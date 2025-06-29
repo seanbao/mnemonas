@@ -19,6 +19,7 @@ import { FileIcon } from '@/components/ui/FileIcon'
 import { EmptyState } from '@/components/ui/EmptyState'
 import { searchFiles, SearchError, type SearchResult } from '@/api/search'
 import { encodePathForUrl, formatBytes, formatDate, cn } from '@/lib/utils'
+import { GENERIC_LOAD_ERROR_DESCRIPTION, getUserFacingErrorDescription } from '@/lib/apiMessages'
 import { getInvalidHomeDirDescription, invalidHomeDirTitle, resolveUserHomeScope } from '@/lib/userScope'
 import { useIsAdmin, useUser } from '@/stores/auth'
 
@@ -37,7 +38,7 @@ function getSearchErrorPresentation(error: unknown): {
 
   return {
     title: '搜索失败',
-    description: error instanceof Error && error.message ? error.message : '请稍后重试',
+    description: getUserFacingErrorDescription(error, GENERIC_LOAD_ERROR_DESCRIPTION),
   }
 }
 
@@ -108,7 +109,7 @@ export function SearchPage() {
 
   const { data, isLoading, error, refetch } = useQuery({
     queryKey: ['search', authScopeKey, isAdmin, homeScopeKey, trimmedDebouncedQuery],
-    queryFn: () => searchFiles(trimmedDebouncedQuery),
+    queryFn: ({ signal }) => searchFiles(trimmedDebouncedQuery, { signal }),
     enabled: !hasInvalidHomeDir && trimmedDebouncedQuery.length > 0,
   })
 

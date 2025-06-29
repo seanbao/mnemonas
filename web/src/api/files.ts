@@ -1,5 +1,8 @@
 import type { FileItem } from '@/stores/files'
-import { sanitizeFilename, normalizePath, encodePathForUrl, getFilenameFromContentDisposition } from '@/lib/utils'
+import { readDownloadJsonErrorDetails, triggerBrowserDownload } from '@/lib/downloadResponse'
+import { INVALID_API_RESPONSE_MESSAGE } from '@/lib/apiMessages'
+import { readStructuredJsonErrorDetails } from '@/lib/jsonErrorResponse'
+import { ensureZipExtension, sanitizeFilename, normalizePath, encodePathForUrl, getFilenameFromContentDisposition } from '@/lib/utils'
 import { authFetch, refreshAuthSession } from './auth'
 
 export type { FileItem }
@@ -12,6 +15,19 @@ export const MAX_UPLOAD_FILE_SIZE_LABEL = '10 GB'
 export interface FileListResponse {
   files: FileItem[]
   path: string
+  capabilities?: FileItem['capabilities']
+}
+
+export interface ListFilesOptions {
+  signal?: AbortSignal
+}
+
+export interface RequestOptions {
+  signal?: AbortSignal
+}
+
+export interface UploadFileOptions {
+  signal?: AbortSignal
 }
 
 export interface VersionInfo {
@@ -68,6 +84,7 @@ export interface DirectoryQuotaUsage {
 export interface HealthStatus {
   status: string
   uptime: string
+  uptimeSecs?: number
   timestamp?: string
   version?: string
   storage?: {
@@ -294,7 +311,7 @@ async function handleResponse<T>(response: Response, errorPrefix: string): Promi
   try {
     return await response.json()
   } catch {
-    throw new Error('服务器返回了无效的数据')
+    throw new Error(INVALID_API_RESPONSE_MESSAGE)
   }
 }
 
@@ -306,7 +323,7 @@ async function handleWrappedResponse<T>(response: Response, errorPrefix: string)
     body.success !== true ||
     !('data' in body)
   ) {
-    throw new Error('服务器返回了无效的数据')
+    throw new Error(INVALID_API_RESPONSE_MESSAGE)
   }
   return body.data
 }
@@ -323,12 +340,12 @@ async function expectWrappedActionResponse<T>(
     body.success !== true ||
     !('data' in body)
   ) {
-    throw new Error('服务器返回了无效的数据')
+    throw new Error(INVALID_API_RESPONSE_MESSAGE)
   }
 
   const data = body.data
   if (!isValid(data)) {
-    throw new Error('服务器返回了无效的数据')
+    throw new Error(INVALID_API_RESPONSE_MESSAGE)
   }
 
   return {
@@ -341,6 +358,11 @@ async function expectWrappedActionResponse<T>(
 async function throwApiErrorFromResponse(response: Response, fallback: string): Promise<never> {
   let message = fallback
   let code: string | undefined
+  const structuredDetails = await readStructuredJsonErrorDetails(response, fallback)
+  if (structuredDetails) {
+    throw new ApiError(structuredDetails.message, response.status, response.statusText, structuredDetails.code)
+  }
+
   try {
     const details = extractApiErrorDetails(await response.json(), fallback)
     message = details.message
@@ -350,6 +372,15 @@ async function throwApiErrorFromResponse(response: Response, fallback: string): 
   }
 
   throw new ApiError(message, response.status, response.statusText, code)
+}
+
+async function throwDownloadApiErrorFromJsonResponse(response: Response): Promise<void> {
+  const details = await readDownloadJsonErrorDetails(response, '下载文件失败')
+  if (!details) {
+    return
+  }
+
+  throw new ApiError(details.message, response.status, response.statusText, details.code)
 }
 
 function extractApiErrorDetails(body: unknown, fallback: string): {
@@ -405,6 +436,15 @@ function createApiErrorFromXhr(xhr: XMLHttpRequest, fallback: string): ApiError 
   }
 
   return new ApiError(message, xhr.status, xhr.statusText, code)
+}
+
+function createAbortError(): Error {
+  if (typeof DOMException !== 'undefined') {
+    return new DOMException('Upload aborted', 'AbortError')
+  }
+  const error = new Error('Upload aborted')
+  error.name = 'AbortError'
+  return error
 }
 
 function getActionResultFromXhr(xhr: XMLHttpRequest): ActionResult {
@@ -484,6 +524,14 @@ function isFileItemShape(value: unknown): value is FileItem {
     && typeof value.size === 'number'
     && typeof value.modTime === 'string'
     && isStringOrUndefined(value.etag)
+    && (value.capabilities === undefined || isFileCapabilitiesShape(value.capabilities))
+}
+
+function isFileCapabilitiesShape(value: unknown): value is NonNullable<FileItem['capabilities']> {
+  return isRecord(value)
+    && typeof value.read === 'boolean'
+    && typeof value.concreteRead === 'boolean'
+    && typeof value.write === 'boolean'
 }
 
 function isFileListResponseShape(value: unknown): value is FileListResponse {
@@ -491,6 +539,7 @@ function isFileListResponseShape(value: unknown): value is FileListResponse {
     && typeof value.path === 'string'
     && Array.isArray(value.files)
     && value.files.every(isFileItemShape)
+    && (value.capabilities === undefined || isFileCapabilitiesShape(value.capabilities))
 }
 
 function isVersionInfoShape(value: unknown): value is VersionInfo {
@@ -658,12 +707,12 @@ function isEmptyTrashResultShape(value: unknown): value is { deleted_count: numb
     && isBooleanOrUndefined(value.warning)
 }
 
-function isHealthShape(value: unknown): value is HealthStatus {
+function isHealthShape(value: unknown): value is HealthStatus & { uptime_secs?: number } {
   if (!isRecord(value) || typeof value.status !== 'string' || typeof value.uptime !== 'string') {
     return false
   }
 
-  if (!isStringOrUndefined(value.timestamp) || !isStringOrUndefined(value.version)) {
+  if (!isNumberOrUndefined(value.uptime_secs) || !isStringOrUndefined(value.timestamp) || !isStringOrUndefined(value.version)) {
     return false
   }
 
@@ -1620,25 +1669,25 @@ function isBackupJobShape(value: unknown): value is BackupJob {
 }
 
 // List files in a directory
-export async function listFiles(path: string): Promise<FileListResponse> {
+export async function listFiles(path: string, options: ListFilesOptions = {}): Promise<FileListResponse> {
   const normalizedPath = normalizePath(path)
   const encodedPath = encodePathForUrl(normalizedPath)
-  const response = await authFetch(`${API_BASE}/files${encodedPath}`)
+  const response = await authFetch(`${API_BASE}/files${encodedPath}`, options)
   const data = await handleWrappedResponse<unknown>(response, '获取文件列表失败')
   if (!isFileListResponseShape(data)) {
-    throw new Error('服务器返回了无效的数据')
+    throw new Error(INVALID_API_RESPONSE_MESSAGE)
   }
   return data
 }
 
 // Get file versions
-export async function getVersions(path: string): Promise<VersionInfo[]> {
+export async function getVersions(path: string, options: { signal?: AbortSignal } = {}): Promise<VersionInfo[]> {
   const normalizedPath = normalizePath(path)
   const encodedPath = encodePathForUrl(normalizedPath)
-  const response = await authFetch(`${API_BASE}/versions${encodedPath}`)
+  const response = await authFetch(`${API_BASE}/versions${encodedPath}`, options)
   const data = await handleWrappedResponse<unknown>(response, '获取版本历史失败')
   if (!isVersionsResponseShape(data)) {
-    throw new Error('服务器返回了无效的数据')
+    throw new Error(INVALID_API_RESPONSE_MESSAGE)
   }
   return data.versions
 }
@@ -1655,11 +1704,11 @@ export async function deleteFile(path: string, options: RequestInit = {}): Promi
 }
 
 // Get storage stats (direct response, not wrapped)
-export async function getStorageStats(): Promise<StorageStats> {
-  const response = await authFetch(`${API_BASE}/stats`)
+export async function getStorageStats(options: RequestOptions = {}): Promise<StorageStats> {
+  const response = await authFetch(`${API_BASE}/stats`, options)
   const data = await handleWrappedResponse<unknown>(response, '获取存储统计失败')
   if (!isStorageStatsShape(data)) {
-    throw new Error('服务器返回了无效的数据')
+    throw new Error(INVALID_API_RESPONSE_MESSAGE)
   }
   return {
     fileCount: data.total_files,
@@ -1708,24 +1757,32 @@ export async function getStorageStats(): Promise<StorageStats> {
 }
 
 // Get health status (direct response, not wrapped)
-export async function getHealth(): Promise<HealthStatus> {
-  const response = await fetch('/health')
+export async function getHealth(options: RequestOptions = {}): Promise<HealthStatus> {
+  const response = await fetch('/health', options)
   if (!response.ok) {
-    throw new ApiError('获取健康状态失败', response.status, response.statusText)
+    await throwApiErrorFromResponse(response, '获取健康状态失败')
   }
 
   let body: unknown
   try {
     body = await response.json()
   } catch {
-    throw new Error('服务器返回了无效的数据')
+    throw new Error(INVALID_API_RESPONSE_MESSAGE)
   }
 
   if (!isHealthShape(body)) {
-    throw new Error('服务器返回了无效的数据')
+    throw new Error(INVALID_API_RESPONSE_MESSAGE)
   }
 
-  return body
+  return {
+    status: body.status,
+    uptime: body.uptime,
+    uptimeSecs: body.uptime_secs,
+    timestamp: body.timestamp,
+    version: body.version,
+    storage: body.storage,
+    dataplane: body.dataplane,
+  }
 }
 
 function normalizeDiskHealthReport(data: {
@@ -1788,30 +1845,32 @@ function normalizeDiskHealthReport(data: {
   }
 }
 
-export async function getDiskHealth(): Promise<DiskHealthReport> {
-  const response = await authFetch(`${API_BASE}/maintenance/disk-health`)
+export async function getDiskHealth(options?: { signal?: AbortSignal }): Promise<DiskHealthReport> {
+  const response = await authFetch(`${API_BASE}/maintenance/disk-health`, {
+    signal: options?.signal,
+  })
   const data = await handleWrappedResponse<unknown>(response, '获取磁盘健康失败')
   if (!isDiskHealthReportShape(data)) {
-    throw new Error('服务器返回了无效的数据')
+    throw new Error(INVALID_API_RESPONSE_MESSAGE)
   }
   return normalizeDiskHealthReport(data)
 }
 
-export async function getAppVersion(): Promise<AppVersionInfo> {
-  const response = await authFetch(`${API_BASE}/version`)
+export async function getAppVersion(options: RequestOptions = {}): Promise<AppVersionInfo> {
+  const response = await authFetch(`${API_BASE}/version`, options)
   const data = await handleWrappedResponse<unknown>(response, '获取版本信息失败')
   if (!isDiagnosticsVersionShape(data)) {
-    throw new Error('服务器返回了无效的数据')
+    throw new Error(INVALID_API_RESPONSE_MESSAGE)
   }
   return normalizeAppVersion(data)
 }
 
 // Get diagnostics info (direct response, not wrapped)
-export async function getDiagnostics(): Promise<DiagnosticsInfo> {
-  const response = await authFetch(`${API_BASE}/diagnostics`)
+export async function getDiagnostics(options: RequestOptions = {}): Promise<DiagnosticsInfo> {
+  const response = await authFetch(`${API_BASE}/diagnostics`, options)
   const data = await handleWrappedResponse<unknown>(response, '获取诊断信息失败')
   if (!isDiagnosticsShape(data)) {
-    throw new Error('服务器返回了无效的数据')
+    throw new Error(INVALID_API_RESPONSE_MESSAGE)
   }
   return {
     timestamp: data.timestamp,
@@ -1925,10 +1984,11 @@ export async function getDiagnostics(): Promise<DiagnosticsInfo> {
 }
 
 // Create directory
-export async function createDirectory(path: string): Promise<ActionResult> {
+export async function createDirectory(path: string, options: RequestOptions = {}): Promise<ActionResult> {
   const normalizedPath = normalizePath(path)
   const encodedPath = encodePathForUrl(normalizedPath)
   const response = await authFetch(`${API_BASE}/directories${encodedPath}`, {
+    ...options,
     method: 'POST',
   })
   return expectWrappedActionResponse(response, '创建文件夹失败', isPathActionShape)
@@ -1938,7 +1998,8 @@ export async function createDirectory(path: string): Promise<ActionResult> {
 export async function uploadFile(
   path: string,
   file: File,
-  onProgress?: (progress: number) => void
+  onProgress?: (progress: number) => void,
+  options: UploadFileOptions = {}
 ): Promise<ActionResult> {
   // Sanitize filename to prevent path traversal
   const safeFilename = sanitizeFilename(file.name)
@@ -1950,7 +2011,42 @@ export async function uploadFile(
   const url = `${uploadBase}/${encodedFilename}`
 
   const sendUpload = (retryCount: number): Promise<ActionResult> => new Promise((resolve, reject) => {
+    if (options.signal?.aborted) {
+      reject(createAbortError())
+      return
+    }
+
     const xhr = new XMLHttpRequest()
+    let settled = false
+
+    const cleanup = () => {
+      options.signal?.removeEventListener('abort', abortUpload)
+    }
+
+    function resolveOnce(result: ActionResult) {
+      if (settled) {
+        return
+      }
+      settled = true
+      cleanup()
+      resolve(result)
+    }
+
+    function rejectOnce(error: unknown) {
+      if (settled) {
+        return
+      }
+      settled = true
+      cleanup()
+      reject(error)
+    }
+
+    function abortUpload() {
+      xhr.abort()
+      rejectOnce(createAbortError())
+    }
+
+    options.signal?.addEventListener('abort', abortUpload, { once: true })
 
     xhr.upload.addEventListener('progress', (e) => {
       if (e.lengthComputable && onProgress) {
@@ -1959,38 +2055,57 @@ export async function uploadFile(
     })
 
     xhr.addEventListener('load', async () => {
+      if (options.signal?.aborted) {
+        rejectOnce(createAbortError())
+        return
+      }
+
       if (xhr.status >= 200 && xhr.status < 300) {
-        resolve(getActionResultFromXhr(xhr))
+        resolveOnce(getActionResultFromXhr(xhr))
         return
       }
 
       if (xhr.status === 401 && retryCount === 0) {
-        const refreshed = await refreshAuthSession()
+        let refreshed = false
+        try {
+          refreshed = await refreshAuthSession()
+        } catch (error) {
+          rejectOnce(error)
+          return
+        }
+        if (options.signal?.aborted) {
+          rejectOnce(createAbortError())
+          return
+        }
         if (refreshed) {
           try {
             const retryResult = await sendUpload(retryCount + 1)
-            resolve(retryResult)
+            resolveOnce(retryResult)
           } catch (error) {
-            reject(error)
+            rejectOnce(error)
           }
           return
         }
       }
 
       if (xhr.status === 413) {
-        reject(createApiErrorFromXhr(xhr, `文件超过 ${MAX_UPLOAD_FILE_SIZE_LABEL} 上传限制`))
+        rejectOnce(createApiErrorFromXhr(xhr, `文件超过 ${MAX_UPLOAD_FILE_SIZE_LABEL} 上传限制`))
         return
       }
 
-      reject(createApiErrorFromXhr(xhr, '上传失败'))
+      rejectOnce(createApiErrorFromXhr(xhr, '上传失败'))
     })
 
     xhr.addEventListener('error', () => {
-      reject(new Error('网络错误，上传失败'))
+      rejectOnce(new Error('网络错误，上传失败'))
     })
 
     xhr.addEventListener('timeout', () => {
-      reject(new Error('上传超时'))
+      rejectOnce(new Error('上传超时'))
+    })
+
+    xhr.addEventListener('abort', () => {
+      rejectOnce(createAbortError())
     })
 
     // Use REST API instead of WebDAV to avoid Basic Auth popup
@@ -2007,24 +2122,9 @@ export function getDownloadUrl(path?: string): string {
   return buildDownloadUrl(path)
 }
 
-function triggerBrowserDownload(blob: Blob, filename: string): void {
-  const url = URL.createObjectURL(blob)
-  const link = document.createElement('a')
-  link.href = url
-  try {
-    link.download = sanitizeFilename(filename)
-  } catch {
-    link.download = 'download'
-  }
-  document.body.appendChild(link)
-  link.click()
-  document.body.removeChild(link)
-  URL.revokeObjectURL(url)
-}
-
 export function buildDownloadUrl(
   path?: string,
-  options?: { version?: string; download?: boolean }
+  options?: { version?: string; download?: boolean; archive?: 'zip' }
 ): string {
   if (!path) return ''
   const normalizedPath = normalizePath(path)
@@ -2036,13 +2136,16 @@ export function buildDownloadUrl(
   if (options?.download) {
     params.set('download', 'true')
   }
+  if (options?.archive) {
+    params.set('archive', options.archive)
+  }
   const query = params.toString()
   return query ? `${API_BASE}/download${encodedPath}?${query}` : `${API_BASE}/download${encodedPath}`
 }
 
 export async function downloadFile(
   path: string,
-  options?: { version?: string; download?: boolean; filename?: string }
+  options?: { version?: string; download?: boolean; filename?: string; archive?: 'zip'; signal?: AbortSignal }
 ): Promise<void> {
   const normalizedPath = normalizePath(path)
   const encodedPath = encodePathForUrl(normalizedPath)
@@ -2053,17 +2156,24 @@ export async function downloadFile(
   if (options?.download !== false) {
     params.set('download', 'true')
   }
+  if (options?.archive) {
+    params.set('archive', options.archive)
+  }
 
   const query = params.toString()
   const url = query ? `${API_BASE}/download${encodedPath}?${query}` : `${API_BASE}/download${encodedPath}`
-  const response = await authFetch(url)
+  const response = await authFetch(url, options?.signal ? { signal: options.signal } : {})
 
   if (!response.ok) {
     await throwApiErrorFromResponse(response, '下载文件失败')
   }
 
-  const fallbackFilename = options?.filename ?? normalizedPath.split('/').filter(Boolean).pop() ?? 'download'
-  const filename = getFilenameFromContentDisposition(response.headers.get('Content-Disposition'), fallbackFilename)
+  const pathFilename = normalizedPath.split('/').filter(Boolean).pop() ?? 'download'
+  const baseFilename = options?.filename ?? pathFilename
+  const fallbackFilename = options?.archive === 'zip' ? ensureZipExtension(baseFilename) : baseFilename
+  const contentDisposition = response.headers.get('Content-Disposition')
+  await throwDownloadApiErrorFromJsonResponse(response)
+  const filename = getFilenameFromContentDisposition(contentDisposition, fallbackFilename)
   const blob = await response.blob()
   triggerBrowserDownload(blob, filename)
 }
@@ -2079,11 +2189,12 @@ export function getThumbnailUrl(path?: string, size: ThumbnailSize = 'medium'): 
 }
 
 // Rename/Move file
-export async function moveFile(fromPath: string, toPath: string): Promise<ActionResult> {
+export async function moveFile(fromPath: string, toPath: string, options: RequestOptions = {}): Promise<ActionResult> {
   const normalizedFrom = normalizePath(fromPath)
   const normalizedTo = normalizePath(toPath)
   
   const response = await authFetch(`${API_BASE}/files-move`, {
+    ...options,
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -2097,11 +2208,12 @@ export async function moveFile(fromPath: string, toPath: string): Promise<Action
 }
 
 // Copy file
-export async function copyFile(fromPath: string, toPath: string): Promise<ActionResult> {
+export async function copyFile(fromPath: string, toPath: string, options: RequestOptions = {}): Promise<ActionResult> {
   const normalizedFrom = normalizePath(fromPath)
   const normalizedTo = normalizePath(toPath)
   
   const response = await authFetch(`${API_BASE}/files-copy`, {
+    ...options,
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -2115,10 +2227,11 @@ export async function copyFile(fromPath: string, toPath: string): Promise<Action
 }
 
 // Restore file to a specific version
-export async function restoreVersion(path: string, hash: string): Promise<ActionResult> {
+export async function restoreVersion(path: string, hash: string, options: RequestOptions = {}): Promise<ActionResult> {
   const normalizedPath = normalizePath(path)
   const encodedPath = encodeURIComponent(normalizedPath)
   const response = await authFetch(`${API_BASE}/versions/${hash}/restore?path=${encodedPath}`, {
+    ...options,
     method: 'POST',
   })
   return expectWrappedActionResponse(response, '恢复版本失败', isRestoreVersionActionShape)
@@ -2154,11 +2267,11 @@ export interface TrashListResponse {
 }
 
 // List trash items
-export async function listTrash(): Promise<TrashListResponse> {
-  const response = await authFetch(`${API_BASE}/trash/`)
+export async function listTrash(options: RequestOptions = {}): Promise<TrashListResponse> {
+  const response = await authFetch(`${API_BASE}/trash/`, options)
   const data = await handleWrappedResponse<unknown>(response, '获取回收站列表失败')
   if (!isTrashListResponseShape(data)) {
-    throw new Error('服务器返回了无效的数据')
+    throw new Error(INVALID_API_RESPONSE_MESSAGE)
   }
 
   const items = data.items.map(item => ({
@@ -2183,28 +2296,31 @@ export async function listTrash(): Promise<TrashListResponse> {
 }
 
 // Restore item from trash
-export async function restoreFromTrash(id: string, newPath?: string): Promise<ActionResult> {
+export async function restoreFromTrash(id: string, newPath?: string, options: RequestOptions = {}): Promise<ActionResult> {
   const url = newPath 
     ? `${API_BASE}/trash/${id}/restore?path=${encodeURIComponent(newPath)}`
     : `${API_BASE}/trash/${id}/restore`
   
   const response = await authFetch(url, {
+    ...options,
     method: 'POST',
   })
   return expectWrappedActionResponse(response, '恢复文件失败', isRestoreTrashActionShape)
 }
 
 // Permanently delete item from trash
-export async function deleteFromTrash(id: string): Promise<ActionResult> {
+export async function deleteFromTrash(id: string, options: RequestOptions = {}): Promise<ActionResult> {
   const response = await authFetch(`${API_BASE}/trash/${id}`, {
+    ...options,
     method: 'DELETE',
   })
   return expectWrappedActionResponse(response, '永久删除失败', isDeleteTrashActionShape)
 }
 
 // Empty trash (delete all items permanently)
-export async function emptyTrash(): Promise<EmptyTrashResult> {
+export async function emptyTrash(options: RequestOptions = {}): Promise<EmptyTrashResult> {
   const response = await authFetch(`${API_BASE}/trash/`, {
+    ...options,
     method: 'DELETE',
   })
   const body = await handleResponse<ApiResponseWrapper<unknown>>(response, '清空回收站失败')
@@ -2214,12 +2330,12 @@ export async function emptyTrash(): Promise<EmptyTrashResult> {
     || body.success !== true
     || !('data' in body)
   ) {
-    throw new Error('服务器返回了无效的数据')
+    throw new Error(INVALID_API_RESPONSE_MESSAGE)
   }
 
   const data = body.data
   if (!isEmptyTrashResultShape(data)) {
-    throw new Error('服务器返回了无效的数据')
+    throw new Error(INVALID_API_RESPONSE_MESSAGE)
   }
   return {
     deletedCount: data.deleted_count,
@@ -2257,21 +2373,22 @@ export interface ScrubResult {
 }
 
 // Get last scrub result
-export async function getScrubResult(): Promise<ScrubResult> {
-  const response = await authFetch(`${API_BASE}/maintenance/scrub`)
+export async function getScrubResult(options: RequestOptions = {}): Promise<ScrubResult> {
+  const response = await authFetch(`${API_BASE}/maintenance/scrub`, options)
   const data = await handleWrappedResponse<unknown>(response, '获取校验结果失败')
   if (!isScrubResultShape(data)) {
-    throw new Error('服务器返回了无效的数据')
+    throw new Error(INVALID_API_RESPONSE_MESSAGE)
   }
   return data
 }
 
 // Run scrub operation
-export async function runScrub(hashes?: string[]): Promise<ScrubResult> {
+export async function runScrub(hashes?: string[], options: RequestOptions = {}): Promise<ScrubResult> {
   const response = await authFetch(`${API_BASE}/maintenance/scrub`, {
     method: 'POST',
     headers: hashes?.length ? { 'Content-Type': 'application/json' } : {},
     body: hashes?.length ? JSON.stringify({ hashes }) : undefined,
+    signal: options.signal,
   })
   const body = await handleResponse<ApiResponseWrapper<unknown>>(response, '执行数据校验失败')
   if (
@@ -2280,12 +2397,12 @@ export async function runScrub(hashes?: string[]): Promise<ScrubResult> {
     || body.success !== true
     || !('data' in body)
   ) {
-    throw new Error('服务器返回了无效的数据')
+    throw new Error(INVALID_API_RESPONSE_MESSAGE)
   }
 
   const data = body.data
   if (!isRunScrubResponseShape(data)) {
-    throw new Error('服务器返回了无效的数据')
+    throw new Error(INVALID_API_RESPONSE_MESSAGE)
   }
 
   const result: ScrubResult = {
@@ -2302,150 +2419,165 @@ export async function runScrub(hashes?: string[]): Promise<ScrubResult> {
 }
 
 // List configured backup jobs
-export async function listBackupJobs(): Promise<BackupJob[]> {
-  const response = await authFetch(`${API_BASE}/maintenance/backups`)
+export async function listBackupJobs(options: RequestOptions = {}): Promise<BackupJob[]> {
+  const response = await authFetch(`${API_BASE}/maintenance/backups`, options)
   const data = await handleWrappedResponse<unknown>(response, '获取备份任务失败')
   if (!Array.isArray(data) || !data.every(isBackupJobShape)) {
-    throw new Error('服务器返回了无效的数据')
+    throw new Error(INVALID_API_RESPONSE_MESSAGE)
   }
   return data
 }
 
 // Run a backup job immediately
-export async function runBackupJob(id: string): Promise<BackupRunResult> {
+export async function runBackupJob(id: string, options: RequestOptions = {}): Promise<BackupRunResult> {
   const response = await authFetch(`${API_BASE}/maintenance/backups/${encodeURIComponent(id)}/run`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: '{}',
+    signal: options.signal,
   })
   const data = await handleWrappedResponse<unknown>(response, '执行备份任务失败')
   if (!isBackupRunResultShape(data)) {
-    throw new Error('服务器返回了无效的数据')
+    throw new Error(INVALID_API_RESPONSE_MESSAGE)
   }
   return data
 }
 
 // Run a restore drill against the latest completed backup snapshot
-export async function runBackupRestoreDrill(id: string, keepArtifact = false): Promise<BackupRestoreDrillResult> {
+export async function runBackupRestoreDrill(id: string, keepArtifact = false, options: RequestOptions = {}): Promise<BackupRestoreDrillResult> {
   const response = await authFetch(`${API_BASE}/maintenance/backups/${encodeURIComponent(id)}/restore-drill`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ keep_artifact: keepArtifact }),
+    signal: options.signal,
   })
   const data = await handleWrappedResponse<unknown>(response, '执行恢复演练失败')
   if (!isBackupRestoreDrillResultShape(data)) {
-    throw new Error('服务器返回了无效的数据')
+    throw new Error(INVALID_API_RESPONSE_MESSAGE)
   }
   return data
 }
 
 // Check backup retention policy and remote/local snapshot visibility
-export async function checkBackupRetentionJob(id: string): Promise<BackupRetentionCheckResult> {
+export async function checkBackupRetentionJob(id: string, options: RequestOptions = {}): Promise<BackupRetentionCheckResult> {
   const response = await authFetch(`${API_BASE}/maintenance/backups/${encodeURIComponent(id)}/retention-check`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: '{}',
+    signal: options.signal,
   })
   const data = await handleWrappedResponse<unknown>(response, '检查备份保留策略失败')
   if (!isBackupRetentionCheckResultShape(data)) {
-    throw new Error('服务器返回了无效的数据')
+    throw new Error(INVALID_API_RESPONSE_MESSAGE)
   }
   return data
 }
 
 // Preview a supported backup restore without writing target data
-export async function previewBackupRestoreJob(id: string, targetPath: string, includeConfig = false): Promise<BackupRestorePreviewResult> {
+export async function previewBackupRestoreJob(id: string, targetPath: string, includeConfig = false, options: RequestOptions = {}): Promise<BackupRestorePreviewResult> {
   const response = await authFetch(`${API_BASE}/maintenance/backups/${encodeURIComponent(id)}/restore-preview`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ target_path: targetPath, include_config: includeConfig }),
+    signal: options.signal,
   })
   const data = await handleWrappedResponse<unknown>(response, '生成恢复预览失败')
   if (!isBackupRestorePreviewResultShape(data)) {
-    throw new Error('服务器返回了无效的数据')
+    throw new Error(INVALID_API_RESPONSE_MESSAGE)
   }
   return data
 }
 
 // Preview multiple backup restores without writing target data
-export async function previewBatchBackupRestore(items: BackupBatchRestoreItemRequest[]): Promise<BackupBatchRestorePreviewResult> {
+export async function previewBatchBackupRestore(items: BackupBatchRestoreItemRequest[], options: RequestOptions = {}): Promise<BackupBatchRestorePreviewResult> {
   const response = await authFetch(`${API_BASE}/maintenance/backups/batch-restore-preview`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ items }),
+    signal: options.signal,
   })
   const data = await handleWrappedResponse<unknown>(response, '生成批量恢复预览失败')
   if (!isBackupBatchRestorePreviewResultShape(data)) {
-    throw new Error('服务器返回了无效的数据')
+    throw new Error(INVALID_API_RESPONSE_MESSAGE)
   }
   return data
 }
 
 // Restore a supported backup job to a safe target directory
-export async function restoreBackupJob(id: string, targetPath: string, includeConfig = false): Promise<BackupRestoreResult> {
+export async function restoreBackupJob(id: string, targetPath: string, includeConfig = false, options: RequestOptions = {}): Promise<BackupRestoreResult> {
   const response = await authFetch(`${API_BASE}/maintenance/backups/${encodeURIComponent(id)}/restore`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ target_path: targetPath, include_config: includeConfig }),
+    signal: options.signal,
   })
   const data = await handleWrappedResponse<unknown>(response, '恢复备份失败')
   if (!isBackupRestoreResultShape(data)) {
-    throw new Error('服务器返回了无效的数据')
+    throw new Error(INVALID_API_RESPONSE_MESSAGE)
   }
   return data
 }
 
 // Restore multiple backup jobs sequentially to safe target directories
-export async function runBatchBackupRestore(items: BackupBatchRestoreItemRequest[]): Promise<BackupBatchRestoreResult> {
+export async function runBatchBackupRestore(items: BackupBatchRestoreItemRequest[], options: RequestOptions = {}): Promise<BackupBatchRestoreResult> {
   const response = await authFetch(`${API_BASE}/maintenance/backups/batch-restore`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ items }),
+    signal: options.signal,
   })
   const data = await handleWrappedResponse<unknown>(response, '执行批量恢复失败')
   if (!isBackupBatchRestoreResultShape(data)) {
-    throw new Error('服务器返回了无效的数据')
+    throw new Error(INVALID_API_RESPONSE_MESSAGE)
   }
   return data
 }
 
 // Verify a restored backup target without modifying it
-export async function verifyBackupRestoreJob(id: string, targetPath: string): Promise<BackupRestoreVerifyResult> {
+export async function verifyBackupRestoreJob(id: string, targetPath: string, options: RequestOptions = {}): Promise<BackupRestoreVerifyResult> {
   const response = await authFetch(`${API_BASE}/maintenance/backups/${encodeURIComponent(id)}/restore-verify`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ target_path: targetPath }),
+    signal: options.signal,
   })
   const data = await handleWrappedResponse<unknown>(response, '校验恢复目录失败')
   if (!isBackupRestoreVerifyResultShape(data)) {
-    throw new Error('服务器返回了无效的数据')
+    throw new Error(INVALID_API_RESPONSE_MESSAGE)
   }
   return data
 }
 
 // Download a restore summary for one backup job restore state.
-export async function downloadBackupRestoreReport(id: string): Promise<void> {
-  const response = await authFetch(`${API_BASE}/maintenance/backups/${encodeURIComponent(id)}/restore-report`)
+export async function downloadBackupRestoreReport(id: string, options?: { signal?: AbortSignal }): Promise<void> {
+  const response = await authFetch(
+    `${API_BASE}/maintenance/backups/${encodeURIComponent(id)}/restore-report`,
+    options?.signal ? { signal: options.signal } : {},
+  )
   if (!response.ok) {
     await throwApiErrorFromResponse(response, '导出恢复摘要失败')
   }
 
   const fallbackFilename = `mnemonas-restore-summary-${id}-${new Date().toISOString().slice(0, 10)}.json`
-  const filename = getFilenameFromContentDisposition(response.headers.get('Content-Disposition'), fallbackFilename)
+  const contentDisposition = response.headers.get('Content-Disposition')
+  await throwDownloadApiErrorFromJsonResponse(response)
+  const filename = getFilenameFromContentDisposition(contentDisposition, fallbackFilename)
 
   const blob = await response.blob()
   triggerBrowserDownload(blob, filename)
 }
 
 // Download diagnostics export
-export async function downloadDiagnosticsExport(): Promise<void> {
-  const response = await authFetch(`${API_BASE}/diagnostics-export`)
+export async function downloadDiagnosticsExport(options?: { signal?: AbortSignal }): Promise<void> {
+  const response = await authFetch(`${API_BASE}/diagnostics-export`, options?.signal ? { signal: options.signal } : {})
   if (!response.ok) {
     await throwApiErrorFromResponse(response, '导出诊断信息失败')
   }
 
   const fallbackFilename = `mnemonas-diagnostics-${new Date().toISOString().slice(0, 10)}.json`
-  const filename = getFilenameFromContentDisposition(response.headers.get('Content-Disposition'), fallbackFilename)
+  const contentDisposition = response.headers.get('Content-Disposition')
+  await throwDownloadApiErrorFromJsonResponse(response)
+  const filename = getFilenameFromContentDisposition(contentDisposition, fallbackFilename)
 
   const blob = await response.blob()
   triggerBrowserDownload(blob, filename)

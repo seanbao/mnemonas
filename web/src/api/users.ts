@@ -4,6 +4,8 @@
  */
 
 import { authFetch } from './auth'
+import { INVALID_API_RESPONSE_MESSAGE as INVALID_USERS_RESPONSE_MESSAGE } from '@/lib/apiMessages'
+import { readStructuredJsonErrorDetails } from '@/lib/jsonErrorResponse'
 
 export interface User {
   id: string
@@ -26,6 +28,8 @@ export interface CreateUserRequest {
   email?: string
   role?: 'admin' | 'user' | 'guest'
   groups?: string[]
+  home_dir?: string
+  quota_bytes?: number
 }
 
 export interface ResetPasswordRequest {
@@ -50,6 +54,10 @@ interface UsersActionResult {
   success: boolean
   warning?: boolean
   message?: string
+}
+
+export interface UsersRequestOptions {
+  signal?: AbortSignal
 }
 
 export interface UserResponse {
@@ -126,8 +134,22 @@ export class UsersError extends Error {
 }
 
 const API_BASE = '/api/v1/admin/users'
+const USERS_ERROR_MESSAGES = {
+  list: '获取用户列表失败',
+  create: '创建用户失败',
+  update: '更新用户失败',
+  delete: '删除用户失败',
+  resetPassword: '重置密码失败',
+  revokeSessions: '撤销用户会话失败',
+  updateStatus: '更新用户状态失败',
+} as const
 
 async function parseUsersError(response: Response, fallback: string): Promise<UsersError> {
+  const structuredError = await readStructuredJsonErrorDetails(response, fallback)
+  if (structuredError) {
+    return new UsersError(structuredError.message, response.status, structuredError.code)
+  }
+
   try {
     const body = await response.json() as UsersApiResponse<never>
     return new UsersError(body.error?.message || body.message || fallback, response.status, body.error?.code)
@@ -154,23 +176,26 @@ async function parseUsersSuccess<T>(response: Response, invalidMessage: string):
 /**
  * List all users (admin only)
  */
-export async function listUsers(): Promise<ListUsersResponse> {
-  const response = await authFetch(`${API_BASE}/`)
+export async function listUsers(options: UsersRequestOptions = {}): Promise<ListUsersResponse> {
+  const response = await authFetch(`${API_BASE}/`, {
+    signal: options.signal,
+  })
   
   if (!response.ok) {
-    throw await parseUsersError(response, 'Failed to list users')
+    throw await parseUsersError(response, USERS_ERROR_MESSAGES.list)
   }
 
-  const body = await parseUsersSuccess<{ users?: User[]; total?: number }>(response, 'Invalid users response')
+  const body = await parseUsersSuccess<{ users?: User[]; total?: number }>(response, INVALID_USERS_RESPONSE_MESSAGE)
   if (
-		!body.data ||
-		(body.data.users !== undefined && (!Array.isArray(body.data.users) || body.data.users.some((user) => !isValidUser(user)))) ||
-		(body.data.total !== undefined && typeof body.data.total !== 'number')
-	) {
-    throw new Error('Invalid users response')
+    !body.data ||
+    !Array.isArray(body.data.users) ||
+    body.data.users.some((user) => !isValidUser(user)) ||
+    (body.data.total !== undefined && typeof body.data.total !== 'number')
+  ) {
+    throw new Error(INVALID_USERS_RESPONSE_MESSAGE)
   }
 
-  const users = Array.isArray(body.data.users) ? body.data.users : []
+  const users = body.data.users
 
   return {
     success: body.success,
@@ -182,8 +207,9 @@ export async function listUsers(): Promise<ListUsersResponse> {
 /**
  * Create a new user (admin only)
  */
-export async function createUser(data: CreateUserRequest): Promise<UserResponse> {
+export async function createUser(data: CreateUserRequest, options: UsersRequestOptions = {}): Promise<UserResponse> {
   const response = await authFetch(`${API_BASE}/`, {
+    ...options,
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -192,12 +218,12 @@ export async function createUser(data: CreateUserRequest): Promise<UserResponse>
   })
   
   if (!response.ok) {
-    throw await parseUsersError(response, 'Failed to create user')
+    throw await parseUsersError(response, USERS_ERROR_MESSAGES.create)
   }
 
-  const body = await parseUsersSuccess<{ user: User }>(response, 'Invalid create user response')
+  const body = await parseUsersSuccess<{ user: User }>(response, INVALID_USERS_RESPONSE_MESSAGE)
   if (!body.data || !isValidUser(body.data.user)) {
-    throw new Error('Invalid create user response')
+    throw new Error(INVALID_USERS_RESPONSE_MESSAGE)
   }
 
   return {
@@ -211,8 +237,9 @@ export async function createUser(data: CreateUserRequest): Promise<UserResponse>
 /**
  * Update user metadata, role, home directory, or quota (admin only)
  */
-export async function updateUser(userId: string, data: UpdateUserRequest): Promise<UserResponse> {
+export async function updateUser(userId: string, data: UpdateUserRequest, options: UsersRequestOptions = {}): Promise<UserResponse> {
   const response = await authFetch(`${API_BASE}/${userId}`, {
+    ...options,
     method: 'PUT',
     headers: {
       'Content-Type': 'application/json',
@@ -221,12 +248,12 @@ export async function updateUser(userId: string, data: UpdateUserRequest): Promi
   })
 
   if (!response.ok) {
-    throw await parseUsersError(response, 'Failed to update user')
+    throw await parseUsersError(response, USERS_ERROR_MESSAGES.update)
   }
 
-  const body = await parseUsersSuccess<{ user: User }>(response, 'Invalid update user response')
+  const body = await parseUsersSuccess<{ user: User }>(response, INVALID_USERS_RESPONSE_MESSAGE)
   if (!body.data || !isValidUser(body.data.user)) {
-    throw new Error('Invalid update user response')
+    throw new Error(INVALID_USERS_RESPONSE_MESSAGE)
   }
 
   return {
@@ -240,18 +267,19 @@ export async function updateUser(userId: string, data: UpdateUserRequest): Promi
 /**
  * Delete a user (admin only)
  */
-export async function deleteUser(userId: string): Promise<UsersActionResult> {
+export async function deleteUser(userId: string, options: UsersRequestOptions = {}): Promise<UsersActionResult> {
   const response = await authFetch(`${API_BASE}/${userId}`, {
+    ...options,
     method: 'DELETE',
   })
   
   if (!response.ok) {
-    throw await parseUsersError(response, 'Failed to delete user')
+    throw await parseUsersError(response, USERS_ERROR_MESSAGES.delete)
   }
 
-  const body = await parseUsersSuccess<null>(response, 'Invalid delete user response')
+  const body = await parseUsersSuccess<null>(response, INVALID_USERS_RESPONSE_MESSAGE)
   if (!('data' in body)) {
-    throw new Error('Invalid delete user response')
+    throw new Error(INVALID_USERS_RESPONSE_MESSAGE)
   }
   return {
     success: body.success,
@@ -265,9 +293,11 @@ export async function deleteUser(userId: string): Promise<UsersActionResult> {
  */
 export async function resetUserPassword(
   userId: string,
-  data: ResetPasswordRequest
+  data: ResetPasswordRequest,
+  options: UsersRequestOptions = {}
 ): Promise<UsersActionResult> {
   const response = await authFetch(`${API_BASE}/${userId}/reset-password`, {
+    ...options,
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -276,12 +306,12 @@ export async function resetUserPassword(
   })
   
   if (!response.ok) {
-    throw await parseUsersError(response, 'Failed to reset password')
+    throw await parseUsersError(response, USERS_ERROR_MESSAGES.resetPassword)
   }
 
-  const body = await parseUsersSuccess<null>(response, 'Invalid reset password response')
+  const body = await parseUsersSuccess<null>(response, INVALID_USERS_RESPONSE_MESSAGE)
   if (!('data' in body)) {
-    throw new Error('Invalid reset password response')
+    throw new Error(INVALID_USERS_RESPONSE_MESSAGE)
   }
   return {
     success: body.success,
@@ -293,18 +323,19 @@ export async function resetUserPassword(
 /**
  * Revoke a user's active sessions (admin only)
  */
-export async function revokeUserSessions(userId: string): Promise<UsersActionResult> {
+export async function revokeUserSessions(userId: string, options: UsersRequestOptions = {}): Promise<UsersActionResult> {
   const response = await authFetch(`${API_BASE}/${userId}/revoke-sessions`, {
+    ...options,
     method: 'POST',
   })
 
   if (!response.ok) {
-    throw await parseUsersError(response, 'Failed to revoke user sessions')
+    throw await parseUsersError(response, USERS_ERROR_MESSAGES.revokeSessions)
   }
 
-  const body = await parseUsersSuccess<{ revoked: boolean; warning?: boolean }>(response, 'Invalid revoke sessions response')
+  const body = await parseUsersSuccess<{ revoked: boolean; warning?: boolean }>(response, INVALID_USERS_RESPONSE_MESSAGE)
   if (!body.data || typeof body.data.revoked !== 'boolean') {
-    throw new Error('Invalid revoke sessions response')
+    throw new Error(INVALID_USERS_RESPONSE_MESSAGE)
   }
   return {
     success: body.success,
@@ -318,9 +349,11 @@ export async function revokeUserSessions(userId: string): Promise<UsersActionRes
  */
 export async function toggleUserStatus(
   userId: string,
-  disabled: boolean
+  disabled: boolean,
+  options: UsersRequestOptions = {}
 ): Promise<UsersActionResult> {
   const response = await authFetch(`${API_BASE}/${userId}/status`, {
+    ...options,
     method: 'PUT',
     headers: {
       'Content-Type': 'application/json',
@@ -329,12 +362,12 @@ export async function toggleUserStatus(
   })
   
   if (!response.ok) {
-    throw await parseUsersError(response, 'Failed to update user status')
+    throw await parseUsersError(response, USERS_ERROR_MESSAGES.updateStatus)
   }
 
-  const body = await parseUsersSuccess<{ disabled: boolean }>(response, 'Invalid update user status response')
+  const body = await parseUsersSuccess<{ disabled: boolean }>(response, INVALID_USERS_RESPONSE_MESSAGE)
   if (!body.data || typeof body.data.disabled !== 'boolean') {
-    throw new Error('Invalid update user status response')
+    throw new Error(INVALID_USERS_RESPONSE_MESSAGE)
   }
   return {
     success: body.success,

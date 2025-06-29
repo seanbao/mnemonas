@@ -38,6 +38,8 @@ function getPostLoginRedirectPath(state: unknown): string {
   return from
 }
 
+const loginWarningTitle = '登录成功，但操作记录写入失败'
+
 export function LoginPage() {
   const navigate = useNavigate()
   const location = useLocation()
@@ -64,8 +66,9 @@ export function LoginPage() {
 
   useEffect(() => {
     let cancelled = false
+    const controller = new AbortController()
 
-    void getSetupStatus()
+    void getSetupStatus({ signal: controller.signal })
       .then((status) => {
         if (!cancelled) {
           setIsFirstRun(status.is_first_run)
@@ -79,13 +82,15 @@ export function LoginPage() {
 
     return () => {
       cancelled = true
+      controller.abort()
     }
   }, [])
 
   useEffect(() => {
     let cancelled = false
+    const controller = new AbortController()
 
-    void getHealth()
+    void getHealth({ signal: controller.signal })
       .then((health) => {
         if (!cancelled) {
           setAppVersion(health.version || null)
@@ -99,6 +104,7 @@ export function LoginPage() {
 
     return () => {
       cancelled = true
+      controller.abort()
     }
   }, [])
 
@@ -136,7 +142,7 @@ export function LoginPage() {
       const result = await login(trimmedUsername, password)
       clearError()
       addToast(result.warning
-        ? { title: result.message ?? '登录成功，但操作记录写入失败', color: 'warning' }
+        ? { title: loginWarningTitle, color: 'warning' }
         : { title: '登录成功', color: 'success' })
       const from = getPostLoginRedirectPath(location.state)
       navigate(from, { replace: true })

@@ -507,6 +507,46 @@ func TestHandler_RemoveFavoriteAndUpdateNote_NormalizeRoutePath(t *testing.T) {
 	}
 }
 
+func TestHandler_RemoveFavoriteAndUpdateNote_DecodeEscapedRoutePath(t *testing.T) {
+	store, err := NewStore(filepath.Join(t.TempDir(), "favorites.json"))
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+	handler := NewHandler(store, zerolog.Nop())
+
+	if _, err := store.Add("user-123", "/docs/my file.txt", "first"); err != nil {
+		t.Fatalf("seed favorite error: %v", err)
+	}
+
+	updateReq := httptest.NewRequest(http.MethodPatch, "/api/v1/favorites/docs/my%20file.txt", strings.NewReader(`{"note":"updated"}`))
+	updateReq = updateReq.WithContext(auth.WithClaimsContext(updateReq.Context(), &auth.TokenClaims{UserID: "user-123"}))
+	updateRec := httptest.NewRecorder()
+	handler.UpdateNote(updateRec, updateReq)
+	if updateRec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", updateRec.Code, updateRec.Body.String())
+	}
+
+	favorites := store.List("user-123")
+	if len(favorites) != 1 {
+		t.Fatalf("expected 1 favorite after update, got %d", len(favorites))
+	}
+	if favorites[0].Note != "updated" {
+		t.Fatalf("expected decoded route update to change note, got %q", favorites[0].Note)
+	}
+
+	removeReq := httptest.NewRequest(http.MethodDelete, "/api/v1/favorites/docs/my%20file.txt", nil)
+	removeReq = removeReq.WithContext(auth.WithClaimsContext(removeReq.Context(), &auth.TokenClaims{UserID: "user-123"}))
+	removeRec := httptest.NewRecorder()
+	handler.RemoveFavorite(removeRec, removeReq)
+	if removeRec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", removeRec.Code, removeRec.Body.String())
+	}
+
+	if store.IsFavorite("user-123", "/docs/my file.txt") {
+		t.Fatal("expected decoded route favorite to be removed")
+	}
+}
+
 func TestHandler_RemoveFavoriteAndUpdateNote_IncludeNullDataOnSuccess(t *testing.T) {
 	store, err := NewStore(filepath.Join(t.TempDir(), "favorites.json"))
 	if err != nil {

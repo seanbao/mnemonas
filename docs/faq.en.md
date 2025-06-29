@@ -20,7 +20,7 @@ English | [简体中文](faq.md)
 | --- | --- | --- |
 | Linux/systemd | Auto-start, clear logs, good diagnostics, best for long-running servers | Linux host focused |
 | Docker | Easy start, isolated, easy to upgrade | Requires Docker and correct volume mapping |
-| Manual binaries | Simple for debugging | You manage processes yourself |
+| Manual binaries | Simple for debugging | Manual process management |
 
 For long-running service deployments, use [Linux/systemd deployment](linux-systemd-deployment.en.md). For quick evaluation or existing container hosts, use [Docker deployment](docker-deployment.en.md).
 
@@ -118,7 +118,7 @@ For a separate global WebDAV credential, use:
 [webdav]
 auth_type = "basic"
 username = "admin"
-password = "your-password-here"
+password = "change-this-strong-password"
 ```
 
 If `password` is empty, MnemoNAS generates a WebDAV password and stores it in `<storage.root>/secrets.json`.
@@ -213,7 +213,7 @@ curl -X POST \
 
 MnemoNAS uses streaming paths. Practical limits come from disk space, clients, reverse proxy settings, and the underlying filesystem.
 
-For large files, test upload, download, and restore with your real workload. Public deployments must configure reverse proxy settings such as Nginx `client_max_body_size`, `proxy_request_buffering`, and timeouts.
+For large files, test upload, download, and restore with the expected workload. Public deployments must configure reverse proxy settings such as Nginx `client_max_body_size`, `proxy_request_buffering`, and timeouts.
 
 ## Performance and Maintenance
 
@@ -333,7 +333,7 @@ rm -rf -- "$DATA_DIR/files" "$DATA_DIR/.mnemonas"
 docker compose up -d
 ```
 
-Back up first if there is any data you may need.
+Back up first when existing data may still be needed.
 
 ## More Help
 

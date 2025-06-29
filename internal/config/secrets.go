@@ -27,6 +27,13 @@ const SecretsFile = "secrets.json"
 
 const secretsFileMode = 0600
 
+const (
+	readablePasswordLowerChars = "abcdefghjkmnpqrstuvwxyz"
+	readablePasswordUpperChars = "ABCDEFGHJKMNPQRSTUVWXYZ"
+	readablePasswordDigitChars = "23456789"
+	readablePasswordChars      = readablePasswordLowerChars + readablePasswordUpperChars + readablePasswordDigitChars
+)
+
 var errSecretsFileSymlink = errors.New("secrets file path must not be a symlink")
 
 // ErrSecretsNotFound indicates that the runtime secrets file is unexpectedly missing.
@@ -321,18 +328,53 @@ func generateSecureKey(length int) (string, error) {
 }
 
 // generateReadablePassword generates a human-readable random password
-// Uses a mix of lowercase, uppercase, and digits (no ambiguous characters)
+// Uses lowercase, uppercase, and digits while excluding ambiguous characters.
 func generateReadablePassword(length int) (string, error) {
-	// Exclude ambiguous characters: 0, O, l, 1, I
-	const charset = "abcdefghjkmnpqrstuvwxyzABCDEFGHJKMNPQRSTUVWXYZ23456789"
-	b := make([]byte, length)
-	charsetSize := big.NewInt(int64(len(charset)))
-	for i := range b {
-		index, err := rand.Int(rand.Reader, charsetSize)
-		if err != nil {
-			return "", fmt.Errorf("failed to generate random password: %w", err)
+	b := make([]byte, 0, length)
+	if length >= 3 {
+		for _, charset := range []string{
+			readablePasswordLowerChars,
+			readablePasswordUpperChars,
+			readablePasswordDigitChars,
+		} {
+			ch, err := randomReadablePasswordByte(charset)
+			if err != nil {
+				return "", err
+			}
+			b = append(b, ch)
 		}
-		b[i] = charset[index.Int64()]
 	}
+	for len(b) < length {
+		ch, err := randomReadablePasswordByte(readablePasswordChars)
+		if err != nil {
+			return "", err
+		}
+		b = append(b, ch)
+	}
+
+	if err := shuffleReadablePassword(b); err != nil {
+		return "", err
+	}
+
 	return string(b), nil
+}
+
+func randomReadablePasswordByte(charset string) (byte, error) {
+	index, err := rand.Int(rand.Reader, big.NewInt(int64(len(charset))))
+	if err != nil {
+		return 0, fmt.Errorf("failed to generate random password: %w", err)
+	}
+	return charset[index.Int64()], nil
+}
+
+func shuffleReadablePassword(password []byte) error {
+	for i := len(password) - 1; i > 0; i-- {
+		index, err := rand.Int(rand.Reader, big.NewInt(int64(i+1)))
+		if err != nil {
+			return fmt.Errorf("failed to shuffle random password: %w", err)
+		}
+		j := int(index.Int64())
+		password[i], password[j] = password[j], password[i]
+	}
+	return nil
 }

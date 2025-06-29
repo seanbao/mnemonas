@@ -5,6 +5,8 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TRAEFIK_DIR="$REPO_ROOT/deploy/public-access/traefik"
 CLOUDFLARE_CONFIG="$REPO_ROOT/deploy/public-access/cloudflare-tunnel/config.yml"
+PUBLIC_ACCESS_README="$REPO_ROOT/deploy/public-access/README.md"
+PUBLIC_ACCESS_README_EN="$REPO_ROOT/deploy/public-access/README.en.md"
 
 fail() {
     printf '[public-access-template-test] ERROR: %s\n' "$*" >&2
@@ -71,7 +73,32 @@ test_cloudflare_tunnel_template() {
     assert_file_not_contains "$CLOUDFLARE_CONFIG" "9091"
 }
 
+test_public_access_readmes() {
+    [[ -f "$PUBLIC_ACCESS_README" ]] || fail "missing public access Chinese README"
+    [[ -f "$PUBLIC_ACCESS_README_EN" ]] || fail "missing public access English README"
+
+    assert_file_contains "$PUBLIC_ACCESS_README" "公网访问模板"
+    assert_file_contains "$PUBLIC_ACCESS_README" "[English](README.en.md)"
+    assert_file_contains "$PUBLIC_ACCESS_README" "Traefik"
+    assert_file_contains "$PUBLIC_ACCESS_README" "Cloudflare Tunnel"
+    assert_file_contains "$PUBLIC_ACCESS_README" "只开放 \`80/443\`"
+    assert_file_contains "$PUBLIC_ACCESS_README" "小写、无单个 FQDN 尾点"
+
+    assert_file_contains "$PUBLIC_ACCESS_README_EN" "Public Access Templates"
+    assert_file_contains "$PUBLIC_ACCESS_README_EN" "[简体中文](README.md)"
+    assert_file_contains "$PUBLIC_ACCESS_README_EN" "Traefik"
+    assert_file_contains "$PUBLIC_ACCESS_README_EN" "Cloudflare Tunnel"
+    assert_file_contains "$PUBLIC_ACCESS_README_EN" "only \`80/443\`"
+    assert_file_contains "$PUBLIC_ACCESS_README_EN" "lowercase and without a single FQDN trailing dot"
+}
+
+test_docker_docs_mount_syntax() {
+    assert_tree_not_contains "$REPO_ROOT/docs" ".mnemonas:/data"
+}
+
 test_traefik_template
 test_cloudflare_tunnel_template
+test_public_access_readmes
+test_docker_docs_mount_syntax
 
 printf '[public-access-template-test] all checks passed\n'

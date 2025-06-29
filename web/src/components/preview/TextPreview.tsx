@@ -3,9 +3,12 @@ import { Spinner } from '@heroui/react'
 import { FileCode, AlertCircle } from 'lucide-react'
 import { buildPreviewUrl, getLanguageFromExtension } from '@/lib/preview-utils'
 import { authFetch } from '@/api/auth'
+import { readDownloadJsonErrorDetails } from '@/lib/downloadResponse'
+import { GENERIC_LOAD_ERROR_DESCRIPTION, getUserFacingErrorDescription } from '@/lib/apiMessages'
 import { cn } from '@/lib/utils'
 
 const maxPreviewBytes = 1024 * 1024
+const textPreviewTooLargeMessage = '文件过大，无法预览'
 
 const keywords: Record<string, string[]> = {
   javascript: ['const', 'let', 'var', 'function', 'return', 'if', 'else', 'for', 'while', 'class', 'import', 'export', 'from', 'async', 'await', 'try', 'catch', 'throw', 'new', 'this', 'true', 'false', 'null', 'undefined'],
@@ -78,16 +81,32 @@ function highlightLine(line: string, language: string): ReactNode[] {
   return parts
 }
 
-async function readLimitedText(response: Response): Promise<string> {
+function isAbortError(error: unknown): boolean {
+  return error instanceof DOMException && error.name === 'AbortError'
+}
+
+function getTextPreviewErrorMessage(error: unknown): string {
+  if (error instanceof Error && error.message === textPreviewTooLargeMessage) {
+    return textPreviewTooLargeMessage
+  }
+
+  return getUserFacingErrorDescription(error, GENERIC_LOAD_ERROR_DESCRIPTION)
+}
+
+async function readLimitedText(response: Response, signal?: AbortSignal): Promise<string> {
   const contentLength = response.headers.get('content-length')
   if (contentLength && parseInt(contentLength, 10) > maxPreviewBytes) {
-    throw new Error('文件过大，无法预览')
+    throw new Error(textPreviewTooLargeMessage)
+  }
+
+  if (signal?.aborted) {
+    throw new DOMException('Preview request aborted', 'AbortError')
   }
 
   if (!response.body) {
     const text = await response.text()
     if (new TextEncoder().encode(text).byteLength > maxPreviewBytes) {
-      throw new Error('文件过大，无法预览')
+      throw new Error(textPreviewTooLargeMessage)
     }
     return text
   }
@@ -95,9 +114,16 @@ async function readLimitedText(response: Response): Promise<string> {
   const reader = response.body.getReader()
   const chunks: Uint8Array[] = []
   let received = 0
+  const abortReader = () => {
+    void reader.cancel().catch(() => {})
+  }
 
   try {
+    signal?.addEventListener('abort', abortReader, { once: true })
     while (true) {
+      if (signal?.aborted) {
+        throw new DOMException('Preview request aborted', 'AbortError')
+      }
       const { done, value } = await reader.read()
       if (done) {
         break
@@ -105,11 +131,12 @@ async function readLimitedText(response: Response): Promise<string> {
       received += value.byteLength
       if (received > maxPreviewBytes) {
         void reader.cancel().catch(() => {})
-        throw new Error('文件过大，无法预览')
+        throw new Error(textPreviewTooLargeMessage)
       }
       chunks.push(value)
     }
   } finally {
+    signal?.removeEventListener('abort', abortReader)
     reader.releaseLock()
   }
 
@@ -137,6 +164,7 @@ export function TextPreview({ path, filename, className }: TextPreviewProps) {
 
   useEffect(() => {
     let cancelled = false
+    const controller = new AbortController()
 
     async function loadContent() {
       setIsLoading(true)
@@ -145,19 +173,27 @@ export function TextPreview({ path, filename, className }: TextPreviewProps) {
       
       try {
         const url = buildPreviewUrl(path, { includeAuth: false })
-        const response = await authFetch(url)
-        
+        const response = await authFetch(url, { signal: controller.signal })
+
         if (!response.ok) {
+          const jsonError = await readDownloadJsonErrorDetails(response, '加载失败')
+          if (jsonError) {
+            if (!cancelled) {
+              setError(getTextPreviewErrorMessage(new Error(jsonError.message)))
+            }
+            return
+          }
+
           throw new Error(`加载失败: ${response.statusText}`)
         }
         
-        const text = await readLimitedText(response)
+        const text = await readLimitedText(response, controller.signal)
         if (!cancelled) {
           setContent(text)
         }
       } catch (err) {
-        if (!cancelled) {
-          setError(err instanceof Error ? err.message : '加载失败')
+        if (!cancelled && !controller.signal.aborted && !isAbortError(err)) {
+          setError(getTextPreviewErrorMessage(err))
         }
       } finally {
         if (!cancelled) {
@@ -170,6 +206,7 @@ export function TextPreview({ path, filename, className }: TextPreviewProps) {
 
     return () => {
       cancelled = true
+      controller.abort()
     }
   }, [path])
 

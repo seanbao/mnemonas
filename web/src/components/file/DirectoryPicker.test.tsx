@@ -64,6 +64,26 @@ function createDeferred<T>() {
   return { promise, resolve, reject }
 }
 
+function expectListFilesCalledWithAbortSignal(path: string) {
+  const call = mockListFiles.mock.calls.find(([calledPath]) => calledPath === path)
+  expect(call).toBeTruthy()
+  expect((call?.[1] as { signal?: AbortSignal } | undefined)?.signal).toBeInstanceOf(AbortSignal)
+}
+
+function expectCreateDirectoryCalledWithAbortSignal(path: string) {
+  const call = mockCreateDirectory.mock.calls.find(([calledPath]) => calledPath === path)
+  expect(call).toBeTruthy()
+  expect((call?.[1] as { signal?: AbortSignal } | undefined)?.signal).toBeInstanceOf(AbortSignal)
+}
+
+function expectListFilesCalledWithPath(path: string) {
+  expect(mockListFiles.mock.calls.some(([calledPath]) => calledPath === path)).toBe(true)
+}
+
+function expectListFilesNotCalledWithPath(path: string) {
+  expect(mockListFiles.mock.calls.some(([calledPath]) => calledPath === path)).toBe(false)
+}
+
 function renderPicker(props?: Partial<React.ComponentProps<typeof DirectoryPicker>>) {
   const queryClient = new QueryClient({
     defaultOptions: {
@@ -130,7 +150,7 @@ describe('DirectoryPicker', () => {
     await waitFor(() => {
       expect(mockAddToast).toHaveBeenCalledWith({
         title: '加载目录失败',
-        description: 'directory unavailable',
+        description: '数据加载失败，请检查网络或稍后重试。',
         color: 'danger',
       })
     })
@@ -140,6 +160,74 @@ describe('DirectoryPicker', () => {
     await waitFor(() => {
       expect(mockListFiles).toHaveBeenCalledTimes(3)
     })
+  })
+
+  it('passes the query abort signal when loading the root directory', async () => {
+    renderPicker()
+
+    await waitFor(() => {
+      expectListFilesCalledWithAbortSignal('/')
+    })
+  })
+
+  it('passes an abort signal when expanding a directory', async () => {
+    const user = userEvent.setup({ writeToClipboard: false })
+    mockListFiles
+      .mockResolvedValueOnce({
+        path: '/',
+        files: [{ name: 'docs', path: '/docs', isDir: true, size: 0, modTime: '2024-01-01T00:00:00Z' }],
+      })
+      .mockResolvedValueOnce({
+        path: '/docs',
+        files: [],
+      })
+
+    renderPicker()
+
+    await waitFor(() => {
+      expect(screen.getByText('docs')).toBeTruthy()
+    })
+
+    const docsToggle = screen.getByText('docs').closest('div')?.querySelector('button')
+    expect(docsToggle).toBeTruthy()
+    await user.click(docsToggle as HTMLButtonElement)
+
+    await waitFor(() => {
+      expectListFilesCalledWithAbortSignal('/docs')
+    })
+  })
+
+  it('aborts an in-flight expanded directory load when the picker unmounts', async () => {
+    const user = userEvent.setup({ writeToClipboard: false })
+    let expandedSignal: AbortSignal | undefined
+    const pendingDirectory = createDeferred<Awaited<ReturnType<typeof listFiles>>>()
+    mockListFiles
+      .mockResolvedValueOnce({
+        path: '/',
+        files: [{ name: 'docs', path: '/docs', isDir: true, size: 0, modTime: '2024-01-01T00:00:00Z' }],
+      })
+      .mockImplementationOnce((_path, options?: { signal?: AbortSignal }) => {
+        expandedSignal = options?.signal
+        return pendingDirectory.promise
+      })
+
+    const { unmount } = renderPicker()
+
+    await waitFor(() => {
+      expect(screen.getByText('docs')).toBeTruthy()
+    })
+
+    const docsToggle = screen.getByText('docs').closest('div')?.querySelector('button')
+    expect(docsToggle).toBeTruthy()
+    await user.click(docsToggle as HTMLButtonElement)
+
+    await waitFor(() => {
+      expect(expandedSignal).toBeInstanceOf(AbortSignal)
+    })
+
+    unmount()
+
+    expect(expandedSignal?.aborted).toBe(true)
   })
 
   it('collapses and re-expands an already loaded directory without refetching it', async () => {
@@ -220,7 +308,7 @@ describe('DirectoryPicker', () => {
     await user.click(screen.getByRole('button', { name: '选择此目录' }))
 
     expect(onSelect).toHaveBeenCalledWith('/')
-    expect(mockListFiles).not.toHaveBeenCalledWith('/docs')
+    expectListFilesNotCalledWithPath('/docs')
   })
 
   it('cancels folder creation before submitting', async () => {
@@ -285,13 +373,13 @@ describe('DirectoryPicker', () => {
     )
 
     await waitFor(() => {
-      expect(mockListFiles).toHaveBeenCalledWith('/member')
+      expectListFilesCalledWithPath('/member')
     })
 
     expect(screen.queryByText('admin-secret')).toBeNull()
   })
 
-  it('shows backend error details when creating a folder fails', async () => {
+  it('shows generic error details when creating a folder fails', async () => {
     const user = userEvent.setup({ writeToClipboard: false })
     mockCreateDirectory.mockRejectedValueOnce(new Error('permission denied'))
 
@@ -308,7 +396,7 @@ describe('DirectoryPicker', () => {
     await waitFor(() => {
       expect(mockAddToast).toHaveBeenCalledWith({
         title: '创建文件夹失败',
-        description: 'permission denied',
+        description: '操作未完成，请稍后重试。',
         color: 'danger',
       })
     })
@@ -342,10 +430,127 @@ describe('DirectoryPicker', () => {
     await user.click(screen.getByRole('button', { name: '创建' }))
 
     await waitFor(() => {
-      expect(mockCreateDirectory).toHaveBeenCalledWith('/private')
+      expectCreateDirectoryCalledWithAbortSignal('/private')
       expect(screen.getByText('private')).toBeTruthy()
       expect(screen.getByText('/private')).toBeTruthy()
     })
+  })
+
+  it('passes an abort signal when creating a folder', async () => {
+    const user = userEvent.setup({ writeToClipboard: false })
+
+    renderPicker()
+
+    await waitFor(() => {
+      expect(screen.getByText('在此处新建文件夹')).toBeTruthy()
+    })
+
+    await user.click(screen.getByText('在此处新建文件夹'))
+    await user.type(screen.getByPlaceholderText('新文件夹名称'), 'private')
+    await user.click(screen.getByRole('button', { name: '创建' }))
+
+    await waitFor(() => {
+      expectCreateDirectoryCalledWithAbortSignal('/private')
+    })
+  })
+
+  it('passes an abort signal when reloading the parent after creating a folder', async () => {
+    const user = userEvent.setup({ writeToClipboard: false })
+    let parentReloadSignal: AbortSignal | undefined
+    mockListFiles
+      .mockResolvedValueOnce({
+        path: '/',
+        files: [
+          { name: 'docs', path: '/docs', isDir: true, size: 0, modTime: '2024-01-01T00:00:00Z' },
+        ],
+      })
+      .mockImplementationOnce((_path, options?: { signal?: AbortSignal }) => {
+        parentReloadSignal = options?.signal
+        return Promise.resolve({
+          path: '/',
+          files: [
+            { name: 'docs', path: '/docs', isDir: true, size: 0, modTime: '2024-01-01T00:00:00Z' },
+            { name: 'private', path: '/private', isDir: true, size: 0, modTime: '2024-01-01T00:00:00Z' },
+          ],
+        })
+      })
+
+    renderPicker()
+
+    await waitFor(() => {
+      expect(screen.getByText('docs')).toBeTruthy()
+    })
+
+    await user.click(screen.getByText('在此处新建文件夹'))
+    await user.type(screen.getByPlaceholderText('新文件夹名称'), 'private')
+    await user.click(screen.getByRole('button', { name: '创建' }))
+
+    await waitFor(() => {
+      expect(parentReloadSignal).toBeInstanceOf(AbortSignal)
+    })
+  })
+
+  it('aborts an in-flight folder create request when the picker unmounts', async () => {
+    const user = userEvent.setup({ writeToClipboard: false })
+    let createSignal: AbortSignal | undefined
+    const pendingCreate = createDeferred<typeof successActionResult>()
+    mockCreateDirectory.mockImplementationOnce((_path, options?: Parameters<typeof createDirectory>[1]) => {
+      createSignal = options?.signal
+      return pendingCreate.promise
+    })
+
+    const { unmount } = renderPicker()
+
+    await waitFor(() => {
+      expect(screen.getByText('在此处新建文件夹')).toBeTruthy()
+    })
+
+    await user.click(screen.getByText('在此处新建文件夹'))
+    await user.type(screen.getByPlaceholderText('新文件夹名称'), 'private')
+    await user.click(screen.getByRole('button', { name: '创建' }))
+
+    await waitFor(() => {
+      expect(createSignal).toBeInstanceOf(AbortSignal)
+    })
+
+    unmount()
+
+    expect(createSignal?.aborted).toBe(true)
+  })
+
+  it('aborts an in-flight parent reload when the picker unmounts after creating a folder', async () => {
+    const user = userEvent.setup({ writeToClipboard: false })
+    let parentReloadSignal: AbortSignal | undefined
+    const pendingParentReload = createDeferred<Awaited<ReturnType<typeof listFiles>>>()
+    mockListFiles
+      .mockResolvedValueOnce({
+        path: '/',
+        files: [
+          { name: 'docs', path: '/docs', isDir: true, size: 0, modTime: '2024-01-01T00:00:00Z' },
+        ],
+      })
+      .mockImplementationOnce((_path, options?: { signal?: AbortSignal }) => {
+        parentReloadSignal = options?.signal
+        return pendingParentReload.promise
+      })
+
+    const { unmount } = renderPicker()
+
+    await waitFor(() => {
+      expect(screen.getByText('docs')).toBeTruthy()
+    })
+
+    await user.click(screen.getByText('在此处新建文件夹'))
+    await user.type(screen.getByPlaceholderText('新文件夹名称'), 'private')
+    await user.click(screen.getByRole('button', { name: '创建' }))
+
+    await waitFor(() => {
+      expect(parentReloadSignal).toBeInstanceOf(AbortSignal)
+    })
+
+    unmount()
+
+    expect(parentReloadSignal?.aborted).toBe(true)
   })
 
   it('shows warning toast when creating a folder succeeds with a persistence warning', async () => {
@@ -364,7 +569,7 @@ describe('DirectoryPicker', () => {
 
     await waitFor(() => {
       expect(mockAddToast).toHaveBeenCalledWith({
-        title: 'directory created with persistence warning',
+        title: '文件夹创建完成，但存在警告',
         color: 'warning',
       })
     })
@@ -520,9 +725,10 @@ describe('DirectoryPicker', () => {
 
     await waitFor(() => {
       expect(screen.getByText('加载目录失败')).toBeTruthy()
-      expect(screen.getByText('root unavailable')).toBeTruthy()
+      expect(screen.getByText('数据加载失败，请检查网络或稍后重试。')).toBeTruthy()
       expect(screen.getByRole('button', { name: '重新加载' })).toBeTruthy()
     })
+    expect(screen.queryByText('root unavailable')).toBeNull()
 
     expect(screen.queryByText('当前目录没有子文件夹')).toBeNull()
 
@@ -572,10 +778,32 @@ describe('DirectoryPicker', () => {
     renderPicker({ initialPath: '/tester/projects' })
 
     await waitFor(() => {
-      expect(mockListFiles).toHaveBeenCalledWith('/tester')
+      expectListFilesCalledWithPath('/tester')
       expect(screen.getByText('主目录')).toBeTruthy()
       expect(screen.getByText('/tester/projects')).toBeTruthy()
       expect(screen.getByText('docs')).toBeTruthy()
+    })
+  })
+
+  it('uses an out-of-home initial path as the visible root so server access rules can resolve it', async () => {
+    mockUser.id = 'u2'
+    mockUser.username = 'tester'
+    mockUser.role = 'user'
+    mockUser.homeDir = '/tester'
+    mockListFiles.mockResolvedValueOnce({
+      path: '/team/projects',
+      files: [
+        { name: 'drafts', path: '/team/projects/drafts', isDir: true, size: 0, modTime: '2024-01-01T00:00:00Z' },
+      ],
+    })
+
+    renderPicker({ initialPath: '/team/projects' })
+
+    await waitFor(() => {
+      expectListFilesCalledWithPath('/team/projects')
+      expect(screen.getAllByText('projects').length).toBeGreaterThan(0)
+      expect(screen.getByText('/team/projects')).toBeTruthy()
+      expect(screen.getByText('drafts')).toBeTruthy()
     })
   })
 
@@ -630,7 +858,7 @@ describe('DirectoryPicker', () => {
     await user.click(screen.getByRole('button', { name: '创建' }))
 
     await waitFor(() => {
-      expect(mockCreateDirectory).toHaveBeenCalledWith('/old')
+      expectCreateDirectoryCalledWithAbortSignal('/old')
     })
 
     await user.click(screen.getByRole('button', { name: '选择此目录' }))
@@ -666,7 +894,7 @@ describe('DirectoryPicker', () => {
     await user.click(screen.getByRole('button', { name: '创建' }))
 
     await waitFor(() => {
-      expect(mockCreateDirectory).toHaveBeenCalledWith('/old')
+      expectCreateDirectoryCalledWithAbortSignal('/old')
     })
 
     await user.click(screen.getByRole('button', { name: '选择此目录' }))
@@ -681,7 +909,7 @@ describe('DirectoryPicker', () => {
     await waitFor(() => {
       expect(mockAddToast).toHaveBeenCalledWith({
         title: '创建文件夹失败',
-        description: 'create failed',
+        description: '操作未完成，请稍后重试。',
         color: 'danger',
       })
     })
@@ -744,7 +972,7 @@ describe('DirectoryPicker', () => {
     await user.click(docsToggle as HTMLButtonElement)
 
     await waitFor(() => {
-      expect(mockListFiles).toHaveBeenCalledWith('/docs')
+      expectListFilesCalledWithPath('/docs')
     })
 
     view.rerender(

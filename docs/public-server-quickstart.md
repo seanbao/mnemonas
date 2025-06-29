@@ -64,7 +64,7 @@ http://localhost:18080
 - 将 MnemoNAS 的 `[server].host` 收紧到 `127.0.0.1`；
 - 设置 `trusted_proxy_hops = 1`；
 - 重启 `mnemonas.service`；
-- 允许本机 `80/443`，限制直接访问 `8080/9090/9091` 或自定义后端端口；
+- 允许本机 `80/443`，移除 `8080/9090/9091` 或自定义后端端口上的宽泛 UFW 放行规则，并限制直接访问；
 - 运行基础公网入口检查。
 
 ```bash
@@ -77,7 +77,9 @@ sudo mnemonas-public-setup --proxy caddy nas.example.com admin@example.com
 sudo mnemonas-public-setup --proxy nginx nas.example.com admin@example.com
 ```
 
-如需 Traefik 或 Cloudflare Tunnel，请从 `deploy/public-access/traefik/` 或 `deploy/public-access/cloudflare-tunnel/config.yml` 模板开始，并参考 [反向代理配置](reverse-proxy-setup.md)。
+`mnemonas-public-setup` 会先将域名统一为小写，并移除单个 FQDN 尾点，再写入反向代理配置、证书命令和完成摘要。
+
+如需 Traefik 或 Cloudflare Tunnel，请从 `deploy/public-access/traefik/` 或 `deploy/public-access/cloudflare-tunnel/config.yml` 模板开始；模板说明见 [公网访问模板](../deploy/public-access/README.md)，详细配置见 [反向代理配置](reverse-proxy-setup.md)。
 
 如果已经登录 Web UI，也可以打开 `设置 -> 常规 -> 公网访问向导`：
 
@@ -107,7 +109,7 @@ Web UI 向导会把 MnemoNAS 调整为适合反向代理的表单配置，但证
 curl -I https://nas.example.com/health
 ```
 
-直连后端端口应失败或超时：
+直连后端端口应连接失败或超时；如果返回任何 HTTP 状态码（包括 `401`、`403`、`404`），都表示端口仍可从公网访问：
 
 ```bash
 curl --connect-timeout 3 http://nas.example.com:8080/health
@@ -123,7 +125,7 @@ sudo mnemonas-doctor --public-domain nas.example.com
 ss -tlnp | grep -E '80|443|8080|9090|9091'
 ```
 
-带 `--public-domain` 的检查会验证公网 HTTPS health、HTTP 到 HTTPS 跳转、证书 hostname、证书剩余有效期、后端直连端口和 dataplane 端口暴露情况，并提示云安全组人工复核项；证书检查需要服务器上有 `openssl`。它也会提示本机可检测到的续期路径：Nginx/certbot 部署应先执行 `sudo certbot renew --dry-run`，Caddy 部署应检查 `sudo journalctl -u caddy --since '24 hours ago'` 是否没有 ACME 错误。
+带 `--public-domain` 的检查会先将域名统一为小写，并移除单个 FQDN 尾点，再验证公网 HTTPS health、HTTP 是否跳转到同一域名的 HTTPS、证书 hostname、证书剩余有效期、公开部署认证配置、管理员账号冗余、分享链接基础 URL、后端直连端口和 dataplane 端口暴露情况，并提示云安全组人工复核项；证书检查需要服务器上有 `openssl`。公开部署认证检查要求 `auth.enabled = true`、`security.allow_unsafe_no_auth = false`，且启用 WebDAV 时不能使用 `auth_type = "none"`。管理员冗余检查会读取 `auth.users_file`，未配置时读取 `$STORAGE_ROOT/.mnemonas/users.json`；文件缺失、解析失败或没有启用中的管理员会失败，只有一个启用中的管理员会产生告警，两个及以上启用中的管理员为通过。启用分享功能时，`share.base_url` 应使用 HTTPS 默认端口，不能包含 userinfo、查询参数或片段，且主机名必须有效；使用 HTTP、非 443 端口、userinfo、查询参数、片段或无效主机名会失败，留空或使用其他域名会给出人工复核提示。它也会提示本机可检测到的续期路径：Nginx/certbot 部署应先执行 `sudo certbot renew --dry-run`，Caddy 部署应检查 `sudo journalctl -u caddy --since '24 hours ago'` 是否没有 ACME 错误。
 
 期望状态：
 
@@ -139,13 +141,20 @@ ss -tlnp | grep -E '80|443|8080|9090|9091'
 https://nas.example.com/dav
 ```
 
-WebDAV 凭据不是 Web UI 管理员密码。默认凭据保存在：
+公网部署推荐使用 MnemoNAS 用户认证，让 WebDAV 客户端使用 Web UI 用户账号，并继承 `home_dir`、目录授权和容量配额边界：
+
+```toml
+[webdav]
+auth_type = "users"
+```
+
+保留旧版全局 Basic Auth 模式时，WebDAV 凭据不是 Web UI 管理员密码。默认生成的凭据保存在：
 
 ```bash
 sudo cat /srv/mnemonas/secrets.json
 ```
 
-也可以在 `/etc/mnemonas/config.toml` 的 `[webdav]` 中设置自定义强密码，修改后重启：
+也可以在 `/etc/mnemonas/config.toml` 的 `[webdav]` 中设置自定义 Basic Auth 强密码，修改后先校验再重启：
 
 ```bash
 sudo nasd --check-config --config /etc/mnemonas/config.toml

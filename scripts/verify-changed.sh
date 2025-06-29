@@ -142,6 +142,7 @@ proto_changed=0
 scripts_changed=0
 workflows_changed=0
 docker_changed=0
+docs_changed=0
 precommit_changed=0
 agents_changed=0
 makefile_changed=0
@@ -150,6 +151,12 @@ for file in "${FILES[@]}"; do
 	case "$file" in
 		*.go|go.mod|go.sum)
 			go_changed=1
+			;;
+	esac
+
+	case "$file" in
+		*.md|scripts/check-doc-links.sh)
+			docs_changed=1
 			;;
 	esac
 
@@ -253,6 +260,10 @@ fi
 
 if [[ "$docker_changed" == "1" ]]; then
 	add_command "Build Docker image" "make docker"
+fi
+
+if [[ "$docs_changed" == "1" || "$makefile_changed" == "1" ]]; then
+	add_command "Validate documentation links" "make docs-check"
 fi
 
 if [[ "${#COMMANDS[@]}" -eq 0 ]]; then

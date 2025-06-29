@@ -83,11 +83,13 @@ cd mnemonas
 
 - `[webdav].password` - WebDAV 认证密码
 
-镜像默认以非 root 用户运行，容器内数据目录是 `/data`，默认对应宿主机 `~/.mnemonas`。如需改宿主机数据目录，优先使用 `./scripts/docker-quickstart.sh --data-dir /path/to/mnemonas --start`；脚本会把该路径写入 `.env` 的 `MNEMONAS_DATA_DIR`。Docker 中的自定义配置必须显式设置 `[storage].root`，通常保持 `root = "/data"`，且不能设置为 `/`。启动时如果已有配置里的 `[storage].root` 和 Docker 的 `STORAGE_ROOT` 不一致，容器日志会输出警告，并继续以配置文件为准。如修改为其他容器内路径，需额外挂载该路径；否则数据会写入容器临时层。例如设置 `root = "/data-root"` 时，需要在 `docker-compose.yml` 中增加 `- ~/.mnemonas-data:/data-root`。
+镜像默认以非 root 用户运行，容器内数据目录是 `/data`，默认对应宿主机 `~/.mnemonas`。如需改宿主机数据目录，优先使用 `./scripts/docker-quickstart.sh --data-dir /path/to/mnemonas --start`；脚本会把该路径写入 `.env` 的 `MNEMONAS_DATA_DIR`。Docker 中的自定义配置必须显式设置 `[storage].root`，通常保持 `root = "/data"`，且不能设置为 `/`。启动时如果已有配置里的 `[storage].root` 和 Docker 的 `STORAGE_ROOT` 不一致，容器日志会输出警告，并继续以配置文件为准。如修改为其他容器内路径，需额外挂载该路径；否则数据会写入容器临时层。例如设置 `root = "/data-root"` 时，需要在 `docker-compose.yml` 中增加指向 `/data-root` 的长语法 bind 挂载。
 
-Docker quickstart、容器启动入口和预检脚本都会要求数据目录为绝对路径，并拒绝 `..` 片段、受保护的系统目录以及符号链接路径组件，避免把配置或对象数据写入被替换或过宽的目录。容器内 `CONFIG_PATH` 必须是绝对路径，并且位于 `STORAGE_ROOT` 之下；默认即为 `/data/config.toml`。如果需要自定义宿主机路径，请挂载真实目录而不是符号链接。
+Docker quickstart、容器启动入口和预检脚本都会要求数据目录为绝对路径，并拒绝控制字符、`..` 片段、受保护的系统目录以及符号链接路径组件，避免把配置或对象数据写入被替换或过宽的目录。仓库自带的 Compose 文件使用长卷语法挂载 `/data`，避免宿主机路径中的 `:` 被误解析为卷目标或挂载模式；自定义 Compose 片段也应使用长卷语法。容器启动入口还会在创建或修改权限前检查 `STORAGE_ROOT/files` 与 `STORAGE_ROOT/.mnemonas/objects`，这些托管子目录不能通过符号链接指向其他位置。容器内 `CONFIG_PATH` 必须是绝对路径，并且位于 `STORAGE_ROOT` 之下，且不能包含控制字符、父目录段或符号链接路径组件；默认即为 `/data/config.toml`。Docker 容器以内置 `config.toml` 中的 `[dataplane].grpc_address` 作为内部 gRPC 地址的唯一来源；启动时会拒绝与该配置不一致的 `DATAPLANE_GRPC_ADDR` 环境变量，防止控制面和数据面使用不同端点。如果需要自定义宿主机路径，请挂载真实目录而不是符号链接。
 
-仓库自带的 Compose 文件默认使用 UID/GID `1000:1000`，Compose 会自动读取 `.env`。如果你的宿主机用户不是 1000，优先按上面的命令把当前 UID/GID 写入 `.env`；也可以启动时显式传入当前用户：
+自定义 `--env` 路径必须指向已有目录中的文件。脚本不会隐式创建 `.env` 的父目录，避免输入错误时先创建数据目录再失败。
+
+仓库自带的 Compose 文件默认使用 UID/GID `1000:1000`，Compose 会自动读取 `.env`。如果宿主机用户不是 1000，优先按上面的命令把当前 UID/GID 写入 `.env`；也可以启动时显式传入当前用户：
 
 ```bash
 MNEMONAS_UID="$(id -u)" MNEMONAS_GID="$(id -g)" docker compose up -d --build
@@ -124,7 +126,9 @@ docker build \
   --build-arg VERSION=local \
   --build-arg BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   -t mnemonas:local .
-docker run --rm --user "$(id -u):$(id -g)" -p 8080:8080 -v "$HOME/.mnemonas:/data" mnemonas:local
+docker run --rm --user "$(id -u):$(id -g)" -p 8080:8080 \
+  --mount type=bind,source="$HOME/.mnemonas",target=/data \
+  mnemonas:local
 ```
 
 手动运行镜像时同样只需要 `-p 8080:8080`。`9090/9091` 是容器内部 dataplane 端口，不需要也不应发布。
@@ -134,7 +138,7 @@ docker run --rm --user "$(id -u):$(id -g)" -p 8080:8080 -v "$HOME/.mnemonas:/dat
 ```bash
 docker build -t mnemonas:local \
   --build-arg NODE_IMAGE=node:22-bookworm-slim \
-  --build-arg GO_IMAGE=golang:1.25.9-alpine \
+  --build-arg GO_IMAGE=golang:1.25.10-alpine \
   --build-arg RUST_IMAGE=rust:1.92 \
   --build-arg RUNTIME_IMAGE=debian:bookworm-slim \
   --build-arg VERSION=local \
@@ -182,7 +186,11 @@ services:
       - "${MNEMONAS_HTTP_PORT:-8080}:8080"
     volumes:
       # 数据存储到用户目录
-      - ${HOME}/.mnemonas:/data
+      - type: bind
+        source: ${HOME}/.mnemonas
+        target: /data
+        bind:
+          create_host_path: true
     environment:
       - TZ=Asia/Shanghai
     restart: unless-stopped
@@ -212,7 +220,7 @@ enabled = true
 prefix = "/dav"
 auth_type = "basic"
 username = "webdav"
-password = "your-secure-password"  # 请修改！
+password = "change-this-strong-password"  # 请修改！
 
 [log]
 level = "info"
@@ -233,7 +241,11 @@ services:
     ports:
       - "127.0.0.1:${MNEMONAS_HTTP_PORT:-8080}:8080"
     volumes:
-      - ${HOME}/.mnemonas:/data
+      - type: bind
+        source: ${HOME}/.mnemonas
+        target: /data
+        bind:
+          create_host_path: true
     restart: unless-stopped
 ```
 
@@ -277,7 +289,11 @@ services:
     ports:
       - "${MNEMONAS_HTTP_PORT:-8080}:8080"
     volumes:
-      - ${HOME}/.mnemonas:/data
+      - type: bind
+        source: ${HOME}/.mnemonas
+        target: /data
+        bind:
+          create_host_path: true
     environment:
       - TZ=Asia/Shanghai
     restart: always
@@ -308,7 +324,11 @@ services:
     expose:
       - "8080"
     volumes:
-      - ${HOME}/.mnemonas:/data
+      - type: bind
+        source: ${HOME}/.mnemonas
+        target: /data
+        bind:
+          create_host_path: true
     restart: unless-stopped
     networks:
       - internal
@@ -375,6 +395,14 @@ http {
 }
 ```
 
+Docker bridge 反向代理的直连来源通常不是 loopback。使用上面的 Nginx 容器示例时，MnemoNAS 配置还需要信任该 Docker 网络的代理来源，否则 `X-Forwarded-Proto` 会被忽略，登录请求和 Secure cookie 判断可能仍按 HTTP 直连处理。可用 `docker network inspect <compose-project>_internal` 查看实际子网，并写入：
+
+```toml
+[server]
+trusted_proxy_hops = 1
+trusted_proxy_cidrs = ["172.18.0.0/16"] # 替换为实际 Docker network 子网或 nginx 容器 IP
+```
+
 ### 使用 Traefik 反向代理
 
 ```yaml
@@ -389,7 +417,11 @@ services:
       - "traefik.http.routers.mnemonas.tls.certresolver=letsencrypt"
       - "traefik.http.services.mnemonas.loadbalancer.server.port=8080"
     volumes:
-      - ${HOME}/.mnemonas:/data
+      - type: bind
+        source: ${HOME}/.mnemonas
+        target: /data
+        bind:
+          create_host_path: true
     networks:
       - traefik-network
 ```
@@ -471,6 +503,7 @@ docker compose down
 DEFAULT_DATA_DIR="$HOME/.mnemonas"
 DATA_DIR="${MNEMONAS_DATA_DIR:-$DEFAULT_DATA_DIR}"
 [ "$DATA_DIR" = "$DEFAULT_DATA_DIR" ] || { echo "refusing non-default DATA_DIR; inspect and delete manually: $DATA_DIR"; exit 1; }
+case "$DATA_DIR" in *$'\n'*|*$'\r'*|*"/../"*|*"/.."|"../"*|"..") echo "refusing unsafe DATA_DIR: $DATA_DIR"; exit 1 ;; esac
 [ ! -L "$DATA_DIR" ] || { echo "refusing symlink DATA_DIR: $DATA_DIR"; exit 1; }
 rm -rf -- "$DATA_DIR"
 tar xzf mnemonas-backup-YYYYMMDD.tar.gz -C ~
@@ -492,7 +525,7 @@ docker compose logs mnemonas
 # 检查配置文件语法与基础字段校验（无副作用，不会启动 dataplane）
 docker run --rm --entrypoint /app/nasd \
   --user "$(id -u):$(id -g)" \
-  -v "$HOME/.mnemonas:/data" \
+  --mount type=bind,source="$HOME/.mnemonas",target=/data \
   "${MNEMONAS_IMAGE:-mnemonas:local}" --check-config --config /data/config.toml
 ```
 
@@ -516,7 +549,7 @@ docker run --rm --entrypoint /app/nasd \
 ls -la ~/.mnemonas
 
 # 默认镜像以 UID/GID 1000 运行，仓库 Compose 文件也允许用 MNEMONAS_UID/MNEMONAS_GID 覆盖。
-# 如果你手动固定了其他 UID/GID，请把目录所有者调整为实际运行容器的用户。
+# 如果手动固定了其他 UID/GID，请把目录所有者调整为实际运行容器的用户。
 sudo chown -R 1000:1000 ~/.mnemonas
 chmod 750 ~/.mnemonas
 ```

@@ -1,4 +1,4 @@
-import { useState, useCallback, useLayoutEffect, useRef } from 'react'
+import { useState, useCallback, useEffect, useLayoutEffect, useRef } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   Card,
@@ -47,8 +47,10 @@ import { formatBytes, formatDate, cn } from '@/lib/utils'
 import { PageHeader } from '@/components/ui/PageHeader'
 import { EmptyState } from '@/components/ui/EmptyState'
 import { StatCard } from '@/components/ui/StatCard'
+import { getUserFacingErrorDescription } from '@/lib/apiMessages'
 
 const usersUnavailableDescription = '用户配置当前不可用，请检查系统配置状态或稍后重试。'
+const usersLoadErrorDescription = '用户列表加载失败，请检查网络或稍后重试。'
 const maxPasswordBytes = 72
 const quotaUnits = [
   { key: 'B', label: 'B', multiplier: 1 },
@@ -122,8 +124,24 @@ function formatGroupNames(groups: string[] | undefined): string {
   return (groups ?? []).join(', ')
 }
 
+function normalizesToRootHomeDir(homeDir: string): boolean {
+  const normalized = homeDir.trim().replaceAll('\\', '/')
+  return normalized.split('/').filter((segment) => segment && segment !== '.').length === 0
+}
+
+function isRootHomeDirForNonAdmin(role: User['role'], homeDir: string): boolean {
+  return role !== 'admin' && normalizesToRootHomeDir(homeDir)
+}
+
 function isMissingUserError(error: unknown): boolean {
   return error instanceof UsersError && (error.status === 404 || error.code === 'USER_NOT_FOUND')
+}
+
+function isAbortError(error: unknown): boolean {
+  return typeof error === 'object'
+    && error !== null
+    && 'name' in error
+    && (error as { name?: unknown }).name === 'AbortError'
 }
 
 function syncMissingUserInCache(queryClient: ReturnType<typeof useQueryClient>, userId: string): boolean {
@@ -173,7 +191,7 @@ function getUsersLoadErrorPresentation(error: unknown): {
 
   return {
     title: '加载用户列表失败',
-    description: error instanceof Error ? error.message : '请稍后重试',
+    description: getUserFacingErrorDescription(error, usersLoadErrorDescription),
   }
 }
 
@@ -232,7 +250,7 @@ function getUsersActionErrorPresentation(
     if (error.code === 'INVALID_HOME_DIR') {
       return {
         title: '主目录无效',
-        description: '主目录必须是站内绝对路径，例如 /alice。',
+        description: '主目录必须是站内绝对路径；非管理员不能使用 /。',
         color: 'warning',
       }
     }
@@ -264,7 +282,7 @@ function getUsersActionErrorPresentation(
 
   return {
     title: titles.failure,
-    description: error instanceof Error ? error.message : '请稍后重试',
+    description: getUserFacingErrorDescription(error),
     color: 'danger',
   }
 }
@@ -475,6 +493,10 @@ function UserCard({
             </div>
           )}
           <div className="flex min-w-0 items-center gap-2 text-default-500">
+            <FolderOpen size={14} className="shrink-0" />
+            <span className="truncate font-mono">{user.home_dir}</span>
+          </div>
+          <div className="flex min-w-0 items-center gap-2 text-default-500">
             <Calendar size={14} className="shrink-0" />
             <span className="truncate">创建于 {formatDate(user.created_at)}</span>
           </div>
@@ -518,11 +540,46 @@ export function UsersPage() {
   const [newEmail, setNewEmail] = useState('')
   const [newRole, setNewRole] = useState<'admin' | 'user' | 'guest'>('user')
   const [newGroups, setNewGroups] = useState('')
+  const [newHomeDir, setNewHomeDir] = useState('')
+  const [newQuotaValue, setNewQuotaValue] = useState('0')
+  const [newQuotaUnit, setNewQuotaUnit] = useState<QuotaUnit>('GB')
   const [resetPassword, setResetPassword] = useState('')
   const currentUserId = getStoredUser()?.id ?? 'anonymous'
   const usersQueryKey = ['users', currentUserId] as const
   const createSessionRef = useRef(0)
-  const createDraftRef = useRef({ username: '', password: '', email: '', role: 'user', groups: '' })
+  const createDraftRef = useRef({
+    username: '',
+    password: '',
+    email: '',
+    role: 'user',
+    groups: '',
+    homeDir: '',
+    quotaValue: '0',
+    quotaUnit: 'GB',
+  })
+  const createAbortControllerRef = useRef<AbortController | null>(null)
+  const updateAbortControllerRef = useRef<AbortController | null>(null)
+  const deleteAbortControllerRef = useRef<AbortController | null>(null)
+  const resetPasswordAbortControllerRef = useRef<AbortController | null>(null)
+  const revokeSessionsAbortControllerRef = useRef<AbortController | null>(null)
+  const toggleStatusAbortControllerRef = useRef<AbortController | null>(null)
+
+  useEffect(() => {
+    return () => {
+      createAbortControllerRef.current?.abort()
+      createAbortControllerRef.current = null
+      updateAbortControllerRef.current?.abort()
+      updateAbortControllerRef.current = null
+      deleteAbortControllerRef.current?.abort()
+      deleteAbortControllerRef.current = null
+      resetPasswordAbortControllerRef.current?.abort()
+      resetPasswordAbortControllerRef.current = null
+      revokeSessionsAbortControllerRef.current?.abort()
+      revokeSessionsAbortControllerRef.current = null
+      toggleStatusAbortControllerRef.current?.abort()
+      toggleStatusAbortControllerRef.current = null
+    }
+  }, [])
 
   useLayoutEffect(() => {
     createDraftRef.current = {
@@ -531,21 +588,28 @@ export function UsersPage() {
       email: newEmail,
       role: newRole,
       groups: newGroups,
+      homeDir: newHomeDir,
+      quotaValue: newQuotaValue,
+      quotaUnit: newQuotaUnit,
     }
-  }, [newEmail, newGroups, newPassword, newRole, newUsername])
+  }, [newEmail, newGroups, newHomeDir, newPassword, newQuotaUnit, newQuotaValue, newRole, newUsername])
 
   const { data, isLoading, isRefetching, error, refetch } = useQuery({
     queryKey: usersQueryKey,
-    queryFn: listUsers,
+    queryFn: ({ signal }) => listUsers({ signal }),
   })
 
   const createMutation = useMutation({
-    mutationFn: ({ request }: {
+    mutationFn: ({ request, signal }: {
       request: Parameters<typeof createUser>[0]
       submittedDraft: typeof createDraftRef.current
       createSession: number
-    }) => createUser(request),
+      signal: AbortSignal
+    }) => createUser(request, { signal }),
     onSuccess: (result, variables) => {
+      if (variables.signal.aborted) {
+        return
+      }
       queryClient.invalidateQueries({ queryKey: usersQueryKey })
       if (
         createSessionRef.current === variables.createSession
@@ -556,36 +620,51 @@ export function UsersPage() {
       }
       addToast(getUsersActionSuccessToast('create', { warning: result.warning }))
     },
-    onError: (error) => {
+    onError: (error, variables) => {
+      if (variables.signal.aborted || isAbortError(error)) {
+        return
+      }
       addToast(getUsersActionErrorPresentation(error, {
         unavailable: '创建用户暂不可用',
         failure: '创建失败',
       }))
     },
+    onSettled: (_result, _error, variables) => {
+      if (createAbortControllerRef.current?.signal === variables?.signal) {
+        createAbortControllerRef.current = null
+      }
+    },
   })
 
   const updateMutation = useMutation({
-    mutationFn: ({ userId, email, role, groups, homeDir, quotaBytes }: {
+    mutationFn: ({ userId, email, role, groups, homeDir, quotaBytes, signal }: {
       userId: string
       email: string
       role: User['role']
       groups: string[]
       homeDir: string
       quotaBytes: number
+      signal: AbortSignal
     }) => updateUser(userId, {
       email,
       role,
       groups,
       home_dir: homeDir,
       quota_bytes: quotaBytes,
-    }),
-    onSuccess: (result) => {
+    }, { signal }),
+    onSuccess: (result, variables) => {
+      if (variables.signal.aborted) {
+        return
+      }
       queryClient.invalidateQueries({ queryKey: usersQueryKey })
       onEditClose()
       setEditTarget(null)
       addToast(getUsersActionSuccessToast('update', { warning: result.warning }))
     },
     onError: (error, variables) => {
+      if (variables.signal.aborted || isAbortError(error)) {
+        return
+      }
       if (isMissingUserError(error)) {
         syncMissingUserInCache(queryClient, variables.userId)
         onEditClose()
@@ -599,19 +678,30 @@ export function UsersPage() {
         failure: '更新失败',
       }))
     },
+    onSettled: (_result, _error, variables) => {
+      if (updateAbortControllerRef.current?.signal === variables?.signal) {
+        updateAbortControllerRef.current = null
+      }
+    },
   })
 
   const deleteMutation = useMutation({
-    mutationFn: deleteUser,
-    onSuccess: (result) => {
+    mutationFn: ({ userId, signal }: { userId: string; signal: AbortSignal }) => deleteUser(userId, { signal }),
+    onSuccess: (result, variables) => {
+      if (variables.signal.aborted) {
+        return
+      }
       queryClient.invalidateQueries({ queryKey: usersQueryKey })
       onDeleteClose()
       setDeleteTarget(null)
       addToast(getUsersActionSuccessToast('delete', { warning: result.warning }))
     },
-    onError: (error, userId) => {
+    onError: (error, variables) => {
+      if (variables.signal.aborted || isAbortError(error)) {
+        return
+      }
       if (isMissingUserError(error)) {
-        syncMissingUserInCache(queryClient, userId)
+        syncMissingUserInCache(queryClient, variables.userId)
         onDeleteClose()
         setDeleteTarget(null)
         addToast({ title: '用户已不存在，已同步更新', color: 'warning' })
@@ -623,12 +713,20 @@ export function UsersPage() {
         failure: '删除失败',
       }))
     },
+    onSettled: (_result, _error, variables) => {
+      if (deleteAbortControllerRef.current?.signal === variables?.signal) {
+        deleteAbortControllerRef.current = null
+      }
+    },
   })
 
   const resetPasswordMutation = useMutation({
-    mutationFn: ({ userId, password }: { userId: string; password: string }) =>
-      resetUserPassword(userId, { new_password: password }),
-    onSuccess: (result) => {
+    mutationFn: ({ userId, password, signal }: { userId: string; password: string; signal: AbortSignal }) =>
+      resetUserPassword(userId, { new_password: password }, { signal }),
+    onSuccess: (result, variables) => {
+      if (variables.signal.aborted) {
+        return
+      }
       queryClient.invalidateQueries({ queryKey: usersQueryKey })
       onResetClose()
       setResetTarget(null)
@@ -636,6 +734,9 @@ export function UsersPage() {
       addToast(getUsersActionSuccessToast('reset-password', { warning: result.warning }))
     },
     onError: (error, variables) => {
+      if (variables.signal.aborted || isAbortError(error)) {
+        return
+      }
       if (isMissingUserError(error)) {
         syncMissingUserInCache(queryClient, variables.userId)
         onResetClose()
@@ -650,16 +751,27 @@ export function UsersPage() {
         failure: '重置失败',
       }))
     },
+    onSettled: (_result, _error, variables) => {
+      if (resetPasswordAbortControllerRef.current?.signal === variables?.signal) {
+        resetPasswordAbortControllerRef.current = null
+      }
+    },
   })
 
   const revokeSessionsMutation = useMutation({
-    mutationFn: (userId: string) => revokeUserSessions(userId),
-    onSuccess: (result) => {
+    mutationFn: ({ userId, signal }: { userId: string; signal: AbortSignal }) => revokeUserSessions(userId, { signal }),
+    onSuccess: (result, variables) => {
+      if (variables.signal.aborted) {
+        return
+      }
       addToast(getUsersActionSuccessToast('revoke-sessions', { warning: result.warning }))
     },
-    onError: (error, userId) => {
+    onError: (error, variables) => {
+      if (variables.signal.aborted || isAbortError(error)) {
+        return
+      }
       if (isMissingUserError(error)) {
-        syncMissingUserInCache(queryClient, userId)
+        syncMissingUserInCache(queryClient, variables.userId)
         addToast({ title: '用户已不存在，已同步更新', color: 'warning' })
         return
       }
@@ -669,12 +781,20 @@ export function UsersPage() {
         failure: '吊销登录失败',
       }))
     },
+    onSettled: (_result, _error, variables) => {
+      if (revokeSessionsAbortControllerRef.current?.signal === variables?.signal) {
+        revokeSessionsAbortControllerRef.current = null
+      }
+    },
   })
 
   const toggleStatusMutation = useMutation({
-    mutationFn: ({ userId, disabled }: { userId: string; disabled: boolean }) =>
-      toggleUserStatus(userId, disabled),
+    mutationFn: ({ userId, disabled, signal }: { userId: string; disabled: boolean; signal: AbortSignal }) =>
+      toggleUserStatus(userId, disabled, { signal }),
     onSuccess: (result, variables) => {
+      if (variables.signal.aborted) {
+        return
+      }
       queryClient.invalidateQueries({ queryKey: usersQueryKey })
       addToast(getUsersActionSuccessToast('toggle-status', {
         warning: result.warning,
@@ -682,6 +802,9 @@ export function UsersPage() {
       }))
     },
     onError: (error, variables) => {
+      if (variables.signal.aborted || isAbortError(error)) {
+        return
+      }
       if (isMissingUserError(error)) {
         syncMissingUserInCache(queryClient, variables.userId)
         addToast({ title: '用户已不存在，已同步更新', color: 'warning' })
@@ -693,6 +816,11 @@ export function UsersPage() {
         failure: '状态更新失败',
       }))
     },
+    onSettled: (_result, _error, variables) => {
+      if (toggleStatusAbortControllerRef.current?.signal === variables?.signal) {
+        toggleStatusAbortControllerRef.current = null
+      }
+    },
   })
 
   const resetCreateForm = useCallback(() => {
@@ -701,6 +829,9 @@ export function UsersPage() {
     setNewEmail('')
     setNewRole('user')
     setNewGroups('')
+    setNewHomeDir('')
+    setNewQuotaValue('0')
+    setNewQuotaUnit('GB')
   }, [])
 
   const handleOpenCreateModal = useCallback(() => {
@@ -733,6 +864,27 @@ export function UsersPage() {
       addToast({ title: '用户组无效', description: parsedGroups.error, color: 'warning' })
       return
     }
+    const homeDir = newHomeDir.trim()
+    if (homeDir && !homeDir.startsWith('/')) {
+      addToast({ title: '主目录必须以 / 开头', color: 'warning' })
+      return
+    }
+    if (homeDir && isRootHomeDirForNonAdmin(newRole, homeDir)) {
+      addToast({
+        title: '非管理员主目录不能为 /',
+        description: '请选择具体目录，例如 /alice。',
+        color: 'warning',
+      })
+      return
+    }
+    const quotaBytes = quotaFormValueToBytes(newQuotaValue, newQuotaUnit)
+    if (quotaBytes == null) {
+      addToast({ title: '配额无效', description: '请输入非负数字，0 表示不限额。', color: 'warning' })
+      return
+    }
+    createAbortControllerRef.current?.abort()
+    const controller = new AbortController()
+    createAbortControllerRef.current = controller
     createMutation.mutate({
       request: {
         username: newUsername.trim(),
@@ -740,11 +892,14 @@ export function UsersPage() {
         email: newEmail.trim() || undefined,
         role: newRole,
         groups: parsedGroups.groups,
+        home_dir: homeDir || undefined,
+        quota_bytes: quotaBytes,
       },
       submittedDraft: { ...createDraftRef.current },
       createSession: createSessionRef.current,
+      signal: controller.signal,
     })
-  }, [newUsername, newPassword, newEmail, newGroups, newRole, createMutation])
+  }, [newUsername, newPassword, newEmail, newGroups, newHomeDir, newQuotaUnit, newQuotaValue, newRole, createMutation])
 
   const handleOpenEditModal = useCallback((user: User) => {
     const quota = quotaBytesToFormValue(user.quota_bytes)
@@ -771,6 +926,14 @@ export function UsersPage() {
       addToast({ title: '主目录必须以 / 开头', color: 'warning' })
       return
     }
+    if (isRootHomeDirForNonAdmin(editRole, homeDir)) {
+      addToast({
+        title: '非管理员主目录不能为 /',
+        description: '请选择具体目录，例如 /alice。',
+        color: 'warning',
+      })
+      return
+    }
     const quotaBytes = quotaFormValueToBytes(editQuotaValue, editQuotaUnit)
     if (quotaBytes == null) {
       addToast({ title: '配额无效', description: '请输入非负数字，0 表示不限额。', color: 'warning' })
@@ -782,6 +945,9 @@ export function UsersPage() {
       return
     }
 
+    updateAbortControllerRef.current?.abort()
+    const controller = new AbortController()
+    updateAbortControllerRef.current = controller
     updateMutation.mutate({
       userId: editTarget.id,
       email: editEmail.trim(),
@@ -789,12 +955,16 @@ export function UsersPage() {
       groups: parsedGroups.groups,
       homeDir,
       quotaBytes,
+      signal: controller.signal,
     })
   }, [editEmail, editGroups, editHomeDir, editQuotaUnit, editQuotaValue, editRole, editTarget, updateMutation])
 
   const handleDelete = useCallback(() => {
     if (!deleteTarget) return
-    deleteMutation.mutate(deleteTarget.id)
+    deleteAbortControllerRef.current?.abort()
+    const controller = new AbortController()
+    deleteAbortControllerRef.current = controller
+    deleteMutation.mutate({ userId: deleteTarget.id, signal: controller.signal })
   }, [deleteTarget, deleteMutation])
 
   const handleResetPassword = useCallback(() => {
@@ -811,7 +981,10 @@ export function UsersPage() {
       addToast({ title: `新密码最多 ${maxPasswordBytes} 字节`, color: 'warning' })
       return
     }
-    resetPasswordMutation.mutate({ userId: resetTarget.id, password: resetPassword })
+    resetPasswordAbortControllerRef.current?.abort()
+    const controller = new AbortController()
+    resetPasswordAbortControllerRef.current = controller
+    resetPasswordMutation.mutate({ userId: resetTarget.id, password: resetPassword, signal: controller.signal })
   }, [resetTarget, resetPassword, resetPasswordMutation])
 
   const handleOpenDeleteModal = useCallback((user: User) => {
@@ -840,12 +1013,18 @@ export function UsersPage() {
 
   const handleToggleStatus = useCallback((user: User) => {
     if (user.id === currentUserId) return
-    toggleStatusMutation.mutate({ userId: user.id, disabled: !user.disabled })
+    toggleStatusAbortControllerRef.current?.abort()
+    const controller = new AbortController()
+    toggleStatusAbortControllerRef.current = controller
+    toggleStatusMutation.mutate({ userId: user.id, disabled: !user.disabled, signal: controller.signal })
   }, [currentUserId, toggleStatusMutation])
 
   const handleRevokeSessions = useCallback((user: User) => {
     if (user.id === currentUserId) return
-    revokeSessionsMutation.mutate(user.id)
+    revokeSessionsAbortControllerRef.current?.abort()
+    const controller = new AbortController()
+    revokeSessionsAbortControllerRef.current = controller
+    revokeSessionsMutation.mutate({ userId: user.id, signal: controller.signal })
   }, [currentUserId, revokeSessionsMutation])
 
   const handleRefreshUsers = useCallback(async () => {
@@ -933,7 +1112,7 @@ export function UsersPage() {
               <EmptyState
                 icon={AlertCircle}
                 title={usersLoadError?.title ?? '加载用户列表失败'}
-                description={usersLoadError?.description ?? '请稍后重试'}
+                description={usersLoadError?.description ?? usersLoadErrorDescription}
                 action={
                   <Button variant="bordered" className="rounded-lg" onPress={handleRefreshUsers}>
                     重新加载
@@ -968,7 +1147,7 @@ export function UsersPage() {
       <Modal
         isOpen={isCreateOpen}
         onClose={handleCloseCreateModal}
-        size="md"
+        size="lg"
         placement="center"
         classNames={{
           base: "bg-content1 border border-divider shadow-xl rounded-lg",
@@ -1081,6 +1260,61 @@ export function UsersPage() {
                 }}
               />
             </div>
+            <div>
+              <Input
+                label="主目录"
+                aria-label="主目录"
+                placeholder="/username"
+                value={newHomeDir}
+                onValueChange={setNewHomeDir}
+                size="lg"
+                variant="bordered"
+                labelPlacement="outside"
+                startContent={<FolderOpen size={16} className="text-default-400" />}
+                classNames={{
+                  inputWrapper: "bg-default-50 border-default-200 hover:border-default-300 data-[focus=true]:!border-accent-primary",
+                  input: "text-sm placeholder:text-default-400 font-mono",
+                }}
+              />
+            </div>
+            <div className="grid grid-cols-[minmax(0,1fr)_8rem] gap-3">
+              <Input
+                type="number"
+                min={0}
+                label="容量配额"
+                aria-label="容量配额"
+                placeholder="0 表示不限额"
+                value={newQuotaValue}
+                onValueChange={setNewQuotaValue}
+                size="lg"
+                variant="bordered"
+                labelPlacement="outside"
+                startContent={<HardDrive size={16} className="text-default-400" />}
+                classNames={{
+                  inputWrapper: "bg-default-50 border-default-200 hover:border-default-300 data-[focus=true]:!border-accent-primary",
+                  input: "text-sm placeholder:text-default-400",
+                }}
+              />
+              <Select
+                label="单位"
+                aria-label="容量配额单位"
+                selectedKeys={[newQuotaUnit]}
+                onSelectionChange={(keys) => {
+                  const value = Array.from(keys)[0] as QuotaUnit
+                  if (value) setNewQuotaUnit(value)
+                }}
+                size="lg"
+                variant="bordered"
+                labelPlacement="outside"
+                classNames={{
+                  trigger: "bg-default-50 border-default-200 hover:border-default-300 data-[focus=true]:!border-accent-primary",
+                }}
+              >
+                {quotaUnits.map((unit) => (
+                  <SelectItem key={unit.key}>{unit.label}</SelectItem>
+                ))}
+              </Select>
+            </div>
           </ModalBody>
           <ModalFooter className="px-6 pb-6 pt-2 gap-2">
             <Button
@@ -1095,7 +1329,15 @@ export function UsersPage() {
               color="primary"
               onPress={handleCreate}
               isLoading={createMutation.isPending}
-              isDisabled={!newUsername.trim() || !newPassword.trim() || newPassword.length < 8 || utf8ByteLength(newPassword) > maxPasswordBytes}
+              isDisabled={
+                !newUsername.trim()
+                || !newPassword.trim()
+                || newPassword.length < 8
+                || utf8ByteLength(newPassword) > maxPasswordBytes
+                || Boolean(newHomeDir.trim() && !newHomeDir.trim().startsWith('/'))
+                || Boolean(newHomeDir.trim() && isRootHomeDirForNonAdmin(newRole, newHomeDir))
+                || quotaFormValueToBytes(newQuotaValue, newQuotaUnit) == null
+              }
               className="rounded-lg"
             >
               创建
@@ -1261,7 +1503,12 @@ export function UsersPage() {
               color="primary"
               onPress={handleUpdateUser}
               isLoading={updateMutation.isPending}
-              isDisabled={!editTarget || !editHomeDir.trim() || quotaFormValueToBytes(editQuotaValue, editQuotaUnit) == null}
+              isDisabled={
+                !editTarget
+                || !editHomeDir.trim()
+                || isRootHomeDirForNonAdmin(editRole, editHomeDir)
+                || quotaFormValueToBytes(editQuotaValue, editQuotaUnit) == null
+              }
               className="rounded-lg"
             >
               保存

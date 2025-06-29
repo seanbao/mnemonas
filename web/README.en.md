@@ -56,7 +56,7 @@ export MNEMONAS_E2E_REUSE_EXISTING=1
 export MNEMONAS_E2E_BACKEND_URL=http://127.0.0.1:8080
 export MNEMONAS_E2E_FRONTEND_URL=http://127.0.0.1:5173
 export E2E_USERNAME=admin
-export E2E_PASSWORD='your-password'
+export E2E_PASSWORD='change-this-test-password'
 
 npm run test:e2e
 npm run test:e2e:navigation
@@ -68,8 +68,10 @@ Notes:
 
 - Protected-page tests prefer `E2E_PASSWORD` and also support `E2E_PASSWORD_FILE`.
 - The default configuration starts an isolated test backend, generates an initial password, and writes it under `MNEMONAS_E2E_ROOT`.
+- The isolated backend uses a 2-hour access-token lifetime and a 168-hour refresh-token lifetime to reduce shared storageState expiration risk during long parallel test runs.
 - `MNEMONAS_E2E_ROOT` must be under `/tmp` or the current checkout and must not contain `..` or symlink path components.
 - `MNEMONAS_E2E_BACKEND_URL` and `MNEMONAS_E2E_FRONTEND_URL` can adjust isolated test server ports; `MNEMONAS_E2E_REUSE_EXISTING=1` is required to skip automatic startup.
+- Local Playwright runs use 4 workers by default; set `MNEMONAS_E2E_WORKERS` to a positive integer to override it. CI always uses 1 worker.
 - Without `E2E_PASSWORD_FILE`, Playwright tries the default initial-password path `~/.mnemonas/.mnemonas/initial-password.txt`.
 - Protected-page tests skip automatically when no admin password is available.
 

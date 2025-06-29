@@ -1,3 +1,4 @@
+import { useEffect, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Card, CardBody, CardHeader, Progress, Chip, Button, Divider, addToast } from '@heroui/react'
 import { 
@@ -16,11 +17,14 @@ import {
   BellRing,
   Thermometer,
   Network,
+  Download,
   type LucideIcon,
 } from 'lucide-react'
-import { ApiError, getDiagnostics, getDiskHealth, getStorageStats, type DiagnosticsInfo, type DiskHealthReport } from '@/api/files'
-import { formatBytes } from '@/lib/utils'
-import { areDiskStatsAvailable, areStorageStatsAvailable, clampUsagePercent, formatFilesystemType, formatUsagePercent } from '@/lib/storageStats'
+import { ApiError, downloadDiagnosticsExport, getDiagnostics, getDiskHealth, getStorageStats, type DiagnosticsInfo, type DiskHealthReport } from '@/api/files'
+import { formatBytes, formatUptimeSeconds } from '@/lib/utils'
+import { areDiskStatsAvailable, areStorageStatsAvailable, clampUsagePercent, formatFilesystemType, formatUsagePercent, getFilesystemIntegrityStatus } from '@/lib/storageStats'
+import { GENERIC_ACTION_ERROR_DESCRIPTION, GENERIC_LOAD_ERROR_DESCRIPTION, getUserFacingErrorDescription } from '@/lib/apiMessages'
+import { getDiskHealthDeviceDisplayMessage } from '@/lib/diskHealthMessages'
 import { PageHeader } from '@/components/ui/PageHeader'
 import { EmptyState } from '@/components/ui/EmptyState'
 import { useUser } from '@/stores/auth'
@@ -58,21 +62,6 @@ function StatusIndicator({
   )
 }
 
-// Format uptime
-function formatUptime(seconds: number): string {
-  const days = Math.floor(seconds / 86400)
-  const hours = Math.floor((seconds % 86400) / 3600)
-  const minutes = Math.floor((seconds % 3600) / 60)
-
-  if (days > 0) {
-    return `${days}天 ${hours}小时`
-  }
-  if (hours > 0) {
-    return `${hours}小时 ${minutes}分钟`
-  }
-  return `${minutes}分钟`
-}
-
 function formatMetricWithUnit(value: number | undefined, unit: string): string {
   return value === undefined ? '--' : `${value} ${unit}`
 }
@@ -102,42 +91,42 @@ function getFilesystemPresentation(
   className: string
   iconClassName: string
 } {
-  const normalized = fsType?.trim().toLowerCase()
-  if (nativeDataChecksumSupport === true) {
+  const status = getFilesystemIntegrityStatus(fsType, nativeDataChecksumSupport)
+  if (status.level === 'supported') {
     return {
       icon: ShieldCheck,
-      title: '原生数据校验支持',
-      description: `${formatFilesystemType(fsType)} 具备底层校验与 scrub 能力，仍需保留独立备份。`,
+      title: status.title,
+      description: status.description,
       className: 'border-success/25 bg-success/5',
       iconClassName: 'text-success',
     }
   }
 
-  if (!normalized || normalized === 'unknown') {
+  if (status.level === 'unknown') {
     return {
       icon: AlertCircle,
-      title: '文件系统未知',
-      description: '无法识别底层文件系统，建议在部署机上运行 mnemonas-doctor 核对磁盘布局。',
+      title: status.title,
+      description: status.description,
       className: 'border-default-200 bg-content2/40',
       iconClassName: 'text-default-500',
     }
   }
 
-  if (normalized === 'tmpfs') {
+  if (status.level === 'volatile') {
     return {
       icon: AlertCircle,
-      title: '临时文件系统',
-      description: '当前存储看起来是 tmpfs，重启可能丢失数据。请迁移到持久磁盘。',
+      title: status.title,
+      description: status.description,
       className: 'border-danger/25 bg-danger/5',
       iconClassName: 'text-danger',
     }
   }
 
-  if (['nfs', 'cifs', 'smb', 'smb2', 'fuse'].some((prefix) => normalized.startsWith(prefix))) {
+  if (status.level === 'remote') {
     return {
       icon: AlertCircle,
-      title: '网络或 FUSE 存储',
-      description: '请确认一致性、断线恢复和独立备份策略。',
+      title: status.title,
+      description: status.description,
       className: 'border-warning/25 bg-warning/5',
       iconClassName: 'text-warning',
     }
@@ -145,8 +134,8 @@ function getFilesystemPresentation(
 
   return {
     icon: AlertCircle,
-    title: '建议使用 ZFS/Btrfs',
-    description: '当前未检测到底层数据校验与 scrub 能力，请依赖 MnemoNAS scrub 和独立备份。',
+    title: status.title,
+    description: status.description,
     className: 'border-warning/25 bg-warning/5',
     iconClassName: 'text-warning',
   }
@@ -177,7 +166,7 @@ function getAlertsPresentation(alerts: DiagnosticsInfo['alerts']): {
     return {
       icon: AlertCircle,
       title: '空间提醒暂不可用',
-      description: '配置已启用，但当前进程没有挂载提醒服务，请检查服务启动日志。',
+      description: `配置已启用，但当前进程没有挂载提醒服务，请检查服务启动日志。${formatAlertNotificationSummary(alerts)}`,
       className: 'border-danger/25 bg-danger/5',
       iconClassName: 'text-danger',
     }
@@ -191,12 +180,13 @@ function getAlertsPresentation(alerts: DiagnosticsInfo['alerts']): {
   const freeText = alerts.lastFreeBytes !== undefined
     ? `，剩余 ${formatBytes(alerts.lastFreeBytes)}`
     : ''
+  const notificationSummary = formatAlertNotificationSummary(alerts)
 
   if (lastLevel === 'critical') {
     return {
       icon: AlertCircle,
       title: '可用空间严重不足',
-      description: `${checkedText}${usageText}${freeText}。请尽快清理或扩容。`,
+      description: `${checkedText}${usageText}${freeText}。请尽快清理或扩容。${notificationSummary}`,
       className: 'border-danger/25 bg-danger/5',
       iconClassName: 'text-danger',
     }
@@ -206,24 +196,46 @@ function getAlertsPresentation(alerts: DiagnosticsInfo['alerts']): {
     return {
       icon: AlertCircle,
       title: '可用空间偏紧',
-      description: `${checkedText}${usageText}${freeText}。建议安排清理或扩容。`,
+      description: `${checkedText}${usageText}${freeText}。建议安排清理或扩容。${notificationSummary}`,
       className: 'border-warning/25 bg-warning/5',
       iconClassName: 'text-warning',
     }
   }
 
-  const hasNotificationChannel = alerts.webhookConfigured || alerts.telegramConfigured || alerts.emailConfigured
-  const notificationText = hasNotificationChannel
-    ? '通知通道已配置。'
+  const notificationChannels = getAlertNotificationChannels(alerts)
+  const notificationText = notificationChannels.length > 0
+    ? `通知通道已配置：${notificationChannels.join('、')}。`
     : '如需外部通知，请在设置中配置 Webhook、Telegram 或邮件。'
 
   return {
     icon: BellRing,
-    title: hasNotificationChannel ? '空间提醒已启用' : '空间提醒已启用，未配置通知通道',
+    title: notificationChannels.length > 0 ? '空间提醒已启用' : '空间提醒已启用，未配置通知通道',
     description: `${checkedText}。${notificationText}`,
     className: 'border-success/25 bg-success/5',
     iconClassName: 'text-success',
   }
+}
+
+function getAlertNotificationChannels(alerts: NonNullable<DiagnosticsInfo['alerts']>): string[] {
+  const channels: string[] = []
+  if (alerts.webhookConfigured) {
+    channels.push('Webhook')
+  }
+  if (alerts.telegramConfigured) {
+    channels.push('Telegram')
+  }
+  if (alerts.emailConfigured) {
+    channels.push('邮件')
+  }
+  return channels
+}
+
+function formatAlertNotificationSummary(alerts: NonNullable<DiagnosticsInfo['alerts']>): string {
+  const channels = getAlertNotificationChannels(alerts)
+  if (channels.length > 0) {
+    return `通知通道：${channels.join('、')}。`
+  }
+  return '未配置外部通知通道。'
 }
 
 function formatGoDurationLabel(value: string | undefined): string {
@@ -425,7 +437,10 @@ function diskHealthDeviceMetricSummary(device: DiskHealthReport['devices'][numbe
   return device.present ? '在线' : '离线'
 }
 
-function getHealthLoadErrorPresentation(errors: Array<unknown>): { title: string; description: string } {
+function getHealthLoadErrorPresentation(
+  errors: Array<unknown>,
+  fallbackDescription = GENERIC_LOAD_ERROR_DESCRIPTION,
+): { title: string; description: string } {
   if (errors.some((error) => error instanceof ApiError && error.isUnavailable)) {
     return {
       title: '设备状态暂不可用',
@@ -436,12 +451,12 @@ function getHealthLoadErrorPresentation(errors: Array<unknown>): { title: string
   const firstError = errors.find(Boolean)
   return {
     title: '加载设备状态失败',
-    description: firstError instanceof Error ? firstError.message : '请稍后重试',
+    description: getUserFacingErrorDescription(firstError, fallbackDescription),
   }
 }
 
 function getHealthRefreshErrorToast(errors: Array<unknown>): { title: string; description: string; color: 'warning' | 'danger' } {
-  const presentation = getHealthLoadErrorPresentation(errors)
+  const presentation = getHealthLoadErrorPresentation(errors, GENERIC_ACTION_ERROR_DESCRIPTION)
   if (errors.some((error) => error instanceof ApiError && error.isUnavailable)) {
     return {
       title: '刷新暂不可用',
@@ -457,23 +472,41 @@ function getHealthRefreshErrorToast(errors: Array<unknown>): { title: string; de
   }
 }
 
+function getDiagnosticsExportErrorToast(error: unknown): { title: string; description: string; color: 'warning' | 'danger' } {
+  if (error instanceof ApiError && error.isUnavailable) {
+    return {
+      title: '诊断包暂不可用',
+      description: '诊断包服务当前不可用，请检查设备状态后重试。',
+      color: 'warning',
+    }
+  }
+
+  return {
+    title: '下载诊断包失败',
+    description: getUserFacingErrorDescription(error, GENERIC_ACTION_ERROR_DESCRIPTION),
+    color: 'danger',
+  }
+}
+
 export function HealthPage() {
   const user = useUser()
+  const diagnosticsExportAbortControllerRef = useRef<AbortController | null>(null)
+  const [isExportingDiagnostics, setIsExportingDiagnostics] = useState(false)
   const { data: diagnostics, isLoading: diagLoading, error: diagError, refetch: refetchDiag } = useQuery({
     queryKey: ['diagnostics', user?.id ?? 'anonymous'],
-    queryFn: getDiagnostics,
+    queryFn: ({ signal }) => getDiagnostics({ signal }),
     refetchInterval: 30000, // Refresh every 30 seconds
   })
 
   const { data: stats, isLoading: statsLoading, error: statsError, refetch: refetchStats } = useQuery({
     queryKey: ['storage-stats', user?.id ?? 'anonymous'],
-    queryFn: getStorageStats,
+    queryFn: ({ signal }) => getStorageStats({ signal }),
     refetchInterval: 30000,
   })
 
   const { data: diskHealth, isLoading: diskHealthLoading, error: diskHealthError, refetch: refetchDiskHealth } = useQuery({
     queryKey: ['disk-health', user?.id ?? 'anonymous'],
-    queryFn: getDiskHealth,
+    queryFn: ({ signal }) => getDiskHealth({ signal }),
     refetchInterval: 30000,
   })
 
@@ -502,6 +535,13 @@ export function HealthPage() {
   const DiskHealthStatusIcon = diskHealthPresentation.icon
   const buildTime = formatBuildTime(diagnostics?.version?.buildTime)
 
+  useEffect(() => {
+    return () => {
+      diagnosticsExportAbortControllerRef.current?.abort()
+      diagnosticsExportAbortControllerRef.current = null
+    }
+  }, [])
+
   const handleRefresh = async () => {
     const [diagResult, statsResult, diskHealthResult] = await Promise.all([refetchDiag(), refetchStats(), refetchDiskHealth()])
     const refreshErrors = [diagResult.error, statsResult.error, diskHealthResult.error].filter((error): error is Error => Boolean(error))
@@ -514,11 +554,32 @@ export function HealthPage() {
     addToast({ title: '设备状态已刷新', color: 'success' })
   }
 
+  const handleDiagnosticsExport = async () => {
+    diagnosticsExportAbortControllerRef.current?.abort()
+    const controller = new AbortController()
+    diagnosticsExportAbortControllerRef.current = controller
+    setIsExportingDiagnostics(true)
+    try {
+      await downloadDiagnosticsExport({ signal: controller.signal })
+      addToast({ title: '诊断信息导出已开始', color: 'success' })
+    } catch (error) {
+      if (controller.signal.aborted) {
+        return
+      }
+      addToast(getDiagnosticsExportErrorToast(error))
+    } finally {
+      if (diagnosticsExportAbortControllerRef.current === controller) {
+        diagnosticsExportAbortControllerRef.current = null
+        setIsExportingDiagnostics(false)
+      }
+    }
+  }
+
   const statsCards = [
     {
       icon: Clock,
       title: '运行时间',
-      value: diagnostics?.uptimeSecs !== undefined ? formatUptime(diagnostics.uptimeSecs) : '--',
+      value: diagnostics?.uptimeSecs !== undefined ? formatUptimeSeconds(diagnostics.uptimeSecs) : '--',
     },
     {
       icon: Cpu,
@@ -565,14 +626,24 @@ export function HealthPage() {
         subtitle="磁盘、存储和后台服务是否正常"
         icon={Activity}
         actions={
-          <Button
-            className="btn-secondary rounded-lg"
-            startContent={<RefreshCw size={16} />}
-            onPress={handleRefresh}
-            isLoading={isLoading}
-          >
-            刷新
-          </Button>
+          <>
+            <Button
+              className="btn-secondary rounded-lg"
+              startContent={<Download size={16} />}
+              onPress={handleDiagnosticsExport}
+              isLoading={isExportingDiagnostics}
+            >
+              下载诊断包
+            </Button>
+            <Button
+              className="btn-secondary rounded-lg"
+              startContent={<RefreshCw size={16} />}
+              onPress={handleRefresh}
+              isLoading={isLoading}
+            >
+              刷新
+            </Button>
+          </>
         }
       />
 
@@ -838,29 +909,32 @@ export function HealthPage() {
 
             {diskHealth?.devices.length ? (
               <div className="space-y-2">
-                {diskHealth.devices.slice(0, 4).map((device) => (
-                  <div key={`${device.path}-${device.name ?? ''}`} className="flex items-start justify-between gap-3 rounded-lg bg-content2/50 p-3">
-                    <div className="min-w-0">
-                      <p className="truncate text-sm font-medium text-foreground">{device.name || device.model || device.path}</p>
-                      <p className="mt-1 truncate text-xs text-default-500">{device.model || device.path}</p>
-                      {device.message && (
-                        <p className="mt-1 text-xs leading-4 text-default-500">{device.message}</p>
-                      )}
+                {diskHealth.devices.slice(0, 4).map((device) => {
+                  const deviceDisplayMessage = getDiskHealthDeviceDisplayMessage(device.message, device.status)
+                  return (
+                    <div key={`${device.path}-${device.name ?? ''}`} className="flex items-start justify-between gap-3 rounded-lg bg-content2/50 p-3">
+                      <div className="min-w-0">
+                        <p className="truncate text-sm font-medium text-foreground">{device.name || device.model || device.path}</p>
+                        <p className="mt-1 truncate text-xs text-default-500">{device.model || device.path}</p>
+                        {deviceDisplayMessage && (
+                          <p className="mt-1 text-xs leading-4 text-default-500">{deviceDisplayMessage}</p>
+                        )}
+                      </div>
+                      <div className="shrink-0 text-right">
+                        <Chip
+                          size="sm"
+                          color={device.status === 'critical' ? 'danger' : device.status === 'warning' || device.status === 'unavailable' ? 'warning' : 'success'}
+                          variant="flat"
+                        >
+                          {device.status === 'critical' ? '严重' : device.status === 'warning' ? '提醒' : device.status === 'unavailable' ? '不可用' : '正常'}
+                        </Chip>
+                        <p className="mt-2 text-xs text-default-500">
+                          {diskHealthDeviceMetricSummary(device)}
+                        </p>
+                      </div>
                     </div>
-                    <div className="shrink-0 text-right">
-                      <Chip
-                        size="sm"
-                        color={device.status === 'critical' ? 'danger' : device.status === 'warning' || device.status === 'unavailable' ? 'warning' : 'success'}
-                        variant="flat"
-                      >
-                        {device.status === 'critical' ? '严重' : device.status === 'warning' ? '提醒' : device.status === 'unavailable' ? '不可用' : '正常'}
-                      </Chip>
-                      <p className="mt-2 text-xs text-default-500">
-                        {diskHealthDeviceMetricSummary(device)}
-                      </p>
-                    </div>
-                  </div>
-                ))}
+                  )
+                })}
                 {diskHealth.devices.length > 4 && (
                   <p className="text-xs text-default-500">还有 {diskHealth.devices.length - 4} 块磁盘未显示</p>
                 )}
@@ -978,7 +1052,7 @@ export function HealthPage() {
                 <div className="rounded-lg bg-content2/50 p-3 text-center">
                   <p className="data-value break-anywhere text-2xl font-semibold leading-tight">
                     {diagnostics.dataplane.uptimeSec !== undefined
-                      ? formatUptime(diagnostics.dataplane.uptimeSec) 
+                      ? formatUptimeSeconds(diagnostics.dataplane.uptimeSec)
                       : '--'}
                   </p>
                   <p className="text-default-400 text-xs">数据面运行</p>

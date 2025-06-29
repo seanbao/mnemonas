@@ -813,9 +813,13 @@ func (s *Service) CleanCache(ctx context.Context, maxAge time.Duration) (int, er
 
 		if !info.IsDir() && info.ModTime().Before(cutoff) {
 			if s.cacheRoot != nil {
-				if err := s.cacheRoot.Remove(relPath); err == nil {
-					count++
+				if err := s.cacheRoot.Remove(relPath); err != nil {
+					if !errors.Is(err, os.ErrNotExist) {
+						return fmt.Errorf("remove thumbnail cache %q: %w", relPath, mapThumbnailRootPathError(err))
+					}
+					return nil
 				}
+				count++
 				return nil
 			}
 
@@ -823,9 +827,13 @@ func (s *Service) CleanCache(ctx context.Context, maxAge time.Duration) (int, er
 			if relPath != "." {
 				absPath = filepath.Join(s.cacheDir, relPath)
 			}
-			if err := os.Remove(absPath); err == nil {
-				count++
+			if err := os.Remove(absPath); err != nil {
+				if !errors.Is(err, os.ErrNotExist) {
+					return fmt.Errorf("remove thumbnail cache %q: %w", absPath, err)
+				}
+				return nil
 			}
+			count++
 		}
 		return nil
 	})

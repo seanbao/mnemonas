@@ -96,6 +96,16 @@ function renderSearchPage(initialQuery = '') {
   )
 }
 
+function expectSearchFilesCalledWithQuery(query: string) {
+  expect(vi.mocked(searchApi.searchFiles).mock.calls.some(([calledQuery]) => calledQuery === query)).toBe(true)
+}
+
+function expectSearchFilesCalledWithAbortSignal(query: string) {
+  const call = vi.mocked(searchApi.searchFiles).mock.calls.find(([calledQuery]) => calledQuery === query)
+  expect(call).toBeTruthy()
+  expect((call?.[1] as { signal?: AbortSignal } | undefined)?.signal).toBeInstanceOf(AbortSignal)
+}
+
 describe('SearchPage', () => {
   beforeEach(() => {
     vi.clearAllMocks()
@@ -145,7 +155,7 @@ describe('SearchPage', () => {
       await user.type(input, 'test')
       
       await waitFor(() => {
-        expect(searchApi.searchFiles).toHaveBeenCalledWith('test')
+        expectSearchFilesCalledWithAbortSignal('test')
       }, { timeout: 1000 })
     })
 
@@ -243,7 +253,7 @@ describe('SearchPage', () => {
     )
 
     await waitFor(() => {
-      expect(searchApi.searchFiles).toHaveBeenCalledWith('report')
+      expectSearchFilesCalledWithQuery('report')
     })
 
     expect(screen.queryByText('/admin/secret.txt')).toBeNull()
@@ -285,7 +295,7 @@ describe('SearchPage', () => {
       await user.keyboard('{Enter}')
 
       await waitFor(() => {
-        expect(searchApi.searchFiles).toHaveBeenCalledWith('test')
+        expectSearchFilesCalledWithQuery('test')
       })
 
       expect(window.history.length).toBe(initialHistoryLength)
@@ -333,7 +343,7 @@ describe('SearchPage', () => {
 
       await waitFor(() => {
         expect(screen.getByText('搜索失败')).toBeInTheDocument()
-        expect(screen.getByText('Network error')).toBeInTheDocument()
+        expect(screen.getByText('数据加载失败，请检查网络或稍后重试。')).toBeInTheDocument()
         expect(screen.getByRole('button', { name: '重试搜索' })).toBeInTheDocument()
       })
     })
@@ -401,7 +411,7 @@ describe('SearchPage', () => {
       await waitFor(() => {
         expect(mockAddToast).toHaveBeenCalledWith({
           title: '搜索失败',
-          description: 'still down',
+          description: '数据加载失败，请检查网络或稍后重试。',
           color: 'danger',
         })
       })

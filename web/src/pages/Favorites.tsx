@@ -1,5 +1,5 @@
 import { getInvalidHomeDirDescription, invalidHomeDirTitle, resolveUserHomeScope } from '@/lib/userScope'
-import { useCallback, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
@@ -36,6 +36,7 @@ import { cn, encodePathForUrl, formatRelativeTime } from '@/lib/utils'
 import { useBatchOperation, type BatchOperationResult } from '@/lib/useBatchOperation'
 import { PageHeader } from '@/components/ui/PageHeader'
 import { useCanWrite, useUser } from '@/stores/auth'
+import { GENERIC_LOAD_ERROR_DESCRIPTION, getUserFacingErrorDescription } from '@/lib/apiMessages'
 
 // Get filename from path
 function getFileName(path: string): string {
@@ -82,7 +83,7 @@ function getFavoritesActionErrorPresentation(error: unknown): {
 
   return {
     title: '操作失败',
-    description: error instanceof Error ? error.message : '请稍后重试',
+    description: getUserFacingErrorDescription(error),
     color: 'danger',
   }
 }
@@ -128,7 +129,7 @@ function getFavoritesRefreshErrorPresentation(error: unknown): {
 
   return {
     title: '刷新失败',
-    description: error instanceof Error ? error.message : '请稍后重试',
+    description: getUserFacingErrorDescription(error),
     color: 'danger',
   }
 }
@@ -167,6 +168,13 @@ function getMissingFavoriteToast(): {
     description: '该收藏可能已被其他操作移除，列表已同步更新。',
     color: 'warning',
   }
+}
+
+function isAbortError(error: unknown): boolean {
+  return typeof error === 'object'
+    && error !== null
+    && 'name' in error
+    && (error as { name?: unknown }).name === 'AbortError'
 }
 
 // Get parent directory from path
@@ -302,6 +310,18 @@ export function FavoritesPage() {
   const editSessionRef = useRef(0)
   const editingItemRef = useRef(editingItem)
   const noteValueRef = useRef(noteValue)
+  const removeAbortControllerRef = useRef<AbortController | null>(null)
+  const updateNoteAbortControllerRef = useRef<AbortController | null>(null)
+  const batchRemoveAbortControllerRef = useRef<AbortController | null>(null)
+
+  useEffect(() => () => {
+    removeAbortControllerRef.current?.abort()
+    removeAbortControllerRef.current = null
+    updateNoteAbortControllerRef.current?.abort()
+    updateNoteAbortControllerRef.current = null
+    batchRemoveAbortControllerRef.current?.abort()
+    batchRemoveAbortControllerRef.current = null
+  }, [])
 
   useLayoutEffect(() => {
     editingItemRef.current = editingItem
@@ -315,7 +335,7 @@ export function FavoritesPage() {
 
   const { data: favorites, isLoading, error, refetch } = useQuery({
     queryKey: favoritesQueryKey,
-    queryFn: listFavorites,
+    queryFn: ({ signal }) => listFavorites({ signal }),
     enabled: !hasInvalidHomeDir,
   })
 
@@ -384,30 +404,47 @@ export function FavoritesPage() {
 
   // Remove mutation
   const removeMutation = useMutation({
-    mutationFn: (path: string) => removeFavorite(path),
-    onSuccess: (result, path) => {
-      removeFavoritesFromCache([path])
-      removeSelectedPaths([path])
+    mutationFn: ({ path, signal }: { path: string; signal: AbortSignal }) => removeFavorite(path, { signal }),
+    onSuccess: (result, variables) => {
+      if (variables.signal.aborted) {
+        return
+      }
+
+      removeFavoritesFromCache([variables.path])
+      removeSelectedPaths([variables.path])
       queryClient.invalidateQueries({ queryKey: favoritesQueryKey })
       addToast({ title: getFavoritesActionSuccessTitle('remove', result.message), color: 'success' })
     },
-    onError: (error, path) => {
+    onError: (error, variables) => {
+      if (variables.signal.aborted || isAbortError(error)) {
+        return
+      }
+
       if (error instanceof FavoritesError && error.isNotFound) {
-        removeFavoritesFromCache([path])
-        removeSelectedPaths([path])
+        removeFavoritesFromCache([variables.path])
+        removeSelectedPaths([variables.path])
         addToast(getMissingFavoriteToast())
         return
       }
 
       addToast(getFavoritesActionErrorPresentation(error))
     },
+    onSettled: (_result, _error, variables) => {
+      if (removeAbortControllerRef.current?.signal === variables?.signal) {
+        removeAbortControllerRef.current = null
+      }
+    },
   })
 
   // Update note mutation
   const updateNoteMutation = useMutation({
-    mutationFn: ({ path, note }: { path: string; note: string; editSession: number }) => 
-      updateFavoriteNote(path, note),
+    mutationFn: ({ path, note, signal }: { path: string; note: string; editSession: number; signal: AbortSignal }) =>
+      updateFavoriteNote(path, note, { signal }),
     onSuccess: (result, variables) => {
+      if (variables.signal.aborted) {
+        return
+      }
+
       queryClient.invalidateQueries({ queryKey: favoritesQueryKey })
       addToast({ title: getFavoritesActionSuccessTitle('update-note', result.message), color: 'success' })
       if (
@@ -420,6 +457,10 @@ export function FavoritesPage() {
       }
     },
     onError: (error, variables) => {
+      if (variables.signal.aborted || isAbortError(error)) {
+        return
+      }
+
       if (error instanceof FavoritesError && error.isNotFound) {
         removeFavoritesFromCache([variables.path])
         removeSelectedPaths([variables.path])
@@ -433,6 +474,11 @@ export function FavoritesPage() {
 
       addToast(getFavoritesActionErrorPresentation(error))
     },
+    onSettled: (_result, _error, variables) => {
+      if (updateNoteAbortControllerRef.current?.signal === variables?.signal) {
+        updateNoteAbortControllerRef.current = null
+      }
+    },
   })
 
   const handleSelectAll = useCallback(() => {
@@ -444,9 +490,16 @@ export function FavoritesPage() {
     }
   }, [canWrite, favoriteItems, visibleSelectedItems.size])
 
-  const batchRemoveFavorite = useCallback(async (path: string) => {
+  const handleRemoveFavorite = useCallback((path: string) => {
+    removeAbortControllerRef.current?.abort()
+    const controller = new AbortController()
+    removeAbortControllerRef.current = controller
+    removeMutation.mutate({ path, signal: controller.signal })
+  }, [removeMutation])
+
+  const batchRemoveFavorite = useCallback(async (path: string, options?: { signal?: AbortSignal }) => {
     try {
-      await removeFavorite(path)
+      await removeFavorite(path, options?.signal ? { signal: options.signal } : undefined)
     } catch (error) {
       if (error instanceof FavoritesError && error.isNotFound) {
         return {
@@ -481,7 +534,16 @@ export function FavoritesPage() {
     if (!canWrite) return
     const paths = Array.from(visibleSelectedItems)
     if (paths.length === 0) return
-    await executeBatchRemove(paths)
+    batchRemoveAbortControllerRef.current?.abort()
+    const controller = new AbortController()
+    batchRemoveAbortControllerRef.current = controller
+    try {
+      await executeBatchRemove(paths, { signal: controller.signal })
+    } finally {
+      if (batchRemoveAbortControllerRef.current === controller) {
+        batchRemoveAbortControllerRef.current = null
+      }
+    }
   }, [canWrite, visibleSelectedItems, executeBatchRemove])
 
   const handleNavigate = useCallback((path: string) => {
@@ -515,7 +577,15 @@ export function FavoritesPage() {
   const handleSaveNote = useCallback(() => {
     if (!canWrite) return
     if (editingItem) {
-      updateNoteMutation.mutate({ path: editingItem.path, note: noteValue, editSession: editSessionRef.current })
+      updateNoteAbortControllerRef.current?.abort()
+      const controller = new AbortController()
+      updateNoteAbortControllerRef.current = controller
+      updateNoteMutation.mutate({
+        path: editingItem.path,
+        note: noteValue,
+        editSession: editSessionRef.current,
+        signal: controller.signal,
+      })
     }
   }, [canWrite, editingItem, noteValue, updateNoteMutation])
 
@@ -613,7 +683,7 @@ export function FavoritesPage() {
           <EmptyState
             icon={AlertCircle}
             title="加载收藏列表失败"
-            description={(error as Error).message || '请稍后重试'}
+            description={getUserFacingErrorDescription(error, GENERIC_LOAD_ERROR_DESCRIPTION)}
             action={
               <Button variant="bordered" className="rounded-lg" onPress={handleRefreshFavorites}>
                 重新加载
@@ -704,7 +774,7 @@ export function FavoritesPage() {
               onNavigate={() => handleNavigate(item.path)}
               onRemove={() => {
                 if (!canWrite) return
-                removeMutation.mutate(item.path)
+                handleRemoveFavorite(item.path)
               }}
               onEditNote={() => handleEditNote(item)}
             />

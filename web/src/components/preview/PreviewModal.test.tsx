@@ -1,10 +1,11 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { ensureDownloadSession, refreshAuthSession } from '@/api/auth'
+import { authFetch, ensureDownloadSession, refreshAuthSession } from '@/api/auth'
 import { downloadFile } from '@/api/files'
 import { PreviewModal, type PreviewFile } from './PreviewModal'
 
 vi.mock('@/api/auth', () => ({
+  authFetch: vi.fn(),
   ensureDownloadSession: vi.fn(),
   refreshAuthSession: vi.fn(),
 }))
@@ -47,9 +48,18 @@ vi.mock('./PdfPreview', () => ({
   PdfPreview: ({ filename }: { filename: string }) => <div>pdf preview {filename}</div>,
 }))
 
+function createDeferred<T>() {
+  let reject!: (reason?: unknown) => void
+  const promise = new Promise<T>((_resolve, rej) => {
+    reject = rej
+  })
+  return { promise, reject }
+}
+
 describe('PreviewModal', () => {
   const mockEnsureDownloadSession = vi.mocked(ensureDownloadSession)
   const mockRefreshAuthSession = vi.mocked(refreshAuthSession)
+  const mockAuthFetch = vi.mocked(authFetch)
   const mockDownloadFile = vi.mocked(downloadFile)
 
   beforeEach(() => {
@@ -57,6 +67,7 @@ describe('PreviewModal', () => {
     vi.restoreAllMocks()
     mockEnsureDownloadSession.mockResolvedValue({ ok: true })
     mockRefreshAuthSession.mockResolvedValue(false)
+    mockAuthFetch.mockRejectedValue(new Error('media error probe failed'))
     mockDownloadFile.mockResolvedValue(undefined)
   })
 
@@ -249,6 +260,44 @@ describe('PreviewModal', () => {
     })
   })
 
+  it('uses a stable media preview message after session recovery fails with structured JSON', async () => {
+    mockRefreshAuthSession.mockResolvedValueOnce(false)
+    mockAuthFetch.mockResolvedValueOnce(new Response(JSON.stringify({
+      success: false,
+      error: {
+        code: 'SERVICE_UNAVAILABLE',
+        message: 'preview storage unavailable',
+      },
+    }), {
+      status: 503,
+      headers: { 'Content-Type': 'application/json' },
+    }))
+    const file: PreviewFile = { path: '/video.mp4', name: 'video.mp4' }
+
+    render(
+      <PreviewModal
+        isOpen={true}
+        onClose={() => {}}
+        file={file}
+        files={[file]}
+      />
+    )
+
+    const video = document.querySelector('video') as HTMLVideoElement | null
+    fireEvent.error(video!)
+
+    await waitFor(() => {
+      expect(mockAuthFetch).toHaveBeenCalledWith('/api/v1/download/video.mp4', {
+        headers: {
+          Range: 'bytes=0-0',
+          'X-Mnemonas-Download-Probe': 'json-error',
+        },
+      })
+      expect(screen.getByText('无法加载视频')).toBeInTheDocument()
+    })
+    expect(screen.queryByText('preview storage unavailable')).not.toBeInTheDocument()
+  })
+
   it('opens external link without auth query', async () => {
     const openSpy = vi.spyOn(window, 'open').mockReturnValue(null)
     const file: PreviewFile = { path: '/video.mp4', name: 'video.mp4' }
@@ -272,6 +321,47 @@ describe('PreviewModal', () => {
         '_blank',
         'noopener,noreferrer'
       )
+    })
+  })
+
+  it('shows a warning and skips opening when external preview returns a structured JSON error', async () => {
+    mockAuthFetch.mockResolvedValueOnce(new Response(JSON.stringify({
+      success: false,
+      error: {
+        code: 'SERVICE_UNAVAILABLE',
+        message: 'preview storage unavailable',
+      },
+    }), {
+      status: 503,
+      headers: { 'Content-Type': 'application/json' },
+    }))
+    const openSpy = vi.spyOn(window, 'open').mockReturnValue(null)
+    const file: PreviewFile = { path: '/video.mp4', name: 'video.mp4' }
+
+    render(
+      <PreviewModal
+        isOpen={true}
+        onClose={() => {}}
+        file={file}
+        files={[file]}
+      />
+    )
+
+    screen.getByTitle('在新标签页打开').click()
+
+    await waitFor(() => {
+      expect(mockAuthFetch).toHaveBeenCalledWith('/api/v1/download/video.mp4', {
+        headers: {
+          Range: 'bytes=0-0',
+          'X-Mnemonas-Download-Probe': 'json-error',
+        },
+      })
+      expect(openSpy).not.toHaveBeenCalled()
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '预览暂不可用',
+        description: '数据加载失败，请检查网络或稍后重试。',
+        color: 'warning',
+      })
     })
   })
 
@@ -327,7 +417,10 @@ describe('PreviewModal', () => {
 
     screen.getByText('下载文件').click()
     await waitFor(() => {
-      expect(mockDownloadFile).toHaveBeenCalledWith('/archive.bin', { filename: 'archive.bin' })
+      expect(mockDownloadFile).toHaveBeenCalledWith('/archive.bin', expect.objectContaining({
+        filename: 'archive.bin',
+        signal: expect.any(AbortSignal),
+      }))
     })
 
     screen.getByText('在新标签页打开').click()
@@ -356,7 +449,7 @@ describe('PreviewModal', () => {
     await waitFor(() => {
       expect(openSpy).not.toHaveBeenCalled()
       expect(mockAddToast).toHaveBeenCalledWith({
-        title: 'download session unavailable',
+        title: '原始预览和下载会话同步失败，请稍后重试',
         color: 'warning',
       })
     })
@@ -405,12 +498,56 @@ describe('PreviewModal', () => {
     screen.getByTitle('下载').click()
 
     await waitFor(() => {
-      expect(mockDownloadFile).toHaveBeenCalledWith('/video.mp4', { filename: 'video.mp4' })
+      expect(mockDownloadFile).toHaveBeenCalledWith('/video.mp4', expect.objectContaining({
+        filename: 'video.mp4',
+        signal: expect.any(AbortSignal),
+      }))
       expect(mockAddToast).toHaveBeenCalledWith({
         title: '下载暂不可用',
         description: '文件系统当前不可用，请检查设备状态或稍后重试。',
         color: 'warning',
       })
+    })
+  })
+
+  it('aborts pending toolbar downloads when the modal closes and ignores abort feedback', async () => {
+    const download = createDeferred<void>()
+    let signal: AbortSignal | undefined
+    mockDownloadFile.mockImplementationOnce((_path, options) => {
+      signal = options?.signal
+      return download.promise
+    })
+    const file: PreviewFile = { path: '/video.mp4', name: 'video.mp4' }
+
+    const { rerender } = render(
+      <PreviewModal
+        isOpen={true}
+        onClose={() => {}}
+        file={file}
+        files={[file]}
+      />
+    )
+
+    screen.getByTitle('下载').click()
+
+    await waitFor(() => {
+      expect(signal).toBeInstanceOf(AbortSignal)
+    })
+
+    rerender(
+      <PreviewModal
+        isOpen={false}
+        onClose={() => {}}
+        file={file}
+        files={[file]}
+      />
+    )
+
+    expect(signal?.aborted).toBe(true)
+    download.reject(new DOMException('download aborted', 'AbortError'))
+
+    await waitFor(() => {
+      expect(mockAddToast).not.toHaveBeenCalled()
     })
   })
 })

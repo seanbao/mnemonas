@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Card, CardBody, CardHeader, Button, Chip, Progress, Divider, Table, TableHeader, TableColumn, TableBody, TableRow, TableCell, Modal, ModalContent, ModalHeader, ModalBody, ModalFooter, Input, Checkbox, addToast } from '@heroui/react'
 import { 
@@ -50,7 +50,40 @@ import {
   type ScrubError,
 } from '@/api/files'
 import { formatBytes, formatDuration } from '@/lib/utils'
+import { GENERIC_ACTION_ERROR_DESCRIPTION, GENERIC_LOAD_ERROR_DESCRIPTION, getUserFacingErrorDescription } from '@/lib/apiMessages'
 import { useUser } from '@/stores/auth'
+
+type AbortControllerRef = { current: AbortController | null }
+type ScrubMutationRequest = { signal: AbortSignal }
+type BackupJobMutationRequest = { jobId: string; signal: AbortSignal }
+type RestorePreviewMutationRequest = { jobId: string; targetPath: string; includeConfig: boolean; signal: AbortSignal }
+type RestoreMutationRequest = RestorePreviewMutationRequest
+type RestoreVerifyMutationRequest = { jobId: string; targetPath: string; signal: AbortSignal }
+type BatchRestoreMutationRequest = { items: BackupBatchRestoreItemRequest[]; signal: AbortSignal }
+
+function createActionAbortController(ref: AbortControllerRef): AbortController {
+  ref.current?.abort()
+  const controller = new AbortController()
+  ref.current = controller
+  return controller
+}
+
+function clearActionAbortController(ref: AbortControllerRef, signal: AbortSignal): void {
+  if (ref.current?.signal === signal) {
+    ref.current = null
+  }
+}
+
+function abortActionControllers(refs: AbortControllerRef[]): void {
+  refs.forEach((ref) => {
+    ref.current?.abort()
+    ref.current = null
+  })
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === 'AbortError'
+}
 
 function getMaintenanceLoadErrorPresentation(error: unknown): { title: string; description: string } {
   if (error instanceof ApiError && error.isUnavailable) {
@@ -62,7 +95,21 @@ function getMaintenanceLoadErrorPresentation(error: unknown): { title: string; d
 
   return {
     title: '加载校验结果失败',
-    description: error instanceof Error ? error.message : '请稍后重试',
+    description: getUserFacingErrorDescription(error, GENERIC_LOAD_ERROR_DESCRIPTION),
+  }
+}
+
+function getBackupLoadErrorPresentation(error: unknown): { title: string; description: string } {
+  if (error instanceof ApiError && error.isUnavailable) {
+    return {
+      title: '备份任务暂不可用',
+      description: '备份管理器当前不可用，请检查配置后重试。',
+    }
+  }
+
+  return {
+    title: '加载备份任务失败',
+    description: getUserFacingErrorDescription(error, GENERIC_LOAD_ERROR_DESCRIPTION),
   }
 }
 
@@ -82,7 +129,7 @@ function getMaintenanceActionErrorPresentation(
 
   return {
     title: fallbackTitle,
-    description: error instanceof Error ? error.message : '请稍后重试',
+    description: getUserFacingErrorDescription(error, GENERIC_ACTION_ERROR_DESCRIPTION),
     color: 'danger',
   }
 }
@@ -165,6 +212,51 @@ function ResultSummary({ result }: { result: ScrubResult }) {
   )
 }
 
+const scrubErrorTypeLabels: Record<string, string> = {
+  corrupted: '校验不一致',
+  missing: '对象缺失',
+  io_error: '读取失败',
+}
+
+const scrubErrorMessagesByBackendMessage: Record<string, string> = {
+  'object failed integrity verification': '对象内容与索引记录不一致，请检查存储介质并从备份恢复。',
+  'object is missing': '对象数据缺失，请从备份恢复受影响文件。',
+  'object could not be read': '对象读取失败，请检查磁盘或权限状态。',
+  'object verification failed': '对象校验失败，请查看服务日志并确认备份状态。',
+}
+
+const scrubErrorMessagesByType: Record<string, string> = {
+  corrupted: scrubErrorMessagesByBackendMessage['object failed integrity verification'],
+  missing: scrubErrorMessagesByBackendMessage['object is missing'],
+  io_error: scrubErrorMessagesByBackendMessage['object could not be read'],
+}
+
+const scrubResultMessagesByBackendMessage: Record<string, string> = {
+  'scrub completed with persistence warning': '校验结果已完成，但历史记录保存不完整；建议下载诊断包并检查服务日志。',
+  'scrub failed; check server logs for details': '数据校验未完成；建议下载诊断包并检查服务日志。',
+}
+
+function normalizeDiagnosticMessageKey(value: string): string {
+  return value.trim().toLowerCase()
+}
+
+function getScrubErrorTypeLabel(errorType: string): string {
+  return scrubErrorTypeLabels[normalizeDiagnosticMessageKey(errorType)] ?? '校验失败'
+}
+
+function getScrubErrorDisplayMessage(error: ScrubError): string {
+  const message = scrubErrorMessagesByBackendMessage[normalizeDiagnosticMessageKey(error.message)]
+  if (message) {
+    return message
+  }
+
+  return scrubErrorMessagesByType[normalizeDiagnosticMessageKey(error.error_type)] ?? '对象校验失败，请查看服务日志并确认备份状态。'
+}
+
+function getScrubResultDisplayMessage(message: string): string {
+  return scrubResultMessagesByBackendMessage[normalizeDiagnosticMessageKey(message)] ?? message
+}
+
 // Error list component
 function ErrorList({ errors }: { errors: ScrubError[] }) {
   if (!errors || errors.length === 0) return null
@@ -189,9 +281,9 @@ function ErrorList({ errors }: { errors: ScrubError[] }) {
                   <code className="text-xs">{error.hash.slice(0, 16)}...</code>
                 </TableCell>
                 <TableCell>
-                  <Chip size="sm" color="danger" variant="flat">{error.error_type}</Chip>
+                  <Chip size="sm" color="danger" variant="flat">{getScrubErrorTypeLabel(error.error_type)}</Chip>
                 </TableCell>
-                <TableCell className="text-sm">{error.message}</TableCell>
+                <TableCell className="text-sm">{getScrubErrorDisplayMessage(error)}</TableCell>
               </TableRow>
             ))}
           </TableBody>
@@ -313,6 +405,33 @@ function getBackupTriggerLabel(trigger?: string): string {
   return '手动'
 }
 
+const backupDiagnosticMessagesByBackendMessage: Record<string, string> = {
+  'last successful backup completed recently': '最近一次备份成功完成。',
+  'latest backup failed but a previous snapshot is available': '最近一次备份失败，但仍有可用历史快照。',
+  'backup job disabled': '备份任务已停用。',
+  'manifest missing': '清单文件缺失',
+  'check command failed': '检测命令执行失败',
+  'disk full': '磁盘空间不足',
+  'restore failed': '恢复失败',
+  'verify failed': '恢复校验失败',
+  'restore target already exists': '恢复目标已存在',
+  'all batch restore items failed': '所有批量恢复项目均失败',
+}
+
+function getBackupDiagnosticDisplayMessage(message: string): string {
+  const normalized = normalizeDiagnosticMessageKey(message)
+  const indexedItemFailure = normalized.match(/^item (\d+): (.+)$/)
+  if (indexedItemFailure) {
+    const itemNumber = Number(indexedItemFailure[1]) + 1
+    const itemMessage = backupDiagnosticMessagesByBackendMessage[indexedItemFailure[2]]
+    if (itemMessage) {
+      return `项目 ${itemNumber}: ${itemMessage}`
+    }
+  }
+
+  return backupDiagnosticMessagesByBackendMessage[normalized] ?? message
+}
+
 function getBackupRetentionText(job: BackupJob): string {
   if ((job.type === 'restic' || job.type === 'rclone') && job.retention_message) {
     return job.retention_message
@@ -328,6 +447,12 @@ function getBackupRetentionText(job: BackupJob): string {
 }
 
 function getBackupRetentionCheckMetricText(result: BackupRetentionCheckResult): string {
+  if (result.status === 'running') {
+    return '检测中'
+  }
+  if (result.status === 'failed') {
+    return result.error_message ? `检测失败: ${getBackupDiagnosticDisplayMessage(result.error_message)}` : '检测失败'
+  }
   if (result.snapshot_count !== undefined && result.snapshot_count > 0) {
     return `${result.snapshot_count} 个快照`
   }
@@ -355,17 +480,27 @@ function canRunBackupRestoreDrill(job: BackupJob): boolean {
   if (job.type === 'restic' || job.type === 'rclone') {
     return true
   }
-  return job.last_run?.status === 'completed'
+  return job.type === 'local' && hasCompletedLocalBackupSnapshot(job)
 }
 
 function canRunBackupRestore(job: BackupJob): boolean {
   if (job.type === 'restic' || job.type === 'rclone') {
     return true
   }
-  return job.type === 'local' && job.last_run?.status === 'completed'
+  return job.type === 'local' && hasCompletedLocalBackupSnapshot(job)
+}
+
+function hasCompletedLocalBackupSnapshot(job: BackupJob): boolean {
+  return job.last_run?.status === 'completed' || job.last_successful_run?.status === 'completed'
 }
 
 function getBackupRunMetricText(result: BackupRunResult): string {
+  if (result.status === 'running') {
+    return '备份任务运行中'
+  }
+  if (result.status === 'failed') {
+    return '备份任务失败'
+  }
   if (result.file_count === 0 && result.total_bytes === 0 && !result.snapshot_path) {
     return '外部备份命令已完成'
   }
@@ -373,6 +508,12 @@ function getBackupRunMetricText(result: BackupRunResult): string {
 }
 
 function getBackupRestoreDrillMetricText(result: BackupRestoreDrillResult): string {
+  if (result.status === 'running') {
+    return '恢复演练运行中'
+  }
+  if (result.status === 'failed') {
+    return '恢复演练失败'
+  }
   if (result.file_count === 0 && result.verified_bytes === 0 && !result.restored_path) {
     return '校验命令已完成'
   }
@@ -380,6 +521,12 @@ function getBackupRestoreDrillMetricText(result: BackupRestoreDrillResult): stri
 }
 
 function getBackupRestoreMetricText(result: BackupRestoreResult): string {
+  if (result.status === 'running') {
+    return '恢复任务运行中'
+  }
+  if (result.status === 'failed') {
+    return '恢复任务失败'
+  }
   if (result.file_count === 0 && result.verified_bytes === 0 && !result.snapshot_path) {
     return '恢复命令已完成'
   }
@@ -387,6 +534,12 @@ function getBackupRestoreMetricText(result: BackupRestoreResult): string {
 }
 
 function getBackupRestorePreviewMetricText(result: BackupRestorePreviewResult): string {
+  if (result.status === 'running') {
+    return '恢复预览生成中'
+  }
+  if (result.status === 'failed') {
+    return '恢复预览失败'
+  }
   if (result.file_count === 0 && result.total_bytes === 0 && !result.snapshot_path) {
     return '可恢复内容已确认'
   }
@@ -394,6 +547,12 @@ function getBackupRestorePreviewMetricText(result: BackupRestorePreviewResult): 
 }
 
 function getBackupRestoreVerifyMetricText(result: BackupRestoreVerifyResult): string {
+  if (result.status === 'running') {
+    return '恢复目录检查中'
+  }
+  if (result.status === 'failed') {
+    return '恢复目录检查失败'
+  }
   if (result.file_count === 0 && result.verified_bytes === 0) {
     return '目标目录已检查'
   }
@@ -451,6 +610,39 @@ function hasFailedRestorePreflight(result: BackupRestorePreviewResult | null): b
   return Boolean(result?.preflight_checks?.some((check) => check.status === 'failed'))
 }
 
+function hasWarningRestorePreflight(result: BackupRestorePreviewResult | null): boolean {
+  return Boolean(
+    (result?.warnings?.length ?? 0) > 0
+    || result?.preflight_checks?.some((check) => check.status === 'warning'),
+  )
+}
+
+function getRestorePreviewPanelClass(result: BackupRestorePreviewResult, matches: boolean): string {
+  if (!matches) {
+    return 'rounded-lg border border-default-200 bg-content2/70 p-4 text-sm'
+  }
+  if (hasFailedRestorePreflight(result)) {
+    return 'rounded-lg border border-danger/20 bg-danger/10 p-4 text-sm'
+  }
+  if (hasWarningRestorePreflight(result)) {
+    return 'rounded-lg border border-warning/20 bg-warning/10 p-4 text-sm'
+  }
+  return 'rounded-lg border border-success/20 bg-success/10 p-4 text-sm'
+}
+
+function getRestorePreviewTitle(result: BackupRestorePreviewResult, matches: boolean): string {
+  if (!matches) {
+    return '预览已失效'
+  }
+  if (hasFailedRestorePreflight(result)) {
+    return '预览未通过'
+  }
+  if (hasWarningRestorePreflight(result)) {
+    return '预览已确认，有提醒'
+  }
+  return '预览已确认'
+}
+
 function RestorePreflightList({ checks }: { checks?: BackupRestorePreflightCheck[] }) {
   if (!checks || checks.length === 0) {
     return null
@@ -500,17 +692,25 @@ function RestoreCutoverChecklist({
   verifyResult: BackupRestoreVerifyResult | null
   isVerifying: boolean
 }) {
+  const restoreWarnings = result.warnings ?? []
+  const hasRestoreWarnings = restoreWarnings.length > 0
   const verifyWarnings = verifyResult?.warnings ?? []
   const verifyTone = !verifyResult || isVerifying ? 'default' : verifyWarnings.length > 0 ? 'warning' : 'success'
   const storageTone = !verifyResult || isVerifying ? 'default' : verifyResult.looks_like_storage_root ? 'success' : 'warning'
   const configTone = result.config_restored ? (verifyResult?.config_found ? 'success' : 'warning') : 'default'
+  const completionToneClass = hasRestoreWarnings
+    ? 'border-warning/20 bg-warning/10'
+    : 'border-success/20 bg-success/10'
+  const completionTitleClass = hasRestoreWarnings ? 'text-warning' : 'text-success'
 
   return (
     <div className="space-y-4">
-      <div className="rounded-lg border border-success/20 bg-success/10 p-4 text-sm">
+      <div className={`rounded-lg border p-4 text-sm ${completionToneClass}`}>
         <div className="flex items-center justify-between gap-3">
-          <div className="font-medium text-success">恢复已完成</div>
-          <BackupStatusChip status={result.status} />
+          <div className={`font-medium ${completionTitleClass}`}>
+            {hasRestoreWarnings ? '恢复已完成，有警告' : '恢复已完成'}
+          </div>
+          <BackupStatusChip status={result.status} warning={hasRestoreWarnings} />
         </div>
         <div className="mt-2 text-default-600">{getBackupRestoreMetricText(result)}</div>
         <div className="mt-1 truncate font-mono text-xs text-default-500" title={result.target_path}>
@@ -519,6 +719,17 @@ function RestoreCutoverChecklist({
       </div>
 
       <RestorePreflightList checks={result.preflight_checks} />
+
+      {hasRestoreWarnings && (
+        <div className="rounded-lg border border-warning/20 bg-warning/10 p-3 text-sm text-warning">
+          <div className="font-medium">恢复警告</div>
+          <div className="mt-2 space-y-1">
+            {restoreWarnings.map((warning) => (
+              <div key={warning}>{getBackupDiagnosticDisplayMessage(warning)}</div>
+            ))}
+          </div>
+        </div>
+      )}
 
       <div className="grid gap-3">
         <RestoreCheckRow
@@ -561,7 +772,7 @@ function RestoreCutoverChecklist({
           <div className="font-medium">校验警告</div>
           <div className="mt-2 space-y-1">
             {verifyWarnings.map((warning) => (
-              <div key={warning}>{warning}</div>
+              <div key={warning}>{getBackupDiagnosticDisplayMessage(warning)}</div>
             ))}
           </div>
         </div>
@@ -590,9 +801,9 @@ function BackupRunSummary({ result }: { result?: BackupRunResult }) {
         <div className="text-default-500">已清理 {result.pruned_snapshots} 个旧快照</div>
       )}
       {result.warnings && result.warnings.length > 0 && (
-        <div className="text-warning">{result.warnings[0]}</div>
+        <div className="text-warning">{getBackupDiagnosticDisplayMessage(result.warnings[0])}</div>
       )}
-      {result.error_message && <div className="text-danger">{result.error_message}</div>}
+      {result.error_message && <div className="text-danger">{getBackupDiagnosticDisplayMessage(result.error_message)}</div>}
     </div>
   )
 }
@@ -718,12 +929,12 @@ function BackupDrillSummary({ job }: { job: BackupJob }) {
         </div>
       )}
       {job.restore_drill_stats?.last_failure_message && (
-        <div className="text-warning">最近失败: {job.restore_drill_stats.last_failure_message}</div>
+        <div className="text-warning">最近失败: {getBackupDiagnosticDisplayMessage(job.restore_drill_stats.last_failure_message)}</div>
       )}
       {latestFailureCategory && (
         <div className="text-warning">失败类型: {latestFailureCategory}</div>
       )}
-      {result.error_message && <div className="text-danger">{result.error_message}</div>}
+      {result.error_message && <div className="text-danger">{getBackupDiagnosticDisplayMessage(result.error_message)}</div>}
       <BackupDrillHistoryList history={job.restore_drill_history} />
     </div>
   )
@@ -735,11 +946,13 @@ function BackupRestoreSummary({ job }: { job: BackupJob }) {
   if (!result) {
     return <span className="text-default-400">尚未恢复</span>
   }
+  const restoreWarnings = result.warnings ?? []
+  const verifyWarnings = verify?.warnings ?? []
 
   return (
     <div className="space-y-1 text-sm">
       <div className="flex items-center gap-2">
-        <BackupStatusChip status={result.status} />
+        <BackupStatusChip status={result.status} warning={restoreWarnings.length > 0} />
         <span className="text-default-500">{formatDateTime(result.finished_at ?? result.started_at)}</span>
       </div>
       <div className="text-default-500">
@@ -756,7 +969,9 @@ function BackupRestoreSummary({ job }: { job: BackupJob }) {
           最近检查: {getBackupRestoreVerifyMetricText(verify)}
         </div>
       )}
-      {result.error_message && <div className="text-danger">{result.error_message}</div>}
+      {restoreWarnings.length > 0 && <div className="text-warning">{getBackupDiagnosticDisplayMessage(restoreWarnings[0])}</div>}
+      {verifyWarnings.length > 0 && <div className="text-warning">{getBackupDiagnosticDisplayMessage(verifyWarnings[0])}</div>}
+      {result.error_message && <div className="text-danger">{getBackupDiagnosticDisplayMessage(result.error_message)}</div>}
     </div>
   )
 }
@@ -819,10 +1034,22 @@ function isCurrentRestorePreview(
 }
 
 function getBatchRestorePreviewMetricText(result: BackupBatchRestorePreviewResult): string {
+  if (result.status === 'running') {
+    return '批量恢复预览生成中'
+  }
+  if (result.status === 'failed') {
+    return '批量恢复预览失败'
+  }
   return `${result.items.length} 项 · 预计 ${result.total_files} 个文件 · ${formatBytes(result.total_bytes)}`
 }
 
 function getBatchRestoreMetricText(result: BackupBatchRestoreResult): string {
+  if (result.status === 'running') {
+    return '批量恢复运行中'
+  }
+  if (result.status === 'failed') {
+    return '批量恢复失败'
+  }
   const completedCount = result.items.filter((item) => item.status === 'completed').length
   return `${completedCount}/${result.items.length} 项完成 · ${result.total_files} 个文件 · ${formatBytes(result.verified_bytes)}`
 }
@@ -880,7 +1107,7 @@ function BatchRestorePreviewSummary({ result }: { result: BackupBatchRestorePrev
       </div>
       <div className="mt-2 text-default-600">{getBatchRestorePreviewMetricText(result)}</div>
       {result.warnings && result.warnings.length > 0 && (
-        <div className="mt-2 text-warning">{result.warnings[0]}</div>
+        <div className="mt-2 text-warning">{getBackupDiagnosticDisplayMessage(result.warnings[0])}</div>
       )}
       <div className="mt-3 space-y-2">
         {result.items.map((item) => (
@@ -896,9 +1123,12 @@ function BatchRestorePreviewSummary({ result }: { result: BackupBatchRestorePrev
               <>
                 <div className="mt-2 text-default-500">{getBackupRestorePreviewMetricText(item.preview)}</div>
                 <RestorePreflightList checks={item.preview.preflight_checks} />
+                {item.preview.warnings && item.preview.warnings.length > 0 && (
+                  <div className="mt-2 text-warning">{getBackupDiagnosticDisplayMessage(item.preview.warnings[0])}</div>
+                )}
               </>
             )}
-            {item.error_message && <div className="mt-2 text-danger">{item.error_message}</div>}
+            {item.error_message && <div className="mt-2 text-danger">{getBackupDiagnosticDisplayMessage(item.error_message)}</div>}
           </div>
         ))}
       </div>
@@ -915,8 +1145,8 @@ function BatchRestoreResultSummary({ result }: { result: BackupBatchRestoreResul
           <BackupStatusChip status={result.status} warning={result.warning} />
         </div>
         <div className="mt-2 text-default-600">{getBatchRestoreMetricText(result)}</div>
-        {result.error_message && <div className="mt-2 text-danger">{result.error_message}</div>}
-        {result.warnings && result.warnings.length > 0 && <div className="mt-2 text-warning">{result.warnings[0]}</div>}
+        {result.error_message && <div className="mt-2 text-danger">{getBackupDiagnosticDisplayMessage(result.error_message)}</div>}
+        {result.warnings && result.warnings.length > 0 && <div className="mt-2 text-warning">{getBackupDiagnosticDisplayMessage(result.warnings[0])}</div>}
       </div>
       <div className="space-y-2">
         {result.items.map((item) => (
@@ -934,8 +1164,8 @@ function BatchRestoreResultSummary({ result }: { result: BackupBatchRestoreResul
                 只读校验: {getBackupRestoreVerifyMetricText(item.verify)}
               </div>
             )}
-            {item.warnings && item.warnings.length > 0 && <div className="mt-1 text-warning">{item.warnings[0]}</div>}
-            {item.error_message && <div className="mt-1 text-danger">{item.error_message}</div>}
+            {item.warnings && item.warnings.length > 0 && <div className="mt-1 text-warning">{getBackupDiagnosticDisplayMessage(item.warnings[0])}</div>}
+            {item.error_message && <div className="mt-1 text-danger">{getBackupDiagnosticDisplayMessage(item.error_message)}</div>}
           </div>
         ))}
       </div>
@@ -946,6 +1176,17 @@ function BatchRestoreResultSummary({ result }: { result: BackupBatchRestoreResul
 export default function Maintenance() {
   const queryClient = useQueryClient()
   const user = useUser()
+  const diagnosticsExportAbortControllerRef = useRef<AbortController | null>(null)
+  const restoreReportExportAbortControllerRef = useRef<AbortController | null>(null)
+  const scrubAbortControllerRef = useRef<AbortController | null>(null)
+  const runBackupAbortControllerRef = useRef<AbortController | null>(null)
+  const retentionCheckAbortControllerRef = useRef<AbortController | null>(null)
+  const restoreDrillAbortControllerRef = useRef<AbortController | null>(null)
+  const restorePreviewAbortControllerRef = useRef<AbortController | null>(null)
+  const restoreAbortControllerRef = useRef<AbortController | null>(null)
+  const restoreVerifyAbortControllerRef = useRef<AbortController | null>(null)
+  const batchRestorePreviewAbortControllerRef = useRef<AbortController | null>(null)
+  const batchRestoreAbortControllerRef = useRef<AbortController | null>(null)
   const [isExporting, setIsExporting] = useState(false)
   const [exportingRestoreReportJobId, setExportingRestoreReportJobId] = useState<string | null>(null)
   const [isAwaitingRunningState, setIsAwaitingRunningState] = useState(false)
@@ -963,11 +1204,29 @@ export default function Maintenance() {
   const [batchRestoreResult, setBatchRestoreResult] = useState<BackupBatchRestoreResult | null>(null)
   const scrubResultQueryKey = ['scrub-result', user?.id ?? 'anonymous'] as const
   const backupJobsQueryKey = ['backup-jobs', user?.id ?? 'anonymous'] as const
+
+  useEffect(() => {
+    return () => {
+      abortActionControllers([
+        diagnosticsExportAbortControllerRef,
+        restoreReportExportAbortControllerRef,
+        scrubAbortControllerRef,
+        runBackupAbortControllerRef,
+        retentionCheckAbortControllerRef,
+        restoreDrillAbortControllerRef,
+        restorePreviewAbortControllerRef,
+        restoreAbortControllerRef,
+        restoreVerifyAbortControllerRef,
+        batchRestorePreviewAbortControllerRef,
+        batchRestoreAbortControllerRef,
+      ])
+    }
+  }, [])
   
   // Fetch last scrub result
   const { data: scrubResult, isLoading, error, refetch } = useQuery({
     queryKey: scrubResultQueryKey,
-    queryFn: getScrubResult,
+    queryFn: ({ signal }) => getScrubResult({ signal }),
     refetchInterval: (query) => {
       // Auto-refresh while scrub is running
       const data = query.state.data
@@ -983,8 +1242,9 @@ export default function Maintenance() {
     refetch: refetchBackups,
   } = useQuery({
     queryKey: backupJobsQueryKey,
-    queryFn: listBackupJobs,
+    queryFn: ({ signal }) => listBackupJobs({ signal }),
   })
+  const backupLoadErrorPresentation = getBackupLoadErrorPresentation(backupError)
 
   const handleRefreshScrubResult = async () => {
     const result = await refetch()
@@ -1108,8 +1368,11 @@ export default function Maintenance() {
   
   // Run scrub mutation
   const scrubMutation = useMutation({
-    mutationFn: () => runScrub(),
-    onSuccess: (result) => {
+    mutationFn: (request: ScrubMutationRequest) => runScrub(undefined, { signal: request.signal }),
+    onSuccess: (result, request) => {
+      if (request.signal.aborted) {
+        return
+      }
       if (result.status === 'running') {
         void queryClient.refetchQueries({ queryKey: scrubResultQueryKey, type: 'active' }).finally(() => {
           setIsAwaitingRunningState(false)
@@ -1120,11 +1383,14 @@ export default function Maintenance() {
       }
 
       const title = result.warning
-        ? (result.message ?? '数据校验完成，但存在警告')
+        ? '数据校验完成，但存在警告'
         : (result.status === 'running' ? '数据校验已启动' : '数据校验已完成')
       addToast({ title, color: result.warning ? 'warning' : 'success' })
     },
-    onError: (error: unknown) => {
+    onError: (error: unknown, request) => {
+      if (request.signal.aborted || isAbortError(error)) {
+        return
+      }
       if (isScrubAlreadyRunningError(error)) {
         void queryClient.refetchQueries({ queryKey: scrubResultQueryKey, type: 'active' }).finally(() => {
           setIsAwaitingRunningState(false)
@@ -1153,11 +1419,17 @@ export default function Maintenance() {
     onMutate: () => {
       setIsAwaitingRunningState(true)
     },
+    onSettled: (_result, _error, request) => {
+      clearActionAbortController(scrubAbortControllerRef, request.signal)
+    },
   })
 
   const runBackupMutation = useMutation({
-    mutationFn: (jobId: string) => runBackupJob(jobId),
-    onSuccess: (result) => {
+    mutationFn: (request: BackupJobMutationRequest) => runBackupJob(request.jobId, { signal: request.signal }),
+    onSuccess: (result, request) => {
+      if (request.signal.aborted) {
+        return
+      }
       void queryClient.invalidateQueries({ queryKey: backupJobsQueryKey })
       addToast({
         title: result.warning ? '备份完成但有警告' : '备份已完成',
@@ -1165,7 +1437,10 @@ export default function Maintenance() {
         color: result.warning ? 'warning' : 'success',
       })
     },
-    onError: (error: unknown) => {
+    onError: (error: unknown, request) => {
+      if (request.signal.aborted || isAbortError(error)) {
+        return
+      }
       void queryClient.invalidateQueries({ queryKey: backupJobsQueryKey })
       const errorPresentation = getMaintenanceActionErrorPresentation(
         error,
@@ -1179,11 +1454,17 @@ export default function Maintenance() {
         color: error instanceof ApiError && error.status === 409 ? 'warning' : errorPresentation.color,
       })
     },
+    onSettled: (_result, _error, request) => {
+      clearActionAbortController(runBackupAbortControllerRef, request.signal)
+    },
   })
 
   const retentionCheckMutation = useMutation({
-    mutationFn: (jobId: string) => checkBackupRetentionJob(jobId),
-    onSuccess: (result) => {
+    mutationFn: (request: BackupJobMutationRequest) => checkBackupRetentionJob(request.jobId, { signal: request.signal }),
+    onSuccess: (result, request) => {
+      if (request.signal.aborted) {
+        return
+      }
       void queryClient.invalidateQueries({ queryKey: backupJobsQueryKey })
       addToast({
         title: result.warning ? '保留策略检测完成，有警告' : '保留策略检测完成',
@@ -1191,7 +1472,10 @@ export default function Maintenance() {
         color: result.warning ? 'warning' : 'success',
       })
     },
-    onError: (error: unknown) => {
+    onError: (error: unknown, request) => {
+      if (request.signal.aborted || isAbortError(error)) {
+        return
+      }
       void queryClient.invalidateQueries({ queryKey: backupJobsQueryKey })
       const errorPresentation = getMaintenanceActionErrorPresentation(
         error,
@@ -1205,11 +1489,17 @@ export default function Maintenance() {
         color: error instanceof ApiError && error.status === 409 ? 'warning' : errorPresentation.color,
       })
     },
+    onSettled: (_result, _error, request) => {
+      clearActionAbortController(retentionCheckAbortControllerRef, request.signal)
+    },
   })
 
   const restoreDrillMutation = useMutation({
-    mutationFn: (jobId: string) => runBackupRestoreDrill(jobId, false),
-    onSuccess: (result) => {
+    mutationFn: (request: BackupJobMutationRequest) => runBackupRestoreDrill(request.jobId, false, { signal: request.signal }),
+    onSuccess: (result, request) => {
+      if (request.signal.aborted) {
+        return
+      }
       void queryClient.invalidateQueries({ queryKey: backupJobsQueryKey })
       addToast({
         title: '恢复演练已完成',
@@ -1217,7 +1507,10 @@ export default function Maintenance() {
         color: 'success',
       })
     },
-    onError: (error: unknown) => {
+    onError: (error: unknown, request) => {
+      if (request.signal.aborted || isAbortError(error)) {
+        return
+      }
       void queryClient.invalidateQueries({ queryKey: backupJobsQueryKey })
       const errorPresentation = getMaintenanceActionErrorPresentation(
         error,
@@ -1231,21 +1524,32 @@ export default function Maintenance() {
         color: error instanceof ApiError && error.status === 409 ? 'warning' : errorPresentation.color,
       })
     },
+    onSettled: (_result, _error, request) => {
+      clearActionAbortController(restoreDrillAbortControllerRef, request.signal)
+    },
   })
 
   const restorePreviewMutation = useMutation({
-    mutationFn: (req: { jobId: string; targetPath: string; includeConfig: boolean }) => previewBackupRestoreJob(req.jobId, req.targetPath, req.includeConfig),
-    onSuccess: (result) => {
+    mutationFn: (req: RestorePreviewMutationRequest) => previewBackupRestoreJob(req.jobId, req.targetPath, req.includeConfig, { signal: req.signal }),
+    onSuccess: (result, request) => {
+      if (request.signal.aborted) {
+        return
+      }
       setRestorePreview(result)
       const hasFailedPreflight = result.preflight_checks?.some((check) => check.status === 'failed') ?? false
       const hasWarnings = hasFailedPreflight || (result.warnings?.length ?? 0) > 0
       addToast({
         title: hasFailedPreflight ? '恢复预检未通过' : hasWarnings ? '恢复预览已生成，有提醒' : '恢复预览已生成',
-        description: hasWarnings && result.warnings?.[0] ? result.warnings[0] : getBackupRestorePreviewMetricText(result).replace(' · ', '，'),
+        description: hasWarnings && result.warnings?.[0]
+          ? getBackupDiagnosticDisplayMessage(result.warnings[0])
+          : getBackupRestorePreviewMetricText(result).replace(' · ', '，'),
         color: hasFailedPreflight ? 'danger' : hasWarnings ? 'warning' : 'success',
       })
     },
-    onError: (error: unknown) => {
+    onError: (error: unknown, request) => {
+      if (request.signal.aborted || isAbortError(error)) {
+        return
+      }
       setRestorePreview(null)
       const errorPresentation = getMaintenanceActionErrorPresentation(
         error,
@@ -1259,19 +1563,31 @@ export default function Maintenance() {
         color: error instanceof ApiError && error.status === 409 ? 'warning' : errorPresentation.color,
       })
     },
+    onSettled: (_result, _error, request) => {
+      clearActionAbortController(restorePreviewAbortControllerRef, request.signal)
+    },
   })
 
   const restoreVerifyMutation = useMutation({
-    mutationFn: (req: { jobId: string; targetPath: string }) => verifyBackupRestoreJob(req.jobId, req.targetPath),
-    onSuccess: (result) => {
+    mutationFn: (req: RestoreVerifyMutationRequest) => verifyBackupRestoreJob(req.jobId, req.targetPath, { signal: req.signal }),
+    onSuccess: (result, request) => {
+      if (request.signal.aborted) {
+        return
+      }
       setRestoreVerifyResult(result)
+      const verifyWarnings = result.warnings ?? []
       addToast({
-        title: result.warnings && result.warnings.length > 0 ? '恢复目录检查完成，有警告' : '恢复目录检查完成',
-        description: getBackupRestoreVerifyMetricText(result).replace(' · ', '，'),
-        color: result.warnings && result.warnings.length > 0 ? 'warning' : 'success',
+        title: verifyWarnings.length > 0 ? '恢复目录检查完成，有警告' : '恢复目录检查完成',
+        description: verifyWarnings[0]
+          ? getBackupDiagnosticDisplayMessage(verifyWarnings[0])
+          : getBackupRestoreVerifyMetricText(result).replace(' · ', '，'),
+        color: verifyWarnings.length > 0 ? 'warning' : 'success',
       })
     },
-    onError: (error: unknown) => {
+    onError: (error: unknown, request) => {
+      if (request.signal.aborted || isAbortError(error)) {
+        return
+      }
       setRestoreVerifyResult(null)
       const errorPresentation = getMaintenanceActionErrorPresentation(
         error,
@@ -1285,23 +1601,40 @@ export default function Maintenance() {
         color: error instanceof ApiError && error.status === 409 ? 'warning' : errorPresentation.color,
       })
     },
+    onSettled: (_result, _error, request) => {
+      clearActionAbortController(restoreVerifyAbortControllerRef, request.signal)
+    },
   })
 
+  const startRestoreVerify = (jobId: string, targetPath: string) => {
+    const controller = createActionAbortController(restoreVerifyAbortControllerRef)
+    restoreVerifyMutation.mutate({ jobId, targetPath, signal: controller.signal })
+  }
+
   const restoreMutation = useMutation({
-    mutationFn: (req: { jobId: string; targetPath: string; includeConfig: boolean }) => restoreBackupJob(req.jobId, req.targetPath, req.includeConfig),
-    onSuccess: (result) => {
+    mutationFn: (req: RestoreMutationRequest) => restoreBackupJob(req.jobId, req.targetPath, req.includeConfig, { signal: req.signal }),
+    onSuccess: (result, request) => {
+      if (request.signal.aborted) {
+        return
+      }
       void queryClient.invalidateQueries({ queryKey: backupJobsQueryKey })
       setRestoreResult(result)
       setRestoreVerifyResult(null)
       setRestoreTargetPath(result.target_path)
+      const restoreWarnings = result.warnings ?? []
       addToast({
-        title: '备份已恢复',
-        description: `${getBackupRestoreMetricText(result)}，目标: ${result.target_path}`,
-        color: 'success',
+        title: restoreWarnings.length > 0 ? '备份已恢复，有警告' : '备份已恢复',
+        description: restoreWarnings[0]
+          ? getBackupDiagnosticDisplayMessage(restoreWarnings[0])
+          : `${getBackupRestoreMetricText(result)}，目标: ${result.target_path}`,
+        color: restoreWarnings.length > 0 ? 'warning' : 'success',
       })
-      restoreVerifyMutation.mutate({ jobId: result.job_id, targetPath: result.target_path })
+      startRestoreVerify(result.job_id, result.target_path)
     },
-    onError: (error: unknown) => {
+    onError: (error: unknown, request) => {
+      if (request.signal.aborted || isAbortError(error)) {
+        return
+      }
       const errorPresentation = getMaintenanceActionErrorPresentation(
         error,
         '恢复备份失败',
@@ -1314,22 +1647,33 @@ export default function Maintenance() {
         color: error instanceof ApiError && error.status === 409 ? 'warning' : errorPresentation.color,
       })
     },
+    onSettled: (_result, _error, request) => {
+      clearActionAbortController(restoreAbortControllerRef, request.signal)
+    },
   })
 
   const batchRestorePreviewMutation = useMutation({
-    mutationFn: (items: BackupBatchRestoreItemRequest[]) => previewBatchBackupRestore(items),
-    onSuccess: (result) => {
+    mutationFn: (request: BatchRestoreMutationRequest) => previewBatchBackupRestore(request.items, { signal: request.signal }),
+    onSuccess: (result, request) => {
+      if (request.signal.aborted) {
+        return
+      }
       setBatchRestorePreview(result)
       setBatchRestoreResult(null)
       const hasFailedPreflight = hasFailedBatchRestorePreview(result)
       const hasWarnings = hasFailedPreflight || result.warning || (result.warnings?.length ?? 0) > 0
       addToast({
         title: hasFailedPreflight ? '批量恢复预检未通过' : hasWarnings ? '批量恢复预览已生成，有提醒' : '批量恢复预览已生成',
-        description: hasWarnings && result.warnings?.[0] ? result.warnings[0] : getBatchRestorePreviewMetricText(result).replace(' · ', '，'),
+        description: hasWarnings && result.warnings?.[0]
+          ? getBackupDiagnosticDisplayMessage(result.warnings[0])
+          : getBatchRestorePreviewMetricText(result).replace(' · ', '，'),
         color: hasFailedPreflight ? 'danger' : hasWarnings ? 'warning' : 'success',
       })
     },
-    onError: (error: unknown) => {
+    onError: (error: unknown, request) => {
+      if (request.signal.aborted || isAbortError(error)) {
+        return
+      }
       setBatchRestorePreview(null)
       const errorPresentation = getMaintenanceActionErrorPresentation(
         error,
@@ -1343,20 +1687,35 @@ export default function Maintenance() {
         color: error instanceof ApiError && error.status === 409 ? 'warning' : errorPresentation.color,
       })
     },
+    onSettled: (_result, _error, request) => {
+      clearActionAbortController(batchRestorePreviewAbortControllerRef, request.signal)
+    },
   })
 
   const batchRestoreMutation = useMutation({
-    mutationFn: (items: BackupBatchRestoreItemRequest[]) => runBatchBackupRestore(items),
-    onSuccess: (result) => {
+    mutationFn: (request: BatchRestoreMutationRequest) => runBatchBackupRestore(request.items, { signal: request.signal }),
+    onSuccess: (result, request) => {
+      if (request.signal.aborted) {
+        return
+      }
       void queryClient.invalidateQueries({ queryKey: backupJobsQueryKey })
       setBatchRestoreResult(result)
+      const batchWarnings = result.warnings ?? []
+      const batchRestoreDescription = batchWarnings[0]
+        ? getBackupDiagnosticDisplayMessage(batchWarnings[0])
+        : result.error_message
+          ? getBackupDiagnosticDisplayMessage(result.error_message)
+          : getBatchRestoreMetricText(result).replace(' · ', '，')
       addToast({
         title: result.status === 'failed' ? '批量恢复失败' : result.warning ? '批量恢复完成，有警告' : '批量恢复已完成',
-        description: getBatchRestoreMetricText(result).replace(' · ', '，'),
+        description: batchRestoreDescription,
         color: result.status === 'failed' ? 'danger' : result.warning ? 'warning' : 'success',
       })
     },
-    onError: (error: unknown) => {
+    onError: (error: unknown, request) => {
+      if (request.signal.aborted || isAbortError(error)) {
+        return
+      }
       const errorPresentation = getMaintenanceActionErrorPresentation(
         error,
         '执行批量恢复失败',
@@ -1369,15 +1728,24 @@ export default function Maintenance() {
         color: error instanceof ApiError && error.status === 409 ? 'warning' : errorPresentation.color,
       })
     },
+    onSettled: (_result, _error, request) => {
+      clearActionAbortController(batchRestoreAbortControllerRef, request.signal)
+    },
   })
   
   // Handle export
   const handleExport = async () => {
+    diagnosticsExportAbortControllerRef.current?.abort()
+    const controller = new AbortController()
+    diagnosticsExportAbortControllerRef.current = controller
     setIsExporting(true)
     try {
-      await downloadDiagnosticsExport()
+      await downloadDiagnosticsExport({ signal: controller.signal })
       addToast({ title: '诊断信息导出已开始', color: 'success' })
     } catch (error) {
+      if (controller.signal.aborted) {
+        return
+      }
       const errorPresentation = getMaintenanceActionErrorPresentation(
         error,
         '下载诊断包失败',
@@ -1390,16 +1758,25 @@ export default function Maintenance() {
         color: errorPresentation.color,
       })
     } finally {
-      setIsExporting(false)
+      if (diagnosticsExportAbortControllerRef.current === controller) {
+        diagnosticsExportAbortControllerRef.current = null
+        setIsExporting(false)
+      }
     }
   }
 
   const handleDownloadRestoreReport = async (job: BackupJob) => {
+    restoreReportExportAbortControllerRef.current?.abort()
+    const controller = new AbortController()
+    restoreReportExportAbortControllerRef.current = controller
     setExportingRestoreReportJobId(job.id)
     try {
-      await downloadBackupRestoreReport(job.id)
+      await downloadBackupRestoreReport(job.id, { signal: controller.signal })
       addToast({ title: '恢复摘要导出已开始', description: job.name, color: 'success' })
     } catch (error) {
+      if (controller.signal.aborted) {
+        return
+      }
       const errorPresentation = getMaintenanceActionErrorPresentation(
         error,
         '导出恢复摘要失败',
@@ -1412,8 +1789,63 @@ export default function Maintenance() {
         color: error instanceof ApiError && error.status === 409 ? 'warning' : errorPresentation.color,
       })
     } finally {
-      setExportingRestoreReportJobId(null)
+      if (restoreReportExportAbortControllerRef.current === controller) {
+        restoreReportExportAbortControllerRef.current = null
+        setExportingRestoreReportJobId(null)
+      }
     }
+  }
+
+  const startScrub = () => {
+    const controller = createActionAbortController(scrubAbortControllerRef)
+    scrubMutation.mutate({ signal: controller.signal })
+  }
+
+  const startBackupRun = (jobId: string) => {
+    const controller = createActionAbortController(runBackupAbortControllerRef)
+    runBackupMutation.mutate({ jobId, signal: controller.signal })
+  }
+
+  const startRetentionCheck = (jobId: string) => {
+    const controller = createActionAbortController(retentionCheckAbortControllerRef)
+    retentionCheckMutation.mutate({ jobId, signal: controller.signal })
+  }
+
+  const startRestoreDrill = (jobId: string) => {
+    const controller = createActionAbortController(restoreDrillAbortControllerRef)
+    restoreDrillMutation.mutate({ jobId, signal: controller.signal })
+  }
+
+  const startRestorePreview = () => {
+    if (!restoreJob) return
+    const controller = createActionAbortController(restorePreviewAbortControllerRef)
+    restorePreviewMutation.mutate({
+      jobId: restoreJob.id,
+      targetPath: restoreTargetPath.trim(),
+      includeConfig: restoreIncludeConfigForRequest,
+      signal: controller.signal,
+    })
+  }
+
+  const startRestore = () => {
+    if (!restoreJob) return
+    const controller = createActionAbortController(restoreAbortControllerRef)
+    restoreMutation.mutate({
+      jobId: restoreJob.id,
+      targetPath: restoreTargetPath.trim(),
+      includeConfig: restoreIncludeConfigForRequest,
+      signal: controller.signal,
+    })
+  }
+
+  const startBatchRestorePreview = () => {
+    const controller = createActionAbortController(batchRestorePreviewAbortControllerRef)
+    batchRestorePreviewMutation.mutate({ items: batchRestoreItems, signal: controller.signal })
+  }
+
+  const startBatchRestore = () => {
+    const controller = createActionAbortController(batchRestoreAbortControllerRef)
+    batchRestoreMutation.mutate({ items: batchRestoreItems, signal: controller.signal })
   }
   
   const isRunning = scrubResult?.status === 'running' || isAwaitingRunningState
@@ -1467,7 +1899,7 @@ export default function Maintenance() {
               startContent={isRunning ? <RefreshCw size={18} className="animate-spin" /> : <Play size={18} />}
               isLoading={scrubMutation.isPending}
               isDisabled={isRunning}
-              onPress={() => scrubMutation.mutate()}
+              onPress={startScrub}
             >
               {isRunning ? '校验中...' : '开始校验'}
             </Button>
@@ -1545,7 +1977,7 @@ export default function Maintenance() {
                     <div>
                       <p className="text-sm text-warning">本次校验完成，但存在警告</p>
                       {scrubResult.message && (
-                        <p className="text-sm text-warning mt-1">{scrubResult.message}</p>
+                        <p className="text-sm text-warning mt-1">{getScrubResultDisplayMessage(scrubResult.message)}</p>
                       )}
                     </div>
                   </div>
@@ -1555,7 +1987,7 @@ export default function Maintenance() {
               {/* Error message */}
               {scrubResult.error_message && (
                 <div className="mt-4 p-3 bg-danger/10 rounded-lg border border-danger/20">
-                  <p className="text-sm text-danger">{scrubResult.error_message}</p>
+                  <p className="text-sm text-danger">{getScrubResultDisplayMessage(scrubResult.error_message)}</p>
                 </div>
               )}
               
@@ -1614,10 +2046,8 @@ export default function Maintenance() {
             <div className="flex items-center justify-center py-8">
               <EmptyState
                 icon={AlertCircle}
-                title={backupError instanceof ApiError && backupError.isUnavailable ? '备份任务暂不可用' : '加载备份任务失败'}
-                description={backupError instanceof ApiError && backupError.isUnavailable
-                  ? '备份管理器当前不可用，请检查配置后重试。'
-                  : (backupError instanceof Error ? backupError.message : '请稍后重试')}
+                title={backupLoadErrorPresentation.title}
+                description={backupLoadErrorPresentation.description}
                 action={
                   <Button variant="bordered" className="rounded-lg" onPress={handleRefreshBackups}>
                     重新加载
@@ -1645,9 +2075,9 @@ export default function Maintenance() {
                 </TableHeader>
                 <TableBody>
                   {backupJobs.map((job: BackupJob) => {
-                    const isRunningBackup = runBackupMutation.isPending && runBackupMutation.variables === job.id
-                    const isCheckingRetention = retentionCheckMutation.isPending && retentionCheckMutation.variables === job.id
-                    const isRunningDrill = restoreDrillMutation.isPending && restoreDrillMutation.variables === job.id
+                    const isRunningBackup = runBackupMutation.isPending && runBackupMutation.variables?.jobId === job.id
+                    const isCheckingRetention = retentionCheckMutation.isPending && retentionCheckMutation.variables?.jobId === job.id
+                    const isRunningDrill = restoreDrillMutation.isPending && restoreDrillMutation.variables?.jobId === job.id
                     const isRunningRestore = restoreMutation.isPending && restoreMutation.variables?.jobId === job.id
                     const isExportingReport = exportingRestoreReportJobId === job.id
                     const isBusy = job.running || isRunningBackup || isCheckingRetention || isRunningDrill || isRunningRestore
@@ -1713,7 +2143,7 @@ export default function Maintenance() {
                             )}
                             {job.health_message && (
                               <div className={job.health_status === 'failed' ? 'text-xs text-danger' : 'text-xs text-default-400'}>
-                                {job.health_message}
+                                {getBackupDiagnosticDisplayMessage(job.health_message)}
                               </div>
                             )}
                           </div>
@@ -1730,7 +2160,7 @@ export default function Maintenance() {
                               startContent={isRunningBackup ? <RefreshCw size={16} className="animate-spin" /> : <Archive size={16} />}
                               isLoading={isRunningBackup}
                               isDisabled={isBusy || job.disabled}
-                              onPress={() => runBackupMutation.mutate(job.id)}
+                              onPress={() => startBackupRun(job.id)}
                             >
                               立即备份
                             </Button>
@@ -1741,7 +2171,7 @@ export default function Maintenance() {
                               startContent={isCheckingRetention ? <RefreshCw size={16} className="animate-spin" /> : <FileWarning size={16} />}
                               isLoading={isCheckingRetention}
                               isDisabled={isBusy || job.disabled}
-                              onPress={() => retentionCheckMutation.mutate(job.id)}
+                              onPress={() => startRetentionCheck(job.id)}
                             >
                               检查保留
                             </Button>
@@ -1752,7 +2182,7 @@ export default function Maintenance() {
                               startContent={isRunningDrill ? <RefreshCw size={16} className="animate-spin" /> : <RotateCcw size={16} />}
                               isLoading={isRunningDrill}
                               isDisabled={isBusy || job.disabled || !canRunBackupRestoreDrill(job)}
-                              onPress={() => restoreDrillMutation.mutate(job.id)}
+                              onPress={() => startRestoreDrill(job.id)}
                             >
                               恢复演练
                             </Button>
@@ -1861,10 +2291,13 @@ export default function Maintenance() {
                   <span>恢复不会覆盖当前数据目录。请先恢复到独立目录，人工确认后再切换服务配置或迁移数据。</span>
                 </div>
                 {restorePreview && (
-                  <div className={restorePreviewMatches ? 'rounded-lg border border-success/20 bg-success/10 p-4 text-sm' : 'rounded-lg border border-default-200 bg-content2/70 p-4 text-sm'}>
+                  <div className={getRestorePreviewPanelClass(restorePreview, restorePreviewMatches)}>
                     <div className="flex items-center justify-between gap-3">
-                      <div className="font-medium">{restorePreviewMatches ? '预览已确认' : '预览已失效'}</div>
-                      <BackupStatusChip status={restorePreview.status} />
+                      <div className="font-medium">{getRestorePreviewTitle(restorePreview, restorePreviewMatches)}</div>
+                      <BackupStatusChip
+                        status={hasFailedRestorePreflight(restorePreview) ? 'failed' : restorePreview.status}
+                        warning={hasWarningRestorePreflight(restorePreview)}
+                      />
                     </div>
                     <div className="mt-2 text-default-600">{getBackupRestorePreviewMetricText(restorePreview)}</div>
                     <div className="mt-1 truncate text-default-500" title={restorePreview.target_path}>
@@ -1878,7 +2311,7 @@ export default function Maintenance() {
                     <RestorePreflightList checks={restorePreview.preflight_checks} />
                     {restorePreview.warnings && restorePreview.warnings.length > 0 && (
                       <div className="mt-3 rounded-lg border border-warning/20 bg-warning/10 p-3 text-xs text-warning">
-                        {restorePreview.warnings[0]}
+                        {getBackupDiagnosticDisplayMessage(restorePreview.warnings[0])}
                       </div>
                     )}
                     {restorePreview.sample_paths && restorePreview.sample_paths.length > 0 && (
@@ -1917,7 +2350,7 @@ export default function Maintenance() {
                   isDisabled={!restoreJob}
                   onPress={() => {
                     if (!restoreJob || !restoreResult) return
-                    restoreVerifyMutation.mutate({ jobId: restoreJob.id, targetPath: restoreResult.target_path })
+                    startRestoreVerify(restoreJob.id, restoreResult.target_path)
                   }}
                 >
                   重新检查
@@ -1933,14 +2366,7 @@ export default function Maintenance() {
                   className="rounded-lg"
                   isLoading={restorePreviewMutation.isPending}
                   isDisabled={!restoreJob || restoreTargetPath.trim() === '' || restoreMutation.isPending}
-                  onPress={() => {
-                    if (!restoreJob) return
-                    restorePreviewMutation.mutate({
-                      jobId: restoreJob.id,
-                      targetPath: restoreTargetPath.trim(),
-                      includeConfig: restoreIncludeConfigForRequest,
-                    })
-                  }}
+                  onPress={startRestorePreview}
                 >
                   生成预览
                 </Button>
@@ -1949,14 +2375,7 @@ export default function Maintenance() {
                   className="rounded-lg"
                   isLoading={restoreMutation.isPending}
                   isDisabled={!restoreJob || restoreTargetPath.trim() === '' || !restorePreviewMatches || restorePreviewHasFailedPreflight || restorePreviewMutation.isPending}
-                  onPress={() => {
-                    if (!restoreJob) return
-                    restoreMutation.mutate({
-                      jobId: restoreJob.id,
-                      targetPath: restoreTargetPath.trim(),
-                      includeConfig: restoreIncludeConfigForRequest,
-                    })
-                  }}
+                  onPress={startRestore}
                 >
                   开始恢复
                 </Button>
@@ -2086,7 +2505,7 @@ export default function Maintenance() {
                   className="rounded-lg"
                   isLoading={batchRestorePreviewMutation.isPending}
                   isDisabled={!batchRestoreTargetsReady || batchRestoreMutation.isPending}
-                  onPress={() => batchRestorePreviewMutation.mutate(batchRestoreItems)}
+                  onPress={startBatchRestorePreview}
                 >
                   生成批量预览
                 </Button>
@@ -2095,7 +2514,7 @@ export default function Maintenance() {
                   className="rounded-lg"
                   isLoading={batchRestoreMutation.isPending}
                   isDisabled={!batchRestoreTargetsReady || !batchRestorePreviewMatches || batchRestorePreviewHasFailed || batchRestorePreviewMutation.isPending}
-                  onPress={() => batchRestoreMutation.mutate(batchRestoreItems)}
+                  onPress={startBatchRestore}
                 >
                   开始批量恢复
                 </Button>

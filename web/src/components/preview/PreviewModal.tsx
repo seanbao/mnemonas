@@ -1,10 +1,12 @@
-import { useState, useEffect, useCallback, useMemo } from 'react'
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { Modal, ModalContent, ModalBody, Button, Spinner, addToast } from '@heroui/react'
 import { X, ChevronLeft, ChevronRight, Download, ExternalLink, AlertCircle, Music, FileQuestion } from 'lucide-react'
 import { downloadFile } from '@/api/files'
-import { ensureDownloadSession, refreshAuthSession } from '@/api/auth'
+import { authFetch, ensureDownloadSession, refreshAuthSession } from '@/api/auth'
 import { getPreviewType, buildPreviewUrl } from '@/lib/preview-utils'
 import { getFileDownloadErrorToast } from '@/lib/fileActionErrors'
+import { readRangedDownloadJsonErrorDetails, type DownloadJsonErrorDetails } from '@/lib/downloadResponse'
+import { GENERIC_LOAD_ERROR_DESCRIPTION, getUserFacingErrorDescription } from '@/lib/apiMessages'
 import { TextPreview } from './TextPreview'
 import { ImagePreview } from './ImagePreview'
 import { PdfPreview } from './PdfPreview'
@@ -23,6 +25,8 @@ export interface PreviewModalProps {
   onFileChange?: (file: PreviewFile) => void
 }
 
+const previewSessionSyncWarningTitle = '原始预览和下载会话同步失败，请稍后重试'
+
 function buildStreamUrl(path: string): string {
   return buildPreviewUrl(path)
 }
@@ -30,6 +34,18 @@ function buildStreamUrl(path: string): string {
 function withSessionRetryParam(url: string): string {
   const separator = url.includes('?') ? '&' : '?'
   return `${url}${separator}session_retry=1`
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof DOMException && error.name === 'AbortError'
+}
+
+function getPreviewProbeErrorMessage(error: DownloadJsonErrorDetails | undefined, fallback: string): string {
+  if (!error) {
+    return fallback
+  }
+
+  return getUserFacingErrorDescription(new Error(error.message), fallback)
 }
 
 function useRetryableMediaUrl(baseUrl: string, errorMessage: string) {
@@ -55,9 +71,11 @@ function useRetryableMediaUrl(baseUrl: string, errorMessage: string) {
       }
     }
 
+    const previewError = await readRangedDownloadJsonErrorDetails(mediaUrl, errorMessage, authFetch)
+    const message = getPreviewProbeErrorMessage(previewError, errorMessage)
     setIsLoading(false)
-    setError(errorMessage)
-  }, [baseUrl, errorMessage, hasRetried])
+    setError(message)
+  }, [baseUrl, errorMessage, hasRetried, mediaUrl])
 
   return {
     mediaUrl,
@@ -75,6 +93,7 @@ export function PreviewModal({
   files = [],
   onFileChange,
 }: PreviewModalProps) {
+  const downloadAbortControllerRef = useRef<AbortController | null>(null)
   const currentIndex = useMemo(() => {
     if (!file || files.length === 0) {
       return -1
@@ -132,11 +151,33 @@ export function PreviewModal({
     return () => window.removeEventListener('keydown', handleKeyDown)
   }, [isOpen, handlePrev, handleNext, onClose])
 
+  useEffect(() => {
+    return () => {
+      downloadAbortControllerRef.current?.abort()
+      downloadAbortControllerRef.current = null
+    }
+  }, [isOpen, currentFile?.path])
+
   const handleDownload = useCallback(() => {
     if (!currentFile) return
-    void downloadFile(currentFile.path, { filename: currentFile.name }).catch((error: unknown) => {
-      addToast(getFileDownloadErrorToast(error))
+    downloadAbortControllerRef.current?.abort()
+    const controller = new AbortController()
+    downloadAbortControllerRef.current = controller
+    void downloadFile(currentFile.path, {
+      filename: currentFile.name,
+      signal: controller.signal,
     })
+      .catch((error: unknown) => {
+        if (controller.signal.aborted || isAbortError(error)) {
+          return
+        }
+        addToast(getFileDownloadErrorToast(error))
+      })
+      .finally(() => {
+        if (downloadAbortControllerRef.current === controller) {
+          downloadAbortControllerRef.current = null
+        }
+      })
   }, [currentFile])
 
   const handleOpenExternal = useCallback(async () => {
@@ -144,11 +185,21 @@ export function PreviewModal({
 
     const session = await ensureDownloadSession()
     if (!session.ok) {
-      addToast({ title: session.message ?? '原始预览和下载会话同步失败，请稍后重试', color: 'warning' })
+      addToast({ title: previewSessionSyncWarningTitle, color: 'warning' })
       return
     }
 
     const url = buildStreamUrl(currentFile.path)
+    const previewError = await readRangedDownloadJsonErrorDetails(url, '预览失败', authFetch)
+    if (previewError) {
+      addToast({
+        title: '预览暂不可用',
+        description: getPreviewProbeErrorMessage(previewError, GENERIC_LOAD_ERROR_DESCRIPTION),
+        color: 'warning',
+      })
+      return
+    }
+
     if (!openUrlInNewTab(url)) {
       addToast({ title: '浏览器拦截了新标签页，请允许弹窗后重试', color: 'warning' })
     }

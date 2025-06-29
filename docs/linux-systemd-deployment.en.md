@@ -80,9 +80,9 @@ Custom data directory or port:
 sudo env STORAGE_ROOT=/srv/mnemonas SERVER_PORT=8080 ./scripts/install-systemd.sh
 ```
 
-The systemd installer and uninstaller require absolute paths for `BIN_DIR`, `SHARE_DIR`, `CONFIG_DIR`, `CONFIG_PATH`, `SYSTEMD_DIR`, `STORAGE_ROOT`, and the Web UI directory, and none of those paths may contain symbolic-link components. `CONFIG_PATH` must stay under `CONFIG_DIR`; except for the Web UI directory living under `SHARE_DIR`, binary, shared-resource, config, systemd unit, and data paths must not overlap each other. To place data on a separate disk, mount the real filesystem at the target directory before running the installer; do not point `STORAGE_ROOT` at a symlink.
+The systemd installer and uninstaller require absolute paths for `BIN_DIR`, `SHARE_DIR`, `CONFIG_DIR`, `CONFIG_PATH`, `SYSTEMD_DIR`, `STORAGE_ROOT`, and the Web UI directory. Those paths must not contain control characters or symbolic-link components. `CONFIG_PATH` must stay under `CONFIG_DIR`; except for the Web UI directory living under `SHARE_DIR`, binary, shared-resource, config, systemd unit, and data paths must not overlap each other. Before creating directories or changing permissions, the installer also checks `STORAGE_ROOT/files` and `STORAGE_ROOT/.mnemonas/objects`; those managed subdirectories must not point elsewhere through symlinks. To place data on a separate disk, mount the real filesystem at the target directory before running the installer; do not point `STORAGE_ROOT` at a symlink.
 
-The installer only fixes ownership of the managed top-level directories by default. If you manually copied data and need a recursive ownership repair:
+The installer only fixes ownership of the managed top-level directories by default. After manual data copy, recursive ownership repair can be requested with:
 
 ```bash
 sudo env FIX_STORAGE_OWNERSHIP=1 ./scripts/install-systemd.sh
@@ -140,7 +140,7 @@ sudo systemctl restart mnemonas-dataplane
 sudo mnemonas-doctor
 ```
 
-`mnemonas-doctor` checks service state, Web UI, directory permissions, filesystem type, and free space. It also warns when UFW appears to expose dataplane ports.
+`mnemonas-doctor` checks service state, Web UI, directory permissions, filesystem type, and free space. The Web UI health and storage pages also show the underlying filesystem type, mount point, device or dataset source, redacted mount options, ZFS/Btrfs native-checksum hints, and space-alert runtime state. Administrators can download a diagnostic bundle from the health page and copy a storage-backing summary from the storage page for troubleshooting records. It also warns when UFW appears to expose dataplane ports.
 
 After config changes:
 
@@ -188,7 +188,7 @@ sudo ufw enable
 sudo ufw status numbered
 ```
 
-If you changed `SERVER_PORT`, `DATAPLANE_GRPC_ADDR`, or `DATAPLANE_HTTP_ADDR`, replace the example ports with the actual ports.
+When `SERVER_PORT`, `DATAPLANE_GRPC_ADDR`, or `DATAPLANE_HTTP_ADDR` are changed, replace the example ports with the actual ports.
 
 If the reverse proxy and MnemoNAS run on the same machine, set `[server].host = "127.0.0.1"` when LAN direct access is not needed.
 
@@ -245,7 +245,7 @@ sudo env REMOVE_CONFIG=1 REMOVE_DATA=1 CONFIRM_REMOVE_DATA=/srv/mnemonas mnemona
 
 The uninstaller also refuses install and data paths that contain symlink components. When removing data, `CONFIRM_REMOVE_DATA` must exactly match `STORAGE_ROOT` to avoid deleting a real mount point or a replaced directory tree by mistake.
 
-The service account is kept by default to preserve UID/GID reuse. Set `REMOVE_SERVICE_USER=1` if you also want to remove it.
+The service account is kept by default to preserve UID/GID reuse. Set `REMOVE_SERVICE_USER=1` to remove it as part of uninstall.
 
 ## Troubleshooting
 

@@ -51,7 +51,7 @@ import { ContextMenu, ContextMenuSection, ContextMenuItem } from '@/components/u
 import { MoveDialog } from '@/components/file'
 import { PreviewModal, type PreviewFile } from '@/components/preview'
 import { useLocation, useNavigate } from 'react-router-dom'
-import { useFilesStore, type FileItem } from '@/stores/files'
+import { useFilesStore, type FileCapabilities, type FileItem } from '@/stores/files'
 import { useClipboardStore } from '@/stores/clipboard'
 import { useCanWrite, useShareEnabled, useUser } from '@/stores/auth'
 import { useContextMenu, useKeyboardShortcuts } from '@/hooks'
@@ -72,7 +72,14 @@ import {
 import { checkFavorites, toggleFavorite } from '@/api/favorites'
 import { listShares, ShareError } from '@/api/share'
 import { getFileQueryScopeKey, getFilesQueryKey } from '@/lib/fileQueryKey'
-import { copyTextToClipboard, decodePathFromUrl, encodePathForUrl, formatBytes, formatDate, cn, normalizePath, pathWithinBase } from '@/lib/utils'
+import { GENERIC_LOAD_ERROR_DESCRIPTION, getUserFacingErrorDescription } from '@/lib/apiMessages'
+import {
+  getPathConflictErrorToast,
+  getQuotaExceededErrorToast,
+  getSharedPathConflictErrorToast,
+  getSharedQuotaExceededErrorToast,
+} from '@/lib/fileActionErrors'
+import { copyTextToClipboard, decodePathFromUrl, encodePathForUrl, formatBytes, formatDate, cn, normalizePath } from '@/lib/utils'
 import { getInvalidHomeDirDescription, invalidHomeDirTitle, resolveUserHomeScope } from '@/lib/userScope'
 
 type SortKey = 'name' | 'size' | 'modTime'
@@ -96,6 +103,19 @@ function getFileTypeLabel(file: FileItem): string {
   }
 
   return file.name.slice(dotIndex + 1).toUpperCase()
+}
+
+function getDownloadOptions(file: FileItem): Parameters<typeof downloadFile>[1] {
+  return file.isDir
+    ? { archive: 'zip', filename: `${file.name}.zip` }
+    : { filename: file.name }
+}
+
+function getDownloadOptionsWithSignal(file: FileItem, signal: AbortSignal): Parameters<typeof downloadFile>[1] {
+  return {
+    ...getDownloadOptions(file),
+    signal,
+  }
 }
 
 function isDirectoryAlreadyExistsError(error: unknown): boolean {
@@ -130,7 +150,7 @@ function getFavoritesBannerContent(error: unknown): { title: string; description
 
   return {
     title: '收藏状态加载失败',
-    description: error instanceof Error ? error.message : '请稍后重试',
+    description: getUserFacingErrorDescription(error, GENERIC_LOAD_ERROR_DESCRIPTION),
   }
 }
 
@@ -144,7 +164,7 @@ function getFilesLoadErrorPresentation(error: unknown): { title: string; descrip
 
   return {
     title: '当前目录加载失败',
-    description: error instanceof Error ? error.message : '请稍后重试',
+    description: getUserFacingErrorDescription(error, GENERIC_LOAD_ERROR_DESCRIPTION),
   }
 }
 
@@ -168,6 +188,42 @@ function isFilesystemUnavailableError(error: unknown): boolean {
   return status === 503 || code === 'SERVICE_UNAVAILABLE'
 }
 
+function isAbortError(error: unknown): boolean {
+  return typeof error === 'object'
+    && error !== null
+    && 'name' in error
+    && (error as { name?: unknown }).name === 'AbortError'
+}
+
+type CreateFolderMutationVariables = {
+  path: string
+  directoryPath: string
+  folderName: string
+  sessionId: number
+  signal: AbortSignal
+}
+
+type RenameMutationVariables = {
+  from: string
+  to: string
+  directoryPath: string
+  targetPath: string
+  submittedName: string
+  sessionId: number
+  signal: AbortSignal
+}
+
+type DeleteMutationVariables = {
+  path: string
+  signal: AbortSignal
+}
+
+type FavoriteMutationVariables = {
+  path: string
+  isFavorited: boolean
+  signal: AbortSignal
+}
+
 function getFilesActionErrorToast(
   error: unknown,
   titles: {
@@ -187,12 +243,24 @@ function getFilesActionErrorToast(
     }
   }
 
+  const pathConflictToast = getPathConflictErrorToast(error)
+  if (pathConflictToast) {
+    return pathConflictToast
+  }
+
+  const quotaExceededToast = getQuotaExceededErrorToast(error)
+  if (quotaExceededToast) {
+    return quotaExceededToast
+  }
+
   return {
     title: titles.failure,
-    description: error instanceof Error ? error.message : '请稍后重试',
+    description: getUserFacingErrorDescription(error),
     color: 'danger',
   }
 }
+
+const missingFileSyncWarningTitle = '文件或文件夹已不存在，已同步更新'
 
 function getFilesActionSuccessToast(
   result: ActionResult,
@@ -206,7 +274,7 @@ function getFilesActionSuccessToast(
 } {
   if (result.warning) {
     return {
-      title: result.message ?? titles.warning,
+      title: result.message === missingFileSyncWarningTitle ? missingFileSyncWarningTitle : titles.warning,
       color: 'warning',
     }
   }
@@ -244,24 +312,6 @@ function getCreateFolderErrorToast(error: unknown): {
   description: string
   color: 'warning' | 'danger'
 } {
-  if (error instanceof Error) {
-    if (error.message === 'resource already exists') {
-      return {
-        title: '同名项目已存在',
-        description: '当前目录中已存在同名文件或文件夹，请使用其他名称。',
-        color: 'warning',
-      }
-    }
-
-    if (error.message === 'parent path is not a directory') {
-      return {
-        title: '目标位置不可用',
-        description: '当前目录状态已变更，请刷新列表后重试。',
-        color: 'warning',
-      }
-    }
-  }
-
   return getFilesActionErrorToast(error, {
     unavailable: '创建暂不可用',
     failure: '创建失败',
@@ -273,13 +323,21 @@ type MissingFileActionResult = ActionResult & { staleMissing: true }
 function getMissingFileActionResult(): MissingFileActionResult {
   return {
     warning: true,
-    message: '文件或文件夹已不存在，已同步更新',
+    message: missingFileSyncWarningTitle,
     staleMissing: true,
   }
 }
 
 function isMissingFileActionResult(result: ActionResult): result is MissingFileActionResult {
   return !!result && typeof result === 'object' && 'staleMissing' in result && result.staleMissing === true
+}
+
+function getActionWarningSummary(result: ActionResult): string {
+  return isMissingFileActionResult(result) ? missingFileSyncWarningTitle : ''
+}
+
+function getSynchronizedWarningTitle(warningMessages: string[]): string | null {
+  return warningMessages.find((message) => message === missingFileSyncWarningTitle) ?? null
 }
 
 async function withMissingFileActionResult(operation: () => Promise<ActionResult>): Promise<ActionResult> {
@@ -320,7 +378,7 @@ function getFavoriteActionErrorToast(error: unknown): {
 
   return {
     title: '操作失败',
-    description: error instanceof Error ? error.message : '请稍后重试',
+    description: getUserFacingErrorDescription(error),
     color: 'danger',
   }
 }
@@ -351,7 +409,7 @@ function getFavoriteRefreshErrorToast(error: unknown): {
 
   return {
     title: '刷新失败',
-    description: error instanceof Error ? error.message : '请稍后重试',
+    description: getUserFacingErrorDescription(error),
     color: 'danger',
   }
 }
@@ -361,7 +419,7 @@ function getUploadQueueErrorMessage(error: unknown): string {
     return '文件系统当前不可用，请检查设备状态或稍后重试。'
   }
 
-  return error instanceof Error ? error.message : '上传失败'
+  return getUserFacingErrorDescription(error)
 }
 
 function getFolderUploadSummaryToast(
@@ -377,7 +435,7 @@ function getFolderUploadSummaryToast(
   if (errorCount === 0) {
     if (warningMessages.length > 0) {
       return {
-        title: warningMessages[0] || '文件夹上传完成，但存在警告',
+        title: '文件夹上传完成，但存在警告',
         description: `成功上传 ${successCount} 个文件`,
         color: 'warning',
       }
@@ -407,7 +465,7 @@ function getFolderUploadSummaryToast(
   }
 
   return {
-    title: warningMessages[0] || '文件夹上传部分完成',
+    title: getSynchronizedWarningTitle(warningMessages) ?? '文件夹上传部分完成',
     description: `成功上传 ${successCount} 个文件，失败 ${errorCount} 个`,
     color: 'warning',
   }
@@ -419,7 +477,7 @@ function getUploadWarningSummaryToast(successCount: number, warningMessages: str
   color: 'warning'
 } {
   return {
-    title: warningMessages[0] || '上传完成，但存在警告',
+    title: getSynchronizedWarningTitle(warningMessages) ?? '上传完成，但存在警告',
     description: `成功上传 ${successCount} 个文件`,
     color: 'warning',
   }
@@ -436,7 +494,7 @@ function getPartialBatchActionToast(
   color: 'warning'
 } {
   return {
-    title: warningMessages[0] || title,
+    title: getSynchronizedWarningTitle(warningMessages) ?? title,
     description: `成功 ${successCount} 个，失败 ${errorCount} 个`,
     color: 'warning',
   }
@@ -477,6 +535,14 @@ function getShareFeatureState(error: unknown): 'disabled' | 'unavailable' | null
     return 'unavailable'
   }
   return null
+}
+
+function hasWriteCapability(canWrite: boolean, capabilities?: FileCapabilities): boolean {
+  return canWrite && (capabilities?.write ?? true)
+}
+
+function hasConcreteReadCapability(canWrite: boolean, capabilities?: FileCapabilities): boolean {
+  return canWrite && (capabilities?.concreteRead ?? true)
 }
 
 // Breadcrumb navigation component
@@ -541,6 +607,7 @@ function FileRow({
   shareActionLabel,
   isMultiSelection,
   canWrite,
+  canShareFile,
   onSelect, 
   onOpen,
   onActivate,
@@ -549,6 +616,7 @@ function FileRow({
   onViewVersions,
   onShare,
   onToggleFavorite,
+  onDownload,
   onContextMenu,
 }: { 
   file: FileItem
@@ -561,6 +629,7 @@ function FileRow({
   shareActionLabel: string
   isMultiSelection: boolean
   canWrite: boolean
+  canShareFile: boolean
   onSelect: (e: React.MouseEvent) => void
   onOpen: () => void
   onActivate: (e: React.MouseEvent) => void
@@ -569,19 +638,15 @@ function FileRow({
   onViewVersions: () => void
   onShare: () => void
   onToggleFavorite: () => void
+  onDownload: () => void
   onContextMenu: (e: React.MouseEvent) => void
 }) {
   const detailLabel = isSelected && isMultiSelection
     ? '多选中'
     : getFileTypeLabel(file)
   const handleDownload = useCallback(() => {
-    void downloadFile(file.path, { filename: file.name }).catch((error: unknown) => {
-      addToast(getFilesActionErrorToast(error, {
-        unavailable: '下载暂不可用',
-        failure: '下载失败',
-      }))
-    })
-  }, [file.path, file.name])
+    onDownload()
+  }, [onDownload])
 
   const handleCopyPath = useCallback(() => {
     copyTextToClipboard(file.path)
@@ -675,13 +740,22 @@ function FileRow({
             >
               <DropdownSection title="操作" showDivider>
                 {file.isDir ? (
-                  <DropdownItem 
-                    key="open" 
-                    startContent={<FolderOpen size={16} />}
-                    onPress={onOpen}
-                  >
-                    打开文件夹
-                  </DropdownItem>
+                  <>
+                    <DropdownItem
+                      key="open"
+                      startContent={<FolderOpen size={16} />}
+                      onPress={onOpen}
+                    >
+                      打开文件夹
+                    </DropdownItem>
+                    <DropdownItem
+                      key="download-archive"
+                      startContent={<Download size={16} />}
+                      onPress={handleDownload}
+                    >
+                      下载为 ZIP
+                    </DropdownItem>
+                  </>
                 ) : (
                   <DropdownItem 
                     key="download" 
@@ -708,7 +782,7 @@ function FileRow({
                   复制路径
                 </DropdownItem>
               </DropdownSection>
-              {canWrite ? (
+              {canShareFile ? (
                 <DropdownSection title="分享">
                   <DropdownItem 
                     key="favorite" 
@@ -812,6 +886,7 @@ function FileCard({
   shareActionLabel,
   isMultiSelection,
   canWrite,
+  canShareFile,
   onSelect,
   onOpen,
   onActivate,
@@ -820,6 +895,7 @@ function FileCard({
   onViewVersions,
   onShare,
   onToggleFavorite,
+  onDownload,
   onContextMenu,
 }: {
   file: FileItem
@@ -832,6 +908,7 @@ function FileCard({
   shareActionLabel: string
   isMultiSelection: boolean
   canWrite: boolean
+  canShareFile: boolean
   onSelect: (e: React.MouseEvent) => void
   onOpen: () => void
   onActivate: (e: React.MouseEvent) => void
@@ -840,6 +917,7 @@ function FileCard({
   onViewVersions: () => void
   onShare: () => void
   onToggleFavorite: () => void
+  onDownload: () => void
   onContextMenu: (e: React.MouseEvent) => void
 }) {
   const detailLabel = isSelected && isMultiSelection
@@ -848,13 +926,8 @@ function FileCard({
       ? '文件夹'
       : formatBytes(file.size)
   const handleDownload = useCallback(() => {
-    void downloadFile(file.path, { filename: file.name }).catch((error: unknown) => {
-      addToast(getFilesActionErrorToast(error, {
-        unavailable: '下载暂不可用',
-        failure: '下载失败',
-      }))
-    })
-  }, [file.path, file.name])
+    onDownload()
+  }, [onDownload])
 
   const handleCopyPath = useCallback(() => {
     copyTextToClipboard(file.path)
@@ -926,13 +999,22 @@ function FileCard({
             >
               <DropdownSection title="操作" showDivider>
                 {file.isDir ? (
-                  <DropdownItem 
-                    key="open" 
-                    startContent={<FolderOpen size={16} />}
-                    onPress={onOpen}
-                  >
-                    打开文件夹
-                  </DropdownItem>
+                  <>
+                    <DropdownItem
+                      key="open"
+                      startContent={<FolderOpen size={16} />}
+                      onPress={onOpen}
+                    >
+                      打开文件夹
+                    </DropdownItem>
+                    <DropdownItem
+                      key="download-archive"
+                      startContent={<Download size={16} />}
+                      onPress={handleDownload}
+                    >
+                      下载为 ZIP
+                    </DropdownItem>
+                  </>
                 ) : (
                   <DropdownItem 
                     key="download" 
@@ -959,7 +1041,7 @@ function FileCard({
                   复制路径
                 </DropdownItem>
               </DropdownSection>
-              {canWrite ? (
+              {canShareFile ? (
                 <DropdownSection title="分享" showDivider>
                   <DropdownItem 
                     key="favorite" 
@@ -1023,6 +1105,8 @@ function FileCard({
 }
 
 export function FilesPage() {
+  'use no memo'
+
   const parentRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const folderInputRef = useRef<HTMLInputElement>(null)
@@ -1080,11 +1164,18 @@ export function FilesPage() {
   const [deleteTarget, setDeleteTarget] = useState<FileItem | null>(null)
   const newFolderSessionRef = useRef(0)
   const currentNewFolderNameRef = useRef('')
+  const createFolderAbortControllerRef = useRef<AbortController | null>(null)
   const renameSessionRef = useRef(0)
   const currentRenameValueRef = useRef('')
   const currentRenameFileRef = useRef<FileItem | null>(null)
+  const renameAbortControllerRef = useRef<AbortController | null>(null)
+  const deleteAbortControllerRef = useRef<AbortController | null>(null)
+  const batchDeleteAbortControllerRef = useRef<AbortController | null>(null)
+  const pasteAbortControllerRef = useRef<AbortController | null>(null)
+  const favoriteAbortControllerRef = useRef<AbortController | null>(null)
   const lastSelectedIndexRef = useRef<number | null>(null)
   const appliedHighlightedPathRef = useRef<string | null>(null)
+  const downloadAbortControllersRef = useRef(new Set<AbortController>())
   const [multiSelectHintVisible, setMultiSelectHintVisible] = useState(false)
   const hintTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   
@@ -1098,6 +1189,7 @@ export function FilesPage() {
   const [showUploadPanel, setShowUploadPanel] = useState(false)
   const uploadClearTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const uploadSessionRef = useRef(0)
+  const uploadAbortControllerRef = useRef<AbortController | null>(null)
   const [shareFeatureDisabled, setShareFeatureDisabled] = useState(false)
   
   const { 
@@ -1121,6 +1213,31 @@ export function FilesPage() {
   useEffect(() => {
     currentPathRef.current = currentPath
   }, [currentPath])
+
+  useEffect(() => {
+    const controllers = downloadAbortControllersRef.current
+    return () => {
+      controllers.forEach((controller) => controller.abort())
+      controllers.clear()
+    }
+  }, [])
+
+  useEffect(() => {
+    return () => {
+      createFolderAbortControllerRef.current?.abort()
+      createFolderAbortControllerRef.current = null
+      renameAbortControllerRef.current?.abort()
+      renameAbortControllerRef.current = null
+      deleteAbortControllerRef.current?.abort()
+      deleteAbortControllerRef.current = null
+      batchDeleteAbortControllerRef.current?.abort()
+      batchDeleteAbortControllerRef.current = null
+      pasteAbortControllerRef.current?.abort()
+      pasteAbortControllerRef.current = null
+      favoriteAbortControllerRef.current?.abort()
+      favoriteAbortControllerRef.current = null
+    }
+  }, [])
 
   const setFilePathState = useCallback((filePath: string): string => {
     const normalizedPath = normalizePath(filePath)
@@ -1160,16 +1277,8 @@ export function FilesPage() {
         return
       }
     }
-    if (scopedHomeDir && scopedHomeDir !== '/' && !pathWithinBase(scopedHomeDir, finalPath)) {
-      addToast({
-        title: '仅可访问主目录内的文件',
-        color: 'warning',
-      })
-      navigateToFilePath(scopedHomeDir, { replace: true })
-      return
-    }
     setFilePathState(finalPath)
-  }, [hasInvalidHomeDir, location.pathname, navigate, navigateToFilePath, scopedHomeDir, setFilePathState])
+  }, [hasInvalidHomeDir, location.pathname, navigate, setFilePathState])
 
   useEffect(() => {
     if (!hasInvalidHomeDir) return
@@ -1181,14 +1290,7 @@ export function FilesPage() {
     }
   }, [hasInvalidHomeDir, currentPath, location.pathname, navigate, setFilePathState])
 
-  useEffect(() => {
-    if (hasInvalidHomeDir) return
-    if (!user || user.role === 'admin' || !scopedHomeDir || scopedHomeDir === '/') return
-    if (location.pathname !== '/files' || currentPath !== '/' || currentPathRef.current !== '/') return
-    navigateToFilePath(scopedHomeDir, { replace: true })
-  }, [hasInvalidHomeDir, user, location.pathname, currentPath, scopedHomeDir, navigateToFilePath])
-
-  const currentPathAllowed = !hasInvalidHomeDir && (!scopedHomeDir || pathWithinBase(scopedHomeDir, currentPath))
+  const currentPathAllowed = !hasInvalidHomeDir
   const filesQueryKey = getFilesQueryKey(fileScopeKey, currentPath)
 
   useEffect(() => {
@@ -1232,7 +1334,7 @@ export function FilesPage() {
 
   const { data, isLoading, error, refetch } = useQuery({
     queryKey: filesQueryKey,
-    queryFn: () => listFiles(currentPath),
+    queryFn: ({ signal }) => listFiles(currentPath, { signal }),
     enabled: currentPathAllowed,
   })
 
@@ -1259,17 +1361,17 @@ export function FilesPage() {
     })
   }, [filesQueryKey, queryClient])
 
-  const deleteFileWithMissingSync = useCallback(async (path: string) => {
-    return withMissingFileActionResult(() => deleteFile(path))
+  const deleteFileWithMissingSync = useCallback(async (path: string, options?: RequestInit) => {
+    return withMissingFileActionResult(() => options ? deleteFile(path, options) : deleteFile(path))
   }, [])
 
-  const deleteSingleFileWithMissingSync = useCallback(async (path: string) => {
-    return withMissingFileActionResult(() => deleteFile(path, {}))
+  const deleteSingleFileWithMissingSync = useCallback(async (path: string, options?: RequestInit) => {
+    return withMissingFileActionResult(() => options ? deleteFile(path, options) : deleteFile(path, {}))
   }, [])
 
-  const moveFileWithMissingSync = useCallback(async (fromPath: string, toPath: string) => {
+  const moveFileWithMissingSync = useCallback(async (fromPath: string, toPath: string, options?: { signal?: AbortSignal }) => {
     try {
-      return await moveFile(fromPath, toPath)
+      return options ? await moveFile(fromPath, toPath, options) : await moveFile(fromPath, toPath)
     } catch (error) {
       if (getErrorStatus(error) === 404) {
         return getMissingFileActionResult()
@@ -1279,9 +1381,9 @@ export function FilesPage() {
     }
   }, [])
 
-  const copyFileWithMissingSync = useCallback(async (fromPath: string, toPath: string) => {
+  const copyFileWithMissingSync = useCallback(async (fromPath: string, toPath: string, options?: { signal?: AbortSignal }) => {
     try {
-      return await copyFile(fromPath, toPath)
+      return options ? await copyFile(fromPath, toPath, options) : await copyFile(fromPath, toPath)
     } catch (error) {
       if (getErrorStatus(error) === 404) {
         return getMissingFileActionResult()
@@ -1293,9 +1395,13 @@ export function FilesPage() {
 
   // Mutations (omitted for brevity, same as before)
   const deleteMutation = useMutation({
-    mutationFn: deleteSingleFileWithMissingSync,
-    onSuccess: (result, path) => {
-      removeFilesFromCache([path])
+    mutationFn: ({ path, signal }: DeleteMutationVariables) => deleteSingleFileWithMissingSync(path, { signal }),
+    onSuccess: (result, variables) => {
+      if (variables.signal.aborted) {
+        return
+      }
+
+      removeFilesFromCache([variables.path])
       queryClient.invalidateQueries({ queryKey: filesQueryKey })
       onDeleteClose()
       setDeleteTarget(null)
@@ -1304,17 +1410,30 @@ export function FilesPage() {
         warning: '删除完成，但存在警告',
       }))
     },
-    onError: (error) => {
+    onError: (error, variables) => {
+      if (variables.signal.aborted || isAbortError(error)) {
+        return
+      }
+
       addToast(getFilesActionErrorToast(error, {
         unavailable: '删除暂不可用',
         failure: '删除失败',
       }))
     },
+    onSettled: (_result, _error, variables) => {
+      if (deleteAbortControllerRef.current?.signal === variables?.signal) {
+        deleteAbortControllerRef.current = null
+      }
+    },
   })
   
   const createFolderMutation = useMutation({
-    mutationFn: ({ path }: { path: string; directoryPath: string; folderName: string; sessionId: number }) => createDirectory(path),
+    mutationFn: ({ path, signal }: CreateFolderMutationVariables) => createDirectory(path, { signal }),
     onSuccess: (result, variables) => {
+      if (variables.signal.aborted) {
+        return
+      }
+
       queryClient.invalidateQueries({ queryKey: getFilesQueryKey(fileScopeKey, variables.directoryPath) })
       if (
         newFolderSessionRef.current === variables.sessionId
@@ -1325,14 +1444,27 @@ export function FilesPage() {
       }
       addToast(getCreateFolderSuccessToast(result))
     },
-    onError: (error) => {
+    onError: (error, variables) => {
+      if (variables.signal.aborted || isAbortError(error)) {
+        return
+      }
+
       addToast(getCreateFolderErrorToast(error))
+    },
+    onSettled: (_result, _error, variables) => {
+      if (createFolderAbortControllerRef.current?.signal === variables?.signal) {
+        createFolderAbortControllerRef.current = null
+      }
     },
   })
   
   const renameMutation = useMutation({
-    mutationFn: ({ from, to }: { from: string; to: string; directoryPath: string; targetPath: string; submittedName: string; sessionId: number }) => moveFileWithMissingSync(from, to),
+    mutationFn: ({ from, to, signal }: RenameMutationVariables) => moveFileWithMissingSync(from, to, { signal }),
     onSuccess: (result, variables) => {
+      if (variables.signal.aborted) {
+        return
+      }
+
       if (isMissingFileActionResult(result)) {
         removeFilesFromCache([variables.from])
       }
@@ -1350,11 +1482,20 @@ export function FilesPage() {
         warning: '重命名完成，但存在警告',
       }))
     },
-    onError: (error) => {
+    onError: (error, variables) => {
+      if (variables.signal.aborted || isAbortError(error)) {
+        return
+      }
+
       addToast(getFilesActionErrorToast(error, {
         unavailable: '重命名暂不可用',
         failure: '重命名失败',
       }))
+    },
+    onSettled: (_result, _error, variables) => {
+      if (renameAbortControllerRef.current?.signal === variables?.signal) {
+        renameAbortControllerRef.current = null
+      }
     },
   })
 
@@ -1375,6 +1516,14 @@ export function FilesPage() {
       return sortOrder === 'asc' ? comparison : -comparison
     })
   }, [data?.files, sortBy, sortOrder])
+
+  const currentPathCanWrite = hasWriteCapability(canWrite, data?.capabilities)
+  const canWriteFile = useCallback((file: FileItem): boolean => {
+    return hasWriteCapability(canWrite, file.capabilities)
+  }, [canWrite])
+  const canUseFileSource = useCallback((file: FileItem): boolean => {
+    return hasConcreteReadCapability(canWrite, file.capabilities)
+  }, [canWrite])
 
   useEffect(() => {
     if (selectedFiles.size === 0) return
@@ -1438,13 +1587,13 @@ export function FilesPage() {
     refetch: refetchFavorites,
   } = useQuery({
     queryKey: [...favoritesCheckQueryKey, filePaths],
-    queryFn: () => checkFavorites(filePaths),
+    queryFn: ({ signal }) => checkFavorites(filePaths, { signal }),
     enabled: !hasInvalidHomeDir && filePaths.length > 0,
     staleTime: 30000, // Cache for 30 seconds
   })
   const { error: shareAvailabilityError } = useQuery({
     queryKey: ['shares-availability'],
-    queryFn: () => listShares(),
+    queryFn: ({ signal }) => listShares(false, { signal }),
     enabled: canWrite && configuredShareEnabled !== false,
     retry: false,
     staleTime: 30000,
@@ -1471,9 +1620,13 @@ export function FilesPage() {
       : null
 
   const favoriteMutation = useMutation({
-    mutationFn: ({ path, isFavorited }: { path: string; isFavorited: boolean }) => 
-      toggleFavorite(path, isFavorited),
-    onSuccess: (newStatus) => {
+    mutationFn: ({ path, isFavorited, signal }: FavoriteMutationVariables) =>
+      toggleFavorite(path, isFavorited, { signal }),
+    onSuccess: (newStatus, variables) => {
+      if (variables.signal.aborted) {
+        return
+      }
+
       queryClient.invalidateQueries({ queryKey: favoritesCheckQueryKey })
       queryClient.invalidateQueries({ queryKey: favoritesListQueryKey })
       addToast({ 
@@ -1482,6 +1635,10 @@ export function FilesPage() {
       })
     },
     onError: (error, variables) => {
+      if (variables.signal.aborted || isAbortError(error)) {
+        return
+      }
+
       if (getErrorCode(error) === 'FAVORITE_ALREADY_EXISTS' || getErrorStatus(error) === 409) {
         syncFavoriteStatus(variables.path, true)
         queryClient.invalidateQueries({ queryKey: favoritesCheckQueryKey })
@@ -1508,7 +1665,23 @@ export function FilesPage() {
 
       addToast(getFavoriteActionErrorToast(error))
     },
+    onSettled: (_result, _error, variables) => {
+      if (favoriteAbortControllerRef.current?.signal === variables?.signal) {
+        favoriteAbortControllerRef.current = null
+      }
+    },
   })
+
+  const handleToggleFavorite = (path: string, isFavorited: boolean) => {
+    favoriteAbortControllerRef.current?.abort()
+    const controller = new AbortController()
+    favoriteAbortControllerRef.current = controller
+    favoriteMutation.mutate({
+      path,
+      isFavorited,
+      signal: controller.signal,
+    })
+  }
 
   const virtualizer = useVirtualizer({
     count: sortedFiles.length,
@@ -1618,25 +1791,33 @@ export function FilesPage() {
   }, [sortedFiles, selectedFiles.size, selectAll, clearSelection])
 
   const handleCreateFolder = useCallback(() => {
-    if (!canWrite) return
+    if (!currentPathCanWrite || createFolderMutation.isPending) return
     const trimmedFolderName = newFolderName.trim()
     if (!trimmedFolderName) return
     const path = currentPath === '/' ? `/${trimmedFolderName}` : `${currentPath}/${trimmedFolderName}`
+    const controller = new AbortController()
+    createFolderAbortControllerRef.current?.abort()
+    createFolderAbortControllerRef.current = controller
     createFolderMutation.mutate({
       path,
       directoryPath: currentPath,
       folderName: trimmedFolderName,
       sessionId: newFolderSessionRef.current,
+      signal: controller.signal,
     })
-  }, [canWrite, newFolderName, currentPath, createFolderMutation])
+  }, [currentPathCanWrite, createFolderMutation, newFolderName, currentPath])
 
   const handleRename = useCallback(() => {
-    if (!canWrite) return
+    if (renameMutation.isPending) return
     const trimmedRenameValue = renameValue.trim()
     if (!actionFile || !trimmedRenameValue) return
+    if (!canWriteFile(actionFile)) return
     if (trimmedRenameValue === actionFile.name) return
     const parentPath = actionFile.path.substring(0, actionFile.path.lastIndexOf('/')) || '/'
     const newPath = parentPath === '/' ? `/${trimmedRenameValue}` : `${parentPath}/${trimmedRenameValue}`
+    const controller = new AbortController()
+    renameAbortControllerRef.current?.abort()
+    renameAbortControllerRef.current = controller
     renameMutation.mutate({
       from: actionFile.path,
       to: newPath,
@@ -1644,19 +1825,28 @@ export function FilesPage() {
       targetPath: actionFile.path,
       submittedName: trimmedRenameValue,
       sessionId: renameSessionRef.current,
+      signal: controller.signal,
     })
-  }, [canWrite, actionFile, currentPath, renameValue, renameMutation])
+  }, [renameMutation, renameValue, actionFile, canWriteFile, currentPath])
 
   const handleDelete = useCallback(() => {
-    if (!canWrite) return
+    if (deleteMutation.isPending) return
     if (!deleteTarget) return
-    deleteMutation.mutate(deleteTarget.path)
-  }, [canWrite, deleteTarget, deleteMutation])
+    if (!canWriteFile(deleteTarget)) return
+    const controller = new AbortController()
+    deleteAbortControllerRef.current?.abort()
+    deleteAbortControllerRef.current = controller
+    deleteMutation.mutate({
+      path: deleteTarget.path,
+      signal: controller.signal,
+    })
+  }, [canWriteFile, deleteMutation, deleteTarget])
 
   const handleOpenNewFolderModal = useCallback(() => {
+    if (!currentPathCanWrite) return
     newFolderSessionRef.current += 1
     onNewFolderOpen()
-  }, [onNewFolderOpen])
+  }, [currentPathCanWrite, onNewFolderOpen])
 
   const handleCloseNewFolderModal = useCallback(() => {
     if (createFolderMutation.isPending) return
@@ -1665,18 +1855,18 @@ export function FilesPage() {
 
   // Action handlers for context menu
   const handleOpenRenameModal = useCallback((file: FileItem) => {
-    if (!canWrite) return
+    if (!canWriteFile(file)) return
     renameSessionRef.current += 1
     setActionFile(file)
     setRenameValue(file.name)
     onRenameOpen()
-  }, [canWrite, onRenameOpen])
+  }, [canWriteFile, onRenameOpen])
 
   const handleOpenDeleteModal = useCallback((file: FileItem) => {
-    if (!canWrite) return
+    if (!canWriteFile(file)) return
     setDeleteTarget(file)
     onDeleteOpen()
-  }, [canWrite, onDeleteOpen])
+  }, [canWriteFile, onDeleteOpen])
 
   const handleCloseRenameModal = useCallback(() => {
     if (renameMutation.isPending) return
@@ -1700,29 +1890,56 @@ export function FilesPage() {
   }, [navigate])
 
   const handleOpenShareModal = useCallback((file: FileItem) => {
-    if (!canWrite) return
+    if (!canUseFileSource(file)) return
     if (!shareActionsAvailable) {
       addToast({ title: shareActionLabel, color: 'warning' })
       return
     }
     setShareFile(file)
     onShareOpen()
-  }, [canWrite, onShareOpen, shareActionLabel, shareActionsAvailable])
+  }, [canUseFileSource, onShareOpen, shareActionLabel, shareActionsAvailable])
 
   // Move/Copy handlers
   const handleOpenMoveModal = useCallback((files: FileItem[]) => {
-    if (!canWrite) return
+    if (files.length === 0 || !files.every(canWriteFile)) {
+      addToast({ title: '所选项目不可移动', color: 'warning' })
+      return
+    }
     setMoveFiles(files)
     setMoveMode('move')
     onMoveOpen()
-  }, [canWrite, onMoveOpen])
+  }, [canWriteFile, onMoveOpen])
 
   const handleOpenCopyModal = useCallback((files: FileItem[]) => {
-    if (!canWrite) return
+    if (files.length === 0 || !files.every(canUseFileSource)) {
+      addToast({ title: '所选项目不可复制', color: 'warning' })
+      return
+    }
     setMoveFiles(files)
     setMoveMode('copy')
     onMoveOpen()
-  }, [canWrite, onMoveOpen])
+  }, [canUseFileSource, onMoveOpen])
+
+  const handleFileDownload = useCallback((file: FileItem, options?: { onSettled?: () => void }) => {
+    const controller = new AbortController()
+    downloadAbortControllersRef.current.add(controller)
+
+    void downloadFile(file.path, getDownloadOptionsWithSignal(file, controller.signal))
+      .catch((error: unknown) => {
+        if (controller.signal.aborted || isAbortError(error)) {
+          return
+        }
+
+        addToast(getFilesActionErrorToast(error, {
+          unavailable: '下载暂不可用',
+          failure: '下载失败',
+        }))
+      })
+      .finally(() => {
+        downloadAbortControllersRef.current.delete(controller)
+        options?.onSettled?.()
+      })
+  }, [])
 
   // Context menu handler
   const handleContextMenu = useCallback((file: FileItem, e: React.MouseEvent) => {
@@ -1743,18 +1960,9 @@ export function FilesPage() {
 
   // Context menu actions
   const handleContextMenuDownload = useCallback(() => {
-    if (!contextMenuFile || contextMenuFile.isDir) return
-    void downloadFile(contextMenuFile.path, { filename: contextMenuFile.name })
-      .catch((error: unknown) => {
-        addToast(getFilesActionErrorToast(error, {
-          unavailable: '下载暂不可用',
-          failure: '下载失败',
-        }))
-      })
-      .finally(() => {
-        contextMenu.hide()
-      })
-  }, [contextMenuFile, contextMenu])
+    if (!contextMenuFile) return
+    handleFileDownload(contextMenuFile, { onSettled: contextMenu.hide })
+  }, [contextMenuFile, contextMenu, handleFileDownload])
 
   const handleContextMenuCopyPath = useCallback(() => {
     if (!contextMenuFile) return
@@ -1774,21 +1982,27 @@ export function FilesPage() {
   const createdDirsRef = useRef<Set<string>>(new Set())
 
   // Ensure a directory path exists (create parent directories recursively)
-  const ensureDirectoryExists = useCallback(async (dirPath: string, warningMessages: string[]) => {
+  const ensureDirectoryExists = useCallback(async (dirPath: string, warningMessages: string[], signal?: AbortSignal) => {
     if (dirPath === '/' || createdDirsRef.current.has(dirPath)) return
+    if (signal?.aborted) {
+      throw new DOMException('directory creation aborted', 'AbortError')
+    }
     
     // Get parent path
     const parentPath = dirPath.substring(0, dirPath.lastIndexOf('/')) || '/'
     
     // Ensure parent exists first
-    await ensureDirectoryExists(parentPath, warningMessages)
+    await ensureDirectoryExists(parentPath, warningMessages, signal)
+    if (signal?.aborted) {
+      throw new DOMException('directory creation aborted', 'AbortError')
+    }
     
     // Create this directory if not already created
     if (!createdDirsRef.current.has(dirPath)) {
       try {
-        const result = await createDirectory(dirPath)
+        const result = await createDirectory(dirPath, signal ? { signal } : {})
         if (result.warning) {
-          warningMessages.push(result.message ?? '')
+          warningMessages.push(getActionWarningSummary(result))
         }
         createdDirsRef.current.add(dirPath)
       } catch (error) {
@@ -1803,12 +2017,17 @@ export function FilesPage() {
 
   // Enhanced upload handler with queue support and folder support
   const handleUpload = useCallback(async (files: FileList | null) => {
-    if (!canWrite) return
+    if (!currentPathCanWrite) return
     if (!files || files.length === 0) return
 
+    uploadAbortControllerRef.current?.abort()
     const uploadSession = uploadSessionRef.current + 1
     uploadSessionRef.current = uploadSession
+    const uploadController = new AbortController()
+    uploadAbortControllerRef.current = uploadController
     const isCurrentUploadSession = () => uploadSessionRef.current === uploadSession
+      && uploadAbortControllerRef.current === uploadController
+      && !uploadController.signal.aborted
 
     if (uploadClearTimeoutRef.current) {
       clearTimeout(uploadClearTimeoutRef.current)
@@ -1855,6 +2074,9 @@ export function FilesPage() {
     }
 
     if (uploadableEntries.length === 0) {
+      if (uploadAbortControllerRef.current === uploadController) {
+        uploadAbortControllerRef.current = null
+      }
       return
     }
 
@@ -1862,84 +2084,101 @@ export function FilesPage() {
     let errorCount = rejectedEntries.length
     const uploadErrors: unknown[] = []
     const uploadWarningMessages: string[] = []
-    
-    for (const { item, index } of uploadableEntries) {
-      const file = item.file
-      const relativePath = (file as File & { webkitRelativePath?: string }).webkitRelativePath || ''
-      
-      if (isCurrentUploadSession()) {
-        setUploadQueue(prev => prev.map((item, j) => 
+
+    try {
+      for (const { item, index } of uploadableEntries) {
+        const file = item.file
+        const relativePath = (file as File & { webkitRelativePath?: string }).webkitRelativePath || ''
+
+        if (!isCurrentUploadSession()) {
+          return
+        }
+        setUploadQueue(prev => prev.map((item, j) =>
           j === index ? { ...item, status: 'uploading' as const } : item
         ))
-      }
-      
-      try {
-        // For folder uploads, create parent directories first
-        if (relativePath && relativePath.includes('/')) {
+
+        try {
+          // For folder uploads, create parent directories first
+          if (relativePath && relativePath.includes('/')) {
           const relativeDir = relativePath.substring(0, relativePath.lastIndexOf('/'))
           const targetDir = currentPath === '/' ? `/${relativeDir}` : `${currentPath}/${relativeDir}`
-          await ensureDirectoryExists(targetDir, uploadWarningMessages)
+          await ensureDirectoryExists(targetDir, uploadWarningMessages, uploadController.signal)
         }
-
-        // Calculate the target path for the file
-        let targetPath = currentPath
-        if (relativePath && relativePath.includes('/')) {
-          const relativeDir = relativePath.substring(0, relativePath.lastIndexOf('/'))
-          targetPath = currentPath === '/' ? `/${relativeDir}` : `${currentPath}/${relativeDir}`
-        }
-        
-        const result = await uploadFile(targetPath, file, (progress) => {
           if (!isCurrentUploadSession()) {
             return
           }
-          setUploadQueue(prev => prev.map((item, j) => 
-            j === index ? { ...item, progress } : item
-          ))
-        })
-        if (result.warning) {
-          uploadWarningMessages.push(result.message ?? '')
-        }
-        successCount++
-        if (isCurrentUploadSession()) {
-          setUploadQueue(prev => prev.map((item, j) => 
-            j === index ? { ...item, status: 'done' as const, progress: 100 } : item
-          ))
-        }
-      } catch (error) {
-        errorCount++
-        uploadErrors.push(error)
-        if (isCurrentUploadSession()) {
-          setUploadQueue(prev => prev.map((item, j) => 
-            j === index ? { ...item, status: 'error' as const, error: getUploadQueueErrorMessage(error) } : item
-          ))
+
+          // Calculate the target path for the file
+          let targetPath = currentPath
+          if (relativePath && relativePath.includes('/')) {
+            const relativeDir = relativePath.substring(0, relativePath.lastIndexOf('/'))
+            targetPath = currentPath === '/' ? `/${relativeDir}` : `${currentPath}/${relativeDir}`
+          }
+
+          const result = await uploadFile(targetPath, file, (progress) => {
+            if (!isCurrentUploadSession()) {
+              return
+            }
+            setUploadQueue(prev => prev.map((item, j) =>
+              j === index ? { ...item, progress } : item
+            ))
+          }, { signal: uploadController.signal })
+          if (result.warning) {
+            uploadWarningMessages.push(getActionWarningSummary(result))
+          }
+          successCount++
+          if (isCurrentUploadSession()) {
+            setUploadQueue(prev => prev.map((item, j) =>
+              j === index ? { ...item, status: 'done' as const, progress: 100 } : item
+            ))
+          }
+        } catch (error) {
+          if (uploadController.signal.aborted || isAbortError(error)) {
+            return
+          }
+          errorCount++
+          uploadErrors.push(error)
+          if (isCurrentUploadSession()) {
+            setUploadQueue(prev => prev.map((item, j) =>
+              j === index ? { ...item, status: 'error' as const, error: getUploadQueueErrorMessage(error) } : item
+            ))
+          }
         }
       }
-    }
 
-    queryClient.invalidateQueries({ queryKey: filesQueryKey })
-
-    if (!isCurrentUploadSession()) {
-      return
-    }
-
-    setIsUploading(false)
-    
-    // Show summary toast for folder upload
-    if (isFolderUpload) {
-      const summaryToast = getFolderUploadSummaryToast(successCount, errorCount, uploadErrors, uploadWarningMessages)
-      if (summaryToast.color !== 'success') {
-        addToast(summaryToast)
+      if (!isCurrentUploadSession()) {
+        return
       }
-    } else if (errorCount === 0 && uploadWarningMessages.length > 0) {
-      addToast(getUploadWarningSummaryToast(successCount, uploadWarningMessages))
+
+      queryClient.invalidateQueries({ queryKey: filesQueryKey })
+
+      if (!isCurrentUploadSession()) {
+        return
+      }
+
+      setIsUploading(false)
+
+      // Show summary toast for folder upload
+      if (isFolderUpload) {
+        const summaryToast = getFolderUploadSummaryToast(successCount, errorCount, uploadErrors, uploadWarningMessages)
+        if (summaryToast.color !== 'success') {
+          addToast(summaryToast)
+        }
+      } else if (errorCount === 0 && uploadWarningMessages.length > 0) {
+        addToast(getUploadWarningSummaryToast(successCount, uploadWarningMessages))
+      }
+
+      // Keep completed uploads visible long enough to review, then remove successes.
+      uploadClearTimeoutRef.current = setTimeout(() => {
+        setUploadQueue(prev => prev.filter(item => item.status === 'error'))
+        uploadClearTimeoutRef.current = null
+      }, UPLOAD_HISTORY_SUCCESS_RETENTION_MS)
+    } finally {
+      if (uploadAbortControllerRef.current === uploadController) {
+        uploadAbortControllerRef.current = null
+      }
     }
-    
-    // Keep completed uploads visible long enough to review, then remove successes.
-    uploadClearTimeoutRef.current = setTimeout(() => {
-      setUploadQueue(prev => prev.filter(item => item.status === 'error'))
-      uploadClearTimeoutRef.current = null
-    }, UPLOAD_HISTORY_SUCCESS_RETENTION_MS)
-  }, [canWrite, currentPath, ensureDirectoryExists, filesQueryKey, queryClient])
+  }, [currentPathCanWrite, currentPath, ensureDirectoryExists, filesQueryKey, queryClient])
 
   const handleUploadInputChange = useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
     void handleUpload(event.target.files)
@@ -1948,6 +2187,9 @@ export function FilesPage() {
 
   useEffect(() => {
     return () => {
+      uploadSessionRef.current += 1
+      uploadAbortControllerRef.current?.abort()
+      uploadAbortControllerRef.current = null
       if (uploadClearTimeoutRef.current) {
         clearTimeout(uploadClearTimeoutRef.current)
         uploadClearTimeoutRef.current = null
@@ -1961,33 +2203,33 @@ export function FilesPage() {
 
   // Drag and drop handlers
   const handleDragEnter = useCallback((e: React.DragEvent) => {
-    if (!canWrite) return
+    if (!currentPathCanWrite) return
     e.preventDefault()
     e.stopPropagation()
     dragCountRef.current++
     if (e.dataTransfer.types.includes('Files')) {
       setIsDragging(true)
     }
-  }, [canWrite])
+  }, [currentPathCanWrite])
 
   const handleDragLeave = useCallback((e: React.DragEvent) => {
-    if (!canWrite) return
+    if (!currentPathCanWrite) return
     e.preventDefault()
     e.stopPropagation()
     dragCountRef.current--
     if (dragCountRef.current === 0) {
       setIsDragging(false)
     }
-  }, [canWrite])
+  }, [currentPathCanWrite])
 
   const handleDragOver = useCallback((e: React.DragEvent) => {
-    if (!canWrite) return
+    if (!currentPathCanWrite) return
     e.preventDefault()
     e.stopPropagation()
-  }, [canWrite])
+  }, [currentPathCanWrite])
 
   const handleDrop = useCallback((e: React.DragEvent) => {
-    if (!canWrite) return
+    if (!currentPathCanWrite) return
     e.preventDefault()
     e.stopPropagation()
     dragCountRef.current = 0
@@ -1997,13 +2239,21 @@ export function FilesPage() {
     if (files.length > 0) {
       handleUpload(files)
     }
-  }, [canWrite, handleUpload])
+  }, [currentPathCanWrite, handleUpload])
 
   // Batch delete handler
   const handleBatchDelete = useCallback(async () => {
-    if (!canWrite) return
+    const writableSelected = sortedFiles.filter((file) => selectedFiles.has(file.path) && canWriteFile(file))
+    if (writableSelected.length === 0 || writableSelected.length !== selectedFiles.size) {
+      addToast({ title: '所选项目不可删除', color: 'warning' })
+      return
+    }
+    batchDeleteAbortControllerRef.current?.abort()
+    const controller = new AbortController()
+    batchDeleteAbortControllerRef.current = controller
+    const { signal } = controller
     setIsBatchDeleting(true)
-    const paths = Array.from(selectedFiles)
+    const paths = writableSelected.map((file) => file.path)
     let successCount = 0
     let errorCount = 0
     const succeededPaths: string[] = []
@@ -2013,18 +2263,33 @@ export function FilesPage() {
 
     try {
       for (const path of paths) {
+        if (signal.aborted) {
+          return
+        }
+
         try {
-          const result = await deleteFileWithMissingSync(path)
+          const result = await deleteFileWithMissingSync(path, { signal })
+          if (signal.aborted) {
+            return
+          }
           successCount++
           succeededPaths.push(path)
           if (result.warning) {
-            warningMessages.push(result.message ?? '')
+            warningMessages.push(getActionWarningSummary(result))
           }
         } catch (error) {
+          if (signal.aborted || isAbortError(error)) {
+            return
+          }
+
           errorCount++
           failedPaths.push(path)
           failedErrors.push(error)
         }
+      }
+
+      if (signal.aborted) {
+        return
       }
 
       removeFilesFromCache(succeededPaths)
@@ -2035,7 +2300,7 @@ export function FilesPage() {
         clearSelection()
         if (warningMessages.length > 0) {
           addToast({
-            title: warningMessages[0] || `已删除 ${successCount} 个文件，但存在警告`,
+            title: getSynchronizedWarningTitle(warningMessages) ?? `已删除 ${successCount} 个文件，但存在警告`,
             color: 'warning',
           })
         } else {
@@ -2061,69 +2326,101 @@ export function FilesPage() {
 
       addToast(getPartialBatchActionToast('批量删除部分完成', successCount, errorCount, warningMessages))
     } finally {
-      setIsBatchDeleting(false)
+      if (batchDeleteAbortControllerRef.current === controller) {
+        batchDeleteAbortControllerRef.current = null
+      }
+      if (!signal.aborted) {
+        setIsBatchDeleting(false)
+      }
     }
-  }, [canWrite, selectedFiles, deleteFileWithMissingSync, removeFilesFromCache, queryClient, clearSelection, onBatchDeleteClose, setSelection, filesQueryKey])
+  }, [canWriteFile, selectedFiles, sortedFiles, deleteFileWithMissingSync, removeFilesFromCache, queryClient, clearSelection, onBatchDeleteClose, setSelection, filesQueryKey])
 
   // Batch download handler
   const handleBatchDownload = useCallback(async () => {
     const paths = Array.from(selectedFiles)
-    const files = sortedFiles.filter(f => paths.includes(f.path) && !f.isDir)
+    const items = sortedFiles.filter(f => paths.includes(f.path))
 
-    if (files.length === 0) {
+    if (items.length === 0) {
       addToast({ title: '未选择可下载的文件', color: 'warning' })
       return
     }
 
-    const results = await Promise.allSettled(files.map((file) => downloadFile(file.path, { filename: file.name })))
-    const failedErrors = results
-      .filter((result): result is PromiseRejectedResult => result.status === 'rejected')
-      .map((result) => result.reason)
-    const failed = results.filter((result) => result.status === 'rejected').length
-    const succeeded = files.length - failed
+    const controller = new AbortController()
+    downloadAbortControllersRef.current.add(controller)
 
-    if (failed === 0) {
-      addToast({ title: `已开始下载 ${succeeded} 个文件`, color: 'success' })
-      return
-    }
+    try {
+      const results = await Promise.allSettled(
+        items.map((file) => downloadFile(file.path, getDownloadOptionsWithSignal(file, controller.signal)))
+      )
 
-    if (succeeded === 0) {
-      if (failedErrors.length > 0 && failedErrors.every(isFilesystemUnavailableError)) {
-        addToast({
-          title: '批量下载暂不可用',
-          description: '文件系统当前不可用，请检查设备状态或稍后重试。',
-          color: 'warning',
-        })
-      } else {
-        addToast({ title: '批量下载失败', description: `共 ${failed} 个文件下载失败`, color: 'danger' })
+      if (controller.signal.aborted) {
+        return
       }
-      return
-    }
 
-    addToast({ title: '部分文件开始下载', description: `已开始 ${succeeded} 个，失败 ${failed} 个`, color: 'warning' })
+      const failedErrors = results
+        .filter((result): result is PromiseRejectedResult => result.status === 'rejected')
+        .map((result) => result.reason)
+      const failed = results.filter((result) => result.status === 'rejected').length
+      const succeeded = items.length - failed
+
+      if (failed === 0) {
+        addToast({ title: `已开始下载 ${succeeded} 项`, color: 'success' })
+        return
+      }
+
+      if (succeeded === 0) {
+        if (failedErrors.length > 0 && failedErrors.every(isFilesystemUnavailableError)) {
+          addToast({
+            title: '批量下载暂不可用',
+            description: '文件系统当前不可用，请检查设备状态或稍后重试。',
+            color: 'warning',
+          })
+        } else {
+          addToast({ title: '批量下载失败', description: `共 ${failed} 个项目下载失败`, color: 'danger' })
+        }
+        return
+      }
+
+      addToast({ title: '部分项目开始下载', description: `已开始 ${succeeded} 项，失败 ${failed} 项`, color: 'warning' })
+    } finally {
+      downloadAbortControllersRef.current.delete(controller)
+    }
   }, [selectedFiles, sortedFiles])
 
   // Keyboard shortcuts handlers
   const handleKeyboardCopy = useCallback(() => {
-    if (!canWrite) return
     if (selectedFiles.size === 0) return
-    clipboard.copy(Array.from(selectedFiles), currentPath)
-    addToast({ title: `已复制 ${selectedFiles.size} 个项目`, color: 'success' })
-  }, [canWrite, selectedFiles, currentPath, clipboard])
+    const copyableSelected = sortedFiles.filter((file) => selectedFiles.has(file.path) && canUseFileSource(file))
+    if (copyableSelected.length === 0 || copyableSelected.length !== selectedFiles.size) {
+      addToast({ title: '所选项目不可复制', color: 'warning' })
+      return
+    }
+    clipboard.copy(copyableSelected.map((file) => file.path), currentPath)
+    addToast({ title: `已复制 ${copyableSelected.length} 个项目`, color: 'success' })
+  }, [canUseFileSource, selectedFiles, sortedFiles, currentPath, clipboard])
 
   const handleKeyboardCut = useCallback(() => {
-    if (!canWrite) return
     if (selectedFiles.size === 0) return
-    clipboard.cut(Array.from(selectedFiles), currentPath)
-    addToast({ title: `已剪切 ${selectedFiles.size} 个项目`, color: 'success' })
-  }, [canWrite, selectedFiles, currentPath, clipboard])
+    const writableSelected = sortedFiles.filter((file) => selectedFiles.has(file.path) && canWriteFile(file))
+    if (writableSelected.length === 0 || writableSelected.length !== selectedFiles.size) {
+      addToast({ title: '所选项目不可移动', color: 'warning' })
+      return
+    }
+    clipboard.cut(writableSelected.map((file) => file.path), currentPath)
+    addToast({ title: `已剪切 ${writableSelected.length} 个项目`, color: 'success' })
+  }, [canWriteFile, selectedFiles, sortedFiles, currentPath, clipboard])
 
   const handleKeyboardPaste = useCallback(async () => {
-    if (!canWrite) return
+    if (!currentPathCanWrite) return
     if (!clipboard.hasPaths()) return
     
     const { paths, operation, sourcePath } = clipboard
     if (!operation || !sourcePath) return
+
+    pasteAbortControllerRef.current?.abort()
+    const controller = new AbortController()
+    pasteAbortControllerRef.current = controller
+    const { signal } = controller
     
     let successCount = 0
     let errorCount = 0
@@ -2131,108 +2428,141 @@ export function FilesPage() {
     const stalePaths: string[] = []
     const failedErrors: unknown[] = []
     const warningMessages: string[] = []
-    
-    for (const path of paths) {
-      const fileName = path.split('/').pop() || ''
-      const destPath = currentPath === '/' ? `/${fileName}` : `${currentPath}/${fileName}`
-      
-      try {
-        if (operation === 'cut') {
-          const result = await moveFileWithMissingSync(path, destPath)
-          if (isMissingFileActionResult(result)) {
-            stalePaths.push(path)
-          }
-          if (result.warning) {
-            warningMessages.push(result.message ?? '')
-          }
-        } else {
-          const result = await copyFileWithMissingSync(path, destPath)
-          if (isMissingFileActionResult(result)) {
-            stalePaths.push(path)
-          }
-          if (result.warning) {
-            warningMessages.push(result.message ?? '')
-          }
+
+    try {
+      for (const path of paths) {
+        if (signal.aborted) {
+          return
         }
-        successCount++
-      } catch (error) {
-        errorCount++
-        failedPaths.push(path)
-        failedErrors.push(error)
-      }
-    }
-    
-    if (operation === 'cut') {
-      if (failedPaths.length === 0) {
-        clipboard.clear()
-      } else {
-        clipboard.cut(failedPaths, sourcePath)
-      }
-    } else if (stalePaths.length > 0) {
-      const staleSet = new Set(stalePaths)
-      const remainingPaths = paths.filter((path) => !staleSet.has(path))
-      if (remainingPaths.length === 0) {
-        clipboard.clear()
-      } else {
-        clipboard.copy(remainingPaths, sourcePath)
-      }
-    }
-    
-    queryClient.invalidateQueries({ queryKey: filesQueryKey })
-    if (sourcePath !== currentPath) {
-      queryClient.invalidateQueries({ queryKey: getFilesQueryKey(fileScopeKey, sourcePath) })
-    }
-    
-    if (errorCount === 0) {
-          if (warningMessages.length > 0) {
-            addToast({
-              title: warningMessages[0] || `成功复制 ${successCount} 个文件，但存在警告`,
-              color: 'warning',
-            })
+
+        const fileName = path.split('/').pop() || ''
+        const destPath = currentPath === '/' ? `/${fileName}` : `${currentPath}/${fileName}`
+
+        try {
+          if (operation === 'cut') {
+            const result = await moveFileWithMissingSync(path, destPath, { signal })
+            if (signal.aborted) {
+              return
+            }
+            if (isMissingFileActionResult(result)) {
+              stalePaths.push(path)
+            }
+            if (result.warning) {
+              warningMessages.push(getActionWarningSummary(result))
+            }
           } else {
-            addToast({ title: `成功${operation === 'cut' ? '移动' : '复制'} ${successCount} 个文件`, color: 'success' })
+            const result = await copyFileWithMissingSync(path, destPath, { signal })
+            if (signal.aborted) {
+              return
+            }
+            if (isMissingFileActionResult(result)) {
+              stalePaths.push(path)
+            }
+            if (result.warning) {
+              warningMessages.push(getActionWarningSummary(result))
+            }
           }
-      return
-    }
+          successCount++
+        } catch (error) {
+          if (signal.aborted || isAbortError(error)) {
+            return
+          }
 
-    if (successCount === 0) {
-      if (failedErrors.length > 0 && failedErrors.every(isFilesystemUnavailableError)) {
-        addToast({
-          title: `${operation === 'cut' ? '批量移动' : '批量复制'}暂不可用`,
-          description: '文件系统当前不可用，请检查设备状态或稍后重试。',
-          color: 'warning',
-        })
-      } else {
-        addToast({ title: `${operation === 'cut' ? '批量移动' : '批量复制'}失败`, description: `共 ${errorCount} 个项目失败`, color: 'danger' })
+          errorCount++
+          failedPaths.push(path)
+          failedErrors.push(error)
+        }
       }
-      return
-    }
 
-    addToast(getPartialBatchActionToast(`${operation === 'cut' ? '批量移动' : '批量复制'}部分完成`, successCount, errorCount, warningMessages))
-  }, [canWrite, clipboard, currentPath, moveFileWithMissingSync, copyFileWithMissingSync, filesQueryKey, fileScopeKey, queryClient])
+      if (signal.aborted) {
+        return
+      }
+
+      if (operation === 'cut') {
+        if (failedPaths.length === 0) {
+          clipboard.clear()
+        } else {
+          clipboard.cut(failedPaths, sourcePath)
+        }
+      } else if (stalePaths.length > 0) {
+        const staleSet = new Set(stalePaths)
+        const remainingPaths = paths.filter((path) => !staleSet.has(path))
+        if (remainingPaths.length === 0) {
+          clipboard.clear()
+        } else {
+          clipboard.copy(remainingPaths, sourcePath)
+        }
+      }
+
+      queryClient.invalidateQueries({ queryKey: filesQueryKey })
+      if (sourcePath !== currentPath) {
+        queryClient.invalidateQueries({ queryKey: getFilesQueryKey(fileScopeKey, sourcePath) })
+      }
+
+      if (errorCount === 0) {
+        const pasteActionLabel = operation === 'cut' ? '移动' : '复制'
+        if (warningMessages.length > 0) {
+          addToast({
+            title: getSynchronizedWarningTitle(warningMessages) ?? `成功${pasteActionLabel} ${successCount} 个文件，但存在警告`,
+            color: 'warning',
+          })
+        } else {
+          addToast({ title: `成功${pasteActionLabel} ${successCount} 个文件`, color: 'success' })
+        }
+        return
+      }
+
+      if (successCount === 0) {
+        if (failedErrors.length > 0 && failedErrors.every(isFilesystemUnavailableError)) {
+          addToast({
+            title: `${operation === 'cut' ? '批量移动' : '批量复制'}暂不可用`,
+            description: '文件系统当前不可用，请检查设备状态或稍后重试。',
+            color: 'warning',
+          })
+        } else {
+          addToast(
+            getSharedPathConflictErrorToast(failedErrors)
+            ?? getSharedQuotaExceededErrorToast(failedErrors)
+            ?? { title: `${operation === 'cut' ? '批量移动' : '批量复制'}失败`, description: `共 ${errorCount} 个项目失败`, color: 'danger' }
+          )
+        }
+        return
+      }
+
+      addToast(getPartialBatchActionToast(`${operation === 'cut' ? '批量移动' : '批量复制'}部分完成`, successCount, errorCount, warningMessages))
+    } finally {
+      if (pasteAbortControllerRef.current === controller) {
+        pasteAbortControllerRef.current = null
+      }
+    }
+  }, [currentPathCanWrite, clipboard, currentPath, moveFileWithMissingSync, copyFileWithMissingSync, filesQueryKey, fileScopeKey, queryClient])
 
   const handleKeyboardDelete = useCallback(() => {
-    if (!canWrite) return
     if (selectedFiles.size > 0) {
-      onBatchDeleteOpen()
+      const writableSelected = sortedFiles.filter((file) => selectedFiles.has(file.path) && canWriteFile(file))
+      if (writableSelected.length === selectedFiles.size) {
+        onBatchDeleteOpen()
+      } else {
+        addToast({ title: '所选项目不可删除', color: 'warning' })
+      }
       return
     }
 
     const target = getFocusedOrActiveFile()
     if (!target) return
+    if (!canWriteFile(target.file)) return
     setDeleteTarget(target.file)
     onDeleteOpen()
-  }, [canWrite, getFocusedOrActiveFile, onBatchDeleteOpen, onDeleteOpen, selectedFiles.size])
+  }, [canWriteFile, getFocusedOrActiveFile, onBatchDeleteOpen, onDeleteOpen, selectedFiles, sortedFiles])
 
   const handleKeyboardRename = useCallback(() => {
-    if (!canWrite) return
     const target = selectedFiles.size === 1
       ? sortedFiles.find(f => f.path === Array.from(selectedFiles)[0])
       : getFocusedOrActiveFile()?.file
-    if (target) {
+    if (target && canWriteFile(target)) {
       handleOpenRenameModal(target)
     }
-  }, [canWrite, getFocusedOrActiveFile, handleOpenRenameModal, selectedFiles, sortedFiles])
+  }, [canWriteFile, getFocusedOrActiveFile, handleOpenRenameModal, selectedFiles, sortedFiles])
 
   const handleKeyboardEnter = useCallback(() => {
     // If there's a focused file, open it
@@ -2381,14 +2711,14 @@ export function FilesPage() {
     onEscape: handleKeyboardEscape,
     onCopy: canWrite ? handleKeyboardCopy : undefined,
     onCut: canWrite ? handleKeyboardCut : undefined,
-    onPaste: canWrite ? handleKeyboardPaste : undefined,
+    onPaste: currentPathCanWrite ? handleKeyboardPaste : undefined,
     onRename: canWrite ? handleKeyboardRename : undefined,
     onEnter: handleKeyboardEnter,
     onSpace: handleKeyboardToggleFocusedSelection,
     onArrowDown: handleKeyboardArrowDown,
     onArrowUp: handleKeyboardArrowUp,
     onRefresh: handleKeyboardRefresh,
-    onNewFolder: canWrite ? handleOpenNewFolderModal : undefined,
+    onNewFolder: currentPathCanWrite ? handleOpenNewFolderModal : undefined,
   }, {
     enabled: fileShortcutsEnabled,
   })
@@ -2432,6 +2762,9 @@ export function FilesPage() {
     if (selectedFiles.size === 0) return []
     return sortedFiles.filter((file) => selectedFiles.has(file.path))
   }, [selectedFiles, sortedFiles])
+  const canMoveSelectedItems = selectedFileItems.length > 0 && selectedFileItems.every(canWriteFile)
+  const canCopySelectedItems = selectedFileItems.length > 0 && selectedFileItems.every(canUseFileSource)
+  const canDeleteSelectedItems = canMoveSelectedItems
   const totalCounts = useMemo(() => {
     let files = 0
     let folders = 0
@@ -2597,7 +2930,7 @@ export function FilesPage() {
 
       {/* Upload queue panel */}
       {showUploadPanel && uploadQueue.length > 0 && (
-        <div className="fixed inset-x-4 bottom-[calc(env(safe-area-inset-bottom)+5.25rem)] z-[100] overflow-hidden rounded-lg border border-divider bg-content1 shadow-xl sm:inset-x-auto sm:right-6 sm:bottom-6 sm:w-96">
+        <div className="fixed inset-x-4 bottom-[calc(env(safe-area-inset-bottom)+5.25rem)] z-30 overflow-hidden rounded-lg border border-divider bg-content1 shadow-xl sm:inset-x-auto sm:right-6 sm:bottom-6 sm:w-96">
           <div className="flex items-center justify-between px-4 py-3 bg-content2 border-b border-divider">
             <div className="flex items-center gap-2">
               <Upload size={16} className="text-accent-primary" />
@@ -2714,6 +3047,7 @@ export function FilesPage() {
                       className="btn-secondary btn-sm rounded-lg text-default-600"
                       startContent={<Move size={16} />}
                       onPress={() => handleOpenMoveModal(selectedFileItems)}
+                      isDisabled={!canMoveSelectedItems}
                     >
                       批量移动
                     </Button>
@@ -2724,6 +3058,7 @@ export function FilesPage() {
                       className="btn-secondary btn-sm rounded-lg text-default-600"
                       startContent={<Files size={16} />}
                       onPress={() => handleOpenCopyModal(selectedFileItems)}
+                      isDisabled={!canCopySelectedItems}
                     >
                       批量复制
                     </Button>
@@ -2735,6 +3070,7 @@ export function FilesPage() {
                       className="rounded-lg"
                       startContent={<Trash2 size={16} />}
                       onPress={onBatchDeleteOpen}
+                      isDisabled={!canDeleteSelectedItems}
                     >
                       批量删除
                     </Button>
@@ -2773,7 +3109,7 @@ export function FilesPage() {
                 </>
               ) : (
                 <>
-                  {canWrite ? (
+                  {currentPathCanWrite ? (
                     <>
                       <Button
                         className="btn-primary btn-md border-none font-medium rounded-lg"
@@ -2804,7 +3140,7 @@ export function FilesPage() {
                     </>
                   ) : (
                     <div className="rounded-lg border border-divider bg-content2/50 px-3 py-2 text-sm text-default-500">
-                      只读账户可查看、预览和下载文件
+                      {canWrite ? '当前目录为只读，可查看、预览和下载文件' : '只读账户可查看、预览和下载文件'}
                     </div>
                   )}
                 </>
@@ -2893,10 +3229,9 @@ export function FilesPage() {
 
           {hasSelection && (
             <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-t border-divider px-3 pb-3 text-xs text-default-500">
-              <span>下载将处理 {selectedCounts.files} 个文件</span>
+              <span>下载将处理 {selectedCounts.files + selectedCounts.folders} 项</span>
               <span>删除会进入回收站</span>
-              {selectedCounts.files === 0 && selectedCounts.folders > 0 && <span>当前选择不含可下载文件</span>}
-              {selectedCounts.files > 0 && selectedCounts.folders > 0 && <span>将跳过文件夹，仅下载文件</span>}
+              {selectedCounts.folders > 0 && <span>文件夹会打包为 ZIP</span>}
             </div>
           )}
         </div>
@@ -2907,7 +3242,7 @@ export function FilesPage() {
             <AlertCircle size={16} className="shrink-0 text-warning" />
             <div className="min-w-0 flex-1">
               <p className="font-medium">{favoritesBanner?.title ?? '收藏状态加载失败'}</p>
-              <p className="truncate text-xs text-default-500">{favoritesBanner?.description ?? '请稍后重试'}</p>
+              <p className="truncate text-xs text-default-500">{favoritesBanner?.description ?? GENERIC_LOAD_ERROR_DESCRIPTION}</p>
             </div>
             <Button size="sm" variant="bordered" className="rounded-lg" onPress={handleRefreshFavoritesBanner}>
               重新加载收藏状态
@@ -3013,7 +3348,8 @@ export function FilesPage() {
                         shareActionsAvailable={shareActionsAvailable}
                         shareActionLabel={shareActionLabel}
                         isMultiSelection={hasMultiSelection}
-                        canWrite={canWrite}
+                        canWrite={canWriteFile(file)}
+                        canShareFile={canUseFileSource(file)}
                         onSelect={(e) => handleFileSelection(file, virtualItem.index, e, 'toggle')}
                         onOpen={() => handleFileOpen(file)}
                         onActivate={(e) => handleFileActivate(file, virtualItem.index, e)}
@@ -3021,10 +3357,11 @@ export function FilesPage() {
                         onDelete={() => handleOpenDeleteModal(file)}
                         onViewVersions={() => handleViewVersions(file)}
                         onShare={() => handleOpenShareModal(file)}
-                        onToggleFavorite={() => favoriteMutation.mutate({ 
-                          path: file.path, 
-                          isFavorited: favoritesData?.[file.path] ?? false 
-                        })}
+                        onToggleFavorite={() => handleToggleFavorite(
+                          file.path,
+                          favoritesData?.[file.path] ?? false
+                        )}
+                        onDownload={() => handleFileDownload(file)}
                         onContextMenu={(e) => handleContextMenu(file, e)}
                       />
                     </div>
@@ -3096,7 +3433,8 @@ export function FilesPage() {
                       shareActionsAvailable={shareActionsAvailable}
                       shareActionLabel={shareActionLabel}
                       isMultiSelection={hasMultiSelection}
-                      canWrite={canWrite}
+                      canWrite={canWriteFile(file)}
+                      canShareFile={canUseFileSource(file)}
                       onSelect={(e) => handleFileSelection(file, index, e, 'toggle')}
                       onOpen={() => handleFileOpen(file)}
                       onActivate={(e) => handleFileActivate(file, index, e)}
@@ -3104,10 +3442,11 @@ export function FilesPage() {
                       onDelete={() => handleOpenDeleteModal(file)}
                       onViewVersions={() => handleViewVersions(file)}
                       onShare={() => handleOpenShareModal(file)}
-                      onToggleFavorite={() => favoriteMutation.mutate({
-                        path: file.path,
-                        isFavorited: favoritesData?.[file.path] ?? false
-                      })}
+                      onToggleFavorite={() => handleToggleFavorite(
+                        file.path,
+                        favoritesData?.[file.path] ?? false
+                      )}
+                      onDownload={() => handleFileDownload(file)}
                       onContextMenu={(e) => handleContextMenu(file, e)}
                     />
                   ))}
@@ -3382,9 +3721,9 @@ export function FilesPage() {
                       handleOpenMoveModal(selectedFileItems)
                       contextMenu.hide()
                     }}
-                    disabled={selectedFileItems.length === 0}
+                    disabled={!canMoveSelectedItems}
                   >
-                    批量移动{selectedFileItems.length === 0 ? '（无可移动项）' : ''}
+                    批量移动{!canMoveSelectedItems ? '（无可移动项）' : ''}
                   </ContextMenuItem>
                 )}
                 {canWrite && (
@@ -3394,9 +3733,9 @@ export function FilesPage() {
                       handleOpenCopyModal(selectedFileItems)
                       contextMenu.hide()
                     }}
-                    disabled={selectedFileItems.length === 0}
+                    disabled={!canCopySelectedItems}
                   >
-                    批量复制{selectedFileItems.length === 0 ? '（无可复制项）' : ''}
+                    批量复制{!canCopySelectedItems ? '（无可复制项）' : ''}
                   </ContextMenuItem>
                 )}
                 {canWrite && (
@@ -3407,6 +3746,7 @@ export function FilesPage() {
                       onBatchDeleteOpen()
                       contextMenu.hide()
                     }}
+                    disabled={!canDeleteSelectedItems}
                   >
                     批量删除（进回收站）
                   </ContextMenuItem>
@@ -3416,15 +3756,23 @@ export function FilesPage() {
               <>
                 <ContextMenuSection title="操作" showDivider>
                   {contextMenuFile.isDir ? (
-                    <ContextMenuItem
-                      icon={<FolderOpen size={16} />}
-                      onClick={() => {
-                        navigateToFilePath(contextMenuFile.path)
-                        contextMenu.hide()
-                      }}
-                    >
-                      打开文件夹
-                    </ContextMenuItem>
+                    <>
+                      <ContextMenuItem
+                        icon={<FolderOpen size={16} />}
+                        onClick={() => {
+                          navigateToFilePath(contextMenuFile.path)
+                          contextMenu.hide()
+                        }}
+                      >
+                        打开文件夹
+                      </ContextMenuItem>
+                      <ContextMenuItem
+                        icon={<Download size={16} />}
+                        onClick={handleContextMenuDownload}
+                      >
+                        下载为 ZIP
+                      </ContextMenuItem>
+                    </>
                   ) : (
                     <ContextMenuItem
                       icon={<Download size={16} />}
@@ -3433,7 +3781,7 @@ export function FilesPage() {
                       下载
                     </ContextMenuItem>
                   )}
-                  {canWrite && (
+                  {canWriteFile(contextMenuFile) && (
                     <ContextMenuItem
                       icon={<Pencil size={16} />}
                       onClick={() => {
@@ -3444,7 +3792,7 @@ export function FilesPage() {
                       重命名
                     </ContextMenuItem>
                   )}
-                  {canWrite && (
+                  {canWriteFile(contextMenuFile) && (
                     <ContextMenuItem
                       icon={<Move size={16} />}
                       onClick={() => {
@@ -3455,7 +3803,7 @@ export function FilesPage() {
                       移动到...
                     </ContextMenuItem>
                   )}
-                  {canWrite && (
+                  {canUseFileSource(contextMenuFile) && (
                     <ContextMenuItem
                       icon={<Files size={16} />}
                       onClick={() => {
@@ -3473,23 +3821,23 @@ export function FilesPage() {
                     复制路径
                   </ContextMenuItem>
                 </ContextMenuSection>
-                <ContextMenuSection title={canWrite ? '分享' : '历史'} showDivider>
-                  {canWrite && (
+                <ContextMenuSection title={canUseFileSource(contextMenuFile) ? '分享' : '历史'} showDivider>
+                  {canUseFileSource(contextMenuFile) && (
                     <ContextMenuItem
                       icon={<Star size={16} className={favoritesData?.[contextMenuFile.path] ? "fill-accent-primary text-accent-primary" : ""} />}
                       disabled={!favoriteActionsAvailable}
                       onClick={() => {
-                        favoriteMutation.mutate({ 
-                          path: contextMenuFile.path, 
-                          isFavorited: favoritesData?.[contextMenuFile.path] ?? false 
-                        })
+                        handleToggleFavorite(
+                          contextMenuFile.path,
+                          favoritesData?.[contextMenuFile.path] ?? false
+                        )
                         contextMenu.hide()
                       }}
                     >
                       {favoriteActionsAvailable ? (favoritesData?.[contextMenuFile.path] ? '取消收藏' : '添加收藏') : favoriteUnavailableLabel}
                     </ContextMenuItem>
                   )}
-                  {canWrite && (
+                  {canUseFileSource(contextMenuFile) && (
                     <ContextMenuItem
                       icon={<Link2 size={16} />}
                       disabled={!shareActionsAvailable}
@@ -3512,7 +3860,7 @@ export function FilesPage() {
                     查看版本历史
                   </ContextMenuItem>
                 </ContextMenuSection>
-                {canWrite && (
+                {canWriteFile(contextMenuFile) && (
                   <ContextMenuSection>
                     <ContextMenuItem
                       icon={<Trash2 size={16} />}

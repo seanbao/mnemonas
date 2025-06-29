@@ -105,6 +105,7 @@ require_absolute_path() {
   local label="$2"
   [[ "$value" == /* ]] || fail "$label must be an absolute path for systemd deployment: $value"
   [[ "$value" != *[[:space:]]* ]] || fail "$label cannot contain whitespace for systemd deployment: $value"
+  [[ "$value" != *[[:cntrl:]]* ]] || fail "$label cannot contain control characters: $value"
   ! path_has_parent_segment "$value" || fail "$label cannot contain parent directory segments: $value"
 }
 
@@ -209,6 +210,7 @@ require_systemd_literal() {
   local value="$1"
   local label="$2"
   [[ "$value" != *$'\n'* && "$value" != *$'\r'* ]] || fail "$label cannot contain newline characters: $value"
+  [[ "$value" != *[[:cntrl:]]* ]] || fail "$label cannot contain control characters: $value"
   [[ "$value" != *%* ]] || fail "$label cannot contain systemd specifiers (%): $value"
   [[ "$value" != *\"* && "$value" != *\\* ]] || fail "$label cannot contain quote or backslash characters for systemd deployment: $value"
 }
@@ -233,16 +235,29 @@ endpoint_host() {
   printf '%s\n' "$host"
 }
 
+is_ipv4_loopback_host() {
+  local host="$1"
+  local octet
+  local -a octets
+
+  [[ "$host" =~ ^127\.([0-9]{1,3}\.){2}[0-9]{1,3}$ ]] || return 1
+  IFS='.' read -r -a octets <<< "$host"
+  for octet in "${octets[@]}"; do
+    [[ ${#octet} -le 3 ]] || return 1
+    (( 10#$octet >= 0 && 10#$octet <= 255 )) || return 1
+  done
+  return 0
+}
+
 is_loopback_host() {
   local host="$1"
+
   case "$host" in
-    localhost|ip6-localhost|127.*|::1)
+    localhost|ip6-localhost|::1)
       return 0
       ;;
-    *)
-      return 1
-      ;;
   esac
+  is_ipv4_loopback_host "$host"
 }
 
 warn_if_non_loopback_endpoint() {
@@ -403,7 +418,7 @@ require_checkout_artifacts_current() {
   local dataplane_src="$3"
   local web_src="$4"
 
-  [[ -z "${RELEASE_DIR:-}" && -d "$release_root/.git" ]] || return 0
+  [[ -d "$release_root/.git" ]] || return 0
 
   if has_newer_file_than "$nasd_src" \
     "$release_root/cmd" \
@@ -438,6 +453,51 @@ toml_value() {
   local section="$1"
   local key="$2"
   local file="$3"
+
+  [[ -f "$file" ]] || return 0
+
+  if command -v python3 >/dev/null 2>&1; then
+    local value
+    if value=$(python3 - "$file" "$section" "$key" <<'PY'
+import sys
+
+try:
+    import tomllib
+except Exception:
+    sys.exit(2)
+
+path, section, key = sys.argv[1], sys.argv[2], sys.argv[3]
+try:
+    with open(path, "rb") as handle:
+        data = tomllib.load(handle)
+except Exception:
+    sys.exit(2)
+
+current = data
+for part in section.split("."):
+    if not isinstance(current, dict):
+        sys.exit(0)
+    current = current.get(part)
+    if current is None:
+        sys.exit(0)
+
+if not isinstance(current, dict) or key not in current:
+    sys.exit(0)
+
+value = current[key]
+if isinstance(value, bool):
+    sys.stdout.write("true" if value else "false")
+elif isinstance(value, (str, int, float)):
+    sys.stdout.write(str(value))
+elif hasattr(value, "isoformat"):
+    sys.stdout.write(value.isoformat())
+PY
+    ); then
+      printf '%s' "$value"
+      return 0
+    fi
+  fi
+
   awk -v section="[$section]" -v key="$key" '
     function strip_comment(text,    i, c, quote, escaped, out) {
       quote = ""
@@ -577,6 +637,7 @@ ensure_storage_directories() {
 
 render_config() {
   local template="$1"
+  CONFIG_CREATED=0
   mkdir -p "$CONFIG_DIR"
   chown "$SERVICE_USER:$SERVICE_GROUP" "$CONFIG_DIR"
   chmod 0750 "$CONFIG_DIR"
@@ -597,9 +658,16 @@ render_config() {
     -e "s|^port = .*|port = $SERVER_PORT|" \
     -e "s|^root = \".*\"|root = \"$storage_root_escaped\"|" \
     -e "s|^grpc_address = \".*\"|grpc_address = \"$dataplane_grpc_addr_escaped\"|" \
-    "$template" > "$CONFIG_PATH"
+  "$template" > "$CONFIG_PATH"
   chown "$SERVICE_USER:$SERVICE_GROUP" "$CONFIG_PATH"
   chmod 0600 "$CONFIG_PATH"
+  CONFIG_CREATED=1
+}
+
+cleanup_created_config() {
+  if [[ "${CONFIG_CREATED:-0}" == "1" ]]; then
+    rm -f -- "$CONFIG_PATH"
+  fi
 }
 
 install_units() {
@@ -683,6 +751,119 @@ WantedBy=multi-user.target
 EOF
 }
 
+install_web_assets() {
+  local web_src="$1"
+  local web_parent web_name tmp_dir backup_parent backup_path
+
+  web_parent="$(dirname "$WEB_DIR")"
+  web_name="$(basename "$WEB_DIR")"
+  mkdir -p "$SHARE_DIR" "$web_parent"
+  chmod a+x "$SHARE_DIR"
+
+  tmp_dir="$(mktemp -d "$web_parent/.${web_name}.new.XXXXXXXX")"
+  if ! cp -a "$web_src"/. "$tmp_dir"/; then
+    rm -rf -- "$tmp_dir"
+    return 1
+  fi
+  if ! chmod -R a+rX "$tmp_dir"; then
+    rm -rf -- "$tmp_dir"
+    return 1
+  fi
+
+  backup_parent=""
+  backup_path=""
+  if [[ -e "$WEB_DIR" || -L "$WEB_DIR" ]]; then
+    backup_parent="$(mktemp -d "$web_parent/.${web_name}.old.XXXXXXXX")"
+    backup_path="$backup_parent/$web_name"
+    if ! mv -- "$WEB_DIR" "$backup_path"; then
+      rm -rf -- "$tmp_dir" "$backup_parent"
+      return 1
+    fi
+  fi
+
+  if ! mv -- "$tmp_dir" "$WEB_DIR"; then
+    if [[ -n "$backup_path" && -e "$backup_path" ]]; then
+      mv -- "$backup_path" "$WEB_DIR" || true
+    fi
+    rm -rf -- "$tmp_dir" "$backup_parent"
+    return 1
+  fi
+
+  if [[ -n "$backup_parent" ]]; then
+    rm -rf -- "$backup_parent"
+  fi
+}
+
+install_binary_assets() {
+  local nasd_src="$1"
+  local dataplane_src="$2"
+  local dataplane_start_src="$3"
+  local doctor_src="$4"
+  local public_setup_src="$5"
+  local uninstall_src="$6"
+  local staging_dir backup_dir name target
+  local -a names sources backed_names installed_names
+
+  mkdir -p "$BIN_DIR"
+  staging_dir="$(mktemp -d "$BIN_DIR/.mnemonas-bin.new.XXXXXXXX")"
+  names=(nasd dataplane mnemonas-dataplane-start)
+  sources=("$nasd_src" "$dataplane_src" "$dataplane_start_src")
+  if [[ -n "$doctor_src" ]]; then
+    names+=(mnemonas-doctor)
+    sources+=("$doctor_src")
+  fi
+  if [[ -n "$public_setup_src" ]]; then
+    names+=(mnemonas-public-setup)
+    sources+=("$public_setup_src")
+  fi
+  if [[ -n "$uninstall_src" ]]; then
+    names+=(mnemonas-uninstall-systemd)
+    sources+=("$uninstall_src")
+  fi
+
+  local i
+  for i in "${!names[@]}"; do
+    if ! install -m 0755 "${sources[$i]}" "$staging_dir/${names[$i]}"; then
+      rm -rf -- "$staging_dir"
+      return 1
+    fi
+  done
+
+  backup_dir="$(mktemp -d "$BIN_DIR/.mnemonas-bin.old.XXXXXXXX")"
+  for name in "${names[@]}"; do
+    target="$BIN_DIR/$name"
+    if [[ -e "$target" || -L "$target" ]]; then
+      if ! mv -- "$target" "$backup_dir/$name"; then
+        local backed_name
+        for backed_name in "${backed_names[@]}"; do
+          mv -- "$backup_dir/$backed_name" "$BIN_DIR/$backed_name" || true
+        done
+        rm -rf -- "$staging_dir" "$backup_dir"
+        return 1
+      fi
+      backed_names+=("$name")
+    fi
+  done
+
+  for name in "${names[@]}"; do
+    if ! mv -- "$staging_dir/$name" "$BIN_DIR/$name"; then
+      local installed_name
+      for installed_name in "${installed_names[@]}"; do
+        rm -f -- "$BIN_DIR/$installed_name"
+      done
+      local backed_name
+      for backed_name in "${backed_names[@]}"; do
+        mv -- "$backup_dir/$backed_name" "$BIN_DIR/$backed_name" || true
+      done
+      rm -rf -- "$staging_dir" "$backup_dir"
+      return 1
+    fi
+    installed_names+=("$name")
+  done
+
+  rm -rf -- "$staging_dir" "$backup_dir"
+}
+
 detect_primary_ipv4() {
   local ip_addr=""
 
@@ -712,10 +893,21 @@ web_ui_url() {
   printf 'http://%s:%s\n' "$host" "$SERVER_PORT"
 }
 
+restart_service() {
+  local service="$1"
+
+  if systemctl restart "$service"; then
+    return 0
+  fi
+
+  fail "failed to restart $service; inspect with: systemctl status $service --no-pager; journalctl -u $service -n 100 --no-pager"
+}
+
 main() {
   require_root
   require_command install
   require_command grep
+  require_command mktemp
   require_command sed
   require_command systemctl
 
@@ -734,12 +926,14 @@ main() {
 
   apply_existing_config_defaults
   require_safe_directory_path "$BIN_DIR" "BIN_DIR"
-		  require_mutable_tree_path "$CONFIG_DIR" "CONFIG_DIR"
-		  require_absolute_path "$CONFIG_PATH" "CONFIG_PATH"
-		  require_no_symlink_components "$CONFIG_PATH" "CONFIG_PATH"
-		  require_config_path_under_config_dir
+  require_mutable_tree_path "$CONFIG_DIR" "CONFIG_DIR"
+  require_absolute_path "$CONFIG_PATH" "CONFIG_PATH"
+  require_no_symlink_components "$CONFIG_PATH" "CONFIG_PATH"
+  require_config_path_under_config_dir
   require_safe_directory_path "$SYSTEMD_DIR" "SYSTEMD_DIR"
   require_mutable_tree_path "$STORAGE_ROOT" "STORAGE_ROOT"
+  require_mutable_tree_path "$STORAGE_ROOT/files" "storage files directory"
+  require_mutable_tree_path "$STORAGE_ROOT/.mnemonas/objects" "storage internal object directory"
   require_core_path_layout
   require_safe_share_dir
   require_safe_web_dir
@@ -761,31 +955,19 @@ main() {
   warn_if_non_loopback_endpoint "$DATAPLANE_HTTP_ADDR" "DATAPLANE_HTTP_ADDR"
   create_service_user
 
-  mkdir -p "$BIN_DIR" "$WEB_DIR"
   ensure_storage_directories
+  render_config "$config_template"
+  if ! "$nasd_src" --check-config --config "$CONFIG_PATH" >/dev/null; then
+    cleanup_created_config
+    return 1
+  fi
 
+  mkdir -p "$BIN_DIR"
   log "installing binaries"
-  install -m 0755 "$nasd_src" "$BIN_DIR/nasd"
-  install -m 0755 "$dataplane_src" "$BIN_DIR/dataplane"
-  install -m 0755 "$dataplane_start_src" "$BIN_DIR/mnemonas-dataplane-start"
-  if [[ -n "$doctor_src" ]]; then
-    install -m 0755 "$doctor_src" "$BIN_DIR/mnemonas-doctor"
-  fi
-  if [[ -n "$public_setup_src" ]]; then
-    install -m 0755 "$public_setup_src" "$BIN_DIR/mnemonas-public-setup"
-  fi
-  if [[ -n "$uninstall_src" ]]; then
-    install -m 0755 "$uninstall_src" "$BIN_DIR/mnemonas-uninstall-systemd"
-  fi
+  install_binary_assets "$nasd_src" "$dataplane_src" "$dataplane_start_src" "$doctor_src" "$public_setup_src" "$uninstall_src"
 
   log "installing Web UI assets"
-  rm -rf -- "$WEB_DIR"
-  mkdir -p "$WEB_DIR"
-  cp -a "$web_src"/. "$WEB_DIR"/
-  chmod -R a+rX "$SHARE_DIR"
-
-  render_config "$config_template"
-  "$BIN_DIR/nasd" --check-config --config "$CONFIG_PATH" >/dev/null
+  install_web_assets "$web_src"
 
   install_units
   systemctl daemon-reload
@@ -793,8 +975,8 @@ main() {
 
   if [[ "$ENABLE_NOW" != "0" ]]; then
     log "starting services"
-    systemctl restart mnemonas-dataplane.service
-    systemctl restart mnemonas.service
+    restart_service mnemonas-dataplane.service
+    restart_service mnemonas.service
   fi
 
   local initial_password_file web_url

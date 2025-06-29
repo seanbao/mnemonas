@@ -157,13 +157,13 @@ func TestCASIntegration_WriteReadVerify(t *testing.T) {
 
 ### 3.1 用户场景测试
 
-默认入口是 `make e2e`，它通过 `scripts/run-e2e-isolated.sh` 启动临时后端、临时存储和非默认端口，再调用 `scripts/e2e-test.sh` 测试真实用户场景。隔离根目录必须位于 `/tmp` 或当前 checkout 下，且不能包含 `..` 或符号链接路径组件。需要跳过耗时测试时：
+默认入口是 `make e2e`，它通过 `scripts/run-e2e-isolated.sh` 启动临时后端、临时存储和非默认端口，再调用 `scripts/e2e-test.sh` 测试真实用户场景。隔离根目录必须位于 `/tmp` 或当前 checkout 下，且不能包含控制字符、`..` 或符号链接路径组件。需要跳过耗时测试时：
 
 ```bash
 ./scripts/run-e2e-isolated.sh --quick
 ```
 
-`scripts/e2e-test.sh` 可以手动打一个已启动的服务；此时需要显式提供 `BASE_URL` 和对应的临时存储、配置、密钥、初始密码文件路径。手动 `STORAGE_ROOT` 必须是绝对路径，不能包含 `..` 或符号链接路径组件，且默认只允许位于 `/tmp` 或当前 checkout 下。
+`scripts/e2e-test.sh` 可以手动打一个已启动的服务；此时需要显式提供 `BASE_URL` 和对应的临时存储、配置、密钥、初始密码文件路径。手动 `STORAGE_ROOT` 必须是绝对路径，不能包含控制字符、`..` 或符号链接路径组件，且默认只允许位于 `/tmp` 或当前 checkout 下。
 
 示例场景：
 
@@ -175,7 +175,10 @@ test_fresh_install_auth_enabled() {
     export HOME="$TEST_HOME"
 
     mkdir -p ~/.mnemonas
-    echo '[auth]\nenabled = true' > ~/.mnemonas/config.toml
+    cat > ~/.mnemonas/config.toml <<'TOML'
+[auth]
+enabled = true
+TOML
     ./bin/nasd &
     sleep 2
     
@@ -183,10 +186,17 @@ test_fresh_install_auth_enabled() {
     [ -f ~/.mnemonas/.mnemonas/initial-password.txt ] || fail "Password file not created"
     
     # 提取密码并登录
-    password=$(grep "Password:" ~/.mnemonas/.mnemonas/initial-password.txt | awk '{print $2}')
+    password=$(sed -n 's/^Password:[[:space:]]*//p' ~/.mnemonas/.mnemonas/initial-password.txt | head -n1)
+    login_payload=$(PASSWORD="$password" python3 - <<'PY'
+import json
+import os
+
+print(json.dumps({"username": "admin", "password": os.environ["PASSWORD"]}))
+PY
+)
     response=$(curl -s -X POST http://localhost:8080/api/v1/auth/login \
         -H "Content-Type: application/json" \
-        -d "{\"username\":\"admin\",\"password\":\"$password\"}")
+        -d "$login_payload")
     
     # 验证登录成功
     echo "$response" | grep -q '"success":true' || fail "Login failed"
@@ -359,10 +369,11 @@ RUN_CORRUPTION_TESTS=0 \
 
 - 必须显式传入 `BASE_URL`、`STORAGE_ROOT` 和 `NASD_BIN`
 - 默认只允许 `/tmp` 或当前 checkout 下的 `STORAGE_ROOT`
-- `STORAGE_ROOT` 必须是绝对路径，不能包含 `..` 或符号链接路径组件
+- `STORAGE_ROOT` 必须是绝对路径，不能包含控制字符、`..` 或符号链接路径组件
 - 默认拒绝 `$HOME/.mnemonas`
 - 非交互环境必须设置 `FAULT_INJECTION_ASSUME_YES=1`
 - 真实存储路径必须额外设置 `ALLOW_REAL_STORAGE=1`，且仍必须是绝对路径，不能指向 `/`、`/tmp`、`/var` 等受保护系统目录
+- 会被读取或改写的 `OBJECTS_DIR` 和 `INDEX_DB` 必须位于 `STORAGE_ROOT` 下
 
 这些门禁由 `scripts/test-fault-injection-safety.sh` 回归测试覆盖，并纳入 `make scripts-check`。
 
@@ -420,12 +431,13 @@ on:
     branches: [main, master]
 
 env:
-  GO_VERSION: '1.25.9'
+  GO_VERSION: '1.25.10'
   RUST_VERSION: '1.92'
   NODE_VERSION: '22'
   GOLANGCI_LINT_VERSION: 'v2.11.4'
   GOVULNCHECK_VERSION: 'v1.3.0'
   CARGO_AUDIT_VERSION: '0.22.1'
+  NPM_AUDIT_LEVEL: 'moderate'
 
 jobs:
   go:
@@ -545,7 +557,7 @@ jobs:
         run: npm ci
 
       - name: Dependency audit
-        run: npm audit --audit-level=high
+        run: npm audit --audit-level="${{ env.NPM_AUDIT_LEVEL }}"
 
       - name: Lint
         run: npm run lint
@@ -877,7 +889,7 @@ npm run test:e2e:ui
 npm run test:e2e:update
 ```
 
-默认 Playwright 配置会自动启动隔离的后端和前端测试服务器；`MNEMONAS_E2E_BACKEND_URL` 和 `MNEMONAS_E2E_FRONTEND_URL` 可调整隔离服务器地址或端口。本地已有服务只有在设置 `MNEMONAS_E2E_REUSE_EXISTING=1` 时才会被复用，调试已有环境时还应显式设置 `E2E_PASSWORD`。
+默认 Playwright 配置会自动启动隔离的后端和前端测试服务器；隔离后端使用 2 小时 Access Token 有效期和 168 小时 Refresh Token 有效期，以降低长时间并行测试中的共享 storageState 过期风险。`MNEMONAS_E2E_BACKEND_URL` 和 `MNEMONAS_E2E_FRONTEND_URL` 可调整隔离服务器地址或端口。本地已有服务只有在设置 `MNEMONAS_E2E_REUSE_EXISTING=1` 时才会被复用，调试已有环境时还应显式设置 `E2E_PASSWORD`。
 
 **E2E 测试目录结构**：
 
@@ -1004,3 +1016,4 @@ jobs:
 - [ ] 视觉回归无意外变化
 - [ ] 无 TypeScript 错误
 - [ ] 无 ESLint 警告
+- [ ] `make docs-check` 通过，文档本地链接、标题锚点、入口文档和 `docs/` 中英文配对、文档索引入口无断裂

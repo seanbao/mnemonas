@@ -107,6 +107,11 @@ function renderUsersPage(queryClient = createTestQueryClient()) {
   )
 }
 
+function expectAbortSignal(signal: AbortSignal | undefined): asserts signal is AbortSignal {
+  expect(signal).toBeDefined()
+  expect(typeof signal?.aborted).toBe('boolean')
+}
+
 describe('UsersPage', () => {
   beforeEach(() => {
     vi.clearAllMocks()
@@ -222,6 +227,15 @@ describe('UsersPage', () => {
         // Use getAllByText since there might be multiple occurrences
         const adminBadges = screen.getAllByText('管理员')
         expect(adminBadges.length).toBeGreaterThan(0)
+      })
+    })
+
+    it('shows each user home directory on the user card', async () => {
+      renderUsersPage()
+
+      await waitFor(() => {
+        expect(screen.getByText('/home/admin')).toBeInTheDocument()
+        expect(screen.getByText('/home/testuser')).toBeInTheDocument()
       })
     })
 
@@ -377,6 +391,63 @@ describe('UsersPage', () => {
       })
     })
 
+    it('submits create form with home directory and quota', async () => {
+      vi.mocked(usersApi.createUser).mockResolvedValue({
+        success: true,
+        user: {
+          id: 'new-user',
+          username: 'newuser',
+          email: 'new@example.com',
+          role: 'user',
+          disabled: false,
+          home_dir: '/team/newuser',
+          created_at: '2024-01-20T00:00:00Z',
+          updated_at: '2024-01-20T00:00:00Z',
+          quota_bytes: 2147483648,
+          used_bytes: 0,
+        },
+      })
+
+      const user = userEvent.setup()
+      renderUsersPage()
+
+      await user.click(screen.getByRole('button', { name: /添加用户/i }))
+
+      fireEvent.change(await screen.findByLabelText(/用户名/i), { target: { value: 'newuser' } })
+      fireEvent.change(screen.getByLabelText(/密码/i), { target: { value: 'password123' } })
+      fireEvent.change(screen.getByLabelText('邮箱'), { target: { value: 'new@example.com' } })
+      fireEvent.change(screen.getByLabelText('主目录'), { target: { value: ' /team/newuser ' } })
+      fireEvent.change(screen.getByLabelText('容量配额'), { target: { value: '2' } })
+
+      await user.click(screen.getByRole('button', { name: '创建' }))
+
+      await waitFor(() => {
+        expect(usersApi.createUser).toHaveBeenCalledWith({
+          username: 'newuser',
+          password: 'password123',
+          email: 'new@example.com',
+          role: 'user',
+          groups: [],
+          home_dir: '/team/newuser',
+          quota_bytes: 2147483648,
+        }, expect.objectContaining({ signal: expect.any(AbortSignal) }))
+      })
+    })
+
+    it('disables create button for non-admin root home directory', async () => {
+      const user = userEvent.setup()
+      renderUsersPage()
+
+      await user.click(screen.getByRole('button', { name: /添加用户/i }))
+
+      fireEvent.change(await screen.findByLabelText(/用户名/i), { target: { value: 'rootuser' } })
+      fireEvent.change(screen.getByLabelText(/密码/i), { target: { value: 'password123' } })
+      fireEvent.change(screen.getByLabelText('主目录'), { target: { value: '/' } })
+
+      expect(screen.getByRole('button', { name: '创建' })).toBeDisabled()
+      expect(usersApi.createUser).not.toHaveBeenCalled()
+    })
+
     it('disables create button when form is incomplete', async () => {
       const user = userEvent.setup()
       renderUsersPage()
@@ -459,7 +530,7 @@ describe('UsersPage', () => {
       await waitFor(() => {
         expect(mockAddToast).toHaveBeenCalledWith({
           title: '创建失败',
-          description: 'create failed',
+          description: '操作未完成，请稍后重试。',
           color: 'danger',
         })
       })
@@ -605,9 +676,30 @@ describe('UsersPage', () => {
           groups: ['editors', 'family'],
           home_dir: '/team/editors',
           quota_bytes: 2147483648,
-        })
+        }, expect.objectContaining({ signal: expect.any(AbortSignal) }))
         expect(mockAddToast).toHaveBeenCalledWith({ title: '用户已更新', color: 'success' })
       })
+    })
+
+    it('disables update button for non-admin root home directory', async () => {
+      const user = userEvent.setup()
+      renderUsersPage()
+
+      await waitFor(() => {
+        expect(screen.getByText('testuser')).toBeInTheDocument()
+      })
+
+      await user.click(screen.getByRole('button', { name: 'testuser 用户操作' }))
+      await user.click(screen.getAllByRole('menuitem').find((item) => item.textContent?.includes('编辑用户'))!)
+
+      await waitFor(() => {
+        expect(screen.getByRole('heading', { name: '编辑用户' })).toBeInTheDocument()
+      })
+
+      fireEvent.change(screen.getByLabelText('主目录'), { target: { value: '/' } })
+
+      expect(screen.getByRole('button', { name: '保存' })).toBeDisabled()
+      expect(usersApi.updateUser).not.toHaveBeenCalled()
     })
 
     it('rejects invalid group names before updating a user', async () => {
@@ -715,7 +807,7 @@ describe('UsersPage', () => {
       await user.click(screen.getByText('禁用用户'))
 
       await waitFor(() => {
-        expect(usersApi.toggleUserStatus).toHaveBeenCalledWith('user-2', true)
+        expect(usersApi.toggleUserStatus).toHaveBeenCalledWith('user-2', true, expect.objectContaining({ signal: expect.any(AbortSignal) }))
       })
     })
 
@@ -737,7 +829,7 @@ describe('UsersPage', () => {
       await user.click(screen.getByText('启用用户'))
 
       await waitFor(() => {
-        expect(usersApi.toggleUserStatus).toHaveBeenCalledWith('user-3', false)
+        expect(usersApi.toggleUserStatus).toHaveBeenCalledWith('user-3', false, expect.objectContaining({ signal: expect.any(AbortSignal) }))
         expect(mockAddToast).toHaveBeenCalledWith({ title: '用户已启用', color: 'success' })
       })
     })
@@ -760,7 +852,7 @@ describe('UsersPage', () => {
       await user.click(screen.getByText('让现有登录失效'))
 
       await waitFor(() => {
-        expect(usersApi.revokeUserSessions).toHaveBeenCalledWith('user-2')
+        expect(usersApi.revokeUserSessions).toHaveBeenCalledWith('user-2', expect.objectContaining({ signal: expect.any(AbortSignal) }))
         expect(mockAddToast).toHaveBeenCalledWith({ title: '现有登录已失效', color: 'success' })
       })
     })
@@ -856,7 +948,7 @@ describe('UsersPage', () => {
       await waitFor(() => {
         expect(mockAddToast).toHaveBeenCalledWith({
           title: '删除失败',
-          description: 'delete failed',
+          description: '操作未完成，请稍后重试。',
           color: 'danger',
         })
       })
@@ -1027,7 +1119,11 @@ describe('UsersPage', () => {
       await user.click(screen.getByRole('button', { name: '确认重置' }))
 
       await waitFor(() => {
-        expect(usersApi.resetUserPassword).toHaveBeenCalledWith('user-2', { new_password: 'password123' })
+        expect(usersApi.resetUserPassword).toHaveBeenCalledWith(
+          'user-2',
+          { new_password: 'password123' },
+          expect.objectContaining({ signal: expect.any(AbortSignal) })
+        )
         expect(mockAddToast).toHaveBeenCalledWith({ title: '密码已重置', color: 'success' })
       })
     })
@@ -1057,6 +1153,7 @@ describe('UsersPage', () => {
         expect(vi.mocked(usersApi.resetUserPassword).mock.calls[0]).toEqual([
           'user-2',
           { new_password: 'password123' },
+          expect.objectContaining({ signal: expect.any(AbortSignal) }),
         ])
       })
 
@@ -1072,7 +1169,7 @@ describe('UsersPage', () => {
       await waitFor(() => {
         expect(mockAddToast).toHaveBeenCalledWith({
           title: '重置失败',
-          description: 'reset failed',
+          description: '操作未完成，请稍后重试。',
           color: 'danger',
         })
       })
@@ -1142,6 +1239,178 @@ describe('UsersPage', () => {
     })
   })
 
+  describe('request cancellation', () => {
+    it('aborts a pending create request when the page unmounts', async () => {
+      const user = userEvent.setup()
+      const pendingCreate = createDeferred<Awaited<ReturnType<typeof usersApi.createUser>>>()
+      let signal: AbortSignal | undefined
+      vi.mocked(usersApi.createUser).mockImplementationOnce((_request, options) => {
+        signal = options?.signal
+        return pendingCreate.promise
+      })
+
+      const { unmount } = renderUsersPage()
+
+      await user.click(screen.getByRole('button', { name: /添加用户/i }))
+      fireEvent.change(screen.getByLabelText(/用户名/i), { target: { value: 'alice' } })
+      fireEvent.change(screen.getByLabelText(/密码/i), { target: { value: 'password123' } })
+      await user.click(screen.getByRole('button', { name: '创建' }))
+
+      await waitFor(() => {
+        expectAbortSignal(signal)
+      })
+      expect(signal.aborted).toBe(false)
+
+      unmount()
+
+      expect(signal.aborted).toBe(true)
+    })
+
+    it('aborts a pending update request when the page unmounts', async () => {
+      const user = userEvent.setup()
+      const pendingUpdate = createDeferred<Awaited<ReturnType<typeof usersApi.updateUser>>>()
+      let signal: AbortSignal | undefined
+      vi.mocked(usersApi.updateUser).mockImplementationOnce((_userId, _request, options) => {
+        signal = options?.signal
+        return pendingUpdate.promise
+      })
+
+      const { unmount } = renderUsersPage()
+
+      await waitFor(() => {
+        expect(screen.getByText('testuser')).toBeInTheDocument()
+      })
+
+      await user.click(screen.getByRole('button', { name: 'testuser 用户操作' }))
+      await user.click(screen.getAllByRole('menuitem').find((item) => item.textContent?.includes('编辑用户'))!)
+      await user.click(screen.getByRole('button', { name: '保存' }))
+
+      await waitFor(() => {
+        expectAbortSignal(signal)
+      })
+      expect(signal.aborted).toBe(false)
+
+      unmount()
+
+      expect(signal.aborted).toBe(true)
+    })
+
+    it('aborts a pending delete request when the page unmounts', async () => {
+      const user = userEvent.setup()
+      const pendingDelete = createDeferred<Awaited<ReturnType<typeof usersApi.deleteUser>>>()
+      let signal: AbortSignal | undefined
+      vi.mocked(usersApi.deleteUser).mockImplementationOnce((_userId, options) => {
+        signal = options?.signal
+        return pendingDelete.promise
+      })
+
+      const { unmount } = renderUsersPage()
+
+      await waitFor(() => {
+        expect(screen.getByText('testuser')).toBeInTheDocument()
+      })
+
+      await user.click(screen.getByRole('button', { name: 'testuser 用户操作' }))
+      await user.click(screen.getAllByRole('menuitem').find((item) => item.textContent?.includes('删除用户'))!)
+      await user.click(screen.getByRole('button', { name: '删除' }))
+
+      await waitFor(() => {
+        expectAbortSignal(signal)
+      })
+      expect(signal.aborted).toBe(false)
+
+      unmount()
+
+      expect(signal.aborted).toBe(true)
+    })
+
+    it('aborts a pending password reset request when the page unmounts', async () => {
+      const user = userEvent.setup()
+      const pendingReset = createDeferred<Awaited<ReturnType<typeof usersApi.resetUserPassword>>>()
+      let signal: AbortSignal | undefined
+      vi.mocked(usersApi.resetUserPassword).mockImplementationOnce((_userId, _request, options) => {
+        signal = options?.signal
+        return pendingReset.promise
+      })
+
+      const { unmount } = renderUsersPage()
+
+      await waitFor(() => {
+        expect(screen.getByText('testuser')).toBeInTheDocument()
+      })
+
+      await user.click(screen.getByRole('button', { name: 'testuser 用户操作' }))
+      await user.click(screen.getAllByRole('menuitem').find((item) => item.textContent?.includes('重置密码'))!)
+      await user.type(screen.getByLabelText('新密码'), 'password123')
+      await user.click(screen.getByRole('button', { name: '确认重置' }))
+
+      await waitFor(() => {
+        expectAbortSignal(signal)
+      })
+      expect(signal.aborted).toBe(false)
+
+      unmount()
+
+      expect(signal.aborted).toBe(true)
+    })
+
+    it('aborts a pending status toggle request when the page unmounts', async () => {
+      const user = userEvent.setup()
+      const pendingToggle = createDeferred<Awaited<ReturnType<typeof usersApi.toggleUserStatus>>>()
+      let signal: AbortSignal | undefined
+      vi.mocked(usersApi.toggleUserStatus).mockImplementationOnce((_userId, _disabled, options) => {
+        signal = options?.signal
+        return pendingToggle.promise
+      })
+
+      const { unmount } = renderUsersPage()
+
+      await waitFor(() => {
+        expect(screen.getByText('testuser')).toBeInTheDocument()
+      })
+
+      await user.click(screen.getByRole('button', { name: 'testuser 用户操作' }))
+      await user.click(screen.getByText('禁用用户'))
+
+      await waitFor(() => {
+        expectAbortSignal(signal)
+      })
+      expect(signal.aborted).toBe(false)
+
+      unmount()
+
+      expect(signal.aborted).toBe(true)
+    })
+
+    it('aborts a pending session revoke request when the page unmounts', async () => {
+      const user = userEvent.setup()
+      const pendingRevoke = createDeferred<Awaited<ReturnType<typeof usersApi.revokeUserSessions>>>()
+      let signal: AbortSignal | undefined
+      vi.mocked(usersApi.revokeUserSessions).mockImplementationOnce((_userId, options) => {
+        signal = options?.signal
+        return pendingRevoke.promise
+      })
+
+      const { unmount } = renderUsersPage()
+
+      await waitFor(() => {
+        expect(screen.getByText('testuser')).toBeInTheDocument()
+      })
+
+      await user.click(screen.getByRole('button', { name: 'testuser 用户操作' }))
+      await user.click(screen.getByText('让现有登录失效'))
+
+      await waitFor(() => {
+        expectAbortSignal(signal)
+      })
+      expect(signal.aborted).toBe(false)
+
+      unmount()
+
+      expect(signal.aborted).toBe(true)
+    })
+  })
+
   describe('loading state', () => {
     it('shows loading state initially', () => {
       vi.mocked(usersApi.listUsers).mockImplementation(() => new Promise(() => {}))
@@ -1172,7 +1441,7 @@ describe('UsersPage', () => {
 
       await waitFor(() => {
         expect(screen.getByText('加载用户列表失败')).toBeInTheDocument()
-        expect(screen.getByText('Network error')).toBeInTheDocument()
+        expect(screen.getByText('用户列表加载失败，请检查网络或稍后重试。')).toBeInTheDocument()
         expect(screen.getByRole('button', { name: '重新加载' })).toBeInTheDocument()
       })
     })
@@ -1235,6 +1504,29 @@ describe('UsersPage', () => {
     })
     })
 
+    it('shows generic failure toast when reloading users fails with an Error object', async () => {
+    const user = userEvent.setup()
+    vi.mocked(usersApi.listUsers)
+      .mockRejectedValueOnce(new Error('Network error'))
+      .mockRejectedValueOnce(new Error('backend timeout'))
+
+    renderUsersPage()
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: '重新加载' })).toBeInTheDocument()
+    })
+
+    await user.click(screen.getByRole('button', { name: '重新加载' }))
+
+    await waitFor(() => {
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '刷新失败',
+        description: '操作未完成，请稍后重试。',
+        color: 'danger',
+      })
+    })
+    })
+
     it('shows generic failure toast when reloading users fails without an Error object', async () => {
     const user = userEvent.setup()
     vi.mocked(usersApi.listUsers)
@@ -1252,7 +1544,7 @@ describe('UsersPage', () => {
     await waitFor(() => {
       expect(mockAddToast).toHaveBeenCalledWith({
         title: '刷新失败',
-        description: '请稍后重试',
+        description: '操作未完成，请稍后重试。',
         color: 'danger',
       })
     })

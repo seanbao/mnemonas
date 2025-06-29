@@ -8,7 +8,7 @@ This guide is for a public Linux server where MnemoNAS runs locally and users ac
 Public 80/443 -> Caddy/Nginx -> 127.0.0.1:8080 -> MnemoNAS
 ```
 
-Do not expose MnemoNAS `8080` or dataplane `9090/9091` directly to the public internet. If you changed the backend ports, keep those custom ports private as well.
+Do not expose MnemoNAS `8080` or dataplane `9090/9091` directly to the public internet. Custom backend ports must remain private as well.
 
 ## Prerequisites
 
@@ -48,7 +48,7 @@ First access the app through the server, an SSH tunnel, or a temporary trusted n
 ssh -L 18080:127.0.0.1:8080 <user>@<server-ip>
 ```
 
-Then open this on your local machine:
+Then open this URL on the local machine:
 
 ```text
 http://localhost:18080
@@ -64,7 +64,7 @@ Caddy is the recommended default. The helper script will:
 - bind MnemoNAS `[server].host` to `127.0.0.1`;
 - set `trusted_proxy_hops = 1`;
 - restart `mnemonas.service`;
-- allow local `80/443` and restrict direct `8080/9090/9091` or the custom backend ports;
+- allow local `80/443`, remove broad UFW allow rules for `8080/9090/9091` or custom backend ports, and restrict direct access;
 - run basic public-entry checks.
 
 ```bash
@@ -77,9 +77,11 @@ For Nginx:
 sudo mnemonas-public-setup --proxy nginx nas.example.com admin@example.com
 ```
 
-For Traefik or Cloudflare Tunnel, start from `deploy/public-access/traefik/` or `deploy/public-access/cloudflare-tunnel/config.yml` and see [Reverse proxy setup](reverse-proxy-setup.en.md).
+`mnemonas-public-setup` first lowercases the domain and removes a single FQDN trailing dot, then writes the normalized value into reverse-proxy config, certificate commands, and the completion summary.
 
-If you are already logged into the Web UI, you can also open `System Settings -> General -> Public Access Wizard`:
+For Traefik or Cloudflare Tunnel, start from `deploy/public-access/traefik/` or `deploy/public-access/cloudflare-tunnel/config.yml`; see [Public access templates](../deploy/public-access/README.en.md) for the template notes and [Reverse proxy setup](reverse-proxy-setup.en.md) for the full configuration.
+
+After logging into the Web UI, `System Settings -> General -> Public Access Wizard` can also apply the recommended app settings:
 
 - enter the public domain;
 - select Caddy or Nginx;
@@ -107,7 +109,7 @@ Public HTTPS should work:
 curl -I https://nas.example.com/health
 ```
 
-Direct backend ports should fail or time out:
+Direct backend ports should fail to connect or time out. Any HTTP status response, including `401`, `403`, or `404`, means the port is still publicly reachable:
 
 ```bash
 curl --connect-timeout 3 http://nas.example.com:8080/health
@@ -123,13 +125,13 @@ sudo mnemonas-doctor --public-domain nas.example.com
 ss -tlnp | grep -E '80|443|8080|9090|9091'
 ```
 
-The `--public-domain` check verifies public HTTPS health, HTTP-to-HTTPS redirect behavior, certificate hostname, remaining certificate validity, direct backend exposure, and dataplane port exposure, then prints the manual cloud-firewall review item. Certificate inspection requires `openssl` on the server. It also reports detectable renewal paths: Nginx/certbot deployments should pass `sudo certbot renew --dry-run`, and Caddy deployments should have clean ACME logs from `sudo journalctl -u caddy --since '24 hours ago'`.
+The `--public-domain` check first lowercases the domain and removes a single FQDN trailing dot, then verifies public HTTPS health, HTTP redirects to HTTPS on the same public domain, certificate hostname, remaining certificate validity, public-deployment authentication settings, administrator-account redundancy, share-link base URL, direct backend exposure, and dataplane port exposure, then prints the manual cloud-firewall review item. Certificate inspection requires `openssl` on the server. Public authentication checks require `auth.enabled = true`, `security.allow_unsafe_no_auth = false`, and authenticated WebDAV when WebDAV is enabled. Administrator redundancy is checked from `auth.users_file`, or `$STORAGE_ROOT/.mnemonas/users.json` when it is unset. A missing file, parse failure, or zero enabled administrators fails the check; one enabled administrator produces a warning; two or more enabled administrators pass. When sharing is enabled, `share.base_url` should use HTTPS on the default port, must not contain userinfo, query strings, or fragments, and must use a valid host name; HTTP, a non-443 port, userinfo, query strings, fragments, or an invalid host name fails the check, while empty values or a different host produce a manual review warning. It also reports detectable renewal paths: Nginx/certbot deployments should pass `sudo certbot renew --dry-run`, and Caddy deployments should have clean ACME logs from `sudo journalctl -u caddy --since '24 hours ago'`.
 
 Expected state:
 
 - Caddy/Nginx listens on `0.0.0.0:80` and `0.0.0.0:443`;
 - MnemoNAS Web/API/WebDAV listens only on `127.0.0.1:8080`;
-- dataplane `9090/9091`, or your custom dataplane ports, listen only on `127.0.0.1`.
+- dataplane `9090/9091`, or custom dataplane ports, listen only on `127.0.0.1`.
 
 ## 4. WebDAV URL
 
@@ -139,13 +141,20 @@ Use HTTPS for public WebDAV:
 https://nas.example.com/dav
 ```
 
-WebDAV credentials are not the Web UI administrator password. Default credentials are stored in:
+For public deployments, prefer MnemoNAS user authentication so WebDAV clients use Web UI account credentials and inherit `home_dir`, directory grants, and quota boundaries:
+
+```toml
+[webdav]
+auth_type = "users"
+```
+
+When keeping the legacy global Basic Auth mode, WebDAV credentials are separate from the Web UI administrator password. Default generated credentials are stored in:
 
 ```bash
 sudo cat /srv/mnemonas/secrets.json
 ```
 
-You can set a custom strong password in `[webdav]` in `/etc/mnemonas/config.toml`, then restart:
+A custom strong Basic Auth password can be set in `[webdav]` in `/etc/mnemonas/config.toml`, followed by validation and restart:
 
 ```bash
 sudo nasd --check-config --config /etc/mnemonas/config.toml
@@ -158,7 +167,7 @@ sudo systemctl restart mnemonas
 - [ ] At least two enabled administrator accounts exist, so one lost password does not lock out maintenance.
 - [ ] The Web UI security self-check has no `block` items; all `warning` items are fixed or explicitly accepted.
 - [ ] `https://nas.example.com/health` works.
-- [ ] Public `8080/9090/9091`, or your custom backend ports, are unreachable.
+- [ ] Public `8080/9090/9091`, or custom backend ports, are unreachable.
 - [ ] `/etc/mnemonas/config.toml` has `server.host = "127.0.0.1"`.
 - [ ] `/etc/mnemonas/config.toml` has `trusted_proxy_hops = 1`.
 - [ ] `/etc/mnemonas/config.toml` has `security.allow_unsafe_no_auth = false`.

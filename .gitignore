@@ -64,6 +64,7 @@ data/
 *.prof
 *.out
 coverage.txt
+output/
 
 # Temporary files
 *.tmp

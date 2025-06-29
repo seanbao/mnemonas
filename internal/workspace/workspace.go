@@ -30,6 +30,7 @@ var finalizeWorkspaceCopyTemp = func(root *os.Root, tmpPath string) error {
 }
 var syncWorkspaceDir = syncWorkspaceParentDir
 var afterValidateWorkspacePaths = func() error { return nil }
+var beforeWorkspaceRename = func() error { return nil }
 
 const workspaceRootEscapeError = "path escapes from parent"
 
@@ -73,10 +74,17 @@ func cleanupTempPath(tmpPath string, operationErr error) error {
 }
 
 func cleanupWorkspaceTempPath(root *os.Root, tmpPath string, operationErr error) error {
-	if removeErr := root.Remove(tmpPath); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+	if removeErr := removeWorkspaceTempPath(root, tmpPath); removeErr != nil {
 		return errors.Join(operationErr, fmt.Errorf("cleanup temp file %s: %w", tmpPath, removeErr))
 	}
 	return operationErr
+}
+
+func removeWorkspaceTempPath(root *os.Root, tmpPath string) error {
+	if removeErr := root.Remove(tmpPath); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+		return removeErr
+	}
+	return nil
 }
 
 func cleanupWorkspaceCreatedDirs(rootPath string, root *os.Root, createdDirs []string, operationErr error) error {
@@ -697,7 +705,7 @@ func (w *Workspace) WriteFile(ctx context.Context, name string, data []byte) err
 }
 
 func (w *Workspace) WriteFileFromReaderWithOptions(ctx context.Context, name string, r io.Reader, options WriteFileOptions) (int64, error) {
-	if err := validateWorkspaceName(name); err != nil {
+	if err := validateWorkspaceMutationName(name); err != nil {
 		return 0, err
 	}
 	fullPath := w.FullPath(name)
@@ -783,7 +791,7 @@ func (w *Workspace) WriteFileFromReader(ctx context.Context, name string, r io.R
 
 // Mkdir creates a directory
 func (w *Workspace) Mkdir(ctx context.Context, name string) error {
-	if err := validateWorkspaceName(name); err != nil {
+	if err := validateWorkspaceMutationName(name); err != nil {
 		return err
 	}
 	fullPath := w.FullPath(name)
@@ -894,7 +902,7 @@ func (w *Workspace) DeleteAll(ctx context.Context, name string) error {
 		return ErrNotFound
 	}
 
-	if err := w.rootHandle.RemoveAll(rootName); err != nil {
+	if err := rootio.RemoveAllNoFollow(w.rootHandle, rootName); err != nil {
 		return mapWorkspaceRootPathError(err)
 	}
 	if err := syncWorkspaceDir(filepath.Dir(fullPath)); err != nil {
@@ -954,16 +962,22 @@ func (w *Workspace) Rename(ctx context.Context, oldName, newName string) error {
 	if !parentInfo.IsDir() {
 		return ErrNotDir
 	}
+	if err := beforeWorkspaceRename(); err != nil {
+		return err
+	}
 
-	if err := w.rootHandle.Rename(oldRootName, newRootName); err != nil {
+	if err := rootio.RenamePathIntoDirNoFollow(oldPath, filepath.Dir(newPath), filepath.Base(newPath)); err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return ErrAlreadyExists
+		}
 		return mapWorkspaceRootPathError(err)
 	}
 	if err := syncWorkspaceRenameDirs(oldPath, newPath); err != nil {
-		if rollbackErr := w.rootHandle.Rename(newRootName, oldRootName); rollbackErr != nil {
-			return errors.Join(
+		if rollbackErr := rootio.RenamePathIntoDirNoFollow(newPath, filepath.Dir(oldPath), filepath.Base(oldPath)); rollbackErr != nil {
+			return WrapVisibleMutationWarning(errors.Join(
 				fmt.Errorf("failed to sync directory: %w", err),
 				fmt.Errorf("failed to rollback renamed path: %w", rollbackErr),
-			)
+			))
 		}
 		if rollbackSyncErr := syncWorkspaceRenameDirs(newPath, oldPath); rollbackSyncErr != nil {
 			return errors.Join(
@@ -1063,15 +1077,22 @@ func (w *Workspace) Copy(ctx context.Context, srcName, dstName string) error {
 		}
 		return cleanupWorkspaceTempPath(w.rootHandle, tmpPath, err)
 	}
+
+	var copyWarning error
 	if err := finalizeWorkspaceCopyTemp(w.rootHandle, tmpPath); err != nil {
-		return cleanupWorkspaceTempPath(w.rootHandle, tmpPath, fmt.Errorf("failed to finalize copied file: %w", err))
+		if cleanupErr := removeWorkspaceTempPath(w.rootHandle, tmpPath); cleanupErr != nil {
+			copyWarning = fmt.Errorf("failed to finalize copied file: %w", errors.Join(err, fmt.Errorf("cleanup temp file %s: %w", tmpPath, cleanupErr)))
+		}
 	}
 	if err := syncWorkspaceDir(filepath.Dir(dstPath)); err != nil {
+		if copyWarning != nil {
+			return WrapVisibleMutationWarning(errors.Join(copyWarning, fmt.Errorf("sync parent directory: %w", err)))
+		}
 		if rollbackErr := w.rootHandle.Remove(dstRootName); rollbackErr != nil {
-			return errors.Join(
+			return WrapVisibleMutationWarning(errors.Join(
 				fmt.Errorf("sync parent directory: %w", err),
 				fmt.Errorf("failed to rollback copied file: %w", rollbackErr),
-			)
+			))
 		}
 		if rollbackSyncErr := syncWorkspaceDir(filepath.Dir(dstPath)); rollbackSyncErr != nil {
 			return errors.Join(
@@ -1080,6 +1101,9 @@ func (w *Workspace) Copy(ctx context.Context, srcName, dstName string) error {
 			)
 		}
 		return fmt.Errorf("sync parent directory: %w", err)
+	}
+	if copyWarning != nil {
+		return WrapVisibleMutationWarning(copyWarning)
 	}
 
 	return nil

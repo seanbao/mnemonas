@@ -354,6 +354,28 @@ func (tm *TokenManager) ValidateAccessToken(tokenString string) (*TokenClaims, e
 func (tm *TokenManager) validateRefreshTokenClaims(tokenString string) (*jwt.RegisteredClaims, error) {
 	tm.CleanupRevokedTokens()
 
+	claims, err := tm.parseRefreshTokenClaims(tokenString)
+	if err != nil {
+		return nil, err
+	}
+	if tm.isRevoked(claims.ID) {
+		return nil, errRefreshTokenReused
+	}
+
+	// Check if associated access token is revoked
+	accessTokenID := strings.TrimSuffix(claims.ID, "-refresh")
+	if tm.isRevoked(accessTokenID) {
+		return nil, ErrTokenRevoked
+	}
+
+	if tm.isUserRevoked(claims.Subject, claims.IssuedAt) {
+		return nil, ErrTokenRevoked
+	}
+
+	return claims, nil
+}
+
+func (tm *TokenManager) parseRefreshTokenClaims(tokenString string) (*jwt.RegisteredClaims, error) {
 	token, err := jwt.ParseWithClaims(tokenString, &jwt.RegisteredClaims{}, func(token *jwt.Token) (interface{}, error) {
 		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
 			return nil, ErrInvalidToken
@@ -376,20 +398,6 @@ func (tm *TokenManager) validateRefreshTokenClaims(tokenString string) (*jwt.Reg
 		return nil, ErrInvalidToken
 	}
 
-	if tm.isRevoked(claims.ID) {
-		return nil, ErrTokenRevoked
-	}
-
-	// Check if associated access token is revoked
-	accessTokenID := strings.TrimSuffix(claims.ID, "-refresh")
-	if tm.isRevoked(accessTokenID) {
-		return nil, ErrTokenRevoked
-	}
-
-	if tm.isUserRevoked(claims.Subject, claims.IssuedAt) {
-		return nil, ErrTokenRevoked
-	}
-
 	return claims, nil
 }
 
@@ -397,10 +405,42 @@ func (tm *TokenManager) validateRefreshTokenClaims(tokenString string) (*jwt.Reg
 func (tm *TokenManager) ValidateRefreshToken(tokenString string) (string, error) {
 	claims, err := tm.validateRefreshTokenClaims(tokenString)
 	if err != nil {
+		if errors.Is(err, errRefreshTokenReused) {
+			return "", ErrTokenRevoked
+		}
 		return "", err
 	}
 
 	return claims.Subject, nil
+}
+
+func (tm *TokenManager) consumeRefreshTokenClaims(claims *jwt.RegisteredClaims) error {
+	if claims == nil || !strings.HasSuffix(claims.ID, "-refresh") {
+		return ErrInvalidToken
+	}
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+
+	now := time.Now()
+	tm.persistCleanupRevocationsLocked(tm.cleanupRevokedTokensLocked(now))
+	if _, revoked := tm.revokedTokens[claims.ID]; revoked {
+		return errRefreshTokenReused
+	}
+
+	accessTokenID := strings.TrimSuffix(claims.ID, "-refresh")
+	if _, revoked := tm.revokedTokens[accessTokenID]; revoked {
+		return ErrTokenRevoked
+	}
+
+	if isUserRevokedLocked(tm.userRevokedAt, claims.Subject, claims.IssuedAt) {
+		return ErrTokenRevoked
+	}
+
+	tm.revokedTokens[claims.ID] = now.Add(tm.refreshExpiry)
+	if err := persistTokenRevocations(tm); err != nil {
+		return asTokenRevocationPersistenceWarning(err)
+	}
+	return nil
 }
 
 // RevokeToken revokes a token by ID
@@ -507,9 +547,18 @@ func (tm *TokenManager) isUserRevoked(userID string, issuedAt *jwt.NumericDate) 
 	}
 
 	tm.mu.RLock()
-	revokedAt, revoked := tm.userRevokedAt[userID]
+	revoked := isUserRevokedLocked(tm.userRevokedAt, userID, issuedAt)
 	tm.mu.RUnlock()
 
+	return revoked
+}
+
+func isUserRevokedLocked(userRevokedAt map[string]time.Time, userID string, issuedAt *jwt.NumericDate) bool {
+	if issuedAt == nil {
+		return false
+	}
+
+	revokedAt, revoked := userRevokedAt[userID]
 	if !revoked {
 		return false
 	}
@@ -522,6 +571,8 @@ var (
 	ErrInvalidToken = errors.New("invalid token")
 	ErrTokenExpired = errors.New("token expired")
 	ErrTokenRevoked = errors.New("token revoked")
+
+	errRefreshTokenReused = fmt.Errorf("refresh token reused: %w", ErrTokenRevoked)
 )
 
 func generateTokenID() (string, error) {

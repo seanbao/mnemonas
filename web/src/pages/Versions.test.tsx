@@ -3,7 +3,7 @@ import { act, render, screen, waitFor } from '@/test/utils'
 import userEvent from '@testing-library/user-event'
 import * as HeroUI from '@heroui/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { ensureDownloadSession } from '@/api/auth'
+import { authFetch, ensureDownloadSession } from '@/api/auth'
 
 const mockAddToast = vi.fn()
 
@@ -38,6 +38,7 @@ vi.mock('@/stores/auth', () => ({
 }))
 
 vi.mock('@/api/auth', () => ({
+  authFetch: vi.fn(),
   ensureDownloadSession: vi.fn(),
 }))
 
@@ -48,8 +49,27 @@ import { ApiError, downloadFile, getVersions, restoreVersion } from '@/api/files
 const mockGetVersions = vi.mocked(getVersions)
 const mockDownloadFile = vi.mocked(downloadFile)
 const mockRestoreVersion = vi.mocked(restoreVersion)
+const mockAuthFetch = vi.mocked(authFetch)
 const mockEnsureDownloadSession = vi.mocked(ensureDownloadSession)
 const successActionResult = { warning: false, message: undefined } as const
+
+function expectGetVersionsCalledWithPath(path: string) {
+  expect(mockGetVersions.mock.calls.some(([calledPath]) => calledPath === path)).toBe(true)
+}
+
+function expectGetVersionsCalledWithAbortSignal(path: string) {
+  const call = mockGetVersions.mock.calls.find(([calledPath]) => calledPath === path)
+  expect(call).toBeTruthy()
+  expect((call?.[1] as { signal?: AbortSignal } | undefined)?.signal).toBeInstanceOf(AbortSignal)
+}
+
+function getRestoreVersionSignal(path: string, hash: string): AbortSignal {
+  const call = mockRestoreVersion.mock.calls.find(([calledPath, calledHash]) => calledPath === path && calledHash === hash)
+  expect(call).toBeTruthy()
+  const signal = (call?.[2] as { signal?: AbortSignal } | undefined)?.signal
+  expect(signal).toBeInstanceOf(AbortSignal)
+  return signal as AbortSignal
+}
 
 function warningActionResult(message: string) {
   return { warning: true, message } as const
@@ -72,6 +92,9 @@ describe('VersionsPage', () => {
     window.history.pushState({}, '', '/')
     mockUseIsAdmin.mockReturnValue(true)
     mockUseUser.mockReturnValue({ id: 'admin', username: 'admin', role: 'admin', email: '', homeDir: '/' })
+    mockAuthFetch.mockResolvedValue(new Response('ok', {
+      headers: { 'Content-Type': 'application/octet-stream' },
+    }))
     mockEnsureDownloadSession.mockResolvedValue({ ok: true })
     mockDownloadFile.mockResolvedValue(undefined)
     mockGetVersions.mockResolvedValue([
@@ -110,7 +133,7 @@ describe('VersionsPage', () => {
       render(<VersionsPage />)
 
       expect(screen.getByText('查看和下载文件版本')).toBeTruthy()
-      expect(screen.getByText('输入主目录内文件路径后可查看版本记录，支持预览和下载。')).toBeTruthy()
+      expect(screen.getByText('输入可访问文件路径后可查看版本记录，支持预览和下载。')).toBeTruthy()
     })
   })
 
@@ -126,7 +149,7 @@ describe('VersionsPage', () => {
       await user.click(searchBtn)
 
       await waitFor(() => {
-        expect(mockGetVersions).toHaveBeenCalledWith('/test.txt')
+        expectGetVersionsCalledWithPath('/test.txt')
       })
     })
 
@@ -138,7 +161,7 @@ describe('VersionsPage', () => {
       await user.type(input, '/test.txt{enter}')
 
       await waitFor(() => {
-        expect(mockGetVersions).toHaveBeenCalledWith('/test.txt')
+        expectGetVersionsCalledWithPath('/test.txt')
       })
     })
 
@@ -150,7 +173,7 @@ describe('VersionsPage', () => {
       await user.type(input, 'test.txt{enter}')
 
       await waitFor(() => {
-        expect(mockGetVersions).toHaveBeenCalledWith('/test.txt')
+        expectGetVersionsCalledWithPath('/test.txt')
       })
     })
 
@@ -162,7 +185,7 @@ describe('VersionsPage', () => {
       await user.type(input, '  /test.txt  {enter}')
 
       await waitFor(() => {
-        expect(mockGetVersions).toHaveBeenCalledWith('/test.txt')
+        expectGetVersionsCalledWithPath('/test.txt')
       })
     })
 
@@ -194,7 +217,7 @@ describe('VersionsPage', () => {
       render(<VersionsPage />)
 
       await waitFor(() => {
-        expect(mockGetVersions).toHaveBeenCalledWith('/T145iNXfXqXXb1upjX.avif')
+        expectGetVersionsCalledWithPath('/T145iNXfXqXXb1upjX.avif')
       })
 
       expect(screen.getByPlaceholderText(/输入文件路径/)).toHaveValue('/T145iNXfXqXXb1upjX.avif')
@@ -202,7 +225,7 @@ describe('VersionsPage', () => {
       expect(await screen.findByText('未找到版本记录')).toBeTruthy()
     })
 
-    it('blocks non-admin searches outside the assigned home directory', async () => {
+    it('allows non-admin searches outside the assigned home directory so server access rules can resolve them', async () => {
       mockUseIsAdmin.mockReturnValue(false)
       mockUseUser.mockReturnValue({ id: 'tester', username: 'tester', role: 'user', email: '', homeDir: '/tester' })
 
@@ -210,16 +233,15 @@ describe('VersionsPage', () => {
       render(<VersionsPage />)
 
       const input = screen.getByPlaceholderText(/输入文件路径/)
-      await user.type(input, '/other/secret.txt{enter}')
+      await user.type(input, '/team/report.txt{enter}')
 
       await waitFor(() => {
-        expect(mockAddToast).toHaveBeenCalledWith({
-          title: '仅可查看主目录内文件的版本历史',
-          color: 'warning',
-        })
+        expectGetVersionsCalledWithPath('/team/report.txt')
       })
-      expect(mockGetVersions).not.toHaveBeenCalled()
-      expect(input).toHaveValue('/tester')
+      expect(mockAddToast).not.toHaveBeenCalledWith(expect.objectContaining({
+        title: '仅可查看主目录内文件的版本历史',
+      }))
+      expect(input).toHaveValue('/team/report.txt')
     })
 
     it('shows an invalid-home error instead of querying versions for non-admin users without a home directory', async () => {
@@ -242,7 +264,7 @@ describe('VersionsPage', () => {
       render(<VersionsPage />)
 
       await waitFor(() => {
-        expect(mockGetVersions).toHaveBeenCalledWith('/first.txt')
+        expectGetVersionsCalledWithPath('/first.txt')
       })
 
       mockGetVersions.mockClear()
@@ -253,7 +275,7 @@ describe('VersionsPage', () => {
       })
 
       await waitFor(() => {
-        expect(mockGetVersions).toHaveBeenCalledWith('/second.txt')
+        expectGetVersionsCalledWithPath('/second.txt')
       })
 
       expect(screen.getByPlaceholderText(/输入文件路径/)).toHaveValue('/second.txt')
@@ -286,7 +308,7 @@ describe('VersionsPage', () => {
       )
 
       await waitFor(() => {
-        expect(mockGetVersions).toHaveBeenCalledWith('/tester/report.txt')
+        expectGetVersionsCalledWithPath('/tester/report.txt')
       })
 
       expect(screen.queryByRole('list', { name: '版本历史' })).toBeNull()
@@ -303,11 +325,10 @@ describe('VersionsPage', () => {
       await user.type(input, '/test.txt{enter}')
 
       await waitFor(() => {
-        expect(mockGetVersions).toHaveBeenCalledWith('/test.txt')
+        expectGetVersionsCalledWithAbortSignal('/test.txt')
       })
 
-      // Verify API was called with correct parameters
-      expect(mockGetVersions).toHaveBeenCalledTimes(1)
+      expect(mockGetVersions.mock.calls.every(([calledPath]) => calledPath === '/test.txt')).toBe(true)
     })
 
     it('handles multiple version data correctly', async () => {
@@ -323,7 +344,7 @@ describe('VersionsPage', () => {
       await user.type(input, '/multi.txt{enter}')
 
       await waitFor(() => {
-        expect(mockGetVersions).toHaveBeenCalledWith('/multi.txt')
+        expectGetVersionsCalledWithPath('/multi.txt')
       })
     })
 
@@ -385,7 +406,7 @@ describe('VersionsPage', () => {
       await user.type(input, '/test.txt{enter}')
 
       await waitFor(() => {
-        expect(mockGetVersions).toHaveBeenCalledWith('/test.txt')
+        expectGetVersionsCalledWithPath('/test.txt')
       })
 
       expect(screen.queryAllByTitle('恢复到此版本')).toHaveLength(0)
@@ -479,9 +500,9 @@ describe('VersionsPage', () => {
 
       await user.click(screen.getByText('确认恢复'))
 
-      await waitFor(() => {
-        expect(mockAddToast).toHaveBeenCalledWith({
-          title: 'version restored with persistence warning',
+        await waitFor(() => {
+          expect(mockAddToast).toHaveBeenCalledWith({
+          title: '恢复版本完成，但存在警告',
           color: 'warning',
         })
       })
@@ -562,7 +583,9 @@ describe('VersionsPage', () => {
       await user.click(await screen.findByText('确认恢复'))
 
       await waitFor(() => {
-        expect(mockRestoreVersion).toHaveBeenCalledWith('/test.txt', 'hash2')
+        expect(mockRestoreVersion).toHaveBeenCalledWith('/test.txt', 'hash2', expect.objectContaining({
+          signal: expect.any(AbortSignal),
+        }))
       })
 
       await user.click(screen.getByText('取消'))
@@ -578,6 +601,42 @@ describe('VersionsPage', () => {
       await waitFor(() => {
         expect(screen.queryByText('确认恢复版本')).toBeFalsy()
       })
+    })
+
+    it('aborts pending restores when the page unmounts and ignores abort feedback', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      const firstRestore = createDeferred<typeof successActionResult>()
+      mockRestoreVersion.mockImplementationOnce(() => firstRestore.promise)
+
+      const { unmount } = render(<VersionsPage />)
+
+      const input = screen.getByPlaceholderText(/输入文件路径/)
+      await user.type(input, '/test.txt{enter}')
+
+      await waitFor(() => {
+        expect(screen.queryAllByTitle('恢复到此版本').length).toBeGreaterThan(0)
+      })
+
+      await user.click(screen.getAllByTitle('恢复到此版本')[0])
+      await user.click(await screen.findByText('确认恢复'))
+
+      await waitFor(() => {
+        expect(mockRestoreVersion).toHaveBeenCalledWith('/test.txt', 'hash2', expect.objectContaining({
+          signal: expect.any(AbortSignal),
+        }))
+      })
+      const signal = getRestoreVersionSignal('/test.txt', 'hash2')
+
+      unmount()
+
+      expect(signal.aborted).toBe(true)
+
+      await act(async () => {
+        firstRestore.reject(new DOMException('version restore aborted', 'AbortError'))
+        await firstRestore.promise.catch(() => undefined)
+      })
+
+      expect(mockAddToast).not.toHaveBeenCalled()
     })
 
     it('keeps the restore modal open when a pending restore later fails', async () => {
@@ -598,7 +657,9 @@ describe('VersionsPage', () => {
       await user.click(await screen.findByText('确认恢复'))
 
       await waitFor(() => {
-        expect(mockRestoreVersion).toHaveBeenCalledWith('/test.txt', 'hash2')
+        expect(mockRestoreVersion).toHaveBeenCalledWith('/test.txt', 'hash2', expect.objectContaining({
+          signal: expect.any(AbortSignal),
+        }))
       })
 
       await user.click(screen.getByText('取消'))
@@ -613,7 +674,7 @@ describe('VersionsPage', () => {
       await waitFor(() => {
         expect(mockAddToast).toHaveBeenCalledWith({
           title: '恢复版本失败',
-          description: 'restore failed',
+          description: '操作未完成，请稍后重试。',
           color: 'danger',
         })
       })
@@ -652,7 +713,10 @@ describe('VersionsPage', () => {
       await user.click(screen.getAllByTitle('下载此版本')[0])
 
       await waitFor(() => {
-        expect(mockDownloadFile).toHaveBeenCalledWith('/test.txt', { version: 'hash3' })
+        expect(mockDownloadFile).toHaveBeenCalledWith('/test.txt', expect.objectContaining({
+          version: 'hash3',
+          signal: expect.any(AbortSignal),
+        }))
       })
 
       await waitFor(() => {
@@ -679,7 +743,10 @@ describe('VersionsPage', () => {
       await user.click(screen.getAllByTitle('下载此版本')[0])
 
       await waitFor(() => {
-        expect(mockDownloadFile).toHaveBeenCalledWith('/test.txt', { version: 'hash3' })
+        expect(mockDownloadFile).toHaveBeenCalledWith('/test.txt', expect.objectContaining({
+          version: 'hash3',
+          signal: expect.any(AbortSignal),
+        }))
       })
 
       await waitFor(() => {
@@ -688,6 +755,41 @@ describe('VersionsPage', () => {
           description: '该版本或目标文件已被移除，请刷新版本历史后重试。',
           color: 'warning',
         })
+      })
+    })
+
+    it('aborts pending version downloads when the selected path changes and ignores abort feedback', async () => {
+      const download = createDeferred<void>()
+      let signal: AbortSignal | undefined
+      mockDownloadFile.mockImplementationOnce((_path, options) => {
+        signal = options?.signal
+        return download.promise
+      })
+      const user = userEvent.setup({ writeToClipboard: false })
+      render(<VersionsPage />)
+
+      const input = screen.getByPlaceholderText(/输入文件路径/)
+      await user.type(input, '/test.txt{enter}')
+
+      await waitFor(() => {
+        expect(screen.queryAllByTitle('下载此版本').length).toBeGreaterThan(0)
+      })
+
+      await user.click(screen.getAllByTitle('下载此版本')[0])
+
+      await waitFor(() => {
+        expect(signal).toBeInstanceOf(AbortSignal)
+      })
+
+      const nextInput = screen.getByPlaceholderText(/输入文件路径/)
+      await user.clear(nextInput)
+      await user.type(nextInput, '/other.txt{enter}')
+
+      expect(signal?.aborted).toBe(true)
+      download.reject(new DOMException('version download aborted', 'AbortError'))
+
+      await waitFor(() => {
+        expect(mockAddToast).not.toHaveBeenCalled()
       })
     })
 
@@ -752,7 +854,47 @@ describe('VersionsPage', () => {
       await waitFor(() => {
         expect(openSpy).not.toHaveBeenCalled()
         expect(mockAddToast).toHaveBeenCalledWith({
-          title: 'download session unavailable',
+          title: '原始预览和下载会话同步失败，请稍后重试',
+          color: 'warning',
+        })
+      })
+    })
+
+    it('shows a warning and skips opening when version preview returns a structured JSON error', async () => {
+      mockAuthFetch.mockResolvedValueOnce(new Response(JSON.stringify({
+        success: false,
+        error: {
+          code: 'SERVICE_UNAVAILABLE',
+          message: 'version storage unavailable',
+        },
+      }), {
+        status: 503,
+        headers: { 'Content-Type': 'application/json' },
+      }))
+      const openSpy = vi.spyOn(window, 'open').mockReturnValue(null)
+      const user = userEvent.setup({ writeToClipboard: false })
+      render(<VersionsPage />)
+
+      const input = screen.getByPlaceholderText(/输入文件路径/)
+      await user.type(input, '/test.txt{enter}')
+
+      await waitFor(() => {
+        expect(screen.queryAllByTitle('预览').length).toBeGreaterThan(0)
+      })
+
+      await user.click(screen.getAllByTitle('预览')[0])
+
+      await waitFor(() => {
+        expect(mockAuthFetch).toHaveBeenCalledWith('/api/v1/download/test.txt?version=hash3', {
+          headers: {
+            Range: 'bytes=0-0',
+            'X-Mnemonas-Download-Probe': 'json-error',
+          },
+        })
+        expect(openSpy).not.toHaveBeenCalled()
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '预览版本暂不可用',
+          description: '数据加载失败，请检查网络或稍后重试。',
           color: 'warning',
         })
       })
@@ -785,16 +927,22 @@ describe('VersionsPage', () => {
 
       await waitFor(() => {
         expect(screen.getByText('获取版本历史失败')).toBeTruthy()
+        expect(screen.getByText('数据加载失败，请检查网络或稍后重试。')).toBeTruthy()
       })
     })
 
     it('retries loading versions from the error state', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
-      mockGetVersions
-        .mockRejectedValueOnce(new Error('文件不存在'))
-        .mockResolvedValueOnce([
+      let retryRequested = false
+      mockGetVersions.mockImplementation(() => {
+        if (!retryRequested) {
+          return Promise.reject(new Error('文件不存在'))
+        }
+
+        return Promise.resolve([
           { version: 1, hash: 'hash1', size: 1000, timestamp: '2024-01-01T00:00:00Z' },
         ])
+      })
       render(<VersionsPage />)
 
       const input = screen.getByPlaceholderText(/输入文件路径/)
@@ -804,6 +952,7 @@ describe('VersionsPage', () => {
         expect(screen.getByRole('button', { name: '重新加载' })).toBeTruthy()
       })
 
+      retryRequested = true
       await user.click(screen.getByRole('button', { name: '重新加载' }))
 
       await waitFor(() => {
@@ -814,26 +963,32 @@ describe('VersionsPage', () => {
 
     it('shows warning toast when version reload becomes unavailable', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
-      mockGetVersions
-        .mockRejectedValueOnce(new Error('文件不存在'))
-        .mockRejectedValueOnce(new ApiError('version storage unavailable', 503, 'SERVICE_UNAVAILABLE'))
+      let retryRequested = false
+      mockGetVersions.mockImplementation(() => {
+        if (!retryRequested) {
+          return Promise.reject(new Error('文件不存在'))
+        }
+
+        return Promise.reject(new ApiError('version storage unavailable', 503, 'SERVICE_UNAVAILABLE'))
+      })
       render(<VersionsPage />)
 
       const input = screen.getByPlaceholderText(/输入文件路径/)
-	  await user.type(input, '/retry-unavailable.txt{enter}')
+      await user.type(input, '/retry-unavailable.txt{enter}')
 
-	  await waitFor(() => {
-	    expect(screen.getByRole('button', { name: '重新加载' })).toBeTruthy()
-	  })
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: '重新加载' })).toBeTruthy()
+      })
 
-	  await user.click(screen.getByRole('button', { name: '重新加载' }))
+      retryRequested = true
+      await user.click(screen.getByRole('button', { name: '重新加载' }))
 
-	  await waitFor(() => {
-	    expect(mockAddToast).toHaveBeenCalledWith({
-	      title: '版本历史暂不可用',
-	      description: '版本存储当前不可用，请检查设备状态或稍后重试。',
-	      color: 'warning',
-	    })
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '版本历史暂不可用',
+          description: '版本存储当前不可用，请检查设备状态或稍后重试。',
+          color: 'warning',
+        })
       })
     })
   })

@@ -117,7 +117,7 @@ describe('Header', () => {
 
     expect(mockAddToast).toHaveBeenCalledWith({
       title: '刷新失败',
-      description: 'refresh failed',
+      description: '数据刷新失败，请稍后重试。',
       color: 'danger',
     })
   })
@@ -229,7 +229,7 @@ describe('Header', () => {
   })
 
   it('shows a warning toast when logout succeeds with backend warning metadata', async () => {
-    logoutMock.mockResolvedValueOnce({ warning: true, message: undefined })
+    logoutMock.mockResolvedValueOnce({ warning: true, message: 'logout audit write failed' })
     render(<Header />)
 
     await act(async () => {
@@ -279,7 +279,7 @@ describe('Header', () => {
     await waitFor(() => {
       expect(mockAddToast).toHaveBeenCalledWith({
         title: '退出登录失败',
-        description: 'logout refused',
+        description: '退出登录失败，请稍后重试。',
         color: 'danger',
       })
     })

@@ -6,6 +6,9 @@ REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 COMPOSE_FILE="${COMPOSE_FILE:-$REPO_ROOT/docker-compose.yml}"
 ENV_PATH="${ENV_PATH:-$REPO_ROOT/.env}"
 DATA_DIR_SET="${DATA_DIR+x}"
+if [[ -n "${MNEMONAS_DATA_DIR:-}" ]]; then
+	DATA_DIR_SET=1
+fi
 HOST_PORT_SET="${HOST_PORT+x}"
 DATA_DIR="${DATA_DIR:-${MNEMONAS_DATA_DIR:-$HOME/.mnemonas}}"
 HOST_PORT="${HOST_PORT:-${MNEMONAS_HTTP_PORT:-}}"
@@ -111,6 +114,48 @@ toml_value() {
 	local file="$3"
 
 	[[ -f "$file" ]] || return 0
+	if command -v python3 >/dev/null 2>&1; then
+		local value
+		if value=$(python3 - "$file" "$section" "$key" <<'PY'
+import sys
+
+try:
+    import tomllib
+except Exception:
+    sys.exit(2)
+
+path, section, key = sys.argv[1], sys.argv[2], sys.argv[3]
+try:
+    with open(path, "rb") as handle:
+        data = tomllib.load(handle)
+except Exception:
+    sys.exit(2)
+
+current = data
+for part in section.split("."):
+    if not isinstance(current, dict):
+        sys.exit(0)
+    current = current.get(part)
+    if current is None:
+        sys.exit(0)
+
+if not isinstance(current, dict) or key not in current:
+    sys.exit(0)
+
+value = current[key]
+if isinstance(value, bool):
+    sys.stdout.write("true" if value else "false")
+elif isinstance(value, (str, int, float)):
+    sys.stdout.write(str(value))
+elif hasattr(value, "isoformat"):
+    sys.stdout.write(value.isoformat())
+PY
+		); then
+			printf '%s' "$value"
+			return 0
+		fi
+	fi
+
 	awk -v section="[$section]" -v key="$key" '
 		function strip_comment(text,    i, c, quote, escaped, out) {
 			quote = ""
@@ -434,6 +479,10 @@ validate_data_dir_path() {
 	fi
 	if [[ "$DATA_DIR" == *$'\n'* || "$DATA_DIR" == *$'\r'* ]]; then
 		fail "Data directory cannot contain newline characters: $DATA_DIR"
+		return 1
+	fi
+	if [[ "$DATA_DIR" == *[[:cntrl:]]* ]]; then
+		fail "Data directory cannot contain control characters: $DATA_DIR"
 		return 1
 	fi
 	if [[ "$DATA_DIR" != /* ]]; then

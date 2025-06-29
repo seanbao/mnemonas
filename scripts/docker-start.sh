@@ -62,6 +62,48 @@ read_config_value() {
 		return 0
 	fi
 
+	if command -v python3 >/dev/null 2>&1; then
+		local value
+		if value=$(python3 - "$CONFIG_PATH" "$section" "$key" <<'PY'
+import sys
+
+try:
+    import tomllib
+except Exception:
+    sys.exit(2)
+
+path, section, key = sys.argv[1], sys.argv[2], sys.argv[3]
+try:
+    with open(path, "rb") as handle:
+        data = tomllib.load(handle)
+except Exception:
+    sys.exit(2)
+
+current = data
+for part in section.split("."):
+    if not isinstance(current, dict):
+        sys.exit(0)
+    current = current.get(part)
+    if current is None:
+        sys.exit(0)
+
+if not isinstance(current, dict) or key not in current:
+    sys.exit(0)
+
+value = current[key]
+if isinstance(value, bool):
+    sys.stdout.write("true" if value else "false")
+elif isinstance(value, (str, int, float)):
+    sys.stdout.write(str(value))
+elif hasattr(value, "isoformat"):
+    sys.stdout.write(value.isoformat())
+PY
+		); then
+			printf '%s' "$value"
+			return 0
+		fi
+	fi
+
 	awk -v section="[$section]" -v key="$key" '
 		function strip_comment(text,    i, c, quote, escaped, out) {
 			quote = ""
@@ -232,16 +274,29 @@ endpoint_host() {
 	printf '%s\n' "$host"
 }
 
+is_ipv4_loopback_host() {
+	local host="$1"
+	local octet
+	local -a octets
+
+	[[ "$host" =~ ^127\.([0-9]{1,3}\.){2}[0-9]{1,3}$ ]] || return 1
+	IFS='.' read -r -a octets <<< "$host"
+	for octet in "${octets[@]}"; do
+		[[ ${#octet} -le 3 ]] || return 1
+		(( 10#$octet >= 0 && 10#$octet <= 255 )) || return 1
+	done
+	return 0
+}
+
 is_loopback_host() {
 	local host="$1"
+
 	case "$host" in
-		localhost|ip6-localhost|127.*|::1)
+		localhost|ip6-localhost|::1)
 			return 0
 			;;
-		*)
-			return 1
-			;;
 	esac
+	is_ipv4_loopback_host "$host"
 }
 
 warn_if_non_loopback_endpoint() {
@@ -272,6 +327,10 @@ require_safe_storage_root() {
 
 	if [[ "$storage_root" == *$'\n'* || "$storage_root" == *$'\r'* ]]; then
 		echo "[ERROR] Refusing to prepare $label with newline characters" >&2
+		return 1
+	fi
+	if [[ "$storage_root" == *[[:cntrl:]]* ]]; then
+		echo "[ERROR] Refusing to prepare $label with control characters" >&2
 		return 1
 	fi
 	if path_has_parent_segment "$storage_root"; then
@@ -305,6 +364,10 @@ require_safe_config_path() {
 	fi
 	if [[ "$config_path" == *$'\n'* || "$config_path" == *$'\r'* ]]; then
 		echo "[ERROR] Refusing to prepare CONFIG_PATH with newline characters" >&2
+		return 1
+	fi
+	if [[ "$config_path" == *[[:cntrl:]]* ]]; then
+		echo "[ERROR] Refusing to prepare CONFIG_PATH with control characters" >&2
 		return 1
 	fi
 	if path_has_parent_segment "$config_path"; then
@@ -504,8 +567,19 @@ storage_root_config="$(read_config_value storage root)"
 require_configured_storage_root "$storage_root_config"
 storage_root=$(expand_path "$storage_root_config")
 require_safe_storage_root "$storage_root"
-dataplane_grpc_addr="${DATAPLANE_GRPC_ADDR:-$(read_config_value dataplane grpc_address)}"
+configured_dataplane_grpc_addr="$(read_config_value dataplane grpc_address)"
+if [[ -z "$configured_dataplane_grpc_addr" ]]; then
+	configured_dataplane_grpc_addr="127.0.0.1:9090"
+fi
+if [[ -n "${DATAPLANE_GRPC_ADDR:-}" && "$DATAPLANE_GRPC_ADDR" != "$configured_dataplane_grpc_addr" ]]; then
+	echo "[ERROR] DATAPLANE_GRPC_ADDR does not match [dataplane].grpc_address in $CONFIG_PATH; update config.toml instead of overriding the Docker dataplane gRPC address" >&2
+	exit 1
+fi
+dataplane_grpc_addr="$configured_dataplane_grpc_addr"
 dataplane_data_dir="$(expand_path "${DATAPLANE_DATA_DIR:-$storage_root/.mnemonas/objects}")"
+require_safe_storage_root "$dataplane_data_dir" "DATAPLANE_DATA_DIR"
+require_safe_storage_root "$storage_root/.mnemonas/objects" "storage internal object directory"
+require_safe_storage_root "$storage_root/files" "storage files directory"
 
 if [[ "$(normalize_compare_path "$storage_root")" != "$(normalize_compare_path "$expected_storage_root")" ]]; then
 	echo "[WARN] Configured [storage].root is $storage_root, but Docker STORAGE_ROOT is $expected_storage_root. Data and initial password files will be under the configured root." >&2
@@ -519,10 +593,6 @@ if ! chmod 700 "$storage_root/.mnemonas" "$storage_root/.mnemonas/objects"; then
 	echo "[WARN] Could not tighten permissions on $storage_root/.mnemonas or $storage_root/.mnemonas/objects" >&2
 fi
 
-if [[ -z "$dataplane_grpc_addr" ]]; then
-	dataplane_grpc_addr="127.0.0.1:9090"
-fi
-require_safe_storage_root "$dataplane_data_dir" "DATAPLANE_DATA_DIR"
 require_safe_tcp_addr "$DATAPLANE_HTTP_ADDR" "DATAPLANE_HTTP_ADDR"
 require_safe_tcp_addr "$dataplane_grpc_addr" "DATAPLANE_GRPC_ADDR"
 dataplane_args=("$APP_DIR/dataplane" --listen "$DATAPLANE_HTTP_ADDR" --grpc "$dataplane_grpc_addr" --data-dir "$dataplane_data_dir")

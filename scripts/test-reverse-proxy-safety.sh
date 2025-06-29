@@ -29,9 +29,9 @@ run_expect_failure_with_env() {
 
     set +e
     if [[ -n "$email" ]]; then
-        env "$@" bash "$REPO_ROOT/scripts/setup-reverse-proxy.sh" "$domain" "$email" > "$case_dir/out.log" 2>&1
+        env "$@" bash "$REPO_ROOT/scripts/setup-reverse-proxy.sh" "$domain" "$email" </dev/null > "$case_dir/out.log" 2>&1
     else
-        env "$@" bash "$REPO_ROOT/scripts/setup-reverse-proxy.sh" "$domain" > "$case_dir/out.log" 2>&1
+        env "$@" bash "$REPO_ROOT/scripts/setup-reverse-proxy.sh" "$domain" </dev/null > "$case_dir/out.log" 2>&1
     fi
     status=$?
     set -e
@@ -90,6 +90,12 @@ run_upstream_host_validation_tests() {
 run_config_path_validation_tests() {
     local target_dir target_config
 
+    run_expect_failure_with_env "config-path-parent-segment" "nas.example.com" "" "--config 不能包含父目录段" \
+        MNEMONAS_CONFIG_PATH="$TMP_ROOT/config/../config.toml"
+
+    run_expect_failure_with_env "config-path-control-character" "nas.example.com" "" "--config 不能包含控制字符" \
+        MNEMONAS_CONFIG_PATH="$TMP_ROOT/config"$'\a'"/config.toml"
+
     target_dir="$TMP_ROOT/config-target"
     mkdir -p "$target_dir"
     ln -s "$target_dir" "$TMP_ROOT/config-link-dir"
@@ -122,6 +128,31 @@ EOF
     assert_file_contains "$case_dir/self-test.log" "[reverse-proxy-self-test] all checks passed"
 }
 
+run_nginx_webdav_docs_include_destination_header_test() {
+    local doc
+    local -a docs=(
+        "$REPO_ROOT/docs/reverse-proxy-setup.md"
+        "$REPO_ROOT/docs/reverse-proxy-setup.en.md"
+        "$REPO_ROOT/docs/security.md"
+        "$REPO_ROOT/docs/security.en.md"
+        "$REPO_ROOT/docs/docker-deployment.md"
+        "$REPO_ROOT/docs/docker-deployment.en.md"
+    )
+
+    for doc in "${docs[@]}"; do
+        assert_file_contains "$doc" 'proxy_pass_request_headers on;'
+        # shellcheck disable=SC2016 # Match the literal nginx variable in docs.
+        assert_file_contains "$doc" 'proxy_set_header Destination $http_destination;'
+    done
+}
+
+run_docker_proxy_docs_include_trusted_proxy_cidrs_test() {
+    assert_file_contains "$REPO_ROOT/docs/docker-deployment.md" 'trusted_proxy_cidrs = ["172.18.0.0/16"]'
+    assert_file_contains "$REPO_ROOT/docs/docker-deployment.md" 'Docker bridge'
+    assert_file_contains "$REPO_ROOT/docs/docker-deployment.en.md" 'trusted_proxy_cidrs = ["172.18.0.0/16"]'
+    assert_file_contains "$REPO_ROOT/docs/docker-deployment.en.md" 'Docker bridge'
+}
+
 run_domain_validation_tests
 run_email_validation_tests
 run_port_validation_tests
@@ -129,5 +160,7 @@ run_upstream_host_validation_tests
 run_config_path_validation_tests
 run_config_rewrite_self_test
 run_release_layout_nasd_discovery_test
+run_nginx_webdav_docs_include_destination_header_test
+run_docker_proxy_docs_include_trusted_proxy_cidrs_test
 
 printf '[reverse-proxy-test] all checks passed\n'

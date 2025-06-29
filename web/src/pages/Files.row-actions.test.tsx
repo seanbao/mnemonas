@@ -128,6 +128,16 @@ async function getFileActionArea(name: string) {
   return area as HTMLElement
 }
 
+function expectToggleFavoriteCalledWithAbortSignal(path: string, isFavorited: boolean) {
+  const call = mockToggleFavorite.mock.calls.find((args) => {
+    const [calledPath, calledIsFavorited, options] = args as [string, boolean, { signal?: AbortSignal } | undefined]
+    return calledPath === path && calledIsFavorited === isFavorited && options?.signal instanceof AbortSignal
+  })
+  expect(call).toBeTruthy()
+  const [, , options] = call as unknown as [string, boolean, { signal?: AbortSignal }]
+  expect(Object.keys(options)).toEqual(['signal'])
+}
+
 describe('FilesPage list row actions', () => {
   beforeEach(() => {
     vi.clearAllMocks()
@@ -174,7 +184,10 @@ describe('FilesPage list row actions', () => {
     await user.click(within(actionArea).getByText('下载'))
 
     await waitFor(() => {
-      expect(mockDownloadFile).toHaveBeenCalledWith('/photo.jpg', { filename: 'photo.jpg' })
+      expect(mockDownloadFile).toHaveBeenCalledWith('/photo.jpg', expect.objectContaining({
+        filename: 'photo.jpg',
+        signal: expect.any(AbortSignal),
+      }))
     })
 
     await user.click(within(actionArea).getByText('复制路径'))
@@ -195,7 +208,10 @@ describe('FilesPage list row actions', () => {
     await user.click(within(actionArea).getByText('下载'))
 
     await waitFor(() => {
-      expect(mockDownloadFile).toHaveBeenCalledWith('/photo.jpg', { filename: 'photo.jpg' })
+      expect(mockDownloadFile).toHaveBeenCalledWith('/photo.jpg', expect.objectContaining({
+        filename: 'photo.jpg',
+        signal: expect.any(AbortSignal),
+      }))
       expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({
         title: '下载失败',
         color: 'danger',
@@ -273,7 +289,7 @@ describe('FilesPage list row actions', () => {
 
     await user.click(within(actionArea).getByText('添加收藏'))
     await waitFor(() => {
-      expect(mockToggleFavorite).toHaveBeenCalledWith('/photo.jpg', false)
+      expectToggleFavoriteCalledWithAbortSignal('/photo.jpg', false)
     })
 
     await user.click(within(actionArea).getByText('查看版本历史'))

@@ -2,7 +2,7 @@
 
 English | [简体中文](mounting-guide.md)
 
-MnemoNAS exposes files through WebDAV. Use the Web UI for management and WebDAV when you want to browse or mount the same storage from desktop, mobile, or command-line clients.
+MnemoNAS exposes files through WebDAV. The Web UI provides management operations, while WebDAV provides desktop, mobile, and command-line access to the same storage.
 
 ## Connection Information
 

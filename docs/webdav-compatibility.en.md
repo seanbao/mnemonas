@@ -8,9 +8,9 @@ This document records MnemoNAS WebDAV protocol coverage and expected client comp
 
 REST API resource copying is available at `/api/v1/files-copy`, but the WebDAV `Overwrite: T/F` behavior applies only to the WebDAV `COPY` method.
 
-Some write requests may return a successful status after the visible mutation is committed while a later persistence or cleanup step fails. In that case, MnemoNAS sends an HTTP `Warning` header such as `199 MnemoNAS "workspace mutation persistence incomplete"` or `199 MnemoNAS "delete cleanup incomplete"`.
+Some write requests may return a successful status after the visible mutation is committed while a later persistence or cleanup step fails. In that case, MnemoNAS sends an HTTP `Warning` header rather than rewriting the committed mutation as a full failure. Covered warning values include `199 MnemoNAS "workspace mutation persistence incomplete"`, `199 MnemoNAS "delete cleanup incomplete"`, and `199 MnemoNAS "trash delete cleanup incomplete"`.
 
-Authentication: `auth_type = "users"` accepts MnemoNAS user credentials, maps regular users' mount root to their `home_dir`, applies matching directory access rules for shared paths, makes guest accounts read-only, and enforces user quotas for PUT/COPY/MOVE writes into `home_dir`. Shared-path capacity limits are handled by directory quotas. `auth_type = "basic"` remains the global service-credential compatibility mode.
+Authentication: `auth_type = "users"` accepts MnemoNAS user credentials, maps regular users' mount root to their `home_dir`, lists top-level navigation entries for granted shared directories at the mount root, applies matching directory access rules for shared paths, makes guest accounts read-only, and enforces user quotas for PUT/COPY/MOVE writes into `home_dir`. Ancestor entries synthesized for nested grants are read-only navigation; writes still require a matching write grant. Shared-path capacity limits are handled by directory quotas. `auth_type = "basic"` remains the global service-credential compatibility mode.
 
 ## Protocol Status
 
@@ -24,9 +24,9 @@ Authentication: `auth_type = "users"` accepts MnemoNAS user credentials, maps re
 | `HEAD` | Supported | Returns file metadata |
 | `PUT` | Supported | Full overwrite writes; conditional `If-Match` and `If-Unmodified-Since`; partial `Content-Range` PUT returns `400` |
 | `DELETE` | Supported | Soft-deletes to trash; collections require or imply `Depth: infinity` |
-| `MKCOL` | Supported | Creates directories |
-| `MOVE` | Supported | Move/rename with `Overwrite: T/F`; collections require or imply `Depth: infinity` |
-| `COPY` | Supported | File and directory copy; `Overwrite: T/F`; collections support `Depth: 0` and `Depth: infinity` |
+| `MKCOL` | Supported | Creates directories; returns `409 Conflict` when the direct parent directory is absent and does not create intermediate directories |
+| `MOVE` | Supported | Move/rename with `Overwrite: T/F`; collections require or imply `Depth: infinity`; after an overwrite is committed, backup cleanup failures return `204` with `Warning` |
+| `COPY` | Supported | File and directory copy; `Overwrite: T/F`; collections support `Depth: 0` and `Depth: infinity`; recursive directory copies return success with `Warning` when only post-create persistence fails |
 | `PROPPATCH` | Simplified | Parses the request and returns `207 Multi-Status` with `403 Forbidden` for property changes |
 | `LOCK` | Simplified | Returns a virtual lock token; supports `Depth: 0` and `Depth: infinity`; one-hour expiry |
 | `UNLOCK` | Simplified | Requires matching `Lock-Token`; expired locks are cleaned automatically |
@@ -162,7 +162,7 @@ rclone obscure <webdav-password>
 
 ```text
 # /etc/davfs2/secrets
-http://localhost:8080/dav admin <your-webdav-password>
+http://localhost:8080/dav <webdav-username> <webdav-password>
 ```
 
 ```bash

@@ -218,12 +218,12 @@ func (c *Checker) Check(ctx context.Context) (*Report, error) {
 	}
 
 	overall := StatusOK
-	for _, device := range cfg.Devices {
+	for i, device := range cfg.Devices {
 		status := c.checkDevice(ctx, cfg, device)
 		report.Devices = append(report.Devices, status)
 		overall = maxStatus(overall, status.Status)
 		if status.Status != StatusOK && status.Message != "" {
-			report.Warnings = append(report.Warnings, fmt.Sprintf("%s: %s", deviceLabel(status), status.Message))
+			report.Warnings = append(report.Warnings, fmt.Sprintf("%s: %s", deviceLabel(status, i), status.Message))
 		}
 	}
 
@@ -550,11 +550,11 @@ func statusRank(status string) int {
 	}
 }
 
-func deviceLabel(status DeviceStatus) string {
+func deviceLabel(status DeviceStatus, index int) string {
 	if status.Name != "" {
 		return status.Name
 	}
-	return status.Path
+	return fmt.Sprintf("device %d", index+1)
 }
 
 func firstNonEmpty(values ...string) string {

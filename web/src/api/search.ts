@@ -4,6 +4,8 @@
  */
 
 import { authFetch } from './auth'
+import { INVALID_API_RESPONSE_MESSAGE } from '@/lib/apiMessages'
+import { readStructuredJsonErrorDetails } from '@/lib/jsonErrorResponse'
 
 interface SearchApiError {
   code?: string
@@ -32,6 +34,11 @@ export interface SearchResponse {
   count: number
 }
 
+export interface SearchFilesOptions {
+  limit?: number
+  signal?: AbortSignal
+}
+
 export class SearchError extends Error {
   status: number
   statusText: string
@@ -49,6 +56,8 @@ export class SearchError extends Error {
     return this.status === 503 || this.code === 'SERVICE_UNAVAILABLE'
   }
 }
+
+const SEARCH_FAILED_MESSAGE = '搜索失败'
 
 interface SearchResultWire {
   name: string
@@ -84,33 +93,45 @@ function isSearchResponse(value: unknown): value is SearchResponse & { results: 
 /**
  * Search for files matching the query
  * @param query - Search query (case-insensitive substring match)
- * @param limit - Maximum results to return (default 50, max 100)
+ * @param optionsOrLimit - Search options, or a legacy maximum result count.
  */
-export async function searchFiles(query: string, limit: number = 50): Promise<SearchResponse> {
+export async function searchFiles(query: string, optionsOrLimit: SearchFilesOptions | number = {}): Promise<SearchResponse> {
   const trimmedQuery = query.trim()
+  const limit = typeof optionsOrLimit === 'number'
+    ? optionsOrLimit
+    : optionsOrLimit.limit ?? 50
+  const signal = typeof optionsOrLimit === 'number'
+    ? undefined
+    : optionsOrLimit.signal
   if (!trimmedQuery) {
-    throw new Error("Search query is required")
+    throw new Error('请输入搜索关键词')
   }
   if (!Number.isInteger(limit) || limit <= 0 || limit > 100) {
-    throw new Error("Search limit must be between 1 and 100")
+    throw new Error('搜索结果数量必须在 1 到 100 之间')
   }
 
   const params = new URLSearchParams({ q: trimmedQuery })
   if (limit && limit !== 50) {
     params.set('limit', String(limit))
   }
-  
-  const response = await authFetch(`/api/v1/search?${params}`)
+
+  const url = `/api/v1/search?${params}`
+  const response = signal ? await authFetch(url, { signal }) : await authFetch(url)
   
   if (!response.ok) {
-    let message = 'Search failed'
+    const structuredError = await readStructuredJsonErrorDetails(response, SEARCH_FAILED_MESSAGE)
+    if (structuredError) {
+      throw new SearchError(structuredError.message, response.status, response.statusText, structuredError.code)
+    }
+
+    let message = SEARCH_FAILED_MESSAGE
     let code: string | undefined
     try {
       const body = await response.json() as SearchApiResponse<never> & { code?: string }
       const topLevelCode = typeof body.code === 'string' ? body.code : undefined
       message = typeof body.error === 'string'
         ? body.error
-        : body.error?.message || body.message || 'Search failed'
+        : body.error?.message || body.message || SEARCH_FAILED_MESSAGE
       if (typeof body.error !== 'string' && typeof body.error?.code === 'string') {
         code = body.error.code
       } else if (topLevelCode) {
@@ -126,7 +147,7 @@ export async function searchFiles(query: string, limit: number = 50): Promise<Se
   try {
     result = await response.json()
   } catch {
-    throw new Error('服务器返回了无效的数据')
+    throw new Error(INVALID_API_RESPONSE_MESSAGE)
   }
 
   const looksWrapped = !!result &&
@@ -138,7 +159,7 @@ export async function searchFiles(query: string, limit: number = 50): Promise<Se
     : result
 
   if (!isSearchResponse(data)) {
-    throw new Error('服务器返回了无效的数据')
+    throw new Error(INVALID_API_RESPONSE_MESSAGE)
   }
 
   return {

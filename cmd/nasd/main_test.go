@@ -454,8 +454,36 @@ func TestBuildWebDAVHandler(t *testing.T) {
 	}
 
 	prefix, handler = buildWebDAVHandler(nil, api.WebDAVRuntimeConfig{
-		Enabled: true,
-		Prefix:  "dav/",
+		Enabled:  true,
+		Prefix:   "/dav",
+		AuthType: "basic",
+		Password: "secret",
+	})
+	if prefix != "/dav" || handler == nil {
+		t.Fatalf("basic auth default username buildWebDAVHandler() = (%q, %#v), want /dav and handler", prefix, handler)
+	}
+	req := httptest.NewRequest("OPTIONS", "/dav/", nil)
+	req.SetBasicAuth("admin", "secret")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("admin Basic Auth status = %d, want %d; body=%s", w.Code, http.StatusOK, w.Body.String())
+	}
+	req = httptest.NewRequest("OPTIONS", "/dav/", nil)
+	req.SetBasicAuth("", "secret")
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("blank username Basic Auth status = %d, want %d; body=%s", w.Code, http.StatusUnauthorized, w.Body.String())
+	}
+	if closer, ok := handler.(io.Closer); ok {
+		_ = closer.Close()
+	}
+
+	prefix, handler = buildWebDAVHandler(nil, api.WebDAVRuntimeConfig{
+		Enabled:  true,
+		Prefix:   "dav/",
+		AuthType: "none",
 	})
 	if prefix != "/dav" {
 		t.Fatalf("normalized prefix = %q, want /dav", prefix)
@@ -483,9 +511,9 @@ func TestBuildWebDAVHandler(t *testing.T) {
 	if prefix != "/dav" || handler == nil {
 		t.Fatalf("users auth buildWebDAVHandler() = (%q, %#v), want /dav and handler", prefix, handler)
 	}
-	req := httptest.NewRequest("OPTIONS", "/dav/", nil)
+	req = httptest.NewRequest("OPTIONS", "/dav/", nil)
 	req.SetBasicAuth("davuser", "password123")
-	w := httptest.NewRecorder()
+	w = httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
 		t.Fatalf("users auth OPTIONS status = %d, want %d; body=%s", w.Code, http.StatusOK, w.Body.String())
@@ -1079,6 +1107,48 @@ func TestLogWebDAVCredentialStatus_DoesNotWritePasswordField(t *testing.T) {
 	}
 	if strings.Contains(output, `"password":`) {
 		t.Fatalf("expected log output not to include a password field, got %s", output)
+	}
+}
+
+func TestApplyStartupWebDAVCredentials_TreatsWhitespacePasswordAsGenerated(t *testing.T) {
+	cfg := config.Default()
+	cfg.WebDAV.Enabled = true
+	cfg.WebDAV.AuthType = "basic"
+	cfg.WebDAV.Username = " \t "
+	cfg.WebDAV.Password = " \t "
+	secrets := &config.Secrets{WebDAVPassword: "generated-pass"}
+
+	generated := applyStartupWebDAVCredentials(cfg, secrets)
+
+	if !generated {
+		t.Fatal("expected whitespace WebDAV password to use generated secret")
+	}
+	if cfg.WebDAV.Username != "admin" {
+		t.Fatalf("expected default username admin, got %q", cfg.WebDAV.Username)
+	}
+	if cfg.WebDAV.Password != "generated-pass" {
+		t.Fatalf("expected generated WebDAV password, got %q", cfg.WebDAV.Password)
+	}
+}
+
+func TestApplyStartupWebDAVCredentials_PreservesCustomPassword(t *testing.T) {
+	cfg := config.Default()
+	cfg.WebDAV.Enabled = true
+	cfg.WebDAV.AuthType = "basic"
+	cfg.WebDAV.Username = ""
+	cfg.WebDAV.Password = " custom-pass "
+	secrets := &config.Secrets{WebDAVPassword: "generated-pass"}
+
+	generated := applyStartupWebDAVCredentials(cfg, secrets)
+
+	if generated {
+		t.Fatal("expected custom WebDAV password to be preserved")
+	}
+	if cfg.WebDAV.Username != "admin" {
+		t.Fatalf("expected default username admin, got %q", cfg.WebDAV.Username)
+	}
+	if cfg.WebDAV.Password != " custom-pass " {
+		t.Fatalf("expected custom WebDAV password to be preserved, got %q", cfg.WebDAV.Password)
 	}
 }
 

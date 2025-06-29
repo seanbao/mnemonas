@@ -40,6 +40,13 @@ test.describe('存储空间概览', () => {
     const usageLabel = page.getByText('已用')
     await expect(usageLabel).toBeVisible()
   })
+
+  test('应显示存储承载和数据校验信息', async ({ page }) => {
+    await expect(page.getByText('数据校验能力')).toBeVisible()
+    await expect(page.getByText(/挂载点|存储源/).first()).toBeVisible()
+    await expect(page.getByText(/原生数据校验支持|建议使用 ZFS\/Btrfs|文件系统未知|临时文件系统|网络或 FUSE 存储/)).toBeVisible()
+    await expect(page.getByRole('button', { name: '复制存储摘要' })).toBeVisible()
+  })
 })
 
 test.describe('存储统计卡片', () => {

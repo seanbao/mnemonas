@@ -84,19 +84,37 @@ test.describe('公开分享页面', () => {
     const shareId = readFixtureValue(FOLDER_SHARE_ID_FILE)
     test.skip(!shareId, 'Skipped: no seeded public folder share fixture')
 
+    const rootItemsResponse = page.waitForResponse((response) => (
+      response.request().method() === 'GET'
+      && response.url().includes(`/api/v1/public/shares/${shareId}/items`)
+    ))
+
     await page.goto(`/s/${shareId}`, { waitUntil: 'domcontentloaded' })
+    expect((await rootItemsResponse).status()).toBe(200)
 
-    await expect(page.getByText('root-note.txt')).toBeVisible({ timeout: 5000 })
-    await expect(page.getByText('subdir')).toBeVisible({ timeout: 5000 })
-    await expect(page.getByText('根目录')).toBeVisible({ timeout: 5000 })
+    await expect(page.getByRole('button', { name: /root-note\.txt/ })).toBeVisible({ timeout: 10000 })
+    await expect(page.getByRole('button', { name: /subdir\s+文件夹/ })).toBeVisible({ timeout: 10000 })
+    await expect(page.getByText('根目录')).toBeVisible({ timeout: 10000 })
 
-    await page.getByRole('button', { name: 'subdir' }).click()
+    const subdirItemsResponse = page.waitForResponse((response) => (
+      response.request().method() === 'GET'
+      && response.url().includes(`/api/v1/public/shares/${shareId}/items`)
+      && response.url().includes('path=subdir')
+    ))
+    await page.getByRole('button', { name: /subdir\s+文件夹/ }).click()
+    expect((await subdirItemsResponse).status()).toBe(200)
 
-    await expect(page.getByText('/subdir')).toBeVisible({ timeout: 5000 })
-    await expect(page.getByText('nested-note.txt')).toBeVisible({ timeout: 5000 })
-    await expect(page.getByRole('button', { name: '返回上级' })).toBeVisible({ timeout: 5000 })
+    await expect(page.getByText('/subdir')).toBeVisible({ timeout: 10000 })
+    await expect(page.getByRole('button', { name: /nested-note\.txt/ })).toBeVisible({ timeout: 10000 })
+    await expect(page.getByRole('button', { name: '返回上级' })).toBeVisible({ timeout: 10000 })
 
+    const backToRootResponse = page.waitForResponse((response) => (
+      response.request().method() === 'GET'
+      && response.url().includes(`/api/v1/public/shares/${shareId}/items`)
+      && !response.url().includes('path=')
+    ))
     await page.getByRole('button', { name: '返回上级' }).click()
-    await expect(page.getByText('root-note.txt')).toBeVisible({ timeout: 5000 })
+    expect((await backToRootResponse).status()).toBe(200)
+    await expect(page.getByRole('button', { name: /root-note\.txt/ })).toBeVisible({ timeout: 10000 })
   })
 })

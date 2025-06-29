@@ -81,6 +81,7 @@ require_absolute_path() {
   local label="$2"
   [[ "$value" == /* ]] || fail "$label must be an absolute path: $value"
   [[ "$value" != *[[:space:]]* ]] || fail "$label cannot contain whitespace: $value"
+  [[ "$value" != *[[:cntrl:]]* ]] || fail "$label cannot contain control characters: $value"
   ! path_has_parent_segment "$value" || fail "$label cannot contain parent directory segments: $value"
 }
 
@@ -90,6 +91,7 @@ require_safe_account_name() {
   [[ -n "$value" ]] || fail "$label cannot be empty"
   [[ "$value" != *[[:space:]]* ]] || fail "$label cannot contain whitespace: $value"
   [[ "$value" != *$'\n'* && "$value" != *$'\r'* ]] || fail "$label cannot contain newline characters: $value"
+  [[ "$value" != *[[:cntrl:]]* ]] || fail "$label cannot contain control characters: $value"
   [[ "$value" != *%* ]] || fail "$label cannot contain systemd specifiers (%): $value"
   [[ "$value" != *\"* && "$value" != *\\* ]] || fail "$label cannot contain quote or backslash characters: $value"
   [[ "$value" != "root" ]] || fail "$label must not be root"

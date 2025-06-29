@@ -74,9 +74,9 @@ sudo ./scripts/install-systemd.sh
 sudo env STORAGE_ROOT=/srv/mnemonas SERVER_PORT=8080 ./scripts/install-systemd.sh
 ```
 
-systemd 安装与卸载脚本要求 `BIN_DIR`、`SHARE_DIR`、`CONFIG_DIR`、`CONFIG_PATH`、`SYSTEMD_DIR`、`STORAGE_ROOT` 和 Web UI 目录使用绝对路径，且路径组件不能包含符号链接。`CONFIG_PATH` 必须位于 `CONFIG_DIR` 下；除 Web UI 目录可位于 `SHARE_DIR` 内之外，二进制、共享资源、配置、systemd unit 和数据目录不能互相重叠。需要把数据放到单独磁盘时，先把真实文件系统挂载到目标目录，再运行安装脚本；不要把 `STORAGE_ROOT` 指向符号链接。
+systemd 安装与卸载脚本要求 `BIN_DIR`、`SHARE_DIR`、`CONFIG_DIR`、`CONFIG_PATH`、`SYSTEMD_DIR`、`STORAGE_ROOT` 和 Web UI 目录使用绝对路径，且不能包含控制字符，路径组件不能包含符号链接。`CONFIG_PATH` 必须位于 `CONFIG_DIR` 下；除 Web UI 目录可位于 `SHARE_DIR` 内之外，二进制、共享资源、配置、systemd unit 和数据目录不能互相重叠。安装脚本还会在创建或修改权限前检查 `STORAGE_ROOT/files` 与 `STORAGE_ROOT/.mnemonas/objects`，这些托管子目录不能通过符号链接指向其他位置。需要把数据放到单独磁盘时，先把真实文件系统挂载到目标目录，再运行安装脚本；不要把 `STORAGE_ROOT` 指向符号链接。
 
-安装脚本默认只修正 `/srv/mnemonas`、`files` 和 `.mnemonas` 这些顶层托管目录的所有者，不会在升级时递归改动已有数据。若你手动复制过数据导致服务用户无权访问，可显式运行：
+安装脚本默认只修正 `/srv/mnemonas`、`files` 和 `.mnemonas` 这些顶层托管目录的所有者，不会在升级时递归改动已有数据。若因手动复制数据导致服务用户无权访问，可显式运行：
 
 ```bash
 sudo env FIX_STORAGE_OWNERSHIP=1 ./scripts/install-systemd.sh
@@ -134,7 +134,7 @@ sudo systemctl restart mnemonas-dataplane
 sudo mnemonas-doctor
 ```
 
-`mnemonas-doctor` 会检查服务状态、Web UI、目录权限、存储挂载类型和剩余磁盘空间。Web UI 的“设备状态”和“空间与存储”页也会显示底层文件系统类型、ZFS/Btrfs 原生校验提示，以及空间提醒运行态。默认低于 10GB 可用空间时给出警告，可用 `MIN_FREE_BYTES=<bytes> sudo mnemonas-doctor` 调整阈值。
+`mnemonas-doctor` 会检查服务状态、Web UI、目录权限、存储挂载类型和剩余磁盘空间。Web UI 的“设备状态”和“空间与存储”页也会显示底层文件系统类型、挂载点、设备/数据集来源、脱敏挂载选项、ZFS/Btrfs 原生校验提示，以及空间提醒运行态；管理员可在“设备状态”页下载诊断包，也可在“空间与存储”页复制存储承载摘要用于排障记录。默认低于 10GB 可用空间时给出警告，可用 `MIN_FREE_BYTES=<bytes> sudo mnemonas-doctor` 调整阈值。
 
 如果系统安装了 UFW，`mnemonas-doctor` 也会检查防火墙是否启用，并提示不要放行 dataplane 的 `9090/9091` 端口。
 

@@ -197,10 +197,10 @@ func (m *Manager) RunBatchRestore(ctx context.Context, opts BatchRestoreOptions)
 
 func validateBatchRestoreItems(items []BatchRestoreItemOptions) error {
 	if len(items) == 0 {
-		return fmt.Errorf("%w: batch restore items are empty", ErrUnsafePath)
+		return invalidRestoreRequestErrorf("%w: batch restore items are empty", ErrUnsafePath)
 	}
 	if len(items) > batchRestoreLimit {
-		return fmt.Errorf("%w: batch restore supports at most %d items", ErrUnsafePath, batchRestoreLimit)
+		return invalidRestoreRequestErrorf("%w: batch restore supports at most %d items", ErrUnsafePath, batchRestoreLimit)
 	}
 	return nil
 }
@@ -290,12 +290,14 @@ func cloneBatchRestorePreviewResult(result *BatchRestorePreviewResult) *BatchRes
 		clone.Items = make([]BatchRestorePreviewItemResult, 0, len(result.Items))
 		for _, item := range result.Items {
 			item.Preview = cloneRestorePreviewResult(item.Preview)
+			item.ErrorMessage = sanitizeBackupMessageForAPI(item.ErrorMessage)
 			clone.Items = append(clone.Items, item)
 		}
 	}
 	if len(result.Warnings) > 0 {
-		clone.Warnings = append([]string(nil), result.Warnings...)
+		clone.Warnings = sanitizeBackupMessagesForAPI(result.Warnings)
 	}
+	clone.ErrorMessage = sanitizeBackupMessageForAPI(clone.ErrorMessage)
 	return &clone
 }
 
@@ -311,13 +313,15 @@ func cloneBatchRestoreResult(result *BatchRestoreResult) *BatchRestoreResult {
 			item.Restore = cloneRestoreResult(item.Restore)
 			item.Verify = cloneRestoreVerifyResult(item.Verify)
 			if len(item.Warnings) > 0 {
-				item.Warnings = append([]string(nil), item.Warnings...)
+				item.Warnings = sanitizeBackupMessagesForAPI(item.Warnings)
 			}
+			item.ErrorMessage = sanitizeBackupMessageForAPI(item.ErrorMessage)
 			clone.Items = append(clone.Items, item)
 		}
 	}
 	if len(result.Warnings) > 0 {
-		clone.Warnings = append([]string(nil), result.Warnings...)
+		clone.Warnings = sanitizeBackupMessagesForAPI(result.Warnings)
 	}
+	clone.ErrorMessage = sanitizeBackupMessageForAPI(clone.ErrorMessage)
 	return &clone
 }

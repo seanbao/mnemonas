@@ -1,6 +1,7 @@
 package share
 
 import (
+	"archive/zip"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -8,10 +9,12 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"mime"
 	"net/http"
 	"net/url"
+	"os"
 	"path"
 	"strconv"
 	"strings"
@@ -40,6 +43,10 @@ type FileOpener interface {
 type FileStatProvider interface {
 	Stat(ctx context.Context, filePath string) (*storage.FileInfo, error)
 	ReadDir(ctx context.Context, filePath string) ([]*storage.FileInfo, error)
+}
+
+type FileSnapshotOpener interface {
+	OpenFileSnapshot(ctx context.Context, filePath string) (*os.File, *storage.FileInfo, error)
 }
 
 type PathAccessAuthorizer func(ctx context.Context, share *Share, targetPath string) error
@@ -98,11 +105,20 @@ const (
 	defaultPasswordLockDuration   = 5 * time.Minute
 	defaultRateLimitErrorMessage  = "too many attempts, try later"
 	defaultJSONRequestBodyLimit   = 1 * 1024 * 1024
+	maxShareArchiveEntries        = 10000
 	maxDurationDays               = int64((1<<63 - 1) / int64(24*time.Hour))
 	untrustedDownloadCSP          = "sandbox; default-src 'none'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; img-src 'self' data: blob:; media-src 'self' data: blob:; style-src 'unsafe-inline'"
+	shareAccessSameSite           = http.SameSiteStrictMode
 )
 
-var errInvalidSharePermission = errors.New("invalid permission")
+var (
+	maxShareArchiveBytes           = int64(20 * 1024 * 1024 * 1024)
+	errInvalidSharePermission      = errors.New("invalid permission")
+	errUnsupportedShareArchive     = errors.New("unsupported archive format")
+	errInvalidShareArchivePath     = errors.New("invalid archive path")
+	errShareArchiveTooManyEntries  = errors.New("archive contains too many entries")
+	errShareArchiveContentTooLarge = errors.New("archive content is too large")
+)
 
 func newPasswordAttemptTracker() *passwordAttemptTracker {
 	return &passwordAttemptTracker{
@@ -253,7 +269,7 @@ func normalizeShareRelativePath(rawPath string) (string, error) {
 	if strings.ContainsRune(normalized, '\x00') {
 		return "", errors.New("invalid path")
 	}
-	normalized = strings.TrimPrefix(normalized, "/")
+	normalized = strings.TrimLeft(normalized, "/")
 	cleaned := path.Clean(normalized)
 	if cleaned == ".." || strings.HasPrefix(cleaned, "../") {
 		return "", errors.New("invalid path")
@@ -672,8 +688,8 @@ type PublicShareInfo struct {
 	Permission  Permission `json:"permission"`
 	Description string     `json:"description,omitempty"`
 	FileName    string     `json:"file_name,omitempty"`
-	FileSize    int64      `json:"file_size,omitempty"`
-	FolderItems int        `json:"folder_items,omitempty"`
+	FileSize    *int64     `json:"file_size,omitempty"`
+	FolderItems *int       `json:"folder_items,omitempty"`
 }
 
 // PublicShareItem represents a single file item in a shared folder.
@@ -710,6 +726,7 @@ func writePublicShareAccessError(w http.ResponseWriter, err error) {
 
 // AccessShare handles public share access
 func (h *Handler) AccessShare(w http.ResponseWriter, r *http.Request) {
+	setPublicShareJSONHeaders(w)
 	id := chi.URLParam(r, "id")
 
 	share, err := h.store.Get(id)
@@ -757,7 +774,6 @@ func (h *Handler) AccessShare(w http.ResponseWriter, r *http.Request) {
 			Type:        share.Type,
 			HasPassword: share.HasPassword(),
 			Permission:  share.Permission,
-			Description: share.Description,
 		}
 
 		if !writePublicShareInfo(w, info) {
@@ -804,6 +820,7 @@ type AccessShareRequest struct {
 
 // AccessShareWithPassword validates password and returns share details
 func (h *Handler) AccessShareWithPassword(w http.ResponseWriter, r *http.Request) {
+	setPublicShareJSONHeaders(w)
 	id := chi.URLParam(r, "id")
 
 	var req AccessShareRequest
@@ -893,11 +910,30 @@ func shareDownloadContentType(filePath string) string {
 
 // DownloadShare handles file download for shares
 func (h *Handler) DownloadShare(w http.ResponseWriter, r *http.Request) {
+	setPublicShareJSONHeaders(w)
 	id := chi.URLParam(r, "id")
+	archiveFormat, err := shareArchiveFormatFromRequest(r)
+	if err != nil {
+		writeShareError(w, http.StatusBadRequest, "unsupported archive format", "INVALID_ARCHIVE_FORMAT")
+		return
+	}
 
 	share, err := h.authorizeShare(r, id)
 	if err != nil {
 		writePublicShareAccessError(w, err)
+		return
+	}
+
+	if archiveFormat == "zip" {
+		if h.fs == nil {
+			writeShareError(w, http.StatusServiceUnavailable, "filesystem not available", "FILESYSTEM_UNAVAILABLE")
+			return
+		}
+		if err := h.authorizeSharePath(r.Context(), share, share.Path); err != nil {
+			writePublicSharePathError(w, err, "DOWNLOAD_SHARE_FAILED")
+			return
+		}
+		h.serveAuthorizedShareArchive(w, r, share, share.Path)
 		return
 	}
 
@@ -939,44 +975,12 @@ func (h *Handler) DownloadShare(w http.ResponseWriter, r *http.Request) {
 	}
 	defer reader.Close()
 
-	firstChunk, exhausted, err := prefetchDownloadChunk(reader)
-	if err != nil {
-		writeShareError(w, http.StatusInternalServerError, "internal server error", "DOWNLOAD_SHARE_FAILED")
-		return
-	}
-	accessReservation, err := h.reserveAuthorizedAccessForShare(share)
-	if err != nil {
-		if IsPersistenceWarning(err) {
-			markSharePersistenceWarningHeaders(w)
-		} else {
-			writePublicShareAccessError(w, err)
-			return
-		}
-	}
-
-	filename := path.Base(share.Path)
-	setUntrustedDownloadHeaders(w)
-	w.Header().Set("Content-Disposition", contentDispositionAttachment(filename))
-	w.Header().Set("Content-Type", shareDownloadContentType(share.Path))
-	if err := streamDownload(w, reader, firstChunk, exhausted); err != nil {
-		if streamResponseStarted(err) {
-			return
-		}
-		if rollbackErr := h.store.rollbackAuthorizedAccess(accessReservation); rollbackErr != nil {
-			if IsPersistenceWarning(rollbackErr) {
-				markSharePersistenceWarningHeaders(w)
-			} else {
-				writeShareError(w, http.StatusInternalServerError, "internal server error", "DOWNLOAD_SHARE_ROLLBACK_FAILED")
-				return
-			}
-		}
-		writeShareError(w, http.StatusInternalServerError, "internal server error", "DOWNLOAD_SHARE_FAILED")
-		return
-	}
+	h.serveAuthorizedShareDownload(w, r, share, reader, share.Path)
 }
 
 // DownloadShareFile handles file download from shared folder
 func (h *Handler) DownloadShareFile(w http.ResponseWriter, r *http.Request) {
+	setPublicShareJSONHeaders(w)
 	id := chi.URLParam(r, "id")
 	filePath, err := shareDownloadPathFromRequest(r, id)
 	if err != nil {
@@ -986,6 +990,11 @@ func (h *Handler) DownloadShareFile(w http.ResponseWriter, r *http.Request) {
 	filePath, err = normalizeShareRelativePath(filePath)
 	if err != nil {
 		writeShareError(w, http.StatusBadRequest, "invalid path", "INVALID_PATH")
+		return
+	}
+	archiveFormat, err := shareArchiveFormatFromRequest(r)
+	if err != nil {
+		writeShareError(w, http.StatusBadRequest, "unsupported archive format", "INVALID_ARCHIVE_FORMAT")
 		return
 	}
 
@@ -1021,6 +1030,11 @@ func (h *Handler) DownloadShareFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if archiveFormat == "zip" {
+		h.serveAuthorizedShareArchive(w, r, share, fullPath)
+		return
+	}
+
 	reader, err := h.fs.OpenFile(r.Context(), fullPath)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
@@ -1044,6 +1058,25 @@ func (h *Handler) DownloadShareFile(w http.ResponseWriter, r *http.Request) {
 	}
 	defer reader.Close()
 
+	h.serveAuthorizedShareDownload(w, r, share, reader, fullPath)
+}
+
+func contentDispositionAttachment(filename string) string {
+	value := mime.FormatMediaType("attachment", map[string]string{"filename": filename})
+	if value == "" {
+		return "attachment"
+	}
+	return value
+}
+
+func (h *Handler) serveAuthorizedShareDownload(w http.ResponseWriter, r *http.Request, share *Share, reader FileReader, filePath string) {
+	if requestHasRangeHeader(r) {
+		if seeker, ok := reader.(io.ReadSeeker); ok {
+			h.serveSeekableShareDownload(w, r, share, seeker, filePath)
+			return
+		}
+	}
+
 	firstChunk, exhausted, err := prefetchDownloadChunk(reader)
 	if err != nil {
 		writeShareError(w, http.StatusInternalServerError, "internal server error", "DOWNLOAD_SHARE_FAILED")
@@ -1059,10 +1092,7 @@ func (h *Handler) DownloadShareFile(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	filename := path.Base(fullPath)
-	setUntrustedDownloadHeaders(w)
-	w.Header().Set("Content-Disposition", contentDispositionAttachment(filename))
-	w.Header().Set("Content-Type", shareDownloadContentType(fullPath))
+	setShareDownloadHeaders(w, filePath)
 	if err := streamDownload(w, reader, firstChunk, exhausted); err != nil {
 		if streamResponseStarted(err) {
 			return
@@ -1080,12 +1110,452 @@ func (h *Handler) DownloadShareFile(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func contentDispositionAttachment(filename string) string {
-	value := mime.FormatMediaType("attachment", map[string]string{"filename": filename})
-	if value == "" {
-		return "attachment"
+func shareArchiveFormatFromRequest(r *http.Request) (string, error) {
+	archiveFormat := strings.TrimSpace(r.URL.Query().Get("archive"))
+	if archiveFormat == "" {
+		return "", nil
 	}
-	return value
+	if archiveFormat != "zip" {
+		return "", errUnsupportedShareArchive
+	}
+	return archiveFormat, nil
+}
+
+type shareArchiveEntry struct {
+	sourcePath string
+	zipName    string
+	info       *storage.FileInfo
+}
+
+type shareArchiveCollector struct {
+	handler      *Handler
+	share        *Share
+	statProvider FileStatProvider
+	ctx          context.Context
+	entries      []shareArchiveEntry
+	totalBytes   int64
+}
+
+func (h *Handler) serveAuthorizedShareArchive(w http.ResponseWriter, r *http.Request, share *Share, rootPath string) {
+	statProvider, ok := h.fs.(FileStatProvider)
+	if !ok {
+		writeShareError(w, http.StatusServiceUnavailable, "filesystem not available", "FILESYSTEM_UNAVAILABLE")
+		return
+	}
+
+	entries, err := h.collectShareArchiveEntries(r.Context(), share, statProvider, rootPath)
+	if err != nil {
+		writePublicShareArchiveError(w, err)
+		return
+	}
+
+	accessReservation, err := h.reserveAuthorizedAccessForShare(share)
+	if err != nil {
+		if IsPersistenceWarning(err) {
+			markSharePersistenceWarningHeaders(w)
+		} else {
+			writePublicShareAccessError(w, err)
+			return
+		}
+	}
+
+	setShareArchiveDownloadHeaders(w, rootPath)
+	trackingWriter := &responseStartTrackingWriter{ResponseWriter: w}
+	zipWriter := zip.NewWriter(trackingWriter)
+	if err := h.writeShareArchive(r.Context(), zipWriter, entries); err != nil {
+		if trackingWriter.started {
+			_ = zipWriter.Close()
+			return
+		}
+		h.rollbackShareArchiveAccessOrWriteError(w, accessReservation, err, "DOWNLOAD_SHARE_ARCHIVE_FAILED")
+		return
+	}
+	if err := zipWriter.Close(); err != nil {
+		if trackingWriter.started {
+			return
+		}
+		h.rollbackShareArchiveAccessOrWriteError(w, accessReservation, err, "DOWNLOAD_SHARE_ARCHIVE_FAILED")
+		return
+	}
+}
+
+func (h *Handler) rollbackShareArchiveAccessOrWriteError(w http.ResponseWriter, reservation *authorizedAccessReservation, err error, fallbackCode string) {
+	if rollbackErr := h.store.rollbackAuthorizedAccess(reservation); rollbackErr != nil {
+		if IsPersistenceWarning(rollbackErr) {
+			markSharePersistenceWarningHeaders(w)
+		} else {
+			writeShareError(w, http.StatusInternalServerError, "internal server error", "DOWNLOAD_SHARE_ARCHIVE_ROLLBACK_FAILED")
+			return
+		}
+	}
+	if isPublicShareArchiveResponseError(err) {
+		writePublicShareArchiveError(w, err)
+		return
+	}
+	writeShareError(w, http.StatusInternalServerError, "internal server error", fallbackCode)
+}
+
+func (h *Handler) collectShareArchiveEntries(ctx context.Context, share *Share, statProvider FileStatProvider, rootPath string) ([]shareArchiveEntry, error) {
+	info, err := statProvider.Stat(ctx, rootPath)
+	if err != nil {
+		return nil, err
+	}
+
+	rootName, err := safeShareArchiveEntryName(shareArchiveRootName(rootPath))
+	if err != nil {
+		return nil, err
+	}
+
+	collector := &shareArchiveCollector{
+		handler:      h,
+		share:        share,
+		statProvider: statProvider,
+		ctx:          ctx,
+	}
+	if info.IsDir {
+		if err := collector.walkDirectory(rootPath, rootName, info); err != nil {
+			return nil, err
+		}
+		return collector.entries, nil
+	}
+
+	if err := collector.addFile(rootPath, rootName, info); err != nil {
+		return nil, err
+	}
+	return collector.entries, nil
+}
+
+func (c *shareArchiveCollector) walkDirectory(sourcePath, zipName string, info *storage.FileInfo) error {
+	if err := c.ctx.Err(); err != nil {
+		return err
+	}
+	if err := c.addDirectory(sourcePath, zipName, info); err != nil {
+		return err
+	}
+
+	children, err := c.statProvider.ReadDir(c.ctx, sourcePath)
+	if err != nil {
+		return err
+	}
+	for _, child := range children {
+		if child == nil {
+			continue
+		}
+		if err := c.ctx.Err(); err != nil {
+			return err
+		}
+		childPath, childName, err := shareReadDirChildPath(sourcePath, child)
+		if err != nil {
+			if errors.Is(err, ErrShareNotFound) {
+				continue
+			}
+			return err
+		}
+		if err := c.handler.authorizeSharePath(c.ctx, c.share, childPath); err != nil {
+			if errors.Is(err, ErrShareNotFound) {
+				continue
+			}
+			return err
+		}
+
+		zipChildName, err := safeShareArchiveEntryName(path.Join(zipName, childName))
+		if err != nil {
+			return err
+		}
+		if child.IsDir {
+			if err := c.walkDirectory(childPath, zipChildName, child); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := c.addFile(childPath, zipChildName, child); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (c *shareArchiveCollector) addDirectory(sourcePath, zipName string, info *storage.FileInfo) error {
+	if len(c.entries)+1 > maxShareArchiveEntries {
+		return errShareArchiveTooManyEntries
+	}
+	c.entries = append(c.entries, shareArchiveEntry{
+		sourcePath: sourcePath,
+		zipName:    strings.TrimRight(zipName, "/") + "/",
+		info:       info,
+	})
+	return nil
+}
+
+func (c *shareArchiveCollector) addFile(sourcePath, zipName string, info *storage.FileInfo) error {
+	if len(c.entries)+1 > maxShareArchiveEntries {
+		return errShareArchiveTooManyEntries
+	}
+	if info.Size < 0 || c.totalBytes > maxShareArchiveBytes-info.Size {
+		return errShareArchiveContentTooLarge
+	}
+	c.totalBytes += info.Size
+	c.entries = append(c.entries, shareArchiveEntry{
+		sourcePath: sourcePath,
+		zipName:    zipName,
+		info:       info,
+	})
+	return nil
+}
+
+func (h *Handler) writeShareArchive(ctx context.Context, zipWriter *zip.Writer, entries []shareArchiveEntry) error {
+	var totalBytes int64
+	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if entry.info == nil {
+			return fmt.Errorf("share archive entry %s missing metadata", entry.sourcePath)
+		}
+		if entry.info.IsDir {
+			header := &zip.FileHeader{
+				Name:   entry.zipName,
+				Method: zip.Store,
+			}
+			header.SetModTime(entry.info.ModTime)
+			header.SetMode(os.ModeDir | 0o755)
+			if _, err := zipWriter.CreateHeader(header); err != nil {
+				return fmt.Errorf("create share archive directory %s: %w", entry.zipName, err)
+			}
+			continue
+		}
+
+		reader, archiveInfo, err := h.openShareArchiveFile(ctx, entry)
+		if err != nil {
+			return fmt.Errorf("open share archive file %s: %w", entry.sourcePath, err)
+		}
+		if reader == nil {
+			return storage.ErrNotFound
+		}
+		if archiveInfo == nil {
+			archiveInfo = entry.info
+		}
+		if archiveInfo.IsDir {
+			_ = reader.Close()
+			return storage.ErrIsDir
+		}
+		if archiveInfo.Size < 0 || totalBytes > maxShareArchiveBytes-archiveInfo.Size {
+			_ = reader.Close()
+			return errShareArchiveContentTooLarge
+		}
+
+		header := &zip.FileHeader{
+			Name:               entry.zipName,
+			Method:             zip.Deflate,
+			UncompressedSize64: uint64(archiveInfo.Size),
+		}
+		header.SetModTime(archiveInfo.ModTime)
+		header.SetMode(0o644)
+		writer, err := zipWriter.CreateHeader(header)
+		if err != nil {
+			_ = reader.Close()
+			return fmt.Errorf("create share archive file %s: %w", entry.zipName, err)
+		}
+		remaining := maxShareArchiveBytes - totalBytes
+		written, copyErr := io.Copy(writer, io.LimitReader(reader, remaining+1))
+		closeErr := reader.Close()
+		if copyErr != nil {
+			return fmt.Errorf("write share archive file %s: %w", entry.zipName, copyErr)
+		}
+		if closeErr != nil {
+			return fmt.Errorf("close share archive file %s: %w", entry.sourcePath, closeErr)
+		}
+		if written > remaining {
+			return errShareArchiveContentTooLarge
+		}
+		totalBytes += written
+	}
+	return nil
+}
+
+func (h *Handler) openShareArchiveFile(ctx context.Context, entry shareArchiveEntry) (FileReader, *storage.FileInfo, error) {
+	if snapshotOpener, ok := h.fs.(FileSnapshotOpener); ok {
+		return snapshotOpener.OpenFileSnapshot(ctx, entry.sourcePath)
+	}
+	reader, err := h.fs.OpenFile(ctx, entry.sourcePath)
+	return reader, entry.info, err
+}
+
+func isPublicShareArchiveResponseError(err error) bool {
+	return errors.Is(err, errShareArchiveTooManyEntries) ||
+		errors.Is(err, errShareArchiveContentTooLarge) ||
+		errors.Is(err, errInvalidShareArchivePath) ||
+		errors.Is(err, storage.ErrNotFound) ||
+		errors.Is(err, ErrShareNotFound) ||
+		errors.Is(err, storage.ErrNotDir) ||
+		errors.Is(err, storage.ErrIsDir)
+}
+
+func writePublicShareArchiveError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, errShareArchiveTooManyEntries):
+		writeShareError(w, http.StatusRequestEntityTooLarge, "archive contains too many entries", "ARCHIVE_TOO_MANY_ENTRIES")
+	case errors.Is(err, errShareArchiveContentTooLarge):
+		writeShareError(w, http.StatusRequestEntityTooLarge, "archive content is too large", "ARCHIVE_TOO_LARGE")
+	case errors.Is(err, errInvalidShareArchivePath):
+		writeShareError(w, http.StatusBadRequest, "invalid path", "INVALID_PATH")
+	case errors.Is(err, storage.ErrNotFound), errors.Is(err, ErrShareNotFound):
+		writeShareError(w, http.StatusNotFound, "file not found", "FILE_NOT_FOUND")
+	case errors.Is(err, storage.ErrNotDir), errors.Is(err, storage.ErrIsDir):
+		writeShareError(w, http.StatusBadRequest, "path is not a directory", "INVALID_PATH")
+	default:
+		writeShareError(w, http.StatusInternalServerError, "internal server error", "DOWNLOAD_SHARE_ARCHIVE_FAILED")
+	}
+}
+
+func (h *Handler) serveSeekableShareDownload(w http.ResponseWriter, r *http.Request, share *Share, reader io.ReadSeeker, filePath string) {
+	servesContent, err := seekableRangeRequestServesContent(r, reader)
+	if err != nil {
+		writeShareError(w, http.StatusInternalServerError, "internal server error", "DOWNLOAD_SHARE_FAILED")
+		return
+	}
+	if !servesContent {
+		setShareDownloadHeaders(w, filePath)
+		http.ServeContent(w, r, path.Base(filePath), time.Time{}, reader)
+		return
+	}
+
+	_, err = h.reserveAuthorizedAccessForShare(share)
+	if err != nil {
+		if IsPersistenceWarning(err) {
+			markSharePersistenceWarningHeaders(w)
+		} else {
+			writePublicShareAccessError(w, err)
+			return
+		}
+	}
+
+	setShareDownloadHeaders(w, filePath)
+	http.ServeContent(w, r, path.Base(filePath), time.Time{}, reader)
+}
+
+func seekableRangeRequestServesContent(r *http.Request, reader io.Seeker) (bool, error) {
+	if !requestHasRangeHeader(r) {
+		return true, nil
+	}
+	if strings.TrimSpace(r.Header.Get("If-Range")) != "" {
+		return true, nil
+	}
+	size, err := seekableContentSize(reader)
+	if err != nil {
+		return false, err
+	}
+	return shareRangeHeaderServesContent(r.Header.Get("Range"), size), nil
+}
+
+func seekableContentSize(reader io.Seeker) (int64, error) {
+	current, err := reader.Seek(0, io.SeekCurrent)
+	if err != nil {
+		return 0, err
+	}
+	size, sizeErr := reader.Seek(0, io.SeekEnd)
+	_, restoreErr := reader.Seek(current, io.SeekStart)
+	if sizeErr != nil {
+		return 0, sizeErr
+	}
+	if restoreErr != nil {
+		return 0, restoreErr
+	}
+	return size, nil
+}
+
+func shareRangeHeaderServesContent(rangeHeader string, size int64) bool {
+	const prefix = "bytes="
+	if !strings.HasPrefix(rangeHeader, prefix) {
+		return false
+	}
+
+	hasRange := false
+	noOverlap := false
+	for _, rawRange := range strings.Split(rangeHeader[len(prefix):], ",") {
+		rawRange = strings.TrimSpace(rawRange)
+		if rawRange == "" {
+			continue
+		}
+		startText, endText, ok := strings.Cut(rawRange, "-")
+		if !ok {
+			return false
+		}
+		startText = strings.TrimSpace(startText)
+		endText = strings.TrimSpace(endText)
+		if startText == "" {
+			if endText == "" || strings.HasPrefix(endText, "-") {
+				return false
+			}
+			suffixLength, err := strconv.ParseInt(endText, 10, 64)
+			if err != nil || suffixLength < 0 {
+				return false
+			}
+			hasRange = true
+			continue
+		}
+
+		start, err := strconv.ParseInt(startText, 10, 64)
+		if err != nil || start < 0 {
+			return false
+		}
+		if start >= size {
+			noOverlap = true
+			continue
+		}
+		if endText != "" {
+			end, err := strconv.ParseInt(endText, 10, 64)
+			if err != nil || start > end {
+				return false
+			}
+		}
+		hasRange = true
+	}
+	if noOverlap && !hasRange {
+		return size == 0
+	}
+	return true
+}
+
+func requestHasRangeHeader(r *http.Request) bool {
+	return strings.TrimSpace(r.Header.Get("Range")) != ""
+}
+
+func setShareArchiveDownloadHeaders(w http.ResponseWriter, rootPath string) {
+	setUntrustedDownloadHeaders(w)
+	w.Header().Set("Content-Disposition", contentDispositionAttachment(shareArchiveFilename(rootPath)))
+	w.Header().Set("Content-Type", "application/zip")
+}
+
+func setShareDownloadHeaders(w http.ResponseWriter, filePath string) {
+	filename := path.Base(filePath)
+	setUntrustedDownloadHeaders(w)
+	w.Header().Set("Content-Disposition", contentDispositionAttachment(filename))
+	w.Header().Set("Content-Type", shareDownloadContentType(filePath))
+}
+
+func safeShareArchiveEntryName(name string) (string, error) {
+	normalized := strings.ReplaceAll(name, "\\", "/")
+	if normalized == "" || strings.ContainsRune(normalized, '\x00') || strings.HasPrefix(normalized, "/") || hasShareTraversalSegment(normalized) {
+		return "", errInvalidShareArchivePath
+	}
+	cleaned := path.Clean(normalized)
+	if cleaned == "." || cleaned == ".." || strings.HasPrefix(cleaned, "../") {
+		return "", errInvalidShareArchivePath
+	}
+	return cleaned, nil
+}
+
+func shareArchiveRootName(rootPath string) string {
+	cleaned := path.Clean(rootPath)
+	if cleaned == "/" || cleaned == "." {
+		return "mnemonas-share"
+	}
+	return path.Base(cleaned)
+}
+
+func shareArchiveFilename(rootPath string) string {
+	return shareArchiveRootName(rootPath) + ".zip"
 }
 
 func setUntrustedDownloadHeaders(w http.ResponseWriter) {
@@ -1093,6 +1563,29 @@ func setUntrustedDownloadHeaders(w http.ResponseWriter) {
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	w.Header().Set("Content-Security-Policy", untrustedDownloadCSP)
+}
+
+func setPublicShareJSONHeaders(w http.ResponseWriter) {
+	header := w.Header()
+	header.Set("Cache-Control", "private, no-cache")
+	header.Set("X-Content-Type-Options", "nosniff")
+	header.Set("Referrer-Policy", "no-referrer")
+	appendVaryHeader(header, "Cookie")
+}
+
+func appendVaryHeader(header http.Header, token string) {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return
+	}
+	for _, value := range header.Values("Vary") {
+		for _, existing := range strings.Split(value, ",") {
+			if strings.EqualFold(strings.TrimSpace(existing), token) {
+				return
+			}
+		}
+	}
+	header.Add("Vary", token)
 }
 
 func prefetchDownloadChunk(reader io.Reader) ([]byte, bool, error) {
@@ -1169,6 +1662,7 @@ func (w *responseStartTrackingWriter) Write(p []byte) (int, error) {
 
 // ListShareItems lists items within a shared folder.
 func (h *Handler) ListShareItems(w http.ResponseWriter, r *http.Request) {
+	setPublicShareJSONHeaders(w)
 	id := chi.URLParam(r, "id")
 	relPath := r.URL.Query().Get("path")
 	var err error
@@ -1225,14 +1719,8 @@ func (h *Handler) ListShareItems(w http.ResponseWriter, r *http.Request) {
 
 	items := make([]*PublicShareItem, 0, len(entries))
 	for _, entry := range entries {
-		entryPath := entry.Path
-		if strings.TrimSpace(entryPath) == "" {
-			entryPath = path.Join(fullPath, entry.Name)
-		}
-		if err := h.authorizeSharePath(r.Context(), share, entryPath); err != nil {
-			if errors.Is(err, ErrShareNotFound) {
-				continue
-			}
+		entryPath, entryName, err := shareReadDirChildPath(fullPath, entry)
+		if err != nil {
 			writeShareError(w, http.StatusInternalServerError, "internal server error", "LIST_SHARE_ITEMS_FAILED")
 			return
 		}
@@ -1241,11 +1729,18 @@ func (h *Handler) ListShareItems(w http.ResponseWriter, r *http.Request) {
 			writeShareError(w, http.StatusInternalServerError, "internal server error", "LIST_SHARE_ITEMS_FAILED")
 			return
 		}
+		if err := h.authorizeSharePath(r.Context(), share, entryPath); err != nil {
+			if errors.Is(err, ErrShareNotFound) {
+				continue
+			}
+			writeShareError(w, http.StatusInternalServerError, "internal server error", "LIST_SHARE_ITEMS_FAILED")
+			return
+		}
 		if relItemPath == "." {
-			relItemPath = entry.Name
+			relItemPath = entryName
 		}
 		items = append(items, &PublicShareItem{
-			Name:    entry.Name,
+			Name:    entryName,
 			Path:    relItemPath,
 			IsDir:   entry.IsDir,
 			Size:    entry.Size,
@@ -1307,7 +1802,8 @@ func (h *Handler) enrichPublicShareInfo(ctx context.Context, info *PublicShareIn
 		if fileInfo.IsDir {
 			return storage.ErrIsDir
 		}
-		info.FileSize = fileInfo.Size
+		fileSize := fileInfo.Size
+		info.FileSize = &fileSize
 	case ShareTypeFolder:
 		if err := h.authorizeSharePath(ctx, share, share.Path); err != nil {
 			return err
@@ -1320,16 +1816,14 @@ func (h *Handler) enrichPublicShareInfo(ctx context.Context, info *PublicShareIn
 		if err != nil {
 			return err
 		}
-		info.FolderItems = len(authorizedEntries)
+		folderItems := len(authorizedEntries)
+		info.FolderItems = &folderItems
 	}
 
 	return nil
 }
 
 func (h *Handler) authorizeSharePath(ctx context.Context, share *Share, targetPath string) error {
-	if h.pathAccessAuthorizer == nil {
-		return nil
-	}
 	if share == nil {
 		return ErrShareNotFound
 	}
@@ -1338,22 +1832,24 @@ func (h *Handler) authorizeSharePath(ctx context.Context, share *Share, targetPa
 	if !isWithinSharePath(share.Path, cleanTarget) {
 		return ErrShareNotFound
 	}
+	if h.pathAccessAuthorizer == nil {
+		return nil
+	}
 	return h.pathAccessAuthorizer(ctx, share, cleanTarget)
 }
 
 func (h *Handler) filterAuthorizedShareEntries(ctx context.Context, share *Share, parentPath string, entries []*storage.FileInfo) ([]*storage.FileInfo, error) {
-	if h.pathAccessAuthorizer == nil {
-		return entries, nil
-	}
-
 	filtered := make([]*storage.FileInfo, 0, len(entries))
 	for _, entry := range entries {
 		if entry == nil {
 			continue
 		}
-		entryPath := entry.Path
-		if strings.TrimSpace(entryPath) == "" {
-			entryPath = path.Join(parentPath, entry.Name)
+		entryPath, entryName, err := shareReadDirChildPath(parentPath, entry)
+		if err != nil {
+			if errors.Is(err, ErrShareNotFound) {
+				continue
+			}
+			return nil, err
 		}
 		if err := h.authorizeSharePath(ctx, share, entryPath); err != nil {
 			if errors.Is(err, ErrShareNotFound) {
@@ -1361,9 +1857,28 @@ func (h *Handler) filterAuthorizedShareEntries(ctx context.Context, share *Share
 			}
 			return nil, err
 		}
-		filtered = append(filtered, entry)
+		entryInfo := *entry
+		entryInfo.Path = entryPath
+		entryInfo.Name = entryName
+		filtered = append(filtered, &entryInfo)
 	}
 	return filtered, nil
+}
+
+func shareReadDirChildPath(parentPath string, child *storage.FileInfo) (string, string, error) {
+	if child == nil {
+		return "", "", ErrShareNotFound
+	}
+	cleanParent := path.Clean(parentPath)
+	childPath := child.Path
+	if strings.TrimSpace(childPath) == "" {
+		childPath = path.Join(cleanParent, child.Name)
+	}
+	cleanChild := path.Clean(childPath)
+	if cleanChild == cleanParent || path.Dir(cleanChild) != cleanParent {
+		return "", "", ErrShareNotFound
+	}
+	return cleanChild, path.Base(cleanChild), nil
 }
 
 func writePublicSharePathError(w http.ResponseWriter, err error, fallbackCode string) {
@@ -1493,7 +2008,7 @@ func (h *Handler) setShareAccessCookie(w http.ResponseWriter, r *http.Request, s
 			Value:    h.shareAccessToken(share),
 			Path:     cookiePath,
 			HttpOnly: true,
-			SameSite: http.SameSiteLaxMode,
+			SameSite: shareAccessSameSite,
 			Secure:   requestIsHTTPS(r),
 		}
 

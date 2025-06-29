@@ -19,6 +19,7 @@ const BACKEND_HOST = normalizeTcpHostForCli('MNEMONAS_E2E_BACKEND_URL host', RAW
 const FRONTEND_HOST = normalizeTcpHostForCli('MNEMONAS_E2E_FRONTEND_URL host', RAW_FRONTEND_HOST)
 const FRONTEND_PORT = FRONTEND_PARSED_URL.port || (FRONTEND_PARSED_URL.protocol === 'https:' ? '443' : '80')
 const WEB_SERVER_ENV = { ...process.env }
+const LOCAL_WORKERS = parseOptionalPositiveInteger('MNEMONAS_E2E_WORKERS', process.env.MNEMONAS_E2E_WORKERS) ?? 4
 delete WEB_SERVER_ENV.NO_COLOR
 
 process.env.E2E_USERNAME ||= 'admin'
@@ -73,6 +74,20 @@ function assertSafeTcpPort(label: string, value: string): void {
   }
 }
 
+function parseOptionalPositiveInteger(label: string, value: string | undefined): number | undefined {
+  if (value === undefined || value.trim() === '') {
+    return undefined
+  }
+  if (!/^[0-9]+$/.test(value)) {
+    throw new Error(`${label} must be a positive integer: ${value}`)
+  }
+  const parsed = Number.parseInt(value, 10)
+  if (!Number.isInteger(parsed) || parsed < 1) {
+    throw new Error(`${label} must be a positive integer: ${value}`)
+  }
+  return parsed
+}
+
 /**
  * Playwright E2E 测试配置
  * @see https://playwright.dev/docs/test-configuration
@@ -88,7 +103,7 @@ export default defineConfig({
   fullyParallel: true,
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 2 : 0,
-  workers: process.env.CI ? 1 : undefined,
+  workers: process.env.CI ? 1 : LOCAL_WORKERS,
   reporter: [
     ['html', { open: 'never' }],
     ['list'],

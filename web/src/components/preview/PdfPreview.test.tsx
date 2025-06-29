@@ -46,10 +46,28 @@ describe('PdfPreview', () => {
     render(<PdfPreview path="/docs/file.pdf" filename="file.pdf" />)
 
     await waitFor(() => {
-      expect(mockAuthFetch).toHaveBeenCalledWith('/api/v1/download/docs/file.pdf')
+      expect(mockAuthFetch).toHaveBeenCalledWith('/api/v1/download/docs/file.pdf', expect.anything())
     })
 
     expect(await screen.findByTitle('file.pdf')).toBeInTheDocument()
+  })
+
+  it('passes an abort signal and cancels the pending pdf request when unmounted', async () => {
+    let signal: AbortSignal | undefined
+    mockAuthFetch.mockImplementationOnce((_url, options) => {
+      signal = options?.signal
+      return new Promise<Response>(() => {})
+    })
+
+    const { unmount } = render(<PdfPreview path="/docs/file.pdf" filename="file.pdf" />)
+
+    await waitFor(() => {
+      expect(signal).toBeInstanceOf(AbortSignal)
+    })
+
+    unmount()
+
+    expect(signal?.aborted).toBe(true)
   })
 
   it('forces the preview blob to application/pdf', async () => {
@@ -91,5 +109,66 @@ describe('PdfPreview', () => {
     await waitFor(() => {
       expect(screen.getByText('无法加载 PDF')).toBeInTheDocument()
     })
+  })
+
+  it('rejects successful non-PDF JSON responses without reading them as preview errors', async () => {
+    const json = vi.fn(() => Promise.resolve({
+      code: 'FILESYSTEM_UNAVAILABLE',
+      message: 'user JSON document content',
+    }))
+    const arrayBuffer = vi.fn(() => Promise.resolve(new ArrayBuffer(0)))
+
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      headers: new Headers({ 'Content-Type': 'application/json' }),
+      clone: () => ({ json }),
+      arrayBuffer,
+    } as unknown as Response)
+
+    render(<PdfPreview path="/docs/unavailable.pdf" filename="unavailable.pdf" />)
+
+    await waitFor(() => {
+      expect(screen.getByText('无法加载 PDF')).toBeInTheDocument()
+    })
+    expect(json).not.toHaveBeenCalled()
+    expect(arrayBuffer).not.toHaveBeenCalled()
+    expect(URL.createObjectURL).not.toHaveBeenCalled()
+  })
+
+  it('uses a stable message for structured JSON errors from non-OK preview responses', async () => {
+    const json = vi.fn(() => Promise.resolve({
+      success: false,
+      error: {
+        code: 'FILESYSTEM_UNAVAILABLE',
+        message: 'preview storage unavailable',
+      },
+    }))
+
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 503,
+      headers: new Headers({ 'Content-Type': 'application/json' }),
+      clone: () => ({ json }),
+    } as unknown as Response)
+
+    render(<PdfPreview path="/docs/unavailable.pdf" filename="unavailable.pdf" />)
+
+    await waitFor(() => {
+      expect(screen.getByText('无法加载 PDF')).toBeInTheDocument()
+    })
+    expect(json).toHaveBeenCalled()
+    expect(screen.queryByText('preview storage unavailable')).not.toBeInTheDocument()
+    expect(URL.createObjectURL).not.toHaveBeenCalled()
+  })
+
+  it('does not expose raw request errors when PDF loading rejects', async () => {
+    mockAuthFetch.mockRejectedValueOnce(new Error('preview storage unavailable'))
+
+    render(<PdfPreview path="/docs/unavailable.pdf" filename="unavailable.pdf" />)
+
+    await waitFor(() => {
+      expect(screen.getByText('无法加载 PDF')).toBeInTheDocument()
+    })
+    expect(screen.queryByText('preview storage unavailable')).not.toBeInTheDocument()
   })
 })

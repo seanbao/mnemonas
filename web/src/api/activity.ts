@@ -1,6 +1,8 @@
 // Activity log API client
 
 import { authFetch } from './auth'
+import { INVALID_API_RESPONSE_MESSAGE } from '@/lib/apiMessages'
+import { readStructuredJsonErrorDetails } from '@/lib/jsonErrorResponse'
 
 const API_BASE = '/api/v1'
 
@@ -35,8 +37,13 @@ interface ApiResponseWrapper<T> {
 }
 
 // Handle API response
-async function handleResponse<T>(response: Response, errorMessage: string, invalidMessage = '服务器返回了无效的数据'): Promise<T> {
+async function handleResponse<T>(response: Response, errorMessage: string, invalidMessage = INVALID_API_RESPONSE_MESSAGE): Promise<T> {
   if (!response.ok) {
+    const structuredError = await readStructuredJsonErrorDetails(response, errorMessage)
+    if (structuredError) {
+      throw new ApiError(structuredError.message, response.status, response.statusText, structuredError.code)
+    }
+
     let message = errorMessage
     let code: string | undefined
     try {
@@ -105,6 +112,13 @@ export const ACTIVITY_ACTIONS = [
 
 export type ActionType = typeof ACTIVITY_ACTIONS[number]
 
+export const ACTIVITY_ACTION_GROUPS = [
+  'risk',
+  'share',
+] as const
+
+export type ActivityActionGroup = typeof ACTIVITY_ACTION_GROUPS[number]
+
 const activityActionSet = new Set<string>(ACTIVITY_ACTIONS)
 
 function isActionType(value: unknown): value is ActionType {
@@ -115,19 +129,88 @@ function isStringRecord(value: unknown): value is Record<string, string> {
   return isRecord(value) && Object.values(value).every((entry) => typeof entry === 'string')
 }
 
-function isNumberRecord(value: unknown): value is Record<string, number> {
-  return isRecord(value) && Object.values(value).every((entry) => typeof entry === 'number')
+function isNonNegativeInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0
+}
+
+function isNonNegativeIntegerRecord(value: unknown): value is Record<string, number> {
+  return isRecord(value) && Object.values(value).every(isNonNegativeInteger)
+}
+
+type ActivityActionCountMap = Partial<Record<ActionType, number>>
+
+function isActivityActionNumberRecord(value: unknown): value is ActivityActionCountMap {
+  return isRecord(value)
+    && Object.entries(value).every(([key, entry]) => isActionType(key) && isNonNegativeInteger(entry))
+}
+
+function parseRFC3339Timestamp(value: unknown): number | null {
+  if (typeof value !== 'string') {
+    return null
+  }
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(value)) {
+    return null
+  }
+  const timestamp = Date.parse(value)
+  return Number.isNaN(timestamp) ? null : timestamp
+}
+
+function isValidActivityRiskWindow(value: Record<string, unknown>): boolean {
+  const startedAt = value.max_10m_started_at
+  const endedAt = value.max_10m_ended_at
+
+  if (value.max_10m === 0) {
+    return startedAt === undefined && endedAt === undefined
+  }
+
+  const startedTimestamp = parseRFC3339Timestamp(startedAt)
+  const endedTimestamp = parseRFC3339Timestamp(endedAt)
+  return startedTimestamp !== null && endedTimestamp !== null && endedTimestamp >= startedTimestamp
+}
+
+function isValidActivityRiskSummary(value: unknown): value is ActivityRiskSummary {
+  return isRecord(value)
+    && isNonNegativeInteger(value.total)
+    && isNonNegativeInteger(value.today)
+    && isNonNegativeInteger(value.max_10m)
+    && isValidActivityRiskWindow(value)
 }
 
 function isValidActivityEntry(value: unknown): value is ActivityEntry {
   return isRecord(value)
     && typeof value.id === 'string'
-    && typeof value.timestamp === 'string'
+    && value.id.trim() !== ''
+    && value.id === value.id.trim()
+    && parseRFC3339Timestamp(value.timestamp) !== null
     && isActionType(value.action)
     && (value.path === undefined || typeof value.path === 'string')
     && (value.user === undefined || typeof value.user === 'string')
     && (value.ip === undefined || typeof value.ip === 'string')
     && (value.details === undefined || isStringRecord(value.details))
+}
+
+function isValidActivityListPagination(items: ActivityEntry[], total: number, limit: number, offset: number): boolean {
+  if (items.length > limit) {
+    return false
+  }
+  if (total < items.length) {
+    return false
+  }
+  if (items.length > 0 && offset + items.length > total) {
+    return false
+  }
+  return true
+}
+
+function hasUniqueActivityEntryIDs(items: ActivityEntry[]): boolean {
+  const seen = new Set<string>()
+  for (const item of items) {
+    if (seen.has(item.id)) {
+      return false
+    }
+    seen.add(item.id)
+  }
+  return true
 }
 
 // Activity entry
@@ -150,34 +233,68 @@ export interface ActivityListResponse {
 }
 
 // Activity statistics
+export interface ActivityRiskSummary {
+  total: number
+  today: number
+  max_10m: number
+  max_10m_started_at?: string
+  max_10m_ended_at?: string
+}
+
 export interface ActivityStats {
   total: number
   today: number
-  by_action: Record<ActionType, number>
+  by_action: ActivityActionCountMap
   by_user: Record<string, number>
+  risk_summary?: ActivityRiskSummary
 }
 
 export interface ActivityActionResult {
   message?: string
 }
 
-// List activity entries
-export async function listActivity(options?: {
+export interface ActivityRequestOptions {
+  signal?: AbortSignal
+}
+
+export interface ActivityFilterOptions extends ActivityRequestOptions {
+  action?: ActionType
+  actionGroup?: ActivityActionGroup
+  user?: string
+  path?: string
+  since?: string
+  until?: string
+}
+
+export interface ActivityListOptions extends ActivityFilterOptions {
   limit?: number
   offset?: number
-  action?: ActionType
-  user?: string
-}): Promise<ActivityListResponse> {
+}
+
+function appendActivityFilterParams(params: URLSearchParams, options?: ActivityFilterOptions) {
+  if (options?.action) params.set('action', options.action)
+  if (options?.actionGroup) params.set('action_group', options.actionGroup)
+  if (options?.user) params.set('user', options.user)
+  if (options?.path) params.set('path', options.path)
+  if (options?.since) params.set('since', options.since)
+  if (options?.until) params.set('until', options.until)
+}
+
+function buildActivityUrl(path: string, params: URLSearchParams): string {
+  const queryString = params.toString()
+  return queryString ? `${API_BASE}${path}?${queryString}` : `${API_BASE}${path}`
+}
+
+// List activity entries
+export async function listActivity(options?: ActivityListOptions): Promise<ActivityListResponse> {
   const params = new URLSearchParams()
   if (options?.limit) params.set('limit', String(options.limit))
   if (options?.offset) params.set('offset', String(options.offset))
-  if (options?.action) params.set('action', options.action)
-  if (options?.user) params.set('user', options.user)
+  appendActivityFilterParams(params, options)
 
-  const queryString = params.toString()
-  const url = queryString ? `${API_BASE}/activity/?${queryString}` : `${API_BASE}/activity/`
+  const url = buildActivityUrl('/activity/', params)
 
-  const response = await authFetch(url)
+  const response = options?.signal ? await authFetch(url, { signal: options.signal }) : await authFetch(url)
   const result = await handleResponse<ApiResponseWrapper<{
     items?: ActivityEntry[]
     total?: number
@@ -187,45 +304,61 @@ export async function listActivity(options?: {
 
   if (
     (result.data.items !== undefined && (!Array.isArray(result.data.items) || result.data.items.some((item) => !isValidActivityEntry(item))))
-    || (result.data.total !== undefined && typeof result.data.total !== 'number')
-    || (result.data.limit !== undefined && typeof result.data.limit !== 'number')
-    || (result.data.offset !== undefined && typeof result.data.offset !== 'number')
+    || (result.data.total !== undefined && !isNonNegativeInteger(result.data.total))
+    || (result.data.limit !== undefined && !isNonNegativeInteger(result.data.limit))
+    || (result.data.offset !== undefined && !isNonNegativeInteger(result.data.offset))
   ) {
-    throw new Error('服务器返回了无效的数据')
+    throw new Error(INVALID_API_RESPONSE_MESSAGE)
   }
 
   const items = Array.isArray(result.data.items) ? result.data.items : []
   const limit = result.data.limit ?? options?.limit ?? items.length
   const offset = result.data.offset ?? options?.offset ?? 0
+  const total = result.data.total ?? offset + items.length
+
+  if (!isValidActivityListPagination(items, total, limit, offset)) {
+    throw new Error(INVALID_API_RESPONSE_MESSAGE)
+  }
+  if (!hasUniqueActivityEntryIDs(items)) {
+    throw new Error(INVALID_API_RESPONSE_MESSAGE)
+  }
 
   return {
     items,
-    total: result.data.total ?? items.length,
+    total,
     limit,
     offset,
   }
 }
 
 // Get activity statistics
-export async function getActivityStats(): Promise<ActivityStats> {
-  const response = await authFetch(`${API_BASE}/activity/stats`)
+export async function getActivityStats(options?: ActivityFilterOptions): Promise<ActivityStats> {
+  const params = new URLSearchParams()
+  appendActivityFilterParams(params, options)
+  const url = buildActivityUrl('/activity/stats', params)
+
+  const response = options?.signal
+    ? await authFetch(url, { signal: options.signal })
+    : await authFetch(url)
   const result = await handleResponse<ApiResponseWrapper<ActivityStats>>(response, '获取活动统计失败')
 
   if (
-    typeof result.data.total !== 'number' ||
-    typeof result.data.today !== 'number' ||
-    !isNumberRecord(result.data.by_action) ||
-    !isNumberRecord(result.data.by_user)
+    !isNonNegativeInteger(result.data.total) ||
+    !isNonNegativeInteger(result.data.today) ||
+    !isActivityActionNumberRecord(result.data.by_action) ||
+    !isNonNegativeIntegerRecord(result.data.by_user) ||
+    (result.data.risk_summary !== undefined && !isValidActivityRiskSummary(result.data.risk_summary))
   ) {
-    throw new Error('服务器返回了无效的数据')
+    throw new Error(INVALID_API_RESPONSE_MESSAGE)
   }
 
   return result.data
 }
 
 // Clear activity log (admin only)
-export async function clearActivity(): Promise<ActivityActionResult> {
+export async function clearActivity(options: ActivityRequestOptions = {}): Promise<ActivityActionResult> {
   const response = await authFetch(`${API_BASE}/activity/`, {
+    ...options,
     method: 'DELETE',
   })
   if (!response.ok) {
@@ -235,7 +368,7 @@ export async function clearActivity(): Promise<ActivityActionResult> {
   const result = await handleResponse<ApiResponseWrapper<{ message?: string }>>(response, '清除最近操作失败')
 
   if (result.data.message !== undefined && typeof result.data.message !== 'string') {
-    throw new Error('服务器返回了无效的数据')
+    throw new Error(INVALID_API_RESPONSE_MESSAGE)
   }
 
   return {
@@ -267,7 +400,7 @@ export function getActionLabel(action: ActionType): string {
     disk_health: '磁盘健康异常',
     scrub: '数据校验',
   }
-  return labels[action] || action
+  return labels[action] ?? '未知操作'
 }
 
 // Get action color for UI
