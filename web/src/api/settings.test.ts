@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi, type Mock } from 'vitest'
-import { checkDirectoryAccess, getSecurityCheck, getSettings, getWebDAVCredentials, previewDirectoryAccess, reportDirectoryAccess, SettingsError, updateSettings, type SettingsData } from './settings'
+import { checkDirectoryAccess, getSecurityCheck, getSettings, getWebDAVCredentials, previewDirectoryAccess, reportDirectoryAccess, sendTestAlert, SettingsError, updateSettings, type SettingsData } from './settings'
 
 vi.mock('./auth', () => ({
   authFetch: vi.fn(),
@@ -9,6 +9,38 @@ import { authFetch } from './auth'
 
 const mockAuthFetch = authFetch as Mock
 const invalidResponseMessage = '服务器返回了无效的数据'
+const validCDCSettings = { min_chunk_size: 262144, avg_chunk_size: 1048576, max_chunk_size: 4194304 }
+const validAlertsSettings = {
+  enabled: true,
+  check_interval: '1m',
+  threshold_pct: 80,
+  critical_pct: 90,
+  min_free_bytes: 1024,
+  cooldown_period: '10m',
+  webhook_url: '',
+  webhook_method: 'POST',
+  webhook_headers: [],
+}
+const validDiskHealthSettings = {
+  enabled: true,
+  check_interval: '1h',
+  probe_timeout: '15s',
+  cooldown_period: '4h',
+  command: 'smartctl',
+  temperature_warning_c: 45,
+  temperature_critical_c: 55,
+  media_wear_warning_percent: 80,
+  media_wear_critical_percent: 95,
+  devices: [],
+}
+const validMaintenanceSettings = {
+  scrub: {
+    enabled: true,
+    schedule_interval: '168h',
+    retry_interval: '1h',
+    max_retries: 1,
+  },
+}
 
 function createSettings(overrides: Partial<SettingsData> = {}): SettingsData {
   return {
@@ -18,7 +50,7 @@ function createSettings(overrides: Partial<SettingsData> = {}): SettingsData {
     webdav: { enabled: true, prefix: '/dav', read_only: false, auth_type: 'basic', username: 'admin' },
     share: { enabled: true, base_url: 'http://localhost:8080' },
     dataplane: { grpc_address: '127.0.0.1:9090', timeout: '30s', max_retries: 3 },
-    cdc: { min_chunk_size: 1, avg_chunk_size: 2, max_chunk_size: 3 },
+    cdc: validCDCSettings,
     ...overrides,
   }
 }
@@ -40,7 +72,7 @@ describe('Settings API', () => {
           webdav: { enabled: true, prefix: '/dav', read_only: false, auth_type: 'basic', username: 'admin' },
           share: { enabled: true, base_url: 'http://localhost:8080' },
           dataplane: { grpc_address: '127.0.0.1:9090', timeout: '30s', max_retries: 3 },
-          cdc: { min_chunk_size: 1, avg_chunk_size: 2, max_chunk_size: 3 },
+          cdc: validCDCSettings,
         },
       }),
     })
@@ -147,7 +179,7 @@ describe('Settings API', () => {
           share: { enabled: true, base_url: 'http://localhost:8080' },
           favorites: { enabled: true, runtime_available: false },
           dataplane: { grpc_address: '127.0.0.1:9090', timeout: '30s', max_retries: 3 },
-          cdc: { min_chunk_size: 1, avg_chunk_size: 2, max_chunk_size: 3 },
+          cdc: validCDCSettings,
         },
       }),
     })
@@ -169,7 +201,7 @@ describe('Settings API', () => {
           webdav: { enabled: true, runtime_enabled: false, prefix: '/dav', read_only: false, auth_type: 'basic', username: 'admin' },
           share: { enabled: true, base_url: 'http://localhost:8080' },
           dataplane: { grpc_address: '127.0.0.1:9090', timeout: '30s', max_retries: 3 },
-          cdc: { min_chunk_size: 1, avg_chunk_size: 2, max_chunk_size: 3 },
+          cdc: validCDCSettings,
         },
       }),
     })
@@ -281,8 +313,72 @@ describe('Settings API', () => {
           retention: { max_versions: 10, max_age: '24h', min_free_space: 1024, gc_interval: '1h' },
           webdav: { enabled: true, prefix: '/dav', read_only: false, auth_type: 'basic', username: 'admin' },
           dataplane: { grpc_address: '127.0.0.1:9090', timeout: '30s', max_retries: 3 },
-          cdc: { min_chunk_size: 1, avg_chunk_size: 2, max_chunk_size: 3 },
+          cdc: validCDCSettings,
         },
+      }),
+    })
+
+    await expect(getSettings()).rejects.toThrow(invalidResponseMessage)
+  })
+
+  it.each([
+    ['unsafe default max access', { default_max_access: 9007199254740992 }],
+    ['fractional policy max access', { policy_rules: [{ path: '/team', max_access: 1.5 }] }],
+  ])('rejects settings responses with %s', async (_name, sharePatch) => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        success: true,
+        data: createSettings({
+          share: {
+            ...createSettings().share,
+            ...sharePatch,
+          },
+        }),
+      }),
+    })
+
+    await expect(getSettings()).rejects.toThrow(invalidResponseMessage)
+  })
+
+  it.each([
+    ['unsafe directory quota bytes', { storage: { root: '~/.mnemonas', directory_quotas: [{ path: '/team', quota_bytes: 9007199254740992 }] } }],
+    ['unsafe retention min free space', { retention: { ...createSettings().retention, min_free_space: 9007199254740992 } }],
+    ['unsafe trash max size', { trash: { enabled: true, retention_days: 30, max_size: 9007199254740992 } }],
+    ['unsafe versioning max size', { versioning: { auto_versioned_extensions: ['.txt'], auto_versioned_filenames: [], max_versioned_size: 9007199254740992 } }],
+    ['unsafe alerts min free bytes', { alerts: { enabled: true, check_interval: '1m', threshold_pct: 80, critical_pct: 90, min_free_bytes: 9007199254740992, cooldown_period: '10m', webhook_url: '', webhook_method: 'POST', webhook_headers: [] } }],
+    ['out-of-range alerts threshold', { alerts: { ...validAlertsSettings, threshold_pct: 101 } }],
+    ['fractional alerts critical threshold', { alerts: { ...validAlertsSettings, critical_pct: 90.5 } }],
+    ['inverted alerts thresholds', { alerts: { ...validAlertsSettings, threshold_pct: 95, critical_pct: 90 } }],
+  ])('rejects settings responses with %s', async (_name, override) => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        success: true,
+        data: createSettings(override as Partial<SettingsData>),
+      }),
+    })
+
+    await expect(getSettings()).rejects.toThrow(invalidResponseMessage)
+  })
+
+  it.each([
+    ['out-of-range server port', { server: { ...createSettings().server, port: 65536 } }],
+    ['negative trusted proxy hops', { server: { ...createSettings().server, trusted_proxy_hops: -1 } }],
+    ['fractional retention max versions', { retention: { ...createSettings().retention, max_versions: 1.5 } }],
+    ['fractional dataplane max retries', { dataplane: { ...createSettings().dataplane, max_retries: 1.5 } }],
+    ['invalid CDC chunk order', { cdc: { min_chunk_size: 1048576, avg_chunk_size: 262144, max_chunk_size: 4194304 } }],
+    ['negative trash retention days', { trash: { enabled: true, retention_days: -1, max_size: 1024 } }],
+    ['out-of-range alerts SMTP port', { alerts: { ...validAlertsSettings, smtp_port: 70000 } }],
+    ['out-of-range disk health media wear threshold', { disk_health: { ...validDiskHealthSettings, media_wear_warning_percent: 101 } }],
+    ['inverted disk health temperature thresholds', { disk_health: { ...validDiskHealthSettings, temperature_warning_c: 60, temperature_critical_c: 50 } }],
+    ['negative maintenance scrub max retries', { maintenance: { scrub: { ...validMaintenanceSettings.scrub, max_retries: -1 } } }],
+  ])('rejects settings responses with %s', async (_name, override) => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        success: true,
+        data: createSettings(override as Partial<SettingsData>),
       }),
     })
 
@@ -460,19 +556,142 @@ describe('Settings API', () => {
     }))
   })
 
-  it('sends trusted_proxy_hops in update payloads', async () => {
-  mockAuthFetch.mockResolvedValueOnce({
-    ok: true,
-    json: () => Promise.resolve({ success: true, data: null, message: 'settings updated' }),
+  it.each([
+    ['negative default max access', { share: { default_max_access: -1 } }, 'INVALID_SHARE_DEFAULT_MAX_ACCESS'],
+    ['fractional default max access', { share: { default_max_access: 1.5 } }, 'INVALID_SHARE_DEFAULT_MAX_ACCESS'],
+    ['unsafe default max access', { share: { default_max_access: 9007199254740992 } }, 'INVALID_SHARE_DEFAULT_MAX_ACCESS'],
+    ['non-number default max access', { share: { default_max_access: '5' as unknown as number } }, 'INVALID_SHARE_DEFAULT_MAX_ACCESS'],
+    ['negative policy max access', { share: { policy_rules: [{ path: '/team', max_access: -1 }] } }, 'INVALID_SHARE_POLICY_MAX_ACCESS'],
+    ['fractional policy max access', { share: { policy_rules: [{ path: '/team', max_access: 1.5 }] } }, 'INVALID_SHARE_POLICY_MAX_ACCESS'],
+    ['unsafe policy max access', { share: { policy_rules: [{ path: '/team', max_access: 9007199254740992 }] } }, 'INVALID_SHARE_POLICY_MAX_ACCESS'],
+    ['non-number policy max access', { share: { policy_rules: [{ path: '/team', max_access: '5' as unknown as number }] } }, 'INVALID_SHARE_POLICY_MAX_ACCESS'],
+  ])('rejects %s before updating settings', async (_label, request, code) => {
+    await expect(updateSettings(request)).rejects.toMatchObject({
+      status: 0,
+      code,
+    })
+    expect(mockAuthFetch).not.toHaveBeenCalled()
   })
 
-  await updateSettings({ server: { trusted_proxy_hops: 3 } })
+  it.each([
+    ['zero directory quota bytes', { storage: { directory_quotas: [{ path: '/team', quota_bytes: 0 }] } }, 'INVALID_DIRECTORY_QUOTA_BYTES'],
+    ['unsafe directory quota bytes', { storage: { directory_quotas: [{ path: '/team', quota_bytes: 9007199254740992 }] } }, 'INVALID_DIRECTORY_QUOTA_BYTES'],
+    ['non-number directory quota bytes', { storage: { directory_quotas: [{ path: '/team', quota_bytes: '1GiB' as unknown as number }] } }, 'INVALID_DIRECTORY_QUOTA_BYTES'],
+    ['fractional retention min free space', { retention: { min_free_space: 1.5 } }, 'INVALID_RETENTION_MIN_FREE_SPACE'],
+    ['unsafe retention min free space', { retention: { min_free_space: 9007199254740992 } }, 'INVALID_RETENTION_MIN_FREE_SPACE'],
+    ['zero trash max size', { trash: { max_size: 0 } }, 'INVALID_TRASH_MAX_SIZE'],
+    ['unsafe trash max size', { trash: { max_size: 9007199254740992 } }, 'INVALID_TRASH_MAX_SIZE'],
+    ['zero versioning max size', { versioning: { max_versioned_size: 0 } }, 'INVALID_VERSIONING_MAX_VERSIONED_SIZE'],
+    ['unsafe versioning max size', { versioning: { max_versioned_size: 9007199254740992 } }, 'INVALID_VERSIONING_MAX_VERSIONED_SIZE'],
+    ['fractional alerts min free bytes', { alerts: { min_free_bytes: 1.5 } }, 'INVALID_ALERTS_MIN_FREE_BYTES'],
+    ['unsafe alerts min free bytes', { alerts: { min_free_bytes: 9007199254740992 } }, 'INVALID_ALERTS_MIN_FREE_BYTES'],
+  ])('rejects %s before updating settings', async (_label, request, code) => {
+    await expect(updateSettings(request)).rejects.toMatchObject({
+      status: 0,
+      code,
+    })
+    expect(mockAuthFetch).not.toHaveBeenCalled()
+  })
 
-  expect(mockAuthFetch).toHaveBeenCalledWith('/api/v1/settings/', expect.objectContaining({
-    method: 'PUT',
-    body: JSON.stringify({ server: { trusted_proxy_hops: 3 } }),
-	  }))
-	  })
+  it.each([
+    ['zero server port', { server: { port: 0 } }, 'INVALID_SERVER_PORT'],
+    ['out-of-range server port', { server: { port: 65536 } }, 'INVALID_SERVER_PORT'],
+    ['fractional trusted proxy hops', { server: { trusted_proxy_hops: 1.5 } }, 'INVALID_SERVER_TRUSTED_PROXY_HOPS'],
+    ['negative trusted proxy hops', { server: { trusted_proxy_hops: -1 } }, 'INVALID_SERVER_TRUSTED_PROXY_HOPS'],
+    ['fractional retention max versions', { retention: { max_versions: 1.5 } }, 'INVALID_RETENTION_MAX_VERSIONS'],
+    ['negative trash retention days', { trash: { retention_days: -1 } }, 'INVALID_TRASH_RETENTION_DAYS'],
+    ['fractional dataplane max retries', { dataplane: { max_retries: 1.5 } }, 'INVALID_DATAPLANE_MAX_RETRIES'],
+    ['out-of-range SMTP port', { alerts: { smtp_port: 70000 } }, 'INVALID_ALERTS_SMTP_PORT'],
+    ['out-of-range alerts threshold', { alerts: { threshold_pct: 101 } }, 'INVALID_ALERTS_THRESHOLDS'],
+    ['fractional alerts critical threshold', { alerts: { critical_pct: 90.5 } }, 'INVALID_ALERTS_THRESHOLDS'],
+    ['inverted alerts thresholds', { alerts: { threshold_pct: 95, critical_pct: 90 } }, 'INVALID_ALERTS_THRESHOLDS'],
+    ['inverted disk temperature thresholds', { disk_health: { temperature_warning_c: 60, temperature_critical_c: 50 } }, 'INVALID_DISK_HEALTH_TEMPERATURE'],
+    ['out-of-range disk media wear threshold', { disk_health: { media_wear_warning_percent: 101 } }, 'INVALID_DISK_HEALTH_MEDIA_WEAR'],
+    ['negative scrub max retries', { maintenance: { scrub: { max_retries: -1 } } }, 'INVALID_SCRUB_MAX_RETRIES'],
+    ['too-small CDC min chunk size', { cdc: { min_chunk_size: 65535 } }, 'INVALID_CDC_CHUNK_SIZE'],
+    ['invalid CDC chunk order', { cdc: { min_chunk_size: 1048576, avg_chunk_size: 262144 } }, 'INVALID_CDC_CHUNK_SIZE'],
+  ])('rejects %s before updating settings', async (_label, request, code) => {
+    await expect(updateSettings(request)).rejects.toMatchObject({
+      status: 0,
+      code,
+    })
+    expect(mockAuthFetch).not.toHaveBeenCalled()
+  })
+
+  it('sends a test alert request and validates the response', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        success: true,
+        message: 'test alert sent',
+        data: {
+          event_type: 'alert_test',
+          channels: ['webhook', 'email'],
+        },
+      }),
+    })
+
+    const result = await sendTestAlert()
+
+    expect(mockAuthFetch).toHaveBeenCalledWith('/api/v1/settings/alerts/test', {
+      method: 'POST',
+    })
+    expect(result.message).toBe('test alert sent')
+    expect(result.data.channels).toEqual(['webhook', 'email'])
+  })
+
+  it('forwards abort signal when sending a test alert', async () => {
+    const controller = new AbortController()
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        success: true,
+        data: {
+          event_type: 'alert_test',
+          channels: ['webhook'],
+        },
+      }),
+    })
+
+    await sendTestAlert({ signal: controller.signal })
+
+    expect(mockAuthFetch).toHaveBeenCalledWith('/api/v1/settings/alerts/test', {
+      method: 'POST',
+      signal: controller.signal,
+    })
+  })
+
+  it('rejects malformed successful test alert responses', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ success: true, data: { event_type: 'alert_test', channels: [1] } }),
+    })
+
+    await expect(sendTestAlert()).rejects.toThrow(invalidResponseMessage)
+  })
+
+  it('rejects successful test alert responses with an unexpected event type', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ success: true, data: { event_type: 'backup_run', channels: ['webhook'] } }),
+    })
+
+    await expect(sendTestAlert()).rejects.toThrow(invalidResponseMessage)
+  })
+
+  it('sends trusted_proxy_hops in update payloads', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ success: true, data: null, message: 'settings updated' }),
+    })
+
+    await updateSettings({ server: { trusted_proxy_hops: 3 } })
+
+    expect(mockAuthFetch).toHaveBeenCalledWith('/api/v1/settings/', expect.objectContaining({
+      method: 'PUT',
+      body: JSON.stringify({ server: { trusted_proxy_hops: 3 } }),
+    }))
+  })
 
   it('sends trusted_proxy_cidrs in update payloads', async () => {
     mockAuthFetch.mockResolvedValueOnce({
@@ -726,6 +945,86 @@ describe('Settings API', () => {
     await expect(reportDirectoryAccess({ path: '/team/readme.txt' })).rejects.toThrow(invalidResponseMessage)
   })
 
+  it.each([
+    ['negative users', { users: -1 }],
+    ['fractional read_allowed', { read_allowed: 1.5 }],
+    ['unsafe read_denied', { read_denied: 9007199254740992 }],
+    ['non-number write_allowed', { write_allowed: '1' }],
+    ['negative write_denied', { write_denied: -1 }],
+    ['fractional related_shares', { related_shares: 1.5 }],
+    ['unsafe active_related_shares', { active_related_shares: 9007199254740992 }],
+    ['negative password_protected_shares', { password_protected_shares: -1 }],
+  ])('rejects directory access report summaries with %s', async (_label, summaryOverride) => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        success: true,
+        data: {
+          path: '/team/readme.txt',
+          summary: {
+            users: 1,
+            read_allowed: 1,
+            read_denied: 0,
+            write_allowed: 1,
+            write_denied: 0,
+            related_shares: 0,
+            active_related_shares: 0,
+            password_protected_shares: 0,
+            ...summaryOverride,
+          },
+          users: [{
+            username: 'alice',
+            user_id: 'u1',
+            role: 'user',
+            home_dir: '/users/alice',
+            path: '/team/readme.txt',
+            read: { mode: 'read', allowed: true, source: 'directory_access_rule', matched_rule: { path: '/team', read_users: ['alice'] } },
+            write: { mode: 'write', allowed: true, source: 'directory_access_rule', matched_rule: { path: '/team', write_users: ['alice'] } },
+          }],
+        },
+      }),
+    })
+
+    await expect(reportDirectoryAccess({ path: '/team/readme.txt' })).rejects.toThrow(invalidResponseMessage)
+  })
+
+  it('rejects directory access report shares with unsafe counters', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        success: true,
+        data: {
+          path: '/team/readme.txt',
+          summary: { users: 1, read_allowed: 1, read_denied: 0, write_allowed: 1, write_denied: 0, related_shares: 1, active_related_shares: 1, password_protected_shares: 1 },
+          users: [{
+            username: 'alice',
+            user_id: 'u1',
+            role: 'user',
+            home_dir: '/users/alice',
+            path: '/team/readme.txt',
+            read: { mode: 'read', allowed: true, source: 'directory_access_rule', matched_rule: { path: '/team', read_users: ['alice'] } },
+            write: { mode: 'write', allowed: true, source: 'directory_access_rule', matched_rule: { path: '/team', write_users: ['alice'] } },
+          }],
+          shares: [{
+            id: 'share-1',
+            path: '/team',
+            type: 'folder',
+            created_by: 'u1',
+            relation: 'covers_path',
+            enabled: true,
+            active: true,
+            has_password: true,
+            access_count: 0,
+            max_access: 9007199254740992,
+            url: '/s/share-1',
+          }],
+        },
+      }),
+    })
+
+    await expect(reportDirectoryAccess({ path: '/team/readme.txt' })).rejects.toThrow(invalidResponseMessage)
+  })
+
   it('previews directory access rules without saving settings', async () => {
     const controller = new AbortController()
     mockAuthFetch.mockResolvedValueOnce({
@@ -771,7 +1070,7 @@ describe('Settings API', () => {
       json: () => Promise.resolve({ success: false, error: { message: 'invalid settings' } }),
     })
 
-    await expect(updateSettings({ server: { port: 0 } })).rejects.toMatchObject({
+    await expect(updateSettings({ server: { port: 8081 } })).rejects.toMatchObject({
       message: 'invalid settings',
       status: 400,
     })

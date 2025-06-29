@@ -138,6 +138,33 @@ describe('Favorites API', () => {
       })
     })
 
+    it.each([
+      ['null data', null],
+      ['missing count', { favorites: [] }],
+      ['non-number count', { favorites: [], count: '0' }],
+      ['negative count', { favorites: [], count: -1 }],
+      ['fractional count', { favorites: [], count: 1.5 }],
+      ['unsafe count', { favorites: [], count: 9007199254740992 }],
+      [
+        'count smaller than returned favorites',
+        {
+          favorites: [{ path: '/file1.txt', user_id: 'user1', created_at: '2024-01-01' }],
+          count: 0,
+        },
+      ],
+    ])('rejects favorite list responses with %s', async (_name, data) => {
+      mockAuthFetch.mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({ success: true, data }),
+      })
+
+      await expect(listFavorites()).rejects.toMatchObject({
+        message: invalidResponseMessage,
+        status: 200,
+      })
+    })
+
     it('rejects unreadable successful favorite list responses', async () => {
       mockAuthFetch.mockResolvedValueOnce({
         ok: true,

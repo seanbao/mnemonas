@@ -97,6 +97,21 @@ function isValidFavorite(value: unknown): value is Favorite {
     ((value as Favorite).note === undefined || typeof (value as Favorite).note === 'string')
 }
 
+function isNonNegativeSafeInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
+}
+
+function isValidFavoritesResponse(value: unknown): value is FavoritesResponse {
+  if (!value || typeof value !== 'object') {
+    return false
+  }
+  const response = value as FavoritesResponse
+  return Array.isArray(response.favorites) &&
+    response.favorites.every(isValidFavorite) &&
+    isNonNegativeSafeInteger(response.count) &&
+    response.count >= response.favorites.length
+}
+
 function getFavoritesErrorMessage(body: FavoritesApiResponse<never>, fallback: string): string {
   if (typeof body.error === 'string' && body.error) {
     return body.error
@@ -154,7 +169,7 @@ export async function listFavorites(options: FavoritesRequestOptions = {}): Prom
   }
 
   const data = await readFavoritesSuccessData<FavoritesResponse>(response, INVALID_API_RESPONSE_MESSAGE)
-  if (!Array.isArray(data.favorites) || data.favorites.some((favorite) => !isValidFavorite(favorite))) {
+  if (!isValidFavoritesResponse(data)) {
     throw new FavoritesError(INVALID_API_RESPONSE_MESSAGE, response.status)
   }
   return data.favorites

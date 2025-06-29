@@ -270,6 +270,152 @@ func TestServer_GetSettingsSecurityCheck_WarnsWhenShareBaseURLHostDiffersFromReq
 	}
 }
 
+func TestServer_GetSettingsSecurityCheck_WarnsWhenShareBaseURLEndsWithShareRoute(t *testing.T) {
+	tests := []struct {
+		name    string
+		baseURL string
+		path    string
+	}{
+		{
+			name:    "root share route",
+			baseURL: "https://nas.example.test/s/",
+			path:    "/s/",
+		},
+		{
+			name:    "base path share route",
+			baseURL: "https://nas.example.test/base/s",
+			path:    "/base/s",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			cfg := config.Default()
+			cfg.Storage.Root = tmpDir
+			cfg.Auth.UsersFile = filepath.Join(tmpDir, ".mnemonas", "users.json")
+			cfg.Server.Host = "127.0.0.1"
+			cfg.Server.TrustedProxyHops = 1
+			cfg.DataPlane.GRPCAddress = "127.0.0.1:9090"
+			cfg.WebDAV.Enabled = true
+			cfg.WebDAV.AuthType = "basic"
+			cfg.Share.Enabled = true
+			cfg.Share.BaseURL = tt.baseURL
+			t.Setenv("DATAPLANE_HTTP_ADDR", "127.0.0.1:9091")
+
+			server, err := NewServer(zerolog.Nop(), &ServerConfig{Config: cfg})
+			if err != nil {
+				t.Fatalf("NewServer() error: %v", err)
+			}
+
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/settings/security-check", nil)
+			req.Host = "nas.example.test"
+			req.RemoteAddr = "127.0.0.1:1234"
+			req.Header.Set("X-Forwarded-Proto", "https")
+			rec := httptest.NewRecorder()
+
+			server.Router().ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusOK {
+				t.Fatalf("security check status = %d, want %d: %s", rec.Code, http.StatusOK, rec.Body.String())
+			}
+
+			var payload struct {
+				Success bool                  `json:"success"`
+				Data    securityCheckResponse `json:"data"`
+			}
+			if err := json.NewDecoder(rec.Body).Decode(&payload); err != nil {
+				t.Fatalf("decode security check response: %v", err)
+			}
+
+			check := securityCheckByID(t, payload.Data.Checks, "share_base_url")
+			if check.Status != securityCheckWarning {
+				t.Fatalf("share_base_url status = %q, want %q; check=%#v", check.Status, securityCheckWarning, check)
+			}
+			if check.Title != "分享基础 URL 包含分享路由" {
+				t.Fatalf("share_base_url title = %q, want share route warning", check.Title)
+			}
+			if got := check.Details["base_url_path"]; got != tt.path {
+				t.Fatalf("base_url_path = %#v, want %q", got, tt.path)
+			}
+		})
+	}
+}
+
+func TestServer_GetSettingsSecurityCheck_WarnsForWeakWebDAVBasicPassword(t *testing.T) {
+	tests := []struct {
+		name     string
+		password string
+		risk     string
+	}{
+		{
+			name:     "placeholder",
+			password: "change-this-webdav-password",
+			risk:     "placeholder",
+		},
+		{
+			name:     "too short",
+			password: "short-pass",
+			risk:     "too_short",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			cfg := config.Default()
+			cfg.Storage.Root = tmpDir
+			cfg.Auth.UsersFile = filepath.Join(tmpDir, ".mnemonas", "users.json")
+			cfg.Server.Host = "127.0.0.1"
+			cfg.Server.TrustedProxyHops = 1
+			cfg.DataPlane.GRPCAddress = "127.0.0.1:9090"
+			cfg.WebDAV.Enabled = true
+			cfg.WebDAV.AuthType = "basic"
+			cfg.WebDAV.Password = tt.password
+			cfg.Share.Enabled = false
+			t.Setenv("DATAPLANE_HTTP_ADDR", "127.0.0.1:9091")
+
+			server, err := NewServer(zerolog.Nop(), &ServerConfig{Config: cfg})
+			if err != nil {
+				t.Fatalf("NewServer() error: %v", err)
+			}
+
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/settings/security-check", nil)
+			req.RemoteAddr = "127.0.0.1:1234"
+			req.Header.Set("X-Forwarded-Proto", "https")
+			rec := httptest.NewRecorder()
+
+			server.Router().ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusOK {
+				t.Fatalf("security check status = %d, want %d: %s", rec.Code, http.StatusOK, rec.Body.String())
+			}
+
+			var payload struct {
+				Success bool                  `json:"success"`
+				Data    securityCheckResponse `json:"data"`
+			}
+			if err := json.NewDecoder(rec.Body).Decode(&payload); err != nil {
+				t.Fatalf("decode security check response: %v", err)
+			}
+
+			check := securityCheckByID(t, payload.Data.Checks, "webdav_auth")
+			if check.Status != securityCheckWarning {
+				t.Fatalf("webdav_auth status = %q, want %q; check=%#v", check.Status, securityCheckWarning, check)
+			}
+			if check.Title != "WebDAV Basic 密码需要更换" {
+				t.Fatalf("webdav_auth title = %q, want weak password warning", check.Title)
+			}
+			if got := check.Details["password_risk"]; got != tt.risk {
+				t.Fatalf("password_risk = %#v, want %q", got, tt.risk)
+			}
+			if _, ok := check.Details["password"]; ok {
+				t.Fatalf("webdav_auth details must not expose password: %#v", check.Details)
+			}
+		})
+	}
+}
+
 func TestServer_GetSettingsSecurityCheck_PassesTrustedProxyLoopbackSetup(t *testing.T) {
 	tmpDir := t.TempDir()
 	cfg := config.Default()
@@ -349,6 +495,69 @@ func TestServer_GetSettingsSecurityCheck_PassesTrustedProxyLoopbackSetup(t *test
 	}
 	if check := securityCheckByID(t, payload.Data.Checks, "initial_password_file"); check.Status != securityCheckPass {
 		t.Fatalf("initial_password_file status = %q, want %q", check.Status, securityCheckPass)
+	}
+}
+
+func TestServer_GetSettingsSecurityCheck_UsesRuntimeAuthUsersFileForInitialPassword(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfg := config.Default()
+	cfg.Storage.Root = tmpDir
+	cfg.Auth.UsersFile = filepath.Join(tmpDir, "config", "users.json")
+	runtimeUsersFile := filepath.Join(tmpDir, "runtime", "users.json")
+	cfg.Server.Host = "127.0.0.1"
+	cfg.Server.TrustedProxyHops = 1
+	cfg.DataPlane.GRPCAddress = "127.0.0.1:9090"
+	cfg.WebDAV.Enabled = true
+	cfg.WebDAV.AuthType = "basic"
+	cfg.Share.Enabled = false
+	t.Setenv("DATAPLANE_HTTP_ADDR", "127.0.0.1:9091")
+
+	_, password, err := auth.NewUserStore(runtimeUsersFile)
+	if err != nil {
+		t.Fatalf("NewUserStore() error: %v", err)
+	}
+
+	server, err := NewServer(zerolog.Nop(), &ServerConfig{
+		Config:         cfg,
+		AuthEnabled:    true,
+		AuthUsersFile:  runtimeUsersFile,
+		AuthJWTSecret:  "security-check-runtime-users-secret",
+		AuthAccessTTL:  15 * time.Minute,
+		AuthRefreshTTL: 24 * time.Hour,
+	})
+	if err != nil {
+		t.Fatalf("NewServer() error: %v", err)
+	}
+
+	if password == "" {
+		t.Fatal("expected bootstrap admin password")
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/settings/security-check", nil)
+	req.RemoteAddr = "127.0.0.1:1234"
+	req.Header.Set("X-Forwarded-Proto", "https")
+	rec := httptest.NewRecorder()
+
+	server.handleGetSecurityCheck(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("security check status = %d, want %d: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var payload struct {
+		Success bool                  `json:"success"`
+		Data    securityCheckResponse `json:"data"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode security check response: %v", err)
+	}
+
+	check := securityCheckByID(t, payload.Data.Checks, "initial_password_file")
+	if check.Status != securityCheckBlock {
+		t.Fatalf("initial_password_file status = %q, want %q; check=%#v", check.Status, securityCheckBlock, check)
+	}
+	wantPath := filepath.Join(filepath.Dir(runtimeUsersFile), "initial-password.txt")
+	if got := check.Details["path"]; got != wantPath {
+		t.Fatalf("initial_password_file path = %#v, want %q", got, wantPath)
 	}
 }
 
@@ -482,5 +691,45 @@ func TestServer_GetSettingsSecurityCheck_BlocksPrivateForwardedProtoWithoutTrust
 	}
 	if check := securityCheckByID(t, payload.Data.Checks, "forwarded_proto_trust"); check.Status != securityCheckBlock {
 		t.Fatalf("forwarded_proto_trust status = %q, want %q", check.Status, securityCheckBlock)
+	}
+}
+
+func TestServer_GetSettingsSecurityCheck_WarnsForTrustedForwardedProtoHTTP(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfg := config.Default()
+	cfg.Storage.Root = tmpDir
+	cfg.Auth.Enabled = false
+	cfg.Auth.UsersFile = filepath.Join(tmpDir, ".mnemonas", "users.json")
+	cfg.Server.Host = "127.0.0.1"
+	cfg.Server.TrustedProxyHops = 1
+	cfg.DataPlane.GRPCAddress = "127.0.0.1:9090"
+	cfg.Share.Enabled = false
+	t.Setenv("DATAPLANE_HTTP_ADDR", "127.0.0.1:9091")
+
+	server, err := NewServer(zerolog.Nop(), &ServerConfig{Config: cfg})
+	if err != nil {
+		t.Fatalf("NewServer() error: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/settings/security-check", nil)
+	req.RemoteAddr = "127.0.0.1:1234"
+	req.Header.Set("X-Forwarded-Proto", "http")
+	rec := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("security check status = %d, want %d: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var payload struct {
+		Success bool                  `json:"success"`
+		Data    securityCheckResponse `json:"data"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode security check response: %v", err)
+	}
+	if check := securityCheckByID(t, payload.Data.Checks, "forwarded_proto_trust"); check.Status != securityCheckWarning {
+		t.Fatalf("forwarded_proto_trust status = %q, want %q", check.Status, securityCheckWarning)
 	}
 }

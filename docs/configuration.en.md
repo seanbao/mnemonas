@@ -391,6 +391,24 @@ Runtime behavior:
 - WebDAV is matched before the API and frontend handlers, so enabled prefixes cannot overlap reserved application routes.
 - `auth_type = "basic"` is the compatibility mode: one global service credential, without app-level `home_dir` isolation.
 
+Security guidance:
+
+- Production deployments should prefer `auth_type = "users"`. Basic Auth should be limited to legacy clients or dedicated service credentials and use a password-manager value when configured manually.
+- HTTPS should terminate at a reverse proxy for network exposure.
+- `read_only = true` can reduce write exposure for read-only mounts.
+
+Example:
+
+```toml
+[webdav]
+enabled = true
+prefix = "/dav"
+read_only = false
+auth_type = "basic"
+username = "webdav-service"
+password = "" # leave empty to use generated credentials; use a password-manager value for custom credentials
+```
+
 ## `[smb]`
 
 The current release does not start an SMB/Samba listener. This section is a preview contract for a future SMB gateway sidecar. If `enabled = true`, `nasd --check-config` prints a preview warning, and the health page plus diagnostics export report SMB runtime as unavailable. Use WebDAV for current LAN mounts.
@@ -418,13 +436,7 @@ Share paths must be absolute MnemoNAS virtual paths such as `/` or `/team/docs`.
 | `refresh_token_ttl` | duration | `"168h"` | Refresh-token lifetime |
 | `users_file` | string | `<storage.root>/.mnemonas/users.json` | User data file |
 
-On first startup without a users file, MnemoNAS creates an administrator and writes the initial password to:
-
-```text
-<storage.root>/.mnemonas/initial-password.txt
-```
-
-The file is removed after first successful login for that administrator.
+On first startup without a `users_file`, MnemoNAS creates the default administrator and writes the initial password to `initial-password.txt` in the same directory as `users_file`. The default path is `<storage.root>/.mnemonas/initial-password.txt`. The file is removed after first successful login for that administrator.
 
 ## `[share]`
 
@@ -482,7 +494,7 @@ By default, `auth.enabled = false` or enabled WebDAV with `webdav.auth_type = "n
 | `cooldown_period` | duration | `"4h"` | Alert cooldown |
 | `webhook_url` | string | `""` | Alert webhook URL; non-empty values must be absolute `http` or `https` URLs |
 | `webhook_method` | string | `"POST"` | `POST` sends JSON; `GET` encodes fields into query |
-| `webhook_headers` | string[] | `[]` | Additional headers, `"Key: Value"`; names must be valid HTTP tokens and values cannot contain newlines or control characters |
+| `webhook_headers` | string[] | `[]` | Additional headers, `"Key: Value"`; names must be valid HTTP tokens, cannot repeat case-insensitively, and values cannot contain newlines or control characters |
 | `telegram_enabled` | bool | `false` | Enable Telegram bot notifications |
 | `telegram_bot_token` | string | `""` | Telegram bot token; never returned in diagnostics or settings responses |
 | `telegram_chat_id` | string | `""` | Telegram chat ID or `@channel` username |
@@ -494,7 +506,7 @@ By default, `auth.enabled = false` or enabled WebDAV with `webdav.auth_type = "n
 | `smtp_from` | string | `""` | Sender address, such as `MnemoNAS <alerts@example.com>` |
 | `smtp_to` | string[] | `[]` | Recipient addresses |
 
-Health pages and diagnostics show alert state and whether Webhook, Telegram, or email notifications are configured. The email channel is marked configured only when email alerts are enabled and SMTP host, port, sender, and at least one recipient are present. Diagnostics do not expose webhook URL, webhook headers, `telegram_bot_token`, SMTP host, SMTP username, `smtp_password`, sender address, or recipient addresses. The same notification channels are used for backup failures, restore-drill failures, stale or missing restore-drill reminders, disk-health anomalies, scrub anomalies, and login rate-limit events. Successful and failed webhook logs record only the URL scheme and host, not paths, query strings, credentials, or GET payload fields. Telegram send errors do not include the bot token.
+Health pages and diagnostics show alert state and whether Webhook, Telegram, or email notifications are configured. The email channel is marked configured only when email alerts are enabled and SMTP host, port, sender, and at least one non-empty recipient are present. Diagnostics do not expose webhook URL, webhook headers, `telegram_bot_token`, SMTP host, SMTP username, `smtp_password`, sender address, or recipient addresses. The same notification channels are used for backup failures, backup-warning runs, explicit restore failures or warnings, post-restore read-only verification failures or warnings, restore-drill failures, stale or missing restore-drill reminders, retention-check failures or warnings, disk-health anomalies, scrub anomalies, and login rate-limit events; backup-related event types include `backup_run`, `backup_restore`, `backup_restore_verify`, `backup_restore_drill`, and `backup_retention_check`. Administrators can send an `alert_test` event from the Web settings page or `POST /api/v1/settings/alerts/test` after saving the alert configuration. Successful and failed webhook logs record only the URL scheme and host, not paths, query strings, credentials, or GET payload fields. Telegram send errors do not include the bot token.
 
 ## `[disk_health]`
 

@@ -864,6 +864,13 @@ func TestConfig_Validate(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name: "Invalid alerts webhook duplicate header name",
+			modify: func(c *Config) {
+				c.Alerts.WebhookHeaders = []string{"Authorization: Bearer one", "authorization: Bearer two"}
+			},
+			wantErr: true,
+		},
+		{
 			name: "Invalid alerts email missing recipients",
 			modify: func(c *Config) {
 				c.Alerts.EmailEnabled = true

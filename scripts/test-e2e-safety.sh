@@ -17,6 +17,14 @@ assert_file_contains() {
 	grep -Fq -- "$expected" "$path" || fail "$path does not contain: $expected"
 }
 
+assert_file_not_contains() {
+	local path="$1"
+	local unexpected="$2"
+	if grep -Fq -- "$unexpected" "$path"; then
+		fail "$path contains unsafe text: $unexpected"
+	fi
+}
+
 extract_first_toml_block() {
 	local path="$1"
 	local out="$2"
@@ -606,6 +614,17 @@ run_docs_use_storage_root_config_placeholder_test() {
 	assert_file_contains "$REPO_ROOT/docs/mounting-guide.en.md" '<storage.root>/secrets.json'
 }
 
+run_web_readmes_avoid_e2e_placeholder_password_test() {
+	assert_file_not_contains "$REPO_ROOT/web/README.md" "change-this-test-password"
+	assert_file_not_contains "$REPO_ROOT/web/README.en.md" "change-this-test-password"
+	# shellcheck disable=SC2016 # Match the literal README snippet containing $HOME.
+	assert_file_contains "$REPO_ROOT/web/README.md" 'export E2E_PASSWORD_FILE="$HOME/.mnemonas/.mnemonas/initial-password.txt"'
+	# shellcheck disable=SC2016 # Match the literal README snippet containing $HOME.
+	assert_file_contains "$REPO_ROOT/web/README.en.md" 'export E2E_PASSWORD_FILE="$HOME/.mnemonas/.mnemonas/initial-password.txt"'
+	assert_file_contains "$REPO_ROOT/web/README.md" '# export E2E_PASSWORD="<admin-password>"'
+	assert_file_contains "$REPO_ROOT/web/README.en.md" '# export E2E_PASSWORD="<admin-password>"'
+}
+
 run_refuse_default_personal_storage_test() {
   local case_dir="$TMP_ROOT/refuse-default-storage"
   local fake_home="$case_dir/home"
@@ -670,6 +689,7 @@ run_configuration_complete_example_keeps_optional_arrays_commented_test
 run_configuration_docs_have_single_section_headings_test
 run_configuration_default_paths_follow_storage_root_test
 run_docs_use_storage_root_config_placeholder_test
+run_web_readmes_avoid_e2e_placeholder_password_test
 run_refuse_default_personal_storage_test
 run_isolated_target_reaches_health_check_test
 

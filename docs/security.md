@@ -8,7 +8,7 @@
 
 ### Web UI 管理账号
 
-默认启用 Web UI 登录认证。首次启动且没有用户数据时，系统会创建一个管理员账号，并把初始密码写入：
+默认启用 Web UI 登录认证。首次启动且没有用户数据时，系统会创建一个管理员账号，并把初始密码写入 `auth.users_file` 同目录的 `initial-password.txt`。默认路径为：
 
 ```text
 <storage.root>/.mnemonas/initial-password.txt
@@ -67,7 +67,7 @@ password = ""  # 留空则首次启动时自动生成
 
 ```toml
 [webdav]
-password = "change-this-strong-password"  # 至少 16 字符，混合大小写、数字、符号
+password = ""  # 留空使用自动生成密码；自定义时使用密码管理器生成的随机强密码
 ```
 
 **密码强度建议**：
@@ -236,12 +236,12 @@ cloudflared tunnel run mnemonas
 ### 部署前检查
 
 - [ ] 已通过服务器端 `initial-password.txt` 完成首次 Web UI 登录，并已修改管理员密码
-- [ ] WebDAV 使用 `auth_type = "users"`，或已记录全局 Basic Auth 凭据并设置自定义强密码
+- [ ] WebDAV 使用 `auth_type = "users"`，或已记录全局 Basic Auth 凭据并设置自定义强密码或自动生成密码，未保留示例密码
 - [ ] `auth_type` 不是 `none`（除非仅本地访问）
 - [ ] 公网部署时 `server.host = "127.0.0.1"`，只通过 HTTPS 反向代理访问
 - [ ] dataplane gRPC/HTTP 端口保持在 `127.0.0.1` 或受信私有网络内，没有直接暴露到公网
 - [ ] Web UI “安全自检”没有 `block` 项；公网部署前应处理所有 `warning`，尤其是 `allow_unsafe_no_auth`、反向代理 header、dataplane 端口和备用管理员提醒
-- [ ] systemd 部署已运行 `sudo mnemonas-doctor --public-domain <domain>`，并确认 HTTP 会跳转到同一域名的 HTTPS、HTTPS 证书 hostname 匹配、30 天内不过期，续期路径已验证，且没有 Web 后端直连、dataplane 端口暴露或 UFW 放行警告
+- [ ] systemd 部署已运行 `sudo mnemonas-doctor --public-domain <domain>`，并确认 HTTP 会跳转到同一域名的 HTTPS、HTTPS 证书 hostname 匹配、30 天内不过期，续期路径已验证，匿名 WebDAV `PROPFIND` 被拒绝，且没有 Web 后端直连、dataplane 端口暴露或 UFW 放行警告
 - [ ] 已按 [公网云防火墙复核清单](cloud-firewall-checklist.md) 确认云安全组或防火墙公网入口只开放 `80/443`；管理端口、Web 后端端口和 dataplane 端口不对公网开放
 - [ ] 生产环境使用 HTTPS
 
@@ -250,7 +250,7 @@ cloudflared tunnel run mnemonas
 ```bash
 # MnemoNAS 自检
 sudo mnemonas-doctor --public-domain <domain>
-# 该命令会检查 HTTPS health、HTTP 是否跳转到同一域名的 HTTPS、证书 hostname、证书 30 天有效期、证书续期提示、后端直连端口和 dataplane 端口
+# 该命令会检查 HTTPS health、HTTP 是否跳转到同一域名的 HTTPS、证书 hostname、证书 30 天有效期、证书续期提示、匿名 WebDAV PROPFIND、后端直连端口和 dataplane 端口
 
 # 检查监听端口
 ss -tlnp | grep 8080

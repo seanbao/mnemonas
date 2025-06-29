@@ -230,6 +230,29 @@ describe('Search API', () => {
     await expect(searchFiles('report')).rejects.toThrow('服务器返回了无效的数据')
   })
 
+  it.each([
+    ['negative count', { count: -1, results: [] }],
+    ['fractional count', { count: 1.5, results: [] }],
+    ['unsafe count', { count: 9007199254740992, results: [] }],
+    ['count smaller than results', { count: 0, results: [{ name: 'report.pdf', path: '/docs/report.pdf', isDir: false, size: 100, modTime: '2026-03-14T00:00:00Z' }] }],
+    ['negative result size', { count: 1, results: [{ name: 'report.pdf', path: '/docs/report.pdf', isDir: false, size: -1, modTime: '2026-03-14T00:00:00Z' }] }],
+    ['fractional result size', { count: 1, results: [{ name: 'report.pdf', path: '/docs/report.pdf', isDir: false, size: 1.5, modTime: '2026-03-14T00:00:00Z' }] }],
+    ['unsafe result size', { count: 1, results: [{ name: 'report.pdf', path: '/docs/report.pdf', isDir: false, size: 9007199254740992, modTime: '2026-03-14T00:00:00Z' }] }],
+  ])('rejects successful search responses with %s', async (_label, overrides) => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        success: true,
+        data: {
+          query: 'report',
+          ...overrides,
+        },
+      }),
+    })
+
+    await expect(searchFiles('report')).rejects.toThrow('服务器返回了无效的数据')
+  })
+
   it('rejects wrapped search responses when success is false', async () => {
     mockAuthFetch.mockResolvedValueOnce({
       ok: true,

@@ -125,7 +125,7 @@ sudo mnemonas-doctor --public-domain nas.example.com
 ss -tlnp | grep -E '80|443|8080|9090|9091'
 ```
 
-The `--public-domain` check first lowercases the domain and removes a single FQDN trailing dot, then verifies public HTTPS health, HTTP redirects to HTTPS on the same public domain, certificate hostname, remaining certificate validity, public-deployment authentication settings, administrator-account redundancy, share-link base URL, direct backend exposure, and dataplane port exposure, then prints the manual cloud-firewall review item. Certificate inspection requires `openssl` on the server. Public authentication checks require `auth.enabled = true`, `security.allow_unsafe_no_auth = false`, and authenticated WebDAV when WebDAV is enabled. Administrator redundancy is checked from `auth.users_file`, or `$STORAGE_ROOT/.mnemonas/users.json` when it is unset. A missing file, parse failure, or zero enabled administrators fails the check; one enabled administrator produces a warning; two or more enabled administrators pass. When sharing is enabled, `share.base_url` should use HTTPS on the default port, must not contain userinfo, query strings, or fragments, and must use a valid host name; HTTP, a non-443 port, userinfo, query strings, fragments, or an invalid host name fails the check, while empty values or a different host produce a manual review warning. It also reports detectable renewal paths: Nginx/certbot deployments should pass `sudo certbot renew --dry-run`, and Caddy deployments should have clean ACME logs from `sudo journalctl -u caddy --since '24 hours ago'`.
+The `--public-domain` check first lowercases the domain and removes a single FQDN trailing dot, then verifies public HTTPS health, HTTP redirects to HTTPS on the same public domain, certificate hostname, remaining certificate validity, public-deployment authentication settings, administrator-account redundancy, share-link base URL, direct backend exposure, and dataplane port exposure, then prints the manual cloud-firewall review item. Certificate inspection requires `openssl` on the server. Public authentication checks require `auth.enabled = true`, `security.allow_unsafe_no_auth = false`, and authenticated WebDAV when WebDAV is enabled; if global Basic Auth remains in use, explicit common placeholder passwords or passwords shorter than 16 characters produce a warning. Administrator redundancy is checked from `auth.users_file`, or `$STORAGE_ROOT/.mnemonas/users.json` when it is unset. A missing file, parse failure, or zero enabled administrators fails the check; one enabled administrator produces a warning; two or more enabled administrators pass. The initial password check uses `initial-password.txt` in the same user-data directory, so a custom `auth.users_file` moves the checked password file location with it. When sharing is enabled, `share.base_url` should use HTTPS on the default port, must not contain userinfo, query strings, or fragments, and must use a valid host name; HTTP, a non-443 port, userinfo, query strings, fragments, or an invalid host name fails the check, while empty values, a different host, or a path already ending in `/s` produce a manual review warning. `share.base_url` should be the site origin or the base path before `/s`; otherwise generated share URLs contain a duplicated `/s/s` route. It also reports detectable renewal paths: Nginx/certbot deployments should pass `sudo certbot renew --dry-run`, and Caddy deployments should have clean ACME logs from `sudo journalctl -u caddy --since '24 hours ago'`.
 
 Expected state:
 
@@ -148,11 +148,13 @@ For public deployments, prefer MnemoNAS user authentication so WebDAV clients us
 auth_type = "users"
 ```
 
-When keeping the legacy global Basic Auth mode, WebDAV credentials are separate from the Web UI administrator password. Default generated credentials are stored in:
+When keeping the legacy global Basic Auth mode, WebDAV credentials are separate from the Web UI administrator password. The generated value is visible on the Web settings page after administrator login. For command-line troubleshooting, print only the `webdav_password` field so JWT signing secrets are not shown together:
 
 ```bash
-sudo cat /srv/mnemonas/secrets.json
+sudo python3 -c 'import json; print(json.load(open("/srv/mnemonas/secrets.json", encoding="utf-8")).get("webdav_password", ""))'
 ```
+
+The full `secrets.json` also contains runtime signing secrets and should not be copied into support requests, chats, or logs.
 
 A custom strong Basic Auth password can be set in `[webdav]` in `/etc/mnemonas/config.toml`, followed by validation and restart:
 

@@ -584,7 +584,7 @@ GET /api/v1/setup/
 
 **说明**:
 - 该接口不再返回任何初始密码或用户名
-- 首次启动生成的 Web 登录初始管理员密码仅写入 `<storage.root>/.mnemonas/initial-password.txt`；非交互启动日志只提示该文件路径
+- 首次启动生成的 Web 登录初始管理员密码仅写入 `auth.users_file` 同目录的 `initial-password.txt`；默认路径为 `<storage.root>/.mnemonas/initial-password.txt`，非交互启动日志只提示该文件路径
 - 该接口返回 setup 专用平铺 JSON，不使用通用 `data` wrapper
 
 ### 确认已查看初始化信息
@@ -812,7 +812,7 @@ GET /api/v1/diagnostics
 - `filesystem.disk_stats_available` 表示磁盘容量统计是否可用；不可用时 `filesystem.disk_*` 字段会被省略。可用时会同时包含 `filesystem.disk_filesystem_type`、`filesystem.disk_mount_point`、`filesystem.disk_mount_source`、脱敏后的 `filesystem.disk_mount_options` 和 `filesystem.disk_native_data_checksum_support`，用于确认实际承载 MnemoNAS 的挂载点、设备/数据集和文件系统校验能力。
 - `alerts.runtime_available` 表示当前进程是否挂载了提醒监控；`alerts.webhook_configured` 只表示是否配置了 Webhook，不会暴露 `webhook_url` 或 `webhook_headers`。
 - `alerts.telegram_configured` 只表示 Telegram 通知是否具备可用配置，不会暴露 `telegram_bot_token`。
-- `alerts.email_configured` 只表示 SMTP 邮件通知是否具备可用配置，不会暴露 `smtp_host`、`smtp_username`、`smtp_password`、`smtp_from` 或 `smtp_to`。
+- `alerts.email_configured` 只表示 SMTP 邮件通知是否具备可用配置，包括启用邮件通知、SMTP 主机、端口、发件人和至少一个非空收件人；不会暴露 `smtp_host`、`smtp_username`、`smtp_password`、`smtp_from` 或 `smtp_to`。
 - `alerts.last_*` 来自上一次提醒检查；尚未完成首次检查时会被省略。
 - `maintenance` 是维护任务脱敏摘要；其中 `scrub_schedule_*` 反映 `[maintenance.scrub]` 周期计划，`last_scrub_*` 来自最近一次 Scrub 历史，`scrub_failure_retries` 只在最近一次 Scrub 失败时出现。
 - `disk_health` 是磁盘健康脱敏摘要；完整设备路径、序列号、温度和 SMART 状态通过管理员维护接口 `GET /api/v1/maintenance/disk-health` 获取。
@@ -2264,7 +2264,9 @@ GET /api/v1/settings/security-check
 - `data.status` 是整体状态，取值为 `pass`、`warning`、`block`
 - `checks[].status` 是单项状态，取值同上；存在任一 `block` 时整体为 `block`，否则存在任一 `warning` 时整体为 `warning`
 - `checks[].id` 当前包含 `auth_enabled`、`unsafe_no_auth_override`、`https_request`、`public_http_exposure`、`trusted_proxy_or_tls`、`forwarded_proto_trust`、`server_listen`、`admin_accounts`、`dataplane_listen`、`dataplane_http_listen`、`webdav_auth`、`smb_preview`、`share_base_url`、`initial_password_file`
-- `share_base_url` 在分享功能启用时检查公网分享链接基础 URL；HTTP、非 443 的 HTTPS 端口、包含 userinfo、查询参数、片段或主机名格式无效的 URL 会标记为 `block`，空值或其他域名会保留为需人工复核的告警
+- `webdav_auth` 在 WebDAV 启用时检查认证方式；`auth_type = "none"` 会在非本机监听时标记为 `block`，全局 Basic Auth 显式配置常见占位密码或少于 16 字符的密码会标记为需更换的 `warning`，响应只包含 `password_risk` 类型，不返回密码值
+- `share_base_url` 在分享功能启用时检查公网分享链接基础 URL；HTTP、非 443 的 HTTPS 端口、包含 userinfo、查询参数、片段或主机名格式无效的 URL 会标记为 `block`，空值、其他域名或以 `/s` 分享路由结尾的基础路径会保留为需人工复核的告警
+- `forwarded_proto_trust` 检查 `X-Forwarded-Proto` 与受信代理配置：未配置 `trusted_proxy_hops` 时出现该 header 会标记为 `warning`，header 来自非受信来源会标记为 `block`，来自受信来源但值不是 `https` 会标记为 `warning`
 - `request` 描述当前请求如何被服务端识别，例如是否 HTTPS、是否来自受信转发源、`X-Forwarded-Proto` 是否被采纳
 - `config` 描述自检使用的关键运行配置
 
@@ -2438,7 +2440,7 @@ PUT /api/v1/settings
 - 请求中的 `retention.max_age`、`retention.gc_interval` 必须是 `time.ParseDuration` 可解析的字符串，例如 `720h`、`24h`、`0`
 - 请求中的 `alerts.check_interval`、`alerts.cooldown_period` 必须是正的 `time.ParseDuration` 字符串
 - 请求中的 `alerts.webhook_url` 为空时禁用 Webhook 发送，非空时必须是完整的 `http` 或 `https` URL
-- 请求中的 `alerts.webhook_method` 仅支持 `GET` 或 `POST`；`POST` 发送 JSON body，`GET` 将提醒字段编码到 URL query。`alerts.webhook_headers` 每项必须是 `"Key: Value"` 格式，Header 名称必须是合法 HTTP token，值不能包含换行或控制字符
+- 请求中的 `alerts.webhook_method` 仅支持 `GET` 或 `POST`；`POST` 发送 JSON body，`GET` 将提醒字段编码到 URL query。`alerts.webhook_headers` 每项必须是 `"Key: Value"` 格式，Header 名称必须是合法 HTTP token，不能重复（大小写不敏感），值不能包含换行或控制字符
 - `GET /api/v1/settings` 不返回 Webhook URL 或 Header 值；响应中的 `alerts.webhook_url` 和 `alerts.webhook_headers` 使用 `<redacted>` 占位符表示已配置值，`alerts.webhook_url_configured` 与 `alerts.webhook_headers_configured` 表示是否存在对应配置。`PUT /api/v1/settings` 可提交真实 Webhook URL/Header 值来更新配置；如果提交原样的 `<redacted>` 占位值，服务端会保留对应的既有值。
 - 省略 `alerts.telegram_bot_token` 或 `alerts.smtp_password` 会保留既有密钥；提交空字符串会清除对应密钥。`alerts.telegram_enabled = true` 时清除 `telegram_bot_token` 会因缺少必需 Token 被拒绝。
 - `alerts.telegram_enabled = true` 时必须提供 `telegram_bot_token` 和 `telegram_chat_id`；`telegram_bot_token` 不能包含空白、`/`、`?` 或 `#`，诊断和设置读取响应不会明文返回该 Token
@@ -2448,6 +2450,30 @@ PUT /api/v1/settings
 - 请求中的 `dataplane.grpc_address` 必须是合法 `host:port` 地址，端口范围 1-65535，且不能包含空白或控制字符；`dataplane.timeout` 必须是正的 `time.ParseDuration` 字符串，`dataplane.max_retries` 必须是 `0` 或正整数
 - 配置校验失败时返回 `400 Bad Request` 和稳定错误消息 `invalid configuration`
 - 非法设置请求不会修改进程内当前生效配置
+
+### 发送测试提醒
+
+```
+POST /api/v1/settings/alerts/test
+```
+
+**需要管理员权限**
+
+该接口会通过当前已保存的提醒通道发送一次 `alert_test` warning 事件，用于验证 Webhook、Telegram 或 SMTP 邮件链路。它要求 `[alerts] enabled = true`、至少存在一个已配置的通知通道，并且当前进程已挂载提醒运行态；SMTP 邮件通道只有在启用邮件通知、SMTP 主机、端口、发件人和至少一个非空收件人均存在时才计入通道列表。测试事件的 `details` 只包含 `trigger = "manual_test"`、`source = "settings"` 和通道名称列表，不包含 Webhook、Telegram 或 SMTP 密钥。
+
+**响应示例**:
+```json
+{
+  "success": true,
+  "data": {
+    "event_type": "alert_test",
+    "channels": ["webhook", "email"]
+  },
+  "message": "test alert sent"
+}
+```
+
+提醒未启用或没有可用通道时返回 `409 Conflict`；提醒运行态不可用时返回 `503 Service Unavailable`；通道发送失败时返回通用 `500` 错误，不返回通道密钥。
 
 ### 获取 WebDAV 凭据
 
@@ -2787,12 +2813,32 @@ GET /api/v1/maintenance/backups
         "started_at": "2026-05-09T04:15:00Z",
         "finished_at": "2026-05-09T04:15:01Z",
         "duration_ms": 1000,
+        "snapshot_path": "/mnt/backup-drive/mnemonas/external-disk/snapshots/20260509T020304.000000000Z",
+        "manifest_path": "/mnt/backup-drive/mnemonas/external-disk/snapshots/20260509T020304.000000000Z/manifest.json",
         "target_path": "/restore/mnemonas",
         "file_count": 42,
         "verified_bytes": 1048576,
         "looks_like_storage_root": true,
         "warnings": []
-      }
+      },
+      "last_matching_restore_verify": {
+        "id": "20260509T041500.000000000Z",
+        "job_id": "external-disk",
+        "status": "completed",
+        "started_at": "2026-05-09T04:15:00Z",
+        "finished_at": "2026-05-09T04:15:01Z",
+        "duration_ms": 1000,
+        "snapshot_path": "/mnt/backup-drive/mnemonas/external-disk/snapshots/20260509T020304.000000000Z",
+        "manifest_path": "/mnt/backup-drive/mnemonas/external-disk/snapshots/20260509T020304.000000000Z/manifest.json",
+        "target_path": "/restore/mnemonas",
+        "file_count": 42,
+        "verified_bytes": 1048576,
+        "looks_like_storage_root": true,
+        "warnings": []
+      },
+      "restore_report_findings": [
+        "未发现阻塞项；仍需在切换前按恢复清单人工复核。"
+      ]
     }
   ]
 }
@@ -2816,11 +2862,13 @@ POST /api/v1/maintenance/backups/{id}/run
 - `type = "restic"`：调用 `command` 指定的 restic 可执行文件，执行 `restic -r <repository> --password-file <password_file> backup <source>`；`verify_after_backup = true` 时执行 `restic check`。
 - `type = "rclone"`：调用 `command` 指定的 rclone 可执行文件，执行 `rclone sync <source> <remote>`；`verify_after_backup = true` 时执行 `rclone check --one-way`。
 
-`restic` 和 `rclone` 不通过 shell 拼接命令；`command` 只能是可执行名或绝对路径，`extra_args` 会作为 argv 追加到备份命令，恢复命令不会复用备份专用参数。`local` 的 `destination` 必须位于 `storage.root` 之外，且已存在的路径组件不能是符号链接；本地恢复预览、恢复和恢复演练在读取快照 manifest 或创建演练产物前也会重新检查该目标路径。备份运行前会拒绝 `source` 树中的符号链接；`rclone` 恢复演练也会在执行远端校验前应用同一检查。`password_file`、`config_file` 必须是 `source` 与 `storage.root` 之外的普通文件。API 任务视图、运行结果、恢复报告、批量恢复结果和备份提醒事件会对 `repository`、`remote`、`destination`、`manifest_path` 等远端目标字段中的 userinfo、token、密码、secret 和 key 参数做 `<redacted>` 脱敏；API 可见的备份 `error_message`、`warnings`、预检详情和提醒事件错误信息中出现的同类模式也会脱敏。实际 restic/rclone 命令仍使用配置中的原始值。
+`restic` 和 `rclone` 不通过 shell 拼接命令；`command` 只能是可执行名或绝对路径，`extra_args` 会作为 argv 追加到备份命令，恢复命令不会复用备份专用参数。`local` 的 `destination` 必须位于 `storage.root` 之外，且已存在的路径组件不能是符号链接；本地恢复预览、恢复和恢复演练在读取快照 manifest 或创建演练产物前也会重新检查该目标路径。备份运行前会拒绝 `source` 树中的符号链接；`rclone` 恢复演练也会在执行远端校验前应用同一检查。`password_file`、`config_file` 必须是 `source` 与 `storage.root` 之外的普通文件。API 任务视图、运行结果、恢复/预览结果、恢复报告、批量恢复结果和备份提醒事件会对 `repository`、`remote`、`destination`、`target_path`、`snapshot_path`、`manifest_path`、`config_path` 等展示字段中的 userinfo、token、密码、secret 和 key 参数做 `<redacted>` 脱敏；API 可见的备份 `error_message`、`warnings`、预检详情和提醒事件错误信息中出现的同类模式也会脱敏。实际 restic/rclone 命令仍使用配置中的原始值。调用方在串联 `restore-preview`、`restore` 和 `restore-verify` 时，应保留并复用原请求中的 `target_path`；响应中的脱敏 `target_path` 仅适合作为展示值。
 
-任务可配置 `disabled`、`schedule_interval`、`schedule_window_start`、`schedule_window_end`、`stale_after`、`restore_drill_stale_after`、`max_snapshots`、`max_age` 和 `retention_policy`。`schedule_interval` 大于 0 时服务内置调度器会自动按间隔执行；设置 `schedule_window_start`/`schedule_window_end` 后，自动任务只会在服务器本地时间窗口内启动，手动执行不受影响。`local` 成功备份后会按 `max_snapshots` 和 `max_age` 清理旧快照，并在响应的 `pruned_snapshots` 中返回清理数量。成功备份后会自动运行一次保留策略检测，也可调用 `POST /retention-check` 手动检查。`restic` 检测执行 `restic snapshots --json --tag mnemonas --tag job:<id>`，`rclone` 检测执行 `rclone lsjson <remote> --recursive --files-only`；检测结果写入 `last_retention_check`，并影响 `retention_status`/`retention_message`。`restic` 和 `rclone` 的远端保留策略仍由外部工具管理；配置 `retention_policy` 会把该外部策略标记为已确认，否则会返回 `warning` 提醒确认。`restore_drill_stale_after` 留空或未配置时默认 30 天，任务视图会通过 `restore_drill_status` 和 `restore_drill_message` 提示尚未演练、演练失败或演练过期；配置提醒通道后，缺失或过期恢复演练会发送限频的 `backup_restore_drill` warning 事件，`trigger` 为 `restore_drill_reminder`，并持久化 `last_restore_drill_reminder_at`。`health_status` 只表示备份运行健康，可能为 `ok`、`manual`、`running`、`due`、`stale`、`failed` 或 `disabled`。任务视图会返回 `last_restore_drill`、最近恢复演练历史 `restore_drill_history`、恢复演练统计 `restore_drill_stats`、`last_restore`、`last_restore_verify` 与最近恢复历史 `restore_history`；恢复演练历史和显式恢复历史默认都保留最近 20 条，失败演练和失败恢复也会记录错误信息。失败的恢复演练会返回稳定的 `failure_category`，当前可能值包括 `no_snapshot`、`unsupported_job_type`、`unsafe_path`、`integrity_check`、`external_command`、`cancelled`、`io` 和 `unknown`，并会透传到提醒事件。`restore_drill_stats` 汇总最近保留窗口内的总次数、成功次数、失败次数、成功率、连续成功/失败次数、最近成功/失败时间、最近失败原因和失败类型，便于回顾恢复能力、恢复目标、恢复预检、只读校验结果、切换/回滚清单、状态、文件数和字节数。
+任务可配置 `disabled`、`schedule_interval`、`schedule_window_start`、`schedule_window_end`、`stale_after`、`restore_drill_stale_after`、`max_snapshots`、`max_age` 和 `retention_policy`。`schedule_interval` 大于 0 时服务内置调度器会自动按间隔执行；设置 `schedule_window_start`/`schedule_window_end` 后，自动任务只会在服务器本地时间窗口内启动，手动执行不受影响。`local` 成功备份后会按 `max_snapshots` 和 `max_age` 清理旧快照，并在响应的 `pruned_snapshots` 中返回清理数量。成功备份后会自动运行一次保留策略检测，也可调用 `POST /retention-check` 手动检查。`restic` 检测执行 `restic snapshots --json --tag mnemonas --tag job:<id>`，`rclone` 检测执行 `rclone lsjson <remote> --recursive --files-only`；检测结果写入 `last_retention_check`，并影响 `retention_status`/`retention_message`。`restic` 和 `rclone` 的远端保留策略仍由外部工具管理；配置 `retention_policy` 会把该外部策略标记为已确认，否则会返回 `warning` 提醒确认。`restore_drill_stale_after` 留空或未配置时默认 30 天，任务视图会通过 `restore_drill_status` 和 `restore_drill_message` 提示尚未演练、演练失败或演练过期；配置提醒通道后，缺失或过期恢复演练会发送限频的 `backup_restore_drill` warning 事件，`trigger` 为 `restore_drill_reminder`，并持久化 `last_restore_drill_reminder_at`。`health_status` 只表示备份运行健康，可能为 `ok`、`manual`、`running`、`due`、`stale`、`failed` 或 `disabled`。任务视图会返回 `last_restore_drill`、最近恢复演练历史 `restore_drill_history`、恢复演练统计 `restore_drill_stats`、`last_restore`、`last_restore_verify`、最近恢复匹配的只读校验 `last_matching_restore_verify` 与最近恢复历史 `restore_history`；恢复演练历史和显式恢复历史默认都保留最近 20 条，失败演练和失败恢复也会记录错误信息。失败的恢复演练会返回稳定的 `failure_category`，当前可能值包括 `no_snapshot`、`unsupported_job_type`、`unsafe_path`、`integrity_check`、`external_command`、`cancelled`、`io` 和 `unknown`，并会透传到提醒事件。`restore_drill_stats` 汇总最近保留窗口内的总次数、成功次数、失败次数、成功率、连续成功/失败次数、最近成功/失败时间、最近失败原因和失败类型，便于回顾恢复能力、恢复目标、恢复预检、只读校验结果、切换/回滚清单、状态、文件数和字节数。
 
-当 `[alerts] enabled = true` 且配置了 Webhook、Telegram 或 SMTP 邮件时，备份失败、恢复演练失败、恢复演练缺失/过期提醒、保留策略检测失败或备份完成但带警告会发送提醒事件。事件 `type` 为 `backup_run`、`backup_restore_drill` 或 `backup_retention_check`，`level` 为 `warning` 或 `critical`，`details` 包含任务 ID、运行 ID、状态、脱敏后的错误信息、脱敏后的备份目标/manifest 路径、快照路径和文件/字节统计。
+备份、恢复、恢复演练、只读校验和保留检测开始执行时会先写入 `running` 状态。服务启动时，状态文件中遗留的 `running` 记录会被标记为失败并写回状态文件，避免重启后长期显示并未实际运行的任务。
+
+当 `[alerts] enabled = true` 且配置了 Webhook、Telegram 或 SMTP 邮件时，备份失败、显式恢复失败或带警告、恢复后只读校验失败或带警告、恢复演练失败、恢复演练缺失/过期提醒、保留策略检测失败或备份完成但带警告会发送提醒事件。事件 `type` 为 `backup_run`、`backup_restore`、`backup_restore_verify`、`backup_restore_drill` 或 `backup_retention_check`，`level` 为 `warning` 或 `critical`，`details` 只包含有值的字段，可包括任务 ID、运行 ID、状态、恢复目标路径、脱敏后的错误信息、脱敏后的备份目标/manifest 路径、快照路径和文件/字节统计。
 
 手动检查快照保留策略和远端可见内容：
 
@@ -3051,7 +3099,7 @@ POST /api/v1/maintenance/backups/batch-restore
 }
 ```
 
-批量接口最多接受 20 个条目。每个条目复用单任务恢复的 `target_path` 与 `include_config` 语义；服务端会拒绝重复目标、父子嵌套目标和同一批次中互相覆盖的目标路径。批量预览不写入目标目录，也不写入恢复历史；响应的 `items[]` 会分别返回每个条目的 `index`、`status`、`error_message` 和 `preview`，预览警告位于 `preview.warnings`，汇总提示位于顶层 `warnings`。批量恢复按顺序执行每个条目；成功恢复后会立即对对应目标执行 `restore-verify`，并在条目结果中返回 `restore`、`verify`、`warnings` 和 `error_message`。批量结果中的错误和警告同样会脱敏远端目标内嵌的凭据模式。部分条目失败时，批量结果 `status = "completed"` 且 `warning = true`；全部条目失败时，`status = "failed"`。调用方应始终读取 `items[]` 的逐项状态，而不是只看批量总状态。
+批量接口最多接受 20 个条目。每个条目复用单任务恢复的 `target_path` 与 `include_config` 语义；服务端会拒绝重复目标、父子嵌套目标和同一批次中互相覆盖的目标路径。批量预览不写入目标目录，也不写入恢复历史；响应的 `items[]` 会分别返回每个条目的 `index`、`status`、`error_message` 和 `preview`，预览警告位于 `preview.warnings`，汇总提示位于顶层 `warnings`。批量恢复按顺序执行每个条目；成功恢复后会立即对对应目标执行 `restore-verify`，并在条目结果中返回 `restore`、`verify`、`warnings` 和 `error_message`。顶层 `total_files` 与 `verified_bytes` 汇总已完成条目的只读校验结果。批量结果中的错误和警告同样会脱敏远端目标内嵌的凭据模式。部分条目失败时，批量结果 `status = "completed"` 且 `warning = true`；全部条目失败时，`status = "failed"`。调用方应始终读取 `items[]` 的逐项状态，而不是只看批量总状态。
 
 把支持的备份任务恢复到指定目录：
 
@@ -3081,7 +3129,7 @@ POST /api/v1/maintenance/backups/{id}/restore
 GET /api/v1/maintenance/backups/{id}/restore-report
 ```
 
-响应为 `application/json` 附件，包含 `job`、最近备份、最近保留检测、最近恢复演练、恢复演练历史、最近恢复、最近恢复后只读校验、恢复历史和 `findings`。该摘要适合在切换 storage.root 前留档，或在恢复失败后随诊断信息一起保存。
+响应为 `application/json` 附件，包含 `job`、最近备份、最近保留检测、最近恢复演练、恢复演练历史、最近恢复、最近恢复后只读校验、最近恢复匹配的只读校验 `last_matching_restore_verify`、恢复历史和 `findings`。该摘要适合在切换 storage.root 前留档，或在恢复失败后随诊断信息一起保存。
 
 恢复完成后，对目标目录执行只读校验，不写入恢复历史：
 
@@ -3106,6 +3154,8 @@ POST /api/v1/maintenance/backups/{id}/restore-verify
     "status": "completed",
     "source": "/srv/mnemonas",
     "destination": "/mnt/backup-drive/mnemonas",
+    "snapshot_path": "/mnt/backup-drive/mnemonas/external-disk/snapshots/20260509T020304.000000000Z",
+    "manifest_path": "/mnt/backup-drive/mnemonas/external-disk/snapshots/20260509T020304.000000000Z/manifest.json",
     "target_path": "/mnt/restore/mnemonas",
     "file_count": 42,
     "verified_bytes": 1048576,
@@ -3121,7 +3171,9 @@ POST /api/v1/maintenance/backups/{id}/restore-verify
 }
 ```
 
-`restore-verify` 要求目标目录已存在，目标路径不能包含控制字符，并且仍位于 `storage.root`、备份来源和本地备份目标/仓库之外；目标路径中已存在的路径组件不能是符号链接。它会统计恢复目录中的常规文件和字节数，检查 `.mnemonas-restore/config.toml`、`files/`、`.mnemonas/`、`.mnemonas/index.db` 与 `.mnemonas/objects` 是否存在，并对符号链接、非常规文件或不像完整 `storage.root` 的目录给出警告。维护页在恢复成功后会自动调用该接口，并展示恢复后切换检查清单。
+`restore-verify` 要求目标目录已存在，目标路径不能包含控制字符，并且仍位于 `storage.root`、备份来源和本地备份目标/仓库之外；目标路径中已存在的路径组件不能是符号链接。它会统计恢复目录中的常规文件和字节数，检查 `.mnemonas-restore/config.toml`、`files/`、`.mnemonas/`、`.mnemonas/index.db` 与 `.mnemonas/objects` 是否存在，并对符号链接、非常规文件或不像完整 `storage.root` 的目录给出警告。`local` 任务会优先对照同一目标最近一次成功恢复所用的快照，找不到匹配恢复记录时再对照最新本地快照；响应中的 `snapshot_path` 和 `manifest_path` 表示实际对照对象。维护页在恢复成功后会自动调用该接口，并展示恢复后切换检查清单。
+
+任务视图和恢复报告中的最近恢复摘要只会把目标路径一致、校验时间不早于最近恢复完成时间，且最近恢复已成功完成的 `last_restore_verify` 关联到 `last_restore`。任务视图会返回 `last_matching_restore_verify` 和 `restore_report_findings`，用于展示与恢复报告 `last_matching_restore_verify` 和 `findings` 相同的匹配校验与待处理发现项。任务视图和恢复报告会把匹配结果复制到 `last_matching_restore_verify`；不匹配时，该字段省略，并输出最近恢复尚未完成匹配只读校验的发现项。最近恢复仍在运行时，恢复报告会输出恢复未完成的发现项，并避免把旧校验结果关联到本次恢复。
 
 **错误语义**:
 - 未配置备份管理器：`503 Service Unavailable`

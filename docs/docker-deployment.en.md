@@ -234,7 +234,7 @@ enabled = true
 prefix = "/dav"
 auth_type = "basic"
 username = "webdav"
-password = "change-this-strong-password"
+password = "" # leave empty to use generated credentials; use a password-manager value for custom credentials
 
 [log]
 level = "info"

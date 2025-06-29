@@ -119,6 +119,9 @@ func TestServer_BackupEndpoints_RunAndRestoreDrill(t *testing.T) {
 	if verifyResult.TargetPath != restoreTarget || verifyResult.FileCount != restoreResult.FileCount || verifyResult.VerifiedBytes != restoreResult.VerifiedBytes || !verifyResult.ConfigFound {
 		t.Fatalf("unexpected restore verify result: %+v", verifyResult)
 	}
+	if verifyResult.SnapshotPath != restoreResult.SnapshotPath || verifyResult.ManifestPath != restoreResult.ManifestPath {
+		t.Fatalf("restore verify reference = (%q, %q), want restore reference (%q, %q)", verifyResult.SnapshotPath, verifyResult.ManifestPath, restoreResult.SnapshotPath, restoreResult.ManifestPath)
+	}
 	retentionResult := runBackupAPIRequest[backup.RetentionCheckResult](t, server, http.MethodPost, "/api/v1/maintenance/backups/home/retention-check", nil, http.StatusOK)
 	if retentionResult.Status != backup.StatusCompleted || retentionResult.SnapshotCount != 1 || !retentionResult.Warning {
 		t.Fatalf("unexpected retention check result: %+v", retentionResult)
@@ -134,6 +137,9 @@ func TestServer_BackupEndpoints_RunAndRestoreDrill(t *testing.T) {
 	if jobView.LastRestoreVerify == nil || jobView.LastRestoreVerify.ID != verifyResult.ID || jobView.LastRestoreVerify.TargetPath != restoreTarget {
 		t.Fatalf("backup job missing latest restore verify report: %+v", jobView.LastRestoreVerify)
 	}
+	if jobView.LastMatchingRestoreVerify == nil || jobView.LastMatchingRestoreVerify.ID != verifyResult.ID {
+		t.Fatalf("backup job matching restore verify = %+v, want %s", jobView.LastMatchingRestoreVerify, verifyResult.ID)
+	}
 	if len(jobView.RestoreDrillHistory) != 1 || jobView.RestoreDrillHistory[0].ID != drillResult.ID {
 		t.Fatalf("backup job restore drill history = %+v, want latest drill", jobView.RestoreDrillHistory)
 	}
@@ -145,6 +151,9 @@ func TestServer_BackupEndpoints_RunAndRestoreDrill(t *testing.T) {
 	}
 	if len(jobView.RestoreHistory) != 1 || jobView.RestoreHistory[0].ID != restoreResult.ID {
 		t.Fatalf("backup job restore history = %+v, want latest restore", jobView.RestoreHistory)
+	}
+	if len(jobView.RestoreReportFindings) == 0 {
+		t.Fatalf("backup job restore report findings are empty: %+v", jobView)
 	}
 
 	reportReq := httptest.NewRequest(http.MethodGet, "/api/v1/maintenance/backups/home/restore-report", nil)
@@ -160,8 +169,14 @@ func TestServer_BackupEndpoints_RunAndRestoreDrill(t *testing.T) {
 	if err := json.NewDecoder(reportResp.Body).Decode(&report); err != nil {
 		t.Fatalf("decode restore report: %v", err)
 	}
-	if report.Job.ID != "home" || report.LastRestore == nil || report.LastRestoreVerify == nil || len(report.RestoreDrillHistory) != 1 || report.RestoreDrillStats == nil || len(report.Findings) == 0 {
+	if report.Job.ID != "home" || report.LastRestore == nil || report.LastRestoreVerify == nil || report.LastMatchingRestoreVerify == nil || len(report.RestoreDrillHistory) != 1 || report.RestoreDrillStats == nil || len(report.Findings) == 0 {
 		t.Fatalf("unexpected restore report: %+v", report)
+	}
+	if strings.Join(report.Job.RestoreReportFindings, "\n") != strings.Join(report.Findings, "\n") {
+		t.Fatalf("restore report job findings = %+v, want report findings %+v", report.Job.RestoreReportFindings, report.Findings)
+	}
+	if report.LastMatchingRestoreVerify.ID != verifyResult.ID {
+		t.Fatalf("restore report matching verify = %+v, want %s", report.LastMatchingRestoreVerify, verifyResult.ID)
 	}
 
 	batchA := filepath.Join(tmpDir, "batch-a")
@@ -280,6 +295,51 @@ func TestServer_BackupEndpoints_RunUnsafeConfiguredPathReturnsInternalDetails(t 
 	}
 }
 
+func TestServer_BackupEndpoints_RedactsExternalCommandSecretsFromErrorLogs(t *testing.T) {
+	tmpDir := t.TempDir()
+	source := filepath.Join(tmpDir, "source")
+	passwordFile := filepath.Join(tmpDir, "restic.pass")
+	commandPath := filepath.Join(tmpDir, "failing-restic")
+	repository := "rest:https://user:repo-pass@backup.example/repo?token=remote-token&region=us"
+	stderr := `failed repository ` + repository + ` with access_key_id=AKIASECRET secret_access_key=secret-access-key --password flag-repo-pass --token flag-remote-token --api-key "quoted token" secret='spaced secret' Authorization: Bearer "bearer secret" X-Auth-Token: header-token X-Api-Key: "header quoted token" {"access_key_id":"json-akia","secret_access_key":"json secret","authorization":"Bearer json bearer"}`
+	mustWriteAPITestFile(t, filepath.Join(source, "docs", "note.txt"), "restic")
+	mustWriteAPITestFile(t, passwordFile, "secret")
+	script := "#!/bin/sh\ncat >&2 <<'EOF'\n" + stderr + "\nEOF\nexit 1\n"
+	if err := os.WriteFile(commandPath, []byte(script), 0700); err != nil {
+		t.Fatalf("WriteFile(command) error: %v", err)
+	}
+
+	var logBuffer bytes.Buffer
+	server, err := NewServer(zerolog.New(&logBuffer), &ServerConfig{
+		BackupRoot:  filepath.Join(tmpDir, "state"),
+		StorageRoot: source,
+		BackupJobs: []config.BackupJobConfig{{
+			ID:           "restic-remote",
+			Name:         "Restic remote",
+			Type:         backup.JobTypeRestic,
+			Source:       source,
+			Repository:   repository,
+			Command:      commandPath,
+			PasswordFile: passwordFile,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("NewServer() error: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/maintenance/backups/restic-remote/run", nil)
+	rec := httptest.NewRecorder()
+	server.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("run remote backup status = %d, want %d; body=%s", rec.Code, http.StatusInternalServerError, rec.Body.String())
+	}
+	assertNoBackupAPITestSecrets(t, rec.Body.String())
+	assertNoBackupAPITestSecrets(t, logBuffer.String())
+	if !strings.Contains(logBuffer.String(), "<redacted>") {
+		t.Fatalf("backup error log = %q, want redacted marker", logBuffer.String())
+	}
+}
+
 func TestServer_BackupEndpoints_FailureSendsAlertEvent(t *testing.T) {
 	tmpDir := t.TempDir()
 	source := filepath.Join(tmpDir, "source")
@@ -319,6 +379,9 @@ func TestServer_BackupEndpoints_FailureSendsAlertEvent(t *testing.T) {
 	if event.Details["job_id"] != "home" || event.Details["status"] != backup.StatusFailed {
 		t.Fatalf("unexpected backup alert details: %+v", event.Details)
 	}
+	if _, ok := event.Details["target_path"]; ok {
+		t.Fatalf("backup run alert included empty target_path detail: %+v", event.Details)
+	}
 }
 
 func TestBackupAlertNotifier_MapsRestoreDrillReminderMetadata(t *testing.T) {
@@ -340,6 +403,7 @@ func TestBackupAlertNotifier_MapsRestoreDrillReminderMetadata(t *testing.T) {
 		Trigger:             backup.NotificationTriggerReminder,
 		Status:              "stale",
 		StartedAt:           lastDrill,
+		TargetPath:          "/restore/mnemonas",
 		LastSuccessfulRunAt: &lastSuccess,
 		LastRestoreDrillAt:  &lastDrill,
 		StaleAfter:          "720h0m0s",
@@ -357,6 +421,9 @@ func TestBackupAlertNotifier_MapsRestoreDrillReminderMetadata(t *testing.T) {
 	if details["trigger"] != backup.NotificationTriggerReminder || details["status"] != "stale" {
 		t.Fatalf("unexpected reminder details: %+v", details)
 	}
+	if details["target_path"] != "/restore/mnemonas" {
+		t.Fatalf("target_path detail = %#v, want /restore/mnemonas", details["target_path"])
+	}
 	if details["stale_after"] != "720h0m0s" || details["reminder_cooldown"] != "24h0m0s" {
 		t.Fatalf("missing reminder timing details: %+v", details)
 	}
@@ -368,6 +435,85 @@ func TestBackupAlertNotifier_MapsRestoreDrillReminderMetadata(t *testing.T) {
 	}
 	if _, ok := details["last_restore_drill_at"].(*time.Time); !ok {
 		t.Fatalf("last_restore_drill_at detail = %#v, want *time.Time", details["last_restore_drill_at"])
+	}
+	if _, ok := details["snapshot_count"]; ok {
+		t.Fatalf("reminder details included zero snapshot_count: %+v", details)
+	}
+	if _, ok := details["error_message"]; ok {
+		t.Fatalf("reminder details included empty error_message: %+v", details)
+	}
+}
+
+func TestBackupAlertNotifier_RedactsSensitiveText(t *testing.T) {
+	recorder := &backupEventRecorder{}
+	notifier := newBackupAlertNotifier(recorder, zerolog.Nop())
+	if notifier == nil {
+		t.Fatal("newBackupAlertNotifier() returned nil")
+	}
+
+	err := notifier.NotifyBackupEvent(context.Background(), backup.NotificationEvent{
+		Type:         backup.NotificationTypeRestore,
+		Level:        backup.NotificationLevelCritical,
+		Message:      "restore failed token=message-secret",
+		JobID:        "home",
+		JobName:      "Home backup",
+		JobType:      backup.JobTypeLocal,
+		Status:       backup.StatusFailed,
+		Source:       "/srv/source/token=source-secret",
+		Destination:  "rest:https://user:repo-pass@backup.example/repo?token=remote-token",
+		TargetPath:   "/restore/token=restore-secret",
+		ManifestPath: "/state/secret_access_key=manifest-secret/manifest.json",
+		Warnings: []string{
+			"restore warning token=warning-secret",
+			`Authorization: Bearer "warning bearer"`,
+		},
+		ErrorMessage: `restic failed --password repo-pass X-Auth-Token: header-secret`,
+		Timestamp:    time.Date(2026, 5, 10, 4, 0, 0, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatalf("NotifyBackupEvent() error: %v", err)
+	}
+	if len(recorder.events) != 1 {
+		t.Fatalf("alert event count = %d, want 1", len(recorder.events))
+	}
+
+	event := recorder.events[0]
+	assertBackupAlertStringNoSecrets(t, event.Message)
+	for _, key := range []string{"source", "destination", "target_path", "manifest_path", "error_message"} {
+		value, ok := event.Details[key].(string)
+		if !ok {
+			t.Fatalf("%s detail = %#v, want string", key, event.Details[key])
+		}
+		assertBackupAlertStringNoSecrets(t, value)
+	}
+	warnings, ok := event.Details["warnings"].([]string)
+	if !ok {
+		t.Fatalf("warnings detail = %#v, want []string", event.Details["warnings"])
+	}
+	for _, warning := range warnings {
+		assertBackupAlertStringNoSecrets(t, warning)
+	}
+	if got, ok := event.Details["target_path"].(string); !ok || !strings.Contains(got, "token=<redacted>") {
+		t.Fatalf("target_path detail = %#v, want redacted token", event.Details["target_path"])
+	}
+}
+
+func assertBackupAlertStringNoSecrets(t *testing.T, value string) {
+	t.Helper()
+	for _, secret := range []string{
+		"message-secret",
+		"source-secret",
+		"repo-pass",
+		"remote-token",
+		"restore-secret",
+		"manifest-secret",
+		"warning-secret",
+		"warning bearer",
+		"header-secret",
+	} {
+		if strings.Contains(value, secret) {
+			t.Fatalf("backup alert text leaked %q: %q", secret, value)
+		}
 	}
 }
 
@@ -413,6 +559,15 @@ func runBackupAPIRequest[T any](t *testing.T, server *Server, method string, tar
 		}
 	}
 	return out
+}
+
+func assertNoBackupAPITestSecrets(t *testing.T, value string) {
+	t.Helper()
+	for _, secret := range []string{"repo-pass", "remote-token", "AKIASECRET", "secret-access-key", "flag-repo-pass", "flag-remote-token", "quoted token", "spaced secret", "bearer secret", "header-token", "header quoted token", "json-akia", "json secret", "json bearer", "user:repo-pass", "token=remote-token", "access_key_id=AKIASECRET", "secret_access_key=secret-access-key"} {
+		if strings.Contains(value, secret) {
+			t.Fatalf("backup API value leaked %q: %q", secret, value)
+		}
+	}
 }
 
 func mustWriteAPITestFile(t *testing.T, path string, content string) {

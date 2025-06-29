@@ -228,6 +228,10 @@ func removeAllAtNoFollow(parentFD int, name, display string) error {
 	if err != nil {
 		return noFollowPathError("openat", display, parentFD, name, err)
 	}
+	if err := unix.Fchmod(dirFD, uint32((stat.Mode&07777)|0700)); err != nil {
+		_ = unix.Close(dirFD)
+		return rootPathError("chmod", display, err)
+	}
 	dirFile := os.NewFile(uintptr(dirFD), display)
 	closeDir := true
 	defer func() {
@@ -380,7 +384,10 @@ func replaceEmptyDirPathNoFollow(rootPath, relParent, oldName, newName, oldDispl
 		return noFollowPathError("fstatat", newDisplay, parentFD, newName, err)
 	}
 
-	if err := unix.Renameat(parentFD, oldName, parentFD, newName); err != nil {
+	if err := renameNoReplaceAt(parentFD, oldName, parentFD, newName); err != nil {
+		if err == unix.EEXIST || err == unix.ENOTEMPTY {
+			return rootPathError("renameat", newDisplay, os.ErrExist)
+		}
 		return rootPathError("renameat", newDisplay, err)
 	}
 	return nil

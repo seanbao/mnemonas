@@ -9,6 +9,18 @@ import { authFetch } from './auth'
 
 const mockAuthFetch = authFetch as Mock
 const invalidResponseMessage = '服务器返回了无效的数据'
+const validUser = {
+  id: 'u1',
+  username: 'admin',
+  email: '',
+  role: 'admin' as const,
+  disabled: false,
+  home_dir: '/',
+  created_at: '2024-01-01',
+  updated_at: '2024-01-01',
+  quota_bytes: 0,
+  used_bytes: 0,
+}
 
 describe('Users API', () => {
   beforeEach(() => {
@@ -52,18 +64,7 @@ describe('Users API', () => {
 
   it('forwards abort signals for user management write operations', async () => {
     const signal = new AbortController().signal
-    const user = {
-      id: 'u1',
-      username: 'admin',
-      email: '',
-      role: 'admin',
-      disabled: false,
-      home_dir: '/',
-      created_at: '2024-01-01',
-      updated_at: '2024-01-01',
-      quota_bytes: 0,
-      used_bytes: 0,
-    }
+    const user = validUser
 
     mockAuthFetch
       .mockResolvedValueOnce({
@@ -258,6 +259,25 @@ describe('Users API', () => {
     await expect(listUsers()).rejects.toThrow(invalidResponseMessage)
   })
 
+  it.each([
+    ['negative quota bytes', { users: [{ ...validUser, quota_bytes: -1 }] }],
+    ['fractional used bytes', { users: [{ ...validUser, used_bytes: 1.5 }] }],
+    ['unsafe quota bytes', { users: [{ ...validUser, quota_bytes: 9007199254740992 }] }],
+    ['unsafe total', { users: [validUser], total: 9007199254740992 }],
+    ['negative total', { users: [validUser], total: -1 }],
+    ['total smaller than returned users', { users: [validUser, { ...validUser, id: 'u2', username: 'guest', role: 'guest' as const }], total: 1 }],
+  ])('rejects list users responses with %s', async (_label, data) => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        success: true,
+        data,
+      }),
+    })
+
+    await expect(listUsers()).rejects.toThrow(invalidResponseMessage)
+  })
+
   it('rejects unreadable successful list users responses', async () => {
     mockAuthFetch.mockResolvedValueOnce({
       ok: true,
@@ -293,6 +313,42 @@ describe('Users API', () => {
     })
 
     await expect(updateUser('u1', { quota_bytes: 0 })).rejects.toThrow(invalidResponseMessage)
+  })
+
+  it.each([
+    ['create response with fractional quota', () => createUser({ username: 'admin', password: 'password123' }), { ...validUser, quota_bytes: 1.5 }],
+    ['create response with unsafe used bytes', () => createUser({ username: 'admin', password: 'password123' }), { ...validUser, used_bytes: 9007199254740992 }],
+    ['update response with negative quota', () => updateUser('u1', { quota_bytes: 0 }), { ...validUser, quota_bytes: -1 }],
+    ['update response with fractional used bytes', () => updateUser('u1', { quota_bytes: 0 }), { ...validUser, used_bytes: 1.5 }],
+  ])('rejects %s', async (_label, action, user) => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        success: true,
+        data: {
+          user,
+        },
+      }),
+    })
+
+    await expect(action()).rejects.toThrow(invalidResponseMessage)
+  })
+
+  it.each([
+    ['negative create quota', () => createUser({ username: 'admin', password: 'password123', quota_bytes: -1 }), 'INVALID_QUOTA'],
+    ['fractional create quota', () => createUser({ username: 'admin', password: 'password123', quota_bytes: 1.5 }), 'INVALID_QUOTA'],
+    ['unsafe create quota', () => createUser({ username: 'admin', password: 'password123', quota_bytes: 9007199254740992 }), 'INVALID_QUOTA'],
+    ['non-number create quota', () => createUser({ username: 'admin', password: 'password123', quota_bytes: '1GiB' as unknown as number }), 'INVALID_QUOTA'],
+    ['negative update quota', () => updateUser('u1', { quota_bytes: -1 }), 'INVALID_QUOTA'],
+    ['fractional update quota', () => updateUser('u1', { quota_bytes: 1.5 }), 'INVALID_QUOTA'],
+    ['unsafe update quota', () => updateUser('u1', { quota_bytes: 9007199254740992 }), 'INVALID_QUOTA'],
+    ['non-number update quota', () => updateUser('u1', { quota_bytes: '1GiB' as unknown as number }), 'INVALID_QUOTA'],
+  ])('rejects %s before calling the users API', async (_label, action, code) => {
+    await expect(action()).rejects.toMatchObject({
+      status: 0,
+      code,
+    })
+    expect(mockAuthFetch).not.toHaveBeenCalled()
   })
 
   it('uses structured error messages', async () => {

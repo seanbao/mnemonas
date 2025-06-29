@@ -118,7 +118,7 @@ For a separate global WebDAV credential, use:
 [webdav]
 auth_type = "basic"
 username = "admin"
-password = "change-this-strong-password"
+password = "" # leave empty to use generated credentials; use a password-manager value for custom credentials
 ```
 
 If `password` is empty, MnemoNAS generates a WebDAV password and stores it in `<storage.root>/secrets.json`.

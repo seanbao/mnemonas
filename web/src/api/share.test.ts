@@ -509,6 +509,9 @@ describe('Share API', () => {
       ['non-object item', null],
       ['invalid is_dir', { name: 'file.txt', path: '/file.txt', is_dir: 'false', size: 1, mod_time: '2026-03-13T00:00:00Z' }],
       ['invalid size', { name: 'file.txt', path: '/file.txt', is_dir: false, size: '1', mod_time: '2026-03-13T00:00:00Z' }],
+      ['negative size', { name: 'file.txt', path: '/file.txt', is_dir: false, size: -1, mod_time: '2026-03-13T00:00:00Z' }],
+      ['fractional size', { name: 'file.txt', path: '/file.txt', is_dir: false, size: 1.5, mod_time: '2026-03-13T00:00:00Z' }],
+      ['unsafe size', { name: 'file.txt', path: '/file.txt', is_dir: false, size: 9007199254740992, mod_time: '2026-03-13T00:00:00Z' }],
       ['invalid mod_time', { name: 'file.txt', path: '/file.txt', is_dir: false, size: 1, mod_time: 123 }],
     ])('rejects folder item responses with %s', async (_label, item) => {
       ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
@@ -660,7 +663,13 @@ describe('Share API', () => {
       ['description', { description: 42 }],
       ['file_name', { file_name: 42 }],
       ['file_size', { file_size: '42' }],
+      ['negative file_size', { file_size: -1 }],
+      ['fractional file_size', { file_size: 42.5 }],
+      ['unsafe file_size', { file_size: 9007199254740992 }],
       ['folder_items', { folder_items: '2' }],
+      ['negative folder_items', { folder_items: -1 }],
+      ['fractional folder_items', { folder_items: 2.5 }],
+      ['unsafe folder_items', { folder_items: 9007199254740992 }],
     ])('rejects public share payloads with invalid optional %s', async (_label, overrides) => {
       ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
         ok: true,
@@ -794,6 +803,25 @@ describe('Share API', () => {
         default_max_access: 25,
       })
       expect(global.fetch).toHaveBeenCalledWith('/api/v1/shares/policy', expect.anything())
+    })
+
+    it.each([
+      ['unsafe default max access', { default_expires_in: '168h', default_max_access: 9007199254740992 }],
+      ['fractional policy max access', { default_expires_in: '168h', default_max_access: 25, policy_rules: [{ path: '/team', max_access: 1.5 }] }],
+    ])('rejects share default policy responses with %s', async (_label, policy) => {
+      ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({
+          success: true,
+          data: policy,
+        }),
+      })
+
+      await expect(getSharePolicy()).rejects.toMatchObject({
+        message: '服务器返回了无效的数据',
+        status: 200,
+      })
     })
 
     it('forwards abort signal when loading share default policy', async () => {
@@ -1080,7 +1108,9 @@ describe('Share API', () => {
       ['non-object share', null],
       ['invalid expires_at', createValidShare({ expires_at: 123 as unknown as string | null })],
       ['invalid last_access', createValidShare({ last_access: 123 as unknown as string | null })],
+      ['invalid access_count', createValidShare({ access_count: 1.5 })],
       ['invalid max_access', createValidShare({ max_access: '5' as unknown as number })],
+      ['unsafe max_access', createValidShare({ max_access: 9007199254740992 })],
       ['invalid description', createValidShare({ description: 42 as unknown as string })],
     ])('rejects share list responses with %s', async (_label, share) => {
       ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
@@ -1134,6 +1164,21 @@ describe('Share API', () => {
       })
     })
 
+    it.each([
+      ['negative', -1],
+      ['fractional', 1.5],
+      ['unsafe', 9007199254740992],
+      ['NaN', Number.NaN],
+      ['non-number', '5' as unknown as number],
+    ])('rejects %s create share max_access before sending a request', async (_label, maxAccess) => {
+      await expect(createShare({ path: '/docs/b.txt', max_access: maxAccess })).rejects.toMatchObject({
+        message: '访问次数必须是 0 或不超过安全范围的正整数',
+        status: 0,
+        code: 'INVALID_MAX_ACCESS',
+      })
+      expect(global.fetch).not.toHaveBeenCalled()
+    })
+
     it('rejects unreadable successful share responses', async () => {
       ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
         ok: true,
@@ -1158,6 +1203,21 @@ describe('Share API', () => {
         message: '服务器返回了无效的数据',
         status: 200,
       })
+    })
+
+    it.each([
+      ['negative', -1],
+      ['fractional', 1.5],
+      ['unsafe', 9007199254740992],
+      ['NaN', Number.NaN],
+      ['non-number', '5' as unknown as number],
+    ])('rejects %s update share max_access before sending a request', async (_label, maxAccess) => {
+      await expect(updateShare('share-1', { max_access: maxAccess })).rejects.toMatchObject({
+        message: '访问次数必须是 0 或不超过安全范围的正整数',
+        status: 0,
+        code: 'INVALID_MAX_ACCESS',
+      })
+      expect(global.fetch).not.toHaveBeenCalled()
     })
 
     it('throws ShareError when update share fails', async () => {

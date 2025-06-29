@@ -236,13 +236,23 @@ function isShareRisk(value: unknown): value is ShareRisk {
     && (risk.reasons === undefined || (Array.isArray(risk.reasons) && risk.reasons.every(isShareRiskReason)))
 }
 
+function isNonNegativeSafeInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
+}
+
+function validateShareMaxAccessRequest(maxAccess: unknown): void {
+  if (maxAccess !== undefined && !isNonNegativeSafeInteger(maxAccess)) {
+    throw new ShareError('访问次数必须是 0 或不超过安全范围的正整数', 0, 'INVALID_MAX_ACCESS')
+  }
+}
+
 function isSharePolicy(value: unknown): value is SharePolicy {
   if (!value || typeof value !== 'object') {
     return false
   }
   const policy = value as Partial<SharePolicy>
   return typeof policy.default_expires_in === 'string'
-    && typeof policy.default_max_access === 'number'
+    && isNonNegativeSafeInteger(policy.default_max_access)
     && (policy.policy_rules === undefined || (Array.isArray(policy.policy_rules) && policy.policy_rules.every(isSharePolicyRule)))
 }
 
@@ -254,7 +264,7 @@ function isSharePolicyRule(value: unknown): value is SharePolicyRule {
   return typeof rule.path === 'string'
     && (rule.require_password === undefined || typeof rule.require_password === 'boolean')
     && (rule.max_expires_in === undefined || typeof rule.max_expires_in === 'string')
-    && (rule.max_access === undefined || typeof rule.max_access === 'number')
+    && (rule.max_access === undefined || isNonNegativeSafeInteger(rule.max_access))
 }
 
 function isValidShare(value: unknown): value is Share {
@@ -272,11 +282,11 @@ function isValidShare(value: unknown): value is Share {
     typeof share.has_password === 'boolean' &&
     isPermission(share.permission) &&
     typeof share.enabled === 'boolean' &&
-    typeof share.access_count === 'number' &&
+    isNonNegativeSafeInteger(share.access_count) &&
     typeof share.url === 'string' &&
     (share.expires_at === undefined || share.expires_at === null || typeof share.expires_at === 'string') &&
     (share.last_access === undefined || share.last_access === null || typeof share.last_access === 'string') &&
-    (share.max_access === undefined || typeof share.max_access === 'number') &&
+    (share.max_access === undefined || isNonNegativeSafeInteger(share.max_access)) &&
     (share.description === undefined || typeof share.description === 'string') &&
     (share.risk === undefined || isShareRisk(share.risk))
   )
@@ -295,8 +305,8 @@ function isValidPublicShareInfo(value: unknown): value is PublicShareInfo {
     isPermission(share.permission) &&
     (share.description === undefined || typeof share.description === 'string') &&
     (share.file_name === undefined || typeof share.file_name === 'string') &&
-    (share.file_size === undefined || typeof share.file_size === 'number') &&
-    (share.folder_items === undefined || typeof share.folder_items === 'number')
+    (share.file_size === undefined || isNonNegativeSafeInteger(share.file_size)) &&
+    (share.folder_items === undefined || isNonNegativeSafeInteger(share.folder_items))
   )
 }
 
@@ -310,7 +320,7 @@ function isValidPublicShareItem(value: unknown): value is PublicShareItem {
     typeof item.name === 'string' &&
     typeof item.path === 'string' &&
     typeof item.is_dir === 'boolean' &&
-    typeof item.size === 'number' &&
+    isNonNegativeSafeInteger(item.size) &&
     typeof item.mod_time === 'string'
   )
 }
@@ -510,6 +520,8 @@ export async function getSharePolicy(options: ShareRequestOptions = {}): Promise
  * Create a new share
  */
 export async function createShare(req: CreateShareRequest, options: ShareRequestOptions = {}): Promise<ShareCreateResult> {
+  validateShareMaxAccessRequest(req.max_access)
+
   const response = await authFetch(`${API_BASE}/shares`, {
     ...options,
     method: 'POST',
@@ -552,6 +564,8 @@ export async function getShare(id: string, options: ShareRequestOptions = {}): P
  * Update share
  */
 export async function updateShare(id: string, req: UpdateShareRequest, options: ShareRequestOptions = {}): Promise<Share> {
+  validateShareMaxAccessRequest(req.max_access)
+
   const response = await authFetch(`${API_BASE}/shares/${id}`, {
     ...options,
     method: 'PUT',

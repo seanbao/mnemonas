@@ -389,6 +389,36 @@ describe('API: files', () => {
       expect(onProgress).toHaveBeenNthCalledWith(2, 100)
     })
 
+    it('normalizes unusual upload progress events before reporting them', async () => {
+      const onProgress = vi.fn()
+      MockXMLHttpRequest.queuedResults.push({
+        type: 'load',
+        status: 201,
+        statusText: 'Created',
+        responseText: JSON.stringify({
+          success: true,
+          data: {
+            path: '/docs/report.txt',
+          },
+        }),
+        progressEvents: [
+          { lengthComputable: true, loaded: 10, total: 0 },
+          { lengthComputable: true, loaded: Number.POSITIVE_INFINITY, total: 100 },
+          { lengthComputable: true, loaded: 50, total: Number.NaN },
+          { lengthComputable: true, loaded: -10, total: 100 },
+          { lengthComputable: true, loaded: 125, total: 100 },
+        ],
+      })
+
+      await expect(uploadFile('/docs', new File(['content'], 'report.txt'), onProgress)).resolves.toEqual({
+        warning: false,
+        message: undefined,
+      })
+      expect(onProgress).toHaveBeenNthCalledWith(1, 0)
+      expect(onProgress).toHaveBeenNthCalledWith(2, 100)
+      expect(onProgress).toHaveBeenCalledTimes(2)
+    })
+
     it('rejects without starting XHR when the upload signal is already aborted', async () => {
       const controller = new AbortController()
       controller.abort()
@@ -612,6 +642,22 @@ describe('API: files', () => {
 
       await expect(listFiles('/')).rejects.toThrow('服务器返回了无效的数据')
     })
+
+    it.each([
+      ['negative file size', { name: 'test.txt', path: '/test.txt', isDir: false, size: -1, modTime: '2024-01-01' }],
+      ['fractional file size', { name: 'test.txt', path: '/test.txt', isDir: false, size: 1.5, modTime: '2024-01-01' }],
+      ['unsafe file size', { name: 'test.txt', path: '/test.txt', isDir: false, size: 9007199254740992, modTime: '2024-01-01' }],
+    ])('rejects file list payloads with %s', async (_label, file) => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          success: true,
+          data: { files: [file], path: '/' },
+        }),
+      })
+
+      await expect(listFiles('/')).rejects.toThrow('服务器返回了无效的数据')
+    })
   })
 
   describe('getVersions', () => {
@@ -684,6 +730,28 @@ describe('API: files', () => {
           data: {
             path: '/test.txt',
             versions: { invalid: true },
+          },
+        }),
+      })
+
+      await expect(getVersions('/test.txt')).rejects.toThrow('服务器返回了无效的数据')
+    })
+
+    it.each([
+      ['zero version number', { version: 0, hash: 'abc123', size: 100, timestamp: '2024-01-01' }],
+      ['fractional version number', { version: 1.5, hash: 'abc123', size: 100, timestamp: '2024-01-01' }],
+      ['unsafe version number', { version: 9007199254740992, hash: 'abc123', size: 100, timestamp: '2024-01-01' }],
+      ['negative version size', { version: 1, hash: 'abc123', size: -1, timestamp: '2024-01-01' }],
+      ['fractional version size', { version: 1, hash: 'abc123', size: 1.5, timestamp: '2024-01-01' }],
+      ['unsafe version size', { version: 1, hash: 'abc123', size: 9007199254740992, timestamp: '2024-01-01' }],
+    ])('rejects version history payloads with %s', async (_label, version) => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          success: true,
+          data: {
+            path: '/test.txt',
+            versions: [version],
           },
         }),
       })
@@ -971,6 +1039,33 @@ describe('API: files', () => {
 
       await expect(getStorageStats()).rejects.toThrow('服务器返回了无效的数据')
     })
+
+    it.each([
+      ['negative total files', { total_files: -1 }],
+      ['fractional total chunks', { total_chunks: 1.5 }],
+      ['unsafe total size', { total_size: 9007199254740992 }],
+      ['negative unique size', { unique_size: -1 }],
+      ['non-finite dedup ratio', { dedup_ratio: Number.POSITIVE_INFINITY }],
+      ['negative disk total', { disk_total: -1 }],
+      ['fractional disk free bytes', { disk_free: 1.5 }],
+      ['unsafe disk available bytes', { disk_available: 9007199254740992 }],
+      ['negative disk used bytes', { disk_used: -1 }],
+      ['out-of-range disk usage ratio', { disk_usage_ratio: 1.5 }],
+      ['negative directory quota bytes', { directory_quotas: [{ path: '/team', quota_bytes: -1, used_bytes: 0, available_bytes: 0, usage_ratio: 0, exists: true, status: 'normal' }] }],
+      ['fractional directory used bytes', { directory_quotas: [{ path: '/team', quota_bytes: 1024, used_bytes: 1.5, available_bytes: 1024, usage_ratio: 0.5, exists: true, status: 'normal' }] }],
+      ['unsafe directory available bytes', { directory_quotas: [{ path: '/team', quota_bytes: 1024, used_bytes: 0, available_bytes: 9007199254740992, usage_ratio: 0.5, exists: true, status: 'normal' }] }],
+      ['negative directory usage ratio', { directory_quotas: [{ path: '/team', quota_bytes: 1024, used_bytes: 0, available_bytes: 1024, usage_ratio: -0.1, exists: true, status: 'normal' }] }],
+    ])('rejects storage stats payloads with %s', async (_label, data) => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          success: true,
+          data,
+        }),
+      })
+
+      await expect(getStorageStats()).rejects.toThrow('服务器返回了无效的数据')
+    })
   })
 
   describe('getHealth', () => {
@@ -1093,8 +1188,12 @@ describe('API: files', () => {
     it.each([
       ['invalid timestamp', { status: 'healthy', uptime: '1h30m', timestamp: 123 }],
       ['invalid uptime seconds', { status: 'healthy', uptime: '1h30m', uptime_secs: '5400' }],
+      ['negative uptime seconds', { status: 'healthy', uptime: '1h30m', uptime_secs: -1 }],
+      ['unsafe uptime seconds', { status: 'healthy', uptime: '1h30m', uptime_secs: 9007199254740992 }],
       ['invalid storage details', { status: 'healthy', uptime: '1h30m', storage: { dataDir: 42 } }],
       ['invalid dataplane details', { status: 'healthy', uptime: '1h30m', dataplane: { uptime: 'bad' } }],
+      ['fractional dataplane uptime', { status: 'healthy', uptime: '1h30m', dataplane: { uptime: 1.5 } }],
+      ['negative dataplane uptime', { status: 'healthy', uptime: '1h30m', dataplane: { uptime: -1 } }],
     ])('rejects health responses with %s', async (_label, body) => {
       mockFetch.mockResolvedValueOnce({
         ok: true,
@@ -1739,6 +1838,29 @@ describe('API: files', () => {
 
         await expect(listTrash()).rejects.toThrow('服务器返回了无效的数据')
       })
+
+      it.each([
+        ['negative item size', { items: [{ id: 'item1', originalPath: '/deleted.txt', deletedAt: '2024-01-01T00:00:00Z', name: 'deleted.txt', isDir: false, size: -1 }] }],
+        ['fractional item size', { items: [{ id: 'item1', originalPath: '/deleted.txt', deletedAt: '2024-01-01T00:00:00Z', name: 'deleted.txt', isDir: false, size: 1.5 }] }],
+        ['unsafe item size', { items: [{ id: 'item1', originalPath: '/deleted.txt', deletedAt: '2024-01-01T00:00:00Z', name: 'deleted.txt', isDir: false, size: 9007199254740992 }] }],
+        ['negative count', { items: [], count: -1 }],
+        ['fractional count', { items: [], count: 1.5 }],
+        ['count smaller than returned items', { items: [{ id: 'item1', originalPath: '/deleted.txt', deletedAt: '2024-01-01T00:00:00Z', name: 'deleted.txt', isDir: false, size: 1 }], count: 0 }],
+        ['unsafe total size', { items: [], totalSize: 9007199254740992 }],
+        ['negative retention days', { items: [], retentionDays: -1 }],
+        ['fractional retention max size', { items: [], retentionMaxSize: 1.5 }],
+      ])('rejects trash list payloads with %s', async (_label, data) => {
+        mockFetch.mockResolvedValueOnce({
+          ok: true,
+          json: () => Promise.resolve({
+            success: true,
+            data,
+            timestamp: '2024-01-01',
+          }),
+        })
+
+        await expect(listTrash()).rejects.toThrow('服务器返回了无效的数据')
+      })
     })
 
     describe('restoreFromTrash', () => {
@@ -2038,6 +2160,23 @@ describe('API: files', () => {
           json: () => Promise.resolve({
             success: true,
             data: { deleted_count: '2', partial: true },
+            timestamp: '2024-01-01',
+          }),
+        })
+
+        await expect(emptyTrash()).rejects.toThrow('服务器返回了无效的数据')
+      })
+
+      it.each([
+        ['negative deleted count', -1],
+        ['fractional deleted count', 1.5],
+        ['unsafe deleted count', 9007199254740992],
+      ])('rejects empty trash responses with %s', async (_label, deletedCount) => {
+        mockFetch.mockResolvedValueOnce({
+          ok: true,
+          json: () => Promise.resolve({
+            success: true,
+            data: { deleted_count: deletedCount, partial: false },
             timestamp: '2024-01-01',
           }),
         })
@@ -2639,6 +2778,38 @@ describe('API: files', () => {
 
       await expect(getDiskHealth()).rejects.toThrow('服务器返回了无效的数据')
     })
+
+    it.each([
+      ['non-finite temperature', { temperature_c: Number.NaN }],
+      ['negative power-on hours', { power_on_hours: -1 }],
+      ['fractional power-on hours', { power_on_hours: 1.5 }],
+      ['negative wear percentage', { wear_percent_used: -1 }],
+      ['out-of-range available spare', { available_spare_percent: 101 }],
+      ['unsafe media error count', { media_errors: 9007199254740992 }],
+      ['negative critical warning bitmask', { nvme_critical_warning: -1 }],
+      ['non-finite temperature warning', { temperature_warning_c: Number.POSITIVE_INFINITY }],
+    ])('rejects disk health devices with %s', async (_label, deviceOverride) => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          success: true,
+          data: {
+            enabled: true,
+            status: 'warning',
+            checked_at: '2026-05-13T08:30:00Z',
+            devices: [{
+              path: '/dev/disk/by-id/test',
+              present: true,
+              smart_available: true,
+              status: 'warning',
+              ...deviceOverride,
+            }],
+          },
+        }),
+      })
+
+      await expect(getDiskHealth()).rejects.toThrow('服务器返回了无效的数据')
+    })
   })
 
   describe('getDiagnostics', () => {
@@ -2920,14 +3091,32 @@ describe('API: files', () => {
 
     it.each([
       ['uptime counters', { uptime_secs: 'bad' }],
+      ['negative uptime counters', { uptime_secs: -1 }],
+      ['unsafe goroutine counters', { goroutines: 9007199254740992 }],
       ['system state', { system: { filesystem_initialized: 'yes' } }],
       ['memory stats', { memory: { alloc_mb: '50' } }],
+      ['non-finite memory stats', { memory: { alloc_mb: Number.POSITIVE_INFINITY } }],
       ['filesystem stats', { filesystem: { trash_items: '5' } }],
+      ['negative filesystem counters', { filesystem: { trash_items: -1 } }],
+      ['unsafe filesystem bytes', { filesystem: { disk_total: 9007199254740992 } }],
+      ['out-of-range filesystem ratio', { filesystem: { disk_usage_ratio: 1.5 } }],
       ['alert settings', { alerts: { enabled: 'yes' } }],
+      ['out-of-range alert threshold', { alerts: { threshold_pct: 101 } }],
+      ['negative alert free bytes', { alerts: { min_free_bytes: -1 } }],
+      ['non-finite alert usage percent', { alerts: { last_used_pct: Number.POSITIVE_INFINITY } }],
       ['maintenance settings', { maintenance: { scrub_schedule_enabled: 'yes' } }],
+      ['fractional maintenance counters', { maintenance: { scrub_max_retries: 1.5 } }],
+      ['negative maintenance counters', { maintenance: { scrub_failure_retries: -1 } }],
+      ['disk-health temperatures', { disk_health: { temperature_warning_c: Number.NaN } }],
+      ['out-of-range disk-health wear percent', { disk_health: { media_wear_warning_percent: 101 } }],
+      ['unsafe disk-health device count', { disk_health: { device_count: 9007199254740992 } }],
       ['SMB settings', { smb: { enabled: 'yes' } }],
+      ['negative SMB share count', { smb: { share_count: -1 } }],
       ['storage stats', { storage: { total_chunks: '100' } }],
+      ['unsafe storage bytes', { storage: { total_size: 9007199254740992 } }],
+      ['non-finite storage ratio', { storage: { dedup_ratio: Number.POSITIVE_INFINITY } }],
       ['dataplane status', { dataplane: { healthy: 'yes' } }],
+      ['negative dataplane uptime', { dataplane: { uptime_sec: -1 } }],
     ])('rejects diagnostics responses with invalid %s', async (_label, overrides) => {
       mockFetch.mockResolvedValueOnce({
         ok: true,
@@ -3045,6 +3234,10 @@ describe('API: files', () => {
       ['end time', { end_time: 123 }],
       ['status', { status: 'unknown' }],
       ['numeric counters', { total_objects: '100' }],
+      ['negative counters', { total_objects: -1 }],
+      ['fractional counters', { valid_objects: 1.5 }],
+      ['unsafe counters', { total_size: 9007199254740992 }],
+      ['non-finite counters', { duration_ms: Number.POSITIVE_INFINITY }],
       ['error message', { error_message: 404 }],
     ])('rejects scrub results with invalid %s', async (_label, overrides) => {
       mockFetch.mockResolvedValueOnce({
@@ -3327,6 +3520,30 @@ describe('API: files', () => {
         looks_like_storage_root: true,
         warnings: [],
       },
+      last_matching_restore_verify: {
+        id: '20260509T040005.000000000Z',
+        job_id: 'external-disk',
+        status: 'completed',
+        started_at: '2026-05-09T04:00:05Z',
+        finished_at: '2026-05-09T04:00:06Z',
+        duration_ms: 1000,
+        source: '/srv/mnemonas',
+        destination: '/mnt/backup-drive/mnemonas',
+        snapshot_path: '/mnt/backup-drive/mnemonas/external-disk/snapshots/20260509T020304.000000000Z',
+        manifest_path: '/mnt/backup-drive/mnemonas/external-disk/snapshots/20260509T020304.000000000Z/manifest.json',
+        target_path: '/restore/mnemonas',
+        file_count: 12,
+        verified_bytes: 4096,
+        config_path: '/restore/mnemonas/.mnemonas-restore/config.toml',
+        config_found: true,
+        files_dir_found: true,
+        internal_dir_found: true,
+        index_found: true,
+        objects_dir_found: true,
+        looks_like_storage_root: true,
+        warnings: [],
+      },
+      restore_report_findings: ['未发现阻塞项；仍需在切换前按恢复清单人工复核。'],
       restore_history: [{
         id: '20260509T040000.000000000Z',
         job_id: 'external-disk',
@@ -3387,6 +3604,8 @@ describe('API: files', () => {
       expect(jobs[0].restore_drill_history).toHaveLength(1)
       expect(jobs[0].last_restore?.target_path).toBe('/restore/mnemonas')
       expect(jobs[0].last_restore_verify?.looks_like_storage_root).toBe(true)
+      expect(jobs[0].last_matching_restore_verify?.id).toBe('20260509T040005.000000000Z')
+      expect(jobs[0].restore_report_findings).toEqual(['未发现阻塞项；仍需在切换前按恢复清单人工复核。'])
       expect(jobs[0].restore_history).toHaveLength(1)
       expect(jobs[0].last_retention_check?.snapshot_count).toBe(3)
       expectFetchCall(1, '/api/v1/maintenance/backups')
@@ -3667,6 +3886,38 @@ describe('API: files', () => {
       })
     })
 
+    it.each([
+      ['fractional duration', { duration_ms: 1.5 }],
+      ['negative file_count', { file_count: -1 }],
+      ['unsafe total_bytes', { total_bytes: 9007199254740992 }],
+    ])('rejects backup restore preview responses with %s', async (_name, override) => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          success: true,
+          data: {
+            id: '20260509T035900.000000000Z',
+            job_id: 'external-disk',
+            status: 'completed',
+            started_at: '2026-05-09T03:59:00Z',
+            finished_at: '2026-05-09T03:59:01Z',
+            duration_ms: 1000,
+            source: '/srv/mnemonas',
+            destination: '/mnt/backup-drive/mnemonas',
+            target_path: '/restore/mnemonas',
+            file_count: 12,
+            total_bytes: 4096,
+            config_available: true,
+            config_included: true,
+            ...override,
+          },
+          timestamp: '2026-05-09',
+        }),
+      })
+
+      await expect(previewBackupRestoreJob('external-disk', '/restore/mnemonas', true)).rejects.toThrow('服务器返回了无效的数据')
+    })
+
     it('previews a batch backup restore request', async () => {
       const batchPreview = {
         id: '20260509T035901.000000000Z',
@@ -3718,6 +3969,70 @@ describe('API: files', () => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ items }),
       })
+    })
+
+    it.each([
+      ['fractional item index', {
+        itemOverride: { index: 0.5 },
+        resultOverride: {},
+        previewOverride: {},
+      }],
+      ['negative total_files', {
+        itemOverride: {},
+        resultOverride: { total_files: -1 },
+        previewOverride: {},
+      }],
+      ['unsafe nested preview file_count', {
+        itemOverride: {},
+        resultOverride: {},
+        previewOverride: { file_count: 9007199254740992 },
+      }],
+    ])('rejects batch backup restore preview responses with %s', async (_name, overrides) => {
+      const preview = {
+        id: '20260509T035900.000000000Z',
+        job_id: 'external-disk',
+        status: 'completed',
+        started_at: '2026-05-09T03:59:00Z',
+        finished_at: '2026-05-09T03:59:01Z',
+        duration_ms: 1000,
+        source: '/srv/mnemonas',
+        destination: '/mnt/backup-drive/mnemonas',
+        target_path: '/restore/a',
+        file_count: 12,
+        total_bytes: 4096,
+        config_available: true,
+        config_included: true,
+        ...overrides.previewOverride,
+      }
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          success: true,
+          data: {
+            id: '20260509T035901.000000000Z',
+            status: 'completed',
+            started_at: '2026-05-09T03:59:01Z',
+            finished_at: '2026-05-09T03:59:02Z',
+            duration_ms: 1000,
+            items: [{
+              index: 0,
+              job_id: 'external-disk',
+              target_path: '/restore/a',
+              include_config: true,
+              status: 'completed',
+              preview,
+              ...overrides.itemOverride,
+            }],
+            total_files: 12,
+            total_bytes: 4096,
+            ...overrides.resultOverride,
+          },
+          timestamp: '2026-05-09',
+        }),
+      })
+
+      const items = [{ job_id: 'external-disk', target_path: '/restore/a', include_config: true }]
+      await expect(previewBatchBackupRestore(items)).rejects.toThrow('服务器返回了无效的数据')
     })
 
     it('restores a local backup job to a target path', async () => {
@@ -3833,6 +4148,80 @@ describe('API: files', () => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ items }),
       })
+    })
+
+    it.each([
+      ['fractional item index', {
+        itemOverride: { index: 0.5 },
+        resultOverride: {},
+        verifyOverride: {},
+      }],
+      ['unsafe total_files', {
+        itemOverride: {},
+        resultOverride: { total_files: 9007199254740992 },
+        verifyOverride: {},
+      }],
+      ['negative verified_bytes', {
+        itemOverride: {},
+        resultOverride: { verified_bytes: -1 },
+        verifyOverride: {},
+      }],
+      ['unsafe nested verify file_count', {
+        itemOverride: {},
+        resultOverride: {},
+        verifyOverride: { file_count: 9007199254740992 },
+      }],
+    ])('rejects batch backup restore responses with %s', async (_name, overrides) => {
+      const verify = {
+        id: '20260509T040005.000000000Z',
+        job_id: 'external-disk',
+        status: 'completed',
+        started_at: '2026-05-09T04:00:05Z',
+        finished_at: '2026-05-09T04:00:06Z',
+        duration_ms: 1000,
+        source: '/srv/mnemonas',
+        destination: '/mnt/backup-drive/mnemonas',
+        target_path: '/restore/a',
+        file_count: 12,
+        verified_bytes: 4096,
+        config_found: true,
+        files_dir_found: true,
+        internal_dir_found: true,
+        index_found: true,
+        objects_dir_found: true,
+        looks_like_storage_root: true,
+        ...overrides.verifyOverride,
+      }
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          success: true,
+          data: {
+            id: '20260509T040001.000000000Z',
+            status: 'completed',
+            started_at: '2026-05-09T04:00:01Z',
+            finished_at: '2026-05-09T04:00:02Z',
+            duration_ms: 1000,
+            items: [{
+              index: 0,
+              job_id: 'external-disk',
+              target_path: '/restore/a',
+              include_config: true,
+              status: 'completed',
+              verify,
+              warnings: [],
+              ...overrides.itemOverride,
+            }],
+            total_files: 12,
+            verified_bytes: 4096,
+            ...overrides.resultOverride,
+          },
+          timestamp: '2026-05-09',
+        }),
+      })
+
+      const items = [{ job_id: 'external-disk', target_path: '/restore/a', include_config: true }]
+      await expect(runBatchBackupRestore(items)).rejects.toThrow('服务器返回了无效的数据')
     })
 
     it('verifies a restored backup target', async () => {
@@ -3966,6 +4355,31 @@ describe('API: files', () => {
         json: () => Promise.resolve({
           success: true,
           data: [{ ...backupJob, running: 'no' }],
+        }),
+      })
+
+      await expect(listBackupJobs()).rejects.toThrow('服务器返回了无效的数据')
+    })
+
+    it.each([
+      ['max_snapshots', { ...backupJob, max_snapshots: 1.5 }],
+      ['last_run duration', { ...backupJob, last_run: { ...backupJob.last_run, duration_ms: -1 } }],
+      ['last_run file_count', { ...backupJob, last_run: { ...backupJob.last_run, file_count: 1.5 } }],
+      ['last_run total_bytes', { ...backupJob, last_run: { ...backupJob.last_run, total_bytes: 9007199254740992 } }],
+      ['last_run pruned_snapshots', { ...backupJob, last_run: { ...backupJob.last_run, pruned_snapshots: -1 } }],
+      ['restore drill stats total_runs', { ...backupJob, restore_drill_stats: { ...backupJob.restore_drill_stats, total_runs: 1.5 } }],
+      ['restore drill stats success_rate', { ...backupJob, restore_drill_stats: { ...backupJob.restore_drill_stats, success_rate: 1.1 } }],
+      ['restore drill verified_bytes', { ...backupJob, last_restore_drill: { ...backupJob.last_restore_drill, verified_bytes: 9007199254740992 } }],
+      ['restore file_count', { ...backupJob, last_restore: { ...backupJob.last_restore, file_count: -1 } }],
+      ['restore verify verified_bytes', { ...backupJob, last_restore_verify: { ...backupJob.last_restore_verify, verified_bytes: Number.NaN } }],
+      ['retention snapshot_count', { ...backupJob, last_retention_check: { ...backupJob.last_retention_check, snapshot_count: 9007199254740992 } }],
+    ])('rejects backup job responses with invalid %s', async (_name, job) => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          success: true,
+          data: [job],
+          timestamp: '2026-05-09',
         }),
       })
 

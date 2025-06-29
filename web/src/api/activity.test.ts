@@ -148,6 +148,25 @@ describe('Activity API', () => {
     await expect(listActivity()).rejects.toThrow('服务器返回了无效的数据')
   })
 
+  it.each([
+    ['unsafe total', { total: 9007199254740992, limit: 20, offset: 0 }],
+    ['unsafe limit', { total: 0, limit: 9007199254740992, offset: 0 }],
+    ['unsafe offset', { total: 0, limit: 20, offset: 9007199254740992 }],
+  ])('rejects activity list responses with %s', async (_label, pagination) => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        success: true,
+        data: {
+          items: [],
+          ...pagination,
+        },
+      }),
+    })
+
+    await expect(listActivity()).rejects.toThrow('服务器返回了无效的数据')
+  })
+
   it('rejects activity list responses with inconsistent pagination totals', async () => {
     mockAuthFetch.mockResolvedValueOnce({
       ok: true,
@@ -417,6 +436,25 @@ describe('Activity API', () => {
             max_10m: 1,
           },
         },
+      }),
+    })
+
+    await expect(getActivityStats()).rejects.toThrow('服务器返回了无效的数据')
+  })
+
+  it.each([
+    ['unsafe total', { total: 9007199254740992, today: 3, by_action: { login: 3 }, by_user: { admin: 8 } }],
+    ['unsafe today', { total: 12, today: 9007199254740992, by_action: { login: 3 }, by_user: { admin: 8 } }],
+    ['unsafe action count', { total: 12, today: 3, by_action: { login: 9007199254740992 }, by_user: { admin: 8 } }],
+    ['unsafe user count', { total: 12, today: 3, by_action: { login: 3 }, by_user: { admin: 9007199254740992 } }],
+    ['unsafe risk summary total', { total: 12, today: 3, by_action: { login: 3 }, by_user: { admin: 8 }, risk_summary: { total: 9007199254740992, today: 1, max_10m: 1 } }],
+    ['unsafe risk summary max window', { total: 12, today: 3, by_action: { login: 3 }, by_user: { admin: 8 }, risk_summary: { total: 1, today: 1, max_10m: 9007199254740992 } }],
+  ])('rejects activity stats responses with %s', async (_label, data) => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        success: true,
+        data,
       }),
     })
 

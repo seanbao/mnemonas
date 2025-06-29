@@ -60,6 +60,7 @@ type RestorePreviewMutationRequest = { jobId: string; targetPath: string; includ
 type RestoreMutationRequest = RestorePreviewMutationRequest
 type RestoreVerifyMutationRequest = { jobId: string; targetPath: string; signal: AbortSignal }
 type BatchRestoreMutationRequest = { items: BackupBatchRestoreItemRequest[]; signal: AbortSignal }
+type RestorePreviewRequestSnapshot = Omit<RestorePreviewMutationRequest, 'signal'>
 
 function createActionAbortController(ref: AbortControllerRef): AbortController {
   ref.current?.abort()
@@ -418,18 +419,26 @@ const backupDiagnosticMessagesByBackendMessage: Record<string, string> = {
   'all batch restore items failed': '所有批量恢复项目均失败',
 }
 
+function getBackupDiagnosticDisplayMessageForNormalized(normalized: string): string | null {
+  const batchTargetConflict = normalized.match(/^restore target already exists: restore target conflicts with batch item (\d+)$/)
+  if (batchTargetConflict) {
+    return `恢复目标与第 ${Number(batchTargetConflict[1]) + 1} 项重复或存在父子嵌套。`
+  }
+  return backupDiagnosticMessagesByBackendMessage[normalized] ?? null
+}
+
 function getBackupDiagnosticDisplayMessage(message: string): string {
   const normalized = normalizeDiagnosticMessageKey(message)
   const indexedItemFailure = normalized.match(/^item (\d+): (.+)$/)
   if (indexedItemFailure) {
     const itemNumber = Number(indexedItemFailure[1]) + 1
-    const itemMessage = backupDiagnosticMessagesByBackendMessage[indexedItemFailure[2]]
+    const itemMessage = getBackupDiagnosticDisplayMessageForNormalized(indexedItemFailure[2])
     if (itemMessage) {
       return `项目 ${itemNumber}: ${itemMessage}`
     }
   }
 
-  return backupDiagnosticMessagesByBackendMessage[normalized] ?? message
+  return getBackupDiagnosticDisplayMessageForNormalized(normalized) ?? message
 }
 
 function getBackupRetentionText(job: BackupJob): string {
@@ -557,6 +566,15 @@ function getBackupRestoreVerifyMetricText(result: BackupRestoreVerifyResult): st
     return '目标目录已检查'
   }
   return `检查 ${result.file_count} 个文件 · ${formatBytes(result.verified_bytes)}`
+}
+
+function getBackupSnapshotReferenceText(snapshotPath?: string): string {
+  if (!snapshotPath) {
+    return ''
+  }
+  const normalized = snapshotPath.replace(/\\/g, '/')
+  const name = normalized.split('/').filter(Boolean).pop()
+  return name ? `对照快照 ${name}` : '已记录对照快照'
 }
 
 function getRestoreTargetDescription(job: BackupJob | null): string {
@@ -742,6 +760,13 @@ function RestoreCutoverChecklist({
           title="只读校验"
           description={isVerifying ? '正在检查恢复目录。' : verifyResult ? getBackupRestoreVerifyMetricText(verifyResult) : '尚未完成恢复目录检查。'}
         />
+        {verifyResult?.snapshot_path && (
+          <RestoreCheckRow
+            tone="success"
+            title="对照快照"
+            description={getBackupSnapshotReferenceText(verifyResult.snapshot_path)}
+          />
+        )}
         <RestoreCheckRow
           tone={storageTone}
           title="存储结构"
@@ -940,12 +965,38 @@ function BackupDrillSummary({ job }: { job: BackupJob }) {
   )
 }
 
+function BackupRestoreReportFindings({ findings }: { findings?: string[] }) {
+  const visibleFindings = (findings ?? []).filter((finding) => finding.trim() !== '')
+  if (visibleFindings.length === 0) {
+    return null
+  }
+  const displayFindings = visibleFindings.map(getBackupDiagnosticDisplayMessage)
+  const hasBlockingFinding = visibleFindings.some((finding) => !finding.startsWith('未发现阻塞项'))
+  const suffix = visibleFindings.length > 1 ? ` 等 ${visibleFindings.length} 项` : ''
+  const fullSummary = displayFindings.join('\n')
+  return (
+    <div
+      aria-label={`摘要发现: ${displayFindings.join('；')}`}
+      className={hasBlockingFinding ? 'text-warning' : 'text-default-400'}
+      title={fullSummary}
+    >
+      摘要发现: {displayFindings[0]}{suffix}
+    </div>
+  )
+}
+
 function BackupRestoreSummary({ job }: { job: BackupJob }) {
   const result = job.last_restore
-  const verify = job.last_restore_verify
   if (!result) {
-    return <span className="text-default-400">尚未恢复</span>
+    return (
+      <div className="space-y-1 text-sm">
+        <span className="text-default-400">尚未恢复</span>
+        <BackupRestoreReportFindings findings={job.restore_report_findings} />
+      </div>
+    )
   }
+  const verify = job.last_matching_restore_verify ?? null
+  const needsMatchingVerify = result.status === 'completed' && !verify
   const restoreWarnings = result.warnings ?? []
   const verifyWarnings = verify?.warnings ?? []
 
@@ -969,6 +1020,15 @@ function BackupRestoreSummary({ job }: { job: BackupJob }) {
           最近检查: {getBackupRestoreVerifyMetricText(verify)}
         </div>
       )}
+      {verify?.snapshot_path && (
+        <div className="max-w-[18rem] truncate text-default-400" title={verify.snapshot_path}>
+          {getBackupSnapshotReferenceText(verify.snapshot_path)}
+        </div>
+      )}
+      {needsMatchingVerify && (
+        <div className="text-warning">最近恢复尚未完成匹配的只读校验</div>
+      )}
+      <BackupRestoreReportFindings findings={job.restore_report_findings} />
       {restoreWarnings.length > 0 && <div className="text-warning">{getBackupDiagnosticDisplayMessage(restoreWarnings[0])}</div>}
       {verifyWarnings.length > 0 && <div className="text-warning">{getBackupDiagnosticDisplayMessage(verifyWarnings[0])}</div>}
       {result.error_message && <div className="text-danger">{getBackupDiagnosticDisplayMessage(result.error_message)}</div>}
@@ -1016,21 +1076,169 @@ function normalizeRestoreTargetForCompare(value: string): string {
   return trimmed.replace(/\/+$/, '')
 }
 
+function isAbsoluteRestoreTargetPath(value: string): boolean {
+  const trimmed = value.trim()
+  return trimmed.startsWith('/') || /^[A-Za-z]:[\\/]/.test(trimmed) || trimmed.startsWith('\\\\')
+}
+
+function normalizeRestoreTargetSegments(pathBody: string, separatorPattern: RegExp): string[] {
+  const segments: string[] = []
+  for (const segment of pathBody.split(separatorPattern)) {
+    if (!segment || segment === '.') {
+      continue
+    }
+    if (segment === '..') {
+      segments.pop()
+      continue
+    }
+    segments.push(segment)
+  }
+  return segments
+}
+
+function getRestoreTargetSafetyPath(value: string): string | null {
+  const trimmed = value.trim()
+  const driveMatch = /^([A-Za-z]:)[\\/](.*)$/.exec(trimmed)
+  if (driveMatch) {
+    return `${driveMatch[1].toLowerCase()}/${normalizeRestoreTargetSegments(driveMatch[2], /[\\/]+/).join('/')}`
+  }
+  if (trimmed.startsWith('\\\\')) {
+    const parts = trimmed.slice(2).split(/[\\/]+/).filter(Boolean)
+    if (parts.length < 2) {
+      return '//'
+    }
+    return `//${parts.slice(0, 2).join('/').toLowerCase()}/${normalizeRestoreTargetSegments(parts.slice(2).join('\\'), /[\\/]+/).join('/')}`
+  }
+  if (trimmed.startsWith('/')) {
+    return `/${normalizeRestoreTargetSegments(trimmed.slice(1), /\/+/).join('/')}`
+  }
+  return null
+}
+
+function isRestoreTargetProtectedPath(value: string): boolean {
+  const safetyPath = getRestoreTargetSafetyPath(value)
+  if (!safetyPath) {
+    return false
+  }
+  const normalized = safetyPath.replace(/\/+$/, '') || '/'
+  if (normalized === '/' || /^[a-z]:$/.test(normalized) || /^\/\/[^/]+\/[^/]+$/.test(normalized)) {
+    return true
+  }
+  return new Set([
+    '/bin', '/boot', '/dev', '/etc', '/home', '/lib', '/lib64', '/media', '/mnt',
+    '/opt', '/proc', '/root', '/run', '/sbin', '/srv', '/sys', '/tmp', '/usr',
+    '/usr/local', '/usr/local/bin', '/usr/local/share', '/var',
+  ]).has(normalized)
+}
+
+function getRestoreTargetInputError(targetPath: string): string | null {
+  if ([...targetPath].some((char) => {
+    const code = char.charCodeAt(0)
+    return code < 0x20 || code === 0x7f
+  })) {
+    return '恢复目标不能包含控制字符。'
+  }
+  const trimmed = targetPath.trim()
+  if (trimmed === '') {
+    return null
+  }
+  if (!isAbsoluteRestoreTargetPath(trimmed)) {
+    return '恢复目标必须是服务器上的绝对路径，例如 /mnt/restore/mnemonas。'
+  }
+  if (isRestoreTargetProtectedPath(trimmed)) {
+    return '恢复目标不能是文件系统根目录或受保护系统目录。'
+  }
+  return null
+}
+
+function getBatchRestoreTargetInputError(items: BackupBatchRestoreItemRequest[]): string | null {
+  for (const [index, item] of items.entries()) {
+    const error = getRestoreTargetInputError(item.target_path)
+    if (error) {
+      return `第 ${index + 1} 项: ${error}`
+    }
+  }
+  return null
+}
+
+type RestoreTargetConflictKey = {
+  root: string
+  segments: string[]
+}
+
+function getRestoreTargetConflictKey(value: string): RestoreTargetConflictKey | null {
+  const trimmed = value.trim()
+  const driveMatch = /^([A-Za-z]:)[\\/](.*)$/.exec(trimmed)
+  if (driveMatch) {
+    return {
+      root: driveMatch[1].toLowerCase(),
+      segments: normalizeRestoreTargetSegments(driveMatch[2].toLowerCase(), /[\\/]+/),
+    }
+  }
+  if (trimmed.startsWith('\\\\')) {
+    const parts = trimmed.slice(2).split(/[\\/]+/).filter(Boolean)
+    if (parts.length < 2) {
+      return { root: `unc:${parts.join('/').toLowerCase()}`, segments: [] }
+    }
+    return {
+      root: `unc:${parts.slice(0, 2).join('/').toLowerCase()}`,
+      segments: normalizeRestoreTargetSegments(parts.slice(2).join('\\').toLowerCase(), /[\\/]+/),
+    }
+  }
+  if (trimmed.startsWith('/')) {
+    return {
+      root: '/',
+      segments: normalizeRestoreTargetSegments(trimmed.slice(1), /\/+/),
+    }
+  }
+  return null
+}
+
+function restoreTargetContainsOrEquals(parent: string, child: string): boolean {
+  const parentPath = getRestoreTargetConflictKey(parent)
+  const childPath = getRestoreTargetConflictKey(child)
+  if (!parentPath || !childPath || parentPath.root !== childPath.root) {
+    return false
+  }
+  if (parentPath.segments.length > childPath.segments.length) {
+    return false
+  }
+  return parentPath.segments.every((segment, index) => segment === childPath.segments[index])
+}
+
+function getBatchRestoreTargetConflict(items: BackupBatchRestoreItemRequest[]): string | null {
+  const seen: Array<{ index: number; path: string }> = []
+  for (const [index, item] of items.entries()) {
+    const targetPath = item.target_path.trim()
+    if (!getRestoreTargetConflictKey(targetPath)) {
+      continue
+    }
+    for (const existing of seen) {
+      if (restoreTargetContainsOrEquals(existing.path, targetPath) || restoreTargetContainsOrEquals(targetPath, existing.path)) {
+        return `第 ${existing.index + 1} 项和第 ${index + 1} 项的目标目录重复或存在父子嵌套，请改为互不包含的独立目录。`
+      }
+    }
+    seen.push({ index, path: targetPath })
+  }
+  return null
+}
+
 function effectiveRestoreIncludeConfig(job: BackupJob | null, includeConfig: boolean): boolean {
   return job?.type === 'local' && includeConfig
 }
 
 function isCurrentRestorePreview(
   preview: BackupRestorePreviewResult | null,
+  request: RestorePreviewRequestSnapshot | null,
   job: BackupJob | null,
   targetPath: string,
   includeConfig: boolean,
 ): boolean {
-  if (!preview || !job || preview.job_id !== job.id || preview.status !== 'completed') {
+  if (!preview || !request || !job || preview.job_id !== request.jobId || request.jobId !== job.id || preview.status !== 'completed') {
     return false
   }
-  return normalizeRestoreTargetForCompare(preview.target_path) === normalizeRestoreTargetForCompare(targetPath)
-    && preview.config_included === effectiveRestoreIncludeConfig(job, includeConfig)
+  return normalizeRestoreTargetForCompare(request.targetPath) === normalizeRestoreTargetForCompare(targetPath)
+    && request.includeConfig === effectiveRestoreIncludeConfig(job, includeConfig)
 }
 
 function getBatchRestorePreviewMetricText(result: BackupBatchRestorePreviewResult): string {
@@ -1085,16 +1293,17 @@ function hasFailedBatchRestorePreview(result: BackupBatchRestorePreviewResult | 
 
 function isCurrentBatchRestorePreview(
   preview: BackupBatchRestorePreviewResult | null,
+  requestItems: BackupBatchRestoreItemRequest[] | null,
   items: BackupBatchRestoreItemRequest[],
 ): boolean {
-  if (!preview || preview.status !== 'completed' || preview.items.length !== items.length || items.length === 0) {
+  if (!preview || !requestItems || preview.status !== 'completed' || preview.items.length !== requestItems.length || requestItems.length !== items.length || items.length === 0) {
     return false
   }
   return items.every((item, index) => {
-    const previewItem = preview.items[index]
-    return previewItem?.job_id === item.job_id
-      && previewItem.include_config === Boolean(item.include_config)
-      && normalizeRestoreTargetForCompare(previewItem.target_path) === normalizeRestoreTargetForCompare(item.target_path)
+    const requestItem = requestItems[index]
+    return requestItem?.job_id === item.job_id
+      && Boolean(requestItem.include_config) === Boolean(item.include_config)
+      && normalizeRestoreTargetForCompare(requestItem.target_path) === normalizeRestoreTargetForCompare(item.target_path)
   })
 }
 
@@ -1164,6 +1373,11 @@ function BatchRestoreResultSummary({ result }: { result: BackupBatchRestoreResul
                 只读校验: {getBackupRestoreVerifyMetricText(item.verify)}
               </div>
             )}
+            {item.verify?.snapshot_path && (
+              <div className="mt-1 truncate text-default-400" title={item.verify.snapshot_path}>
+                {getBackupSnapshotReferenceText(item.verify.snapshot_path)}
+              </div>
+            )}
             {item.warnings && item.warnings.length > 0 && <div className="mt-1 text-warning">{getBackupDiagnosticDisplayMessage(item.warnings[0])}</div>}
             {item.error_message && <div className="mt-1 text-danger">{getBackupDiagnosticDisplayMessage(item.error_message)}</div>}
           </div>
@@ -1194,6 +1408,7 @@ export default function Maintenance() {
   const [restoreTargetPath, setRestoreTargetPath] = useState('')
   const [restoreIncludeConfig, setRestoreIncludeConfig] = useState(false)
   const [restorePreview, setRestorePreview] = useState<BackupRestorePreviewResult | null>(null)
+  const [restorePreviewRequest, setRestorePreviewRequest] = useState<RestorePreviewRequestSnapshot | null>(null)
   const [restoreResult, setRestoreResult] = useState<BackupRestoreResult | null>(null)
   const [restoreVerifyResult, setRestoreVerifyResult] = useState<BackupRestoreVerifyResult | null>(null)
   const [isBatchRestoreOpen, setIsBatchRestoreOpen] = useState(false)
@@ -1201,6 +1416,7 @@ export default function Maintenance() {
   const [batchRestoreTargets, setBatchRestoreTargets] = useState<Record<string, string>>({})
   const [batchRestoreIncludeConfig, setBatchRestoreIncludeConfig] = useState<Record<string, boolean>>({})
   const [batchRestorePreview, setBatchRestorePreview] = useState<BackupBatchRestorePreviewResult | null>(null)
+  const [batchRestorePreviewItems, setBatchRestorePreviewItems] = useState<BackupBatchRestoreItemRequest[] | null>(null)
   const [batchRestoreResult, setBatchRestoreResult] = useState<BackupBatchRestoreResult | null>(null)
   const scrubResultQueryKey = ['scrub-result', user?.id ?? 'anonymous'] as const
   const backupJobsQueryKey = ['backup-jobs', user?.id ?? 'anonymous'] as const
@@ -1290,6 +1506,7 @@ export default function Maintenance() {
     setRestoreTargetPath('')
     setRestoreIncludeConfig(job.type === 'local' && Boolean(job.include_config))
     setRestorePreview(null)
+    setRestorePreviewRequest(null)
     setRestoreResult(null)
     setRestoreVerifyResult(null)
   }
@@ -1302,6 +1519,7 @@ export default function Maintenance() {
     setRestoreTargetPath('')
     setRestoreIncludeConfig(false)
     setRestorePreview(null)
+    setRestorePreviewRequest(null)
     setRestoreResult(null)
     setRestoreVerifyResult(null)
   }
@@ -1309,6 +1527,7 @@ export default function Maintenance() {
   const handleRestoreTargetPathChange = (value: string) => {
     setRestoreTargetPath(value)
     setRestorePreview(null)
+    setRestorePreviewRequest(null)
     setRestoreResult(null)
     setRestoreVerifyResult(null)
   }
@@ -1316,6 +1535,7 @@ export default function Maintenance() {
   const handleRestoreIncludeConfigChange = (value: boolean) => {
     setRestoreIncludeConfig(value)
     setRestorePreview(null)
+    setRestorePreviewRequest(null)
     setRestoreResult(null)
     setRestoreVerifyResult(null)
   }
@@ -1329,6 +1549,7 @@ export default function Maintenance() {
     setBatchRestoreTargets({})
     setBatchRestoreIncludeConfig(defaults)
     setBatchRestorePreview(null)
+    setBatchRestorePreviewItems(null)
     setBatchRestoreResult(null)
     setIsBatchRestoreOpen(true)
   }
@@ -1341,6 +1562,7 @@ export default function Maintenance() {
     setBatchRestoreSelectedJobIds([])
     setBatchRestoreTargets({})
     setBatchRestorePreview(null)
+    setBatchRestorePreviewItems(null)
     setBatchRestoreResult(null)
   }
 
@@ -1351,18 +1573,21 @@ export default function Maintenance() {
         : current.filter((currentJobId) => currentJobId !== jobId)
     ))
     setBatchRestorePreview(null)
+    setBatchRestorePreviewItems(null)
     setBatchRestoreResult(null)
   }
 
   const handleBatchRestoreTargetChange = (jobId: string, value: string) => {
     setBatchRestoreTargets((current) => ({ ...current, [jobId]: value }))
     setBatchRestorePreview(null)
+    setBatchRestorePreviewItems(null)
     setBatchRestoreResult(null)
   }
 
   const handleBatchRestoreIncludeConfigChange = (jobId: string, value: boolean) => {
     setBatchRestoreIncludeConfig((current) => ({ ...current, [jobId]: value }))
     setBatchRestorePreview(null)
+    setBatchRestorePreviewItems(null)
     setBatchRestoreResult(null)
   }
   
@@ -1536,6 +1761,11 @@ export default function Maintenance() {
         return
       }
       setRestorePreview(result)
+      setRestorePreviewRequest({
+        jobId: request.jobId,
+        targetPath: request.targetPath,
+        includeConfig: request.includeConfig,
+      })
       const hasFailedPreflight = result.preflight_checks?.some((check) => check.status === 'failed') ?? false
       const hasWarnings = hasFailedPreflight || (result.warnings?.length ?? 0) > 0
       addToast({
@@ -1551,6 +1781,7 @@ export default function Maintenance() {
         return
       }
       setRestorePreview(null)
+      setRestorePreviewRequest(null)
       const errorPresentation = getMaintenanceActionErrorPresentation(
         error,
         '生成恢复预览失败',
@@ -1607,6 +1838,15 @@ export default function Maintenance() {
   })
 
   const startRestoreVerify = (jobId: string, targetPath: string) => {
+    const targetInputError = getRestoreTargetInputError(targetPath)
+    if (targetInputError) {
+      addToast({
+        title: '恢复目标格式无效',
+        description: targetInputError,
+        color: 'danger',
+      })
+      return
+    }
     const controller = createActionAbortController(restoreVerifyAbortControllerRef)
     restoreVerifyMutation.mutate({ jobId, targetPath, signal: controller.signal })
   }
@@ -1620,7 +1860,7 @@ export default function Maintenance() {
       void queryClient.invalidateQueries({ queryKey: backupJobsQueryKey })
       setRestoreResult(result)
       setRestoreVerifyResult(null)
-      setRestoreTargetPath(result.target_path)
+      setRestoreTargetPath(request.targetPath)
       const restoreWarnings = result.warnings ?? []
       addToast({
         title: restoreWarnings.length > 0 ? '备份已恢复，有警告' : '备份已恢复',
@@ -1629,7 +1869,7 @@ export default function Maintenance() {
           : `${getBackupRestoreMetricText(result)}，目标: ${result.target_path}`,
         color: restoreWarnings.length > 0 ? 'warning' : 'success',
       })
-      startRestoreVerify(result.job_id, result.target_path)
+      startRestoreVerify(result.job_id, request.targetPath)
     },
     onError: (error: unknown, request) => {
       if (request.signal.aborted || isAbortError(error)) {
@@ -1659,6 +1899,7 @@ export default function Maintenance() {
         return
       }
       setBatchRestorePreview(result)
+      setBatchRestorePreviewItems(request.items.map((item) => ({ ...item })))
       setBatchRestoreResult(null)
       const hasFailedPreflight = hasFailedBatchRestorePreview(result)
       const hasWarnings = hasFailedPreflight || result.warning || (result.warnings?.length ?? 0) > 0
@@ -1675,6 +1916,7 @@ export default function Maintenance() {
         return
       }
       setBatchRestorePreview(null)
+      setBatchRestorePreviewItems(null)
       const errorPresentation = getMaintenanceActionErrorPresentation(
         error,
         '生成批量恢复预览失败',
@@ -1818,10 +2060,20 @@ export default function Maintenance() {
 
   const startRestorePreview = () => {
     if (!restoreJob) return
+    const targetPath = restoreTargetPath.trim()
+    const targetInputError = getRestoreTargetInputError(targetPath)
+    if (targetInputError) {
+      addToast({
+        title: '恢复目标格式无效',
+        description: targetInputError,
+        color: 'danger',
+      })
+      return
+    }
     const controller = createActionAbortController(restorePreviewAbortControllerRef)
     restorePreviewMutation.mutate({
       jobId: restoreJob.id,
-      targetPath: restoreTargetPath.trim(),
+      targetPath,
       includeConfig: restoreIncludeConfigForRequest,
       signal: controller.signal,
     })
@@ -1829,35 +2081,83 @@ export default function Maintenance() {
 
   const startRestore = () => {
     if (!restoreJob) return
+    const targetPath = restoreTargetPath.trim()
+    const targetInputError = getRestoreTargetInputError(targetPath)
+    if (targetInputError) {
+      addToast({
+        title: '恢复目标格式无效',
+        description: targetInputError,
+        color: 'danger',
+      })
+      return
+    }
     const controller = createActionAbortController(restoreAbortControllerRef)
     restoreMutation.mutate({
       jobId: restoreJob.id,
-      targetPath: restoreTargetPath.trim(),
+      targetPath,
       includeConfig: restoreIncludeConfigForRequest,
       signal: controller.signal,
     })
   }
 
   const startBatchRestorePreview = () => {
+    const targetInputError = getBatchRestoreTargetInputError(batchRestoreItems)
+    if (targetInputError) {
+      addToast({
+        title: '批量恢复目标格式无效',
+        description: targetInputError,
+        color: 'danger',
+      })
+      return
+    }
+    if (batchRestoreTargetConflict) {
+      addToast({
+        title: '批量恢复目标冲突',
+        description: batchRestoreTargetConflict,
+        color: 'danger',
+      })
+      return
+    }
     const controller = createActionAbortController(batchRestorePreviewAbortControllerRef)
     batchRestorePreviewMutation.mutate({ items: batchRestoreItems, signal: controller.signal })
   }
 
   const startBatchRestore = () => {
+    const targetInputError = getBatchRestoreTargetInputError(batchRestoreItems)
+    if (targetInputError) {
+      addToast({
+        title: '批量恢复目标格式无效',
+        description: targetInputError,
+        color: 'danger',
+      })
+      return
+    }
+    if (batchRestoreTargetConflict) {
+      addToast({
+        title: '批量恢复目标冲突',
+        description: batchRestoreTargetConflict,
+        color: 'danger',
+      })
+      return
+    }
     const controller = createActionAbortController(batchRestoreAbortControllerRef)
     batchRestoreMutation.mutate({ items: batchRestoreItems, signal: controller.signal })
   }
   
   const isRunning = scrubResult?.status === 'running' || isAwaitingRunningState
   const restoreIncludeConfigForRequest = effectiveRestoreIncludeConfig(restoreJob, restoreIncludeConfig)
-  const restorePreviewMatches = isCurrentRestorePreview(restorePreview, restoreJob, restoreTargetPath, restoreIncludeConfig)
+  const restoreTargetInputError = getRestoreTargetInputError(restoreTargetPath)
+  const restoreTargetReady = restoreTargetPath.trim() !== '' && !restoreTargetInputError
+  const restorePreviewMatches = isCurrentRestorePreview(restorePreview, restorePreviewRequest, restoreJob, restoreTargetPath, restoreIncludeConfig)
   const restorePreviewHasFailedPreflight = hasFailedRestorePreflight(restorePreview)
   const restoreActionPending = restoreMutation.isPending || restorePreviewMutation.isPending || restoreVerifyMutation.isPending
   const restorableBackupJobs = backupJobs.filter((job) => !job.disabled && canRunBackupRestore(job))
   const batchRestoreItems = buildBatchRestoreItems(backupJobs, batchRestoreSelectedJobIds, batchRestoreTargets, batchRestoreIncludeConfig)
   const batchRestoreWithinLimit = batchRestoreItems.length <= 20
-  const batchRestoreTargetsReady = batchRestoreItems.length > 0 && batchRestoreWithinLimit && batchRestoreItems.every((item) => item.target_path.length > 0)
-  const batchRestorePreviewMatches = isCurrentBatchRestorePreview(batchRestorePreview, batchRestoreItems)
+  const batchRestoreTargetInputError = getBatchRestoreTargetInputError(batchRestoreItems)
+  const batchRestoreTargetConflict = getBatchRestoreTargetConflict(batchRestoreItems)
+  const batchRestoreTargetsReady = batchRestoreItems.length > 0 && batchRestoreWithinLimit && !batchRestoreTargetInputError && !batchRestoreTargetConflict && batchRestoreItems.every((item) => item.target_path.length > 0)
+  const batchRestorePreviewMatches = isCurrentBatchRestorePreview(batchRestorePreview, batchRestorePreviewItems, batchRestoreItems)
   const batchRestorePreviewHasFailed = hasFailedBatchRestorePreview(batchRestorePreview)
   const batchRestoreActionPending = batchRestorePreviewMutation.isPending || batchRestoreMutation.isPending
   
@@ -2231,7 +2531,7 @@ export default function Maintenance() {
             <li>本地备份任务应写入 storage.root 之外的磁盘、挂载点或快照目标</li>
             <li>restic/rclone 任务会调用外部工具执行备份与校验</li>
             <li>本地恢复演练会复制最近快照并通过 manifest 校验</li>
-            <li>restic/rclone 恢复会先写入独立目录，并在安装前执行恢复校验</li>
+            <li>restic/rclone 恢复会先写入独立目录；rclone 会在安装前执行远端一致性校验，恢复成功后会执行只读校验</li>
             <li>批量恢复应先生成预览，确认每个目标目录互不重叠后再执行</li>
           </ul>
         </CardBody>
@@ -2276,6 +2576,8 @@ export default function Maintenance() {
                   onValueChange={handleRestoreTargetPathChange}
                   isDisabled={restoreActionPending}
                   description={getRestoreTargetDescription(restoreJob)}
+                  isInvalid={Boolean(restoreTargetInputError)}
+                  errorMessage={restoreTargetInputError ?? undefined}
                 />
                 {restoreJob?.type === 'local' && (
                   <Checkbox
@@ -2347,10 +2649,10 @@ export default function Maintenance() {
                   color="primary"
                   className="rounded-lg"
                   isLoading={restoreVerifyMutation.isPending}
-                  isDisabled={!restoreJob}
+                  isDisabled={!restoreJob || !restoreTargetReady}
                   onPress={() => {
                     if (!restoreJob || !restoreResult) return
-                    startRestoreVerify(restoreJob.id, restoreResult.target_path)
+                    startRestoreVerify(restoreJob.id, restoreTargetPath.trim())
                   }}
                 >
                   重新检查
@@ -2365,7 +2667,7 @@ export default function Maintenance() {
                   variant="bordered"
                   className="rounded-lg"
                   isLoading={restorePreviewMutation.isPending}
-                  isDisabled={!restoreJob || restoreTargetPath.trim() === '' || restoreMutation.isPending}
+                  isDisabled={!restoreJob || !restoreTargetReady || restoreMutation.isPending}
                   onPress={startRestorePreview}
                 >
                   生成预览
@@ -2374,7 +2676,7 @@ export default function Maintenance() {
                   color="warning"
                   className="rounded-lg"
                   isLoading={restoreMutation.isPending}
-                  isDisabled={!restoreJob || restoreTargetPath.trim() === '' || !restorePreviewMatches || restorePreviewHasFailedPreflight || restorePreviewMutation.isPending}
+                  isDisabled={!restoreJob || !restoreTargetReady || !restorePreviewMatches || restorePreviewHasFailedPreflight || restorePreviewMutation.isPending}
                   onPress={startRestore}
                 >
                   开始恢复
@@ -2424,6 +2726,7 @@ export default function Maintenance() {
                   <div className="space-y-3">
                     {restorableBackupJobs.map((job) => {
                       const selected = batchRestoreSelectedJobIds.includes(job.id)
+                      const targetInputError = selected ? getRestoreTargetInputError(batchRestoreTargets[job.id] ?? '') : null
                       return (
                         <div key={job.id} className={selected ? 'rounded-lg border border-primary/30 bg-primary/5 p-4' : 'rounded-lg border border-divider bg-content2/50 p-4'}>
                           <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(18rem,1.4fr)] lg:items-start">
@@ -2450,6 +2753,8 @@ export default function Maintenance() {
                                 onValueChange={(value) => handleBatchRestoreTargetChange(job.id, value)}
                                 isDisabled={!selected || batchRestoreActionPending}
                                 description={selected ? getRestoreTargetDescription(job) : '选择该任务后填写恢复目标目录。'}
+                                isInvalid={Boolean(targetInputError)}
+                                errorMessage={targetInputError ?? undefined}
                               />
                               {job.type === 'local' && (
                                 <Checkbox
@@ -2470,6 +2775,16 @@ export default function Maintenance() {
                 {!batchRestoreWithinLimit && (
                   <div className="rounded-lg border border-danger/20 bg-danger/10 p-3 text-sm text-danger">
                     一次最多恢复 20 项，请减少选择后重新生成预览。
+                  </div>
+                )}
+                {batchRestoreTargetConflict && (
+                  <div className="rounded-lg border border-danger/20 bg-danger/10 p-3 text-sm text-danger">
+                    {batchRestoreTargetConflict}
+                  </div>
+                )}
+                {batchRestoreTargetInputError && (
+                  <div className="rounded-lg border border-danger/20 bg-danger/10 p-3 text-sm text-danger">
+                    {batchRestoreTargetInputError}
                   </div>
                 )}
                 {batchRestorePreview && (

@@ -22,9 +22,9 @@ systemd 安装会把源码中的 `scripts/setup-reverse-proxy.sh` 安装为 `mne
 
 脚本会将域名统一为小写，并移除单个 FQDN 尾点；规范化后的值会用于 Caddy/Nginx 配置、证书申请、WebDAV 地址和验证命令。
 
-脚本要求 `--config` 使用绝对路径，且路径不能包含空白字符、控制字符、父目录段或符号链接组件，以保持与 `nasd` 配置文件安全检查一致。
+脚本要求 `--config` 使用绝对路径，且路径不能包含空白字符、控制字符、父目录段或符号链接组件，以保持与 `nasd` 配置文件安全检查一致。配置更新、后续 `mnemonas-doctor --public-domain` 诊断以及 WebDAV 地址解析都会使用同一个配置路径。
 
-脚本完成摘要会读取配置中的 `webdav.prefix` 并输出对应的公网 WebDAV 地址；未配置时使用默认 `/dav`。如果已把 WebDAV 前缀改为其他路径，验证命令中的 `/dav` 也应替换为实际前缀。
+脚本完成摘要会读取配置中的 `webdav.prefix` 并输出对应的公网 WebDAV 地址；未配置时使用默认 `/dav`。显式配置为空字符串、根路径，或覆盖 `/api`、`/s`、`/health` 保留路由的前缀会被视为无效，因为它会与 Web UI/API 路由重叠。该前缀会按服务端 URL 路径规则规范化，例如去除首尾空白、折叠重复斜杠、处理 `.` 和 `..` 段。如果已把 WebDAV 前缀改为其他路径，验证命令中的 `/dav` 也应替换为实际前缀。
 
 使用 `--skip-mnemonas-config` 或 `--no-firewall` 时，完成摘要会把对应项目标记为已跳过，并列出需要手动确认的配置。
 
@@ -117,8 +117,9 @@ sudo systemctl status caddy
 curl -I https://nas.example.com/health
 
 # 测试 WebDAV；auth_type=users 时使用 MnemoNAS 用户名和密码
+# auth_type=basic 时使用设置页显示的 WebDAV 凭据，自动生成密码为 /srv/mnemonas/secrets.json 中的 webdav_password 字段
 WEBDAV_USER="admin"
-WEBDAV_PASS="change-this-webdav-password"
+WEBDAV_PASS="<实际 WebDAV 密码>"
 curl -u "$WEBDAV_USER:$WEBDAV_PASS" -X PROPFIND https://nas.example.com/dav/ -H "Depth: 0"
 ```
 
@@ -398,7 +399,7 @@ journalctl -u certbot --since '24 hours ago'
 ls ~/.local/share/caddy/certificates/
 journalctl -u caddy --since '24 hours ago'
 
-# 统一复核证书 hostname、30 天有效期、续期提示和端口暴露
+# 统一复核证书 hostname、30 天有效期、续期提示、匿名 WebDAV PROPFIND 和端口暴露
 sudo mnemonas-doctor --public-domain nas.example.com
 ```
 
@@ -417,8 +418,9 @@ ss -tlnp | grep -E '80|443|8080'
 
 ```bash
 # 测试 PROPFIND；auth_type=users 时使用 MnemoNAS 用户名和密码
+# auth_type=basic 时使用设置页显示的 WebDAV 凭据，自动生成密码为 /srv/mnemonas/secrets.json 中的 webdav_password 字段
 WEBDAV_USER="admin"
-WEBDAV_PASS="change-this-webdav-password"
+WEBDAV_PASS="<实际 WebDAV 密码>"
 curl -u "$WEBDAV_USER:$WEBDAV_PASS" -X PROPFIND https://nas.example.com/dav/ \
   -H "Depth: 1" \
   -v

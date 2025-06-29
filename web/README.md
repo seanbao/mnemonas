@@ -60,12 +60,14 @@ npx playwright install
 
 # Playwright 会自动启动隔离的后端和 Vite 前端
 
-# 如需使用已有环境运行受保护页面测试，显式复用已有服务并提供管理员凭据
+# 复用已有环境运行受保护页面测试时，显式提供服务地址和管理员凭据
 export MNEMONAS_E2E_REUSE_EXISTING=1
 export MNEMONAS_E2E_BACKEND_URL=http://127.0.0.1:8080
 export MNEMONAS_E2E_FRONTEND_URL=http://127.0.0.1:5173
 export E2E_USERNAME=admin
-export E2E_PASSWORD='change-this-test-password'
+export E2E_PASSWORD_FILE="$HOME/.mnemonas/.mnemonas/initial-password.txt"
+# 已修改管理员密码且不使用密码文件时，可改用：
+# export E2E_PASSWORD="<admin-password>"
 
 # 运行所有 E2E 测试
 npm run test:e2e

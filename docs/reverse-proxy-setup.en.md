@@ -22,9 +22,9 @@ The systemd installer installs `scripts/setup-reverse-proxy.sh` as `mnemonas-pub
 
 The script lowercases the domain and removes a single FQDN trailing dot. The normalized value is used in the Caddy/Nginx configuration, certificate request, WebDAV URL, and verification commands.
 
-The helper requires `--config` to be an absolute path without whitespace, control characters, parent-directory segments, or symlink components, matching the `nasd` config-file safety checks.
+The helper requires `--config` to be an absolute path without whitespace, control characters, parent-directory segments, or symlink components, matching the `nasd` config-file safety checks. Configuration updates, the follow-up `mnemonas-doctor --public-domain` diagnostics, and WebDAV URL resolution use the same configuration path.
 
-The completion summary reads `webdav.prefix` from the configuration and prints the matching public WebDAV URL. If no prefix is configured, it uses the default `/dav`. When a deployment uses a custom WebDAV prefix, replace `/dav` in the verification commands with that prefix.
+The completion summary reads `webdav.prefix` from the configuration and prints the matching public WebDAV URL. If no prefix is configured, it uses the default `/dav`. An explicitly empty prefix, root prefix, or prefix under the reserved `/api`, `/s`, or `/health` route namespaces is invalid because it overlaps the Web UI/API routes. The prefix is normalized with the same URL-path rules as the server, including trimming surrounding whitespace, folding repeated slashes, and resolving `.` and `..` path segments. When a deployment uses a custom WebDAV prefix, replace `/dav` in the verification commands with that prefix.
 
 When `--skip-mnemonas-config` or `--no-firewall` is used, the completion summary marks the corresponding item as skipped and lists the manual settings to verify.
 
@@ -101,8 +101,8 @@ Verify:
 ```bash
 curl -I https://nas.example.com/health
 
-WEBDAV_USER="admin" # use a MnemoNAS username when auth_type=users
-WEBDAV_PASS="change-this-webdav-password"
+WEBDAV_USER="admin" # MnemoNAS username when auth_type=users
+WEBDAV_PASS="<actual WebDAV password>" # Basic Auth generated passwords use the webdav_password field in /srv/mnemonas/secrets.json
 curl -u "$WEBDAV_USER:$WEBDAV_PASS" -X PROPFIND https://nas.example.com/dav/ -H "Depth: 0"
 ```
 
@@ -314,7 +314,7 @@ bantime = 3600
 
 ## Troubleshooting
 
-Certificate checks:
+Certificate, anonymous WebDAV PROPFIND, and exposure checks:
 
 ```bash
 sudo certbot certificates
@@ -335,8 +335,8 @@ ss -tlnp | grep -E '80|443|8080'
 WebDAV:
 
 ```bash
-WEBDAV_USER="admin" # use a MnemoNAS username when auth_type=users
-WEBDAV_PASS="change-this-webdav-password"
+WEBDAV_USER="admin" # MnemoNAS username when auth_type=users
+WEBDAV_PASS="<actual WebDAV password>" # Basic Auth generated passwords use the webdav_password field in /srv/mnemonas/secrets.json
 curl -u "$WEBDAV_USER:$WEBDAV_PASS" -X PROPFIND https://nas.example.com/dav/ \
   -H "Depth: 1" \
   -v

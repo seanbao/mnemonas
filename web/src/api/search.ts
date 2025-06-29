@@ -70,12 +70,16 @@ interface SearchResultWire {
   hash?: string
 }
 
+function isNonNegativeSafeInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
+}
+
 function isSearchResultWire(value: unknown): value is SearchResultWire {
   return !!value
     && typeof value === 'object'
     && typeof (value as SearchResultWire).name === 'string'
     && typeof (value as SearchResultWire).path === 'string'
-    && typeof (value as SearchResultWire).size === 'number'
+    && isNonNegativeSafeInteger((value as SearchResultWire).size)
     && (typeof (value as SearchResultWire).isDir === 'boolean' || typeof (value as SearchResultWire).is_dir === 'boolean')
     && (typeof (value as SearchResultWire).modTime === 'string' || typeof (value as SearchResultWire).mod_time === 'string')
     && ((value as SearchResultWire).hash === undefined || typeof (value as SearchResultWire).hash === 'string')
@@ -85,9 +89,10 @@ function isSearchResponse(value: unknown): value is SearchResponse & { results: 
   return !!value &&
     typeof value === 'object' &&
     typeof (value as SearchResponse).query === 'string' &&
-    typeof (value as SearchResponse).count === 'number' &&
+    isNonNegativeSafeInteger((value as SearchResponse).count) &&
     Array.isArray((value as SearchResponse).results) &&
-    (value as SearchResponse & { results: unknown[] }).results.every((item) => isSearchResultWire(item))
+    (value as SearchResponse & { results: unknown[] }).results.every((item) => isSearchResultWire(item)) &&
+    (value as SearchResponse).count >= (value as SearchResponse & { results: unknown[] }).results.length
 }
 
 /**

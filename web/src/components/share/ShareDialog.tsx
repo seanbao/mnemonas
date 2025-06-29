@@ -135,6 +135,22 @@ function utf8ByteLength(value: string): number {
   return new TextEncoder().encode(value).length
 }
 
+function parseShareMaxAccessInput(value: string): { maxAccess?: number; error?: string } {
+  const trimmed = value.trim()
+  if (!trimmed) {
+    return {}
+  }
+  if (!/^\d+$/.test(trimmed)) {
+    return { error: '访问次数必须是 0 或正整数' }
+  }
+
+  const parsed = Number(trimmed)
+  if (!Number.isSafeInteger(parsed)) {
+    return { error: '访问次数过大' }
+  }
+  return { maxAccess: parsed }
+}
+
 function getShareDialogActionErrorToast(error: unknown): {
   title: string
   description?: string
@@ -237,6 +253,8 @@ export function ShareDialog({
     : passwordTooLong
       ? '分享密码最多 72 字节'
       : undefined
+  const parsedMaxAccess = useMemo(() => parseShareMaxAccessInput(maxAccess), [maxAccess])
+  const maxAccessInvalid = Boolean(parsedMaxAccess.error)
 
   const shareUrl = useMemo(() => {
     if (!createdShare) return ''
@@ -359,7 +377,9 @@ export function ShareDialog({
     if (expiresIn === '' && sharePolicy && isUnlimitedPolicyDuration(sharePolicy.default_expires_in)) {
       warnings.push('系统默认不设置过期时间。')
     }
-    if (maxAccess === '' && sharePolicy && sharePolicy.default_max_access === 0) {
+    if (maxAccess.trim() === '0') {
+      warnings.push('已选择不限制访问次数。')
+    } else if (maxAccess === '' && sharePolicy && sharePolicy.default_max_access === 0) {
       warnings.push('系统默认不限制访问次数。')
     }
     if (isFolder && getSharePathDepth(filePath) <= 1) {
@@ -403,6 +423,14 @@ export function ShareDialog({
       })
       return
     }
+    if (parsedMaxAccess.error) {
+      addToast({
+        title: '访问次数格式无效',
+        description: parsedMaxAccess.error,
+        color: 'warning',
+      })
+      return
+    }
 
     const sessionId = createSessionRef.current
     const requestPath = filePath
@@ -429,9 +457,8 @@ export function ShareDialog({
       if (expiresIn) {
         req.expires_in = expiresIn
       }
-      if (maxAccess) {
-        const num = parseInt(maxAccess)
-        if (num > 0) req.max_access = num
+      if (parsedMaxAccess.maxAccess !== undefined) {
+        req.max_access = parsedMaxAccess.maxAccess
       }
       if (description.trim()) {
         req.description = description.trim()
@@ -656,17 +683,20 @@ export function ShareDialog({
                   <span className="text-sm font-medium">访问次数限制</span>
                 </div>
                 <Input
-                  type="number"
+                  type="text"
                   placeholder="使用系统默认"
-                  min="1"
+                  inputMode="numeric"
+                  pattern="[0-9]*"
                   value={maxAccess}
                   onValueChange={setMaxAccess}
+                  isInvalid={maxAccessInvalid}
+                  errorMessage={parsedMaxAccess.error}
                   classNames={{
                     inputWrapper: "bg-content2 border-divider",
                   }}
                 />
                 <p className="text-xs text-default-500">
-                  系统默认：{effectivePolicyText.maxAccess}
+                  系统默认：{effectivePolicyText.maxAccess}；0 表示不限制
                 </p>
               </div>
 
@@ -713,7 +743,7 @@ export function ShareDialog({
               <Button 
                 color="primary" 
                 onPress={handleCreate}
-                isDisabled={passwordRequiredButEmpty || passwordTooLong}
+                isDisabled={passwordRequiredButEmpty || passwordTooLong || maxAccessInvalid}
                 isLoading={isLoading}
                 startContent={!isLoading && <Link2 size={16} />}
                 className="rounded-lg"
