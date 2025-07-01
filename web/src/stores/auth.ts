@@ -7,7 +7,7 @@ import {
   getCurrentUser,
   getStoredUser,
 } from '@/api/auth'
-import { acknowledgeSetup, getSetupStatus } from '@/api/setup'
+import { getSetupStatus } from '@/api/setup'
 import { queryClient } from '@/lib/queryClient'
 
 let authStateEpoch = 0
@@ -173,11 +173,8 @@ export const useAuthStore = create<AuthState>((set) => ({
               return
             }
             useAuthStore.getState().setShareEnabled(setupStatus.share_enabled ?? null)
-            if (setupStatus.is_first_run) {
-              await acknowledgeSetup({ signal: controller.signal })
-            }
           } catch {
-            // Ignore setup acknowledgement failures to avoid blocking login.
+            // Ignore setup status sync failures to avoid blocking login.
           } finally {
             if (postLoginSetupAbortController === controller) {
               postLoginSetupAbortController = null

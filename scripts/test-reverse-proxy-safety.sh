@@ -161,6 +161,11 @@ run_docker_proxy_docs_include_trusted_proxy_cidrs_test() {
     assert_file_contains "$REPO_ROOT/docs/docker-deployment.en.md" 'Docker bridge'
 }
 
+run_reverse_proxy_docs_include_dataplane_port_audit_test() {
+    assert_file_contains "$REPO_ROOT/docs/reverse-proxy-setup.md" "ss -tlnp | grep -E '80|443|8080|9090|9091'"
+    assert_file_contains "$REPO_ROOT/docs/reverse-proxy-setup.en.md" "ss -tlnp | grep -E '80|443|8080|9090|9091'"
+}
+
 run_webdav_docs_avoid_placeholder_password_test() {
     assert_file_not_contains "$REPO_ROOT/docs/reverse-proxy-setup.md" 'change-this-webdav-password'
     assert_file_not_contains "$REPO_ROOT/docs/reverse-proxy-setup.en.md" 'change-this-webdav-password'
@@ -181,6 +186,7 @@ run_config_rewrite_self_test
 run_release_layout_nasd_discovery_test
 run_nginx_webdav_docs_include_destination_header_test
 run_docker_proxy_docs_include_trusted_proxy_cidrs_test
+run_reverse_proxy_docs_include_dataplane_port_audit_test
 run_webdav_docs_avoid_placeholder_password_test
 
 printf '[reverse-proxy-test] all checks passed\n'

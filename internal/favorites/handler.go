@@ -227,10 +227,25 @@ func (h *Handler) RemoveFavorite(w http.ResponseWriter, r *http.Request) {
 	h.success(w, http.StatusOK, nil, "favorite removed successfully")
 }
 
+func favoriteCheckPathFromRequest(r *http.Request) (string, error) {
+	values, ok := r.URL.Query()["path"]
+	if !ok {
+		return "", nil
+	}
+	if len(values) != 1 {
+		return "", errors.New("ambiguous path parameter")
+	}
+	return values[0], nil
+}
+
 // CheckFavorite handles GET /api/v1/favorites/check?path=...
 func (h *Handler) CheckFavorite(w http.ResponseWriter, r *http.Request) {
 	userID := getUserID(r)
-	checkPath := r.URL.Query().Get("path")
+	checkPath, err := favoriteCheckPathFromRequest(r)
+	if err != nil {
+		h.error(w, http.StatusBadRequest, "invalid path", "INVALID_PATH")
+		return
+	}
 
 	if strings.TrimSpace(checkPath) == "" {
 		h.error(w, http.StatusBadRequest, "path query parameter is required", "MISSING_PATH")

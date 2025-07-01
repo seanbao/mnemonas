@@ -93,7 +93,7 @@ See [Linux/systemd deployment](docs/linux-systemd-deployment.en.md).
 
 ### Docker Compose
 
-Docker Engine and Compose v2 are required. Local source builds also require the Buildx plugin. Verify `docker compose version` first, and verify `docker buildx version` when building from source.
+Docker Engine and Compose v2 are required. Local source builds also require the Buildx plugin. Verify `docker compose version` first, and verify `docker buildx version` when building from source. On Ubuntu 24.04 systems where `docker` is available but `docker compose` is missing, the Ubuntu packages are usually `docker-compose-v2` and `docker-buildx`; Docker's official apt repository usually uses `docker-compose-plugin` and `docker-buildx-plugin`.
 
 ```bash
 git clone https://github.com/seanbao/mnemonas.git
@@ -113,7 +113,7 @@ If port 8080 is already used:
 ./scripts/docker-quickstart.sh --port 8888 --start
 ```
 
-On first startup, MnemoNAS creates persistent config in the data directory. The Web login initial password is stored at `<MNEMONAS_DATA_DIR>/.mnemonas/initial-password.txt`. Release image usage is documented in the [Docker deployment guide](docs/docker-deployment.en.md).
+On first startup, MnemoNAS creates persistent config in the data directory. The Web login initial password is stored at `<MNEMONAS_DATA_DIR>/.mnemonas/initial-password.txt`. After the first administrator login, the dashboard shows a first-deployment checklist and requires explicit confirmation of initial credential handling, administrator redundancy, backup planning, and public-entry safety before the prompt can be closed. Release image usage is documented in the [Docker deployment guide](docs/docker-deployment.en.md).
 
 ### Manual Binary Run
 

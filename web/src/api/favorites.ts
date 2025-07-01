@@ -91,7 +91,7 @@ interface FavoritesApiResponse<T> {
 function isValidFavorite(value: unknown): value is Favorite {
   return !!value &&
     typeof value === 'object' &&
-    typeof (value as Favorite).path === 'string' &&
+    isLogicalPathString((value as Favorite).path) &&
     typeof (value as Favorite).user_id === 'string' &&
     typeof (value as Favorite).created_at === 'string' &&
     ((value as Favorite).note === undefined || typeof (value as Favorite).note === 'string')
@@ -99,6 +99,18 @@ function isValidFavorite(value: unknown): value is Favorite {
 
 function isNonNegativeSafeInteger(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
+}
+
+function isLogicalPathString(value: unknown): value is string {
+  if (typeof value !== 'string' || value.length === 0) {
+    return false
+  }
+
+  try {
+    return normalizePath(value) === value
+  } catch {
+    return false
+  }
 }
 
 function isValidFavoritesResponse(value: unknown): value is FavoritesResponse {

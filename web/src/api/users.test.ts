@@ -97,6 +97,34 @@ describe('Users API', () => {
     expect(mockAuthFetch).toHaveBeenNthCalledWith(6, '/api/v1/admin/users/u1/status', expect.objectContaining({ method: 'PUT', signal }))
   })
 
+  it('encodes user IDs as path segments for user management write operations', async () => {
+    const userId = 'user?with space%'
+    const encodedUserId = 'user%3Fwith%20space%25'
+
+    mockAuthFetch
+      .mockResolvedValueOnce({
+        ok: true,
+        headers: { get: () => null },
+        json: () => Promise.resolve({ success: true, data: { user: { ...validUser, id: userId, email: 'ops@example.com' } } }),
+      })
+      .mockResolvedValueOnce({ ok: true, headers: { get: () => null }, json: () => Promise.resolve({ success: true, data: null }) })
+      .mockResolvedValueOnce({ ok: true, headers: { get: () => null }, json: () => Promise.resolve({ success: true, data: null }) })
+      .mockResolvedValueOnce({ ok: true, headers: { get: () => null }, json: () => Promise.resolve({ success: true, data: { revoked: true } }) })
+      .mockResolvedValueOnce({ ok: true, headers: { get: () => null }, json: () => Promise.resolve({ success: true, data: { disabled: true } }) })
+
+    await updateUser(userId, { email: 'ops@example.com' })
+    await deleteUser(userId)
+    await resetUserPassword(userId, { new_password: 'password123' })
+    await revokeUserSessions(userId)
+    await toggleUserStatus(userId, true)
+
+    expect(mockAuthFetch).toHaveBeenNthCalledWith(1, `/api/v1/admin/users/${encodedUserId}`, expect.objectContaining({ method: 'PUT' }))
+    expect(mockAuthFetch).toHaveBeenNthCalledWith(2, `/api/v1/admin/users/${encodedUserId}`, expect.objectContaining({ method: 'DELETE' }))
+    expect(mockAuthFetch).toHaveBeenNthCalledWith(3, `/api/v1/admin/users/${encodedUserId}/reset-password`, expect.objectContaining({ method: 'POST' }))
+    expect(mockAuthFetch).toHaveBeenNthCalledWith(4, `/api/v1/admin/users/${encodedUserId}/revoke-sessions`, expect.objectContaining({ method: 'POST' }))
+    expect(mockAuthFetch).toHaveBeenNthCalledWith(5, `/api/v1/admin/users/${encodedUserId}/status`, expect.objectContaining({ method: 'PUT' }))
+  })
+
   it('derives total users from the returned list when the summary field is missing', async () => {
     mockAuthFetch.mockResolvedValueOnce({
       ok: true,
@@ -190,6 +218,34 @@ describe('Users API', () => {
     })
   })
 
+  it('normalizes create-time home directories before sending requests', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      headers: { get: () => null },
+      json: () => Promise.resolve({
+        success: true,
+        data: {
+          user: { ...validUser, username: 'editor', role: 'user', home_dir: '/team/editor' },
+        },
+      }),
+    })
+
+    await createUser({
+      username: 'editor',
+      password: 'password123',
+      home_dir: ' team\\editor/ ',
+    })
+
+    expect(mockAuthFetch).toHaveBeenCalledWith('/api/v1/admin/users/', expect.objectContaining({
+      method: 'POST',
+      body: JSON.stringify({
+        username: 'editor',
+        password: 'password123',
+        home_dir: '/team/editor',
+      }),
+    }))
+  })
+
   it('unwraps wrapped update user responses', async () => {
     mockAuthFetch.mockResolvedValueOnce({
       ok: true,
@@ -214,6 +270,27 @@ describe('Users API', () => {
       user: { email: 'ops@example.com', quota_bytes: 1024, used_bytes: 512 },
       warning: false,
       message: 'user updated successfully',
+    })
+  })
+
+  it('normalizes update-time home directories before sending requests', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      headers: { get: () => null },
+      json: () => Promise.resolve({
+        success: true,
+        data: {
+          user: { ...validUser, username: 'editor', role: 'user', home_dir: '/team/editor' },
+        },
+      }),
+    })
+
+    await updateUser('u1', { home_dir: ' team\\editor/ ' })
+
+    expect(mockAuthFetch).toHaveBeenCalledWith('/api/v1/admin/users/u1', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ home_dir: '/team/editor' }),
     })
   })
 
@@ -260,9 +337,16 @@ describe('Users API', () => {
   })
 
   it.each([
+    ['blank id', { users: [{ ...validUser, id: '   ' }] }],
+    ['blank username', { users: [{ ...validUser, username: '   ' }] }],
+    ['trimmed username', { users: [{ ...validUser, username: ' admin ' }] }],
     ['negative quota bytes', { users: [{ ...validUser, quota_bytes: -1 }] }],
     ['fractional used bytes', { users: [{ ...validUser, used_bytes: 1.5 }] }],
     ['unsafe quota bytes', { users: [{ ...validUser, quota_bytes: 9007199254740992 }] }],
+    ['unsafe home directory', { users: [{ ...validUser, home_dir: '/users/./admin' }] }],
+    ['relative home directory', { users: [{ ...validUser, home_dir: 'users/admin' }] }],
+    ['trailing-slash home directory', { users: [{ ...validUser, home_dir: '/users/admin/' }] }],
+    ['trimmed home directory', { users: [{ ...validUser, home_dir: ' /users/admin ' }] }],
     ['unsafe total', { users: [validUser], total: 9007199254740992 }],
     ['negative total', { users: [validUser], total: -1 }],
     ['total smaller than returned users', { users: [validUser, { ...validUser, id: 'u2', username: 'guest', role: 'guest' as const }], total: 1 }],
@@ -316,10 +400,18 @@ describe('Users API', () => {
   })
 
   it.each([
+    ['create response with blank id', () => createUser({ username: 'admin', password: 'password123' }), { ...validUser, id: '' }],
+    ['create response with blank username', () => createUser({ username: 'admin', password: 'password123' }), { ...validUser, username: '   ' }],
     ['create response with fractional quota', () => createUser({ username: 'admin', password: 'password123' }), { ...validUser, quota_bytes: 1.5 }],
     ['create response with unsafe used bytes', () => createUser({ username: 'admin', password: 'password123' }), { ...validUser, used_bytes: 9007199254740992 }],
+    ['create response with unsafe home directory', () => createUser({ username: 'admin', password: 'password123' }), { ...validUser, home_dir: '/users/./admin' }],
+    ['create response with relative home directory', () => createUser({ username: 'admin', password: 'password123' }), { ...validUser, home_dir: 'users/admin' }],
+    ['create response with trailing-slash home directory', () => createUser({ username: 'admin', password: 'password123' }), { ...validUser, home_dir: '/users/admin/' }],
+    ['update response with trimmed username', () => updateUser('u1', { quota_bytes: 0 }), { ...validUser, username: ' admin ' }],
     ['update response with negative quota', () => updateUser('u1', { quota_bytes: 0 }), { ...validUser, quota_bytes: -1 }],
     ['update response with fractional used bytes', () => updateUser('u1', { quota_bytes: 0 }), { ...validUser, used_bytes: 1.5 }],
+    ['update response with unsafe home directory', () => updateUser('u1', { quota_bytes: 0 }), { ...validUser, home_dir: '/users/../admin' }],
+    ['update response with trimmed home directory', () => updateUser('u1', { quota_bytes: 0 }), { ...validUser, home_dir: ' /users/admin ' }],
   ])('rejects %s', async (_label, action, user) => {
     mockAuthFetch.mockResolvedValueOnce({
       ok: true,
@@ -339,10 +431,12 @@ describe('Users API', () => {
     ['fractional create quota', () => createUser({ username: 'admin', password: 'password123', quota_bytes: 1.5 }), 'INVALID_QUOTA'],
     ['unsafe create quota', () => createUser({ username: 'admin', password: 'password123', quota_bytes: 9007199254740992 }), 'INVALID_QUOTA'],
     ['non-number create quota', () => createUser({ username: 'admin', password: 'password123', quota_bytes: '1GiB' as unknown as number }), 'INVALID_QUOTA'],
+    ['invalid create home directory', () => createUser({ username: 'admin', password: 'password123', home_dir: '/users/./admin' }), 'INVALID_HOME_DIR'],
     ['negative update quota', () => updateUser('u1', { quota_bytes: -1 }), 'INVALID_QUOTA'],
     ['fractional update quota', () => updateUser('u1', { quota_bytes: 1.5 }), 'INVALID_QUOTA'],
     ['unsafe update quota', () => updateUser('u1', { quota_bytes: 9007199254740992 }), 'INVALID_QUOTA'],
     ['non-number update quota', () => updateUser('u1', { quota_bytes: '1GiB' as unknown as number }), 'INVALID_QUOTA'],
+    ['invalid update home directory', () => updateUser('u1', { home_dir: '/users/../admin' }), 'INVALID_HOME_DIR'],
   ])('rejects %s before calling the users API', async (_label, action, code) => {
     await expect(action()).rejects.toMatchObject({
       status: 0,

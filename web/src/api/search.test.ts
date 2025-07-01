@@ -231,6 +231,26 @@ describe('Search API', () => {
   })
 
   it.each([
+    ['unsafe', '/docs/./report.pdf'],
+    ['relative', 'docs/report.pdf'],
+    ['trailing-slash', '/docs/report.pdf/'],
+  ])('rejects successful search responses with %s result paths', async (_label, path) => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        success: true,
+        data: {
+          query: 'report',
+          count: 1,
+          results: [{ name: 'report.pdf', path, isDir: false, size: 100, modTime: '2026-03-14T00:00:00Z' }],
+        },
+      }),
+    })
+
+    await expect(searchFiles('report')).rejects.toThrow('服务器返回了无效的数据')
+  })
+
+  it.each([
     ['negative count', { count: -1, results: [] }],
     ['fractional count', { count: 1.5, results: [] }],
     ['unsafe count', { count: 9007199254740992, results: [] }],

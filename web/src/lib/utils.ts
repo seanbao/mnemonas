@@ -43,6 +43,17 @@ export function sanitizeFilename(filename: string): string {
   return sanitized
 }
 
+function sanitizeFilenameOrDefault(filename: string, fallback = 'download'): string {
+  try {
+    return sanitizeFilename(filename)
+  } catch {
+    if (filename === fallback) {
+      return 'download'
+    }
+    return sanitizeFilenameOrDefault(fallback)
+  }
+}
+
 function splitContentDispositionParts(header: string): string[] {
   const parts: string[] = []
   let current = ''
@@ -118,7 +129,7 @@ function decodeExtendedFilename(value: string): string {
 
 export function getFilenameFromContentDisposition(contentDisposition: string | null, fallback: string): string {
   if (!contentDisposition) {
-    return fallback
+    return sanitizeFilenameOrDefault(fallback)
   }
 
   const params = new Map<string, string>()
@@ -136,7 +147,7 @@ export function getFilenameFromContentDisposition(contentDisposition: string | n
   if (extendedFilename) {
     const decoded = decodeExtendedFilename(extendedFilename)
     if (decoded) {
-      return decoded
+      return sanitizeFilenameOrDefault(decoded, fallback)
     }
   }
 
@@ -144,11 +155,11 @@ export function getFilenameFromContentDisposition(contentDisposition: string | n
   if (filename) {
     const unquoted = unquoteContentDispositionValue(filename)
     if (unquoted) {
-      return unquoted
+      return sanitizeFilenameOrDefault(unquoted, fallback)
     }
   }
 
-  return fallback
+  return sanitizeFilenameOrDefault(fallback)
 }
 
 export function ensureZipExtension(filename: string): string {

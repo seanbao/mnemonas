@@ -178,6 +178,7 @@ export interface DiagnosticsInfo {
     cooldownPeriod?: string
     webhookConfigured?: boolean
     telegramConfigured?: boolean
+    wecomConfigured?: boolean
     emailConfigured?: boolean
     webhookMethod?: string
     lastLevel?: string
@@ -521,13 +522,13 @@ function isPositiveSafeInteger(value: unknown): value is number {
 }
 
 function isPathActionShape(value: unknown): value is { path: string } {
-  return isRecord(value) && typeof value.path === 'string'
+  return isRecord(value) && isLogicalPathString(value.path)
 }
 
 function isFileItemShape(value: unknown): value is FileItem {
   return isRecord(value)
     && typeof value.name === 'string'
-    && typeof value.path === 'string'
+    && isLogicalPathString(value.path)
     && typeof value.isDir === 'boolean'
     && isNonNegativeSafeInteger(value.size)
     && typeof value.modTime === 'string'
@@ -544,7 +545,7 @@ function isFileCapabilitiesShape(value: unknown): value is NonNullable<FileItem[
 
 function isFileListResponseShape(value: unknown): value is FileListResponse {
   return isRecord(value)
-    && typeof value.path === 'string'
+    && isLogicalPathString(value.path)
     && Array.isArray(value.files)
     && value.files.every(isFileItemShape)
     && (value.capabilities === undefined || isFileCapabilitiesShape(value.capabilities))
@@ -560,7 +561,7 @@ function isVersionInfoShape(value: unknown): value is VersionInfo {
 
 function isVersionsResponseShape(value: unknown): value is { path: string, versions: VersionInfo[] } {
   return isRecord(value)
-    && typeof value.path === 'string'
+    && isLogicalPathString(value.path)
     && Array.isArray(value.versions)
     && value.versions.every(isVersionInfoShape)
 }
@@ -663,7 +664,7 @@ function isDirectoryQuotaUsageShape(value: unknown): value is {
   status: DirectoryQuotaUsageStatus
 } {
   return isRecord(value)
-    && typeof value.path === 'string'
+    && isLogicalPathString(value.path)
     && isNonNegativeSafeInteger(value.quota_bytes)
     && isNonNegativeSafeInteger(value.used_bytes)
     && isNonNegativeSafeInteger(value.available_bytes)
@@ -680,11 +681,11 @@ function isDirectoryQuotaUsageStatus(value: unknown): value is DirectoryQuotaUsa
 }
 
 function isMoveCopyActionShape(value: unknown): value is { from: string; to: string } {
-  return isRecord(value) && typeof value.from === 'string' && typeof value.to === 'string'
+  return isRecord(value) && isLogicalPathString(value.from) && isLogicalPathString(value.to)
 }
 
 function isRestoreVersionActionShape(value: unknown): value is { path: string; restored: string } {
-  return isRecord(value) && typeof value.path === 'string' && typeof value.restored === 'string'
+  return isRecord(value) && isLogicalPathString(value.path) && typeof value.restored === 'string'
 }
 
 function isRestoreTrashActionShape(value: unknown): value is { id: string; restored: boolean } {
@@ -872,6 +873,66 @@ function isStringOrUndefined(value: unknown): value is string | undefined {
   return value === undefined || typeof value === 'string'
 }
 
+function isLogicalPathString(value: unknown): value is string {
+  if (typeof value !== 'string' || value.length === 0) {
+    return false
+  }
+
+  try {
+    return normalizePath(value) === value
+  } catch {
+    return false
+  }
+}
+
+function hasInvalidHostPathControlCharacter(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index)
+    if (code < 0x20 || code === 0x7f) {
+      return true
+    }
+  }
+  return false
+}
+
+function normalizeHostAbsolutePath(value: string): string {
+  if (hasInvalidHostPathControlCharacter(value) || value.includes('\\')) {
+    throw new Error('非法路径')
+  }
+
+  const trimmed = value.trim()
+  if (!trimmed.startsWith('/')) {
+    throw new Error('非法路径')
+  }
+
+  const segments = trimmed.split('/').filter(Boolean)
+  if (segments.length === 0 || segments.some((segment) => segment === '.' || segment === '..')) {
+    throw new Error('非法路径')
+  }
+
+  return `/${segments.join('/')}`
+}
+
+function isCanonicalHostAbsolutePath(value: unknown): value is string {
+  if (typeof value !== 'string' || value.length === 0) {
+    return false
+  }
+
+  try {
+    return normalizeHostAbsolutePath(value) === value
+  } catch {
+    return false
+  }
+}
+
+function normalizeBackupBatchRestoreItems(items: BackupBatchRestoreItemRequest[]): BackupBatchRestoreItemRequest[] {
+  return items.map((item) => ({
+    ...item,
+    job_id: item.job_id.trim(),
+    target_path: normalizeHostAbsolutePath(item.target_path),
+  }))
+}
+
 function isDiagnosticsShape(value: unknown): value is {
   timestamp: string
   uptime: string
@@ -920,6 +981,7 @@ function isDiagnosticsShape(value: unknown): value is {
     cooldown_period?: string
     webhook_configured?: boolean
     telegram_configured?: boolean
+    wecom_configured?: boolean
     email_configured?: boolean
     webhook_method?: string
     last_level?: string
@@ -1044,6 +1106,7 @@ function isDiagnosticsShape(value: unknown): value is {
       || !isStringOrUndefined(value.alerts.cooldown_period)
       || !isBooleanOrUndefined(value.alerts.webhook_configured)
       || !isBooleanOrUndefined(value.alerts.telegram_configured)
+      || !isBooleanOrUndefined(value.alerts.wecom_configured)
       || !isBooleanOrUndefined(value.alerts.email_configured)
       || !isStringOrUndefined(value.alerts.webhook_method)
       || !isStringOrUndefined(value.alerts.last_level)
@@ -1500,7 +1563,7 @@ function isBackupRestoreDrillResultShape(value: unknown): value is BackupRestore
     && isNonNegativeSafeInteger(value.duration_ms)
     && isStringOrUndefined(value.snapshot_path)
     && isStringOrUndefined(value.manifest_path)
-    && isStringOrUndefined(value.restored_path)
+    && (value.restored_path === undefined || isCanonicalHostAbsolutePath(value.restored_path))
     && typeof value.artifact_kept === 'boolean'
     && isNonNegativeSafeInteger(value.file_count)
     && isNonNegativeSafeInteger(value.verified_bytes)
@@ -1532,9 +1595,9 @@ function isBackupRestoreResultShape(value: unknown): value is BackupRestoreResul
     && isNonNegativeSafeInteger(value.duration_ms)
     && isStringOrUndefined(value.snapshot_path)
     && isStringOrUndefined(value.manifest_path)
-    && typeof value.target_path === 'string'
+    && isCanonicalHostAbsolutePath(value.target_path)
     && typeof value.config_restored === 'boolean'
-    && isStringOrUndefined(value.config_path)
+    && (value.config_path === undefined || isCanonicalHostAbsolutePath(value.config_path))
     && isNonNegativeSafeInteger(value.file_count)
     && isNonNegativeSafeInteger(value.verified_bytes)
     && isBackupRestorePreflightChecksOrUndefined(value.preflight_checks)
@@ -1556,7 +1619,7 @@ function isBackupRestorePreviewResultShape(value: unknown): value is BackupResto
     && typeof value.destination === 'string'
     && isStringOrUndefined(value.snapshot_path)
     && isStringOrUndefined(value.manifest_path)
-    && typeof value.target_path === 'string'
+    && isCanonicalHostAbsolutePath(value.target_path)
     && isNonNegativeSafeInteger(value.file_count)
     && isNonNegativeSafeInteger(value.total_bytes)
     && typeof value.config_available === 'boolean'
@@ -1581,10 +1644,10 @@ function isBackupRestoreVerifyResultShape(value: unknown): value is BackupRestor
     && typeof value.destination === 'string'
     && isStringOrUndefined(value.snapshot_path)
     && isStringOrUndefined(value.manifest_path)
-    && typeof value.target_path === 'string'
+    && isCanonicalHostAbsolutePath(value.target_path)
     && isNonNegativeSafeInteger(value.file_count)
     && isNonNegativeSafeInteger(value.verified_bytes)
-    && isStringOrUndefined(value.config_path)
+    && (value.config_path === undefined || isCanonicalHostAbsolutePath(value.config_path))
     && typeof value.config_found === 'boolean'
     && typeof value.files_dir_found === 'boolean'
     && typeof value.internal_dir_found === 'boolean'
@@ -1619,7 +1682,7 @@ function isBackupBatchRestorePreviewItemResultShape(value: unknown): value is Ba
   return isRecord(value)
     && isNonNegativeSafeInteger(value.index)
     && typeof value.job_id === 'string'
-    && typeof value.target_path === 'string'
+    && isCanonicalHostAbsolutePath(value.target_path)
     && typeof value.include_config === 'boolean'
     && isBackupStatus(value.status)
     && (value.preview === undefined || isBackupRestorePreviewResultShape(value.preview))
@@ -1646,7 +1709,7 @@ function isBackupBatchRestoreItemResultShape(value: unknown): value is BackupBat
   return isRecord(value)
     && isNonNegativeSafeInteger(value.index)
     && typeof value.job_id === 'string'
-    && typeof value.target_path === 'string'
+    && isCanonicalHostAbsolutePath(value.target_path)
     && typeof value.include_config === 'boolean'
     && isBackupStatus(value.status)
     && (value.restore === undefined || isBackupRestoreResultShape(value.restore))
@@ -1968,6 +2031,7 @@ export async function getDiagnostics(options: RequestOptions = {}): Promise<Diag
       cooldownPeriod: data.alerts.cooldown_period,
       webhookConfigured: data.alerts.webhook_configured,
       telegramConfigured: data.alerts.telegram_configured,
+      wecomConfigured: data.alerts.wecom_configured,
       emailConfigured: data.alerts.email_configured,
       webhookMethod: data.alerts.webhook_method,
       lastLevel: data.alerts.last_level,
@@ -2236,7 +2300,9 @@ export function getThumbnailUrl(path?: string, size: ThumbnailSize = 'medium'): 
   if (!path) return ''
   const normalizedPath = normalizePath(path)
   const encodedPath = encodePathForUrl(normalizedPath)
-  return `${API_BASE}/thumbnails${encodedPath}?size=${size}`
+  const params = new URLSearchParams()
+  params.set('size', size)
+  return `${API_BASE}/thumbnails${encodedPath}?${params.toString()}`
 }
 
 // Rename/Move file
@@ -2281,7 +2347,8 @@ export async function copyFile(fromPath: string, toPath: string, options: Reques
 export async function restoreVersion(path: string, hash: string, options: RequestOptions = {}): Promise<ActionResult> {
   const normalizedPath = normalizePath(path)
   const encodedPath = encodeURIComponent(normalizedPath)
-  const response = await authFetch(`${API_BASE}/versions/${hash}/restore?path=${encodedPath}`, {
+  const encodedHash = encodeURIComponent(hash)
+  const response = await authFetch(`${API_BASE}/versions/${encodedHash}/restore?path=${encodedPath}`, {
     ...options,
     method: 'POST',
   })
@@ -2317,6 +2384,10 @@ export interface TrashListResponse {
   retentionMaxSize?: number
 }
 
+function trashItemUrl(id: string): string {
+  return `${API_BASE}/trash/${encodeURIComponent(id)}`
+}
+
 // List trash items
 export async function listTrash(options: RequestOptions = {}): Promise<TrashListResponse> {
   const response = await authFetch(`${API_BASE}/trash/`, options)
@@ -2348,9 +2419,10 @@ export async function listTrash(options: RequestOptions = {}): Promise<TrashList
 
 // Restore item from trash
 export async function restoreFromTrash(id: string, newPath?: string, options: RequestOptions = {}): Promise<ActionResult> {
+  const baseURL = `${trashItemUrl(id)}/restore`
   const url = newPath 
-    ? `${API_BASE}/trash/${id}/restore?path=${encodeURIComponent(newPath)}`
-    : `${API_BASE}/trash/${id}/restore`
+    ? `${baseURL}?path=${encodeURIComponent(newPath)}`
+    : baseURL
   
   const response = await authFetch(url, {
     ...options,
@@ -2361,7 +2433,7 @@ export async function restoreFromTrash(id: string, newPath?: string, options: Re
 
 // Permanently delete item from trash
 export async function deleteFromTrash(id: string, options: RequestOptions = {}): Promise<ActionResult> {
-  const response = await authFetch(`${API_BASE}/trash/${id}`, {
+  const response = await authFetch(trashItemUrl(id), {
     ...options,
     method: 'DELETE',
   })
@@ -2526,10 +2598,11 @@ export async function checkBackupRetentionJob(id: string, options: RequestOption
 
 // Preview a supported backup restore without writing target data
 export async function previewBackupRestoreJob(id: string, targetPath: string, includeConfig = false, options: RequestOptions = {}): Promise<BackupRestorePreviewResult> {
+  const normalizedTargetPath = normalizeHostAbsolutePath(targetPath)
   const response = await authFetch(`${API_BASE}/maintenance/backups/${encodeURIComponent(id)}/restore-preview`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ target_path: targetPath, include_config: includeConfig }),
+    body: JSON.stringify({ target_path: normalizedTargetPath, include_config: includeConfig }),
     signal: options.signal,
   })
   const data = await handleWrappedResponse<unknown>(response, '生成恢复预览失败')
@@ -2541,10 +2614,11 @@ export async function previewBackupRestoreJob(id: string, targetPath: string, in
 
 // Preview multiple backup restores without writing target data
 export async function previewBatchBackupRestore(items: BackupBatchRestoreItemRequest[], options: RequestOptions = {}): Promise<BackupBatchRestorePreviewResult> {
+  const normalizedItems = normalizeBackupBatchRestoreItems(items)
   const response = await authFetch(`${API_BASE}/maintenance/backups/batch-restore-preview`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ items }),
+    body: JSON.stringify({ items: normalizedItems }),
     signal: options.signal,
   })
   const data = await handleWrappedResponse<unknown>(response, '生成批量恢复预览失败')
@@ -2556,10 +2630,11 @@ export async function previewBatchBackupRestore(items: BackupBatchRestoreItemReq
 
 // Restore a supported backup job to a safe target directory
 export async function restoreBackupJob(id: string, targetPath: string, includeConfig = false, options: RequestOptions = {}): Promise<BackupRestoreResult> {
+  const normalizedTargetPath = normalizeHostAbsolutePath(targetPath)
   const response = await authFetch(`${API_BASE}/maintenance/backups/${encodeURIComponent(id)}/restore`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ target_path: targetPath, include_config: includeConfig }),
+    body: JSON.stringify({ target_path: normalizedTargetPath, include_config: includeConfig }),
     signal: options.signal,
   })
   const data = await handleWrappedResponse<unknown>(response, '恢复备份失败')
@@ -2571,10 +2646,11 @@ export async function restoreBackupJob(id: string, targetPath: string, includeCo
 
 // Restore multiple backup jobs sequentially to safe target directories
 export async function runBatchBackupRestore(items: BackupBatchRestoreItemRequest[], options: RequestOptions = {}): Promise<BackupBatchRestoreResult> {
+  const normalizedItems = normalizeBackupBatchRestoreItems(items)
   const response = await authFetch(`${API_BASE}/maintenance/backups/batch-restore`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ items }),
+    body: JSON.stringify({ items: normalizedItems }),
     signal: options.signal,
   })
   const data = await handleWrappedResponse<unknown>(response, '执行批量恢复失败')
@@ -2586,10 +2662,11 @@ export async function runBatchBackupRestore(items: BackupBatchRestoreItemRequest
 
 // Verify a restored backup target without modifying it
 export async function verifyBackupRestoreJob(id: string, targetPath: string, options: RequestOptions = {}): Promise<BackupRestoreVerifyResult> {
+  const normalizedTargetPath = normalizeHostAbsolutePath(targetPath)
   const response = await authFetch(`${API_BASE}/maintenance/backups/${encodeURIComponent(id)}/restore-verify`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ target_path: targetPath }),
+    body: JSON.stringify({ target_path: normalizedTargetPath }),
     signal: options.signal,
   })
   const data = await handleWrappedResponse<unknown>(response, '校验恢复目录失败')

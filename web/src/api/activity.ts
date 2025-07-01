@@ -3,6 +3,7 @@
 import { authFetch } from './auth'
 import { INVALID_API_RESPONSE_MESSAGE } from '@/lib/apiMessages'
 import { readStructuredJsonErrorDetails } from '@/lib/jsonErrorResponse'
+import { normalizePath } from '@/lib/utils'
 
 const API_BASE = '/api/v1'
 
@@ -120,17 +121,49 @@ export const ACTIVITY_ACTION_GROUPS = [
 export type ActivityActionGroup = typeof ACTIVITY_ACTION_GROUPS[number]
 
 const activityActionSet = new Set<string>(ACTIVITY_ACTIONS)
+const activityDetailPathKeys = new Set([
+  'path',
+  'from',
+  'to',
+  'source_path',
+  'target_path',
+  'destination_path',
+  'original_path',
+  'restore_path',
+  'quota_path',
+])
 
 function isActionType(value: unknown): value is ActionType {
   return typeof value === 'string' && activityActionSet.has(value)
 }
 
-function isStringRecord(value: unknown): value is Record<string, string> {
-  return isRecord(value) && Object.values(value).every((entry) => typeof entry === 'string')
-}
-
 function isNonNegativeInteger(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
+}
+
+function isLogicalPathString(value: unknown): value is string {
+  if (typeof value !== 'string' || value.length === 0) {
+    return false
+  }
+
+  try {
+    return normalizePath(value) === value
+  } catch {
+    return false
+  }
+}
+
+function isActivityDetailPathKey(key: string): boolean {
+  return activityDetailPathKeys.has(key.trim().toLowerCase())
+}
+
+function isValidActivityDetails(value: unknown): value is Record<string, string> {
+  return isRecord(value) && Object.entries(value).every(([key, entry]) => {
+    if (typeof entry !== 'string') {
+      return false
+    }
+    return !isActivityDetailPathKey(key) || entry === '' || isLogicalPathString(entry)
+  })
 }
 
 function isNonNegativeIntegerRecord(value: unknown): value is Record<string, number> {
@@ -183,10 +216,10 @@ function isValidActivityEntry(value: unknown): value is ActivityEntry {
     && value.id === value.id.trim()
     && parseRFC3339Timestamp(value.timestamp) !== null
     && isActionType(value.action)
-    && (value.path === undefined || typeof value.path === 'string')
+    && (value.path === undefined || isLogicalPathString(value.path))
     && (value.user === undefined || typeof value.user === 'string')
     && (value.ip === undefined || typeof value.ip === 'string')
-    && (value.details === undefined || isStringRecord(value.details))
+    && (value.details === undefined || isValidActivityDetails(value.details))
 }
 
 function isValidActivityListPagination(items: ActivityEntry[], total: number, limit: number, offset: number): boolean {
@@ -275,7 +308,7 @@ function appendActivityFilterParams(params: URLSearchParams, options?: ActivityF
   if (options?.action) params.set('action', options.action)
   if (options?.actionGroup) params.set('action_group', options.actionGroup)
   if (options?.user) params.set('user', options.user)
-  if (options?.path) params.set('path', options.path)
+  if (options?.path) params.set('path', normalizePath(options.path))
   if (options?.since) params.set('since', options.since)
   if (options?.until) params.set('until', options.until)
 }

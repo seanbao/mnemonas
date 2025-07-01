@@ -618,6 +618,82 @@ describe('ShareAccessPage', () => {
     }))
   })
 
+  it('does not duplicate zip extensions for shared folder archive filenames', async () => {
+    const user = userEvent.setup()
+    mockGetPublicShare.mockResolvedValue({
+      id: 'abc123',
+      type: 'folder',
+      has_password: false,
+      permission: 'read',
+      file_name: 'backups.zip',
+      folder_items: 0,
+    })
+    mockGetPublicShareItems.mockResolvedValue({
+      path: '',
+      items: [],
+    })
+    mockDownloadShare.mockResolvedValue(undefined)
+
+    renderWithRouter('abc123')
+
+    await waitFor(() => {
+      expect(screen.getByText('backups.zip')).toBeInTheDocument()
+    })
+
+    await user.click(screen.getByRole('button', { name: '下载为 ZIP' }))
+
+    expect(mockDownloadShare).toHaveBeenCalledWith('abc123', expect.objectContaining({
+      archive: 'zip',
+      filename: 'backups.zip',
+      signal: expect.any(AbortSignal),
+    }))
+  })
+
+  it('downloads the current shared subfolder as a zip archive', async () => {
+    const user = userEvent.setup()
+    mockGetPublicShare.mockResolvedValue({
+      id: 'abc123',
+      type: 'folder',
+      has_password: false,
+      permission: 'read',
+      file_name: 'team-share',
+      folder_items: 1,
+    })
+    mockGetPublicShareItems
+      .mockResolvedValueOnce({
+        path: '',
+        items: [
+          { name: 'docs', path: 'docs', is_dir: true, size: 0, mod_time: '2024-01-01T00:00:00Z' },
+        ],
+      })
+      .mockResolvedValueOnce({
+        path: 'docs',
+        items: [],
+      })
+    mockDownloadShare.mockResolvedValue(undefined)
+
+    renderWithRouter('abc123')
+
+    await waitFor(() => {
+      expect(screen.getByText('docs')).toBeInTheDocument()
+    })
+
+    await user.click(screen.getByRole('button', { name: /docs/ }))
+
+    await waitFor(() => {
+      expect(screen.getByText('/docs')).toBeInTheDocument()
+    })
+
+    await user.click(screen.getByRole('button', { name: '下载为 ZIP' }))
+
+    expect(mockDownloadShare).toHaveBeenCalledWith('abc123', expect.objectContaining({
+      filePath: 'docs',
+      archive: 'zip',
+      filename: 'docs.zip',
+      signal: expect.any(AbortSignal),
+    }))
+  })
+
   it('downloads a folder item from a shared folder as a zip archive', async () => {
     const user = userEvent.setup()
     mockGetPublicShare.mockResolvedValue({

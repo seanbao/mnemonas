@@ -36,6 +36,8 @@ type Config struct {
 	TelegramEnabled  bool          `toml:"telegram_enabled"`   // Send Telegram notifications
 	TelegramBotToken string        `toml:"telegram_bot_token"` // Telegram bot token
 	TelegramChatID   string        `toml:"telegram_chat_id"`   // Telegram chat ID or @channel
+	WeComEnabled     bool          `toml:"wecom_enabled"`      // Send WeCom group robot notifications
+	WeComWebhookURL  string        `toml:"wecom_webhook_url"`  // WeCom group robot webhook URL
 	EmailEnabled     bool          `toml:"email_enabled"`      // Send email notifications
 	SMTPHost         string        `toml:"smtp_host"`          // SMTP host without port
 	SMTPPort         int           `toml:"smtp_port"`          // SMTP port
@@ -301,6 +303,9 @@ func (m *Monitor) SendEvent(ctx context.Context, event EventPayload) error {
 	if cfg.TelegramEnabled {
 		sendErr = errors.Join(sendErr, m.sendEventTelegram(ctx, event, cfg))
 	}
+	if cfg.WeComEnabled {
+		sendErr = errors.Join(sendErr, m.sendEventWeCom(ctx, event, cfg))
+	}
 	if cfg.EmailEnabled {
 		sendErr = errors.Join(sendErr, m.sendEventEmail(ctx, event, cfg))
 	}
@@ -445,6 +450,11 @@ func (m *Monitor) sendAlert(ctx context.Context, stats *StorageStats, cfg Config
 			sendErr = errors.Join(sendErr, err)
 		}
 	}
+	if cfg.WeComEnabled {
+		if err := m.sendStorageWeCom(ctx, stats, cfg, message, hostname); err != nil {
+			sendErr = errors.Join(sendErr, err)
+		}
+	}
 
 	return sendErr
 }
@@ -544,7 +554,10 @@ func (m *Monitor) sendWebhookRequest(ctx context.Context, payload any, cfg Confi
 }
 
 func hasNotificationChannel(cfg Config) bool {
-	return strings.TrimSpace(cfg.WebhookURL) != "" || cfg.EmailEnabled || cfg.TelegramEnabled
+	return strings.TrimSpace(cfg.WebhookURL) != "" ||
+		cfg.EmailEnabled ||
+		cfg.TelegramEnabled ||
+		(cfg.WeComEnabled && strings.TrimSpace(cfg.WeComWebhookURL) != "")
 }
 
 type telegramMessagePayload struct {
@@ -655,6 +668,131 @@ func truncateTelegramText(text string) string {
 		return text
 	}
 	return string(runes[:maxTelegramMessageRunes-1]) + "…"
+}
+
+type weComTextPayload struct {
+	MsgType string `json:"msgtype"`
+	Text    struct {
+		Content string `json:"content"`
+	} `json:"text"`
+}
+
+type weComAPIResponse struct {
+	ErrCode int `json:"errcode"`
+}
+
+func (m *Monitor) sendStorageWeCom(ctx context.Context, stats *StorageStats, cfg Config, message, hostname string) error {
+	if stats == nil {
+		return nil
+	}
+	lines := []string{
+		"[MnemoNAS] storage " + string(stats.Level),
+		message,
+		"",
+		"Host: " + hostname,
+		"Path: " + stats.Path,
+		"Used: " + formatBytes(stats.UsedBytes) + " (" + strconv.FormatFloat(stats.UsedPct, 'f', 1, 64) + "%)",
+		"Free: " + formatBytes(stats.FreeBytes),
+		"Checked at: " + stats.CheckedAt.UTC().Format(time.RFC3339),
+	}
+	return m.sendWeCom(ctx, cfg, strings.Join(lines, "\n"))
+}
+
+func (m *Monitor) sendEventWeCom(ctx context.Context, event EventPayload, cfg Config) error {
+	lines := []string{
+		"[MnemoNAS] " + event.Type + " " + string(event.Level),
+		event.Message,
+		"",
+		"Host: " + event.Hostname,
+		"Timestamp: " + event.Timestamp.UTC().Format(time.RFC3339),
+	}
+	if len(event.Details) > 0 {
+		details, err := json.MarshalIndent(event.Details, "", "  ")
+		if err != nil {
+			return fmt.Errorf("marshal event details for wecom: %w", err)
+		}
+		lines = append(lines, "", "Details:", string(details))
+	}
+	return m.sendWeCom(ctx, cfg, strings.Join(lines, "\n"))
+}
+
+func (m *Monitor) sendWeCom(ctx context.Context, cfg Config, text string) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+	if !cfg.WeComEnabled {
+		return nil
+	}
+	webhookURL := strings.TrimSpace(cfg.WeComWebhookURL)
+	if webhookURL == "" {
+		return errors.New("wecom alert missing webhook URL")
+	}
+
+	payload := weComTextPayload{MsgType: "text"}
+	payload.Text.Content = truncateWeComText(text)
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("marshal wecom payload: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, webhookURL, bytes.NewReader(data))
+	if err != nil {
+		return sanitizedWeComWebhookRequestError("create request", webhookURL, err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", "MnemoNAS-Alert/1.0")
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return sanitizedWeComWebhookRequestError("send request", webhookURL, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("wecom webhook request to %s returned status %d", redactWebhookURLForLog(webhookURL), resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return fmt.Errorf("read wecom webhook response from %s: %w", redactWebhookURLForLog(webhookURL), err)
+	}
+	if len(strings.TrimSpace(string(body))) > 0 {
+		var result weComAPIResponse
+		if err := json.Unmarshal(body, &result); err != nil {
+			return fmt.Errorf("decode wecom webhook response from %s: invalid response", redactWebhookURLForLog(webhookURL))
+		}
+		if result.ErrCode != 0 {
+			return fmt.Errorf("wecom webhook request to %s returned errcode %d", redactWebhookURLForLog(webhookURL), result.ErrCode)
+		}
+	}
+
+	m.logger.Info().
+		Str("url", redactWebhookURLForLog(webhookURL)).
+		Msg("WeCom alert sent successfully")
+	return nil
+}
+
+func truncateWeComText(text string) string {
+	const maxWeComMessageRunes = 2048
+	runes := []rune(text)
+	if len(runes) <= maxWeComMessageRunes {
+		return text
+	}
+	return string(runes[:maxWeComMessageRunes-1]) + "…"
+}
+
+func sanitizedWeComWebhookRequestError(action, rawURL string, err error) error {
+	target := redactWebhookURLForLog(rawURL)
+	if err == nil {
+		return fmt.Errorf("wecom webhook %s failed for %s", action, target)
+	}
+	if detail := sanitizedWebhookErrorDetail(err); detail != "" {
+		return fmt.Errorf("wecom webhook %s failed for %s: %s", action, target, detail)
+	}
+	return fmt.Errorf("wecom webhook %s failed for %s", action, target)
 }
 
 func (m *Monitor) sendStorageEmail(ctx context.Context, stats *StorageStats, cfg Config, message, hostname string) error {
