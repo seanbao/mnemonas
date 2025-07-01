@@ -156,6 +156,10 @@ function isUserRole(role: unknown): role is User['role'] {
   return role === 'admin' || role === 'user' || role === 'guest'
 }
 
+function isCanonicalNonEmptyString(value: unknown): value is string {
+  return typeof value === 'string' && value.trim() === value && value.length > 0
+}
+
 function parseAuthSessionData(data: LoginResponse | RefreshResponse | undefined): AuthSessionData {
   if (!data || data.user == null) {
     throw new Error(INVALID_AUTH_RESPONSE_MESSAGE)
@@ -267,8 +271,8 @@ function normalizeUser(user: ApiUser): User {
   const homeDir = user.homeDir ?? user.home_dir
 
   if (
-    typeof user.id !== 'string' ||
-    typeof user.username !== 'string' ||
+    !isCanonicalNonEmptyString(user.id) ||
+    !isCanonicalNonEmptyString(user.username) ||
     !isUserRole(user.role) ||
     typeof homeDir !== 'string' ||
     homeDir.length === 0 ||

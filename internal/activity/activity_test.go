@@ -900,6 +900,169 @@ func TestLogAndList(t *testing.T) {
 	}
 }
 
+func TestLogNormalizesActivityPath(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := NewStore(tmpDir)
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+
+	if err := store.Log(ActionUpload, " docs\\report.txt/ ", "user1", "192.168.1.1", nil); err != nil {
+		t.Fatalf("Log() error: %v", err)
+	}
+
+	entries, total := store.List(10, 0, "", "")
+	if total != 1 || len(entries) != 1 {
+		t.Fatalf("expected one activity entry, got total=%d entries=%+v", total, entries)
+	}
+	if entries[0].Path != "/docs/report.txt" {
+		t.Fatalf("activity path = %q, want /docs/report.txt", entries[0].Path)
+	}
+
+	reloaded, err := NewStore(tmpDir)
+	if err != nil {
+		t.Fatalf("NewStore() reload error: %v", err)
+	}
+	reloadedEntries, _ := reloaded.List(10, 0, "", "")
+	if len(reloadedEntries) != 1 || reloadedEntries[0].Path != "/docs/report.txt" {
+		t.Fatalf("reloaded activity path = %+v, want /docs/report.txt", reloadedEntries)
+	}
+}
+
+func TestLogRejectsUnsafeActivityPath(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := NewStore(tmpDir)
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+
+	if err := store.Log(ActionUpload, "/docs/./report.txt", "user1", "192.168.1.1", nil); !errors.Is(err, errInvalidActivityPath) {
+		t.Fatalf("Log() error = %v, want %v", err, errInvalidActivityPath)
+	}
+	if store.Count() != 0 {
+		t.Fatalf("expected rejected activity path not to be stored, got %d entries", store.Count())
+	}
+}
+
+func TestLogNormalizesActivityDetailPaths(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := NewStore(tmpDir)
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+
+	if err := store.Log(ActionMove, "/docs/source.txt", "user1", "192.168.1.1", map[string]string{
+		"to":         " docs\\target.txt/ ",
+		"from":       "/docs/./unsafe.txt",
+		"quota_path": "/quota/..\x00/secret",
+		"note":       "keep ../text",
+	}); err != nil {
+		t.Fatalf("Log() error: %v", err)
+	}
+
+	entries, total := store.List(10, 0, "", "")
+	if total != 1 || len(entries) != 1 {
+		t.Fatalf("expected one activity entry, got total=%d entries=%+v", total, entries)
+	}
+	details := entries[0].Details
+	if details["to"] != "/docs/target.txt" {
+		t.Fatalf("to detail = %q, want /docs/target.txt", details["to"])
+	}
+	if details["from"] != "" {
+		t.Fatalf("unsafe from detail = %q, want hidden empty path", details["from"])
+	}
+	if details["quota_path"] != "" {
+		t.Fatalf("unsafe quota_path detail = %q, want hidden empty path", details["quota_path"])
+	}
+	if details["note"] != "keep ../text" {
+		t.Fatalf("non-path detail changed to %q", details["note"])
+	}
+}
+
+func TestNewStoreNormalizesLegacyActivityPath(t *testing.T) {
+	tmpDir := t.TempDir()
+	writeActivityFixture(t, filepath.Join(tmpDir, "activity.json"), []Entry{{
+		ID:        "legacy-relative-path",
+		Timestamp: time.Now(),
+		Action:    ActionUpload,
+		Path:      "legacy\\report.txt/",
+		User:      "admin",
+	}})
+
+	store, err := NewStore(tmpDir)
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+
+	entries, total := store.List(10, 0, "", "")
+	if total != 1 || len(entries) != 1 {
+		t.Fatalf("expected one legacy activity entry, got total=%d entries=%+v", total, entries)
+	}
+	if entries[0].Path != "/legacy/report.txt" {
+		t.Fatalf("legacy activity path = %q, want /legacy/report.txt", entries[0].Path)
+	}
+}
+
+func TestNewStoreHidesUnsafeLegacyActivityPath(t *testing.T) {
+	tmpDir := t.TempDir()
+	writeActivityFixture(t, filepath.Join(tmpDir, "activity.json"), []Entry{{
+		ID:        "legacy-unsafe-path",
+		Timestamp: time.Now(),
+		Action:    ActionUpload,
+		Path:      "/legacy/../secret.txt",
+		User:      "admin",
+	}})
+
+	store, err := NewStore(tmpDir)
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+
+	entries, total := store.List(10, 0, "", "")
+	if total != 1 || len(entries) != 1 {
+		t.Fatalf("expected one legacy activity entry, got total=%d entries=%+v", total, entries)
+	}
+	if entries[0].Path != "" {
+		t.Fatalf("unsafe legacy activity path = %q, want hidden empty path", entries[0].Path)
+	}
+}
+
+func TestNewStoreNormalizesLegacyActivityDetailPaths(t *testing.T) {
+	tmpDir := t.TempDir()
+	writeActivityFixture(t, filepath.Join(tmpDir, "activity.json"), []Entry{{
+		ID:        "legacy-detail-paths",
+		Timestamp: time.Now(),
+		Action:    ActionMove,
+		Path:      "/legacy/source.txt",
+		User:      "admin",
+		Details: map[string]string{
+			"to":   "legacy\\target.txt/",
+			"from": "/legacy/./unsafe.txt",
+			"type": "file",
+		},
+	}})
+
+	store, err := NewStore(tmpDir)
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+
+	entries, total := store.List(10, 0, "", "")
+	if total != 1 || len(entries) != 1 {
+		t.Fatalf("expected one legacy activity entry, got total=%d entries=%+v", total, entries)
+	}
+	details := entries[0].Details
+	if details["to"] != "/legacy/target.txt" {
+		t.Fatalf("legacy to detail = %q, want /legacy/target.txt", details["to"])
+	}
+	if details["from"] != "" {
+		t.Fatalf("unsafe legacy from detail = %q, want hidden empty path", details["from"])
+	}
+	if details["type"] != "file" {
+		t.Fatalf("legacy non-path detail changed to %q", details["type"])
+	}
+}
+
 func TestLogRejectsUnknownAction(t *testing.T) {
 	tmpDir := t.TempDir()
 	store, err := NewStore(tmpDir)

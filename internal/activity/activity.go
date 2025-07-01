@@ -25,6 +25,7 @@ var errDuplicateActivityID = errors.New("duplicate activity ID")
 var errZeroActivityTimestamp = errors.New("activity timestamp must not be zero")
 var errEmptyActivityID = errors.New("activity ID must not be empty")
 var errNoncanonicalActivityID = errors.New("activity ID must not contain surrounding whitespace")
+var errInvalidActivityPath = errors.New("invalid activity path")
 
 type activityLogFormatError struct {
 	err error
@@ -74,7 +75,23 @@ func validateActivityID(id string) error {
 	return nil
 }
 
-func validateDecodedActivityEntry(entry Entry, seenIDs map[string]struct{}) error {
+func normalizeActivityEntryPath(rawPath string) (string, error) {
+	normalized := strings.ReplaceAll(strings.TrimSpace(rawPath), "\\", "/")
+	if normalized == "" {
+		return "", nil
+	}
+	if strings.ContainsRune(normalized, '\x00') {
+		return "", errInvalidActivityPath
+	}
+	for _, segment := range strings.Split(normalized, "/") {
+		if segment == "." || segment == ".." {
+			return "", errInvalidActivityPath
+		}
+	}
+	return pathpkg.Clean("/" + strings.TrimPrefix(normalized, "/")), nil
+}
+
+func validateDecodedActivityEntry(entry *Entry, seenIDs map[string]struct{}) error {
 	if err := validateActivityAction(entry.Action); err != nil {
 		return err
 	}
@@ -88,6 +105,12 @@ func validateDecodedActivityEntry(entry Entry, seenIDs map[string]struct{}) erro
 		return fmt.Errorf("%w: %q", errDuplicateActivityID, entry.ID)
 	}
 	seenIDs[entry.ID] = struct{}{}
+	if normalizedPath, err := normalizeActivityEntryPath(entry.Path); err == nil {
+		entry.Path = normalizedPath
+	} else {
+		entry.Path = ""
+	}
+	entry.Details = normalizeActivityDetails(entry.Details)
 	return nil
 }
 
@@ -227,6 +250,26 @@ func copyDetails(details map[string]string) map[string]string {
 	return clone
 }
 
+func normalizeActivityDetails(details map[string]string) map[string]string {
+	if details == nil {
+		return nil
+	}
+	normalized := make(map[string]string, len(details))
+	for key, value := range details {
+		if !DetailKeyMayContainPath(key) {
+			normalized[key] = value
+			continue
+		}
+		cleanValue, err := normalizeActivityEntryPath(value)
+		if err != nil {
+			normalized[key] = ""
+			continue
+		}
+		normalized[key] = cleanValue
+	}
+	return normalized
+}
+
 func copyEntry(entry Entry) Entry {
 	clone := entry
 	clone.Details = copyDetails(entry.Details)
@@ -324,7 +367,7 @@ func decodeActivityEntries(reader io.Reader, maxSize int) ([]Entry, error) {
 		if err := decoder.Decode(&entry); err != nil {
 			return nil, err
 		}
-		if err := validateDecodedActivityEntry(entry, seenIDs); err != nil {
+		if err := validateDecodedActivityEntry(&entry, seenIDs); err != nil {
 			return nil, wrapActivityLogFormatError(err)
 		}
 		if maxSize <= 0 || len(entries) < maxSize {
@@ -883,6 +926,10 @@ func (s *Store) Log(action ActionType, path, user, ip string, details map[string
 	if err := validateActivityAction(action); err != nil {
 		return err
 	}
+	cleanPath, err := normalizeActivityEntryPath(path)
+	if err != nil {
+		return err
+	}
 	timestamp := activityTimeNow()
 	if err := validateActivityTimestamp(timestamp); err != nil {
 		return err
@@ -896,10 +943,10 @@ func (s *Store) Log(action ActionType, path, user, ip string, details map[string
 			ID:        id,
 			Timestamp: timestamp,
 			Action:    action,
-			Path:      path,
+			Path:      cleanPath,
 			User:      user,
 			IP:        ip,
-			Details:   copyDetails(details),
+			Details:   normalizeActivityDetails(details),
 		}
 
 		nextEntries := make([]Entry, 0, len(entries)+1)

@@ -525,6 +525,33 @@ describe('auth API', () => {
     expect(localStorage.getItem('mnemonas_user')).toBeNull()
   })
 
+  it.each([
+    ['blank id', { id: '   ', username: 'admin' }],
+    ['blank username', { id: 'u1', username: '   ' }],
+    ['trimmed username', { id: 'u1', username: ' admin ' }],
+  ])('rejects successful login responses with a %s', async (_label, userOverride) => {
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({
+        success: true,
+        data: {
+          access_token: 'access-1',
+          refresh_token: 'refresh-1',
+          expires_at: '2026-03-13T00:00:00Z',
+          token_type: 'Bearer',
+          user: { role: 'admin', home_dir: '/', ...userOverride },
+        },
+      }),
+    })
+
+    await expect(login('admin', 'password')).rejects.toMatchObject({
+      message: '登录响应无效',
+      status: 200,
+    })
+    expect(localStorage.getItem('mnemonas_user')).toBeNull()
+  })
+
   it('rejects false-success login responses instead of storing fake session state', async () => {
     fetchMock.mockResolvedValueOnce({
       ok: true,
@@ -1089,6 +1116,21 @@ describe('auth API', () => {
       username: 'admin',
       role: 'admin',
       home_dir: '   ',
+    }))
+
+    expect(getStoredUser()).toBeNull()
+    expect(localStorage.getItem('mnemonas_user')).toBeNull()
+  })
+
+  it.each([
+    ['blank id', { id: '', username: 'admin' }],
+    ['blank username', { id: 'u1', username: '   ' }],
+    ['trimmed username', { id: 'u1', username: ' admin ' }],
+  ])('clears stored user payloads with a %s', (_label, userOverride) => {
+    localStorage.setItem('mnemonas_user', JSON.stringify({
+      role: 'admin',
+      home_dir: '/',
+      ...userOverride,
     }))
 
     expect(getStoredUser()).toBeNull()

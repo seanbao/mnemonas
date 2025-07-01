@@ -6,6 +6,7 @@
 import { authFetch } from './auth'
 import { INVALID_API_RESPONSE_MESSAGE as INVALID_SETTINGS_RESPONSE_MESSAGE } from '@/lib/apiMessages'
 import { readStructuredJsonErrorDetails } from '@/lib/jsonErrorResponse'
+import { normalizePath } from '@/lib/utils'
 
 const API_BASE = '/api/v1/settings'
 const MIN_CDC_CHUNK_SIZE = 64 * 1024
@@ -102,6 +103,9 @@ export interface SettingsData {
     telegram_enabled?: boolean
     telegram_bot_token_configured?: boolean
     telegram_chat_id?: string
+    wecom_enabled?: boolean
+    wecom_webhook_url?: string
+    wecom_webhook_url_configured?: boolean
     email_enabled?: boolean
     smtp_host?: string
     smtp_port?: number
@@ -378,6 +382,8 @@ export interface UpdateSettingsRequest {
     telegram_enabled?: boolean
     telegram_bot_token?: string
     telegram_chat_id?: string
+    wecom_enabled?: boolean
+    wecom_webhook_url?: string
     email_enabled?: boolean
     smtp_host?: string
     smtp_port?: number
@@ -453,9 +459,50 @@ function isStringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((entry) => typeof entry === 'string')
 }
 
+function hasControlCharacter(value: string): boolean {
+  for (const char of value) {
+    const code = char.charCodeAt(0)
+    if (code < 0x20 || code === 0x7f) {
+      return true
+    }
+  }
+  return false
+}
+
+function normalizeSettingsLogicalPath(value: string, message: string, code: string): string {
+  const trimmed = value.trim()
+  if (
+    !trimmed
+    || !trimmed.startsWith('/')
+    || /[\\?#]/u.test(trimmed)
+    || hasControlCharacter(trimmed)
+  ) {
+    throw new SettingsError(message, 0, code)
+  }
+
+  if (trimmed.split('/').some((segment) => segment === '.' || segment === '..')) {
+    throw new SettingsError(message, 0, code)
+  }
+
+  const collapsed = trimmed.replace(/\/+/gu, '/')
+  return collapsed === '/' ? '/' : collapsed.replace(/\/+$/u, '')
+}
+
+function isLogicalPathString(value: unknown): value is string {
+  if (typeof value !== 'string' || value.length === 0) {
+    return false
+  }
+
+  try {
+    return normalizePath(value) === value
+  } catch {
+    return false
+  }
+}
+
 function isDirectoryQuota(value: unknown): value is DirectoryQuota {
   return isRecord(value)
-    && typeof value.path === 'string'
+    && isLogicalPathString(value.path)
     && isPositiveSafeInteger(value.quota_bytes)
 }
 
@@ -621,6 +668,62 @@ function validateShareSettingsUpdateRequest(share: UpdateSettingsRequest['share'
   }
 }
 
+function requireLogicalPath(value: string, message: string, code: string): string {
+  try {
+    return normalizePath(value)
+  } catch {
+    throw new SettingsError(message, 0, code)
+  }
+}
+
+function normalizeDirectoryAccessRulesForRequest(
+  rules: DirectoryAccessRule[] | undefined,
+  message: string,
+  code: string,
+): DirectoryAccessRule[] | undefined {
+  if (!rules) {
+    return undefined
+  }
+
+  return rules.map((rule, index) => ({
+    ...rule,
+    path: normalizeSettingsLogicalPath(rule.path, `第 ${index + 1} 行${message}`, code),
+  }))
+}
+
+function normalizeLogicalPathSettingsUpdateRequest(data: UpdateSettingsRequest): UpdateSettingsRequest {
+  const normalized: UpdateSettingsRequest = { ...data }
+
+  if (data.storage) {
+    const storage = { ...data.storage }
+    if (data.storage.directory_quotas) {
+      storage.directory_quotas = data.storage.directory_quotas.map((quota, index) => ({
+        ...quota,
+        path: normalizeSettingsLogicalPath(quota.path, `第 ${index + 1} 行目录配额路径无效`, 'INVALID_DIRECTORY_QUOTA_PATH'),
+      }))
+    }
+    storage.directory_access_rules = normalizeDirectoryAccessRulesForRequest(
+      data.storage.directory_access_rules,
+      '目录访问规则路径无效',
+      'INVALID_DIRECTORY_ACCESS_RULE_PATH',
+    )
+    normalized.storage = storage
+  }
+
+  if (data.share) {
+    const share = { ...data.share }
+    if (data.share.policy_rules) {
+      share.policy_rules = data.share.policy_rules.map((rule, index) => ({
+        ...rule,
+        path: normalizeSettingsLogicalPath(rule.path, `第 ${index + 1} 行分享策略路径无效`, 'INVALID_SHARE_POLICY_PATH'),
+      }))
+    }
+    normalized.share = share
+  }
+
+  return normalized
+}
+
 function isDirectoryAccessDecisionSource(value: unknown): value is DirectoryAccessDecisionSource {
   return value === 'auth_disabled'
     || value === 'admin'
@@ -633,7 +736,7 @@ function isDirectoryAccessDecisionSource(value: unknown): value is DirectoryAcce
 
 function isDirectoryAccessRule(value: unknown): value is DirectoryAccessRule {
   return isRecord(value)
-    && typeof value.path === 'string'
+    && isLogicalPathString(value.path)
     && (value.read_users === undefined || isStringArray(value.read_users))
     && (value.write_users === undefined || isStringArray(value.write_users))
     && (value.read_groups === undefined || isStringArray(value.read_groups))
@@ -644,7 +747,7 @@ function isDirectoryAccessRule(value: unknown): value is DirectoryAccessRule {
 
 function isSharePolicyRule(value: unknown): value is SharePolicyRule {
   return isRecord(value)
-    && typeof value.path === 'string'
+    && isLogicalPathString(value.path)
     && (value.require_password === undefined || typeof value.require_password === 'boolean')
     && (value.max_expires_in === undefined || typeof value.max_expires_in === 'string')
     && (value.max_access === undefined || isNonNegativeSafeInteger(value.max_access))
@@ -674,8 +777,8 @@ function isDirectoryAccessCheckData(value: unknown): value is DirectoryAccessChe
     && typeof value.user_id === 'string'
     && isDirectoryAccessRole(value.role)
     && (value.groups === undefined || isStringArray(value.groups))
-    && typeof value.home_dir === 'string'
-    && typeof value.path === 'string'
+    && isLogicalPathString(value.home_dir)
+    && isLogicalPathString(value.path)
     && isDirectoryAccessDecision(value.read)
     && isDirectoryAccessDecision(value.write)
 }
@@ -699,7 +802,7 @@ function isDirectoryAccessShareRelation(value: unknown): value is DirectoryAcces
 function isDirectoryAccessShareImpact(value: unknown): value is DirectoryAccessShareImpact {
   return isRecord(value)
     && typeof value.id === 'string'
-    && typeof value.path === 'string'
+    && isLogicalPathString(value.path)
     && (value.type === 'file' || value.type === 'folder')
     && typeof value.created_by === 'string'
     && isDirectoryAccessShareRelation(value.relation)
@@ -714,7 +817,7 @@ function isDirectoryAccessShareImpact(value: unknown): value is DirectoryAccessS
 
 function isDirectoryAccessReportData(value: unknown): value is DirectoryAccessReportData {
   return isRecord(value)
-    && typeof value.path === 'string'
+    && isLogicalPathString(value.path)
     && (value.preview === undefined || typeof value.preview === 'boolean')
     && isDirectoryAccessReportSummary(value.summary)
     && Array.isArray(value.users)
@@ -864,6 +967,9 @@ function isValidSettingsData(value: unknown): value is SettingsData {
       || (value.alerts.telegram_enabled !== undefined && typeof value.alerts.telegram_enabled !== 'boolean')
       || (value.alerts.telegram_bot_token_configured !== undefined && typeof value.alerts.telegram_bot_token_configured !== 'boolean')
       || (value.alerts.telegram_chat_id !== undefined && typeof value.alerts.telegram_chat_id !== 'string')
+      || (value.alerts.wecom_enabled !== undefined && typeof value.alerts.wecom_enabled !== 'boolean')
+      || (value.alerts.wecom_webhook_url !== undefined && typeof value.alerts.wecom_webhook_url !== 'string')
+      || (value.alerts.wecom_webhook_url_configured !== undefined && typeof value.alerts.wecom_webhook_url_configured !== 'boolean')
       || (value.alerts.email_enabled !== undefined && typeof value.alerts.email_enabled !== 'boolean')
       || (value.alerts.smtp_host !== undefined && typeof value.alerts.smtp_host !== 'string')
       || (value.alerts.smtp_port !== undefined && !isSafeIntegerInRange(value.alerts.smtp_port, 1, 65535))
@@ -959,9 +1065,10 @@ export async function updateSettings(
   data: UpdateSettingsRequest,
   options: SettingsRequestOptions = {},
 ): Promise<{ success: boolean; message: string }> {
-  validateSmallIntegerSettingsUpdateRequest(data)
-  validateCapacitySettingsUpdateRequest(data)
-  validateShareSettingsUpdateRequest(data.share)
+  const normalizedData = normalizeLogicalPathSettingsUpdateRequest(data)
+  validateSmallIntegerSettingsUpdateRequest(normalizedData)
+  validateCapacitySettingsUpdateRequest(normalizedData)
+  validateShareSettingsUpdateRequest(normalizedData.share)
 
   const response = await authFetch(`${API_BASE}/`, {
     ...options,
@@ -969,7 +1076,7 @@ export async function updateSettings(
     headers: {
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify(data),
+    body: JSON.stringify(normalizedData),
   })
   
   if (!response.ok) {
@@ -1013,13 +1120,17 @@ export async function checkDirectoryAccess(
   data: DirectoryAccessCheckRequest,
   options: SettingsRequestOptions = {},
 ): Promise<DirectoryAccessCheckData> {
+  const request = {
+    ...data,
+    path: requireLogicalPath(data.path, '目录访问检查路径无效', 'INVALID_DIRECTORY_ACCESS_PATH'),
+  }
   const response = await authFetch(`${API_BASE}/access-check`, {
     ...options,
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify(data),
+    body: JSON.stringify(request),
   })
 
   if (!response.ok) {
@@ -1037,13 +1148,17 @@ export async function reportDirectoryAccess(
   data: DirectoryAccessReportRequest,
   options: SettingsRequestOptions = {},
 ): Promise<DirectoryAccessReportData> {
+  const request = {
+    ...data,
+    path: requireLogicalPath(data.path, '目录访问报告路径无效', 'INVALID_DIRECTORY_ACCESS_PATH'),
+  }
   const response = await authFetch(`${API_BASE}/access-report`, {
     ...options,
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify(data),
+    body: JSON.stringify(request),
   })
 
   if (!response.ok) {
@@ -1061,13 +1176,23 @@ export async function previewDirectoryAccess(
   data: DirectoryAccessPreviewRequest,
   options: SettingsRequestOptions = {},
 ): Promise<DirectoryAccessReportData> {
+  const request = {
+    ...data,
+    path: requireLogicalPath(data.path, '目录访问预览路径无效', 'INVALID_DIRECTORY_ACCESS_PATH'),
+    directory_access_rules: normalizeDirectoryAccessRulesForRequest(
+      data.directory_access_rules,
+      '目录访问规则路径无效',
+      'INVALID_DIRECTORY_ACCESS_RULE_PATH',
+    ) ?? [],
+  }
+
   const response = await authFetch(`${API_BASE}/access-preview`, {
     ...options,
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify(data),
+    body: JSON.stringify(request),
   })
 
   if (!response.ok) {

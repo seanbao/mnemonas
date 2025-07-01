@@ -100,6 +100,30 @@ describe('Activity API', () => {
     expect(mockAuthFetch).toHaveBeenCalledWith('/api/v1/activity/?limit=10&offset=20&action=delete&action_group=risk&user=admin&path=%2Fphotos&since=2026-05-01T00%3A00%3A00Z&until=2026-05-02T00%3A00%3A00Z')
   })
 
+  it('normalizes activity list path filters before sending requests', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        success: true,
+        data: {
+          items: [],
+          total: 0,
+          limit: 50,
+          offset: 0,
+        },
+      }),
+    })
+
+    await listActivity({ path: 'photos' })
+
+    expect(mockAuthFetch).toHaveBeenCalledWith('/api/v1/activity/?path=%2Fphotos')
+  })
+
+  it('rejects invalid activity list path filters before sending requests', async () => {
+    await expect(listActivity({ path: '/photos/./secret' })).rejects.toThrow('非法路径')
+    expect(mockAuthFetch).not.toHaveBeenCalled()
+  })
+
   it('forwards abort signals to the authenticated fetch request', async () => {
     const controller = new AbortController()
     mockAuthFetch.mockResolvedValueOnce({
@@ -275,6 +299,84 @@ describe('Activity API', () => {
     await expect(listActivity()).rejects.toThrow('服务器返回了无效的数据')
   })
 
+  it.each([
+    ['relative path', 'docs/report.txt'],
+    ['trailing-slash path', '/docs/report.txt/'],
+    ['unsafe path', '/docs/./report.txt'],
+  ])('rejects activity entries with noncanonical %s', async (_label, path) => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        success: true,
+        data: {
+          items: [{ id: '1', timestamp: '2026-03-14T00:00:00Z', action: 'upload', path }],
+          total: 1,
+          limit: 50,
+          offset: 0,
+        },
+      }),
+    })
+
+    await expect(listActivity()).rejects.toThrow('服务器返回了无效的数据')
+  })
+
+  it('accepts activity entries with canonical and hidden path details', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        success: true,
+        data: {
+          items: [{
+            id: '1',
+            timestamp: '2026-03-14T00:00:00Z',
+            action: 'move',
+            path: '/docs/source.txt',
+            details: {
+              to: '/docs/target.txt',
+              from: '',
+              note: 'external reference /not-a-logical-path/',
+            },
+          }],
+          total: 1,
+          limit: 50,
+          offset: 0,
+        },
+      }),
+    })
+
+    const result = await listActivity()
+
+    expect(result.items[0].details?.to).toBe('/docs/target.txt')
+    expect(result.items[0].details?.from).toBe('')
+  })
+
+  it.each([
+    ['relative detail path', { to: 'docs/report.txt' }],
+    ['trailing-slash detail path', { target_path: '/docs/report.txt/' }],
+    ['unsafe detail path', { from: '/docs/./report.txt' }],
+  ])('rejects activity entries with noncanonical %s', async (_label, details) => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        success: true,
+        data: {
+          items: [{
+            id: '1',
+            timestamp: '2026-03-14T00:00:00Z',
+            action: 'move',
+            path: '/docs/source.txt',
+            details,
+          }],
+          total: 1,
+          limit: 50,
+          offset: 0,
+        },
+      }),
+    })
+
+    await expect(listActivity()).rejects.toThrow('服务器返回了无效的数据')
+  })
+
   it('rejects activity entries with non-string detail values', async () => {
     mockAuthFetch.mockResolvedValueOnce({
       ok: true,
@@ -386,6 +488,11 @@ describe('Activity API', () => {
     expect(mockAuthFetch).toHaveBeenCalledWith('/api/v1/activity/stats?action=upload&action_group=share&user=admin&path=%2Fphotos&since=2026-05-01T00%3A00%3A00Z&until=2026-05-02T00%3A00%3A00Z', {
       signal: controller.signal,
     })
+  })
+
+  it('rejects invalid activity stats path filters before sending requests', async () => {
+    await expect(getActivityStats({ path: '/photos/./secret' })).rejects.toThrow('非法路径')
+    expect(mockAuthFetch).not.toHaveBeenCalled()
   })
 
   it('rejects malformed successful activity stats responses', async () => {

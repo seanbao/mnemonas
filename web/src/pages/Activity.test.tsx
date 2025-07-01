@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import type { ReactNode } from 'react'
-import { render, screen, waitFor } from '@/test/utils'
+import { render, screen, waitFor, within } from '@/test/utils'
 import { fireEvent } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
@@ -152,7 +152,10 @@ vi.mock('@/api/activity', () => ({
       upload: '上传文件',
       download: '下载文件',
       delete: '删除文件',
+      move: '移动文件',
+      share: '创建分享',
       login: '登录',
+      trash_empty: '清空回收站',
       scrub: '数据校验',
     }
     return labels[action] || action
@@ -281,6 +284,7 @@ function createDeferred<T>() {
 describe('ActivityPage', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    window.history.pushState({}, '', '/')
     vi.spyOn(HeroUI, 'addToast').mockImplementation(((...args: unknown[]) => mockAddToast(...args)) as typeof HeroUI.addToast)
     useIsAdminMock.mockReturnValue(true)
     useUserMock.mockReturnValue({ id: 'admin-id', username: 'admin', role: 'admin' })
@@ -543,6 +547,74 @@ describe('ActivityPage', () => {
         expect(deleteElements.length).toBeGreaterThanOrEqual(1)
         const loginElements = screen.getAllByText('登录')
         expect(loginElements.length).toBeGreaterThanOrEqual(1)
+      })
+    })
+
+    it('shows review details for review-worthy current page activity', async () => {
+      mockListActivity.mockResolvedValue({
+        items: [
+          {
+            id: 'delete-1',
+            timestamp: new Date(Date.now() - 1000 * 60).toISOString(),
+            action: 'delete',
+            path: '/old-file.txt',
+            user: 'user1',
+            details: {
+              cleanup_warning: 'true',
+            },
+          },
+          {
+            id: 'move-1',
+            timestamp: new Date(Date.now() - 1000 * 120).toISOString(),
+            action: 'move',
+            path: '/documents/report.pdf',
+            user: 'admin',
+            details: {
+              to: '/archive/report.pdf',
+            },
+          },
+          {
+            id: 'share-1',
+            timestamp: new Date(Date.now() - 1000 * 180).toISOString(),
+            action: 'share',
+            path: '/documents/report.pdf',
+            user: 'admin',
+            details: {
+              has_password: 'true',
+              max_access: '2',
+            },
+          },
+          {
+            id: 'login-1',
+            timestamp: new Date(Date.now() - 1000 * 240).toISOString(),
+            action: 'login',
+            user: 'admin',
+          },
+        ],
+        total: 4,
+        limit: 20,
+        offset: 0,
+      })
+
+      render(<ActivityPage />)
+
+      await waitFor(() => {
+        const review = within(screen.getByLabelText('当前页复核明细'))
+        expect(review.getByText('当前页复核明细')).toBeTruthy()
+        expect(review.getByText('当前页包含 3 条需复核记录')).toBeTruthy()
+        expect(review.getByText('路径: /old-file.txt')).toBeTruthy()
+        expect(review.getByText('复核: 清理状态: 残留数据清理不完整，请检查存储状态。')).toBeTruthy()
+        expect(review.getAllByText('路径: /documents/report.pdf')).toHaveLength(2)
+        expect(review.getByText('复核: 目标路径: /archive/report.pdf')).toBeTruthy()
+        expect(review.getByText('复核: 密码保护: 是')).toBeTruthy()
+        expect(review.queryByText('登录')).toBeNull()
+        const checklist = within(screen.getByLabelText('复核处置清单'))
+        expect(checklist.getByText('确认影响范围: 3 条记录，涉及 2 个路径、2 个用户。')).toBeTruthy()
+        expect(checklist.getByText('删除类操作: 检查回收站、版本历史和最近备份，确认是否需要恢复。')).toBeTruthy()
+        expect(checklist.getByText('路径变更: 核对来源和目标路径，确认移动或重命名是否符合预期。')).toBeTruthy()
+        expect(checklist.getByText('分享变更: 核对分享链接、密码、有效期和访问次数，关闭不再需要的公开链接。')).toBeTruthy()
+        expect(checklist.getByText('带警告记录: 先处理持久化或清理警告，再把本次复核标记为完成。')).toBeTruthy()
+        expect(checklist.getByText('记录处置结论: 在团队工单或运维记录中写明复核人、处理结果和时间。')).toBeTruthy()
       })
     })
 
@@ -1139,6 +1211,30 @@ describe('ActivityPage', () => {
         expect(screen.getByText('当前筛选:')).toBeTruthy()
         expect(screen.getByText('分组：分享相关')).toBeTruthy()
         expect(screen.getByText('当前筛选结果')).toBeTruthy()
+      })
+    })
+
+    it('loads share review filters from the URL query', async () => {
+      window.history.pushState({}, '', '/activity?action_group=share&path=%2Fdocs%2Freport.pdf')
+
+      render(<ActivityPage />)
+
+      await waitFor(() => {
+        expectListActivityCalledWith({
+          limit: 20,
+          offset: 0,
+          action: undefined,
+          actionGroup: 'share',
+          path: '/docs/report.pdf',
+        })
+        expectGetActivityStatsCalledWithSignal({
+          actionGroup: 'share',
+          path: '/docs/report.pdf',
+        })
+        expect(screen.getByText('当前筛选:')).toBeTruthy()
+        expect(screen.getByText('分组：分享相关')).toBeTruthy()
+        expect(screen.getByText('路径：/docs/report.pdf')).toBeTruthy()
+        expect(screen.getByPlaceholderText('按路径筛选')).toHaveValue('/docs/report.pdf')
       })
     })
 

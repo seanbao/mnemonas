@@ -2073,6 +2073,43 @@ func TestServer_Search_InvalidLimitReturnsBadRequest(t *testing.T) {
 	}
 }
 
+func TestServer_Search_RejectsAmbiguousQueryParameters(t *testing.T) {
+	server, _, _ := setupTestServer(t)
+
+	tests := []struct {
+		name    string
+		target  string
+		message string
+	}{
+		{
+			name:    "duplicate query",
+			target:  "/api/v1/search?q=report&q=invoice",
+			message: "query parameter 'q' must appear exactly once",
+		},
+		{
+			name:    "duplicate limit",
+			target:  "/api/v1/search?q=report&limit=10&limit=20",
+			message: "limit parameter must appear at most once",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, tc.target, nil)
+			w := httptest.NewRecorder()
+
+			server.Router().ServeHTTP(w, req)
+
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("Search ambiguous query status = %d, want %d", w.Code, http.StatusBadRequest)
+			}
+			if !strings.Contains(w.Body.String(), tc.message) {
+				t.Fatalf("expected %q error, got %s", tc.message, w.Body.String())
+			}
+		})
+	}
+}
+
 func TestServer_Search_WhitespaceOnlyQueryReturnsBadRequest(t *testing.T) {
 	server, fs, _ := setupTestServer(t)
 	ctx := context.Background()
@@ -2934,6 +2971,25 @@ func TestServer_DownloadFile_ContentDispositionEscapesFilename(t *testing.T) {
 	}
 }
 
+func TestServer_DownloadFile_RejectsAmbiguousDownloadParameter(t *testing.T) {
+	server, _, _ := setupTestServer(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/download/missing.txt?download=true&download=false", nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("ambiguous download parameter status = %d, want %d; body=%s", w.Code, http.StatusBadRequest, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "download parameter must appear at most once") {
+		t.Fatalf("expected ambiguous download parameter message, got %s", w.Body.String())
+	}
+	if contentDisposition := w.Header().Get("Content-Disposition"); contentDisposition != "" {
+		t.Fatalf("ambiguous download parameter must not set attachment header, got %q", contentDisposition)
+	}
+}
+
 func TestServer_DownloadFile_DecodesLiteralPercentFilename(t *testing.T) {
 	server, fs, _ := setupTestServer(t)
 	ctx := context.Background()
@@ -3104,6 +3160,112 @@ func TestServer_DownloadDirectoryAsZip(t *testing.T) {
 	}
 	if got := string(entries["docs/nested/report.txt"]); got != "report" {
 		t.Fatalf("docs/nested/report.txt archive content = %q, want report", got)
+	}
+}
+
+func TestServer_DownloadArchiveRejectsAmbiguousArchiveParameter(t *testing.T) {
+	server, fs, _ := setupTestServer(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/docs"); err != nil {
+		t.Fatalf("Mkdir(/docs) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/docs/readme.txt", bytes.NewReader([]byte("readme"))); err != nil {
+		t.Fatalf("WriteFile(/docs/readme.txt) error: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/download/docs?archive=zip&archive=tar", nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("ambiguous archive parameter status = %d, want %d; body=%s", w.Code, http.StatusBadRequest, w.Body.String())
+	}
+	if contentDisposition := w.Header().Get("Content-Disposition"); contentDisposition != "" {
+		t.Fatalf("ambiguous archive parameter must not set attachment header, got %q", contentDisposition)
+	}
+}
+
+func TestServer_DownloadRootDirectoryAsZip(t *testing.T) {
+	server, fs, _ := setupTestServer(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/root.txt", bytes.NewReader([]byte("root"))); err != nil {
+		t.Fatalf("WriteFile(/root.txt) error: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/download/?archive=zip&download=true", nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("root directory archive status = %d, want %d; body=%s", w.Code, http.StatusOK, w.Body.String())
+	}
+	mediaType, params, err := mime.ParseMediaType(w.Header().Get("Content-Disposition"))
+	if err != nil {
+		t.Fatalf("root directory archive Content-Disposition is invalid: %v", err)
+	}
+	if mediaType != "attachment" || params["filename"] != "mnemonas-files.zip" {
+		t.Fatalf("root directory archive Content-Disposition = media %q params %+v, want mnemonas-files.zip attachment", mediaType, params)
+	}
+
+	entries := readZipEntries(t, w.Body.Bytes())
+	if _, ok := entries["mnemonas-files/"]; !ok {
+		t.Fatalf("root directory archive missing mnemonas-files/; entries=%v", sortedMapKeys(entries))
+	}
+	if got := string(entries["mnemonas-files/root.txt"]); got != "root" {
+		t.Fatalf("mnemonas-files/root.txt archive content = %q, want root", got)
+	}
+}
+
+func TestDownloadArchiveFilenameDoesNotDuplicateZipExtension(t *testing.T) {
+	tests := []struct {
+		name     string
+		rootPath string
+		want     string
+	}{
+		{name: "folder", rootPath: "/docs", want: "docs.zip"},
+		{name: "zip named folder", rootPath: "/backups.zip", want: "backups.zip"},
+		{name: "uppercase zip named folder", rootPath: "/BACKUPS.ZIP", want: "BACKUPS.ZIP"},
+		{name: "root", rootPath: "/", want: "mnemonas-files.zip"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := downloadArchiveFilename(tt.rootPath); got != tt.want {
+				t.Fatalf("downloadArchiveFilename(%q) = %q, want %q", tt.rootPath, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestServer_DownloadZipNamedDirectoryArchiveKeepsSingleZipSuffix(t *testing.T) {
+	server, fs, _ := setupTestServer(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/backups.zip"); err != nil {
+		t.Fatalf("Mkdir(/backups.zip) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/backups.zip/manifest.json", bytes.NewReader([]byte("{}"))); err != nil {
+		t.Fatalf("WriteFile(/backups.zip/manifest.json) error: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/download/backups.zip?archive=zip&download=true", nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("zip-named directory archive status = %d, want %d; body=%s", w.Code, http.StatusOK, w.Body.String())
+	}
+	mediaType, params, err := mime.ParseMediaType(w.Header().Get("Content-Disposition"))
+	if err != nil {
+		t.Fatalf("zip-named directory archive Content-Disposition is invalid: %v", err)
+	}
+	if mediaType != "attachment" || params["filename"] != "backups.zip" {
+		t.Fatalf("zip-named directory archive Content-Disposition = media %q params %+v, want backups.zip attachment", mediaType, params)
 	}
 }
 
@@ -5500,6 +5662,32 @@ func TestServer_DownloadVersion_UsesExtensionContentTypeForPreview(t *testing.T)
 	}
 	if body := w.Body.String(); body != "v1" {
 		t.Fatalf("version preview body = %q, want %q", body, "v1")
+	}
+}
+
+func TestServer_DownloadVersionRejectsAmbiguousVersionParameter(t *testing.T) {
+	server, fs, _ := setupTestServer(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/versions/ambiguous.txt", bytes.NewReader([]byte("current"))); err != nil {
+		t.Fatalf("WriteFile(/versions/ambiguous.txt) error: %v", err)
+	}
+
+	firstHash := strings.Repeat("a", 64)
+	secondHash := strings.Repeat("b", 64)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/download/versions/ambiguous.txt?version="+firstHash+"&version="+secondHash, nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("ambiguous version parameter status = %d, want %d; body=%s", w.Code, http.StatusBadRequest, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "invalid hash") {
+		t.Fatalf("ambiguous version parameter response = %s, want invalid hash", w.Body.String())
+	}
+	if contentDisposition := w.Header().Get("Content-Disposition"); contentDisposition != "" {
+		t.Fatalf("ambiguous version parameter must not set attachment header, got %q", contentDisposition)
 	}
 }
 
@@ -9251,6 +9439,60 @@ func TestServer_RestoreVersion_MissingPath(t *testing.T) {
 	}
 }
 
+func TestServer_RestoreVersionRejectsAmbiguousPathWithoutMutation(t *testing.T) {
+	server, fs, _ := setupTestServer(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/restore-version"); err != nil {
+		t.Fatalf("Mkdir() error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/restore-version/ambiguous.txt", bytes.NewReader([]byte("version 1"))); err != nil {
+		t.Fatalf("WriteFile(v1) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/restore-version/ambiguous.txt", bytes.NewReader([]byte("version 2"))); err != nil {
+		t.Fatalf("WriteFile(v2) error: %v", err)
+	}
+
+	versions, err := fs.ListVersions(ctx, "/restore-version/ambiguous.txt")
+	if err != nil {
+		t.Fatalf("ListVersions() error: %v", err)
+	}
+	hashToRestore := ""
+	for _, version := range versions {
+		if version.Comment != "(current)" {
+			hashToRestore = version.Hash
+			break
+		}
+	}
+	if hashToRestore == "" {
+		t.Fatal("expected at least one historical version hash to restore")
+	}
+
+	req := httptest.NewRequest("POST", "/api/v1/versions/"+hashToRestore+"/restore?path=/restore-version/ambiguous.txt&path=/restore-version/other.txt", nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("ambiguous restore path status = %d, want %d; body=%s", w.Code, http.StatusBadRequest, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "invalid path") {
+		t.Fatalf("ambiguous restore path response = %s, want invalid path", w.Body.String())
+	}
+	reader, err := fs.OpenFile(ctx, "/restore-version/ambiguous.txt")
+	if err != nil {
+		t.Fatalf("OpenFile() error: %v", err)
+	}
+	defer reader.Close()
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("ReadAll() error: %v", err)
+	}
+	if string(data) != "version 2" {
+		t.Fatalf("ambiguous restore path mutated file content to %q, want version 2", string(data))
+	}
+}
+
 func TestServer_RestoreVersion_RejectsWorkspaceRootPath(t *testing.T) {
 	server, fs, _ := setupTestServer(t)
 	ctx := context.Background()
@@ -10808,6 +11050,59 @@ func TestServer_RestoreFromTrash_InvalidPathIsSanitized(t *testing.T) {
 	}
 	if strings.Contains(bodyStr, "..") || strings.Contains(strings.ToLower(bodyStr), "traversal") {
 		t.Fatalf("expected sanitized invalid path error, got %s", bodyStr)
+	}
+}
+
+func TestServer_RestoreFromTrashRejectsAmbiguousPathWithoutMutation(t *testing.T) {
+	server, fs, _ := setupTestServer(t)
+	ctx := context.Background()
+
+	for _, dir := range []string{"/trash-restore-ambiguous", "/trash-restore-target"} {
+		if err := fs.Mkdir(ctx, dir); err != nil {
+			t.Fatalf("Mkdir(%s) error: %v", dir, err)
+		}
+	}
+	if err := fs.WriteFile(ctx, "/trash-restore-ambiguous/deleted.txt", bytes.NewReader([]byte("restore me"))); err != nil {
+		t.Fatalf("WriteFile(deleted) error: %v", err)
+	}
+	if err := fs.Delete(ctx, "/trash-restore-ambiguous/deleted.txt"); err != nil {
+		t.Fatalf("Delete(deleted) error: %v", err)
+	}
+
+	items, err := fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash() error: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("trash item count = %d, want 1", len(items))
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/trash/"+items[0].ID+"/restore?path=/trash-restore-target/first.txt&path=/trash-restore-target/second.txt", nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("ambiguous trash restore path status = %d, want %d; body=%s", w.Code, http.StatusBadRequest, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "invalid path") {
+		t.Fatalf("ambiguous trash restore path response = %s, want invalid path", w.Body.String())
+	}
+	for _, p := range []string{
+		"/trash-restore-ambiguous/deleted.txt",
+		"/trash-restore-target/first.txt",
+		"/trash-restore-target/second.txt",
+	} {
+		if _, err := fs.Stat(ctx, p); !errors.Is(err, storage.ErrNotFound) {
+			t.Fatalf("expected ambiguous restore to leave %s absent, got %v", p, err)
+		}
+	}
+	remaining, err := fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash(after ambiguous restore) error: %v", err)
+	}
+	if len(remaining) != 1 || remaining[0].ID != items[0].ID {
+		t.Fatalf("expected rejected restore to leave trash item unchanged, got %+v", remaining)
 	}
 }
 
@@ -13654,6 +13949,40 @@ func TestServer_GC_InvalidDryRunCheckedBeforeDataplane(t *testing.T) {
 	}
 }
 
+func TestServer_GC_RejectsAmbiguousDryRunBeforeDataplane(t *testing.T) {
+	server, _, _ := setupTestServer(t)
+	server.dataplane = nil
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/maintenance/gc?dry_run=false&dry_run=true", nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("GC ambiguous dry_run status = %d, want %d; body=%s", w.Code, http.StatusBadRequest, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "dry_run parameter must be specified at most once") {
+		t.Fatalf("expected ambiguous dry_run error, got %s", w.Body.String())
+	}
+}
+
+func TestServer_GC_RejectsAmbiguousGracePeriodBeforeDataplane(t *testing.T) {
+	server, _, _ := setupTestServer(t)
+	server.dataplane = nil
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/maintenance/gc?grace_period_hours=0&grace_period_hours=24", nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("GC ambiguous grace_period_hours status = %d, want %d; body=%s", w.Code, http.StatusBadRequest, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "grace_period_hours parameter must be specified at most once") {
+		t.Fatalf("expected ambiguous grace_period_hours error, got %s", w.Body.String())
+	}
+}
+
 func TestServer_GC_RejectsOverflowingGracePeriod(t *testing.T) {
 	server, _, _ := setupTestServer(t)
 
@@ -13808,6 +14137,44 @@ func TestServer_Objects_RejectsInvalidLimit(t *testing.T) {
 			}
 			if !strings.Contains(w.Body.String(), "limit parameter must be between 1 and 1000") {
 				t.Fatalf("expected limit validation error for %q, got %s", rawLimit, w.Body.String())
+			}
+		})
+	}
+}
+
+func TestServer_Objects_RejectsAmbiguousQueryParametersBeforeDataplane(t *testing.T) {
+	server, _, _ := setupTestServer(t)
+	server.dataplane = nil
+
+	tests := []struct {
+		name    string
+		target  string
+		message string
+	}{
+		{
+			name:    "duplicate cursor",
+			target:  "/api/v1/maintenance/objects?cursor=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&cursor=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+			message: "cursor parameter must appear at most once",
+		},
+		{
+			name:    "duplicate limit",
+			target:  "/api/v1/maintenance/objects?limit=10&limit=20",
+			message: "limit parameter must appear at most once",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, tc.target, nil)
+			w := httptest.NewRecorder()
+
+			server.Router().ServeHTTP(w, req)
+
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("ListObjects ambiguous %s status = %d, want %d: %s", tc.name, w.Code, http.StatusBadRequest, w.Body.String())
+			}
+			if !strings.Contains(w.Body.String(), tc.message) {
+				t.Fatalf("expected %q message, got %s", tc.message, w.Body.String())
 			}
 		})
 	}
@@ -14247,6 +14614,24 @@ func TestServer_Thumbnail_RejectsInvalidSizeParameter(t *testing.T) {
 	}
 	if !strings.Contains(w.Body.String(), "size parameter must be one of: small, medium, large") {
 		t.Fatalf("expected invalid size error, got %s", w.Body.String())
+	}
+}
+
+func TestServer_Thumbnail_RejectsAmbiguousSizeParameter(t *testing.T) {
+	server, _, tmpDir := setupTestServer(t)
+
+	thumbService := newTestThumbnailService(t, path.Join(tmpDir, "thumbnails"))
+	server.thumbnail = thumbService
+
+	req := httptest.NewRequest("GET", "/api/v1/thumbnails/missing.png?size=small&size=large", nil)
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("thumbnail ambiguous size status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+	if !strings.Contains(w.Body.String(), "size parameter must appear at most once") {
+		t.Fatalf("expected ambiguous size error, got %s", w.Body.String())
 	}
 }
 
@@ -15713,6 +16098,29 @@ func TestServer_ListShares_FiltersResultsByHomeDirForNonAdmin(t *testing.T) {
 	}
 }
 
+func TestServer_ListShares_RejectsAmbiguousAllParameter(t *testing.T) {
+	server, _, _, _, _ := setupAuthServerWithFeatures(t, true, false)
+
+	adminUsername := "share-list-admin"
+	adminPassword := "adminpass123"
+	if _, err := server.userStore.Create(adminUsername, adminPassword, "", auth.RoleAdmin); err != nil {
+		t.Fatalf("create admin user error: %v", err)
+	}
+	adminToken := loginAndGetAccessToken(t, server, adminUsername, adminPassword)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/shares?all=true&all=false", nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("ambiguous all share list status = %d, want %d; body=%s", w.Code, http.StatusBadRequest, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "INVALID_REQUEST") {
+		t.Fatalf("expected INVALID_REQUEST response, got %s", w.Body.String())
+	}
+}
+
 func TestServer_ListShares_HidesNestedSharedAncestorForNonAdmin(t *testing.T) {
 	server, fs, _, username, password := setupAuthServerWithFeatures(t, true, false)
 	setUserHomeDirForTest(t, server, username, "/tester")
@@ -15909,6 +16317,24 @@ func TestServer_CheckFavorite_RejectsPathOutsideHomeForNonAdmin(t *testing.T) {
 	}
 	if !strings.Contains(allowedRec.Body.String(), `"is_favorite":true`) {
 		t.Fatalf("expected own home favorite to be reported, got %s", allowedRec.Body.String())
+	}
+}
+
+func TestServer_CheckFavorite_RejectsAmbiguousPathBeforeHomeScopeCheck(t *testing.T) {
+	server, _, _, username, password := setupAuthServerWithFeatures(t, false, true)
+
+	token := loginAndGetAccessToken(t, server, username, password)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/favorites/check?path=/tester/own.txt&path=/other/secret.txt", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	server.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("ambiguous favorite check path status = %d, want %d; body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "invalid path") {
+		t.Fatalf("expected invalid path response, got %s", rec.Body.String())
 	}
 }
 
@@ -16851,6 +17277,167 @@ func TestServer_UpdateSettings_UpdatesDirectoryStorageControlsAndWebDAVRuntime(t
 	}
 }
 
+func TestServer_UpdateSettings_SendsPolicyChangeAlert(t *testing.T) {
+	server, _, tmpDir := setupTestServer(t)
+	server.configPath = path.Join(tmpDir, "config.toml")
+	server.config.WebDAV.Enabled = false
+	server.config.Share.Enabled = false
+	server.config.Share.DefaultExpiresIn = 0
+	server.config.Share.DefaultMaxAccess = 0
+	server.config.Share.PolicyRules = nil
+	server.storeConfig(server.config)
+	monitor := &fakeAlertMonitor{}
+	server.alertMonitor = monitor
+
+	body := `{"storage":{"directory_access_rules":[{"path":"/team/","read_groups":["Family"],"write_groups":["Editors"]}]},"share":{"enabled":true,"default_expires_in":"24h","default_max_access":10,"policy_rules":[{"path":"/team/","require_password":true,"max_expires_in":"24h","max_access":10}]}}`
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/settings", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("update settings status = %d, want %d; body=%s", w.Code, http.StatusOK, w.Body.String())
+	}
+	if len(monitor.events) != 1 {
+		t.Fatalf("policy alert event count = %d, want 1", len(monitor.events))
+	}
+	event := monitor.events[0]
+	if event.Type != settingsPolicyChangedAlertType || event.Level != alerts.AlertLevelWarning {
+		t.Fatalf("policy alert event = %s/%s, want %s/warning", event.Type, event.Level, settingsPolicyChangedAlertType)
+	}
+	if event.Message != "directory access and share policies changed" {
+		t.Fatalf("policy alert message = %q", event.Message)
+	}
+	if event.Timestamp.Location() != time.UTC {
+		t.Fatalf("policy alert timestamp location = %v, want UTC", event.Timestamp.Location())
+	}
+	if event.Details["source"] != "settings" {
+		t.Fatalf("policy alert source = %#v, want settings", event.Details["source"])
+	}
+	if got, want := event.Details["changed_sections"], []string{"directory_access_rules", "share_policy"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("policy alert changed sections = %#v, want %#v", got, want)
+	}
+	if event.Details["directory_access_rules_changed"] != true || event.Details["directory_access_rule_count"] != 1 {
+		t.Fatalf("unexpected directory access alert details: %+v", event.Details)
+	}
+	if got, want := event.Details["directory_access_rule_paths"], []string{"/team"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("directory access rule paths = %#v, want %#v", got, want)
+	}
+	for _, key := range []string{
+		"share_policy_changed",
+		"share_enabled_changed",
+		"share_default_expiry_changed",
+		"share_default_max_access_changed",
+		"share_policy_rules_changed",
+	} {
+		if event.Details[key] != true {
+			t.Fatalf("policy alert detail %s = %#v, want true; details=%+v", key, event.Details[key], event.Details)
+		}
+	}
+	if event.Details["share_policy_rule_count"] != 1 {
+		t.Fatalf("share policy rule count = %#v, want 1", event.Details["share_policy_rule_count"])
+	}
+	if got, want := event.Details["share_policy_rule_paths"], []string{"/team"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("share policy rule paths = %#v, want %#v", got, want)
+	}
+}
+
+func TestServer_UpdateSettings_DoesNotSendPolicyChangeAlertForNormalizedNoop(t *testing.T) {
+	server, _, tmpDir := setupTestServer(t)
+	server.configPath = path.Join(tmpDir, "config.toml")
+	server.config.WebDAV.Enabled = false
+	server.config.Storage.DirectoryAccessRules = config.NormalizeDirectoryAccessRules([]config.DirectoryAccessRuleConfig{
+		{Path: "/team", ReadGroups: []string{"family"}},
+	})
+	server.config.Share.Enabled = true
+	server.config.Share.DefaultExpiresIn = 24 * time.Hour
+	server.config.Share.DefaultMaxAccess = 10
+	server.config.Share.PolicyRules = config.NormalizeSharePolicyRules([]config.SharePolicyRuleConfig{
+		{Path: "/team", RequirePassword: true, MaxExpiresIn: 24 * time.Hour, MaxAccess: 10},
+	})
+	server.storeConfig(server.config)
+	monitor := &fakeAlertMonitor{}
+	server.alertMonitor = monitor
+
+	body := `{"storage":{"directory_access_rules":[{"path":"/team/","read_groups":["Family"]}]},"share":{"enabled":true,"default_expires_in":"24h","default_max_access":10,"policy_rules":[{"path":"/team/","require_password":true,"max_expires_in":"24h","max_access":10}]}}`
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/settings", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("update settings status = %d, want %d; body=%s", w.Code, http.StatusOK, w.Body.String())
+	}
+	if len(monitor.events) != 0 {
+		t.Fatalf("unexpected policy alert events: %+v", monitor.events)
+	}
+}
+
+func TestServer_UpdateSettings_PolicyChangeAlertFailureDoesNotFailSettings(t *testing.T) {
+	server, _, tmpDir := setupTestServer(t)
+	server.configPath = path.Join(tmpDir, "config.toml")
+	server.config.WebDAV.Enabled = false
+	server.config.Storage.DirectoryAccessRules = nil
+	server.storeConfig(server.config)
+	monitor := &fakeAlertMonitor{sendErr: errors.New("webhook token=secret-token failed")}
+	server.alertMonitor = monitor
+
+	body := `{"storage":{"directory_access_rules":[{"path":"/team/","read_groups":["Family"]}]}}`
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/settings", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("update settings status = %d, want %d; body=%s", w.Code, http.StatusOK, w.Body.String())
+	}
+	if len(server.config.Storage.DirectoryAccessRules) != 1 || server.config.Storage.DirectoryAccessRules[0].Path != "/team" {
+		t.Fatalf("directory access rules were not saved after alert failure: %+v", server.config.Storage.DirectoryAccessRules)
+	}
+	if len(monitor.events) != 0 {
+		t.Fatalf("unexpected stored events after alert send failure: %+v", monitor.events)
+	}
+}
+
+func TestServer_UpdateSettings_RejectsDotSegmentScopedPaths(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{
+			name: "directory quota",
+			body: `{"storage":{"directory_quotas":[{"path":"/team/../private","quota_bytes":1048576}]}}`,
+		},
+		{
+			name: "directory access rule",
+			body: `{"storage":{"directory_access_rules":[{"path":"/team/./private","read_groups":["family"]}]}}`,
+		},
+		{
+			name: "share policy rule",
+			body: `{"share":{"policy_rules":[{"path":"/docs/../private","require_password":true}]}}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server, _, tmpDir := setupTestServer(t)
+			server.configPath = path.Join(tmpDir, "config.toml")
+			req := httptest.NewRequest(http.MethodPut, "/api/v1/settings", strings.NewReader(tt.body))
+			req.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+
+			server.Router().ServeHTTP(w, req)
+
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("update settings status = %d, want %d; body=%s", w.Code, http.StatusBadRequest, w.Body.String())
+			}
+		})
+	}
+}
+
 func TestServer_UpdateSettings_NormalizesWebDAVPrefix(t *testing.T) {
 	server, _, tmpDir := setupTestServer(t)
 	server.configPath = path.Join(tmpDir, "config.toml")
@@ -17593,7 +18180,7 @@ func TestServer_UpdateSettings_UpdatesAlertsConfig(t *testing.T) {
 	monitor := &fakeAlertMonitor{}
 	server.alertMonitor = monitor
 
-	body := `{"alerts":{"enabled":true,"check_interval":"30m","threshold_pct":85,"critical_pct":92,"min_free_bytes":21474836480,"cooldown_period":"2h","webhook_url":"https://hooks.example.com/storage","webhook_method":"POST","webhook_headers":["Authorization: Bearer token","X-MnemoNAS: alerts"],"telegram_enabled":true,"telegram_bot_token":"123456:secret-token","telegram_chat_id":"-1001234567890","email_enabled":true,"smtp_host":"smtp.example.com","smtp_port":587,"smtp_username":"alerts","smtp_password":"secret","smtp_from":"MnemoNAS <alerts@example.com>","smtp_to":["admin@example.com"]}}`
+	body := `{"alerts":{"enabled":true,"check_interval":"30m","threshold_pct":85,"critical_pct":92,"min_free_bytes":21474836480,"cooldown_period":"2h","webhook_url":"https://hooks.example.com/storage","webhook_method":"POST","webhook_headers":["Authorization: Bearer token","X-MnemoNAS: alerts"],"telegram_enabled":true,"telegram_bot_token":"123456:secret-token","telegram_chat_id":"-1001234567890","wecom_enabled":true,"wecom_webhook_url":"https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=secret-key","email_enabled":true,"smtp_host":"smtp.example.com","smtp_port":587,"smtp_username":"alerts","smtp_password":"secret","smtp_from":"MnemoNAS <alerts@example.com>","smtp_to":["admin@example.com"]}}`
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/settings", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -17633,6 +18220,9 @@ func TestServer_UpdateSettings_UpdatesAlertsConfig(t *testing.T) {
 	if !server.config.Alerts.TelegramEnabled || server.config.Alerts.TelegramBotToken != "123456:secret-token" || server.config.Alerts.TelegramChatID != "-1001234567890" {
 		t.Fatalf("unexpected Telegram alert config: %+v", server.config.Alerts)
 	}
+	if !server.config.Alerts.WeComEnabled || server.config.Alerts.WeComWebhookURL != "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=secret-key" {
+		t.Fatalf("unexpected WeCom alert config: %+v", server.config.Alerts)
+	}
 	if !server.config.Alerts.EmailEnabled || server.config.Alerts.SMTPHost != "smtp.example.com" || server.config.Alerts.SMTPPort != 587 {
 		t.Fatalf("unexpected email alert config: %+v", server.config.Alerts)
 	}
@@ -17642,7 +18232,7 @@ func TestServer_UpdateSettings_UpdatesAlertsConfig(t *testing.T) {
 	if monitor.updateCount != 1 {
 		t.Fatalf("expected alert monitor update once, got %d", monitor.updateCount)
 	}
-	if monitor.lastConfig.CheckInterval != 30*time.Minute || monitor.lastConfig.WebhookURL != "https://hooks.example.com/storage" || !monitor.lastConfig.TelegramEnabled || monitor.lastConfig.TelegramChatID != "-1001234567890" || !monitor.lastConfig.EmailEnabled {
+	if monitor.lastConfig.CheckInterval != 30*time.Minute || monitor.lastConfig.WebhookURL != "https://hooks.example.com/storage" || !monitor.lastConfig.TelegramEnabled || monitor.lastConfig.TelegramChatID != "-1001234567890" || !monitor.lastConfig.WeComEnabled || monitor.lastConfig.WeComWebhookURL != "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=secret-key" || !monitor.lastConfig.EmailEnabled {
 		t.Fatalf("unexpected alert monitor config: %+v", monitor.lastConfig)
 	}
 }
@@ -17654,6 +18244,8 @@ func TestServer_SendTestAlert_SendsConfiguredChannels(t *testing.T) {
 	server.config.Alerts.TelegramEnabled = true
 	server.config.Alerts.TelegramBotToken = "123456:secret-token"
 	server.config.Alerts.TelegramChatID = "-1001234567890"
+	server.config.Alerts.WeComEnabled = true
+	server.config.Alerts.WeComWebhookURL = "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=secret-key"
 	server.config.Alerts.EmailEnabled = true
 	server.config.Alerts.SMTPHost = "smtp.example.com"
 	server.config.Alerts.SMTPPort = 587
@@ -17681,13 +18273,13 @@ func TestServer_SendTestAlert_SendsConfiguredChannels(t *testing.T) {
 		t.Fatalf("test alert timestamp location = %v, want UTC", event.Timestamp.Location())
 	}
 	channels, ok := event.Details["channels"].([]string)
-	if !ok || !reflect.DeepEqual(channels, []string{"webhook", "telegram", "email"}) {
-		t.Fatalf("test alert channels = %#v, want webhook/telegram/email", event.Details["channels"])
+	if !ok || !reflect.DeepEqual(channels, []string{"webhook", "telegram", "wecom", "email"}) {
+		t.Fatalf("test alert channels = %#v, want webhook/telegram/wecom/email", event.Details["channels"])
 	}
 	if event.Details["trigger"] != "manual_test" || event.Details["source"] != "settings" {
 		t.Fatalf("unexpected test alert details: %+v", event.Details)
 	}
-	for _, leaked := range []string{"secret-token", "alerts@example.com", "admin@example.com"} {
+	for _, leaked := range []string{"secret-token", "secret-key", "alerts@example.com", "admin@example.com"} {
 		if strings.Contains(w.Body.String(), leaked) {
 			t.Fatalf("test alert response leaked %q: %s", leaked, w.Body.String())
 		}
@@ -17773,6 +18365,126 @@ func TestServer_SendTestAlert_ReturnsGenericFailure(t *testing.T) {
 	}
 }
 
+func TestServer_SendShareExpiryReminderAlerts_SendsAggregateEvent(t *testing.T) {
+	server, _, _, _, _ := setupAuthServerWithFeatures(t, true, false)
+	server.config.Alerts.Enabled = true
+	server.config.Alerts.WebhookURL = "https://hooks.example.com/share"
+	server.storeConfig(server.config)
+	monitor := &fakeAlertMonitor{}
+	server.alertMonitor = monitor
+
+	now := time.Date(2026, 6, 3, 8, 0, 0, 0, time.UTC)
+	firstShare := createShareExpiryReminderTestShare(t, server.shareStore, "/docs/a.txt", now.Add(48*time.Hour), func(s *share.Share) {})
+	createShareExpiryReminderTestShare(t, server.shareStore, "/team/soon.txt", now.Add(24*time.Hour), func(s *share.Share) {})
+	createShareExpiryReminderTestShare(t, server.shareStore, "/team/later.txt", now.Add(96*time.Hour), func(s *share.Share) {})
+	createShareExpiryReminderTestShare(t, server.shareStore, "/team/expired.txt", now.Add(-time.Hour), func(s *share.Share) {})
+	createShareExpiryReminderTestShare(t, server.shareStore, "/team/disabled.txt", now.Add(24*time.Hour), func(s *share.Share) {
+		s.Enabled = false
+	})
+	createShareExpiryReminderTestShare(t, server.shareStore, "/team/limit.txt", now.Add(24*time.Hour), func(s *share.Share) {
+		s.MaxAccess = 1
+		s.AccessCount = 1
+	})
+
+	sent := server.sendShareExpiryReminderAlerts(context.Background(), now)
+
+	if sent != 2 {
+		t.Fatalf("share expiry reminder sent count = %d, want 2", sent)
+	}
+	if len(monitor.events) != 1 {
+		t.Fatalf("share expiry alert event count = %d, want 1", len(monitor.events))
+	}
+	event := monitor.events[0]
+	if event.Type != shareExpiringSoonAlertType || event.Level != alerts.AlertLevelWarning {
+		t.Fatalf("share expiry alert event = %s/%s, want %s/warning", event.Type, event.Level, shareExpiringSoonAlertType)
+	}
+	if event.Message != "share links are expiring soon" {
+		t.Fatalf("share expiry alert message = %q", event.Message)
+	}
+	if event.Timestamp != now {
+		t.Fatalf("share expiry alert timestamp = %s, want %s", event.Timestamp, now)
+	}
+	if event.Details["source"] != "share" || event.Details["share_count"] != 2 || event.Details["window_hours"] != 72 {
+		t.Fatalf("unexpected share expiry alert details: %+v", event.Details)
+	}
+	if event.Details["soonest_expires_at"] != now.Add(24*time.Hour).Format(time.RFC3339) {
+		t.Fatalf("soonest expiry = %#v, want %s", event.Details["soonest_expires_at"], now.Add(24*time.Hour).Format(time.RFC3339))
+	}
+	if event.Details["expires_before"] != now.Add(shareExpiryReminderWindow).Format(time.RFC3339) {
+		t.Fatalf("expires_before = %#v, want %s", event.Details["expires_before"], now.Add(shareExpiryReminderWindow).Format(time.RFC3339))
+	}
+	if got, want := event.Details["share_paths"], []string{"/docs/a.txt", "/team/soon.txt"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("share expiry paths = %#v, want %#v", got, want)
+	}
+	if strings.Contains(fmt.Sprint(event.Details), firstShare.ID) {
+		t.Fatalf("share expiry alert leaked share id in details: %+v", event.Details)
+	}
+
+	sent = server.sendShareExpiryReminderAlerts(context.Background(), now.Add(time.Hour))
+	if sent != 0 {
+		t.Fatalf("duplicate share expiry reminder sent count = %d, want 0", sent)
+	}
+	if len(monitor.events) != 1 {
+		t.Fatalf("duplicate share expiry alert event count = %d, want 1", len(monitor.events))
+	}
+}
+
+func TestServer_SendShareExpiryReminderAlerts_DoesNotMarkWhenAlertsUnavailable(t *testing.T) {
+	server, _, _, _, _ := setupAuthServerWithFeatures(t, true, false)
+	server.config.Alerts.Enabled = false
+	server.config.Alerts.WebhookURL = ""
+	server.storeConfig(server.config)
+	monitor := &fakeAlertMonitor{}
+	server.alertMonitor = monitor
+
+	now := time.Date(2026, 6, 3, 8, 0, 0, 0, time.UTC)
+	createShareExpiryReminderTestShare(t, server.shareStore, "/docs/a.txt", now.Add(24*time.Hour), func(s *share.Share) {})
+
+	sent := server.sendShareExpiryReminderAlerts(context.Background(), now)
+	if sent != 0 || len(monitor.events) != 0 {
+		t.Fatalf("disabled alerts sent=%d events=%+v, want no reminders", sent, monitor.events)
+	}
+
+	server.config.Alerts.Enabled = true
+	server.config.Alerts.WebhookURL = "https://hooks.example.com/share"
+	server.storeConfig(server.config)
+
+	sent = server.sendShareExpiryReminderAlerts(context.Background(), now.Add(time.Minute))
+	if sent != 1 {
+		t.Fatalf("enabled alerts sent count = %d, want 1", sent)
+	}
+	if len(monitor.events) != 1 {
+		t.Fatalf("enabled share expiry event count = %d, want 1", len(monitor.events))
+	}
+}
+
+func createShareExpiryReminderTestShare(t *testing.T, store *share.ShareStore, sharePath string, expiresAt time.Time, mutate func(*share.Share)) *share.Share {
+	t.Helper()
+	created, err := store.Create(share.CreateShareOptions{
+		Path:      sharePath,
+		Type:      share.ShareTypeFile,
+		CreatedBy: "tester",
+	})
+	if err != nil {
+		t.Fatalf("Create(%s) error: %v", sharePath, err)
+	}
+	if err := store.Update(created.ID, func(updated *share.Share) error {
+		expiresAt := expiresAt.UTC()
+		updated.ExpiresAt = &expiresAt
+		if mutate != nil {
+			mutate(updated)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("Update(%s) error: %v", created.ID, err)
+	}
+	updated, err := store.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get(%s) error: %v", created.ID, err)
+	}
+	return updated
+}
+
 func TestServer_UpdateSettings_ClearsAlertSecrets(t *testing.T) {
 	server, _, tmpDir := setupTestServer(t)
 	server.configPath = path.Join(tmpDir, "config.toml")
@@ -17808,11 +18520,12 @@ func TestServer_UpdateSettings_PreservesRedactedWebhookHeaders(t *testing.T) {
 	server.configPath = path.Join(tmpDir, "config.toml")
 	server.config.Alerts.WebhookURL = "https://hooks.example.com/storage?token=secret-token"
 	server.config.Alerts.WebhookHeaders = []string{"Authorization: Bearer secret-token", "X-MnemoNAS: alerts"}
+	server.config.Alerts.WeComWebhookURL = "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=secret-key"
 	server.storeConfig(server.config)
 	monitor := &fakeAlertMonitor{}
 	server.alertMonitor = monitor
 
-	body := `{"alerts":{"threshold_pct":86,"webhook_url":"<redacted>","webhook_headers":["Authorization: <redacted>","X-MnemoNAS: <redacted>"]}}`
+	body := `{"alerts":{"threshold_pct":86,"webhook_url":"<redacted>","webhook_headers":["Authorization: <redacted>","X-MnemoNAS: <redacted>"],"wecom_webhook_url":"<redacted>"}}`
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/settings", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -17825,11 +18538,14 @@ func TestServer_UpdateSettings_PreservesRedactedWebhookHeaders(t *testing.T) {
 	if server.config.Alerts.WebhookURL != "https://hooks.example.com/storage?token=secret-token" {
 		t.Fatalf("webhook URL = %q, want preserved secret URL", server.config.Alerts.WebhookURL)
 	}
+	if server.config.Alerts.WeComWebhookURL != "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=secret-key" {
+		t.Fatalf("WeCom webhook URL = %q, want preserved secret URL", server.config.Alerts.WeComWebhookURL)
+	}
 	expected := []string{"Authorization: Bearer secret-token", "X-MnemoNAS: alerts"}
 	if !reflect.DeepEqual(server.config.Alerts.WebhookHeaders, expected) {
 		t.Fatalf("webhook headers = %#v, want %#v", server.config.Alerts.WebhookHeaders, expected)
 	}
-	if monitor.updateCount != 1 || !reflect.DeepEqual(monitor.lastConfig.WebhookHeaders, expected) {
+	if monitor.updateCount != 1 || !reflect.DeepEqual(monitor.lastConfig.WebhookHeaders, expected) || monitor.lastConfig.WeComWebhookURL != "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=secret-key" {
 		t.Fatalf("unexpected alert monitor headers: count=%d config=%#v", monitor.updateCount, monitor.lastConfig.WebhookHeaders)
 	}
 }
@@ -17855,6 +18571,30 @@ func TestServer_UpdateSettings_RejectsUnknownRedactedWebhookURL(t *testing.T) {
 	}
 	if server.config.Alerts.WebhookURL != "" {
 		t.Fatalf("webhook URL changed after rejected update: %q", server.config.Alerts.WebhookURL)
+	}
+}
+
+func TestServer_UpdateSettings_RejectsUnknownRedactedWeComWebhookURL(t *testing.T) {
+	server, _, tmpDir := setupTestServer(t)
+	server.configPath = path.Join(tmpDir, "config.toml")
+	server.config.Alerts.WeComWebhookURL = ""
+	server.storeConfig(server.config)
+
+	body := `{"alerts":{"wecom_webhook_url":"<redacted>"}}`
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/settings", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("update settings unknown redacted WeCom webhook URL status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+	if !strings.Contains(w.Body.String(), "invalid alerts.wecom_webhook_url redacted placeholder") {
+		t.Fatalf("expected redacted WeCom webhook URL validation message, got %s", w.Body.String())
+	}
+	if server.config.Alerts.WeComWebhookURL != "" {
+		t.Fatalf("WeCom webhook URL changed after rejected update: %q", server.config.Alerts.WeComWebhookURL)
 	}
 }
 
@@ -18044,6 +18784,36 @@ func TestServer_UpdateSettings_InvalidAlertsWebhookURLDoesNotUpdateAlertMonitor(
 	}
 	if server.config.Alerts.WebhookURL != "https://hooks.example.com/old" {
 		t.Fatalf("expected invalid webhook URL update to leave config unchanged, got %q", server.config.Alerts.WebhookURL)
+	}
+	if monitor.updateCount != 0 {
+		t.Fatalf("expected invalid configuration not to update alert monitor, got %d updates", monitor.updateCount)
+	}
+}
+
+func TestServer_UpdateSettings_InvalidAlertsWeComWebhookURLDoesNotUpdateAlertMonitor(t *testing.T) {
+	server, _, tmpDir := setupTestServer(t)
+	server.configPath = path.Join(tmpDir, "config.toml")
+	server.config.Alerts.WeComEnabled = true
+	server.config.Alerts.WeComWebhookURL = "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=old"
+	server.storeConfig(server.config)
+	monitor := &fakeAlertMonitor{}
+	server.alertMonitor = monitor
+
+	body := `{"alerts":{"wecom_webhook_url":"ftp://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=secret-key"}}`
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/settings", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("update settings invalid alerts WeCom webhook URL status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+	if !strings.Contains(w.Body.String(), "invalid configuration") {
+		t.Fatalf("expected invalid configuration message, got %s", w.Body.String())
+	}
+	if server.config.Alerts.WeComWebhookURL != "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=old" {
+		t.Fatalf("expected invalid WeCom webhook URL update to leave config unchanged, got %q", server.config.Alerts.WeComWebhookURL)
 	}
 	if monitor.updateCount != 0 {
 		t.Fatalf("expected invalid configuration not to update alert monitor, got %d updates", monitor.updateCount)
@@ -18575,6 +19345,8 @@ func TestServer_GetSettings_RedactsWebhookHeaderValues(t *testing.T) {
 	server, _, _ := setupTestServer(t)
 	server.config.Alerts.WebhookURL = "https://hooks.example.com/storage?token=secret-token"
 	server.config.Alerts.WebhookHeaders = []string{"Authorization: Bearer secret-token", "X-MnemoNAS: alerts"}
+	server.config.Alerts.WeComEnabled = true
+	server.config.Alerts.WeComWebhookURL = "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=secret-key"
 	server.storeConfig(server.config)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/settings", nil)
@@ -18590,10 +19362,13 @@ func TestServer_GetSettings_RedactsWebhookHeaderValues(t *testing.T) {
 		Success bool `json:"success"`
 		Data    struct {
 			Alerts struct {
-				WebhookURL               string   `json:"webhook_url"`
-				WebhookURLConfigured     bool     `json:"webhook_url_configured"`
-				WebhookHeaders           []string `json:"webhook_headers"`
-				WebhookHeadersConfigured bool     `json:"webhook_headers_configured"`
+				WebhookURL                string   `json:"webhook_url"`
+				WebhookURLConfigured      bool     `json:"webhook_url_configured"`
+				WebhookHeaders            []string `json:"webhook_headers"`
+				WebhookHeadersConfigured  bool     `json:"webhook_headers_configured"`
+				WeComEnabled              bool     `json:"wecom_enabled"`
+				WeComWebhookURL           string   `json:"wecom_webhook_url"`
+				WeComWebhookURLConfigured bool     `json:"wecom_webhook_url_configured"`
 			} `json:"alerts"`
 		} `json:"data"`
 	}
@@ -18606,6 +19381,9 @@ func TestServer_GetSettings_RedactsWebhookHeaderValues(t *testing.T) {
 	if resp.Data.Alerts.WebhookURL != redactedSettingsSecretValue || !resp.Data.Alerts.WebhookURLConfigured {
 		t.Fatalf("unexpected webhook URL redaction state: %+v", resp.Data.Alerts)
 	}
+	if !resp.Data.Alerts.WeComEnabled || resp.Data.Alerts.WeComWebhookURL != redactedSettingsSecretValue || !resp.Data.Alerts.WeComWebhookURLConfigured {
+		t.Fatalf("unexpected WeCom URL redaction state: %+v", resp.Data.Alerts)
+	}
 	if !resp.Data.Alerts.WebhookHeadersConfigured {
 		t.Fatal("expected webhook_headers_configured=true")
 	}
@@ -18614,7 +19392,7 @@ func TestServer_GetSettings_RedactsWebhookHeaderValues(t *testing.T) {
 		t.Fatalf("webhook_headers = %#v, want %#v", resp.Data.Alerts.WebhookHeaders, expected)
 	}
 	body := w.Body.String()
-	for _, leaked := range []string{"token=secret-token", "Bearer secret-token", "X-MnemoNAS: alerts"} {
+	for _, leaked := range []string{"token=secret-token", "Bearer secret-token", "X-MnemoNAS: alerts", "secret-key", "/cgi-bin/webhook/send"} {
 		if strings.Contains(body, leaked) {
 			t.Fatalf("settings response leaked webhook header value %q: %s", leaked, body)
 		}
@@ -19446,6 +20224,53 @@ func TestServer_ListActivity_RejectsInvalidActionFilter(t *testing.T) {
 	}
 }
 
+func TestServer_ListActivity_RejectsAmbiguousQueryParameters(t *testing.T) {
+	server, _, _, username, _ := setupAuthServer(t)
+
+	tests := []struct {
+		name    string
+		target  string
+		message string
+	}{
+		{
+			name:    "duplicate limit",
+			target:  "/api/v1/activity/?limit=10&limit=20",
+			message: "limit parameter must appear at most once",
+		},
+		{
+			name:    "duplicate offset",
+			target:  "/api/v1/activity/?offset=0&offset=1",
+			message: "offset parameter must appear at most once",
+		},
+		{
+			name:    "duplicate action",
+			target:  "/api/v1/activity/?action=upload&action=delete",
+			message: "action parameter must appear at most once",
+		},
+		{
+			name:    "duplicate path",
+			target:  "/api/v1/activity/?path=%2Ftester&path=%2Fother",
+			message: "path parameter must appear at most once",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, tc.target, nil)
+			req.Header.Set("Authorization", "Bearer "+issueAccessTokenWithoutActivity(t, server, username))
+			w := httptest.NewRecorder()
+			server.Router().ServeHTTP(w, req)
+
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("list activity with ambiguous %s status = %d, want %d: %s", tc.name, w.Code, http.StatusBadRequest, w.Body.String())
+			}
+			if !strings.Contains(w.Body.String(), tc.message) {
+				t.Fatalf("expected %q message, got %s", tc.message, w.Body.String())
+			}
+		})
+	}
+}
+
 func TestServer_ActivityStats_HonorsQueryFilters(t *testing.T) {
 	server, _, _, username, _ := setupAuthServer(t)
 
@@ -19544,6 +20369,53 @@ func TestServer_ActivityStats_RejectsInvalidActionFilter(t *testing.T) {
 	}
 	if !strings.Contains(w.Body.String(), "action parameter is invalid") {
 		t.Fatalf("expected invalid action message, got %s", w.Body.String())
+	}
+}
+
+func TestServer_ActivityStats_RejectsAmbiguousQueryParameters(t *testing.T) {
+	server, _, _, username, _ := setupAuthServer(t)
+
+	tests := []struct {
+		name    string
+		target  string
+		message string
+	}{
+		{
+			name:    "duplicate action_group",
+			target:  "/api/v1/activity/stats?action_group=share&action_group=risk",
+			message: "action_group parameter must appear at most once",
+		},
+		{
+			name:    "duplicate user",
+			target:  "/api/v1/activity/stats?user=admin&user=" + url.QueryEscape(username),
+			message: "user parameter must appear at most once",
+		},
+		{
+			name:    "duplicate since",
+			target:  "/api/v1/activity/stats?since=2026-05-01T00%3A00%3A00Z&since=2026-05-02T00%3A00%3A00Z",
+			message: "since parameter must appear at most once",
+		},
+		{
+			name:    "duplicate until",
+			target:  "/api/v1/activity/stats?until=2026-05-01T00%3A00%3A00Z&until=2026-05-02T00%3A00%3A00Z",
+			message: "until parameter must appear at most once",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, tc.target, nil)
+			req.Header.Set("Authorization", "Bearer "+issueAccessTokenWithoutActivity(t, server, username))
+			w := httptest.NewRecorder()
+			server.Router().ServeHTTP(w, req)
+
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("activity stats with ambiguous %s status = %d, want %d: %s", tc.name, w.Code, http.StatusBadRequest, w.Body.String())
+			}
+			if !strings.Contains(w.Body.String(), tc.message) {
+				t.Fatalf("expected %q message, got %s", tc.message, w.Body.String())
+			}
+		})
 	}
 }
 

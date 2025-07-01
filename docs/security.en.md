@@ -223,7 +223,7 @@ cloudflared tunnel run mnemonas
 - [ ] Public deployments use `server.host = "127.0.0.1"` and are reachable only through the HTTPS reverse proxy.
 - [ ] Dataplane gRPC/HTTP ports are loopback-only or private.
 - [ ] The Web UI security self-check has no `block` items; public deployments should resolve all `warning` items before exposure, especially `allow_unsafe_no_auth`, reverse-proxy headers, dataplane ports, and spare-administrator warnings.
-- [ ] `sudo mnemonas-doctor --public-domain <domain>` reports HTTP redirects to HTTPS on the same public domain, a matching HTTPS certificate with at least 30 days remaining, verified renewal guidance, rejected anonymous WebDAV `PROPFIND`, and no direct backend exposure, dataplane exposure, or UFW allow warnings.
+- [ ] `sudo mnemonas-doctor --public-domain <domain>` reports HTTP redirects to HTTPS on the same public domain, a matching HTTPS certificate with at least 30 days remaining, verified renewal guidance, usable administrator-account redundancy, an absent `initial-password.txt` path with no symlink or non-regular file left behind, rejected anonymous WebDAV `PROPFIND`, and no direct backend exposure, dataplane exposure, or UFW allow warnings.
 - [ ] The [Public cloud firewall checklist](cloud-firewall-checklist.en.md) has been applied: cloud security groups or public firewall rules expose only `80/443`; management ports, the Web backend port, and dataplane ports are not publicly reachable.
 - [ ] Public deployments use HTTPS.
 

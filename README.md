@@ -107,7 +107,7 @@ cd mnemonas
 # http://localhost:8080
 ```
 
-仓库自带的 `docker-compose.yml` 默认从当前源码构建 `mnemonas:local` 镜像，不要求宿主机安装 Go/Rust/Node.js，但需要能拉取 Docker 基础镜像。Dockerfile 使用 BuildKit 缓存和较小的 Alpine Go builder，弱网环境下重试构建不会从零下载所有依赖。`docker-quickstart.sh` 会创建或更新 `.env`，把 `MNEMONAS_UID`/`MNEMONAS_GID` 设置为当前宿主机用户，创建 `MNEMONAS_DATA_DIR`，运行 Docker 预检，并在 `--start` 时按 `MNEMONAS_IMAGE` 选择启动方式：本地镜像执行源码构建，发布镜像使用 `docker compose up -d --pull missing --no-build`。GitHub Releases 的二进制归档会附带 `docker-compose.yml` 和 `.env.example`，归档内模板会把 `MNEMONAS_IMAGE` 预设为同一 release tag 的 GHCR 镜像。如果 8080 已被占用，可运行 `./scripts/docker-quickstart.sh --port 8888 --start`。首次启动会在数据目录中自动生成持久化配置；Web 登录初始密码在 `<MNEMONAS_DATA_DIR>/.mnemonas/initial-password.txt`。发布镜像使用方式见 [Docker 部署指南](docs/docker-deployment.md)。
+仓库自带的 `docker-compose.yml` 默认从当前源码构建 `mnemonas:local` 镜像，不要求宿主机安装 Go/Rust/Node.js，但需要能拉取 Docker 基础镜像。Dockerfile 使用 BuildKit 缓存和较小的 Alpine Go builder，弱网环境下重试构建不会从零下载所有依赖。`docker-quickstart.sh` 会创建或更新 `.env`，把 `MNEMONAS_UID`/`MNEMONAS_GID` 设置为当前宿主机用户，创建 `MNEMONAS_DATA_DIR`，运行 Docker 预检，并在 `--start` 时按 `MNEMONAS_IMAGE` 选择启动方式：本地镜像执行源码构建，发布镜像使用 `docker compose up -d --pull missing --no-build`。GitHub Releases 的二进制归档会附带 `docker-compose.yml` 和 `.env.example`，归档内模板会把 `MNEMONAS_IMAGE` 预设为同一 release tag 的 GHCR 镜像。如果 8080 已被占用，可运行 `./scripts/docker-quickstart.sh --port 8888 --start`。首次启动会在数据目录中自动生成持久化配置；Web 登录初始密码在 `<MNEMONAS_DATA_DIR>/.mnemonas/initial-password.txt`。管理员首次登录后，首页会显示首次部署检查，逐项确认初始登录凭据处理、管理员冗余、备份和公网入口后可关闭提示。发布镜像使用方式见 [Docker 部署指南](docs/docker-deployment.md)。
 
 ### 二进制安装
 

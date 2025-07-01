@@ -130,6 +130,36 @@ func TestHandler_OPTIONS(t *testing.T) {
 	if dav == "" {
 		t.Error("DAV header is missing")
 	}
+
+	if got := w.Header().Get("MS-Author-Via"); got != "DAV" {
+		t.Errorf("MS-Author-Via header = %q, want DAV", got)
+	}
+}
+
+func TestHandler_UnsupportedMethodSetsAllowHeader(t *testing.T) {
+	handler, _, _ := setupTestHandler(t)
+
+	req := httptest.NewRequest("ACL", "/dav/", nil)
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("unsupported method status = %d, want %d", w.Code, http.StatusMethodNotAllowed)
+	}
+
+	assertWebDAVAllowHeader(t, w)
+}
+
+func assertWebDAVAllowHeader(t *testing.T, w *httptest.ResponseRecorder) {
+	t.Helper()
+
+	allow := w.Header().Get("Allow")
+	for _, method := range []string{"OPTIONS", "PROPFIND", "GET", "PUT", "DELETE", "MKCOL", "COPY", "MOVE", "PROPPATCH", "LOCK", "UNLOCK"} {
+		if !strings.Contains(allow, method) {
+			t.Fatalf("Allow header = %q, missing %s", allow, method)
+		}
+	}
 }
 
 func TestHandler_MKCOL(t *testing.T) {
@@ -309,6 +339,7 @@ func TestHandler_MKCOL_ExistingDirectoryReturnsMethodNotAllowed(t *testing.T) {
 	if w.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("MKCOL existing directory status = %d, want %d", w.Code, http.StatusMethodNotAllowed)
 	}
+	assertWebDAVAllowHeader(t, w)
 }
 
 func TestHandler_MKCOL_ExistingFileReturnsMethodNotAllowed(t *testing.T) {
@@ -327,6 +358,7 @@ func TestHandler_MKCOL_ExistingFileReturnsMethodNotAllowed(t *testing.T) {
 	if w.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("MKCOL existing file status = %d, want %d", w.Code, http.StatusMethodNotAllowed)
 	}
+	assertWebDAVAllowHeader(t, w)
 }
 
 func TestHandler_MKCOL_ConcurrentCreateReturnsMethodNotAllowed(t *testing.T) {
@@ -372,6 +404,7 @@ func TestHandler_MKCOL_ConcurrentCreateReturnsMethodNotAllowed(t *testing.T) {
 	if w.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("MKCOL concurrent create status = %d, want %d", w.Code, http.StatusMethodNotAllowed)
 	}
+	assertWebDAVAllowHeader(t, w)
 	if _, err := fs.Stat(ctx, targetPath); err != nil {
 		t.Fatalf("expected concurrently created collection to remain, got %v", err)
 	}
@@ -4661,6 +4694,21 @@ func TestHandler_ReadOnlyMode(t *testing.T) {
 	}
 }
 
+func TestHandler_ReadOnlyModeUnsupportedMethodReturnsMethodNotAllowed(t *testing.T) {
+	handler, _, _ := setupTestHandler(t)
+	handler.readOnly = true
+
+	req := httptest.NewRequest("ACL", "/dav/test", nil)
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("unsupported method in read-only mode status = %d, want %d", w.Code, http.StatusMethodNotAllowed)
+	}
+	assertWebDAVAllowHeader(t, w)
+}
+
 func TestHandler_BasicAuth(t *testing.T) {
 	client := setupDataplaneClient(t)
 	if client == nil {
@@ -5933,6 +5981,8 @@ func TestHandler_PathTraversal(t *testing.T) {
 		"/dav/test/../../etc/passwd",
 		"/dav/..%2F..%2Fetc/passwd",
 		"/dav/..%5Csecret.txt",
+		"/dav/safe%5C..%5Csecret.txt",
+		"/dav/safe%5C.%5Csecret.txt",
 		"/dav/./secret.txt",
 		"/dav/%2e/secret.txt",
 	}
@@ -5976,6 +6026,30 @@ func TestHandler_LegalDoubleDotFilenameAllowed(t *testing.T) {
 	}
 }
 
+func TestHandler_RequestPathNormalizesBackslashSeparators(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/slashes"); err != nil {
+		t.Fatalf("Mkdir(slashes) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/slashes/note.txt", bytes.NewReader([]byte("ok"))); err != nil {
+		t.Fatalf("WriteFile(note.txt) error: %v", err)
+	}
+
+	req := httptest.NewRequest("GET", "/dav/slashes%5Cnote.txt", nil)
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET backslash-normalized path status = %d, want %d", w.Code, http.StatusOK)
+	}
+	if w.Body.String() != "ok" {
+		t.Fatalf("GET backslash-normalized path body = %q, want %q", w.Body.String(), "ok")
+	}
+}
+
 func TestHandler_ServeHTTP_RejectsSimilarPrefix(t *testing.T) {
 	handler := NewHandler(Config{Prefix: "/dav", AuthType: "none"})
 	req := httptest.NewRequest("GET", "/davish/file.txt", nil)
@@ -6013,6 +6087,19 @@ func TestHandler_GetDestination_AllowsDoubleDotFilename(t *testing.T) {
 	}
 }
 
+func TestHandler_GetDestination_NormalizesBackslashSeparators(t *testing.T) {
+	handler := NewHandler(Config{Prefix: "/dav", AuthType: "none"})
+	req := httptest.NewRequest("COPY", "/dav/src.txt", nil)
+	req.Host = "localhost"
+	req.Header.Set("Destination", "http://localhost/dav/dst%5Cfolder%5Cfile.txt")
+
+	dst := handler.getDestination(req)
+
+	if dst != "/dst/folder/file.txt" {
+		t.Fatalf("getDestination() = %q, want %q", dst, "/dst/folder/file.txt")
+	}
+}
+
 func TestHandler_GetDestination_ExactPrefixMapsToRoot(t *testing.T) {
 	handler := NewHandler(Config{Prefix: "/dav", AuthType: "none"})
 	req := httptest.NewRequest("COPY", "/dav/src.txt", nil)
@@ -6036,6 +6123,78 @@ func TestHandler_GetDestination_AllowsDefaultHTTPSPortWhenRequestHostOmitsPort(t
 
 	if dst != "/dst.txt" {
 		t.Fatalf("getDestination() = %q, want %q", dst, "/dst.txt")
+	}
+}
+
+func TestHandler_GetDestination_AllowsSingleFQDNTrailingDotHost(t *testing.T) {
+	handler := NewHandler(Config{Prefix: "/dav", AuthType: "none"})
+
+	req := httptest.NewRequest("COPY", "/dav/src.txt", nil)
+	req.Host = "nas.example.com"
+	req.Header.Set("Destination", "https://nas.example.com./dav/dst.txt")
+	if dst := handler.getDestination(req); dst != "/dst.txt" {
+		t.Fatalf("getDestination() = %q, want %q", dst, "/dst.txt")
+	}
+
+	req = httptest.NewRequest("COPY", "/dav/src.txt", nil)
+	req.Host = "nas.example.com."
+	req.Header.Set("Destination", "https://nas.example.com/dav/dst.txt")
+	if dst := handler.getDestination(req); dst != "/dst.txt" {
+		t.Fatalf("getDestination() with request trailing dot = %q, want %q", dst, "/dst.txt")
+	}
+}
+
+func TestHandler_GetDestination_RejectsRepeatedFQDNTrailingDotHost(t *testing.T) {
+	handler := NewHandler(Config{Prefix: "/dav", AuthType: "none"})
+	req := httptest.NewRequest("COPY", "/dav/src.txt", nil)
+	req.Host = "nas.example.com"
+	req.Header.Set("Destination", "https://nas.example.com../dav/dst.txt")
+
+	if dst := handler.getDestination(req); dst != "" {
+		t.Fatalf("getDestination() = %q, want empty string for repeated FQDN trailing dot", dst)
+	}
+
+	req = httptest.NewRequest("COPY", "/dav/src.txt", nil)
+	req.Host = "nas.example.com.."
+	req.Header.Set("Destination", "https://nas.example.com../dav/dst.txt")
+	if dst := handler.getDestination(req); dst != "" {
+		t.Fatalf("getDestination() with repeated-dot request host = %q, want empty string", dst)
+	}
+}
+
+func TestHandler_GetDestination_AllowsSchemeRelativeSameHost(t *testing.T) {
+	handler := NewHandler(Config{Prefix: "/dav", AuthType: "none"})
+
+	req := httptest.NewRequest("COPY", "/dav/src.txt", nil)
+	req.Host = "nas.example.com"
+	req.Header.Set("Destination", "//nas.example.com/dav/dst.txt")
+	if dst := handler.getDestination(req); dst != "/dst.txt" {
+		t.Fatalf("getDestination() = %q, want %q", dst, "/dst.txt")
+	}
+
+	req = httptest.NewRequest("COPY", "/dav/src.txt", nil)
+	req.Host = "nas.example.com:8443"
+	req.Header.Set("Destination", "//nas.example.com:8443/dav/dst.txt")
+	if dst := handler.getDestination(req); dst != "/dst.txt" {
+		t.Fatalf("getDestination() with explicit matching ports = %q, want %q", dst, "/dst.txt")
+	}
+}
+
+func TestHandler_GetDestination_RejectsSchemeRelativePortMismatch(t *testing.T) {
+	handler := NewHandler(Config{Prefix: "/dav", AuthType: "none"})
+
+	req := httptest.NewRequest("COPY", "/dav/src.txt", nil)
+	req.Host = "nas.example.com"
+	req.Header.Set("Destination", "//nas.example.com:8443/dav/dst.txt")
+	if dst := handler.getDestination(req); dst != "" {
+		t.Fatalf("getDestination() = %q, want empty string for scheme-relative destination with destination-only port", dst)
+	}
+
+	req = httptest.NewRequest("COPY", "/dav/src.txt", nil)
+	req.Host = "nas.example.com:8443"
+	req.Header.Set("Destination", "//nas.example.com/dav/dst.txt")
+	if dst := handler.getDestination(req); dst != "" {
+		t.Fatalf("getDestination() = %q, want empty string for scheme-relative destination with request-only port", dst)
 	}
 }
 
@@ -6080,6 +6239,8 @@ func TestHandler_GetDestination_RejectsPercentEncodedTraversal(t *testing.T) {
 	for _, destination := range []string{
 		"http://localhost/dav/%2e%2e/secret.txt",
 		"http://localhost/dav/%2e/secret.txt",
+		"http://localhost/dav/safe%5C..%5Csecret.txt",
+		"http://localhost/dav/safe%5C.%5Csecret.txt",
 	} {
 		t.Run(destination, func(t *testing.T) {
 			req := httptest.NewRequest("COPY", "/dav/src.txt", nil)
@@ -6233,10 +6394,68 @@ func TestResolveIfHeaderPath_AllowsDefaultHTTPSPortWhenRequestHostOmitsPort(t *t
 	}
 }
 
+func TestResolveIfHeaderPath_AllowsSingleFQDNTrailingDotHost(t *testing.T) {
+	resolved, ok := resolveIfHeaderPath("https://nas.example.com./dav/locked.txt", "nas.example.com", "/dav")
+	if !ok {
+		t.Fatal("expected FQDN trailing dot If URI to resolve")
+	}
+	if resolved != "/locked.txt" {
+		t.Fatalf("resolveIfHeaderPath() = %q, want %q", resolved, "/locked.txt")
+	}
+}
+
+func TestResolveIfHeaderPath_RejectsRepeatedFQDNTrailingDotHost(t *testing.T) {
+	if resolved, ok := resolveIfHeaderPath("https://nas.example.com../dav/locked.txt", "nas.example.com", "/dav"); ok {
+		t.Fatalf("resolveIfHeaderPath() = %q, want repeated FQDN trailing dot rejection", resolved)
+	}
+	if resolved, ok := resolveIfHeaderPath("https://nas.example.com../dav/locked.txt", "nas.example.com..", "/dav"); ok {
+		t.Fatalf("resolveIfHeaderPath() with repeated-dot request host = %q, want rejection", resolved)
+	}
+}
+
+func TestResolveIfHeaderPath_AllowsSchemeRelativeSameHost(t *testing.T) {
+	resolved, ok := resolveIfHeaderPath("//nas.example.com/dav/locked.txt", "nas.example.com", "/dav")
+	if !ok {
+		t.Fatal("expected scheme-relative If URI without ports to resolve")
+	}
+	if resolved != "/locked.txt" {
+		t.Fatalf("resolveIfHeaderPath() = %q, want %q", resolved, "/locked.txt")
+	}
+
+	resolved, ok = resolveIfHeaderPath("//nas.example.com:8443/dav/locked.txt", "nas.example.com:8443", "/dav")
+	if !ok {
+		t.Fatal("expected scheme-relative If URI with matching explicit ports to resolve")
+	}
+	if resolved != "/locked.txt" {
+		t.Fatalf("resolveIfHeaderPath() with explicit matching ports = %q, want %q", resolved, "/locked.txt")
+	}
+}
+
+func TestResolveIfHeaderPath_NormalizesBackslashSeparators(t *testing.T) {
+	resolved, ok := resolveIfHeaderPath("http://localhost/dav/locks%5Cfile.txt", "localhost", "/dav")
+	if !ok {
+		t.Fatal("expected If URI with backslash separators to resolve")
+	}
+	if resolved != "/locks/file.txt" {
+		t.Fatalf("resolveIfHeaderPath() = %q, want %q", resolved, "/locks/file.txt")
+	}
+}
+
+func TestResolveIfHeaderPath_RejectsSchemeRelativePortMismatch(t *testing.T) {
+	if resolved, ok := resolveIfHeaderPath("//nas.example.com:8443/dav/locked.txt", "nas.example.com", "/dav"); ok {
+		t.Fatalf("resolveIfHeaderPath() = %q, want destination-only port rejection", resolved)
+	}
+	if resolved, ok := resolveIfHeaderPath("//nas.example.com/dav/locked.txt", "nas.example.com:8443", "/dav"); ok {
+		t.Fatalf("resolveIfHeaderPath() = %q, want request-only port rejection", resolved)
+	}
+}
+
 func TestResolveIfHeaderPath_RejectsDotSegments(t *testing.T) {
 	for _, rawPath := range []string{
 		"http://localhost/dav/%2e/locked.txt",
 		"http://localhost/dav/%2e%2e/locked.txt",
+		"http://localhost/dav/locks%5C..%5Clocked.txt",
+		"http://localhost/dav/locks%5C.%5Clocked.txt",
 	} {
 		t.Run(rawPath, func(t *testing.T) {
 			if resolved, ok := resolveIfHeaderPath(rawPath, "localhost", "/dav"); ok {

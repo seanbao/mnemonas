@@ -319,6 +319,8 @@ type AlertsConfig struct {
 	TelegramEnabled  bool          `toml:"telegram_enabled"`   // Enable Telegram notifications
 	TelegramBotToken string        `toml:"telegram_bot_token"` // Telegram bot token
 	TelegramChatID   string        `toml:"telegram_chat_id"`   // Telegram chat ID or @channel
+	WeComEnabled     bool          `toml:"wecom_enabled"`      // Enable WeCom group robot notifications
+	WeComWebhookURL  string        `toml:"wecom_webhook_url"`  // WeCom group robot webhook URL
 	EmailEnabled     bool          `toml:"email_enabled"`      // Enable SMTP email notifications
 	SMTPHost         string        `toml:"smtp_host"`          // SMTP host without port
 	SMTPPort         int           `toml:"smtp_port"`          // SMTP port
@@ -527,6 +529,7 @@ func applyStorageRootDefaults(cfg *Config, defaultRoot string) {
 	cfg.Alerts.WebhookHeaders = normalizeStringSlice(cfg.Alerts.WebhookHeaders)
 	cfg.Alerts.TelegramBotToken = strings.TrimSpace(cfg.Alerts.TelegramBotToken)
 	cfg.Alerts.TelegramChatID = strings.TrimSpace(cfg.Alerts.TelegramChatID)
+	cfg.Alerts.WeComWebhookURL = strings.TrimSpace(cfg.Alerts.WeComWebhookURL)
 	cfg.Alerts.SMTPHost = strings.TrimSpace(cfg.Alerts.SMTPHost)
 	cfg.Alerts.SMTPUsername = strings.TrimSpace(cfg.Alerts.SMTPUsername)
 	cfg.Alerts.SMTPFrom = strings.TrimSpace(cfg.Alerts.SMTPFrom)
@@ -785,6 +788,7 @@ func Load(path string) (*Config, error) {
 	cfg.Alerts.WebhookMethod = strings.ToUpper(strings.TrimSpace(cfg.Alerts.WebhookMethod))
 	cfg.Alerts.TelegramBotToken = strings.TrimSpace(cfg.Alerts.TelegramBotToken)
 	cfg.Alerts.TelegramChatID = strings.TrimSpace(cfg.Alerts.TelegramChatID)
+	cfg.Alerts.WeComWebhookURL = strings.TrimSpace(cfg.Alerts.WeComWebhookURL)
 	cfg.Alerts.SMTPHost = strings.TrimSpace(cfg.Alerts.SMTPHost)
 	cfg.Alerts.SMTPUsername = strings.TrimSpace(cfg.Alerts.SMTPUsername)
 	cfg.Alerts.SMTPFrom = strings.TrimSpace(cfg.Alerts.SMTPFrom)
@@ -810,10 +814,7 @@ func NormalizeDirectoryQuotas(quotas []DirectoryQuotaConfig) []DirectoryQuotaCon
 	normalized := make([]DirectoryQuotaConfig, 0, len(quotas))
 	for _, quota := range quotas {
 		copied := quota
-		copied.Path = strings.TrimSpace(copied.Path)
-		if copied.Path != "" && strings.HasPrefix(copied.Path, "/") {
-			copied.Path = urlpath.Clean(copied.Path)
-		}
+		copied.Path = normalizeScopedConfigPath(copied.Path)
 		normalized = append(normalized, copied)
 	}
 	return normalized
@@ -828,10 +829,7 @@ func NormalizeDirectoryAccessRules(rules []DirectoryAccessRuleConfig) []Director
 	normalized := make([]DirectoryAccessRuleConfig, 0, len(rules))
 	for _, rule := range rules {
 		copied := rule
-		copied.Path = strings.TrimSpace(copied.Path)
-		if copied.Path != "" && strings.HasPrefix(copied.Path, "/") {
-			copied.Path = urlpath.Clean(copied.Path)
-		}
+		copied.Path = normalizeScopedConfigPath(copied.Path)
 		copied.ReadUsers = normalizeAccessRulePrincipalList(copied.ReadUsers)
 		copied.WriteUsers = normalizeAccessRulePrincipalList(copied.WriteUsers)
 		copied.ReadGroups = normalizeAccessRulePrincipalList(copied.ReadGroups)
@@ -852,13 +850,27 @@ func NormalizeSharePolicyRules(rules []SharePolicyRuleConfig) []SharePolicyRuleC
 	normalized := make([]SharePolicyRuleConfig, 0, len(rules))
 	for _, rule := range rules {
 		copied := rule
-		copied.Path = strings.TrimSpace(copied.Path)
-		if copied.Path != "" && strings.HasPrefix(copied.Path, "/") {
-			copied.Path = urlpath.Clean(copied.Path)
-		}
+		copied.Path = normalizeScopedConfigPath(copied.Path)
 		normalized = append(normalized, copied)
 	}
 	return normalized
+}
+
+func normalizeScopedConfigPath(rawPath string) string {
+	cleaned := strings.TrimSpace(rawPath)
+	if cleaned != "" && strings.HasPrefix(cleaned, "/") && !hasScopedConfigDotSegment(cleaned) {
+		cleaned = urlpath.Clean(cleaned)
+	}
+	return cleaned
+}
+
+func hasScopedConfigDotSegment(value string) bool {
+	for _, segment := range strings.Split(value, "/") {
+		if segment == "." || segment == ".." {
+			return true
+		}
+	}
+	return false
 }
 
 func normalizeAccessRulePrincipalList(values []string) []string {
@@ -1713,6 +1725,9 @@ func (c *Config) Validate() error {
 	if err := validateTelegramAlertsConfig(c.Alerts); err != nil {
 		errs = append(errs, err)
 	}
+	if err := validateWeComAlertsConfig(c.Alerts); err != nil {
+		errs = append(errs, err)
+	}
 	logLevel := strings.ToLower(strings.TrimSpace(c.Log.Level))
 	if logLevel != "debug" && logLevel != "info" && logLevel != "warn" && logLevel != "error" {
 		errs = append(errs, fmt.Errorf("invalid log.level: %q", c.Log.Level))
@@ -1880,6 +1895,17 @@ func validateTelegramAlertsConfig(alerts AlertsConfig) error {
 		if strings.TrimSpace(alerts.TelegramChatID) == "" {
 			errs = append(errs, errors.New("alerts.telegram_chat_id is required when telegram alerts are enabled"))
 		}
+	}
+	return errors.Join(errs...)
+}
+
+func validateWeComAlertsConfig(alerts AlertsConfig) error {
+	var errs []error
+	if err := validateOptionalHTTPURL(alerts.WeComWebhookURL, "alerts.wecom_webhook_url"); err != nil {
+		errs = append(errs, err)
+	}
+	if alerts.WeComEnabled && strings.TrimSpace(alerts.WeComWebhookURL) == "" {
+		errs = append(errs, errors.New("alerts.wecom_webhook_url is required when wecom alerts are enabled"))
 	}
 	return errors.Join(errs...)
 }

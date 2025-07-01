@@ -87,6 +87,18 @@ vi.mock('@/api/activity', async (importOriginal) => {
   }
 })
 
+vi.mock('@/api/setup', () => ({
+  acknowledgeSetup: vi.fn().mockResolvedValue({ success: true, message: 'ok' }),
+  getSetupStatus: vi.fn().mockResolvedValue({
+    success: true,
+    is_first_run: false,
+    auth_enabled: true,
+    share_enabled: true,
+    webdav_enabled: true,
+    webdav_auth_type: 'basic',
+  }),
+}))
+
 // Mock navigation
 const mockNavigate = vi.fn()
 vi.mock('react-router-dom', async () => {
@@ -108,12 +120,15 @@ vi.mock('@/stores/auth', async (importOriginal) => {
 
 import { ApiError as FilesApiError, getAppVersion, getHealth, getStorageStats, listBackupJobs } from '@/api/files'
 import { ApiError, listActivity } from '@/api/activity'
+import { acknowledgeSetup, getSetupStatus } from '@/api/setup'
 
 const mockGetHealth = getHealth as ReturnType<typeof vi.fn>
 const mockGetAppVersion = getAppVersion as ReturnType<typeof vi.fn>
 const mockGetStorageStats = getStorageStats as ReturnType<typeof vi.fn>
 const mockListBackupJobs = listBackupJobs as ReturnType<typeof vi.fn>
 const mockListActivity = listActivity as ReturnType<typeof vi.fn>
+const mockAcknowledgeSetup = acknowledgeSetup as ReturnType<typeof vi.fn>
+const mockGetSetupStatus = getSetupStatus as ReturnType<typeof vi.fn>
 
 function expectListActivityCalledWithSignal(options: { limit?: number }) {
   const call = mockListActivity.mock.calls.find(([calledOptions]) => calledOptions?.limit === options.limit)
@@ -180,6 +195,15 @@ describe('DashboardPage', () => {
         { id: 'act-1', action: 'upload', path: '/docs/report.pdf', timestamp: '2024-01-15T10:00:00Z' },
       ],
     })
+    mockGetSetupStatus.mockResolvedValue({
+      success: true,
+      is_first_run: false,
+      auth_enabled: true,
+      share_enabled: true,
+      webdav_enabled: true,
+      webdav_auth_type: 'basic',
+    })
+    mockAcknowledgeSetup.mockResolvedValue({ success: true, message: 'ok' })
   })
 
   describe('loading state', () => {
@@ -212,6 +236,7 @@ describe('DashboardPage', () => {
         expectCalledWithAbortSignal(mockGetAppVersion)
         expectListActivityCalledWithSignal({ limit: 5 })
         expectCalledWithAbortSignal(mockListBackupJobs)
+        expectCalledWithAbortSignal(mockGetSetupStatus)
       })
     })
 
@@ -400,6 +425,99 @@ describe('DashboardPage', () => {
       await waitFor(() => {
         expect(screen.getByText('磁盘容量统计不可用，仅显示 CAS 数据')).toBeTruthy()
       })
+    })
+
+    it('shows first-run deployment checklist and acknowledges it explicitly', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockGetSetupStatus
+        .mockResolvedValueOnce({
+          success: true,
+          is_first_run: true,
+          auth_enabled: true,
+          share_enabled: true,
+          webdav_enabled: true,
+          webdav_auth_type: 'basic',
+        })
+        .mockResolvedValueOnce({
+          success: true,
+          is_first_run: false,
+          auth_enabled: true,
+          share_enabled: true,
+          webdav_enabled: true,
+          webdav_auth_type: 'basic',
+        })
+
+      render(<DashboardPage />)
+
+      expect(await screen.findByText('首次部署检查')).toBeTruthy()
+      expect(screen.getByText('初始登录凭据已处理')).toBeTruthy()
+      expect(screen.getByText(/initial-password.txt/)).toBeTruthy()
+      expect(screen.getByText(/分享:\s*可用/)).toBeTruthy()
+      expect(screen.getByText(/WebDAV:\s*basic/)).toBeTruthy()
+      const confirmButton = screen.getByRole('button', { name: '还需确认 4 项' })
+
+      expect(confirmButton).toBeDisabled()
+      await user.click(confirmButton)
+      expect(mockAcknowledgeSetup).not.toHaveBeenCalled()
+
+      for (const item of [
+        '初始登录凭据已处理',
+        '至少保留一个可用管理员',
+        '备份位置与恢复演练已规划',
+        '公网访问仅通过 HTTPS 反向代理',
+      ]) {
+        await user.click(screen.getByRole('checkbox', { name: new RegExp(item) }))
+      }
+
+      expect(confirmButton).not.toBeDisabled()
+      await user.click(confirmButton)
+
+      await waitFor(() => {
+        expect(mockAcknowledgeSetup).toHaveBeenCalledTimes(1)
+        expect(mockAddToast).toHaveBeenCalledWith({ title: '首次部署检查已确认', color: 'success' })
+      })
+      await waitFor(() => {
+        expect(screen.queryByText('首次部署检查')).toBeNull()
+      })
+    })
+
+    it('keeps first-run checklist visible when acknowledgement fails', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockGetSetupStatus.mockResolvedValue({
+        success: true,
+        is_first_run: true,
+        auth_enabled: true,
+        share_enabled: false,
+        webdav_enabled: false,
+        webdav_auth_type: 'none',
+      })
+      mockAcknowledgeSetup.mockRejectedValueOnce(new Error('setup acknowledge unavailable'))
+
+      render(<DashboardPage />)
+
+      expect(await screen.findByText('首次部署检查')).toBeTruthy()
+      expect(screen.getByText(/分享:\s*未启用/)).toBeTruthy()
+      expect(screen.getByText(/WebDAV:\s*未启用/)).toBeTruthy()
+
+      for (const item of [
+        '初始登录凭据已处理',
+        '至少保留一个可用管理员',
+        '备份位置与恢复演练已规划',
+        '公网访问仅通过 HTTPS 反向代理',
+      ]) {
+        await user.click(screen.getByRole('checkbox', { name: new RegExp(item) }))
+      }
+
+      await user.click(screen.getByRole('button', { name: '已确认' }))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '确认初始化失败',
+          description: 'setup acknowledge unavailable',
+          color: 'danger',
+        })
+      })
+      expect(screen.getByText('首次部署检查')).toBeTruthy()
     })
   })
 

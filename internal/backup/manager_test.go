@@ -1217,6 +1217,20 @@ func TestRestoreReportFindingsIgnoreStaleRestoreVerify(t *testing.T) {
 	}); matching != nil {
 		t.Fatalf("matchingRestoreVerifyForRestore() = %+v, want nil for failed restore", matching)
 	}
+	matchingTime := restoreFinished.Add(time.Minute)
+	if matching := matchingRestoreVerifyForRestore(&RestoreResult{
+		Status:     StatusCompleted,
+		StartedAt:  restoreStarted,
+		FinishedAt: &restoreFinished,
+		TargetPath: "/restore/parent/../new",
+	}, &RestoreVerifyResult{
+		Status:     StatusCompleted,
+		StartedAt:  matchingTime,
+		FinishedAt: &matchingTime,
+		TargetPath: "/restore/new",
+	}); matching != nil {
+		t.Fatalf("matchingRestoreVerifyForRestore() = %+v, want nil for noncanonical target mismatch", matching)
+	}
 }
 
 func TestRestoreReportMatchingUsesRawTargetsBeforeRedaction(t *testing.T) {
@@ -1809,6 +1823,26 @@ func TestManager_RunRestoreVerifyUsesRestoreSnapshotWhenNewerBackupExists(t *tes
 		t.Fatalf("RunRestoreVerify reference = (%q, %q), want first run reference (%q, %q)", verify.SnapshotPath, verify.ManifestPath, firstRun.SnapshotPath, firstRun.ManifestPath)
 	}
 	assertWarningsNotContain(t, verify.Warnings, "恢复目标文件校验失败: docs/note.txt")
+}
+
+func TestManager_LatestCompletedRestoreForTargetRequiresCanonicalTarget(t *testing.T) {
+	manager := &Manager{
+		state: persistedState{
+			Jobs: map[string]JobState{
+				"home": {
+					LastRestore: &RestoreResult{
+						Status:       StatusCompleted,
+						TargetPath:   "/restore/parent/../new",
+						SnapshotPath: "/backups/snapshots/20260520",
+					},
+				},
+			},
+		},
+	}
+
+	if restore := manager.latestCompletedRestoreForTarget("home", "/restore/new"); restore != nil {
+		t.Fatalf("latestCompletedRestoreForTarget() = %+v, want nil for noncanonical target mismatch", restore)
+	}
 }
 
 func TestManager_RunRestoreVerifyWarnsWhenRestoredConfigPathIsDirectory(t *testing.T) {
@@ -2757,6 +2791,39 @@ func TestValidateRestoreTargetPathRejectsControlCharacters(t *testing.T) {
 	}
 }
 
+func TestValidateRestoreTargetPathRejectsDotSegments(t *testing.T) {
+	tmpDir := t.TempDir()
+	source := filepath.Join(tmpDir, "source")
+	destination := filepath.Join(tmpDir, "backups")
+	storageRoot := filepath.Join(tmpDir, "storage")
+	for _, target := range []string{
+		filepath.Join(tmpDir, "restore-parent") + string(os.PathSeparator) + ".." + string(os.PathSeparator) + "restore",
+		filepath.Join(tmpDir, "restore") + string(os.PathSeparator) + "." + string(os.PathSeparator) + "target",
+	} {
+		_, err := validateRestoreTargetPath(source, destination, storageRoot, target)
+		if !errors.Is(err, ErrUnsafePath) {
+			t.Fatalf("validateRestoreTargetPath(%q) error = %v, want ErrUnsafePath", target, err)
+		}
+	}
+}
+
+func TestValidateRestoreTargetPathRejectsBackslashTargets(t *testing.T) {
+	tmpDir := t.TempDir()
+	source := filepath.Join(tmpDir, "source")
+	destination := filepath.Join(tmpDir, "backups")
+	storageRoot := filepath.Join(tmpDir, "storage")
+	for _, target := range []string{
+		filepath.Join(tmpDir, `restore\windows`),
+		`C:\restore\mnemonas`,
+		`\\server\share\restore`,
+	} {
+		_, err := validateRestoreTargetPath(source, destination, storageRoot, target)
+		if !errors.Is(err, ErrUnsafePath) || !errors.Is(err, ErrInvalidRestoreRequest) {
+			t.Fatalf("validateRestoreTargetPath(%q) error = %v, want ErrUnsafePath and ErrInvalidRestoreRequest", target, err)
+		}
+	}
+}
+
 func TestManager_RunRestoreRejectsTargetSymlinkAncestor(t *testing.T) {
 	tmpDir := t.TempDir()
 	source := filepath.Join(tmpDir, "source")
@@ -3149,7 +3216,7 @@ func TestManager_RunBatchRestorePreviewAndRestore(t *testing.T) {
 	}
 
 	restoreA := filepath.Join(tmpDir, "restore-a")
-	restoreARaw := filepath.Join(tmpDir, "restore-parent") + string(os.PathSeparator) + ".." + string(os.PathSeparator) + "restore-a"
+	restoreARaw := restoreA + string(os.PathSeparator)
 	preview, err := manager.RunBatchRestorePreview(context.Background(), BatchRestoreOptions{
 		Items: []BatchRestoreItemOptions{
 			{JobID: "home", TargetPath: restoreARaw},
@@ -3173,7 +3240,7 @@ func TestManager_RunBatchRestorePreviewAndRestore(t *testing.T) {
 	}
 
 	restoreB := filepath.Join(tmpDir, "restore-b")
-	restoreBRaw := filepath.Join(tmpDir, "restore-parent") + string(os.PathSeparator) + ".." + string(os.PathSeparator) + "restore-b"
+	restoreBRaw := restoreB + string(os.PathSeparator)
 	restore, err := manager.RunBatchRestore(context.Background(), BatchRestoreOptions{
 		Items: []BatchRestoreItemOptions{
 			{JobID: "home", TargetPath: restoreA},
@@ -3219,6 +3286,87 @@ func TestManager_RunBatchRestorePreviewAndRestore(t *testing.T) {
 		t.Fatalf("second partial batch item = %+v, want target conflict", partial.Items[1])
 	}
 	assertFileContent(t, filepath.Join(restoreC, "docs", "note.txt"), "batch restore")
+}
+
+func TestManager_BatchRestoreRejectsDotSegmentTargets(t *testing.T) {
+	tmpDir := t.TempDir()
+	source := filepath.Join(tmpDir, "source")
+	destination := filepath.Join(tmpDir, "backups")
+	mustWriteFile(t, filepath.Join(source, "docs", "note.txt"), "batch restore")
+
+	manager, err := NewManager(ManagerConfig{
+		Root:        filepath.Join(tmpDir, "state"),
+		StorageRoot: source,
+		Jobs: []config.BackupJobConfig{{
+			ID:          "home",
+			Name:        "Home backup",
+			Type:        JobTypeLocal,
+			Source:      source,
+			Destination: destination,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("NewManager() error: %v", err)
+	}
+	if _, err := manager.RunJob(context.Background(), "home"); err != nil {
+		t.Fatalf("RunJob() error: %v", err)
+	}
+
+	dotDotTarget := filepath.Join(tmpDir, "restore-parent") + string(os.PathSeparator) + ".." + string(os.PathSeparator) + "restore-a"
+	_, err = manager.RunBatchRestorePreview(context.Background(), BatchRestoreOptions{
+		Items: []BatchRestoreItemOptions{{JobID: "home", TargetPath: dotDotTarget}},
+	})
+	if !errors.Is(err, ErrUnsafePath) || !errors.Is(err, ErrInvalidRestoreRequest) {
+		t.Fatalf("RunBatchRestorePreview() error = %v, want ErrUnsafePath and ErrInvalidRestoreRequest", err)
+	}
+
+	dotTarget := filepath.Join(tmpDir, "restore-b") + string(os.PathSeparator) + "." + string(os.PathSeparator) + "target"
+	_, err = manager.RunBatchRestore(context.Background(), BatchRestoreOptions{
+		Items: []BatchRestoreItemOptions{{JobID: "home", TargetPath: dotTarget}},
+	})
+	if !errors.Is(err, ErrUnsafePath) || !errors.Is(err, ErrInvalidRestoreRequest) {
+		t.Fatalf("RunBatchRestore() error = %v, want ErrUnsafePath and ErrInvalidRestoreRequest", err)
+	}
+}
+
+func TestManager_BatchRestoreRejectsBackslashTargetsBeforeRunning(t *testing.T) {
+	tmpDir := t.TempDir()
+	source := filepath.Join(tmpDir, "source")
+	destination := filepath.Join(tmpDir, "backups")
+	mustWriteFile(t, filepath.Join(source, "docs", "note.txt"), "batch restore")
+
+	manager, err := NewManager(ManagerConfig{
+		Root:        filepath.Join(tmpDir, "state"),
+		StorageRoot: source,
+		Jobs: []config.BackupJobConfig{{
+			ID:          "home",
+			Name:        "Home backup",
+			Type:        JobTypeLocal,
+			Source:      source,
+			Destination: destination,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("NewManager() error: %v", err)
+	}
+	if _, err := manager.RunJob(context.Background(), "home"); err != nil {
+		t.Fatalf("RunJob() error: %v", err)
+	}
+
+	restoreTarget := filepath.Join(tmpDir, "restore-valid")
+	backslashTarget := filepath.Join(tmpDir, `restore\windows`)
+	_, err = manager.RunBatchRestore(context.Background(), BatchRestoreOptions{
+		Items: []BatchRestoreItemOptions{
+			{JobID: "home", TargetPath: restoreTarget},
+			{JobID: "home", TargetPath: backslashTarget},
+		},
+	})
+	if !errors.Is(err, ErrUnsafePath) || !errors.Is(err, ErrInvalidRestoreRequest) {
+		t.Fatalf("RunBatchRestore() error = %v, want ErrUnsafePath and ErrInvalidRestoreRequest", err)
+	}
+	if _, statErr := os.Stat(restoreTarget); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("restore target stat error = %v, want not exist", statErr)
+	}
 }
 
 func TestFinishBatchRestoreAggregatesPostRestoreVerifyTotals(t *testing.T) {

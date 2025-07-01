@@ -1,5 +1,6 @@
+import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { Card, CardBody, CardHeader, Skeleton, Button, Chip, addToast } from '@heroui/react'
+import { Card, CardBody, CardHeader, Skeleton, Button, Checkbox, Chip, addToast } from '@heroui/react'
 import { 
   HardDrive, 
   FileBox, 
@@ -24,10 +25,12 @@ import {
   Database,
   Archive,
   RefreshCw,
+  CheckCircle2,
 } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
 import { ApiError as FilesApiError, getAppVersion, getHealth, getStorageStats, listBackupJobs, type BackupJob } from '@/api/files'
 import { ApiError as ActivityApiError, listActivity, getActionLabel, getActionColor, type ActionType, type ActivityEntry } from '@/api/activity'
+import { acknowledgeSetup, getSetupStatus, type SetupStatusResponse } from '@/api/setup'
 import { formatBytes, cn, formatRelativeTime, formatUptimeSeconds } from '@/lib/utils'
 import { areDiskStatsAvailable, clampUsagePercent, formatUsagePercent, getDiskSpaceStatus } from '@/lib/storageStats'
 import { getInvalidHomeDirDescription, invalidHomeDirTitle, resolveUserHomeScope } from '@/lib/userScope'
@@ -159,6 +162,36 @@ function getBackupIssueCount(jobs: BackupJob[]): number {
   )).length
 }
 
+function getSetupFeatureStatus(status: SetupStatusResponse): Array<{ label: string; value: string }> {
+  return [
+    { label: '分享', value: status.share_enabled === false ? '未启用' : '可用' },
+    { label: 'WebDAV', value: status.webdav_enabled ? status.webdav_auth_type : '未启用' },
+  ]
+}
+
+const setupChecklistItems = [
+  {
+    id: 'initial-password',
+    label: '初始登录凭据已处理',
+    description: '确认已完成首次登录，并已修改密码或妥善处理 initial-password.txt。',
+  },
+  {
+    id: 'admin-redundancy',
+    label: '至少保留一个可用管理员',
+    description: '确认管理员账号可登录，生产环境建议准备第二个管理员。',
+  },
+  {
+    id: 'backup-plan',
+    label: '备份位置与恢复演练已规划',
+    description: '外置盘或远端备份不应位于同一个数据目录内。',
+  },
+  {
+    id: 'public-entry',
+    label: '公网访问仅通过 HTTPS 反向代理',
+    description: '不要把 8080、9090 或 9091 后端端口直接暴露到公网。',
+  },
+] as const
+
 function getBackupOverview(
   isAdmin: boolean,
   jobs: BackupJob[] | undefined,
@@ -269,6 +302,8 @@ export function DashboardPage() {
   const navigate = useNavigate()
   const isAdmin = useIsAdmin()
   const user = useUser()
+  const [isAcknowledgingSetup, setIsAcknowledgingSetup] = useState(false)
+  const [setupChecklist, setSetupChecklist] = useState<Record<string, boolean>>({})
   const authScopeKey = user?.id ?? 'anonymous'
   const { rootPath, hasInvalidHomeDir } = resolveUserHomeScope(user)
   const homeScopeKey = hasInvalidHomeDir ? '__invalid__' : (rootPath ?? '/')
@@ -304,20 +339,27 @@ export function DashboardPage() {
     enabled: isAdmin,
     refetchInterval: 60000,
   })
+  const { data: setupStatus, error: setupStatusError, refetch: refetchSetupStatus } = useQuery({
+    queryKey: ['setup-status', authScopeKey],
+    queryFn: ({ signal }) => getSetupStatus({ signal }),
+    enabled: isAdmin,
+    staleTime: 30000,
+  })
 
   const isLoading = healthLoading || statsLoading || versionLoading
-  const hasPartialError = Boolean(healthError || statsError || versionError || recentActivityError || backupError)
+  const hasPartialError = Boolean(healthError || statsError || versionError || recentActivityError || backupError || setupStatusError)
   const recentActivityErrorPresentation = recentActivityError
     ? getRecentActivityErrorPresentation(recentActivityError)
     : null
 
   const handleRetry = async () => {
-    const [healthResult, statsResult, versionResult, recentActivityResult, backupResult] = await Promise.all([
+    const [healthResult, statsResult, versionResult, recentActivityResult, backupResult, setupResult] = await Promise.all([
       refetchHealth(),
       refetchStats(),
       refetchVersion(),
       refetchRecentActivity(),
       isAdmin ? refetchBackupJobs() : Promise.resolve({ error: null }),
+      isAdmin ? refetchSetupStatus() : Promise.resolve({ error: null }),
     ])
     const refreshErrors = [
       healthResult.error,
@@ -325,6 +367,7 @@ export function DashboardPage() {
       versionResult.error,
       recentActivityResult.error,
       isAdmin ? backupResult.error : null,
+      isAdmin ? setupResult.error : null,
     ].filter((error): error is Error => Boolean(error))
 
     if (refreshErrors.length > 0) {
@@ -333,6 +376,34 @@ export function DashboardPage() {
     }
 
     addToast({ title: '首页已刷新', color: 'success' })
+  }
+
+  const handleAcknowledgeSetup = async () => {
+    const isSetupChecklistComplete = setupChecklistItems.every((item) => setupChecklist[item.id])
+    if (!isSetupChecklistComplete) {
+      addToast({
+        title: '请先完成首次部署检查',
+        description: '逐项确认后再关闭首次运行提示。',
+        color: 'warning',
+      })
+      return
+    }
+
+    setIsAcknowledgingSetup(true)
+    try {
+      await acknowledgeSetup()
+      await refetchSetupStatus()
+      setSetupChecklist({})
+      addToast({ title: '首次部署检查已确认', color: 'success' })
+    } catch (error) {
+      addToast({
+        title: '确认初始化失败',
+        description: error instanceof Error && error.message ? error.message : '请稍后重试。',
+        color: 'danger',
+      })
+    } finally {
+      setIsAcknowledgingSetup(false)
+    }
   }
 
   if (isLoading) {
@@ -385,6 +456,8 @@ export function DashboardPage() {
   const fileCountKnown = stats?.fileCountAvailable === true
   const storageUsageValue = diskStatsKnown ? formatStorageSize(stats?.diskUsed) : formatStorageSize(stats?.totalSize)
   const backupOverview = getBackupOverview(isAdmin, backupJobs, backupLoading, backupError)
+  const isSetupChecklistComplete = setupChecklistItems.every((item) => setupChecklist[item.id])
+  const remainingSetupChecklistItems = setupChecklistItems.filter((item) => !setupChecklist[item.id]).length
 
   const statsCards = [
     {
@@ -487,6 +560,67 @@ export function DashboardPage() {
             <div>
               <p className="text-sm font-medium text-foreground">{invalidHomeDirTitle}</p>
               <p className="text-xs text-default-600">{getInvalidHomeDirDescription('查看空间和最近操作')}</p>
+            </div>
+          </CardBody>
+        </Card>
+      )}
+
+      {setupStatus?.is_first_run && (
+        <Card className="border-accent-primary/25 bg-accent-primary/5 shadow-none">
+          <CardBody className="space-y-4">
+            <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+              <div className="flex items-start gap-3">
+                <CheckCircle2 size={18} className="mt-0.5 shrink-0 text-accent-primary" />
+                <div>
+                  <p className="text-sm font-medium text-foreground">首次部署检查</p>
+                  <p className="text-xs text-default-600">确认关键入口后关闭首次运行提示。</p>
+                </div>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {getSetupFeatureStatus(setupStatus).map((item) => (
+                  <Chip key={item.label} size="sm" variant="flat" className="rounded-lg">
+                    {item.label}: {item.value}
+                  </Chip>
+                ))}
+              </div>
+            </div>
+            <div className="grid grid-cols-1 gap-2 md:grid-cols-2">
+              {setupChecklistItems.map((item) => (
+                <Checkbox
+                  key={item.id}
+                  isSelected={setupChecklist[item.id] === true}
+                  onValueChange={(selected) => {
+                    setSetupChecklist((current) => ({ ...current, [item.id]: selected }))
+                  }}
+                  className="m-0 rounded-lg bg-content1/60 px-3 py-2"
+                  classNames={{
+                    label: 'w-full',
+                  }}
+                >
+                  <span className="block text-xs font-medium text-foreground">{item.label}</span>
+                  <span className="block text-xs text-default-500">{item.description}</span>
+                </Checkbox>
+              ))}
+            </div>
+            <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center">
+              <Button size="sm" variant="flat" className="rounded-lg" onPress={() => navigate('/users')}>
+                用户
+              </Button>
+              <Button size="sm" variant="flat" className="rounded-lg" onPress={() => navigate('/maintenance')}>
+                备份
+              </Button>
+              <Button size="sm" variant="flat" className="rounded-lg" onPress={() => navigate('/settings')}>
+                公网设置
+              </Button>
+              <Button
+                size="sm"
+                className="rounded-lg bg-accent-primary text-white"
+                isDisabled={!isSetupChecklistComplete}
+                isLoading={isAcknowledgingSetup}
+                onPress={handleAcknowledgeSetup}
+              >
+                {isSetupChecklistComplete ? '已确认' : `还需确认 ${remainingSetupChecklistItems} 项`}
+              </Button>
             </div>
           </CardBody>
         </Card>
