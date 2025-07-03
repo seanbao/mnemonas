@@ -27,6 +27,46 @@ var errEmptyActivityID = errors.New("activity ID must not be empty")
 var errNoncanonicalActivityID = errors.New("activity ID must not contain surrounding whitespace")
 var errInvalidActivityPath = errors.New("invalid activity path")
 
+// ErrInvalidReviewRecord reports invalid activity review disposition input.
+var ErrInvalidReviewRecord = errors.New("invalid activity review record")
+
+// ErrReviewRecordNotFound reports a missing persisted activity review record.
+var ErrReviewRecordNotFound = errors.New("activity review record not found")
+
+const maxActivityReviewRecords = 1000
+const maxActivityReviewNoteLength = 1000
+const maxActivityReviewScopeLength = 80
+const maxActivityReviewFilterSummaryLength = 512
+const maxActivityReviewReviewerLength = 128
+const maxActivityReviewEntryIDs = 500
+const maxActivityReviewSamples = 10
+
+// ReviewDispositionStatus classifies the operational outcome recorded for reviewed activity entries.
+type ReviewDispositionStatus string
+
+const (
+	ReviewDispositionDocumented    ReviewDispositionStatus = "documented"
+	ReviewDispositionConfirmed     ReviewDispositionStatus = "confirmed"
+	ReviewDispositionRestored      ReviewDispositionStatus = "restored"
+	ReviewDispositionDisabled      ReviewDispositionStatus = "disabled"
+	ReviewDispositionNeedsFollowUp ReviewDispositionStatus = "needs_follow_up"
+)
+
+func normalizeReviewDispositionStatus(status ReviewDispositionStatus) (ReviewDispositionStatus, error) {
+	switch status {
+	case "":
+		return ReviewDispositionDocumented, nil
+	case ReviewDispositionDocumented,
+		ReviewDispositionConfirmed,
+		ReviewDispositionRestored,
+		ReviewDispositionDisabled,
+		ReviewDispositionNeedsFollowUp:
+		return status, nil
+	default:
+		return "", fmt.Errorf("%w: disposition_status is invalid", ErrInvalidReviewRecord)
+	}
+}
+
 type activityLogFormatError struct {
 	err error
 }
@@ -224,13 +264,60 @@ type ListFilter struct {
 	Until   *time.Time
 }
 
+// ReviewRecord represents a persisted review disposition for a set of activity entries.
+type ReviewRecord struct {
+	ID                string                  `json:"id"`
+	ReviewedAt        time.Time               `json:"reviewed_at"`
+	Reviewer          string                  `json:"reviewer"`
+	Note              string                  `json:"note"`
+	ScopeLabel        string                  `json:"scope_label"`
+	FilterSummary     string                  `json:"filter_summary"`
+	DispositionStatus ReviewDispositionStatus `json:"disposition_status"`
+	ActionCounts      map[ActionType]int      `json:"action_counts,omitempty"`
+	ReviewCount       int                     `json:"review_count"`
+	TotalCount        int                     `json:"total_count"`
+	PathCount         int                     `json:"path_count"`
+	UserCount         int                     `json:"user_count"`
+	PathSamples       []string                `json:"path_samples,omitempty"`
+	UserSamples       []string                `json:"user_samples,omitempty"`
+	ActivityEntryIDs  []string                `json:"activity_entry_ids"`
+}
+
+// ReviewRecordInput contains user-visible review disposition data before persistence.
+type ReviewRecordInput struct {
+	Reviewer          string
+	Note              string
+	ScopeLabel        string
+	FilterSummary     string
+	DispositionStatus ReviewDispositionStatus
+	ActionCounts      map[ActionType]int
+	ReviewCount       int
+	TotalCount        int
+	PathCount         int
+	UserCount         int
+	PathSamples       []string
+	UserSamples       []string
+	ActivityEntryIDs  []string
+}
+
+// ReviewRecordFilter limits activity review record queries.
+type ReviewRecordFilter struct {
+	Reviewer          string
+	ActivityEntryID   string
+	DispositionStatus ReviewDispositionStatus
+	Since             *time.Time
+	Until             *time.Time
+}
+
 // Store manages activity log storage
 type Store struct {
-	root    string
-	entries []Entry
-	mu      sync.RWMutex
-	writeMu sync.Mutex
-	maxSize int // Maximum number of entries to keep in memory
+	root          string
+	entries       []Entry
+	reviewRecords []ReviewRecord
+	mu            sync.RWMutex
+	writeMu       sync.Mutex
+	maxSize       int // Maximum number of entries to keep in memory
+	reviewMaxSize int // Maximum number of review records to keep in memory
 }
 
 var activityLogWriter = writeActivityLogFile
@@ -276,6 +363,20 @@ func copyEntry(entry Entry) Entry {
 	return clone
 }
 
+func copyReviewRecord(record ReviewRecord) ReviewRecord {
+	clone := record
+	if record.ActionCounts != nil {
+		clone.ActionCounts = make(map[ActionType]int, len(record.ActionCounts))
+		for action, count := range record.ActionCounts {
+			clone.ActionCounts[action] = count
+		}
+	}
+	clone.PathSamples = append([]string(nil), record.PathSamples...)
+	clone.UserSamples = append([]string(nil), record.UserSamples...)
+	clone.ActivityEntryIDs = append([]string(nil), record.ActivityEntryIDs...)
+	return clone
+}
+
 // DetailKeyMayContainPath reports whether an activity detail key conventionally stores a MnemoNAS path.
 func DetailKeyMayContainPath(key string) bool {
 	switch strings.ToLower(strings.TrimSpace(key)) {
@@ -305,9 +406,11 @@ func NewStore(root string) (*Store, error) {
 	}
 
 	s := &Store{
-		root:    filepath.Dir(normalizedLogPath),
-		entries: make([]Entry, 0),
-		maxSize: 10000, // Keep last 10000 entries in memory
+		root:          filepath.Dir(normalizedLogPath),
+		entries:       make([]Entry, 0),
+		reviewRecords: make([]ReviewRecord, 0),
+		maxSize:       10000, // Keep last 10000 entries in memory
+		reviewMaxSize: maxActivityReviewRecords,
 	}
 
 	// Load existing entries
@@ -319,6 +422,14 @@ func NewStore(root string) (*Store, error) {
 			)
 		}
 	}
+	if err := s.loadReviewRecords(); err != nil {
+		if recoverErr := s.recoverCorruptReviewRecords(err); recoverErr != nil {
+			return nil, errors.Join(
+				fmt.Errorf("load activity review records: %w", err),
+				fmt.Errorf("recover corrupt activity review records: %w", recoverErr),
+			)
+		}
+	}
 
 	return s, nil
 }
@@ -326,6 +437,10 @@ func NewStore(root string) (*Store, error) {
 // logFilePath returns the path to the current log file
 func (s *Store) logFilePath() string {
 	return filepath.Join(s.root, "activity.json")
+}
+
+func (s *Store) reviewRecordsFilePath() string {
+	return filepath.Join(s.root, "activity_reviews.json")
 }
 
 // load reads entries from disk
@@ -345,6 +460,25 @@ func (s *Store) load() error {
 	}
 
 	s.entries = entries
+	return nil
+}
+
+func (s *Store) loadReviewRecords() error {
+	file, err := openRegisteredActivityLogFile(s.reviewRecordsFilePath())
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	records, err := decodeActivityReviewRecords(file, s.reviewMaxSize)
+	if err != nil {
+		return err
+	}
+
+	s.reviewRecords = records
 	return nil
 }
 
@@ -395,6 +529,98 @@ func decodeActivityEntries(reader io.Reader, maxSize int) ([]Entry, error) {
 	return nil, wrapActivityLogFormatError(fmt.Errorf("failed to parse activity log: trailing data after array (%v)", extraToken))
 }
 
+func decodeActivityReviewRecords(reader io.Reader, maxSize int) ([]ReviewRecord, error) {
+	decoder := json.NewDecoder(reader)
+
+	startToken, err := decoder.Token()
+	if err != nil {
+		return nil, err
+	}
+	startDelim, ok := startToken.(json.Delim)
+	if !ok || startDelim != '[' {
+		return nil, wrapActivityLogFormatError(errors.New("failed to parse activity review records: expected JSON array"))
+	}
+
+	records := make([]ReviewRecord, 0)
+	seenIDs := make(map[string]struct{})
+	for decoder.More() {
+		var record ReviewRecord
+		if err := decoder.Decode(&record); err != nil {
+			return nil, err
+		}
+		if err := validateDecodedActivityReviewRecord(&record, seenIDs); err != nil {
+			return nil, wrapActivityLogFormatError(err)
+		}
+		if maxSize <= 0 || len(records) < maxSize {
+			records = append(records, record)
+		}
+	}
+
+	endToken, err := decoder.Token()
+	if err != nil {
+		return nil, err
+	}
+	endDelim, ok := endToken.(json.Delim)
+	if !ok || endDelim != ']' {
+		return nil, wrapActivityLogFormatError(errors.New("failed to parse activity review records: expected closing array delimiter"))
+	}
+
+	extraToken, err := decoder.Token()
+	if errors.Is(err, io.EOF) {
+		return records, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	return nil, wrapActivityLogFormatError(fmt.Errorf("failed to parse activity review records: trailing data after array (%v)", extraToken))
+}
+
+func validateDecodedActivityReviewRecord(record *ReviewRecord, seenIDs map[string]struct{}) error {
+	if err := validateActivityID(record.ID); err != nil {
+		return err
+	}
+	if _, ok := seenIDs[record.ID]; ok {
+		return fmt.Errorf("%w: %q", errDuplicateActivityID, record.ID)
+	}
+	seenIDs[record.ID] = struct{}{}
+	if err := validateActivityTimestamp(record.ReviewedAt); err != nil {
+		return err
+	}
+	normalized, err := normalizeActivityReviewRecordInput(ReviewRecordInput{
+		Reviewer:          record.Reviewer,
+		Note:              record.Note,
+		ScopeLabel:        record.ScopeLabel,
+		FilterSummary:     record.FilterSummary,
+		DispositionStatus: record.DispositionStatus,
+		ActionCounts:      record.ActionCounts,
+		ReviewCount:       record.ReviewCount,
+		TotalCount:        record.TotalCount,
+		PathCount:         record.PathCount,
+		UserCount:         record.UserCount,
+		PathSamples:       record.PathSamples,
+		UserSamples:       record.UserSamples,
+		ActivityEntryIDs:  record.ActivityEntryIDs,
+	})
+	if err != nil {
+		return err
+	}
+	record.Reviewer = normalized.Reviewer
+	record.Note = normalized.Note
+	record.ScopeLabel = normalized.ScopeLabel
+	record.FilterSummary = normalized.FilterSummary
+	record.DispositionStatus = normalized.DispositionStatus
+	record.ActionCounts = normalized.ActionCounts
+	record.ReviewCount = normalized.ReviewCount
+	record.TotalCount = normalized.TotalCount
+	record.PathCount = normalized.PathCount
+	record.UserCount = normalized.UserCount
+	record.PathSamples = normalized.PathSamples
+	record.UserSamples = normalized.UserSamples
+	record.ActivityEntryIDs = normalized.ActivityEntryIDs
+	return nil
+}
+
 func (s *Store) recoverCorruptLog(loadErr error) error {
 	if !isRecoverableActivityLogError(loadErr) {
 		return loadErr
@@ -421,6 +647,36 @@ func (s *Store) recoverCorruptLog(loadErr error) error {
 	}
 
 	s.entries = make([]Entry, 0)
+	return nil
+}
+
+func (s *Store) recoverCorruptReviewRecords(loadErr error) error {
+	if !isRecoverableActivityLogError(loadErr) {
+		return loadErr
+	}
+
+	reviewPath := s.reviewRecordsFilePath()
+	corruptPath := fmt.Sprintf("%s.corrupt.%d", reviewPath, time.Now().UnixNano())
+	if err := renameRegisteredActivityLogFile(reviewPath, corruptPath); err != nil {
+		return fmt.Errorf("backup corrupt activity review records: %w", err)
+	}
+	if err := syncRegisteredActivityLogDir(reviewPath); err != nil {
+		if rollbackErr := renameRegisteredActivityLogFile(corruptPath, reviewPath); rollbackErr != nil {
+			return errors.Join(
+				fmt.Errorf("sync corrupt activity review records directory: %w", err),
+				fmt.Errorf("rollback corrupt activity review records backup: %w", rollbackErr),
+			)
+		}
+		if rollbackSyncErr := syncRegisteredActivityLogDir(reviewPath); rollbackSyncErr != nil {
+			return errors.Join(
+				fmt.Errorf("sync corrupt activity review records directory: %w", err),
+				fmt.Errorf("sync corrupt activity review records rollback: %w", rollbackSyncErr),
+			)
+		}
+		return fmt.Errorf("sync corrupt activity review records directory: %w", err)
+	}
+
+	s.reviewRecords = make([]ReviewRecord, 0)
 	return nil
 }
 
@@ -452,8 +708,24 @@ func saveEntries(path string, entries []Entry) error {
 	return activityLogWriter(path, data)
 }
 
+func saveReviewRecords(path string, records []ReviewRecord) error {
+	data, err := json.MarshalIndent(records, "", "  ")
+	if err != nil {
+		return err
+	}
+	return activityLogWriter(path, data)
+}
+
 func cloneEntries(entries []Entry) []Entry {
 	return append([]Entry(nil), entries...)
+}
+
+func cloneReviewRecords(records []ReviewRecord) []ReviewRecord {
+	cloned := make([]ReviewRecord, len(records))
+	for i, record := range records {
+		cloned[i] = copyReviewRecord(record)
+	}
+	return cloned
 }
 
 func (s *Store) updateEntries(mutator func([]Entry) ([]Entry, error)) error {
@@ -475,6 +747,29 @@ func (s *Store) updateEntries(mutator func([]Entry) ([]Entry, error)) error {
 
 	s.mu.Lock()
 	s.entries = nextEntries
+	s.mu.Unlock()
+	return nil
+}
+
+func (s *Store) updateReviewRecords(mutator func([]ReviewRecord) ([]ReviewRecord, error)) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
+	s.mu.RLock()
+	currentRecords := cloneReviewRecords(s.reviewRecords)
+	reviewPath := s.reviewRecordsFilePath()
+	s.mu.RUnlock()
+
+	nextRecords, err := mutator(currentRecords)
+	if err != nil {
+		return err
+	}
+	if err := saveReviewRecords(reviewPath, nextRecords); err != nil {
+		return err
+	}
+
+	s.mu.Lock()
+	s.reviewRecords = nextRecords
 	s.mu.Unlock()
 	return nil
 }
@@ -921,6 +1216,221 @@ func generateUniqueActivityID(entries []Entry) (string, error) {
 	return "", errors.New("generate unique activity ID: collision limit exceeded")
 }
 
+func generateUniqueActivityReviewID(records []ReviewRecord) (string, error) {
+	existing := make(map[string]struct{}, len(records))
+	for _, record := range records {
+		existing[record.ID] = struct{}{}
+	}
+
+	var invalidIDErr error
+	for attempt := 0; attempt < maxActivityIDAttempts; attempt++ {
+		id, err := activityIDGenerator()
+		if err != nil {
+			return "", fmt.Errorf("generate activity review ID: %w", err)
+		}
+		if err := validateActivityID(id); err != nil {
+			invalidIDErr = err
+			continue
+		}
+		if _, ok := existing[id]; !ok {
+			return id, nil
+		}
+	}
+
+	if invalidIDErr != nil {
+		return "", invalidIDErr
+	}
+	return "", errors.New("generate unique activity review ID: collision limit exceeded")
+}
+
+func normalizeActivityReviewText(value string, maxBytes int, field string) (string, error) {
+	normalized := strings.TrimSpace(value)
+	if normalized == "" {
+		return "", fmt.Errorf("%w: %s is required", ErrInvalidReviewRecord, field)
+	}
+	if strings.ContainsRune(normalized, '\x00') {
+		return "", fmt.Errorf("%w: %s contains a NUL byte", ErrInvalidReviewRecord, field)
+	}
+	if len(normalized) > maxBytes {
+		return "", fmt.Errorf("%w: %s is too long", ErrInvalidReviewRecord, field)
+	}
+	return normalized, nil
+}
+
+func normalizeOptionalActivityReviewText(value string, maxBytes int, field string) (string, error) {
+	normalized := strings.TrimSpace(value)
+	if normalized == "" {
+		return "", nil
+	}
+	if strings.ContainsRune(normalized, '\x00') {
+		return "", fmt.Errorf("%w: %s contains a NUL byte", ErrInvalidReviewRecord, field)
+	}
+	if len(normalized) > maxBytes {
+		return "", fmt.Errorf("%w: %s is too long", ErrInvalidReviewRecord, field)
+	}
+	return normalized, nil
+}
+
+func normalizeActivityReviewEntryIDs(values []string) ([]string, error) {
+	if len(values) == 0 {
+		return nil, fmt.Errorf("%w: activity_entry_ids is required", ErrInvalidReviewRecord)
+	}
+	if len(values) > maxActivityReviewEntryIDs {
+		return nil, fmt.Errorf("%w: too many activity_entry_ids", ErrInvalidReviewRecord)
+	}
+	seen := make(map[string]struct{}, len(values))
+	normalized := make([]string, 0, len(values))
+	for _, value := range values {
+		id := strings.TrimSpace(value)
+		if err := validateActivityID(id); err != nil {
+			return nil, fmt.Errorf("%w: invalid activity_entry_ids", ErrInvalidReviewRecord)
+		}
+		if _, ok := seen[id]; ok {
+			return nil, fmt.Errorf("%w: duplicate activity_entry_ids", ErrInvalidReviewRecord)
+		}
+		seen[id] = struct{}{}
+		normalized = append(normalized, id)
+	}
+	return normalized, nil
+}
+
+func normalizeActivityReviewActionCounts(values map[ActionType]int, reviewCount int) (map[ActionType]int, error) {
+	if len(values) == 0 {
+		return nil, nil
+	}
+	normalized := make(map[ActionType]int, len(values))
+	total := 0
+	for action, count := range values {
+		if err := validateActivityAction(action); err != nil {
+			return nil, fmt.Errorf("%w: action_counts contains an unknown action", ErrInvalidReviewRecord)
+		}
+		if count <= 0 {
+			return nil, fmt.Errorf("%w: action_counts must be positive", ErrInvalidReviewRecord)
+		}
+		normalized[action] = count
+		total += count
+	}
+	if total != reviewCount {
+		return nil, fmt.Errorf("%w: action_counts must add up to review_count", ErrInvalidReviewRecord)
+	}
+	return normalized, nil
+}
+
+func normalizeActivityReviewPathSamples(values []string) ([]string, error) {
+	if len(values) == 0 {
+		return nil, nil
+	}
+	if len(values) > maxActivityReviewSamples {
+		return nil, fmt.Errorf("%w: too many path_samples", ErrInvalidReviewRecord)
+	}
+	seen := make(map[string]struct{}, len(values))
+	normalized := make([]string, 0, len(values))
+	for _, value := range values {
+		if strings.TrimSpace(value) == "" {
+			return nil, fmt.Errorf("%w: path_samples contains an empty path", ErrInvalidReviewRecord)
+		}
+		pathValue, err := normalizeActivityEntryPath(value)
+		if err != nil || pathValue == "" {
+			return nil, fmt.Errorf("%w: path_samples contains an invalid path", ErrInvalidReviewRecord)
+		}
+		if _, ok := seen[pathValue]; ok {
+			return nil, fmt.Errorf("%w: duplicate path_samples", ErrInvalidReviewRecord)
+		}
+		seen[pathValue] = struct{}{}
+		normalized = append(normalized, pathValue)
+	}
+	return normalized, nil
+}
+
+func normalizeActivityReviewUserSamples(values []string) ([]string, error) {
+	if len(values) == 0 {
+		return nil, nil
+	}
+	if len(values) > maxActivityReviewSamples {
+		return nil, fmt.Errorf("%w: too many user_samples", ErrInvalidReviewRecord)
+	}
+	seen := make(map[string]struct{}, len(values))
+	normalized := make([]string, 0, len(values))
+	for _, value := range values {
+		user, err := normalizeActivityReviewText(value, maxActivityReviewReviewerLength, "user_samples")
+		if err != nil {
+			return nil, err
+		}
+		if _, ok := seen[user]; ok {
+			return nil, fmt.Errorf("%w: duplicate user_samples", ErrInvalidReviewRecord)
+		}
+		seen[user] = struct{}{}
+		normalized = append(normalized, user)
+	}
+	return normalized, nil
+}
+
+func normalizeActivityReviewRecordInput(input ReviewRecordInput) (ReviewRecordInput, error) {
+	reviewer, err := normalizeActivityReviewText(input.Reviewer, maxActivityReviewReviewerLength, "reviewer")
+	if err != nil {
+		return ReviewRecordInput{}, err
+	}
+	note, err := normalizeActivityReviewText(input.Note, maxActivityReviewNoteLength, "note")
+	if err != nil {
+		return ReviewRecordInput{}, err
+	}
+	scopeLabel, err := normalizeActivityReviewText(input.ScopeLabel, maxActivityReviewScopeLength, "scope_label")
+	if err != nil {
+		return ReviewRecordInput{}, err
+	}
+	filterSummary, err := normalizeOptionalActivityReviewText(input.FilterSummary, maxActivityReviewFilterSummaryLength, "filter_summary")
+	if err != nil {
+		return ReviewRecordInput{}, err
+	}
+	dispositionStatus, err := normalizeReviewDispositionStatus(input.DispositionStatus)
+	if err != nil {
+		return ReviewRecordInput{}, err
+	}
+	entryIDs, err := normalizeActivityReviewEntryIDs(input.ActivityEntryIDs)
+	if err != nil {
+		return ReviewRecordInput{}, err
+	}
+	if input.ReviewCount <= 0 {
+		return ReviewRecordInput{}, fmt.Errorf("%w: review_count must be positive", ErrInvalidReviewRecord)
+	}
+	actionCounts, err := normalizeActivityReviewActionCounts(input.ActionCounts, input.ReviewCount)
+	if err != nil {
+		return ReviewRecordInput{}, err
+	}
+	if input.TotalCount < input.ReviewCount {
+		return ReviewRecordInput{}, fmt.Errorf("%w: total_count must cover review_count", ErrInvalidReviewRecord)
+	}
+	if input.PathCount < 0 {
+		return ReviewRecordInput{}, fmt.Errorf("%w: path_count must be non-negative", ErrInvalidReviewRecord)
+	}
+	if input.UserCount < 0 {
+		return ReviewRecordInput{}, fmt.Errorf("%w: user_count must be non-negative", ErrInvalidReviewRecord)
+	}
+	pathSamples, err := normalizeActivityReviewPathSamples(input.PathSamples)
+	if err != nil {
+		return ReviewRecordInput{}, err
+	}
+	userSamples, err := normalizeActivityReviewUserSamples(input.UserSamples)
+	if err != nil {
+		return ReviewRecordInput{}, err
+	}
+	return ReviewRecordInput{
+		Reviewer:          reviewer,
+		Note:              note,
+		ScopeLabel:        scopeLabel,
+		FilterSummary:     filterSummary,
+		DispositionStatus: dispositionStatus,
+		ActionCounts:      actionCounts,
+		ReviewCount:       input.ReviewCount,
+		TotalCount:        input.TotalCount,
+		PathCount:         input.PathCount,
+		UserCount:         input.UserCount,
+		PathSamples:       pathSamples,
+		UserSamples:       userSamples,
+		ActivityEntryIDs:  entryIDs,
+	}, nil
+}
+
 // Log records a new activity entry
 func (s *Store) Log(action ActionType, path, user, ip string, details map[string]string) error {
 	if err := validateActivityAction(action); err != nil {
@@ -959,12 +1469,176 @@ func (s *Store) Log(action ActionType, path, user, ip string, details map[string
 	})
 }
 
+// RecordReview persists a review disposition for activity entries.
+func (s *Store) RecordReview(input ReviewRecordInput) (ReviewRecord, error) {
+	normalized, err := normalizeActivityReviewRecordInput(input)
+	if err != nil {
+		return ReviewRecord{}, err
+	}
+	reviewedAt := activityTimeNow()
+	if err := validateActivityTimestamp(reviewedAt); err != nil {
+		return ReviewRecord{}, err
+	}
+
+	var created ReviewRecord
+	if err := s.updateReviewRecords(func(records []ReviewRecord) ([]ReviewRecord, error) {
+		id, err := generateUniqueActivityReviewID(records)
+		if err != nil {
+			return nil, err
+		}
+		created = ReviewRecord{
+			ID:                id,
+			ReviewedAt:        reviewedAt,
+			Reviewer:          normalized.Reviewer,
+			Note:              normalized.Note,
+			ScopeLabel:        normalized.ScopeLabel,
+			FilterSummary:     normalized.FilterSummary,
+			DispositionStatus: normalized.DispositionStatus,
+			ActionCounts:      normalized.ActionCounts,
+			ReviewCount:       normalized.ReviewCount,
+			TotalCount:        normalized.TotalCount,
+			PathCount:         normalized.PathCount,
+			UserCount:         normalized.UserCount,
+			PathSamples:       append([]string(nil), normalized.PathSamples...),
+			UserSamples:       append([]string(nil), normalized.UserSamples...),
+			ActivityEntryIDs:  append([]string(nil), normalized.ActivityEntryIDs...),
+		}
+
+		nextRecords := make([]ReviewRecord, 0, len(records)+1)
+		nextRecords = append(nextRecords, created)
+		nextRecords = append(nextRecords, records...)
+		if len(nextRecords) > s.reviewMaxSize {
+			nextRecords = nextRecords[:s.reviewMaxSize]
+		}
+		return nextRecords, nil
+	}); err != nil {
+		return ReviewRecord{}, err
+	}
+
+	return copyReviewRecord(created), nil
+}
+
+// UpdateReviewRecordDisposition updates the current disposition outcome for a persisted review record.
+func (s *Store) UpdateReviewRecordDisposition(id, reviewer string, status ReviewDispositionStatus, note *string) (ReviewRecord, error) {
+	if strings.TrimSpace(id) != id || id == "" {
+		return ReviewRecord{}, fmt.Errorf("%w: id is invalid", ErrInvalidReviewRecord)
+	}
+	if err := validateActivityID(id); err != nil {
+		return ReviewRecord{}, fmt.Errorf("%w: id is invalid", ErrInvalidReviewRecord)
+	}
+	normalizedReviewer, err := normalizeActivityReviewText(reviewer, maxActivityReviewReviewerLength, "reviewer")
+	if err != nil {
+		return ReviewRecord{}, err
+	}
+	if status == "" {
+		return ReviewRecord{}, fmt.Errorf("%w: disposition_status is required", ErrInvalidReviewRecord)
+	}
+	normalizedStatus, err := normalizeReviewDispositionStatus(status)
+	if err != nil {
+		return ReviewRecord{}, err
+	}
+	reviewedAt := activityTimeNow()
+	if err := validateActivityTimestamp(reviewedAt); err != nil {
+		return ReviewRecord{}, err
+	}
+	var normalizedNote *string
+	if note != nil {
+		value, err := normalizeActivityReviewText(*note, maxActivityReviewNoteLength, "note")
+		if err != nil {
+			return ReviewRecord{}, err
+		}
+		normalizedNote = &value
+	}
+
+	var updated ReviewRecord
+	if err := s.updateReviewRecords(func(records []ReviewRecord) ([]ReviewRecord, error) {
+		for index := range records {
+			if records[index].ID != id {
+				continue
+			}
+			records[index].Reviewer = normalizedReviewer
+			records[index].ReviewedAt = reviewedAt
+			records[index].DispositionStatus = normalizedStatus
+			if normalizedNote != nil {
+				records[index].Note = *normalizedNote
+			}
+			updated = copyReviewRecord(records[index])
+			return records, nil
+		}
+		return nil, ErrReviewRecordNotFound
+	}); err != nil {
+		return ReviewRecord{}, err
+	}
+
+	return copyReviewRecord(updated), nil
+}
+
 // List returns recent activity entries
 func (s *Store) List(limit, offset int, actionFilter ActionType, userFilter string) ([]Entry, int) {
 	return s.ListFiltered(limit, offset, ListFilter{
 		Action: actionFilter,
 		User:   userFilter,
 	})
+}
+
+func (s *Store) ListReviewRecords(limit, offset int) ([]ReviewRecord, int) {
+	return s.ListReviewRecordsFiltered(limit, offset, ReviewRecordFilter{})
+}
+
+// ListReviewRecordsFiltered returns persisted activity review dispositions matching all filters.
+func (s *Store) ListReviewRecordsFiltered(limit, offset int, filter ReviewRecordFilter) ([]ReviewRecord, int) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if offset < 0 {
+		offset = 0
+	}
+	filtered := make([]ReviewRecord, 0, len(s.reviewRecords))
+	reviewer := strings.TrimSpace(filter.Reviewer)
+	entryID := strings.TrimSpace(filter.ActivityEntryID)
+	for _, record := range s.reviewRecords {
+		if reviewer != "" && record.Reviewer != reviewer {
+			continue
+		}
+		if entryID != "" && !reviewRecordContainsActivityEntryID(record, entryID) {
+			continue
+		}
+		if filter.DispositionStatus != "" && record.DispositionStatus != filter.DispositionStatus {
+			continue
+		}
+		if filter.Since != nil && record.ReviewedAt.Before(*filter.Since) {
+			continue
+		}
+		if filter.Until != nil && record.ReviewedAt.After(*filter.Until) {
+			continue
+		}
+		filtered = append(filtered, record)
+	}
+
+	total := len(filtered)
+	if limit <= 0 {
+		return []ReviewRecord{}, total
+	}
+	if offset >= total {
+		return []ReviewRecord{}, total
+	}
+	end := offset + limit
+	if end > total {
+		end = total
+	}
+	records := make([]ReviewRecord, 0, end-offset)
+	for _, record := range filtered[offset:end] {
+		records = append(records, copyReviewRecord(record))
+	}
+	return records, total
+}
+
+func reviewRecordContainsActivityEntryID(record ReviewRecord, entryID string) bool {
+	for _, candidate := range record.ActivityEntryIDs {
+		if candidate == entryID {
+			return true
+		}
+	}
+	return false
 }
 
 // ListFiltered returns recent activity entries matching all provided filters.

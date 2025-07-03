@@ -20461,6 +20461,304 @@ func TestServer_ActivityStats_HonorsPathFilter(t *testing.T) {
 	}
 }
 
+func TestServer_ActivityReviewRecords_AdminCanCreateAndList(t *testing.T) {
+	server, _, _, _, _ := setupAuthServer(t)
+
+	reqBody := strings.NewReader(`{
+		"note": "  已确认误删文件已恢复  ",
+		"scope_label": "集中窗口",
+		"filter_summary": "分组 高风险变更",
+		"disposition_status": "restored",
+		"action_counts": {"delete": 1, "move": 1},
+		"review_count": 2,
+		"total_count": 3,
+		"path_count": 2,
+		"user_count": 1,
+		"path_samples": ["docs/deleted.txt", "/docs/moved.txt"],
+		"user_samples": [" user1 "],
+		"activity_entry_ids": ["delete-1", "move-1"]
+	}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/activity/reviews", reqBody)
+	req.Header.Set("Authorization", "Bearer "+issueAccessTokenWithoutActivity(t, server, "admin"))
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create activity review status = %d, want %d: %s", w.Code, http.StatusCreated, w.Body.String())
+	}
+	var created struct {
+		Data activity.ReviewRecord `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &created); err != nil {
+		t.Fatalf("failed to parse created review response: %v", err)
+	}
+	if created.Data.Reviewer != "admin" {
+		t.Fatalf("reviewer = %q, want admin", created.Data.Reviewer)
+	}
+	if created.Data.Note != "已确认误删文件已恢复" {
+		t.Fatalf("note was not normalized: %q", created.Data.Note)
+	}
+	if len(created.Data.ActivityEntryIDs) != 2 || created.Data.ActivityEntryIDs[0] != "delete-1" {
+		t.Fatalf("unexpected activity entry IDs: %+v", created.Data.ActivityEntryIDs)
+	}
+	if created.Data.DispositionStatus != activity.ReviewDispositionRestored {
+		t.Fatalf("disposition_status = %q, want %q", created.Data.DispositionStatus, activity.ReviewDispositionRestored)
+	}
+	if created.Data.ActionCounts[activity.ActionDelete] != 1 || created.Data.ActionCounts[activity.ActionMove] != 1 {
+		t.Fatalf("unexpected action counts: %+v", created.Data.ActionCounts)
+	}
+	if got, want := fmt.Sprint(created.Data.PathSamples), "[/docs/deleted.txt /docs/moved.txt]"; got != want {
+		t.Fatalf("path_samples = %s, want %s", got, want)
+	}
+	if got, want := fmt.Sprint(created.Data.UserSamples), "[user1]"; got != want {
+		t.Fatalf("user_samples = %s, want %s", got, want)
+	}
+
+	listReq := httptest.NewRequest(http.MethodGet, "/api/v1/activity/reviews?limit=5", nil)
+	listReq.Header.Set("Authorization", "Bearer "+issueAccessTokenWithoutActivity(t, server, "admin"))
+	listRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(listRec, listReq)
+
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("list activity reviews status = %d, want %d: %s", listRec.Code, http.StatusOK, listRec.Body.String())
+	}
+	var listed struct {
+		Data struct {
+			Items []activity.ReviewRecord `json:"items"`
+			Total int                     `json:"total"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(listRec.Body.Bytes(), &listed); err != nil {
+		t.Fatalf("failed to parse listed review response: %v", err)
+	}
+	if listed.Data.Total != 1 || len(listed.Data.Items) != 1 {
+		t.Fatalf("expected one review record, got %s", listRec.Body.String())
+	}
+	if listed.Data.Items[0].ID != created.Data.ID {
+		t.Fatalf("listed review ID = %q, want %q", listed.Data.Items[0].ID, created.Data.ID)
+	}
+	if listed.Data.Items[0].DispositionStatus != activity.ReviewDispositionRestored || listed.Data.Items[0].ActionCounts[activity.ActionMove] != 1 {
+		t.Fatalf("listed review lost structured disposition fields: %+v", listed.Data.Items[0])
+	}
+}
+
+func TestServer_ActivityReviewRecords_AdminCanUpdateDisposition(t *testing.T) {
+	server, _, _, _, _ := setupAuthServer(t)
+	record, err := server.activity.RecordReview(activity.ReviewRecordInput{
+		Reviewer:          "owner",
+		Note:              "分享链接仍需处理",
+		ScopeLabel:        "当前页",
+		DispositionStatus: activity.ReviewDispositionNeedsFollowUp,
+		ActionCounts: map[activity.ActionType]int{
+			activity.ActionShare: 1,
+		},
+		ReviewCount:      1,
+		TotalCount:       1,
+		PathCount:        1,
+		UserCount:        1,
+		PathSamples:      []string{"/docs/report.pdf"},
+		ActivityEntryIDs: []string{"share-1"},
+	})
+	if err != nil {
+		t.Fatalf("RecordReview() error: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/activity/reviews/"+record.ID, strings.NewReader(`{
+		"disposition_status": "disabled",
+		"note": "分享链接已关闭，访问入口已核对"
+	}`))
+	req.Header.Set("Authorization", "Bearer "+issueAccessTokenWithoutActivity(t, server, "admin"))
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("update activity review status = %d, want %d: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+	var updated struct {
+		Data activity.ReviewRecord `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &updated); err != nil {
+		t.Fatalf("failed to parse updated review response: %v", err)
+	}
+	if updated.Data.DispositionStatus != activity.ReviewDispositionDisabled {
+		t.Fatalf("disposition_status = %q, want %q", updated.Data.DispositionStatus, activity.ReviewDispositionDisabled)
+	}
+	if updated.Data.Reviewer != "admin" {
+		t.Fatalf("reviewer = %q, want admin", updated.Data.Reviewer)
+	}
+	if updated.Data.Note != "分享链接已关闭，访问入口已核对" || updated.Data.PathSamples[0] != "/docs/report.pdf" {
+		t.Fatalf("update should preserve review context: %+v", updated.Data)
+	}
+
+	listReq := httptest.NewRequest(http.MethodGet, "/api/v1/activity/reviews?disposition_status=needs_follow_up", nil)
+	listReq.Header.Set("Authorization", "Bearer "+issueAccessTokenWithoutActivity(t, server, "admin"))
+	listRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(listRec, listReq)
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("list updated activity reviews status = %d, want %d: %s", listRec.Code, http.StatusOK, listRec.Body.String())
+	}
+	var listed struct {
+		Data struct {
+			Items []activity.ReviewRecord `json:"items"`
+			Total int                     `json:"total"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(listRec.Body.Bytes(), &listed); err != nil {
+		t.Fatalf("failed to parse listed review response: %v", err)
+	}
+	if listed.Data.Total != 0 || len(listed.Data.Items) != 0 {
+		t.Fatalf("updated review should leave needs-follow-up list: %s", listRec.Body.String())
+	}
+}
+
+func TestServer_ActivityReviewRecords_HonorsQueryFilters(t *testing.T) {
+	server, _, _, _, _ := setupAuthServer(t)
+
+	if _, err := server.activity.RecordReview(activity.ReviewRecordInput{
+		Reviewer:         "admin",
+		Note:             "older review",
+		ScopeLabel:       "当前页",
+		ReviewCount:      1,
+		TotalCount:       1,
+		PathCount:        1,
+		UserCount:        1,
+		ActivityEntryIDs: []string{"delete-1"},
+	}); err != nil {
+		t.Fatalf("RecordReview(first) error: %v", err)
+	}
+	if _, err := server.activity.RecordReview(activity.ReviewRecordInput{
+		Reviewer:          "owner",
+		Note:              "newer review",
+		ScopeLabel:        "集中窗口",
+		DispositionStatus: activity.ReviewDispositionNeedsFollowUp,
+		ReviewCount:       2,
+		TotalCount:        3,
+		PathCount:         2,
+		UserCount:         1,
+		ActivityEntryIDs:  []string{"delete-2", "share-1"},
+	}); err != nil {
+		t.Fatalf("RecordReview(second) error: %v", err)
+	}
+
+	since := time.Now().Add(-time.Minute).Format(time.RFC3339)
+	target := "/api/v1/activity/reviews?reviewer=owner&activity_entry_id=share-1&disposition_status=needs_follow_up&since=" + url.QueryEscape(since)
+	req := httptest.NewRequest(http.MethodGet, target, nil)
+	req.Header.Set("Authorization", "Bearer "+issueAccessTokenWithoutActivity(t, server, "admin"))
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("filtered activity reviews status = %d, want %d: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+	var payload struct {
+		Data struct {
+			Items []activity.ReviewRecord `json:"items"`
+			Total int                     `json:"total"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to parse filtered review response: %v", err)
+	}
+	if payload.Data.Total != 1 || len(payload.Data.Items) != 1 {
+		t.Fatalf("expected one filtered review, got %s", w.Body.String())
+	}
+	if payload.Data.Items[0].Reviewer != "owner" || payload.Data.Items[0].Note != "newer review" {
+		t.Fatalf("unexpected filtered review: %+v", payload.Data.Items[0])
+	}
+
+	invalidReq := httptest.NewRequest(http.MethodGet, "/api/v1/activity/reviews?disposition_status=unknown", nil)
+	invalidReq.Header.Set("Authorization", "Bearer "+issueAccessTokenWithoutActivity(t, server, "admin"))
+	invalidRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(invalidRec, invalidReq)
+	if invalidRec.Code != http.StatusBadRequest {
+		t.Fatalf("invalid disposition_status response status = %d, want %d: %s", invalidRec.Code, http.StatusBadRequest, invalidRec.Body.String())
+	}
+}
+
+func TestServer_ActivityReviewRecords_RejectsNonAdmin(t *testing.T) {
+	server, _, _, username, _ := setupAuthServer(t)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/activity/reviews", strings.NewReader(`{
+		"note": "已处理",
+		"scope_label": "当前页",
+		"review_count": 1,
+		"total_count": 1,
+		"path_count": 1,
+		"user_count": 1,
+		"activity_entry_ids": ["delete-1"]
+	}`))
+	req.Header.Set("Authorization", "Bearer "+issueAccessTokenWithoutActivity(t, server, username))
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("non-admin create activity review status = %d, want %d: %s", w.Code, http.StatusForbidden, w.Body.String())
+	}
+
+	updateReq := httptest.NewRequest(http.MethodPatch, "/api/v1/activity/reviews/review-1", strings.NewReader(`{
+		"disposition_status": "restored"
+	}`))
+	updateReq.Header.Set("Authorization", "Bearer "+issueAccessTokenWithoutActivity(t, server, username))
+	updateRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(updateRec, updateReq)
+	if updateRec.Code != http.StatusForbidden {
+		t.Fatalf("non-admin update activity review status = %d, want %d: %s", updateRec.Code, http.StatusForbidden, updateRec.Body.String())
+	}
+}
+
+func TestServer_ActivityReviewRecords_RejectsInvalidRecord(t *testing.T) {
+	server, _, _, _, _ := setupAuthServer(t)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/activity/reviews", strings.NewReader(`{
+		"note": "",
+		"scope_label": "当前页",
+		"review_count": 0,
+		"total_count": 0,
+		"path_count": 0,
+		"user_count": 0,
+		"activity_entry_ids": []
+	}`))
+	req.Header.Set("Authorization", "Bearer "+issueAccessTokenWithoutActivity(t, server, "admin"))
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("invalid activity review status = %d, want %d: %s", w.Code, http.StatusBadRequest, w.Body.String())
+	}
+
+	listReq := httptest.NewRequest(http.MethodGet, "/api/v1/activity/reviews", nil)
+	listReq.Header.Set("Authorization", "Bearer "+issueAccessTokenWithoutActivity(t, server, "admin"))
+	listRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(listRec, listReq)
+
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("list activity reviews after invalid create status = %d, want %d: %s", listRec.Code, http.StatusOK, listRec.Body.String())
+	}
+	if strings.Contains(listRec.Body.String(), "当前页") {
+		t.Fatalf("invalid review appeared in list: %s", listRec.Body.String())
+	}
+
+	invalidUpdateReq := httptest.NewRequest(http.MethodPatch, "/api/v1/activity/reviews/missing", strings.NewReader(`{
+		"disposition_status": "unknown"
+	}`))
+	invalidUpdateReq.Header.Set("Authorization", "Bearer "+issueAccessTokenWithoutActivity(t, server, "admin"))
+	invalidUpdateRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(invalidUpdateRec, invalidUpdateReq)
+	if invalidUpdateRec.Code != http.StatusBadRequest {
+		t.Fatalf("invalid review update status = %d, want %d: %s", invalidUpdateRec.Code, http.StatusBadRequest, invalidUpdateRec.Body.String())
+	}
+
+	missingUpdateReq := httptest.NewRequest(http.MethodPatch, "/api/v1/activity/reviews/missing", strings.NewReader(`{
+		"disposition_status": "restored"
+	}`))
+	missingUpdateReq.Header.Set("Authorization", "Bearer "+issueAccessTokenWithoutActivity(t, server, "admin"))
+	missingUpdateRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(missingUpdateRec, missingUpdateReq)
+	if missingUpdateRec.Code != http.StatusNotFound {
+		t.Fatalf("missing review update status = %d, want %d: %s", missingUpdateRec.Code, http.StatusNotFound, missingUpdateRec.Body.String())
+	}
+}
+
 func TestServer_ListActivity_RecreatedUsernameDoesNotSeeLegacyEntries(t *testing.T) {
 	server := newActivityOnlyAuthServer(t)
 	username := "tester"

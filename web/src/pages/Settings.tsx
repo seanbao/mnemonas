@@ -41,7 +41,7 @@ import {
 } from 'lucide-react'
 import { cn, copyTextToClipboard, parseByteSize, normalizeWebDAVPrefix, isValidWebDAVPrefix, webDAVPrefixOverlapsReservedRoute, formatWebDAVUrl, formatBytes } from '@/lib/utils'
 import { GENERIC_LOAD_ERROR_DESCRIPTION, getUserFacingErrorDescription } from '@/lib/apiMessages'
-import { ShareManager } from '@/components/share'
+import { ShareManager, normalizeShareReviewFilter } from '@/components/share'
 import { PageHeader } from '@/components/ui/PageHeader'
 import { EmptyState } from '@/components/ui/EmptyState'
 import { useAuthStore, useUser } from '@/stores/auth'
@@ -3080,6 +3080,8 @@ export function SettingsPage() {
   const navigate = useNavigate()
   const [searchParams, setSearchParams] = useSearchParams()
   const selectedTab = normalizeSettingsTab(searchParams.get('tab'))
+  const sharePathFilter = selectedTab === 'shares' ? searchParams.get('share_path') ?? '' : ''
+  const shareReviewFilter = selectedTab === 'shares' ? normalizeShareReviewFilter(searchParams.get('share_filter')) : 'all'
   const defaultSettings = {
     serverHost: '0.0.0.0',
     serverPort: '8080',
@@ -3615,6 +3617,13 @@ export function SettingsPage() {
 
     setSearchParams({ tab: nextTab })
   }, [setSearchParams])
+
+  const handleClearSharePathFilter = useCallback(() => {
+    const nextParams = new URLSearchParams(searchParams)
+    nextParams.set('tab', 'shares')
+    nextParams.delete('share_path')
+    setSearchParams(nextParams)
+  }, [searchParams, setSearchParams])
 
   const mapServerSettings = useCallback((data: NonNullable<typeof settingsData>['data']) => {
     return {
@@ -6962,7 +6971,12 @@ export function SettingsPage() {
                 description="查看和处理已创建的分享链接"
                 icon={Link2}
               >
-                <ShareManager featureEnabled={settings.shareEnabled} />
+                <ShareManager
+                  featureEnabled={settings.shareEnabled}
+                  initialReviewFilter={shareReviewFilter}
+                  pathFilter={sharePathFilter}
+                  onClearPathFilter={handleClearSharePathFilter}
+                />
               </SettingsSection>
             </div>
           </Tab>

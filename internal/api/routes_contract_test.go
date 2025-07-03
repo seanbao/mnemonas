@@ -18,6 +18,9 @@ import (
 func expectedRESTRouteContracts() []string {
 	return []string{
 		"GET /api/v1/activity/",
+		"GET /api/v1/activity/reviews",
+		"PATCH /api/v1/activity/reviews/{id}",
+		"POST /api/v1/activity/reviews",
 		"GET /api/v1/activity/stats",
 		"DELETE /api/v1/activity/",
 		"GET /api/v1/admin/users/",
