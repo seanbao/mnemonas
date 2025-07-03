@@ -1935,9 +1935,15 @@ func (s *Server) setupRoutes() {
 			r.Get("/", s.handleListActivity)
 			r.Get("/stats", s.handleActivityStats)
 			if s.authEnabled {
+				r.With(s.authMw.RequireRole(auth.RoleAdmin)).Get("/reviews", s.handleListActivityReviewRecords)
+				r.With(s.authMw.RequireRole(auth.RoleAdmin)).Post("/reviews", s.handleCreateActivityReviewRecord)
+				r.With(s.authMw.RequireRole(auth.RoleAdmin)).Patch("/reviews/{id}", s.handleUpdateActivityReviewRecord)
 				r.With(s.authMw.RequireRole(auth.RoleAdmin)).Delete("/", s.handleClearActivity)
 				return
 			}
+			r.Get("/reviews", s.handleListActivityReviewRecords)
+			r.Post("/reviews", s.handleCreateActivityReviewRecord)
+			r.Patch("/reviews/{id}", s.handleUpdateActivityReviewRecord)
 			r.Delete("/", s.handleClearActivity)
 		})
 
@@ -6174,6 +6180,249 @@ func (s *Server) handleActivityStats(w http.ResponseWriter, r *http.Request) {
 
 	entries, _ := s.activity.ListFiltered(s.activity.Count(), 0, filter)
 	NewAPIResponse(buildActivityStats(entries)).Write(w, http.StatusOK)
+}
+
+type createActivityReviewRecordRequest struct {
+	Note              string                           `json:"note"`
+	ScopeLabel        string                           `json:"scope_label"`
+	FilterSummary     string                           `json:"filter_summary"`
+	DispositionStatus activity.ReviewDispositionStatus `json:"disposition_status"`
+	ActionCounts      map[activity.ActionType]int      `json:"action_counts"`
+	ReviewCount       int                              `json:"review_count"`
+	TotalCount        int                              `json:"total_count"`
+	PathCount         int                              `json:"path_count"`
+	UserCount         int                              `json:"user_count"`
+	PathSamples       []string                         `json:"path_samples"`
+	UserSamples       []string                         `json:"user_samples"`
+	ActivityEntryIDs  []string                         `json:"activity_entry_ids"`
+}
+
+type updateActivityReviewRecordRequest struct {
+	DispositionStatus activity.ReviewDispositionStatus `json:"disposition_status"`
+	Note              *string                          `json:"note"`
+}
+
+func (s *Server) handleListActivityReviewRecords(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query()
+	limitStr, ok := singleActivityQueryParam(w, query, "limit")
+	if !ok {
+		return
+	}
+	offsetStr, ok := singleActivityQueryParam(w, query, "offset")
+	if !ok {
+		return
+	}
+	reviewer, ok := singleActivityQueryParam(w, query, "reviewer")
+	if !ok {
+		return
+	}
+	entryIDValue, ok := singleActivityQueryParam(w, query, "activity_entry_id")
+	if !ok {
+		return
+	}
+	dispositionStatusValue, ok := singleActivityQueryParam(w, query, "disposition_status")
+	if !ok {
+		return
+	}
+	sinceValue, ok := singleActivityQueryParam(w, query, "since")
+	if !ok {
+		return
+	}
+	untilValue, ok := singleActivityQueryParam(w, query, "until")
+	if !ok {
+		return
+	}
+
+	limit := 20
+	if limitStr != "" {
+		l, err := strconv.Atoi(limitStr)
+		if err != nil || l <= 0 || l > 100 {
+			BadRequest(w, "limit parameter must be between 1 and 100")
+			return
+		}
+		limit = l
+	}
+	offset := 0
+	if offsetStr != "" {
+		o, err := strconv.Atoi(offsetStr)
+		if err != nil || o < 0 {
+			BadRequest(w, "offset parameter must be a non-negative integer")
+			return
+		}
+		offset = o
+	}
+	activityEntryID, ok := parseActivityReviewEntryIDQueryParam(w, entryIDValue)
+	if !ok {
+		return
+	}
+	dispositionStatus, ok := parseActivityReviewDispositionStatusQueryParam(w, dispositionStatusValue)
+	if !ok {
+		return
+	}
+	since, ok := parseActivityTimeQueryParam(w, sinceValue, "since")
+	if !ok {
+		return
+	}
+	until, ok := parseActivityTimeQueryParam(w, untilValue, "until")
+	if !ok {
+		return
+	}
+	if since != nil && until != nil && since.After(*until) {
+		BadRequest(w, "since parameter must be before or equal to until parameter")
+		return
+	}
+
+	if s.activityConfiguredButUnavailable() {
+		ServiceUnavailable(w, "activity log unavailable")
+		return
+	}
+	if s.activity == nil {
+		NewAPIResponse(map[string]any{
+			"items":  []any{},
+			"total":  0,
+			"limit":  limit,
+			"offset": offset,
+		}).Write(w, http.StatusOK)
+		return
+	}
+
+	records, total := s.activity.ListReviewRecordsFiltered(limit, offset, activity.ReviewRecordFilter{
+		Reviewer:          strings.TrimSpace(reviewer),
+		ActivityEntryID:   activityEntryID,
+		DispositionStatus: dispositionStatus,
+		Since:             since,
+		Until:             until,
+	})
+	NewAPIResponse(map[string]any{
+		"items":  records,
+		"total":  total,
+		"limit":  limit,
+		"offset": offset,
+	}).Write(w, http.StatusOK)
+}
+
+func (s *Server) handleCreateActivityReviewRecord(w http.ResponseWriter, r *http.Request) {
+	if s.activityConfiguredButUnavailable() {
+		ServiceUnavailable(w, "activity log unavailable")
+		return
+	}
+	if s.activity == nil {
+		ServiceUnavailable(w, "activity log not configured")
+		return
+	}
+
+	var req createActivityReviewRecordRequest
+	if err := decodeJSONBody(r, &req); err != nil {
+		writeLimitedJSONBodyError(w, err, DefaultJSONRequestBodyLimit)
+		return
+	}
+
+	record, err := s.activity.RecordReview(activity.ReviewRecordInput{
+		Reviewer:          currentActivityReviewReviewer(r),
+		Note:              req.Note,
+		ScopeLabel:        req.ScopeLabel,
+		FilterSummary:     req.FilterSummary,
+		DispositionStatus: req.DispositionStatus,
+		ActionCounts:      req.ActionCounts,
+		ReviewCount:       req.ReviewCount,
+		TotalCount:        req.TotalCount,
+		PathCount:         req.PathCount,
+		UserCount:         req.UserCount,
+		PathSamples:       req.PathSamples,
+		UserSamples:       req.UserSamples,
+		ActivityEntryIDs:  req.ActivityEntryIDs,
+	})
+	if err != nil {
+		if errors.Is(err, activity.ErrInvalidReviewRecord) {
+			BadRequest(w, err.Error())
+			return
+		}
+		s.respondInternalError(w, "record activity review", err)
+		return
+	}
+
+	NewAPIResponse(record).Write(w, http.StatusCreated)
+}
+
+func (s *Server) handleUpdateActivityReviewRecord(w http.ResponseWriter, r *http.Request) {
+	if s.activityConfiguredButUnavailable() {
+		ServiceUnavailable(w, "activity log unavailable")
+		return
+	}
+	if s.activity == nil {
+		ServiceUnavailable(w, "activity log not configured")
+		return
+	}
+
+	recordID := chi.URLParam(r, "id")
+	var req updateActivityReviewRecordRequest
+	if err := decodeJSONBody(r, &req); err != nil {
+		writeLimitedJSONBodyError(w, err, DefaultJSONRequestBodyLimit)
+		return
+	}
+
+	record, err := s.activity.UpdateReviewRecordDisposition(
+		recordID,
+		currentActivityReviewReviewer(r),
+		req.DispositionStatus,
+		req.Note,
+	)
+	if err != nil {
+		if errors.Is(err, activity.ErrReviewRecordNotFound) {
+			NotFound(w, "activity review record not found")
+			return
+		}
+		if errors.Is(err, activity.ErrInvalidReviewRecord) {
+			BadRequest(w, err.Error())
+			return
+		}
+		s.respondInternalError(w, "update activity review", err)
+		return
+	}
+
+	NewAPIResponse(record).Write(w, http.StatusOK)
+}
+
+func parseActivityReviewEntryIDQueryParam(w http.ResponseWriter, value string) (string, bool) {
+	if strings.TrimSpace(value) == "" {
+		return "", true
+	}
+	trimmed := strings.TrimSpace(value)
+	if trimmed != value {
+		BadRequest(w, "activity_entry_id parameter is invalid")
+		return "", false
+	}
+	return trimmed, true
+}
+
+func parseActivityReviewDispositionStatusQueryParam(w http.ResponseWriter, value string) (activity.ReviewDispositionStatus, bool) {
+	if strings.TrimSpace(value) == "" {
+		return "", true
+	}
+	if strings.TrimSpace(value) != value {
+		BadRequest(w, "disposition_status parameter is invalid")
+		return "", false
+	}
+	status := activity.ReviewDispositionStatus(value)
+	switch status {
+	case activity.ReviewDispositionDocumented,
+		activity.ReviewDispositionConfirmed,
+		activity.ReviewDispositionRestored,
+		activity.ReviewDispositionDisabled,
+		activity.ReviewDispositionNeedsFollowUp:
+		return status, true
+	default:
+		BadRequest(w, "disposition_status parameter is invalid")
+		return "", false
+	}
+}
+
+func currentActivityReviewReviewer(r *http.Request) string {
+	claims := auth.GetClaimsFromContext(r.Context())
+	if claims != nil && strings.TrimSpace(claims.Username) != "" {
+		return claims.Username
+	}
+	return "admin"
 }
 
 func parseActivityQueryFilter(w http.ResponseWriter, r *http.Request) (activity.ListFilter, bool) {

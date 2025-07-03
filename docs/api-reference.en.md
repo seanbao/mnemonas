@@ -960,6 +960,125 @@ Response example:
 }
 ```
 
+### List Activity Review Records (Admin)
+
+Return persisted activity review disposition records.
+
+```
+GET /api/v1/activity/reviews
+```
+
+Query parameters:
+
+- `limit`: Result count. The default is 20 and the maximum is 100.
+- `offset`: Pagination offset.
+- `reviewer`: Filter by reviewer.
+- `activity_entry_id`: Return only review records linked to the given activity entry ID.
+- `disposition_status`: Filter by disposition status. Allowed values are `documented`, `confirmed`, `restored`, `disabled`, and `needs_follow_up`.
+- `since`: Return review records at or after this RFC3339 timestamp.
+- `until`: Return review records at or before this RFC3339 timestamp.
+
+Invalid time formats, a `since` value later than `until`, a non-canonical `activity_entry_id`, or an unsupported `disposition_status` return `400 Bad Request`.
+
+Response example:
+
+```json
+{
+  "success": true,
+  "data": {
+    "items": [
+      {
+        "id": "review-123",
+        "reviewed_at": "2024-01-15T10:05:00Z",
+        "reviewer": "admin",
+        "note": "Deleted files were confirmed restored from trash",
+        "scope_label": "concentrated window",
+        "filter_summary": "group risk changes",
+        "disposition_status": "restored",
+        "action_counts": {
+          "delete": 2,
+          "move": 1
+        },
+        "review_count": 3,
+        "total_count": 5,
+        "path_count": 2,
+        "user_count": 1,
+        "path_samples": ["/docs/deleted.txt", "/docs/moved.txt"],
+        "user_samples": ["admin"],
+        "activity_entry_ids": ["act-delete-1", "act-move-1"]
+      }
+    ],
+    "total": 1,
+    "limit": 20,
+    "offset": 0
+  },
+  "timestamp": "2024-01-15T10:05:00Z"
+}
+```
+
+### Create Activity Review Record (Admin)
+
+Record an activity review disposition. The server uses the current authenticated account as `reviewer` and sets `reviewed_at`.
+
+```
+POST /api/v1/activity/reviews
+```
+
+Request body:
+
+```json
+{
+  "note": "Deleted files were confirmed restored from trash",
+  "scope_label": "current page",
+  "filter_summary": "group risk changes",
+  "disposition_status": "restored",
+  "action_counts": {
+    "delete": 2,
+    "move": 1
+  },
+  "review_count": 3,
+  "total_count": 5,
+  "path_count": 2,
+  "user_count": 1,
+  "path_samples": ["/docs/deleted.txt", "/docs/moved.txt"],
+  "user_samples": ["admin"],
+  "activity_entry_ids": ["act-delete-1", "act-move-1"]
+}
+```
+
+Notes:
+
+- `note`, `scope_label`, and `activity_entry_ids` are required. `review_count` must be greater than zero, and `total_count` must not be lower than `review_count`.
+- `disposition_status` is optional and defaults to `documented`. Allowed values are `documented`, `confirmed`, `restored`, `disabled`, and `needs_follow_up`.
+- `action_counts` is optional. Keys must be known activity action types, values must be positive integers, and the sum must equal `review_count`.
+- `path_samples` and `user_samples` are optional and accept at most 10 entries each. Paths are normalized with the same logical path rules as activity entries, and duplicate samples are rejected.
+- When the activity log is not configured, failed to initialize, or is currently unavailable, the API returns `503 Service Unavailable`.
+
+### Update Activity Review Record Disposition (Admin)
+
+Update the current disposition status of a persisted activity review record, optionally replacing its disposition note. The server replaces `reviewer` with the current authenticated account and updates `reviewed_at` to the status write-back time; when `note` is omitted, the previous note is preserved. Samples, counts, and linked activity entries remain unchanged.
+
+```
+PATCH /api/v1/activity/reviews/{id}
+```
+
+Request body:
+
+```json
+{
+  "disposition_status": "disabled",
+  "note": "The share link was disabled and the access entry point was verified"
+}
+```
+
+Notes:
+
+- `disposition_status` is required. Allowed values are `documented`, `confirmed`, `restored`, `disabled`, and `needs_follow_up`.
+- `note` is optional. When provided, it must be non-empty text; the server trims surrounding whitespace and applies the activity review note length limit.
+- A non-canonical `{id}` or unsupported `disposition_status` returns `400 Bad Request`.
+- A missing review record returns `404 Not Found`.
+- When the activity log is not configured, failed to initialize, or is currently unavailable, the API returns `503 Service Unavailable`.
+
 ### Clear Activity Log (Admin)
 
 ```

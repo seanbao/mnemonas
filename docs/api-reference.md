@@ -1880,6 +1880,120 @@ GET /api/v1/activity/stats
 }
 ```
 
+### 列出活动复核记录（管理员）
+
+获取已持久化的活动复核处置记录。
+
+```
+GET /api/v1/activity/reviews
+```
+
+**查询参数**:
+
+- `limit`: 返回数量（默认 20，最大 100）
+- `offset`: 分页偏移
+- `reviewer`: 按复核人过滤
+- `activity_entry_id`: 仅返回关联指定最近操作记录 ID 的复核记录
+- `disposition_status`: 按处置状态过滤，允许值为 `documented`、`confirmed`、`restored`、`disabled`、`needs_follow_up`
+- `since`: 仅返回该时间点之后或等于该时间点的复核记录，格式为 RFC3339 时间戳
+- `until`: 仅返回该时间点之前或等于该时间点的复核记录，格式为 RFC3339 时间戳
+
+`since` 晚于 `until`、时间格式无效、`activity_entry_id` 非规范值或 `disposition_status` 非允许值时，接口返回 `400 Bad Request`。
+
+**响应示例**:
+```json
+{
+  "success": true,
+  "data": {
+    "items": [
+      {
+        "id": "review-123",
+        "reviewed_at": "2024-01-15T10:05:00Z",
+        "reviewer": "admin",
+        "note": "已确认误删文件已从回收站恢复",
+        "scope_label": "集中窗口",
+        "filter_summary": "分组 高风险变更",
+        "disposition_status": "restored",
+        "action_counts": {
+          "delete": 2,
+          "move": 1
+        },
+        "review_count": 3,
+        "total_count": 5,
+        "path_count": 2,
+        "user_count": 1,
+        "path_samples": ["/docs/deleted.txt", "/docs/moved.txt"],
+        "user_samples": ["admin"],
+        "activity_entry_ids": ["act-delete-1", "act-move-1"]
+      }
+    ],
+    "total": 1,
+    "limit": 20,
+    "offset": 0
+  },
+  "timestamp": "2024-01-15T10:05:00Z"
+}
+```
+
+### 创建活动复核记录（管理员）
+
+记录一次活动复核处置结论。服务端会使用当前认证账号作为 `reviewer`，并写入 `reviewed_at`。
+
+```
+POST /api/v1/activity/reviews
+```
+
+**请求体**:
+```json
+{
+  "note": "已确认误删文件已从回收站恢复",
+  "scope_label": "当前页",
+  "filter_summary": "分组 高风险变更",
+  "disposition_status": "restored",
+  "action_counts": {
+    "delete": 2,
+    "move": 1
+  },
+  "review_count": 3,
+  "total_count": 5,
+  "path_count": 2,
+  "user_count": 1,
+  "path_samples": ["/docs/deleted.txt", "/docs/moved.txt"],
+  "user_samples": ["admin"],
+  "activity_entry_ids": ["act-delete-1", "act-move-1"]
+}
+```
+
+**说明**:
+- `note`、`scope_label` 和 `activity_entry_ids` 必填；`review_count` 必须大于 0，且 `total_count` 不能小于 `review_count`
+- `disposition_status` 可选，缺省为 `documented`；允许值为 `documented`、`confirmed`、`restored`、`disabled`、`needs_follow_up`
+- `action_counts` 可选；键必须是已知最近操作类型，值必须为正整数，且计数总和必须等于 `review_count`
+- `path_samples` 和 `user_samples` 可选，最多各 10 个；路径会按最近操作路径规则规范化，重复样例会被拒绝
+- 若最近操作记录未配置、初始化失败或当前不可用，接口返回 `503 Service Unavailable`
+
+### 更新活动复核记录处置状态（管理员）
+
+更新一条已持久化活动复核记录的当前处置状态，并可同步更新处置备注。服务端会使用当前认证账号覆盖 `reviewer`，并将 `reviewed_at` 更新为本次状态回写时间；未传 `note` 时保留原备注，样例、计数和关联活动记录保持不变。
+
+```
+PATCH /api/v1/activity/reviews/{id}
+```
+
+**请求体**:
+```json
+{
+  "disposition_status": "disabled",
+  "note": "分享链接已关闭，访问入口已核对"
+}
+```
+
+**说明**:
+- `disposition_status` 必填；允许值为 `documented`、`confirmed`、`restored`、`disabled`、`needs_follow_up`
+- `note` 可选；传入时必须为非空文本，服务端会按活动复核备注规则去除首尾空白并校验长度
+- `{id}` 非规范或 `disposition_status` 非允许值时返回 `400 Bad Request`
+- 复核记录不存在时返回 `404 Not Found`
+- 若最近操作记录未配置、初始化失败或当前不可用，接口返回 `503 Service Unavailable`
+
 ### 清空最近操作记录（管理员）
 
 ```

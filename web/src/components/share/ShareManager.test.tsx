@@ -223,6 +223,75 @@ describe('ShareManager', () => {
     expect(params.get('path')).toBe('/docs/report.pdf')
   })
 
+  it('filters shares by the linked disposition path', async () => {
+    const user = userEvent.setup()
+    const onClearPathFilter = vi.fn()
+    vi.mocked(shareApi.listShares).mockResolvedValueOnce([
+      mockShares[0],
+      {
+        ...mockShares[0],
+        id: 'share-other',
+        path: '/photos/a.jpg',
+      },
+    ])
+
+    render(<ShareManager pathFilter="/docs/report.pdf" onClearPathFilter={onClearPathFilter} />)
+
+    await waitFor(() => {
+      expect(screen.getByText('我的分享 (1 / 2)')).toBeInTheDocument()
+      expect(screen.getByText('report.pdf')).toBeInTheDocument()
+      expect(screen.queryByText('a.jpg')).not.toBeInTheDocument()
+    })
+
+    const pathFilterRegion = within(screen.getByRole('region', { name: '分享路径筛选' }))
+    expect(pathFilterRegion.getByText('路径：/docs/report.pdf')).toBeInTheDocument()
+
+    await user.click(pathFilterRegion.getByRole('button', { name: '清除路径筛选' }))
+    expect(onClearPathFilter).toHaveBeenCalledTimes(1)
+  })
+
+  it('applies the initial review filter within the linked path', async () => {
+    vi.mocked(shareApi.listShares).mockResolvedValueOnce([
+      {
+        ...mockShares[0],
+        id: 'share-safe',
+        path: '/docs/safe.pdf',
+      },
+      {
+        ...mockShares[0],
+        id: 'share-risk',
+        path: '/docs/open.pdf',
+        risk: {
+          level: 'high',
+          reasons: [
+            { code: 'no_password', level: 'high', message: '未设置密码，拿到链接的人都能访问' },
+          ],
+        },
+      },
+      {
+        ...mockShares[0],
+        id: 'share-other',
+        path: '/photos/open.pdf',
+        risk: {
+          level: 'high',
+          reasons: [
+            { code: 'no_password', level: 'high', message: '未设置密码，拿到链接的人都能访问' },
+          ],
+        },
+      },
+    ])
+
+    render(<ShareManager pathFilter="/docs" initialReviewFilter="review" />)
+
+    await waitFor(() => {
+      expect(screen.getByText('我的分享 (2 / 3)')).toBeInTheDocument()
+      expect(screen.getByText('open.pdf')).toBeInTheDocument()
+      expect(screen.queryByText('safe.pdf')).not.toBeInTheDocument()
+      expect(screen.queryByText('/photos/open.pdf')).not.toBeInTheDocument()
+      expect(screen.getByRole('button', { name: '需复核 (1)' })).toBeInTheDocument()
+    })
+  })
+
   it('renders a share as expired at the exact expiration time', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true })
     try {

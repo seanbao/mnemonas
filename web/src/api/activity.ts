@@ -120,6 +120,16 @@ export const ACTIVITY_ACTION_GROUPS = [
 
 export type ActivityActionGroup = typeof ACTIVITY_ACTION_GROUPS[number]
 
+export const ACTIVITY_REVIEW_DISPOSITION_STATUSES = [
+  'documented',
+  'confirmed',
+  'restored',
+  'disabled',
+  'needs_follow_up',
+] as const
+
+export type ActivityReviewDispositionStatus = typeof ACTIVITY_REVIEW_DISPOSITION_STATUSES[number]
+
 const activityActionSet = new Set<string>(ACTIVITY_ACTIONS)
 const activityDetailPathKeys = new Set([
   'path',
@@ -170,7 +180,7 @@ function isNonNegativeIntegerRecord(value: unknown): value is Record<string, num
   return isRecord(value) && Object.values(value).every(isNonNegativeInteger)
 }
 
-type ActivityActionCountMap = Partial<Record<ActionType, number>>
+export type ActivityActionCountMap = Partial<Record<ActionType, number>>
 
 function isActivityActionNumberRecord(value: unknown): value is ActivityActionCountMap {
   return isRecord(value)
@@ -246,6 +256,17 @@ function hasUniqueActivityEntryIDs(items: ActivityEntry[]): boolean {
   return true
 }
 
+function hasUniqueStrings(values: string[]): boolean {
+  const seen = new Set<string>()
+  for (const value of values) {
+    if (seen.has(value)) {
+      return false
+    }
+    seen.add(value)
+  }
+  return true
+}
+
 // Activity entry
 export interface ActivityEntry {
   id: string
@@ -260,6 +281,51 @@ export interface ActivityEntry {
 // Activity list response
 export interface ActivityListResponse {
   items: ActivityEntry[]
+  total: number
+  limit: number
+  offset: number
+}
+
+export interface ActivityReviewRecord {
+  id: string
+  reviewed_at: string
+  reviewer: string
+  note: string
+  scope_label: string
+  filter_summary?: string
+  disposition_status?: ActivityReviewDispositionStatus
+  action_counts?: ActivityActionCountMap
+  review_count: number
+  total_count: number
+  path_count: number
+  user_count: number
+  path_samples?: string[]
+  user_samples?: string[]
+  activity_entry_ids: string[]
+}
+
+export interface ActivityReviewRecordCreateInput {
+  note: string
+  scope_label: string
+  filter_summary?: string
+  disposition_status?: ActivityReviewDispositionStatus
+  action_counts?: ActivityActionCountMap
+  review_count: number
+  total_count: number
+  path_count: number
+  user_count: number
+  path_samples?: string[]
+  user_samples?: string[]
+  activity_entry_ids: string[]
+}
+
+export interface ActivityReviewRecordDispositionUpdateInput {
+  disposition_status: ActivityReviewDispositionStatus
+  note?: string
+}
+
+export interface ActivityReviewRecordListResponse {
+  items: ActivityReviewRecord[]
   total: number
   limit: number
   offset: number
@@ -302,6 +368,62 @@ export interface ActivityFilterOptions extends ActivityRequestOptions {
 export interface ActivityListOptions extends ActivityFilterOptions {
   limit?: number
   offset?: number
+}
+
+export interface ActivityReviewRecordListOptions extends ActivityRequestOptions {
+  limit?: number
+  offset?: number
+  reviewer?: string
+  activityEntryId?: string
+  dispositionStatus?: ActivityReviewDispositionStatus
+  since?: string
+  until?: string
+}
+
+function isValidActivityReviewRecord(value: unknown): value is ActivityReviewRecord {
+  return isRecord(value)
+    && typeof value.id === 'string'
+    && value.id.trim() !== ''
+    && value.id === value.id.trim()
+    && parseRFC3339Timestamp(value.reviewed_at) !== null
+    && typeof value.reviewer === 'string'
+    && value.reviewer.trim() !== ''
+    && typeof value.note === 'string'
+    && value.note.trim() !== ''
+    && typeof value.scope_label === 'string'
+    && value.scope_label.trim() !== ''
+    && (value.filter_summary === undefined || typeof value.filter_summary === 'string')
+    && (value.disposition_status === undefined || isActivityReviewDispositionStatus(value.disposition_status))
+    && (value.action_counts === undefined || isActivityActionNumberRecord(value.action_counts))
+    && isNonNegativeInteger(value.review_count)
+    && value.review_count > 0
+    && isNonNegativeInteger(value.total_count)
+    && value.total_count >= value.review_count
+    && isNonNegativeInteger(value.path_count)
+    && isNonNegativeInteger(value.user_count)
+    && (value.path_samples === undefined || (Array.isArray(value.path_samples) && value.path_samples.every(isLogicalPathString) && hasUniqueStrings(value.path_samples)))
+    && (value.user_samples === undefined || (Array.isArray(value.user_samples) && value.user_samples.every((user) => typeof user === 'string' && user.trim() !== '' && user === user.trim()) && hasUniqueStrings(value.user_samples)))
+    && Array.isArray(value.activity_entry_ids)
+    && value.activity_entry_ids.length > 0
+    && value.activity_entry_ids.every((id) => typeof id === 'string' && id.trim() !== '' && id === id.trim())
+    && hasUniqueStrings(value.activity_entry_ids)
+}
+
+function isActivityReviewDispositionStatus(value: unknown): value is ActivityReviewDispositionStatus {
+  return typeof value === 'string' && ACTIVITY_REVIEW_DISPOSITION_STATUSES.includes(value as ActivityReviewDispositionStatus)
+}
+
+function isValidActivityReviewRecordListPagination(items: ActivityReviewRecord[], total: number, limit: number, offset: number): boolean {
+  if (items.length > limit) {
+    return false
+  }
+  if (total < items.length) {
+    return false
+  }
+  if (items.length > 0 && offset + items.length > total) {
+    return false
+  }
+  return true
 }
 
 function appendActivityFilterParams(params: URLSearchParams, options?: ActivityFilterOptions) {
@@ -385,6 +507,82 @@ export async function getActivityStats(options?: ActivityFilterOptions): Promise
     throw new Error(INVALID_API_RESPONSE_MESSAGE)
   }
 
+  return result.data
+}
+
+export async function listActivityReviewRecords(options?: ActivityReviewRecordListOptions): Promise<ActivityReviewRecordListResponse> {
+  const params = new URLSearchParams()
+  if (options?.limit) params.set('limit', String(options.limit))
+  if (options?.offset) params.set('offset', String(options.offset))
+  if (options?.reviewer) params.set('reviewer', options.reviewer)
+  if (options?.activityEntryId) params.set('activity_entry_id', options.activityEntryId)
+  if (options?.dispositionStatus) params.set('disposition_status', options.dispositionStatus)
+  if (options?.since) params.set('since', options.since)
+  if (options?.until) params.set('until', options.until)
+  const url = buildActivityUrl('/activity/reviews', params)
+
+  const response = options?.signal ? await authFetch(url, { signal: options.signal }) : await authFetch(url)
+  const result = await handleResponse<ApiResponseWrapper<{
+    items?: ActivityReviewRecord[]
+    total?: number
+    limit?: number
+    offset?: number
+  }>>(response, '获取活动复核记录失败')
+
+  if (
+    (result.data.items !== undefined && (!Array.isArray(result.data.items) || result.data.items.some((item) => !isValidActivityReviewRecord(item))))
+    || (result.data.total !== undefined && !isNonNegativeInteger(result.data.total))
+    || (result.data.limit !== undefined && !isNonNegativeInteger(result.data.limit))
+    || (result.data.offset !== undefined && !isNonNegativeInteger(result.data.offset))
+  ) {
+    throw new Error(INVALID_API_RESPONSE_MESSAGE)
+  }
+
+  const items = Array.isArray(result.data.items) ? result.data.items : []
+  const limit = result.data.limit ?? options?.limit ?? items.length
+  const offset = result.data.offset ?? options?.offset ?? 0
+  const total = result.data.total ?? offset + items.length
+
+  if (!isValidActivityReviewRecordListPagination(items, total, limit, offset)) {
+    throw new Error(INVALID_API_RESPONSE_MESSAGE)
+  }
+
+  return { items, total, limit, offset }
+}
+
+export async function createActivityReviewRecord(input: ActivityReviewRecordCreateInput, options: ActivityRequestOptions = {}): Promise<ActivityReviewRecord> {
+  const response = await authFetch(`${API_BASE}/activity/reviews`, {
+    ...options,
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(input),
+  })
+  const result = await handleResponse<ApiResponseWrapper<ActivityReviewRecord>>(response, '记录活动复核失败')
+  if (!isValidActivityReviewRecord(result.data)) {
+    throw new Error(INVALID_API_RESPONSE_MESSAGE)
+  }
+  return result.data
+}
+
+export async function updateActivityReviewRecordDisposition(
+  id: string,
+  input: ActivityReviewRecordDispositionUpdateInput,
+  options: ActivityRequestOptions = {},
+): Promise<ActivityReviewRecord> {
+  const response = await authFetch(`${API_BASE}/activity/reviews/${encodeURIComponent(id)}`, {
+    ...options,
+    method: 'PATCH',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(input),
+  })
+  const result = await handleResponse<ApiResponseWrapper<ActivityReviewRecord>>(response, '更新活动复核状态失败')
+  if (!isValidActivityReviewRecord(result.data)) {
+    throw new Error(INVALID_API_RESPONSE_MESSAGE)
+  }
   return result.data
 }
 

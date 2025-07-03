@@ -156,6 +156,10 @@ vi.mock('@heroui/react', async () => {
 
 vi.mock('@/components/share', () => ({
   ShareManager: () => <div>ShareManager</div>,
+  normalizeShareReviewFilter: (value: string | null | undefined) => {
+    const filters = new Set(['all', 'review', 'expiring', 'passwordless', 'broad', 'stale'])
+    return value && filters.has(value) ? value : 'all'
+  },
 }))
 
 vi.mock('@/stores/auth', async (importOriginal) => {

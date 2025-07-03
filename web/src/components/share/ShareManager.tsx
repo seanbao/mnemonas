@@ -30,6 +30,7 @@ import {
   AlertCircle,
   Activity,
   ShieldAlert,
+  X,
 } from 'lucide-react'
 import { 
   listShares, 
@@ -44,6 +45,8 @@ import {
 import { EmptyState } from '@/components/ui/EmptyState'
 import { FileIcon } from '@/components/ui/FileIcon'
 import { GENERIC_LOAD_ERROR_DESCRIPTION, getUserFacingErrorDescription } from '@/lib/apiMessages'
+import { normalizePath } from '@/lib/utils'
+import { normalizeShareReviewFilter, type ShareReviewFilter } from './reviewFilters'
 
 function getShareFeatureState(error: unknown): 'disabled' | 'unavailable' | null {
   if (!(error instanceof ShareError)) {
@@ -165,9 +168,10 @@ function getRiskPresentation(level?: string): { label: string; color: 'default' 
 interface ShareManagerProps {
   showAllShares?: boolean
   featureEnabled?: boolean
+  initialReviewFilter?: ShareReviewFilter | string | null
+  pathFilter?: string | null
+  onClearPathFilter?: () => void
 }
-
-type ShareReviewFilter = 'all' | 'review' | 'expiring' | 'passwordless' | 'broad' | 'stale'
 
 interface ShareReviewSummaryMetric {
   key: Exclude<ShareReviewFilter, 'all'>
@@ -213,6 +217,40 @@ function getShareActivityReviewRoute(path: string): string {
   return `/activity?${params.toString()}`
 }
 
+function normalizeSharePathFilter(value: string | null | undefined): string {
+  const trimmed = value?.trim() ?? ''
+  if (!trimmed) {
+    return ''
+  }
+
+  try {
+    return normalizePath(trimmed)
+  } catch {
+    return ''
+  }
+}
+
+function shareMatchesPathFilter(share: Share, pathFilter: string): boolean {
+  if (!pathFilter) {
+    return true
+  }
+
+  let sharePath: string
+  try {
+    sharePath = normalizePath(share.path)
+  } catch {
+    return false
+  }
+
+  if (pathFilter === '/' || sharePath === '/') {
+    return true
+  }
+
+  return sharePath === pathFilter
+    || sharePath.startsWith(`${pathFilter}/`)
+    || pathFilter.startsWith(`${sharePath}/`)
+}
+
 function getShareReviewStatus(metrics: ShareReviewSummaryMetric[]): {
   label: string
   description: string
@@ -247,14 +285,20 @@ function getShareReviewStatus(metrics: ShareReviewSummaryMetric[]): {
   }
 }
 
-export function ShareManager({ showAllShares = false, featureEnabled = true }: ShareManagerProps) {
+export function ShareManager({
+  showAllShares = false,
+  featureEnabled = true,
+  initialReviewFilter = 'all',
+  pathFilter = '',
+  onClearPathFilter,
+}: ShareManagerProps) {
   const navigate = useNavigate()
   const [shares, setShares] = useState<Share[]>([])
   const [isLoading, setIsLoading] = useState(true)
   const [loadError, setLoadError] = useState<unknown | null>(null)
   const [deleteTarget, setDeleteTarget] = useState<Share | null>(null)
   const [isDeleting, setIsDeleting] = useState(false)
-  const [reviewFilter, setReviewFilter] = useState<ShareReviewFilter>('all')
+  const [reviewFilter, setReviewFilter] = useState<ShareReviewFilter>(() => normalizeShareReviewFilter(initialReviewFilter))
   const [isDisablingHighRisk, setIsDisablingHighRisk] = useState(false)
   const sharesRef = useRef<Share[]>([])
   const loadRequestRef = useRef(0)
@@ -353,16 +397,20 @@ export function ShareManager({ showAllShares = false, featureEnabled = true }: S
     void loadSharesRef.current()
   }, [featureEnabled])
 
-  const riskyShares = useMemo(() => shares.filter(isRiskyShare), [shares])
-  const highRiskShares = useMemo(() => shares.filter(isHighRiskShare), [shares])
-  const expiringSoonShares = useMemo(() => shares.filter(share => shareHasRiskCode(share, 'expiring_soon')), [shares])
-  const passwordlessShares = useMemo(() => shares.filter(share => shareHasRiskCode(share, 'no_password')), [shares])
-  const broadFolderShares = useMemo(() => shares.filter(share => (
+  const normalizedPathFilter = useMemo(() => normalizeSharePathFilter(pathFilter), [pathFilter])
+  const pathFilteredShares = useMemo(() => (
+    normalizedPathFilter ? shares.filter((share) => shareMatchesPathFilter(share, normalizedPathFilter)) : shares
+  ), [normalizedPathFilter, shares])
+  const riskyShares = useMemo(() => pathFilteredShares.filter(isRiskyShare), [pathFilteredShares])
+  const highRiskShares = useMemo(() => pathFilteredShares.filter(isHighRiskShare), [pathFilteredShares])
+  const expiringSoonShares = useMemo(() => pathFilteredShares.filter(share => shareHasRiskCode(share, 'expiring_soon')), [pathFilteredShares])
+  const passwordlessShares = useMemo(() => pathFilteredShares.filter(share => shareHasRiskCode(share, 'no_password')), [pathFilteredShares])
+  const broadFolderShares = useMemo(() => pathFilteredShares.filter(share => (
     shareHasRiskCode(share, 'root_folder') || shareHasRiskCode(share, 'broad_folder')
-  )), [shares])
-  const staleShares = useMemo(() => shares.filter(share => (
+  )), [pathFilteredShares])
+  const staleShares = useMemo(() => pathFilteredShares.filter(share => (
     shareHasRiskCode(share, 'unused_enabled') || shareHasRiskCode(share, 'stale_enabled')
-  )), [shares])
+  )), [pathFilteredShares])
   const visibleShares = useMemo(() => {
     switch (reviewFilter) {
     case 'review':
@@ -376,9 +424,9 @@ export function ShareManager({ showAllShares = false, featureEnabled = true }: S
     case 'stale':
       return staleShares
     default:
-      return shares
+      return pathFilteredShares
     }
-  }, [broadFolderShares, expiringSoonShares, passwordlessShares, reviewFilter, riskyShares, shares, staleShares])
+  }, [broadFolderShares, expiringSoonShares, passwordlessShares, pathFilteredShares, reviewFilter, riskyShares, staleShares])
   const reviewSummaryMetrics = useMemo<ShareReviewSummaryMetric[]>(() => ([
     {
       key: 'review',
@@ -662,7 +710,7 @@ export function ShareManager({ showAllShares = false, featureEnabled = true }: S
       <div className="flex min-w-0 flex-wrap items-center justify-between gap-3">
         <div className="flex min-w-0 flex-wrap items-center gap-2">
           <h2 className="text-lg font-semibold text-foreground">
-            我的分享 ({shares.length})
+            我的分享 ({normalizedPathFilter ? `${pathFilteredShares.length} / ${shares.length}` : shares.length})
           </h2>
           {riskyShares.length > 0 && (
             <Chip size="sm" color="warning" variant="flat">
@@ -736,6 +784,29 @@ export function ShareManager({ showAllShares = false, featureEnabled = true }: S
           </Button>
         </div>
       </div>
+
+      {normalizedPathFilter && (
+        <div
+          role="region"
+          aria-label="分享路径筛选"
+          className="flex min-w-0 flex-col gap-2 rounded-lg border border-divider bg-content2/60 px-3 py-2 text-sm sm:flex-row sm:items-center sm:justify-between"
+        >
+          <div className="min-w-0 truncate text-default-600" title={normalizedPathFilter}>
+            路径：{normalizedPathFilter}
+          </div>
+          {onClearPathFilter && (
+            <Button
+              size="sm"
+              variant="light"
+              className="h-8 rounded-lg px-2 text-default-500"
+              startContent={<X size={14} />}
+              onPress={onClearPathFilter}
+            >
+              清除路径筛选
+            </Button>
+          )}
+        </div>
+      )}
 
       <div
         role="region"
