@@ -1,11 +1,13 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { act, render, screen, waitFor } from '@/test/utils'
 import userEvent from '@testing-library/user-event'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { TrashPage } from './Trash'
 import * as HeroUI from '@heroui/react'
 
 const mockAddToast = vi.fn()
 const useCanWriteMock = vi.fn(() => true)
+const mockUser = { id: 'u1', username: 'admin', role: 'admin' as const, email: 'admin@local', homeDir: '/' }
 
 // Mock API functions
 vi.mock('@/api/files', async (importOriginal) => {
@@ -84,6 +86,7 @@ vi.mock('@/stores/auth', async (importOriginal) => {
   return {
     ...actual,
     useCanWrite: () => useCanWriteMock(),
+    useUser: () => mockUser,
   }
 })
 
@@ -110,6 +113,11 @@ describe('TrashPage', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     useCanWriteMock.mockReturnValue(true)
+    mockUser.id = 'u1'
+    mockUser.username = 'admin'
+    mockUser.role = 'admin'
+    mockUser.email = 'admin@local'
+    mockUser.homeDir = '/'
     mockUseRealBatchOperation = false
     vi.spyOn(HeroUI, 'addToast').mockImplementation(((...args: unknown[]) => mockAddToast(...args)) as typeof HeroUI.addToast)
     mockBatchExecute.mockClear()
@@ -154,6 +162,22 @@ describe('TrashPage', () => {
       // Should show skeleton loaders
       const skeletons = document.querySelectorAll('[class*="skeleton"], [class*="animate"]')
       expect(skeletons.length).toBeGreaterThan(0)
+    })
+
+    it('shows an invalid-home error instead of loading trash for non-admin users without a home directory', async () => {
+      mockUser.id = 'u2'
+      mockUser.username = 'member'
+      mockUser.role = 'user'
+      mockUser.homeDir = ''
+
+      render(<TrashPage />)
+
+      await waitFor(() => {
+        expect(screen.getAllByText('主目录配置无效').length).toBeGreaterThan(0)
+        expect(screen.getByText('当前账户未配置有效的主目录，无法查看回收站。请联系管理员修复账户 home_dir。')).toBeTruthy()
+      })
+
+      expect(mockListTrash).not.toHaveBeenCalled()
     })
 
     it('renders page header', async () => {
@@ -203,6 +227,51 @@ describe('TrashPage', () => {
         expect(screen.getByText(/小时前|分钟前|刚刚/)).toBeTruthy()
       })
     })
+
+    it('does not reuse cached trash items from another user session', async () => {
+    mockUser.id = 'u2'
+    mockUser.username = 'member'
+    mockUser.role = 'user'
+    mockUser.homeDir = '/member'
+    mockListTrash.mockImplementation(() => pendingTrashRefetch())
+
+    const queryClient = new QueryClient({
+      defaultOptions: {
+        queries: {
+          retry: false,
+          gcTime: 0,
+          staleTime: 0,
+        },
+      },
+    })
+    queryClient.setQueryData(['trash'], {
+      items: [
+        {
+          id: 'admin-item',
+          originalPath: '/admin/secret.txt',
+          deletedAt: '2024-01-15T10:00:00Z',
+          name: 'secret.txt',
+          isDir: false,
+          size: 128,
+        },
+      ],
+      count: 1,
+      totalSize: 128,
+    })
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <TrashPage />
+      </QueryClientProvider>
+    )
+
+    await waitFor(() => {
+      expect(mockListTrash).toHaveBeenCalledTimes(1)
+    })
+
+    expect(screen.queryByText('/admin/secret.txt')).toBeNull()
+    expect(screen.queryByText('secret.txt')).toBeNull()
+  })
 
     it('hides guest write controls on trash page', async () => {
       useCanWriteMock.mockReturnValue(false)

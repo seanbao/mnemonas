@@ -52,7 +52,7 @@ const navSections: NavSection[] = [
     title: '管理',
     items: [
       { icon: Trash2, label: '回收站', path: '/trash' },
-      { icon: HardDrive, label: '存储', path: '/storage' },
+      { icon: HardDrive, label: '存储', path: '/storage', adminOnly: true },
       { icon: ShieldCheck, label: '守护', path: '/maintenance', adminOnly: true },
       { icon: Users, label: '用户', path: '/users', adminOnly: true },
     ]
@@ -109,6 +109,7 @@ export function Sidebar({ collapsed = false, onClose }: SidebarProps) {
   const { data: storageStats, error: storageStatsError, refetch: refetchStorageStats, isRefetching: isRefetchingStorageStats } = useQuery({
     queryKey: ['storage-stats-sidebar'],
     queryFn: getStorageStats,
+    enabled: isAdmin && !collapsed,
     staleTime: 1000 * 60 * 5, // Cache for 5 minutes
     refetchInterval: 1000 * 60 * 5, // Refresh every 5 minutes
   })
@@ -230,7 +231,7 @@ export function Sidebar({ collapsed = false, onClose }: SidebarProps) {
       </nav>
 
       {/* Storage Status - 存储状态底栏 */}
-      {!collapsed && (
+      {!collapsed && isAdmin && (
         <div className="p-4 border-t border-divider relative z-10">
           <div className="gradient-meridian-subtle rounded-xl p-4">
             <div className="flex items-center gap-2 mb-2">

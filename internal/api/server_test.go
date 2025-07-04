@@ -691,6 +691,32 @@ func setUserHomeDirForTest(t *testing.T, server *Server, username, homeDir strin
 	}
 }
 
+func newActivityOnlyAuthServer(t *testing.T) *Server {
+	t.Helper()
+
+	store, err := activity.NewStore(filepath.Join(t.TempDir(), "activity"))
+	if err != nil {
+		t.Fatalf("activity.NewStore() error: %v", err)
+	}
+
+	return &Server{
+		activity:           store,
+		activityConfigured: true,
+		authEnabled:        true,
+	}
+}
+
+func newAuthenticatedActivityRequest(method, target string, user *auth.User) *http.Request {
+	req := httptest.NewRequest(method, target, nil)
+	ctx := context.WithValue(req.Context(), auth.ContextKeyUser, user)
+	ctx = auth.WithClaimsContext(ctx, &auth.TokenClaims{
+		UserID:   user.ID,
+		Username: user.Username,
+		Role:     user.Role,
+	})
+	return req.WithContext(ctx)
+}
+
 func setupShareServer(t *testing.T) (*Server, string) {
 	return setupShareServerWithOptions(t, true, "")
 }
@@ -1822,6 +1848,54 @@ func TestServer_DeleteFile_DisablesSharesForDeletedPath(t *testing.T) {
 	}
 }
 
+func TestServer_DeleteFile_ReturnsWarningWhenShareDisableSyncFailsAfterVisibleDelete(t *testing.T) {
+	server, shareID := setupShareServer(t)
+	ctx := context.Background()
+
+	fileShare, err := server.shareStore.Create(share.CreateShareOptions{
+		Path:      "/docs/a.txt",
+		Type:      share.ShareTypeFile,
+		CreatedBy: "tester",
+	})
+	if err != nil {
+		t.Fatalf("Create(file share) error: %v", err)
+	}
+
+	restoreSync := share.SetSyncShareStoreRootDirForTest(func(root *os.Root) error {
+		return errors.New("directory fsync failed")
+	})
+	defer restoreSync()
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/files/docs/a.txt", nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("delete shared file warning status = %d, want %d: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+	if got := w.Header().Get("Warning"); got != workspaceMutationWarningHeader {
+		t.Fatalf("warning header = %q, want %q", got, workspaceMutationWarningHeader)
+	}
+	if _, err := server.fs.Stat(ctx, "/docs/a.txt"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("expected deleted file to stay gone after warning, got %v", err)
+	}
+	disabledShare, err := server.shareStore.Get(fileShare.ID)
+	if err != nil {
+		t.Fatalf("Get(fileShare) error: %v", err)
+	}
+	if disabledShare.Enabled {
+		t.Fatal("expected deleted file share to remain disabled after warning")
+	}
+	folderShare, err := server.shareStore.Get(shareID)
+	if err != nil {
+		t.Fatalf("Get(folder share) error: %v", err)
+	}
+	if !folderShare.Enabled {
+		t.Fatal("expected unrelated folder share to remain enabled after warning")
+	}
+}
+
 func TestServer_DeleteFile_RemovesFavoritesForDeletedPath(t *testing.T) {
 	server := setupFavoritesPathSyncServer(t)
 
@@ -1982,6 +2056,61 @@ func TestServer_HandlePathDeleted_RollbackPreservesRecreatedFavorite(t *testing.
 	}
 }
 
+func TestServer_HandlePathDeleted_RollbackIgnoresFavoritePersistenceWarning(t *testing.T) {
+	server, _, tmpDir := setupTestServer(t)
+
+	favoritesDir := filepath.Join(tmpDir, "delete-rollback-favorite-warning")
+	if err := os.MkdirAll(favoritesDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(favoritesDir) error: %v", err)
+	}
+	favoritesStore, err := favorites.NewStore(filepath.Join(favoritesDir, "favorites.json"))
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+	if _, err := favoritesStore.Add("tester", "/docs/a.txt", "original"); err != nil {
+		t.Fatalf("Add(original) error: %v", err)
+	}
+
+	server.favoritesStore = favoritesStore
+
+	result, err := server.handlePathDeleted(context.Background(), "/docs/a.txt")
+	if err != nil {
+		t.Fatalf("handlePathDeleted() error: %v", err)
+	}
+	if result == nil || result.Rollback == nil {
+		t.Fatal("expected delete hook result with rollback")
+	}
+
+	restoreSync := favorites.SetSyncFavoritesStoreRootDirForTest(func(root *os.Root) error {
+		return errors.New("directory fsync failed")
+	})
+	defer restoreSync()
+
+	if err := result.Rollback(); err != nil {
+		t.Fatalf("Rollback() error: %v", err)
+	}
+
+	loadedFavorites := favoritesStore.List("tester")
+	if len(loadedFavorites) != 1 {
+		t.Fatalf("expected one favorite after warning rollback, got %d", len(loadedFavorites))
+	}
+	if loadedFavorites[0].Path != "/docs/a.txt" {
+		t.Fatalf("expected restored favorite path %q, got %q", "/docs/a.txt", loadedFavorites[0].Path)
+	}
+
+	reloadedStore, err := favorites.NewStore(filepath.Join(favoritesDir, "favorites.json"))
+	if err != nil {
+		t.Fatalf("NewStore(reload) error: %v", err)
+	}
+	reloadedFavorites := reloadedStore.List("tester")
+	if len(reloadedFavorites) != 1 {
+		t.Fatalf("expected one persisted favorite after reload, got %d", len(reloadedFavorites))
+	}
+	if reloadedFavorites[0].Path != "/docs/a.txt" {
+		t.Fatalf("expected persisted restored favorite path %q, got %q", "/docs/a.txt", reloadedFavorites[0].Path)
+	}
+}
+
 func TestServer_HandlePathDeleted_RollbackPreservesUpdatedShareMetadata(t *testing.T) {
 	server, _, tmpDir := setupTestServer(t)
 
@@ -2051,6 +2180,62 @@ func TestServer_HandlePathDeleted_RollbackPreservesUpdatedShareMetadata(t *testi
 	}
 	if reloadedShare.Description != "newer" {
 		t.Fatalf("expected persisted newer share description, got %q", reloadedShare.Description)
+	}
+}
+
+func TestServer_HandlePathDeleted_RollbackIgnoresSharePersistenceWarning(t *testing.T) {
+	server, _, tmpDir := setupTestServer(t)
+
+	shareDir := filepath.Join(tmpDir, "delete-rollback-share-warning")
+	if err := os.MkdirAll(shareDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(shareDir) error: %v", err)
+	}
+	shareStore, err := share.NewShareStore(filepath.Join(shareDir, "shares.json"))
+	if err != nil {
+		t.Fatalf("NewShareStore() error: %v", err)
+	}
+	createdShare, err := shareStore.Create(share.CreateShareOptions{Path: "/docs/a.txt", Type: share.ShareTypeFile, CreatedBy: "tester"})
+	if err != nil {
+		t.Fatalf("Create() error: %v", err)
+	}
+
+	server.shareStore = shareStore
+
+	result, err := server.handlePathDeleted(context.Background(), "/docs/a.txt")
+	if err != nil {
+		t.Fatalf("handlePathDeleted() error: %v", err)
+	}
+	if result == nil || result.Rollback == nil {
+		t.Fatal("expected delete hook result with rollback")
+	}
+
+	restoreSync := share.SetSyncShareStoreRootDirForTest(func(root *os.Root) error {
+		return errors.New("directory fsync failed")
+	})
+	defer restoreSync()
+
+	if err := result.Rollback(); err != nil {
+		t.Fatalf("Rollback() error: %v", err)
+	}
+
+	restoredShare, err := shareStore.Get(createdShare.ID)
+	if err != nil {
+		t.Fatalf("Get(restoredShare) error: %v", err)
+	}
+	if !restoredShare.Enabled {
+		t.Fatal("expected rollback warning to still re-enable share")
+	}
+
+	reloadedStore, err := share.NewShareStore(filepath.Join(shareDir, "shares.json"))
+	if err != nil {
+		t.Fatalf("NewShareStore(reload) error: %v", err)
+	}
+	reloadedShare, err := reloadedStore.Get(createdShare.ID)
+	if err != nil {
+		t.Fatalf("Get(reloadedShare) error: %v", err)
+	}
+	if !reloadedShare.Enabled {
+		t.Fatal("expected persisted share to stay enabled after warning rollback")
 	}
 }
 
@@ -4105,6 +4290,53 @@ func TestServer_Stats_OmitsStorageFieldsWhenDataplaneUnavailable(t *testing.T) {
 	}
 }
 
+func TestServer_Stats_HidesGlobalStatsForNonAdminHomeScopedUser(t *testing.T) {
+	server, fs, _, username, password := setupAuthServer(t)
+	setUserHomeDirForTest(t, server, username, "/tester")
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/tester"); err != nil {
+		t.Fatalf("Mkdir(/tester) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/other"); err != nil {
+		t.Fatalf("Mkdir(/other) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/tester/own.txt", bytes.NewReader([]byte("own"))); err != nil {
+		t.Fatalf("WriteFile(/tester/own.txt) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/other/secret.txt", bytes.NewReader([]byte("secret"))); err != nil {
+		t.Fatalf("WriteFile(/other/secret.txt) error: %v", err)
+	}
+
+	token := loginAndGetAccessToken(t, server, username, password)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/stats", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("stats as non-admin status = %d, want %d", w.Code, http.StatusOK)
+	}
+
+	var payload struct {
+		Data map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("Failed to parse response JSON: %v", err)
+	}
+	if available, ok := payload.Data["total_files_available"].(bool); !ok || available {
+		t.Fatalf("expected non-admin stats to hide total_files, got %v", payload.Data["total_files_available"])
+	}
+	if available, ok := payload.Data["storage_stats_available"].(bool); !ok || available {
+		t.Fatalf("expected non-admin stats to hide storage stats, got %v", payload.Data["storage_stats_available"])
+	}
+	for _, key := range []string{"total_files", "total_chunks", "total_size", "unique_size", "dedup_ratio"} {
+		if _, ok := payload.Data[key]; ok {
+			t.Fatalf("expected non-admin stats to omit %s, got %v", key, payload.Data[key])
+		}
+	}
+}
+
 func TestServer_Diagnostics(t *testing.T) {
 	client := setupDataplaneClient(t)
 	if client == nil {
@@ -4716,6 +4948,51 @@ func TestReadFavoriteBodyPath_PreservesWhitespaceInPath(t *testing.T) {
 	}
 }
 
+func TestReadFavoriteBodyPath_LeavesBodyReadableForDownstreamHandler(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/favorites", strings.NewReader(`{"path":"/docs/report.pdf ","note":"note"}`))
+	req.Header.Set("Content-Type", "application/json")
+
+	cleanPath, err := readFavoriteBodyPath(req)
+	if err != nil {
+		t.Fatalf("readFavoriteBodyPath() error: %v", err)
+	}
+	if cleanPath != "/docs/report.pdf " {
+		t.Fatalf("expected whitespace-preserving path, got %q", cleanPath)
+	}
+
+	var downstream struct {
+		Path string `json:"path"`
+		Note string `json:"note"`
+	}
+	if err := decodeJSONBody(req, &downstream); err != nil {
+		t.Fatalf("decodeJSONBody() after readFavoriteBodyPath error: %v", err)
+	}
+	if downstream.Path != "/docs/report.pdf " || downstream.Note != "note" {
+		t.Fatalf("expected downstream decode to preserve body, got %+v", downstream)
+	}
+}
+
+func TestReadCreateSharePath_LeavesBodyReadableForDownstreamHandler(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/shares", strings.NewReader(`{"path":"/docs/a.txt","type":"file"}`))
+	req.Header.Set("Content-Type", "application/json")
+
+	sharePath, err := readCreateSharePath(req)
+	if err != nil {
+		t.Fatalf("readCreateSharePath() error: %v", err)
+	}
+	if sharePath != "/docs/a.txt" {
+		t.Fatalf("expected normalized share path, got %q", sharePath)
+	}
+
+	var downstream share.CreateShareRequest
+	if err := decodeJSONBody(req, &downstream); err != nil {
+		t.Fatalf("decodeJSONBody() after readCreateSharePath error: %v", err)
+	}
+	if downstream.Path != "/docs/a.txt" || downstream.Type != string(share.ShareTypeFile) {
+		t.Fatalf("expected downstream decode to preserve share body, got %+v", downstream)
+	}
+}
+
 func TestReadFavoriteBatchPaths_PreservesWhitespaceInPaths(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/favorites/check-batch", strings.NewReader(`{"paths":["/docs/report.pdf ","/docs/report.pdf"]}`))
 	req.Header.Set("Content-Type", "application/json")
@@ -5058,6 +5335,62 @@ func TestServer_MoveFile_UpdatesSharePaths(t *testing.T) {
 	}
 }
 
+func TestServer_MoveFile_ReturnsWarningWhenShareRenameSyncFailsAfterVisibleRename(t *testing.T) {
+	server, shareID := setupShareServer(t)
+	ctx := context.Background()
+
+	if err := server.fs.Mkdir(ctx, "/archive"); err != nil {
+		t.Fatalf("Mkdir(/archive) error: %v", err)
+	}
+	fileShare, err := server.shareStore.Create(share.CreateShareOptions{
+		Path:      "/docs/a.txt",
+		Type:      share.ShareTypeFile,
+		CreatedBy: "tester",
+	})
+	if err != nil {
+		t.Fatalf("Create(file share) error: %v", err)
+	}
+
+	restoreSync := share.SetSyncShareStoreRootDirForTest(func(root *os.Root) error {
+		return errors.New("directory fsync failed")
+	})
+	defer restoreSync()
+
+	body := `{"from":"/docs","to":"/archive/docs"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/files-move", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("move shared folder warning status = %d, want %d: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+	if got := w.Header().Get("Warning"); got != workspaceMutationWarningHeader {
+		t.Fatalf("warning header = %q, want %q", got, workspaceMutationWarningHeader)
+	}
+	if _, err := server.fs.Stat(ctx, "/archive/docs/a.txt"); err != nil {
+		t.Fatalf("expected moved file to exist after warning, got %v", err)
+	}
+	if _, err := server.fs.Stat(ctx, "/docs"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("expected source path to be gone after warning, got %v", err)
+	}
+	renamedFolderShare, err := server.shareStore.Get(shareID)
+	if err != nil {
+		t.Fatalf("Get(folder share) error: %v", err)
+	}
+	if renamedFolderShare.Path != "/archive/docs" {
+		t.Fatalf("expected folder share path to be updated after warning, got %q", renamedFolderShare.Path)
+	}
+	renamedFileShare, err := server.shareStore.Get(fileShare.ID)
+	if err != nil {
+		t.Fatalf("Get(file share) error: %v", err)
+	}
+	if renamedFileShare.Path != "/archive/docs/a.txt" {
+		t.Fatalf("expected file share path to be updated after warning, got %q", renamedFileShare.Path)
+	}
+}
+
 func TestServer_MoveFile_UpdatesFavoritePaths(t *testing.T) {
 	server := setupFavoritesPathSyncServer(t)
 	ctx := context.Background()
@@ -5188,6 +5521,97 @@ func TestServer_MoveFile_RollsBackWhenFavoritePathSyncFails(t *testing.T) {
 	}
 	if server.favoritesStore.IsFavorite("tester", "/archive/docs") || server.favoritesStore.IsFavorite("tester", "/archive/docs/report.txt") {
 		t.Fatal("expected destination favorites not to be persisted after rollback")
+	}
+}
+
+func TestServer_HandlePathRenamed_RollbackIgnoresSharePersistenceWarning(t *testing.T) {
+	server, _, tmpDir := setupTestServer(t)
+
+	shareDir := filepath.Join(tmpDir, "rename-rollback-share-warning")
+	if err := os.MkdirAll(shareDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(shareDir) error: %v", err)
+	}
+	shareStore, err := share.NewShareStore(filepath.Join(shareDir, "shares.json"))
+	if err != nil {
+		t.Fatalf("NewShareStore() error: %v", err)
+	}
+	folderShare, err := shareStore.Create(share.CreateShareOptions{Path: "/docs", Type: share.ShareTypeFolder, CreatedBy: "tester"})
+	if err != nil {
+		t.Fatalf("Create(folder share) error: %v", err)
+	}
+	fileShare, err := shareStore.Create(share.CreateShareOptions{Path: "/docs/report.txt", Type: share.ShareTypeFile, CreatedBy: "tester"})
+	if err != nil {
+		t.Fatalf("Create(file share) error: %v", err)
+	}
+
+	favoritesDir := filepath.Join(tmpDir, "rename-rollback-favorites-warning")
+	if err := os.MkdirAll(favoritesDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(favoritesDir) error: %v", err)
+	}
+	favoritesStore, err := favorites.NewStore(filepath.Join(favoritesDir, "favorites.json"))
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+	if _, err := favoritesStore.Add("tester", "/docs", "folder"); err != nil {
+		t.Fatalf("Add(/docs) error: %v", err)
+	}
+
+	server.shareStore = shareStore
+	server.favoritesStore = favoritesStore
+
+	if err := os.Chmod(favoritesDir, 0o500); err != nil {
+		t.Fatalf("Chmod(favoritesDir) error: %v", err)
+	}
+	defer func() {
+		_ = os.Chmod(favoritesDir, 0o755)
+	}()
+
+	callCount := 0
+	restoreSync := share.SetSyncShareStoreRootDirForTest(func(root *os.Root) error {
+		callCount++
+		if callCount == 2 {
+			return errors.New("directory fsync failed")
+		}
+		return nil
+	})
+	defer restoreSync()
+
+	err = server.handlePathRenamed(context.Background(), "/docs", "/archive/docs")
+	if err == nil {
+		t.Fatal("expected handlePathRenamed() to fail because favorites sync fails")
+	}
+	if !strings.Contains(err.Error(), "sync favorite paths after rename") {
+		t.Fatalf("expected favorite sync failure, got %v", err)
+	}
+	if strings.Contains(err.Error(), "rollback share paths after rename") {
+		t.Fatalf("expected rollback warning to be ignored, got %v", err)
+	}
+
+	loadedFolderShare, err := shareStore.Get(folderShare.ID)
+	if err != nil {
+		t.Fatalf("Get(folder share) error: %v", err)
+	}
+	if loadedFolderShare.Path != "/docs" {
+		t.Fatalf("expected folder share path rollback to /docs, got %q", loadedFolderShare.Path)
+	}
+	loadedFileShare, err := shareStore.Get(fileShare.ID)
+	if err != nil {
+		t.Fatalf("Get(file share) error: %v", err)
+	}
+	if loadedFileShare.Path != "/docs/report.txt" {
+		t.Fatalf("expected file share path rollback to /docs/report.txt, got %q", loadedFileShare.Path)
+	}
+
+	reloadedStore, err := share.NewShareStore(filepath.Join(shareDir, "shares.json"))
+	if err != nil {
+		t.Fatalf("NewShareStore(reload) error: %v", err)
+	}
+	reloadedFolderShare, err := reloadedStore.Get(folderShare.ID)
+	if err != nil {
+		t.Fatalf("Get(reloaded folder share) error: %v", err)
+	}
+	if reloadedFolderShare.Path != "/docs" {
+		t.Fatalf("expected persisted folder share path rollback to /docs, got %q", reloadedFolderShare.Path)
 	}
 }
 
@@ -6162,6 +6586,153 @@ func TestServer_Trash_Restore_RestoresLinkedSharesAndFavorites(t *testing.T) {
 	}
 }
 
+func TestServer_Trash_Restore_ReturnsWarningWhenShareRestoreSyncFailsAfterVisibleRestore(t *testing.T) {
+	server, fs, tmpDir := setupTestServer(t)
+	ctx := context.Background()
+
+	shareStore, err := share.NewShareStore(filepath.Join(tmpDir, "trash-restore-warning-shares.json"))
+	if err != nil {
+		t.Fatalf("NewShareStore() error: %v", err)
+	}
+	favoritesStore, err := favorites.NewStore(filepath.Join(tmpDir, "trash-restore-warning-favorites.json"))
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+	server.shareStore = shareStore
+	server.favoritesStore = favoritesStore
+
+	if err := fs.Mkdir(ctx, "/trash-restore-warning"); err != nil {
+		t.Fatalf("Mkdir() error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/trash-restore-warning/report.txt", bytes.NewReader([]byte("restore me"))); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+	createdShare, err := shareStore.Create(share.CreateShareOptions{
+		Path:      "/trash-restore-warning/report.txt",
+		Type:      share.ShareTypeFile,
+		CreatedBy: "tester",
+	})
+	if err != nil {
+		t.Fatalf("CreateShare() error: %v", err)
+	}
+	if _, err := favoritesStore.Add("tester", "/trash-restore-warning/report.txt", "file"); err != nil {
+		t.Fatalf("AddFavorite() error: %v", err)
+	}
+
+	deleteReq := httptest.NewRequest(http.MethodDelete, "/api/v1/files/trash-restore-warning/report.txt", nil)
+	deleteRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(deleteRec, deleteReq)
+	if deleteRec.Code != http.StatusOK {
+		t.Fatalf("Delete status = %d, want %d, body: %s", deleteRec.Code, http.StatusOK, deleteRec.Body.String())
+	}
+
+	items, err := fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash() error: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected one trash item, got %d", len(items))
+	}
+
+	restoreSync := share.SetSyncShareStoreRootDirForTest(func(root *os.Root) error {
+		return errors.New("directory fsync failed")
+	})
+	defer restoreSync()
+
+	restoreReq := httptest.NewRequest(http.MethodPost, "/api/v1/trash/"+items[0].ID+"/restore", nil)
+	restoreRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(restoreRec, restoreReq)
+	if restoreRec.Code != http.StatusOK {
+		t.Fatalf("RestoreFromTrash status = %d, want %d, body: %s", restoreRec.Code, http.StatusOK, restoreRec.Body.String())
+	}
+
+	warningValues := restoreRec.Header().Values("Warning")
+	if len(warningValues) == 0 || warningValues[0] != trashRestoreMetadataWarningHeader {
+		t.Fatalf("warning headers = %v, want first value %q", warningValues, trashRestoreMetadataWarningHeader)
+	}
+	if body := restoreRec.Body.String(); !strings.Contains(body, `"warning":true`) {
+		t.Fatalf("expected restore warning body, got %s", body)
+	}
+	if body := restoreRec.Body.String(); !strings.Contains(body, `"message":"file restored with metadata warning"`) {
+		t.Fatalf("expected restore warning message, got %s", body)
+	}
+
+	if _, err := fs.Stat(ctx, "/trash-restore-warning/report.txt"); err != nil {
+		t.Fatalf("Stat(restored file) error: %v", err)
+	}
+	restoredShare, err := shareStore.Get(createdShare.ID)
+	if err != nil {
+		t.Fatalf("Get(restored share) error: %v", err)
+	}
+	if !restoredShare.Enabled {
+		t.Fatal("expected share to be re-enabled after warning restore")
+	}
+	if restoredShare.Path != "/trash-restore-warning/report.txt" {
+		t.Fatalf("expected restored share path %q, got %q", "/trash-restore-warning/report.txt", restoredShare.Path)
+	}
+	if !favoritesStore.IsFavorite("tester", "/trash-restore-warning/report.txt") {
+		t.Fatal("expected favorite to be restored even when share restore warns")
+	}
+}
+
+func TestServer_Trash_Restore_PreservesRecreatedFavorite(t *testing.T) {
+	server, fs, tmpDir := setupTestServer(t)
+	ctx := context.Background()
+
+	favoritesStore, err := favorites.NewStore(filepath.Join(tmpDir, "trash-restore-preserve-favorite.json"))
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+	server.favoritesStore = favoritesStore
+
+	if err := fs.Mkdir(ctx, "/trash-restore-preserve-favorite"); err != nil {
+		t.Fatalf("Mkdir() error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/trash-restore-preserve-favorite/report.txt", bytes.NewReader([]byte("restore me"))); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+	if _, err := favoritesStore.Add("tester", "/trash-restore-preserve-favorite/report.txt", "original"); err != nil {
+		t.Fatalf("AddFavorite(original) error: %v", err)
+	}
+
+	deleteReq := httptest.NewRequest(http.MethodDelete, "/api/v1/files/trash-restore-preserve-favorite/report.txt", nil)
+	deleteRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(deleteRec, deleteReq)
+	if deleteRec.Code != http.StatusOK {
+		t.Fatalf("Delete status = %d, want %d, body: %s", deleteRec.Code, http.StatusOK, deleteRec.Body.String())
+	}
+
+	if _, err := favoritesStore.Add("tester", "/trash-restore-preserve-favorite/report.txt", "newer"); err != nil {
+		t.Fatalf("AddFavorite(newer) error: %v", err)
+	}
+
+	items, err := fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash() error: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected one trash item, got %d", len(items))
+	}
+
+	restoreReq := httptest.NewRequest(http.MethodPost, "/api/v1/trash/"+items[0].ID+"/restore", nil)
+	restoreRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(restoreRec, restoreReq)
+	if restoreRec.Code != http.StatusOK {
+		t.Fatalf("RestoreFromTrash status = %d, want %d, body: %s", restoreRec.Code, http.StatusOK, restoreRec.Body.String())
+	}
+
+	loaded := favoritesStore.List("tester")
+	if len(loaded) != 1 {
+		t.Fatalf("expected one favorite after restore, got %d", len(loaded))
+	}
+	if loaded[0].Path != "/trash-restore-preserve-favorite/report.txt" {
+		t.Fatalf("expected restored favorite path %q, got %q", "/trash-restore-preserve-favorite/report.txt", loaded[0].Path)
+	}
+	if loaded[0].Note != "newer" {
+		t.Fatalf("expected newer recreated favorite note to be preserved, got %q", loaded[0].Note)
+	}
+}
+
 func TestServer_Trash_Restore_PreservesUpdatedShareMetadata(t *testing.T) {
 	server, fs, tmpDir := setupTestServer(t)
 	ctx := context.Background()
@@ -6232,6 +6803,162 @@ func TestServer_Trash_Restore_PreservesUpdatedShareMetadata(t *testing.T) {
 	}
 }
 
+func TestServer_RestoreDeletedPathState_NormalizesLegacyShareRestoreState(t *testing.T) {
+	server, _, tmpDir := setupTestServer(t)
+
+	shareStore, err := share.NewShareStore(filepath.Join(tmpDir, "trash-restore-legacy-share.json"))
+	if err != nil {
+		t.Fatalf("NewShareStore() error: %v", err)
+	}
+	server.shareStore = shareStore
+
+	createdShare, err := shareStore.Create(share.CreateShareOptions{
+		Path:      "/trash-restore-legacy-share/report.txt",
+		Type:      share.ShareTypeFile,
+		CreatedBy: "tester",
+	})
+	if err != nil {
+		t.Fatalf("CreateShare() error: %v", err)
+	}
+
+	disabledShares, err := shareStore.DisableSharesUnderPathWithRestore("/trash-restore-legacy-share/report.txt")
+	if err != nil {
+		t.Fatalf("DisableSharesUnderPathWithRestore() error: %v", err)
+	}
+	if len(disabledShares) != 1 {
+		t.Fatalf("expected one disabled share, got %d", len(disabledShares))
+	}
+
+	legacy := *disabledShares[0]
+	legacy.Path = `trash-restore-legacy-share\report.txt`
+	legacy.Permission = share.PermissionReadWrite
+
+	restoreData, err := json.Marshal(deletedPathRestoreState{Shares: []*share.Share{&legacy}})
+	if err != nil {
+		t.Fatalf("Marshal(restoreData) error: %v", err)
+	}
+
+	if err := server.restoreDeletedPathState("/trash-restore-legacy-share/report.txt", "/trash-restore-legacy-share/report.txt", restoreData); err != nil {
+		t.Fatalf("restoreDeletedPathState() error: %v", err)
+	}
+
+	restoredShare, err := shareStore.Get(createdShare.ID)
+	if err != nil {
+		t.Fatalf("Get(restoredShare) error: %v", err)
+	}
+	if restoredShare.Path != "/trash-restore-legacy-share/report.txt" {
+		t.Fatalf("expected restored share path %q, got %q", "/trash-restore-legacy-share/report.txt", restoredShare.Path)
+	}
+	if restoredShare.Permission != share.PermissionRead {
+		t.Fatalf("expected restored share permission %q, got %q", share.PermissionRead, restoredShare.Permission)
+	}
+}
+
+func TestServer_RestoreDeletedPathState_NormalizesLegacyFavoriteRestoreState(t *testing.T) {
+	server, _, tmpDir := setupTestServer(t)
+
+	favoritesStore, err := favorites.NewStore(filepath.Join(tmpDir, "trash-restore-legacy-favorite.json"))
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+	server.favoritesStore = favoritesStore
+
+	if _, err := favoritesStore.Add("tester", "/trash-restore-legacy-favorite/report.txt", "original"); err != nil {
+		t.Fatalf("Add(original favorite) error: %v", err)
+	}
+
+	removedFavorites, err := favoritesStore.RemoveFavoritesUnderPathWithRestore("/trash-restore-legacy-favorite/report.txt")
+	if err != nil {
+		t.Fatalf("RemoveFavoritesUnderPathWithRestore() error: %v", err)
+	}
+	if len(removedFavorites) != 1 {
+		t.Fatalf("expected one removed favorite, got %d", len(removedFavorites))
+	}
+
+	legacy := *removedFavorites[0]
+	legacy.Path = `trash-restore-legacy-favorite\report.txt`
+
+	restoreData, err := json.Marshal(deletedPathRestoreState{Favorites: []*favorites.Favorite{&legacy}})
+	if err != nil {
+		t.Fatalf("Marshal(restoreData) error: %v", err)
+	}
+
+	if err := server.restoreDeletedPathState("/trash-restore-legacy-favorite/report.txt", "/trash-restore-legacy-favorite/report.txt", restoreData); err != nil {
+		t.Fatalf("restoreDeletedPathState() error: %v", err)
+	}
+
+	if !favoritesStore.IsFavorite("tester", "/trash-restore-legacy-favorite/report.txt") {
+		t.Fatal("expected normalized restored favorite to be present")
+	}
+}
+
+func TestServer_RestoreDeletedPathState_RelocatesLegacyPathsToCustomTarget(t *testing.T) {
+	server, _, tmpDir := setupTestServer(t)
+
+	shareStore, err := share.NewShareStore(filepath.Join(tmpDir, "trash-restore-legacy-relocate-shares.json"))
+	if err != nil {
+		t.Fatalf("NewShareStore() error: %v", err)
+	}
+	favoritesStore, err := favorites.NewStore(filepath.Join(tmpDir, "trash-restore-legacy-relocate-favorites.json"))
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+	server.shareStore = shareStore
+	server.favoritesStore = favoritesStore
+
+	createdShare, err := shareStore.Create(share.CreateShareOptions{
+		Path:      "/trash-restore-legacy-relocate/notes.txt",
+		Type:      share.ShareTypeFile,
+		CreatedBy: "tester",
+	})
+	if err != nil {
+		t.Fatalf("CreateShare() error: %v", err)
+	}
+	if _, err := favoritesStore.Add("tester", "/trash-restore-legacy-relocate/notes.txt", "original"); err != nil {
+		t.Fatalf("AddFavorite() error: %v", err)
+	}
+
+	disabledShares, err := shareStore.DisableSharesUnderPathWithRestore("/trash-restore-legacy-relocate/notes.txt")
+	if err != nil {
+		t.Fatalf("DisableSharesUnderPathWithRestore() error: %v", err)
+	}
+	removedFavorites, err := favoritesStore.RemoveFavoritesUnderPathWithRestore("/trash-restore-legacy-relocate/notes.txt")
+	if err != nil {
+		t.Fatalf("RemoveFavoritesUnderPathWithRestore() error: %v", err)
+	}
+	if len(disabledShares) != 1 || len(removedFavorites) != 1 {
+		t.Fatalf("expected one share and one favorite in restore state, got %d shares and %d favorites", len(disabledShares), len(removedFavorites))
+	}
+
+	legacyShare := *disabledShares[0]
+	legacyShare.Path = `trash-restore-legacy-relocate\notes.txt`
+	legacyFavorite := *removedFavorites[0]
+	legacyFavorite.Path = `trash-restore-legacy-relocate\notes.txt`
+
+	restoreData, err := json.Marshal(deletedPathRestoreState{
+		Shares:    []*share.Share{&legacyShare},
+		Favorites: []*favorites.Favorite{&legacyFavorite},
+	})
+	if err != nil {
+		t.Fatalf("Marshal(restoreData) error: %v", err)
+	}
+
+	if err := server.restoreDeletedPathState("/trash-restore-legacy-relocate/notes.txt", "/trash-restore-target/restored.txt", restoreData); err != nil {
+		t.Fatalf("restoreDeletedPathState() error: %v", err)
+	}
+
+	restoredShare, err := shareStore.Get(createdShare.ID)
+	if err != nil {
+		t.Fatalf("Get(restoredShare) error: %v", err)
+	}
+	if restoredShare.Path != "/trash-restore-target/restored.txt" {
+		t.Fatalf("expected restored share path %q, got %q", "/trash-restore-target/restored.txt", restoredShare.Path)
+	}
+	if !favoritesStore.IsFavorite("tester", "/trash-restore-target/restored.txt") {
+		t.Fatal("expected restored favorite to be relocated to the custom target path")
+	}
+}
+
 func TestServer_RollbackDeletedPathShareRestoreState_PreservesNewerMetadata(t *testing.T) {
 	server, _, tmpDir := setupTestServer(t)
 
@@ -6293,6 +7020,71 @@ func TestServer_RollbackDeletedPathShareRestoreState_PreservesNewerMetadata(t *t
 	}
 	if rolledBackShare.Description != "newer" {
 		t.Fatalf("expected rollback to preserve newer share description, got %q", rolledBackShare.Description)
+	}
+}
+
+func TestServer_RollbackDeletedPathShareRestoreState_IgnoresSharePersistenceWarning(t *testing.T) {
+	server, _, tmpDir := setupTestServer(t)
+
+	shareStore, err := share.NewShareStore(filepath.Join(tmpDir, "trash-restore-rollback-share-warning.json"))
+	if err != nil {
+		t.Fatalf("NewShareStore() error: %v", err)
+	}
+	server.shareStore = shareStore
+
+	createdShare, err := shareStore.Create(share.CreateShareOptions{
+		Path:      "/trash-restore-rollback-warning/report.txt",
+		Type:      share.ShareTypeFile,
+		CreatedBy: "tester",
+	})
+	if err != nil {
+		t.Fatalf("CreateShare() error: %v", err)
+	}
+
+	disabledShares, err := shareStore.DisableSharesUnderPathWithRestore("/trash-restore-rollback-warning/report.txt")
+	if err != nil {
+		t.Fatalf("DisableSharesUnderPathWithRestore() error: %v", err)
+	}
+	if len(disabledShares) != 1 {
+		t.Fatalf("expected one disabled share, got %d", len(disabledShares))
+	}
+
+	if err := shareStore.RestoreShares(disabledShares); err != nil {
+		t.Fatalf("RestoreShares() error: %v", err)
+	}
+
+	snapshot, err := server.snapshotDeletedPathShareRestoreState(disabledShares)
+	if err != nil {
+		t.Fatalf("snapshotDeletedPathShareRestoreState() error: %v", err)
+	}
+
+	restoreSync := share.SetSyncShareStoreRootDirForTest(func(root *os.Root) error {
+		return errors.New("directory fsync failed")
+	})
+	defer restoreSync()
+
+	if err := server.rollbackDeletedPathShareRestoreState(snapshot); err != nil {
+		t.Fatalf("rollbackDeletedPathShareRestoreState() error: %v", err)
+	}
+
+	rolledBackShare, err := shareStore.Get(createdShare.ID)
+	if err != nil {
+		t.Fatalf("Get(rolledBackShare) error: %v", err)
+	}
+	if rolledBackShare.Enabled {
+		t.Fatal("expected rollback warning to restore disabled state")
+	}
+
+	reloadedStore, err := share.NewShareStore(filepath.Join(tmpDir, "trash-restore-rollback-share-warning.json"))
+	if err != nil {
+		t.Fatalf("NewShareStore(reload) error: %v", err)
+	}
+	reloadedShare, err := reloadedStore.Get(createdShare.ID)
+	if err != nil {
+		t.Fatalf("Get(reloadedShare) error: %v", err)
+	}
+	if reloadedShare.Enabled {
+		t.Fatal("expected persisted rollback warning to keep disabled state")
 	}
 }
 
@@ -8174,6 +8966,31 @@ func TestServer_PublicShareAccess_HidesLegacyShareOutsideHomeForNonAdminOwner(t 
 	}
 }
 
+func TestServer_PublicShareAccess_AllowsLegacyUsernameOwnedShareWithinHome(t *testing.T) {
+	server, fs, _, username, _ := setupAuthServerWithFeatures(t, true, false)
+
+	ctx := context.Background()
+	if err := fs.Mkdir(ctx, "/tester"); err != nil {
+		t.Fatalf("Mkdir(/tester) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/tester/own.txt", bytes.NewReader([]byte("own"))); err != nil {
+		t.Fatalf("WriteFile(/tester/own.txt) error: %v", err)
+	}
+
+	legacyShare, err := server.shareStore.Create(share.CreateShareOptions{Path: "/tester/own.txt", Type: share.ShareTypeFile, CreatedBy: username})
+	if err != nil {
+		t.Fatalf("Create legacy username-owned share error: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/s/"+legacyShare.ID, nil)
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("public legacy username-owned share status = %d, want %d", w.Code, http.StatusOK)
+	}
+}
+
 func TestServer_PublicShareAccess_HidesShareForDisabledOwner(t *testing.T) {
 	server, fs, _, username, _ := setupAuthServerWithFeatures(t, true, false)
 
@@ -8644,6 +9461,65 @@ func TestServer_ListShares_FiltersResultsByHomeDirForNonAdmin(t *testing.T) {
 	}
 }
 
+func TestServer_ListShares_IncludesLegacyUsernameOwnedShareWithinHomeDir(t *testing.T) {
+	server, fs, _, username, password := setupAuthServerWithFeatures(t, true, false)
+
+	ctx := context.Background()
+	if err := fs.Mkdir(ctx, "/tester"); err != nil {
+		t.Fatalf("Mkdir(/tester) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/tester/own.txt", bytes.NewReader([]byte("own"))); err != nil {
+		t.Fatalf("WriteFile(/tester/own.txt) error: %v", err)
+	}
+
+	if _, err := server.shareStore.Create(share.CreateShareOptions{Path: "/tester/own.txt", Type: share.ShareTypeFile, CreatedBy: username}); err != nil {
+		t.Fatalf("Create legacy username-owned share error: %v", err)
+	}
+
+	token := loginAndGetAccessToken(t, server, username, password)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/shares", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("list legacy username-owned shares status = %d, want %d", w.Code, http.StatusOK)
+	}
+	if !strings.Contains(w.Body.String(), "/tester/own.txt") {
+		t.Fatalf("expected legacy username-owned share in list, got %s", w.Body.String())
+	}
+}
+
+func TestServer_GetShare_AllowsLegacyUsernameOwnedShareWithinHomeDir(t *testing.T) {
+	server, fs, _, username, password := setupAuthServerWithFeatures(t, true, false)
+
+	ctx := context.Background()
+	if err := fs.Mkdir(ctx, "/tester"); err != nil {
+		t.Fatalf("Mkdir(/tester) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/tester/own.txt", bytes.NewReader([]byte("own"))); err != nil {
+		t.Fatalf("WriteFile(/tester/own.txt) error: %v", err)
+	}
+
+	legacyShare, err := server.shareStore.Create(share.CreateShareOptions{Path: "/tester/own.txt", Type: share.ShareTypeFile, CreatedBy: username})
+	if err != nil {
+		t.Fatalf("Create legacy username-owned share error: %v", err)
+	}
+
+	token := loginAndGetAccessToken(t, server, username, password)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/shares/"+legacyShare.ID, nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("get legacy username-owned share status = %d, want %d", w.Code, http.StatusOK)
+	}
+	if !strings.Contains(w.Body.String(), legacyShare.ID) {
+		t.Fatalf("expected legacy username-owned share in response, got %s", w.Body.String())
+	}
+}
+
 func TestServer_ListShares_InvalidUserHomeDirReturnsEmptyList(t *testing.T) {
 	server, _, _, username, password := setupAuthServerWithFeatures(t, true, false)
 	setUserHomeDirForTest(t, server, username, "../escape")
@@ -8862,6 +9738,71 @@ func TestServer_ListFavorites_FiltersResultsByHomeDirForNonAdmin(t *testing.T) {
 	}
 	if strings.Contains(body, "/other/secret.txt") {
 		t.Fatalf("expected outside-home favorite to be filtered, got %s", body)
+	}
+}
+
+func TestServer_LegacyUsernameFavorite_RemainsAccessibleToOwner(t *testing.T) {
+	server, _, _, username, password := setupAuthServerWithFeatures(t, false, true)
+
+	if _, err := server.favoritesStore.Add(username, "/tester/own.txt", "legacy"); err != nil {
+		t.Fatalf("Add legacy username favorite error: %v", err)
+	}
+
+	token := loginAndGetAccessToken(t, server, username, password)
+
+	listReq := httptest.NewRequest(http.MethodGet, "/api/v1/favorites", nil)
+	listReq.Header.Set("Authorization", "Bearer "+token)
+	listRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(listRec, listReq)
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("list legacy username favorite status = %d, want %d", listRec.Code, http.StatusOK)
+	}
+	if !strings.Contains(listRec.Body.String(), "/tester/own.txt") {
+		t.Fatalf("expected legacy username favorite in list, got %s", listRec.Body.String())
+	}
+
+	checkReq := httptest.NewRequest(http.MethodGet, "/api/v1/favorites/check?path=/tester/own.txt", nil)
+	checkReq.Header.Set("Authorization", "Bearer "+token)
+	checkRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(checkRec, checkReq)
+	if checkRec.Code != http.StatusOK {
+		t.Fatalf("check legacy username favorite status = %d, want %d", checkRec.Code, http.StatusOK)
+	}
+	if !strings.Contains(checkRec.Body.String(), `"is_favorite":true`) {
+		t.Fatalf("expected legacy username favorite to be reported, got %s", checkRec.Body.String())
+	}
+
+	addReq := httptest.NewRequest(http.MethodPost, "/api/v1/favorites", strings.NewReader(`{"path":"/tester/own.txt"}`))
+	addReq.Header.Set("Authorization", "Bearer "+token)
+	addReq.Header.Set("Content-Type", "application/json")
+	addRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(addRec, addReq)
+	if addRec.Code != http.StatusConflict {
+		t.Fatalf("add duplicate legacy username favorite status = %d, want %d", addRec.Code, http.StatusConflict)
+	}
+
+	updateReq := httptest.NewRequest(http.MethodPatch, "/api/v1/favorites/tester/own.txt", strings.NewReader(`{"note":"updated"}`))
+	updateReq.Header.Set("Authorization", "Bearer "+token)
+	updateReq.Header.Set("Content-Type", "application/json")
+	updateRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(updateRec, updateReq)
+	if updateRec.Code != http.StatusOK {
+		t.Fatalf("update legacy username favorite note status = %d, want %d", updateRec.Code, http.StatusOK)
+	}
+	legacyFavorites := server.favoritesStore.List(username)
+	if len(legacyFavorites) != 1 || legacyFavorites[0].Note != "updated" {
+		t.Fatalf("expected legacy username favorite note to update, got %+v", legacyFavorites)
+	}
+
+	removeReq := httptest.NewRequest(http.MethodDelete, "/api/v1/favorites/tester/own.txt", nil)
+	removeReq.Header.Set("Authorization", "Bearer "+token)
+	removeRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(removeRec, removeReq)
+	if removeRec.Code != http.StatusOK {
+		t.Fatalf("remove legacy username favorite status = %d, want %d", removeRec.Code, http.StatusOK)
+	}
+	if server.favoritesStore.IsFavorite(username, "/tester/own.txt") {
+		t.Fatal("expected legacy username favorite to be removed")
 	}
 }
 
@@ -10871,6 +11812,50 @@ func TestServer_ListActivity_NonAdminOnlySeesOwnEntriesWhenAuthEnabled(t *testin
 	}
 }
 
+func TestServer_ListActivity_RecreatedUsernameDoesNotSeeLegacyEntries(t *testing.T) {
+	server := newActivityOnlyAuthServer(t)
+	username := "tester"
+
+	if server.activity == nil {
+		t.Fatal("expected activity store to be initialized")
+	}
+	if err := server.activity.Log(activity.ActionUpload, "/tester/legacy.txt", username, "127.0.0.1", nil); err != nil {
+		t.Fatalf("log legacy upload activity error: %v", err)
+	}
+	if err := server.activity.Log(activity.ActionLogin, "", username, "127.0.0.1", nil); err != nil {
+		t.Fatalf("log legacy login activity error: %v", err)
+	}
+
+	recreatedUser := &auth.User{
+		ID:        "recreated-user",
+		Username:  username,
+		Role:      auth.RoleUser,
+		HomeDir:   "/tester",
+		CreatedAt: time.Now().Add(time.Hour),
+	}
+
+	req := newAuthenticatedActivityRequest(http.MethodGet, "/api/v1/activity/", recreatedUser)
+	w := httptest.NewRecorder()
+	server.handleListActivity(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("list activity as recreated user status = %d, want %d", w.Code, http.StatusOK)
+	}
+
+	var payload struct {
+		Data struct {
+			Items []activity.Entry `json:"items"`
+			Total int              `json:"total"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to parse recreated-user activity response: %v", err)
+	}
+	if payload.Data.Total != 0 || len(payload.Data.Items) != 0 {
+		t.Fatalf("expected recreated user to see no legacy activity entries, got %s", w.Body.String())
+	}
+}
+
 func TestServer_ListActivity_NonAdminFiltersOutsideHomeDirEntries(t *testing.T) {
 	server, _, _, username, _ := setupAuthServer(t)
 
@@ -10910,6 +11895,45 @@ func TestServer_ListActivity_NonAdminFiltersOutsideHomeDirEntries(t *testing.T) 
 	}
 	if payload.Data.Items[0].Path != "/tester/own.txt" {
 		t.Fatalf("non-admin saw path %q, want in-home path only", payload.Data.Items[0].Path)
+	}
+}
+
+func TestServer_ListActivity_NonAdminHidesOutsideHomeDetailPaths(t *testing.T) {
+	server, _, _, username, _ := setupAuthServer(t)
+
+	if server.activity == nil {
+		t.Fatal("expected activity store to be initialized")
+	}
+	if err := server.activity.Log(activity.ActionMove, "/tester/own.txt", username, "127.0.0.1", map[string]string{"to": "/other/secret.txt"}); err != nil {
+		t.Fatalf("log move activity error: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/activity/", nil)
+	req.Header.Set("Authorization", "Bearer "+issueAccessTokenWithoutActivity(t, server, username))
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("list activity as non-admin status = %d, want %d", w.Code, http.StatusOK)
+	}
+
+	var payload struct {
+		Data struct {
+			Items []activity.Entry `json:"items"`
+			Total int              `json:"total"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to parse list activity response: %v", err)
+	}
+	if payload.Data.Total != 1 || len(payload.Data.Items) != 1 {
+		t.Fatalf("expected one filtered activity entry, got total=%d items=%d", payload.Data.Total, len(payload.Data.Items))
+	}
+	if payload.Data.Items[0].Path != "/tester/own.txt" {
+		t.Fatalf("non-admin saw path %q, want in-home path only", payload.Data.Items[0].Path)
+	}
+	if payload.Data.Items[0].Details["to"] != "" {
+		t.Fatalf("expected outside-home detail path to be hidden, got %+v", payload.Data.Items[0].Details)
 	}
 }
 
@@ -10997,6 +12021,58 @@ func TestServer_ActivityStats_NonAdminOnlySeesOwnEntriesWhenAuthEnabled(t *testi
 	}
 	if payload.Data.ByAction[string(activity.ActionDelete)] != 0 {
 		t.Fatalf("expected admin delete count to be hidden, got %d", payload.Data.ByAction[string(activity.ActionDelete)])
+	}
+}
+
+func TestServer_ActivityStats_RecreatedUsernameDoesNotCountLegacyEntries(t *testing.T) {
+	server := newActivityOnlyAuthServer(t)
+	username := "tester"
+
+	if server.activity == nil {
+		t.Fatal("expected activity store to be initialized")
+	}
+	if err := server.activity.Log(activity.ActionUpload, "/tester/legacy.txt", username, "127.0.0.1", nil); err != nil {
+		t.Fatalf("log legacy upload activity error: %v", err)
+	}
+	if err := server.activity.Log(activity.ActionLogin, "", username, "127.0.0.1", nil); err != nil {
+		t.Fatalf("log legacy login activity error: %v", err)
+	}
+
+	recreatedUser := &auth.User{
+		ID:        "recreated-user",
+		Username:  username,
+		Role:      auth.RoleUser,
+		HomeDir:   "/tester",
+		CreatedAt: time.Now().Add(time.Hour),
+	}
+
+	statsReq := newAuthenticatedActivityRequest(http.MethodGet, "/api/v1/activity/stats", recreatedUser)
+	statsRec := httptest.NewRecorder()
+	server.handleActivityStats(statsRec, statsReq)
+
+	if statsRec.Code != http.StatusOK {
+		t.Fatalf("activity stats as recreated user status = %d, want %d", statsRec.Code, http.StatusOK)
+	}
+
+	var payload struct {
+		Data struct {
+			Total    int            `json:"total"`
+			Today    int            `json:"today"`
+			ByUser   map[string]int `json:"by_user"`
+			ByAction map[string]int `json:"by_action"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(statsRec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to parse recreated-user activity stats response: %v", err)
+	}
+	if payload.Data.Total != 0 || payload.Data.Today != 0 {
+		t.Fatalf("expected recreated user stats to exclude legacy activity, got %s", statsRec.Body.String())
+	}
+	if payload.Data.ByUser[username] != 0 {
+		t.Fatalf("expected recreated user count = 0, got %d", payload.Data.ByUser[username])
+	}
+	if payload.Data.ByAction[string(activity.ActionUpload)] != 0 || payload.Data.ByAction[string(activity.ActionLogin)] != 0 {
+		t.Fatalf("expected recreated user action counts to exclude legacy activity, got %+v", payload.Data.ByAction)
 	}
 }
 

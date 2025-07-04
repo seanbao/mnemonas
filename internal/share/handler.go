@@ -44,6 +44,7 @@ type FileStatProvider interface {
 type responseEnvelope struct {
 	Success bool         `json:"success"`
 	Data    interface{}  `json:"data,omitempty"`
+	Warning bool         `json:"warning,omitempty"`
 	Message string       `json:"message,omitempty"`
 	Error   *errorDetail `json:"error,omitempty"`
 }
@@ -69,6 +70,7 @@ type Handler struct {
 
 type shareOwnerStore interface {
 	GetByID(id string) (*auth.User, error)
+	GetByUsername(username string) (*auth.User, error)
 }
 
 type passwordAttemptTracker struct {
@@ -84,14 +86,15 @@ type passwordAttemptState struct {
 }
 
 const (
-	shareAccessCookiePrefix      = "mnemonas_share_"
-	defaultPasswordFailureLimit  = 5
-	defaultPasswordFailureWindow = 15 * time.Minute
-	defaultPasswordFailureDelay  = 200 * time.Millisecond
-	defaultPasswordLockDuration  = 5 * time.Minute
-	defaultRateLimitErrorMessage = "too many attempts, try later"
-	defaultJSONRequestBodyLimit  = 1 * 1024 * 1024
-	maxDurationDays              = int64((1<<63 - 1) / int64(24*time.Hour))
+	shareAccessCookiePrefix       = "mnemonas_share_"
+	sharePersistenceWarningHeader = `199 MnemoNAS "share persistence incomplete"`
+	defaultPasswordFailureLimit   = 5
+	defaultPasswordFailureWindow  = 15 * time.Minute
+	defaultPasswordFailureDelay   = 200 * time.Millisecond
+	defaultPasswordLockDuration   = 5 * time.Minute
+	defaultRateLimitErrorMessage  = "too many attempts, try later"
+	defaultJSONRequestBodyLimit   = 1 * 1024 * 1024
+	maxDurationDays               = int64((1<<63 - 1) / int64(24*time.Hour))
 )
 
 var errInvalidSharePermission = errors.New("invalid permission")
@@ -375,6 +378,12 @@ func (h *Handler) CreateShare(w http.ResponseWriter, r *http.Request) {
 
 	share, err := h.store.Create(opts)
 	if err != nil {
+		if IsPersistenceWarning(err) {
+			shareInfo := share.ToInfo()
+			shareInfo.URL = h.buildShareURL(share.ID)
+			writeShareSuccessWithWarning(w, http.StatusCreated, shareInfo, "share created with persistence warning")
+			return
+		}
 		writeShareError(w, http.StatusInternalServerError, "internal server error", "CREATE_SHARE_FAILED")
 		return
 	}
@@ -387,14 +396,13 @@ func (h *Handler) CreateShare(w http.ResponseWriter, r *http.Request) {
 
 // ListShares lists shares for the current user
 func (h *Handler) ListShares(w http.ResponseWriter, r *http.Request) {
-	userID := getUserIDFromContext(r.Context())
 	isAdmin := getIsAdminFromContext(r.Context())
 
 	var shares []*Share
 	if isAdmin && r.URL.Query().Get("all") == "true" {
 		shares = h.store.ListAll()
 	} else {
-		shares = h.store.ListByUser(userID)
+		shares = h.store.ListByUser(getShareOwnerIdentifiersFromContext(r.Context())...)
 	}
 
 	infos := make([]*ShareInfo, len(shares))
@@ -420,9 +428,7 @@ func (h *Handler) GetShare(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	userID := getUserIDFromContext(r.Context())
-	isAdmin := getIsAdminFromContext(r.Context())
-	if share.CreatedBy != userID && !isAdmin {
+	if !shareOwnedByRequester(r.Context(), share) {
 		writeShareError(w, http.StatusForbidden, "forbidden", "FORBIDDEN")
 		return
 	}
@@ -482,9 +488,7 @@ func (h *Handler) UpdateShare(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	userID := getUserIDFromContext(r.Context())
-	isAdmin := getIsAdminFromContext(r.Context())
-	if share.CreatedBy != userID && !isAdmin {
+	if !shareOwnedByRequester(r.Context(), share) {
 		writeShareError(w, http.StatusForbidden, "forbidden", "FORBIDDEN")
 		return
 	}
@@ -543,6 +547,12 @@ func (h *Handler) UpdateShare(w http.ResponseWriter, r *http.Request) {
 			writeShareError(w, http.StatusNotFound, "share not found", "SHARE_NOT_FOUND")
 			return
 		}
+		if IsPersistenceWarning(err) && updatedShare != nil {
+			info := updatedShare.ToInfo()
+			info.URL = h.buildShareURL(updatedShare.ID)
+			writeShareSuccessWithWarning(w, http.StatusOK, info, "share updated with persistence warning")
+			return
+		}
 		writeShareError(w, http.StatusInternalServerError, "internal server error", "UPDATE_SHARE_FAILED")
 		return
 	}
@@ -571,9 +581,7 @@ func (h *Handler) DeleteShare(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	userID := getUserIDFromContext(r.Context())
-	isAdmin := getIsAdminFromContext(r.Context())
-	if share.CreatedBy != userID && !isAdmin {
+	if !shareOwnedByRequester(r.Context(), share) {
 		writeShareError(w, http.StatusForbidden, "forbidden", "FORBIDDEN")
 		return
 	}
@@ -587,6 +595,10 @@ func (h *Handler) DeleteShare(w http.ResponseWriter, r *http.Request) {
 	if err := h.store.Delete(id); err != nil {
 		if errors.Is(err, ErrShareNotFound) {
 			writeShareError(w, http.StatusNotFound, "share not found", "SHARE_NOT_FOUND")
+			return
+		}
+		if IsPersistenceWarning(err) {
+			writeShareSuccessWithWarning(w, http.StatusOK, nil, "share deleted with persistence warning")
 			return
 		}
 		writeShareError(w, http.StatusInternalServerError, "internal server error", "DELETE_SHARE_FAILED")
@@ -873,8 +885,12 @@ func (h *Handler) DownloadShare(w http.ResponseWriter, r *http.Request) {
 	}
 	accessReservation, err := h.reserveAuthorizedAccessForShare(share)
 	if err != nil {
-		writePublicShareAccessError(w, err)
-		return
+		if IsPersistenceWarning(err) {
+			markSharePersistenceWarningHeaders(w)
+		} else {
+			writePublicShareAccessError(w, err)
+			return
+		}
 	}
 
 	filename := path.Base(share.Path)
@@ -885,8 +901,12 @@ func (h *Handler) DownloadShare(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if rollbackErr := h.store.rollbackAuthorizedAccess(accessReservation); rollbackErr != nil {
-			writeShareError(w, http.StatusInternalServerError, "internal server error", "DOWNLOAD_SHARE_ROLLBACK_FAILED")
-			return
+			if IsPersistenceWarning(rollbackErr) {
+				markSharePersistenceWarningHeaders(w)
+			} else {
+				writeShareError(w, http.StatusInternalServerError, "internal server error", "DOWNLOAD_SHARE_ROLLBACK_FAILED")
+				return
+			}
 		}
 		writeShareError(w, http.StatusInternalServerError, "internal server error", "DOWNLOAD_SHARE_FAILED")
 		return
@@ -967,8 +987,12 @@ func (h *Handler) DownloadShareFile(w http.ResponseWriter, r *http.Request) {
 	}
 	accessReservation, err := h.reserveAuthorizedAccessForShare(share)
 	if err != nil {
-		writePublicShareAccessError(w, err)
-		return
+		if IsPersistenceWarning(err) {
+			markSharePersistenceWarningHeaders(w)
+		} else {
+			writePublicShareAccessError(w, err)
+			return
+		}
 	}
 
 	filename := path.Base(fullPath)
@@ -979,8 +1003,12 @@ func (h *Handler) DownloadShareFile(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if rollbackErr := h.store.rollbackAuthorizedAccess(accessReservation); rollbackErr != nil {
-			writeShareError(w, http.StatusInternalServerError, "internal server error", "DOWNLOAD_SHARE_ROLLBACK_FAILED")
-			return
+			if IsPersistenceWarning(rollbackErr) {
+				markSharePersistenceWarningHeaders(w)
+			} else {
+				writeShareError(w, http.StatusInternalServerError, "internal server error", "DOWNLOAD_SHARE_ROLLBACK_FAILED")
+				return
+			}
 		}
 		writeShareError(w, http.StatusInternalServerError, "internal server error", "DOWNLOAD_SHARE_FAILED")
 		return
@@ -1141,8 +1169,12 @@ func (h *Handler) ListShareItems(w http.ResponseWriter, r *http.Request) {
 
 	accessReservation, err := h.reserveAuthorizedAccessForShare(share)
 	if err != nil {
-		writePublicShareAccessError(w, err)
-		return
+		if IsPersistenceWarning(err) {
+			markSharePersistenceWarningHeaders(w)
+		} else {
+			writePublicShareAccessError(w, err)
+			return
+		}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -1152,8 +1184,12 @@ func (h *Handler) ListShareItems(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if rollbackErr := h.store.rollbackAuthorizedAccess(accessReservation); rollbackErr != nil {
-			writeShareError(w, http.StatusInternalServerError, "internal server error", "LIST_SHARE_ITEMS_ROLLBACK_FAILED")
-			return
+			if IsPersistenceWarning(rollbackErr) {
+				markSharePersistenceWarningHeaders(w)
+			} else {
+				writeShareError(w, http.StatusInternalServerError, "internal server error", "LIST_SHARE_ITEMS_ROLLBACK_FAILED")
+				return
+			}
 		}
 		writeShareError(w, http.StatusInternalServerError, "internal server error", "LIST_SHARE_ITEMS_FAILED")
 		return
@@ -1243,7 +1279,7 @@ func (h *Handler) ensureShareOwnerActive(share *Share) error {
 		return nil
 	}
 
-	owner, err := h.userStore.GetByID(share.CreatedBy)
+	owner, err := resolveShareOwner(h.userStore, share.CreatedBy)
 	if err != nil {
 		if errors.Is(err, auth.ErrUserNotFound) {
 			return ErrShareDisabled
@@ -1262,17 +1298,17 @@ func (h *Handler) reserveAuthorizedAccessForShare(share *Share) (*authorizedAcce
 	}
 
 	_, reservation, err := h.store.reserveAuthorizedAccess(share.ID)
-	if err != nil {
+	if err != nil && !IsPersistenceWarning(err) {
 		return nil, err
 	}
 	if err := h.ensureShareOwnerActive(share); err != nil {
-		if rollbackErr := h.store.rollbackAuthorizedAccess(reservation); rollbackErr != nil {
+		if rollbackErr := h.store.rollbackAuthorizedAccess(reservation); rollbackErr != nil && !IsPersistenceWarning(rollbackErr) {
 			return nil, errors.Join(err, rollbackErr)
 		}
 		return nil, err
 	}
 
-	return reservation, nil
+	return reservation, err
 }
 
 func (h *Handler) hasShareAccess(r *http.Request, share *Share) bool {
@@ -1332,6 +1368,9 @@ func requestIsHTTPS(r *http.Request) bool {
 	if !requestip.IsTrustedForwardedSource(requestip.RemoteIP(r.RemoteAddr)) {
 		return false
 	}
+	if requestip.TrustedProxyHops() <= 0 {
+		return false
+	}
 	return strings.EqualFold(strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")), "https")
 }
 
@@ -1368,12 +1407,32 @@ func writePublicShareInfo(w http.ResponseWriter, info *PublicShareInfo) bool {
 }
 
 func writeShareSuccess(w http.ResponseWriter, status int, data interface{}, message string) {
+	writeShareSuccessEnvelope(w, status, data, message, false)
+}
+
+func writeShareSuccessWithWarning(w http.ResponseWriter, status int, data interface{}, message string) {
+	markSharePersistenceWarningHeaders(w)
+	writeShareSuccessEnvelope(w, status, data, message, true)
+}
+
+func markSharePersistenceWarningHeaders(w http.ResponseWriter) {
+	headers := w.Header()
+	for _, warningValue := range headers.Values("Warning") {
+		if warningValue == sharePersistenceWarningHeader {
+			return
+		}
+	}
+	headers.Add("Warning", sharePersistenceWarningHeader)
+}
+
+func writeShareSuccessEnvelope(w http.ResponseWriter, status int, data interface{}, message string, warning bool) {
 	if data == nil {
 		data = json.RawMessage("null")
 	}
 	writeShareJSON(w, status, responseEnvelope{
 		Success: true,
 		Data:    data,
+		Warning: warning,
 		Message: message,
 	})
 }
@@ -1421,6 +1480,66 @@ func isWithinSharePath(basePath, targetPath string) bool {
 		return len(targetPath) > len(basePath) && targetPath[len(basePath)] == '/'
 	}
 	return false
+}
+
+func resolveShareOwner(store shareOwnerStore, ownerRef string) (*auth.User, error) {
+	if store == nil || strings.TrimSpace(ownerRef) == "" {
+		return nil, auth.ErrUserNotFound
+	}
+
+	owner, err := store.GetByID(ownerRef)
+	if err == nil {
+		return owner, nil
+	}
+	if !errors.Is(err, auth.ErrUserNotFound) {
+		return nil, err
+	}
+
+	owner, err = store.GetByUsername(ownerRef)
+	if err != nil {
+		return nil, err
+	}
+	return owner, nil
+}
+
+func shareOwnedByRequester(ctx context.Context, share *Share) bool {
+	if share == nil {
+		return false
+	}
+	if getIsAdminFromContext(ctx) {
+		return true
+	}
+	for _, ownerIdentifier := range getShareOwnerIdentifiersFromContext(ctx) {
+		if share.CreatedBy == ownerIdentifier {
+			return true
+		}
+	}
+	return false
+}
+
+func getShareOwnerIdentifiersFromContext(ctx context.Context) []string {
+	claims := auth.GetClaimsFromContext(ctx)
+	if claims == nil {
+		return nil
+	}
+
+	identifiers := make([]string, 0, 2)
+	appendUnique := func(value string) {
+		trimmed := strings.TrimSpace(value)
+		if trimmed == "" {
+			return
+		}
+		for _, existing := range identifiers {
+			if existing == trimmed {
+				return
+			}
+		}
+		identifiers = append(identifiers, trimmed)
+	}
+
+	appendUnique(claims.UserID)
+	appendUnique(claims.Username)
+	return identifiers
 }
 
 func getUserIDFromContext(ctx context.Context) string {

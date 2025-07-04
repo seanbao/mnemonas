@@ -1,3 +1,4 @@
+import { getInvalidHomeDirDescription, invalidHomeDirTitle, resolveUserHomeScope } from '@/lib/userScope'
 import { useCallback, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
@@ -34,7 +35,7 @@ import { EmptyState } from '@/components/ui/EmptyState'
 import { cn, formatRelativeTime } from '@/lib/utils'
 import { useBatchOperation, type BatchOperationResult } from '@/lib/useBatchOperation'
 import { PageHeader } from '@/components/ui/PageHeader'
-import { useCanWrite } from '@/stores/auth'
+import { useCanWrite, useUser } from '@/stores/auth'
 
 // Get filename from path
 function getFileName(path: string): string {
@@ -290,6 +291,11 @@ export function FavoritesPage() {
   const navigate = useNavigate()
   const queryClient = useQueryClient()
   const canWrite = useCanWrite()
+  const user = useUser()
+  const { scopedHomeDir, hasInvalidHomeDir } = resolveUserHomeScope(user)
+  const authScopeKey = user?.id ?? 'anonymous'
+  const favoritesScopeKey = `${authScopeKey}:${hasInvalidHomeDir ? '__invalid__' : (scopedHomeDir ?? '/')}`
+  const favoritesQueryKey = ['favorites', favoritesScopeKey] as const
   const [selectedItems, setSelectedItems] = useState<Set<string>>(new Set())
   const [editingItem, setEditingItem] = useState<Favorite | null>(null)
   const [noteValue, setNoteValue] = useState('')
@@ -308,8 +314,9 @@ export function FavoritesPage() {
   const { isOpen: isEditOpen, onOpen: onEditOpen, onClose: onEditClose } = useDisclosure()
 
   const { data: favorites, isLoading, error, refetch } = useQuery({
-    queryKey: ['favorites'],
+    queryKey: favoritesQueryKey,
     queryFn: listFavorites,
+    enabled: !hasInvalidHomeDir,
   })
 
   const favoriteItems = useMemo(() => favorites ?? [], [favorites])
@@ -365,7 +372,7 @@ export function FavoritesPage() {
     }
 
     const removedPaths = new Set(paths)
-    queryClient.setQueryData<Favorite[]>(['favorites'], (current) => {
+    queryClient.setQueryData<Favorite[]>(favoritesQueryKey, (current) => {
       if (!current) {
         return current
       }
@@ -373,7 +380,7 @@ export function FavoritesPage() {
       const next = current.filter((item) => !removedPaths.has(item.path))
       return next.length === current.length ? current : next
     })
-  }, [queryClient])
+  }, [favoritesQueryKey, queryClient])
 
   // Remove mutation
   const removeMutation = useMutation({
@@ -381,7 +388,7 @@ export function FavoritesPage() {
     onSuccess: (result, path) => {
       removeFavoritesFromCache([path])
       removeSelectedPaths([path])
-      queryClient.invalidateQueries({ queryKey: ['favorites'] })
+      queryClient.invalidateQueries({ queryKey: favoritesQueryKey })
       addToast({ title: getFavoritesActionSuccessTitle('remove', result.message), color: 'success' })
     },
     onError: (error, path) => {
@@ -401,7 +408,7 @@ export function FavoritesPage() {
     mutationFn: ({ path, note }: { path: string; note: string; editSession: number }) => 
       updateFavoriteNote(path, note),
     onSuccess: (result, variables) => {
-      queryClient.invalidateQueries({ queryKey: ['favorites'] })
+      queryClient.invalidateQueries({ queryKey: favoritesQueryKey })
       addToast({ title: getFavoritesActionSuccessTitle('update-note', result.message), color: 'success' })
       if (
         editSessionRef.current === variables.editSession
@@ -466,7 +473,7 @@ export function FavoritesPage() {
       const failedPaths = result.failedItems.filter((item): item is string => typeof item === 'string')
       removeFavoritesFromCache(succeededPaths)
       setSelectedItems(new Set(failedPaths))
-      queryClient.invalidateQueries({ queryKey: ['favorites'] })
+      queryClient.invalidateQueries({ queryKey: favoritesQueryKey })
     },
   })
 
@@ -520,6 +527,25 @@ export function FavoritesPage() {
   }
   addToast({ title: '收藏夹已刷新', color: 'success' })
   }, [refetch])
+
+  if (hasInvalidHomeDir) {
+    return (
+      <div className="h-full flex flex-col space-y-4 p-6 overflow-auto custom-scrollbar">
+        <PageHeader
+          title="收藏夹"
+          subtitle={invalidHomeDirTitle}
+          icon={Star}
+        />
+        <div className="flex flex-1 items-center justify-center">
+          <EmptyState
+            icon={AlertCircle}
+            title={invalidHomeDirTitle}
+            description={getInvalidHomeDirDescription('查看收藏')}
+          />
+        </div>
+      </div>
+    )
+  }
 
   if (isLoading) {
     return (

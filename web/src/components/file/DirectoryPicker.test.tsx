@@ -142,6 +142,41 @@ describe('DirectoryPicker', () => {
     })
   })
 
+  it('does not reuse cached root directory entries from another user session', async () => {
+    mockUser.id = 'u2'
+    mockUser.username = 'member'
+    mockUser.role = 'user'
+    mockUser.email = 'member@local'
+    mockUser.homeDir = '/member'
+    mockListFiles.mockImplementation(() => new Promise(() => {}))
+
+    const queryClient = new QueryClient({
+      defaultOptions: {
+        queries: {
+          retry: false,
+          gcTime: 0,
+          staleTime: 0,
+        },
+      },
+    })
+    queryClient.setQueryData(['files', '/member'], {
+      path: '/member',
+      files: [{ name: 'admin-secret', path: '/member/admin-secret', isDir: true, size: 0, modTime: '2024-01-01T00:00:00Z' }],
+    })
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <DirectoryPicker isOpen={true} onClose={vi.fn()} onSelect={vi.fn()} />
+      </QueryClientProvider>
+    )
+
+    await waitFor(() => {
+      expect(mockListFiles).toHaveBeenCalledWith('/member')
+    })
+
+    expect(screen.queryByText('admin-secret')).toBeNull()
+  })
+
   it('shows backend error details when creating a folder fails', async () => {
     const user = userEvent.setup({ writeToClipboard: false })
     mockCreateDirectory.mockRejectedValueOnce(new Error('permission denied'))

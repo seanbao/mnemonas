@@ -7,6 +7,10 @@ import * as HeroUI from '@heroui/react'
 
 const mockAddToast = vi.fn()
 
+const { mockUser } = vi.hoisted(() => ({
+  mockUser: { id: 'u1', username: 'admin', role: 'admin' as const, email: 'admin@local', homeDir: '/' },
+}))
+
 import { getSettings } from '@/api/settings'
 import { SettingsError } from '@/api/settings'
 import { updateSettings } from '@/api/settings'
@@ -86,6 +90,14 @@ vi.mock('@/components/share', () => ({
   ShareManager: () => <div>ShareManager</div>,
 }))
 
+vi.mock('@/stores/auth', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/stores/auth')>()
+  return {
+    ...actual,
+    useUser: () => mockUser,
+  }
+})
+
 // Mock the settings API
 vi.mock('@/api/settings', () => ({
   SettingsError: class SettingsError extends Error {
@@ -115,6 +127,11 @@ vi.mock('@/api/settings', () => ({
 describe('SettingsPage', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    mockUser.id = 'u1'
+    mockUser.username = 'admin'
+    mockUser.role = 'admin'
+    mockUser.email = 'admin@local'
+    mockUser.homeDir = '/'
     window.history.pushState({}, '', '/settings')
     mockGetSettings.mockResolvedValue(defaultSettingsResponse)
     mockGetWebDAVCredentials.mockResolvedValue({
@@ -176,6 +193,54 @@ describe('SettingsPage', () => {
       await waitFor(() => {
         expect(screen.getByText('重置')).toBeTruthy()
       })
+    })
+
+    it('refetches settings and WebDAV credentials when the auth scope changes', async () => {
+    window.history.pushState({}, '', '/settings?tab=webdav')
+    mockGetSettings
+      .mockResolvedValueOnce(defaultSettingsResponse)
+      .mockResolvedValueOnce({
+        data: {
+          ...defaultSettingsResponse.data,
+          webdav: {
+            ...defaultSettingsResponse.data.webdav,
+            username: 'other-admin',
+          },
+        },
+      })
+    mockGetWebDAVCredentials
+      .mockResolvedValueOnce({
+        enabled: true,
+        url: '/dav/',
+        auth_type: 'basic',
+        username: 'admin',
+        password: 'secret',
+      })
+      .mockResolvedValueOnce({
+        enabled: true,
+        url: '/dav/',
+        auth_type: 'basic',
+        username: 'other-admin',
+        password: 'secret-2',
+      })
+
+    const { rerender } = render(<SettingsPage />)
+
+    await waitFor(() => {
+      expect(mockGetSettings).toHaveBeenCalledTimes(1)
+      expect(mockGetWebDAVCredentials).toHaveBeenCalledTimes(1)
+    })
+
+    mockUser.id = 'u2'
+    mockUser.username = 'other-admin'
+    mockUser.email = 'other@local'
+
+    rerender(<SettingsPage />)
+
+    await waitFor(() => {
+      expect(mockGetSettings).toHaveBeenCalledTimes(2)
+      expect(mockGetWebDAVCredentials).toHaveBeenCalledTimes(2)
+    })
     })
   })
 

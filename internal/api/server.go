@@ -34,6 +34,7 @@ import (
 	"github.com/seanbao/mnemonas/internal/storage"
 	"github.com/seanbao/mnemonas/internal/thumbnail"
 	"github.com/seanbao/mnemonas/internal/versionstore"
+	"github.com/seanbao/mnemonas/internal/workspace"
 	"github.com/zeebo/blake3"
 )
 
@@ -179,31 +180,40 @@ func (s *Server) webDAVConfiguredButUnavailable() bool {
 
 func (s *Server) handlePathRenamed(_ context.Context, oldPath, newPath string) error {
 	var renamedShares []*share.Share
+	var renameWarning error
 	if s.shareStore != nil {
 		var err error
 		renamedShares, err = s.shareStore.UpdatePathReferencesWithRestore(oldPath, newPath)
 		if err != nil {
-			return fmt.Errorf("sync share paths after rename: %w", err)
+			if share.IsPersistenceWarning(err) {
+				renameWarning = errors.Join(renameWarning, workspace.WrapVisibleMutationWarning(fmt.Errorf("sync share paths after rename: %w", err)))
+			} else {
+				return fmt.Errorf("sync share paths after rename: %w", err)
+			}
 		}
 	}
 	if s.favoritesStore != nil {
 		if err := s.favoritesStore.UpdatePathReferences(oldPath, newPath); err != nil {
-			if len(renamedShares) > 0 {
-				if rollbackErr := s.shareStore.RestoreMovedSharesPreservingCurrent(renamedShares); rollbackErr != nil {
-					return errors.Join(
-						fmt.Errorf("sync favorite paths after rename: %w", err),
-						fmt.Errorf("rollback share paths after rename: %w", rollbackErr),
-					)
+			if favorites.IsPersistenceWarning(err) {
+				renameWarning = errors.Join(renameWarning, workspace.WrapVisibleMutationWarning(fmt.Errorf("sync favorite paths after rename: %w", err)))
+			} else {
+				if len(renamedShares) > 0 {
+					if rollbackErr := s.shareStore.RestoreMovedSharesPreservingCurrent(renamedShares); rollbackErr != nil && !share.IsPersistenceWarning(rollbackErr) {
+						return errors.Join(
+							fmt.Errorf("sync favorite paths after rename: %w", err),
+							fmt.Errorf("rollback share paths after rename: %w", rollbackErr),
+						)
+					}
 				}
+				return fmt.Errorf("sync favorite paths after rename: %w", err)
 			}
-			return fmt.Errorf("sync favorite paths after rename: %w", err)
 		}
 	}
 	if s.afterPathRenamed != nil {
 		s.afterPathRenamed(oldPath, newPath)
 	}
 
-	return nil
+	return renameWarning
 }
 
 type deletedPathRestoreState struct {
@@ -318,12 +328,16 @@ func (s *Server) rollbackDeletedPathShareRestoreState(snapshot deletedPathShareR
 	var rollbackErr error
 	if len(snapshot.shares) > 0 {
 		if err := s.shareStore.RestoreDisabledSharesPreservingCurrent(snapshot.shares); err != nil {
-			rollbackErr = errors.Join(rollbackErr, fmt.Errorf("restore share snapshot after trash metadata failure: %w", err))
+			if !share.IsPersistenceWarning(err) {
+				rollbackErr = errors.Join(rollbackErr, fmt.Errorf("restore share snapshot after trash metadata failure: %w", err))
+			}
 		}
 	}
 	for _, id := range snapshot.absentIDs {
 		if err := s.shareStore.Delete(id); err != nil && !errors.Is(err, share.ErrShareNotFound) {
-			rollbackErr = errors.Join(rollbackErr, fmt.Errorf("delete restored share after trash metadata failure: %w", err))
+			if !share.IsPersistenceWarning(err) {
+				rollbackErr = errors.Join(rollbackErr, fmt.Errorf("delete restored share after trash metadata failure: %w", err))
+			}
 		}
 	}
 
@@ -350,6 +364,7 @@ func (s *Server) restoreDeletedPathState(sourcePath, restoredPath string, restor
 	}
 
 	shareSnapshot := deletedPathShareRestoreSnapshot{}
+	var restoreWarning error
 	if len(state.Shares) > 0 && len(state.Favorites) > 0 {
 		var err error
 		shareSnapshot, err = s.snapshotDeletedPathShareRestoreState(state.Shares)
@@ -359,11 +374,19 @@ func (s *Server) restoreDeletedPathState(sourcePath, restoredPath string, restor
 	}
 	if len(state.Shares) > 0 && s.shareStore != nil {
 		if err := s.shareStore.RestoreShares(state.Shares); err != nil {
-			return fmt.Errorf("restore shares from trash metadata: %w", err)
+			if share.IsPersistenceWarning(err) {
+				restoreWarning = errors.Join(restoreWarning, fmt.Errorf("restore shares from trash metadata: %w", err))
+			} else {
+				return fmt.Errorf("restore shares from trash metadata: %w", err)
+			}
 		}
 	}
 	if len(state.Favorites) > 0 && s.favoritesStore != nil {
-		if err := s.favoritesStore.RestoreFavorites(state.Favorites); err != nil {
+		if err := s.favoritesStore.RestoreFavoritesIfMissing(state.Favorites); err != nil {
+			if favorites.IsPersistenceWarning(err) {
+				restoreWarning = errors.Join(restoreWarning, fmt.Errorf("restore favorites from trash metadata: %w", err))
+				return restoreWarning
+			}
 			if len(state.Shares) > 0 {
 				if rollbackErr := s.rollbackDeletedPathShareRestoreState(shareSnapshot); rollbackErr != nil {
 					return errors.Join(
@@ -376,16 +399,21 @@ func (s *Server) restoreDeletedPathState(sourcePath, restoredPath string, restor
 		}
 	}
 
-	return nil
+	return restoreWarning
 }
 
 func (s *Server) handlePathDeleted(_ context.Context, targetPath string) (*storage.PathDeleteHookResult, error) {
 	var disabledShares []*share.Share
+	var deleteHookWarning error
 	if s.shareStore != nil {
 		var err error
 		disabledShares, err = s.shareStore.DisableSharesUnderPathWithRestore(targetPath)
 		if err != nil {
-			return nil, fmt.Errorf("disable shares after delete: %w", err)
+			if share.IsPersistenceWarning(err) {
+				deleteHookWarning = errors.Join(deleteHookWarning, workspace.WrapVisibleMutationWarning(fmt.Errorf("disable shares after delete: %w", err)))
+			} else {
+				return nil, fmt.Errorf("disable shares after delete: %w", err)
+			}
 		}
 	}
 
@@ -394,15 +422,19 @@ func (s *Server) handlePathDeleted(_ context.Context, targetPath string) (*stora
 		var err error
 		removedFavorites, err = s.favoritesStore.RemoveFavoritesUnderPathWithRestore(targetPath)
 		if err != nil {
-			if s.shareStore != nil {
-				if rollbackErr := s.shareStore.RestoreDisabledSharesPreservingCurrent(disabledShares); rollbackErr != nil {
-					return nil, errors.Join(
-						fmt.Errorf("remove favorites after delete: %w", err),
-						fmt.Errorf("rollback shares after delete: %w", rollbackErr),
-					)
+			if favorites.IsPersistenceWarning(err) {
+				deleteHookWarning = errors.Join(deleteHookWarning, workspace.WrapVisibleMutationWarning(fmt.Errorf("remove favorites after delete: %w", err)))
+			} else {
+				if s.shareStore != nil {
+					if rollbackErr := s.shareStore.RestoreDisabledSharesPreservingCurrent(disabledShares); rollbackErr != nil && !share.IsPersistenceWarning(rollbackErr) {
+						return nil, errors.Join(
+							fmt.Errorf("remove favorites after delete: %w", err),
+							fmt.Errorf("rollback shares after delete: %w", rollbackErr),
+						)
+					}
 				}
+				return nil, fmt.Errorf("remove favorites after delete: %w", err)
 			}
-			return nil, fmt.Errorf("remove favorites after delete: %w", err)
 		}
 	}
 
@@ -410,12 +442,16 @@ func (s *Server) handlePathDeleted(_ context.Context, targetPath string) (*stora
 		var rollbackErr error
 		if len(removedFavorites) > 0 {
 			if err := s.favoritesStore.RestoreFavoritesIfMissing(removedFavorites); err != nil {
-				rollbackErr = errors.Join(rollbackErr, fmt.Errorf("restore favorites after delete rollback: %w", err))
+				if !favorites.IsPersistenceWarning(err) {
+					rollbackErr = errors.Join(rollbackErr, fmt.Errorf("restore favorites after delete rollback: %w", err))
+				}
 			}
 		}
 		if len(disabledShares) > 0 {
 			if err := s.shareStore.RestoreDisabledSharesPreservingCurrent(disabledShares); err != nil {
-				rollbackErr = errors.Join(rollbackErr, fmt.Errorf("restore shares after delete rollback: %w", err))
+				if !share.IsPersistenceWarning(err) {
+					rollbackErr = errors.Join(rollbackErr, fmt.Errorf("restore shares after delete rollback: %w", err))
+				}
 			}
 		}
 		return rollbackErr
@@ -457,7 +493,7 @@ func (s *Server) handlePathDeleted(_ context.Context, targetPath string) (*stora
 		return nil, err
 	}
 
-	return combinedHookResult, nil
+	return combinedHookResult, deleteHookWarning
 }
 
 func runDeleteHookRollback(result *storage.PathDeleteHookResult) error {
@@ -534,11 +570,13 @@ const (
 )
 
 func decodeJSONBodyWithLimit(r *http.Request, dst any, limit int64) error {
-	if _, err := readBufferedRequestBody(r, limit); err != nil {
+	body, err := readBufferedRequestBody(r, limit)
+	if err != nil {
 		return err
 	}
+	r.Body = io.NopCloser(bytes.NewReader(body))
 
-	decoder := json.NewDecoder(r.Body)
+	decoder := json.NewDecoder(bytes.NewReader(body))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(dst); err != nil {
 		return err
@@ -2520,6 +2558,11 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	stats := map[string]any{
 		"total_files_available":   false,
 		"storage_stats_available": false,
+	}
+
+	if _, scoped, err := s.currentUserHomeDir(r.Context()); err != nil || scoped {
+		NewAPIResponse(stats).Write(w, http.StatusOK)
+		return
 	}
 
 	if s.fs != nil {
@@ -4969,7 +5012,7 @@ func (s *Server) ensureShareWithinOwnerHome(id string) (*share.Share, error) {
 		return shareInfo, nil
 	}
 
-	owner, err := s.userStore.GetByID(shareInfo.CreatedBy)
+	owner, err := s.resolveShareOwner(shareInfo.CreatedBy)
 	if err != nil {
 		if errors.Is(err, auth.ErrUserNotFound) {
 			return nil, share.ErrShareNotFound
@@ -4995,6 +5038,67 @@ func (s *Server) ensureShareWithinOwnerHome(id string) (*share.Share, error) {
 	}
 
 	return shareInfo, nil
+}
+
+func (s *Server) resolveShareOwner(ownerRef string) (*auth.User, error) {
+	if s.userStore == nil || strings.TrimSpace(ownerRef) == "" {
+		return nil, auth.ErrUserNotFound
+	}
+
+	owner, err := s.userStore.GetByID(ownerRef)
+	if err == nil {
+		return owner, nil
+	}
+	if !errors.Is(err, auth.ErrUserNotFound) {
+		return nil, err
+	}
+
+	owner, err = s.userStore.GetByUsername(ownerRef)
+	if err != nil {
+		return nil, err
+	}
+	return owner, nil
+}
+
+func getShareOwnerIdentifiersFromRequest(ctx context.Context) []string {
+	claims := auth.GetClaimsFromContext(ctx)
+	if claims == nil {
+		return nil
+	}
+
+	identifiers := make([]string, 0, 2)
+	appendUnique := func(value string) {
+		trimmed := strings.TrimSpace(value)
+		if trimmed == "" {
+			return
+		}
+		for _, existing := range identifiers {
+			if existing == trimmed {
+				return
+			}
+		}
+		identifiers = append(identifiers, trimmed)
+	}
+
+	appendUnique(claims.UserID)
+	appendUnique(claims.Username)
+	return identifiers
+}
+
+func getFavoriteUserIdentifiersFromRequest(ctx context.Context) (string, []string) {
+	claims := auth.GetClaimsFromContext(ctx)
+	if claims == nil {
+		return "anonymous", nil
+	}
+	primary := strings.TrimSpace(claims.UserID)
+	if primary == "" {
+		primary = "anonymous"
+	}
+	legacy := strings.TrimSpace(claims.Username)
+	if legacy == "" || legacy == primary {
+		return primary, nil
+	}
+	return primary, []string{legacy}
 }
 
 func (s *Server) handleAccessShare(w http.ResponseWriter, r *http.Request) {
@@ -5093,11 +5197,7 @@ func (s *Server) handleListShares(w http.ResponseWriter, r *http.Request) {
 	} else if auth.IsAdmin(r.Context()) && r.URL.Query().Get("all") == "true" {
 		sharesList = s.shareStore.ListAll()
 	} else {
-		userID := ""
-		if claims := auth.GetClaimsFromContext(r.Context()); claims != nil && claims.UserID != "" {
-			userID = claims.UserID
-		}
-		sharesList = s.shareStore.ListByUser(userID)
+		sharesList = s.shareStore.ListByUser(getShareOwnerIdentifiersFromRequest(r.Context())...)
 	}
 
 	if s.authEnabled {
@@ -5164,12 +5264,8 @@ func (s *Server) handleListFavorites(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	userID := "anonymous"
-	if claims := auth.GetClaimsFromContext(r.Context()); claims != nil && claims.UserID != "" {
-		userID = claims.UserID
-	}
-
-	favoritesList := s.favoritesStore.List(userID)
+	userID, legacyUserIDs := getFavoriteUserIdentifiersFromRequest(r.Context())
+	favoritesList := s.favoritesStore.List(userID, legacyUserIDs...)
 	if s.authEnabled {
 		var err error
 		favoritesList, err = s.filterFavoritesByHomeDir(r.Context(), favoritesList)
@@ -5424,6 +5520,7 @@ func readFavoriteBodyPath(r *http.Request) (string, error) {
 
 	var req struct {
 		Path string `json:"path"`
+		Note string `json:"note"`
 	}
 	if err := decodeJSONBody(r, &req); err != nil {
 		return "", err

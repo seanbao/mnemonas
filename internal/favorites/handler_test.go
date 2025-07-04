@@ -3,8 +3,10 @@ package favorites
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -347,6 +349,82 @@ func TestHandler_InternalErrorsHideOperationDetails(t *testing.T) {
 	updateRec := httptest.NewRecorder()
 	handler.UpdateNote(updateRec, updateReq)
 	assertInternal(t, updateRec, "UPDATE_NOTE_FAILED")
+}
+
+func TestHandler_MutationPersistenceWarningsReturnSuccess(t *testing.T) {
+	store, err := NewStore(filepath.Join(t.TempDir(), "favorites.json"))
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+	if _, err := store.Add("user-123", "/docs/report.pdf", "note"); err != nil {
+		t.Fatalf("seed favorite error: %v", err)
+	}
+	handler := NewHandler(store, zerolog.Nop())
+
+	originalSyncFavoritesStoreRootDir := syncFavoritesStoreRootDir
+	syncFavoritesStoreRootDir = func(root *os.Root) error {
+		return errors.New("directory fsync failed")
+	}
+	defer func() {
+		syncFavoritesStoreRootDir = originalSyncFavoritesStoreRootDir
+	}()
+
+	assertWarningSuccess := func(t *testing.T, rec *httptest.ResponseRecorder, wantStatus int, wantMessage string) {
+		t.Helper()
+		if rec.Code != wantStatus {
+			t.Fatalf("expected status %d, got %d: %s", wantStatus, rec.Code, rec.Body.String())
+		}
+		if rec.Header().Get("Warning") != favoritesPersistenceWarningHeader {
+			t.Fatalf("expected Warning header %q, got %q", favoritesPersistenceWarningHeader, rec.Header().Get("Warning"))
+		}
+		var payload struct {
+			Success bool   `json:"success"`
+			Warning bool   `json:"warning"`
+			Message string `json:"message"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+			t.Fatalf("failed to decode response: %v", err)
+		}
+		if !payload.Success || !payload.Warning {
+			t.Fatalf("expected warning success response, got %s", rec.Body.String())
+		}
+		if payload.Message != wantMessage {
+			t.Fatalf("expected message %q, got %q", wantMessage, payload.Message)
+		}
+	}
+
+	addReq := httptest.NewRequest(http.MethodPost, "/api/v1/favorites", strings.NewReader(`{"path":"/docs/new.pdf"}`))
+	addReq = addReq.WithContext(auth.WithClaimsContext(addReq.Context(), &auth.TokenClaims{UserID: "user-123"}))
+	addRec := httptest.NewRecorder()
+	handler.AddFavorite(addRec, addReq)
+	assertWarningSuccess(t, addRec, http.StatusCreated, "favorite added with persistence warning")
+	if !store.IsFavorite("user-123", "/docs/new.pdf") {
+		t.Fatal("expected warned add to persist in handler store")
+	}
+
+	updateReq := httptest.NewRequest(http.MethodPatch, "/api/v1/favorites/docs/report.pdf", strings.NewReader(`{"note":"updated"}`))
+	updateReq = updateReq.WithContext(auth.WithClaimsContext(updateReq.Context(), &auth.TokenClaims{UserID: "user-123"}))
+	updateRec := httptest.NewRecorder()
+	handler.UpdateNote(updateRec, updateReq)
+	assertWarningSuccess(t, updateRec, http.StatusOK, "favorite note updated with persistence warning")
+	updated := false
+	for _, favorite := range store.List("user-123") {
+		if favorite.Path == "/docs/report.pdf" && favorite.Note == "updated" {
+			updated = true
+		}
+	}
+	if !updated {
+		t.Fatal("expected warned update to persist in handler store")
+	}
+
+	removeReq := httptest.NewRequest(http.MethodDelete, "/api/v1/favorites/docs/report.pdf", nil)
+	removeReq = removeReq.WithContext(auth.WithClaimsContext(removeReq.Context(), &auth.TokenClaims{UserID: "user-123"}))
+	removeRec := httptest.NewRecorder()
+	handler.RemoveFavorite(removeRec, removeReq)
+	assertWarningSuccess(t, removeRec, http.StatusOK, "favorite removed with persistence warning")
+	if store.IsFavorite("user-123", "/docs/report.pdf") {
+		t.Fatal("expected warned remove to persist in handler store")
+	}
 }
 
 func TestHandler_RemoveFavoriteAndUpdateNote_NormalizeRoutePath(t *testing.T) {

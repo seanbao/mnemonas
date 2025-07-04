@@ -95,8 +95,7 @@ function createTestQueryClient() {
   })
 }
 
-function renderUsersPage() {
-  const queryClient = createTestQueryClient()
+function renderUsersPage(queryClient = createTestQueryClient()) {
   return render(
     <QueryClientProvider client={queryClient}>
       <BrowserRouter>
@@ -128,6 +127,47 @@ describe('UsersPage', () => {
       renderUsersPage()
       expect(screen.getByText('用户管理')).toBeInTheDocument()
       expect(screen.getByText('管理系统用户、权限和配额')).toBeInTheDocument()
+    })
+
+    it('refetches the user list when the current session changes', async () => {
+    vi.mocked(usersApi.listUsers)
+      .mockResolvedValueOnce({
+        success: true,
+        users: mockUsers,
+        total: mockUsers.length,
+      })
+      .mockResolvedValueOnce({
+        success: true,
+        users: [mockUsers[0]],
+        total: 1,
+      })
+
+    const queryClient = createTestQueryClient()
+    const { rerender } = renderUsersPage(queryClient)
+
+    await waitFor(() => {
+      expect(vi.mocked(usersApi.listUsers)).toHaveBeenCalledTimes(1)
+    })
+
+    vi.mocked(authApi.getStoredUser).mockReturnValue({
+      id: 'user-2',
+      username: 'other-admin',
+      role: 'admin',
+      homeDir: '/',
+      email: 'other@example.com',
+    })
+
+    rerender(
+      <QueryClientProvider client={queryClient}>
+        <BrowserRouter>
+          <UsersPage />
+        </BrowserRouter>
+      </QueryClientProvider>
+    )
+
+    await waitFor(() => {
+      expect(vi.mocked(usersApi.listUsers)).toHaveBeenCalledTimes(2)
+    })
     })
 
     it('renders add user button', async () => {

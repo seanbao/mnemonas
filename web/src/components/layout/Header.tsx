@@ -26,6 +26,7 @@ export function Header({ onMenuClick }: HeaderProps) {
   const handleLogout = async () => {
     try {
       const result = await logout()
+      queryClient.clear()
       addToast(result.warning
         ? { title: result.message ?? '已退出登录，但活动日志写入失败', color: 'warning' }
         : { title: '已退出登录', color: 'success' })
