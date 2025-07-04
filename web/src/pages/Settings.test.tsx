@@ -24,9 +24,9 @@ const { defaultSettingsResponse } = vi.hoisted(() => ({
     trash: { enabled: true, retention_days: 30, max_size: 10737418240 },
       retention: { max_versions: 100, max_age: '8760h', min_free_space: 10737418240, gc_interval: '24h' },
       versioning: { auto_versioned_extensions: ['.md', '.txt', '.go'], auto_versioned_filenames: ['README', 'Dockerfile', 'Makefile'], max_versioned_size: 104857600 },
-      webdav: { enabled: true, prefix: '/dav', read_only: false, auth_type: 'basic', username: 'admin' },
+      webdav: { enabled: true, runtime_enabled: true, prefix: '/dav', read_only: false, auth_type: 'basic', username: 'admin' },
       share: { enabled: false, base_url: '' },
-      favorites: { enabled: true },
+      favorites: { enabled: true, runtime_available: true },
       alerts: { enabled: false, check_interval: '1h', threshold_pct: 90, critical_pct: 95, min_free_bytes: 10737418240, cooldown_period: '4h', webhook_url: '', webhook_method: 'POST', webhook_headers: [] },
       cdc: { min_chunk_size: 262144, avg_chunk_size: 1048576, max_chunk_size: 4194304 },
       dataplane: { grpc_address: '127.0.0.1:9090', timeout: '30s', max_retries: 3 },
@@ -311,6 +311,29 @@ describe('SettingsPage', () => {
         expect(screen.getByText('配置 WebDAV 协议接入；保存后会立即更新运行中的 WebDAV 配置')).toBeTruthy()
         expect(screen.getByText('配置访问凭据；保存后会立即作用到运行中的 WebDAV 服务')).toBeTruthy()
         expect(screen.getByText('用于挂载当前运行中的 WebDAV 服务；保存成功后这里会显示最新的运行配置')).toBeTruthy()
+      })
+    })
+
+    it('warns when WebDAV is enabled but the runtime service is unavailable', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockGetSettings.mockResolvedValueOnce({
+        data: {
+          ...defaultSettingsResponse.data,
+          webdav: {
+            ...defaultSettingsResponse.data.webdav,
+            enabled: true,
+            runtime_enabled: false,
+          },
+        },
+      })
+
+      render(<SettingsPage />)
+
+      await openTab(user, 'WebDAV')
+
+      await waitFor(() => {
+        expect(screen.getByText('WebDAV 运行态当前不可用')).toBeTruthy()
+        expect(screen.getByText('配置已启用，但运行中的 WebDAV 服务未成功启动；请检查自动生成凭据和内部存储状态。')).toBeTruthy()
       })
     })
 
@@ -640,6 +663,28 @@ describe('SettingsPage', () => {
         }))
       })
     })
+
+    it('warns when favorites are enabled but runtime is unavailable', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockGetSettings.mockResolvedValueOnce({
+        data: {
+          ...defaultSettingsResponse.data,
+          favorites: {
+            enabled: true,
+            runtime_available: false,
+          },
+        },
+      })
+
+      render(<SettingsPage />)
+
+      await openTab(user, '高级')
+
+      await waitFor(() => {
+        expect(screen.getByText('收藏运行态当前不可用')).toBeTruthy()
+        expect(screen.getByText('配置已启用，但运行中的收藏存储未就绪；收藏接口会返回不可用，直到服务恢复对收藏存储的访问。')).toBeTruthy()
+      })
+    })
   })
 
   describe('general settings', () => {
@@ -882,6 +927,29 @@ describe('SettingsPage', () => {
         })
       })
     })
+
+    it('shows a success toast when the backend reports a hot-applied save', async () => {
+    const user = userEvent.setup({ writeToClipboard: false })
+    mockUpdateSettings.mockResolvedValueOnce({
+      success: true,
+      message: 'settings updated',
+    })
+
+    render(<SettingsPage />)
+
+    await waitFor(() => {
+      expect(screen.getByDisplayValue('8080')).toBeTruthy()
+    })
+
+    await user.click(screen.getByText('保存设置'))
+
+    await waitFor(() => {
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '设置已保存',
+        color: 'success',
+      })
+    })
+  })
 
     it('preserves newer local edits when an older save resolves', async () => {
       const user = userEvent.setup({ writeToClipboard: false })

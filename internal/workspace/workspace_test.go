@@ -230,6 +230,19 @@ func setupWorkspace(t *testing.T) *Workspace {
 	return w
 }
 
+func TestWorkspace_StatAfterCloseReturnsErrClosed(t *testing.T) {
+	w := setupWorkspace(t)
+
+	if err := w.Close(); err != nil {
+		t.Fatalf("Close() error: %v", err)
+	}
+
+	_, err := w.Stat(context.Background(), "/after-close.txt")
+	if !errors.Is(err, os.ErrClosed) {
+		t.Fatalf("Stat() after Close error = %v, want %v", err, os.ErrClosed)
+	}
+}
+
 func TestNew(t *testing.T) {
 	tmpDir := t.TempDir()
 	w, err := New(tmpDir)

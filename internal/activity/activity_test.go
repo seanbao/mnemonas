@@ -3,6 +3,7 @@ package activity
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -170,6 +171,70 @@ func TestNewStore_RecoversFromCorruptLogFile(t *testing.T) {
 	}
 	if reloaded.Count() != 1 {
 		t.Fatalf("Expected recovered store to persist new entries, got %d", reloaded.Count())
+	}
+}
+
+func TestNewStore_RecoversFromTrailingDataAfterArray(t *testing.T) {
+	tmpDir := t.TempDir()
+	logPath := filepath.Join(tmpDir, "activity.json")
+	if err := os.WriteFile(logPath, []byte(`[{"id":"entry-1","timestamp":"2026-04-20T10:30:00Z","action":"upload","path":"/docs/file.txt","user":"user"}] {}`), 0640); err != nil {
+		t.Fatalf("WriteFile(activity.json) error: %v", err)
+	}
+
+	store, err := NewStore(tmpDir)
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+	if store.Count() != 0 {
+		t.Fatalf("Expected recovered store to start empty after trailing data recovery, got %d entries", store.Count())
+	}
+
+	entries, readErr := os.ReadDir(tmpDir)
+	if readErr != nil {
+		t.Fatalf("ReadDir() error: %v", readErr)
+	}
+
+	foundBackup := false
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), "activity.json.corrupt.") {
+			foundBackup = true
+			break
+		}
+	}
+	if !foundBackup {
+		t.Fatal("expected corrupt activity log backup to be created for trailing data")
+	}
+}
+
+func TestNewStore_RecoversFromTruncatedEntryInArray(t *testing.T) {
+	tmpDir := t.TempDir()
+	logPath := filepath.Join(tmpDir, "activity.json")
+	if err := os.WriteFile(logPath, []byte(`[{"id":"entry-1","timestamp":"2026-04-20T10:30:00Z","action":"upload","path":"/docs/file.txt","user":"user"`), 0640); err != nil {
+		t.Fatalf("WriteFile(activity.json) error: %v", err)
+	}
+
+	store, err := NewStore(tmpDir)
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+	if store.Count() != 0 {
+		t.Fatalf("Expected recovered store to start empty after truncated entry recovery, got %d entries", store.Count())
+	}
+
+	entries, readErr := os.ReadDir(tmpDir)
+	if readErr != nil {
+		t.Fatalf("ReadDir() error: %v", readErr)
+	}
+
+	foundBackup := false
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), "activity.json.corrupt.") {
+			foundBackup = true
+			break
+		}
+	}
+	if !foundBackup {
+		t.Fatal("expected corrupt activity log backup to be created for truncated entry")
 	}
 }
 
@@ -727,6 +792,54 @@ func TestListPagination(t *testing.T) {
 	}
 }
 
+func TestList_ClampsNegativeOffset(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, _ := NewStore(tmpDir)
+
+	if err := store.Log(ActionUpload, "/first.txt", "user", "127.0.0.1", nil); err != nil {
+		t.Fatalf("Log(first) error: %v", err)
+	}
+	if err := store.Log(ActionDelete, "/second.txt", "user", "127.0.0.1", nil); err != nil {
+		t.Fatalf("Log(second) error: %v", err)
+	}
+
+	entries, total := store.List(1, -3, "", "")
+	if total != 2 {
+		t.Fatalf("Expected total 2, got %d", total)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("Expected 1 entry, got %d", len(entries))
+	}
+	if entries[0].Path != "/second.txt" {
+		t.Fatalf("Expected clamped negative offset to return most recent entry, got %s", entries[0].Path)
+	}
+}
+
+func TestList_NonPositiveLimitReturnsEmptyPage(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, _ := NewStore(tmpDir)
+
+	if err := store.Log(ActionUpload, "/only.txt", "user", "127.0.0.1", nil); err != nil {
+		t.Fatalf("Log() error: %v", err)
+	}
+
+	entries, total := store.List(-1, 0, "", "")
+	if total != 1 {
+		t.Fatalf("Expected total 1, got %d", total)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("Expected empty page for negative limit, got %d entries", len(entries))
+	}
+
+	entries, total = store.List(0, 0, "", "")
+	if total != 1 {
+		t.Fatalf("Expected total 1 for zero limit, got %d", total)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("Expected empty page for zero limit, got %d entries", len(entries))
+	}
+}
+
 func TestClear(t *testing.T) {
 	tmpDir := t.TempDir()
 	store, _ := NewStore(tmpDir)
@@ -1189,6 +1302,41 @@ func TestMaxSize(t *testing.T) {
 	// Most recent entry should be file9.txt
 	if entries[0].Path != "/file9.txt" {
 		t.Errorf("Expected most recent /file9.txt, got %s", entries[0].Path)
+	}
+}
+
+func TestNewStore_LoadTrimsEntriesToDefaultMaxSize(t *testing.T) {
+	tmpDir := t.TempDir()
+	entries := make([]Entry, 0, 10005)
+	base := time.Now()
+	for i := 0; i < 10005; i++ {
+		entries = append(entries, Entry{
+			ID:        fmt.Sprintf("id-%05d", i),
+			Timestamp: base.Add(-time.Duration(i) * time.Second),
+			Action:    ActionUpload,
+			Path:      fmt.Sprintf("/file%d.txt", i),
+			User:      "user",
+		})
+	}
+	writeActivityFixture(t, filepath.Join(tmpDir, "activity.json"), entries)
+
+	store, err := NewStore(tmpDir)
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+	if store.Count() != 10000 {
+		t.Fatalf("Expected trimmed default max size 10000, got %d", store.Count())
+	}
+
+	loaded, total := store.List(10005, 0, "", "")
+	if total != 10000 || len(loaded) != 10000 {
+		t.Fatalf("Expected 10000 visible entries after load trim, got total=%d len=%d", total, len(loaded))
+	}
+	if loaded[0].Path != "/file0.txt" {
+		t.Fatalf("Expected newest retained entry /file0.txt, got %s", loaded[0].Path)
+	}
+	if loaded[len(loaded)-1].Path != "/file9999.txt" {
+		t.Fatalf("Expected oldest retained entry /file9999.txt, got %s", loaded[len(loaded)-1].Path)
 	}
 }
 

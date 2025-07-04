@@ -142,25 +142,15 @@ export class ApiError extends Error {
 // Helper to handle API responses
 async function handleResponse<T>(response: Response, errorPrefix: string): Promise<T> {
   if (!response.ok) {
-    let message = errorPrefix
-    let code: string | undefined
+    let details: { message: string; code?: string }
     try {
-      const body = await response.json()
-      if (typeof body.error === 'string') {
-        message = body.error
-      } else if (body.error?.message) {
-        message = body.error.message
-        if (typeof body.error.code === 'string') {
-          code = body.error.code
-        }
-      } else if (body.message) {
-        message = body.message
-      }
+      details = extractApiErrorDetails(await response.json(), errorPrefix)
     } catch {
       // Use status text if JSON parsing fails
-      message = `${errorPrefix}: ${response.statusText}`
+      throw new ApiError(`${errorPrefix}: ${response.statusText}`, response.status, response.statusText)
     }
-    throw new ApiError(message, response.status, response.statusText, code)
+
+    throw new ApiError(details.message, response.status, response.statusText, details.code)
   }
   
   try {
@@ -232,15 +222,17 @@ function extractApiErrorDetails(body: unknown, fallback: string): {
     return { message: fallback }
   }
 
+  const topLevelCode = typeof body.code === 'string' ? body.code : undefined
+
   if (typeof body.error === 'string' && body.error) {
-    return { message: body.error }
+    return { message: body.error, code: topLevelCode }
   }
 
   if (isRecord(body.error)) {
     const message = typeof body.error.message === 'string' && body.error.message
       ? body.error.message
       : undefined
-    const code = typeof body.error.code === 'string' ? body.error.code : undefined
+    const code = typeof body.error.code === 'string' ? body.error.code : topLevelCode
 
     if (message) {
       return { message, code }
@@ -254,10 +246,10 @@ function extractApiErrorDetails(body: unknown, fallback: string): {
   }
 
   if (typeof body.message === 'string' && body.message) {
-    return { message: body.message }
+    return { message: body.message, code: topLevelCode }
   }
 
-  return { message: fallback }
+  return { message: fallback, code: topLevelCode }
 }
 
 function createApiErrorFromXhr(xhr: XMLHttpRequest, fallback: string): ApiError {

@@ -44,6 +44,7 @@ export interface SettingsData {
   }
   webdav: {
     enabled: boolean
+    runtime_enabled?: boolean
     prefix: string
     read_only: boolean
     auth_type: string
@@ -55,6 +56,7 @@ export interface SettingsData {
   }
   favorites?: {
     enabled: boolean
+    runtime_available?: boolean
   }
   alerts?: {
     enabled: boolean
@@ -241,6 +243,7 @@ function isValidSettingsData(value: unknown): value is SettingsData {
     || typeof value.retention.gc_interval !== 'string'
     || !isRecord(value.webdav)
     || typeof value.webdav.enabled !== 'boolean'
+    || (value.webdav.runtime_enabled !== undefined && typeof value.webdav.runtime_enabled !== 'boolean')
     || typeof value.webdav.prefix !== 'string'
     || typeof value.webdav.read_only !== 'boolean'
     || typeof value.webdav.auth_type !== 'string'
@@ -289,7 +292,9 @@ function isValidSettingsData(value: unknown): value is SettingsData {
   }
 
   if (value.favorites !== undefined) {
-    if (!isRecord(value.favorites) || typeof value.favorites.enabled !== 'boolean') {
+    if (!isRecord(value.favorites)
+      || typeof value.favorites.enabled !== 'boolean'
+      || (value.favorites.runtime_available !== undefined && typeof value.favorites.runtime_available !== 'boolean')) {
       return false
     }
   }

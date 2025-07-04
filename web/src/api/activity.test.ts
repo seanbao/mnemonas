@@ -178,6 +178,22 @@ describe('Activity API', () => {
     })
   })
 
+  it('preserves top-level service-unavailable activity error codes', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 503,
+      statusText: 'Service Unavailable',
+      json: () => Promise.resolve({ code: 'SERVICE_UNAVAILABLE', message: 'activity log unavailable', timestamp: '2026-04-23T00:00:00Z' }),
+    })
+
+    await expect(listActivity()).rejects.toMatchObject({
+      message: 'activity log unavailable',
+      status: 503,
+      code: 'SERVICE_UNAVAILABLE',
+      isUnavailable: true,
+    })
+  })
+
   it('marks ApiError as unavailable for 503 responses', () => {
     const error = new ApiError('activity log unavailable', 503, 'Service Unavailable', 'SERVICE_UNAVAILABLE')
 

@@ -111,6 +111,8 @@ type Server struct {
 	activeWebDAV        WebDAVRuntimeConfig
 	webdavMu            sync.RWMutex
 	updateWebDAV        func(WebDAVRuntimeConfig)
+	afterPathRenamed    func(oldPath, newPath string)
+	afterPathDeleted    func(path string) *storage.PathDeleteHookResult
 	beforeThumbnailRead func(string) error
 }
 
@@ -196,6 +198,9 @@ func (s *Server) handlePathRenamed(_ context.Context, oldPath, newPath string) e
 			}
 			return fmt.Errorf("sync favorite paths after rename: %w", err)
 		}
+	}
+	if s.afterPathRenamed != nil {
+		s.afterPathRenamed(oldPath, newPath)
 	}
 
 	return nil
@@ -312,7 +317,7 @@ func (s *Server) rollbackDeletedPathShareRestoreState(snapshot deletedPathShareR
 
 	var rollbackErr error
 	if len(snapshot.shares) > 0 {
-		if err := s.shareStore.RestoreShares(snapshot.shares); err != nil {
+		if err := s.shareStore.RestoreDisabledSharesPreservingCurrent(snapshot.shares); err != nil {
 			rollbackErr = errors.Join(rollbackErr, fmt.Errorf("restore share snapshot after trash metadata failure: %w", err))
 		}
 	}
@@ -401,10 +406,6 @@ func (s *Server) handlePathDeleted(_ context.Context, targetPath string) (*stora
 		}
 	}
 
-	if len(disabledShares) == 0 && len(removedFavorites) == 0 {
-		return nil, nil
-	}
-
 	rollback := func() error {
 		var rollbackErr error
 		if len(removedFavorites) > 0 {
@@ -420,24 +421,83 @@ func (s *Server) handlePathDeleted(_ context.Context, targetPath string) (*stora
 		return rollbackErr
 	}
 
-	restoreData, err := json.Marshal(deletedPathRestoreState{
-		Shares:    disabledShares,
-		Favorites: removedFavorites,
-	})
-	if err != nil {
-		if rollbackErr := rollback(); rollbackErr != nil {
-			return nil, errors.Join(
-				fmt.Errorf("encode delete restore metadata: %w", err),
-				fmt.Errorf("rollback delete hooks after metadata encode failure: %w", rollbackErr),
-			)
+	var hookResult *storage.PathDeleteHookResult
+	if len(disabledShares) > 0 || len(removedFavorites) > 0 {
+		restoreData, err := json.Marshal(deletedPathRestoreState{
+			Shares:    disabledShares,
+			Favorites: removedFavorites,
+		})
+		if err != nil {
+			if rollbackErr := rollback(); rollbackErr != nil {
+				return nil, errors.Join(
+					fmt.Errorf("encode delete restore metadata: %w", err),
+					fmt.Errorf("rollback delete hooks after metadata encode failure: %w", rollbackErr),
+				)
+			}
+			return nil, fmt.Errorf("encode delete restore metadata: %w", err)
 		}
-		return nil, fmt.Errorf("encode delete restore metadata: %w", err)
+
+		hookResult = &storage.PathDeleteHookResult{
+			Rollback:    rollback,
+			RestoreData: restoreData,
+		}
 	}
 
-	return &storage.PathDeleteHookResult{
-		Rollback:    rollback,
-		RestoreData: restoreData,
-	}, nil
+	var afterHookResult *storage.PathDeleteHookResult
+	if s.afterPathDeleted != nil {
+		afterHookResult = s.afterPathDeleted(targetPath)
+	}
+
+	combinedHookResult, err := combineDeleteHookResults(hookResult, afterHookResult)
+	if err != nil {
+		rollbackErr := errors.Join(runDeleteHookRollback(afterHookResult), runDeleteHookRollback(hookResult))
+		if rollbackErr != nil {
+			return nil, errors.Join(err, fmt.Errorf("rollback delete hooks after listener merge failure: %w", rollbackErr))
+		}
+		return nil, err
+	}
+
+	return combinedHookResult, nil
+}
+
+func runDeleteHookRollback(result *storage.PathDeleteHookResult) error {
+	if result == nil || result.Rollback == nil {
+		return nil
+	}
+	return result.Rollback()
+}
+
+func combineDeleteHookResults(primary, secondary *storage.PathDeleteHookResult) (*storage.PathDeleteHookResult, error) {
+	if primary == nil {
+		return secondary, nil
+	}
+	if secondary == nil {
+		return primary, nil
+	}
+	if len(primary.RestoreData) > 0 && len(secondary.RestoreData) > 0 {
+		return nil, errors.New("multiple delete hooks returned restore metadata")
+	}
+
+	combined := &storage.PathDeleteHookResult{}
+	if len(primary.RestoreData) > 0 {
+		combined.RestoreData = primary.RestoreData
+	} else {
+		combined.RestoreData = secondary.RestoreData
+	}
+	if primary.Rollback != nil || secondary.Rollback != nil {
+		combined.Rollback = func() error {
+			var rollbackErr error
+			if secondary.Rollback != nil {
+				rollbackErr = errors.Join(rollbackErr, secondary.Rollback())
+			}
+			if primary.Rollback != nil {
+				rollbackErr = errors.Join(rollbackErr, primary.Rollback())
+			}
+			return rollbackErr
+		}
+	}
+
+	return combined, nil
 }
 
 type AlertMonitor interface {
@@ -637,6 +697,9 @@ type ServerConfig struct {
 	DataplaneAddr string
 	// New storage configuration
 	FileSystem *storage.FileSystem
+	// Additional path change listeners run after the built-in share/favorites sync.
+	AfterPathRenamed func(oldPath, newPath string)
+	AfterPathDeleted func(path string) *storage.PathDeleteHookResult
 	// Storage service roots
 	ThumbnailRoot   string
 	MaintenanceRoot string
@@ -675,7 +738,7 @@ func NewServer(logger zerolog.Logger, cfg *ServerConfig) (*Server, error) {
 	r.Use(middleware.Timeout(DefaultRequestTimeout * time.Second))
 	// Keep observability endpoints reachable even when the request concurrency
 	// budget is saturated by slow data operations.
-	r.Use(throttleExceptPaths(DefaultMaxConcurrentRequests, "/health", "/api/v1/version"))
+	r.Use(throttleExceptPaths(DefaultMaxConcurrentRequests, "/health", "/api/v1/version", "/api/v1/metrics"))
 
 	s := &Server{
 		router:    r,
@@ -684,6 +747,8 @@ func NewServer(logger zerolog.Logger, cfg *ServerConfig) (*Server, error) {
 	}
 	requestip.SetTrustedProxyHops(config.Default().Server.TrustedProxyHops)
 	if cfg != nil {
+		s.afterPathRenamed = cfg.AfterPathRenamed
+		s.afterPathDeleted = cfg.AfterPathDeleted
 		s.updateWebDAV = cfg.UpdateWebDAV
 	}
 
@@ -1540,10 +1605,6 @@ func (s *Server) handleListFiles(w http.ResponseWriter, r *http.Request) {
 		badRequestInvalidPath(w)
 		return
 	}
-	if isMutationRootPath(filePath) {
-		badRequestInvalidPath(w)
-		return
-	}
 	if err := s.authorizeUserPath(r.Context(), filePath); err != nil {
 		forbiddenPathOutsideHome(w)
 		return
@@ -1650,6 +1711,10 @@ func (s *Server) handleCreateDirectory(w http.ResponseWriter, r *http.Request) {
 		badRequestInvalidPath(w)
 		return
 	}
+	if isMutationRootPath(dirPath) {
+		badRequestInvalidPath(w)
+		return
+	}
 	if err := s.authorizeUserPath(r.Context(), dirPath); err != nil {
 		forbiddenPathOutsideHome(w)
 		return
@@ -1719,6 +1784,10 @@ func (s *Server) handleDeleteFile(w http.ResponseWriter, r *http.Request) {
 	// REM-5 fix: Validate path
 	filePath, err := validatePath(filePath)
 	if err != nil {
+		badRequestInvalidPath(w)
+		return
+	}
+	if isMutationRootPath(filePath) {
 		badRequestInvalidPath(w)
 		return
 	}
@@ -2372,7 +2441,7 @@ func (s *Server) handleRestoreVersion(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
-	query := r.URL.Query().Get("q")
+	query := strings.TrimSpace(r.URL.Query().Get("q"))
 	if query == "" {
 		BadRequest(w, "query parameter 'q' is required")
 		return
@@ -4036,18 +4105,20 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 			"max_versioned_size":        cfg.Storage.Versioning.MaxVersionedSize,
 		},
 		"webdav": map[string]interface{}{
-			"enabled":   cfg.WebDAV.Enabled,
-			"prefix":    cfg.WebDAV.Prefix,
-			"read_only": cfg.WebDAV.ReadOnly,
-			"auth_type": cfg.WebDAV.AuthType,
-			"username":  cfg.WebDAV.Username,
+			"enabled":         cfg.WebDAV.Enabled,
+			"runtime_enabled": s.currentActiveWebDAV().Enabled,
+			"prefix":          cfg.WebDAV.Prefix,
+			"read_only":       cfg.WebDAV.ReadOnly,
+			"auth_type":       cfg.WebDAV.AuthType,
+			"username":        cfg.WebDAV.Username,
 		},
 		"share": map[string]interface{}{
 			"enabled":  cfg.Share.Enabled,
 			"base_url": cfg.Share.BaseURL,
 		},
 		"favorites": map[string]interface{}{
-			"enabled": cfg.Favorites.Enabled,
+			"enabled":           cfg.Favorites.Enabled,
+			"runtime_available": cfg.Favorites.Enabled && s.favoritesRuntimeReady(),
 		},
 		"alerts": map[string]interface{}{
 			"enabled":         cfg.Alerts.Enabled,
@@ -4166,6 +4237,23 @@ type CDCSettingsUpdate struct {
 	MinChunkSize *uint32 `json:"min_chunk_size,omitempty"`
 	AvgChunkSize *uint32 `json:"avg_chunk_size,omitempty"`
 	MaxChunkSize *uint32 `json:"max_chunk_size,omitempty"`
+}
+
+func settingsUpdateMayRequireRestart(req UpdateSettingsRequest) bool {
+	if req.Server != nil {
+		if req.Server.Host != nil || req.Server.Port != nil || req.Server.ReadTimeout != nil || req.Server.WriteTimeout != nil || req.Server.IdleTimeout != nil {
+			return true
+		}
+		if req.Server.TLS != nil && (req.Server.TLS.Enabled != nil || req.Server.TLS.CertFile != nil || req.Server.TLS.KeyFile != nil || req.Server.TLS.AutoGenerate != nil || req.Server.TLS.CertDir != nil) {
+			return true
+		}
+	}
+
+	if req.CDC != nil && (req.CDC.MinChunkSize != nil || req.CDC.AvgChunkSize != nil || req.CDC.MaxChunkSize != nil) {
+		return true
+	}
+
+	return false
 }
 
 func (s *Server) validateWebDAVIdentity(cfg config.Config) error {
@@ -4310,7 +4398,7 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 				if trimmed == "" {
 					continue
 				}
-				cleaned = append(cleaned, trimmed)
+				cleaned = append(cleaned, strings.ToLower(trimmed))
 			}
 			updatedConfig.Storage.Versioning.AutoVersionedExtensions = cleaned
 		}
@@ -4523,7 +4611,12 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 
 	s.logger.Info().Msg("settings updated and saved")
 
-	NewAPIResponse(nil).WithMessage("settings updated, some changes may require restart").Write(w, http.StatusOK)
+	message := "settings updated"
+	if settingsUpdateMayRequireRestart(req) {
+		message = "settings updated, some changes may require restart"
+	}
+
+	NewAPIResponse(nil).WithMessage(message).Write(w, http.StatusOK)
 }
 
 func (s *Server) prepareDataplaneReplacement(ctx context.Context, req UpdateSettingsRequest, cfg config.Config) (*dataplane.Client, error) {
@@ -4839,8 +4932,12 @@ func (s *Server) isFavoritesFeatureEnabled() bool {
 	return cfg != nil && cfg.Favorites.Enabled
 }
 
+func (s *Server) favoritesRuntimeReady() bool {
+	return s.favoritesStore != nil && s.favoritesHandler != nil
+}
+
 func (s *Server) favoritesConfiguredButUnavailable() bool {
-	return s.favoritesConfigured && (s.favoritesStore == nil || s.favoritesHandler == nil)
+	return s.favoritesConfigured && !s.favoritesRuntimeReady()
 }
 
 func (s *Server) writeShareFeatureDisabled(w http.ResponseWriter, status int) {
@@ -5062,12 +5159,8 @@ func (s *Server) handleListFavorites(w http.ResponseWriter, r *http.Request) {
 		writeFavoritesErrorResponse(w, http.StatusServiceUnavailable, "favorites feature disabled", "FAVORITES_FEATURE_DISABLED")
 		return
 	}
-	if s.favoritesConfiguredButUnavailable() {
+	if !s.favoritesRuntimeReady() {
 		writeFavoritesErrorResponse(w, http.StatusServiceUnavailable, "favorites feature unavailable", "FAVORITES_UNAVAILABLE")
-		return
-	}
-	if s.favoritesStore == nil {
-		s.favoritesHandler.ListFavorites(w, r)
 		return
 	}
 
@@ -5097,7 +5190,7 @@ func (s *Server) handleAddFavorite(w http.ResponseWriter, r *http.Request) {
 		writeFavoritesErrorResponse(w, http.StatusServiceUnavailable, "favorites feature disabled", "FAVORITES_FEATURE_DISABLED")
 		return
 	}
-	if s.favoritesConfiguredButUnavailable() {
+	if !s.favoritesRuntimeReady() {
 		writeFavoritesErrorResponse(w, http.StatusServiceUnavailable, "favorites feature unavailable", "FAVORITES_UNAVAILABLE")
 		return
 	}
@@ -5129,7 +5222,7 @@ func (s *Server) handleCheckFavorite(w http.ResponseWriter, r *http.Request) {
 		writeFavoritesErrorResponse(w, http.StatusServiceUnavailable, "favorites feature disabled", "FAVORITES_FEATURE_DISABLED")
 		return
 	}
-	if s.favoritesConfiguredButUnavailable() {
+	if !s.favoritesRuntimeReady() {
 		writeFavoritesErrorResponse(w, http.StatusServiceUnavailable, "favorites feature unavailable", "FAVORITES_UNAVAILABLE")
 		return
 	}
@@ -5152,7 +5245,7 @@ func (s *Server) handleCheckFavorites(w http.ResponseWriter, r *http.Request) {
 		writeFavoritesErrorResponse(w, http.StatusServiceUnavailable, "favorites feature disabled", "FAVORITES_FEATURE_DISABLED")
 		return
 	}
-	if s.favoritesConfiguredButUnavailable() {
+	if !s.favoritesRuntimeReady() {
 		writeFavoritesErrorResponse(w, http.StatusServiceUnavailable, "favorites feature unavailable", "FAVORITES_UNAVAILABLE")
 		return
 	}
@@ -5179,7 +5272,7 @@ func (s *Server) handleRemoveFavorite(w http.ResponseWriter, r *http.Request) {
 		writeFavoritesErrorResponse(w, http.StatusServiceUnavailable, "favorites feature disabled", "FAVORITES_FEATURE_DISABLED")
 		return
 	}
-	if s.favoritesConfiguredButUnavailable() {
+	if !s.favoritesRuntimeReady() {
 		writeFavoritesErrorResponse(w, http.StatusServiceUnavailable, "favorites feature unavailable", "FAVORITES_UNAVAILABLE")
 		return
 	}
@@ -5207,7 +5300,7 @@ func (s *Server) handleUpdateFavoriteNote(w http.ResponseWriter, r *http.Request
 		writeFavoritesErrorResponse(w, http.StatusServiceUnavailable, "favorites feature disabled", "FAVORITES_FEATURE_DISABLED")
 		return
 	}
-	if s.favoritesConfiguredButUnavailable() {
+	if !s.favoritesRuntimeReady() {
 		writeFavoritesErrorResponse(w, http.StatusServiceUnavailable, "favorites feature unavailable", "FAVORITES_UNAVAILABLE")
 		return
 	}
@@ -5312,22 +5405,16 @@ func readCreateSharePath(r *http.Request) (string, error) {
 		return "", nil
 	}
 
-	body, err := readBufferedRequestBody(r, DefaultJSONRequestBodyLimit)
-	if err != nil {
-		return "", err
-	}
-
 	var req share.CreateShareRequest
-	if err := json.Unmarshal(body, &req); err != nil {
+	if err := decodeJSONBody(r, &req); err != nil {
 		return "", err
 	}
 
-	cleanPath := strings.TrimSpace(req.Path)
-	if cleanPath == "" {
+	if strings.TrimSpace(req.Path) == "" {
 		return "", nil
 	}
 
-	return validatePath(cleanPath)
+	return validatePath(req.Path)
 }
 
 func readFavoriteBodyPath(r *http.Request) (string, error) {
@@ -5335,24 +5422,18 @@ func readFavoriteBodyPath(r *http.Request) (string, error) {
 		return "", nil
 	}
 
-	body, err := readBufferedRequestBody(r, DefaultJSONRequestBodyLimit)
-	if err != nil {
-		return "", err
-	}
-
 	var req struct {
 		Path string `json:"path"`
 	}
-	if err := json.Unmarshal(body, &req); err != nil {
+	if err := decodeJSONBody(r, &req); err != nil {
 		return "", err
 	}
 
-	cleanPath := strings.TrimSpace(req.Path)
-	if cleanPath == "" {
+	if strings.TrimSpace(req.Path) == "" {
 		return "", nil
 	}
 
-	return validatePath(cleanPath)
+	return validatePath(req.Path)
 }
 
 func readFavoriteBatchPaths(r *http.Request) ([]string, error) {
@@ -5360,25 +5441,19 @@ func readFavoriteBatchPaths(r *http.Request) ([]string, error) {
 		return nil, nil
 	}
 
-	body, err := readBufferedRequestBody(r, DefaultJSONRequestBodyLimit)
-	if err != nil {
-		return nil, err
-	}
-
 	var req struct {
 		Paths []string `json:"paths"`
 	}
-	if err := json.Unmarshal(body, &req); err != nil {
+	if err := decodeJSONBody(r, &req); err != nil {
 		return nil, err
 	}
 
 	cleanPaths := make([]string, 0, len(req.Paths))
 	for _, favoritePath := range req.Paths {
-		trimmedPath := strings.TrimSpace(favoritePath)
-		if trimmedPath == "" {
+		if strings.TrimSpace(favoritePath) == "" {
 			continue
 		}
-		cleanPath, err := validatePath(trimmedPath)
+		cleanPath, err := validatePath(favoritePath)
 		if err != nil {
 			return nil, err
 		}
@@ -5389,17 +5464,18 @@ func readFavoriteBatchPaths(r *http.Request) ([]string, error) {
 }
 
 func readFavoriteQueryPath(r *http.Request) (string, error) {
-	cleanPath := strings.TrimSpace(r.URL.Query().Get("path"))
-	if cleanPath == "" {
+	queryPath := r.URL.Query().Get("path")
+	if strings.TrimSpace(queryPath) == "" {
 		return "", nil
 	}
-	return validatePath(cleanPath)
+	return validatePath(queryPath)
 }
 
 func readFavoriteRoutePath(r *http.Request) (string, error) {
-	cleanPath := strings.TrimSpace(strings.TrimPrefix(r.URL.Path, "/api/v1/favorites"))
-	if cleanPath == "" || cleanPath == "/" {
+	routePath := strings.TrimPrefix(r.URL.Path, "/api/v1/favorites")
+	trimmedPath := strings.TrimSpace(routePath)
+	if trimmedPath == "" || trimmedPath == "/" {
 		return "", nil
 	}
-	return validatePath(cleanPath)
+	return validatePath(routePath)
 }

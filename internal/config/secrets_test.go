@@ -108,7 +108,7 @@ func TestLoadOrCreateSecrets(t *testing.T) {
 		}
 	})
 
-	t.Run("invalid json file", func(t *testing.T) {
+	t.Run("invalid json file recovers by backing up and regenerating secrets", func(t *testing.T) {
 		tmpDir := t.TempDir()
 		secretsPath := filepath.Join(tmpDir, SecretsFile)
 
@@ -117,17 +117,55 @@ func TestLoadOrCreateSecrets(t *testing.T) {
 			t.Fatalf("failed to write invalid secrets: %v", err)
 		}
 
-		_, _, err := LoadOrCreateSecrets(tmpDir)
-		if err == nil {
-			t.Error("expected error for invalid JSON, got nil")
+		secrets, isNew, err := LoadOrCreateSecrets(tmpDir)
+		if err != nil {
+			t.Fatalf("LoadOrCreateSecrets() should recover invalid JSON: %v", err)
+		}
+		if !isNew {
+			t.Fatal("expected invalid secrets file recovery to regenerate secrets")
+		}
+		if secrets.JWTSecret == "" {
+			t.Fatal("expected regenerated JWT secret to be non-empty")
+		}
+		if secrets.WebDAVPassword == "" {
+			t.Fatal("expected regenerated WebDAV password to be non-empty")
+		}
+
+		entries, readDirErr := os.ReadDir(tmpDir)
+		if readDirErr != nil {
+			t.Fatalf("ReadDir(tmpDir) error: %v", readDirErr)
+		}
+		foundBackup := false
+		for _, entry := range entries {
+			if strings.HasPrefix(entry.Name(), "secrets.json.corrupt.") {
+				foundBackup = true
+				break
+			}
+		}
+		if !foundBackup {
+			t.Fatal("expected corrupt secrets backup to be created")
+		}
+
+		reloaded, isNewReloaded, err := LoadOrCreateSecrets(tmpDir)
+		if err != nil {
+			t.Fatalf("LoadOrCreateSecrets() after recovery failed: %v", err)
+		}
+		if isNewReloaded {
+			t.Fatal("expected regenerated secrets to persist across reload")
+		}
+		if reloaded.JWTSecret != secrets.JWTSecret {
+			t.Fatalf("expected regenerated JWT secret to persist, got %q want %q", reloaded.JWTSecret, secrets.JWTSecret)
+		}
+		if reloaded.WebDAVPassword != secrets.WebDAVPassword {
+			t.Fatalf("expected regenerated WebDAV password to persist, got %q want %q", reloaded.WebDAVPassword, secrets.WebDAVPassword)
 		}
 
 		info, statErr := os.Stat(secretsPath)
 		if statErr != nil {
-			t.Fatalf("failed to stat invalid secrets file: %v", statErr)
+			t.Fatalf("failed to stat recovered secrets file: %v", statErr)
 		}
 		if info.Mode().Perm() != 0600 {
-			t.Fatalf("expected invalid secrets file permissions to be tightened to 0600, got %o", info.Mode().Perm())
+			t.Fatalf("expected recovered secrets file permissions to be 0600, got %o", info.Mode().Perm())
 		}
 	})
 

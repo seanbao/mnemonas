@@ -214,7 +214,10 @@ type CreateShareRequest struct {
 }
 
 func normalizeShareAbsolutePath(rawPath string) (string, error) {
-	normalized := strings.ReplaceAll(strings.TrimSpace(rawPath), "\\", "/")
+	normalized := strings.ReplaceAll(rawPath, "\\", "/")
+	if strings.TrimSpace(normalized) == "" {
+		return "", errors.New("invalid path")
+	}
 	if hasShareTraversalSegment(normalized) {
 		return "", errors.New("invalid path")
 	}
@@ -342,28 +345,32 @@ func (h *Handler) CreateShare(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if statProvider, ok := h.fs.(FileStatProvider); ok {
-		info, err := statProvider.Stat(r.Context(), cleanPath)
-		if err != nil {
-			if errors.Is(err, storage.ErrNotFound) {
-				writeShareError(w, http.StatusNotFound, "file not found", "FILE_NOT_FOUND")
-				return
-			}
-			if errors.Is(err, storage.ErrNotDir) {
-				writeShareError(w, http.StatusBadRequest, "invalid path", "INVALID_PATH")
-				return
-			}
-			writeShareError(w, http.StatusInternalServerError, "internal server error", "CREATE_SHARE_FAILED")
+	statProvider, ok := h.fs.(FileStatProvider)
+	if !ok {
+		writeShareError(w, http.StatusServiceUnavailable, "filesystem not available", "FILESYSTEM_UNAVAILABLE")
+		return
+	}
+
+	info, err := statProvider.Stat(r.Context(), cleanPath)
+	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			writeShareError(w, http.StatusNotFound, "file not found", "FILE_NOT_FOUND")
 			return
 		}
-		if opts.Type == ShareTypeFile && info.IsDir {
-			writeShareError(w, http.StatusBadRequest, "path is not a file", "INVALID_SHARE_TYPE")
+		if errors.Is(err, storage.ErrNotDir) {
+			writeShareError(w, http.StatusBadRequest, "invalid path", "INVALID_PATH")
 			return
 		}
-		if opts.Type == ShareTypeFolder && !info.IsDir {
-			writeShareError(w, http.StatusBadRequest, "path is not a folder", "INVALID_SHARE_TYPE")
-			return
-		}
+		writeShareError(w, http.StatusInternalServerError, "internal server error", "CREATE_SHARE_FAILED")
+		return
+	}
+	if opts.Type == ShareTypeFile && info.IsDir {
+		writeShareError(w, http.StatusBadRequest, "path is not a file", "INVALID_SHARE_TYPE")
+		return
+	}
+	if opts.Type == ShareTypeFolder && !info.IsDir {
+		writeShareError(w, http.StatusBadRequest, "path is not a folder", "INVALID_SHARE_TYPE")
+		return
 	}
 
 	share, err := h.store.Create(opts)
@@ -372,10 +379,10 @@ func (h *Handler) CreateShare(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	info := share.ToInfo()
-	info.URL = h.buildShareURL(share.ID)
+	shareInfo := share.ToInfo()
+	shareInfo.URL = h.buildShareURL(share.ID)
 
-	writeShareSuccess(w, http.StatusCreated, info, "")
+	writeShareSuccess(w, http.StatusCreated, shareInfo, "")
 }
 
 // ListShares lists shares for the current user

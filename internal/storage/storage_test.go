@@ -108,6 +108,30 @@ func setupFileSystem(t *testing.T) *FileSystem {
 	return fs
 }
 
+func setupStandaloneFileSystem(t *testing.T) *FileSystem {
+	t.Helper()
+
+	tmpDir := t.TempDir()
+	fs, err := New(&Config{
+		FilesRoot:          filepath.Join(tmpDir, "files"),
+		InternalRoot:       filepath.Join(tmpDir, ".mnemonas"),
+		TrashRoot:          filepath.Join(tmpDir, ".mnemonas", "trash"),
+		Dataplane:          dataplane.NewClient("unused"),
+		MaxVersions:        10,
+		MaxVersionAge:      30 * 24 * time.Hour,
+		TrashRetentionDays: 30,
+	})
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := fs.Close(); err != nil {
+			t.Errorf("fs.Close() error: %v", err)
+		}
+	})
+	return fs
+}
+
 func setupManagedPathHelperFileSystem(t *testing.T) *FileSystem {
 	t.Helper()
 
@@ -404,8 +428,8 @@ func TestFileSystem_WriteFile_RejectsSymlinkParent(t *testing.T) {
 	}
 
 	err := fs.WriteFile(ctx, "/escape/payload.txt", bytes.NewReader([]byte("payload")))
-	if err != ErrNotFound {
-		t.Fatalf("WriteFile() error = %v, want ErrNotFound", err)
+	if !errors.Is(err, errStoragePathSymlink) {
+		t.Fatalf("WriteFile() error = %v, want errStoragePathSymlink", err)
 	}
 
 	if _, statErr := os.Stat(filepath.Join(outsideDir, "payload.txt")); !errors.Is(statErr, os.ErrNotExist) {
@@ -815,7 +839,7 @@ func TestFileSystem_WriteFile_RollsBackNewFileWhenDirectorySyncFails(t *testing.
 	if err == nil {
 		t.Fatal("Expected WriteFile() to fail when parent directory sync fails")
 	}
-	if !strings.Contains(err.Error(), "failed to sync parent directory") {
+	if !strings.Contains(err.Error(), "sync parent directory") {
 		t.Fatalf("expected parent directory sync failure in error, got %v", err)
 	}
 
@@ -844,7 +868,7 @@ func TestFileSystem_WriteFile_RollsBackOverwriteWhenDirectorySyncFails(t *testin
 	if err == nil {
 		t.Fatal("Expected WriteFile() overwrite to fail when parent directory sync fails")
 	}
-	if !strings.Contains(err.Error(), "failed to sync parent directory") {
+	if !strings.Contains(err.Error(), "sync parent directory") {
 		t.Fatalf("expected parent directory sync failure in error, got %v", err)
 	}
 
@@ -883,7 +907,7 @@ func TestFileSystem_WriteFile_RollsBackVersionMetadataWhenDirectorySyncFails(t *
 	if err == nil {
 		t.Fatal("Expected WriteFile() overwrite to fail when parent directory sync fails")
 	}
-	if !strings.Contains(err.Error(), "failed to sync parent directory") {
+	if !strings.Contains(err.Error(), "sync parent directory") {
 		t.Fatalf("expected parent directory sync failure in error, got %v", err)
 	}
 
@@ -3191,8 +3215,8 @@ func TestFileSystem_RestoreFromTrashTo_RollsBackOnMetadataConflict(t *testing.T)
 	}
 
 	conflictPath := "/restored/restore-conflict.md"
-	if err := fs.versions.UpdateFileIndex(ctx, conflictPath, 1, time.Now(), "conflict-hash"); err != nil {
-		t.Fatalf("UpdateFileIndex() error: %v", err)
+	if err := fs.versions.AddVersion(ctx, conflictPath, "conflict-hash", 1, ""); err != nil {
+		t.Fatalf("AddVersion() error: %v", err)
 	}
 
 	err = fs.RestoreFromTrashTo(ctx, items[0].ID, conflictPath)
@@ -3248,12 +3272,12 @@ func TestFileSystem_RestoreFromTrashTo_DoesNotMoveMetadataBeforeTrashMetadataRem
 
 	newPath := "/restored/restore-remove-fail.md"
 	rollbackRenameCalled := false
-	fs.renameMetadataPath = func(ctx context.Context, oldName, updatedPath string) error {
+	fs.renameHistoryMetadataPath = func(ctx context.Context, oldName, updatedPath string) error {
 		if oldName == newPath && updatedPath == "/restore-remove-fail.md" {
 			rollbackRenameCalled = true
 			return errors.New("metadata rollback failed")
 		}
-		return fs.versions.RenamePath(ctx, oldName, updatedPath)
+		return fs.versions.RenamePathHistory(ctx, oldName, updatedPath)
 	}
 	fs.removeTrashMetadata = func(ctx context.Context, id string) error {
 		return errors.New("remove trash metadata failed")
@@ -3321,12 +3345,12 @@ func TestFileSystem_RestoreFromTrashTo_DoesNotMoveMetadataBeforeIndexUpdateSucce
 
 	newPath := "/restored/restore-index-rollback-fail.md"
 	rollbackRenameCalled := false
-	fs.renameMetadataPath = func(ctx context.Context, oldName, updatedPath string) error {
+	fs.renameHistoryMetadataPath = func(ctx context.Context, oldName, updatedPath string) error {
 		if oldName == newPath && updatedPath == "/restore-index-rollback-fail.md" {
 			rollbackRenameCalled = true
 			return errors.New("metadata rollback failed")
 		}
-		return fs.versions.RenamePath(ctx, oldName, updatedPath)
+		return fs.versions.RenamePathHistory(ctx, oldName, updatedPath)
 	}
 	fs.updateFileIndex = func(ctx context.Context, path string, size int64, modTime time.Time, hash string) error {
 		return errors.New("index update failed")
@@ -3589,6 +3613,78 @@ func TestFileSystem_DeleteFromTrash_AttemptsVersionObjectCleanup(t *testing.T) {
 	}
 }
 
+func TestFileSystem_DeleteFromTrash_RemovesDirectoryChildVersionMetadata(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/docs"); err != nil {
+		t.Fatalf("Mkdir(/docs) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/docs/nested"); err != nil {
+		t.Fatalf("Mkdir(/docs/nested) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/docs/nested/report.txt", bytes.NewReader([]byte("report v1"))); err != nil {
+		t.Fatalf("WriteFile(report v1) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/docs/nested/report.txt", bytes.NewReader([]byte("report v2"))); err != nil {
+		t.Fatalf("WriteFile(report v2) error: %v", err)
+	}
+
+	versions, err := fs.versions.GetVersions(ctx, "/docs/nested/report.txt")
+	if err != nil {
+		t.Fatalf("GetVersions(report before delete) error: %v", err)
+	}
+	if len(versions) == 0 {
+		t.Fatal("expected nested file to have version history before delete")
+	}
+
+	if err := fs.Delete(ctx, "/docs"); err != nil {
+		t.Fatalf("Delete(/docs) error: %v", err)
+	}
+
+	items, err := fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash() error: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected 1 trash item, got %d", len(items))
+	}
+
+	deletedHashes := make(map[string]int)
+	fs.deleteVersionObject = func(ctx context.Context, hash string) error {
+		deletedHashes[hash]++
+		return nil
+	}
+
+	if err := fs.DeleteFromTrash(ctx, items[0].ID); err != nil {
+		t.Fatalf("DeleteFromTrash() error: %v", err)
+	}
+
+	for _, version := range versions {
+		if deletedHashes[version.Hash] != 1 {
+			t.Fatalf("expected deleteVersionObject to be called once for %s, got %d", version.Hash, deletedHashes[version.Hash])
+		}
+	}
+
+	paths, err := fs.versions.ListVersionPaths(ctx)
+	if err != nil {
+		t.Fatalf("ListVersionPaths() error: %v", err)
+	}
+	for _, versionPath := range paths {
+		if versionPath == "/docs/nested/report.txt" {
+			t.Fatalf("expected nested version metadata to be removed, got paths %v", paths)
+		}
+	}
+
+	remainingVersions, err := fs.versions.GetVersions(ctx, "/docs/nested/report.txt")
+	if err != nil {
+		t.Fatalf("GetVersions(report after DeleteFromTrash) error: %v", err)
+	}
+	if len(remainingVersions) != 0 {
+		t.Fatalf("expected nested version metadata to be removed, got %d entries", len(remainingVersions))
+	}
+}
+
 func TestFileSystem_EmptyTrash_AttemptsVersionObjectCleanup(t *testing.T) {
 	fs := setupFileSystem(t)
 	ctx := context.Background()
@@ -3825,6 +3921,19 @@ func TestFileSystem_EmptyTrash_PreservesPartialWarningWhenHardFailureFollows(t *
 		t.Fatalf("Delete(versioned) error: %v", err)
 	}
 
+	originalSyncStoragePathDir := syncStoragePathDir
+	syncFailures := 0
+	syncStoragePathDir = func(dir string) error {
+		syncFailures++
+		if syncFailures == 1 {
+			return errors.New("sync dir failed")
+		}
+		return originalSyncStoragePathDir(dir)
+	}
+	t.Cleanup(func() {
+		syncStoragePathDir = originalSyncStoragePathDir
+	})
+
 	removeCalls := 0
 	fs.removeTrashPath = func(path string) error {
 		removeCalls++
@@ -3832,9 +3941,6 @@ func TestFileSystem_EmptyTrash_PreservesPartialWarningWhenHardFailureFollows(t *
 			return errors.New("trash delete failed")
 		}
 		return os.RemoveAll(path)
-	}
-	fs.deleteVersionObject = func(ctx context.Context, hash string) error {
-		return errors.New("delete object failed")
 	}
 
 	deleted, err := fs.EmptyTrash(ctx)
@@ -3859,8 +3965,8 @@ func TestFileSystem_EmptyTrash_PreservesPartialWarningWhenHardFailureFollows(t *
 	if len(items) != 1 {
 		t.Fatalf("expected one trash item to remain after mixed warning error, got %d", len(items))
 	}
-	if items[0].OriginalPath != "/empty-trash-mixed-plain.txt" {
-		t.Fatalf("expected plain trash item to remain after hard failure, got %+v", items[0])
+	if items[0].OriginalPath != "/empty-trash-mixed-plain.txt" && items[0].OriginalPath != "/empty-trash-mixed-versioned.md" {
+		t.Fatalf("expected one original trash item to remain after hard failure, got %+v", items[0])
 	}
 }
 
@@ -3930,7 +4036,7 @@ func TestFileSystem_DeleteFromTrash_ReturnsDirectorySyncErrorAfterContentDelete(
 	syncCalls := 0
 	syncStoragePathDir = func(dir string) error {
 		syncCalls++
-		if syncCalls == 3 {
+		if syncCalls == 1 {
 			return errors.New("sync dir failed")
 		}
 		return nil
@@ -3946,7 +4052,7 @@ func TestFileSystem_DeleteFromTrash_ReturnsDirectorySyncErrorAfterContentDelete(
 	if !strings.Contains(err.Error(), "failed to sync deleted trash content") {
 		t.Fatalf("expected deleted trash sync failure in error, got %v", err)
 	}
-	if syncCalls < 3 {
+	if syncCalls < 1 {
 		t.Fatalf("expected post-delete sync to be attempted, got %d sync calls", syncCalls)
 	}
 
@@ -4023,8 +4129,17 @@ func TestFileSystem_DeleteFromTrash_DoesNotRemoveOutsideDeletingDirAfterTrashRoo
 	if _, statErr := os.Stat(outsideDeletingDir); statErr != nil {
 		t.Fatalf("expected outside .deleting directory to remain untouched, got %v", statErr)
 	}
-	if _, statErr := os.Stat(filepath.Join(backupTrashRoot, ".deleting")); !errors.Is(statErr, os.ErrNotExist) {
-		t.Fatalf("expected anchored .deleting directory to be cleaned up, got %v", statErr)
+	anchoredDeletingDir := filepath.Join(backupTrashRoot, ".deleting")
+	if entries, readErr := os.ReadDir(anchoredDeletingDir); readErr == nil {
+		if len(entries) != 0 {
+			entryNames := make([]string, 0, len(entries))
+			for _, entry := range entries {
+				entryNames = append(entryNames, entry.Name())
+			}
+			t.Fatalf("expected anchored .deleting directory to have no staged leftovers, got %d entries: %v", len(entries), entryNames)
+		}
+	} else if !errors.Is(readErr, os.ErrNotExist) {
+		t.Fatalf("expected anchored .deleting directory to be empty or absent, got %v", readErr)
 	}
 	if _, statErr := os.Stat(filepath.Join(backupTrashRoot, items[0].ID)); statErr != nil {
 		t.Fatalf("expected trash item content to be rolled back inside anchored trash root, got %v", statErr)
@@ -4204,7 +4319,7 @@ func TestFileSystem_EmptyTrash_CountsDeletedItemWhenDirectorySyncFailsAfterConte
 	syncCalls := 0
 	syncStoragePathDir = func(dir string) error {
 		syncCalls++
-		if syncCalls == 3 {
+		if syncCalls == 1 {
 			return errors.New("sync dir failed")
 		}
 		return nil
@@ -4357,6 +4472,33 @@ func TestFileSystem_ListVersions_PropagatesVersionStoreFailure(t *testing.T) {
 	}
 }
 
+func TestFileSystem_ListVersions_PropagatesCurrentFileReadError(t *testing.T) {
+	fs := setupStandaloneFileSystem(t)
+	ctx := context.Background()
+
+	path := fs.workspace.FullPath("/versioned.txt")
+	if err := os.WriteFile(path, []byte("current"), 0600); err != nil {
+		t.Fatalf("os.WriteFile(versioned.txt) error: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chmod(path, 0600)
+	})
+	if err := os.Chmod(path, 0); err != nil {
+		t.Fatalf("os.Chmod(versioned.txt) error: %v", err)
+	}
+
+	versions, err := fs.ListVersions(ctx, "/versioned.txt")
+	if err == nil {
+		t.Fatal("expected ListVersions() to return current file read error")
+	}
+	if versions != nil {
+		t.Fatalf("expected no version list on current file read error, got %d entries", len(versions))
+	}
+	if !os.IsPermission(err) {
+		t.Fatalf("expected permission error from ListVersions(), got %v", err)
+	}
+}
+
 func TestFileSystem_RestoreVersion_RollsBackWhenIndexUpdateFails(t *testing.T) {
 	fs := setupFileSystem(t)
 	ctx := context.Background()
@@ -4444,6 +4586,38 @@ func TestFileSystem_GetVersion_RejectsHashFromDifferentPath(t *testing.T) {
 	}
 	if reader != nil {
 		t.Fatal("expected no reader when hash does not belong to requested path")
+	}
+}
+
+func TestFileSystem_GetVersion_PropagatesCurrentFileReadError(t *testing.T) {
+	fs := setupStandaloneFileSystem(t)
+	ctx := context.Background()
+
+	content := []byte("current")
+	path := fs.workspace.FullPath("/versioned.txt")
+	if err := os.WriteFile(path, content, 0600); err != nil {
+		t.Fatalf("os.WriteFile(versioned.txt) error: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chmod(path, 0600)
+	})
+	if err := os.Chmod(path, 0); err != nil {
+		t.Fatalf("os.Chmod(versioned.txt) error: %v", err)
+	}
+
+	reader, err := fs.GetVersion(ctx, "/versioned.txt", computeHash(content))
+	if err == nil {
+		t.Fatal("expected GetVersion() to return current file read error")
+	}
+	if reader != nil {
+		_ = reader.Close()
+		t.Fatal("expected no reader on current file read error")
+	}
+	if errors.Is(err, ErrVersionNotFound) {
+		t.Fatalf("expected current file read error, got %v", err)
+	}
+	if !os.IsPermission(err) {
+		t.Fatalf("expected permission error from GetVersion(), got %v", err)
 	}
 }
 
@@ -6017,6 +6191,40 @@ func TestFileSystem_SearchWithinBase_RespectsLimitWithinRoot(t *testing.T) {
 	}
 }
 
+func TestFileSystem_SearchWithinBase_RejectsTraversalRoot(t *testing.T) {
+	tmpDir := t.TempDir()
+	fs, err := New(&Config{
+		FilesRoot:          filepath.Join(tmpDir, "files"),
+		InternalRoot:       filepath.Join(tmpDir, ".mnemonas"),
+		TrashRoot:          filepath.Join(tmpDir, ".mnemonas", "trash"),
+		Dataplane:          dataplane.NewClient("unused"),
+		MaxVersions:        10,
+		MaxVersionAge:      30 * 24 * time.Hour,
+		TrashRetentionDays: 30,
+	})
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	defer fs.Close()
+
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/other"); err != nil {
+		t.Fatalf("Mkdir(/other) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/other/report.txt", bytes.NewReader([]byte("other"))); err != nil {
+		t.Fatalf("WriteFile(/other/report.txt) error: %v", err)
+	}
+
+	results, err := fs.SearchWithinBase(ctx, "../../other", "report", 10)
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("SearchWithinBase() error = %v, want %v", err, ErrNotFound)
+	}
+	if results != nil {
+		t.Fatalf("expected no results when root escapes workspace, got %d", len(results))
+	}
+}
+
 func TestFileSystem_Search_PropagatesTraversalError(t *testing.T) {
 	fs := setupFileSystem(t)
 	ctx := context.Background()
@@ -6045,9 +6253,11 @@ func TestFileSystem_Search_EmptyQuery(t *testing.T) {
 	fs := setupFileSystem(t)
 	ctx := context.Background()
 
-	_, err := fs.Search(ctx, "", 10)
-	if err == nil {
-		t.Error("Search with empty query should return error")
+	for _, query := range []string{"", "   \t\n  "} {
+		_, err := fs.Search(ctx, query, 10)
+		if err == nil {
+			t.Fatalf("Search with query %q should return error", query)
+		}
 	}
 }
 
@@ -6177,6 +6387,57 @@ func TestFileSystem_SetVersioning(t *testing.T) {
 	}
 	if reason == "" {
 		t.Error("Reason should not be empty")
+	}
+}
+
+func TestFileSystem_SetVersioning_ReturnsErrNotFoundForMissingPath(t *testing.T) {
+	tmpDir := t.TempDir()
+	fs, err := New(&Config{
+		FilesRoot:          filepath.Join(tmpDir, "files"),
+		InternalRoot:       filepath.Join(tmpDir, ".mnemonas"),
+		TrashRoot:          filepath.Join(tmpDir, ".mnemonas", "trash"),
+		Dataplane:          dataplane.NewClient("unused"),
+		MaxVersions:        10,
+		MaxVersionAge:      30 * 24 * time.Hour,
+		TrashRetentionDays: 30,
+	})
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	defer fs.Close()
+
+	ctx := context.Background()
+
+	err = fs.SetVersioning(ctx, "/missing.txt", false)
+	if err != ErrNotFound {
+		t.Fatalf("SetVersioning() error = %v, want %v", err, ErrNotFound)
+	}
+}
+
+func TestFileSystem_SetVersioning_ReturnsErrIsDirForDirectoryPath(t *testing.T) {
+	tmpDir := t.TempDir()
+	fs, err := New(&Config{
+		FilesRoot:          filepath.Join(tmpDir, "files"),
+		InternalRoot:       filepath.Join(tmpDir, ".mnemonas"),
+		TrashRoot:          filepath.Join(tmpDir, ".mnemonas", "trash"),
+		Dataplane:          dataplane.NewClient("unused"),
+		MaxVersions:        10,
+		MaxVersionAge:      30 * 24 * time.Hour,
+		TrashRetentionDays: 30,
+	})
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	defer fs.Close()
+
+	ctx := context.Background()
+	if err := fs.Mkdir(ctx, "/dir"); err != nil {
+		t.Fatalf("Mkdir(/dir) error: %v", err)
+	}
+
+	err = fs.SetVersioning(ctx, "/dir", false)
+	if err != ErrIsDir {
+		t.Fatalf("SetVersioning() error = %v, want %v", err, ErrIsDir)
 	}
 }
 

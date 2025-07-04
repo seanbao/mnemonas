@@ -161,6 +161,30 @@ func TestHandler_AddFavorite_EmptyPathReturnsBadRequest(t *testing.T) {
 	}
 }
 
+func TestHandler_AddFavorite_PreservesWhitespaceInPath(t *testing.T) {
+	store, err := NewStore(filepath.Join(t.TempDir(), "favorites.json"))
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+	handler := NewHandler(store, zerolog.Nop())
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/favorites", strings.NewReader(`{"path":"/docs/report.pdf ","note":"note"}`))
+	req = req.WithContext(auth.WithClaimsContext(req.Context(), &auth.TokenClaims{UserID: "user-123"}))
+	rec := httptest.NewRecorder()
+
+	handler.AddFavorite(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected status 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !store.IsFavorite("user-123", "/docs/report.pdf ") {
+		t.Fatal("expected favorite to preserve trailing whitespace in path")
+	}
+	if store.IsFavorite("user-123", "/docs/report.pdf") {
+		t.Fatal("expected trimmed sibling path to remain unfavorited")
+	}
+}
+
 func TestHandler_AddFavorite_RejectsUnknownFields(t *testing.T) {
 	store, err := NewStore(filepath.Join(t.TempDir(), "favorites.json"))
 	if err != nil {
@@ -421,17 +445,17 @@ func TestHandler_RemoveFavoriteAndUpdateNote_IncludeNullDataOnSuccess(t *testing
 	assertNullData(t, removeRec.Body.Bytes())
 }
 
-func TestHandler_CheckFavorite_TrimsSurroundingWhitespace(t *testing.T) {
+func TestHandler_CheckFavorite_PreservesWhitespaceInPath(t *testing.T) {
 	store, err := NewStore(filepath.Join(t.TempDir(), "favorites.json"))
 	if err != nil {
 		t.Fatalf("NewStore() error: %v", err)
 	}
-	if _, err := store.Add("user-123", "/docs/report.pdf", "note"); err != nil {
+	if _, err := store.Add("user-123", "/docs/report.pdf ", "note"); err != nil {
 		t.Fatalf("seed favorite error: %v", err)
 	}
 	handler := NewHandler(store, zerolog.Nop())
 
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/favorites/check?path=%20/docs/report.pdf%20", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/favorites/check?path=%2Fdocs%2Freport.pdf%20", nil)
 	req = req.WithContext(auth.WithClaimsContext(req.Context(), &auth.TokenClaims{UserID: "user-123"}))
 	rec := httptest.NewRecorder()
 
@@ -451,10 +475,10 @@ func TestHandler_CheckFavorite_TrimsSurroundingWhitespace(t *testing.T) {
 		t.Fatalf("failed to decode response: %v", err)
 	}
 	if !payload.Success || !payload.Data.IsFavorite {
-		t.Fatalf("expected trimmed path to match favorite, got %s", rec.Body.String())
+		t.Fatalf("expected whitespace-preserving path to match favorite, got %s", rec.Body.String())
 	}
-	if payload.Data.Path != "/docs/report.pdf" {
-		t.Fatalf("expected normalized path, got %q", payload.Data.Path)
+	if payload.Data.Path != "/docs/report.pdf " {
+		t.Fatalf("expected whitespace-preserving path, got %q", payload.Data.Path)
 	}
 }
 
@@ -488,17 +512,17 @@ func TestHandler_CheckFavorite_WhitespaceOnlyPathReturnsBadRequest(t *testing.T)
 	}
 }
 
-func TestHandler_CheckFavorites_TrimsSurroundingWhitespace(t *testing.T) {
+func TestHandler_CheckFavorites_PreservesWhitespaceInPaths(t *testing.T) {
 	store, err := NewStore(filepath.Join(t.TempDir(), "favorites.json"))
 	if err != nil {
 		t.Fatalf("NewStore() error: %v", err)
 	}
-	if _, err := store.Add("user-123", "/docs/report.pdf", "note"); err != nil {
+	if _, err := store.Add("user-123", "/docs/report.pdf ", "note"); err != nil {
 		t.Fatalf("seed favorite error: %v", err)
 	}
 	handler := NewHandler(store, zerolog.Nop())
 
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/favorites/check-batch", strings.NewReader(`{"paths":[" /docs/report.pdf ","/docs/missing.pdf"]}`))
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/favorites/check-batch", strings.NewReader(`{"paths":["/docs/report.pdf ","/docs/report.pdf"]}`))
 	req = req.WithContext(auth.WithClaimsContext(req.Context(), &auth.TokenClaims{UserID: "user-123"}))
 	rec := httptest.NewRecorder()
 
@@ -519,11 +543,11 @@ func TestHandler_CheckFavorites_TrimsSurroundingWhitespace(t *testing.T) {
 	if !payload.Success {
 		t.Fatalf("expected success response, got %s", rec.Body.String())
 	}
-	if !payload.Data.Favorites["/docs/report.pdf"] {
-		t.Fatalf("expected trimmed favorite path to match, got %#v", payload.Data.Favorites)
+	if !payload.Data.Favorites["/docs/report.pdf "] {
+		t.Fatalf("expected whitespace-preserving favorite path to match, got %#v", payload.Data.Favorites)
 	}
-	if payload.Data.Favorites["/docs/missing.pdf"] {
-		t.Fatalf("expected missing path to remain false, got %#v", payload.Data.Favorites)
+	if payload.Data.Favorites["/docs/report.pdf"] {
+		t.Fatalf("expected trimmed sibling path to remain false, got %#v", payload.Data.Favorites)
 	}
 }
 

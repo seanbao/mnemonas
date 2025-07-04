@@ -17,6 +17,29 @@ import (
 
 var errActivityLogSymlink = errors.New("activity log path must not be a symlink")
 
+type activityLogFormatError struct {
+	err error
+}
+
+func (e *activityLogFormatError) Error() string {
+	return e.err.Error()
+}
+
+func (e *activityLogFormatError) Unwrap() error {
+	return e.err
+}
+
+func wrapActivityLogFormatError(err error) error {
+	if err == nil {
+		return nil
+	}
+	var formatErr *activityLogFormatError
+	if errors.As(err, &formatErr) {
+		return err
+	}
+	return &activityLogFormatError{err: err}
+}
+
 var syncActivityLogRootDir = syncActivityRootDir
 var afterValidateActivityLogPath = func() {}
 
@@ -127,21 +150,65 @@ func (s *Store) logFilePath() string {
 
 // load reads entries from disk
 func (s *Store) load() error {
-	data, err := readRegisteredActivityLogFile(s.logFilePath())
+	file, err := openRegisteredActivityLogFile(s.logFilePath())
 	if os.IsNotExist(err) {
 		return nil
 	}
 	if err != nil {
 		return err
 	}
+	defer file.Close()
 
-	var entries []Entry
-	if err := json.Unmarshal(data, &entries); err != nil {
+	entries, err := decodeActivityEntries(file, s.maxSize)
+	if err != nil {
 		return err
 	}
 
 	s.entries = entries
 	return nil
+}
+
+func decodeActivityEntries(reader io.Reader, maxSize int) ([]Entry, error) {
+	decoder := json.NewDecoder(reader)
+
+	startToken, err := decoder.Token()
+	if err != nil {
+		return nil, err
+	}
+	startDelim, ok := startToken.(json.Delim)
+	if !ok || startDelim != '[' {
+		return nil, wrapActivityLogFormatError(errors.New("failed to parse activity log: expected JSON array"))
+	}
+
+	entries := make([]Entry, 0)
+	for decoder.More() {
+		var entry Entry
+		if err := decoder.Decode(&entry); err != nil {
+			return nil, err
+		}
+		if maxSize <= 0 || len(entries) < maxSize {
+			entries = append(entries, entry)
+		}
+	}
+
+	endToken, err := decoder.Token()
+	if err != nil {
+		return nil, err
+	}
+	endDelim, ok := endToken.(json.Delim)
+	if !ok || endDelim != ']' {
+		return nil, wrapActivityLogFormatError(errors.New("failed to parse activity log: expected closing array delimiter"))
+	}
+
+	extraToken, err := decoder.Token()
+	if errors.Is(err, io.EOF) {
+		return entries, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	return nil, wrapActivityLogFormatError(fmt.Errorf("failed to parse activity log: trailing data after array (%v)", extraToken))
 }
 
 func (s *Store) recoverCorruptLog(loadErr error) error {
@@ -174,7 +241,7 @@ func (s *Store) recoverCorruptLog(loadErr error) error {
 }
 
 func isRecoverableActivityLogError(err error) bool {
-	if errors.Is(err, io.EOF) {
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 		return true
 	}
 
@@ -184,7 +251,12 @@ func isRecoverableActivityLogError(err error) bool {
 	}
 
 	var typeErr *json.UnmarshalTypeError
-	return errors.As(err, &typeErr)
+	if errors.As(err, &typeErr) {
+		return true
+	}
+
+	var formatErr *activityLogFormatError
+	return errors.As(err, &formatErr)
 }
 
 // save writes entries to disk
@@ -335,6 +407,20 @@ func registeredActivityLogDirRoot(path string) (*os.Root, string, bool, error) {
 	return root, normalizedPath, root != nil, nil
 }
 
+func openRegisteredActivityLogFile(path string) (io.ReadCloser, error) {
+	root, normalizedPath, ok, err := registeredActivityLogDirRoot(path)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		if err := validateActivityLogPath(normalizedPath); err != nil {
+			return nil, err
+		}
+		return os.Open(normalizedPath)
+	}
+	return openActivityLogFileWithRoot(root, normalizedPath)
+}
+
 func readRegisteredActivityLogFile(path string) ([]byte, error) {
 	root, normalizedPath, ok, err := registeredActivityLogDirRoot(path)
 	if err != nil {
@@ -398,15 +484,24 @@ func syncRegisteredActivityLogDir(path string) error {
 }
 
 func readActivityLogFileWithRoot(root *os.Root, path string) ([]byte, error) {
+	file, err := openActivityLogFileWithRoot(root, path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	return io.ReadAll(file)
+}
+
+func openActivityLogFileWithRoot(root *os.Root, path string) (*os.File, error) {
 	afterValidateActivityLogPath()
 
 	file, err := root.Open(filepath.Base(path))
 	if err != nil {
 		return nil, mapActivityRootPathError(err)
 	}
-	defer file.Close()
 
-	return io.ReadAll(file)
+	return file, nil
 }
 
 func writeActivityLogFileAtomicallyWithRoot(root *os.Root, path string, data []byte) error {
@@ -671,6 +766,9 @@ func (s *Store) Log(action ActionType, path, user, ip string, details map[string
 func (s *Store) List(limit, offset int, actionFilter ActionType, userFilter string) ([]Entry, int) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	if offset < 0 {
+		offset = 0
+	}
 
 	// Filter entries
 	var filtered []Entry
@@ -687,6 +785,9 @@ func (s *Store) List(limit, offset int, actionFilter ActionType, userFilter stri
 	total := len(filtered)
 
 	// Apply pagination
+	if limit <= 0 {
+		return []Entry{}, total
+	}
 	if offset >= len(filtered) {
 		return []Entry{}, total
 	}

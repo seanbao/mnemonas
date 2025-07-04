@@ -40,7 +40,8 @@ async function handleResponse<T>(response: Response, errorMessage: string, inval
     let message = errorMessage
     let code: string | undefined
     try {
-      const body = await response.json() as ApiResponseWrapper<never> | { error?: string; message?: string }
+      const body = await response.json() as ApiResponseWrapper<never> | { error?: string; message?: string; code?: string }
+      const topLevelCode = typeof body.code === 'string' ? body.code : undefined
       if (typeof body.error === 'string') {
         message = body.error || errorMessage
       } else if (body.error && typeof body.error === 'object' && 'message' in body.error && typeof body.error.message === 'string') {
@@ -50,6 +51,9 @@ async function handleResponse<T>(response: Response, errorMessage: string, inval
         }
       } else if (body.message) {
         message = body.message
+      }
+      if (!code && topLevelCode) {
+        code = topLevelCode
       }
     } catch { /* ignore */ }
     throw new ApiError(message, response.status, response.statusText, code)

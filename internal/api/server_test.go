@@ -200,6 +200,133 @@ func setupTestServer(t *testing.T) (*Server, *storage.FileSystem, string) {
 	return server, fs, tmpDir
 }
 
+func TestServer_PathChangeHooks_CallAdditionalListeners(t *testing.T) {
+	client := setupDataplaneClient(t)
+	if client == nil {
+		t.Skip("dataplane not available, skipping test")
+	}
+
+	tmpDir := t.TempDir()
+	filesRoot := path.Join(tmpDir, "files")
+	internalRoot := path.Join(tmpDir, ".mnemonas")
+
+	fs, err := storage.New(&storage.Config{
+		FilesRoot:          filesRoot,
+		InternalRoot:       internalRoot,
+		TrashRoot:          path.Join(internalRoot, "trash"),
+		TrashRetentionDays: 30,
+		Dataplane:          client,
+	})
+	if err != nil {
+		t.Skipf("storage.New() error (CGO may be disabled): %v", err)
+	}
+
+	var renamedPairs [][2]string
+	var deletedPaths []string
+	_, err = NewServer(zerolog.Nop(), &ServerConfig{
+		FileSystem: fs,
+		AfterPathRenamed: func(oldPath, newPath string) {
+			renamedPairs = append(renamedPairs, [2]string{oldPath, newPath})
+		},
+		AfterPathDeleted: func(targetPath string) *storage.PathDeleteHookResult {
+			deletedPaths = append(deletedPaths, targetPath)
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewServer() error: %v", err)
+	}
+
+	ctx := context.Background()
+	if err := fs.Mkdir(ctx, "/docs"); err != nil {
+		t.Fatalf("Mkdir(/docs) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/docs/file.txt", bytes.NewReader([]byte("content"))); err != nil {
+		t.Fatalf("WriteFile(/docs/file.txt) error: %v", err)
+	}
+	if err := fs.Rename(ctx, "/docs/file.txt", "/docs/renamed.txt"); err != nil {
+		t.Fatalf("Rename() error: %v", err)
+	}
+	if err := fs.Delete(ctx, "/docs/renamed.txt"); err != nil {
+		t.Fatalf("Delete() error: %v", err)
+	}
+
+	if len(renamedPairs) != 1 {
+		t.Fatalf("rename callback count = %d, want 1", len(renamedPairs))
+	}
+	if renamedPairs[0] != ([2]string{"/docs/file.txt", "/docs/renamed.txt"}) {
+		t.Fatalf("rename callback = %v, want [/docs/file.txt /docs/renamed.txt]", renamedPairs[0])
+	}
+	if len(deletedPaths) != 1 || deletedPaths[0] != "/docs/renamed.txt" {
+		t.Fatalf("delete callbacks = %v, want [/docs/renamed.txt]", deletedPaths)
+	}
+}
+
+func TestServer_PathChangeHooks_RollBackAdditionalDeleteListenerOnMetadataFailure(t *testing.T) {
+	client := setupDataplaneClient(t)
+	if client == nil {
+		t.Skip("dataplane not available, skipping test")
+	}
+
+	tmpDir := t.TempDir()
+	filesRoot := path.Join(tmpDir, "files")
+	internalRoot := path.Join(tmpDir, ".mnemonas")
+
+	fs, err := storage.New(&storage.Config{
+		FilesRoot:          filesRoot,
+		InternalRoot:       internalRoot,
+		TrashRoot:          path.Join(internalRoot, "trash"),
+		TrashRetentionDays: 30,
+		Dataplane:          client,
+	})
+	if err != nil {
+		t.Skipf("storage.New() error (CGO may be disabled): %v", err)
+	}
+
+	rollbackCalls := 0
+	_, err = NewServer(zerolog.Nop(), &ServerConfig{
+		FileSystem: fs,
+		AfterPathDeleted: func(targetPath string) *storage.PathDeleteHookResult {
+			if targetPath != "/docs/file.txt" {
+				t.Fatalf("unexpected delete target %q", targetPath)
+			}
+			return &storage.PathDeleteHookResult{
+				Rollback: func() error {
+					rollbackCalls++
+					return nil
+				},
+				RestoreData: []byte(`{"listener":"webdav"}`),
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewServer() error: %v", err)
+	}
+
+	setStorageHook(t, fs, "updateTrashRestoreData", func(context.Context, string, []byte) error {
+		return errors.New("persist delete hook metadata")
+	})
+
+	ctx := context.Background()
+	if err := fs.Mkdir(ctx, "/docs"); err != nil {
+		t.Fatalf("Mkdir(/docs) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/docs/file.txt", bytes.NewReader([]byte("content"))); err != nil {
+		t.Fatalf("WriteFile(/docs/file.txt) error: %v", err)
+	}
+
+	err = fs.Delete(ctx, "/docs/file.txt")
+	if err == nil {
+		t.Fatal("expected delete to fail when trash restore metadata persistence fails")
+	}
+	if !strings.Contains(err.Error(), "failed to persist trash restore metadata") {
+		t.Fatalf("expected trash restore metadata failure, got %v", err)
+	}
+	if rollbackCalls != 1 {
+		t.Fatalf("additional delete rollback calls = %d, want 1", rollbackCalls)
+	}
+}
+
 func setStorageHook[T any](t *testing.T, fs *storage.FileSystem, fieldName string, fn T) {
 	t.Helper()
 	field := reflect.ValueOf(fs).Elem().FieldByName(fieldName)
@@ -546,11 +673,19 @@ func newTestThumbnailService(t *testing.T, cacheDir string) *thumbnail.Service {
 func setUserHomeDirForTest(t *testing.T, server *Server, username, homeDir string) {
 	t.Helper()
 
+	effectiveHomeDir := homeDir
+	// Auth persistence now rejects empty or traversal-based home directories.
+	// For API-level authorization tests, simulate the same external behavior by
+	// switching the user into an isolated scope that does not include the target paths.
+	if strings.TrimSpace(homeDir) == "" || hasTraversalSegment(strings.ReplaceAll(homeDir, "\\", "/")) {
+		effectiveHomeDir = "/__invalid-scope__"
+	}
+
 	user, err := server.userStore.GetByUsername(username)
 	if err != nil {
 		t.Fatalf("GetByUsername(%s) error: %v", username, err)
 	}
-	user.HomeDir = homeDir
+	user.HomeDir = effectiveHomeDir
 	if err := server.userStore.Update(user); err != nil {
 		t.Fatalf("Update(%s) error: %v", username, err)
 	}
@@ -760,7 +895,7 @@ func TestServer_ObservabilityEndpoints_BypassThrottle(t *testing.T) {
 	}
 
 	client := &http.Client{Timeout: 500 * time.Millisecond}
-	for _, endpoint := range []string{"/health", "/api/v1/version"} {
+	for _, endpoint := range []string{"/health", "/api/v1/version", "/api/v1/metrics"} {
 		resp, err := client.Get(httpServer.URL + endpoint)
 		if err != nil {
 			t.Fatalf("GET %s should bypass throttle: %v", endpoint, err)
@@ -1362,6 +1497,27 @@ func TestServer_Search_InvalidLimitReturnsBadRequest(t *testing.T) {
 				t.Fatalf("expected invalid limit error, got %s", w.Body.String())
 			}
 		})
+	}
+}
+
+func TestServer_Search_WhitespaceOnlyQueryReturnsBadRequest(t *testing.T) {
+	server, fs, _ := setupTestServer(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/docs/my report.txt", strings.NewReader("content")); err != nil {
+		t.Fatalf("WriteFile(my report.txt) error: %v", err)
+	}
+
+	req := httptest.NewRequest("GET", "/api/v1/search?q=%20", nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("Search whitespace-only query status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+	if !strings.Contains(w.Body.String(), "query parameter 'q' is required") {
+		t.Fatalf("expected missing query error, got %s", w.Body.String())
 	}
 }
 
@@ -2294,6 +2450,81 @@ func TestServer_DownloadWithQueryAuth(t *testing.T) {
 	}
 }
 
+func TestServer_DownloadSession_UsesRouteAuthContract(t *testing.T) {
+	server, _, _, username, password := setupAuthServer(t)
+
+	decodeErrorCode := func(t *testing.T, body []byte) string {
+		t.Helper()
+
+		var envelope struct {
+			Error *struct {
+				Code string `json:"code"`
+			} `json:"error"`
+		}
+		if err := json.Unmarshal(body, &envelope); err != nil {
+			t.Fatalf("failed to decode response: %v", err)
+		}
+		if envelope.Error == nil {
+			t.Fatalf("expected structured error response, got %s", string(body))
+		}
+		return envelope.Error.Code
+	}
+
+	t.Run("missing authorization header", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/download-session", nil)
+		rec := httptest.NewRecorder()
+
+		server.Router().ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusUnauthorized, rec.Body.String())
+		}
+		if got := decodeErrorCode(t, rec.Body.Bytes()); got != "MISSING_AUTH_HEADER" {
+			t.Fatalf("error code = %q, want %q", got, "MISSING_AUTH_HEADER")
+		}
+	})
+
+	t.Run("revoked access token", func(t *testing.T) {
+		loginBody := fmt.Sprintf(`{"username":"%s","password":"%s"}`, username, password)
+		loginReq := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", strings.NewReader(loginBody))
+		loginRec := httptest.NewRecorder()
+		server.Router().ServeHTTP(loginRec, loginReq)
+
+		if loginRec.Code != http.StatusOK {
+			t.Fatalf("login status = %d, want %d", loginRec.Code, http.StatusOK)
+		}
+
+		var loginPayload struct {
+			Data auth.LoginResponse `json:"data"`
+		}
+		if err := json.Unmarshal(loginRec.Body.Bytes(), &loginPayload); err != nil {
+			t.Fatalf("failed to decode login response: %v", err)
+		}
+
+		logoutReq := httptest.NewRequest(http.MethodPost, "/api/v1/auth/logout", nil)
+		logoutReq.Header.Set("Authorization", "Bearer "+loginPayload.Data.AccessToken)
+		logoutRec := httptest.NewRecorder()
+		server.Router().ServeHTTP(logoutRec, logoutReq)
+
+		if logoutRec.Code != http.StatusOK {
+			t.Fatalf("logout status = %d, want %d; body=%s", logoutRec.Code, http.StatusOK, logoutRec.Body.String())
+		}
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/download-session", nil)
+		req.Header.Set("Authorization", "Bearer "+loginPayload.Data.AccessToken)
+		rec := httptest.NewRecorder()
+
+		server.Router().ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusUnauthorized, rec.Body.String())
+		}
+		if got := decodeErrorCode(t, rec.Body.Bytes()); got != "TOKEN_REVOKED" {
+			t.Fatalf("error code = %q, want %q", got, "TOKEN_REVOKED")
+		}
+	})
+}
+
 func TestServer_Login_LogsActivityWithUsername(t *testing.T) {
 	server, _, _, username, password := setupAuthServer(t)
 	if server.activity == nil {
@@ -2604,7 +2835,7 @@ func TestServer_AddFavorite_LogsFavoriteActivity(t *testing.T) {
 	}
 
 	token := loginAndGetAccessToken(t, server, username, password)
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/favorites", strings.NewReader(`{"path":"/docs/a.txt","note":"starred"}`))
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/favorites", strings.NewReader(`{"path":"/tester/docs/a.txt","note":"starred"}`))
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -2622,8 +2853,8 @@ func TestServer_AddFavorite_LogsFavoriteActivity(t *testing.T) {
 	if entries[0].User != username {
 		t.Fatalf("expected favorite activity user %q, got %q", username, entries[0].User)
 	}
-	if entries[0].Path != "/docs/a.txt" {
-		t.Fatalf("expected favorite activity path %q, got %q", "/docs/a.txt", entries[0].Path)
+	if entries[0].Path != "/tester/docs/a.txt" {
+		t.Fatalf("expected favorite activity path %q, got %q", "/tester/docs/a.txt", entries[0].Path)
 	}
 }
 
@@ -2637,12 +2868,12 @@ func TestServer_RemoveFavorite_LogsUnfavoriteActivity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetByUsername(%s) error: %v", username, err)
 	}
-	if _, err := server.favoritesStore.Add(user.ID, "/docs/a.txt", "starred"); err != nil {
+	if _, err := server.favoritesStore.Add(user.ID, "/tester/docs/a.txt", "starred"); err != nil {
 		t.Fatalf("favoritesStore.Add() error: %v", err)
 	}
 
 	token := loginAndGetAccessToken(t, server, username, password)
-	req := httptest.NewRequest(http.MethodDelete, "/api/v1/favorites/docs/a.txt", nil)
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/favorites/tester/docs/a.txt", nil)
 	req.Header.Set("Authorization", "Bearer "+token)
 	w := httptest.NewRecorder()
 
@@ -2659,8 +2890,8 @@ func TestServer_RemoveFavorite_LogsUnfavoriteActivity(t *testing.T) {
 	if entries[0].User != username {
 		t.Fatalf("expected unfavorite activity user %q, got %q", username, entries[0].User)
 	}
-	if entries[0].Path != "/docs/a.txt" {
-		t.Fatalf("expected unfavorite activity path %q, got %q", "/docs/a.txt", entries[0].Path)
+	if entries[0].Path != "/tester/docs/a.txt" {
+		t.Fatalf("expected unfavorite activity path %q, got %q", "/tester/docs/a.txt", entries[0].Path)
 	}
 }
 
@@ -2674,12 +2905,12 @@ func TestServer_UpdateFavoriteNote_LogsFavoriteNoteActivity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetByUsername(%s) error: %v", username, err)
 	}
-	if _, err := server.favoritesStore.Add(user.ID, "/docs/a.txt", "old note"); err != nil {
+	if _, err := server.favoritesStore.Add(user.ID, "/tester/docs/a.txt", "old note"); err != nil {
 		t.Fatalf("favoritesStore.Add() error: %v", err)
 	}
 
 	token := loginAndGetAccessToken(t, server, username, password)
-	req := httptest.NewRequest(http.MethodPatch, "/api/v1/favorites/docs/a.txt", strings.NewReader(`{"note":"new note"}`))
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/favorites/tester/docs/a.txt", strings.NewReader(`{"note":"new note"}`))
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -2697,8 +2928,8 @@ func TestServer_UpdateFavoriteNote_LogsFavoriteNoteActivity(t *testing.T) {
 	if entries[0].User != username {
 		t.Fatalf("expected favorite-note activity user %q, got %q", username, entries[0].User)
 	}
-	if entries[0].Path != "/docs/a.txt" {
-		t.Fatalf("expected favorite-note activity path %q, got %q", "/docs/a.txt", entries[0].Path)
+	if entries[0].Path != "/tester/docs/a.txt" {
+		t.Fatalf("expected favorite-note activity path %q, got %q", "/tester/docs/a.txt", entries[0].Path)
 	}
 }
 
@@ -2975,6 +3206,58 @@ func TestServer_ListFavorites_ReturnsServiceUnavailableWhenStoreInitFails(t *tes
 	}
 	if !strings.Contains(w.Body.String(), "FAVORITES_UNAVAILABLE") {
 		t.Fatalf("expected FAVORITES_UNAVAILABLE response, got %s", w.Body.String())
+	}
+}
+
+func TestServer_ListFavorites_FailsClosedWhenRuntimeComponentsAreMissing(t *testing.T) {
+	server := setupFavoritesServerWithOptions(t, true)
+	server.favoritesStore = nil
+	server.favoritesHandler = nil
+	server.favoritesConfigured = false
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/favorites", nil)
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("list favorites without runtime components status = %d, want %d", w.Code, http.StatusServiceUnavailable)
+	}
+	if !strings.Contains(w.Body.String(), "FAVORITES_UNAVAILABLE") {
+		t.Fatalf("expected FAVORITES_UNAVAILABLE response, got %s", w.Body.String())
+	}
+}
+
+func TestServer_GetSettings_ReportsFavoritesRuntimeUnavailableWhenStoreInitFails(t *testing.T) {
+	server := setupFavoritesUnavailableServer(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/settings", nil)
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("get settings status = %d, want %d", w.Code, http.StatusOK)
+	}
+
+	var resp struct {
+		Success bool `json:"success"`
+		Data    struct {
+			Favorites struct {
+				Enabled          bool `json:"enabled"`
+				RuntimeAvailable bool `json:"runtime_available"`
+			} `json:"favorites"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode settings response error: %v", err)
+	}
+	if !resp.Success {
+		t.Fatal("expected success response")
+	}
+	if !resp.Data.Favorites.Enabled {
+		t.Fatal("expected favorites to remain enabled in persisted settings")
+	}
+	if resp.Data.Favorites.RuntimeAvailable {
+		t.Fatal("expected favorites runtime_available to report false when store initialization fails")
 	}
 }
 
@@ -4273,11 +4556,12 @@ func TestServer_PathTraversal(t *testing.T) {
 	server, _, _ := setupTestServer(t)
 
 	tests := []struct {
-		name string
-		path string
+		name       string
+		path       string
+		wantStatus int
 	}{
-		{"DotDot", "/api/v1/files/../../../etc/passwd"},
-		{"EncodedDotDot", "/api/v1/files/..%2F..%2Fetc/passwd"},
+		{"DotDot", "/api/v1/files/../../../etc/passwd", 0},
+		{"EncodedDotDot", "/api/v1/files/..%2F..%2Fetc/passwd", http.StatusNotFound},
 	}
 
 	for _, tt := range tests {
@@ -4286,6 +4570,19 @@ func TestServer_PathTraversal(t *testing.T) {
 			w := httptest.NewRecorder()
 
 			server.Router().ServeHTTP(w, req)
+
+			if tt.wantStatus != 0 {
+				if w.Code != tt.wantStatus {
+					t.Fatalf("path traversal status = %d, want %d", w.Code, tt.wantStatus)
+				}
+				if w.Code == http.StatusBadRequest {
+					body := w.Body.String()
+					if strings.Contains(strings.ToLower(body), "traversal") || strings.Contains(body, "..") {
+						t.Fatalf("expected sanitized invalid path error, got %s", body)
+					}
+				}
+				return
+			}
 
 			if w.Code != http.StatusBadRequest && w.Code != http.StatusNotFound {
 				t.Errorf("Path traversal should be blocked, got status %d", w.Code)
@@ -4403,6 +4700,60 @@ func TestValidatePath(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("validatePath(%q) = %q, want %q", tt.input, got, tt.want)
 		}
+	}
+}
+
+func TestReadFavoriteBodyPath_PreservesWhitespaceInPath(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/favorites", strings.NewReader(`{"path":"/docs/report.pdf "}`))
+	req.Header.Set("Content-Type", "application/json")
+
+	cleanPath, err := readFavoriteBodyPath(req)
+	if err != nil {
+		t.Fatalf("readFavoriteBodyPath() error: %v", err)
+	}
+	if cleanPath != "/docs/report.pdf " {
+		t.Fatalf("expected whitespace-preserving path, got %q", cleanPath)
+	}
+}
+
+func TestReadFavoriteBatchPaths_PreservesWhitespaceInPaths(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/favorites/check-batch", strings.NewReader(`{"paths":["/docs/report.pdf ","/docs/report.pdf"]}`))
+	req.Header.Set("Content-Type", "application/json")
+
+	cleanPaths, err := readFavoriteBatchPaths(req)
+	if err != nil {
+		t.Fatalf("readFavoriteBatchPaths() error: %v", err)
+	}
+	if len(cleanPaths) != 2 {
+		t.Fatalf("expected two preserved paths, got %+v", cleanPaths)
+	}
+	if cleanPaths[0] != "/docs/report.pdf " || cleanPaths[1] != "/docs/report.pdf" {
+		t.Fatalf("expected preserved batch paths, got %+v", cleanPaths)
+	}
+}
+
+func TestReadFavoriteQueryPath_PreservesWhitespaceInPath(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/favorites/check?path=%2Fdocs%2Freport.pdf%20", nil)
+
+	cleanPath, err := readFavoriteQueryPath(req)
+	if err != nil {
+		t.Fatalf("readFavoriteQueryPath() error: %v", err)
+	}
+	if cleanPath != "/docs/report.pdf " {
+		t.Fatalf("expected whitespace-preserving query path, got %q", cleanPath)
+	}
+}
+
+func TestReadFavoriteRoutePath_PreservesWhitespaceInPath(t *testing.T) {
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/favorites/docs/report.pdf", nil)
+	req.URL.Path = "/api/v1/favorites/docs/report.pdf "
+
+	cleanPath, err := readFavoriteRoutePath(req)
+	if err != nil {
+		t.Fatalf("readFavoriteRoutePath() error: %v", err)
+	}
+	if cleanPath != "/docs/report.pdf " {
+		t.Fatalf("expected whitespace-preserving route path, got %q", cleanPath)
 	}
 }
 
@@ -4842,7 +5193,7 @@ func TestServer_MoveFile_RollsBackWhenFavoritePathSyncFails(t *testing.T) {
 
 func TestServer_MoveFile_RollbackDoesNotMoveUnrelatedDestinationSharesWhenFavoriteSyncFails(t *testing.T) {
 	if os.PathSeparator == '\\' {
-		t.Skip("symlink-backed save failure test requires unix-like symlink behavior")
+		t.Skip("permission-backed save failure test requires unix-like directory permission semantics")
 	}
 
 	server, fs, tmpDir := setupTestServer(t)
@@ -4862,7 +5213,11 @@ func TestServer_MoveFile_RollbackDoesNotMoveUnrelatedDestinationSharesWhenFavori
 	}
 
 	shareFilePath := filepath.Join(tmpDir, "move-share-rollback-unrelated.json")
-	favoritesFilePath := filepath.Join(tmpDir, "move-favorites-rollback-unrelated.json")
+	favoritesDir := filepath.Join(tmpDir, "move-favorites-rollback-unrelated")
+	if err := os.MkdirAll(favoritesDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(favoritesDir) error: %v", err)
+	}
+	favoritesFilePath := filepath.Join(favoritesDir, "favorites.json")
 
 	shareStore, err := share.NewShareStore(shareFilePath)
 	if err != nil {
@@ -4888,12 +5243,12 @@ func TestServer_MoveFile_RollbackDoesNotMoveUnrelatedDestinationSharesWhenFavori
 	server.shareStore = shareStore
 	server.favoritesStore = favoritesStore
 
-	if err := os.Remove(favoritesFilePath); err != nil && !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("Remove(favorites file) error: %v", err)
+	if err := os.Chmod(favoritesDir, 0o500); err != nil {
+		t.Fatalf("Chmod(favoritesDir) error: %v", err)
 	}
-	if err := os.Symlink(filepath.Join(tmpDir, "favorites-move-save-target"), favoritesFilePath); err != nil {
-		t.Fatalf("Symlink(favorites file) error: %v", err)
-	}
+	defer func() {
+		_ = os.Chmod(favoritesDir, 0o755)
+	}()
 
 	body := `{"from":"/docs/report.txt","to":"/archive/docs/report.txt"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/files-move", strings.NewReader(body))
@@ -5486,6 +5841,22 @@ func TestServer_CreateDirectory_ReturnsConflictWhenPathIsExistingFile(t *testing
 	}
 }
 
+func TestServer_CreateDirectory_RejectsRootPath(t *testing.T) {
+	server, _, _ := setupTestServer(t)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/directories/", nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("create directory root path status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+	if !strings.Contains(w.Body.String(), "invalid path") {
+		t.Fatalf("expected invalid path response, got %s", w.Body.String())
+	}
+}
+
 func TestServer_RestoreFromTrash_InvalidPathIsSanitized(t *testing.T) {
 	server, _, _ := setupTestServer(t)
 
@@ -5791,16 +6162,154 @@ func TestServer_Trash_Restore_RestoresLinkedSharesAndFavorites(t *testing.T) {
 	}
 }
 
+func TestServer_Trash_Restore_PreservesUpdatedShareMetadata(t *testing.T) {
+	server, fs, tmpDir := setupTestServer(t)
+	ctx := context.Background()
+
+	shareStore, err := share.NewShareStore(filepath.Join(tmpDir, "trash-restore-preserve-share.json"))
+	if err != nil {
+		t.Fatalf("NewShareStore() error: %v", err)
+	}
+	server.shareStore = shareStore
+
+	if err := fs.Mkdir(ctx, "/trash-restore-preserve-share"); err != nil {
+		t.Fatalf("Mkdir() error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/trash-restore-preserve-share/report.txt", bytes.NewReader([]byte("restore me"))); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+	createdShare, err := shareStore.Create(share.CreateShareOptions{
+		Path:        "/trash-restore-preserve-share/report.txt",
+		Type:        share.ShareTypeFile,
+		CreatedBy:   "tester",
+		Description: "original",
+	})
+	if err != nil {
+		t.Fatalf("CreateShare() error: %v", err)
+	}
+
+	deleteReq := httptest.NewRequest(http.MethodDelete, "/api/v1/files/trash-restore-preserve-share/report.txt", nil)
+	deleteRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(deleteRec, deleteReq)
+	if deleteRec.Code != http.StatusOK {
+		t.Fatalf("Delete status = %d, want %d, body: %s", deleteRec.Code, http.StatusOK, deleteRec.Body.String())
+	}
+
+	if err := shareStore.Update(createdShare.ID, func(updated *share.Share) error {
+		updated.Description = "newer"
+		return nil
+	}); err != nil {
+		t.Fatalf("UpdateShare() error: %v", err)
+	}
+
+	items, err := fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash() error: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected one trash item, got %d", len(items))
+	}
+
+	restoreReq := httptest.NewRequest(http.MethodPost, "/api/v1/trash/"+items[0].ID+"/restore", nil)
+	restoreRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(restoreRec, restoreReq)
+	if restoreRec.Code != http.StatusOK {
+		t.Fatalf("RestoreFromTrash status = %d, want %d, body: %s", restoreRec.Code, http.StatusOK, restoreRec.Body.String())
+	}
+
+	restoredShare, err := shareStore.Get(createdShare.ID)
+	if err != nil {
+		t.Fatalf("Get(restored share) error: %v", err)
+	}
+	if !restoredShare.Enabled {
+		t.Fatal("expected share to be re-enabled after restore")
+	}
+	if restoredShare.Description != "newer" {
+		t.Fatalf("expected restore to preserve newer share description, got %q", restoredShare.Description)
+	}
+	if restoredShare.Path != "/trash-restore-preserve-share/report.txt" {
+		t.Fatalf("expected restored share path %q, got %q", "/trash-restore-preserve-share/report.txt", restoredShare.Path)
+	}
+}
+
+func TestServer_RollbackDeletedPathShareRestoreState_PreservesNewerMetadata(t *testing.T) {
+	server, _, tmpDir := setupTestServer(t)
+
+	shareStore, err := share.NewShareStore(filepath.Join(tmpDir, "trash-restore-rollback-preserve-share.json"))
+	if err != nil {
+		t.Fatalf("NewShareStore() error: %v", err)
+	}
+	server.shareStore = shareStore
+
+	createdShare, err := shareStore.Create(share.CreateShareOptions{
+		Path:        "/trash-restore-rollback-preserve/report.txt",
+		Type:        share.ShareTypeFile,
+		CreatedBy:   "tester",
+		Description: "original",
+	})
+	if err != nil {
+		t.Fatalf("CreateShare() error: %v", err)
+	}
+
+	disabledShares, err := shareStore.DisableSharesUnderPathWithRestore("/trash-restore-rollback-preserve/report.txt")
+	if err != nil {
+		t.Fatalf("DisableSharesUnderPathWithRestore() error: %v", err)
+	}
+	if len(disabledShares) != 1 {
+		t.Fatalf("expected one disabled share, got %d", len(disabledShares))
+	}
+
+	restoredShareState := *disabledShares[0]
+	restoredShareState.Path = "/restored/report.txt"
+
+	snapshot, err := server.snapshotDeletedPathShareRestoreState([]*share.Share{&restoredShareState})
+	if err != nil {
+		t.Fatalf("snapshotDeletedPathShareRestoreState() error: %v", err)
+	}
+
+	if err := shareStore.RestoreShares([]*share.Share{&restoredShareState}); err != nil {
+		t.Fatalf("RestoreShares() error: %v", err)
+	}
+	if err := shareStore.Update(createdShare.ID, func(updated *share.Share) error {
+		updated.Description = "newer"
+		return nil
+	}); err != nil {
+		t.Fatalf("UpdateShare() error: %v", err)
+	}
+
+	if err := server.rollbackDeletedPathShareRestoreState(snapshot); err != nil {
+		t.Fatalf("rollbackDeletedPathShareRestoreState() error: %v", err)
+	}
+
+	rolledBackShare, err := shareStore.Get(createdShare.ID)
+	if err != nil {
+		t.Fatalf("Get(rolledBackShare) error: %v", err)
+	}
+	if rolledBackShare.Path != "/trash-restore-rollback-preserve/report.txt" {
+		t.Fatalf("expected rolled back share path %q, got %q", "/trash-restore-rollback-preserve/report.txt", rolledBackShare.Path)
+	}
+	if rolledBackShare.Enabled {
+		t.Fatal("expected rolled back share to return to disabled state")
+	}
+	if rolledBackShare.Description != "newer" {
+		t.Fatalf("expected rollback to preserve newer share description, got %q", rolledBackShare.Description)
+	}
+}
+
 func TestServer_Trash_Restore_RollsBackLinkedSharesWhenFavoriteRestoreFails(t *testing.T) {
 	if os.PathSeparator == '\\' {
-		t.Skip("symlink-backed save failure test requires unix-like symlink behavior")
+		t.Skip("permission-backed save failure test requires unix-like directory permission semantics")
 	}
 
 	server, fs, tmpDir := setupTestServer(t)
 	ctx := context.Background()
 
 	shareFilePath := filepath.Join(tmpDir, "trash-restore-rollback-shares.json")
-	favoritesFilePath := filepath.Join(tmpDir, "trash-restore-rollback-favorites.json")
+	favoritesDir := filepath.Join(tmpDir, "trash-restore-rollback-favorites")
+	if err := os.MkdirAll(favoritesDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(favoritesDir) error: %v", err)
+	}
+	favoritesFilePath := filepath.Join(favoritesDir, "favorites.json")
 
 	shareStore, err := share.NewShareStore(shareFilePath)
 	if err != nil {
@@ -5846,12 +6355,12 @@ func TestServer_Trash_Restore_RollsBackLinkedSharesWhenFavoriteRestoreFails(t *t
 		t.Fatalf("expected one trash item, got %d", len(items))
 	}
 
-	if err := os.Remove(favoritesFilePath); err != nil && !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("Remove(favorites file) error: %v", err)
+	if err := os.Chmod(favoritesDir, 0o500); err != nil {
+		t.Fatalf("Chmod(favoritesDir) error: %v", err)
 	}
-	if err := os.Symlink(filepath.Join(tmpDir, "favorites-save-target"), favoritesFilePath); err != nil {
-		t.Fatalf("Symlink(favorites file) error: %v", err)
-	}
+	defer func() {
+		_ = os.Chmod(favoritesDir, 0o755)
+	}()
 
 	restoreReq := httptest.NewRequest(http.MethodPost, "/api/v1/trash/"+items[0].ID+"/restore", nil)
 	restoreRec := httptest.NewRecorder()
@@ -6277,31 +6786,36 @@ func TestServer_Trash_EmptyPartialSuccessPreservesCleanupWarning(t *testing.T) {
 	server, fs, _ := setupTestServer(t)
 	ctx := context.Background()
 
-	if err := fs.WriteFile(ctx, "/trash-empty-mixed-plain.txt", bytes.NewReader([]byte("plain"))); err != nil {
-		t.Fatalf("WriteFile(plain) error: %v", err)
+	if err := fs.WriteFile(ctx, "/trash-empty-mixed-a.txt", bytes.NewReader([]byte("a-v1"))); err != nil {
+		t.Fatalf("WriteFile(mixed a v1) error: %v", err)
 	}
-	if err := fs.WriteFile(ctx, "/trash-empty-mixed-versioned.md", bytes.NewReader([]byte("v1"))); err != nil {
-		t.Fatalf("WriteFile(versioned v1) error: %v", err)
+	if err := fs.WriteFile(ctx, "/trash-empty-mixed-a.txt", bytes.NewReader([]byte("a-v2"))); err != nil {
+		t.Fatalf("WriteFile(mixed a v2) error: %v", err)
 	}
-	if err := fs.WriteFile(ctx, "/trash-empty-mixed-versioned.md", bytes.NewReader([]byte("v2"))); err != nil {
-		t.Fatalf("WriteFile(versioned v2) error: %v", err)
+	if err := fs.WriteFile(ctx, "/trash-empty-mixed-b.md", bytes.NewReader([]byte("b-v1"))); err != nil {
+		t.Fatalf("WriteFile(mixed b v1) error: %v", err)
 	}
-	if err := fs.Delete(ctx, "/trash-empty-mixed-plain.txt"); err != nil {
-		t.Fatalf("Delete(plain) error: %v", err)
+	if err := fs.WriteFile(ctx, "/trash-empty-mixed-b.md", bytes.NewReader([]byte("b-v2"))); err != nil {
+		t.Fatalf("WriteFile(mixed b v2) error: %v", err)
 	}
-	if err := fs.Delete(ctx, "/trash-empty-mixed-versioned.md"); err != nil {
-		t.Fatalf("Delete(versioned) error: %v", err)
+	if err := fs.Delete(ctx, "/trash-empty-mixed-a.txt"); err != nil {
+		t.Fatalf("Delete(mixed a) error: %v", err)
+	}
+	if err := fs.Delete(ctx, "/trash-empty-mixed-b.md"); err != nil {
+		t.Fatalf("Delete(mixed b) error: %v", err)
 	}
 
-	removeCalls := 0
+	cleanupWarningTriggered := false
+	hardFailureInjected := false
 	setStorageHook(t, fs, "removeTrashPath", func(path string) error {
-		removeCalls++
-		if removeCalls == 2 {
+		if cleanupWarningTriggered && !hardFailureInjected {
+			hardFailureInjected = true
 			return errors.New("trash delete failed")
 		}
 		return os.RemoveAll(path)
 	})
 	setStorageHook(t, fs, "deleteVersionObject", func(ctx context.Context, hash string) error {
+		cleanupWarningTriggered = true
 		return errors.New("delete object failed")
 	})
 
@@ -6453,19 +6967,16 @@ func TestServer_Scrub_SaveCompletedResultFailureReturnsWarning(t *testing.T) {
 	callCount := 0
 	saveScrubResult = func(store *maintenance.HistoryStore, result *maintenance.ScrubResult) error {
 		callCount++
-		if callCount == 2 {
-			if chmodErr := os.Chmod(maintRoot, 0500); chmodErr != nil {
-				return chmodErr
+		if callCount == 1 {
+			if err := originalSaveScrubResult(store, result); err != nil {
+				return err
 			}
-			defer func() {
-				_ = os.Chmod(maintRoot, 0700)
-			}()
+			return errors.New("forced scrub result persistence failure")
 		}
 		return originalSaveScrubResult(store, result)
 	}
 	defer func() {
 		saveScrubResult = originalSaveScrubResult
-		_ = os.Chmod(maintRoot, 0700)
 	}()
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/maintenance/scrub", nil)
@@ -6479,8 +6990,8 @@ func TestServer_Scrub_SaveCompletedResultFailureReturnsWarning(t *testing.T) {
 	if got := w.Header().Get("Warning"); got != scrubResultPersistenceWarningHeader {
 		t.Fatalf("warning header = %q, want %q", got, scrubResultPersistenceWarningHeader)
 	}
-	if callCount != 2 {
-		t.Fatalf("expected saveScrubResult to be called twice, got %d", callCount)
+	if callCount != 1 {
+		t.Fatalf("expected saveScrubResult to be called once for completed scrub, got %d", callCount)
 	}
 
 	var payload struct {
@@ -7555,6 +8066,36 @@ func TestServer_CreateShare_RejectsPathOutsideHomeForNonAdmin(t *testing.T) {
 	}
 }
 
+func TestServer_CreateShare_RejectsUnknownFieldsBeforeHomeScopeCheck(t *testing.T) {
+	server, fs, _, username, password := setupAuthServerWithFeatures(t, true, false)
+
+	ctx := context.Background()
+	if err := fs.Mkdir(ctx, "/tester"); err != nil {
+		t.Fatalf("Mkdir(/tester) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/other"); err != nil {
+		t.Fatalf("Mkdir(/other) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/other/secret.txt", bytes.NewReader([]byte("secret"))); err != nil {
+		t.Fatalf("WriteFile(/other/secret.txt) error: %v", err)
+	}
+
+	token := loginAndGetAccessToken(t, server, username, password)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/shares", strings.NewReader(`{"path":"/other/secret.txt","type":"file","unexpected":true}`))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("share create with unknown fields status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+	if !strings.Contains(w.Body.String(), "INVALID_REQUEST") {
+		t.Fatalf("expected invalid request response, got %s", w.Body.String())
+	}
+}
+
 func TestServer_CreateShare_RejectsOversizedRequestBody(t *testing.T) {
 	server, _, _, username, password := setupAuthServerWithFeatures(t, true, false)
 	token := loginAndGetAccessToken(t, server, username, password)
@@ -8103,7 +8644,7 @@ func TestServer_ListShares_FiltersResultsByHomeDirForNonAdmin(t *testing.T) {
 	}
 }
 
-func TestServer_ListShares_InvalidUserHomeDirReturnsForbidden(t *testing.T) {
+func TestServer_ListShares_InvalidUserHomeDirReturnsEmptyList(t *testing.T) {
 	server, _, _, username, password := setupAuthServerWithFeatures(t, true, false)
 	setUserHomeDirForTest(t, server, username, "../escape")
 
@@ -8114,8 +8655,18 @@ func TestServer_ListShares_InvalidUserHomeDirReturnsForbidden(t *testing.T) {
 	w := httptest.NewRecorder()
 	server.Router().ServeHTTP(w, req)
 
-	if w.Code != http.StatusForbidden {
-		t.Fatalf("list shares with invalid home_dir status = %d, want %d", w.Code, http.StatusForbidden)
+	if w.Code != http.StatusOK {
+		t.Fatalf("list shares with isolated home scope status = %d, want %d", w.Code, http.StatusOK)
+	}
+
+	var payload struct {
+		Data []map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to parse list shares response: %v", err)
+	}
+	if len(payload.Data) != 0 {
+		t.Fatalf("expected empty share list for isolated home scope, got %s", w.Body.String())
 	}
 }
 
@@ -8174,6 +8725,25 @@ func TestServer_CheckFavorite_RejectsPathOutsideHomeForNonAdmin(t *testing.T) {
 	}
 }
 
+func TestServer_AddFavorite_RejectsUnknownFieldsBeforeHomeScopeCheck(t *testing.T) {
+	server, _, _, username, password := setupAuthServerWithFeatures(t, false, true)
+
+	token := loginAndGetAccessToken(t, server, username, password)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/favorites", strings.NewReader(`{"path":"/other/secret.txt","note":"x","extra":true}`))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("add favorite with unknown fields status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+	if !strings.Contains(w.Body.String(), "INVALID_REQUEST") {
+		t.Fatalf("expected invalid request response, got %s", w.Body.String())
+	}
+}
+
 func TestServer_CheckFavorites_RejectsPathOutsideHomeForNonAdmin(t *testing.T) {
 	server, _, _, username, password := setupAuthServerWithFeatures(t, false, true)
 
@@ -8210,6 +8780,25 @@ func TestServer_CheckFavorites_RejectsPathOutsideHomeForNonAdmin(t *testing.T) {
 	}
 	if !strings.Contains(allowedRec.Body.String(), `"/tester/own.txt":true`) {
 		t.Fatalf("expected own home favorite batch result, got %s", allowedRec.Body.String())
+	}
+}
+
+func TestServer_CheckFavorites_RejectsUnknownFieldsBeforeHomeScopeCheck(t *testing.T) {
+	server, _, _, username, password := setupAuthServerWithFeatures(t, false, true)
+
+	token := loginAndGetAccessToken(t, server, username, password)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/favorites/check-batch", strings.NewReader(`{"paths":["/other/secret.txt"],"extra":true}`))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("check favorites with unknown fields status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+	if !strings.Contains(w.Body.String(), "INVALID_REQUEST") {
+		t.Fatalf("expected invalid request response, got %s", w.Body.String())
 	}
 }
 
@@ -8366,7 +8955,7 @@ func TestServer_UpdateFavoriteNote_RejectsPathOutsideHomeForNonAdmin(t *testing.
 	}
 }
 
-func TestServer_ListFavorites_InvalidUserHomeDirReturnsForbidden(t *testing.T) {
+func TestServer_ListFavorites_InvalidUserHomeDirReturnsEmptyList(t *testing.T) {
 	server, _, _, username, password := setupAuthServerWithFeatures(t, false, true)
 	setUserHomeDirForTest(t, server, username, "../escape")
 
@@ -8377,8 +8966,21 @@ func TestServer_ListFavorites_InvalidUserHomeDirReturnsForbidden(t *testing.T) {
 	w := httptest.NewRecorder()
 	server.Router().ServeHTTP(w, req)
 
-	if w.Code != http.StatusForbidden {
-		t.Fatalf("list favorites with invalid home_dir status = %d, want %d", w.Code, http.StatusForbidden)
+	if w.Code != http.StatusOK {
+		t.Fatalf("list favorites with isolated home scope status = %d, want %d", w.Code, http.StatusOK)
+	}
+
+	var payload struct {
+		Data struct {
+			Favorites []map[string]any `json:"favorites"`
+			Count     int              `json:"count"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to parse list favorites response: %v", err)
+	}
+	if payload.Data.Count != 0 || len(payload.Data.Favorites) != 0 {
+		t.Fatalf("expected empty favorites list for isolated home scope, got %s", w.Body.String())
 	}
 }
 
@@ -8397,6 +8999,24 @@ func TestServer_AddFavorite_TraversalPathReturnsBadRequest(t *testing.T) {
 	}
 	if !strings.Contains(w.Body.String(), "invalid path") {
 		t.Fatalf("expected invalid path response, got %s", w.Body.String())
+	}
+}
+
+func TestServer_AddFavorite_RootLikePathReturnsBadRequestForScopedUser(t *testing.T) {
+	server, _, _, username, password := setupAuthServerWithFeatures(t, false, true)
+	token := loginAndGetAccessToken(t, server, username, password)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/favorites", strings.NewReader(`{"path":"."}`))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("add favorite root-like path status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+	if !strings.Contains(w.Body.String(), "path is required") {
+		t.Fatalf("expected missing path response, got %s", w.Body.String())
 	}
 }
 
@@ -8618,6 +9238,51 @@ func TestServer_WebDAVCredentials_GeneratedPasswordUnavailableReturnsServiceUnav
 	}
 }
 
+func TestServer_GetSettings_ReportsWebDAVRuntimeDisabledWhenGeneratedPasswordUnavailable(t *testing.T) {
+	server, _, tmpDir := setupTestServer(t)
+	server.config.Storage.Root = filepath.Join(tmpDir, "missing-secrets")
+	server.config.WebDAV.Enabled = true
+	server.config.WebDAV.AuthType = "basic"
+	server.config.WebDAV.Username = "webdav-user"
+	server.config.WebDAV.Password = ""
+	server.activeWebDAV = WebDAVRuntimeConfig{
+		Enabled:  false,
+		Prefix:   "/dav",
+		AuthType: "basic",
+		Username: "webdav-user",
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/settings", nil)
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("get settings status = %d, want %d", w.Code, http.StatusOK)
+	}
+
+	var resp struct {
+		Success bool `json:"success"`
+		Data    struct {
+			WebDAV struct {
+				Enabled        bool `json:"enabled"`
+				RuntimeEnabled bool `json:"runtime_enabled"`
+			} `json:"webdav"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode settings response error: %v", err)
+	}
+	if !resp.Success {
+		t.Fatal("expected success response")
+	}
+	if !resp.Data.WebDAV.Enabled {
+		t.Fatal("expected persisted WebDAV enabled flag to remain true")
+	}
+	if resp.Data.WebDAV.RuntimeEnabled {
+		t.Fatal("expected runtime_enabled to report false when generated credentials are unavailable")
+	}
+}
+
 func TestServer_WebDAVCredentials_UpdatesRunningConfigAfterSettingsUpdate(t *testing.T) {
 	server, _, tmpDir := setupTestServer(t)
 	server.configPath = path.Join(tmpDir, "config.toml")
@@ -8764,6 +9429,15 @@ func TestServer_UpdateSettings_UpdatesTrustedProxyHops(t *testing.T) {
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("update settings status = %d, want %d: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+	var resp struct {
+		Message string `json:"message"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode update settings trusted proxy response: %v", err)
+	}
+	if resp.Message != "settings updated" {
+		t.Fatalf("expected hot-applied settings message, got %q", resp.Message)
 	}
 	if server.config.Server.TrustedProxyHops != 2 {
 		t.Fatalf("trusted proxy hops = %d, want %d", server.config.Server.TrustedProxyHops, 2)
@@ -9588,6 +10262,15 @@ func TestServer_UpdateSettings_UpdatesServerTimeouts(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("update settings server timeouts status = %d, want %d", w.Code, http.StatusOK)
 	}
+	var resp struct {
+		Message string `json:"message"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode update settings server timeouts response: %v", err)
+	}
+	if resp.Message != "settings updated, some changes may require restart" {
+		t.Fatalf("expected restart warning message, got %q", resp.Message)
+	}
 	if server.config.Server.ReadTimeout != 45*time.Second {
 		t.Fatalf("expected read timeout 45s, got %s", server.config.Server.ReadTimeout)
 	}
@@ -9770,7 +10453,7 @@ func TestServer_UpdateSettings_UpdatesVersioningConfig(t *testing.T) {
 	server, _, tmpDir := setupTestServer(t)
 	server.configPath = path.Join(tmpDir, "config.toml")
 
-	body := `{"versioning":{"auto_versioned_extensions":[".md"," .txt ",""],"auto_versioned_filenames":["README"," Dockerfile ",""],"max_versioned_size":209715200}}`
+	body := `{"versioning":{"auto_versioned_extensions":[".MD"," .TXT ",""],"auto_versioned_filenames":["README"," Dockerfile ",""],"max_versioned_size":209715200}}`
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/settings", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -9795,7 +10478,7 @@ func TestServer_UpdateSettings_UpdatesRunningVersioningPolicy(t *testing.T) {
 	server, fs, tmpDir := setupTestServer(t)
 	server.configPath = path.Join(tmpDir, "config.toml")
 
-	body := `{"versioning":{"auto_versioned_extensions":[".md"," .txt ",""],"auto_versioned_filenames":["README"," Dockerfile ",""],"max_versioned_size":209715200}}`
+	body := `{"versioning":{"auto_versioned_extensions":[".MD"," .TXT ",""],"auto_versioned_filenames":["README"," Dockerfile ",""],"max_versioned_size":209715200}}`
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/settings", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -10230,7 +10913,7 @@ func TestServer_ListActivity_NonAdminFiltersOutsideHomeDirEntries(t *testing.T) 
 	}
 }
 
-func TestServer_ListActivity_InvalidUserHomeDirReturnsForbidden(t *testing.T) {
+func TestServer_ListActivity_InvalidUserHomeDirReturnsEmptyList(t *testing.T) {
 	server, _, _, username, password := setupAuthServer(t)
 	setUserHomeDirForTest(t, server, username, "../escape")
 
@@ -10240,8 +10923,24 @@ func TestServer_ListActivity_InvalidUserHomeDirReturnsForbidden(t *testing.T) {
 	w := httptest.NewRecorder()
 	server.Router().ServeHTTP(w, req)
 
-	if w.Code != http.StatusForbidden {
-		t.Fatalf("list activity with invalid home_dir status = %d, want %d", w.Code, http.StatusForbidden)
+	if w.Code != http.StatusOK {
+		t.Fatalf("list activity with isolated home scope status = %d, want %d", w.Code, http.StatusOK)
+	}
+
+	var payload struct {
+		Data struct {
+			Items []activity.Entry `json:"items"`
+			Total int              `json:"total"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to parse list activity response: %v", err)
+	}
+	if payload.Data.Total != 1 || len(payload.Data.Items) != 1 {
+		t.Fatalf("expected only the login activity to remain visible for isolated home scope, got %s", w.Body.String())
+	}
+	if payload.Data.Items[0].Action != activity.ActionLogin || payload.Data.Items[0].Path != "" {
+		t.Fatalf("expected only the pathless login activity, got %+v", payload.Data.Items[0])
 	}
 }
 
@@ -10351,7 +11050,7 @@ func TestServer_ActivityStats_NonAdminFiltersOutsideHomeDirEntries(t *testing.T)
 	}
 }
 
-func TestServer_ActivityStats_InvalidUserHomeDirReturnsForbidden(t *testing.T) {
+func TestServer_ActivityStats_InvalidUserHomeDirReturnsZeroStats(t *testing.T) {
 	server, _, _, username, password := setupAuthServer(t)
 	setUserHomeDirForTest(t, server, username, "../escape")
 
@@ -10361,8 +11060,29 @@ func TestServer_ActivityStats_InvalidUserHomeDirReturnsForbidden(t *testing.T) {
 	w := httptest.NewRecorder()
 	server.Router().ServeHTTP(w, req)
 
-	if w.Code != http.StatusForbidden {
-		t.Fatalf("activity stats with invalid home_dir status = %d, want %d", w.Code, http.StatusForbidden)
+	if w.Code != http.StatusOK {
+		t.Fatalf("activity stats with isolated home scope status = %d, want %d", w.Code, http.StatusOK)
+	}
+
+	var payload struct {
+		Data struct {
+			Total    int            `json:"total"`
+			Today    int            `json:"today"`
+			ByUser   map[string]int `json:"by_user"`
+			ByAction map[string]int `json:"by_action"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to parse activity stats response: %v", err)
+	}
+	if payload.Data.Total != 1 || payload.Data.Today != 1 {
+		t.Fatalf("expected isolated home scope stats to retain only the login activity, got %s", w.Body.String())
+	}
+	if payload.Data.ByUser[username] != 1 || len(payload.Data.ByUser) != 1 {
+		t.Fatalf("expected only the requesting user's login count, got %s", w.Body.String())
+	}
+	if payload.Data.ByAction[string(activity.ActionLogin)] != 1 || len(payload.Data.ByAction) != 1 {
+		t.Fatalf("expected only the login action count, got %s", w.Body.String())
 	}
 }
 
@@ -10852,15 +11572,21 @@ func TestServer_UploadFile_ErrorCases(t *testing.T) {
 	server, fs, _ := setupTestServer(t)
 
 	t.Run("UploadToNonExistentDir", func(t *testing.T) {
+		ctx := context.Background()
 		content := "test content"
 		req := httptest.NewRequest("POST", "/api/v1/files/nonexistent-dir/file.txt", strings.NewReader(content))
 		w := httptest.NewRecorder()
 
 		server.Router().ServeHTTP(w, req)
 
-		// Should fail since parent directory doesn't exist
-		if w.Code == http.StatusCreated {
-			// If it succeeds, that's also acceptable (auto-create parent)
+		if w.Code != http.StatusCreated {
+			t.Fatalf("Upload to non-existent parent status = %d, want %d", w.Code, http.StatusCreated)
+		}
+		if _, err := fs.Stat(ctx, "/nonexistent-dir/file.txt"); err != nil {
+			t.Fatalf("expected uploaded file to exist after auto-creating parent, got %v", err)
+		}
+		if _, err := fs.Stat(ctx, "/nonexistent-dir"); err != nil {
+			t.Fatalf("expected parent directory to be created during upload, got %v", err)
 		}
 	})
 
@@ -10924,8 +11650,11 @@ func TestServer_DeleteFile_ErrorCases(t *testing.T) {
 
 		server.Router().ServeHTTP(w, req)
 
-		if w.Code != http.StatusNotFound && w.Code != http.StatusOK {
-			t.Errorf("Delete nonexistent file status = %d", w.Code)
+		if w.Code != http.StatusNotFound {
+			t.Fatalf("Delete nonexistent file status = %d, want %d", w.Code, http.StatusNotFound)
+		}
+		if !strings.Contains(w.Body.String(), "resource not found") {
+			t.Fatalf("expected sanitized not-found response, got %s", w.Body.String())
 		}
 	})
 

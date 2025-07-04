@@ -230,8 +230,10 @@ Authorization: Bearer <access_token>
 - 当请求被后端识别为 HTTPS（直连 TLS 或可信代理转发 `X-Forwarded-Proto: https`）时，cookie 带 `Secure`
 
 **失败行为**:
-- 缺少 `Authorization: Bearer ...` 头时返回 `401`，错误码 `MISSING_AUTH`
-- 认证上下文缺失或 access token 已失效时返回 `401`，错误码 `NOT_AUTHENTICATED`
+- 该路由复用通用认证 middleware；缺少认证头时返回 `401`，错误码 `MISSING_AUTH_HEADER`
+- `Authorization` 头格式非法时返回 `401`，错误码 `INVALID_AUTH_HEADER`
+- access token 已过期、已吊销或无效时分别返回 `401`，错误码 `TOKEN_EXPIRED`、`TOKEN_REVOKED`、`INVALID_TOKEN`
+- token 对应用户不存在或已被禁用时分别返回 `401/403`，错误码 `USER_NOT_FOUND`、`USER_DISABLED`
 
 ### 修改密码
 
@@ -457,6 +459,8 @@ GET /api/v1/stats
 ### 诊断信息
 
 获取详细的系统诊断信息。
+
+**需要认证**: 当 `auth.enabled = true` 时需要管理员 JWT；未开启认证时可直接访问
 
 ```
 GET /api/v1/diagnostics
@@ -1485,6 +1489,7 @@ GET /api/v1/settings
     },
     "webdav": {
       "enabled": true,
+      "runtime_enabled": true,
       "prefix": "/dav",
       "read_only": false,
       "auth_type": "basic",
@@ -1495,7 +1500,8 @@ GET /api/v1/settings
       "base_url": ""
     },
     "favorites": {
-      "enabled": true
+      "enabled": true,
+      "runtime_available": true
     },
     "trash": {
       "enabled": true,
@@ -1526,6 +1532,9 @@ GET /api/v1/settings
   }
 }
 ```
+
+- `webdav.runtime_enabled` 表示当前进程中的 WebDAV 服务是否处于运行状态；当 `webdav.enabled = true` 但自动生成凭据不可用时，该值为 `false`
+- `favorites.runtime_available` 表示当前进程中的收藏接口是否可用；当 `favorites.enabled = true` 但收藏存储初始化失败或运行态依赖缺失时，该值为 `false`
 
 ### 更新设置
 
@@ -1608,11 +1617,12 @@ PUT /api/v1/settings
 ```json
 {
   "success": true,
-  "message": "settings updated, some changes may require restart"
+  "message": "settings updated"
 }
 ```
 
 **失败行为**:
+- 成功响应的 `message` 在仅包含热更新字段时为 `settings updated`；当请求涉及 `server.host`、`server.port`、`server.read_timeout`、`server.write_timeout`、`server.idle_timeout`、`server.tls.*` 或 `cdc.*` 时为 `settings updated, some changes may require restart`
 - `trash` 支持更新 `enabled`、`retention_days`、`max_size`；保存后会立即影响运行中的回收站策略
 - `retention` 支持更新 `max_versions`、`max_age`、`min_free_space`、`gc_interval`；保存后会立即更新运行中的版本保留阈值与周期清理任务，`gc_interval` 设为 `0` 表示禁用周期清理
 - `server` 支持更新 `host`、`port`、`read_timeout`、`write_timeout`、`idle_timeout`；保存后需重启服务才能影响运行中的 HTTP 监听器
@@ -1629,7 +1639,7 @@ PUT /api/v1/settings
 - 请求中的 `server.read_timeout`、`server.write_timeout`、`server.idle_timeout` 必须是正的 `time.ParseDuration` 字符串，例如 `30s`、`2m`
 - 请求中的 `retention.max_age`、`retention.gc_interval` 必须是 `time.ParseDuration` 可解析的字符串，例如 `720h`、`24h`、`0`
 - 请求中的 `alerts.check_interval`、`alerts.cooldown_period` 必须是正的 `time.ParseDuration` 字符串
-- 请求中的 `alerts.webhook_method` 仅支持 `GET` 或 `POST`，`alerts.webhook_headers` 每项必须是 `Key:Value` 格式
+- 请求中的 `alerts.webhook_method` 仅支持 `GET` 或 `POST`；`POST` 发送 JSON body，`GET` 将告警字段编码到 URL query。`alerts.webhook_headers` 每项必须是 `Key:Value` 格式
 - 请求中的 `dataplane.timeout` 必须是正的 `time.ParseDuration` 字符串，`dataplane.max_retries` 必须是 `0` 或正整数
 - 配置校验失败时返回 `400 Bad Request` 和稳定错误消息 `invalid configuration`
 - 非法设置请求不会修改进程内当前生效配置
@@ -1847,6 +1857,8 @@ POST /api/v1/maintenance/gc
 ### 导出诊断信息
 
 下载完整的诊断信息包（JSON 格式）。
+
+**需要认证**: 当 `auth.enabled = true` 时需要管理员 JWT；未开启认证时可直接访问
 
 ```
 GET /api/v1/diagnostics-export

@@ -86,6 +86,42 @@ func TestNew(t *testing.T) {
 	}
 }
 
+func TestNew_RecoversFromCorruptDatabaseFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+	if err := os.WriteFile(dbPath, []byte("not a sqlite database"), 0600); err != nil {
+		t.Fatalf("WriteFile(corrupt db) error: %v", err)
+	}
+
+	store, err := New(Config{
+		DBPath:    dbPath,
+		Dataplane: dataplane.NewClient("unused"),
+	})
+	if err != nil {
+		t.Fatalf("New() with corrupt database should recover, got %v", err)
+	}
+	defer store.Close()
+
+	entries, err := os.ReadDir(tmpDir)
+	if err != nil {
+		t.Fatalf("ReadDir(tmpDir) error: %v", err)
+	}
+	foundBackup := false
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), "test.db.corrupt.") {
+			foundBackup = true
+			break
+		}
+	}
+	if !foundBackup {
+		t.Fatal("expected corrupt database backup to be created")
+	}
+
+	if _, err := store.ListTrash(context.Background()); err != nil {
+		t.Fatalf("expected recovered database to be usable, got %v", err)
+	}
+}
+
 func TestNew_RequiresDataplane(t *testing.T) {
 	tmpDir := t.TempDir()
 	_, err := New(Config{
@@ -670,6 +706,51 @@ func TestStore_AddToTrash_DefaultsNilRestoreDataToEmptyBlob(t *testing.T) {
 	}
 }
 
+func TestStore_ListTrash_OrdersItemsDeterministicallyWithinSameSecond(t *testing.T) {
+	tmpDir := t.TempDir()
+	s, err := New(Config{
+		DBPath:    filepath.Join(tmpDir, "test.db"),
+		Dataplane: dataplane.NewClient("unused"),
+	})
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	defer s.Close()
+
+	ctx := context.Background()
+	deletedAt := time.Unix(1700000000, 0)
+	olderInsert := &TrashItem{
+		ID:           "trash-older-insert",
+		OriginalPath: "/older.txt",
+		DeletedAt:    deletedAt,
+		ExpiresAt:    deletedAt.Add(time.Hour),
+	}
+	newerInsert := &TrashItem{
+		ID:           "trash-newer-insert",
+		OriginalPath: "/newer.txt",
+		DeletedAt:    deletedAt,
+		ExpiresAt:    deletedAt.Add(time.Hour),
+	}
+
+	if err := s.AddToTrash(ctx, olderInsert); err != nil {
+		t.Fatalf("AddToTrash(olderInsert) error: %v", err)
+	}
+	if err := s.AddToTrash(ctx, newerInsert); err != nil {
+		t.Fatalf("AddToTrash(newerInsert) error: %v", err)
+	}
+
+	items, err := s.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash() error: %v", err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("expected two trash items, got %d", len(items))
+	}
+	if items[0].ID != newerInsert.ID {
+		t.Fatalf("expected most recently inserted trash item %q first when deleted_at ties, got %q", newerInsert.ID, items[0].ID)
+	}
+}
+
 func TestStore_FileLock(t *testing.T) {
 	s := setupStore(t)
 	ctx := context.Background()
@@ -961,6 +1042,83 @@ func TestStore_RenamePath(t *testing.T) {
 	_, exists = s.GetVersioningOverride(ctx, "/docs/readme.md")
 	if exists {
 		t.Error("GetVersioningOverride() old path should not exist")
+	}
+}
+
+func TestStore_RenamePathHistory_PreservesTargetFileIndex(t *testing.T) {
+	s := setupStore(t)
+	ctx := context.Background()
+
+	if err := s.AddVersion(ctx, "/docs/readme.md", "hash1", 100, ""); err != nil {
+		t.Fatalf("AddVersion() error: %v", err)
+	}
+	if err := s.AddVersion(ctx, "/docs/readme.md", "hash2", 200, ""); err != nil {
+		t.Fatalf("AddVersion() error: %v", err)
+	}
+	if err := s.SetVersioningOverride(ctx, "/docs/readme.md", true); err != nil {
+		t.Fatalf("SetVersioningOverride() error: %v", err)
+	}
+	if err := s.AcquireLock(ctx, "/docs/readme.md", "writer", WriteLock, time.Hour); err != nil {
+		t.Fatalf("AcquireLock() error: %v", err)
+	}
+
+	now := time.Now().Truncate(time.Second)
+	if err := s.UpdateFileIndex(ctx, "/notes/readme.md", 300, now, "restored-hash"); err != nil {
+		t.Fatalf("UpdateFileIndex(target) error: %v", err)
+	}
+
+	if err := s.RenamePathHistory(ctx, "/docs", "/notes"); err != nil {
+		t.Fatalf("RenamePathHistory() error: %v", err)
+	}
+
+	versions, err := s.GetVersions(ctx, "/notes/readme.md")
+	if err != nil {
+		t.Fatalf("GetVersions(target) error: %v", err)
+	}
+	if len(versions) != 2 {
+		t.Fatalf("GetVersions(target) returned %d versions, want 2", len(versions))
+	}
+
+	oldVersions, err := s.GetVersions(ctx, "/docs/readme.md")
+	if err != nil {
+		t.Fatalf("GetVersions(source) error: %v", err)
+	}
+	if len(oldVersions) != 0 {
+		t.Fatalf("GetVersions(source) returned %d versions, want 0", len(oldVersions))
+	}
+
+	size, modTime, hash, err := s.GetFileIndex(ctx, "/notes/readme.md")
+	if err != nil {
+		t.Fatalf("GetFileIndex(target) error: %v", err)
+	}
+	if size != 300 {
+		t.Fatalf("GetFileIndex(target) size = %d, want 300", size)
+	}
+	if !modTime.Equal(now) {
+		t.Fatalf("GetFileIndex(target) modTime = %v, want %v", modTime, now)
+	}
+	if hash != "restored-hash" {
+		t.Fatalf("GetFileIndex(target) hash = %s, want restored-hash", hash)
+	}
+
+	enabled, exists := s.GetVersioningOverride(ctx, "/notes/readme.md")
+	if !exists || !enabled {
+		t.Fatalf("GetVersioningOverride(target) = (%v, %v), want (true, true)", enabled, exists)
+	}
+	_, exists = s.GetVersioningOverride(ctx, "/docs/readme.md")
+	if exists {
+		t.Fatal("GetVersioningOverride(source) should not exist")
+	}
+
+	lock, err := s.GetLock(ctx, "/notes/readme.md")
+	if err != nil {
+		t.Fatalf("GetLock(target) error: %v", err)
+	}
+	if lock.Holder != "writer" {
+		t.Fatalf("GetLock(target) holder = %q, want %q", lock.Holder, "writer")
+	}
+	if _, err := s.GetLock(ctx, "/docs/readme.md"); err != ErrNotFound {
+		t.Fatalf("GetLock(source) error = %v, want %v", err, ErrNotFound)
 	}
 }
 
