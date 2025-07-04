@@ -4,7 +4,35 @@
 
 ## 🔐 认证配置
 
-### Basic Auth（当前支持）
+### Web UI 管理账号
+
+默认启用 Web UI 登录认证。首次启动且没有用户数据时，系统会创建一个管理员账号，并把初始密码写入：
+
+```text
+<storage.root>/.mnemonas/initial-password.txt
+```
+
+注意：
+
+- 初始管理员密码不会长期保存在 `secrets.json`
+- setup API 不返回初始用户名或密码
+- 默认不会把初始密码明文打印到终端；只提示 `initial-password.txt` 路径。仅本地受控调试时，可在首次启动前设置 `MNEMONAS_PRINT_INITIAL_PASSWORD=1` 临时打印
+- 首次成功登录对应管理员账号后，`initial-password.txt` 会自动删除
+- 登录后应立即修改管理员密码
+
+systemd 部署默认路径：
+
+```bash
+sudo cat /srv/mnemonas/.mnemonas/initial-password.txt
+```
+
+Docker 默认路径：
+
+```bash
+cat ~/.mnemonas/.mnemonas/initial-password.txt
+```
+
+### WebDAV Basic Auth
 
 编辑 `~/.mnemonas/config.toml`：
 
@@ -19,9 +47,8 @@ password = ""  # 留空则首次启动时自动生成
 **自动生成密码**：
 
 - 首次启动时，如果 `password` 为空，系统会自动生成 16 位随机密码
-- 密码会显示在启动日志中，并保存到 `<storage_root>/secrets.json`
-- 浏览器端不会通过 setup API 或弹窗回传初始密码
-- setup API 仅返回首启状态与认证开关，不包含任何初始凭据内容
+- 该密码用于 WebDAV 客户端，不是 Web UI 管理员密码
+- 密码会保存到 `<storage_root>/secrets.json`，启动日志只提示文件路径，不输出明文密码
 - 后续启动会自动使用保存的密码
 
 **手动设置密码**（如需自定义）：
@@ -40,6 +67,9 @@ password = "your-strong-password"  # 至少 16 字符，混合大小写、数字
 ### 禁用认证（仅限本地开发）
 
 ```toml
+[auth]
+enabled = false
+
 [webdav]
 auth_type = "none"
 
@@ -47,7 +77,7 @@ auth_type = "none"
 host = "127.0.0.1"  # 仅本地访问
 ```
 
-⚠️ **警告**：禁用认证时必须将 host 设为 `127.0.0.1`，否则任何人都能访问。
+⚠️ **警告**：`auth.enabled = false` 会关闭 Web UI/API 登录；`webdav.auth_type = "none"` 会关闭 WebDAV Basic Auth。禁用任一认证时必须将 `host` 设为 `127.0.0.1`，否则任何人都能访问。
 
 ---
 
@@ -81,6 +111,8 @@ password = "your-password"
 ```bash
 # Ubuntu/Debian
 sudo ufw allow from 192.168.0.0/24 to any port 8080
+sudo ufw deny 9090/tcp comment "MnemoNAS dataplane gRPC"
+sudo ufw deny 9091/tcp comment "MnemoNAS dataplane HTTP"
 
 # CentOS/RHEL
 sudo firewall-cmd --add-rich-rule='rule family="ipv4" source address="192.168.0.0/24" port port="8080" protocol="tcp" accept' --permanent
@@ -95,7 +127,7 @@ sudo firewall-cmd --reload
 
 ## 🔒 HTTPS 配置
 
-MnemoNAS 不直接处理 TLS，推荐使用反向代理：
+MnemoNAS 支持内置 TLS 配置，但家庭和公网部署更推荐使用 Caddy/Nginx/Traefik 等反向代理统一处理 HTTPS、证书续期和上传限制。
 
 ### 方案一：Nginx + Let's Encrypt
 
@@ -153,8 +185,8 @@ Caddy 自动获取和续期 Let's Encrypt 证书。
 
 ```bash
 # 安装 cloudflared
-curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o /usr/local/bin/cloudflared
-chmod +x /usr/local/bin/cloudflared
+curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o /tmp/cloudflared
+sudo install -m 0755 /tmp/cloudflared /usr/local/bin/cloudflared
 
 # 登录并创建隧道
 cloudflared tunnel login
@@ -181,9 +213,12 @@ cloudflared tunnel run mnemonas
 
 ### 部署前检查
 
-- [ ] 已记录首次启动时显示的自动生成密码（或已设置自定义密码）
+- [ ] 已通过服务器端 `initial-password.txt` 完成首次 Web UI 登录，并已修改管理员密码
+- [ ] 已记录 WebDAV Basic Auth 凭据，或已设置自定义强密码
 - [ ] `auth_type` 不是 `none`（除非仅本地访问）
 - [ ] 如果 `host = "0.0.0.0"`，已配置防火墙
+- [ ] dataplane gRPC/HTTP 端口保持在 `127.0.0.1` 或受信私有网络内，没有直接暴露到公网
+- [ ] systemd 部署已运行 `sudo mnemonas-doctor`，并确认没有 dataplane 端口暴露或 UFW 放行警告
 - [ ] 生产环境使用 HTTPS
 
 ### 运行时检查
@@ -191,6 +226,7 @@ cloudflared tunnel run mnemonas
 ```bash
 # 检查监听端口
 ss -tlnp | grep 8080
+ss -tlnp | grep -E '9090|9091'
 
 # 检查外部可访问性（从另一台机器）
 curl http://<server-ip>:8080/health
@@ -247,6 +283,14 @@ location /api/ {
 - 内部文件预览与缩略图链路不再依赖 `auth` 查询参数
 - `Secure` 标记只会在实际 HTTPS，或显式启用 `trusted_proxy_hops > 0` 且请求直接来自 loopback / 私有网段代理并携带 `X-Forwarded-Proto=https` 时启用，避免公网请求伪造 HTTPS 语义
 
+#### Web UI 会话令牌
+
+- 当前 Web UI 的访问令牌和刷新令牌保存在浏览器 `localStorage` 中，用于 REST API 与上传请求的 `Authorization` 头
+- 服务端已设置基础安全响应头、CSP 与 `Permissions-Policy`，并且下载/预览链路使用短期 `HttpOnly` cookie，降低令牌出现在 URL 或日志里的风险
+- `localStorage` 仍然会被同源 XSS 读取；公网部署必须使用受信任的静态资源、HTTPS 反向代理和较新的浏览器，不要在同一域名下注入第三方脚本
+- 共用电脑上使用后应主动退出登录；管理员修改密码、删除或禁用用户会撤销该用户的刷新令牌
+- 长期方向是把主 Web 会话也迁移到 `HttpOnly` cookie 或同等风险更低的会话机制
+
 #### 公开分享密码验证
 
 - 受密码保护的公开分享在浏览器完成一次密码验证后，会下发同路径 `HttpOnly` cookie
@@ -256,13 +300,13 @@ location /api/ {
 - 客户端地址默认不信任转发头，始终使用直连来源；只有显式设置 `server.trusted_proxy_hops > 0` 且请求直接来自 loopback 或私有网段代理时，才按 `X-Forwarded-For` 从右侧回溯客户端地址。多跳代理部署需要设置为代理总层数
 - `Secure` cookie 标记同样只在实际 HTTPS 或受信代理转发的 HTTPS 请求上启用
 
-### 路线图
+### 安全能力状态
 
-| 版本 | 安全特性 |
+| 状态 | 安全特性 |
 | ---- | -------- |
-| v0.1.0 | Basic Auth, 路径遍历保护, 只读模式 |
-| v0.2.0 | 多用户支持, 权限控制 |
-| v0.3.0 | OAuth/OIDC 集成 |
+| 已支持 | Web UI 登录、多用户与角色、用户 home 目录隔离、WebDAV Basic Auth、路径遍历保护、WebDAV 只读模式、公开分享密码验证与失败锁定 |
+| 建议通过反向代理补充 | HTTPS 证书自动续期、按 IP/用户限速、公网访问控制 |
+| 计划中 | OAuth/OIDC 集成、更细粒度的应用层访问策略 |
 
 ---
 

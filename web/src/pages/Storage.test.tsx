@@ -47,6 +47,13 @@ describe('StoragePage', () => {
     totalSize: 5368709120, // 5 GB
     dedupRatio: 0.35,
     storageStatsAvailable: true,
+    diskStatsAvailable: true,
+    diskTotal: 21474836480, // 20 GB
+    diskAvailable: 16106127360, // 15 GB
+    diskUsed: 5368709120, // 5 GB
+    diskUsageRatio: 0.25,
+    diskFilesystemType: 'zfs',
+    diskNativeDataChecksumSupport: true,
   }
 
   beforeEach(() => {
@@ -89,7 +96,7 @@ describe('StoragePage', () => {
       render(<StoragePage />)
 
       await waitFor(() => {
-        expect(screen.getByText('CAS 内容寻址存储系统')).toBeTruthy()
+        expect(screen.getByText('原生文件 + CAS 版本历史')).toBeTruthy()
       })
     })
 
@@ -196,6 +203,22 @@ describe('StoragePage', () => {
         expect(progressBar).toBeTruthy()
       })
     })
+
+    it('warns when disk space is below the safe operating margin', async () => {
+      mockGetStorageStats.mockResolvedValue({
+        ...mockStats,
+        diskAvailable: 512 * 1024 * 1024,
+        diskUsed: 20937965568,
+        diskUsageRatio: 0.975,
+      })
+
+      render(<StoragePage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('存储空间严重不足')).toBeTruthy()
+        expect(screen.getByText(/尽快清理回收站/)).toBeTruthy()
+      })
+    })
   })
 
   describe('stats cards', () => {
@@ -208,11 +231,31 @@ describe('StoragePage', () => {
       })
     })
 
-    it('displays storage size', async () => {
+    it('displays disk capacity and available space', async () => {
       render(<StoragePage />)
 
       await waitFor(() => {
-        expect(screen.getByText('存储大小')).toBeTruthy()
+        expect(screen.getByText('磁盘容量')).toBeTruthy()
+        expect(screen.getByText('可用空间')).toBeTruthy()
+        expect(screen.getByText('磁盘占用')).toBeTruthy()
+        expect(screen.getByText('25.0%')).toBeTruthy()
+      })
+    })
+
+    it('displays filesystem type', async () => {
+      render(<StoragePage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('文件系统')).toBeTruthy()
+        expect(screen.getByText('ZFS')).toBeTruthy()
+      })
+    })
+
+    it('displays CAS storage size', async () => {
+      render(<StoragePage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('CAS 大小')).toBeTruthy()
       })
     })
 

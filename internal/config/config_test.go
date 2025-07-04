@@ -113,6 +113,11 @@ func TestConfig_Validate(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name:    "Filesystem root storage.root",
+			modify:  func(c *Config) { c.Storage.Root = string(os.PathSeparator) },
+			wantErr: true,
+		},
+		{
 			name:    "Negative trash retention days",
 			modify:  func(c *Config) { c.Storage.Trash.RetentionDays = -1 },
 			wantErr: true,
@@ -184,6 +189,13 @@ func TestConfig_Validate(t *testing.T) {
 		{
 			name:    "Negative dataplane max retries",
 			modify:  func(c *Config) { c.DataPlane.MaxRetries = -1 },
+			wantErr: true,
+		},
+		{
+			name: "Invalid CDC zero min",
+			modify: func(c *Config) {
+				c.DataPlane.CDC.MinChunkSize = 0
+			},
 			wantErr: true,
 		},
 		{
@@ -886,6 +898,22 @@ func TestConfig_EnsureDirs(t *testing.T) {
 			t.Errorf("Directory %s was not created", dir)
 		} else if !info.IsDir() {
 			t.Errorf("%s is not a directory", dir)
+		}
+	}
+
+	wantModes := map[string]os.FileMode{
+		tmpDir:                                 0750,
+		filepath.Join(tmpDir, "files"):         0750,
+		filepath.Join(tmpDir, ".mnemonas"):     0700,
+		filepath.Join(tmpDir, ".mnemonas/tmp"): 0700,
+	}
+	for dir, wantMode := range wantModes {
+		info, err := os.Stat(dir)
+		if err != nil {
+			t.Fatalf("stat %s: %v", dir, err)
+		}
+		if got := info.Mode().Perm(); got != wantMode {
+			t.Fatalf("mode for %s = %o, want %o", dir, got, wantMode)
 		}
 	}
 }

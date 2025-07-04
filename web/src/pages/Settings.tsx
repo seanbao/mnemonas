@@ -56,13 +56,13 @@ function SettingsSection({
 }) {
   return (
     <Card className="card-meridian">
-      <CardHeader className="flex gap-4 pb-2">
-        <div className="gradient-meridian rounded-xl p-2.5 shadow-sm">
+      <CardHeader className="flex min-w-0 gap-4 pb-2">
+        <div className="gradient-meridian shrink-0 rounded-lg p-2.5 shadow-sm">
           <Icon size={20} className="text-white" />
         </div>
-        <div className="flex-1">
-          <h3 className="text-base font-semibold text-foreground">{title}</h3>
-          <p className="text-xs text-default-500 mt-0.5">{description}</p>
+        <div className="min-w-0 flex-1">
+          <h3 className="break-anywhere text-base font-semibold text-foreground">{title}</h3>
+          <p className="break-anywhere mt-0.5 text-xs text-default-500">{description}</p>
         </div>
       </CardHeader>
       <CardBody className="pt-2">
@@ -198,6 +198,17 @@ function normalizeSettingsTab(value: string | null): SettingsTabKey {
   return 'general'
 }
 
+function listensBeyondLoopback(host: string): boolean {
+  const normalized = host.trim().toLowerCase().replace(/^\[/, '').replace(/\]$/, '')
+  if (normalized === '' || normalized === '*' || normalized === '0.0.0.0' || normalized === '::') {
+    return true
+  }
+  if (normalized === 'localhost' || normalized === 'ip6-localhost' || normalized === '::1') {
+    return false
+  }
+  return !normalized.startsWith('127.')
+}
+
 // Setting row component
 function SettingRow({ 
   label, 
@@ -209,14 +220,14 @@ function SettingRow({
   children: React.ReactNode 
 }) {
   return (
-    <div className="flex items-center justify-between py-2.5 first:pt-0 last:pb-0">
-      <div className="flex-1 min-w-0 pr-4">
+    <div className="flex flex-col gap-2 py-2.5 first:pt-0 last:pb-0 sm:flex-row sm:items-center sm:justify-between">
+      <div className="min-w-0 flex-1 sm:pr-4">
         <div className="text-sm font-medium text-foreground">{label}</div>
         {description && (
           <div className="text-xs text-default-500 mt-0.5">{description}</div>
         )}
       </div>
-      <div className="shrink-0">
+      <div className="w-full min-w-0 sm:w-auto sm:shrink-0">
         {children}
       </div>
     </div>
@@ -311,7 +322,6 @@ export function SettingsPage() {
     && settingsData.data.webdav.runtime_enabled === false
   const favoritesRuntimeUnavailable = settingsData?.data.favorites?.enabled === true
     && settingsData.data.favorites?.runtime_available === false
-
   const webdavUrl = useMemo(() => {
     return formatWebDAVUrl(window.location.origin, webdavCredentials?.url ?? '')
   }, [webdavCredentials?.url])
@@ -438,6 +448,8 @@ export function SettingsPage() {
     }
     return draftSettings
   }, [draftSettings, isDirty, mapServerSettings, savedSettingsOverride, settingsData])
+  const webdavNoAuthSelected = settings.webdavEnabled && settings.webdavAuthType === 'none'
+  const serverBeyondLoopback = listensBeyondLoopback(settings.serverHost)
 
   const updateDirtySettings = (updater: (prev: typeof draftSettings) => typeof draftSettings) => {
     setIsDirty(true)
@@ -572,6 +584,24 @@ export function SettingsPage() {
       addToast({
         title: '大小格式无效',
         description: err instanceof Error ? err.message : '请使用 1024、1 KB、1.5 MB 之类的格式',
+        color: 'danger',
+      })
+      return
+    }
+
+    if (minChunkBytes <= 0 || avgChunkBytes <= 0 || maxChunkBytes <= 0) {
+      addToast({
+        title: 'CDC 分块参数无效',
+        description: '最小、平均和最大块大小都必须大于 0',
+        color: 'danger',
+      })
+      return
+    }
+
+    if (minChunkBytes >= avgChunkBytes || avgChunkBytes >= maxChunkBytes) {
+      addToast({
+        title: 'CDC 分块参数无效',
+        description: '请保持最小块大小 < 平均块大小 < 最大块大小',
         color: 'danger',
       })
       return
@@ -803,7 +833,7 @@ export function SettingsPage() {
   if (isLoading) {
     return (
       <div className="h-full overflow-auto custom-scrollbar">
-        <div className="max-w-4xl mx-auto p-7">
+        <div className="max-w-4xl mx-auto p-4 sm:p-6 lg:p-7">
           <PageHeader
             title="系统设置"
             subtitle="配置 MnemoNAS 系统参数"
@@ -811,14 +841,14 @@ export function SettingsPage() {
               <>
                 <Button
                   variant="bordered"
-                  className="btn-secondary btn-md rounded-xl"
+                  className="btn-secondary btn-md rounded-lg"
                   startContent={<RefreshCw size={16} />}
                   isDisabled
                 >
                   重置
                 </Button>
                 <Button
-                  className="btn-primary btn-md rounded-xl"
+                  className="btn-primary btn-md rounded-lg"
                   startContent={<Save size={16} />}
                   isDisabled
                 >
@@ -850,7 +880,7 @@ export function SettingsPage() {
           title={settingsLoadErrorPresentation!.title}
           description={settingsLoadErrorPresentation!.description}
           action={
-		    <Button variant="bordered" className="rounded-xl" onPress={handleRefreshSettings} isLoading={isRefetching}>
+		    <Button variant="bordered" className="rounded-lg" onPress={handleRefreshSettings} isLoading={isRefetching}>
               重新加载
             </Button>
           }
@@ -861,7 +891,7 @@ export function SettingsPage() {
 
   return (
     <div className="h-full overflow-auto custom-scrollbar">
-      <div className="max-w-4xl mx-auto p-7">
+      <div className="max-w-4xl mx-auto p-4 sm:p-6 lg:p-7">
         {/* Header */}
         <PageHeader
           title="系统设置"
@@ -870,7 +900,7 @@ export function SettingsPage() {
             <>
               <Button
                 variant="bordered"
-                className="btn-secondary btn-md rounded-xl"
+                className="btn-secondary btn-md rounded-lg"
                 startContent={<RefreshCw size={16} />}
                 onPress={handleReset}
                 isLoading={isRefetching}
@@ -879,7 +909,7 @@ export function SettingsPage() {
                 重置
               </Button>
               <Button
-                className="btn-primary btn-md rounded-xl"
+                className="btn-primary btn-md rounded-lg"
                 startContent={<Save size={16} />}
                 isLoading={saveMutation.isPending}
                 onPress={handleSave}
@@ -895,9 +925,11 @@ export function SettingsPage() {
         <Tabs 
           selectedKey={selectedTab}
           onSelectionChange={handleTabSelectionChange}
+          aria-label="设置分类"
           classNames={{
-            tabList: "bg-content1 border border-divider rounded-xl p-1 gap-1 shadow-[var(--shadow-soft)]",
-            tab: "px-4 py-2 rounded-lg text-default-600 data-[selected=true]:bg-accent-primary data-[selected=true]:text-white data-[selected=true]:shadow-sm whitespace-nowrap",
+            base: "w-full",
+            tabList: "w-full max-w-full justify-start overflow-x-auto bg-content1 border border-divider rounded-lg p-1 gap-1 shadow-[var(--shadow-soft)]",
+            tab: "!w-auto !flex-none shrink-0 min-w-fit px-4 py-2 rounded-lg text-default-600 data-[selected=true]:bg-accent-primary data-[selected=true]:text-white data-[selected=true]:shadow-sm whitespace-nowrap",
             cursor: "hidden",
           }}
         >
@@ -909,7 +941,7 @@ export function SettingsPage() {
                 icon={Server}
               >
                 <div className="space-y-4">
-                  <div className="grid grid-cols-2 gap-4">
+                  <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                     <div>
                       <label className="text-sm font-medium text-default-600 mb-1.5 block">监听地址</label>
                       <Input
@@ -939,7 +971,7 @@ export function SettingsPage() {
                     </div>
                   </div>
                   <Divider className="bg-divider" />
-                  <div className="grid grid-cols-3 gap-4">
+                  <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
                   <div>
                     <label className="text-sm font-medium text-default-600 mb-1.5 block">读取超时</label>
                     <Input
@@ -1035,7 +1067,7 @@ export function SettingsPage() {
           />
           </SettingRow>
           <Divider className="bg-divider" />
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
           <div>
             <label className="text-sm font-medium text-default-600 mb-1.5 block">证书文件</label>
             <Input
@@ -1081,7 +1113,7 @@ export function SettingsPage() {
                 <div className="space-y-4">
                   <div>
                     <label className="text-sm font-medium text-default-600 mb-1.5 block">存储根目录</label>
-                    <div className="w-full rounded-xl border border-divider bg-content2/40 px-3 py-3 text-sm text-foreground">
+                    <div className="w-full rounded-lg border border-divider bg-content2/40 px-3 py-3 text-sm text-foreground">
                       {settings.storageRoot || '~/.mnemonas'}
                     </div>
                   </div>
@@ -1265,7 +1297,7 @@ export function SettingsPage() {
           <Tab key="webdav" title="WebDAV">
             <div className="space-y-6 mt-6">
               {webdavCredentialsError && (
-                <div className="flex items-start gap-3 rounded-2xl border border-warning/30 bg-warning/5 px-4 py-3 text-sm text-foreground">
+                <div className="flex items-start gap-3 rounded-lg border border-warning/30 bg-warning/5 px-4 py-3 text-sm text-foreground">
                   <AlertCircle size={18} className="mt-0.5 shrink-0 text-warning" />
                   <div className="flex-1">
                     <p className="font-medium">{webdavCredentialsErrorPresentation?.title}</p>
@@ -1274,7 +1306,7 @@ export function SettingsPage() {
                   <Button
                     size="sm"
                     variant="bordered"
-                    className="rounded-xl"
+                    className="rounded-lg"
 				    onPress={handleRefreshWebDAVCredentials}
                     isLoading={isRefetchingWebDAVCredentials}
                   >
@@ -1291,7 +1323,7 @@ export function SettingsPage() {
                   icon={Key}
                 >
                   <div className="space-y-4">
-                    <div className="p-4 rounded-xl bg-content2/50 border border-divider">
+                    <div className="p-4 rounded-lg bg-content2/50 border border-divider">
                       <div className="space-y-4">
                         {/* WebDAV URL */}
                         <div className="space-y-1.5">
@@ -1421,7 +1453,7 @@ export function SettingsPage() {
               >
                 <div className="space-y-4">
                   {webdavRuntimeUnavailable && (
-                    <div className="flex items-start gap-3 rounded-2xl border border-warning/30 bg-warning/5 px-4 py-3 text-sm text-foreground">
+                    <div className="flex items-start gap-3 rounded-lg border border-warning/30 bg-warning/5 px-4 py-3 text-sm text-foreground">
                       <AlertCircle size={18} className="mt-0.5 shrink-0 text-warning" />
                       <div>
                         <div className="font-medium text-foreground">WebDAV 运行态当前不可用</div>
@@ -1498,15 +1530,46 @@ export function SettingsPage() {
                         webdavAuthType: event.target.value as 'basic' | 'none',
                       }))}
                       disabled={!settings.webdavEnabled}
-                      className="input-shell h-9 rounded-xl px-3 text-sm bg-content1 border border-divider min-w-[160px]"
+                      className="input-shell h-9 rounded-lg px-3 text-sm bg-content1 border border-divider min-w-[160px]"
                       aria-label="WebDAV 认证方式"
                     >
                       <option value="basic">Basic Auth</option>
                       <option value="none">无认证</option>
                     </select>
                   </SettingRow>
+                  {webdavNoAuthSelected && (
+                    <>
+                      <Divider className="bg-divider" />
+                      <div
+                        className={cn(
+                          "flex items-start gap-3 rounded-lg px-4 py-3 text-sm text-foreground",
+                          serverBeyondLoopback
+                            ? "border border-danger/30 bg-danger/5"
+                            : "border border-warning/30 bg-warning/5"
+                        )}
+                      >
+                        <AlertCircle
+                          size={18}
+                          className={cn(
+                            "mt-0.5 shrink-0",
+                            serverBeyondLoopback ? "text-danger" : "text-warning"
+                          )}
+                        />
+                        <div>
+                          <div className="font-medium text-foreground">
+                            {serverBeyondLoopback ? 'WebDAV 当前将无认证开放' : 'WebDAV 无认证仅适合本机或可信网络'}
+                          </div>
+                          <div className="text-default-600">
+                            {serverBeyondLoopback
+                              ? '当前监听地址不是 loopback，保存后任何能访问该端口的人都可以读写 WebDAV。建议改用 Basic Auth，或先把监听地址/端口限制到可信网络。'
+                              : '当前监听地址限制在本机；只有在反向代理、隧道或防火墙已提供外层认证时才建议保持无认证。'}
+                          </div>
+                        </div>
+                      </div>
+                    </>
+                  )}
                   <Divider className="bg-divider" />
-                  <div className="grid grid-cols-2 gap-4">
+                  <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                     <div>
                       <label className="text-sm font-medium text-default-600 mb-1.5 block">用户名</label>
                       <Input
@@ -1548,7 +1611,7 @@ export function SettingsPage() {
                 icon={Zap}
               >
                 <div className="space-y-4">
-                  <div className="p-4 rounded-xl bg-content2 border border-divider">
+                  <div className="p-4 rounded-lg bg-content2 border border-divider">
                     <div className="flex items-start gap-3">
                       <div className="w-8 h-8 rounded-lg bg-accent-primary/15 flex items-center justify-center shrink-0 mt-0.5">
                         <HardDrive size={16} className="text-accent-primary" />
@@ -1701,7 +1764,7 @@ export function SettingsPage() {
                     />
                   </SettingRow>
                   <Divider className="bg-divider" />
-                  <div className="grid grid-cols-2 gap-4">
+                  <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                     <div>
                       <label className="text-sm font-medium text-default-600 mb-1.5 block">普通告警阈值 (%)</label>
                       <Input
@@ -1820,7 +1883,7 @@ export function SettingsPage() {
               >
                 <div className="space-y-4">
                   {favoritesRuntimeUnavailable && (
-                    <div className="flex items-start gap-3 rounded-2xl border border-warning/30 bg-warning/5 px-4 py-3 text-sm text-foreground">
+                    <div className="flex items-start gap-3 rounded-lg border border-warning/30 bg-warning/5 px-4 py-3 text-sm text-foreground">
                       <AlertCircle size={18} className="mt-0.5 shrink-0 text-warning" />
                       <div>
                         <div className="font-medium text-foreground">收藏运行态当前不可用</div>

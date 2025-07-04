@@ -163,7 +163,7 @@ describe('Header', () => {
     locationPathname = '/search'
     render(<Header />)
 
-    const searchInput = screen.getByPlaceholderText('搜索文件与记忆')
+    const searchInput = screen.getByPlaceholderText('搜索文件')
     fireEvent.change(searchInput, { target: { value: 'report' } })
     fireEvent.keyDown(searchInput, { key: 'Enter' })
 

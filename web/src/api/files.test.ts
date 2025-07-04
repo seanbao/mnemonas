@@ -563,10 +563,18 @@ describe('API: files', () => {
           total_files: 42,
           total_files_available: true,
           storage_stats_available: true,
+          disk_stats_available: true,
           total_size: 1073741824,
           total_chunks: 100,
           unique_size: 536870912,
           dedup_ratio: 1.5,
+          disk_total: 2147483648,
+          disk_free: 1073741824,
+          disk_available: 1048576000,
+          disk_used: 1073741824,
+          disk_usage_ratio: 0.5,
+          disk_filesystem_type: 'zfs',
+          disk_native_data_checksum_support: true,
         },
       }
 
@@ -579,10 +587,18 @@ describe('API: files', () => {
       expect(result.fileCount).toBe(42)
       expect(result.fileCountAvailable).toBe(true)
       expect(result.storageStatsAvailable).toBe(true)
+      expect(result.diskStatsAvailable).toBe(true)
       expect(result.totalSize).toBe(1073741824)
       expect(result.totalObjects).toBe(100)
       expect(result.uniqueSize).toBe(536870912)
       expect(result.dedupRatio).toBe(1.5)
+      expect(result.diskTotal).toBe(2147483648)
+      expect(result.diskFree).toBe(1073741824)
+      expect(result.diskAvailable).toBe(1048576000)
+      expect(result.diskUsed).toBe(1073741824)
+      expect(result.diskUsageRatio).toBe(0.5)
+      expect(result.diskFilesystemType).toBe('zfs')
+      expect(result.diskNativeDataChecksumSupport).toBe(true)
     })
 
     it('rejects invalid wrapped response for storage stats', async () => {
@@ -607,10 +623,18 @@ describe('API: files', () => {
       expect(result.fileCount).toBeUndefined()
       expect(result.fileCountAvailable).toBe(false)
       expect(result.storageStatsAvailable).toBe(false)
+      expect(result.diskStatsAvailable).toBe(false)
       expect(result.totalSize).toBeUndefined()
       expect(result.totalObjects).toBeUndefined()
       expect(result.uniqueSize).toBeUndefined()
       expect(result.dedupRatio).toBeUndefined()
+      expect(result.diskTotal).toBeUndefined()
+      expect(result.diskFree).toBeUndefined()
+      expect(result.diskAvailable).toBeUndefined()
+      expect(result.diskUsed).toBeUndefined()
+      expect(result.diskUsageRatio).toBeUndefined()
+      expect(result.diskFilesystemType).toBeUndefined()
+      expect(result.diskNativeDataChecksumSupport).toBeUndefined()
     })
 
     it('preserves service-unavailable storage stats error codes', async () => {
@@ -733,6 +757,7 @@ describe('API: files', () => {
             name: 'MnemoNAS',
             version: '0.1.0',
             go: 'go1.24.0',
+            build_time: '2026-04-29T00:00:00Z',
           },
         }),
       })
@@ -740,6 +765,7 @@ describe('API: files', () => {
       const result = await getAppVersion()
       expect(result.version).toBe('0.1.0')
       expect(result.go).toBe('go1.24.0')
+      expect(result.buildTime).toBe('2026-04-29T00:00:00Z')
     })
 
     it('rejects malformed successful version responses', async () => {
@@ -1532,7 +1558,7 @@ describe('API: files', () => {
           timestamp: '2024-01-15T10:00:00Z',
           uptime: '1h30m',
           uptime_secs: 5400,
-          version: { name: 'MnemoNAS', version: '0.1.0', go: '1.21' },
+          version: { name: 'MnemoNAS', version: '0.1.0', go: '1.21', build_time: '2026-04-29T00:00:00Z' },
           system: {
             filesystem_initialized: true,
             dataplane_connected: true,
@@ -1548,7 +1574,33 @@ describe('API: files', () => {
             num_gc: 10,
           },
           goroutines: 25,
-          filesystem: { trash_items: 5, trash_size: 1024 },
+          filesystem: {
+            trash_items: 5,
+            trash_size: 1024,
+            disk_stats_available: true,
+            disk_total: 20480,
+            disk_free: 10240,
+            disk_available: 8192,
+            disk_used: 10240,
+            disk_usage_ratio: 0.5,
+            disk_filesystem_type: 'btrfs',
+            disk_native_data_checksum_support: true,
+          },
+          alerts: {
+            enabled: true,
+            runtime_available: true,
+            check_interval: '30m',
+            threshold_pct: 85,
+            critical_pct: 92,
+            min_free_bytes: 21474836480,
+            cooldown_period: '2h',
+            webhook_configured: true,
+            webhook_method: 'POST',
+            last_level: 'warning',
+            last_checked_at: '2026-04-29T10:30:00Z',
+            last_used_pct: 87.5,
+            last_free_bytes: 9663676416,
+          },
           storage: { total_chunks: 100, total_size: 10240, unique_size: 8192, dedup_ratio: 1.25 },
           dataplane: { healthy: true, version: '0.1.0', uptime_sec: 3600 },
         },
@@ -1561,13 +1613,25 @@ describe('API: files', () => {
 
       const result = await getDiagnostics()
       expect(result.uptimeSecs).toBe(5400)
+      expect(result.version.buildTime).toBe('2026-04-29T00:00:00Z')
       expect(result.system?.filesystemInitialized).toBe(true)
       expect(result.system?.maintenanceHistoryReady).toBe(true)
       expect(result.system?.activityLogReady).toBe(true)
-        expect(result.system?.favoritesStoreReady).toBe(true)
+      expect(result.system?.favoritesStoreReady).toBe(true)
       expect(result.memory?.allocMb).toBe(50)
       expect(result.goroutines).toBe(25)
       expect(result.filesystem?.trashItems).toBe(5)
+      expect(result.filesystem?.diskStatsAvailable).toBe(true)
+      expect(result.filesystem?.diskTotal).toBe(20480)
+      expect(result.filesystem?.diskAvailable).toBe(8192)
+      expect(result.filesystem?.diskUsageRatio).toBe(0.5)
+      expect(result.filesystem?.diskFilesystemType).toBe('btrfs')
+      expect(result.filesystem?.diskNativeDataChecksumSupport).toBe(true)
+      expect(result.alerts?.enabled).toBe(true)
+      expect(result.alerts?.runtimeAvailable).toBe(true)
+      expect(result.alerts?.webhookConfigured).toBe(true)
+      expect(result.alerts?.lastLevel).toBe('warning')
+      expect(result.alerts?.lastUsedPct).toBe(87.5)
       expect(result.storage?.dedupRatio).toBe(1.25)
       expect(result.dataplane?.healthy).toBe(true)
     })
@@ -1593,6 +1657,7 @@ describe('API: files', () => {
       expect(result.memory).toBeUndefined()
       expect(result.goroutines).toBeUndefined()
       expect(result.filesystem).toBeUndefined()
+      expect(result.alerts).toBeUndefined()
       expect(result.storage).toBeUndefined()
       expect(result.dataplane).toBeUndefined()
     })
@@ -1608,6 +1673,7 @@ describe('API: files', () => {
           system: {},
           memory: {},
           filesystem: {},
+          alerts: {},
           storage: {},
           dataplane: {},
         },
@@ -1623,9 +1689,11 @@ describe('API: files', () => {
       expect(result.system?.filesystemInitialized).toBeUndefined()
       expect(result.system?.maintenanceHistoryReady).toBeUndefined()
       expect(result.system?.activityLogReady).toBeUndefined()
-        expect(result.system?.favoritesStoreReady).toBeUndefined()
+      expect(result.system?.favoritesStoreReady).toBeUndefined()
       expect(result.memory?.allocMb).toBeUndefined()
       expect(result.filesystem?.trashItems).toBeUndefined()
+      expect(result.alerts?.enabled).toBeUndefined()
+      expect(result.alerts?.lastLevel).toBeUndefined()
       expect(result.storage?.dedupRatio).toBeUndefined()
       expect(result.dataplane?.healthy).toBeUndefined()
     })

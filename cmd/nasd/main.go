@@ -3,11 +3,13 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -96,6 +98,25 @@ type frontendHandler struct {
 	fileServer http.Handler
 }
 
+const appContentSecurityPolicy = "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self' data:; connect-src 'self'; frame-src 'self' blob:; worker-src 'self' blob:"
+
+func withSecurityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		setHeaderIfAbsent(w.Header(), "X-Content-Type-Options", "nosniff")
+		setHeaderIfAbsent(w.Header(), "Referrer-Policy", "no-referrer")
+		setHeaderIfAbsent(w.Header(), "X-Frame-Options", "DENY")
+		setHeaderIfAbsent(w.Header(), "Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=()")
+		setHeaderIfAbsent(w.Header(), "Content-Security-Policy", appContentSecurityPolicy)
+		next.ServeHTTP(w, r)
+	})
+}
+
+func setHeaderIfAbsent(headers http.Header, key, value string) {
+	if headers.Get(key) == "" {
+		headers.Set(key, value)
+	}
+}
+
 func newFrontendHandler(root string) http.Handler {
 	return &frontendHandler{
 		root:       root,
@@ -156,8 +177,16 @@ func discoverFrontendAssets() string {
 }
 
 func hasFrontendIndex(dir string) bool {
-	info, err := os.Stat(filepath.Join(dir, "index.html"))
-	return err == nil && !info.IsDir()
+	indexPath := filepath.Join(dir, "index.html")
+	info, err := os.Stat(indexPath)
+	if err != nil || info.IsDir() {
+		return false
+	}
+	data, err := os.ReadFile(indexPath)
+	if err != nil {
+		return false
+	}
+	return !bytes.Contains(data, []byte("src/main.tsx"))
 }
 
 func shouldServeFrontend(r *http.Request) bool {
@@ -333,6 +362,9 @@ func main() {
 		Msg("starting MnemoNAS")
 
 	// Security warnings
+	for _, warning := range configWarnings(cfg) {
+		log.Warn().Msg(warning)
+	}
 	if cfg.WebDAV.Enabled && cfg.WebDAV.AuthType == "none" {
 		log.Warn().Msg("⚠️  WebDAV authentication is DISABLED - WebDAV access is unprotected!")
 		log.Warn().Msg("   Set [webdav].auth_type = \"basic\" to enable WebDAV authentication")
@@ -342,17 +374,7 @@ func main() {
 		log.Warn().Msg("   Set [server.tls].enabled = true for secure connections")
 	}
 
-	// Show auto-generated WebDAV credentials (only on first run or when password was empty)
-	if webdavPasswordGenerated && isNewSecrets {
-		log.Info().Msg("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-		log.Info().Msg("🔐 WebDAV credentials (auto-generated, save these!):")
-		log.Info().Str("username", cfg.WebDAV.Username).Msg("   Username")
-		log.Info().Str("password", cfg.WebDAV.Password).Msg("   Password")
-		log.Info().Msgf("   Stored in: %s/secrets.json", dataRoot)
-		log.Info().Msg("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-	} else if webdavPasswordGenerated {
-		log.Info().Msg("🔐 WebDAV using auto-generated password from secrets.json")
-	}
+	logWebDAVCredentialStatus(dataRoot, cfg.WebDAV.Username, webdavPasswordGenerated, isNewSecrets)
 
 	// Create data plane client for storage operations
 	dataplaneClient, err := connectStartupDataplane(cfg.DataPlane.Address(), cfg.DataPlane.Timeout)
@@ -468,6 +490,8 @@ func main() {
 		// Config for settings API
 		Config:       cfg,
 		ConfigPath:   path,
+		AppVersion:   version,
+		BuildTime:    buildTime,
 		ActiveWebDAV: &activeWebDAV,
 		UpdateWebDAV: func(runtimeCfg api.WebDAVRuntimeConfig) {
 			prefix, handler := buildWebDAVHandler(fs, runtimeCfg)
@@ -509,6 +533,7 @@ func main() {
 		}
 		router.ServeHTTP(w, r)
 	})
+	handler = withSecurityHeaders(handler)
 	if activeWebDAV.Enabled {
 		log.Info().Str("prefix", cfg.WebDAV.Prefix).Str("auth", cfg.WebDAV.AuthType).Msg("WebDAV enabled")
 	}
@@ -584,6 +609,25 @@ func main() {
 	}
 
 	log.Info().Msg("server stopped")
+}
+
+func logWebDAVCredentialStatus(dataRoot, username string, passwordGenerated, newSecrets bool) {
+	if !passwordGenerated {
+		return
+	}
+
+	secretsPath := filepath.Join(dataRoot, config.SecretsFile)
+	if newSecrets {
+		log.Info().Msg("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+		log.Info().Msg("🔐 WebDAV credentials were auto-generated")
+		log.Info().Str("username", username).Msg("   Username")
+		log.Info().Str("secrets_file", secretsPath).Msg("   Password stored in")
+		log.Info().Msg("   View the password from the server-side secrets file or Web UI settings")
+		log.Info().Msg("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+		return
+	}
+
+	log.Info().Str("secrets_file", secretsPath).Msg("🔐 WebDAV using auto-generated password from secrets file")
 }
 
 func initLogger() {
@@ -816,14 +860,82 @@ func validateConfigOnly(path string, output io.Writer) error {
 			return err
 		}
 		_, _ = fmt.Fprintln(output, "configuration is valid (using built-in defaults)")
+		writeConfigWarnings(output, cfg)
 		return nil
 	}
 
-	if _, err := config.Load(resolvedPath); err != nil {
+	cfg, err := config.Load(resolvedPath)
+	if err != nil {
 		return err
 	}
 	_, _ = fmt.Fprintf(output, "configuration is valid: %s\n", resolvedPath)
+	writeConfigWarnings(output, cfg)
 	return nil
+}
+
+func writeConfigWarnings(output io.Writer, cfg *config.Config) {
+	for _, warning := range configWarnings(cfg) {
+		_, _ = fmt.Fprintf(output, "warning: %s\n", warning)
+	}
+}
+
+func configWarnings(cfg *config.Config) []string {
+	if cfg == nil {
+		return nil
+	}
+
+	warnings := make([]string, 0, 3)
+	serverBeyondLoopback := listensBeyondLoopback(cfg.Server.Host)
+	if serverBeyondLoopback && !cfg.Auth.Enabled {
+		warnings = append(warnings, "auth.enabled=false while server.host listens beyond loopback; Web UI/API will be reachable without login")
+	}
+	if serverBeyondLoopback && cfg.WebDAV.Enabled && strings.EqualFold(strings.TrimSpace(cfg.WebDAV.AuthType), "none") {
+		warnings = append(warnings, "webdav.auth_type=none while server.host listens beyond loopback; WebDAV will be reachable without Basic Auth")
+	}
+	if listensBeyondLoopback(hostFromTCPAddress(cfg.DataPlane.GRPCAddress)) {
+		warnings = append(warnings, "dataplane.grpc_address listens beyond loopback; dataplane has no external authentication")
+	}
+	return warnings
+}
+
+func hostFromTCPAddress(address string) string {
+	trimmed := strings.TrimSpace(address)
+	if trimmed == "" {
+		return ""
+	}
+
+	host, _, err := net.SplitHostPort(trimmed)
+	if err == nil {
+		return strings.Trim(host, "[]")
+	}
+
+	if strings.HasPrefix(trimmed, "[") {
+		if end := strings.Index(trimmed, "]"); end > 0 {
+			return strings.Trim(trimmed[1:end], "[]")
+		}
+	}
+
+	if strings.Count(trimmed, ":") == 1 {
+		host, _, _ := strings.Cut(trimmed, ":")
+		return strings.Trim(host, "[]")
+	}
+	return strings.Trim(trimmed, "[]")
+}
+
+func listensBeyondLoopback(host string) bool {
+	normalized := strings.ToLower(strings.Trim(strings.TrimSpace(host), "[]"))
+	switch normalized {
+	case "", "*":
+		return true
+	case "localhost", "ip6-localhost":
+		return false
+	}
+
+	ip := net.ParseIP(normalized)
+	if ip == nil {
+		return true
+	}
+	return !ip.IsLoopback()
 }
 
 func matchesWebDAVPrefix(prefix, requestPath string) bool {

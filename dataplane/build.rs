@@ -1,16 +1,5 @@
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Generate proto files on every build
+fn main() {
+    // The Rust protobuf code is checked in so normal builds do not need protoc.
     println!("cargo:rerun-if-changed=../proto/dataplane.proto");
-
-    // Ensure output directory exists
-    std::fs::create_dir_all("src/proto")?;
-
-    // Compile protobuf
-    tonic_build::configure()
-        .build_server(true)
-        .build_client(true)
-        .out_dir("src/proto")
-        .compile_protos(&["../proto/dataplane.proto"], &["../proto"])?;
-
-    Ok(())
+    println!("cargo:rerun-if-changed=src/proto/mnemonas.dataplane.v1.rs");
 }

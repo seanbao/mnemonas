@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2317
 
 set -euo pipefail
 
@@ -21,6 +22,8 @@ DATAPLANE_HTTP="${MNEMONAS_E2E_DATAPLANE_HTTP:-127.0.0.1:19091}"
 DATAPLANE_GRPC="${MNEMONAS_E2E_DATAPLANE_GRPC:-127.0.0.1:19090}"
 NASD_HOST="${MNEMONAS_E2E_NASD_HOST:-127.0.0.1}"
 NASD_PORT="${MNEMONAS_E2E_NASD_PORT:-18080}"
+
+export GOTOOLCHAIN="${GOTOOLCHAIN:-local}"
 
 cleanup() {
   if [[ -n "${nasd_pid:-}" ]]; then

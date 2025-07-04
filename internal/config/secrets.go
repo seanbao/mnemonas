@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/big"
 	"os"
 	"path/filepath"
 	"time"
@@ -243,10 +244,6 @@ func renameRegisteredSecretsFile(oldPath, newPath string) error {
 	return os.Rename(normalizedOldPath, normalizedNewPath)
 }
 
-func validateSecretsFilePath(secretsPath string) error {
-	return validateManagedFilePath(secretsPath, errSecretsFileSymlink, "secrets file")
-}
-
 func writeSecretsFile(secretsPath string, data []byte) error {
 	if err := writeRegisteredManagedFileAtomically(secretsPath, data, errSecretsFileSymlink, ".secrets-*.tmp", "secrets", secretsFileMode); err != nil {
 		return err
@@ -276,11 +273,13 @@ func generateReadablePassword(length int) (string, error) {
 	// Exclude ambiguous characters: 0, O, l, 1, I
 	const charset = "abcdefghjkmnpqrstuvwxyzABCDEFGHJKMNPQRSTUVWXYZ23456789"
 	b := make([]byte, length)
-	if _, err := rand.Read(b); err != nil {
-		return "", fmt.Errorf("failed to generate random password: %w", err)
-	}
+	charsetSize := big.NewInt(int64(len(charset)))
 	for i := range b {
-		b[i] = charset[int(b[i])%len(charset)]
+		index, err := rand.Int(rand.Reader, charsetSize)
+		if err != nil {
+			return "", fmt.Errorf("failed to generate random password: %w", err)
+		}
+		b[i] = charset[index.Int64()]
 	}
 	return string(b), nil
 }

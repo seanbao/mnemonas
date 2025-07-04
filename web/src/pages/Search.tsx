@@ -66,7 +66,7 @@ function SearchResultItem({ result, onClick }: { result: SearchResult; onClick: 
     <button
       type="button"
       className={cn(
-        "flex w-full items-center gap-3 px-4 py-2.5 text-left transition-all duration-150",
+        "flex w-full flex-wrap items-center gap-x-3 gap-y-1 px-3 py-3 text-left transition-all duration-150 sm:flex-nowrap sm:px-4 sm:py-2.5",
         "hover:bg-content2 border-b border-divider last:border-b-0",
         "focus:outline-none focus:bg-content2"
       )}
@@ -76,18 +76,18 @@ function SearchResultItem({ result, onClick }: { result: SearchResult; onClick: 
       <div className="flex-shrink-0">
         <FileIcon name={result.name} isDir={result.isDir} size={24} variant="bare" />
       </div>
-      <div className="flex-1 min-w-0">
+      <div className="min-w-0 flex-1 basis-[calc(100%-3rem)] sm:basis-auto">
         <div className="font-medium text-foreground truncate">{result.name}</div>
         <div className="text-xs text-default-500 truncate">{result.path}</div>
       </div>
-      <div className="flex-shrink-0 text-right text-sm text-default-500">
+      <div className="ml-9 flex-shrink-0 text-left text-sm text-default-500 sm:ml-0 sm:text-right">
         {result.isDir ? (
           <span>文件夹</span>
         ) : (
           <span>{formatBytes(result.size)}</span>
         )}
       </div>
-      <div className="flex-shrink-0 text-right text-xs text-default-500 w-24">
+      <div className="hidden w-24 flex-shrink-0 text-right text-xs text-default-500 sm:block">
         {formatDate(result.modTime)}
       </div>
     </button>
@@ -150,15 +150,15 @@ export function SearchPage() {
   }, [setSearchParams])
 
   return (
-    <div className="h-full flex flex-col p-6">
+    <div className="flex h-full min-h-0 flex-col p-4 sm:p-6">
       {/* Header */}
-      <div className="flex items-center gap-4 mb-6">
+      <div className="mb-6 flex min-w-0 items-center gap-3 sm:gap-4">
         <Button
           isIconOnly
           variant="light"
           aria-label="返回上一页"
           onPress={() => navigate(-1)}
-          className="text-default-500 rounded-xl"
+          className="text-default-500 rounded-lg"
         >
           <ArrowLeft size={20} />
         </Button>
@@ -191,9 +191,9 @@ export function SearchPage() {
       </div>
 
       {/* Results */}
-      <Card className="flex-1 card-meridian overflow-hidden">
+      <Card className="card-meridian min-h-0 flex-1 overflow-hidden">
         <CardHeader className="border-b border-divider bg-content2/30">
-          <div className="flex items-center justify-between w-full">
+          <div className="flex w-full min-w-0 flex-wrap items-center justify-between gap-2">
             <h2 className="font-semibold text-foreground">搜索结果</h2>
             {data && (
               <span className="text-sm text-default-500">
@@ -225,7 +225,7 @@ export function SearchPage() {
                 title={getSearchErrorPresentation(error).title}
                 description={getSearchErrorPresentation(error).description}
                 action={
-                  <Button variant="bordered" className="rounded-xl" onPress={handleRetrySearch}>
+                  <Button variant="bordered" className="rounded-lg" onPress={handleRetrySearch}>
                     重试搜索
                   </Button>
                 }

@@ -201,7 +201,7 @@ function FavoriteRow({
   return (
     <div
       className={cn(
-        "flex items-center gap-4 px-4 py-3 transition-all duration-200 border-b border-divider hover:bg-content2/50 group",
+        "group flex flex-wrap items-start gap-x-3 gap-y-2 border-b border-divider px-4 py-4 transition-all duration-200 hover:bg-content2/50 sm:flex-nowrap sm:items-center sm:gap-4 sm:py-3",
         isSelected && "bg-accent-primary/10"
       )}
     >
@@ -218,7 +218,7 @@ function FavoriteRow({
       </div>
       <button
         type="button"
-        className="flex-1 min-w-0 text-left focus:outline-none"
+        className="min-w-0 flex-1 basis-[calc(100%-6rem)] text-left focus:outline-none sm:basis-auto"
         onClick={onNavigate}
         aria-label={`${isDir ? '打开文件夹' : '打开文件'} ${item.path}`}
       >
@@ -231,19 +231,19 @@ function FavoriteRow({
         </p>
       </button>
       {item.note && (
-        <div className="max-w-[200px]">
+        <div className="ml-14 max-w-[calc(100%-3.5rem)] basis-full sm:ml-0 sm:max-w-[200px] sm:basis-auto">
           <p className="text-sm text-default-500 truncate" title={item.note}>
             {item.note}
           </p>
         </div>
       )}
-      <div className="w-32 text-right">
-        <div className="text-sm text-default-500 flex items-center justify-end gap-1">
+      <div className="ml-14 text-left sm:ml-0 sm:w-32 sm:text-right">
+        <div className="flex items-center gap-1 text-sm text-default-500 sm:justify-end">
           <Clock size={12} />
           {formatRelativeTime(item.created_at)}
         </div>
       </div>
-      <div className="w-24 flex items-center justify-end gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+      <div className="ml-auto flex shrink-0 items-center justify-end gap-1 opacity-100 transition-opacity sm:w-24 sm:opacity-0 sm:group-hover:opacity-100">
         <Button
           isIconOnly
           size="sm"
@@ -251,7 +251,7 @@ function FavoriteRow({
           onPress={onNavigate}
           aria-label={`跳转到 ${item.path}`}
           title="跳转到文件"
-          className="rounded-xl"
+          className="rounded-lg"
         >
           <ExternalLink size={16} />
         </Button>
@@ -263,7 +263,7 @@ function FavoriteRow({
             onPress={onEditNote}
             aria-label={`编辑备注 ${item.path}`}
             title="编辑备注"
-            className="rounded-xl"
+            className="rounded-lg"
           >
             <Edit3 size={16} />
           </Button>
@@ -277,7 +277,7 @@ function FavoriteRow({
             onPress={onRemove}
             aria-label={`取消收藏 ${item.path}`}
             title="取消收藏"
-            className="rounded-xl"
+            className="rounded-lg"
           >
             <Trash2 size={16} />
           </Button>
@@ -530,7 +530,7 @@ export function FavoritesPage() {
 
   if (hasInvalidHomeDir) {
     return (
-      <div className="h-full flex flex-col space-y-4 p-6 overflow-auto custom-scrollbar">
+      <div className="flex h-full min-h-0 flex-col space-y-4 overflow-auto p-4 custom-scrollbar sm:p-6">
         <PageHeader
           title="收藏夹"
           subtitle={invalidHomeDirTitle}
@@ -549,7 +549,7 @@ export function FavoritesPage() {
 
   if (isLoading) {
     return (
-      <div className="p-6 lg:p-8 flex items-center justify-center h-full">
+      <div className="flex h-full items-center justify-center p-6 lg:p-8">
         <div className="text-center">
           <div className="w-12 h-12 border-3 border-accent-primary border-t-transparent rounded-full animate-spin mx-auto mb-4" />
           <p className="text-default-500">加载收藏列表...</p>
@@ -561,7 +561,7 @@ export function FavoritesPage() {
   if (error) {
     if (featureState === 'disabled') {
       return (
-        <div className="h-full flex flex-col space-y-4 p-6 overflow-auto custom-scrollbar">
+        <div className="flex h-full min-h-0 flex-col space-y-4 overflow-auto p-4 custom-scrollbar sm:p-6">
           <PageHeader
             title="收藏夹"
             subtitle="功能已关闭"
@@ -580,7 +580,7 @@ export function FavoritesPage() {
 
     if (featureState === 'unavailable') {
       return (
-        <div className="h-full flex flex-col space-y-4 p-6 overflow-auto custom-scrollbar">
+        <div className="flex h-full min-h-0 flex-col space-y-4 overflow-auto p-4 custom-scrollbar sm:p-6">
           <PageHeader
             title="收藏夹"
             subtitle="暂不可用"
@@ -592,7 +592,7 @@ export function FavoritesPage() {
               title="收藏功能暂不可用"
               description="收藏存储未成功初始化，请检查系统健康状态或稍后重试。"
               action={
-                <Button variant="bordered" className="rounded-xl" onPress={handleRefreshFavorites}>
+                <Button variant="bordered" className="rounded-lg" onPress={handleRefreshFavorites}>
                   重新加载
                 </Button>
               }
@@ -603,7 +603,7 @@ export function FavoritesPage() {
     }
 
     return (
-      <div className="h-full flex flex-col space-y-4 p-6 overflow-auto custom-scrollbar">
+      <div className="flex h-full min-h-0 flex-col space-y-4 overflow-auto p-4 custom-scrollbar sm:p-6">
         <PageHeader
           title="收藏夹"
           subtitle="加载失败"
@@ -615,7 +615,7 @@ export function FavoritesPage() {
             title="加载收藏列表失败"
             description={(error as Error).message || '请稍后重试'}
             action={
-              <Button variant="bordered" className="rounded-xl" onPress={handleRefreshFavorites}>
+              <Button variant="bordered" className="rounded-lg" onPress={handleRefreshFavorites}>
                 重新加载
               </Button>
             }
@@ -626,7 +626,7 @@ export function FavoritesPage() {
   }
 
   return (
-    <div className="h-full flex flex-col space-y-4 p-6 overflow-auto custom-scrollbar">
+    <div className="flex h-full min-h-0 flex-col space-y-4 overflow-auto p-4 custom-scrollbar sm:p-6">
       {/* Header */}
       <PageHeader
         title="收藏夹"
@@ -636,13 +636,13 @@ export function FavoritesPage() {
 
       {/* Selection bar */}
       {canWrite && visibleSelectedItems.size > 0 && (
-        <div className="flex items-center gap-4 px-4 py-2.5 bg-accent-primary/10 backdrop-blur-sm rounded-xl border border-divider shadow-[var(--shadow-soft)]">
+        <div className="flex flex-wrap items-center gap-3 rounded-lg border border-divider bg-accent-primary/10 px-4 py-2.5 shadow-[var(--shadow-soft)]">
           <div className="w-8 h-8 rounded-full bg-accent-primary/15 flex items-center justify-center">
             <span className="text-sm font-bold text-accent-primary">{visibleSelectedItems.size}</span>
           </div>
           <span className="text-sm font-medium">已选择 {visibleSelectedItems.size} 项</span>
-          <div className="flex-1" />
-          <Button size="sm" variant="flat" onPress={() => setSelectedItems(new Set())} className="rounded-xl">
+          <div className="hidden flex-1 sm:block" />
+          <Button size="sm" variant="flat" onPress={() => setSelectedItems(new Set())} className="rounded-lg">
             取消选择
           </Button>
           <Button
@@ -652,7 +652,7 @@ export function FavoritesPage() {
             startContent={<Star size={14} />}
             onPress={handleBatchRemove}
             isLoading={isBatchRemoving}
-            className="rounded-xl"
+            className="rounded-lg"
           >
             取消收藏
           </Button>
@@ -661,7 +661,7 @@ export function FavoritesPage() {
 
       {/* List header */}
       {favoriteItems.length > 0 && (
-        <div className="flex items-center gap-4 px-4 py-2.5 bg-content2/50 backdrop-blur-sm rounded-xl border border-divider text-sm font-medium text-default-400">
+        <div className="hidden items-center gap-4 rounded-lg border border-divider bg-content2/50 px-4 py-2.5 text-sm font-medium text-default-400 sm:flex">
           {canWrite ? (
             <Checkbox
               isSelected={visibleSelectedItems.size === favoriteItems.length && favoriteItems.length > 0}
@@ -683,7 +683,7 @@ export function FavoritesPage() {
       )}
 
       {/* Item list */}
-      <div className="flex-1 overflow-auto card-meridian rounded-xl">
+      <div className="card-meridian min-h-0 flex-1 overflow-auto rounded-lg">
         {favoriteItems.length > 0 ? (
           favoriteItems.map(item => (
             <FavoriteRow
@@ -727,14 +727,14 @@ export function FavoritesPage() {
         placement="center"
         size="md"
         classNames={{
-          base: "bg-content1 border border-divider shadow-2xl rounded-2xl",
+          base: "bg-content1 border border-divider shadow-xl rounded-lg",
           backdrop: "bg-black/60 backdrop-blur-md",
           closeButton: "top-4 right-4 text-default-400 hover:text-foreground hover:bg-default-100 rounded-lg",
         }}
       >
         <ModalContent>
           <ModalHeader className="flex items-center gap-3 px-6 pt-6 pb-2">
-            <div className="w-10 h-10 rounded-xl bg-accent-primary/10 text-accent-primary flex items-center justify-center">
+            <div className="w-10 h-10 rounded-lg bg-accent-primary/10 text-accent-primary flex items-center justify-center">
               <Edit3 size={20} />
             </div>
             <div>
@@ -752,7 +752,7 @@ export function FavoritesPage() {
               onValueChange={setNoteValue}
               variant="bordered"
               classNames={{
-                inputWrapper: "rounded-xl",
+                inputWrapper: "rounded-lg",
               }}
             />
           </ModalBody>
@@ -761,7 +761,7 @@ export function FavoritesPage() {
               variant="flat"
               onPress={handleCloseEditModal}
               isDisabled={updateNoteMutation.isPending}
-              className="text-default-600 rounded-xl"
+              className="text-default-600 rounded-lg"
             >
               取消
             </Button>
@@ -769,7 +769,7 @@ export function FavoritesPage() {
               color="primary"
               onPress={handleSaveNote}
               isLoading={updateNoteMutation.isPending}
-              className="rounded-xl"
+              className="rounded-lg"
             >
               保存
             </Button>

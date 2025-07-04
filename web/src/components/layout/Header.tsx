@@ -89,42 +89,40 @@ export function Header({ onMenuClick }: HeaderProps) {
     }
   }, [location.pathname, navigate, searchQuery])
 
-  // Generate avatar URL based on username
-  const avatarUrl = user?.username 
-    ? `https://api.dicebear.com/7.x/avataaars/svg?seed=${user.username}`
-    : 'https://api.dicebear.com/7.x/avataaars/svg?seed=guest'
-
   const displayName = user?.username || '访客'
   const displayEmail = user?.email || 'guest@local'
+  const avatarName = displayName.slice(0, 2).toUpperCase()
 
   return (
-    <header className="h-16 border-b border-divider flex items-center justify-between px-4 lg:px-8 sticky top-0 z-40 glass">
+    <header className="header-surface sticky top-0 z-30 flex h-16 shrink-0 items-center justify-between border-b border-divider px-3 sm:px-4 lg:px-8">
       {/* Left section */}
-      <div className="flex items-center gap-4">
+      <div className="flex min-w-0 items-center gap-3">
         <button
           onClick={onMenuClick}
-          className="p-2 rounded-lg hover:bg-content2 lg:hidden"
+          className="rounded-lg p-2 hover:bg-content2 lg:hidden"
           aria-label="打开导航菜单"
         >
           <Menu size={20} className="text-default-600" />
         </button>
+        <div className="min-w-0 sm:hidden">
+          <h1 className="truncate text-base font-semibold">MnemoNAS</h1>
+        </div>
         <div className="hidden sm:block">
           <h1 className="text-lg font-semibold">私有云存储</h1>
-          <p className="text-muted-foreground text-xs">数据在自己手里，体验不输云服务</p>
+          <p className="text-muted-foreground text-xs">数据在自己手里，简单可靠地管理文件</p>
         </div>
       </div>
 
       {/* Right section: Search & Actions */}
-      <div className="flex items-center gap-2">
-        {/* Search - Mnemosyne Style */}
+      <div className="flex shrink-0 items-center gap-1.5 sm:gap-2">
         <div 
-          className="hidden sm:flex items-center gap-2 px-3 py-2 glass rounded-xl w-[240px] focus-within:border-accent-primary focus-within:ring-2 focus-within:ring-accent-primary/15 transition-all duration-200 cursor-pointer border border-transparent"
+          className="input-shell hidden w-[240px] cursor-pointer items-center gap-2 rounded-lg px-3 py-2 transition-all duration-200 focus-within:border-accent-primary focus-within:ring-2 focus-within:ring-accent-primary/15 md:flex lg:w-[280px]"
           onClick={handleSearchClick}
         >
           <Search size={16} className="text-default-500 shrink-0" />
           <input 
             type="text" 
-            placeholder="搜索文件与记忆" 
+            placeholder="搜索文件"
             className="flex-1 bg-transparent border-none outline-none text-[13px] text-foreground placeholder:text-default-500"
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
@@ -140,12 +138,12 @@ export function Header({ onMenuClick }: HeaderProps) {
           onPress={handleRefresh}
           isLoading={isRefreshing}
           aria-label="刷新数据"
-          className="rounded-xl"
+          className="rounded-lg"
         >
           <RefreshCw size={18} className={isRefreshing ? 'animate-spin' : ''} />
         </Button>
 
-        <Button isIconOnly variant="light" size="sm" aria-label="系统提醒设置" onPress={handleAlertsSettings} className="rounded-xl">
+        <Button isIconOnly variant="light" size="sm" aria-label="系统提醒设置" onPress={handleAlertsSettings} className="hidden rounded-lg sm:inline-flex">
           <Bell size={18} />
         </Button>
 
@@ -153,16 +151,19 @@ export function Header({ onMenuClick }: HeaderProps) {
 
         <Dropdown placement="bottom-end">
           <DropdownTrigger>
-            <button className="w-9 h-9 rounded-xl border border-divider glass p-0.5 hover:border-accent-primary/50 transition-colors overflow-hidden">
+            <button
+              className="h-9 w-9 overflow-hidden rounded-lg border border-divider bg-content1 p-0.5 transition-colors hover:border-accent-primary/50"
+              aria-label="打开用户菜单"
+            >
               <Avatar
-                src={avatarUrl}
-                className="w-full h-full rounded-lg"
+                name={avatarName}
+                className="h-full w-full rounded-md bg-primary/10 text-primary"
               />
             </button>
           </DropdownTrigger>
           <DropdownMenu 
             aria-label="User menu" 
-            className="w-56 bg-content1 border border-divider rounded-xl shadow-xl"
+            className="w-56 rounded-lg border border-divider bg-content1 shadow-xl"
             itemClasses={{
               base: "data-[hover=true]:bg-content2 data-[hover=true]:text-foreground text-default-600",
             }}
@@ -174,8 +175,8 @@ export function Header({ onMenuClick }: HeaderProps) {
             <DropdownItem key="profile" className="h-14 gap-2" textValue="Profile">
               <div className="flex items-center gap-3">
                 <Avatar
-                  src={avatarUrl}
-                  className="w-10 h-10"
+                  name={avatarName}
+                  className="h-10 w-10 bg-primary/10 text-primary"
                 />
                 <div>
                   <p className="font-semibold text-foreground">{displayName}</p>

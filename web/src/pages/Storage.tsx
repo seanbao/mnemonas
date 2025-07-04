@@ -12,9 +12,11 @@ import {
   Sparkles,
   TrendingUp,
   AlertCircle,
+  ShieldCheck,
 } from 'lucide-react'
 import { ApiError, getStorageStats } from '@/api/files'
 import { formatBytes } from '@/lib/utils'
+import { areDiskStatsAvailable, areStorageStatsAvailable, clampUsagePercent, formatFilesystemType, formatUsagePercent, getDiskSpaceStatus } from '@/lib/storageStats'
 import { PageHeader } from '@/components/ui/PageHeader'
 import { EmptyState } from '@/components/ui/EmptyState'
 import { useIsAdmin, useUser } from '@/stores/auth'
@@ -25,27 +27,6 @@ function formatStorageSize(value: number | undefined): string {
 
 function formatCount(value: number | undefined): string {
   return value === undefined ? '--' : value.toLocaleString()
-}
-
-function areStorageStatsAvailable(stats: {
-  storageStatsAvailable?: boolean
-  totalSize?: number
-  totalObjects?: number
-  uniqueSize?: number
-  dedupRatio?: number
-} | undefined): boolean {
-  if (!stats) {
-    return false
-  }
-  if (stats.storageStatsAvailable !== undefined) {
-    return stats.storageStatsAvailable
-  }
-  return (
-    stats.totalSize !== undefined
-    || stats.totalObjects !== undefined
-    || stats.uniqueSize !== undefined
-    || stats.dedupRatio !== undefined
-  )
 }
 
 function getStorageErrorPresentation(error: unknown): { title: string; description: string } {
@@ -77,12 +58,27 @@ function getStorageRefreshErrorToast(error: unknown): { title: string; descripti
   }
 }
 
+function getDiskUsageBarClass(level: 'unknown' | 'normal' | 'warning' | 'critical'): string {
+  if (level === 'critical') {
+    return 'bg-danger/70'
+  }
+  if (level === 'warning') {
+    return 'bg-warning/70'
+  }
+  return 'bg-accent-primary'
+}
+
+function getDiskSpacePanelClass(level: 'unknown' | 'normal' | 'warning' | 'critical'): string {
+  return level === 'critical'
+    ? 'border-danger/25 bg-danger/5 text-danger'
+    : 'border-warning/25 bg-warning/5 text-warning'
+}
+
 // Action card for maintenance operations
 function MaintenanceCard({
   title,
   description,
   icon: Icon,
-  gradient,
   lastRun,
   estimate,
   buttonText,
@@ -93,7 +89,6 @@ function MaintenanceCard({
   title: string
   description: string
   icon: React.ElementType
-  gradient: string
   lastRun: string
   estimate: string
   buttonText: string
@@ -103,10 +98,9 @@ function MaintenanceCard({
 }) {
   return (
     <div className="stat-card">
-      <div className={`absolute inset-0 bg-gradient-to-br ${gradient} rounded-2xl opacity-50`} />
       <div className="relative">
         <div className="flex items-center gap-3 mb-4">
-          <div className="gradient-meridian-subtle w-10 h-10 rounded-xl flex items-center justify-center">
+          <div className="gradient-meridian-subtle flex h-10 w-10 items-center justify-center rounded-lg">
             <Icon size={20} className="text-accent-primary" />
           </div>
           <div>
@@ -129,7 +123,7 @@ function MaintenanceCard({
         <Button 
           color={buttonColor} 
           variant="flat" 
-          className="w-full rounded-xl"
+          className="w-full rounded-lg"
           onPress={onPress}
           isDisabled={isDisabled}
         >
@@ -162,7 +156,7 @@ export function StoragePage() {
 
   if (isLoading) {
     return (
-      <div className="p-6 lg:p-8 space-y-6">
+      <div className="p-4 space-y-6 sm:p-6 lg:p-8">
         <div className="flex items-center gap-3">
           <div className="w-10 h-10 rounded-lg bg-accent-primary flex items-center justify-center">
             <HardDrive size={20} className="text-white" />
@@ -187,29 +181,29 @@ export function StoragePage() {
 
   if (error) {
     return (
-      <div className="p-6 lg:p-8 space-y-6">
-        <div className="flex items-center justify-between">
-          <PageHeader
-            title="存储管理"
-            subtitle="CAS 内容寻址存储系统"
-            icon={HardDrive}
-          />
-          <Button
-            variant="flat"
-            startContent={<RefreshCw size={16} />}
-            onPress={handleRefresh}
-            className="rounded-xl"
-          >
-            刷新
-          </Button>
-        </div>
+      <div className="p-4 space-y-6 sm:p-6 lg:p-8">
+        <PageHeader
+          title="存储管理"
+          subtitle="原生文件 + CAS 版本历史"
+          icon={HardDrive}
+          actions={
+            <Button
+              variant="flat"
+              startContent={<RefreshCw size={16} />}
+              onPress={handleRefresh}
+              className="rounded-lg"
+            >
+              刷新
+            </Button>
+          }
+        />
 
         <EmptyState
           icon={AlertCircle}
           title={storageErrorPresentation!.title}
           description={storageErrorPresentation!.description}
           action={
-            <Button variant="bordered" className="rounded-xl" onPress={handleRefresh}>
+            <Button variant="bordered" className="rounded-lg" onPress={handleRefresh}>
               重新加载
             </Button>
           }
@@ -219,59 +213,87 @@ export function StoragePage() {
   }
 
   const storageStatsAvailable = areStorageStatsAvailable(stats)
-  const usedBytes = storageStatsAvailable ? stats?.totalSize : undefined
-  const hasUsage = usedBytes !== undefined && usedBytes > 0
-  const storageKnown = storageStatsAvailable
+  const diskStatsAvailable = areDiskStatsAvailable(stats)
+  const casBytes = storageStatsAvailable ? stats?.totalSize : undefined
+  const diskUsedBytes = diskStatsAvailable ? stats?.diskUsed : undefined
+  const diskTotalBytes = diskStatsAvailable ? stats?.diskTotal : undefined
+  const diskAvailableBytes = diskStatsAvailable ? stats?.diskAvailable : undefined
+  const diskUsagePercent = diskStatsAvailable ? clampUsagePercent(stats?.diskUsageRatio) : undefined
+  const diskSpaceStatus = getDiskSpaceStatus(stats)
+  const shouldShowDiskSpaceAlert = diskSpaceStatus.level === 'warning' || diskSpaceStatus.level === 'critical'
+  const overviewUsedBytes = diskStatsAvailable ? diskUsedBytes : casBytes
+  const hasUsage = overviewUsedBytes !== undefined && overviewUsedBytes > 0
   const uniqueBytes = storageStatsAvailable ? stats?.uniqueSize ?? 0 : 0
-  const savedBytes = storageStatsAvailable && usedBytes !== undefined && stats?.uniqueSize !== undefined
-    ? Math.max(0, usedBytes - uniqueBytes)
+  const savedBytes = storageStatsAvailable && casBytes !== undefined && stats?.uniqueSize !== undefined
+    ? Math.max(0, casBytes - uniqueBytes)
     : undefined
+  const overviewSubtitle = diskStatsAvailable && diskUsedBytes !== undefined
+    ? `${formatBytes(diskUsedBytes)} 已使用${diskAvailableBytes !== undefined ? ` · ${formatBytes(diskAvailableBytes)} 可用` : ''}`
+    : casBytes !== undefined
+      ? `${formatBytes(casBytes)} CAS 数据 · 磁盘容量不可用`
+      : '统计不可用'
 
   const statsCards = [
+    {
+      title: '磁盘容量',
+      value: diskStatsAvailable ? formatStorageSize(diskTotalBytes) : '--',
+      icon: HardDrive,
+    },
+    {
+      title: '可用空间',
+      value: diskStatsAvailable ? formatStorageSize(diskAvailableBytes) : '--',
+      icon: Activity,
+    },
+    {
+      title: '磁盘占用',
+      value: diskStatsAvailable ? formatUsagePercent(stats?.diskUsageRatio) : '--',
+      icon: TrendingUp,
+    },
+    {
+      title: '文件系统',
+      value: diskStatsAvailable ? formatFilesystemType(stats?.diskFilesystemType) : '--',
+      icon: stats?.diskNativeDataChecksumSupport === true ? ShieldCheck : HardDrive,
+    },
     {
       title: '对象总数',
       value: storageStatsAvailable ? formatCount(stats?.totalObjects) : '--',
       icon: Database,
-      gradient: 'from-blue-500/20 to-violet-500/20',
     },
     {
-      title: '存储大小',
-      value: storageStatsAvailable ? formatStorageSize(stats?.totalSize) : '--',
-      icon: HardDrive,
-      gradient: 'from-emerald-500/20 to-cyan-500/20',
+      title: 'CAS 大小',
+      value: storageStatsAvailable ? formatStorageSize(casBytes) : '--',
+      icon: Database,
     },
     {
       title: '去重率',
       value: storageStatsAvailable && stats?.dedupRatio !== undefined ? `${(stats.dedupRatio * 100).toFixed(1)}%` : '--',
       icon: Sparkles,
-      gradient: 'from-violet-500/20 to-fuchsia-500/20',
     },
     {
       title: '节省空间',
       value: formatStorageSize(savedBytes),
       icon: TrendingUp,
-      gradient: 'from-amber-500/20 to-orange-500/20',
     },
   ]
 
   return (
-    <div className="p-6 lg:p-8 space-y-6">
+    <div className="p-4 space-y-6 sm:p-6 lg:p-8">
       {/* Header */}
-      <div className="flex items-center justify-between">
-        <PageHeader
-          title="存储管理"
-          subtitle="CAS 内容寻址存储系统"
-          icon={HardDrive}
-        />
-        <Button 
-          variant="flat" 
-          startContent={<RefreshCw size={16} />}
-          onPress={handleRefresh}
-          className="rounded-xl"
-        >
-          刷新
-        </Button>
-      </div>
+      <PageHeader
+        title="存储管理"
+        subtitle="原生文件 + CAS 版本历史"
+        icon={HardDrive}
+        actions={
+          <Button
+            variant="flat"
+            startContent={<RefreshCw size={16} />}
+            onPress={handleRefresh}
+            className="rounded-lg"
+          >
+            刷新
+          </Button>
+        }
+      />
 
       {/* Storage Overview Card */}
       <Card className="card-meridian">
@@ -283,7 +305,7 @@ export function StoragePage() {
             <div>
               <span className="font-semibold">存储空间使用情况</span>
               <p className="text-default-500 text-xs">
-                {usedBytes !== undefined ? `${formatBytes(usedBytes)} 已使用 · 容量未知` : '统计不可用'}
+                {overviewSubtitle}
               </p>
             </div>
           </div>
@@ -292,23 +314,31 @@ export function StoragePage() {
           <div className="space-y-2">
             <div className="h-2 rounded-full bg-content2 overflow-hidden">
               <div 
-                className={hasUsage ? "h-full bg-accent-primary rounded-full flow-line opacity-60" : "h-full bg-accent-primary/30 rounded-full"}
-                style={{ width: hasUsage ? '100%' : '0%' }}
+                className={hasUsage ? `h-full rounded-full flow-line opacity-70 ${getDiskUsageBarClass(diskSpaceStatus.level)}` : "h-full bg-accent-primary/30 rounded-full"}
+                style={{ width: diskUsagePercent !== undefined ? `${diskUsagePercent}%` : hasUsage ? '100%' : '0%' }}
               />
             </div>
             <div className="flex justify-between text-sm text-default-500">
-              <span>{usedBytes !== undefined ? '已用' : '统计不可用'}</span>
-              <span>{storageKnown ? '容量未知' : '--'}</span>
+              <span>{overviewUsedBytes !== undefined ? '已用' : '统计不可用'}</span>
+              <span>{diskStatsAvailable ? formatStorageSize(diskTotalBytes) : '--'}</span>
             </div>
+            {shouldShowDiskSpaceAlert && (
+              <div className={`mt-3 flex items-start gap-2 rounded-lg border p-3 ${getDiskSpacePanelClass(diskSpaceStatus.level)}`}>
+                <AlertCircle size={16} className="mt-0.5 shrink-0" />
+                <div className="min-w-0">
+                  <p className="text-sm font-medium text-foreground">{diskSpaceStatus.title}</p>
+                  <p className="mt-1 text-xs leading-5 text-default-600">{diskSpaceStatus.description}</p>
+                </div>
+              </div>
+            )}
           </div>
         </CardBody>
       </Card>
 
       {/* Stats Grid */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 md:grid-cols-3 xl:grid-cols-4">
         {statsCards.map((stat) => (
           <div key={stat.title} className="stat-card">
-            <div className={`absolute inset-0 bg-gradient-to-br ${stat.gradient} rounded-2xl opacity-50`} />
             <div className="relative">
               <div className="flex items-start justify-between">
                 <div>
@@ -317,7 +347,7 @@ export function StoragePage() {
                     <span className="data-value-large">{stat.value}</span>
                   </div>
                 </div>
-                <div className="gradient-meridian-subtle rounded-xl p-2.5">
+                <div className="gradient-meridian-subtle rounded-lg p-2.5">
                   <stat.icon className="text-accent-primary h-5 w-5" />
                 </div>
               </div>
@@ -332,7 +362,6 @@ export function StoragePage() {
           title="数据巡检 (Scrub)"
           description="验证所有数据完整性"
           icon={Activity}
-          gradient="from-emerald-500/20 to-cyan-500/20"
           lastRun="在系统维护中执行"
           estimate="支持随时启动"
           buttonText={isAdmin ? '打开维护工具' : '仅管理员可用'}
@@ -345,7 +374,6 @@ export function StoragePage() {
           title="垃圾回收 (GC)"
           description="清理无引用的数据块"
           icon={Trash2}
-          gradient="from-amber-500/20 to-orange-500/20"
           lastRun="在系统维护中执行"
           estimate="支持干运行与保护期"
           buttonText={isAdmin ? '打开维护工具' : '仅管理员可用'}

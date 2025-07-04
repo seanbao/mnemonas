@@ -740,19 +740,19 @@ func TestListWithFilters(t *testing.T) {
 	store.Log(ActionLogin, "", "user1", "192.168.1.2", nil)
 
 	// Filter by action
-	entries, total := store.List(10, 0, ActionUpload, "")
+	_, total := store.List(10, 0, ActionUpload, "")
 	if total != 2 {
 		t.Errorf("Expected 2 upload entries, got %d", total)
 	}
 
 	// Filter by user
-	entries, total = store.List(10, 0, "", "admin")
+	_, total = store.List(10, 0, "", "admin")
 	if total != 2 {
 		t.Errorf("Expected 2 admin entries, got %d", total)
 	}
 
 	// Filter by both
-	entries, total = store.List(10, 0, ActionUpload, "admin")
+	entries, total := store.List(10, 0, ActionUpload, "admin")
 	if total != 1 {
 		t.Errorf("Expected 1 admin upload entry, got %d", total)
 	}
