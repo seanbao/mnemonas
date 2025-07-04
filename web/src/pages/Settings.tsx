@@ -233,7 +233,7 @@ export function SettingsPage() {
     serverReadTimeout: '30s',
     serverWriteTimeout: '60s',
     serverIdleTimeout: '120s',
-    serverTrustedProxyHops: '1',
+    serverTrustedProxyHops: '0',
     tlsEnabled: false,
     tlsCertFile: '',
     tlsKeyFile: '',
@@ -354,7 +354,7 @@ export function SettingsPage() {
       serverReadTimeout: data.server.read_timeout,
       serverWriteTimeout: data.server.write_timeout,
       serverIdleTimeout: data.server.idle_timeout,
-      serverTrustedProxyHops: String(data.server.trusted_proxy_hops ?? 1),
+      serverTrustedProxyHops: String(data.server.trusted_proxy_hops ?? 0),
       tlsEnabled: data.server.tls?.enabled ?? false,
       tlsCertFile: data.server.tls?.cert_file ?? '',
       tlsKeyFile: data.server.tls?.key_file ?? '',
@@ -977,10 +977,10 @@ export function SettingsPage() {
                   <Divider className="bg-divider" />
                   <SettingRow
                     label="受信代理层数"
-                    description="按 X-Forwarded-For 从右向左回溯的代理层数；0 表示忽略转发头，1 适用于单层反向代理"
+                    description="默认忽略转发头；仅在受信反向代理后方部署时设置为实际代理层数"
                   >
                     <Input
-                      placeholder="1"
+                      placeholder="0"
                       type="number"
                       min={0}
                       inputMode="numeric"

@@ -295,7 +295,7 @@ export function FavoritesPage() {
   const { scopedHomeDir, hasInvalidHomeDir } = resolveUserHomeScope(user)
   const authScopeKey = user?.id ?? 'anonymous'
   const favoritesScopeKey = `${authScopeKey}:${hasInvalidHomeDir ? '__invalid__' : (scopedHomeDir ?? '/')}`
-  const favoritesQueryKey = ['favorites', favoritesScopeKey] as const
+  const favoritesQueryKey = useMemo(() => ['favorites', favoritesScopeKey] as const, [favoritesScopeKey])
   const [selectedItems, setSelectedItems] = useState<Set<string>>(new Set())
   const [editingItem, setEditingItem] = useState<Favorite | null>(null)
   const [noteValue, setNoteValue] = useState('')

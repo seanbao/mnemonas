@@ -40,7 +40,7 @@ MnemoNAS 数据分为以下几个部分：
 | ---- | ------ | ---- |
 | `files/` | ⭐⭐⭐ 极高 | 用户文件内容，丢失无法恢复 |
 | `.mnemonas/` | ⭐⭐⭐ 极高 | 元数据与版本对象 |
-| `secrets.json` | ⭐⭐ 中等 | JWT/WebDAV 密钥与初始密码 |
+| `secrets.json` | ⭐⭐ 中等 | JWT/WebDAV 密钥；首启 Web 管理员密码不长期保存在此文件 |
 | `config.toml` | ⭐⭐ 中等 | 默认位于 `~/.mnemonas/` |
 
 ---

@@ -159,7 +159,7 @@ server {
 }
 ```
 
-  若请求会经过多层反向代理，MnemoNAS 侧需要把 `[server].trusted_proxy_hops` 设置为实际代理层数。默认值 `1` 只适用于 app 前面只有一层受信代理的部署；多跳链路仍保留 `X-Forwarded-For $proxy_add_x_forwarded_for` 时，应显式调高该值，避免把上一级代理地址误判为客户端地址。
+  MnemoNAS 默认不信任 `X-Forwarded-*` 头。启用反向代理后，请把 `[server].trusted_proxy_hops` 设置为实际代理层数；单层代理设置为 `1`，多跳链路仍保留 `X-Forwarded-For $proxy_add_x_forwarded_for` 时，应设置为代理总层数，避免把上一级代理地址误判为客户端地址。
 
 ### 3. 启用站点并申请证书
 
@@ -213,7 +213,6 @@ services:
     image: mnemonas:latest
     volumes:
       - ~/.mnemonas:/root/.mnemonas
-      - ~/.mnemonas/config.toml:/root/.mnemonas/config.toml:ro
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.nas.rule=Host(`nas.example.com`)"

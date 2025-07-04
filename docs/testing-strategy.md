@@ -345,9 +345,9 @@ on:
     branches: [main]
 
 env:
-  GO_VERSION: '1.22'
-  RUST_VERSION: '1.75'
-  NODE_VERSION: '20'
+  GO_VERSION: '1.25'
+  RUST_VERSION: '1.92'
+  NODE_VERSION: '22'
 
 jobs:
   go:
@@ -390,7 +390,9 @@ jobs:
           args: --timeout=5m
 
       - name: Test
-        run: CGO_ENABLED=1 bash ./scripts/with-test-dataplane.sh go test -v -race -coverprofile=coverage.out ./...
+        run: |
+          packages=$(go list ./... | grep -v '/web/node_modules/')
+          CGO_ENABLED=1 bash ./scripts/with-test-dataplane.sh go test -v -race -coverprofile=coverage.out $packages
 
       - name: Upload coverage
         uses: codecov/codecov-action@v4
@@ -670,7 +672,7 @@ describe('useThemeStore', () => {
 
 **运行命令**：
 
-> Vitest 依赖 `Array.prototype.findLastIndex`，需 Node.js 20+。
+> 前端工具链需 Node.js 20.19+ 或 22.12+；推荐使用项目 `.nvmrc` 指定的 22.x。
 
 ```bash
 cd web

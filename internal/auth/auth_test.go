@@ -2512,6 +2512,10 @@ func TestAuthHandler(t *testing.T) {
 	})
 
 	t.Run("login rate limiting ignores spoofed leading forwarded for entries", func(t *testing.T) {
+		originalHops := requestip.TrustedProxyHops()
+		requestip.SetTrustedProxyHops(1)
+		defer requestip.SetTrustedProxyHops(originalHops)
+
 		h.loginFailureLimit = 2
 		h.loginFailureWindow = time.Minute
 		h.loginLockDuration = time.Minute

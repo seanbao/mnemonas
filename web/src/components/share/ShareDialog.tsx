@@ -22,14 +22,14 @@ import {
   Users,
   CheckCircle,
 } from 'lucide-react'
-import { createShare, copyShareUrl, ShareError, type Share, type CreateShareRequest } from '@/api/share'
+import { createShare, copyShareUrl, ShareError, type ShareCreateResult, type CreateShareRequest } from '@/api/share'
 
 interface ShareDialogProps {
   isOpen: boolean
   onClose: () => void
   filePath: string
   isFolder?: boolean
-  onShareCreated?: (share: Share) => void
+  onShareCreated?: (share: ShareCreateResult) => void
   featureEnabled?: boolean
   onFeatureDisabled?: () => void
 }
@@ -94,7 +94,7 @@ export function ShareDialog({
   onFeatureDisabled,
 }: ShareDialogProps) {
   const [isLoading, setIsLoading] = useState(false)
-  const [createdShare, setCreatedShare] = useState<Share | null>(null)
+  const [createdShare, setCreatedShare] = useState<ShareCreateResult | null>(null)
   const [featureDisabled, setFeatureDisabled] = useState(false)
   const createSessionRef = useRef(0)
   const currentFilePathRef = useRef(filePath)

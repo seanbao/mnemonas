@@ -17,7 +17,6 @@ import (
 type Secrets struct {
 	JWTSecret      string `json:"jwt_secret"`
 	WebDAVPassword string `json:"webdav_password,omitempty"` // Auto-generated if not configured
-	WebPassword    string `json:"web_password,omitempty"`    // Auto-generated initial admin password
 	SetupShown     bool   `json:"setup_shown,omitempty"`     // True if setup info has been shown to user
 }
 
@@ -53,6 +52,9 @@ func LoadSecrets(dataDir string) (*Secrets, error) {
 	var secrets Secrets
 	if err := json.Unmarshal(data, &secrets); err != nil {
 		return nil, fmt.Errorf("failed to parse secrets file: %w", err)
+	}
+	if err := scrubLegacyWebPassword(normalizedPath, data, &secrets); err != nil {
+		return nil, err
 	}
 	return &secrets, nil
 }
@@ -110,6 +112,9 @@ func LoadOrCreateSecrets(dataDir string) (*Secrets, bool, error) {
 			}
 			err = os.ErrNotExist
 		} else {
+			if err := scrubLegacyWebPassword(normalizedPath, data, &secrets); err != nil {
+				return nil, false, err
+			}
 			return &secrets, false, nil
 		}
 	}
@@ -143,6 +148,29 @@ func LoadOrCreateSecrets(dataDir string) (*Secrets, bool, error) {
 	}
 
 	return secrets, true, nil
+}
+
+func scrubLegacyWebPassword(secretsPath string, data []byte, secrets *Secrets) error {
+	if !hasLegacyWebPassword(data) {
+		return nil
+	}
+	cleanData, err := json.MarshalIndent(secrets, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to serialize scrubbed secrets: %w", err)
+	}
+	if err := writeSecretsFile(secretsPath, cleanData); err != nil {
+		return fmt.Errorf("failed to remove legacy web password from secrets file: %w", err)
+	}
+	return nil
+}
+
+func hasLegacyWebPassword(data []byte) bool {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return false
+	}
+	_, ok := raw["web_password"]
+	return ok
 }
 
 func recoverCorruptSecretsFile(secretsPath string, loadErr error) error {

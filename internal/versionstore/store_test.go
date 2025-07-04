@@ -1,6 +1,3 @@
-//go:build cgo
-// +build cgo
-
 package versionstore
 
 import (
@@ -857,7 +854,7 @@ func TestNew_UpgradesLegacyFileLocksSchema(t *testing.T) {
 
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "legacy-locks.db")
-	db, err := sql.Open("sqlite3", dbPath)
+	db, err := sql.Open(sqliteDriverName, versionStoreSQLiteDSN(dbPath))
 	if err != nil {
 		t.Fatalf("sql.Open() error: %v", err)
 	}

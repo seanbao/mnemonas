@@ -6,7 +6,7 @@ port = 8080
 read_timeout = "30s"
 write_timeout = "60s"
 idle_timeout = "120s"
-trusted_proxy_hops = 1        # 信任 app 前方的代理层数；0 表示完全忽略 X-Forwarded-For / X-Real-IP
+trusted_proxy_hops = 0        # 默认不信任 X-Forwarded-*；反向代理后方部署时设置为实际代理层数
 
 [server.tls]
 enabled = false              # 启用 HTTPS
