@@ -26,6 +26,16 @@ describe('activityDetails', () => {
     ])
   })
 
+  it('formats version restore details with a readable restore source', () => {
+    expect(getActivityDetailEntries('restore', {
+      restore_source: 'version',
+      hash: 'abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890',
+    })).toEqual([
+      { key: 'restore_source', label: '恢复来源', value: '版本历史' },
+      { key: 'hash', label: '版本哈希', value: 'abcdef123456...' },
+    ])
+  })
+
   it('omits details hidden by access filtering', () => {
     expect(getActivityDetailEntries('move', {
       to: '',

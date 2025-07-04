@@ -224,10 +224,6 @@ func (s requestScope) canAccess(targetPath string, mode accessMode) bool {
 	return strings.TrimSpace(s.homeDir) != "" && pathMatchesOrDescendant(path.Clean(s.homeDir), targetPath)
 }
 
-func (s requestScope) hasReadableDescendantRule(targetPath string) bool {
-	return len(s.readableDescendantRulePaths(targetPath)) > 0
-}
-
 func (s requestScope) hasReadableSharedRootPath(targetPath string) bool {
 	if !s.scoped || !s.hasAccessRules() {
 		return false
@@ -309,9 +305,9 @@ func accessRuleAllowsScope(rule DirectoryAccessRule, scope requestScope, mode ac
 		}
 	}
 
-	users := rule.ReadUsers
-	roles := rule.ReadRoles
-	groupsAllowed := rule.ReadGroups
+	var users []string
+	var roles []string
+	var groupsAllowed []string
 	if mode == accessWrite {
 		users = rule.WriteUsers
 		roles = rule.WriteRoles

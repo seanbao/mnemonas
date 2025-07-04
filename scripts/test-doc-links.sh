@@ -22,6 +22,7 @@ new_repo() {
 	local repo="$TMP_ROOT/$name"
 	mkdir -p "$repo/scripts"
 	cp "$REPO_ROOT/scripts/check-doc-links.sh" "$repo/scripts/check-doc-links.sh"
+	cp "$REPO_ROOT/go.mod" "$REPO_ROOT/go.sum" "$repo/"
 	chmod +x "$repo/scripts/check-doc-links.sh"
 	git -C "$repo" init -q
 	printf '%s\n' "$repo"
@@ -273,8 +274,70 @@ EOF
 	git -C "$repo" add README.en.md
 }
 
+write_valid_json_fence_doc() {
+	local repo="$1"
+	write_root_readme_pair "$repo"
+	cat >> "$repo/README.md" <<'EOF'
+
+```json
+{
+  "success": true,
+  "data": {
+    "id": "example"
+  }
+}
+```
+EOF
+	git -C "$repo" add README.md README.en.md
+}
+
+write_invalid_json_fence_doc() {
+	local repo="$1"
+	write_root_readme_pair "$repo"
+	cat >> "$repo/README.md" <<'EOF'
+
+```json
+{
+  "success": true,
+  "data": { ... }
+}
+```
+EOF
+	git -C "$repo" add README.md README.en.md
+}
+
+write_valid_toml_fence_doc() {
+	local repo="$1"
+	write_root_readme_pair "$repo"
+	cat >> "$repo/README.md" <<'EOF'
+
+```toml
+[server]
+host = "127.0.0.1"
+port = 8080
+```
+EOF
+	git -C "$repo" add README.md README.en.md
+}
+
+write_invalid_toml_fence_doc() {
+	local repo="$1"
+	write_root_readme_pair "$repo"
+	cat >> "$repo/README.md" <<'EOF'
+
+```toml
+[server]
+port = 8080
+port = 8081
+```
+EOF
+	git -C "$repo" add README.md README.en.md
+}
+
 run_accepts "valid-links" write_valid_docs
 run_accepts "untracked-valid-link-target" write_untracked_valid_doc
+run_accepts "valid-json-fence" write_valid_json_fence_doc
+run_accepts "valid-toml-fence" write_valid_toml_fence_doc
 run_rejects "missing-file" "missing link target: docs/missing.md" write_missing_file_doc
 run_rejects "escaping-link" "link escapes repository: ../outside.md" write_escaping_link_doc
 run_rejects "missing-anchor" "missing heading anchor: #missing-section" write_missing_anchor_doc
@@ -284,5 +347,7 @@ run_rejects "missing-chinese-index-entry" "docs/README.md: missing documentation
 run_rejects "missing-english-index-entry" "docs/README.en.md: missing documentation index entry: docs/operations.en.md" write_missing_english_index_entry
 run_rejects "missing-root-english-pair" "missing English documentation pair: README.en.md" write_missing_root_english_pair
 run_rejects "missing-root-chinese-pair" "missing Chinese documentation pair: README.md" write_missing_root_chinese_pair
+run_rejects "invalid-json-fence" "invalid json code fence" write_invalid_json_fence_doc
+run_rejects "invalid-toml-fence" "invalid toml code fence" write_invalid_toml_fence_doc
 
 printf '[doc-links-test] all checks passed\n'

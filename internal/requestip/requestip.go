@@ -50,6 +50,33 @@ func TrustedProxyCIDRs() []string {
 	return values
 }
 
+// RequestIsHTTPS reports whether a request is directly HTTPS or was forwarded
+// as HTTPS by a configured trusted proxy.
+func RequestIsHTTPS(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+	if r.TLS != nil {
+		return true
+	}
+	if TrustedProxyHops() <= 0 {
+		return false
+	}
+	if !IsTrustedForwardedSource(RemoteIP(r.RemoteAddr)) {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")), "https")
+}
+
+// RequestScheme returns the request scheme after applying the same trusted
+// proxy boundary used for Secure cookie decisions.
+func RequestScheme(r *http.Request) string {
+	if RequestIsHTTPS(r) {
+		return "https"
+	}
+	return "http"
+}
+
 // ClientIP returns the client IP for a request.
 // Forwarded headers are only trusted when the direct peer is loopback or an
 // explicitly configured trusted proxy.

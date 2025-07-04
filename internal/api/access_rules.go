@@ -207,9 +207,9 @@ func directoryAccessRuleAllowsUser(rule config.DirectoryAccessRuleConfig, user *
 		groups = append(groups, strings.ToLower(strings.TrimSpace(group)))
 	}
 
-	users := rule.ReadUsers
-	roles := rule.ReadRoles
-	groupsAllowed := rule.ReadGroups
+	var users []string
+	var roles []string
+	var groupsAllowed []string
 	if mode == pathAccessWrite {
 		users = rule.WriteUsers
 		roles = rule.WriteRoles
@@ -260,15 +260,6 @@ func (s *Server) evaluateUserPathAccessWithRules(user *auth.User, targetPath str
 	result.Read = s.evaluateUserPathAccessModeWithRules(user, targetPath, pathAccessRead, rules)
 	result.Write = s.evaluateUserPathAccessModeWithRules(user, targetPath, pathAccessWrite, rules)
 	return result
-}
-
-func (s *Server) evaluateUserPathAccessMode(user *auth.User, targetPath string, mode pathAccessMode) pathAccessEvaluation {
-	cfg := s.currentConfig()
-	var rules []config.DirectoryAccessRuleConfig
-	if cfg != nil {
-		rules = cfg.Storage.DirectoryAccessRules
-	}
-	return s.evaluateUserPathAccessModeWithRules(user, targetPath, mode, rules)
 }
 
 func (s *Server) evaluateUserPathAccessModeWithRules(user *auth.User, targetPath string, mode pathAccessMode, rules []config.DirectoryAccessRuleConfig) pathAccessEvaluation {

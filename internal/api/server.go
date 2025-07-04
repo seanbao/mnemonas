@@ -666,7 +666,7 @@ func newBackupAlertNotifier(monitor AlertMonitor, logger zerolog.Logger) backup.
 		alertEvent := alerts.EventPayload{
 			Type:      event.Type,
 			Level:     backupNotificationLevel(event.Level),
-			Message:   backup.SanitizeNotificationText(event.Message),
+			Message:   backupAlertMessage(event),
 			Timestamp: event.Timestamp,
 			Details:   backupAlertDetails(event),
 		}
@@ -680,6 +680,52 @@ func newBackupAlertNotifier(monitor AlertMonitor, logger zerolog.Logger) backup.
 		}
 		return nil
 	})
+}
+
+func backupAlertMessage(event backup.NotificationEvent) string {
+	failed := event.Status == backup.StatusFailed
+	switch event.Type {
+	case backup.NotificationTypeBackupRun:
+		if failed {
+			return "backup run failed"
+		}
+		return "backup run completed with warnings"
+	case backup.NotificationTypeRestore:
+		if failed {
+			return "backup restore failed"
+		}
+		return "backup restore completed with warnings"
+	case backup.NotificationTypeRestoreVerify:
+		if failed {
+			return "backup restore verification failed"
+		}
+		return "backup restore verification completed with warnings"
+	case backup.NotificationTypeRestoreDrill:
+		if event.Trigger == backup.NotificationTriggerReminder {
+			switch event.Status {
+			case "due":
+				return "backup restore drill is due"
+			case "stale":
+				return "backup restore drill is stale"
+			default:
+				return "backup restore drill reminder"
+			}
+		}
+		if failed {
+			return "backup restore drill failed"
+		}
+		return "backup restore drill requires attention"
+	case backup.NotificationTypeRetention:
+		if failed {
+			return "backup retention check failed"
+		}
+		return "backup retention check completed with warnings"
+	default:
+		if event.Level == backup.NotificationLevelCritical || failed {
+			return "backup event failed"
+		}
+		return "backup event requires attention"
+	}
 }
 
 func backupAlertDetails(event backup.NotificationEvent) map[string]any {
@@ -709,29 +755,19 @@ func backupAlertDetails(event backup.NotificationEvent) map[string]any {
 			details[key] = value
 		}
 	}
-	addStrings := func(key string, values []string) {
-		if len(values) > 0 {
-			sanitized := make([]string, len(values))
-			for i, value := range values {
-				sanitized[i] = backup.SanitizeNotificationText(value)
-			}
-			details[key] = sanitized
+	addBool := func(key string, value bool) {
+		if value {
+			details[key] = true
 		}
 	}
 
 	addString("job_id", event.JobID)
-	addString("job_name", event.JobName)
 	addString("job_type", event.JobType)
 	addString("run_id", event.RunID)
 	addString("trigger", event.Trigger)
 	addString("status", event.Status)
 	addTime("started_at", event.StartedAt)
 	addTimePtr("finished_at", event.FinishedAt)
-	addString("source", event.Source)
-	addString("destination", event.Destination)
-	addString("target_path", event.TargetPath)
-	addString("snapshot_path", event.SnapshotPath)
-	addString("manifest_path", event.ManifestPath)
 	addInt("snapshot_count", event.SnapshotCount)
 	addInt64("file_count", event.FileCount)
 	addInt64("total_bytes", event.TotalBytes)
@@ -741,10 +777,26 @@ func backupAlertDetails(event backup.NotificationEvent) map[string]any {
 	addString("stale_after", event.StaleAfter)
 	addString("reminder_cooldown", event.ReminderCooldown)
 	addInt("pruned_snapshots", event.PrunedSnapshots)
-	addStrings("warnings", event.Warnings)
-	addString("error_message", event.ErrorMessage)
+	addInt("warning_count", len(event.Warnings))
+	addBool("error_message_present", strings.TrimSpace(event.ErrorMessage) != "")
+	addBool("location_details_omitted", backupAlertHasLocationDetails(event))
 	addString("failure_category", event.FailureCategory)
 	return details
+}
+
+func backupAlertHasLocationDetails(event backup.NotificationEvent) bool {
+	for _, value := range []string{
+		event.Source,
+		event.Destination,
+		event.TargetPath,
+		event.SnapshotPath,
+		event.ManifestPath,
+	} {
+		if strings.TrimSpace(value) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func backupNotificationLevel(level string) alerts.AlertLevel {
@@ -1013,7 +1065,6 @@ func scrubAlertSampleErrors(errors []dataplane.ScrubError) []map[string]string {
 	samples := make([]map[string]string, 0, limit)
 	for _, scrubErr := range errors[:limit] {
 		samples = append(samples, map[string]string{
-			"hash":       scrubErr.Hash,
 			"error_type": scrubErr.ErrorType,
 			"message":    publicScrubObjectErrorMessage(scrubErr.ErrorType),
 		})
@@ -1686,15 +1737,7 @@ func requestMetadataOriginMatches(r *http.Request, rawURL string) bool {
 }
 
 func requestScheme(r *http.Request) string {
-	if r.TLS != nil {
-		return "https"
-	}
-	if requestip.TrustedProxyHops() > 0 &&
-		requestip.IsTrustedForwardedSource(requestip.RemoteIP(r.RemoteAddr)) &&
-		strings.EqualFold(strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")), "https") {
-		return "https"
-	}
-	return "http"
+	return requestip.RequestScheme(r)
 }
 
 func normalizeHTTPHostForScheme(scheme, rawHost string) string {
@@ -2945,7 +2988,7 @@ func (s *Server) handleUploadFile(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if errors.As(err, new(*quotaExceededError)) {
-			s.sendQuotaExceededAlertEvent(r.Context(), "upload", filePath, err)
+			s.sendQuotaExceededAlertEvent(r.Context(), "upload", err)
 			respondQuotaExceeded(w, err)
 			return
 		}
@@ -2961,7 +3004,7 @@ func (s *Server) handleUploadFile(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if errors.As(err, new(*quotaExceededError)) {
-			s.sendQuotaExceededAlertEvent(r.Context(), "upload", filePath, err)
+			s.sendQuotaExceededAlertEvent(r.Context(), "upload", err)
 			respondQuotaExceeded(w, err)
 			return
 		}
@@ -3457,7 +3500,7 @@ func (s *Server) handleMoveFile(w http.ResponseWriter, r *http.Request) {
 			moveWarning = true
 		} else {
 			if errors.As(err, new(*quotaExceededError)) {
-				s.sendQuotaExceededAlertEvent(r.Context(), "move", toPath, err)
+				s.sendQuotaExceededAlertEvent(r.Context(), "move", err)
 				respondQuotaExceeded(w, err)
 				return
 			}
@@ -3613,7 +3656,7 @@ func (s *Server) handleCopyFile(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if errors.As(err, new(*quotaExceededError)) {
-			s.sendQuotaExceededAlertEvent(r.Context(), "copy", toPath, err)
+			s.sendQuotaExceededAlertEvent(r.Context(), "copy", err)
 			respondQuotaExceeded(w, err)
 			return
 		}
@@ -3986,7 +4029,11 @@ func (s *Server) handleRestoreVersion(w http.ResponseWriter, r *http.Request) {
 	if err := s.restoreVersionWithQuota(r.Context(), filePath, hash); err != nil {
 		if errors.As(err, new(*storage.VisibleMutationWarningError)) {
 			markWorkspaceMutationWarningHeaders(w)
-			s.LogActivityWithWarning(w, r, activity.ActionRestore, filePath, map[string]string{"hash": hash, "persistence_warning": "true"})
+			s.LogActivityWithWarning(w, r, activity.ActionRestore, filePath, map[string]string{
+				"restore_source":      "version",
+				"hash":                hash,
+				"persistence_warning": "true",
+			})
 			NewAPIResponse(map[string]any{
 				"path":     filePath,
 				"restored": hash,
@@ -4007,7 +4054,7 @@ func (s *Server) handleRestoreVersion(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if errors.As(err, new(*quotaExceededError)) {
-			s.sendQuotaExceededAlertEvent(r.Context(), "version_restore", filePath, err)
+			s.sendQuotaExceededAlertEvent(r.Context(), "version_restore", err)
 			respondQuotaExceeded(w, err)
 			return
 		}
@@ -4020,7 +4067,10 @@ func (s *Server) handleRestoreVersion(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Log activity
-	s.LogActivityWithWarning(w, r, activity.ActionRestore, filePath, map[string]string{"hash": hash})
+	s.LogActivityWithWarning(w, r, activity.ActionRestore, filePath, map[string]string{
+		"restore_source": "version",
+		"hash":           hash,
+	})
 
 	NewAPIResponse(map[string]any{
 		"path":     filePath,
@@ -4191,15 +4241,58 @@ func addDiskStatsToMap(target map[string]any, stats *storage.DiskStats) {
 		target["disk_filesystem_type"] = stats.FileSystemType
 	}
 	if stats.MountPoint != "" {
-		target["disk_mount_point"] = stats.MountPoint
+		target["disk_mount_point"] = sanitizeDiskMountPath(stats.MountPoint)
 	}
 	if stats.MountSource != "" {
-		target["disk_mount_source"] = stats.MountSource
+		target["disk_mount_source"] = sanitizeDiskMountSource(stats.MountSource)
 	}
 	if stats.MountOptions != "" {
 		target["disk_mount_options"] = sanitizeDiskMountOptions(stats.MountOptions)
 	}
 	target["disk_native_data_checksum_support"] = stats.NativeDataChecksumSupport
+}
+
+func sanitizeDiskMountPath(mountPath string) string {
+	return backup.SanitizeNotificationText(mountPath)
+}
+
+func sanitizeDiskMountSource(source string) string {
+	redacted := backup.SanitizeNotificationText(source)
+	return redactMountSourceUserinfo(redacted)
+}
+
+func redactMountSourceUserinfo(source string) string {
+	if strings.TrimSpace(source) == "" {
+		return source
+	}
+
+	prefix := ""
+	authorityStart := -1
+	if strings.HasPrefix(source, "//") {
+		prefix = "//"
+		authorityStart = len(prefix)
+	} else if schemeEnd := strings.Index(source, "://"); schemeEnd > 0 {
+		prefix = source[:schemeEnd+3]
+		authorityStart = len(prefix)
+	}
+	if authorityStart < 0 {
+		return source
+	}
+
+	rest := source[authorityStart:]
+	authorityEnd := len(rest)
+	for _, separator := range []string{"/", "?", "#"} {
+		if index := strings.Index(rest, separator); index >= 0 && index < authorityEnd {
+			authorityEnd = index
+		}
+	}
+
+	authority := rest[:authorityEnd]
+	atIndex := strings.LastIndex(authority, "@")
+	if atIndex < 0 {
+		return source
+	}
+	return prefix + redactedSettingsSecretValue + "@" + authority[atIndex+1:] + rest[authorityEnd:]
 }
 
 func sanitizeDiskMountOptions(options string) string {
@@ -5659,7 +5752,7 @@ func (s *Server) handleRestoreFromTrash(w http.ResponseWriter, r *http.Request) 
 			restorePersistenceWarning = true
 		} else {
 			if errors.As(err, new(*quotaExceededError)) {
-				s.sendQuotaExceededAlertEvent(r.Context(), "trash_restore", quotaTargetPath, err)
+				s.sendQuotaExceededAlertEvent(r.Context(), "trash_restore", err)
 				respondQuotaExceeded(w, err)
 				return
 			}
@@ -6855,11 +6948,7 @@ func (s *Server) sendLoginRateLimitAlert(username, clientIP string) {
 		Level:     alerts.AlertLevelWarning,
 		Message:   "login attempts were rate limited",
 		Timestamp: apiTimeNow().UTC(),
-		Details: map[string]any{
-			"username":  username,
-			"client_ip": clientIP,
-			"trigger":   "rate_limited",
-		},
+		Details:   loginRateLimitAlertDetails(username, clientIP),
 	}
 
 	go func() {
@@ -6889,6 +6978,50 @@ func loginRateLimitAlertUsernameLabel(username string) string {
 		return "invalid username"
 	}
 	return username
+}
+
+func loginRateLimitAlertDetails(username, clientIP string) map[string]any {
+	return map[string]any{
+		"trigger":         "rate_limited",
+		"key_scope":       "username_client_ip",
+		"username_status": loginRateLimitAlertUsernameStatus(username),
+		"client_ip_scope": loginRateLimitAlertClientIPScope(clientIP),
+	}
+}
+
+func loginRateLimitAlertUsernameStatus(username string) string {
+	switch username {
+	case "", "unknown":
+		return "unknown"
+	case "invalid username":
+		return "invalid"
+	default:
+		return "provided"
+	}
+}
+
+func loginRateLimitAlertClientIPScope(clientIP string) string {
+	ip := net.ParseIP(strings.TrimSpace(clientIP))
+	if ip == nil {
+		return "unknown"
+	}
+
+	switch {
+	case ip.IsUnspecified():
+		return "unspecified"
+	case ip.IsLoopback():
+		return "loopback"
+	case ip.IsPrivate():
+		return "private"
+	case ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast():
+		return "link_local"
+	case ip.IsMulticast():
+		return "multicast"
+	case ip.IsGlobalUnicast():
+		return "public"
+	default:
+		return "unknown"
+	}
 }
 
 func (s *Server) reserveLoginRateLimitAlert(username, clientIP string) bool {
@@ -6987,6 +7120,199 @@ func securityCheckOverallStatus(checks []securityCheckItem) securityCheckStatus 
 		}
 	}
 	return status
+}
+
+func (s *Server) securityUsersFileAccessCheck(cfg *config.Config) securityCheckItem {
+	const checkID = "users_file_access"
+
+	if !s.authEnabled {
+		return securityCheckItem{
+			ID:      checkID,
+			Status:  securityCheckWarning,
+			Title:   "用户文件权限检查不可用",
+			Message: "Web 登录认证未启用；启用认证后会检查用户文件访问边界。",
+		}
+	}
+
+	usersFile := strings.TrimSpace(s.effectiveAuthUsersFile(cfg))
+	if usersFile == "" {
+		return securityCheckItem{
+			ID:      checkID,
+			Status:  securityCheckBlock,
+			Title:   "用户文件路径未配置",
+			Message: "Web 登录认证已启用，但无法确定用户文件路径。",
+		}
+	}
+
+	usersDir := filepath.Dir(usersFile)
+	details := map[string]interface{}{
+		"path": usersFile,
+		"dir":  usersDir,
+	}
+	dirInfo, err := os.Lstat(usersDir)
+	if err != nil {
+		details["error"] = err.Error()
+		return securityCheckItem{
+			ID:      checkID,
+			Status:  securityCheckBlock,
+			Title:   "用户文件目录不可读",
+			Message: "请确认用户文件目录存在，并且 MnemoNAS 服务账号可以读取。",
+			Details: details,
+		}
+	}
+	details["dir_mode"] = fmt.Sprintf("%04o", dirInfo.Mode().Perm())
+	if dirInfo.Mode()&os.ModeSymlink != 0 {
+		details["dir_kind"] = "symlink"
+		return securityCheckItem{
+			ID:      checkID,
+			Status:  securityCheckBlock,
+			Title:   "用户文件目录是符号链接",
+			Message: "请将用户文件目录改为服务账号可读取的普通私有目录。",
+			Details: details,
+		}
+	}
+	if !dirInfo.IsDir() {
+		details["dir_kind"] = "not_directory"
+		return securityCheckItem{
+			ID:      checkID,
+			Status:  securityCheckBlock,
+			Title:   "用户文件目录无效",
+			Message: "用户文件所在路径不是目录，请恢复为普通私有目录。",
+			Details: details,
+		}
+	}
+
+	fileInfo, err := os.Lstat(usersFile)
+	if err != nil {
+		details["error"] = err.Error()
+		return securityCheckItem{
+			ID:      checkID,
+			Status:  securityCheckBlock,
+			Title:   "用户文件不可读",
+			Message: "请确认用户文件存在，并且 MnemoNAS 服务账号可以读取。",
+			Details: details,
+		}
+	}
+	details["file_mode"] = fmt.Sprintf("%04o", fileInfo.Mode().Perm())
+	if fileInfo.Mode()&os.ModeSymlink != 0 {
+		details["file_kind"] = "symlink"
+		return securityCheckItem{
+			ID:      checkID,
+			Status:  securityCheckBlock,
+			Title:   "用户文件是符号链接",
+			Message: "请将用户文件恢复为普通私有文件，避免认证数据指向不受控路径。",
+			Details: details,
+		}
+	}
+	if !fileInfo.Mode().IsRegular() {
+		details["file_kind"] = "not_regular"
+		return securityCheckItem{
+			ID:      checkID,
+			Status:  securityCheckBlock,
+			Title:   "用户文件不是普通文件",
+			Message: "请将用户文件恢复为普通私有文件。",
+			Details: details,
+		}
+	}
+
+	dirOpen := dirInfo.Mode().Perm()&0o077 != 0
+	fileOpen := fileInfo.Mode().Perm()&0o077 != 0
+	if dirOpen || fileOpen {
+		details["dir_group_or_other_access"] = dirOpen
+		details["file_group_or_other_access"] = fileOpen
+		return securityCheckItem{
+			ID:      checkID,
+			Status:  securityCheckWarning,
+			Title:   "用户文件权限过宽",
+			Message: "用户文件或其目录允许组或其他用户访问；公网部署前建议将目录设为 0700、用户文件设为 0600。",
+			Details: details,
+		}
+	}
+
+	return securityCheckItem{
+		ID:      checkID,
+		Status:  securityCheckPass,
+		Title:   "用户文件权限为私有",
+		Message: "用户文件是普通文件，且用户文件及其目录不允许组或其他用户访问。",
+		Details: details,
+	}
+}
+
+func securityInitialPasswordFileCheck(initialPasswordFile string) securityCheckItem {
+	const checkID = "initial_password_file"
+
+	initialPasswordFile = strings.TrimSpace(initialPasswordFile)
+	details := map[string]interface{}{
+		"path": initialPasswordFile,
+	}
+	if initialPasswordFile == "" {
+		return securityCheckItem{
+			ID:      checkID,
+			Status:  securityCheckBlock,
+			Title:   "初始管理员密码路径无法确定",
+			Message: "无法从用户文件路径确定 initial-password.txt 位置；公网访问前请先修复 auth.users_file 配置。",
+			Details: details,
+		}
+	}
+
+	fileInfo, err := os.Lstat(initialPasswordFile)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return securityCheckItem{
+				ID:      checkID,
+				Status:  securityCheckPass,
+				Title:   "未发现初始密码文件",
+				Message: "初始管理员密码文件已不存在。",
+			}
+		}
+		details["error"] = err.Error()
+		return securityCheckItem{
+			ID:      checkID,
+			Status:  securityCheckWarning,
+			Title:   "无法确认初始密码文件状态",
+			Message: "请在服务器上确认 initial-password.txt 不存在。",
+			Details: details,
+		}
+	}
+
+	details["mode"] = fmt.Sprintf("%04o", fileInfo.Mode().Perm())
+	if fileInfo.Mode()&os.ModeSymlink != 0 {
+		details["path_kind"] = "symlink"
+		return securityCheckItem{
+			ID:      checkID,
+			Status:  securityCheckBlock,
+			Title:   "初始管理员密码路径是符号链接",
+			Message: "initial-password.txt 路径是符号链接；公网访问前请删除该路径，避免初始凭据指向不受控位置。",
+			Details: details,
+		}
+	}
+	if !fileInfo.Mode().IsRegular() {
+		details["path_kind"] = "not_regular"
+		return securityCheckItem{
+			ID:      checkID,
+			Status:  securityCheckBlock,
+			Title:   "初始管理员密码路径不是普通文件",
+			Message: "initial-password.txt 路径存在但不是普通文件；公网访问前请删除该路径。",
+			Details: details,
+		}
+	}
+
+	details["path_kind"] = "regular"
+	return securityCheckItem{
+		ID:      checkID,
+		Status:  securityCheckBlock,
+		Title:   "初始管理员密码文件仍存在",
+		Message: "请完成首次登录并确认该文件已被删除；公网访问前不要保留初始密码文件。",
+		Details: details,
+	}
+}
+
+func securityInitialPasswordFilePath(usersFile string) string {
+	usersFile = strings.TrimSpace(usersFile)
+	if usersFile == "" {
+		return ""
+	}
+	return filepath.Join(filepath.Dir(usersFile), "initial-password.txt")
 }
 
 func securityRemoteIPIsPublic(remoteIP string) bool {
@@ -7152,6 +7478,532 @@ func securityWebDAVBasicPasswordRisk(password string) string {
 	return ""
 }
 
+func securityWebDAVPrefixOverlapsReservedRoute(prefix string) bool {
+	normalized := config.NormalizeWebDAVPrefix(prefix)
+	if normalized == "/" {
+		return true
+	}
+
+	for _, reserved := range []string{"/api", "/s", "/health"} {
+		if normalized == reserved || strings.HasPrefix(normalized, reserved+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+func securityWebDAVPrefixRisk(prefix string) (string, string) {
+	trimmed := strings.TrimSpace(prefix)
+	normalized := config.NormalizeWebDAVPrefix(prefix)
+	if trimmed == "" {
+		return normalized, "empty"
+	}
+	for _, r := range normalized {
+		if r < 0x20 || r == 0x7f {
+			return normalized, "invalid_characters"
+		}
+	}
+	if strings.ContainsAny(normalized, "\\?#") {
+		return normalized, "invalid_characters"
+	}
+	if normalized == "/" {
+		return normalized, "root"
+	}
+	if securityWebDAVPrefixOverlapsReservedRoute(normalized) {
+		return normalized, "reserved_route"
+	}
+	return normalized, ""
+}
+
+func securityWebDAVPrefixCheck(cfg *config.Config) securityCheckItem {
+	const checkID = "webdav_prefix"
+
+	normalized, risk := securityWebDAVPrefixRisk(cfg.WebDAV.Prefix)
+	details := map[string]interface{}{
+		"webdav_enabled":     cfg.WebDAV.Enabled,
+		"prefix":             cfg.WebDAV.Prefix,
+		"normalized_prefix":  normalized,
+		"recommended_prefix": "/dav",
+	}
+
+	if !cfg.WebDAV.Enabled {
+		return securityCheckItem{
+			ID:      checkID,
+			Status:  securityCheckPass,
+			Title:   "WebDAV 前缀未启用",
+			Message: "WebDAV 未启用，不会占用额外的公开路径。",
+			Details: details,
+		}
+	}
+
+	if risk != "" {
+		details["prefix_risk"] = risk
+		title := "WebDAV 前缀不可用"
+		message := "WebDAV 前缀必须是独立的 URL 路径，不能覆盖 Web UI、API、分享或健康检查路由。"
+		switch risk {
+		case "empty":
+			title = "WebDAV 前缀为空"
+			message = "WebDAV 已启用，但前缀为空；请改为 /dav 或其他独立路径，避免挂载入口不明确。"
+		case "root":
+			title = "WebDAV 前缀覆盖站点根路径"
+			message = "WebDAV 前缀不能是站点根路径；请改为 /dav 或其他独立路径。"
+		case "reserved_route":
+			title = "WebDAV 前缀占用保留路由"
+			message = "WebDAV 前缀不能位于 /api、/s 或 /health 路由下；请改为 /dav 或其他独立路径。"
+		case "invalid_characters":
+			title = "WebDAV 前缀格式无效"
+			message = "WebDAV 前缀只能是 URL 路径，不能包含反斜杠、查询参数、片段或控制字符。"
+		}
+		return securityCheckItem{
+			ID:      checkID,
+			Status:  securityCheckBlock,
+			Title:   title,
+			Message: message,
+			Details: details,
+		}
+	}
+
+	return securityCheckItem{
+		ID:      checkID,
+		Status:  securityCheckPass,
+		Title:   "WebDAV 前缀可用",
+		Message: "WebDAV 挂载入口使用独立路径，不会覆盖 Web UI、API、分享或健康检查路由。",
+		Details: details,
+	}
+}
+
+func (s *Server) securityWebDAVAuthCheck(cfg *config.Config, webDAVAuthType, explicitPasswordRisk string, serverLoopback bool) securityCheckItem {
+	details := map[string]interface{}{
+		"prefix":    cfg.WebDAV.Prefix,
+		"auth_type": webDAVAuthType,
+		"read_only": cfg.WebDAV.ReadOnly,
+	}
+
+	switch {
+	case !cfg.WebDAV.Enabled:
+		return securityCheckItem{
+			ID:      "webdav_auth",
+			Status:  securityCheckPass,
+			Title:   "WebDAV 未启用",
+			Message: "当前没有额外的 WebDAV 暴露面。",
+		}
+	case webDAVAuthType == "basic" && strings.TrimSpace(cfg.WebDAV.Password) == "":
+		details["password_source"] = "generated"
+		runtimeCfg := s.currentActiveWebDAV()
+		runtimeAuthType := config.NormalizeWebDAVAuthType(runtimeCfg.AuthType)
+		generatedPassword := strings.TrimSpace(runtimeCfg.Password)
+		generatedAvailable := runtimeCfg.Enabled && runtimeAuthType == "basic" && generatedPassword != ""
+		details["generated_password_available"] = generatedAvailable
+		details["runtime_enabled"] = runtimeCfg.Enabled
+		details["runtime_auth_type"] = runtimeAuthType
+		if !generatedAvailable {
+			return securityCheckItem{
+				ID:      "webdav_auth",
+				Status:  securityCheckBlock,
+				Title:   "自动 WebDAV 密码不可用",
+				Message: "WebDAV 使用自动生成 Basic Auth 密码，但运行态没有加载到可用密码；请检查 secrets.json，设置自定义强密码，或改用 MnemoNAS 用户认证。",
+				Details: details,
+			}
+		}
+		if generatedPasswordRisk := securityWebDAVBasicPasswordRisk(generatedPassword); generatedPasswordRisk != "" {
+			details["password_risk"] = generatedPasswordRisk
+			return securityCheckItem{
+				ID:      "webdav_auth",
+				Status:  securityCheckWarning,
+				Title:   "自动 WebDAV 密码需要更换",
+				Message: "WebDAV 使用自动生成 Basic Auth 密码，但当前密码不满足公网强度建议；请设置自定义强密码，或改用 MnemoNAS 用户认证。",
+				Details: details,
+			}
+		}
+		return securityCheckItem{
+			ID:      "webdav_auth",
+			Status:  securityCheckPass,
+			Title:   "WebDAV 已启用认证",
+			Message: "WebDAV 入口使用自动生成的 Basic 凭据。",
+			Details: details,
+		}
+	case webDAVAuthType == "basic" && explicitPasswordRisk != "":
+		details["password_source"] = "configured"
+		details["password_risk"] = explicitPasswordRisk
+		return securityCheckItem{
+			ID:      "webdav_auth",
+			Status:  securityCheckWarning,
+			Title:   "WebDAV Basic 密码需要更换",
+			Message: "WebDAV 使用全局 Basic Auth 且配置了弱密码或示例密码；公网访问前应改为自动生成密码、自定义强密码，或切换到 MnemoNAS 用户认证。",
+			Details: details,
+		}
+	case webDAVAuthType == "basic" || webDAVAuthType == "users":
+		message := "WebDAV 入口使用独立 Basic 凭据。"
+		if webDAVAuthType == "users" {
+			message = "WebDAV 入口使用 MnemoNAS 用户账号，并按角色、home_dir 和配额限制访问。"
+		}
+		return securityCheckItem{
+			ID:      "webdav_auth",
+			Status:  securityCheckPass,
+			Title:   "WebDAV 已启用认证",
+			Message: message,
+			Details: details,
+		}
+	case webDAVAuthType == "none" && serverLoopback:
+		return securityCheckItem{
+			ID:      "webdav_auth",
+			Status:  securityCheckWarning,
+			Title:   "WebDAV 当前无独立认证",
+			Message: "当前 Web 服务仅监听本机；如经反向代理公开 WebDAV，请在代理层或 WebDAV 配置中启用认证。",
+			Details: details,
+		}
+	default:
+		return securityCheckItem{
+			ID:      "webdav_auth",
+			Status:  securityCheckBlock,
+			Title:   "WebDAV 暴露面缺少认证",
+			Message: "WebDAV 已启用但认证方式不是 basic 或 users，公网访问前必须启用认证或关闭 WebDAV。",
+			Details: details,
+		}
+	}
+}
+
+const (
+	securityRecommendedAccessTokenTTL  = time.Hour
+	securityRecommendedRefreshTokenTTL = 30 * 24 * time.Hour
+	securityRecommendedShareDefaultTTL = 30 * 24 * time.Hour
+)
+
+func securityDurationSeconds(value time.Duration) int64 {
+	return int64(value / time.Second)
+}
+
+func securitySameSiteString(mode http.SameSite) string {
+	switch mode {
+	case http.SameSiteDefaultMode:
+		return "Default"
+	case http.SameSiteLaxMode:
+		return "Lax"
+	case http.SameSiteStrictMode:
+		return "Strict"
+	case http.SameSiteNoneMode:
+		return "None"
+	default:
+		return "unknown"
+	}
+}
+
+func securitySessionTokenTTLCheck(cfg *config.Config, authEnabled bool) securityCheckItem {
+	const checkID = "session_token_ttl"
+
+	details := map[string]interface{}{
+		"access_token_ttl":                      cfg.Auth.AccessTokenTTL.String(),
+		"refresh_token_ttl":                     cfg.Auth.RefreshTokenTTL.String(),
+		"access_token_ttl_seconds":              securityDurationSeconds(cfg.Auth.AccessTokenTTL),
+		"refresh_token_ttl_seconds":             securityDurationSeconds(cfg.Auth.RefreshTokenTTL),
+		"recommended_access_token_ttl":          securityRecommendedAccessTokenTTL.String(),
+		"recommended_refresh_token_ttl":         securityRecommendedRefreshTokenTTL.String(),
+		"recommended_access_token_ttl_seconds":  securityDurationSeconds(securityRecommendedAccessTokenTTL),
+		"recommended_refresh_token_ttl_seconds": securityDurationSeconds(securityRecommendedRefreshTokenTTL),
+	}
+
+	if !authEnabled {
+		return securityCheckItem{
+			ID:      checkID,
+			Status:  securityCheckWarning,
+			Title:   "会话有效期检查不可用",
+			Message: "Web 登录认证未启用；启用认证后会检查访问令牌和刷新令牌有效期。",
+			Details: details,
+		}
+	}
+
+	if cfg.Auth.AccessTokenTTL <= 0 || cfg.Auth.RefreshTokenTTL <= 0 {
+		return securityCheckItem{
+			ID:      checkID,
+			Status:  securityCheckBlock,
+			Title:   "会话有效期配置无效",
+			Message: "访问令牌和刷新令牌有效期必须为正值。",
+			Details: details,
+		}
+	}
+
+	accessTooLong := cfg.Auth.AccessTokenTTL > securityRecommendedAccessTokenTTL
+	refreshTooLong := cfg.Auth.RefreshTokenTTL > securityRecommendedRefreshTokenTTL
+	if accessTooLong || refreshTooLong {
+		details["access_token_ttl_too_long"] = accessTooLong
+		details["refresh_token_ttl_too_long"] = refreshTooLong
+		return securityCheckItem{
+			ID:      checkID,
+			Status:  securityCheckWarning,
+			Title:   "会话有效期偏长",
+			Message: "访问令牌或刷新令牌有效期长于公网部署建议值；公网访问前建议缩短有效期，降低会话泄露后的风险窗口。",
+			Details: details,
+		}
+	}
+
+	return securityCheckItem{
+		ID:      checkID,
+		Status:  securityCheckPass,
+		Title:   "会话有效期符合公网建议",
+		Message: "访问令牌和刷新令牌有效期处于建议范围内。",
+		Details: details,
+	}
+}
+
+func securityLoginRateLimitCheck(authEnabled bool, handler *auth.Handler) securityCheckItem {
+	const checkID = "login_rate_limit"
+
+	policy := auth.LoginRateLimitPolicy{}
+	if handler != nil {
+		policy = handler.LoginRateLimitPolicy()
+	}
+	details := map[string]interface{}{
+		"auth_enabled":                 authEnabled,
+		"enabled":                      policy.Enabled,
+		"failure_limit":                policy.FailureLimit,
+		"failure_window":               policy.FailureWindow.String(),
+		"failure_window_seconds":       securityDurationSeconds(policy.FailureWindow),
+		"lock_duration":                policy.LockDuration.String(),
+		"lock_duration_seconds":        securityDurationSeconds(policy.LockDuration),
+		"alert_event":                  "login_rate_limited",
+		"alert_cooldown":               loginRateLimitAlertCooldown.String(),
+		"alert_cooldown_seconds":       securityDurationSeconds(loginRateLimitAlertCooldown),
+		"key_scope":                    "username_and_client_ip",
+		"invalid_credentials_response": "generic",
+	}
+
+	if !authEnabled {
+		return securityCheckItem{
+			ID:      checkID,
+			Status:  securityCheckWarning,
+			Title:   "登录限速检查不可用",
+			Message: "Web 登录认证未启用；启用认证后会对连续失败登录进行限速。",
+			Details: details,
+		}
+	}
+
+	if !policy.Enabled {
+		return securityCheckItem{
+			ID:      checkID,
+			Status:  securityCheckBlock,
+			Title:   "登录失败限速未启用",
+			Message: "Web 登录认证已启用，但连续失败登录限速策略不可用；公网访问前必须修复登录防护。",
+			Details: details,
+		}
+	}
+
+	return securityCheckItem{
+		ID:      checkID,
+		Status:  securityCheckPass,
+		Title:   "登录失败限速已启用",
+		Message: "连续失败登录会按用户名和客户端 IP 触发短期锁定，并产生登录限速提醒事件。",
+		Details: details,
+	}
+}
+
+func securityPublicShareBoundaryCheck(cfg *config.Config, requestSchemeValue string) securityCheckItem {
+	const checkID = "public_share_boundary"
+
+	policy := share.PublicShareAccessPolicySnapshot()
+	secureCookie := requestSchemeValue == "https"
+	passwordRateLimitEnabled := policy.PasswordFailureLimit > 0 &&
+		policy.PasswordFailureWindow > 0 &&
+		policy.PasswordLockDuration > 0
+	details := map[string]interface{}{
+		"share_enabled":                           cfg.Share.Enabled,
+		"password_cookie_secure":                  secureCookie,
+		"password_cookie_http_only":               policy.CookieHTTPOnly,
+		"password_cookie_same_site":               securitySameSiteString(policy.CookieSameSite),
+		"password_cookie_paths":                   policy.CookiePaths,
+		"password_cookie_name_prefix":             policy.CookieNamePrefix,
+		"password_rate_limit_enabled":             passwordRateLimitEnabled,
+		"password_failure_limit":                  policy.PasswordFailureLimit,
+		"password_failure_window":                 policy.PasswordFailureWindow.String(),
+		"password_failure_window_seconds":         securityDurationSeconds(policy.PasswordFailureWindow),
+		"password_lock_duration":                  policy.PasswordLockDuration.String(),
+		"password_lock_duration_seconds":          securityDurationSeconds(policy.PasswordLockDuration),
+		"metadata_cache_control":                  policy.MetadataCacheControl,
+		"metadata_vary_cookie":                    policy.MetadataVaryCookie,
+		"metadata_content_type_nosniff":           policy.MetadataNosniff,
+		"metadata_referrer_policy":                policy.MetadataReferrerPolicy,
+		"public_download_json_errors_no_cache":    true,
+		"public_download_json_errors_nosniff":     true,
+		"public_download_json_errors_no_referrer": true,
+		"request_scheme":                          requestSchemeValue,
+	}
+
+	if !cfg.Share.Enabled {
+		return securityCheckItem{
+			ID:      checkID,
+			Status:  securityCheckPass,
+			Title:   "公开分享未启用",
+			Message: "公开分享未启用，不会下发公开分享访问 cookie。",
+			Details: details,
+		}
+	}
+
+	if !secureCookie {
+		return securityCheckItem{
+			ID:      checkID,
+			Status:  securityCheckWarning,
+			Title:   "公开分享访问 cookie 未使用 Secure",
+			Message: "分享功能已启用，但当前请求未被识别为 HTTPS；受密码保护的公开分享访问 cookie 不会带 Secure 标记。",
+			Details: details,
+		}
+	}
+
+	if !policy.CookieHTTPOnly || policy.CookieSameSite != http.SameSiteStrictMode || !passwordRateLimitEnabled ||
+		!policy.MetadataVaryCookie || !policy.MetadataNosniff || policy.MetadataCacheControl == "" || policy.MetadataReferrerPolicy == "" {
+		return securityCheckItem{
+			ID:      checkID,
+			Status:  securityCheckBlock,
+			Title:   "公开分享浏览器边界异常",
+			Message: "公开分享访问 cookie、失败限速或缓存边界未满足公网安全要求。",
+			Details: details,
+		}
+	}
+
+	return securityCheckItem{
+		ID:      checkID,
+		Status:  securityCheckPass,
+		Title:   "公开分享浏览器边界符合公网建议",
+		Message: "受密码保护的公开分享使用 HttpOnly、SameSite=Strict、Secure 访问 cookie，并为公开分享 JSON 响应设置私有缓存和 Cookie Vary 边界。",
+		Details: details,
+	}
+}
+
+func securityBrowserSessionBoundaryCheck(r *http.Request, cfg *config.Config, authEnabled bool, requestSchemeValue, remoteIP string, trustedForwardedSource bool) securityCheckItem {
+	const checkID = "browser_session_boundary"
+
+	secureCookie := requestSchemeValue == "https"
+	details := map[string]interface{}{
+		"auth_enabled":                                authEnabled,
+		"session_cookie_secure":                       secureCookie,
+		"primary_session_cookie_http_only":            true,
+		"primary_session_cookie_same_site":            "Lax",
+		"download_session_cookie_http_only":           true,
+		"download_session_cookie_same_site":           "Strict",
+		"same_origin_browser_write_protection":        true,
+		"origin_metadata_required_for_browser_writes": true,
+		"request_scheme":                              requestSchemeValue,
+		"direct_tls":                                  r.TLS != nil,
+		"forwarded_proto":                             strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")),
+		"remote_ip":                                   remoteIP,
+		"trusted_forwarded_source":                    trustedForwardedSource,
+		"trusted_proxy_hops":                          cfg.Server.TrustedProxyHops,
+		"trusted_proxy_cidrs":                         cfg.Server.TrustedProxyCIDRs,
+	}
+
+	if !authEnabled {
+		return securityCheckItem{
+			ID:      checkID,
+			Status:  securityCheckWarning,
+			Title:   "浏览器会话边界检查不可用",
+			Message: "Web 登录认证未启用；启用认证后会检查 Web UI 会话 cookie 和浏览器写请求同源边界。",
+			Details: details,
+		}
+	}
+
+	if !secureCookie {
+		return securityCheckItem{
+			ID:      checkID,
+			Status:  securityCheckWarning,
+			Title:   "浏览器会话 cookie 未使用 Secure",
+			Message: "当前请求未被识别为 HTTPS，Web UI 会话和下载 cookie 不会带 Secure 标记；公网访问前请启用 TLS 或配置受信反向代理转发 X-Forwarded-Proto=https。",
+			Details: details,
+		}
+	}
+
+	return securityCheckItem{
+		ID:      checkID,
+		Status:  securityCheckPass,
+		Title:   "浏览器会话边界符合公网建议",
+		Message: "当前访问会为 Web UI 会话和下载 cookie 设置 Secure 标记，且浏览器写请求会经过同源元数据校验。",
+		Details: details,
+	}
+}
+
+func securityShareDefaultPolicyCheck(cfg *config.Config) securityCheckItem {
+	const checkID = "share_default_policy"
+
+	details := map[string]interface{}{
+		"share_enabled":                          cfg.Share.Enabled,
+		"default_expires_in":                     cfg.Share.DefaultExpiresIn.String(),
+		"default_expires_in_seconds":             securityDurationSeconds(cfg.Share.DefaultExpiresIn),
+		"default_max_access":                     cfg.Share.DefaultMaxAccess,
+		"default_max_access_unlimited":           cfg.Share.DefaultMaxAccess == 0,
+		"recommended_default_expires_in":         securityRecommendedShareDefaultTTL.String(),
+		"recommended_default_expires_in_seconds": securityDurationSeconds(securityRecommendedShareDefaultTTL),
+		"policy_rule_count":                      len(cfg.Share.PolicyRules),
+	}
+
+	if !cfg.Share.Enabled {
+		return securityCheckItem{
+			ID:      checkID,
+			Status:  securityCheckPass,
+			Title:   "分享默认策略未启用",
+			Message: "分享功能未启用，不会生成新的公开分享链接。",
+			Details: details,
+		}
+	}
+
+	if cfg.Share.DefaultExpiresIn < 0 || cfg.Share.DefaultMaxAccess < 0 {
+		return securityCheckItem{
+			ID:      checkID,
+			Status:  securityCheckBlock,
+			Title:   "分享默认策略无效",
+			Message: "分享默认有效期和默认访问次数不能为负值。",
+			Details: details,
+		}
+	}
+
+	if cfg.Share.DefaultExpiresIn == 0 && cfg.Share.DefaultMaxAccess == 0 {
+		details["default_expires_in_unlimited"] = true
+		return securityCheckItem{
+			ID:      checkID,
+			Status:  securityCheckWarning,
+			Title:   "新分享默认不会过期且访问次数不限制",
+			Message: "分享功能已启用，但新分享默认没有过期时间和访问次数上限；公网访问前建议同时设置默认有效期和默认访问次数。",
+			Details: details,
+		}
+	}
+
+	if cfg.Share.DefaultExpiresIn == 0 {
+		details["default_expires_in_unlimited"] = true
+		return securityCheckItem{
+			ID:      checkID,
+			Status:  securityCheckWarning,
+			Title:   "新分享默认不会过期",
+			Message: "分享功能已启用，但新分享默认没有过期时间；公网访问前建议设置默认有效期，避免长期公开链接被遗忘。",
+			Details: details,
+		}
+	}
+
+	if cfg.Share.DefaultExpiresIn > securityRecommendedShareDefaultTTL {
+		details["default_expires_in_too_long"] = true
+		return securityCheckItem{
+			ID:      checkID,
+			Status:  securityCheckWarning,
+			Title:   "新分享默认有效期偏长",
+			Message: "新分享默认有效期长于公网部署建议值；公网访问前建议缩短默认有效期。",
+			Details: details,
+		}
+	}
+
+	if cfg.Share.DefaultMaxAccess == 0 {
+		return securityCheckItem{
+			ID:      checkID,
+			Status:  securityCheckWarning,
+			Title:   "新分享默认访问次数不限制",
+			Message: "分享功能已启用，但新分享默认没有访问次数上限；公网访问前建议设置默认访问次数，避免公开链接被反复访问。",
+			Details: details,
+		}
+	}
+
+	return securityCheckItem{
+		ID:      checkID,
+		Status:  securityCheckPass,
+		Title:   "分享默认策略符合建议",
+		Message: "新分享默认有效期和默认访问次数处于公网部署建议范围内。",
+		Details: details,
+	}
+}
+
 func (s *Server) handleGetSecurityCheck(w http.ResponseWriter, r *http.Request) {
 	cfg := s.currentConfig()
 	if cfg == nil {
@@ -7173,14 +8025,14 @@ func (s *Server) handleGetSecurityCheck(w http.ResponseWriter, r *http.Request) 
 	dataplaneHTTPLoopback := securityListenHostIsLoopback(dataplaneHTTPHost)
 	smbHost := securityTCPAddressHost(cfg.SMB.Listen)
 	smbLoopback := securityListenHostIsLoopback(smbHost)
-	initialPasswordFile := filepath.Join(filepath.Dir(s.effectiveAuthUsersFile(cfg)), "initial-password.txt")
+	initialPasswordFile := securityInitialPasswordFilePath(s.effectiveAuthUsersFile(cfg))
 	forwardedProto := strings.TrimSpace(r.Header.Get("X-Forwarded-Proto"))
 	remotePublic := securityRemoteIPIsPublic(remoteIP)
 	webDAVAuthType := config.NormalizeWebDAVAuthType(cfg.WebDAV.AuthType)
 	webDAVPasswordRisk := securityWebDAVBasicPasswordRisk(cfg.WebDAV.Password)
 	unsafeNoAuthRisk := cfg.Security.AllowUnsafeNoAuth && !serverLoopback && (!s.authEnabled || (cfg.WebDAV.Enabled && webDAVAuthType == "none"))
 
-	checks := make([]securityCheckItem, 0, 14)
+	checks := make([]securityCheckItem, 0, 21)
 
 	if s.authEnabled {
 		checks = append(checks, securityCheckItem{
@@ -7197,6 +8049,12 @@ func (s *Server) handleGetSecurityCheck(w http.ResponseWriter, r *http.Request) 
 			Message: "公网访问前必须启用账号登录。",
 		})
 	}
+
+	checks = append(checks, securitySessionTokenTTLCheck(cfg, s.authEnabled))
+	checks = append(checks, securityLoginRateLimitCheck(s.authEnabled, s.authHandler))
+	checks = append(checks, securityBrowserSessionBoundaryCheck(r, cfg, s.authEnabled, requestSchemeValue, remoteIP, trustedForwardedSource))
+	checks = append(checks, securityPublicShareBoundaryCheck(cfg, requestSchemeValue))
+	checks = append(checks, securityShareDefaultPolicyCheck(cfg))
 
 	if cfg.Security.AllowUnsafeNoAuth {
 		status := securityCheckWarning
@@ -7228,6 +8086,8 @@ func (s *Server) handleGetSecurityCheck(w http.ResponseWriter, r *http.Request) 
 			},
 		})
 	}
+
+	checks = append(checks, s.securityUsersFileAccessCheck(cfg))
 
 	if requestSchemeValue == "https" {
 		checks = append(checks, securityCheckItem{
@@ -7522,68 +8382,8 @@ func (s *Server) handleGetSecurityCheck(w http.ResponseWriter, r *http.Request) 
 		})
 	}
 
-	switch {
-	case !cfg.WebDAV.Enabled:
-		checks = append(checks, securityCheckItem{
-			ID:      "webdav_auth",
-			Status:  securityCheckPass,
-			Title:   "WebDAV 未启用",
-			Message: "当前没有额外的 WebDAV 暴露面。",
-		})
-	case webDAVAuthType == "basic" && webDAVPasswordRisk != "":
-		checks = append(checks, securityCheckItem{
-			ID:      "webdav_auth",
-			Status:  securityCheckWarning,
-			Title:   "WebDAV Basic 密码需要更换",
-			Message: "WebDAV 使用全局 Basic Auth 且配置了弱密码或示例密码；公网访问前应改为自动生成密码、自定义强密码，或切换到 MnemoNAS 用户认证。",
-			Details: map[string]interface{}{
-				"prefix":        cfg.WebDAV.Prefix,
-				"auth_type":     webDAVAuthType,
-				"read_only":     cfg.WebDAV.ReadOnly,
-				"password_risk": webDAVPasswordRisk,
-			},
-		})
-	case webDAVAuthType == "basic" || webDAVAuthType == "users":
-		message := "WebDAV 入口使用独立 Basic 凭据。"
-		if webDAVAuthType == "users" {
-			message = "WebDAV 入口使用 MnemoNAS 用户账号，并按角色、home_dir 和配额限制访问。"
-		}
-		checks = append(checks, securityCheckItem{
-			ID:      "webdav_auth",
-			Status:  securityCheckPass,
-			Title:   "WebDAV 已启用认证",
-			Message: message,
-			Details: map[string]interface{}{
-				"prefix":    cfg.WebDAV.Prefix,
-				"auth_type": webDAVAuthType,
-				"read_only": cfg.WebDAV.ReadOnly,
-			},
-		})
-	case webDAVAuthType == "none" && serverLoopback:
-		checks = append(checks, securityCheckItem{
-			ID:      "webdav_auth",
-			Status:  securityCheckWarning,
-			Title:   "WebDAV 当前无独立认证",
-			Message: "当前 Web 服务仅监听本机；如经反向代理公开 WebDAV，请在代理层或 WebDAV 配置中启用认证。",
-			Details: map[string]interface{}{
-				"prefix":    cfg.WebDAV.Prefix,
-				"auth_type": webDAVAuthType,
-				"read_only": cfg.WebDAV.ReadOnly,
-			},
-		})
-	default:
-		checks = append(checks, securityCheckItem{
-			ID:      "webdav_auth",
-			Status:  securityCheckBlock,
-			Title:   "WebDAV 暴露面缺少认证",
-			Message: "WebDAV 已启用但认证方式不是 basic 或 users，公网访问前必须启用认证或关闭 WebDAV。",
-			Details: map[string]interface{}{
-				"prefix":    cfg.WebDAV.Prefix,
-				"auth_type": webDAVAuthType,
-				"read_only": cfg.WebDAV.ReadOnly,
-			},
-		})
-	}
+	checks = append(checks, securityWebDAVPrefixCheck(cfg))
+	checks = append(checks, s.securityWebDAVAuthCheck(cfg, webDAVAuthType, webDAVPasswordRisk, serverLoopback))
 
 	if !cfg.SMB.Enabled {
 		checks = append(checks, securityCheckItem{
@@ -7735,35 +8535,7 @@ func (s *Server) handleGetSecurityCheck(w http.ResponseWriter, r *http.Request) 
 		})
 	}
 
-	if _, err := os.Stat(initialPasswordFile); err == nil {
-		checks = append(checks, securityCheckItem{
-			ID:      "initial_password_file",
-			Status:  securityCheckBlock,
-			Title:   "初始管理员密码文件仍存在",
-			Message: "请完成首次登录并确认该文件已被删除；公网访问前不要保留初始密码文件。",
-			Details: map[string]interface{}{
-				"path": initialPasswordFile,
-			},
-		})
-	} else if errors.Is(err, os.ErrNotExist) {
-		checks = append(checks, securityCheckItem{
-			ID:      "initial_password_file",
-			Status:  securityCheckPass,
-			Title:   "未发现初始密码文件",
-			Message: "初始管理员密码文件已不存在。",
-		})
-	} else {
-		checks = append(checks, securityCheckItem{
-			ID:      "initial_password_file",
-			Status:  securityCheckWarning,
-			Title:   "无法确认初始密码文件状态",
-			Message: "请在服务器上确认 initial-password.txt 不存在。",
-			Details: map[string]interface{}{
-				"path":  initialPasswordFile,
-				"error": err.Error(),
-			},
-		})
-	}
+	checks = append(checks, securityInitialPasswordFileCheck(initialPasswordFile))
 
 	resp := securityCheckResponse{
 		Status:      securityCheckOverallStatus(checks),
@@ -7778,19 +8550,24 @@ func (s *Server) handleGetSecurityCheck(w http.ResponseWriter, r *http.Request) 
 			"forwarded_proto":          strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")),
 		},
 		Config: map[string]interface{}{
-			"auth_enabled":         s.authEnabled,
-			"server_host":          cfg.Server.Host,
-			"server_port":          cfg.Server.Port,
-			"tls_enabled":          cfg.Server.TLS.Enabled,
-			"trusted_proxy_hops":   cfg.Server.TrustedProxyHops,
-			"trusted_proxy_cidrs":  cfg.Server.TrustedProxyCIDRs,
-			"dataplane_grpc_addr":  cfg.DataPlane.GRPCAddress,
-			"dataplane_http_addr":  dataplaneHTTPAddress,
-			"webdav_enabled":       cfg.WebDAV.Enabled,
-			"webdav_auth_type":     webDAVAuthType,
-			"smb_enabled":          cfg.SMB.Enabled,
-			"share_enabled":        cfg.Share.Enabled,
-			"allow_unsafe_no_auth": cfg.Security.AllowUnsafeNoAuth,
+			"auth_enabled":             s.authEnabled,
+			"auth_access_token_ttl":    cfg.Auth.AccessTokenTTL.String(),
+			"auth_refresh_token_ttl":   cfg.Auth.RefreshTokenTTL.String(),
+			"server_host":              cfg.Server.Host,
+			"server_port":              cfg.Server.Port,
+			"tls_enabled":              cfg.Server.TLS.Enabled,
+			"trusted_proxy_hops":       cfg.Server.TrustedProxyHops,
+			"trusted_proxy_cidrs":      cfg.Server.TrustedProxyCIDRs,
+			"dataplane_grpc_addr":      cfg.DataPlane.GRPCAddress,
+			"dataplane_http_addr":      dataplaneHTTPAddress,
+			"webdav_enabled":           cfg.WebDAV.Enabled,
+			"webdav_prefix":            config.NormalizeWebDAVPrefix(cfg.WebDAV.Prefix),
+			"webdav_auth_type":         webDAVAuthType,
+			"smb_enabled":              cfg.SMB.Enabled,
+			"share_enabled":            cfg.Share.Enabled,
+			"share_default_expires_in": cfg.Share.DefaultExpiresIn.String(),
+			"share_default_max_access": cfg.Share.DefaultMaxAccess,
+			"allow_unsafe_no_auth":     cfg.Security.AllowUnsafeNoAuth,
 		},
 	}
 
@@ -7828,6 +8605,11 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 			"root":                   cfg.Storage.Root,
 			"directory_quotas":       settingsDirectoryQuotas(cfg.Storage.DirectoryQuotas),
 			"directory_access_rules": settingsDirectoryAccessRules(cfg.Storage.DirectoryAccessRules),
+		},
+		"auth": map[string]interface{}{
+			"enabled":           cfg.Auth.Enabled,
+			"access_token_ttl":  cfg.Auth.AccessTokenTTL.String(),
+			"refresh_token_ttl": cfg.Auth.RefreshTokenTTL.String(),
 		},
 		"trash": map[string]interface{}{
 			"enabled":        cfg.Storage.Trash.Enabled,
@@ -8302,6 +9084,7 @@ func pathAccessShareRelation(targetPath, sharePath string) string {
 
 // UpdateSettingsRequest represents settings update request
 type UpdateSettingsRequest struct {
+	Auth        *AuthSettingsUpdate        `json:"auth,omitempty"`
 	Server      *ServerSettingsUpdate      `json:"server,omitempty"`
 	Storage     *StorageSettingsUpdate     `json:"storage,omitempty"`
 	Trash       *TrashSettingsUpdate       `json:"trash,omitempty"`
@@ -8315,6 +9098,11 @@ type UpdateSettingsRequest struct {
 	DiskHealth  *DiskHealthSettingsUpdate  `json:"disk_health,omitempty"`
 	Maintenance *MaintenanceSettingsUpdate `json:"maintenance,omitempty"`
 	WebDAV      *WebDAVSettingsUpdate      `json:"webdav,omitempty"`
+}
+
+type AuthSettingsUpdate struct {
+	AccessTokenTTL  *string `json:"access_token_ttl,omitempty"`
+	RefreshTokenTTL *string `json:"refresh_token_ttl,omitempty"`
 }
 
 type StorageSettingsUpdate struct {
@@ -8567,6 +9355,25 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	updatedConfig := *currentConfig
 
 	// Apply updates
+	if req.Auth != nil {
+		if req.Auth.AccessTokenTTL != nil {
+			d, err := time.ParseDuration(*req.Auth.AccessTokenTTL)
+			if err != nil || d <= 0 {
+				BadRequest(w, "invalid auth.access_token_ttl")
+				return
+			}
+			updatedConfig.Auth.AccessTokenTTL = d
+		}
+		if req.Auth.RefreshTokenTTL != nil {
+			d, err := time.ParseDuration(*req.Auth.RefreshTokenTTL)
+			if err != nil || d <= 0 {
+				BadRequest(w, "invalid auth.refresh_token_ttl")
+				return
+			}
+			updatedConfig.Auth.RefreshTokenTTL = d
+		}
+	}
+
 	if req.Server != nil {
 		if req.Server.Host != nil {
 			updatedConfig.Server.Host = *req.Server.Host
@@ -9085,6 +9892,10 @@ func (s *Server) prepareDataplaneReplacement(ctx context.Context, req UpdateSett
 }
 
 func (s *Server) applyRuntimeSettings(ctx context.Context, req UpdateSettingsRequest, cfg config.Config, preparedDataplane *dataplane.Client, preparedWebDAV *WebDAVRuntimeConfig) {
+	if req.Auth != nil && s.tokenManager != nil {
+		s.tokenManager.UpdateExpiries(cfg.Auth.AccessTokenTTL, cfg.Auth.RefreshTokenTTL)
+	}
+
 	if req.Server != nil {
 		if req.Server.TrustedProxyHops != nil {
 			requestip.SetTrustedProxyHops(cfg.Server.TrustedProxyHops)

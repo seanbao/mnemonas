@@ -121,9 +121,9 @@ const SHARE_POLICY_PRESETS = [
   {
     key: 'family',
     label: '家庭默认',
-    description: '7 天有效，不限制次数',
+    description: '7 天有效，最多 20 次访问',
     defaultExpiresIn: '168h',
-    defaultMaxAccess: '0',
+    defaultMaxAccess: '20',
   },
   {
     key: 'temporary',
@@ -140,6 +140,10 @@ const SHARE_POLICY_PRESETS = [
     defaultMaxAccess: '100',
   },
 ] as const
+
+const PUBLIC_ACCESS_MAX_ACCESS_TOKEN_TTL_MS = 60 * 60 * 1000
+const PUBLIC_ACCESS_MAX_REFRESH_TOKEN_TTL_MS = 720 * 60 * 60 * 1000
+const PUBLIC_ACCESS_MAX_SHARE_DEFAULT_EXPIRES_MS = 720 * 60 * 60 * 1000
 
 type SharePolicyRuleDraft = SharePolicyRule & {
   max_access_input?: string
@@ -496,6 +500,38 @@ function isValidDurationString(value: string): boolean {
   return /^(?:\d+(?:\.\d+)?(?:ns|us|µs|ms|s|m|h))+$/.test(trimmed)
 }
 
+function durationStringToMilliseconds(value: string): number | null {
+  const trimmed = value.trim()
+  if (!isValidDurationString(trimmed)) {
+    return null
+  }
+
+  const parts = trimmed.match(/\d+(?:\.\d+)?(?:ns|us|µs|ms|s|m|h)/g)
+  if (!parts || parts.join('') !== trimmed) {
+    return null
+  }
+
+  const unitMilliseconds: Record<string, number> = {
+    ns: 0.000001,
+    us: 0.001,
+    'µs': 0.001,
+    ms: 1,
+    s: 1000,
+    m: 60 * 1000,
+    h: 60 * 60 * 1000,
+  }
+  let total = 0
+  for (const part of parts) {
+    const match = part.match(/^(\d+(?:\.\d+)?)(ns|us|µs|ms|s|m|h)$/)
+    if (!match) {
+      return null
+    }
+    total += Number.parseFloat(match[1]) * unitMilliseconds[match[2]]
+  }
+
+  return Number.isFinite(total) ? total : null
+}
+
 function isZeroDurationString(value: string): boolean {
   const trimmed = value.trim()
   if (trimmed === '0') {
@@ -532,6 +568,23 @@ function isSafeByteSize(value: number, allowZero: boolean): boolean {
 
 function isPositiveDurationString(value: string): boolean {
   return isValidDurationString(value) && !isZeroDurationString(value)
+}
+
+function publicAccessDurationRecommendation(value: string, maxMilliseconds: number, fallback: string): string {
+  const trimmed = value.trim()
+  const parsed = durationStringToMilliseconds(trimmed)
+  if (parsed === null || parsed <= 0 || parsed > maxMilliseconds) {
+    return fallback
+  }
+  return trimmed
+}
+
+function publicAccessMaxAccessRecommendation(value: string, fallback: string): string {
+  const parsed = parseNonNegativeSafeIntegerInput(value)
+  if (!parsed.valid || parsed.value <= 0) {
+    return fallback
+  }
+  return String(parsed.value)
 }
 
 function isNonNegativeDurationString(value: string): boolean {
@@ -730,6 +783,16 @@ function securityCheckHasWebDAVPasswordRisk(check: SecurityCheckItem): boolean {
     && check.details.password_risk.trim() !== ''
 }
 
+function securityCheckUsesGeneratedWebDAVPassword(check: SecurityCheckItem): boolean {
+  return check.id === 'webdav_auth'
+    && check.details?.password_source === 'generated'
+}
+
+function securityCheckHasUnavailableGeneratedWebDAVPassword(check: SecurityCheckItem): boolean {
+  return securityCheckUsesGeneratedWebDAVPassword(check)
+    && check.details?.generated_password_available === false
+}
+
 function securityCheckHasTrustedNonHTTPSForwardedProto(check: SecurityCheckItem): boolean {
   if (check.id !== 'forwarded_proto_trust') {
     return false
@@ -740,6 +803,32 @@ function securityCheckHasTrustedNonHTTPSForwardedProto(check: SecurityCheckItem)
   return forwardedProto !== ''
     && forwardedProto !== 'https'
     && check.details?.trusted_forwarded_source === true
+}
+
+function securityCheckStringDetail(check: SecurityCheckItem, key: string): string {
+  const value = check.details?.[key]
+  return typeof value === 'string' ? value.trim() : ''
+}
+
+function securityCheckNumberDetail(check: SecurityCheckItem, key: string): number | undefined {
+  const value = check.details?.[key]
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined
+}
+
+function shareDefaultExpiresNeedsSecurityRepair(check: SecurityCheckItem): boolean {
+  if (check.details?.default_expires_in_unlimited === true || check.details?.default_expires_in_too_long === true) {
+    return true
+  }
+  const seconds = securityCheckNumberDetail(check, 'default_expires_in_seconds')
+  return seconds !== undefined && (seconds <= 0 || seconds > 720 * 60 * 60)
+}
+
+function shareDefaultMaxAccessNeedsSecurityRepair(check: SecurityCheckItem): boolean {
+  if (check.details?.default_max_access_unlimited === true) {
+    return true
+  }
+  const maxAccess = securityCheckNumberDetail(check, 'default_max_access')
+  return maxAccess !== undefined && maxAccess <= 0
 }
 
 function httpsShareBaseURLFromSecurityCheck(check: SecurityCheckItem): string {
@@ -2720,6 +2809,45 @@ function getSecurityCheckDisplayMessage(check: SecurityCheckItem): string {
       return check.status === 'pass'
         ? '管理员账号配置满足基本可用性要求。'
         : '建议至少保留一个可用管理员账号，并为家庭或团队配置备用管理员。'
+    case 'session_token_ttl':
+      if (check.status === 'pass') {
+        return 'Web UI 访问令牌和刷新令牌有效期处于公网部署建议范围内。'
+      }
+      if (check.status === 'block') {
+        return 'Web UI 会话有效期配置无效，访问令牌和刷新令牌必须为正值。'
+      }
+      return 'Web UI 会话有效期偏长，公网访问前建议缩短配置以降低会话泄露后的风险窗口。'
+    case 'login_rate_limit':
+      if (check.status === 'pass') {
+        return '连续失败登录会按用户名和客户端 IP 触发短期锁定，并产生登录限速提醒事件。'
+      }
+      if (check.details?.auth_enabled === false) {
+        return 'Web 登录认证未启用，登录失败限速暂不可用。'
+      }
+      return '登录失败限速策略不可用；公网访问前应先修复登录防护。'
+    case 'browser_session_boundary':
+      if (check.status === 'pass') {
+        return '当前访问会为 Web UI 会话和下载 cookie 设置 Secure 标记，浏览器写请求也会经过同源元数据校验。'
+      }
+      if (check.details?.auth_enabled === false) {
+        return 'Web 登录认证未启用，浏览器会话 cookie 边界暂不可检查。'
+      }
+      return '当前访问未被识别为 HTTPS，Web UI 会话和下载 cookie 不会带 Secure 标记；公网访问前请修正 TLS 或受信代理配置。'
+    case 'public_share_boundary':
+      if (check.status === 'pass') {
+        return check.details?.share_enabled === false
+          ? '公开分享未启用，不会下发公开分享访问 cookie。'
+          : '受密码保护的公开分享使用 HttpOnly、SameSite=Strict、Secure 访问 cookie，并设置私有缓存边界。'
+      }
+      return '分享功能已启用，但当前访问未被识别为 HTTPS；受密码保护的公开分享访问 cookie 不会带 Secure 标记。'
+    case 'users_file_access':
+      if (check.status === 'pass') {
+        return '用户文件是普通私有文件，且目录权限满足公网部署要求。'
+      }
+      if (check.status === 'block') {
+        return '用户文件缺失、不是普通文件或使用了符号链接；请恢复为服务账号可读取的普通私有文件。'
+      }
+      return '用户文件或其目录允许组或其他用户访问；建议将目录设为 0700、用户文件设为 0600。'
     case 'dataplane_listen':
       return check.status === 'pass'
         ? '数据面 gRPC 仅监听本机地址。'
@@ -2729,12 +2857,29 @@ function getSecurityCheckDisplayMessage(check: SecurityCheckItem): string {
         ? '数据面 HTTP 健康接口仅监听本机地址。'
         : '数据面 HTTP 健康接口不应暴露到外网，请绑定到本机地址。'
     case 'webdav_auth':
+      if (securityCheckHasUnavailableGeneratedWebDAVPassword(check)) {
+        return 'WebDAV 使用自动生成 Basic Auth，但运行态没有可用密码；请检查 secrets.json，设置自定义强密码，或改用 MnemoNAS 用户认证。'
+      }
       if (securityCheckHasWebDAVPasswordRisk(check)) {
+        if (securityCheckUsesGeneratedWebDAVPassword(check)) {
+          return '当前自动生成的 WebDAV Basic Auth 密码偏弱，公网访问前应设置自定义强密码或改用 MnemoNAS 用户认证。'
+        }
         return 'WebDAV Basic Auth 使用弱密码或示例密码，公网访问前应更换为自动生成密码、自定义强密码，或改用 MnemoNAS 用户认证。'
       }
       return check.status === 'pass'
         ? 'WebDAV 暴露面已启用合适的认证方式，或当前未启用 WebDAV。'
         : 'WebDAV 对外访问前必须启用 Basic 认证、MnemoNAS 用户认证或关闭 WebDAV。'
+    case 'webdav_prefix':
+      if (check.status === 'pass') {
+        return 'WebDAV 挂载入口使用独立路径，不会覆盖 Web UI、API、分享或健康检查路由。'
+      }
+      if (check.details?.prefix_risk === 'invalid_characters') {
+        return 'WebDAV 前缀格式无效；只能使用 URL 路径，不能包含反斜杠、查询参数、片段或控制字符。'
+      }
+      if (check.details?.prefix_risk === 'reserved_route') {
+        return 'WebDAV 前缀占用了 /api、/s 或 /health 保留路由；请改为 /dav 或其他独立路径。'
+      }
+      return 'WebDAV 前缀会覆盖站点根路径或缺少明确挂载点；请改为 /dav 或其他独立路径。'
     case 'smb_preview':
       return check.status === 'pass'
         ? 'SMB 预览未启用，不会启动额外的 SMB/Samba 监听器。'
@@ -2758,10 +2903,35 @@ function getSecurityCheckDisplayMessage(check: SecurityCheckItem): string {
       return check.status === 'pass'
         ? '公开分享链接使用 HTTPS 基础地址，或分享功能未启用。'
         : '公开分享链接应使用 HTTPS 默认端口且不包含用户信息，避免在公网中暴露不安全链接。'
+    case 'share_default_policy':
+      if (check.status === 'pass') {
+        return '新分享默认有效期和默认访问次数处于公网部署建议范围内，或分享功能未启用。'
+      }
+      if (check.status === 'block') {
+        return '分享默认有效期或默认访问次数配置无效，请修复负值后重新检查。'
+      }
+      if (check.details?.default_expires_in_unlimited === true
+        && check.details?.default_max_access_unlimited === true) {
+        return '分享功能已启用，但新分享默认不会过期且访问次数不限制；家庭公网分享建议同时设置默认有效期和默认访问次数。'
+      }
+      if (check.details?.default_expires_in_unlimited === true) {
+        return '分享功能已启用，但新分享默认不会过期；家庭公网分享建议设置默认有效期，避免长期公开链接被遗忘。'
+      }
+      if (check.details?.default_max_access_unlimited === true) {
+        return '分享功能已启用，但新分享默认访问次数不限制；家庭公网分享建议设置默认访问次数，避免公开链接被反复访问。'
+      }
+      return '新分享默认有效期偏长；家庭公网分享建议缩短默认有效期，降低链接长期暴露风险。'
     case 'initial_password_file':
-      return check.status === 'pass'
-        ? '初始管理员密码文件状态正常。'
-        : '初始管理员密码文件需要处理，避免遗留凭据被误用。'
+      if (check.status === 'pass') {
+        return '初始管理员密码文件状态正常。'
+      }
+      if (check.details?.path_kind === 'symlink') {
+        return '初始管理员密码路径是符号链接；公网访问前请删除该路径，避免初始凭据指向不受控位置。'
+      }
+      if (check.details?.path_kind === 'not_regular') {
+        return '初始管理员密码路径存在但不是普通文件；公网访问前请删除该路径。'
+      }
+      return '初始管理员密码文件需要处理，避免遗留凭据被误用。'
     default:
       return getSecurityCheckFallbackMessage(check.status)
   }
@@ -3095,6 +3265,8 @@ export function SettingsPage() {
     tlsKeyFile: '',
     tlsAutoGenerate: true,
     tlsCertDir: '',
+    authAccessTokenTTL: '15m',
+    authRefreshTokenTTL: '168h',
     storageRoot: '',
     directoryQuotas: '',
     directoryAccessRules: '',
@@ -3639,6 +3811,8 @@ export function SettingsPage() {
       tlsKeyFile: data.server.tls?.key_file ?? '',
       tlsAutoGenerate: data.server.tls?.auto_generate ?? true,
       tlsCertDir: data.server.tls?.cert_dir ?? '',
+      authAccessTokenTTL: data.auth?.access_token_ttl ?? '15m',
+      authRefreshTokenTTL: data.auth?.refresh_token_ttl ?? '168h',
       storageRoot: data.storage.root,
       directoryQuotas: formatDirectoryQuotaLines(data.storage.directory_quotas),
       directoryAccessRules: formatDirectoryAccessRuleLines(data.storage.directory_access_rules),
@@ -3841,19 +4015,49 @@ export function SettingsPage() {
       ...prev,
       serverHost: '127.0.0.1',
       serverTrustedProxyHops: '1',
+      authAccessTokenTTL: publicAccessDurationRecommendation(
+        prev.authAccessTokenTTL,
+        PUBLIC_ACCESS_MAX_ACCESS_TOKEN_TTL_MS,
+        '1h',
+      ),
+      authRefreshTokenTTL: publicAccessDurationRecommendation(
+        prev.authRefreshTokenTTL,
+        PUBLIC_ACCESS_MAX_REFRESH_TOKEN_TTL_MS,
+        '720h',
+      ),
+      shareDefaultExpiresIn: prev.shareEnabled
+        ? publicAccessDurationRecommendation(
+          prev.shareDefaultExpiresIn,
+          PUBLIC_ACCESS_MAX_SHARE_DEFAULT_EXPIRES_MS,
+          '168h',
+        )
+        : prev.shareDefaultExpiresIn,
+      shareDefaultMaxAccess: prev.shareEnabled
+        ? publicAccessMaxAccessRecommendation(prev.shareDefaultMaxAccess, '20')
+        : prev.shareDefaultMaxAccess,
       shareBaseURL: prev.shareEnabled && publicAccessBaseURL ? publicAccessBaseURL : prev.shareBaseURL,
     }))
     addToast({
       title: '已应用公网访问推荐',
-      description: '保存设置后生效；监听地址变更需要重启服务。',
+      description: '保存设置后生效；监听地址变更需要重启服务，会话有效期、新分享默认有效期和默认访问次数会保持在公网建议范围内。',
       color: 'success',
     })
   }
 
   const applySecurityCheckFix = (check: SecurityCheckItem) => {
     switch (check.id) {
+      case 'auth_enabled':
+      case 'login_rate_limit':
+        addToast({
+          title: '需要启用 Web 登录认证',
+          description: '在配置文件中设置 [auth].enabled = true，确认 jwt_secret 和 users_file 可用后重启服务；首次登录后请修改初始管理员密码。',
+          color: 'warning',
+        })
+        return
       case 'https_request':
       case 'public_http_exposure':
+      case 'browser_session_boundary':
+      case 'public_share_boundary':
         updateDirtySettings((prev) => ({
           ...prev,
           serverHost: '127.0.0.1',
@@ -3901,6 +4105,15 @@ export function SettingsPage() {
         addToast({ title: '已改为本机数据面地址', description: '保存设置后会校验并切换连接。', color: 'success' })
         return
       case 'webdav_auth':
+        if (securityCheckUsesGeneratedWebDAVPassword(check) && securityCheckResponse?.data.config.auth_enabled !== false) {
+          updateDirtySettings((prev) => ({
+            ...prev,
+            webdavAuthType: 'users',
+            webdavUseGeneratedPassword: false,
+          }))
+          addToast({ title: '已启用 WebDAV 用户认证', description: '保存后可使用 MnemoNAS 账号挂载。', color: 'success' })
+          return
+        }
         if (securityCheckHasWebDAVPasswordRisk(check)) {
           updateDirtySettings((prev) => ({
             ...prev,
@@ -3933,6 +4146,13 @@ export function SettingsPage() {
         }))
         addToast({ title: '已启用 WebDAV 用户认证', description: '保存后可使用 MnemoNAS 账号挂载。', color: 'success' })
         return
+      case 'webdav_prefix':
+        updateDirtySettings((prev) => ({
+          ...prev,
+          webdavPrefix: '/dav',
+        }))
+        addToast({ title: '已改回 WebDAV 默认前缀', description: '保存后 WebDAV 挂载入口为 /dav。', color: 'success' })
+        return
       case 'share_base_url': {
         const repairedShareBaseURL = publicAccessBaseURL || httpsShareBaseURLFromSecurityCheck(check)
         if (!repairedShareBaseURL) {
@@ -3943,12 +4163,46 @@ export function SettingsPage() {
         addToast({ title: '已更新分享基础 URL', description: '保存设置后影响新创建的分享链接。', color: 'success' })
         return
       }
+      case 'share_default_policy':
+        updateDirtySettings((prev) => ({
+          ...prev,
+          shareDefaultExpiresIn: shareDefaultExpiresNeedsSecurityRepair(check) ? '168h' : prev.shareDefaultExpiresIn,
+          shareDefaultMaxAccess: shareDefaultMaxAccessNeedsSecurityRepair(check) ? '20' : prev.shareDefaultMaxAccess,
+        }))
+        addToast({ title: '已应用分享默认策略建议', description: '保存设置后影响新创建的分享链接。', color: 'success' })
+        return
       case 'unsafe_no_auth_override':
         addToast({
           title: '需要编辑配置文件',
           description: '将 [security].allow_unsafe_no_auth 改为 false，并确认 Web 登录和 WebDAV 认证已启用后重启服务。',
           color: 'warning',
         })
+        return
+      case 'users_file_access':
+        {
+          const usersDir = securityCheckStringDetail(check, 'dir')
+          const usersPath = securityCheckStringDetail(check, 'path')
+          const permissionHint = usersDir && usersPath
+            ? `在服务器上将用户文件目录 ${usersDir} 设为 0700，将用户文件 ${usersPath} 设为 0600；如果路径是符号链接或非普通文件，请先恢复为普通私有路径。`
+            : '在服务器上移除符号链接，并将用户文件目录设为 0700、users.json 设为 0600 后重新检查。'
+          addToast({
+            title: '需要收紧用户文件权限',
+            description: permissionHint,
+            color: 'warning',
+          })
+        }
+        return
+      case 'initial_password_file':
+        {
+          const initialPasswordPath = securityCheckStringDetail(check, 'path')
+          addToast({
+            title: '需要移除初始密码路径',
+            description: initialPasswordPath
+              ? `完成首次登录并修改密码后，在服务器上删除 ${initialPasswordPath}；如果该路径是符号链接或目录，也一并移除后重新检查。`
+              : '完成首次登录并修改密码后，在服务器上删除 initial-password.txt；如果该路径是符号链接或目录，也一并移除后重新检查。',
+            color: 'warning',
+          })
+        }
         return
       case 'dataplane_http_listen': {
         const dataplaneHTTPAddress = dataplaneHTTPLoopbackAddressFromSecurityCheck(check)
@@ -3962,16 +4216,43 @@ export function SettingsPage() {
       case 'admin_accounts':
         navigate('/users')
         return
+      case 'session_token_ttl':
+        updateDirtySettings((prev) => ({
+          ...prev,
+          authAccessTokenTTL: '1h',
+          authRefreshTokenTTL: '720h',
+        }))
+        addToast({
+          title: '已应用会话有效期建议',
+          description: '保存后新签发的 Web UI token 会使用 1h/720h。',
+          color: 'success',
+        })
+        return
       default:
         addToast({ title: '该项需要手动处理', color: 'warning' })
     }
   }
 
   const getSecurityCheckAction = (check: SecurityCheckItem): SecurityCheckAction | undefined => {
+    if (check.status === 'pass') {
+      return undefined
+    }
+
     switch (check.id) {
+      case 'auth_enabled':
+        return { label: '启用认证', onPress: () => applySecurityCheckFix(check) }
+      case 'login_rate_limit':
+        if (check.details?.auth_enabled === false) {
+          return { label: '启用认证', onPress: () => applySecurityCheckFix(check) }
+        }
+        return undefined
       case 'https_request':
         return { label: '应用代理推荐', onPress: () => applySecurityCheckFix(check) }
       case 'public_http_exposure':
+        return { label: '应用代理推荐', onPress: () => applySecurityCheckFix(check) }
+      case 'browser_session_boundary':
+        return { label: '应用代理推荐', onPress: () => applySecurityCheckFix(check) }
+      case 'public_share_boundary':
         return { label: '应用代理推荐', onPress: () => applySecurityCheckFix(check) }
       case 'trusted_proxy_or_tls':
         return { label: '设置代理层数', onPress: () => applySecurityCheckFix(check) }
@@ -3985,15 +4266,31 @@ export function SettingsPage() {
       case 'dataplane_listen':
         return { label: '改为本机地址', onPress: () => applySecurityCheckFix(check) }
       case 'dataplane_http_listen':
-        return { label: '查看处理方式', onPress: () => applySecurityCheckFix(check) }
+        return { label: '查看环境变量', onPress: () => applySecurityCheckFix(check) }
       case 'webdav_auth':
+        if (securityCheckUsesGeneratedWebDAVPassword(check)) {
+          if (securityCheckResponse?.data.config.auth_enabled === false) {
+            return undefined
+          }
+          return { label: '改用用户认证', onPress: () => applySecurityCheckFix(check) }
+        }
         return { label: securityCheckHasWebDAVPasswordRisk(check) ? '更换密码' : '启用认证', onPress: () => applySecurityCheckFix(check) }
+      case 'webdav_prefix':
+        return { label: '改为 /dav', onPress: () => applySecurityCheckFix(check) }
       case 'share_base_url':
         return { label: '使用 HTTPS URL', onPress: () => applySecurityCheckFix(check) }
+      case 'share_default_policy':
+        return { label: '应用建议', onPress: () => applySecurityCheckFix(check) }
       case 'unsafe_no_auth_override':
-        return { label: '查看处理方式', onPress: () => applySecurityCheckFix(check) }
+        return { label: '关闭例外', onPress: () => applySecurityCheckFix(check) }
+      case 'users_file_access':
+        return { label: '查看权限路径', onPress: () => applySecurityCheckFix(check) }
+      case 'initial_password_file':
+        return { label: '查看文件路径', onPress: () => applySecurityCheckFix(check) }
       case 'admin_accounts':
         return { label: '管理用户', onPress: () => applySecurityCheckFix(check) }
+      case 'session_token_ttl':
+        return { label: '应用建议', onPress: () => applySecurityCheckFix(check) }
       default:
         return undefined
     }
@@ -4110,6 +4407,8 @@ export function SettingsPage() {
     const trimmedReadTimeout = settings.serverReadTimeout.trim()
     const trimmedWriteTimeout = settings.serverWriteTimeout.trim()
     const trimmedIdleTimeout = settings.serverIdleTimeout.trim()
+    const trimmedAuthAccessTokenTTL = settings.authAccessTokenTTL.trim()
+    const trimmedAuthRefreshTokenTTL = settings.authRefreshTokenTTL.trim()
     const trimmedTrustedProxyHops = settings.serverTrustedProxyHops.trim()
     const parsedTrustedProxyHops = Number(trimmedTrustedProxyHops)
     const trimmedMaxVersions = settings.maxVersions.trim()
@@ -4365,6 +4664,24 @@ export function SettingsPage() {
       addToast({
         title: '空闲超时格式无效',
         description: '空闲超时必须使用 120s / 2m 这类 Go duration 格式，且大于 0',
+        color: 'danger',
+      })
+      return
+    }
+
+    if (!isPositiveDurationString(trimmedAuthAccessTokenTTL)) {
+      addToast({
+        title: '会话有效期无效',
+        description: '访问令牌有效期必须使用 15m / 1h 这类 Go duration 格式，且大于 0',
+        color: 'danger',
+      })
+      return
+    }
+
+    if (!isPositiveDurationString(trimmedAuthRefreshTokenTTL)) {
+      addToast({
+        title: '会话有效期无效',
+        description: '刷新令牌有效期必须使用 168h / 720h 这类 Go duration 格式，且大于 0',
         color: 'danger',
       })
       return
@@ -4921,6 +5238,10 @@ export function SettingsPage() {
         directory_quotas: parsedDirectoryQuotas.quotas,
         directory_access_rules: parsedDirectoryAccessRules.rules,
       },
+      auth: {
+        access_token_ttl: trimmedAuthAccessTokenTTL,
+        refresh_token_ttl: trimmedAuthRefreshTokenTTL,
+      },
       retention: {
         max_versions: parsedMaxVersions,
         max_age: trimmedMaxAge,
@@ -5158,6 +5479,39 @@ export function SettingsPage() {
                 onRefresh={() => { void refetchSecurityCheck() }}
                 getAction={getSecurityCheckAction}
               />
+
+              <SettingsSection
+                title="认证会话"
+                description="配置 Web UI token 有效期；保存后影响新签发的访问令牌和刷新令牌"
+                icon={Key}
+              >
+                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                  <div>
+                    <label className="text-sm font-medium text-default-600 mb-1.5 block">访问令牌有效期</label>
+                    <Input
+                      aria-label="访问令牌有效期"
+                      placeholder="15m"
+                      value={settings.authAccessTokenTTL}
+                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, authAccessTokenTTL: v }))}
+                      classNames={{
+                        inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary",
+                      }}
+                    />
+                  </div>
+                  <div>
+                    <label className="text-sm font-medium text-default-600 mb-1.5 block">刷新令牌有效期</label>
+                    <Input
+                      aria-label="刷新令牌有效期"
+                      placeholder="168h"
+                      value={settings.authRefreshTokenTTL}
+                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, authRefreshTokenTTL: v }))}
+                      classNames={{
+                        inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary",
+                      }}
+                    />
+                  </div>
+                </div>
+              </SettingsSection>
 
               <SettingsSection
                 title="服务器"
@@ -6874,6 +7228,7 @@ export function SettingsPage() {
                   >
                     <Input
                       type="url"
+                      aria-label="分享基础 URL"
                       value={settings.shareBaseURL}
                       onValueChange={(v) => updateDirtySettings(s => ({ ...s, shareBaseURL: v }))}
                       placeholder="https://nas.example.com"
@@ -6921,6 +7276,7 @@ export function SettingsPage() {
                     description="例如 168h；留空或填 0 表示新分享默认不过期"
                   >
                     <Input
+                      aria-label="新分享默认有效期"
                       value={settings.shareDefaultExpiresIn}
                       onValueChange={(v) => updateDirtySettings(s => ({ ...s, shareDefaultExpiresIn: v }))}
                       placeholder="168h"
@@ -6937,6 +7293,7 @@ export function SettingsPage() {
                   >
                     <Input
                       type="text"
+                      aria-label="新分享默认访问次数"
                       inputMode="numeric"
                       pattern="[0-9]*"
                       value={settings.shareDefaultMaxAccess}

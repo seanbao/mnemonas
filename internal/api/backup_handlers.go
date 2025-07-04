@@ -270,7 +270,7 @@ func (s *Server) writeBackupError(w http.ResponseWriter, operation string, err e
 	case errors.Is(err, backup.ErrRestoreTargetExists):
 		Conflict(w, "backup restore target already exists")
 	case errors.Is(err, backup.ErrInvalidRestoreRequest), errors.Is(err, backup.ErrUnsupportedJobType):
-		BadRequest(w, err.Error())
+		BadRequest(w, backup.SanitizeNotificationText(err.Error()))
 	default:
 		s.logger.Error().Err(err).Str("operation", operation).Msg("backup operation failed")
 		apiErr := NewAPIError(ErrCodeInternal, "backup operation failed")

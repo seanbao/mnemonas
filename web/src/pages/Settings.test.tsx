@@ -68,6 +68,7 @@ const { defaultSettingsResponse, defaultSecurityCheckResponse } = vi.hoisted(() 
     data: {
       server: { host: '0.0.0.0', port: 8080, read_timeout: '30s', write_timeout: '60s', idle_timeout: '120s', trusted_proxy_hops: 1, trusted_proxy_cidrs: ['10.0.0.0/8'], read_timeout_seconds: 60, write_timeout_seconds: 300 },
       storage: { root: '~/.mnemonas' },
+      auth: { enabled: true, access_token_ttl: '15m0s', refresh_token_ttl: '168h0m0s' },
     trash: { enabled: true, retention_days: 30, max_size: 10737418240 },
       retention: { max_versions: 100, max_age: '8760h', min_free_space: 10737418240, gc_interval: '24h' },
       versioning: { auto_versioned_extensions: ['.md', '.txt', '.go'], auto_versioned_filenames: ['README', 'Dockerfile', 'Makefile'], max_versioned_size: 104857600 },
@@ -625,9 +626,50 @@ describe('SettingsPage', () => {
 
       expect(screen.getByDisplayValue('127.0.0.1')).toBeTruthy()
       expect(screen.getByLabelText('受信代理层数')).toHaveValue(1)
+      expect(screen.getByLabelText('访问令牌有效期')).toHaveValue('15m0s')
+      expect(screen.getByLabelText('刷新令牌有效期')).toHaveValue('168h0m0s')
       expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({
         title: '已应用公网访问推荐',
+        description: expect.stringContaining('会话有效期、新分享默认有效期和默认访问次数会保持在公网建议范围内'),
       }))
+    })
+
+    it('caps long session token lifetimes when applying public access recommendations', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockGetSettings.mockResolvedValueOnce({
+        data: {
+          ...defaultSettingsResponse.data,
+          auth: {
+            ...defaultSettingsResponse.data.auth,
+            access_token_ttl: '2h0m0s',
+            refresh_token_ttl: '1080h0m0s',
+          },
+        },
+      })
+
+      render(<SettingsPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('公网访问向导')).toBeTruthy()
+        expect(screen.getByLabelText('访问令牌有效期')).toHaveValue('2h0m0s')
+      })
+
+      fireEvent.change(screen.getByLabelText('公网域名'), { target: { value: 'nas.example.com' } })
+      await user.click(screen.getByRole('button', { name: '应用推荐到表单' }))
+
+      expect(screen.getByLabelText('访问令牌有效期')).toHaveValue('1h')
+      expect(screen.getByLabelText('刷新令牌有效期')).toHaveValue('720h')
+
+      await user.click(screen.getByText('保存设置'))
+
+      await waitFor(() => {
+        expectUpdateSettingsCalledWith(expect.objectContaining({
+          auth: expect.objectContaining({
+            access_token_ttl: '1h',
+            refresh_token_ttl: '720h',
+          }),
+        }))
+      })
     })
 
     it('requires a public domain before applying recommendations while sharing is enabled', async () => {
@@ -691,6 +733,80 @@ describe('SettingsPage', () => {
       })
     })
 
+    it('sets unsafe public sharing defaults to seven days when applying recommendations', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockGetSettings.mockResolvedValueOnce({
+        data: {
+          ...defaultSettingsResponse.data,
+          share: {
+            ...defaultSettingsResponse.data.share,
+            enabled: true,
+            base_url: '',
+            default_expires_in: '0',
+            default_max_access: 0,
+          },
+        },
+      })
+
+      render(<SettingsPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('公网访问向导')).toBeTruthy()
+      })
+
+      fireEvent.change(screen.getByLabelText('公网域名'), { target: { value: 'nas.example.com' } })
+      await user.click(screen.getByRole('button', { name: '应用推荐到表单' }))
+      await user.click(screen.getByText('保存设置'))
+
+      await waitFor(() => {
+        expectUpdateSettingsCalledWith(expect.objectContaining({
+          share: expect.objectContaining({
+            enabled: true,
+            base_url: 'https://nas.example.com',
+            default_expires_in: '168h',
+            default_max_access: 20,
+          }),
+        }))
+      })
+    })
+
+    it('keeps stricter public sharing defaults when applying recommendations', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockGetSettings.mockResolvedValueOnce({
+        data: {
+          ...defaultSettingsResponse.data,
+          share: {
+            ...defaultSettingsResponse.data.share,
+            enabled: true,
+            base_url: '',
+            default_expires_in: '24h',
+            default_max_access: 3,
+          },
+        },
+      })
+
+      render(<SettingsPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('公网访问向导')).toBeTruthy()
+      })
+
+      fireEvent.change(screen.getByLabelText('公网域名'), { target: { value: 'nas.example.com' } })
+      await user.click(screen.getByRole('button', { name: '应用推荐到表单' }))
+      await user.click(screen.getByText('保存设置'))
+
+      await waitFor(() => {
+        expectUpdateSettingsCalledWith(expect.objectContaining({
+          share: expect.objectContaining({
+            enabled: true,
+            base_url: 'https://nas.example.com',
+            default_expires_in: '24h',
+            default_max_access: 3,
+          }),
+        }))
+      })
+    })
+
     it('rejects public access domains that include a path or port', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
       render(<SettingsPage />)
@@ -703,6 +819,9 @@ describe('SettingsPage', () => {
 
       expect(screen.getByText('请输入域名，不要包含路径或端口')).toBeTruthy()
       expect(screen.queryByText('https://nas.example.com')).toBeNull()
+      expect(screen.getByText('sudo mnemonas-public-setup --proxy caddy nas.example.com admin@example.com')).toBeTruthy()
+      expect(screen.getByText('sudo mnemonas-doctor --public-domain nas.example.com')).toBeTruthy()
+      expect(screen.queryByText('sudo mnemonas-doctor --public-domain https://nas.example.com:8443/path')).toBeNull()
       expect(screen.getByRole('button', { name: '应用推荐到表单' })).toBeDisabled()
 
       await user.click(screen.getByRole('button', { name: '应用推荐到表单' }))
@@ -721,6 +840,9 @@ describe('SettingsPage', () => {
 
       expect(screen.getByText('请输入有效域名，域名标签只能包含字母、数字和连字符，且不能以连字符开头或结尾')).toBeTruthy()
       expect(screen.queryByText('https://bad_domain.example.com')).toBeNull()
+      expect(screen.getByText('sudo mnemonas-public-setup --proxy caddy nas.example.com admin@example.com')).toBeTruthy()
+      expect(screen.getByText('sudo mnemonas-doctor --public-domain nas.example.com')).toBeTruthy()
+      expect(screen.queryByText('sudo mnemonas-doctor --public-domain bad_domain.example.com')).toBeNull()
       expect(screen.getByRole('button', { name: '应用推荐到表单' })).toBeDisabled()
     })
 
@@ -769,6 +891,95 @@ describe('SettingsPage', () => {
       }))
     })
 
+    it('does not show repair actions for passing security checks', async () => {
+      mockGetSecurityCheck.mockResolvedValueOnce({
+        success: true,
+        data: {
+          status: 'pass',
+          generated_at: '2026-05-08T00:00:00Z',
+          checks: [
+            {
+              id: 'auth_enabled',
+              status: 'pass',
+              title: 'Web 登录认证已启用',
+              message: '管理界面需要账号登录。',
+            },
+            {
+              id: 'session_token_ttl',
+              status: 'pass',
+              title: '会话有效期处于建议范围',
+              message: 'Web UI 访问令牌和刷新令牌有效期处于公网部署建议范围内。',
+            },
+            {
+              id: 'login_rate_limit',
+              status: 'pass',
+              title: '登录失败限速已启用',
+              message: '连续失败登录会按用户名和客户端 IP 触发短期锁定。',
+            },
+            {
+              id: 'share_default_policy',
+              status: 'pass',
+              title: '分享默认策略处于建议范围',
+              message: '新分享默认有效期和默认访问次数处于公网部署建议范围内。',
+            },
+          ],
+          request: { scheme: 'https' },
+          config: { auth_enabled: true, share_enabled: true },
+        },
+      })
+
+      render(<SettingsPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('Web 登录认证已启用')).toBeTruthy()
+        expect(screen.getByText('会话有效期处于建议范围')).toBeTruthy()
+        expect(screen.getByText('登录失败限速已启用')).toBeTruthy()
+      })
+
+      expect(screen.queryByRole('button', { name: '启用认证' })).toBeNull()
+      expect(screen.queryByRole('button', { name: '应用建议' })).toBeNull()
+    })
+
+    it('shows login rate-limit guidance when auth is disabled', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockGetSecurityCheck.mockResolvedValueOnce({
+        success: true,
+        data: {
+          status: 'warning',
+          generated_at: '2026-05-08T00:00:00Z',
+          checks: [
+            {
+              id: 'login_rate_limit',
+              status: 'warning',
+              title: '登录限速检查不可用',
+              message: 'backend raw login rate-limit detail',
+              details: {
+                auth_enabled: false,
+                enabled: false,
+                failure_limit: 0,
+              },
+            },
+          ],
+          request: { scheme: 'https' },
+          config: { auth_enabled: false },
+        },
+      })
+
+      render(<SettingsPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('登录限速检查不可用')).toBeTruthy()
+        expect(screen.getByText('Web 登录认证未启用，登录失败限速暂不可用。')).toBeTruthy()
+      })
+      expect(screen.queryByText('backend raw login rate-limit detail')).toBeNull()
+
+      await user.click(screen.getByRole('button', { name: '启用认证' }))
+
+      expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({
+        title: '需要启用 Web 登录认证',
+      }))
+    })
+
     it('maps security check backend messages before rendering them', async () => {
       mockGetSecurityCheck.mockResolvedValueOnce({
         success: true,
@@ -802,6 +1013,399 @@ describe('SettingsPage', () => {
       })
       expect(screen.queryByText('backend raw server listen detail')).toBeNull()
       expect(screen.queryByText('backend raw custom probe detail')).toBeNull()
+    })
+
+    it('shows users file access security guidance without exposing raw backend text', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockGetSecurityCheck.mockResolvedValueOnce({
+        success: true,
+        data: {
+          status: 'warning',
+          generated_at: '2026-05-08T00:00:00Z',
+          checks: [
+            {
+              id: 'users_file_access',
+              status: 'warning',
+              title: '用户文件权限过宽',
+              message: 'backend raw users file mode detail',
+              details: {
+                dir: '/srv/mnemonas/.mnemonas',
+                path: '/srv/mnemonas/.mnemonas/users.json',
+                dir_mode: '0755',
+                file_mode: '0644',
+              },
+            },
+          ],
+          request: { scheme: 'https' },
+          config: { auth_enabled: true },
+        },
+      })
+
+      render(<SettingsPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('用户文件权限过宽')).toBeTruthy()
+        expect(screen.getByText('用户文件或其目录允许组或其他用户访问；建议将目录设为 0700、用户文件设为 0600。')).toBeTruthy()
+      })
+      expect(screen.queryByText('backend raw users file mode detail')).toBeNull()
+
+      await user.click(screen.getByRole('button', { name: '查看权限路径' }))
+
+      expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({
+        title: '需要收紧用户文件权限',
+        description: expect.stringContaining('用户文件目录 /srv/mnemonas/.mnemonas 设为 0700，将用户文件 /srv/mnemonas/.mnemonas/users.json 设为 0600'),
+      }))
+    })
+
+    it('shows initial password symlink guidance without exposing raw backend text', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockGetSecurityCheck.mockResolvedValueOnce({
+        success: true,
+        data: {
+          status: 'block',
+          generated_at: '2026-05-08T00:00:00Z',
+          checks: [
+            {
+              id: 'initial_password_file',
+              status: 'block',
+              title: '初始管理员密码路径是符号链接',
+              message: 'backend raw initial password symlink detail',
+              details: {
+                path: '/srv/mnemonas/.mnemonas/initial-password.txt',
+                path_kind: 'symlink',
+              },
+            },
+          ],
+          request: { scheme: 'https' },
+          config: { auth_enabled: true },
+        },
+      })
+
+      render(<SettingsPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('初始管理员密码路径是符号链接')).toBeTruthy()
+        expect(screen.getByText('初始管理员密码路径是符号链接；公网访问前请删除该路径，避免初始凭据指向不受控位置。')).toBeTruthy()
+      })
+      expect(screen.queryByText('backend raw initial password symlink detail')).toBeNull()
+
+      await user.click(screen.getByRole('button', { name: '查看文件路径' }))
+
+      expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({
+        title: '需要移除初始密码路径',
+        description: expect.stringContaining('/srv/mnemonas/.mnemonas/initial-password.txt'),
+      }))
+    })
+
+    it('repairs session token TTL findings without exposing raw backend text', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockGetSecurityCheck.mockResolvedValueOnce({
+        success: true,
+        data: {
+          status: 'warning',
+          generated_at: '2026-05-08T00:00:00Z',
+          checks: [
+            {
+              id: 'session_token_ttl',
+              status: 'warning',
+              title: '会话有效期偏长',
+              message: 'backend raw session ttl detail',
+              details: {
+                access_token_ttl: '2h0m0s',
+                refresh_token_ttl: '1080h0m0s',
+                access_token_ttl_too_long: true,
+                refresh_token_ttl_too_long: true,
+              },
+            },
+          ],
+          request: { scheme: 'https' },
+          config: { auth_enabled: true },
+        },
+      })
+
+      render(<SettingsPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('会话有效期偏长')).toBeTruthy()
+        expect(screen.getByText('Web UI 会话有效期偏长，公网访问前建议缩短配置以降低会话泄露后的风险窗口。')).toBeTruthy()
+      })
+      expect(screen.queryByText('backend raw session ttl detail')).toBeNull()
+
+      await user.click(screen.getByRole('button', { name: '应用建议' }))
+      await user.click(screen.getByText('保存设置'))
+
+      await waitFor(() => {
+        expectUpdateSettingsCalledWith(expect.objectContaining({
+          auth: expect.objectContaining({
+            access_token_ttl: '1h',
+            refresh_token_ttl: '720h',
+          }),
+        }))
+      })
+      expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({
+        title: '已应用会话有效期建议',
+      }))
+    })
+
+    it('shows browser session boundary guidance without exposing raw backend text', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockGetSecurityCheck.mockResolvedValueOnce({
+        success: true,
+        data: {
+          status: 'warning',
+          generated_at: '2026-05-08T00:00:00Z',
+          checks: [
+            {
+              id: 'browser_session_boundary',
+              status: 'warning',
+              title: '浏览器会话 cookie 未使用 Secure',
+              message: 'backend raw browser session boundary detail',
+              details: {
+                auth_enabled: true,
+                session_cookie_secure: false,
+                same_origin_browser_write_protection: true,
+                request_scheme: 'http',
+              },
+            },
+          ],
+          request: { scheme: 'http' },
+          config: { auth_enabled: true, trusted_proxy_hops: 0 },
+        },
+      })
+
+      render(<SettingsPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('浏览器会话 cookie 未使用 Secure')).toBeTruthy()
+        expect(screen.getByText('当前访问未被识别为 HTTPS，Web UI 会话和下载 cookie 不会带 Secure 标记；公网访问前请修正 TLS 或受信代理配置。')).toBeTruthy()
+      })
+      expect(screen.queryByText('backend raw browser session boundary detail')).toBeNull()
+
+      await user.click(screen.getByRole('button', { name: '应用代理推荐' }))
+
+      expect(screen.getByDisplayValue('127.0.0.1')).toBeTruthy()
+      expect(screen.getByLabelText('受信代理层数')).toHaveValue(1)
+      expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({
+        title: '已应用反向代理推荐',
+      }))
+    })
+
+    it('shows public share boundary guidance without exposing raw backend text', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockGetSecurityCheck.mockResolvedValueOnce({
+        success: true,
+        data: {
+          status: 'warning',
+          generated_at: '2026-05-08T00:00:00Z',
+          checks: [
+            {
+              id: 'public_share_boundary',
+              status: 'warning',
+              title: '公开分享访问 cookie 未使用 Secure',
+              message: 'backend raw public share boundary detail',
+              details: {
+                share_enabled: true,
+                password_cookie_secure: false,
+                password_cookie_same_site: 'Strict',
+                metadata_vary_cookie: true,
+              },
+            },
+          ],
+          request: { scheme: 'http' },
+          config: { auth_enabled: true, trusted_proxy_hops: 0 },
+        },
+      })
+
+      render(<SettingsPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('公开分享访问 cookie 未使用 Secure')).toBeTruthy()
+        expect(screen.getByText('分享功能已启用，但当前访问未被识别为 HTTPS；受密码保护的公开分享访问 cookie 不会带 Secure 标记。')).toBeTruthy()
+      })
+      expect(screen.queryByText('backend raw public share boundary detail')).toBeNull()
+
+      await user.click(screen.getByRole('button', { name: '应用代理推荐' }))
+
+      expect(screen.getByDisplayValue('127.0.0.1')).toBeTruthy()
+      expect(screen.getByLabelText('受信代理层数')).toHaveValue(1)
+      expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({
+        title: '已应用反向代理推荐',
+      }))
+    })
+
+    it('repairs unsafe share default policy from the security check', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockGetSettings.mockResolvedValueOnce({
+        data: {
+          ...defaultSettingsResponse.data,
+          share: {
+            ...defaultSettingsResponse.data.share,
+            enabled: true,
+            default_expires_in: '0',
+            default_max_access: 0,
+          },
+        },
+      })
+      mockGetSecurityCheck.mockResolvedValueOnce({
+        success: true,
+        data: {
+          status: 'warning',
+          generated_at: '2026-05-08T00:00:00Z',
+          checks: [
+            {
+              id: 'share_default_policy',
+              status: 'warning',
+              title: '新分享默认不会过期且访问次数不限制',
+              message: 'backend raw share default policy detail',
+              details: {
+                share_enabled: true,
+                default_expires_in: '0s',
+                default_expires_in_unlimited: true,
+                default_max_access: 0,
+                default_max_access_unlimited: true,
+              },
+            },
+          ],
+          request: { scheme: 'https' },
+          config: { auth_enabled: true, share_enabled: true },
+        },
+      })
+
+      render(<SettingsPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('新分享默认不会过期且访问次数不限制')).toBeTruthy()
+        expect(screen.getByText('分享功能已启用，但新分享默认不会过期且访问次数不限制；家庭公网分享建议同时设置默认有效期和默认访问次数。')).toBeTruthy()
+      })
+      expect(screen.queryByText('backend raw share default policy detail')).toBeNull()
+
+      await user.click(screen.getByRole('button', { name: '应用建议' }))
+
+      expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({
+        title: '已应用分享默认策略建议',
+      }))
+
+      await openTab(user, '分享')
+
+      expect(screen.getByDisplayValue('168h')).toBeTruthy()
+      expect(screen.getByDisplayValue('20')).toBeTruthy()
+    })
+
+    it('repairs unlimited share default access count from the security check', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockGetSettings.mockResolvedValueOnce({
+        data: {
+          ...defaultSettingsResponse.data,
+          share: {
+            ...defaultSettingsResponse.data.share,
+            enabled: true,
+            default_expires_in: '24h',
+            default_max_access: 0,
+          },
+        },
+      })
+      mockGetSecurityCheck.mockResolvedValueOnce({
+        success: true,
+        data: {
+          status: 'warning',
+          generated_at: '2026-05-08T00:00:00Z',
+          checks: [
+            {
+              id: 'share_default_policy',
+              status: 'warning',
+              title: '新分享默认访问次数不限制',
+              message: 'backend raw share default policy detail',
+              details: {
+                share_enabled: true,
+                default_expires_in: '24h0m0s',
+                default_expires_in_seconds: 86400,
+                default_max_access: 0,
+                default_max_access_unlimited: true,
+              },
+            },
+          ],
+          request: { scheme: 'https' },
+          config: { auth_enabled: true, share_enabled: true },
+        },
+      })
+
+      render(<SettingsPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('新分享默认访问次数不限制')).toBeTruthy()
+        expect(screen.getByText('分享功能已启用，但新分享默认访问次数不限制；家庭公网分享建议设置默认访问次数，避免公开链接被反复访问。')).toBeTruthy()
+      })
+      expect(screen.queryByText('backend raw share default policy detail')).toBeNull()
+
+      await user.click(screen.getByRole('button', { name: '应用建议' }))
+      await user.click(screen.getByText('保存设置'))
+
+      await waitFor(() => {
+        expectUpdateSettingsCalledWith(expect.objectContaining({
+          share: expect.objectContaining({
+            default_expires_in: '24h',
+            default_max_access: 20,
+          }),
+        }))
+      })
+    })
+
+    it('repairs invalid share default policy values from the security check', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockGetSettings.mockResolvedValueOnce({
+        data: {
+          ...defaultSettingsResponse.data,
+          share: {
+            ...defaultSettingsResponse.data.share,
+            enabled: true,
+            default_expires_in: '-1h',
+            default_max_access: -1,
+          },
+        },
+      })
+      mockGetSecurityCheck.mockResolvedValueOnce({
+        success: true,
+        data: {
+          status: 'block',
+          generated_at: '2026-05-08T00:00:00Z',
+          checks: [
+            {
+              id: 'share_default_policy',
+              status: 'block',
+              title: '分享默认策略无效',
+              message: 'backend raw share default policy detail',
+              details: {
+                share_enabled: true,
+                default_expires_in: '-1h0m0s',
+                default_expires_in_seconds: -3600,
+                default_max_access: -1,
+              },
+            },
+          ],
+          request: { scheme: 'https' },
+          config: { auth_enabled: true, share_enabled: true },
+        },
+      })
+
+      render(<SettingsPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('分享默认策略无效')).toBeTruthy()
+        expect(screen.getByText('分享默认有效期或默认访问次数配置无效，请修复负值后重新检查。')).toBeTruthy()
+      })
+      expect(screen.queryByText('backend raw share default policy detail')).toBeNull()
+
+      await user.click(screen.getByRole('button', { name: '应用建议' }))
+      await user.click(screen.getByText('保存设置'))
+
+      await waitFor(() => {
+        expectUpdateSettingsCalledWith(expect.objectContaining({
+          share: expect.objectContaining({
+            default_expires_in: '168h',
+            default_max_access: 20,
+          }),
+        }))
+      })
     })
 
     it('shows a specific security check message for share base URL host mismatch', async () => {
@@ -1085,6 +1689,109 @@ describe('SettingsPage', () => {
       })
       expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({
         title: '已改用自动生成 WebDAV 密码',
+      }))
+    })
+
+    it('offers user authentication when generated WebDAV credentials are unavailable', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockGetSecurityCheck.mockResolvedValueOnce({
+        success: true,
+        data: {
+          status: 'block',
+          generated_at: '2026-05-08T00:00:00Z',
+          checks: [
+            {
+              id: 'webdav_auth',
+              status: 'block',
+              title: '自动 WebDAV 密码不可用',
+              message: 'WebDAV 使用自动生成 Basic Auth 密码，但运行态没有加载到可用密码。',
+              details: {
+                prefix: '/dav',
+                auth_type: 'basic',
+                password_source: 'generated',
+                generated_password_available: false,
+              },
+            },
+          ],
+          request: { scheme: 'https' },
+          config: { auth_enabled: true, webdav_enabled: true, webdav_auth_type: 'basic' },
+        },
+      })
+      render(<SettingsPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('自动 WebDAV 密码不可用')).toBeTruthy()
+        expect(screen.getByText('WebDAV 使用自动生成 Basic Auth，但运行态没有可用密码；请检查 secrets.json，设置自定义强密码，或改用 MnemoNAS 用户认证。')).toBeTruthy()
+      })
+
+      await user.click(screen.getByRole('button', { name: '改用用户认证' }))
+      await user.click(screen.getByText('保存设置'))
+
+      await waitFor(() => {
+        expectUpdateSettingsCalledWith(expect.objectContaining({
+          webdav: expect.objectContaining({
+            auth_type: 'users',
+          }),
+        }))
+      })
+      expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({
+        title: '已启用 WebDAV 用户认证',
+      }))
+    })
+
+    it('repairs unsafe WebDAV prefixes from security check findings', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockGetSettings.mockResolvedValueOnce({
+        data: {
+          ...defaultSettingsResponse.data,
+          webdav: {
+            ...defaultSettingsResponse.data.webdav,
+            prefix: '/api/v1',
+          },
+        },
+      })
+      mockGetSecurityCheck.mockResolvedValueOnce({
+        success: true,
+        data: {
+          status: 'block',
+          generated_at: '2026-05-08T00:00:00Z',
+          checks: [
+            {
+              id: 'webdav_prefix',
+              status: 'block',
+              title: 'WebDAV 前缀占用保留路由',
+              message: 'WebDAV 前缀不能位于 /api、/s 或 /health 路由下。',
+              details: {
+                prefix: '/api/v1',
+                normalized_prefix: '/api/v1',
+                prefix_risk: 'reserved_route',
+                recommended_prefix: '/dav',
+              },
+            },
+          ],
+          request: { scheme: 'https' },
+          config: { webdav_enabled: true, webdav_prefix: '/api/v1', webdav_auth_type: 'basic' },
+        },
+      })
+      render(<SettingsPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('WebDAV 前缀占用保留路由')).toBeTruthy()
+        expect(screen.getByText('WebDAV 前缀占用了 /api、/s 或 /health 保留路由；请改为 /dav 或其他独立路径。')).toBeTruthy()
+      })
+
+      await user.click(screen.getByRole('button', { name: '改为 /dav' }))
+      await user.click(screen.getByText('保存设置'))
+
+      await waitFor(() => {
+        expectUpdateSettingsCalledWith(expect.objectContaining({
+          webdav: expect.objectContaining({
+            prefix: '/dav',
+          }),
+        }))
+      })
+      expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({
+        title: '已改回 WebDAV 默认前缀',
       }))
     })
 
@@ -1432,11 +2139,46 @@ describe('SettingsPage', () => {
         expect(screen.getByText('无认证暴露例外已开启')).toBeTruthy()
       })
 
-      await user.click(screen.getByRole('button', { name: '查看处理方式' }))
+      await user.click(screen.getByRole('button', { name: '关闭例外' }))
 
       expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({
         title: '需要编辑配置文件',
         description: expect.stringContaining('allow_unsafe_no_auth'),
+      }))
+    })
+
+    it('shows manual guidance when Web login auth is disabled', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockGetSecurityCheck.mockResolvedValueOnce({
+        success: true,
+        data: {
+          status: 'block',
+          generated_at: '2026-05-08T00:00:00Z',
+          checks: [
+            {
+              id: 'auth_enabled',
+              status: 'block',
+              title: 'Web 登录认证未启用',
+              message: 'backend raw auth disabled detail',
+            },
+          ],
+          request: { scheme: 'http' },
+          config: { auth_enabled: false },
+        },
+      })
+      render(<SettingsPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('Web 登录认证未启用')).toBeTruthy()
+        expect(screen.getByText('管理界面未启用登录认证，公网访问前必须启用认证。')).toBeTruthy()
+      })
+      expect(screen.queryByText('backend raw auth disabled detail')).toBeNull()
+
+      await user.click(screen.getByRole('button', { name: '启用认证' }))
+
+      expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({
+        title: '需要启用 Web 登录认证',
+        description: expect.stringContaining('[auth].enabled = true'),
       }))
     })
 
@@ -1466,7 +2208,7 @@ describe('SettingsPage', () => {
         expect(screen.getByText('数据面 HTTP 不应暴露外网')).toBeTruthy()
       })
 
-      await user.click(screen.getByRole('button', { name: '查看处理方式' }))
+      await user.click(screen.getByRole('button', { name: '查看环境变量' }))
 
       expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({
         title: '需要调整启动环境',
@@ -3907,6 +4649,51 @@ describe('SettingsPage', () => {
       })
     })
 
+    it('allows editing auth session token lifetimes and saves them', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      render(<SettingsPage />)
+
+      const accessTokenInput = await screen.findByLabelText('访问令牌有效期')
+      const refreshTokenInput = screen.getByLabelText('刷新令牌有效期')
+
+      expect(accessTokenInput).toHaveValue('15m0s')
+      expect(refreshTokenInput).toHaveValue('168h0m0s')
+
+      await user.clear(accessTokenInput)
+      await user.type(accessTokenInput, '30m')
+      await user.clear(refreshTokenInput)
+      await user.type(refreshTokenInput, '720h')
+      await user.click(screen.getByText('保存设置'))
+
+      await waitFor(() => {
+        expectUpdateSettingsCalledWith(expect.objectContaining({
+          auth: expect.objectContaining({
+            access_token_ttl: '30m',
+            refresh_token_ttl: '720h',
+          }),
+        }))
+      })
+    })
+
+    it('rejects invalid auth session token lifetimes before saving', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      render(<SettingsPage />)
+
+      const accessTokenInput = await screen.findByLabelText('访问令牌有效期')
+      await user.clear(accessTokenInput)
+      await user.type(accessTokenInput, '0')
+      await user.click(screen.getByText('保存设置'))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '会话有效期无效',
+          description: '访问令牌有效期必须使用 15m / 1h 这类 Go duration 格式，且大于 0',
+          color: 'danger',
+        })
+      })
+      expect(mockUpdateSettings).not.toHaveBeenCalled()
+    })
+
     it('renders trusted proxy hops input', async () => {
       render(<SettingsPage />)
       await waitFor(() => {
@@ -4041,6 +4828,7 @@ describe('SettingsPage', () => {
           data: {
             server: { host: '0.0.0.0', port: 8080, read_timeout: '30s', write_timeout: '60s', idle_timeout: '120s', trusted_proxy_hops: 1, read_timeout_seconds: 60, write_timeout_seconds: 300 },
             storage: { root: '~/.mnemonas' },
+            auth: { enabled: true, access_token_ttl: '15m0s', refresh_token_ttl: '168h0m0s' },
             trash: { enabled: true, retention_days: 30, max_size: 10737418240 },
             retention: { max_versions: 100, max_age: '8760h', min_free_space: 10737418240, gc_interval: '24h' },
             versioning: { auto_versioned_extensions: ['.md', '.txt', '.go'], auto_versioned_filenames: ['README', 'Dockerfile', 'Makefile'], max_versioned_size: 104857600 },
@@ -4056,6 +4844,7 @@ describe('SettingsPage', () => {
           data: {
             server: { host: '10.0.0.1', port: 9090, read_timeout: '45s', write_timeout: '90s', idle_timeout: '5m', trusted_proxy_hops: 3, read_timeout_seconds: 60, write_timeout_seconds: 300 },
             storage: { root: '/srv/mnemonas' },
+            auth: { enabled: true, access_token_ttl: '30m0s', refresh_token_ttl: '720h0m0s' },
             trash: { enabled: false, retention_days: 14, max_size: 2147483648 },
             retention: { max_versions: 200, max_age: '720h', min_free_space: 2147483648, gc_interval: '12h' },
             versioning: { auto_versioned_extensions: ['.md', '.txt'], auto_versioned_filenames: ['README', 'LICENSE'], max_versioned_size: 209715200 },
@@ -4283,6 +5072,7 @@ describe('SettingsPage', () => {
         data: {
           server: { host: '10.0.0.1', port: 9090, read_timeout: '45s', write_timeout: '90s', idle_timeout: '5m', read_timeout_seconds: 60, write_timeout_seconds: 300 },
           storage: { root: '/srv/mnemonas' },
+          auth: { enabled: true, access_token_ttl: '30m0s', refresh_token_ttl: '720h0m0s' },
           trash: { enabled: false, retention_days: 14, max_size: 2147483648 },
           retention: { max_versions: 200, max_age: '720h', min_free_space: 2147483648, gc_interval: '12h' },
           versioning: { auto_versioned_extensions: ['.md', '.txt'], auto_versioned_filenames: ['README', 'LICENSE'], max_versioned_size: 209715200 },
@@ -5508,6 +6298,7 @@ describe('SettingsPage', () => {
           data: {
             server: { host: '0.0.0.0', port: 8080, read_timeout: '30s', write_timeout: '60s', idle_timeout: '120s', read_timeout_seconds: 60, write_timeout_seconds: 300 },
             storage: { root: '~/.mnemonas' },
+            auth: { enabled: true, access_token_ttl: '15m0s', refresh_token_ttl: '168h0m0s' },
             trash: { enabled: true, retention_days: 30, max_size: 10737418240 },
             retention: { max_versions: 100, max_age: '8760h', min_free_space: 10737418240, gc_interval: '24h' },
             versioning: { auto_versioned_extensions: ['.md', '.txt', '.go'], auto_versioned_filenames: ['README', 'Dockerfile', 'Makefile'], max_versioned_size: 104857600 },
@@ -5638,6 +6429,7 @@ describe('SettingsPage', () => {
           data: {
             server: { host: '0.0.0.0', port: 8080, read_timeout: '30s', write_timeout: '60s', idle_timeout: '120s', read_timeout_seconds: 60, write_timeout_seconds: 300 },
             storage: { root: '~/.mnemonas' },
+            auth: { enabled: true, access_token_ttl: '15m0s', refresh_token_ttl: '168h0m0s' },
             trash: { enabled: true, retention_days: 30, max_size: 10737418240 },
             retention: { max_versions: 100, max_age: '8760h', min_free_space: 10737418240, gc_interval: '24h' },
             versioning: { auto_versioned_extensions: ['.md', '.txt', '.go'], auto_versioned_filenames: ['README', 'Dockerfile', 'Makefile'], max_versioned_size: 104857600 },

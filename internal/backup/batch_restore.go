@@ -9,6 +9,8 @@ import (
 
 const batchRestoreLimit = 20
 
+var afterBatchRestorePreflightPassed = func(*BatchRestorePreviewResult) {}
+
 // BatchRestoreItemOptions describes one restore request in a batch.
 type BatchRestoreItemOptions struct {
 	JobID         string `json:"job_id"`
@@ -144,6 +146,15 @@ func (m *Manager) RunBatchRestore(ctx context.Context, opts BatchRestoreOptions)
 	if err := validateBatchRestoreItems(opts.Items); err != nil {
 		return nil, err
 	}
+	preview, err := m.RunBatchRestorePreview(ctx, opts)
+	if err != nil {
+		return nil, err
+	}
+	if batchRestorePreviewHasFailure(preview) {
+		return cloneBatchRestoreResult(batchRestoreResultFromFailedPreflight(preview)), nil
+	}
+	afterBatchRestorePreflightPassed(preview)
+
 	startedAt := m.now().UTC()
 	result := &BatchRestoreResult{
 		ID:        formatRunID(startedAt),
@@ -205,6 +216,68 @@ func (m *Manager) RunBatchRestore(ctx context.Context, opts BatchRestoreOptions)
 	}
 	finishBatchRestore(result, m.now().UTC())
 	return cloneBatchRestoreResult(result), nil
+}
+
+func batchRestorePreviewHasFailure(result *BatchRestorePreviewResult) bool {
+	if result == nil || result.Status == StatusFailed {
+		return true
+	}
+	for _, item := range result.Items {
+		if item.Status == StatusFailed || batchRestorePreviewItemHasFailedPreflight(item) {
+			return true
+		}
+	}
+	return false
+}
+
+func batchRestorePreviewItemHasFailedPreflight(item BatchRestorePreviewItemResult) bool {
+	return item.Preview != nil && firstFailedRestorePreflight(item.Preview.PreflightChecks) != nil
+}
+
+func batchRestoreResultFromFailedPreflight(preview *BatchRestorePreviewResult) *BatchRestoreResult {
+	startedAt := time.Now().UTC()
+	finishedAt := startedAt
+	result := &BatchRestoreResult{
+		ID:        formatRunID(startedAt),
+		Status:    StatusRunning,
+		StartedAt: startedAt,
+		Items:     []BatchRestoreItemResult{},
+		Warnings:  []string{"batch restore preflight failed before writes; no target data was written"},
+	}
+	if preview == nil {
+		result.Status = StatusFailed
+		result.Warning = true
+		result.ErrorMessage = "batch restore preflight failed before writes"
+		result.FinishedAt = &finishedAt
+		return result
+	}
+	result.ID = preview.ID
+	result.StartedAt = preview.StartedAt
+	if preview.FinishedAt != nil {
+		finishedAt = *preview.FinishedAt
+	}
+	result.Items = make([]BatchRestoreItemResult, 0, len(preview.Items))
+	for _, item := range preview.Items {
+		errorMessage := strings.TrimSpace(item.ErrorMessage)
+		if errorMessage == "" && item.Preview != nil {
+			if failedPreflight := firstFailedRestorePreflight(item.Preview.PreflightChecks); failedPreflight != nil {
+				errorMessage = failedPreflight.Error()
+			}
+		}
+		if errorMessage == "" {
+			errorMessage = "batch restore preflight failed before this item started"
+		}
+		result.Items = append(result.Items, BatchRestoreItemResult{
+			Index:         item.Index,
+			JobID:         item.JobID,
+			TargetPath:    item.TargetPath,
+			IncludeConfig: item.IncludeConfig,
+			Status:        StatusFailed,
+			ErrorMessage:  errorMessage,
+		})
+	}
+	finishBatchRestore(result, finishedAt)
+	return result
 }
 
 func validateBatchRestoreItems(items []BatchRestoreItemOptions) error {

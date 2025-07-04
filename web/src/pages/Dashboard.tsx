@@ -159,6 +159,10 @@ function getBackupIssueCount(jobs: BackupJob[]): number {
     || job.restore_drill_status === 'failed'
     || job.restore_drill_status === 'stale'
     || job.last_run?.status === 'failed'
+    || job.last_restore?.status === 'failed'
+    || (job.last_restore?.status === 'completed' && !job.last_matching_restore_verify)
+    || job.last_matching_restore_verify?.status === 'failed'
+    || (job.last_matching_restore_verify?.warnings?.length ?? 0) > 0
   )).length
 }
 
@@ -216,7 +220,7 @@ function getBackupOverview(
 
   const issueCount = getBackupIssueCount(jobs)
   if (issueCount > 0) {
-    return { value: `${issueCount} 项待处理`, trend: '检查失败、过期或缺少演练的任务', needsAttention: true }
+    return { value: `${issueCount} 项待处理`, trend: '检查失败、过期、缺少演练或恢复校验的任务', needsAttention: true }
   }
 
   const latestSuccess = jobs
@@ -602,19 +606,19 @@ export function DashboardPage() {
                 </Checkbox>
               ))}
             </div>
-            <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center">
-              <Button size="sm" variant="flat" className="rounded-lg" onPress={() => navigate('/users')}>
+            <div className="grid grid-cols-2 gap-2 sm:flex sm:flex-row sm:flex-wrap sm:items-center">
+              <Button size="sm" variant="flat" className="w-full rounded-lg sm:w-auto" onPress={() => navigate('/users')}>
                 用户
               </Button>
-              <Button size="sm" variant="flat" className="rounded-lg" onPress={() => navigate('/maintenance')}>
+              <Button size="sm" variant="flat" className="w-full rounded-lg sm:w-auto" onPress={() => navigate('/maintenance')}>
                 备份
               </Button>
-              <Button size="sm" variant="flat" className="rounded-lg" onPress={() => navigate('/settings')}>
+              <Button size="sm" variant="flat" className="w-full rounded-lg sm:w-auto" onPress={() => navigate('/settings')}>
                 公网设置
               </Button>
               <Button
                 size="sm"
-                className="rounded-lg bg-accent-primary text-white"
+                className="w-full rounded-lg bg-accent-primary text-white sm:w-auto"
                 isDisabled={!isSetupChecklistComplete}
                 isLoading={isAcknowledgingSetup}
                 onPress={handleAcknowledgeSetup}

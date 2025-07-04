@@ -22,6 +22,7 @@ const ACTIVITY_DETAIL_LABELS: Record<string, string> = {
   destination_path: '目标路径',
   original_path: '原路径',
   restore_path: '恢复路径',
+  restore_source: '恢复来源',
   quota_path: '配额路径',
   hash: '版本哈希',
   archive: '归档格式',
@@ -76,6 +77,7 @@ const ACTIVITY_DETAIL_ORDER = new Map<string, number>([
   ['target_path', 7.1],
   ['destination_path', 7.1],
   ['restore_path', 7.1],
+  ['restore_source', 7.2],
   ['quota_path', 7.2],
   ['hash', 8],
   ['archive', 9],
@@ -327,6 +329,15 @@ function formatActivityDetailValue(action: ActionType, key: string, value: strin
 
   if (key === 'hash') {
     return value.length > 12 ? `${value.slice(0, 12)}...` : value
+  }
+
+  if (key === 'restore_source') {
+    const labels: Record<string, string> = {
+      version: '版本历史',
+      trash: '回收站',
+      backup: '备份',
+    }
+    return labels[value.trim().toLowerCase()] ?? value
   }
 
   if (key === 'archive') {

@@ -352,6 +352,33 @@ describe('DashboardPage', () => {
       expect(mockNavigate).toHaveBeenCalledWith('/maintenance')
     })
 
+    it('surfaces completed restores that still need matching verification', async () => {
+      mockListBackupJobs.mockResolvedValueOnce([{
+        id: 'external-disk',
+        name: '外置硬盘备份',
+        type: 'local',
+        disabled: false,
+        health_status: 'ok',
+        retention_status: 'ok',
+        restore_drill_status: 'ok',
+        running: false,
+        last_run: { status: 'completed' },
+        last_restore: {
+          status: 'completed',
+          target_path: '/restore/mnemonas',
+        },
+        last_matching_restore_verify: undefined,
+      }])
+
+      render(<DashboardPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('备份需要查看')).toBeTruthy()
+        expect(screen.getByText('1 项待处理')).toBeTruthy()
+        expect(screen.getAllByText('检查失败、过期、缺少演练或恢复校验的任务').length).toBeGreaterThan(0)
+      })
+    })
+
     it('shows disk capacity guidance when disk stats are available', async () => {
       render(<DashboardPage />)
 

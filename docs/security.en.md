@@ -127,7 +127,7 @@ Recommended path:
 
 1. Run `sudo mnemonas-public-setup --proxy caddy <domain> <email>` or `sudo mnemonas-public-setup --proxy nginx <domain> <email>` on the server to generate and install reverse-proxy configuration.
 2. After logging into the Web UI, open `System Settings -> General -> Public Access Wizard` and apply the recommended `server.host`, `trusted_proxy_hops`, share base URL, and related settings for the chosen deployment mode.
-3. Run the Web UI security self-check to verify authentication, HTTPS request semantics, trusted-proxy handling, listener scope, dataplane ports, WebDAV authentication, share base URL, initial password file state, and administrator-account redundancy.
+3. Run the Web UI security self-check to verify authentication, session-token lifetimes, login throttling, browser session-cookie boundaries, public-share cookie/cache boundaries, users-file permissions, HTTPS request semantics, trusted-proxy handling, listener scope, dataplane ports, WebDAV authentication, share base URL, share default policy, initial password file state, and administrator-account redundancy.
 4. Run `sudo mnemonas-doctor --public-domain <domain>` on the server to re-check the public domain, reverse proxy, and local port exposure.
 
 The Web UI wizard updates MnemoNAS application settings and shows operational guidance. Certificate issuance, firewall rules, cloud security groups, and reverse-proxy installation still belong on the server or in the cloud console. The security self-check can only verify runtime state and request semantics that the MnemoNAS process can observe; it does not replace cloud security-group, real public-port, or certificate-chain checks.
@@ -222,8 +222,8 @@ cloudflared tunnel run mnemonas
 - [ ] `webdav.auth_type` is not `none` unless the server is loopback-only.
 - [ ] Public deployments use `server.host = "127.0.0.1"` and are reachable only through the HTTPS reverse proxy.
 - [ ] Dataplane gRPC/HTTP ports are loopback-only or private.
-- [ ] The Web UI security self-check has no `block` items; public deployments should resolve all `warning` items before exposure, especially `allow_unsafe_no_auth`, reverse-proxy headers, dataplane ports, and spare-administrator warnings.
-- [ ] `sudo mnemonas-doctor --public-domain <domain>` reports HTTP redirects to HTTPS on the same public domain, a matching HTTPS certificate with at least 30 days remaining, verified renewal guidance, usable administrator-account redundancy, an absent `initial-password.txt` path with no symlink or non-regular file left behind, rejected anonymous WebDAV `PROPFIND`, and no direct backend exposure, dataplane exposure, or UFW allow warnings.
+- [ ] The Web UI security self-check has no `block` items; public deployments should resolve all `warning` items before exposure, especially `allow_unsafe_no_auth`, session-token lifetimes, login throttling, browser session-cookie boundaries, public-share cookie/cache boundaries, users-file permissions, reverse-proxy headers, dataplane ports, share default policy, and spare-administrator warnings.
+- [ ] `sudo mnemonas-doctor --public-domain <domain>` reports HTTP redirects to HTTPS on the same public domain, a matching HTTPS certificate with at least 30 days remaining, verified renewal guidance, usable administrator-account redundancy, public-safe session-token lifetimes, a non-symlink users file and users-file directory with private permissions, a non-symlink generated WebDAV credentials file with private permissions, an absent `initial-password.txt` path with no symlink or non-regular file left behind, reviewed public-share default policy and public-share JSON response boundaries, rejected anonymous WebDAV `PROPFIND`, and no direct backend exposure, dataplane exposure, or UFW allow warnings.
 - [ ] The [Public cloud firewall checklist](cloud-firewall-checklist.en.md) has been applied: cloud security groups or public firewall rules expose only `80/443`; management ports, the Web backend port, and dataplane ports are not publicly reachable.
 - [ ] Public deployments use HTTPS.
 
@@ -231,7 +231,7 @@ Runtime checks:
 
 ```bash
 sudo mnemonas-doctor --public-domain <domain>
-# Checks HTTPS health, HTTP redirects to HTTPS on the same public domain, certificate hostname, 30-day certificate validity, renewal guidance, anonymous WebDAV PROPFIND, direct backend exposure, and dataplane exposure.
+# Checks HTTPS health, HTTP redirects to HTTPS on the same public domain, certificate hostname, 30-day certificate validity, renewal guidance, public-share JSON response boundaries, anonymous WebDAV PROPFIND, direct backend exposure, and dataplane exposure.
 
 ss -tlnp | grep 8080
 ss -tlnp | grep -E '9090|9091'
@@ -289,6 +289,8 @@ The `Secure` cookie flag is enabled when the request is actually HTTPS, or when 
 
 The Web UI stores the primary access and refresh session in `HttpOnly`, `SameSite=Lax` cookies. It no longer writes bearer access or refresh tokens to `localStorage`; REST API calls, uploads, refresh, and logout use same-origin cookies sent by the browser. Legacy tokens left by older versions are cleared during initialization, refresh, logout, and related auth paths.
 
+For public deployments, keep `auth.access_token_ttl` at or below `1h` and `auth.refresh_token_ttl` at or below `720h` (30 days). The security self-check reports longer values as warnings.
+
 For REST mutations and WebDAV write methods (`POST`, `PUT`, `PATCH`, `DELETE`, `MKCOL`, `COPY`, `MOVE`, `PROPPATCH`, `LOCK`, `UNLOCK`) that carry browser `Origin`, `Referer`, or `Sec-Fetch-Site` metadata, the server rejects requests whose source scheme, host, or port does not match the current request. It also rejects browser requests explicitly marked `cross-site` or `same-site` when they do not use an `Authorization` header. Script clients without browser origin metadata and explicit `Authorization` API clients continue to work.
 
 API clients can still use `Authorization: Bearer <access-token>` and JSON refresh tokens for scripts and automation. The server adds security headers, CSP, and `Permissions-Policy`; file download, version preview, thumbnail, WebDAV file, and WebDAV directory-listing responses also include `X-Content-Type-Options: nosniff` and a sandbox CSP to reduce script execution when user files are opened in the browser. Public deployments still need careful origin hygiene.
@@ -311,6 +313,8 @@ Public share metadata, password-validation responses, and folder-listing respons
 After clearing site data, switching browser, or changing the share password, the password must be entered again.
 
 Five failed password attempts for the same share and client address lock access for five minutes and return `429 Too Many Requests`.
+
+For family public sharing, keep newly created shares expiring by default, for example after 7 days, and set an explicit default access-count limit. The security self-check reports no default expiry, values above `720h` (30 days), or unlimited default access counts as warnings.
 
 ## Security Capability Status
 

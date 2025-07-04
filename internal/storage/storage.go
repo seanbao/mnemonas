@@ -2576,10 +2576,6 @@ type diskMountDetails struct {
 	MountOptions   string
 }
 
-func filesystemTypeForPath(root string, magic uint64) string {
-	return diskMountDetailsForPath(root, magic).FileSystemType
-}
-
 func diskMountDetailsForPath(root string, magic uint64) diskMountDetails {
 	mountInfo, err := readMountInfo()
 	if err == nil {

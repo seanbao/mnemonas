@@ -301,10 +301,14 @@ function getActivityReviewFilterSummary({
 function activityReviewRecordMatchesFilters(
   record: ActivityReviewRecord,
   reviewerFilter: string,
+  activityEntryIDFilter: string,
   sinceFilter?: string,
   dispositionStatusFilter?: ActivityReviewDispositionStatus,
 ): boolean {
   if (reviewerFilter && record.reviewer !== reviewerFilter) {
+    return false
+  }
+  if (activityEntryIDFilter && !record.activity_entry_ids.includes(activityEntryIDFilter)) {
     return false
   }
   if (dispositionStatusFilter && (record.disposition_status ?? 'documented') !== dispositionStatusFilter) {
@@ -376,6 +380,14 @@ function activityReviewRecordHasRecoveryFollowUp(record: ActivityReviewRecord): 
   return activityReviewRecordHasAction(record, ACTIVITY_RECOVERY_FOLLOW_UP_ACTIONS)
 }
 
+function getActivityEntryPrimaryPath(entry: ActivityEntry): string {
+  return entry.path?.trim() ?? ''
+}
+
+function activityEntryHasRecoveryFollowUp(entry: ActivityEntry): boolean {
+  return ACTIVITY_RECOVERY_FOLLOW_UP_ACTIONS.has(entry.action)
+}
+
 // Format relative time
 // Get icon for action type
 function ActionIcon({ action }: { action: ActionType }) {
@@ -407,11 +419,29 @@ function ActionIcon({ action }: { action: ActionType }) {
 }
 
 // Activity entry row
-function ActivityRow({ entry }: { entry: ActivityEntry }) {
+function ActivityRow({
+  entry,
+  onOpenVersions,
+  onOpenTrash,
+  onOpenShares,
+}: {
+  entry: ActivityEntry
+  onOpenVersions: (entry: ActivityEntry) => void
+  onOpenTrash: (entry: ActivityEntry) => void
+  onOpenShares: (entry: ActivityEntry) => void
+}) {
   const color = getActionColor(entry.action)
+  const primaryPath = getActivityEntryPrimaryPath(entry)
+  const showRecoveryActions = Boolean(primaryPath && activityEntryHasRecoveryFollowUp(entry))
+  const showShareActions = Boolean(primaryPath && ACTIVITY_SHARE_ACTIONS.has(entry.action))
+  const hasActions = showRecoveryActions || showShareActions
 
   return (
-    <div className="activity-log-row grid grid-cols-[2.5rem_minmax(0,1fr)] gap-x-3 gap-y-2 border-b border-divider px-4 py-3.5 transition-colors last:border-b-0 hover:bg-content2/40 sm:grid-cols-[2.5rem_minmax(0,1fr)_auto] sm:items-center sm:px-5">
+    <div
+      role="listitem"
+      aria-label={`活动记录 ${getActionLabel(entry.action)}${primaryPath ? ` ${primaryPath}` : ''}`}
+      className="activity-log-row grid grid-cols-[2.5rem_minmax(0,1fr)] gap-x-3 gap-y-2 border-b border-divider px-4 py-3.5 transition-colors last:border-b-0 hover:bg-content2/40 sm:grid-cols-[2.5rem_minmax(0,1fr)_auto] sm:items-center sm:px-5"
+    >
       <div className={cn(
         "activity-log-icon flex h-9 w-9 shrink-0 items-center justify-center rounded-lg",
         color === 'success' && "bg-success/20 text-success",
@@ -435,6 +465,43 @@ function ActivityRow({ entry }: { entry: ActivityEntry }) {
             {getActivityDetailEntries(entry.action, entry.details).map((detail) => (
               <span key={detail.key} className="min-w-0 truncate">{detail.label}: {detail.value}</span>
             ))}
+          </div>
+        )}
+        {hasActions && (
+          <div className="activity-log-actions mt-2 flex flex-wrap gap-1.5">
+            {showRecoveryActions && (
+              <>
+                <Button
+                  size="sm"
+                  variant="light"
+                  className="h-7 rounded-lg px-2 text-xs"
+                  startContent={<RotateCcw size={13} />}
+                  onPress={() => onOpenVersions(entry)}
+                >
+                  查看版本
+                </Button>
+                <Button
+                  size="sm"
+                  variant="light"
+                  className="h-7 rounded-lg px-2 text-xs"
+                  startContent={<Trash2 size={13} />}
+                  onPress={() => onOpenTrash(entry)}
+                >
+                  查回收站
+                </Button>
+              </>
+            )}
+            {showShareActions && (
+              <Button
+                size="sm"
+                variant="light"
+                className="h-7 rounded-lg px-2 text-xs"
+                startContent={<Share2 size={13} />}
+                onPress={() => onOpenShares(entry)}
+              >
+                处理分享
+              </Button>
+            )}
           </div>
         )}
       </div>
@@ -811,12 +878,14 @@ function ActivityReviewDispositionRecorder({
   followUpTotal,
   followUpRecordsError,
   reviewReviewerFilter,
+  reviewActivityEntryIDFilter,
   reviewTimeRangeFilter,
   reviewDispositionStatusFilter,
   reviewDispositionStatus,
   note,
   onNoteChange,
   onReviewReviewerFilterChange,
+  onReviewActivityEntryIDFilterChange,
   onReviewTimeRangeFilterChange,
   onReviewDispositionStatusFilterChange,
   onReviewDispositionStatusChange,
@@ -844,12 +913,14 @@ function ActivityReviewDispositionRecorder({
   followUpTotal: number
   followUpRecordsError: unknown
   reviewReviewerFilter: string
+  reviewActivityEntryIDFilter: string
   reviewTimeRangeFilter: ActivityTimeRangeKey
   reviewDispositionStatusFilter: ActivityReviewDispositionFilterKey
   reviewDispositionStatus: ActivityReviewDispositionStatus
   note: string
   onNoteChange: (value: string) => void
   onReviewReviewerFilterChange: (value: string) => void
+  onReviewActivityEntryIDFilterChange: (value: string) => void
   onReviewTimeRangeFilterChange: (value: string | undefined) => void
   onReviewDispositionStatusFilterChange: (value: string | undefined) => void
   onReviewDispositionStatusChange: (value: string | undefined) => void
@@ -877,7 +948,7 @@ function ActivityReviewDispositionRecorder({
   const users = getUniqueActivityReviewValues(reviewEntries, (entry) => entry.user)
   const scopeLabel = getActivityReviewScopeLabel(isFiltered, reviewWindow)
   const trimmedNote = note.trim()
-  const hasRecordFilters = Boolean(reviewReviewerFilter.trim() || reviewTimeRangeFilter !== 'all' || reviewDispositionStatusFilter !== 'all')
+  const hasRecordFilters = Boolean(reviewReviewerFilter.trim() || reviewActivityEntryIDFilter.trim() || reviewTimeRangeFilter !== 'all' || reviewDispositionStatusFilter !== 'all')
   const hasFollowUpRecords = followUpTotal > 0 || followUpRecords.length > 0
   const hiddenFollowUpRecords = Math.max(followUpTotal - followUpRecords.length, 0)
   const getReviewRecordDispositionNote = (record: ActivityReviewRecord): string => reviewRecordDispositionNotes[record.id] ?? ''
@@ -1141,7 +1212,7 @@ function ActivityReviewDispositionRecorder({
       )}
 
       <div aria-label="复核历史筛选" className="mt-3 flex flex-col gap-2 rounded-lg border border-divider bg-content2/60 px-3 py-2 sm:flex-row sm:items-start sm:justify-between">
-        <div className="flex min-w-0 flex-col gap-2 sm:flex-row sm:items-start">
+        <div className="flex min-w-0 flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-start">
           <Input
             aria-label="按复核人筛选"
             placeholder="按复核人筛选"
@@ -1150,6 +1221,15 @@ function ActivityReviewDispositionRecorder({
             value={reviewReviewerFilter}
             onValueChange={onReviewReviewerFilterChange}
             startContent={<User size={14} />}
+          />
+          <Input
+            aria-label="按关联活动筛选"
+            placeholder="按关联活动筛选"
+            size="sm"
+            className="w-full sm:w-44"
+            value={reviewActivityEntryIDFilter}
+            onValueChange={onReviewActivityEntryIDFilterChange}
+            startContent={<Search size={14} />}
           />
           <Select
             placeholder="复核时间"
@@ -1406,6 +1486,7 @@ export function ActivityPage() {
   const [reviewDispositionNote, setReviewDispositionNote] = useState('')
   const [reviewDispositionStatus, setReviewDispositionStatus] = useState<ActivityReviewDispositionStatus>('documented')
   const [reviewRecordReviewerFilter, setReviewRecordReviewerFilter] = useState('')
+  const [reviewRecordActivityEntryIDFilter, setReviewRecordActivityEntryIDFilter] = useState('')
   const [reviewRecordTimeRangeFilter, setReviewRecordTimeRangeFilter] = useState<ActivityTimeRangeKey>('all')
   const [reviewRecordDispositionStatusFilter, setReviewRecordDispositionStatusFilter] = useState<ActivityReviewDispositionFilterKey>('all')
   const [isRecordingFilteredReview, setIsRecordingFilteredReview] = useState(false)
@@ -1420,6 +1501,7 @@ export function ActivityPage() {
   const clearActivityAbortControllerRef = useRef<AbortController | null>(null)
   const normalizedUserFilter = isAdmin ? userFilter.trim() : ''
   const normalizedReviewRecordReviewerFilter = isAdmin ? reviewRecordReviewerFilter.trim() : ''
+  const normalizedReviewRecordActivityEntryIDFilter = isAdmin ? reviewRecordActivityEntryIDFilter.trim() : ''
   const normalizedReviewRecordDispositionStatusFilter = isAdmin && reviewRecordDispositionStatusFilter !== 'all'
     ? reviewRecordDispositionStatusFilter
     : undefined
@@ -1429,8 +1511,8 @@ export function ActivityPage() {
   const timeRangeSinceFilter = useMemo(() => getActivityTimeRangeSince(timeRangeFilter), [timeRangeFilter])
   const reviewRecordSinceFilter = useMemo(() => getActivityTimeRangeSince(reviewRecordTimeRangeFilter), [reviewRecordTimeRangeFilter])
   const activityReviewRecordsQueryKey = useMemo(
-    () => ['activity-review-records', authScopeKey, normalizedReviewRecordReviewerFilter, normalizedReviewRecordDispositionStatusFilter, reviewRecordSinceFilter] as const,
-    [authScopeKey, normalizedReviewRecordReviewerFilter, normalizedReviewRecordDispositionStatusFilter, reviewRecordSinceFilter],
+    () => ['activity-review-records', authScopeKey, normalizedReviewRecordReviewerFilter, normalizedReviewRecordActivityEntryIDFilter, normalizedReviewRecordDispositionStatusFilter, reviewRecordSinceFilter] as const,
+    [authScopeKey, normalizedReviewRecordReviewerFilter, normalizedReviewRecordActivityEntryIDFilter, normalizedReviewRecordDispositionStatusFilter, reviewRecordSinceFilter],
   )
   const activityReviewFollowUpRecordsQueryKey = useMemo(
     () => ['activity-review-follow-up-records', authScopeKey] as const,
@@ -1475,6 +1557,7 @@ export function ActivityPage() {
     queryFn: ({ signal }) => listActivityReviewRecords({
       limit: 5,
       reviewer: normalizedReviewRecordReviewerFilter || undefined,
+      activityEntryId: normalizedReviewRecordActivityEntryIDFilter || undefined,
       dispositionStatus: normalizedReviewRecordDispositionStatusFilter,
       since: reviewRecordSinceFilter,
       signal,
@@ -1538,7 +1621,7 @@ export function ActivityPage() {
     mutationFn: ({ input }: { input: ActivityReviewRecordCreateInput; successTitle: string }) => createActivityReviewRecord(input),
     retry: false,
     onSuccess: (record, variables) => {
-      if (activityReviewRecordMatchesFilters(record, normalizedReviewRecordReviewerFilter, reviewRecordSinceFilter, normalizedReviewRecordDispositionStatusFilter)) {
+      if (activityReviewRecordMatchesFilters(record, normalizedReviewRecordReviewerFilter, normalizedReviewRecordActivityEntryIDFilter, reviewRecordSinceFilter, normalizedReviewRecordDispositionStatusFilter)) {
         queryClient.setQueryData<ActivityReviewRecordListResponse>(activityReviewRecordsQueryKey, (current) => {
           return prependActivityReviewRecord(current, record, 5)
         })
@@ -1577,6 +1660,7 @@ export function ActivityPage() {
           (candidate) => activityReviewRecordMatchesFilters(
             candidate,
             normalizedReviewRecordReviewerFilter,
+            normalizedReviewRecordActivityEntryIDFilter,
             reviewRecordSinceFilter,
             normalizedReviewRecordDispositionStatusFilter,
           ),
@@ -1681,12 +1765,14 @@ export function ActivityPage() {
 
   const handleClearReviewRecordFilters = () => {
     setReviewRecordReviewerFilter('')
+    setReviewRecordActivityEntryIDFilter('')
     setReviewRecordTimeRangeFilter('all')
     setReviewRecordDispositionStatusFilter('all')
   }
 
   const handleShowFollowUpReviewRecords = () => {
     setReviewRecordReviewerFilter('')
+    setReviewRecordActivityEntryIDFilter('')
     setReviewRecordTimeRangeFilter('all')
     setReviewRecordDispositionStatusFilter('needs_follow_up')
   }
@@ -1716,6 +1802,38 @@ export function ActivityPage() {
       description: traceDescription,
       color: 'success',
     })
+  }
+
+  const handleOpenActivityEntryVersions = (entry: ActivityEntry) => {
+    const path = getActivityEntryPrimaryPath(entry)
+    if (!path) {
+      addToast({ title: '没有可查看版本的路径', color: 'warning' })
+      return
+    }
+    navigate(`/versions?path=${encodeURIComponent(path)}`)
+  }
+
+  const handleOpenActivityEntryTrash = (entry: ActivityEntry) => {
+    const path = getActivityEntryPrimaryPath(entry)
+    if (!path) {
+      addToast({ title: '没有可查询回收站的路径', color: 'warning' })
+      return
+    }
+    navigate(`/trash?path=${encodeURIComponent(path)}`)
+  }
+
+  const handleOpenActivityEntryShares = (entry: ActivityEntry) => {
+    const path = getActivityEntryPrimaryPath(entry)
+    if (!path) {
+      addToast({ title: '没有可处理分享的路径', color: 'warning' })
+      return
+    }
+
+    const params = new URLSearchParams({
+      tab: 'shares',
+      share_path: path,
+    })
+    navigate(`/settings?${params.toString()}`)
   }
 
   const handleOpenReviewRecordVersions = (record: ActivityReviewRecord) => {
@@ -1764,6 +1882,7 @@ export function ActivityPage() {
         limit: ACTIVITY_REVIEW_EXPORT_LIMIT,
         offset: 0,
         reviewer: normalizedReviewRecordReviewerFilter || undefined,
+        activityEntryId: normalizedReviewRecordActivityEntryIDFilter || undefined,
         dispositionStatus: normalizedReviewRecordDispositionStatusFilter,
         since: reviewRecordSinceFilter,
       })
@@ -2208,12 +2327,14 @@ export function ActivityPage() {
           followUpTotal={reviewFollowUpTotal}
           followUpRecordsError={reviewFollowUpRecordsError}
           reviewReviewerFilter={reviewRecordReviewerFilter}
+          reviewActivityEntryIDFilter={reviewRecordActivityEntryIDFilter}
           reviewTimeRangeFilter={reviewRecordTimeRangeFilter}
           reviewDispositionStatusFilter={reviewRecordDispositionStatusFilter}
           reviewDispositionStatus={reviewDispositionStatus}
           note={reviewDispositionNote}
           onNoteChange={setReviewDispositionNote}
           onReviewReviewerFilterChange={setReviewRecordReviewerFilter}
+          onReviewActivityEntryIDFilterChange={setReviewRecordActivityEntryIDFilter}
           onReviewTimeRangeFilterChange={handleReviewRecordTimeRangeChange}
           onReviewDispositionStatusFilterChange={handleReviewRecordDispositionStatusFilterChange}
           onReviewDispositionStatusChange={handleReviewDispositionStatusChange}
@@ -2316,7 +2437,7 @@ export function ActivityPage() {
       )}
 
       {/* Activity list */}
-      <div className="card-meridian min-h-0 flex-1 overflow-auto rounded-lg">
+      <div role="list" aria-label="最近操作列表" className="card-meridian min-h-0 flex-1 overflow-auto rounded-lg">
         {pathFilterErrorMessage ? (
           <div className="flex h-64 items-center justify-center">
             <EmptyState
@@ -2337,7 +2458,13 @@ export function ActivityPage() {
           </div>
         ) : entries.length > 0 ? (
           entries.map((entry) => (
-            <ActivityRow key={entry.id} entry={entry} />
+            <ActivityRow
+              key={entry.id}
+              entry={entry}
+              onOpenVersions={handleOpenActivityEntryVersions}
+              onOpenTrash={handleOpenActivityEntryTrash}
+              onOpenShares={handleOpenActivityEntryShares}
+            />
           ))
         ) : (
           <div className="flex items-center justify-center h-64">

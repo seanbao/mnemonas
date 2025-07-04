@@ -3,7 +3,6 @@ package api
 import (
 	"context"
 	"reflect"
-	"sort"
 	"time"
 
 	"github.com/seanbao/mnemonas/internal/alerts"
@@ -42,14 +41,12 @@ func settingsPolicyChangedAlertEvent(currentConfig, updatedConfig config.Config)
 			"changed_sections":                 changedSections,
 			"directory_access_rules_changed":   directoryRulesChanged,
 			"directory_access_rule_count":      len(updatedConfig.Storage.DirectoryAccessRules),
-			"directory_access_rule_paths":      directoryAccessRulePaths(updatedConfig.Storage.DirectoryAccessRules),
 			"share_policy_changed":             sharePolicyChanged,
 			"share_enabled_changed":            shareEnabledChanged,
 			"share_default_expiry_changed":     shareDefaultExpiryChanged,
 			"share_default_max_access_changed": shareDefaultMaxAccessChanged,
 			"share_policy_rules_changed":       sharePolicyRulesChanged,
 			"share_policy_rule_count":          len(updatedConfig.Share.PolicyRules),
-			"share_policy_rule_paths":          sharePolicyRulePaths(updatedConfig.Share.PolicyRules),
 		},
 	}, true
 }
@@ -63,24 +60,6 @@ func settingsPolicyChangedAlertMessage(directoryRulesChanged, sharePolicyChanged
 	default:
 		return "share policy changed"
 	}
-}
-
-func directoryAccessRulePaths(rules []config.DirectoryAccessRuleConfig) []string {
-	paths := make([]string, 0, len(rules))
-	for _, rule := range rules {
-		paths = append(paths, rule.Path)
-	}
-	sort.Strings(paths)
-	return paths
-}
-
-func sharePolicyRulePaths(rules []config.SharePolicyRuleConfig) []string {
-	paths := make([]string, 0, len(rules))
-	for _, rule := range rules {
-		paths = append(paths, rule.Path)
-	}
-	sort.Strings(paths)
-	return paths
 }
 
 func (s *Server) sendSettingsPolicyChangedAlertEvent(ctx context.Context, event alerts.EventPayload) {
