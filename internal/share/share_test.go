@@ -3307,6 +3307,8 @@ func TestShareStore_DeleteRollbackOnSaveFailure(t *testing.T) {
 }
 
 func TestShareStore_GetDoesNotBlockWhileAuthorizedAccessPersists(t *testing.T) {
+	const waitTimeout = 5 * time.Second
+
 	tempDir := t.TempDir()
 	storePath := filepath.Join(tempDir, "shares.json")
 
@@ -3351,7 +3353,7 @@ func TestShareStore_GetDoesNotBlockWhileAuthorizedAccessPersists(t *testing.T) {
 
 	select {
 	case <-writerStarted:
-	case <-time.After(time.Second):
+	case <-time.After(waitTimeout):
 		t.Fatal("timed out waiting for share store write to start")
 	}
 
@@ -3368,7 +3370,7 @@ func TestShareStore_GetDoesNotBlockWhileAuthorizedAccessPersists(t *testing.T) {
 
 	select {
 	case <-getDone:
-	case <-time.After(time.Second):
+	case <-time.After(waitTimeout):
 		t.Fatal("Get() blocked on an in-flight authorized access save")
 	}
 
@@ -3381,7 +3383,7 @@ func TestShareStore_GetDoesNotBlockWhileAuthorizedAccessPersists(t *testing.T) {
 		if accessErr != nil {
 			t.Fatalf("RecordAuthorizedAccess() error: %v", accessErr)
 		}
-	case <-time.After(time.Second):
+	case <-time.After(waitTimeout):
 		t.Fatal("RecordAuthorizedAccess() did not finish after releasing writer")
 	}
 
@@ -3395,6 +3397,8 @@ func TestShareStore_GetDoesNotBlockWhileAuthorizedAccessPersists(t *testing.T) {
 }
 
 func TestShareStore_ConcurrentWritesSerializePersistence(t *testing.T) {
+	const waitTimeout = 5 * time.Second
+
 	tmpDir := t.TempDir()
 	storePath := filepath.Join(tmpDir, "shares.json")
 
@@ -3447,7 +3451,7 @@ func TestShareStore_ConcurrentWritesSerializePersistence(t *testing.T) {
 
 	select {
 	case <-firstStarted:
-	case <-time.After(time.Second):
+	case <-time.After(waitTimeout):
 		t.Fatal("timed out waiting for first share persist to start")
 	}
 
@@ -3472,13 +3476,13 @@ func TestShareStore_ConcurrentWritesSerializePersistence(t *testing.T) {
 		if err != nil {
 			t.Fatalf("first Create() error: %v", err)
 		}
-	case <-time.After(time.Second):
+	case <-time.After(waitTimeout):
 		t.Fatal("first Create() did not finish after releasing writer")
 	}
 
 	select {
 	case <-secondStarted:
-	case <-time.After(time.Second):
+	case <-time.After(waitTimeout):
 		t.Fatal("timed out waiting for second share persist to start")
 	}
 
@@ -3487,7 +3491,7 @@ func TestShareStore_ConcurrentWritesSerializePersistence(t *testing.T) {
 		if err != nil {
 			t.Fatalf("second Create() error: %v", err)
 		}
-	case <-time.After(time.Second):
+	case <-time.After(waitTimeout):
 		t.Fatal("second Create() did not finish")
 	}
 

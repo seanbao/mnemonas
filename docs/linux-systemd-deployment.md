@@ -244,7 +244,7 @@ sudo mnemonas-uninstall-systemd
 sudo env REMOVE_CONFIG=1 REMOVE_DATA=1 CONFIRM_REMOVE_DATA=/srv/mnemonas mnemonas-uninstall-systemd
 ```
 
-卸载脚本同样拒绝经过符号链接组件的安装路径和数据路径。删除数据时 `CONFIRM_REMOVE_DATA` 必须与 `STORAGE_ROOT` 完全一致，避免误删真实挂载点或被替换的目录树。
+卸载脚本同样拒绝经过符号链接组件的二进制、共享资源、配置、systemd unit 和数据路径。删除配置或数据时，目标目录不能是符号链接或经过符号链接组件；删除数据还要求 `CONFIRM_REMOVE_DATA` 必须与 `STORAGE_ROOT` 完全一致，避免误删真实挂载点或被替换的目录树。
 
 服务账号默认保留，便于之后重新安装复用同一 UID/GID；如果确实要删除账号，可额外设置 `REMOVE_SERVICE_USER=1`。
 

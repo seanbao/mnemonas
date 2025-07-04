@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/pelletier/go-toml/v2"
+
 	"github.com/seanbao/mnemonas/internal/rootio"
 )
 

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { act, render, screen, waitFor } from '@/test/utils'
+import { act, render, screen, waitFor, within } from '@/test/utils'
 import userEvent from '@testing-library/user-event'
 import * as HeroUI from '@heroui/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
@@ -429,6 +429,14 @@ describe('VersionsPage', () => {
       await waitFor(() => {
         expect(screen.getByText('确认恢复版本')).toBeTruthy()
       })
+
+      const review = within(screen.getByLabelText('版本恢复执行前复核'))
+      expect(review.getByText('恢复影响复核')).toBeTruthy()
+      expect(review.getByText('/test.txt')).toBeTruthy()
+      expect(review.getByText('当前可见文件会被所选历史版本覆盖。')).toBeTruthy()
+      expect(review.getByText('恢复前的当前内容会保存为新的历史版本。')).toBeTruthy()
+      expect(review.getByText('服务端会重新校验管理员权限、目录配额和目标父目录状态。')).toBeTruthy()
+      expect(review.getByText('版本不匹配、父目录冲突或版本存储不可用时会拒绝恢复并保留现状。')).toBeTruthy()
     })
 
     it('closes the restore modal when cancellation is allowed', async () => {

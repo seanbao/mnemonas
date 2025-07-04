@@ -139,7 +139,7 @@ sudo firewall-cmd --reload
 
 1. 在服务器上运行 `sudo mnemonas-public-setup --proxy caddy <domain> <email>` 或 `sudo mnemonas-public-setup --proxy nginx <domain> <email>`，生成并安装反向代理配置。
 2. 登录 Web UI 后打开 `设置 -> 常规 -> 公网访问向导`，根据部署方式应用 `server.host`、`trusted_proxy_hops`、分享域名等配置。
-3. 在 Web UI 运行“安全自检”，确认认证、HTTPS 请求语义、受信代理、监听地址、dataplane 端口、WebDAV 认证、分享 Base URL、初始密码文件和管理员账号备用状态。
+3. 在 Web UI 运行“安全自检”，确认认证、会话有效期、登录限速、浏览器会话 cookie 边界、公开分享 cookie/cache 边界、用户文件权限、HTTPS 请求语义、受信代理、监听地址、dataplane 端口、WebDAV 认证、分享 Base URL、分享默认策略、初始密码文件和管理员账号备用状态。
 4. 在服务器上运行 `sudo mnemonas-doctor --public-domain <domain>`，复核公网域名、反向代理和本机端口暴露情况。
 
 Web UI 向导只负责 MnemoNAS 应用配置和操作提示；证书签发、防火墙、云安全组和反向代理安装仍应在服务器或云控制台完成。安全自检只能检查 MnemoNAS 进程能观察到的运行态和当前请求语义，不能替代云厂商安全组、真实公网端口和证书链检查。
@@ -240,8 +240,8 @@ cloudflared tunnel run mnemonas
 - [ ] `auth_type` 不是 `none`（除非仅本地访问）
 - [ ] 公网部署时 `server.host = "127.0.0.1"`，只通过 HTTPS 反向代理访问
 - [ ] dataplane gRPC/HTTP 端口保持在 `127.0.0.1` 或受信私有网络内，没有直接暴露到公网
-- [ ] Web UI “安全自检”没有 `block` 项；公网部署前应处理所有 `warning`，尤其是 `allow_unsafe_no_auth`、反向代理 header、dataplane 端口和备用管理员提醒
-- [ ] systemd 部署已运行 `sudo mnemonas-doctor --public-domain <domain>`，并确认 HTTP 会跳转到同一域名的 HTTPS、HTTPS 证书 hostname 匹配、30 天内不过期，续期路径已验证，管理员账号冗余可用，`initial-password.txt` 路径不存在且不是符号链接或非普通文件，匿名 WebDAV `PROPFIND` 被拒绝，且没有 Web 后端直连、dataplane 端口暴露或 UFW 放行警告
+- [ ] Web UI “安全自检”没有 `block` 项；公网部署前应处理所有 `warning`，尤其是 `allow_unsafe_no_auth`、会话有效期、登录限速、浏览器会话 cookie 边界、公开分享 cookie/cache 边界、用户文件权限、反向代理 header、dataplane 端口、分享默认策略和备用管理员提醒
+- [ ] systemd 部署已运行 `sudo mnemonas-doctor --public-domain <domain>`，并确认 HTTP 会跳转到同一域名的 HTTPS、HTTPS 证书 hostname 匹配、30 天内不过期，续期路径已验证，管理员账号冗余可用，会话有效期符合公网建议，用户文件及其目录不是符号链接且权限为私有，自动 WebDAV 凭据文件不是符号链接且权限私有，`initial-password.txt` 路径不存在且不是符号链接或非普通文件，公开分享默认策略和公开分享 JSON 响应边界已处理，匿名 WebDAV `PROPFIND` 被拒绝，且没有 Web 后端直连、dataplane 端口暴露或 UFW 放行警告
 - [ ] 已按 [公网云防火墙复核清单](cloud-firewall-checklist.md) 确认云安全组或防火墙公网入口只开放 `80/443`；管理端口、Web 后端端口和 dataplane 端口不对公网开放
 - [ ] 生产环境使用 HTTPS
 
@@ -250,7 +250,7 @@ cloudflared tunnel run mnemonas
 ```bash
 # MnemoNAS 自检
 sudo mnemonas-doctor --public-domain <domain>
-# 该命令会检查 HTTPS health、HTTP 是否跳转到同一域名的 HTTPS、证书 hostname、证书 30 天有效期、证书续期提示、匿名 WebDAV PROPFIND、后端直连端口和 dataplane 端口
+# 该命令会检查 HTTPS health、HTTP 是否跳转到同一域名的 HTTPS、证书 hostname、证书 30 天有效期、证书续期提示、公开分享 JSON 响应边界、匿名 WebDAV PROPFIND、后端直连端口和 dataplane 端口
 
 # 检查监听端口
 ss -tlnp | grep 8080
@@ -320,6 +320,7 @@ location /api/ {
 #### Web UI 会话令牌
 
 - Web UI 主会话使用 `HttpOnly`、`SameSite=Lax` cookie 保存访问令牌和刷新令牌，不再把 bearer token 写入 `localStorage`
+- 公网部署建议将 `auth.access_token_ttl` 保持在 `1h` 以内，将 `auth.refresh_token_ttl` 保持在 `720h`（30 天）以内；安全自检会提示超出建议值的配置
 - REST API、上传请求、刷新令牌与退出登录请求由浏览器自动携带同源 cookie；旧版本残留在 `localStorage` 的令牌会在初始化、刷新、登出等路径中清理
 - 对带浏览器 `Origin` / `Referer` / `Sec-Fetch-Site` 元数据的 REST 写请求和 WebDAV 写方法（`POST`、`PUT`、`PATCH`、`DELETE`、`MKCOL`、`COPY`、`MOVE`、`PROPPATCH`、`LOCK`、`UNLOCK`），服务端会拒绝来源 scheme、主机或端口与当前请求不一致的请求，并拒绝浏览器明确标记为 `cross-site` 或 `same-site` 的无 `Authorization` 写请求；无浏览器来源头的脚本客户端以及显式 `Authorization` API 客户端继续可用
 - API 客户端仍可使用 `Authorization: Bearer <access-token>` 与 JSON refresh token，兼容脚本和自动化调用
@@ -329,6 +330,7 @@ location /api/ {
 #### 公开分享密码验证
 
 - 受密码保护的公开分享在浏览器完成一次密码验证后，会下发 `HttpOnly`、`SameSite=Strict` cookie；cookie 只作用于对应的 `/s/<id>` 与 `/api/v1/public/shares/<id>` 路径
+- 家庭公网分享建议让新分享默认 7 天过期，并设置明确的默认访问次数；安全自检会提示默认不过期、超过 `720h`（30 天）或默认访问次数不限制的配置。
 - 文件夹浏览与文件下载依赖该 cookie，不再通过 URL 查询参数传递分享密码
 - 公开分享信息、密码验证响应与文件夹列表响应会返回 `Cache-Control: private, no-cache`、`Vary: Cookie`、`X-Content-Type-Options: nosniff` 和 `Referrer-Policy: no-referrer`，避免浏览器或中间缓存复用依赖 cookie 的分享元数据
 - 清除浏览器站点数据、切换浏览器或密码变更后，需要重新输入分享密码

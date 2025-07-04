@@ -308,6 +308,80 @@ test.describe('公网访问向导', () => {
       },
     })
   })
+
+  test('应用推荐后保存应提交公网分享和会话安全默认值', async ({ page }) => {
+    let submittedBody: unknown
+    await page.route('**/api/v1/settings/', async (route) => {
+      const method = route.request().method()
+      if (method === 'GET') {
+        const response = await route.fetch()
+        const body = await response.json() as {
+          data: {
+            auth?: Record<string, unknown>
+            share?: Record<string, unknown>
+          }
+        }
+        await route.fulfill({
+          status: response.status(),
+          contentType: 'application/json',
+          json: {
+            ...body,
+            data: {
+              ...body.data,
+              auth: {
+                ...body.data.auth,
+                access_token_ttl: '2h0m0s',
+                refresh_token_ttl: '1080h0m0s',
+              },
+              share: {
+                ...body.data.share,
+                enabled: true,
+                base_url: '',
+                default_expires_in: '0',
+                default_max_access: 0,
+              },
+            },
+          },
+        })
+        return
+      }
+      if (method !== 'PUT') {
+        await route.continue()
+        return
+      }
+
+      submittedBody = JSON.parse(route.request().postData() || '{}')
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ success: true, data: null, message: 'settings updated, some changes may require restart' }),
+      })
+    })
+
+    await page.reload()
+    await expect(page.getByText('加载设置...')).toHaveCount(0, { timeout: 15000 })
+    await page.getByLabel('公网域名').fill('nas.example.com')
+    await page.getByRole('button', { name: '应用推荐到表单' }).click()
+    await page.getByRole('button', { name: /保存|保存设置/i }).click()
+
+    await expect(page.getByText('设置已保存，部分变更需要重启后生效')).toBeVisible({ timeout: 5000 })
+    expect(submittedBody).toMatchObject({
+      server: {
+        host: '127.0.0.1',
+        trusted_proxy_hops: 1,
+      },
+      auth: {
+        access_token_ttl: '1h',
+        refresh_token_ttl: '720h',
+      },
+      share: {
+        enabled: true,
+        base_url: 'https://nas.example.com',
+        default_expires_in: '168h',
+        default_max_access: 20,
+      },
+    })
+  })
 })
 
 test.describe('安全自检修复动作', () => {
@@ -370,6 +444,84 @@ test.describe('设置页面响应式', () => {
 
     await page.getByRole('button', { name: '应用推荐到表单' }).click()
     await expect(page.getByLabel('受信代理层数')).toHaveValue('1')
+
+    const horizontalOverflow = await page.evaluate(() => {
+      const pageWidth = Math.max(document.documentElement.scrollWidth, document.body.scrollWidth)
+      return pageWidth - window.innerWidth
+    })
+    expect(horizontalOverflow).toBeLessThanOrEqual(2)
+  })
+
+  test('移动端公网访问向导可修复公开分享默认策略', async ({ page }) => {
+    let submittedBody: unknown
+    await page.route('**/api/v1/settings/', async (route) => {
+      const method = route.request().method()
+      if (method === 'GET') {
+        const response = await route.fetch()
+        const body = await response.json() as {
+          data: {
+            share?: Record<string, unknown>
+          }
+        }
+        await route.fulfill({
+          status: response.status(),
+          contentType: 'application/json',
+          json: {
+            ...body,
+            data: {
+              ...body.data,
+              share: {
+                ...body.data.share,
+                enabled: true,
+                base_url: '',
+                default_expires_in: '0',
+                default_max_access: 0,
+              },
+            },
+          },
+        })
+        return
+      }
+      if (method !== 'PUT') {
+        await route.continue()
+        return
+      }
+
+      submittedBody = JSON.parse(route.request().postData() || '{}')
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ success: true, data: null, message: 'settings updated, some changes may require restart' }),
+      })
+    })
+
+    await page.setViewportSize({ width: 390, height: 844 })
+    await ensureAuthenticatedAt(page, '/settings')
+    await expect(page.getByText('加载设置...')).toHaveCount(0, { timeout: 15000 })
+
+    const wizardHeading = page.getByRole('heading', { name: '公网访问向导' })
+    await wizardHeading.scrollIntoViewIfNeeded()
+    await expect(wizardHeading).toBeVisible({ timeout: 5000 })
+    await expect(page.getByText('填写公网域名后设置')).toBeVisible()
+    await expect(page.getByRole('button', { name: '应用推荐到表单' })).toBeDisabled()
+
+    await page.getByLabel('公网域名').fill('nas.example.com')
+    await expect(page.getByText('https://nas.example.com')).toBeVisible()
+    await page.getByRole('button', { name: '应用推荐到表单' }).click()
+    await page.getByRole('tab', { name: '分享' }).click()
+    await expect(page.getByLabel('新分享默认有效期')).toHaveValue('168h')
+    await expect(page.getByLabel('新分享默认访问次数')).toHaveValue('20')
+
+    await page.getByRole('button', { name: /保存|保存设置/i }).click()
+    await expect(page.getByText('设置已保存，部分变更需要重启后生效')).toBeVisible({ timeout: 5000 })
+    expect(submittedBody).toMatchObject({
+      share: {
+        enabled: true,
+        base_url: 'https://nas.example.com',
+        default_expires_in: '168h',
+        default_max_access: 20,
+      },
+    })
 
     const horizontalOverflow = await page.evaluate(() => {
       const pageWidth = Math.max(document.documentElement.scrollWidth, document.body.scrollWidth)

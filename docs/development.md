@@ -23,7 +23,7 @@
 
 | 工具 | 最低版本 | 推荐版本 | 用途 |
 | ---- | -------- | -------- | ---- |
-| **Go** | 1.25.10 | 1.25.10+ | Go 控制面开发 |
+| **Go** | 1.25.11 | 1.25.11+ | Go 控制面开发 |
 | **Rust** | 1.92 | 1.92.x | Rust 数据面开发 |
 | **Node.js** | `^20.19.0` 或 `>=22.12.0` | `.nvmrc` 指定的 22.x | 前端开发 |
 | **protoc** | 3.20 | 3.20.1（CI 固定） | 重新生成 protobuf 代码；普通 dataplane/Docker 构建使用已提交生成代码 |
@@ -77,8 +77,8 @@ cargo install cargo-watch --version 8.5.3
 # 更新包管理器
 sudo apt update
 
-# 安装 Go (推荐从 https://go.dev/dl/ 选择 1.25.10 或更新的 1.25.x 补丁版本)
-GO_VERSION=1.25.10
+# 安装 Go (推荐从 https://go.dev/dl/ 选择 1.25.11 或更新的 1.25.x 补丁版本)
+GO_VERSION=1.25.11
 wget "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz"
 sudo tar -C /usr/local -xzf "go${GO_VERSION}.linux-amd64.tar.gz"
 echo 'export PATH=$PATH:/usr/local/go/bin:$HOME/go/bin' >> ~/.bashrc
@@ -754,7 +754,7 @@ export PATH=$PATH:$(go env GOPATH)/bin
 
 ### Q: Go 尝试下载 toolchain 但网络失败
 
-仓库使用 `toolchain go1.25.10` 固定 CI 和 release 的补丁版本。若本机已经安装兼容的 Go 1.25.x，但网络无法下载指定 toolchain，可临时使用本机工具链运行本地检查：
+仓库使用 `toolchain go1.25.11` 固定 CI 和 release 的补丁版本。若本机已经安装兼容的 Go 1.25.x，但网络无法下载指定 toolchain，可临时使用本机工具链运行本地检查：
 
 ```bash
 packages=$(GOTOOLCHAIN=local make --no-print-directory go-packages)
@@ -762,7 +762,7 @@ GOTOOLCHAIN=local go test $packages
 GOTOOLCHAIN=local make build
 ```
 
-`GOTOOLCHAIN=local` 只适合本地临时验证。发布构建和安全扫描必须使用 `go1.25.10` 或更新的 1.25.x 补丁版本；低于该版本的本地工具链会被 `govulncheck` 报出标准库漏洞。Playwright 隔离后端默认会使用 `GOTOOLCHAIN=local`，避免 E2E 因 toolchain 下载超时而无法启动。
+`GOTOOLCHAIN=local` 只适合本地临时验证。发布构建和安全扫描必须使用 `go1.25.11` 或更新的 1.25.x 补丁版本；低于该版本的本地工具链会被 `govulncheck` 报出标准库漏洞。Playwright 隔离后端默认会使用 `GOTOOLCHAIN=local`，避免 E2E 因 toolchain 下载超时而无法启动。
 
 如果下载失败并提示 `checksum database disabled by GOSUMDB=off`，说明本机环境禁用了 Go checksum database，toolchain 模块无法完成校验。发布构建和安全扫描不要带这个覆盖值，可临时这样运行：
 

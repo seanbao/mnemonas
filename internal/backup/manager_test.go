@@ -3267,25 +3267,106 @@ func TestManager_RunBatchRestorePreviewAndRestore(t *testing.T) {
 	}
 
 	restoreC := filepath.Join(tmpDir, "restore-c")
-	partial, err := manager.RunBatchRestore(context.Background(), BatchRestoreOptions{
+	preflightFailed, err := manager.RunBatchRestore(context.Background(), BatchRestoreOptions{
 		Items: []BatchRestoreItemOptions{
 			{JobID: "home", TargetPath: restoreC},
 			{JobID: "home", TargetPath: filepath.Join(restoreC, "nested")},
 		},
 	})
 	if err != nil {
-		t.Fatalf("RunBatchRestore() partial error: %v", err)
+		t.Fatalf("RunBatchRestore() preflight error: %v", err)
 	}
-	if partial.Status != StatusCompleted || !partial.Warning || len(partial.Items) != 2 {
-		t.Fatalf("unexpected partial batch restore outcome: %+v", partial)
+	if preflightFailed.Status != StatusFailed || !preflightFailed.Warning || len(preflightFailed.Items) != 2 {
+		t.Fatalf("unexpected preflight-failed batch restore outcome: %+v", preflightFailed)
 	}
-	if partial.Items[0].Status != StatusCompleted || partial.Items[0].Restore == nil || partial.Items[0].Verify == nil {
-		t.Fatalf("first partial batch item = %+v, want completed restore and verify", partial.Items[0])
+	if preflightFailed.Items[0].Status != StatusFailed || preflightFailed.Items[0].Restore != nil || preflightFailed.Items[0].Verify != nil || !strings.Contains(preflightFailed.Items[0].ErrorMessage, "preflight failed before this item started") {
+		t.Fatalf("first preflight-failed batch item = %+v, want not-started failure", preflightFailed.Items[0])
 	}
-	if partial.Items[1].Status != StatusFailed || !strings.Contains(partial.Items[1].ErrorMessage, "conflicts") {
-		t.Fatalf("second partial batch item = %+v, want target conflict", partial.Items[1])
+	if preflightFailed.Items[1].Status != StatusFailed || !strings.Contains(preflightFailed.Items[1].ErrorMessage, "conflicts") {
+		t.Fatalf("second preflight-failed batch item = %+v, want target conflict", preflightFailed.Items[1])
 	}
-	assertFileContent(t, filepath.Join(restoreC, "docs", "note.txt"), "batch restore")
+	if _, err := os.Stat(restoreC); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("preflight-failed batch restore wrote target before all items passed: stat error = %v", err)
+	}
+}
+
+func TestManager_RunBatchRestoreReportsTargetCreatedAfterPreflight(t *testing.T) {
+	tmpDir := t.TempDir()
+	source := filepath.Join(tmpDir, "source")
+	destination := filepath.Join(tmpDir, "backups")
+	mustWriteFile(t, filepath.Join(source, "docs", "note.txt"), "batch restore")
+
+	manager, err := NewManager(ManagerConfig{
+		Root:        filepath.Join(tmpDir, "state"),
+		StorageRoot: source,
+		Jobs: []config.BackupJobConfig{{
+			ID:          "home",
+			Name:        "Home backup",
+			Type:        JobTypeLocal,
+			Source:      source,
+			Destination: destination,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("NewManager() error: %v", err)
+	}
+	if _, err := manager.RunJob(context.Background(), "home"); err != nil {
+		t.Fatalf("RunJob() error: %v", err)
+	}
+
+	restoreA := filepath.Join(tmpDir, "restore-a")
+	restoreB := filepath.Join(tmpDir, "restore-b", "token=restore-secret")
+	if err := os.MkdirAll(filepath.Dir(restoreB), 0700); err != nil {
+		t.Fatalf("MkdirAll(restoreB parent) error: %v", err)
+	}
+	oldHook := afterBatchRestorePreflightPassed
+	hookRan := false
+	afterBatchRestorePreflightPassed = func(preview *BatchRestorePreviewResult) {
+		if hookRan || preview == nil || preview.Status != StatusCompleted {
+			return
+		}
+		hookRan = true
+		mustWriteFile(t, filepath.Join(restoreB, "occupied.txt"), "already here")
+	}
+	defer func() {
+		afterBatchRestorePreflightPassed = oldHook
+	}()
+
+	restore, err := manager.RunBatchRestore(context.Background(), BatchRestoreOptions{
+		Items: []BatchRestoreItemOptions{
+			{JobID: "home", TargetPath: restoreA},
+			{JobID: "home", TargetPath: restoreB},
+		},
+	})
+	if err != nil {
+		t.Fatalf("RunBatchRestore() error: %v", err)
+	}
+	if !hookRan {
+		t.Fatal("batch restore preflight hook did not run")
+	}
+	if restore.Status != StatusCompleted || !restore.Warning || restore.ErrorMessage != "1 of 2 batch restore items failed" {
+		t.Fatalf("unexpected batch restore outcome: %+v", restore)
+	}
+	if len(restore.Items) != 2 {
+		t.Fatalf("batch restore item count = %d, want 2", len(restore.Items))
+	}
+	if restore.Items[0].Status != StatusCompleted || restore.Items[0].Restore == nil || restore.Items[0].Verify == nil {
+		t.Fatalf("first batch restore item = %+v, want completed restore and verify", restore.Items[0])
+	}
+	assertFileContent(t, filepath.Join(restoreA, "docs", "note.txt"), "batch restore")
+	if restore.Items[1].Status != StatusFailed || restore.Items[1].Restore == nil || restore.Items[1].Verify != nil || !strings.Contains(restore.Items[1].ErrorMessage, ErrRestoreTargetExists.Error()) {
+		t.Fatalf("second batch restore item = %+v, want target-exists failure without verify", restore.Items[1])
+	}
+	assertNoBackupTargetSecrets(t, restore.Items[1].TargetPath)
+	assertNoBackupTargetSecrets(t, restore.Items[1].ErrorMessage)
+	assertNoBackupTargetSecrets(t, restore.Items[1].Restore.TargetPath)
+	for _, warning := range restore.Warnings {
+		assertNoBackupTargetSecrets(t, warning)
+	}
+	assertFileContent(t, filepath.Join(restoreB, "occupied.txt"), "already here")
+	if _, statErr := os.Stat(filepath.Join(restoreB, "docs", "note.txt")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("second restore target was overwritten after preflight race: stat error = %v", statErr)
+	}
 }
 
 func TestManager_BatchRestoreRejectsDotSegmentTargets(t *testing.T) {

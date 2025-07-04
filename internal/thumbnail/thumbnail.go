@@ -24,10 +24,11 @@ import (
 	"time"
 
 	"github.com/disintegration/imaging"
-	"github.com/seanbao/mnemonas/internal/rootio"
 	_ "golang.org/x/image/bmp"
 	_ "golang.org/x/image/tiff"
 	_ "golang.org/x/image/webp"
+
+	"github.com/seanbao/mnemonas/internal/rootio"
 )
 
 var errThumbnailCacheSymlink = errors.New("thumbnail cache path must not be a symlink")

@@ -2,6 +2,7 @@ package diskhealth
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -307,7 +308,7 @@ func TestMonitorSendsAlertOnCriticalAndRespectsCooldown(t *testing.T) {
 	}
 }
 
-func TestMonitorAlertWarningsHideUnnamedDevicePath(t *testing.T) {
+func TestMonitorAlertDetailsHideDeviceLabelsAndWarnings(t *testing.T) {
 	devicePath := filepath.Join(t.TempDir(), "nvme-Backup_SECRET999")
 	if err := os.WriteFile(devicePath, []byte("device"), 0600); err != nil {
 		t.Fatalf("failed to create fake device: %v", err)
@@ -317,7 +318,7 @@ func TestMonitorAlertWarningsHideUnnamedDevicePath(t *testing.T) {
 		Enabled:        true,
 		CheckInterval:  time.Hour,
 		CooldownPeriod: time.Hour,
-		Devices:        []DeviceConfig{{Path: devicePath}},
+		Devices:        []DeviceConfig{{Name: "Backup_SECRET999", Path: devicePath}},
 	}, sender, testLogger(), WithRunner(func(context.Context, string, ...string) (CommandResult, error) {
 		return CommandResult{Stdout: smartJSON(false, 40, "SER123")}, nil
 	}))
@@ -327,13 +328,21 @@ func TestMonitorAlertWarningsHideUnnamedDevicePath(t *testing.T) {
 	if len(sender.events) != 1 {
 		t.Fatalf("events = %d, want 1", len(sender.events))
 	}
-	warnings, ok := sender.events[0].Details["warnings"].([]string)
-	if !ok {
-		t.Fatalf("warnings detail = %#v, want []string", sender.events[0].Details["warnings"])
+	details := sender.events[0].Details
+	if _, ok := details["warnings"]; ok {
+		t.Fatalf("disk health alert must not include warning text: %+v", details)
 	}
-	joined := strings.Join(warnings, "\n")
-	if strings.Contains(joined, devicePath) || strings.Contains(joined, "SECRET999") {
-		t.Fatalf("alert warnings leaked unnamed device path: %q", joined)
+	if details["device_count"] != 1 || details["warning_count"] != 1 || details["critical_device_count"] != 1 {
+		t.Fatalf("unexpected disk health alert aggregate details: %+v", details)
+	}
+	data, err := json.Marshal(details)
+	if err != nil {
+		t.Fatalf("marshal disk health alert details: %v", err)
+	}
+	for _, leaked := range []string{devicePath, "Backup_SECRET999", "SECRET999", "SER123"} {
+		if strings.Contains(string(data), leaked) {
+			t.Fatalf("disk health alert details leaked %q: %s", leaked, data)
+		}
 	}
 }
 

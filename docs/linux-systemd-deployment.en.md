@@ -243,7 +243,7 @@ Only remove config and data after verifying backups:
 sudo env REMOVE_CONFIG=1 REMOVE_DATA=1 CONFIRM_REMOVE_DATA=/srv/mnemonas mnemonas-uninstall-systemd
 ```
 
-The uninstaller also refuses install and data paths that contain symlink components. When removing data, `CONFIRM_REMOVE_DATA` must exactly match `STORAGE_ROOT` to avoid deleting a real mount point or a replaced directory tree by mistake.
+The uninstaller also refuses binary, shared-resource, config, systemd-unit, and data paths that contain symlink components. When removing config or data, the target directory must not be a symlink or pass through symlink components. When removing data, `CONFIRM_REMOVE_DATA` must exactly match `STORAGE_ROOT` to avoid deleting a real mount point or a replaced directory tree by mistake.
 
 The service account is kept by default to preserve UID/GID reuse. Set `REMOVE_SERVICE_USER=1` to remove it as part of uninstall.
 

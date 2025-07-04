@@ -86,15 +86,6 @@ func hasFavoriteDotSegment(filePath string) bool {
 	return false
 }
 
-func hasFavoriteTraversalSegment(filePath string) bool {
-	for _, segment := range strings.Split(filePath, "/") {
-		if segment == ".." {
-			return true
-		}
-	}
-	return false
-}
-
 func decodeJSONBodyStrict(r *http.Request, dst any) error {
 	body, err := io.ReadAll(io.LimitReader(r.Body, defaultJSONRequestBodyLimit+1))
 	if err != nil {

@@ -185,29 +185,6 @@ func ensureQuotaCheckAvailable(check quotaCheck) error {
 	return nil
 }
 
-func (s *Server) directoryQuotaChecksForRequiredBytes(ctx context.Context, targetPath string, requiredBytes int64) ([]quotaCheck, error) {
-	rules := directoryQuotaRulesForTarget(s.directoryQuotaRules(), targetPath)
-	if len(rules) == 0 || requiredBytes <= 0 {
-		return nil, nil
-	}
-
-	checks := make([]quotaCheck, 0, len(rules))
-	for _, rule := range rules {
-		usedBytes, err := s.pathLogicalSizeIfExists(ctx, rule.Path)
-		if err != nil {
-			return nil, err
-		}
-		checks = append(checks, quotaCheck{
-			QuotaType:     quotaTypeDirectory,
-			QuotaPath:     rule.Path,
-			UsedBytes:     usedBytes,
-			QuotaBytes:    rule.QuotaBytes,
-			RequiredBytes: requiredBytes,
-		})
-	}
-	return checks, nil
-}
-
 func (s *Server) directoryQuotaUsageStats(ctx context.Context) ([]directoryQuotaUsageStat, error) {
 	rules := s.directoryQuotaRules()
 	stats := make([]directoryQuotaUsageStat, 0, len(rules))
@@ -844,22 +821,6 @@ func (s *Server) restoreVersionWithQuota(ctx context.Context, filePath, hash str
 	return s.fs.RestoreVersion(ctx, filePath, hash)
 }
 
-func ensureQuotaAvailable(usedBytes, quotaBytes, requiredBytes int64) error {
-	requiredBytes = nonNegativeSize(requiredBytes)
-	availableBytes := quotaBytes - usedBytes
-	if availableBytes < 0 {
-		availableBytes = 0
-	}
-	if requiredBytes > availableBytes {
-		return newQuotaExceededError(usedBytes, quotaBytes, requiredBytes, availableBytes)
-	}
-	return nil
-}
-
-func newQuotaExceededError(usedBytes, quotaBytes, requiredBytes, availableBytes int64) *quotaExceededError {
-	return newQuotaExceededErrorFor(quotaTypeUser, "", usedBytes, quotaBytes, requiredBytes, availableBytes)
-}
-
 func newQuotaExceededErrorFor(quotaType, quotaPath string, usedBytes, quotaBytes, requiredBytes, availableBytes int64) *quotaExceededError {
 	if usedBytes < 0 {
 		usedBytes = 0
@@ -954,7 +915,7 @@ func quotaExceededMessage(err *quotaExceededError) string {
 	return err.Error()
 }
 
-func (s *Server) sendQuotaExceededAlertEvent(ctx context.Context, operation, targetPath string, err error) {
+func (s *Server) sendQuotaExceededAlertEvent(ctx context.Context, operation string, err error) {
 	var quotaErr *quotaExceededError
 	if !errors.As(err, &quotaErr) {
 		return
@@ -964,29 +925,25 @@ func (s *Server) sendQuotaExceededAlertEvent(ctx context.Context, operation, tar
 		return
 	}
 
-	username := ""
-	homeDir := ""
+	actorScope := "unknown"
 	if user := auth.GetUserFromContext(ctx); user != nil {
-		username = user.Username
-		homeDir = user.HomeDir
+		actorScope = "authenticated_user"
+	}
+	details := map[string]any{
+		"operation":       operation,
+		"actor_scope":     actorScope,
+		"quota_type":      quotaErr.QuotaType,
+		"used_bytes":      quotaErr.UsedBytes,
+		"quota_bytes":     quotaErr.QuotaBytes,
+		"required_bytes":  quotaErr.RequiredBytes,
+		"available_bytes": quotaErr.AvailableBytes,
 	}
 	event := alerts.EventPayload{
 		Type:      quotaExceededAlertType,
 		Level:     alerts.AlertLevelWarning,
 		Message:   quotaExceededMessage(quotaErr),
 		Timestamp: time.Now().UTC(),
-		Details: map[string]any{
-			"operation":       operation,
-			"target_path":     targetPath,
-			"username":        username,
-			"home_dir":        homeDir,
-			"quota_type":      quotaErr.QuotaType,
-			"quota_path":      quotaErr.QuotaPath,
-			"used_bytes":      quotaErr.UsedBytes,
-			"quota_bytes":     quotaErr.QuotaBytes,
-			"required_bytes":  quotaErr.RequiredBytes,
-			"available_bytes": quotaErr.AvailableBytes,
-		},
+		Details:   details,
 	}
 	if sendErr := sender.SendEvent(context.WithoutCancel(ctx), event); sendErr != nil {
 		s.logger.Warn().Err(sendErr).Str("event_type", event.Type).Msg("failed to send quota alert event")

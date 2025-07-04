@@ -901,6 +901,7 @@ describe('MaintenancePage', () => {
         expect(screen.getByText('近 2 次包含 1 次失败')).toBeTruthy()
         expect(screen.getByText('目标: /restore/mnemonas')).toBeTruthy()
         expect(screen.getByText('最近检查: 检查 12 个文件 · 4 KB')).toBeTruthy()
+        expect(screen.getByText('已校验')).toBeTruthy()
         expect(screen.getAllByText('对照快照 20260509T020304.000000000Z').length).toBeGreaterThan(0)
       })
       expect(screen.queryByText('last successful backup completed recently')).toBeNull()
@@ -1248,6 +1249,7 @@ describe('MaintenancePage', () => {
       await waitFor(() => {
         expect(screen.getByText(verifyWarning)).toBeTruthy()
         expect(screen.getByText(/最近检查: 检查 12 个文件/)).toBeTruthy()
+        expect(screen.getByText('检查有警告')).toBeTruthy()
       })
     })
 
@@ -1273,6 +1275,7 @@ describe('MaintenancePage', () => {
 
       await waitFor(() => {
         expect(screen.getByText('最近检查: 恢复目录检查中')).toBeTruthy()
+        expect(screen.getByText('检查中')).toBeTruthy()
         expect(screen.queryByText('最近恢复尚未完成匹配的只读校验')).toBeNull()
       })
     })
@@ -1301,6 +1304,7 @@ describe('MaintenancePage', () => {
       await waitFor(() => {
         expect(screen.getByText('目标: /restore/new')).toBeTruthy()
         expect(screen.getByText('最近恢复尚未完成匹配的只读校验')).toBeTruthy()
+        expect(screen.getByText('待校验')).toBeTruthy()
         expect(screen.queryByText(/最近检查:/)).toBeNull()
         expect(screen.queryByText('stale verify warning')).toBeNull()
       })
@@ -2444,6 +2448,160 @@ describe('MaintenancePage', () => {
       })
     })
 
+    it('localizes partial batch restore failure summaries', async () => {
+      const secondJob = {
+        ...mockBackupJobs[0],
+        id: 'garage-disk',
+        name: '车库硬盘备份',
+        destination: '/mnt/garage/mnemonas',
+      }
+      mockListBackupJobs.mockResolvedValue([mockBackupJobs[0], secondJob])
+      mockPreviewBatchBackupRestore.mockResolvedValueOnce({
+        id: 'batch-preview-partial',
+        status: 'completed',
+        started_at: '2026-05-09T03:59:00Z',
+        finished_at: '2026-05-09T03:59:01Z',
+        duration_ms: 1000,
+        total_files: 24,
+        total_bytes: 8192,
+        items: [{
+          index: 0,
+          job_id: 'external-disk',
+          target_path: '/restore/external',
+          include_config: true,
+          status: 'completed',
+          preview: {
+            id: 'preview-external',
+            job_id: 'external-disk',
+            status: 'completed',
+            started_at: '2026-05-09T03:59:00Z',
+            finished_at: '2026-05-09T03:59:01Z',
+            duration_ms: 1000,
+            source: '/srv/mnemonas',
+            destination: '/mnt/backup-drive/mnemonas',
+            target_path: '/restore/external',
+            file_count: 12,
+            total_bytes: 4096,
+            config_available: true,
+            config_included: true,
+          },
+        }, {
+          index: 1,
+          job_id: 'garage-disk',
+          target_path: '/restore/garage',
+          include_config: true,
+          status: 'completed',
+          preview: {
+            id: 'preview-garage',
+            job_id: 'garage-disk',
+            status: 'completed',
+            started_at: '2026-05-09T03:59:00Z',
+            finished_at: '2026-05-09T03:59:01Z',
+            duration_ms: 1000,
+            source: '/srv/mnemonas',
+            destination: '/mnt/garage/mnemonas',
+            target_path: '/restore/garage',
+            file_count: 12,
+            total_bytes: 4096,
+            config_available: true,
+            config_included: true,
+          },
+        }],
+      })
+      mockRunBatchBackupRestore.mockResolvedValueOnce({
+        id: 'batch-restore-partial',
+        status: 'completed',
+        started_at: '2026-05-09T04:00:00Z',
+        finished_at: '2026-05-09T04:00:02Z',
+        duration_ms: 2000,
+        total_files: 12,
+        verified_bytes: 4096,
+        warning: true,
+        warnings: ['item 1: restore target already exists'],
+        error_message: '1 of 2 batch restore items failed',
+        items: [{
+          index: 0,
+          job_id: 'external-disk',
+          target_path: '/restore/external',
+          include_config: true,
+          status: 'completed',
+          restore: {
+            id: 'restore-external',
+            job_id: 'external-disk',
+            status: 'completed',
+            started_at: '2026-05-09T04:00:00Z',
+            finished_at: '2026-05-09T04:00:01Z',
+            duration_ms: 1000,
+            target_path: '/restore/external',
+            config_restored: true,
+            file_count: 12,
+            verified_bytes: 4096,
+            warnings: [],
+          },
+          verify: {
+            id: 'verify-external',
+            job_id: 'external-disk',
+            status: 'completed',
+            started_at: '2026-05-09T04:00:01Z',
+            finished_at: '2026-05-09T04:00:02Z',
+            duration_ms: 1000,
+            source: '/srv/mnemonas',
+            destination: '/mnt/backup-drive/mnemonas',
+            target_path: '/restore/external',
+            file_count: 12,
+            verified_bytes: 4096,
+            config_found: true,
+            files_dir_found: true,
+            internal_dir_found: true,
+            index_found: true,
+            objects_dir_found: true,
+            looks_like_storage_root: true,
+            warnings: [],
+          },
+          warnings: [],
+        }, {
+          index: 1,
+          job_id: 'garage-disk',
+          target_path: '/restore/garage',
+          include_config: true,
+          status: 'failed',
+          error_message: 'restore target already exists',
+        }],
+      })
+
+      render(<Maintenance />)
+
+      await waitFor(() => {
+        expect(screen.getByText('外置硬盘备份')).toBeTruthy()
+        expect(screen.getByText('车库硬盘备份')).toBeTruthy()
+      })
+
+      fireEvent.click(screen.getByRole('button', { name: /批量恢复/ }))
+      fireEvent.click(screen.getAllByLabelText('选择 外置硬盘备份')[0])
+      fireEvent.click(screen.getAllByLabelText('选择 车库硬盘备份')[0])
+      fireEvent.change(screen.getByLabelText('外置硬盘备份 目标目录'), { target: { value: '/restore/external' } })
+      fireEvent.change(screen.getByLabelText('车库硬盘备份 目标目录'), { target: { value: '/restore/garage' } })
+      fireEvent.click(screen.getByRole('button', { name: /生成批量预览/ }))
+
+      await waitFor(() => {
+        expect(screen.getByText('批量预览结果')).toBeTruthy()
+      })
+
+      fireEvent.click(screen.getByRole('button', { name: /开始批量恢复/ }))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({
+          title: '批量恢复完成，有警告',
+          description: '项目 2: 恢复目标已存在',
+          color: 'warning',
+        }))
+        expect(screen.getByText('1 / 2 个批量恢复项目失败')).toBeTruthy()
+        expect(screen.getAllByText('项目 2: 恢复目标已存在').length).toBeGreaterThan(0)
+      })
+      expect(screen.queryByText('1 of 2 batch restore items failed')).toBeNull()
+      expect(screen.queryByText('item 1: restore target already exists')).toBeNull()
+    })
+
     it('keeps unknown indexed batch restore warnings unchanged', async () => {
       const rawWarning = 'item 0: RCLONE Exit Status 1'
       mockListBackupJobs.mockResolvedValue(mockBackupJobs)
@@ -2553,12 +2711,12 @@ describe('MaintenancePage', () => {
           target_path: '/restore/batch',
           include_config: true,
           status: 'failed',
-          error_message: 'restore target already exists',
+          error_message: 'batch restore preflight failed before this item started',
         }],
         total_files: 0,
         verified_bytes: 0,
         warning: true,
-        warnings: ['item 0: restore target already exists'],
+        warnings: ['batch restore preflight failed before writes; no target data was written'],
         error_message: 'all batch restore items failed',
       })
 
@@ -2589,15 +2747,17 @@ describe('MaintenancePage', () => {
         }))
         expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({
           title: '批量恢复失败',
-          description: '项目 1: 恢复目标已存在',
+          description: '批量恢复预检未通过，未写入任何目标数据',
           color: 'danger',
         }))
         expect(screen.getAllByText('批量恢复失败').length).toBeGreaterThan(0)
-        expect(screen.getAllByText('项目 1: 恢复目标已存在').length).toBeGreaterThan(0)
+        expect(screen.getAllByText('批量恢复预检未通过，未写入任何目标数据').length).toBeGreaterThan(0)
+        expect(screen.getByText('批量恢复预检未通过，该项目未开始写入')).toBeTruthy()
         expect(screen.getByText('所有批量恢复项目均失败')).toBeTruthy()
         expect(screen.queryByText(/0\/1 项完成/)).toBeNull()
       })
-      expect(screen.queryByText('item 0: restore target already exists')).toBeNull()
+      expect(screen.queryByText('batch restore preflight failed before writes; no target data was written')).toBeNull()
+      expect(screen.queryByText('batch restore preflight failed before this item started')).toBeNull()
       expect(screen.queryByText('all batch restore items failed')).toBeNull()
     })
 

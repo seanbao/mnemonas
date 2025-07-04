@@ -83,6 +83,10 @@ test_public_access_readmes() {
     assert_file_contains "$PUBLIC_ACCESS_README" "Cloudflare Tunnel"
     assert_file_contains "$PUBLIC_ACCESS_README" "只开放 \`80/443\`"
     assert_file_contains "$PUBLIC_ACCESS_README" "小写、无单个 FQDN 尾点"
+    assert_file_contains "$PUBLIC_ACCESS_README" 'host = "127.0.0.1"'
+    assert_file_contains "$PUBLIC_ACCESS_README" "trusted_proxy_hops = 1"
+    assert_file_contains "$PUBLIC_ACCESS_README" 'base_url = "https://nas.example.com"'
+    assert_file_contains "$PUBLIC_ACCESS_README" "trusted_proxy_cidrs"
 
     assert_file_contains "$PUBLIC_ACCESS_README_EN" "Public Access Templates"
     assert_file_contains "$PUBLIC_ACCESS_README_EN" "[简体中文](README.md)"
@@ -90,6 +94,10 @@ test_public_access_readmes() {
     assert_file_contains "$PUBLIC_ACCESS_README_EN" "Cloudflare Tunnel"
     assert_file_contains "$PUBLIC_ACCESS_README_EN" "only \`80/443\`"
     assert_file_contains "$PUBLIC_ACCESS_README_EN" "lowercase and without a single FQDN trailing dot"
+    assert_file_contains "$PUBLIC_ACCESS_README_EN" 'host = "127.0.0.1"'
+    assert_file_contains "$PUBLIC_ACCESS_README_EN" "trusted_proxy_hops = 1"
+    assert_file_contains "$PUBLIC_ACCESS_README_EN" 'base_url = "https://nas.example.com"'
+    assert_file_contains "$PUBLIC_ACCESS_README_EN" "trusted_proxy_cidrs"
 }
 
 test_docker_docs_mount_syntax() {
@@ -113,10 +121,24 @@ test_docs_avoid_webdav_placeholder_passwords() {
     assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.en.md" "a custom \`auth.users_file\` moves the checked password file location"
     assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.md" "bcrypt 格式的 \`password_hash\`"
     assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.en.md" "bcrypt-format \`password_hash\`"
+    assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.md" "用户文件及其目录不能是符号链接"
+    assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.en.md" "users file and its directory must not be symlinks"
     assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.md" "符号链接或非普通文件"
     assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.en.md" "symlink or non-regular file"
+    assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.md" "\`secrets.json\` 必须存在、不能是符号链接"
+    assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.en.md" "\`secrets.json\` must exist, must not be a symlink"
+    assert_file_contains "$REPO_ROOT/docs/security.md" '用户文件及其目录不是符号链接且权限为私有'
+    assert_file_contains "$REPO_ROOT/docs/security.en.md" 'non-symlink users file and users-file directory with private permissions'
+    assert_file_contains "$REPO_ROOT/docs/security.md" '自动 WebDAV 凭据文件不是符号链接且权限私有'
+    assert_file_contains "$REPO_ROOT/docs/security.en.md" 'non-symlink generated WebDAV credentials file with private permissions'
     assert_file_contains "$REPO_ROOT/docs/security.md" '密码管理器生成的随机强密码'
     assert_file_contains "$REPO_ROOT/docs/security.en.md" 'password-manager value'
+    assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.md" 'auth.access_token_ttl'
+    assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.en.md" 'auth.access_token_ttl'
+    assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.md" 'share.default_expires_in'
+    assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.en.md" 'share.default_expires_in'
+    assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.md" "share.default_max_access\` 大于 \`0\`"
+    assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.en.md" "share.default_max_access\` is greater than \`0\`"
 }
 
 test_traefik_template

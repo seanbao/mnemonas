@@ -804,12 +804,7 @@ func (m *Monitor) checkAndAlert(ctx context.Context) {
 		Level:     alertLevelForStatus(report.Status),
 		Message:   report.Message,
 		Timestamp: report.CheckedAt,
-		Details: map[string]any{
-			"status":       report.Status,
-			"checked_at":   report.CheckedAt.UTC().Format(time.RFC3339),
-			"device_count": len(report.Devices),
-			"warnings":     report.Warnings,
-		},
+		Details:   diskHealthAlertDetails(report),
 	}
 	if err := m.sender.SendEvent(ctx, event); err != nil {
 		m.logger.Warn().Err(err).Str("status", report.Status).Msg("failed to send disk health alert")
@@ -892,4 +887,35 @@ func alertLevelForStatus(status string) alerts.AlertLevel {
 		return alerts.AlertLevelCritical
 	}
 	return alerts.AlertLevelWarning
+}
+
+func diskHealthAlertDetails(report *Report) map[string]any {
+	if report == nil {
+		return map[string]any{
+			"status": "unknown",
+		}
+	}
+	warningDeviceCount := 0
+	criticalDeviceCount := 0
+	unavailableDeviceCount := 0
+	for _, device := range report.Devices {
+		switch device.Status {
+		case StatusWarning:
+			warningDeviceCount++
+		case StatusCritical:
+			criticalDeviceCount++
+		case StatusUnavailable:
+			unavailableDeviceCount++
+		}
+	}
+	details := map[string]any{
+		"status":                   report.Status,
+		"checked_at":               report.CheckedAt.UTC().Format(time.RFC3339),
+		"device_count":             len(report.Devices),
+		"warning_count":            len(report.Warnings),
+		"warning_device_count":     warningDeviceCount,
+		"critical_device_count":    criticalDeviceCount,
+		"unavailable_device_count": unavailableDeviceCount,
+	}
+	return details
 }

@@ -73,6 +73,7 @@ const (
 // StorageStats holds storage statistics
 type StorageStats struct {
 	Path       string     `json:"path"`
+	PathScope  string     `json:"path_scope,omitempty"`
 	TotalBytes uint64     `json:"total_bytes"`
 	FreeBytes  uint64     `json:"free_bytes"`
 	UsedBytes  uint64     `json:"used_bytes"`
@@ -102,6 +103,9 @@ func cloneConfig(cfg Config) Config {
 
 var sendSMTPMail = smtp.SendMail
 var telegramAPIBaseURL = "https://api.telegram.org"
+
+const storageAlertPathOmitted = "<omitted>"
+const storageAlertPathScopeConfiguredRoot = "configured_storage_root"
 
 // AlertPayload is the webhook payload
 type AlertPayload struct {
@@ -460,16 +464,40 @@ func (m *Monitor) sendAlert(ctx context.Context, stats *StorageStats, cfg Config
 }
 
 func (m *Monitor) sendWebhook(ctx context.Context, payload AlertPayload, cfg Config) error {
-	return m.sendWebhookRequest(ctx, payload, cfg, func(query url.Values) error {
-		setCommonWebhookQuery(query, payload.Type, payload.Level, payload.Message, payload.Hostname, payload.Timestamp)
-		query.Set("path", payload.Stats.Path)
-		query.Set("total_bytes", strconv.FormatUint(payload.Stats.TotalBytes, 10))
-		query.Set("free_bytes", strconv.FormatUint(payload.Stats.FreeBytes, 10))
-		query.Set("used_bytes", strconv.FormatUint(payload.Stats.UsedBytes, 10))
-		query.Set("used_pct", strconv.FormatFloat(payload.Stats.UsedPct, 'f', -1, 64))
-		query.Set("checked_at", payload.Stats.CheckedAt.UTC().Format(time.RFC3339Nano))
+	publicPayload := storageAlertPayloadForNotification(payload)
+	return m.sendWebhookRequest(ctx, publicPayload, cfg, func(query url.Values) error {
+		setCommonWebhookQuery(query, publicPayload.Type, publicPayload.Level, publicPayload.Message, publicPayload.Hostname, publicPayload.Timestamp)
+		query.Set("path", publicPayload.Stats.Path)
+		if publicPayload.Stats.PathScope != "" {
+			query.Set("path_scope", publicPayload.Stats.PathScope)
+		}
+		query.Set("total_bytes", strconv.FormatUint(publicPayload.Stats.TotalBytes, 10))
+		query.Set("free_bytes", strconv.FormatUint(publicPayload.Stats.FreeBytes, 10))
+		query.Set("used_bytes", strconv.FormatUint(publicPayload.Stats.UsedBytes, 10))
+		query.Set("used_pct", strconv.FormatFloat(publicPayload.Stats.UsedPct, 'f', -1, 64))
+		query.Set("checked_at", publicPayload.Stats.CheckedAt.UTC().Format(time.RFC3339Nano))
 		return nil
 	})
+}
+
+func storageAlertPayloadForNotification(payload AlertPayload) AlertPayload {
+	payload.Stats = storageAlertStatsForNotification(payload.Stats)
+	return payload
+}
+
+func storageAlertStatsForNotification(stats StorageStats) StorageStats {
+	if strings.TrimSpace(stats.Path) != "" {
+		stats.Path = storageAlertPathOmitted
+		stats.PathScope = storageAlertPathScopeConfiguredRoot
+	}
+	return stats
+}
+
+func storageAlertPathScope(stats *StorageStats) string {
+	if stats != nil && strings.TrimSpace(stats.Path) != "" {
+		return storageAlertPathScopeConfiguredRoot
+	}
+	return "unknown"
 }
 
 func (m *Monitor) sendEventWebhook(ctx context.Context, payload EventPayload, cfg Config) error {
@@ -575,7 +603,7 @@ func (m *Monitor) sendStorageTelegram(ctx context.Context, stats *StorageStats, 
 		message,
 		"",
 		"Host: " + hostname,
-		"Path: " + stats.Path,
+		"Path scope: " + storageAlertPathScope(stats),
 		"Used: " + formatBytes(stats.UsedBytes) + " (" + strconv.FormatFloat(stats.UsedPct, 'f', 1, 64) + "%)",
 		"Free: " + formatBytes(stats.FreeBytes),
 		"Checked at: " + stats.CheckedAt.UTC().Format(time.RFC3339),
@@ -690,7 +718,7 @@ func (m *Monitor) sendStorageWeCom(ctx context.Context, stats *StorageStats, cfg
 		message,
 		"",
 		"Host: " + hostname,
-		"Path: " + stats.Path,
+		"Path scope: " + storageAlertPathScope(stats),
 		"Used: " + formatBytes(stats.UsedBytes) + " (" + strconv.FormatFloat(stats.UsedPct, 'f', 1, 64) + "%)",
 		"Free: " + formatBytes(stats.FreeBytes),
 		"Checked at: " + stats.CheckedAt.UTC().Format(time.RFC3339),
@@ -805,7 +833,7 @@ func (m *Monitor) sendStorageEmail(ctx context.Context, stats *StorageStats, cfg
 		"Type: storage_alert",
 		"Level: " + string(stats.Level),
 		"Host: " + hostname,
-		"Path: " + stats.Path,
+		"Path scope: " + storageAlertPathScope(stats),
 		"Used: " + formatBytes(stats.UsedBytes) + " (" + strconv.FormatFloat(stats.UsedPct, 'f', 1, 64) + "%)",
 		"Free: " + formatBytes(stats.FreeBytes),
 		"Checked at: " + stats.CheckedAt.UTC().Format(time.RFC3339),
@@ -854,10 +882,10 @@ func (m *Monitor) sendEmail(ctx context.Context, cfg Config, subject, body strin
 	}
 	message := buildEmailMessage(from, recipients, subject, body)
 	if err := sendSMTPMail(addr, auth, from, recipients, message); err != nil {
-		return fmt.Errorf("send email alert via %s: %w", addr, err)
+		return errors.New("send email alert failed")
 	}
 	m.logger.Info().
-		Str("smtp_host", strings.TrimSpace(cfg.SMTPHost)).
+		Str("channel", "email").
 		Int("recipients", len(recipients)).
 		Msg("Email alert sent successfully")
 	return nil

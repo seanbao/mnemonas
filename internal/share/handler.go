@@ -96,6 +96,20 @@ type passwordAttemptState struct {
 	lockedUntil time.Time
 }
 
+type PublicShareAccessPolicy struct {
+	CookieNamePrefix       string
+	CookiePaths            []string
+	CookieHTTPOnly         bool
+	CookieSameSite         http.SameSite
+	MetadataCacheControl   string
+	MetadataVaryCookie     bool
+	MetadataNosniff        bool
+	MetadataReferrerPolicy string
+	PasswordFailureLimit   int
+	PasswordFailureWindow  time.Duration
+	PasswordLockDuration   time.Duration
+}
+
 const (
 	shareAccessCookiePrefix       = "mnemonas_share_"
 	sharePersistenceWarningHeader = `199 MnemoNAS "share persistence incomplete"`
@@ -124,6 +138,22 @@ func newPasswordAttemptTracker() *passwordAttemptTracker {
 	return &passwordAttemptTracker{
 		attempts: make(map[string]passwordAttemptState),
 		now:      time.Now,
+	}
+}
+
+func PublicShareAccessPolicySnapshot() PublicShareAccessPolicy {
+	return PublicShareAccessPolicy{
+		CookieNamePrefix:       shareAccessCookiePrefix,
+		CookiePaths:            []string{"/s/{share_id}", "/api/v1/public/shares/{share_id}"},
+		CookieHTTPOnly:         true,
+		CookieSameSite:         shareAccessSameSite,
+		MetadataCacheControl:   "private, no-cache",
+		MetadataVaryCookie:     true,
+		MetadataNosniff:        true,
+		MetadataReferrerPolicy: "no-referrer",
+		PasswordFailureLimit:   defaultPasswordFailureLimit,
+		PasswordFailureWindow:  defaultPasswordFailureWindow,
+		PasswordLockDuration:   defaultPasswordLockDuration,
 	}
 }
 
@@ -2084,16 +2114,7 @@ func shareAccessCookieName(id string) string {
 }
 
 func requestIsHTTPS(r *http.Request) bool {
-	if r.TLS != nil {
-		return true
-	}
-	if !requestip.IsTrustedForwardedSource(requestip.RemoteIP(r.RemoteAddr)) {
-		return false
-	}
-	if requestip.TrustedProxyHops() <= 0 {
-		return false
-	}
-	return strings.EqualFold(strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")), "https")
+	return requestip.RequestIsHTTPS(r)
 }
 
 var marshalShareJSON = func(data any) ([]byte, error) {

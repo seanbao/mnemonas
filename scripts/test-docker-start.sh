@@ -672,6 +672,14 @@ EOF
 	[[ ! -f "$capture_dir/nasd.args" ]] || fail "nasd started despite invalid CDC range"
 }
 
+run_manual_docker_run_docs_prepare_data_dir_test() {
+	local file
+	for file in "$REPO_ROOT/docs/docker-deployment.md" "$REPO_ROOT/docs/docker-deployment.en.md"; do
+		assert_file_contains "$file" 'mkdir -p "$HOME/.mnemonas"'
+		assert_file_contains "$file" "/data/config.toml"
+	done
+}
+
 run_default_config_test
 run_mismatched_storage_root_warning_test
 run_toml_escaped_storage_root_test
@@ -691,5 +699,6 @@ run_dataplane_addr_validation_test
 run_dataplane_grpc_env_mismatch_test
 run_invalid_cdc_range_test
 run_dataplane_exposure_warning_test
+run_manual_docker_run_docs_prepare_data_dir_test
 
 printf '[docker-start-test] all checks passed\n'

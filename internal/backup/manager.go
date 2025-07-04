@@ -3875,28 +3875,6 @@ func runExternalCommand(ctx context.Context, command string, args ...string) err
 	return nil
 }
 
-func runExternalCommandOutput(ctx context.Context, command string, args ...string) ([]byte, error) {
-	if strings.TrimSpace(command) == "" {
-		return nil, ErrUnsupportedJobType
-	}
-	stdout := limitedBuffer{limit: externalCommandStdoutLimit}
-	stderr := limitedBuffer{limit: externalCommandStderrLimit}
-	cmd := execCommandContext(ctx, command, args...)
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		detail := sanitizeExternalCommandDetail(&stderr)
-		if detail != "" {
-			return nil, fmt.Errorf("run %s: %w: %s", filepath.Base(command), err, detail)
-		}
-		return nil, fmt.Errorf("run %s: %w", filepath.Base(command), err)
-	}
-	if stdout.Truncated() {
-		return nil, fmt.Errorf("run %s: stdout exceeded %d bytes", filepath.Base(command), externalCommandStdoutLimit)
-	}
-	return stdout.Bytes(), nil
-}
-
 func runExternalCommandReader(ctx context.Context, command string, readStdout func(io.Reader) error, args ...string) error {
 	if strings.TrimSpace(command) == "" {
 		return ErrUnsupportedJobType
@@ -4090,10 +4068,6 @@ type resticLSJSONEntry struct {
 type resticSnapshotJSONEntry struct {
 	Time time.Time `json:"time"`
 	ID   string    `json:"id"`
-}
-
-func parseResticSnapshotsJSON(data []byte) ([]time.Time, error) {
-	return parseResticSnapshotsJSONReader(bytes.NewReader(data))
 }
 
 func parseResticSnapshotsJSONReader(reader io.Reader) ([]time.Time, error) {
