@@ -78,6 +78,8 @@ sudo env STORAGE_ROOT=/srv/mnemonas SERVER_PORT=8080 ./scripts/install-systemd.s
 sudo env FIX_STORAGE_OWNERSHIP=1 ./scripts/install-systemd.sh
 ```
 
+安装完成后脚本会输出可直接执行的下一步，包括 Web UI 地址、读取初始密码的 `sudo cat .../initial-password.txt` 命令、`mnemonas-doctor` 诊断命令和日志查看命令。
+
 如果还没有可用的 release 包，也可以在目标机器或另一台 Linux 机器上从源码构建后安装：
 
 ```bash

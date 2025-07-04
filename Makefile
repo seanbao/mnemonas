@@ -10,7 +10,7 @@ GOVULNCHECK_VERSION ?= v1.3.0
 CARGO_AUDIT_VERSION ?= 0.22.1
 GO_SECURITY_ENV ?= GOSUMDB=sum.golang.org GOTOOLCHAIN=auto
 NPM_AUDIT ?= 0
-DEPLOYMENT_SCRIPTS := scripts/install-systemd.sh scripts/uninstall-systemd.sh scripts/mnemonas-doctor.sh scripts/mnemonas-docker-preflight.sh scripts/mnemonas-dataplane-start.sh scripts/test-systemd-install.sh scripts/test-systemd-uninstall.sh scripts/test-docker-start.sh scripts/test-docker-preflight.sh scripts/docker-start.sh scripts/setup-reverse-proxy.sh scripts/dev.sh scripts/benchmark.sh
+DEPLOYMENT_SCRIPTS := scripts/install-systemd.sh scripts/uninstall-systemd.sh scripts/mnemonas-doctor.sh scripts/mnemonas-docker-preflight.sh scripts/docker-quickstart.sh scripts/mnemonas-dataplane-start.sh scripts/test-systemd-install.sh scripts/test-systemd-uninstall.sh scripts/test-docker-start.sh scripts/test-docker-preflight.sh scripts/test-docker-quickstart.sh scripts/docker-start.sh scripts/setup-reverse-proxy.sh scripts/dev.sh scripts/benchmark.sh
 ACCEPTANCE_SCRIPTS := scripts/e2e-test.sh scripts/fault-injection-test.sh
 WEB_SCRIPTS := web/scripts/start-e2e-backend.sh
 
@@ -165,6 +165,7 @@ scripts-check:
 	./scripts/test-systemd-uninstall.sh
 	./scripts/test-docker-start.sh
 	./scripts/test-docker-preflight.sh
+	./scripts/test-docker-quickstart.sh
 
 # 安全依赖检查
 security-check:

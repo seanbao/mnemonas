@@ -103,6 +103,8 @@ run_fresh_install_test() {
   assert_file_contains "$install_dir/systemd/mnemonas.service" "RequiresMountsFor=$storage_dir"
   assert_file_contains "$install_dir/systemd/mnemonas.service" "CapabilityBoundingSet="
   assert_file_contains "$install_dir/systemd/mnemonas.service" "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6"
+  assert_file_contains "$case_dir/install.log" "Next steps:"
+  assert_file_contains "$case_dir/install.log" "Read initial password: sudo cat $storage_dir/.mnemonas/initial-password.txt"
   assert_file_contains "$case_dir/install.log" "Uninstall: sudo $install_dir/bin/mnemonas-uninstall-systemd"
   assert_mode "$storage_dir" "750"
   assert_mode "$storage_dir/files" "750"
@@ -147,7 +149,7 @@ EOF
     ENABLE_NOW=0 \
     "$REPO_ROOT/scripts/install-systemd.sh" > "$case_dir/install.log"
 
-  assert_file_contains "$case_dir/install.log" "Web UI: http://<ubuntu-laptop-ip>:18080"
+  assert_file_contains "$case_dir/install.log" "Open Web UI: http://127.0.0.1:18080"
   assert_file_contains "$install_dir/systemd/mnemonas-dataplane.service" "Environment=DATAPLANE_GRPC_ADDR=127.0.0.1:19090"
   assert_file_contains "$install_dir/systemd/mnemonas-dataplane.service" "Environment=DATAPLANE_DATA_DIR=$storage_dir/.mnemonas/objects"
   assert_file_contains "$install_dir/systemd/mnemonas.service" "ReadWritePaths=$storage_dir $install_dir/etc/mnemonas"
@@ -216,6 +218,7 @@ run_doctor_config_test() {
   printf '<div id="root"></div>\n' > "$web_dir/index.html"
 
   write_executable "$fake_path/id" '#!/usr/bin/env bash' 'exit 0'
+  write_executable "$fake_path/runuser" '#!/usr/bin/env bash' 'shift 3; "$@"'
   write_executable "$fake_path/systemctl" \
     '#!/usr/bin/env bash' \
     'if [[ "${1:-}" == "is-active" ]]; then exit 0; fi' \

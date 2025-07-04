@@ -15,7 +15,7 @@ services:
     ports:
       - "${MNEMONAS_HTTP_PORT:-8080}:8080"    # Web UI + API + WebDAV
     volumes:
-      - ${HOME}/.mnemonas:/data
+      - ${MNEMONAS_DATA_DIR:-${HOME}/.mnemonas}:/data
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "/app/mnemonas-healthcheck"]

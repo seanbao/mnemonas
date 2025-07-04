@@ -59,23 +59,29 @@ cd mnemonas
 
 仓库自带的 `docker-compose.yml` 默认从当前源码构建 `mnemonas:local` 镜像。宿主机不需要安装 Go/Rust/Node.js 构建工具，但 Docker 需要能拉取 Rust、Node、Go 和 Debian 基础镜像。正式 release 镜像发布并公开后，可以在自己的 Compose 文件中改用 `ghcr.io/seanbao/mnemonas:latest`。
 
-### 2. 准备数据目录
+### 2. 准备并启动
 
 ```bash
-mkdir -p ~/.mnemonas
-chmod 750 ~/.mnemonas
-cp .env.example .env
-sed -i "s/^MNEMONAS_UID=.*/MNEMONAS_UID=$(id -u)/" .env
-sed -i "s/^MNEMONAS_GID=.*/MNEMONAS_GID=$(id -g)/" .env
-# 如果宿主机 8080 已被占用，可把 .env 里的 MNEMONAS_HTTP_PORT 改成 8888 等空闲端口。
-./scripts/mnemonas-docker-preflight.sh
+./scripts/docker-quickstart.sh --start
 ```
 
-首次启动会在 `~/.mnemonas/config.toml` 自动生成持久化配置。启动后请先用 `~/.mnemonas/.mnemonas/initial-password.txt` 中的初始管理员密码登录 Web UI 并修改密码；自动生成的 WebDAV 密码保存在 `~/.mnemonas/secrets.json`，不会直接写入容器日志。如使用 WebDAV，也建议修改：
+这个脚本会创建或更新 `.env`，写入当前宿主机用户的 `MNEMONAS_UID`/`MNEMONAS_GID`，创建 `MNEMONAS_DATA_DIR`，运行 Docker 预检，并启动 Compose 服务。如果宿主机 8080 已被占用，可改用：
+
+```bash
+./scripts/docker-quickstart.sh --port 8888 --start
+```
+
+如果只想准备环境并查看将要执行的下一步，不启动容器：
+
+```bash
+./scripts/docker-quickstart.sh
+```
+
+首次启动会在 `<MNEMONAS_DATA_DIR>/config.toml` 自动生成持久化配置。启动后请先用 `<MNEMONAS_DATA_DIR>/.mnemonas/initial-password.txt` 中的初始管理员密码登录 Web UI 并修改密码；自动生成的 WebDAV 密码保存在 `<MNEMONAS_DATA_DIR>/secrets.json`，不会直接写入容器日志。如使用 WebDAV，也建议修改：
 
 - `[webdav].password` - WebDAV 认证密码
 
-镜像默认以非 root 用户运行，容器内数据目录是 `/data`，对应宿主机 `~/.mnemonas`。Docker 中的自定义配置必须显式设置 `[storage].root`，通常保持 `root = "/data"`，且不能设置为 `/`。启动时如果已有配置里的 `[storage].root` 和 Docker 的 `STORAGE_ROOT` 不一致，容器日志会输出警告，并继续以配置文件为准。如修改为其他容器内路径，需额外挂载该路径；否则数据会写入容器临时层。例如设置 `root = "/data-root"` 时，需要在 `docker-compose.yml` 中增加 `- ~/.mnemonas-data:/data-root`。
+镜像默认以非 root 用户运行，容器内数据目录是 `/data`，默认对应宿主机 `~/.mnemonas`。如需改宿主机数据目录，优先使用 `./scripts/docker-quickstart.sh --data-dir /path/to/mnemonas --start`；脚本会把该路径写入 `.env` 的 `MNEMONAS_DATA_DIR`。Docker 中的自定义配置必须显式设置 `[storage].root`，通常保持 `root = "/data"`，且不能设置为 `/`。启动时如果已有配置里的 `[storage].root` 和 Docker 的 `STORAGE_ROOT` 不一致，容器日志会输出警告，并继续以配置文件为准。如修改为其他容器内路径，需额外挂载该路径；否则数据会写入容器临时层。例如设置 `root = "/data-root"` 时，需要在 `docker-compose.yml` 中增加 `- ~/.mnemonas-data:/data-root`。
 
 仓库自带的 Compose 文件默认使用 UID/GID `1000:1000`，Compose 会自动读取 `.env`。如果你的宿主机用户不是 1000，优先按上面的命令把当前 UID/GID 写入 `.env`；也可以启动时显式传入当前用户：
 
@@ -83,9 +89,9 @@ sed -i "s/^MNEMONAS_GID=.*/MNEMONAS_GID=$(id -g)/" .env
 MNEMONAS_UID="$(id -u)" MNEMONAS_GID="$(id -g)" docker compose up -d --build
 ```
 
-`./scripts/mnemonas-docker-preflight.sh` 不会启动或修改容器，只检查启动前最常见的失败点：Docker daemon、Compose v2 插件、Buildx、`~/.mnemonas` 权限、可用磁盘空间、`MNEMONAS_HTTP_PORT` 端口占用、已有 `config.toml` 的 `[storage].root`，以及 Compose 配置是否能渲染。预检有失败项时先按输出修复，再运行 `docker compose up -d --build`。
+`./scripts/mnemonas-docker-preflight.sh` 不会启动或修改容器，只检查启动前最常见的失败点：Docker daemon、Compose v2 插件、Buildx、数据目录权限、可用磁盘空间、`MNEMONAS_HTTP_PORT` 端口占用、已有 `config.toml` 的 `[storage].root`，以及 Compose 配置是否能渲染。预检有失败项时先按输出修复，再运行 `./scripts/docker-quickstart.sh --start`。
 
-### 3. 启动服务
+### 3. 手动启动服务
 
 ```bash
 docker compose up -d --build
