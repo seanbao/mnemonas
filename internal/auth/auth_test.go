@@ -126,6 +126,62 @@ func TestWriteRegisteredAuthFileAtomically_CleansCreatedDirectoriesWhenTempCreat
 	}
 }
 
+func TestUserStore_SaveUserState_PersistsCanonicalOrder(t *testing.T) {
+	usersPath := filepath.Join(t.TempDir(), "users.json")
+	users := map[string]*User{
+		"user-zeta":  {ID: "user-zeta", Username: "zeta"},
+		"user-alpha": {ID: "user-alpha", Username: "Alpha"},
+		"user-beta":  {ID: "user-beta", Username: "beta"},
+	}
+
+	expected := []struct {
+		id       string
+		username string
+	}{
+		{id: "user-alpha", username: "Alpha"},
+		{id: "user-beta", username: "beta"},
+		{id: "user-zeta", username: "zeta"},
+	}
+
+	for i := 0; i < 64; i++ {
+		if err := saveUserState(usersPath, users); err != nil {
+			t.Fatalf("saveUserState() error: %v", err)
+		}
+
+		data, err := os.ReadFile(usersPath)
+		if err != nil {
+			t.Fatalf("ReadFile(users.json) error: %v", err)
+		}
+
+		var persisted []User
+		if err := json.Unmarshal(data, &persisted); err != nil {
+			t.Fatalf("Unmarshal(persisted users) error: %v", err)
+		}
+		if len(persisted) != len(expected) {
+			t.Fatalf("persisted user count = %d, want %d", len(persisted), len(expected))
+		}
+		for index, want := range expected {
+			if persisted[index].ID != want.id || persisted[index].Username != want.username {
+				t.Fatalf("persisted order at iteration %d = [%s:%s %s:%s %s:%s], want [%s:%s %s:%s %s:%s]",
+					i,
+					persisted[0].ID,
+					persisted[0].Username,
+					persisted[1].ID,
+					persisted[1].Username,
+					persisted[2].ID,
+					persisted[2].Username,
+					expected[0].id,
+					expected[0].username,
+					expected[1].id,
+					expected[1].username,
+					expected[2].id,
+					expected[2].username,
+				)
+			}
+		}
+	}
+}
+
 func TestUserStore_Create_DoesNotFollowSymlinkInsertedAfterValidation(t *testing.T) {
 	baseDir := t.TempDir()
 	managedDir := filepath.Join(baseDir, "managed")
@@ -1200,19 +1256,22 @@ func TestTokenManager(t *testing.T) {
 		}()
 
 		err = tm.RevokeToken(claims.TokenID)
-		if err == nil || isAuthPersistenceWarning(err) {
-			t.Fatalf("expected hard persistence failure, got %v", err)
+		if !isAuthPersistenceWarning(err) {
+			t.Fatalf("expected persistence warning, got %v", err)
 		}
 
 		tm.mu.RLock()
 		_, hasExpiredCleanup := tm.revokedTokens["expired-cleanup-token"]
 		_, hasNewRevocation := tm.revokedTokens[claims.TokenID]
 		tm.mu.RUnlock()
-		if !hasExpiredCleanup {
-			t.Fatal("expected hard failure to restore expired cleanup entry")
+		if hasExpiredCleanup {
+			t.Fatal("expected warning to keep expired cleanup entry removed")
 		}
-		if hasNewRevocation {
-			t.Fatal("expected hard failure to roll back new token revocation")
+		if !hasNewRevocation {
+			t.Fatal("expected warning to keep new token revocation in memory")
+		}
+		if _, err := tm.ValidateAccessToken(tokenPair.AccessToken); err != ErrTokenRevoked {
+			t.Fatalf("expected access token to be revoked after warning, got %v", err)
 		}
 	})
 
@@ -1320,7 +1379,7 @@ func TestTokenManager(t *testing.T) {
 		}
 	})
 
-	t.Run("revoke by user rolls back in-memory revocation on hard persistence failure", func(t *testing.T) {
+	t.Run("revoke by user returns warning and keeps in-memory revocation on hard persistence failure", func(t *testing.T) {
 		tm := NewTokenManager(secret, 15*time.Minute, 24*time.Hour)
 
 		user := &User{
@@ -1350,8 +1409,8 @@ func TestTokenManager(t *testing.T) {
 		}()
 
 		err = tm.RevokeByUser(user.ID)
-		if err == nil || isAuthPersistenceWarning(err) {
-			t.Fatalf("expected hard persistence failure, got %v", err)
+		if !isAuthPersistenceWarning(err) {
+			t.Fatalf("expected persistence warning, got %v", err)
 		}
 
 		persistTokenRevocations = originalPersistTokenRevocations
@@ -1361,21 +1420,21 @@ func TestTokenManager(t *testing.T) {
 		_, hasExpiredCleanupUser := tm.userRevokedAt["expired-cleanup-user"]
 		_, revokedUser := tm.userRevokedAt[user.ID]
 		tm.mu.RUnlock()
-		if !hasExpiredCleanupToken {
-			t.Fatal("expected hard failure to restore expired token cleanup entry")
+		if hasExpiredCleanupToken {
+			t.Fatal("expected warning to keep expired token cleanup entry removed")
 		}
 		if !hasExpiredCleanupUser {
-			t.Fatal("expected hard failure to restore expired user cleanup entry")
+			t.Fatal("expected unaffected user revocation entry to remain present")
 		}
-		if revokedUser {
-			t.Fatal("expected hard failure to roll back user revocation state")
+		if !revokedUser {
+			t.Fatal("expected warning to keep user revocation state in memory")
 		}
 
-		if _, err := tm.ValidateAccessToken(tokenPair.AccessToken); err != nil {
-			t.Fatalf("expected access token to remain valid after rollback, got %v", err)
+		if _, err := tm.ValidateAccessToken(tokenPair.AccessToken); err != ErrTokenRevoked {
+			t.Fatalf("expected access token to be revoked after warning, got %v", err)
 		}
-		if _, err := tm.ValidateRefreshToken(tokenPair.RefreshToken); err != nil {
-			t.Fatalf("expected refresh token to remain valid after rollback, got %v", err)
+		if _, err := tm.ValidateRefreshToken(tokenPair.RefreshToken); err != ErrTokenRevoked {
+			t.Fatalf("expected refresh token to be revoked after warning, got %v", err)
 		}
 	})
 
@@ -1451,6 +1510,59 @@ func TestTokenManager(t *testing.T) {
 		}
 		if _, err := restarted.ValidateRefreshToken(tokenPair.RefreshToken); err != ErrTokenRevoked {
 			t.Fatalf("expected restarted manager to reject revoked refresh token, got %v", err)
+		}
+	})
+
+	t.Run("corrupt token revocation file recovers on startup", func(t *testing.T) {
+		storeDir := t.TempDir()
+		revocationFile := filepath.Join(storeDir, "token-revocations.json")
+		if err := os.WriteFile(revocationFile, []byte("{"), 0o600); err != nil {
+			t.Fatalf("WriteFile(corrupt revocation file) error: %v", err)
+		}
+
+		tm := NewTokenManager(secret, 15*time.Minute, 24*time.Hour)
+		if err := tm.EnablePersistence(revocationFile); err != nil {
+			t.Fatalf("EnablePersistence() with corrupt revocation file error: %v", err)
+		}
+
+		entries, err := os.ReadDir(storeDir)
+		if err != nil {
+			t.Fatalf("ReadDir(storeDir) error: %v", err)
+		}
+		foundBackup := false
+		for _, entry := range entries {
+			if strings.HasPrefix(entry.Name(), "token-revocations.json.corrupt.") {
+				foundBackup = true
+				break
+			}
+		}
+		if !foundBackup {
+			t.Fatal("expected corrupt token revocation backup to be created")
+		}
+
+		user := &User{
+			ID:       "user-corrupt-revocation-recovery",
+			Username: "corrupt-revocation-recovery",
+			Role:     RoleUser,
+		}
+		tokenPair, err := tm.GenerateTokenPair(user)
+		if err != nil {
+			t.Fatalf("GenerateTokenPair() error: %v", err)
+		}
+		accessClaims, err := tm.ValidateAccessToken(tokenPair.AccessToken)
+		if err != nil {
+			t.Fatalf("ValidateAccessToken() before revoke error: %v", err)
+		}
+		if err := tm.RevokeToken(accessClaims.TokenID); err != nil {
+			t.Fatalf("RevokeToken(access) error: %v", err)
+		}
+
+		restarted := NewTokenManager(secret, 15*time.Minute, 24*time.Hour)
+		if err := restarted.EnablePersistence(revocationFile); err != nil {
+			t.Fatalf("EnablePersistence() after recovery restart error: %v", err)
+		}
+		if _, err := restarted.ValidateAccessToken(tokenPair.AccessToken); err != ErrTokenRevoked {
+			t.Fatalf("expected restarted manager to reject revoked access token after recovery, got %v", err)
 		}
 	})
 
@@ -2720,6 +2832,16 @@ func TestAuthHandler(t *testing.T) {
 		if !envelope.Success {
 			t.Fatal("expected create user success")
 		}
+		var data map[string]map[string]interface{}
+		if err := json.Unmarshal(envelope.Data, &data); err != nil {
+			t.Fatalf("unmarshal create user data error: %v", err)
+		}
+		userData := data["user"]
+		for _, field := range []string{"id", "username", "email", "role", "disabled", "home_dir", "created_at", "updated_at", "quota_bytes", "used_bytes"} {
+			if _, ok := userData[field]; !ok {
+				t.Fatalf("expected create user response to include %q, got %+v", field, userData)
+			}
+		}
 	})
 
 	t.Run("admin create user rejects unknown fields", func(t *testing.T) {
@@ -2966,8 +3088,14 @@ func TestAuthHandler(t *testing.T) {
 		createRec := httptest.NewRecorder()
 		warningHandler.HandleCreateUser(createRec, createReq)
 		createData := assertWarningSuccess(t, createRec, http.StatusCreated, "user created with persistence warning")
-		if _, ok := createData["user"].(map[string]interface{}); !ok {
+		userData, ok := createData["user"].(map[string]interface{})
+		if !ok {
 			t.Fatalf("expected user payload for create warning, got %+v", createData)
+		}
+		for _, field := range []string{"id", "username", "email", "role", "disabled", "home_dir", "created_at", "updated_at", "quota_bytes", "used_bytes"} {
+			if _, ok := userData[field]; !ok {
+				t.Fatalf("expected create warning user payload to include %q, got %+v", field, userData)
+			}
 		}
 		if _, err := warningStore.GetByUsername("warningcreate"); err != nil {
 			t.Fatalf("expected warned create to commit user, got %v", err)
@@ -3015,6 +3143,238 @@ func TestAuthHandler(t *testing.T) {
 		}
 		if !refreshedToggle.Disabled {
 			t.Fatal("expected warned toggle to commit disabled state")
+		}
+	})
+
+	t.Run("change password returns warning and revokes existing tokens when revocation persistence fails hard", func(t *testing.T) {
+		changeUser, err := store.Create("hard-revoke-change", "password123", "hard-revoke-change@test.com", RoleUser)
+		if err != nil {
+			t.Fatalf("failed to create change user: %v", err)
+		}
+
+		tokenPair, err := tm.GenerateTokenPair(changeUser)
+		if err != nil {
+			t.Fatalf("GenerateTokenPair() error: %v", err)
+		}
+
+		originalPersistTokenRevocations := persistTokenRevocations
+		persistTokenRevocations = func(tm *TokenManager) error {
+			return errors.New("write failed")
+		}
+		defer func() {
+			persistTokenRevocations = originalPersistTokenRevocations
+		}()
+
+		req := httptest.NewRequest("POST", "/api/v1/auth/password", bytes.NewBufferString(`{"old_password":"password123","new_password":"newpassword456"}`))
+		req = req.WithContext(context.WithValue(req.Context(), ContextKeyUser, changeUser))
+		rec := httptest.NewRecorder()
+
+		h.HandleChangePassword(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+		}
+		if got := rec.Header().Get("Warning"); got != authPersistenceWarningHeader {
+			t.Fatalf("warning header = %q, want %q", got, authPersistenceWarningHeader)
+		}
+
+		var envelope authEnvelope
+		if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
+			t.Fatalf("unmarshal change password envelope error: %v", err)
+		}
+		if !envelope.Success {
+			t.Fatalf("expected success response, got %s", rec.Body.String())
+		}
+		if envelope.Message != "password changed with persistence warning" {
+			t.Fatalf("message = %q, want %q", envelope.Message, "password changed with persistence warning")
+		}
+
+		if _, err := store.Authenticate("hard-revoke-change", "newpassword456"); err != nil {
+			t.Fatalf("expected changed password to authenticate successfully, got %v", err)
+		}
+		if _, err := tm.ValidateAccessToken(tokenPair.AccessToken); err != ErrTokenRevoked {
+			t.Fatalf("expected access token to be revoked after password change, got %v", err)
+		}
+		if _, err := tm.ValidateRefreshToken(tokenPair.RefreshToken); err != ErrTokenRevoked {
+			t.Fatalf("expected refresh token to be revoked after password change, got %v", err)
+		}
+	})
+
+	t.Run("reset password returns warning and revokes existing tokens when revocation persistence fails hard", func(t *testing.T) {
+		admin, err := store.GetByUsername("handleradmin")
+		if err != nil {
+			t.Fatalf("failed to get admin user: %v", err)
+		}
+		resetUser, err := store.Create("hard-revoke-reset", "password123", "hard-revoke-reset@test.com", RoleUser)
+		if err != nil {
+			t.Fatalf("failed to create reset user: %v", err)
+		}
+
+		tokenPair, err := tm.GenerateTokenPair(resetUser)
+		if err != nil {
+			t.Fatalf("GenerateTokenPair() error: %v", err)
+		}
+
+		originalPersistTokenRevocations := persistTokenRevocations
+		persistTokenRevocations = func(tm *TokenManager) error {
+			return errors.New("write failed")
+		}
+		defer func() {
+			persistTokenRevocations = originalPersistTokenRevocations
+		}()
+
+		req := httptest.NewRequest("POST", "/api/v1/admin/users/"+resetUser.ID+"/reset-password", bytes.NewBufferString(`{"new_password":"resetpass456"}`))
+		req = req.WithContext(context.WithValue(req.Context(), ContextKeyUser, admin))
+		rec := httptest.NewRecorder()
+
+		h.HandleResetUserPassword(rec, req, resetUser.ID)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+		}
+		if got := rec.Header().Get("Warning"); got != authPersistenceWarningHeader {
+			t.Fatalf("warning header = %q, want %q", got, authPersistenceWarningHeader)
+		}
+
+		var envelope authEnvelope
+		if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
+			t.Fatalf("unmarshal reset password envelope error: %v", err)
+		}
+		if !envelope.Success {
+			t.Fatalf("expected success response, got %s", rec.Body.String())
+		}
+		if envelope.Message != "password reset with persistence warning" {
+			t.Fatalf("message = %q, want %q", envelope.Message, "password reset with persistence warning")
+		}
+
+		if _, err := store.Authenticate("hard-revoke-reset", "resetpass456"); err != nil {
+			t.Fatalf("expected reset password to authenticate successfully, got %v", err)
+		}
+		if _, err := tm.ValidateAccessToken(tokenPair.AccessToken); err != ErrTokenRevoked {
+			t.Fatalf("expected access token to be revoked after password reset, got %v", err)
+		}
+		if _, err := tm.ValidateRefreshToken(tokenPair.RefreshToken); err != ErrTokenRevoked {
+			t.Fatalf("expected refresh token to be revoked after password reset, got %v", err)
+		}
+	})
+
+	t.Run("delete user returns warning and revokes existing tokens when revocation persistence fails hard", func(t *testing.T) {
+		admin, err := store.GetByUsername("handleradmin")
+		if err != nil {
+			t.Fatalf("failed to get admin user: %v", err)
+		}
+		deleteUser, err := store.Create("hard-revoke-delete", "password123", "hard-revoke-delete@test.com", RoleUser)
+		if err != nil {
+			t.Fatalf("failed to create delete user: %v", err)
+		}
+
+		tokenPair, err := tm.GenerateTokenPair(deleteUser)
+		if err != nil {
+			t.Fatalf("GenerateTokenPair() error: %v", err)
+		}
+
+		originalPersistTokenRevocations := persistTokenRevocations
+		persistTokenRevocations = func(tm *TokenManager) error {
+			return errors.New("write failed")
+		}
+		defer func() {
+			persistTokenRevocations = originalPersistTokenRevocations
+		}()
+
+		req := httptest.NewRequest("DELETE", "/api/v1/admin/users/"+deleteUser.ID, nil)
+		req = req.WithContext(context.WithValue(req.Context(), ContextKeyUser, admin))
+		rec := httptest.NewRecorder()
+
+		h.HandleDeleteUser(rec, req, deleteUser.ID)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+		}
+		if got := rec.Header().Get("Warning"); got != authPersistenceWarningHeader {
+			t.Fatalf("warning header = %q, want %q", got, authPersistenceWarningHeader)
+		}
+
+		var envelope authEnvelope
+		if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
+			t.Fatalf("unmarshal delete user envelope error: %v", err)
+		}
+		if !envelope.Success {
+			t.Fatalf("expected success response, got %s", rec.Body.String())
+		}
+		if envelope.Message != "user deleted with persistence warning" {
+			t.Fatalf("message = %q, want %q", envelope.Message, "user deleted with persistence warning")
+		}
+
+		if _, err := store.GetByID(deleteUser.ID); err != ErrUserNotFound {
+			t.Fatalf("expected deleted user to be removed from store, got %v", err)
+		}
+		if _, err := tm.ValidateAccessToken(tokenPair.AccessToken); err != ErrTokenRevoked {
+			t.Fatalf("expected access token to be revoked after delete warning, got %v", err)
+		}
+		if _, err := tm.ValidateRefreshToken(tokenPair.RefreshToken); err != ErrTokenRevoked {
+			t.Fatalf("expected refresh token to be revoked after delete warning, got %v", err)
+		}
+	})
+
+	t.Run("disable user returns warning and revokes existing tokens when revocation persistence fails hard", func(t *testing.T) {
+		admin, err := store.GetByUsername("handleradmin")
+		if err != nil {
+			t.Fatalf("failed to get admin user: %v", err)
+		}
+		toggleUser, err := store.Create("hard-revoke-toggle", "password123", "hard-revoke-toggle@test.com", RoleUser)
+		if err != nil {
+			t.Fatalf("failed to create toggle user: %v", err)
+		}
+
+		tokenPair, err := tm.GenerateTokenPair(toggleUser)
+		if err != nil {
+			t.Fatalf("GenerateTokenPair() error: %v", err)
+		}
+
+		originalPersistTokenRevocations := persistTokenRevocations
+		persistTokenRevocations = func(tm *TokenManager) error {
+			return errors.New("write failed")
+		}
+		defer func() {
+			persistTokenRevocations = originalPersistTokenRevocations
+		}()
+
+		req := httptest.NewRequest("PUT", "/api/v1/admin/users/"+toggleUser.ID+"/status", bytes.NewBufferString(`{"disabled":true}`))
+		req = req.WithContext(context.WithValue(req.Context(), ContextKeyUser, admin))
+		rec := httptest.NewRecorder()
+
+		h.HandleToggleUserStatus(rec, req, toggleUser.ID)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+		}
+		if got := rec.Header().Get("Warning"); got != authPersistenceWarningHeader {
+			t.Fatalf("warning header = %q, want %q", got, authPersistenceWarningHeader)
+		}
+
+		var envelope authEnvelope
+		if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
+			t.Fatalf("unmarshal toggle user envelope error: %v", err)
+		}
+		if !envelope.Success {
+			t.Fatalf("expected success response, got %s", rec.Body.String())
+		}
+		if envelope.Message != "user status updated with persistence warning" {
+			t.Fatalf("message = %q, want %q", envelope.Message, "user status updated with persistence warning")
+		}
+
+		updatedUser, err := store.GetByID(toggleUser.ID)
+		if err != nil {
+			t.Fatalf("GetByID(toggleUser) error: %v", err)
+		}
+		if !updatedUser.Disabled {
+			t.Fatal("expected disabled user state to remain committed after warning")
+		}
+		if _, err := tm.ValidateAccessToken(tokenPair.AccessToken); err != ErrTokenRevoked {
+			t.Fatalf("expected access token to be revoked after disable warning, got %v", err)
+		}
+		if _, err := tm.ValidateRefreshToken(tokenPair.RefreshToken); err != ErrTokenRevoked {
+			t.Fatalf("expected refresh token to be revoked after disable warning, got %v", err)
 		}
 	})
 

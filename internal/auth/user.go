@@ -264,6 +264,7 @@ func saveUserState(filePath string, users map[string]*User) error {
 	for _, user := range users {
 		serializedUsers = append(serializedUsers, cloneUser(user))
 	}
+	sortUsersForList(serializedUsers)
 
 	data, err := json.MarshalIndent(serializedUsers, "", "  ")
 	if err != nil {

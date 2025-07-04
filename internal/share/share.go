@@ -271,6 +271,7 @@ func saveShareState(filePath string, shares map[string]*Share) error {
 	for _, share := range shares {
 		serializedShares = append(serializedShares, copyShare(share))
 	}
+	sortSharesCanonical(serializedShares)
 
 	data, err := json.MarshalIndent(serializedShares, "", "  ")
 	if err != nil {
@@ -301,8 +302,8 @@ func clonePathIndex(pathIdx map[string][]string) map[string][]string {
 }
 
 func normalizeStoredSharePath(rawPath string) (string, error) {
-	normalized := strings.ReplaceAll(strings.TrimSpace(rawPath), "\\", "/")
-	if normalized == "" {
+	normalized := strings.ReplaceAll(rawPath, "\\", "/")
+	if strings.TrimSpace(normalized) == "" {
 		return "", errInvalidSharePath
 	}
 	for _, segment := range strings.Split(normalized, "/") {
@@ -1137,6 +1138,7 @@ func (s *ShareStore) DisableSharesUnderPathWithRestore(targetPath string) ([]*Sh
 		if !changed {
 			return nil, nil
 		}
+		sortSharesCanonical(disabled)
 		if err := saveShareState(snapshot.filePath, snapshot.shares); err != nil {
 			return nil, err
 		}
@@ -1450,6 +1452,21 @@ func cloneTimePtr(value *time.Time) *time.Time {
 	}
 	cloned := *value
 	return &cloned
+}
+
+func sortSharesCanonical(shares []*Share) {
+	sort.Slice(shares, func(i, j int) bool {
+		if shares[i].Path != shares[j].Path {
+			return shares[i].Path < shares[j].Path
+		}
+		if shares[i].CreatedBy != shares[j].CreatedBy {
+			return shares[i].CreatedBy < shares[j].CreatedBy
+		}
+		if !shares[i].CreatedAt.Equal(shares[j].CreatedAt) {
+			return shares[i].CreatedAt.Before(shares[j].CreatedAt)
+		}
+		return shares[i].ID < shares[j].ID
+	})
 }
 
 func sortSharesForOutput(shares []*Share) {

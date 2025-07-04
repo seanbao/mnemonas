@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"syscall"
@@ -50,6 +51,11 @@ type switchableWebDAVHandler struct {
 	handler http.Handler
 }
 
+type webdavPathChangeHandler interface {
+	OnPathRenamed(oldPath, newPath string)
+	OnPathDeleted(path string) *storage.PathDeleteHookResult
+}
+
 func newSwitchableWebDAVHandler(prefix string, handler http.Handler) *switchableWebDAVHandler {
 	s := &switchableWebDAVHandler{}
 	s.Update(prefix, handler)
@@ -58,9 +64,30 @@ func newSwitchableWebDAVHandler(prefix string, handler http.Handler) *switchable
 
 func (s *switchableWebDAVHandler) Update(prefix string, handler http.Handler) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	previous := s.handler
 	s.prefix = prefix
 	s.handler = handler
+	s.mu.Unlock()
+
+	if handlersEqual(previous, handler) {
+		return
+	}
+	if closer, ok := previous.(io.Closer); ok {
+		_ = closer.Close()
+	}
+}
+
+func handlersEqual(a, b http.Handler) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	if reflect.TypeOf(a) != reflect.TypeOf(b) {
+		return false
+	}
+	if !reflect.TypeOf(a).Comparable() {
+		return false
+	}
+	return a == b
 }
 
 func (s *switchableWebDAVHandler) ServeIfMatches(w http.ResponseWriter, r *http.Request) bool {
@@ -75,6 +102,30 @@ func (s *switchableWebDAVHandler) ServeIfMatches(w http.ResponseWriter, r *http.
 
 	handler.ServeHTTP(w, r)
 	return true
+}
+
+func (s *switchableWebDAVHandler) OnPathRenamed(oldPath, newPath string) {
+	notifier, ok := s.currentPathChangeHandler()
+	if !ok {
+		return
+	}
+	notifier.OnPathRenamed(oldPath, newPath)
+}
+
+func (s *switchableWebDAVHandler) OnPathDeleted(path string) *storage.PathDeleteHookResult {
+	notifier, ok := s.currentPathChangeHandler()
+	if !ok {
+		return nil
+	}
+	return notifier.OnPathDeleted(path)
+}
+
+func (s *switchableWebDAVHandler) currentPathChangeHandler() (webdavPathChangeHandler, bool) {
+	s.mu.RLock()
+	handler := s.handler
+	s.mu.RUnlock()
+	notifier, ok := handler.(webdavPathChangeHandler)
+	return notifier, ok
 }
 
 func buildWebDAVHandler(fs *storage.FileSystem, cfg api.WebDAVRuntimeConfig) (string, http.Handler) {
@@ -289,11 +340,13 @@ func main() {
 	runtimeWebDAV := newSwitchableWebDAVHandler(webdavPrefix, webdavHandler)
 
 	apiServer, err := api.NewServer(log.Logger, &api.ServerConfig{
-		DataplaneAddr:   cfg.DataPlane.Address(),
-		FileSystem:      fs, // Pass the new storage filesystem
-		ThumbnailRoot:   filepath.Join(cfg.InternalDir(), "thumbnails"),
-		MaintenanceRoot: filepath.Join(cfg.InternalDir(), "maintenance"),
-		ActivityRoot:    filepath.Join(cfg.InternalDir(), "activity"),
+		DataplaneAddr:    cfg.DataPlane.Address(),
+		FileSystem:       fs, // Pass the new storage filesystem
+		AfterPathRenamed: runtimeWebDAV.OnPathRenamed,
+		AfterPathDeleted: runtimeWebDAV.OnPathDeleted,
+		ThumbnailRoot:    filepath.Join(cfg.InternalDir(), "thumbnails"),
+		MaintenanceRoot:  filepath.Join(cfg.InternalDir(), "maintenance"),
+		ActivityRoot:     filepath.Join(cfg.InternalDir(), "activity"),
 		// Auth configuration
 		AuthEnabled:    cfg.Auth.Enabled,
 		AuthUsersFile:  cfg.Auth.UsersFile,

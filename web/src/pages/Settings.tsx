@@ -305,6 +305,10 @@ export function SettingsPage() {
   const webdavCredentialsErrorPresentation = webdavCredentialsError
     ? getWebDAVCredentialsErrorPresentation(webdavCredentialsError)
     : null
+  const webdavRuntimeUnavailable = settingsData?.data.webdav.enabled === true
+    && settingsData.data.webdav.runtime_enabled === false
+  const favoritesRuntimeUnavailable = settingsData?.data.favorites?.enabled === true
+    && settingsData.data.favorites?.runtime_available === false
 
   const webdavUrl = useMemo(() => {
     return formatWebDAVUrl(window.location.origin, webdavCredentials?.url ?? '')
@@ -1414,6 +1418,17 @@ export function SettingsPage() {
                 icon={Globe}
               >
                 <div className="space-y-4">
+                  {webdavRuntimeUnavailable && (
+                    <div className="flex items-start gap-3 rounded-2xl border border-warning/30 bg-warning/5 px-4 py-3 text-sm text-foreground">
+                      <AlertCircle size={18} className="mt-0.5 shrink-0 text-warning" />
+                      <div>
+                        <div className="font-medium text-foreground">WebDAV 运行态当前不可用</div>
+                        <div className="text-default-600">
+                          配置已启用，但运行中的 WebDAV 服务未成功启动；请检查自动生成凭据和内部存储状态。
+                        </div>
+                      </div>
+                    </div>
+                  )}
                   <SettingRow
                     label="启用 WebDAV"
                     description="允许通过 WebDAV 协议访问文件"
@@ -1802,6 +1817,17 @@ export function SettingsPage() {
                 icon={Star}
               >
                 <div className="space-y-4">
+                  {favoritesRuntimeUnavailable && (
+                    <div className="flex items-start gap-3 rounded-2xl border border-warning/30 bg-warning/5 px-4 py-3 text-sm text-foreground">
+                      <AlertCircle size={18} className="mt-0.5 shrink-0 text-warning" />
+                      <div>
+                        <div className="font-medium text-foreground">收藏运行态当前不可用</div>
+                        <div className="text-default-600">
+                          配置已启用，但运行中的收藏存储未就绪；收藏接口会返回不可用，直到服务恢复对收藏存储的访问。
+                        </div>
+                      </div>
+                    </div>
+                  )}
                   <SettingRow
                     label="启用收藏功能"
                     description="允许标记收藏、查询收藏状态和维护收藏备注"

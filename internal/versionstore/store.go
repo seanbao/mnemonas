@@ -13,18 +13,17 @@ import (
 	"sync"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3"
 	"github.com/seanbao/mnemonas/internal/dataplane"
 )
 
 // Common errors
 var (
-	ErrNotFound         = errors.New("not found")
-	ErrAlreadyExists    = errors.New("already exists")
-	ErrFileLocked       = errors.New("file is locked")
-	ErrLockExpired      = errors.New("lock has expired")
-	ErrUnavailable      = errors.New("version object store unavailable")
-	errInvalidStorePath = errors.New("invalid path")
+	ErrNotFound            = errors.New("not found")
+	ErrAlreadyExists       = errors.New("already exists")
+	ErrFileLocked          = errors.New("file is locked")
+	ErrLockExpired         = errors.New("lock has expired")
+	ErrUnavailable         = errors.New("version object store unavailable")
+	errInvalidStorePath    = errors.New("invalid path")
 	errVersionStoreSymlink = errors.New("version store path must not traverse a symlink")
 )
 
@@ -124,7 +123,27 @@ func New(cfg Config) (*Store, error) {
 	if err := createTables(db); err != nil {
 		_ = db.Close()
 		_ = dirHandle.Close()
-		return nil, err
+		if recoverErr := recoverCorruptVersionStoreDatabase(normalizedPath, err); recoverErr != nil {
+			return nil, errors.Join(
+				fmt.Errorf("initialize version store schema: %w", err),
+				fmt.Errorf("recover corrupt version store database: %w", recoverErr),
+			)
+		}
+
+		anchoredDBPath, dirHandle, err = prepareAnchoredVersionStorePath(normalizedPath)
+		if err != nil {
+			return nil, err
+		}
+		db, err = sql.Open("sqlite3", anchoredDBPath+"?_journal=WAL&_timeout=5000")
+		if err != nil {
+			_ = dirHandle.Close()
+			return nil, err
+		}
+		if err := createTables(db); err != nil {
+			_ = db.Close()
+			_ = dirHandle.Close()
+			return nil, err
+		}
 	}
 
 	store := &Store{
@@ -147,6 +166,88 @@ func New(cfg Config) (*Store, error) {
 	}
 
 	return store, nil
+}
+
+func recoverCorruptVersionStoreDatabase(dbPath string, initErr error) error {
+	if !isRecoverableVersionStoreInitError(initErr) {
+		return initErr
+	}
+
+	root, err := os.OpenRoot(filepath.Dir(dbPath))
+	if err != nil {
+		return fmt.Errorf("open version store directory root: %w", err)
+	}
+	defer root.Close()
+
+	base := filepath.Base(dbPath)
+	backupBase := fmt.Sprintf("%s.corrupt.%d", base, time.Now().UnixNano())
+	renamed := make([][2]string, 0, 3)
+
+	if err := root.Rename(base, backupBase); err != nil {
+		return fmt.Errorf("backup corrupt version store database: %w", err)
+	}
+	renamed = append(renamed, [2]string{base, backupBase})
+
+	for _, sidecar := range []string{"-wal", "-shm"} {
+		oldName := base + sidecar
+		newName := backupBase + sidecar
+		if err := root.Rename(oldName, newName); err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			if rollbackErr := rollbackRenamedVersionStoreFiles(root, renamed); rollbackErr != nil {
+				return errors.Join(
+					fmt.Errorf("backup corrupt version store sidecar %s: %w", oldName, err),
+					fmt.Errorf("rollback corrupt version store backup: %w", rollbackErr),
+				)
+			}
+			if rollbackSyncErr := syncVersionStoreDir(filepath.Dir(dbPath)); rollbackSyncErr != nil {
+				return errors.Join(
+					fmt.Errorf("backup corrupt version store sidecar %s: %w", oldName, err),
+					fmt.Errorf("sync corrupt version store rollback: %w", rollbackSyncErr),
+				)
+			}
+			return fmt.Errorf("backup corrupt version store sidecar %s: %w", oldName, err)
+		}
+		renamed = append(renamed, [2]string{oldName, newName})
+	}
+
+	if err := syncVersionStoreDir(filepath.Dir(dbPath)); err != nil {
+		if rollbackErr := rollbackRenamedVersionStoreFiles(root, renamed); rollbackErr != nil {
+			return errors.Join(
+				fmt.Errorf("sync corrupt version store directory: %w", err),
+				fmt.Errorf("rollback corrupt version store backup: %w", rollbackErr),
+			)
+		}
+		if rollbackSyncErr := syncVersionStoreDir(filepath.Dir(dbPath)); rollbackSyncErr != nil {
+			return errors.Join(
+				fmt.Errorf("sync corrupt version store directory: %w", err),
+				fmt.Errorf("sync corrupt version store rollback: %w", rollbackSyncErr),
+			)
+		}
+		return fmt.Errorf("sync corrupt version store directory: %w", err)
+	}
+
+	return nil
+}
+
+func rollbackRenamedVersionStoreFiles(root *os.Root, renamed [][2]string) error {
+	var rollbackErr error
+	for i := len(renamed) - 1; i >= 0; i-- {
+		if err := root.Rename(renamed[i][1], renamed[i][0]); err != nil {
+			rollbackErr = errors.Join(rollbackErr, err)
+		}
+	}
+	return rollbackErr
+}
+
+func isRecoverableVersionStoreInitError(err error) bool {
+	if isRecoverableVersionStoreSQLiteError(err) {
+		return true
+	}
+
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "file is not a database") || strings.Contains(message, "database disk image is malformed")
 }
 
 func normalizeVersionStoreFilePath(dbPath string) (string, error) {
@@ -781,7 +882,7 @@ func (s *Store) RenamePath(ctx context.Context, oldPath, newPath string) error {
 		return nil
 	}
 
-	conflict, err := s.hasMetadataPathConflict(ctx, newPath)
+	conflict, err := s.hasPathConflictInTables(ctx, newPath, []string{"versions", "files", "versioning_overrides", "file_locks"})
 	if err != nil {
 		return err
 	}
@@ -820,14 +921,67 @@ func (s *Store) RenamePath(ctx context.Context, oldPath, newPath string) error {
 	return nil
 }
 
-func (s *Store) hasMetadataPathConflict(ctx context.Context, targetPath string) (bool, error) {
+// RenamePathHistory updates historical metadata after restore flows that already
+// recreated the current file index at the destination path.
+func (s *Store) RenamePathHistory(ctx context.Context, oldPath, newPath string) error {
+	s.fileLocksMu.Lock()
+	defer s.fileLocksMu.Unlock()
+
+	oldPath, err := normalizeVersionStorePath(oldPath)
+	if err != nil {
+		return err
+	}
+	newPath, err = normalizeVersionStorePath(newPath)
+	if err != nil {
+		return err
+	}
+	if oldPath == newPath {
+		return nil
+	}
+
+	conflict, err := s.hasPathConflictInTables(ctx, newPath, []string{"versions", "versioning_overrides", "file_locks"})
+	if err != nil {
+		return err
+	}
+	if conflict {
+		return ErrAlreadyExists
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	if err := renamePathInTable(ctx, tx, "versions", oldPath, newPath); err != nil {
+		return err
+	}
+	if err := renamePathInTable(ctx, tx, "versioning_overrides", oldPath, newPath); err != nil {
+		return err
+	}
+	if err := renamePathInTable(ctx, tx, "file_locks", oldPath, newPath); err != nil {
+		return err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	committed = true
+	return nil
+}
+
+func (s *Store) hasPathConflictInTables(ctx context.Context, targetPath string, tables []string) (bool, error) {
 	if targetPath == "/" {
 		return false, nil
 	}
 
 	prefix := targetPath + "/"
 	prefixLen := len(prefix)
-	tables := []string{"versions", "files", "versioning_overrides", "file_locks"}
 	for _, table := range tables {
 		query := fmt.Sprintf(`SELECT EXISTS(SELECT 1 FROM %s WHERE path = ? OR substr(path, 1, ?) = ? LIMIT 1)`, table)
 		var exists bool
@@ -922,7 +1076,7 @@ func (s *Store) GetTrashItem(ctx context.Context, id string) (*TrashItem, error)
 func (s *Store) ListTrash(ctx context.Context) ([]TrashItem, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, original_path, size, deleted_at, expires_at, is_dir, had_versions, restore_data 
-		 FROM trash ORDER BY deleted_at DESC`)
+		 FROM trash ORDER BY deleted_at DESC, rowid DESC`)
 	if err != nil {
 		return nil, err
 	}

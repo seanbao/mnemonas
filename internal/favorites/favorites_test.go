@@ -233,6 +233,39 @@ func TestNewStore_LoadNormalizesAndDropsInvalidPaths(t *testing.T) {
 	}
 }
 
+func TestNewStore_LoadPreservesWhitespaceInPath(t *testing.T) {
+	tmpDir := t.TempDir()
+	storePath := filepath.Join(tmpDir, "favorites.json")
+	targetPath := "/docs/report.pdf "
+
+	writeFavoritesFixture(t, storePath, []Favorite{{
+		Path:      targetPath,
+		UserID:    "user1",
+		CreatedAt: time.Date(2026, time.April, 23, 11, 0, 0, 0, time.UTC),
+		Note:      "whitespace",
+	}})
+
+	store, err := NewStore(storePath)
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+
+	if !store.IsFavorite("user1", targetPath) {
+		t.Fatal("expected whitespace-preserving favorite path to remain favorited after load")
+	}
+	if store.IsFavorite("user1", "/docs/report.pdf") {
+		t.Fatal("expected trimmed sibling path to remain unfavorited after load")
+	}
+
+	data, err := os.ReadFile(storePath)
+	if err != nil {
+		t.Fatalf("ReadFile(favorites.json) error: %v", err)
+	}
+	if !strings.Contains(string(data), `"path":"/docs/report.pdf "`) {
+		t.Fatalf("expected persisted favorites file to preserve trailing whitespace path, got %s", string(data))
+	}
+}
+
 func TestNewStore_RejectsNullFavoriteEntry(t *testing.T) {
 	tmpDir := t.TempDir()
 	storePath := filepath.Join(tmpDir, "favorites.json")
@@ -244,6 +277,67 @@ func TestNewStore_RejectsNullFavoriteEntry(t *testing.T) {
 		t.Fatal("expected NewStore() to reject null favorite entries")
 	} else if !strings.Contains(err.Error(), "null entry") {
 		t.Fatalf("expected null entry error, got %v", err)
+	}
+}
+
+func TestStore_SaveFavoritesState_PersistsCanonicalOrder(t *testing.T) {
+	storePath := filepath.Join(t.TempDir(), "favorites.json")
+	createdAt := time.Unix(1700000000, 0)
+	dataByUser := map[string]map[string]*Favorite{
+		"user-b": {
+			"/docs/c.txt": {Path: "/docs/c.txt", UserID: "user-b", CreatedAt: createdAt},
+		},
+		"user-a": {
+			"/docs/b.txt": {Path: "/docs/b.txt", UserID: "user-a", CreatedAt: createdAt},
+			"/docs/a.txt": {Path: "/docs/a.txt", UserID: "user-a", CreatedAt: createdAt},
+		},
+	}
+
+	expected := []struct {
+		userID string
+		path   string
+	}{
+		{userID: "user-a", path: "/docs/a.txt"},
+		{userID: "user-a", path: "/docs/b.txt"},
+		{userID: "user-b", path: "/docs/c.txt"},
+	}
+
+	for i := 0; i < 64; i++ {
+		if err := saveFavoritesState(storePath, dataByUser); err != nil {
+			t.Fatalf("saveFavoritesState() error: %v", err)
+		}
+
+		data, err := os.ReadFile(storePath)
+		if err != nil {
+			t.Fatalf("ReadFile(favorites.json) error: %v", err)
+		}
+
+		var persisted []Favorite
+		if err := json.Unmarshal(data, &persisted); err != nil {
+			t.Fatalf("Unmarshal(persisted favorites) error: %v", err)
+		}
+		if len(persisted) != len(expected) {
+			t.Fatalf("persisted favorite count = %d, want %d", len(persisted), len(expected))
+		}
+		for index, want := range expected {
+			if persisted[index].UserID != want.userID || persisted[index].Path != want.path {
+				t.Fatalf("persisted order at iteration %d = [%s:%s %s:%s %s:%s], want [%s:%s %s:%s %s:%s]",
+					i,
+					persisted[0].UserID,
+					persisted[0].Path,
+					persisted[1].UserID,
+					persisted[1].Path,
+					persisted[2].UserID,
+					persisted[2].Path,
+					expected[0].userID,
+					expected[0].path,
+					expected[1].userID,
+					expected[1].path,
+					expected[2].userID,
+					expected[2].path,
+				)
+			}
+		}
 	}
 }
 
@@ -787,6 +881,40 @@ func TestStore_ReturnedFavoritesAreDetachedCopies(t *testing.T) {
 	}
 }
 
+func TestStore_List_OrdersSameTimestampFavoritesDeterministically(t *testing.T) {
+	createdAt := time.Unix(1700000000, 0)
+	store := &Store{
+		data: map[string]map[string]*Favorite{
+			"user1": {
+				"/docs/b.txt": {Path: "/docs/b.txt", UserID: "user1", CreatedAt: createdAt},
+				"/docs/a.txt": {Path: "/docs/a.txt", UserID: "user1", CreatedAt: createdAt},
+				"/docs/c.txt": {Path: "/docs/c.txt", UserID: "user1", CreatedAt: createdAt},
+			},
+		},
+	}
+
+	expected := []string{"/docs/a.txt", "/docs/b.txt", "/docs/c.txt"}
+	for i := 0; i < 64; i++ {
+		listed := store.List("user1")
+		if len(listed) != len(expected) {
+			t.Fatalf("List() returned %d favorites, want %d", len(listed), len(expected))
+		}
+		for index, expectedPath := range expected {
+			if listed[index].Path != expectedPath {
+				t.Fatalf("List() order at iteration %d = [%s %s %s], want [%s %s %s]",
+					i,
+					listed[0].Path,
+					listed[1].Path,
+					listed[2].Path,
+					expected[0],
+					expected[1],
+					expected[2],
+				)
+			}
+		}
+	}
+}
+
 func TestStore_RollsBackFailedMutations(t *testing.T) {
 	tmpDir := t.TempDir()
 	storePath := filepath.Join(tmpDir, "favorites.json")
@@ -975,6 +1103,32 @@ func TestStore_UpdatePathReferences_PreservesAllDescendantsForSingleUser(t *test
 	}
 }
 
+func TestStore_UpdatePathReferences_NormalizesInputPaths(t *testing.T) {
+	tmpDir := t.TempDir()
+	storePath := filepath.Join(tmpDir, "favorites.json")
+
+	store, err := NewStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	if _, err := store.Add("user1", "/docs/a.txt", "note"); err != nil {
+		t.Fatalf("Add(/docs/a.txt) error: %v", err)
+	}
+
+	if err := store.UpdatePathReferences(`docs`, `archive\\docs`); err != nil {
+		t.Fatalf("UpdatePathReferences() error: %v", err)
+	}
+
+	loaded := store.List("user1")
+	if len(loaded) != 1 {
+		t.Fatalf("expected one favorite after rewrite, got %d", len(loaded))
+	}
+	if loaded[0].Path != "/archive/docs/a.txt" {
+		t.Fatalf("expected normalized rewritten path, got %q", loaded[0].Path)
+	}
+}
+
 func TestStore_RemoveFavoritesUnderPath_RemovesExactAndDescendantFavorites(t *testing.T) {
 	tmpDir := t.TempDir()
 	storePath := filepath.Join(tmpDir, "favorites.json")
@@ -1012,6 +1166,33 @@ func TestStore_RemoveFavoritesUnderPath_RemovesExactAndDescendantFavorites(t *te
 	}
 	if store.IsFavorite("user2", "/docs/sub/b.txt") {
 		t.Fatal("expected second user descendant favorite to be removed")
+	}
+}
+func TestStore_RemoveFavoritesUnderPath_NormalizesInputPaths(t *testing.T) {
+	tmpDir := t.TempDir()
+	storePath := filepath.Join(tmpDir, "favorites.json")
+
+	store, err := NewStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	if _, err := store.Add("user1", "/docs/a.txt", "file"); err != nil {
+		t.Fatalf("Add(/docs/a.txt) error: %v", err)
+	}
+	if _, err := store.Add("user1", "/docs/sub/b.txt", "file"); err != nil {
+		t.Fatalf("Add(/docs/sub/b.txt) error: %v", err)
+	}
+
+	if err := store.RemoveFavoritesUnderPath(`docs\\sub`); err != nil {
+		t.Fatalf("RemoveFavoritesUnderPath() error: %v", err)
+	}
+
+	if !store.IsFavorite("user1", "/docs/a.txt") {
+		t.Fatal("expected sibling favorite to remain after normalized descendant removal")
+	}
+	if store.IsFavorite("user1", "/docs/sub/b.txt") {
+		t.Fatal("expected normalized descendant favorite to be removed")
 	}
 }
 
@@ -1055,6 +1236,61 @@ func TestStore_RemoveFavoritesUnderPathWithRestore_RestoresRemovedFavorites(t *t
 	}
 	if !reloaded.IsFavorite("user1", "/docs") || !reloaded.IsFavorite("user1", "/docs/a.txt") {
 		t.Fatal("expected restored favorites to persist after reload")
+	}
+}
+
+func TestStore_RemoveFavoritesUnderPathWithRestore_ReturnsCanonicalOrder(t *testing.T) {
+	expected := []struct {
+		userID string
+		path   string
+	}{
+		{userID: "user-a", path: "/docs/a.txt"},
+		{userID: "user-a", path: "/docs/b.txt"},
+		{userID: "user-b", path: "/docs/c.txt"},
+	}
+
+	for i := 0; i < 32; i++ {
+		store, err := NewStore(filepath.Join(t.TempDir(), "favorites.json"))
+		if err != nil {
+			t.Fatalf("NewStore() error: %v", err)
+		}
+
+		if _, err := store.Add("user-b", "/docs/c.txt", "c"); err != nil {
+			t.Fatalf("Add(/docs/c.txt) error: %v", err)
+		}
+		if _, err := store.Add("user-a", "/docs/b.txt", "b"); err != nil {
+			t.Fatalf("Add(/docs/b.txt) error: %v", err)
+		}
+		if _, err := store.Add("user-a", "/docs/a.txt", "a"); err != nil {
+			t.Fatalf("Add(/docs/a.txt) error: %v", err)
+		}
+
+		removed, err := store.RemoveFavoritesUnderPathWithRestore("/docs")
+		if err != nil {
+			t.Fatalf("RemoveFavoritesUnderPathWithRestore() error: %v", err)
+		}
+		if len(removed) != len(expected) {
+			t.Fatalf("removed favorite count = %d, want %d", len(removed), len(expected))
+		}
+		for index, want := range expected {
+			if removed[index].UserID != want.userID || removed[index].Path != want.path {
+				t.Fatalf("removed order at iteration %d = [%s:%s %s:%s %s:%s], want [%s:%s %s:%s %s:%s]",
+					i,
+					removed[0].UserID,
+					removed[0].Path,
+					removed[1].UserID,
+					removed[1].Path,
+					removed[2].UserID,
+					removed[2].Path,
+					expected[0].userID,
+					expected[0].path,
+					expected[1].userID,
+					expected[1].path,
+					expected[2].userID,
+					expected[2].path,
+				)
+			}
+		}
 	}
 }
 

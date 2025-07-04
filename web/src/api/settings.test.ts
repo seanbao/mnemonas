@@ -37,6 +37,51 @@ describe('Settings API', () => {
     expect(result.data.server.trusted_proxy_hops).toBe(2)
   })
 
+  it('accepts favorites runtime availability in settings responses', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        success: true,
+        data: {
+          server: { host: '0.0.0.0', port: 8080, read_timeout: '30s', write_timeout: '30s', idle_timeout: '60s', trusted_proxy_hops: 2 },
+          storage: { root: '/root/.mnemonas' },
+          retention: { max_versions: 10, max_age: '24h', min_free_space: 1024, gc_interval: '1h' },
+          webdav: { enabled: true, prefix: '/dav', read_only: false, auth_type: 'basic', username: 'admin' },
+          share: { enabled: true, base_url: 'http://localhost:8080' },
+          favorites: { enabled: true, runtime_available: false },
+          dataplane: { grpc_address: '127.0.0.1:9090', timeout: '30s', max_retries: 3 },
+          cdc: { min_chunk_size: 1, avg_chunk_size: 2, max_chunk_size: 3 },
+        },
+      }),
+    })
+
+    const result = await getSettings()
+
+    expect(result.data.favorites?.runtime_available).toBe(false)
+  })
+
+  it('accepts WebDAV runtime enablement in settings responses', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        success: true,
+        data: {
+          server: { host: '0.0.0.0', port: 8080, read_timeout: '30s', write_timeout: '30s', idle_timeout: '60s', trusted_proxy_hops: 2 },
+          storage: { root: '/root/.mnemonas' },
+          retention: { max_versions: 10, max_age: '24h', min_free_space: 1024, gc_interval: '1h' },
+          webdav: { enabled: true, runtime_enabled: false, prefix: '/dav', read_only: false, auth_type: 'basic', username: 'admin' },
+          share: { enabled: true, base_url: 'http://localhost:8080' },
+          dataplane: { grpc_address: '127.0.0.1:9090', timeout: '30s', max_retries: 3 },
+          cdc: { min_chunk_size: 1, avg_chunk_size: 2, max_chunk_size: 3 },
+        },
+      }),
+    })
+
+    const result = await getSettings()
+
+    expect(result.data.webdav.runtime_enabled).toBe(false)
+  })
+
   it('rejects malformed successful settings responses', async () => {
     mockAuthFetch.mockResolvedValueOnce({
       ok: true,

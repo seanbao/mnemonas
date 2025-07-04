@@ -122,6 +122,12 @@ func NewHistoryStore(dataDir string) (*HistoryStore, error) {
 				fmt.Errorf("recover corrupt scrub history: %w", recoverErr),
 			)
 		}
+		if recoverErr := store.restoreTerminalFallbackAfterCorruptRecovery(); recoverErr != nil {
+			return nil, errors.Join(
+				fmt.Errorf("load last scrub result: %w", err),
+				fmt.Errorf("restore terminal scrub fallback after corrupt recovery: %w", recoverErr),
+			)
+		}
 	}
 	return store, nil
 }
@@ -211,7 +217,12 @@ func (s *HistoryStore) loadLastScrubResult() error {
 
 	if fallback, fallbackErr := s.loadScrubTerminalFallback(result); fallbackErr != nil {
 		if !os.IsNotExist(fallbackErr) {
-			return fmt.Errorf("load scrub terminal fallback: %w", fallbackErr)
+			if recoverErr := s.recoverCorruptScrubTerminalFallback(fallbackErr); recoverErr != nil {
+				return errors.Join(
+					fmt.Errorf("load scrub terminal fallback: %w", fallbackErr),
+					fmt.Errorf("recover corrupt scrub terminal fallback: %w", recoverErr),
+				)
+			}
 		}
 	} else if fallback != nil {
 		result = fallback
@@ -234,11 +245,45 @@ func (s *HistoryStore) loadLastScrubResult() error {
 }
 
 func (s *HistoryStore) recoverCorruptLastScrubResult(loadErr error) error {
+	if err := recoverCorruptHistoryFile(s.lastScrubPath(), loadErr); err != nil {
+		return err
+	}
+	s.scrubResult = nil
+	return nil
+}
+
+func (s *HistoryStore) recoverCorruptScrubTerminalFallback(loadErr error) error {
+	return recoverCorruptHistoryFile(s.lastScrubTerminalFallbackPath(), loadErr)
+}
+
+func (s *HistoryStore) restoreTerminalFallbackAfterCorruptRecovery() error {
+	fallback, err := loadScrubResultFile(s.lastScrubTerminalFallbackPath())
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("load scrub terminal fallback: %w", err)
+	}
+	if fallback == nil || fallback.Status == "running" {
+		return nil
+	}
+
+	if err := s.persistScrubResult(fallback); err != nil {
+		if isHistoryPersistenceWarning(err) {
+			s.scrubResult = cloneScrubResult(fallback)
+			return nil
+		}
+		return fmt.Errorf("persist scrub terminal fallback: %w", err)
+	}
+	s.scrubResult = cloneScrubResult(fallback)
+	return nil
+}
+
+func recoverCorruptHistoryFile(path string, loadErr error) error {
 	if !isRecoverableHistoryLoadError(loadErr) {
 		return loadErr
 	}
 
-	path := s.lastScrubPath()
 	corruptPath := fmt.Sprintf("%s.corrupt.%d", path, time.Now().UnixNano())
 	if err := renameRegisteredHistoryFile(path, corruptPath); err != nil {
 		return fmt.Errorf("backup corrupt scrub history: %w", err)
@@ -259,7 +304,6 @@ func (s *HistoryStore) recoverCorruptLastScrubResult(loadErr error) error {
 		return fmt.Errorf("sync corrupt scrub history directory: %w", err)
 	}
 
-	s.scrubResult = nil
 	return nil
 }
 

@@ -197,6 +197,25 @@ type ErrorDetail struct {
 	Message string `json:"message"`
 }
 
+func fullUserResponse(user *User) map[string]interface{} {
+	info := map[string]interface{}{
+		"id":          user.ID,
+		"username":    user.Username,
+		"email":       user.Email,
+		"role":        user.Role,
+		"disabled":    user.Disabled,
+		"home_dir":    user.HomeDir,
+		"created_at":  user.CreatedAt,
+		"updated_at":  user.UpdatedAt,
+		"quota_bytes": user.QuotaBytes,
+		"used_bytes":  user.UsedBytes,
+	}
+	if user.LastLoginAt != nil {
+		info["last_login_at"] = user.LastLoginAt
+	}
+	return info
+}
+
 // HandleLogin handles POST /api/v1/auth/login
 func (h *Handler) HandleLogin(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -229,27 +248,27 @@ func (h *Handler) HandleLogin(w http.ResponseWriter, r *http.Request) {
 			markAuthPersistenceWarningHeaders(w)
 			loginWarning = true
 		} else {
-		switch err {
-		case ErrInvalidCredentials:
-			if h.loginAttempts != nil {
-				if locked := h.loginAttempts.recordFailure(attemptKey, h.loginFailureLimit, h.loginFailureWindow, h.loginLockDuration); locked {
-					writeError(w, http.StatusTooManyRequests, defaultLoginRateLimitMessage, "LOGIN_RATE_LIMITED")
-					return
+			switch err {
+			case ErrInvalidCredentials:
+				if h.loginAttempts != nil {
+					if locked := h.loginAttempts.recordFailure(attemptKey, h.loginFailureLimit, h.loginFailureWindow, h.loginLockDuration); locked {
+						writeError(w, http.StatusTooManyRequests, defaultLoginRateLimitMessage, "LOGIN_RATE_LIMITED")
+						return
+					}
 				}
-			}
-			writeError(w, http.StatusUnauthorized, "invalid username or password", "INVALID_CREDENTIALS")
-		case ErrUserDisabled:
-			if h.loginAttempts != nil {
-				if locked := h.loginAttempts.recordFailure(attemptKey, h.loginFailureLimit, h.loginFailureWindow, h.loginLockDuration); locked {
-					writeError(w, http.StatusTooManyRequests, defaultLoginRateLimitMessage, "LOGIN_RATE_LIMITED")
-					return
+				writeError(w, http.StatusUnauthorized, "invalid username or password", "INVALID_CREDENTIALS")
+			case ErrUserDisabled:
+				if h.loginAttempts != nil {
+					if locked := h.loginAttempts.recordFailure(attemptKey, h.loginFailureLimit, h.loginFailureWindow, h.loginLockDuration); locked {
+						writeError(w, http.StatusTooManyRequests, defaultLoginRateLimitMessage, "LOGIN_RATE_LIMITED")
+						return
+					}
 				}
+				writeError(w, http.StatusUnauthorized, "invalid username or password", "INVALID_CREDENTIALS")
+			default:
+				writeError(w, http.StatusInternalServerError, "internal server error", "AUTH_ERROR")
 			}
-			writeError(w, http.StatusUnauthorized, "invalid username or password", "INVALID_CREDENTIALS")
-		default:
-			writeError(w, http.StatusInternalServerError, "internal server error", "AUTH_ERROR")
-		}
-		return
+			return
 		}
 	}
 	if h.loginAttempts != nil {
@@ -573,22 +592,7 @@ func (h *Handler) HandleListUsers(w http.ResponseWriter, r *http.Request) {
 	userInfos := make([]map[string]interface{}, 0, len(users))
 
 	for _, u := range users {
-		info := map[string]interface{}{
-			"id":          u.ID,
-			"username":    u.Username,
-			"email":       u.Email,
-			"role":        u.Role,
-			"disabled":    u.Disabled,
-			"home_dir":    u.HomeDir,
-			"created_at":  u.CreatedAt,
-			"updated_at":  u.UpdatedAt,
-			"quota_bytes": u.QuotaBytes,
-			"used_bytes":  u.UsedBytes,
-		}
-		if u.LastLoginAt != nil {
-			info["last_login_at"] = u.LastLoginAt
-		}
-		userInfos = append(userInfos, info)
+		userInfos = append(userInfos, fullUserResponse(u))
 	}
 
 	writeSuccess(w, http.StatusOK, map[string]interface{}{
@@ -643,13 +647,7 @@ func (h *Handler) HandleCreateUser(w http.ResponseWriter, r *http.Request) {
 		if isAuthPersistenceWarning(err) && user != nil {
 			markAuthPersistenceWarningHeaders(w)
 			writeSuccess(w, http.StatusCreated, map[string]interface{}{
-				"user": UserInfo{
-					ID:       user.ID,
-					Username: user.Username,
-					Email:    user.Email,
-					Role:     user.Role,
-					HomeDir:  user.HomeDir,
-				},
+				"user":    fullUserResponse(user),
 				"warning": true,
 			}, "user created with persistence warning")
 			return
@@ -666,13 +664,7 @@ func (h *Handler) HandleCreateUser(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeSuccess(w, http.StatusCreated, map[string]interface{}{
-		"user": UserInfo{
-			ID:       user.ID,
-			Username: user.Username,
-			Email:    user.Email,
-			Role:     user.Role,
-			HomeDir:  user.HomeDir,
-		},
+		"user": fullUserResponse(user),
 	}, "")
 }
 

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"sync"
@@ -103,7 +104,16 @@ func (tm *TokenManager) EnablePersistence(filePath string) error {
 
 	state, err := loadTokenRevocationState(normalizedPath)
 	if err != nil {
-		return err
+		if recoverErr := recoverCorruptTokenRevocationFile(normalizedPath, err); recoverErr != nil {
+			return errors.Join(
+				fmt.Errorf("load token revocation file: %w", err),
+				fmt.Errorf("recover corrupt token revocation file: %w", recoverErr),
+			)
+		}
+		state = &tokenRevocationState{
+			RevokedTokens: make(map[string]time.Time),
+			UserRevokedAt: make(map[string]time.Time),
+		}
 	}
 
 	tm.mu.Lock()
@@ -152,6 +162,48 @@ func loadTokenRevocationState(filePath string) (*tokenRevocationState, error) {
 	}
 
 	return state, nil
+}
+
+func recoverCorruptTokenRevocationFile(filePath string, loadErr error) error {
+	if !isRecoverableTokenRevocationLoadError(loadErr) {
+		return loadErr
+	}
+
+	corruptPath := fmt.Sprintf("%s.corrupt.%d", filePath, time.Now().UnixNano())
+	if err := renameRegisteredAuthFile(filePath, corruptPath, errTokenRevocationFileSymlink); err != nil {
+		return fmt.Errorf("backup corrupt token revocation file: %w", err)
+	}
+	if err := syncRegisteredAuthDir(filePath); err != nil {
+		if rollbackErr := renameRegisteredAuthFile(corruptPath, filePath, errTokenRevocationFileSymlink); rollbackErr != nil {
+			return errors.Join(
+				fmt.Errorf("sync corrupt token revocation directory: %w", err),
+				fmt.Errorf("rollback corrupt token revocation backup: %w", rollbackErr),
+			)
+		}
+		if rollbackSyncErr := syncRegisteredAuthDir(filePath); rollbackSyncErr != nil {
+			return errors.Join(
+				fmt.Errorf("sync corrupt token revocation directory: %w", err),
+				fmt.Errorf("sync corrupt token revocation rollback: %w", rollbackSyncErr),
+			)
+		}
+		return fmt.Errorf("sync corrupt token revocation directory: %w", err)
+	}
+
+	return nil
+}
+
+func isRecoverableTokenRevocationLoadError(err error) bool {
+	if errors.Is(err, io.EOF) {
+		return true
+	}
+
+	var syntaxErr *json.SyntaxError
+	if errors.As(err, &syntaxErr) {
+		return true
+	}
+
+	var typeErr *json.UnmarshalTypeError
+	return errors.As(err, &typeErr)
 }
 
 func (tm *TokenManager) persistRevocationsLocked() error {
@@ -355,22 +407,13 @@ func (tm *TokenManager) RevokeToken(tokenID string) error {
 	defer tm.mu.Unlock()
 
 	now := time.Now()
-	previousExpiry, hadPrevious := tm.revokedTokens[tokenID]
-	cleanupSnapshot := tm.cleanupRevokedTokensLocked(now)
+	tm.cleanupRevokedTokensLocked(now)
 	afterRevokeTokenCleanup()
 
 	// Store with expiry time for cleanup
 	tm.revokedTokens[tokenID] = now.Add(tm.refreshExpiry)
 	if err := persistTokenRevocations(tm); err != nil {
-		if !isAuthPersistenceWarning(err) {
-			if hadPrevious {
-				tm.revokedTokens[tokenID] = previousExpiry
-			} else {
-				delete(tm.revokedTokens, tokenID)
-			}
-			tm.restoreRevokedTokenCleanupLocked(cleanupSnapshot)
-		}
-		return err
+		return asTokenRevocationPersistenceWarning(err)
 	}
 	return nil
 }
@@ -381,21 +424,19 @@ func (tm *TokenManager) RevokeByUser(userID string) error {
 	defer tm.mu.Unlock()
 
 	now := time.Now()
-	previousRevokedAt, hadPrevious := tm.userRevokedAt[userID]
-	cleanupSnapshot := tm.cleanupRevokedTokensLocked(now)
+	tm.cleanupRevokedTokensLocked(now)
 	tm.userRevokedAt[userID] = jwtTimestamp(now)
 	if err := persistTokenRevocations(tm); err != nil {
-		if !isAuthPersistenceWarning(err) {
-			if hadPrevious {
-				tm.userRevokedAt[userID] = previousRevokedAt
-			} else {
-				delete(tm.userRevokedAt, userID)
-			}
-			tm.restoreRevokedTokenCleanupLocked(cleanupSnapshot)
-		}
-		return err
+		return asTokenRevocationPersistenceWarning(err)
 	}
 	return nil
+}
+
+func asTokenRevocationPersistenceWarning(err error) error {
+	if err == nil || isAuthPersistenceWarning(err) {
+		return err
+	}
+	return wrapAuthPersistenceWarning(err)
 }
 
 // isRevoked checks if a token is revoked

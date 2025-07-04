@@ -77,7 +77,7 @@ critical_pct = 95.0          # 使用率达到此百分比时发送严重告警
 min_free_bytes = 10737418240 # 剩余空间低于此值时告警（10GB）
 cooldown_period = "4h"       # 同级别告警冷却时间
 webhook_url = ""             # Webhook URL（如企业微信机器人、Slack 等）
-webhook_method = "POST"      # HTTP 方法
+webhook_method = "POST"      # HTTP 方法；GET 时将告警字段编码到 URL query
 # webhook_headers = ["Authorization:Bearer xxx"]  # 自定义请求头
 
 [log]
