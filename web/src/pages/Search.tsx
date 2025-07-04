@@ -18,7 +18,7 @@ import { PageHeader } from '@/components/ui/PageHeader'
 import { FileIcon } from '@/components/ui/FileIcon'
 import { EmptyState } from '@/components/ui/EmptyState'
 import { searchFiles, SearchError, type SearchResult } from '@/api/search'
-import { formatBytes, formatDate, cn } from '@/lib/utils'
+import { encodePathForUrl, formatBytes, formatDate, cn } from '@/lib/utils'
 import { getInvalidHomeDirDescription, invalidHomeDirTitle, resolveUserHomeScope } from '@/lib/userScope'
 import { useIsAdmin, useUser } from '@/stores/auth'
 
@@ -123,11 +123,11 @@ export function SearchPage() {
 
   const handleResultClick = useCallback((result: SearchResult) => {
     if (result.isDir) {
-      navigate(`/files${encodeURI(result.path)}`)
+      navigate(`/files${encodePathForUrl(result.path)}`)
     } else {
       // Navigate to parent directory and highlight the file
       const parentPath = result.path.substring(0, result.path.lastIndexOf('/')) || '/'
-      navigate(`/files${encodeURI(parentPath)}`, { state: { highlightPath: result.path } })
+      navigate(`/files${encodePathForUrl(parentPath)}`, { state: { highlightPath: result.path } })
     }
   }, [navigate])
 

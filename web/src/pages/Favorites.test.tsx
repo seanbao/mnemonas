@@ -346,6 +346,29 @@ describe('FavoritesPage', () => {
     })
   })
 
+  it('encodes special characters when navigating to a favorite item', async () => {
+    const user = userEvent.setup()
+    vi.mocked(favoritesApi.listFavorites).mockResolvedValueOnce([
+      {
+        path: '/docs/a #1?/report?.pdf',
+        user_id: 'user-1',
+        created_at: '2024-01-15T10:00:00Z',
+      },
+    ])
+
+    render(<FavoritesPage />)
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: '打开文件 /docs/a #1?/report?.pdf' })).toBeInTheDocument()
+    })
+
+    await user.click(screen.getByRole('button', { name: '打开文件 /docs/a #1?/report?.pdf' }))
+
+    expect(mockNavigate).toHaveBeenCalledWith('/files/docs/a%20%231%3F', {
+      state: { highlightPath: '/docs/a #1?/report?.pdf' },
+    })
+  })
+
   it('keeps failed favorites selected after partial batch removal', async () => {
     const user = userEvent.setup()
     mockBatchResult = {

@@ -11,6 +11,8 @@ import {
   normalizePath,
   normalizeWebDAVPrefix,
   formatWebDAVUrl,
+  encodePathForUrl,
+  decodePathFromUrl,
   isImageFile,
   isVideoFile,
   getFileIcon,
@@ -218,6 +220,20 @@ describe('formatWebDAVUrl', () => {
 
   it('falls back to origin when url is empty', () => {
     expect(formatWebDAVUrl('https://localhost', '')).toBe('https://localhost')
+  })
+})
+
+describe('URL path helpers', () => {
+  it('encodes special characters within path segments', () => {
+    expect(encodePathForUrl('/docs/a #1?/report%.pdf')).toBe('/docs/a%20%231%3F/report%25.pdf')
+  })
+
+  it('decodes special characters within path segments', () => {
+    expect(decodePathFromUrl('/docs/a%20%231%3F/report%25.pdf')).toBe('/docs/a #1?/report%.pdf')
+  })
+
+  it('throws on invalid encoded paths', () => {
+    expect(() => decodePathFromUrl('/%E0%A4%A')).toThrow(URIError)
   })
 })
 describe('file type detection', () => {
