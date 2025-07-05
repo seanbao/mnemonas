@@ -196,6 +196,7 @@ function TreeNode({
         }}
       >
         <button
+          type="button"
           className="w-5 h-5 flex items-center justify-center rounded hover:bg-content2/50"
           onClick={(e) => {
             e.stopPropagation()

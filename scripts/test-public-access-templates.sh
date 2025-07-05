@@ -121,20 +121,22 @@ test_docs_avoid_webdav_placeholder_passwords() {
     assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.en.md" "a custom \`auth.users_file\` moves the checked password file location"
     assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.md" "bcrypt 格式的 \`password_hash\`"
     assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.en.md" "bcrypt-format \`password_hash\`"
-    assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.md" "用户文件及其目录不能是符号链接"
-    assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.en.md" "users file and its directory must not be symlinks"
-    assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.md" "符号链接或非普通文件"
-    assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.en.md" "symlink or non-regular file"
-    assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.md" "\`secrets.json\` 必须存在、不能是符号链接"
-    assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.en.md" "\`secrets.json\` must exist, must not be a symlink"
-    assert_file_contains "$REPO_ROOT/docs/security.md" '用户文件及其目录不是符号链接且权限为私有'
-    assert_file_contains "$REPO_ROOT/docs/security.en.md" 'non-symlink users file and users-file directory with private permissions'
-    assert_file_contains "$REPO_ROOT/docs/security.md" '自动 WebDAV 凭据文件不是符号链接且权限私有'
-    assert_file_contains "$REPO_ROOT/docs/security.en.md" 'non-symlink generated WebDAV credentials file with private permissions'
+    assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.md" "用户文件及其目录不能是符号链接，路径组件也不能包含符号链接"
+    assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.en.md" "users file and its directory must not be symlinks and must not pass through symlink components"
+    assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.md" "符号链接、路径组件包含符号链接或该路径是非普通文件"
+    assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.en.md" "symlink, symlink component, or non-regular file"
+    assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.md" "\`secrets.json\` 必须存在、不能是符号链接、路径组件不能包含符号链接"
+    assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.en.md" "\`secrets.json\` must exist, must not be a symlink, must not pass through symlink components"
+    assert_file_contains "$REPO_ROOT/docs/security.md" '用户文件及其目录不是符号链接、路径组件不包含符号链接且权限为私有'
+    assert_file_contains "$REPO_ROOT/docs/security.en.md" 'non-symlink users file and users-file directory that do not pass through symlink components and have private permissions'
+    assert_file_contains "$REPO_ROOT/docs/security.md" '自动 WebDAV 凭据文件不是符号链接、路径组件不包含符号链接且权限私有'
+    assert_file_contains "$REPO_ROOT/docs/security.en.md" 'non-symlink generated WebDAV credentials file that does not pass through symlink components and has private permissions'
     assert_file_contains "$REPO_ROOT/docs/security.md" '密码管理器生成的随机强密码'
     assert_file_contains "$REPO_ROOT/docs/security.en.md" 'password-manager value'
     assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.md" 'auth.access_token_ttl'
     assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.en.md" 'auth.access_token_ttl'
+    assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.md" '/etc/mnemonas/config.toml` 是普通私有文件，路径组件不包含符号链接'
+    assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.en.md" '/etc/mnemonas/config.toml` is a private regular file and does not pass through symlink components'
     assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.md" 'share.default_expires_in'
     assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.en.md" 'share.default_expires_in'
     assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.md" "share.default_max_access\` 大于 \`0\`"

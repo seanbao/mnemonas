@@ -101,6 +101,7 @@ export function Header({ onMenuClick }: HeaderProps) {
       {/* Left section */}
       <div className="flex min-w-0 items-center gap-3">
         <button
+          type="button"
           onClick={onMenuClick}
           className="rounded-lg p-2 hover:bg-content2 lg:hidden"
           aria-label="打开导航菜单"
@@ -155,6 +156,7 @@ export function Header({ onMenuClick }: HeaderProps) {
         <Dropdown placement="bottom-end">
           <DropdownTrigger>
             <button
+              type="button"
               className="h-9 w-9 overflow-hidden rounded-lg border border-divider bg-content1 p-0.5 transition-colors hover:border-accent-primary/50"
               aria-label="打开用户菜单"
             >

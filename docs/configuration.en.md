@@ -441,7 +441,7 @@ Share paths must be absolute MnemoNAS virtual paths such as `/` or `/team/docs`.
 | `refresh_token_ttl` | duration | `"168h"` | Refresh-token lifetime; public deployments should keep this at or below `720h` (30 days) |
 | `users_file` | string | `<storage.root>/.mnemonas/users.json` | User data file |
 
-On first startup without a `users_file`, MnemoNAS creates the default administrator and writes the initial password to `initial-password.txt` in the same directory as `users_file`. The default path is `<storage.root>/.mnemonas/initial-password.txt`. The file is removed after first successful login for that administrator.
+On first startup without a `users_file`, or when the file has no enabled administrator, MnemoNAS creates a default or recovery administrator and writes the initial password to `initial-password.txt` in the same directory as `users_file`. The default path is `<storage.root>/.mnemonas/initial-password.txt`. The file is removed after first successful login for that administrator. When authentication is enabled, `mnemonas-doctor` parses this user file and reports whether a usable administrator exists.
 
 ## `[share]`
 
@@ -478,7 +478,7 @@ max_access = 20
 | --- | --- | --- | --- |
 | `allow_unsafe_no_auth` | bool | `false` | Allow Web UI/API auth or WebDAV authentication to be disabled while HTTP listens beyond loopback |
 
-By default, `auth.enabled = false` or enabled WebDAV with `webdav.auth_type = "none"` fails validation when `server.host` listens beyond loopback. Set this to `true` only when a firewall, container port binding, or reverse proxy deliberately limits access; MnemoNAS will still print a security warning.
+By default, `auth.enabled = false` or enabled WebDAV with `webdav.auth_type = "none"` fails validation when `server.host` listens beyond loopback. Set this to `true` only when a firewall, container port binding, or reverse proxy deliberately limits access; MnemoNAS will still print a security warning. `mnemonas-doctor` also reports these unauthenticated postures in ordinary deployment diagnostics so the outer network boundary can be reviewed after installation.
 
 ## `[favorites]`
 

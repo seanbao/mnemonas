@@ -364,6 +364,7 @@ describe('MaintenancePage', () => {
     mockUser.role = 'admin'
     mockUser.email = 'admin@local'
     mockUser.homeDir = '/'
+    window.history.pushState({}, '', '/maintenance')
     mockGetScrubResult.mockResolvedValue(mockCompletedResult)
     mockRunScrub.mockResolvedValue(mockCompletedResult)
     mockDownloadDiagnosticsExport.mockResolvedValue(undefined)
@@ -906,6 +907,20 @@ describe('MaintenancePage', () => {
       })
       expect(screen.queryByText('last successful backup completed recently')).toBeNull()
       expect(screen.queryByText('最近失败: manifest missing')).toBeNull()
+    })
+
+    it('marks the backup job referenced by the security check query', async () => {
+      window.history.pushState({}, '', '/maintenance?backupJob=external-disk')
+      mockListBackupJobs.mockResolvedValue(mockBackupJobs)
+
+      render(<Maintenance />)
+
+      await waitFor(() => {
+        expect(screen.getByText('安全自检定位')).toBeTruthy()
+      })
+
+      const focusedJob = document.querySelector('[data-backup-job-id="external-disk"]')
+      expect(focusedJob?.getAttribute('data-focused-backup-job')).toBe('true')
     })
 
     it('shows stale restore drill and retention warnings', async () => {

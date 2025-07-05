@@ -334,6 +334,61 @@ run_sensitive_file_permission_warning_test() {
 	assert_file_contains "$out" "Summary: 0 failure(s), 1 warning(s)"
 }
 
+run_configured_auth_file_permission_warning_test() {
+	local case_dir="$TMP_ROOT/configured-auth-permission"
+	local fake_bin="$case_dir/bin"
+	local out="$case_dir/out.log"
+	make_case "$case_dir"
+	make_fake_bin "$fake_bin"
+	mkdir -p "$case_dir/home/.mnemonas/custom-auth"
+	cat > "$case_dir/home/.mnemonas/config.toml" <<'TOML'
+[storage]
+root = "/data"
+
+[auth]
+users_file = "~/custom-auth/users.json"
+TOML
+	printf '[]\n' > "$case_dir/home/.mnemonas/custom-auth/users.json"
+	printf 'Password: test-password\n' > "$case_dir/home/.mnemonas/custom-auth/initial-password.txt"
+	chmod 0600 "$case_dir/home/.mnemonas/config.toml"
+	chmod 0600 "$case_dir/home/.mnemonas/custom-auth/users.json"
+	chmod 0644 "$case_dir/home/.mnemonas/custom-auth/initial-password.txt"
+
+	PATH="$fake_bin:$PATH" \
+		REPO_ROOT="$case_dir/repo" \
+		HOME="$case_dir/home" \
+		bash "$PROJECT_ROOT/scripts/mnemonas-docker-preflight.sh" > "$out"
+
+	assert_file_contains "$out" "Configured users file is private to its owner"
+	assert_file_contains "$out" "Configured initial admin password file allows group or other access"
+	assert_file_contains "$out" "Summary: 0 failure(s), 1 warning(s)"
+}
+
+run_unmapped_configured_auth_file_warning_test() {
+	local case_dir="$TMP_ROOT/unmapped-configured-auth"
+	local fake_bin="$case_dir/bin"
+	local out="$case_dir/out.log"
+	make_case "$case_dir"
+	make_fake_bin "$fake_bin"
+	cat > "$case_dir/home/.mnemonas/config.toml" <<'TOML'
+[storage]
+root = "/data"
+
+[auth]
+users_file = "/run/mnemonas/users.json"
+TOML
+	chmod 0600 "$case_dir/home/.mnemonas/config.toml"
+
+	PATH="$fake_bin:$PATH" \
+		REPO_ROOT="$case_dir/repo" \
+		HOME="$case_dir/home" \
+		bash "$PROJECT_ROOT/scripts/mnemonas-docker-preflight.sh" > "$out"
+
+	assert_file_contains "$out" "Configured auth.users_file is outside the /data mount"
+	assert_file_contains "$out" "/run/mnemonas/users.json"
+	assert_file_contains "$out" "Summary: 0 failure(s), 1 warning(s)"
+}
+
 run_config_file_permission_warning_test() {
 	local case_dir="$TMP_ROOT/config-permission"
 	local fake_bin="$case_dir/bin"
@@ -677,6 +732,8 @@ run_data_dir_control_character_test
 run_symlink_data_dir_test
 run_sensitive_files_private_test
 run_sensitive_file_permission_warning_test
+run_configured_auth_file_permission_warning_test
+run_unmapped_configured_auth_file_warning_test
 run_config_file_permission_warning_test
 run_sensitive_file_symlink_test
 run_config_file_symlink_test
