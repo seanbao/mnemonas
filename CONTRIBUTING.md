@@ -77,6 +77,9 @@ cd web && npm run test:run
 
 # 部署脚本与安装脚本测试
 make scripts-check
+
+# GitHub Actions workflow 变更
+make workflows-check
 ```
 
 ## 📝 开发流程
@@ -176,6 +179,7 @@ PR 检查清单：
 - [ ] 添加或更新了测试
 - [ ] 文档已更新
 - [ ] 修改 proto 时已运行 `make proto` 并提交生成文件
+- [ ] GitHub Actions workflow 变更已运行 `make workflows-check`
 - [ ] 部署脚本、Docker、systemd 或安装文档变更已运行 `make scripts-check`
 - [ ] CHANGELOG 已更新（如适用）
 - [ ] Commit message 符合规范
