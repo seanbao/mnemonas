@@ -266,13 +266,12 @@ func TestResponseWriterKeepsFirstStatus(t *testing.T) {
 
 func TestUptime(t *testing.T) {
 	m := NewRequestMetrics()
-
-	time.Sleep(10 * time.Millisecond)
+	m.startTimeUnixNano.Store(time.Now().Add(-2 * time.Second).UnixNano())
 
 	stats := m.GetStats()
 
-	if stats.UptimeSecs < 0 {
-		t.Error("UptimeSecs should be non-negative")
+	if stats.UptimeSecs < 1 {
+		t.Fatalf("UptimeSecs = %d, want at least 1", stats.UptimeSecs)
 	}
 }
 

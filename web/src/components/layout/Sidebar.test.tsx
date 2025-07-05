@@ -78,7 +78,7 @@ describe('Sidebar', () => {
     it('renders logo', () => {
       render(<Sidebar />)
       expect(screen.getAllByText('MnemoNAS').length).toBeGreaterThan(0)
-      expect(screen.getByText('Private Storage')).toBeTruthy()
+      expect(screen.getByText('私有存储')).toBeTruthy()
     })
 
     it('renders the backend version when available', async () => {
@@ -214,11 +214,13 @@ describe('Sidebar', () => {
       expect(screen.getByText('存储空间')).toBeTruthy()
     })
 
-    it('renders progress bar', () => {
+    it('renders progress bar', async () => {
       render(<Sidebar />)
-      const storageSection = screen.getByText('存储空间').closest('div')?.parentElement
-      const progressBar = storageSection?.querySelector('div.bg-accent-primary')
+      expect(await screen.findByText(/25\.0% 已用/)).toBeTruthy()
+      const progressBar = screen.getByRole('progressbar', { name: '侧边栏存储使用率' })
       expect(progressBar).toBeTruthy()
+      expect(progressBar).toHaveAttribute('aria-valuenow', '25')
+      expect(progressBar).toHaveAttribute('aria-valuetext', '25.0% 已用')
     })
 
     it('shows a retryable error state when storage stats fail to load', async () => {
@@ -303,13 +305,44 @@ describe('Sidebar', () => {
       expect(screen.getByText('--')).toBeTruthy()
       expect(screen.queryByText(/去重率/)).toBeFalsy()
     })
+
+    it('shows warning disk-space status in the global storage summary', async () => {
+      mockGetStorageStats.mockResolvedValueOnce({
+        storageStatsAvailable: true,
+        diskStatsAvailable: true,
+        diskTotal: 100 * 1024 * 1024 * 1024,
+        diskAvailable: 8 * 1024 * 1024 * 1024,
+        diskUsed: 92 * 1024 * 1024 * 1024,
+        diskUsageRatio: 0.92,
+      })
+
+      render(<Sidebar />)
+
+      expect(await screen.findByText('偏紧')).toBeTruthy()
+      expect(screen.getByText(/92\.0% 已用/)).toBeTruthy()
+    })
+
+    it('shows critical disk-space status in the global storage summary', async () => {
+      mockGetStorageStats.mockResolvedValueOnce({
+        storageStatsAvailable: true,
+        diskStatsAvailable: true,
+        diskTotal: 100 * 1024 * 1024 * 1024,
+        diskAvailable: 512 * 1024 * 1024,
+        diskUsed: 99 * 1024 * 1024 * 1024,
+        diskUsageRatio: 0.97,
+      })
+
+      render(<Sidebar />)
+
+      expect(await screen.findByText('严重不足')).toBeTruthy()
+      expect(screen.getByText(/97\.0% 已用/)).toBeTruthy()
+    })
   })
 
   describe('collapsed mode', () => {
     it('hides text when collapsed', () => {
       render(<Sidebar collapsed={true} />)
-      // Text like "Private Storage" should not be visible
-      expect(screen.queryByText('Private Storage')).toBeFalsy()
+      expect(screen.queryByText('私有存储')).toBeFalsy()
     })
 
     it('hides section titles when collapsed', () => {

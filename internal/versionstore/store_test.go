@@ -569,7 +569,6 @@ func TestStore_DeleteOldVersions(t *testing.T) {
 	for i := 0; i < 10; i++ {
 		hash := "hash" + string(rune('a'+i))
 		s.AddVersion(ctx, "/test.txt", hash, int64(i*100), "")
-		time.Sleep(10 * time.Millisecond)
 	}
 
 	// Keep only 3 versions

@@ -2493,11 +2493,21 @@ func TestMaxSize(t *testing.T) {
 	tmpDir := t.TempDir()
 	store, _ := NewStore(tmpDir)
 	store.maxSize = 5 // Set small max size for test
+	base := time.Date(2026, time.April, 8, 10, 0, 0, 0, time.UTC)
+	var tick int
+	originalNow := activityTimeNow
+	activityTimeNow = func() time.Time {
+		ts := base.Add(time.Duration(tick) * time.Millisecond)
+		tick++
+		return ts
+	}
+	defer func() {
+		activityTimeNow = originalNow
+	}()
 
 	// Log more entries than max size
 	for i := 0; i < 10; i++ {
 		store.Log(ActionUpload, "/file"+string(rune('0'+i))+".txt", "user", "127.0.0.1", nil)
-		time.Sleep(time.Millisecond) // Ensure unique timestamps
 	}
 
 	if store.Count() != 5 {

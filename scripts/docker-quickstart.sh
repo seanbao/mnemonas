@@ -18,6 +18,8 @@ HOST_PORT="${HOST_PORT:-${MNEMONAS_HTTP_PORT:-}}"
 RUN_PREFLIGHT=1
 START_AFTER_PREPARE=0
 BUILD_IMAGE=1
+CHECK_HEALTH_AFTER_START=1
+HEALTH_TIMEOUT_SECONDS="${HEALTH_TIMEOUT_SECONDS:-30}"
 
 log() {
 	printf '[mnemonas-docker] %s\n' "$*"
@@ -39,6 +41,7 @@ Options:
   --start              Prepare, run preflight, then start with docker compose up -d
   --no-build           With --start, do not build the image locally
   --skip-preflight     Do not run scripts/mnemonas-docker-preflight.sh
+  --skip-health-check  With --start, skip the post-start HTTP health check
   --port PORT          Host HTTP port for Web UI, API, and WebDAV
   --data-dir PATH      Host data directory mounted into the container as /data
   --env PATH           Compose .env file to create/update
@@ -49,6 +52,8 @@ Environment:
   ENV_PATH             Compose env file, defaults to <repo>/.env
   DATA_DIR             Host data directory, defaults to $HOME/.mnemonas
   HOST_PORT            Host HTTP port, defaults to 8080
+  HEALTH_TIMEOUT_SECONDS
+                       Seconds to wait for /health after --start, defaults to 30
 EOF
 }
 
@@ -56,6 +61,11 @@ require_port() {
 	local value="$1"
 	[[ "$value" =~ ^[0-9]+$ ]] || fail "--port must be a number from 1 to 65535: $value"
 	(( 10#$value >= 1 && 10#$value <= 65535 )) || fail "--port must be a number from 1 to 65535: $value"
+}
+
+require_health_timeout() {
+	[[ "$HEALTH_TIMEOUT_SECONDS" =~ ^[0-9]+$ ]] || fail "HEALTH_TIMEOUT_SECONDS must be a positive integer: $HEALTH_TIMEOUT_SECONDS"
+	(( 10#$HEALTH_TIMEOUT_SECONDS >= 1 && 10#$HEALTH_TIMEOUT_SECONDS <= 300 )) || fail "HEALTH_TIMEOUT_SECONDS must be between 1 and 300 seconds: $HEALTH_TIMEOUT_SECONDS"
 }
 
 normalize_compare_path() {
@@ -392,13 +402,53 @@ start_compose() {
 	fi
 
 	log "starting MnemoNAS with docker ${args[*]}"
-	docker "${args[@]}"
+	if ! docker "${args[@]}"; then
+		fail "docker compose failed to start MnemoNAS. Inspect with: docker compose -f $REPO_ROOT/docker-compose.yml --env-file $ENV_PATH ps; docker compose -f $REPO_ROOT/docker-compose.yml --env-file $ENV_PATH logs --tail 100 mnemonas"
+	fi
+}
+
+wait_for_health() {
+	local url deadline
+
+	if [[ "$CHECK_HEALTH_AFTER_START" != "1" ]]; then
+		log "skipping post-start health check"
+		return
+	fi
+	if ! command -v curl >/dev/null 2>&1; then
+		log "curl is unavailable; skipping post-start health check"
+		return
+	fi
+
+	url="http://127.0.0.1:$HOST_PORT/health"
+	deadline=$((SECONDS + HEALTH_TIMEOUT_SECONDS))
+	log "waiting for health check: $url"
+	while true; do
+		if curl -fsS --connect-timeout 2 --max-time 5 "$url" >/dev/null 2>&1; then
+			log "health check passed: $url"
+			return
+		fi
+		if (( SECONDS >= deadline )); then
+			fail "health check did not pass within ${HEALTH_TIMEOUT_SECONDS}s: $url. Inspect logs with: docker compose -f $REPO_ROOT/docker-compose.yml --env-file $ENV_PATH logs --tail 100 mnemonas"
+		fi
+		sleep 1
+	done
+}
+
+report_initial_password_file() {
+	local password_path="$DATA_DIR/.mnemonas/initial-password.txt"
+
+	if [[ -f "$password_path" ]]; then
+		log "initial password file is available: $password_path"
+	else
+		log "initial password file is not present: $password_path. Existing deployments may have removed it after first login; on a new deployment, inspect container logs."
+	fi
 }
 
 print_next_steps() {
 	log "ready"
 	printf '\n'
 	printf 'Web UI:              http://localhost:%s\n' "$HOST_PORT"
+	printf 'Health:              curl http://localhost:%s/health\n' "$HOST_PORT"
 	printf 'Initial password:    %s/.mnemonas/initial-password.txt\n' "$DATA_DIR"
 	printf 'WebDAV URL:          http://localhost:%s/dav\n' "$HOST_PORT"
 	printf 'Status:              docker compose -f %s --env-file %s ps\n' "$REPO_ROOT/docker-compose.yml" "$ENV_PATH"
@@ -421,6 +471,10 @@ while [[ $# -gt 0 ]]; do
 			;;
 		--skip-preflight)
 			RUN_PREFLIGHT=0
+			shift
+			;;
+		--skip-health-check)
+			CHECK_HEALTH_AFTER_START=0
 			shift
 			;;
 		--port)
@@ -469,11 +523,16 @@ apply_existing_env_defaults
 DATA_DIR="${DATA_DIR:-$HOME/.mnemonas}"
 HOST_PORT="${HOST_PORT:-8080}"
 require_port "$HOST_PORT"
+if [[ "$START_AFTER_PREPARE" == "1" && "$CHECK_HEALTH_AFTER_START" == "1" ]]; then
+	require_health_timeout
+fi
 require_safe_data_dir
 prepare_data_dir
 prepare_env
 run_preflight
 if [[ "$START_AFTER_PREPARE" == "1" ]]; then
 	start_compose
+	wait_for_health
+	report_initial_password_file
 fi
 print_next_steps

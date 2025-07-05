@@ -8,6 +8,19 @@ import (
 	"github.com/seanbao/mnemonas/internal/storage"
 )
 
+func expirePropfindCacheEntry(t *testing.T, cache *PropfindCache, path, depth string) {
+	t.Helper()
+
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+
+	entry, ok := cache.entries[cacheKey(path, depth)]
+	if !ok {
+		t.Fatalf("cache entry %s depth %s not found before expiration", path, depth)
+	}
+	entry.cachedAt = time.Now().Add(-time.Hour)
+}
+
 func TestPropfindCache_GetSet(t *testing.T) {
 	cache := NewPropfindCache(time.Second, 100)
 
@@ -127,8 +140,7 @@ func TestPropfindCache_Expiration(t *testing.T) {
 		t.Error("Get should return cached value before expiration")
 	}
 
-	// Wait for expiration
-	time.Sleep(60 * time.Millisecond)
+	expirePropfindCacheEntry(t, cache, "/test", "1")
 
 	_, ok = cache.Get("/test", "1")
 	if ok {
@@ -286,7 +298,8 @@ func TestPropfindCache_Stats(t *testing.T) {
 		t.Errorf("Expired = %d, want 0", expired)
 	}
 
-	time.Sleep(60 * time.Millisecond)
+	expirePropfindCacheEntry(t, cache, "/a", "1")
+	expirePropfindCacheEntry(t, cache, "/b", "1")
 
 	size, expired = cache.Stats()
 	if size != 2 {

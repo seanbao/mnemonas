@@ -1,5 +1,5 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { BrowserRouter } from 'react-router-dom'
@@ -9,6 +9,8 @@ import * as authApi from '@/api/auth'
 import { UsersError } from '@/api/users'
 
 const mockAddToast = vi.fn()
+const mockTriggerBrowserDownload = vi.fn()
+const originalClipboardDescriptor = Object.getOwnPropertyDescriptor(navigator, 'clipboard')
 
 vi.mock('@heroui/react', async () => {
   const actual = await vi.importActual<typeof import('@heroui/react')>('@heroui/react')
@@ -35,6 +37,10 @@ vi.mock('@/api/users', async (importOriginal) => {
 
 vi.mock('@/api/auth', () => ({
   getStoredUser: vi.fn(),
+}))
+
+vi.mock('@/lib/downloadResponse', () => ({
+  triggerBrowserDownload: (...args: unknown[]) => mockTriggerBrowserDownload(...args),
 }))
 
 const mockUsers = [
@@ -112,6 +118,11 @@ function expectAbortSignal(signal: AbortSignal | undefined): asserts signal is A
   expect(typeof signal?.aborted).toBe('boolean')
 }
 
+function getVisibleUsernamesByCardOrder(): string[] {
+  return screen.getAllByRole('button', { name: / 用户操作$/ })
+    .map((button) => button.getAttribute('aria-label')?.replace(/ 用户操作$/, '') ?? '')
+}
+
 describe('UsersPage', () => {
   beforeEach(() => {
     vi.clearAllMocks()
@@ -127,6 +138,14 @@ describe('UsersPage', () => {
       users: mockUsers,
       total: mockUsers.length,
     })
+  })
+
+  afterEach(() => {
+    if (originalClipboardDescriptor) {
+      Object.defineProperty(navigator, 'clipboard', originalClipboardDescriptor)
+    } else {
+      Reflect.deleteProperty(navigator, 'clipboard')
+    }
   })
 
   describe('rendering', () => {
@@ -191,8 +210,8 @@ describe('UsersPage', () => {
       renderUsersPage()
       await waitFor(() => {
         expect(screen.getByText('总用户数')).toBeInTheDocument()
-        expect(screen.getByText('管理员')).toBeInTheDocument()
-        expect(screen.getByText('活跃用户')).toBeInTheDocument()
+        expect(screen.getByRole('button', { name: '查看管理员' })).toBeInTheDocument()
+        expect(screen.getByRole('button', { name: '查看活跃用户' })).toBeInTheDocument()
       })
     })
   })
@@ -204,7 +223,354 @@ describe('UsersPage', () => {
         expect(screen.getByText('admin')).toBeInTheDocument()
         expect(screen.getByText('testuser')).toBeInTheDocument()
         expect(screen.getByText('guest')).toBeInTheDocument()
+        expect(screen.getByText('显示全部 3 个用户')).toBeInTheDocument()
       })
+    })
+
+    it('searches users by username, email, group, and home directory', async () => {
+      const user = userEvent.setup()
+      vi.mocked(usersApi.listUsers).mockResolvedValue({
+        success: true,
+        users: [
+          {
+            ...mockUsers[0],
+            username: 'admin',
+            email: 'admin@example.com',
+            groups: ['ops'],
+            home_dir: '/home/admin',
+          },
+          {
+            ...mockUsers[1],
+            username: 'alice',
+            email: 'alice@example.com',
+            groups: ['family', 'editors'],
+            home_dir: '/family/alice',
+          },
+          {
+            ...mockUsers[2],
+            username: 'media',
+            email: '',
+            groups: ['guests'],
+            home_dir: '/shares/media',
+          },
+        ],
+        total: 3,
+      })
+
+      renderUsersPage()
+
+      const searchInput = await screen.findByRole('textbox', { name: '搜索用户' })
+      await user.type(searchInput, 'editors')
+
+      expect(screen.getByText('alice')).toBeInTheDocument()
+      expect(screen.getByText('搜索命中 1 / 3 个用户')).toBeInTheDocument()
+      expect(screen.queryByText('admin')).not.toBeInTheDocument()
+      expect(screen.queryByText('media')).not.toBeInTheDocument()
+
+      fireEvent.change(searchInput, { target: { value: '/shares' } })
+      expect(screen.getByText('media')).toBeInTheDocument()
+      expect(screen.queryByText('alice')).not.toBeInTheDocument()
+
+      fireEvent.change(searchInput, { target: { value: 'ADMIN@EXAMPLE' } })
+      expect(screen.getByText('admin')).toBeInTheDocument()
+      expect(screen.queryByText('media')).not.toBeInTheDocument()
+    })
+
+    it('combines user search with review hint filtering', async () => {
+      const user = userEvent.setup()
+      vi.mocked(usersApi.listUsers).mockResolvedValue({
+        success: true,
+        users: [
+          {
+            ...mockUsers[0],
+            id: 'user-healthy',
+            username: 'healthy',
+            role: 'user',
+            disabled: false,
+            groups: ['family'],
+            last_login_at: '2024-01-15T10:00:00Z',
+            quota_bytes: 1000,
+            used_bytes: 100,
+          },
+          {
+            ...mockUsers[1],
+            id: 'user-warning',
+            username: 'warning',
+            role: 'user',
+            disabled: false,
+            groups: ['family'],
+            last_login_at: undefined,
+            quota_bytes: 1000,
+            used_bytes: 900,
+          },
+          {
+            ...mockUsers[2],
+            id: 'user-admin-review',
+            username: 'adminreview',
+            role: 'admin',
+            disabled: false,
+            groups: ['ops'],
+            last_login_at: '2024-01-15T10:00:00Z',
+            quota_bytes: 0,
+            used_bytes: 0,
+          },
+        ],
+        total: 3,
+      })
+
+      renderUsersPage()
+
+      await user.click(await screen.findByRole('button', { name: '复核提示' }))
+      await user.type(screen.getByRole('textbox', { name: '搜索用户' }), 'family')
+
+      expect(screen.getByText('warning')).toBeInTheDocument()
+      expect(screen.getByText('复核提示中搜索命中 1 / 2 个用户（全量 3 个）')).toBeInTheDocument()
+      expect(screen.queryByText('healthy')).not.toBeInTheDocument()
+      expect(screen.queryByText('adminreview')).not.toBeInTheDocument()
+
+      await user.click(screen.getByRole('button', { name: '清除筛选' }))
+
+      expect(screen.getByText('显示全部 3 个用户')).toBeInTheDocument()
+      expect(screen.getByText('healthy')).toBeInTheDocument()
+      expect(screen.getByText('adminreview')).toBeInTheDocument()
+    })
+
+    it('filters account attention by disabled and never-login reasons', async () => {
+      const user = userEvent.setup()
+      renderUsersPage()
+
+      await screen.findByText('admin')
+
+      await user.click(screen.getByRole('button', { name: '停用账号' }))
+      expect(screen.getByText('停用账号 1 / 3 个用户')).toBeInTheDocument()
+      expect(getVisibleUsernamesByCardOrder()).toEqual(['guest'])
+      expect(screen.queryByText('testuser')).not.toBeInTheDocument()
+
+      await user.click(screen.getByRole('button', { name: '从未登录' }))
+      expect(screen.getByText('从未登录 2 / 3 个用户')).toBeInTheDocument()
+      expect(getVisibleUsernamesByCardOrder()).toEqual(['guest', 'testuser'])
+      expect(screen.queryByText('admin')).not.toBeInTheDocument()
+    })
+
+    it('focuses user list filters from the stats cards', async () => {
+      const user = userEvent.setup()
+      vi.mocked(usersApi.listUsers).mockResolvedValue({
+        success: true,
+        users: [
+          {
+            ...mockUsers[0],
+            id: 'user-healthy',
+            username: 'healthy',
+            role: 'user',
+            disabled: false,
+            last_login_at: '2024-01-15T10:00:00Z',
+            quota_bytes: 1000,
+            used_bytes: 100,
+          },
+          {
+            ...mockUsers[1],
+            id: 'user-never',
+            username: 'neverlogin',
+            role: 'user',
+            disabled: false,
+            last_login_at: undefined,
+            quota_bytes: 1000,
+            used_bytes: 100,
+          },
+          {
+            ...mockUsers[2],
+            id: 'user-near-quota',
+            username: 'nearquota',
+            role: 'user',
+            disabled: false,
+            last_login_at: '2024-01-16T10:00:00Z',
+            quota_bytes: 1000,
+            used_bytes: 900,
+          },
+          {
+            ...mockUsers[2],
+            id: 'user-admin-review',
+            username: 'adminreview',
+            role: 'admin',
+            disabled: false,
+            last_login_at: '2024-01-17T10:00:00Z',
+            quota_bytes: 0,
+            used_bytes: 0,
+          },
+          {
+            ...mockUsers[2],
+            id: 'user-disabled',
+            username: 'disabled',
+            role: 'guest',
+            disabled: true,
+            last_login_at: '2024-01-18T10:00:00Z',
+            quota_bytes: 1000,
+            used_bytes: 100,
+          },
+        ],
+        total: 5,
+      })
+
+      renderUsersPage()
+
+      const searchInput = await screen.findByRole('textbox', { name: '搜索用户' })
+      await user.type(searchInput, 'healthy')
+      expect(screen.getByText('搜索命中 1 / 5 个用户')).toBeInTheDocument()
+
+      await user.click(screen.getByRole('button', { name: '查看管理员' }))
+      expect((searchInput as HTMLInputElement).value).toBe('')
+      expect(screen.getByText('管理员 1 / 5 个用户')).toBeInTheDocument()
+      expect(getVisibleUsernamesByCardOrder()).toEqual(['adminreview'])
+
+      await user.click(screen.getByRole('button', { name: '查看活跃用户' }))
+      expect(screen.getByText('活跃用户 4 / 5 个用户')).toBeInTheDocument()
+      expect(getVisibleUsernamesByCardOrder()).toEqual(['adminreview', 'healthy', 'nearquota', 'neverlogin'])
+      expect(screen.queryByText('disabled')).not.toBeInTheDocument()
+
+      await user.click(screen.getByRole('button', { name: '查看账号关注用户' }))
+      expect(screen.getByText('账号关注 2 / 5 个用户')).toBeInTheDocument()
+      expect(getVisibleUsernamesByCardOrder()).toEqual(['disabled', 'neverlogin'])
+
+      await user.click(screen.getByRole('button', { name: '查看配额关注用户' }))
+      expect(screen.getByText('配额关注 1 / 5 个用户')).toBeInTheDocument()
+      expect(getVisibleUsernamesByCardOrder()).toEqual(['nearquota'])
+
+      await user.click(screen.getByRole('button', { name: '查看复核提示用户' }))
+      expect(screen.getByText('复核提示 4 / 5 个用户')).toBeInTheDocument()
+      expect(getVisibleUsernamesByCardOrder()).toEqual(['disabled', 'nearquota', 'neverlogin', 'adminreview'])
+
+      await user.click(screen.getByRole('button', { name: '查看全部用户' }))
+      expect(screen.getByText('显示全部 5 个用户')).toBeInTheDocument()
+      expect(getVisibleUsernamesByCardOrder()).toEqual(['healthy', 'neverlogin', 'nearquota', 'adminreview', 'disabled'])
+    })
+
+    it('sorts users from the list toolbar and clears the selected sort', async () => {
+      const user = userEvent.setup()
+      vi.mocked(usersApi.listUsers).mockResolvedValue({
+        success: true,
+        users: [
+          {
+            ...mockUsers[0],
+            id: 'user-beta',
+            username: 'beta',
+            role: 'user',
+            quota_bytes: 1000,
+            used_bytes: 50,
+            last_login_at: '2024-01-15T10:00:00Z',
+          },
+          {
+            ...mockUsers[1],
+            id: 'user-alpha',
+            username: 'alpha',
+            role: 'user',
+            quota_bytes: 1000,
+            used_bytes: 900,
+            last_login_at: '2024-02-15T10:00:00Z',
+          },
+          {
+            ...mockUsers[2],
+            id: 'user-gamma',
+            username: 'gamma',
+            role: 'guest',
+            disabled: false,
+            quota_bytes: 1000,
+            used_bytes: 300,
+            last_login_at: undefined,
+          },
+        ],
+        total: 3,
+      })
+
+      renderUsersPage()
+
+      await screen.findByRole('button', { name: '排序：默认顺序' })
+      await screen.findByText('beta')
+      expect(getVisibleUsernamesByCardOrder()).toEqual(['beta', 'alpha', 'gamma'])
+
+      await user.click(screen.getByRole('button', { name: '排序：默认顺序' }))
+      await user.click(await screen.findByText('按容量用量'))
+
+      expect(screen.getByRole('button', { name: '排序：容量用量' })).toBeInTheDocument()
+      expect(screen.getByText('显示全部 3 个用户 · 排序：容量用量')).toBeInTheDocument()
+      expect(getVisibleUsernamesByCardOrder()).toEqual(['alpha', 'gamma', 'beta'])
+
+      await user.click(screen.getByRole('button', { name: '清除筛选' }))
+
+      expect(screen.getByRole('button', { name: '排序：默认顺序' })).toBeInTheDocument()
+      expect(screen.getByText('显示全部 3 个用户')).toBeInTheDocument()
+      expect(getVisibleUsernamesByCardOrder()).toEqual(['beta', 'alpha', 'gamma'])
+    })
+
+    it('exports the current visible user list as CSV', async () => {
+      const user = userEvent.setup()
+      vi.mocked(usersApi.listUsers).mockResolvedValue({
+        success: true,
+        users: [
+          {
+            ...mockUsers[0],
+            id: 'user-alice',
+            username: 'alice',
+            email: 'alice@example.com',
+            role: 'user',
+            groups: ['family', 'editors'],
+            home_dir: '/family/alice',
+            quota_bytes: 1000,
+            used_bytes: 900,
+          },
+          {
+            ...mockUsers[1],
+            id: 'user-media',
+            username: 'media',
+            email: '',
+            role: 'guest',
+            groups: ['media'],
+            home_dir: '/shares/media',
+            quota_bytes: 0,
+            used_bytes: 100,
+          },
+        ],
+        total: 2,
+      })
+
+      renderUsersPage()
+
+      await user.type(await screen.findByRole('textbox', { name: '搜索用户' }), 'family')
+      await user.click(screen.getByRole('button', { name: '导出当前清单' }))
+
+      await waitFor(() => {
+        expect(mockTriggerBrowserDownload).toHaveBeenCalledTimes(1)
+        expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({
+          title: '用户清单已导出',
+          description: '已导出当前视图 1 个用户。',
+          color: 'success',
+        }))
+      })
+
+      const [blob, filename] = mockTriggerBrowserDownload.mock.calls[0] as [Blob, string]
+      expect(filename).toMatch(/^mnemonas-users-.+\.csv$/)
+      const csv = await blob.text()
+      expect(csv.startsWith('\uFEFF导出范围,搜索命中 1 / 2 个用户')).toBe(true)
+      expect(csv).toContain('搜索,family')
+      expect(csv).toContain('用户ID,用户名,邮箱,角色,状态,账号关注,用户组,主目录,权限范围,权限说明,配额状态,配额使用率,配额说明')
+      expect(csv).toContain('user-alice,alice,alice@example.com,用户,启用,无,editors; family,/family/alice,主目录 + 用户组范围')
+      expect(csv).toContain('接近上限,90%,剩余 100 B。,900,1000,配额接近上限')
+      expect(csv).not.toContain('user-media')
+    })
+
+    it('shows an empty state when user search has no matches', async () => {
+      const user = userEvent.setup()
+      renderUsersPage()
+
+      await user.type(await screen.findByRole('textbox', { name: '搜索用户' }), 'missing-user')
+
+      expect(screen.getByText('没有匹配的用户')).toBeInTheDocument()
+      expect(screen.getByText('请调整搜索关键词，或切换用户列表筛选条件。')).toBeInTheDocument()
+      expect(screen.queryByText('admin')).not.toBeInTheDocument()
+
+      await user.click(screen.getAllByRole('button', { name: '清除筛选' })[0])
+
+      expect(screen.getByText('显示全部 3 个用户')).toBeInTheDocument()
+      expect(screen.getByText('admin')).toBeInTheDocument()
     })
 
     it('shows current user badge', async () => {
@@ -239,6 +605,52 @@ describe('UsersPage', () => {
       })
     })
 
+    it('shows permission scope context and account review hints on user cards', async () => {
+      vi.mocked(usersApi.listUsers).mockResolvedValue({
+        success: true,
+        users: [
+          {
+            ...mockUsers[1],
+            id: 'user-alice',
+            username: 'alice',
+            groups: ['family', 'editors'],
+            home_dir: '/home/alice',
+            last_login_at: undefined,
+            quota_bytes: 1000,
+            used_bytes: 1200,
+          },
+          {
+            ...mockUsers[2],
+            id: 'user-visitor',
+            username: 'visitor',
+            role: 'guest',
+            disabled: true,
+            groups: [],
+            home_dir: '/guest/public',
+            last_login_at: '2024-01-18T10:00:00Z',
+          },
+        ],
+        total: 2,
+      })
+
+      renderUsersPage()
+
+      await waitFor(() => {
+        expect(screen.getByText('alice')).toBeInTheDocument()
+        expect(screen.getByText('visitor')).toBeInTheDocument()
+      })
+
+      expect(screen.getByText('主目录 + 用户组范围')).toBeInTheDocument()
+      expect(screen.getByText('主目录 /home/alice；用户组 editors, family，命中目录授权时可访问共享路径。')).toBeInTheDocument()
+      expect(screen.getByText('访客主目录范围')).toBeInTheDocument()
+      expect(screen.getByText('默认限制在 /guest/public；未加入用户组。')).toBeInTheDocument()
+
+      const aliceHints = screen.getByLabelText('alice 复核提示')
+      expect(within(aliceHints).getByText('从未登录')).toBeInTheDocument()
+      expect(within(aliceHints).getByText('配额已超限')).toBeInTheDocument()
+      expect(within(screen.getByLabelText('visitor 复核提示')).getByText('复核停用账号')).toBeInTheDocument()
+    })
+
     it('renders unknown roles with their backend label and omits missing optional fields', async () => {
       vi.mocked(usersApi.listUsers).mockResolvedValue({
         success: true,
@@ -268,6 +680,486 @@ describe('UsersPage', () => {
       expect(screen.queryByText(/最后登录/)).not.toBeInTheDocument()
       expect(screen.getByText('已用 0 B')).toBeInTheDocument()
     })
+
+    it('shows quota usage state on user cards', async () => {
+      vi.mocked(usersApi.listUsers).mockResolvedValue({
+        success: true,
+        users: [
+          {
+            ...mockUsers[1],
+            id: 'user-near-quota',
+            username: 'nearquota',
+            quota_bytes: 1000,
+            used_bytes: 950,
+          },
+          {
+            ...mockUsers[2],
+            id: 'user-over-quota',
+            username: 'overquota',
+            quota_bytes: 1000,
+            used_bytes: 1200,
+          },
+          {
+            ...mockUsers[0],
+            id: 'user-unlimited',
+            username: 'unlimited',
+            quota_bytes: 0,
+            used_bytes: 2048,
+          },
+        ],
+        total: 3,
+      })
+
+      renderUsersPage()
+
+      await waitFor(() => {
+        expect(screen.getByText('nearquota')).toBeInTheDocument()
+        expect(screen.getByText('overquota')).toBeInTheDocument()
+      })
+
+      expect(screen.getByText('接近上限')).toBeInTheDocument()
+      expect(screen.getByText('已超限')).toBeInTheDocument()
+      expect(screen.getByText('未设配额')).toBeInTheDocument()
+      expect(screen.getByRole('progressbar', { name: 'nearquota 配额使用率' })).toHaveAttribute('aria-valuetext', '95% 已用，剩余 50 B。')
+      expect(screen.getByRole('progressbar', { name: 'overquota 配额使用率' })).toHaveAttribute('aria-valuetext', '120% 已用，已超出 200 B。')
+      expect(screen.getByRole('progressbar', { name: 'unlimited 未设置用户容量限制' })).toHaveAttribute('aria-valuetext', '不限额，已用 2 KB')
+      expect(screen.getByText('95%')).toBeInTheDocument()
+      expect(screen.getByText('120%')).toBeInTheDocument()
+    })
+
+    it('copies a user quota summary for administrator review', async () => {
+      const user = userEvent.setup()
+      const writeText = vi.fn().mockResolvedValue(undefined)
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: { writeText },
+      })
+      vi.mocked(usersApi.listUsers).mockResolvedValue({
+        success: true,
+        users: [
+          {
+            ...mockUsers[0],
+            username: 'admin',
+            role: 'admin',
+            disabled: false,
+            groups: ['admins'],
+            quota_bytes: 1000,
+            used_bytes: 100,
+          },
+          {
+            ...mockUsers[1],
+            username: 'alice',
+            role: 'user',
+            disabled: false,
+            groups: ['family', 'editors'],
+            home_dir: '/home/alice',
+            quota_bytes: 1000,
+            used_bytes: 900,
+          },
+          {
+            ...mockUsers[2],
+            username: 'guest',
+            role: 'guest',
+            disabled: true,
+            groups: [],
+            quota_bytes: 1000,
+            used_bytes: 1200,
+          },
+        ],
+        total: 3,
+      })
+
+      renderUsersPage()
+
+      const copyButton = await screen.findByRole('button', { name: '复制配额摘要' })
+      await user.click(copyButton)
+
+      await waitFor(() => {
+        expect(writeText).toHaveBeenCalledTimes(1)
+      })
+      const report = writeText.mock.calls[0]?.[0] as string
+      expect(report).toContain('用户配额摘要')
+      expect(report).toContain('用户总数: 3 个')
+      expect(report).toContain('需复核: 2 个')
+      expect(report).toContain('用户名 | 邮箱 | 角色 | 状态 | 用户组 | 主目录 | 最后登录 | 配额状态 | 用量 | 剩余/超出 | 占比 | 建议处理')
+      expect(report).toContain('admin | admin@example.com | 管理员 | 启用 | admins | /home/admin | 2024-01-15T10:00:00Z | 配额正常 | 100 B / 1000 B | 剩余 900 B')
+      expect(report).toContain('alice | test@example.com | 普通用户 | 启用 | family, editors | /home/alice | 从未登录 | 接近上限 | 900 B / 1000 B | 剩余 100 B')
+      expect(report).toContain('guest | 未设置 | 访客 | 已停用 | 未分组 | /home/guest | 从未登录 | 已超限 | 1.17 KB / 1000 B | 超出 200 B')
+      expect(report).toMatch(/guest[\s\S]*alice[\s\S]*admin/)
+      expect(mockAddToast).toHaveBeenCalledWith({ title: '用户配额摘要已复制', color: 'success' })
+    })
+
+    it('copies a user account attention summary for administrator review', async () => {
+      const user = userEvent.setup()
+      const writeText = vi.fn().mockResolvedValue(undefined)
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: { writeText },
+      })
+      vi.mocked(usersApi.listUsers).mockResolvedValue({
+        success: true,
+        users: [
+          {
+            ...mockUsers[0],
+            username: 'owner',
+            role: 'admin',
+            disabled: false,
+            groups: ['admins'],
+            home_dir: '/',
+            last_login_at: '2024-01-15T10:00:00Z',
+          },
+          {
+            ...mockUsers[1],
+            username: 'alice',
+            role: 'user',
+            disabled: false,
+            groups: ['family'],
+            home_dir: '/home/alice',
+            last_login_at: undefined,
+          },
+          {
+            ...mockUsers[2],
+            username: 'guest',
+            role: 'guest',
+            disabled: true,
+            groups: [],
+            home_dir: '/guest/public',
+            last_login_at: undefined,
+          },
+        ],
+        total: 3,
+      })
+
+      renderUsersPage()
+
+      const copyButton = await screen.findByRole('button', { name: '复制账号摘要' })
+      await user.click(copyButton)
+
+      await waitFor(() => {
+        expect(writeText).toHaveBeenCalledTimes(1)
+      })
+      const report = writeText.mock.calls[0]?.[0] as string
+      expect(report).toContain('用户账号复核摘要')
+      expect(report).toContain('用户总数: 3 个')
+      expect(report).toContain('需复核: 2 个')
+      expect(report).toContain('停用账号: 1 个')
+      expect(report).toContain('从未登录: 2 个')
+      expect(report).toContain('用户名 | 邮箱 | 角色 | 状态 | 用户组 | 主目录 | 最后登录 | 账号关注 | 建议处理')
+      expect(report).toContain('guest | 未设置 | 访客 | 已停用 | 未分组 | /guest/public | 从未登录 | 停用账号, 从未登录')
+      expect(report).toContain('alice | test@example.com | 普通用户 | 启用 | family | /home/alice | 从未登录 | 从未登录')
+      expect(report).toContain('owner | admin@example.com | 管理员 | 启用 | admins | / | 2024-01-15T10:00:00Z | 无')
+      expect(report).toMatch(/guest[\s\S]*alice[\s\S]*owner/)
+      expect(mockAddToast).toHaveBeenCalledWith({ title: '用户账号摘要已复制', color: 'success' })
+    })
+
+    it('copies a user access review summary for administrator review', async () => {
+      const user = userEvent.setup()
+      const writeText = vi.fn().mockResolvedValue(undefined)
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: { writeText },
+      })
+      vi.mocked(usersApi.listUsers).mockResolvedValue({
+        success: true,
+        users: [
+          {
+            ...mockUsers[0],
+            username: 'admin',
+            role: 'admin',
+            disabled: false,
+            groups: ['ops'],
+            home_dir: '/',
+            quota_bytes: 0,
+            used_bytes: 2048,
+          },
+          {
+            ...mockUsers[1],
+            username: 'alice',
+            role: 'user',
+            disabled: false,
+            groups: ['family', 'editors'],
+            home_dir: '/home/alice',
+            last_login_at: undefined,
+            quota_bytes: 1000,
+            used_bytes: 900,
+          },
+          {
+            ...mockUsers[2],
+            username: 'guest',
+            role: 'guest',
+            disabled: true,
+            groups: [],
+            home_dir: '/guest/public',
+            last_login_at: '2024-01-16T10:00:00Z',
+            quota_bytes: 1000,
+            used_bytes: 1200,
+          },
+        ],
+        total: 3,
+      })
+
+      renderUsersPage()
+
+      const copyButton = await screen.findByRole('button', { name: '复制权限摘要' })
+      await user.click(copyButton)
+
+      await waitFor(() => {
+        expect(writeText).toHaveBeenCalledTimes(1)
+      })
+      const report = writeText.mock.calls[0]?.[0] as string
+      expect(report).toContain('用户权限复核摘要')
+      expect(report).toContain('用户总数: 3 个')
+      expect(report).toContain('管理员: 1 个')
+      expect(report).toContain('需复核: 3 个')
+      expect(report).toContain('用户名 | 邮箱 | 角色 | 状态 | 用户组 | 主目录 | 权限范围 | 权限说明 | 复核提示 | 最后登录')
+      expect(report).toContain('guest | 未设置 | 访客 | 已停用 | 未分组 | /guest/public | 访客主目录范围')
+      expect(report).toContain('alice | test@example.com | 普通用户 | 启用 | editors, family | /home/alice | 主目录 + 用户组范围')
+      expect(report).toContain('admin | admin@example.com | 管理员 | 启用 | ops | / | 管理员全局范围')
+      expect(report).toMatch(/guest[\s\S]*alice[\s\S]*admin/)
+      expect(mockAddToast).toHaveBeenCalledWith({ title: '用户权限摘要已复制', color: 'success' })
+    })
+
+    it('filters the list to quota attention users', async () => {
+      vi.mocked(usersApi.listUsers).mockResolvedValue({
+        success: true,
+        users: [
+          {
+            ...mockUsers[0],
+            id: 'user-healthy',
+            username: 'healthy',
+            quota_bytes: 1000,
+            used_bytes: 100,
+          },
+          {
+            ...mockUsers[1],
+            id: 'user-near-quota',
+            username: 'nearquota',
+            quota_bytes: 1000,
+            used_bytes: 900,
+          },
+          {
+            ...mockUsers[2],
+            id: 'user-over-quota',
+            username: 'overquota',
+            quota_bytes: 1000,
+            used_bytes: 1200,
+          },
+        ],
+        total: 3,
+      })
+
+      renderUsersPage()
+
+      await waitFor(() => {
+        expect(screen.getByText('healthy')).toBeInTheDocument()
+      })
+
+      await userEvent.click(screen.getByRole('button', { name: '配额关注' }))
+
+      expect(screen.queryByText('healthy')).not.toBeInTheDocument()
+      expect(screen.getByText('nearquota')).toBeInTheDocument()
+      expect(screen.getByText('overquota')).toBeInTheDocument()
+      expect(document.body.textContent).toMatch(/overquota[\s\S]*nearquota/)
+
+      await userEvent.click(screen.getByRole('button', { name: '全部用户' }))
+
+      expect(screen.getByText('healthy')).toBeInTheDocument()
+    })
+
+    it('shows an empty state when quota attention filter has no matches', async () => {
+      vi.mocked(usersApi.listUsers).mockResolvedValue({
+        success: true,
+        users: [
+          {
+            ...mockUsers[0],
+            id: 'user-healthy',
+            username: 'healthy',
+            quota_bytes: 1000,
+            used_bytes: 100,
+          },
+        ],
+        total: 1,
+      })
+
+      renderUsersPage()
+
+      await waitFor(() => {
+        expect(screen.getByText('healthy')).toBeInTheDocument()
+      })
+
+      await userEvent.click(screen.getByRole('button', { name: '配额关注' }))
+
+      expect(screen.getByText('暂无配额关注用户')).toBeInTheDocument()
+      expect(screen.getByText('所有已设置配额的用户当前都低于关注阈值。')).toBeInTheDocument()
+      expect(screen.queryByText('healthy')).not.toBeInTheDocument()
+    })
+
+    it('filters the list to account attention users', async () => {
+      vi.mocked(usersApi.listUsers).mockResolvedValue({
+        success: true,
+        users: [
+          {
+            ...mockUsers[0],
+            id: 'user-healthy',
+            username: 'healthy',
+            disabled: false,
+            last_login_at: '2024-01-15T10:00:00Z',
+          },
+          {
+            ...mockUsers[1],
+            id: 'user-never-login',
+            username: 'neverlogin',
+            disabled: false,
+            last_login_at: undefined,
+          },
+          {
+            ...mockUsers[2],
+            id: 'user-disabled',
+            username: 'disabled',
+            disabled: true,
+            last_login_at: '2024-01-16T10:00:00Z',
+          },
+        ],
+        total: 3,
+      })
+
+      renderUsersPage()
+
+      await waitFor(() => {
+        expect(screen.getByText('healthy')).toBeInTheDocument()
+      })
+
+      await userEvent.click(screen.getByRole('button', { name: '账号关注' }))
+
+      expect(screen.queryByText('healthy')).not.toBeInTheDocument()
+      expect(screen.getByText('disabled')).toBeInTheDocument()
+      expect(screen.getByText('neverlogin')).toBeInTheDocument()
+      expect(document.body.textContent).toMatch(/disabled[\s\S]*neverlogin/)
+
+      await userEvent.click(screen.getByRole('button', { name: '全部用户' }))
+
+      expect(screen.getByText('healthy')).toBeInTheDocument()
+    })
+
+    it('filters the list to users with review hints', async () => {
+      vi.mocked(usersApi.listUsers).mockResolvedValue({
+        success: true,
+        users: [
+          {
+            ...mockUsers[0],
+            id: 'user-healthy',
+            username: 'healthy',
+            role: 'user',
+            disabled: false,
+            last_login_at: '2024-01-15T10:00:00Z',
+            quota_bytes: 1000,
+            used_bytes: 100,
+          },
+          {
+            ...mockUsers[0],
+            id: 'user-admin',
+            username: 'adminreview',
+            role: 'admin',
+            disabled: false,
+            last_login_at: '2024-01-15T10:00:00Z',
+            quota_bytes: 0,
+            used_bytes: 2048,
+          },
+          {
+            ...mockUsers[1],
+            id: 'user-near-quota',
+            username: 'nearquota',
+            disabled: false,
+            last_login_at: undefined,
+            quota_bytes: 1000,
+            used_bytes: 900,
+          },
+          {
+            ...mockUsers[2],
+            id: 'user-over-quota',
+            username: 'overquota',
+            disabled: false,
+            last_login_at: '2024-01-16T10:00:00Z',
+            quota_bytes: 1000,
+            used_bytes: 1200,
+          },
+        ],
+        total: 4,
+      })
+
+      renderUsersPage()
+
+      await waitFor(() => {
+        expect(screen.getByText('healthy')).toBeInTheDocument()
+      })
+
+      await userEvent.click(screen.getByRole('button', { name: '复核提示' }))
+
+      expect(screen.queryByText('healthy')).not.toBeInTheDocument()
+      expect(screen.getByText('overquota')).toBeInTheDocument()
+      expect(screen.getByText('nearquota')).toBeInTheDocument()
+      expect(screen.getByText('adminreview')).toBeInTheDocument()
+      expect(document.body.textContent).toMatch(/overquota[\s\S]*nearquota[\s\S]*adminreview/)
+    })
+
+    it('shows an empty state when review hint filter has no matches', async () => {
+      vi.mocked(usersApi.listUsers).mockResolvedValue({
+        success: true,
+        users: [
+          {
+            ...mockUsers[0],
+            id: 'user-healthy',
+            username: 'healthy',
+            role: 'user',
+            disabled: false,
+            last_login_at: '2024-01-15T10:00:00Z',
+            quota_bytes: 1000,
+            used_bytes: 100,
+          },
+        ],
+        total: 1,
+      })
+
+      renderUsersPage()
+
+      await waitFor(() => {
+        expect(screen.getByText('healthy')).toBeInTheDocument()
+      })
+
+      await userEvent.click(screen.getByRole('button', { name: '复核提示' }))
+
+      expect(screen.getByText('暂无复核提示用户')).toBeInTheDocument()
+      expect(screen.getByText('所有用户当前暂无账号、权限或配额复核提示。')).toBeInTheDocument()
+      expect(screen.queryByText('healthy')).not.toBeInTheDocument()
+    })
+
+    it('shows an empty state when account attention filter has no matches', async () => {
+      vi.mocked(usersApi.listUsers).mockResolvedValue({
+        success: true,
+        users: [
+          {
+            ...mockUsers[0],
+            id: 'user-healthy',
+            username: 'healthy',
+            disabled: false,
+            last_login_at: '2024-01-15T10:00:00Z',
+          },
+        ],
+        total: 1,
+      })
+
+      renderUsersPage()
+
+      await waitFor(() => {
+        expect(screen.getByText('healthy')).toBeInTheDocument()
+      })
+
+      await userEvent.click(screen.getByRole('button', { name: '账号关注' }))
+
+      expect(screen.getByText('暂无账号关注用户')).toBeInTheDocument()
+      expect(screen.getByText('所有用户当前均为启用且已有登录记录。')).toBeInTheDocument()
+      expect(screen.queryByText('healthy')).not.toBeInTheDocument()
+    })
   })
 
   describe('stats', () => {
@@ -289,7 +1181,77 @@ describe('UsersPage', () => {
     it('shows correct active users count', async () => {
       renderUsersPage()
       await waitFor(() => {
-        expect(screen.getByText('2')).toBeInTheDocument()
+        const activeUsersCard = screen.getByRole('button', { name: '查看活跃用户' }).closest('.card-meridian')
+        expect(activeUsersCard).not.toBeNull()
+        expect(within(activeUsersCard as HTMLElement).getByText('2')).toBeInTheDocument()
+      })
+    })
+
+    it('shows account attention count', async () => {
+      vi.mocked(usersApi.listUsers).mockResolvedValue({
+        success: true,
+        users: [
+          { ...mockUsers[0], disabled: false, last_login_at: '2024-01-15T10:00:00Z' },
+          { ...mockUsers[1], disabled: false, last_login_at: undefined },
+          { ...mockUsers[2], disabled: true, last_login_at: '2024-01-16T10:00:00Z' },
+        ],
+        total: 3,
+      })
+
+      renderUsersPage()
+
+      await waitFor(() => {
+        const accountAttentionTitle = screen.getAllByText('账号关注')
+          .find((element) => element.tagName.toLowerCase() === 'p')
+        expect(accountAttentionTitle).toBeDefined()
+        const accountAttentionCard = accountAttentionTitle?.closest('.card-meridian')
+        expect(accountAttentionCard).not.toBeNull()
+        expect(within(accountAttentionCard as HTMLElement).getByText('2')).toBeInTheDocument()
+        expect(within(accountAttentionCard as HTMLElement).getByText('停用 1 个 · 从未登录 1 个')).toBeInTheDocument()
+      })
+    })
+
+    it('shows quota attention count', async () => {
+      vi.mocked(usersApi.listUsers).mockResolvedValue({
+        success: true,
+        users: [
+          { ...mockUsers[0], quota_bytes: 1000, used_bytes: 100 },
+          { ...mockUsers[1], quota_bytes: 1000, used_bytes: 900 },
+          { ...mockUsers[2], quota_bytes: 1000, used_bytes: 1100 },
+        ],
+        total: 3,
+      })
+
+      renderUsersPage()
+
+      await waitFor(() => {
+        expect(screen.getAllByText('配额关注').length).toBeGreaterThan(0)
+        expect(screen.getByText('2 个用户接近或超过上限')).toBeInTheDocument()
+      })
+    })
+
+    it('shows review hint count breakdown', async () => {
+      vi.mocked(usersApi.listUsers).mockResolvedValue({
+        success: true,
+        users: [
+          { ...mockUsers[0], role: 'user', disabled: false, last_login_at: '2024-01-15T10:00:00Z', quota_bytes: 1000, used_bytes: 100 },
+          { ...mockUsers[1], role: 'user', disabled: false, last_login_at: undefined, quota_bytes: 1000, used_bytes: 900 },
+          { ...mockUsers[2], role: 'guest', disabled: true, last_login_at: '2024-01-16T10:00:00Z', quota_bytes: 1000, used_bytes: 1200 },
+          { ...mockUsers[0], id: 'user-admin-review', username: 'adminreview', role: 'admin', disabled: false, last_login_at: '2024-01-17T10:00:00Z', quota_bytes: 0, used_bytes: 0 },
+        ],
+        total: 4,
+      })
+
+      renderUsersPage()
+
+      await waitFor(() => {
+        const reviewTitle = screen.getAllByText('复核提示')
+          .find((element) => element.tagName.toLowerCase() === 'p')
+        expect(reviewTitle).toBeDefined()
+        const reviewCard = reviewTitle?.closest('.card-meridian')
+        expect(reviewCard).not.toBeNull()
+        expect(within(reviewCard as HTMLElement).getByText('3')).toBeInTheDocument()
+        expect(within(reviewCard as HTMLElement).getByText('严重 1 个 · 提醒 1 个 · 记录 1 个')).toBeInTheDocument()
       })
     })
 

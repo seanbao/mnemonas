@@ -903,6 +903,22 @@ restart_service() {
   fail "failed to restart $service; inspect with: systemctl status $service --no-pager; journalctl -u $service -n 100 --no-pager"
 }
 
+reload_systemd_units() {
+  if systemctl daemon-reload; then
+    return 0
+  fi
+
+  fail "failed to reload systemd units; inspect unit files with: systemctl cat mnemonas.service mnemonas-dataplane.service; systemctl status mnemonas.service --no-pager"
+}
+
+enable_services() {
+  if systemctl enable mnemonas-dataplane.service mnemonas.service >/dev/null; then
+    return 0
+  fi
+
+  fail "failed to enable systemd units; inspect with: systemctl status mnemonas.service --no-pager; systemctl status mnemonas-dataplane.service --no-pager; journalctl -u mnemonas.service -u mnemonas-dataplane.service -n 100 --no-pager"
+}
+
 main() {
   require_root
   require_command install
@@ -970,8 +986,8 @@ main() {
   install_web_assets "$web_src"
 
   install_units
-  systemctl daemon-reload
-  systemctl enable mnemonas-dataplane.service mnemonas.service >/dev/null
+  reload_systemd_units
+  enable_services
 
   if [[ "$ENABLE_NOW" != "0" ]]; then
     log "starting services"
@@ -991,6 +1007,7 @@ main() {
   log "  Configure public HTTPS: sudo $BIN_DIR/mnemonas-public-setup --proxy caddy <domain> <email>"
   log "  Check status: systemctl status mnemonas --no-pager"
   log "  View logs: journalctl -u mnemonas -f"
+  log "  Keep this release directory; rerun its installer to return to this version after a failed upgrade"
   log "  Uninstall: sudo $BIN_DIR/mnemonas-uninstall-systemd"
 }
 

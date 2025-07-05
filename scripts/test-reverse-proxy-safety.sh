@@ -164,6 +164,8 @@ run_docker_proxy_docs_include_trusted_proxy_cidrs_test() {
 run_reverse_proxy_docs_include_dataplane_port_audit_test() {
     assert_file_contains "$REPO_ROOT/docs/reverse-proxy-setup.md" "ss -tlnp | grep -E '80|443|8080|9090|9091'"
     assert_file_contains "$REPO_ROOT/docs/reverse-proxy-setup.en.md" "ss -tlnp | grep -E '80|443|8080|9090|9091'"
+    assert_file_contains "$REPO_ROOT/docs/reverse-proxy-setup.md" "/proc/net/tcp"
+    assert_file_contains "$REPO_ROOT/docs/reverse-proxy-setup.en.md" "/proc/net/tcp"
 }
 
 run_webdav_docs_avoid_placeholder_password_test() {

@@ -68,6 +68,10 @@ export interface UserResponse {
   message?: string
 }
 
+type ApiUser = Omit<User, 'groups'> & {
+  groups?: string[] | null
+}
+
 interface UsersApiError {
   code?: string
   message: string
@@ -104,18 +108,18 @@ function isValidUserHomeDir(value: unknown): value is string {
   }
 }
 
-function isValidUser(value: unknown): value is User {
+function isValidUser(value: unknown): value is ApiUser {
   if (!value || typeof value !== 'object') {
     return false
   }
 
-  const user = value as Partial<User>
+  const user = value as Partial<ApiUser>
   return (
     isCanonicalNonEmptyString(user.id) &&
     isCanonicalNonEmptyString(user.username) &&
     typeof user.email === 'string' &&
     isUserRole(user.role) &&
-    (user.groups === undefined || (Array.isArray(user.groups) && user.groups.every((group) => typeof group === 'string'))) &&
+    (user.groups == null || (Array.isArray(user.groups) && user.groups.every((group) => typeof group === 'string'))) &&
     typeof user.disabled === 'boolean' &&
     isValidUserHomeDir(user.home_dir) &&
     typeof user.created_at === 'string' &&
@@ -124,6 +128,18 @@ function isValidUser(value: unknown): value is User {
     isNonNegativeSafeInteger(user.quota_bytes) &&
     isNonNegativeSafeInteger(user.used_bytes)
   )
+}
+
+function normalizeUser(user: ApiUser): User {
+  const { groups, ...rest } = user
+  if (groups == null) {
+    return rest
+  }
+
+  return {
+    ...rest,
+    groups,
+  }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -242,7 +258,7 @@ export async function listUsers(options: UsersRequestOptions = {}): Promise<List
     throw new Error(INVALID_USERS_RESPONSE_MESSAGE)
   }
 
-  const users = body.data.users
+  const users = body.data.users.map(normalizeUser)
 
   return {
     success: body.success,
@@ -278,7 +294,7 @@ export async function createUser(data: CreateUserRequest, options: UsersRequestO
 
   return {
     success: body.success,
-    user: body.data.user,
+    user: normalizeUser(body.data.user),
     warning: hasUsersWarning(response, body.data),
     message: body.message,
   }
@@ -311,7 +327,7 @@ export async function updateUser(userId: string, data: UpdateUserRequest, option
 
   return {
     success: body.success,
-    user: body.data.user,
+    user: normalizeUser(body.data.user),
     warning: hasUsersWarning(response, body.data),
     message: body.message,
   }

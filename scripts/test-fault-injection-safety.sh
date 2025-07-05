@@ -408,6 +408,41 @@ run_health_failure_does_not_restart_test() {
 	assert_not_exists "$invoked_log"
 }
 
+run_isolated_runner_refuse_untrusted_root_test() {
+	local case_dir="$TMP_ROOT/isolated-refuse-untrusted-root"
+	mkdir -p "$case_dir"
+
+	run_expect_failure "$case_dir/out.log" env \
+		MNEMONAS_FAULT_ROOT="/var/lib/mnemonas-fault-test" \
+		bash "$REPO_ROOT/scripts/run-fault-injection-isolated.sh"
+
+	assert_file_contains "$case_dir/out.log" "MNEMONAS_FAULT_ROOT must be under /tmp or this checkout"
+}
+
+run_isolated_runner_refuse_non_loopback_host_test() {
+	local case_dir="$TMP_ROOT/isolated-refuse-public-host"
+	local fault_root="$case_dir/fault-root"
+	mkdir -p "$case_dir"
+
+	run_expect_failure "$case_dir/out.log" env \
+		MNEMONAS_FAULT_ROOT="$fault_root" \
+		MNEMONAS_FAULT_NASD_HOST="0.0.0.0" \
+		bash "$REPO_ROOT/scripts/run-fault-injection-isolated.sh"
+
+	assert_file_contains "$case_dir/out.log" "MNEMONAS_FAULT_NASD_HOST must be loopback-only"
+	assert_not_exists "$fault_root"
+}
+
+run_fault_injection_docs_use_isolated_runner_test() {
+	assert_file_contains "$REPO_ROOT/Makefile" "./scripts/run-fault-injection-isolated.sh"
+	assert_file_contains "$REPO_ROOT/README.md" "make fault-injection"
+	assert_file_contains "$REPO_ROOT/README.en.md" "scripts/run-fault-injection-isolated.sh"
+	assert_file_contains "$REPO_ROOT/docs/development.md" "scripts/run-fault-injection-isolated.sh"
+	assert_file_contains "$REPO_ROOT/docs/development.en.md" "scripts/run-fault-injection-isolated.sh"
+	assert_file_contains "$REPO_ROOT/docs/testing-strategy.md" "scripts/run-fault-injection-isolated.sh"
+	assert_file_contains "$REPO_ROOT/docs/testing-strategy.en.md" "scripts/run-fault-injection-isolated.sh"
+}
+
 run_default_disabled_test
 run_missing_explicit_target_test
 run_refuse_unisolated_storage_test
@@ -424,5 +459,8 @@ run_refuse_external_index_db_test
 run_refuse_default_personal_storage_test
 run_noninteractive_confirmation_test
 run_health_failure_does_not_restart_test
+run_isolated_runner_refuse_untrusted_root_test
+run_isolated_runner_refuse_non_loopback_host_test
+run_fault_injection_docs_use_isolated_runner_test
 
 printf '[fault-injection-safety-test] all checks passed\n'

@@ -946,16 +946,13 @@ test_crash_recovery_doc() {
         return
     fi
     
-    log_info "Crash recovery test (manual verification)..."
+    log_info "Crash recovery is covered by isolated fault-injection tests..."
     echo ""
-    echo "  To fully test crash recovery:"
-    echo "  1. Start a large file upload"
-    echo "  2. Kill nasd process mid-write: pkill -9 nasd"
-    echo "  3. Restart nasd"
-    echo "  4. Verify no .tmp files in <storage_root>/.mnemonas/tmp/"
-    echo "  5. Verify WebDAV still works"
+    echo "  Run one of the following commands to test crash recovery:"
+    echo "  make fault-injection"
+    echo "  ./scripts/run-fault-injection-isolated.sh"
     echo ""
-    log_skip "Crash recovery requires manual testing"
+    log_skip "Crash recovery covered by isolated fault-injection runner"
 }
 
 # ==============================================================================

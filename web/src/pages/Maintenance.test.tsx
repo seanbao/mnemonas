@@ -930,6 +930,31 @@ describe('MaintenancePage', () => {
       })
     })
 
+    it('shows attention reasons for warning-only backup jobs', async () => {
+      mockListBackupJobs.mockResolvedValue([{
+        ...mockBackupJobs[0],
+        id: 'warning-only',
+        name: '有警告的备份',
+        last_run: {
+          ...mockBackupJobs[0].last_run,
+          warning: true,
+          warnings: ['backup completed with warnings'],
+        },
+        last_restore: {
+          ...mockBackupJobs[0].last_restore,
+          warnings: ['restore completed with warnings'],
+        },
+      }])
+
+      render(<Maintenance />)
+
+      await waitFor(() => {
+        const attention = screen.getByLabelText('待处理原因: 最近备份有警告；最近恢复有警告')
+        expect(within(attention).getByText('需处理')).toBeTruthy()
+        expect(within(attention).getByText('最近备份有警告、最近恢复有警告')).toBeTruthy()
+      })
+    })
+
     it('shows running and failed retention check states without content metrics', async () => {
       mockListBackupJobs.mockResolvedValue([{
         ...mockBackupJobs[0],
@@ -1177,6 +1202,40 @@ describe('MaintenancePage', () => {
       })
     })
 
+    it('shows next steps for backup attention reasons', async () => {
+      mockListBackupJobs.mockResolvedValue([{
+        ...mockBackupJobs[0],
+        health_status: 'failed',
+        health_message: 'latest backup failed but a previous snapshot is available',
+        retention_status: 'warning',
+        retention_message: '远端保留策略需要确认',
+        restore_drill_status: 'due',
+        restore_drill_message: '需要执行恢复演练',
+        last_run: {
+          ...mockBackupJobs[0].last_run,
+          id: '20260510T020304.000000000Z',
+          status: 'failed',
+          warning: false,
+          warnings: [],
+          error_message: 'backup failed',
+        },
+        last_restore: {
+          ...mockBackupJobs[0].last_restore,
+          status: 'completed',
+          target_path: '/restore/pending',
+        },
+        last_matching_restore_verify: undefined,
+      }])
+
+      render(<Maintenance />)
+
+      await waitFor(() => {
+        expect(screen.getByLabelText('待处理原因: 备份健康异常；最近备份失败；保留策略需确认；恢复演练待执行；恢复待校验')).toBeTruthy()
+        const nextSteps = screen.getByLabelText('建议处理: 运行立即备份并查看最近备份结果；运行检查保留并确认快照或远端保留策略；执行恢复演练并复核演练历史；运行检查恢复完成只读校验')
+        expect(nextSteps).toHaveTextContent('建议: 运行立即备份并查看最近备份结果、运行检查保留并确认快照或远端保留策略 等 4 步')
+      })
+    })
+
     it('shows restore report findings in the restore summary', async () => {
       mockListBackupJobs.mockResolvedValue([{
         ...mockBackupJobs[0],
@@ -1210,6 +1269,30 @@ describe('MaintenancePage', () => {
       await waitFor(() => {
         expect(screen.getByText('尚未恢复')).toBeTruthy()
         expect(screen.getByText('摘要发现: 尚未执行过显式恢复。')).toBeTruthy()
+      })
+    })
+
+    it('checks the latest restored target from the backup task list', async () => {
+      const user = userEvent.setup()
+      mockListBackupJobs.mockResolvedValue(mockBackupJobs)
+
+      render(<Maintenance />)
+
+      await waitFor(() => {
+        expect(screen.getByText('外置硬盘备份')).toBeTruthy()
+      })
+
+      await user.click(screen.getByRole('button', { name: /检查恢复/ }))
+
+      await waitFor(() => {
+        expect(mockVerifyBackupRestoreJob).toHaveBeenCalledWith('external-disk', '/restore/mnemonas', expect.objectContaining({
+          signal: expect.any(AbortSignal),
+        }))
+        expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({
+          title: '恢复目录检查完成',
+          description: '检查 12 个文件，4 KB',
+          color: 'success',
+        }))
       })
     })
 
@@ -1851,17 +1934,103 @@ describe('MaintenancePage', () => {
       fireEvent.click(screen.getByRole('button', { name: /批量恢复/ }))
 
       await waitFor(() => {
+        const readiness = within(screen.getByLabelText('批量恢复准备度摘要'))
+        expect(readiness.getByText('尚未选择任务')).toBeTruthy()
+        expect(readiness.getByText('尚未选择目标')).toBeTruthy()
+        expect(readiness.getByText('选择任务后生成批量预览')).toBeTruthy()
+        expect(screen.getByText('可恢复任务 1 项，待处理 0 项；选择后会保留已填写目标，空目标使用建议目录。')).toBeTruthy()
+        expect((screen.getByRole('button', { name: '选择待处理' }) as HTMLButtonElement).disabled).toBe(true)
+        expect((screen.getByRole('button', { name: '选择全部' }) as HTMLButtonElement).disabled).toBe(false)
+        expect((screen.getByRole('button', { name: '清空选择' }) as HTMLButtonElement).disabled).toBe(true)
         const targetInput = screen.getByLabelText('外置硬盘备份 目标目录') as HTMLInputElement
         expect(targetInput.value).toBe('/mnt/restore/external-disk')
         expect(targetInput.disabled).toBe(true)
         expect(screen.getByText('选择该任务后可使用建议目标目录，或改成自定义独立目录。')).toBeTruthy()
       })
 
-      fireEvent.click(screen.getAllByLabelText('选择 外置硬盘备份')[0])
+      fireEvent.click(screen.getByRole('button', { name: '选择全部' }))
 
-      const selectedTargetInput = screen.getByLabelText('外置硬盘备份 目标目录') as HTMLInputElement
+      let selectedTargetInput = screen.getByLabelText('外置硬盘备份 目标目录') as HTMLInputElement
       expect(selectedTargetInput.value).toBe('/mnt/restore/external-disk')
       expect(selectedTargetInput.disabled).toBe(false)
+      let readiness = within(screen.getByLabelText('批量恢复准备度摘要'))
+      expect(readiness.getByText('1 / 20 项')).toBeTruthy()
+      expect(readiness.getByText('1 / 1 已填写')).toBeTruthy()
+      expect(readiness.getByText('需要生成批量预览')).toBeTruthy()
+      expect((screen.getByRole('button', { name: '清空选择' }) as HTMLButtonElement).disabled).toBe(false)
+
+      fireEvent.click(screen.getByRole('button', { name: '清空选择' }))
+
+      selectedTargetInput = screen.getByLabelText('外置硬盘备份 目标目录') as HTMLInputElement
+      expect(selectedTargetInput.value).toBe('/mnt/restore/external-disk')
+      expect(selectedTargetInput.disabled).toBe(true)
+      readiness = within(screen.getByLabelText('批量恢复准备度摘要'))
+      expect(readiness.getByText('尚未选择任务')).toBeTruthy()
+      expect(readiness.getByText('尚未选择目标')).toBeTruthy()
+
+      fireEvent.click(screen.getAllByLabelText('选择 外置硬盘备份')[0])
+
+      selectedTargetInput = screen.getByLabelText('外置硬盘备份 目标目录') as HTMLInputElement
+      expect(selectedTargetInput.value).toBe('/mnt/restore/external-disk')
+      expect(selectedTargetInput.disabled).toBe(false)
+      readiness = within(screen.getByLabelText('批量恢复准备度摘要'))
+      expect(readiness.getByText('1 / 20 项')).toBeTruthy()
+      expect(readiness.getByText('1 / 1 已填写')).toBeTruthy()
+      expect(readiness.getByText('需要生成批量预览')).toBeTruthy()
+    })
+
+    it('selects only backup jobs that need restore attention', async () => {
+      mockListBackupJobs.mockResolvedValue([
+        mockBackupJobs[0],
+        {
+          ...mockBackupJobs[0],
+          id: 'pending-restore',
+          name: '待校验备份',
+          destination: '/mnt/backup-drive/pending-restore',
+          last_matching_restore_verify: undefined,
+          last_restore_verify: undefined,
+        },
+        {
+          ...mockBackupJobs[0],
+          id: 'warning-restore',
+          name: '有警告恢复备份',
+          destination: '/mnt/backup-drive/warning-restore',
+          last_restore: {
+            ...mockBackupJobs[0].last_restore,
+            warnings: ['restore completed with warnings'],
+          },
+        },
+      ])
+
+      render(<Maintenance />)
+
+      await waitFor(() => {
+        expect(screen.getByText('外置硬盘备份')).toBeTruthy()
+        expect(screen.getByText('待校验备份')).toBeTruthy()
+        expect(screen.getByText('有警告恢复备份')).toBeTruthy()
+      })
+
+      fireEvent.click(screen.getByRole('button', { name: /批量恢复/ }))
+
+      await waitFor(() => {
+        expect(screen.getByText('可恢复任务 3 项，待处理 2 项；选择后会保留已填写目标，空目标使用建议目录。')).toBeTruthy()
+      })
+
+      fireEvent.click(screen.getByRole('button', { name: '选择待处理' }))
+
+      const healthyTargetInput = screen.getByLabelText('外置硬盘备份 目标目录') as HTMLInputElement
+      const pendingTargetInput = screen.getByLabelText('待校验备份 目标目录') as HTMLInputElement
+      const warningTargetInput = screen.getByLabelText('有警告恢复备份 目标目录') as HTMLInputElement
+      expect(healthyTargetInput.disabled).toBe(true)
+      expect(pendingTargetInput.value).toBe('/mnt/restore/pending-restore')
+      expect(pendingTargetInput.disabled).toBe(false)
+      expect(warningTargetInput.value).toBe('/mnt/restore/warning-restore')
+      expect(warningTargetInput.disabled).toBe(false)
+
+      const readiness = within(screen.getByLabelText('批量恢复准备度摘要'))
+      expect(readiness.getByText('2 / 20 项')).toBeTruthy()
+      expect(readiness.getByText('2 / 2 已填写')).toBeTruthy()
+      expect(readiness.getByText('需要生成批量预览')).toBeTruthy()
     })
 
     it('previews and runs a batch restore from the backup card', async () => {
@@ -1986,34 +2155,38 @@ describe('MaintenancePage', () => {
       fireEvent.click(screen.getByRole('button', { name: /生成批量预览/ }))
 
       await waitFor(() => {
-	        expect(mockPreviewBatchBackupRestore).toHaveBeenCalledWith([{
-	          job_id: 'external-disk',
-	          target_path: batchTarget,
-	          include_config: true,
-	        }], expect.objectContaining({
-	          signal: expect.any(AbortSignal),
-	        }))
-	        expect(screen.getByText('批量预览结果')).toBeTruthy()
-	        const impact = within(screen.getByLabelText('批量恢复影响摘要'))
-	        expect(impact.getByText('目标目录')).toBeTruthy()
-	        expect(impact.getByText('冲突与覆盖')).toBeTruthy()
-	        expect(impact.getByText('权限影响')).toBeTruthy()
-	        expect(impact.getByText(/1 项会恢复配置文件到各自目标目录/)).toBeTruthy()
-	        expect(impact.getByText('恢复后校验')).toBeTruthy()
-	        const review = within(screen.getByLabelText('批量恢复执行前复核'))
-	        expect(review.getByText('恢复项目')).toBeTruthy()
-	        expect(review.getByText('1 项')).toBeTruthy()
-	        expect(review.getByText('目标目录')).toBeTruthy()
-	        expect(review.getByText('1 个互不重叠的独立目标目录')).toBeTruthy()
-	        expect(review.getByText('恢复内容')).toBeTruthy()
-	        expect(review.getByText('12 个文件 · 4 KB')).toBeTruthy()
-	        expect(review.getByText('配置文件')).toBeTruthy()
-	        expect(review.getByText('1 项会恢复配置文件')).toBeTruthy()
-	        expect(review.getByText('预检结果')).toBeTruthy()
-	        expect(review.getByText('1 项通过 · 0 项提醒 · 0 项失败')).toBeTruthy()
-	        expect(review.getByText('恢复后检查')).toBeTruthy()
-	        expect(review.getByText('每个成功项目都会自动执行只读校验；批量结果会汇总已校验文件数和字节数。')).toBeTruthy()
-	      })
+        expect(mockPreviewBatchBackupRestore).toHaveBeenCalledWith([{
+          job_id: 'external-disk',
+          target_path: batchTarget,
+          include_config: true,
+        }], expect.objectContaining({
+          signal: expect.any(AbortSignal),
+        }))
+        expect(screen.getByText('批量预览结果')).toBeTruthy()
+        const readiness = within(screen.getByLabelText('批量恢复准备度摘要'))
+        expect(readiness.getByText('1 / 20 项')).toBeTruthy()
+        expect(readiness.getByText('1 项会恢复配置文件')).toBeTruthy()
+        expect(readiness.getByText('批量预览可用于执行')).toBeTruthy()
+        const impact = within(screen.getByLabelText('批量恢复影响摘要'))
+        expect(impact.getByText('目标目录')).toBeTruthy()
+        expect(impact.getByText('冲突与覆盖')).toBeTruthy()
+        expect(impact.getByText('权限影响')).toBeTruthy()
+        expect(impact.getByText(/1 项会恢复配置文件到各自目标目录/)).toBeTruthy()
+        expect(impact.getByText('恢复后校验')).toBeTruthy()
+        const review = within(screen.getByLabelText('批量恢复执行前复核'))
+        expect(review.getByText('恢复项目')).toBeTruthy()
+        expect(review.getByText('1 项')).toBeTruthy()
+        expect(review.getByText('目标目录')).toBeTruthy()
+        expect(review.getByText('1 个互不重叠的独立目标目录')).toBeTruthy()
+        expect(review.getByText('恢复内容')).toBeTruthy()
+        expect(review.getByText('12 个文件 · 4 KB')).toBeTruthy()
+        expect(review.getByText('配置文件')).toBeTruthy()
+        expect(review.getByText('1 项会恢复配置文件')).toBeTruthy()
+        expect(review.getByText('预检结果')).toBeTruthy()
+        expect(review.getByText('1 项通过 · 0 项提醒 · 0 项失败')).toBeTruthy()
+        expect(review.getByText('恢复后检查')).toBeTruthy()
+        expect(review.getByText('每个成功项目都会自动执行只读校验；批量结果会汇总已校验文件数和字节数。')).toBeTruthy()
+      })
 
       fireEvent.click(screen.getByRole('button', { name: /开始批量恢复/ }))
 
@@ -2058,6 +2231,10 @@ describe('MaintenancePage', () => {
       fireEvent.click(screen.getAllByLabelText('选择 远端备份')[0])
       fireEvent.change(screen.getByLabelText('远端备份 目标目录'), { target: { value: '/restore/batch/nested' } })
 
+      const readiness = within(screen.getByLabelText('批量恢复准备度摘要'))
+      expect(readiness.getByText('2 / 20 项')).toBeTruthy()
+      expect(readiness.getByText('2 / 2 已填写；存在重复或父子嵌套')).toBeTruthy()
+      expect(readiness.getByText('处理目标目录后再生成批量预览')).toBeTruthy()
       expect(screen.getByText('第 1 项和第 2 项的目标目录重复或存在父子嵌套，请改为互不包含的独立目录。')).toBeTruthy()
       expect((screen.getByRole('button', { name: /生成批量预览/ }) as HTMLButtonElement).disabled).toBe(true)
 
@@ -3299,6 +3476,11 @@ describe('MaintenancePage', () => {
       await waitFor(() => {
         expect(screen.getByText(/正在校验数据完整性/)).toBeTruthy()
       })
+
+      expect(screen.getByRole('progressbar', { name: '校验进行中' })).toHaveAttribute(
+        'aria-valuetext',
+        '正在校验数据完整性，已验证 450 / 1,000 个对象'
+      )
     })
 
     it('disables start button when running', async () => {

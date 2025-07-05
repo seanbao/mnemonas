@@ -145,6 +145,24 @@ describe('Users API', () => {
     expect(result.total).toBe(2)
   })
 
+  it('normalizes null user groups from Go nil slices', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        success: true,
+        data: {
+          users: [{ ...validUser, groups: null }],
+          total: 1,
+        },
+      }),
+    })
+
+    const result = await listUsers()
+
+    expect(result.users[0]).not.toHaveProperty('groups')
+    expect(result.total).toBe(1)
+  })
+
   it('unwraps wrapped create user responses', async () => {
     mockAuthFetch.mockResolvedValueOnce({
       ok: true,

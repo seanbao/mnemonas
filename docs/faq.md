@@ -44,6 +44,16 @@ docker compose up -d
 # docker compose up -d --no-build
 ```
 
+Docker release 镜像升级前应记录 `.env` 中当前 `MNEMONAS_IMAGE` 标签。若升级后容器无法启动、核心流程异常或健康检查失败，可把 `MNEMONAS_IMAGE` 改回上一版本标签后执行：
+
+```bash
+docker compose pull
+docker compose up -d --no-build
+docker compose logs --tail 100 mnemonas
+```
+
+Docker 回退只切换镜像，继续使用同一个宿主机数据目录。若新版本已执行不可逆数据迁移，应先按对应 release note 或备份恢复流程处理。
+
 Ubuntu/systemd 方式：
 
 ```bash
@@ -54,6 +64,16 @@ sudo ./scripts/install-systemd.sh
 sudo mnemonas-doctor
 ```
 
+systemd 升级前建议完成备份，并保留上一版本 release 解压目录。若升级后服务无法启动、核心流程异常或 `mnemonas-doctor` 失败，可从上一版本目录重新运行安装脚本回退二进制和 Web UI：
+
+```bash
+cd mnemonas-<previous-version>-linux-amd64
+sudo ./scripts/install-systemd.sh
+sudo mnemonas-doctor
+```
+
+回退继续使用现有 `/etc/mnemonas/config.toml` 和 `/srv/mnemonas` 数据目录。若新版本已执行不可逆数据迁移，应按对应 release note 或备份恢复流程处理，不应直接用旧版本读取迁移后的数据。
+
 手动二进制方式：
 
 ```bash
@@ -62,6 +82,8 @@ pkill dataplane
 ./dataplane --data-dir ~/.mnemonas/.mnemonas/objects &
 ./nasd --config ~/.mnemonas/config.toml
 ```
+
+所有部署路径在跨大版本升级前都应先完成备份。
 
 ### Q: 数据存储在哪里？
 

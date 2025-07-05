@@ -165,7 +165,7 @@ export function Header({ onMenuClick }: HeaderProps) {
             </button>
           </DropdownTrigger>
           <DropdownMenu 
-            aria-label="User menu" 
+            aria-label="用户菜单"
             className="w-56 rounded-lg border border-divider bg-content1 shadow-xl"
             itemClasses={{
               base: "data-[hover=true]:bg-content2 data-[hover=true]:text-foreground text-default-600",
@@ -175,7 +175,7 @@ export function Header({ onMenuClick }: HeaderProps) {
               if (key === 'settings') handleSettings()
             }}
           >
-            <DropdownItem key="profile" className="h-14 gap-2" textValue="Profile">
+            <DropdownItem key="profile" className="h-14 gap-2" textValue="当前用户">
               <div className="flex items-center gap-3">
                 <Avatar
                   name={avatarName}

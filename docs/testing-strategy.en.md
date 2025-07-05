@@ -104,7 +104,7 @@ Quick isolated run:
 ./scripts/run-e2e-isolated.sh --quick
 ```
 
-The isolated runner starts a temporary backend, temporary storage, and non-default ports before invoking `scripts/e2e-test.sh`. The isolated root must be under `/tmp` or the current checkout and must not contain control characters, `..`, or symlink path components. Playwright's isolated backend uses a 2-hour access-token lifetime and a 168-hour refresh-token lifetime to reduce shared storageState expiration risk during long parallel runs.
+The isolated runner starts a temporary backend, temporary storage, and non-default ports before invoking `scripts/e2e-test.sh`. The isolated root must be under `/tmp` or the current checkout and must not contain control characters, `..`, or symlink path components. The default backend port is `18180` and default frontend port is `14173` for Playwright. Playwright's isolated backend uses a 2-hour access-token lifetime and a 168-hour refresh-token lifetime to reduce shared storageState expiration risk during long parallel runs.
 
 Manual tests against an existing service must provide explicit targets:
 
@@ -278,9 +278,16 @@ GO_FUZZTIME=2s RUN_GO_RACE=0 RUN_E2E_TORTURE=0 make test-torture
 
 ## Destructive Fault Injection
 
-`scripts/fault-injection-test.sh` validates crash recovery, concurrent write conflicts, version restore, object corruption, and metadata corruption. It can kill `nasd` and modify internal files, so it refuses to run by default.
+`scripts/run-fault-injection-isolated.sh` starts an isolated backend and runs `scripts/fault-injection-test.sh` against it. The destructive runner validates crash recovery, concurrent write conflicts, version restore, object corruption, and metadata corruption. It can kill `nasd` and modify internal files, so the low-level runner refuses to run without explicit target information.
 
 Isolated run:
+
+```bash
+make fault-injection
+./scripts/run-fault-injection-isolated.sh
+```
+
+Explicit target run:
 
 ```bash
 MNEMONAS_LIVE_FAULTS=1 \
@@ -294,13 +301,14 @@ RUN_CORRUPTION_TESTS=0 \
 
 Safety gates:
 
+- `scripts/run-fault-injection-isolated.sh` accepts only `/tmp` or checkout-local roots and loopback Web and dataplane addresses.
 - `BASE_URL`, `STORAGE_ROOT`, and `NASD_BIN` must be explicit.
 - Default allowed storage roots are `/tmp` or the current checkout.
 - `STORAGE_ROOT` must be absolute and must not contain control characters, `..`, or symlink path components.
 - `$HOME/.mnemonas` is rejected by default.
 - Non-interactive runs require `FAULT_INJECTION_ASSUME_YES=1`.
 - Real storage paths require `ALLOW_REAL_STORAGE=1`, must still be absolute, and must not point at protected system directories such as `/`, `/tmp`, or `/var`.
-- `OBJECTS_DIR` and `INDEX_DB`, which may be read or modified by the destructive checks, must be under `STORAGE_ROOT`.
+- `OBJECTS_DIR`, `INDEX_DB`, and optional `NASD_PID_FILE` paths that may be read or modified by the destructive checks must be under `STORAGE_ROOT`.
 
 These gates are tested by `scripts/test-fault-injection-safety.sh` and included in `make scripts-check`.
 

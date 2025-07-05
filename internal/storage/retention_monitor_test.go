@@ -15,6 +15,17 @@ func TestRetentionMonitor_UpdateConfig_AppliesPeriodicSweep(t *testing.T) {
 	fs := setupFileSystem(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	swept := make(chan error, 1)
+	originalOnRetentionMonitorSweepComplete := onRetentionMonitorSweepComplete
+	onRetentionMonitorSweepComplete = func(_ context.Context, err error) {
+		select {
+		case swept <- err:
+		default:
+		}
+	}
+	t.Cleanup(func() {
+		onRetentionMonitorSweepComplete = originalOnRetentionMonitorSweepComplete
+	})
 
 	for _, content := range []string{"v1", "v2", "v3", "v4"} {
 		if err := fs.WriteFile(ctx, "/retention-monitor.txt", bytes.NewReader([]byte(content))); err != nil {
@@ -38,23 +49,22 @@ func TestRetentionMonitor_UpdateConfig_AppliesPeriodicSweep(t *testing.T) {
 		SweepInterval: 20 * time.Millisecond,
 	})
 
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		versions, err := fs.ListVersions(ctx, "/retention-monitor.txt")
+	select {
+	case err := <-swept:
 		if err != nil {
-			t.Fatalf("ListVersions() error: %v", err)
+			t.Fatalf("retention sweep error: %v", err)
 		}
-		if len(versions) == 2 {
-			return
-		}
-		time.Sleep(20 * time.Millisecond)
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for retention sweep")
 	}
 
 	versions, err := fs.ListVersions(ctx, "/retention-monitor.txt")
 	if err != nil {
-		t.Fatalf("ListVersions() final error: %v", err)
+		t.Fatalf("ListVersions() error: %v", err)
 	}
-	t.Fatalf("expected current version plus one retained historical version after periodic sweep, got %d versions", len(versions))
+	if len(versions) != 2 {
+		t.Fatalf("expected current version plus one retained historical version after periodic sweep, got %d versions", len(versions))
+	}
 }
 
 func TestRetentionMonitor_UpdateConfig_SerializesConcurrentRestarts(t *testing.T) {
