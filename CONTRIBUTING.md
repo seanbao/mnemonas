@@ -4,11 +4,14 @@
 
 ## 📋 行为准则
 
-参与本项目即表示你同意遵守以下准则：
+参与本项目即表示你同意遵守 [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)。核心要求包括：
+
 - 尊重所有参与者
 - 使用包容性语言
 - 接受建设性批评
 - 关注对社区最有利的事情
+
+如果你遇到违反准则的行为，或不确定某类问题应该如何反馈，请参考 [SUPPORT.md](SUPPORT.md) 和 [SECURITY.md](SECURITY.md)。
 
 ## 🚀 快速开始
 
@@ -18,7 +21,7 @@
 |------|------|------|
 | Go | 1.25.9+ | 控制面开发 |
 | Rust | 1.92+ | 数据面开发 |
-| Node.js | 22.x（或兼容的 20.19+） | 前端开发 |
+| Node.js | `^20.19.0` 或 `>=22.12.0`（推荐使用 `.nvmrc` 指定的 22.x） | 前端开发 |
 | Docker Engine + Compose v2 插件 | Docker 20.10+，支持 `docker compose` | 容器化部署 |
 | protoc | 3.20+（CI 固定 3.20.1） | Protocol Buffers 编译 |
 
@@ -247,6 +250,7 @@ make docker
 
 ## ❓ 获取帮助
 
+- 阅读 [支持说明](SUPPORT.md) 选择合适的问题反馈渠道
 - 在 [Discussions](https://github.com/seanbao/mnemonas/discussions) 提问
 - 在 [Issues](https://github.com/seanbao/mnemonas/issues) 报告 Bug
 - 查看 [FAQ](docs/faq.md)

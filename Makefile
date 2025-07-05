@@ -4,7 +4,8 @@
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 BUILD_TIME ?= $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
 LDFLAGS := -s -w -X main.version=$(VERSION) -X main.buildTime=$(BUILD_TIME)
-GO_PACKAGES ?= $(shell go list ./... | grep -v '/web/node_modules/')
+GO_PACKAGES ?=
+GO_PACKAGE_PATTERN ?= ./...
 GO_LINT_PACKAGES ?= ./...
 GOVULNCHECK_VERSION ?= v1.3.0
 CARGO_AUDIT_VERSION ?= 0.22.1
@@ -13,6 +14,17 @@ NPM_AUDIT ?= 0
 DEPLOYMENT_SCRIPTS := scripts/install-systemd.sh scripts/uninstall-systemd.sh scripts/mnemonas-doctor.sh scripts/mnemonas-docker-preflight.sh scripts/docker-quickstart.sh scripts/mnemonas-dataplane-start.sh scripts/test-systemd-install.sh scripts/test-systemd-uninstall.sh scripts/test-docker-start.sh scripts/test-docker-preflight.sh scripts/test-docker-quickstart.sh scripts/docker-start.sh scripts/setup-reverse-proxy.sh scripts/dev.sh scripts/benchmark.sh
 ACCEPTANCE_SCRIPTS := scripts/e2e-test.sh scripts/fault-injection-test.sh
 WEB_SCRIPTS := web/scripts/start-e2e-backend.sh
+
+define RESOLVE_GO_PACKAGES
+packages="$(GO_PACKAGES)"; \
+if [ -z "$$packages" ]; then \
+	packages="$$(go list $(GO_PACKAGE_PATTERN) | grep -v '/web/node_modules/')"; \
+fi; \
+if [ -z "$$packages" ]; then \
+	echo "❌ no Go packages resolved" >&2; \
+	exit 1; \
+fi
+endef
 
 # 默认目标
 all: build
@@ -88,7 +100,8 @@ dev:
 # 运行测试
 test:
 	@echo "🧪 Running Go tests..."
-	CGO_ENABLED=1 bash ./scripts/with-test-dataplane.sh go test -v -race $(GO_PACKAGES)
+	@$(RESOLVE_GO_PACKAGES); \
+	CGO_ENABLED=1 bash ./scripts/with-test-dataplane.sh go test -v -race $$packages
 	@echo "🦀 Running Rust tests..."
 	cd dataplane && cargo test --locked
 	cargo test --manifest-path tools/proto-gen/Cargo.toml --locked
@@ -99,7 +112,8 @@ test:
 coverage:
 	@echo "📊 Generating coverage reports..."
 	@mkdir -p coverage
-	CGO_ENABLED=0 bash ./scripts/with-test-dataplane.sh go test -coverprofile=coverage/go.out $(GO_PACKAGES)
+	@$(RESOLVE_GO_PACKAGES); \
+	CGO_ENABLED=0 bash ./scripts/with-test-dataplane.sh go test -coverprofile=coverage/go.out $$packages
 	go tool cover -html=coverage/go.out -o coverage/go.html
 	cd web && npm run test:coverage
 	@echo "✅ Coverage reports: coverage/go.html, web/coverage/"
@@ -132,7 +146,8 @@ clean:
 # 格式化代码
 fmt:
 	@echo "✨ Formatting code..."
-	go fmt $(GO_PACKAGES)
+	@$(RESOLVE_GO_PACKAGES); \
+	go fmt $$packages
 	cd dataplane && cargo fmt
 	cargo fmt --manifest-path tools/proto-gen/Cargo.toml
 	cd web && npm run lint -- --fix 2>/dev/null || true
@@ -213,8 +228,9 @@ check: scripts-check lint test
 # 快速检查 (commit 前)
 quick-check:
 	@echo "🚀 Quick check..."
-	CGO_ENABLED=0 go build $(GO_PACKAGES)
-	CGO_ENABLED=0 bash ./scripts/with-test-dataplane.sh go test -short $(GO_PACKAGES)
+	@$(RESOLVE_GO_PACKAGES); \
+	CGO_ENABLED=0 go build $$packages; \
+	CGO_ENABLED=0 bash ./scripts/with-test-dataplane.sh go test -short $$packages
 	cd dataplane && cargo check --locked
 	cargo check --manifest-path tools/proto-gen/Cargo.toml --locked
 	@echo "✅ Quick check passed"

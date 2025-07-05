@@ -83,9 +83,12 @@ Run dependency vulnerability checks before releases and after dependency updates
 ```bash
 make install-audit-tools
 make security-check
+# Include frontend npm audit when you explicitly want to send the dependency tree
+# to the configured npm registry:
+make security-check NPM_AUDIT=1
 ```
 
-The checks cover Go with `govulncheck`, Rust with `cargo audit`, and the Web UI with `npm audit --audit-level=high`. CI runs the same classes of checks on pull requests and pushes.
+By default, `make security-check` covers Go with `govulncheck` and Rust with `cargo audit` for both the dataplane and `tools/proto-gen`. Frontend `npm audit --audit-level=high` is opt-in through `NPM_AUDIT=1` because it sends the dependency tree to the configured npm registry. CI runs Go, Rust, and frontend dependency checks on pull requests and pushes.
 
 ## Known Security Considerations
 
