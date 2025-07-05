@@ -145,6 +145,7 @@ const SHARE_POLICY_PRESETS = [
 const PUBLIC_ACCESS_MAX_ACCESS_TOKEN_TTL_MS = 60 * 60 * 1000
 const PUBLIC_ACCESS_MAX_REFRESH_TOKEN_TTL_MS = 720 * 60 * 60 * 1000
 const PUBLIC_ACCESS_MAX_SHARE_DEFAULT_EXPIRES_MS = 720 * 60 * 60 * 1000
+const PUBLIC_ACCESS_SNIPPET_COPY_BUTTON_CLASS = 'h-8 w-8 min-w-8 shrink-0'
 
 type SharePolicyRuleDraft = SharePolicyRule & {
   max_access_input?: string
@@ -2893,9 +2894,13 @@ function getSecurityCheckDisplayMessage(check: SecurityCheckItem): string {
         ? 'Web 服务仅监听本机地址。'
         : '建议仅监听本机地址，并由受信反向代理对外提供 HTTPS。'
     case 'admin_accounts':
-      return check.status === 'pass'
-        ? '管理员账号配置满足基本可用性要求。'
-        : '建议至少保留一个可用管理员账号，并为家庭或团队配置备用管理员。'
+      if (check.status === 'pass') {
+        return '管理员账号配置满足基本可用性要求。'
+      }
+      if (check.status === 'block') {
+        return '当前没有可用管理员账号；需要恢复或创建至少一个启用中的管理员。'
+      }
+      return '建议至少保留两个启用中的管理员账号，避免主账号失效后无法管理。'
     case 'session_token_ttl':
       if (check.status === 'pass') {
         return 'Web UI 访问令牌和刷新令牌有效期处于公网部署建议范围内。'
@@ -2930,11 +2935,62 @@ function getSecurityCheckDisplayMessage(check: SecurityCheckItem): string {
         return '公开分享访问 cookie、失败限速或缓存边界未满足公网安全要求。'
       }
       return '分享功能已启用，但当前访问未被识别为 HTTPS；受密码保护的公开分享访问 cookie 不会带 Secure 标记。'
+    case 'config_file_access':
+      if (check.status === 'pass') {
+        return '配置文件是普通私有文件，权限满足公网部署要求。'
+      }
+      if (check.status === 'block') {
+        if (check.details?.path_kind === 'symlink_component') {
+          return '配置文件路径经过符号链接组件；请改为服务账号可读取的普通私有路径。'
+        }
+        if (check.details?.path_kind === 'symlink') {
+          return '配置文件是符号链接；请恢复为服务账号可读取的普通私有文件。'
+        }
+        if (check.details?.path_kind === 'not_regular') {
+          return '配置文件路径存在但不是普通文件；请恢复为服务账号可读取的普通私有文件。'
+        }
+        return '配置文件路径存在阻断风险；公网访问前应恢复为普通私有文件。'
+      }
+      if (check.details?.path_kind === 'missing') {
+        return '当前配置文件路径不存在；设置保存可能失败，公网部署前应持久化为私有普通文件。'
+      }
+      if (check.details?.group_or_other_access === true) {
+        return '配置文件允许组或其他用户访问；建议将 config.toml 设为 0600。'
+      }
+      return '配置文件路径或权限需要人工确认；公网部署前应确认 config.toml 是私有普通文件。'
+    case 'secrets_file_access':
+      if (check.status === 'pass') {
+        return check.details?.generated_webdav_password_required === false
+          ? '当前 WebDAV 不依赖 secrets.json 中的自动生成 Basic 密码。'
+          : '自动 WebDAV 凭据文件是普通私有文件，权限满足公网部署要求。'
+      }
+      if (check.status === 'block') {
+        if (check.details?.path_kind === 'missing') {
+          return 'WebDAV 使用自动生成 Basic 密码，但 secrets.json 不存在；请先生成凭据、设置自定义强密码，或改用 MnemoNAS 用户认证。'
+        }
+        if (check.details?.path_kind === 'symlink_component') {
+          return '自动 WebDAV 凭据路径经过符号链接组件；请改为服务账号可读取的普通私有路径。'
+        }
+        if (check.details?.path_kind === 'symlink') {
+          return '自动 WebDAV 凭据文件是符号链接；请恢复为服务账号可读取的普通私有文件。'
+        }
+        if (check.details?.path_kind === 'not_regular') {
+          return '自动 WebDAV 凭据路径存在但不是普通文件；请恢复为服务账号可读取的普通私有文件。'
+        }
+        return '自动 WebDAV 凭据文件存在阻断风险；公网访问前应恢复为普通私有文件。'
+      }
+      if (check.details?.group_or_other_access === true) {
+        return '自动 WebDAV 凭据文件允许组或其他用户访问；建议将 secrets.json 设为 0600。'
+      }
+      return '自动 WebDAV 凭据文件路径或权限需要人工确认；公网部署前应确认 secrets.json 是私有普通文件。'
     case 'users_file_access':
       if (check.status === 'pass') {
         return '用户文件是普通私有文件，且目录权限满足公网部署要求。'
       }
       if (check.status === 'block') {
+        if (check.details?.dir_kind === 'symlink_component') {
+          return '用户文件路径经过符号链接组件；请改为服务账号可读取的普通私有目录路径。'
+        }
         return '用户文件缺失、不是普通文件或使用了符号链接；请恢复为服务账号可读取的普通私有文件。'
       }
       return '用户文件或其目录允许组或其他用户访问；建议将目录设为 0700、用户文件设为 0600。'
@@ -3011,12 +3067,44 @@ function getSecurityCheckDisplayMessage(check: SecurityCheckItem): string {
         return '分享功能已启用，但新分享默认访问次数不限制；家庭公网分享建议设置默认访问次数，避免公开链接被反复访问。'
       }
       return '新分享默认有效期偏长；家庭公网分享建议缩短默认有效期，降低链接长期暴露风险。'
+    case 'backup_local_destinations':
+      if (check.status === 'pass') {
+        return '启用中的本地备份目标不在主存储或来源目录内，且当前目录状态可用。'
+      }
+      if (check.status === 'block') {
+        if (check.details?.destination_kind === 'inside_storage_root') {
+          return '本地备份目标位于 storage.root 内部；请改用独立磁盘、独立数据集或远端备份目标。'
+        }
+        if (check.details?.destination_kind === 'inside_source') {
+          return '本地备份目标位于备份来源目录内；请改用独立磁盘、独立数据集或远端备份目标。'
+        }
+        if (check.details?.destination_kind === 'symlink_component') {
+          return '本地备份目标路径经过符号链接组件；请改为普通目录、独立数据集或远端备份目标。'
+        }
+        if (check.details?.destination_kind === 'symlink') {
+          return '本地备份目标是符号链接；请改为普通目录、独立数据集或远端备份目标。'
+        }
+        if (check.details?.destination_kind === 'not_directory') {
+          return '本地备份目标当前不是目录；请恢复为普通目录、独立数据集或远端备份目标。'
+        }
+        return '本地备份目标配置存在阻断风险；备份运行前应先修复目标路径。'
+      }
+      if (check.details?.destination_kind === 'missing') {
+        return '本地备份目标目录当前不存在；首次备份可能会创建目录，但长期备份目标建议提前挂载并确认可写。'
+      }
+      if (check.details?.destination_kind === 'not_writable') {
+        return '本地备份目标目录没有写权限位；请确认 MnemoNAS 服务账号可以写入该目录。'
+      }
+      return '本地备份目标状态需要人工确认；请检查目标目录是否已挂载并可写。'
     case 'initial_password_file':
       if (check.status === 'pass') {
         return '初始管理员密码文件状态正常。'
       }
       if (check.details?.path_kind === 'symlink') {
         return '初始管理员密码路径是符号链接；公网访问前请删除该路径，避免初始凭据指向不受控位置。'
+      }
+      if (check.details?.path_kind === 'symlink_component') {
+        return '初始管理员密码路径经过符号链接组件；公网访问前请改为普通私有目录并确认该文件不存在。'
       }
       if (check.details?.path_kind === 'not_regular') {
         return '初始管理员密码路径存在但不是普通文件；公网访问前请删除该路径。'
@@ -3272,6 +3360,7 @@ function PublicAccessWizard({
             classNames={{
               base: "bg-content1 border border-divider",
               pre: "font-mono text-xs whitespace-pre-wrap break-all",
+              copyButton: PUBLIC_ACCESS_SNIPPET_COPY_BUTTON_CLASS,
             }}
             hideSymbol
           >
@@ -3284,6 +3373,7 @@ function PublicAccessWizard({
             classNames={{
               base: "bg-content1 border border-divider",
               pre: "font-mono text-xs whitespace-pre-wrap break-all",
+              copyButton: PUBLIC_ACCESS_SNIPPET_COPY_BUTTON_CLASS,
             }}
             hideSymbol
           >
@@ -3305,6 +3395,7 @@ function PublicAccessWizard({
             classNames={{
               base: "bg-content1 border border-warning-200",
               pre: "font-mono text-xs whitespace-pre-wrap break-all",
+              copyButton: PUBLIC_ACCESS_SNIPPET_COPY_BUTTON_CLASS,
             }}
             hideSymbol
           >
@@ -4295,12 +4386,50 @@ export function SettingsPage() {
         }))
         addToast({ title: '已应用分享默认策略建议', description: '保存设置后影响新创建的分享链接。', color: 'success' })
         return
+      case 'backup_local_destinations':
+        {
+          const destination = securityCheckStringDetail(check, 'destination')
+          const jobID = securityCheckStringDetail(check, 'job_id')
+          addToast({
+            title: '需要检查本地备份目标',
+            description: destination
+              ? `在服务器上检查备份作业 ${jobID || '<unknown>'} 的目标目录 ${destination}，确认它不是符号链接、不在主存储或来源目录内，并且 MnemoNAS 服务账号可以写入。`
+              : '在服务器上检查本地备份作业目标目录，确认它不是符号链接、不在主存储或来源目录内，并且 MnemoNAS 服务账号可以写入。',
+            color: 'warning',
+          })
+          navigate(jobID ? `/maintenance?backupJob=${encodeURIComponent(jobID)}` : '/maintenance')
+        }
+        return
       case 'unsafe_no_auth_override':
         addToast({
           title: '需要编辑配置文件',
           description: '将 [security].allow_unsafe_no_auth 改为 false，并确认 Web 登录和 WebDAV 认证已启用后重启服务。',
           color: 'warning',
         })
+        return
+      case 'config_file_access':
+        {
+          const configPath = securityCheckStringDetail(check, 'path')
+          addToast({
+            title: '需要检查配置文件路径',
+            description: configPath
+              ? `在服务器上确认 ${configPath} 是普通文件、路径组件不经过符号链接，并将权限设为 0600 后重新检查。`
+              : '在服务器上确认 MnemoNAS 使用的 config.toml 是普通文件、路径组件不经过符号链接，并将权限设为 0600 后重新检查。',
+            color: 'warning',
+          })
+        }
+        return
+      case 'secrets_file_access':
+        {
+          const secretsPath = securityCheckStringDetail(check, 'path')
+          addToast({
+            title: '需要检查自动 WebDAV 凭据',
+            description: secretsPath
+              ? `在服务器上确认 ${secretsPath} 是普通文件、路径组件不经过符号链接，并将权限设为 0600；也可以改用 WebDAV 用户认证或设置自定义强密码。`
+              : '在服务器上确认 storage.root 下的 secrets.json 是普通文件、路径组件不经过符号链接，并将权限设为 0600；也可以改用 WebDAV 用户认证或设置自定义强密码。',
+            color: 'warning',
+          })
+        }
         return
       case 'users_file_access':
         {
@@ -4408,8 +4537,14 @@ export function SettingsPage() {
         return { label: '使用 HTTPS URL', onPress: () => applySecurityCheckFix(check) }
       case 'share_default_policy':
         return { label: '应用建议', onPress: () => applySecurityCheckFix(check) }
+      case 'backup_local_destinations':
+        return { label: '查看备份目标', onPress: () => applySecurityCheckFix(check) }
       case 'unsafe_no_auth_override':
         return { label: '关闭例外', onPress: () => applySecurityCheckFix(check) }
+      case 'config_file_access':
+        return { label: '查看配置路径', onPress: () => applySecurityCheckFix(check) }
+      case 'secrets_file_access':
+        return { label: '查看凭据路径', onPress: () => applySecurityCheckFix(check) }
       case 'users_file_access':
         return { label: '查看权限路径', onPress: () => applySecurityCheckFix(check) }
       case 'initial_password_file':

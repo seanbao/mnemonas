@@ -4,7 +4,7 @@
 
 本文档介绍 MnemoNAS 的安全配置最佳实践，适用于局域网和公网部署场景。
 
-## 🔐 认证配置
+## 认证配置
 
 ### Web UI 管理账号
 
@@ -63,8 +63,10 @@ password = ""  # 留空则首次启动时自动生成
 - 该密码用于 WebDAV 客户端，不是 Web UI 管理员密码
 - 密码会保存到 `<storage.root>/secrets.json`，启动日志只提示文件路径，不输出明文密码
 - 后续启动会自动使用保存的密码
-- `mnemonas-doctor` 会提示 `config.toml` 是否为符号链接、非普通文件或权限过宽；长期部署的配置文件应保持为私有普通文件
-- `mnemonas-doctor` 会提示启用认证时 `users.json` 是否缺失，并提示 `users.json`、`secrets.json` 或相关目录是否为符号链接、非普通文件或权限过宽；长期部署应保持这些文件为私有普通文件
+- `mnemonas-doctor` 会提示 `config.toml` 是否为符号链接、路径组件包含符号链接、非普通文件或权限过宽；长期部署的配置文件应保持为私有普通文件
+- `mnemonas-doctor` 会提示启用认证时 `users.json` 是否缺失，并提示 `users.json`、`secrets.json` 或相关目录是否为符号链接、路径组件包含符号链接、非普通文件或权限过宽。Web UI 安全自检还会把当前运行时配置文件路径、自动 WebDAV 凭据路径、用户文件路径或初始密码路径经过符号链接组件标记为 `block`，并提示配置文件和自动 WebDAV 凭据文件权限过宽。长期部署应保持这些文件为私有普通文件
+- `mnemonas-doctor` 会解析启用认证时的 `users.json`，确认至少存在一个启用中的管理员；如果没有可用管理员，下一次启动会创建恢复管理员，诊断会提示该恢复状态
+- `mnemonas-doctor` 会报告 `auth.enabled=false`、`webdav.auth_type="none"` 和 `security.allow_unsafe_no_auth=true` 等无认证姿态；这类配置只适合受控网络、VPN、防火墙或外层访问控制已经明确限制访问范围的部署
 
 **手动设置密码**（如需自定义）：
 
@@ -96,7 +98,7 @@ host = "127.0.0.1"  # 仅本地访问
 
 ---
 
-## 🌐 网络监听配置
+## 网络监听配置
 
 ### 场景一：仅本地访问
 
@@ -142,14 +144,14 @@ sudo firewall-cmd --reload
 
 1. 在服务器上运行 `sudo mnemonas-public-setup --proxy caddy <domain> <email>` 或 `sudo mnemonas-public-setup --proxy nginx <domain> <email>`，生成并安装反向代理配置。
 2. 登录 Web UI 后打开 `设置 -> 常规 -> 公网访问向导`，根据部署方式应用 `server.host`、`trusted_proxy_hops`、分享域名等配置。
-3. 在 Web UI 运行“安全自检”，确认认证、会话有效期、登录限速、浏览器会话 cookie 边界、公开分享 cookie/cache 边界、用户文件权限、HTTPS 请求语义、受信代理、监听地址、dataplane 端口、WebDAV 认证、分享 Base URL、分享默认策略、初始密码文件和管理员账号备用状态。
+3. 在 Web UI 运行“安全自检”，确认认证、会话有效期、登录限速、浏览器会话 cookie 边界、公开分享 cookie/cache 边界、配置文件权限、自动 WebDAV 凭据文件权限、用户文件权限、HTTPS 请求语义、受信代理、监听地址、dataplane 端口、WebDAV 认证、分享 Base URL、分享默认策略、本地备份目标、初始密码文件和管理员账号备用状态。
 4. 在服务器上运行 `sudo mnemonas-doctor --public-domain <domain>`，复核公网域名、反向代理和本机端口暴露情况。
 
 Web UI 向导只负责 MnemoNAS 应用配置和操作提示；证书签发、防火墙、云安全组和反向代理安装仍应在服务器或云控制台完成。安全自检只能检查 MnemoNAS 进程能观察到的运行态和当前请求语义，不能替代云厂商安全组、真实公网端口和证书链检查。
 
 ---
 
-## 🔒 HTTPS 配置
+## HTTPS 配置
 
 MnemoNAS 支持内置 TLS 配置，但公网或长期部署更推荐使用 Caddy/Nginx/Traefik 等反向代理统一处理 HTTPS、证书续期和上传限制。
 
@@ -234,7 +236,7 @@ cloudflared tunnel run mnemonas
 
 ---
 
-## 🛡️ 安全检查清单
+## 安全检查清单
 
 ### 部署前检查
 
@@ -244,8 +246,8 @@ cloudflared tunnel run mnemonas
 - [ ] 公网部署时 `server.host = "127.0.0.1"`，只通过 HTTPS 反向代理访问
 - [ ] 管理员首页的首次部署检查没有认证关闭或 WebDAV 匿名访问提示；如存在提示，应先处理对应配置或确认外层访问控制
 - [ ] dataplane gRPC/HTTP 端口保持在 `127.0.0.1` 或受信私有网络内，没有直接暴露到公网
-- [ ] Web UI “安全自检”没有 `block` 项；公网部署前应处理所有 `warning`，尤其是 `allow_unsafe_no_auth`、会话有效期、登录限速、浏览器会话 cookie 边界、公开分享 cookie/cache 边界、用户文件权限、反向代理 header、dataplane 端口、分享默认策略和备用管理员提醒
-- [ ] systemd 部署已运行 `sudo mnemonas-doctor --public-domain <domain>`，并确认 HTTP 会跳转到同一域名的 HTTPS、HTTPS 证书 hostname 匹配、30 天内不过期，续期路径已验证，管理员账号冗余可用，会话有效期符合公网建议，用户文件及其目录不是符号链接且权限为私有，自动 WebDAV 凭据文件不是符号链接且权限私有，`initial-password.txt` 路径不存在且不是符号链接或非普通文件，公开分享默认策略和公开分享 JSON 响应边界已处理，匿名 WebDAV `PROPFIND` 被拒绝，且没有 Web 后端直连、dataplane 端口暴露或 UFW 放行警告
+- [ ] Web UI “安全自检”没有 `block` 项；公网部署前应处理所有 `warning`，尤其是 `allow_unsafe_no_auth`、会话有效期、登录限速、浏览器会话 cookie 边界、公开分享 cookie/cache 边界、配置文件权限、自动 WebDAV 凭据文件权限、用户文件权限、反向代理 header、dataplane 端口、本地备份目标、分享默认策略和备用管理员提醒
+- [ ] systemd 部署已运行 `sudo mnemonas-doctor --public-domain <domain>`，并确认 HTTP 会跳转到同一域名的 HTTPS、HTTPS 证书 hostname 匹配、30 天内不过期，续期路径已验证，配置文件不是符号链接且路径组件不包含符号链接，管理员账号冗余可用，会话有效期符合公网建议，用户文件及其目录不是符号链接、路径组件不包含符号链接且权限为私有，自动 WebDAV 凭据文件不是符号链接、路径组件不包含符号链接且权限私有，`initial-password.txt` 路径不存在，且没有保留符号链接、符号链接路径组件或非普通文件，公开分享默认策略和公开分享 JSON 响应边界已处理，匿名 WebDAV `PROPFIND` 被拒绝，且没有 Web 后端直连、dataplane 端口暴露或 UFW 放行警告
 - [ ] 已按 [公网云防火墙复核清单](cloud-firewall-checklist.md) 确认云安全组或防火墙公网入口只开放 `80/443`；管理端口、Web 后端端口和 dataplane 端口不对公网开放
 - [ ] 生产环境使用 HTTPS
 
@@ -281,7 +283,7 @@ curl https://<domain>/dav/
 
 ---
 
-## 🚫 已知安全限制
+## 已知安全限制
 
 ### 当前版本
 
@@ -353,7 +355,7 @@ location /api/ {
 
 ---
 
-## 📖 更多资源
+## 更多资源
 
 - [Docker 部署指南](docker-deployment.md) - 包含反向代理配置示例
 - [FAQ](faq.md) - 常见安全问题

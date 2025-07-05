@@ -123,6 +123,7 @@ Major upgrades for React, Vite, HeroUI, Tailwind, TypeScript, Vitest, or Playwri
 - Empty states should use EmptyState; file-type icons should use FileIcon.
 - Colors and backgrounds should use HeroUI semantic tokens such as `bg-content1`, `bg-content2`, `text-foreground`, and `text-default-500`.
 - Utility functions should reuse `src/lib/utils.ts` where practical, such as `formatBytes` and `formatRelativeTime`.
+- Native `<button>` elements in production code must declare `type` explicitly to avoid implicit form submission when reused inside forms.
 - The visual style should be compact, calm, and suitable for repeated operational use.
 - Operational pages should prioritize scanning efficiency, 8px-or-smaller radii, fine borders, stable dimensions, and explicit state colors.
 - Mobile must be independently usable: common paths should be reachable through bottom navigation or clear actions, and content must not be hidden by headers, drawers, or bottom navigation.

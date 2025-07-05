@@ -7123,6 +7123,79 @@ func securityCheckOverallStatus(checks []securityCheckItem) securityCheckStatus 
 	return status
 }
 
+func securityFirstSymlinkPathComponent(value string) (string, bool, error) {
+	cleaned := filepath.Clean(strings.TrimSpace(value))
+	if cleaned == "" || cleaned == "." {
+		return "", false, nil
+	}
+	if !filepath.IsAbs(cleaned) {
+		abs, err := filepath.Abs(cleaned)
+		if err != nil {
+			return "", false, err
+		}
+		cleaned = abs
+	}
+
+	volume := filepath.VolumeName(cleaned)
+	rest := strings.TrimPrefix(cleaned, volume)
+	separator := string(os.PathSeparator)
+	current := volume
+	if strings.HasPrefix(rest, separator) {
+		current = volume + separator
+		rest = strings.TrimLeft(rest, separator)
+	}
+	parts := strings.Split(rest, separator)
+	for i := 0; i < len(parts)-1; i++ {
+		part := parts[i]
+		if part == "" || part == "." {
+			continue
+		}
+		current = filepath.Join(current, part)
+		info, err := os.Lstat(current)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return "", false, nil
+			}
+			return "", false, err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return current, true, nil
+		}
+	}
+	return "", false, nil
+}
+
+func securityAbsCleanPath(value string) (string, error) {
+	cleaned := filepath.Clean(strings.TrimSpace(value))
+	if cleaned == "" || cleaned == "." {
+		return "", nil
+	}
+	if filepath.IsAbs(cleaned) {
+		return cleaned, nil
+	}
+	abs, err := filepath.Abs(cleaned)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Clean(abs), nil
+}
+
+func securityPathContainsOrEquals(parent, child string) bool {
+	parentClean := filepath.Clean(strings.TrimSpace(parent))
+	childClean := filepath.Clean(strings.TrimSpace(child))
+	if parentClean == "" || childClean == "" {
+		return false
+	}
+	if parentClean == childClean {
+		return true
+	}
+	rel, err := filepath.Rel(parentClean, childClean)
+	if err != nil {
+		return false
+	}
+	return rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
 func (s *Server) securityUsersFileAccessCheck(cfg *config.Config) securityCheckItem {
 	const checkID = "users_file_access"
 
@@ -7169,6 +7242,26 @@ func (s *Server) securityUsersFileAccessCheck(cfg *config.Config) securityCheckI
 			Status:  securityCheckBlock,
 			Title:   "用户文件目录是符号链接",
 			Message: "请将用户文件目录改为服务账号可读取的普通私有目录。",
+			Details: details,
+		}
+	}
+	if symlinkComponent, ok, err := securityFirstSymlinkPathComponent(usersDir); err != nil {
+		details["error"] = err.Error()
+		return securityCheckItem{
+			ID:      checkID,
+			Status:  securityCheckBlock,
+			Title:   "用户文件目录路径不可确认",
+			Message: "无法确认用户文件目录路径组件是否安全；请在服务器上检查 auth.users_file。",
+			Details: details,
+		}
+	} else if ok {
+		details["dir_kind"] = "symlink_component"
+		details["symlink_component"] = symlinkComponent
+		return securityCheckItem{
+			ID:      checkID,
+			Status:  securityCheckBlock,
+			Title:   "用户文件目录路径包含符号链接",
+			Message: "用户文件目录路径经过符号链接组件；请改为服务账号可读取的普通私有目录路径。",
 			Details: details,
 		}
 	}
@@ -7239,6 +7332,454 @@ func (s *Server) securityUsersFileAccessCheck(cfg *config.Config) securityCheckI
 	}
 }
 
+func securityBackupLocalDestinationsCheck(cfg *config.Config) securityCheckItem {
+	const checkID = "backup_local_destinations"
+
+	localJobs := 0
+	enabledLocalJobs := 0
+	for _, job := range cfg.Backup.Jobs {
+		if job.Type != "local" {
+			continue
+		}
+		localJobs++
+		if !job.Disabled {
+			enabledLocalJobs++
+		}
+	}
+
+	baseDetails := map[string]interface{}{
+		"local_job_count":         localJobs,
+		"enabled_local_job_count": enabledLocalJobs,
+	}
+	if strings.TrimSpace(cfg.Storage.Root) != "" {
+		baseDetails["storage_root"] = cfg.Storage.Root
+	}
+	if localJobs == 0 {
+		return securityCheckItem{
+			ID:      checkID,
+			Status:  securityCheckPass,
+			Title:   "未配置本地备份作业",
+			Message: "当前没有需要检查本地目标目录的备份作业。",
+			Details: baseDetails,
+		}
+	}
+	if enabledLocalJobs == 0 {
+		return securityCheckItem{
+			ID:      checkID,
+			Status:  securityCheckPass,
+			Title:   "本地备份作业已停用",
+			Message: "当前没有启用中的本地备份目标目录。",
+			Details: baseDetails,
+		}
+	}
+
+	withJobDetails := func(job config.BackupJobConfig, destination, source string) map[string]interface{} {
+		details := map[string]interface{}{
+			"local_job_count":         localJobs,
+			"enabled_local_job_count": enabledLocalJobs,
+			"job_id":                  job.ID,
+			"destination":             destination,
+			"source":                  source,
+		}
+		if strings.TrimSpace(cfg.Storage.Root) != "" {
+			details["storage_root"] = cfg.Storage.Root
+		}
+		return details
+	}
+
+	for _, job := range cfg.Backup.Jobs {
+		if job.Type != "local" || job.Disabled {
+			continue
+		}
+
+		destination := strings.TrimSpace(job.Destination)
+		source := strings.TrimSpace(job.Source)
+		if source == "" {
+			source = strings.TrimSpace(cfg.Storage.Root)
+		}
+		details := withJobDetails(job, destination, source)
+
+		if destination == "" {
+			details["destination_kind"] = "missing"
+			return securityCheckItem{
+				ID:      checkID,
+				Status:  securityCheckBlock,
+				Title:   "本地备份目标未配置",
+				Message: "启用中的本地备份作业缺少目标目录；请配置独立磁盘、独立数据集或远端备份目标。",
+				Details: details,
+			}
+		}
+		if !filepath.IsAbs(destination) {
+			details["destination_kind"] = "relative"
+			return securityCheckItem{
+				ID:      checkID,
+				Status:  securityCheckBlock,
+				Title:   "本地备份目标不是绝对路径",
+				Message: "本地备份目标必须使用服务器上的绝对路径。",
+				Details: details,
+			}
+		}
+
+		destinationAbs, err := securityAbsCleanPath(destination)
+		if err != nil {
+			details["error"] = err.Error()
+			return securityCheckItem{
+				ID:      checkID,
+				Status:  securityCheckBlock,
+				Title:   "无法确认本地备份目标路径",
+				Message: "无法解析本地备份目标路径；请在服务器上检查备份作业配置。",
+				Details: details,
+			}
+		}
+		if storageRootAbs, err := securityAbsCleanPath(cfg.Storage.Root); err != nil {
+			details["error"] = err.Error()
+			return securityCheckItem{
+				ID:      checkID,
+				Status:  securityCheckBlock,
+				Title:   "无法确认存储根目录路径",
+				Message: "无法解析 storage.root；请在服务器上检查存储和备份配置。",
+				Details: details,
+			}
+		} else if storageRootAbs != "" && securityPathContainsOrEquals(storageRootAbs, destinationAbs) {
+			details["destination_kind"] = "inside_storage_root"
+			return securityCheckItem{
+				ID:      checkID,
+				Status:  securityCheckBlock,
+				Title:   "本地备份目标位于主存储内",
+				Message: "本地备份目标不能位于 storage.root 内部；请改用独立磁盘、独立数据集或远端备份目标。",
+				Details: details,
+			}
+		}
+		if sourceAbs, err := securityAbsCleanPath(source); err != nil {
+			details["error"] = err.Error()
+			return securityCheckItem{
+				ID:      checkID,
+				Status:  securityCheckBlock,
+				Title:   "无法确认本地备份来源路径",
+				Message: "无法解析本地备份来源路径；请在服务器上检查备份作业配置。",
+				Details: details,
+			}
+		} else if sourceAbs != "" && securityPathContainsOrEquals(sourceAbs, destinationAbs) {
+			details["destination_kind"] = "inside_source"
+			return securityCheckItem{
+				ID:      checkID,
+				Status:  securityCheckBlock,
+				Title:   "本地备份目标位于备份来源内",
+				Message: "本地备份目标不能位于备份来源目录内部；请改用独立磁盘、独立数据集或远端备份目标。",
+				Details: details,
+			}
+		}
+
+		if symlinkComponent, ok, err := securityFirstSymlinkPathComponent(destination); err != nil {
+			details["error"] = err.Error()
+			return securityCheckItem{
+				ID:      checkID,
+				Status:  securityCheckBlock,
+				Title:   "无法确认本地备份目标路径",
+				Message: "无法确认本地备份目标路径组件是否安全；请在服务器上检查备份目标。",
+				Details: details,
+			}
+		} else if ok {
+			details["destination_kind"] = "symlink_component"
+			details["symlink_component"] = symlinkComponent
+			return securityCheckItem{
+				ID:      checkID,
+				Status:  securityCheckBlock,
+				Title:   "本地备份目标路径包含符号链接",
+				Message: "本地备份目标路径经过符号链接组件；请改为普通目录、独立数据集或远端备份目标。",
+				Details: details,
+			}
+		}
+
+		info, err := os.Lstat(destination)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				details["destination_kind"] = "missing"
+				return securityCheckItem{
+					ID:      checkID,
+					Status:  securityCheckWarning,
+					Title:   "本地备份目标目录不存在",
+					Message: "本地备份目标目录当前不存在；首次备份可能会创建目录，但长期备份目标建议提前挂载并确认可写。",
+					Details: details,
+				}
+			}
+			details["error"] = err.Error()
+			return securityCheckItem{
+				ID:      checkID,
+				Status:  securityCheckWarning,
+				Title:   "无法确认本地备份目标目录",
+				Message: "无法读取本地备份目标目录状态；请在服务器上确认目标路径可用。",
+				Details: details,
+			}
+		}
+
+		details["mode"] = fmt.Sprintf("%04o", info.Mode().Perm())
+		if info.Mode()&os.ModeSymlink != 0 {
+			details["destination_kind"] = "symlink"
+			return securityCheckItem{
+				ID:      checkID,
+				Status:  securityCheckBlock,
+				Title:   "本地备份目标是符号链接",
+				Message: "本地备份目标目录不能是符号链接；请改为普通目录、独立数据集或远端备份目标。",
+				Details: details,
+			}
+		}
+		if !info.IsDir() {
+			details["destination_kind"] = "not_directory"
+			return securityCheckItem{
+				ID:      checkID,
+				Status:  securityCheckBlock,
+				Title:   "本地备份目标不是目录",
+				Message: "本地备份目标必须是目录；请恢复为普通目录、独立数据集或远端备份目标。",
+				Details: details,
+			}
+		}
+		if info.Mode().Perm()&0o222 == 0 {
+			details["destination_kind"] = "not_writable"
+			return securityCheckItem{
+				ID:      checkID,
+				Status:  securityCheckWarning,
+				Title:   "本地备份目标可能不可写",
+				Message: "本地备份目标目录没有写权限位；请确认 MnemoNAS 服务账号可以写入该目录。",
+				Details: details,
+			}
+		}
+	}
+
+	return securityCheckItem{
+		ID:      checkID,
+		Status:  securityCheckPass,
+		Title:   "本地备份目标状态可用",
+		Message: "启用中的本地备份目标不在主存储或来源目录内，且当前目录状态可用。",
+		Details: baseDetails,
+	}
+}
+
+func securityConfigFileAccessCheck(configPath string) securityCheckItem {
+	const checkID = "config_file_access"
+
+	configPath = strings.TrimSpace(configPath)
+	details := map[string]interface{}{
+		"path": configPath,
+	}
+	if configPath == "" {
+		return securityCheckItem{
+			ID:      checkID,
+			Status:  securityCheckWarning,
+			Title:   "配置文件路径无法确定",
+			Message: "当前运行态未提供配置文件路径；请在服务器上确认 config.toml 是私有普通文件。",
+			Details: details,
+		}
+	}
+
+	if symlinkComponent, ok, err := securityFirstSymlinkPathComponent(configPath); err != nil {
+		details["error"] = err.Error()
+		return securityCheckItem{
+			ID:      checkID,
+			Status:  securityCheckWarning,
+			Title:   "无法确认配置文件路径",
+			Message: "请在服务器上确认 config.toml 路径组件不包含符号链接，且文件权限为私有。",
+			Details: details,
+		}
+	} else if ok {
+		details["path_kind"] = "symlink_component"
+		details["symlink_component"] = symlinkComponent
+		return securityCheckItem{
+			ID:      checkID,
+			Status:  securityCheckBlock,
+			Title:   "配置文件路径包含符号链接",
+			Message: "config.toml 路径经过符号链接组件；请改为服务账号可读取的普通私有路径。",
+			Details: details,
+		}
+	}
+
+	fileInfo, err := os.Lstat(configPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			details["path_kind"] = "missing"
+			return securityCheckItem{
+				ID:      checkID,
+				Status:  securityCheckWarning,
+				Title:   "配置文件不存在",
+				Message: "当前配置文件路径不存在；设置保存可能失败，公网部署前应持久化为私有普通文件。",
+				Details: details,
+			}
+		}
+		details["error"] = err.Error()
+		return securityCheckItem{
+			ID:      checkID,
+			Status:  securityCheckWarning,
+			Title:   "无法确认配置文件状态",
+			Message: "请在服务器上确认 config.toml 存在、不是符号链接且权限为私有。",
+			Details: details,
+		}
+	}
+
+	details["mode"] = fmt.Sprintf("%04o", fileInfo.Mode().Perm())
+	if fileInfo.Mode()&os.ModeSymlink != 0 {
+		details["path_kind"] = "symlink"
+		return securityCheckItem{
+			ID:      checkID,
+			Status:  securityCheckBlock,
+			Title:   "配置文件是符号链接",
+			Message: "config.toml 是符号链接；请恢复为服务账号可读取的普通私有文件。",
+			Details: details,
+		}
+	}
+	if !fileInfo.Mode().IsRegular() {
+		details["path_kind"] = "not_regular"
+		return securityCheckItem{
+			ID:      checkID,
+			Status:  securityCheckBlock,
+			Title:   "配置文件不是普通文件",
+			Message: "config.toml 当前路径不是普通文件；请恢复为服务账号可读取的普通私有文件。",
+			Details: details,
+		}
+	}
+
+	details["path_kind"] = "regular"
+	open := fileInfo.Mode().Perm()&0o077 != 0
+	details["group_or_other_access"] = open
+	if open {
+		return securityCheckItem{
+			ID:      checkID,
+			Status:  securityCheckWarning,
+			Title:   "配置文件权限过宽",
+			Message: "config.toml 允许组或其他用户访问；公网部署前建议将配置文件设为 0600。",
+			Details: details,
+		}
+	}
+
+	return securityCheckItem{
+		ID:      checkID,
+		Status:  securityCheckPass,
+		Title:   "配置文件权限为私有",
+		Message: "config.toml 是普通文件，且不允许组或其他用户访问。",
+		Details: details,
+	}
+}
+
+func securitySecretsFileAccessCheck(cfg *config.Config, webDAVAuthType string) securityCheckItem {
+	const checkID = "secrets_file_access"
+
+	generatedPasswordRequired := cfg.WebDAV.Enabled && webDAVAuthType == "basic" && strings.TrimSpace(cfg.WebDAV.Password) == ""
+	secretsPath := ""
+	if strings.TrimSpace(cfg.Storage.Root) != "" {
+		secretsPath = filepath.Join(cfg.Storage.Root, config.SecretsFile)
+	}
+	details := map[string]interface{}{
+		"path":                               secretsPath,
+		"webdav_enabled":                     cfg.WebDAV.Enabled,
+		"webdav_auth_type":                   webDAVAuthType,
+		"generated_webdav_password_required": generatedPasswordRequired,
+	}
+
+	if !generatedPasswordRequired {
+		return securityCheckItem{
+			ID:      checkID,
+			Status:  securityCheckPass,
+			Title:   "未使用自动 WebDAV 凭据",
+			Message: "当前 WebDAV 配置不依赖 secrets.json 中的自动生成 Basic 密码。",
+			Details: details,
+		}
+	}
+	if secretsPath == "" {
+		return securityCheckItem{
+			ID:      checkID,
+			Status:  securityCheckBlock,
+			Title:   "自动 WebDAV 凭据路径无法确定",
+			Message: "WebDAV 使用自动生成 Basic 密码，但无法确定 secrets.json 路径；公网访问前请修复 storage.root 或设置自定义强密码。",
+			Details: details,
+		}
+	}
+
+	if symlinkComponent, ok, err := securityFirstSymlinkPathComponent(secretsPath); err != nil {
+		details["error"] = err.Error()
+		return securityCheckItem{
+			ID:      checkID,
+			Status:  securityCheckBlock,
+			Title:   "无法确认自动 WebDAV 凭据路径",
+			Message: "WebDAV 使用自动生成 Basic 密码，但无法确认 secrets.json 路径组件是否安全。",
+			Details: details,
+		}
+	} else if ok {
+		details["path_kind"] = "symlink_component"
+		details["symlink_component"] = symlinkComponent
+		return securityCheckItem{
+			ID:      checkID,
+			Status:  securityCheckBlock,
+			Title:   "自动 WebDAV 凭据路径包含符号链接",
+			Message: "secrets.json 路径经过符号链接组件；请改为服务账号可读取的普通私有路径。",
+			Details: details,
+		}
+	}
+
+	fileInfo, err := os.Lstat(secretsPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			details["path_kind"] = "missing"
+			return securityCheckItem{
+				ID:      checkID,
+				Status:  securityCheckBlock,
+				Title:   "自动 WebDAV 凭据文件缺失",
+				Message: "WebDAV 使用自动生成 Basic 密码，但 secrets.json 不存在；请先启动 MnemoNAS 生成凭据，设置自定义强密码，或改用 MnemoNAS 用户认证。",
+				Details: details,
+			}
+		}
+		details["error"] = err.Error()
+		return securityCheckItem{
+			ID:      checkID,
+			Status:  securityCheckBlock,
+			Title:   "无法确认自动 WebDAV 凭据文件",
+			Message: "WebDAV 使用自动生成 Basic 密码，但无法读取 secrets.json 文件状态。",
+			Details: details,
+		}
+	}
+
+	details["mode"] = fmt.Sprintf("%04o", fileInfo.Mode().Perm())
+	if fileInfo.Mode()&os.ModeSymlink != 0 {
+		details["path_kind"] = "symlink"
+		return securityCheckItem{
+			ID:      checkID,
+			Status:  securityCheckBlock,
+			Title:   "自动 WebDAV 凭据文件是符号链接",
+			Message: "secrets.json 是符号链接；请恢复为服务账号可读取的普通私有文件。",
+			Details: details,
+		}
+	}
+	if !fileInfo.Mode().IsRegular() {
+		details["path_kind"] = "not_regular"
+		return securityCheckItem{
+			ID:      checkID,
+			Status:  securityCheckBlock,
+			Title:   "自动 WebDAV 凭据路径不是普通文件",
+			Message: "secrets.json 当前路径不是普通文件；请恢复为服务账号可读取的普通私有文件。",
+			Details: details,
+		}
+	}
+
+	details["path_kind"] = "regular"
+	open := fileInfo.Mode().Perm()&0o077 != 0
+	details["group_or_other_access"] = open
+	if open {
+		return securityCheckItem{
+			ID:      checkID,
+			Status:  securityCheckWarning,
+			Title:   "自动 WebDAV 凭据权限过宽",
+			Message: "secrets.json 允许组或其他用户访问；公网部署前建议将该文件设为 0600。",
+			Details: details,
+		}
+	}
+
+	return securityCheckItem{
+		ID:      checkID,
+		Status:  securityCheckPass,
+		Title:   "自动 WebDAV 凭据权限为私有",
+		Message: "secrets.json 是普通文件，且不允许组或其他用户访问。",
+		Details: details,
+	}
+}
+
 func securityInitialPasswordFileCheck(initialPasswordFile string) securityCheckItem {
 	const checkID = "initial_password_file"
 
@@ -7256,14 +7797,37 @@ func securityInitialPasswordFileCheck(initialPasswordFile string) securityCheckI
 		}
 	}
 
+	if symlinkComponent, ok, err := securityFirstSymlinkPathComponent(initialPasswordFile); err != nil {
+		details["error"] = err.Error()
+		return securityCheckItem{
+			ID:      checkID,
+			Status:  securityCheckWarning,
+			Title:   "无法确认初始管理员密码路径",
+			Message: "请在服务器上确认 initial-password.txt 路径组件不包含符号链接且该文件不存在。",
+			Details: details,
+		}
+	} else if ok {
+		details["path_kind"] = "symlink_component"
+		details["symlink_component"] = symlinkComponent
+		return securityCheckItem{
+			ID:      checkID,
+			Status:  securityCheckBlock,
+			Title:   "初始管理员密码路径包含符号链接",
+			Message: "initial-password.txt 路径经过符号链接组件；公网访问前请改为普通私有目录并确认该文件不存在。",
+			Details: details,
+		}
+	}
+
 	fileInfo, err := os.Lstat(initialPasswordFile)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
+			details["path_kind"] = "missing"
 			return securityCheckItem{
 				ID:      checkID,
 				Status:  securityCheckPass,
 				Title:   "未发现初始密码文件",
 				Message: "初始管理员密码文件已不存在。",
+				Details: details,
 			}
 		}
 		details["error"] = err.Error()
@@ -8087,7 +8651,7 @@ func (s *Server) handleGetSecurityCheck(w http.ResponseWriter, r *http.Request) 
 	webDAVPasswordRisk := securityWebDAVBasicPasswordRisk(cfg.WebDAV.Password)
 	unsafeNoAuthRisk := cfg.Security.AllowUnsafeNoAuth && !serverLoopback && (!s.authEnabled || (cfg.WebDAV.Enabled && webDAVAuthType == "none"))
 
-	checks := make([]securityCheckItem, 0, 21)
+	checks := make([]securityCheckItem, 0, 24)
 
 	if s.authEnabled {
 		checks = append(checks, securityCheckItem{
@@ -8110,6 +8674,7 @@ func (s *Server) handleGetSecurityCheck(w http.ResponseWriter, r *http.Request) 
 	checks = append(checks, securityBrowserSessionBoundaryCheck(r, cfg, s.authEnabled, requestSchemeValue, remoteIP, trustedForwardedSource))
 	checks = append(checks, securityPublicShareBoundaryCheck(cfg, requestSchemeValue))
 	checks = append(checks, securityShareDefaultPolicyCheck(cfg))
+	checks = append(checks, securityBackupLocalDestinationsCheck(cfg))
 
 	if cfg.Security.AllowUnsafeNoAuth {
 		status := securityCheckWarning
@@ -8142,6 +8707,7 @@ func (s *Server) handleGetSecurityCheck(w http.ResponseWriter, r *http.Request) 
 		})
 	}
 
+	checks = append(checks, securityConfigFileAccessCheck(s.configPath))
 	checks = append(checks, s.securityUsersFileAccessCheck(cfg))
 
 	if requestSchemeValue == "https" {
@@ -8439,6 +9005,7 @@ func (s *Server) handleGetSecurityCheck(w http.ResponseWriter, r *http.Request) 
 
 	checks = append(checks, securityWebDAVPrefixCheck(cfg))
 	checks = append(checks, s.securityWebDAVAuthCheck(cfg, webDAVAuthType, webDAVPasswordRisk, serverLoopback))
+	checks = append(checks, securitySecretsFileAccessCheck(cfg, webDAVAuthType))
 
 	if !cfg.SMB.Enabled {
 		checks = append(checks, securityCheckItem{

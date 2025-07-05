@@ -48,7 +48,8 @@ interface QuickActionProps {
 
 function QuickAction({ icon: Icon, label, description, onClick }: QuickActionProps) {
   return (
-    <button 
+    <button
+      type="button"
       className="group stat-card p-5 text-left transition-colors hover:border-primary/35"
       onClick={onClick}
     >
@@ -384,9 +385,9 @@ export function DashboardPage() {
   const handleRetry = async () => {
     const [healthResult, statsResult, versionResult, recentActivityResult, backupResult, setupResult] = await Promise.all([
       refetchHealth(),
-      refetchStats(),
+      hasInvalidHomeDir ? Promise.resolve({ error: null }) : refetchStats(),
       refetchVersion(),
-      refetchRecentActivity(),
+      hasInvalidHomeDir ? Promise.resolve({ error: null }) : refetchRecentActivity(),
       isAdmin ? refetchBackupJobs() : Promise.resolve({ error: null }),
       isAdmin ? refetchSetupStatus() : Promise.resolve({ error: null }),
     ])

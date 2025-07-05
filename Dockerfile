@@ -89,7 +89,7 @@ RUN groupadd --gid 1000 mnemonas \
 	&& chown -R mnemonas:mnemonas /data /app
 
 # 复制默认配置；/app 里的副本用于首次启动时填充挂载卷中的缺失配置。
-COPY mnemonas.example.toml /app/mnemonas.example.toml
+COPY --chmod=0644 mnemonas.example.toml /app/mnemonas.example.toml
 COPY --chown=mnemonas:mnemonas mnemonas.example.toml /data/config.toml
 RUN sed -i 's|^root = ".*"|root = "/data"|' /data/config.toml \
 	&& chown mnemonas:mnemonas /data/config.toml

@@ -33,6 +33,19 @@ export default defineConfig([
       'react-hooks/incompatible-library': 'off',
     },
   },
+  {
+    files: ['src/**/*.tsx'],
+    ignores: ['**/*.test.tsx', '**/test/**/*.{ts,tsx}', '**/__mocks__/**/*.{ts,tsx}'],
+    rules: {
+      'no-restricted-syntax': [
+        'error',
+        {
+          selector: "JSXOpeningElement[name.name='button']:not(:has(JSXAttribute[name.name='type']))",
+          message: 'Native button elements must declare type="button", type="submit", or type="reset".',
+        },
+      ],
+    },
+  },
   // Disable react-refresh rules for test files and mocks
   {
     files: ['**/*.test.{ts,tsx}', '**/test/**/*.{ts,tsx}', '**/__mocks__/**/*.{ts,tsx}'],
