@@ -81,6 +81,8 @@ const (
 )
 
 var webdavRandomRead = rand.Read
+var onWebDAVLockCleanupComplete = func(*Handler) {}
+var onWebDAVPropfindCacheMiss = func(*Handler, string, string) {}
 
 type webDAVScopeContextKey struct{}
 
@@ -551,6 +553,7 @@ func (h *Handler) startLockCleanupLoop() {
 					h.locksMu.Lock()
 					h.removeExpiredLocksLocked(time.Now())
 					h.locksMu.Unlock()
+					onWebDAVLockCleanupComplete(h)
 				case <-h.lockCleanupStop:
 					return
 				}
@@ -2572,6 +2575,7 @@ func (h *Handler) handlePropfind(ctx context.Context, w http.ResponseWriter, r *
 			h.writePropfindResponse(w, responses)
 			return
 		}
+		onWebDAVPropfindCacheMiss(h, filePath, depth)
 	}
 	generation := h.propCache.SnapshotGeneration()
 

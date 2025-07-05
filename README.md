@@ -87,7 +87,7 @@ sudo ./scripts/install-systemd.sh
 sudo mnemonas-doctor
 ```
 
-默认会安装到 `/usr/local/bin`，配置写入 `/etc/mnemonas/config.toml`，数据放在 `/srv/mnemonas`，Web UI 监听 `http://<server-ip>:8080`。首次登录密码在 `/srv/mnemonas/.mnemonas/initial-password.txt`。如果要通过公网域名访问，先按 [公网服务器快速上线](docs/public-server-quickstart.md) 收紧后端端口并配置 HTTPS 反向代理。
+默认会安装到 `/usr/local/bin`，配置写入 `/etc/mnemonas/config.toml`，数据放在 `/srv/mnemonas`，Web UI 监听 `http://<server-ip>:8080`。首次登录密码在 `/srv/mnemonas/.mnemonas/initial-password.txt`。升级前保留上一版本 release 解压目录，升级失败时可重新运行旧目录里的安装脚本回退二进制和 Web UI；完整步骤见部署指南。如果要通过公网域名访问，先按 [公网服务器快速上线](docs/public-server-quickstart.md) 收紧后端端口并配置 HTTPS 反向代理。
 
 详见 [Linux/systemd 部署指南](docs/linux-systemd-deployment.md)。
 
@@ -107,7 +107,7 @@ cd mnemonas
 # http://localhost:8080
 ```
 
-仓库自带的 `docker-compose.yml` 默认从当前源码构建 `mnemonas:local` 镜像，不要求宿主机安装 Go/Rust/Node.js，但需要能拉取 Docker 基础镜像。Dockerfile 使用 BuildKit 缓存和较小的 Alpine Go builder，弱网环境下重试构建不会从零下载所有依赖。`docker-quickstart.sh` 会创建或更新 `.env`，把 `MNEMONAS_UID`/`MNEMONAS_GID` 设置为当前宿主机用户，创建 `MNEMONAS_DATA_DIR`，运行 Docker 预检，并在 `--start` 时按 `MNEMONAS_IMAGE` 选择启动方式：本地镜像执行源码构建，发布镜像使用 `docker compose up -d --pull missing --no-build`。GitHub Releases 的二进制归档会附带 `docker-compose.yml` 和 `.env.example`，归档内模板会把 `MNEMONAS_IMAGE` 预设为同一 release tag 的 GHCR 镜像。如果 8080 已被占用，可运行 `./scripts/docker-quickstart.sh --port 8888 --start`。首次启动会在数据目录中自动生成持久化配置；Web 登录初始密码在 `<MNEMONAS_DATA_DIR>/.mnemonas/initial-password.txt`。管理员首次登录后，首页会显示首次部署检查，逐项确认初始登录凭据处理、管理员冗余、备份和公网入口后可关闭提示。发布镜像使用方式见 [Docker 部署指南](docs/docker-deployment.md)。
+仓库自带的 `docker-compose.yml` 默认从当前源码构建 `mnemonas:local` 镜像，不要求宿主机安装 Go/Rust/Node.js，但需要能拉取 Docker 基础镜像。Dockerfile 使用 BuildKit 缓存和较小的 Alpine Go builder，弱网环境下重试构建不会从零下载所有依赖。`docker-quickstart.sh` 会创建或更新 `.env`，把 `MNEMONAS_UID`/`MNEMONAS_GID` 设置为当前宿主机用户，创建 `MNEMONAS_DATA_DIR`，运行 Docker 预检，并在 `--start` 时按 `MNEMONAS_IMAGE` 选择启动方式：本地镜像执行源码构建，发布镜像使用 `docker compose up -d --pull missing --no-build`；启动后脚本会等待本机 `/health` 通过，避免容器已创建但服务未就绪。如果本机无法访问 Docker 发布端口，可显式传 `--skip-health-check`。GitHub Releases 的二进制归档会附带 `docker-compose.yml` 和 `.env.example`，归档内模板会把 `MNEMONAS_IMAGE` 预设为同一 release tag 的 GHCR 镜像。如果 8080 已被占用，可运行 `./scripts/docker-quickstart.sh --port 8888 --start`。首次启动会在数据目录中自动生成持久化配置；Web 登录初始密码在 `<MNEMONAS_DATA_DIR>/.mnemonas/initial-password.txt`。管理员首次登录后，首页会显示首次部署检查，逐项确认初始登录凭据处理、管理员冗余、备份和公网入口后可关闭提示。发布镜像使用方式见 [Docker 部署指南](docs/docker-deployment.md)。
 
 ### 二进制安装
 
@@ -228,18 +228,17 @@ make coverage
 # E2E 验收测试
 make e2e
 
-# 破坏性故障注入测试，必须指向隔离测试实例
-MNEMONAS_LIVE_FAULTS=1 \
-BASE_URL=http://127.0.0.1:18080 \
-STORAGE_ROOT=/tmp/mnemonas-fault-target \
-NASD_BIN="$PWD/bin/nasd" \
-./scripts/fault-injection-test.sh
+# 破坏性故障注入测试，默认启动隔离后端
+make fault-injection
 
 # 性能基准测试
 make bench
 
 # 代码检查
 make lint
+
+# golangci-lint 默认复用本地 Go 工具链环境；需要自动下载工具链时可覆盖
+GO_LINT_ENV="GOSUMDB=sum.golang.org GOTOOLCHAIN=auto" make lint
 
 # golangci-lint 不在 PATH 时可显式指定位置
 GOLANGCI_LINT=/path/to/golangci-lint make lint
@@ -308,7 +307,8 @@ Docker 和 systemd 部署默认只对外提供 `8080`；`9090/9091` 是内部 da
 | [scripts/torture-test.sh](scripts/torture-test.sh) | 非破坏性深度测试矩阵：race、fuzz、property、浏览器交互完整性 |
 | [scripts/run-benchmark-isolated.sh](scripts/run-benchmark-isolated.sh) | 启动隔离后端并运行性能基准测试，`make bench` 默认使用它 |
 | [scripts/benchmark.sh](scripts/benchmark.sh) | 对显式指定的本地服务和存储根执行性能基准测试 |
-| [scripts/fault-injection-test.sh](scripts/fault-injection-test.sh) | 破坏性故障注入测试；默认关闭，必须显式指定隔离目标 |
+| [scripts/run-fault-injection-isolated.sh](scripts/run-fault-injection-isolated.sh) | 启动隔离后端并运行破坏性故障注入测试，`make fault-injection` 默认使用它 |
+| [scripts/fault-injection-test.sh](scripts/fault-injection-test.sh) | 对显式指定的目标执行底层破坏性故障注入测试 |
 | [scripts/setup-reverse-proxy.sh](scripts/setup-reverse-proxy.sh) | 公网 HTTPS 反向代理配置与 MnemoNAS 安全入口收紧 |
 
 ## 📜 License

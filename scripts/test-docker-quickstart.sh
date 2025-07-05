@@ -30,6 +30,23 @@ make_repo_case() {
 		'printf "preflight repo=%s env=%s data=%s port=%s\n" "$REPO_ROOT" "$ENV_PATH" "$DATA_DIR" "$HOST_PORT" > "$CAPTURE_DIR/preflight.log"'
 }
 
+make_success_curl() {
+	local bin_dir="$1"
+	write_executable "$bin_dir/curl" \
+		'#!/usr/bin/env bash' \
+		'set -euo pipefail' \
+		'printf "%s\n" "$*" > "$CAPTURE_DIR/curl.args"'
+}
+
+make_failing_curl() {
+	local bin_dir="$1"
+	write_executable "$bin_dir/curl" \
+		'#!/usr/bin/env bash' \
+		'set -euo pipefail' \
+		'printf "%s\n" "$*" > "$CAPTURE_DIR/curl.args"' \
+		'exit 7'
+}
+
 assert_file_contains() {
 	local path="$1"
 	local expected="$2"
@@ -121,10 +138,13 @@ run_start_test() {
 	local quickstart="$REPO_ROOT/scripts/docker-quickstart.sh"
 	mkdir -p "$capture_dir" "$fake_bin"
 	make_repo_case "$repo_dir"
+	mkdir -p "$data_dir/.mnemonas"
+	printf 'Password: test-password\n' > "$data_dir/.mnemonas/initial-password.txt"
 	write_executable "$fake_bin/docker" \
 		'#!/usr/bin/env bash' \
 		'set -euo pipefail' \
 		'printf "%s\n" "$*" > "$CAPTURE_DIR/docker.args"'
+	make_success_curl "$fake_bin"
 
 	CAPTURE_DIR="$capture_dir" \
 		REPO_ROOT="$repo_dir" \
@@ -138,6 +158,9 @@ run_start_test() {
 	assert_file_contains "$capture_dir/docker.args" "compose -f $repo_dir/docker-compose.yml --env-file $repo_dir/.env up -d"
 	assert_file_contains "$capture_dir/docker.args" "--no-build"
 	assert_file_not_contains "$capture_dir/docker.args" "--build"
+	assert_file_contains "$capture_dir/curl.args" "http://127.0.0.1:18081/health"
+	assert_file_contains "$case_dir/out.log" "health check passed"
+	assert_file_contains "$case_dir/out.log" "initial password file is available: $data_dir/.mnemonas/initial-password.txt"
 }
 
 run_start_release_image_test() {
@@ -160,6 +183,7 @@ EOF
 		'#!/usr/bin/env bash' \
 		'set -euo pipefail' \
 		'printf "%s\n" "$*" > "$CAPTURE_DIR/docker.args"'
+	make_success_curl "$fake_bin"
 
 	CAPTURE_DIR="$capture_dir" \
 		REPO_ROOT="$repo_dir" \
@@ -172,6 +196,8 @@ EOF
 	assert_file_contains "$capture_dir/docker.args" "compose -f $repo_dir/docker-compose.yml --env-file $repo_dir/.env up -d"
 	assert_file_contains "$capture_dir/docker.args" "--pull missing --no-build"
 	assert_file_not_contains "$capture_dir/docker.args" "--build"
+	assert_file_contains "$capture_dir/curl.args" "http://127.0.0.1:18082/health"
+	assert_file_contains "$case_dir/out.log" "initial password file is not present: $data_dir/.mnemonas/initial-password.txt"
 }
 
 run_start_release_template_test() {
@@ -192,6 +218,7 @@ run_start_release_template_test() {
 		'#!/usr/bin/env bash' \
 		'set -euo pipefail' \
 		'printf "%s\n" "$*" > "$CAPTURE_DIR/docker.args"'
+	make_success_curl "$fake_bin"
 
 	CAPTURE_DIR="$capture_dir" \
 		REPO_ROOT="$repo_dir" \
@@ -206,6 +233,111 @@ run_start_release_template_test() {
 	assert_file_contains "$capture_dir/docker.args" "compose -f $repo_dir/docker-compose.yml --env-file $repo_dir/.env up -d"
 	assert_file_contains "$capture_dir/docker.args" "--pull missing --no-build"
 	assert_file_not_contains "$capture_dir/docker.args" "--build"
+	assert_file_contains "$capture_dir/curl.args" "http://127.0.0.1:18083/health"
+}
+
+run_start_compose_failure_test() {
+	local case_dir="$TMP_ROOT/start-compose-failure"
+	local repo_dir="$case_dir/repo"
+	local data_dir="$case_dir/data"
+	local capture_dir="$case_dir/capture"
+	local fake_bin="$case_dir/bin"
+	local quickstart="$REPO_ROOT/scripts/docker-quickstart.sh"
+	local status
+	mkdir -p "$capture_dir" "$fake_bin"
+	make_repo_case "$repo_dir"
+	write_executable "$fake_bin/docker" \
+		'#!/usr/bin/env bash' \
+		'set -euo pipefail' \
+		'printf "%s\n" "$*" > "$CAPTURE_DIR/docker.args"' \
+		'exit 17'
+	make_success_curl "$fake_bin"
+
+	set +e
+	CAPTURE_DIR="$capture_dir" \
+		REPO_ROOT="$repo_dir" \
+		PATH="$fake_bin:$PATH" \
+		bash "$quickstart" \
+			--start \
+			--no-build \
+			--port 18086 \
+			--data-dir "$data_dir" > "$case_dir/out.log" 2>&1
+	status=$?
+	set -e
+
+	[[ "$status" -ne 0 ]] || fail "quickstart accepted a failed docker compose start"
+	assert_file_contains "$capture_dir/docker.args" "compose -f $repo_dir/docker-compose.yml --env-file $repo_dir/.env up -d"
+	assert_file_contains "$case_dir/out.log" "docker compose failed to start MnemoNAS"
+	assert_file_contains "$case_dir/out.log" "docker compose -f $repo_dir/docker-compose.yml --env-file $repo_dir/.env ps"
+	assert_file_contains "$case_dir/out.log" "logs --tail 100 mnemonas"
+	[[ ! -f "$capture_dir/curl.args" ]] || fail "curl was called after docker compose failed"
+}
+
+run_start_health_failure_test() {
+	local case_dir="$TMP_ROOT/start-health-failure"
+	local repo_dir="$case_dir/repo"
+	local data_dir="$case_dir/data"
+	local capture_dir="$case_dir/capture"
+	local fake_bin="$case_dir/bin"
+	local quickstart="$REPO_ROOT/scripts/docker-quickstart.sh"
+	local status
+	mkdir -p "$capture_dir" "$fake_bin"
+	make_repo_case "$repo_dir"
+	write_executable "$fake_bin/docker" \
+		'#!/usr/bin/env bash' \
+		'set -euo pipefail' \
+		'printf "%s\n" "$*" > "$CAPTURE_DIR/docker.args"'
+	make_failing_curl "$fake_bin"
+
+	set +e
+	CAPTURE_DIR="$capture_dir" \
+		REPO_ROOT="$repo_dir" \
+		PATH="$fake_bin:$PATH" \
+		HEALTH_TIMEOUT_SECONDS=1 \
+		bash "$quickstart" \
+			--start \
+			--no-build \
+			--port 18084 \
+			--data-dir "$data_dir" > "$case_dir/out.log" 2>&1
+	status=$?
+	set -e
+
+	[[ "$status" -ne 0 ]] || fail "quickstart accepted a failed post-start health check"
+	assert_file_contains "$capture_dir/docker.args" "compose -f $repo_dir/docker-compose.yml --env-file $repo_dir/.env up -d"
+	assert_file_contains "$capture_dir/curl.args" "http://127.0.0.1:18084/health"
+	assert_file_contains "$case_dir/out.log" "health check did not pass within 1s"
+	assert_file_contains "$case_dir/out.log" "logs --tail 100 mnemonas"
+}
+
+run_start_skip_health_check_test() {
+	local case_dir="$TMP_ROOT/start-skip-health"
+	local repo_dir="$case_dir/repo"
+	local data_dir="$case_dir/data"
+	local capture_dir="$case_dir/capture"
+	local fake_bin="$case_dir/bin"
+	local quickstart="$REPO_ROOT/scripts/docker-quickstart.sh"
+	mkdir -p "$capture_dir" "$fake_bin"
+	make_repo_case "$repo_dir"
+	write_executable "$fake_bin/docker" \
+		'#!/usr/bin/env bash' \
+		'set -euo pipefail' \
+		'printf "%s\n" "$*" > "$CAPTURE_DIR/docker.args"'
+	make_failing_curl "$fake_bin"
+
+	CAPTURE_DIR="$capture_dir" \
+		REPO_ROOT="$repo_dir" \
+		PATH="$fake_bin:$PATH" \
+		HEALTH_TIMEOUT_SECONDS=invalid \
+		bash "$quickstart" \
+			--start \
+			--no-build \
+			--skip-health-check \
+			--port 18085 \
+			--data-dir "$data_dir" > "$case_dir/out.log"
+
+	assert_file_contains "$capture_dir/docker.args" "compose -f $repo_dir/docker-compose.yml --env-file $repo_dir/.env up -d"
+	[[ ! -f "$capture_dir/curl.args" ]] || fail "curl was called despite --skip-health-check"
+	assert_file_contains "$case_dir/out.log" "skipping post-start health check"
 }
 
 run_invalid_data_dir_test() {
@@ -457,6 +589,9 @@ run_existing_env_test
 run_start_test
 run_start_release_image_test
 run_start_release_template_test
+run_start_compose_failure_test
+run_start_health_failure_test
+run_start_skip_health_check_test
 run_invalid_data_dir_test
 run_protected_data_dir_test
 run_data_dir_traversal_test

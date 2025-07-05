@@ -91,6 +91,7 @@ const ALERT_CHANNEL_LABELS: Record<string, string> = {
   webhook: 'Webhook',
   telegram: 'Telegram',
   wecom: '企业微信',
+  dingtalk: '钉钉',
   email: 'SMTP 邮件',
 }
 
@@ -1728,6 +1729,92 @@ function SharePolicyChangeReview({
   )
 }
 
+function SharePolicyCoverageSummary({ draft }: { draft: SharePolicyReviewInput }) {
+  const normalizedRules = normalizeSharePolicyRulesForSave(draft.rules)
+  if (normalizedRules.error) {
+    return (
+      <div
+        className="rounded-lg border border-warning/20 bg-warning/10 px-3 py-2 text-xs text-warning"
+        aria-label="分享策略覆盖摘要"
+      >
+        分享策略覆盖摘要暂不可用：{normalizedRules.error}
+      </div>
+    )
+  }
+
+  const rules = normalizedRules.rules
+  const defaultExpiresIn = normalizeSharePolicyDurationForReview(draft.defaultExpiresIn)
+  const defaultMaxAccess = normalizeSharePolicyMaxAccessForReview(draft.defaultMaxAccess)
+  const passwordRuleCount = rules.filter((rule) => rule.require_password).length
+  const expiresRuleCount = rules.filter((rule) => Boolean(rule.max_expires_in)).length
+  const accessRuleCount = rules.filter((rule) => Boolean(rule.max_access && rule.max_access > 0)).length
+  const attentionItems = draft.enabled
+    ? [
+      draft.baseURL.trim() === '' ? '分享基础 URL 未固定，跨域名或反向代理切换后需复核已生成链接。' : '',
+      defaultExpiresIn === '' ? '新分享默认不过期，建议为公网分享设置默认有效期。' : '',
+      defaultMaxAccess === '' ? '新分享默认访问次数不限制，建议为公网分享设置默认访问次数。' : '',
+      rules.length === 0 ? '尚未配置路径分享策略，所有路径只受全局默认值约束。' : '',
+      rules.length > passwordRuleCount ? `${rules.length - passwordRuleCount} 条路径策略未强制密码。` : '',
+      rules.length > expiresRuleCount ? `${rules.length - expiresRuleCount} 条路径策略未限制最长有效期。` : '',
+      rules.length > accessRuleCount ? `${rules.length - accessRuleCount} 条路径策略未限制访问次数。` : '',
+    ].filter(Boolean)
+    : ['分享功能当前停用；重新启用前应复核默认有效期、访问次数和路径策略。']
+
+  const summaryItems = [
+    { label: '功能状态', value: draft.enabled ? '已启用' : '已停用', tone: draft.enabled ? 'warning' : 'success' },
+    { label: '默认有效期', value: sharePolicyLimitValueLabel(defaultExpiresIn), tone: draft.enabled && defaultExpiresIn === '' ? 'warning' : 'success' },
+    { label: '默认访问次数', value: sharePolicyLimitValueLabel(defaultMaxAccess), tone: draft.enabled && defaultMaxAccess === '' ? 'warning' : 'success' },
+    { label: '路径策略', value: `${rules.length} 条`, tone: draft.enabled && rules.length === 0 ? 'warning' : 'success' },
+    { label: '强制密码路径', value: `${passwordRuleCount} 条`, tone: draft.enabled && rules.length > passwordRuleCount ? 'warning' : 'success' },
+    { label: '完整限制路径', value: `${rules.filter((rule) => rule.require_password && rule.max_expires_in && rule.max_access && rule.max_access > 0).length} 条`, tone: 'default' },
+  ]
+
+  return (
+    <div aria-label="分享策略覆盖摘要" className="rounded-lg border border-divider bg-content1/60 p-3">
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <div className="text-sm font-semibold text-foreground">分享策略覆盖摘要</div>
+          <div className="mt-1 text-xs text-default-500">基于当前编辑内容估算默认分享限制和路径规则覆盖。</div>
+        </div>
+        <span className={cn(
+          'w-fit rounded-full px-2 py-1 text-xs font-medium',
+          attentionItems.length > 0 ? 'bg-warning/10 text-warning' : 'bg-success/10 text-success',
+        )}>
+          关注项 {attentionItems.length}
+        </span>
+      </div>
+      <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+        {summaryItems.map((item) => (
+          <div
+            key={item.label}
+            className={cn(
+              'min-w-0 rounded-lg border p-3',
+              item.tone === 'success'
+                ? 'border-success/20 bg-success/5'
+                : item.tone === 'warning'
+                  ? 'border-warning/20 bg-warning/10'
+                  : 'border-divider bg-content2/60',
+            )}
+          >
+            <div className="text-xs font-medium text-default-500">{item.label}</div>
+            <div className="mt-1 break-words text-sm text-default-700">{item.value}</div>
+          </div>
+        ))}
+      </div>
+      <div className="mt-3 rounded-lg border border-divider bg-content2/40 px-3 py-2">
+        <div className="text-xs font-medium text-default-500">策略关注项</div>
+        <ul className="mt-2 list-disc space-y-1 pl-4 text-xs leading-5 text-default-600">
+          {attentionItems.length === 0 ? (
+            <li>未发现默认策略或路径策略的明显宽松项。</li>
+          ) : attentionItems.map((item) => (
+            <li key={item}>{item}</li>
+          ))}
+        </ul>
+      </div>
+    </div>
+  )
+}
+
 function directoryAccessSourceLabel(source: DirectoryAccessDecision['source']): string {
   switch (source) {
     case 'admin':
@@ -2839,6 +2926,9 @@ function getSecurityCheckDisplayMessage(check: SecurityCheckItem): string {
           ? '公开分享未启用，不会下发公开分享访问 cookie。'
           : '受密码保护的公开分享使用 HttpOnly、SameSite=Strict、Secure 访问 cookie，并设置私有缓存边界。'
       }
+      if (check.status === 'block') {
+        return '公开分享访问 cookie、失败限速或缓存边界未满足公网安全要求。'
+      }
       return '分享功能已启用，但当前访问未被识别为 HTTPS；受密码保护的公开分享访问 cookie 不会带 Secure 标记。'
     case 'users_file_access':
       if (check.status === 'pass') {
@@ -3312,6 +3402,9 @@ export function SettingsPage() {
     alertsWeComEnabled: false,
     alertsWeComWebhookURL: '',
     alertsWeComWebhookURLConfigured: false,
+    alertsDingTalkEnabled: false,
+    alertsDingTalkWebhookURL: '',
+    alertsDingTalkWebhookURLConfigured: false,
     alertsEmailEnabled: false,
     alertsSMTPHost: '',
     alertsSMTPPort: '587',
@@ -3393,6 +3486,9 @@ export function SettingsPage() {
       const weComWebhookURL = request.alerts.wecom_webhook_url?.trim() ?? ''
       next.alertsWeComWebhookURL = weComWebhookURL ? REDACTED_SETTINGS_SECRET : ''
       next.alertsWeComWebhookURLConfigured = weComWebhookURL !== ''
+      const dingTalkWebhookURL = request.alerts.dingtalk_webhook_url?.trim() ?? ''
+      next.alertsDingTalkWebhookURL = dingTalkWebhookURL ? REDACTED_SETTINGS_SECRET : ''
+      next.alertsDingTalkWebhookURLConfigured = dingTalkWebhookURL !== ''
       next.alertsSMTPPasswordConfigured = request.alerts.smtp_password === ''
         ? false
         : settings.alertsSMTPPasswordConfigured || (request.alerts.smtp_password?.trim() ?? '') !== ''
@@ -3432,6 +3528,10 @@ export function SettingsPage() {
       next.alertsWeComWebhookURL = sanitizedSubmitted.alertsWeComWebhookURL
       next.alertsWeComWebhookURLConfigured = sanitizedSubmitted.alertsWeComWebhookURLConfigured
     }
+    if (current.alertsDingTalkWebhookURL === submitted.alertsDingTalkWebhookURL) {
+      next.alertsDingTalkWebhookURL = sanitizedSubmitted.alertsDingTalkWebhookURL
+      next.alertsDingTalkWebhookURLConfigured = sanitizedSubmitted.alertsDingTalkWebhookURLConfigured
+    }
     if (current.alertsSMTPPassword === submitted.alertsSMTPPassword) {
       next.alertsSMTPPassword = sanitizedSubmitted.alertsSMTPPassword
       next.alertsSMTPPasswordConfigured = sanitizedSubmitted.alertsSMTPPasswordConfigured
@@ -3459,6 +3559,12 @@ export function SettingsPage() {
     ) {
       return true
     }
+    if (
+      settings.alertsDingTalkEnabled
+      && (settings.alertsDingTalkWebhookURLConfigured || settings.alertsDingTalkWebhookURL.trim() !== '')
+    ) {
+      return true
+    }
     const smtpPort = Number(settings.alertsSMTPPort.trim())
     const hasSMTPRecipient = settings.alertsSMTPTo
       .split(/[\n,]+/)
@@ -3482,7 +3588,7 @@ export function SettingsPage() {
     if (!hasSavedAlertNotificationChannel(settings)) {
       return {
         title: '没有可用提醒通道',
-        description: '请至少配置 Webhook、Telegram、企业微信或邮件通道并保存后再发送测试提醒。',
+        description: '请至少配置 Webhook、Telegram、企业微信、钉钉或邮件通道并保存后再发送测试提醒。',
       }
     }
     return null
@@ -3858,6 +3964,9 @@ export function SettingsPage() {
       alertsWeComEnabled: data.alerts?.wecom_enabled ?? false,
       alertsWeComWebhookURL: data.alerts?.wecom_webhook_url ?? '',
       alertsWeComWebhookURLConfigured: data.alerts?.wecom_webhook_url_configured ?? (data.alerts?.wecom_webhook_url ?? '') === REDACTED_SETTINGS_SECRET,
+      alertsDingTalkEnabled: data.alerts?.dingtalk_enabled ?? false,
+      alertsDingTalkWebhookURL: data.alerts?.dingtalk_webhook_url ?? '',
+      alertsDingTalkWebhookURLConfigured: data.alerts?.dingtalk_webhook_url_configured ?? (data.alerts?.dingtalk_webhook_url ?? '') === REDACTED_SETTINGS_SECRET,
       alertsEmailEnabled: data.alerts?.email_enabled ?? false,
       alertsSMTPHost: data.alerts?.smtp_host ?? '',
       alertsSMTPPort: String(data.alerts?.smtp_port ?? 587),
@@ -4057,7 +4166,22 @@ export function SettingsPage() {
       case 'https_request':
       case 'public_http_exposure':
       case 'browser_session_boundary':
+        updateDirtySettings((prev) => ({
+          ...prev,
+          serverHost: '127.0.0.1',
+          serverTrustedProxyHops: '1',
+        }))
+        addToast({ title: '已应用反向代理推荐', description: '保存设置后生效。', color: 'success' })
+        return
       case 'public_share_boundary':
+        if (check.details?.password_cookie_secure !== false) {
+          addToast({
+            title: '需要检查公开分享边界',
+            description: '公开分享 cookie、失败限速或缓存边界异常；请先升级或检查服务端公开分享响应头后重新运行安全自检。',
+            color: 'warning',
+          })
+          return
+        }
         updateDirtySettings((prev) => ({
           ...prev,
           serverHost: '127.0.0.1',
@@ -4253,7 +4377,10 @@ export function SettingsPage() {
       case 'browser_session_boundary':
         return { label: '应用代理推荐', onPress: () => applySecurityCheckFix(check) }
       case 'public_share_boundary':
-        return { label: '应用代理推荐', onPress: () => applySecurityCheckFix(check) }
+        if (check.status === 'warning' && check.details?.password_cookie_secure === false) {
+          return { label: '应用代理推荐', onPress: () => applySecurityCheckFix(check) }
+        }
+        return undefined
       case 'trusted_proxy_or_tls':
         return { label: '设置代理层数', onPress: () => applySecurityCheckFix(check) }
       case 'forwarded_proto_trust':
@@ -4434,6 +4561,7 @@ export function SettingsPage() {
     const trimmedAlertsTelegramBotToken = settings.alertsTelegramBotToken.trim()
     const trimmedAlertsTelegramChatID = settings.alertsTelegramChatID.trim()
     const trimmedAlertsWeComWebhookURL = settings.alertsWeComWebhookURL.trim()
+    const trimmedAlertsDingTalkWebhookURL = settings.alertsDingTalkWebhookURL.trim()
     const trimmedAlertsSMTPHost = settings.alertsSMTPHost.trim()
     const trimmedAlertsSMTPPort = settings.alertsSMTPPort.trim()
     const parsedAlertsSMTPPort = Number(trimmedAlertsSMTPPort)
@@ -4959,6 +5087,33 @@ export function SettingsPage() {
       return
     }
 
+    if (trimmedAlertsDingTalkWebhookURL === REDACTED_SETTINGS_SECRET && !settings.alertsDingTalkWebhookURLConfigured) {
+      addToast({
+        title: '钉钉 Webhook 占位符无效',
+        description: '只有服务端已保存的钉钉 Webhook URL 才能保留为 <redacted>；新增钉钉 Webhook 需要填写真实地址。',
+        color: 'danger',
+      })
+      return
+    }
+
+    if (trimmedAlertsDingTalkWebhookURL !== REDACTED_SETTINGS_SECRET && !isValidOptionalHTTPURL(trimmedAlertsDingTalkWebhookURL)) {
+      addToast({
+        title: '钉钉 Webhook URL 无效',
+        description: '钉钉 Webhook URL 必须为空，或使用 http/https 的完整地址',
+        color: 'danger',
+      })
+      return
+    }
+
+    if (settings.alertsDingTalkEnabled && !trimmedAlertsDingTalkWebhookURL && !settings.alertsDingTalkWebhookURLConfigured) {
+      addToast({
+        title: '钉钉 Webhook URL 缺失',
+        description: '启用钉钉通知时必须填写群机器人 Webhook URL。',
+        color: 'danger',
+      })
+      return
+    }
+
     if (!/^\d+$/.test(trimmedAlertsSMTPPort) || !Number.isInteger(parsedAlertsSMTPPort) || parsedAlertsSMTPPort < 1 || parsedAlertsSMTPPort > 65535) {
       addToast({
         title: 'SMTP 端口格式无效',
@@ -5287,6 +5442,8 @@ export function SettingsPage() {
         telegram_chat_id: trimmedAlertsTelegramChatID,
         wecom_enabled: settings.alertsWeComEnabled,
         wecom_webhook_url: trimmedAlertsWeComWebhookURL,
+        dingtalk_enabled: settings.alertsDingTalkEnabled,
+        dingtalk_webhook_url: trimmedAlertsDingTalkWebhookURL,
         email_enabled: settings.alertsEmailEnabled,
         smtp_host: trimmedAlertsSMTPHost,
         smtp_port: parsedAlertsSMTPPort,
@@ -6959,6 +7116,44 @@ export function SettingsPage() {
                   </SettingRow>
                   <Divider className="bg-divider" />
                   <SettingRow
+                    label="钉钉通知"
+                    description="将同一批提醒事件发送到钉钉群机器人"
+                  >
+                    <Switch
+                      aria-label="启用钉钉通知"
+                      isSelected={settings.alertsDingTalkEnabled}
+                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, alertsDingTalkEnabled: v }))}
+                      isDisabled={!settings.alertsEnabled}
+                      classNames={{
+                        wrapper: cn(
+                          "group-data-[selected=true]:bg-accent-primary",
+                          "bg-content2"
+                        ),
+                        label: "sr-only",
+                      }}
+                    >
+                      启用钉钉通知
+                    </Switch>
+                  </SettingRow>
+                  <Divider className="bg-divider" />
+                  <SettingRow
+                    label="钉钉 Webhook URL"
+                    description="钉钉群机器人 Webhook 地址；保存后仅显示已配置占位"
+                  >
+                    <Input
+                      type="url"
+                      aria-label="钉钉 Webhook URL"
+                      value={settings.alertsDingTalkWebhookURL}
+                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, alertsDingTalkWebhookURL: v }))}
+                      placeholder="https://oapi.dingtalk.com/robot/send?access_token=..."
+                      isDisabled={!settings.alertsEnabled || !settings.alertsDingTalkEnabled}
+                      classNames={{
+                        inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
+                      }}
+                    />
+                  </SettingRow>
+                  <Divider className="bg-divider" />
+                  <SettingRow
                     label="邮件通知"
                     description="将同一批提醒事件发送到 SMTP 收件人"
                   >
@@ -7320,6 +7515,7 @@ export function SettingsPage() {
 	                    saved={savedSharePolicyReviewInput}
 	                    draft={draftSharePolicyReviewInput}
 	                  />
+                    <SharePolicyCoverageSummary draft={draftSharePolicyReviewInput} />
 	                </div>
 	              </SettingsSection>
 

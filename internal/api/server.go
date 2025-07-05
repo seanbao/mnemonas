@@ -4342,6 +4342,7 @@ func (s *Server) alertsDiagnostics(cfg *config.Config) map[string]any {
 		info["webhook_configured"] = strings.TrimSpace(cfg.Alerts.WebhookURL) != ""
 		info["telegram_configured"] = cfg.Alerts.TelegramEnabled && strings.TrimSpace(cfg.Alerts.TelegramBotToken) != "" && strings.TrimSpace(cfg.Alerts.TelegramChatID) != ""
 		info["wecom_configured"] = cfg.Alerts.WeComEnabled && strings.TrimSpace(cfg.Alerts.WeComWebhookURL) != ""
+		info["dingtalk_configured"] = cfg.Alerts.DingTalkEnabled && strings.TrimSpace(cfg.Alerts.DingTalkWebhookURL) != ""
 		info["email_configured"] = emailAlertsConfigured(cfg.Alerts)
 		method := strings.ToUpper(strings.TrimSpace(cfg.Alerts.WebhookMethod))
 		if method == "" {
@@ -7688,6 +7689,41 @@ func securitySameSiteString(mode http.SameSite) string {
 	}
 }
 
+func securityHeaderHasToken(value, token string) bool {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return false
+	}
+	for _, part := range strings.Split(value, ",") {
+		if strings.EqualFold(strings.TrimSpace(part), token) {
+			return true
+		}
+	}
+	return false
+}
+
+func securityPublicShareCookiePathsScoped(paths []string) bool {
+	expected := map[string]bool{
+		"/s/{share_id}":                    false,
+		"/api/v1/public/shares/{share_id}": false,
+	}
+	if len(paths) != len(expected) {
+		return false
+	}
+	for _, cookiePath := range paths {
+		if _, ok := expected[cookiePath]; !ok {
+			return false
+		}
+		expected[cookiePath] = true
+	}
+	for _, found := range expected {
+		if !found {
+			return false
+		}
+	}
+	return true
+}
+
 func securitySessionTokenTTLCheck(cfg *config.Config, authEnabled bool) securityCheckItem {
 	const checkID = "session_token_ttl"
 
@@ -7797,19 +7833,36 @@ func securityLoginRateLimitCheck(authEnabled bool, handler *auth.Handler) securi
 }
 
 func securityPublicShareBoundaryCheck(cfg *config.Config, requestSchemeValue string) securityCheckItem {
+	return securityPublicShareBoundaryCheckWithPolicy(cfg, requestSchemeValue, share.PublicShareAccessPolicySnapshot())
+}
+
+func securityPublicShareBoundaryCheckWithPolicy(cfg *config.Config, requestSchemeValue string, policy share.PublicShareAccessPolicy) securityCheckItem {
 	const checkID = "public_share_boundary"
 
-	policy := share.PublicShareAccessPolicySnapshot()
 	secureCookie := requestSchemeValue == "https"
 	passwordRateLimitEnabled := policy.PasswordFailureLimit > 0 &&
 		policy.PasswordFailureWindow > 0 &&
 		policy.PasswordLockDuration > 0
+	cookiePathsScoped := securityPublicShareCookiePathsScoped(policy.CookiePaths)
+	metadataCachePrivate := securityHeaderHasToken(policy.MetadataCacheControl, "private")
+	metadataCacheNoCache := securityHeaderHasToken(policy.MetadataCacheControl, "no-cache")
+	metadataReferrerNoReferrer := strings.EqualFold(strings.TrimSpace(policy.MetadataReferrerPolicy), "no-referrer")
+	browserBoundaryValid := policy.CookieHTTPOnly &&
+		policy.CookieSameSite == http.SameSiteStrictMode &&
+		cookiePathsScoped &&
+		passwordRateLimitEnabled &&
+		policy.MetadataVaryCookie &&
+		policy.MetadataNosniff &&
+		metadataCachePrivate &&
+		metadataCacheNoCache &&
+		metadataReferrerNoReferrer
 	details := map[string]interface{}{
 		"share_enabled":                           cfg.Share.Enabled,
 		"password_cookie_secure":                  secureCookie,
 		"password_cookie_http_only":               policy.CookieHTTPOnly,
 		"password_cookie_same_site":               securitySameSiteString(policy.CookieSameSite),
 		"password_cookie_paths":                   policy.CookiePaths,
+		"password_cookie_paths_scoped":            cookiePathsScoped,
 		"password_cookie_name_prefix":             policy.CookieNamePrefix,
 		"password_rate_limit_enabled":             passwordRateLimitEnabled,
 		"password_failure_limit":                  policy.PasswordFailureLimit,
@@ -7818,9 +7871,12 @@ func securityPublicShareBoundaryCheck(cfg *config.Config, requestSchemeValue str
 		"password_lock_duration":                  policy.PasswordLockDuration.String(),
 		"password_lock_duration_seconds":          securityDurationSeconds(policy.PasswordLockDuration),
 		"metadata_cache_control":                  policy.MetadataCacheControl,
+		"metadata_cache_private":                  metadataCachePrivate,
+		"metadata_cache_no_cache":                 metadataCacheNoCache,
 		"metadata_vary_cookie":                    policy.MetadataVaryCookie,
 		"metadata_content_type_nosniff":           policy.MetadataNosniff,
 		"metadata_referrer_policy":                policy.MetadataReferrerPolicy,
+		"metadata_referrer_no_referrer":           metadataReferrerNoReferrer,
 		"public_download_json_errors_no_cache":    true,
 		"public_download_json_errors_nosniff":     true,
 		"public_download_json_errors_no_referrer": true,
@@ -7837,23 +7893,22 @@ func securityPublicShareBoundaryCheck(cfg *config.Config, requestSchemeValue str
 		}
 	}
 
+	if !browserBoundaryValid {
+		return securityCheckItem{
+			ID:      checkID,
+			Status:  securityCheckBlock,
+			Title:   "公开分享浏览器边界异常",
+			Message: "公开分享访问 cookie、失败限速或缓存边界未满足公网安全要求。",
+			Details: details,
+		}
+	}
+
 	if !secureCookie {
 		return securityCheckItem{
 			ID:      checkID,
 			Status:  securityCheckWarning,
 			Title:   "公开分享访问 cookie 未使用 Secure",
 			Message: "分享功能已启用，但当前请求未被识别为 HTTPS；受密码保护的公开分享访问 cookie 不会带 Secure 标记。",
-			Details: details,
-		}
-	}
-
-	if !policy.CookieHTTPOnly || policy.CookieSameSite != http.SameSiteStrictMode || !passwordRateLimitEnabled ||
-		!policy.MetadataVaryCookie || !policy.MetadataNosniff || policy.MetadataCacheControl == "" || policy.MetadataReferrerPolicy == "" {
-		return securityCheckItem{
-			ID:      checkID,
-			Status:  securityCheckBlock,
-			Title:   "公开分享浏览器边界异常",
-			Message: "公开分享访问 cookie、失败限速或缓存边界未满足公网安全要求。",
 			Details: details,
 		}
 	}
@@ -8647,30 +8702,33 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 			"runtime_available": cfg.Favorites.Enabled && s.favoritesRuntimeReady(),
 		},
 		"alerts": map[string]interface{}{
-			"enabled":                       cfg.Alerts.Enabled,
-			"check_interval":                cfg.Alerts.CheckInterval.String(),
-			"threshold_pct":                 cfg.Alerts.ThresholdPct,
-			"critical_pct":                  cfg.Alerts.CriticalPct,
-			"min_free_bytes":                cfg.Alerts.MinFreeBytes,
-			"cooldown_period":               cfg.Alerts.CooldownPeriod.String(),
-			"webhook_url":                   settingsWebhookURLForResponse(cfg.Alerts.WebhookURL),
-			"webhook_url_configured":        strings.TrimSpace(cfg.Alerts.WebhookURL) != "",
-			"webhook_method":                cfg.Alerts.WebhookMethod,
-			"webhook_headers":               webhookHeaders,
-			"webhook_headers_configured":    len(webhookHeaders) > 0,
-			"telegram_enabled":              cfg.Alerts.TelegramEnabled,
-			"telegram_bot_token_configured": strings.TrimSpace(cfg.Alerts.TelegramBotToken) != "",
-			"telegram_chat_id":              cfg.Alerts.TelegramChatID,
-			"wecom_enabled":                 cfg.Alerts.WeComEnabled,
-			"wecom_webhook_url":             settingsWebhookURLForResponse(cfg.Alerts.WeComWebhookURL),
-			"wecom_webhook_url_configured":  strings.TrimSpace(cfg.Alerts.WeComWebhookURL) != "",
-			"email_enabled":                 cfg.Alerts.EmailEnabled,
-			"smtp_host":                     cfg.Alerts.SMTPHost,
-			"smtp_port":                     cfg.Alerts.SMTPPort,
-			"smtp_username":                 cfg.Alerts.SMTPUsername,
-			"smtp_password_configured":      strings.TrimSpace(cfg.Alerts.SMTPPassword) != "",
-			"smtp_from":                     cfg.Alerts.SMTPFrom,
-			"smtp_to":                       settingsStringSlice(cfg.Alerts.SMTPTo),
+			"enabled":                         cfg.Alerts.Enabled,
+			"check_interval":                  cfg.Alerts.CheckInterval.String(),
+			"threshold_pct":                   cfg.Alerts.ThresholdPct,
+			"critical_pct":                    cfg.Alerts.CriticalPct,
+			"min_free_bytes":                  cfg.Alerts.MinFreeBytes,
+			"cooldown_period":                 cfg.Alerts.CooldownPeriod.String(),
+			"webhook_url":                     settingsWebhookURLForResponse(cfg.Alerts.WebhookURL),
+			"webhook_url_configured":          strings.TrimSpace(cfg.Alerts.WebhookURL) != "",
+			"webhook_method":                  cfg.Alerts.WebhookMethod,
+			"webhook_headers":                 webhookHeaders,
+			"webhook_headers_configured":      len(webhookHeaders) > 0,
+			"telegram_enabled":                cfg.Alerts.TelegramEnabled,
+			"telegram_bot_token_configured":   strings.TrimSpace(cfg.Alerts.TelegramBotToken) != "",
+			"telegram_chat_id":                cfg.Alerts.TelegramChatID,
+			"wecom_enabled":                   cfg.Alerts.WeComEnabled,
+			"wecom_webhook_url":               settingsWebhookURLForResponse(cfg.Alerts.WeComWebhookURL),
+			"wecom_webhook_url_configured":    strings.TrimSpace(cfg.Alerts.WeComWebhookURL) != "",
+			"dingtalk_enabled":                cfg.Alerts.DingTalkEnabled,
+			"dingtalk_webhook_url":            settingsWebhookURLForResponse(cfg.Alerts.DingTalkWebhookURL),
+			"dingtalk_webhook_url_configured": strings.TrimSpace(cfg.Alerts.DingTalkWebhookURL) != "",
+			"email_enabled":                   cfg.Alerts.EmailEnabled,
+			"smtp_host":                       cfg.Alerts.SMTPHost,
+			"smtp_port":                       cfg.Alerts.SMTPPort,
+			"smtp_username":                   cfg.Alerts.SMTPUsername,
+			"smtp_password_configured":        strings.TrimSpace(cfg.Alerts.SMTPPassword) != "",
+			"smtp_from":                       cfg.Alerts.SMTPFrom,
+			"smtp_to":                         settingsStringSlice(cfg.Alerts.SMTPTo),
 		},
 		"disk_health": map[string]interface{}{
 			"enabled":                     cfg.DiskHealth.Enabled,
@@ -8764,6 +8822,9 @@ func configuredAlertChannels(cfg config.AlertsConfig) []string {
 	if cfg.WeComEnabled && strings.TrimSpace(cfg.WeComWebhookURL) != "" {
 		channels = append(channels, "wecom")
 	}
+	if cfg.DingTalkEnabled && strings.TrimSpace(cfg.DingTalkWebhookURL) != "" {
+		channels = append(channels, "dingtalk")
+	}
 	if emailAlertsConfigured(cfg) {
 		channels = append(channels, "email")
 	}
@@ -8783,6 +8844,10 @@ func resolveSettingsWebhookURL(existing, requested string) (string, error) {
 
 func resolveSettingsWeComWebhookURL(existing, requested string) (string, error) {
 	return resolveSettingsSecretURL(existing, requested, "alerts.wecom_webhook_url")
+}
+
+func resolveSettingsDingTalkWebhookURL(existing, requested string) (string, error) {
+	return resolveSettingsSecretURL(existing, requested, "alerts.dingtalk_webhook_url")
 }
 
 func resolveSettingsSecretURL(existing, requested, fieldName string) (string, error) {
@@ -9206,27 +9271,29 @@ type FavoritesSettingsUpdate struct {
 }
 
 type AlertsSettingsUpdate struct {
-	Enabled          *bool     `json:"enabled,omitempty"`
-	CheckInterval    *string   `json:"check_interval,omitempty"`
-	ThresholdPct     *float64  `json:"threshold_pct,omitempty"`
-	CriticalPct      *float64  `json:"critical_pct,omitempty"`
-	MinFreeBytes     *uint64   `json:"min_free_bytes,omitempty"`
-	CooldownPeriod   *string   `json:"cooldown_period,omitempty"`
-	WebhookURL       *string   `json:"webhook_url,omitempty"`
-	WebhookMethod    *string   `json:"webhook_method,omitempty"`
-	WebhookHeaders   *[]string `json:"webhook_headers,omitempty"`
-	TelegramEnabled  *bool     `json:"telegram_enabled,omitempty"`
-	TelegramBotToken *string   `json:"telegram_bot_token,omitempty"`
-	TelegramChatID   *string   `json:"telegram_chat_id,omitempty"`
-	WeComEnabled     *bool     `json:"wecom_enabled,omitempty"`
-	WeComWebhookURL  *string   `json:"wecom_webhook_url,omitempty"`
-	EmailEnabled     *bool     `json:"email_enabled,omitempty"`
-	SMTPHost         *string   `json:"smtp_host,omitempty"`
-	SMTPPort         *int      `json:"smtp_port,omitempty"`
-	SMTPUsername     *string   `json:"smtp_username,omitempty"`
-	SMTPPassword     *string   `json:"smtp_password,omitempty"`
-	SMTPFrom         *string   `json:"smtp_from,omitempty"`
-	SMTPTo           *[]string `json:"smtp_to,omitempty"`
+	Enabled            *bool     `json:"enabled,omitempty"`
+	CheckInterval      *string   `json:"check_interval,omitempty"`
+	ThresholdPct       *float64  `json:"threshold_pct,omitempty"`
+	CriticalPct        *float64  `json:"critical_pct,omitempty"`
+	MinFreeBytes       *uint64   `json:"min_free_bytes,omitempty"`
+	CooldownPeriod     *string   `json:"cooldown_period,omitempty"`
+	WebhookURL         *string   `json:"webhook_url,omitempty"`
+	WebhookMethod      *string   `json:"webhook_method,omitempty"`
+	WebhookHeaders     *[]string `json:"webhook_headers,omitempty"`
+	TelegramEnabled    *bool     `json:"telegram_enabled,omitempty"`
+	TelegramBotToken   *string   `json:"telegram_bot_token,omitempty"`
+	TelegramChatID     *string   `json:"telegram_chat_id,omitempty"`
+	WeComEnabled       *bool     `json:"wecom_enabled,omitempty"`
+	WeComWebhookURL    *string   `json:"wecom_webhook_url,omitempty"`
+	DingTalkEnabled    *bool     `json:"dingtalk_enabled,omitempty"`
+	DingTalkWebhookURL *string   `json:"dingtalk_webhook_url,omitempty"`
+	EmailEnabled       *bool     `json:"email_enabled,omitempty"`
+	SMTPHost           *string   `json:"smtp_host,omitempty"`
+	SMTPPort           *int      `json:"smtp_port,omitempty"`
+	SMTPUsername       *string   `json:"smtp_username,omitempty"`
+	SMTPPassword       *string   `json:"smtp_password,omitempty"`
+	SMTPFrom           *string   `json:"smtp_from,omitempty"`
+	SMTPTo             *[]string `json:"smtp_to,omitempty"`
 }
 
 type DiskHealthSettingsUpdate struct {
@@ -9668,6 +9735,17 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 			}
 			updatedConfig.Alerts.WeComWebhookURL = resolved
 		}
+		if req.Alerts.DingTalkEnabled != nil {
+			updatedConfig.Alerts.DingTalkEnabled = *req.Alerts.DingTalkEnabled
+		}
+		if req.Alerts.DingTalkWebhookURL != nil {
+			resolved, err := resolveSettingsDingTalkWebhookURL(currentConfig.Alerts.DingTalkWebhookURL, *req.Alerts.DingTalkWebhookURL)
+			if err != nil {
+				BadRequest(w, err.Error())
+				return
+			}
+			updatedConfig.Alerts.DingTalkWebhookURL = resolved
+		}
 		if req.Alerts.EmailEnabled != nil {
 			updatedConfig.Alerts.EmailEnabled = *req.Alerts.EmailEnabled
 		}
@@ -9980,27 +10058,29 @@ func (s *Server) applyRuntimeSettings(ctx context.Context, req UpdateSettingsReq
 
 	if req.Alerts != nil && s.alertMonitor != nil {
 		s.alertMonitor.UpdateConfig(alerts.Config{
-			Enabled:          cfg.Alerts.Enabled,
-			CheckInterval:    cfg.Alerts.CheckInterval,
-			ThresholdPct:     cfg.Alerts.ThresholdPct,
-			CriticalPct:      cfg.Alerts.CriticalPct,
-			MinFreeBytes:     cfg.Alerts.MinFreeBytes,
-			CooldownPeriod:   cfg.Alerts.CooldownPeriod,
-			WebhookURL:       cfg.Alerts.WebhookURL,
-			WebhookMethod:    cfg.Alerts.WebhookMethod,
-			WebhookHeaders:   cfg.Alerts.WebhookHeaders,
-			TelegramEnabled:  cfg.Alerts.TelegramEnabled,
-			TelegramBotToken: cfg.Alerts.TelegramBotToken,
-			TelegramChatID:   cfg.Alerts.TelegramChatID,
-			WeComEnabled:     cfg.Alerts.WeComEnabled,
-			WeComWebhookURL:  cfg.Alerts.WeComWebhookURL,
-			EmailEnabled:     cfg.Alerts.EmailEnabled,
-			SMTPHost:         cfg.Alerts.SMTPHost,
-			SMTPPort:         cfg.Alerts.SMTPPort,
-			SMTPUsername:     cfg.Alerts.SMTPUsername,
-			SMTPPassword:     cfg.Alerts.SMTPPassword,
-			SMTPFrom:         cfg.Alerts.SMTPFrom,
-			SMTPTo:           cfg.Alerts.SMTPTo,
+			Enabled:            cfg.Alerts.Enabled,
+			CheckInterval:      cfg.Alerts.CheckInterval,
+			ThresholdPct:       cfg.Alerts.ThresholdPct,
+			CriticalPct:        cfg.Alerts.CriticalPct,
+			MinFreeBytes:       cfg.Alerts.MinFreeBytes,
+			CooldownPeriod:     cfg.Alerts.CooldownPeriod,
+			WebhookURL:         cfg.Alerts.WebhookURL,
+			WebhookMethod:      cfg.Alerts.WebhookMethod,
+			WebhookHeaders:     cfg.Alerts.WebhookHeaders,
+			TelegramEnabled:    cfg.Alerts.TelegramEnabled,
+			TelegramBotToken:   cfg.Alerts.TelegramBotToken,
+			TelegramChatID:     cfg.Alerts.TelegramChatID,
+			WeComEnabled:       cfg.Alerts.WeComEnabled,
+			WeComWebhookURL:    cfg.Alerts.WeComWebhookURL,
+			DingTalkEnabled:    cfg.Alerts.DingTalkEnabled,
+			DingTalkWebhookURL: cfg.Alerts.DingTalkWebhookURL,
+			EmailEnabled:       cfg.Alerts.EmailEnabled,
+			SMTPHost:           cfg.Alerts.SMTPHost,
+			SMTPPort:           cfg.Alerts.SMTPPort,
+			SMTPUsername:       cfg.Alerts.SMTPUsername,
+			SMTPPassword:       cfg.Alerts.SMTPPassword,
+			SMTPFrom:           cfg.Alerts.SMTPFrom,
+			SMTPTo:             cfg.Alerts.SMTPTo,
 		})
 	}
 

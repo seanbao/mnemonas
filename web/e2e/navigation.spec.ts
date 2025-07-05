@@ -1,6 +1,8 @@
 import { test, expect, type Page } from '@playwright/test'
 import { ensureAuthenticatedAt } from './helpers/auth-check'
 
+test.setTimeout(45_000)
+
 async function openSidebarIfNeeded(page: Page): Promise<void> {
   const sidebar = page.getByTestId('app-sidebar-shell')
   const menuButton = page.getByRole('button', { name: '打开导航菜单' })

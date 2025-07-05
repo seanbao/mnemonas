@@ -33,8 +33,10 @@ import { ApiError as ActivityApiError, listActivity, getActionLabel, getActionCo
 import { acknowledgeSetup, getSetupStatus, type SetupStatusResponse } from '@/api/setup'
 import { formatBytes, cn, formatRelativeTime, formatUptimeSeconds } from '@/lib/utils'
 import { areDiskStatsAvailable, clampUsagePercent, formatUsagePercent, getDiskSpaceStatus } from '@/lib/storageStats'
+import { backupJobNeedsAttention, getBackupAttentionNextStepSummary, getBackupAttentionReasonSummary } from '@/lib/backupAttention'
 import { getInvalidHomeDirDescription, invalidHomeDirTitle, resolveUserHomeScope } from '@/lib/userScope'
 import { PageHeader } from '@/components/ui/PageHeader'
+import { StatCard } from '@/components/ui/StatCard'
 import { useIsAdmin, useUser } from '@/stores/auth'
 
 interface QuickActionProps {
@@ -151,26 +153,44 @@ function getDashboardRefreshErrorToast(errors: Array<unknown>): { title: string;
 }
 
 function getBackupIssueCount(jobs: BackupJob[]): number {
-  return jobs.filter((job) => (
-    job.health_status === 'failed'
-    || job.health_status === 'stale'
-    || job.retention_status === 'failed'
-    || job.retention_status === 'warning'
-    || job.restore_drill_status === 'failed'
-    || job.restore_drill_status === 'stale'
-    || job.last_run?.status === 'failed'
-    || job.last_restore?.status === 'failed'
-    || (job.last_restore?.status === 'completed' && !job.last_matching_restore_verify)
-    || job.last_matching_restore_verify?.status === 'failed'
-    || (job.last_matching_restore_verify?.warnings?.length ?? 0) > 0
-  )).length
+  return jobs.filter(backupJobNeedsAttention).length
 }
 
-function getSetupFeatureStatus(status: SetupStatusResponse): Array<{ label: string; value: string }> {
+type SetupSafetyTone = 'default' | 'success' | 'warning'
+
+function getSetupSafetyHighlights(status: SetupStatusResponse): Array<{ label: string; value: string; tone: SetupSafetyTone }> {
+  const webdavAuthType = status.webdav_auth_type === 'none' ? '匿名' : status.webdav_auth_type
+
   return [
-    { label: '分享', value: status.share_enabled === false ? '未启用' : '可用' },
-    { label: 'WebDAV', value: status.webdav_enabled ? status.webdav_auth_type : '未启用' },
+    { label: '认证', value: status.auth_enabled ? '已启用' : '需启用', tone: status.auth_enabled ? 'success' : 'warning' },
+    { label: '分享', value: status.share_enabled === false ? '未启用' : '可用', tone: 'default' },
+    {
+      label: 'WebDAV',
+      value: status.webdav_enabled ? webdavAuthType : '未启用',
+      tone: status.webdav_enabled && status.webdav_auth_type === 'none' ? 'warning' : 'default',
+    },
   ]
+}
+
+function getSetupSafetyWarning(status: SetupStatusResponse): string | null {
+  const warnings: string[] = []
+  if (!status.auth_enabled) {
+    warnings.push('Web UI/API 认证未启用')
+  }
+  if (status.webdav_enabled && status.webdav_auth_type === 'none') {
+    warnings.push('WebDAV 匿名访问已启用')
+  }
+  if (warnings.length === 0) {
+    return null
+  }
+  return `${warnings.join('，')}；仅适合受控内网或外层访问控制，公网部署前应先处理。`
+}
+
+function getSetupChecklistProgressText(remainingItems: number): string {
+  if (remainingItems === 0) {
+    return '首次部署检查已完成，可以关闭首次运行提示。'
+  }
+  return `还需确认 ${remainingItems} 项后才能关闭首次运行提示。`
 }
 
 const setupChecklistItems = [
@@ -201,7 +221,7 @@ function getBackupOverview(
   jobs: BackupJob[] | undefined,
   isLoading: boolean,
   error: unknown,
-): { value: string; trend: string; needsAttention: boolean } {
+): { value: string; trend: string; needsAttention: boolean; nextStep?: string } {
   if (!isAdmin) {
     return { value: '可用', trend: '由管理员维护备份', needsAttention: false }
   }
@@ -220,7 +240,12 @@ function getBackupOverview(
 
   const issueCount = getBackupIssueCount(jobs)
   if (issueCount > 0) {
-    return { value: `${issueCount} 项待处理`, trend: '检查失败、过期、缺少演练或恢复校验的任务', needsAttention: true }
+    return {
+      value: `${issueCount} 项待处理`,
+      trend: getBackupAttentionReasonSummary(jobs),
+      needsAttention: true,
+      nextStep: getBackupAttentionNextStepSummary(jobs),
+    }
   }
 
   const latestSuccess = jobs
@@ -459,15 +484,20 @@ export function DashboardPage() {
   const storageStatsKnown = stats?.storageStatsAvailable === true
   const fileCountKnown = stats?.fileCountAvailable === true
   const storageUsageValue = diskStatsKnown ? formatStorageSize(stats?.diskUsed) : formatStorageSize(stats?.totalSize)
+  const storageProgressValueText = diskStatsKnown
+    ? `${formatUsagePercent(stats?.diskUsageRatio)} 已用`
+    : hasStorageData ? `已用 ${storageUsageValue}，磁盘容量统计不可用` : '统计不可用'
   const backupOverview = getBackupOverview(isAdmin, backupJobs, backupLoading, backupError)
   const isSetupChecklistComplete = setupChecklistItems.every((item) => setupChecklist[item.id])
   const remainingSetupChecklistItems = setupChecklistItems.filter((item) => !setupChecklist[item.id]).length
+  const setupSafetyWarning = setupStatus ? getSetupSafetyWarning(setupStatus) : null
 
   const statsCards = [
     {
       title: '存储使用',
       value: storageUsageValue,
       icon: HardDrive,
+      tone: shouldShowDiskSpaceAlert ? 'warning' : 'primary',
       trend: diskStatsKnown
         ? `${formatUsagePercent(stats?.diskUsageRatio)} 已用 · ${diskSpaceStatus.label}`
         : storageStatsKnown ? 'CAS 统计可用' : '统计不可用',
@@ -476,21 +506,24 @@ export function DashboardPage() {
       title: '文件数量',
       value: fileCountKnown ? formatCount(stats?.fileCount) : '--',
       icon: FileBox,
+      tone: 'primary',
       trend: fileCountKnown ? '文件索引计数' : '统计不可用',
     },
     {
       title: '备份状态',
       value: backupOverview.value,
       icon: Archive,
+      tone: backupOverview.needsAttention ? 'warning' : 'success',
       trend: backupOverview.trend,
     },
     {
       title: '运行时间',
       value: health?.uptimeSecs !== undefined ? formatUptimeSeconds(health.uptimeSecs) : health?.uptime ?? '--',
       icon: Clock,
+      tone: healthStatus === 'healthy' ? 'success' : healthStatus === 'unknown' ? 'default' : 'warning',
       trend: health ? '稳定运行' : '状态未知',
     },
-  ]
+  ] as const
 
   return (
     <div className="p-4 space-y-6 sm:p-6 lg:p-8">
@@ -581,13 +614,18 @@ export function DashboardPage() {
                 </div>
               </div>
               <div className="flex flex-wrap gap-2">
-                {getSetupFeatureStatus(setupStatus).map((item) => (
-                  <Chip key={item.label} size="sm" variant="flat" className="rounded-lg">
+                {getSetupSafetyHighlights(setupStatus).map((item) => (
+                  <Chip key={item.label} size="sm" variant="flat" color={item.tone} className="rounded-lg">
                     {item.label}: {item.value}
                   </Chip>
                 ))}
               </div>
             </div>
+            {setupSafetyWarning && (
+              <div className="rounded-lg border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-default-700">
+                {setupSafetyWarning}
+              </div>
+            )}
             <div className="grid grid-cols-1 gap-2 md:grid-cols-2">
               {setupChecklistItems.map((item) => (
                 <Checkbox
@@ -606,6 +644,9 @@ export function DashboardPage() {
                 </Checkbox>
               ))}
             </div>
+            <p className="text-xs text-default-600">
+              {getSetupChecklistProgressText(remainingSetupChecklistItems)}
+            </p>
             <div className="grid grid-cols-2 gap-2 sm:flex sm:flex-row sm:flex-wrap sm:items-center">
               <Button size="sm" variant="flat" className="w-full rounded-lg sm:w-auto" onPress={() => navigate('/users')}>
                 用户
@@ -638,6 +679,9 @@ export function DashboardPage() {
               <div>
                 <p className="text-sm font-medium text-foreground">备份需要查看</p>
                 <p className="text-xs text-default-600">{backupOverview.trend}</p>
+                {backupOverview.nextStep && (
+                  <p className="mt-1 text-xs text-default-600">建议: {backupOverview.nextStep}</p>
+                )}
               </div>
             </div>
             <Button
@@ -676,25 +720,18 @@ export function DashboardPage() {
         </Card>
       )}
 
-      {/* Stats Grid - Meridian Style */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+      {/* Stats Grid */}
+      <div className="grid grid-cols-2 gap-2 sm:gap-3 lg:grid-cols-4">
         {statsCards.map((stat) => (
-          <div key={stat.title} className="stat-card">
-            <div className="relative">
-              <div className="flex items-start justify-between">
-                <div>
-                  <p className="text-default-500 text-sm">{stat.title}</p>
-                  <div className="mt-1 flex items-baseline gap-1">
-                    <span className="data-value-large">{stat.value}</span>
-                  </div>
-                  <p className="text-default-500 mt-2 text-xs">{stat.trend}</p>
-                </div>
-                <div className="gradient-meridian-subtle rounded-lg p-2.5">
-                  <stat.icon className="text-accent-primary h-5 w-5" />
-                </div>
-              </div>
-            </div>
-          </div>
+          <StatCard
+            key={stat.title}
+            title={stat.title}
+            value={stat.value}
+            subtitle={stat.trend}
+            icon={stat.icon}
+            tone={stat.tone}
+            density="compact"
+          />
         ))}
       </div>
 
@@ -717,7 +754,15 @@ export function DashboardPage() {
               <span className="text-default-600">已用空间</span>
               <span className="data-value">{storageUsageValue}</span>
             </div>
-            <div className="h-2 rounded-full bg-content2 overflow-hidden">
+            <div
+              role="progressbar"
+              aria-label="首页存储使用率"
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-valuenow={diskUsagePercent !== undefined ? Math.round(diskUsagePercent) : undefined}
+              aria-valuetext={storageProgressValueText}
+              className="h-2 rounded-full bg-content2 overflow-hidden"
+            >
               {hasStorageData ? (
                 <div
                   className={cn('h-full rounded-full flow-line', getDiskUsageBarClass(diskSpaceStatus.level))}

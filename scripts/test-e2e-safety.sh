@@ -466,6 +466,19 @@ run_playwright_backend_uses_long_access_ttl_test() {
 	assert_file_contains "$backend_script" 'refresh_token_ttl = "168h"'
 }
 
+run_playwright_defaults_use_low_collision_ports_test() {
+	assert_file_contains "$REPO_ROOT/web/playwright.config.ts" "http://127.0.0.1:18180"
+	assert_file_contains "$REPO_ROOT/web/playwright.config.ts" "http://127.0.0.1:14173"
+	assert_file_contains "$REPO_ROOT/web/scripts/start-e2e-backend.sh" "NASD_PORT=\"\${MNEMONAS_E2E_NASD_PORT:-18180}\""
+	assert_file_contains "$REPO_ROOT/web/scripts/start-e2e-backend.sh" "DATAPLANE_GRPC=\"\${MNEMONAS_E2E_DATAPLANE_GRPC:-127.0.0.1:19190}\""
+	assert_file_contains "$REPO_ROOT/web/scripts/start-e2e-backend.sh" "DATAPLANE_HTTP=\"\${MNEMONAS_E2E_DATAPLANE_HTTP:-127.0.0.1:19191}\""
+	assert_file_contains "$REPO_ROOT/scripts/run-e2e-isolated.sh" "NASD_PORT=\"\${MNEMONAS_E2E_NASD_PORT:-18180}\""
+	assert_file_contains "$REPO_ROOT/web/README.md" "默认隔离端口为后端 \`18180\`、前端 \`14173\`"
+	assert_file_contains "$REPO_ROOT/web/README.en.md" "The default isolated ports are backend \`18180\` and frontend \`14173\`"
+	assert_file_contains "$REPO_ROOT/docs/testing-strategy.md" "默认后端端口为 \`18180\`，默认前端端口为 \`14173\`"
+	assert_file_contains "$REPO_ROOT/docs/testing-strategy.en.md" "default backend port is \`18180\` and default frontend port is \`14173\`"
+}
+
 run_testing_strategy_uses_json_safe_login_payload_test() {
 	local zh_doc="$REPO_ROOT/docs/testing-strategy.md"
 	local en_doc="$REPO_ROOT/docs/testing-strategy.en.md"
@@ -682,6 +695,7 @@ run_refuse_loopback_name_spoof_playwright_backend_host_test
 run_refuse_symlink_playwright_backend_root_test
 run_refuse_newline_playwright_backend_root_test
 run_refuse_control_character_playwright_backend_root_test
+run_playwright_defaults_use_low_collision_ports_test
 run_playwright_backend_uses_long_access_ttl_test
 run_testing_strategy_uses_json_safe_login_payload_test
 run_testing_strategy_uses_portable_toml_snippet_test

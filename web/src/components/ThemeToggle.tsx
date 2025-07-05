@@ -13,12 +13,15 @@ export function ThemeToggle() {
   }
 
   const Icon = theme === 'light' ? Sun : theme === 'dark' ? Moon : Monitor
+  const themeLabel = theme === 'light' ? '浅色' : theme === 'dark' ? '深色' : '跟随系统'
+  const toggleLabel = `切换主题，当前为${themeLabel}`
 
   return (
     <Button
       isIconOnly
       variant="light"
-      aria-label="Toggle theme"
+      aria-label={toggleLabel}
+      title={toggleLabel}
       onPress={cycleTheme}
       className="rounded-lg text-default-500 hover:text-default-900"
     >

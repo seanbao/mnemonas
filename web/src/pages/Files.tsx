@@ -3025,40 +3025,46 @@ export function FilesPage() {
             </div>
           </div>
           <div className="max-h-72 overflow-y-auto">
-            {uploadQueue.map((item, i) => (
-              <div key={i} className="px-4 py-3 border-b border-divider last:border-b-0 hover:bg-content2/50 transition-colors">
-                <div className="flex items-center gap-2.5 mb-1.5">
-                  {item.status === 'done' && <CheckCircle2 size={16} className="text-emerald-500 flex-shrink-0" />}
-                  {item.status === 'error' && <AlertCircle size={16} className="text-rose flex-shrink-0" />}
-                  {item.status === 'cancelled' && <X size={16} className="text-default-400 flex-shrink-0" />}
-                  {(item.status === 'pending' || item.status === 'uploading') && (
-                    <div className="w-4 h-4 border-2 border-accent-primary border-t-transparent rounded-full animate-spin flex-shrink-0" />
-                  )}
-                  <span className="text-sm truncate flex-1" title={item.relativePath || item.file.name}>
-                    {item.relativePath || item.file.name}
-                  </span>
+            {uploadQueue.map((item, i) => {
+              const uploadDisplayName = item.relativePath || item.file.name
+              const uploadProgressPercent = Math.round(item.progress)
+              return (
+                <div key={i} className="px-4 py-3 border-b border-divider last:border-b-0 hover:bg-content2/50 transition-colors">
+                  <div className="flex items-center gap-2.5 mb-1.5">
+                    {item.status === 'done' && <CheckCircle2 size={16} className="text-emerald-500 flex-shrink-0" />}
+                    {item.status === 'error' && <AlertCircle size={16} className="text-rose flex-shrink-0" />}
+                    {item.status === 'cancelled' && <X size={16} className="text-default-400 flex-shrink-0" />}
+                    {(item.status === 'pending' || item.status === 'uploading') && (
+                      <div className="w-4 h-4 border-2 border-accent-primary border-t-transparent rounded-full animate-spin flex-shrink-0" />
+                    )}
+                    <span className="text-sm truncate flex-1" title={uploadDisplayName}>
+                      {uploadDisplayName}
+                    </span>
+                    {item.status === 'uploading' && (
+                      <span className="text-xs text-default-400">{uploadProgressPercent}%</span>
+                    )}
+                  </div>
                   {item.status === 'uploading' && (
-                    <span className="text-xs text-default-400">{Math.round(item.progress)}%</span>
+                    <Progress
+                      size="sm"
+                      value={item.progress}
+                      aria-label={`${uploadDisplayName} 上传进度`}
+                      aria-valuetext={`${uploadProgressPercent}% 已上传`}
+                      classNames={{
+                        base: "h-1.5",
+                        indicator: "bg-accent-primary"
+                      }}
+                    />
+                  )}
+                  {item.status === 'error' && (
+                    <p className="text-xs text-rose mt-1">{item.error}</p>
+                  )}
+                  {item.status === 'cancelled' && (
+                    <p className="text-xs text-default-500 mt-1">{item.error}</p>
                   )}
                 </div>
-                {item.status === 'uploading' && (
-                  <Progress 
-                    size="sm" 
-                    value={item.progress} 
-                    classNames={{ 
-                      base: "h-1.5",
-                      indicator: "bg-accent-primary"
-                    }} 
-                  />
-                )}
-                {item.status === 'error' && (
-                  <p className="text-xs text-rose mt-1">{item.error}</p>
-                )}
-                {item.status === 'cancelled' && (
-                  <p className="text-xs text-default-500 mt-1">{item.error}</p>
-                )}
-              </div>
-            ))}
+              )
+            })}
           </div>
           {/* Summary footer */}
           {!isUploading && uploadQueue.length > 0 && (

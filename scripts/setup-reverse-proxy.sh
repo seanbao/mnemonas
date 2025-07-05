@@ -28,6 +28,8 @@ DATAPLANE_HTTP_PORT="${MNEMONAS_DATAPLANE_HTTP_PORT:-}"
 WEBDAV_PREFIX=""
 MNEMONAS_CONFIG_STATUS="pending"
 FIREWALL_STATUS="pending"
+PROC_NET_TCP_PATH="${MNEMONAS_PROC_NET_TCP_PATH:-/proc/net/tcp}"
+PROC_NET_TCP6_PATH="${MNEMONAS_PROC_NET_TCP6_PATH:-/proc/net/tcp6}"
 
 log_info() { echo -e "${GREEN}[INFO]${NC} $1"; }
 log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
@@ -1529,9 +1531,83 @@ configure_firewall() {
     log_warn "此脚本不能修改云厂商安全组；请确认公网只开放 TCP 80/443，SSH 仅限可信来源"
 }
 
-ss_local_addresses_for_port() {
+local_addresses_for_port() {
     local port="$1"
-    ss -lntH 2>/dev/null | awk -v suffix=":$port" '$4 ~ suffix "$" { print $4 }'
+
+    if ss_available; then
+        ss -lntH 2>/dev/null | awk -v suffix=":$port" '$4 ~ suffix "$" { print $4 }'
+        return
+    fi
+
+    proc_net_local_addresses_for_port "$port"
+}
+
+ss_available() {
+    [[ "${MNEMONAS_REVERSE_PROXY_DISABLE_SS:-0}" != "1" ]] && command -v ss >/dev/null 2>&1
+}
+
+can_inspect_local_ports() {
+    ss_available || [[ -r "$PROC_NET_TCP_PATH" || -r "$PROC_NET_TCP6_PATH" ]]
+}
+
+proc_net_local_addresses_for_port() {
+    local port="$1"
+
+    proc_net_tcp4_addresses_for_port "$port"
+    proc_net_tcp6_addresses_for_port "$port"
+}
+
+proc_net_tcp4_addresses_for_port() {
+    local port="$1"
+    local want_port local_addr state hex_addr hex_port b1 b2 b3 b4
+
+    [[ -r "$PROC_NET_TCP_PATH" ]] || return 0
+    printf -v want_port '%04X' "$((10#$port))"
+
+    while read -r _ local_addr _ state _; do
+        [[ "$local_addr" == "local_address" ]] && continue
+        [[ "$state" == "0A" ]] || continue
+        hex_addr="${local_addr%%:*}"
+        hex_port="${local_addr##*:}"
+        [[ "${hex_port^^}" == "$want_port" ]] || continue
+        [[ "$hex_addr" =~ ^[0-9A-Fa-f]{8}$ ]] || continue
+
+        b1="${hex_addr:6:2}"
+        b2="${hex_addr:4:2}"
+        b3="${hex_addr:2:2}"
+        b4="${hex_addr:0:2}"
+        printf '%d.%d.%d.%d:%d\n' "$((16#$b1))" "$((16#$b2))" "$((16#$b3))" "$((16#$b4))" "$((16#$hex_port))"
+    done < "$PROC_NET_TCP_PATH"
+}
+
+proc_net_tcp6_addresses_for_port() {
+    local port="$1"
+    local want_port local_addr state hex_addr hex_port host
+
+    [[ -r "$PROC_NET_TCP6_PATH" ]] || return 0
+    printf -v want_port '%04X' "$((10#$port))"
+
+    while read -r _ local_addr _ state _; do
+        [[ "$local_addr" == "local_address" ]] && continue
+        [[ "$state" == "0A" ]] || continue
+        hex_addr="${local_addr%%:*}"
+        hex_port="${local_addr##*:}"
+        [[ "${hex_port^^}" == "$want_port" ]] || continue
+        [[ "$hex_addr" =~ ^[0-9A-Fa-f]{32}$ ]] || continue
+
+        case "${hex_addr^^}" in
+            00000000000000000000000000000000)
+                host="::"
+                ;;
+            00000000000000000000000001000000)
+                host="::1"
+                ;;
+            *)
+                host="${hex_addr^^}"
+                ;;
+        esac
+        printf '[%s]:%d\n' "$host" "$((16#$hex_port))"
+    done < "$PROC_NET_TCP6_PATH"
 }
 
 host_from_ss_local_address() {
@@ -1578,8 +1654,8 @@ check_loopback_only_port() {
     local address host
     local -a unsafe_addresses=()
 
-    if ! command -v ss >/dev/null 2>&1; then
-        log_warn "ss 不可用，跳过 $label 端口检查"
+    if ! can_inspect_local_ports; then
+        log_warn "$label 端口 $port 无法检查；请安装 iproute2/ss 或确保 /proc/net/tcp 可读"
         return
     fi
 
@@ -1589,7 +1665,7 @@ check_loopback_only_port() {
         if ! is_loopback_host "$host"; then
             unsafe_addresses+=("$address")
         fi
-    done < <(ss_local_addresses_for_port "$port")
+    done < <(local_addresses_for_port "$port")
 
     if [[ "${#unsafe_addresses[@]}" -eq 0 ]]; then
         log_info "$label 端口 $port 仅本机监听或未监听"
@@ -1841,6 +1917,37 @@ EOF
     grep -Fq 'DATAPLANE_GRPC_PORT=19090' "$tmp/doctor-env.log" || fail "self-test failed: doctor did not receive DATAPLANE_GRPC_PORT"
     grep -Fq 'DATAPLANE_HTTP_PORT=19091' "$tmp/doctor-env.log" || fail "self-test failed: doctor did not receive DATAPLANE_HTTP_PORT"
     grep -Fq 'args=--public-domain nas.example.com' "$tmp/doctor-env.log" || fail "self-test failed: doctor was not invoked with public domain"
+
+    cat > "$tmp/proc-net-tcp" <<'EOF'
+  sl  local_address rem_address st tx_queue rx_queue tr tm->when retrnsmt uid timeout inode
+   0: 0100007F:46A0 00000000:0000 0A 00000000:00000000 00:00000000 00000000 0 0 1
+   1: 00000000:4A92 00000000:0000 0A 00000000:00000000 00:00000000 00000000 0 0 2
+EOF
+    cat > "$tmp/proc-net-tcp6" <<'EOF'
+  sl  local_address                         remote_address                        st tx_queue rx_queue tr tm->when retrnsmt uid timeout inode
+   0: 00000000000000000000000001000000:4A93 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000 0 0 3
+EOF
+    (
+        MNEMONAS_REVERSE_PROXY_DISABLE_SS=1
+        PROC_NET_TCP_PATH="$tmp/proc-net-tcp"
+        PROC_NET_TCP6_PATH="$tmp/proc-net-tcp6"
+        check_loopback_only_port "19090" "MnemoNAS dataplane gRPC"
+    ) > "$tmp/proc-port-unsafe.log"
+    grep -Fq 'MnemoNAS dataplane gRPC 端口 19090 仍监听在非 loopback 地址: 0.0.0.0:19090' "$tmp/proc-port-unsafe.log" || fail "self-test failed: proc net fallback did not report wildcard IPv4 listeners"
+    (
+        MNEMONAS_REVERSE_PROXY_DISABLE_SS=1
+        PROC_NET_TCP_PATH="$tmp/proc-net-tcp"
+        PROC_NET_TCP6_PATH="$tmp/proc-net-tcp6"
+        check_loopback_only_port "19091" "MnemoNAS dataplane HTTP"
+    ) > "$tmp/proc-port-loopback.log"
+    grep -Fq 'MnemoNAS dataplane HTTP 端口 19091 仅本机监听或未监听' "$tmp/proc-port-loopback.log" || fail "self-test failed: proc net fallback did not accept IPv6 loopback listeners"
+    (
+        MNEMONAS_REVERSE_PROXY_DISABLE_SS=1
+        PROC_NET_TCP_PATH="$tmp/missing-proc-net-tcp"
+        PROC_NET_TCP6_PATH="$tmp/missing-proc-net-tcp6"
+        check_loopback_only_port "19092" "MnemoNAS dataplane HTTP"
+    ) > "$tmp/proc-port-uninspectable.log"
+    grep -Fq 'MnemoNAS dataplane HTTP 端口 19092 无法检查；请安装 iproute2/ss 或确保 /proc/net/tcp 可读' "$tmp/proc-port-uninspectable.log" || fail "self-test failed: unavailable port inspection source was not reported"
 
     cat > "$fake_bin/ufw" <<'EOF'
 #!/usr/bin/env bash

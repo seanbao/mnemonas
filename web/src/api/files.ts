@@ -179,6 +179,7 @@ export interface DiagnosticsInfo {
     webhookConfigured?: boolean
     telegramConfigured?: boolean
     wecomConfigured?: boolean
+    dingTalkConfigured?: boolean
     emailConfigured?: boolean
     webhookMethod?: string
     lastLevel?: string
@@ -982,6 +983,7 @@ function isDiagnosticsShape(value: unknown): value is {
     webhook_configured?: boolean
     telegram_configured?: boolean
     wecom_configured?: boolean
+    dingtalk_configured?: boolean
     email_configured?: boolean
     webhook_method?: string
     last_level?: string
@@ -1107,6 +1109,7 @@ function isDiagnosticsShape(value: unknown): value is {
       || !isBooleanOrUndefined(value.alerts.webhook_configured)
       || !isBooleanOrUndefined(value.alerts.telegram_configured)
       || !isBooleanOrUndefined(value.alerts.wecom_configured)
+      || !isBooleanOrUndefined(value.alerts.dingtalk_configured)
       || !isBooleanOrUndefined(value.alerts.email_configured)
       || !isStringOrUndefined(value.alerts.webhook_method)
       || !isStringOrUndefined(value.alerts.last_level)
@@ -2032,6 +2035,7 @@ export async function getDiagnostics(options: RequestOptions = {}): Promise<Diag
       webhookConfigured: data.alerts.webhook_configured,
       telegramConfigured: data.alerts.telegram_configured,
       wecomConfigured: data.alerts.wecom_configured,
+      dingTalkConfigured: data.alerts.dingtalk_configured,
       emailConfigured: data.alerts.email_configured,
       webhookMethod: data.alerts.webhook_method,
       lastLevel: data.alerts.last_level,

@@ -88,6 +88,8 @@ The installer only fixes ownership of the managed top-level directories by defau
 sudo env FIX_STORAGE_OWNERSHIP=1 ./scripts/install-systemd.sh
 ```
 
+If the installer fails while reloading, enabling, or starting the systemd services, it prints the failed stage and the relevant `systemctl cat`, `systemctl status`, or `journalctl` commands. Keep the config and data directories in place, inspect the reported unit or service logs, then rerun the installer after fixing the issue.
+
 If no release archive is available, build from source:
 
 ```bash
@@ -140,7 +142,7 @@ sudo systemctl restart mnemonas-dataplane
 sudo mnemonas-doctor
 ```
 
-`mnemonas-doctor` checks service state, Web UI, directory permissions, filesystem type, and free space. The Web UI health and storage pages also show the underlying filesystem type, mount point, device or dataset source, redacted mount options, ZFS/Btrfs native-checksum hints, and space-alert runtime state. Administrators can download a diagnostic bundle from the health page and copy a storage-backing summary from the storage page for troubleshooting records. It also warns when UFW appears to expose dataplane ports.
+`mnemonas-doctor` checks service state, Web UI, the config file, runtime-sensitive files, directory permissions, filesystem type, free space, and backup-root placement. A non-regular `config.toml` is a failure; a symlinked or broadly readable config file is reported as a risk. When authentication is enabled, it reports a missing `users.json`; it also reports risks when `users.json`, `secrets.json`, or their relevant parent directories are symlinks, unexpected file types, or broadly readable. When `BACKUP_ROOT` exists, it must not equal or live under `storage.root`; it also reports a risk when both paths use the same filesystem source and when the service user or current diagnostic environment cannot write to it. Use a separate disk, dataset, or remote mount path for backup targets. The Web UI health and storage pages also show the underlying filesystem type, mount point, device or dataset source, redacted mount options, ZFS/Btrfs native-checksum hints, and space-alert runtime state. Administrators can download a diagnostic bundle from the health page and copy a storage-backing summary from the storage page for troubleshooting records. It also warns when UFW appears to expose dataplane ports.
 
 After config changes:
 
@@ -227,7 +229,15 @@ sudo ./scripts/install-systemd.sh
 sudo mnemonas-doctor
 ```
 
-Back up before large version jumps.
+Back up before large version jumps. Keep the extracted previous release directory as well, so an upgrade that fails to start, breaks a core workflow, or fails `mnemonas-doctor` can be rolled back to the previous version:
+
+```bash
+cd mnemonas-<previous-version>-linux-amd64
+sudo ./scripts/install-systemd.sh
+sudo mnemonas-doctor
+```
+
+Rollback replaces the binaries and Web UI assets while continuing to use the existing `/etc/mnemonas/config.toml` and `/srv/mnemonas` data directory. If the newer release performed an irreversible data migration, follow that release note or restore from backup before starting the older version; do not point an older binary at migrated data without an explicit compatibility statement.
 
 ## Uninstall
 

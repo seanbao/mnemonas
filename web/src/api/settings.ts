@@ -111,6 +111,9 @@ export interface SettingsData {
     wecom_enabled?: boolean
     wecom_webhook_url?: string
     wecom_webhook_url_configured?: boolean
+    dingtalk_enabled?: boolean
+    dingtalk_webhook_url?: string
+    dingtalk_webhook_url_configured?: boolean
     email_enabled?: boolean
     smtp_host?: string
     smtp_port?: number
@@ -393,6 +396,8 @@ export interface UpdateSettingsRequest {
     telegram_chat_id?: string
     wecom_enabled?: boolean
     wecom_webhook_url?: string
+    dingtalk_enabled?: boolean
+    dingtalk_webhook_url?: string
     email_enabled?: boolean
     smtp_host?: string
     smtp_port?: number
@@ -983,6 +988,9 @@ function isValidSettingsData(value: unknown): value is SettingsData {
       || (value.alerts.wecom_enabled !== undefined && typeof value.alerts.wecom_enabled !== 'boolean')
       || (value.alerts.wecom_webhook_url !== undefined && typeof value.alerts.wecom_webhook_url !== 'string')
       || (value.alerts.wecom_webhook_url_configured !== undefined && typeof value.alerts.wecom_webhook_url_configured !== 'boolean')
+      || (value.alerts.dingtalk_enabled !== undefined && typeof value.alerts.dingtalk_enabled !== 'boolean')
+      || (value.alerts.dingtalk_webhook_url !== undefined && typeof value.alerts.dingtalk_webhook_url !== 'string')
+      || (value.alerts.dingtalk_webhook_url_configured !== undefined && typeof value.alerts.dingtalk_webhook_url_configured !== 'boolean')
       || (value.alerts.email_enabled !== undefined && typeof value.alerts.email_enabled !== 'boolean')
       || (value.alerts.smtp_host !== undefined && typeof value.alerts.smtp_host !== 'string')
       || (value.alerts.smtp_port !== undefined && !isSafeIntegerInRange(value.alerts.smtp_port, 1, 65535))

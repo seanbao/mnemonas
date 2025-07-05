@@ -5,6 +5,20 @@ import tailwindcss from '@tailwindcss/vite'
 import path from 'path'
 
 const apiProxyTarget = process.env.VITE_API_PROXY_TARGET || 'http://localhost:8080'
+const apiProxy = {
+  '/api': {
+    target: apiProxyTarget,
+    changeOrigin: false,
+  },
+  '/dav': {
+    target: apiProxyTarget,
+    changeOrigin: false,
+  },
+  '/health': {
+    target: apiProxyTarget,
+    changeOrigin: false,
+  },
+}
 
 if (!globalThis.crypto || typeof globalThis.crypto.getRandomValues !== 'function') {
   globalThis.crypto = webcrypto as typeof globalThis.crypto
@@ -47,19 +61,9 @@ export default defineConfig({
     },
   },
   server: {
-    proxy: {
-      '/api': {
-        target: apiProxyTarget,
-        changeOrigin: false,
-      },
-      '/dav': {
-        target: apiProxyTarget,
-        changeOrigin: false,
-      },
-      '/health': {
-        target: apiProxyTarget,
-        changeOrigin: false,
-      },
-    },
+    proxy: apiProxy,
+  },
+  preview: {
+    proxy: apiProxy,
   },
 })

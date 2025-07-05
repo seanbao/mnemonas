@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
 import { Button, Skeleton, Card, CardBody, CardHeader, addToast } from '@heroui/react'
@@ -16,29 +17,28 @@ import {
   ShieldCheck,
   Settings2,
 } from 'lucide-react'
-import { ApiError, getStorageStats, type DirectoryQuotaUsage, type StorageStats } from '@/api/files'
+import { ApiError, getStorageStats, type DirectoryQuotaUsageStatus, type StorageStats } from '@/api/files'
 import { formatBytes } from '@/lib/utils'
 import { areDiskStatsAvailable, areStorageStatsAvailable, clampUsagePercent, formatFilesystemType, formatUsagePercent, getDiskSpaceStatus, getFilesystemIntegrityStatus, type FilesystemIntegrityStatus, type FilesystemIntegrityStatusLevel } from '@/lib/storageStats'
+import {
+  formatDirectoryQuotaSummaryReport,
+  getDirectoryQuotaActionText,
+  getDirectoryQuotaAttentionListItems,
+  getDirectoryQuotaStatusLabel,
+  summarizeDirectoryQuotas,
+  type DirectoryQuotaListFilter,
+} from '@/lib/directoryQuota'
+import { buildStorageRiskItems, getStorageRiskLevel, getStorageRiskNextStepSummary, getStorageRiskSummary, type StorageRiskItem, type StorageRiskLevel } from '@/lib/storageRisk'
 import { GENERIC_ACTION_ERROR_DESCRIPTION, getUserFacingErrorDescription } from '@/lib/apiMessages'
 import { PageHeader } from '@/components/ui/PageHeader'
 import { EmptyState } from '@/components/ui/EmptyState'
+import { StatCard } from '@/components/ui/StatCard'
 import { useIsAdmin, useUser } from '@/stores/auth'
 
 const storageStatsLoadErrorDescription = '存储统计加载失败，请检查网络或稍后重试。'
 const clipboardWriteFailureDescription = '请检查浏览器剪贴板权限。'
 const directoryQuotaExample = `/team 2 GB
 /media 512 MB`
-
-type DirectoryQuotaSummary = {
-  totalCount: number
-  normalCount: number
-  warningCount: number
-  exceededCount: number
-  missingCount: number
-  usedBytes: number
-  quotaBytes: number
-  usageRatio: number | undefined
-}
 
 function formatStorageSize(value: number | undefined): string {
   return value === undefined ? '--' : formatBytes(value)
@@ -124,20 +124,7 @@ function formatStorageBackingSummary(stats: StorageStats, filesystemIntegritySta
   return rows.map(([label, value]) => `${label}: ${value}`).join('\n')
 }
 
-function getDirectoryQuotaStatusLabel(quota: DirectoryQuotaUsage): string {
-  if (quota.status === 'missing') {
-    return '目录未创建'
-  }
-  if (quota.status === 'exceeded') {
-    return '已达上限'
-  }
-  if (quota.status === 'warning') {
-    return '接近上限'
-  }
-  return '正常'
-}
-
-function getDirectoryQuotaBadgeClass(status: DirectoryQuotaUsage['status']): string {
+function getDirectoryQuotaBadgeClass(status: DirectoryQuotaUsageStatus): string {
   if (status === 'exceeded') {
     return 'border-danger/25 bg-danger/10 text-danger'
   }
@@ -150,7 +137,7 @@ function getDirectoryQuotaBadgeClass(status: DirectoryQuotaUsage['status']): str
   return 'border-success/25 bg-success/10 text-success'
 }
 
-function getDirectoryQuotaBarClass(status: DirectoryQuotaUsage['status']): string {
+function getDirectoryQuotaBarClass(status: DirectoryQuotaUsageStatus): string {
   if (status === 'exceeded') {
     return 'bg-danger/70'
   }
@@ -163,79 +150,31 @@ function getDirectoryQuotaBarClass(status: DirectoryQuotaUsage['status']): strin
   return 'bg-success/70'
 }
 
-function summarizeDirectoryQuotas(quotas: DirectoryQuotaUsage[]): DirectoryQuotaSummary {
-  const summary = quotas.reduce<Omit<DirectoryQuotaSummary, 'usageRatio'>>((acc, quota) => {
-    acc.totalCount += 1
-    acc.usedBytes += quota.usedBytes
-    acc.quotaBytes += quota.quotaBytes
-
-    if (quota.status === 'exceeded') {
-      acc.exceededCount += 1
-    } else if (quota.status === 'warning') {
-      acc.warningCount += 1
-    } else if (quota.status === 'missing') {
-      acc.missingCount += 1
-    } else {
-      acc.normalCount += 1
-    }
-
-    return acc
-  }, {
-    totalCount: 0,
-    normalCount: 0,
-    warningCount: 0,
-    exceededCount: 0,
-    missingCount: 0,
-    usedBytes: 0,
-    quotaBytes: 0,
-  })
-
-  return {
-    ...summary,
-    usageRatio: summary.quotaBytes > 0 ? summary.usedBytes / summary.quotaBytes : undefined,
+function getStorageRiskItemClass(level: StorageRiskItem['level']): string {
+  if (level === 'critical') {
+    return 'border-danger/25 bg-danger/5'
   }
+  return 'border-warning/25 bg-warning/5'
 }
 
-function getDirectoryQuotaAttentionPriority(status: DirectoryQuotaUsage['status']): number {
-  if (status === 'exceeded') {
-    return 0
+function getStorageRiskSummaryPanelClass(tone: StorageRiskLevel): string {
+  if (tone === 'critical') {
+    return 'border-danger/25 bg-danger/10 text-danger'
   }
-  if (status === 'missing') {
-    return 1
+  if (tone === 'warning') {
+    return 'border-warning/25 bg-warning/10 text-warning'
   }
-  if (status === 'warning') {
-    return 2
-  }
-  return 3
+  return 'border-success/25 bg-success/10 text-success'
 }
 
-function getDirectoryQuotaAttentionItems(quotas: DirectoryQuotaUsage[]): DirectoryQuotaUsage[] {
-  return quotas
-    .filter((quota) => quota.status !== 'normal')
-    .sort((left, right) => {
-      const priorityDiff = getDirectoryQuotaAttentionPriority(left.status) - getDirectoryQuotaAttentionPriority(right.status)
-      if (priorityDiff !== 0) {
-        return priorityDiff
-      }
-      if (right.usageRatio !== left.usageRatio) {
-        return right.usageRatio - left.usageRatio
-      }
-      return left.path.localeCompare(right.path)
-    })
-    .slice(0, 5)
-}
-
-function getDirectoryQuotaActionText(quota: DirectoryQuotaUsage): string {
-  if (quota.status === 'exceeded') {
-    return '清理目录内容、提高配额，或迁移部分数据。'
+function getStorageRiskSummaryIconClass(tone: StorageRiskLevel): string {
+  if (tone === 'critical') {
+    return 'text-danger'
   }
-  if (quota.status === 'missing') {
-    return '创建目标目录，或删除不再使用的配额配置。'
+  if (tone === 'warning') {
+    return 'text-warning'
   }
-  if (quota.status === 'warning') {
-    return '复核近期增长，并确认是否需要扩容或归档。'
-  }
-  return '保持当前配置。'
+  return 'text-success'
 }
 
 // Action card for maintenance operations
@@ -299,6 +238,7 @@ function MaintenanceCard({
 }
 
 export function StoragePage() {
+  const [directoryQuotaFilter, setDirectoryQuotaFilter] = useState<DirectoryQuotaListFilter>('all')
   const navigate = useNavigate()
   const user = useUser()
   const isAdmin = useIsAdmin()
@@ -406,53 +346,82 @@ export function StoragePage() {
     : casBytes !== undefined
       ? `${formatBytes(casBytes)} CAS 数据 · 磁盘容量不可用`
       : '统计不可用'
+  const diskUsageValueText = diskStatsAvailable
+    ? `${formatUsagePercent(stats?.diskUsageRatio)} 已用`
+    : overviewSubtitle
   const directoryQuotas = stats?.directoryQuotas ?? []
   const directoryQuotaSummary = summarizeDirectoryQuotas(directoryQuotas)
-  const directoryQuotaAttentionCount = directoryQuotaSummary.exceededCount + directoryQuotaSummary.missingCount
-  const directoryQuotaAttentionItems = getDirectoryQuotaAttentionItems(directoryQuotas)
+  const directoryQuotaAttentionListItems = getDirectoryQuotaAttentionListItems(directoryQuotas)
+  const directoryQuotaAttentionCount = directoryQuotaAttentionListItems.length
+  const directoryQuotaAttentionItems = directoryQuotaAttentionListItems.slice(0, 5)
+  const visibleDirectoryQuotas = directoryQuotaFilter === 'attention'
+    ? directoryQuotaAttentionListItems
+    : directoryQuotas
+  const directoryQuotaSummaryReport = directoryQuotas.length > 0
+    ? formatDirectoryQuotaSummaryReport(directoryQuotas, directoryQuotaSummary, directoryQuotaAttentionCount)
+    : ''
+  const storageRiskItems = isAdmin
+    ? buildStorageRiskItems(
+        diskSpaceStatus,
+        filesystemIntegrityStatus,
+        stats?.directoryQuotaStatsAvailable,
+        directoryQuotaSummary,
+      )
+    : []
+  const storageRiskLevel = getStorageRiskLevel(storageRiskItems)
+  const storageRiskSummary = getStorageRiskSummary(storageRiskLevel)
+  const storageRiskNextStepSummary = getStorageRiskNextStepSummary(storageRiskItems)
 
   const statsCards = [
     {
       title: '磁盘容量',
       value: diskStatsAvailable ? formatStorageSize(diskTotalBytes) : '--',
       icon: HardDrive,
+      tone: 'primary',
     },
     {
       title: '可用空间',
       value: diskStatsAvailable ? formatStorageSize(diskAvailableBytes) : '--',
       icon: Activity,
+      tone: diskSpaceStatus.level === 'critical' ? 'danger' : diskSpaceStatus.level === 'warning' ? 'warning' : 'success',
     },
     {
       title: '磁盘占用',
       value: diskStatsAvailable ? formatUsagePercent(stats?.diskUsageRatio) : '--',
       icon: TrendingUp,
+      tone: diskSpaceStatus.level === 'critical' ? 'danger' : diskSpaceStatus.level === 'warning' ? 'warning' : 'primary',
     },
     {
       title: '文件系统',
       value: diskStatsAvailable ? formatFilesystemType(stats?.diskFilesystemType) : '--',
       icon: stats?.diskNativeDataChecksumSupport === true ? ShieldCheck : HardDrive,
+      tone: filesystemIntegrityStatus?.level === 'supported' ? 'success' : filesystemIntegrityStatus?.level === 'unknown' ? 'default' : 'warning',
     },
     {
       title: '对象总数',
       value: storageStatsAvailable ? formatCount(stats?.totalObjects) : '--',
       icon: Database,
+      tone: 'primary',
     },
     {
       title: 'CAS 大小',
       value: storageStatsAvailable ? formatStorageSize(casBytes) : '--',
       icon: Database,
+      tone: 'primary',
     },
     {
       title: '去重率',
       value: storageStatsAvailable && stats?.dedupRatio !== undefined ? `${(stats.dedupRatio * 100).toFixed(1)}%` : '--',
       icon: Sparkles,
+      tone: 'secondary',
     },
     {
       title: '节省空间',
       value: formatStorageSize(savedBytes),
       icon: TrendingUp,
+      tone: savedBytes !== undefined && savedBytes > 0 ? 'success' : 'default',
     },
-  ]
+  ] as const
 
   const handleCopyStorageBackingSummary = async () => {
     if (!navigator.clipboard?.writeText) {
@@ -470,6 +439,28 @@ export function StoragePage() {
     } catch {
       addToast({
         title: '无法复制存储摘要',
+        description: clipboardWriteFailureDescription,
+        color: 'danger',
+      })
+    }
+  }
+
+  const handleCopyDirectoryQuotaSummary = async () => {
+    if (!navigator.clipboard?.writeText) {
+      addToast({
+        title: '无法复制目录配额摘要',
+        description: '当前浏览器不支持剪贴板写入。',
+        color: 'warning',
+      })
+      return
+    }
+
+    try {
+      await navigator.clipboard.writeText(directoryQuotaSummaryReport)
+      addToast({ title: '目录配额摘要已复制', color: 'success' })
+    } catch {
+      addToast({
+        title: '无法复制目录配额摘要',
         description: clipboardWriteFailureDescription,
         color: 'danger',
       })
@@ -512,7 +503,15 @@ export function StoragePage() {
         </CardHeader>
         <CardBody>
           <div className="space-y-2">
-            <div className="h-2 rounded-full bg-content2 overflow-hidden">
+            <div
+              role="progressbar"
+              aria-label="存储使用率"
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-valuenow={diskUsagePercent !== undefined ? Math.round(diskUsagePercent) : undefined}
+              aria-valuetext={diskUsageValueText}
+              className="h-2 rounded-full bg-content2 overflow-hidden"
+            >
               <div 
                 className={hasUsage ? `h-full rounded-full flow-line opacity-70 ${getDiskUsageBarClass(diskSpaceStatus.level)}` : "h-full bg-accent-primary/30 rounded-full"}
                 style={{ width: diskUsagePercent !== undefined ? `${diskUsagePercent}%` : hasUsage ? '100%' : '0%' }}
@@ -532,7 +531,7 @@ export function StoragePage() {
               </div>
             )}
             {hasStorageBackingDetails && (
-              <div className="mt-4 grid gap-3 rounded-lg border border-divider bg-content1 p-3 text-sm sm:grid-cols-2">
+              <div aria-label="存储承载详情" className="mt-4 grid gap-3 rounded-lg border border-divider bg-content1 p-3 text-sm sm:grid-cols-2">
                 <div className="flex min-w-0 flex-col gap-2 sm:col-span-2 sm:flex-row sm:items-center sm:justify-between">
                   <div className="min-w-0">
                     <p className="font-medium text-foreground">存储承载详情</p>
@@ -586,30 +585,102 @@ export function StoragePage() {
         </CardBody>
       </Card>
 
-      {/* Stats Grid */}
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 md:grid-cols-3 xl:grid-cols-4">
-        {statsCards.map((stat) => (
-          <div key={stat.title} className="stat-card">
-            <div className="relative">
-              <div className="flex items-start justify-between">
-                <div>
-                  <p className="text-default-500 text-sm">{stat.title}</p>
-                  <div className="mt-1 flex items-baseline gap-1">
-                    <span className="data-value-large">{stat.value}</span>
-                  </div>
-                </div>
-                <div className="gradient-meridian-subtle rounded-lg p-2.5">
-                  <stat.icon className="text-accent-primary h-5 w-5" />
-                </div>
+      {isAdmin && (
+        <Card aria-label="存储健康摘要" className="card-meridian">
+          <CardHeader className="pb-0">
+            <div className="flex items-center gap-2">
+              <div className="gradient-meridian-subtle rounded-lg p-2">
+                {storageRiskLevel === 'normal' ? (
+                  <CheckCircle2 className="h-4 w-4 text-success" />
+                ) : (
+                  <AlertCircle className={`h-4 w-4 ${getStorageRiskSummaryIconClass(storageRiskSummary.tone)}`} />
+                )}
+              </div>
+              <div>
+                <span className="font-semibold">存储健康摘要</span>
+                <p className="text-xs text-default-500">集中复核容量、底层校验能力和目录配额边界</p>
               </div>
             </div>
-          </div>
+          </CardHeader>
+          <CardBody>
+            <div className="grid gap-4 lg:grid-cols-[minmax(0,0.75fr)_minmax(0,1.25fr)]">
+              <div className={`rounded-lg border p-4 ${getStorageRiskSummaryPanelClass(storageRiskSummary.tone)}`}>
+                <p className="text-xs font-medium opacity-80">当前判断</p>
+                <p className="mt-2 text-lg font-semibold">{storageRiskSummary.title}</p>
+                <p className="mt-2 text-sm leading-6 text-default-700">{storageRiskSummary.description}</p>
+                <p className="mt-3 rounded-lg bg-content1 px-3 py-2 text-xs leading-5 text-default-600">
+                  建议处理: {storageRiskNextStepSummary}
+                </p>
+                <div className="mt-4 flex flex-wrap gap-2 text-xs">
+                  <span className="rounded-full bg-content1 px-2 py-1 text-default-600">
+                    容量：{diskSpaceStatus.label}
+                  </span>
+                  {filesystemIntegrityStatus && (
+                    <span className="rounded-full bg-content1 px-2 py-1 text-default-600">
+                      校验：{filesystemIntegrityStatus.label}
+                    </span>
+                  )}
+                  <span className="rounded-full bg-content1 px-2 py-1 text-default-600">
+                    配额异常：{directoryQuotaSummary.exceededCount + directoryQuotaSummary.warningCount + directoryQuotaSummary.missingCount} 个
+                  </span>
+                </div>
+              </div>
+
+              {storageRiskItems.length === 0 ? (
+                <div className="rounded-lg border border-success/25 bg-success/5 p-4">
+                  <div className="flex items-start gap-2">
+                    <CheckCircle2 size={16} className="mt-0.5 shrink-0 text-success" />
+                    <div className="min-w-0">
+                      <p className="text-sm font-medium text-foreground">未发现需处理的存储风险</p>
+                      <p className="mt-1 text-xs leading-5 text-default-600">
+                        继续保留外部备份，并定期运行完整性检查和恢复演练。
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  {storageRiskItems.slice(0, 4).map((item) => (
+                    <div key={item.key} className={`rounded-lg border p-3 ${getStorageRiskItemClass(item.level)}`}>
+                      <div className="flex items-start gap-2">
+                        <AlertCircle size={15} className={`mt-0.5 shrink-0 ${item.level === 'critical' ? 'text-danger' : 'text-warning'}`} />
+                        <div className="min-w-0">
+                          <p className="text-sm font-medium text-foreground">{item.title}</p>
+                          <p className="mt-1 text-xs leading-5 text-default-600">{item.description}</p>
+                          <p className="mt-1 text-xs leading-5 text-default-500">{item.action}</p>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                  {storageRiskItems.length > 4 && (
+                    <p className="text-xs text-default-500">
+                      另有 {storageRiskItems.length - 4} 项低优先级风险可在页面下方继续复核。
+                    </p>
+                  )}
+                </div>
+              )}
+            </div>
+          </CardBody>
+        </Card>
+      )}
+
+      {/* Stats Grid */}
+      <div className="grid grid-cols-2 gap-2 sm:gap-3 md:grid-cols-3 xl:grid-cols-4">
+        {statsCards.map((stat) => (
+          <StatCard
+            key={stat.title}
+            title={stat.title}
+            value={stat.value}
+            icon={stat.icon}
+            tone={stat.tone}
+            density="compact"
+          />
         ))}
       </div>
 
       {isAdmin && (
         <Card className="card-meridian">
-          <CardHeader className="pb-0">
+          <CardHeader className="flex flex-col items-start gap-3 pb-0 sm:flex-row sm:items-center sm:justify-between">
             <div className="flex items-center gap-2">
               <div className="gradient-meridian-subtle rounded-lg p-2">
                 <HardDrive className="h-4 w-4 text-accent-primary" />
@@ -619,6 +690,40 @@ export function StoragePage() {
                 <p className="text-xs text-default-500">按目录统计当前文件占用和剩余额度</p>
               </div>
             </div>
+            {stats?.directoryQuotaStatsAvailable && directoryQuotas.length > 0 && (
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+                <Button
+                  size="sm"
+                  variant="flat"
+                  className="w-fit rounded-lg"
+                  startContent={<Copy size={14} />}
+                  onPress={handleCopyDirectoryQuotaSummary}
+                >
+                  复制配额摘要
+                </Button>
+                <div className="flex rounded-lg border border-divider bg-content2/50 p-1" role="group" aria-label="目录配额筛选">
+                  <Button
+                    size="sm"
+                    variant={directoryQuotaFilter === 'all' ? 'solid' : 'light'}
+                    color={directoryQuotaFilter === 'all' ? 'primary' : 'default'}
+                    className="rounded-md"
+                    onPress={() => setDirectoryQuotaFilter('all')}
+                  >
+                    全部目录
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant={directoryQuotaFilter === 'attention' ? 'solid' : 'light'}
+                    color={directoryQuotaFilter === 'attention' ? 'warning' : 'default'}
+                    className="rounded-md"
+                    startContent={<AlertCircle size={14} />}
+                    onPress={() => setDirectoryQuotaFilter('attention')}
+                  >
+                    配额关注
+                  </Button>
+                </div>
+              </div>
+            )}
           </CardHeader>
           <CardBody>
             {!stats?.directoryQuotaStatsAvailable ? (
@@ -674,13 +779,13 @@ export function StoragePage() {
                     <p className="mt-1 text-lg font-semibold text-warning">{directoryQuotaSummary.warningCount} 个</p>
                     <p className="mt-1 text-xs text-default-500">建议复核增长较快目录</p>
                   </div>
-                  <div className={`min-w-0 rounded-lg border p-3 ${directoryQuotaAttentionCount > 0 ? 'border-danger/25 bg-danger/5' : 'border-success/25 bg-success/5'}`}>
-                    <p className="text-xs text-default-500">需处理</p>
+                  <div className={`min-w-0 rounded-lg border p-3 ${directoryQuotaAttentionCount > 0 ? 'border-warning/25 bg-warning/5' : 'border-success/25 bg-success/5'}`}>
+                    <p className="text-xs text-default-500">需复核</p>
                     <p className={`mt-1 text-lg font-semibold ${directoryQuotaAttentionCount > 0 ? 'text-danger' : 'text-success'}`}>
                       {directoryQuotaAttentionCount} 个
                     </p>
                     <p className="mt-1 text-xs text-default-500">
-                      已超限 {directoryQuotaSummary.exceededCount} 个 · 路径不存在 {directoryQuotaSummary.missingCount} 个
+                      接近上限 {directoryQuotaSummary.warningCount} 个 · 已超限 {directoryQuotaSummary.exceededCount} 个 · 路径不存在 {directoryQuotaSummary.missingCount} 个
                     </p>
                   </div>
                 </div>
@@ -695,7 +800,7 @@ export function StoragePage() {
                         <p className="mt-1 text-xs text-warning/80">优先处理超限、不存在和接近上限目录</p>
                       </div>
                       <p className="text-xs text-warning/80">
-                        {directoryQuotaAttentionItems.length} / {directoryQuotaSummary.totalCount} 个需复核
+                        显示 {directoryQuotaAttentionItems.length} / {directoryQuotaAttentionCount} 个需复核
                       </p>
                     </div>
                     <div className="mt-3 divide-y divide-warning/20">
@@ -724,8 +829,17 @@ export function StoragePage() {
                     </div>
                   </div>
                 )}
-                {directoryQuotas.map((quota) => {
+                {visibleDirectoryQuotas.length === 0 ? (
+                  <div className="flex items-center justify-center rounded-lg border border-divider bg-content1 p-6">
+                    <EmptyState
+                      icon={CheckCircle2}
+                      title="暂无配额关注目录"
+                      description="所有已配置目录配额当前都处于正常范围。"
+                    />
+                  </div>
+                ) : visibleDirectoryQuotas.map((quota) => {
                   const usagePercent = clampUsagePercent(quota.usageRatio) ?? 0
+                  const quotaUsageValueText = `${formatUsagePercent(quota.usageRatio)} 已用，剩余 ${formatBytes(quota.availableBytes)}，${getDirectoryQuotaStatusLabel(quota)}`
                   return (
                     <div key={quota.path} className="rounded-lg border border-divider bg-content1 p-4">
                       <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
@@ -741,7 +855,15 @@ export function StoragePage() {
                           {getDirectoryQuotaStatusLabel(quota)}
                         </span>
                       </div>
-                      <div className="mt-3 h-2 overflow-hidden rounded-full bg-content2">
+                      <div
+                        role="progressbar"
+                        aria-label={`${quota.path} 目录配额使用率`}
+                        aria-valuemin={0}
+                        aria-valuemax={100}
+                        aria-valuenow={Number(usagePercent.toFixed(1))}
+                        aria-valuetext={quotaUsageValueText}
+                        className="mt-3 h-2 overflow-hidden rounded-full bg-content2"
+                      >
                         <div
                           className={`h-full rounded-full ${getDirectoryQuotaBarClass(quota.status)}`}
                           style={{ width: `${usagePercent}%` }}

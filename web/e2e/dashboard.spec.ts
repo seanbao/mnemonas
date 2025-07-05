@@ -88,7 +88,7 @@ test.describe('首页备份风险提示', () => {
   test('应提示恢复后缺少匹配校验的备份任务', async ({ page }) => {
     await expect(page.getByText('备份需要查看')).toBeVisible()
     await expect(page.getByText('1 项待处理')).toBeVisible()
-    await expect(page.getByText('检查失败、过期、缺少演练或恢复校验的任务').first()).toBeVisible()
+    await expect(page.getByText('恢复待校验').first()).toBeVisible()
     await expect(page.getByRole('button', { name: '打开备份' })).toBeVisible()
   })
 })

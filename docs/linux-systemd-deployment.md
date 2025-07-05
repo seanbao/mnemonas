@@ -84,6 +84,8 @@ sudo env FIX_STORAGE_OWNERSHIP=1 ./scripts/install-systemd.sh
 
 安装完成后脚本会输出可直接执行的下一步，包括 Web UI 地址、读取初始密码的 `sudo cat .../initial-password.txt` 命令、`mnemonas-doctor` 诊断命令和日志查看命令。
 
+如果安装在重载、启用或启动 systemd 服务阶段失败，脚本会输出失败阶段以及对应的 `systemctl cat`、`systemctl status` 或 `journalctl` 检查命令。先保留配置和数据目录，按输出排查 unit 或服务日志后，可重新运行安装脚本。
+
 如果还没有可用的 release 包，也可以在目标机器或另一台 Linux 机器上从源码构建后安装：
 
 ```bash
@@ -134,7 +136,7 @@ sudo systemctl restart mnemonas-dataplane
 sudo mnemonas-doctor
 ```
 
-`mnemonas-doctor` 会检查服务状态、Web UI、目录权限、存储挂载类型和剩余磁盘空间。Web UI 的“设备状态”和“空间与存储”页也会显示底层文件系统类型、挂载点、设备/数据集来源、脱敏挂载选项、ZFS/Btrfs 原生校验提示，以及空间提醒运行态；管理员可在“设备状态”页下载诊断包，也可在“空间与存储”页复制存储承载摘要用于排障记录。默认低于 10GB 可用空间时给出警告，可用 `MIN_FREE_BYTES=<bytes> sudo mnemonas-doctor` 调整阈值。
+`mnemonas-doctor` 会检查服务状态、Web UI、配置文件、运行态敏感文件、目录权限、存储挂载类型、剩余磁盘空间和备份目录位置。`config.toml` 不是普通文件时会失败；如果配置文件是符号链接或权限过宽，会提示风险。启用认证时，如果 `users.json` 缺失，或 `users.json`、`secrets.json` 及相关目录是符号链接、非普通文件或权限过宽，诊断会提示风险。`BACKUP_ROOT` 存在时不能等于或位于 `storage.root` 内部；如果与 `storage.root` 使用同一个 filesystem source，诊断会提示风险；如果服务用户或当前诊断环境无法写入，也会提示权限问题。备份目标应指向独立磁盘、独立数据集或远端挂载路径。Web UI 的“设备状态”和“空间与存储”页也会显示底层文件系统类型、挂载点、设备/数据集来源、脱敏挂载选项、ZFS/Btrfs 原生校验提示，以及空间提醒运行态；管理员可在“设备状态”页下载诊断包，也可在“空间与存储”页复制存储承载摘要用于排障记录。默认低于 10GB 可用空间时给出警告，可用 `MIN_FREE_BYTES=<bytes> sudo mnemonas-doctor` 调整阈值。
 
 如果系统安装了 UFW，`mnemonas-doctor` 也会检查防火墙是否启用，并提示不要放行 dataplane 的 `9090/9091` 端口。
 
@@ -228,7 +230,15 @@ sudo ./scripts/install-systemd.sh
 sudo mnemonas-doctor
 ```
 
-升级前建议先完成一次备份，尤其是跨大版本升级。
+升级前建议先完成一次备份，尤其是跨大版本升级。还应保留上一版本的 release 解压目录，便于升级后发现启动失败、核心工作流异常或 `mnemonas-doctor` 失败时回退到上一版本：
+
+```bash
+cd mnemonas-<previous-version>-linux-amd64
+sudo ./scripts/install-systemd.sh
+sudo mnemonas-doctor
+```
+
+回退会覆盖二进制和 Web UI 静态资源，并继续使用现有 `/etc/mnemonas/config.toml` 与 `/srv/mnemonas` 数据目录。若新版本已经执行过不可逆的数据迁移，应先按对应 release note 或备份恢复流程处理；不要直接用旧版本读取已经迁移后的数据。
 
 ## 卸载
 

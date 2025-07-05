@@ -3160,8 +3160,11 @@ func TestHandler_PROPFIND_DoesNotServeStaleCacheWhilePutIsInFlight(t *testing.T)
 	if err := fs.Mkdir(ctx, "/cache-race"); err != nil {
 		t.Fatalf("Mkdir(/cache-race) error: %v", err)
 	}
-	if err := fs.WriteFile(ctx, "/cache-race/existing.txt", bytes.NewReader([]byte("existing"))); err != nil {
-		t.Fatalf("WriteFile(/cache-race/existing.txt) error: %v", err)
+	for i := 0; i < 10; i++ {
+		filePath := fmt.Sprintf("/cache-race/existing-%02d.txt", i)
+		if err := fs.WriteFile(ctx, filePath, bytes.NewReader([]byte("existing"))); err != nil {
+			t.Fatalf("WriteFile(%s) error: %v", filePath, err)
+		}
 	}
 
 	initialReq := httptest.NewRequest("PROPFIND", "/dav/cache-race", nil)
@@ -3172,11 +3175,14 @@ func TestHandler_PROPFIND_DoesNotServeStaleCacheWhilePutIsInFlight(t *testing.T)
 	if initialW.Code != http.StatusMultiStatus {
 		t.Fatalf("initial PROPFIND status = %d, want %d", initialW.Code, http.StatusMultiStatus)
 	}
-	if !strings.Contains(initialW.Body.String(), "existing.txt") {
+	if !strings.Contains(initialW.Body.String(), "existing-00.txt") {
 		t.Fatalf("expected initial PROPFIND to include existing file, got %q", initialW.Body.String())
 	}
 	if strings.Contains(initialW.Body.String(), "new.txt") {
 		t.Fatalf("initial PROPFIND unexpectedly contains new file, got %q", initialW.Body.String())
+	}
+	if _, ok := handler.propCache.Get("/cache-race", "1"); !ok {
+		t.Fatal("expected initial PROPFIND to populate cache for the large directory")
 	}
 
 	originalUpdateFileIndex := getStorageHook[func(ctx context.Context, path string, size int64, modTime time.Time, hash string) error](t, fs, "updateFileIndex")
@@ -3204,12 +3210,41 @@ func TestHandler_PROPFIND_DoesNotServeStaleCacheWhilePutIsInFlight(t *testing.T)
 		handler.ServeHTTP(putW, putReq)
 		close(putDone)
 	}()
+	releaseUpdate := func() {
+		select {
+		case <-continueUpdate:
+		default:
+			close(continueUpdate)
+		}
+	}
+	defer releaseUpdate()
 
 	select {
 	case <-updateStarted:
+	case <-putDone:
+		t.Fatalf("PUT completed before updateFileIndex hook, status=%d body=%q", putW.Code, putW.Body.String())
 	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for PUT to reach updateFileIndex hook")
+		t.Fatalf("timed out waiting for PUT to reach updateFileIndex hook, status=%d body=%q", putW.Code, putW.Body.String())
 	}
+	if _, ok := handler.propCache.Get("/cache-race", "1"); ok {
+		t.Fatal("expected PUT to invalidate cached PROPFIND before writing file content")
+	}
+
+	cacheMissed := make(chan struct{})
+	originalOnWebDAVPropfindCacheMiss := onWebDAVPropfindCacheMiss
+	onWebDAVPropfindCacheMiss = func(cacheHandler *Handler, filePath, depth string) {
+		if cacheHandler == handler && filePath == "/cache-race" && depth == "1" {
+			select {
+			case <-cacheMissed:
+			default:
+				close(cacheMissed)
+			}
+		}
+		originalOnWebDAVPropfindCacheMiss(cacheHandler, filePath, depth)
+	}
+	t.Cleanup(func() {
+		onWebDAVPropfindCacheMiss = originalOnWebDAVPropfindCacheMiss
+	})
 
 	concurrentReq := httptest.NewRequest("PROPFIND", "/dav/cache-race", nil)
 	concurrentReq.Header.Set("Depth", "1")
@@ -3221,13 +3256,11 @@ func TestHandler_PROPFIND_DoesNotServeStaleCacheWhilePutIsInFlight(t *testing.T)
 	}()
 
 	select {
-	case <-concurrentDone:
-		if !strings.Contains(concurrentW.Body.String(), "new.txt") {
-			t.Fatalf("concurrent PROPFIND returned stale cached body while PUT was in flight: %q", concurrentW.Body.String())
-		}
-	case <-time.After(50 * time.Millisecond):
+	case <-cacheMissed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for concurrent PROPFIND to miss stale cache while PUT was in flight")
 	}
-	close(continueUpdate)
+	releaseUpdate()
 
 	select {
 	case <-concurrentDone:
@@ -3637,6 +3670,17 @@ func TestHandler_LockCleanupLoopRemovesExpiredLocksWithoutNewRequests(t *testing
 	handler := NewHandler(Config{AuthType: "none"})
 	handler.lockCleanupInterval = 10 * time.Millisecond
 	t.Cleanup(func() { handler.Close() })
+	cleaned := make(chan struct{}, 1)
+	originalOnWebDAVLockCleanupComplete := onWebDAVLockCleanupComplete
+	onWebDAVLockCleanupComplete = func(*Handler) {
+		select {
+		case cleaned <- struct{}{}:
+		default:
+		}
+	}
+	t.Cleanup(func() {
+		onWebDAVLockCleanupComplete = originalOnWebDAVLockCleanupComplete
+	})
 
 	handler.locksMu.Lock()
 	handler.locks["/expired-background-lock.txt"] = webdavLock{
@@ -3647,19 +3691,18 @@ func TestHandler_LockCleanupLoopRemovesExpiredLocksWithoutNewRequests(t *testing
 
 	handler.startLockCleanupLoop()
 
-	deadline := time.Now().Add(500 * time.Millisecond)
-	for time.Now().Before(deadline) {
-		handler.locksMu.Lock()
-		_, exists := handler.locks["/expired-background-lock.txt"]
-		handler.locksMu.Unlock()
-		if !exists {
-			return
-		}
-
-		time.Sleep(10 * time.Millisecond)
+	select {
+	case <-cleaned:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for background lock cleanup")
 	}
 
-	t.Fatal("expected background lock cleanup loop to remove expired lock")
+	handler.locksMu.Lock()
+	_, exists := handler.locks["/expired-background-lock.txt"]
+	handler.locksMu.Unlock()
+	if exists {
+		t.Fatal("expected background lock cleanup loop to remove expired lock")
+	}
 }
 
 func TestHandler_LOCK_ReplacesExpiredLock(t *testing.T) {

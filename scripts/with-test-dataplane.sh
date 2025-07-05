@@ -9,8 +9,10 @@ fi
 
 PROJECT_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 DATAPLANE_DIR="$PROJECT_ROOT/dataplane"
-GRPC_ADDR="${MNEMONAS_TEST_DATAPLANE_ADDR:-127.0.0.1:19090}"
-HTTP_ADDR="${MNEMONAS_TEST_DATAPLANE_HTTP_ADDR:-127.0.0.1:19091}"
+GRPC_ADDR_EXPLICIT="${MNEMONAS_TEST_DATAPLANE_ADDR+x}"
+HTTP_ADDR_EXPLICIT="${MNEMONAS_TEST_DATAPLANE_HTTP_ADDR+x}"
+GRPC_ADDR="${MNEMONAS_TEST_DATAPLANE_ADDR:-}"
+HTTP_ADDR="${MNEMONAS_TEST_DATAPLANE_HTTP_ADDR:-}"
 DATAPLANE_PID=""
 
 fail() {
@@ -81,6 +83,60 @@ tcp_addr_host() {
     return 1
 }
 
+tcp_addr_port() {
+    local value="$1"
+
+    if [[ "$value" =~ ^\[([^][]+)\]:([0-9]+)$ ]]; then
+        printf '%s\n' "${BASH_REMATCH[2]}"
+        return 0
+    fi
+    if [[ "$value" =~ ^([^:]+):([0-9]+)$ ]]; then
+        printf '%s\n' "${BASH_REMATCH[2]}"
+        return 0
+    fi
+    return 1
+}
+
+pick_loopback_port() {
+    if command -v python3 >/dev/null 2>&1; then
+        python3 - <<'PY'
+import socket
+
+with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+    sock.bind(("127.0.0.1", 0))
+    print(sock.getsockname()[1])
+PY
+        return 0
+    fi
+
+    fail "python3 is required to auto-select test dataplane ports; set MNEMONAS_TEST_DATAPLANE_ADDR and MNEMONAS_TEST_DATAPLANE_HTTP_ADDR explicitly"
+}
+
+resolve_default_addresses() {
+    if [[ -z "$GRPC_ADDR_EXPLICIT" ]]; then
+        local grpc_port
+        grpc_port="$(pick_loopback_port)"
+        GRPC_ADDR="127.0.0.1:$grpc_port"
+    fi
+    if [[ -z "$HTTP_ADDR_EXPLICIT" ]]; then
+        local http_port
+        http_port="$(pick_loopback_port)"
+        HTTP_ADDR="127.0.0.1:$http_port"
+    fi
+}
+
+require_distinct_dataplane_ports() {
+    local grpc_port http_port grpc_host http_host
+
+    grpc_port="$(tcp_addr_port "$GRPC_ADDR")" || fail "MNEMONAS_TEST_DATAPLANE_ADDR must be a host:port address: $GRPC_ADDR"
+    http_port="$(tcp_addr_port "$HTTP_ADDR")" || fail "MNEMONAS_TEST_DATAPLANE_HTTP_ADDR must be a host:port address: $HTTP_ADDR"
+    grpc_host="$(tcp_addr_host "$GRPC_ADDR")"
+    http_host="$(tcp_addr_host "$HTTP_ADDR")"
+    if [[ "$grpc_port" == "$http_port" && "$grpc_host" == "$http_host" ]]; then
+        fail "MNEMONAS_TEST_DATAPLANE_ADDR and MNEMONAS_TEST_DATAPLANE_HTTP_ADDR must use different ports"
+    fi
+}
+
 require_safe_tcp_addr() {
     local value="$1"
     local label="$2"
@@ -114,10 +170,12 @@ require_loopback_tcp_addr() {
     is_loopback_host "$host" || fail "$label must be loopback-only for test dataplane: $value"
 }
 
+resolve_default_addresses
 require_safe_tcp_addr "$GRPC_ADDR" "MNEMONAS_TEST_DATAPLANE_ADDR"
 require_loopback_tcp_addr "$GRPC_ADDR" "MNEMONAS_TEST_DATAPLANE_ADDR"
 require_safe_tcp_addr "$HTTP_ADDR" "MNEMONAS_TEST_DATAPLANE_HTTP_ADDR"
 require_loopback_tcp_addr "$HTTP_ADDR" "MNEMONAS_TEST_DATAPLANE_HTTP_ADDR"
+require_distinct_dataplane_ports
 
 HEALTH_URL="http://$HTTP_ADDR/health"
 DATA_DIR=$(mktemp -d "${TMPDIR:-/tmp}/mnemonas-test-dataplane.XXXXXX")

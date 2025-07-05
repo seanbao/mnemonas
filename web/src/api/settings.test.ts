@@ -254,6 +254,9 @@ describe('Settings API', () => {
         wecom_enabled: true,
         wecom_webhook_url: '<redacted>',
         wecom_webhook_url_configured: true,
+        dingtalk_enabled: true,
+        dingtalk_webhook_url: '<redacted>',
+        dingtalk_webhook_url_configured: true,
       },
       disk_health: {
         enabled: true,
@@ -301,6 +304,9 @@ describe('Settings API', () => {
     expect(result.data.alerts?.wecom_enabled).toBe(true)
     expect(result.data.alerts?.wecom_webhook_url).toBe('<redacted>')
     expect(result.data.alerts?.wecom_webhook_url_configured).toBe(true)
+    expect(result.data.alerts?.dingtalk_enabled).toBe(true)
+    expect(result.data.alerts?.dingtalk_webhook_url).toBe('<redacted>')
+    expect(result.data.alerts?.dingtalk_webhook_url_configured).toBe(true)
     expect(result.data.disk_health?.devices[0]?.path).toBe('/dev/disk/by-id/test')
     expect(result.data.maintenance?.scrub?.schedule_interval).toBe('168h')
   })
@@ -1303,6 +1309,7 @@ describe('Settings API', () => {
     ['favorites', { favorites: { enabled: true, runtime_available: 'yes' } }],
     ['alerts', { alerts: { enabled: true, check_interval: '1m', threshold_pct: 80, critical_pct: 90, min_free_bytes: 1024, cooldown_period: '10m', webhook_url: 'https://hooks.example.com', webhook_method: 'POST', webhook_headers: [], telegram_enabled: true, telegram_bot_token_configured: 'yes' } }],
     ['alerts wecom', { alerts: { ...validAlertsSettings, wecom_enabled: true, wecom_webhook_url: 123 } }],
+    ['alerts dingtalk', { alerts: { ...validAlertsSettings, dingtalk_enabled: true, dingtalk_webhook_url: 123 } }],
     ['disk_health', { disk_health: { enabled: true, check_interval: '1h', probe_timeout: '15s', cooldown_period: '4h', command: 'smartctl', temperature_warning_c: 45, temperature_critical_c: 55, media_wear_warning_percent: 80, media_wear_critical_percent: 95, devices: [{ path: 12 }] } }],
     ['maintenance', { maintenance: { scrub: { enabled: true, schedule_interval: '168h', retry_interval: '1h', max_retries: '1' } } }],
   ])('rejects malformed optional %s settings sections', async (_name, override) => {

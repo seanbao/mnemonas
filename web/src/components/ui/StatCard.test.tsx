@@ -1,6 +1,6 @@
-import { render, screen } from '@testing-library/react'
+import { fireEvent, render, screen } from '@testing-library/react'
 import { HardDrive } from 'lucide-react'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { StatCard } from './StatCard'
 
 describe('StatCard', () => {
@@ -30,5 +30,23 @@ describe('StatCard', () => {
     expect(screen.getByText('of 10 GB')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Manage' })).toBeInTheDocument()
     expect(document.querySelector('svg')?.parentElement).toHaveClass('bg-warning/10', 'text-warning')
+  })
+
+  it('supports an optional press action', () => {
+    const onPress = vi.fn()
+    render(<StatCard title="Warnings" value={3} onPress={onPress} ariaLabel="查看告警" />)
+
+    fireEvent.click(screen.getByRole('button', { name: '查看告警' }))
+
+    expect(onPress).toHaveBeenCalledTimes(1)
+  })
+
+  it('supports compact density for dense mobile stat grids', () => {
+    render(<StatCard title="Users" value={6} subtitle="2 need review" icon={HardDrive} density="compact" />)
+
+    expect(screen.getByText('Users')).toHaveClass('text-[11px]')
+    expect(screen.getByText('6')).toHaveClass('text-xl')
+    expect(screen.getByText('2 need review')).toHaveClass('text-[11px]')
+    expect(document.querySelector('svg')?.parentElement).toHaveClass('h-8', 'w-8')
   })
 })
