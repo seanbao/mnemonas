@@ -590,11 +590,23 @@ func TestFrontendHandlerServesAssetsAndSPAFallback(t *testing.T) {
 		accept     string
 		wantStatus int
 		wantBody   string
+		wantCache  string
 	}{
-		{name: "root", path: "/", accept: "text/html", wantStatus: http.StatusOK, wantBody: `<div id="root"></div>`},
-		{name: "spa route", path: "/files/photos", accept: "text/html", wantStatus: http.StatusOK, wantBody: `<div id="root"></div>`},
+		{name: "root", path: "/", accept: "text/html", wantStatus: http.StatusOK, wantBody: `<div id="root"></div>`, wantCache: "no-cache"},
+		{name: "spa route", path: "/files/photos", accept: "text/html", wantStatus: http.StatusOK, wantBody: `<div id="root"></div>`, wantCache: "no-cache"},
+		{name: "spa route accepts missing accept", path: "/files/photos", wantStatus: http.StatusOK, wantBody: `<div id="root"></div>`, wantCache: "no-cache"},
+		{name: "spa route rejects html q zero", path: "/files/photos", accept: "application/json, text/html;q=0", wantStatus: http.StatusNotFound, wantBody: "404"},
+		{name: "spa route accepts positive html q", path: "/files/photos", accept: "application/json, text/html;q=0.5", wantStatus: http.StatusOK, wantBody: `<div id="root"></div>`, wantCache: "no-cache"},
+		{name: "spa route accepts wildcard", path: "/files/photos", accept: "*/*", wantStatus: http.StatusOK, wantBody: `<div id="root"></div>`, wantCache: "no-cache"},
+		{name: "spa route rejects wildcard with explicit html q zero", path: "/files/photos", accept: "*/*, text/html;q=0", wantStatus: http.StatusNotFound, wantBody: "404"},
+		{name: "spa route rejects text wildcard q zero over broad wildcard", path: "/files/photos", accept: "text/*;q=0, */*;q=1", wantStatus: http.StatusNotFound, wantBody: "404"},
+		{name: "spa route rejects text wildcard q zero after broad wildcard", path: "/files/photos", accept: "*/*;q=1, text/*;q=0", wantStatus: http.StatusNotFound, wantBody: "404"},
+		{name: "spa route accepts positive text wildcard", path: "/files/photos", accept: "application/json, text/*;q=0.5", wantStatus: http.StatusOK, wantBody: `<div id="root"></div>`, wantCache: "no-cache"},
+		{name: "spa route accepts html over rejected text wildcard", path: "/files/photos", accept: "text/*;q=0, text/html;q=0.5", wantStatus: http.StatusOK, wantBody: `<div id="root"></div>`, wantCache: "no-cache"},
 		{name: "asset", path: "/assets/app.js", accept: "*/*", wantStatus: http.StatusOK, wantBody: "console.log('ok')"},
 		{name: "missing asset", path: "/assets/missing.js", accept: "application/javascript", wantStatus: http.StatusNotFound, wantBody: "404"},
+		{name: "missing asset with wildcard", path: "/assets/missing.js", accept: "*/*", wantStatus: http.StatusNotFound, wantBody: "404"},
+		{name: "asset dot segment does not fall back", path: "/assets/../files", accept: "text/html", wantStatus: http.StatusNotFound, wantBody: "404"},
 	}
 
 	for _, tt := range tests {
@@ -610,6 +622,9 @@ func TestFrontendHandlerServesAssetsAndSPAFallback(t *testing.T) {
 			}
 			if !strings.Contains(rec.Body.String(), tt.wantBody) {
 				t.Fatalf("body = %q, want to contain %q", rec.Body.String(), tt.wantBody)
+			}
+			if got := rec.Header().Get("Cache-Control"); got != tt.wantCache {
+				t.Fatalf("Cache-Control = %q, want %q", got, tt.wantCache)
 			}
 		})
 	}
@@ -683,8 +698,17 @@ func TestShouldServeFrontendPreservesBackendRoutes(t *testing.T) {
 		{name: "api", method: http.MethodGet, path: "/api/v1/files/", accept: "text/html", want: false},
 		{name: "health", method: http.MethodGet, path: "/health", accept: "text/html", want: false},
 		{name: "share json compatibility", method: http.MethodGet, path: "/s/share-1", accept: "application/json", want: false},
+		{name: "share missing accept compatibility", method: http.MethodGet, path: "/s/share-1", accept: "", want: false},
+		{name: "share wildcard compatibility", method: http.MethodGet, path: "/s/share-1", accept: "*/*", want: false},
 		{name: "share spa page", method: http.MethodGet, path: "/s/share-1", accept: "text/html", want: true},
+		{name: "share spa page rejects html q zero", method: http.MethodGet, path: "/s/share-1", accept: "application/json, text/html;q=0", want: false},
+		{name: "share spa page accepts positive html q", method: http.MethodGet, path: "/s/share-1", accept: "application/json, text/html;q=0.5", want: true},
+		{name: "share rejects text wildcard compatibility", method: http.MethodGet, path: "/s/share-1", accept: "text/*", want: false},
 		{name: "share download", method: http.MethodGet, path: "/s/share-1/download", accept: "text/html", want: false},
+		{name: "api dot segment stays backend", method: http.MethodGet, path: "/api/../settings", accept: "text/html", want: false},
+		{name: "encoded api dot segment stays backend", method: http.MethodGet, path: "/api/%2e%2e/settings", accept: "text/html", want: false},
+		{name: "share dot segment stays backend", method: http.MethodGet, path: "/s/../settings", accept: "text/html", want: false},
+		{name: "nested share dot segment stays backend", method: http.MethodGet, path: "/s/share-1/../settings", accept: "text/html", want: false},
 		{name: "spa route", method: http.MethodGet, path: "/settings", accept: "text/html", want: true},
 		{name: "mutation", method: http.MethodPost, path: "/settings", accept: "text/html", want: false},
 	}
@@ -801,6 +825,44 @@ func TestApplyLoggerConfig_RespectsConfiguredLevel(t *testing.T) {
 	}
 	if !strings.Contains(content, `"message":"warn message"`) {
 		t.Fatalf("expected warn message in log output, got %s", content)
+	}
+}
+
+func TestApplyLoggerConfig_ConsoleRFC3339UsesTimeLayout(t *testing.T) {
+	restoreGlobalLoggerState(t)
+
+	logPath := filepath.Join(t.TempDir(), "mnemonas.log")
+	closer, err := applyLoggerConfig(config.LogConfig{
+		Level:      "info",
+		Format:     "console",
+		Output:     logPath,
+		TimeFormat: "RFC3339",
+	})
+	if err != nil {
+		t.Fatalf("applyLoggerConfig() error: %v", err)
+	}
+	defer func() {
+		if closer != nil {
+			_ = closer.Close()
+		}
+	}()
+
+	log.Info().Msg("console message")
+	if closer != nil {
+		_ = closer.Close()
+		closer = nil
+	}
+
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("ReadFile() error: %v", err)
+	}
+	content := strings.TrimSpace(string(data))
+	if !strings.Contains(content, "console message") {
+		t.Fatalf("expected console message in log output, got %s", content)
+	}
+	if strings.Contains(content, "RFC") {
+		t.Fatalf("console log timestamp used the literal time format name, got %s", content)
 	}
 }
 
@@ -1064,8 +1126,20 @@ func TestResolveLogTimeFormats(t *testing.T) {
 	if got := resolveConsoleLogTimeFormat(""); got != time.RFC3339 {
 		t.Fatalf("default console time format = %q, want %q", got, time.RFC3339)
 	}
+	if got := resolveConsoleLogTimeFormat("rfc3339"); got != time.RFC3339 {
+		t.Fatalf("named console RFC3339 time format = %q, want %q", got, time.RFC3339)
+	}
+	if got := resolveConsoleLogTimeFormat("rfc3339nano"); got != time.RFC3339Nano {
+		t.Fatalf("named console RFC3339Nano time format = %q, want %q", got, time.RFC3339Nano)
+	}
 	if got := resolveConsoleLogTimeFormat(" 15:04 "); got != "15:04" {
 		t.Fatalf("custom console time format = %q, want 15:04", got)
+	}
+	if got := resolveConsoleLogTimeFieldFormat("unixms"); got != zerolog.TimeFormatUnixMs {
+		t.Fatalf("console time field format = %q, want %q", got, zerolog.TimeFormatUnixMs)
+	}
+	if formatter := resolveConsoleLogTimestampFormatter("unix"); formatter == nil || formatter("1234567890") != "1234567890" {
+		t.Fatalf("unix console timestamp formatter did not preserve raw timestamp")
 	}
 
 	tests := []struct {
@@ -1075,6 +1149,7 @@ func TestResolveLogTimeFormats(t *testing.T) {
 	}{
 		{name: "default", in: "", want: time.RFC3339},
 		{name: "rfc3339", in: "rfc3339", want: time.RFC3339},
+		{name: "rfc3339 nano", in: "RFC3339Nano", want: time.RFC3339Nano},
 		{name: "unix", in: "UNIX", want: zerolog.TimeFormatUnix},
 		{name: "unix milliseconds", in: "unixms", want: zerolog.TimeFormatUnixMs},
 		{name: "unix microseconds", in: "UNIXMICRO", want: zerolog.TimeFormatUnixMicro},

@@ -1046,6 +1046,80 @@ func TestRecordReviewRejectsInvalidInput(t *testing.T) {
 	if !errors.Is(err, ErrInvalidReviewRecord) {
 		t.Fatalf("RecordReview(invalid action counts) error = %v, want %v", err, ErrInvalidReviewRecord)
 	}
+
+	_, err = store.RecordReview(ReviewRecordInput{
+		Reviewer:          "admin",
+		Note:              "已处理",
+		ScopeLabel:        "当前页",
+		DispositionStatus: ReviewDispositionDocumented,
+		ReviewCount:       1,
+		TotalCount:        1,
+		PathCount:         1,
+		UserCount:         1,
+		PathSamples:       []string{"/docs/report\a.pdf"},
+		ActivityEntryIDs:  []string{"delete-1"},
+	})
+	if !errors.Is(err, ErrInvalidReviewRecord) {
+		t.Fatalf("RecordReview(control path sample) error = %v, want %v", err, ErrInvalidReviewRecord)
+	}
+
+	controlTextCases := []struct {
+		name   string
+		modify func(*ReviewRecordInput)
+	}{
+		{
+			name: "note",
+			modify: func(input *ReviewRecordInput) {
+				input.Note = "已处理\n仍需跟进"
+			},
+		},
+		{
+			name: "scope label",
+			modify: func(input *ReviewRecordInput) {
+				input.ScopeLabel = "当前页\x7f"
+			},
+		},
+		{
+			name: "filter summary",
+			modify: func(input *ReviewRecordInput) {
+				input.FilterSummary = "分组\n高风险"
+			},
+		},
+		{
+			name: "reviewer",
+			modify: func(input *ReviewRecordInput) {
+				input.Reviewer = "admin\x7f"
+			},
+		},
+		{
+			name: "user sample",
+			modify: func(input *ReviewRecordInput) {
+				input.UserSamples = []string{"user\n1"}
+			},
+		},
+	}
+	for _, tc := range controlTextCases {
+		t.Run("control text "+tc.name, func(t *testing.T) {
+			input := ReviewRecordInput{
+				Reviewer:          "admin",
+				Note:              "已处理",
+				ScopeLabel:        "当前页",
+				FilterSummary:     "分组 高风险",
+				DispositionStatus: ReviewDispositionDocumented,
+				ReviewCount:       1,
+				TotalCount:        1,
+				PathCount:         1,
+				UserCount:         1,
+				ActivityEntryIDs:  []string{"delete-1"},
+			}
+			tc.modify(&input)
+
+			_, err := store.RecordReview(input)
+			if !errors.Is(err, ErrInvalidReviewRecord) {
+				t.Fatalf("RecordReview(%s control text) error = %v, want %v", tc.name, err, ErrInvalidReviewRecord)
+			}
+		})
+	}
 }
 
 func TestUpdateReviewRecordDispositionPersistsAndReloads(t *testing.T) {
@@ -1148,6 +1222,10 @@ func TestUpdateReviewRecordDispositionRejectsInvalidInput(t *testing.T) {
 	emptyNote := " "
 	if _, err := store.UpdateReviewRecordDisposition(record.ID, "admin", ReviewDispositionRestored, &emptyNote); !errors.Is(err, ErrInvalidReviewRecord) {
 		t.Fatalf("UpdateReviewRecordDisposition(empty note) error = %v, want %v", err, ErrInvalidReviewRecord)
+	}
+	controlNote := "已恢复\n待复核"
+	if _, err := store.UpdateReviewRecordDisposition(record.ID, "admin", ReviewDispositionRestored, &controlNote); !errors.Is(err, ErrInvalidReviewRecord) {
+		t.Fatalf("UpdateReviewRecordDisposition(control note) error = %v, want %v", err, ErrInvalidReviewRecord)
 	}
 
 	records, total := store.ListReviewRecords(10, 0)
@@ -1299,8 +1377,12 @@ func TestLogRejectsUnsafeActivityPath(t *testing.T) {
 		t.Fatalf("NewStore() error: %v", err)
 	}
 
-	if err := store.Log(ActionUpload, "/docs/./report.txt", "user1", "192.168.1.1", nil); !errors.Is(err, errInvalidActivityPath) {
-		t.Fatalf("Log() error = %v, want %v", err, errInvalidActivityPath)
+	for _, activityPath := range []string{"/docs/./report.txt", "/docs/report\a.txt", "/docs/report\x7f.txt"} {
+		t.Run(activityPath, func(t *testing.T) {
+			if err := store.Log(ActionUpload, activityPath, "user1", "192.168.1.1", nil); !errors.Is(err, errInvalidActivityPath) {
+				t.Fatalf("Log() error = %v, want %v", err, errInvalidActivityPath)
+			}
+		})
 	}
 	if store.Count() != 0 {
 		t.Fatalf("expected rejected activity path not to be stored, got %d entries", store.Count())
@@ -1315,10 +1397,13 @@ func TestLogNormalizesActivityDetailPaths(t *testing.T) {
 	}
 
 	if err := store.Log(ActionMove, "/docs/source.txt", "user1", "192.168.1.1", map[string]string{
-		"to":         " docs\\target.txt/ ",
-		"from":       "/docs/./unsafe.txt",
-		"quota_path": "/quota/..\x00/secret",
-		"note":       "keep ../text",
+		"to":            " docs\\target.txt/ ",
+		"from":          "/docs/./unsafe.txt",
+		"quota_path":    "/quota/..\x00/secret",
+		"config_path":   " configs\\active.toml/ ",
+		"manifest_path": "/manifests/./unsafe.json",
+		"snapshot_path": "/snapshots/..\x00/secret",
+		"note":          "keep ../text",
 	}); err != nil {
 		t.Fatalf("Log() error: %v", err)
 	}
@@ -1336,6 +1421,15 @@ func TestLogNormalizesActivityDetailPaths(t *testing.T) {
 	}
 	if details["quota_path"] != "" {
 		t.Fatalf("unsafe quota_path detail = %q, want hidden empty path", details["quota_path"])
+	}
+	if details["config_path"] != "/configs/active.toml" {
+		t.Fatalf("config_path detail = %q, want /configs/active.toml", details["config_path"])
+	}
+	if details["manifest_path"] != "" {
+		t.Fatalf("unsafe manifest_path detail = %q, want hidden empty path", details["manifest_path"])
+	}
+	if details["snapshot_path"] != "" {
+		t.Fatalf("unsafe snapshot_path detail = %q, want hidden empty path", details["snapshot_path"])
 	}
 	if details["note"] != "keep ../text" {
 		t.Fatalf("non-path detail changed to %q", details["note"])
@@ -1399,9 +1493,11 @@ func TestNewStoreNormalizesLegacyActivityDetailPaths(t *testing.T) {
 		Path:      "/legacy/source.txt",
 		User:      "admin",
 		Details: map[string]string{
-			"to":   "legacy\\target.txt/",
-			"from": "/legacy/./unsafe.txt",
-			"type": "file",
+			"to":            "legacy\\target.txt/",
+			"from":          "/legacy/./unsafe.txt",
+			"manifest_path": "legacy\\manifest.json",
+			"snapshot_path": "/legacy/..\x00/snapshot",
+			"type":          "file",
 		},
 	}})
 
@@ -1420,6 +1516,12 @@ func TestNewStoreNormalizesLegacyActivityDetailPaths(t *testing.T) {
 	}
 	if details["from"] != "" {
 		t.Fatalf("unsafe legacy from detail = %q, want hidden empty path", details["from"])
+	}
+	if details["manifest_path"] != "/legacy/manifest.json" {
+		t.Fatalf("legacy manifest_path detail = %q, want /legacy/manifest.json", details["manifest_path"])
+	}
+	if details["snapshot_path"] != "" {
+		t.Fatalf("unsafe legacy snapshot_path detail = %q, want hidden empty path", details["snapshot_path"])
 	}
 	if details["type"] != "file" {
 		t.Fatalf("legacy non-path detail changed to %q", details["type"])

@@ -16,6 +16,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode"
 
 	"github.com/seanbao/mnemonas/internal/rootio"
 )
@@ -121,7 +122,7 @@ func normalizeLegacyStoredFavoritePath(rawPath string) (string, error) {
 
 func normalizeStoredFavoritePathWithPolicy(rawPath string, allowCurrentDirSegment bool) (string, error) {
 	normalized := strings.ReplaceAll(rawPath, "\\", "/")
-	if strings.ContainsRune(normalized, '\x00') {
+	if containsFavoritePathControlCharacter(normalized) {
 		return "", errInvalidFavoritePath
 	}
 	if strings.TrimSpace(normalized) == "" {
@@ -137,6 +138,10 @@ func normalizeStoredFavoritePathWithPolicy(rawPath string, allowCurrentDirSegmen
 		return "", errInvalidFavoritePath
 	}
 	return cleaned, nil
+}
+
+func containsFavoritePathControlCharacter(filePath string) bool {
+	return strings.IndexFunc(filePath, unicode.IsControl) >= 0
 }
 
 func normalizeRestoredFavorite(favorite *Favorite) (*Favorite, error) {

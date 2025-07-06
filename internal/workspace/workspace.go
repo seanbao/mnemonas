@@ -16,6 +16,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode"
 
 	"github.com/seanbao/mnemonas/internal/rootio"
 )
@@ -424,6 +425,21 @@ func childWorkspaceRootName(parent, child string) string {
 	return path.Join(parent, child)
 }
 
+func workspaceDirEntryName(entry os.DirEntry) (string, error) {
+	if entry == nil {
+		return "", ErrNotFound
+	}
+	name := entry.Name()
+	normalized := strings.ReplaceAll(name, "\\", "/")
+	if name == "" || strings.Contains(normalized, "/") {
+		return "", ErrNotFound
+	}
+	if err := validateWorkspaceName(name); err != nil {
+		return "", err
+	}
+	return name, nil
+}
+
 func isWorkspaceRootEscapeError(err error) bool {
 	var pathErr *os.PathError
 	if !errors.As(err, &pathErr) {
@@ -524,7 +540,7 @@ func CleanPath(name string) string {
 
 func validateWorkspaceName(name string) error {
 	normalized := strings.ReplaceAll(name, "\\", "/")
-	if strings.ContainsRune(normalized, '\x00') {
+	if strings.IndexFunc(normalized, unicode.IsControl) >= 0 {
 		return ErrNotFound
 	}
 	for _, segment := range strings.Split(normalized, "/") {
@@ -615,7 +631,11 @@ func (w *Workspace) ReadDir(ctx context.Context, name string) ([]*FileInfo, erro
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		childRootName := childWorkspaceRootName(workspaceRootRelativeName(name), e.Name())
+		entryName, err := workspaceDirEntryName(e)
+		if err != nil {
+			return nil, err
+		}
+		childRootName := childWorkspaceRootName(workspaceRootRelativeName(name), entryName)
 		info, err := readDirEntryInfo(w.rootHandle, childRootName, e)
 		if err != nil {
 			return nil, mapWorkspaceRootPathError(err)
@@ -624,10 +644,10 @@ func (w *Workspace) ReadDir(ctx context.Context, name string) ([]*FileInfo, erro
 			continue
 		}
 
-		childPath := path.Join(CleanPath(name), e.Name())
+		childPath := path.Join(CleanPath(name), entryName)
 		result = append(result, &FileInfo{
 			Path:    childPath,
-			Name:    e.Name(),
+			Name:    entryName,
 			IsDir:   info.IsDir(),
 			Size:    info.Size(),
 			ModTime: info.ModTime(),
@@ -1156,7 +1176,11 @@ func (w *Workspace) walkWorkspaceEntry(ctx context.Context, rootName, cleanPath 
 			return err
 		}
 
-		childRootName := childWorkspaceRootName(rootName, entry.Name())
+		entryName, err := workspaceDirEntryName(entry)
+		if err != nil {
+			return err
+		}
+		childRootName := childWorkspaceRootName(rootName, entryName)
 		entryInfo, err := readDirEntryInfo(w.rootHandle, childRootName, entry)
 		if err != nil {
 			return mapWorkspaceRootPathError(err)
@@ -1165,7 +1189,7 @@ func (w *Workspace) walkWorkspaceEntry(ctx context.Context, rootName, cleanPath 
 			continue
 		}
 
-		childCleanPath := path.Join(cleanPath, entry.Name())
+		childCleanPath := path.Join(cleanPath, entryName)
 		if err := w.walkWorkspaceEntry(ctx, childRootName, childCleanPath, entryInfo, fn); err != nil {
 			return err
 		}

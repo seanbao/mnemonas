@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"path"
 	"strings"
+	"unicode"
 
 	"github.com/seanbao/mnemonas/internal/auth"
 	"github.com/seanbao/mnemonas/internal/config"
@@ -134,7 +135,7 @@ func enforceHomeDir(user *auth.User, targetPath string) error {
 
 func cleanVirtualPath(value string) (string, error) {
 	normalized := strings.ReplaceAll(value, "\\", "/")
-	if strings.ContainsRune(normalized, '\x00') || hasDotSegment(normalized) {
+	if strings.IndexFunc(normalized, unicode.IsControl) >= 0 || hasDotSegment(normalized) {
 		return "", ErrInvalidPath
 	}
 	cleaned := path.Clean("/" + normalized)

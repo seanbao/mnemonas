@@ -559,6 +559,12 @@ func TestStore_DeleteVersionRestoreVersionsAndReferenceChecks(t *testing.T) {
 	if err := s.RestoreVersions(ctx, []Version{{Path: "/docs/report\x00.txt", Hash: "bad"}}); !errors.Is(err, errInvalidStorePath) {
 		t.Fatalf("RestoreVersions(NUL path) error = %v, want %v", err, errInvalidStorePath)
 	}
+	if err := s.RestoreVersions(ctx, []Version{{Path: "/docs/report\n.txt", Hash: "bad"}}); !errors.Is(err, errInvalidStorePath) {
+		t.Fatalf("RestoreVersions(control character path) error = %v, want %v", err, errInvalidStorePath)
+	}
+	if err := s.RestoreVersions(ctx, []Version{{Path: "/docs/report\x7f.txt", Hash: "bad"}}); !errors.Is(err, errInvalidStorePath) {
+		t.Fatalf("RestoreVersions(delete control character path) error = %v, want %v", err, errInvalidStorePath)
+	}
 }
 
 func TestStore_DeleteOldVersions(t *testing.T) {

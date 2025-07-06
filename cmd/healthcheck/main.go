@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 	"time"
+	"unicode"
 )
 
 const (
@@ -43,7 +44,12 @@ func run(getenv func(string) string, stderr io.Writer) int {
 		timeout = parsed
 	}
 
-	client := http.Client{Timeout: timeout}
+	client := http.Client{
+		Timeout: timeout,
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
 	resp, err := client.Get(url)
 	if err != nil {
 		fmt.Fprintf(stderr, "healthcheck request failed: %v\n", err)
@@ -66,7 +72,7 @@ func validateHealthcheckURL(raw string) error {
 		return fmt.Errorf("cannot be empty")
 	}
 	if trimmed != raw || strings.IndexFunc(trimmed, func(r rune) bool {
-		return r <= 0x20 || r == 0x7f
+		return unicode.IsSpace(r) || unicode.IsControl(r)
 	}) >= 0 {
 		return fmt.Errorf("must not contain whitespace or control characters")
 	}

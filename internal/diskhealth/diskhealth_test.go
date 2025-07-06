@@ -140,6 +140,37 @@ func TestCheckerWarningsHideUnnamedDevicePath(t *testing.T) {
 	}
 }
 
+func TestCheckerStatFailureDoesNotExposeDevicePath(t *testing.T) {
+	devicePath := filepath.Join(t.TempDir(), "ata-Samsung_SECRET123") + "\x00invalid"
+	checker := NewChecker(Config{
+		Enabled: true,
+		Devices: []DeviceConfig{{
+			Path: devicePath,
+		}},
+	}, testLogger())
+
+	report, err := checker.Check(context.Background())
+	if err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+	if report.Status != StatusWarning {
+		t.Fatalf("status = %q, want %q; report=%+v", report.Status, StatusWarning, report)
+	}
+	device := report.Devices[0]
+	if device.Present {
+		t.Fatalf("expected stat failure device to be marked not present")
+	}
+	if device.Message != "device stat failed: check service permissions and device path" {
+		t.Fatalf("device message = %q, want generic stat failure", device.Message)
+	}
+	reportText := device.Message + "\n" + strings.Join(report.Warnings, "\n")
+	for _, leaked := range []string{devicePath, "SECRET123", "ata-Samsung"} {
+		if strings.Contains(reportText, leaked) {
+			t.Fatalf("disk health report leaked device path detail %q: %q", leaked, reportText)
+		}
+	}
+}
+
 func TestCheckerReportsCriticalForNVMeMediaWear(t *testing.T) {
 	devicePath := testDevicePath(t)
 	checker := NewChecker(Config{
@@ -278,6 +309,7 @@ func TestMonitorSendsAlertOnCriticalAndRespectsCooldown(t *testing.T) {
 	devicePath := testDevicePath(t)
 	sender := &fakeAlertSender{}
 	var recorded []*Report
+	now := time.Date(2026, 6, 14, 9, 0, 0, 0, time.UTC)
 	monitor := NewMonitor(Config{
 		Enabled:        true,
 		CheckInterval:  time.Hour,
@@ -285,6 +317,8 @@ func TestMonitorSendsAlertOnCriticalAndRespectsCooldown(t *testing.T) {
 		Devices:        []DeviceConfig{{Path: devicePath}},
 	}, sender, testLogger(), WithRunner(func(context.Context, string, ...string) (CommandResult, error) {
 		return CommandResult{Stdout: smartJSON(false, 40, "SER123")}, nil
+	}), WithNow(func() time.Time {
+		return now
 	}))
 	monitor.SetActivityRecorder(func(_ context.Context, report *Report) error {
 		recorded = append(recorded, report)
@@ -305,6 +339,25 @@ func TestMonitorSendsAlertOnCriticalAndRespectsCooldown(t *testing.T) {
 	}
 	if sender.events[0].Level != alerts.AlertLevelCritical {
 		t.Fatalf("event level = %q, want critical", sender.events[0].Level)
+	}
+	if !sender.events[0].Timestamp.Equal(now) {
+		t.Fatalf("event timestamp = %s, want %s", sender.events[0].Timestamp, now)
+	}
+
+	now = now.Add(2 * time.Hour)
+	monitor.checkAndAlert(context.Background())
+
+	if len(sender.events) != 2 {
+		t.Fatalf("events after cooldown = %d, want 2", len(sender.events))
+	}
+	if len(recorded) != 2 {
+		t.Fatalf("activity records after cooldown = %d, want 2", len(recorded))
+	}
+	if !sender.events[1].Timestamp.Equal(now) {
+		t.Fatalf("event timestamp after cooldown = %s, want %s", sender.events[1].Timestamp, now)
+	}
+	if !recorded[1].CheckedAt.Equal(now) {
+		t.Fatalf("recorded checked_at after cooldown = %s, want %s", recorded[1].CheckedAt, now)
 	}
 }
 
