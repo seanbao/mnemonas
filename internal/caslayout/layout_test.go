@@ -991,6 +991,38 @@ func TestStore_WalkPropagatesCallbackError(t *testing.T) {
 	}
 }
 
+func TestStore_WalkRejectsUnsafeEntryNames(t *testing.T) {
+	tests := []struct {
+		name      string
+		entryName string
+	}{
+		{name: "backslash", entryName: "nested\\object"},
+		{name: "newline", entryName: "object\n2026"},
+		{name: "delete-control", entryName: "object\x7f"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			store, err := NewStore(tmpDir, nil)
+			if err != nil {
+				t.Fatalf("NewStore() error: %v", err)
+			}
+			if err := os.WriteFile(filepath.Join(tmpDir, tt.entryName), []byte("object"), 0644); err != nil {
+				t.Skipf("platform does not support unsafe filename %q: %v", tt.entryName, err)
+			}
+
+			err = store.Walk(func(hash string) error {
+				t.Fatalf("Walk() callback unexpectedly received hash %q", hash)
+				return nil
+			})
+			if !errors.Is(err, errCASPathSymlink) {
+				t.Fatalf("Walk() error = %v, want errCASPathSymlink", err)
+			}
+		})
+	}
+}
+
 func TestStore_Walk_DoesNotFollowRootSymlinkInsertedAfterValidation(t *testing.T) {
 	tmpDir := t.TempDir()
 	store, err := NewStore(tmpDir, nil)

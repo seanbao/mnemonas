@@ -42,6 +42,7 @@ func restoreReportFindings(view JobView) []string {
 func restoreReportFindingsWithMatchingVerify(view JobView, matchingRestoreVerify *RestoreVerifyResult) []string {
 	var findings []string
 	appendFinding := func(prefix, message string) {
+		message = sanitizeBackupMessageForAPI(message)
 		if strings.TrimSpace(message) == "" {
 			findings = append(findings, prefix)
 			return
@@ -76,11 +77,13 @@ func restoreReportFindingsWithMatchingVerify(view JobView, matchingRestoreVerify
 	if view.LastRestoreVerify == nil && (view.LastRestore == nil || view.LastRestore.Status != StatusCompleted) {
 		findings = append(findings, "尚未持久化恢复后的只读校验报告。")
 	} else if matchingRestoreVerify != nil {
-		if matchingRestoreVerify.Status == StatusFailed {
+		if matchingRestoreVerify.Status == StatusRunning {
+			findings = append(findings, "最近一次恢复目录校验仍在运行，完成前不应切换恢复目标。")
+		} else if matchingRestoreVerify.Status == StatusFailed {
 			appendFinding("最近一次恢复目录校验失败", matchingRestoreVerify.ErrorMessage)
 		}
 		for _, warning := range matchingRestoreVerify.Warnings {
-			findings = append(findings, "恢复目录校验警告: "+warning)
+			findings = append(findings, "恢复目录校验警告: "+sanitizeBackupMessageForAPI(warning))
 		}
 	}
 	if len(findings) == 0 {
@@ -103,7 +106,7 @@ func restoreVerifyMatchesRestore(restore *RestoreResult, verify *RestoreVerifyRe
 	if restore.Status != StatusCompleted {
 		return false
 	}
-	if verify.Status != StatusCompleted && verify.Status != StatusFailed {
+	if verify.Status != StatusRunning && verify.Status != StatusCompleted && verify.Status != StatusFailed {
 		return false
 	}
 	restoreTarget := strings.TrimSpace(restore.TargetPath)
@@ -115,14 +118,11 @@ func restoreVerifyMatchesRestore(restore *RestoreResult, verify *RestoreVerifyRe
 	if restore.FinishedAt != nil {
 		restoreTime = *restore.FinishedAt
 	}
-	verifyTime := verify.StartedAt
-	if verify.FinishedAt != nil {
-		verifyTime = *verify.FinishedAt
-	}
-	if restoreTime.IsZero() || verifyTime.IsZero() {
+	verifyStart := verify.StartedAt
+	if restoreTime.IsZero() || verifyStart.IsZero() {
 		return false
 	}
-	return !verifyTime.Before(restoreTime)
+	return !verifyStart.Before(restoreTime)
 }
 
 func failedRestoreDrillHistoryCount(history []*RestoreDrillResult) int {

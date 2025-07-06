@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 func TestRunRejectsRequestError(t *testing.T) {
@@ -30,6 +31,8 @@ func TestRunRejectsInvalidURL(t *testing.T) {
 		"://invalid-url",
 		"file:///etc/passwd",
 		"http://127.0.0.1:8080/health\nX=1",
+		"http://127.0.0.1:8080/health\u0081",
+		"http://127.0.0.1:8080/health\u00a0",
 		"/health",
 	}
 
@@ -97,6 +100,28 @@ func TestRunRejectsUnhealthyStatus(t *testing.T) {
 	}
 }
 
+func TestRunRejectsRedirectStatus(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/health-ok", http.StatusFound)
+	}))
+	defer server.Close()
+
+	getenv := func(key string) string {
+		if key == "MNEMONAS_HEALTHCHECK_URL" {
+			return server.URL + "/health"
+		}
+		return ""
+	}
+
+	var stderr bytes.Buffer
+	if code := run(getenv, &stderr); code != 1 {
+		t.Fatalf("run() = %d, want 1 for redirect status; stderr=%s", code, stderr.String())
+	}
+	if stderr.Len() == 0 {
+		t.Fatal("expected an error message")
+	}
+}
+
 func TestRunRejectsInvalidTimeout(t *testing.T) {
 	getenv := func(key string) string {
 		if key == "MNEMONAS_HEALTHCHECK_TIMEOUT" {
@@ -108,6 +133,41 @@ func TestRunRejectsInvalidTimeout(t *testing.T) {
 	var stderr bytes.Buffer
 	if code := run(getenv, &stderr); code != 2 {
 		t.Fatalf("run() = %d, want 2", code)
+	}
+}
+
+func TestRunUsesConfiguredTimeout(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-time.After(100 * time.Millisecond):
+			w.WriteHeader(http.StatusNoContent)
+		}
+	}))
+	defer server.Close()
+
+	getenv := func(key string) string {
+		switch key {
+		case "MNEMONAS_HEALTHCHECK_URL":
+			return server.URL + "/health"
+		case "MNEMONAS_HEALTHCHECK_TIMEOUT":
+			return "1ms"
+		default:
+			return ""
+		}
+	}
+
+	var stderr bytes.Buffer
+	startedAt := time.Now()
+	if code := run(getenv, &stderr); code != 1 {
+		t.Fatalf("run() = %d, want 1 for timed-out request; stderr=%s", code, stderr.String())
+	}
+	if elapsed := time.Since(startedAt); elapsed > time.Second {
+		t.Fatalf("run() took %s, timeout was not applied", elapsed)
+	}
+	if stderr.Len() == 0 {
+		t.Fatal("expected an error message")
 	}
 }
 

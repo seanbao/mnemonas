@@ -84,7 +84,7 @@ func TestResolvePathDeniesGuestWrite(t *testing.T) {
 }
 
 func TestResolvePathRejectsTraversal(t *testing.T) {
-	for _, requestPath := range []string{"../secret", "team/./readme.md", "."} {
+	for _, requestPath := range []string{"../secret", "team/./readme.md", ".", "team/report\n2026.txt", "team/report\x7f2026.txt"} {
 		t.Run(requestPath, func(t *testing.T) {
 			_, err := ResolvePath(testShares(), "docs", requestPath, &auth.User{
 				ID:       "admin-1",

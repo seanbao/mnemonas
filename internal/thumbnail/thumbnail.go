@@ -22,6 +22,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode"
 
 	"github.com/disintegration/imaging"
 	_ "golang.org/x/image/bmp"
@@ -657,6 +658,19 @@ func thumbnailChildRelativePath(parent, child string) string {
 	return filepath.Join(parent, child)
 }
 
+func safeThumbnailCacheEntryName(name string) (string, error) {
+	normalized := strings.ReplaceAll(name, "\\", "/")
+	if name == "" || strings.Contains(normalized, "/") || strings.IndexFunc(normalized, unicode.IsControl) >= 0 {
+		return "", errThumbnailCacheSymlink
+	}
+	for _, segment := range strings.Split(normalized, "/") {
+		if segment == "." || segment == ".." {
+			return "", errThumbnailCacheSymlink
+		}
+	}
+	return name, nil
+}
+
 func walkThumbnailCacheWithRoot(root *os.Root, relPath string, walkFn thumbnailWalkFunc) error {
 	info, err := root.Lstat(relPath)
 	if err != nil {
@@ -688,7 +702,11 @@ func walkThumbnailCacheEntryWithRoot(root *os.Root, relPath string, info os.File
 	})
 
 	for _, entry := range entries {
-		childRelPath := thumbnailChildRelativePath(relPath, entry.Name())
+		entryName, err := safeThumbnailCacheEntryName(entry.Name())
+		if err != nil {
+			return err
+		}
+		childRelPath := thumbnailChildRelativePath(relPath, entryName)
 		childInfo, err := root.Lstat(childRelPath)
 		if err != nil {
 			return mapThumbnailRootPathError(err)

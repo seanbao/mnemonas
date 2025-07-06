@@ -48,27 +48,40 @@ func NewHandler(store *Store, logger zerolog.Logger) *Handler {
 // getUserID extracts user ID from request context
 // This should be set by auth middleware
 func getUserID(r *http.Request) string {
-	if claims := auth.GetClaimsFromContext(r.Context()); claims != nil && claims.UserID != "" {
-		return claims.UserID
+	if user := auth.GetUserFromContext(r.Context()); user != nil && user.Disabled {
+		return "anonymous"
+	}
+	if claims := auth.GetClaimsFromContext(r.Context()); claims != nil && strings.TrimSpace(claims.UserID) != "" {
+		return strings.TrimSpace(claims.UserID)
+	}
+	if user := auth.GetUserFromContext(r.Context()); user != nil && !user.Disabled && strings.TrimSpace(user.ID) != "" {
+		return strings.TrimSpace(user.ID)
 	}
 	// Fallback for when auth is disabled
 	return "anonymous"
 }
 
 func getLegacyUserIdentifiers(r *http.Request) []string {
+	if user := auth.GetUserFromContext(r.Context()); user != nil && user.Disabled {
+		return nil
+	}
 	claims := auth.GetClaimsFromContext(r.Context())
-	if claims == nil {
+	if claims != nil {
+		if strings.TrimSpace(claims.Username) == "" || strings.TrimSpace(claims.Username) == strings.TrimSpace(claims.UserID) {
+			return nil
+		}
+		return []string{strings.TrimSpace(claims.Username)}
+	}
+	user := auth.GetUserFromContext(r.Context())
+	if user == nil || user.Disabled || strings.TrimSpace(user.Username) == "" || strings.TrimSpace(user.Username) == strings.TrimSpace(user.ID) {
 		return nil
 	}
-	if strings.TrimSpace(claims.Username) == "" || claims.Username == claims.UserID {
-		return nil
-	}
-	return []string{claims.Username}
+	return []string{strings.TrimSpace(user.Username)}
 }
 
 func normalizeFavoritePath(rawPath string) (string, error) {
 	normalized := strings.ReplaceAll(rawPath, "\\", "/")
-	if strings.ContainsRune(normalized, '\x00') {
+	if containsFavoritePathControlCharacter(normalized) {
 		return "", errors.New("invalid path")
 	}
 	if hasFavoriteDotSegment(normalized) {
@@ -348,7 +361,9 @@ func (h *Handler) UpdateNote(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) json(w http.ResponseWriter, status int, data any) {
 	payload, err := json.Marshal(data)
 	if err != nil {
-		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"success":false,"error":{"code":"INTERNAL_ERROR","message":"internal server error"}}`))
 		return
 	}
 

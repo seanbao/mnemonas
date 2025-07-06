@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strings"
 	"syscall"
+	"unicode"
 
 	"github.com/seanbao/mnemonas/internal/rootio"
 )
@@ -542,6 +543,19 @@ func casChildRelativePath(parent, child string) string {
 	return filepath.Join(parent, child)
 }
 
+func safeCASDirEntryName(name string) (string, error) {
+	normalized := strings.ReplaceAll(name, "\\", "/")
+	if name == "" || strings.Contains(normalized, "/") || strings.IndexFunc(normalized, unicode.IsControl) >= 0 {
+		return "", errCASPathSymlink
+	}
+	for _, segment := range strings.Split(normalized, "/") {
+		if segment == "." || segment == ".." {
+			return "", errCASPathSymlink
+		}
+	}
+	return name, nil
+}
+
 func (s *Store) casFullPath(relPath string) string {
 	if relPath == "." {
 		return s.root
@@ -590,7 +604,11 @@ func (s *Store) walkRootEntry(relPath string, info os.FileInfo, fn casWalkFunc) 
 	})
 
 	for _, entry := range entries {
-		childRelPath := casChildRelativePath(relPath, entry.Name())
+		entryName, err := safeCASDirEntryName(entry.Name())
+		if err != nil {
+			return err
+		}
+		childRelPath := casChildRelativePath(relPath, entryName)
 		childInfo, err := s.rootHandle.Lstat(childRelPath)
 		if err != nil {
 			if errors.Is(err, os.ErrPermission) || rootio.IsSymlinkError(err) || isCASRootEscapeError(err) {

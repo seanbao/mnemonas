@@ -111,6 +111,45 @@ func TestStoreRejectsDuplicateUsername(t *testing.T) {
 	}
 }
 
+func TestStoreRejectsUnicodeWhitespaceAndControlCharactersInNames(t *testing.T) {
+	validHash := "8846f7eaee8fb117ad06bdd830b7586c"
+
+	tests := []struct {
+		name     string
+		userID   string
+		username string
+	}{
+		{
+			name:     "user id unicode control",
+			userID:   "user\u00811",
+			username: "alice",
+		},
+		{
+			name:     "username unicode control",
+			userID:   "user-1",
+			username: "ali\u0081ce",
+		},
+		{
+			name:     "username unicode whitespace",
+			userID:   "user-1",
+			username: "ali\u00a0ce",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store, err := NewStore(filepath.Join(t.TempDir(), "smb-credentials.json"))
+			if err != nil {
+				t.Fatalf("NewStore() error: %v", err)
+			}
+
+			if _, err := store.SetCredential(tt.userID, tt.username, validHash, true); err == nil {
+				t.Fatal("SetCredential() error = nil, want invalid name error")
+			}
+		})
+	}
+}
+
 func TestNewStoreRejectsDuplicatePersistedUsername(t *testing.T) {
 	filePath := filepath.Join(t.TempDir(), "smb-credentials.json")
 	data := `{"credentials":[` +

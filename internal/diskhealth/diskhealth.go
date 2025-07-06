@@ -119,6 +119,15 @@ func WithRunner(runner CommandRunner) Option {
 	}
 }
 
+// WithNow injects the time source used by reports, mainly for tests.
+func WithNow(now func() time.Time) Option {
+	return func(c *Checker) {
+		if now != nil {
+			c.now = now
+		}
+	}
+}
+
 // Checker performs disk health probes.
 type Checker struct {
 	logger zerolog.Logger
@@ -257,7 +266,7 @@ func (c *Checker) checkDevice(ctx context.Context, cfg Config, device DeviceConf
 			return status
 		}
 		status.Status = StatusWarning
-		status.Message = fmt.Sprintf("device stat failed: %s", err)
+		status.Message = "device stat failed: check service permissions and device path"
 		return status
 	}
 	status.Present = true
@@ -776,6 +785,7 @@ func (m *Monitor) checkAndAlert(ctx context.Context) {
 		return
 	}
 	m.storeReport(report)
+	checkedAt := m.reportCheckedAt(report)
 	if !shouldAlertForReport(report) {
 		if report.Status == StatusOK {
 			m.mu.Lock()
@@ -789,13 +799,13 @@ func (m *Monitor) checkAndAlert(ctx context.Context) {
 	}
 
 	cfg := m.checker.Config()
-	if !m.shouldSendAlert(report.Status, cfg.CooldownPeriod) {
+	if !m.shouldSendAlert(report.Status, cfg.CooldownPeriod, checkedAt) {
 		return
 	}
-	m.recordActivityIfDue(ctx, report, cfg.CooldownPeriod)
+	m.recordActivityIfDue(ctx, report, cfg.CooldownPeriod, checkedAt)
 	if m.sender == nil {
 		m.logger.Warn().Str("status", report.Status).Msg("disk health alert triggered without alert sender")
-		m.recordAlert(report.Status)
+		m.recordAlert(report.Status, checkedAt)
 		return
 	}
 
@@ -803,14 +813,21 @@ func (m *Monitor) checkAndAlert(ctx context.Context) {
 		Type:      "disk_health",
 		Level:     alertLevelForStatus(report.Status),
 		Message:   report.Message,
-		Timestamp: report.CheckedAt,
+		Timestamp: checkedAt,
 		Details:   diskHealthAlertDetails(report),
 	}
 	if err := m.sender.SendEvent(ctx, event); err != nil {
 		m.logger.Warn().Err(err).Str("status", report.Status).Msg("failed to send disk health alert")
 		return
 	}
-	m.recordAlert(report.Status)
+	m.recordAlert(report.Status, checkedAt)
+}
+
+func (m *Monitor) reportCheckedAt(report *Report) time.Time {
+	if report != nil && !report.CheckedAt.IsZero() {
+		return report.CheckedAt.UTC()
+	}
+	return m.checker.now().UTC()
 }
 
 func (m *Monitor) storeReport(report *Report) {
@@ -819,7 +836,7 @@ func (m *Monitor) storeReport(report *Report) {
 	m.lastReport = cloneReport(report)
 }
 
-func (m *Monitor) shouldSendAlert(status string, cooldown time.Duration) bool {
+func (m *Monitor) shouldSendAlert(status string, cooldown time.Duration, now time.Time) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if status != m.lastAlertStatus {
@@ -828,14 +845,17 @@ func (m *Monitor) shouldSendAlert(status string, cooldown time.Duration) bool {
 	if cooldown <= 0 {
 		return true
 	}
-	return time.Since(m.lastAlert) >= cooldown
+	if m.lastAlert.IsZero() {
+		return true
+	}
+	return now.Sub(m.lastAlert) >= cooldown
 }
 
-func (m *Monitor) recordAlert(status string) {
+func (m *Monitor) recordAlert(status string, now time.Time) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.lastAlertStatus = status
-	m.lastAlert = time.Now()
+	m.lastAlert = now
 }
 
 func (m *Monitor) activityRecorder() Recorder {
@@ -844,7 +864,7 @@ func (m *Monitor) activityRecorder() Recorder {
 	return m.recorder
 }
 
-func (m *Monitor) shouldRecordActivity(status string, cooldown time.Duration) bool {
+func (m *Monitor) shouldRecordActivity(status string, cooldown time.Duration, now time.Time) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if status != m.lastActivityRecordStatus {
@@ -853,26 +873,29 @@ func (m *Monitor) shouldRecordActivity(status string, cooldown time.Duration) bo
 	if cooldown <= 0 {
 		return true
 	}
-	return time.Since(m.lastActivityRecord) >= cooldown
+	if m.lastActivityRecord.IsZero() {
+		return true
+	}
+	return now.Sub(m.lastActivityRecord) >= cooldown
 }
 
-func (m *Monitor) recordActivity(status string) {
+func (m *Monitor) recordActivity(status string, now time.Time) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.lastActivityRecordStatus = status
-	m.lastActivityRecord = time.Now()
+	m.lastActivityRecord = now
 }
 
-func (m *Monitor) recordActivityIfDue(ctx context.Context, report *Report, cooldown time.Duration) {
+func (m *Monitor) recordActivityIfDue(ctx context.Context, report *Report, cooldown time.Duration, checkedAt time.Time) {
 	recorder := m.activityRecorder()
-	if recorder == nil || report == nil || !m.shouldRecordActivity(report.Status, cooldown) {
+	if recorder == nil || report == nil || !m.shouldRecordActivity(report.Status, cooldown, checkedAt) {
 		return
 	}
 	if err := recorder(ctx, cloneReport(report)); err != nil {
 		m.logger.Warn().Err(err).Str("status", report.Status).Msg("failed to record disk health activity")
 		return
 	}
-	m.recordActivity(report.Status)
+	m.recordActivity(report.Status, checkedAt)
 }
 
 func shouldAlertForReport(report *Report) bool {

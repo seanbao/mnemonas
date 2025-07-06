@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"net/smtp"
@@ -116,6 +117,53 @@ func TestCheck(t *testing.T) {
 	}
 	if stats.Level != AlertLevelWarning {
 		t.Fatalf("expected Check() to populate warning level, got %s", stats.Level)
+	}
+}
+
+func TestStorageStatsFromUsageHandlesInvalidCapacity(t *testing.T) {
+	checkedAt := time.Date(2026, 6, 14, 12, 0, 0, 0, time.FixedZone("CST", 8*60*60))
+
+	zero := storageStatsFromUsage("/data", 0, 0, checkedAt)
+	if math.IsNaN(zero.UsedPct) || math.IsInf(zero.UsedPct, 0) {
+		t.Fatalf("zero-capacity used_pct = %v, want finite", zero.UsedPct)
+	}
+	if zero.UsedBytes != 0 || zero.FreeBytes != 0 || zero.UsedPct != 0 {
+		t.Fatalf("unexpected zero-capacity stats: %+v", zero)
+	}
+	if zero.CheckedAt.Location() != time.UTC {
+		t.Fatalf("checked_at location = %v, want UTC", zero.CheckedAt.Location())
+	}
+
+	clamped := storageStatsFromUsage("/data", 100, 120, checkedAt)
+	if clamped.FreeBytes != 100 || clamped.UsedBytes != 0 || clamped.UsedPct != 0 {
+		t.Fatalf("unexpected clamped stats: %+v", clamped)
+	}
+
+	used := storageStatsFromUsage("/data", 100, 25, checkedAt)
+	if used.UsedBytes != 75 || used.UsedPct != 75 {
+		t.Fatalf("unexpected regular usage stats: %+v", used)
+	}
+}
+
+func TestStorageStatsFromStatfsBlocksValidatesBlockSizeAndOverflow(t *testing.T) {
+	checkedAt := time.Date(2026, 6, 14, 12, 0, 0, 0, time.UTC)
+
+	stats, err := storageStatsFromStatfsBlocks("/data", 10, 2, 4096, checkedAt)
+	if err != nil {
+		t.Fatalf("storageStatsFromStatfsBlocks() error: %v", err)
+	}
+	if stats.TotalBytes != 40960 || stats.FreeBytes != 8192 || stats.UsedBytes != 32768 {
+		t.Fatalf("unexpected statfs stats: %+v", stats)
+	}
+
+	for _, blockSize := range []int64{0, -4096} {
+		if _, err := storageStatsFromStatfsBlocks("/data", 10, 2, blockSize, checkedAt); !errors.Is(err, errStorageStatsInvalidBlockSize) {
+			t.Fatalf("block size %d error = %v, want invalid block size", blockSize, err)
+		}
+	}
+
+	if _, err := storageStatsFromStatfsBlocks("/data", ^uint64(0), 1, 2, checkedAt); !errors.Is(err, errStorageStatsCapacityOverflow) {
+		t.Fatalf("overflow error = %v, want capacity overflow", err)
 	}
 }
 
@@ -433,6 +481,64 @@ func TestCheck_DoesNotAdvanceCooldownWhenWebhookFails(t *testing.T) {
 
 	if got := requestCount.Load(); got != 2 {
 		t.Fatalf("expected webhook failures to bypass cooldown suppression, got %d requests", got)
+	}
+}
+
+func TestCheck_UsesStatsCheckedAtForCooldown(t *testing.T) {
+	reqCh := make(chan AlertPayload, 3)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload AlertPayload
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Errorf("Decode(webhook request) error: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		reqCh <- payload
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	now := time.Date(2026, 6, 14, 10, 0, 0, 0, time.UTC)
+	monitor := NewMonitor(Config{
+		Enabled:        true,
+		CheckInterval:  time.Hour,
+		ThresholdPct:   150,
+		CriticalPct:    200,
+		MinFreeBytes:   ^uint64(0),
+		CooldownPeriod: time.Hour,
+		WebhookURL:     server.URL,
+		WebhookMethod:  http.MethodPost,
+	}, t.TempDir(), zerolog.Nop())
+	monitor.now = func() time.Time {
+		return now
+	}
+
+	monitor.check(context.Background())
+	monitor.check(context.Background())
+	if got := len(reqCh); got != 1 {
+		t.Fatalf("webhook requests inside cooldown = %d, want 1", got)
+	}
+
+	first := <-reqCh
+	if !first.Timestamp.Equal(now) {
+		t.Fatalf("first timestamp = %s, want %s", first.Timestamp, now)
+	}
+	if !first.Stats.CheckedAt.Equal(now) {
+		t.Fatalf("first checked_at = %s, want %s", first.Stats.CheckedAt, now)
+	}
+
+	now = now.Add(2 * time.Hour)
+	monitor.check(context.Background())
+	if got := len(reqCh); got != 1 {
+		t.Fatalf("webhook requests after cooldown = %d, want 1", got)
+	}
+
+	second := <-reqCh
+	if !second.Timestamp.Equal(now) {
+		t.Fatalf("second timestamp = %s, want %s", second.Timestamp, now)
+	}
+	if !second.Stats.CheckedAt.Equal(now) {
+		t.Fatalf("second checked_at = %s, want %s", second.Stats.CheckedAt, now)
 	}
 }
 
@@ -1046,6 +1152,33 @@ func TestTelegramErrorDoesNotExposeBotToken(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "secret-token") || strings.Contains(err.Error(), "123456") {
 		t.Fatalf("Telegram error leaked bot token: %s", err)
+	}
+}
+
+func TestSendEventRejectsTelegramTokenUnicodeControlCharacter(t *testing.T) {
+	originalTelegramAPIBaseURL := telegramAPIBaseURL
+	defer func() { telegramAPIBaseURL = originalTelegramAPIBaseURL }()
+
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	telegramAPIBaseURL = server.URL
+
+	monitor := NewMonitor(Config{
+		Enabled:          true,
+		TelegramEnabled:  true,
+		TelegramBotToken: "123456:secret\u0081token",
+		TelegramChatID:   "-1001234567890",
+	}, t.TempDir(), zerolog.Nop())
+	err := monitor.SendEvent(context.Background(), EventPayload{Type: "backup_run"})
+	if err == nil {
+		t.Fatal("SendEvent() error = nil, want invalid bot token error")
+	}
+	if requests.Load() != 0 {
+		t.Fatalf("Telegram request count = %d, want 0 for invalid token", requests.Load())
 	}
 }
 

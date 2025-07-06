@@ -595,6 +595,11 @@ func (h *Handler) HandleCreateDownloadSession(w http.ResponseWriter, r *http.Req
 		return
 	}
 
+	if user := GetUserFromContext(r.Context()); user != nil && user.Disabled {
+		writeDisabledUserError(w)
+		return
+	}
+
 	claims := GetClaimsFromContext(r.Context())
 	if claims == nil || claims.ExpiresAt == nil {
 		writeError(w, http.StatusUnauthorized, "not authenticated", "NOT_AUTHENTICATED")
@@ -642,6 +647,10 @@ func requestIsHTTPS(r *http.Request) bool {
 	return requestip.RequestIsHTTPS(r)
 }
 
+func writeDisabledUserError(w http.ResponseWriter) {
+	writeError(w, http.StatusForbidden, "user account is disabled", "USER_DISABLED")
+}
+
 // HandleMe handles GET /api/v1/auth/me
 func (h *Handler) HandleMe(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
@@ -652,6 +661,10 @@ func (h *Handler) HandleMe(w http.ResponseWriter, r *http.Request) {
 	user := GetUserFromContext(r.Context())
 	if user == nil {
 		writeError(w, http.StatusUnauthorized, "not authenticated", "NOT_AUTHENTICATED")
+		return
+	}
+	if user.Disabled {
+		writeDisabledUserError(w)
 		return
 	}
 
@@ -685,6 +698,10 @@ func (h *Handler) HandleChangePassword(w http.ResponseWriter, r *http.Request) {
 	user := GetUserFromContext(r.Context())
 	if user == nil {
 		writeError(w, http.StatusUnauthorized, "not authenticated", "NOT_AUTHENTICATED")
+		return
+	}
+	if user.Disabled {
+		writeDisabledUserError(w)
 		return
 	}
 
@@ -1276,7 +1293,9 @@ func markAuthPersistenceWarningHeaders(w http.ResponseWriter) {
 func writeEnvelope(w http.ResponseWriter, status int, envelope ResponseEnvelope) {
 	body, err := json.Marshal(envelope)
 	if err != nil {
-		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"success":false,"error":{"code":"INTERNAL_ERROR","message":"internal server error"}}`))
 		return
 	}
 
