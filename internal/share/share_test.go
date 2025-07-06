@@ -475,6 +475,16 @@ func TestShareStore_CreateRejectsInvalidInvariants(t *testing.T) {
 			wantErr: errInvalidSharePath,
 		},
 		{
+			name:    "control character path",
+			opts:    CreateShareOptions{Path: "/docs\a/report.pdf", Type: ShareTypeFile, CreatedBy: "user1"},
+			wantErr: errInvalidSharePath,
+		},
+		{
+			name:    "delete control character path",
+			opts:    CreateShareOptions{Path: "/docs\x7f/report.pdf", Type: ShareTypeFile, CreatedBy: "user1"},
+			wantErr: errInvalidSharePath,
+		},
+		{
 			name:    "negative max access",
 			opts:    CreateShareOptions{Path: "/test/file.txt", Type: ShareTypeFile, CreatedBy: "user1", MaxAccess: -1},
 			wantErr: errInvalidMaxAccess,

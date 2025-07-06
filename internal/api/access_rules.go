@@ -3,7 +3,6 @@ package api
 import (
 	"context"
 	"errors"
-	"path"
 	"slices"
 	"strings"
 
@@ -65,9 +64,18 @@ func (s *Server) authorizeUserPathForOptions(ctx context.Context, targetPath str
 		return nil
 	}
 
+	cleanTargetPath, err := validatePath(targetPath)
+	if err != nil {
+		return errPathOutsideHomeDir
+	}
+	targetPath = cleanTargetPath
+
 	user := auth.GetUserFromContext(ctx)
 	if user == nil {
-		return nil
+		return errPathAccessDenied
+	}
+	if user.Disabled {
+		return errPathAccessDenied
 	}
 
 	if rule, ok := s.matchDirectoryAccessRule(targetPath); ok {
@@ -113,63 +121,74 @@ func matchDirectoryAccessRuleIn(rules []config.DirectoryAccessRuleConfig, target
 		return config.DirectoryAccessRuleConfig{}, false
 	}
 
-	targetPath = path.Clean(targetPath)
-	bestIndex := -1
-	bestLength := -1
-	for i, rule := range rules {
-		if strings.TrimSpace(rule.Path) == "" {
-			continue
-		}
-		if !pathWithinBase(rule.Path, targetPath) {
-			continue
-		}
-		if len(rule.Path) > bestLength {
-			bestIndex = i
-			bestLength = len(rule.Path)
-		}
-	}
-	if bestIndex < 0 {
+	targetPath = cleanRuntimePathRulePath(targetPath)
+	if targetPath == "" {
 		return config.DirectoryAccessRuleConfig{}, false
 	}
-	return rules[bestIndex], true
+	var bestRule config.DirectoryAccessRuleConfig
+	bestLength := -1
+	for _, rule := range rules {
+		rulePath := cleanRuntimePathRulePath(rule.Path)
+		if rulePath == "" || !pathWithinBase(rulePath, targetPath) {
+			continue
+		}
+		if len(rulePath) > bestLength {
+			rule.Path = rulePath
+			bestRule = rule
+			bestLength = len(rulePath)
+		}
+	}
+	if bestLength < 0 {
+		return config.DirectoryAccessRuleConfig{}, false
+	}
+	return bestRule, true
 }
 
 func (s *Server) hasExistingReadableDirectoryAccessDescendantRule(ctx context.Context, user *auth.User, targetPath string) (bool, error) {
-	if s.fs == nil {
-		return false, nil
-	}
 	cfg := s.currentConfig()
 	if cfg == nil || len(cfg.Storage.DirectoryAccessRules) == 0 {
 		return false, nil
 	}
 
-	for _, rule := range readableDirectoryAccessDescendantRules(cfg.Storage.DirectoryAccessRules, user, targetPath) {
+	_, ok, err := s.existingReadableDirectoryAccessDescendantRuleWithRules(ctx, user, targetPath, cfg.Storage.DirectoryAccessRules)
+	return ok, err
+}
+
+func (s *Server) existingReadableDirectoryAccessDescendantRuleWithRules(ctx context.Context, user *auth.User, targetPath string, rules []config.DirectoryAccessRuleConfig) (config.DirectoryAccessRuleConfig, bool, error) {
+	if s.fs == nil || len(rules) == 0 {
+		return config.DirectoryAccessRuleConfig{}, false, nil
+	}
+
+	for _, rule := range readableDirectoryAccessDescendantRules(rules, user, targetPath) {
 		ok, err := s.directoryExistsForAccessRule(ctx, rule.Path)
 		if err != nil {
-			return false, err
+			return config.DirectoryAccessRuleConfig{}, false, err
 		}
 		if ok {
-			return true, nil
+			return rule, true, nil
 		}
 	}
-	return false, nil
+	return config.DirectoryAccessRuleConfig{}, false, nil
 }
 
 func readableDirectoryAccessDescendantRules(rules []config.DirectoryAccessRuleConfig, user *auth.User, targetPath string) []config.DirectoryAccessRuleConfig {
 	if len(rules) == 0 || user == nil {
 		return nil
 	}
-	targetPath = path.Clean(targetPath)
+	targetPath = cleanRuntimePathRulePath(targetPath)
+	if targetPath == "" {
+		return nil
+	}
 	if targetPath == "/" {
 		return nil
 	}
 
 	matched := make([]config.DirectoryAccessRuleConfig, 0)
 	for _, rule := range rules {
-		if strings.TrimSpace(rule.Path) == "" {
+		rulePath := cleanRuntimePathRulePath(rule.Path)
+		if rulePath == "" {
 			continue
 		}
-		rulePath := path.Clean(rule.Path)
 		if rulePath == "/" || rulePath == targetPath {
 			continue
 		}
@@ -211,13 +230,13 @@ func directoryAccessRuleAllowsUser(rule config.DirectoryAccessRuleConfig, user *
 	var roles []string
 	var groupsAllowed []string
 	if mode == pathAccessWrite {
-		users = rule.WriteUsers
-		roles = rule.WriteRoles
-		groupsAllowed = rule.WriteGroups
+		users = normalizeAccessRuleRuntimeValues(rule.WriteUsers)
+		roles = normalizeAccessRuleRuntimeValues(rule.WriteRoles)
+		groupsAllowed = normalizeAccessRuleRuntimeValues(rule.WriteGroups)
 	} else {
-		users = append(append([]string(nil), rule.ReadUsers...), rule.WriteUsers...)
-		roles = append(append([]string(nil), rule.ReadRoles...), rule.WriteRoles...)
-		groupsAllowed = append(append([]string(nil), rule.ReadGroups...), rule.WriteGroups...)
+		users = normalizeAccessRuleRuntimeValues(append(append([]string(nil), rule.ReadUsers...), rule.WriteUsers...))
+		roles = normalizeAccessRuleRuntimeValues(append(append([]string(nil), rule.ReadRoles...), rule.WriteRoles...))
+		groupsAllowed = normalizeAccessRuleRuntimeValues(append(append([]string(nil), rule.ReadGroups...), rule.WriteGroups...))
 	}
 
 	if slices.Contains(users, username) || slices.Contains(roles, role) {
@@ -231,22 +250,32 @@ func directoryAccessRuleAllowsUser(rule config.DirectoryAccessRuleConfig, user *
 	return false
 }
 
+func normalizeAccessRuleRuntimeValues(values []string) []string {
+	normalized := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.ToLower(strings.TrimSpace(value))
+		if value != "" {
+			normalized = append(normalized, value)
+		}
+	}
+	return normalized
+}
+
 func (s *Server) hasDirectoryAccessRules() bool {
 	cfg := s.currentConfig()
 	return cfg != nil && len(cfg.Storage.DirectoryAccessRules) > 0
 }
 
-func (s *Server) evaluateUserPathAccess(user *auth.User, targetPath string) pathAccessCheckResult {
+func (s *Server) evaluateUserPathAccess(ctx context.Context, user *auth.User, targetPath string) (pathAccessCheckResult, error) {
 	cfg := s.currentConfig()
 	var rules []config.DirectoryAccessRuleConfig
 	if cfg != nil {
 		rules = cfg.Storage.DirectoryAccessRules
 	}
-	return s.evaluateUserPathAccessWithRules(user, targetPath, rules)
+	return s.evaluateUserPathAccessWithRules(ctx, user, targetPath, rules)
 }
 
-func (s *Server) evaluateUserPathAccessWithRules(user *auth.User, targetPath string, rules []config.DirectoryAccessRuleConfig) pathAccessCheckResult {
-	targetPath = path.Clean(targetPath)
+func (s *Server) evaluateUserPathAccessWithRules(ctx context.Context, user *auth.User, targetPath string, rules []config.DirectoryAccessRuleConfig) (pathAccessCheckResult, error) {
 	result := pathAccessCheckResult{
 		Path: targetPath,
 	}
@@ -257,19 +286,42 @@ func (s *Server) evaluateUserPathAccessWithRules(user *auth.User, targetPath str
 		result.Groups = append([]string(nil), user.Groups...)
 		result.HomeDir = user.HomeDir
 	}
-	result.Read = s.evaluateUserPathAccessModeWithRules(user, targetPath, pathAccessRead, rules)
-	result.Write = s.evaluateUserPathAccessModeWithRules(user, targetPath, pathAccessWrite, rules)
-	return result
+	cleanTargetPath, err := validatePath(targetPath)
+	if err != nil {
+		result.Read = invalidPathAccessEvaluation(pathAccessRead)
+		result.Write = invalidPathAccessEvaluation(pathAccessWrite)
+		return result, nil
+	}
+	result.Path = cleanTargetPath
+	targetPath = cleanTargetPath
+	result.Read, err = s.evaluateUserPathAccessModeWithRules(ctx, user, targetPath, pathAccessRead, rules)
+	if err != nil {
+		return result, err
+	}
+	result.Write, err = s.evaluateUserPathAccessModeWithRules(ctx, user, targetPath, pathAccessWrite, rules)
+	if err != nil {
+		return result, err
+	}
+	return result, nil
 }
 
-func (s *Server) evaluateUserPathAccessModeWithRules(user *auth.User, targetPath string, mode pathAccessMode, rules []config.DirectoryAccessRuleConfig) pathAccessEvaluation {
+func invalidPathAccessEvaluation(mode pathAccessMode) pathAccessEvaluation {
+	return pathAccessEvaluation{
+		Mode:    mode,
+		Allowed: false,
+		Source:  "invalid_path",
+		Message: "path is invalid",
+	}
+}
+
+func (s *Server) evaluateUserPathAccessModeWithRules(ctx context.Context, user *auth.User, targetPath string, mode pathAccessMode, rules []config.DirectoryAccessRuleConfig) (pathAccessEvaluation, error) {
 	if !s.authEnabled {
 		return pathAccessEvaluation{
 			Mode:    mode,
 			Allowed: true,
 			Source:  "auth_disabled",
 			Message: "authentication is disabled",
-		}
+		}, nil
 	}
 	if user == nil {
 		return pathAccessEvaluation{
@@ -277,7 +329,7 @@ func (s *Server) evaluateUserPathAccessModeWithRules(user *auth.User, targetPath
 			Allowed: false,
 			Source:  "user_not_found",
 			Message: "user was not found",
-		}
+		}, nil
 	}
 	if user.Disabled {
 		return pathAccessEvaluation{
@@ -285,7 +337,7 @@ func (s *Server) evaluateUserPathAccessModeWithRules(user *auth.User, targetPath
 			Allowed: false,
 			Source:  "user_disabled",
 			Message: "user account is disabled",
-		}
+		}, nil
 	}
 	if user.Role == auth.RoleAdmin {
 		return pathAccessEvaluation{
@@ -293,7 +345,7 @@ func (s *Server) evaluateUserPathAccessModeWithRules(user *auth.User, targetPath
 			Allowed: true,
 			Source:  "admin",
 			Message: "admin role has full access",
-		}
+		}, nil
 	}
 
 	if rule, ok := matchDirectoryAccessRuleIn(rules, targetPath); ok {
@@ -309,18 +361,21 @@ func (s *Server) evaluateUserPathAccessModeWithRules(user *auth.User, targetPath
 			Source:      "directory_access_rule",
 			Message:     message,
 			MatchedRule: &matchedRule,
-		}
+		}, nil
 	}
 	if mode == pathAccessRead {
-		if descendantRules := readableDirectoryAccessDescendantRules(rules, user, targetPath); len(descendantRules) > 0 {
-			matchedRule := descendantRules[0]
+		matchedRule, ok, err := s.existingReadableDirectoryAccessDescendantRuleWithRules(ctx, user, targetPath, rules)
+		if err != nil {
+			return pathAccessEvaluation{}, err
+		}
+		if ok {
 			return pathAccessEvaluation{
 				Mode:        mode,
 				Allowed:     true,
 				Source:      "directory_access_rule",
-				Message:     "directory access rule grants read through a descendant",
+				Message:     "directory access rule grants read through an existing descendant",
 				MatchedRule: &matchedRule,
-			}
+			}, nil
 		}
 	}
 
@@ -331,7 +386,7 @@ func (s *Server) evaluateUserPathAccessModeWithRules(user *auth.User, targetPath
 			Allowed: false,
 			Source:  "invalid_home_dir",
 			Message: "user home_dir is invalid",
-		}
+		}, nil
 	}
 	allowed := pathWithinBase(homeDir, targetPath)
 	message := "path is outside the user's home_dir"
@@ -343,5 +398,5 @@ func (s *Server) evaluateUserPathAccessModeWithRules(user *auth.User, targetPath
 		Allowed: allowed,
 		Source:  "home_dir",
 		Message: message,
-	}
+	}, nil
 }

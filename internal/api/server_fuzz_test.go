@@ -4,6 +4,7 @@ import (
 	"path"
 	"strings"
 	"testing"
+	"unicode"
 )
 
 func FuzzValidatePath(f *testing.F) {
@@ -17,6 +18,8 @@ func FuzzValidatePath(f *testing.F) {
 		"/docs/../secret",
 		"..\\etc\\passwd",
 		"/nul\x00byte",
+		"/report\n2026.txt",
+		"/report\x7f2026.txt",
 	}
 
 	for _, seed := range seeds {
@@ -28,7 +31,7 @@ func FuzzValidatePath(f *testing.F) {
 		normalizedInput := strings.ReplaceAll(input, "\\", "/")
 
 		if err != nil {
-			if !hasDotSegment(normalizedInput) && !strings.ContainsRune(normalizedInput, '\x00') {
+			if !hasDotSegment(normalizedInput) && strings.IndexFunc(normalizedInput, unicode.IsControl) < 0 {
 				t.Fatalf("validatePath(%q) returned unexpected error: %v", input, err)
 			}
 			return
@@ -40,8 +43,8 @@ func FuzzValidatePath(f *testing.F) {
 		if !strings.HasPrefix(got, "/") {
 			t.Fatalf("validatePath(%q) = %q, want absolute path", input, got)
 		}
-		if strings.ContainsRune(got, '\x00') {
-			t.Fatalf("validatePath(%q) = %q, want no NUL bytes", input, got)
+		if strings.IndexFunc(got, unicode.IsControl) >= 0 {
+			t.Fatalf("validatePath(%q) = %q, want no control characters", input, got)
 		}
 		if strings.Contains(got, "\\") {
 			t.Fatalf("validatePath(%q) = %q, want normalized separators", input, got)

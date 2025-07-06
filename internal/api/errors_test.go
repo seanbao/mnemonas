@@ -29,6 +29,30 @@ func (w *failingResponseWriter) Write(_ []byte) (int, error) {
 	return 0, errors.New("write failed")
 }
 
+func assertInternalJSONError(t *testing.T, w *httptest.ResponseRecorder) {
+	t.Helper()
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusInternalServerError)
+	}
+	if contentType := w.Header().Get("Content-Type"); contentType != "application/json" {
+		t.Fatalf("Content-Type = %q, want application/json", contentType)
+	}
+
+	var response APIError
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+		t.Fatalf("failed to unmarshal internal error response: %v; body=%q", err, w.Body.String())
+	}
+	if response.Code != ErrCodeInternal {
+		t.Fatalf("code = %q, want %q", response.Code, ErrCodeInternal)
+	}
+	if response.Message != "internal server error" {
+		t.Fatalf("message = %q, want internal server error", response.Message)
+	}
+	if response.Timestamp == "" {
+		t.Fatal("timestamp should not be empty")
+	}
+}
+
 func TestNewAPIError(t *testing.T) {
 	err := NewAPIError("TEST_CODE", "test message")
 
@@ -112,12 +136,7 @@ func TestAPIError_Write_InvalidDetailsFailsClosed(t *testing.T) {
 	if writeErr == nil {
 		t.Fatal("expected marshal error")
 	}
-	if w.Code != http.StatusInternalServerError {
-		t.Fatalf("status = %d, want %d", w.Code, http.StatusInternalServerError)
-	}
-	if w.Body.String() != "Internal Server Error\n" {
-		t.Fatalf("expected internal server error body, got %q", w.Body.String())
-	}
+	assertInternalJSONError(t, w)
 }
 
 func TestBadRequest(t *testing.T) {
@@ -317,12 +336,7 @@ func TestAPIResponse_Write_InvalidDataFailsClosed(t *testing.T) {
 	if writeErr == nil {
 		t.Fatal("expected marshal error")
 	}
-	if w.Code != http.StatusInternalServerError {
-		t.Fatalf("status = %d, want %d", w.Code, http.StatusInternalServerError)
-	}
-	if w.Body.String() != "Internal Server Error\n" {
-		t.Fatalf("expected internal server error body, got %q", w.Body.String())
-	}
+	assertInternalJSONError(t, w)
 }
 
 func TestAPIError_Chaining(t *testing.T) {

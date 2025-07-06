@@ -9,7 +9,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"mime"
 	"net/http"
@@ -132,6 +131,9 @@ var (
 	errInvalidShareArchivePath     = errors.New("invalid archive path")
 	errShareArchiveTooManyEntries  = errors.New("archive contains too many entries")
 	errShareArchiveContentTooLarge = errors.New("archive content is too large")
+	errShareArchiveDuplicateEntry  = errors.New("archive contains duplicate entry names")
+	errShareArchiveMissingMetadata = errors.New("archive entry missing metadata")
+	errShareArchiveSnapshotChanged = errors.New("archive entry snapshot changed")
 )
 
 func newPasswordAttemptTracker() *passwordAttemptTracker {
@@ -273,7 +275,7 @@ type CreateShareRequest struct {
 
 func normalizeShareAbsolutePath(rawPath string) (string, error) {
 	normalized := strings.ReplaceAll(rawPath, "\\", "/")
-	if strings.ContainsRune(normalized, '\x00') {
+	if containsSharePathControlCharacter(normalized) {
 		return "", errors.New("invalid path")
 	}
 	if strings.TrimSpace(normalized) == "" {
@@ -287,7 +289,7 @@ func normalizeShareAbsolutePath(rawPath string) (string, error) {
 
 func normalizeShareRelativePath(rawPath string) (string, error) {
 	normalized := strings.ReplaceAll(rawPath, "\\", "/")
-	if strings.ContainsRune(normalized, '\x00') {
+	if containsSharePathControlCharacter(normalized) {
 		return "", errors.New("invalid path")
 	}
 	normalized = strings.TrimLeft(normalized, "/")
@@ -778,6 +780,10 @@ func writePublicShareAccessError(w http.ResponseWriter, err error) {
 // AccessShare handles public share access
 func (h *Handler) AccessShare(w http.ResponseWriter, r *http.Request) {
 	setPublicShareJSONHeaders(w)
+	if rejectNonGETPublicShareRead(w, r) {
+		return
+	}
+
 	id := chi.URLParam(r, "id")
 
 	share, err := h.store.Get(id)
@@ -872,6 +878,10 @@ type AccessShareRequest struct {
 // AccessShareWithPassword validates password and returns share details
 func (h *Handler) AccessShareWithPassword(w http.ResponseWriter, r *http.Request) {
 	setPublicShareJSONHeaders(w)
+	if rejectNonPOSTPublicShareAccess(w, r) {
+		return
+	}
+
 	id := chi.URLParam(r, "id")
 
 	var req AccessShareRequest
@@ -962,6 +972,10 @@ func shareDownloadContentType(filePath string) string {
 // DownloadShare handles file download for shares
 func (h *Handler) DownloadShare(w http.ResponseWriter, r *http.Request) {
 	setPublicShareJSONHeaders(w)
+	if rejectNonGETPublicShareRead(w, r) {
+		return
+	}
+
 	id := chi.URLParam(r, "id")
 	archiveFormat, err := shareArchiveFormatFromRequest(r)
 	if err != nil {
@@ -1032,6 +1046,10 @@ func (h *Handler) DownloadShare(w http.ResponseWriter, r *http.Request) {
 // DownloadShareFile handles file download from shared folder
 func (h *Handler) DownloadShareFile(w http.ResponseWriter, r *http.Request) {
 	setPublicShareJSONHeaders(w)
+	if rejectNonGETPublicShareRead(w, r) {
+		return
+	}
+
 	id := chi.URLParam(r, "id")
 	filePath, err := shareDownloadPathFromRequest(r, id)
 	if err != nil {
@@ -1120,6 +1138,24 @@ func contentDispositionAttachment(filename string) string {
 	return value
 }
 
+func rejectNonGETPublicShareRead(w http.ResponseWriter, r *http.Request) bool {
+	if r.Method == http.MethodGet {
+		return false
+	}
+	w.Header().Set("Allow", http.MethodGet)
+	writeShareError(w, http.StatusMethodNotAllowed, "method not allowed", "METHOD_NOT_ALLOWED")
+	return true
+}
+
+func rejectNonPOSTPublicShareAccess(w http.ResponseWriter, r *http.Request) bool {
+	if r.Method == http.MethodPost {
+		return false
+	}
+	w.Header().Set("Allow", http.MethodPost)
+	writeShareError(w, http.StatusMethodNotAllowed, "method not allowed", "METHOD_NOT_ALLOWED")
+	return true
+}
+
 func (h *Handler) serveAuthorizedShareDownload(w http.ResponseWriter, r *http.Request, share *Share, reader FileReader, filePath string) {
 	if requestHasRangeHeader(r) {
 		if seeker, ok := reader.(io.ReadSeeker); ok {
@@ -1185,6 +1221,29 @@ type shareArchiveEntry struct {
 	info       *storage.FileInfo
 }
 
+type shareArchiveInternalError struct {
+	operation string
+	err       error
+}
+
+func (e *shareArchiveInternalError) Error() string {
+	if strings.TrimSpace(e.operation) == "" {
+		return "share archive operation failed"
+	}
+	return e.operation + " failed"
+}
+
+func (e *shareArchiveInternalError) Unwrap() error {
+	return e.err
+}
+
+func newShareArchiveInternalError(operation string, err error) error {
+	if err == nil {
+		return &shareArchiveInternalError{operation: operation}
+	}
+	return &shareArchiveInternalError{operation: operation, err: err}
+}
+
 type shareArchiveCollector struct {
 	handler      *Handler
 	share        *Share
@@ -1203,6 +1262,10 @@ func (h *Handler) serveAuthorizedShareArchive(w http.ResponseWriter, r *http.Req
 
 	entries, err := h.collectShareArchiveEntries(r.Context(), share, statProvider, rootPath)
 	if err != nil {
+		writePublicShareArchiveError(w, err)
+		return
+	}
+	if err := validateShareArchiveEntries(entries); err != nil {
 		writePublicShareArchiveError(w, err)
 		return
 	}
@@ -1363,29 +1426,37 @@ func (c *shareArchiveCollector) addFile(sourcePath, zipName string, info *storag
 
 func (h *Handler) writeShareArchive(ctx context.Context, zipWriter *zip.Writer, entries []shareArchiveEntry) error {
 	var totalBytes int64
+	seenNames := make(map[string]struct{}, len(entries))
 	for _, entry := range entries {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 		if entry.info == nil {
-			return fmt.Errorf("share archive entry %s missing metadata", entry.sourcePath)
+			return errShareArchiveMissingMetadata
+		}
+		zipName, err := safeShareArchiveHeaderName(entry.zipName, entry.info.IsDir)
+		if err != nil {
+			return err
+		}
+		if err := rememberShareArchiveHeaderName(seenNames, zipName); err != nil {
+			return err
 		}
 		if entry.info.IsDir {
 			header := &zip.FileHeader{
-				Name:   entry.zipName,
+				Name:   zipName,
 				Method: zip.Store,
 			}
 			header.SetModTime(entry.info.ModTime)
 			header.SetMode(os.ModeDir | 0o755)
 			if _, err := zipWriter.CreateHeader(header); err != nil {
-				return fmt.Errorf("create share archive directory %s: %w", entry.zipName, err)
+				return newShareArchiveInternalError("create share archive directory", err)
 			}
 			continue
 		}
 
 		reader, archiveInfo, err := h.openShareArchiveFile(ctx, entry)
 		if err != nil {
-			return fmt.Errorf("open share archive file %s: %w", entry.sourcePath, err)
+			return newShareArchiveInternalError("open share archive file", err)
 		}
 		if reader == nil {
 			return storage.ErrNotFound
@@ -1395,7 +1466,7 @@ func (h *Handler) writeShareArchive(ctx context.Context, zipWriter *zip.Writer, 
 		}
 		if archiveInfo.IsDir {
 			_ = reader.Close()
-			return storage.ErrIsDir
+			return errShareArchiveSnapshotChanged
 		}
 		if archiveInfo.Size < 0 || totalBytes > maxShareArchiveBytes-archiveInfo.Size {
 			_ = reader.Close()
@@ -1403,7 +1474,7 @@ func (h *Handler) writeShareArchive(ctx context.Context, zipWriter *zip.Writer, 
 		}
 
 		header := &zip.FileHeader{
-			Name:               entry.zipName,
+			Name:               zipName,
 			Method:             zip.Deflate,
 			UncompressedSize64: uint64(archiveInfo.Size),
 		}
@@ -1412,22 +1483,47 @@ func (h *Handler) writeShareArchive(ctx context.Context, zipWriter *zip.Writer, 
 		writer, err := zipWriter.CreateHeader(header)
 		if err != nil {
 			_ = reader.Close()
-			return fmt.Errorf("create share archive file %s: %w", entry.zipName, err)
+			return newShareArchiveInternalError("create share archive file", err)
 		}
 		remaining := maxShareArchiveBytes - totalBytes
 		written, copyErr := io.Copy(writer, io.LimitReader(reader, remaining+1))
 		closeErr := reader.Close()
 		if copyErr != nil {
-			return fmt.Errorf("write share archive file %s: %w", entry.zipName, copyErr)
+			return newShareArchiveInternalError("write share archive file", copyErr)
 		}
 		if closeErr != nil {
-			return fmt.Errorf("close share archive file %s: %w", entry.sourcePath, closeErr)
+			return newShareArchiveInternalError("close share archive file", closeErr)
 		}
 		if written > remaining {
 			return errShareArchiveContentTooLarge
 		}
 		totalBytes += written
 	}
+	return nil
+}
+
+func validateShareArchiveEntries(entries []shareArchiveEntry) error {
+	seenNames := make(map[string]struct{}, len(entries))
+	for _, entry := range entries {
+		if entry.info == nil {
+			return errShareArchiveMissingMetadata
+		}
+		zipName, err := safeShareArchiveHeaderName(entry.zipName, entry.info.IsDir)
+		if err != nil {
+			return err
+		}
+		if err := rememberShareArchiveHeaderName(seenNames, zipName); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func rememberShareArchiveHeaderName(seenNames map[string]struct{}, zipName string) error {
+	if _, ok := seenNames[zipName]; ok {
+		return errShareArchiveDuplicateEntry
+	}
+	seenNames[zipName] = struct{}{}
 	return nil
 }
 
@@ -1442,6 +1538,8 @@ func (h *Handler) openShareArchiveFile(ctx context.Context, entry shareArchiveEn
 func isPublicShareArchiveResponseError(err error) bool {
 	return errors.Is(err, errShareArchiveTooManyEntries) ||
 		errors.Is(err, errShareArchiveContentTooLarge) ||
+		errors.Is(err, errShareArchiveDuplicateEntry) ||
+		errors.Is(err, errShareArchiveSnapshotChanged) ||
 		errors.Is(err, errInvalidShareArchivePath) ||
 		errors.Is(err, storage.ErrNotFound) ||
 		errors.Is(err, ErrShareNotFound) ||
@@ -1455,6 +1553,10 @@ func writePublicShareArchiveError(w http.ResponseWriter, err error) {
 		writeShareError(w, http.StatusRequestEntityTooLarge, "archive contains too many entries", "ARCHIVE_TOO_MANY_ENTRIES")
 	case errors.Is(err, errShareArchiveContentTooLarge):
 		writeShareError(w, http.StatusRequestEntityTooLarge, "archive content is too large", "ARCHIVE_TOO_LARGE")
+	case errors.Is(err, errShareArchiveDuplicateEntry):
+		writeShareError(w, http.StatusConflict, "archive contains duplicate entries", "ARCHIVE_DUPLICATE_ENTRY")
+	case errors.Is(err, errShareArchiveSnapshotChanged):
+		writeShareError(w, http.StatusConflict, "archive entry changed during download", "ARCHIVE_ENTRY_CHANGED")
 	case errors.Is(err, errInvalidShareArchivePath):
 		writeShareError(w, http.StatusBadRequest, "invalid path", "INVALID_PATH")
 	case errors.Is(err, storage.ErrNotFound), errors.Is(err, ErrShareNotFound):
@@ -1529,7 +1631,6 @@ func shareRangeHeaderServesContent(rangeHeader string, size int64) bool {
 	}
 
 	hasRange := false
-	noOverlap := false
 	for _, rawRange := range strings.Split(rangeHeader[len(prefix):], ",") {
 		rawRange = strings.TrimSpace(rawRange)
 		if rawRange == "" {
@@ -1549,7 +1650,9 @@ func shareRangeHeaderServesContent(rangeHeader string, size int64) bool {
 			if err != nil || suffixLength < 0 {
 				return false
 			}
-			hasRange = true
+			if suffixLength > 0 && size > 0 {
+				hasRange = true
+			}
 			continue
 		}
 
@@ -1558,7 +1661,6 @@ func shareRangeHeaderServesContent(rangeHeader string, size int64) bool {
 			return false
 		}
 		if start >= size {
-			noOverlap = true
 			continue
 		}
 		if endText != "" {
@@ -1569,10 +1671,7 @@ func shareRangeHeaderServesContent(rangeHeader string, size int64) bool {
 		}
 		hasRange = true
 	}
-	if noOverlap && !hasRange {
-		return size == 0
-	}
-	return true
+	return hasRange
 }
 
 func requestHasRangeHeader(r *http.Request) bool {
@@ -1593,8 +1692,11 @@ func setShareDownloadHeaders(w http.ResponseWriter, filePath string) {
 }
 
 func safeShareArchiveEntryName(name string) (string, error) {
-	normalized := strings.ReplaceAll(name, "\\", "/")
-	if normalized == "" || strings.ContainsRune(normalized, '\x00') || strings.HasPrefix(normalized, "/") || hasShareDotSegment(normalized) {
+	if strings.Contains(name, "\\") {
+		return "", errInvalidShareArchivePath
+	}
+	normalized := name
+	if normalized == "" || containsSharePathControlCharacter(normalized) || strings.HasPrefix(normalized, "/") || strings.Contains(normalized, ":") || hasShareDotSegment(normalized) {
 		return "", errInvalidShareArchivePath
 	}
 	cleaned := path.Clean(normalized)
@@ -1602,6 +1704,25 @@ func safeShareArchiveEntryName(name string) (string, error) {
 		return "", errInvalidShareArchivePath
 	}
 	return cleaned, nil
+}
+
+func safeShareArchiveHeaderName(name string, isDir bool) (string, error) {
+	if strings.Contains(name, "\\") {
+		return "", errInvalidShareArchivePath
+	}
+	normalized := name
+	if isDir {
+		trimmed := strings.TrimRight(normalized, "/")
+		cleaned, err := safeShareArchiveEntryName(trimmed)
+		if err != nil {
+			return "", err
+		}
+		return cleaned + "/", nil
+	}
+	if strings.HasSuffix(normalized, "/") {
+		return "", errInvalidShareArchivePath
+	}
+	return safeShareArchiveEntryName(normalized)
 }
 
 func shareArchiveRootName(rootPath string) string {
@@ -1725,6 +1846,10 @@ func (w *responseStartTrackingWriter) Write(p []byte) (int, error) {
 // ListShareItems lists items within a shared folder.
 func (h *Handler) ListShareItems(w http.ResponseWriter, r *http.Request) {
 	setPublicShareJSONHeaders(w)
+	if rejectNonGETPublicShareRead(w, r) {
+		return
+	}
+
 	id := chi.URLParam(r, "id")
 	relPath, err := shareListPathFromRequest(r)
 	if err != nil {
@@ -1894,7 +2019,10 @@ func (h *Handler) authorizeSharePath(ctx context.Context, share *Share, targetPa
 		return ErrShareNotFound
 	}
 
-	cleanTarget := path.Clean(targetPath)
+	cleanTarget, ok := cleanShareRuntimePath(targetPath)
+	if !ok {
+		return ErrShareNotFound
+	}
 	if !isWithinSharePath(share.Path, cleanTarget) {
 		return ErrShareNotFound
 	}
@@ -1938,21 +2066,28 @@ func shareReadDirChildPath(parentPath string, child *storage.FileInfo) (string, 
 	cleanParent := path.Clean(parentPath)
 	childPath := child.Path
 	if strings.TrimSpace(childPath) == "" {
-		childName := strings.ReplaceAll(child.Name, "\\", "/")
-		if strings.ContainsRune(childName, '\x00') || hasShareDotSegment(childName) {
-			return "", "", ErrShareNotFound
+		childName, err := safeShareFallbackChildName(child.Name)
+		if err != nil {
+			return "", "", err
 		}
 		childPath = path.Join(cleanParent, childName)
 	}
-	normalizedChildPath := strings.ReplaceAll(childPath, "\\", "/")
-	if strings.ContainsRune(normalizedChildPath, '\x00') || hasShareDotSegment(normalizedChildPath) {
+	if strings.Contains(childPath, "\\") || containsSharePathControlCharacter(childPath) || hasShareDotSegment(childPath) {
 		return "", "", ErrShareNotFound
 	}
-	cleanChild := path.Clean(normalizedChildPath)
+	cleanChild := path.Clean(childPath)
 	if cleanChild == cleanParent || path.Dir(cleanChild) != cleanParent {
 		return "", "", ErrShareNotFound
 	}
 	return cleanChild, path.Base(cleanChild), nil
+}
+
+func safeShareFallbackChildName(name string) (string, error) {
+	childName := strings.ReplaceAll(name, "\\", "/")
+	if childName == "" || strings.Contains(childName, "/") || containsSharePathControlCharacter(childName) || hasShareDotSegment(childName) {
+		return "", ErrShareNotFound
+	}
+	return childName, nil
 }
 
 func writePublicSharePathError(w http.ResponseWriter, err error, fallbackCode string) {
@@ -2191,8 +2326,14 @@ func writeShareError(w http.ResponseWriter, status int, message, code string) {
 }
 
 func shareRelativePath(basePath, entryPath string) (string, error) {
-	cleanBase := path.Clean(basePath)
-	cleanEntry := path.Clean(entryPath)
+	cleanBase, ok := cleanShareRuntimePath(basePath)
+	if !ok {
+		return "", ErrShareNotFound
+	}
+	cleanEntry, ok := cleanShareRuntimePath(entryPath)
+	if !ok {
+		return "", ErrShareNotFound
+	}
 
 	if cleanEntry == cleanBase {
 		return ".", nil
@@ -2211,8 +2352,15 @@ func shareRelativePath(basePath, entryPath string) (string, error) {
 }
 
 func isWithinSharePath(basePath, targetPath string) bool {
-	basePath = path.Clean(basePath)
-	targetPath = path.Clean(targetPath)
+	var ok bool
+	basePath, ok = cleanShareRuntimePath(basePath)
+	if !ok {
+		return false
+	}
+	targetPath, ok = cleanShareRuntimePath(targetPath)
+	if !ok {
+		return false
+	}
 	if basePath == "/" {
 		return strings.HasPrefix(targetPath, "/")
 	}
@@ -2223,6 +2371,20 @@ func isWithinSharePath(basePath, targetPath string) bool {
 		return len(targetPath) > len(basePath) && targetPath[len(basePath)] == '/'
 	}
 	return false
+}
+
+func cleanShareRuntimePath(filePath string) (string, bool) {
+	if filePath == "" || !strings.HasPrefix(filePath, "/") {
+		return "", false
+	}
+	if strings.Contains(filePath, "\\") || containsSharePathControlCharacter(filePath) || hasShareDotSegment(filePath) {
+		return "", false
+	}
+	cleaned := path.Clean(filePath)
+	if cleaned == "." || !strings.HasPrefix(cleaned, "/") {
+		return "", false
+	}
+	return cleaned, true
 }
 
 func resolveShareOwner(store shareOwnerStore, ownerRef string) (*auth.User, error) {
@@ -2261,8 +2423,7 @@ func shareOwnedByRequester(ctx context.Context, share *Share) bool {
 }
 
 func getShareOwnerIdentifiersFromContext(ctx context.Context) []string {
-	claims := auth.GetClaimsFromContext(ctx)
-	if claims == nil {
+	if user := auth.GetUserFromContext(ctx); user != nil && user.Disabled {
 		return nil
 	}
 
@@ -2280,14 +2441,27 @@ func getShareOwnerIdentifiersFromContext(ctx context.Context) []string {
 		identifiers = append(identifiers, trimmed)
 	}
 
-	appendUnique(claims.UserID)
-	appendUnique(claims.Username)
+	if claims := auth.GetClaimsFromContext(ctx); claims != nil {
+		appendUnique(claims.UserID)
+		appendUnique(claims.Username)
+		return identifiers
+	}
+	if user := auth.GetUserFromContext(ctx); user != nil && !user.Disabled {
+		appendUnique(user.ID)
+		appendUnique(user.Username)
+	}
 	return identifiers
 }
 
 func getUserIDFromContext(ctx context.Context) string {
-	if claims := auth.GetClaimsFromContext(ctx); claims != nil {
-		return claims.UserID
+	if user := auth.GetUserFromContext(ctx); user != nil && user.Disabled {
+		return ""
+	}
+	if claims := auth.GetClaimsFromContext(ctx); claims != nil && strings.TrimSpace(claims.UserID) != "" {
+		return strings.TrimSpace(claims.UserID)
+	}
+	if user := auth.GetUserFromContext(ctx); user != nil && !user.Disabled && strings.TrimSpace(user.ID) != "" {
+		return strings.TrimSpace(user.ID)
 	}
 	return ""
 }

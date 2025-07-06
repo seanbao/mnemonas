@@ -123,10 +123,6 @@ func TestFilterSearchResultsByHomeDir_ReturnsOriginalWhenUnscoped(t *testing.T) 
 				HomeDir:  "/admins/admin",
 			}),
 		},
-		"anonymous": {
-			server: &Server{authEnabled: true},
-			ctx:    context.Background(),
-		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			filtered, err := tt.server.filterSearchResultsByHomeDir(tt.ctx, results)
@@ -137,6 +133,36 @@ func TestFilterSearchResultsByHomeDir_ReturnsOriginalWhenUnscoped(t *testing.T) 
 				t.Fatalf("expected original results to be returned, got %+v", filtered)
 			}
 		})
+	}
+}
+
+func TestFilterSearchResultsByHomeDirRejectsMissingUserContext(t *testing.T) {
+	server := &Server{authEnabled: true}
+	filtered, err := server.filterSearchResultsByHomeDir(context.Background(), []*storage.SearchResult{{Path: "/outside.txt"}})
+	if !errors.Is(err, errPathAccessDenied) {
+		t.Fatalf("filterSearchResultsByHomeDir() error = %v, want %v", err, errPathAccessDenied)
+	}
+	if filtered != nil {
+		t.Fatalf("expected nil results when user context is missing, got %+v", filtered)
+	}
+}
+
+func TestFilterSearchResultsByHomeDirRejectsDisabledUserContext(t *testing.T) {
+	server := &Server{authEnabled: true}
+	ctx := contextWithAPIUser(&auth.User{
+		ID:       "u1",
+		Username: "tester",
+		Role:     auth.RoleUser,
+		HomeDir:  "/users/tester",
+		Disabled: true,
+	})
+
+	filtered, err := server.filterSearchResultsByHomeDir(ctx, []*storage.SearchResult{{Path: "/users/tester/report.txt"}})
+	if !errors.Is(err, errPathAccessDenied) {
+		t.Fatalf("filterSearchResultsByHomeDir() error = %v, want %v", err, errPathAccessDenied)
+	}
+	if filtered != nil {
+		t.Fatalf("expected nil results when user is disabled, got %+v", filtered)
 	}
 }
 

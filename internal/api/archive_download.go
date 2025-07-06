@@ -4,13 +4,13 @@ import (
 	"archive/zip"
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"path"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/seanbao/mnemonas/internal/activity"
 	"github.com/seanbao/mnemonas/internal/storage"
@@ -21,13 +21,43 @@ const maxDownloadArchiveEntries = 10000
 var maxDownloadArchiveBytes = int64(20 * 1024 * 1024 * 1024)
 
 var (
-	errDownloadArchiveTooManyEntries = errors.New("archive contains too many entries")
-	errDownloadArchiveTooLarge       = errors.New("archive content is too large")
-	errUnsupportedDownloadArchive    = errors.New("unsupported archive format")
+	errDownloadArchiveTooManyEntries  = errors.New("archive contains too many entries")
+	errDownloadArchiveTooLarge        = errors.New("archive content is too large")
+	errUnsupportedDownloadArchive     = errors.New("unsupported archive format")
+	errDownloadArchiveDuplicateEntry  = errors.New("archive contains duplicate entry names")
+	errDownloadArchiveMissingMetadata = errors.New("archive entry missing metadata")
+	errDownloadArchiveSnapshotChanged = errors.New("archive entry snapshot changed")
 )
 
 var downloadArchiveWriter = func(s *Server, ctx context.Context, zipWriter *zip.Writer, entries []downloadArchiveEntry) error {
 	return s.writeDownloadArchive(ctx, zipWriter, entries)
+}
+
+type downloadArchiveInternalError struct {
+	operation string
+	err       error
+}
+
+func (e downloadArchiveInternalError) Error() string {
+	operation := strings.TrimSpace(e.operation)
+	if operation == "" {
+		return "download archive operation failed"
+	}
+	return operation + " failed"
+}
+
+func (e downloadArchiveInternalError) Unwrap() error {
+	return e.err
+}
+
+func newDownloadArchiveInternalError(operation string, err error) error {
+	if err == nil {
+		err = errors.New("unknown download archive error")
+	}
+	return downloadArchiveInternalError{
+		operation: operation,
+		err:       err,
+	}
 }
 
 type downloadArchiveEntry struct {
@@ -55,6 +85,10 @@ func (s *Server) handleDownloadArchive(w http.ResponseWriter, r *http.Request, r
 	entries, err := s.collectDownloadArchiveEntries(r.Context(), rootPath)
 	if err != nil {
 		s.respondDownloadArchiveError(w, "collect download archive", err)
+		return
+	}
+	if err := validateDownloadArchiveEntries(entries); err != nil {
+		s.respondDownloadArchiveError(w, "validate download archive", err)
 		return
 	}
 
@@ -176,10 +210,10 @@ func downloadArchiveChildPath(sourcePath string, child *storage.FileInfo) (strin
 	}
 	cleanSource := path.Clean(sourcePath)
 	childPath := child.Path
-	if strings.TrimSpace(childPath) == "" {
-		childName := strings.ReplaceAll(child.Name, "\\", "/")
-		if strings.ContainsRune(childName, '\x00') || hasDotSegment(childName) {
-			return "", "", errInvalidPath
+	if childPath == "" {
+		childName, err := safeDownloadArchiveFallbackChildName(child.Name)
+		if err != nil {
+			return "", "", err
 		}
 		if cleanSource == "/" {
 			childPath = "/" + childName
@@ -187,15 +221,22 @@ func downloadArchiveChildPath(sourcePath string, child *storage.FileInfo) (strin
 			childPath = cleanSource + "/" + childName
 		}
 	}
-	normalizedChildPath := strings.ReplaceAll(childPath, "\\", "/")
-	if strings.ContainsRune(normalizedChildPath, '\x00') || hasDotSegment(normalizedChildPath) {
+	if strings.Contains(childPath, "\\") || containsDownloadArchivePathControlCharacter(childPath) || hasDotSegment(childPath) {
 		return "", "", errInvalidPath
 	}
-	cleanChild := path.Clean(normalizedChildPath)
+	cleanChild := path.Clean(childPath)
 	if cleanChild == cleanSource || path.Dir(cleanChild) != cleanSource {
 		return "", "", errInvalidPath
 	}
 	return cleanChild, path.Base(cleanChild), nil
+}
+
+func safeDownloadArchiveFallbackChildName(name string) (string, error) {
+	childName := strings.ReplaceAll(name, "\\", "/")
+	if childName == "" || strings.Contains(childName, "/") || containsDownloadArchivePathControlCharacter(childName) || hasDotSegment(childName) {
+		return "", errInvalidPath
+	}
+	return childName, nil
 }
 
 func (c *downloadArchiveCollector) addDirectory(sourcePath, zipName string, info *storage.FileInfo) error {
@@ -228,33 +269,41 @@ func (c *downloadArchiveCollector) addFile(sourcePath, zipName string, info *sto
 
 func (s *Server) writeDownloadArchive(ctx context.Context, zipWriter *zip.Writer, entries []downloadArchiveEntry) error {
 	var totalBytes int64
+	seenNames := make(map[string]struct{}, len(entries))
 	for _, entry := range entries {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 		if entry.info == nil {
-			return fmt.Errorf("archive entry %s missing metadata", entry.sourcePath)
+			return newDownloadArchiveInternalError("prepare archive entry", errDownloadArchiveMissingMetadata)
+		}
+		zipName, err := safeDownloadArchiveHeaderName(entry.zipName, entry.info.IsDir)
+		if err != nil {
+			return err
+		}
+		if err := rememberDownloadArchiveHeaderName(seenNames, zipName); err != nil {
+			return err
 		}
 		if entry.info.IsDir {
 			header := &zip.FileHeader{
-				Name:   entry.zipName,
+				Name:   zipName,
 				Method: zip.Store,
 			}
 			header.SetModTime(entry.info.ModTime)
 			header.SetMode(os.ModeDir | 0o755)
 			if _, err := zipWriter.CreateHeader(header); err != nil {
-				return fmt.Errorf("create archive directory %s: %w", entry.zipName, err)
+				return newDownloadArchiveInternalError("create archive directory", err)
 			}
 			continue
 		}
 
 		file, snapshotInfo, err := s.fs.OpenFileSnapshot(ctx, entry.sourcePath)
 		if err != nil {
-			return fmt.Errorf("open archive file %s: %w", entry.sourcePath, err)
+			return newDownloadArchiveInternalError("open archive file", err)
 		}
 		if snapshotInfo.IsDir {
 			_ = file.Close()
-			return fmt.Errorf("archive file became a directory: %s", entry.sourcePath)
+			return newDownloadArchiveInternalError("open archive file", errDownloadArchiveSnapshotChanged)
 		}
 		if snapshotInfo.Size < 0 || totalBytes > maxDownloadArchiveBytes-snapshotInfo.Size {
 			_ = file.Close()
@@ -262,7 +311,7 @@ func (s *Server) writeDownloadArchive(ctx context.Context, zipWriter *zip.Writer
 		}
 
 		header := &zip.FileHeader{
-			Name:               entry.zipName,
+			Name:               zipName,
 			Method:             zip.Deflate,
 			UncompressedSize64: uint64(snapshotInfo.Size),
 		}
@@ -271,16 +320,16 @@ func (s *Server) writeDownloadArchive(ctx context.Context, zipWriter *zip.Writer
 		writer, err := zipWriter.CreateHeader(header)
 		if err != nil {
 			_ = file.Close()
-			return fmt.Errorf("create archive file %s: %w", entry.zipName, err)
+			return newDownloadArchiveInternalError("create archive file", err)
 		}
 		remaining := maxDownloadArchiveBytes - totalBytes
 		written, err := io.Copy(writer, io.LimitReader(file, remaining+1))
 		if err != nil {
 			_ = file.Close()
-			return fmt.Errorf("write archive file %s: %w", entry.zipName, err)
+			return newDownloadArchiveInternalError("write archive file", err)
 		}
 		if err := file.Close(); err != nil {
-			return fmt.Errorf("close archive file %s: %w", entry.sourcePath, err)
+			return newDownloadArchiveInternalError("close archive file", err)
 		}
 		if written > remaining {
 			return errDownloadArchiveTooLarge
@@ -290,12 +339,41 @@ func (s *Server) writeDownloadArchive(ctx context.Context, zipWriter *zip.Writer
 	return nil
 }
 
+func validateDownloadArchiveEntries(entries []downloadArchiveEntry) error {
+	seenNames := make(map[string]struct{}, len(entries))
+	for _, entry := range entries {
+		if entry.info == nil {
+			return newDownloadArchiveInternalError("prepare archive entry", errDownloadArchiveMissingMetadata)
+		}
+		zipName, err := safeDownloadArchiveHeaderName(entry.zipName, entry.info.IsDir)
+		if err != nil {
+			return err
+		}
+		if err := rememberDownloadArchiveHeaderName(seenNames, zipName); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func rememberDownloadArchiveHeaderName(seenNames map[string]struct{}, zipName string) error {
+	if _, ok := seenNames[zipName]; ok {
+		return errDownloadArchiveDuplicateEntry
+	}
+	seenNames[zipName] = struct{}{}
+	return nil
+}
+
 func (s *Server) respondDownloadArchiveError(w http.ResponseWriter, operation string, err error) {
 	switch {
 	case errors.Is(err, errDownloadArchiveTooManyEntries):
 		NewAPIError(ErrCodePayloadTooLarge, "archive contains too many entries").Write(w, http.StatusRequestEntityTooLarge)
 	case errors.Is(err, errDownloadArchiveTooLarge):
 		NewAPIError(ErrCodePayloadTooLarge, "archive content is too large").Write(w, http.StatusRequestEntityTooLarge)
+	case errors.Is(err, errDownloadArchiveDuplicateEntry):
+		Conflict(w, "archive contains duplicate entries")
+	case errors.Is(err, errDownloadArchiveSnapshotChanged):
+		Conflict(w, "archive entry changed during download")
 	case errors.Is(err, errInvalidPath):
 		badRequestInvalidPath(w)
 	case errors.Is(err, storage.ErrNotDir):
@@ -315,8 +393,11 @@ func clearDownloadArchiveHeaders(w http.ResponseWriter) {
 }
 
 func safeDownloadArchiveEntryName(name string) (string, error) {
-	normalized := strings.ReplaceAll(name, "\\", "/")
-	if normalized == "" || strings.ContainsRune(normalized, '\x00') || strings.HasPrefix(normalized, "/") || hasDotSegment(normalized) {
+	if strings.Contains(name, "\\") {
+		return "", errInvalidPath
+	}
+	normalized := name
+	if normalized == "" || containsDownloadArchivePathControlCharacter(normalized) || strings.HasPrefix(normalized, "/") || strings.Contains(normalized, ":") || hasDotSegment(normalized) {
 		return "", errInvalidPath
 	}
 	cleaned := path.Clean(normalized)
@@ -324,6 +405,29 @@ func safeDownloadArchiveEntryName(name string) (string, error) {
 		return "", errInvalidPath
 	}
 	return cleaned, nil
+}
+
+func containsDownloadArchivePathControlCharacter(value string) bool {
+	return strings.IndexFunc(value, unicode.IsControl) >= 0
+}
+
+func safeDownloadArchiveHeaderName(name string, isDir bool) (string, error) {
+	if strings.Contains(name, "\\") {
+		return "", errInvalidPath
+	}
+	normalized := name
+	if isDir {
+		trimmed := strings.TrimRight(normalized, "/")
+		cleaned, err := safeDownloadArchiveEntryName(trimmed)
+		if err != nil {
+			return "", err
+		}
+		return cleaned + "/", nil
+	}
+	if strings.HasSuffix(normalized, "/") {
+		return "", errInvalidPath
+	}
+	return safeDownloadArchiveEntryName(normalized)
 }
 
 func downloadArchiveRootName(rootPath string) string {
