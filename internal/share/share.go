@@ -16,6 +16,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode"
 
 	"golang.org/x/crypto/bcrypt"
 
@@ -465,7 +466,7 @@ func rebuildPathIndex(shares map[string]*Share) map[string][]string {
 
 func normalizeStoredSharePath(rawPath string) (string, error) {
 	normalized := strings.ReplaceAll(rawPath, "\\", "/")
-	if strings.ContainsRune(normalized, '\x00') {
+	if containsSharePathControlCharacter(normalized) {
 		return "", errInvalidSharePath
 	}
 	if strings.TrimSpace(normalized) == "" {
@@ -479,7 +480,7 @@ func normalizeStoredSharePath(rawPath string) (string, error) {
 
 func normalizeLegacyStoredSharePath(rawPath string) (string, error) {
 	normalized := strings.ReplaceAll(rawPath, "\\", "/")
-	if strings.ContainsRune(normalized, '\x00') {
+	if containsSharePathControlCharacter(normalized) {
 		return "", errInvalidSharePath
 	}
 	if strings.TrimSpace(normalized) == "" {
@@ -500,6 +501,10 @@ func hasShareDotSegment(filePath string) bool {
 		}
 	}
 	return false
+}
+
+func containsSharePathControlCharacter(filePath string) bool {
+	return strings.IndexFunc(filePath, unicode.IsControl) >= 0
 }
 
 func validateShareInvariants(share *Share) error {

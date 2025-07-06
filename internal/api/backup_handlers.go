@@ -60,6 +60,7 @@ func (s *Server) handleDownloadBackupRestoreReport(w http.ResponseWriter, r *htt
 	}
 
 	filename := "mnemonas-restore-summary-" + safeBackupReportFilenamePart(report.Job.ID) + "-" + report.GeneratedAt.Format("20060102T150405Z") + ".json"
+	setSensitiveJSONResponseHeaders(w)
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Content-Disposition", formatAttachmentHeader(filename))
 	w.WriteHeader(http.StatusOK)
