@@ -267,6 +267,65 @@ describe('authStore', () => {
     expect(state.error).toBe('账户已被禁用，请联系管理员')
   })
 
+  it('redacts secrets from explicit auth-cleared messages', () => {
+    useAuthStore.setState({
+      user: {
+        id: 'user-1',
+        username: 'user',
+        role: 'user',
+        email: '',
+        homeDir: '/users/user',
+      },
+      isAuthenticated: true,
+      isLoading: false,
+      error: null,
+      authEnabled: true,
+    })
+
+    window.dispatchEvent(new CustomEvent('mnemonas:auth-cleared', {
+      detail: {
+        reason: 'expired',
+        message: '登录已过期 token=session-secret Authorization: Bearer bearer-secret',
+      },
+    }))
+
+    const state = useAuthStore.getState()
+    expect(clearQueryClientMock).toHaveBeenCalledTimes(1)
+    expect(state.error).toBe('登录已过期 token=<redacted> Authorization: Bearer <redacted>')
+    expect(state.error).not.toContain('session-secret')
+    expect(state.error).not.toContain('bearer-secret')
+  })
+
+  it('ignores blank auth-cleared messages from the auth layer', () => {
+    useAuthStore.setState({
+      user: {
+        id: 'user-1',
+        username: 'user',
+        role: 'user',
+        email: '',
+        homeDir: '/users/user',
+      },
+      isAuthenticated: true,
+      isLoading: false,
+      error: null,
+      authEnabled: true,
+    })
+
+    window.dispatchEvent(new CustomEvent('mnemonas:auth-cleared', {
+      detail: {
+        reason: 'expired',
+        message: '   ',
+      },
+    }))
+
+    const state = useAuthStore.getState()
+    expect(clearQueryClientMock).toHaveBeenCalledTimes(1)
+    expect(state.user).toBeNull()
+    expect(state.isAuthenticated).toBe(false)
+    expect(state.isLoading).toBe(false)
+    expect(state.error).toBe('登录已过期，请重新登录')
+  })
+
   it('preserves cached auth state when current user validation is temporarily unavailable', async () => {
     getStoredUserMock.mockReturnValue({
       id: 'cached-1',
@@ -514,6 +573,44 @@ describe('authStore', () => {
     expect(state.isLoading).toBe(false)
   })
 
+  it('can skip session validation for public entry routes without cached auth state', async () => {
+    getStoredUserMock.mockReturnValue(null)
+
+    await expect(useAuthStore.getState().initialize({ validateSession: false })).resolves.toBeUndefined()
+
+    expect(getSetupStatusMock).toHaveBeenCalledWith({
+      signal: expect.any(AbortSignal),
+    })
+    expect(getCurrentUserMock).not.toHaveBeenCalled()
+
+    const state = useAuthStore.getState()
+    expect(state.user).toBeNull()
+    expect(state.isAuthenticated).toBe(false)
+    expect(state.isLoading).toBe(false)
+    expect(state.shareEnabled).toBe(true)
+  })
+
+  it('skips session validation for public entry routes even with stale cached auth state', async () => {
+    const user = {
+      id: 'admin-1',
+      username: 'admin',
+      role: 'admin' as const,
+      email: '',
+      homeDir: '/',
+    }
+    getStoredUserMock.mockReturnValue(user)
+    getCurrentUserMock.mockResolvedValue(user)
+
+    await expect(useAuthStore.getState().initialize({ validateSession: false })).resolves.toBeUndefined()
+
+    expect(getCurrentUserMock).not.toHaveBeenCalled()
+
+    const state = useAuthStore.getState()
+    expect(state.user).toBeNull()
+    expect(state.isAuthenticated).toBe(false)
+    expect(state.isLoading).toBe(false)
+  })
+
   it('clears auth state when the cookie session is invalid', async () => {
     getStoredUserMock.mockReturnValue({
       id: 'cached-1',
@@ -575,6 +672,33 @@ describe('authStore', () => {
     expect(state.error).toBe('用户名或密码错误')
   })
 
+  it('redacts secrets from explicit AuthError login messages', async () => {
+    const authError = Object.assign(
+      new Error('用户名或密码错误 token=login-secret --password repo:pass/with/slash'),
+      { name: 'AuthError' }
+    )
+    loginMock.mockRejectedValueOnce(authError)
+
+    await expect(useAuthStore.getState().login('admin', 'wrong')).rejects.toThrow('login-secret')
+
+    const state = useAuthStore.getState()
+    expect(state.isLoading).toBe(false)
+    expect(state.error).toBe('用户名或密码错误 token=<redacted> --password <redacted>')
+    expect(state.error).not.toContain('login-secret')
+    expect(state.error).not.toContain('repo:pass/with/slash')
+  })
+
+  it('ignores blank AuthError login messages from the auth API', async () => {
+    const authError = Object.assign(new Error('   '), { name: 'AuthError' })
+    loginMock.mockRejectedValueOnce(authError)
+
+    await expect(useAuthStore.getState().login('admin', 'wrong')).rejects.toThrow('   ')
+
+    const state = useAuthStore.getState()
+    expect(state.isLoading).toBe(false)
+    expect(state.error).toBe('登录失败')
+  })
+
   it('does not expose arbitrary Error messages from failed logout attempts', async () => {
     useAuthStore.setState({
       user: {
@@ -592,6 +716,30 @@ describe('authStore', () => {
     logoutMock.mockRejectedValueOnce(new Error('socket hang up'))
 
     await expect(useAuthStore.getState().logout()).rejects.toThrow('socket hang up')
+
+    expect(useAuthStore.getState().isAuthenticated).toBe(true)
+    expect(useAuthStore.getState().isLoading).toBe(false)
+    expect(useAuthStore.getState().error).toBe('退出登录失败')
+  })
+
+  it('ignores blank AuthError logout messages from the auth API', async () => {
+    useAuthStore.setState({
+      user: {
+        id: 'admin-1',
+        username: 'admin',
+        role: 'admin',
+        email: '',
+        homeDir: '/',
+      },
+      isAuthenticated: true,
+      isLoading: false,
+      error: null,
+      authEnabled: true,
+    })
+    const authError = Object.assign(new Error('   '), { name: 'AuthError' })
+    logoutMock.mockRejectedValueOnce(authError)
+
+    await expect(useAuthStore.getState().logout()).rejects.toThrow('   ')
 
     expect(useAuthStore.getState().isAuthenticated).toBe(true)
     expect(useAuthStore.getState().isLoading).toBe(false)

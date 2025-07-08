@@ -84,6 +84,10 @@ function expectListFilesNotCalledWithPath(path: string) {
   expect(mockListFiles.mock.calls.some(([calledPath]) => calledPath === path)).toBe(false)
 }
 
+function getDirectoryToggle(name: string, expanded = false) {
+  return screen.getByRole('button', { name: `${expanded ? '折叠' : '展开'} ${name}` })
+}
+
 function renderPicker(props?: Partial<React.ComponentProps<typeof DirectoryPicker>>) {
   const queryClient = new QueryClient({
     defaultOptions: {
@@ -101,9 +105,9 @@ function renderPicker(props?: Partial<React.ComponentProps<typeof DirectoryPicke
   return {
     queryClient,
     ...render(
-    <QueryClientProvider client={queryClient}>
-      <DirectoryPicker {...defaultProps} {...props} />
-    </QueryClientProvider>
+      <QueryClientProvider client={queryClient}>
+        <DirectoryPicker {...defaultProps} {...props} />
+      </QueryClientProvider>
     ),
   }
 }
@@ -144,8 +148,7 @@ describe('DirectoryPicker', () => {
       expect(screen.getByText('docs')).toBeTruthy()
     })
 
-    const toggleButtons = screen.getAllByRole('button')
-    await user.click(toggleButtons.find((button) => button.className.includes('w-5 h-5')) ?? toggleButtons[0])
+    await user.click(getDirectoryToggle('docs'))
 
     await waitFor(() => {
       expect(mockAddToast).toHaveBeenCalledWith({
@@ -155,7 +158,7 @@ describe('DirectoryPicker', () => {
       })
     })
 
-    await user.click(toggleButtons.find((button) => button.className.includes('w-5 h-5')) ?? toggleButtons[0])
+    await user.click(getDirectoryToggle('docs'))
 
     await waitFor(() => {
       expect(mockListFiles).toHaveBeenCalledTimes(3)
@@ -188,9 +191,7 @@ describe('DirectoryPicker', () => {
       expect(screen.getByText('docs')).toBeTruthy()
     })
 
-    const docsToggle = screen.getByText('docs').closest('div')?.querySelector('button')
-    expect(docsToggle).toBeTruthy()
-    await user.click(docsToggle as HTMLButtonElement)
+    await user.click(getDirectoryToggle('docs'))
 
     await waitFor(() => {
       expectListFilesCalledWithAbortSignal('/docs')
@@ -217,9 +218,7 @@ describe('DirectoryPicker', () => {
       expect(screen.getByText('docs')).toBeTruthy()
     })
 
-    const docsToggle = screen.getByText('docs').closest('div')?.querySelector('button')
-    expect(docsToggle).toBeTruthy()
-    await user.click(docsToggle as HTMLButtonElement)
+    await user.click(getDirectoryToggle('docs'))
 
     await waitFor(() => {
       expect(expandedSignal).toBeInstanceOf(AbortSignal)
@@ -248,18 +247,16 @@ describe('DirectoryPicker', () => {
       expect(screen.getByText('docs')).toBeTruthy()
     })
 
-    const docsToggle = screen.getByText('docs').closest('div')?.querySelector('button')
-    expect(docsToggle).toBeTruthy()
-    await user.click(docsToggle as HTMLButtonElement)
+    await user.click(getDirectoryToggle('docs'))
 
     await waitFor(() => {
       expect(screen.getByText('reports')).toBeTruthy()
     })
 
-    await user.click(docsToggle as HTMLButtonElement)
+    await user.click(getDirectoryToggle('docs', true))
     expect(screen.queryByText('reports')).toBeNull()
 
-    await user.click(docsToggle as HTMLButtonElement)
+    await user.click(getDirectoryToggle('docs'))
 
     await waitFor(() => {
       expect(screen.getByText('reports')).toBeTruthy()
@@ -302,9 +299,7 @@ describe('DirectoryPicker', () => {
 
     await user.click(screen.getByText('docs'))
 
-    const docsToggle = screen.getByText('docs').closest('div')?.querySelector('button')
-    expect(docsToggle).toBeTruthy()
-    await user.click(docsToggle as HTMLButtonElement)
+    await user.click(getDirectoryToggle('docs'))
     await user.click(screen.getByRole('button', { name: '选择此目录' }))
 
     expect(onSelect).toHaveBeenCalledWith('/')
@@ -358,10 +353,10 @@ describe('DirectoryPicker', () => {
     })
 
     await user.click(screen.getByText('在此处新建文件夹'))
-    await user.type(screen.getByPlaceholderText('新文件夹名称'), 'draft')
-    await user.click(screen.getAllByRole('button', { name: '取消' })[0])
+    await user.type(screen.getByLabelText('新文件夹名称'), 'draft')
+    await user.click(screen.getByRole('button', { name: '取消新建文件夹' }))
 
-    expect(screen.queryByDisplayValue('draft')).toBeNull()
+    expect(screen.queryByLabelText('新文件夹名称')).toBeNull()
     expect(screen.getByText('在此处新建文件夹')).toBeTruthy()
     expect(mockCreateDirectory).not.toHaveBeenCalled()
   })
@@ -376,7 +371,7 @@ describe('DirectoryPicker', () => {
     })
 
     await user.click(screen.getByText('在此处新建文件夹'))
-    await user.type(screen.getByPlaceholderText('新文件夹名称'), '../escape')
+    await user.type(screen.getByLabelText('新文件夹名称'), '../escape')
 
     expect(screen.getByRole('button', { name: '创建' })).toBeDisabled()
 
@@ -453,7 +448,7 @@ describe('DirectoryPicker', () => {
     })
 
     await user.click(screen.getByText('在此处新建文件夹'))
-    await user.type(screen.getByPlaceholderText('新文件夹名称'), 'private')
+    await user.type(screen.getByLabelText('新文件夹名称'), 'private')
     await user.click(screen.getByRole('button', { name: '创建' }))
 
     await waitFor(() => {
@@ -489,7 +484,7 @@ describe('DirectoryPicker', () => {
     })
 
     await user.click(screen.getByText('在此处新建文件夹'))
-    await user.type(screen.getByPlaceholderText('新文件夹名称'), 'private')
+    await user.type(screen.getByLabelText('新文件夹名称'), 'private')
     await user.click(screen.getByRole('button', { name: '创建' }))
 
     await waitFor(() => {
@@ -509,7 +504,7 @@ describe('DirectoryPicker', () => {
     })
 
     await user.click(screen.getByText('在此处新建文件夹'))
-    await user.type(screen.getByPlaceholderText('新文件夹名称'), 'private')
+    await user.type(screen.getByLabelText('新文件夹名称'), 'private')
     await user.click(screen.getByRole('button', { name: '创建' }))
 
     await waitFor(() => {
@@ -545,7 +540,7 @@ describe('DirectoryPicker', () => {
     })
 
     await user.click(screen.getByText('在此处新建文件夹'))
-    await user.type(screen.getByPlaceholderText('新文件夹名称'), 'private')
+    await user.type(screen.getByLabelText('新文件夹名称'), 'private')
     await user.click(screen.getByRole('button', { name: '创建' }))
 
     await waitFor(() => {
@@ -569,7 +564,7 @@ describe('DirectoryPicker', () => {
     })
 
     await user.click(screen.getByText('在此处新建文件夹'))
-    await user.type(screen.getByPlaceholderText('新文件夹名称'), 'private')
+    await user.type(screen.getByLabelText('新文件夹名称'), 'private')
     await user.click(screen.getByRole('button', { name: '创建' }))
 
     await waitFor(() => {
@@ -604,7 +599,7 @@ describe('DirectoryPicker', () => {
     })
 
     await user.click(screen.getByText('在此处新建文件夹'))
-    await user.type(screen.getByPlaceholderText('新文件夹名称'), 'private')
+    await user.type(screen.getByLabelText('新文件夹名称'), 'private')
     await user.click(screen.getByRole('button', { name: '创建' }))
 
     await waitFor(() => {
@@ -627,7 +622,7 @@ describe('DirectoryPicker', () => {
     })
 
     await user.click(screen.getByText('在此处新建文件夹'))
-    await user.type(screen.getByPlaceholderText('新文件夹名称'), 'warn-folder')
+    await user.type(screen.getByLabelText('新文件夹名称'), 'warn-folder')
     await user.click(screen.getByRole('button', { name: '创建' }))
 
     await waitFor(() => {
@@ -649,7 +644,7 @@ describe('DirectoryPicker', () => {
     })
 
     await user.click(screen.getByText('在此处新建文件夹'))
-    await user.type(screen.getByPlaceholderText('新文件夹名称'), 'docs')
+    await user.type(screen.getByLabelText('新文件夹名称'), 'docs')
     await user.click(screen.getByRole('button', { name: '创建' }))
 
     await waitFor(() => {
@@ -660,7 +655,7 @@ describe('DirectoryPicker', () => {
     })
 
     await waitFor(() => {
-      expect(screen.queryByDisplayValue('docs')).toBeFalsy()
+      expect(screen.queryByLabelText('新文件夹名称')).toBeFalsy()
       expect(screen.getByText('/docs')).toBeTruthy()
     })
   })
@@ -676,7 +671,7 @@ describe('DirectoryPicker', () => {
     })
 
     await user.click(screen.getByText('在此处新建文件夹'))
-    await user.type(screen.getByPlaceholderText('新文件夹名称'), 'docs')
+    await user.type(screen.getByLabelText('新文件夹名称'), 'docs')
     await user.click(screen.getByRole('button', { name: '创建' }))
 
     await waitFor(() => {
@@ -687,7 +682,7 @@ describe('DirectoryPicker', () => {
       })
     })
 
-    expect(screen.getByDisplayValue('docs')).toBeTruthy()
+    expect(screen.getByLabelText('新文件夹名称')).toHaveValue('docs')
   })
 
   it('shows a localized warning when the create parent stops being a directory', async () => {
@@ -701,13 +696,36 @@ describe('DirectoryPicker', () => {
     })
 
     await user.click(screen.getByText('在此处新建文件夹'))
-    await user.type(screen.getByPlaceholderText('新文件夹名称'), 'child')
+    await user.type(screen.getByLabelText('新文件夹名称'), 'child')
     await user.click(screen.getByRole('button', { name: '创建' }))
 
     await waitFor(() => {
       expect(mockAddToast).toHaveBeenCalledWith({
         title: '目标位置不可用',
         description: '当前目录状态已变更，请刷新列表后重试。',
+        color: 'warning',
+      })
+    })
+  })
+
+  it('shows quota guidance when creating a folder exceeds quota', async () => {
+    const user = userEvent.setup({ writeToClipboard: false })
+    mockCreateDirectory.mockRejectedValueOnce(new ApiError('user quota exceeded', 507, 'Insufficient Storage', 'QUOTA_EXCEEDED'))
+
+    renderPicker()
+
+    await waitFor(() => {
+      expect(screen.getByText('在此处新建文件夹')).toBeTruthy()
+    })
+
+    await user.click(screen.getByText('在此处新建文件夹'))
+    await user.type(screen.getByLabelText('新文件夹名称'), 'quota-child')
+    await user.click(screen.getByRole('button', { name: '创建' }))
+
+    await waitFor(() => {
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '容量配额不足',
+        description: '当前用户的容量配额不足，请清理空间或调整用户配额后重试。',
         color: 'warning',
       })
     })
@@ -728,8 +746,7 @@ describe('DirectoryPicker', () => {
       expect(screen.getByText('docs')).toBeTruthy()
     })
 
-    const toggleButtons = screen.getAllByRole('button')
-    await user.click(toggleButtons.find((button) => button.className.includes('w-5 h-5')) ?? toggleButtons[0])
+    await user.click(getDirectoryToggle('docs'))
 
     await waitFor(() => {
       expect(mockAddToast).toHaveBeenCalledWith({
@@ -763,7 +780,7 @@ describe('DirectoryPicker', () => {
     })
 
     await user.click(screen.getByText('在此处新建文件夹'))
-    await user.type(screen.getByPlaceholderText('新文件夹名称'), 'private')
+    await user.type(screen.getByLabelText('新文件夹名称'), 'private')
     await user.click(screen.getByRole('button', { name: '创建' }))
 
     await waitFor(() => {
@@ -945,7 +962,7 @@ describe('DirectoryPicker', () => {
     })
 
     await user.click(screen.getByText('在此处新建文件夹'))
-    await user.type(screen.getByPlaceholderText('新文件夹名称'), 'old')
+    await user.type(screen.getByLabelText('新文件夹名称'), 'old')
     await user.click(screen.getByRole('button', { name: '创建' }))
 
     await waitFor(() => {
@@ -955,7 +972,7 @@ describe('DirectoryPicker', () => {
     await user.click(screen.getByRole('button', { name: '选择此目录' }))
 
     expect(onClose).not.toHaveBeenCalled()
-    expect(screen.getByDisplayValue('old')).toBeTruthy()
+    expect(screen.getByLabelText('新文件夹名称')).toHaveValue('old')
 
     await act(async () => {
       pendingCreate.resolve(successActionResult)
@@ -964,7 +981,7 @@ describe('DirectoryPicker', () => {
 
     await waitFor(() => {
       expect(screen.getByText('/old')).toBeTruthy()
-      expect(screen.queryByDisplayValue('old')).toBeFalsy()
+      expect(screen.queryByLabelText('新文件夹名称')).toBeFalsy()
     })
   })
 
@@ -981,7 +998,7 @@ describe('DirectoryPicker', () => {
     })
 
     await user.click(screen.getByText('在此处新建文件夹'))
-    await user.type(screen.getByPlaceholderText('新文件夹名称'), 'old')
+    await user.type(screen.getByLabelText('新文件夹名称'), 'old')
     await user.click(screen.getByRole('button', { name: '创建' }))
 
     await waitFor(() => {
@@ -991,7 +1008,7 @@ describe('DirectoryPicker', () => {
     await user.click(screen.getByRole('button', { name: '选择此目录' }))
 
     expect(onClose).not.toHaveBeenCalled()
-    expect(screen.getByDisplayValue('old')).toBeTruthy()
+    expect(screen.getByLabelText('新文件夹名称')).toHaveValue('old')
 
     await act(async () => {
       pendingCreate.reject(new Error('create failed'))
@@ -1005,7 +1022,7 @@ describe('DirectoryPicker', () => {
       })
     })
 
-    expect(screen.getByDisplayValue('old')).toBeTruthy()
+    expect(screen.getByLabelText('新文件夹名称')).toHaveValue('old')
     expect(onClose).not.toHaveBeenCalled()
   })
 
@@ -1022,10 +1039,10 @@ describe('DirectoryPicker', () => {
     await user.keyboard('{Enter}')
     expect(mockCreateDirectory).not.toHaveBeenCalled()
 
-    await user.type(screen.getByPlaceholderText('新文件夹名称'), 'draft')
+    await user.type(screen.getByLabelText('新文件夹名称'), 'draft')
     await user.keyboard('{Escape}')
 
-    expect(screen.queryByPlaceholderText('新文件夹名称')).toBeNull()
+    expect(screen.queryByLabelText('新文件夹名称')).toBeNull()
     expect(screen.getByText('在此处新建文件夹')).toBeTruthy()
     expect(mockCreateDirectory).not.toHaveBeenCalled()
   })
@@ -1058,9 +1075,7 @@ describe('DirectoryPicker', () => {
       expect(screen.getByText('docs')).toBeTruthy()
     })
 
-    const docsToggle = screen.getByText('docs').closest('div')?.querySelector('button')
-    expect(docsToggle).toBeTruthy()
-    await user.click(docsToggle as HTMLButtonElement)
+    await user.click(getDirectoryToggle('docs'))
 
     await waitFor(() => {
       expectListFilesCalledWithPath('/docs')
@@ -1090,9 +1105,7 @@ describe('DirectoryPicker', () => {
       expect(screen.getByText('docs')).toBeTruthy()
     })
 
-    const reopenedDocsToggle = screen.getByText('docs').closest('div')?.querySelector('button')
-    expect(reopenedDocsToggle).toBeTruthy()
-    await user.click(reopenedDocsToggle as HTMLButtonElement)
+    await user.click(getDirectoryToggle('docs'))
 
     await waitFor(() => {
       expect(mockListFiles.mock.calls.filter(([calledPath]) => calledPath === '/docs')).toHaveLength(2)

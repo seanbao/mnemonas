@@ -594,7 +594,8 @@ describe('AlbumPage', () => {
       await waitFor(() => {
         expect(mockRefreshAuthSession).toHaveBeenCalledTimes(1)
         expect(screen.getByText('部分缩略图加载失败')).toBeTruthy()
-        expect(screen.getByText('部分图片当前只能显示占位图；仍可尝试点击进入预览或直接下载原图。')).toBeTruthy()
+        expect(screen.getByText('部分缩略图暂时无法加载；仍可点击进入预览或直接下载原图。')).toBeTruthy()
+        expect(screen.queryByText(/占位图/)).toBeNull()
       })
     })
 
@@ -622,7 +623,7 @@ describe('AlbumPage', () => {
             'X-Mnemonas-Download-Probe': 'json-error',
           },
         })
-        expect(screen.getByText('部分图片当前只能显示占位图；仍可尝试点击进入预览或直接下载原图。')).toBeTruthy()
+        expect(screen.getByText('部分缩略图暂时无法加载；仍可点击进入预览或直接下载原图。')).toBeTruthy()
       })
       expect(screen.queryByText('thumbnail storage unavailable')).toBeNull()
     })
@@ -909,9 +910,9 @@ describe('AlbumPage', () => {
       await user.click(screen.getByRole('button', { name: '显示图片信息' }))
 
       await waitFor(() => {
-        const sizeField = screen.getByText('大小').closest('div')
-        expect(sizeField).toBeTruthy()
-        expect(within(sizeField as HTMLElement).getByText('--')).toBeTruthy()
+        const sizeField = screen.getByRole('group', { name: '图片大小' })
+        expect(within(sizeField).getByText('大小')).toBeTruthy()
+        expect(within(sizeField).getByText('--')).toBeTruthy()
       })
     })
 

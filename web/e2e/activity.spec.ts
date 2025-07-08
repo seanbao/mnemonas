@@ -1,7 +1,14 @@
 import { test, expect, type Page } from '@playwright/test'
 import { ensureAuthenticatedAt } from './helpers/auth-check'
 
-const ACTIVITY_STAT_LABELS = ['累计操作', '今日操作', '最常见操作', '最活跃用户'] as const
+const ACTIVITY_STAT_CARDS = [
+  { label: '累计操作' },
+  { label: '今日操作' },
+  { label: '最常见操作' },
+  { label: '最活跃用户' },
+] as const
+
+const ACTIVITY_STAT_LABELS = ACTIVITY_STAT_CARDS.map((card) => card.label)
 
 type StatCardLayout = {
   label: string
@@ -17,33 +24,35 @@ async function expectActivityStatsVisible(page: Page): Promise<void> {
   await expect(page.getByText('统计暂不可用')).toHaveCount(0)
 
   for (const label of ACTIVITY_STAT_LABELS) {
-    await expect(page.getByText(label, { exact: true })).toBeVisible({ timeout: 10_000 })
+    await expect(getActivityStatCard(page, label)).toBeVisible({ timeout: 10_000 })
   }
   await expect(page.getByText('高风险摘要')).toBeVisible({ timeout: 10_000 })
 }
 
+function getActivityStatCard(page: Page, label: string) {
+  return page.getByRole('group', { name: new RegExp(`^${label}，`) })
+}
+
 async function collectActivityStatCardLayout(page: Page): Promise<StatCardLayout[]> {
-  return page.evaluate((labels) => {
-    return labels.map((label) => {
-      const title = Array.from(document.querySelectorAll('p')).find((element) => (
-        element.textContent?.trim() === label
-      ))
-      const card = title?.closest('.card-meridian')
+  const layouts: StatCardLayout[] = []
 
-      if (!card) {
-        return null
-      }
+  for (const card of ACTIVITY_STAT_CARDS) {
+    const box = await getActivityStatCard(page, card.label).boundingBox()
 
-      const rect = card.getBoundingClientRect()
-      return {
-        label,
-        left: Math.round(rect.left),
-        top: Math.round(rect.top),
-        width: Math.round(rect.width),
-        height: Math.round(rect.height),
-      }
-    }).filter((layout): layout is StatCardLayout => layout !== null)
-  }, ACTIVITY_STAT_LABELS)
+    if (!box) {
+      continue
+    }
+
+    layouts.push({
+      label: card.label,
+      left: Math.round(box.x),
+      top: Math.round(box.y),
+      width: Math.round(box.width),
+      height: Math.round(box.height),
+    })
+  }
+
+  return layouts
 }
 
 function groupLayoutRows(layouts: StatCardLayout[]): StatCardLayout[][] {
@@ -75,16 +84,15 @@ test.describe('最近操作统计概览', () => {
     await expect(page.getByText('历史记录总量')).toBeVisible({ timeout: 10_000 })
     await expect(page.getByText('当天新增记录')).toBeVisible({ timeout: 10_000 })
 
-    const hasActivityRow = await page.locator('.activity-log-row').first().isVisible({ timeout: 5_000 }).catch(() => false)
+    const hasActivityRow = await page.getByRole('listitem', { name: /^活动记录/ }).first().isVisible({ timeout: 5_000 }).catch(() => false)
     const hasEmptyState = await page.getByText('暂无最近操作').isVisible({ timeout: 1_000 }).catch(() => false)
 
     expect(hasActivityRow || hasEmptyState).toBe(true)
   })
 
   test('管理员可按用户筛选最近操作', async ({ page }) => {
-    const userFilter = page.getByPlaceholder('按用户筛选')
-    const canFilterByUser = await userFilter.isVisible({ timeout: 3_000 }).catch(() => false)
-    test.skip(!canFilterByUser, '当前测试账号不是管理员或无权按用户筛选最近操作')
+    const userFilter = page.getByLabel('按用户筛选')
+    await expect(userFilter).toBeVisible({ timeout: 10_000 })
 
     const filteredResponsePromise = page.waitForResponse((response) => {
       const url = new URL(response.url())
@@ -139,7 +147,7 @@ test.describe('最近操作统计概览', () => {
   })
 
   test('可按路径筛选最近操作', async ({ page }) => {
-    const pathFilter = page.getByPlaceholder('按路径筛选')
+    const pathFilter = page.getByLabel('按路径筛选')
     await expect(pathFilter).toBeVisible({ timeout: 10_000 })
 
     const filteredResponsePromise = page.waitForResponse((response) => {
@@ -153,11 +161,11 @@ test.describe('最近操作统计概览', () => {
 
     const filteredResponse = await filteredResponsePromise
     expect(filteredResponse.ok()).toBe(true)
-    await expect(page.getByText('路径：/')).toBeVisible({ timeout: 5_000 })
+    await expect(page.getByText('路径：/', { exact: true })).toBeVisible({ timeout: 5_000 })
   })
 
   test('非法路径筛选应停留在本地校验', async ({ page }) => {
-    const pathFilter = page.getByPlaceholder('按路径筛选')
+    const pathFilter = page.getByLabel('按路径筛选')
     await expect(pathFilter).toBeVisible({ timeout: 10_000 })
 
     const activityRequests: string[] = []
@@ -206,8 +214,7 @@ test.describe('最近操作统计概览', () => {
 
   test('清空记录操作应先打开确认对话框', async ({ page }) => {
     const clearButton = page.getByRole('button', { name: '清空记录' })
-    const canClearActivity = await clearButton.isVisible({ timeout: 3_000 }).catch(() => false)
-    test.skip(!canClearActivity, '当前测试账号不是管理员或无权清空最近操作')
+    await expect(clearButton).toBeVisible({ timeout: 10_000 })
 
     await clearButton.click()
 

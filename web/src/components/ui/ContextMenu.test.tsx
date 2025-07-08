@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
-import { render, screen, fireEvent } from '@testing-library/react'
+import { render, screen, fireEvent, within } from '@testing-library/react'
 import {
   ContextMenu,
   ContextMenuSection,
@@ -35,7 +35,7 @@ describe('ContextMenu', () => {
       </ContextMenu>
     )
 
-    const menu = document.querySelector('[data-context-menu]')
+    const menu = screen.getByRole('menu', { name: '上下文菜单' })
     expect(menu).toHaveStyle({ left: '200px', top: '300px' })
   })
 
@@ -51,7 +51,7 @@ describe('ContextMenu', () => {
       </ContextMenu>
     )
 
-    const menu = document.querySelector('[data-context-menu]')
+    const menu = screen.getByRole('menu', { name: '上下文菜单' })
     expect(menu).toHaveStyle({ left: '72px', top: '52px' })
 
     Object.defineProperty(window, 'innerWidth', { configurable: true, value: originalInnerWidth })
@@ -68,11 +68,10 @@ describe('ContextMenu', () => {
     )
 
     const container = document.getElementById('container')
-    const menu = document.querySelector('[data-context-menu]')
+    const menu = screen.getByRole('menu', { name: '上下文菜单' })
     
-    // Menu should be child of body, not container
-    expect(menu?.parentElement).toBe(document.body)
-    expect(container?.querySelector('[data-context-menu]')).toBeNull()
+    expect(document.body).toContainElement(menu)
+    expect(within(container as HTMLElement).queryByRole('menu', { name: '上下文菜单' })).toBeNull()
   })
 
   it('applies custom className', () => {
@@ -87,7 +86,7 @@ describe('ContextMenu', () => {
       </ContextMenu>
     )
 
-    const menu = document.querySelector('[data-context-menu]')
+    const menu = screen.getByRole('menu', { name: '上下文菜单' })
     expect(menu).toHaveClass('custom-menu-class')
   })
 })
@@ -123,7 +122,7 @@ describe('ContextMenuSection', () => {
     )
 
     // No additional text besides item
-    expect(screen.getByRole('button')).toBeInTheDocument()
+    expect(screen.getByRole('menuitem')).toBeInTheDocument()
     expect(screen.queryByText(/Section/)).not.toBeInTheDocument()
   })
 
@@ -145,17 +144,19 @@ describe('ContextMenuItem', () => {
     expect(screen.getByText('Action Text')).toBeInTheDocument()
   })
 
-  it('renders as a button', () => {
+  it('renders as a menu item button', () => {
     render(<ContextMenuItem>Action</ContextMenuItem>)
 
-    expect(screen.getByRole('button')).toBeInTheDocument()
+    const item = screen.getByRole('menuitem')
+    expect(item).toBeInTheDocument()
+    expect(item.tagName).toBe('BUTTON')
   })
 
   it('calls onClick when clicked', () => {
     const onClick = vi.fn()
     render(<ContextMenuItem onClick={onClick}>Click Me</ContextMenuItem>)
 
-    fireEvent.click(screen.getByRole('button'))
+    fireEvent.click(screen.getByRole('menuitem'))
 
     expect(onClick).toHaveBeenCalledTimes(1)
   })
@@ -168,7 +169,7 @@ describe('ContextMenuItem', () => {
       </ContextMenuItem>
     )
 
-    fireEvent.click(screen.getByRole('button'))
+    fireEvent.click(screen.getByRole('menuitem'))
 
     expect(onClick).not.toHaveBeenCalled()
   })
@@ -176,24 +177,24 @@ describe('ContextMenuItem', () => {
   it('applies disabled styles', () => {
     render(<ContextMenuItem disabled>Disabled Item</ContextMenuItem>)
 
-    expect(screen.getByRole('button')).toHaveClass('opacity-50')
-    expect(screen.getByRole('button')).toHaveClass('cursor-not-allowed')
+    expect(screen.getByRole('menuitem')).toHaveClass('opacity-50')
+    expect(screen.getByRole('menuitem')).toHaveClass('cursor-not-allowed')
   })
 
   it('applies danger styles', () => {
     render(<ContextMenuItem danger>Delete</ContextMenuItem>)
 
-    expect(screen.getByRole('button')).toHaveClass('text-danger')
+    expect(screen.getByRole('menuitem')).toHaveClass('text-danger')
   })
 
   it('renders icon when provided', () => {
     render(
-      <ContextMenuItem icon={<span data-testid="icon">📁</span>}>
+      <ContextMenuItem icon={<span role="img" aria-label="文件夹图标">📁</span>}>
         With Icon
       </ContextMenuItem>
     )
 
-    expect(screen.getByTestId('icon')).toBeInTheDocument()
+    expect(screen.getByRole('img', { name: '文件夹图标' })).toBeInTheDocument()
   })
 
   it('applies custom className', () => {
@@ -201,7 +202,7 @@ describe('ContextMenuItem', () => {
       <ContextMenuItem className="custom-item-class">Item</ContextMenuItem>
     )
 
-    expect(screen.getByRole('button')).toHaveClass('custom-item-class')
+    expect(screen.getByRole('menuitem')).toHaveClass('custom-item-class')
   })
 })
 

@@ -17,7 +17,7 @@ export function EmptyState({
   className,
 }: EmptyStateProps) {
   return (
-    <div className={cn("card-meridian flex min-w-0 flex-col items-center justify-center border-dashed p-8 text-center", className)}>
+    <div className={cn("card-mnemonas flex min-w-0 flex-col items-center justify-center border-dashed p-8 text-center", className)}>
       {Icon && (
         <div className="mb-4 flex h-14 w-14 shrink-0 items-center justify-center rounded-lg border border-divider bg-content2 text-primary">
           <Icon size={32} className="text-current" />

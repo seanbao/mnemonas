@@ -1,5 +1,5 @@
 {
-  "name": "web",
+  "name": "mnemonas-web",
   "private": true,
   "version": "0.0.0",
   "type": "module",
@@ -9,7 +9,7 @@
   "lint-staged": {
     "*.{ts,tsx}": [
       "eslint --fix",
-      "bash -c 'tsc --noEmit'"
+      "bash -c 'npm run typecheck'"
     ]
   },
   "scripts": {
@@ -17,26 +17,40 @@
     "dev": "vite",
     "prebuild": "node ./scripts/check-node.cjs",
     "build": "tsc -b && vite build",
-    "lint": "eslint .",
+    "prelint": "node ./scripts/check-node.cjs",
+    "lint": "npm run check:scripts && npm run check:identity && npm run check:queries && npm run check:testids && npm run check:ts-suppressions && npm run check:console && npm run check:test-focus && npm run check:a11y && eslint . && node ./scripts/check-eslint-button-rule.mjs",
+    "check:scripts": "node ./scripts/check-node-scripts.cjs",
+    "check:identity": "node ./scripts/check-project-identity.cjs",
+    "check:queries": "node ./scripts/check-testing-library-queries.cjs",
+    "check:testids": "node ./scripts/check-production-testids.cjs",
+    "check:ts-suppressions": "node ./scripts/check-production-ts-suppressions.cjs",
+    "check:console": "node ./scripts/check-production-console.cjs",
+    "check:test-focus": "node ./scripts/check-test-focus.cjs",
+    "check:a11y": "node ./scripts/check-icon-button-labels.cjs",
+    "pretypecheck": "node ./scripts/check-node.cjs",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.e2e.json",
+    "pretypecheck:e2e": "node ./scripts/check-node.cjs",
+    "typecheck:e2e": "tsc --noEmit -p tsconfig.e2e.json",
+    "prepreview": "node ./scripts/check-node.cjs",
     "preview": "vite preview",
     "check:node": "node ./scripts/check-node.cjs",
-    "pretest": "node ./scripts/check-node.cjs",
-    "pretest:ui": "node ./scripts/check-node.cjs",
-    "pretest:run": "node ./scripts/check-node.cjs",
-    "pretest:coverage": "node ./scripts/check-node.cjs",
+    "pretest": "node ./scripts/check-node.cjs && npm run check:test-focus",
+    "pretest:ui": "node ./scripts/check-node.cjs && npm run check:test-focus",
+    "pretest:run": "node ./scripts/check-node.cjs && npm run check:test-focus",
+    "pretest:coverage": "node ./scripts/check-node.cjs && npm run check:test-focus",
     "test": "node -r ./scripts/vitest-preload.cjs ./node_modules/vitest/vitest.mjs",
     "test:ui": "node -r ./scripts/vitest-preload.cjs ./node_modules/vitest/vitest.mjs --ui",
     "test:run": "node -r ./scripts/vitest-preload.cjs ./node_modules/vitest/vitest.mjs run",
     "test:coverage": "node -r ./scripts/vitest-preload.cjs ./node_modules/vitest/vitest.mjs run --coverage",
-    "pretest:e2e": "node ./scripts/check-node.cjs",
+    "pretest:e2e": "node ./scripts/check-node.cjs && npm run check:test-focus",
     "test:e2e": "node ./scripts/playwright.cjs test",
-    "pretest:e2e:navigation": "node ./scripts/check-node.cjs",
+    "pretest:e2e:navigation": "node ./scripts/check-node.cjs && npm run check:test-focus",
     "test:e2e:navigation": "node ./scripts/playwright.cjs test navigation.spec.ts",
-    "pretest:e2e:ui": "node ./scripts/check-node.cjs",
+    "pretest:e2e:ui": "node ./scripts/check-node.cjs && npm run check:test-focus",
     "test:e2e:ui": "node ./scripts/playwright.cjs test --ui",
-    "pretest:e2e:update": "node ./scripts/check-node.cjs",
+    "pretest:e2e:update": "node ./scripts/check-node.cjs && npm run check:test-focus",
     "test:e2e:update": "node ./scripts/playwright.cjs test --update-snapshots",
-    "prepare": "husky"
+    "prepare": "node ./scripts/prepare-husky.cjs"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",
@@ -52,7 +66,7 @@
     "postcss": "^8.5.12",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
-    "react-router-dom": "^7.14.2",
+    "react-router-dom": "^7.17.0",
     "tailwind-merge": "^3.4.0",
     "tailwindcss": "^4.1.18",
     "zustand": "^5.0.9"
@@ -66,7 +80,7 @@
     "@types/node": "^24.10.1",
     "@types/react": "^19.2.5",
     "@types/react-dom": "^19.2.3",
-    "@vitejs/plugin-react": "^5.1.1",
+    "@vitejs/plugin-react": "^6.0.2",
     "@vitest/coverage-v8": "^4.0.18",
     "eslint": "^9.39.1",
     "eslint-plugin-react-hooks": "^7.0.1",
@@ -79,7 +93,7 @@
     "lint-staged": "^16.2.7",
     "typescript": "~5.9.3",
     "typescript-eslint": "^8.46.4",
-    "vite": "^7.3.2",
+    "vite": "^8.0.16",
     "vitest": "^4.0.18"
   },
   "optionalDependencies": {

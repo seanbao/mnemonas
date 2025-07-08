@@ -56,8 +56,28 @@ describe('jsonErrorResponse', () => {
       expect(extractStructuredJsonErrorDetails({ success: false }, '下载失败')).toBeUndefined()
     })
 
+    it('ignores blank structured error messages', () => {
+      expect(extractStructuredJsonErrorDetails({
+        success: false,
+        error: { code: 'PAYLOAD_TOO_LARGE', message: '   ' },
+      }, '下载失败')).toBeUndefined()
+      expect(extractStructuredJsonErrorDetails({
+        code: 'PAYLOAD_TOO_LARGE',
+        message: '\t',
+      }, '下载失败')).toBeUndefined()
+    })
+
     it('ignores code-only false-success bodies when the code is not localized', () => {
       expect(extractStructuredJsonErrorDetails({ success: false, code: 'DRAFT' }, '下载失败')).toBeUndefined()
+    })
+
+    it('ignores blank codes for localized code-only errors', () => {
+      expect(extractStructuredJsonErrorDetails({
+        success: false,
+        code: '   ',
+      }, '下载失败', {
+        localizeCode: () => '分享已停用',
+      })).toBeUndefined()
     })
 
     it('uses localized messages for code-only false-success bodies', () => {
@@ -116,6 +136,19 @@ describe('jsonErrorResponse', () => {
       }), {
         status: 200,
         headers: { 'Content-Type': 'application/json' },
+      })
+
+      await expect(readStructuredJsonErrorDetails(response, '下载失败')).resolves.toBeUndefined()
+    })
+
+    it('ignores blank problem-json messages', async () => {
+      const response = new Response(JSON.stringify({
+        title: '   ',
+        detail: '\n',
+        status: 503,
+      }), {
+        status: 503,
+        headers: { 'Content-Type': 'application/problem+json' },
       })
 
       await expect(readStructuredJsonErrorDetails(response, '下载失败')).resolves.toBeUndefined()

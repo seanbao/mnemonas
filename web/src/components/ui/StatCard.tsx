@@ -43,15 +43,19 @@ export function StatCard({
     warning: 'bg-warning/10 text-warning',
     danger: 'bg-danger/10 text-danger',
   }
+  const statAccessibleName = getDefaultAriaLabel(title, value, subtitle)
+  const actionAccessibleName = ariaLabel ?? statAccessibleName
 
   const content = (
     <>
       {Icon && (
-        <div className={cn(
-          "flex shrink-0 items-center justify-center self-start rounded-lg border border-divider",
-          density === 'compact' ? 'h-8 w-8' : 'h-10 w-10',
-          toneClasses[tone],
-        )}>
+        <div
+          className={cn(
+            "flex shrink-0 items-center justify-center self-start rounded-lg border border-divider",
+            density === 'compact' ? 'h-8 w-8' : 'h-10 w-10',
+            toneClasses[tone],
+          )}
+        >
           <Icon size={density === 'compact' ? 18 : 20} className="text-current" />
         </div>
       )}
@@ -72,16 +76,22 @@ export function StatCard({
   )
 
   return (
-    <Card className={cn("card-meridian min-w-0", onPress && "transition-colors hover:border-primary/40", className)}>
-      <CardBody className={cn(
-        "p-0",
-        !onPress && "flex items-start gap-3",
-        !onPress && (density === 'compact' ? 'min-h-[5rem] p-3' : 'min-h-[6rem] p-4'),
-      )}>
+    <Card
+      role="group"
+      aria-label={statAccessibleName}
+      className={cn("card-mnemonas min-w-0", onPress && "transition-colors hover:border-primary/40", className)}
+    >
+      <CardBody
+        className={cn(
+          "p-0",
+          !onPress && "flex items-start gap-3",
+          !onPress && (density === 'compact' ? 'min-h-[5rem] p-3' : 'min-h-[6rem] p-4'),
+        )}
+      >
         {onPress ? (
           <button
             type="button"
-            aria-label={ariaLabel ?? getDefaultAriaLabel(title, value, subtitle)}
+            aria-label={actionAccessibleName}
             className={cn(
               "flex w-full items-start gap-3 text-left outline-none transition-colors focus-visible:ring-2 focus-visible:ring-primary/40",
               density === 'compact' ? 'min-h-[5rem] p-3' : 'min-h-[6rem] p-4',

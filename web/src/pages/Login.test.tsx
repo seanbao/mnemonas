@@ -137,6 +137,7 @@ describe('LoginPage', () => {
       
       // Multiple MnemoNAS text elements exist (header, footer, etc.)
       expect(screen.getAllByText(/MnemoNAS/i).length).toBeGreaterThan(0)
+      expect(screen.getByText('自托管私有云存储')).toBeInTheDocument()
       expect(screen.getByText('登录后管理文件、版本与分享')).toBeInTheDocument()
       expect(screen.getByLabelText(/用户名/i, { selector: 'input' })).toBeInTheDocument()
       expect(screen.getByLabelText(/密码/i, { selector: 'input' })).toBeInTheDocument()

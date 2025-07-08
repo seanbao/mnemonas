@@ -1,4 +1,5 @@
 import { useMemo, useCallback, useEffect, useRef, useState } from 'react'
+import type { InputHTMLAttributes } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { 
@@ -42,7 +43,9 @@ import {
   Move,
   Files,
   RotateCcw,
+  ArrowDownWideNarrow,
   ArrowUpDown,
+  ArrowUpNarrowWide,
 } from 'lucide-react'
 import { ShareDialog } from '@/components/share'
 import { FileIcon } from '@/components/ui/FileIcon'
@@ -81,8 +84,11 @@ import {
   type UploadQueueItem,
 } from '@/lib/uploadQueue'
 import {
+  getFileDownloadErrorToast,
   getPathConflictErrorToast,
   getQuotaExceededErrorToast,
+  getSharedArchiveDownloadErrorToast,
+  getSharedMissingFileDownloadErrorToast,
   getSharedPathConflictErrorToast,
   getSharedQuotaExceededErrorToast,
 } from '@/lib/fileActionErrors'
@@ -91,8 +97,21 @@ import { copyTextToClipboard, decodePathFromUrl, encodePathForUrl, formatBytes, 
 import { getInvalidHomeDirDescription, invalidHomeDirTitle, resolveUserHomeScope } from '@/lib/userScope'
 
 type SortKey = 'name' | 'size' | 'modTime'
+type DirectoryUploadInputProps = InputHTMLAttributes<HTMLInputElement> & {
+  webkitdirectory: string
+  directory: string
+}
 
 const UPLOAD_HISTORY_SUCCESS_RETENTION_MS = 15000
+
+const directoryUploadInputProps = {
+  type: 'file',
+  webkitdirectory: '',
+  directory: '',
+  multiple: true,
+  className: 'hidden',
+  'aria-label': '选择上传文件夹',
+} satisfies DirectoryUploadInputProps
 
 const sortLabels: Record<SortKey, string> = {
   name: '名称',
@@ -423,6 +442,11 @@ function getUploadQueueErrorMessage(error: unknown): string {
     return '文件系统当前不可用，请检查设备状态或稍后重试。'
   }
 
+  const quotaExceededToast = getQuotaExceededErrorToast(error)
+  if (quotaExceededToast) {
+    return quotaExceededToast.description
+  }
+
   return getUserFacingErrorDescription(error)
 }
 
@@ -461,6 +485,11 @@ function getFolderUploadSummaryToast(
       }
     }
 
+    const quotaExceededToast = getSharedQuotaExceededErrorToast(errors)
+    if (quotaExceededToast) {
+      return quotaExceededToast
+    }
+
     return {
       title: '文件夹上传失败',
       description: `共 ${errorCount} 个文件上传失败`,
@@ -468,9 +497,14 @@ function getFolderUploadSummaryToast(
     }
   }
 
+  const quotaExceededToast = getSharedQuotaExceededErrorToast(errors)
+  const baseDescription = `成功上传 ${successCount} 个文件，失败 ${errorCount} 个`
+
   return {
     title: getSynchronizedWarningTitle(warningMessages) ?? '文件夹上传部分完成',
-    description: `成功上传 ${successCount} 个文件，失败 ${errorCount} 个`,
+    description: quotaExceededToast?.description
+      ? `${baseDescription}；${quotaExceededToast.description}`
+      : baseDescription,
     color: 'warning',
   }
 }
@@ -491,15 +525,18 @@ function getPartialBatchActionToast(
   title: string,
   successCount: number,
   errorCount: number,
-  warningMessages: string[]
+  warningMessages: string[],
+  failureDescription?: string
 ): {
   title: string
   description: string
   color: 'warning'
 } {
+  const baseDescription = `成功 ${successCount} 个，失败 ${errorCount} 个`
+
   return {
     title: getSynchronizedWarningTitle(warningMessages) ?? title,
-    description: `成功 ${successCount} 个，失败 ${errorCount} 个`,
+    description: failureDescription ? `${baseDescription}；${failureDescription}` : baseDescription,
     color: 'warning',
   }
 }
@@ -710,7 +747,9 @@ function FileRow({
   }, [file.path])
 
   return (
-    <div 
+    <div
+      role="group"
+      aria-label={`${file.name} 文件项`}
       className={cn(
         "group grid grid-cols-[36px_minmax(0,1fr)_36px] items-center gap-3 border-b border-divider px-3 py-3 cursor-pointer transition-all duration-150 sm:grid-cols-[44px_minmax(0,1fr)_88px_118px_40px] sm:gap-4 sm:px-5 md:grid-cols-[44px_minmax(0,1fr)_100px_150px_120px_40px]",
         "hover:bg-content2/60",
@@ -725,6 +764,8 @@ function FileRow({
       onContextMenu={onContextMenu}
     >
       <div
+        role="group"
+        aria-label={`${file.name} 选择控制`}
         className="flex items-center justify-center"
         onClick={(e) => e.stopPropagation()}
         onDoubleClick={(e) => e.stopPropagation()}
@@ -764,6 +805,8 @@ function FileRow({
       </div>
 
       <div
+        role="group"
+        aria-label={`${file.name} 操作控制`}
         className="flex items-center justify-center"
         onClick={(e) => e.stopPropagation()}
         onDoubleClick={(e) => e.stopPropagation()}
@@ -883,7 +926,7 @@ function PreviewPanel({ file }: { file: FileItem | null }) {
   if (!file) return null
 
   return (
-    <aside className="relative hidden w-[300px] shrink-0 flex-col gap-5 overflow-hidden border-l border-divider bg-content2/70 p-5 xl:flex">
+    <aside aria-label="文件详情" className="relative hidden w-[300px] shrink-0 flex-col gap-5 overflow-hidden border-l border-divider bg-content2/70 p-5 xl:flex">
       <div className="text-center relative z-10">
         <div className="mx-auto mb-3 flex h-20 w-20 items-center justify-center rounded-lg border border-divider bg-content1">
           <FileIcon name={file.name} isDir={file.isDir} size={76} variant="tile" />
@@ -987,6 +1030,8 @@ function FileCard({
 
   return (
     <div
+      role="group"
+      aria-label={`${file.name} 文件项`}
       className={cn(
         "group relative min-h-[168px] bg-content1 border border-divider rounded-lg p-4 cursor-pointer transition-all duration-200",
         "shadow-[var(--shadow-soft)] hover:border-accent-primary/40 hover:shadow-[var(--shadow-medium)]",
@@ -1000,7 +1045,9 @@ function FileCard({
       onDoubleClick={onOpen}
       onContextMenu={onContextMenu}
     >
-      <div 
+      <div
+        role="group"
+        aria-label={`${file.name} 选择控制`}
         className="absolute top-3 left-3 z-10"
         onClick={(e) => e.stopPropagation()}
         onDoubleClick={(e) => e.stopPropagation()}
@@ -1018,7 +1065,9 @@ function FileCard({
         />
       </div>
 
-      <div 
+      <div
+        role="group"
+        aria-label={`${file.name} 操作控制`}
         className="absolute top-3 right-3 z-10"
         onClick={(e) => e.stopPropagation()}
         onDoubleClick={(e) => e.stopPropagation()}
@@ -1669,16 +1718,18 @@ export function FilesPage() {
   const favoriteMutation = useMutation({
     mutationFn: ({ path, isFavorited, signal }: FavoriteMutationVariables) =>
       toggleFavorite(path, isFavorited, { signal }),
-    onSuccess: (newStatus, variables) => {
+    onSuccess: (result, variables) => {
       if (variables.signal.aborted) {
         return
       }
 
       queryClient.invalidateQueries({ queryKey: favoritesCheckQueryKey })
       queryClient.invalidateQueries({ queryKey: favoritesListQueryKey })
-      addToast({ 
-        title: newStatus ? '已添加收藏' : '已取消收藏', 
-        color: 'success' 
+      addToast({
+        title: result.isFavorited
+          ? result.warning ? '已添加收藏，但存在警告' : '已添加收藏'
+          : result.warning ? '已取消收藏，但存在警告' : '已取消收藏',
+        color: result.warning ? 'warning' : 'success',
       })
     },
     onError: (error, variables) => {
@@ -1995,10 +2046,7 @@ export function FilesPage() {
           return
         }
 
-        addToast(getFilesActionErrorToast(error, {
-          unavailable: '下载暂不可用',
-          failure: '下载失败',
-        }))
+        addToast(getFileDownloadErrorToast(error))
       })
       .finally(() => {
         downloadAbortControllersRef.current.delete(controller)
@@ -2446,6 +2494,9 @@ export function FilesPage() {
         .map((result) => result.reason)
       const failed = results.filter((result) => result.status === 'rejected').length
       const succeeded = items.length - failed
+      const archiveErrorToast = getSharedArchiveDownloadErrorToast(failedErrors)
+      const missingFileErrorToast = getSharedMissingFileDownloadErrorToast(failedErrors)
+      const sharedDownloadErrorToast = archiveErrorToast ?? missingFileErrorToast
 
       if (failed === 0) {
         addToast({ title: `已开始下载 ${succeeded} 项`, color: 'success' })
@@ -2459,13 +2510,21 @@ export function FilesPage() {
             description: '文件系统当前不可用，请检查设备状态或稍后重试。',
             color: 'warning',
           })
+        } else if (sharedDownloadErrorToast) {
+          addToast(sharedDownloadErrorToast)
         } else {
           addToast({ title: '批量下载失败', description: `共 ${failed} 个项目下载失败`, color: 'danger' })
         }
         return
       }
 
-      addToast({ title: '部分项目开始下载', description: `已开始 ${succeeded} 项，失败 ${failed} 项`, color: 'warning' })
+      addToast({
+        title: '部分项目开始下载',
+        description: sharedDownloadErrorToast
+          ? `已开始 ${succeeded} 项，失败 ${failed} 项；${sharedDownloadErrorToast.description}`
+          : `已开始 ${succeeded} 项，失败 ${failed} 项`,
+        color: 'warning',
+      })
     } finally {
       downloadAbortControllersRef.current.delete(controller)
     }
@@ -2624,7 +2683,16 @@ export function FilesPage() {
         return
       }
 
-      addToast(getPartialBatchActionToast(`${operation === 'cut' ? '批量移动' : '批量复制'}部分完成`, successCount, errorCount, warningMessages))
+      const sharedFailureToast =
+        getSharedPathConflictErrorToast(failedErrors)
+        ?? getSharedQuotaExceededErrorToast(failedErrors)
+      addToast(getPartialBatchActionToast(
+        `${operation === 'cut' ? '批量移动' : '批量复制'}部分完成`,
+        successCount,
+        errorCount,
+        warningMessages,
+        sharedFailureToast?.description
+      ))
     } finally {
       if (pasteAbortControllerRef.current === controller) {
         pasteAbortControllerRef.current = null
@@ -3004,6 +3072,8 @@ export function FilesPage() {
 
   return (
     <div 
+      role="region"
+      aria-label="文件上传区域"
       className="relative flex h-full min-h-0 overflow-hidden"
       onDragEnter={handleDragEnter}
       onDragLeave={handleDragLeave}
@@ -3124,9 +3194,8 @@ export function FilesPage() {
       )}
 
       <div className="flex min-h-0 flex-1 flex-col p-4 sm:p-5 lg:p-7">
-        <input ref={fileInputRef} type="file" multiple className="hidden" onChange={handleUploadInputChange} />
-        {/* @ts-expect-error - webkitdirectory is a non-standard attribute */}
-        <input ref={folderInputRef} type="file" webkitdirectory="" directory="" multiple className="hidden" onChange={handleUploadInputChange} />
+        <input ref={fileInputRef} type="file" multiple className="hidden" aria-label="选择上传文件" onChange={handleUploadInputChange} />
+        <input ref={folderInputRef} {...directoryUploadInputProps} onChange={handleUploadInputChange} />
         
         {/* Breadcrumbs */}
         <Breadcrumbs path={currentPath} onNavigate={navigateToFilePath} />
@@ -3303,7 +3372,11 @@ export function FilesPage() {
                   aria-label={sortOrder === 'asc' ? '切换为降序' : '切换为升序'}
                   title={sortOrder === 'asc' ? '升序' : '降序'}
                 >
-                  {sortOrder === 'asc' ? '↑' : '↓'}
+                  {sortOrder === 'asc' ? (
+                    <ArrowUpNarrowWide size={16} aria-hidden="true" />
+                  ) : (
+                    <ArrowDownWideNarrow size={16} aria-hidden="true" />
+                  )}
                 </button>
               </div>
 
@@ -3313,6 +3386,7 @@ export function FilesPage() {
                   className={cn("flex h-9 w-9 items-center justify-center rounded-lg transition-all", viewMode === 'list' ? "bg-accent-primary text-white shadow-sm" : "text-default-500 hover:text-default-600")}
                   onClick={() => setViewMode('list')}
                   aria-label="列表视图"
+                  aria-pressed={viewMode === 'list'}
                 >
                   <List size={16} />
                 </button>
@@ -3321,6 +3395,7 @@ export function FilesPage() {
                   className={cn("flex h-9 w-9 items-center justify-center rounded-lg transition-all", viewMode === 'grid' ? "bg-accent-primary text-white shadow-sm" : "text-default-500 hover:text-default-600")}
                   onClick={() => setViewMode('grid')}
                   aria-label="网格视图"
+                  aria-pressed={viewMode === 'grid'}
                 >
                   <Grid size={16} />
                 </button>
@@ -3420,6 +3495,8 @@ export function FilesPage() {
             {/* List Content */}
             <div
               ref={parentRef}
+              role="region"
+              aria-label="文件列表内容"
               className="relative min-h-0 flex-1 overflow-auto custom-scrollbar"
               onClick={() => {
                 if (selectedFiles.size > 0) {
@@ -3501,6 +3578,8 @@ export function FilesPage() {
         ) : (
           /* Grid View */
           <div
+            role="region"
+            aria-label="文件网格内容"
             className="min-h-0 flex-1 overflow-auto custom-scrollbar"
             onClick={() => {
               if (selectedFiles.size > 0) {
@@ -3602,6 +3681,7 @@ export function FilesPage() {
           <ModalBody className="px-6 py-4">
             <div>
               <Input
+                aria-label="文件夹名称"
                 placeholder="请输入文件夹名称"
                 value={newFolderName}
                 onValueChange={setNewFolderName}
@@ -3657,6 +3737,7 @@ export function FilesPage() {
           <ModalBody className="px-6 py-4">
             <div>
               <Input
+                aria-label="新名称"
                 placeholder="请输入新名称"
                 value={renameValue}
                 onValueChange={setRenameValue}
@@ -3711,7 +3792,15 @@ export function FilesPage() {
           </ModalBody>
           <ModalFooter className="px-6 pb-6 pt-2 gap-2">
             <Button variant="flat" onPress={handleCloseDeleteModal} isDisabled={deleteMutation.isPending} className="text-default-600 rounded-lg">取消</Button>
-            <Button color="danger" onPress={handleDelete} isLoading={deleteMutation.isPending} className="rounded-lg">删除</Button>
+            <Button
+              color="danger"
+              aria-label={deleteTarget ? `确认删除 ${deleteTarget.name}` : '确认删除'}
+              onPress={handleDelete}
+              isLoading={deleteMutation.isPending}
+              className="rounded-lg"
+            >
+              删除
+            </Button>
           </ModalFooter>
         </ModalContent>
       </Modal>

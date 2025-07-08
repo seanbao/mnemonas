@@ -36,6 +36,26 @@ describe('activityDetails', () => {
     ])
   })
 
+  it('does not expose raw unknown generic enum detail values', () => {
+    expect(getActivityDetailEntries('restore', {
+      archive: 'backend_raw_archive',
+      permission: 'backend_raw_permission',
+      restore_source: 'backend_raw_restore_source',
+      type: 'backend_raw_type',
+    })).toEqual([
+      { key: 'type', label: '类型', value: '未知类型' },
+      { key: 'permission', label: '权限', value: '未知权限' },
+      { key: 'restore_source', label: '恢复来源', value: '未知来源' },
+      { key: 'archive', label: '归档格式', value: '未知归档格式' },
+    ])
+
+    expect(getActivityDetailEntries('trash_restore', {
+      metadata_restore: 'backend_raw_metadata_restore',
+    })).toEqual([
+      { key: 'metadata_restore', label: '关联元数据', value: '状态未知' },
+    ])
+  })
+
   it('omits details hidden by access filtering', () => {
     expect(getActivityDetailEntries('move', {
       to: '',
@@ -86,6 +106,33 @@ describe('activityDetails', () => {
       { key: 'persistence_warning', label: '记录持久化', value: '结果记录保存异常，请检查维护历史。' },
       { key: 'trigger', label: '触发方式', value: '自动重试' },
     ])
+  })
+
+  it('does not expose raw unknown scrub status or trigger values', () => {
+    expect(getActivityDetailEntries('scrub', {
+      status: 'backend_raw_status',
+      trigger: 'backend_raw_trigger',
+    })).toEqual([
+      { key: 'status', label: '状态', value: '未知状态' },
+      { key: 'trigger', label: '触发方式', value: '未知触发方式' },
+    ])
+  })
+
+  it('redacts secret-like values in generic diagnostic activity details', () => {
+    const entries = getActivityDetailEntries('restore', {
+      error_message: 'restore failed https://backup.example/repo?token=restore-secret --password restic-secret Authorization: Bearer bearer-secret',
+    })
+
+    expect(entries).toEqual([
+      {
+        key: 'error_message',
+        label: '诊断',
+        value: 'restore failed https://backup.example/repo?token=<redacted> --password <redacted> Authorization: Bearer <redacted>',
+      },
+    ])
+    for (const leaked of ['restore-secret', 'restic-secret', 'bearer-secret']) {
+      expect(entries[0].value).not.toContain(leaked)
+    }
   })
 
   it('keeps trash cleanup wording specific to trash actions', () => {

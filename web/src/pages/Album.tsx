@@ -35,7 +35,7 @@ import { EmptyState } from '@/components/ui/EmptyState'
 const MAX_DEPTH = 5 // Maximum directory depth to traverse
 const MAX_IMAGES = 1000 // Maximum images to collect
 const CONCURRENCY_LIMIT = 3 // Maximum concurrent directory requests
-const THUMBNAIL_LOAD_FAILURE_MESSAGE = '部分图片当前只能显示占位图；仍可尝试点击进入预览或直接下载原图。'
+const THUMBNAIL_LOAD_FAILURE_MESSAGE = '部分缩略图暂时无法加载；仍可点击进入预览或直接下载原图。'
 
 function withSessionRetryParam(url: string): string {
   const separator = url.includes('?') ? '&' : '?'
@@ -614,7 +614,7 @@ function ImagePreview({
                     <span className="text-white/60">文件名</span>
                     <p className="truncate">{currentImage?.name}</p>
                   </div>
-                  <div>
+                  <div role="group" aria-label="图片大小">
                     <span className="text-white/60">大小</span>
                     <p>{currentImage?.size !== undefined ? formatBytes(currentImage.size) : '--'}</p>
                   </div>

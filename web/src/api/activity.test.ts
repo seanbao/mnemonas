@@ -719,6 +719,22 @@ describe('Activity API', () => {
     })
   })
 
+  it('ignores blank legacy activity error messages and codes', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 503,
+      statusText: 'Service Unavailable',
+      json: () => Promise.resolve({ success: false, error: { code: '   ', message: '   ' }, message: '  ', code: '   ' }),
+    })
+
+    await expect(listActivity()).rejects.toMatchObject({
+      message: '获取最近操作失败',
+      status: 503,
+      code: undefined,
+      isUnavailable: true,
+    })
+  })
+
   it('marks ApiError as unavailable for 503 responses', () => {
     const error = new ApiError('activity log unavailable', 503, 'Service Unavailable', 'SERVICE_UNAVAILABLE')
 
@@ -897,6 +913,37 @@ describe('Activity API', () => {
     await expect(listActivityReviewRecords({ limit: 5 })).rejects.toThrow('服务器返回了无效的数据')
   })
 
+  it('rejects activity review records with control-character text', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        success: true,
+        data: {
+          items: [{
+            id: 'review-1',
+            reviewed_at: '2026-05-01T10:10:00Z',
+            reviewer: 'admin',
+            note: '已处理\u0085仍需跟进',
+            scope_label: '当前页',
+            filter_summary: '分组 高风险变更',
+            review_count: 1,
+            total_count: 1,
+            path_count: 1,
+            user_count: 1,
+            path_samples: ['/docs/report.pdf'],
+            user_samples: ['admin\nreviewer'],
+            activity_entry_ids: ['delete-1'],
+          }],
+          total: 1,
+          limit: 5,
+          offset: 0,
+        },
+      }),
+    })
+
+    await expect(listActivityReviewRecords({ limit: 5 })).rejects.toThrow('服务器返回了无效的数据')
+  })
+
   it('reads clear activity error message from response body', async () => {
     mockAuthFetch.mockResolvedValueOnce({
       ok: false,
@@ -919,7 +966,61 @@ describe('Activity API', () => {
       }),
     })
 
-    await expect(clearActivity()).resolves.toEqual({ message: 'Activity log cleared' })
+    await expect(clearActivity()).resolves.toEqual({ warning: false, message: 'Activity log cleared' })
+  })
+
+  it('returns warning details for clear activity responses with warning metadata', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      statusText: 'OK',
+      headers: new Headers({ Warning: '199 mnemonas "activity clear warning"' }),
+      json: () => Promise.resolve({
+        success: true,
+        warning: true,
+        message: 'activity clear completed with warning',
+        data: { message: 'Activity log cleared' },
+      }),
+    })
+
+    await expect(clearActivity()).resolves.toEqual({
+      warning: true,
+      message: 'Activity log cleared',
+    })
+  })
+
+  it('returns warning details for clear activity responses with data warning flags', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      statusText: 'OK',
+      json: () => Promise.resolve({
+        success: true,
+        data: {
+          warning: true,
+          message: 'activity clear completed with data warning',
+        },
+      }),
+    })
+
+    await expect(clearActivity()).resolves.toEqual({
+      warning: true,
+      message: 'activity clear completed with data warning',
+    })
+  })
+
+  it('ignores blank clear activity success messages', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      statusText: 'OK',
+      json: () => Promise.resolve({
+        success: true,
+        data: { message: '   ' },
+      }),
+    })
+
+    await expect(clearActivity()).resolves.toEqual({ warning: false, message: undefined })
   })
 
   it('forwards abort signal when clearing activity', async () => {
@@ -934,7 +1035,7 @@ describe('Activity API', () => {
       }),
     })
 
-    await expect(clearActivity({ signal: controller.signal })).resolves.toEqual({ message: 'Activity log cleared' })
+    await expect(clearActivity({ signal: controller.signal })).resolves.toEqual({ warning: false, message: 'Activity log cleared' })
 
     expect(mockAuthFetch).toHaveBeenCalledWith('/api/v1/activity/', {
       method: 'DELETE',
@@ -972,6 +1073,20 @@ describe('Activity API', () => {
       json: () => Promise.resolve({
         success: true,
         data: { message: 42 },
+      }),
+    })
+
+    await expect(clearActivity()).rejects.toThrow('服务器返回了无效的数据')
+  })
+
+  it('rejects clear activity responses with malformed warning flags', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      statusText: 'OK',
+      json: () => Promise.resolve({
+        success: true,
+        data: { message: 'Activity log cleared', warning: 'yes' },
       }),
     })
 
@@ -1028,7 +1143,7 @@ describe('Activity API', () => {
       login: '登录',
       logout: '登出',
       trash_restore: '从回收站恢复',
-      trash_delete: '从回收站删除',
+      trash_delete: '永久删除回收站项目',
       trash_empty: '清空回收站',
       disk_health: '磁盘健康异常',
       scrub: '数据校验',

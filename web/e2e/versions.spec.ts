@@ -1,19 +1,36 @@
-import { test, expect } from '@playwright/test'
+import { test, expect, type Locator, type Page } from '@playwright/test'
 import { ensureAuthenticatedAt } from './helpers/auth-check'
 import { createFolderThroughUi, fileRowByName, openFolderThroughUi, uploadTextFileThroughPicker } from './helpers/files'
+import { expectNoPageHorizontalOverflow } from './helpers/layout'
 
-function getVersionPathInput(page: import('@playwright/test').Page) {
+function getVersionPathInput(page: Page): Locator {
   return page.getByRole('textbox', { name: /输入文件路径|文件路径/i })
 }
 
-function getVersionsPageTitle(page: import('@playwright/test').Page) {
+function getVersionsPageTitle(page: Page): Locator {
   return page.getByRole('heading', { name: '版本历史', exact: true })
 }
 
+function getVersionQueryStatus(page: Page): Locator {
+  return page.getByText(/未找到版本记录|获取版本历史失败|版本历史暂不可用|当前版本|仅有当前版本/i).first()
+}
+
+async function expectVersionQuerySettled(page: Page): Promise<void> {
+  const explicitStatus = getVersionQueryStatus(page)
+  const versionList = page.getByRole('list', { name: '版本历史' })
+
+  await expect.poll(async () => {
+    const hasStatus = await explicitStatus.isVisible().catch(() => false)
+    const hasVersionList = await versionList.isVisible().catch(() => false)
+    return hasStatus || hasVersionList
+  }, { timeout: 10_000 }).toBe(true)
+}
+
 /**
- * 版本历史页面 E2E 测试
- * 认证状态由 auth.setup.ts 通过 storageState 自动注入
- * 如果认证启用但登录失败，测试会被跳过
+ * Version history page E2E tests.
+ * auth.setup.ts injects storageState automatically.
+ * Login setup failures fail by default; protected-page tests skip only when
+ * auth skipping is explicitly enabled for reused environments.
  */
 
 test.describe('版本历史页面', () => {
@@ -23,7 +40,8 @@ test.describe('版本历史页面', () => {
 
   test('应显示版本历史页面', async ({ page }) => {
     await expect(page).not.toHaveURL(/\/login/)
-    await expect(page.locator('body')).toBeVisible()
+    await expect(getVersionsPageTitle(page)).toBeVisible({ timeout: 5000 })
+    await expect(getVersionPathInput(page)).toBeVisible()
   })
 
   test('应显示版本历史标题', async ({ page }) => {
@@ -61,11 +79,7 @@ test.describe('版本历史查询', () => {
     await expect(queryBtn).toBeVisible({ timeout: 2000 })
     await queryBtn.click()
 
-    await page.waitForTimeout(1000)
-
-    // 应显示结果或错误信息
-    const body = page.locator('body')
-    await expect(body).toBeVisible()
+    await expectVersionQuerySettled(page)
   })
 
   test('查询不存在的文件应显示提示', async ({ page }) => {
@@ -137,10 +151,9 @@ test.describe('版本操作按钮', () => {
   test('版本表格应包含操作列', async ({ page }) => {
     await ensureAuthenticatedAt(page, '/versions')
 
-    // 表格头应包含操作列
-    // 这可能不存在（如果没有查询），所以只检查页面存在
-    const body = page.locator('body')
-    await expect(body).toBeVisible()
+    await expect(getVersionsPageTitle(page)).toBeVisible({ timeout: 5000 })
+    await expect(getVersionPathInput(page)).toBeVisible()
+    await expect(page.getByRole('button', { name: /查询|搜索/i })).toBeVisible()
   })
 })
 
@@ -149,19 +162,20 @@ test.describe('版本历史页面响应式', () => {
     await page.setViewportSize({ width: 375, height: 667 })
     await ensureAuthenticatedAt(page, '/versions')
 
-    const body = page.locator('body')
-    await expect(body).toBeVisible()
-
-    // 标题应可见
     const title = getVersionsPageTitle(page)
     await expect(title).toBeVisible({ timeout: 5000 })
+    await expect(getVersionPathInput(page)).toBeVisible()
+    await expect(page.getByRole('button', { name: /查询|搜索/i })).toBeVisible()
+    await expectNoPageHorizontalOverflow(page)
   })
 
   test('平板端布局', async ({ page }) => {
     await page.setViewportSize({ width: 768, height: 1024 })
     await ensureAuthenticatedAt(page, '/versions')
 
-    const title = page.getByText('版本历史').first()
+    const title = getVersionsPageTitle(page)
     await expect(title).toBeVisible({ timeout: 5000 })
+    await expect(getVersionPathInput(page)).toBeVisible()
+    await expectNoPageHorizontalOverflow(page)
   })
 })

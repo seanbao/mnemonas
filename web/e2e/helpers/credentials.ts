@@ -15,12 +15,12 @@ function parseInitialPasswordFile(filePath: string): string {
 }
 
 function getPasswordFileCandidates(): string[] {
-  const candidates: string[] = []
-
-  if (process.env.E2E_PASSWORD_FILE) {
-    candidates.push(process.env.E2E_PASSWORD_FILE)
+  const explicitPasswordFile = process.env.E2E_PASSWORD_FILE?.trim()
+  if (explicitPasswordFile) {
+    return [explicitPasswordFile]
   }
 
+  const candidates: string[] = []
   const homeDir = os.homedir()
   if (homeDir) {
     candidates.push(
@@ -60,7 +60,7 @@ export function resolveE2ECredentials(): E2ECredentials {
         passwordSource: 'file',
       }
     } catch {
-      // Ignore unreadable candidates and continue to the next location.
+      // Ignore unreadable candidates; missing credentials are reported below.
     }
   }
 

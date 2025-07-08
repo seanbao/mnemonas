@@ -1,6 +1,6 @@
 const API_BASE = '/api/v1'
 
-import { readStructuredJsonErrorDetails } from '@/lib/jsonErrorResponse'
+import { getNonBlankJsonString, readStructuredJsonErrorDetails } from '@/lib/jsonErrorResponse'
 import { normalizeUserHomeDir } from '@/lib/utils'
 
 export interface User {
@@ -43,13 +43,15 @@ export interface RefreshResponse {
 
 interface AuthApiError {
   code?: string
-  message: string
+  message?: string
 }
 
 interface AuthApiResponse<T> {
   success: boolean
   data?: T
+  warning?: boolean
   message?: string
+  code?: string
   error?: AuthApiError
 }
 
@@ -110,6 +112,37 @@ let refreshPromise: Promise<boolean> | null = null
 let isDownloadSessionReady = true
 let legacyAuthRequestCount = 0
 
+function readLocalStorageItem(key: string): string | null {
+  try {
+    if (typeof localStorage === 'undefined') {
+      return null
+    }
+    return localStorage.getItem(key)
+  } catch {
+    return null
+  }
+}
+
+function writeLocalStorageItem(key: string, value: string): void {
+  try {
+    if (typeof localStorage !== 'undefined') {
+      localStorage.setItem(key, value)
+    }
+  } catch {
+    // Browser storage may be disabled while the HttpOnly cookie session remains usable.
+  }
+}
+
+function removeLocalStorageItem(key: string): void {
+  try {
+    if (typeof localStorage !== 'undefined') {
+      localStorage.removeItem(key)
+    }
+  } catch {
+    // Ignore storage access failures so logout and auth recovery can continue.
+  }
+}
+
 function isAbortError(error: unknown): boolean {
   return error instanceof DOMException && error.name === 'AbortError'
 }
@@ -119,11 +152,11 @@ function isRequestSignalAborted(signal: RequestInit['signal']): boolean {
 }
 
 function getSessionEndedMessage(responseMessage?: string): string {
-  return responseMessage || '账户已被禁用，请联系管理员'
+  return getNonBlankJsonString(responseMessage) ?? '账户已被禁用，请联系管理员'
 }
 
 function getMissingUserMessage(responseMessage?: string): string {
-  return responseMessage || '账户不存在或已被删除，请重新登录'
+  return getNonBlankJsonString(responseMessage) ?? '账户不存在或已被删除，请重新登录'
 }
 
 function getMissingBrowserSessionMessage(): string {
@@ -136,8 +169,8 @@ function hasStoredAuthState(): boolean {
 
 function hasBrowserSessionState(): boolean {
   return Boolean(
-    localStorage.getItem(SESSION_MARKER_KEY) ||
-    localStorage.getItem(USER_KEY)
+    readLocalStorageItem(SESSION_MARKER_KEY) ||
+    readLocalStorageItem(USER_KEY)
   )
 }
 
@@ -147,8 +180,8 @@ function hasLegacyTokenState(): boolean {
 
 function hasLegacyTokenStorage(): boolean {
   return Boolean(
-    localStorage.getItem(TOKEN_KEY) ||
-    localStorage.getItem(REFRESH_TOKEN_KEY)
+    readLocalStorageItem(TOKEN_KEY) ||
+    readLocalStorageItem(REFRESH_TOKEN_KEY)
   )
 }
 
@@ -158,6 +191,10 @@ function isUserRole(role: unknown): role is User['role'] {
 
 function isCanonicalNonEmptyString(value: unknown): value is string {
   return typeof value === 'string' && value.trim() === value && value.length > 0
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object'
 }
 
 function parseAuthSessionData(data: LoginResponse | RefreshResponse | undefined): AuthSessionData {
@@ -180,8 +217,10 @@ function readAuthSuccessData<T>(body: AuthApiResponse<T> | undefined): T {
 
 function getAuthActionResult<T>(response: Response, body: AuthApiResponse<T> | undefined): AuthActionResult {
   return {
-    warning: response.headers?.get?.('Warning') != null,
-    message: body?.message,
+    warning: response.headers?.get?.('Warning') != null ||
+      body?.warning === true ||
+      (isRecord(body?.data) && body.data.warning === true),
+    message: getNonBlankJsonString(body?.message),
   }
 }
 
@@ -197,7 +236,9 @@ async function readAuthApiError(response: Response, fallback = ''): Promise<Auth
   try {
     const bodySource = typeof response.clone === 'function' ? response.clone() : response
     const body: AuthApiResponse<never> = await bodySource.json()
-    return body.error
+    const code = getNonBlankJsonString(body.error?.code) ?? getNonBlankJsonString(body.code)
+    const message = getNonBlankJsonString(body.error?.message) ?? getNonBlankJsonString(body.message)
+    return code === undefined && message === undefined ? undefined : { code, message }
   } catch {
     return undefined
   }
@@ -257,12 +298,12 @@ export function getStoredRefreshToken(): string | null {
 }
 
 export function getStoredUser(): User | null {
-  const data = localStorage.getItem(USER_KEY)
+  const data = readLocalStorageItem(USER_KEY)
   if (!data) return null
   try {
     return normalizeUser(JSON.parse(data) as ApiUser)
   } catch {
-    localStorage.removeItem(USER_KEY)
+    removeLocalStorageItem(USER_KEY)
     return null
   }
 }
@@ -299,20 +340,20 @@ export function storeTokens(accessToken: string, refreshToken: string, user: Use
 }
 
 function clearLegacyTokenStorage(): void {
-  localStorage.removeItem(TOKEN_KEY)
-  localStorage.removeItem(REFRESH_TOKEN_KEY)
+  removeLocalStorageItem(TOKEN_KEY)
+  removeLocalStorageItem(REFRESH_TOKEN_KEY)
 }
 
 function storeSessionUser(user: User): void {
   clearLegacyTokenStorage()
-  localStorage.setItem(SESSION_MARKER_KEY, '1')
-  localStorage.setItem(USER_KEY, JSON.stringify(user))
+  writeLocalStorageItem(SESSION_MARKER_KEY, '1')
+  writeLocalStorageItem(USER_KEY, JSON.stringify(user))
 }
 
 export function clearTokens(detail?: AuthClearedDetail): void {
   clearLegacyTokenStorage()
-  localStorage.removeItem(USER_KEY)
-  localStorage.removeItem(SESSION_MARKER_KEY)
+  removeLocalStorageItem(USER_KEY)
+  removeLocalStorageItem(SESSION_MARKER_KEY)
   isDownloadSessionReady = true
 
   if (typeof window !== 'undefined') {
@@ -321,7 +362,7 @@ export function clearTokens(detail?: AuthClearedDetail): void {
 }
 
 function getDownloadSessionSyncMessage(responseMessage?: string): string {
-  return responseMessage || '原始预览和下载会话同步失败，请稍后重试'
+  return getNonBlankJsonString(responseMessage) ?? '原始预览和下载会话同步失败，请稍后重试'
 }
 
 interface DownloadSessionResult {
@@ -337,8 +378,8 @@ interface RefreshReplayRecoveryResult {
   terminal: boolean
 }
 
-async function syncDownloadSession(options: AuthRequestOptions = {}): Promise<DownloadSessionResult> {
-  const hadBrowserSessionState = hasBrowserSessionState()
+async function syncDownloadSession(options: AuthRequestOptions = {}, force = false): Promise<DownloadSessionResult> {
+  const hadBrowserSessionState = force || hasBrowserSessionState()
   clearLegacyTokenStorage()
   if (!hadBrowserSessionState) {
     isDownloadSessionReady = true
@@ -551,7 +592,7 @@ async function tryRefreshToken(hadAuthState = hasStoredAuthState()): Promise<boo
       const body: AuthApiResponse<RefreshResponse> = await response.json()
       const data = parseAuthSessionData(readAuthSuccessData(body))
       storeSessionUser(data.user)
-      const downloadSession = await syncDownloadSession()
+      const downloadSession = await syncDownloadSession({}, true)
       return !downloadSession.authCleared
     } catch {
       if (hadAuthState) {
@@ -586,7 +627,7 @@ async function recoverBrowserSessionAfterRefreshRevoked(): Promise<RefreshReplay
     const user = normalizeUser(data.user)
     storeSessionUser(user)
 
-    const downloadSession = await syncDownloadSession()
+    const downloadSession = await syncDownloadSession({}, true)
     return { recovered: !downloadSession.authCleared, terminal: Boolean(downloadSession.authCleared) }
   } catch {
     return { recovered: false, terminal: false }
@@ -625,7 +666,7 @@ export async function login(username: string, password: string, options: AuthReq
   }
 
   storeSessionUser(data.user)
-  const downloadSession = await syncDownloadSession(options)
+  const downloadSession = await syncDownloadSession(options, true)
   if (downloadSession.authCleared) {
     throw new AuthError(
       downloadSession.message ?? getMissingBrowserSessionMessage(),
@@ -723,7 +764,7 @@ export async function getCurrentUser(options: AuthRequestOptions = {}): Promise<
   }
 
   storeSessionUser(user)
-  const downloadSession = await syncDownloadSession(options)
+  const downloadSession = await syncDownloadSession(options, true)
   if (downloadSession.authCleared) {
     return null
   }

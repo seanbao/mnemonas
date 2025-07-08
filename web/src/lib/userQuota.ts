@@ -296,7 +296,7 @@ export function formatUserQuotaSummaryReport(
 
   return [
     '用户配额摘要',
-    ...headerRows.map(([label, value]) => `${label}: ${value}`),
+    ...headerRows.map(([label, value]) => `${label}：${value}`),
     '',
     '用户明细',
     '用户名 | 邮箱 | 角色 | 状态 | 用户组 | 主目录 | 最后登录 | 配额状态 | 用量 | 剩余/超出 | 占比 | 建议处理',

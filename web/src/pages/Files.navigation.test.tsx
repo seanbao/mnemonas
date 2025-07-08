@@ -151,7 +151,7 @@ function LocationProbe({ onPath }: { onPath: (path: string) => void }) {
     onPath(location.pathname)
   }, [location.pathname, onPath])
 
-  return <div data-testid="location-path">{location.pathname}</div>
+  return <output aria-label="当前路由">{location.pathname}</output>
 }
 
 function renderFilesRoute(initialPath: string, observedPaths: string[]) {
@@ -227,7 +227,7 @@ describe('FilesPage navigation integration', () => {
     await user.dblClick(await screen.findByText('documents'))
 
     await waitFor(() => {
-      expect(screen.getByTestId('location-path').textContent).toBe('/files/documents')
+      expect(screen.getByLabelText('当前路由')).toHaveTextContent('/files/documents')
       expect(useFilesStore.getState().currentPath).toBe('/documents')
       expect(screen.getByText('notes.txt')).toBeTruthy()
     })
@@ -243,7 +243,7 @@ describe('FilesPage navigation integration', () => {
     renderFilesRoute('/files/documents', observedPaths)
 
     await waitFor(() => {
-      expect(screen.getByTestId('location-path').textContent).toBe('/files/documents')
+      expect(screen.getByLabelText('当前路由')).toHaveTextContent('/files/documents')
       expect(useFilesStore.getState().currentPath).toBe('/documents')
       expect(screen.getByText('notes.txt')).toBeTruthy()
     })

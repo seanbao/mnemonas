@@ -12,6 +12,9 @@ describe('diskHealthMessages', () => {
     expect(getDiskHealthStatusLabel('critical')).toBe('严重异常')
     expect(getDiskHealthStatusLabel('warning')).toBe('提醒')
     expect(getDiskHealthStatusLabel('unavailable')).toBe('不可用')
+    expect(getDiskHealthStatusLabel(' disabled ')).toBe('未启用')
+    expect(getDiskHealthStatusLabel('UNKNOWN')).toBe('未知')
+    expect(getDiskHealthStatusLabel('backend raw status')).toBe('未知')
   })
 
   it('maps report-level backend messages without exposing raw diagnostics', () => {

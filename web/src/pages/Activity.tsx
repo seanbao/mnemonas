@@ -68,7 +68,7 @@ import {
   type ActivityReviewRecordListResponse,
   type ActivityStats,
 } from '@/api/activity'
-import { cn, formatDate, formatRelativeTime, normalizePath } from '@/lib/utils'
+import { cn, formatDate, formatRelativeTime, hasControlCharacter, normalizePath } from '@/lib/utils'
 import { PageHeader } from '@/components/ui/PageHeader'
 import { EmptyState } from '@/components/ui/EmptyState'
 import { StatCard } from '@/components/ui/StatCard'
@@ -76,6 +76,7 @@ import { useIsAdmin, useUser } from '@/stores/auth'
 import { getInvalidHomeDirDescription, invalidHomeDirTitle, resolveUserHomeScope } from '@/lib/userScope'
 import { getUserFacingErrorDescription } from '@/lib/apiMessages'
 import { getActivityDetailEntries } from '@/lib/activityDetails'
+import { getRedactedDiagnosticMessage } from '@/lib/diagnosticMessages'
 import { triggerBrowserDownload } from '@/lib/downloadResponse'
 
 const ACTIVITY_TIME_RANGES = [
@@ -233,8 +234,7 @@ function parseActivityPathFilter(value: string): ActivityPathFilterState {
     return { normalizedPath: '' }
   }
 
-  // eslint-disable-next-line no-control-regex
-  if (/[\x00-\x1F\x7F]/.test(trimmed)) {
+  if (hasControlCharacter(trimmed)) {
     return { normalizedPath: '', errorMessage: ACTIVITY_PATH_FILTER_ERROR }
   }
 
@@ -463,7 +463,7 @@ function ActivityRow({
         {entry.details && Object.keys(entry.details).length > 0 && (
           <div className="activity-log-details mt-1 flex min-w-0 flex-wrap gap-x-3 gap-y-1 text-xs text-default-400">
             {getActivityDetailEntries(entry.action, entry.details).map((detail) => (
-              <span key={detail.key} className="min-w-0 truncate">{detail.label}: {detail.value}</span>
+              <span key={detail.key} className="min-w-0 truncate">{detail.label}：{detail.value}</span>
             ))}
           </div>
         )}
@@ -560,6 +560,8 @@ function getActivityClearErrorToast(error: unknown): { title: string; descriptio
     color: 'danger',
   }
 }
+
+const getNonBlankToastDescription = getRedactedDiagnosticMessage
 
 function isAbortError(error: unknown): boolean {
   return error instanceof Error && error.name === 'AbortError'
@@ -743,26 +745,26 @@ function getActivityReviewDispositionItems(entries: ActivityEntry[]): string[] {
   const hasWarning = entries.some(hasActivityWarningDetails)
 
   const items = [
-    `确认影响范围: ${entries.length} 条记录，涉及 ${paths.length || 0} 个路径、${users.length || 0} 个用户。`,
+    `确认影响范围：${entries.length} 条记录，涉及 ${paths.length || 0} 个路径、${users.length || 0} 个用户。`,
   ]
 
   if (hasDestructive) {
-    items.push('删除类操作: 检查回收站、版本历史和最近备份，确认是否需要恢复。')
+    items.push('删除类操作：检查回收站、版本历史和最近备份，确认是否需要恢复。')
   }
   if (hasPathChange) {
-    items.push('路径变更: 核对来源和目标路径，确认移动或重命名是否符合预期。')
+    items.push('路径变更：核对来源和目标路径，确认移动或重命名是否符合预期。')
   }
   if (hasShare) {
-    items.push('分享变更: 核对分享链接、密码、有效期和访问次数，关闭不再需要的公开链接。')
+    items.push('分享变更：核对分享链接、密码、有效期和访问次数，关闭不再需要的公开链接。')
   }
   if (hasRestore) {
-    items.push('恢复变更: 检查恢复后的文件、权限和相关分享/收藏状态。')
+    items.push('恢复变更：检查恢复后的文件、权限和相关分享/收藏状态。')
   }
   if (hasWarning) {
-    items.push('带警告记录: 先处理持久化或清理警告，再把本次复核标记为完成。')
+    items.push('带警告记录：先处理持久化或清理警告，再把本次复核标记为完成。')
   }
 
-  items.push('记录处置结论: 在团队工单或运维记录中写明复核人、处理结果和时间。')
+  items.push('记录处置结论：在团队工单或运维记录中写明复核人、处理结果和时间。')
   return items
 }
 
@@ -826,12 +828,12 @@ function ActivityReviewDetails({
                   <span className="text-xs text-warning/80">{getActivityReviewReasons(entry).join(' · ')}</span>
                 </div>
                 <div className="mt-1 truncate text-xs text-default-600" title={entry.path || undefined}>
-                  路径: {entry.path || '全局操作'}
+                  路径：{entry.path || '全局操作'}
                 </div>
                 {details.length > 0 && (
                   <div className="mt-1 flex min-w-0 flex-wrap gap-x-3 gap-y-1 text-xs text-default-500">
                     {details.map((detail) => (
-                      <span key={detail.key} className="min-w-0 truncate">复核: {detail.label}: {detail.value}</span>
+                      <span key={detail.key} className="min-w-0 truncate">复核：{detail.label}：{detail.value}</span>
                     ))}
                   </div>
                 )}
@@ -1184,11 +1186,11 @@ function ActivityReviewDispositionRecorder({
                     {record.note}
                   </div>
                   <div className="mt-1 text-xs text-default-500">
-                    {record.scope_label}: {record.review_count} 条待处置 / {record.total_count} 条总记录
+                    {record.scope_label}：{record.review_count} 条待处置 / {record.total_count} 条总记录
                   </div>
                   {record.path_samples && record.path_samples.length > 0 && (
                     <div className="mt-1 truncate text-xs text-default-500" title={record.path_samples.join(', ')}>
-                      路径样例: {record.path_samples.join(', ')}
+                      路径样例：{record.path_samples.join(', ')}
                     </div>
                   )}
                   <div className="mt-1 flex items-center justify-between gap-2 text-xs text-default-500">
@@ -1314,25 +1316,25 @@ function ActivityReviewDispositionRecorder({
                   </Chip>
                 </div>
                 <div className="mt-1 text-xs text-default-500">
-                  {record.scope_label}: {record.review_count} 条待处置 / {record.total_count} 条总记录 · {record.path_count} 个路径 · {record.user_count} 个用户
+                  {record.scope_label}：{record.review_count} 条待处置 / {record.total_count} 条总记录 · {record.path_count} 个路径 · {record.user_count} 个用户
                 </div>
                 {record.action_counts && (
                   <div className="mt-1 truncate text-xs text-default-500" title={formatActivityReviewActionCounts(record.action_counts)}>
-                    类型: {formatActivityReviewActionCounts(record.action_counts)}
+                    类型：{formatActivityReviewActionCounts(record.action_counts)}
                   </div>
                 )}
                 {record.path_samples && record.path_samples.length > 0 && (
                   <div className="mt-1 truncate text-xs text-default-500" title={record.path_samples.join(', ')}>
-                    路径样例: {record.path_samples.join(', ')}
+                    路径样例：{record.path_samples.join(', ')}
                   </div>
                 )}
                 {record.user_samples && record.user_samples.length > 0 && (
                   <div className="mt-1 truncate text-xs text-default-500" title={record.user_samples.join(', ')}>
-                    用户样例: {record.user_samples.join(', ')}
+                    用户样例：{record.user_samples.join(', ')}
                   </div>
                 )}
                 <div className="mt-1 truncate text-xs text-default-500" title={record.filter_summary || '未筛选'}>
-                  条件: {record.filter_summary || '未筛选'}
+                  条件：{record.filter_summary || '未筛选'}
                 </div>
               </div>
               <div className="text-xs text-default-500 sm:text-right">
@@ -1596,7 +1598,7 @@ export function ActivityPage() {
   const clearActivityMutation = useMutation({
     mutationFn: async ({ signal }: { signal: AbortSignal }) => clearActivity({ signal }),
     retry: false,
-    onSuccess: (_result, variables) => {
+    onSuccess: (result, variables) => {
       if (variables.signal.aborted) {
         return
       }
@@ -1605,7 +1607,11 @@ export function ActivityPage() {
       setIsClearConfirmOpen(false)
       void queryClient.invalidateQueries({ queryKey: ['activity'] })
       void queryClient.invalidateQueries({ queryKey: ['activity-stats'] })
-      addToast({ title: '最近操作已清空', color: 'success' })
+      addToast({
+        title: result.warning ? '最近操作已清空，但存在警告' : '最近操作已清空',
+        description: result.warning ? getNonBlankToastDescription(result.message) : undefined,
+        color: result.warning ? 'warning' : 'success',
+      })
     },
     onError: (mutationError: unknown, variables) => {
       if (variables.signal.aborted || isAbortError(mutationError)) {
@@ -2074,7 +2080,12 @@ export function ActivityPage() {
 
   if (isLoading) {
     return (
-      <div className="flex h-full items-center justify-center p-6 lg:p-8">
+      <div
+        role="status"
+        aria-label="加载最近操作"
+        aria-busy="true"
+        className="flex h-full items-center justify-center p-6 lg:p-8"
+      >
         <div className="text-center">
           <div className="w-12 h-12 border-3 border-accent-primary border-t-transparent rounded-full animate-spin mx-auto mb-4" />
           <p className="text-default-500">加载最近操作...</p>
@@ -2361,7 +2372,7 @@ export function ActivityPage() {
       {/* Filter chips */}
       {hasActiveFilters && (
         <div className="flex flex-wrap items-center gap-2">
-          <span className="text-sm text-default-500">当前筛选:</span>
+          <span className="text-sm text-default-500">当前筛选：</span>
           {timeRangeFilter !== 'all' && (
             <Chip
               size="sm"
@@ -2441,7 +2452,7 @@ export function ActivityPage() {
       )}
 
       {/* Activity list */}
-      <div role="list" aria-label="最近操作列表" className="card-meridian min-h-0 flex-1 overflow-auto rounded-lg">
+      <div role="list" aria-label="最近操作列表" className="card-mnemonas min-h-0 flex-1 overflow-auto rounded-lg">
         {pathFilterErrorMessage ? (
           <div className="flex h-64 items-center justify-center">
             <EmptyState

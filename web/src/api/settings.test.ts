@@ -473,6 +473,36 @@ describe('Settings API', () => {
     })
   })
 
+  it('preserves top-level service-unavailable settings error codes', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 503,
+      json: () => Promise.resolve({ success: false, code: 'SERVICE_UNAVAILABLE', message: 'settings not available' }),
+    })
+
+    await expect(getSettings()).rejects.toMatchObject({
+      message: 'settings not available',
+      status: 503,
+      code: 'SERVICE_UNAVAILABLE',
+      isUnavailable: true,
+    })
+  })
+
+  it('ignores blank legacy settings error messages and codes', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 503,
+      json: () => Promise.resolve({ success: false, error: { code: '   ', message: '   ' }, message: '  ' }),
+    })
+
+    await expect(getSettings()).rejects.toMatchObject({
+      message: '获取设置失败',
+      status: 503,
+      code: undefined,
+      isUnavailable: true,
+    })
+  })
+
   it('unwraps security check responses', async () => {
     mockAuthFetch.mockResolvedValueOnce({
       ok: true,
@@ -568,6 +598,38 @@ describe('Settings API', () => {
     expect(result.message).toContain('require restart')
   })
 
+  it('returns warning details for successful update responses with warning metadata', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      headers: new Headers({ Warning: '199 mnemonas "settings saved with warning"' }),
+      json: () => Promise.resolve({
+        success: true,
+        data: null,
+        warning: true,
+        message: 'settings saved with warning',
+      }),
+    })
+
+    await expect(updateSettings({ server: { port: 8081 } })).resolves.toEqual({
+      success: true,
+      warning: true,
+      message: 'settings saved with warning',
+    })
+  })
+
+  it('normalizes blank update success messages to an empty string', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ success: true, data: null, message: '   ' }),
+    })
+
+    await expect(updateSettings({ server: { port: 8081 } })).resolves.toEqual({
+      success: true,
+      warning: false,
+      message: '',
+    })
+  })
+
   it('forwards abort signal when updating settings', async () => {
     const controller = new AbortController()
     mockAuthFetch.mockResolvedValueOnce({
@@ -653,8 +715,11 @@ describe('Settings API', () => {
 
   it.each([
     ['directory quota path', { storage: { directory_quotas: [{ path: '/team/./private', quota_bytes: 1048576 }] } }, 'INVALID_DIRECTORY_QUOTA_PATH'],
+    ['unicode control directory quota path', { storage: { directory_quotas: [{ path: '/team\u0085private', quota_bytes: 1048576 }] } }, 'INVALID_DIRECTORY_QUOTA_PATH'],
     ['directory access rule path', { storage: { directory_access_rules: [{ path: '/team/../private', read_groups: ['family'] }] } }, 'INVALID_DIRECTORY_ACCESS_RULE_PATH'],
+    ['unicode control directory access rule path', { storage: { directory_access_rules: [{ path: '/team\u0085private', read_groups: ['family'] }] } }, 'INVALID_DIRECTORY_ACCESS_RULE_PATH'],
     ['share policy path', { share: { policy_rules: [{ path: '/team/./private' }] } }, 'INVALID_SHARE_POLICY_PATH'],
+    ['unicode control share policy path', { share: { policy_rules: [{ path: '/team\u0085private' }] } }, 'INVALID_SHARE_POLICY_PATH'],
     ['relative directory quota path', { storage: { directory_quotas: [{ path: 'team', quota_bytes: 1048576 }] } }, 'INVALID_DIRECTORY_QUOTA_PATH'],
     ['backslash directory access rule path', { storage: { directory_access_rules: [{ path: '/team\\private', read_groups: ['family'] }] } }, 'INVALID_DIRECTORY_ACCESS_RULE_PATH'],
     ['query share policy path', { share: { policy_rules: [{ path: '/team?private' }] } }, 'INVALID_SHARE_POLICY_PATH'],
@@ -711,6 +776,51 @@ describe('Settings API', () => {
     })
     expect(result.message).toBe('test alert sent')
     expect(result.data.channels).toEqual(['webhook', 'email'])
+  })
+
+  it('normalizes blank test alert success messages to an empty string', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        success: true,
+        message: '   ',
+        data: {
+          event_type: 'alert_test',
+          channels: ['webhook'],
+        },
+      }),
+    })
+
+    const result = await sendTestAlert()
+
+    expect(result.message).toBe('')
+    expect(result.data.channels).toEqual(['webhook'])
+  })
+
+  it('returns warning details for successful test alert responses with data warning flags', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        success: true,
+        message: 'test alert sent with warning',
+        data: {
+          event_type: 'alert_test',
+          channels: ['webhook'],
+          warning: true,
+        },
+      }),
+    })
+
+    await expect(sendTestAlert()).resolves.toEqual({
+      success: true,
+      warning: true,
+      message: 'test alert sent with warning',
+      data: {
+        event_type: 'alert_test',
+        channels: ['webhook'],
+        warning: true,
+      },
+    })
   })
 
   it('forwards abort signal when sending a test alert', async () => {
@@ -1263,6 +1373,17 @@ describe('Settings API', () => {
     await expect(previewDirectoryAccess({
       path: '/team/readme.txt',
       directory_access_rules: [{ path: '/team/../private', read_groups: ['family'] }],
+    })).rejects.toMatchObject({
+      status: 0,
+      code: 'INVALID_DIRECTORY_ACCESS_RULE_PATH',
+    })
+    expect(mockAuthFetch).not.toHaveBeenCalled()
+  })
+
+  it('rejects Unicode control directory access preview rule paths before sending requests', async () => {
+    await expect(previewDirectoryAccess({
+      path: '/team/readme.txt',
+      directory_access_rules: [{ path: '/team\u0085private', read_groups: ['family'] }],
     })).rejects.toMatchObject({
       status: 0,
       code: 'INVALID_DIRECTORY_ACCESS_RULE_PATH',

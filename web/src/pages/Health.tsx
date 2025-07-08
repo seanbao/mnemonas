@@ -252,7 +252,7 @@ function formatGoDurationLabel(value: string | undefined): string {
 
   const match = value.match(/^(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?$/)
   if (!match || match[0] === '') {
-    return value
+    return '未知间隔'
   }
 
   const hours = Number(match[1] ?? 0)
@@ -347,7 +347,7 @@ function getSMBPresentation(smb: DiagnosticsInfo['smb']): {
     return {
       icon: Network,
       title: 'SMB 当前不可挂载',
-      description: `${shareText}当前版本只保留 SMB 网关配置和权限模型，尚未内置 SMB/Samba 运行时。请继续使用 WebDAV。`,
+      description: `${shareText}当前构建未包含 SMB/Samba 运行组件，局域网挂载请继续使用 WebDAV。`,
       className: 'border-warning/25 bg-warning/5',
       iconClassName: 'text-warning',
     }
@@ -595,7 +595,7 @@ export function HealthPage() {
       icon: Cpu,
       title: '内存使用',
       value: diagnostics?.memory?.allocMb !== undefined ? `${diagnostics.memory.allocMb} MB` : '--',
-      subtitle: diagnostics?.memory?.sysMb !== undefined ? `系统: ${diagnostics.memory.sysMb} MB` : undefined,
+      subtitle: diagnostics?.memory?.sysMb !== undefined ? `系统：${diagnostics.memory.sysMb} MB` : undefined,
     },
     {
       icon: Database,
@@ -681,10 +681,10 @@ export function HealthPage() {
       )}
 
       {/* System Status */}
-      <Card className="card-meridian">
+      <Card className="card-mnemonas">
         <CardHeader className="pb-0">
           <div className="flex items-center gap-2">
-            <div className="gradient-meridian rounded-lg p-2">
+            <div className="gradient-mnemonas rounded-lg p-2">
               <Server size={16} className="text-white" />
             </div>
             <div>
@@ -806,7 +806,7 @@ export function HealthPage() {
       {/* Storage Details */}
       <div className="grid grid-cols-1 gap-6 xl:grid-cols-3">
         {/* Storage Card */}
-        <Card className="card-meridian">
+        <Card className="card-mnemonas">
           <CardHeader className="pb-0">
             <div className="flex items-center gap-2">
               <div className="bg-accent-primary/10 rounded-lg p-2">
@@ -895,7 +895,7 @@ export function HealthPage() {
         </Card>
 
         {/* Disk Health Card */}
-        <Card className="card-meridian">
+        <Card className="card-mnemonas">
           <CardHeader className="pb-0">
             <div className="flex items-center gap-2">
               <div className="bg-success/10 rounded-lg p-2">
@@ -957,7 +957,7 @@ export function HealthPage() {
         </Card>
 
         {/* Trash Card */}
-        <Card className="card-meridian">
+        <Card className="card-mnemonas">
           <CardHeader className="pb-0">
             <div className="flex items-center gap-2">
               <div className="bg-warning/10 rounded-lg p-2">
@@ -995,7 +995,7 @@ export function HealthPage() {
       </div>
 
       {/* Memory & Performance */}
-      <Card className="card-meridian">
+      <Card className="card-mnemonas">
         <CardHeader className="pb-0">
           <div className="flex items-center gap-2">
             <div className="gradient-energy rounded-lg p-2">

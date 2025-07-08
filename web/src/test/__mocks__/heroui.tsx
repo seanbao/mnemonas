@@ -35,7 +35,7 @@ export function Table({
   ...props
 }: TableProps) {
   return (
-    <div data-testid="heroui-table" role="table" aria-label={ariaLabel} {...props}>
+    <div role="table" aria-label={ariaLabel} {...props}>
       {children}
     </div>
   )
@@ -48,7 +48,7 @@ interface TableHeaderProps {
 
 export function TableHeader({ children }: TableHeaderProps) {
   return (
-    <div data-testid="table-header" role="rowgroup">
+    <div role="rowgroup">
       <div role="row">{children}</div>
     </div>
   )
@@ -73,15 +73,15 @@ interface TableBodyProps<T> {
 
 export function TableBody<T>({ children, items, emptyContent, isLoading, loadingContent }: TableBodyProps<T>) {
   if (isLoading && loadingContent) {
-    return <div data-testid="table-body" role="rowgroup">{loadingContent}</div>
+    return <div role="rowgroup">{loadingContent}</div>
   }
   
   if (typeof children === 'function' && items) {
     if (items.length === 0) {
-      return <div data-testid="table-body" role="rowgroup">{emptyContent}</div>
+      return <div role="rowgroup">{emptyContent}</div>
     }
     return (
-      <div data-testid="table-body" role="rowgroup">
+      <div role="rowgroup">
         {items.map((item, index) => (
           <React.Fragment key={index}>{children(item)}</React.Fragment>
         ))}
@@ -91,7 +91,7 @@ export function TableBody<T>({ children, items, emptyContent, isLoading, loading
   
   // When children is not a function, it's ReactNode
   const childrenNode = typeof children === 'function' ? null : children
-  return <div data-testid="table-body" role="rowgroup">{childrenNode}</div>
+  return <div role="rowgroup">{childrenNode}</div>
 }
 
 interface TableRowProps {
@@ -123,7 +123,7 @@ export function Dropdown({ children, ...props }: DropdownProps) {
   const [isOpen, setIsOpen] = React.useState(false)
   
   return (
-    <div data-testid="heroui-dropdown" data-open={isOpen} {...props}>
+    <div {...props}>
       {React.Children.map(children, child => {
         if (React.isValidElement(child)) {
           if (child.type === DropdownTrigger) {
@@ -148,7 +148,7 @@ interface DropdownTriggerProps {
 
 export function DropdownTrigger({ children, onClick }: DropdownTriggerProps) {
   return (
-    <div data-testid="dropdown-trigger" onClick={onClick}>
+    <div onClick={onClick}>
       {children}
     </div>
   )
@@ -162,7 +162,7 @@ interface DropdownMenuProps {
 
 export function DropdownMenu({ children, 'aria-label': ariaLabel, onAction }: DropdownMenuProps) {
   return (
-    <div data-testid="dropdown-menu" role="menu" aria-label={ariaLabel}>
+    <div role="menu" aria-label={ariaLabel}>
       {React.Children.map(children, child => {
         if (React.isValidElement(child) && onAction) {
           return React.cloneElement(child as React.ReactElement<{ onAction: typeof onAction }>, { onAction })
@@ -204,7 +204,7 @@ interface DropdownSectionProps {
 
 export function DropdownSection({ children, title }: DropdownSectionProps) {
   return (
-    <div data-testid="dropdown-section">
+    <div>
       {title && <div className="dropdown-section-title">{title}</div>}
       {children}
     </div>

@@ -1,5 +1,6 @@
 import { test, expect, type Page } from '@playwright/test'
 import { ensureAuthenticatedAt } from './helpers/auth-check'
+import { waitForRouteSettled } from './helpers/route-ready'
 
 const routeGroups = [
   {
@@ -41,9 +42,7 @@ type AccessibilityIssue = {
 
 async function prepareRoute(page: Page, route: string) {
   await ensureAuthenticatedAt(page, route)
-  await expect(page.locator('body')).toBeVisible()
-  await page.getByText('加载中...').waitFor({ state: 'hidden', timeout: 10_000 }).catch(() => {})
-  await page.waitForTimeout(500)
+  await waitForRouteSettled(page, route)
 }
 
 async function collectAccessibilityIssues(page: Page, route: string): Promise<AccessibilityIssue[]> {

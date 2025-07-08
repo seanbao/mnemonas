@@ -1,8 +1,10 @@
-import { Component, Suspense, lazy, useEffect, type ErrorInfo, type ReactNode } from 'react'
+import { Component, Suspense, lazy, useEffect, useRef, type ErrorInfo, type ReactNode } from 'react'
 import { BrowserRouter, Routes, Route, useLocation } from 'react-router-dom'
 import { AppLayout } from '@/components/layout'
 import { ProtectedRoute } from '@/components/auth'
 import { useAuthStore } from '@/stores/auth'
+import { shouldValidateSessionOnInitialRoute } from '@/lib/authInitialRoute'
+import { routeRenderDiagnosticMessage } from '@/lib/routeDiagnostics'
 
 const DashboardPage = lazy(() => import('@/pages/Dashboard').then((mod) => ({ default: mod.DashboardPage })))
 const FilesPage = lazy(() => import('@/pages/Files').then((mod) => ({ default: mod.FilesPage })))
@@ -64,7 +66,9 @@ class RouteErrorBoundary extends Component<RouteErrorBoundaryProps, RouteErrorBo
   }
 
   componentDidCatch(error: unknown, errorInfo: ErrorInfo) {
-    console.error('Route render failed', error, errorInfo.componentStack)
+    if (import.meta.env.DEV) {
+      console.error('Route render failed', routeRenderDiagnosticMessage(error), errorInfo.componentStack)
+    }
   }
 
   componentDidUpdate(prevProps: RouteErrorBoundaryProps) {
@@ -91,6 +95,7 @@ function AppRoutes() {
         <Routes>
           {/* Public routes */}
           <Route path="/login" element={<LoginPage />} />
+          <Route path="/s" element={<ShareAccessPage />} />
           <Route path="/s/:id" element={<ShareAccessPage />} />
 
           {/* Protected routes */}
@@ -158,16 +163,24 @@ function AppRoutes() {
   )
 }
 
-function App() {
+function AuthInitializer() {
   const initialize = useAuthStore((state) => state.initialize)
+  const location = useLocation()
+  const initialPathname = useRef(location.pathname)
 
-  // Initialize auth state on app mount
   useEffect(() => {
-    initialize()
+    void initialize({
+      validateSession: shouldValidateSessionOnInitialRoute(initialPathname.current),
+    })
   }, [initialize])
 
+  return null
+}
+
+function App() {
   return (
     <BrowserRouter>
+      <AuthInitializer />
       <AppRoutes />
     </BrowserRouter>
   )

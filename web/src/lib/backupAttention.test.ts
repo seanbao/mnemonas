@@ -95,6 +95,25 @@ describe('backupAttention', () => {
     expect(getBackupAttentionNextStepSummary([pendingVerifyJob, verifyWarningJob])).toBe('执行恢复演练并复核演练历史、运行检查恢复完成只读校验 等 3 步')
   })
 
+  it('flags a running restore verification for the latest restore', () => {
+    const job = backupJob({
+      last_restore: {
+        status: 'completed',
+        target_path: '/restore/mnemonas',
+      } as NonNullable<BackupJob['last_restore']>,
+      last_matching_restore_verify: {
+        status: 'running',
+        target_path: '/restore/mnemonas',
+        warnings: [],
+      } as NonNullable<BackupJob['last_matching_restore_verify']>,
+    })
+
+    expect(getBackupAttentionReasons(job)).toEqual(['恢复检查中'])
+    expect(getBackupAttentionNextSteps(job)).toEqual(['等待恢复检查完成'])
+    expect(getBackupAttentionReasonSummary([job])).toBe('恢复检查中')
+    expect(getBackupAttentionNextStepSummary([job])).toBe('等待恢复检查完成')
+  })
+
   it('deduplicates backup next steps across health and run failures', () => {
     const job = backupJob({
       health_status: 'failed',
