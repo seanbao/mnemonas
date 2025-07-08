@@ -134,7 +134,7 @@ export function formatDirectoryQuotaSummaryReport(
 
   return [
     '目录配额摘要',
-    ...headerRows.map(([label, value]) => `${label}: ${value}`),
+    ...headerRows.map(([label, value]) => `${label}：${value}`),
     '',
     '目录明细',
     '路径 | 状态 | 用量 | 剩余 | 占比 | 存在状态 | 建议处理',

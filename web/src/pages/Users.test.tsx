@@ -123,6 +123,19 @@ function getVisibleUsernamesByCardOrder(): string[] {
     .map((button) => button.getAttribute('aria-label')?.replace(/ 用户操作$/, '') ?? '')
 }
 
+async function openUserActionMenu(user: ReturnType<typeof userEvent.setup>, username: string) {
+  await user.click(screen.getByRole('button', { name: `${username} 用户操作` }))
+}
+
+async function clickUserActionMenuItem(
+  user: ReturnType<typeof userEvent.setup>,
+  username: string,
+  action: string,
+) {
+  await openUserActionMenu(user, username)
+  await user.click(screen.getByRole('menuitem', { name: action }))
+}
+
 describe('UsersPage', () => {
   beforeEach(() => {
     vi.clearAllMocks()
@@ -567,7 +580,7 @@ describe('UsersPage', () => {
       expect(screen.getByText('请调整搜索关键词，或切换用户列表筛选条件。')).toBeInTheDocument()
       expect(screen.queryByText('admin')).not.toBeInTheDocument()
 
-      await user.click(screen.getAllByRole('button', { name: '清除筛选' })[0])
+      await user.click(screen.getByRole('button', { name: '清除空状态用户筛选' }))
 
       expect(screen.getByText('显示全部 3 个用户')).toBeInTheDocument()
       expect(screen.getByText('admin')).toBeInTheDocument()
@@ -779,8 +792,8 @@ describe('UsersPage', () => {
       })
       const report = writeText.mock.calls[0]?.[0] as string
       expect(report).toContain('用户配额摘要')
-      expect(report).toContain('用户总数: 3 个')
-      expect(report).toContain('需复核: 2 个')
+      expect(report).toContain('用户总数：3 个')
+      expect(report).toContain('需复核：2 个')
       expect(report).toContain('用户名 | 邮箱 | 角色 | 状态 | 用户组 | 主目录 | 最后登录 | 配额状态 | 用量 | 剩余/超出 | 占比 | 建议处理')
       expect(report).toContain('admin | admin@example.com | 管理员 | 启用 | admins | /home/admin | 2024-01-15T10:00:00Z | 配额正常 | 100 B / 1000 B | 剩余 900 B')
       expect(report).toContain('alice | test@example.com | 普通用户 | 启用 | family, editors | /home/alice | 从未登录 | 接近上限 | 900 B / 1000 B | 剩余 100 B')
@@ -840,10 +853,10 @@ describe('UsersPage', () => {
       })
       const report = writeText.mock.calls[0]?.[0] as string
       expect(report).toContain('用户账号复核摘要')
-      expect(report).toContain('用户总数: 3 个')
-      expect(report).toContain('需复核: 2 个')
-      expect(report).toContain('停用账号: 1 个')
-      expect(report).toContain('从未登录: 2 个')
+      expect(report).toContain('用户总数：3 个')
+      expect(report).toContain('需复核：2 个')
+      expect(report).toContain('停用账号：1 个')
+      expect(report).toContain('从未登录：2 个')
       expect(report).toContain('用户名 | 邮箱 | 角色 | 状态 | 用户组 | 主目录 | 最后登录 | 账号关注 | 建议处理')
       expect(report).toContain('guest | 未设置 | 访客 | 已停用 | 未分组 | /guest/public | 从未登录 | 停用账号, 从未登录')
       expect(report).toContain('alice | test@example.com | 普通用户 | 启用 | family | /home/alice | 从未登录 | 从未登录')
@@ -908,9 +921,9 @@ describe('UsersPage', () => {
       })
       const report = writeText.mock.calls[0]?.[0] as string
       expect(report).toContain('用户权限复核摘要')
-      expect(report).toContain('用户总数: 3 个')
-      expect(report).toContain('管理员: 1 个')
-      expect(report).toContain('需复核: 3 个')
+      expect(report).toContain('用户总数：3 个')
+      expect(report).toContain('管理员：1 个')
+      expect(report).toContain('需复核：3 个')
       expect(report).toContain('用户名 | 邮箱 | 角色 | 状态 | 用户组 | 主目录 | 权限范围 | 权限说明 | 复核提示 | 最后登录')
       expect(report).toContain('guest | 未设置 | 访客 | 已停用 | 未分组 | /guest/public | 访客主目录范围')
       expect(report).toContain('alice | test@example.com | 普通用户 | 启用 | editors, family | /home/alice | 主目录 + 用户组范围')
@@ -1166,24 +1179,27 @@ describe('UsersPage', () => {
     it('shows correct total users count', async () => {
       renderUsersPage()
       await waitFor(() => {
-        expect(screen.getByText('3')).toBeInTheDocument()
+        const totalUsersCard = screen.getByRole('group', { name: '总用户数，3' })
+        expect(within(totalUsersCard).getByRole('button', { name: '查看全部用户' })).toBeInTheDocument()
+        expect(within(totalUsersCard).getByText('3')).toBeInTheDocument()
       })
     })
 
     it('shows correct admin count', async () => {
       renderUsersPage()
       await waitFor(() => {
-        const statCards = screen.getAllByText('1')
-        expect(statCards.length).toBeGreaterThan(0)
+        const adminCard = screen.getByRole('group', { name: '管理员，1' })
+        expect(within(adminCard).getByRole('button', { name: '查看管理员' })).toBeInTheDocument()
+        expect(within(adminCard).getByText('1')).toBeInTheDocument()
       })
     })
 
     it('shows correct active users count', async () => {
       renderUsersPage()
       await waitFor(() => {
-        const activeUsersCard = screen.getByRole('button', { name: '查看活跃用户' }).closest('.card-meridian')
-        expect(activeUsersCard).not.toBeNull()
-        expect(within(activeUsersCard as HTMLElement).getByText('2')).toBeInTheDocument()
+        const activeUsersCard = screen.getByRole('group', { name: '活跃用户，2' })
+        expect(within(activeUsersCard).getByRole('button', { name: '查看活跃用户' })).toBeInTheDocument()
+        expect(within(activeUsersCard).getByText('2')).toBeInTheDocument()
       })
     })
 
@@ -1201,13 +1217,10 @@ describe('UsersPage', () => {
       renderUsersPage()
 
       await waitFor(() => {
-        const accountAttentionTitle = screen.getAllByText('账号关注')
-          .find((element) => element.tagName.toLowerCase() === 'p')
-        expect(accountAttentionTitle).toBeDefined()
-        const accountAttentionCard = accountAttentionTitle?.closest('.card-meridian')
-        expect(accountAttentionCard).not.toBeNull()
-        expect(within(accountAttentionCard as HTMLElement).getByText('2')).toBeInTheDocument()
-        expect(within(accountAttentionCard as HTMLElement).getByText('停用 1 个 · 从未登录 1 个')).toBeInTheDocument()
+        const accountAttentionCard = screen.getByRole('group', { name: '账号关注，2，停用 1 个 · 从未登录 1 个' })
+        expect(within(accountAttentionCard).getByText('账号关注')).toBeInTheDocument()
+        expect(within(accountAttentionCard).getByText('2')).toBeInTheDocument()
+        expect(within(accountAttentionCard).getByText('停用 1 个 · 从未登录 1 个')).toBeInTheDocument()
       })
     })
 
@@ -1245,13 +1258,10 @@ describe('UsersPage', () => {
       renderUsersPage()
 
       await waitFor(() => {
-        const reviewTitle = screen.getAllByText('复核提示')
-          .find((element) => element.tagName.toLowerCase() === 'p')
-        expect(reviewTitle).toBeDefined()
-        const reviewCard = reviewTitle?.closest('.card-meridian')
-        expect(reviewCard).not.toBeNull()
-        expect(within(reviewCard as HTMLElement).getByText('3')).toBeInTheDocument()
-        expect(within(reviewCard as HTMLElement).getByText('严重 1 个 · 提醒 1 个 · 记录 1 个')).toBeInTheDocument()
+        const reviewCard = screen.getByRole('group', { name: '复核提示，3，严重 1 个 · 提醒 1 个 · 记录 1 个' })
+        expect(within(reviewCard).getByText('复核提示')).toBeInTheDocument()
+        expect(within(reviewCard).getByText('3')).toBeInTheDocument()
+        expect(within(reviewCard).getByText('严重 1 个 · 提醒 1 个 · 记录 1 个')).toBeInTheDocument()
       })
     })
 
@@ -1633,8 +1643,7 @@ describe('UsersPage', () => {
         expect(screen.getByText('testuser')).toBeInTheDocument()
       })
 
-      await user.click(screen.getByRole('button', { name: 'testuser 用户操作' }))
-      await user.click(screen.getAllByRole('menuitem').find((item) => item.textContent?.includes('编辑用户'))!)
+      await clickUserActionMenuItem(user, 'testuser', '编辑用户')
 
       await waitFor(() => {
         expect(screen.getByRole('heading', { name: '编辑用户' })).toBeInTheDocument()
@@ -1666,8 +1675,7 @@ describe('UsersPage', () => {
         expect(screen.getByText('testuser')).toBeInTheDocument()
       })
 
-      await user.click(screen.getByRole('button', { name: 'testuser 用户操作' }))
-      await user.click(screen.getAllByRole('menuitem').find((item) => item.textContent?.includes('编辑用户'))!)
+      await clickUserActionMenuItem(user, 'testuser', '编辑用户')
 
       await waitFor(() => {
         expect(screen.getByRole('heading', { name: '编辑用户' })).toBeInTheDocument()
@@ -1687,8 +1695,7 @@ describe('UsersPage', () => {
         expect(screen.getByText('testuser')).toBeInTheDocument()
       })
 
-      await user.click(screen.getByRole('button', { name: 'testuser 用户操作' }))
-      await user.click(screen.getAllByRole('menuitem').find((item) => item.textContent?.includes('编辑用户'))!)
+      await clickUserActionMenuItem(user, 'testuser', '编辑用户')
 
       await waitFor(() => {
         expect(screen.getByRole('heading', { name: '编辑用户' })).toBeInTheDocument()
@@ -1709,8 +1716,7 @@ describe('UsersPage', () => {
         expect(screen.getByText('testuser')).toBeInTheDocument()
       })
 
-      await user.click(screen.getByRole('button', { name: 'testuser 用户操作' }))
-      await user.click(screen.getAllByRole('menuitem').find((item) => item.textContent?.includes('编辑用户'))!)
+      await clickUserActionMenuItem(user, 'testuser', '编辑用户')
 
       await waitFor(() => {
         expect(screen.getByRole('heading', { name: '编辑用户' })).toBeInTheDocument()
@@ -1739,10 +1745,10 @@ describe('UsersPage', () => {
         expect(screen.getByText('testuser')).toBeInTheDocument()
       })
 
-      await user.click(screen.getByRole('button', { name: 'testuser 用户操作' }))
+      await openUserActionMenu(user, 'testuser')
 
       await waitFor(() => {
-        expect(screen.getByText('删除用户')).toBeInTheDocument()
+        expect(screen.getByRole('menuitem', { name: '删除用户' })).toBeInTheDocument()
       })
     })
 
@@ -1754,8 +1760,7 @@ describe('UsersPage', () => {
         expect(screen.getByText('testuser')).toBeInTheDocument()
       })
 
-      await user.click(screen.getByRole('button', { name: 'testuser 用户操作' }))
-      await user.click(screen.getAllByRole('menuitem').find((item) => item.textContent?.includes('删除用户'))!)
+      await clickUserActionMenuItem(user, 'testuser', '删除用户')
 
       await waitFor(() => {
         expect(screen.getByRole('heading', { name: '确认删除' })).toBeInTheDocument()
@@ -1778,8 +1783,7 @@ describe('UsersPage', () => {
         expect(screen.getByText('testuser')).toBeInTheDocument()
       })
 
-      await user.click(screen.getByRole('button', { name: 'testuser 用户操作' }))
-      await user.click(screen.getAllByRole('menuitem').find((item) => item.textContent?.includes('删除用户'))!)
+      await clickUserActionMenuItem(user, 'testuser', '删除用户')
       await user.click(screen.getByRole('button', { name: '删除' }))
 
       await waitFor(() => {
@@ -1797,13 +1801,7 @@ describe('UsersPage', () => {
         expect(screen.getByText('testuser')).toBeInTheDocument()
       })
 
-      await user.click(screen.getByRole('button', { name: 'testuser 用户操作' }))
-
-      await waitFor(() => {
-        expect(screen.getByText('禁用用户')).toBeInTheDocument()
-      })
-
-      await user.click(screen.getByText('禁用用户'))
+      await clickUserActionMenuItem(user, 'testuser', '禁用用户')
 
       await waitFor(() => {
         expect(usersApi.toggleUserStatus).toHaveBeenCalledWith('user-2', true, expect.objectContaining({ signal: expect.any(AbortSignal) }))
@@ -1819,13 +1817,7 @@ describe('UsersPage', () => {
         expect(screen.getByText('guest')).toBeInTheDocument()
       })
 
-      await user.click(screen.getByRole('button', { name: 'guest 用户操作' }))
-
-      await waitFor(() => {
-        expect(screen.getByText('启用用户')).toBeInTheDocument()
-      })
-
-      await user.click(screen.getByText('启用用户'))
+      await clickUserActionMenuItem(user, 'guest', '启用用户')
 
       await waitFor(() => {
         expect(usersApi.toggleUserStatus).toHaveBeenCalledWith('user-3', false, expect.objectContaining({ signal: expect.any(AbortSignal) }))
@@ -1842,13 +1834,7 @@ describe('UsersPage', () => {
         expect(screen.getByText('testuser')).toBeInTheDocument()
       })
 
-      await user.click(screen.getByRole('button', { name: 'testuser 用户操作' }))
-
-      await waitFor(() => {
-        expect(screen.getByText('让现有登录失效')).toBeInTheDocument()
-      })
-
-      await user.click(screen.getByText('让现有登录失效'))
+      await clickUserActionMenuItem(user, 'testuser', '让现有登录失效')
 
       await waitFor(() => {
         expect(usersApi.revokeUserSessions).toHaveBeenCalledWith('user-2', expect.objectContaining({ signal: expect.any(AbortSignal) }))
@@ -1866,8 +1852,7 @@ describe('UsersPage', () => {
         expect(screen.getByText('guest')).toBeInTheDocument()
       })
 
-      await user.click(screen.getByRole('button', { name: 'testuser 用户操作' }))
-      await user.click(screen.getByText('让现有登录失效'))
+      await clickUserActionMenuItem(user, 'testuser', '让现有登录失效')
 
       await waitFor(() => {
         expect(mockAddToast).toHaveBeenCalledWith({ title: '用户已不存在，已同步更新', color: 'warning' })
@@ -1890,8 +1875,7 @@ describe('UsersPage', () => {
         expect(screen.getByText('testuser')).toBeInTheDocument()
       })
 
-      await user.click(screen.getByRole('button', { name: 'testuser 用户操作' }))
-      await user.click(screen.getByText('让现有登录失效'))
+      await clickUserActionMenuItem(user, 'testuser', '让现有登录失效')
 
       await waitFor(() => {
         expect(mockAddToast).toHaveBeenCalledWith({
@@ -1922,8 +1906,7 @@ describe('UsersPage', () => {
         expect(screen.getByText('testuser')).toBeInTheDocument()
       })
 
-      await user.click(screen.getByRole('button', { name: 'testuser 用户操作' }))
-      await user.click(screen.getAllByRole('menuitem').find((item) => item.textContent?.includes('删除用户'))!)
+      await clickUserActionMenuItem(user, 'testuser', '删除用户')
 
       await waitFor(() => {
         expect(screen.getByRole('button', { name: '删除' })).toBeInTheDocument()
@@ -1967,8 +1950,7 @@ describe('UsersPage', () => {
         expect(screen.getByText('guest')).toBeInTheDocument()
       })
 
-      await user.click(screen.getByRole('button', { name: 'testuser 用户操作' }))
-      await user.click(screen.getAllByRole('menuitem').find((item) => item.textContent?.includes('删除用户'))!)
+      await clickUserActionMenuItem(user, 'testuser', '删除用户')
 
       await waitFor(() => {
         expect(screen.getByRole('button', { name: '删除' })).toBeInTheDocument()
@@ -2007,8 +1989,7 @@ describe('UsersPage', () => {
         expect(screen.getByText('guest')).toBeInTheDocument()
       })
 
-      await user.click(screen.getByRole('button', { name: 'testuser 用户操作' }))
-      await user.click(screen.getAllByRole('menuitem').find((item) => item.textContent?.includes('删除用户'))!)
+      await clickUserActionMenuItem(user, 'testuser', '删除用户')
 
       await waitFor(() => {
         expect(screen.getByRole('button', { name: '删除' })).toBeInTheDocument()
@@ -2041,8 +2022,7 @@ describe('UsersPage', () => {
         expect(screen.getByText('testuser')).toBeInTheDocument()
       })
 
-      await user.click(screen.getByRole('button', { name: 'testuser 用户操作' }))
-      await user.click(screen.getAllByRole('menuitem').find((item) => item.textContent?.includes('删除用户'))!)
+      await clickUserActionMenuItem(user, 'testuser', '删除用户')
       await user.click(screen.getByRole('button', { name: '删除' }))
 
       await waitFor(() => {
@@ -2064,10 +2044,10 @@ describe('UsersPage', () => {
         expect(screen.getByText('testuser')).toBeInTheDocument()
       })
 
-      await user.click(screen.getByRole('button', { name: 'testuser 用户操作' }))
+      await openUserActionMenu(user, 'testuser')
 
       await waitFor(() => {
-        expect(screen.getByText('重置密码')).toBeInTheDocument()
+        expect(screen.getByRole('menuitem', { name: '重置密码' })).toBeInTheDocument()
       })
     })
 
@@ -2079,8 +2059,7 @@ describe('UsersPage', () => {
         expect(screen.getByText('testuser')).toBeInTheDocument()
       })
 
-      await user.click(screen.getByRole('button', { name: 'testuser 用户操作' }))
-      await user.click(screen.getAllByRole('menuitem').find((item) => item.textContent?.includes('重置密码'))!)
+      await clickUserActionMenuItem(user, 'testuser', '重置密码')
 
       await waitFor(() => {
         expect(screen.getByLabelText('新密码')).toBeInTheDocument()
@@ -2093,8 +2072,7 @@ describe('UsersPage', () => {
         expect(screen.queryByLabelText('新密码')).not.toBeInTheDocument()
       })
 
-      await user.click(screen.getByRole('button', { name: 'testuser 用户操作' }))
-      await user.click(screen.getAllByRole('menuitem').find((item) => item.textContent?.includes('重置密码'))!)
+      await clickUserActionMenuItem(user, 'testuser', '重置密码')
 
       await waitFor(() => {
         expect(screen.getByLabelText('新密码')).toHaveValue('')
@@ -2111,8 +2089,7 @@ describe('UsersPage', () => {
         expect(screen.getByText('testuser')).toBeInTheDocument()
       })
 
-      await user.click(screen.getByRole('button', { name: 'testuser 用户操作' }))
-      await user.click(screen.getAllByRole('menuitem').find((item) => item.textContent?.includes('重置密码'))!)
+      await clickUserActionMenuItem(user, 'testuser', '重置密码')
 
       await user.type(screen.getByLabelText('新密码'), 'password123')
       await user.click(screen.getByRole('button', { name: '确认重置' }))
@@ -2138,8 +2115,7 @@ describe('UsersPage', () => {
         expect(screen.getByText('testuser')).toBeInTheDocument()
       })
 
-      await user.click(screen.getByRole('button', { name: 'testuser 用户操作' }))
-      await user.click(screen.getAllByRole('menuitem').find((item) => item.textContent?.includes('重置密码'))!)
+      await clickUserActionMenuItem(user, 'testuser', '重置密码')
 
       await waitFor(() => {
         expect(screen.getByRole('button', { name: '确认重置' })).toBeInTheDocument()
@@ -2188,8 +2164,7 @@ describe('UsersPage', () => {
         expect(screen.getByText('guest')).toBeInTheDocument()
       })
 
-      await user.click(screen.getByRole('button', { name: 'testuser 用户操作' }))
-      await user.click(screen.getAllByRole('menuitem').find((item) => item.textContent?.includes('重置密码'))!)
+      await clickUserActionMenuItem(user, 'testuser', '重置密码')
 
       await waitFor(() => {
         expect(screen.getByRole('button', { name: '确认重置' })).toBeInTheDocument()
@@ -2223,8 +2198,7 @@ describe('UsersPage', () => {
         expect(screen.getByText('testuser')).toBeInTheDocument()
       })
 
-      await user.click(screen.getByRole('button', { name: 'testuser 用户操作' }))
-      await user.click(screen.getAllByRole('menuitem').find((item) => item.textContent?.includes('重置密码'))!)
+      await clickUserActionMenuItem(user, 'testuser', '重置密码')
       await user.type(screen.getByLabelText('新密码'), 'password123')
       await user.click(screen.getByRole('button', { name: '确认重置' }))
 
@@ -2280,8 +2254,7 @@ describe('UsersPage', () => {
         expect(screen.getByText('testuser')).toBeInTheDocument()
       })
 
-      await user.click(screen.getByRole('button', { name: 'testuser 用户操作' }))
-      await user.click(screen.getAllByRole('menuitem').find((item) => item.textContent?.includes('编辑用户'))!)
+      await clickUserActionMenuItem(user, 'testuser', '编辑用户')
       await user.click(screen.getByRole('button', { name: '保存' }))
 
       await waitFor(() => {
@@ -2309,8 +2282,7 @@ describe('UsersPage', () => {
         expect(screen.getByText('testuser')).toBeInTheDocument()
       })
 
-      await user.click(screen.getByRole('button', { name: 'testuser 用户操作' }))
-      await user.click(screen.getAllByRole('menuitem').find((item) => item.textContent?.includes('删除用户'))!)
+      await clickUserActionMenuItem(user, 'testuser', '删除用户')
       await user.click(screen.getByRole('button', { name: '删除' }))
 
       await waitFor(() => {
@@ -2338,8 +2310,7 @@ describe('UsersPage', () => {
         expect(screen.getByText('testuser')).toBeInTheDocument()
       })
 
-      await user.click(screen.getByRole('button', { name: 'testuser 用户操作' }))
-      await user.click(screen.getAllByRole('menuitem').find((item) => item.textContent?.includes('重置密码'))!)
+      await clickUserActionMenuItem(user, 'testuser', '重置密码')
       await user.type(screen.getByLabelText('新密码'), 'password123')
       await user.click(screen.getByRole('button', { name: '确认重置' }))
 
@@ -2368,8 +2339,7 @@ describe('UsersPage', () => {
         expect(screen.getByText('testuser')).toBeInTheDocument()
       })
 
-      await user.click(screen.getByRole('button', { name: 'testuser 用户操作' }))
-      await user.click(screen.getByText('禁用用户'))
+      await clickUserActionMenuItem(user, 'testuser', '禁用用户')
 
       await waitFor(() => {
         expectAbortSignal(signal)
@@ -2396,8 +2366,7 @@ describe('UsersPage', () => {
         expect(screen.getByText('testuser')).toBeInTheDocument()
       })
 
-      await user.click(screen.getByRole('button', { name: 'testuser 用户操作' }))
-      await user.click(screen.getByText('让现有登录失效'))
+      await clickUserActionMenuItem(user, 'testuser', '让现有登录失效')
 
       await waitFor(() => {
         expectAbortSignal(signal)
@@ -2620,13 +2589,7 @@ describe('UsersPage', () => {
         expect(screen.getByText('testuser')).toBeInTheDocument()
       })
 
-      await user.click(screen.getByRole('button', { name: 'testuser 用户操作' }))
-
-      await waitFor(() => {
-        expect(screen.getByText('禁用用户')).toBeInTheDocument()
-      })
-
-      await user.click(screen.getByText('禁用用户'))
+      await clickUserActionMenuItem(user, 'testuser', '禁用用户')
 
       await waitFor(() => {
         expect(mockAddToast).toHaveBeenCalledWith({
@@ -2647,13 +2610,7 @@ describe('UsersPage', () => {
         expect(screen.getByText('testuser')).toBeInTheDocument()
       })
 
-      await user.click(screen.getByRole('button', { name: 'testuser 用户操作' }))
-
-      await waitFor(() => {
-        expect(screen.getByText('让现有登录失效')).toBeInTheDocument()
-      })
-
-      await user.click(screen.getByText('让现有登录失效'))
+      await clickUserActionMenuItem(user, 'testuser', '让现有登录失效')
 
       await waitFor(() => {
         expect(mockAddToast).toHaveBeenCalledWith({
@@ -2681,13 +2638,7 @@ describe('UsersPage', () => {
         expect(screen.getByText('admin')).toBeInTheDocument()
       })
 
-      await user.click(screen.getByRole('button', { name: 'admin 用户操作' }))
-
-      await waitFor(() => {
-        expect(screen.getByText('禁用用户')).toBeInTheDocument()
-      })
-
-      await user.click(screen.getByText('禁用用户'))
+      await clickUserActionMenuItem(user, 'admin', '禁用用户')
 
       await waitFor(() => {
         expect(mockAddToast).toHaveBeenCalledWith({
@@ -2715,13 +2666,7 @@ describe('UsersPage', () => {
         expect(screen.getByText('admin')).toBeInTheDocument()
       })
 
-      await user.click(screen.getByRole('button', { name: 'admin 用户操作' }))
-
-      await waitFor(() => {
-        expect(screen.getByText('禁用用户')).toBeInTheDocument()
-      })
-
-      await user.click(screen.getByText('禁用用户'))
+      await clickUserActionMenuItem(user, 'admin', '禁用用户')
 
       await waitFor(() => {
         expect(mockAddToast).toHaveBeenCalledWith({
@@ -2743,13 +2688,7 @@ describe('UsersPage', () => {
         expect(screen.getByText('guest')).toBeInTheDocument()
       })
 
-      await user.click(screen.getByRole('button', { name: 'testuser 用户操作' }))
-
-      await waitFor(() => {
-        expect(screen.getByText('禁用用户')).toBeInTheDocument()
-      })
-
-      await user.click(screen.getByText('禁用用户'))
+      await clickUserActionMenuItem(user, 'testuser', '禁用用户')
 
       await waitFor(() => {
         expect(mockAddToast).toHaveBeenCalledWith({ title: '用户已不存在，已同步更新', color: 'warning' })
@@ -2773,13 +2712,7 @@ describe('UsersPage', () => {
         expect(screen.getByText('testuser')).toBeInTheDocument()
       })
 
-      await user.click(screen.getByRole('button', { name: 'testuser 用户操作' }))
-
-      await waitFor(() => {
-        expect(screen.getByText('禁用用户')).toBeInTheDocument()
-      })
-
-      await user.click(screen.getByText('禁用用户'))
+      await clickUserActionMenuItem(user, 'testuser', '禁用用户')
 
       await waitFor(() => {
         expect(mockAddToast).toHaveBeenCalledWith({

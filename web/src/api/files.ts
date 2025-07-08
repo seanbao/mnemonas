@@ -1,8 +1,8 @@
 import type { FileItem } from '@/stores/files'
 import { readDownloadJsonErrorDetails, triggerBrowserDownload } from '@/lib/downloadResponse'
 import { INVALID_API_RESPONSE_MESSAGE } from '@/lib/apiMessages'
-import { readStructuredJsonErrorDetails } from '@/lib/jsonErrorResponse'
-import { ensureZipExtension, sanitizeFilename, normalizePath, encodePathForUrl, getFilenameFromContentDisposition } from '@/lib/utils'
+import { getNonBlankJsonString, readStructuredJsonErrorDetails } from '@/lib/jsonErrorResponse'
+import { ensureZipExtension, sanitizeFilename, normalizePath, encodePathForUrl, getFilenameFromContentDisposition, hasControlCharacter } from '@/lib/utils'
 import { authFetch, refreshAuthSession } from './auth'
 
 export type { FileItem }
@@ -352,8 +352,9 @@ async function expectWrappedActionResponse<T>(
 
   return {
     warning: response.headers?.get?.('Warning') != null
+      || body.warning === true
       || (isRecord(data) && data.warning === true),
-    message: typeof body.message === 'string' && body.message ? body.message : undefined,
+    message: getNonBlankJsonString(body.message),
   }
 }
 
@@ -382,7 +383,48 @@ async function throwDownloadApiErrorFromJsonResponse(response: Response): Promis
     return
   }
 
-  throw new ApiError(details.message, response.status, response.statusText, details.code)
+  const localizedDetails = localizeDownloadApiErrorDetails(details)
+  throw new ApiError(localizedDetails.message, response.status, response.statusText, localizedDetails.code)
+}
+
+async function throwDownloadApiErrorFromResponse(response: Response): Promise<never> {
+  let message = '下载文件失败'
+  let code: string | undefined
+  const structuredDetails = await readStructuredJsonErrorDetails(response, message)
+  if (structuredDetails) {
+    const localizedDetails = localizeDownloadApiErrorDetails(structuredDetails)
+    throw new ApiError(localizedDetails.message, response.status, response.statusText, localizedDetails.code)
+  }
+
+  try {
+    const details = localizeDownloadApiErrorDetails(extractApiErrorDetails(await response.json(), message))
+    message = details.message
+    code = details.code
+  } catch {
+    // Keep the fallback message when the body is missing or invalid.
+  }
+
+  throw new ApiError(message, response.status, response.statusText, code)
+}
+
+function localizeDownloadApiErrorDetails(details: { message: string; code?: string }): { message: string; code?: string } {
+  const localized = localizedDownloadApiErrorMessage(details.message)
+  return localized ? { ...details, message: localized } : details
+}
+
+function localizedDownloadApiErrorMessage(message: string): string | undefined {
+  switch (message.trim()) {
+    case 'archive contains too many entries':
+      return '归档包含的条目过多'
+    case 'archive content is too large':
+      return '归档内容过大'
+    case 'archive contains duplicate entries':
+      return '归档条目名称冲突，请刷新后重试'
+    case 'archive entry changed during download':
+      return '文件内容已变更，请刷新后重试'
+    default:
+      return undefined
+  }
 }
 
 function extractApiErrorDetails(body: unknown, fallback: string): {
@@ -393,31 +435,32 @@ function extractApiErrorDetails(body: unknown, fallback: string): {
     return { message: fallback }
   }
 
-  const topLevelCode = typeof body.code === 'string' ? body.code : undefined
+  const topLevelCode = getNonBlankJsonString(body.code)
 
-  if (typeof body.error === 'string' && body.error) {
-    return { message: body.error, code: topLevelCode }
+  const stringError = getNonBlankJsonString(body.error)
+  if (stringError !== undefined) {
+    return { message: stringError, code: topLevelCode }
   }
 
   if (isRecord(body.error)) {
-    const message = typeof body.error.message === 'string' && body.error.message
-      ? body.error.message
-      : undefined
-    const code = typeof body.error.code === 'string' ? body.error.code : topLevelCode
+    const message = getNonBlankJsonString(body.error.message)
+    const code = getNonBlankJsonString(body.error.code) ?? topLevelCode
 
-    if (message) {
+    if (message !== undefined) {
       return { message, code }
     }
 
-    if (typeof body.message === 'string' && body.message) {
-      return { message: body.message, code }
+    const topLevelMessage = getNonBlankJsonString(body.message)
+    if (topLevelMessage !== undefined) {
+      return { message: topLevelMessage, code }
     }
 
     return { message: fallback, code }
   }
 
-  if (typeof body.message === 'string' && body.message) {
-    return { message: body.message, code: topLevelCode }
+  const topLevelMessage = getNonBlankJsonString(body.message)
+  if (topLevelMessage !== undefined) {
+    return { message: topLevelMessage, code: topLevelCode }
   }
 
   return { message: fallback, code: topLevelCode }
@@ -461,8 +504,10 @@ function getActionResultFromXhr(xhr: XMLHttpRequest): ActionResult {
     try {
       const body = JSON.parse(xhr.responseText)
       if (isRecord(body)) {
-        if (typeof body.message === 'string' && body.message) {
-          message = body.message
+        message = getNonBlankJsonString(body.message)
+
+        if (body.warning === true) {
+          dataWarning = true
         }
 
         if (isRecord(body.data) && body.data.warning === true) {
@@ -484,6 +529,7 @@ function getActionResultFromXhr(xhr: XMLHttpRequest): ActionResult {
 interface ApiResponseWrapper<T> {
   success: boolean
   data: T
+  warning?: boolean
   message?: string
   timestamp: string
 }
@@ -886,18 +932,8 @@ function isLogicalPathString(value: unknown): value is string {
   }
 }
 
-function hasInvalidHostPathControlCharacter(value: string): boolean {
-  for (let index = 0; index < value.length; index += 1) {
-    const code = value.charCodeAt(index)
-    if (code < 0x20 || code === 0x7f) {
-      return true
-    }
-  }
-  return false
-}
-
 function normalizeHostAbsolutePath(value: string): string {
-  if (hasInvalidHostPathControlCharacter(value) || value.includes('\\')) {
+  if (hasControlCharacter(value) || value.includes('\\')) {
     throw new Error('非法路径')
   }
 
@@ -1950,12 +1986,12 @@ function normalizeDiskHealthReport(data: {
       mediaErrors: device.media_errors,
       nvmeCriticalWarning: device.nvme_critical_warning,
       status: device.status,
-      message: device.message,
+      message: getNonBlankJsonString(device.message),
       temperatureWarningC: device.temperature_warning_c,
       temperatureCriticalC: device.temperature_critical_c,
     })),
     warnings: data.warnings,
-    message: data.message,
+    message: getNonBlankJsonString(data.message),
   }
 }
 
@@ -2083,7 +2119,7 @@ export async function getDiagnostics(options: RequestOptions = {}): Promise<Diag
       shareCount: data.smb.share_count,
       credentialsReady: data.smb.credentials_ready,
       gatewayConfigured: data.smb.gateway_configured,
-      message: data.smb.message,
+      message: getNonBlankJsonString(data.smb.message),
     } : undefined,
     storage: data.storage ? {
       totalChunks: data.storage.total_chunks,
@@ -2284,7 +2320,7 @@ export async function downloadFile(
   const response = await authFetch(url, options?.signal ? { signal: options.signal } : {})
 
   if (!response.ok) {
-    await throwApiErrorFromResponse(response, '下载文件失败')
+    await throwDownloadApiErrorFromResponse(response)
   }
 
   const pathFilename = normalizedPath.split('/').filter(Boolean).pop() ?? 'download'
@@ -2468,8 +2504,9 @@ export async function emptyTrash(options: RequestOptions = {}): Promise<EmptyTra
     deletedCount: data.deleted_count,
     partial: !!data.partial,
     warning: response.headers?.get?.('Warning') != null
+      || body.warning === true
       || (isRecord(data) && data.warning === true),
-    message: typeof body.message === 'string' && body.message ? body.message : undefined,
+    message: getNonBlankJsonString(body.message),
   }
 }
 
@@ -2536,8 +2573,9 @@ export async function runScrub(hashes?: string[], options: RequestOptions = {}):
     has_result: true,
     ...data,
     warning: response.headers?.get?.('Warning') != null
+      || body.warning === true
       || (isRecord(data) && data.warning === true),
-    message: typeof body.message === 'string' && body.message ? body.message : undefined,
+    message: getNonBlankJsonString(body.message),
   }
   if (!result.status) {
     result.status = 'completed'

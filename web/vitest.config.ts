@@ -11,6 +11,7 @@ if (!globalThis.crypto || typeof globalThis.crypto.getRandomValues !== 'function
 export default defineConfig({
   plugins: [react()],
   test: {
+    allowOnly: false,
     globals: true,
     environment: 'happy-dom',
     setupFiles: ['./src/test/setup.ts'],

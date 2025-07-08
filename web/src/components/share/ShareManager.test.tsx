@@ -619,6 +619,8 @@ describe('ShareManager', () => {
       ...mockShares[0],
       enabled: false,
       risk: { level: 'none' },
+      warning: false,
+      message: undefined,
     })
 
     render(<ShareManager />)
@@ -634,6 +636,42 @@ describe('ShareManager', () => {
       expect(mockAddToast).toHaveBeenCalledWith({ title: '已停用 1 个需处理分享', color: 'success' })
       expect(screen.getByText('已禁用')).toBeInTheDocument()
       expect(screen.queryByText('需处理')).not.toBeInTheDocument()
+    })
+  })
+
+  it('shows a warning toast when high-risk shares are disabled with persistence warnings', async () => {
+    const user = userEvent.setup()
+    vi.mocked(shareApi.listShares).mockResolvedValueOnce([
+      {
+        ...mockShares[0],
+        risk: {
+          level: 'high',
+          reasons: [
+            { code: 'no_password', level: 'high', message: '未设置密码，拿到链接的人都能访问' },
+          ],
+        },
+      },
+    ])
+    vi.mocked(shareApi.updateShare).mockResolvedValueOnce({
+      ...mockShares[0],
+      enabled: false,
+      risk: { level: 'none' },
+      warning: true,
+      message: 'share updated with persistence warning',
+    })
+
+    render(<ShareManager />)
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: '停用需处理 (1)' })).toBeInTheDocument()
+    })
+
+    await user.click(screen.getByRole('button', { name: '停用需处理 (1)' }))
+
+    await waitFor(() => {
+      expectUpdateShareCalledWithAbortSignal('share-1', { enabled: false })
+      expect(mockAddToast).toHaveBeenCalledWith({ title: '已停用 1 个需处理分享，但存在警告', color: 'warning' })
+      expect(screen.getByText('已禁用')).toBeInTheDocument()
     })
   })
 
@@ -832,7 +870,12 @@ describe('ShareManager', () => {
 
   it('disables an enabled share successfully', async () => {
     const user = userEvent.setup()
-    vi.mocked(shareApi.updateShare).mockResolvedValueOnce({ ...mockShares[0], enabled: false })
+    vi.mocked(shareApi.updateShare).mockResolvedValueOnce({
+      ...mockShares[0],
+      enabled: false,
+      warning: false,
+      message: undefined,
+    })
 
     render(<ShareManager />)
 
@@ -846,6 +889,31 @@ describe('ShareManager', () => {
     await waitFor(() => {
       expectUpdateShareCalledWithAbortSignal('share-1', { enabled: false })
       expect(mockAddToast).toHaveBeenCalledWith({ title: '分享已禁用', color: 'success' })
+      expect(screen.getByText('已禁用')).toBeInTheDocument()
+    })
+  })
+
+  it('shows a warning toast when disabling a share succeeds with persistence warnings', async () => {
+    const user = userEvent.setup()
+    vi.mocked(shareApi.updateShare).mockResolvedValueOnce({
+      ...mockShares[0],
+      enabled: false,
+      warning: true,
+      message: 'share updated with persistence warning',
+    })
+
+    render(<ShareManager />)
+
+    await waitFor(() => {
+      expect(screen.getByText('report.pdf')).toBeInTheDocument()
+    })
+
+    await user.click(screen.getByLabelText('report.pdf 分享操作'))
+    await user.click(await screen.findByText('禁用分享'))
+
+    await waitFor(() => {
+      expectUpdateShareCalledWithAbortSignal('share-1', { enabled: false })
+      expect(mockAddToast).toHaveBeenCalledWith({ title: '分享已禁用，但存在警告', color: 'warning' })
       expect(screen.getByText('已禁用')).toBeInTheDocument()
     })
   })
@@ -876,7 +944,12 @@ describe('ShareManager', () => {
     const user = userEvent.setup()
     const disabledShare = { ...mockShares[0], enabled: false }
     vi.mocked(shareApi.listShares).mockResolvedValueOnce([disabledShare])
-    vi.mocked(shareApi.updateShare).mockResolvedValueOnce({ ...disabledShare, enabled: true })
+    vi.mocked(shareApi.updateShare).mockResolvedValueOnce({
+      ...disabledShare,
+      enabled: true,
+      warning: false,
+      message: undefined,
+    })
 
     render(<ShareManager />)
 
@@ -890,6 +963,33 @@ describe('ShareManager', () => {
     await waitFor(() => {
       expectUpdateShareCalledWithAbortSignal('share-1', { enabled: true })
       expect(mockAddToast).toHaveBeenCalledWith({ title: '分享已启用', color: 'success' })
+      expect(screen.queryByText('已禁用')).not.toBeInTheDocument()
+    })
+  })
+
+  it('shows a warning toast when enabling a share succeeds with persistence warnings', async () => {
+    const user = userEvent.setup()
+    const disabledShare = { ...mockShares[0], enabled: false }
+    vi.mocked(shareApi.listShares).mockResolvedValueOnce([disabledShare])
+    vi.mocked(shareApi.updateShare).mockResolvedValueOnce({
+      ...disabledShare,
+      enabled: true,
+      warning: true,
+      message: 'share updated with persistence warning',
+    })
+
+    render(<ShareManager />)
+
+    await waitFor(() => {
+      expect(screen.getByText('已禁用')).toBeInTheDocument()
+    })
+
+    await user.click(screen.getByLabelText('report.pdf 分享操作'))
+    await user.click(await screen.findByText('启用分享'))
+
+    await waitFor(() => {
+      expectUpdateShareCalledWithAbortSignal('share-1', { enabled: true })
+      expect(mockAddToast).toHaveBeenCalledWith({ title: '分享已启用，但存在警告', color: 'warning' })
       expect(screen.queryByText('已禁用')).not.toBeInTheDocument()
     })
   })

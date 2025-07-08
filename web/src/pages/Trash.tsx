@@ -39,6 +39,12 @@ import { useBatchOperation, type BatchOperationResult } from '@/lib/useBatchOper
 import { GENERIC_ACTION_ERROR_DESCRIPTION, GENERIC_LOAD_ERROR_DESCRIPTION, getUserFacingErrorDescription } from '@/lib/apiMessages'
 import { PageHeader } from '@/components/ui/PageHeader'
 import { useCanWrite, useUser } from '@/stores/auth'
+import {
+  getPathConflictErrorToast,
+  getQuotaExceededErrorToast,
+  getSharedPathConflictErrorToast,
+  getSharedQuotaExceededErrorToast,
+} from '@/lib/fileActionErrors'
 
 // Calculate days until auto-delete based on retention config
 function daysUntilDelete(deletedAt: string, retentionDays: number): number | null {
@@ -109,6 +115,10 @@ function getMissingTrashItemResult(): ActionResult {
     warning: true,
     message: missingTrashItemTitle,
   }
+}
+
+function getTrashBatchWarningMessage(result: ActionResult): string | undefined {
+  return result.message === missingTrashItemTitle ? missingTrashItemTitle : undefined
 }
 
 function getTrashRestoreSuccessToast(result: ActionResult): {
@@ -185,6 +195,16 @@ function getTrashActionErrorPresentation(
     }
   }
 
+  const pathConflictToast = getPathConflictErrorToast(error)
+  if (pathConflictToast) {
+    return pathConflictToast
+  }
+
+  const quotaExceededToast = getQuotaExceededErrorToast(error)
+  if (quotaExceededToast) {
+    return quotaExceededToast
+  }
+
   return {
     title: titles.failure,
     description: getUserFacingErrorDescription(error, GENERIC_ACTION_ERROR_DESCRIPTION),
@@ -197,6 +217,7 @@ function getTrashBatchActionToast(
   titles: {
     unavailable: string
     warning: string
+    partial: string
   }
 ) {
   if (result.failed === 0 && result.warningCount > 0) {
@@ -213,6 +234,24 @@ function getTrashBatchActionToast(
     return {
       title: titles.unavailable,
       description: trashUnavailableDescription,
+      color: 'warning' as const,
+    }
+  }
+
+  const sharedFailureToast =
+    getSharedPathConflictErrorToast(result.failedErrors)
+    ?? getSharedQuotaExceededErrorToast(result.failedErrors)
+
+  if (result.succeeded === 0 && sharedFailureToast) {
+    return sharedFailureToast
+  }
+
+  if (result.succeeded > 0 && result.failed > 0 && sharedFailureToast) {
+    return {
+      title: titles.partial
+        .replace('{succeeded}', String(result.succeeded))
+        .replace('{failed}', String(result.failed)),
+      description: sharedFailureToast.description,
       color: 'warning' as const,
     }
   }
@@ -627,9 +666,11 @@ export function TrashPage() {
       failure: '{count} 项恢复失败',
       partial: '{succeeded} 项恢复成功，{failed} 项失败',
     },
+    getWarningMessage: getTrashBatchWarningMessage,
     getToast: (result) => getTrashBatchActionToast(result, {
       unavailable: '批量恢复暂不可用',
       warning: '已恢复 {count} 项，但存在警告',
+      partial: '{succeeded} 项恢复成功，{failed} 项失败',
     }),
     onComplete: (result) => {
       removeTrashItemsFromCache(result.succeededItems as string[])
@@ -663,9 +704,11 @@ export function TrashPage() {
       failure: '{count} 项永久删除失败',
       partial: '{succeeded} 项永久删除成功，{failed} 项失败',
     },
+    getWarningMessage: getTrashBatchWarningMessage,
     getToast: (result) => getTrashBatchActionToast(result, {
       unavailable: '批量永久删除暂不可用',
       warning: '已永久删除 {count} 项，但存在警告',
+      partial: '{succeeded} 项永久删除成功，{failed} 项失败',
     }),
     onComplete: (result) => {
       removeTrashItemsFromCache(result.succeededItems as string[])
@@ -757,7 +800,12 @@ export function TrashPage() {
 
   if (isLoading) {
     return (
-      <div className="flex h-full items-center justify-center p-6 lg:p-8">
+      <div
+        role="status"
+        aria-label="加载回收站"
+        aria-busy="true"
+        className="flex h-full items-center justify-center p-6 lg:p-8"
+      >
         <div className="text-center">
           <div className="w-12 h-12 border-3 border-accent-primary border-t-transparent rounded-full animate-spin mx-auto mb-4" />
           <p className="text-default-500">加载回收站...</p>
@@ -915,7 +963,7 @@ export function TrashPage() {
       )}
 
       {/* Item list */}
-      <div className="card-meridian min-h-0 flex-1 overflow-auto rounded-lg">
+      <div className="card-mnemonas min-h-0 flex-1 overflow-auto rounded-lg">
         {visibleItems.length > 0 ? (
           visibleItems.map(item => (
             <TrashRow
@@ -1092,6 +1140,7 @@ export function TrashPage() {
               color="danger"
               onPress={handleConfirmEmpty}
               isLoading={emptyMutation.isPending}
+              aria-label="确认清空回收站"
               className="rounded-lg"
             >
               清空回收站

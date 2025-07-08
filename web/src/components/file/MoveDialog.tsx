@@ -34,6 +34,7 @@ function isAbortError(error: unknown): boolean {
 function getMoveDialogSuccessToast(
   mode: 'move' | 'copy',
   successCount: number,
+  warningCount: number,
   warningMessages: string[]
 ): {
   title: string
@@ -41,7 +42,7 @@ function getMoveDialogSuccessToast(
 } {
   const actionText = mode === 'move' ? '移动' : '复制'
 
-  if (warningMessages.length > 0) {
+  if (warningCount > 0) {
     const synchronizedWarning = warningMessages.find(message => message === missingMoveSourceWarningTitle)
     return {
       title: synchronizedWarning ?? `成功${actionText} ${successCount} 个项目，但存在警告`,
@@ -89,6 +90,29 @@ function getMoveDialogFailureToast(
     title: `批量${actionText}失败`,
     description: `共 ${errorCount} 个项目失败`,
     color: 'danger',
+  }
+}
+
+function getMoveDialogPartialFailureToast(
+  mode: 'move' | 'copy',
+  successCount: number,
+  errorCount: number,
+  errors: unknown[]
+): {
+  title: string
+  description: string
+  color: 'warning'
+} {
+  const actionText = mode === 'move' ? '移动' : '复制'
+  const baseDescription = `成功 ${successCount} 个，失败 ${errorCount} 个`
+  const sharedFailureToast = getSharedPathConflictErrorToast(errors) ?? getSharedQuotaExceededErrorToast(errors)
+
+  return {
+    title: `批量${actionText}部分完成`,
+    description: sharedFailureToast?.description
+      ? `${baseDescription}；${sharedFailureToast.description}`
+      : baseDescription,
+    color: 'warning',
   }
 }
 
@@ -162,6 +186,7 @@ function MoveDialogContent({
     setIsProcessing(true)
     let successCount = 0
     let errorCount = 0
+    let warningCount = 0
     const failedFiles: typeof filesToProcess = []
     const failedErrors: unknown[] = []
     const warningMessages: string[] = []
@@ -182,7 +207,10 @@ function MoveDialogContent({
               return
             }
             if (result.warning) {
-              warningMessages.push(result.message ?? '')
+              warningCount++
+              if (result.message === missingMoveSourceWarningTitle) {
+                warningMessages.push(missingMoveSourceWarningTitle)
+              }
             }
           } else {
             const result = await copyFile(file.path, destPath, { signal })
@@ -190,7 +218,10 @@ function MoveDialogContent({
               return
             }
             if (result.warning) {
-              warningMessages.push(result.message ?? '')
+              warningCount++
+              if (result.message === missingMoveSourceWarningTitle) {
+                warningMessages.push(missingMoveSourceWarningTitle)
+              }
             }
           }
           successCount++
@@ -201,6 +232,7 @@ function MoveDialogContent({
 
           if (isMissingFileError(error)) {
             successCount++
+            warningCount++
             warningMessages.push(missingMoveSourceWarningTitle)
             continue
           }
@@ -224,7 +256,7 @@ function MoveDialogContent({
         if (isActiveRef.current) {
           onClose()
         }
-        addToast(getMoveDialogSuccessToast(mode, successCount, warningMessages))
+        addToast(getMoveDialogSuccessToast(mode, successCount, warningCount, warningMessages))
         return
       }
 
@@ -234,11 +266,7 @@ function MoveDialogContent({
       }
 
       if (successCount > 0) {
-        addToast({
-          title: `批量${actionText}部分完成`,
-          description: `成功 ${successCount} 个，失败 ${errorCount} 个`,
-          color: 'warning',
-        })
+        addToast(getMoveDialogPartialFailureToast(mode, successCount, errorCount, failedErrors))
       } else {
         addToast(getMoveDialogFailureToast(mode, successCount, errorCount, failedErrors))
       }
@@ -247,7 +275,7 @@ function MoveDialogContent({
         operationAbortControllerRef.current = null
       }
     }
-  }, [targetPath, isProcessing, pendingFiles, mode, normalizedCurrentPath, fileScopeKey, queryClient, onClose, actionText])
+  }, [targetPath, isProcessing, pendingFiles, mode, normalizedCurrentPath, fileScopeKey, queryClient, onClose])
 
   const handleClose = useCallback(() => {
     if (isProcessing) {
@@ -286,7 +314,7 @@ function MoveDialogContent({
             {/* Files to move */}
             <div className="mb-4">
               <div className="text-xs font-medium text-default-500 mb-2">
-                {actionText}以下项目:
+                {actionText}以下项目：
               </div>
               <div className="max-h-32 overflow-y-auto space-y-1 border border-divider rounded-lg p-2">
                 {pendingFiles.slice(0, 5).map(file => (
@@ -306,7 +334,7 @@ function MoveDialogContent({
             {/* Target selection */}
             <div>
               <div className="text-xs font-medium text-default-500 mb-2">
-                目标位置:
+                目标位置：
               </div>
               <Button
                 variant="bordered"

@@ -70,9 +70,24 @@ describe('themeStore', () => {
       useThemeStore.getState().setTheme('dark')
       useThemeStore.getState().setTheme('system')
       useThemeStore.getState().setTheme('light')
-      
+
       const state = useThemeStore.getState()
       expect(state.theme).toBe('light')
+    })
+
+    it('updates the active theme when localStorage writes are unavailable', () => {
+      const storageError = new DOMException('localStorage is blocked', 'SecurityError')
+      vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+        throw storageError
+      })
+
+      expect(() => useThemeStore.getState().setTheme('light')).not.toThrow()
+
+      expect(useThemeStore.getState()).toMatchObject({
+        theme: 'light',
+        resolvedTheme: 'light',
+      })
+      expect(document.documentElement.classList.contains('dark')).toBe(false)
     })
   })
 
@@ -173,7 +188,7 @@ describe('themeStore', () => {
         state: { theme: 'dark', resolvedTheme: 'dark' },
         version: 0
       }))
-      
+
       // Reset and let persist rehydrate
       useThemeStore.setState({ theme: 'dark', resolvedTheme: 'dark' })
       const state = useThemeStore.getState()
@@ -185,7 +200,7 @@ describe('themeStore', () => {
         state: { theme: 'light', resolvedTheme: 'light' },
         version: 0
       }))
-      
+
       const state = useThemeStore.getState()
       expect(['dark', 'light']).toContain(state.theme)
     })
@@ -326,6 +341,33 @@ describe('themeStore module initialization', () => {
     expect(document.documentElement.classList.contains('dark')).toBe(false)
   })
 
+  it('ignores unknown stored theme values during module initialization', async () => {
+    vi.spyOn(window, 'matchMedia').mockImplementation((query) => ({
+      matches: !query.includes('dark'),
+      media: query,
+      onchange: null,
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    }))
+    localStorage.setItem('mnemonas-theme', JSON.stringify({
+      state: { theme: 'solarized', resolvedTheme: 'dark' },
+      version: 0,
+    }))
+    document.documentElement.classList.add('dark')
+
+    await vi.resetModules()
+    const { useThemeStore: isolatedThemeStore } = await import('./theme')
+
+    expect(isolatedThemeStore.getState()).toMatchObject({
+      theme: 'system',
+      resolvedTheme: 'light',
+    })
+    expect(document.documentElement.classList.contains('dark')).toBe(false)
+  })
+
   it('can initialize and update without browser globals', async () => {
     vi.stubGlobal('window', undefined)
     vi.stubGlobal('document', undefined)
@@ -342,6 +384,32 @@ describe('themeStore module initialization', () => {
       expect(isolatedThemeStore.getState().resolvedTheme).toBe('dark')
     } finally {
       vi.unstubAllGlobals()
+    }
+  })
+
+  it('can initialize and update when matchMedia is unavailable', async () => {
+    const originalMatchMedia = Object.getOwnPropertyDescriptor(window, 'matchMedia')
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      value: undefined,
+    })
+
+    try {
+      await vi.resetModules()
+      const { useThemeStore: isolatedThemeStore } = await import('./theme')
+
+      expect(isolatedThemeStore.getState().resolvedTheme).toBe('light')
+
+      isolatedThemeStore.getState().setTheme('system')
+
+      expect(isolatedThemeStore.getState()).toMatchObject({
+        theme: 'system',
+        resolvedTheme: 'light',
+      })
+    } finally {
+      if (originalMatchMedia) {
+        Object.defineProperty(window, 'matchMedia', originalMatchMedia)
+      }
     }
   })
 })

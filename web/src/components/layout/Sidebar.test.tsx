@@ -36,6 +36,10 @@ function expectCalledWithAbortSignal(mockFn: ReturnType<typeof vi.fn>) {
   expect(Object.keys((call?.[0] ?? {}) as Record<string, unknown>).sort()).toEqual(['signal'])
 }
 
+function expectSidebarLinkHref(name: string, href: string) {
+  expect(screen.getByRole('link', { name })).toHaveAttribute('href', href)
+}
+
 vi.mock('@/stores/auth', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/stores/auth')>()
   return {
@@ -144,56 +148,47 @@ describe('Sidebar', () => {
   describe('navigation links', () => {
     it('has correct href for files', () => {
       render(<Sidebar />)
-      const link = screen.getByText('文件').closest('a')
-      expect(link).toHaveAttribute('href', '/files')
+      expectSidebarLinkHref('文件', '/files')
     })
 
     it('has correct href for album', () => {
       render(<Sidebar />)
-      const link = screen.getByText('相册').closest('a')
-      expect(link).toHaveAttribute('href', '/album')
+      expectSidebarLinkHref('相册', '/album')
     })
 
     it('has correct href for search', () => {
       render(<Sidebar />)
-      const link = screen.getByText('搜索').closest('a')
-      expect(link).toHaveAttribute('href', '/search')
+      expectSidebarLinkHref('搜索', '/search')
     })
 
     it('has correct href for versions', () => {
       render(<Sidebar />)
-      const link = screen.getByText('版本').closest('a')
-      expect(link).toHaveAttribute('href', '/versions')
+      expectSidebarLinkHref('版本', '/versions')
     })
 
     it('has correct href for trash', () => {
       render(<Sidebar />)
-      const link = screen.getByText('回收站').closest('a')
-      expect(link).toHaveAttribute('href', '/trash')
+      expectSidebarLinkHref('回收站', '/trash')
     })
 
     it('has correct href for storage', () => {
       render(<Sidebar />)
-      const link = screen.getByText('空间').closest('a')
-      expect(link).toHaveAttribute('href', '/storage')
+      expectSidebarLinkHref('空间', '/storage')
     })
 
     it('has correct href for maintenance', () => {
       render(<Sidebar />)
-      const link = screen.getByText('备份与维护').closest('a')
-      expect(link).toHaveAttribute('href', '/maintenance')
+      expectSidebarLinkHref('备份与维护', '/maintenance')
     })
 
     it('has correct href for health', () => {
       render(<Sidebar />)
-      const link = screen.getByText('设备状态').closest('a')
-      expect(link).toHaveAttribute('href', '/system-health')
+      expectSidebarLinkHref('设备状态', '/system-health')
     })
 
     it('has correct href for settings', () => {
       render(<Sidebar />)
-      const link = screen.getByText('设置').closest('a')
-      expect(link).toHaveAttribute('href', '/settings')
+      expectSidebarLinkHref('设置', '/settings')
     })
 
     it('invokes onClose when a navigation link is clicked', async () => {

@@ -5,7 +5,7 @@
 
 import { authFetch } from './auth'
 import { INVALID_API_RESPONSE_MESSAGE as INVALID_USERS_RESPONSE_MESSAGE } from '@/lib/apiMessages'
-import { readStructuredJsonErrorDetails } from '@/lib/jsonErrorResponse'
+import { getNonBlankJsonString, readStructuredJsonErrorDetails } from '@/lib/jsonErrorResponse'
 import { normalizeUserHomeDir } from '@/lib/utils'
 
 export interface User {
@@ -80,7 +80,9 @@ interface UsersApiError {
 interface UsersApiResponse<T> {
   success: boolean
   data?: T
+  warning?: boolean
   message?: string
+  code?: string
   error?: UsersApiError
 }
 
@@ -146,12 +148,16 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object'
 }
 
-function hasUsersWarning(response: Response, data: unknown): boolean {
+function hasUsersWarning(response: Response, body: UsersApiResponse<unknown>): boolean {
   const warningHeader = typeof response.headers?.get === 'function'
     ? response.headers.get('Warning')
     : null
 
-  return warningHeader != null || (isRecord(data) && data.warning === true)
+  return warningHeader != null || body.warning === true || (isRecord(body.data) && body.data.warning === true)
+}
+
+function getUsersActionMessage(body: UsersApiResponse<unknown>): string | undefined {
+  return getNonBlankJsonString(body.message)
 }
 
 export class UsersError extends Error {
@@ -193,7 +199,9 @@ async function parseUsersError(response: Response, fallback: string): Promise<Us
 
   try {
     const body = await response.json() as UsersApiResponse<never>
-    return new UsersError(body.error?.message || body.message || fallback, response.status, body.error?.code)
+    const message = getNonBlankJsonString(body.error?.message) ?? getNonBlankJsonString(body.message) ?? fallback
+    const code = getNonBlankJsonString(body.error?.code) ?? getNonBlankJsonString(body.code)
+    return new UsersError(message, response.status, code)
   } catch {
     return new UsersError(fallback, response.status)
   }
@@ -295,8 +303,8 @@ export async function createUser(data: CreateUserRequest, options: UsersRequestO
   return {
     success: body.success,
     user: normalizeUser(body.data.user),
-    warning: hasUsersWarning(response, body.data),
-    message: body.message,
+    warning: hasUsersWarning(response, body),
+    message: getUsersActionMessage(body),
   }
 }
 
@@ -328,8 +336,8 @@ export async function updateUser(userId: string, data: UpdateUserRequest, option
   return {
     success: body.success,
     user: normalizeUser(body.data.user),
-    warning: hasUsersWarning(response, body.data),
-    message: body.message,
+    warning: hasUsersWarning(response, body),
+    message: getUsersActionMessage(body),
   }
 }
 
@@ -352,8 +360,8 @@ export async function deleteUser(userId: string, options: UsersRequestOptions = 
   }
   return {
     success: body.success,
-    warning: hasUsersWarning(response, body.data),
-    message: body.message,
+    warning: hasUsersWarning(response, body),
+    message: getUsersActionMessage(body),
   }
 }
 
@@ -384,8 +392,8 @@ export async function resetUserPassword(
   }
   return {
     success: body.success,
-    warning: hasUsersWarning(response, body.data),
-    message: body.message,
+    warning: hasUsersWarning(response, body),
+    message: getUsersActionMessage(body),
   }
 }
 
@@ -408,8 +416,8 @@ export async function revokeUserSessions(userId: string, options: UsersRequestOp
   }
   return {
     success: body.success,
-    warning: hasUsersWarning(response, body.data),
-    message: body.message,
+    warning: hasUsersWarning(response, body),
+    message: getUsersActionMessage(body),
   }
 }
 
@@ -440,7 +448,7 @@ export async function toggleUserStatus(
   }
   return {
     success: body.success,
-    warning: hasUsersWarning(response, body.data),
-    message: body.message,
+    warning: hasUsersWarning(response, body),
+    message: getUsersActionMessage(body),
   }
 }

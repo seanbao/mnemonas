@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import fc from 'fast-check'
-import { decodePathFromUrl, encodePathForUrl, normalizePath, pathWithinBase } from './utils'
+import { decodePathFromUrl, encodePathForUrl, hasControlCharacter, normalizePath, pathWithinBase } from './utils'
 
 const propertyOptions = {
   numRuns: 300,
@@ -9,13 +9,13 @@ const propertyOptions = {
 
 const urlSegmentArbitrary = fc
   .string({ maxLength: 16, unit: 'grapheme' })
-  .filter((segment) => !segment.includes('/') && !segment.includes('\0'))
+  .filter((segment) => !segment.includes('/') && !hasControlCharacter(segment))
 
 const safeSegmentArbitrary = fc
   .string({ minLength: 1, maxLength: 16, unit: 'grapheme' })
   .filter((segment) => (
     !segment.includes('/') &&
-    !segment.includes('\0') &&
+    !hasControlCharacter(segment) &&
     segment !== '.' &&
     segment !== '..'
   ))

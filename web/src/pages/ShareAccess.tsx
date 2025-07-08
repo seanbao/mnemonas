@@ -30,6 +30,8 @@ import { ensureZipExtension, formatBytes, formatDate } from '@/lib/utils'
 import { GENERIC_LOAD_ERROR_DESCRIPTION, getUserFacingErrorDescription } from '@/lib/apiMessages'
 import { getFolderPathAfterShareAuth } from './shareAccessUtils'
 
+const SHARE_ACCESS_PASSWORD_INPUT_ID = 'share-access-password'
+
 function hasAuthorizedShareContent(info: PublicShareInfo): boolean {
   return info.file_name !== undefined || info.file_size !== undefined || info.folder_items !== undefined
 }
@@ -63,6 +65,17 @@ function getGoneSharePresentation(error: ShareError): { title: string; descripti
   return null
 }
 
+function getMissingShareContentPresentation(error: ShareError): { title: string; description: string } | null {
+  if (error.code !== 'FILE_NOT_FOUND') {
+    return null
+  }
+
+  return {
+    title: '分享内容已不存在',
+    description: '该分享指向的文件或文件夹已被移动或删除，请联系分享创建者。',
+  }
+}
+
 function getShareAccessErrorPresentation(error: unknown): { title: string; description: string } {
   if (error instanceof ShareError) {
     if (error.isFeatureDisabled) {
@@ -70,6 +83,11 @@ function getShareAccessErrorPresentation(error: unknown): { title: string; descr
         title: '分享功能已关闭',
         description: '当前服务已关闭分享功能，公开分享链接暂不可访问。',
       }
+    }
+
+    const missingContentPresentation = getMissingShareContentPresentation(error)
+    if (missingContentPresentation) {
+      return missingContentPresentation
     }
 
     if (error.isNotFound) {
@@ -106,10 +124,17 @@ function getShareAccessErrorPresentation(error: unknown): { title: string; descr
 }
 
 function getShareListErrorPresentation(error: unknown): { title: string; description: string } {
-  if (error instanceof ShareError && error.isUnavailable) {
-    return {
-      title: '文件夹内容暂不可用',
-      description: '分享目录当前不可访问，请检查设备状态或稍后重试。',
+  if (error instanceof ShareError) {
+    const missingContentPresentation = getMissingShareContentPresentation(error)
+    if (missingContentPresentation) {
+      return missingContentPresentation
+    }
+
+    if (error.isUnavailable) {
+      return {
+        title: '文件夹内容暂不可用',
+        description: '分享目录当前不可访问，请检查设备状态或稍后重试。',
+      }
     }
   }
 
@@ -135,6 +160,14 @@ function getShareActionErrorToast(
       return {
         title: '分享功能已关闭',
         description: '当前服务已关闭分享功能，公开分享链接暂不可访问。',
+        color: 'warning',
+      }
+    }
+
+    const missingContentPresentation = getMissingShareContentPresentation(error)
+    if (missingContentPresentation) {
+      return {
+        ...missingContentPresentation,
         color: 'warning',
       }
     }
@@ -544,7 +577,7 @@ export function ShareAccessPage() {
         <Card className="w-full max-w-md rounded-lg border border-divider bg-content1 shadow-sm">
           <CardBody className="p-6 sm:p-8">
             <div className="mb-8 text-center">
-              <div className="gradient-meridian mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-lg">
+              <div className="gradient-mnemonas mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-lg">
                 <Lock size={28} className="text-white" />
               </div>
               <h2 className="text-xl font-semibold text-foreground">
@@ -555,8 +588,15 @@ export function ShareAccessPage() {
 
             <form onSubmit={handlePasswordSubmit} className="space-y-4">
               <div>
-                <label className="text-sm font-medium text-default-600 mb-1.5 block">访问密码</label>
+                <label
+                  htmlFor={SHARE_ACCESS_PASSWORD_INPUT_ID}
+                  className="text-sm font-medium text-default-600 mb-1.5 block"
+                >
+                  访问密码
+                </label>
                 <Input
+                  id={SHARE_ACCESS_PASSWORD_INPUT_ID}
+                  aria-label="访问密码"
                   type="password"
                   placeholder="请输入密码"
                   value={password}
@@ -591,7 +631,7 @@ export function ShareAccessPage() {
     <div className="app-shell min-h-[100svh] bg-background px-4 py-8 sm:py-12">
       <main className="mx-auto w-full max-w-2xl">
         <div className="mb-5 text-center">
-          <div className="gradient-meridian mx-auto mb-3 flex h-11 w-11 items-center justify-center rounded-lg">
+          <div className="gradient-mnemonas mx-auto mb-3 flex h-11 w-11 items-center justify-center rounded-lg">
             <HardDrive size={22} className="text-white" />
           </div>
           <p className="text-sm font-medium text-default-500">MnemoNAS 文件分享</p>

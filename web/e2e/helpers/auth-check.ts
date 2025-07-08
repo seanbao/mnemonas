@@ -1,7 +1,57 @@
-import { Page, expect, test } from '@playwright/test'
+import { expect, test, type Locator, type Page } from '@playwright/test'
 import { resolveE2ECredentials } from './credentials'
 
-async function waitForAppReady(page: Page): Promise<void> {
+export const LOGIN_BUTTON_PATTERN = /^(登录|sign in|login)$/i
+export const USERNAME_INPUT_PATTERN = /^用户名$/i
+export const PASSWORD_INPUT_PATTERN = /^密码$/i
+
+type AuthSurface = 'app' | 'login' | 'loading'
+
+async function isVisible(locator: Locator): Promise<boolean> {
+  return locator.isVisible().catch(() => false)
+}
+
+export function isAuthSkipAllowed(): boolean {
+  const value = process.env.MNEMONAS_E2E_ALLOW_AUTH_SKIP?.trim().toLowerCase()
+  return value === '1' || value === 'true' || value === 'yes'
+}
+
+function skipOrFail(message: string): never {
+  if (isAuthSkipAllowed()) {
+    test.skip(true, `Skipped: ${message}`)
+  }
+  throw new Error(`${message}. Set MNEMONAS_E2E_ALLOW_AUTH_SKIP=1 only when intentionally reusing an environment where protected-page checks may be skipped.`)
+}
+
+export async function waitForAuthSurface(page: Page, timeout = 10_000): Promise<Exclude<AuthSurface, 'loading'>> {
+  const desktopNavigation = page.getByRole('navigation', { name: '主导航' })
+  const mobileNavigation = page.getByRole('navigation', { name: '移动端主导航' })
+  const mobileMenuButton = page.getByRole('button', { name: '打开导航菜单' })
+  const usernameInput = page.getByLabel(USERNAME_INPUT_PATTERN)
+  const loginButton = page.getByRole('button', { name: LOGIN_BUTTON_PATTERN })
+  let observedSurface: AuthSurface = 'loading'
+
+  await expect.poll(async () => {
+    if (
+      await isVisible(desktopNavigation)
+      || await isVisible(mobileNavigation)
+      || await isVisible(mobileMenuButton)
+    ) {
+      observedSurface = 'app'
+      return observedSurface
+    }
+    if (await isVisible(usernameInput) && await isVisible(loginButton)) {
+      observedSurface = 'login'
+      return observedSurface
+    }
+    observedSurface = 'loading'
+    return observedSurface
+  }, { timeout }).not.toBe('loading')
+
+  return observedSurface as Exclude<AuthSurface, 'loading'>
+}
+
+export async function waitForAppReady(page: Page): Promise<void> {
   // Vite HMR and app-level polling keep background requests alive, so networkidle is not a stable readiness signal.
   await page.waitForLoadState('domcontentloaded')
   await page.locator('body').waitFor({ state: 'visible' })
@@ -9,90 +59,78 @@ async function waitForAppReady(page: Page): Promise<void> {
   const routeFallback = page.getByText('加载中...')
   await routeFallback.waitFor({ state: 'hidden', timeout: 10_000 }).catch(() => {})
 
-  await Promise.any([
-    page.getByRole('navigation', { name: '主导航' }).waitFor({ state: 'visible', timeout: 10_000 }),
-    page.getByRole('button', { name: /登录|sign in|login/i }).waitFor({ state: 'visible', timeout: 10_000 }),
-  ]).catch(() => {})
-
-  await page.waitForTimeout(100)
+  await waitForAuthSurface(page)
 }
 
 /**
- * 检查页面是否被重定向到登录页
- * 返回 true 表示需要认证（已重定向到登录页）
+ * Check whether the page has been redirected to the login route.
+ * Returns true when authentication is required.
  */
 export async function isRedirectedToLogin(page: Page): Promise<boolean> {
   return page.url().includes('/login')
 }
 
 /**
- * 等待认证状态初始化或在需要时自动登录
- * 
- * 由于 storageState 中的 token 可能已过期（15分钟有效期），
- * 此函数会检测到登录页时自动执行登录，并在登录成功后重新导航到原页面。
- * 
- * @param page - Playwright page 对象
- * @param targetPath - 期望的目标路径（用于登录后重新导航）
+ * Wait for authentication state to settle and sign in when required.
+ *
+ * storageState tokens can expire, so this helper retries login when the
+ * protected route redirects to the login page.
+ *
+ * @param page - Playwright page object.
+ * @param targetPath - Expected route after login.
  */
 export async function skipIfAuthRequired(page: Page, targetPath?: string): Promise<void> {
-  if (!page.url().includes('/login')) {
-    // ProtectedRoute may redirect slightly after the initial document load.
-    await page.waitForTimeout(300)
-    if (!page.url().includes('/login')) {
-      return
+  const surface = await waitForAuthSurface(page).catch(error => {
+    if (page.url().includes('/login')) {
+      return 'login'
     }
+    throw error
+  })
+
+  if (surface !== 'login' && !page.url().includes('/login')) {
+    return
   }
 
-  // 在登录页，尝试自动登录
   const { username, password } = resolveE2ECredentials()
 
-  // 检查登录表单是否存在
-  const loginButton = page.getByRole('button', { name: /登录|sign in|login/i })
+  const loginButton = page.getByRole('button', { name: LOGIN_BUTTON_PATTERN })
   const isLoginPage = await loginButton.isVisible({ timeout: 3000 }).catch(() => false)
-  
+
   if (!isLoginPage) {
-    // 没有登录表单，可能 auth 被禁用或者页面出错
-    return
+    skipOrFail('Login form not found while authentication is required')
   }
 
   if (!password) {
-    test.skip(true, 'Skipped: no E2E password configured or initial password file found')
-    return
+    skipOrFail('No E2E password configured or initial password file found')
   }
 
-  // 填写登录表单
-  const usernameInput = page.getByPlaceholder(/用户名|请输入用户名/i)
-  const passwordInput = page.getByPlaceholder(/密码|请输入密码/i)
+  const usernameInput = page.getByLabel(USERNAME_INPUT_PATTERN)
+  const passwordInput = page.getByLabel(PASSWORD_INPUT_PATTERN)
 
   if (!await usernameInput.isVisible({ timeout: 2000 }).catch(() => false)) {
-    test.skip(true, 'Skipped: Login form not found')
-    return
+    skipOrFail('Login form not found')
   }
 
   await usernameInput.fill(username)
   await passwordInput.fill(password)
   await loginButton.click()
 
-  // 等待登录结果（重定向离开登录页或显示错误）
   try {
     await page.waitForURL(url => !url.pathname.includes('/login'), {
       timeout: 10000,
     })
-    
-    // 登录成功后，如果指定了目标路径且当前不在该路径，则重新导航
+
     if (targetPath && !page.url().includes(targetPath)) {
       await page.goto(targetPath, { waitUntil: 'domcontentloaded' })
       await waitForAppReady(page)
     }
   } catch {
-    // 登录失败
-    test.skip(true, 'Skipped: auto-login failed (invalid credentials, rate limit, or backend error)')
+    skipOrFail('Auto-login failed (invalid credentials, rate limit, or backend error)')
   }
 }
 
 /**
- * 确保在目标页面并完成认证
- * 结合导航和认证检查为一个函数
+ * Navigate to the target page and complete authentication if required.
  */
 export async function ensureAuthenticatedAt(page: Page, path: string): Promise<void> {
   await page.goto(path, { waitUntil: 'domcontentloaded' })
@@ -101,7 +139,7 @@ export async function ensureAuthenticatedAt(page: Page, path: string): Promise<v
 }
 
 /**
- * 断言不在登录页
+ * Assert that the current page is not the login route.
  */
 export async function assertNotOnLoginPage(page: Page): Promise<void> {
   await expect(page).not.toHaveURL(/\/login/)

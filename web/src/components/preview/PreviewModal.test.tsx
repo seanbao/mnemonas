@@ -14,11 +14,11 @@ const mockAddToast = vi.fn()
 
 vi.mock('@heroui/react', () => ({
   Modal: ({ children, isOpen }: { children: React.ReactNode; isOpen: boolean }) =>
-    isOpen ? <div data-testid="modal">{children}</div> : null,
+    isOpen ? <div role="dialog" aria-label="预览对话框">{children}</div> : null,
   ModalContent: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
   ModalBody: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
-  Button: ({ children, onPress, isDisabled, title, isIconOnly, isLoading }: { children: React.ReactNode; onPress?: () => void; isDisabled?: boolean; title?: string; isIconOnly?: boolean; isLoading?: boolean }) => (
-    <button disabled={isDisabled || isLoading} onClick={onPress} title={title} aria-hidden={isIconOnly}>{children}</button>
+  Button: ({ children, onPress, isDisabled, title, isLoading, 'aria-label': ariaLabel }: { children: React.ReactNode; onPress?: () => void; isDisabled?: boolean; title?: string; isIconOnly?: boolean; isLoading?: boolean; 'aria-label'?: string }) => (
+    <button disabled={isDisabled || isLoading} onClick={onPress} title={title} aria-label={ariaLabel}>{children}</button>
   ),
   Spinner: () => <div>loading</div>,
   addToast: (...args: unknown[]) => mockAddToast(...args),
@@ -54,6 +54,14 @@ function createDeferred<T>() {
     reject = rej
   })
   return { promise, reject }
+}
+
+function getVideoPreview(filename: string): HTMLVideoElement {
+  return screen.getByLabelText(`视频预览 ${filename}`)
+}
+
+function getAudioPreview(filename: string): HTMLAudioElement {
+  return screen.getByLabelText(`音频预览 ${filename}`)
 }
 
 describe('PreviewModal', () => {
@@ -94,8 +102,8 @@ describe('PreviewModal', () => {
       />
     )
 
-    screen.getByTitle('下载').click()
-    screen.getByTitle('在新标签页打开').click()
+    screen.getByRole('button', { name: '下载' }).click()
+    screen.getByRole('button', { name: '在新标签页打开' }).click()
 
     await Promise.resolve()
     expect(mockDownloadFile).not.toHaveBeenCalled()
@@ -114,9 +122,8 @@ describe('PreviewModal', () => {
       />
     )
 
-    const video = document.querySelector('video') as HTMLVideoElement | null
-    expect(video).toBeTruthy()
-    expect(video?.getAttribute('src')).toBe('/api/v1/download/video.mp4')
+    const video = getVideoPreview('video.mp4')
+    expect(video).toHaveAttribute('src', '/api/v1/download/video.mp4')
   })
 
   it('renders audio preview without auth query', () => {
@@ -131,9 +138,8 @@ describe('PreviewModal', () => {
       />
     )
 
-    const audio = document.querySelector('audio') as HTMLAudioElement | null
-    expect(audio).toBeTruthy()
-    expect(audio?.getAttribute('src')).toBe('/api/v1/download/audio.mp3')
+    const audio = getAudioPreview('audio.mp3')
+    expect(audio).toHaveAttribute('src', '/api/v1/download/audio.mp3')
   })
 
   it('renders image previews through the image preview component', () => {
@@ -179,14 +185,13 @@ describe('PreviewModal', () => {
       />
     )
 
-    const video = document.querySelector('video') as HTMLVideoElement | null
-    expect(video).toBeTruthy()
+    const video = getVideoPreview('video.mp4')
 
-    fireEvent.error(video!)
+    fireEvent.error(video)
 
     await waitFor(() => {
       expect(mockRefreshAuthSession).toHaveBeenCalledTimes(1)
-      expect(video?.getAttribute('src')).toBe('/api/v1/download/video.mp4?session_retry=1')
+      expect(video).toHaveAttribute('src', '/api/v1/download/video.mp4?session_retry=1')
     })
   })
 
@@ -202,10 +207,10 @@ describe('PreviewModal', () => {
       />
     )
 
-    const video = document.querySelector('video') as HTMLVideoElement | null
+    const video = getVideoPreview('video.mp4')
     expect(screen.getByText('loading')).toBeInTheDocument()
 
-    fireEvent.loadedData(video!)
+    fireEvent.loadedData(video)
 
     expect(screen.queryByText('loading')).not.toBeInTheDocument()
   })
@@ -223,14 +228,14 @@ describe('PreviewModal', () => {
       />
     )
 
-    const video = document.querySelector('video') as HTMLVideoElement | null
-    fireEvent.error(video!)
+    const video = getVideoPreview('video.mp4')
+    fireEvent.error(video)
 
     await waitFor(() => {
-      expect(video?.getAttribute('src')).toBe('/api/v1/download/video.mp4?session_retry=1')
+      expect(video).toHaveAttribute('src', '/api/v1/download/video.mp4?session_retry=1')
     })
 
-    fireEvent.error(video!)
+    fireEvent.error(video)
 
     await waitFor(() => {
       expect(screen.getByText('无法加载视频')).toBeInTheDocument()
@@ -250,10 +255,9 @@ describe('PreviewModal', () => {
       />
     )
 
-    const audio = document.querySelector('audio') as HTMLAudioElement | null
-    expect(audio).toBeTruthy()
+    const audio = getAudioPreview('audio.mp3')
 
-    fireEvent.error(audio!)
+    fireEvent.error(audio)
 
     await waitFor(() => {
       expect(screen.getByText('无法加载音频')).toBeInTheDocument()
@@ -283,8 +287,8 @@ describe('PreviewModal', () => {
       />
     )
 
-    const video = document.querySelector('video') as HTMLVideoElement | null
-    fireEvent.error(video!)
+    const video = getVideoPreview('video.mp4')
+    fireEvent.error(video)
 
     await waitFor(() => {
       expect(mockAuthFetch).toHaveBeenCalledWith('/api/v1/download/video.mp4', {
@@ -311,7 +315,7 @@ describe('PreviewModal', () => {
       />
     )
 
-    const externalButton = screen.getByTitle('在新标签页打开')
+    const externalButton = screen.getByRole('button', { name: '在新标签页打开' })
     externalButton.click()
 
     await waitFor(() => {
@@ -347,7 +351,7 @@ describe('PreviewModal', () => {
       />
     )
 
-    screen.getByTitle('在新标签页打开').click()
+    screen.getByRole('button', { name: '在新标签页打开' }).click()
 
     await waitFor(() => {
       expect(mockAuthFetch).toHaveBeenCalledWith('/api/v1/download/video.mp4', {
@@ -360,6 +364,41 @@ describe('PreviewModal', () => {
       expect(mockAddToast).toHaveBeenCalledWith({
         title: '预览暂不可用',
         description: '数据加载失败，请检查网络或稍后重试。',
+        color: 'warning',
+      })
+    })
+  })
+
+  it('shows a missing-file warning when external preview target no longer exists', async () => {
+    mockAuthFetch.mockResolvedValueOnce(new Response(JSON.stringify({
+      success: false,
+      error: {
+        code: 'FILE_NOT_FOUND',
+        message: 'file not found',
+      },
+    }), {
+      status: 404,
+      headers: { 'Content-Type': 'application/json' },
+    }))
+    const openSpy = vi.spyOn(window, 'open').mockReturnValue(null)
+    const file: PreviewFile = { path: '/missing.mp4', name: 'missing.mp4' }
+
+    render(
+      <PreviewModal
+        isOpen={true}
+        onClose={() => {}}
+        file={file}
+        files={[file]}
+      />
+    )
+
+    screen.getByRole('button', { name: '在新标签页打开' }).click()
+
+    await waitFor(() => {
+      expect(openSpy).not.toHaveBeenCalled()
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '预览暂不可用',
+        description: '该文件可能已被移动或删除，请刷新列表后重试。',
         color: 'warning',
       })
     })
@@ -384,10 +423,10 @@ describe('PreviewModal', () => {
       />
     )
 
-    screen.getByTitle('上一个 (←)').click()
+    screen.getByRole('button', { name: '上一个 (←)' }).click()
     expect(onFileChange).toHaveBeenCalledWith(files[0])
 
-    screen.getByTitle('下一个 (→)').click()
+    screen.getByRole('button', { name: '下一个 (→)' }).click()
     expect(onFileChange).toHaveBeenCalledWith(files[2])
 
     fireEvent.keyDown(window, { key: 'ArrowLeft' })
@@ -444,7 +483,7 @@ describe('PreviewModal', () => {
       />
     )
 
-    screen.getByTitle('在新标签页打开').click()
+    screen.getByRole('button', { name: '在新标签页打开' }).click()
 
     await waitFor(() => {
       expect(openSpy).not.toHaveBeenCalled()
@@ -468,7 +507,7 @@ describe('PreviewModal', () => {
       />
     )
 
-    screen.getByTitle('在新标签页打开').click()
+    screen.getByRole('button', { name: '在新标签页打开' }).click()
 
     await waitFor(() => {
       expect(mockEnsureDownloadSession).toHaveBeenCalledTimes(1)
@@ -495,7 +534,7 @@ describe('PreviewModal', () => {
       />
     )
 
-    screen.getByTitle('下载').click()
+    screen.getByRole('button', { name: '下载' }).click()
 
     await waitFor(() => {
       expect(mockDownloadFile).toHaveBeenCalledWith('/video.mp4', expect.objectContaining({
@@ -528,7 +567,7 @@ describe('PreviewModal', () => {
       />
     )
 
-    screen.getByTitle('下载').click()
+    screen.getByRole('button', { name: '下载' }).click()
 
     await waitFor(() => {
       expect(signal).toBeInstanceOf(AbortSignal)

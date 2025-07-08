@@ -77,7 +77,7 @@
   
   --color-divider: rgba(17, 24, 39, 0.08);
 
-  /* Success - Green tones matching Meridian */
+  /* Success - Green tones matching MnemoNAS */
   --color-success-50: #ecfdf5;
   --color-success-100: #d1fae5;
   --color-success-200: #a7f3d0;
@@ -91,7 +91,7 @@
   --color-success: var(--color-success-500);
   --color-success-foreground: #ffffff;
 
-  /* Warning - Amber/Yellow tones matching Meridian starlight */
+  /* Warning - Amber/Yellow tones matching MnemoNAS starlight */
   --color-warning-50: #fffbeb;
   --color-warning-100: #fef3c7;
   --color-warning-200: #fde68a;
@@ -106,7 +106,7 @@
   --color-warning-foreground: #ffffff;
   --color-status-warning: var(--color-warning-500);
 
-  /* Danger - Rose/Red tones matching Meridian */
+  /* Danger - Rose/Red tones matching MnemoNAS */
   --color-danger-50: #fff1f2;
   --color-danger-100: #ffe4e6;
   --color-danger-200: #fecdd3;
@@ -264,12 +264,12 @@ svg {
   min-width: 0;
 }
 
-.gradient-meridian {
+.gradient-mnemonas {
   background: linear-gradient(135deg, #4f6fdb 0%, #14b8a6 100%);
 }
 
 /* Subtle gradient for cards and backgrounds */
-.gradient-meridian-subtle {
+.gradient-mnemonas-subtle {
   background: rgba(79, 111, 219, 0.08);
 }
 
@@ -277,7 +277,7 @@ svg {
   background: linear-gradient(135deg, #4f6fdb 0%, #14b8a6 100%);
 }
 
-.card-meridian {
+.card-mnemonas {
   background: linear-gradient(180deg, rgba(255, 255, 255, 0.98) 0%, rgba(248, 250, 252, 0.98) 100%);
   border: 1px solid var(--color-divider);
   border-radius: var(--radius-lg);
@@ -285,7 +285,7 @@ svg {
   min-width: 0;
 }
 
-.dark .card-meridian {
+.dark .card-mnemonas {
   background: linear-gradient(180deg, rgba(17, 24, 39, 0.98) 0%, rgba(15, 23, 42, 0.98) 100%);
 }
 
@@ -797,7 +797,7 @@ label {
   }
 }
 
-/* Toast Customization - Meridian Style */
+/* Toast Customization - MnemoNAS Style */
 [data-slot="toast-region"],
 [data-slot="toast-region"] > div,
 .mn-toast-region,
@@ -837,7 +837,7 @@ label {
   text-overflow: ellipsis;
 }
 
-/* Toast styling with Meridian theme */
+/* Toast styling with MnemoNAS theme */
 [data-toast],
 [data-slot="toast"],
 .mn-toast-region [role="status"],

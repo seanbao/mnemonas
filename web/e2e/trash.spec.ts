@@ -1,10 +1,77 @@
-import { test, expect } from '@playwright/test'
+import { test, expect, type Locator, type Page, type TestInfo } from '@playwright/test'
 import { ensureAuthenticatedAt } from './helpers/auth-check'
+import { expectNoPageHorizontalOverflow } from './helpers/layout'
+
+test.describe.configure({ mode: 'serial' })
+
+const TRASH_EMPTY_STATE_PATTERN = /回收站是空的|暂无|empty/i
+
+type TrashContentState = 'empty' | 'items' | 'loading'
+
+function trashPageTitle(page: Page): Locator {
+  return page.getByRole('heading', { name: '回收站' })
+}
+
+function trashEmptyState(page: Page): Locator {
+  return page.getByText(TRASH_EMPTY_STATE_PATTERN)
+}
+
+function firstTrashItemCheckbox(page: Page): Locator {
+  return page.getByRole('checkbox', { name: /^选择 / }).first()
+}
+
+function trashFixtureFileName(testInfo: TestInfo, prefix: string): string {
+  const suffix = `${testInfo.workerIndex}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+  return `${prefix}-${suffix}.txt`
+}
+
+async function seedDeletedTextFile(page: Page, fileName: string, content = 'trash fixture'): Promise<void> {
+  const fileUrl = `/api/v1/files/${encodeURIComponent(fileName)}`
+
+  await page.evaluate(async ({ fileUrl, fileName, content }) => {
+    const requireOk = async (response: Response, action: string) => {
+      if (!response.ok) {
+        throw new Error(`${action} failed: ${response.status} ${await response.text()}`)
+      }
+    }
+
+    await requireOk(await fetch(fileUrl, {
+      method: 'POST',
+      body: new File([content], fileName, { type: 'text/plain' }),
+    }), 'create trash fixture')
+    await requireOk(await fetch(fileUrl, { method: 'DELETE' }), 'delete trash fixture')
+  }, { fileUrl, fileName, content })
+}
+
+async function isVisible(locator: Locator, timeout = 1000): Promise<boolean> {
+  return locator.isVisible({ timeout }).catch(() => false)
+}
+
+async function readTrashContentState(page: Page): Promise<TrashContentState> {
+  if (await isVisible(trashEmptyState(page), 500)) {
+    return 'empty'
+  }
+  if (await isVisible(firstTrashItemCheckbox(page), 500)) {
+    return 'items'
+  }
+  return 'loading'
+}
+
+async function waitForTrashContentState(page: Page): Promise<Exclude<TrashContentState, 'loading'>> {
+  let observedState: TrashContentState = 'loading'
+  await expect.poll(async () => {
+    observedState = await readTrashContentState(page)
+    return observedState
+  }, { timeout: 10_000 }).not.toBe('loading')
+
+  return observedState as Exclude<TrashContentState, 'loading'>
+}
 
 /**
- * 回收站页面 E2E 测试
- * 认证状态由 auth.setup.ts 通过 storageState 自动注入
- * 如果认证启用但登录失败，测试会被跳过
+ * Trash page E2E tests.
+ * auth.setup.ts injects storageState automatically.
+ * Login setup failures fail by default; protected-page tests skip only when
+ * auth skipping is explicitly enabled for reused environments.
  */
 
 test.describe('回收站页面', () => {
@@ -14,31 +81,23 @@ test.describe('回收站页面', () => {
 
   test('应显示回收站页面', async ({ page }) => {
     await expect(page).not.toHaveURL(/\/login/)
-    await expect(page.locator('body')).toBeVisible()
+    await expect(trashPageTitle(page)).toBeVisible({ timeout: 5000 })
+    await expect(page.getByText(/项\s*·.*天后自动清理/i)).toBeVisible()
   })
 
   test('应显示回收站标题', async ({ page }) => {
-    const title = page.getByRole('heading', { name: '回收站' })
+    const title = trashPageTitle(page)
     await expect(title).toBeVisible({ timeout: 5000 })
   })
 
   test('应显示回收站统计信息', async ({ page }) => {
-    // 检查统计信息（项数、大小、自动清理时间）
+    // Check item count, size, and automatic cleanup retention.
     const statsText = page.getByText(/项\s*·.*天后自动清理/i)
     await expect(statsText).toBeVisible({ timeout: 5000 })
   })
 
-  test('回收站为空时应显示空状态', async ({ page }) => {
-    await page.waitForTimeout(2000)
-
-    // 检查是否有文件项或空状态
-    const emptyState = page.getByText(/回收站是空的|暂无|empty/i)
-    const itemList = page.getByRole('checkbox', { name: /^选择 / }).first()
-    
-    const hasEmpty = await emptyState.isVisible({ timeout: 1000 }).catch(() => false)
-    const hasItems = await itemList.isVisible({ timeout: 1000 }).catch(() => false)
-    
-    expect(hasEmpty || hasItems).toBe(true)
+  test('应显示内容列表或空状态', async ({ page }) => {
+    await waitForTrashContentState(page)
   })
 })
 
@@ -47,29 +106,26 @@ test.describe('回收站批量操作', () => {
     await ensureAuthenticatedAt(page, '/trash')
   })
 
-  test('清空回收站按钮应可见（有内容时）', async ({ page }) => {
-    // 清空按钮可能只在有内容时显示
-    const body = page.locator('body')
-    
-    // 页面应正常渲染
-    await expect(body).toBeVisible()
+  test('清空回收站按钮应可见（有内容时）', async ({ page }, testInfo) => {
+    const fileName = trashFixtureFileName(testInfo, 'e2e-empty-action')
+    await seedDeletedTextFile(page, fileName)
+
+    await ensureAuthenticatedAt(page, '/trash')
+    await expect(page.getByText(fileName, { exact: true }).filter({ visible: true })).toBeVisible({ timeout: 10_000 })
+    await expect(page.getByRole('button', { name: '清空回收站' })).toBeVisible()
   })
 
-  test('选中项后应显示批量操作栏', async ({ page }) => {
-    // 如果有项目，尝试选中
-    const checkbox = page.getByRole('checkbox').nth(1)
-    if (await checkbox.isVisible({ timeout: 2000 }).catch(() => false)) {
-      await checkbox.click({ force: true })
-      
-      // 检查批量操作按钮
-      const batchRestore = page.getByRole('button', { name: /^恢复$/ })
-      const batchDelete = page.getByRole('button', { name: /^永久删除$/ })
-      
-      const hasRestore = await batchRestore.isVisible({ timeout: 2000 }).catch(() => false)
-      const hasDelete = await batchDelete.isVisible({ timeout: 1000 }).catch(() => false)
-      
-      expect(hasRestore || hasDelete).toBe(true)
-    }
+  test('选中项后应显示批量操作栏', async ({ page }, testInfo) => {
+    const fileName = trashFixtureFileName(testInfo, 'e2e-batch-actions')
+    await seedDeletedTextFile(page, fileName)
+
+    await ensureAuthenticatedAt(page, '/trash')
+    await expect(page.getByText(fileName, { exact: true }).filter({ visible: true })).toBeVisible({ timeout: 10_000 })
+    await page.getByRole('checkbox', { name: `选择 ${fileName}` }).click({ force: true })
+
+    await expect(page.getByText('已选择 1 项')).toBeVisible()
+    await expect(page.getByRole('button', { name: /^恢复$/ })).toBeVisible()
+    await expect(page.getByRole('button', { name: /^永久删除$/ })).toBeVisible()
   })
 })
 
@@ -78,23 +134,15 @@ test.describe('回收站单项操作', () => {
     await ensureAuthenticatedAt(page, '/trash')
   })
 
-  // 这个测试需要回收站中有实际数据才能运行
-  // 在没有测试数据的情况下跳过
-  test('每个项目应有恢复和删除按钮', async ({ page }) => {
-    // 等待页面稳定
-    await page.waitForTimeout(1000)
+  test('每个项目应有恢复和删除按钮', async ({ page }, testInfo) => {
+    const fileName = trashFixtureFileName(testInfo, 'e2e-row-actions')
+    await seedDeletedTextFile(page, fileName)
 
-    const emptyState = page.getByText(/回收站是空的|暂无|empty/i)
-    const isEmpty = await emptyState.isVisible({ timeout: 1000 }).catch(() => false)
-    test.skip(isEmpty, '当前测试数据中没有回收站条目')
+    await ensureAuthenticatedAt(page, '/trash')
 
-    const restoreBtn = page.getByRole('button', { name: /^恢复\s.+$/ }).first()
-    const deleteBtn = page.getByRole('button', { name: /^永久删除\s.+$/ }).first()
-
-    const hasRestore = await restoreBtn.isVisible({ timeout: 1000 }).catch(() => false)
-    const hasDelete = await deleteBtn.isVisible({ timeout: 1000 }).catch(() => false)
-
-    expect(hasRestore || hasDelete).toBe(true)
+    await expect(page.getByText(fileName, { exact: true }).filter({ visible: true })).toBeVisible({ timeout: 10_000 })
+    await expect(page.getByRole('button', { name: `恢复 ${fileName}` })).toBeVisible()
+    await expect(page.getByRole('button', { name: `永久删除 ${fileName}` })).toBeVisible()
   })
 
   test('点击恢复应将回收站文件还原到原目录', async ({ page }, testInfo) => {
@@ -177,17 +225,19 @@ test.describe('回收站单项操作', () => {
 })
 
 test.describe('回收站确认对话框', () => {
-  test('清空回收站应弹出确认对话框', async ({ page }) => {
+  test('清空回收站应弹出确认对话框', async ({ page }, testInfo) => {
     await ensureAuthenticatedAt(page, '/trash')
+    const fileName = trashFixtureFileName(testInfo, 'e2e-empty-dialog')
+    await seedDeletedTextFile(page, fileName)
 
+    await ensureAuthenticatedAt(page, '/trash')
+    await expect(page.getByText(fileName, { exact: true }).filter({ visible: true })).toBeVisible({ timeout: 10_000 })
     const emptyTrashBtn = page.getByRole('button', { name: /清空回收站/i })
-    if (await emptyTrashBtn.isVisible({ timeout: 2000 }).catch(() => false)) {
-      await emptyTrashBtn.click()
-      
-      // 检查确认对话框
-      await expect(page.getByText('确定要清空回收站吗？')).toBeVisible({ timeout: 5000 })
-      await expect(page.getByText(/此操作无法撤销/i)).toBeVisible({ timeout: 5000 })
-    }
+    await emptyTrashBtn.click()
+
+    // Check the destructive-action confirmation dialog.
+    await expect(page.getByText('确定要清空回收站吗？')).toBeVisible({ timeout: 5000 })
+    await expect(page.getByText(/此操作无法撤销/i)).toBeVisible({ timeout: 5000 })
   })
 })
 
@@ -195,7 +245,7 @@ test.describe('回收站自动清理提示', () => {
   test('应显示自动清理时间提示', async ({ page }) => {
     await ensureAuthenticatedAt(page, '/trash')
 
-    // 检查自动清理提示（30天）
+    // Check the automatic cleanup retention hint.
     const autoCleanHint = page.getByText(/30 天|自动清理/i)
     await expect(autoCleanHint).toBeVisible({ timeout: 5000 })
   })
@@ -206,18 +256,20 @@ test.describe('回收站页面响应式', () => {
     await page.setViewportSize({ width: 375, height: 667 })
     await ensureAuthenticatedAt(page, '/trash')
 
-    const body = page.locator('body')
-    await expect(body).toBeVisible()
-
-    const title = page.getByRole('heading', { name: '回收站' })
+    const title = trashPageTitle(page)
     await expect(title).toBeVisible({ timeout: 5000 })
+    await expect(page.getByText(/项\s*·.*天后自动清理/i)).toBeVisible()
+    await waitForTrashContentState(page)
+    await expectNoPageHorizontalOverflow(page)
   })
 
   test('平板端布局', async ({ page }) => {
     await page.setViewportSize({ width: 768, height: 1024 })
     await ensureAuthenticatedAt(page, '/trash')
 
-    const title = page.getByRole('heading', { name: '回收站' })
+    const title = trashPageTitle(page)
     await expect(title).toBeVisible({ timeout: 5000 })
+    await expect(page.getByText(/项\s*·.*天后自动清理/i)).toBeVisible()
+    await expectNoPageHorizontalOverflow(page)
   })
 })

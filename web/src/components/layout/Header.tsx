@@ -119,13 +119,16 @@ export function Header({ onMenuClick }: HeaderProps) {
 
       {/* Right section: Search & Actions */}
       <div className="flex shrink-0 items-center gap-1.5 sm:gap-2">
-        <div 
+        <div
+          role="search"
+          aria-label="全局搜索"
           className="input-shell hidden w-[240px] cursor-pointer items-center gap-2 rounded-lg px-3 py-2 transition-all duration-200 focus-within:border-accent-primary focus-within:ring-2 focus-within:ring-accent-primary/15 md:flex lg:w-[280px]"
           onClick={handleSearchClick}
         >
           <Search size={16} className="text-default-500 shrink-0" />
-          <input 
-            type="text" 
+          <input
+            type="text"
+            aria-label="全局搜索文件"
             placeholder="搜索文件"
             className="flex-1 bg-transparent border-none outline-none text-[13px] text-foreground placeholder:text-default-500"
             value={searchQuery}

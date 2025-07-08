@@ -49,6 +49,7 @@ vi.mock('@/lib/useBatchOperation', () => ({
       failure: string
       partial: string
     }
+    getWarningMessage?: (result: unknown) => string | undefined
     getToast?: (result: typeof mockBatchResult) => { title: string; description?: string; color: 'success' | 'warning' | 'danger' } | null | undefined
     onComplete?: (result: typeof mockBatchResult) => void
   }) => ({
@@ -67,12 +68,14 @@ vi.mock('@/lib/useBatchOperation', () => ({
             warningMessages: [],
           }
         }
-        const warningMessages = results
+        const warningResults = results
           .filter((result): result is PromiseFulfilledResult<unknown> => result.status === 'fulfilled')
           .map((result) => result.value)
           .filter((value): value is { warning?: boolean; message?: string } => !!value && typeof value === 'object')
-          .map((value) => value.warning ? value.message : undefined)
-          .filter((message): message is string => typeof message === 'string')
+          .filter((value) => value.warning === true)
+        const warningMessages = warningResults
+          .map((value) => options.getWarningMessage?.(value))
+          .filter((message): message is string => typeof message === 'string' && message.trim().length > 0)
         const result = {
           succeeded: results.filter((result) => result.status === 'fulfilled').length,
           failed: results.filter((result) => result.status === 'rejected').length,
@@ -82,7 +85,7 @@ vi.mock('@/lib/useBatchOperation', () => ({
           failedErrors: results
             .filter((result): result is PromiseRejectedResult => result.status === 'rejected')
             .map((result) => result.reason),
-          warningCount: warningMessages.length,
+          warningCount: warningResults.length,
           warningMessages,
         }
         mockBatchExecute(items)
@@ -559,7 +562,7 @@ describe('FavoritesPage', () => {
       expect(screen.getAllByRole('checkbox').length).toBeGreaterThan(2)
     })
 
-    const selectAll = screen.getAllByRole('checkbox')[0]
+    const selectAll = screen.getByRole('checkbox', { name: '选择全部收藏' })
     await user.click(selectAll)
 
     await waitFor(() => {
@@ -582,7 +585,7 @@ describe('FavoritesPage', () => {
       expect(screen.getAllByRole('checkbox').length).toBeGreaterThan(2)
     })
 
-    await user.click(screen.getAllByRole('checkbox')[1])
+    await user.click(screen.getByRole('checkbox', { name: '选择收藏 /docs/report.pdf' }))
 
     await waitFor(() => {
       expect(screen.getByText((_, node) => node?.textContent?.replace(/\s+/g, '') === '已选择1项')).toBeInTheDocument()
@@ -602,7 +605,7 @@ describe('FavoritesPage', () => {
       expect(screen.getAllByRole('checkbox').length).toBeGreaterThan(2)
     })
 
-    const reportCheckbox = screen.getAllByRole('checkbox')[1]
+    const reportCheckbox = screen.getByRole('checkbox', { name: '选择收藏 /docs/report.pdf' })
     await user.click(reportCheckbox)
 
     await waitFor(() => {
@@ -770,9 +773,36 @@ describe('FavoritesPage', () => {
     })
   })
 
+  it('shows a warning toast when batch remove succeeds with persistence warnings', async () => {
+    const user = userEvent.setup()
+    mockUseRealBatchOperation = true
+    vi.mocked(favoritesApi.removeFavorite).mockResolvedValue({
+      warning: true,
+      message: 'favorite removed with persistence warning',
+    })
+
+    render(<FavoritesPage />)
+
+    await waitFor(() => {
+      expect(screen.getAllByRole('checkbox').length).toBeGreaterThan(2)
+    })
+
+    const checkboxes = screen.getAllByRole('checkbox')
+    await user.click(checkboxes[1])
+    await user.click(checkboxes[2])
+    await user.click(screen.getByText('取消收藏'))
+
+    await waitFor(() => {
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '2 项已取消收藏，但存在警告',
+        color: 'warning',
+      })
+    })
+  })
+
   it('optimistically removes a selected favorite before refetch completes', async () => {
     const user = userEvent.setup()
-    vi.mocked(favoritesApi.removeFavorite).mockResolvedValue({ message: 'favorite removed successfully' })
+    vi.mocked(favoritesApi.removeFavorite).mockResolvedValue({ warning: false, message: 'favorite removed successfully' })
     vi.mocked(favoritesApi.listFavorites).mockReset()
     vi.mocked(favoritesApi.listFavorites).mockResolvedValueOnce(mockFavorites)
     vi.mocked(favoritesApi.listFavorites).mockImplementation(() => pendingFavoritesRefetch())
@@ -806,7 +836,7 @@ describe('FavoritesPage', () => {
 
   it('keeps still-present selected favorites selected after a single removal', async () => {
     const user = userEvent.setup()
-    vi.mocked(favoritesApi.removeFavorite).mockResolvedValue({ message: 'favorite removed successfully' })
+    vi.mocked(favoritesApi.removeFavorite).mockResolvedValue({ warning: false, message: 'favorite removed successfully' })
     vi.mocked(favoritesApi.listFavorites).mockReset()
     vi.mocked(favoritesApi.listFavorites).mockResolvedValueOnce(mockFavorites)
     vi.mocked(favoritesApi.listFavorites).mockImplementation(() => pendingFavoritesRefetch())
@@ -1107,7 +1137,7 @@ describe('FavoritesPage', () => {
     expect(screen.getByLabelText('备注')).toHaveValue('旧备注')
 
     await act(async () => {
-      pendingNoteSave.resolve({ message: 'favorite note updated successfully' })
+      pendingNoteSave.resolve({ warning: false, message: 'favorite note updated successfully' })
     })
 
     await waitFor(() => {
@@ -1182,7 +1212,7 @@ describe('FavoritesPage', () => {
 
   it('shows the localized remove success toast after a successful single remove', async () => {
     const user = userEvent.setup()
-    vi.mocked(favoritesApi.removeFavorite).mockResolvedValueOnce({ message: 'favorite removed successfully' })
+    vi.mocked(favoritesApi.removeFavorite).mockResolvedValueOnce({ warning: false, message: 'favorite removed successfully' })
 
     render(<FavoritesPage />)
 
@@ -1199,7 +1229,7 @@ describe('FavoritesPage', () => {
 
   it('uses the localized remove success toast for alternate backend messages', async () => {
     const user = userEvent.setup()
-    vi.mocked(favoritesApi.removeFavorite).mockResolvedValueOnce({ message: 'removed' })
+    vi.mocked(favoritesApi.removeFavorite).mockResolvedValueOnce({ warning: false, message: 'removed' })
 
     render(<FavoritesPage />)
 
@@ -1214,9 +1244,29 @@ describe('FavoritesPage', () => {
     })
   })
 
+  it('shows a localized warning toast after a successful single remove with persistence warnings', async () => {
+    const user = userEvent.setup()
+    vi.mocked(favoritesApi.removeFavorite).mockResolvedValueOnce({
+      warning: true,
+      message: 'favorite removed with persistence warning',
+    })
+
+    render(<FavoritesPage />)
+
+    await waitFor(() => {
+      expect(screen.getByText('report.pdf')).toBeInTheDocument()
+    })
+
+    await user.click(screen.getByRole('button', { name: '取消收藏 /docs/report.pdf' }))
+
+    await waitFor(() => {
+      expect(mockAddToast).toHaveBeenCalledWith({ title: '已取消收藏，但存在警告', color: 'warning' })
+    })
+  })
+
   it('shows the localized note update success toast after a successful save', async () => {
     const user = userEvent.setup()
-    vi.mocked(favoritesApi.updateFavoriteNote).mockResolvedValueOnce({ message: 'favorite note updated successfully' })
+    vi.mocked(favoritesApi.updateFavoriteNote).mockResolvedValueOnce({ warning: false, message: 'favorite note updated successfully' })
 
     render(<FavoritesPage />)
 
@@ -1237,9 +1287,35 @@ describe('FavoritesPage', () => {
     })
   })
 
+  it('shows a localized warning toast after a successful note update with persistence warnings', async () => {
+    const user = userEvent.setup()
+    vi.mocked(favoritesApi.updateFavoriteNote).mockResolvedValueOnce({
+      warning: true,
+      message: 'favorite note updated with persistence warning',
+    })
+
+    render(<FavoritesPage />)
+
+    await waitFor(() => {
+      expect(screen.getByText('report.pdf')).toBeInTheDocument()
+    })
+
+    await user.click(screen.getByRole('button', { name: '编辑备注 /docs/report.pdf' }))
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: '保存' })).toBeInTheDocument()
+    })
+
+    await user.click(screen.getByRole('button', { name: '保存' }))
+
+    await waitFor(() => {
+      expect(mockAddToast).toHaveBeenCalledWith({ title: '备注已更新，但存在警告', color: 'warning' })
+    })
+  })
+
   it('uses the localized note update success toast for alternate backend messages', async () => {
     const user = userEvent.setup()
-    vi.mocked(favoritesApi.updateFavoriteNote).mockResolvedValueOnce({ message: 'updated' })
+    vi.mocked(favoritesApi.updateFavoriteNote).mockResolvedValueOnce({ warning: false, message: 'updated' })
 
     render(<FavoritesPage />)
 

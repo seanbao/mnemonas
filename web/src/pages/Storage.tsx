@@ -203,7 +203,7 @@ function MaintenanceCard({
     <div className="stat-card">
       <div className="relative">
         <div className="flex items-center gap-3 mb-4">
-          <div className="gradient-meridian-subtle flex h-10 w-10 items-center justify-center rounded-lg">
+          <div className="gradient-mnemonas-subtle flex h-10 w-10 items-center justify-center rounded-lg">
             <Icon size={20} className="text-accent-primary" />
           </div>
           <div>
@@ -260,7 +260,12 @@ export function StoragePage() {
 
   if (isLoading) {
     return (
-      <div className="p-4 space-y-6 sm:p-6 lg:p-8">
+      <div
+        role="status"
+        aria-label="加载空间与存储"
+        aria-busy="true"
+        className="p-4 space-y-6 sm:p-6 lg:p-8"
+      >
         <div className="flex items-center gap-3">
           <div className="w-10 h-10 rounded-lg bg-accent-primary flex items-center justify-center">
             <HardDrive size={20} className="text-white" />
@@ -487,10 +492,10 @@ export function StoragePage() {
       />
 
       {/* Storage Overview Card */}
-      <Card className="card-meridian">
+      <Card className="card-mnemonas">
         <CardHeader className="pb-0">
           <div className="flex items-center gap-2">
-            <div className="gradient-meridian rounded-lg p-2">
+            <div className="gradient-mnemonas rounded-lg p-2">
               <Database className="h-4 w-4 text-white" />
             </div>
             <div>
@@ -586,10 +591,10 @@ export function StoragePage() {
       </Card>
 
       {isAdmin && (
-        <Card aria-label="存储健康摘要" className="card-meridian">
+        <Card aria-label="存储健康摘要" className="card-mnemonas">
           <CardHeader className="pb-0">
             <div className="flex items-center gap-2">
-              <div className="gradient-meridian-subtle rounded-lg p-2">
+              <div className="gradient-mnemonas-subtle rounded-lg p-2">
                 {storageRiskLevel === 'normal' ? (
                   <CheckCircle2 className="h-4 w-4 text-success" />
                 ) : (
@@ -609,7 +614,7 @@ export function StoragePage() {
                 <p className="mt-2 text-lg font-semibold">{storageRiskSummary.title}</p>
                 <p className="mt-2 text-sm leading-6 text-default-700">{storageRiskSummary.description}</p>
                 <p className="mt-3 rounded-lg bg-content1 px-3 py-2 text-xs leading-5 text-default-600">
-                  建议处理: {storageRiskNextStepSummary}
+                  建议处理：{storageRiskNextStepSummary}
                 </p>
                 <div className="mt-4 flex flex-wrap gap-2 text-xs">
                   <span className="rounded-full bg-content1 px-2 py-1 text-default-600">
@@ -679,10 +684,10 @@ export function StoragePage() {
       </div>
 
       {isAdmin && (
-        <Card className="card-meridian">
+        <Card className="card-mnemonas">
           <CardHeader className="flex flex-col items-start gap-3 pb-0 sm:flex-row sm:items-center sm:justify-between">
             <div className="flex items-center gap-2">
-              <div className="gradient-meridian-subtle rounded-lg p-2">
+              <div className="gradient-mnemonas-subtle rounded-lg p-2">
                 <HardDrive className="h-4 w-4 text-accent-primary" />
               </div>
               <div>

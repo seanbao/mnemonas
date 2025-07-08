@@ -11,7 +11,7 @@ const mockAddToast = vi.fn()
 // Mock HeroUI components
 vi.mock('@heroui/react', () => ({
   Card: ({ children, className }: { children: React.ReactNode; className?: string }) => (
-    <div className={className} data-testid="card">{children}</div>
+    <div className={className} role="group">{children}</div>
   ),
   CardBody: ({ children, className }: { children: React.ReactNode; className?: string }) => (
     <div className={className}>{children}</div>
@@ -19,22 +19,26 @@ vi.mock('@heroui/react', () => ({
   Button: ({ children, onPress, type }: { children: React.ReactNode; onPress?: () => void; type?: 'button' | 'submit' | 'reset' }) => (
     <button onClick={onPress} type={type}>{children}</button>
   ),
-  Input: ({ label, placeholder, value, onValueChange, type }: { 
-    label?: string; 
-    placeholder?: string; 
+  Input: ({ label, placeholder, value, onValueChange, type, id, isDisabled }: {
+    label?: string;
+    placeholder?: string;
     value?: string;
     onValueChange?: (v: string) => void;
     type?: string;
+    id?: string;
+    isDisabled?: boolean;
   }) => (
-    <input 
-      aria-label={label} 
+    <input
+      id={id}
+      aria-label={label}
       placeholder={placeholder}
       value={value}
+      disabled={isDisabled}
       onChange={(e) => onValueChange?.(e.target.value)}
       type={type}
     />
   ),
-  Spinner: () => <div data-testid="spinner">Loading...</div>,
+  Spinner: () => <div role="status" aria-label="加载中">Loading...</div>,
   addToast: (...args: unknown[]) => mockAddToast(...args),
 }))
 
@@ -162,6 +166,17 @@ describe('ShareAccessPage', () => {
       expect(screen.getByText('分享不存在或已失效')).toBeInTheDocument()
       expect(screen.getByText('该分享链接不存在、已被移除，或当前不可访问。')).toBeInTheDocument()
       expect(screen.queryByText('share not found')).not.toBeInTheDocument()
+    })
+  })
+
+  it('shows a missing-content state when the shared file has been removed', async () => {
+    mockGetPublicShare.mockRejectedValue(new ShareError('分享文件不存在或已被移除', 404, 'FILE_NOT_FOUND'))
+
+    renderWithRouter('abc123')
+
+    await waitFor(() => {
+      expect(screen.getByText('分享内容已不存在')).toBeInTheDocument()
+      expect(screen.getByText('该分享指向的文件或文件夹已被移动或删除，请联系分享创建者。')).toBeInTheDocument()
     })
   })
 
@@ -346,7 +361,7 @@ describe('ShareAccessPage', () => {
       expect(screen.getByText('此分享需要密码')).toBeInTheDocument()
     })
 
-    await user.type(screen.getByPlaceholderText('请输入密码'), 'secret')
+    await user.type(screen.getByLabelText('访问密码'), 'secret')
     await user.click(screen.getByText('验证密码'))
 
     await waitFor(() => {
@@ -374,7 +389,7 @@ describe('ShareAccessPage', () => {
       expect(screen.getByText('此分享需要密码')).toBeInTheDocument()
     })
 
-    await user.type(screen.getByPlaceholderText('请输入密码'), 'wrong-secret')
+    await user.type(screen.getByLabelText('访问密码'), 'wrong-secret')
     await user.click(screen.getByText('验证密码'))
 
     await waitFor(() => {
@@ -398,7 +413,7 @@ describe('ShareAccessPage', () => {
       expect(screen.getByText('此分享需要密码')).toBeInTheDocument()
     })
 
-    await user.type(screen.getByPlaceholderText('请输入密码'), 'secret')
+    await user.type(screen.getByLabelText('访问密码'), 'secret')
     await user.click(screen.getByText('验证密码'))
 
     await waitFor(() => {
@@ -426,7 +441,7 @@ describe('ShareAccessPage', () => {
       expect(screen.getByText('此分享需要密码')).toBeInTheDocument()
     })
 
-    await user.type(screen.getByPlaceholderText('请输入密码'), 'secret')
+    await user.type(screen.getByLabelText('访问密码'), 'secret')
     await user.click(screen.getByText('验证密码'))
 
     await waitFor(() => {
@@ -796,6 +811,40 @@ describe('ShareAccessPage', () => {
     })
   })
 
+  it('shows missing-content feedback when a shared folder item no longer exists', async () => {
+    const user = userEvent.setup()
+    mockGetPublicShare.mockResolvedValue({
+      id: 'abc123',
+      type: 'folder',
+      has_password: false,
+      permission: 'read',
+      folder_items: 1,
+    })
+    mockGetPublicShareItems.mockResolvedValue({
+      path: '',
+      items: [
+        { name: 'note.txt', path: 'note.txt', is_dir: false, size: 12, mod_time: '2024-01-02T00:00:00Z' },
+      ],
+    })
+    mockDownloadShare.mockRejectedValue(new ShareError('分享文件不存在或已被移除', 404, 'FILE_NOT_FOUND'))
+
+    renderWithRouter('abc123')
+
+    await waitFor(() => {
+      expect(screen.getByText('note.txt')).toBeInTheDocument()
+    })
+
+    await user.click(screen.getByRole('button', { name: '下载' }))
+
+    await waitFor(() => {
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '分享内容已不存在',
+        description: '该分享指向的文件或文件夹已被移动或删除，请联系分享创建者。',
+        color: 'warning',
+      })
+    })
+  })
+
   it('ignores stale folder listing responses after navigating back to a parent folder', async () => {
     const user = userEvent.setup()
     const nestedListing = createDeferred<{
@@ -1003,7 +1052,7 @@ describe('ShareAccessPage', () => {
       expect(screen.getByText('此分享需要密码')).toBeInTheDocument()
     })
 
-    await user.type(screen.getByPlaceholderText('请输入密码'), 'secret')
+    await user.type(screen.getByLabelText('访问密码'), 'secret')
     await user.click(screen.getByText('验证密码'))
 
     await waitFor(() => {
@@ -1075,6 +1124,35 @@ describe('ShareAccessPage', () => {
       expect(mockAddToast).toHaveBeenCalledWith({
         title: '下载暂不可用',
         description: '分享内容当前不可访问，请检查设备状态或稍后重试。',
+        color: 'warning',
+      })
+    })
+  })
+
+  it('shows missing-content feedback when file download target no longer exists', async () => {
+    const user = userEvent.setup()
+    mockGetPublicShare.mockResolvedValue({
+      id: 'abc123',
+      type: 'file',
+      has_password: false,
+      permission: 'read',
+      file_name: 'test.txt',
+      file_size: 10,
+    })
+    mockDownloadShare.mockRejectedValue(new ShareError('分享文件不存在或已被移除', 404, 'FILE_NOT_FOUND'))
+
+    renderWithRouter('abc123')
+
+    await waitFor(() => {
+      expect(screen.getByText('下载文件')).toBeInTheDocument()
+    })
+
+    await user.click(screen.getByText('下载文件'))
+
+    await waitFor(() => {
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '分享内容已不存在',
+        description: '该分享指向的文件或文件夹已被移动或删除，请联系分享创建者。',
         color: 'warning',
       })
     })
@@ -1161,14 +1239,32 @@ describe('ShareAccessPage', () => {
       expect(screen.getByText('此分享需要密码')).toBeInTheDocument()
     })
 
-    await user.type(screen.getByPlaceholderText('请输入密码'), 'secret')
+    await user.type(screen.getByLabelText('访问密码'), 'secret')
     await user.click(screen.getByText('验证密码'))
 
     await waitFor(() => {
       expect(screen.getByText('此分享需要密码')).toBeInTheDocument()
     })
 
-    expect(screen.getByPlaceholderText('请输入密码')).toHaveValue('')
+    expect(screen.getByLabelText('访问密码')).toHaveValue('')
+  })
+
+  it('shows a missing-content state when listing a folder share whose target no longer exists', async () => {
+    mockGetPublicShare.mockResolvedValue({
+      id: 'abc123',
+      type: 'folder',
+      has_password: false,
+      permission: 'read',
+      folder_items: 1,
+    })
+    mockGetPublicShareItems.mockRejectedValue(new ShareError('分享文件不存在或已被移除', 404, 'FILE_NOT_FOUND'))
+
+    renderWithRouter('abc123')
+
+    await waitFor(() => {
+      expect(screen.getByText('分享内容已不存在')).toBeInTheDocument()
+      expect(screen.getByText('该分享指向的文件或文件夹已被移动或删除，请联系分享创建者。')).toBeInTheDocument()
+    })
   })
 
   it('preserves the current folder path after re-authenticating a folder share', () => {
@@ -1222,7 +1318,7 @@ describe('ShareAccessPage', () => {
       expect(screen.getByText('此分享需要密码')).toBeInTheDocument()
     })
 
-    expect(screen.getByPlaceholderText('请输入密码')).toHaveValue('')
+    expect(screen.getByLabelText('访问密码')).toHaveValue('')
   })
 
   it('ignores stale password verification responses after navigating to another share', async () => {
@@ -1264,7 +1360,7 @@ describe('ShareAccessPage', () => {
       expect(screen.getByText('此分享需要密码')).toBeInTheDocument()
     })
 
-    await userEvent.type(screen.getByPlaceholderText('请输入密码'), 'secret')
+    await userEvent.type(screen.getByLabelText('访问密码'), 'secret')
     await userEvent.click(screen.getByText('验证密码'))
 
     await waitFor(() => {

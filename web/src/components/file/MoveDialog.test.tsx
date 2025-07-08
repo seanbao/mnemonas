@@ -102,6 +102,12 @@ function renderDialog(props?: Partial<React.ComponentProps<typeof MoveDialog>>) 
   }
 }
 
+async function selectRootTarget(user: ReturnType<typeof userEvent.setup>) {
+  await user.click(screen.getByText('点击选择目标文件夹'))
+  await user.click(await screen.findByRole('button', { name: '选择根目录' }))
+  await user.click(screen.getByRole('button', { name: '选择此目录' }))
+}
+
 describe('MoveDialog', () => {
   beforeEach(() => {
     vi.clearAllMocks()
@@ -149,12 +155,7 @@ describe('MoveDialog', () => {
 
     renderDialog({ onClose })
 
-    await user.click(screen.getByText('点击选择目标文件夹'))
-    await waitFor(() => {
-      expect(screen.getAllByText('根目录').length).toBeGreaterThan(0)
-    })
-    await user.click(screen.getAllByText('根目录')[0])
-    await user.click(screen.getByRole('button', { name: '选择此目录' }))
+    await selectRootTarget(user)
 
     await user.click(screen.getByRole('button', { name: '移动' }))
 
@@ -181,12 +182,7 @@ describe('MoveDialog', () => {
 
     renderDialog({ onClose })
 
-    await user.click(screen.getByText('点击选择目标文件夹'))
-    await waitFor(() => {
-      expect(screen.getAllByText('根目录').length).toBeGreaterThan(0)
-    })
-    await user.click(screen.getAllByText('根目录')[0])
-    await user.click(screen.getByRole('button', { name: '选择此目录' }))
+    await selectRootTarget(user)
 
     await user.click(screen.getByRole('button', { name: '移动' }))
 
@@ -204,21 +200,92 @@ describe('MoveDialog', () => {
     })
   })
 
+  it('includes conflict guidance after partial copy target conflict', async () => {
+    const user = userEvent.setup({ writeToClipboard: false })
+    const onClose = vi.fn()
+    mockCopyFile
+      .mockResolvedValueOnce(successActionResult)
+      .mockRejectedValueOnce(new ApiError('resource already exists', 409, 'Conflict'))
+
+    renderDialog({ onClose, mode: 'copy' })
+
+    await selectRootTarget(user)
+
+    await user.click(screen.getByRole('button', { name: '复制' }))
+
+    await waitFor(() => {
+      expect(mockCopyFile).toHaveBeenCalledTimes(2)
+    })
+
+    expect(onClose).not.toHaveBeenCalled()
+    expect(screen.queryByText('a.txt')).toBeNull()
+    expect(screen.getAllByText('b.txt').length).toBeGreaterThan(0)
+    expect(mockAddToast).toHaveBeenCalledWith({
+      title: '批量复制部分完成',
+      description: '成功 1 个，失败 1 个；当前目录中已存在同名文件或文件夹，请使用其他名称。',
+      color: 'warning',
+    })
+  })
+
+  it('includes quota guidance after partial move target quota failure', async () => {
+    const user = userEvent.setup({ writeToClipboard: false })
+    const onClose = vi.fn()
+    mockMoveFile
+      .mockResolvedValueOnce(successActionResult)
+      .mockRejectedValueOnce(new ApiError('directory quota exceeded', 507, 'Insufficient Storage', 'QUOTA_EXCEEDED'))
+
+    renderDialog({ onClose })
+
+    await selectRootTarget(user)
+
+    await user.click(screen.getByRole('button', { name: '移动' }))
+
+    await waitFor(() => {
+      expect(mockMoveFile).toHaveBeenCalledTimes(2)
+    })
+
+    expect(onClose).not.toHaveBeenCalled()
+    expect(screen.queryByText('a.txt')).toBeNull()
+    expect(screen.getAllByText('b.txt').length).toBeGreaterThan(0)
+    expect(mockAddToast).toHaveBeenCalledWith({
+      title: '批量移动部分完成',
+      description: '成功 1 个，失败 1 个；目标目录的容量配额不足，请清理空间或调整目录配额后重试。',
+      color: 'warning',
+    })
+  })
+
   it('shows warning toast when full move succeeds with warnings', async () => {
     const user = userEvent.setup({ writeToClipboard: false })
     const onClose = vi.fn()
     mockMoveFile
-      .mockResolvedValueOnce(warningActionResult('resource moved with persistence warning'))
+      .mockResolvedValueOnce(warningActionResult('token=move-secret'))
       .mockResolvedValueOnce(successActionResult)
 
     renderDialog({ onClose })
 
-    await user.click(screen.getByText('点击选择目标文件夹'))
+    await selectRootTarget(user)
+    await user.click(screen.getByRole('button', { name: '移动' }))
+
     await waitFor(() => {
-      expect(screen.getAllByText('根目录').length).toBeGreaterThan(0)
+      expect(onClose).toHaveBeenCalledTimes(1)
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '成功移动 2 个项目，但存在警告',
+        color: 'warning',
+      })
     })
-    await user.click(screen.getAllByText('根目录')[0])
-    await user.click(screen.getByRole('button', { name: '选择此目录' }))
+    expect(JSON.stringify(mockAddToast.mock.calls)).not.toContain('move-secret')
+  })
+
+  it('shows a generic warning toast when warning messages are blank', async () => {
+    const user = userEvent.setup({ writeToClipboard: false })
+    const onClose = vi.fn()
+    mockMoveFile
+      .mockResolvedValueOnce(warningActionResult('   '))
+      .mockResolvedValueOnce(successActionResult)
+
+    renderDialog({ onClose })
+
+    await selectRootTarget(user)
     await user.click(screen.getByRole('button', { name: '移动' }))
 
     await waitFor(() => {
@@ -234,17 +301,12 @@ describe('MoveDialog', () => {
     const user = userEvent.setup({ writeToClipboard: false })
     const onClose = vi.fn()
     mockCopyFile
-      .mockResolvedValueOnce(warningActionResult('resource copied with persistence warning'))
+      .mockResolvedValueOnce(warningActionResult('password=copy-secret'))
       .mockResolvedValueOnce(successActionResult)
 
     renderDialog({ onClose, mode: 'copy' })
 
-    await user.click(screen.getByText('点击选择目标文件夹'))
-    await waitFor(() => {
-      expect(screen.getAllByText('根目录').length).toBeGreaterThan(0)
-    })
-    await user.click(screen.getAllByText('根目录')[0])
-    await user.click(screen.getByRole('button', { name: '选择此目录' }))
+    await selectRootTarget(user)
 
     await user.click(screen.getByRole('button', { name: '复制' }))
 
@@ -255,6 +317,7 @@ describe('MoveDialog', () => {
         color: 'warning',
       })
     })
+    expect(JSON.stringify(mockAddToast.mock.calls)).not.toContain('copy-secret')
   })
 
   it('closes with a warning when all copy sources are already missing', async () => {
@@ -264,12 +327,7 @@ describe('MoveDialog', () => {
 
     renderDialog({ onClose, mode: 'copy' })
 
-    await user.click(screen.getByText('点击选择目标文件夹'))
-    await waitFor(() => {
-      expect(screen.getAllByText('根目录').length).toBeGreaterThan(0)
-    })
-    await user.click(screen.getAllByText('根目录')[0])
-    await user.click(screen.getByRole('button', { name: '选择此目录' }))
+    await selectRootTarget(user)
 
     await user.click(screen.getByRole('button', { name: '复制' }))
 
@@ -289,12 +347,7 @@ describe('MoveDialog', () => {
 
     renderDialog({ onClose, mode: 'copy' })
 
-    await user.click(screen.getByText('点击选择目标文件夹'))
-    await waitFor(() => {
-      expect(screen.getAllByText('根目录').length).toBeGreaterThan(0)
-    })
-    await user.click(screen.getAllByText('根目录')[0])
-    await user.click(screen.getByRole('button', { name: '选择此目录' }))
+    await selectRootTarget(user)
 
     await user.click(screen.getByRole('button', { name: '复制' }))
 
@@ -319,12 +372,7 @@ describe('MoveDialog', () => {
 
     renderDialog({ onClose, mode: 'copy' })
 
-    await user.click(screen.getByText('点击选择目标文件夹'))
-    await waitFor(() => {
-      expect(screen.getAllByText('根目录').length).toBeGreaterThan(0)
-    })
-    await user.click(screen.getAllByText('根目录')[0])
-    await user.click(screen.getByRole('button', { name: '选择此目录' }))
+    await selectRootTarget(user)
 
     await user.click(screen.getByRole('button', { name: '复制' }))
 
@@ -349,12 +397,7 @@ describe('MoveDialog', () => {
 
     renderDialog({ onClose, mode: 'copy' })
 
-    await user.click(screen.getByText('点击选择目标文件夹'))
-    await waitFor(() => {
-      expect(screen.getAllByText('根目录').length).toBeGreaterThan(0)
-    })
-    await user.click(screen.getAllByText('根目录')[0])
-    await user.click(screen.getByRole('button', { name: '选择此目录' }))
+    await selectRootTarget(user)
 
     await user.click(screen.getByRole('button', { name: '复制' }))
 
@@ -379,12 +422,7 @@ describe('MoveDialog', () => {
 
     renderDialog({ onClose })
 
-    await user.click(screen.getByText('点击选择目标文件夹'))
-    await waitFor(() => {
-      expect(screen.getAllByText('根目录').length).toBeGreaterThan(0)
-    })
-    await user.click(screen.getAllByText('根目录')[0])
-    await user.click(screen.getByRole('button', { name: '选择此目录' }))
+    await selectRootTarget(user)
 
     await user.click(screen.getByRole('button', { name: '移动' }))
 
@@ -409,12 +447,7 @@ describe('MoveDialog', () => {
 
     renderDialog({ onClose })
 
-    await user.click(screen.getByText('点击选择目标文件夹'))
-    await waitFor(() => {
-      expect(screen.getAllByText('根目录').length).toBeGreaterThan(0)
-    })
-    await user.click(screen.getAllByText('根目录')[0])
-    await user.click(screen.getByRole('button', { name: '选择此目录' }))
+    await selectRootTarget(user)
 
     await user.click(screen.getByRole('button', { name: '移动' }))
 
@@ -466,12 +499,7 @@ describe('MoveDialog', () => {
 
     renderDialog({ onClose, files: firstFiles })
 
-    await user.click(screen.getByText('点击选择目标文件夹'))
-    await waitFor(() => {
-      expect(screen.getAllByText('根目录').length).toBeGreaterThan(0)
-    })
-    await user.click(screen.getAllByText('根目录')[0])
-    await user.click(screen.getByRole('button', { name: '选择此目录' }))
+    await selectRootTarget(user)
     await user.click(screen.getByRole('button', { name: '移动' }))
 
     await waitFor(() => {
@@ -501,12 +529,7 @@ describe('MoveDialog', () => {
 
     renderDialog({ onClose, files: firstFiles })
 
-    await user.click(screen.getByText('点击选择目标文件夹'))
-    await waitFor(() => {
-      expect(screen.getAllByText('根目录').length).toBeGreaterThan(0)
-    })
-    await user.click(screen.getAllByText('根目录')[0])
-    await user.click(screen.getByRole('button', { name: '选择此目录' }))
+    await selectRootTarget(user)
     await user.click(screen.getByRole('button', { name: '移动' }))
 
     await waitFor(() => {
@@ -541,12 +564,7 @@ describe('MoveDialog', () => {
 
     const view = renderDialog({ onClose })
 
-    await user.click(screen.getByText('点击选择目标文件夹'))
-    await waitFor(() => {
-      expect(screen.getAllByText('根目录').length).toBeGreaterThan(0)
-    })
-    await user.click(screen.getAllByText('根目录')[0])
-    await user.click(screen.getByRole('button', { name: '选择此目录' }))
+    await selectRootTarget(user)
     await user.click(screen.getByRole('button', { name: '移动' }))
 
     let moveSignal: AbortSignal | undefined

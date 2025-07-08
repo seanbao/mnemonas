@@ -2,8 +2,8 @@
 
 import { authFetch } from './auth'
 import { INVALID_API_RESPONSE_MESSAGE } from '@/lib/apiMessages'
-import { readStructuredJsonErrorDetails } from '@/lib/jsonErrorResponse'
-import { normalizePath } from '@/lib/utils'
+import { getNonBlankJsonString, readStructuredJsonErrorDetails } from '@/lib/jsonErrorResponse'
+import { hasControlCharacter, normalizePath } from '@/lib/utils'
 
 const API_BASE = '/api/v1'
 
@@ -31,6 +31,7 @@ interface ApiResponseWrapper<T> {
   success: boolean
   data: T
   message?: string
+  warning?: boolean
   error?: {
     code?: string
     message: string
@@ -50,20 +51,15 @@ async function handleResponse<T>(response: Response, errorMessage: string, inval
     try {
       const body: unknown = await response.json()
       if (isRecord(body)) {
-        const topLevelCode = typeof body.code === 'string' ? body.code : undefined
-        if (typeof body.error === 'string') {
-          message = body.error || errorMessage
-        } else if (isRecord(body.error) && typeof body.error.message === 'string') {
-          message = body.error.message
-          if (typeof body.error.code === 'string') {
-            code = body.error.code
-          }
-        } else if (typeof body.message === 'string' && body.message) {
-          message = body.message
-        }
-        if (!code && topLevelCode) {
-          code = topLevelCode
-        }
+        const topLevelCode = getNonBlankJsonString(body.code)
+        const errorMessageBody = typeof body.error === 'string'
+          ? getNonBlankJsonString(body.error)
+          : isRecord(body.error)
+            ? getNonBlankJsonString(body.error.message)
+            : undefined
+        const errorCode = isRecord(body.error) ? getNonBlankJsonString(body.error.code) : undefined
+        message = errorMessageBody ?? getNonBlankJsonString(body.message) ?? errorMessage
+        code = errorCode ?? topLevelCode
       }
     } catch { /* ignore */ }
     throw new ApiError(message, response.status, response.statusText, code)
@@ -85,6 +81,12 @@ async function handleResponse<T>(response: Response, errorMessage: string, inval
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value)
+}
+
+function hasActivityWarning<T>(response: Response, body: ApiResponseWrapper<T>): boolean {
+  return response.headers?.get?.('Warning') != null
+    || body.warning === true
+    || (isRecord(body.data) && body.data.warning === true)
 }
 
 // Activity action types
@@ -349,6 +351,7 @@ export interface ActivityStats {
 }
 
 export interface ActivityActionResult {
+  warning: boolean
   message?: string
 }
 
@@ -386,13 +389,10 @@ function isValidActivityReviewRecord(value: unknown): value is ActivityReviewRec
     && value.id.trim() !== ''
     && value.id === value.id.trim()
     && parseRFC3339Timestamp(value.reviewed_at) !== null
-    && typeof value.reviewer === 'string'
-    && value.reviewer.trim() !== ''
-    && typeof value.note === 'string'
-    && value.note.trim() !== ''
-    && typeof value.scope_label === 'string'
-    && value.scope_label.trim() !== ''
-    && (value.filter_summary === undefined || typeof value.filter_summary === 'string')
+    && isNonEmptyReviewText(value.reviewer)
+    && isNonEmptyReviewText(value.note)
+    && isNonEmptyReviewText(value.scope_label)
+    && isOptionalReviewText(value.filter_summary)
     && (value.disposition_status === undefined || isActivityReviewDispositionStatus(value.disposition_status))
     && (value.action_counts === undefined || isActivityActionNumberRecord(value.action_counts))
     && isNonNegativeInteger(value.review_count)
@@ -402,7 +402,7 @@ function isValidActivityReviewRecord(value: unknown): value is ActivityReviewRec
     && isNonNegativeInteger(value.path_count)
     && isNonNegativeInteger(value.user_count)
     && (value.path_samples === undefined || (Array.isArray(value.path_samples) && value.path_samples.every(isLogicalPathString) && hasUniqueStrings(value.path_samples)))
-    && (value.user_samples === undefined || (Array.isArray(value.user_samples) && value.user_samples.every((user) => typeof user === 'string' && user.trim() !== '' && user === user.trim()) && hasUniqueStrings(value.user_samples)))
+    && (value.user_samples === undefined || (Array.isArray(value.user_samples) && value.user_samples.every((user) => isNonEmptyReviewText(user) && user === user.trim()) && hasUniqueStrings(value.user_samples)))
     && Array.isArray(value.activity_entry_ids)
     && value.activity_entry_ids.length > 0
     && value.activity_entry_ids.every((id) => typeof id === 'string' && id.trim() !== '' && id === id.trim())
@@ -411,6 +411,14 @@ function isValidActivityReviewRecord(value: unknown): value is ActivityReviewRec
 
 function isActivityReviewDispositionStatus(value: unknown): value is ActivityReviewDispositionStatus {
   return typeof value === 'string' && ACTIVITY_REVIEW_DISPOSITION_STATUSES.includes(value as ActivityReviewDispositionStatus)
+}
+
+function isNonEmptyReviewText(value: unknown): value is string {
+  return typeof value === 'string' && value.trim() !== '' && !hasControlCharacter(value)
+}
+
+function isOptionalReviewText(value: unknown): value is string | undefined {
+  return value === undefined || (typeof value === 'string' && !hasControlCharacter(value))
 }
 
 function isValidActivityReviewRecordListPagination(items: ActivityReviewRecord[], total: number, limit: number, offset: number): boolean {
@@ -596,14 +604,18 @@ export async function clearActivity(options: ActivityRequestOptions = {}): Promi
     await handleResponse(response, '清除最近操作失败')
   }
 
-  const result = await handleResponse<ApiResponseWrapper<{ message?: string }>>(response, '清除最近操作失败')
+  const result = await handleResponse<ApiResponseWrapper<{ message?: string; warning?: boolean }>>(response, '清除最近操作失败')
 
   if (result.data.message !== undefined && typeof result.data.message !== 'string') {
     throw new Error(INVALID_API_RESPONSE_MESSAGE)
   }
+  if (result.data.warning !== undefined && typeof result.data.warning !== 'boolean') {
+    throw new Error(INVALID_API_RESPONSE_MESSAGE)
+  }
 
   return {
-    message: result.data.message,
+    warning: hasActivityWarning(response, result),
+    message: getNonBlankJsonString(result.data.message) ?? getNonBlankJsonString(result.message),
   }
 }
 
@@ -626,7 +638,7 @@ export function getActionLabel(action: ActionType): string {
     login: '登录',
     logout: '登出',
     trash_restore: '从回收站恢复',
-    trash_delete: '从回收站删除',
+    trash_delete: '永久删除回收站项目',
     trash_empty: '清空回收站',
     disk_health: '磁盘健康异常',
     scrub: '数据校验',

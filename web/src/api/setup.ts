@@ -5,7 +5,7 @@
 
 import { authFetch } from './auth'
 import { INVALID_API_RESPONSE_MESSAGE as INVALID_SETUP_RESPONSE_MESSAGE } from '@/lib/apiMessages'
-import { readStructuredJsonErrorDetails } from '@/lib/jsonErrorResponse'
+import { getNonBlankJsonString, readStructuredJsonErrorDetails } from '@/lib/jsonErrorResponse'
 
 const API_BASE = '/api/v1/setup'
 const SETUP_STATUS_FAILED_MESSAGE = '获取初始化状态失败'
@@ -19,6 +19,9 @@ interface SetupErrorResponse {
 
 interface SetupSuccessResponse {
   success: boolean
+  message?: string
+  warning?: boolean
+  data?: unknown
 }
 
 export interface SetupStatusResponse {
@@ -32,6 +35,22 @@ export interface SetupStatusResponse {
 
 export interface SetupRequestOptions {
   signal?: AbortSignal
+}
+
+export interface SetupActionResult {
+  success: boolean
+  message: string
+  warning: boolean
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value)
+}
+
+function hasSetupWarning(response: Response, body: SetupSuccessResponse): boolean {
+  return response.headers?.get?.('Warning') != null
+    || body.warning === true
+    || (isRecord(body.data) && body.data.warning === true)
 }
 
 async function parseSetupSuccess<T extends SetupSuccessResponse>(response: Response, invalidMessage: string): Promise<T> {
@@ -57,9 +76,10 @@ async function readSetupErrorMessage(response: Response, fallback: string): Prom
 
   try {
     const error = await response.json() as SetupErrorResponse
-    return typeof error.error === 'string'
-      ? error.error
-      : error.error?.message || error.message || fallback
+    const legacyErrorMessage = typeof error.error === 'string'
+      ? getNonBlankJsonString(error.error)
+      : getNonBlankJsonString(error.error?.message)
+    return legacyErrorMessage ?? getNonBlankJsonString(error.message) ?? fallback
   } catch {
     return fallback
   }
@@ -90,7 +110,7 @@ export async function getSetupStatus(options: SetupRequestOptions = {}): Promise
 /**
  * Acknowledge setup after an authenticated admin signs in.
  */
-export async function acknowledgeSetup(options: SetupRequestOptions = {}): Promise<{ success: boolean; message: string }> {
+export async function acknowledgeSetup(options: SetupRequestOptions = {}): Promise<SetupActionResult> {
   const response = await authFetch(`${API_BASE}/acknowledge`, {
     method: 'POST',
     ...(options.signal ? { signal: options.signal } : {}),
@@ -100,9 +120,10 @@ export async function acknowledgeSetup(options: SetupRequestOptions = {}): Promi
     throw new Error(await readSetupErrorMessage(response, ACKNOWLEDGE_SETUP_FAILED_MESSAGE))
   }
   
-  const body = await parseSetupSuccess<SetupSuccessResponse & { message?: string }>(response, INVALID_SETUP_RESPONSE_MESSAGE)
+  const body = await parseSetupSuccess<SetupSuccessResponse>(response, INVALID_SETUP_RESPONSE_MESSAGE)
   return {
     success: true,
-    message: body.message ?? '',
+    warning: hasSetupWarning(response, body),
+    message: getNonBlankJsonString(body.message) ?? '',
   }
 }

@@ -50,9 +50,10 @@ import {
   type ScrubResult,
   type ScrubError,
 } from '@/api/files'
-import { cn, formatBytes, formatDuration } from '@/lib/utils'
+import { cn, formatBytes, formatDuration, hasControlCharacter } from '@/lib/utils'
 import { GENERIC_ACTION_ERROR_DESCRIPTION, GENERIC_LOAD_ERROR_DESCRIPTION, getUserFacingErrorDescription } from '@/lib/apiMessages'
 import { backupJobNeedsAttention, getBackupAttentionNextSteps, getBackupAttentionReasons } from '@/lib/backupAttention'
+import { redactDiagnosticSecretFragments } from '@/lib/diagnosticMessages'
 import { useUser } from '@/stores/auth'
 
 type AbortControllerRef = { current: AbortController | null }
@@ -138,7 +139,7 @@ function getMaintenanceActionErrorPresentation(
 }
 
 function isScrubAlreadyRunningError(error: unknown): boolean {
-  return error instanceof ApiError && error.status === 409 && error.message.includes('already running')
+  return error instanceof ApiError && error.status === 409 && diagnosticMessageIncludes(error.message, 'already running')
 }
 
 // Status chip component
@@ -159,7 +160,7 @@ function StatusChip({ status, warning }: { status?: string; warning?: boolean })
     failed: { color: 'danger', icon: <XCircle size={14} />, label: '校验失败' },
   }
   
-  const config = configs[status] || { color: 'default', icon: <AlertCircle size={14} />, label: status }
+  const config = configs[status] || { color: 'default', icon: <AlertCircle size={14} />, label: '未知状态' }
   
   return (
     <Chip size="sm" color={config.color} variant="flat" startContent={config.icon}>
@@ -256,7 +257,11 @@ const scrubResultMessagesByBackendMessage: Record<string, string> = {
 }
 
 function normalizeDiagnosticMessageKey(value: string): string {
-  return value.trim().toLowerCase()
+  return value.trim().replace(/\s+/g, ' ').toLowerCase()
+}
+
+function diagnosticMessageIncludes(value: string, expected: string): boolean {
+  return normalizeDiagnosticMessageKey(value).includes(expected)
 }
 
 function getScrubErrorTypeLabel(errorType: string): string {
@@ -273,7 +278,8 @@ function getScrubErrorDisplayMessage(error: ScrubError): string {
 }
 
 function getScrubResultDisplayMessage(message: string): string {
-  return scrubResultMessagesByBackendMessage[normalizeDiagnosticMessageKey(message)] ?? message
+  return scrubResultMessagesByBackendMessage[normalizeDiagnosticMessageKey(message)]
+    ?? '数据校验结果已记录，请下载诊断包并检查服务日志。'
 }
 
 // Error list component
@@ -335,7 +341,7 @@ function BackupStatusChip({ status, warning }: { status?: string; warning?: bool
     running: { color: 'warning', icon: <RefreshCw size={14} className="animate-spin" />, label: '运行中' },
     failed: { color: 'danger', icon: <XCircle size={14} />, label: '失败' },
   }
-  const config = configs[status] || { color: 'default', icon: <AlertCircle size={14} />, label: status }
+  const config = configs[status] || { color: 'default', icon: <AlertCircle size={14} />, label: '未知状态' }
   return (
     <Chip size="sm" color={config.color} variant="flat" startContent={config.icon}>
       {config.label}
@@ -353,7 +359,7 @@ function BackupHealthChip({ status }: { status: string }) {
     failed: { color: 'danger', icon: <XCircle size={14} />, label: '异常' },
     disabled: { color: 'default', icon: <AlertCircle size={14} />, label: '已停用' },
   }
-  const config = configs[status] || { color: 'default', icon: <AlertCircle size={14} />, label: status }
+  const config = configs[status] || { color: 'default', icon: <AlertCircle size={14} />, label: '未知状态' }
   return (
     <Chip size="sm" color={config.color} variant="flat" startContent={config.icon}>
       {config.label}
@@ -371,7 +377,7 @@ function BackupPolicyChip({ status, staleLabel = '过期' }: { status: string; s
     running: { color: 'warning', icon: <RefreshCw size={14} className="animate-spin" />, label: '运行中' },
     disabled: { color: 'default', icon: <AlertCircle size={14} />, label: '已停用' },
   }
-  const config = configs[status] || { color: 'default', icon: <AlertCircle size={14} />, label: status }
+  const config = configs[status] || { color: 'default', icon: <AlertCircle size={14} />, label: '未知状态' }
   return (
     <Chip size="sm" color={config.color} variant="flat" startContent={config.icon}>
       {config.label}
@@ -395,26 +401,23 @@ function formatBackupDuration(value?: string): string {
     return ''
   }
 
-  const hours = value.match(/^(\d+)h0m0s$/)
-  if (hours) {
-    const count = Number(hours[1])
-    if (count > 0 && count % 24 === 0) {
-      return `${count / 24} 天`
-    }
-    return `${count} 小时`
+  const match = value.match(/^(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?$/)
+  if (!match || match[0] === '') {
+    return '未知时长'
   }
 
-  const minutes = value.match(/^(\d+)m0s$/)
-  if (minutes) {
-    return `${Number(minutes[1])} 分钟`
+  const hours = Number(match[1] ?? 0)
+  const minutes = Number(match[2] ?? 0)
+  const seconds = Number(match[3] ?? 0)
+  if (hours > 0 && minutes === 0 && seconds === 0 && hours % 24 === 0) {
+    return `${hours / 24} 天`
   }
 
-  const seconds = value.match(/^(\d+)s$/)
-  if (seconds) {
-    return `${Number(seconds[1])} 秒`
-  }
-
-  return value
+  const parts: string[] = []
+  if (hours > 0) parts.push(`${hours} 小时`)
+  if (minutes > 0) parts.push(`${minutes} 分钟`)
+  if (seconds > 0 || parts.length === 0) parts.push(`${seconds} 秒`)
+  return parts.join(' ')
 }
 
 function getBackupJobFocusElementId(jobId: string): string {
@@ -422,10 +425,14 @@ function getBackupJobFocusElementId(jobId: string): string {
 }
 
 function getBackupTriggerLabel(trigger?: string): string {
-  if (trigger === 'scheduled') {
+  const normalized = trigger?.trim().toLowerCase()
+  if (!normalized || normalized === 'manual') {
+    return '手动'
+  }
+  if (normalized === 'scheduled') {
     return '自动'
   }
-  return '手动'
+  return '未知触发方式'
 }
 
 const backupDiagnosticMessagesByBackendMessage: Record<string, string> = {
@@ -437,6 +444,12 @@ const backupDiagnosticMessagesByBackendMessage: Record<string, string> = {
   'disk full': '磁盘空间不足',
   'restore failed': '恢复失败',
   'verify failed': '恢复校验失败',
+  'restore drill ok': '恢复演练仍在预期窗口内',
+  'restore drill due': '需要执行恢复演练',
+  'restore drill stale': '恢复演练已过期',
+  'restore drill failed': '最近一次恢复演练失败',
+  'restore drill running': '恢复演练正在运行',
+  'no successful backup yet': '尚无成功备份，先完成备份再执行恢复演练',
   'restore target already exists': '恢复目标已存在',
   'all batch restore items failed': '所有批量恢复项目均失败',
   'batch restore preflight failed before writes; no target data was written': '批量恢复预检未通过，未写入任何目标数据',
@@ -463,11 +476,15 @@ function getBackupDiagnosticDisplayMessage(message: string): string {
     const itemNumber = Number(indexedItemFailure[1]) + 1
     const itemMessage = getBackupDiagnosticDisplayMessageForNormalized(indexedItemFailure[2])
     if (itemMessage) {
-      return `项目 ${itemNumber}: ${itemMessage}`
+      return `项目 ${itemNumber}：${itemMessage}`
     }
   }
 
-  return getBackupDiagnosticDisplayMessageForNormalized(normalized) ?? message
+  return getBackupDiagnosticDisplayMessageForNormalized(normalized) ?? redactDiagnosticSecretFragments(message)
+}
+
+function getRestoreDrillDisplayMessage(message?: string): string {
+  return message ? getBackupDiagnosticDisplayMessage(message) : '尚未演练'
 }
 
 function getBackupRetentionText(job: BackupJob): string {
@@ -489,7 +506,7 @@ function getBackupRetentionCheckMetricText(result: BackupRetentionCheckResult): 
     return '检测中'
   }
   if (result.status === 'failed') {
-    return result.error_message ? `检测失败: ${getBackupDiagnosticDisplayMessage(result.error_message)}` : '检测失败'
+    return result.error_message ? `检测失败：${getBackupDiagnosticDisplayMessage(result.error_message)}` : '检测失败'
   }
   if (result.snapshot_count !== undefined && result.snapshot_count > 0) {
     return `${result.snapshot_count} 个快照`
@@ -498,6 +515,35 @@ function getBackupRetentionCheckMetricText(result: BackupRetentionCheckResult): 
     return `${result.file_count} 个文件 · ${formatBytes(result.total_bytes ?? 0)}`
   }
   return '未发现可恢复内容'
+}
+
+type MaintenanceTaskResult = {
+  status: string
+  warning?: boolean
+  warnings?: string[]
+  error_message?: string
+}
+
+function hasMaintenanceTaskWarning(result: MaintenanceTaskResult): boolean {
+  return result.warning === true || (result.warnings?.length ?? 0) > 0
+}
+
+function getMaintenanceTaskToastColor(result: MaintenanceTaskResult): 'success' | 'warning' | 'danger' {
+  if (result.status === 'failed') {
+    return 'danger'
+  }
+  if (result.status === 'running' || hasMaintenanceTaskWarning(result)) {
+    return 'warning'
+  }
+  return 'success'
+}
+
+function getMaintenanceTaskDescription(result: MaintenanceTaskResult, fallback: string): string {
+  const diagnosticMessage = result.error_message ?? result.warnings?.[0]
+  if (diagnosticMessage) {
+    return getBackupDiagnosticDisplayMessage(diagnosticMessage)
+  }
+  return fallback
 }
 
 function getBackupRetentionCheckTime(result?: BackupRetentionCheckResult): string {
@@ -511,7 +557,7 @@ function getBackupScheduleWindowText(job: BackupJob): string {
   if (!job.schedule_window_start || !job.schedule_window_end) {
     return ''
   }
-  return `自动窗口: ${job.schedule_window_start}-${job.schedule_window_end}`
+  return `自动窗口：${job.schedule_window_start}-${job.schedule_window_end}`
 }
 
 const backupStarterConfigSnippet = `[[backup.jobs]]
@@ -561,7 +607,7 @@ function BackupAttentionSummary({ job }: { job: BackupJob }) {
   return (
     <div className="space-y-1">
       <div
-        aria-label={`待处理原因: ${summary}`}
+        aria-label={`待处理原因：${summary}`}
         className="flex flex-wrap items-center gap-1 text-xs text-warning"
         title={summary}
       >
@@ -577,12 +623,12 @@ function BackupAttentionSummary({ job }: { job: BackupJob }) {
       </div>
       {nextSteps.length > 0 && (
         <div
-          aria-label={`建议处理: ${stepSummary}`}
+          aria-label={`建议处理：${stepSummary}`}
           className="flex items-center gap-1 text-xs text-default-500"
           title={stepSummary}
         >
           <ListChecks size={14} className="shrink-0 text-warning" />
-          <span>建议: {visibleSteps.join('、')}{stepSuffix}</span>
+          <span>建议：{visibleSteps.join('、')}{stepSuffix}</span>
         </div>
       )}
     </div>
@@ -855,7 +901,7 @@ function RestoreImpactSummary({
     ? '配置文件会单独恢复到 .mnemonas-restore/config.toml；切换前需人工比对用户、目录权限、分享、告警和公开访问设置。'
     : '本次不恢复配置文件，当前运行中的用户、目录权限、分享、告警和公开访问设置不会自动改变。'
   const sampleText = result.sample_paths && result.sample_paths.length > 0
-    ? `样例: ${result.sample_paths.slice(0, 3).join('、')}`
+    ? `样例：${result.sample_paths.slice(0, 3).join('、')}`
     : '预览未返回样例路径。'
 
   return (
@@ -966,22 +1012,25 @@ function RestoreCutoverChecklist({
   isVerifying: boolean
 }) {
   const restoreWarnings = result.warnings ?? []
+  const restoreFailed = result.status === 'failed'
   const hasRestoreWarnings = restoreWarnings.length > 0
   const verifyWarnings = verifyResult?.warnings ?? []
-  const verifyTone = !verifyResult || isVerifying ? 'default' : verifyWarnings.length > 0 ? 'warning' : 'success'
-  const storageTone = !verifyResult || isVerifying ? 'default' : verifyResult.looks_like_storage_root ? 'success' : 'warning'
-  const configTone = result.config_restored ? (verifyResult?.config_found ? 'success' : 'warning') : 'default'
-  const completionToneClass = hasRestoreWarnings
+  const verifyTone = !verifyResult || isVerifying ? 'default' : verifyResult.status === 'failed' ? 'danger' : verifyWarnings.length > 0 ? 'warning' : 'success'
+  const storageTone = !verifyResult || isVerifying ? 'default' : verifyResult.status === 'failed' ? 'danger' : verifyResult.looks_like_storage_root ? 'success' : 'warning'
+  const configTone = restoreFailed ? 'default' : result.config_restored ? (verifyResult?.config_found ? 'success' : 'warning') : 'default'
+  const completionToneClass = restoreFailed
+    ? 'border-danger/20 bg-danger/10'
+    : hasRestoreWarnings
     ? 'border-warning/20 bg-warning/10'
     : 'border-success/20 bg-success/10'
-  const completionTitleClass = hasRestoreWarnings ? 'text-warning' : 'text-success'
+  const completionTitleClass = restoreFailed ? 'text-danger' : hasRestoreWarnings ? 'text-warning' : 'text-success'
 
   return (
     <div className="space-y-4">
       <div className={`rounded-lg border p-4 text-sm ${completionToneClass}`}>
         <div className="flex items-center justify-between gap-3">
           <div className={`font-medium ${completionTitleClass}`}>
-            {hasRestoreWarnings ? '恢复已完成，有警告' : '恢复已完成'}
+            {restoreFailed ? '恢复失败' : hasRestoreWarnings ? '恢复已完成，有警告' : '恢复已完成'}
           </div>
           <BackupStatusChip status={result.status} warning={hasRestoreWarnings} />
         </div>
@@ -1006,9 +1055,9 @@ function RestoreCutoverChecklist({
 
       <div className="grid gap-3">
         <RestoreCheckRow
-          tone="success"
+          tone={restoreFailed ? 'danger' : 'success'}
           title="恢复目录"
-          description="数据已写入独立目录，当前数据目录未被覆盖。"
+          description={restoreFailed ? '恢复未完成；请查看错误信息并确认目标目录状态。' : '数据已写入独立目录，当前数据目录未被覆盖。'}
         />
         <RestoreCheckRow
           tone={verifyTone}
@@ -1041,11 +1090,18 @@ function RestoreCutoverChecklist({
           }
         />
         <RestoreCheckRow
-          tone={verifyResult && verifyWarnings.length === 0 ? 'success' : 'default'}
+          tone={restoreFailed ? 'danger' : verifyResult && verifyResult.status !== 'failed' && verifyWarnings.length === 0 ? 'success' : 'default'}
           title="切换准备"
-          description="切换前保留旧目录和旧配置；切换后确认健康检查、登录、文件列表、上传、下载和版本历史。"
+          description={restoreFailed ? '恢复失败时不应切换 storage.root；先处理失败原因并重新执行恢复。' : '切换前保留旧目录和旧配置；切换后确认健康检查、登录、文件列表、上传、下载和版本历史。'}
         />
       </div>
+
+      {result.error_message && (
+        <div className="rounded-lg border border-danger/20 bg-danger/10 p-3 text-sm text-danger">
+          <div className="font-medium">恢复错误</div>
+          <div className="mt-2">{getBackupDiagnosticDisplayMessage(result.error_message)}</div>
+        </div>
+      )}
 
       {verifyWarnings.length > 0 && (
         <div className="rounded-lg border border-warning/20 bg-warning/10 p-3 text-sm text-warning">
@@ -1058,8 +1114,8 @@ function RestoreCutoverChecklist({
         </div>
       )}
 
-      <RestoreChecklistBlock title="切换步骤" items={result.cutover_checklist} />
-      <RestoreChecklistBlock title="回滚清单" items={result.rollback_checklist} />
+      {!restoreFailed && <RestoreChecklistBlock title="切换步骤" items={result.cutover_checklist} />}
+      {!restoreFailed && <RestoreChecklistBlock title="回滚清单" items={result.rollback_checklist} />}
     </div>
   )
 }
@@ -1097,12 +1153,17 @@ function getBackupTaskStatusLabel(status: string): string {
     case 'failed':
       return '失败'
     default:
-      return status
+      return '未知状态'
   }
 }
 
 function getRestoreDrillFailureCategoryLabel(category?: string): string | null {
-  switch (category) {
+  const normalized = category?.trim().toLowerCase()
+  if (!normalized) {
+    return null
+  }
+
+  switch (normalized) {
     case 'no_snapshot':
       return '无可用快照'
     case 'unsupported_job_type':
@@ -1120,7 +1181,7 @@ function getRestoreDrillFailureCategoryLabel(category?: string): string | null {
     case 'unknown':
       return '未分类失败'
     default:
-      return null
+      return '未分类失败'
   }
 }
 
@@ -1174,12 +1235,12 @@ function BackupDrillSummary({ job }: { job: BackupJob }) {
         <div className="flex items-center gap-2">
           <BackupPolicyChip status={job.restore_drill_status} staleLabel="演练过期" />
         </div>
-        <div className="text-default-500">{job.restore_drill_message || '尚未演练'}</div>
+        <div className="text-default-500">{getRestoreDrillDisplayMessage(job.restore_drill_message)}</div>
         {job.restore_drill_stale_after && (
-          <div className="text-default-400">提醒周期: {formatBackupDuration(job.restore_drill_stale_after)}</div>
+          <div className="text-default-400">提醒周期：{formatBackupDuration(job.restore_drill_stale_after)}</div>
         )}
         {job.last_restore_drill_reminder_at && (
-          <div className="text-default-400">最近提醒: {formatDateTime(job.last_restore_drill_reminder_at)}</div>
+          <div className="text-default-400">最近提醒：{formatDateTime(job.last_restore_drill_reminder_at)}</div>
         )}
         {statsText && <div className="text-default-400">{statsText}</div>}
       </div>
@@ -1197,11 +1258,11 @@ function BackupDrillSummary({ job }: { job: BackupJob }) {
       </div>
       {job.restore_drill_message && (
         <div className={job.restore_drill_status === 'failed' ? 'text-danger' : job.restore_drill_status === 'stale' || job.restore_drill_status === 'due' ? 'text-warning' : 'text-default-400'}>
-          {job.restore_drill_message}
+          {getRestoreDrillDisplayMessage(job.restore_drill_message)}
         </div>
       )}
       {job.last_restore_drill_reminder_at && (
-        <div className="text-default-400">最近提醒: {formatDateTime(job.last_restore_drill_reminder_at)}</div>
+        <div className="text-default-400">最近提醒：{formatDateTime(job.last_restore_drill_reminder_at)}</div>
       )}
       {statsText && (
         <div className={job.restore_drill_stats?.consecutive_failures ? 'text-warning' : 'text-default-400'}>
@@ -1209,10 +1270,10 @@ function BackupDrillSummary({ job }: { job: BackupJob }) {
         </div>
       )}
       {job.restore_drill_stats?.last_failure_message && (
-        <div className="text-warning">最近失败: {getBackupDiagnosticDisplayMessage(job.restore_drill_stats.last_failure_message)}</div>
+        <div className="text-warning">最近失败：{getBackupDiagnosticDisplayMessage(job.restore_drill_stats.last_failure_message)}</div>
       )}
       {latestFailureCategory && (
-        <div className="text-warning">失败类型: {latestFailureCategory}</div>
+        <div className="text-warning">失败类型：{latestFailureCategory}</div>
       )}
       {result.error_message && <div className="text-danger">{getBackupDiagnosticDisplayMessage(result.error_message)}</div>}
       <BackupDrillHistoryList history={job.restore_drill_history} />
@@ -1231,11 +1292,11 @@ function BackupRestoreReportFindings({ findings }: { findings?: string[] }) {
   const fullSummary = displayFindings.join('\n')
   return (
     <div
-      aria-label={`摘要发现: ${displayFindings.join('；')}`}
+      aria-label={`摘要发现：${displayFindings.join('；')}`}
       className={hasBlockingFinding ? 'text-warning' : 'text-default-400'}
       title={fullSummary}
     >
-      摘要发现: {displayFindings[0]}{suffix}
+      摘要发现：{displayFindings[0]}{suffix}
     </div>
   )
 }
@@ -1260,7 +1321,7 @@ function BackupRestoreHistoryList({ history }: { history?: BackupRestoreResult[]
               </span>
               <span className="truncate text-default-400">{formatDateTime(entry.finished_at ?? entry.started_at)}</span>
             </div>
-            <div className="truncate text-default-500" title={entry.target_path}>目标: {entry.target_path}</div>
+            <div className="truncate text-default-500" title={entry.target_path}>目标：{entry.target_path}</div>
             <div className="text-default-400">{getBackupRestoreMetricText(entry)}</div>
             {entry.error_message && <div className="text-danger">{getBackupDiagnosticDisplayMessage(entry.error_message)}</div>}
             {entry.warnings && entry.warnings.length > 0 && <div className="text-warning">{getBackupDiagnosticDisplayMessage(entry.warnings[0])}</div>}
@@ -1347,12 +1408,12 @@ function BackupRestoreSummary({ job }: { job: BackupJob }) {
         {getBackupRestoreMetricText(result)}
       </div>
       <div className="max-w-[18rem] truncate text-default-400" title={result.target_path}>
-        目标: {result.target_path}
+        目标：{result.target_path}
       </div>
       <BackupRestoreHistoryList history={job.restore_history} />
       {verify && (
         <div className={verify.status === 'failed' ? 'text-danger' : verify.warnings && verify.warnings.length > 0 ? 'text-warning' : 'text-default-400'}>
-          最近检查: {getBackupRestoreVerifyMetricText(verify)}
+          最近检查：{getBackupRestoreVerifyMetricText(verify)}
         </div>
       )}
       {verify?.snapshot_path && (
@@ -1375,13 +1436,14 @@ function getBackupConflictTitle(error: unknown, fallback: string): string {
   if (!(error instanceof ApiError) || error.status !== 409) {
     return fallback
   }
-  if (error.message.includes('disabled')) {
+  const message = normalizeDiagnosticMessageKey(error.message)
+  if (message.includes('disabled')) {
     return '备份任务已停用'
   }
-  if (error.message.includes('no completed snapshots')) {
+  if (message.includes('no completed snapshots')) {
     return '暂无可演练的备份快照'
   }
-  if (error.message.includes('already running')) {
+  if (message.includes('already running')) {
     return '备份任务正在运行'
   }
   return fallback
@@ -1391,13 +1453,14 @@ function getBackupConflictDescription(error: unknown, fallback: string): string 
   if (!(error instanceof ApiError) || error.status !== 409) {
     return fallback
   }
-  if (error.message.includes('disabled')) {
+  const message = normalizeDiagnosticMessageKey(error.message)
+  if (message.includes('disabled')) {
     return '请先在配置文件中启用该任务并重启服务。'
   }
-  if (error.message.includes('no completed snapshots')) {
+  if (message.includes('no completed snapshots')) {
     return '请先完成一次成功备份，再执行恢复或演练。'
   }
-  if (error.message.includes('already running')) {
+  if (message.includes('already running')) {
     return '已有备份或恢复演练正在执行，请稍后刷新状态。'
   }
   return fallback
@@ -1430,6 +1493,9 @@ function hasUnsafeRestoreTargetSegment(value: string): boolean {
 
 function normalizeRestoreTargetForRequest(value: string): string | null {
   const trimmed = value.trim()
+  if (trimmed.includes('\\')) {
+    return null
+  }
   if (!trimmed.startsWith('/')) {
     return null
   }
@@ -1472,15 +1538,15 @@ function isRestoreTargetProtectedPath(value: string): boolean {
 }
 
 function getRestoreTargetInputError(targetPath: string): string | null {
-  if ([...targetPath].some((char) => {
-    const code = char.charCodeAt(0)
-    return code < 0x20 || code === 0x7f
-  })) {
+  if (hasControlCharacter(targetPath)) {
     return '恢复目标不能包含控制字符。'
   }
   const trimmed = targetPath.trim()
   if (trimmed === '') {
     return null
+  }
+  if (trimmed.includes('\\')) {
+    return '恢复目标不能包含反斜杠，请使用服务器上的 POSIX 绝对路径。'
   }
   if (!isAbsoluteRestoreTargetPath(trimmed)) {
     return '恢复目标必须是服务器上的绝对路径，例如 /mnt/restore/mnemonas。'
@@ -1498,7 +1564,7 @@ function getBatchRestoreTargetInputError(items: BackupBatchRestoreItemRequest[])
   for (const [index, item] of items.entries()) {
     const error = getRestoreTargetInputError(item.target_path)
     if (error) {
-      return `第 ${index + 1} 项: ${error}`
+      return `第 ${index + 1} 项：${error}`
     }
   }
   return null
@@ -1887,7 +1953,7 @@ function BatchRestoreResultSummary({ result }: { result: BackupBatchRestoreResul
             {item.restore && <div className="mt-2 text-default-500">{getBackupRestoreMetricText(item.restore)}</div>}
             {item.verify && (
               <div className={item.verify.warnings && item.verify.warnings.length > 0 ? 'mt-1 text-warning' : 'mt-1 text-default-500'}>
-                只读校验: {getBackupRestoreVerifyMetricText(item.verify)}
+                只读校验：{getBackupRestoreVerifyMetricText(item.verify)}
               </div>
             )}
             {item.verify?.snapshot_path && (
@@ -2221,10 +2287,11 @@ export default function Maintenance() {
         return
       }
       void queryClient.invalidateQueries({ queryKey: backupJobsQueryKey })
+      const toastColor = getMaintenanceTaskToastColor(result)
       addToast({
-        title: result.warning ? '备份完成但有警告' : '备份已完成',
-        description: getBackupRunMetricText(result).replace(' · ', '，'),
-        color: result.warning ? 'warning' : 'success',
+        title: result.status === 'failed' ? '备份任务失败' : hasMaintenanceTaskWarning(result) ? '备份完成但有警告' : '备份已完成',
+        description: getMaintenanceTaskDescription(result, getBackupRunMetricText(result).replace(' · ', '，')),
+        color: toastColor,
       })
     },
     onError: (error: unknown, request) => {
@@ -2256,10 +2323,11 @@ export default function Maintenance() {
         return
       }
       void queryClient.invalidateQueries({ queryKey: backupJobsQueryKey })
+      const toastColor = getMaintenanceTaskToastColor(result)
       addToast({
-        title: result.warning ? '保留策略检测完成，有警告' : '保留策略检测完成',
-        description: getBackupRetentionCheckMetricText(result).replace(' · ', '，'),
-        color: result.warning ? 'warning' : 'success',
+        title: result.status === 'failed' ? '保留策略检测失败' : hasMaintenanceTaskWarning(result) ? '保留策略检测完成，有警告' : '保留策略检测完成',
+        description: getMaintenanceTaskDescription(result, getBackupRetentionCheckMetricText(result).replace(' · ', '，')),
+        color: toastColor,
       })
     },
     onError: (error: unknown, request) => {
@@ -2291,10 +2359,11 @@ export default function Maintenance() {
         return
       }
       void queryClient.invalidateQueries({ queryKey: backupJobsQueryKey })
+      const toastColor = getMaintenanceTaskToastColor(result)
       addToast({
-        title: '恢复演练已完成',
-        description: getBackupRestoreDrillMetricText(result).replace(' · ', '，'),
-        color: 'success',
+        title: result.status === 'failed' ? '恢复演练失败' : result.status === 'running' ? '恢复演练已启动' : '恢复演练已完成',
+        description: getMaintenanceTaskDescription(result, getBackupRestoreDrillMetricText(result).replace(' · ', '，')),
+        color: toastColor,
       })
     },
     onError: (error: unknown, request) => {
@@ -2331,13 +2400,11 @@ export default function Maintenance() {
         targetPath: request.targetPath,
         includeConfig: request.includeConfig,
       })
-      const hasFailedPreflight = result.preflight_checks?.some((check) => check.status === 'failed') ?? false
+      const hasFailedPreflight = result.status === 'failed' || (result.preflight_checks?.some((check) => check.status === 'failed') ?? false)
       const hasWarnings = hasFailedPreflight || (result.warnings?.length ?? 0) > 0
       addToast({
-        title: hasFailedPreflight ? '恢复预检未通过' : hasWarnings ? '恢复预览已生成，有提醒' : '恢复预览已生成',
-        description: hasWarnings && result.warnings?.[0]
-          ? getBackupDiagnosticDisplayMessage(result.warnings[0])
-          : getBackupRestorePreviewMetricText(result).replace(' · ', '，'),
+        title: result.status === 'failed' ? '恢复预览失败' : hasFailedPreflight ? '恢复预检未通过' : hasWarnings ? '恢复预览已生成，有提醒' : '恢复预览已生成',
+        description: getMaintenanceTaskDescription(result, getBackupRestorePreviewMetricText(result).replace(' · ', '，')),
         color: hasFailedPreflight ? 'danger' : hasWarnings ? 'warning' : 'success',
       })
     },
@@ -2373,12 +2440,11 @@ export default function Maintenance() {
       void queryClient.invalidateQueries({ queryKey: backupJobsQueryKey })
       setRestoreVerifyResult(result)
       const verifyWarnings = result.warnings ?? []
+      const toastColor = getMaintenanceTaskToastColor(result)
       addToast({
-        title: verifyWarnings.length > 0 ? '恢复目录检查完成，有警告' : '恢复目录检查完成',
-        description: verifyWarnings[0]
-          ? getBackupDiagnosticDisplayMessage(verifyWarnings[0])
-          : getBackupRestoreVerifyMetricText(result).replace(' · ', '，'),
-        color: verifyWarnings.length > 0 ? 'warning' : 'success',
+        title: result.status === 'failed' ? '恢复目录检查失败' : verifyWarnings.length > 0 ? '恢复目录检查完成，有警告' : '恢复目录检查完成',
+        description: getMaintenanceTaskDescription(result, getBackupRestoreVerifyMetricText(result).replace(' · ', '，')),
+        color: toastColor,
       })
     },
     onError: (error: unknown, request) => {
@@ -2429,14 +2495,15 @@ export default function Maintenance() {
       setRestoreVerifyResult(null)
       setRestoreTargetPath(request.targetPath)
       const restoreWarnings = result.warnings ?? []
+      const toastColor = getMaintenanceTaskToastColor(result)
       addToast({
-        title: restoreWarnings.length > 0 ? '备份已恢复，有警告' : '备份已恢复',
-        description: restoreWarnings[0]
-          ? getBackupDiagnosticDisplayMessage(restoreWarnings[0])
-          : `${getBackupRestoreMetricText(result)}，目标: ${result.target_path}`,
-        color: restoreWarnings.length > 0 ? 'warning' : 'success',
+        title: result.status === 'failed' ? '备份恢复失败' : restoreWarnings.length > 0 ? '备份已恢复，有警告' : '备份已恢复',
+        description: getMaintenanceTaskDescription(result, `${getBackupRestoreMetricText(result)}，目标：${result.target_path}`),
+        color: toastColor,
       })
-      startRestoreVerify(result.job_id, request.targetPath)
+      if (result.status !== 'failed') {
+        startRestoreVerify(result.job_id, request.targetPath)
+      }
     },
     onError: (error: unknown, request) => {
       if (request.signal.aborted || isAbortError(error)) {
@@ -2752,7 +2819,7 @@ export default function Maintenance() {
       />
       
       {/* Scrub Card */}
-      <Card className="card-meridian">
+      <Card className="card-mnemonas">
         <CardHeader className="flex flex-col items-start gap-3 pb-2 sm:flex-row sm:items-center sm:justify-between">
           <div className="flex items-center gap-3">
             <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-accent-primary/15">
@@ -2802,25 +2869,25 @@ export default function Maintenance() {
                 {scrubResult.id && (
                   <div className="flex items-center gap-1">
                     <Database size={14} />
-                    <span>任务 ID: {scrubResult.id}</span>
+                    <span>任务 ID：{scrubResult.id}</span>
                   </div>
                 )}
                 {scrubResult.start_time && (
                   <div className="flex items-center gap-1">
                     <Clock size={14} />
-                    <span>开始: {new Date(scrubResult.start_time).toLocaleString('zh-CN')}</span>
+                    <span>开始：{new Date(scrubResult.start_time).toLocaleString('zh-CN')}</span>
                   </div>
                 )}
                 {scrubResult.duration_ms !== undefined && scrubResult.status !== 'running' && (
                   <div className="flex items-center gap-1">
                     <Clock size={14} />
-                    <span>耗时: {formatDuration(scrubResult.duration_ms)}</span>
+                    <span>耗时：{formatDuration(scrubResult.duration_ms)}</span>
                   </div>
                 )}
                 {scrubResult.total_size !== undefined && (
                   <div className="flex items-center gap-1">
                     <Database size={14} />
-                    <span>数据量: {formatBytes(scrubResult.total_size)}</span>
+                    <span>数据量：{formatBytes(scrubResult.total_size)}</span>
                   </div>
                 )}
               </div>
@@ -2877,7 +2944,7 @@ export default function Maintenance() {
       </Card>
 
       {/* Backup Jobs Card */}
-      <Card className="card-meridian">
+      <Card className="card-mnemonas">
         <CardHeader className="flex flex-col items-start gap-3 pb-2 sm:flex-row sm:items-center sm:justify-between">
           <div className="flex items-center gap-3">
             <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-accent-primary/15">
@@ -2974,6 +3041,8 @@ export default function Maintenance() {
                         <TableCell>
                           <div
                             id={getBackupJobFocusElementId(job.id)}
+                            role="group"
+                            aria-label={`${job.name} 备份任务${isFocusedBackupJob ? '，安全自检定位' : ''}`}
                             className={cn(
                               '-m-2 space-y-1 rounded-lg border border-transparent p-2',
                               isFocusedBackupJob && 'border-warning/60 bg-warning/10 ring-2 ring-warning/30',
@@ -2995,7 +3064,7 @@ export default function Maintenance() {
                               {job.id} · {job.type}
                             </div>
                             <div className="max-w-[22rem] truncate text-xs text-default-400" title={job.source}>
-                              来源: {job.source}
+                              来源：{job.source}
                             </div>
                             <BackupAttentionSummary job={job} />
                           </div>
@@ -3010,7 +3079,7 @@ export default function Maintenance() {
                           </div>
                           {job.command && (
                             <div className="max-w-[20rem] truncate text-xs text-default-400" title={job.command}>
-                              命令: {job.command}
+                              命令：{job.command}
                             </div>
                           )}
                         </TableCell>
@@ -3021,7 +3090,7 @@ export default function Maintenance() {
                               <span>{job.disabled ? '任务已停用' : job.schedule_interval ? `每 ${formatBackupDuration(job.schedule_interval)}` : '手动执行'}</span>
                             </div>
                             <div className="text-xs text-default-500">
-                              {job.next_run_at ? `下次运行: ${formatDateTime(job.next_run_at)}` : '不会自动运行'}
+                              {job.next_run_at ? `下次运行：${formatDateTime(job.next_run_at)}` : '不会自动运行'}
                             </div>
                             {getBackupScheduleWindowText(job) && (
                               <div className="text-xs text-default-500">
@@ -3034,12 +3103,12 @@ export default function Maintenance() {
                             </div>
                             {job.retention_policy && (
                               <div className="max-w-[18rem] truncate text-xs text-default-400" title={job.retention_policy}>
-                                策略: {job.retention_policy}
+                                策略：{job.retention_policy}
                               </div>
                             )}
                             {job.last_retention_check && (
                               <div className={job.last_retention_check.warning || job.last_retention_check.status === 'failed' ? 'text-xs text-warning' : 'text-xs text-default-400'}>
-                                最近检测: {getBackupRetentionCheckMetricText(job.last_retention_check)}
+                                最近检测：{getBackupRetentionCheckMetricText(job.last_retention_check)}
                                 {getBackupRetentionCheckTime(job.last_retention_check) && ` · ${getBackupRetentionCheckTime(job.last_retention_check)}`}
                               </div>
                             )}
@@ -3137,7 +3206,7 @@ export default function Maintenance() {
       </Card>
       
       {/* Info Card */}
-      <Card className="card-meridian">
+      <Card className="card-mnemonas">
         <CardBody className="text-sm text-default-600">
           <h4 className="font-medium mb-2">维护建议</h4>
           <ul className="list-disc list-inside space-y-1">
@@ -3181,7 +3250,7 @@ export default function Maintenance() {
                     <div className="font-medium">{restoreJob.name}</div>
                     <div className="mt-1 text-default-500">{restoreJob.id} · {restoreJob.type}</div>
                     <div className="mt-1 truncate text-default-400" title={restoreJob.destination}>
-                      备份目标: {restoreJob.destination}
+                      备份目标：{restoreJob.destination}
                     </div>
                   </div>
                 )}
@@ -3224,11 +3293,11 @@ export default function Maintenance() {
                     </div>
                     <div className="mt-2 text-default-600">{getBackupRestorePreviewMetricText(restorePreview)}</div>
                     <div className="mt-1 truncate text-default-500" title={restorePreview.target_path}>
-                      目标: {restorePreview.target_path}
+                      目标：{restorePreview.target_path}
                     </div>
                     {restorePreview.config_available && (
                       <div className="mt-1 text-default-500">
-                        配置文件: {restorePreview.config_included ? '将恢复到 .mnemonas-restore/config.toml' : '本次不恢复'}
+                        配置文件：{restorePreview.config_included ? '将恢复到 .mnemonas-restore/config.toml' : '本次不恢复'}
                       </div>
                     )}
                     <RestoreImpactSummary result={restorePreview} matches={restorePreviewMatches} />
@@ -3412,8 +3481,8 @@ export default function Maintenance() {
                               </Checkbox>
                               <div className="ml-7 space-y-1 text-xs text-default-500">
                                 <div>{job.id} · {job.type}</div>
-                                <div className="truncate" title={job.destination}>备份目标: {job.destination}</div>
-                                <div className="truncate" title={job.source}>来源: {job.source}</div>
+                                <div className="truncate" title={job.destination}>备份目标：{job.destination}</div>
+                                <div className="truncate" title={job.source}>来源：{job.source}</div>
                               </div>
                             </div>
                             <div className="space-y-3">

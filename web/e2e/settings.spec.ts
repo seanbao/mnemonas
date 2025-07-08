@@ -1,10 +1,13 @@
 import { test, expect } from '@playwright/test'
 import { ensureAuthenticatedAt } from './helpers/auth-check'
+import { routeBackupJobs } from './helpers/backups'
+import { waitForRouteSettled } from './helpers/route-ready'
 
 /**
- * 设置页面 E2E 测试
- * 认证状态由 auth.setup.ts 通过 storageState 自动注入
- * 如果认证启用但登录失败，测试会被跳过
+ * Settings page E2E tests.
+ * Authentication state is injected by auth.setup.ts through storageState.
+ * Login setup failures fail by default; protected-page tests skip only when
+ * auth skipping is explicitly enabled for reused environments.
  */
 
 test.describe('设置页面', () => {
@@ -14,7 +17,8 @@ test.describe('设置页面', () => {
 
   test('应显示设置页面', async ({ page }) => {
     await expect(page).not.toHaveURL(/\/login/)
-    await expect(page.locator('body')).toBeVisible()
+    await expect(page.getByRole('heading', { name: /设置/i })).toBeVisible({ timeout: 5000 })
+    await expect(page.getByRole('button', { name: /保存|保存设置/i })).toBeVisible()
   })
 
   test('应显示设置页面标题', async ({ page }) => {
@@ -33,9 +37,7 @@ test.describe('设置页面', () => {
 
     for (const tabPattern of tabs) {
       const tab = page.getByRole('tab', { name: tabPattern })
-      if (await tab.isVisible({ timeout: 1000 }).catch(() => false)) {
-        await expect(tab).toBeVisible()
-      }
+      await expect(tab).toBeVisible({ timeout: 5000 })
     }
   })
 
@@ -49,8 +51,8 @@ test.describe('设置页面', () => {
       await expect(tab).toBeVisible({ timeout: 5000 })
       const box = await tab.boundingBox()
       expect(box, `${tabName} tab should have a layout box`).not.toBeNull()
-      expect(Math.round((box?.left ?? 0) + (box?.width ?? 0))).toBeLessThanOrEqual(390)
-      expect(Math.round(box?.left ?? 0)).toBeGreaterThanOrEqual(0)
+      expect(Math.round((box?.x ?? 0) + (box?.width ?? 0))).toBeLessThanOrEqual(390)
+      expect(Math.round(box?.x ?? 0)).toBeGreaterThanOrEqual(0)
     }
   })
 
@@ -66,62 +68,57 @@ test.describe('设置页面', () => {
 test.describe('设置选项卡切换', () => {
   test.beforeEach(async ({ page }) => {
     await ensureAuthenticatedAt(page, '/settings')
+    await waitForRouteSettled(page, '/settings')
   })
 
   test('点击 WebDAV 选项卡应显示 WebDAV 设置', async ({ page }) => {
     const webdavTab = page.getByRole('tab', { name: /WebDAV/i })
-    if (await webdavTab.isVisible({ timeout: 2000 }).catch(() => false)) {
-      await webdavTab.click()
-      await page.waitForTimeout(500)
+    await expect(webdavTab).toBeVisible({ timeout: 5000 })
+    await webdavTab.click()
 
-      // 检查 WebDAV 相关设置项
-      const webdavSwitch = page.getByRole('switch', { name: /启用 WebDAV/i })
-      await expect(webdavSwitch).toBeVisible({ timeout: 5000 })
-    }
+    const webdavSwitch = page.getByRole('switch', { name: /启用 WebDAV/i })
+    await expect(webdavSwitch).toBeVisible({ timeout: 5000 })
   })
 
   test('点击版本保留选项卡应显示版本设置', async ({ page }) => {
     const retentionTab = page.getByRole('tab', { name: /版本保留/i })
-    if (await retentionTab.isVisible({ timeout: 2000 }).catch(() => false)) {
-      await retentionTab.click()
-      await page.waitForTimeout(500)
+    await expect(retentionTab).toBeVisible({ timeout: 5000 })
+    await retentionTab.click()
 
-      // 检查版本相关设置项
-      const maxVersions = page.getByText(/最大版本数/i)
-      await expect(maxVersions).toBeVisible({ timeout: 5000 })
-    }
+    const maxVersions = page.getByText(/最大版本数/i)
+    await expect(maxVersions).toBeVisible({ timeout: 5000 })
+    await expect(page.getByText('路径直接填写 MnemoNAS 逻辑路径')).toBeVisible()
   })
 
   test('点击高级选项卡应显示 CDC 设置', async ({ page }) => {
     const advancedTab = page.getByRole('tab', { name: /高级/i })
-    if (await advancedTab.isVisible({ timeout: 2000 }).catch(() => false)) {
-      await advancedTab.click()
-      await page.waitForTimeout(500)
+    await expect(advancedTab).toBeVisible({ timeout: 5000 })
+    await advancedTab.click()
 
-      const cdcHeading = page.getByRole('heading', { name: 'CDC 分块参数' })
-      await expect(cdcHeading).toBeVisible({ timeout: 5000 })
-    }
+    const cdcHeading = page.getByRole('heading', { name: 'CDC 分块参数' })
+    await expect(cdcHeading).toBeVisible({ timeout: 5000 })
   })
 
   test('高级选项卡应显示钉钉提醒通道设置', async ({ page }) => {
     const advancedTab = page.getByRole('tab', { name: /高级/i })
-    if (await advancedTab.isVisible({ timeout: 2000 }).catch(() => false)) {
-      await advancedTab.click()
-      const dingTalkSwitch = page.getByRole('switch', { name: '启用钉钉通知' })
-      await dingTalkSwitch.scrollIntoViewIfNeeded()
-      await expect(dingTalkSwitch).toBeVisible({ timeout: 5000 })
-      await expect(page.getByLabel('钉钉 Webhook URL')).toBeVisible()
-    }
+    await expect(advancedTab).toBeVisible({ timeout: 5000 })
+    await advancedTab.click()
+
+    const dingTalkSwitch = page.getByRole('switch', { name: '启用钉钉通知' })
+    await dingTalkSwitch.scrollIntoViewIfNeeded()
+    await expect(dingTalkSwitch).toBeVisible({ timeout: 5000 })
+    await expect(page.getByLabel('钉钉 Webhook URL')).toBeVisible()
   })
 
   test('点击分享选项卡应显示分享策略覆盖摘要', async ({ page }) => {
     const sharesTab = page.getByRole('tab', { name: /分享/i })
-    if (await sharesTab.isVisible({ timeout: 2000 }).catch(() => false)) {
-      await sharesTab.click()
-      const coverage = page.getByLabel('分享策略覆盖摘要')
-      await expect(coverage.getByText('分享策略覆盖摘要')).toBeVisible({ timeout: 5000 })
-      await expect(coverage.getByText('策略关注项')).toBeVisible()
-    }
+    await expect(sharesTab).toBeVisible({ timeout: 5000 })
+    await sharesTab.click()
+
+    const coverage = page.getByLabel('分享策略覆盖摘要')
+    await expect(coverage.getByText('分享策略覆盖摘要')).toBeVisible({ timeout: 5000 })
+    await expect(coverage.getByText('策略关注项')).toBeVisible()
+    await expect(page.getByText('分享策略路径填写 MnemoNAS 逻辑路径')).toBeVisible()
   })
 })
 
@@ -131,7 +128,7 @@ test.describe('设置表单交互', () => {
   })
 
   test('点击保存设置应提交成功并显示提示', async ({ page }) => {
-    await expect(page.getByText('加载设置...')).toHaveCount(0, { timeout: 15000 })
+    await waitForRouteSettled(page, '/settings')
 
     const saveButton = page.getByRole('button', { name: /保存|保存设置/i })
     await expect(saveButton).toBeVisible({ timeout: 5000 })
@@ -164,7 +161,7 @@ test.describe('设置表单交互', () => {
       })
     })
 
-    await expect(page.getByText('加载设置...')).toHaveCount(0, { timeout: 15000 })
+    await waitForRouteSettled(page, '/settings')
     await page.getByRole('tab', { name: /WebDAV/i }).click()
 
     const webdavSwitch = page.getByRole('switch', { name: /启用 WebDAV/i })
@@ -237,7 +234,7 @@ test.describe('设置表单交互', () => {
     })
 
     await page.reload()
-    await expect(page.getByText('加载设置...')).toHaveCount(0, { timeout: 15000 })
+    await waitForRouteSettled(page, '/settings')
     await page.getByRole('tab', { name: /高级/i }).click()
 
     const clearTelegramToken = page.getByRole('checkbox', { name: '保存时清除已保存 Telegram Token' })
@@ -261,28 +258,30 @@ test.describe('设置表单交互', () => {
   })
 
   test('服务器地址输入框应可编辑', async ({ page }) => {
-    const hostInput = page.getByLabel(/监听地址/i)
-    if (await hostInput.isVisible({ timeout: 2000 }).catch(() => false)) {
-      await hostInput.clear()
-      await hostInput.fill('127.0.0.1')
-      await expect(hostInput).toHaveValue('127.0.0.1')
-    }
+    await waitForRouteSettled(page, '/settings')
+
+    const hostInput = page.getByLabel('服务器监听地址')
+    await expect(hostInput).toBeVisible({ timeout: 5000 })
+    await hostInput.clear()
+    await hostInput.fill('127.0.0.1')
+    await expect(hostInput).toHaveValue('127.0.0.1')
   })
 
   test('端口输入框应可编辑', async ({ page }) => {
-    const portInput = page.getByLabel(/端口/i)
-    if (await portInput.isVisible({ timeout: 2000 }).catch(() => false)) {
-      await portInput.clear()
-      await portInput.fill('9080')
-      await expect(portInput).toHaveValue('9080')
-    }
+    await waitForRouteSettled(page, '/settings')
+
+    const portInput = page.getByLabel('服务器端口')
+    await expect(portInput).toBeVisible({ timeout: 5000 })
+    await portInput.clear()
+    await portInput.fill('9080')
+    await expect(portInput).toHaveValue('9080')
   })
 })
 
 test.describe('公网访问向导', () => {
   test.beforeEach(async ({ page }) => {
     await ensureAuthenticatedAt(page, '/settings')
-    await expect(page.getByText('加载设置...')).toHaveCount(0, { timeout: 15000 })
+    await waitForRouteSettled(page, '/settings')
   })
 
   test('填写域名后应更新命令并应用推荐配置到表单', async ({ page }) => {
@@ -297,7 +296,7 @@ test.describe('公网访问向导', () => {
 
     await page.getByRole('button', { name: '应用推荐到表单' }).click()
 
-    await expect(page.getByPlaceholder('0.0.0.0')).toHaveValue('127.0.0.1')
+    await expect(page.getByLabel('服务器监听地址')).toHaveValue('127.0.0.1')
     await expect(page.getByLabel('受信代理层数')).toHaveValue('1')
   })
 
@@ -380,7 +379,7 @@ test.describe('公网访问向导', () => {
     })
 
     await page.reload()
-    await expect(page.getByText('加载设置...')).toHaveCount(0, { timeout: 15000 })
+    await waitForRouteSettled(page, '/settings')
     await page.getByLabel('公网域名').fill('nas.example.com')
     await page.getByRole('button', { name: '应用推荐到表单' }).click()
     await page.getByRole('button', { name: /保存|保存设置/i }).click()
@@ -431,14 +430,13 @@ test.describe('安全自检修复动作', () => {
         }),
       })
     })
-
     await ensureAuthenticatedAt(page, '/settings')
-    await expect(page.getByText('加载设置...')).toHaveCount(0, { timeout: 15000 })
+    await waitForRouteSettled(page, '/settings')
     await expect(page.getByText('Web 服务监听范围偏宽')).toBeVisible({ timeout: 5000 })
 
     await page.getByRole('button', { name: '改为本机监听' }).click()
 
-    await expect(page.getByPlaceholder('0.0.0.0')).toHaveValue('127.0.0.1')
+    await expect(page.getByLabel('服务器监听地址')).toHaveValue('127.0.0.1')
   })
 
   test('公开分享边界异常不应显示代理修复按钮', async ({ page }) => {
@@ -473,11 +471,92 @@ test.describe('安全自检修复动作', () => {
     })
 
     await ensureAuthenticatedAt(page, '/settings')
-    await expect(page.getByText('加载设置...')).toHaveCount(0, { timeout: 15000 })
+    await waitForRouteSettled(page, '/settings')
     await expect(page.getByText('公开分享浏览器边界异常')).toBeVisible({ timeout: 5000 })
     await expect(page.getByText('公开分享访问 cookie、失败限速或缓存边界未满足公网安全要求。')).toBeVisible()
     await expect(page.getByText('backend raw public share boundary block detail')).toHaveCount(0)
     await expect(page.getByRole('button', { name: '应用代理推荐' })).toHaveCount(0)
+  })
+
+  test('路径和本地备份风险应提供可执行提示', async ({ page }) => {
+    await page.route('**/api/v1/settings/security-check', async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          success: true,
+          data: {
+            status: 'block',
+            generated_at: '2026-05-08T00:00:00Z',
+            checks: [
+              {
+                id: 'config_file_access',
+                status: 'block',
+                title: '配置文件路径包含符号链接',
+                message: 'backend raw config file detail',
+                details: {
+                  path: '/srv/mnemonas/config/config.toml',
+                  path_kind: 'symlink_component',
+                  symlink_component: '/srv/mnemonas/config',
+                },
+              },
+              {
+                id: 'secrets_file_access',
+                status: 'block',
+                title: '自动 WebDAV 凭据路径包含符号链接',
+                message: 'backend raw secrets file detail',
+                details: {
+                  path: '/srv/mnemonas/data/secrets.json',
+                  path_kind: 'symlink_component',
+                  symlink_component: '/srv/mnemonas/data',
+                  generated_webdav_password_required: true,
+                },
+              },
+              {
+                id: 'backup_local_destinations',
+                status: 'block',
+                title: '本地备份目标位于主存储内',
+                message: 'backend raw backup destination detail',
+                details: {
+                  job_id: 'external-disk',
+                  destination: '/srv/mnemonas/data/backups',
+                  source: '/srv/mnemonas/data',
+                  storage_root: '/srv/mnemonas/data',
+                  destination_kind: 'inside_storage_root',
+                },
+              },
+            ],
+            request: { scheme: 'https' },
+            config: { auth_enabled: true, webdav_enabled: true, webdav_auth_type: 'basic' },
+          },
+        }),
+      })
+    })
+    await routeBackupJobs(page)
+
+    await ensureAuthenticatedAt(page, '/settings')
+    await waitForRouteSettled(page, '/settings')
+    await expect(page.getByText('配置文件路径包含符号链接')).toBeVisible({ timeout: 5000 })
+    await expect(page.getByText('自动 WebDAV 凭据路径包含符号链接')).toBeVisible()
+    await expect(page.getByText('本地备份目标位于主存储内')).toBeVisible()
+    await expect(page.getByText('backend raw config file detail')).toHaveCount(0)
+    await expect(page.getByText('backend raw secrets file detail')).toHaveCount(0)
+    await expect(page.getByText('backend raw backup destination detail')).toHaveCount(0)
+
+    await page.getByRole('button', { name: '查看配置路径' }).click()
+    await expect(page.getByText('需要检查配置文件路径')).toBeVisible({ timeout: 5000 })
+    await expect(page.getByText(/\/srv\/mnemonas\/config\/config\.toml 是普通文件/)).toBeVisible()
+
+    await page.getByRole('button', { name: '查看凭据路径' }).click()
+    await expect(page.getByText('需要检查自动 WebDAV 凭据')).toBeVisible({ timeout: 5000 })
+    await expect(page.getByText(/\/srv\/mnemonas\/data\/secrets\.json 是普通文件/)).toBeVisible()
+
+    await page.getByRole('button', { name: '查看备份目标' }).click()
+    await expect(page.getByText('需要检查本地备份目标')).toBeVisible({ timeout: 5000 })
+    await expect(page).toHaveURL(/\/maintenance\?backupJob=external-disk/)
+    const focusedBackupJob = page.getByRole('group', { name: '外置硬盘备份 备份任务，安全自检定位' })
+    await expect(focusedBackupJob).toBeVisible({ timeout: 5000 })
+    await expect(focusedBackupJob.getByText('安全自检定位')).toBeVisible()
   })
 })
 
@@ -493,7 +572,7 @@ test.describe('设置页面响应式', () => {
   test('移动端公网访问向导主要操作可用且不产生横向溢出', async ({ page }) => {
     await page.setViewportSize({ width: 390, height: 844 })
     await ensureAuthenticatedAt(page, '/settings')
-    await expect(page.getByText('加载设置...')).toHaveCount(0, { timeout: 15000 })
+    await waitForRouteSettled(page, '/settings')
 
     const wizardHeading = page.getByRole('heading', { name: '公网访问向导' })
     await wizardHeading.scrollIntoViewIfNeeded()
@@ -558,7 +637,7 @@ test.describe('设置页面响应式', () => {
 
     await page.setViewportSize({ width: 390, height: 844 })
     await ensureAuthenticatedAt(page, '/settings')
-    await expect(page.getByText('加载设置...')).toHaveCount(0, { timeout: 15000 })
+    await waitForRouteSettled(page, '/settings')
 
     const wizardHeading = page.getByRole('heading', { name: '公网访问向导' })
     await wizardHeading.scrollIntoViewIfNeeded()

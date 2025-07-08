@@ -1,28 +1,47 @@
-import { test, expect, type Page } from '@playwright/test'
+import { test, expect, type Locator, type Page } from '@playwright/test'
 import { ensureAuthenticatedAt } from './helpers/auth-check'
-import { createFolderThroughUi, fileRowByName, openFolderThroughUi, uploadTextFileThroughPicker } from './helpers/files'
+import { createFolderThroughUi, dropTextFileOnFileBrowser, fileRowByName, openFolderThroughUi, uploadTextFileThroughPicker } from './helpers/files'
+import { expectNoPageHorizontalOverflow } from './helpers/layout'
 
 test.describe.configure({ mode: 'serial' })
 
+const FILE_EMPTY_STATE_PATTERN = /这里空空如也|暂无文件|no files/i
+
 /**
- * 文件浏览页面 E2E 测试
- * 认证状态由 auth.setup.ts 通过 storageState 自动注入
- * 如果认证启用但登录失败，测试会被跳过
+ * File browser page E2E tests.
+ * auth.setup.ts injects storageState automatically.
+ * Login setup failures fail by default; protected-page tests skip only when
+ * auth skipping is explicitly enabled for reused environments.
  */
-
-async function expectNoPageHorizontalOverflow(page: Page) {
-  const overflow = await page.evaluate(() => {
-    const root = document.documentElement
-    const body = document.body
-    return Math.max(root.scrollWidth, body.scrollWidth) - root.clientWidth
-  })
-
-  expect(overflow).toBeLessThanOrEqual(2)
-}
 
 async function waitForFileBrowser(page: Page) {
   await page.getByText('加载中...').waitFor({ state: 'hidden', timeout: 15_000 }).catch(() => {})
   await expect(page.getByRole('button', { name: '根目录' })).toBeVisible({ timeout: 15_000 })
+}
+
+async function isVisible(locator: Locator, timeout = 1000): Promise<boolean> {
+  return locator.isVisible({ timeout }).catch(() => false)
+}
+
+async function waitForFileBrowserContentState(page: Page): Promise<'empty' | 'items'> {
+  const emptyState = page.getByText(FILE_EMPTY_STATE_PATTERN)
+  const fileList = page.getByRole('checkbox', { name: /^选择 / }).first()
+  let observedState: 'empty' | 'items' | 'loading' = 'loading'
+
+  await expect.poll(async () => {
+    if (await isVisible(emptyState, 500)) {
+      observedState = 'empty'
+      return observedState
+    }
+    if (await isVisible(fileList, 500)) {
+      observedState = 'items'
+      return observedState
+    }
+    observedState = 'loading'
+    return observedState
+  }, { timeout: 15_000 }).not.toBe('loading')
+
+  return observedState as 'empty' | 'items'
 }
 
 function escapeRegExp(value: string): string {
@@ -133,13 +152,12 @@ test.describe('文件浏览页面', () => {
   })
 
   test('应显示文件页面', async ({ page }) => {
-    // 验证已进入文件页面（不应在登录页）
     await expect(page).not.toHaveURL(/\/login/)
-    await expect(page.locator('body')).toBeVisible()
+    await expect(page.getByRole('button', { name: '根目录' })).toBeVisible({ timeout: 5000 })
+    await expect(page.getByRole('button', { name: '上传文件', exact: true })).toBeVisible()
   })
 
   test('应显示面包屑导航', async ({ page }) => {
-    // 检查根目录面包屑
     const rootBreadcrumb = page.getByRole('button', { name: '根目录' })
     await expect(rootBreadcrumb).toBeVisible({ timeout: 15_000 })
   })
@@ -151,32 +169,28 @@ test.describe('文件浏览页面', () => {
     const uploadFolderBtn = page.getByRole('button', { name: '上传文件夹', exact: true })
     await expect(uploadFolderBtn).toBeVisible({ timeout: 5000 })
 
-    // 检查新建文件夹按钮
     const newFolderBtn = page.getByRole('button', { name: /新建空间|新建文件夹/i })
     await expect(newFolderBtn).toBeVisible({ timeout: 5000 })
   })
 
   test('应支持列表和网格视图切换', async ({ page }) => {
-    // 查找视图切换按钮
-    const viewToggle = page.locator('button svg[class*="list"], button svg[class*="grid"]').first()
-    if (await viewToggle.isVisible({ timeout: 2000 }).catch(() => false)) {
-      await viewToggle.click()
-      await page.waitForTimeout(300)
-    }
+    const listViewButton = page.getByRole('button', { name: '列表视图' })
+    const gridViewButton = page.getByRole('button', { name: '网格视图' })
+
+    await expect(listViewButton).toBeVisible({ timeout: 5000 })
+    await expect(gridViewButton).toBeVisible({ timeout: 5000 })
+
+    await gridViewButton.click()
+    await expect(gridViewButton).toHaveAttribute('aria-pressed', 'true')
+    await expect(listViewButton).toHaveAttribute('aria-pressed', 'false')
+
+    await listViewButton.click()
+    await expect(listViewButton).toHaveAttribute('aria-pressed', 'true')
+    await expect(gridViewButton).toHaveAttribute('aria-pressed', 'false')
   })
 
   test('空目录应显示空状态提示', async ({ page }) => {
-    // 等待页面加载
-    await page.waitForTimeout(2000)
-
-    // 检查是否有空状态提示或文件列表
-    const emptyState = page.getByText(/空空如也|暂无文件|no files/i)
-    const fileList = page.getByRole('checkbox', { name: /^选择 / }).first()
-    
-    const hasEmpty = await emptyState.isVisible({ timeout: 1000 }).catch(() => false)
-    const hasFiles = await fileList.isVisible({ timeout: 1000 }).catch(() => false)
-    
-    expect(hasEmpty || hasFiles).toBe(true)
+    await waitForFileBrowserContentState(page)
   })
 
   test('目录加载失败应显示人类可识别的错误和重试入口', async ({ page }) => {
@@ -214,7 +228,7 @@ test.describe('文件浏览页面', () => {
     const expectedPath = `/files/${folderName}`
     await expectFolderView(page, expectedPath, folderName)
 
-    await page.waitForTimeout(500)
+    await waitForFileBrowserContentState(page)
     await expect(page).toHaveURL(new RegExp(`${escapeRegExp(expectedPath)}$`))
     await expect(page.getByText('这里空空如也')).toBeVisible({ timeout: 5_000 })
 
@@ -302,41 +316,51 @@ test.describe('文件批量操作', () => {
     await ensureAuthenticatedAt(page, '/files')
   })
 
-  test('选择文件后应显示批量操作按钮', async ({ page }) => {
-    // 如果有文件，尝试选择
-    const checkbox = page.locator('[class*="checkbox"], input[type="checkbox"]').first()
-    if (await checkbox.isVisible({ timeout: 2000 }).catch(() => false)) {
-      await checkbox.click()
-      
-      // 检查批量操作按钮
-      const batchDeleteBtn = page.getByRole('button', { name: /批量删除/i })
-      await expect(batchDeleteBtn).toBeVisible({ timeout: 5000 })
-    }
+  test('选择文件后应显示批量操作按钮', async ({ page }, testInfo) => {
+    testInfo.setTimeout(60_000)
+
+    await waitForFileBrowser(page)
+
+    const fileName = `e2e-batch-${testInfo.workerIndex}-${Date.now()}.txt`
+    await uploadTextFileThroughPicker(page, fileName, `batch operation fixture ${fileName}`)
+
+    const fileCheckbox = page.getByRole('checkbox', { name: `选择 ${fileName}` })
+    await expect(fileRowByName(page, fileName)).toBeVisible({ timeout: 10_000 })
+    await fileCheckbox.click()
+
+    await expect(fileCheckbox).toHaveAttribute('aria-checked', 'true')
+    await expect(page.getByRole('button', { name: '取消选择' })).toBeVisible({ timeout: 5000 })
+    await expect(page.getByRole('button', { name: /批量删除/i })).toBeVisible({ timeout: 5000 })
   })
 })
 
 test.describe('新建文件夹功能', () => {
   test('点击新建按钮应打开模态框', async ({ page }) => {
     await ensureAuthenticatedAt(page, '/files')
+    await waitForFileBrowser(page)
 
     const newFolderBtn = page.getByRole('button', { name: /新建空间|新建文件夹/i })
-    if (await newFolderBtn.isVisible({ timeout: 2000 }).catch(() => false)) {
-      await newFolderBtn.click()
-      
-      // 检查模态框出现
-      await expect(page.getByRole('heading', { name: '新建文件夹' })).toBeVisible({ timeout: 5000 })
-      await expect(page.getByPlaceholder('请输入文件夹名称')).toBeVisible()
-    }
+    await expect(newFolderBtn).toBeVisible({ timeout: 5000 })
+    await newFolderBtn.click()
+
+    await expect(page.getByRole('heading', { name: '新建文件夹' })).toBeVisible({ timeout: 5000 })
+    await expect(page.getByLabel('文件夹名称')).toBeVisible()
   })
 })
 
 test.describe('文件拖放上传', () => {
-  test('拖放区域应存在', async ({ page }) => {
-    await ensureAuthenticatedAt(page, '/files')
+  test('拖放文件应上传到当前目录', async ({ page }, testInfo) => {
+    testInfo.setTimeout(60_000)
 
-    // 页面应该响应拖放事件（检查页面结构）
-    const body = page.locator('body')
-    await expect(body).toBeVisible()
+    await ensureAuthenticatedAt(page, '/files')
+    await waitForFileBrowser(page)
+
+    const fileName = `e2e-drop-${testInfo.workerIndex}-${Date.now()}.txt`
+    await dropTextFileOnFileBrowser(page, fileName, `drag and drop fixture ${fileName}`)
+
+    await expect(page.getByText('释放以上传')).toBeHidden({ timeout: 5_000 })
+    await expect(fileRowByName(page, fileName)).toBeVisible({ timeout: 10_000 })
+    await expect(page.getByText('上传完成')).toBeVisible({ timeout: 10_000 })
   })
 })
 
@@ -345,9 +369,8 @@ test.describe('文件页面响应式', () => {
     await page.setViewportSize({ width: 375, height: 667 })
     await ensureAuthenticatedAt(page, '/files')
 
-    const body = page.locator('body')
-    await expect(body).toBeVisible()
-    await expect(page.getByText('根目录')).toBeVisible()
+    await expect(page.getByRole('button', { name: '根目录' })).toBeVisible({ timeout: 5000 })
+    await expect(page.getByRole('button', { name: '上传文件', exact: true })).toBeVisible()
     await expectNoPageHorizontalOverflow(page)
   })
 
@@ -355,9 +378,8 @@ test.describe('文件页面响应式', () => {
     await page.setViewportSize({ width: 768, height: 1024 })
     await ensureAuthenticatedAt(page, '/files')
 
-    const body = page.locator('body')
-    await expect(body).toBeVisible()
-    await expect(page.getByText('根目录')).toBeVisible()
+    await expect(page.getByRole('button', { name: '根目录' })).toBeVisible({ timeout: 5000 })
+    await expect(page.getByRole('button', { name: '上传文件', exact: true })).toBeVisible()
     await expectNoPageHorizontalOverflow(page)
   })
 })
