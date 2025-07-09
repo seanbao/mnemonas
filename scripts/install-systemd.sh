@@ -340,6 +340,31 @@ WantedBy=multi-user.target
 EOF
 }
 
+detect_primary_ipv4() {
+  local ip_addr=""
+
+  if command -v ip >/dev/null 2>&1; then
+    ip_addr="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{ for (i = 1; i <= NF; i++) if ($i == "src") { print $(i + 1); exit } }')"
+  fi
+  if [[ -z "$ip_addr" ]] && command -v hostname >/dev/null 2>&1; then
+    ip_addr="$(hostname -I 2>/dev/null | awk '{ print $1 }')"
+  fi
+
+  printf '%s\n' "$ip_addr"
+}
+
+web_ui_url() {
+  local host="$SERVER_HOST"
+  case "$host" in
+    0.0.0.0|::|\[::\])
+      host="$(detect_primary_ipv4)"
+      [[ -n "$host" ]] || host="<ubuntu-laptop-ip>"
+      ;;
+  esac
+
+  printf 'http://%s:%s\n' "$host" "$SERVER_PORT"
+}
+
 main() {
   require_root
   require_command install
@@ -405,12 +430,18 @@ main() {
     systemctl restart mnemonas.service
   fi
 
+  local initial_password_file web_url
+  initial_password_file="$STORAGE_ROOT/.mnemonas/initial-password.txt"
+  web_url="$(web_ui_url)"
+
   log "installed successfully"
-  log "Web UI: http://<ubuntu-laptop-ip>:$SERVER_PORT"
-  log "Initial Web password file: $STORAGE_ROOT/.mnemonas/initial-password.txt"
-  log "Check status: systemctl status mnemonas --no-pager"
-  log "Run doctor: sudo $BIN_DIR/mnemonas-doctor"
-  log "Uninstall: sudo $BIN_DIR/mnemonas-uninstall-systemd"
+  log "Next steps:"
+  log "  Open Web UI: $web_url"
+  log "  Read initial password: sudo cat $initial_password_file"
+  log "  Run doctor: sudo $BIN_DIR/mnemonas-doctor"
+  log "  Check status: systemctl status mnemonas --no-pager"
+  log "  View logs: journalctl -u mnemonas -f"
+  log "  Uninstall: sudo $BIN_DIR/mnemonas-uninstall-systemd"
 }
 
 main "$@"

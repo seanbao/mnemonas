@@ -99,27 +99,14 @@ sudo mnemonas-doctor
 git clone https://github.com/seanbao/mnemonas.git
 cd mnemonas
 
-# 准备私有数据目录
-mkdir -p ~/.mnemonas
-chmod 750 ~/.mnemonas
-
-# 让容器以当前宿主机用户写入数据
-cp .env.example .env
-sed -i "s/^MNEMONAS_UID=.*/MNEMONAS_UID=$(id -u)/" .env
-sed -i "s/^MNEMONAS_GID=.*/MNEMONAS_GID=$(id -g)/" .env
-# 如果 8080 已被占用，可改 .env 中的 MNEMONAS_HTTP_PORT
-
-# 启动前预检 Docker/Compose、端口、目录权限和已有配置
-./scripts/mnemonas-docker-preflight.sh
-
-# 构建并启动服务
-docker compose up -d --build
+# 准备 .env、数据目录、UID/GID，运行预检并启动服务
+./scripts/docker-quickstart.sh --start
 
 # 默认打开浏览器访问:
 # http://localhost:8080
 ```
 
-仓库自带的 `docker-compose.yml` 默认从当前源码构建 `mnemonas:local` 镜像，不要求宿主机安装 Go/Rust/Node.js，但需要能拉取 Docker 基础镜像。Dockerfile 使用 BuildKit 缓存和较小的 Alpine Go builder，弱网环境下重试构建不会从零下载所有依赖。Compose 会自动读取 `.env`，建议把 `MNEMONAS_UID`/`MNEMONAS_GID` 设置为当前宿主机用户，避免数据目录变成不可写；如果 8080 已被占用，改 `MNEMONAS_HTTP_PORT` 即可。`mnemonas-docker-preflight.sh` 会在启动前检查 Compose v2 插件、Buildx、宿主机 HTTP 端口、数据目录权限、磁盘空间和已有 Docker 配置。首次启动会在 `~/.mnemonas/config.toml` 自动生成持久化配置；Web 登录初始密码在 `~/.mnemonas/.mnemonas/initial-password.txt`，容器日志会提示这个文件路径。正式 release 镜像发布并公开后，也可以改用 `ghcr.io/seanbao/mnemonas:latest`。
+仓库自带的 `docker-compose.yml` 默认从当前源码构建 `mnemonas:local` 镜像，不要求宿主机安装 Go/Rust/Node.js，但需要能拉取 Docker 基础镜像。Dockerfile 使用 BuildKit 缓存和较小的 Alpine Go builder，弱网环境下重试构建不会从零下载所有依赖。`docker-quickstart.sh` 会创建或更新 `.env`，把 `MNEMONAS_UID`/`MNEMONAS_GID` 设置为当前宿主机用户，创建 `MNEMONAS_DATA_DIR`，运行 Docker 预检，并在 `--start` 时执行 `docker compose up -d --build`。如果 8080 已被占用，可运行 `./scripts/docker-quickstart.sh --port 8888 --start`。首次启动会在数据目录中自动生成持久化配置；Web 登录初始密码在 `<MNEMONAS_DATA_DIR>/.mnemonas/initial-password.txt`。正式 release 镜像发布并公开后，也可以改用 `ghcr.io/seanbao/mnemonas:latest`。
 
 ### 二进制安装
 
