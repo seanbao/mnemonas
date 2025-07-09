@@ -170,7 +170,7 @@ mnemonas/
 
 - Go 1.25.9+
 - Rust 1.92+
-- Node.js 22.x（或兼容的 20.19+）
+- Node.js `^20.19.0` 或 `>=22.12.0`（推荐使用 `.nvmrc` 指定的 22.x）
 - Docker Engine + Compose v2 插件（支持 `docker compose`）
 - protoc 3.20+（`make proto` / `make build` 或修改 proto 时需要；Docker 镜像构建不需要）
 
@@ -178,7 +178,7 @@ mnemonas/
 
 推荐使用 `scripts/dev.sh` 脚本快速启动开发环境：
 
-前端 Node.js 版本由项目根目录 `.nvmrc` 固定为 `22`。执行前端相关命令前先加载：
+前端 Node.js 版本由项目根目录 `.nvmrc` 固定为 `22`，并通过 `web/package.json` 的 engine 约束要求 `^20.19.0` 或 `>=22.12.0`。执行前端相关命令前先加载：
 
 ```bash
 source "$HOME/.nvm/nvm.sh"
@@ -271,6 +271,8 @@ Docker 和 systemd 部署默认只对外提供 `8080`；`9090/9091` 是内部 da
 | [FAQ](docs/faq.md) | 常见问题解答 |
 | [架构设计](docs/architecture.md) | 系统架构与技术选型 |
 | [安全指南](docs/security.md) | 认证与网络安全配置 |
+| [支持说明](SUPPORT.md) | 支持渠道、问题分流和维护边界 |
+| [行为准则](CODE_OF_CONDUCT.md) | 社区协作规则和问题报告方式 |
 
 ## 🔧 脚本工具
 
@@ -292,7 +294,7 @@ MIT License - 详见 [LICENSE](LICENSE)
 
 ## 🤝 贡献
 
-欢迎贡献！请查看 [CONTRIBUTING.md](CONTRIBUTING.md) 了解详情。
+欢迎贡献！请查看 [CONTRIBUTING.md](CONTRIBUTING.md) 了解流程，并遵守 [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)。使用问题、Bug 报告和功能建议的分流方式见 [SUPPORT.md](SUPPORT.md)。
 
 ---
 
