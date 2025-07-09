@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.7
-# 多阶段构建
+# Multi-stage build.
 
 ARG RUST_IMAGE=rust:1.92
 ARG NODE_IMAGE=node:22-bookworm-slim
@@ -8,7 +8,7 @@ ARG RUNTIME_IMAGE=debian:bookworm-slim
 ARG VERSION=dev
 ARG BUILD_TIME=unknown
 
-# === Rust构建阶段 ===
+# === Rust build stage ===
 FROM ${RUST_IMAGE} AS rust-builder
 
 WORKDIR /build/dataplane
@@ -18,7 +18,7 @@ ENV CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse \
 COPY dataplane/Cargo.toml dataplane/Cargo.lock ./
 COPY proto ../proto
 
-# 先构建依赖（利用缓存）
+# Build dependencies first so Docker can reuse the cache.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
 	--mount=type=cache,target=/usr/local/cargo/git \
 	--mount=type=cache,target=/build/dataplane/target \
@@ -32,18 +32,19 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 	cargo build --release --locked \
 	&& cp target/release/dataplane /tmp/dataplane
 
-# === 前端构建阶段 ===
+# === Frontend build stage ===
 FROM ${NODE_IMAGE} AS web-builder
 
 WORKDIR /build/web
 COPY web/package.json web/package-lock.json ./
+COPY web/scripts/prepare-husky.cjs ./scripts/prepare-husky.cjs
 RUN --mount=type=cache,target=/root/.npm,sharing=locked \
 	npm ci --prefer-offline
 
 COPY web ./
 RUN npm run build
 
-# === Go构建阶段 ===
+# === Go build stage ===
 FROM ${GO_IMAGE} AS go-builder
 ARG VERSION=dev
 ARG BUILD_TIME=unknown
@@ -59,7 +60,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 	CGO_ENABLED=0 go build -ldflags="-s -w -X main.version=${VERSION} -X main.buildTime=${BUILD_TIME}" -o nasd ./cmd/nasd \
 	&& CGO_ENABLED=0 go build -ldflags="-s -w" -o mnemonas-healthcheck ./cmd/healthcheck
 
-# === 最终镜像 ===
+# === Runtime image ===
 FROM ${RUNTIME_IMAGE}
 ARG VERSION=dev
 ARG BUILD_TIME=unknown
@@ -74,34 +75,41 @@ WORKDIR /app
 ENV HOME=/data
 RUN mkdir -p /etc/ssl/certs
 
-# 复制二进制文件
+# Copy built binaries and Web assets.
 COPY --from=rust-builder /tmp/dataplane /app/
 COPY --from=go-builder /build/nasd /app/
 COPY --from=go-builder /build/mnemonas-healthcheck /app/
 COPY --from=go-builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=web-builder /build/web/dist /app/web
 
-# 创建非 root 运行用户。UID/GID 1000 能直接写入大多数 Linux 用户创建的 bind mount。
+# Create a non-root runtime user. UID/GID 1000 can write to most bind mounts
+# created by a regular Linux user.
 RUN groupadd --gid 1000 mnemonas \
 	&& useradd --uid 1000 --gid 1000 --home-dir /data --shell /usr/sbin/nologin mnemonas \
 	&& mkdir -p /data/files \
-	&& mkdir -p /data/.mnemonas/{objects,trash,thumbnails,maintenance,activity,tmp} \
+	&& mkdir -p \
+		/data/.mnemonas/objects \
+		/data/.mnemonas/trash \
+		/data/.mnemonas/thumbnails \
+		/data/.mnemonas/maintenance \
+		/data/.mnemonas/activity \
+		/data/.mnemonas/tmp \
 	&& chown -R mnemonas:mnemonas /data /app
 
-# 复制默认配置；/app 里的副本用于首次启动时填充挂载卷中的缺失配置。
+# Copy the default config. The /app copy is used to populate missing config
+# files in mounted volumes on first startup.
 COPY --chmod=0644 mnemonas.example.toml /app/mnemonas.example.toml
 COPY --chown=mnemonas:mnemonas mnemonas.example.toml /data/config.toml
 RUN sed -i 's|^root = ".*"|root = "/data"|' /data/config.toml \
 	&& chown mnemonas:mnemonas /data/config.toml
 
-# 只公开 Web/API/WebDAV 入口。dataplane 的 9090/9091 默认绑定到容器内 loopback，
-# 不应发布到公网或不可信局域网。
+# Expose only the Web/API/WebDAV entry point. Dataplane ports 9090/9091 bind
+# to container loopback by default and must not be published to public or
+# untrusted LAN networks.
 EXPOSE 8080
 
-# 启动脚本
-COPY scripts/docker-start.sh /app/start.sh
-
-RUN chmod +x /app/start.sh
+# Startup script.
+COPY --chmod=0755 scripts/docker-start.sh /app/start.sh
 
 USER mnemonas:mnemonas
 
