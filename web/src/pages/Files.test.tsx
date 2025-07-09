@@ -258,6 +258,16 @@ describe('FilesPage', () => {
       })
     })
 
+    it('decodes encoded file route segments before syncing page state', async () => {
+      mockLocationPathname = '/files/docs/a%20%231%3F'
+
+      render(<FilesPage />)
+
+      await waitFor(() => {
+        expect(mockFilesStoreState.setCurrentPath).toHaveBeenCalledWith('/docs/a #1?')
+      })
+    })
+
     it('redirects non-admin root browsing to the assigned home directory', async () => {
       mockUser.id = 'u2'
       mockUser.username = 'tester'
@@ -649,6 +659,31 @@ describe('FilesPage', () => {
 
       expect(mockFilesStoreState.toggleFileSelection).toHaveBeenCalledWith('/photo.jpg')
       expect(mockFilesStoreState.setSelection).not.toHaveBeenCalledWith(['/photo.jpg'])
+    })
+
+    it('does not open a folder when its checkbox is double-clicked', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockFilesStoreState.viewMode = 'grid'
+      render(<FilesPage />)
+
+      const checkbox = await screen.findByRole('checkbox', { name: '选择 documents' })
+      mockFilesStoreState.setCurrentPath.mockClear()
+
+      await user.dblClick(checkbox)
+
+      expect(mockFilesStoreState.setCurrentPath).not.toHaveBeenCalledWith('/documents')
+    })
+
+    it('marks only selected rows as multi-selected', async () => {
+      mockFilesStoreState.viewMode = 'grid'
+      mockFilesStoreState.selectedFiles = new Set(['/documents', '/photo.jpg'])
+
+      render(<FilesPage />)
+
+      await waitFor(() => {
+        expect(screen.getAllByText('多选中')).toHaveLength(2)
+        expect(screen.getByText('9.77 MB')).toBeTruthy()
+      })
     })
 
     it('moves keyboard focus for details without selecting on arrow keys', async () => {

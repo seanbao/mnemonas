@@ -157,6 +157,16 @@ export function encodePathForUrl(path: string): string {
     .join('/')
 }
 
+/**
+ * Decode path segments from URL use while preserving the path structure.
+ */
+export function decodePathFromUrl(path: string): string {
+  return path
+    .split('/')
+    .map(segment => decodeURIComponent(segment))
+    .join('/')
+}
+
 export function formatBytes(bytes: number, decimals = 2): string {
   if (bytes === 0) return '0 B'
 

@@ -72,7 +72,7 @@ import {
 import { checkFavorites, toggleFavorite } from '@/api/favorites'
 import { listShares, ShareError } from '@/api/share'
 import { getFileQueryScopeKey, getFilesQueryKey } from '@/lib/fileQueryKey'
-import { copyTextToClipboard, formatBytes, formatDate, cn, normalizePath } from '@/lib/utils'
+import { copyTextToClipboard, decodePathFromUrl, encodePathForUrl, formatBytes, formatDate, cn, normalizePath } from '@/lib/utils'
 import { getInvalidHomeDirDescription, invalidHomeDirTitle, resolveUserHomeScope } from '@/lib/userScope'
 
 type SortKey = 'name' | 'size' | 'modTime'
@@ -558,6 +558,11 @@ function FileRow({
   onToggleFavorite: () => void
   onContextMenu: (e: React.MouseEvent) => void
 }) {
+  const detailLabel = isSelected && isMultiSelection
+    ? '多选中'
+    : file.isDir
+      ? '文件夹'
+      : file.name.split('.').pop()?.toUpperCase() || 'FILE'
   const handleDownload = useCallback(() => {
     void downloadFile(file.path, { filename: file.name }).catch((error: unknown) => {
       addToast(getFilesActionErrorToast(error, {
@@ -583,7 +588,6 @@ function FileRow({
         "group grid grid-cols-[36px_minmax(0,1fr)_36px] items-center gap-3 border-b border-divider px-3 py-3 cursor-pointer transition-all duration-150 sm:grid-cols-[44px_minmax(0,1fr)_88px_118px_40px] sm:gap-4 sm:px-5 md:grid-cols-[44px_minmax(0,1fr)_100px_150px_120px_40px]",
         "hover:bg-content2/60",
         isActive && !isSelected && "bg-content2/50",
-        isMultiSelection && "bg-content2/30",
         isSelected && "bg-accent-primary/10"
       )}
       onClick={(e) => {
@@ -593,7 +597,12 @@ function FileRow({
       onDoubleClick={onOpen}
       onContextMenu={onContextMenu}
     >
-      <div className="flex items-center justify-center" onClick={(e) => e.stopPropagation()}>
+      <div
+        className="flex items-center justify-center"
+        onClick={(e) => e.stopPropagation()}
+        onDoubleClick={(e) => e.stopPropagation()}
+        onContextMenu={(e) => e.stopPropagation()}
+      >
         <button
           type="button"
           role="checkbox"
@@ -619,7 +628,7 @@ function FileRow({
         <div className="min-w-0">
           <div className="font-medium text-foreground truncate text-[13px]">{file.name}</div>
           <div className="text-xs text-default-500 mt-0.5 truncate">
-            {isMultiSelection ? '多选中' : file.isDir ? '文件夹' : file.name.split('.').pop()?.toUpperCase() || 'FILE'}
+            {detailLabel}
           </div>
         </div>
       </div>
@@ -636,7 +645,12 @@ function FileRow({
         <span className="text-xs text-default-400">—</span>
       </div>
 
-      <div className="flex items-center justify-center" onClick={(e) => e.stopPropagation()}>
+      <div
+        className="flex items-center justify-center"
+        onClick={(e) => e.stopPropagation()}
+        onDoubleClick={(e) => e.stopPropagation()}
+        onContextMenu={(e) => e.stopPropagation()}
+      >
         {!isMultiSelection && (
           <Dropdown placement="bottom-end">
             <DropdownTrigger>
@@ -821,6 +835,11 @@ function FileCard({
   onToggleFavorite: () => void
   onContextMenu: (e: React.MouseEvent) => void
 }) {
+  const detailLabel = isSelected && isMultiSelection
+    ? '多选中'
+    : file.isDir
+      ? '文件夹'
+      : formatBytes(file.size)
   const handleDownload = useCallback(() => {
     void downloadFile(file.path, { filename: file.name }).catch((error: unknown) => {
       addToast(getFilesActionErrorToast(error, {
@@ -846,7 +865,6 @@ function FileCard({
         "group relative min-h-[168px] bg-content1 border border-divider rounded-lg p-4 cursor-pointer transition-all duration-200",
         "shadow-[var(--shadow-soft)] hover:border-accent-primary/40 hover:shadow-[var(--shadow-medium)]",
         isActive && !isSelected && "border-default-300 bg-content2/50",
-        isMultiSelection && "bg-content2/40",
         isSelected && "border-accent-primary bg-accent-primary/5"
       )}
       onClick={(e) => {
@@ -859,6 +877,8 @@ function FileCard({
       <div 
         className="absolute top-3 left-3 z-10"
         onClick={(e) => e.stopPropagation()}
+        onDoubleClick={(e) => e.stopPropagation()}
+        onContextMenu={(e) => e.stopPropagation()}
       >
         <button
           type="button"
@@ -883,6 +903,8 @@ function FileCard({
       <div 
         className="absolute top-3 right-3 z-10"
         onClick={(e) => e.stopPropagation()}
+        onDoubleClick={(e) => e.stopPropagation()}
+        onContextMenu={(e) => e.stopPropagation()}
       >
         {!isMultiSelection && (
           <Dropdown placement="bottom-end">
@@ -986,7 +1008,7 @@ function FileCard({
       <div className="text-center">
         <div className="font-medium text-foreground truncate text-sm mb-1">{file.name}</div>
         <div className="text-xs text-default-500">
-          {isMultiSelection ? '多选中' : file.isDir ? '文件夹' : formatBytes(file.size)}
+          {detailLabel}
         </div>
       </div>
     </div>
@@ -1086,6 +1108,12 @@ export function FilesPage() {
     toggleSortOrder,
   } = useFilesStore()
 
+  const currentPathRef = useRef(currentPath)
+
+  useEffect(() => {
+    currentPathRef.current = currentPath
+  }, [currentPath])
+
   useEffect(() => {
     if (hasInvalidHomeDir) return
     if (!location.pathname.startsWith('/files')) return
@@ -1093,10 +1121,10 @@ export function FilesPage() {
     let finalPath = '/'
     if (routePath) {
       try {
-        finalPath = normalizePath(decodeURI(routePath))
+        finalPath = normalizePath(decodePathFromUrl(routePath))
       } catch {
-        const fallbackPath = currentPath || '/'
-        const fallbackRoute = fallbackPath === '/' ? '/files' : `/files${encodeURI(fallbackPath)}`
+        const fallbackPath = currentPathRef.current || '/'
+        const fallbackRoute = fallbackPath === '/' ? '/files' : `/files${encodePathForUrl(fallbackPath)}`
         addToast({
           title: fallbackPath === '/' ? '路径格式无效，已返回根目录' : '路径格式无效，已返回上一个有效位置',
           color: 'warning',
@@ -1112,15 +1140,15 @@ export function FilesPage() {
         title: '仅可访问主目录内的文件',
         color: 'warning',
       })
-      if (currentPath !== scopedHomeDir) {
+      if (currentPathRef.current !== scopedHomeDir) {
         setCurrentPath(scopedHomeDir)
       }
       return
     }
-    if (finalPath !== currentPath) {
+    if (finalPath !== currentPathRef.current) {
       setCurrentPath(finalPath)
     }
-  }, [hasInvalidHomeDir, location.pathname, currentPath, navigate, scopedHomeDir, setCurrentPath])
+  }, [hasInvalidHomeDir, location.pathname, navigate, scopedHomeDir, setCurrentPath])
 
   useEffect(() => {
     if (!hasInvalidHomeDir) return
@@ -1144,7 +1172,7 @@ export function FilesPage() {
 
   useEffect(() => {
     if (hasInvalidHomeDir) return
-    const encodedPath = currentPath === '/' ? '' : encodeURI(currentPath)
+    const encodedPath = currentPath === '/' ? '' : encodePathForUrl(currentPath)
     const targetPath = `/files${encodedPath}`
     if (location.pathname !== targetPath) {
       navigate(targetPath, { replace: true })
