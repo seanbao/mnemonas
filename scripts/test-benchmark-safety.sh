@@ -17,6 +17,14 @@ assert_file_contains() {
 	grep -Fq -- "$expected" "$path" || fail "$path does not contain: $expected"
 }
 
+assert_file_not_contains() {
+	local path="$1"
+	local unexpected="$2"
+	if grep -Fq -- "$unexpected" "$path"; then
+		fail "$path contains unsafe text: $unexpected"
+	fi
+}
+
 assert_not_exists() {
 	local path="$1"
 	[[ ! -e "$path" ]] || fail "$path unexpectedly exists"
@@ -298,6 +306,48 @@ EOF
 	assert_file_contains "$invoked_log" "admin:$secret"
 }
 
+run_webdav_users_env_credentials_test() {
+	local case_dir="$TMP_ROOT/webdav-users-env"
+	local fake_bin="$case_dir/bin"
+	local invoked_log="$case_dir/curl.log"
+	local secret='mnemonas-user-secret'
+	mkdir -p "$case_dir/storage"
+	make_fake_curl "$fake_bin" "$invoked_log"
+
+	run_expect_failure "$case_dir/out.log" env \
+		HOME="$case_dir/home" \
+		PATH="$fake_bin:$PATH" \
+		CURL_INVOKED_LOG="$invoked_log" \
+		MNEMONAS_STORAGE_ROOT="$case_dir/storage" \
+		MNEMONAS_WEBDAV_AUTH_TYPE=" Users " \
+		MNEMONAS_WEBDAV_USERNAME="family-user" \
+		MNEMONAS_WEBDAV_PASSWORD="$secret" \
+		bash "$REPO_ROOT/scripts/benchmark.sh" "http://127.0.0.1:9"
+
+	assert_file_contains "$invoked_log" "family-user:$secret"
+	assert_file_contains "$invoked_log" "-u family-user:$secret -sS -o /dev/null -w %{http_code} -X PROPFIND"
+	assert_file_contains "$invoked_log" "http://127.0.0.1:9/dav/"
+}
+
+run_webdav_users_missing_credentials_test() {
+	local case_dir="$TMP_ROOT/webdav-users-missing"
+	local fake_bin="$case_dir/bin"
+	local invoked_log="$case_dir/curl.log"
+	mkdir -p "$case_dir/storage"
+	make_fake_curl "$fake_bin" "$invoked_log"
+
+	run_expect_failure "$case_dir/out.log" env \
+		HOME="$case_dir/home" \
+		PATH="$fake_bin:$PATH" \
+		CURL_INVOKED_LOG="$invoked_log" \
+		MNEMONAS_STORAGE_ROOT="$case_dir/storage" \
+		MNEMONAS_WEBDAV_AUTH_TYPE="users" \
+		bash "$REPO_ROOT/scripts/benchmark.sh" "http://127.0.0.1:9"
+
+	assert_file_contains "$case_dir/out.log" "WebDAV users auth requires MNEMONAS_WEBDAV_USERNAME and MNEMONAS_WEBDAV_PASSWORD"
+	assert_not_exists "$invoked_log"
+}
+
 run_admin_login_json_escape_and_pretty_response_test() {
 	local case_dir="$TMP_ROOT/admin-login-json"
 	local fake_bin="$case_dir/bin"
@@ -461,6 +511,17 @@ run_refuse_default_personal_storage_test() {
 	assert_file_contains "$case_dir/out.log" "refusing to benchmark against default personal storage root"
 }
 
+run_benchmark_docs_avoid_weak_webdav_env_credentials_test() {
+	assert_file_not_contains "$REPO_ROOT/docs/development.md" 'MNEMONAS_WEBDAV_USERNAME="webdav"'
+	assert_file_not_contains "$REPO_ROOT/docs/development.md" 'MNEMONAS_WEBDAV_PASSWORD="secret"'
+	assert_file_not_contains "$REPO_ROOT/docs/development.en.md" 'MNEMONAS_WEBDAV_USERNAME="webdav"'
+	assert_file_not_contains "$REPO_ROOT/docs/development.en.md" 'MNEMONAS_WEBDAV_PASSWORD="secret"'
+	assert_file_contains "$REPO_ROOT/docs/development.md" 'MNEMONAS_WEBDAV_USERNAME="<mnemonas-or-webdav-username>"'
+	assert_file_contains "$REPO_ROOT/docs/development.md" 'MNEMONAS_WEBDAV_PASSWORD="<mnemonas-or-webdav-password>"'
+	assert_file_contains "$REPO_ROOT/docs/development.en.md" 'MNEMONAS_WEBDAV_USERNAME="<mnemonas-or-webdav-username>"'
+	assert_file_contains "$REPO_ROOT/docs/development.en.md" 'MNEMONAS_WEBDAV_PASSWORD="<mnemonas-or-webdav-password>"'
+}
+
 run_isolated_target_reaches_health_check_test() {
 	local case_dir="$TMP_ROOT/isolated-target"
 	mkdir -p "$case_dir/storage"
@@ -486,6 +547,8 @@ run_refuse_protected_storage_with_override_test
 run_refuse_symlink_storage_test
 run_webdav_secret_json_escape_test
 run_webdav_config_toml_escape_test
+run_webdav_users_missing_credentials_test
+run_webdav_users_env_credentials_test
 run_admin_login_json_escape_and_pretty_response_test
 run_refuse_traversal_isolated_root_test
 run_refuse_newline_isolated_root_test
@@ -497,6 +560,7 @@ run_refuse_loopback_name_spoof_isolated_host_test
 run_refuse_non_loopback_isolated_dataplane_test
 run_refuse_invalid_isolated_ready_attempts_test
 run_refuse_default_personal_storage_test
+run_benchmark_docs_avoid_weak_webdav_env_credentials_test
 run_isolated_target_reaches_health_check_test
 
 printf '[benchmark-safety-test] all checks passed\n'

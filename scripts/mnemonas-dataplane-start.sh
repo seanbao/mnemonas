@@ -137,6 +137,48 @@ PY
   ' "$file"
 }
 
+check_config_toml_syntax() {
+  local file="$1"
+  local parse_out
+  local status
+
+  [[ -f "$file" ]] || return
+
+  if ! command -v python3 >/dev/null 2>&1; then
+    return
+  fi
+
+  parse_out="$(mktemp -t mnemonas-dataplane-config-toml.XXXXXX)"
+  if python3 - "$file" >"$parse_out" 2>&1 <<'PY'
+import sys
+
+try:
+    import tomllib
+except Exception:
+    sys.exit(3)
+
+path = sys.argv[1]
+try:
+    with open(path, "rb") as handle:
+        tomllib.load(handle)
+except Exception as exc:
+    print(str(exc), file=sys.stderr)
+    sys.exit(2)
+PY
+  then
+    rm -f -- "$parse_out"
+    return
+  fi
+
+  status=$?
+  if [[ "$status" -ne 3 ]]; then
+    sed 's/^/[mnemonas-dataplane-start] TOML parse error: /' "$parse_out" >&2
+    rm -f -- "$parse_out"
+    fail "CONFIG_PATH TOML syntax is invalid: $file"
+  fi
+  rm -f -- "$parse_out"
+}
+
 expand_path() {
   local path=$1
   local home="${HOME:-}"
@@ -392,6 +434,7 @@ require_no_control_characters "$CONFIG_PATH" "CONFIG_PATH"
 [[ "$CONFIG_PATH" == /* ]] || fail "CONFIG_PATH must be an absolute path: $CONFIG_PATH"
 ! path_has_parent_segment "$CONFIG_PATH" || fail "CONFIG_PATH cannot contain parent directory segments: $CONFIG_PATH"
 require_no_symlink_components "$CONFIG_PATH" "CONFIG_PATH"
+check_config_toml_syntax "$CONFIG_PATH"
 
 storage_root="${STORAGE_ROOT:-$(toml_value storage root "$CONFIG_PATH")}"
 storage_root="$(expand_path "$storage_root")"
