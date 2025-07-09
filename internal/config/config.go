@@ -364,6 +364,15 @@ func expandUserPath(path string) string {
 	return path
 }
 
+func isFilesystemRoot(path string) bool {
+	cleaned := filepath.Clean(path)
+	volume := filepath.VolumeName(cleaned)
+	if volume != "" {
+		return cleaned == volume+string(os.PathSeparator)
+	}
+	return cleaned == string(os.PathSeparator)
+}
+
 func normalizeStringSlice(values []string) []string {
 	if values == nil {
 		return []string{}
@@ -477,10 +486,6 @@ func (c *Config) Save(path string) error {
 	}
 
 	return nil
-}
-
-func validateConfigFilePath(path string) error {
-	return validateManagedFilePath(path, errConfigFileSymlink, "config file")
 }
 
 func normalizeManagedFilePath(path, label string) (string, error) {
@@ -753,6 +758,9 @@ func ensureManagedDir(dir string, perm os.FileMode) error {
 	if err := os.MkdirAll(dir, perm); err != nil {
 		return err
 	}
+	if err := os.Chmod(dir, perm); err != nil {
+		return err
+	}
 	return syncCreatedManagedDirs(createdDirs)
 }
 
@@ -866,50 +874,6 @@ func cleanupCreatedManagedDirs(createdDirs []string, label string, operationErr 
 	return rollbackErr
 }
 
-func writeManagedFileAtomically(path string, data []byte, symlinkErr error, pattern, label string, perm os.FileMode) error {
-	if err := validateManagedFilePath(path, symlinkErr, label); err != nil {
-		return err
-	}
-	afterValidateManagedFilePath()
-
-	dir := filepath.Dir(path)
-	tmpFile, err := os.CreateTemp(dir, pattern)
-	if err != nil {
-		return fmt.Errorf("failed to create temp %s file: %w", label, err)
-	}
-	tmpPath := tmpFile.Name()
-	cleanup := true
-	defer func() {
-		if cleanup {
-			_ = os.Remove(tmpPath)
-		}
-	}()
-
-	if err := tmpFile.Chmod(perm); err != nil {
-		_ = tmpFile.Close()
-		return fmt.Errorf("failed to set temp %s permissions: %w", label, err)
-	}
-	if _, err := tmpFile.Write(data); err != nil {
-		_ = tmpFile.Close()
-		return fmt.Errorf("failed to write %s file: %w", label, err)
-	}
-	if err := tmpFile.Sync(); err != nil {
-		_ = tmpFile.Close()
-		return fmt.Errorf("failed to sync %s file: %w", label, err)
-	}
-	if err := tmpFile.Close(); err != nil {
-		return fmt.Errorf("failed to close temp %s file: %w", label, err)
-	}
-	if err := os.Rename(tmpPath, path); err != nil {
-		return fmt.Errorf("failed to replace %s: %w", label, err)
-	}
-	cleanup = false
-	if err := syncManagedDir(dir); err != nil {
-		return fmt.Errorf("failed to sync %s directory: %w", label, err)
-	}
-	return nil
-}
-
 func mapManagedRootPathError(err error, symlinkErr error) error {
 	if errors.Is(err, os.ErrPermission) || isManagedRootEscapeError(err) {
 		return symlinkErr
@@ -947,6 +911,8 @@ func (c *Config) Validate() error {
 
 	if c.Storage.Root == "" {
 		errs = append(errs, errors.New("storage.root cannot be empty"))
+	} else if isFilesystemRoot(c.Storage.Root) {
+		errs = append(errs, errors.New("storage.root cannot be filesystem root"))
 	}
 	if c.Storage.Trash.RetentionDays < 0 {
 		errs = append(errs, errors.New("storage.trash.retention_days cannot be negative"))
@@ -1000,6 +966,15 @@ func (c *Config) Validate() error {
 
 	// CDC configuration validation
 	cdc := c.DataPlane.CDC
+	if cdc.MinChunkSize == 0 {
+		errs = append(errs, errors.New("min_chunk_size must be positive"))
+	}
+	if cdc.AvgChunkSize == 0 {
+		errs = append(errs, errors.New("avg_chunk_size must be positive"))
+	}
+	if cdc.MaxChunkSize == 0 {
+		errs = append(errs, errors.New("max_chunk_size must be positive"))
+	}
 	if cdc.MinChunkSize >= cdc.AvgChunkSize {
 		errs = append(errs, errors.New("min_chunk_size must be less than avg_chunk_size"))
 	}
@@ -1066,30 +1041,37 @@ func NormalizeWebDAVPrefix(prefix string) string {
 func (c *Config) EnsureDirs() error {
 	// New directory structure
 	root := c.Storage.Root
-	dirs := []string{
-		filepath.Join(root, "files"),                    // User files (755)
-		filepath.Join(root, ".mnemonas"),                // Internal data (700)
-		filepath.Join(root, ".mnemonas", "objects"),     // Version objects
-		filepath.Join(root, ".mnemonas", "trash"),       // Trash
-		filepath.Join(root, ".mnemonas", "thumbnails"),  // Thumbnails
-		filepath.Join(root, ".mnemonas", "maintenance"), // Maintenance
-		filepath.Join(root, ".mnemonas", "activity"),    // Activity logs
-		filepath.Join(root, ".mnemonas", "tmp"),         // Temp files
+	if root == "" {
+		return errors.New("storage.root cannot be empty")
+	}
+	if isFilesystemRoot(root) {
+		return errors.New("storage.root cannot be filesystem root")
+	}
+
+	dirs := []struct {
+		path string
+		perm os.FileMode
+	}{
+		{root, 0750},
+		{filepath.Join(root, "files"), 0750},
+		{filepath.Join(root, ".mnemonas"), 0700},
+		{filepath.Join(root, ".mnemonas", "objects"), 0700},
+		{filepath.Join(root, ".mnemonas", "trash"), 0700},
+		{filepath.Join(root, ".mnemonas", "thumbnails"), 0700},
+		{filepath.Join(root, ".mnemonas", "maintenance"), 0700},
+		{filepath.Join(root, ".mnemonas", "activity"), 0700},
+		{filepath.Join(root, ".mnemonas", "tmp"), 0700},
 	}
 
 	for _, dir := range dirs {
-		if err := validateManagedFilePath(dir, errManagedDirectorySymlink, "managed directory"); err != nil {
-			return fmt.Errorf("failed to validate directory %s: %w", dir, err)
+		if err := validateManagedFilePath(dir.path, errManagedDirectorySymlink, "managed directory"); err != nil {
+			return fmt.Errorf("failed to validate directory %s: %w", dir.path, err)
 		}
 	}
 
-	for i, dir := range dirs {
-		var perm os.FileMode = 0700
-		if i == 0 { // files/ directory should be accessible
-			perm = 0755
-		}
-		if err := ensureManagedDir(dir, perm); err != nil {
-			return fmt.Errorf("failed to create directory %s: %w", dir, err)
+	for _, dir := range dirs {
+		if err := ensureManagedDir(dir.path, dir.perm); err != nil {
+			return fmt.Errorf("failed to create directory %s: %w", dir.path, err)
 		}
 	}
 

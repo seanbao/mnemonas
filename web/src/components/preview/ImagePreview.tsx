@@ -140,11 +140,11 @@ export function ImagePreview({ path, filename, className }: ImagePreviewProps) {
   }, [blobUrl])
 
   return (
-    <div className={cn("h-full flex flex-col bg-content1 rounded-xl overflow-hidden", className)}>
+    <div className={cn("h-full flex flex-col bg-content1 rounded-lg overflow-hidden", className)}>
       {/* Toolbar */}
-      <div className="flex items-center justify-between px-4 py-2 bg-content2 border-b border-divider">
-        <span className="text-sm font-medium truncate max-w-[200px]">{filename}</span>
-        <div className="flex items-center gap-1">
+      <div className="flex items-center justify-between gap-3 border-b border-divider bg-content2 px-3 py-2 sm:px-4">
+        <span className="min-w-0 truncate text-sm font-medium">{filename}</span>
+        <div className="flex shrink-0 items-center gap-1">
           <Button
             isIconOnly
             size="sm"

@@ -15,7 +15,9 @@ We take security seriously. If you discover a security vulnerability, please rep
 
 **DO NOT** open a public GitHub issue for security vulnerabilities.
 
-Instead, please email us at: **security@mnemonas.dev** (or use GitHub's private vulnerability reporting feature)
+Use GitHub's **Private vulnerability reporting** feature for this repository when available.
+
+If private reporting is unavailable, contact the project maintainer through the GitHub profile associated with the repository owner and avoid posting exploit details publicly. A dedicated security email should only be added here after the mailbox is configured and monitored.
 
 ### What to Include
 
@@ -53,13 +55,14 @@ When deploying MnemoNAS:
 
 1. **Use HTTPS**: Always deploy behind a reverse proxy with TLS
 2. **Firewall**: Restrict access to trusted networks
-3. **VPN**: Consider VPN for remote access
+3. **Internal dataplane ports**: Do not expose dataplane gRPC/HTTP ports 9090/9091 to public or untrusted networks
+4. **VPN**: Consider VPN for remote access
 
 ### Authentication
 
-1. **Strong Passwords**: Use strong passwords for WebDAV auth
-2. **Change Defaults**: Always change default credentials
-3. **Rate Limiting**: Enable rate limiting for auth endpoints
+1. **Strong Passwords**: Use strong passwords for Web UI accounts and WebDAV auth
+2. **Change Initial Credentials**: Change the initial admin password after first login
+3. **Disable Unused Access**: Disable WebDAV or sharing if you do not use them
 
 ### Data Protection
 
@@ -73,20 +76,30 @@ When deploying MnemoNAS:
 2. **Monitor**: Watch for security advisories
 3. **Test**: Test updates in a staging environment first
 
+## Dependency Checks
+
+Run dependency vulnerability checks before releases and after dependency updates:
+
+```bash
+make install-audit-tools
+make security-check
+```
+
+The checks cover Go with `govulncheck`, Rust with `cargo audit`, and the Web UI with `npm audit --audit-level=high`. CI runs the same classes of checks on pull requests and pushes.
+
 ## Known Security Considerations
 
 ### Current Limitations
 
-1. **No Multi-User ACL**: Current version has basic auth only
-2. **HTTP by Default**: HTTPS requires reverse proxy setup
-3. **Local Network Focus**: Not designed for direct internet exposure
+1. **No Fine-Grained ACL**: Users, roles, and home directories are supported, but per-file ACLs are not
+2. **HTTP by Default**: Built-in TLS exists, but production HTTPS is best handled by a reverse proxy
+3. **Local Network Focus**: MnemoNAS is not designed for direct internet exposure without a hardened proxy/VPN layer
 
 ### Planned Security Features
 
-- [ ] Multi-user with role-based access control
-- [ ] Built-in TLS support
-- [ ] Audit logging
+- [ ] Fine-grained sharing and access policy controls
 - [ ] Two-factor authentication
+- [ ] External identity provider integration
 
 ## Security Audits
 

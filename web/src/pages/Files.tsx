@@ -42,6 +42,7 @@ import {
   Move,
   Files,
   RotateCcw,
+  ArrowUpDown,
 } from 'lucide-react'
 import { ShareDialog } from '@/components/share'
 import { FileIcon } from '@/components/ui/FileIcon'
@@ -73,6 +74,14 @@ import { listShares, ShareError } from '@/api/share'
 import { getFileQueryScopeKey, getFilesQueryKey } from '@/lib/fileQueryKey'
 import { copyTextToClipboard, formatBytes, formatDate, cn, normalizePath } from '@/lib/utils'
 import { getInvalidHomeDirDescription, invalidHomeDirTitle, resolveUserHomeScope } from '@/lib/userScope'
+
+type SortKey = 'name' | 'size' | 'modTime'
+
+const sortLabels: Record<SortKey, string> = {
+  name: '名称',
+  size: '大小',
+  modTime: '修改时间',
+}
 
 function isDirectoryAlreadyExistsError(error: unknown): boolean {
   return error instanceof ApiError && error.status === 409
@@ -468,11 +477,11 @@ function Breadcrumbs({
   const segments = path === '/' ? [] : path.split('/').filter(Boolean)
   
   return (
-    <nav className="flex items-center gap-1 text-sm mb-4 px-1">
+    <nav className="mb-4 flex items-center gap-1 overflow-x-auto whitespace-nowrap px-1 pb-1 text-sm custom-scrollbar">
       <button
         onClick={() => onNavigate('/')}
         className={cn(
-          "flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl transition-all max-w-[180px] truncate border border-transparent",
+          "flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg transition-all max-w-[180px] truncate border border-transparent",
           segments.length === 0
             ? "bg-content1/80 text-foreground font-medium border-divider shadow-[var(--shadow-soft)]" 
             : "text-default-500 hover:text-foreground hover:bg-content1/60 hover:border-divider"
@@ -492,7 +501,7 @@ function Breadcrumbs({
             <button
               onClick={() => onNavigate(segmentPath)}
               className={cn(
-                "px-2.5 py-1.5 rounded-xl transition-all max-w-[180px] truncate border border-transparent",
+                "px-2.5 py-1.5 rounded-lg transition-all max-w-[180px] truncate border border-transparent",
                 isLast 
                   ? "bg-content1/80 text-foreground font-medium border-divider shadow-[var(--shadow-soft)]" 
                   : "text-default-500 hover:text-foreground hover:bg-content1/60 hover:border-divider"
@@ -511,6 +520,7 @@ function Breadcrumbs({
 function FileRow({ 
   file, 
   isSelected, 
+  isActive,
   isFavorited,
   favoriteActionsAvailable,
   favoriteUnavailableLabel,
@@ -520,7 +530,7 @@ function FileRow({
   canWrite,
   onSelect, 
   onOpen,
-  onClick,
+  onActivate,
   onRename,
   onDelete,
   onViewVersions,
@@ -530,6 +540,7 @@ function FileRow({
 }: { 
   file: FileItem
   isSelected: boolean
+  isActive: boolean
   isFavorited: boolean
   favoriteActionsAvailable: boolean
   favoriteUnavailableLabel: string
@@ -539,7 +550,7 @@ function FileRow({
   canWrite: boolean
   onSelect: (e: React.MouseEvent) => void
   onOpen: () => void
-  onClick: (e: React.MouseEvent) => void
+  onActivate: (e: React.MouseEvent) => void
   onRename: () => void
   onDelete: () => void
   onViewVersions: () => void
@@ -569,14 +580,15 @@ function FileRow({
   return (
     <div 
       className={cn(
-        "group grid grid-cols-[44px_1fr_100px_150px_120px_40px] gap-4 px-5 py-3 cursor-pointer transition-all duration-150 border-b border-divider items-center",
+        "group grid grid-cols-[36px_minmax(0,1fr)_36px] items-center gap-3 border-b border-divider px-3 py-3 cursor-pointer transition-all duration-150 sm:grid-cols-[44px_minmax(0,1fr)_88px_118px_40px] sm:gap-4 sm:px-5 md:grid-cols-[44px_minmax(0,1fr)_100px_150px_120px_40px]",
         "hover:bg-content2/60",
+        isActive && !isSelected && "bg-content2/50",
         isMultiSelection && "bg-content2/30",
         isSelected && "bg-accent-primary/10"
       )}
       onClick={(e) => {
         e.stopPropagation()
-        onClick(e)
+        onActivate(e)
       }}
       onDoubleClick={onOpen}
       onContextMenu={onContextMenu}
@@ -612,15 +624,15 @@ function FileRow({
         </div>
       </div>
       
-      <div className="text-sm text-default-600">
+      <div className="hidden text-sm text-default-600 sm:block">
         {file.isDir ? '—' : formatBytes(file.size)}
       </div>
       
-      <div className="text-sm text-default-600">
+      <div className="hidden text-sm text-default-600 sm:block">
         {formatDate(file.modTime)}
       </div>
       
-      <div className="flex items-center gap-2.5">
+      <div className="hidden items-center gap-2.5 md:flex">
         <span className="text-xs text-default-400">—</span>
       </div>
 
@@ -628,7 +640,7 @@ function FileRow({
         {!isMultiSelection && (
           <Dropdown placement="bottom-end">
             <DropdownTrigger>
-              <button aria-label={`${file.name} 操作菜单`} className="p-1.5 rounded-md opacity-0 group-hover:opacity-100 transition-opacity hover:bg-content2">
+              <button aria-label={`${file.name} 操作菜单`} className="rounded-md p-1.5 opacity-100 transition-opacity hover:bg-content2 sm:opacity-0 sm:group-hover:opacity-100">
                 <MoreVertical size={16} className="text-default-500" />
               </button>
             </DropdownTrigger>
@@ -726,17 +738,17 @@ function PreviewPanel({ file }: { file: FileItem | null }) {
   if (!file) return null
 
   return (
-    <aside className="w-[300px] bg-content2 border-l border-divider p-6 flex flex-col gap-6 relative overflow-hidden shrink-0">
+    <aside className="relative hidden w-[300px] shrink-0 flex-col gap-6 overflow-hidden border-l border-divider bg-content2 p-6 xl:flex">
       <div className="text-center relative z-10">
-        <div className="w-[88px] h-[88px] mx-auto mb-4 rounded-[20px] bg-content1 flex items-center justify-center border border-divider">
+        <div className="mx-auto mb-4 flex h-[88px] w-[88px] items-center justify-center rounded-lg border border-divider bg-content1">
           <FileIcon name={file.name} isDir={file.isDir} size={88} variant="tile" />
         </div>
         <h3 className="font-semibold text-base text-foreground mb-1 truncate px-2">{file.name}</h3>
         <p className="text-[13px] text-default-600">{file.isDir ? '文件夹' : file.name.split('.').pop()?.toUpperCase() || '文件'}</p>
       </div>
 
-      <div className="bg-content1 rounded-xl p-4 relative z-10 border border-divider">
-        <div className="text-[10px] font-semibold uppercase tracking-widest text-default-500 mb-3.5">详情</div>
+      <div className="bg-content1 rounded-lg p-4 relative z-10 border border-divider">
+        <div className="mb-3.5 text-[10px] font-semibold uppercase text-default-500">详情</div>
         <div className="grid grid-cols-2 gap-4">
           <div className="text-center">
             <div className="text-lg font-semibold text-foreground">
@@ -754,7 +766,7 @@ function PreviewPanel({ file }: { file: FileItem | null }) {
       </div>
 
       <div className="flex-1 relative z-10">
-        <div className="text-[10px] font-semibold uppercase tracking-widest text-default-500 mb-3.5">时间线</div>
+        <div className="mb-3.5 text-[10px] font-semibold uppercase text-default-500">时间线</div>
         <div className="relative pl-6 border-l border-divider">
           <div className="relative pb-5 last:pb-0">
             <div className="absolute -left-[20px] top-0 w-3 h-3 rounded-full bg-content1 border border-divider" />
@@ -771,6 +783,7 @@ function PreviewPanel({ file }: { file: FileItem | null }) {
 function FileCard({
   file,
   isSelected,
+  isActive,
   isFavorited,
   favoriteActionsAvailable,
   favoriteUnavailableLabel,
@@ -780,7 +793,7 @@ function FileCard({
   canWrite,
   onSelect,
   onOpen,
-  onClick,
+  onActivate,
   onRename,
   onDelete,
   onViewVersions,
@@ -790,6 +803,7 @@ function FileCard({
 }: {
   file: FileItem
   isSelected: boolean
+  isActive: boolean
   isFavorited: boolean
   favoriteActionsAvailable: boolean
   favoriteUnavailableLabel: string
@@ -799,7 +813,7 @@ function FileCard({
   canWrite: boolean
   onSelect: (e: React.MouseEvent) => void
   onOpen: () => void
-  onClick: (e: React.MouseEvent) => void
+  onActivate: (e: React.MouseEvent) => void
   onRename: () => void
   onDelete: () => void
   onViewVersions: () => void
@@ -829,14 +843,15 @@ function FileCard({
   return (
     <div
       className={cn(
-        "group relative bg-content1 border border-divider rounded-xl p-4 cursor-pointer transition-all duration-200",
+        "group relative min-h-[168px] bg-content1 border border-divider rounded-lg p-4 cursor-pointer transition-all duration-200",
         "shadow-[var(--shadow-soft)] hover:border-accent-primary/40 hover:shadow-[var(--shadow-medium)]",
+        isActive && !isSelected && "border-default-300 bg-content2/50",
         isMultiSelection && "bg-content2/40",
         isSelected && "border-accent-primary bg-accent-primary/5"
       )}
       onClick={(e) => {
         e.stopPropagation()
-        onClick(e)
+        onActivate(e)
       }}
       onDoubleClick={onOpen}
       onContextMenu={onContextMenu}
@@ -872,7 +887,7 @@ function FileCard({
         {!isMultiSelection && (
           <Dropdown placement="bottom-end">
             <DropdownTrigger>
-              <button aria-label={`${file.name} 操作菜单`} className="p-1.5 rounded-md opacity-0 group-hover:opacity-100 transition-opacity bg-content1/80 backdrop-blur-sm hover:bg-content2">
+              <button aria-label={`${file.name} 操作菜单`} className="rounded-md bg-content1/80 p-1.5 opacity-100 backdrop-blur-sm transition-opacity hover:bg-content2 sm:opacity-0 sm:group-hover:opacity-100">
                 <MoreVertical size={14} className="text-default-500" />
               </button>
             </DropdownTrigger>
@@ -963,7 +978,7 @@ function FileCard({
       </div>
 
       <div className="flex justify-center py-6">
-        <div className="w-16 h-16 rounded-2xl flex items-center justify-center">
+        <div className="w-16 h-16 rounded-lg flex items-center justify-center">
           <FileIcon name={file.name} isDir={file.isDir} size={64} variant="tile" />
         </div>
       </div>
@@ -1067,6 +1082,8 @@ export function FilesPage() {
     selectAll,
     clearSelection,
     setViewMode,
+    setSortBy,
+    toggleSortOrder,
   } = useFilesStore()
 
   useEffect(() => {
@@ -1443,6 +1460,29 @@ export function FilesPage() {
   // Active file for preview panel (not selection)
   const [activeFilePath, setActiveFilePath] = useState<string | null>(null)
 
+  const getFocusedOrActiveFile = useCallback((): { file: FileItem; index: number } | null => {
+    if (focusedIndex >= 0 && focusedIndex < sortedFiles.length) {
+      return { file: sortedFiles[focusedIndex], index: focusedIndex }
+    }
+
+    if (activeFilePath) {
+      const activeIndex = sortedFiles.findIndex((file) => file.path === activeFilePath)
+      if (activeIndex >= 0) {
+        return { file: sortedFiles[activeIndex], index: activeIndex }
+      }
+    }
+
+    if (selectedFiles.size === 1) {
+      const selectedPath = Array.from(selectedFiles)[0]
+      const selectedIndex = sortedFiles.findIndex((file) => file.path === selectedPath)
+      if (selectedIndex >= 0) {
+        return { file: sortedFiles[selectedIndex], index: selectedIndex }
+      }
+    }
+
+    return null
+  }, [activeFilePath, focusedIndex, selectedFiles, sortedFiles])
+
   const handleFileSelection = useCallback(
     (file: FileItem, index: number, event: React.MouseEvent, mode: 'primary' | 'toggle' = 'primary') => {
       const isShift = event.shiftKey
@@ -1481,6 +1521,21 @@ export function FilesPage() {
     },
     [activeFilePath, selectedFiles, setSelection, setFocusedIndex, sortedFiles, toggleFileSelection]
   )
+
+  const handleFileActivate = useCallback((file: FileItem, index: number, event: React.MouseEvent) => {
+    if (event.shiftKey || event.metaKey || event.ctrlKey) {
+      handleFileSelection(file, index, event, event.metaKey || event.ctrlKey ? 'toggle' : 'primary')
+      return
+    }
+
+    if (selectedFiles.size > 0) {
+      clearSelection()
+    }
+
+    setActiveFilePath(file.path)
+    setFocusedIndex(index)
+    lastSelectedIndexRef.current = index
+  }, [clearSelection, handleFileSelection, selectedFiles.size, setFocusedIndex])
 
   // Handle double click - open folder or preview file
   const handleFileOpen = useCallback((file: FileItem) => {
@@ -2094,19 +2149,26 @@ export function FilesPage() {
 
   const handleKeyboardDelete = useCallback(() => {
     if (!canWrite) return
-    if (selectedFiles.size === 0) return
-    onBatchDeleteOpen()
-  }, [canWrite, selectedFiles.size, onBatchDeleteOpen])
+    if (selectedFiles.size > 0) {
+      onBatchDeleteOpen()
+      return
+    }
+
+    const target = getFocusedOrActiveFile()
+    if (!target) return
+    setDeleteTarget(target.file)
+    onDeleteOpen()
+  }, [canWrite, getFocusedOrActiveFile, onBatchDeleteOpen, onDeleteOpen, selectedFiles.size])
 
   const handleKeyboardRename = useCallback(() => {
     if (!canWrite) return
-    if (selectedFiles.size !== 1) return
-    const path = Array.from(selectedFiles)[0]
-    const file = sortedFiles.find(f => f.path === path)
-    if (file) {
-      handleOpenRenameModal(file)
+    const target = selectedFiles.size === 1
+      ? sortedFiles.find(f => f.path === Array.from(selectedFiles)[0])
+      : getFocusedOrActiveFile()?.file
+    if (target) {
+      handleOpenRenameModal(target)
     }
-  }, [canWrite, selectedFiles, sortedFiles, handleOpenRenameModal])
+  }, [canWrite, getFocusedOrActiveFile, handleOpenRenameModal, selectedFiles, sortedFiles])
 
   const handleKeyboardEnter = useCallback(() => {
     // If there's a focused file, open it
@@ -2155,17 +2217,62 @@ export function FilesPage() {
     }
   }, [focusedIndex, setFocusedIndex, setSelection, setActiveFilePath, sortedFiles])
 
+  const focusFileByKeyboard = useCallback((nextIndex: number) => {
+    if (sortedFiles.length === 0) return
+
+    const clampedIndex = Math.max(0, Math.min(nextIndex, sortedFiles.length - 1))
+    const file = sortedFiles[clampedIndex]
+    if (!file) return
+
+    if (selectedFiles.size > 0) {
+      clearSelection()
+    }
+    setFocusedIndex(clampedIndex)
+    setActiveFilePath(file.path)
+    lastSelectedIndexRef.current = clampedIndex
+  }, [clearSelection, selectedFiles.size, setFocusedIndex, sortedFiles])
+
   const handleKeyboardArrowDown = useCallback((event?: KeyboardEvent) => {
     if (sortedFiles.length === 0) return
     const newIndex = focusedIndex < 0 ? 0 : Math.min(focusedIndex + 1, sortedFiles.length - 1)
-    applyKeyboardSelection(newIndex, Boolean(event?.shiftKey))
-  }, [applyKeyboardSelection, focusedIndex, sortedFiles.length])
+    if (event?.shiftKey) {
+      applyKeyboardSelection(newIndex, true)
+      return
+    }
+    focusFileByKeyboard(newIndex)
+  }, [applyKeyboardSelection, focusFileByKeyboard, focusedIndex, sortedFiles.length])
 
   const handleKeyboardArrowUp = useCallback((event?: KeyboardEvent) => {
     if (sortedFiles.length === 0) return
     const newIndex = focusedIndex <= 0 ? 0 : focusedIndex - 1
-    applyKeyboardSelection(newIndex, Boolean(event?.shiftKey))
-  }, [applyKeyboardSelection, focusedIndex, sortedFiles.length])
+    if (event?.shiftKey) {
+      applyKeyboardSelection(newIndex, true)
+      return
+    }
+    focusFileByKeyboard(newIndex)
+  }, [applyKeyboardSelection, focusFileByKeyboard, focusedIndex, sortedFiles.length])
+
+  const handleKeyboardToggleFocusedSelection = useCallback(() => {
+    const target = getFocusedOrActiveFile() ?? (sortedFiles[0] ? { file: sortedFiles[0], index: 0 } : null)
+    if (!target) return
+
+    toggleFileSelection(target.file.path)
+    setFocusedIndex(target.index)
+    lastSelectedIndexRef.current = target.index
+
+    if (target.file.isDir) {
+      setActiveFilePath(null)
+    } else {
+      setActiveFilePath(target.file.path)
+    }
+  }, [getFocusedOrActiveFile, setFocusedIndex, sortedFiles, toggleFileSelection])
+
+  const handleKeyboardEscape = useCallback(() => {
+    clearSelection()
+    setActiveFilePath(null)
+    setFocusedIndex(-1)
+    lastSelectedIndexRef.current = null
+  }, [clearSelection, setFocusedIndex])
 
   const handleKeyboardRefresh = useCallback(() => {
     void refetch().then((result) => {
@@ -2192,20 +2299,34 @@ export function FilesPage() {
     })
   }, [refetchFavorites])
 
+  const fileShortcutsEnabled = !(
+    isNewFolderOpen
+    || isRenameOpen
+    || isDeleteOpen
+    || isBatchDeleteOpen
+    || isShareOpen
+    || isMoveOpen
+    || isPreviewOpen
+    || contextMenu.state.isOpen
+  )
+
   // Register keyboard shortcuts
   useKeyboardShortcuts({
     onDelete: canWrite ? handleKeyboardDelete : undefined,
     onSelectAll: handleSelectAll,
-    onEscape: clearSelection,
+    onEscape: handleKeyboardEscape,
     onCopy: canWrite ? handleKeyboardCopy : undefined,
     onCut: canWrite ? handleKeyboardCut : undefined,
     onPaste: canWrite ? handleKeyboardPaste : undefined,
     onRename: canWrite ? handleKeyboardRename : undefined,
     onEnter: handleKeyboardEnter,
+    onSpace: handleKeyboardToggleFocusedSelection,
     onArrowDown: handleKeyboardArrowDown,
     onArrowUp: handleKeyboardArrowUp,
     onRefresh: handleKeyboardRefresh,
     onNewFolder: canWrite ? handleOpenNewFolderModal : undefined,
+  }, {
+    enabled: fileShortcutsEnabled,
   })
 
   // Determine active file for preview (prioritize activeFilePath, then single selection)
@@ -2352,8 +2473,8 @@ export function FilesPage() {
 
   if (hasInvalidHomeDir) {
     return (
-      <div className="h-full flex overflow-hidden relative">
-        <div className="flex-1 flex flex-col min-w-0 p-7">
+      <div className="relative flex h-full min-h-0 overflow-hidden">
+        <div className="flex min-h-0 flex-1 flex-col p-4 sm:p-5 lg:p-7">
           <Breadcrumbs path="/" onNavigate={setCurrentPath} />
           <div className="flex-1 flex items-center justify-center surface-card">
             <EmptyState
@@ -2371,8 +2492,8 @@ export function FilesPage() {
   if (error) {
     const errorPresentation = getFilesLoadErrorPresentation(error)
     return (
-      <div className="h-full flex overflow-hidden relative">
-        <div className="flex-1 flex flex-col min-w-0 p-7">
+      <div className="relative flex h-full min-h-0 overflow-hidden">
+        <div className="flex min-h-0 flex-1 flex-col p-4 sm:p-5 lg:p-7">
           <Breadcrumbs path={currentPath} onNavigate={setCurrentPath} />
           <div className="flex-1 flex items-center justify-center surface-card">
             <EmptyState
@@ -2381,7 +2502,7 @@ export function FilesPage() {
               description={errorPresentation.description}
               className="max-w-md"
               action={
-                <Button variant="bordered" className="rounded-xl" onPress={handleKeyboardRefresh}>
+                <Button variant="bordered" className="rounded-lg" onPress={handleKeyboardRefresh}>
                   重新加载
                 </Button>
               }
@@ -2394,7 +2515,7 @@ export function FilesPage() {
 
   return (
     <div 
-      className="h-full flex overflow-hidden relative"
+      className="relative flex h-full min-h-0 overflow-hidden"
       onDragEnter={handleDragEnter}
       onDragLeave={handleDragLeave}
       onDragOver={handleDragOver}
@@ -2402,9 +2523,9 @@ export function FilesPage() {
     >
       {/* Drag overlay */}
       {isDragging && (
-        <div className="absolute inset-0 z-50 bg-content1/95 backdrop-blur-sm flex items-center justify-center border-2 border-dashed border-accent-primary rounded-xl m-4">
+        <div className="absolute inset-0 z-50 bg-content1/95 backdrop-blur-sm flex items-center justify-center border-2 border-dashed border-accent-primary rounded-lg m-4">
           <div className="text-center">
-            <div className="w-16 h-16 mx-auto mb-4 rounded-2xl bg-accent-primary flex items-center justify-center shadow-[var(--shadow-soft)]">
+            <div className="w-16 h-16 mx-auto mb-4 rounded-lg bg-accent-primary flex items-center justify-center shadow-[var(--shadow-soft)]">
               <Upload size={32} className="text-white" />
             </div>
             <h3 className="text-xl font-semibold text-foreground mb-2">释放以上传</h3>
@@ -2415,7 +2536,7 @@ export function FilesPage() {
 
       {/* Upload queue panel */}
       {showUploadPanel && uploadQueue.length > 0 && (
-        <div className="fixed bottom-6 right-6 z-[100] w-96 bg-content1 border border-divider rounded-xl shadow-xl overflow-hidden">
+        <div className="fixed inset-x-4 bottom-[calc(env(safe-area-inset-bottom)+5.25rem)] z-[100] overflow-hidden rounded-lg border border-divider bg-content1 shadow-xl sm:inset-x-auto sm:right-6 sm:bottom-6 sm:w-96">
           <div className="flex items-center justify-between px-4 py-3 bg-content2 border-b border-divider">
             <div className="flex items-center gap-2">
               <Upload size={16} className="text-accent-primary" />
@@ -2428,13 +2549,15 @@ export function FilesPage() {
                 <button 
                   onClick={() => setUploadQueue([])}
                   className="px-2 py-1 text-xs text-default-500 hover:text-default-700 hover:bg-content3 rounded transition-colors"
+                  aria-label="清空上传记录"
                 >
                   清空
                 </button>
               )}
-              <button 
+              <button
                 onClick={() => setShowUploadPanel(false)}
                 className="p-1.5 hover:bg-content3 rounded transition-colors"
+                aria-label="隐藏上传记录"
               >
                 <X size={14} className="text-default-500" />
               </button>
@@ -2485,7 +2608,7 @@ export function FilesPage() {
         </div>
       )}
 
-      <div className="flex-1 flex flex-col min-w-0 p-7">
+      <div className="flex min-h-0 flex-1 flex-col p-4 sm:p-5 lg:p-7">
         <input ref={fileInputRef} type="file" multiple className="hidden" onChange={handleUploadInputChange} />
         {/* @ts-expect-error - webkitdirectory is a non-standard attribute */}
         <input ref={folderInputRef} type="file" webkitdirectory="" directory="" multiple className="hidden" onChange={handleUploadInputChange} />
@@ -2494,11 +2617,11 @@ export function FilesPage() {
         <Breadcrumbs path={currentPath} onNavigate={setCurrentPath} />
         
         {/* Toolbar */}
-        <div className="flex items-center justify-between mb-6">
-          <div className="flex items-center gap-3">
+        <div className="mb-6 flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
+          <div className="flex min-w-0 flex-wrap items-center gap-2.5 sm:gap-3">
             {hasSelection ? (
               <>
-                <div className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-content2 border border-divider text-sm">
+                <div className="flex flex-wrap items-center gap-2 rounded-lg border border-divider bg-content2 px-3 py-1.5 text-sm">
                   <span className="text-default-600">已选</span>
                   <span className="font-semibold text-foreground">{selectedFiles.size}</span>
                   <span className="text-default-600">项</span>
@@ -2541,7 +2664,7 @@ export function FilesPage() {
                 </div>
                 <Button 
                   variant="bordered" 
-                  className="btn-secondary btn-sm rounded-xl"
+                  className="btn-secondary btn-sm rounded-lg"
                   startContent={<X size={16} />}
                   onPress={clearSelection}
                 >
@@ -2550,7 +2673,7 @@ export function FilesPage() {
                 <Button 
                   color="primary"
                   variant="flat" 
-                  className="rounded-xl"
+                  className="rounded-lg"
                   startContent={<Download size={16} />}
                   onPress={handleBatchDownload}
                   isDisabled={!hasDownloadableSelection}
@@ -2563,7 +2686,7 @@ export function FilesPage() {
                 {canWrite && (
                   <Button 
                     variant="bordered" 
-                    className="btn-secondary btn-sm rounded-xl text-default-500"
+                    className="btn-secondary btn-sm rounded-lg text-default-500"
                     startContent={<Move size={16} />}
                     onPress={() => handleOpenMoveModal(selectedFileItems)}
                   >
@@ -2573,7 +2696,7 @@ export function FilesPage() {
                 {canWrite && (
                   <Button 
                     variant="bordered" 
-                    className="btn-secondary btn-sm rounded-xl text-default-500"
+                    className="btn-secondary btn-sm rounded-lg text-default-500"
                     startContent={<Files size={16} />}
                     onPress={() => handleOpenCopyModal(selectedFileItems)}
                   >
@@ -2584,7 +2707,7 @@ export function FilesPage() {
                   <Button 
                     color="danger"
                     variant="flat"
-                    className="rounded-xl"
+                    className="rounded-lg"
                     startContent={<Trash2 size={16} />}
                     onPress={onBatchDeleteOpen}
                   >
@@ -2609,7 +2732,7 @@ export function FilesPage() {
                 {canWrite ? (
                   <>
                     <Button 
-                      className="btn-primary btn-md border-none font-medium rounded-xl"
+                      className="btn-primary btn-md border-none font-medium rounded-lg"
                       startContent={<Upload size={16} />}
                       onPress={() => fileInputRef.current?.click()}
                       isLoading={isUploading}
@@ -2618,7 +2741,7 @@ export function FilesPage() {
                     </Button>
                     <Button 
                       variant="bordered" 
-                      className="btn-secondary btn-md rounded-xl"
+                      className="btn-secondary btn-md rounded-lg"
                       startContent={<FolderUp size={16} />}
                       onPress={() => folderInputRef.current?.click()}
                       isLoading={isUploading}
@@ -2628,7 +2751,7 @@ export function FilesPage() {
                     </Button>
                     <Button 
                       variant="bordered" 
-                      className="btn-secondary btn-md rounded-xl"
+                      className="btn-secondary btn-md rounded-lg"
                       startContent={<FolderPlus size={16} />}
                       onPress={handleOpenNewFolderModal}
                     >
@@ -2636,7 +2759,7 @@ export function FilesPage() {
                     </Button>
                   </>
                 ) : (
-                  <div className="rounded-xl border border-divider bg-content1 px-4 py-2 text-sm text-default-500">
+                  <div className="rounded-lg border border-divider bg-content1 px-4 py-2 text-sm text-default-500">
                     访客账户为只读，仅可查看、预览和下载文件
                   </div>
                 )}
@@ -2644,32 +2767,74 @@ export function FilesPage() {
             )}
           </div>
           
-          <div className="flex bg-content1 border border-divider rounded-xl p-0.5 shadow-[var(--shadow-soft)]">
-            <button 
-              className={cn("p-2 rounded-[10px] transition-all", viewMode === 'list' ? "bg-accent-primary text-white shadow-sm" : "text-default-500 hover:text-default-600")}
-              onClick={() => setViewMode('list')}
-            >
-              <List size={16} />
-            </button>
-            <button 
-              className={cn("p-2 rounded-[10px] transition-all", viewMode === 'grid' ? "bg-accent-primary text-white shadow-sm" : "text-default-500 hover:text-default-600")}
-              onClick={() => setViewMode('grid')}
-            >
-              <Grid size={16} />
-            </button>
-          </div>
+          <div className="flex shrink-0 items-center gap-2 self-start xl:self-auto">
+            <div className="flex items-center gap-1 rounded-lg border border-divider bg-content1 p-0.5 shadow-[var(--shadow-soft)]">
+              <Dropdown placement="bottom-end">
+                <DropdownTrigger>
+                  <button
+                    type="button"
+                    className="flex h-9 items-center gap-2 rounded-lg px-2.5 text-sm text-default-600 transition-colors hover:bg-content2 hover:text-foreground"
+                    aria-label={`排序：${sortLabels[sortBy as SortKey]}`}
+                  >
+                    <ArrowUpDown size={15} />
+                    <span className="hidden sm:inline">排序：{sortLabels[sortBy as SortKey]}</span>
+                  </button>
+                </DropdownTrigger>
+                <DropdownMenu
+                  aria-label="排序字段"
+                  classNames={{ base: "bg-content1 border border-divider shadow-lg" }}
+                >
+                  <DropdownItem key="name" onPress={() => setSortBy('name')}>
+                    按名称
+                  </DropdownItem>
+                  <DropdownItem key="size" onPress={() => setSortBy('size')}>
+                    按大小
+                  </DropdownItem>
+                  <DropdownItem key="modTime" onPress={() => setSortBy('modTime')}>
+                    按修改时间
+                  </DropdownItem>
+                </DropdownMenu>
+              </Dropdown>
+              <button
+                type="button"
+                className="flex h-9 min-w-9 items-center justify-center rounded-lg px-2 text-xs font-semibold text-default-600 transition-colors hover:bg-content2 hover:text-foreground"
+                onClick={toggleSortOrder}
+                aria-label={sortOrder === 'asc' ? '切换为降序' : '切换为升序'}
+                title={sortOrder === 'asc' ? '升序' : '降序'}
+              >
+                {sortOrder === 'asc' ? '↑' : '↓'}
+              </button>
+            </div>
+
+            <div className="flex bg-content1 border border-divider rounded-lg p-0.5 shadow-[var(--shadow-soft)]">
+              <button
+                className={cn("p-2 rounded-lg transition-all", viewMode === 'list' ? "bg-accent-primary text-white shadow-sm" : "text-default-500 hover:text-default-600")}
+                onClick={() => setViewMode('list')}
+                aria-label="列表视图"
+              >
+                <List size={16} />
+              </button>
+              <button
+                className={cn("p-2 rounded-lg transition-all", viewMode === 'grid' ? "bg-accent-primary text-white shadow-sm" : "text-default-500 hover:text-default-600")}
+                onClick={() => setViewMode('grid')}
+                aria-label="网格视图"
+              >
+                <Grid size={16} />
+              </button>
+            </div>
           
           {/* Upload history button */}
           {uploadQueue.length > 0 && (
             <button 
               onClick={() => setShowUploadPanel(!showUploadPanel)}
               className={cn(
-                "relative p-2.5 rounded-xl border transition-all",
+                "relative p-2.5 rounded-lg border transition-all",
                 showUploadPanel 
                   ? "bg-accent-primary text-white border-accent-primary shadow-sm" 
                   : "bg-content1 border-divider text-default-500 hover:text-default-600 hover:border-default-400"
               )}
               title="上传记录"
+              aria-label="上传记录"
             >
               <Upload size={16} />
               {isUploading && (
@@ -2680,24 +2845,25 @@ export function FilesPage() {
               )}
             </button>
           )}
+          </div>
         </div>
 
         {/* File List / Grid */}
         {canWrite && favoritesError && (
-          <div className="mb-4 flex items-start gap-3 rounded-2xl border border-warning/30 bg-warning/5 px-4 py-3 text-sm text-foreground">
+          <div className="mb-4 flex items-start gap-3 rounded-lg border border-warning/30 bg-warning/5 px-4 py-3 text-sm text-foreground">
             <AlertCircle size={18} className="mt-0.5 shrink-0 text-warning" />
             <div className="flex-1">
               <p className="font-medium">{favoritesBanner?.title ?? '收藏状态加载失败'}</p>
               <p className="text-default-600">{favoritesBanner?.description ?? '请稍后重试'}</p>
             </div>
-            <Button size="sm" variant="bordered" className="rounded-xl" onPress={handleRefreshFavoritesBanner}>
+            <Button size="sm" variant="bordered" className="rounded-lg" onPress={handleRefreshFavoritesBanner}>
               重新加载收藏状态
             </Button>
           </div>
         )}
 
         {canWrite && shareBanner && (
-          <div className="mb-4 flex items-start gap-3 rounded-2xl border border-warning/30 bg-warning/5 px-4 py-3 text-sm text-foreground">
+          <div className="mb-4 flex items-start gap-3 rounded-lg border border-warning/30 bg-warning/5 px-4 py-3 text-sm text-foreground">
             <AlertCircle size={18} className="mt-0.5 shrink-0 text-warning" />
             <div className="flex-1">
               <p className="font-medium">{shareBanner.title}</p>
@@ -2707,26 +2873,30 @@ export function FilesPage() {
         )}
 
         {viewMode === 'list' ? (
-          <div className="flex-1 surface-card overflow-hidden flex flex-col">
+          <div className="surface-card flex min-h-0 flex-1 flex-col overflow-hidden">
             {/* Header */}
-            <div className="grid grid-cols-[44px_1fr_100px_150px_120px_40px] gap-4 px-5 py-3 table-head text-[11px] font-semibold">
+            <div className="grid grid-cols-[36px_minmax(0,1fr)_36px] gap-3 px-3 py-3 table-head text-[11px] font-semibold sm:grid-cols-[44px_minmax(0,1fr)_88px_118px_40px] sm:gap-4 sm:px-5 md:grid-cols-[44px_minmax(0,1fr)_100px_150px_120px_40px]">
               <div className="flex items-center justify-center">
-                <div 
+                <button
+                  type="button"
+                  role="checkbox"
+                  aria-checked={isAllSelected ? true : isPartialSelected ? 'mixed' : false}
+                  aria-label={isAllSelected ? '取消全选' : '全选当前目录'}
                   className={cn(
-                    "w-5 h-5 border-2 rounded-lg cursor-pointer transition-colors",
+                    "flex h-5 w-5 cursor-pointer items-center justify-center rounded-lg border-2 transition-colors",
                     isAllSelected || isPartialSelected ? "bg-accent-primary border-accent-primary" : "border-default-400 hover:border-accent-primary"
                   )}
                   onClick={handleSelectAll}
                 >
                   {isAllSelected && <span className="text-white text-xs font-bold">✓</span>}
                   {isPartialSelected && <span className="text-white text-xs font-bold">-</span>}
-                </div>
+                </button>
               </div>
               <div>名称</div>
-              <div>大小</div>
-              <div>修改时间</div>
-              <div>时光印记</div>
-              <div className="flex items-center justify-end">
+              <div className="hidden sm:block">大小</div>
+              <div className="hidden sm:block">修改时间</div>
+              <div className="hidden md:block">时光印记</div>
+              <div className="hidden items-center justify-end md:flex">
                 {showMultiSelectHint && (
                   <div className="flex items-center gap-2 animate-in fade-in duration-150">
                     <span className="text-[10px] text-default-500 bg-content2 border border-divider rounded-full px-2 py-0.5">
@@ -2745,7 +2915,7 @@ export function FilesPage() {
             {/* List Content */}
             <div
               ref={parentRef}
-              className="flex-1 overflow-auto custom-scrollbar relative"
+              className="relative min-h-0 flex-1 overflow-auto custom-scrollbar"
               onClick={() => {
                 if (selectedFiles.size > 0) {
                   setMultiSelectHintVisible(true)
@@ -2782,6 +2952,7 @@ export function FilesPage() {
                       <FileRow
                         file={file}
                         isSelected={selectedFiles.has(file.path)}
+                        isActive={activeFilePath === file.path}
                         isFavorited={favoritesData?.[file.path] ?? false}
                         favoriteActionsAvailable={favoriteActionsAvailable}
                         favoriteUnavailableLabel={favoriteUnavailableLabel}
@@ -2791,7 +2962,7 @@ export function FilesPage() {
                         canWrite={canWrite}
                         onSelect={(e) => handleFileSelection(file, virtualItem.index, e, 'toggle')}
                         onOpen={() => handleFileOpen(file)}
-                        onClick={(e) => handleFileSelection(file, virtualItem.index, e)}
+                        onActivate={(e) => handleFileActivate(file, virtualItem.index, e)}
                         onRename={() => handleOpenRenameModal(file)}
                         onDelete={() => handleOpenDeleteModal(file)}
                         onViewVersions={() => handleViewVersions(file)}
@@ -2812,7 +2983,7 @@ export function FilesPage() {
                   <EmptyState
                     icon={Folder}
                     title="这里空空如也"
-                    description="点击「保存记忆」上传文件"
+                    description="上传文件后会显示在这里"
                     className="max-w-md"
                   />
                 </div>
@@ -2822,7 +2993,7 @@ export function FilesPage() {
         ) : (
           /* Grid View */
           <div
-            className="flex-1 overflow-auto custom-scrollbar"
+            className="min-h-0 flex-1 overflow-auto custom-scrollbar"
             onClick={() => {
               if (selectedFiles.size > 0) {
                 setMultiSelectHintVisible(true)
@@ -2845,7 +3016,7 @@ export function FilesPage() {
                 <EmptyState
                   icon={Folder}
                   title="这里空空如也"
-                  description="点击「保存记忆」上传文件"
+                  description="上传文件后会显示在这里"
                   className="max-w-md"
                 />
               </div>
@@ -2858,32 +3029,33 @@ export function FilesPage() {
                     </span>
                   </div>
                 )}
-                <div className="grid grid-cols-[repeat(auto-fill,minmax(160px,1fr))] gap-4">
+                <div className="grid grid-cols-[repeat(auto-fill,minmax(140px,1fr))] gap-3 sm:grid-cols-[repeat(auto-fill,minmax(160px,1fr))] sm:gap-4">
                   {sortedFiles.map((file, index) => (
-                  <FileCard
-                    key={file.path}
-                    file={file}
-                    isSelected={selectedFiles.has(file.path)}
-                    isFavorited={favoritesData?.[file.path] ?? false}
-                    favoriteActionsAvailable={favoriteActionsAvailable}
-                    favoriteUnavailableLabel={favoriteUnavailableLabel}
-                    shareActionsAvailable={shareActionsAvailable}
-                    shareActionLabel={shareActionLabel}
-                    isMultiSelection={hasMultiSelection}
-                    canWrite={canWrite}
-                    onSelect={(e) => handleFileSelection(file, index, e, 'toggle')}
-                    onOpen={() => handleFileOpen(file)}
-                    onClick={(e) => handleFileSelection(file, index, e)}
-                    onRename={() => handleOpenRenameModal(file)}
-                    onDelete={() => handleOpenDeleteModal(file)}
-                    onViewVersions={() => handleViewVersions(file)}
-                    onShare={() => handleOpenShareModal(file)}
-                    onToggleFavorite={() => favoriteMutation.mutate({ 
-                      path: file.path, 
-                      isFavorited: favoritesData?.[file.path] ?? false 
-                    })}
-                    onContextMenu={(e) => handleContextMenu(file, e)}
-                  />
+                    <FileCard
+                      key={file.path}
+                      file={file}
+                      isSelected={selectedFiles.has(file.path)}
+                      isActive={activeFilePath === file.path}
+                      isFavorited={favoritesData?.[file.path] ?? false}
+                      favoriteActionsAvailable={favoriteActionsAvailable}
+                      favoriteUnavailableLabel={favoriteUnavailableLabel}
+                      shareActionsAvailable={shareActionsAvailable}
+                      shareActionLabel={shareActionLabel}
+                      isMultiSelection={hasMultiSelection}
+                      canWrite={canWrite}
+                      onSelect={(e) => handleFileSelection(file, index, e, 'toggle')}
+                      onOpen={() => handleFileOpen(file)}
+                      onActivate={(e) => handleFileActivate(file, index, e)}
+                      onRename={() => handleOpenRenameModal(file)}
+                      onDelete={() => handleOpenDeleteModal(file)}
+                      onViewVersions={() => handleViewVersions(file)}
+                      onShare={() => handleOpenShareModal(file)}
+                      onToggleFavorite={() => favoriteMutation.mutate({
+                        path: file.path,
+                        isFavorited: favoritesData?.[file.path] ?? false
+                      })}
+                      onContextMenu={(e) => handleContextMenu(file, e)}
+                    />
                   ))}
                 </div>
               </div>
@@ -2902,14 +3074,14 @@ export function FilesPage() {
         placement="center"
         size="md"
         classNames={{
-          base: "bg-content1 border border-divider shadow-2xl rounded-2xl",
+          base: "bg-content1 border border-divider shadow-xl rounded-lg",
           backdrop: "bg-black/60 backdrop-blur-md",
           closeButton: "top-4 right-4 text-default-400 hover:text-foreground hover:bg-default-100 rounded-lg",
         }}
       >
         <ModalContent>
           <ModalHeader className="flex items-center gap-3 px-6 pt-6 pb-2">
-            <div className="w-10 h-10 rounded-xl bg-accent-primary/10 text-accent-primary flex items-center justify-center">
+            <div className="w-10 h-10 rounded-lg bg-accent-primary/10 text-accent-primary flex items-center justify-center">
               <FolderPlus size={20} />
             </div>
             <div>
@@ -2938,8 +3110,8 @@ export function FilesPage() {
             </div>
           </ModalBody>
           <ModalFooter className="px-6 pb-6 pt-2 gap-2">
-            <Button variant="flat" onPress={handleCloseNewFolderModal} isDisabled={createFolderMutation.isPending} className="text-default-600 rounded-xl">取消</Button>
-            <Button color="primary" onPress={handleCreateFolder} isLoading={createFolderMutation.isPending} isDisabled={!newFolderName.trim()} className="rounded-xl">创建</Button>
+            <Button variant="flat" onPress={handleCloseNewFolderModal} isDisabled={createFolderMutation.isPending} className="text-default-600 rounded-lg">取消</Button>
+            <Button color="primary" onPress={handleCreateFolder} isLoading={createFolderMutation.isPending} isDisabled={!newFolderName.trim()} className="rounded-lg">创建</Button>
           </ModalFooter>
         </ModalContent>
       </Modal>
@@ -2950,14 +3122,14 @@ export function FilesPage() {
         placement="center"
         size="md"
         classNames={{
-          base: "bg-content1 border border-divider shadow-2xl rounded-2xl",
+          base: "bg-content1 border border-divider shadow-xl rounded-lg",
           backdrop: "bg-black/60 backdrop-blur-md",
           closeButton: "top-4 right-4 text-default-400 hover:text-foreground hover:bg-default-100 rounded-lg",
         }}
       >
         <ModalContent>
           <ModalHeader className="flex items-center gap-3 px-6 pt-6 pb-2">
-            <div className="w-10 h-10 rounded-xl bg-accent-primary/10 text-accent-primary flex items-center justify-center">
+            <div className="w-10 h-10 rounded-lg bg-accent-primary/10 text-accent-primary flex items-center justify-center">
               <Pencil size={20} />
             </div>
             <div>
@@ -2982,8 +3154,8 @@ export function FilesPage() {
             </div>
           </ModalBody>
           <ModalFooter className="px-6 pb-6 pt-2 gap-2">
-            <Button variant="flat" onPress={handleCloseRenameModal} isDisabled={renameMutation.isPending} className="text-default-600 rounded-xl">取消</Button>
-            <Button color="primary" onPress={handleRename} isLoading={renameMutation.isPending} isDisabled={!renameValue.trim() || renameValue.trim() === actionFile?.name} className="rounded-xl">确定</Button>
+            <Button variant="flat" onPress={handleCloseRenameModal} isDisabled={renameMutation.isPending} className="text-default-600 rounded-lg">取消</Button>
+            <Button color="primary" onPress={handleRename} isLoading={renameMutation.isPending} isDisabled={!renameValue.trim() || renameValue.trim() === actionFile?.name} className="rounded-lg">确定</Button>
           </ModalFooter>
         </ModalContent>
       </Modal>
@@ -2994,14 +3166,14 @@ export function FilesPage() {
         placement="center"
         size="md"
         classNames={{
-          base: "bg-content1 border border-divider shadow-2xl rounded-2xl",
+          base: "bg-content1 border border-divider shadow-xl rounded-lg",
           backdrop: "bg-black/60 backdrop-blur-md",
           closeButton: "top-4 right-4 text-default-400 hover:text-foreground hover:bg-default-100 rounded-lg",
         }}
       >
         <ModalContent>
           <ModalHeader className="flex items-center gap-3 px-6 pt-6 pb-2">
-            <div className="w-10 h-10 rounded-xl bg-danger/10 text-danger flex items-center justify-center">
+            <div className="w-10 h-10 rounded-lg bg-danger/10 text-danger flex items-center justify-center">
               <AlertCircle size={20} />
             </div>
             <div>
@@ -3014,8 +3186,8 @@ export function FilesPage() {
             <p className="text-xs text-default-500 mt-2">文件将被移入回收站，可在回收站中恢复。</p>
           </ModalBody>
           <ModalFooter className="px-6 pb-6 pt-2 gap-2">
-            <Button variant="flat" onPress={handleCloseDeleteModal} isDisabled={deleteMutation.isPending} className="text-default-600 rounded-xl">取消</Button>
-            <Button color="danger" onPress={handleDelete} isLoading={deleteMutation.isPending} className="rounded-xl">删除</Button>
+            <Button variant="flat" onPress={handleCloseDeleteModal} isDisabled={deleteMutation.isPending} className="text-default-600 rounded-lg">取消</Button>
+            <Button color="danger" onPress={handleDelete} isLoading={deleteMutation.isPending} className="rounded-lg">删除</Button>
           </ModalFooter>
         </ModalContent>
       </Modal>
@@ -3026,14 +3198,14 @@ export function FilesPage() {
         placement="center"
         size="md"
         classNames={{
-          base: "bg-content1 border border-divider shadow-2xl rounded-2xl",
+          base: "bg-content1 border border-divider shadow-xl rounded-lg",
           backdrop: "bg-black/60 backdrop-blur-md",
           closeButton: "top-4 right-4 text-default-400 hover:text-foreground hover:bg-default-100 rounded-lg",
         }}
       >
         <ModalContent>
           <ModalHeader className="flex items-center gap-3 px-6 pt-6 pb-2">
-            <div className="w-10 h-10 rounded-xl bg-danger/10 text-danger flex items-center justify-center">
+            <div className="w-10 h-10 rounded-lg bg-danger/10 text-danger flex items-center justify-center">
               <Trash2 size={20} />
             </div>
             <div>
@@ -3046,8 +3218,8 @@ export function FilesPage() {
             <p className="text-xs text-default-500 mt-2">文件将被移入回收站，可在回收站中恢复。</p>
           </ModalBody>
           <ModalFooter className="px-6 pb-6 pt-2 gap-2">
-            <Button variant="flat" onPress={handleCloseBatchDeleteModal} isDisabled={isBatchDeleting} className="text-default-600 rounded-xl">取消</Button>
-            <Button color="danger" onPress={handleBatchDelete} isLoading={isBatchDeleting} className="rounded-xl">删除全部</Button>
+            <Button variant="flat" onPress={handleCloseBatchDeleteModal} isDisabled={isBatchDeleting} className="text-default-600 rounded-lg">取消</Button>
+            <Button color="danger" onPress={handleBatchDelete} isLoading={isBatchDeleting} className="rounded-lg">删除全部</Button>
           </ModalFooter>
         </ModalContent>
       </Modal>

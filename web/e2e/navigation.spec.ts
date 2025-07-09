@@ -1,7 +1,7 @@
-import { test, expect } from '@playwright/test'
+import { test, expect, type Page } from '@playwright/test'
 import { ensureAuthenticatedAt } from './helpers/auth-check'
 
-async function openSidebarIfNeeded(page: import('@playwright/test').Page): Promise<void> {
+async function openSidebarIfNeeded(page: Page): Promise<void> {
   const menuButton = page.getByRole('button', { name: '打开导航菜单' })
   if (await menuButton.isVisible({ timeout: 1000 }).catch(() => false)) {
     await menuButton.click()
@@ -9,12 +9,46 @@ async function openSidebarIfNeeded(page: import('@playwright/test').Page): Promi
   }
 }
 
-async function navigateToSearchFromSidebar(page: import('@playwright/test').Page): Promise<void> {
+async function navigateToSearchFromSidebar(page: Page): Promise<void> {
   await openSidebarIfNeeded(page)
-  const searchLink = page.getByRole('link', { name: /搜索|Search/i })
+  const searchLink = page.getByTestId('app-sidebar-shell').getByRole('link', { name: /搜索|Search/i })
   await expect(searchLink).toBeVisible({ timeout: 2000 })
   await searchLink.dispatchEvent('click')
   await expect(page).toHaveURL(/\/search/)
+}
+
+async function expectNoPageHorizontalOverflow(page: Page) {
+  const overflow = await page.evaluate(() => {
+    const root = document.documentElement
+    const body = document.body
+    return Math.max(root.scrollWidth, body.scrollWidth) - root.clientWidth
+  })
+
+  expect(overflow, `${page.url()} should not overflow horizontally`).toBeLessThanOrEqual(2)
+}
+
+async function gotoAuthenticatedRouteForLayout(page: Page, route: string) {
+  await page.goto(route, { waitUntil: 'domcontentloaded' })
+  if (page.url().includes('/login')) {
+    await ensureAuthenticatedAt(page, route)
+  }
+  await page.locator('body').waitFor({ state: 'visible' })
+  await page.getByText('加载中...').waitFor({ state: 'hidden', timeout: 3000 }).catch(() => {})
+}
+
+async function expectRoutesDoNotOverflowOnMobile(page: Page, routes: string[]) {
+  await page.setViewportSize({ width: 375, height: 667 })
+
+  const [firstRoute, ...remainingRoutes] = routes
+  await ensureAuthenticatedAt(page, firstRoute)
+  await expect(page.locator('body')).toBeVisible()
+  await expectNoPageHorizontalOverflow(page)
+
+  for (const route of remainingRoutes) {
+    await gotoAuthenticatedRouteForLayout(page, route)
+    await expect(page.locator('body')).toBeVisible()
+    await expectNoPageHorizontalOverflow(page)
+  }
 }
 
 /**
@@ -35,17 +69,20 @@ test.describe('侧边栏导航', () => {
   })
 
   test('侧边栏应包含文件导航链接', async ({ page }) => {
-    const filesLink = page.getByRole('link', { name: /文件|Files/i })
+    await openSidebarIfNeeded(page)
+    const filesLink = page.getByTestId('app-sidebar-shell').getByRole('link', { name: /文件|Files/i })
     await expect(filesLink).toBeVisible({ timeout: 5000 })
   })
 
   test('侧边栏应包含搜索链接', async ({ page }) => {
-    const searchLink = page.getByRole('link', { name: /搜索|Search/i })
+    await openSidebarIfNeeded(page)
+    const searchLink = page.getByTestId('app-sidebar-shell').getByRole('link', { name: /搜索|Search/i })
     await expect(searchLink).toBeVisible({ timeout: 5000 })
   })
 
   test('侧边栏应包含设置链接', async ({ page }) => {
-    const settingsLink = page.getByRole('link', { name: /设置|Settings/i })
+    await openSidebarIfNeeded(page)
+    const settingsLink = page.getByTestId('app-sidebar-shell').getByRole('link', { name: /设置|Settings/i })
     await expect(settingsLink).toBeVisible({ timeout: 5000 })
   })
 })
@@ -92,15 +129,9 @@ test.describe('404 页面', () => {
   test('不存在的路由应显示 404 页面', async ({ page }) => {
     await ensureAuthenticatedAt(page, '/nonexistent-page-xyz123')
 
-    // 应显示 404 页面或重定向到首页或其他页面
-    const notFound = page.getByText(/404|找不到|not found/i)
-    const hasNotFound = await notFound.isVisible({ timeout: 2000 }).catch(() => false)
-    
-    // 测试通过条件：显示 404 或被重定向到任何有效页面
-    const isValidPage = !page.url().includes('/login')
-    
-    console.log('404 test - hasNotFound:', hasNotFound, 'isValidPage:', isValidPage)
-    expect(hasNotFound || isValidPage).toBe(true)
+    await expect(page).toHaveURL(/\/nonexistent-page-xyz123/)
+    await expect(page.getByRole('heading', { name: '404' })).toBeVisible({ timeout: 5000 })
+    await expect(page.getByRole('heading', { name: '页面不存在' })).toBeVisible()
   })
 })
 
@@ -109,7 +140,7 @@ test.describe('侧边栏点击导航', () => {
     await ensureAuthenticatedAt(page, '/')
     await openSidebarIfNeeded(page)
 
-    const filesLink = page.getByRole('link', { name: /文件|Files/i })
+    const filesLink = page.getByTestId('app-sidebar-shell').getByRole('link', { name: /文件|Files/i })
     await expect(filesLink).toBeVisible({ timeout: 2000 })
     await filesLink.dispatchEvent('click')
     await page.waitForTimeout(500)
@@ -120,7 +151,7 @@ test.describe('侧边栏点击导航', () => {
     await ensureAuthenticatedAt(page, '/')
     await openSidebarIfNeeded(page)
 
-    const searchLink = page.getByRole('link', { name: /搜索|Search/i })
+    const searchLink = page.getByTestId('app-sidebar-shell').getByRole('link', { name: /搜索|Search/i })
     await expect(searchLink).toBeVisible({ timeout: 2000 })
     await searchLink.dispatchEvent('click')
     await page.waitForTimeout(500)
@@ -131,7 +162,7 @@ test.describe('侧边栏点击导航', () => {
     await ensureAuthenticatedAt(page, '/')
     await openSidebarIfNeeded(page)
 
-    const settingsLink = page.getByRole('link', { name: /设置|Settings/i })
+    const settingsLink = page.getByTestId('app-sidebar-shell').getByRole('link', { name: /设置|Settings/i })
     await expect(settingsLink).toBeVisible({ timeout: 2000 })
     await settingsLink.dispatchEvent('click')
     await page.waitForTimeout(500)
@@ -183,17 +214,78 @@ test.describe('响应式侧边栏', () => {
     const openButton = page.getByRole('button', { name: '打开导航菜单' })
     const sidebarShell = page.getByTestId('app-sidebar-shell')
     const overlay = page.getByTestId('mobile-sidebar-overlay')
+    const tabbar = page.getByRole('navigation', { name: '移动端主导航' })
 
     await openButton.click()
 
     await expect(overlay).toBeVisible({ timeout: 2000 })
     await expect(sidebarShell).toHaveClass(/translate-x-0/, { timeout: 2000 })
 
-    await page.getByRole('link', { name: /搜索|Search/i }).click()
+    const overlayBox = await overlay.boundingBox()
+    const tabbarBox = await tabbar.boundingBox()
+    if (!overlayBox || !tabbarBox) {
+      throw new Error('expected mobile sidebar overlay and tabbar to have layout boxes')
+    }
+    const tabbarPointOutsideSidebar = {
+      x: tabbarBox.x + tabbarBox.width - 8,
+      y: tabbarBox.y + tabbarBox.height / 2,
+    }
+    const topAtTabbar = await page.evaluate(({ x, y }) => {
+      const element = document.elementFromPoint(x, y)
+      return element?.getAttribute('data-testid')
+    }, tabbarPointOutsideSidebar)
+    expect(topAtTabbar).toBe('mobile-sidebar-overlay')
+
+    const topAtHeader = await page.evaluate(() => {
+      const element = document.elementFromPoint(window.innerWidth - 8, 32)
+      return element?.getAttribute('data-testid')
+    })
+    expect(topAtHeader).toBe('mobile-sidebar-overlay')
+
+    await sidebarShell.getByRole('link', { name: /搜索|Search/i }).click()
 
     await expect(page).toHaveURL(/\/search/)
     await expect(overlay).toHaveCount(0)
     await expect(sidebarShell).toHaveClass(/-translate-x-full/, { timeout: 2000 })
     await expect(openButton).toBeVisible({ timeout: 2000 })
+  })
+
+  test('移动端底部主导航应可见并可切换常用页面', async ({ page }) => {
+    await page.setViewportSize({ width: 375, height: 667 })
+    await ensureAuthenticatedAt(page, '/')
+
+    const tabbar = page.getByRole('navigation', { name: '移动端主导航' })
+    await expect(tabbar).toBeVisible({ timeout: 2000 })
+
+    await tabbar.getByRole('link', { name: '文件' }).click()
+    await expect(page).toHaveURL(/\/files/)
+
+    await tabbar.getByRole('link', { name: '搜索' }).click()
+    await expect(page).toHaveURL(/\/search/)
+  })
+
+  test('移动端浏览页面不应出现页面级横向溢出', async ({ page }) => {
+    test.setTimeout(60_000)
+    await expectRoutesDoNotOverflowOnMobile(page, [
+      '/',
+      '/files',
+      '/search',
+      '/album',
+      '/favorites',
+      '/trash',
+    ])
+  })
+
+  test('移动端管理页面不应出现页面级横向溢出', async ({ page }) => {
+    test.setTimeout(60_000)
+    await expectRoutesDoNotOverflowOnMobile(page, [
+      '/versions',
+      '/storage',
+      '/maintenance',
+      '/users',
+      '/system-health',
+      '/activity',
+      '/settings',
+    ])
   })
 })

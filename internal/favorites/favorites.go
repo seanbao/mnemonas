@@ -244,10 +244,6 @@ func isRecoverableFavoritesLoadError(err error) bool {
 	return errors.As(err, &typeErr)
 }
 
-func (s *Store) save() error {
-	return saveFavoritesState(s.filePath, s.data)
-}
-
 func saveFavoritesState(filePath string, dataByUser map[string]map[string]*Favorite) error {
 	var favorites []*Favorite
 	for _, userFavs := range dataByUser {

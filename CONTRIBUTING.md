@@ -16,11 +16,11 @@
 
 | 工具 | 版本 | 用途 |
 |------|------|------|
-| Go | 1.22+ | 控制面开发 |
-| Rust | 1.75+ | 数据面开发 |
-| Node.js | 20+ | 前端开发 |
-| Docker | 20.10+ | 容器化部署 |
-| protoc | 25+ | Protocol Buffers 编译 |
+| Go | 1.25.9+ | 控制面开发 |
+| Rust | 1.92+ | 数据面开发 |
+| Node.js | 22.x（或兼容的 20.19+） | 前端开发 |
+| Docker Engine + Compose v2 插件 | Docker 20.10+，支持 `docker compose` | 容器化部署 |
+| protoc | 3.20+（CI 固定 3.20.1） | Protocol Buffers 编译 |
 
 ### 克隆仓库
 
@@ -31,19 +31,15 @@ cd mnemonas
 
 ### 安装依赖
 
+项目根目录提供 `.go-version` 和 `.nvmrc`，可被 goenv/asdf 与 nvm 等工具读取；Rust 最低版本写在 `dataplane/Cargo.toml`。
+
 ```bash
-# Go 依赖
-go mod download
+# 下载 Go/Rust/前端依赖
+make deps
 
-# Rust 依赖
-cd dataplane && cargo fetch && cd ..
-
-# 前端依赖
-cd web && npm ci && cd ..
-
-# protoc 插件
-go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
-go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
+# protoc 插件（与 CI 固定版本保持一致）
+go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
+go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.6.1
 ```
 
 ### 构建项目
@@ -62,14 +58,22 @@ make dev
 # 运行所有测试
 make test
 
+# 提交前快速检查
+make quick-check
+
 # 仅 Go 测试
-go test -v ./...
+packages=$(go list ./... | grep -v '/web/node_modules/')
+CGO_ENABLED=1 bash ./scripts/with-test-dataplane.sh go test -v -race $packages
 
 # 仅 Rust 测试
-cd dataplane && cargo test
+cd dataplane && cargo test --locked
+cargo test --manifest-path tools/proto-gen/Cargo.toml --locked
 
 # 前端测试
 cd web && npm run test:run
+
+# 部署脚本与安装脚本测试
+make scripts-check
 ```
 
 ## 📝 开发流程
@@ -115,9 +119,11 @@ git checkout -b fix/issue-description
 - 注释使用英文
 
 **TypeScript/React:**
-- 使用 ESLint 和 Prettier
+- 使用 ESLint 和 TypeScript 构建检查
 - 优先使用函数组件和 Hooks
 - 组件使用 PascalCase 命名
+- 前端 UI 遵循 `web/README.md` 的视觉规范：现代克制、移动端可用、避免过度装饰或纯工程后台感
+- 修改应用外壳、导航、登录页或响应式布局时，运行相关 Playwright 用例并核对截图基准
 
 **文档:**
 - 中文文档使用中文，技术术语保留英文
@@ -166,6 +172,8 @@ PR 检查清单：
 - [ ] 代码通过 lint 检查
 - [ ] 添加或更新了测试
 - [ ] 文档已更新
+- [ ] 修改 proto 时已运行 `make proto` 并提交生成文件
+- [ ] 部署脚本、Docker、systemd 或安装文档变更已运行 `make scripts-check`
 - [ ] CHANGELOG 已更新（如适用）
 - [ ] Commit message 符合规范
 
@@ -177,9 +185,11 @@ mnemonas/
 ├── internal/           # Go 内部包
 │   ├── api/            # REST API
 │   ├── webdav/         # WebDAV 协议实现
-│   ├── webdavcas/      # WebDAV-CAS 适配层
 │   ├── caslayout/      # CAS 存储布局
 │   ├── config/         # 配置管理
+│   ├── storage/        # 文件系统、版本、回收站与 CAS 编排
+│   ├── auth/           # 用户、认证与 Token
+│   ├── share/          # 分享链接
 │   ├── maintenance/    # 维护任务
 │   ├── metrics/        # 指标收集
 │   └── thumbnail/      # 缩略图服务
@@ -211,6 +221,14 @@ make lint
 # 生成 protobuf
 make proto
 
+# 部署脚本检查
+make scripts-check
+
+# 依赖安全检查；默认扫描 Go/Rust。
+# npm audit 会把依赖树发送给配置的 npm registry，需要前端审计时显式开启：
+make security-check
+make security-check NPM_AUDIT=1
+
 # 清理构建产物
 make clean
 
@@ -222,8 +240,10 @@ make docker
 
 - [架构设计](docs/architecture.md)
 - [开发指南](docs/development.md)
+- [设计决策](docs/design-decisions.md)
+- [Ubuntu 笔记本部署](docs/ubuntu-laptop-deployment.md)
+- [Docker 部署](docs/docker-deployment.md)
 - [API 文档](docs/README.md)
-- [设计文档](https://github.com/seanbao/ideas-lab-notes/blob/main/ideas/open-source-nas-go-rust.md)
 
 ## ❓ 获取帮助
 

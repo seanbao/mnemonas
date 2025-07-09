@@ -9,6 +9,7 @@
 | 文档 | 说明 |
 |------|------|
 | [README](../README.md) | 项目介绍与快速开始 |
+| [Ubuntu 笔记本部署指南](ubuntu-laptop-deployment.md) | 在闲置 Ubuntu 笔记本/小主机上用 systemd 长期运行 |
 | [Docker 部署指南](docker-deployment.md) | 使用 Docker 部署 MnemoNAS |
 | [挂载指南](mounting-guide.md) | 各平台 WebDAV 挂载教程 |
 | [反向代理配置](reverse-proxy-setup.md) | HTTPS 外网访问配置（Caddy/Nginx/Traefik） |
@@ -51,7 +52,7 @@
 
 **首次使用**：
 1. 阅读 [README](../README.md) 了解项目
-2. 按照 [Docker 部署指南](docker-deployment.md) 启动服务
+2. 长期运行优先按 [Ubuntu 笔记本部署指南](ubuntu-laptop-deployment.md) 安装；临时试用可按 [Docker 部署指南](docker-deployment.md) 启动
 3. 参考 [挂载指南](mounting-guide.md) 连接到 NAS
 
 **遇到问题**：

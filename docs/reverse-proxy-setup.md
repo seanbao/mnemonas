@@ -8,6 +8,19 @@
 - 域名已解析到服务器 IP
 - 服务器开放 80/443 端口
 
+## MnemoNAS 配置
+
+MnemoNAS 默认不信任 `X-Forwarded-*` 头。部署在受信反向代理后方时，需要在 `config.toml` 中设置代理层数：
+
+```toml
+[server]
+trusted_proxy_hops = 1
+```
+
+单层 Caddy/Nginx/Traefik 设置为 `1`；多跳链路设置为代理总层数。修改后重启 `mnemonas`。未设置时，服务仍可通过反向代理访问，但登录、分享下载等 cookie 的 `Secure` 判断和按客户端 IP 的限流会按直连来源处理。
+
+公网入口只应开放 80/443。`8080` 是 MnemoNAS Web/API/WebDAV 的直连端口；如果反向代理和 MnemoNAS 在同一台机器，建议把 `[server].host` 改为 `127.0.0.1` 或用防火墙限制 8080 只允许可信来源访问。`9090/9091` 是 dataplane 内部端口，不要通过防火墙、端口映射或反向代理暴露到公网或不可信局域网。
+
 ## 方案一：Caddy（推荐）
 
 Caddy 自动申请和续期 Let's Encrypt 证书，配置最简单。
@@ -16,7 +29,7 @@ Caddy 自动申请和续期 Let's Encrypt 证书，配置最简单。
 
 ```bash
 # Debian/Ubuntu
-sudo apt install -y debian-keyring debian-archive-keyring apt-transport-https curl
+sudo apt install -y debian-keyring debian-archive-keyring apt-transport-https curl gnupg
 curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | sudo gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
 curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | sudo tee /etc/apt/sources.list.d/caddy-stable.list
 sudo apt update
@@ -159,7 +172,7 @@ server {
 }
 ```
 
-  MnemoNAS 默认不信任 `X-Forwarded-*` 头。启用反向代理后，请把 `[server].trusted_proxy_hops` 设置为实际代理层数；单层代理设置为 `1`，多跳链路仍保留 `X-Forwarded-For $proxy_add_x_forwarded_for` 时，应设置为代理总层数，避免把上一级代理地址误判为客户端地址。
+MnemoNAS 的 `trusted_proxy_hops` 设置见本文开头的 [MnemoNAS 配置](#mnemonas-配置)。
 
 ### 3. 启用站点并申请证书
 
@@ -186,6 +199,8 @@ sudo certbot renew --dry-run
 
 如果 MnemoNAS 和反向代理都用 Docker，可以用 Traefik。
 
+示例使用已公开的 release 镜像。若当前只有源码 checkout，请参考 [Docker 部署指南](docker-deployment.md) 先构建 `mnemonas:local`，再把下面的 `image` 改为 `mnemonas:local`。
+
 ### docker-compose.yml
 
 ```yaml
@@ -193,8 +208,8 @@ services:
   traefik:
     image: traefik:v3.0
     command:
-      - "--api.insecure=true"
       - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
       - "--entrypoints.web.address=:80"
       - "--entrypoints.websecure.address=:443"
       - "--certificatesresolvers.letsencrypt.acme.httpchallenge=true"
@@ -210,9 +225,10 @@ services:
     restart: unless-stopped
 
   mnemonas:
-    image: mnemonas:latest
+    image: ghcr.io/seanbao/mnemonas:latest
+    user: "${MNEMONAS_UID:-1000}:${MNEMONAS_GID:-1000}"
     volumes:
-      - ~/.mnemonas:/root/.mnemonas
+      - ${HOME}/.mnemonas:/data
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.nas.rule=Host(`nas.example.com`)"
@@ -226,6 +242,10 @@ services:
       - "traefik.http.routers.nas-http.middlewares=https-redirect"
     restart: unless-stopped
 ```
+
+示例没有启用 Traefik insecure dashboard。若需要 Traefik 管理界面，请单独配置认证、HTTPS 和内网访问限制；不要在公网环境使用 `--api.insecure=true`。
+
+Traefik 需要读取 Docker socket 才能发现容器标签。`/var/run/docker.sock:/var/run/docker.sock:ro` 只限制挂载文件系统的写入，并不等同于低权限 API；更严格的公网部署建议使用 Docker socket proxy，或改用 Caddy/Nginx 这类静态反向代理配置。
 
 ---
 

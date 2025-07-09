@@ -238,7 +238,7 @@ export function ShareDialog({
       placement="center"
       size="lg"
       classNames={{
-        base: "bg-content1 border border-divider shadow-2xl rounded-2xl",
+        base: "bg-content1 border border-divider shadow-xl rounded-lg",
         backdrop: "bg-black/60 backdrop-blur-md",
         closeButton: "top-4 right-4 text-default-400 hover:text-foreground hover:bg-default-100 rounded-lg",
         header: "border-b border-divider",
@@ -261,13 +261,13 @@ export function ShareDialog({
           {createdShare ? (
             /* Share created - show link */
             <div className="space-y-4">
-              <div className={`flex items-center gap-2 ${createdShare.warning ? 'text-status-warning' : 'text-status-success'}`}>
+              <div className={`flex items-center gap-2 ${createdShare.warning ? 'text-warning' : 'text-success'}`}>
                 <CheckCircle size={20} />
                 <span className="font-medium">{createdShare.warning ? '分享链接已创建，但存在警告' : '分享链接已创建'}</span>
               </div>
 
               {createdShare.warning && createdShare.message && (
-                <div className="p-3 bg-status-warning/10 border border-status-warning/30 rounded-lg text-sm text-status-warning">
+                <div className="rounded-lg border border-warning/30 bg-warning/10 p-3 text-sm text-warning">
                   {createdShare.message}
                 </div>
               )}
@@ -284,7 +284,7 @@ export function ShareDialog({
               </Snippet>
 
               <Button
-                className="w-full rounded-xl"
+                className="w-full rounded-lg"
                 color="primary"
                 startContent={<Copy size={16} />}
                 onPress={handleCopy}
@@ -293,8 +293,8 @@ export function ShareDialog({
               </Button>
 
               {createdShare.has_password && (
-                <div className="p-3 bg-status-warning/10 border border-status-warning/30 rounded-lg">
-                  <div className="flex items-center gap-2 text-status-warning text-sm">
+                <div className="rounded-lg border border-warning/30 bg-warning/10 p-3">
+                  <div className="flex items-center gap-2 text-sm text-warning">
                     <Lock size={16} />
                     <span>此链接需要密码才能访问</span>
                   </div>
@@ -422,12 +422,12 @@ export function ShareDialog({
 
         <ModalFooter>
           {createdShare || featureDisabled || !featureEnabled ? (
-            <Button onPress={handleClose} className="rounded-xl">
+            <Button onPress={handleClose} className="rounded-lg">
               关闭
             </Button>
           ) : (
             <>
-              <Button variant="flat" onPress={handleClose} isDisabled={isLoading} className="rounded-xl">
+              <Button variant="flat" onPress={handleClose} isDisabled={isLoading} className="rounded-lg">
                 取消
               </Button>
               <Button 
@@ -436,7 +436,7 @@ export function ShareDialog({
                 isDisabled={passwordRequiredButEmpty}
                 isLoading={isLoading}
                 startContent={!isLoading && <Link2 size={16} />}
-                className="rounded-xl"
+                className="rounded-lg"
               >
                 创建分享链接
               </Button>

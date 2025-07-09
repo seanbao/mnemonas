@@ -57,7 +57,7 @@ export function ContextMenu({ isOpen, position, children, className }: ContextMe
       ref={menuRef}
       data-context-menu
       className={cn(
-        "fixed z-[100] min-w-[180px] py-1 rounded-xl",
+        "fixed z-[100] min-w-[180px] rounded-lg py-1",
         "bg-content1 border border-divider shadow-lg",
         "animate-in fade-in-0 zoom-in-95 duration-100",
         className
@@ -83,7 +83,7 @@ export function ContextMenuSection({ title, children, showDivider = false }: Con
   return (
     <div className={cn(showDivider && "border-b border-divider pb-1 mb-1")}>
       {title && (
-        <div className="px-3 py-1.5 text-xs font-semibold text-default-500 uppercase tracking-wide">
+        <div className="px-3 py-1.5 text-xs font-semibold uppercase text-default-500">
           {title}
         </div>
       )}

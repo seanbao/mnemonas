@@ -136,8 +136,8 @@ test.describe('回收站单项操作', () => {
 
     await ensureAuthenticatedAt(page, '/trash')
 
-    await expect(page.getByText(dirName, { exact: true })).toBeVisible({ timeout: 5000 })
-    await expect(page.getByText(`/${dirName}`, { exact: true })).toBeVisible({ timeout: 5000 })
+    await expect(page.getByText(dirName, { exact: true }).filter({ visible: true })).toBeVisible({ timeout: 5000 })
+    await expect(page.getByText(`/${dirName}`, { exact: true }).filter({ visible: true })).toBeVisible({ timeout: 5000 })
     await expect(page.getByText(`/${dirName}/nested/${nestedFileName}`)).toHaveCount(0)
     await expect(page.getByRole('button', { name: `恢复 ${dirName}` })).toBeVisible({ timeout: 5000 })
   })

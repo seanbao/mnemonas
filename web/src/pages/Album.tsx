@@ -387,7 +387,7 @@ function ImagePreview({
             isIconOnly
             variant="light"
             aria-label="关闭预览"
-            className="absolute top-4 right-4 z-50 text-white rounded-xl"
+            className="absolute top-4 right-4 z-50 text-white rounded-lg"
             onPress={onClose}
           >
             <X size={24} />
@@ -398,7 +398,7 @@ function ImagePreview({
             isIconOnly
             variant="light"
             aria-label="上一张图片"
-            className="absolute left-4 top-1/2 -translate-y-1/2 z-50 text-white hidden md:flex rounded-xl"
+            className="absolute left-4 top-1/2 -translate-y-1/2 z-50 text-white hidden md:flex rounded-lg"
             onPress={handlePrev}
           >
             <ChevronLeft size={32} />
@@ -408,7 +408,7 @@ function ImagePreview({
             isIconOnly
             variant="light"
             aria-label="下一张图片"
-            className="absolute right-4 top-1/2 -translate-y-1/2 z-50 text-white hidden md:flex rounded-xl"
+            className="absolute right-4 top-1/2 -translate-y-1/2 z-50 text-white hidden md:flex rounded-lg"
             onPress={handleNext}
           >
             <ChevronRight size={32} />
@@ -457,7 +457,7 @@ function ImagePreview({
             />
 
             {loadError && !loading && (
-              <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 rounded-2xl border border-danger/20 bg-danger/5 p-6 text-center text-white">
+              <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 rounded-lg border border-danger/20 bg-danger/5 p-6 text-center text-white">
                 <AlertCircle size={40} className="text-danger-300" />
                 <div>
                   <p className="font-medium">图片预览加载失败</p>
@@ -470,21 +470,21 @@ function ImagePreview({
           
           {/* Bottom toolbar */}
           <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/80 to-transparent p-4">
-            <div className="flex items-center justify-between max-w-4xl mx-auto">
-              <div className="text-white">
-                <p className="font-medium truncate max-w-md">{currentImage?.name}</p>
+            <div className="mx-auto flex max-w-4xl flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <div className="min-w-0 text-white">
+                <p className="max-w-md truncate font-medium">{currentImage?.name}</p>
                 <p className="text-sm text-white/60">
                   {currentIndex + 1} / {images.length}
                 </p>
               </div>
               
-              <div className="flex items-center gap-2">
+              <div className="flex shrink-0 items-center gap-2">
                 <Button
                   isIconOnly
                   size="sm"
                   variant="light"
                   aria-label="缩小图片"
-                  className="text-white rounded-xl"
+                  className="text-white rounded-lg"
                   onPress={() => setZoom(z => Math.max(0.5, z - 0.25))}
                 >
                   <ZoomOut size={18} />
@@ -494,7 +494,7 @@ function ImagePreview({
                   size="sm"
                   variant="light"
                   aria-label="放大图片"
-                  className="text-white rounded-xl"
+                  className="text-white rounded-lg"
                   onPress={() => setZoom(z => Math.min(3, z + 0.25))}
                 >
                   <ZoomIn size={18} />
@@ -504,7 +504,7 @@ function ImagePreview({
                   size="sm"
                   variant="light"
                   aria-label="旋转图片"
-                  className="text-white rounded-xl"
+                  className="text-white rounded-lg"
                   onPress={() => setRotation(r => (r + 90) % 360)}
                 >
                   <RotateCw size={18} />
@@ -514,7 +514,7 @@ function ImagePreview({
                   size="sm"
                   variant="light"
                   aria-label={showInfo ? '隐藏图片信息' : '显示图片信息'}
-                  className="text-white rounded-xl"
+                  className="text-white rounded-lg"
                   onPress={() => setShowInfo(!showInfo)}
                 >
                   <Info size={18} />
@@ -524,7 +524,7 @@ function ImagePreview({
                   size="sm"
                   variant="light"
                   aria-label="下载当前图片"
-                  className="text-white rounded-xl"
+                  className="text-white rounded-lg"
                   onPress={handleDownload}
                 >
                   <Download size={18} />
@@ -609,7 +609,7 @@ export function AlbumPage() {
 
   if (isLoading) {
     return (
-      <div className="h-full overflow-auto custom-scrollbar p-7">
+      <div className="h-full overflow-auto custom-scrollbar p-4 sm:p-6 lg:p-7">
         <div className="space-y-6">
           <PageHeader
             title="相册"
@@ -634,7 +634,7 @@ export function AlbumPage() {
 
   if (hasInvalidHomeDir) {
     return (
-      <div className="h-full overflow-auto custom-scrollbar p-7">
+      <div className="h-full overflow-auto custom-scrollbar p-4 sm:p-6 lg:p-7">
         <div className="space-y-6">
           <PageHeader
             title="相册"
@@ -653,7 +653,7 @@ export function AlbumPage() {
 
   if (error) {
     return (
-      <div className="h-full overflow-auto custom-scrollbar p-7">
+      <div className="h-full overflow-auto custom-scrollbar p-4 sm:p-6 lg:p-7">
         <div className="space-y-6">
           <PageHeader
             title="相册"
@@ -665,7 +665,7 @@ export function AlbumPage() {
             title="加载相册失败"
             description="无法扫描图片目录，当前结果不可用。请检查连接状态后重试。"
             action={
-              <Button className="rounded-xl" variant="bordered" onPress={async () => {
+              <Button className="rounded-lg" variant="bordered" onPress={async () => {
                 const result = await refetch()
                 if (result.error) {
                   addToast(getAlbumRefreshErrorToast(result.error))
@@ -683,7 +683,7 @@ export function AlbumPage() {
   }
 
   return (
-    <div className="h-full overflow-auto custom-scrollbar p-7">
+    <div className="h-full overflow-auto custom-scrollbar p-4 sm:p-6 lg:p-7">
       <div className="space-y-6">
         <PageHeader
           title="相册"
@@ -692,7 +692,7 @@ export function AlbumPage() {
         />
 
         {data?.hadPartialError && (
-          <div className="flex items-start gap-3 rounded-2xl border border-warning/30 bg-warning/5 px-4 py-3 text-sm text-foreground">
+          <div className="flex items-start gap-3 rounded-lg border border-warning/30 bg-warning/5 px-4 py-3 text-sm text-foreground">
             <AlertCircle size={18} className="mt-0.5 shrink-0 text-warning" />
             <div>
               <p className="font-medium">部分目录扫描失败</p>
@@ -702,7 +702,7 @@ export function AlbumPage() {
         )}
 
         {hasThumbnailLoadFailures && (
-          <div className="flex items-start gap-3 rounded-2xl border border-warning/30 bg-warning/5 px-4 py-3 text-sm text-foreground">
+          <div className="flex items-start gap-3 rounded-lg border border-warning/30 bg-warning/5 px-4 py-3 text-sm text-foreground">
             <AlertCircle size={18} className="mt-0.5 shrink-0 text-warning" />
             <div>
               <p className="font-medium">部分缩略图加载失败</p>

@@ -421,20 +421,6 @@ func openRegisteredActivityLogFile(path string) (io.ReadCloser, error) {
 	return openActivityLogFileWithRoot(root, normalizedPath)
 }
 
-func readRegisteredActivityLogFile(path string) ([]byte, error) {
-	root, normalizedPath, ok, err := registeredActivityLogDirRoot(path)
-	if err != nil {
-		return nil, err
-	}
-	if !ok {
-		if err := validateActivityLogPath(normalizedPath); err != nil {
-			return nil, err
-		}
-		return os.ReadFile(normalizedPath)
-	}
-	return readActivityLogFileWithRoot(root, normalizedPath)
-}
-
 func writeRegisteredActivityLogFileAtomically(path string, data []byte) error {
 	root, normalizedPath, ok, err := registeredActivityLogDirRoot(path)
 	if err != nil {
@@ -481,16 +467,6 @@ func syncRegisteredActivityLogDir(path string) error {
 		return syncActivityLogRootDir(root)
 	}
 	return syncActivityLogDir(filepath.Dir(normalizedPath))
-}
-
-func readActivityLogFileWithRoot(root *os.Root, path string) ([]byte, error) {
-	file, err := openActivityLogFileWithRoot(root, path)
-	if err != nil {
-		return nil, err
-	}
-	defer file.Close()
-
-	return io.ReadAll(file)
 }
 
 func openActivityLogFileWithRoot(root *os.Root, path string) (*os.File, error) {

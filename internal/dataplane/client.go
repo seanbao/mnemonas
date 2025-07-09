@@ -8,10 +8,11 @@ import (
 	"sync"
 	"time"
 
-	pb "github.com/seanbao/mnemonas/proto"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/credentials/insecure"
+
+	pb "github.com/seanbao/mnemonas/proto"
 )
 
 // Client wraps gRPC connection to data plane service

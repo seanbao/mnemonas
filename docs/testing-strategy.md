@@ -224,7 +224,8 @@ func TestProperty_PasswordFileLifecycle(t *testing.T) {
 
 ```bash
 # 安装
-go install github.com/zimmski/go-mutesting/cmd/go-mutesting@latest
+GO_MUTESTING_VERSION=v0.0.0-20210610104036-6d9217011a00
+go install "github.com/zimmski/go-mutesting/cmd/go-mutesting@${GO_MUTESTING_VERSION}"
 
 # 运行
 go-mutesting ./internal/auth/...
@@ -345,9 +346,12 @@ on:
     branches: [main]
 
 env:
-  GO_VERSION: '1.25'
+  GO_VERSION: '1.25.9'
   RUST_VERSION: '1.92'
   NODE_VERSION: '22'
+  GOLANGCI_LINT_VERSION: 'v2.11.4'
+  GOVULNCHECK_VERSION: 'v1.3.0'
+  CARGO_AUDIT_VERSION: '0.22.1'
 
 jobs:
   go:
@@ -370,29 +374,35 @@ jobs:
       - name: Install protoc
         uses: arduino/setup-protoc@v3
         with:
-          version: '25.x'
+          version: '3.20.1'
 
       - name: Install protoc-gen-go
         run: |
-          go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
-          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
+          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.6.1
 
       - name: Generate protobuf
-        run: |
-          protoc --go_out=. --go_opt=paths=source_relative \
-            --go-grpc_out=. --go-grpc_opt=paths=source_relative \
-            proto/dataplane.proto
+        run: make proto
+
+      - name: Check generated protobuf is committed
+        run: git diff --exit-code -- proto/dataplane.pb.go proto/dataplane_grpc.pb.go dataplane/src/proto/mnemonas.dataplane.v1.rs
 
       - name: Lint
-        uses: golangci/golangci-lint-action@v4
+        uses: golangci/golangci-lint-action@v9
         with:
-          version: latest
+          version: ${{ env.GOLANGCI_LINT_VERSION }}
           args: --timeout=5m
 
       - name: Test
         run: |
           packages=$(go list ./... | grep -v '/web/node_modules/')
           CGO_ENABLED=1 bash ./scripts/with-test-dataplane.sh go test -v -race -coverprofile=coverage.out $packages
+
+      - name: Vulnerability scan
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@${{ env.GOVULNCHECK_VERSION }}
+          packages=$(go list ./... | grep -v '/web/node_modules/')
+          "$(go env GOPATH)/bin/govulncheck" $packages
 
       - name: Upload coverage
         uses: codecov/codecov-action@v4
@@ -421,11 +431,6 @@ jobs:
         with:
           workspaces: dataplane
 
-      - name: Install protoc
-        uses: arduino/setup-protoc@v3
-        with:
-          version: '25.x'
-
       - name: Format check
         run: cargo fmt --check
 
@@ -433,10 +438,18 @@ jobs:
         run: cargo clippy -- -D warnings
 
       - name: Test
-        run: cargo test --all-features
+        run: cargo test --all-features --locked
+
+      - name: Install cargo-audit
+        env:
+          CARGO_REGISTRIES_CRATES_IO_PROTOCOL: sparse
+        run: cargo install cargo-audit --version "${{ env.CARGO_AUDIT_VERSION }}" --locked
+
+      - name: Dependency audit
+        run: cargo audit
 
       - name: Build
-        run: cargo build --release
+        run: cargo build --release --locked
 
   frontend:
     name: Frontend
@@ -457,11 +470,17 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Dependency audit
+        run: npm audit --audit-level=high
+
       - name: Lint
         run: npm run lint
 
       - name: Type check
         run: npx tsc --noEmit
+
+      - name: Build
+        run: npm run build
 
       - name: Test
         run: npm run test:coverage
@@ -482,6 +501,10 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      - name: Set build metadata
+        id: build_meta
+        run: echo "build_time=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> "$GITHUB_OUTPUT"
+
       - name: Build
         uses: docker/build-push-action@v5
         with:
@@ -489,6 +512,9 @@ jobs:
           push: false
           load: true
           tags: mnemonas:test
+          build-args: |
+            VERSION=ci
+            BUILD_TIME=${{ steps.build_meta.outputs.build_time }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -509,6 +535,8 @@ jobs:
 
           for _ in $(seq 1 40); do
             if curl -fsS http://127.0.0.1:18080/health >/dev/null; then
+              curl -fsS http://127.0.0.1:18080/health | grep -q '"version":"ci"'
+              curl -fsS -H 'Accept: text/html' http://127.0.0.1:18080/ | grep -q 'id="root"'
               exit 0
             fi
 
@@ -599,7 +627,6 @@ testdata/
 - [Pact Contract Testing](https://docs.pact.io/)
 - [Google Testing Blog](https://testing.googleblog.com/)
 - [Playwright](https://playwright.dev/)
-- [Storybook](https://storybook.js.org/)
 - [Vitest](https://vitest.dev/)
 
 ---
@@ -612,11 +639,11 @@ testdata/
 
 ```text
 ┌─────────────────────────────────────────┐
-│        视觉回归测试 (Visual)             │  ← 截图对比、防止 UI 回归
+│        视觉回归测试 (Playwright)         │  ← 多视口截图对比、防止 UI 回归
 ├─────────────────────────────────────────┤
 │        E2E 测试 (Playwright)            │  ← 用户场景、跨组件交互
 ├─────────────────────────────────────────┤
-│        组件测试 (Storybook + Vitest)    │  ← 组件隔离、Props 验证
+│        组件测试 (Vitest + Testing Library)│ ← 组件状态、Props、交互
 ├─────────────────────────────────────────┤
 │        单元测试 (Vitest)                │  ← 工具函数、Hooks、Store
 └─────────────────────────────────────────┘
@@ -690,38 +717,22 @@ npm run test:ui
 npm run test:coverage
 ```
 
-### 10.3 组件测试 (Storybook)
+### 10.3 组件测试 (Vitest + Testing Library)
 
-使用 Storybook 进行组件隔离开发和测试：
+当前仓库只保留可运行的前端测试入口：组件和页面状态用 Vitest + Testing Library 覆盖，视觉回归用 Playwright 截图覆盖。不要在 `package.json` 中暴露未安装依赖的测试命令。
 
 ```typescript
-// src/stories/ThemeToggle.stories.tsx
-import type { Meta, StoryObj } from '@storybook/react'
+// src/components/ThemeToggle.test.tsx
+import { describe, expect, it } from 'vitest'
+import { render, screen } from '@/test/utils'
 import { ThemeToggle } from '../components/ThemeToggle'
 
-const meta: Meta<typeof ThemeToggle> = {
-  title: 'Components/ThemeToggle',
-  component: ThemeToggle,
-  parameters: {
-    layout: 'centered',
-  },
-  tags: ['autodocs'],
-}
-
-export default meta
-type Story = StoryObj<typeof meta>
-
-export const Default: Story = {}
-
-export const OnDarkBackground: Story = {
-  decorators: [
-    (Story) => (
-      <div className="p-8 bg-gray-900 rounded-lg">
-        <Story />
-      </div>
-    ),
-  ],
-}
+describe('ThemeToggle', () => {
+  it('renders the theme control', () => {
+    render(<ThemeToggle />)
+    expect(screen.getByRole('button')).toBeTruthy()
+  })
+})
 ```
 
 **运行命令**：
@@ -729,20 +740,9 @@ export const OnDarkBackground: Story = {
 ```bash
 cd web
 
-# 启动 Storybook 开发服务器
-npm run storybook
-
-# 构建静态 Storybook
-npm run build-storybook
+# 运行组件和页面单测
+npm run test:run
 ```
-
-**Storybook 优势**：
-
-- 组件隔离开发，无需启动完整应用
-- 自动生成文档 (autodocs)
-- 可视化 Props 调试
-- 无障碍检查 (a11y addon)
-- 支持视觉回归测试
 
 ### 10.4 E2E 测试 (Playwright)
 
@@ -787,12 +787,17 @@ cd web
 # 运行所有 E2E 测试
 npm run test:e2e
 
+# 快速回归桌面/移动导航和响应式外壳
+npm run test:e2e:navigation
+
 # 带 UI 界面（调试模式）
 npm run test:e2e:ui
 
 # 更新截图基准
 npm run test:e2e:update
 ```
+
+默认 Playwright 配置会自动启动隔离的后端和前端测试服务器；`MNEMONAS_E2E_BACKEND_URL` 和 `MNEMONAS_E2E_FRONTEND_URL` 可调整隔离服务器地址或端口。本地已有服务只有在设置 `MNEMONAS_E2E_REUSE_EXISTING=1` 时才会被复用，调试已有环境时还应显式设置 `E2E_PASSWORD`。
 
 **E2E 测试目录结构**：
 
@@ -806,24 +811,24 @@ web/e2e/
 
 ### 10.5 视觉回归测试
 
-使用 Storycap + reg-cli 进行视觉回归：
+视觉回归由 Playwright 截图断言统一覆盖，避免维护第二套未接入 CI 的截图工具链：
 
 ```bash
 cd web
 
-# 运行视觉回归测试
-npm run test:visual
+# 运行含截图断言的 E2E 测试
+npm run test:e2e
 
-# 更新视觉基准
-npm run test:visual:update
+# 更新截图基准
+npm run test:e2e:update
 ```
 
 **工作流程**：
 
-1. Storycap 自动截取所有 Stories 的截图
-2. reg-cli 对比当前截图与基准截图
-3. 生成 HTML 报告显示差异
-4. CI 中自动检测视觉回归
+1. Playwright 启动隔离的后端和 Vite 前端
+2. 关键页面在桌面、平板和移动视口执行交互测试
+3. `toHaveScreenshot` 对比截图基准
+4. 失败时保留 Playwright report 和截图差异供排查
 
 ### 10.6 测试文件组织
 
@@ -841,18 +846,12 @@ web/
 │   ├── pages/
 │   │   ├── Login.tsx
 │   │   └── Login.test.tsx       # 页面组件测试
-│   └── stories/
-│       └── ThemeToggle.stories.tsx
+│   └── test/
+│       └── setup.ts                 # 测试 setup
 ├── e2e/
 │   ├── login.spec.ts            # E2E 测试
 │   ├── dashboard.spec.ts
 │   └── *.spec.ts-snapshots/     # 截图基准
-├── __screenshots__/             # 视觉回归截图
-│   ├── expected/                # 基准截图
-│   └── diff/                    # 差异截图
-├── .storybook/
-│   ├── main.ts                  # Storybook 配置
-│   └── preview.tsx              # 全局装饰器
 └── playwright.config.ts         # Playwright 配置
 ```
 
@@ -899,34 +898,16 @@ jobs:
           name: playwright-report
           path: web/playwright-report
 
-  storybook:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-      - name: Install dependencies
-        run: cd web && npm ci
-      - name: Build Storybook
-        run: cd web && npm run build-storybook
-      - name: Deploy to GitHub Pages
-        uses: peaceiris/actions-gh-pages@v4
-        if: github.ref == 'refs/heads/main'
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: web/storybook-static
 ```
 
 ### 10.8 前端测试清单
 
 #### 新组件开发清单
 
-- [ ] Storybook Story：覆盖主要状态
 - [ ] Props 测试：各种输入组合
 - [ ] 无障碍测试：键盘导航、屏幕阅读器
 - [ ] 响应式测试：移动端/平板/桌面
-- [ ] 视觉回归：截图基准
+- [ ] 视觉回归：必要时补 Playwright 截图基准
 
 #### 新页面开发清单
 
@@ -941,6 +922,5 @@ jobs:
 - [ ] 所有单元测试通过
 - [ ] E2E 测试通过
 - [ ] 视觉回归无意外变化
-- [ ] Storybook 构建成功
 - [ ] 无 TypeScript 错误
 - [ ] 无 ESLint 警告

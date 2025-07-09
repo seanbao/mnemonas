@@ -112,6 +112,14 @@
 #### 项目工程化
 - GitHub Actions CI/CD 工作流（Go/Rust/Frontend 测试、Docker 构建）
 - Release 自动化工作流（多平台二进制构建、Docker 镜像发布）
+- Ubuntu/systemd 安装脚本，可将 release 包安装为 `mnemonas` 与 `mnemonas-dataplane` 服务
+- `mnemonas-doctor` 部署诊断脚本，检查二进制、配置、systemd、健康端点、端口、存储挂载与备份目录
+- `mnemonas-uninstall-systemd` 卸载脚本，默认保留配置和数据，删除数据需要显式确认
+- Docker Compose 启动前预检脚本，检查 Compose v2、Buildx、端口、目录权限、磁盘空间和已有配置
+- Docker 镜像内置 `mnemonas-healthcheck` 健康检查二进制，不再依赖运行时 `curl`
+- `tools/proto-gen` Rust protobuf 生成器，普通 dataplane/Docker 构建不再依赖系统 `protoc`
+- systemd/Docker 脚本模拟测试，并接入 CI 的脚本校验流程
+- `.go-version`、`.nvmrc`、Go `toolchain` 与 Rust `rust-version` 共同记录本地开发工具链要求
 - CONTRIBUTING.md 贡献指南
 - SECURITY.md 安全策略
 - pre-commit 配置（代码格式化、lint 检查）
@@ -119,16 +127,31 @@
 - .gitignore 完善
 
 #### 文档完善
+- Ubuntu 笔记本部署指南，覆盖 ZFS/Btrfs/mdadm 分层、systemd 安装、网络、备份、升级和故障排查
 - 备份指南（3-2-1 策略、rclone/restic 配置、恢复流程）
 - API 参考文档
 - README 徽章和快速开始指南
+- Docker 部署指南补充 Compose v2 安装、非 root UID/GID、可配置 `MNEMONAS_HTTP_PORT`、弱网构建策略和 dataplane 端口边界
 
 ### Changed
+- Release archive 改为包含顶层目录，并随包附带 Web UI、安装/卸载脚本、诊断脚本和完整 docs 文档
+- 默认 `docker-compose.yml` 从源码构建 `mnemonas:local`，公开 release 镜像可按文档改用 `ghcr.io/seanbao/mnemonas:latest`
+- Docker Compose 宿主机 HTTP 端口改为通过 `.env` 中的 `MNEMONAS_HTTP_PORT` 配置
+- CI 固定 protobuf 生成器和 `protoc 3.20.1`，并检查 `make proto` 后生成文件无漂移
+- Rust CI/Makefile 检查覆盖 dataplane all-targets 和 `tools/proto-gen`
+- 安全文档区分 Web UI 初始管理员密码与 WebDAV Basic Auth 自动密码
+- 安全文档和 doctor 明确提示 dataplane `9090/9091` 不应被防火墙放行到不可信网络
+- 备份文档补充运行中数据的一致性窗口和快照建议
 - 优化 Files 页面表格列布局，新增操作列
 - 优化 Vite 代理配置，添加 `/health` 端点代理
 - 改进配置加载逻辑，支持配置路径传递
 
 ### Fixed
+- 防止 systemd 安装和 `nasd` 静态文件发现误把 Vite 源码目录当成已构建 Web UI
+- 修复 `.gitignore` / `.dockerignore` 中 `nasd` 规则过宽，避免忽略 `cmd/nasd` 下的新文件或 Docker 构建上下文
+- 修复 Docker 运行镜像依赖 `apt-get` 安装健康检查工具的问题
+- 修复 Docker/Rust 构建阶段需要系统 `protoc` 的问题
+- 移除仓库中被跟踪的根目录 `nasd` 二进制、`coverage.out`、`.pids/` 和 `logs/` 构建/运行产物
 - 修复 Files.tsx 语法错误（模板字面量、hook 调用）
 - 修复 Trash.tsx useCallback 依赖警告
 - 修复 utils.ts 控制字符正则 lint 错误
@@ -137,7 +160,7 @@
 
 ---
 
-## [0.1.0] - 2024-XX-XX
+## [0.1.0] - 未发布
 
 首个公开发布版本。
 
@@ -146,19 +169,19 @@
 #### 核心功能
 - **CAS 存储引擎**：基于 BLAKE3 哈希的内容寻址存储
 - **CDC 分块**：使用 FastCDC 算法实现智能分块（256KB-4MB）
-- **版本管理**：所有文件自动保留历史版本，支持一键恢复
+- **版本管理**：按策略自动保留适合版本化的文件历史，支持一键恢复
 - **软删除**：删除操作仅移除引用，数据由 GC 异步清理
 
 #### WebDAV 协议
-- 完整 RFC 4918 实现（PROPFIND, GET, PUT, DELETE, MKCOL, COPY, MOVE）
+- 覆盖 RFC 4918 核心读写方法（PROPFIND, GET, PUT, DELETE, MKCOL, COPY, MOVE）
 - 虚拟锁实现（LOCK/UNLOCK）
 - Basic Auth 认证
-- 兼容主流客户端（macOS Finder, Windows Explorer, Transmit, rclone 等）
+- 持续验证常见客户端（macOS Finder, Windows Explorer, Transmit, rclone 等）
 
 #### 性能优化
 - PROPFIND 响应缓存（30 秒 TTL）
 - 请求指标收集与统计
-- 流式文件传输，支持任意大小文件
+- 流式文件传输，文件大小主要受磁盘、客户端和反向代理限制影响
 
 #### 运维功能
 - 健康检查端点
@@ -175,13 +198,15 @@
 
 - LOCK/UNLOCK 为虚拟实现，多客户端并发编辑同一文件时需注意
 - Windows WebClient 需要修改注册表以支持 HTTP（非 HTTPS）连接
-- 暂不支持多用户独立权限（计划在 0.2.0 实现）
+- 已支持用户、角色和用户主目录范围，但暂不支持细粒度 per-file ACL
+- 不建议在没有 HTTPS 反向代理或 VPN 的情况下直接暴露到公网
 
 ### 兼容性
 
-- **Go**: 1.22+
-- **Rust**: 1.75+
-- **Docker**: 20.10+
+- **Go**: 1.25.9+
+- **Rust**: 1.92+
+- **Node.js**: 22.x（或兼容的 20.19+）
+- **Docker**: 20.10+ 与 Compose v2 插件
 - **支持平台**: Linux (x86_64, ARM64), macOS (Intel, Apple Silicon)
 
 ---
@@ -190,7 +215,10 @@
 
 发布新版本前，请确认：
 
-- [ ] 所有测试通过：`make test`
+- [ ] 快速检查通过：`make quick-check`
+- [ ] 部署脚本检查通过：`make scripts-check`
+- [ ] 全量测试通过：`make test`
+- [ ] 依赖安全检查通过：`make security-check`
 - [ ] 更新 CHANGELOG.md
 - [ ] 更新 README.md 中的版本号（如有）
 - [ ] 创建 Git tag：`git tag -a v0.1.0 -m "Release v0.1.0"`

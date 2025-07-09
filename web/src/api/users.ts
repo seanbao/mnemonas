@@ -271,8 +271,8 @@ export async function toggleUserStatus(
 
   const body = await parseUsersSuccess<{ disabled: boolean }>(response, 'Invalid update user status response')
   if (!body.data || typeof body.data.disabled !== 'boolean') {
-	throw new Error('Invalid update user status response')
-	}
+    throw new Error('Invalid update user status response')
+  }
   return {
     success: body.success,
     warning: hasUsersWarning(response, body.data),

@@ -49,12 +49,13 @@ describe('HealthPage', () => {
       thumbnailServiceReady: true,
       maintenanceHistoryReady: true,
       activityLogReady: true,
-        favoritesStoreReady: true,
+      favoritesStoreReady: true,
     },
     version: {
       name: 'MnemoNAS',
       version: '0.3.0',
-      go: '1.22',
+      go: 'go1.25.9',
+      buildTime: '2026-04-29T00:00:00Z',
     },
     uptimeSecs: 86400,
     memory: {
@@ -80,6 +81,13 @@ describe('HealthPage', () => {
     totalSize: 5368709120,
     dedupRatio: 0.35,
     storageStatsAvailable: true,
+    diskStatsAvailable: true,
+    diskTotal: 21474836480,
+    diskAvailable: 16106127360,
+    diskUsed: 5368709120,
+    diskUsageRatio: 0.25,
+    diskFilesystemType: 'zfs',
+    diskNativeDataChecksumSupport: true,
   }
 
   beforeEach(() => {
@@ -254,32 +262,73 @@ describe('HealthPage', () => {
     it('displays maintenance history status', async () => {
       render(<HealthPage />)
 
-	  await waitFor(() => {
-	    expect(screen.getByText('维护历史')).toBeTruthy()
-	  })
+      await waitFor(() => {
+        expect(screen.getByText('维护历史')).toBeTruthy()
+      })
     })
 
     it('displays activity log status', async () => {
       render(<HealthPage />)
 
-	  await waitFor(() => {
-	    expect(screen.getByText('活动日志')).toBeTruthy()
-	  })
+      await waitFor(() => {
+        expect(screen.getByText('活动日志')).toBeTruthy()
+      })
     })
 
-      it('displays favorites store status when diagnostics provide it', async () => {
-        render(<HealthPage />)
+    it('displays favorites store status when diagnostics provide it', async () => {
+      render(<HealthPage />)
 
-        await waitFor(() => {
-          expect(screen.getByText('收藏存储')).toBeTruthy()
-        })
+      await waitFor(() => {
+        expect(screen.getByText('收藏存储')).toBeTruthy()
       })
+    })
 
     it('displays version info', async () => {
       render(<HealthPage />)
 
       await waitFor(() => {
         expect(screen.getByText(/MnemoNAS/)).toBeTruthy()
+        expect(screen.getByText(/Go 1\.25\.9/)).toBeTruthy()
+        expect(screen.getByText('构建 2026-04-29T00:00:00Z')).toBeTruthy()
+      })
+    })
+
+    it('displays storage alert runtime status when diagnostics provide it', async () => {
+      mockGetDiagnostics.mockResolvedValue({
+        ...mockDiagnostics,
+        alerts: {
+          enabled: true,
+          runtimeAvailable: true,
+          webhookConfigured: true,
+          lastLevel: 'warning',
+          lastCheckedAt: '2026-04-29T10:30:00Z',
+          lastUsedPct: 87.5,
+          lastFreeBytes: 9 * 1024 * 1024 * 1024,
+        },
+      })
+
+      render(<HealthPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('存储告警处于提醒级别')).toBeTruthy()
+        expect(screen.getByText(/使用率 87\.5%/)).toBeTruthy()
+      })
+    })
+
+    it('nudges admins when storage alerts are disabled', async () => {
+      mockGetDiagnostics.mockResolvedValue({
+        ...mockDiagnostics,
+        alerts: {
+          enabled: false,
+          runtimeAvailable: true,
+          webhookConfigured: false,
+        },
+      })
+
+      render(<HealthPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('存储告警未启用')).toBeTruthy()
       })
     })
   })
@@ -312,13 +361,12 @@ describe('HealthPage', () => {
       })
     })
 
-    it('displays dedup ratio card', async () => {
+    it('displays disk usage card', async () => {
       render(<HealthPage />)
 
       await waitFor(() => {
-        expect(screen.getByText('去重率')).toBeTruthy()
-        // Multiple elements may display 35.0%
-        expect(screen.getAllByText('35.0%').length).toBeGreaterThan(0)
+        expect(screen.getAllByText('磁盘使用').length).toBeGreaterThan(0)
+        expect(screen.getAllByText('25.0%').length).toBeGreaterThan(0)
       })
     })
   })
@@ -337,6 +385,29 @@ describe('HealthPage', () => {
 
       await waitFor(() => {
         expect(screen.getByText('对象数量')).toBeTruthy()
+      })
+    })
+
+    it('displays native filesystem integrity status', async () => {
+      render(<HealthPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('原生数据校验支持')).toBeTruthy()
+        expect(screen.getByText('ZFS')).toBeTruthy()
+      })
+    })
+
+    it('warns when storage filesystem lacks native data checksums', async () => {
+      mockGetStorageStats.mockResolvedValue({
+        ...mockStats,
+        diskFilesystemType: 'ext4',
+        diskNativeDataChecksumSupport: false,
+      })
+      render(<HealthPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('建议使用 ZFS/Btrfs')).toBeTruthy()
+        expect(screen.getByText('EXT4')).toBeTruthy()
       })
     })
 

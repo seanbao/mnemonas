@@ -77,9 +77,9 @@ function ActivityRow({ entry }: { entry: ActivityEntry }) {
   const color = getActionColor(entry.action)
 
   return (
-    <div className="flex items-center gap-4 px-4 py-2.5 border-b border-divider table-row">
+    <div className="activity-log-row grid grid-cols-[2.5rem_minmax(0,1fr)] gap-x-3 gap-y-2 border-b border-divider px-4 py-3.5 transition-colors last:border-b-0 hover:bg-content2/40 sm:grid-cols-[2.5rem_minmax(0,1fr)_auto] sm:items-center sm:px-5">
       <div className={cn(
-        "w-8 h-8 rounded-lg flex items-center justify-center",
+        "activity-log-icon flex h-9 w-9 shrink-0 items-center justify-center rounded-lg",
         color === 'success' && "bg-success/20 text-success",
         color === 'danger' && "bg-danger/20 text-danger",
         color === 'warning' && "bg-warning/20 text-warning",
@@ -89,30 +89,30 @@ function ActivityRow({ entry }: { entry: ActivityEntry }) {
         <ActionIcon action={entry.action} />
       </div>
 
-      <div className="flex-1 min-w-0">
-        <div className="flex items-center gap-2">
-          <span className="font-medium">{getActionLabel(entry.action)}</span>
+      <div className="activity-log-main min-w-0">
+        <div className="activity-log-summary flex min-w-0 flex-col gap-0.5 sm:flex-row sm:items-baseline sm:gap-2">
+          <span className="activity-log-action shrink-0 text-sm font-semibold text-foreground">{getActionLabel(entry.action)}</span>
           {entry.path && (
-            <span className="text-sm text-default-400 truncate">{entry.path}</span>
+            <span className="activity-log-path min-w-0 truncate text-sm text-default-500">{entry.path}</span>
           )}
         </div>
         {entry.details && Object.keys(entry.details).length > 0 && (
-          <div className="text-xs text-default-400 mt-1">
+          <div className="activity-log-details mt-1 flex min-w-0 flex-wrap gap-x-3 gap-y-1 text-xs text-default-400">
             {Object.entries(entry.details).map(([key, value]) => (
-              <span key={key} className="mr-3">{key}: {value}</span>
+              <span key={key} className="min-w-0 truncate">{key}: {value}</span>
             ))}
           </div>
         )}
       </div>
 
-      <div className="flex items-center gap-4 text-sm text-default-500">
+      <div className="activity-log-meta col-start-2 flex min-w-0 flex-wrap items-center gap-x-4 gap-y-1 text-xs text-default-500 sm:col-start-auto sm:flex-nowrap sm:justify-end sm:text-sm">
         {entry.user && (
-          <div className="flex items-center gap-1">
+          <div className="flex min-w-0 items-center gap-1">
             <User size={14} />
-            <span>{entry.user}</span>
+            <span className="truncate">{entry.user}</span>
           </div>
         )}
-        <div className="flex items-center gap-1 w-24 justify-end">
+        <div className="flex shrink-0 items-center gap-1 sm:w-24 sm:justify-end">
           <Clock size={14} />
           <span>{formatRelativeTime(entry.timestamp)}</span>
         </div>
@@ -125,6 +125,7 @@ function ActivityRow({ entry }: { entry: ActivityEntry }) {
 const ALL_ACTIONS: ActionType[] = [
   'upload', 'download', 'delete', 'rename', 'move', 'copy',
   'create', 'restore', 'share', 'unshare', 'login', 'logout',
+  'favorite', 'unfavorite', 'favorite_note_update',
   'trash_restore', 'trash_delete', 'trash_empty',
 ]
 
@@ -205,7 +206,7 @@ export function ActivityPage() {
 
   if (hasInvalidHomeDir) {
     return (
-      <div className="h-full flex flex-col space-y-4 p-6 overflow-auto custom-scrollbar">
+      <div className="flex h-full min-h-0 flex-col space-y-4 overflow-auto p-4 custom-scrollbar sm:p-6">
         <PageHeader
           title="活动日志"
           subtitle={invalidHomeDirTitle}
@@ -225,7 +226,7 @@ export function ActivityPage() {
 
   if (isLoading) {
     return (
-      <div className="p-6 lg:p-8 flex items-center justify-center h-full">
+      <div className="flex h-full items-center justify-center p-6 lg:p-8">
         <div className="text-center">
           <div className="w-12 h-12 border-3 border-accent-primary border-t-transparent rounded-full animate-spin mx-auto mb-4" />
           <p className="text-default-500">加载活动日志...</p>
@@ -237,14 +238,14 @@ export function ActivityPage() {
   if (error) {
     if (errorState === 'unavailable') {
       return (
-        <div className="h-full flex flex-col space-y-4 p-6 overflow-auto custom-scrollbar">
+        <div className="flex h-full min-h-0 flex-col space-y-4 overflow-auto p-4 custom-scrollbar sm:p-6">
           <PageHeader
             title="活动日志"
             subtitle="暂不可用"
             icon={Activity}
             actions={
               <Button
-                className="btn-secondary h-8 rounded-xl"
+                className="btn-secondary h-8 rounded-lg"
                 size="sm"
                 startContent={<RefreshCw size={14} className={isRefetching ? 'animate-spin' : ''} />}
                 onPress={handleRefresh}
@@ -261,7 +262,7 @@ export function ActivityPage() {
               title="活动日志暂不可用"
               description="活动日志存储当前不可用，请检查系统健康状态或稍后重试。"
               action={
-                <Button variant="bordered" className="rounded-xl" onPress={handleRefresh}>
+                <Button variant="bordered" className="rounded-lg" onPress={handleRefresh}>
                   重新加载
                 </Button>
               }
@@ -272,14 +273,14 @@ export function ActivityPage() {
     }
 
     return (
-      <div className="h-full flex flex-col space-y-4 p-6 overflow-auto custom-scrollbar">
+      <div className="flex h-full min-h-0 flex-col space-y-4 overflow-auto p-4 custom-scrollbar sm:p-6">
         <PageHeader
           title="活动日志"
           subtitle="加载失败"
           icon={Activity}
           actions={
             <Button
-              className="btn-secondary h-8 rounded-xl"
+              className="btn-secondary h-8 rounded-lg"
               size="sm"
               startContent={<RefreshCw size={14} className={isRefetching ? 'animate-spin' : ''} />}
               onPress={handleRefresh}
@@ -296,7 +297,7 @@ export function ActivityPage() {
             title="加载活动日志失败"
             description={(error as Error).message || '请稍后重试'}
             action={
-              <Button variant="bordered" className="rounded-xl" onPress={handleRefresh}>
+              <Button variant="bordered" className="rounded-lg" onPress={handleRefresh}>
                 重新加载
               </Button>
             }
@@ -310,7 +311,7 @@ export function ActivityPage() {
   const totalEntries = data?.total ?? entries.length
 
   return (
-    <div className="h-full flex flex-col space-y-4 p-6 overflow-auto custom-scrollbar">
+    <div className="flex h-full min-h-0 flex-col space-y-4 overflow-auto p-4 custom-scrollbar sm:p-6">
       {/* Header */}
       <PageHeader
         title="活动日志"
@@ -339,7 +340,7 @@ export function ActivityPage() {
             </Select>
 
             <Button
-              className="btn-secondary h-8 rounded-xl"
+              className="btn-secondary h-8 rounded-lg"
               size="sm"
               startContent={<RefreshCw size={14} className={isRefetching ? 'animate-spin' : ''} />}
               onPress={handleRefresh}
@@ -353,7 +354,7 @@ export function ActivityPage() {
 
       {/* Filter chips */}
       {actionFilter && (
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <span className="text-sm text-default-500">当前筛选:</span>
           <Chip
             size="sm"
@@ -370,7 +371,7 @@ export function ActivityPage() {
       )}
 
       {/* Activity list */}
-      <div className="flex-1 overflow-auto card-meridian rounded-xl">
+      <div className="card-meridian min-h-0 flex-1 overflow-auto rounded-lg">
         {entries.length > 0 ? (
           entries.map((entry) => (
             <ActivityRow key={entry.id} entry={entry} />

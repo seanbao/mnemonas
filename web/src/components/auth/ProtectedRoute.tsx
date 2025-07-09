@@ -42,7 +42,7 @@ export function ProtectedRoute({ children, adminOnly = false }: ProtectedRoutePr
   if (adminOnly && !isAdmin) {
     return (
       <div className="min-h-screen bg-background flex items-center justify-center p-6">
-        <div className="max-w-md w-full text-center bg-content1 border border-divider rounded-2xl shadow-sm p-8 space-y-4">
+        <div className="max-w-md w-full text-center bg-content1 border border-divider rounded-lg shadow-sm p-8 space-y-4">
           <div className="w-12 h-12 rounded-full bg-warning/10 text-warning flex items-center justify-center mx-auto text-xl font-semibold">
             403
           </div>
@@ -52,7 +52,7 @@ export function ProtectedRoute({ children, adminOnly = false }: ProtectedRoutePr
           </div>
           <Link
             to="/"
-            className="inline-flex items-center justify-center rounded-xl bg-primary px-4 py-2 text-primary-foreground font-medium"
+            className="inline-flex items-center justify-center rounded-lg bg-primary px-4 py-2 text-primary-foreground font-medium"
           >
             返回首页
           </Link>

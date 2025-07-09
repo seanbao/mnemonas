@@ -2,9 +2,11 @@
 
 本文档介绍如何使用 Docker 部署 MnemoNAS，包括基础部署、生产环境配置和常见场景示例。
 
+如果目标是一台闲置 Ubuntu 笔记本或小主机，并希望开机自启、用 systemd 管理日志和重启，优先参考 [Ubuntu 笔记本部署指南](ubuntu-laptop-deployment.md)。Docker 更适合快速试用、已有容器平台或希望把 MnemoNAS 和其他服务一起编排的场景。
+
 ## 📋 前置要求
 
-- Docker 20.10+ 和 Docker Compose 2.0+
+- Docker 20.10+ 和 Docker Compose v2 插件（命令形式是 `docker compose`，不是旧版 `docker-compose`）
 - 至少 1GB 可用内存
 - 建议使用 SSD 存储（HDD 也可工作，但性能较低）
 
@@ -14,6 +16,35 @@
 docker --version
 docker compose version
 ```
+
+如果 `docker --version` 可用但 `docker compose version` 提示 unknown command，说明只安装了 Docker CLI，没有安装 Compose v2 插件。Ubuntu 24.04/近期 Debian 系统通常可以直接安装发行版插件：
+
+```bash
+sudo apt update
+sudo apt install -y docker-compose-v2 docker-buildx
+docker compose version
+docker buildx version
+```
+
+如果提示找不到 `docker-compose-v2`，先确认 Ubuntu `universe` 仓库已启用，或改用 Docker 官方 apt 仓库。使用 Docker 官方 apt 仓库时，包名通常是 `docker-compose-plugin`，并建议同时安装 Buildx 插件以获得更好的构建缓存：
+
+```bash
+sudo apt update
+sudo apt install -y docker-compose-plugin docker-buildx-plugin
+docker compose version
+docker buildx version
+```
+
+不要安装旧版 Python `docker-compose` v1；本文档和仓库脚本按 Compose v2 的 `docker compose` 命令维护。
+
+如果 `apt update` 因为额外启用的 foreign architecture 失败，例如日志里反复出现 `binary-armhf/Packages 404 Not Found`，先修复 apt 源或临时只对宿主机架构安装这些 Docker 插件：
+
+```bash
+sudo apt-get -o APT::Architectures=amd64 update
+sudo apt-get -o APT::Architectures=amd64 install -y docker-compose-v2 docker-buildx
+```
+
+这不会移除系统的 foreign architecture，只是这次安装命令按 `amd64` 索引解析；长期看仍建议把不支持该架构的 apt 源补上 `Architectures: amd64` 或改到支持该架构的源。
 
 ---
 
@@ -26,37 +57,86 @@ git clone https://github.com/seanbao/mnemonas.git
 cd mnemonas
 ```
 
+仓库自带的 `docker-compose.yml` 默认从当前源码构建 `mnemonas:local` 镜像。宿主机不需要安装 Go/Rust/Node.js 构建工具，但 Docker 需要能拉取 Rust、Node、Go 和 Debian 基础镜像。正式 release 镜像发布并公开后，可以在自己的 Compose 文件中改用 `ghcr.io/seanbao/mnemonas:latest`。
+
 ### 2. 准备数据目录
 
 ```bash
 mkdir -p ~/.mnemonas
+chmod 750 ~/.mnemonas
+cp .env.example .env
+sed -i "s/^MNEMONAS_UID=.*/MNEMONAS_UID=$(id -u)/" .env
+sed -i "s/^MNEMONAS_GID=.*/MNEMONAS_GID=$(id -g)/" .env
+# 如果宿主机 8080 已被占用，可把 .env 里的 MNEMONAS_HTTP_PORT 改成 8888 等空闲端口。
+./scripts/mnemonas-docker-preflight.sh
 ```
 
-首次启动会在 `~/.mnemonas/config.toml` 自动生成持久化配置。启动后可按需编辑该文件，至少建议修改：
+首次启动会在 `~/.mnemonas/config.toml` 自动生成持久化配置。启动后请先用 `~/.mnemonas/.mnemonas/initial-password.txt` 中的初始管理员密码登录 Web UI 并修改密码；自动生成的 WebDAV 密码保存在 `~/.mnemonas/secrets.json`，不会直接写入容器日志。如使用 WebDAV，也建议修改：
 
 - `[webdav].password` - WebDAV 认证密码
 
-如修改 `[storage].root`，需额外挂载该容器内路径；否则数据会写入容器临时层。例如设置 `root = "/data-root"` 时，需要在 `docker-compose.yml` 中增加 `- ~/.mnemonas-data:/data-root`。
+镜像默认以非 root 用户运行，容器内数据目录是 `/data`，对应宿主机 `~/.mnemonas`。Docker 中的自定义配置必须显式设置 `[storage].root`，通常保持 `root = "/data"`，且不能设置为 `/`。启动时如果已有配置里的 `[storage].root` 和 Docker 的 `STORAGE_ROOT` 不一致，容器日志会输出警告，并继续以配置文件为准。如修改为其他容器内路径，需额外挂载该路径；否则数据会写入容器临时层。例如设置 `root = "/data-root"` 时，需要在 `docker-compose.yml` 中增加 `- ~/.mnemonas-data:/data-root`。
+
+仓库自带的 Compose 文件默认使用 UID/GID `1000:1000`，Compose 会自动读取 `.env`。如果你的宿主机用户不是 1000，优先按上面的命令把当前 UID/GID 写入 `.env`；也可以启动时显式传入当前用户：
+
+```bash
+MNEMONAS_UID="$(id -u)" MNEMONAS_GID="$(id -g)" docker compose up -d --build
+```
+
+`./scripts/mnemonas-docker-preflight.sh` 不会启动或修改容器，只检查启动前最常见的失败点：Docker daemon、Compose v2 插件、Buildx、`~/.mnemonas` 权限、可用磁盘空间、`MNEMONAS_HTTP_PORT` 端口占用、已有 `config.toml` 的 `[storage].root`，以及 Compose 配置是否能渲染。预检有失败项时先按输出修复，再运行 `docker compose up -d --build`。
 
 ### 3. 启动服务
 
 ```bash
-docker compose up -d
+docker compose up -d --build
 ```
+
+仓库自带的 Compose 文件只发布 `8080`，即 Web UI、REST API 和 WebDAV 入口。容器内 dataplane 的 `9090/9091` 默认绑定到 loopback，只供 `nasd` 内部访问；不要把这两个端口加入 `ports:`，也不要通过反向代理暴露到公网或不可信局域网。
+
+Compose 文件启用了 `init: true`，让容器内的最小 init 负责信号转发和子进程回收。MnemoNAS 容器里会同时运行 `nasd` 与 dataplane，长期运行时不要移除这个设置。
 
 ### 4. 验证服务
 
 ```bash
 # 健康检查
-curl http://localhost:8080/health
+curl "http://localhost:${MNEMONAS_HTTP_PORT:-8080}/health"
 
 # 查看日志
 docker compose logs -f
 ```
 
+### 手动构建镜像
+
+如果要绕开 Compose 直接验证本地 Dockerfile：
+
+```bash
+docker build \
+  --build-arg VERSION=local \
+  --build-arg BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  -t mnemonas:local .
+docker run --rm --user "$(id -u):$(id -g)" -p 8080:8080 -v "$HOME/.mnemonas:/data" mnemonas:local
+```
+
+手动运行镜像时同样只需要 `-p 8080:8080`。`9090/9091` 是容器内部 dataplane 端口，不需要也不应发布。
+
+构建阶段的基础镜像可以通过 build args 覆盖，便于使用企业镜像缓存或区域镜像源：
+
+```bash
+docker build -t mnemonas:local \
+  --build-arg NODE_IMAGE=node:22-bookworm-slim \
+  --build-arg GO_IMAGE=golang:1.25.9-alpine \
+  --build-arg RUST_IMAGE=rust:1.92 \
+  --build-arg RUNTIME_IMAGE=debian:bookworm-slim \
+  --build-arg VERSION=local \
+  --build-arg BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  .
+```
+
 ---
 
 ## 🏠 家庭场景配置
+
+下面的场景示例默认使用已公开的 release 镜像。如果你在源码 checkout 中使用仓库自带的 `docker-compose.yml`，保留其中的 `build:` 配置和 `image: mnemonas:local` 即可。
 
 ### 场景一：家庭媒体服务器
 
@@ -69,16 +149,17 @@ services:
   mnemonas:
     image: ghcr.io/seanbao/mnemonas:latest
     container_name: mnemonas
+    user: "${MNEMONAS_UID:-1000}:${MNEMONAS_GID:-1000}"
     ports:
-      - "8080:8080"
+      - "${MNEMONAS_HTTP_PORT:-8080}:8080"
     volumes:
       # 数据存储到用户目录
-      - ~/.mnemonas:/root/.mnemonas
+      - ${HOME}/.mnemonas:/data
     environment:
       - TZ=Asia/Shanghai
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      test: ["CMD", "/app/mnemonas-healthcheck"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -92,7 +173,7 @@ host = "0.0.0.0"
 port = 8080
 
 [storage]
-root = "/root/.mnemonas"  # 容器内路径，对应宿主机 ~/.mnemonas
+root = "/data"            # 容器内路径，对应宿主机 ~/.mnemonas
 
 [storage.retention]
 max_versions = 50        # 照片/视频保留 50 个版本足够
@@ -120,10 +201,11 @@ services:
   mnemonas:
     image: ghcr.io/seanbao/mnemonas:latest
     container_name: mnemonas-dev
+    user: "${MNEMONAS_UID:-1000}:${MNEMONAS_GID:-1000}"
     ports:
-      - "8080:8080"
+      - "127.0.0.1:${MNEMONAS_HTTP_PORT:-8080}:8080"
     volumes:
-      - ~/.mnemonas:/root/.mnemonas
+      - ${HOME}/.mnemonas:/data
     restart: unless-stopped
 ```
 
@@ -131,7 +213,7 @@ services:
 
 ```toml
 [server]
-host = "127.0.0.1"  # 仅本地访问
+host = "0.0.0.0"  # 容器内监听；宿主机访问范围由 ports 的 127.0.0.1 绑定限制
 port = 8080
 
 [storage.retention]
@@ -141,11 +223,13 @@ gc_interval = "1h"       # 更频繁的版本清理
 
 [webdav]
 enabled = true
-auth_type = "none"       # 本地使用，无需认证
+auth_type = "none"       # 仅限绑定到宿主机 127.0.0.1 的本地场景
 
 [log]
 level = "debug"          # 开发时可用 debug
 ```
+
+Docker 中不要用 `server.host = "127.0.0.1"` 来限制宿主机访问范围；那会让进程只监听容器自己的 loopback，发布端口可能无法访问。需要本地-only 时，在 Compose 端口映射里写 `127.0.0.1:${MNEMONAS_HTTP_PORT:-8080}:8080`。`webdav.auth_type = "none"` 只关闭 WebDAV Basic Auth，Web UI/API 登录仍由 `[auth].enabled` 控制。
 
 ### 场景三：多用户共享 NAS
 
@@ -158,10 +242,11 @@ services:
   mnemonas:
     image: ghcr.io/seanbao/mnemonas:latest
     container_name: family-nas
+    user: "${MNEMONAS_UID:-1000}:${MNEMONAS_GID:-1000}"
     ports:
-      - "8080:8080"
+      - "${MNEMONAS_HTTP_PORT:-8080}:8080"
     volumes:
-      - ~/.mnemonas:/root/.mnemonas
+      - ${HOME}/.mnemonas:/data
     environment:
       - TZ=Asia/Shanghai
     restart: always
@@ -187,11 +272,12 @@ services:
   mnemonas:
     image: ghcr.io/seanbao/mnemonas:latest
     container_name: mnemonas
+    user: "${MNEMONAS_UID:-1000}:${MNEMONAS_GID:-1000}"
     # 不暴露端口，通过 nginx 访问
     expose:
       - "8080"
     volumes:
-      - ~/.mnemonas:/root/.mnemonas
+      - ${HOME}/.mnemonas:/data
     restart: unless-stopped
     networks:
       - internal
@@ -264,6 +350,7 @@ http {
 services:
   mnemonas:
     image: ghcr.io/seanbao/mnemonas:latest
+    user: "${MNEMONAS_UID:-1000}:${MNEMONAS_GID:-1000}"
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.mnemonas.rule=Host(`nas.example.com`)"
@@ -271,7 +358,7 @@ services:
       - "traefik.http.routers.mnemonas.tls.certresolver=letsencrypt"
       - "traefik.http.services.mnemonas.loadbalancer.server.port=8080"
     volumes:
-      - ~/.mnemonas:/root/.mnemonas
+      - ${HOME}/.mnemonas:/data
     networks:
       - traefik-network
 ```
@@ -293,6 +380,8 @@ docker compose logs --tail 100 mnemonas
 docker compose logs mnemonas > mnemonas.log
 ```
 
+Docker 启动脚本会在每次容器启动时从 `/data/config.toml` 读取 `[dataplane.cdc]` 并传给 dataplane。修改 CDC 参数后执行 `docker compose restart mnemonas`，新的对象写入会使用更新后的分块参数。dataplane 的 HTTP 健康和 gRPC 端口默认仅在容器内部 loopback 上监听；运维检查优先使用 `http://localhost:8080/health`（或 `.env` 中配置的 `MNEMONAS_HTTP_PORT`）和 Web UI 的健康页。
+
 ### 健康检查
 
 ```bash
@@ -300,7 +389,7 @@ docker compose logs mnemonas > mnemonas.log
 docker inspect --format='{{.State.Health.Status}}' mnemonas
 
 # API 健康检查
-curl http://localhost:8080/health
+curl "http://localhost:${MNEMONAS_HTTP_PORT:-8080}/health"
 ```
 
 ### 集成 Prometheus
@@ -317,11 +406,15 @@ MnemoNAS 提供 `/api/v1/metrics` JSON 指标端点。
 ### 升级服务
 
 ```bash
-# 拉取最新镜像
-docker compose pull
+# 源码 checkout 默认重新构建本地镜像
+docker compose build --pull
 
 # 重启服务（数据保留）
 docker compose up -d
+
+# 如果使用已公开的 release 镜像，则改用：
+# docker compose pull
+# docker compose up -d
 ```
 
 ### 备份数据
@@ -363,9 +456,23 @@ docker compose logs mnemonas
 
 # 检查配置文件语法与基础字段校验（无副作用，不会启动 dataplane）
 docker run --rm --entrypoint /app/nasd \
-  -v ~/.mnemonas:/root/.mnemonas \
-  ghcr.io/seanbao/mnemonas:latest --check-config --config /root/.mnemonas/config.toml
+  --user "$(id -u):$(id -g)" \
+  -v "$HOME/.mnemonas:/data" \
+  "${MNEMONAS_IMAGE:-mnemonas:local}" --check-config --config /data/config.toml
 ```
+
+### 构建时基础镜像拉取很慢
+
+发布镜像公开可用时，优先使用 `ghcr.io/seanbao/mnemonas:latest`，本机无需构建工具。源码本地构建时，可用 Docker 镜像源或企业缓存覆盖 `NODE_IMAGE`、`GO_IMAGE`、`RUST_IMAGE` 和 `RUNTIME_IMAGE` build args。
+
+### 构建卡在 Cargo / npm / Go 依赖下载
+
+仓库 Dockerfile 已避免在运行镜像里执行 `apt-get`，Rust 构建也不再需要系统 `protoc`，Go builder 默认使用较小的 Alpine 变体；但首次从源码构建仍需要在容器内下载 Rust crates、npm 包和 Go modules。弱网环境下可以先采用这些办法：
+
+- 优先使用公开 release 镜像，跳过本机源码构建。
+- 安装 Buildx 插件（Ubuntu 仓库通常是 `docker-buildx`，Docker 官方仓库通常是 `docker-buildx-plugin`）并使用 BuildKit/Buildx 缓存，避免每次从零下载。
+- 在网络更稳定的机器上构建后用 `docker save` / `docker load` 迁移镜像到 Ubuntu 笔记本。
+- 企业或区域网络内，把 `NODE_IMAGE`、`GO_IMAGE`、`RUST_IMAGE` 和 `RUNTIME_IMAGE` 指向内部镜像缓存；Rust crates/npm/Go module 镜像源仍需在构建环境中按各语言工具链单独配置。
 
 ### 权限问题
 
@@ -373,8 +480,10 @@ docker run --rm --entrypoint /app/nasd \
 # 检查挂载目录权限
 ls -la ~/.mnemonas
 
-# 默认镜像以 root 运行；若你改成非 root 用户运行容器，请把目录所有者调整为对应 UID/GID。
-sudo chown -R <uid>:<gid> ~/.mnemonas
+# 默认镜像以 UID/GID 1000 运行，仓库 Compose 文件也允许用 MNEMONAS_UID/MNEMONAS_GID 覆盖。
+# 如果你手动固定了其他 UID/GID，请把目录所有者调整为实际运行容器的用户。
+sudo chown -R 1000:1000 ~/.mnemonas
+chmod 750 ~/.mnemonas
 ```
 
 ### 端口冲突
@@ -384,7 +493,9 @@ sudo chown -R <uid>:<gid> ~/.mnemonas
 sudo lsof -i :8080
 
 # 使用其他端口
-# 修改 docker-compose.yml: ports: - "8888:8080"
+sed -i "s/^MNEMONAS_HTTP_PORT=.*/MNEMONAS_HTTP_PORT=8888/" .env
+./scripts/mnemonas-docker-preflight.sh
+docker compose up -d
 ```
 
 ---

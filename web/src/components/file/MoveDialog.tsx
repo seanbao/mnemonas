@@ -199,14 +199,14 @@ function MoveDialogContent({
         placement="center"
         size="md"
         classNames={{
-          base: "bg-content1 border border-divider shadow-2xl rounded-2xl",
+          base: "bg-content1 border border-divider shadow-xl rounded-lg",
           backdrop: "bg-black/60 backdrop-blur-md",
           closeButton: "top-4 right-4 text-default-400 hover:text-foreground hover:bg-default-100 rounded-lg",
         }}
       >
         <ModalContent>
           <ModalHeader className="flex items-center gap-3 px-6 pt-6 pb-2">
-            <div className="w-10 h-10 rounded-xl bg-accent-primary/10 text-accent-primary flex items-center justify-center">
+            <div className="w-10 h-10 rounded-lg bg-accent-primary/10 text-accent-primary flex items-center justify-center">
               <Icon size={20} />
             </div>
             <div>
@@ -245,7 +245,7 @@ function MoveDialogContent({
               </div>
               <Button
                 variant="bordered"
-                className="w-full justify-start rounded-xl"
+                className="w-full justify-start rounded-lg"
                 onPress={() => setIsPickerOpen(true)}
               >
                 {targetPath ? (
@@ -268,7 +268,7 @@ function MoveDialogContent({
           </ModalBody>
 
           <ModalFooter className="px-6 pb-6 pt-2 gap-2">
-            <Button variant="flat" onPress={handleClose} isDisabled={isProcessing} className="text-default-600 rounded-xl">
+            <Button variant="flat" onPress={handleClose} isDisabled={isProcessing} className="text-default-600 rounded-lg">
               取消
             </Button>
             <Button
@@ -276,7 +276,7 @@ function MoveDialogContent({
               onPress={handleConfirm}
               isLoading={isProcessing}
               isDisabled={!targetPath || targetPath === currentPath}
-              className="rounded-xl"
+              className="rounded-lg"
             >
               {actionText}
             </Button>

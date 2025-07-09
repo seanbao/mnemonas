@@ -52,8 +52,18 @@ test.describe('存储统计卡片', () => {
     await expect(objectsCard).toBeVisible()
   })
 
-  test('应显示存储大小', async ({ page }) => {
-    const sizeCard = page.getByText(/存储大小/i)
+  test('应显示磁盘容量', async ({ page }) => {
+    const diskCard = page.getByText(/磁盘容量/i)
+    await expect(diskCard).toBeVisible()
+  })
+
+  test('应显示文件系统类型', async ({ page }) => {
+    const filesystemCard = page.getByText(/文件系统/i)
+    await expect(filesystemCard).toBeVisible()
+  })
+
+  test('应显示 CAS 大小', async ({ page }) => {
+    const sizeCard = page.getByText(/CAS 大小/i)
     await expect(sizeCard).toBeVisible()
   })
 
@@ -83,9 +93,11 @@ test.describe('维护操作卡片', () => {
     await expect(gcCard).toBeVisible()
   })
 
-  test('维护按钮应标记为即将推出', async ({ page }) => {
+  test('维护按钮应打开维护工具入口', async ({ page }) => {
     const maintenanceButton = page.getByRole('button', { name: '打开维护工具' }).first()
     await expect(maintenanceButton).toBeVisible()
+    await maintenanceButton.click()
+    await expect(page).toHaveURL(/\/maintenance$/)
   })
 })
 
@@ -102,11 +114,11 @@ test.describe('存储管理刷新功能', () => {
   })
 })
 
-test.describe('CAS 存储系统说明', () => {
-  test('应显示 CAS 系统描述', async ({ page }) => {
+test.describe('存储系统说明', () => {
+  test('应显示混合存储描述', async ({ page }) => {
     await ensureAuthenticatedAt(page, '/storage')
 
-    const casDescription = page.getByText(/CAS|内容寻址存储/i)
+    const casDescription = page.getByText(/原生文件 \+ CAS 版本历史/i)
     await expect(casDescription).toBeVisible()
   })
 })
@@ -135,7 +147,7 @@ test.describe('存储管理页面响应式', () => {
     await page.setViewportSize({ width: 1280, height: 800 })
     await ensureAuthenticatedAt(page, '/storage')
 
-    const statsCards = page.getByText(/对象总数|存储大小|去重率|节省空间/i)
+    const statsCards = page.getByText(/磁盘容量|CAS 大小|对象总数|去重率|节省空间/i)
     await expect(statsCards.first()).toBeVisible({ timeout: 5000 })
   })
 })

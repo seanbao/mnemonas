@@ -34,10 +34,18 @@ export interface StorageStats {
   fileCount?: number
   fileCountAvailable?: boolean
   storageStatsAvailable?: boolean
+  diskStatsAvailable?: boolean
   totalSize?: number
   totalObjects?: number
   uniqueSize?: number
   dedupRatio?: number
+  diskTotal?: number
+  diskFree?: number
+  diskAvailable?: number
+  diskUsed?: number
+  diskUsageRatio?: number
+  diskFilesystemType?: string
+  diskNativeDataChecksumSupport?: boolean
 }
 
 export interface HealthStatus {
@@ -60,18 +68,14 @@ export interface DiagnosticsInfo {
   timestamp: string
   uptime: string
   uptimeSecs?: number
-  version: {
-    name: string
-    version: string
-    go: string
-  }
+  version: AppVersionInfo
   system?: {
     filesystemInitialized?: boolean
     dataplaneConnected?: boolean
     thumbnailServiceReady?: boolean
     maintenanceHistoryReady?: boolean
     activityLogReady?: boolean
-     favoritesStoreReady?: boolean
+    favoritesStoreReady?: boolean
   }
   memory?: {
     allocMb?: number
@@ -83,6 +87,29 @@ export interface DiagnosticsInfo {
   filesystem?: {
     trashItems?: number
     trashSize?: number
+    diskStatsAvailable?: boolean
+    diskTotal?: number
+    diskFree?: number
+    diskAvailable?: number
+    diskUsed?: number
+    diskUsageRatio?: number
+    diskFilesystemType?: string
+    diskNativeDataChecksumSupport?: boolean
+  }
+  alerts?: {
+    enabled?: boolean
+    runtimeAvailable?: boolean
+    checkInterval?: string
+    thresholdPct?: number
+    criticalPct?: number
+    minFreeBytes?: number
+    cooldownPeriod?: string
+    webhookConfigured?: boolean
+    webhookMethod?: string
+    lastLevel?: string
+    lastCheckedAt?: string
+    lastUsedPct?: number
+    lastFreeBytes?: number
   }
   storage?: {
     totalChunks?: number
@@ -97,7 +124,19 @@ export interface DiagnosticsInfo {
   }
 }
 
-export type AppVersionInfo = DiagnosticsInfo['version']
+export interface AppVersionInfo {
+  name: string
+  version: string
+  go: string
+  buildTime?: string
+}
+
+interface BackendAppVersionInfo {
+  name: string
+  version: string
+  go: string
+  build_time?: string
+}
 
 // API Error class for better error handling
 export class ApiError extends Error {
@@ -309,19 +348,29 @@ interface ApiResponseWrapper<T> {
 }
 
 export interface ActionResult {
-	warning: boolean
-	message?: string
+  warning: boolean
+  message?: string
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value)
 }
 
-function isDiagnosticsVersionShape(value: unknown): value is DiagnosticsInfo['version'] {
+function isDiagnosticsVersionShape(value: unknown): value is BackendAppVersionInfo {
   return isRecord(value)
     && typeof value.name === 'string'
     && typeof value.version === 'string'
     && typeof value.go === 'string'
+    && isStringOrUndefined(value.build_time)
+}
+
+function normalizeAppVersion(value: BackendAppVersionInfo): AppVersionInfo {
+  return {
+    name: value.name,
+    version: value.version,
+    go: value.go,
+    buildTime: value.build_time,
+  }
 }
 
 function isPathActionShape(value: unknown): value is { path: string } {
@@ -364,19 +413,35 @@ function isStorageStatsShape(value: unknown): value is {
   total_files?: number
   total_files_available?: boolean
   storage_stats_available?: boolean
+  disk_stats_available?: boolean
   total_size?: number
   total_chunks?: number
   unique_size?: number
   dedup_ratio?: number
+  disk_total?: number
+  disk_free?: number
+  disk_available?: number
+  disk_used?: number
+  disk_usage_ratio?: number
+  disk_filesystem_type?: string
+  disk_native_data_checksum_support?: boolean
 } {
   return isRecord(value)
     && isNumberOrUndefined(value.total_files)
     && isBooleanOrUndefined(value.total_files_available)
     && isBooleanOrUndefined(value.storage_stats_available)
+    && isBooleanOrUndefined(value.disk_stats_available)
     && isNumberOrUndefined(value.total_size)
     && isNumberOrUndefined(value.total_chunks)
     && isNumberOrUndefined(value.unique_size)
     && isNumberOrUndefined(value.dedup_ratio)
+    && isNumberOrUndefined(value.disk_total)
+    && isNumberOrUndefined(value.disk_free)
+    && isNumberOrUndefined(value.disk_available)
+    && isNumberOrUndefined(value.disk_used)
+    && isNumberOrUndefined(value.disk_usage_ratio)
+    && isStringOrUndefined(value.disk_filesystem_type)
+    && isBooleanOrUndefined(value.disk_native_data_checksum_support)
 }
 
 function isMoveCopyActionShape(value: unknown): value is { from: string; to: string } {
@@ -495,14 +560,14 @@ function isDiagnosticsShape(value: unknown): value is {
   timestamp: string
   uptime: string
   uptime_secs?: number
-  version: DiagnosticsInfo['version']
+  version: BackendAppVersionInfo
   system?: {
     filesystem_initialized?: boolean
     dataplane_connected?: boolean
     thumbnail_service_ready?: boolean
     maintenance_history_ready?: boolean
     activity_log_ready?: boolean
-     favorites_store_ready?: boolean
+    favorites_store_ready?: boolean
   }
   memory?: {
     alloc_mb?: number
@@ -514,6 +579,29 @@ function isDiagnosticsShape(value: unknown): value is {
   filesystem?: {
     trash_items?: number
     trash_size?: number
+    disk_stats_available?: boolean
+    disk_total?: number
+    disk_free?: number
+    disk_available?: number
+    disk_used?: number
+    disk_usage_ratio?: number
+    disk_filesystem_type?: string
+    disk_native_data_checksum_support?: boolean
+  }
+  alerts?: {
+    enabled?: boolean
+    runtime_available?: boolean
+    check_interval?: string
+    threshold_pct?: number
+    critical_pct?: number
+    min_free_bytes?: number
+    cooldown_period?: string
+    webhook_configured?: boolean
+    webhook_method?: string
+    last_level?: string
+    last_checked_at?: string
+    last_used_pct?: number
+    last_free_bytes?: number
   }
   storage?: {
     total_chunks?: number
@@ -560,7 +648,34 @@ function isDiagnosticsShape(value: unknown): value is {
   if (value.filesystem !== undefined) {
     if (!isRecord(value.filesystem)
       || !isNumberOrUndefined(value.filesystem.trash_items)
-      || !isNumberOrUndefined(value.filesystem.trash_size)) {
+      || !isNumberOrUndefined(value.filesystem.trash_size)
+      || !isBooleanOrUndefined(value.filesystem.disk_stats_available)
+      || !isNumberOrUndefined(value.filesystem.disk_total)
+      || !isNumberOrUndefined(value.filesystem.disk_free)
+      || !isNumberOrUndefined(value.filesystem.disk_available)
+      || !isNumberOrUndefined(value.filesystem.disk_used)
+      || !isNumberOrUndefined(value.filesystem.disk_usage_ratio)
+      || !isStringOrUndefined(value.filesystem.disk_filesystem_type)
+      || !isBooleanOrUndefined(value.filesystem.disk_native_data_checksum_support)) {
+      return false
+    }
+  }
+
+  if (value.alerts !== undefined) {
+    if (!isRecord(value.alerts)
+      || !isBooleanOrUndefined(value.alerts.enabled)
+      || !isBooleanOrUndefined(value.alerts.runtime_available)
+      || !isStringOrUndefined(value.alerts.check_interval)
+      || !isNumberOrUndefined(value.alerts.threshold_pct)
+      || !isNumberOrUndefined(value.alerts.critical_pct)
+      || !isNumberOrUndefined(value.alerts.min_free_bytes)
+      || !isStringOrUndefined(value.alerts.cooldown_period)
+      || !isBooleanOrUndefined(value.alerts.webhook_configured)
+      || !isStringOrUndefined(value.alerts.webhook_method)
+      || !isStringOrUndefined(value.alerts.last_level)
+      || !isStringOrUndefined(value.alerts.last_checked_at)
+      || !isNumberOrUndefined(value.alerts.last_used_pct)
+      || !isNumberOrUndefined(value.alerts.last_free_bytes)) {
       return false
     }
   }
@@ -702,10 +817,24 @@ export async function getStorageStats(): Promise<StorageStats> {
       || data.unique_size !== undefined
       || data.dedup_ratio !== undefined
     ),
+    diskStatsAvailable: data.disk_stats_available ?? (
+      data.disk_total !== undefined
+      || data.disk_free !== undefined
+      || data.disk_available !== undefined
+      || data.disk_used !== undefined
+      || data.disk_usage_ratio !== undefined
+    ),
     totalSize: data.total_size,
     totalObjects: data.total_chunks,
     uniqueSize: data.unique_size,
     dedupRatio: data.dedup_ratio,
+    diskTotal: data.disk_total,
+    diskFree: data.disk_free,
+    diskAvailable: data.disk_available,
+    diskUsed: data.disk_used,
+    diskUsageRatio: data.disk_usage_ratio,
+    diskFilesystemType: data.disk_filesystem_type,
+    diskNativeDataChecksumSupport: data.disk_native_data_checksum_support,
   }
 }
 
@@ -736,7 +865,7 @@ export async function getAppVersion(): Promise<AppVersionInfo> {
   if (!isDiagnosticsVersionShape(data)) {
     throw new Error('服务器返回了无效的数据')
   }
-  return data
+  return normalizeAppVersion(data)
 }
 
 // Get diagnostics info (direct response, not wrapped)
@@ -750,7 +879,7 @@ export async function getDiagnostics(): Promise<DiagnosticsInfo> {
     timestamp: data.timestamp,
     uptime: data.uptime,
     uptimeSecs: data.uptime_secs,
-    version: data.version,
+    version: normalizeAppVersion(data.version),
     system: data.system ? {
       filesystemInitialized: data.system.filesystem_initialized,
       dataplaneConnected: data.system.dataplane_connected,
@@ -769,6 +898,29 @@ export async function getDiagnostics(): Promise<DiagnosticsInfo> {
     filesystem: data.filesystem ? {
       trashItems: data.filesystem.trash_items,
       trashSize: data.filesystem.trash_size,
+      diskStatsAvailable: data.filesystem.disk_stats_available,
+      diskTotal: data.filesystem.disk_total,
+      diskFree: data.filesystem.disk_free,
+      diskAvailable: data.filesystem.disk_available,
+      diskUsed: data.filesystem.disk_used,
+      diskUsageRatio: data.filesystem.disk_usage_ratio,
+      diskFilesystemType: data.filesystem.disk_filesystem_type,
+      diskNativeDataChecksumSupport: data.filesystem.disk_native_data_checksum_support,
+    } : undefined,
+    alerts: data.alerts ? {
+      enabled: data.alerts.enabled,
+      runtimeAvailable: data.alerts.runtime_available,
+      checkInterval: data.alerts.check_interval,
+      thresholdPct: data.alerts.threshold_pct,
+      criticalPct: data.alerts.critical_pct,
+      minFreeBytes: data.alerts.min_free_bytes,
+      cooldownPeriod: data.alerts.cooldown_period,
+      webhookConfigured: data.alerts.webhook_configured,
+      webhookMethod: data.alerts.webhook_method,
+      lastLevel: data.alerts.last_level,
+      lastCheckedAt: data.alerts.last_checked_at,
+      lastUsedPct: data.alerts.last_used_pct,
+      lastFreeBytes: data.alerts.last_free_bytes,
     } : undefined,
     storage: data.storage ? {
       totalChunks: data.storage.total_chunks,

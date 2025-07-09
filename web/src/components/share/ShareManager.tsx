@@ -311,7 +311,7 @@ export function ShareManager({ showAllShares = false, featureEnabled = true }: S
           title="分享功能暂不可用"
           description="分享服务当前不可用，请检查系统健康状态或稍后重试。"
           action={
-            <Button variant="bordered" className="rounded-xl" onPress={() => loadShares()}>
+            <Button variant="bordered" className="rounded-lg" onPress={() => loadShares()}>
               重新加载
             </Button>
           }
@@ -326,7 +326,7 @@ export function ShareManager({ showAllShares = false, featureEnabled = true }: S
         title="加载分享列表失败"
         description={loadError instanceof Error ? loadError.message : '请稍后重试'}
         action={
-          <Button variant="bordered" className="rounded-xl" onPress={() => loadShares()}>
+          <Button variant="bordered" className="rounded-lg" onPress={() => loadShares()}>
             重新加载
           </Button>
         }
@@ -349,7 +349,7 @@ export function ShareManager({ showAllShares = false, featureEnabled = true }: S
   return (
     <div className="space-y-4">
       {/* Header */}
-      <div className="flex items-center justify-between">
+      <div className="flex min-w-0 items-center justify-between gap-3">
         <h2 className="text-lg font-semibold text-foreground">
           我的分享 ({shares.length})
         </h2>
@@ -359,7 +359,7 @@ export function ShareManager({ showAllShares = false, featureEnabled = true }: S
           size="sm"
           onPress={loadShares}
           aria-label="刷新分享列表"
-          className="rounded-xl"
+          className="rounded-lg"
         >
           <RefreshCw size={16} />
         </Button>
@@ -385,14 +385,14 @@ export function ShareManager({ showAllShares = false, featureEnabled = true }: S
         placement="center"
         size="md"
         classNames={{
-          base: "bg-content1 border border-divider shadow-2xl rounded-2xl",
+          base: "bg-content1 border border-divider shadow-xl rounded-lg",
           backdrop: "bg-black/60 backdrop-blur-md",
           closeButton: "top-4 right-4 text-default-400 hover:text-foreground hover:bg-default-100 rounded-lg",
         }}
       >
         <ModalContent>
           <ModalHeader className="flex items-center gap-3 px-6 pt-6 pb-2">
-            <div className="w-10 h-10 rounded-xl bg-danger/10 text-danger flex items-center justify-center">
+            <div className="w-10 h-10 rounded-lg bg-danger/10 text-danger flex items-center justify-center">
               <Trash2 size={20} />
             </div>
             <div>
@@ -403,7 +403,7 @@ export function ShareManager({ showAllShares = false, featureEnabled = true }: S
           <ModalBody className="px-6 py-4">
             <p className="text-default-600">确定要删除此分享链接吗？</p>
             {deleteTarget && (
-              <div className="p-3 bg-content2 rounded-xl mt-3 border border-divider">
+              <div className="p-3 bg-content2 rounded-lg mt-3 border border-divider">
                 <div className="text-xs text-default-500 mb-1">分享路径</div>
                 <div className="font-medium truncate text-foreground flex items-center gap-2">
                   <FileIcon name={deleteTarget.path} isDir={deleteTarget.type === 'folder'} size={16} />
@@ -417,7 +417,7 @@ export function ShareManager({ showAllShares = false, featureEnabled = true }: S
               variant="flat"
               onPress={handleCloseDeleteModal}
               isDisabled={isDeleting}
-              className="text-default-600 rounded-xl"
+              className="text-default-600 rounded-lg"
             >
               取消
             </Button>
@@ -425,7 +425,7 @@ export function ShareManager({ showAllShares = false, featureEnabled = true }: S
               color="danger" 
               onPress={handleDelete}
               isLoading={isDeleting}
-              className="rounded-xl"
+              className="rounded-lg"
             >
               删除
             </Button>
@@ -450,7 +450,7 @@ function ShareItem({ share, onCopy, onToggle, onDelete }: ShareItemProps) {
   return (
     <Card className="card-meridian">
       <CardBody className="p-4">
-        <div className="flex items-start gap-4">
+        <div className="flex flex-col gap-4 sm:flex-row sm:items-start">
           {/* Icon */}
           <FileIcon
             name={fileName}
@@ -459,8 +459,8 @@ function ShareItem({ share, onCopy, onToggle, onDelete }: ShareItemProps) {
           />
 
           {/* Content */}
-          <div className="flex-1 min-w-0">
-            <div className="flex items-center gap-2 mb-1">
+          <div className="min-w-0 flex-1">
+            <div className="mb-1 flex min-w-0 flex-wrap items-center gap-2">
               <span className="font-medium text-foreground truncate">
                 {fileName}
               </span>
@@ -499,21 +499,21 @@ function ShareItem({ share, onCopy, onToggle, onDelete }: ShareItemProps) {
           </div>
 
           {/* Actions */}
-          <div className="flex items-center gap-2">
+          <div className="flex shrink-0 items-center gap-2 self-end sm:self-start">
             <Button
               isIconOnly
               variant="flat"
               size="sm"
               onPress={onCopy}
               aria-label={`${fileName} 复制分享链接`}
-              className="rounded-xl"
+              className="rounded-lg"
             >
               <Copy size={16} />
             </Button>
             
             <Dropdown>
               <DropdownTrigger>
-                <Button isIconOnly variant="flat" size="sm" aria-label={`${fileName} 分享操作`} className="rounded-xl">
+                <Button isIconOnly variant="flat" size="sm" aria-label={`${fileName} 分享操作`} className="rounded-lg">
                   <MoreVertical size={16} />
                 </Button>
               </DropdownTrigger>

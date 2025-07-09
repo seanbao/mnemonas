@@ -293,10 +293,6 @@ func isRecoverableShareLoadError(err error) bool {
 	return errors.As(err, &typeErr)
 }
 
-func (s *ShareStore) save() error {
-	return saveShareState(s.filePath, s.shares)
-}
-
 func saveShareState(filePath string, shares map[string]*Share) error {
 	serializedShares := make([]*Share, 0, len(shares))
 	for _, share := range shares {

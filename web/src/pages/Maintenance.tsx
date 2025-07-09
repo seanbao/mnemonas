@@ -104,7 +104,7 @@ function ResultSummary({ result }: { result: ScrubResult }) {
   }
   
   return (
-    <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mt-4">
+    <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2 md:grid-cols-4">
       <StatCard
         title="总对象数"
         value={formatCount(result.total_objects)}
@@ -143,26 +143,28 @@ function ErrorList({ errors }: { errors: ScrubError[] }) {
         <FileWarning size={16} className="text-danger" />
         发现的问题 ({errors.length})
       </h4>
-      <Table aria-label="错误列表" isStriped>
-        <TableHeader>
-          <TableColumn>哈希</TableColumn>
-          <TableColumn>错误类型</TableColumn>
-          <TableColumn>详情</TableColumn>
-        </TableHeader>
-        <TableBody>
-          {errors.slice(0, 100).map((error, index) => (
-            <TableRow key={index}>
-              <TableCell>
-                <code className="text-xs">{error.hash.slice(0, 16)}...</code>
-              </TableCell>
-              <TableCell>
-                <Chip size="sm" color="danger" variant="flat">{error.error_type}</Chip>
-              </TableCell>
-              <TableCell className="text-sm">{error.message}</TableCell>
-            </TableRow>
-          ))}
-        </TableBody>
-      </Table>
+      <div className="responsive-table">
+        <Table aria-label="错误列表" isStriped>
+          <TableHeader>
+            <TableColumn>哈希</TableColumn>
+            <TableColumn>错误类型</TableColumn>
+            <TableColumn>详情</TableColumn>
+          </TableHeader>
+          <TableBody>
+            {errors.slice(0, 100).map((error, index) => (
+              <TableRow key={index}>
+                <TableCell>
+                  <code className="text-xs">{error.hash.slice(0, 16)}...</code>
+                </TableCell>
+                <TableCell>
+                  <Chip size="sm" color="danger" variant="flat">{error.error_type}</Chip>
+                </TableCell>
+                <TableCell className="text-sm">{error.message}</TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      </div>
       {errors.length > 100 && (
         <p className="text-sm text-default-500 mt-2">
           仅显示前 100 条，共 {errors.length} 条错误
@@ -287,14 +289,14 @@ export default function Maintenance() {
   
   return (
     <div className="h-full overflow-auto custom-scrollbar">
-      <div className="p-6 space-y-6">
+      <div className="space-y-6 p-4 sm:p-6">
       <PageHeader
         title="系统维护"
         subtitle="数据校验与诊断工具"
         icon={ShieldCheck}
         actions={
           <Button
-            className="btn-secondary rounded-xl"
+            className="btn-secondary rounded-lg"
             startContent={<Download size={18} />}
             isLoading={isExporting}
             onPress={handleExport}
@@ -306,9 +308,9 @@ export default function Maintenance() {
       
       {/* Scrub Card */}
       <Card className="card-meridian">
-        <CardHeader className="flex flex-row items-center justify-between pb-2">
+        <CardHeader className="flex flex-col items-start gap-3 pb-2 sm:flex-row sm:items-center sm:justify-between">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-accent-primary/15 flex items-center justify-center">
+            <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-accent-primary/15">
               <ShieldCheck size={20} className="text-accent-primary" />
             </div>
             <div>
@@ -316,10 +318,10 @@ export default function Maintenance() {
               <p className="text-xs text-default-500">验证所有存储对象的 BLAKE3 哈希值</p>
             </div>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             {scrubResult && <StatusChip status={scrubResult.status} warning={scrubResult.warning} />}
             <Button
-              className="btn-primary shadow-md rounded-xl"
+              className="btn-primary rounded-lg shadow-md"
               startContent={isRunning ? <RefreshCw size={18} className="animate-spin" /> : <Play size={18} />}
               isLoading={scrubMutation.isPending}
               isDisabled={isRunning}
@@ -342,7 +344,7 @@ export default function Maintenance() {
                 title={loadErrorPresentation.title}
                 description={loadErrorPresentation.description}
                 action={
-                  <Button variant="bordered" className="rounded-xl" onPress={handleRefreshScrubResult}>
+                  <Button variant="bordered" className="rounded-lg" onPress={handleRefreshScrubResult}>
                     重新加载
                   </Button>
                 }
