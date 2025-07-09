@@ -260,6 +260,18 @@ function isMissingFileActionResult(result: ActionResult): result is MissingFileA
   return !!result && typeof result === 'object' && 'staleMissing' in result && result.staleMissing === true
 }
 
+async function withMissingFileActionResult(operation: () => Promise<ActionResult>): Promise<ActionResult> {
+  try {
+    return await operation()
+  } catch (error) {
+    if (getErrorStatus(error) === 404) {
+      return getMissingFileActionResult()
+    }
+
+    throw error
+  }
+}
+
 function getFavoriteActionErrorToast(error: unknown): {
   title: string
   description: string
@@ -993,8 +1005,8 @@ export function FilesPage() {
   const fileScopeKey = getFileQueryScopeKey(user)
   const { scopedHomeDir, hasInvalidHomeDir } = resolveUserHomeScope(user)
   const favoritesScopeKey = `${authScopeKey}:${hasInvalidHomeDir ? '__invalid__' : (scopedHomeDir ?? '/')}`
-  const favoritesListQueryKey = ['favorites', favoritesScopeKey] as const
-  const favoritesCheckQueryKey = ['favorites-check', favoritesScopeKey] as const
+  const favoritesListQueryKey = useMemo(() => ['favorites', favoritesScopeKey] as const, [favoritesScopeKey])
+  const favoritesCheckQueryKey = useMemo(() => ['favorites-check', favoritesScopeKey] as const, [favoritesScopeKey])
   
   // Track focused file index for keyboard navigation
   const [focusedIndex, setFocusedIndex] = useState<number>(-1)
@@ -1171,15 +1183,11 @@ export function FilesPage() {
   }, [filesQueryKey, queryClient])
 
   const deleteFileWithMissingSync = useCallback(async (path: string) => {
-    try {
-      return await deleteFile(path)
-    } catch (error) {
-      if (getErrorStatus(error) === 404) {
-        return getMissingFileActionResult()
-      }
+    return withMissingFileActionResult(() => deleteFile(path))
+  }, [])
 
-      throw error
-    }
+  const deleteSingleFileWithMissingSync = useCallback(async (path: string) => {
+    return withMissingFileActionResult(() => deleteFile(path, {}))
   }, [])
 
   const moveFileWithMissingSync = useCallback(async (fromPath: string, toPath: string) => {
@@ -1208,7 +1216,7 @@ export function FilesPage() {
 
   // Mutations (omitted for brevity, same as before)
   const deleteMutation = useMutation({
-    mutationFn: deleteFileWithMissingSync,
+    mutationFn: deleteSingleFileWithMissingSync,
     onSuccess: (result, path) => {
       removeFilesFromCache([path])
       queryClient.invalidateQueries({ queryKey: filesQueryKey })

@@ -6,9 +6,9 @@ on:
       - 'v*'
 
 env:
-  GO_VERSION: '1.22'
-  RUST_VERSION: '1.75'
-  NODE_VERSION: '20'
+  GO_VERSION: '1.25'
+  RUST_VERSION: '1.92'
+  NODE_VERSION: '22'
 
 permissions:
   contents: write
@@ -105,10 +105,20 @@ jobs:
 
       - name: Create archive
         run: |
-          cd dist
-          tar -czvf mnemonas-${{ github.ref_name }}-${{ matrix.os }}-${{ matrix.arch }}.tar.gz \
-            nasd-${{ matrix.os }}-${{ matrix.arch }} \
-            dataplane-${{ matrix.os }}-${{ matrix.arch }}
+          rm -rf dist/package
+          mkdir -p dist/package/web
+          install -m 755 dist/nasd-${{ matrix.os }}-${{ matrix.arch }} dist/package/nasd
+          install -m 755 dist/dataplane-${{ matrix.os }}-${{ matrix.arch }} dist/package/dataplane
+          cp -R web/dist/. dist/package/web/
+          install -m 644 mnemonas.example.toml README.md LICENSE dist/package/
+          tar -czvf dist/mnemonas-${{ github.ref_name }}-${{ matrix.os }}-${{ matrix.arch }}.tar.gz \
+            -C dist/package \
+            nasd \
+            dataplane \
+            web \
+            mnemonas.example.toml \
+            README.md \
+            LICENSE
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

@@ -443,10 +443,11 @@ function isTrashListResponseShape(value: unknown): value is {
     && isNumberOrUndefined(value.retentionMaxSize)
 }
 
-function isEmptyTrashResultShape(value: unknown): value is { deleted_count: number; partial?: boolean } {
+function isEmptyTrashResultShape(value: unknown): value is { deleted_count: number; partial?: boolean; warning?: boolean } {
   return isRecord(value)
     && typeof value.deleted_count === 'number'
     && isBooleanOrUndefined(value.partial)
+    && isBooleanOrUndefined(value.warning)
 }
 
 function isHealthShape(value: unknown): value is HealthStatus {
@@ -675,10 +676,11 @@ export async function getVersions(path: string): Promise<VersionInfo[]> {
 }
 
 // Delete a file (soft delete)
-export async function deleteFile(path: string): Promise<ActionResult> {
+export async function deleteFile(path: string, options: RequestInit = {}): Promise<ActionResult> {
   const normalizedPath = normalizePath(path)
   const encodedPath = encodePathForUrl(normalizedPath)
   const response = await authFetch(`${API_BASE}/files${encodedPath}`, {
+    ...options,
     method: 'DELETE',
   })
   return expectWrappedActionResponse(response, '删除文件失败', isPathActionShape)

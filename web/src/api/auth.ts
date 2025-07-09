@@ -253,7 +253,12 @@ function getDownloadSessionSyncMessage(responseMessage?: string): string {
   return responseMessage || '原始预览和下载会话同步失败，请稍后重试'
 }
 
-async function syncDownloadSession(): Promise<{ ok: boolean; message?: string }> {
+interface DownloadSessionResult {
+  ok: boolean
+  message?: string
+}
+
+async function syncDownloadSession(): Promise<DownloadSessionResult> {
   const token = getStoredToken()
   if (!token) {
     isDownloadSessionReady = false
@@ -535,4 +540,3 @@ export async function getCurrentUser(): Promise<User | null> {
   await syncDownloadSession()
   return user
 }
-

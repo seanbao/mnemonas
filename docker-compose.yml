@@ -2,12 +2,9 @@ services:
   mnemonas:
     build: .
     ports:
-      - "8080:8080"    # WebDAV + API
+      - "8080:8080"    # Web UI + API + WebDAV
     volumes:
       - ~/.mnemonas:/root/.mnemonas
-      - ~/.mnemonas/config.toml:/root/.mnemonas/config.toml:ro
-    environment:
-      - LOG_LEVEL=info
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/health"]

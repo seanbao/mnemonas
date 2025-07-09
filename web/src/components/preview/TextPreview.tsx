@@ -1,58 +1,125 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, type ReactNode } from 'react'
 import { Spinner } from '@heroui/react'
 import { FileCode, AlertCircle } from 'lucide-react'
 import { buildPreviewUrl, getLanguageFromExtension } from '@/lib/preview-utils'
 import { authFetch } from '@/api/auth'
 import { cn } from '@/lib/utils'
 
-// Simple syntax highlighting for common patterns
-function highlightCode(code: string, language: string): string {
-  // Basic keyword highlighting for common languages
-  const keywords: Record<string, string[]> = {
-    javascript: ['const', 'let', 'var', 'function', 'return', 'if', 'else', 'for', 'while', 'class', 'import', 'export', 'from', 'async', 'await', 'try', 'catch', 'throw', 'new', 'this', 'true', 'false', 'null', 'undefined'],
-    typescript: ['const', 'let', 'var', 'function', 'return', 'if', 'else', 'for', 'while', 'class', 'import', 'export', 'from', 'async', 'await', 'try', 'catch', 'throw', 'new', 'this', 'true', 'false', 'null', 'undefined', 'interface', 'type', 'enum', 'implements', 'extends'],
-    python: ['def', 'class', 'import', 'from', 'return', 'if', 'elif', 'else', 'for', 'while', 'try', 'except', 'with', 'as', 'True', 'False', 'None', 'and', 'or', 'not', 'in', 'is', 'lambda', 'yield', 'async', 'await'],
-    go: ['func', 'package', 'import', 'return', 'if', 'else', 'for', 'range', 'switch', 'case', 'default', 'struct', 'interface', 'type', 'var', 'const', 'true', 'false', 'nil', 'defer', 'go', 'chan', 'map', 'make', 'new'],
-    rust: ['fn', 'let', 'mut', 'const', 'if', 'else', 'for', 'while', 'loop', 'match', 'struct', 'enum', 'impl', 'trait', 'pub', 'use', 'mod', 'crate', 'self', 'super', 'true', 'false', 'async', 'await', 'return', 'where'],
-  }
-  
-  // Get keywords for the language or use a default set
+const maxPreviewBytes = 1024 * 1024
+
+const keywords: Record<string, string[]> = {
+  javascript: ['const', 'let', 'var', 'function', 'return', 'if', 'else', 'for', 'while', 'class', 'import', 'export', 'from', 'async', 'await', 'try', 'catch', 'throw', 'new', 'this', 'true', 'false', 'null', 'undefined'],
+  typescript: ['const', 'let', 'var', 'function', 'return', 'if', 'else', 'for', 'while', 'class', 'import', 'export', 'from', 'async', 'await', 'try', 'catch', 'throw', 'new', 'this', 'true', 'false', 'null', 'undefined', 'interface', 'type', 'enum', 'implements', 'extends'],
+  python: ['def', 'class', 'import', 'from', 'return', 'if', 'elif', 'else', 'for', 'while', 'try', 'except', 'with', 'as', 'True', 'False', 'None', 'and', 'or', 'not', 'in', 'is', 'lambda', 'yield', 'async', 'await'],
+  go: ['func', 'package', 'import', 'return', 'if', 'else', 'for', 'range', 'switch', 'case', 'default', 'struct', 'interface', 'type', 'var', 'const', 'true', 'false', 'nil', 'defer', 'go', 'chan', 'map', 'make', 'new'],
+  rust: ['fn', 'let', 'mut', 'const', 'if', 'else', 'for', 'while', 'loop', 'match', 'struct', 'enum', 'impl', 'trait', 'pub', 'use', 'mod', 'crate', 'self', 'super', 'true', 'false', 'async', 'await', 'return', 'where'],
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+function buildTokenRegex(language: string): RegExp {
   const langKeywords = keywords[language] || keywords.javascript || []
-  
-  // Escape HTML
-  let escaped = code
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-  
-  // Highlight strings (simple single and double quotes)
-  escaped = escaped.replace(
-    /(["'`])(?:(?!\1|\\).|\\.)*\1/g,
-    '<span class="text-emerald-500">$&</span>'
-  )
-  
-  // Highlight comments (// and #)
-  escaped = escaped.replace(
-    /(\/\/.*|#.*)/g,
-    '<span class="text-default-400 italic">$1</span>'
-  )
-  
-  // Highlight numbers
-  escaped = escaped.replace(
-    /\b(\d+\.?\d*)\b/g,
-    '<span class="text-amber-500">$1</span>'
-  )
-  
-  // Highlight keywords
-  for (const keyword of langKeywords) {
-    const regex = new RegExp(`\\b(${keyword})\\b`, 'g')
-    escaped = escaped.replace(
-      regex,
-      '<span class="text-purple-400 font-medium">$1</span>'
-    )
+  const keywordPattern = langKeywords.map(escapeRegExp).join('|')
+  const patterns = [
+    '(["\\\'`])(?:\\\\.|(?!\\1).)*\\1',
+    '\\/\\/.*|#.*',
+    '\\b\\d+\\.?\\d*\\b',
+  ]
+  if (keywordPattern) {
+    patterns.push(`\\b(?:${keywordPattern})\\b`)
   }
-  
-  return escaped
+  return new RegExp(patterns.join('|'), 'g')
+}
+
+function tokenClass(token: string, language: string): string | null {
+  if (/^(["'`])/.test(token)) {
+    return 'text-emerald-500'
+  }
+  if (token.startsWith('//') || token.startsWith('#')) {
+    return 'text-default-400 italic'
+  }
+  if (/^\d+\.?\d*$/.test(token)) {
+    return 'text-amber-500'
+  }
+  const langKeywords = keywords[language] || keywords.javascript || []
+  if (langKeywords.includes(token)) {
+    return 'text-purple-400 font-medium'
+  }
+  return null
+}
+
+function highlightLine(line: string, language: string): ReactNode[] {
+  const tokenRegex = buildTokenRegex(language)
+  const parts: ReactNode[] = []
+  let lastIndex = 0
+
+  for (const match of line.matchAll(tokenRegex)) {
+    const token = match[0]
+    const index = match.index ?? 0
+    if (index > lastIndex) {
+      parts.push(line.slice(lastIndex, index))
+    }
+
+    const className = tokenClass(token, language)
+    parts.push(className ? (
+      <span key={`${index}-${token}`} className={className}>
+        {token}
+      </span>
+    ) : token)
+    lastIndex = index + token.length
+  }
+
+  if (lastIndex < line.length) {
+    parts.push(line.slice(lastIndex))
+  }
+
+  return parts
+}
+
+async function readLimitedText(response: Response): Promise<string> {
+  const contentLength = response.headers.get('content-length')
+  if (contentLength && parseInt(contentLength, 10) > maxPreviewBytes) {
+    throw new Error('文件过大，无法预览')
+  }
+
+  if (!response.body) {
+    const text = await response.text()
+    if (new TextEncoder().encode(text).byteLength > maxPreviewBytes) {
+      throw new Error('文件过大，无法预览')
+    }
+    return text
+  }
+
+  const reader = response.body.getReader()
+  const chunks: Uint8Array[] = []
+  let received = 0
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) {
+        break
+      }
+      received += value.byteLength
+      if (received > maxPreviewBytes) {
+        void reader.cancel().catch(() => {})
+        throw new Error('文件过大，无法预览')
+      }
+      chunks.push(value)
+    }
+  } finally {
+    reader.releaseLock()
+  }
+
+  const buffer = new Uint8Array(received)
+  let offset = 0
+  for (const chunk of chunks) {
+    buffer.set(chunk, offset)
+    offset += chunk.byteLength
+  }
+  return new TextDecoder().decode(buffer)
 }
 
 export interface TextPreviewProps {
@@ -84,13 +151,7 @@ export function TextPreview({ path, filename, className }: TextPreviewProps) {
           throw new Error(`加载失败: ${response.statusText}`)
         }
         
-        // Check file size - limit to 1MB for preview
-        const contentLength = response.headers.get('content-length')
-        if (contentLength && parseInt(contentLength) > 1024 * 1024) {
-          throw new Error('文件过大，无法预览')
-        }
-        
-        const text = await response.text()
+        const text = await readLimitedText(response)
         if (!cancelled) {
           setContent(text)
         }
@@ -139,7 +200,6 @@ export function TextPreview({ path, filename, className }: TextPreviewProps) {
   }
 
   const lines = content.split('\n')
-  const highlightedContent = highlightCode(content, language)
 
   return (
     <div className={cn("h-full flex flex-col bg-content1 rounded-xl overflow-hidden", className)}>
@@ -166,9 +226,13 @@ export function TextPreview({ path, filename, className }: TextPreviewProps) {
           
           {/* Code content */}
           <pre className="flex-1 py-4 px-4 text-sm font-mono leading-6 overflow-x-auto">
-            <code 
-              dangerouslySetInnerHTML={{ __html: highlightedContent }}
-            />
+            <code className="block">
+              {lines.map((line, index) => (
+                <span key={index} className="block min-h-6">
+                  {highlightLine(line, language)}
+                </span>
+              ))}
+            </code>
           </pre>
         </div>
       </div>

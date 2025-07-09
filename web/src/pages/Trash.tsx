@@ -257,7 +257,7 @@ export function TrashPage() {
   const user = useUser()
   const { hasInvalidHomeDir } = resolveUserHomeScope(user)
   const authScopeKey = user?.id ?? 'anonymous'
-  const trashQueryKey = ['trash', authScopeKey] as const
+  const trashQueryKey = useMemo(() => ['trash', authScopeKey] as const, [authScopeKey])
   const [selectedItems, setSelectedItems] = useState<Set<string>>(new Set())
   const [actionItem, setActionItem] = useState<TrashItem | null>(null)
   const actionItemRef = useRef(actionItem)

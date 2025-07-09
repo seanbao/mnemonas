@@ -221,7 +221,8 @@ curl http://<server-ip>:8080/dav/
 #### 多用户权限边界
 
 - 当前版本已支持多用户与角色（admin/user/guest）
-- 文件与目录权限隔离尚未实现，所有登录用户共享同一数据空间
+- 非管理员用户按账号 `home_dir` 限制文件、搜索、收藏、分享、回收站与活动日志范围
+- WebDAV Basic Auth 是全局服务凭据，不携带应用层用户身份；需要按用户隔离时应使用 Web UI/API 账号访问
 
 #### 速率限制粒度
 
@@ -244,7 +245,7 @@ location /api/ {
 - 文件下载、版本预览、音视频预览与外部打开使用短期 `HttpOnly` download-session cookie，不再通过 URL 查询参数传递长期访问令牌
 - 该 cookie 由已认证会话在登录、初始化或刷新令牌后同步到 `/api/v1` 路径，并覆盖下载与缩略图请求
 - 内部文件预览与缩略图链路不再依赖 `auth` 查询参数
-- `Secure` 标记只会在实际 HTTPS 或请求直接来自 loopback / 私有网段代理且 `X-Forwarded-Proto=https` 时启用，避免公网请求伪造 HTTPS 语义
+- `Secure` 标记只会在实际 HTTPS，或显式启用 `trusted_proxy_hops > 0` 且请求直接来自 loopback / 私有网段代理并携带 `X-Forwarded-Proto=https` 时启用，避免公网请求伪造 HTTPS 语义
 
 #### 公开分享密码验证
 
@@ -252,7 +253,7 @@ location /api/ {
 - 文件夹浏览与文件下载依赖该 cookie，不再通过 URL 查询参数传递分享密码
 - 清除浏览器站点数据、切换浏览器或密码变更后，需要重新输入分享密码
 - 同一 share 与客户端地址组合连续 5 次口令失败后，会锁定 5 分钟并返回 `429 Too Many Requests`
-- 客户端地址默认按一层受信代理解析；仅当请求直接来自 loopback 或私有网段代理时，才信任转发头，并按 `server.trusted_proxy_hops` 从 `X-Forwarded-For` 右侧回溯客户端地址。多跳代理部署需要显式提高该值；设置为 `0` 时始终使用直连来源
+- 客户端地址默认不信任转发头，始终使用直连来源；只有显式设置 `server.trusted_proxy_hops > 0` 且请求直接来自 loopback 或私有网段代理时，才按 `X-Forwarded-For` 从右侧回溯客户端地址。多跳代理部署需要设置为代理总层数
 - `Secure` cookie 标记同样只在实际 HTTPS 或受信代理转发的 HTTPS 请求上启用
 
 ### 路线图

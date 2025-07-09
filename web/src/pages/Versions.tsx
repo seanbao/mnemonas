@@ -288,9 +288,6 @@ function VersionsPageContent({ authScopeKey, initialPath, isAdmin, scopedHomeDir
 
   useEffect(() => {
     if (hasInvalidHomeDir) {
-      setSearchPath('')
-      setSelectedPath(null)
-      setSelectedVersion(null)
       setSearchParams({})
       return
     }
