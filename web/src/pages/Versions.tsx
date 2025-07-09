@@ -235,6 +235,7 @@ function VersionRow({ version, index, isLatest, canRestore, onPreview, onRestore
 export function VersionsPage() {
   const isAdmin = useIsAdmin()
   const user = useUser()
+  const authScopeKey = `${user?.id ?? 'anonymous'}:${isAdmin ? 'admin' : 'scoped'}:${!isAdmin && user?.homeDir ? user.homeDir : '/'}`
   const [searchParams, setSearchParams] = useSearchParams()
   const initialPath = (searchParams.get('path') || '').trim()
   const normalizedInitialPath = initialPath ? (initialPath.startsWith('/') ? initialPath : `/${initialPath}`) : ''
@@ -244,6 +245,7 @@ export function VersionsPage() {
   return (
     <VersionsPageContent
       key={`${hasInvalidHomeDir ? 'invalid' : effectiveScopedHomeDir}:${normalizedInitialPath || '__empty__'}`}
+      authScopeKey={authScopeKey}
       initialPath={normalizedInitialPath}
       isAdmin={isAdmin}
       scopedHomeDir={effectiveScopedHomeDir}
@@ -254,6 +256,7 @@ export function VersionsPage() {
 }
 
 interface VersionsPageContentProps {
+  authScopeKey: string
   initialPath: string
   isAdmin: boolean
   scopedHomeDir: string
@@ -261,7 +264,7 @@ interface VersionsPageContentProps {
   setSearchParams: SetURLSearchParams
 }
 
-function VersionsPageContent({ initialPath, isAdmin, scopedHomeDir, hasInvalidHomeDir, setSearchParams }: VersionsPageContentProps) {
+function VersionsPageContent({ authScopeKey, initialPath, isAdmin, scopedHomeDir, hasInvalidHomeDir, setSearchParams }: VersionsPageContentProps) {
   const initialState = hasInvalidHomeDir
     ? { searchPath: '', selectedPath: null, isBlocked: false }
     : getVersionQueryState(initialPath, scopedHomeDir)
@@ -303,7 +306,7 @@ function VersionsPageContent({ initialPath, isAdmin, scopedHomeDir, hasInvalidHo
   }, [hasInvalidHomeDir, initialState.isBlocked, setSearchParams])
 
   const { data: versions, isLoading, error, refetch } = useQuery({
-    queryKey: ['versions', selectedPath],
+    queryKey: ['versions', authScopeKey, selectedPath],
     queryFn: () => getVersions(selectedPath!),
     enabled: !!selectedPath && selectedPathAllowed,
   })
@@ -327,7 +330,7 @@ function VersionsPageContent({ initialPath, isAdmin, scopedHomeDir, hasInvalidHo
     },
     retry: false,
     onSuccess: (result, variables) => {
-      queryClient.invalidateQueries({ queryKey: ['versions', variables.path] })
+      queryClient.invalidateQueries({ queryKey: ['versions', authScopeKey, variables.path] })
       queryClient.invalidateQueries({ queryKey: ['files'] })
       addToast(getVersionsActionSuccessToast(result))
       if (
@@ -340,7 +343,7 @@ function VersionsPageContent({ initialPath, isAdmin, scopedHomeDir, hasInvalidHo
     },
     onError: (error: unknown, variables) => {
       if (isMissingVersionError(error)) {
-        queryClient.invalidateQueries({ queryKey: ['versions', variables.path] })
+        queryClient.invalidateQueries({ queryKey: ['versions', authScopeKey, variables.path] })
         queryClient.invalidateQueries({ queryKey: ['files'] })
         if (
           restoreSessionRef.current === variables.sessionId
@@ -417,7 +420,7 @@ function VersionsPageContent({ initialPath, isAdmin, scopedHomeDir, hasInvalidHo
   const handleDownload = (version: VersionInfo) => {
     void downloadFile(selectedPath!, { version: version.hash }).catch((error: unknown) => {
       if (selectedPath && isMissingVersionError(error)) {
-        queryClient.invalidateQueries({ queryKey: ['versions', selectedPath] })
+        queryClient.invalidateQueries({ queryKey: ['versions', authScopeKey, selectedPath] })
         addToast(getMissingVersionToast('download'))
         return
       }

@@ -22,6 +22,36 @@ var (
 	errFavoritesStoreSymlink = errors.New("favorites store path must not be a symlink")
 )
 
+// PersistenceWarningError reports that the favorites mutation is already
+// visible on disk, but the final directory fsync did not complete.
+type PersistenceWarningError struct {
+	err error
+}
+
+func (e *PersistenceWarningError) Error() string {
+	return e.err.Error()
+}
+
+func (e *PersistenceWarningError) Unwrap() error {
+	return e.err
+}
+
+func WrapPersistenceWarning(err error) error {
+	if err == nil {
+		return nil
+	}
+	var warningErr *PersistenceWarningError
+	if errors.As(err, &warningErr) {
+		return err
+	}
+	return &PersistenceWarningError{err: err}
+}
+
+func IsPersistenceWarning(err error) bool {
+	var warningErr *PersistenceWarningError
+	return errors.As(err, &warningErr)
+}
+
 // Favorite represents a favorited file or folder
 type Favorite struct {
 	Path      string    `json:"path"`
@@ -89,6 +119,16 @@ func normalizeStoredFavoritePath(rawPath string) (string, error) {
 	return path.Clean("/" + normalized), nil
 }
 
+func normalizeRestoredFavorite(favorite *Favorite) (*Favorite, error) {
+	normalized := copyFavorite(favorite)
+	cleanPath, err := normalizeStoredFavoritePath(normalized.Path)
+	if err != nil {
+		return nil, err
+	}
+	normalized.Path = cleanPath
+	return normalized, nil
+}
+
 // NewStore creates a new favorites store
 func NewStore(filePath string) (*Store, error) {
 	normalizedPath, err := ensureFavoritesStoreDirRoot(filePath, false)
@@ -152,7 +192,9 @@ func (s *Store) load() error {
 
 	if needsRewrite {
 		if err := saveFavoritesState(s.filePath, s.data); err != nil {
-			return fmt.Errorf("persist normalized favorites: %w", err)
+			if !IsPersistenceWarning(err) {
+				return fmt.Errorf("persist normalized favorites: %w", err)
+			}
 		}
 	}
 
@@ -260,6 +302,17 @@ func (s *Store) commitSnapshot(snapshot favoritesSnapshot) bool {
 	s.data = snapshot.data
 	s.version++
 	return true
+}
+
+func (s *Store) persistSnapshot(snapshot favoritesSnapshot) (bool, error) {
+	err := saveFavoritesState(snapshot.filePath, snapshot.data)
+	if err != nil && !IsPersistenceWarning(err) {
+		return false, err
+	}
+	if !s.commitSnapshot(snapshot) {
+		return false, nil
+	}
+	return true, err
 }
 
 func validateFavoritesStorePath(path string) error {
@@ -499,7 +552,7 @@ func writeFavoritesStoreFileAtomicallyWithRoot(root *os.Root, path string, data 
 	}
 	cleanup = false
 	if err := syncRegisteredFavoritesStoreDir(path); err != nil {
-		return fmt.Errorf("failed to sync favorites directory: %w", err)
+		return WrapPersistenceWarning(fmt.Errorf("failed to sync favorites directory: %w", err))
 	}
 
 	return nil
@@ -614,7 +667,7 @@ func writeFavoritesStoreFileAtomically(path string, data []byte) error {
 	}
 	cleanup = false
 	if err := syncFavoritesStoreDir(dir); err != nil {
-		return fmt.Errorf("failed to sync favorites directory: %w", err)
+		return WrapPersistenceWarning(fmt.Errorf("failed to sync favorites directory: %w", err))
 	}
 
 	return nil
@@ -699,16 +752,56 @@ func syncFavoritesDir(dir string) error {
 	return dirHandle.Sync()
 }
 
+func favoriteUserIdentifiers(userID string, extraUserIDs ...string) []string {
+	identifiers := make([]string, 0, 1+len(extraUserIDs))
+	appendUnique := func(value string) {
+		trimmed := strings.TrimSpace(value)
+		if trimmed == "" {
+			return
+		}
+		for _, existing := range identifiers {
+			if existing == trimmed {
+				return
+			}
+		}
+		identifiers = append(identifiers, trimmed)
+	}
+
+	appendUnique(userID)
+	for _, extraUserID := range extraUserIDs {
+		appendUnique(extraUserID)
+	}
+	return identifiers
+}
+
+func findFavoriteOwner(data map[string]map[string]*Favorite, cleanPath string, identifiers []string) (string, *Favorite) {
+	for _, identifier := range identifiers {
+		userFavs := data[identifier]
+		if userFavs == nil {
+			continue
+		}
+		if favorite, ok := userFavs[cleanPath]; ok {
+			return identifier, favorite
+		}
+	}
+	return "", nil
+}
+
 // Add adds a path to favorites
-func (s *Store) Add(userID, path, note string) (*Favorite, error) {
+func (s *Store) Add(userID, path, note string, extraUserIDs ...string) (*Favorite, error) {
 	cleanPath, err := normalizeStoredFavoritePath(path)
 	if err != nil {
 		return nil, err
 	}
+	identifiers := favoriteUserIdentifiers(userID, extraUserIDs...)
+	primaryUserID := ""
+	if len(identifiers) > 0 {
+		primaryUserID = identifiers[0]
+	}
 
 	fav := &Favorite{
 		Path:      cleanPath,
-		UserID:    userID,
+		UserID:    primaryUserID,
 		CreatedAt: time.Now(),
 		Note:      note,
 	}
@@ -717,70 +810,86 @@ func (s *Store) Add(userID, path, note string) (*Favorite, error) {
 
 	for {
 		snapshot := s.snapshotState()
-		if snapshot.data[userID] == nil {
-			snapshot.data[userID] = make(map[string]*Favorite)
-		}
-		if _, exists := snapshot.data[userID][cleanPath]; exists {
+		if primaryUserID == "" {
 			return nil, ErrAlreadyFavorited
 		}
-
-		snapshot.data[userID][cleanPath] = copyFavorite(fav)
-
-		if err := saveFavoritesState(snapshot.filePath, snapshot.data); err != nil {
-			return nil, err
+		if _, existing := findFavoriteOwner(snapshot.data, cleanPath, identifiers); existing != nil {
+			return nil, ErrAlreadyFavorited
 		}
-		if s.commitSnapshot(snapshot) {
-			return copyFavorite(fav), nil
+		if snapshot.data[primaryUserID] == nil {
+			snapshot.data[primaryUserID] = make(map[string]*Favorite)
+		}
+
+		snapshot.data[primaryUserID][cleanPath] = copyFavorite(fav)
+		committed, err := s.persistSnapshot(snapshot)
+		if committed {
+			return copyFavorite(fav), err
+		}
+		if err != nil {
+			return nil, err
 		}
 	}
 }
 
 // Remove removes a path from favorites
-func (s *Store) Remove(userID, path string) error {
+func (s *Store) Remove(userID, path string, extraUserIDs ...string) error {
 	cleanPath, err := normalizeStoredFavoritePath(path)
 	if err != nil {
 		return err
 	}
+	identifiers := favoriteUserIdentifiers(userID, extraUserIDs...)
 
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 
 	for {
 		snapshot := s.snapshotState()
-		if snapshot.data[userID] == nil {
-			return ErrFavoriteNotFound
-		}
-		if _, exists := snapshot.data[userID][cleanPath]; !exists {
+		ownerID, _ := findFavoriteOwner(snapshot.data, cleanPath, identifiers)
+		if ownerID == "" {
 			return ErrFavoriteNotFound
 		}
 
-		delete(snapshot.data[userID], cleanPath)
-		if len(snapshot.data[userID]) == 0 {
-			delete(snapshot.data, userID)
+		delete(snapshot.data[ownerID], cleanPath)
+		if len(snapshot.data[ownerID]) == 0 {
+			delete(snapshot.data, ownerID)
 		}
-
-		if err := saveFavoritesState(snapshot.filePath, snapshot.data); err != nil {
+		committed, err := s.persistSnapshot(snapshot)
+		if committed {
 			return err
 		}
-		if s.commitSnapshot(snapshot) {
-			return nil
+		if err != nil {
+			return err
 		}
 	}
 }
 
 // List returns all favorites for a user, sorted by creation time (newest first)
-func (s *Store) List(userID string) []*Favorite {
+func (s *Store) List(userID string, extraUserIDs ...string) []*Favorite {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-
-	userFavs := s.data[userID]
-	if userFavs == nil {
+	identifiers := favoriteUserIdentifiers(userID, extraUserIDs...)
+	if len(identifiers) == 0 {
 		return []*Favorite{}
 	}
+	primaryUserID := identifiers[0]
 
-	favorites := make([]*Favorite, 0, len(userFavs))
-	for _, fav := range userFavs {
-		favorites = append(favorites, copyFavorite(fav))
+	favoritesByPath := make(map[string]*Favorite)
+	for _, identifier := range identifiers {
+		for _, fav := range s.data[identifier] {
+			if _, exists := favoritesByPath[fav.Path]; exists {
+				continue
+			}
+			cloned := copyFavorite(fav)
+			if primaryUserID != "" {
+				cloned.UserID = primaryUserID
+			}
+			favoritesByPath[cloned.Path] = cloned
+		}
+	}
+
+	favorites := make([]*Favorite, 0, len(favoritesByPath))
+	for _, fav := range favoritesByPath {
+		favorites = append(favorites, fav)
 	}
 
 	// Sort by creation time, newest first
@@ -795,29 +904,27 @@ func (s *Store) List(userID string) []*Favorite {
 }
 
 // IsFavorite checks if a path is favorited by a user
-func (s *Store) IsFavorite(userID, path string) bool {
+func (s *Store) IsFavorite(userID, path string, extraUserIDs ...string) bool {
 	cleanPath, err := normalizeStoredFavoritePath(path)
 	if err != nil {
 		return false
 	}
+	identifiers := favoriteUserIdentifiers(userID, extraUserIDs...)
 
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	if s.data[userID] == nil {
-		return false
-	}
-	_, exists := s.data[userID][cleanPath]
-	return exists
+	ownerID, _ := findFavoriteOwner(s.data, cleanPath, identifiers)
+	return ownerID != ""
 }
 
 // CheckPaths checks which paths are favorited from a list
-func (s *Store) CheckPaths(userID string, paths []string) map[string]bool {
+func (s *Store) CheckPaths(userID string, paths []string, extraUserIDs ...string) map[string]bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	identifiers := favoriteUserIdentifiers(userID, extraUserIDs...)
 
 	result := make(map[string]bool, len(paths))
-	userFavs := s.data[userID]
 
 	for _, rawPath := range paths {
 		cleanPath, err := normalizeStoredFavoritePath(rawPath)
@@ -825,57 +932,58 @@ func (s *Store) CheckPaths(userID string, paths []string) map[string]bool {
 			result[rawPath] = false
 			continue
 		}
-		if userFavs != nil {
-			_, exists := userFavs[cleanPath]
-			result[rawPath] = exists
-		} else {
-			result[rawPath] = false
-		}
+		ownerID, _ := findFavoriteOwner(s.data, cleanPath, identifiers)
+		result[rawPath] = ownerID != ""
 	}
 
 	return result
 }
 
 // UpdateNote updates the note for a favorite
-func (s *Store) UpdateNote(userID, path, note string) error {
+func (s *Store) UpdateNote(userID, path, note string, extraUserIDs ...string) error {
 	cleanPath, err := normalizeStoredFavoritePath(path)
 	if err != nil {
 		return err
 	}
+	identifiers := favoriteUserIdentifiers(userID, extraUserIDs...)
 
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 
 	for {
 		snapshot := s.snapshotState()
-		if snapshot.data[userID] == nil {
-			return ErrFavoriteNotFound
-		}
-
-		fav, exists := snapshot.data[userID][cleanPath]
-		if !exists {
+		_, fav := findFavoriteOwner(snapshot.data, cleanPath, identifiers)
+		if fav == nil {
 			return ErrFavoriteNotFound
 		}
 
 		fav.Note = note
-		if err := saveFavoritesState(snapshot.filePath, snapshot.data); err != nil {
+		committed, err := s.persistSnapshot(snapshot)
+		if committed {
 			return err
 		}
-		if s.commitSnapshot(snapshot) {
-			return nil
+		if err != nil {
+			return err
 		}
 	}
 }
 
 // Count returns the number of favorites for a user
-func (s *Store) Count(userID string) int {
+func (s *Store) Count(userID string, extraUserIDs ...string) int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-
-	if s.data[userID] == nil {
+	identifiers := favoriteUserIdentifiers(userID, extraUserIDs...)
+	if len(identifiers) == 0 {
 		return 0
 	}
-	return len(s.data[userID])
+
+	seenPaths := make(map[string]struct{})
+	for _, identifier := range identifiers {
+		for path := range s.data[identifier] {
+			seenPaths[path] = struct{}{}
+		}
+	}
+	return len(seenPaths)
 }
 
 func favoritePathMatchesOrDescendant(basePath, candidatePath string) bool {
@@ -954,11 +1062,12 @@ func (s *Store) UpdatePathReferences(oldPath, newPath string) error {
 		if !changed {
 			return nil
 		}
-		if err := saveFavoritesState(snapshot.filePath, snapshot.data); err != nil {
+		committed, err := s.persistSnapshot(snapshot)
+		if committed {
 			return err
 		}
-		if s.commitSnapshot(snapshot) {
-			return nil
+		if err != nil {
+			return err
 		}
 	}
 }
@@ -1005,11 +1114,12 @@ func (s *Store) RemoveFavoritesUnderPathWithRestore(targetPath string) ([]*Favor
 			return nil, nil
 		}
 		sortFavoritesCanonical(removed)
-		if err := saveFavoritesState(snapshot.filePath, snapshot.data); err != nil {
-			return nil, err
+		committed, err := s.persistSnapshot(snapshot)
+		if committed {
+			return removed, err
 		}
-		if s.commitSnapshot(snapshot) {
-			return removed, nil
+		if err != nil {
+			return nil, err
 		}
 	}
 }
@@ -1028,27 +1138,33 @@ func (s *Store) RestoreFavorites(favorites []*Favorite) error {
 		changed := false
 
 		for _, favorite := range favorites {
-			if snapshot.data[favorite.UserID] == nil {
-				snapshot.data[favorite.UserID] = make(map[string]*Favorite)
+			normalized, err := normalizeRestoredFavorite(favorite)
+			if err != nil {
+				return err
 			}
 
-			current, ok := snapshot.data[favorite.UserID][favorite.Path]
-			if ok && current.Note == favorite.Note && current.CreatedAt.Equal(favorite.CreatedAt) {
+			if snapshot.data[normalized.UserID] == nil {
+				snapshot.data[normalized.UserID] = make(map[string]*Favorite)
+			}
+
+			current, ok := snapshot.data[normalized.UserID][normalized.Path]
+			if ok && current.Note == normalized.Note && current.CreatedAt.Equal(normalized.CreatedAt) {
 				continue
 			}
 
-			snapshot.data[favorite.UserID][favorite.Path] = copyFavorite(favorite)
+			snapshot.data[normalized.UserID][normalized.Path] = normalized
 			changed = true
 		}
 
 		if !changed {
 			return nil
 		}
-		if err := saveFavoritesState(snapshot.filePath, snapshot.data); err != nil {
+		committed, err := s.persistSnapshot(snapshot)
+		if committed {
 			return err
 		}
-		if s.commitSnapshot(snapshot) {
-			return nil
+		if err != nil {
+			return err
 		}
 	}
 }
@@ -1068,28 +1184,34 @@ func (s *Store) RestoreFavoritesIfMissing(favorites []*Favorite) error {
 		changed := false
 
 		for _, favorite := range favorites {
-			userFavs := snapshot.data[favorite.UserID]
+			normalized, err := normalizeRestoredFavorite(favorite)
+			if err != nil {
+				return err
+			}
+
+			userFavs := snapshot.data[normalized.UserID]
 			if userFavs != nil {
-				if _, ok := userFavs[favorite.Path]; ok {
+				if _, ok := userFavs[normalized.Path]; ok {
 					continue
 				}
 			} else {
 				userFavs = make(map[string]*Favorite)
-				snapshot.data[favorite.UserID] = userFavs
+				snapshot.data[normalized.UserID] = userFavs
 			}
 
-			userFavs[favorite.Path] = copyFavorite(favorite)
+			userFavs[normalized.Path] = normalized
 			changed = true
 		}
 
 		if !changed {
 			return nil
 		}
-		if err := saveFavoritesState(snapshot.filePath, snapshot.data); err != nil {
+		committed, err := s.persistSnapshot(snapshot)
+		if committed {
 			return err
 		}
-		if s.commitSnapshot(snapshot) {
-			return nil
+		if err != nil {
+			return err
 		}
 	}
 }

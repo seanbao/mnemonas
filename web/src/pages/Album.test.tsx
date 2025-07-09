@@ -166,6 +166,38 @@ describe('AlbumPage', () => {
       })
     })
 
+    it('refetches album data when auth scope changes even if the scan root path stays the same', async () => {
+    mockListFiles
+      .mockResolvedValueOnce({
+        files: mockImageFiles,
+        path: '/',
+      })
+      .mockResolvedValueOnce({
+        files: [
+          { name: 'other-user.jpg', path: '/other-user.jpg', isDir: false, size: 4096, modTime: '2024-01-04T00:00:00Z' },
+        ],
+        path: '/',
+      })
+
+    const { rerender } = render(<AlbumPage />)
+
+    await waitFor(() => {
+      expect(mockListFiles).toHaveBeenCalledTimes(1)
+    })
+
+    mockUser.id = 'u2'
+    mockUser.username = 'other-admin'
+    mockUser.email = 'other@local'
+    mockUser.role = 'admin'
+    mockUser.homeDir = '/'
+
+    rerender(<AlbumPage />)
+
+    await waitFor(() => {
+      expect(mockListFiles).toHaveBeenCalledTimes(2)
+    })
+    })
+
     it('shows an invalid-home error instead of scanning root for non-admin users without a home directory', async () => {
       mockUser.id = 'u2'
       mockUser.username = 'tester'

@@ -23,6 +23,7 @@ import {
 import { listFiles, createDirectory, ApiError, type FileItem } from '@/api/files'
 import { EmptyState } from '@/components/ui/EmptyState'
 import { useUser } from '@/stores/auth'
+import { getFileQueryScopeKey, getFilesQueryKey } from '@/lib/fileQueryKey'
 import { cn, normalizePath } from '@/lib/utils'
 import { getInvalidHomeDirDescription, invalidHomeDirTitle, resolveUserHomeScope } from '@/lib/userScope'
 
@@ -239,8 +240,10 @@ export function DirectoryPicker({
   allowCreateFolder = true,
 }: DirectoryPickerProps) {
   const user = useUser()
+  const fileScopeKey = getFileQueryScopeKey(user)
   const { rootPath, hasInvalidHomeDir } = resolveUserHomeScope(user)
   const effectiveRootPath = rootPath ?? '/'
+  const rootFilesQueryKey = getFilesQueryKey(fileScopeKey, effectiveRootPath)
   const rootLabel = effectiveRootPath === '/' ? '根目录' : '主目录'
   const normalizeInitialPath = useCallback((path: string) => {
     if (!rootPath) {
@@ -285,7 +288,7 @@ export function DirectoryPicker({
   
   // Load root directory
   const { data: rootData, error: rootError, isLoading: isLoadingRoot, refetch: refetchRoot } = useQuery({
-    queryKey: ['files', effectiveRootPath],
+    queryKey: rootFilesQueryKey,
     queryFn: () => listFiles(effectiveRootPath),
     enabled: isOpen && !hasInvalidHomeDir,
   })

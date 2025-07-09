@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -18,6 +19,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/seanbao/mnemonas/internal/auth"
+	"github.com/seanbao/mnemonas/internal/requestip"
 	"github.com/seanbao/mnemonas/internal/storage"
 )
 
@@ -270,6 +272,87 @@ func TestCreateShare_UsesBaseURL(t *testing.T) {
 	}
 	if strings.Contains(urlValue, "https://nas.example.com//s/") {
 		t.Fatalf("expected trimmed base URL, got %q", urlValue)
+	}
+}
+
+func TestShareMutationPersistenceWarningsReturnSuccess(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+	handler := NewHandler(store, &fakeShareFS{statInfo: &storage.FileInfo{Path: "/docs/report.pdf", Name: "report.pdf", IsDir: false}})
+
+	originalSyncShareStoreRootDir := syncShareStoreRootDir
+	syncShareStoreRootDir = func(root *os.Root) error {
+		return errors.New("directory fsync failed")
+	}
+	defer func() {
+		syncShareStoreRootDir = originalSyncShareStoreRootDir
+	}()
+
+	assertWarningSuccess := func(t *testing.T, recorder *httptest.ResponseRecorder, wantStatus int, wantMessage string) {
+		t.Helper()
+		if recorder.Code != wantStatus {
+			t.Fatalf("expected status %d, got %d: %s", wantStatus, recorder.Code, recorder.Body.String())
+		}
+		if recorder.Header().Get("Warning") != sharePersistenceWarningHeader {
+			t.Fatalf("expected Warning header %q, got %q", sharePersistenceWarningHeader, recorder.Header().Get("Warning"))
+		}
+		var payload struct {
+			Success bool   `json:"success"`
+			Warning bool   `json:"warning"`
+			Message string `json:"message"`
+		}
+		if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+			t.Fatalf("failed to decode response: %v", err)
+		}
+		if !payload.Success || !payload.Warning {
+			t.Fatalf("expected warning success response, got %s", recorder.Body.String())
+		}
+		if payload.Message != wantMessage {
+			t.Fatalf("expected message %q, got %q", wantMessage, payload.Message)
+		}
+	}
+
+	createBody, err := json.Marshal(CreateShareRequest{Path: "/docs/report.pdf", Type: "file"})
+	if err != nil {
+		t.Fatalf("failed to marshal create request: %v", err)
+	}
+	createReq := httptest.NewRequest(http.MethodPost, "/api/v1/shares", bytes.NewReader(createBody))
+	createReq = createReq.WithContext(auth.WithClaimsContext(createReq.Context(), &auth.TokenClaims{UserID: "user1"}))
+	createRecorder := httptest.NewRecorder()
+	handler.CreateShare(createRecorder, createReq)
+	assertWarningSuccess(t, createRecorder, http.StatusCreated, "share created with persistence warning")
+
+	shares := store.ListByUser("user1")
+	if len(shares) != 1 {
+		t.Fatalf("expected created share to persist after warning, got %d shares", len(shares))
+	}
+	shareID := shares[0].ID
+
+	updateReq := newRouteRequest(http.MethodPut, "/api/v1/shares/"+shareID, shareID, []byte(`{"description":"after"}`))
+	updateReq = updateReq.WithContext(auth.WithClaimsContext(updateReq.Context(), &auth.TokenClaims{UserID: "user1"}))
+	updateRecorder := httptest.NewRecorder()
+	handler.UpdateShare(updateRecorder, updateReq)
+	assertWarningSuccess(t, updateRecorder, http.StatusOK, "share updated with persistence warning")
+	updatedShare, err := store.Get(shareID)
+	if err != nil {
+		t.Fatalf("Get(updated share) error: %v", err)
+	}
+	if updatedShare.Description != "after" {
+		t.Fatalf("expected warned update to persist description, got %q", updatedShare.Description)
+	}
+
+	deleteReq := newRouteRequest(http.MethodDelete, "/api/v1/shares/"+shareID, shareID, nil)
+	deleteReq = deleteReq.WithContext(auth.WithClaimsContext(deleteReq.Context(), &auth.TokenClaims{UserID: "user1"}))
+	deleteRecorder := httptest.NewRecorder()
+	handler.DeleteShare(deleteRecorder, deleteReq)
+	assertWarningSuccess(t, deleteRecorder, http.StatusOK, "share deleted with persistence warning")
+	if _, err := store.Get(shareID); !errors.Is(err, ErrShareNotFound) {
+		t.Fatalf("expected warned delete to persist removal, got %v", err)
 	}
 }
 
@@ -1911,6 +1994,50 @@ func TestAccessShareWithPassword_IgnoresSpoofedForwardedProtoForCookie(t *testin
 	}
 }
 
+func TestAccessShareWithPassword_IgnoresForwardedProtoWhenTrustedProxyHopsDisabled(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	share, err := store.Create(CreateShareOptions{
+		Path:      "/docs",
+		Type:      ShareTypeFolder,
+		CreatedBy: "user1",
+		Password:  "secret",
+	})
+	if err != nil {
+		t.Fatalf("failed to create share: %v", err)
+	}
+
+	originalHops := requestip.TrustedProxyHops()
+	requestip.SetTrustedProxyHops(0)
+	defer requestip.SetTrustedProxyHops(originalHops)
+
+	handler := NewHandler(store, &fakeShareFS{statInfo: &storage.FileInfo{Name: "docs", IsDir: true}})
+	body := []byte(`{"password":"secret"}`)
+	req := newRouteRequest(http.MethodPost, "/s/"+share.ID, share.ID, body)
+	req.RemoteAddr = "127.0.0.1:1234"
+	req.Header.Set("X-Forwarded-Proto", "https")
+	recorder := httptest.NewRecorder()
+
+	handler.AccessShareWithPassword(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", recorder.Code)
+	}
+	cookies := recorder.Result().Cookies()
+	if len(cookies) != 1 {
+		t.Fatalf("expected one cookie, got %d", len(cookies))
+	}
+	if cookies[0].Secure {
+		t.Fatal("expected trusted proxy hops disabled to leave share cookie insecure")
+	}
+}
+
 func TestAccessShareWithPassword_SetsCookiePathForPublicAPIAlias(t *testing.T) {
 	tempDir := t.TempDir()
 	storePath := filepath.Join(tempDir, "shares.json")
@@ -2150,6 +2277,59 @@ func TestListShareItems_PublicFolder(t *testing.T) {
 	}
 	if isDir, ok := paths["sub"]; !ok || !isDir {
 		t.Fatalf("expected sub directory entry in list")
+	}
+}
+
+func TestListShareItems_PublicFolderReturnsWarningWhenAccessPersistenceWarns(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	share, err := store.Create(CreateShareOptions{
+		Path:      "/docs",
+		Type:      ShareTypeFolder,
+		CreatedBy: "user1",
+	})
+	if err != nil {
+		t.Fatalf("failed to create share: %v", err)
+	}
+
+	originalSyncShareStoreRootDir := syncShareStoreRootDir
+	syncShareStoreRootDir = func(root *os.Root) error {
+		return errors.New("directory fsync failed")
+	}
+	defer func() {
+		syncShareStoreRootDir = originalSyncShareStoreRootDir
+	}()
+
+	handler := NewHandler(store, &fakeShareFS{
+		dirItemsByPath: map[string][]*storage.FileInfo{
+			"/docs": {
+				{Path: "/docs/a.txt", Name: "a.txt", Size: 12, IsDir: false},
+			},
+		},
+	})
+
+	req := newRouteRequest(http.MethodGet, "/s/"+share.ID+"/items", share.ID, nil)
+	recorder := httptest.NewRecorder()
+	handler.ListShareItems(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+	if recorder.Header().Get("Warning") != sharePersistenceWarningHeader {
+		t.Fatalf("expected Warning header %q, got %q", sharePersistenceWarningHeader, recorder.Header().Get("Warning"))
+	}
+	current, err := store.Get(share.ID)
+	if err != nil {
+		t.Fatalf("failed to reload share: %v", err)
+	}
+	if current.AccessCount != 1 {
+		t.Fatalf("expected warned list to consume access count, got %d", current.AccessCount)
 	}
 }
 
@@ -2974,6 +3154,66 @@ func TestDownloadShare_FirstResponseWriteFailureReturnsRollbackErrorWhenRollback
 	}
 }
 
+func TestDownloadShare_FirstResponseWriteFailureReturnsOriginalErrorWhenRollbackWarns(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	share, err := store.Create(CreateShareOptions{
+		Path:      "/docs/report.pdf",
+		Type:      ShareTypeFile,
+		CreatedBy: "user1",
+		MaxAccess: 1,
+	})
+	if err != nil {
+		t.Fatalf("failed to create share: %v", err)
+	}
+
+	originalSyncShareStoreRootDir := syncShareStoreRootDir
+	syncShareStoreRootDir = func(root *os.Root) error {
+		return errors.New("directory fsync failed")
+	}
+	defer func() {
+		syncShareStoreRootDir = originalSyncShareStoreRootDir
+	}()
+
+	handler := NewHandler(store, &fakeShareFS{
+		openByPath: map[string]FileReader{
+			"/docs/report.pdf": io.NopCloser(strings.NewReader("download body")),
+		},
+	})
+	req := newRouteRequest(http.MethodGet, "/s/"+share.ID+"/download", share.ID, nil)
+	writer := &failFirstWriteResponseWriter{}
+
+	handler.DownloadShare(writer, req)
+
+	if writer.status != http.StatusInternalServerError {
+		t.Fatalf("expected status 500, got %d", writer.status)
+	}
+	if writer.Header().Get("Warning") != sharePersistenceWarningHeader {
+		t.Fatalf("expected Warning header %q, got %q", sharePersistenceWarningHeader, writer.Header().Get("Warning"))
+	}
+	payload := decodeResponseBytes(t, writer.body.Bytes())
+	errorPayload, ok := payload["error"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected error payload, got %v", payload)
+	}
+	if errorPayload["code"] != "DOWNLOAD_SHARE_FAILED" {
+		t.Fatalf("expected DOWNLOAD_SHARE_FAILED code, got %v", errorPayload["code"])
+	}
+	current, err := store.Get(share.ID)
+	if err != nil {
+		t.Fatalf("failed to load share: %v", err)
+	}
+	if current.AccessCount != 0 {
+		t.Fatalf("expected rollback warning to restore access count, got %d", current.AccessCount)
+	}
+}
+
 func TestDownloadShare_PartialStreamFailureConsumesAccessAndBlocksRetry(t *testing.T) {
 	tempDir := t.TempDir()
 	storePath := filepath.Join(tempDir, "shares.json")
@@ -3064,6 +3304,58 @@ func TestDownloadShare_EmptyFileConsumesAccessCount(t *testing.T) {
 	}
 	if current.AccessCount != 1 {
 		t.Fatalf("expected successful empty download to consume access count, got %d", current.AccessCount)
+	}
+}
+
+func TestDownloadShare_EmptyFileReturnsWarningWhenAccessPersistenceWarns(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	share, err := store.Create(CreateShareOptions{
+		Path:      "/docs/empty.txt",
+		Type:      ShareTypeFile,
+		CreatedBy: "user1",
+		MaxAccess: 1,
+	})
+	if err != nil {
+		t.Fatalf("failed to create share: %v", err)
+	}
+
+	originalSyncShareStoreRootDir := syncShareStoreRootDir
+	syncShareStoreRootDir = func(root *os.Root) error {
+		return errors.New("directory fsync failed")
+	}
+	defer func() {
+		syncShareStoreRootDir = originalSyncShareStoreRootDir
+	}()
+
+	handler := NewHandler(store, &fakeShareFS{
+		openByPath: map[string]FileReader{
+			"/docs/empty.txt": io.NopCloser(bytes.NewReader(nil)),
+		},
+	})
+	req := newRouteRequest(http.MethodGet, "/s/"+share.ID+"/download", share.ID, nil)
+	recorder := httptest.NewRecorder()
+
+	handler.DownloadShare(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", recorder.Code)
+	}
+	if recorder.Header().Get("Warning") != sharePersistenceWarningHeader {
+		t.Fatalf("expected Warning header %q, got %q", sharePersistenceWarningHeader, recorder.Header().Get("Warning"))
+	}
+	current, err := store.Get(share.ID)
+	if err != nil {
+		t.Fatalf("failed to load share: %v", err)
+	}
+	if current.AccessCount != 1 {
+		t.Fatalf("expected warned empty download to consume access count, got %d", current.AccessCount)
 	}
 }
 
@@ -4250,6 +4542,69 @@ func TestListShareItems_FirstResponseWriteFailureReturnsRollbackErrorWhenRollbac
 	handler.ListShareItems(retryRec, req)
 	if retryRec.Code != http.StatusGone {
 		t.Fatalf("expected retry after rollback failure to hit max access limit, got %d", retryRec.Code)
+	}
+}
+
+func TestListShareItems_FirstResponseWriteFailureReturnsOriginalErrorWhenRollbackWarns(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	share, err := store.Create(CreateShareOptions{
+		Path:      "/docs",
+		Type:      ShareTypeFolder,
+		CreatedBy: "user1",
+		MaxAccess: 1,
+	})
+	if err != nil {
+		t.Fatalf("failed to create share: %v", err)
+	}
+
+	originalSyncShareStoreRootDir := syncShareStoreRootDir
+	syncShareStoreRootDir = func(root *os.Root) error {
+		return errors.New("directory fsync failed")
+	}
+	defer func() {
+		syncShareStoreRootDir = originalSyncShareStoreRootDir
+	}()
+
+	handler := NewHandler(store, &fakeShareFS{
+		dirItemsByPath: map[string][]*storage.FileInfo{
+			"/docs": {
+				{Path: "/docs/a.txt", Name: "a.txt", Size: 12, IsDir: false},
+			},
+		},
+	})
+
+	req := newRouteRequest(http.MethodGet, "/s/"+share.ID+"/items", share.ID, nil)
+	writer := &failFirstWriteResponseWriter{}
+
+	handler.ListShareItems(writer, req)
+
+	if writer.status != http.StatusInternalServerError {
+		t.Fatalf("expected status 500, got %d", writer.status)
+	}
+	if writer.Header().Get("Warning") != sharePersistenceWarningHeader {
+		t.Fatalf("expected Warning header %q, got %q", sharePersistenceWarningHeader, writer.Header().Get("Warning"))
+	}
+	payload := decodeResponseBytes(t, writer.body.Bytes())
+	errorPayload, ok := payload["error"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected error payload, got %v", payload)
+	}
+	if errorPayload["code"] != "LIST_SHARE_ITEMS_FAILED" {
+		t.Fatalf("expected LIST_SHARE_ITEMS_FAILED code, got %v", errorPayload["code"])
+	}
+	current, err := store.Get(share.ID)
+	if err != nil {
+		t.Fatalf("failed to load share: %v", err)
+	}
+	if current.AccessCount != 0 {
+		t.Fatalf("expected rollback warning to restore access count, got %d", current.AccessCount)
 	}
 }
 

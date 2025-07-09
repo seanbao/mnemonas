@@ -1,10 +1,12 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, waitFor } from '@/test/utils'
 import userEvent from '@testing-library/user-event'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { DashboardPage } from './Dashboard'
 import * as HeroUI from '@heroui/react'
 
 const useIsAdminMock = vi.fn(() => true)
+const useUserMock = vi.fn(() => ({ id: 'admin-id', username: 'admin', role: 'admin' }))
 const mockAddToast = vi.fn()
 
 // Mock the API functions
@@ -79,6 +81,7 @@ vi.mock('@/stores/auth', async (importOriginal) => {
   return {
     ...actual,
     useIsAdmin: () => useIsAdminMock(),
+    useUser: () => useUserMock(),
   }
 })
 
@@ -95,6 +98,7 @@ describe('DashboardPage', () => {
     vi.clearAllMocks()
     vi.spyOn(HeroUI, 'addToast').mockImplementation(((...args: unknown[]) => mockAddToast(...args)) as typeof HeroUI.addToast)
     useIsAdminMock.mockReturnValue(true)
+    useUserMock.mockReturnValue({ id: 'admin-id', username: 'admin', role: 'admin' })
     mockNavigate.mockClear()
     // Reset mocks to default values (vi.clearAllMocks clears mockResolvedValue)
     mockGetHealth.mockResolvedValue({
@@ -367,14 +371,121 @@ describe('DashboardPage', () => {
 
     it('hides system health quick action for non-admin users', async () => {
       useIsAdminMock.mockReturnValue(false)
+      useUserMock.mockReturnValue({ id: 'scoped-user', username: 'member', role: 'user' })
       render(<DashboardPage />)
 
       await waitFor(() => {
         expect(screen.getByText('文件管理')).toBeTruthy()
       })
 
+      expect(screen.queryByText('存储管理')).toBeNull()
       expect(screen.queryByText('系统健康')).toBeNull()
     })
+
+    it('does not reuse cached admin stats or recent activity for another user session', async () => {
+    useIsAdminMock.mockReturnValue(false)
+    useUserMock.mockReturnValue({ id: 'scoped-user', username: 'member', role: 'user' })
+    mockGetStorageStats.mockImplementation(() => new Promise(() => {}))
+    mockListActivity.mockImplementation(() => new Promise(() => {}))
+
+    const queryClient = new QueryClient({
+      defaultOptions: {
+        queries: {
+          retry: false,
+          gcTime: 0,
+          staleTime: 0,
+        },
+      },
+    })
+    queryClient.setQueryData(['health'], {
+      status: 'healthy',
+      uptime: '1h30m',
+    })
+    queryClient.setQueryData(['app-version'], {
+      name: 'MnemoNAS',
+      version: '0.1.0',
+      go: 'go1.24.0',
+    })
+    queryClient.setQueryData(['stats'], {
+      fileCount: 7,
+      fileCountAvailable: true,
+      storageStatsAvailable: true,
+      totalSize: 2048,
+      totalObjects: 3,
+      dedupRatio: 1.5,
+    })
+    queryClient.setQueryData(['recent-activity'], {
+      items: [
+        { id: 'act-admin', action: 'upload', path: '/admin/secret.txt', timestamp: '2024-01-15T10:00:00Z' },
+      ],
+    })
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <DashboardPage />
+      </QueryClientProvider>
+    )
+
+    await waitFor(() => {
+      expect(mockGetStorageStats).toHaveBeenCalledTimes(1)
+    })
+
+    expect(screen.queryByText('/admin/secret.txt')).toBeNull()
+    expect(screen.queryByText('2 KB')).toBeNull()
+  })
+
+    it('does not reuse scoped stats or recent activity when the same user home directory changes', async () => {
+    useIsAdminMock.mockReturnValue(false)
+    useUserMock.mockReturnValue({ id: 'scoped-user', username: 'member', role: 'user', homeDir: '/member-next' })
+    mockGetStorageStats.mockImplementation(() => new Promise(() => {}))
+    mockListActivity.mockImplementation(() => new Promise(() => {}))
+
+    const queryClient = new QueryClient({
+      defaultOptions: {
+        queries: {
+          retry: false,
+          gcTime: 0,
+          staleTime: 0,
+        },
+      },
+    })
+    queryClient.setQueryData(['health'], {
+      status: 'healthy',
+      uptime: '1h30m',
+    })
+    queryClient.setQueryData(['app-version'], {
+      name: 'MnemoNAS',
+      version: '0.1.0',
+      go: 'go1.24.0',
+    })
+    queryClient.setQueryData(['stats', 'scoped-user', false], {
+      fileCount: 7,
+      fileCountAvailable: true,
+      storageStatsAvailable: true,
+      totalSize: 2048,
+      totalObjects: 3,
+      dedupRatio: 1.5,
+    })
+    queryClient.setQueryData(['recent-activity', 'scoped-user', false], {
+      items: [
+        { id: 'act-admin', action: 'upload', path: '/member-old/secret.txt', timestamp: '2024-01-15T10:00:00Z' },
+      ],
+    })
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <DashboardPage />
+      </QueryClientProvider>
+    )
+
+    await waitFor(() => {
+      expect(mockGetStorageStats).toHaveBeenCalledTimes(1)
+      expect(mockListActivity).toHaveBeenCalledTimes(1)
+    })
+
+    expect(screen.queryByText('/member-old/secret.txt')).toBeNull()
+    expect(screen.queryByText('2 KB')).toBeNull()
+  })
 
     it('navigates to versions on version history click', async () => {
       const user = userEvent.setup({ writeToClipboard: false })

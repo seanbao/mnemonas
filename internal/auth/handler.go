@@ -472,6 +472,9 @@ func requestIsHTTPS(r *http.Request) bool {
 	if !requestip.IsTrustedForwardedSource(requestip.RemoteIP(r.RemoteAddr)) {
 		return false
 	}
+	if requestip.TrustedProxyHops() <= 0 {
+		return false
+	}
 	return strings.EqualFold(strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")), "https")
 }
 

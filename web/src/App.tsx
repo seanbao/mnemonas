@@ -60,7 +60,14 @@ function App() {
             <Route path="versions/*" element={<VersionsPage />} />
             <Route path="trash" element={<TrashPage />} />
             <Route path="favorites" element={<FavoritesPage />} />
-            <Route path="storage" element={<StoragePage />} />
+            <Route
+              path="storage"
+              element={
+                <ProtectedRoute adminOnly>
+                  <StoragePage />
+                </ProtectedRoute>
+              }
+            />
             <Route
               path="system-health"
               element={

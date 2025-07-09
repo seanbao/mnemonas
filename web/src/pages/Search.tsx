@@ -19,6 +19,8 @@ import { FileIcon } from '@/components/ui/FileIcon'
 import { EmptyState } from '@/components/ui/EmptyState'
 import { searchFiles, SearchError, type SearchResult } from '@/api/search'
 import { formatBytes, formatDate, cn } from '@/lib/utils'
+import { getInvalidHomeDirDescription, invalidHomeDirTitle, resolveUserHomeScope } from '@/lib/userScope'
+import { useIsAdmin, useUser } from '@/stores/auth'
 
 const searchUnavailableDescription = '文件系统当前不可用，请稍后重试'
 
@@ -95,14 +97,19 @@ function SearchResultItem({ result, onClick }: { result: SearchResult; onClick: 
 export function SearchPage() {
   const [searchParams, setSearchParams] = useSearchParams()
   const navigate = useNavigate()
+  const user = useUser()
+  const isAdmin = useIsAdmin()
   const query = searchParams.get('q') || ''
   const trimmedQuery = query.trim()
   const trimmedDebouncedQuery = useDeferredValue(trimmedQuery)
+  const { rootPath, hasInvalidHomeDir } = resolveUserHomeScope(user)
+  const authScopeKey = user?.id ?? 'anonymous'
+  const homeScopeKey = hasInvalidHomeDir ? '__invalid__' : (rootPath ?? '/')
 
   const { data, isLoading, error, refetch } = useQuery({
-    queryKey: ['search', trimmedDebouncedQuery],
+    queryKey: ['search', authScopeKey, isAdmin, homeScopeKey, trimmedDebouncedQuery],
     queryFn: () => searchFiles(trimmedDebouncedQuery),
-    enabled: trimmedDebouncedQuery.length > 0,
+    enabled: !hasInvalidHomeDir && trimmedDebouncedQuery.length > 0,
   })
 
   const handleRetrySearch = useCallback(async () => {
@@ -170,6 +177,7 @@ export function SearchPage() {
           value={query}
           onValueChange={handleQueryChange}
           onKeyDown={handleKeyDown}
+          isDisabled={hasInvalidHomeDir}
           startContent={<SearchIcon size={18} className="text-default-500" />}
           autoFocus
           size="lg"
@@ -195,7 +203,15 @@ export function SearchPage() {
           </div>
         </CardHeader>
         <CardBody className="p-0 overflow-auto custom-scrollbar">
-          {isLoading ? (
+          {hasInvalidHomeDir ? (
+            <div className="flex items-center justify-center h-40 p-6">
+              <EmptyState
+                icon={AlertCircle}
+                title={invalidHomeDirTitle}
+                description={getInvalidHomeDirDescription('搜索文件')}
+              />
+            </div>
+          ) : isLoading ? (
             <div className="flex items-center justify-center h-40">
               <div className="text-center">
                 <div className="w-12 h-12 border-3 border-accent-primary border-t-transparent rounded-full animate-spin mx-auto mb-4" />

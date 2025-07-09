@@ -30,6 +30,36 @@ var (
 	errShareStoreSymlink = errors.New("share store path must not be a symlink")
 )
 
+// PersistenceWarningError reports that the shares mutation is already visible
+// on disk, but the final directory fsync did not complete.
+type PersistenceWarningError struct {
+	err error
+}
+
+func (e *PersistenceWarningError) Error() string {
+	return e.err.Error()
+}
+
+func (e *PersistenceWarningError) Unwrap() error {
+	return e.err
+}
+
+func WrapPersistenceWarning(err error) error {
+	if err == nil {
+		return nil
+	}
+	var warningErr *PersistenceWarningError
+	if errors.As(err, &warningErr) {
+		return err
+	}
+	return &PersistenceWarningError{err: err}
+}
+
+func IsPersistenceWarning(err error) bool {
+	var warningErr *PersistenceWarningError
+	return errors.As(err, &warningErr)
+}
+
 // ShareType represents the type of shared resource
 type ShareType string
 
@@ -194,8 +224,7 @@ func (s *ShareStore) load() error {
 		normalized := copyShare(share)
 		originalPath := normalized.Path
 		originalPermission := normalized.Permission
-		normalized.Permission = normalizePermission(normalized.Permission)
-		if err := validateShareInvariants(normalized); err != nil {
+		if err := normalizeLegacyShareInvariants(normalized); err != nil {
 			needsRewrite = true
 			continue
 		}
@@ -211,7 +240,9 @@ func (s *ShareStore) load() error {
 
 	if needsRewrite {
 		if err := saveShareState(s.filePath, s.shares); err != nil {
-			return fmt.Errorf("persist normalized shares: %w", err)
+			if !IsPersistenceWarning(err) {
+				return fmt.Errorf("persist normalized shares: %w", err)
+			}
 		}
 	}
 
@@ -334,6 +365,11 @@ func validateShareInvariants(share *Share) error {
 	}
 }
 
+func normalizeLegacyShareInvariants(share *Share) error {
+	share.Permission = normalizePermission(share.Permission)
+	return validateShareInvariants(share)
+}
+
 func removeShareID(ids []string, id string) []string {
 	for i, currentID := range ids {
 		if currentID == id {
@@ -399,6 +435,17 @@ func (s *ShareStore) commitSnapshot(snapshot shareStoreSnapshot) bool {
 	s.pathIdx = snapshot.pathIdx
 	s.version++
 	return true
+}
+
+func (s *ShareStore) persistSnapshot(snapshot shareStoreSnapshot) (bool, error) {
+	err := saveShareState(snapshot.filePath, snapshot.shares)
+	if err != nil && !IsPersistenceWarning(err) {
+		return false, err
+	}
+	if !s.commitSnapshot(snapshot) {
+		return false, nil
+	}
+	return true, err
 }
 
 func validateShareStorePath(path string) error {
@@ -638,7 +685,7 @@ func writeShareStoreFileAtomicallyWithRoot(root *os.Root, path string, data []by
 	}
 	cleanup = false
 	if err := syncRegisteredShareStoreDir(path); err != nil {
-		return fmt.Errorf("failed to sync shares directory: %w", err)
+		return WrapPersistenceWarning(fmt.Errorf("failed to sync shares directory: %w", err))
 	}
 
 	return nil
@@ -755,7 +802,7 @@ func writeShareStoreFileAtomically(path string, data []byte) error {
 	}
 	cleanup = false
 	if err := syncShareStoreDir(dir); err != nil {
-		return fmt.Errorf("failed to sync shares directory: %w", err)
+		return WrapPersistenceWarning(fmt.Errorf("failed to sync shares directory: %w", err))
 	}
 
 	return nil
@@ -895,12 +942,12 @@ func (s *ShareStore) Create(opts CreateShareOptions) (*Share, error) {
 		snapshot := s.snapshotState()
 		snapshot.shares[id] = copyShare(share)
 		snapshot.pathIdx[share.Path] = append(snapshot.pathIdx[share.Path], id)
-
-		if err := saveShareState(snapshot.filePath, snapshot.shares); err != nil {
-			return nil, err
+		committed, err := s.persistSnapshot(snapshot)
+		if committed {
+			return copyShare(share), err
 		}
-		if s.commitSnapshot(snapshot) {
-			return copyShare(share), nil
+		if err != nil {
+			return nil, err
 		}
 	}
 }
@@ -942,14 +989,27 @@ func (s *ShareStore) GetByPath(path string) []*Share {
 	return shares
 }
 
-// ListByUser lists all shares created by a user
-func (s *ShareStore) ListByUser(userID string) []*Share {
+// ListByUser lists all shares created by a user identifier.
+// Legacy share metadata may persist the owner's username instead of the user ID,
+// so callers may pass multiple accepted identifiers.
+func (s *ShareStore) ListByUser(ownerIdentifiers ...string) []*Share {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
+	acceptedOwners := make(map[string]struct{}, len(ownerIdentifiers))
+	for _, ownerIdentifier := range ownerIdentifiers {
+		if strings.TrimSpace(ownerIdentifier) == "" {
+			continue
+		}
+		acceptedOwners[ownerIdentifier] = struct{}{}
+	}
+	if len(acceptedOwners) == 0 {
+		return nil
+	}
+
 	var shares []*Share
 	for _, share := range s.shares {
-		if share.CreatedBy == userID {
+		if _, ok := acceptedOwners[share.CreatedBy]; ok {
 			shares = append(shares, copyShare(share))
 		}
 	}
@@ -1006,12 +1066,12 @@ func (s *ShareStore) Update(id string, fn func(*Share) error) error {
 			}
 			snapshot.pathIdx[newPath] = append(snapshot.pathIdx[newPath], id)
 		}
-
-		if err := saveShareState(snapshot.filePath, snapshot.shares); err != nil {
+		committed, err := s.persistSnapshot(snapshot)
+		if committed {
 			return err
 		}
-		if s.commitSnapshot(snapshot) {
-			return nil
+		if err != nil {
+			return err
 		}
 	}
 }
@@ -1035,12 +1095,12 @@ func (s *ShareStore) Delete(id string) error {
 			snapshot.pathIdx[share.Path] = ids
 		}
 		delete(snapshot.shares, id)
-
-		if err := saveShareState(snapshot.filePath, snapshot.shares); err != nil {
+		committed, err := s.persistSnapshot(snapshot)
+		if committed {
 			return err
 		}
-		if s.commitSnapshot(snapshot) {
-			return nil
+		if err != nil {
+			return err
 		}
 	}
 }
@@ -1092,11 +1152,12 @@ func (s *ShareStore) UpdatePathReferencesWithRestore(oldPath, newPath string) ([
 		if !changed {
 			return nil, nil
 		}
-		if err := saveShareState(snapshot.filePath, snapshot.shares); err != nil {
-			return nil, err
+		committed, err := s.persistSnapshot(snapshot)
+		if committed {
+			return renamed, err
 		}
-		if s.commitSnapshot(snapshot) {
-			return renamed, nil
+		if err != nil {
+			return nil, err
 		}
 	}
 }
@@ -1139,11 +1200,12 @@ func (s *ShareStore) DisableSharesUnderPathWithRestore(targetPath string) ([]*Sh
 			return nil, nil
 		}
 		sortSharesCanonical(disabled)
-		if err := saveShareState(snapshot.filePath, snapshot.shares); err != nil {
-			return nil, err
+		committed, err := s.persistSnapshot(snapshot)
+		if committed {
+			return disabled, err
 		}
-		if s.commitSnapshot(snapshot) {
-			return disabled, nil
+		if err != nil {
+			return nil, err
 		}
 	}
 }
@@ -1162,30 +1224,36 @@ func (s *ShareStore) RestoreShares(shares []*Share) error {
 		changed := false
 
 		for _, original := range shares {
-			current, ok := snapshot.shares[original.ID]
-			if ok && sharesEqual(current, original) {
+			normalized := copyShare(original)
+			if err := normalizeLegacyShareInvariants(normalized); err != nil {
+				return err
+			}
+
+			current, ok := snapshot.shares[normalized.ID]
+			if ok && sharesEqual(current, normalized) {
 				continue
 			}
 			if ok {
-				if current.Path != original.Path {
-					moveSharePathIndex(snapshot.pathIdx, current.Path, original.Path, original.ID)
+				if current.Path != normalized.Path {
+					moveSharePathIndex(snapshot.pathIdx, current.Path, normalized.Path, normalized.ID)
 				}
 			} else {
-				snapshot.pathIdx[original.Path] = append(snapshot.pathIdx[original.Path], original.ID)
+				snapshot.pathIdx[normalized.Path] = append(snapshot.pathIdx[normalized.Path], normalized.ID)
 			}
 
-			snapshot.shares[original.ID] = copyShare(original)
+			snapshot.shares[normalized.ID] = normalized
 			changed = true
 		}
 
 		if !changed {
 			return nil
 		}
-		if err := saveShareState(snapshot.filePath, snapshot.shares); err != nil {
+		committed, err := s.persistSnapshot(snapshot)
+		if committed {
 			return err
 		}
-		if s.commitSnapshot(snapshot) {
-			return nil
+		if err != nil {
+			return err
 		}
 	}
 }
@@ -1228,11 +1296,12 @@ func (s *ShareStore) RestoreDisabledSharesPreservingCurrent(shares []*Share) err
 		if !changed {
 			return nil
 		}
-		if err := saveShareState(snapshot.filePath, snapshot.shares); err != nil {
+		committed, err := s.persistSnapshot(snapshot)
+		if committed {
 			return err
 		}
-		if s.commitSnapshot(snapshot) {
-			return nil
+		if err != nil {
+			return err
 		}
 	}
 }
@@ -1274,11 +1343,12 @@ func (s *ShareStore) RestoreMovedSharesPreservingCurrent(shares []*Share) error 
 		if !changed {
 			return nil
 		}
-		if err := saveShareState(snapshot.filePath, snapshot.shares); err != nil {
+		committed, err := s.persistSnapshot(snapshot)
+		if committed {
 			return err
 		}
-		if s.commitSnapshot(snapshot) {
-			return nil
+		if err != nil {
+			return err
 		}
 	}
 }
@@ -1346,16 +1416,17 @@ func (s *ShareStore) reserveAuthorizedAccess(id string) (*Share, *authorizedAcce
 		updated.AccessCount++
 		updated.LastAccess = &now
 		snapshot.shares[id] = updated
-
-		if err := saveShareState(snapshot.filePath, snapshot.shares); err != nil {
-			return nil, nil, err
+		reservation := &authorizedAccessReservation{
+			id:                 id,
+			currentLastAccess:  now,
+			previousLastAccess: prevLastAccess,
 		}
-		if s.commitSnapshot(snapshot) {
-			return copyShare(updated), &authorizedAccessReservation{
-				id:                 id,
-				currentLastAccess:  now,
-				previousLastAccess: prevLastAccess,
-			}, nil
+		committed, err := s.persistSnapshot(snapshot)
+		if committed {
+			return copyShare(updated), reservation, err
+		}
+		if err != nil {
+			return nil, nil, err
 		}
 	}
 }
@@ -1383,12 +1454,12 @@ func (s *ShareStore) rollbackAuthorizedAccess(reservation *authorizedAccessReser
 			updated.LastAccess = cloneTimePtr(reservation.previousLastAccess)
 		}
 		snapshot.shares[reservation.id] = updated
-
-		if err := saveShareState(snapshot.filePath, snapshot.shares); err != nil {
+		committed, err := s.persistSnapshot(snapshot)
+		if committed {
 			return err
 		}
-		if s.commitSnapshot(snapshot) {
-			return nil
+		if err != nil {
+			return err
 		}
 	}
 }
@@ -1418,12 +1489,12 @@ func (s *ShareStore) Access(id string, password string) (*Share, error) {
 		updated.AccessCount++
 		updated.LastAccess = &now
 		snapshot.shares[id] = updated
-
-		if err := saveShareState(snapshot.filePath, snapshot.shares); err != nil {
-			return nil, err
+		committed, err := s.persistSnapshot(snapshot)
+		if committed {
+			return copyShare(updated), err
 		}
-		if s.commitSnapshot(snapshot) {
-			return copyShare(updated), nil
+		if err != nil {
+			return nil, err
 		}
 	}
 }

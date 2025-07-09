@@ -1,3 +1,4 @@
+import { getInvalidHomeDirDescription, invalidHomeDirTitle, resolveUserHomeScope } from '@/lib/userScope'
 import { useCallback, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
@@ -34,7 +35,7 @@ import { EmptyState } from '@/components/ui/EmptyState'
 import { formatBytes, cn, formatRelativeTime } from '@/lib/utils'
 import { useBatchOperation, type BatchOperationResult } from '@/lib/useBatchOperation'
 import { PageHeader } from '@/components/ui/PageHeader'
-import { useCanWrite } from '@/stores/auth'
+import { useCanWrite, useUser } from '@/stores/auth'
 
 // Calculate days until auto-delete based on retention config
 function daysUntilDelete(deletedAt: string, retentionDays: number): number | null {
@@ -253,6 +254,10 @@ function TrashRow({
 export function TrashPage() {
   const queryClient = useQueryClient()
   const canWrite = useCanWrite()
+  const user = useUser()
+  const { hasInvalidHomeDir } = resolveUserHomeScope(user)
+  const authScopeKey = user?.id ?? 'anonymous'
+  const trashQueryKey = ['trash', authScopeKey] as const
   const [selectedItems, setSelectedItems] = useState<Set<string>>(new Set())
   const [actionItem, setActionItem] = useState<TrashItem | null>(null)
   const actionItemRef = useRef(actionItem)
@@ -266,8 +271,9 @@ export function TrashPage() {
   const { isOpen: isEmptyOpen, onOpen: onEmptyOpen, onClose: onEmptyClose } = useDisclosure()
 
   const { data, isLoading, error, refetch } = useQuery({
-    queryKey: ['trash'],
+    queryKey: trashQueryKey,
     queryFn: listTrash,
+    enabled: !hasInvalidHomeDir,
   })
 
   const items = useMemo(() => data?.items ?? [], [data?.items])
@@ -322,7 +328,7 @@ export function TrashPage() {
     }
 
     const removedIds = new Set(ids)
-    queryClient.setQueryData<TrashListResponse>(['trash'], (current) => {
+    queryClient.setQueryData<TrashListResponse>(trashQueryKey, (current) => {
       if (!current) {
         return current
       }
@@ -339,10 +345,10 @@ export function TrashPage() {
         totalSize: items.reduce((sum, item) => sum + item.size, 0),
       }
     })
-  }, [queryClient])
+  }, [queryClient, trashQueryKey])
 
   const clearTrashCache = useCallback(() => {
-    queryClient.setQueryData<TrashListResponse>(['trash'], (current) => {
+    queryClient.setQueryData<TrashListResponse>(trashQueryKey, (current) => {
       if (!current) {
         return current
       }
@@ -354,7 +360,7 @@ export function TrashPage() {
         totalSize: 0,
       }
     })
-  }, [queryClient])
+  }, [queryClient, trashQueryKey])
 
   const handleRefreshTrash = useCallback(async () => {
   const result = await refetch()
@@ -398,7 +404,7 @@ export function TrashPage() {
     onSuccess: (result, id) => {
       removeTrashItemsFromCache([id])
       removeSelectedIds([id])
-      queryClient.invalidateQueries({ queryKey: ['trash'] })
+      queryClient.invalidateQueries({ queryKey: trashQueryKey })
       queryClient.invalidateQueries({ queryKey: ['files'] })
 		if (result.warning) {
 			addToast({ title: result.message ?? '恢复完成，但存在警告', color: 'warning' })
@@ -419,7 +425,7 @@ export function TrashPage() {
     onSuccess: (result, id) => {
       removeTrashItemsFromCache([id])
       removeSelectedIds([id])
-      queryClient.invalidateQueries({ queryKey: ['trash'] })
+	  queryClient.invalidateQueries({ queryKey: trashQueryKey })
 		if (result.warning) {
 			addToast({ title: result.message ?? '已永久删除，但存在警告', color: 'warning' })
 		} else {
@@ -443,7 +449,7 @@ export function TrashPage() {
     onSuccess: (result) => {
       clearTrashCache()
       setSelectedItems(new Set())
-      queryClient.invalidateQueries({ queryKey: ['trash'] })
+      queryClient.invalidateQueries({ queryKey: trashQueryKey })
       if (result.partial) {
         addToast({ title: `回收站已部分清空，删除 ${result.deletedCount} 项`, color: 'warning' })
       } else if (result.warning) {
@@ -499,7 +505,7 @@ export function TrashPage() {
     onComplete: (result) => {
       removeTrashItemsFromCache(result.succeededItems as string[])
       setSelectedItems(new Set(result.failedItems as string[]))
-      queryClient.invalidateQueries({ queryKey: ['trash'] })
+      queryClient.invalidateQueries({ queryKey: trashQueryKey })
       queryClient.invalidateQueries({ queryKey: ['files'] })
     },
   })
@@ -525,7 +531,7 @@ export function TrashPage() {
     onComplete: (result) => {
       removeTrashItemsFromCache(result.succeededItems as string[])
       setSelectedItems(new Set(result.failedItems as string[]))
-      queryClient.invalidateQueries({ queryKey: ['trash'] })
+      queryClient.invalidateQueries({ queryKey: trashQueryKey })
     },
   })
 
@@ -556,6 +562,25 @@ export function TrashPage() {
       deleteMutation.mutate(actionItem.id)
     }
   }, [canWrite, actionItem, deleteMutation])
+
+  if (hasInvalidHomeDir) {
+    return (
+      <div className="h-full flex flex-col space-y-4 p-6 overflow-auto custom-scrollbar">
+        <PageHeader
+          title="回收站"
+          subtitle={invalidHomeDirTitle}
+          icon={Trash2}
+        />
+        <div className="flex flex-1 items-center justify-center">
+          <EmptyState
+            icon={AlertCircle}
+            title={invalidHomeDirTitle}
+            description={getInvalidHomeDirDescription('查看回收站')}
+          />
+        </div>
+      </div>
+    )
+  }
 
   if (isLoading) {
     return (

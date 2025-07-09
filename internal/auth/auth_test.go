@@ -18,6 +18,8 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 	"golang.org/x/crypto/bcrypt"
+
+	"github.com/seanbao/mnemonas/internal/requestip"
 )
 
 func TestWriteAuthFileAtomically_ReturnsDirectorySyncError(t *testing.T) {
@@ -2782,6 +2784,39 @@ func TestAuthHandler(t *testing.T) {
 		}
 		if cookies[0].Secure {
 			t.Fatal("expected spoofed forwarded proto to leave cookie insecure")
+		}
+	})
+
+	t.Run("download session cookie ignores forwarded proto when trusted proxy hops disabled", func(t *testing.T) {
+		user, _ := store.GetByUsername("handleruser")
+		pair, _ := tm.GenerateTokenPair(user)
+
+		originalHops := requestip.TrustedProxyHops()
+		requestip.SetTrustedProxyHops(0)
+		defer requestip.SetTrustedProxyHops(originalHops)
+
+		req := httptest.NewRequest("POST", "/api/v1/auth/download-session", nil)
+		req.RemoteAddr = "127.0.0.1:1234"
+		req.Header.Set("Authorization", "Bearer "+pair.AccessToken)
+		req.Header.Set("X-Forwarded-Proto", "https")
+		ctx := context.WithValue(req.Context(), ContextKeyUser, user)
+		ctx = context.WithValue(ctx, ContextKeyClaims, &TokenClaims{
+			RegisteredClaims: jwt.RegisteredClaims{ExpiresAt: jwt.NewNumericDate(time.Now().Add(15 * time.Minute))},
+			UserID:           user.ID,
+			Username:         user.Username,
+			Role:             user.Role,
+		})
+		req = req.WithContext(ctx)
+		rec := httptest.NewRecorder()
+
+		h.HandleCreateDownloadSession(rec, req)
+
+		cookies := rec.Result().Cookies()
+		if len(cookies) != 1 {
+			t.Fatalf("expected one cookie, got %d", len(cookies))
+		}
+		if cookies[0].Secure {
+			t.Fatal("expected trusted proxy hops disabled to leave cookie insecure")
 		}
 	})
 
