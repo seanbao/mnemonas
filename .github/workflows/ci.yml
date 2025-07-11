@@ -42,6 +42,11 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
           cache: true
 
+      - name: Install YAML validation dependency
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-yaml
+
       - name: Validate GitHub Actions workflows
         run: make workflows-check
 
@@ -54,15 +59,50 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install shellcheck
+      - name: Install script validation dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y shellcheck
+          sudo apt-get install -y shellcheck python3-yaml
 
       - name: Validate deployment scripts
         run: make scripts-check
 
-  # Go 代码检查和测试
+  toolchains:
+    name: Toolchains
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Validate pinned toolchain versions
+        run: make toolchains-check
+
+  # Documentation checks
+  docs:
+    name: Documentation
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install documentation validation dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-yaml
+
+      - name: Validate documentation
+        run: make docs-check
+
+  # Go linting and tests
   go:
     name: Go
     runs-on: ubuntu-latest
@@ -131,7 +171,7 @@ jobs:
           flags: go
           fail_ci_if_error: false
 
-  # Rust 代码检查和测试
+  # Rust linting and tests
   rust:
     name: Rust
     runs-on: ubuntu-latest
@@ -193,7 +233,7 @@ jobs:
       - name: Build
         run: cargo build --release --locked
 
-  # 前端测试
+  # Frontend tests
   frontend:
     name: Frontend
     runs-on: ubuntu-latest
@@ -214,6 +254,8 @@ jobs:
           cache-dependency-path: web/package-lock.json
 
       - name: Install dependencies
+        env:
+          HUSKY: '0'
         run: npm ci
 
       - name: Dependency audit
@@ -223,7 +265,7 @@ jobs:
         run: npm run lint
 
       - name: Type check
-        run: npx tsc --noEmit
+        run: npm run typecheck
 
       - name: Build
         run: npm run build
@@ -238,7 +280,7 @@ jobs:
           flags: frontend
           fail_ci_if_error: false
 
-  # 浏览器端到端测试
+  # Browser end-to-end tests
   e2e:
     name: E2E Browser
     runs-on: ubuntu-latest
@@ -275,6 +317,8 @@ jobs:
           cache-dependency-path: web/package-lock.json
 
       - name: Install dependencies
+        env:
+          HUSKY: '0'
         run: npm ci
 
       - name: Install Playwright browser
@@ -295,7 +339,7 @@ jobs:
             web/test-results/
           if-no-files-found: ignore
 
-  # Docker 构建测试
+  # Docker build smoke test
   docker:
     name: Docker Build
     runs-on: ubuntu-latest
@@ -326,35 +370,7 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Smoke test container
-        run: |
-          set -euo pipefail
-
-          docker run -d --name mnemonas-smoke -p 18080:8080 mnemonas:test >/dev/null
-          # shellcheck disable=SC2317
-          cleanup() {
-            status=$?
-            if [ "$status" -ne 0 ]; then
-              docker logs mnemonas-smoke || true
-            fi
-            docker rm -f mnemonas-smoke >/dev/null 2>&1 || true
-            exit "$status"
-          }
-          trap cleanup EXIT
-
-          for _ in $(seq 1 40); do
-            if curl -fsS http://127.0.0.1:18080/health >/dev/null; then
-              curl -fsS http://127.0.0.1:18080/health | grep -q '"version":"ci"'
-              curl -fsS -H 'Accept: text/html' http://127.0.0.1:18080/ | grep -q 'id="root"'
-              exit 0
-            fi
-
-            if ! docker ps --format '{{.Names}}' | grep -qx 'mnemonas-smoke'; then
-              echo "mnemonas smoke container exited before becoming healthy" >&2
-              exit 1
-            fi
-
-            sleep 1
-          done
-
-          echo "timed out waiting for mnemonas smoke container health endpoint" >&2
-          exit 1
+        env:
+          MNEMONAS_DOCKER_SMOKE_CONTAINER: mnemonas-smoke
+          MNEMONAS_DOCKER_SMOKE_EXPECT_VERSION: ci
+        run: ./scripts/docker-smoke.sh mnemonas:test
