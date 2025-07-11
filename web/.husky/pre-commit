@@ -1,1 +1,16 @@
-npx lint-staged
+#!/usr/bin/env sh
+set -e
+
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root/web" || exit 1
+npm run check:node
+npm run check:scripts
+npm run check:identity
+npm run check:queries
+npm run check:testids
+npm run check:ts-suppressions
+npm run check:console
+npm run check:test-focus
+npm run check:a11y
+node ./scripts/check-eslint-button-rule.mjs
+npx lint-staged --config package.json

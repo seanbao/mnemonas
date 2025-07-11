@@ -23,20 +23,58 @@ const errors = []
 const anchorsByFile = new Map()
 const documentationIndexFiles = new Set(['docs/README.md', 'docs/README.en.md'])
 const decorativeHeadingEmoji = /[\u2600-\u27BF\u{1F300}-\u{1FAFF}]/u
+const statusEmojiMarkers = /(?:\u2705|\u274C|\u26A0\uFE0F?|\u25D0)/u
+const legacyFaqMarkers = /^(?:\s{0,3}#{1,6}\s+Q:\s+|\s{0,3}Q:\s+|\s{0,3}\*\*[QA]:\*\*)/
 const bannedMarketingPhrases = [
   'Your files. Your control.',
   'Fast deployment',
+  'one-click',
   '快速部署',
+  '一键',
   '开箱即用',
   '轻松上手',
   '业界最佳',
   '极致性能',
 ]
+const bannedCredentialPlaceholders = [
+  'your-secure-password',
+  'your-mnemonas-password',
+  'your-password',
+  'your-email@example.com',
+  'very-strong-password-here',
+  'change-this-password',
+  'change-this-test-password',
+  'change-this-webdav-password',
+  'changeme',
+  'password123',
+]
+const bannedChineseDocEnglishPhrases = [
+  'preview scaffolding',
+  'preview gateway',
+  'preview config',
+  'preview 状态',
+  'SMB runtime',
+  'SMB share',
+  'LAN 挂载',
+  'mobile 客户端',
+]
+const cjkCharacters = /[\u3040-\u30ff\u3400-\u9fff\uf900-\ufaff]/u
+const allowedEnglishDocChineseLinkLabels = new Set([
+  '简体中文',
+  '中文文档索引',
+  '中文 README',
+  '支持说明',
+  '安全策略',
+])
+const shellFenceLanguages = new Set(['bash', 'sh', 'shell', 'console', 'zsh'])
+const remoteShellPipePattern = /\b(?:curl|wget)\b[^|]*\|\s*(?:sudo\s+)?(?:sh|bash|zsh)\b/i
+const directScriptCommandPattern = /(^|[^\w./-])(\.\/scripts\/([A-Za-z0-9._-]+\.sh))\b/g
 const requiredDocumentPairs = [
   ['README.md', 'README.en.md', 'English', 'Chinese'],
   ['CHANGELOG.md', 'CHANGELOG.en.md', 'English', 'Chinese'],
   ['SUPPORT.md', 'SUPPORT.en.md', 'English', 'Chinese'],
   ['SECURITY.zh-CN.md', 'SECURITY.md', 'English', 'Chinese'],
+  ['deploy/public-access/README.md', 'deploy/public-access/README.en.md', 'English', 'Chinese'],
   ['web/README.md', 'web/README.en.md', 'English', 'Chinese'],
 ]
 
@@ -96,6 +134,97 @@ function checkDocumentationIndexCoverage() {
       errors.push(`docs/README.en.md: missing documentation index entry: ${englishFile}`)
     }
   }
+}
+
+function checkPairedHeadingLevelSequences() {
+  for (const [sourceFile, pairedFile] of pairedDocumentationFiles()) {
+    const sourceLevels = markdownHeadingLevels(sourceFile)
+    const pairedLevels = markdownHeadingLevels(pairedFile)
+    if (sourceLevels.join(',') !== pairedLevels.join(',')) {
+      errors.push(`${sourceFile} and ${pairedFile}: heading level sequence differs`)
+    }
+  }
+}
+
+function checkPairedLanguageLinks() {
+  for (const [chineseFile, englishFile] of pairedDocumentationFiles()) {
+    if (!hasMarkdownLinkTo(chineseFile, englishFile)) {
+      errors.push(`${chineseFile}: missing language switch link to ${englishFile}`)
+    }
+    if (!hasMarkdownLinkTo(englishFile, chineseFile)) {
+      errors.push(`${englishFile}: missing language switch link to ${chineseFile}`)
+    }
+  }
+}
+
+function hasMarkdownLinkTo(sourceFile, targetFile) {
+  const markdown = readOptionalFile(sourceFile)
+  if (markdown === null) {
+    return false
+  }
+
+  const sourceDir = path.dirname(sourceFile)
+  return extractMarkdownLinkTargets(markdown).some((target) => {
+    const normalized = normalizeTarget(target)
+    if (!normalized?.pathTarget) {
+      return false
+    }
+    return path.normalize(path.join(sourceDir, normalized.pathTarget)) === targetFile
+  })
+}
+
+function pairedDocumentationFiles() {
+  const pairs = []
+  const seen = new Set()
+
+  function addPair(sourceFile, pairedFile) {
+    if (!fileSet.has(sourceFile) || !fileSet.has(pairedFile)) {
+      return
+    }
+    const key = `${sourceFile}\0${pairedFile}`
+    if (seen.has(key)) {
+      return
+    }
+    seen.add(key)
+    pairs.push([sourceFile, pairedFile])
+  }
+
+  for (const [chineseFile, englishFile] of requiredDocumentPairs) {
+    addPair(chineseFile, englishFile)
+  }
+
+  for (const file of files) {
+    const parsed = path.parse(file)
+    if (parsed.dir !== 'docs' || parsed.ext !== '.md' || parsed.name.endsWith('.en')) {
+      continue
+    }
+    addPair(file, path.join(parsed.dir, `${parsed.name}.en.md`))
+  }
+
+  return pairs
+}
+
+function markdownHeadingLevels(file) {
+  const levels = []
+  const text = fs.readFileSync(path.join(repoRoot, file), 'utf8')
+  let inFence = false
+
+  for (const line of text.split('\n')) {
+    if (/^\s{0,3}(```|~~~)/.test(line)) {
+      inFence = !inFence
+      continue
+    }
+    if (inFence) {
+      continue
+    }
+
+    const match = /^\s{0,3}(#{1,6})\s+(.+?)\s*$/.exec(line)
+    if (match) {
+      levels.push(match[1].length)
+    }
+  }
+
+  return levels
 }
 
 function readOptionalFile(filePath) {
@@ -160,6 +289,10 @@ function checkTarget(sourceFile, rawTarget) {
   if (!fs.existsSync(resolved)) {
     errors.push(`${sourceFile}: missing link target: ${rawTarget}`)
     return
+  }
+  const relativeTarget = path.relative(repoRoot, resolved).split(path.sep).join('/')
+  if (isRepositoryScript(relativeTarget) && !isExecutable(resolved)) {
+    errors.push(`${sourceFile}: linked script is not executable: ${rawTarget}`)
   }
   if (link.hasFragment && link.fragment && resolved.endsWith('.md')) {
     const anchors = getMarkdownAnchors(resolved)
@@ -226,20 +359,69 @@ function slugHeading(heading) {
 checkRequiredDocumentPairs()
 checkDocumentationPairs()
 checkDocumentationIndexCoverage()
+checkPairedHeadingLevelSequences()
+checkPairedLanguageLinks()
 
 for (const file of files) {
   const text = fs.readFileSync(path.join(repoRoot, file), 'utf8')
 
+  checkCredentialPlaceholderStyle(file, text)
+  checkEnglishDocumentationLanguage(file, text)
   checkDocumentationStyle(file, text)
-  checkJsonCodeFences(file, text)
+  checkShellCodeFenceSafety(file, text)
+  checkDocumentationScriptReferences(file, text)
   for (const target of extractMarkdownLinkTargets(text)) {
     checkTarget(file, target)
   }
 }
 
+function checkCredentialPlaceholderStyle(sourceFile, markdown) {
+  const lines = markdown.split('\n')
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index]
+    const lineNumber = index + 1
+    for (const phrase of bannedCredentialPlaceholders) {
+      if (line.includes(phrase)) {
+        errors.push(`${sourceFile}:${lineNumber}: avoid copyable placeholder credentials in project documentation: ${phrase}`)
+      }
+    }
+  }
+}
+
+function checkEnglishDocumentationLanguage(sourceFile, markdown) {
+  if (!isEnglishMarkdown(sourceFile)) {
+    return
+  }
+
+  const lines = markdown.split('\n')
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index]
+    if (!cjkCharacters.test(stripAllowedEnglishDocChineseNavigation(line))) {
+      continue
+    }
+    errors.push(`${sourceFile}:${index + 1}: avoid non-English text outside language-navigation links in English documentation`)
+  }
+}
+
+function stripAllowedEnglishDocChineseNavigation(line) {
+  return line.replace(/\[([^\]\n]+)\]\([^)]+\)/g, (match, label) => (
+    allowedEnglishDocChineseLinkLabels.has(label) ? '' : match
+  ))
+}
+
+function hasBannedMarketingPhrase(line, phrase) {
+  if (/[A-Za-z]/.test(phrase)) {
+    return line.toLowerCase().includes(phrase.toLowerCase())
+  }
+  return line.includes(phrase)
+}
+
 function checkDocumentationStyle(sourceFile, markdown) {
   const lines = markdown.split('\n')
   let inFence = false
+  const chineseMarkdown = isChineseMarkdown(sourceFile)
+  const englishSecondPerson = /\b(?:you|your|yours|yourself)\b/i
+  const chineseSecondPerson = /[你您](?:的|们)?/
 
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index]
@@ -253,8 +435,27 @@ function checkDocumentationStyle(sourceFile, markdown) {
     }
 
     for (const phrase of bannedMarketingPhrases) {
-      if (line.includes(phrase)) {
+      if (hasBannedMarketingPhrase(line, phrase)) {
         errors.push(`${sourceFile}:${lineNumber}: avoid promotional wording in project documentation: ${phrase}`)
+      }
+    }
+    if (statusEmojiMarkers.test(line)) {
+      errors.push(`${sourceFile}:${lineNumber}: avoid emoji status markers in project documentation`)
+    }
+    if (legacyFaqMarkers.test(line)) {
+      errors.push(`${sourceFile}:${lineNumber}: avoid legacy Q:/A: FAQ markers in project documentation`)
+    }
+    if (englishSecondPerson.test(line)) {
+      errors.push(`${sourceFile}:${lineNumber}: avoid second-person wording in project documentation`)
+    }
+    if (chineseMarkdown && chineseSecondPerson.test(line)) {
+      errors.push(`${sourceFile}:${lineNumber}: avoid second-person wording in Chinese project documentation`)
+    }
+    if (chineseMarkdown) {
+      for (const phrase of bannedChineseDocEnglishPhrases) {
+        if (line.includes(phrase)) {
+          errors.push(`${sourceFile}:${lineNumber}: avoid English phrasing in Chinese documentation: ${phrase}`)
+        }
       }
     }
 
@@ -265,16 +466,23 @@ function checkDocumentationStyle(sourceFile, markdown) {
   }
 }
 
-function checkJsonCodeFences(sourceFile, markdown) {
+function isChineseMarkdown(sourceFile) {
+  return sourceFile.endsWith('.md') && !sourceFile.endsWith('.en.md') && sourceFile !== 'SECURITY.md'
+}
+
+function isEnglishMarkdown(sourceFile) {
+  return sourceFile.endsWith('.en.md') || sourceFile === 'SECURITY.md'
+}
+
+function checkShellCodeFenceSafety(sourceFile, markdown) {
   const lines = markdown.split('\n')
   let inFence = false
   let fenceChar = ''
   let language = ''
-  let startLine = 0
-  let content = []
 
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index]
+    const lineNumber = index + 1
     if (!inFence) {
       const match = /^ {0,3}(`{3,}|~{3,})\s*(.*)$/.exec(line)
       if (!match) {
@@ -283,43 +491,172 @@ function checkJsonCodeFences(sourceFile, markdown) {
       inFence = true
       fenceChar = match[1][0]
       language = (match[2] || '').trim().split(/\s+/, 1)[0].toLowerCase()
-      startLine = index + 1
-      content = []
       continue
     }
 
     const closePattern = fenceChar === '`' ? /^ {0,3}`{3,}\s*$/ : /^ {0,3}~{3,}\s*$/
     if (closePattern.test(line)) {
-      if (language === 'json') {
-        try {
-          JSON.parse(content.join('\n'))
-        } catch (error) {
-          errors.push(`${sourceFile}:${startLine}: invalid json code fence: ${error.message}`)
-        }
-      }
       inFence = false
       fenceChar = ''
       language = ''
-      startLine = 0
-      content = []
       continue
     }
 
-    content.push(line)
+    if (shellFenceLanguages.has(language) && remoteShellPipePattern.test(line)) {
+      errors.push(`${sourceFile}:${lineNumber}: avoid piping remote install scripts directly to a shell; download and inspect the script first`)
+    }
   }
+}
+
+function checkDocumentationScriptReferences(sourceFile, markdown) {
+  const lines = markdown.split('\n')
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index]
+    const lineNumber = index + 1
+    for (const match of line.matchAll(directScriptCommandPattern)) {
+      const command = match[2]
+      const commandStart = (match.index ?? 0) + match[1].length
+      if (hasExplicitShellInterpreter(line.slice(0, commandStart))) {
+        continue
+      }
+
+      const scriptPath = command.slice(2)
+      const resolved = path.join(repoRoot, scriptPath)
+      if (!fs.existsSync(resolved)) {
+        errors.push(`${sourceFile}:${lineNumber}: missing script reference: ${command}`)
+        continue
+      }
+      if (!isExecutable(resolved)) {
+        errors.push(`${sourceFile}:${lineNumber}: script reference is not executable: ${command}`)
+      }
+    }
+  }
+}
+
+function hasExplicitShellInterpreter(prefix) {
+  return /(^|\s)(?:bash|sh|zsh|dash)\s*$/.test(prefix.trimEnd())
+}
+
+function isRepositoryScript(relativePath) {
+  return /^scripts\/[^/]+\.sh$/.test(relativePath)
+}
+
+function isExecutable(filePath) {
+  return (fs.statSync(filePath).mode & 0o111) !== 0
 }
 
 function extractMarkdownLinkTargets(markdown) {
   const targets = []
-  const inlineLink = /\[[^\]\n]+\]\(([^\)\n]+)\)/g
-  const referenceLink = /^\s*\[[^\]\n]+\]:\s+(\S+)/gm
-  for (const pattern of [inlineLink, referenceLink]) {
-    let match
-    while ((match = pattern.exec(markdown)) !== null) {
-      targets.push(match[1])
+  let inFence = false
+  let fenceChar = ''
+
+  for (const line of markdown.split('\n')) {
+    if (!inFence) {
+      const fence = /^ {0,3}(`{3,}|~{3,})/.exec(line)
+      if (fence) {
+        inFence = true
+        fenceChar = fence[1][0]
+        continue
+      }
+
+      targets.push(...extractInlineMarkdownLinkTargets(line))
+      const referenceTarget = extractReferenceMarkdownLinkTarget(line)
+      if (referenceTarget) {
+        targets.push(referenceTarget)
+      }
+      continue
+    }
+
+    const closePattern = fenceChar === '`' ? /^ {0,3}`{3,}\s*$/ : /^ {0,3}~{3,}\s*$/
+    if (closePattern.test(line)) {
+      inFence = false
+      fenceChar = ''
     }
   }
+
   return targets
+}
+
+function extractInlineMarkdownLinkTargets(line) {
+  const targets = []
+  for (let index = 0; index < line.length; index += 1) {
+    if (line[index] !== '[' || isEscaped(line, index)) {
+      continue
+    }
+
+    const labelEnd = findClosingBracket(line, index + 1)
+    if (labelEnd < 0) {
+      continue
+    }
+
+    if (line[labelEnd + 1] !== '(') {
+      index = labelEnd
+      continue
+    }
+
+    const linkTarget = readParenthesizedLinkTarget(line, labelEnd + 2)
+    if (!linkTarget) {
+      index = labelEnd
+      continue
+    }
+
+    targets.push(linkTarget.target)
+    index = linkTarget.end
+  }
+  return targets
+}
+
+function findClosingBracket(text, start) {
+  let depth = 0
+  for (let index = start; index < text.length; index += 1) {
+    if (isEscaped(text, index)) {
+      continue
+    }
+    if (text[index] === '[') {
+      depth += 1
+      continue
+    }
+    if (text[index] === ']') {
+      if (depth === 0) {
+        return index
+      }
+      depth -= 1
+    }
+  }
+  return -1
+}
+
+function readParenthesizedLinkTarget(text, start) {
+  let depth = 0
+  for (let index = start; index < text.length; index += 1) {
+    if (isEscaped(text, index)) {
+      continue
+    }
+    if (text[index] === '(') {
+      depth += 1
+      continue
+    }
+    if (text[index] === ')') {
+      if (depth === 0) {
+        return { target: text.slice(start, index), end: index }
+      }
+      depth -= 1
+    }
+  }
+  return null
+}
+
+function extractReferenceMarkdownLinkTarget(line) {
+  const match = /^\s*\[[^\]\n]+\]:\s+(\S+)/.exec(line)
+  return match ? match[1] : null
+}
+
+function isEscaped(text, index) {
+  let slashCount = 0
+  for (let cursor = index - 1; cursor >= 0 && text[cursor] === '\\'; cursor -= 1) {
+    slashCount += 1
+  }
+  return slashCount % 2 === 1
 }
 
 if (errors.length > 0) {
@@ -332,6 +669,170 @@ if (errors.length > 0) {
 
 console.log(`[docs-link-check] checked ${files.length} markdown files`)
 NODE
+
+python3 - <<'PY'
+import json
+import pathlib
+import re
+import subprocess
+import sys
+from collections.abc import Hashable
+
+try:
+    import yaml
+    from yaml.constructor import ConstructorError
+    from yaml.nodes import MappingNode, SequenceNode
+except ModuleNotFoundError:
+    print(
+        "check-doc-links: PyYAML is required for YAML code fences; install python3-yaml or run `python3 -m pip install PyYAML`",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+
+class UniqueKeyLoader(yaml.SafeLoader):
+    pass
+
+
+def construct_mapping_without_duplicates(loader, node, deep=False):
+    if not isinstance(node, MappingNode):
+        raise ConstructorError(
+            None,
+            None,
+            f"expected a mapping node, but found {node.id}",
+            node.start_mark,
+        )
+
+    seen = {}
+    for key_node, _ in node.value:
+        if key_node.tag == "tag:yaml.org,2002:merge":
+            continue
+
+        key = loader.construct_object(key_node, deep=deep)
+        if not isinstance(key, Hashable):
+            raise ConstructorError(
+                "while constructing a mapping",
+                node.start_mark,
+                "found unhashable key",
+                key_node.start_mark,
+            )
+        if key in seen:
+            raise ConstructorError(
+                "while constructing a mapping",
+                node.start_mark,
+                f"found duplicate key {key!r}",
+                key_node.start_mark,
+            )
+        seen[key] = key_node.start_mark
+
+    return yaml.SafeLoader.construct_mapping(loader, node, deep=deep)
+
+
+UniqueKeyLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
+    construct_mapping_without_duplicates,
+)
+
+
+def construct_unknown_tag(loader, tag_suffix, node):
+    if isinstance(node, MappingNode):
+        return construct_mapping_without_duplicates(loader, node)
+    if isinstance(node, SequenceNode):
+        return loader.construct_sequence(node)
+    return loader.construct_scalar(node)
+
+
+UniqueKeyLoader.add_multi_constructor("", construct_unknown_tag)
+
+
+def construct_json_object_without_duplicates(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"found duplicate key {key!r}")
+        result[key] = value
+    return result
+
+
+def git_files(*args):
+    output = subprocess.check_output(["git", *args], text=True)
+    return [line for line in output.splitlines() if line]
+
+
+tracked = git_files("ls-files", "--", "*.md")
+untracked = git_files("ls-files", "--others", "--exclude-standard", "--", "*.md")
+files = list(dict.fromkeys([*tracked, *untracked]))
+
+open_fence = re.compile(r"^ {0,3}(`{3,}|~{3,})\s*(.*)$")
+close_backtick = re.compile(r"^ {0,3}`{3,}\s*$")
+close_tilde = re.compile(r"^ {0,3}~{3,}\s*$")
+errors = []
+json_fence_count = 0
+yaml_fence_count = 0
+
+for file_name in files:
+    path = pathlib.Path(file_name)
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except UnicodeDecodeError as error:
+        errors.append(f"{file_name}: invalid UTF-8: {error}")
+        continue
+
+    in_fence = False
+    fence_char = ""
+    language = ""
+    start_line = 0
+    content = []
+
+    for index, line in enumerate(lines, 1):
+        if not in_fence:
+            match = open_fence.match(line)
+            if not match:
+                continue
+            in_fence = True
+            fence_char = match.group(1)[0]
+            language = (match.group(2).strip().split(None, 1)[0].lower() if match.group(2).strip() else "")
+            start_line = index
+            content = []
+            continue
+
+        closed = (fence_char == "`" and close_backtick.match(line)) or (
+            fence_char == "~" and close_tilde.match(line)
+        )
+        if closed:
+            if language == "json":
+                json_fence_count += 1
+                raw = "\n".join(content).strip()
+                if raw:
+                    try:
+                        json.loads(raw, object_pairs_hook=construct_json_object_without_duplicates)
+                    except ValueError as error:
+                        errors.append(f"{file_name}:{start_line}: invalid json code fence: {error}")
+            elif language in {"yaml", "yml"}:
+                yaml_fence_count += 1
+                raw = "\n".join(content).strip()
+                if raw:
+                    try:
+                        yaml.load(raw, Loader=UniqueKeyLoader)
+                    except yaml.YAMLError as error:
+                        errors.append(f"{file_name}:{start_line}: invalid yaml code fence: {error}")
+            in_fence = False
+            fence_char = ""
+            language = ""
+            start_line = 0
+            content = []
+            continue
+
+        content.append(line)
+
+if errors:
+    print("Documentation structured code fence check failed:", file=sys.stderr)
+    for error in errors:
+        print(f"  - {error}", file=sys.stderr)
+    sys.exit(1)
+
+print(f"[docs-structured-check] checked {json_fence_count} JSON code fences and {yaml_fence_count} YAML code fences")
+PY
 
 toml_check_program="$(mktemp "${TMPDIR:-/tmp}/mnemonas-doc-toml-check.XXXXXX.go")"
 trap 'rm -f -- "$toml_check_program"' EXIT
@@ -653,6 +1154,10 @@ func securityCheckIDsFromDoc(markdown string) []string {
 func securityCheckIDDocSources(markdown string) []string {
 	lines := strings.Split(markdown, "\n")
 	sources := []string{}
+	idListMarkers := []string{
+		"Current check IDs include",
+		"当前检查项 ID 包括",
+	}
 	for index := 0; index < len(lines); index++ {
 		line := lines[index]
 		switch {
@@ -667,24 +1172,33 @@ func securityCheckIDDocSources(markdown string) []string {
 				index = next
 			}
 			sources = append(sources, strings.Join(block, " "))
-		case strings.Contains(line, "Current check IDs include"):
-			block := []string{line[strings.Index(line, "Current check IDs include"):]}
-			for next := index + 1; next < len(lines); next++ {
-				nextLine := strings.TrimSpace(lines[next])
-				if nextLine == "" {
-					break
-				}
-				block = append(block, lines[next])
-				index = next
-				if strings.Contains(lines[next], ".") {
+		default:
+			markerStart := -1
+			for _, marker := range idListMarkers {
+				if start := strings.Index(line, marker); start >= 0 {
+					markerStart = start
 					break
 				}
 			}
-			source := strings.Join(block, " ")
-			if dot := strings.Index(source, "."); dot >= 0 {
-				source = source[:dot]
+			if markerStart >= 0 {
+				block := []string{line[markerStart:]}
+				for next := index + 1; next < len(lines); next++ {
+					nextLine := strings.TrimSpace(lines[next])
+					if nextLine == "" {
+						break
+					}
+					block = append(block, lines[next])
+					index = next
+					if strings.ContainsAny(lines[next], ".。") {
+						break
+					}
+				}
+				source := strings.Join(block, " ")
+				if stop := strings.IndexAny(source, ".。"); stop >= 0 {
+					source = source[:stop]
+				}
+				sources = append(sources, source)
 			}
-			sources = append(sources, source)
 		}
 	}
 	return sources
