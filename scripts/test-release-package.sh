@@ -167,6 +167,7 @@ for required_path in \
 	"$PROJECT_ROOT/scripts/docker-smoke.sh" \
 	"$PROJECT_ROOT/scripts/docker-start.sh" \
 	"$PROJECT_ROOT/scripts/mnemonas-docker-preflight.sh" \
+	"$PROJECT_ROOT/scripts/verify-release-artifacts.sh" \
 	"$PROJECT_ROOT/scripts/setup-reverse-proxy.sh" \
 	"$PROJECT_ROOT/scripts/uninstall-systemd.sh" \
 	"$PROJECT_ROOT/docker-compose.yml" \
@@ -232,5 +233,6 @@ assert_installer_contains \
 
 TMP_ROOT="$(mktemp -d)"
 build_release_fixture
+assert_executable "$TMP_ROOT/extract/mnemonas-v9.9.9-test-linux-amd64/scripts/verify-release-artifacts.sh"
 
 printf '[release-package-test] all checks passed\n'

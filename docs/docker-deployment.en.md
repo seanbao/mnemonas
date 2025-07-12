@@ -259,6 +259,25 @@ Binary archives from GitHub Releases include `docker-compose.yml` and `.env.exam
 The packaged template presets `MNEMONAS_IMAGE` to the GHCR image for the same release tag.
 Running `./scripts/docker-quickstart.sh --start` from an extracted archive therefore uses the release-image path by default instead of a source build.
 
+After a release is published, verify the GitHub Release archives, `checksums.txt`, and matching GHCR image tag from the download directory:
+
+```bash
+mkdir -p dist/release-check
+gh release download v1.2.3 \
+  --repo seanbao/mnemonas \
+  --dir dist/release-check
+
+./scripts/verify-release-artifacts.sh \
+  --version v1.2.3 \
+  --repository seanbao/mnemonas \
+  --require-targets \
+  --check-image \
+  dist/release-check
+```
+
+`--check-image` uses Docker to check that `ghcr.io/seanbao/mnemonas:1.2.3` exists.
+Omit it when only the downloaded archives and checksums need offline verification.
+
 The examples below default to the source-built local image and can be switched to a verified release image with `MNEMONAS_IMAGE`.
 
 ## Media Archive Example
