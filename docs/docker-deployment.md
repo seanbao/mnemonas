@@ -258,6 +258,25 @@ GitHub Releases 的二进制归档包含 `docker-compose.yml` 和 `.env.example`
 打包模板会将 `MNEMONAS_IMAGE` 预设为同一 release tag 的 GHCR 镜像。
 因此，从解压后的归档运行 `./scripts/docker-quickstart.sh --start` 时，默认走 release 镜像路径，而不是源码构建路径。
 
+发布后可在下载目录核验 GitHub Release 归档、`checksums.txt` 和对应 GHCR 镜像标签：
+
+```bash
+mkdir -p dist/release-check
+gh release download v1.2.3 \
+  --repo seanbao/mnemonas \
+  --dir dist/release-check
+
+./scripts/verify-release-artifacts.sh \
+  --version v1.2.3 \
+  --repository seanbao/mnemonas \
+  --require-targets \
+  --check-image \
+  dist/release-check
+```
+
+`--check-image` 会调用 Docker 检查 `ghcr.io/seanbao/mnemonas:1.2.3` 是否存在。
+仅核验离线下载的归档和 checksums 时，可省略该参数。
+
 下列示例默认使用源码构建的本地镜像，也可通过 `MNEMONAS_IMAGE` 切换到已验证的 release 镜像。
 
 ## 媒体归档示例
