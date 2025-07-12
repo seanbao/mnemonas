@@ -1,178 +1,213 @@
 <!-- markdownlint-disable MD032 MD060 -->
 
-# WebDAV 客户端兼容性清单
+# WebDAV 客户端兼容性
 
 [English](webdav-compatibility.en.md) | 简体中文
 
-本文档记录 MnemoNAS WebDAV 服务的协议能力，以及常见客户端的预期兼容性。客户端版本、系统策略和网络环境会影响结果，发布前后应持续用真实客户端回归验证。
+本文档记录 MnemoNAS WebDAV 协议覆盖范围和预期客户端兼容性。客户端版本、操作系统策略和网络配置都会影响行为，因此 release 前后仍应持续执行真实客户端回归验证。
 
-说明：本文档描述的是 WebDAV 协议能力。REST API `/api/v1/files-copy` 现已支持递归目录复制，但不提供 `Overwrite: T/F` 控制。
+REST API 资源复制接口位于 `/api/v1/files-copy`；WebDAV `Overwrite: T/F` 行为仅适用于 WebDAV `COPY` 方法。
 
-补充：部分写请求在变更已经提交、但后续持久化或清理步骤失败时，会保持成功状态码并附带 HTTP `Warning` 响应头，而不是改写成整体失败。当前已覆盖的 warning 文案包括 `199 MnemoNAS "workspace mutation persistence incomplete"`、`199 MnemoNAS "delete cleanup incomplete"`、`199 MnemoNAS "trash delete cleanup incomplete"`。
+部分写请求可能在可见变更已经提交后，因后续持久化或清理步骤失败而返回成功状态码。此时 MnemoNAS 会发送 HTTP `Warning` 响应头，而不会把已经提交的变更改写为整体失败。当前覆盖的 warning 值包括 `199 MnemoNAS "workspace mutation persistence incomplete"`、`199 MnemoNAS "delete cleanup incomplete"` 和 `199 MnemoNAS "trash delete cleanup incomplete"`。
 
-同源判断：`COPY` / `MOVE` 的 `Destination` 头和锁相关 `If` 头中的 URI 必须指向当前 WebDAV 主机。默认端口（HTTP 80、HTTPS 443）可省略或显式写出；scheme-relative URI（如 `//host/dav/path`）仅在同主机且两边都省略端口，或两边显式端口完全一致时接受。主机名的单个 FQDN 尾点会按同一主机处理，重复尾点会被拒绝。URI 路径会解码一次，`.` / `..` 路径段会被拒绝；反斜杠按路径分隔符归一化后再执行前缀和权限边界检查。
+同源 URI 处理：
 
-认证：`auth_type = "users"` 使用 MnemoNAS 用户账号登录，普通用户挂载根目录映射到自己的 `home_dir`，并在挂载根目录列出可导航到已授权共享目录的顶层入口；嵌套授权产生的祖先入口仅用于只读导航，写操作仍需命中写授权；共享路径按命中的目录授权放行，guest 只读，并对写入 `home_dir` 的 PUT/COPY/MOVE 执行用户配额限制；共享路径容量由目录配额限制。`auth_type = "basic"` 保留为全局服务凭据兼容模式。
+- `COPY` / `MOVE` 的 `Destination` 头，以及锁相关 `If` 头中的带标签 URI，必须指向当前 WebDAV 主机。
+- 带 WebDAV 前缀的绝对路径引用也可接受，例如 `/dav/path`。
+- 裸相对引用会被拒绝。即使引用看起来包含 WebDAV 前缀，例如 `dav/path`，也必须写成 `/dav/path` 或同源绝对 URI。
+- 默认端口（HTTP 80、HTTPS 443）可以省略，也可以显式写出。
+- scheme-relative URI（例如 `//host/dav/path`）仅在主机匹配且两边都省略端口，或两边使用相同显式端口时接受。
+- 主机名的单个 FQDN 尾点会视为同一主机，重复尾点会被拒绝。
+- URI 路径会解码一次；控制字符和 `.` / `..` 路径段会被拒绝；反斜杠会先归一化为路径分隔符，再执行前缀和权限边界检查。
 
-## 协议实现状态
+认证：
 
-### 已实现 (RFC 4918)
+- `auth_type = "users"` 接受 MnemoNAS 用户凭据。
+- 普通用户的挂载根目录映射到自己的 `home_dir`。
+- 已授权的共享目录会作为挂载根目录下的顶层导航入口出现。
+- 共享路径按命中的目录授权规则放行。guest 账号只读。
+- 写入 `home_dir` 的 PUT/COPY/MOVE 会执行用户配额限制；共享路径容量限制由目录配额处理。
+- 为嵌套授权合成的祖先入口仅用于只读导航。写操作仍需命中写授权。
+- `auth_type = "basic"` 保留为全局服务凭据兼容模式。
+
+响应安全头：
+
+- 文件响应、目录 HTML 列表、`PROPFIND` / `PROPPATCH` / `LOCK` XML 响应均设置 `X-Content-Type-Options: nosniff`。
+- 这些包含用户文件名或路径的响应还会设置 sandbox 形式的 `Content-Security-Policy`，以限制浏览器直接打开 WebDAV URL 时的脚本、对象和框架能力。标准 WebDAV 客户端通常会忽略这些浏览器安全头。
+
+## 协议状态
+
+### 已实现核心方法
 
 | 方法 | 状态 | 说明 |
-|------|------|------|
-| `OPTIONS` | ✅ 核心支持 | 返回 `DAV: 1, 2`、`MS-Author-Via: DAV` 和 `Allow` 方法列表 |
-| `PROPFIND` | ✅ 核心支持 | 支持 Depth: 0, 1, infinity |
-| `GET` | ✅ 核心支持 | 支持 Range 请求、ETag、条件请求 |
-| `HEAD` | ✅ 核心支持 | 返回文件元信息 |
-| `PUT` | ✅ 核心支持 | 支持 `If-Match`、`If-Unmodified-Since` 条件写入；仅接受完整覆盖写入，`Content-Range` partial PUT 返回 `400 Bad Request` |
-| `DELETE` | ✅ 核心支持 | 删除进入回收站（软删除）；集合资源仅接受 `Depth: infinity`（省略时按 `infinity` 处理） |
-| `MKCOL` | ✅ 核心支持 | 创建目录；直接父目录不存在时返回 `409 Conflict`，目标已存在时返回带 `Allow` 的 `405 Method Not Allowed`，不会隐式创建中间目录 |
-| `MOVE` | ✅ 核心支持 | 移动/重命名，支持 `Overwrite: T/F`；集合资源仅接受 `Depth: infinity`（省略时按 `infinity` 处理）；覆盖目标已提交后若 backup cleanup 失败，返回 `204 + Warning` |
-| `COPY` | ✅ 核心支持 | 复制文件/目录，支持 `Overwrite: T/F`；集合资源支持 `Depth: 0` 和 `Depth: infinity`；递归目录复制在目标目录已创建、仅持久化失败时返回成功并附带 `Warning` |
-| `PROPPATCH` | ⚠️ 简化 | 解析请求并显式拒绝属性修改；返回 `207 Multi-Status`，属性状态为 `403 Forbidden`，不持久化 dead properties |
-| `LOCK` | ⚠️ 简化 | 返回虚拟锁 token，支持 `Depth: 0` / `Depth: infinity`，默认 1 小时过期 |
-| `UNLOCK` | ⚠️ 简化 | 需要匹配 `Lock-Token`，过期锁会自动清理 |
+| --- | --- | --- |
+| `OPTIONS` | 支持 | 返回 `DAV: 1, 2`、`MS-Author-Via: DAV` 和 `Allow` 方法列表；只读挂载和只读用户仅列出读方法 |
+| `PROPFIND` | 支持 | 支持 `Depth: 0`、`1` 和 `infinity` |
+| `GET` | 支持 | 支持 Range、ETag 和条件请求 |
+| `HEAD` | 支持 | 返回文件元数据 |
+| `PUT` | 支持 | 完整覆盖写入；支持条件 `If-Match` 和 `If-Unmodified-Since`；partial `Content-Range` PUT 返回 `400` |
+| `DELETE` | 支持 | 软删除到回收站；集合资源要求或隐含 `Depth: infinity` |
+| `MKCOL` | 支持 | 创建目录；直接父目录不存在时返回 `409 Conflict`，目标已存在时返回带 `Allow` 的 `405 Method Not Allowed`，且不会创建中间目录 |
+| `MOVE` | 支持 | 移动/重命名，支持 `Overwrite: T/F`；集合资源要求或隐含 `Depth: infinity`；覆盖提交后若 backup cleanup 失败，返回 `204` 并附带 `Warning` |
+| `COPY` | 支持 | 复制文件和目录；支持 `Overwrite: T/F`；集合资源支持 `Depth: 0` 和 `Depth: infinity`；递归目录复制在仅 post-create 持久化失败时返回成功并附带 `Warning` |
+| `PROPPATCH` | 简化 | 解析请求并返回 `207 Multi-Status`，属性修改返回 `403 Forbidden` |
+| `LOCK` | 简化 | 返回虚拟锁 token；支持 `Depth: 0` 和 `Depth: infinity`；一小时过期 |
+| `UNLOCK` | 简化 | 需要匹配 `Lock-Token`；过期锁会自动清理 |
 
-### 未实现
+### 不支持的方法
 
-不支持的方法返回 `405 Method Not Allowed`，并在 `Allow` 响应头中列出当前支持的方法。
+不支持的方法返回 `405 Method Not Allowed`，并在 `Allow` 响应头中列出当前作用域可用的方法。只读挂载和只读用户仅列出 `OPTIONS`、`GET`、`HEAD` 和 `PROPFIND`。
 
 | 方法 | 状态 | 说明 |
-|------|------|------|
-| `ACL` | ❌ 不支持 | RFC 3744 扩展 |
-| `SEARCH` | ❌ 不支持 | RFC 5323 扩展 |
+| --- | --- | --- |
+| `ACL` | 不支持 | RFC 3744 扩展 |
+| `SEARCH` | 不支持 | RFC 5323 扩展 |
 
-## 客户端兼容性矩阵
+## 兼容性矩阵
 
 状态说明：
 
-- ✅ 已验证：有自动化或真实客户端回归记录。
-- ◐ 预期可用：依赖核心 WebDAV 行为，尚需真实客户端回归确认。
-- ⚠️ 需要配置/待验证：已知需要额外设置，或还没有足够验证数据。
+- 已验证：已有自动化或真实客户端测试覆盖。
+- 预期可用：根据标准 WebDAV 行为应可工作，但仍需要真实客户端确认。
+- 需要配置：需要操作系统设置，或验证数据仍有限。
 
-当前自动化测试覆盖 `OPTIONS`、`MKCOL`、`PUT`、`PROPFIND`、`COPY`、`MOVE`、条件请求、Range/ETag、LOCK/UNLOCK 等核心协议行为；下表用于发布前后补齐真实客户端验证。
+当前自动化覆盖：
+
+- `OPTIONS`、`MKCOL`、`PUT`、`PROPFIND`、`COPY` 和 `MOVE`；
+- 条件请求、Range/ETag 和 LOCK/UNLOCK 行为；
+- 同源 `Destination` 解析和锁 `If` URI 解析；
+- 设置 `RUN_RCLONE_WEBDAV=1` 后，低层 E2E 会在已安装 `rclone` 的环境中执行 WebDAV 客户端上传、下载、移动/重命名和列表 smoke。
+
+下表用于跟踪剩余真实客户端验证工作。
 
 ### Linux
 
-| 客户端 | 版本 | 状态 | 备注 |
-|--------|------|------|------|
-| Nautilus (GNOME Files) | 45+ | ◐ 预期可用 | 通过 GVfs davs:// |
-| Dolphin (KDE) | 23+ | ◐ 预期可用 | 内置 WebDAV 支持 |
-| davfs2 | 1.6+ | ◐ 预期可用 | 挂载为本地目录 |
-| rclone | 1.60+ | ◐ 预期可用 | 推荐优先验证；脚本和文档均按 rclone 使用方式设计 |
+| 客户端 | 版本 | 状态 | 说明 |
+| --- | --- | --- | --- |
+| Nautilus / GNOME Files | 45+ | 预期可用 | 使用 GVfs DAV 支持 |
+| Dolphin | 23+ | 预期可用 | 内置 WebDAV 支持 |
+| davfs2 | 1.6+ | 预期可用 | 挂载为本地目录 |
+| rclone | 1.60+ | 已验证 | 可选 `RUN_RCLONE_WEBDAV=1` E2E 覆盖上传、下载、移动/重命名和列表 |
 
 ### macOS
 
-| 客户端 | 版本 | 状态 | 备注 |
-|--------|------|------|------|
-| Finder | macOS 12+ | ◐ 预期可用 | 使用「连接服务器」|
-| Transmit | 5+ | ◐ 预期可用 | 专业文件传输工具 |
-| Cyberduck | 8+ | ◐ 预期可用 | 开源文件浏览器 |
-| rclone | 1.60+ | ◐ 预期可用 | 命令行工具 |
+| 客户端 | 版本 | 状态 | 说明 |
+| --- | --- | --- | --- |
+| Finder | macOS 12+ | 预期可用 | 使用 **前往** -> **连接服务器** |
+| Transmit | 5+ | 预期可用 | 适合大批量传输 |
+| Cyberduck | 8+ | 预期可用 | 开源文件浏览器 |
+| rclone | 1.60+ | 预期可用 | 支持 CLI 和 mount |
 
 ### Windows
 
-| 客户端 | 版本 | 状态 | 备注 |
-|--------|------|------|------|
-| 资源管理器 | Win 10/11 | ⚠️ 需要配置 | 需要启用 WebClient 服务；HTTP 还需要注册表设置 |
-| WinSCP | 6+ | ◐ 预期可用 | 推荐优先验证 |
-| Cyberduck | 8+ | ◐ 预期可用 | 开源文件浏览器 |
-| rclone | 1.60+ | ◐ 预期可用 | 可挂载为盘符 |
-| NetDrive | 3+ | ⚠️ 待验证 | 商业软件，不同版本行为可能不同 |
+| 客户端 | 版本 | 状态 | 说明 |
+| --- | --- | --- | --- |
+| File Explorer | Windows 10/11 | 需要配置 | 需要 WebClient 服务；HTTP Basic Auth 需要注册表设置 |
+| WinSCP | 6+ | 预期可用 | 推荐的 Windows 客户端 |
+| Cyberduck | 8+ | 预期可用 | 开源文件浏览器 |
+| rclone | 1.60+ | 预期可用 | 可挂载为驱动器 |
+| NetDrive | 3+ | 需要验证 | 商业客户端；不同行为可能随版本变化 |
 
-**Windows 资源管理器已知问题**：
-- 默认只支持 HTTPS（需要配置注册表启用 HTTP）
-- 大文件传输可能超时
-- 建议使用第三方客户端获得更好体验
+Windows File Explorer 已知注意事项：
+
+- 强烈建议使用 HTTPS。
+- 大文件传输可能超时。
+- 第三方客户端通常提供更好的体验。
 
 ### iOS / iPadOS
 
-| 客户端 | 版本 | 状态 | 备注 |
-|--------|------|------|------|
-| 文件 App | iOS 15+ | ◐ 预期可用 | 原生 WebDAV 支持 |
-| Documents by Readdle | 8+ | ◐ 预期可用 | 功能丰富 |
-| FileBrowser | 14+ | ⚠️ 待验证 | 专业文件管理 |
+| 客户端 | 版本 | 状态 | 说明 |
+| --- | --- | --- | --- |
+| Files | iOS 15+ | 预期可用 | 原生 WebDAV 支持 |
+| Documents by Readdle | 8+ | 预期可用 | 功能较完整的文件管理器 |
+| FileBrowser | 14+ | 需要验证 | 专业文件管理器 |
 
 ### Android
 
-| 客户端 | 版本 | 状态 | 备注 |
-|--------|------|------|------|
-| Solid Explorer | 2.8+ | ◐ 预期可用 | 推荐优先验证 |
-| Total Commander + WebDAV 插件 | - | ⚠️ 待验证 | 老牌文件管理器 |
-| FolderSync | 5+ | ⚠️ 待验证 | 同步工具 |
-| rclone | - | ◐ 预期可用 | Termux 中运行 |
+| 客户端 | 版本 | 状态 | 说明 |
+| --- | --- | --- | --- |
+| Solid Explorer | 2.8+ | 预期可用 | 推荐的 Android 客户端 |
+| Total Commander + WebDAV plugin | - | 需要验证 | 长期维护的文件管理器 |
+| FolderSync | 5+ | 需要验证 | 同步客户端 |
+| rclone | - | 预期可用 | 可在 Termux 中运行 |
 
 ### 媒体播放器
 
-| 客户端 | 平台 | 状态 | 备注 |
-|--------|------|------|------|
-| Infuse | iOS/tvOS/macOS | ⚠️ 待验证 | 支持 WebDAV 源，播放效果取决于网络和客户端缓存策略 |
-| nPlayer | iOS/Android | ⚠️ 待验证 | 支持字幕，需验证大文件拖动体验 |
-| VLC | 全平台 | ◐ 预期可用 | 网络流播放；重点验证 Range 请求和大文件拖动 |
-| Kodi | 全平台 | ⚠️ 待验证 | 需配置 WebDAV 源 |
+| 客户端 | 平台 | 状态 | 说明 |
+| --- | --- | --- | --- |
+| Infuse | iOS/tvOS/macOS | 需要验证 | 支持 WebDAV 源 |
+| nPlayer | iOS/Android | 需要验证 | 需要验证拖动播放和字幕行为 |
+| VLC | 跨平台 | 预期可用 | 需要验证 Range 请求和拖动播放 |
+| Kodi | 跨平台 | 需要验证 | 需要配置 WebDAV 源 |
 
 ## 已知限制
 
-### LOCK 机制
+### 虚拟锁
 
-当前实现为「虚拟锁」，不提供真正的文件锁定：
-- 返回锁 token 以满足客户端协议要求
-- 支持 `Depth: 0` 和 `Depth: infinity`；省略 `Depth` 时按 `infinity` 处理
-- 仅对已存在资源返回锁成功；不存在的路径返回 `404 Not Found`
-- 刷新锁要求空请求体并携带作用域匹配的 lock token；刷新响应不返回 `Lock-Token` 头
-- `UNLOCK` 需要提供 `Lock-Token` 请求头；缺失时返回 `400 Bad Request`
-- 过期时间固定为 1 小时；后续请求会自动清理过期锁
-- 会阻止缺少匹配 token 的写请求，但不做跨进程持久化
-- 适用于单节点、单用户或低并发场景
+MnemoNAS 会返回 WebDAV lock token 以兼容客户端，但它不是完整的协作锁系统。
 
-**影响**：Office 等依赖锁机制的应用可能出现冲突警告
+- 锁支持 `Depth: 0` 和 `Depth: infinity`。
+- 缺失 `Depth` 时按 `infinity` 处理。
+- 锁定不存在的资源返回 `404 Not Found`。
+- 刷新请求要求空请求体和匹配的 lock token。
+- `UNLOCK` 要求提供 `Lock-Token` 请求头。
+- 过期时间当前为一小时。
+- 锁不会跨进程持久化。
+
+Office 类应用在多个客户端编辑同一文件时，仍可能报告冲突。
 
 ### 大文件上传
 
-- 默认超时 60 秒（可配置）
-- 大于 10GB 的文件建议使用命令行工具
+- 默认写入超时可配置。
+- 大于 10GB 的文件更适合使用 rclone 或其他稳健客户端处理。
+- 反向代理必须允许大请求体和较长上传超时。
 
-### 目录深度
+### 深层目录
 
-- `PROPFIND Depth: infinity` 在大目录可能较慢
-- 建议客户端使用 `Depth: 1` 逐级浏览
+`PROPFIND Depth: infinity` 在非常大的目录树上可能较慢。客户端应优先使用 `Depth: 1` 逐级浏览。
 
-## 性能优化建议
+## 性能说明
 
-1. **目录缓存**：PROPFIND 结果默认缓存 30 秒
-2. **Range 请求**：支持断点续传和视频拖动
-3. **ETag 支持**：启用客户端缓存避免重复下载
-4. **重复内容复用**：相同内容可复用已有对象；客户端仍需要完成一次上传请求
+- `PROPFIND` 响应可能会短时间缓存。
+- Range 请求支持断点续传和媒体拖动。
+- ETag 支持可帮助客户端避免重复下载。
+- 去重内容可以复用已有 CAS 对象，但客户端仍需要发送上传请求。
 
 ## 配置示例
 
-### rclone 配置
+### rclone 示例
 
 ```ini
 [mnemonas]
 type = webdav
 url = http://localhost:8080/dav
 vendor = other
-user = admin
-pass = <obscured-webdav-password>
+user = <mnemonas-or-webdav-username>
+pass = <obscured-mnemonas-or-webdav-password>
 ```
 
-使用 `rclone obscure <webdav-password>` 生成 `pass` 字段的值。
-
-### davfs2 挂载
+使用以下命令生成 `pass`：
 
 ```bash
-# /etc/davfs2/secrets
-http://localhost:8080/dav <webdav-username> <webdav-password>
+rclone obscure <mnemonas-or-webdav-password>
+```
 
-# 挂载命令
+### davfs2 示例
+
+```text
+# /etc/davfs2/secrets
+http://localhost:8080/dav <mnemonas-or-webdav-username> <mnemonas-or-webdav-password>
+```
+
+```bash
 sudo mount -t davfs http://localhost:8080/dav /mnt/nas
 ```
 
-## 问题反馈
+## 报告兼容性问题
 
-如遇到客户端兼容性问题，请提供：
-1. 客户端名称和版本
-2. 操作系统和版本
-3. 复现步骤
-4. 诊断包（可通过 Web UI 导出）
+客户端兼容性报告应包含：
+
+- 客户端名称和版本。
+- 操作系统和版本。
+- 复现步骤。
+- 可行时附上从 Web UI 导出的诊断包。

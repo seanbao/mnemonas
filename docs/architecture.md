@@ -1,394 +1,177 @@
-# MnemoNAS 架构设计
+# MnemoNAS 架构
 
 [English](architecture.en.md) | 简体中文
 
-本文档详细介绍 MnemoNAS 的系统架构、核心设计决策和技术实现细节。
+本文档描述 MnemoNAS 的系统架构、主要设计决策和实现边界。
 
-## 目录
+## 设计定位
 
-- [设计理念](#设计理念)
-- [整体架构](#整体架构)
-- [Go 控制面](#go-控制面)
-- [Rust 数据面](#rust-数据面)
-- [前端架构](#前端架构)
-- [通信协议](#通信协议)
-- [数据模型](#数据模型)
-- [安全设计](#安全设计)
+MnemoNAS 是面向日常文件管理的自托管私有云存储系统。它保持当前文件树可直接读取，在其上提供版本历史和回收站，并同时暴露 Web UI 和 WebDAV。
 
----
+核心原则：
 
-## 设计理念
+- 数据所有权：数据位于用户自己的磁盘上，迁移完整存储根目录即可迁移服务。
+- 可用界面：桌面端和移动端视图应清晰、高效，适合日常文件操作。
+- 崩溃一致性：写入路径恢复后应处于上一个完整版本或新的完整版本，不留下半写入状态。
+- 端到端校验：使用 BLAKE3 哈希检测缺失或损坏对象。
+- 可恢复性：版本历史和回收站是一等功能。
 
-### 一句话定位
+当前非目标：
 
-**自托管私有云存储** — 提供 Web UI、WebDAV、版本历史、回收站、Scrub 和诊断包，面向日常文件管理。
+- 可挂载 SMB/NFS 运行时。SMB 目前仅提供网关配置预览；协议兼容性和安全边界尚未完整。
+- 在 MnemoNAS 内部管理 RAID 或卷。
+- 多节点集群一致性。
 
-### 核心原则
+## 高层架构
 
-1. **数据自主权**：数据在自己手里，容量由本机磁盘决定，迁移完整存储目录即可换机运行
-2. **易用界面**：桌面端和移动端都保持清晰、克制、可扫描，避免传统运维后台式堆砌
-3. **崩溃一致性**：写入路径崩溃后可恢复到"旧版本"或"新版本"，不出现半写入
-4. **端到端校验**：全链路 BLAKE3 哈希校验，能发现并报告静默损坏
-5. **版本可回退**：按策略保留适合版本化的文件历史，配合回收站处理误删/误改
-
-### 非目标（当前范围不做）
-
-- SMB/NFS 可挂载运行时（当前只保留 SMB 网关预览配置，兼容性与安全边界仍未完成）
-- RAID/复杂卷管理（先目录模式 + 清晰的数据目录约定）
-- 集群一致性（先单机可靠，再谈多机）
-
----
-
-## 整体架构
-
-```
-┌────────────────────────────────────────────────────────────────┐
-│                        客户端层                                 │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐       │
-│  │ Web UI   │  │ Finder   │  │ Explorer │  │ nPlayer  │       │
-│  │ (React)  │  │ (macOS)  │  │ (Windows)│  │ (iOS)    │       │
-│  └────┬─────┘  └────┬─────┘  └────┬─────┘  └────┬─────┘       │
-│       │             │             │             │              │
-│       └─────────────┴──────┬──────┴─────────────┘              │
-│                            │                                   │
-├────────────────────────────┼───────────────────────────────────┤
-│                            ▼                                   │
-│  ┌─────────────────────────────────────────────────────────┐  │
-│  │              Go 控制面 (nasd) :8080                      │  │
-│  │                                                          │  │
-│  │  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐      │  │
-│  │  │   WebDAV    │  │  REST API   │  │   Static    │      │  │
-│  │  │  Handler    │  │  Handlers   │  │   Files     │      │  │
-│  │  └──────┬──────┘  └──────┬──────┘  └─────────────┘      │  │
-│  │         │                │                               │  │
-│  │  ┌──────┴────────────────┴──────┐                       │  │
-│  │  │         Storage Layer         │                       │  │
-│  │  │    (统一文件操作接口)          │                       │  │
-│  │  └──────────────┬───────────────┘                       │  │
-│  │                 │                                        │  │
-│  │  ┌──────────────┴───────────────┐                       │  │
-│  │  │  ┌─────────┐  ┌───────────┐  │                       │  │
-│  │  │  │Workspace│  │VersionStore│  │                       │  │
-│  │  │  │(原生文件)│  │(SQLite+CAS)│  │                       │  │
-│  │  │  └─────────┘  └───────────┘  │                       │  │
-│  │  └──────────────────────────────┘                       │  │
-│  │                                                          │  │
-│  └─────────────────────────────────────────────────────────┘  │
-│                    │ gRPC                                      │
-├────────────────────┼───────────────────────────────────────────┤
-│                    ▼                                           │
-│  ┌─────────────────────────────────────────────────────────┐  │
-│  │            Rust 数据面 (dataplane) :9090                 │  │
-│  │                                                          │  │
-│  │  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐      │  │
-│  │  │  gRPC Svc   │  │  HTTP API   │  │   Stats     │      │  │
-│  │  │ (Streaming) │  │ (Health)    │  │             │      │  │
-│  │  └──────┬──────┘  └─────────────┘  └─────────────┘      │  │
-│  │         │                                                │  │
-│  │  ┌──────┴──────────────────────────────────────┐        │  │
-│  │  │              Core Services                   │        │  │
-│  │  │  ┌────────┐  ┌────────┐  ┌────────┐        │        │  │
-│  │  │  │  CDC   │  │  CAS   │  │ Scrub  │        │        │  │
-│  │  │  │FastCDC │  │BLAKE3  │  │Verify  │        │        │  │
-│  │  │  └────────┘  └────────┘  └────────┘        │        │  │
-│  │  │  ┌────────┐  ┌────────┐                    │        │  │
-│  │  │  │  List  │  │ Index  │                    │        │  │
-│  │  │  │Objects │  │DashMap │                    │        │  │
-│  │  │  └────────┘  └────────┘                    │        │  │
-│  │  └─────────────────────────────────────────────┘        │  │
-│  │                                                          │  │
-│  └─────────────────────────────────────────────────────────┘  │
-│                                                                │
-├────────────────────────────────────────────────────────────────┤
-│                         存储层                                  │
-│  ┌─────────────────────────────────────────────────────────┐  │
-│  │                 文件系统 (ext4/xfs/zfs/btrfs)            │  │
-│  │                                                          │  │
-│  │  ~/.mnemonas/                                            │  │
-│  │  ├── files/                # 用户文件（原生存储）          │  │
-│  │  │   ├── documents/                                      │  │
-│  │  │   └── photos/                                         │  │
-│  │  │                                                       │  │
-│  │  └── .mnemonas/            # 内部数据                     │  │
-│  │      ├── index.db          # SQLite 元数据库              │  │
-│  │      ├── objects/          # 版本对象 (CAS)               │  │
-│  │      │   └── ab/cd/abcd... # 分片目录                     │  │
-│  │      └── trash/            # 回收站                       │  │
-│  │                                                          │  │
-│  └─────────────────────────────────────────────────────────┘  │
-└────────────────────────────────────────────────────────────────┘
+```text
++---------------------------------------------------------+
+|                      Clients                            |
+|  Web UI / Finder / Explorer / rclone / mobile clients   |
++-------------------------+-------------------------------+
+                          |
++-------------------------v-------------------------------+
+|                 Go control plane (nasd)                 |
+|  WebDAV handler / REST API / static Web UI / auth       |
+|  config / users / shares / activity / storage facade    |
++-------------------------+-------------------------------+
+                          | gRPC
++-------------------------v-------------------------------+
+|                Rust data plane (dataplane)              |
+|  CAS object storage / CDC chunking / scrub / GC         |
++-------------------------+-------------------------------+
+                          |
++-------------------------v-------------------------------+
+|                      Filesystem                         |
+|  storage.root/files        当前用户文件                 |
+|  storage.root/.mnemonas    元数据、对象、回收站         |
++---------------------------------------------------------+
 ```
 
----
+Go 进程负责面向用户的协议和策略。Rust 进程负责高吞吐的内容寻址存储工作。
 
 ## Go 控制面
 
-### 职责
+控制面由 `cmd/nasd` 和 `internal/` 下的包实现。
 
-- **协议网关**：WebDAV RFC 4918 实现，对接各类客户端
-- **REST API**：提供文件管理、版本查询、系统监控接口
-- **配置管理**：TOML 配置加载与热更新
-- **认证鉴权**：Token 认证、Share 权限管理
-- **任务调度**：Scrub、GC 任务的调度与状态管理
+主要职责：
 
-### 核心模块
+- HTTP server 和静态 Web UI 托管。
+- 文件、用户、分享、设置、维护和诊断 REST API。
+- WebDAV RFC 4918 核心方法。
+- 认证、JWT refresh token、每用户根目录边界和管理员端点。
+- 存储编排：workspace 文件、版本存储、回收站、活动日志和维护任务。
+- 配置加载、校验和运行时设置更新。
 
-#### Storage Layer (`internal/storage/`)
+重要模块：
 
-统一存储层，整合原生文件操作和版本管理：
+| 模块 | 职责 |
+| --- | --- |
+| `internal/storage` | 统一文件操作、版本、回收站和元数据编排 |
+| `internal/workspace` | `storage.root/files` 下的原生文件操作 |
+| `internal/versionstore` | 基于 SQLite 的版本元数据和 object-store 抽象 |
+| `internal/webdav` | WebDAV 请求处理和客户端兼容行为 |
+| `internal/api` | REST handler 和响应契约 |
+| `internal/config` | TOML 配置加载和校验 |
+| `internal/auth` | 用户、用户组、角色、密码、JWT、登录限制和下载会话 |
 
-```go
-type FileSystem struct {
-    workspace *workspace.Workspace   // 原生文件操作
-    versions  *versionstore.Store    // SQLite + CAS 版本管理
-    policy    *versionstore.VersioningPolicy
-    trashRoot string
-    config    *Config
-}
-
-// 核心操作
-func (fs *FileSystem) Stat(ctx context.Context, name string) (*FileInfo, error)
-func (fs *FileSystem) ReadDir(ctx context.Context, name string) ([]*FileInfo, error)
-func (fs *FileSystem) OpenFile(ctx context.Context, name string) (*os.File, error)
-func (fs *FileSystem) WriteFile(ctx context.Context, name string, r io.Reader) error
-func (fs *FileSystem) Delete(ctx context.Context, name string) error  // 软删除到回收站
-func (fs *FileSystem) Rename(ctx context.Context, old, new string) error
-
-// 版本操作
-func (fs *FileSystem) ListVersions(ctx context.Context, name string) ([]VersionRef, error)
-func (fs *FileSystem) GetVersion(ctx context.Context, name, hash string) (io.ReadCloser, error)
-func (fs *FileSystem) RestoreVersion(ctx context.Context, name, hash string) error
-
-// 回收站操作
-func (fs *FileSystem) ListTrash(ctx context.Context) ([]*TrashItem, error)
-func (fs *FileSystem) RestoreFromTrash(ctx context.Context, id string) error
-func (fs *FileSystem) EmptyTrash(ctx context.Context) (int, error)
-```
-
-#### Workspace (`internal/workspace/`)
-
-原生文件操作封装：
-
-```go
-type Workspace struct {
-    root string  // 文件根目录
-}
-
-// 所有文件操作直接映射到文件系统
-func (w *Workspace) ReadFile(ctx context.Context, name string) ([]byte, error)
-func (w *Workspace) WriteFile(ctx context.Context, name string, data []byte) error
-func (w *Workspace) Delete(ctx context.Context, name string) error
-func (w *Workspace) Rename(ctx context.Context, old, new string) error
-func (w *Workspace) Walk(ctx context.Context, root string, fn WalkFunc) error
-```
-
-优势：
-- 文件直接可读取，无需特殊软件
-- 原子写入 (.tmp → fsync → rename)
-- 简单可靠的实现
-
-#### VersionStore (`internal/versionstore/`)
-
-SQLite 驱动的版本管理，支持可插拔的对象存储后端：
-
-```go
-// ObjectStore 接口 - 支持本地或远程存储后端
-type ObjectStore interface {
-    Put(ctx context.Context, data []byte) (hash string, err error)
-    Get(ctx context.Context, hash string) ([]byte, error)
-    Has(ctx context.Context, hash string) bool
-    Delete(ctx context.Context, hash string) error
-}
-
-// LocalObjectStore - 本地文件存储（测试/独立模式）
-type LocalObjectStore struct { root string }
-
-// RemoteObjectStore - 通过 gRPC 调用 Rust 数据面（生产模式）
-type RemoteObjectStore struct { client *dataplane.Client }
-
-type Store struct {
-    db      *sql.DB       // SQLite 连接
-    objects ObjectStore   // 可插拔的对象存储后端
-}
-
-// 版本记录管理
-func (s *Store) AddVersion(ctx context.Context, path, hash string, size int64, comment string) error
-func (s *Store) GetVersions(ctx context.Context, path string) ([]Version, error)
-func (s *Store) DeleteOldVersions(ctx context.Context, path string, maxCount int, maxAge time.Duration) ([]string, error)
-
-// 版本对象存储 (委托给 ObjectStore)
-func (s *Store) PutObject(data []byte) (string, error)
-func (s *Store) GetObject(hash string) ([]byte, error)
-func (s *Store) HasObject(hash string) bool
-
-// 回收站管理
-func (s *Store) AddToTrash(ctx context.Context, item *TrashItem) error
-func (s *Store) ListTrash(ctx context.Context) ([]TrashItem, error)
-func (s *Store) CleanupExpiredTrash(ctx context.Context) ([]string, error)
-
-// 文件锁 (WebDAV LOCK 支持)
-func (s *Store) AcquireLock(ctx context.Context, path, holder string, lockType LockType, duration time.Duration) error
-func (s *Store) ReleaseLock(ctx context.Context, path, holder string) error
-```
-
-**职责划分**：
-- Go `Store`: SQLite 元数据管理、版本策略、回收站、文件锁
-- `ObjectStore`: 纯数据 I/O（本地文件或 Rust gRPC）
-
-SQLite 表结构：
-- `files`: 文件索引（路径、大小、修改时间、哈希）
-- `versions`: 版本历史（路径、版本哈希、时间戳）
-- `versioning_overrides`: 用户自定义版本策略
-- `trash`: 回收站元数据
-- `file_locks`: 文件锁
-
-#### WebDAV Handler (`internal/webdav/`)
-
-实现 RFC 4918 规范的 WebDAV 协议：
-
----
+当前文件先写入原生 workspace。文件符合版本策略时，历史内容会提交到 CAS-backed version store。
 
 ## Rust 数据面
 
-### 职责
+数据面位于 `dataplane/`。
 
-Go 控制面通过 gRPC 调用 Rust 数据面处理 **CAS/CDC/对象 I/O**，原生文件读写仍由 Go 控制面的 Workspace 直接操作：
+主要职责：
 
-| 功能 | 说明 |
-|------|------|
-| **CAS 存储** | BLAKE3 哈希、内存索引（DashMap）、分片目录 |
-| **CDC 分块** | dataplane 的 `PutFile` / `GetFile` 文件 RPC 使用 FastCDC；当前 Go 版本历史路径仍以 whole-object CAS 快照存储 |
-| **Scrub** | 数据完整性校验 |
-| **对象列表** | 列出对象供 Go 进行引用计数删除 |
+- 存取内容寻址对象。
+- 为 dataplane file API 使用 FastCDC 对大内容分块。
+- 使用 BLAKE3 对内容做哈希。
+- 可选使用 zstd 压缩对象载荷。
+- 运行 scrub 和对象列表操作。
+- 向 `nasd` 提供 gRPC，并提供内部健康/统计 HTTP 端点。
 
-当前版本历史写入路径保存的是 BLAKE3 whole-object CAS 对象，具备整对象去重与校验能力；chunk 级版本引用追踪尚未接入控制面 GC，因此不能把运行态版本历史描述为已按 CDC 块级去重。
+Go 版本历史路径当前把历史快照存储为 BLAKE3 整对象 CAS 对象。dataplane `PutFile` / `GetFile` RPC 提供 FastCDC 分块能力，但分块级版本引用追踪尚未接入 Go 控制面。
 
-### 核心模块
+数据面有意不暴露给最终用户。正常部署中，gRPC `9090` 和 HTTP `9091` 应保持在 loopback 或容器内部。
 
-```rust
-// cas.rs - BLAKE3 内容寻址存储
-pub struct CasStore {
-    config: CasConfig,
-    index: DashMap<String, u64>,  // 内存索引
-    stats: CasStats,
-}
+## 通信
 
-impl CasStore {
-    pub async fn put(&self, data: &[u8]) -> Result<String>;
-    pub async fn get(&self, hash: &str) -> Result<Vec<u8>>;
-    pub fn has(&self, hash: &str) -> bool;
-    pub async fn delete(&self, hash: &str) -> Result<bool>;
-    pub async fn scrub(&self, hashes: Option<&[String]>) -> Result<ScrubSummary>;
-}
+`nasd` 通过 gRPC 与 `dataplane` 通信。该边界保持进程间接口简单，避免 CGO/FFI 复杂性，同时保留强类型接口。
 
-// cdc.rs - FastCDC 智能分块
-pub struct Chunker { config: ChunkerConfig }
+NAS 工作负载通常由磁盘 I/O 和网络 I/O 主导，而不是 Go 到 Rust 的序列化开销。因此，gRPC 是当前架构的务实默认选择。
 
-impl Chunker {
-    pub fn chunk(&self, data: &[u8]) -> Vec<Chunk>;
-}
+## 存储模型
 
-// service.rs - gRPC 服务
-pub struct DataPlaneService {
-    cas: Arc<CasStore>,
-    chunker: Arc<Chunker>,
-}
+MnemoNAS 使用混合布局：
+
+```text
+storage.root/
+├── files/                # 当前用户文件，按普通文件保存
+└── .mnemonas/
+    ├── index.db          # SQLite 元数据
+    ├── objects/          # 版本使用的 CAS 对象
+    ├── trash/            # 软删除内容
+    ├── thumbnails/       # 生成的缩略图缓存
+    ├── maintenance/      # scrub/GC 状态
+    └── users.json        # auth 使用默认文件时的用户数据
 ```
 
-### gRPC API
+该布局让用户保留可读的当前文件树，同时将版本历史以内容寻址、整对象去重且可校验的方式保存。
 
-```protobuf
-service DataPlane {
-  // 数据块操作
-  rpc PutChunk(PutChunkRequest) returns (PutChunkResponse);
-  rpc GetChunk(GetChunkRequest) returns (GetChunkResponse);
-  rpc HasChunk(HasChunkRequest) returns (HasChunkResponse);
-  rpc DeleteChunk(DeleteChunkRequest) returns (DeleteChunkResponse);
-
-  // 文件操作（CDC 分块）
-  rpc PutFile(stream PutFileRequest) returns (PutFileResponse);
-  rpc GetFile(GetFileRequest) returns (stream GetFileResponse);
-
-  // 系统操作
-  rpc Health(HealthRequest) returns (HealthResponse);
-  rpc Stats(StatsRequest) returns (StatsResponse);
-  rpc Scrub(ScrubRequest) returns (ScrubResponse);
-  rpc ListObjects(ListObjectsRequest) returns (ListObjectsResponse);
-}
-```
-
-### 为什么用 Rust
-
-| 场景 | Go | Rust | 选择 |
-|------|-----|------|------|
-| 协议解析、业务逻辑 | 简洁、维护性好 | 过度复杂 | **Go** |
-| CDC 分块、批量哈希 | 可用但非最优 | SIMD 优化、零拷贝 | **Rust** |
-| 内存索引（百万对象） | GC 压力 | 无 GC、DashMap 高并发 | **Rust** |
-
-**总结**：Go 做控制面逻辑，Rust 做计算密集型数据操作，分工明确、各取所长。
-
----
-
-## 前端架构
-
-前端位于 `web/`，使用 React、Vite、Tailwind CSS 和 HeroUI。页面按功能域组织，核心页面包括文件、搜索、回收站、版本、收藏、相册、空间、健康、维护、用户和设置。
-
-前端的主要职责：
-
-- 提供桌面端和移动端一致的文件管理交互。
-- 通过 REST API 调用 Go 控制面，公共分享访问使用独立的分享 API。
-- 使用 React Query 管理请求缓存、加载状态、错误状态和变更后的失效刷新。
-- 对长耗时或可取消操作使用 `AbortController`，避免页面切换、对话框关闭或重复点击后出现过期响应覆盖当前状态。
-- 通过 Playwright 覆盖导航、可访问性、布局溢出、运行时错误和关键交互路径。
-
-前端视觉目标是清晰、克制、可扫描，适合家庭和小团队日常重复使用；不以营销页或复杂运维后台为目标。
-
-## 通信协议
-
-MnemoNAS 的运行时通信分为三层：
-
-| 通道 | 协议 | 说明 |
-|------|------|------|
-| 浏览器/API 客户端 → Go 控制面 | HTTP/REST | Web UI、管理 API、文件操作、分享、设置和维护接口 |
-| WebDAV 客户端 → Go 控制面 | WebDAV RFC 4918 子集 | Finder、Windows 文件资源管理器、rclone 等客户端挂载 |
-| Go 控制面 → Rust 数据面 | gRPC | CAS 对象读写、scrub、对象列表和数据面健康检查 |
-
-公网或跨网络访问应只暴露 HTTPS 反向代理入口。数据面 gRPC/HTTP 端口和内部管理端口不应直接暴露到公网或不可信局域网。
+拥有操作系统级访问权限的用户可以安全地直接读取 `files/` 下的文件。但在 MnemoNAS 运行时直接写入或删除这些文件，会绕过版本历史、回收站、活动日志和元数据协调。
 
 ## 数据模型
 
-`storage.root` 下的数据分为当前文件树和内部元数据两部分：
+主要逻辑实体包括：
 
-| 路径 | 内容 | 说明 |
-|------|------|------|
-| `files/` | 当前用户文件 | 原生文件树，可直接用普通文件工具读取 |
-| `.mnemonas/index.db` | SQLite 元数据 | 版本、回收站、锁、活动记录等索引 |
-| `.mnemonas/objects/` | CAS 对象 | 历史版本对象和校验数据 |
-| `.mnemonas/trash/` | 回收站数据 | 删除后的文件内容与恢复信息 |
-| `.mnemonas/thumbnails/` | 缩略图缓存 | 可再生成的派生数据 |
-| `.mnemonas/maintenance/` | 维护状态 | 备份、恢复、巡检和诊断相关状态 |
+- `files/` 下的当前文件和目录。
+- 按路径和内容哈希索引的版本记录。
+- 按 BLAKE3 哈希寻址的 CAS 对象。
+- 包含原路径、删除时间和内容引用的回收站记录。
+- 包含角色、用户组和 `home_dir` 的用户。
+- 可包含密码、过期时间和访问上限的分享链接。
+- 按每用户根目录限定范围的收藏和活动记录。
 
-当前文件优先保存在原生 `files/` 树中，便于故障排查和迁移。符合版本策略的历史内容写入 CAS 对象，并由 SQLite 元数据记录路径、时间、大小和对象哈希。删除操作默认进入回收站；永久删除、过期清理和版本保留策略会影响内部对象是否仍被引用。
-
----
+需要 ACID 语义的事务性元数据使用 SQLite。数据形状较小且本地化的部分功能存储使用 JSON 文件。
 
 ## 安全设计
 
-### 认证
+安全边界：
 
-- **Web UI/API 认证**：默认启用基于 JWT 的登录；浏览器主会话通过同源 `HttpOnly` cookie 保存 access/refresh token，多用户按角色、用户组、`home_dir` 和目录授权控制访问范围
-- **WebDAV 认证**：支持 MnemoNAS 用户账号模式，按角色、用户组、`home_dir`、目录授权、写入 `home_dir` 的用户配额和目录配额限制挂载范围；同时保留全局 Basic Auth 凭据作为兼容模式，适配 Finder、Windows 文件资源管理器、rclone 等客户端
-- **公开分享认证**：每个 Share 使用独立标识，密码保护分享会使用短期 `HttpOnly` 访问 cookie
-- **网络暴露**：默认配置监听 `0.0.0.0:8080` 以便局域网访问；长期部署应配合防火墙、Tailscale/Headscale 或 HTTPS 反向代理限制访问面
+- Web UI/API 认证基于 JWT，默认启用；浏览器会话将 access 和 refresh token 存入同源 `HttpOnly` cookie。
+- 用户角色为 `admin`、`user` 和 `guest`。
+- 非管理员用户受配置的 `home_dir` 限制，并可通过 `storage.directory_access_rules` 获得共享目录授权。
+- 目录访问规则对 files、search、shares、favorites、trash、activity logs 和 WebDAV users mode 使用相同的最具体路径决策。
+- WebDAV 可以认证 MnemoNAS 用户，并应用角色、用户组、`home_dir`、目录访问规则、home 范围用户配额和目录配额边界；旧版 `basic` 模式仍是独立的全局服务凭据。
+- 分享链接密码验证使用短期 HttpOnly cookie。
+- 下载和预览流程使用短期下载会话 cookie，而不是在 URL 中放置长期 token。
 
-### 数据完整性
+部署边界：
 
-- **端到端校验**：写入/读取均校验 BLAKE3 哈希
-- **Scrub 校验**：通过 Web UI/API 触发对象校验，也可配合 cron 或运维计划定期执行
-- **写入原子性**：`.tmp` + `rename` 确保崩溃一致性
+- 保持 dataplane 端口私有。
+- 公网访问通过 Caddy、Nginx、Traefik 或其他可信反向代理提供 HTTPS。
+- 仅在 MnemoNAS 位于可信代理之后时设置 `server.trusted_proxy_hops`。
+- 不要在 loopback-only 开发环境之外禁用认证。
 
-### 未来规划
+## 前端架构
 
-- 对象级加密（用户密钥）
-- OAuth/OIDC 集成
-- 更细粒度的访问策略
+Web UI 位于 `web/`，使用 React、TypeScript、Vite、HeroUI、Tailwind CSS、Zustand 和 TanStack Query。
+
+UI 围绕重复的文件管理工作流组织：
+
+- 支持列表和网格视图的文件浏览器。
+- 上传、下载、重命名、移动、复制、删除和批量操作。
+- 版本历史和恢复。
+- 回收站浏览和恢复。
+- 相册和缩略图。
+- 分享、收藏、活动、设置和维护视图。
+
+前端访问 `/api/v1/*`，生产环境与 `nasd` 同源。生产环境中，`nasd` 托管已构建的静态 Web UI，并确保 API、WebDAV、健康检查和直接分享 API 路由优先于 SPA fallback；`index.html` 使用 `Cache-Control: no-cache`，使浏览器在升级后重新校验应用入口。开发环境中，Vite 在 `5173` 提供前端服务，并将 API 调用代理到 `8080`。
+
+## 相关文档
+
+- [存储内部机制](storage-internals.md)
+- [配置参考](configuration.md)
+- [安全加固](security.md)
+- [API 参考](api-reference.md)
+- [开发指南](development.md)

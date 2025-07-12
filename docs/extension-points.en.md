@@ -234,4 +234,4 @@ Future implementation targets:
 
 - [Architecture](architecture.en.md)
 - [Development guide](development.en.md)
-- [Security guide](security.en.md)
+- [Security Hardening Guide](security.en.md)

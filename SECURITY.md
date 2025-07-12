@@ -12,7 +12,7 @@ English | [简体中文](SECURITY.zh-CN.md)
 
 ## Reporting a Vulnerability
 
-We take security seriously. If you discover a security vulnerability, please report it responsibly.
+Security vulnerability reports are handled seriously. Vulnerabilities should be reported responsibly.
 
 ### How to Report
 
@@ -24,13 +24,13 @@ If private reporting is unavailable, contact the project maintainer through the 
 
 ### What to Include
 
-Please include the following information:
+Reports should include the following information:
 
 1. **Description**: A clear description of the vulnerability
 2. **Impact**: Potential impact and severity
 3. **Steps to Reproduce**: Detailed steps to reproduce the issue
 4. **Affected Versions**: Which versions are affected
-5. **Suggested Fix**: If you have one (optional)
+5. **Suggested Fix**: Optional suggested remediation
 
 ### Response Timeline
 
@@ -44,28 +44,28 @@ Please include the following information:
 
 ### Disclosure Policy
 
-- We will acknowledge receipt of your report
-- We will provide an estimated timeline for the fix
-- We will notify you when the issue is fixed
-- We will credit you in the release notes (unless you prefer to remain anonymous)
-- We ask that you do not publicly disclose the vulnerability until we have released a fix
+- Receipt of the report will be acknowledged
+- An estimated fix timeline will be provided
+- The reporter will be notified when the issue is fixed
+- Release notes may credit the reporter unless anonymity is requested
+- Public disclosure should wait until a fix has been released
 
-## Security Best Practices
+## Deployment Security Recommendations
 
-When deploying MnemoNAS:
+MnemoNAS deployments should follow these security recommendations:
 
 ### Network Security
 
-1. **Use HTTPS**: Always deploy behind a reverse proxy with TLS
-2. **Firewall**: Restrict access to trusted networks
-3. **Internal dataplane ports**: Do not expose dataplane gRPC/HTTP ports 9090/9091 to public or untrusted networks
-4. **VPN**: Consider VPN for remote access
+1. **Use HTTPS**: Production deployments should run behind a reverse proxy with TLS
+2. **Firewall**: Access should be restricted to trusted networks
+3. **Internal dataplane ports**: Dataplane gRPC/HTTP ports `9090/9091` should not be exposed to public or untrusted networks
+4. **VPN**: Remote access should use a VPN or an equivalent controlled network boundary
 
 ### Authentication
 
-1. **Strong Passwords**: Use strong passwords for Web UI accounts and WebDAV auth
-2. **Change Initial Credentials**: Change the initial admin password after first login
-3. **Disable Unused Access**: Disable WebDAV or sharing if you do not use them
+1. **Strong Passwords**: Web UI accounts and WebDAV auth should use strong passwords
+2. **Change Initial Credentials**: The initial admin password should be changed after first login
+3. **Disable Unused Access**: WebDAV and sharing should be disabled when unused
 
 ### Data Protection
 
@@ -75,9 +75,9 @@ When deploying MnemoNAS:
 
 ### Updates
 
-1. **Stay Updated**: Keep MnemoNAS and dependencies up to date
-2. **Monitor**: Watch for security advisories
-3. **Test**: Test updates in a staging environment first
+1. **Stay Updated**: MnemoNAS and dependencies should stay up to date
+2. **Monitor**: Security advisories should be monitored
+3. **Test**: Updates should be tested in a staging environment first
 
 ## Dependency Checks
 
@@ -86,7 +86,7 @@ Run dependency vulnerability checks before releases and after dependency updates
 ```bash
 make install-audit-tools
 make security-check
-# Include frontend npm audit when you explicitly want to send the dependency tree
+# Include frontend npm audit when the run explicitly accepts sending the dependency tree
 # to the configured npm registry:
 make security-check NPM_AUDIT=1
 ```
@@ -109,14 +109,10 @@ By default, `make security-check` covers Go with `govulncheck` and Rust with `ca
 
 ## Security Audits
 
-MnemoNAS has not yet undergone a formal security audit. If you are interested in sponsoring a security audit, please contact us.
+MnemoNAS has not yet undergone a formal security audit. Sponsorship inquiries for an audit can use the maintainer contact associated with the repository owner.
 
 ## Acknowledgments
 
-We thank the following individuals for responsibly disclosing security issues:
+The project acknowledges the following individuals for responsibly disclosing security issues:
 
 *No security issues have been reported yet.*
-
----
-
-Thank you for helping keep MnemoNAS secure!

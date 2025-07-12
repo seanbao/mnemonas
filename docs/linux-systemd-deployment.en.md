@@ -2,7 +2,8 @@
 
 English | [简体中文](linux-systemd-deployment.md)
 
-This guide targets long-running Linux server deployments. The goal is a small number of setup steps, systemd auto-start, useful logs, a stable data directory, and fast diagnostics when something fails.
+This guide targets long-running Linux server deployments.
+It keeps setup steps limited, enables systemd auto-start, preserves useful logs, uses a stable data directory, and supports fast diagnostics when something fails.
 
 ## Good Fit
 
@@ -53,7 +54,8 @@ sudo mkdir -p /srv/mnemonas
 
 Single-disk ext4, XFS, or Btrfs is also usable, but it does not protect against disk failure. Keep an independent backup.
 
-If the same server also runs Docker, downloaders, transcoding, model caches, or other heavy services, do not put their data under `/srv/mnemonas`. Use a separate scratch path such as `/srv/fast-scratch`.
+If the same server also runs Docker, downloaders, transcoding, model caches, or other heavy services, do not put their data under `/srv/mnemonas`.
+Use a separate scratch path such as `/srv/fast-scratch`.
 
 ## Install MnemoNAS
 
@@ -80,7 +82,25 @@ Custom data directory or port:
 sudo env STORAGE_ROOT=/srv/mnemonas SERVER_PORT=8080 ./scripts/install-systemd.sh
 ```
 
-The systemd installer and uninstaller require absolute paths for `BIN_DIR`, `SHARE_DIR`, `CONFIG_DIR`, `CONFIG_PATH`, `SYSTEMD_DIR`, `STORAGE_ROOT`, and the Web UI directory. Those paths must not contain control characters or symbolic-link components. `CONFIG_PATH` must stay under `CONFIG_DIR`; except for the Web UI directory living under `SHARE_DIR`, binary, shared-resource, config, systemd unit, and data paths must not overlap each other. Before creating directories or changing permissions, the installer also checks `STORAGE_ROOT/files` and `STORAGE_ROOT/.mnemonas/objects`; those managed subdirectories must not point elsewhere through symlinks. To place data on a separate disk, mount the real filesystem at the target directory before running the installer; do not point `STORAGE_ROOT` at a symlink.
+The systemd installer and uninstaller require absolute paths for these locations:
+
+- `BIN_DIR`
+- `SHARE_DIR`
+- `CONFIG_DIR`
+- `CONFIG_PATH`
+- `SYSTEMD_DIR`
+- `STORAGE_ROOT`
+- The Web UI directory
+
+Those paths must not contain control characters or symbolic-link components.
+`CONFIG_PATH` must stay under `CONFIG_DIR`.
+
+Except for the Web UI directory living under `SHARE_DIR`, binary, shared-resource, config, systemd unit, and data paths must not overlap each other.
+Before creating directories or changing permissions, the installer also checks `STORAGE_ROOT/files` and `STORAGE_ROOT/.mnemonas/objects`.
+Those managed subdirectories must not point elsewhere through symlinks.
+
+To place data on a separate disk, mount the real filesystem at the target directory before running the installer.
+Do not point `STORAGE_ROOT` at a symlink.
 
 The installer only fixes ownership of the managed top-level directories by default. After manual data copy, recursive ownership repair can be requested with:
 
@@ -88,9 +108,17 @@ The installer only fixes ownership of the managed top-level directories by defau
 sudo env FIX_STORAGE_OWNERSHIP=1 ./scripts/install-systemd.sh
 ```
 
-After a successful installation, the script prints directly runnable next steps, including the Web UI URL, the `sudo cat .../initial-password.txt` command derived from the current `auth.users_file`, the `mnemonas-doctor` diagnostic command, and log inspection commands.
+After a successful installation, the script prints directly runnable next steps.
+These include:
 
-If the installer fails while reloading, enabling, or starting the systemd services, it prints the failed stage and the relevant `systemctl cat`, `systemctl status`, or `journalctl` commands. Keep the config and data directories in place, inspect the reported unit or service logs, then rerun the installer after fixing the issue.
+- The Web UI URL.
+- The `sudo cat .../initial-password.txt` command derived from the current `auth.users_file`.
+- The `mnemonas-doctor` diagnostic command.
+- Log inspection commands.
+
+If the installer fails while reloading, enabling, or starting the systemd services, it prints the failed stage and the relevant diagnostic commands.
+Those commands can include `systemctl cat`, `systemctl status`, or `journalctl`.
+Keep the config and data directories in place, inspect the reported unit or service logs, then rerun the installer after fixing the issue.
 
 If no release archive is available, build from source:
 
@@ -144,7 +172,26 @@ sudo systemctl restart mnemonas-dataplane
 sudo mnemonas-doctor
 ```
 
-`mnemonas-doctor` checks service state, Web UI, the config file, runtime-sensitive files, directory permissions, filesystem type, free space, and backup-root placement. A non-regular `config.toml` is a failure; a config path that is a symlink, passes through symlink components, or is broadly readable is reported as a risk. When authentication is enabled, it reports a missing `users.json`; it also reports risks when `users.json`, `secrets.json`, or their relevant parent directories are symlinks, pass through symlink components, have unexpected file types, or are broadly readable. When `BACKUP_ROOT` exists, it must not equal or live under `storage.root`; it also reports a risk when it is a symlink, is not a directory, shares the same filesystem source as `storage.root`, or cannot be written by the service user or current diagnostic environment. Use a separate disk, dataset, or remote mount path for backup targets. The Web UI health and storage pages also show the underlying filesystem type, mount point, device or dataset source, redacted mount options, ZFS/Btrfs native-checksum hints, and space-alert runtime state. Administrators can download a diagnostic bundle from the health page and copy a storage-backing summary from the storage page for troubleshooting records. By default, the free-space check warns below 10 GiB; set `MIN_FREE_BYTES=<bytes> sudo mnemonas-doctor` to adjust the threshold.
+`mnemonas-doctor` checks service state, Web UI, the config file, runtime-sensitive files, directory permissions, filesystem type, free space, and backup-root placement.
+A non-regular `config.toml` is a failure.
+`config.toml` must parse as TOML; the doctor reports syntax errors independently even if an older binary or wrapper lets `nasd --check-config` pass.
+A config path that is a symlink, passes through symlink components, or is broadly readable is reported as a risk.
+
+When authentication is enabled, the doctor reports a missing `users.json`.
+It also reports risks when `users.json`, `secrets.json`, or their relevant parent directories are unsafe.
+Unsafe cases include symlinks, symlink path components, unexpected file types, and broad read permissions.
+
+When `BACKUP_ROOT` exists, it must not equal or live under `storage.root`.
+The doctor also reports a risk when `BACKUP_ROOT` is unsafe.
+Unsafe cases include a symlink, a non-directory path, or the same filesystem source as `storage.root`.
+They also include no write access for the service user or current diagnostic environment.
+This keeps backup targets separate from the live storage root and confirms they are usable by the service.
+Use a separate disk, dataset, or remote mount path for backup targets.
+
+The Web UI health and storage pages also show storage-backing details.
+These include filesystem type, mount point, device or dataset source, redacted mount options, native-checksum hints, and space-alert runtime state.
+Administrators can download a diagnostic bundle from the health page and copy a storage-backing summary from the storage page for troubleshooting records.
+By default, the free-space check warns below 10 GiB; set `MIN_FREE_BYTES=<bytes> sudo mnemonas-doctor` to adjust the threshold.
 
 If UFW is installed, `mnemonas-doctor` also checks whether the firewall is enabled and warns when dataplane ports `9090/9091` appear exposed.
 
@@ -158,7 +205,7 @@ sudo systemctl restart mnemonas
 
 `--check-config` reports hard errors and security warnings. Do not ignore warnings for long-running deployments.
 
-`[dataplane.cdc]` and `dataplane.grpc_address` are read when the dataplane starts. Restart `mnemonas-dataplane` after changing them, then restart `mnemonas`.
+`[dataplane.cdc]` and `dataplane.grpc_address` are read when the dataplane starts. When a Python TOML parser is available, the startup helper rejects invalid `config.toml` syntax before reading dataplane arguments from a partial file. Restart `mnemonas-dataplane` after changing them, then restart `mnemonas`.
 
 ## Network Guidance
 
@@ -169,7 +216,8 @@ For long-running deployments, start with trusted-network-only access.
 - For external sharing, expose only HTTPS through a reverse proxy.
 - Configure `server.trusted_proxy_hops` correctly behind Caddy, Nginx, Traefik, or another trusted proxy.
 
-If the target is public-domain access, follow the [Public server quickstart](public-server-quickstart.en.md). That path binds the MnemoNAS backend to `127.0.0.1:8080` and exposes only Caddy/Nginx `80/443` publicly.
+If the target is public-domain access, follow the [Public server quickstart](public-server-quickstart.en.md).
+That path binds the MnemoNAS backend to `127.0.0.1:8080` and exposes only Caddy/Nginx `80/443` publicly.
 
 Recommended boundary:
 
@@ -204,6 +252,14 @@ WebDAV URL:
 http://<server-ip>:8080/dav
 ```
 
+WebDAV credentials depend on `[webdav].auth_type`.
+`users` mode uses MnemoNAS usernames and passwords.
+The default `basic` mode uses separate WebDAV credentials.
+
+After installation, the running Web UI exposes the active WebDAV URL, Basic username, and readable generated password on the Settings -> WebDAV tab.
+Custom Basic passwords are not echoed back and should come from the config file or password manager.
+Generated Basic Auth passwords are also available on the server at `<storage.root>/secrets.json`.
+
 ## Backup Strategy
 
 RAID and mirrors are not backups. Keep at least one independent backup.
@@ -233,7 +289,9 @@ sudo ./scripts/install-systemd.sh
 sudo mnemonas-doctor
 ```
 
-Back up before large version jumps. Keep the extracted previous release directory as well, so an upgrade that fails to start, breaks a core workflow, or fails `mnemonas-doctor` can be rolled back to the previous version:
+Back up before large version jumps.
+Keep the extracted previous release directory as well.
+If an upgrade fails to start, breaks a core workflow, or fails `mnemonas-doctor`, roll back to the previous version:
 
 ```bash
 cd mnemonas-<previous-version>-linux-amd64
@@ -241,7 +299,9 @@ sudo ./scripts/install-systemd.sh
 sudo mnemonas-doctor
 ```
 
-Rollback replaces the binaries and Web UI assets while continuing to use the existing `/etc/mnemonas/config.toml` and `/srv/mnemonas` data directory. If the newer release performed an irreversible data migration, follow that release note or restore from backup before starting the older version; do not point an older binary at migrated data without an explicit compatibility statement.
+Rollback replaces the binaries and Web UI assets while continuing to use the existing `/etc/mnemonas/config.toml` and `/srv/mnemonas` data directory.
+If the newer release performed an irreversible data migration, follow that release note or restore from backup before starting the older version.
+Do not point an older binary at migrated data without an explicit compatibility statement.
 
 ## Uninstall
 
@@ -257,7 +317,9 @@ Only remove config and data after verifying backups:
 sudo env REMOVE_CONFIG=1 REMOVE_DATA=1 CONFIRM_REMOVE_DATA=/srv/mnemonas mnemonas-uninstall-systemd
 ```
 
-The uninstaller also refuses binary, shared-resource, config, systemd-unit, and data paths that contain symlink components. When removing config or data, the target directory must not be a symlink or pass through symlink components. When removing data, `CONFIRM_REMOVE_DATA` must exactly match `STORAGE_ROOT` to avoid deleting a real mount point or a replaced directory tree by mistake.
+The uninstaller also refuses binary, shared-resource, config, systemd-unit, and data paths that contain symlink components.
+When removing config or data, the target directory must not be a symlink or pass through symlink components.
+When removing data, `CONFIRM_REMOVE_DATA` must exactly match `STORAGE_ROOT` to avoid deleting a real mount point or a replaced directory tree by mistake.
 
 The service account is kept by default to preserve UID/GID reuse. Set `REMOVE_SERVICE_USER=1` to remove it as part of uninstall.
 
@@ -275,7 +337,7 @@ Common checks:
 | --- | --- |
 | Web UI does not open | `systemctl status mnemonas`, firewall, port conflict |
 | Writes fail after login | Ownership of `/srv/mnemonas` and `/etc/mnemonas` |
-| WebDAV cannot connect | URL ends with `/dav`; current WebDAV credentials are used |
+| WebDAV cannot connect | URL ends with `/dav`; credentials match the current `[webdav].auth_type` |
 | Large upload fails | Disk space, reverse proxy upload limits, `journalctl -u mnemonas` |
 | Scrub reports errors | Stop writes, preserve logs, check filesystem and backups |
 

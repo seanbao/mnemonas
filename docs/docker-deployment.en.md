@@ -54,7 +54,9 @@ git clone https://github.com/seanbao/mnemonas.git
 cd mnemonas
 ```
 
-The bundled `docker-compose.yml` builds `mnemonas:local` from the current source checkout. The host does not need Go, Rust, or Node.js, but Docker must be able to pull Rust, Node, Go, and Debian base images. After public release images are available, switch to GHCR as described in the release image section.
+The bundled `docker-compose.yml` builds `mnemonas:local` from the current source checkout.
+The host does not need Go, Rust, or Node.js, but Docker must be able to pull Rust, Node, Go, and Debian base images.
+After public release images are available, switch to GHCR as described in the release image section.
 
 Prepare and start:
 
@@ -80,7 +82,10 @@ The script:
 - Writes `MNEMONAS_UID` and `MNEMONAS_GID` from the current host user.
 - Creates `MNEMONAS_DATA_DIR`.
 - Runs Docker preflight checks.
-- Starts Compose when `--start` is used. With `MNEMONAS_IMAGE=mnemonas:local`, it runs a local build; with a release image tag, it uses `docker compose up --pull missing --no-build` to pull a missing image and prevent local builds. After start, it waits for the local `/health` endpoint before reporting the service as ready.
+- Starts Compose when `--start` is used.
+- With `MNEMONAS_IMAGE=mnemonas:local`, runs a local build.
+- With a release image tag, uses `docker compose up --pull missing --no-build` to pull a missing image and prevent local builds.
+- After start, waits for the local `/health` endpoint before reporting the service as ready.
 - Prints directly runnable next steps, including the Web UI URL, health check command, initial-password read command, WebDAV URL, Compose status command, and log command.
 
 First startup creates persistent config under `<MNEMONAS_DATA_DIR>/config.toml`. The initial Web UI password is stored at:
@@ -91,11 +96,17 @@ First startup creates persistent config under `<MNEMONAS_DATA_DIR>/config.toml`.
 
 If `[auth].users_file` is customized, `initial-password.txt` is stored next to that users file instead.
 
-The generated WebDAV password is stored in:
+The generated WebDAV Basic Auth password is stored in:
 
 ```text
 <MNEMONAS_DATA_DIR>/secrets.json
 ```
+
+The running Web UI exposes the active WebDAV URL, Basic username, and readable generated password on the Settings -> WebDAV tab.
+Custom Basic passwords are not echoed back.
+
+For regular multi-user mounting, `[webdav].auth_type = "users"` is preferred.
+If `basic` mode remains in use, set `[webdav].password` to a strong random value from a password manager.
 
 ## Data Directory and User IDs
 
@@ -116,7 +127,36 @@ root = "/data"
 
 Do not set `root = "/"`. When another container path such as `/data-root` is used, mount that path explicitly in Compose or the data will land in the container's writable layer.
 
-Docker quickstart, the container start entrypoint, and the preflight script require an absolute data directory and reject control characters, `..` segments, protected system directories, and symlink path components so config and object data cannot be written through a replaced or overly broad directory. The bundled Compose file uses long bind-mount syntax for `/data`, preventing `:` in a host path from being parsed as the volume target or mode; custom Compose snippets should use long bind-mount syntax as well. Before creating directories or changing permissions, the container start entrypoint also checks `STORAGE_ROOT/files` and `STORAGE_ROOT/.mnemonas/objects`; those managed subdirectories must not point elsewhere through symlinks. Docker preflight also checks existing `config.toml`, `.mnemonas/`, `.mnemonas/users.json`, `.mnemonas/initial-password.txt`, and `secrets.json`, rejects symlinks or unexpected file types, warns about broad permissions, validates existing `config.toml` TOML syntax when Python `tomllib` is available, and rejects a relative `[storage].root`; when `auth.users_file` is customized under the container `/data` mount, preflight also checks that users file and its sibling `initial-password.txt` for type and permission issues; when it is explicitly customized outside `/data`, preflight warns that it cannot inspect that users file or initial-password file from the host data directory. It reports only paths and permission state, not password or secret contents. Container `CONFIG_PATH` must be absolute, stay under `STORAGE_ROOT`, and not contain control characters, parent-directory segments, or symlink path components; the default is `/data/config.toml`. Docker containers use `[dataplane].grpc_address` in `config.toml` as the only source of truth for the internal gRPC address; startup rejects a divergent `DATAPLANE_GRPC_ADDR` environment value so the control plane and dataplane cannot use different endpoints. When customizing host storage, mount a real directory rather than a symlink.
+Docker quickstart, the container start entrypoint, and the preflight script require an absolute data directory.
+They reject:
+
+- Control characters.
+- `..` path segments.
+- Protected system directories.
+- Symlink path components.
+
+These checks prevent config and object data from being written through a replaced or overly broad directory.
+The bundled Compose file uses long bind-mount syntax for `/data`, preventing `:` in a host path from being parsed as the volume target or mode.
+Custom Compose snippets should use long bind-mount syntax as well.
+
+Before creating directories or changing permissions, the container start entrypoint checks `STORAGE_ROOT/files` and `STORAGE_ROOT/.mnemonas/objects`.
+Those managed subdirectories must not point elsewhere through symlinks.
+
+Docker preflight checks existing `config.toml`, `.mnemonas/`, `.mnemonas/users.json`, `.mnemonas/initial-password.txt`, and `secrets.json`.
+It rejects symlinks or unexpected file types, warns about broad permissions, and rejects a relative `[storage].root`.
+When Python `tomllib` is available, it also validates existing `config.toml` TOML syntax.
+
+When `auth.users_file` is customized under the container `/data` mount, preflight also checks that users file and its sibling `initial-password.txt` for type and permission issues.
+When it is explicitly customized outside `/data`, preflight warns that it cannot inspect that users file or initial-password file from the host data directory.
+Preflight reports only paths and permission state, not password or secret contents.
+
+Container `CONFIG_PATH` must be absolute, stay under `STORAGE_ROOT`, and not contain control characters, parent-directory segments, or symlink path components.
+The default is `/data/config.toml`.
+When that file already exists, the container start entrypoint reads it in place and does not rewrite its comments, formatting, or field order.
+
+Docker containers use `[dataplane].grpc_address` in `config.toml` as the only source of truth for the internal gRPC address.
+Startup rejects a divergent `DATAPLANE_GRPC_ADDR` environment value so the control plane and dataplane cannot use different endpoints.
+When customizing host storage, mount a real directory rather than a symlink.
 
 Custom `--env` paths must point to a file in an existing directory. The script does not implicitly create the `.env` parent directory, so invalid input fails before creating the data directory.
 
@@ -136,9 +176,19 @@ The bundled Compose file publishes only `8080`, which serves Web UI, REST API, a
 
 `init: true` is enabled so the container has a minimal init process for signal forwarding and child-process reaping. Keep it for long-running deployments.
 
-`./scripts/docker-quickstart.sh --start` waits for `http://127.0.0.1:<port>/health` by default. If Compose startup fails or the health check times out, the script prints the matching `docker compose ps` or `docker compose logs --tail 100 mnemonas` diagnostic command. For a remote Docker context, SSH tunnel, or another environment where the host cannot reach the published port locally, pass `--skip-health-check`; then verify service state with `docker compose ps`, `docker compose logs --tail 100 mnemonas`, or the reachable `/health` endpoint.
+`./scripts/docker-quickstart.sh --start` waits for `http://127.0.0.1:<port>/health` by default.
+If Compose startup fails or the health check times out, the script prints the matching `docker compose ps` or `docker compose logs --tail 100 mnemonas` diagnostic command.
 
-After the health check passes, quickstart derives the `initial-password.txt` location from the existing `config.toml`. When the path is under the container `/data` mount, it reports the corresponding host path and includes a `cat` command in the next steps. When the path is outside `/data`, it reports the container path and includes a `docker compose exec` read command. The script does not print the password. Existing deployments may have removed that file after the first login; a new deployment without that file should be investigated through the container logs.
+For a remote Docker context, SSH tunnel, or another environment where the host cannot reach the published port locally, pass `--skip-health-check`.
+Then verify service state with `docker compose ps`, `docker compose logs --tail 100 mnemonas`, or the reachable `/health` endpoint.
+
+After the health check passes, quickstart derives the `initial-password.txt` location from the existing `config.toml`.
+When the path is under the container `/data` mount, it reports the corresponding host path and includes a `cat` command in the next steps.
+When the path is outside `/data`, it reports the container path and includes a `docker compose exec` read command.
+
+The script does not print the password.
+Existing deployments may have removed that file after the first login.
+A new deployment without that file should be investigated through the container logs.
 
 Verify:
 
@@ -162,7 +212,17 @@ docker run --rm --user "$(id -u):$(id -g)" -p 8080:8080 \
   mnemonas:local
 ```
 
-The host data directory must exist before the bind mount is used. If the directory is absent, Docker can create it as root, which prevents the non-root container user from writing `/data/config.toml` on first startup. Only `8080` needs to be published.
+The host data directory must exist before the bind mount is used.
+If the directory is absent, Docker can create it as root, which prevents the non-root container user from writing `/data/config.toml` on first startup.
+Only `8080` needs to be published.
+
+For a local source build followed by a loopback container smoke test, run:
+
+```bash
+make docker-check
+```
+
+This target builds `mnemonas:latest`, then runs `scripts/docker-smoke.sh` with a temporary `127.0.0.1` port and checks `/health` plus the frontend root page.
 
 Build base images can be overridden for private caches or regional mirrors:
 
@@ -185,7 +245,9 @@ After public release images are available, set the image tag in `.env`:
 MNEMONAS_IMAGE=ghcr.io/seanbao/mnemonas:<version>
 ```
 
-Prefer an explicit version tag. Use `latest` only for temporary evaluation or environments that intentionally accept automatic upgrades. Docker preflight warns when a release image has no explicit tag, no digest, or uses `latest`, so upgrades and rollbacks can return to a known image.
+Prefer an explicit version tag.
+Use `latest` only for temporary evaluation or environments that intentionally accept automatic upgrades.
+Docker preflight warns when a release image has no explicit tag, no digest, or uses `latest`, so upgrades and rollbacks can return to a known image.
 
 The bundled Compose file still includes local build settings. The quickstart script adds `--pull missing --no-build` for release image tags automatically. Manual starts should use:
 
@@ -193,7 +255,9 @@ The bundled Compose file still includes local build settings. The quickstart scr
 docker compose up -d --pull missing --no-build
 ```
 
-Binary archives from GitHub Releases include `docker-compose.yml` and `.env.example`. The packaged template presets `MNEMONAS_IMAGE` to the GHCR image for the same release tag, so `./scripts/docker-quickstart.sh --start` from an extracted archive uses the release-image path by default instead of a source build.
+Binary archives from GitHub Releases include `docker-compose.yml` and `.env.example`.
+The packaged template presets `MNEMONAS_IMAGE` to the GHCR image for the same release tag.
+Running `./scripts/docker-quickstart.sh --start` from an extracted archive therefore uses the release-image path by default instead of a source build.
 
 The examples below default to the source-built local image and can be switched to a verified release image with `MNEMONAS_IMAGE`.
 
@@ -269,11 +333,20 @@ services:
     restart: unless-stopped
 ```
 
-Do not use `server.host = "127.0.0.1"` inside the container to limit host access; that binds to the container's loopback. Restrict host exposure in the Compose port mapping instead. When WebDAV authentication is also disabled for a loopback-only developer container, keep `server.host = "0.0.0.0"` inside the container and set `security.allow_unsafe_no_auth = true` to explicitly confirm that the host port mapping is the access boundary.
+Do not use `server.host = "127.0.0.1"` inside the container to limit host access; that binds to the container's loopback.
+Restrict host exposure in the Compose port mapping instead.
+
+When WebDAV authentication is also disabled for a loopback-only developer container, keep `server.host = "0.0.0.0"` inside the container.
+Set `security.allow_unsafe_no_auth = true` to explicitly confirm that the host port mapping is the access boundary.
 
 ## Multi-User NAS Example
 
-Admins can create users in the Web UI and set groups, `home_dir`, user quotas, and directory access rules. Non-admin users are scoped to that configured root unless a matching directory rule grants shared access; file browsing, search, favorites, shares, trash, activity, and WebDAV `users` mode use the same boundary. Web/API uploads, copies, moves, and trash restores into `home_dir` honor the configured user quota; shared-path capacity limits are handled by directory quotas.
+Admins can create users in the Web UI and set groups, `home_dir`, user quotas, and directory access rules.
+Non-admin users are scoped to that configured root unless a matching directory rule grants shared access.
+
+File browsing, search, favorites, shares, trash, activity, and WebDAV `users` mode use the same boundary.
+Web/API uploads, copies, moves, and trash restores into `home_dir` honor the configured user quota.
+Shared-path capacity limits are handled by directory quotas.
 
 ```yaml
 services:
@@ -351,7 +424,9 @@ proxy_pass_request_headers on;
 proxy_set_header Destination $http_destination;
 ```
 
-Set `server.trusted_proxy_hops = 1` in MnemoNAS config when Nginx is the only trusted proxy in front of the app. Because a Docker bridge proxy usually reaches MnemoNAS from a non-loopback address, also trust the Docker network source. Inspect the actual subnet with `docker network inspect <compose-project>_internal`, then configure:
+Set `server.trusted_proxy_hops = 1` in MnemoNAS config when Nginx is the only trusted proxy in front of the app.
+Because a Docker bridge proxy usually reaches MnemoNAS from a non-loopback address, also trust the Docker network source.
+Inspect the actual subnet with `docker network inspect <compose-project>_internal`, then configure:
 
 ```toml
 [server]
@@ -403,7 +478,9 @@ docker inspect --format='{{.State.Health.Status}}' mnemonas
 curl "http://localhost:${MNEMONAS_HTTP_PORT:-8080}/health"
 ```
 
-`/api/v1/metrics` returns JSON metrics. Prometheus needs a JSON exporter, custom exporter, or conversion layer. If `auth.enabled = true`, the scraper must authenticate as an admin.
+`/api/v1/metrics` returns JSON metrics.
+Prometheus needs a JSON exporter, custom exporter, or conversion layer.
+If `auth.enabled = true`, the scraper must authenticate as an admin.
 
 ## Upgrade and Backup
 
@@ -421,7 +498,8 @@ docker compose pull
 docker compose up -d --no-build
 ```
 
-Before upgrading a release image, record the current `MNEMONAS_IMAGE` tag in `.env` and complete a backup. If the upgraded container does not start, a core workflow regresses, or health checks fail, set `MNEMONAS_IMAGE` back to the previous tag and roll the container image back:
+Before upgrading a release image, record the current `MNEMONAS_IMAGE` tag in `.env` and complete a backup.
+If the upgraded container does not start, a core workflow regresses, or health checks fail, set `MNEMONAS_IMAGE` back to the previous tag and roll the container image back:
 
 ```bash
 docker compose pull
@@ -429,7 +507,9 @@ docker compose up -d --no-build
 docker compose logs --tail 100 mnemonas
 ```
 
-Rollback changes only the container image. It continues to use the same host data directory and `/data/config.toml` inside the container. If the newer release performed an irreversible data migration, follow that release note or restore from backup before starting the older image.
+Rollback changes only the container image.
+It continues to use the same host data directory and `/data/config.toml` inside the container.
+If the newer release performed an irreversible data migration, follow that release note or restore from backup before starting the older image.
 
 Cold backup:
 

@@ -1,4 +1,4 @@
-# Storage Internals and Best Practices
+# Storage Internals and Operations Guidance
 
 English | [简体中文](storage-internals.md)
 

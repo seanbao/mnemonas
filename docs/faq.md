@@ -1,50 +1,46 @@
-# 常见问题 (FAQ)
+# 常见问题
 
 [English](faq.en.md) | 简体中文
 
 ## 安装与部署
 
-### Q: 支持哪些操作系统？
-
-**A:** MnemoNAS 支持以下平台：
+### 支持哪些操作系统？
 
 | 平台 | 支持状态 |
-| ---- | -------- |
-| Linux (x86_64) | 长期运行主路径 |
-| Linux (ARM64) | 长期运行主路径 |
-| macOS (Apple Silicon) | 支持开发、本地运行和手动二进制 |
-| macOS (Intel) | 支持开发、本地运行和手动二进制 |
+| --- | --- |
+| Linux x86_64 | 长期运行主路径 |
+| Linux ARM64 | 长期运行主路径 |
+| macOS Apple Silicon | 支持开发和本地运行 |
+| macOS Intel | 支持开发和本地运行 |
 | Windows | 通过 WSL2 支持 |
 
-### Q: Ubuntu/systemd、Docker 和手动二进制部署有什么区别？
+### systemd、Docker 和手动二进制部署有什么区别？
 
-**A:**
+| 方式 | 优点 | 取舍 |
+| --- | --- | --- |
+| Linux/systemd | 开机自启、日志清晰、诊断脚本完整，适合长期运行的服务器 | 主要面向 Linux 主机 |
+| Docker | 设置步骤少、运行环境隔离、升级路径明确 | 需要 Docker 环境，并正确映射数据卷 |
+| 手动二进制 | 适合调试，流程直接 | 需要手动管理进程 |
 
-| 方式 | 优点 | 缺点 |
-| ---- | ---- | ---- |
-| **Linux/systemd** | 开机自启、日志清晰、适合长期运行、诊断脚本完整 | 主要面向 Linux 主机 |
-| **Docker** | 设置步骤少、运行隔离、升级路径明确 | 需要 Docker 环境，存储路径需正确挂载 |
-| **手动二进制** | 无依赖、适合调试 | 需手动管理进程，不推荐长期无人值守 |
+长期运行的服务部署应参考 [Linux/systemd 部署指南](linux-systemd-deployment.md)。快速评估或已有容器平台时，可使用 [Docker 部署指南](docker-deployment.md)。
 
-长期运行优先参考 [Linux/systemd 部署指南](linux-systemd-deployment.md)。临时试用或已有容器平台时使用 Docker。
+### 升级流程是什么？
 
-### Q: 如何更新到新版本？
-
-**A:**
-
-Docker 方式：
+Docker 源码 checkout：
 
 ```bash
-# 源码 checkout 默认本地构建
 docker compose build --pull
 docker compose up -d
-
-# 如果使用已公开的 release 镜像，则改用：
-# docker compose pull
-# docker compose up -d --no-build
 ```
 
-Docker release 镜像升级前应记录 `.env` 中当前 `MNEMONAS_IMAGE` 标签。若升级后容器无法启动、核心流程异常或健康检查失败，可把 `MNEMONAS_IMAGE` 改回上一版本标签后执行：
+Docker release 镜像：
+
+```bash
+docker compose pull
+docker compose up -d --no-build
+```
+
+升级 Docker release 镜像前，应记录 `.env` 中当前的 `MNEMONAS_IMAGE` 标签。若升级后容器无法启动、核心流程异常或健康检查失败，可把 `MNEMONAS_IMAGE` 改回上一版本标签后运行：
 
 ```bash
 docker compose pull
@@ -54,7 +50,7 @@ docker compose logs --tail 100 mnemonas
 
 Docker 回退只切换镜像，继续使用同一个宿主机数据目录。若新版本已执行不可逆数据迁移，应先按对应 release note 或备份恢复流程处理。
 
-Ubuntu/systemd 方式：
+Ubuntu/systemd：
 
 ```bash
 tar -xzf mnemonas-<version>-linux-amd64.tar.gz
@@ -64,7 +60,7 @@ sudo ./scripts/install-systemd.sh
 sudo mnemonas-doctor
 ```
 
-systemd 升级前建议完成备份，并保留上一版本 release 解压目录。若升级后服务无法启动、核心流程异常或 `mnemonas-doctor` 失败，可从上一版本目录重新运行安装脚本回退二进制和 Web UI：
+systemd 升级前应完成备份，并保留上一版本 release 解压目录。若升级后服务无法启动、核心流程异常或 `mnemonas-doctor` 失败，可从上一版本目录重新运行安装脚本，回退二进制和 Web UI 资源：
 
 ```bash
 cd mnemonas-<previous-version>-linux-amd64
@@ -74,7 +70,7 @@ sudo mnemonas-doctor
 
 回退继续使用现有 `/etc/mnemonas/config.toml` 和 `/srv/mnemonas` 数据目录。若新版本已执行不可逆数据迁移，应按对应 release note 或备份恢复流程处理，不应直接用旧版本读取迁移后的数据。
 
-手动二进制方式：
+手动二进制：
 
 ```bash
 pkill nasd
@@ -85,69 +81,71 @@ pkill dataplane
 
 所有部署路径在跨大版本升级前都应先完成备份。
 
-### Q: 数据存储在哪里？
+### 数据存储在哪里？
 
-**A:** 默认路径：
+默认直接运行布局：
 
-- **数据文件**（用户文件）：`~/.mnemonas/files/`
-- **内部数据**（CAS/元数据）：`~/.mnemonas/.mnemonas/`
-- **配置文件**：`~/.mnemonas/config.toml`
+- 用户文件：`~/.mnemonas/files/`
+- 内部数据：`~/.mnemonas/.mnemonas/`
+- 配置文件：`~/.mnemonas/config.toml`
 
-Linux/systemd 部署默认使用 `/srv/mnemonas` 存放数据，配置文件在 `/etc/mnemonas/config.toml`。
+Ubuntu/systemd 默认布局：
 
-Docker 部署时，宿主机 `~/.mnemonas` 通常映射到容器内 `/data`，内部数据位于 `/data/.mnemonas`。
+- 数据目录：`/srv/mnemonas`
+- 配置文件：`/etc/mnemonas/config.toml`
 
----
+Docker 默认布局：
 
-## WebDAV 相关
+- 宿主机 `~/.mnemonas` 映射到容器内 `/data`
+- 内部数据位于 `/data/.mnemonas`
 
-### Q: WebDAV 挂载后很慢？
+## WebDAV
 
-**A:** 几个可能的原因和解决方案：
+### WebDAV 挂载后较慢时应检查什么？
 
-1. **macOS Finder**：Finder 的 WebDAV 实现效率较低，推荐使用 [Transmit](https://panic.com/transmit/) 或 [Cyberduck](https://cyberduck.io/)
+常见原因：
 
-2. **Windows Explorer**：WebClient 服务有限制，推荐使用 [WinSCP](https://winscp.net/) 或 [Raidrive](https://www.raidrive.com/)
+- macOS Finder 会发送大量 `PROPFIND` 请求。可改用 Transmit、Cyberduck 或 rclone。
+- Windows File Explorer 受 WebClient 限制影响。可改用 WinSCP、Cyberduck、Raidrive 或 rclone。
+- 网络延迟较高。处理大文件时，服务器和客户端应尽量位于同一局域网。
+- 反向代理启用了请求缓冲或请求体限制过小。公网 HTTPS 部署应关闭缓冲，并提高上传大小和超时限制。
 
-3. **网络延迟**：确保服务器和客户端在同一局域网
+MnemoNAS 包含短时间 `PROPFIND` 缓存，但客户端行为仍会影响体验。
 
-4. **缓存未生效**：MnemoNAS 已内置 30 秒 PROPFIND 缓存
+### Windows 为什么无法连接 HTTP WebDAV？
 
-### Q: 为什么 Windows 无法连接 HTTP 的 WebDAV？
-
-**A:** Windows 默认只允许 HTTPS。修改注册表启用 HTTP：
+Windows 默认偏好 HTTPS。本地 HTTP 测试可用管理员权限运行 PowerShell：
 
 ```powershell
-# 以管理员身份运行
 Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\WebClient\Parameters" -Name "BasicAuthLevel" -Value 2
 Restart-Service WebClient
 ```
 
-### Q: 如何启用 WebDAV 认证？
+常规使用应部署 HTTPS。
 
-**A:** 编辑配置文件 `~/.mnemonas/config.toml`：
+### 如何启用 WebDAV 认证？
 
 ```toml
 [webdav]
 enabled = true
 prefix = "/dav"
-auth_type = "users"  # 使用 MnemoNAS 用户账号登录
+auth_type = "users"
 ```
 
-如需单独的全局 WebDAV 凭据，可改用：
+如需单独的全局 WebDAV 凭据，可使用：
 
 ```toml
 [webdav]
 auth_type = "basic"
 username = "admin"
-password = ""  # 留空使用自动生成密码；自定义时使用密码管理器生成的随机强密码
+password = "" # 留空使用生成的凭据；自定义时使用密码管理器生成的随机强密码
 ```
 
-重启服务后生效。
+`password` 为空时，MnemoNAS 会生成 WebDAV 密码并保存到 `<storage.root>/secrets.json`。
 
-### Q: 支持 HTTPS 吗？
+### 是否支持 HTTPS？
 
-**A:** MnemoNAS 支持内置 HTTPS（自签名或自定义证书），也可使用反向代理：
+支持内置 TLS：
 
 ```toml
 [server.tls]
@@ -155,17 +153,16 @@ enabled = true
 auto_generate = true
 ```
 
-反向代理示例：
+公网访问建议使用反向代理：
 
 ```nginx
-# nginx 示例
 server {
     listen 443 ssl;
     server_name nas.example.com;
-    
+
     ssl_certificate /path/to/cert.pem;
     ssl_certificate_key /path/to/key.pem;
-    
+
     location / {
         proxy_pass http://localhost:8080;
         proxy_set_header Host $host;
@@ -174,223 +171,195 @@ server {
 }
 ```
 
----
+参见 [反向代理配置](reverse-proxy-setup.md)。
 
 ## 文件与存储
 
-### Q: 误删了文件怎么办？
+### 误删文件后的恢复方式是什么？
 
-**A:** MnemoNAS 支持回收站和文件版本历史，可恢复删除或修改的文件。
+使用 Web UI 的回收站和版本历史：
 
-1. 打开 Web UI：`http://localhost:8080`
-2. 导航到文件所在目录
-3. 右键点击 → **查看历史版本**
-4. 选择要恢复的版本 → **恢复**
+1. 打开 `http://localhost:8080`。
+2. 进入原始目录。
+3. 使用回收站或文件版本历史。
+4. 恢复目标项目或版本。
 
-或通过 API：
+API 示例：
 
 ```bash
-# 获取文件历史版本
 curl -H "Authorization: Bearer <access-token>" \
-   http://localhost:8080/api/v1/versions/path/to/file
+  http://localhost:8080/api/v1/versions/path/to/file
 
-# 恢复到指定版本
 curl -X POST \
-   -H "Authorization: Bearer <access-token>" \
-   "http://localhost:8080/api/v1/versions/<hash>/restore?path=/path/to/file"
+  -H "Authorization: Bearer <access-token>" \
+  "http://localhost:8080/api/v1/versions/<hash>/restore?path=/path/to/file"
 ```
 
-### Q: 存储空间如何去重？
+### 去重如何工作？
 
-**A:** MnemoNAS 使用 CAS（内容寻址存储）+ CDC（内容定义分块）：
+当前版本内容存储在 BLAKE3 整对象 CAS 中：
 
-1. **内容寻址**：当前版本历史使用 BLAKE3 whole-object CAS，相同完整内容只存储一份
-2. **分块能力**：Rust dataplane 已提供 FastCDC 文件 API，块大小通常在 256KB-4MB 区间
-3. **版本去重边界**：当前 Go 版本历史路径还没有接入 chunk 级引用追踪；不同版本只有在完整内容相同时才会共享对象
+- 完全相同的完整文件内容只存储一次。
+- Rust dataplane 已提供 FastCDC 文件 API，典型块大小为 256KB-4MB。
+- 当前 Go 版本历史路径尚未接入 chunk 级引用追踪，因此不同版本只有在完整内容相同时才会共享存储。
 
-查看 dataplane 统计：
+Dataplane 统计：
 
 ```bash
 curl http://localhost:9091/stats
 ```
 
-`9091` 是 dataplane 本机健康/统计端口，只应在服务器本机或容器内部访问，不要通过防火墙、端口映射或反向代理暴露给外部网络。
+`9091` 是本地或私有 dataplane 健康与统计端口，不应对公网开放。
 
-### Q: 如何清理旧版本？
+### 旧版本如何清理？
 
-**A:** 默认情况下，MnemoNAS 按保留策略自动清理旧版本。可通过配置调整保留范围：
+保留策略配置：
 
 ```toml
 [storage.retention]
-# 保留策略（满足任一条件即清理）
-max_age = "720h"      # 保留 30 天内的版本
-max_versions = 10     # 每个文件保留最近 10 个版本
+max_age = "720h"
+max_versions = 10
 ```
 
 手动触发 GC：
 
 ```bash
 curl -X POST \
-   -H "Authorization: Bearer <access-token>" \
-   http://localhost:8080/api/v1/maintenance/gc
+  -H "Authorization: Bearer <access-token>" \
+  http://localhost:8080/api/v1/maintenance/gc
 ```
 
-### Q: 最大支持多大的文件？
+### 最大文件大小是多少？
 
-**A:** 设计上使用流式传输，文件大小主要受磁盘空间、客户端、反向代理上传限制和底层文件系统限制影响。当前不建议把“最大文件大小”理解为固定承诺；部署前应按实际媒体/备份文件做一次上传、下载和恢复演练。
+MnemoNAS 使用流式路径。实际限制来自磁盘空间、客户端、反向代理设置和底层文件系统。
 
-大文件场景需要特别检查反向代理配置，例如 Nginx 的 `client_max_body_size`、`proxy_request_buffering` 和超时时间。Docker 或 systemd 本地直连时，也需要确认目标数据盘有足够空闲空间。
-
----
+大文件路径应按预期的上传、下载和恢复负载测试。公网部署必须配置反向代理参数，例如 Nginx `client_max_body_size`、`proxy_request_buffering` 和超时时间。
 
 ## 性能与维护
 
-### Q: 如何监控服务状态？
-
-**A:**
+### 如何监控服务状态？
 
 健康检查：
 
 ```bash
 curl http://localhost:8080/health
-# {"status":"healthy","version":"<version>",...}
 ```
 
-性能指标：
+指标：
 
 ```bash
 curl -H "Authorization: Bearer <admin-access-token>" http://localhost:8080/api/v1/metrics
-# 返回请求统计、延迟、吞吐量等
 ```
 
-存储统计：
+Dataplane 本地统计：
 
 ```bash
 curl http://localhost:9091/stats
-# 返回 CAS 存储统计
 ```
 
-该端口没有面向外部客户端的认证层，长期部署时应保持 loopback 绑定。
+Dataplane 端口应保持 loopback 或私有网络绑定。
 
-### Q: Scrub 检查是做什么的？
+### Scrub 检查的作用是什么？
 
-**A:** Scrub 是数据完整性检查，验证每个存储块的哈希值是否正确：
+Scrub 会按哈希校验已存储对象，并报告缺失或损坏的数据。
 
 ```bash
-# 手动触发 scrub
 curl -X POST \
-   -H "Authorization: Bearer <access-token>" \
-   http://localhost:8080/api/v1/maintenance/scrub
+  -H "Authorization: Bearer <access-token>" \
+  http://localhost:8080/api/v1/maintenance/scrub
 
-# 查看最新 scrub 结果
 curl -H "Authorization: Bearer <access-token>" \
-   http://localhost:8080/api/v1/maintenance/scrub
+  http://localhost:8080/api/v1/maintenance/scrub
 ```
 
-建议每月运行一次 scrub，使用维护接口或脚本触发。
+Scrub 应定期运行，例如每月一次。
 
-### Q: 如何备份 MnemoNAS 数据？
+### MnemoNAS 数据应如何备份？
 
-**A:**
+使用一致性来源：
 
-1. **冷备份**：停止服务后复制数据目录
+1. 使用 ZFS、Btrfs 或 LVM 时，优先从文件系统快照备份。
+2. 否则，停止 `mnemonas` 和 `mnemonas-dataplane`，备份完整存储根目录，然后再启动服务。
 
-   ```bash
-   docker compose stop
-   rsync -aHAX --delete ~/.mnemonas/ /backup/mnemonas/
-   docker compose start
-   ```
+Docker 冷备份示例：
 
-2. **快照备份**：如果底层是 ZFS/Btrfs/LVM，先创建文件系统快照，再从快照目录同步。这样可以避免备份过程中元数据仍在变化。
+```bash
+docker compose stop
+rsync -aHAX --delete ~/.mnemonas/ /backup/mnemonas/
+docker compose start
+```
 
-3. **远程备份**：从快照目录或停服务后的数据目录，用 restic、borg 或 rclone 同步到云存储
+远程备份可从快照或冷备份根目录使用 restic、borg 或 rclone。
 
-   ```bash
-   SOURCE_DIR=/path/to/mnemonas-snapshot-or-cold-root
-   rclone sync "$SOURCE_DIR/" remote:mnemonas-backup/current/
-   ```
-
-没有快照能力时，不建议在服务运行中直接复制整个数据目录；优先停服务做冷备份。完整流程见 [备份指南](backup-guide.md)。
-
----
+参见 [备份指南](backup-guide.md)。
 
 ## 故障排除
 
-### Q: 服务无法启动
+### 服务无法启动
 
-**A:** 检查清单：
-
-1. **端口占用**：
-
-   ```bash
-   lsof -i :8080  # 检查 8080 端口
-   lsof -i :9090  # 检查 9090 端口
-   ```
-
-2. **数据目录权限**：
-
-   ```bash
-   ls -la ~/.mnemonas/
-   # 确保当前用户有读写权限
-   ```
-
-3. **查看日志**：
-
-   ```bash
-   # Docker
-   docker compose logs -f
-   
-   # 二进制
-   ./nasd 2>&1 | tee nasd.log
-   ```
-
-### Q: 数据面连接失败
-
-**A:** 控制面无法连接数据面（gRPC）：
-
-1. 确认数据面运行中：
-
-   ```bash
-   curl http://localhost:9091/health
-   ```
-
-   如果这条命令只能从服务器本机访问，这是正常且推荐的部署边界。
-
-2. 检查配置中的数据面地址：
-
-   ```toml
-   [dataplane]
-   grpc_address = "localhost:9090"
-   ```
-
-3. 检查防火墙
-
-### Q: 如何重置所有数据？
-
-**A:** **警告：此操作不可逆。**
+检查：
 
 ```bash
-# 停止服务
-docker compose down
+lsof -i :8080
+lsof -i :9090
+ls -la ~/.mnemonas/
+```
 
-# 删除数据
+日志：
+
+```bash
+docker compose logs -f
+./nasd 2>&1 | tee nasd.log
+```
+
+systemd：
+
+```bash
+sudo mnemonas-doctor
+journalctl -u mnemonas -f
+journalctl -u mnemonas-dataplane -f
+```
+
+### 控制面无法连接数据面
+
+检查 dataplane 健康状态：
+
+```bash
+curl http://localhost:9091/health
+```
+
+检查配置：
+
+```toml
+[dataplane]
+grpc_address = "localhost:9090"
+```
+
+还应检查防火墙，并确认 dataplane 是否绑定到 loopback。
+
+### 如何重置所有数据？
+
+此操作具有破坏性：
+
+```bash
+docker compose down
 DEFAULT_DATA_DIR="$HOME/.mnemonas"
 DATA_DIR="${MNEMONAS_DATA_DIR:-$DEFAULT_DATA_DIR}"
 [ "$DATA_DIR" = "$DEFAULT_DATA_DIR" ] || { echo "refusing non-default DATA_DIR; inspect and delete manually: $DATA_DIR"; exit 1; }
 [ ! -L "$DATA_DIR" ] || { echo "refusing symlink DATA_DIR: $DATA_DIR"; exit 1; }
 rm -rf -- "$DATA_DIR/files" "$DATA_DIR/.mnemonas"
 
-# 重启服务；release 镜像可改用 docker compose up -d --no-build
+# release 镜像可改用 docker compose up -d --no-build。
 docker compose up -d
 ```
 
----
+现有数据仍可能需要保留时，应先完成备份。
 
 ## 更多帮助
 
-- [项目主页](https://github.com/seanbao/mnemonas)
+- [README](../README.md)
+- [文档索引](README.md)
 - [挂载指南](mounting-guide.md)
 - [WebDAV 兼容性](webdav-compatibility.md)
-- [配置参考](../mnemonas.example.toml)
-
-遇到其他问题？请在 [GitHub Issues](https://github.com/seanbao/mnemonas/issues) 提交反馈。
+- [配置参考](configuration.md)
+- [支持说明](../SUPPORT.md)

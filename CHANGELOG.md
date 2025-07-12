@@ -68,7 +68,7 @@
   - 有效期配置
   - 访问统计
   - 分享链接访问页面
-  - 分享风险提示、复核筛选、即将到期提醒、策略预设、按目录路径强制分享约束和一键停用需处理分享
+  - 分享风险提示、复核筛选、即将到期提醒、策略预设、按目录路径强制分享约束和直接停用高风险分享链接
 
 - **Settings 设置**
   - 服务器配置（监听地址、端口）
@@ -169,6 +169,7 @@
 - Release 自动化工作流（多平台二进制构建、Docker 镜像发布）
 - Ubuntu/systemd 安装脚本，可将 release 包安装为 `mnemonas` 与 `mnemonas-dataplane` 服务
 - `mnemonas-doctor` 部署诊断脚本，检查二进制、配置、systemd、健康端点、端口、存储挂载、备份目录、公网 HTTPS 证书状态、HTTP 到 HTTPS 跳转，并提示云安全组人工复核项
+- `mnemonas-doctor --public-domain` 可识别后端控制面和数据面端口的宽泛 UFW 放行规则，并对存储路径和 WebDAV 用户文件路径中的 `~` 做一致展开
 - `mnemonas-public-setup` 公网 HTTPS 反向代理配置助手
 - Traefik 和 Cloudflare Tunnel 公网访问模板，并通过脚本检查避免开放后端和 dataplane 端口
 - `mnemonas-uninstall-systemd` 卸载脚本，默认保留配置和数据，删除数据需要显式确认
@@ -176,6 +177,9 @@
 - Docker 镜像内置 `mnemonas-healthcheck` 健康检查二进制，不再依赖运行时 `curl`
 - `tools/proto-gen` Rust protobuf 生成器，普通 dataplane/Docker 构建不再依赖系统 `protoc`
 - systemd/Docker 脚本模拟测试，并接入 CI 的脚本校验流程
+- 脚本模拟测试覆盖变更文件选择、WebDAV 认证模式、公网反向代理暴露检查、benchmark 路径和 Web Husky hooks
+- WebDAV COPY/MOVE 目标路径回归覆盖，验证绝对 path-reference 目标，并拒绝包括 `dav/path` 在内的裸相对目标
+- `npm run typecheck` 覆盖前端应用、Playwright 规格和共享 E2E helper
 - `.go-version`、`.nvmrc`、Go `toolchain` 与 Rust `rust-version` 共同记录本地开发工具链要求
 - `.gitattributes` 统一文本换行并标记提交的生成文件，降低跨平台和评审噪声
 - SECURITY.md 安全策略
@@ -200,7 +204,7 @@
 - Rust CI/Makefile 检查覆盖 dataplane all-targets 和 `tools/proto-gen`
 - Makefile 改为在 Go 目标运行时再解析包列表，避免 `make help` 等非 Go 目标在解析阶段触发 toolchain 下载，同时继续排除 `web/node_modules`
 - 新增 `make go-packages`，集中 Go 包解析规则，供 CI、文档示例和安全扫描复用
-- 新增 `make workflows-check` 并接入 CI，用 actionlint 检查 GitHub Actions workflow 配置
+- 新增 `make workflows-check` 并接入 CI，用 actionlint 检查 GitHub Actions 工作流配置
 - 统一 README、开发与测试文档中的前端 Node.js engine 要求，匹配 `web/package.json`
 - 安全策略文档补充 `make security-check NPM_AUDIT=1` 用法，避免误解前端依赖安全扫描默认行为
 - CI 和 release 工作流增加最小权限、job 级权限收缩、并发控制和 job 超时，减少权限面、重复运行和挂起风险
@@ -213,12 +217,22 @@
 - 新增公网云防火墙复核清单，覆盖常见云安全组、VPC 防火墙、IPv6 和端口转发误配置
 - 备份文档补充运行中数据的一致性窗口和快照建议
 - 设置页目录权限从原始规则文本框改为结构化规则编辑器，并增加按路径生成用户权限矩阵、相关分享影响和未保存规则预览的入口，降低家庭成员或小团队成员授权配置出错概率
+- `make verify-changed` 将 Web Husky hooks 视为脚本变更，并在 Web 变更时运行前端 typecheck，覆盖未跟踪的 E2E helper 和配置文件
+- 根目录示例配置注释统一为英文，`make verify-changed` 在 `mnemonas.example.toml` 变更时运行 `nasd --check-config`
+- `make verify-changed` 在 `.env.example` 或 Compose 模板变更时运行 Docker 模板相关脚本 fixture
+- `make verify-changed` 在 `.dockerignore` 变更时运行 Docker 构建，避免构建上下文规则漂移
+- `make verify-changed` 总是按 worktree、staged 或 base 模式运行对应范围的 `git diff --check`，并在 `.go-version`、`.nvmrc` 或 `.golangci.yml`/`.golangci.yaml` 变更时选择对应的工具链检查
+- `make verify-changed` 在 `deploy/public-access/` 公网模板变更时运行公网模板安全 fixture
+- `make verify-changed` 在 `.github/dependabot.yml`、`.github/dependabot.yaml`、`codecov.yml` 或 `codecov.yaml` 变更时验证 YAML 配置语法
+- WebDAV 设置脚本和开发辅助脚本明确展示 Basic、users 和 no-auth 模式，避免混淆生成凭据与用户账号挂载
 - 优化 Files 页面表格列布局，新增操作列
 - 优化 Vite 代理配置，添加 `/health` 端点代理
 - 改进配置加载逻辑，支持配置路径传递
 
 ### Fixed
-- 修复通过设置 API 修改 `server.trusted_proxy_hops` 后，运行态请求来源和 HTTPS 转发语义识别未立即同步的问题
+- 修复设置 API 修改 `server.trusted_proxy_hops` 后，运行态请求来源和 HTTPS 转发语义识别未立即同步的问题
+- 修复 Web Husky pre-commit hook，使其解析仓库根目录、切换到 `web/`，并使用前端 lint-staged 配置
+- 修复前端认证初始化：复用已有服务的 E2E 可显式跳过认证状态写入，隔离 E2E 默认失败而不是静默保存空认证状态
 - 防止 systemd 安装和 `nasd` 静态文件发现误把 Vite 源码目录当成已构建 Web UI
 - 修复 `.gitignore` / `.dockerignore` 中 `nasd` 规则过宽，避免忽略 `cmd/nasd` 下的新文件或 Docker 构建上下文
 - 修复 Docker 运行镜像依赖 `apt-get` 安装健康检查工具的问题
@@ -275,7 +289,7 @@
 
 ### 兼容性
 
-- **Go**: 1.25.9+
+- **Go**: 1.25.11+
 - **Rust**: 1.92+
 - **Node.js**: `^20.19.0` 或 `>=22.12.0`
 - **Docker**: 20.10+ 与 Compose v2 插件
@@ -285,21 +299,24 @@
 
 ## 版本发布检查清单
 
-发布新版本前，请确认：
+发布新版本前应完成以下检查：
 
-- [ ] 快速检查通过：`make quick-check`
-- [ ] 部署脚本检查通过：`make scripts-check`
-- [ ] 全量测试通过：`make test`
-- [ ] 依赖安全检查通过：`make security-check`
-- [ ] 更新 CHANGELOG.md 和 CHANGELOG.en.md
-- [ ] 更新 README.md 中的版本号（如有）
+- [ ] 记录当前基线并保持工作树干净：`git status --short --branch`
+- [ ] 变更感知完整验证通过：`GOTOOLCHAIN=local timeout 45m ./scripts/verify-changed.sh --base master`
+- [ ] 文档检查通过：`make docs-check`
+- [ ] 脚本检查通过：`make scripts-check`
+- [ ] 依赖安全检查通过：`make security-check NPM_AUDIT=1`
+- [ ] Docker 构建和烟测通过：`make docker-check`
+- [ ] `./scripts/plan-hardening-commits.sh --fail-on-manual` 确认没有未归类路径
+- [ ] 更新 CHANGELOG.md、CHANGELOG.en.md、README 版本引用和 release note
 - [ ] 创建 Git tag：`git tag -a v0.1.0 -m "Release v0.1.0"`
 - [ ] 推送 tag：`git push origin v0.1.0`
 - [ ] GitHub Release 包含：
   - 版本说明（从 CHANGELOG 复制）
+  - checksums
   - 二进制文件（Linux x86_64, ARM64, macOS）
   - Docker 镜像标签
-- [ ] 更新文档站点（如有）
+- [ ] 发布后验证 release 归档安装、Docker release 镜像启动和公开文档链接
 
 ---
 
