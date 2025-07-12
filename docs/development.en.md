@@ -9,7 +9,7 @@ This guide explains how to set up a local MnemoNAS development environment, buil
 | Tool | Minimum | Recommended | Purpose |
 | --- | --- | --- | --- |
 | Go | 1.25.11 | 1.25.11+ | Go control plane |
-| Rust | 1.92 | 1.92.x | Rust data plane |
+| Rust | 1.92 | 1.92.x | Rust data plane and protobuf generator |
 | Node.js | `^20.19.0` or `>=22.12.0` | `.nvmrc` 22.x | Frontend |
 | protoc | 3.20 | 3.20.1 for CI parity | Regenerate protobuf code |
 | make | 3.x | 4.x | Build automation |
@@ -20,10 +20,13 @@ Optional:
 | --- | --- |
 | Docker Engine + Compose v2 | Container build and deployment |
 | golangci-lint | Required by `make lint` and `make check` unless explicitly skipped |
+| Python 3 | Untracked text-file whitespace checks and local validation scripts in `make verify-changed` |
+| PyYAML | YAML syntax and duplicate-key validation in `make verify-changed`, `make workflows-check`, and `make docs-check` |
+| `timeout` or `gtimeout` | Bounds Docker image builds and container smoke tests selected by `make verify-changed`; on macOS, GNU coreutils can provide `gtimeout` |
 | cargo-watch | Rust hot reload |
 | nvm | Node.js version management |
 
-The repository includes `.go-version` and `.nvmrc`. Rust version is declared in `dataplane/Cargo.toml`. Frontend commands should run after `nvm use`.
+The repository includes `.go-version` and `.nvmrc`. Rust versions are declared in `dataplane/Cargo.toml` and `tools/proto-gen/Cargo.toml`. Frontend commands should run after `nvm use`.
 
 ## Install Dependencies
 
@@ -32,7 +35,9 @@ The repository includes `.go-version` and `.nvmrc`. Rust version is declared in 
 ```bash
 brew install go
 
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o /tmp/rustup-init.sh
+sed -n '1,120p' /tmp/rustup-init.sh
+sh /tmp/rustup-init.sh
 source ~/.cargo/env
 
 brew install nvm
@@ -44,7 +49,8 @@ brew install protobuf
 go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
 go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.6.1
 
-brew install golangci-lint
+brew install golangci-lint python
+python3 -m pip install --user PyYAML
 cargo install cargo-watch --version 8.5.3
 ```
 
@@ -59,16 +65,22 @@ sudo tar -C /usr/local -xzf "go${GO_VERSION}.linux-amd64.tar.gz"
 echo 'export PATH=$PATH:/usr/local/go/bin:$HOME/go/bin' >> ~/.bashrc
 source ~/.bashrc
 
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o /tmp/rustup-init.sh
+sed -n '1,120p' /tmp/rustup-init.sh
+sh /tmp/rustup-init.sh
 source ~/.cargo/env
 
-curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh -o /tmp/nvm-install.sh
+sed -n '1,120p' /tmp/nvm-install.sh
+bash /tmp/nvm-install.sh
 source ~/.nvm/nvm.sh
 nvm install 22
 nvm use 22
 
 sudo apt install protobuf-compiler
 protoc --version
+
+sudo apt install python3-yaml
 
 go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
 go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.6.1
@@ -91,6 +103,8 @@ rustc --version
 node --version
 npm --version
 protoc --version
+python3 --version
+python3 -c 'import yaml'
 
 which protoc-gen-go
 which protoc-gen-go-grpc
@@ -174,7 +188,7 @@ nvm use
 
 ./scripts/dev.sh
 ./scripts/dev.sh --backend
-./scripts/dev.sh --creds # hides the WebDAV plaintext password by default
+./scripts/dev.sh --creds # shows WebDAV auth mode; hides Basic Auth plaintext by default
 ./scripts/dev.sh --frontend
 ./scripts/dev.sh --status
 ./scripts/dev.sh --kill
@@ -182,7 +196,11 @@ nvm use
 
 The script:
 
-- `--creds` shows the initial password file and WebDAV credential location without printing the WebDAV plaintext password. Set `MNEMONAS_DEV_SHOW_SECRETS=1 ./scripts/dev.sh --creds` only for deliberate local-terminal disclosure.
+- `--creds` shows the initial password file and current WebDAV auth mode.
+- `users` mode uses MnemoNAS accounts.
+- `none` reports disabled WebDAV auth.
+- `basic` hides the plaintext Basic Auth password by default.
+- Set `MNEMONAS_DEV_SHOW_SECRETS=1 ./scripts/dev.sh --creds` only for deliberate local-terminal disclosure.
 
 - Builds Go and Rust components.
 - Starts dataplane, `nasd`, and optionally Vite.
@@ -268,11 +286,28 @@ make bench
 make lint
 make check
 make docs-check
+make coverage
+make docker-check
 ```
 
-`make verify-changed` selects workflow, script, Go/Rust, frontend, E2E, Docker, and documentation checks from the changed files in the worktree, staged area, or a configured base ref. Documentation-only changes run `make docs-check`, which validates local Markdown links against files and heading anchors in the repository and confirms that README, CHANGELOG, SUPPORT, SECURITY, the Web README, and documents under `docs/` keep Chinese and English pairs; documents under `docs/` must also appear in both documentation indexes.
+`make verify-changed` selects checks from the changed files in the worktree, staged area, or a configured base ref.
+It can select workflow, script, Go/Rust, frontend, E2E, Docker, documentation, dependency-security, toolchain configuration, quality configuration, example configuration, and public-access template checks.
+When `go.mod`, `go.sum`, Cargo manifests or lockfiles, or Web npm manifests or lockfiles change, `verify-changed` adds dependency security checks; Web npm manifest or lockfile changes run npm audit with `NPM_AUDIT=1`.
+YAML configuration validation rejects syntax errors and duplicate keys within the same mapping so local parsing cannot silently override configuration values.
+Use `./scripts/verify-changed.sh --staged` to inspect staged content only, `./scripts/verify-changed.sh --base <ref>` to validate a branch range, and `--dry-run` to review selected commands without executing them.
+Docker image build and container smoke checks are bounded by `VERIFY_CHANGED_DOCKER_TIMEOUT=45m` by default; override it for slower networks or build hosts. The script automatically uses `timeout` or GNU coreutils `gtimeout`.
 
-`make lint` and `make check` require `golangci-lint` unless `SKIP_GOLANGCI_LINT=1` is explicitly set for local troubleshooting. Go linting inherits `GO_LINT_ENV` from `GO_CMD_ENV` by default, so local checks use `GOTOOLCHAIN=local`; override `GO_LINT_ENV` only when automatic toolchain download is required.
+Documentation-only changes run `make docs-check`.
+That command validates local Markdown links against files and heading anchors in the repository.
+It also validates JSON, YAML, and TOML code fences; JSON and YAML code fences reject duplicate keys within the same object or mapping.
+It also confirms that README, CHANGELOG, SUPPORT, SECURITY, the Web README, public-access template README, and documents under `docs/` keep Chinese and English pairs.
+Documents under `docs/` must also appear in both documentation indexes.
+
+`make coverage` runs repository-wide Go coverage with the temporary dataplane wrapper, enforces the `GO_COVERAGE_MIN` threshold, runs frontend coverage, and writes ignored local reports to `coverage/go.html` and `web/coverage/`.
+
+`make lint` and `make check` require `golangci-lint` unless `SKIP_GOLANGCI_LINT=1` is explicitly set for local troubleshooting.
+Go linting inherits `GO_LINT_ENV` from `GO_CMD_ENV` by default, so local checks use `GOTOOLCHAIN=local`.
+Override `GO_LINT_ENV` only when automatic toolchain download is required.
 
 ### Go
 
@@ -284,11 +319,19 @@ bash ./scripts/with-test-dataplane.sh go test -v ./internal/webdav/...
 
 bash ./scripts/with-test-dataplane.sh go test -v -cover $GO_PACKAGES
 
-bash ./scripts/with-test-dataplane.sh go test -coverprofile=coverage.out $GO_PACKAGES
-go tool cover -html=coverage.out
+make coverage
 ```
 
-The temporary dataplane started by `with-test-dataplane.sh` auto-selects free `127.0.0.1` gRPC and HTTP ports by default. When unset, `MNEMONAS_TEST_DATAPLANE_ADDR` and `MNEMONAS_TEST_DATAPLANE_HTTP_ADDR` are exported to the wrapped command with the selected addresses. Overrides must remain loopback (`localhost`, `ip6-localhost`, `::1`, or dotted-quad numeric `127.0.0.0/8`), must use different ports, and must not contain whitespace or control characters, so the test service is not exposed on public or untrusted LAN interfaces.
+The temporary dataplane started by `with-test-dataplane.sh` auto-selects free `127.0.0.1` gRPC and HTTP ports by default.
+When unset, `MNEMONAS_TEST_DATAPLANE_ADDR` and `MNEMONAS_TEST_DATAPLANE_HTTP_ADDR` are exported to the wrapped command with the selected addresses.
+
+Overrides must:
+
+- remain loopback: `localhost`, `ip6-localhost`, `::1`, or dotted-quad numeric `127.0.0.0/8`;
+- use different ports;
+- avoid whitespace and control characters.
+
+These limits prevent the test service from listening on public or untrusted LAN interfaces.
 
 After installing frontend dependencies, do not use `go test ./...` or `go list ./...` as the repository package set; Go will traverse third-party packages under `web/node_modules`. Use `make --no-print-directory go-packages` for repository-wide Go checks.
 
@@ -301,11 +344,11 @@ cargo test test_cas_store
 cargo test -- --nocapture
 ```
 
-Coverage:
+Coverage from the repository root:
 
 ```bash
-cargo install cargo-tarpaulin
-cargo tarpaulin --out Html
+cargo install cargo-llvm-cov --locked
+make rust-coverage
 ```
 
 ### Frontend
@@ -317,18 +360,33 @@ npm run test:run
 npm run test
 npm run test:coverage
 npm run lint
-npx tsc --noEmit
+npm run typecheck
 npm run test:e2e
 npm run test:e2e:ui
 ```
 
-Playwright starts isolated backend and frontend servers by default. Local runs use 4 workers unless `MNEMONAS_E2E_WORKERS` is set to a positive integer; CI uses 1 worker. The isolated backend uses a 2-hour access-token lifetime and a 168-hour refresh-token lifetime so long parallel E2E runs do not enter concurrent refresh-token rotation after a shared storageState expires. To reuse existing services, set `MNEMONAS_E2E_REUSE_EXISTING=1`, `MNEMONAS_E2E_BACKEND_URL`, `MNEMONAS_E2E_FRONTEND_URL`, and `E2E_PASSWORD`.
+Playwright starts isolated backend and frontend servers by default.
+Local runs use 4 workers unless `MNEMONAS_E2E_WORKERS` is set to a positive integer; CI uses 1 worker.
+
+The isolated backend uses a 2-hour access-token lifetime and a 168-hour refresh-token lifetime.
+This prevents long parallel E2E runs from entering concurrent refresh-token rotation after a shared storageState expires.
+
+To reuse existing services, set:
+
+- `MNEMONAS_E2E_REUSE_EXISTING=1`;
+- `MNEMONAS_E2E_BACKEND_URL`;
+- `MNEMONAS_E2E_FRONTEND_URL`;
+- `E2E_PASSWORD` or `E2E_PASSWORD_FILE`.
+
+The default configuration writes the initial password file to `~/.mnemonas/.mnemonas/initial-password.txt`. If `auth.users_file` is stored at the `storage.root` top level, the initial password file is usually `~/.mnemonas/initial-password.txt`. Without `E2E_PASSWORD_FILE`, Playwright tries those two paths in that order. When `E2E_PASSWORD_FILE` is set explicitly, that file is authoritative; missing or empty files do not fall back to the defaults.
 
 ### WebDAV Smoke Test
 
 ```bash
-WEBDAV_USER="<webdav-username>"
-WEBDAV_PASS="<webdav-password>"
+# These curl examples apply to webdav.auth_type=basic; use ./scripts/dev.sh --creds to find credential locations.
+# When webdav.auth_type=users is enabled, use a MnemoNAS username and password instead.
+WEBDAV_USER="<mnemonas-or-webdav-username>"
+WEBDAV_PASS="<mnemonas-or-webdav-password>"
 
 curl -u "$WEBDAV_USER:$WEBDAV_PASS" -X PROPFIND http://localhost:8080/dav/ -H "Depth: 1"
 curl -u "$WEBDAV_USER:$WEBDAV_PASS" -X PUT http://localhost:8080/dav/test.txt -d "Hello World"
@@ -346,9 +404,22 @@ curl http://localhost:9091/stats
 ```bash
 make e2e
 ./scripts/run-e2e-isolated.sh --quick
+RUN_RCLONE_WEBDAV=1 ./scripts/run-e2e-isolated.sh --quick
 ```
 
-The isolated runner avoids writing into a real user storage root. `scripts/e2e-test.sh` can target an explicit running service, but it requires explicit `BASE_URL`, `STORAGE_ROOT`, `CONFIG_FILE`, `SECRETS_FILE`, and `INITIAL_PASSWORD_FILE`. `STORAGE_ROOT` must not contain control characters, `..`, or symlink path components.
+The isolated runner avoids writing into a real user storage root.
+`scripts/e2e-test.sh` can target an explicit running service, but it requires:
+
+- `BASE_URL`;
+- `STORAGE_ROOT`;
+- `CONFIG_FILE`;
+- `SECRETS_FILE`;
+- `INITIAL_PASSWORD_FILE`.
+
+`STORAGE_ROOT` must not contain control characters, `..`, or symlink path components.
+For WebDAV `auth_type = "basic"`, the script can read Basic Auth credentials from config or `secrets.json`.
+For WebDAV `auth_type = "users"`, set `MNEMONAS_WEBDAV_USERNAME` and `MNEMONAS_WEBDAV_PASSWORD` explicitly.
+Set `RUN_RCLONE_WEBDAV=1` to make the isolated runner and `scripts/e2e-test.sh` run an additional WebDAV client smoke when `rclone` is installed. The smoke covers upload, download, move/rename, and list operations.
 
 The isolated E2E runner and Playwright backend accept only loopback Web and dataplane addresses: `localhost`, `ip6-localhost`, `::1`, or dotted-quad numeric `127.0.0.0/8` addresses. This prevents test backends from unintentionally listening on public or untrusted LAN interfaces.
 
@@ -373,7 +444,18 @@ RUN_CORRUPTION_TESTS=0 \
 ./scripts/fault-injection-test.sh
 ```
 
-Safety checks are covered by `scripts/test-fault-injection-safety.sh` and `make scripts-check`. The isolated runner accepts only `/tmp` or checkout-local roots and loopback Web and dataplane addresses. The low-level runner requires explicit `BASE_URL`, `STORAGE_ROOT`, and `NASD_BIN`. Real storage paths require `ALLOW_REAL_STORAGE=1`, must still be absolute, must not contain control characters, `..`, or symlink path components, and must not point at protected system directories such as `/`, `/tmp`, or `/var`. `OBJECTS_DIR`, `INDEX_DB`, and optional `NASD_PID_FILE` paths that may be read or modified by the destructive checks must be under `STORAGE_ROOT`.
+Safety checks are covered by `scripts/test-fault-injection-safety.sh` and `make scripts-check`.
+The isolated runner accepts only `/tmp` or checkout-local roots and loopback Web and dataplane addresses.
+
+The low-level runner requires explicit `BASE_URL`, `STORAGE_ROOT`, and `NASD_BIN`.
+When WebDAV uses `auth_type = "users"`, it also requires explicit `MNEMONAS_WEBDAV_USERNAME` and `MNEMONAS_WEBDAV_PASSWORD`.
+
+Real storage paths require `ALLOW_REAL_STORAGE=1`.
+They must still be absolute.
+They must not contain control characters, `..`, or symlink path components.
+They must not point at protected system directories such as `/`, `/tmp`, or `/var`.
+
+`OBJECTS_DIR`, `INDEX_DB`, and optional `NASD_PID_FILE` paths that may be read or modified by destructive checks must be under `STORAGE_ROOT`.
 
 ### Benchmarks
 
@@ -387,9 +469,22 @@ Manual benchmark against an explicit service:
 ```bash
 MNEMONAS_STORAGE_ROOT=/tmp/mnemonas-bench-target \
 ./scripts/benchmark.sh http://127.0.0.1:18080
+
+# When explicit WebDAV credentials or protected metrics are required:
+MNEMONAS_WEBDAV_USERNAME="<mnemonas-or-webdav-username>" \
+MNEMONAS_WEBDAV_PASSWORD="<mnemonas-or-webdav-password>" \
+MNEMONAS_ACCESS_TOKEN="<access-token>" \
+MNEMONAS_STORAGE_ROOT=/tmp/mnemonas-bench-target \
+./scripts/benchmark.sh http://127.0.0.1:18080
 ```
 
-Manual benchmark targets create and remove `storage.root/files/benchmark-test`. Real storage paths require `ALLOW_REAL_STORAGE=1`, must still be absolute, must not contain control characters, `..`, or symlink path components, and must not point at protected system directories.
+Manual benchmark targets create and remove `storage.root/files/benchmark-test`.
+Real storage paths require `ALLOW_REAL_STORAGE=1`.
+They must still be absolute, must not contain control characters, `..`, or symlink path components, and must not point at protected system directories.
+
+For WebDAV `auth_type = "basic"`, the manual benchmark reads Basic Auth credentials from `config.toml` or `secrets.json` when environment credentials are not provided.
+For WebDAV `auth_type = "users"`, set `MNEMONAS_WEBDAV_USERNAME` and `MNEMONAS_WEBDAV_PASSWORD` explicitly.
+`[webdav].username/password` are not treated as MnemoNAS user credentials.
 
 The isolated benchmark runner uses the same loopback-only rule for Web and dataplane addresses. To benchmark a remote or shared-network instance, run `scripts/benchmark.sh` directly with an explicit isolated `MNEMONAS_STORAGE_ROOT`.
 

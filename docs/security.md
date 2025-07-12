@@ -2,11 +2,9 @@
 
 [English](security.en.md) | 简体中文
 
-本文档介绍 MnemoNAS 的安全配置最佳实践，适用于局域网和公网部署场景。
+本文档介绍 MnemoNAS 的安全配置建议，适用于局域网和公网部署。
 
-## 认证配置
-
-### Web UI 管理账号
+## Web UI 认证
 
 默认启用 Web UI 登录认证。首次启动且没有用户数据时，系统会创建一个管理员账号，并把初始密码写入 `auth.users_file` 同目录的 `initial-password.txt`。默认路径为：
 
@@ -35,7 +33,7 @@ Docker 默认路径：
 cat ~/.mnemonas/.mnemonas/initial-password.txt
 ```
 
-### WebDAV 认证
+## WebDAV 认证
 
 编辑 `~/.mnemonas/config.toml`：
 
@@ -64,7 +62,8 @@ password = ""  # 留空则首次启动时自动生成
 - 密码会保存到 `<storage.root>/secrets.json`，启动日志只提示文件路径，不输出明文密码
 - 后续启动会自动使用保存的密码
 - `mnemonas-doctor` 会提示 `config.toml` 是否为符号链接、路径组件包含符号链接、非普通文件或权限过宽；长期部署的配置文件应保持为私有普通文件
-- `mnemonas-doctor` 会提示启用认证时 `users.json` 是否缺失，并提示 `users.json`、`secrets.json` 或相关目录是否为符号链接、路径组件包含符号链接、非普通文件或权限过宽。Web UI 安全自检还会把当前运行时配置文件路径、自动 WebDAV 凭据路径、用户文件路径或初始密码路径经过符号链接组件标记为 `block`，并提示配置文件和自动 WebDAV 凭据文件权限过宽。长期部署应保持这些文件为私有普通文件
+- `mnemonas-doctor` 会提示启用认证时 `users.json` 是否缺失，并提示 `users.json`、`secrets.json` 或相关目录是否为符号链接、路径组件包含符号链接、非普通文件或权限过宽
+- Web UI 安全自检会把当前运行时配置文件路径、自动 WebDAV 凭据路径、用户文件路径或初始密码路径经过符号链接组件标记为 `block`，并提示配置文件和自动 WebDAV 凭据文件权限过宽。长期部署应保持这些文件为私有普通文件
 - `mnemonas-doctor` 会解析启用认证时的 `users.json`，确认至少存在一个启用中的管理员；如果没有可用管理员，下一次启动会创建恢复管理员，诊断会提示该恢复状态
 - `mnemonas-doctor` 会报告 `auth.enabled=false`、`webdav.auth_type="none"` 和 `security.allow_unsafe_no_auth=true` 等无认证姿态；这类配置只适合受控网络、VPN、防火墙或外层访问控制已经明确限制访问范围的部署
 
@@ -81,7 +80,7 @@ password = ""  # 留空使用自动生成密码；自定义时使用密码管理
 - 包含大小写字母、数字、特殊符号
 - 使用密码管理器生成
 
-### 禁用认证（仅限本地开发）
+## 仅限本地开发时禁用认证
 
 ```toml
 [auth]
@@ -91,16 +90,14 @@ enabled = false
 auth_type = "none"
 
 [server]
-host = "127.0.0.1"  # 仅本地访问
+host = "127.0.0.1"
 ```
 
-⚠️ **警告**：`auth.enabled = false` 会关闭 Web UI/API 登录；`webdav.auth_type = "none"` 会关闭 WebDAV 认证。禁用任一认证时必须将 `host` 设为 `127.0.0.1`。如果非 loopback 监听确实由外层防火墙、容器端口绑定或反向代理限制访问范围，必须显式设置 `security.allow_unsafe_no_auth = true` 才能通过配置校验。
+`auth.enabled = false` 会关闭 Web UI/API 登录；`webdav.auth_type = "none"` 会关闭 WebDAV 认证。禁用任一认证时必须将 `host` 设为 `127.0.0.1`。如果非 loopback 监听确实由外层防火墙、容器端口绑定或反向代理限制访问范围，必须显式设置 `security.allow_unsafe_no_auth = true` 才能通过配置校验。
 
----
+## 网络监听
 
-## 网络监听配置
-
-### 场景一：仅本地访问
+### 仅本地
 
 ```toml
 [server]
@@ -110,35 +107,30 @@ port = 8080
 
 适用于：开发测试、单机使用
 
-### 场景二：局域网访问
+### 局域网访问
 
 ```toml
 [server]
-host = "0.0.0.0"    # 监听所有接口
+host = "0.0.0.0"
 port = 8080
 
 [webdav]
-auth_type = "users"  # 必须启用认证
+auth_type = "users"
 ```
 
 **防火墙配置**：
 
 ```bash
-# Ubuntu/Debian
 sudo ufw allow from 192.168.0.0/24 to any port 8080
 sudo ufw deny 9090/tcp comment "MnemoNAS dataplane gRPC"
 sudo ufw deny 9091/tcp comment "MnemoNAS dataplane HTTP"
-
-# CentOS/RHEL
-sudo firewall-cmd --add-rich-rule='rule family="ipv4" source address="192.168.0.0/24" port port="8080" protocol="tcp" accept' --permanent
-sudo firewall-cmd --reload
 ```
 
-如果修改过 Web 直连端口或 dataplane 端口，请把示例中的 `8080/9090/9091` 替换为实际端口，并保持 dataplane 端口不对公网或不可信局域网开放。
+如果修改过 Web 直连端口或 dataplane 端口，应将示例中的 `8080/9090/9091` 替换为实际端口，并保持 dataplane 端口不对公网或不可信局域网开放。
 
-### 场景三：公网访问（不推荐直接暴露）
+### 公网访问
 
-**强烈建议**使用反向代理 + HTTPS，而不是直接暴露 MnemoNAS。
+不要把 MnemoNAS 直接暴露到公网。应通过 Caddy、Nginx、Traefik、Cloudflare Tunnel 或其他受信反向代理提供 HTTPS 入口。
 
 推荐操作路径：
 
@@ -149,13 +141,11 @@ sudo firewall-cmd --reload
 
 Web UI 向导只负责 MnemoNAS 应用配置和操作提示；证书签发、防火墙、云安全组和反向代理安装仍应在服务器或云控制台完成。安全自检只能检查 MnemoNAS 进程能观察到的运行态和当前请求语义，不能替代云厂商安全组、真实公网端口和证书链检查。
 
----
-
-## HTTPS 配置
+## HTTPS
 
 MnemoNAS 支持内置 TLS 配置，但公网或长期部署更推荐使用 Caddy/Nginx/Traefik 等反向代理统一处理 HTTPS、证书续期和上传限制。
 
-### 方案一：Nginx + Let's Encrypt
+### Nginx + Let's Encrypt
 
 ```nginx
 server {
@@ -173,7 +163,6 @@ server {
     ssl_protocols TLSv1.2 TLSv1.3;
     ssl_ciphers HIGH:!aNULL:!MD5;
 
-    # WebDAV 需要大上传支持
     client_max_body_size 0;
 
     location / {
@@ -183,7 +172,6 @@ server {
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
 
-        # WebDAV 特殊头
         proxy_pass_request_headers on;
         proxy_set_header Destination $http_destination;
     }
@@ -196,7 +184,7 @@ server {
 sudo certbot --nginx -d nas.example.com
 ```
 
-### 方案二：Caddy（自动 HTTPS）
+### Caddy
 
 ```caddyfile
 nas.example.com {
@@ -206,21 +194,21 @@ nas.example.com {
 
 Caddy 自动获取和续期 Let's Encrypt 证书。
 
-### 方案三：Cloudflare Tunnel（零公网 IP）
+### Cloudflare Tunnel
 
 适合没有公网 IP、但需要通过隧道访问的部署：
 
 ```bash
-# 安装 cloudflared
 curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o /tmp/cloudflared
 sudo install -m 0755 /tmp/cloudflared /usr/local/bin/cloudflared
 
-# 登录并创建隧道
 cloudflared tunnel login
 cloudflared tunnel create mnemonas
+```
 
-# 配置隧道
-cat > ~/.cloudflared/config.yml << EOF
+`~/.cloudflared/config.yml`：
+
+```yaml
 tunnel: <tunnel-id>
 credentials-file: ~/.cloudflared/<tunnel-id>.json
 
@@ -228,17 +216,15 @@ ingress:
   - hostname: nas.example.com
     service: http://localhost:8080
   - service: http_status:404
-EOF
+```
 
-# 运行隧道
+运行：
+
+```bash
 cloudflared tunnel run mnemonas
 ```
 
----
-
-## 安全检查清单
-
-### 部署前检查
+## 部署检查清单
 
 - [ ] 已通过服务器端 `initial-password.txt` 完成首次 Web UI 登录，并已修改管理员密码
 - [ ] WebDAV 使用 `auth_type = "users"`，或已记录全局 Basic Auth 凭据并设置自定义强密码或自动生成密码，未保留示例密码
@@ -246,53 +232,49 @@ cloudflared tunnel run mnemonas
 - [ ] 公网部署时 `server.host = "127.0.0.1"`，只通过 HTTPS 反向代理访问
 - [ ] 管理员首页的首次部署检查没有认证关闭或 WebDAV 匿名访问提示；如存在提示，应先处理对应配置或确认外层访问控制
 - [ ] dataplane gRPC/HTTP 端口保持在 `127.0.0.1` 或受信私有网络内，没有直接暴露到公网
-- [ ] Web UI “安全自检”没有 `block` 项；公网部署前应处理所有 `warning`，尤其是 `allow_unsafe_no_auth`、会话有效期、登录限速、浏览器会话 cookie 边界、公开分享 cookie/cache 边界、配置文件权限、自动 WebDAV 凭据文件权限、用户文件权限、反向代理 header、dataplane 端口、本地备份目标、分享默认策略和备用管理员提醒
-- [ ] systemd 部署已运行 `sudo mnemonas-doctor --public-domain <domain>`，并确认 HTTP 会跳转到同一域名的 HTTPS、HTTPS 证书 hostname 匹配、30 天内不过期，续期路径已验证，配置文件不是符号链接且路径组件不包含符号链接，管理员账号冗余可用，会话有效期符合公网建议，用户文件及其目录不是符号链接、路径组件不包含符号链接且权限为私有，自动 WebDAV 凭据文件不是符号链接、路径组件不包含符号链接且权限私有，`initial-password.txt` 路径不存在，且没有保留符号链接、符号链接路径组件或非普通文件，公开分享默认策略和公开分享 JSON 响应边界已处理，匿名 WebDAV `PROPFIND` 被拒绝，且没有 Web 后端直连、dataplane 端口暴露或 UFW 放行警告
+- [ ] Web UI “安全自检”没有 `block` 项；公网部署前应处理所有 `warning`
+- [ ] 安全自检已覆盖 `allow_unsafe_no_auth`、会话有效期、登录限速、浏览器会话 cookie 边界、公开分享 cookie/cache 边界、配置文件权限、自动 WebDAV 凭据文件权限、用户文件权限、反向代理 header、dataplane 端口、本地备份目标、分享基础 URL、分享默认策略和备用管理员提醒
+- [ ] systemd 部署已运行 `sudo mnemonas-doctor --public-domain <domain>`，并确认 HTTP 会跳转到同一域名的 HTTPS、HTTPS 证书 hostname 匹配、30 天内不过期，续期路径已验证，配置文件不是符号链接、路径组件不包含符号链接且 TOML 语法有效
+- [ ] `mnemonas-doctor --public-domain` 已确认管理员账号冗余可用、会话有效期符合公网建议、用户文件及其目录不是符号链接、路径组件不包含符号链接且权限为私有，自动 WebDAV 凭据文件不是符号链接、路径组件不包含符号链接且权限私有
+- [ ] `mnemonas-doctor --public-domain` 已确认 `initial-password.txt` 路径不存在，且没有保留符号链接、符号链接路径组件或非普通文件
+- [ ] 公开分享基础 URL、公开分享默认策略和公开分享 JSON 响应边界已处理（私有缓存、`Vary: Cookie`、无探测 cookie），匿名 WebDAV `PROPFIND` 被拒绝，且没有 Web 后端直连、dataplane 端口暴露或 UFW 放行警告
 - [ ] 已按 [公网云防火墙复核清单](cloud-firewall-checklist.md) 确认云安全组或防火墙公网入口只开放 `80/443`；管理端口、Web 后端端口和 dataplane 端口不对公网开放
 - [ ] 生产环境使用 HTTPS
 
-### 运行时检查
+运行时检查：
 
 ```bash
-# MnemoNAS 自检
 sudo mnemonas-doctor --public-domain <domain>
-# 该命令会检查 HTTPS health、HTTP 是否跳转到同一域名的 HTTPS、证书 hostname、证书 30 天有效期、证书续期提示、公开分享 JSON 响应边界、匿名 WebDAV PROPFIND、后端直连端口和 dataplane 端口
+# 检查 HTTPS 健康状态、同域 HTTP 到 HTTPS 跳转、证书主机名、30 天证书有效期、续期提示、公开分享 JSON 响应边界、匿名 WebDAV PROPFIND、直连后端暴露和 dataplane 暴露。
 
-# 检查监听端口
 ss -tlnp | grep 8080
 ss -tlnp | grep -E '9090|9091'
 
-# 公网 HTTPS 应可用
 curl -I https://<domain>/health
 
-# 公网直连后端端口应连接失败或超时；任何 HTTP 状态码都表示端口仍可公网访问
 curl --connect-timeout 3 http://<domain>:8080/health
-# 如果使用自定义后端端口，也要检查对应端口公网不可达且不返回 HTTP 状态码
+# 预期：连接失败或超时，且没有 HTTP 状态响应
+# 如果使用自定义后端端口，也应确认这些端口连接失败或超时，且没有 HTTP 状态响应。
 
-# 检查认证是否生效
 curl https://<domain>/dav/
-# 应该返回 401 Unauthorized
+# 预期：启用 WebDAV 认证时返回 401 Unauthorized
 ```
 
-### 定期维护
+定期维护：
 
 - [ ] 定期运行 Scrub 检查数据完整性
 - [ ] 定期备份数据目录
 - [ ] 检查日志中的异常访问
 - [ ] 更新到最新版本
 
----
-
 ## 已知安全限制
 
-### 当前版本
-
-#### LOCK/UNLOCK 是虚拟实现
+### LOCK/UNLOCK 是虚拟实现
 
 - 不提供真正的并发编辑保护
 - 多用户编辑同一文件时需协调
 
-#### 多用户权限边界
+### 多用户权限边界
 
 - 当前版本已支持多用户与角色（admin/user/guest）
 - 当前版本已支持用户组和 `storage.directory_access_rules` 目录授权；非管理员默认按账号 `home_dir` 限制访问，命中目录规则时按用户、用户组或角色授权放行
@@ -300,7 +282,7 @@ curl https://<domain>/dav/
 - 管理员可为用户设置 `quota_bytes`；非管理员通过 Web/API 上传、复制、移动、回收站恢复，以及 `webdav.auth_type = "users"` 下的 WebDAV PUT/COPY/MOVE，在写入目标位于该用户 `home_dir` 内时，会按 `home_dir` 当前用量执行服务端配额限制。共享目录容量应通过目录配额限制
 - WebDAV `users` 模式携带应用层用户身份并执行角色、用户组、`home_dir` 和目录授权边界；`basic` 模式是全局服务凭据兼容模式，不携带应用层用户身份
 
-#### 速率限制粒度
+### 速率限制
 
 - 内置并发请求限制（默认 100 并发）
 - 未提供按 IP/用户的细粒度速率限制
@@ -316,14 +298,14 @@ location /api/ {
 }
 ```
 
-#### 浏览器预览鉴权参数
+### 预览和下载鉴权
 
 - 文件下载、版本预览、音视频预览、缩略图与外部打开使用短期 `HttpOnly`、`SameSite=Strict` download-session cookie，不再通过 URL 查询参数传递长期访问令牌
 - 该 cookie 由已认证会话在登录、初始化或刷新令牌后同步到 `/api/v1` 路径，并覆盖下载与缩略图请求
-- 内部文件预览与缩略图链路不再依赖 `auth` 查询参数
+- 内部文件预览与缩略图请求路径不再依赖 `auth` 查询参数
 - `Secure` 标记只会在实际 HTTPS，或显式启用 `trusted_proxy_hops > 0` 且请求直接来自 loopback / `trusted_proxy_cidrs` 中的代理地址并携带 `X-Forwarded-Proto=https` 时启用，避免公网请求伪造 HTTPS 语义
 
-#### Web UI 会话令牌
+### Web UI 会话令牌
 
 - Web UI 主会话使用 `HttpOnly`、`SameSite=Lax` cookie 保存访问令牌和刷新令牌，不再把 bearer token 写入 `localStorage`
 - 公网部署建议将 `auth.access_token_ttl` 保持在 `1h` 以内，将 `auth.refresh_token_ttl` 保持在 `720h`（30 天）以内；安全自检会提示超出建议值的配置
@@ -333,10 +315,11 @@ location /api/ {
 - 服务端已设置基础安全响应头、CSP 与 `Permissions-Policy`；文件下载、版本预览、缩略图、WebDAV 文件与 WebDAV 目录列表响应额外带 `X-Content-Type-Options: nosniff` 和 sandbox CSP，降低同源打开用户文件时的脚本执行面。公网部署仍必须使用受信任的静态资源、HTTPS 反向代理和较新的浏览器，不要在同一域名下注入第三方脚本
 - 共用电脑上使用后应主动退出登录；修改密码、退出登录、删除用户、禁用用户或管理员手动让用户现有登录失效时，会撤销或清理对应会话
 
-#### 公开分享密码验证
+### 公开分享密码验证
 
 - 受密码保护的公开分享在浏览器完成一次密码验证后，会下发 `HttpOnly`、`SameSite=Strict` cookie；cookie 只作用于对应的 `/s/<id>` 与 `/api/v1/public/shares/<id>` 路径
 - 家庭公网分享建议让新分享默认 7 天过期，并设置明确的默认访问次数；安全自检会提示默认不过期、超过 `720h`（30 天）或默认访问次数不限制的配置。
+- 启用分享功能时，`share.base_url` 应使用 HTTPS 默认端口，不能包含 userinfo、查询参数、片段、反斜杠、重复路径斜杠或 `.`/`..` 路径段，且主机名必须有效；该值应是站点 origin 或应用基础路径，不应包含 `/s` 分享路由。安全自检和 `mnemonas-doctor --public-domain` 会报告不符合公网部署要求的基础 URL。
 - 文件夹浏览与文件下载依赖该 cookie，不再通过 URL 查询参数传递分享密码
 - 公开分享信息、密码验证响应与文件夹列表响应会返回 `Cache-Control: private, no-cache`、`Vary: Cookie`、`X-Content-Type-Options: nosniff` 和 `Referrer-Policy: no-referrer`，避免浏览器或中间缓存复用依赖 cookie 的分享元数据
 - 安全自检会优先阻断公开分享 cookie、失败限速或缓存边界异常；只有这些边界正常但当前请求未被识别为 HTTPS 时，才会降级为 `Secure` cookie 标记告警
@@ -345,7 +328,7 @@ location /api/ {
 - 客户端地址默认不信任转发头，始终使用直连来源；只有显式设置 `server.trusted_proxy_hops > 0` 且请求直接来自 loopback 或 `server.trusted_proxy_cidrs` 中的代理地址时，才按 `X-Forwarded-For` 从右侧回溯客户端地址。多跳代理部署需要设置为代理总层数
 - `Secure` cookie 标记同样只在实际 HTTPS 或受信代理转发的 HTTPS 请求上启用
 
-### 安全能力状态
+## 安全能力状态
 
 | 状态 | 安全特性 |
 | ---- | -------- |
@@ -353,10 +336,9 @@ location /api/ {
 | 建议通过反向代理补充 | HTTPS 证书自动续期、按 IP/用户限速、公网访问控制 |
 | 计划中 | OAuth/OIDC 集成、更细粒度的应用层访问策略 |
 
----
-
 ## 更多资源
 
-- [Docker 部署指南](docker-deployment.md) - 包含反向代理配置示例
-- [FAQ](faq.md) - 常见安全问题
-- [配置参考](../mnemonas.example.toml)
+- [反向代理配置](reverse-proxy-setup.md)
+- [Docker 部署](docker-deployment.md)
+- [FAQ](faq.md)
+- [配置参考](configuration.md)

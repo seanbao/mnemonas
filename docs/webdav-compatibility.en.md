@@ -10,9 +10,30 @@ REST API resource copying is available at `/api/v1/files-copy`, but the WebDAV `
 
 Some write requests may return a successful status after the visible mutation is committed while a later persistence or cleanup step fails. In that case, MnemoNAS sends an HTTP `Warning` header rather than rewriting the committed mutation as a full failure. Covered warning values include `199 MnemoNAS "workspace mutation persistence incomplete"`, `199 MnemoNAS "delete cleanup incomplete"`, and `199 MnemoNAS "trash delete cleanup incomplete"`.
 
-Same-origin URI handling: `Destination` headers on `COPY` / `MOVE` and tagged URIs in lock-related `If` headers must point to the current WebDAV host. Default ports (HTTP 80 and HTTPS 443) may be omitted or written explicitly. Scheme-relative URIs such as `//host/dav/path` are accepted only when the host matches and both sides omit the port, or when both sides use the same explicit port. A single FQDN trailing dot on the host name is treated as the same host, while repeated trailing dots are rejected. URI paths are decoded once; `.` and `..` path segments are rejected, and backslashes are normalized as path separators before prefix and permission-boundary checks.
+Same-origin URI handling:
 
-Authentication: `auth_type = "users"` accepts MnemoNAS user credentials, maps regular users' mount root to their `home_dir`, lists top-level navigation entries for granted shared directories at the mount root, applies matching directory access rules for shared paths, makes guest accounts read-only, and enforces user quotas for PUT/COPY/MOVE writes into `home_dir`. Ancestor entries synthesized for nested grants are read-only navigation; writes still require a matching write grant. Shared-path capacity limits are handled by directory quotas. `auth_type = "basic"` remains the global service-credential compatibility mode.
+- `Destination` headers on `COPY` / `MOVE` and tagged URIs in lock-related `If` headers must point to the current WebDAV host.
+- Absolute-path references with the WebDAV prefix, such as `/dav/path`, are also accepted.
+- Bare relative references are rejected. Even references that look WebDAV-prefixed, such as `dav/path`, must be written as `/dav/path` or as a same-origin absolute URI.
+- Default ports (HTTP 80 and HTTPS 443) may be omitted or written explicitly.
+- Scheme-relative URIs such as `//host/dav/path` are accepted only when the host matches and both sides omit the port, or when both sides use the same explicit port.
+- A single FQDN trailing dot on the host name is treated as the same host, while repeated trailing dots are rejected.
+- URI paths are decoded once; control characters and `.` or `..` path segments are rejected, and backslashes are normalized as path separators before prefix and permission-boundary checks.
+
+Authentication:
+
+- `auth_type = "users"` accepts MnemoNAS user credentials.
+- Regular users' mount root maps to their `home_dir`.
+- Granted shared directories appear as top-level navigation entries at the mount root.
+- Shared paths apply the matching directory access rules. Guest accounts are read-only.
+- PUT/COPY/MOVE writes into `home_dir` enforce user quotas; shared-path capacity limits are handled by directory quotas.
+- Ancestor entries synthesized for nested grants are read-only navigation. Writes still require a matching write grant.
+- `auth_type = "basic"` remains the global service-credential compatibility mode.
+
+Response security headers:
+
+- File responses, directory HTML listings, and `PROPFIND` / `PROPPATCH` / `LOCK` XML responses set `X-Content-Type-Options: nosniff`.
+- Responses that include user file names or paths also set a sandboxed `Content-Security-Policy` to limit script, object, and frame capabilities when a WebDAV URL is opened directly in a browser. Standard WebDAV clients generally ignore these browser security headers.
 
 ## Protocol Status
 
@@ -20,7 +41,7 @@ Authentication: `auth_type = "users"` accepts MnemoNAS user credentials, maps re
 
 | Method | Status | Notes |
 | --- | --- | --- |
-| `OPTIONS` | Supported | Returns `DAV: 1, 2`, `MS-Author-Via: DAV`, and the `Allow` method list |
+| `OPTIONS` | Supported | Returns `DAV: 1, 2`, `MS-Author-Via: DAV`, and the `Allow` method list; read-only mounts and read-only users list only read methods |
 | `PROPFIND` | Supported | Supports `Depth: 0`, `1`, and `infinity` |
 | `GET` | Supported | Supports Range, ETag, and conditional requests |
 | `HEAD` | Supported | Returns file metadata |
@@ -33,9 +54,9 @@ Authentication: `auth_type = "users"` accepts MnemoNAS user credentials, maps re
 | `LOCK` | Simplified | Returns a virtual lock token; supports `Depth: 0` and `Depth: infinity`; one-hour expiry |
 | `UNLOCK` | Simplified | Requires matching `Lock-Token`; expired locks are cleaned automatically |
 
-### Not Implemented
+### Unsupported Methods
 
-Unsupported methods return `405 Method Not Allowed` with an `Allow` response header that lists the currently supported methods.
+Unsupported methods return `405 Method Not Allowed` with an `Allow` response header that lists the methods available to the current scope. Read-only mounts and read-only users list only `OPTIONS`, `GET`, `HEAD`, and `PROPFIND`.
 
 | Method | Status | Notes |
 | --- | --- | --- |
@@ -50,7 +71,14 @@ Status meanings:
 - Expected: should work based on standard WebDAV behavior but still needs real-client confirmation.
 - Needs configuration: requires operating-system settings or has limited validation.
 
-Current automation covers `OPTIONS`, `MKCOL`, `PUT`, `PROPFIND`, `COPY`, `MOVE`, conditional requests, Range/ETag, and LOCK/UNLOCK behavior.
+Current automation covers:
+
+- `OPTIONS`, `MKCOL`, `PUT`, `PROPFIND`, `COPY`, and `MOVE`;
+- conditional requests, Range/ETag, and LOCK/UNLOCK behavior;
+- same-origin `Destination` parsing and lock `If` URI parsing;
+- With `RUN_RCLONE_WEBDAV=1`, the low-level E2E runner also executes a WebDAV client smoke for upload, download, move/rename, and list operations when `rclone` is installed.
+
+The matrix below tracks the remaining real-client validation work.
 
 ### Linux
 
@@ -59,7 +87,7 @@ Current automation covers `OPTIONS`, `MKCOL`, `PUT`, `PROPFIND`, `COPY`, `MOVE`,
 | Nautilus / GNOME Files | 45+ | Expected | Uses GVfs DAV support |
 | Dolphin | 23+ | Expected | Built-in WebDAV support |
 | davfs2 | 1.6+ | Expected | Mounts as local directory |
-| rclone | 1.60+ | Expected | Recommended for CLI regression testing |
+| rclone | 1.60+ | Verified | Optional `RUN_RCLONE_WEBDAV=1` E2E coverage for upload, download, move/rename, and list operations |
 
 ### macOS
 
@@ -145,28 +173,30 @@ Office-style applications may still report conflicts if multiple clients edit th
 - ETag support helps clients avoid unnecessary downloads.
 - Deduplicated content can reuse existing CAS objects, but clients still need to send the upload request.
 
-## rclone Example
+## Configuration Examples
+
+### rclone Example
 
 ```ini
 [mnemonas]
 type = webdav
 url = http://localhost:8080/dav
 vendor = other
-user = admin
-pass = <obscured-webdav-password>
+user = <mnemonas-or-webdav-username>
+pass = <obscured-mnemonas-or-webdav-password>
 ```
 
 Generate `pass` with:
 
 ```bash
-rclone obscure <webdav-password>
+rclone obscure <mnemonas-or-webdav-password>
 ```
 
-## davfs2 Example
+### davfs2 Example
 
 ```text
 # /etc/davfs2/secrets
-http://localhost:8080/dav <webdav-username> <webdav-password>
+http://localhost:8080/dav <mnemonas-or-webdav-username> <mnemonas-or-webdav-password>
 ```
 
 ```bash
@@ -175,7 +205,7 @@ sudo mount -t davfs http://localhost:8080/dav /mnt/nas
 
 ## Reporting Compatibility Problems
 
-When reporting a client issue, include:
+Client compatibility reports should include:
 
 - Client name and version.
 - Operating system and version.

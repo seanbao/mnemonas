@@ -2,9 +2,10 @@
 
 [English](linux-systemd-deployment.en.md) | 简体中文
 
-本文面向需要长期运行的 Linux 服务器部署。目标是：安装步骤少、开机自启、日志可查、数据目录固定、出问题时能快速诊断。
+本文面向需要长期运行的 Linux 服务器部署。
+目标是安装步骤少、开机自启、日志可查、数据目录固定，并在出问题时能快速诊断。
 
-## 适用场景
+## 适用范围
 
 - Ubuntu 22.04/24.04 LTS、Debian 或相近的 systemd Linux 发行版
 - 单机文件服务、文档/媒体归档、局域网或反向代理后的 WebDAV
@@ -27,7 +28,13 @@ MnemoNAS 不自己实现 RAID。多盘可靠性建议交给 ZFS mirror、Btrfs R
 
 推荐的高可靠性方案是两块 SSD 做 ZFS mirror，另配独立磁盘或远端存储做定期备份：
 
-以下命令会清空被选中的磁盘。先用 `ls -l /dev/disk/by-id/` 核对设备型号和序列号，确认不是系统盘后再执行。
+以下命令会清空被选中的磁盘。先核对设备型号和序列号：
+
+```bash
+ls -l /dev/disk/by-id/
+```
+
+确认目标不是系统盘后再创建存储池：
 
 ```bash
 sudo apt update
@@ -47,7 +54,8 @@ sudo mkdir -p /srv/mnemonas
 
 如果暂时只有单盘，也可以先使用 ext4/XFS/Btrfs，但要明确它不能抵御硬盘损坏。至少准备一份独立备份。
 
-如果同一台服务器还会运行 Docker、下载器、转码、模型缓存或其他服务，不要把这些数据放进 `/srv/mnemonas`。建议单独准备 `/srv/fast-scratch` 一类可丢弃工作区，必要时把 Docker `data-root` 挪过去，避免系统根分区或 MnemoNAS 生产数据目录被缓存挤满。
+如果同一台服务器还会运行 Docker、下载器、转码、模型缓存或其他服务，不要把这些数据放进 `/srv/mnemonas`。
+建议单独准备 `/srv/fast-scratch` 一类可丢弃工作区，必要时把 Docker `data-root` 挪过去，避免系统根分区或 MnemoNAS 生产数据目录被缓存挤满。
 
 ## 安装 MnemoNAS
 
@@ -74,7 +82,16 @@ sudo ./scripts/install-systemd.sh
 sudo env STORAGE_ROOT=/srv/mnemonas SERVER_PORT=8080 ./scripts/install-systemd.sh
 ```
 
-systemd 安装与卸载脚本要求 `BIN_DIR`、`SHARE_DIR`、`CONFIG_DIR`、`CONFIG_PATH`、`SYSTEMD_DIR`、`STORAGE_ROOT` 和 Web UI 目录使用绝对路径，且不能包含控制字符，路径组件不能包含符号链接。`CONFIG_PATH` 必须位于 `CONFIG_DIR` 下；除 Web UI 目录可位于 `SHARE_DIR` 内之外，二进制、共享资源、配置、systemd unit 和数据目录不能互相重叠。安装脚本还会在创建或修改权限前检查 `STORAGE_ROOT/files` 与 `STORAGE_ROOT/.mnemonas/objects`，这些托管子目录不能通过符号链接指向其他位置。需要把数据放到单独磁盘时，先把真实文件系统挂载到目标目录，再运行安装脚本；不要把 `STORAGE_ROOT` 指向符号链接。
+systemd 安装与卸载脚本要求 `BIN_DIR`、`SHARE_DIR`、`CONFIG_DIR`、`CONFIG_PATH`、`SYSTEMD_DIR`、`STORAGE_ROOT` 和 Web UI 目录使用绝对路径。
+这些路径不能包含控制字符，路径组件不能包含符号链接。
+`CONFIG_PATH` 必须位于 `CONFIG_DIR` 下。
+
+除 Web UI 目录可位于 `SHARE_DIR` 内之外，二进制、共享资源、配置、systemd unit 和数据目录不能互相重叠。
+安装脚本还会在创建或修改权限前检查 `STORAGE_ROOT/files` 与 `STORAGE_ROOT/.mnemonas/objects`。
+这些托管子目录不能通过符号链接指向其他位置。
+
+需要把数据放到单独磁盘时，先把真实文件系统挂载到目标目录，再运行安装脚本。
+不要把 `STORAGE_ROOT` 指向符号链接。
 
 安装脚本默认只修正 `/srv/mnemonas`、`files` 和 `.mnemonas` 这些顶层托管目录的所有者，不会在升级时递归改动已有数据。若因手动复制数据导致服务用户无权访问，可显式运行：
 
@@ -100,6 +117,8 @@ sudo mnemonas-doctor
 
 源码构建需要 Go、Rust、Node.js 和 protobuf 编译器；版本要求见 [开发指南](development.md)。
 
+## 首次登录
+
 安装后运行诊断：
 
 ```bash
@@ -118,9 +137,9 @@ sudo cat /srv/mnemonas/.mnemonas/initial-password.txt
 http://<server-ip>:8080
 ```
 
-公网域名访问不要直接开放 `8080`，请按 [公网服务器快速上线](public-server-quickstart.md) 配置 HTTPS 反向代理。
+公网域名访问不要直接开放 `8080`，应按 [公网服务器快速上线](public-server-quickstart.md) 配置 HTTPS 反向代理。
 
-登录后请立即修改管理员密码；初始密码文件如果仍存在，`mnemonas-doctor` 会提示。
+登录后应立即修改管理员密码；初始密码文件如果仍存在，`mnemonas-doctor` 会提示。
 
 ## 日常管理
 
@@ -136,7 +155,21 @@ sudo systemctl restart mnemonas-dataplane
 sudo mnemonas-doctor
 ```
 
-`mnemonas-doctor` 会检查服务状态、Web UI、配置文件、运行态敏感文件、目录权限、存储挂载类型、剩余磁盘空间和备份目录位置。`config.toml` 不是普通文件时会失败；如果配置文件是符号链接、路径组件包含符号链接或权限过宽，会提示风险。启用认证时，如果 `users.json` 缺失，或 `users.json`、`secrets.json` 及相关目录是符号链接、路径组件包含符号链接、非普通文件或权限过宽，诊断会提示风险。`BACKUP_ROOT` 存在时不能等于或位于 `storage.root` 内部；如果是符号链接、不是目录、与 `storage.root` 使用同一个 filesystem source，或服务用户/当前诊断环境无法写入，诊断会提示风险。备份目标应指向独立磁盘、独立数据集或远端挂载路径。Web UI 的“设备状态”和“空间与存储”页也会显示底层文件系统类型、挂载点、设备/数据集来源、脱敏挂载选项、ZFS/Btrfs 原生校验提示，以及空间提醒运行态；管理员可在“设备状态”页下载诊断包，也可在“空间与存储”页复制存储承载摘要用于排障记录。默认低于 10 GiB 可用空间时给出警告，可用 `MIN_FREE_BYTES=<bytes> sudo mnemonas-doctor` 调整阈值。
+`mnemonas-doctor` 会检查服务状态、Web UI、配置文件、运行态敏感文件、目录权限、存储挂载类型、剩余磁盘空间和备份目录位置。
+`config.toml` 不是普通文件时会失败。
+`config.toml` 必须能按 TOML 语法解析；即使 `nasd --check-config` 被旧版本或包装脚本误判通过，doctor 也会独立报告语法错误。
+如果配置文件是符号链接、路径组件包含符号链接或权限过宽，会提示风险。
+
+启用认证时，如果 `users.json` 缺失，诊断会提示风险。
+如果 `users.json`、`secrets.json` 及相关目录是符号链接、路径组件包含符号链接、非普通文件或权限过宽，诊断也会提示风险。
+
+`BACKUP_ROOT` 存在时不能等于或位于 `storage.root` 内部。
+如果它是符号链接、不是目录、与 `storage.root` 使用同一个 filesystem source，或服务用户/当前诊断环境无法写入，诊断会提示风险。
+备份目标应指向独立磁盘、独立数据集或远端挂载路径。
+
+Web UI 的“设备状态”和“空间与存储”页也会显示底层文件系统类型、挂载点、设备/数据集来源、脱敏挂载选项、ZFS/Btrfs 原生校验提示，以及空间提醒运行态。
+管理员可在“设备状态”页下载诊断包，也可在“空间与存储”页复制存储承载摘要用于排障记录。
+默认低于 10 GiB 可用空间时给出警告，可用 `MIN_FREE_BYTES=<bytes> sudo mnemonas-doctor` 调整阈值。
 
 如果系统安装了 UFW，`mnemonas-doctor` 也会检查防火墙是否启用，并提示不要放行 dataplane 的 `9090/9091` 端口。
 
@@ -150,7 +183,7 @@ sudo systemctl restart mnemonas
 
 `--check-config` 会同时输出安全警告。配置语法合法但风险较高时，例如关闭登录认证后仍监听非 loopback 地址、WebDAV 选择无认证、或 dataplane gRPC 监听到外部网络，命令仍会通过但会打印 `warning:`。生产或长期部署不要忽略这些警告。
 
-`[dataplane.cdc]` 和 `dataplane.grpc_address` 会在 `mnemonas-dataplane` 每次启动时从配置文件读取；修改这些项后需要重启 `mnemonas-dataplane`，再重启 `mnemonas`。
+`[dataplane.cdc]` 和 `dataplane.grpc_address` 会在 `mnemonas-dataplane` 每次启动时从配置文件读取；启动 helper 在 Python TOML parser 可用时会先拒绝语法无效的 `config.toml`，避免从残缺配置中读取 dataplane 参数。修改这些项后需要重启 `mnemonas-dataplane`，再重启 `mnemonas`。
 
 ## 网络建议
 
@@ -163,9 +196,9 @@ sudo systemctl restart mnemonas
 
 如果目标是通过公网域名访问，优先按 [公网服务器快速上线](public-server-quickstart.md) 配置。该路径会把 MnemoNAS 后端收紧到 `127.0.0.1:8080`，公网只开放 Caddy/Nginx 的 `80/443`。
 
-推荐把两条链路分开规划：
+推荐把以下访问路径分开规划：
 
-| 链路 | 用途 | 建议 |
+| 访问路径 | 用途 | 建议 |
 | --- | --- | --- |
 | 局域网 / Tailscale / Headscale | 管理、SSH、授权用户访问 | 只允许可信网段访问 `8080`；SSH 仅走私有网络 |
 | HTTPS 反向代理 / FRP / 隧道 | 给外部用户打开分享链接 | 公网只开放 `80/443`，代理到 MnemoNAS 的 Web 入口 |
@@ -181,7 +214,7 @@ sudo ufw allow from 100.64.0.0/10 to any port 8080 proto tcp comment "MnemoNAS T
 sudo ufw deny 9090/tcp comment "MnemoNAS dataplane gRPC"
 sudo ufw deny 9091/tcp comment "MnemoNAS dataplane HTTP"
 
-# 如果使用公网 HTTPS 入口，再开放反向代理端口。
+# 如果使用公网 HTTPS 入口，也放行反向代理端口。
 sudo ufw allow 80/tcp
 sudo ufw allow 443/tcp
 
@@ -189,7 +222,7 @@ sudo ufw enable
 sudo ufw status numbered
 ```
 
-如果修改过 `SERVER_PORT`、`DATAPLANE_GRPC_ADDR` 或 `DATAPLANE_HTTP_ADDR`，请把示例中的端口替换为实际端口。
+如果修改过 `SERVER_PORT`、`DATAPLANE_GRPC_ADDR` 或 `DATAPLANE_HTTP_ADDR`，应将示例中的端口替换为实际端口。
 
 如果反向代理和 MnemoNAS 在同一台机器，最稳妥的做法是把 `[server].host` 改为 `127.0.0.1`，让公网只通过代理访问。需要局域网直连时，再用防火墙把 `8080` 限制到可信网段。
 
@@ -198,6 +231,14 @@ WebDAV 地址：
 ```text
 http://<server-ip>:8080/dav
 ```
+
+WebDAV 凭据取决于 `[webdav].auth_type`。
+`users` 模式使用 MnemoNAS 用户名和密码。
+默认 `basic` 模式使用独立 WebDAV 用户名和密码。
+
+安装后可在设置页 `WebDAV` 标签页查看和复制当前 WebDAV 地址、Basic 用户名和可读取的自动生成密码。
+自定义 Basic 密码不会回显，应以配置文件或密码管理器记录为准。
+自动生成的 Basic Auth 密码也可在服务器端 `<storage.root>/secrets.json` 中查看。
 
 ## 备份策略
 
@@ -272,11 +313,11 @@ sudo mnemonas-doctor
 | --- | --- |
 | Web 打不开 | `systemctl status mnemonas`、防火墙、端口是否被占用 |
 | 登录后写入失败 | `/srv/mnemonas` 和 `/etc/mnemonas` 是否归 `mnemonas` 用户所有 |
-| WebDAV 连不上 | 地址是否为 `/dav`，客户端是否使用当前账号密码 |
+| WebDAV 连不上 | 地址是否为 `/dav`，客户端是否按当前 `[webdav].auth_type` 使用对应凭据 |
 | 上传大文件失败 | 磁盘空间、反向代理上传限制、`journalctl -u mnemonas` |
 | scrub 报错 | 先停止写入，保留日志，检查底层文件系统和备份可用性 |
 
-如果需要提交 issue，请附上：
+提交 issue 时，应附上：
 
 ```bash
 sudo mnemonas-doctor

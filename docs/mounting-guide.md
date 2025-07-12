@@ -2,244 +2,249 @@
 
 [English](mounting-guide.en.md) | 简体中文
 
-MnemoNAS 通过 WebDAV 协议提供文件访问。本文档介绍如何在各平台挂载 WebDAV 共享。
+MnemoNAS 通过 WebDAV 暴露文件。Web UI 提供管理操作，WebDAV 则为桌面端、移动端和命令行客户端提供同一存储空间的访问入口。
 
 ## 连接信息
 
 | 项目 | 值 |
 | --- | --- |
-| **协议** | WebDAV (HTTP) |
-| **地址** | `http://<服务器IP>:8080/dav` |
-| **用户名** | `auth_type = "users"` 时使用 MnemoNAS 用户名；`basic` 模式按 WebDAV 配置 |
-| **密码** | `auth_type = "users"` 时使用 MnemoNAS 用户密码；`basic` 模式使用配置密码或首次启动生成的 WebDAV 密码 |
+| 协议 | 基于 HTTP 或 HTTPS 的 WebDAV |
+| 默认地址 | `http://<server-ip>:8080/dav` |
+| 默认本地地址 | `http://localhost:8080/dav` |
+| 用户名 | `auth_type = "users"` 时使用 MnemoNAS 用户名；`basic` 模式使用配置的 WebDAV 用户名 |
+| 密码 | `users` 模式使用 MnemoNAS 用户密码；`basic` 模式使用配置或生成的 WebDAV 密码 |
 
-> 推荐在设置页选择 `auth_type = "users"`，让挂载遵守 MnemoNAS 用户角色、用户组、`home_dir`、目录授权、写入 `home_dir` 的用户配额和目录配额边界。默认配置仍启用全局 Basic Auth 以兼容旧部署；该模式下 WebDAV 凭据与 Web UI 管理员账号不同，可从服务器端 `<storage.root>/secrets.json` 或管理员登录后的设置接口查看当前 WebDAV 凭据，参见 [配置说明](configuration.md)。
+日常挂载建议使用 `auth_type = "users"`。
+该模式会让 WebDAV 遵守 MnemoNAS 用户角色、用户组、`home_dir`、目录授权、写入 `home_dir` 的用户配额和目录配额边界。
+默认兼容性 `basic` 模式使用独立的全局 WebDAV 凭据。
 
----
+Basic Auth 凭据处理：
+
+- 运行中的 Web UI 会在设置页 `WebDAV` 标签页显示当前 WebDAV 地址、Basic 用户名和可读取的生成密码。
+- 自定义 Basic 密码不会回显，应以配置文件或密码管理器记录为准。
+- Basic Auth 使用自动生成密码时，`<storage.root>/secrets.json` 是服务器端兜底来源。
+
+参见 [配置说明](configuration.md)。
 
 ## macOS
 
-### Finder（原生）
+### Finder
 
-1. 打开 Finder
-2. 菜单栏 → **前往** → **连接服务器...** (⌘K)
-3. 输入地址：`http://localhost:8080/dav`
-4. 点击 **连接**
-5. 如需认证，输入用户名和密码
+1. 打开 Finder。
+2. 使用 **前往** -> **连接服务器...**，或按 `Command+K`。
+3. 输入 `http://localhost:8080/dav`。
+4. 点击 **连接**。
+5. 按所选认证模式输入凭据：`users` 模式使用 MnemoNAS 用户名和密码；`basic` 模式使用 WebDAV 用户名和密码。
 
-**断开连接**：在 Finder 侧边栏右键点击已挂载的共享 → **推出**
+断开连接时，在 Finder 侧边栏推出已挂载的共享。
 
-### Transmit（推荐）
+### Transmit
 
-[Transmit](https://panic.com/transmit/) 是 macOS 上常见的文件传输工具：
-
-1. 新建连接 → 协议选择 **WebDAV**
-2. 服务器：`localhost`
-3. 端口：`8080`
-4. 路径：`/dav`
-5. 点击连接
+1. 新建连接。
+2. 选择 **WebDAV**。
+3. 服务器：`localhost`。
+4. 端口：`8080`。
+5. 路径：`/dav`。
+6. 使用所选认证模式对应的凭据连接。
 
 ### Cyberduck
 
-1. 新建书签 → 协议选择 **WebDAV (HTTP)**
-2. 服务器：`localhost:8080`
-3. 路径：`/dav`
-
----
+1. 新建书签。
+2. 选择 **WebDAV (HTTP)** 或 **WebDAV (HTTPS)**。
+3. 服务器：`localhost:8080`。
+4. 路径：`/dav`。
+5. 输入所选认证模式对应的凭据。
 
 ## Windows
 
-### 资源管理器（原生）
+### File Explorer
 
-1. 打开 **此电脑**
-2. 点击 **映射网络驱动器**
-3. 驱动器号：选择一个字母（如 `Z:`）
-4. 文件夹：`http://localhost:8080/dav`
-5. 勾选 **使用其他凭据连接**（如需认证）
-6. 点击 **完成**
+1. 打开 **此电脑**。
+2. 点击 **映射网络驱动器**。
+3. 选择驱动器号，例如 `Z:`。
+4. 文件夹：`http://localhost:8080/dav`。
+5. 启用 **使用其他凭据连接**。
+6. 完成后输入所选认证模式对应的凭据。
 
-**注意**：Windows 原生 WebDAV 客户端对 HTTP（非 HTTPS）支持有限。如遇问题：
+Windows 内置 WebDAV 客户端对 HTTP 支持有限。非 HTTPS 测试可用管理员权限运行 PowerShell：
 
 ```powershell
-# 以管理员身份运行 PowerShell
 Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\WebClient\Parameters" -Name "BasicAuthLevel" -Value 2
 Restart-Service WebClient
 ```
 
-### WinSCP（推荐）
+常规使用建议通过反向代理部署 HTTPS。
 
-1. 下载安装 [WinSCP](https://winscp.net/)
-2. 新建站点 → 协议选择 **WebDAV**
-3. 主机名：`localhost`
-4. 端口：`8080`
-5. 目录：`/dav`
+### WinSCP
+
+1. 安装 WinSCP。
+2. 新建站点。
+3. 文件协议：**WebDAV**。
+4. 主机名：`localhost`。
+5. 端口：`8080`。
+6. 目录：`/dav`。
+7. 输入所选认证模式对应的凭据。
 
 ### Raidrive
 
-[Raidrive](https://www.raidrive.com/) 可将 WebDAV 挂载为本地驱动器：
-
-1. 添加 → NAS → WebDAV
-2. 地址：`http://localhost:8080/dav`
-3. 选择驱动器号并连接
-
----
+1. 添加新的 NAS/WebDAV 驱动器。
+2. URL：`http://localhost:8080/dav`。
+3. 选择驱动器号。
+4. 使用所选认证模式对应的凭据连接。
 
 ## Linux
 
-### GNOME Files (Nautilus)
+### GNOME Files
 
-1. 打开 Files
-2. 侧边栏点击 **其他位置**
-3. 在底部 **连接服务器** 输入：`dav://localhost:8080/dav`
-4. 点击 **连接**
+1. 打开 Files。
+2. 选择 **其他位置**。
+3. 输入 `dav://localhost:8080/dav`。
+4. 连接。
 
 ### KDE Dolphin
 
-1. 地址栏输入：`webdav://localhost:8080/dav`
-2. 按 Enter 连接
+在地址栏输入：
 
-### davfs2（命令行挂载）
+```text
+webdav://localhost:8080/dav
+```
+
+### davfs2
 
 ```bash
-# 安装 davfs2
-sudo apt install davfs2  # Debian/Ubuntu
-sudo dnf install davfs2  # Fedora
-
-# 创建挂载点
+sudo apt install davfs2
 sudo mkdir -p /mnt/nas
-
-# 挂载
 sudo mount -t davfs http://localhost:8080/dav /mnt/nas
-
-# 卸载
 sudo umount /mnt/nas
 ```
 
-**开机自动挂载**（`/etc/fstab`）：
+可选 `/etc/fstab` 条目：
 
 ```fstab
 http://localhost:8080/dav  /mnt/nas  davfs  _netdev,user,noauto  0  0
 ```
 
-**凭据配置**（`~/.davfs2/secrets`）：
+凭据文件：
 
 ```text
-http://localhost:8080/dav  username  password
+http://localhost:8080/dav  <mnemonas-or-webdav-username>  <mnemonas-or-webdav-password>
 ```
 
 ### rclone
 
 ```bash
-# 配置 rclone
 rclone config
+```
 
-# 交互式配置
-# n) New remote
-# name> mnemonas
-# Storage> webdav
-# url> http://localhost:8080/dav
-# vendor> other
-# user> admin（或当前配置的 WebDAV 用户名）
-# pass> 输入当前 WebDAV 密码
+交互式配置值：
 
-# 挂载
+```text
+n) New remote
+name> mnemonas
+Storage> webdav
+url> http://localhost:8080/dav
+vendor> other
+user> <mnemonas-or-webdav-username>
+pass> <mnemonas-or-webdav-password>
+```
+
+挂载：
+
+```bash
 rclone mount mnemonas: /mnt/nas --vfs-cache-mode full
+```
 
-# 或作为 FUSE 挂载（后台运行）
+后台挂载：
+
+```bash
 rclone mount mnemonas: /mnt/nas --daemon --vfs-cache-mode full
 ```
 
----
+## iOS 和 iPadOS
 
-## iOS
+### 文件 App
 
-### 文件 App（原生）
-
-1. 打开 **文件** App
-2. 右上角点击 **...** → **连接服务器**
-3. 输入地址：`http://192.168.x.x:8080/dav`（使用服务器局域网 IP）
-4. 点击 **连接**
+1. 打开 **文件** App。
+2. 点击菜单按钮。
+3. 选择 **连接服务器**。
+4. 输入 `http://192.168.x.x:8080/dav`。
+5. 输入所选认证模式对应的凭据。
 
 ### Documents by Readdle
 
-1. 下载 [Documents](https://apps.apple.com/app/documents-by-readdle/id364901807)
-2. 添加连接 → WebDAV
-3. 输入服务器地址和端口
-
----
+1. 添加新连接。
+2. 选择 WebDAV。
+3. 输入服务器 URL 和所选认证模式对应的凭据。
 
 ## Android
 
-### Cx 文件管理器
-
-1. 下载 [Cx 文件管理器](https://play.google.com/store/apps/details?id=com.cxinventor.file.explorer)
-2. 网络 → 远程存储 → WebDAV
-3. 输入服务器地址
-
 ### Solid Explorer
 
-1. 添加云连接 → WebDAV
-2. 输入 `http://192.168.x.x:8080/dav`
+1. 添加云连接。
+2. 选择 WebDAV。
+3. 输入 `http://192.168.x.x:8080/dav`。
+4. 输入所选认证模式对应的凭据。
 
-### Total Commander + WebDAV 插件
+### Cx 文件管理器
 
-1. 安装 WebDAV 插件
-2. 添加 WebDAV 连接
+1. 打开 **网络**。
+2. 添加远程存储。
+3. 选择 WebDAV 并输入服务器 URL。
+4. 输入所选认证模式对应的凭据。
 
----
+### Total Commander
 
-## 故障排除
+安装 WebDAV 插件，然后用所选认证模式对应的凭据添加 WebDAV 连接。
+
+## 故障排查
 
 ### 连接被拒绝
 
-1. 确认服务正在运行：`curl http://localhost:8080/health`
-2. 检查防火墙是否开放 8080 端口
-3. 如从其他设备访问，使用服务器 IP 而非 localhost
+检查：
 
-### Windows 无法连接 HTTP
+```bash
+curl http://localhost:8080/health
+```
 
-Windows 默认只允许 HTTPS 的 WebDAV。解决方案：
+从其他设备连接时，应使用服务器局域网 IP，而不是 `localhost`。同时检查防火墙和端口映射。
+
+### Windows 无法通过 HTTP 连接
+
+启用 Windows WebClient 服务的 HTTP Basic Auth，或改用 HTTPS。
 
 ```powershell
-# 管理员权限运行
 Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\WebClient\Parameters" -Name "BasicAuthLevel" -Value 2
 Restart-Service WebClient
 ```
 
 ### 大文件上传失败
 
-1. 检查 davfs2 缓存设置：编辑 `/etc/davfs2/davfs2.conf`
+davfs2 可在 `/etc/davfs2/davfs2.conf` 中提高缓存设置：
 
-   ```text
-   cache_size  1024
-   buf_size    256
-   ```
+```text
+cache_size  1024
+buf_size    256
+```
 
-2. rclone 用户尝试：
+rclone：
 
-   ```bash
-   rclone copy localfile mnemonas:/ --size-only
-   ```
+```bash
+rclone copy localfile mnemonas:/ --size-only
+```
+
+使用 HTTPS 时，还应检查反向代理上传限制。
 
 ### macOS Finder 响应慢
 
-macOS Finder 的 WebDAV 实现会频繁发送 PROPFIND 请求。解决方案：
+Finder 会频繁发送 `PROPFIND` 请求。处理较大的目录时，可改用 Transmit、Cyberduck 或 rclone。
 
-1. 使用 Transmit 或 Cyberduck 等第三方客户端
-2. MnemoNAS 已内置 PROPFIND 缓存（30 秒 TTL）
+### 锁定告警
 
-### 文件锁定问题
-
-MnemoNAS 使用虚拟锁实现（简化设计）。如遇锁定问题：
-
-1. 尝试刷新客户端
-2. 重新挂载
-3. 检查是否有其他客户端正在编辑同一文件
-
----
+MnemoNAS 实现虚拟 WebDAV 锁，主要用于客户端兼容。
+如果客户端报告锁定问题，可刷新客户端、重新挂载共享，并检查是否有其他客户端正在编辑同一文件。
 
 ## 更多资源
 
 - [WebDAV 客户端兼容性](webdav-compatibility.md)
-- [配置示例](../mnemonas.example.toml)
+- [配置参考](configuration.md)
 - [FAQ](faq.md)

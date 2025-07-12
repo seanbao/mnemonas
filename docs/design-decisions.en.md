@@ -77,7 +77,7 @@ Packfiles may be introduced later if object count or small-object overhead becom
 
 | Protocol | Decision | Rationale |
 | --- | --- | --- |
-| WebDAV | First supported mount protocol | Cross-platform and feasible to implement well enough for common clients |
+| WebDAV | First supported mount protocol | Cross-platform and practical to support well enough for common clients |
 | S3 | Future extension | Useful for tools, less natural as a mounted filesystem |
 | SMB/Samba | Preview config only | The gateway contract exists, but this build does not start an SMB runtime |
 | NFS | Not in current scope | Permission and deployment boundaries are high for a small project |
@@ -122,7 +122,7 @@ Not promised:
 
 MnemoNAS is not trying to out-feature full NAS operating systems such as TrueNAS or OpenMediaVault. The target is a smaller, more focused self-hosted storage product with a short deployment path, a readable daily-use interface, and explicit data recovery workflows.
 
-Compared with backup tools such as restic or borg, MnemoNAS is interactive file management first. Compared with object stores such as MinIO or Ceph, it is a private NAS first.
+Compared with backup tools such as restic or borg, MnemoNAS learns from their recovery model but does not try to cover every workflow. Compared with object stores such as MinIO or Ceph, it is a private NAS first.
 
 ## Related Documents
 

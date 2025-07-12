@@ -20,7 +20,13 @@ trusted_proxy_hops = 1
 base_url = "https://nas.example.com"
 ```
 
-`host` should be restricted to the local listener. `trusted_proxy_hops = 1` lets MnemoNAS trust `X-Forwarded-*` headers from same-host Traefik or cloudflared, so HTTPS detection, client addresses, login rate limiting, and download cookies are evaluated correctly. If the reverse proxy does not reach MnemoNAS from loopback, list the proxy IP address or CIDR in `[server].trusted_proxy_cidrs`. When sharing is enabled, `share.base_url` should use the public HTTPS domain.
+`host` should be restricted to the local listener. `trusted_proxy_hops = 1` lets MnemoNAS trust `X-Forwarded-*` headers from same-host Traefik or cloudflared, so HTTPS detection, client addresses, login rate limiting, and download cookies are evaluated correctly. If the reverse proxy does not reach MnemoNAS from loopback, list the proxy IP address or CIDR in `[server].trusted_proxy_cidrs`.
+
+When sharing is enabled, `share.base_url` should use the public HTTPS domain or the reverse-proxy application base path, such as `https://nas.example.com/mnemonas`. It should not include the `/s` share route; otherwise generated share links may contain a duplicated `/s/s` route.
+
+Public deployments also require `share.base_url` to use the default HTTPS port and to contain no userinfo, query string, fragment, backslash, duplicated path slash, or `.`/`..` path segments.
+
+`mnemonas-doctor --public-domain` fails HTTP URLs, non-443 ports, userinfo, query strings, fragments, backslashes, duplicated path slashes, `.`/`..` path segments, and invalid hostnames; empty values, host mismatches, or paths already ending in `/s` produce a manual-review warning.
 
 Public deployments should still run:
 
@@ -28,4 +34,6 @@ Public deployments should still run:
 sudo mnemonas-doctor --public-domain nas.example.com
 ```
 
-Cloud firewalls or security groups must expose only `80/443` publicly. MnemoNAS backend `8080`, dataplane `9090/9091`, and any custom backend or dataplane ports must not be exposed to the public internet.
+Public diagnostics depend on local listener inspection. Install `iproute2` for `ss`; when `ss` is unavailable, both `/proc/net/tcp` and `/proc/net/tcp6` must be readable so `mnemonas-doctor --public-domain` covers IPv4 and IPv6 listeners. The host running diagnostics must also have `curl`, `python3`, and `openssl` installed for public HTTP(S) entry, duration, administrator-redundancy, generated WebDAV credential, and HTTPS certificate checks.
+
+Cloud firewalls or security groups must expose only `80/443` publicly. MnemoNAS backend `8080`, dataplane `9090/9091`, and any custom backend or dataplane ports must not be exposed to the public internet. Use the [Public cloud firewall checklist](../../docs/cloud-firewall-checklist.en.md) for the review items.
