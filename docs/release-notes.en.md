@@ -1,0 +1,80 @@
+# Release Notes Draft
+
+English | [简体中文](release-notes.md)
+
+This document is the release-notes draft for the next public release. The final release notes should use the corresponding tag, CI result, Release artifacts, and deployment validation result as the source of truth.
+
+## Summary
+
+This release candidate focuses on improving MnemoNAS stability, public-access safety boundaries, deployment verifiability, and documentation maintainability as a self-hosted NAS. The current hardening branch is split into reviewable commits by risk area and has passed branch-range validation.
+
+## Major Changes
+
+- Strengthened path, archive-download, WebDAV, public-share, workspace, CAS, and backup-restore boundaries, covering symlinks, traversal, percent-encoded dot segments, control characters, and rollback error paths.
+- Expanded backend and frontend coverage for authentication, users, home directories, directory quotas, directory access rules, share policies, and secure session defaults.
+- Improved visible Web quality. Core pages, public entry points, mobile layouts, baseline accessibility, runtime errors, failed requests, and broken visible text are covered by Playwright scans.
+- Hardened systemd, Docker, reverse proxy, public-access templates, doctor, release package, and release artifact verification paths.
+- Streamlined and synchronized Chinese and English documentation, including deployment, configuration, FAQ, roadmap, security, hardening progress, and pre-release review entry points.
+
+## Release Artifacts
+
+The Release workflow is expected to produce:
+
+- Linux x86_64 / ARM64 binary archives.
+- macOS Intel / Apple Silicon manual-run archives.
+- `checksums.txt`.
+- GHCR container image tags.
+
+Archives should include a top-level directory, `nasd`, `dataplane`, Web UI static assets, systemd install/uninstall scripts, doctor, Docker Compose templates, `.env.example`, deployment templates, and Chinese/English documentation. The packaged `.env.example` should preset the GHCR image for the same release tag.
+
+## Pre-Release Validation
+
+The current hardening branch has passed:
+
+- `GOTOOLCHAIN=local ./scripts/verify-changed.sh`
+- `GOTOOLCHAIN=local timeout 45m ./scripts/verify-changed.sh --base master`
+- `make scripts-check`
+- `make docs-check`
+- `./scripts/test-release-package.sh`
+- `./scripts/test-release-artifacts.sh`
+- Playwright E2E: `369 passed`
+- Frontend unit tests: `3054 passed`
+- Docker build and `scripts/docker-smoke.sh`
+
+If code, scripts, configuration, documentation, or workflow files change again before release, rerun the matching validation.
+
+## Post-Publish Verification
+
+After the release tag is published, download the GitHub Release artifacts and run:
+
+```bash
+mkdir -p dist/release-check
+gh release download v0.1.0 \
+  --repo seanbao/mnemonas \
+  --dir dist/release-check
+
+./scripts/verify-release-artifacts.sh \
+  --version v0.1.0 \
+  --repository seanbao/mnemonas \
+  --require-targets \
+  --check-image \
+  dist/release-check
+```
+
+Then complete at least one archive-install smoke test, one Docker release-image startup smoke test, public documentation link checks, and deployment-environment review for DNS, firewall, TLS, and cloud security groups.
+
+## Known Limitations
+
+- The mountable SMB/Samba runtime is still not enabled. The current build only keeps configuration, diagnostics, and runtime-state notices.
+- `LOCK` / `UNLOCK` are virtual WebDAV compatibility behavior. Concurrent multi-client edits of the same file still require conflict control in the client or upper workflow.
+- Real public deployments depend on the specific DNS, firewall, TLS, reverse-proxy, and cloud security-group configuration. Templates and doctor checks do not replace environment-level review.
+- If a future version introduces irreversible data migration, rollback should follow the matching release note or backup-restore procedure.
+
+## Maintainer Release Checklist
+
+- Confirm `CHANGELOG.md` and `CHANGELOG.en.md` cover this release.
+- Confirm this draft is updated with the final tag, validation results, and artifact names.
+- Confirm `git status --short --branch` is clean.
+- Confirm `./scripts/plan-hardening-commits.sh --fail-on-manual` reports no paths left to group.
+- After creating and pushing the tag, confirm the Release workflow succeeds.
+- After publication, run the release artifact verifier and record the result.
