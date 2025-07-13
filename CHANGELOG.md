@@ -308,7 +308,7 @@
 - [ ] 依赖安全检查通过：`make security-check NPM_AUDIT=1`
 - [ ] Docker 构建和烟测通过：`make docker-check`
 - [ ] `./scripts/plan-hardening-commits.sh --fail-on-manual` 确认没有未归类路径
-- [ ] 更新 CHANGELOG.md、CHANGELOG.en.md、README 版本引用和 release note
+- [ ] 更新 CHANGELOG.md、CHANGELOG.en.md、README 版本引用和 [发布说明草稿](docs/release-notes.md)
 - [ ] 创建 Git tag：`git tag -a v0.1.0 -m "Release v0.1.0"`
 - [ ] 推送 tag：`git push origin v0.1.0`
 - [ ] GitHub Release 包含：
@@ -316,6 +316,7 @@
   - checksums
   - 二进制文件（Linux x86_64, ARM64, macOS）
   - Docker 镜像标签
+- [ ] 发布后运行 `./scripts/verify-release-artifacts.sh --require-targets --check-image`，验证 release 产物、checksums 和容器镜像标签
 - [ ] 发布后验证 release 归档安装、Docker release 镜像启动和公开文档链接
 
 ---
