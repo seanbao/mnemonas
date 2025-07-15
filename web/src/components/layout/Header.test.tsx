@@ -122,6 +122,23 @@ describe('Header', () => {
     })
   })
 
+  it('shows a fallback danger toast when active query refetch fails with an unknown value', async () => {
+    refetchQueries.mockRejectedValueOnce('refresh failed')
+    render(<Header />)
+
+    const refreshButton = screen.getByLabelText('刷新数据')
+    await act(async () => {
+      refreshButton.click()
+      await Promise.resolve()
+    })
+
+    expect(mockAddToast).toHaveBeenCalledWith({
+      title: '刷新失败',
+      description: '数据刷新失败，请稍后重试。',
+      color: 'danger',
+    })
+  })
+
   it('hides settings menu item for non-admin users', () => {
     useIsAdminMock.mockReturnValue(false)
     render(<Header />)
@@ -170,6 +187,35 @@ describe('Header', () => {
     expect(navigateMock).toHaveBeenCalledWith('/search?q=report', { replace: true })
   })
 
+  it('navigates to search when clicking the empty search shell outside the search page', () => {
+    render(<Header />)
+
+    const searchShell = screen.getByPlaceholderText('搜索文件').parentElement
+    expect(searchShell).toBeTruthy()
+    fireEvent.click(searchShell!)
+
+    expect(navigateMock).toHaveBeenCalledWith('/search', { replace: false })
+  })
+
+  it('replaces search history when clicking the search shell with a trimmed query on the search page', () => {
+    locationPathname = '/search'
+    render(<Header />)
+
+    const searchInput = screen.getByPlaceholderText('搜索文件')
+    fireEvent.change(searchInput, { target: { value: '  quarterly report  ' } })
+    fireEvent.click(searchInput.parentElement!)
+
+    expect(navigateMock).toHaveBeenCalledWith('/search?q=quarterly%20report', { replace: true })
+  })
+
+  it('does not submit search when clicking directly inside the input', () => {
+    render(<Header />)
+
+    fireEvent.click(screen.getByPlaceholderText('搜索文件'))
+
+    expect(navigateMock).not.toHaveBeenCalled()
+  })
+
   it('shows a warning toast when the browser blocks the docs tab', () => {
     openUrlInNewTabMock.mockReturnValue(false)
     render(<Header />)
@@ -200,6 +246,14 @@ describe('Header', () => {
     expect(navigateMock).toHaveBeenCalledWith('/login', { replace: true })
   })
 
+  it('navigates to settings from the user menu', () => {
+    render(<Header />)
+
+    screen.getByRole('button', { name: '设置' }).click()
+
+    expect(navigateMock).toHaveBeenCalledWith('/settings')
+  })
+
   it('clears cached queries when logout succeeds without warnings', async () => {
     render(<Header />)
 
@@ -212,5 +266,24 @@ describe('Header', () => {
     })
     expect(clearQueries).toHaveBeenCalledTimes(1)
     expect(navigateMock).toHaveBeenCalledWith('/login', { replace: true })
+  })
+
+  it('shows a danger toast when logout fails', async () => {
+    logoutMock.mockRejectedValueOnce(new Error('logout refused'))
+    render(<Header />)
+
+    await act(async () => {
+      screen.getByText('退出登录').click()
+    })
+
+    await waitFor(() => {
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '退出登录失败',
+        description: 'logout refused',
+        color: 'danger',
+      })
+    })
+    expect(clearQueries).not.toHaveBeenCalled()
+    expect(navigateMock).not.toHaveBeenCalledWith('/login', { replace: true })
   })
 })

@@ -457,6 +457,13 @@ describe('Favorites API', () => {
         '/file1.txt': false,
         '/file2.txt': false,
       })
+      mockAuthFetch.mockClear()
+
+      await expect(checkFavorites(['/second.txt', '/third.txt'])).resolves.toEqual({
+        '/second.txt': false,
+        '/third.txt': false,
+      })
+      expect(mockAuthFetch).not.toHaveBeenCalled()
     })
   })
 

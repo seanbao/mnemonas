@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { act, render, screen } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { ShareDialog } from './ShareDialog'
 
@@ -50,7 +50,31 @@ vi.mock('@heroui/react', () => ({
       {errorMessage ? <span>{errorMessage}</span> : null}
     </div>
   ),
-  Select: ({ children }: { children: React.ReactNode }) => <select>{children}</select>,
+  Select: ({
+    children,
+    onSelectionChange,
+  }: {
+    children: React.ReactNode
+    onSelectionChange?: (keys: Set<string>) => void
+  }) => {
+    const mapLabelToValue = (label: string) => {
+      if (label === '永不过期') return ''
+      if (label === '1 小时') return '1h'
+      if (label === '24 小时') return '24h'
+      if (label === '7 天') return '7d'
+      if (label === '30 天') return '30d'
+      if (label === '90 天') return '90d'
+      if (label === '仅查看') return 'read'
+      return label
+    }
+    return (
+      <select
+        onChange={(event) => onSelectionChange?.(new Set([mapLabelToValue(event.target.value)]))}
+      >
+        {children}
+      </select>
+    )
+  },
   SelectItem: ({ children }: { children: React.ReactNode }) => <option>{children}</option>,
   Switch: ({
     isSelected,
@@ -79,7 +103,7 @@ vi.mock('@/api/share', async () => {
   }
 })
 
-import { createShare, ShareError } from '@/api/share'
+import { copyShareUrl, createShare, ShareError } from '@/api/share'
 
 function createDeferred<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void
@@ -185,6 +209,26 @@ describe('ShareDialog', () => {
     expect(screen.getByText('创建分享链接')).toBeInTheDocument()
   })
 
+  it('closes and resets the form when not loading', async () => {
+    const user = userEvent.setup()
+    const onClose = vi.fn()
+
+    render(
+      <ShareDialog
+        isOpen={true}
+        onClose={onClose}
+        filePath="/test/file.txt"
+      />
+    )
+
+    await user.click(screen.getByRole('checkbox'))
+    expect(screen.getByPlaceholderText('设置访问密码')).toBeInTheDocument()
+
+    await user.click(screen.getByText('取消'))
+
+    expect(onClose).toHaveBeenCalled()
+  })
+
   it('shows a disabled state when share creation reports the feature is off', async () => {
     const user = userEvent.setup()
     vi.mocked(createShare).mockRejectedValue(new ShareError('share feature disabled', 503, 'SHARE_FEATURE_DISABLED'))
@@ -201,6 +245,25 @@ describe('ShareDialog', () => {
 
     expect(await screen.findByText('分享功能已关闭')).toBeInTheDocument()
     expect(screen.getByText('当前服务已关闭分享功能。重新启用后，才能为文件或文件夹创建分享链接。')).toBeInTheDocument()
+  })
+
+  it('notifies the parent when share creation reports the feature is off', async () => {
+    const user = userEvent.setup()
+    const onFeatureDisabled = vi.fn()
+    vi.mocked(createShare).mockRejectedValue(new ShareError('share feature disabled', 503, 'SHARE_FEATURE_DISABLED'))
+
+    render(
+      <ShareDialog
+        isOpen={true}
+        onClose={() => {}}
+        filePath="/test/file.txt"
+        onFeatureDisabled={onFeatureDisabled}
+      />
+    )
+
+    await user.click(screen.getByText('创建分享链接'))
+
+    expect(onFeatureDisabled).toHaveBeenCalled()
   })
 
   it('shows unavailable toast when share creation is temporarily unavailable', async () => {
@@ -309,6 +372,153 @@ describe('ShareDialog', () => {
         password: 'secret-123',
       })
     )
+  })
+
+  it('sends optional share settings when configured', async () => {
+    const user = userEvent.setup()
+    vi.mocked(createShare).mockResolvedValue({
+      id: 'share-1',
+      path: '/test/file.txt',
+      type: 'file',
+      created_by: 'user-1',
+      created_at: new Date().toISOString(),
+      has_password: false,
+      permission: 'read',
+      enabled: true,
+      access_count: 0,
+      max_access: 12,
+      description: 'release package',
+      url: '/s/share-1',
+      warning: false,
+      message: undefined,
+    } as never)
+
+    render(
+      <ShareDialog
+        isOpen={true}
+        onClose={() => {}}
+        filePath="/test/file.txt"
+      />
+    )
+
+    fireEvent.change(screen.getAllByRole('combobox')[0], { target: { value: '7 天' } })
+    fireEvent.change(screen.getAllByRole('combobox')[1], { target: { value: '仅查看' } })
+    await user.type(screen.getByPlaceholderText('不限制'), '12')
+    await user.type(screen.getByPlaceholderText('添加备注信息'), '  release package  ')
+    await user.click(screen.getByText('创建分享链接'))
+
+    expect(createShare).toHaveBeenCalledWith(expect.objectContaining({
+      expires_in: '7d',
+      max_access: 12,
+      description: 'release package',
+    }))
+  })
+
+  it('ignores non-positive access limits when creating a share', async () => {
+    const user = userEvent.setup()
+    vi.mocked(createShare).mockResolvedValue({
+      id: 'share-1',
+      path: '/test/file.txt',
+      type: 'file',
+      created_by: 'user-1',
+      created_at: new Date().toISOString(),
+      has_password: false,
+      permission: 'read',
+      enabled: true,
+      access_count: 0,
+      url: '/s/share-1',
+      warning: false,
+      message: undefined,
+    } as never)
+
+    render(
+      <ShareDialog
+        isOpen={true}
+        onClose={() => {}}
+        filePath="/test/file.txt"
+      />
+    )
+
+    await user.type(screen.getByPlaceholderText('不限制'), '0')
+    await user.click(screen.getByText('创建分享链接'))
+
+    expect(createShare).toHaveBeenCalledWith(expect.not.objectContaining({
+      max_access: expect.any(Number),
+    }))
+  })
+
+  it('calls the created callback and supports copying the created share link', async () => {
+    const user = userEvent.setup()
+    const onShareCreated = vi.fn()
+    const createdShare = {
+      id: 'share-1',
+      path: '/test/file.txt',
+      type: 'file' as const,
+      created_by: 'user-1',
+      created_at: new Date().toISOString(),
+      has_password: true,
+      permission: 'read' as const,
+      enabled: true,
+      access_count: 0,
+      max_access: 0,
+      description: '',
+      url: '/s/share-1',
+      warning: false,
+      message: undefined,
+    }
+    vi.mocked(createShare).mockResolvedValue(createdShare)
+    vi.mocked(copyShareUrl).mockResolvedValue()
+
+    render(
+      <ShareDialog
+        isOpen={true}
+        onClose={() => {}}
+        filePath="/test/file.txt"
+        onShareCreated={onShareCreated}
+      />
+    )
+
+    await user.click(screen.getByText('创建分享链接'))
+    await screen.findByText('此链接需要密码才能访问')
+    await user.click(screen.getByText('复制链接'))
+
+    expect(onShareCreated).toHaveBeenCalledWith(createdShare)
+    expect(copyShareUrl).toHaveBeenCalledWith(createdShare)
+    expect(mockAddToast).toHaveBeenCalledWith({ title: '链接已复制', color: 'success' })
+  })
+
+  it('shows a toast when copying the created link fails', async () => {
+    const user = userEvent.setup()
+    vi.mocked(createShare).mockResolvedValue({
+      id: 'share-1',
+      path: '/test/file.txt',
+      type: 'file',
+      created_by: 'user-1',
+      created_at: new Date().toISOString(),
+      has_password: false,
+      permission: 'read',
+      enabled: true,
+      access_count: 0,
+      url: '/s/share-1',
+      warning: false,
+      message: undefined,
+    } as never)
+    vi.mocked(copyShareUrl).mockRejectedValue(new Error('clipboard unavailable'))
+
+    render(
+      <ShareDialog
+        isOpen={true}
+        onClose={() => {}}
+        filePath="/test/file.txt"
+      />
+    )
+
+    await user.click(screen.getByText('创建分享链接'))
+    await user.click(await screen.findByText('复制链接'))
+
+    await waitFor(() => {
+      expect(mockAddToast).toHaveBeenCalledWith({ title: '复制失败', color: 'danger' })
+    })
   })
 
   it('shows warning toast when share creation succeeds with backend warning metadata', async () => {

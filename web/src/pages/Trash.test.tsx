@@ -31,17 +31,20 @@ let mockBatchResult = {
   total: 1,
   succeededItems: ['item1'],
   failedItems: [] as string[],
-	warningCount: 0,
-	warningMessages: [] as string[],
+  failedErrors: [] as unknown[],
+  warningCount: 0,
+  warningMessages: [] as string[],
 }
 vi.mock('@/lib/useBatchOperation', () => ({
   useBatchOperation: (options: {
     operation: (item: string) => Promise<unknown>
-    onComplete?: (result: typeof mockBatchResult & {
-      failedErrors?: unknown[]
-      warningCount?: number
-      warningMessages?: string[]
-    }) => void
+    messages: {
+      success: string
+      failure: string
+      partial: string
+    }
+    getToast?: (result: typeof mockBatchResult) => { title: string; description?: string; color: 'success' | 'warning' | 'danger' } | null | undefined
+    onComplete?: (result: typeof mockBatchResult) => void
   }) => ({
     execute: vi.fn(async (items: string[]) => {
       if (mockUseRealBatchOperation) {
@@ -61,19 +64,60 @@ vi.mock('@/lib/useBatchOperation', () => ({
           failedErrors: results
             .filter((result): result is PromiseRejectedResult => result.status === 'rejected')
             .map((result) => result.reason),
-			warningCount: warningMessages.length,
-			warningMessages,
+          warningCount: warningMessages.length,
+          warningMessages,
         }
         mockBatchExecute(items)
+        const toast = options.getToast?.(result) ?? (result.failed === 0
+          ? {
+            title: result.warningMessages[0] ?? options.messages.success.replace('{count}', String(result.succeeded)),
+            color: result.warningMessages.length > 0 ? 'warning' as const : 'success' as const,
+          }
+          : result.succeeded === 0
+            ? {
+              title: options.messages.failure.replace('{count}', String(result.failed)),
+              color: 'danger' as const,
+            }
+            : {
+              title: options.messages.partial
+                .replace('{succeeded}', String(result.succeeded))
+                .replace('{failed}', String(result.failed)),
+              color: 'warning' as const,
+            })
+        if (toast) {
+          mockAddToast(toast)
+        }
         options.onComplete?.(result)
         return result
       }
 
       const result = {
         ...mockBatchResult,
+        failedErrors: mockBatchResult.failedErrors ?? [],
+        warningCount: mockBatchResult.warningCount ?? 0,
+        warningMessages: mockBatchResult.warningMessages ?? [],
         total: items.length,
       }
       mockBatchExecute(items)
+      const toast = options.getToast?.(result) ?? (result.failed === 0
+        ? {
+          title: result.warningMessages[0] ?? options.messages.success.replace('{count}', String(result.succeeded)),
+          color: result.warningMessages.length > 0 ? 'warning' as const : 'success' as const,
+        }
+        : result.succeeded === 0
+          ? {
+            title: options.messages.failure.replace('{count}', String(result.failed)),
+            color: 'danger' as const,
+          }
+          : {
+            title: options.messages.partial
+              .replace('{succeeded}', String(result.succeeded))
+              .replace('{failed}', String(result.failed)),
+            color: 'warning' as const,
+          })
+      if (toast) {
+        mockAddToast(toast)
+      }
       options.onComplete?.(result)
       return result
     }),
@@ -127,8 +171,9 @@ describe('TrashPage', () => {
       total: 1,
       succeededItems: ['item1'],
       failedItems: [],
-		warningCount: 0,
-		warningMessages: [],
+      failedErrors: [],
+      warningCount: 0,
+      warningMessages: [],
     }
     mockListTrash.mockResolvedValue({
       items: [
@@ -402,6 +447,29 @@ describe('TrashPage', () => {
       })
     })
 
+    it('shows generic failure toast when trash reload fails without an Error object', async () => {
+      const user = userEvent.setup()
+      mockListTrash
+        .mockRejectedValueOnce(new Error('Network error'))
+        .mockRejectedValueOnce('still broken')
+
+      render(<TrashPage />)
+
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: '重新加载' })).toBeTruthy()
+      })
+
+      await user.click(screen.getByRole('button', { name: '重新加载' }))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '刷新失败',
+          description: '请稍后重试',
+          color: 'danger',
+        })
+      })
+    })
+
     it('shows unknown retention copy when retention settings are missing', async () => {
       mockListTrash.mockResolvedValue({
         items: [
@@ -422,6 +490,36 @@ describe('TrashPage', () => {
 
       await waitFor(() => {
         expect(screen.getAllByText(/自动清理设置未知/).length).toBeGreaterThan(1)
+      })
+    })
+
+    it('calculates total trash size when the response omits totalSize', async () => {
+      mockListTrash.mockResolvedValue({
+        items: [
+          {
+            id: 'item1',
+            originalPath: '/deleted-file.txt',
+            deletedAt: new Date(Date.now() - 1000 * 60 * 60).toISOString(),
+            name: 'deleted-file.txt',
+            isDir: false,
+            size: 1024,
+          },
+          {
+            id: 'item2',
+            originalPath: '/deleted-folder',
+            deletedAt: new Date(Date.now() - 1000 * 60 * 60).toISOString(),
+            name: 'deleted-folder',
+            isDir: true,
+            size: 2048,
+          },
+        ],
+        count: 2,
+      })
+
+      render(<TrashPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText(/2 项 · 3 KB/)).toBeTruthy()
       })
     })
 
@@ -450,6 +548,84 @@ describe('TrashPage', () => {
         expect(screen.getByText('已过期，等待清理')).toBeTruthy()
       })
       expect(screen.queryByText('自动清理未启用')).toBeNull()
+    })
+
+    it('shows disabled retention copy without row countdown badges', async () => {
+      mockListTrash.mockResolvedValue({
+        items: [
+          {
+            id: 'item1',
+            originalPath: '/deleted-file.txt',
+            deletedAt: new Date(Date.now() - 1000 * 60 * 60).toISOString(),
+            name: 'deleted-file.txt',
+            isDir: false,
+            size: 1024,
+          },
+        ],
+        count: 1,
+        totalSize: 1024,
+        retentionEnabled: false,
+        retentionDays: 7,
+      })
+
+      render(<TrashPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText(/自动清理未启用/)).toBeTruthy()
+      })
+      expect(screen.queryByText(/天后自动删除/)).toBeNull()
+    })
+
+    it('shows near auto-delete countdown badges when retention is within a week', async () => {
+      mockListTrash.mockResolvedValue({
+        items: [
+          {
+            id: 'item1',
+            originalPath: '/deleted-file.txt',
+            deletedAt: new Date(Date.now() - 1000).toISOString(),
+            name: 'deleted-file.txt',
+            isDir: false,
+            size: 1024,
+          },
+        ],
+        count: 1,
+        totalSize: 1024,
+        retentionEnabled: true,
+        retentionDays: 7,
+      })
+
+      render(<TrashPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText(/7 天后自动清理/)).toBeTruthy()
+        expect(screen.getByText(/天后自动删除/)).toBeTruthy()
+      })
+    })
+
+    it('hides row countdown badges when auto-delete is more than a week away', async () => {
+      mockListTrash.mockResolvedValue({
+        items: [
+          {
+            id: 'item1',
+            originalPath: '/deleted-file.txt',
+            deletedAt: new Date(Date.now() - 1000 * 60 * 60).toISOString(),
+            name: 'deleted-file.txt',
+            isDir: false,
+            size: 1024,
+          },
+        ],
+        count: 1,
+        totalSize: 1024,
+        retentionEnabled: true,
+        retentionDays: 30,
+      })
+
+      render(<TrashPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText(/30 天后自动清理/)).toBeTruthy()
+      })
+      expect(screen.queryByText(/天后自动删除/)).toBeNull()
     })
 
     it('shows expired cleanup badge instead of zero-day countdown', async () => {
@@ -529,6 +705,27 @@ describe('TrashPage', () => {
           title: '恢复暂不可用',
           description: '文件系统当前不可用，请稍后重试',
           color: 'warning',
+        })
+      })
+    })
+
+    it('shows generic failure toast when restore fails without an Error object', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockRestoreFromTrash.mockRejectedValue('restore stopped')
+
+      render(<TrashPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('deleted-file.txt')).toBeTruthy()
+      })
+
+      await user.click(screen.getByRole('button', { name: '恢复 deleted-file.txt' }))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '恢复失败',
+          description: '请稍后重试',
+          color: 'danger',
         })
       })
     })
@@ -673,6 +870,28 @@ describe('TrashPage', () => {
 
       const deleteButtons = screen.getAllByTitle('永久删除')
       expect(deleteButtons.length).toBeGreaterThan(0)
+    })
+
+    it('closes the delete confirmation modal when cancellation is allowed', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+
+      render(<TrashPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('deleted-file.txt')).toBeTruthy()
+      })
+
+      await user.click(screen.getByRole('button', { name: '永久删除 deleted-file.txt' }))
+
+      await waitFor(() => {
+        expect(screen.getByText(/确定要永久删除/)).toBeTruthy()
+      })
+
+      await user.click(screen.getByRole('button', { name: '取消' }))
+
+      await waitFor(() => {
+        expect(screen.queryByText(/确定要永久删除/)).toBeNull()
+      })
     })
 
     it('deletes item on confirm', async () => {
@@ -930,6 +1149,28 @@ describe('TrashPage', () => {
       })
     })
 
+    it('closes the empty trash modal when cancellation is allowed', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+
+      render(<TrashPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('清空回收站')).toBeTruthy()
+      })
+
+      await user.click(screen.getByText('清空回收站'))
+
+      await waitFor(() => {
+        expect(screen.getByText('确定要清空回收站吗？')).toBeTruthy()
+      })
+
+      await user.click(screen.getByRole('button', { name: '取消' }))
+
+      await waitFor(() => {
+        expect(screen.queryByText('确定要清空回收站吗？')).toBeNull()
+      })
+    })
+
     it('empties trash on confirm', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
       mockEmptyTrash.mockResolvedValue({ deletedCount: 2, partial: false })
@@ -1155,6 +1396,198 @@ describe('TrashPage', () => {
       })
     })
 
+    it('clears all selected items from the header checkbox', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+
+      render(<TrashPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('deleted-file.txt')).toBeTruthy()
+      })
+
+      const checkboxes = document.querySelectorAll('[class*="Checkbox"], input[type="checkbox"]')
+      if (checkboxes.length > 0) {
+        await user.click(checkboxes[0] as Element)
+      }
+
+      await waitFor(() => {
+        expect(screen.getByText(/已选择 2 项/)).toBeTruthy()
+      })
+
+      if (checkboxes.length > 0) {
+        await user.click(checkboxes[0] as Element)
+      }
+
+      await waitFor(() => {
+        expect(screen.queryByText(/已选择.*项/)).toBeNull()
+      })
+    })
+
+    it('clears selected trash items from the selection bar action', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+
+      render(<TrashPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('deleted-file.txt')).toBeTruthy()
+      })
+
+      const checkboxes = document.querySelectorAll('[class*="Checkbox"], input[type="checkbox"]')
+      if (checkboxes.length > 1) {
+        await user.click(checkboxes[1] as Element)
+      }
+
+      await waitFor(() => {
+        expect(screen.getByText(/已选择 1 项/)).toBeTruthy()
+      })
+
+      await user.click(screen.getByRole('button', { name: '取消选择' }))
+
+      expect(screen.queryByText(/已选择.*项/)).toBeNull()
+    })
+
+    it('shows warning toast for successful batch restore with warnings', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockUseRealBatchOperation = true
+      mockRestoreFromTrash.mockResolvedValue({
+        warning: true,
+        message: 'restore completed with warnings',
+      })
+
+      render(<TrashPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('deleted-file.txt')).toBeTruthy()
+      })
+
+      const checkboxes = document.querySelectorAll('[class*="Checkbox"], input[type="checkbox"]')
+      if (checkboxes.length > 0) {
+        await user.click(checkboxes[0] as Element)
+      }
+
+      await waitFor(() => {
+        expect(screen.getByText(/已选择 2 项/)).toBeTruthy()
+      })
+
+      await user.click(screen.getByText('恢复'))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: 'restore completed with warnings',
+          color: 'warning',
+        })
+      })
+    })
+
+    it('shows unavailable toast when all batch restore items are unavailable', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockUseRealBatchOperation = true
+      mockRestoreFromTrash.mockRejectedValue(new ApiError(
+        'filesystem not initialized',
+        503,
+        'Service Unavailable',
+        'SERVICE_UNAVAILABLE'
+      ))
+
+      render(<TrashPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('deleted-file.txt')).toBeTruthy()
+      })
+
+      const checkboxes = document.querySelectorAll('[class*="Checkbox"], input[type="checkbox"]')
+      if (checkboxes.length > 0) {
+        await user.click(checkboxes[0] as Element)
+      }
+
+      await waitFor(() => {
+        expect(screen.getByText(/已选择 2 项/)).toBeTruthy()
+      })
+
+      await user.click(screen.getByText('恢复'))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '批量恢复暂不可用',
+          description: '文件系统当前不可用，请稍后重试',
+          color: 'warning',
+        })
+      })
+    })
+
+    it('falls back to generic batch restore failure toast for non-unavailable errors', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockUseRealBatchOperation = true
+      mockRestoreFromTrash.mockRejectedValue(new Error('restore failed'))
+
+      render(<TrashPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('deleted-file.txt')).toBeTruthy()
+      })
+
+      const checkboxes = document.querySelectorAll('[class*="Checkbox"], input[type="checkbox"]')
+      if (checkboxes.length > 0) {
+        await user.click(checkboxes[0] as Element)
+      }
+
+      await waitFor(() => {
+        expect(screen.getByText(/已选择 2 项/)).toBeTruthy()
+      })
+
+      await user.click(screen.getByText('恢复'))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '2 项恢复失败',
+          color: 'danger',
+        })
+      })
+    })
+
+    it('shows unavailable toast when all batch permanent delete items are unavailable', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockUseRealBatchOperation = true
+      mockDeleteFromTrash.mockRejectedValue(new ApiError(
+        'filesystem not initialized',
+        503,
+        'Service Unavailable',
+        'SERVICE_UNAVAILABLE'
+      ))
+
+      render(<TrashPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('deleted-file.txt')).toBeTruthy()
+      })
+
+      const checkboxes = document.querySelectorAll('[class*="Checkbox"], input[type="checkbox"]')
+      if (checkboxes.length > 1) {
+        await user.click(checkboxes[1] as Element)
+      }
+
+      await waitFor(() => {
+        expect(screen.getByText(/已选择 1 项/)).toBeTruthy()
+      })
+
+      await user.click(screen.getByText('永久删除'))
+
+      await waitFor(() => {
+        expect(screen.getByText('确认批量永久删除')).toBeTruthy()
+      })
+
+      const confirmButtons = screen.getAllByRole('button', { name: '永久删除' })
+      await user.click(confirmButtons[confirmButtons.length - 1])
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '批量永久删除暂不可用',
+          description: '文件系统当前不可用，请稍后重试',
+          color: 'warning',
+        })
+      })
+    })
+
     it('confirms before batch permanent delete', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
 
@@ -1190,6 +1623,36 @@ describe('TrashPage', () => {
       })
     })
 
+    it('closes the batch permanent delete modal when cancellation is allowed', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+
+      render(<TrashPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('deleted-file.txt')).toBeTruthy()
+      })
+
+      const checkboxes = document.querySelectorAll('[class*="Checkbox"], input[type="checkbox"]')
+      if (checkboxes.length > 1) {
+        await user.click(checkboxes[1] as Element)
+      }
+
+      await waitFor(() => {
+        expect(screen.getByText(/已选择 1 项/)).toBeTruthy()
+      })
+
+      await user.click(screen.getByText('永久删除'))
+
+      await waitFor(() => {
+        expect(screen.getByText('确认批量永久删除')).toBeTruthy()
+      })
+
+      await user.click(screen.getByRole('button', { name: '取消' }))
+
+      expect(screen.queryByText('确认批量永久删除')).toBeNull()
+      expect(mockBatchExecute).not.toHaveBeenCalled()
+    })
+
     it('keeps failed items selected after partial batch restore failure', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
       mockBatchResult = {
@@ -1198,6 +1661,9 @@ describe('TrashPage', () => {
         total: 2,
         succeededItems: ['item1'],
         failedItems: ['item2'],
+        failedErrors: [new Error('restore failed')],
+        warningCount: 0,
+        warningMessages: [],
       }
 
       render(<TrashPage />)
@@ -1234,6 +1700,9 @@ describe('TrashPage', () => {
         total: 1,
         succeededItems: [],
         failedItems: ['item1'],
+        failedErrors: [new Error('delete failed')],
+        warningCount: 0,
+        warningMessages: [],
       }
 
       render(<TrashPage />)
@@ -1277,6 +1746,9 @@ describe('TrashPage', () => {
         total: 2,
         succeededItems: ['item1', 'item2'],
         failedItems: [],
+        failedErrors: [],
+        warningCount: 0,
+        warningMessages: [],
       }
       mockListTrash.mockReset()
       mockListTrash.mockResolvedValueOnce({

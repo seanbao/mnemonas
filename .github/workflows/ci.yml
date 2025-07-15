@@ -23,6 +23,7 @@ env:
   GOLANGCI_LINT_VERSION: 'v2.11.4'
   GOVULNCHECK_VERSION: 'v1.3.0'
   CARGO_AUDIT_VERSION: '0.22.1'
+  GO_COVERAGE_MIN: '75'
 
 jobs:
   workflows:
@@ -101,6 +102,14 @@ jobs:
         run: |
           mapfile -t packages < <(make --no-print-directory go-packages)
           CGO_ENABLED=1 bash ./scripts/with-test-dataplane.sh go test -v -race -coverprofile=coverage.out "${packages[@]}"
+          coverage=$(go tool cover -func=coverage.out | awk '/^total:/ { gsub("%", "", $3); print $3 }')
+          awk -v coverage="$coverage" -v min="${GO_COVERAGE_MIN}" 'BEGIN {
+            if ((coverage + 0) < (min + 0)) {
+              printf "Go coverage %.1f%% is below %.1f%%\n", coverage, min
+              exit 1
+            }
+            printf "Go coverage %.1f%% meets %.1f%%\n", coverage, min
+          }'
 
       - name: Vulnerability scan
         run: |

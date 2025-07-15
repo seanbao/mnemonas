@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
+import type { ReactNode } from 'react'
 import { render, screen, waitFor } from '@/test/utils'
 import userEvent from '@testing-library/user-event'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
@@ -12,12 +13,35 @@ vi.mock('@heroui/react', async () => {
   const actual = await vi.importActual<typeof import('@heroui/react')>('@heroui/react')
   return {
     ...actual,
+    Chip: ({ children, onClose }: { children: ReactNode; onClose?: () => void }) => (
+      <div>
+        <span>{children}</span>
+        {onClose ? <button onClick={onClose}>清除筛选</button> : null}
+      </div>
+    ),
     Pagination: ({ total, page, onChange }: { total: number; page: number; onChange: (page: number) => void }) => (
       <div>
         <span>{`page ${page} of ${total}`}</span>
         {total > 1 ? <button onClick={() => onChange(2)}>转到第 2 页</button> : null}
       </div>
     ),
+    Select: ({
+      children,
+      onSelectionChange,
+      placeholder,
+    }: {
+      children: ReactNode
+      onSelectionChange?: (keys: Set<string>) => void
+      placeholder?: string
+    }) => (
+      <div>
+        <span>{placeholder}</span>
+        <button onClick={() => onSelectionChange?.(new Set(['delete']))}>筛选删除文件</button>
+        <button onClick={() => onSelectionChange?.(new Set())}>清空筛选</button>
+        <div>{children}</div>
+      </div>
+    ),
+    SelectItem: ({ children }: { children: ReactNode }) => <span>{children}</span>,
   }
 })
 
@@ -48,7 +72,15 @@ vi.mock('@/api/activity', () => ({
     }
     return labels[action] || action
   }),
-  getActionColor: vi.fn(() => 'primary'),
+  getActionColor: vi.fn((action: string) => {
+    const colors: Record<string, string> = {
+      upload: 'success',
+      delete: 'danger',
+      download: 'warning',
+      login: 'default',
+    }
+    return colors[action] || 'primary'
+  }),
 }))
 
 vi.mock('@/stores/auth', async (importOriginal) => {
@@ -197,6 +229,48 @@ describe('ActivityPage', () => {
       })
     })
 
+    it('renders activity details when an entry includes metadata', async () => {
+      mockListActivity.mockResolvedValue({
+        items: [
+          {
+            id: '1',
+            timestamp: new Date(Date.now() - 1000 * 60).toISOString(),
+            action: 'upload',
+            path: '/documents/report.pdf',
+            user: 'admin',
+            details: {
+              client: 'web',
+              result: 'ok',
+            },
+          },
+          {
+            id: '2',
+            timestamp: new Date(Date.now() - 1000 * 120).toISOString(),
+            action: 'download',
+            path: '/documents/report.pdf',
+            user: 'admin',
+          },
+          {
+            id: '3',
+            timestamp: new Date(Date.now() - 1000 * 180).toISOString(),
+            action: 'unknown-action',
+            path: '/documents/unknown.txt',
+            user: 'admin',
+          },
+        ],
+        total: 3,
+        limit: 20,
+        offset: 0,
+      })
+
+      render(<ActivityPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('client: web')).toBeTruthy()
+        expect(screen.getByText('result: ok')).toBeTruthy()
+      })
+    })
+
     it('shows relative time', async () => {
       render(<ActivityPage />)
       
@@ -329,6 +403,27 @@ describe('ActivityPage', () => {
         expect(screen.getByText('活动日志存储当前不可用，请检查系统健康状态或稍后重试。')).toBeTruthy()
       })
     })
+
+    it('uses server error messages when activity reload fails with an Error object', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockListActivity.mockRejectedValueOnce(new Error('Network error'))
+      render(<ActivityPage />)
+
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: '重新加载' })).toBeTruthy()
+      })
+
+      mockListActivity.mockRejectedValueOnce(new Error('activity reload failed'))
+      await user.click(screen.getByRole('button', { name: '重新加载' }))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '刷新失败',
+          description: 'activity reload failed',
+          color: 'danger',
+        })
+      })
+    })
   })
 
   describe('filtering', () => {
@@ -345,6 +440,47 @@ describe('ActivityPage', () => {
       
       await waitFor(() => {
         expect(screen.getByText('刷新')).toBeTruthy()
+      })
+    })
+
+    it('requests the selected action and shows the active filter chip', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      render(<ActivityPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('筛选删除文件')).toBeTruthy()
+      })
+
+      await user.click(screen.getByText('筛选删除文件'))
+
+      await waitFor(() => {
+        expect(mockListActivity).toHaveBeenCalledWith({
+          limit: 20,
+          offset: 0,
+          action: 'delete',
+        })
+        expect(screen.getByText('当前筛选:')).toBeTruthy()
+      })
+    })
+
+    it('clears the active action filter from the chip', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      render(<ActivityPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('筛选删除文件')).toBeTruthy()
+      })
+
+      await user.click(screen.getByText('筛选删除文件'))
+
+      await waitFor(() => {
+        expect(screen.getByText('当前筛选:')).toBeTruthy()
+      })
+
+      await user.click(screen.getByText('清除筛选'))
+
+      await waitFor(() => {
+        expect(screen.queryByText('当前筛选:')).toBeNull()
       })
     })
   })
@@ -388,6 +524,27 @@ describe('ActivityPage', () => {
             color: 'warning',
           })
         })
+    })
+
+    it('shows danger toast when activity reload fails with a generic error', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockListActivity.mockRejectedValueOnce(new Error('Network error'))
+      render(<ActivityPage />)
+
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: '重新加载' })).toBeTruthy()
+      })
+
+      mockListActivity.mockRejectedValueOnce('still unavailable')
+      await user.click(screen.getByRole('button', { name: '重新加载' }))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '刷新失败',
+          description: '请稍后重试',
+          color: 'danger',
+        })
+      })
     })
   })
 

@@ -18,8 +18,9 @@ let mockBatchResult = {
   total: 1,
   succeededItems: ['/docs/report.pdf'] as string[],
   failedItems: [] as string[],
-	warningCount: 0,
-	warningMessages: [] as string[],
+  failedErrors: [] as unknown[],
+  warningCount: 0,
+  warningMessages: [] as string[],
 }
 
 vi.mock('react-router-dom', async () => {
@@ -41,7 +42,16 @@ vi.mock('@/api/favorites', async () => {
 })
 
 vi.mock('@/lib/useBatchOperation', () => ({
-  useBatchOperation: (options: { onComplete?: (result: typeof mockBatchResult) => void }) => ({
+  useBatchOperation: (options: {
+    operation: (item: string) => Promise<unknown>
+    messages: {
+      success: string
+      failure: string
+      partial: string
+    }
+    getToast?: (result: typeof mockBatchResult) => { title: string; description?: string; color: 'success' | 'warning' | 'danger' } | null | undefined
+    onComplete?: (result: typeof mockBatchResult) => void
+  }) => ({
     execute: vi.fn(async (items: string[]) => {
       if (mockUseRealBatchOperation) {
         const results = await Promise.allSettled(items.map((item) => options.operation(item)))
@@ -64,15 +74,56 @@ vi.mock('@/lib/useBatchOperation', () => ({
           warningMessages,
         }
         mockBatchExecute(items)
+        const toast = options.getToast?.(result) ?? (result.failed === 0
+          ? {
+            title: result.warningMessages[0] ?? options.messages.success.replace('{count}', String(result.succeeded)),
+            color: result.warningMessages.length > 0 ? 'warning' as const : 'success' as const,
+          }
+          : result.succeeded === 0
+            ? {
+              title: options.messages.failure.replace('{count}', String(result.failed)),
+              color: 'danger' as const,
+            }
+            : {
+              title: options.messages.partial
+                .replace('{succeeded}', String(result.succeeded))
+                .replace('{failed}', String(result.failed)),
+              color: 'warning' as const,
+            })
+        if (toast) {
+          mockAddToast(toast)
+        }
         options.onComplete?.(result)
         return result
       }
 
       const result = {
         ...mockBatchResult,
+        failedErrors: mockBatchResult.failedErrors ?? [],
+        warningCount: mockBatchResult.warningCount ?? 0,
+        warningMessages: mockBatchResult.warningMessages ?? [],
         total: items.length,
       }
       mockBatchExecute(items)
+      const toast = options.getToast?.(result) ?? (result.failed === 0
+        ? {
+          title: result.warningMessages[0] ?? options.messages.success.replace('{count}', String(result.succeeded)),
+          color: result.warningMessages.length > 0 ? 'warning' as const : 'success' as const,
+        }
+        : result.succeeded === 0
+          ? {
+            title: options.messages.failure.replace('{count}', String(result.failed)),
+            color: 'danger' as const,
+          }
+          : {
+            title: options.messages.partial
+              .replace('{succeeded}', String(result.succeeded))
+              .replace('{failed}', String(result.failed)),
+            color: 'warning' as const,
+          })
+      if (toast) {
+        mockAddToast(toast)
+      }
       options.onComplete?.(result)
       return result
     }),
@@ -134,6 +185,9 @@ describe('FavoritesPage', () => {
       total: 1,
       succeededItems: ['/docs/report.pdf'],
       failedItems: [],
+      failedErrors: [],
+      warningCount: 0,
+      warningMessages: [],
     }
     vi.mocked(favoritesApi.listFavorites).mockResolvedValue(mockFavorites)
   })
@@ -211,6 +265,16 @@ describe('FavoritesPage', () => {
     await waitFor(() => {
       expect(screen.getByText('收藏功能暂不可用')).toBeInTheDocument()
       expect(screen.getByRole('button', { name: '重新加载' })).toBeInTheDocument()
+    })
+  })
+
+  it('shows a generic error state for non-feature favorites errors', async () => {
+    vi.mocked(favoritesApi.listFavorites).mockRejectedValue(new FavoritesError('favorites crashed', 500, 'FAVORITES_ERROR'))
+    render(<FavoritesPage />)
+
+    await waitFor(() => {
+      expect(screen.getByText('加载收藏列表失败')).toBeInTheDocument()
+      expect(screen.getByText('favorites crashed')).toBeInTheDocument()
     })
   })
 
@@ -329,6 +393,52 @@ describe('FavoritesPage', () => {
     })
   })
 
+  it('shows warning toast when favorites reload finds the feature disabled', async () => {
+    const user = userEvent.setup()
+    vi.mocked(favoritesApi.listFavorites)
+      .mockRejectedValueOnce(new Error('Network error'))
+      .mockRejectedValueOnce(new FavoritesError('favorites feature disabled', 503, 'FAVORITES_FEATURE_DISABLED'))
+
+    render(<FavoritesPage />)
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: '重新加载' })).toBeInTheDocument()
+    })
+
+    await user.click(screen.getByRole('button', { name: '重新加载' }))
+
+    await waitFor(() => {
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '收藏功能已关闭',
+        description: '当前服务已关闭收藏功能。如需使用，请在系统设置中重新启用。',
+        color: 'warning',
+      })
+    })
+  })
+
+  it('shows danger toast when favorites reload fails with a generic error', async () => {
+    const user = userEvent.setup()
+    vi.mocked(favoritesApi.listFavorites)
+      .mockRejectedValueOnce(new Error('Network error'))
+      .mockRejectedValueOnce(new Error('still down'))
+
+    render(<FavoritesPage />)
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: '重新加载' })).toBeInTheDocument()
+    })
+
+    await user.click(screen.getByRole('button', { name: '重新加载' }))
+
+    await waitFor(() => {
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '刷新失败',
+        description: 'still down',
+        color: 'danger',
+      })
+    })
+  })
+
   it('supports keyboard navigation to a favorite item', async () => {
     const user = userEvent.setup()
     render(<FavoritesPage />)
@@ -344,6 +454,20 @@ describe('FavoritesPage', () => {
     expect(mockNavigate).toHaveBeenCalledWith('/files/docs', {
       state: { highlightPath: '/docs/report.pdf' },
     })
+  })
+
+  it('navigates directly to a favorite folder', async () => {
+    const user = userEvent.setup()
+
+    render(<FavoritesPage />)
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: '打开文件夹 /photos/' })).toBeInTheDocument()
+    })
+
+    await user.click(screen.getByRole('button', { name: '打开文件夹 /photos/' }))
+
+    expect(mockNavigate).toHaveBeenCalledWith('/files/photos/')
   })
 
   it('encodes special characters when navigating to a favorite item', async () => {
@@ -369,6 +493,70 @@ describe('FavoritesPage', () => {
     })
   })
 
+  it('selects and clears all favorites from the list header checkbox', async () => {
+    const user = userEvent.setup()
+
+    render(<FavoritesPage />)
+
+    await waitFor(() => {
+      expect(screen.getAllByRole('checkbox').length).toBeGreaterThan(2)
+    })
+
+    const selectAll = screen.getAllByRole('checkbox')[0]
+    await user.click(selectAll)
+
+    await waitFor(() => {
+      expect(screen.getByText((_, node) => node?.textContent?.replace(/\s+/g, '') === '已选择2项')).toBeInTheDocument()
+    })
+
+    await user.click(selectAll)
+
+    await waitFor(() => {
+      expect(screen.queryByText((_, node) => node?.textContent?.replace(/\s+/g, '') === '已选择2项')).not.toBeInTheDocument()
+    })
+  })
+
+  it('clears selected favorites from the selection bar action', async () => {
+    const user = userEvent.setup()
+
+    render(<FavoritesPage />)
+
+    await waitFor(() => {
+      expect(screen.getAllByRole('checkbox').length).toBeGreaterThan(2)
+    })
+
+    await user.click(screen.getAllByRole('checkbox')[1])
+
+    await waitFor(() => {
+      expect(screen.getByText((_, node) => node?.textContent?.replace(/\s+/g, '') === '已选择1项')).toBeInTheDocument()
+    })
+
+    await user.click(screen.getByRole('button', { name: '取消选择' }))
+
+    expect(screen.queryByText((_, node) => node?.textContent?.replace(/\s+/g, '') === '已选择1项')).not.toBeInTheDocument()
+  })
+
+  it('deselects a selected favorite from its row checkbox', async () => {
+    const user = userEvent.setup()
+
+    render(<FavoritesPage />)
+
+    await waitFor(() => {
+      expect(screen.getAllByRole('checkbox').length).toBeGreaterThan(2)
+    })
+
+    const reportCheckbox = screen.getAllByRole('checkbox')[1]
+    await user.click(reportCheckbox)
+
+    await waitFor(() => {
+      expect(screen.getByText((_, node) => node?.textContent?.replace(/\s+/g, '') === '已选择1项')).toBeInTheDocument()
+    })
+
+    await user.click(reportCheckbox)
+
+    expect(screen.queryByText((_, node) => node?.textContent?.replace(/\s+/g, '') === '已选择1项')).not.toBeInTheDocument()
+  })
+
   it('keeps failed favorites selected after partial batch removal', async () => {
     const user = userEvent.setup()
     mockBatchResult = {
@@ -377,6 +565,9 @@ describe('FavoritesPage', () => {
       total: 2,
       succeededItems: ['/docs/report.pdf'],
       failedItems: ['/photos/'],
+      failedErrors: [new Error('remove failed')],
+      warningCount: 0,
+      warningMessages: [],
     }
 
     render(<FavoritesPage />)
@@ -442,6 +633,86 @@ describe('FavoritesPage', () => {
     })
   })
 
+  it('shows disabled toast when every batch remove fails because favorites are disabled', async () => {
+    const user = userEvent.setup()
+    mockUseRealBatchOperation = true
+    vi.mocked(favoritesApi.removeFavorite).mockRejectedValue(
+      new FavoritesError('favorites feature disabled', 503, 'FAVORITES_FEATURE_DISABLED')
+    )
+
+    render(<FavoritesPage />)
+
+    await waitFor(() => {
+      expect(screen.getAllByRole('checkbox').length).toBeGreaterThan(2)
+    })
+
+    const checkboxes = screen.getAllByRole('checkbox')
+    await user.click(checkboxes[1])
+    await user.click(checkboxes[2])
+    await user.click(screen.getByText('取消收藏'))
+
+    await waitFor(() => {
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '收藏功能已关闭',
+        description: '当前服务已关闭收藏功能。如需使用，请在系统设置中重新启用。',
+        color: 'warning',
+      })
+      expect(screen.getByText((_, node) => node?.textContent?.replace(/\s+/g, '') === '已选择2项')).toBeInTheDocument()
+    })
+  })
+
+  it('shows unavailable toast when every batch remove fails because favorites are unavailable', async () => {
+    const user = userEvent.setup()
+    mockUseRealBatchOperation = true
+    vi.mocked(favoritesApi.removeFavorite).mockRejectedValue(
+      new FavoritesError('favorites unavailable', 503, 'FAVORITES_UNAVAILABLE')
+    )
+
+    render(<FavoritesPage />)
+
+    await waitFor(() => {
+      expect(screen.getAllByRole('checkbox').length).toBeGreaterThan(2)
+    })
+
+    const checkboxes = screen.getAllByRole('checkbox')
+    await user.click(checkboxes[1])
+    await user.click(checkboxes[2])
+    await user.click(screen.getByText('取消收藏'))
+
+    await waitFor(() => {
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '收藏功能暂不可用',
+        description: '收藏存储未成功初始化，请检查系统健康状态或稍后重试。',
+        color: 'warning',
+      })
+      expect(screen.getByText((_, node) => node?.textContent?.replace(/\s+/g, '') === '已选择2项')).toBeInTheDocument()
+    })
+  })
+
+  it('falls back to the generic failure toast when every batch remove fails for a normal error', async () => {
+    const user = userEvent.setup()
+    mockUseRealBatchOperation = true
+    vi.mocked(favoritesApi.removeFavorite).mockRejectedValue(new Error('remove failed'))
+
+    render(<FavoritesPage />)
+
+    await waitFor(() => {
+      expect(screen.getAllByRole('checkbox').length).toBeGreaterThan(2)
+    })
+
+    const checkboxes = screen.getAllByRole('checkbox')
+    await user.click(checkboxes[1])
+    await user.click(checkboxes[2])
+    await user.click(screen.getByText('取消收藏'))
+
+    await waitFor(() => {
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '2 项取消收藏失败',
+        color: 'danger',
+      })
+    })
+  })
+
   it('optimistically removes a selected favorite before refetch completes', async () => {
     const user = userEvent.setup()
     vi.mocked(favoritesApi.removeFavorite).mockResolvedValue({ message: 'favorite removed successfully' })
@@ -484,6 +755,9 @@ describe('FavoritesPage', () => {
       total: 2,
       succeededItems: ['/docs/report.pdf', '/photos/'],
       failedItems: [],
+      failedErrors: [],
+      warningCount: 0,
+      warningMessages: [],
     }
     vi.mocked(favoritesApi.listFavorites).mockReset()
     vi.mocked(favoritesApi.listFavorites).mockResolvedValueOnce(mockFavorites)
@@ -645,6 +919,27 @@ describe('FavoritesPage', () => {
     expect(screen.queryByText('report.pdf')).not.toBeInTheDocument()
   })
 
+  it('closes the note editor when canceling an idle edit', async () => {
+    const user = userEvent.setup()
+
+    render(<FavoritesPage />)
+
+    await waitFor(() => {
+      expect(screen.getByText('report.pdf')).toBeInTheDocument()
+    })
+
+    await user.click(screen.getByRole('button', { name: '编辑备注 /docs/report.pdf' }))
+
+    await waitFor(() => {
+      expect(screen.getByRole('heading', { name: '编辑备注' })).toBeInTheDocument()
+    })
+
+    await user.click(screen.getByRole('button', { name: '取消' }))
+
+    expect(screen.queryByRole('heading', { name: '编辑备注' })).not.toBeInTheDocument()
+    expect(favoritesApi.updateFavoriteNote).not.toHaveBeenCalled()
+  })
+
   it('keeps the note editor open while a pending save is in flight', async () => {
     const user = userEvent.setup()
     const pendingNoteSave = createDeferred<{ message?: string }>()
@@ -738,9 +1033,49 @@ describe('FavoritesPage', () => {
     })
   })
 
+  it('uses the localized remove success toast for alternate backend messages', async () => {
+    const user = userEvent.setup()
+    vi.mocked(favoritesApi.removeFavorite).mockResolvedValueOnce({ message: 'removed' })
+
+    render(<FavoritesPage />)
+
+    await waitFor(() => {
+      expect(screen.getByText('report.pdf')).toBeInTheDocument()
+    })
+
+    await user.click(screen.getByRole('button', { name: '取消收藏 /docs/report.pdf' }))
+
+    await waitFor(() => {
+      expect(mockAddToast).toHaveBeenCalledWith({ title: '已取消收藏', color: 'success' })
+    })
+  })
+
   it('shows the localized note update success toast after a successful save', async () => {
     const user = userEvent.setup()
     vi.mocked(favoritesApi.updateFavoriteNote).mockResolvedValueOnce({ message: 'favorite note updated successfully' })
+
+    render(<FavoritesPage />)
+
+    await waitFor(() => {
+      expect(screen.getByText('report.pdf')).toBeInTheDocument()
+    })
+
+    await user.click(screen.getByRole('button', { name: '编辑备注 /docs/report.pdf' }))
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: '保存' })).toBeInTheDocument()
+    })
+
+    await user.click(screen.getByRole('button', { name: '保存' }))
+
+    await waitFor(() => {
+      expect(mockAddToast).toHaveBeenCalledWith({ title: '备注已更新', color: 'success' })
+    })
+  })
+
+  it('uses the localized note update success toast for alternate backend messages', async () => {
+    const user = userEvent.setup()
+    vi.mocked(favoritesApi.updateFavoriteNote).mockResolvedValueOnce({ message: 'updated' })
 
     render(<FavoritesPage />)
 

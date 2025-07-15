@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { act, render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { BrowserRouter } from 'react-router-dom'
@@ -277,6 +277,32 @@ describe('UsersPage', () => {
       })
     })
 
+    it('closes and resets the create modal when cancellation is allowed', async () => {
+      const user = userEvent.setup()
+      renderUsersPage()
+
+      await user.click(screen.getByRole('button', { name: /添加用户/i }))
+
+      const usernameInput = await screen.findByLabelText(/用户名/i)
+      const passwordInput = screen.getByLabelText(/密码/i)
+      const emailInput = screen.getByLabelText(/邮箱/i)
+
+      fireEvent.change(usernameInput, { target: { value: 'draftuser' } })
+      fireEvent.change(passwordInput, { target: { value: 'password123' } })
+      fireEvent.change(emailInput, { target: { value: 'draft@example.com' } })
+      await user.click(screen.getByRole('button', { name: '取消' }))
+
+      await waitFor(() => {
+        expect(screen.queryByLabelText(/用户名/i)).not.toBeInTheDocument()
+      })
+
+      await user.click(screen.getByRole('button', { name: /添加用户/i }))
+
+      expect(await screen.findByLabelText(/用户名/i)).toHaveValue('')
+      expect(screen.getByLabelText(/密码/i)).toHaveValue('')
+      expect(screen.getByLabelText(/邮箱/i)).toHaveValue('')
+    })
+
     it('submits create form', async () => {
       vi.mocked(usersApi.createUser).mockResolvedValue({
         success: true,
@@ -299,13 +325,13 @@ describe('UsersPage', () => {
       
       await user.click(screen.getByRole('button', { name: /添加用户/i }))
       
-      await waitFor(() => {
-        expect(screen.getByLabelText(/用户名/i)).toBeInTheDocument()
-      })
+      const usernameInput = await screen.findByLabelText(/用户名/i)
+      const passwordInput = screen.getByLabelText(/密码/i)
+      const emailInput = screen.getByLabelText(/邮箱/i)
 
-      await user.type(screen.getByLabelText(/用户名/i), 'newuser')
-      await user.type(screen.getByLabelText(/密码/i), 'password123')
-      await user.type(screen.getByLabelText(/邮箱/i), 'new@example.com')
+      fireEvent.change(usernameInput, { target: { value: 'newuser' } })
+      fireEvent.change(passwordInput, { target: { value: 'password123' } })
+      fireEvent.change(emailInput, { target: { value: 'new@example.com' } })
       
       await user.click(screen.getByRole('button', { name: '创建' }))
       
@@ -339,9 +365,9 @@ describe('UsersPage', () => {
       renderUsersPage()
 
       await user.click(screen.getByRole('button', { name: /添加用户/i }))
-      await user.type(screen.getByLabelText(/用户名/i), 'alice')
-      await user.type(screen.getByLabelText(/密码/i), 'password123')
-      await user.type(screen.getByLabelText(/邮箱/i), 'alice@example.com')
+      fireEvent.change(screen.getByLabelText(/用户名/i), { target: { value: 'alice' } })
+      fireEvent.change(screen.getByLabelText(/密码/i), { target: { value: 'password123' } })
+      fireEvent.change(screen.getByLabelText(/邮箱/i), { target: { value: 'alice@example.com' } })
       await user.click(screen.getByRole('button', { name: '创建' }))
 
       await waitFor(() => {
@@ -375,9 +401,9 @@ describe('UsersPage', () => {
       renderUsersPage()
 
       await user.click(screen.getByRole('button', { name: /添加用户/i }))
-      await user.type(screen.getByLabelText(/用户名/i), 'alice')
-      await user.type(screen.getByLabelText(/密码/i), 'password123')
-      await user.type(screen.getByLabelText(/邮箱/i), 'alice@example.com')
+      fireEvent.change(screen.getByLabelText(/用户名/i), { target: { value: 'alice' } })
+      fireEvent.change(screen.getByLabelText(/密码/i), { target: { value: 'password123' } })
+      fireEvent.change(screen.getByLabelText(/邮箱/i), { target: { value: 'alice@example.com' } })
       await user.click(screen.getByRole('button', { name: '创建' }))
 
       await waitFor(() => {
@@ -417,8 +443,8 @@ describe('UsersPage', () => {
       renderUsersPage()
 
       await user.click(screen.getByRole('button', { name: /添加用户/i }))
-      await user.type(screen.getByLabelText(/用户名/i), 'admin')
-      await user.type(screen.getByLabelText(/密码/i), 'password123')
+      fireEvent.change(screen.getByLabelText(/用户名/i), { target: { value: 'admin' } })
+      fireEvent.change(screen.getByLabelText(/密码/i), { target: { value: 'password123' } })
       await user.click(screen.getByRole('button', { name: '创建' }))
 
       await waitFor(() => {
@@ -455,8 +481,8 @@ describe('UsersPage', () => {
       renderUsersPage()
 
       await user.click(screen.getByRole('button', { name: /添加用户/i }))
-      await user.type(screen.getByLabelText(/用户名/i), 'newuser')
-      await user.type(screen.getByLabelText(/密码/i), 'password123')
+      fireEvent.change(screen.getByLabelText(/用户名/i), { target: { value: 'newuser' } })
+      fireEvent.change(screen.getByLabelText(/密码/i), { target: { value: 'password123' } })
       await user.click(screen.getByRole('button', { name: '创建' }))
 
       await waitFor(() => {
@@ -482,6 +508,28 @@ describe('UsersPage', () => {
 
       await waitFor(() => {
         expect(screen.getByText('删除用户')).toBeInTheDocument()
+      })
+    })
+
+    it('closes the delete confirmation modal when cancellation is allowed', async () => {
+      const user = userEvent.setup()
+      renderUsersPage()
+
+      await waitFor(() => {
+        expect(screen.getByText('testuser')).toBeInTheDocument()
+      })
+
+      await user.click(screen.getByRole('button', { name: 'testuser 用户操作' }))
+      await user.click(screen.getAllByRole('menuitem').find((item) => item.textContent?.includes('删除用户'))!)
+
+      await waitFor(() => {
+        expect(screen.getByRole('heading', { name: '确认删除' })).toBeInTheDocument()
+      })
+
+      await user.click(screen.getByRole('button', { name: '取消' }))
+
+      await waitFor(() => {
+        expect(screen.queryByRole('heading', { name: '确认删除' })).not.toBeInTheDocument()
       })
     })
 
@@ -687,6 +735,36 @@ describe('UsersPage', () => {
 
       await waitFor(() => {
         expect(screen.getByText('重置密码')).toBeInTheDocument()
+      })
+    })
+
+    it('closes and clears the reset password modal when cancellation is allowed', async () => {
+      const user = userEvent.setup()
+      renderUsersPage()
+
+      await waitFor(() => {
+        expect(screen.getByText('testuser')).toBeInTheDocument()
+      })
+
+      await user.click(screen.getByRole('button', { name: 'testuser 用户操作' }))
+      await user.click(screen.getAllByRole('menuitem').find((item) => item.textContent?.includes('重置密码'))!)
+
+      await waitFor(() => {
+        expect(screen.getByLabelText('新密码')).toBeInTheDocument()
+      })
+
+      await user.type(screen.getByLabelText('新密码'), 'password123')
+      await user.click(screen.getByRole('button', { name: '取消' }))
+
+      await waitFor(() => {
+        expect(screen.queryByLabelText('新密码')).not.toBeInTheDocument()
+      })
+
+      await user.click(screen.getByRole('button', { name: 'testuser 用户操作' }))
+      await user.click(screen.getAllByRole('menuitem').find((item) => item.textContent?.includes('重置密码'))!)
+
+      await waitFor(() => {
+        expect(screen.getByLabelText('新密码')).toHaveValue('')
       })
     })
 
@@ -909,8 +987,8 @@ describe('UsersPage', () => {
         expect(screen.getByLabelText(/用户名/i)).toBeInTheDocument()
       })
 
-      await user.type(screen.getByLabelText(/用户名/i), 'newuser')
-      await user.type(screen.getByLabelText(/密码/i), 'short')
+      fireEvent.change(screen.getByLabelText(/用户名/i), { target: { value: 'newuser' } })
+      fireEvent.change(screen.getByLabelText(/密码/i), { target: { value: 'short' } })
 
       expect(screen.getByRole('button', { name: '创建' })).toBeDisabled()
       expect(usersApi.createUser).not.toHaveBeenCalled()
@@ -928,8 +1006,8 @@ describe('UsersPage', () => {
         expect(screen.getByLabelText(/用户名/i)).toBeInTheDocument()
       })
 
-      await user.type(screen.getByLabelText(/用户名/i), 'newuser')
-      await user.type(screen.getByLabelText(/密码/i), 'password123')
+      fireEvent.change(screen.getByLabelText(/用户名/i), { target: { value: 'newuser' } })
+      fireEvent.change(screen.getByLabelText(/密码/i), { target: { value: 'password123' } })
       await user.click(screen.getByRole('button', { name: '创建' }))
 
       await waitFor(() => {

@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom'
 import { render, screen } from '@testing-library/react'
 import { ProtectedRoute } from './ProtectedRoute'
@@ -19,6 +19,59 @@ function LoginRedirectProbe() {
 }
 
 describe('ProtectedRoute', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  it('shows a loading state while auth is being checked', () => {
+    useAuthStoreMock.mockReturnValue({ isLoading: true, authEnabled: true })
+    useIsAuthenticatedMock.mockReturnValue(false)
+    useIsAdminMock.mockReturnValue(false)
+
+    render(
+      <MemoryRouter>
+        <ProtectedRoute>
+          <div>private</div>
+        </ProtectedRoute>
+      </MemoryRouter>
+    )
+
+    expect(screen.getByText('加载中...')).toBeInTheDocument()
+    expect(screen.queryByText('private')).not.toBeInTheDocument()
+  })
+
+  it('allows access when server auth is disabled', () => {
+    useAuthStoreMock.mockReturnValue({ isLoading: false, authEnabled: false })
+    useIsAuthenticatedMock.mockReturnValue(false)
+    useIsAdminMock.mockReturnValue(false)
+
+    render(
+      <MemoryRouter>
+        <ProtectedRoute>
+          <div>private</div>
+        </ProtectedRoute>
+      </MemoryRouter>
+    )
+
+    expect(screen.getByText('private')).toBeInTheDocument()
+  })
+
+  it('renders children for authenticated admin-only access', () => {
+    useAuthStoreMock.mockReturnValue({ isLoading: false, authEnabled: true })
+    useIsAuthenticatedMock.mockReturnValue(true)
+    useIsAdminMock.mockReturnValue(true)
+
+    render(
+      <MemoryRouter>
+        <ProtectedRoute adminOnly>
+          <div>settings</div>
+        </ProtectedRoute>
+      </MemoryRouter>
+    )
+
+    expect(screen.getByText('settings')).toBeInTheDocument()
+  })
+
   it('preserves query and hash in the post-login redirect target', () => {
     useAuthStoreMock.mockReturnValue({ isLoading: false, authEnabled: true })
     useIsAuthenticatedMock.mockReturnValue(false)

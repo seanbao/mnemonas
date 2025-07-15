@@ -254,6 +254,7 @@ describe('DashboardPage', () => {
     })
 
     it('surfaces critical disk space risk from the overview', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
       mockGetStorageStats.mockResolvedValueOnce({
         fileCount: 42,
         fileCountAvailable: true,
@@ -272,8 +273,33 @@ describe('DashboardPage', () => {
 
       await waitFor(() => {
         expect(screen.getByText('存储空间严重不足')).toBeTruthy()
-        expect(screen.getByText(/尽快清理回收站/)).toBeTruthy()
-        expect(screen.getByRole('button', { name: '查看存储' })).toBeTruthy()
+          expect(screen.getByText(/尽快清理回收站/)).toBeTruthy()
+          expect(screen.getByRole('button', { name: '查看存储' })).toBeTruthy()
+        })
+
+      await user.click(screen.getByRole('button', { name: '查看存储' }))
+      expect(mockNavigate).toHaveBeenCalledWith('/storage')
+    })
+
+    it('surfaces warning disk space risk from the overview', async () => {
+      mockGetStorageStats.mockResolvedValueOnce({
+        fileCount: 42,
+        fileCountAvailable: true,
+        storageStatsAvailable: true,
+        totalSize: 1073741824,
+        totalObjects: 100,
+        dedupRatio: 1.5,
+        diskStatsAvailable: true,
+        diskTotal: 21474836480,
+        diskAvailable: 2147483648,
+        diskUsed: 19327352832,
+        diskUsageRatio: 0.9,
+      })
+
+      render(<DashboardPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('存储空间偏紧')).toBeTruthy()
       })
     })
 
@@ -338,6 +364,28 @@ describe('DashboardPage', () => {
           title: '刷新暂不可用',
           description: '部分系统概览数据当前不可用，请检查服务状态后重试。',
           color: 'warning',
+        })
+      })
+    })
+
+    it('shows danger toast when retry fails without an unavailable error', async () => {
+      const user = userEvent.setup()
+      mockGetHealth.mockRejectedValue(new Error('health failed'))
+      mockGetStorageStats.mockRejectedValue(new Error('stats failed'))
+
+      render(<DashboardPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('重新加载')).toBeTruthy()
+      })
+
+      await user.click(screen.getByText('重新加载'))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '刷新失败',
+          description: '系统概览刷新失败，请稍后重试。',
+          color: 'danger',
         })
       })
     })
@@ -575,6 +623,20 @@ describe('DashboardPage', () => {
       await waitFor(() => {
         expect(screen.getByText('0.1.0')).toBeTruthy()
       })
+    })
+  })
+
+  describe('recent activity', () => {
+    it('navigates to the activity page from the recent activity header', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      render(<DashboardPage />)
+
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: /查看全部/i })).toBeTruthy()
+      })
+
+      await user.click(screen.getByRole('button', { name: /查看全部/i }))
+      expect(mockNavigate).toHaveBeenCalledWith('/activity')
     })
   })
 

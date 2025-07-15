@@ -76,6 +76,16 @@ const renderWithRouter = (shareId: string) => {
   )
 }
 
+const renderWithoutShareId = () => {
+  return render(
+    <MemoryRouter initialEntries={['/s']}>
+      <Routes>
+        <Route path="/s" element={<ShareAccessPage />} />
+      </Routes>
+    </MemoryRouter>
+  )
+}
+
 function createDeferred<T>() {
   let resolve!: (value: T) => void
   let reject!: (reason?: unknown) => void
@@ -117,6 +127,27 @@ describe('ShareAccessPage', () => {
     
     await waitFor(() => {
       expect(screen.getByText('无法访问分享')).toBeInTheDocument()
+    })
+  })
+
+  it('shows an invalid link error and retry toast when the route has no share id', async () => {
+    const user = userEvent.setup()
+
+    renderWithoutShareId()
+
+    await waitFor(() => {
+      expect(screen.getByText('无法访问分享')).toBeInTheDocument()
+      expect(screen.getByText('无效的分享链接')).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: '重新加载' })).toBeInTheDocument()
+    })
+
+    await user.click(screen.getByRole('button', { name: '重新加载' }))
+
+    expect(mockGetPublicShare).not.toHaveBeenCalled()
+    expect(mockAddToast).toHaveBeenCalledWith({
+      title: '刷新失败',
+      description: '无效的分享链接',
+      color: 'danger',
     })
   })
 
@@ -292,6 +323,86 @@ describe('ShareAccessPage', () => {
     })
   })
 
+  it('shows password error feedback when verification is unauthorized', async () => {
+    const user = userEvent.setup()
+    mockGetPublicShare.mockResolvedValue({
+      id: 'abc123',
+      type: 'file',
+      has_password: true,
+      permission: 'read',
+    })
+    mockAccessShareWithPassword.mockRejectedValue(new ShareError('密码错误', 401))
+
+    renderWithRouter('abc123')
+
+    await waitFor(() => {
+      expect(screen.getByText('此分享需要密码')).toBeInTheDocument()
+    })
+
+    await user.type(screen.getByPlaceholderText('请输入密码'), 'wrong-secret')
+    await user.click(screen.getByText('验证密码'))
+
+    await waitFor(() => {
+      expect(mockAddToast).toHaveBeenCalledWith({ title: '密码错误', color: 'danger' })
+    })
+  })
+
+  it('shows disabled feedback when password verification finds sharing is off', async () => {
+    const user = userEvent.setup()
+    mockGetPublicShare.mockResolvedValue({
+      id: 'abc123',
+      type: 'file',
+      has_password: true,
+      permission: 'read',
+    })
+    mockAccessShareWithPassword.mockRejectedValue(new ShareError('share feature disabled', 503, 'SHARE_FEATURE_DISABLED'))
+
+    renderWithRouter('abc123')
+
+    await waitFor(() => {
+      expect(screen.getByText('此分享需要密码')).toBeInTheDocument()
+    })
+
+    await user.type(screen.getByPlaceholderText('请输入密码'), 'secret')
+    await user.click(screen.getByText('验证密码'))
+
+    await waitFor(() => {
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '分享功能已关闭',
+        description: '当前服务已关闭分享功能，公开分享链接暂不可访问。',
+        color: 'warning',
+      })
+    })
+  })
+
+  it('shows fallback feedback when password verification fails with an unknown value', async () => {
+    const user = userEvent.setup()
+    mockGetPublicShare.mockResolvedValue({
+      id: 'abc123',
+      type: 'file',
+      has_password: true,
+      permission: 'read',
+    })
+    mockAccessShareWithPassword.mockRejectedValue('verification stopped')
+
+    renderWithRouter('abc123')
+
+    await waitFor(() => {
+      expect(screen.getByText('此分享需要密码')).toBeInTheDocument()
+    })
+
+    await user.type(screen.getByPlaceholderText('请输入密码'), 'secret')
+    await user.click(screen.getByText('验证密码'))
+
+    await waitFor(() => {
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '验证失败',
+        description: '请稍后重试',
+        color: 'danger',
+      })
+    })
+  })
+
   it('shows file info when share is accessible', async () => {
     mockGetPublicShare.mockResolvedValue({
       id: 'abc123',
@@ -351,6 +462,122 @@ describe('ShareAccessPage', () => {
     await waitFor(() => {
       expect(screen.getByText('docs')).toBeInTheDocument()
       expect(screen.getByText('note.txt')).toBeInTheDocument()
+    })
+  })
+
+  it('shows a folder listing loading state while items are loading', async () => {
+    mockGetPublicShare.mockResolvedValue({
+      id: 'abc123',
+      type: 'folder',
+      has_password: false,
+      permission: 'read',
+      folder_items: 1,
+    })
+    mockGetPublicShareItems.mockImplementation(() => new Promise(() => {}))
+
+    renderWithRouter('abc123')
+
+    await waitFor(() => {
+      expect(screen.getByText('加载文件夹内容...')).toBeInTheDocument()
+    })
+  })
+
+  it('downloads a file from a shared folder', async () => {
+    const user = userEvent.setup()
+    mockGetPublicShare.mockResolvedValue({
+      id: 'abc123',
+      type: 'folder',
+      has_password: false,
+      permission: 'read',
+      folder_items: 1,
+    })
+    mockGetPublicShareItems.mockResolvedValue({
+      path: '',
+      items: [
+        { name: 'note.txt', path: 'note.txt', is_dir: false, size: 12, mod_time: '2024-01-02T00:00:00Z' },
+      ],
+    })
+    mockDownloadShare.mockResolvedValue(undefined)
+
+    renderWithRouter('abc123')
+
+    await waitFor(() => {
+      expect(screen.getByText('note.txt')).toBeInTheDocument()
+    })
+
+    await user.click(screen.getByRole('button', { name: '下载' }))
+
+    expect(mockDownloadShare).toHaveBeenCalledWith('abc123', {
+      filePath: 'note.txt',
+      filename: 'note.txt',
+    })
+  })
+
+  it('returns to password prompt when shared folder item download is unauthorized', async () => {
+    const user = userEvent.setup()
+    mockGetPublicShare.mockResolvedValue({
+      id: 'abc123',
+      type: 'folder',
+      has_password: false,
+      permission: 'read',
+      folder_items: 1,
+    })
+    mockGetPublicShareItems.mockResolvedValue({
+      path: '',
+      items: [
+        { name: 'note.txt', path: 'note.txt', is_dir: false, size: 12, mod_time: '2024-01-02T00:00:00Z' },
+      ],
+    })
+    mockDownloadShare.mockRejectedValue(new ShareError('unauthorized', 401))
+
+    renderWithRouter('abc123')
+
+    await waitFor(() => {
+      expect(screen.getByText('note.txt')).toBeInTheDocument()
+    })
+
+    await user.click(screen.getByRole('button', { name: '下载' }))
+
+    await waitFor(() => {
+      expect(screen.getByText('此分享需要密码')).toBeInTheDocument()
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '访问凭证已失效，请重新输入密码',
+        color: 'warning',
+      })
+    })
+  })
+
+  it('shows fallback feedback when shared folder item download fails with an unknown value', async () => {
+    const user = userEvent.setup()
+    mockGetPublicShare.mockResolvedValue({
+      id: 'abc123',
+      type: 'folder',
+      has_password: false,
+      permission: 'read',
+      folder_items: 1,
+    })
+    mockGetPublicShareItems.mockResolvedValue({
+      path: '',
+      items: [
+        { name: 'note.txt', path: 'note.txt', is_dir: false, size: 12, mod_time: '2024-01-02T00:00:00Z' },
+      ],
+    })
+    mockDownloadShare.mockRejectedValue('download stopped')
+
+    renderWithRouter('abc123')
+
+    await waitFor(() => {
+      expect(screen.getByText('note.txt')).toBeInTheDocument()
+    })
+
+    await user.click(screen.getByRole('button', { name: '下载' }))
+
+    await waitFor(() => {
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '下载失败',
+        description: '请稍后重试',
+        color: 'danger',
+      })
     })
   })
 
@@ -560,6 +787,35 @@ describe('ShareAccessPage', () => {
         title: '下载暂不可用',
         description: '分享内容当前不可访问，请检查系统状态或稍后重试。',
         color: 'warning',
+      })
+    })
+  })
+
+  it('shows failure toast when file download fails with a generic error', async () => {
+    const user = userEvent.setup()
+    mockGetPublicShare.mockResolvedValue({
+      id: 'abc123',
+      type: 'file',
+      has_password: false,
+      permission: 'read',
+      file_name: 'test.txt',
+      file_size: 10,
+    })
+    mockDownloadShare.mockRejectedValue(new Error('download failed'))
+
+    renderWithRouter('abc123')
+
+    await waitFor(() => {
+      expect(screen.getByText('下载文件')).toBeInTheDocument()
+    })
+
+    await user.click(screen.getByText('下载文件'))
+
+    await waitFor(() => {
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '下载失败',
+        description: 'download failed',
+        color: 'danger',
       })
     })
   })

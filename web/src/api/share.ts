@@ -591,14 +591,17 @@ export function formatExpiration(expiresAt?: string): string {
 export function formatDuration(duration: string): string {
   if (duration.endsWith('d')) {
     const days = parseInt(duration)
+    if (Number.isNaN(days)) return duration
     return `${days} 天`
   }
   if (duration.endsWith('h')) {
     const hours = parseInt(duration)
+    if (Number.isNaN(hours)) return duration
     return `${hours} 小时`
   }
   if (duration.endsWith('m')) {
     const mins = parseInt(duration)
+    if (Number.isNaN(mins)) return duration
     return `${mins} 分钟`
   }
   return duration
