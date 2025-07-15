@@ -1244,6 +1244,9 @@ func (s *Server) Router() http.Handler {
 // validatePath validates and cleans a file path, preventing path traversal attacks.
 func validatePath(filePath string) (string, error) {
 	normalized := strings.ReplaceAll(filePath, "\\", "/")
+	if strings.ContainsRune(normalized, '\x00') {
+		return "", errInvalidPath
+	}
 
 	// Clean the path first
 	cleaned := path.Clean("/" + normalized)

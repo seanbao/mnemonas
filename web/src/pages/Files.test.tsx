@@ -698,7 +698,7 @@ describe('FilesPage', () => {
       await user.dblClick(folderName)
 
       expect(mockFilesStoreState.setCurrentPath).toHaveBeenCalledWith('/documents')
-      expect(mockNavigate).toHaveBeenCalledWith('/files/documents', { replace: true })
+      expect(mockNavigate).toHaveBeenCalledWith('/files/documents', { replace: false })
       expect(mockNavigate).not.toHaveBeenCalledWith('/files', expect.objectContaining({ replace: true }))
     })
 
