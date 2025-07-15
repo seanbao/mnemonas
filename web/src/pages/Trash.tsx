@@ -62,7 +62,10 @@ function getAutoDeleteBadgeLabel(deletedAt: string, retentionDays: number | unde
   }
 
   const daysLeft = daysUntilDelete(deletedAt, retentionDays)
-  if (daysLeft === null || daysLeft > 7) {
+  if (daysLeft === null) {
+    return '已过期，等待清理'
+  }
+  if (daysLeft > 7) {
     return null
   }
   if (daysLeft === 0) {
@@ -632,7 +635,7 @@ export function TrashPage() {
   const retentionLabel = !retentionKnown
     ? '自动清理设置未知'
     : retentionEnabled && retentionDays !== undefined
-      ? retentionDays === 0
+      ? retentionDays <= 0
         ? '立即过期，等待清理'
         : `${retentionDays} 天后自动清理`
       : '自动清理未启用'
