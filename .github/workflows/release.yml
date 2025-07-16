@@ -254,6 +254,14 @@ jobs:
           cd dist
           sha256sum ./*.tar.gz > checksums.txt
 
+      - name: Verify release artifacts
+        run: |
+          ./scripts/verify-release-artifacts.sh \
+            --version "$GITHUB_REF_NAME" \
+            --repository "$GITHUB_REPOSITORY" \
+            --require-targets \
+            dist
+
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
