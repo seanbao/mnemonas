@@ -215,6 +215,12 @@ assert_release_workflow_contains \
 	'push: true'
 assert_release_workflow_contains \
 	'sha256sum ./*.tar.gz > checksums.txt' \
+	'Verify release artifacts' \
+	'./scripts/verify-release-artifacts.sh' \
+	'--version "$GITHUB_REF_NAME"' \
+	'--repository "$GITHUB_REPOSITORY"' \
+	'--require-targets' \
+	'            dist' \
 	'dist/checksums.txt'
 
 assert_installer_contains \
