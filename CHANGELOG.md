@@ -208,6 +208,7 @@
 - 统一 README、开发与测试文档中的前端 Node.js engine 要求，匹配 `web/package.json`
 - 安全策略文档补充 `make security-check NPM_AUDIT=1` 用法，避免误解前端依赖安全扫描默认行为
 - CI 和 release 工作流增加最小权限、job 级权限收缩、并发控制和 job 超时，减少权限面、重复运行和挂起风险
+- Release workflow 在创建 GitHub Release 前校验下载归档、checksums 和必需目标集合
 - Release archive 随包附带 `SUPPORT.md`
 - CI push/pull_request 触发分支覆盖 `main` 和 `master`，避免当前仓库默认分支未切换时漏跑检查
 - pre-commit 的 `golangci-lint` 版本对齐 CI/Makefile 使用的 v2.11.4

@@ -6,14 +6,14 @@ This document is the release-notes draft for the next public release. The final 
 
 ## Summary
 
-This release candidate focuses on improving MnemoNAS stability, public-access safety boundaries, deployment verifiability, and documentation maintainability as a self-hosted NAS. The current hardening branch is split into reviewable commits by risk area and has passed branch-range validation.
+This release candidate focuses on improving MnemoNAS stability, public-access safety boundaries, deployment verifiability, and documentation maintainability as a self-hosted NAS. The current hardening branch is split into reviewable commits by risk area and has branch-range validation evidence plus later narrow validation for Release workflow changes.
 
 ## Major Changes
 
 - Strengthened path, archive-download, WebDAV, public-share, workspace, CAS, and backup-restore boundaries, covering symlinks, traversal, percent-encoded dot segments, control characters, and rollback error paths.
 - Expanded backend and frontend coverage for authentication, users, home directories, directory quotas, directory access rules, share policies, and secure session defaults.
 - Improved visible Web quality. Core pages, public entry points, mobile layouts, baseline accessibility, runtime errors, failed requests, and broken visible text are covered by Playwright scans.
-- Hardened systemd, Docker, reverse proxy, public-access templates, doctor, release package, and release artifact verification paths.
+- Hardened systemd, Docker, reverse proxy, public-access templates, doctor, release package, and release artifact verification paths. The Release workflow checks archives, checksums, and the required target set before creating the GitHub Release.
 - Streamlined and synchronized Chinese and English documentation, including deployment, configuration, FAQ, roadmap, security, hardening progress, and pre-release review entry points.
 
 ## Release Artifacts
@@ -29,7 +29,7 @@ Archives should include a top-level directory, `nasd`, `dataplane`, Web UI stati
 
 ## Pre-Release Validation
 
-The current hardening branch has passed:
+The current hardening branch has the following validation evidence. Final publication should use the latest tag, Release workflow result, and any required latest-HEAD validation as the source of truth:
 
 - `GOTOOLCHAIN=local ./scripts/verify-changed.sh`
 - `GOTOOLCHAIN=local timeout 45m ./scripts/verify-changed.sh --base master`
@@ -37,6 +37,7 @@ The current hardening branch has passed:
 - `make docs-check`
 - `./scripts/test-release-package.sh`
 - `./scripts/test-release-artifacts.sh`
+- Release workflow incremental validation: `make workflows-check`, `make scripts-check`, `./scripts/check-secret-leaks.sh`, `make toolchains-check`, `git diff --check`
 - Playwright E2E: `369 passed`
 - Frontend unit tests: `3054 passed`
 - Docker build and `scripts/docker-smoke.sh`
