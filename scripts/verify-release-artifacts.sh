@@ -10,6 +10,7 @@ CHECK_IMAGE=0
 REQUIRE_TARGETS=0
 TMP_ROOT=""
 EXPECTED_TARGETS=(linux-amd64 linux-arm64 darwin-amd64 darwin-arm64)
+CHECKSUM_ARCHIVES=""
 
 cleanup() {
 	if [[ -n "$TMP_ROOT" && -d "$TMP_ROOT" ]]; then
@@ -99,6 +100,68 @@ archive_version() {
 	target="$(archive_target "$archive")"
 	prefix="${name%-"${target}"}"
 	printf '%s\n' "${prefix#mnemonas-}"
+}
+
+validate_checksums_manifest() {
+	local path="$1"
+	local line
+	local line_number=0
+	local hash
+	local rest
+	local filename
+	local normalized
+
+	CHECKSUM_ARCHIVES=""
+	while IFS= read -r line || [[ -n "$line" ]]; do
+		line_number=$((line_number + 1))
+		[[ -n "$line" ]] || fail "checksums.txt contains an empty line"
+		[[ "$line" != \\* ]] || fail "checksums.txt contains unsupported escaped filename syntax on line $line_number"
+		hash="${line%% *}"
+		[[ "$hash" != "$line" ]] || fail "checksums.txt line $line_number is malformed"
+		[[ "$hash" =~ ^[[:xdigit:]]{64}$ ]] || fail "checksums.txt line $line_number has an invalid SHA-256 digest"
+		rest="${line#"$hash"}"
+		case "$rest" in
+			"  "*|" *"*)
+				filename="${rest:2}"
+				;;
+			*)
+				fail "checksums.txt line $line_number is malformed"
+				;;
+		esac
+		[[ -n "$filename" ]] || fail "checksums.txt line $line_number has an empty filename"
+		normalized="${filename#./}"
+		case "$normalized" in
+			mnemonas-*.tar.gz)
+				;;
+			*)
+				fail "checksums.txt lists unsupported file: $filename"
+				;;
+		esac
+		case "$normalized" in
+			/*|*/*|.|..|-*)
+				fail "checksums.txt contains an unsafe file path: $filename"
+				;;
+		esac
+		case " $CHECKSUM_ARCHIVES " in
+			*" $normalized "*)
+				fail "checksums.txt lists duplicate archive: $normalized"
+				;;
+		esac
+		CHECKSUM_ARCHIVES+=" $normalized"
+	done <"$path"
+
+	[[ -n "$CHECKSUM_ARCHIVES" ]] || fail "checksums.txt does not list any release archives"
+}
+
+checksum_manifest_has_archive() {
+	local archive_name="$1"
+
+	case " $CHECKSUM_ARCHIVES " in
+		*" $archive_name "*)
+			return 0
+			;;
+	esac
+	return 1
 }
 
 validate_manifest_paths() {
@@ -244,16 +307,22 @@ need_tool sha256sum
 need_tool tar
 
 CHECKSUMS="$ARTIFACT_DIR/checksums.txt"
-[[ -f "$CHECKSUMS" ]] || fail "missing checksums file: $CHECKSUMS"
-
-if ! (cd "$ARTIFACT_DIR" && sha256sum -c checksums.txt); then
-	fail "sha256 checksum verification failed"
-fi
+[[ -e "$CHECKSUMS" ]] || fail "missing checksums file: $CHECKSUMS"
+assert_regular_file "$CHECKSUMS"
+validate_checksums_manifest "$CHECKSUMS"
 
 shopt -s nullglob
 archives=("$ARTIFACT_DIR"/mnemonas-*.tar.gz)
 shopt -u nullglob
 [[ "${#archives[@]}" -gt 0 ]] || fail "no MnemoNAS release archives found in $ARTIFACT_DIR"
+
+for archive in "${archives[@]}"; do
+	assert_regular_file "$archive"
+done
+
+if ! (cd "$ARTIFACT_DIR" && sha256sum -c checksums.txt); then
+	fail "sha256 checksum verification failed"
+fi
 
 TMP_ROOT="$(mktemp -d)"
 seen_targets=""
@@ -263,7 +332,7 @@ for archive in "${archives[@]}"; do
 	target="$(archive_target "$archive")"
 	found_version="$(archive_version "$archive")"
 
-	grep -Fq -- "$base" "$CHECKSUMS" || fail "checksums.txt does not list $base"
+	checksum_manifest_has_archive "$base" || fail "checksums.txt does not list $base"
 	if [[ -n "$VERSION" ]]; then
 		[[ "$found_version" == "$VERSION" ]] || fail "$base has version $found_version, expected $VERSION"
 	else

@@ -123,6 +123,24 @@ run_complete_release_passes() {
 	assert_file_contains "$out" "verified 4 archive(s) for v1.2.3"
 }
 
+run_binary_checksum_marker_passes() {
+	local case_dir="$TMP_ROOT/binary-checksum-marker"
+	local dist_dir="$case_dir/dist"
+	local out="$case_dir/out.log"
+
+	make_complete_release "$dist_dir" "v1.2.3" "seanbao/mnemonas"
+	awk '{ print $1 " *" $2 }' "$dist_dir/checksums.txt" >"$dist_dir/checksums.txt.tmp"
+	mv "$dist_dir/checksums.txt.tmp" "$dist_dir/checksums.txt"
+
+	bash "$REPO_ROOT/scripts/verify-release-artifacts.sh" \
+		--version v1.2.3 \
+		--repository seanbao/mnemonas \
+		--require-targets \
+		"$dist_dir" >"$out"
+
+	assert_file_contains "$out" "verified 4 archive(s) for v1.2.3"
+}
+
 run_missing_target_fails_in_strict_mode() {
 	local case_dir="$TMP_ROOT/missing-target"
 	local dist_dir="$case_dir/dist"
@@ -161,6 +179,47 @@ run_checksum_mismatch_fails() {
 
 	[[ "$status" -ne 0 ]] || fail "release artifact verifier accepted a checksum mismatch"
 	assert_file_contains "$out" "sha256 checksum verification failed"
+}
+
+run_checksum_path_escape_fails_before_checksum() {
+	local case_dir="$TMP_ROOT/checksum-path-escape"
+	local dist_dir="$case_dir/dist"
+	local out="$case_dir/out.log"
+	local status
+
+	mkdir -p "$dist_dir"
+	printf '%064d  mnemonas-v1.2.3-linux-amd64.tar.gz/../evil.tar.gz\n' 0 >"$dist_dir/checksums.txt"
+
+	set +e
+	bash "$REPO_ROOT/scripts/verify-release-artifacts.sh" "$dist_dir" >"$out" 2>&1
+	status=$?
+	set -e
+
+	[[ "$status" -ne 0 ]] || fail "release artifact verifier accepted an unsafe checksum path"
+	assert_file_contains "$out" "checksums.txt contains an unsafe file path"
+}
+
+run_archive_symlink_fails_before_checksum() {
+	local case_dir="$TMP_ROOT/archive-symlink"
+	local source_dir="$case_dir/source"
+	local dist_dir="$case_dir/dist"
+	local archive="mnemonas-v1.2.3-linux-amd64.tar.gz"
+	local out="$case_dir/out.log"
+	local status
+
+	mkdir -p "$source_dir" "$dist_dir"
+	make_release_archive "$source_dir" "v1.2.3" "linux-amd64" "seanbao/mnemonas"
+	ln -s "$source_dir/$archive" "$dist_dir/$archive"
+	printf '%064d  ./%s\n' 0 "$archive" >"$dist_dir/checksums.txt"
+
+	set +e
+	bash "$REPO_ROOT/scripts/verify-release-artifacts.sh" "$dist_dir" >"$out" 2>&1
+	status=$?
+	set -e
+
+	[[ "$status" -ne 0 ]] || fail "release artifact verifier accepted a symlinked archive"
+	assert_file_contains "$out" "expected regular file:"
+	assert_file_contains "$out" "$archive"
 }
 
 run_wrong_env_image_fails() {
@@ -241,8 +300,11 @@ run_remote_image_check_failure_fails() {
 }
 
 run_complete_release_passes
+run_binary_checksum_marker_passes
 run_missing_target_fails_in_strict_mode
 run_checksum_mismatch_fails
+run_checksum_path_escape_fails_before_checksum
+run_archive_symlink_fails_before_checksum
 run_wrong_env_image_fails
 run_remote_image_check_uses_docker_manifest
 run_remote_image_check_failure_fails
