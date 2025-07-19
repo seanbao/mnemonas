@@ -6,7 +6,7 @@
 
 ## 摘要
 
-本轮发布候选重点强化 MnemoNAS 作为自托管 NAS 的稳定性、公开访问安全边界、部署可验证性和文档可维护性。当前硬化分支按风险面拆分为可审阅提交，并具备分支范围验证和后续 release workflow 增量窄验证证据。
+本轮发布候选重点强化 MnemoNAS 作为自托管 NAS 的稳定性、公开访问安全边界、部署可验证性和文档可维护性。当前硬化分支按风险面拆分为可审阅提交，并已通过完整分支范围验证。
 
 ## 主要变化
 
@@ -29,10 +29,10 @@ Release workflow 预期生成以下产物：
 
 ## 发布前验证
 
-当前硬化分支已有以下验证证据；最终发布前应以最新 tag、Release workflow 结果和必要的最新 HEAD 验证为准：
+当前硬化分支已有以下验证证据；最终发布前应以最新 tag、Release workflow 结果和必要的环境验证为准：
 
 - `GOTOOLCHAIN=local ./scripts/verify-changed.sh`
-- `GOTOOLCHAIN=local timeout 45m ./scripts/verify-changed.sh --base master`
+- `GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master`
 - `make scripts-check`
 - `make docs-check`
 - `./scripts/test-release-package.sh`
