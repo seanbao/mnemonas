@@ -61,11 +61,12 @@ printf '%s\n' 'export const spec = true' >web/e2e/files.spec.ts
 printf '%s\n' 'pub fn touched() {}' >dataplane/src/lib.rs
 printf '%s\n' '[package]' 'name = "proto-gen"' 'version = "0.1.0"' >tools/proto-gen/Cargo.toml
 printf '%s\n' 'console.log("check")' >web/scripts/check-node.cjs
+printf '%s\n' '#!/usr/bin/env bash' 'exit 0' >scripts/release-readiness.sh
 printf '%s\n' 'manual' >misc.txt
 
 ./scripts/plan-hardening-commits.sh >"$output_dir/plan.out" 2>"$output_dir/plan.err"
 
-assert_file_contains "$output_dir/plan.out" "[hardening-commit-plan] grouped 13 changed file(s)"
+assert_file_contains "$output_dir/plan.out" "[hardening-commit-plan] grouped 14 changed file(s)"
 assert_file_contains "$output_dir/plan.out" "docs: documentation compaction and bilingual index"
 assert_file_contains "$output_dir/plan.out" "README.md"
 assert_file_contains "$output_dir/plan.out" "build(ci): local and CI gates"
@@ -82,6 +83,7 @@ assert_file_contains "$output_dir/plan.out" "web/e2e/files.spec.ts"
 assert_file_contains "$output_dir/plan.out" "web/package.json"
 assert_file_contains "$output_dir/plan.out" "build(docker-deploy): containers, deployment, and public entry"
 assert_file_contains "$output_dir/plan.out" "Dockerfile"
+assert_file_contains "$output_dir/plan.out" "scripts/release-readiness.sh"
 assert_file_contains "$output_dir/plan.out" "build(dataplane): Rust and proto-generator baseline"
 assert_file_contains "$output_dir/plan.out" "dataplane/src/lib.rs"
 assert_file_contains "$output_dir/plan.out" "tools/proto-gen/Cargo.toml"
@@ -157,7 +159,7 @@ rm -f misc.txt
 	cat "$output_dir/no-manual.err" >&2
 	fail "planner rejected fully classified paths in strict mode"
 }
-assert_file_contains "$output_dir/no-manual.out" "[hardening-commit-plan] grouped 12 changed file(s)"
+assert_file_contains "$output_dir/no-manual.out" "[hardening-commit-plan] grouped 13 changed file(s)"
 
 ./scripts/plan-hardening-commits.sh --group review-manual >"$output_dir/group-manual-empty.out" 2>"$output_dir/group-manual-empty.err"
 assert_file_contains "$output_dir/group-manual-empty.out" "group review-manual has no changed files"
