@@ -64,7 +64,9 @@ test.describe('侧边栏导航', () => {
 
   test('应显示侧边栏', async ({ page }) => {
     await expect(page).not.toHaveURL(/\/login/)
-    const sidebar = page.locator('aside, nav, [class*="sidebar"]').first()
+    await openSidebarIfNeeded(page)
+
+    const sidebar = page.getByTestId('app-sidebar-shell')
     await expect(sidebar).toBeVisible({ timeout: 5000 })
   })
 
