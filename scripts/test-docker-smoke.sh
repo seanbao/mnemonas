@@ -66,6 +66,9 @@ setup_fake_tools() {
 		'    if [[ -f "$FAKE_DOCKER_STATE/running" ]]; then' \
 		'      cat "$FAKE_DOCKER_STATE/container.name"' \
 		'    fi ;;' \
+		'  port)' \
+		'    printf "%s\n" "$*" > "$FAKE_DOCKER_STATE/port-query.args"' \
+		'    printf "%s\n" "${FAKE_DOCKER_PORT_OUTPUT:-127.0.0.1:19181}" ;;' \
 		'  logs)' \
 		'    printf "%s\n" "$*" > "$FAKE_DOCKER_STATE/logs.args"' \
 		'    printf "fake container logs\n" ;;' \
@@ -116,6 +119,30 @@ run_smoke_passes_and_cleans_container() {
 	assert_file_contains "$state_dir/port.args" "127.0.0.1:19080:8080"
 	assert_file_contains "$state_dir/image.args" "mnemonas:test"
 	assert_file_contains "$state_dir/rm.args" "-f mnemonas-test"
+	assert_file_not_exists "$state_dir/running"
+}
+
+run_smoke_uses_dynamic_loopback_port_by_default() {
+	local case_dir="$TMP_ROOT/dynamic-port"
+	local fake_bin="$case_dir/bin"
+	local state_dir="$case_dir/state"
+	local out="$case_dir/out.log"
+	mkdir -p "$state_dir"
+	setup_fake_tools "$fake_bin"
+
+	PATH="$fake_bin:$PATH" \
+		FAKE_DOCKER_STATE="$state_dir" \
+		MNEMONAS_DOCKER_SMOKE_CONTAINER="mnemonas-dynamic-test" \
+		MNEMONAS_DOCKER_SMOKE_EXPECT_VERSION="ci" \
+		MNEMONAS_DOCKER_SMOKE_RETRIES="1" \
+		MNEMONAS_DOCKER_SMOKE_SLEEP_SECONDS="1" \
+		bash "$REPO_ROOT/scripts/docker-smoke.sh" mnemonas:test > "$out"
+
+	assert_file_contains "$out" "[docker-smoke] mnemonas:test passed health and frontend checks at http://127.0.0.1:19181"
+	assert_file_contains "$state_dir/port.args" "127.0.0.1::8080"
+	assert_file_contains "$state_dir/port-query.args" "mnemonas-dynamic-test 8080/tcp"
+	assert_file_contains "$state_dir/curl.args" "http://127.0.0.1:19181/health"
+	assert_file_contains "$state_dir/rm.args" "-f mnemonas-dynamic-test"
 	assert_file_not_exists "$state_dir/running"
 }
 
@@ -197,6 +224,7 @@ run_smoke_does_not_remove_existing_container_when_run_fails() {
 }
 
 run_smoke_passes_and_cleans_container
+run_smoke_uses_dynamic_loopback_port_by_default
 run_smoke_rejects_version_mismatch_and_prints_logs
 run_smoke_fails_when_container_exits_before_health
 run_smoke_does_not_remove_existing_container_when_run_fails
