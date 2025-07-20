@@ -163,6 +163,7 @@ First public release target.
 - [ ] Run dependency security checks: `make security-check NPM_AUDIT=1`
 - [ ] Run Docker build and smoke checks: `make docker-check`
 - [ ] Confirm `./scripts/plan-hardening-commits.sh --fail-on-manual` reports no unclassified paths
+- [ ] Run release readiness summary: `./scripts/release-readiness.sh`
 - [ ] Update `CHANGELOG.md`, `CHANGELOG.en.md`, README version references, and [release notes draft](docs/release-notes.en.md)
 - [ ] Create and push a Git tag
 - [ ] After publication, download the GitHub Release artifacts and run `./scripts/verify-release-artifacts.sh --version <tag> --repository seanbao/mnemonas --require-targets --check-image <artifact-dir>` to verify release artifacts, checksums, and container image tags
