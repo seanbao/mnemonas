@@ -335,6 +335,8 @@ go test -fuzz=FuzzPasswordValidation ./internal/auth/
 
 ### 6.1 GitHub Actions 工作流
 
+Workflow 配置变更必须先运行 `make workflows-check`。该目标优先使用本机 `actionlint`；未安装时通过固定版本的 `go run github.com/rhysd/actionlint/cmd/actionlint` 执行，并在 CI 中作为独立 job 运行。
+
 ```yaml
 # .github/workflows/ci.yml
 name: CI
