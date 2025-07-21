@@ -83,13 +83,13 @@ jobs:
 
       - name: Test
         run: |
-          packages=$(go list ./... | grep -v '/web/node_modules/')
+          packages=$(make --no-print-directory go-packages)
           CGO_ENABLED=1 bash ./scripts/with-test-dataplane.sh go test -v -race -coverprofile=coverage.out $packages
 
       - name: Vulnerability scan
         run: |
           go install golang.org/x/vuln/cmd/govulncheck@${{ env.GOVULNCHECK_VERSION }}
-          packages=$(go list ./... | grep -v '/web/node_modules/')
+          packages=$(make --no-print-directory go-packages)
           "$(go env GOPATH)/bin/govulncheck" $packages
 
       - name: Upload coverage

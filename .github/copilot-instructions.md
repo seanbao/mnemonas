@@ -278,7 +278,7 @@ Rust 数据面（HTTP 端口 9091，gRPC 端口 9090）：
 
 ```bash
 # Go tests with temporary dataplane
-packages=$(go list ./... | grep -v '/web/node_modules/')
+packages=$(make --no-print-directory go-packages)
 CGO_ENABLED=1 bash ./scripts/with-test-dataplane.sh go test -v $packages
 
 # Rust tests

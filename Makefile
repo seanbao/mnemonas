@@ -1,4 +1,4 @@
-.PHONY: all build web-build test clean deps dev proto proto-go proto-rust fmt lint scripts-check security-check install-audit-tools docker e2e bench coverage check help
+.PHONY: all build web-build test clean deps dev proto proto-go proto-rust go-packages fmt lint scripts-check security-check install-audit-tools docker e2e bench coverage check help
 
 # 版本信息
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
@@ -6,6 +6,7 @@ BUILD_TIME ?= $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
 LDFLAGS := -s -w -X main.version=$(VERSION) -X main.buildTime=$(BUILD_TIME)
 GO_PACKAGES ?=
 GO_PACKAGE_PATTERN ?= ./...
+GO_PACKAGE_EXCLUDE_PATTERN ?= /web/node_modules/
 GO_LINT_PACKAGES ?= ./...
 GOVULNCHECK_VERSION ?= v1.3.0
 CARGO_AUDIT_VERSION ?= 0.22.1
@@ -17,8 +18,9 @@ WEB_SCRIPTS := web/scripts/start-e2e-backend.sh
 
 define RESOLVE_GO_PACKAGES
 packages="$(GO_PACKAGES)"; \
+go_list_env="$${GO_LIST_ENV:-}"; \
 if [ -z "$$packages" ]; then \
-	packages="$$(go list $(GO_PACKAGE_PATTERN) | grep -v '/web/node_modules/')"; \
+	packages="$$(env $$go_list_env go list $(GO_PACKAGE_PATTERN) | grep -v '$(GO_PACKAGE_EXCLUDE_PATTERN)')"; \
 fi; \
 if [ -z "$$packages" ]; then \
 	echo "❌ no Go packages resolved" >&2; \
@@ -48,6 +50,7 @@ help:
 	@echo "  e2e        - Run E2E acceptance tests"
 	@echo "  bench      - Run performance benchmarks"
 	@echo "  proto      - Generate protobuf code"
+	@echo "  go-packages - Print resolved Go package list"
 	@echo "  docker     - Build Docker image"
 	@echo "  clean      - Remove build artifacts"
 	@echo "  deps       - Download dependencies"
@@ -73,6 +76,10 @@ proto-go:
 proto-rust:
 	@echo "🦀 Generating Rust protobuf code..."
 	CARGO_TARGET_DIR=dataplane/target/proto-gen cargo run --manifest-path tools/proto-gen/Cargo.toml --locked
+
+go-packages:
+	@$(RESOLVE_GO_PACKAGES); \
+	printf '%s\n' $$packages
 
 # 构建
 build: proto web-build
@@ -185,11 +192,8 @@ scripts-check:
 # 安全依赖检查
 security-check:
 	@echo "🔐 Scanning Go dependencies..."
-	@packages="$$( $(GO_SECURITY_ENV) go list ./... | grep -v '/web/node_modules/' )"; \
-	if [ -z "$$packages" ]; then \
-		echo "❌ no Go packages resolved for security scan" >&2; \
-		exit 1; \
-	fi; \
+	@GO_LIST_ENV="$(GO_SECURITY_ENV)"; \
+	$(RESOLVE_GO_PACKAGES); \
 	if command -v govulncheck >/dev/null 2>&1; then \
 		$(GO_SECURITY_ENV) govulncheck $$packages; \
 	else \
