@@ -12,6 +12,31 @@ import (
 	"testing"
 )
 
+func TestCleanupTLSTempPath_ReturnsOperationError(t *testing.T) {
+	tmpDir := t.TempDir()
+	busyDir := filepath.Join(tmpDir, "busy")
+	if err := os.Mkdir(busyDir, 0700); err != nil {
+		t.Fatalf("failed to create busy temp dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(busyDir, "child"), []byte("data"), 0600); err != nil {
+		t.Fatalf("failed to create busy temp child: %v", err)
+	}
+
+	root, err := os.OpenRoot(tmpDir)
+	if err != nil {
+		t.Fatalf("failed to open root: %v", err)
+	}
+	defer root.Close()
+
+	operationErr := errors.New("write failed")
+	if got := cleanupTLSTempPath(root, "busy", operationErr); got != operationErr {
+		t.Fatalf("cleanupTLSTempPath() = %v, want original operation error", got)
+	}
+	if _, err := os.Stat(busyDir); err != nil {
+		t.Fatalf("expected busy temp path to remain after ignored cleanup error: %v", err)
+	}
+}
+
 func loadTestCertificateDER(t *testing.T, path string) []byte {
 	t.Helper()
 
@@ -200,6 +225,43 @@ func TestWriteTLSFile_ReturnsDirectorySyncError(t *testing.T) {
 	}
 	if info.Mode().Perm() != 0644 {
 		t.Fatalf("expected TLS file permissions 0644, got %o", info.Mode().Perm())
+	}
+}
+
+func TestWriteTLSFileAtomically_ReplacesExistingFileAndCleansTemp(t *testing.T) {
+	tmpDir := t.TempDir()
+	filePath := filepath.Join(tmpDir, "server.key")
+	if err := os.WriteFile(filePath, []byte("old-key"), 0644); err != nil {
+		t.Fatalf("WriteFile(existing key) error: %v", err)
+	}
+
+	if err := writeTLSFileAtomically(filePath, []byte("new-key"), 0600, errKeyFileSymlink, ".tls-key-*.tmp", "private key file"); err != nil {
+		t.Fatalf("writeTLSFileAtomically() error: %v", err)
+	}
+
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		t.Fatalf("ReadFile(key) error: %v", err)
+	}
+	if string(data) != "new-key" {
+		t.Fatalf("key content = %q, want new-key", string(data))
+	}
+	info, err := os.Stat(filePath)
+	if err != nil {
+		t.Fatalf("Stat(key) error: %v", err)
+	}
+	if info.Mode().Perm() != 0600 {
+		t.Fatalf("key permissions = %o, want 0600", info.Mode().Perm())
+	}
+
+	entries, err := os.ReadDir(tmpDir)
+	if err != nil {
+		t.Fatalf("ReadDir(tmpDir) error: %v", err)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), ".tls-key-") && strings.HasSuffix(entry.Name(), ".tmp") {
+			t.Fatalf("temporary TLS key file was not cleaned up: %s", entry.Name())
+		}
 	}
 }
 

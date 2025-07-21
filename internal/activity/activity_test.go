@@ -25,6 +25,35 @@ func writeActivityFixture(t *testing.T, path string, entries []Entry) {
 	}
 }
 
+func TestCleanupActivityTempPath_JoinsRemoveError(t *testing.T) {
+	tmpDir := t.TempDir()
+	busyDir := filepath.Join(tmpDir, "busy")
+	if err := os.Mkdir(busyDir, 0700); err != nil {
+		t.Fatalf("failed to create busy temp dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(busyDir, "child"), []byte("data"), 0600); err != nil {
+		t.Fatalf("failed to create busy temp child: %v", err)
+	}
+
+	root, err := os.OpenRoot(tmpDir)
+	if err != nil {
+		t.Fatalf("failed to open root: %v", err)
+	}
+	defer root.Close()
+
+	operationErr := errors.New("append failed")
+	err = cleanupActivityTempPath(root, "busy", operationErr)
+	if err == nil {
+		t.Fatal("expected cleanup error")
+	}
+	if !errors.Is(err, operationErr) {
+		t.Fatalf("expected joined error to include operation error, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "cleanup temp activity file busy") {
+		t.Fatalf("expected cleanup context in error, got %v", err)
+	}
+}
+
 func TestWriteActivityLogFile_ReturnsDirectorySyncError(t *testing.T) {
 	tmpDir := t.TempDir()
 	logPath := filepath.Join(tmpDir, "activity.json")
@@ -58,6 +87,43 @@ func TestWriteActivityLogFile_ReturnsDirectorySyncError(t *testing.T) {
 	}
 	if info.Mode().Perm() != 0640 {
 		t.Fatalf("expected activity log permissions 0640, got %o", info.Mode().Perm())
+	}
+}
+
+func TestWriteActivityLogFileAtomically_ReplacesExistingFileAndCleansTemp(t *testing.T) {
+	tmpDir := t.TempDir()
+	logPath := filepath.Join(tmpDir, "activity.json")
+	if err := os.WriteFile(logPath, []byte(`[{"id":"old"}]`), 0600); err != nil {
+		t.Fatalf("WriteFile(existing activity log) error: %v", err)
+	}
+
+	if err := writeActivityLogFileAtomically(logPath, []byte(`[{"id":"new"}]`)); err != nil {
+		t.Fatalf("writeActivityLogFileAtomically() error: %v", err)
+	}
+
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("ReadFile(activity log) error: %v", err)
+	}
+	if string(data) != `[{"id":"new"}]` {
+		t.Fatalf("activity log content = %q, want new content", string(data))
+	}
+	info, err := os.Stat(logPath)
+	if err != nil {
+		t.Fatalf("Stat(activity log) error: %v", err)
+	}
+	if info.Mode().Perm() != 0640 {
+		t.Fatalf("activity log permissions = %o, want 0640", info.Mode().Perm())
+	}
+
+	entries, err := os.ReadDir(tmpDir)
+	if err != nil {
+		t.Fatalf("ReadDir(tmpDir) error: %v", err)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), ".activity-") && strings.HasSuffix(entry.Name(), ".tmp") {
+			t.Fatalf("temporary activity log file was not cleaned up: %s", entry.Name())
+		}
 	}
 }
 

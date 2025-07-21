@@ -177,6 +177,160 @@ func TestNewService_CreateDir(t *testing.T) {
 	}
 }
 
+func TestServiceWaitBlocksUntilBackgroundSavesComplete(t *testing.T) {
+	tmpDir := t.TempDir()
+	svc, err := NewService(tmpDir)
+	if err != nil {
+		t.Fatalf("NewService failed: %v", err)
+	}
+
+	svc.saveWG.Add(1)
+	waitDone := make(chan struct{})
+	go func() {
+		svc.Wait()
+		close(waitDone)
+	}()
+
+	select {
+	case <-waitDone:
+		t.Fatal("Wait returned before background save completed")
+	case <-time.After(10 * time.Millisecond):
+	}
+
+	svc.saveWG.Done()
+
+	select {
+	case <-waitDone:
+	case <-time.After(time.Second):
+		t.Fatal("Wait did not return after background save completed")
+	}
+}
+
+func TestWaitForInProgressThumbnailReturnsClonedData(t *testing.T) {
+	tmpDir := t.TempDir()
+	svc, err := NewService(tmpDir)
+	if err != nil {
+		t.Fatalf("NewService failed: %v", err)
+	}
+	result := &thumbnailGenerationResult{
+		done: make(chan struct{}),
+		data: []byte("thumbnail-data"),
+	}
+	close(result.done)
+
+	data, err := svc.waitForInProgressThumbnail(context.Background(), filepath.Join(tmpDir, "missing.jpg"), result)
+	if err != nil {
+		t.Fatalf("waitForInProgressThumbnail() error: %v", err)
+	}
+	data[0] = 'X'
+	if string(result.data) != "thumbnail-data" {
+		t.Fatalf("result data mutated through returned slice: %q", string(result.data))
+	}
+}
+
+func TestWaitForInProgressThumbnailFallsBackToCacheWhenDataIsEmpty(t *testing.T) {
+	tmpDir := t.TempDir()
+	svc, err := NewService(tmpDir)
+	if err != nil {
+		t.Fatalf("NewService failed: %v", err)
+	}
+
+	cachePath := svc.cachePath(svc.cacheKey("/test/fallback.png", SizeSmall))
+	if err := os.MkdirAll(filepath.Dir(cachePath), 0755); err != nil {
+		t.Fatalf("MkdirAll(cache dir) failed: %v", err)
+	}
+	if err := os.WriteFile(cachePath, []byte("cached-thumbnail"), 0644); err != nil {
+		t.Fatalf("WriteFile(cachePath) failed: %v", err)
+	}
+
+	result := &thumbnailGenerationResult{done: make(chan struct{})}
+	close(result.done)
+
+	data, err := svc.waitForInProgressThumbnail(context.Background(), cachePath, result)
+	if err != nil {
+		t.Fatalf("waitForInProgressThumbnail() error: %v", err)
+	}
+	if string(data) != "cached-thumbnail" {
+		t.Fatalf("fallback cache data = %q, want cached-thumbnail", string(data))
+	}
+}
+
+func TestWaitForInProgressThumbnailReturnsContextError(t *testing.T) {
+	tmpDir := t.TempDir()
+	svc, err := NewService(tmpDir)
+	if err != nil {
+		t.Fatalf("NewService failed: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err = svc.waitForInProgressThumbnail(ctx, filepath.Join(tmpDir, "pending.jpg"), &thumbnailGenerationResult{done: make(chan struct{})})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got %v", err)
+	}
+}
+
+func TestScheduleInProgressExpiryClearsImmediatelyForNonPositiveTTL(t *testing.T) {
+	tmpDir := t.TempDir()
+	svc, err := NewService(tmpDir)
+	if err != nil {
+		t.Fatalf("NewService failed: %v", err)
+	}
+
+	cacheKey := svc.cacheKey("/test/expiry.png", SizeSmall)
+	result := &thumbnailGenerationResult{done: make(chan struct{})}
+	svc.ipMu.Lock()
+	svc.inProgress[cacheKey] = result
+	svc.ipMu.Unlock()
+
+	svc.scheduleInProgressExpiry(cacheKey, result, 0)
+
+	svc.ipMu.Lock()
+	_, ok := svc.inProgress[cacheKey]
+	svc.ipMu.Unlock()
+	if ok {
+		t.Fatal("expected non-positive TTL expiry to clear in-progress entry immediately")
+	}
+}
+
+func TestCleanupThumbnailTempPathJoinsRemoveError(t *testing.T) {
+	tmpDir := t.TempDir()
+	root, err := os.OpenRoot(tmpDir)
+	if err != nil {
+		t.Fatalf("OpenRoot(tmpDir) error: %v", err)
+	}
+	defer root.Close()
+
+	if err := os.Mkdir(filepath.Join(tmpDir, ".thumbnail-stuck.tmp"), 0755); err != nil {
+		t.Fatalf("Mkdir(temp dir) error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, ".thumbnail-stuck.tmp", "child"), []byte("x"), 0644); err != nil {
+		t.Fatalf("WriteFile(child) error: %v", err)
+	}
+
+	operationErr := errors.New("write failed")
+	err = cleanupThumbnailTempPath(root, ".thumbnail-stuck.tmp", operationErr)
+	if !errors.Is(err, operationErr) {
+		t.Fatalf("cleanupThumbnailTempPath() error = %v, want wrapped operation error", err)
+	}
+	if !strings.Contains(err.Error(), "cleanup temp thumbnail") {
+		t.Fatalf("cleanupThumbnailTempPath() error = %v, want cleanup context", err)
+	}
+}
+
+func TestNormalizeThumbnailCachePath_RelativePathIsAbsolute(t *testing.T) {
+	normalized, err := normalizeThumbnailCachePath(filepath.Join("relative", "cache"))
+	if err != nil {
+		t.Fatalf("normalizeThumbnailCachePath() error: %v", err)
+	}
+	if !filepath.IsAbs(normalized) {
+		t.Fatalf("normalized path = %q, want absolute path", normalized)
+	}
+	if filepath.Base(normalized) != "cache" {
+		t.Fatalf("normalized path = %q, want to preserve final path component", normalized)
+	}
+}
+
 func TestNewService_RejectsSymlinkCacheParentDirectory(t *testing.T) {
 	tmpDir := t.TempDir()
 	realCacheDir := filepath.Join(tmpDir, "real-cache")
@@ -1445,5 +1599,14 @@ func TestCacheKey(t *testing.T) {
 	key4 := svc.cacheKey("/test/other.png", SizeMedium)
 	if key1 == key4 {
 		t.Error("different paths should produce different cache keys")
+	}
+}
+
+func TestHasAlpha(t *testing.T) {
+	if !hasAlpha(image.NewRGBA(image.Rect(0, 0, 1, 1))) {
+		t.Fatal("expected RGBA image to report alpha support")
+	}
+	if hasAlpha(image.NewGray(image.Rect(0, 0, 1, 1))) {
+		t.Fatal("expected Gray image to report no alpha support")
 	}
 }

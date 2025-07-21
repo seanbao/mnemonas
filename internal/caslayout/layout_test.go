@@ -9,6 +9,28 @@ import (
 	"testing"
 )
 
+func TestCleanupCASTempPath_IgnoresRemoveError(t *testing.T) {
+	tmpDir := t.TempDir()
+	busyDir := filepath.Join(tmpDir, "busy")
+	if err := os.Mkdir(busyDir, 0700); err != nil {
+		t.Fatalf("failed to create busy temp dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(busyDir, "child"), []byte("data"), 0600); err != nil {
+		t.Fatalf("failed to create busy temp child: %v", err)
+	}
+
+	root, err := os.OpenRoot(tmpDir)
+	if err != nil {
+		t.Fatalf("failed to open root: %v", err)
+	}
+	defer root.Close()
+
+	cleanupCASTempPath(root, "busy")
+	if _, err := os.Stat(busyDir); err != nil {
+		t.Fatalf("expected busy temp path to remain after ignored cleanup error: %v", err)
+	}
+}
+
 func TestShardedLayout_HashToPath(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -208,6 +230,13 @@ func TestStore_PutGetDelete(t *testing.T) {
 		}
 	})
 
+	t.Run("Size_NotFound", func(t *testing.T) {
+		_, err := store.Size("nonexistent")
+		if err != ErrNotFound {
+			t.Errorf("Size(nonexistent) error = %v, want ErrNotFound", err)
+		}
+	})
+
 	// Test Reader
 	t.Run("Reader", func(t *testing.T) {
 		reader, err := store.Reader(hash)
@@ -223,6 +252,28 @@ func TestStore_PutGetDelete(t *testing.T) {
 		}
 		if string(buf[:n]) != string(data) {
 			t.Errorf("Reader content = %q, want %q", buf[:n], data)
+		}
+		if _, err := reader.Seek(0, 0); err != nil {
+			t.Fatalf("Seek(0) error: %v", err)
+		}
+		secondRead := make([]byte, 4)
+		n, err = reader.Read(secondRead)
+		if err != nil {
+			t.Fatalf("Read() after seek error: %v", err)
+		}
+		if string(secondRead[:n]) != "test" {
+			t.Errorf("Reader after seek = %q, want test", secondRead[:n])
+		}
+	})
+
+	t.Run("Reader_NotFound", func(t *testing.T) {
+		reader, err := store.Reader("nonexistent")
+		if err != ErrNotFound {
+			t.Errorf("Reader(nonexistent) error = %v, want ErrNotFound", err)
+		}
+		if reader != nil {
+			_ = reader.Close()
+			t.Fatal("Reader(nonexistent) returned non-nil reader")
 		}
 	})
 
@@ -677,6 +728,82 @@ func TestStore_GetDoesNotFollowSymlinkInsertedAfterValidation(t *testing.T) {
 	}
 }
 
+func TestStore_SizeAndReaderDoNotFollowSymlinkInsertedAfterValidation(t *testing.T) {
+	for _, operation := range []string{"size", "reader"} {
+		t.Run(operation, func(t *testing.T) {
+			baseDir := t.TempDir()
+			root := filepath.Join(baseDir, "cas")
+			outsideDir := filepath.Join(baseDir, "outside")
+			if err := os.MkdirAll(outsideDir, 0755); err != nil {
+				t.Fatalf("MkdirAll(outsideDir) error: %v", err)
+			}
+
+			store, err := NewStore(root, nil)
+			if err != nil {
+				t.Fatalf("NewStore() error: %v", err)
+			}
+
+			hash := "2234567890abcdef1234567890abcdef"
+			objectPath := store.layout.FullPath(store.root, hash)
+			shardDir := filepath.Dir(objectPath)
+			if err := os.MkdirAll(shardDir, 0755); err != nil {
+				t.Fatalf("MkdirAll(shardDir) error: %v", err)
+			}
+			if err := os.WriteFile(objectPath, []byte("root-payload"), 0644); err != nil {
+				t.Fatalf("WriteFile(objectPath) error: %v", err)
+			}
+			outsideObjectPath := filepath.Join(outsideDir, filepath.Base(objectPath))
+			if err := os.WriteFile(outsideObjectPath, []byte("outside-payload"), 0644); err != nil {
+				t.Fatalf("WriteFile(outsideObject) error: %v", err)
+			}
+			backupDir := filepath.Join(root, "backup-shard")
+
+			originalHook := afterValidateCASPath
+			var hookErr error
+			afterValidateCASPath = func() {
+				if hookErr != nil {
+					return
+				}
+				if err := os.Rename(shardDir, backupDir); err != nil {
+					hookErr = err
+					return
+				}
+				if err := os.Symlink(outsideDir, shardDir); err != nil {
+					hookErr = err
+				}
+			}
+			defer func() {
+				afterValidateCASPath = originalHook
+			}()
+
+			var opErr error
+			if operation == "size" {
+				_, opErr = store.Size(hash)
+			} else {
+				var reader ReadSeekCloser
+				reader, opErr = store.Reader(hash)
+				if reader != nil {
+					_ = reader.Close()
+				}
+			}
+			if hookErr != nil {
+				t.Fatalf("afterValidateCASPath hook error: %v", hookErr)
+			}
+			if !errors.Is(opErr, errCASPathSymlink) {
+				t.Fatalf("expected symlink rejection, got %v", opErr)
+			}
+
+			data, err := os.ReadFile(outsideObjectPath)
+			if err != nil {
+				t.Fatalf("ReadFile(outsideObject) error: %v", err)
+			}
+			if string(data) != "outside-payload" {
+				t.Fatalf("expected outside object unchanged, got %q", string(data))
+			}
+		})
+	}
+}
+
 func TestStore_Walk(t *testing.T) {
 	tmpDir := t.TempDir()
 
@@ -715,6 +842,29 @@ func TestStore_Walk(t *testing.T) {
 	// Should have exactly 3 objects (tmp file skipped)
 	if len(collected) != 3 {
 		t.Errorf("Walk() collected %d hashes, want 3", len(collected))
+	}
+}
+
+func TestStore_WalkPropagatesCallbackError(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := NewStore(tmpDir, nil)
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+	hash := "dddd1234567890dddd1234567890dddd"
+	if err := store.Put(hash, []byte("payload")); err != nil {
+		t.Fatalf("Put(hash) error: %v", err)
+	}
+
+	expectedErr := errors.New("stop walk")
+	err = store.Walk(func(gotHash string) error {
+		if gotHash != hash {
+			t.Fatalf("Walk() hash = %s, want %s", gotHash, hash)
+		}
+		return expectedErr
+	})
+	if !errors.Is(err, expectedErr) {
+		t.Fatalf("Walk() error = %v, want %v", err, expectedErr)
 	}
 }
 

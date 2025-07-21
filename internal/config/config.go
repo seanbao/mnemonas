@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	urlpath "path"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -1034,7 +1035,18 @@ func NormalizeWebDAVPrefix(prefix string) string {
 	if !strings.HasPrefix(trimmed, "/") {
 		trimmed = "/" + trimmed
 	}
-	return strings.TrimRight(trimmed, "/")
+
+	cleaned := trimmed
+	for {
+		next := urlpath.Clean(strings.TrimSpace(cleaned))
+		if next == "" {
+			return "/"
+		}
+		if next == cleaned {
+			return next
+		}
+		cleaned = next
+	}
 }
 
 // EnsureDirs ensures all required directories exist

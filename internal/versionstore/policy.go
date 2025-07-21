@@ -89,7 +89,7 @@ func (p *VersioningPolicy) ShouldVersion(ctx context.Context, path string, fileS
 	}
 
 	// 3. Check extension
-	ext := strings.ToLower(filepath.Ext(path))
+	ext := normalizeConfiguredVersionedExtension(filepath.Ext(path))
 	for _, versionedExt := range p.AutoVersionedExtensions {
 		if ext == normalizeConfiguredVersionedExtension(versionedExt) {
 			return true
@@ -97,7 +97,7 @@ func (p *VersioningPolicy) ShouldVersion(ctx context.Context, path string, fileS
 	}
 
 	// 4. Check filename (for files without extension)
-	filename := filepath.Base(path)
+	filename := normalizeConfiguredVersionedFilename(filepath.Base(path))
 	for _, versionedName := range p.AutoVersionedFilenames {
 		if filename == normalizeConfiguredVersionedFilename(versionedName) {
 			return true
@@ -109,7 +109,7 @@ func (p *VersioningPolicy) ShouldVersion(ctx context.Context, path string, fileS
 
 // IsVersionedExtension checks if an extension is in the versioned list
 func (p *VersioningPolicy) IsVersionedExtension(ext string) bool {
-	ext = strings.ToLower(ext)
+	ext = normalizeConfiguredVersionedExtension(ext)
 	for _, versionedExt := range p.AutoVersionedExtensions {
 		if ext == normalizeConfiguredVersionedExtension(versionedExt) {
 			return true
@@ -120,6 +120,7 @@ func (p *VersioningPolicy) IsVersionedExtension(ext string) bool {
 
 // IsVersionedFilename checks if a filename is in the versioned list
 func (p *VersioningPolicy) IsVersionedFilename(filename string) bool {
+	filename = normalizeConfiguredVersionedFilename(filename)
 	for _, versionedName := range p.AutoVersionedFilenames {
 		if filename == normalizeConfiguredVersionedFilename(versionedName) {
 			return true
@@ -147,7 +148,7 @@ func (p *VersioningPolicy) GetVersioningStatus(ctx context.Context, path string,
 	}
 
 	// Check extension
-	ext := strings.ToLower(filepath.Ext(path))
+	ext := normalizeConfiguredVersionedExtension(filepath.Ext(path))
 	for _, versionedExt := range p.AutoVersionedExtensions {
 		if ext == normalizeConfiguredVersionedExtension(versionedExt) {
 			return true, "extension_match"
@@ -155,7 +156,7 @@ func (p *VersioningPolicy) GetVersioningStatus(ctx context.Context, path string,
 	}
 
 	// Check filename
-	filename := filepath.Base(path)
+	filename := normalizeConfiguredVersionedFilename(filepath.Base(path))
 	for _, versionedName := range p.AutoVersionedFilenames {
 		if filename == normalizeConfiguredVersionedFilename(versionedName) {
 			return true, "filename_match"

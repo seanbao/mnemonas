@@ -49,25 +49,73 @@ func startTestDataPlaneServer(t *testing.T) (string, func()) {
 }
 
 type fakeDataPlaneClient struct {
-	putFileStream grpc.ClientStreamingClient[pb.PutFileRequest, pb.PutFileResponse]
-	putFileErr    error
-	getFileStream grpc.ServerStreamingClient[pb.GetFileResponse]
-	getFileErr    error
+	putChunkReq     *pb.PutChunkRequest
+	putChunkResp    *pb.PutChunkResponse
+	putChunkErr     error
+	getChunkReq     *pb.GetChunkRequest
+	getChunkResp    *pb.GetChunkResponse
+	getChunkErr     error
+	hasChunkReq     *pb.HasChunkRequest
+	hasChunkResp    *pb.HasChunkResponse
+	hasChunkErr     error
+	deleteChunkReq  *pb.DeleteChunkRequest
+	deleteChunkResp *pb.DeleteChunkResponse
+	deleteChunkErr  error
+	putFileStream   grpc.ClientStreamingClient[pb.PutFileRequest, pb.PutFileResponse]
+	putFileErr      error
+	getFileStream   grpc.ServerStreamingClient[pb.GetFileResponse]
+	getFileErr      error
+	statsResp       *pb.StatsResponse
+	statsErr        error
+	scrubReq        *pb.ScrubRequest
+	scrubResp       *pb.ScrubResponse
+	scrubErr        error
+	listObjectsReq  *pb.ListObjectsRequest
+	listObjectsResp *pb.ListObjectsResponse
+	listObjectsErr  error
 }
 
-func (f *fakeDataPlaneClient) PutChunk(context.Context, *pb.PutChunkRequest, ...grpc.CallOption) (*pb.PutChunkResponse, error) {
+func (f *fakeDataPlaneClient) PutChunk(_ context.Context, req *pb.PutChunkRequest, _ ...grpc.CallOption) (*pb.PutChunkResponse, error) {
+	f.putChunkReq = req
+	if f.putChunkErr != nil {
+		return nil, f.putChunkErr
+	}
+	if f.putChunkResp != nil {
+		return f.putChunkResp, nil
+	}
 	return nil, errors.New("not implemented")
 }
 
-func (f *fakeDataPlaneClient) GetChunk(context.Context, *pb.GetChunkRequest, ...grpc.CallOption) (*pb.GetChunkResponse, error) {
+func (f *fakeDataPlaneClient) GetChunk(_ context.Context, req *pb.GetChunkRequest, _ ...grpc.CallOption) (*pb.GetChunkResponse, error) {
+	f.getChunkReq = req
+	if f.getChunkErr != nil {
+		return nil, f.getChunkErr
+	}
+	if f.getChunkResp != nil {
+		return f.getChunkResp, nil
+	}
 	return nil, errors.New("not implemented")
 }
 
-func (f *fakeDataPlaneClient) HasChunk(context.Context, *pb.HasChunkRequest, ...grpc.CallOption) (*pb.HasChunkResponse, error) {
+func (f *fakeDataPlaneClient) HasChunk(_ context.Context, req *pb.HasChunkRequest, _ ...grpc.CallOption) (*pb.HasChunkResponse, error) {
+	f.hasChunkReq = req
+	if f.hasChunkErr != nil {
+		return nil, f.hasChunkErr
+	}
+	if f.hasChunkResp != nil {
+		return f.hasChunkResp, nil
+	}
 	return nil, errors.New("not implemented")
 }
 
-func (f *fakeDataPlaneClient) DeleteChunk(context.Context, *pb.DeleteChunkRequest, ...grpc.CallOption) (*pb.DeleteChunkResponse, error) {
+func (f *fakeDataPlaneClient) DeleteChunk(_ context.Context, req *pb.DeleteChunkRequest, _ ...grpc.CallOption) (*pb.DeleteChunkResponse, error) {
+	f.deleteChunkReq = req
+	if f.deleteChunkErr != nil {
+		return nil, f.deleteChunkErr
+	}
+	if f.deleteChunkResp != nil {
+		return f.deleteChunkResp, nil
+	}
 	return nil, errors.New("not implemented")
 }
 
@@ -84,14 +132,34 @@ func (f *fakeDataPlaneClient) Health(context.Context, *pb.HealthRequest, ...grpc
 }
 
 func (f *fakeDataPlaneClient) Stats(context.Context, *pb.StatsRequest, ...grpc.CallOption) (*pb.StatsResponse, error) {
+	if f.statsErr != nil {
+		return nil, f.statsErr
+	}
+	if f.statsResp != nil {
+		return f.statsResp, nil
+	}
 	return nil, errors.New("not implemented")
 }
 
-func (f *fakeDataPlaneClient) Scrub(context.Context, *pb.ScrubRequest, ...grpc.CallOption) (*pb.ScrubResponse, error) {
+func (f *fakeDataPlaneClient) Scrub(_ context.Context, req *pb.ScrubRequest, _ ...grpc.CallOption) (*pb.ScrubResponse, error) {
+	f.scrubReq = req
+	if f.scrubErr != nil {
+		return nil, f.scrubErr
+	}
+	if f.scrubResp != nil {
+		return f.scrubResp, nil
+	}
 	return nil, errors.New("not implemented")
 }
 
-func (f *fakeDataPlaneClient) ListObjects(context.Context, *pb.ListObjectsRequest, ...grpc.CallOption) (*pb.ListObjectsResponse, error) {
+func (f *fakeDataPlaneClient) ListObjects(_ context.Context, req *pb.ListObjectsRequest, _ ...grpc.CallOption) (*pb.ListObjectsResponse, error) {
+	f.listObjectsReq = req
+	if f.listObjectsErr != nil {
+		return nil, f.listObjectsErr
+	}
+	if f.listObjectsResp != nil {
+		return f.listObjectsResp, nil
+	}
 	return nil, errors.New("not implemented")
 }
 
@@ -177,6 +245,14 @@ func TestNewClient(t *testing.T) {
 	}
 	if client.client != nil {
 		t.Error("Expected client to be nil initially")
+	}
+}
+
+func TestAddr(t *testing.T) {
+	client := NewClient("localhost:9090")
+
+	if got := client.Addr(); got != "localhost:9090" {
+		t.Fatalf("Addr() = %q, want localhost:9090", got)
 	}
 }
 
@@ -277,6 +353,112 @@ func TestDeleteChunkNotConnected(t *testing.T) {
 	}
 }
 
+func TestUnaryChunkRPCsMapRequestsAndResponses(t *testing.T) {
+	fake := &fakeDataPlaneClient{
+		statsResp:       &pb.StatsResponse{TotalChunks: 7, TotalSize: 1024, UniqueSize: 512, DedupRatio: 0.5},
+		putChunkResp:    &pb.PutChunkResponse{Hash: "hash-1", Size: 4, Deduplicated: true},
+		getChunkResp:    &pb.GetChunkResponse{Data: []byte("data")},
+		hasChunkResp:    &pb.HasChunkResponse{Exists: true},
+		deleteChunkResp: &pb.DeleteChunkResponse{Deleted: true},
+	}
+	client := NewClient("localhost:9090")
+	client.client = fake
+
+	stats, err := client.Stats(context.Background())
+	if err != nil {
+		t.Fatalf("Stats() error: %v", err)
+	}
+	if stats.TotalChunks != 7 || stats.TotalSize != 1024 || stats.UniqueSize != 512 || stats.DedupRatio != 0.5 {
+		t.Fatalf("unexpected Stats() response: %#v", stats)
+	}
+
+	chunkInfo, err := client.PutChunk(context.Background(), []byte("data"))
+	if err != nil {
+		t.Fatalf("PutChunk() error: %v", err)
+	}
+	if fake.putChunkReq == nil || string(fake.putChunkReq.Data) != "data" {
+		t.Fatalf("PutChunk request = %#v", fake.putChunkReq)
+	}
+	if chunkInfo.Hash != "hash-1" || chunkInfo.Size != 4 || !chunkInfo.Deduplicated {
+		t.Fatalf("unexpected PutChunk() response: %#v", chunkInfo)
+	}
+
+	data, err := client.GetChunk(context.Background(), "hash-1")
+	if err != nil {
+		t.Fatalf("GetChunk() error: %v", err)
+	}
+	if fake.getChunkReq == nil || fake.getChunkReq.Hash != "hash-1" {
+		t.Fatalf("GetChunk request = %#v", fake.getChunkReq)
+	}
+	if string(data) != "data" {
+		t.Fatalf("GetChunk() data = %q, want data", string(data))
+	}
+
+	exists, err := client.HasChunk(context.Background(), "hash-1")
+	if err != nil {
+		t.Fatalf("HasChunk() error: %v", err)
+	}
+	if fake.hasChunkReq == nil || fake.hasChunkReq.Hash != "hash-1" {
+		t.Fatalf("HasChunk request = %#v", fake.hasChunkReq)
+	}
+	if !exists {
+		t.Fatal("expected HasChunk() to return true")
+	}
+
+	deleted, err := client.DeleteChunk(context.Background(), "hash-1")
+	if err != nil {
+		t.Fatalf("DeleteChunk() error: %v", err)
+	}
+	if fake.deleteChunkReq == nil || fake.deleteChunkReq.Hash != "hash-1" {
+		t.Fatalf("DeleteChunk request = %#v", fake.deleteChunkReq)
+	}
+	if !deleted {
+		t.Fatal("expected DeleteChunk() to return true")
+	}
+}
+
+func TestUnaryChunkRPCsReturnClientErrors(t *testing.T) {
+	for name, run := range map[string]func(*Client) error{
+		"stats": func(client *Client) error {
+			_, err := client.Stats(context.Background())
+			return err
+		},
+		"put chunk": func(client *Client) error {
+			_, err := client.PutChunk(context.Background(), []byte("data"))
+			return err
+		},
+		"get chunk": func(client *Client) error {
+			_, err := client.GetChunk(context.Background(), "hash-1")
+			return err
+		},
+		"has chunk": func(client *Client) error {
+			_, err := client.HasChunk(context.Background(), "hash-1")
+			return err
+		},
+		"delete chunk": func(client *Client) error {
+			_, err := client.DeleteChunk(context.Background(), "hash-1")
+			return err
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			rpcErr := errors.New("rpc failed")
+			fake := &fakeDataPlaneClient{
+				statsErr:       rpcErr,
+				putChunkErr:    rpcErr,
+				getChunkErr:    rpcErr,
+				hasChunkErr:    rpcErr,
+				deleteChunkErr: rpcErr,
+			}
+			client := NewClient("localhost:9090")
+			client.client = fake
+
+			if err := run(client); !errors.Is(err, rpcErr) {
+				t.Fatalf("RPC error = %v, want %v", err, rpcErr)
+			}
+		})
+	}
+}
+
 func TestPutFileNotConnected(t *testing.T) {
 	client := NewClient("localhost:9090")
 
@@ -357,6 +539,99 @@ func TestListObjectsNotConnected(t *testing.T) {
 	}
 	if err.Error() != "not connected" {
 		t.Errorf("Expected 'not connected' error, got: %v", err)
+	}
+}
+
+func TestScrubMapsResponseAndRequestHashes(t *testing.T) {
+	fake := &fakeDataPlaneClient{
+		scrubResp: &pb.ScrubResponse{
+			TotalObjects:     4,
+			ValidObjects:     2,
+			CorruptedObjects: 1,
+			MissingObjects:   1,
+			TotalSize:        4096,
+			DurationMs:       25,
+			Errors: []*pb.ScrubError{
+				{Hash: "hash-1", ErrorType: "missing", Message: "object missing"},
+			},
+		},
+	}
+	client := NewClient("localhost:9090")
+	client.client = fake
+
+	result, err := client.Scrub(context.Background(), []string{"hash-1", "hash-2"})
+	if err != nil {
+		t.Fatalf("Scrub() error: %v", err)
+	}
+	if fake.scrubReq == nil || len(fake.scrubReq.Hashes) != 2 || fake.scrubReq.Hashes[0] != "hash-1" || fake.scrubReq.Hashes[1] != "hash-2" {
+		t.Fatalf("scrub request hashes = %#v", fake.scrubReq)
+	}
+	if result.TotalObjects != 4 || result.ValidObjects != 2 || result.CorruptedObjects != 1 || result.MissingObjects != 1 {
+		t.Fatalf("unexpected scrub counters: %#v", result)
+	}
+	if result.TotalSize != 4096 || result.DurationMs != 25 {
+		t.Fatalf("unexpected scrub size/duration: %#v", result)
+	}
+	if len(result.Errors) != 1 || result.Errors[0].Hash != "hash-1" || result.Errors[0].ErrorType != "missing" || result.Errors[0].Message != "object missing" {
+		t.Fatalf("unexpected scrub errors: %#v", result.Errors)
+	}
+}
+
+func TestListObjectsBuildsRequestAndMapsOptionalFields(t *testing.T) {
+	nextCursor := "next-page"
+	createdAt := int64(1_700_000_000)
+	fake := &fakeDataPlaneClient{
+		listObjectsResp: &pb.ListObjectsResponse{
+			NextCursor: &nextCursor,
+			Objects: []*pb.ObjectInfo{
+				{Hash: "hash-1", Size: 100, CreatedAtUnix: &createdAt},
+				{Hash: "hash-2", Size: 200},
+			},
+		},
+	}
+	client := NewClient("localhost:9090")
+	client.client = fake
+
+	result, err := client.ListObjects(context.Background(), "cursor-1", 50)
+	if err != nil {
+		t.Fatalf("ListObjects() error: %v", err)
+	}
+	if fake.listObjectsReq == nil || fake.listObjectsReq.Cursor == nil || *fake.listObjectsReq.Cursor != "cursor-1" {
+		t.Fatalf("list objects cursor request = %#v", fake.listObjectsReq)
+	}
+	if fake.listObjectsReq.Limit == nil || *fake.listObjectsReq.Limit != 50 {
+		t.Fatalf("list objects limit request = %#v", fake.listObjectsReq)
+	}
+	if result.NextCursor != nextCursor {
+		t.Fatalf("NextCursor = %q, want %q", result.NextCursor, nextCursor)
+	}
+	if len(result.Objects) != 2 {
+		t.Fatalf("objects length = %d, want 2", len(result.Objects))
+	}
+	if result.Objects[0].Hash != "hash-1" || result.Objects[0].Size != 100 || !result.Objects[0].CreatedAt.Equal(time.Unix(createdAt, 0)) {
+		t.Fatalf("first object = %#v", result.Objects[0])
+	}
+	if result.Objects[1].Hash != "hash-2" || result.Objects[1].Size != 200 || !result.Objects[1].CreatedAt.IsZero() {
+		t.Fatalf("second object = %#v", result.Objects[1])
+	}
+}
+
+func TestListObjectsOmitsEmptyPaginationFields(t *testing.T) {
+	fake := &fakeDataPlaneClient{listObjectsResp: &pb.ListObjectsResponse{}}
+	client := NewClient("localhost:9090")
+	client.client = fake
+
+	if _, err := client.ListObjects(context.Background(), "", 0); err != nil {
+		t.Fatalf("ListObjects() error: %v", err)
+	}
+	if fake.listObjectsReq == nil {
+		t.Fatal("expected ListObjects request")
+	}
+	if fake.listObjectsReq.Cursor != nil {
+		t.Fatalf("Cursor = %q, want nil", *fake.listObjectsReq.Cursor)
+	}
+	if fake.listObjectsReq.Limit != nil {
+		t.Fatalf("Limit = %d, want nil", *fake.listObjectsReq.Limit)
 	}
 }
 

@@ -43,6 +43,70 @@ func setupDataplaneClient(t *testing.T) *dataplane.Client {
 	return client
 }
 
+func TestRollbackRenamedVersionStoreFiles_RestoresInReverseOrder(t *testing.T) {
+	tmpDir := t.TempDir()
+	root, err := os.OpenRoot(tmpDir)
+	if err != nil {
+		t.Fatalf("OpenRoot() error: %v", err)
+	}
+	defer root.Close()
+
+	if err := os.WriteFile(filepath.Join(tmpDir, "mnemonas.db.corrupt"), []byte("db"), 0600); err != nil {
+		t.Fatalf("WriteFile(db backup) error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, "mnemonas.db.corrupt-wal"), []byte("wal"), 0600); err != nil {
+		t.Fatalf("WriteFile(wal backup) error: %v", err)
+	}
+
+	err = rollbackRenamedVersionStoreFiles(root, [][2]string{
+		{"mnemonas.db", "mnemonas.db.corrupt"},
+		{"mnemonas.db-wal", "mnemonas.db.corrupt-wal"},
+	})
+	if err != nil {
+		t.Fatalf("rollbackRenamedVersionStoreFiles() error: %v", err)
+	}
+
+	for name, want := range map[string]string{
+		"mnemonas.db":     "db",
+		"mnemonas.db-wal": "wal",
+	} {
+		data, err := os.ReadFile(filepath.Join(tmpDir, name))
+		if err != nil {
+			t.Fatalf("ReadFile(%s) error: %v", name, err)
+		}
+		if string(data) != want {
+			t.Fatalf("%s contents = %q, want %q", name, string(data), want)
+		}
+	}
+}
+
+func TestRollbackRenamedVersionStoreFiles_ReturnsRenameErrors(t *testing.T) {
+	tmpDir := t.TempDir()
+	root, err := os.OpenRoot(tmpDir)
+	if err != nil {
+		t.Fatalf("OpenRoot() error: %v", err)
+	}
+	defer root.Close()
+
+	err = rollbackRenamedVersionStoreFiles(root, [][2]string{
+		{"mnemonas.db", "missing-backup"},
+	})
+	if err == nil {
+		t.Fatal("expected rollback error")
+	}
+	if !strings.Contains(err.Error(), "missing-backup") {
+		t.Fatalf("expected missing backup path in rollback error, got %v", err)
+	}
+}
+
+func TestRecoverCorruptVersionStoreDatabase_ReturnsUnrecoverableInitError(t *testing.T) {
+	initErr := errors.New("permission denied")
+	err := recoverCorruptVersionStoreDatabase(filepath.Join(t.TempDir(), "mnemonas.db"), initErr)
+	if err != initErr {
+		t.Fatalf("recoverCorruptVersionStoreDatabase() = %v, want original error", err)
+	}
+}
+
 func setupStore(t *testing.T) *Store {
 	client := setupDataplaneClient(t)
 	if client == nil {
@@ -150,6 +214,20 @@ func TestNew_RequiresDataplane(t *testing.T) {
 	if err == nil {
 		t.Error("Expected error when Dataplane is nil")
 	}
+}
+
+func TestStore_SetDataplaneClient(t *testing.T) {
+	first := dataplane.NewClient("first")
+	second := dataplane.NewClient("second")
+	store := &Store{objects: NewObjectStore(first)}
+
+	store.SetDataplaneClient(second)
+	if got := store.objects.getClient(); got != second {
+		t.Fatalf("dataplane client = %#v, want second client", got)
+	}
+
+	(*Store)(nil).SetDataplaneClient(first)
+	(&Store{}).SetDataplaneClient(first)
 }
 
 func TestNew_ReturnsDirectoryTreeSyncError(t *testing.T) {
@@ -352,6 +430,62 @@ func TestStore_DeleteVersions(t *testing.T) {
 	versions, _ := s.GetVersions(ctx, "/test.txt")
 	if len(versions) != 0 {
 		t.Errorf("Versions still exist after delete: %d", len(versions))
+	}
+}
+
+func TestStore_DeleteVersionRestoreVersionsAndReferenceChecks(t *testing.T) {
+	s := setupStore(t)
+	ctx := context.Background()
+
+	if err := s.AddVersion(ctx, "/docs/report.txt", "hash-keep", 100, "keep"); err != nil {
+		t.Fatalf("AddVersion(keep) error: %v", err)
+	}
+	if err := s.AddVersion(ctx, "/docs/report.txt", "hash-delete", 200, "delete"); err != nil {
+		t.Fatalf("AddVersion(delete) error: %v", err)
+	}
+	toRestore, err := s.GetVersion(ctx, "/docs/report.txt", "hash-delete")
+	if err != nil {
+		t.Fatalf("GetVersion(delete) error: %v", err)
+	}
+
+	hasRef, err := s.HasVersionReference(ctx, "hash-delete")
+	if err != nil {
+		t.Fatalf("HasVersionReference(before) error: %v", err)
+	}
+	if !hasRef {
+		t.Fatal("expected hash-delete to be referenced before deletion")
+	}
+
+	if err := s.DeleteVersion(ctx, "/docs/report.txt", "hash-delete"); err != nil {
+		t.Fatalf("DeleteVersion() error: %v", err)
+	}
+	if _, err := s.GetVersion(ctx, "/docs/report.txt", "hash-delete"); err != ErrNotFound {
+		t.Fatalf("GetVersion(deleted) error = %v, want ErrNotFound", err)
+	}
+	hasRef, err = s.HasVersionReference(ctx, "hash-delete")
+	if err != nil {
+		t.Fatalf("HasVersionReference(after delete) error: %v", err)
+	}
+	if hasRef {
+		t.Fatal("expected hash-delete reference to be absent after DeleteVersion")
+	}
+
+	if err := s.RestoreVersions(ctx, []Version{*toRestore}); err != nil {
+		t.Fatalf("RestoreVersions() error: %v", err)
+	}
+	restored, err := s.GetVersion(ctx, "/docs/report.txt", "hash-delete")
+	if err != nil {
+		t.Fatalf("GetVersion(restored) error: %v", err)
+	}
+	if restored.ID != toRestore.ID || restored.Comment != "delete" {
+		t.Fatalf("restored version = %#v, want original %#v", restored, toRestore)
+	}
+
+	if err := s.RestoreVersions(ctx, nil); err != nil {
+		t.Fatalf("RestoreVersions(nil) error: %v", err)
+	}
+	if err := s.RestoreVersions(ctx, []Version{{Path: "../escape", Hash: "bad"}}); !errors.Is(err, errInvalidStorePath) {
+		t.Fatalf("RestoreVersions(invalid path) error = %v, want %v", err, errInvalidStorePath)
 	}
 }
 
@@ -1469,6 +1603,90 @@ func TestStore_Objects(t *testing.T) {
 	}
 	if exists {
 		t.Error("HasObject() returned true after delete")
+	}
+}
+
+func TestStore_ChunkReferenceLifecycle(t *testing.T) {
+	s := setupStore(t)
+	ctx := context.Background()
+
+	if err := s.AddChunkRef(ctx, "chunk-a", 128); err != nil {
+		t.Fatalf("AddChunkRef(first) error: %v", err)
+	}
+	if err := s.AddChunkRef(ctx, "chunk-a", 128); err != nil {
+		t.Fatalf("AddChunkRef(second) error: %v", err)
+	}
+
+	shouldGC, err := s.RemoveChunkRef(ctx, "missing-chunk")
+	if err != nil {
+		t.Fatalf("RemoveChunkRef(missing) error: %v", err)
+	}
+	if shouldGC {
+		t.Fatal("missing chunk must not be reported as ready for GC")
+	}
+
+	shouldGC, err = s.RemoveChunkRef(ctx, "chunk-a")
+	if err != nil {
+		t.Fatalf("RemoveChunkRef(first) error: %v", err)
+	}
+	if shouldGC {
+		t.Fatal("chunk-a should still have one reference after first removal")
+	}
+
+	shouldGC, err = s.RemoveChunkRef(ctx, "chunk-a")
+	if err != nil {
+		t.Fatalf("RemoveChunkRef(second) error: %v", err)
+	}
+	if !shouldGC {
+		t.Fatal("chunk-a should be ready for GC after reference count reaches zero")
+	}
+
+	orphans, err := s.GetOrphanedChunks(ctx, 10)
+	if err != nil {
+		t.Fatalf("GetOrphanedChunks() error: %v", err)
+	}
+	if len(orphans) != 1 || orphans[0] != "chunk-a" {
+		t.Fatalf("orphaned chunks = %v, want [chunk-a]", orphans)
+	}
+	if err := s.DeleteChunkRef(ctx, "chunk-a"); err != nil {
+		t.Fatalf("DeleteChunkRef() error: %v", err)
+	}
+	orphans, err = s.GetOrphanedChunks(ctx, 10)
+	if err != nil {
+		t.Fatalf("GetOrphanedChunks(after delete) error: %v", err)
+	}
+	if len(orphans) != 0 {
+		t.Fatalf("orphaned chunks after delete = %v, want empty", orphans)
+	}
+}
+
+func TestStore_LinkVersionChunks(t *testing.T) {
+	s := setupStore(t)
+	ctx := context.Background()
+
+	if err := s.AddVersion(ctx, "/docs/report.txt", "manifest-hash", 256, ""); err != nil {
+		t.Fatalf("AddVersion() error: %v", err)
+	}
+	version, err := s.GetVersion(ctx, "/docs/report.txt", "manifest-hash")
+	if err != nil {
+		t.Fatalf("GetVersion() error: %v", err)
+	}
+	for _, hash := range []string{"chunk-1", "chunk-2"} {
+		if err := s.AddChunkRef(ctx, hash, 64); err != nil {
+			t.Fatalf("AddChunkRef(%s) error: %v", hash, err)
+		}
+	}
+
+	if err := s.LinkVersionChunks(ctx, version.ID, []string{"chunk-1", "chunk-2", "chunk-1"}); err != nil {
+		t.Fatalf("LinkVersionChunks() error: %v", err)
+	}
+
+	var linked int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM version_chunks WHERE version_id = ?`, version.ID).Scan(&linked); err != nil {
+		t.Fatalf("count version_chunks error: %v", err)
+	}
+	if linked != 2 {
+		t.Fatalf("linked chunk rows = %d, want 2 unique chunks", linked)
 	}
 }
 

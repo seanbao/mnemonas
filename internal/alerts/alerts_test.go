@@ -14,6 +14,48 @@ import (
 	"github.com/rs/zerolog"
 )
 
+func TestDefaultConfig(t *testing.T) {
+	cfg := DefaultConfig()
+
+	if cfg.Enabled {
+		t.Fatal("default alerts config should be disabled")
+	}
+	if cfg.CheckInterval != time.Hour {
+		t.Fatalf("CheckInterval = %v, want %v", cfg.CheckInterval, time.Hour)
+	}
+	if cfg.ThresholdPct != 90.0 || cfg.CriticalPct != 95.0 {
+		t.Fatalf("unexpected threshold defaults: warning=%v critical=%v", cfg.ThresholdPct, cfg.CriticalPct)
+	}
+	if cfg.MinFreeBytes != 10*1024*1024*1024 {
+		t.Fatalf("MinFreeBytes = %d, want 10 GiB", cfg.MinFreeBytes)
+	}
+	if cfg.CooldownPeriod != 4*time.Hour {
+		t.Fatalf("CooldownPeriod = %v, want %v", cfg.CooldownPeriod, 4*time.Hour)
+	}
+	if cfg.WebhookMethod != "POST" {
+		t.Fatalf("WebhookMethod = %q, want POST", cfg.WebhookMethod)
+	}
+}
+
+func TestFormatBytes(t *testing.T) {
+	for name, tt := range map[string]struct {
+		bytes uint64
+		want  string
+	}{
+		"bytes":     {bytes: 512, want: "512 B"},
+		"kilobytes": {bytes: 1536, want: "1.5 KB"},
+		"megabytes": {bytes: 3 * 1024 * 1024, want: "3.0 MB"},
+		"gigabytes": {bytes: 5 * 1024 * 1024 * 1024, want: "5.0 GB"},
+		"terabytes": {bytes: 2 * 1024 * 1024 * 1024 * 1024, want: "2.0 TB"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := formatBytes(tt.bytes); got != tt.want {
+				t.Fatalf("formatBytes(%d) = %q, want %q", tt.bytes, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestNewMonitor(t *testing.T) {
 	logger := zerolog.New(os.Stderr).With().Timestamp().Logger()
 	cfg := Config{
