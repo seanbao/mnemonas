@@ -1,71 +1,59 @@
-# 外网访问配置指南
+# Public HTTPS and Reverse Proxy Setup
 
-[English](reverse-proxy-setup.en.md) | 简体中文
+English | [简体中文](reverse-proxy-setup.md)
 
-本文档介绍如何通过反向代理配置 MnemoNAS 的 HTTPS 外网访问。
+This guide explains how to expose MnemoNAS through HTTPS with a reverse proxy. Public access should go through HTTPS on `80/443`, not by exposing the raw `8080` service directly.
 
-## 前置条件
+## Prerequisites
 
-- 一台公网服务器（或已配置好内网穿透）
-- 域名已解析到服务器 IP
-- 服务器开放 80/443 端口
+- A public server or a working tunnel.
+- A domain name pointing to the server.
+- Firewall rules allowing `80` and `443`.
 
-## MnemoNAS 配置
+## MnemoNAS Configuration
 
-MnemoNAS 默认不信任 `X-Forwarded-*` 头。部署在受信反向代理后方时，需要在 `config.toml` 中设置代理层数：
+MnemoNAS does not trust `X-Forwarded-*` headers by default. When it is behind trusted proxies, set the number of proxy hops:
 
 ```toml
 [server]
 trusted_proxy_hops = 1
 ```
 
-单层 Caddy/Nginx/Traefik 设置为 `1`；多跳链路设置为代理总层数。修改后重启 `mnemonas`。未设置时，服务仍可通过反向代理访问，但登录、分享下载等 cookie 的 `Secure` 判断和按客户端 IP 的限流会按直连来源处理。
+Use `1` for a single Caddy, Nginx, or Traefik proxy. For multiple hops, set the total number of trusted proxy layers. Restart `mnemonas` after changing the value.
 
-公网入口只应开放 80/443。`8080` 是 MnemoNAS Web/API/WebDAV 的直连端口；如果反向代理和 MnemoNAS 在同一台机器，建议把 `[server].host` 改为 `127.0.0.1` 或用防火墙限制 8080 只允许可信来源访问。`9090/9091` 是 dataplane 内部端口，不要通过防火墙、端口映射或反向代理暴露到公网或不可信局域网。
+Without this setting, MnemoNAS still works behind a proxy, but Secure-cookie detection and client-IP-based rate limiting use the direct peer address instead of the real client address.
 
-## 方案一：Caddy（推荐）
+Only expose `80/443` publicly. `8080` is the direct Web/API/WebDAV port. If the reverse proxy and MnemoNAS run on the same host, prefer `[server].host = "127.0.0.1"` or firewall `8080` to trusted sources. Dataplane `9090/9091` must not be exposed.
 
-Caddy 自动申请和续期 Let's Encrypt 证书，配置最简单。
+## Option 1: Caddy
 
-### 1. 安装 Caddy
+Caddy is the simplest option because it handles Let's Encrypt certificates automatically.
+
+Install:
 
 ```bash
-# Debian/Ubuntu
 sudo apt install -y debian-keyring debian-archive-keyring apt-transport-https curl gnupg
 curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | sudo gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
 curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | sudo tee /etc/apt/sources.list.d/caddy-stable.list
 sudo apt update
 sudo apt install caddy
-
-# CentOS/RHEL
-sudo yum install yum-plugin-copr
-sudo yum copr enable @caddy/caddy
-sudo yum install caddy
 ```
 
-### 2. 配置 Caddyfile
-
-编辑 `/etc/caddy/Caddyfile`：
+`/etc/caddy/Caddyfile`:
 
 ```caddyfile
 nas.example.com {
-    # 自动 HTTPS（Let's Encrypt）
-    
-    # 反向代理到 MnemoNAS
     reverse_proxy localhost:8080 {
-        # WebDAV 需要的 headers
         header_up Host {host}
         header_up X-Real-IP {remote_host}
         header_up X-Forwarded-For {remote_host}
         header_up X-Forwarded-Proto {scheme}
     }
-    
-    # 上传大文件支持（默认 10GB）
+
     request_body {
         max_size 10GB
     }
-    
-    # 日志
+
     log {
         output file /var/log/caddy/nas.log
         format json
@@ -73,59 +61,43 @@ nas.example.com {
 }
 ```
 
-### 3. 启动服务
+Start:
 
 ```bash
 sudo systemctl enable caddy
 sudo systemctl restart caddy
-
-# 检查状态
 sudo systemctl status caddy
 ```
 
-### 4. 验证
+Verify:
 
 ```bash
-# 检查 HTTPS 证书
 curl -I https://nas.example.com/health
 
-# 测试 WebDAV
 WEBDAV_USER="webdav"
 WEBDAV_PASS="your-webdav-password"
 curl -u "$WEBDAV_USER:$WEBDAV_PASS" -X PROPFIND https://nas.example.com/dav/ -H "Depth: 0"
 ```
 
----
+## Option 2: Nginx + Certbot
 
-## 方案二：Nginx + Certbot
-
-适合已有 Nginx 环境的场景。
-
-### 1. 安装
+Install:
 
 ```bash
-# Debian/Ubuntu
 sudo apt install nginx certbot python3-certbot-nginx
-
-# CentOS/RHEL
-sudo yum install nginx certbot python3-certbot-nginx
 ```
 
-### 2. Nginx 配置
-
-创建 `/etc/nginx/sites-available/nas.example.com`：
+Create `/etc/nginx/sites-available/nas.example.com`:
 
 ```nginx
 server {
     listen 80;
     server_name nas.example.com;
-    
-    # Certbot 验证用
+
     location /.well-known/acme-challenge/ {
         root /var/www/certbot;
     }
-    
-    # 强制跳转 HTTPS
+
     location / {
         return 301 https://$host$request_uri;
     }
@@ -134,39 +106,26 @@ server {
 server {
     listen 443 ssl http2;
     server_name nas.example.com;
-    
-    # SSL 证书（certbot 会自动填充）
+
     ssl_certificate /etc/letsencrypt/live/nas.example.com/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/nas.example.com/privkey.pem;
-    
-    # SSL 安全配置
     ssl_protocols TLSv1.2 TLSv1.3;
-    ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384;
     ssl_prefer_server_ciphers off;
-    ssl_session_cache shared:SSL:10m;
-    ssl_session_timeout 1d;
-    
-    # 大文件上传
+
     client_max_body_size 10G;
     client_body_timeout 3600s;
     proxy_read_timeout 3600s;
     proxy_send_timeout 3600s;
-    
-    # 禁用缓冲（大文件流式传输）
     proxy_buffering off;
     proxy_request_buffering off;
-    
+
     location / {
         proxy_pass http://127.0.0.1:8080;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
-        
-        # WebDAV 方法支持
         proxy_method $request_method;
-        
-        # WebSocket 支持（未来可能需要）
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";
@@ -174,36 +133,21 @@ server {
 }
 ```
 
-MnemoNAS 的 `trusted_proxy_hops` 设置见本文开头的 [MnemoNAS 配置](#mnemonas-配置)。
-
-### 3. 启用站点并申请证书
+Enable and request certificate:
 
 ```bash
-# 启用站点
 sudo ln -s /etc/nginx/sites-available/nas.example.com /etc/nginx/sites-enabled/
-
-# 测试配置
 sudo nginx -t
-
-# 重载 nginx
 sudo systemctl reload nginx
-
-# 申请证书（首次）
 sudo certbot --nginx -d nas.example.com
-
-# 测试自动续期
 sudo certbot renew --dry-run
 ```
 
----
+Set `trusted_proxy_hops = 1` in MnemoNAS for a single Nginx proxy.
 
-## 方案三：Docker Compose 一体化
+## Option 3: Docker Compose with Traefik
 
-如果 MnemoNAS 和反向代理都用 Docker，可以用 Traefik。
-
-示例中的 MnemoNAS 镜像默认使用源码构建的 `mnemonas:local`。发布镜像公开后，可在 `.env` 中设置 `MNEMONAS_IMAGE=ghcr.io/seanbao/mnemonas:<version>`。
-
-### docker-compose.yml
+When MnemoNAS and the reverse proxy both run under Docker, the example defaults to the source-built `mnemonas:local` image. After public release images are available, set `MNEMONAS_IMAGE=ghcr.io/seanbao/mnemonas:<version>` in `.env`.
 
 ```yaml
 services:
@@ -237,7 +181,6 @@ services:
       - "traefik.http.routers.nas.entrypoints=websecure"
       - "traefik.http.routers.nas.tls.certresolver=letsencrypt"
       - "traefik.http.services.nas.loadbalancer.server.port=8080"
-      # HTTP 跳转 HTTPS
       - "traefik.http.routers.nas-http.rule=Host(`nas.example.com`)"
       - "traefik.http.routers.nas-http.entrypoints=web"
       - "traefik.http.middlewares.https-redirect.redirectscheme.scheme=https"
@@ -245,43 +188,41 @@ services:
     restart: unless-stopped
 ```
 
-示例没有启用 Traefik insecure dashboard。若需要 Traefik 管理界面，请单独配置认证、HTTPS 和内网访问限制；不要在公网环境使用 `--api.insecure=true`。
+The example does not enable the insecure Traefik dashboard. If a dashboard is needed, protect it separately with authentication, HTTPS, and network restrictions.
 
-Traefik 需要读取 Docker socket 才能发现容器标签。`/var/run/docker.sock:/var/run/docker.sock:ro` 只限制挂载文件系统的写入，并不等同于低权限 API；更严格的公网部署建议使用 Docker socket proxy，或改用 Caddy/Nginx 这类静态反向代理配置。
+Mounting `/var/run/docker.sock` read-only still gives Traefik broad Docker API visibility. More hardened deployments can use a Docker socket proxy or a static Caddy/Nginx config.
 
----
+## Hardening
 
-## 安全加固
+### Optional Extra Basic Auth
 
-### 1. 基础认证（可选双重保护）
-
-Caddy：
+Caddy:
 
 ```caddyfile
 nas.example.com {
     basicauth /dav/* {
-        admin $2a$14$... # caddy hash-password 生成
+        admin $2a$14$...
     }
     reverse_proxy localhost:8080
 }
 ```
 
-### 2. 限制访问 IP（可选）
+### Optional IP Restrictions
 
-Caddy：
+Caddy:
 
 ```caddyfile
 nas.example.com {
     @blocked not remote_ip 192.168.0.0/16 10.0.0.0/8
     respond @blocked "Forbidden" 403
-    
+
     reverse_proxy localhost:8080
 }
 ```
 
-### 3. Fail2ban 防暴力破解
+### Fail2ban Example
 
-创建 `/etc/fail2ban/filter.d/mnemonas.conf`：
+`/etc/fail2ban/filter.d/mnemonas.conf`:
 
 ```ini
 [Definition]
@@ -289,7 +230,7 @@ failregex = ^.*"POST /api/v1/auth/login.*" 401.*client=<HOST>.*$
 ignoreregex =
 ```
 
-创建 `/etc/fail2ban/jail.d/mnemonas.conf`：
+`/etc/fail2ban/jail.d/mnemonas.conf`:
 
 ```ini
 [mnemonas]
@@ -301,58 +242,44 @@ maxretry = 5
 bantime = 3600
 ```
 
----
+## Client URLs
 
-## 客户端连接
-
-配置完成后，各客户端连接方式：
-
-| 客户端 | 地址 |
-| ------ | ---- |
-| Web 浏览器 | `https://nas.example.com` |
+| Client | URL |
+| --- | --- |
+| Browser | `https://nas.example.com` |
 | macOS Finder | `https://nas.example.com/dav` |
-| Windows 资源管理器 | `https://nas.example.com/dav` |
-| Linux (davfs2) | `https://nas.example.com/dav` |
-| Rclone | `webdav:https://nas.example.com/dav` |
+| Windows File Explorer | `https://nas.example.com/dav` |
+| Linux davfs2 | `https://nas.example.com/dav` |
+| rclone | `webdav:https://nas.example.com/dav` |
 
----
+## Troubleshooting
 
-## 故障排查
-
-### 证书问题
+Certificate checks:
 
 ```bash
-# 检查证书状态
 sudo certbot certificates
-
-# 手动续期
 sudo certbot renew
-
-# Caddy 证书位置
-ls ~/.local/share/caddy/certificates/
 ```
 
-### 连接超时
+Connectivity:
 
 ```bash
-# 检查防火墙
 sudo ufw status
-sudo firewall-cmd --list-all
-
-# 检查端口监听
 ss -tlnp | grep -E '80|443|8080'
 ```
 
-### WebDAV 问题
+WebDAV:
 
 ```bash
-# 测试 PROPFIND
 WEBDAV_USER="webdav"
 WEBDAV_PASS="your-webdav-password"
 curl -u "$WEBDAV_USER:$WEBDAV_PASS" -X PROPFIND https://nas.example.com/dav/ \
   -H "Depth: 1" \
   -v
+```
 
-# 检查后端日志
+Backend logs:
+
+```bash
 docker logs mnemonas 2>&1 | tail -50
 ```

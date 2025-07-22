@@ -1,5 +1,7 @@
 # WebDAV 挂载指南
 
+[English](mounting-guide.en.md) | 简体中文
+
 MnemoNAS 通过 WebDAV 协议提供文件访问。本文档介绍如何在各平台挂载 WebDAV 共享。
 
 ## 📍 连接信息
@@ -29,7 +31,7 @@ MnemoNAS 通过 WebDAV 协议提供文件访问。本文档介绍如何在各平
 
 ### Transmit（推荐）
 
-[Transmit](https://panic.com/transmit/) 是 macOS 上优秀的文件传输工具：
+[Transmit](https://panic.com/transmit/) 是 macOS 上常见的文件传输工具：
 
 1. 新建连接 → 协议选择 **WebDAV**
 2. 服务器：`localhost`

@@ -1,5 +1,7 @@
 # 常见问题 (FAQ)
 
+[English](faq.en.md) | 简体中文
+
 ## 📦 安装与部署
 
 ### Q: 支持哪些操作系统？
@@ -8,11 +10,11 @@
 
 | 平台 | 支持状态 |
 | ---- | -------- |
-| Linux (x86_64) | ✅ 完全支持 |
-| Linux (ARM64) | ✅ 完全支持 |
-| macOS (Apple Silicon) | ✅ 完全支持 |
-| macOS (Intel) | ✅ 完全支持 |
-| Windows | 🔄 通过 WSL2 支持 |
+| Linux (x86_64) | 长期运行主路径 |
+| Linux (ARM64) | 长期运行主路径 |
+| macOS (Apple Silicon) | 支持开发、本地运行和手动二进制 |
+| macOS (Intel) | 支持开发、本地运行和手动二进制 |
+| Windows | 通过 WSL2 支持 |
 
 ### Q: Ubuntu/systemd、Docker 和手动二进制部署有什么区别？
 
@@ -20,11 +22,11 @@
 
 | 方式 | 优点 | 缺点 |
 | ---- | ---- | ---- |
-| **Ubuntu/systemd** | 开机自启、日志清晰、适合长期运行、诊断脚本完整 | 主要面向 Linux 主机 |
+| **Linux/systemd** | 开机自启、日志清晰、适合长期运行、诊断脚本完整 | 主要面向 Linux 主机 |
 | **Docker** | 启动简单、隔离性好、易于升级 | 需要 Docker 环境，存储路径需正确挂载 |
 | **手动二进制** | 无依赖、适合调试 | 需手动管理进程，不推荐长期无人值守 |
 
-闲置 Ubuntu 笔记本或小主机长期运行，优先参考 [Ubuntu 笔记本部署指南](ubuntu-laptop-deployment.md)。临时试用或已有容器平台时使用 Docker。
+长期运行优先参考 [Linux/systemd 部署指南](linux-systemd-deployment.md)。临时试用或已有容器平台时使用 Docker。
 
 ### Q: 如何更新到新版本？
 
@@ -69,7 +71,7 @@ pkill dataplane
 - **内部数据**（CAS/元数据）：`~/.mnemonas/.mnemonas/`
 - **配置文件**：`~/.mnemonas/config.toml`
 
-Ubuntu/systemd 部署默认使用 `/srv/mnemonas` 存放数据，配置文件在 `/etc/mnemonas/config.toml`。
+Linux/systemd 部署默认使用 `/srv/mnemonas` 存放数据，配置文件在 `/etc/mnemonas/config.toml`。
 
 Docker 部署时，宿主机 `~/.mnemonas` 通常映射到容器内 `/data`，内部数据位于 `/data/.mnemonas`。
 
@@ -149,7 +151,7 @@ server {
 
 ### Q: 误删了文件怎么办？
 
-**A:** MnemoNAS 支持文件版本历史，可以轻松恢复删除或修改的文件！
+**A:** MnemoNAS 支持回收站和文件版本历史，可恢复删除或修改的文件。
 
 1. 打开 Web UI：`http://localhost:8080`
 2. 导航到文件所在目录
@@ -223,7 +225,7 @@ curl -X POST \
 
 ```bash
 curl http://localhost:8080/health
-# {"status":"healthy","version":"v0.2.0",...}
+# {"status":"healthy","version":"<version>",...}
 ```
 
 性能指标：
