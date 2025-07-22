@@ -593,28 +593,35 @@ RUN_CORRUPTION_TESTS=0 \
 
 ### 性能基准测试
 
-使用 `scripts/benchmark.sh` 测试 WebDAV PROPFIND 性能：
+默认使用隔离后端测试 WebDAV PROPFIND 性能，避免在真实 `storage.root` 下创建和删除基准测试文件：
 
 ```bash
-./scripts/benchmark.sh [base_url]
+make bench
 
-# 默认测试 http://localhost:8080
-./scripts/benchmark.sh
+# 或显式调用隔离包装脚本
+./scripts/run-benchmark-isolated.sh
+```
 
-# 测试其他地址
+`scripts/benchmark.sh` 可以手动打一个已启动的本地服务；这种模式必须显式提供服务地址和对应的本地 `storage.root`：
+
+```bash
+MNEMONAS_STORAGE_ROOT=/tmp/mnemonas-bench-target \
+./scripts/benchmark.sh http://127.0.0.1:18080
+
+# 真实存储路径需要额外确认
+ALLOW_REAL_STORAGE=1 \
+MNEMONAS_STORAGE_ROOT=/data/mnemonas \
 ./scripts/benchmark.sh http://192.168.1.100:8080
-
-# 若服务的 storage.root 不是默认 ~/.mnemonas，可显式指定
-MNEMONAS_STORAGE_ROOT=/data/mnemonas ./scripts/benchmark.sh
 
 # 若未使用默认 WebDAV 凭据或需要显式抓取受保护的 metrics
 MNEMONAS_WEBDAV_USERNAME="family" \
 MNEMONAS_WEBDAV_PASSWORD="secret" \
 MNEMONAS_ACCESS_TOKEN="<access-token>" \
-./scripts/benchmark.sh http://localhost:8080
+MNEMONAS_STORAGE_ROOT=/tmp/mnemonas-bench-target \
+./scripts/benchmark.sh http://127.0.0.1:18080
 ```
 
-脚本会在 `storage.root/files/benchmark-test` 下创建真实测试文件，并优先从 `config.toml` / `secrets.json` 自动读取 WebDAV Basic Auth。若认证已初始化且 bootstrap admin 凭据不可用，可通过 `MNEMONAS_ACCESS_TOKEN` 显式传入管理员 token；否则 metrics 段会标记为 `skip`。若 WebDAV `PROPFIND` 返回非 `207 Multi-Status`，脚本会立即退出，而不是继续输出无效耗时。
+脚本会在 `storage.root/files/benchmark-test` 下创建真实测试文件，退出时删除该目录，并优先从 `config.toml` / `secrets.json` 自动读取 WebDAV Basic Auth。默认只允许 `/tmp` 或当前 checkout 下的 `MNEMONAS_STORAGE_ROOT`；真实存储路径必须额外设置 `ALLOW_REAL_STORAGE=1`。若认证已初始化且 bootstrap admin 凭据不可用，可通过 `MNEMONAS_ACCESS_TOKEN` 显式传入管理员 token；否则 metrics 段会标记为 `skip`。若 WebDAV `PROPFIND` 返回非 `207 Multi-Status`，脚本会立即退出，而不是继续输出无效耗时。
 
 测试内容：
 

@@ -22,8 +22,8 @@ GO_FUZZTIME ?= 10s
 GO_FUZZ_TARGETS ?= ./internal/api:FuzzValidatePath ./internal/api:FuzzPathWithinBase ./internal/config:FuzzNormalizeWebDAVPrefix
 GO_TORTURE_PACKAGES ?= ./internal/api ./internal/auth ./internal/share ./internal/storage ./internal/versionstore ./internal/dataplane ./internal/workspace
 WEB_TORTURE_SPECS ?= files.spec.ts interaction-integrity.spec.ts layout-integrity.spec.ts runtime-integrity.spec.ts
-DEPLOYMENT_SCRIPTS := scripts/install-systemd.sh scripts/uninstall-systemd.sh scripts/mnemonas-doctor.sh scripts/mnemonas-docker-preflight.sh scripts/docker-quickstart.sh scripts/mnemonas-dataplane-start.sh scripts/test-systemd-install.sh scripts/test-systemd-uninstall.sh scripts/test-docker-start.sh scripts/test-docker-preflight.sh scripts/test-docker-quickstart.sh scripts/test-fault-injection-safety.sh scripts/docker-start.sh scripts/setup-reverse-proxy.sh scripts/dev.sh scripts/benchmark.sh
-ACCEPTANCE_SCRIPTS := scripts/e2e-test.sh scripts/fault-injection-test.sh scripts/torture-test.sh scripts/run-e2e-isolated.sh
+DEPLOYMENT_SCRIPTS := scripts/install-systemd.sh scripts/uninstall-systemd.sh scripts/mnemonas-doctor.sh scripts/mnemonas-docker-preflight.sh scripts/docker-quickstart.sh scripts/mnemonas-dataplane-start.sh scripts/test-systemd-install.sh scripts/test-systemd-uninstall.sh scripts/test-docker-start.sh scripts/test-docker-preflight.sh scripts/test-docker-quickstart.sh scripts/test-fault-injection-safety.sh scripts/test-e2e-safety.sh scripts/test-benchmark-safety.sh scripts/docker-start.sh scripts/setup-reverse-proxy.sh scripts/dev.sh scripts/benchmark.sh
+ACCEPTANCE_SCRIPTS := scripts/e2e-test.sh scripts/fault-injection-test.sh scripts/torture-test.sh scripts/run-e2e-isolated.sh scripts/run-benchmark-isolated.sh
 WEB_SCRIPTS := web/scripts/start-e2e-backend.sh
 
 define RESOLVE_GO_PACKAGES
@@ -62,7 +62,7 @@ help:
 	@echo "  workflows-check - Validate GitHub Actions workflows"
 	@echo "  e2e        - Run isolated E2E acceptance tests"
 	@echo "  fault-injection - Run live destructive fault-injection tests"
-	@echo "  bench      - Run performance benchmarks"
+	@echo "  bench      - Run isolated performance benchmarks"
 	@echo "  proto      - Generate protobuf code"
 	@echo "  go-packages - Print resolved Go package list"
 	@echo "  docker     - Build Docker image"
@@ -180,9 +180,9 @@ fault-injection:
 
 # 性能基准测试
 bench:
-	@echo "⏱️  Running benchmarks..."
-	@chmod +x scripts/benchmark.sh
-	./scripts/benchmark.sh
+	@echo "⏱️  Running isolated benchmarks..."
+	@chmod +x scripts/benchmark.sh scripts/run-benchmark-isolated.sh
+	./scripts/run-benchmark-isolated.sh
 
 # 运行
 run: build
@@ -244,6 +244,8 @@ scripts-check:
 	./scripts/test-docker-start.sh
 	./scripts/test-docker-preflight.sh
 	./scripts/test-docker-quickstart.sh
+	./scripts/test-benchmark-safety.sh
+	./scripts/test-e2e-safety.sh
 	./scripts/test-fault-injection-safety.sh
 
 # 安全依赖检查
