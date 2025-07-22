@@ -162,7 +162,7 @@ classify_file() {
 	local file="$1"
 
 	case "$file" in
-		README.md|README.en.md|CHANGELOG.md|CHANGELOG.en.md|SECURITY.md|SECURITY.zh-CN.md|SUPPORT.md|SUPPORT.en.md|.github/copilot-instructions.md|docs/*|web/README.md|web/README.en.md|deploy/public-access/README.md|deploy/public-access/README.en.md)
+		README.md|README.en.md|CHANGELOG.md|CHANGELOG.en.md|CONTRIBUTING.md|CONTRIBUTING.en.md|SECURITY.md|SECURITY.zh-CN.md|SUPPORT.md|SUPPORT.en.md|.github/copilot-instructions.md|docs/*|web/README.md|web/README.en.md|deploy/public-access/README.md|deploy/public-access/README.en.md)
 			append_to_group "docs" "$file"
 			return 0
 			;;
