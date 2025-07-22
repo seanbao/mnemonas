@@ -34,6 +34,8 @@ This file records verified review progress so future work can continue from the 
 - `make bench` now uses an isolated temporary backend and storage root through `scripts/run-benchmark-isolated.sh`; raw `scripts/benchmark.sh` now refuses implicit base URLs and personal storage roots.
 - Fault-injection and E2E shell counters no longer trip `set -e` on successful increments. Crash-during-write live fault coverage now throttles the upload so incomplete upload handling is exercised reliably.
 - Docker npm install cache is serialized with `sharing=locked`, avoiding esbuild postinstall `ETXTBSY` races during BuildKit builds.
+- Docker and systemd dataplane launch helpers accept TOML-style underscored integer chunk-size settings and normalize them before passing CLI flags to the dataplane binary.
+- Shell TOML and `.env` readers preserve `#` inside quoted values across Docker, systemd, doctor, development, E2E, benchmark, and fault-injection helpers; Docker quickstart quotes generated `.env` values when needed.
 
 ## Recent Validation
 
@@ -98,6 +100,9 @@ This file records verified review progress so future work can continue from the 
 - `MNEMONAS_HTTP_PORT=18083 MNEMONAS_DATA_DIR=/tmp/mnemonas-docker-preflight-data docker compose -f docker-compose.yml --env-file .env.example config --quiet`
 - `DOCKER_BUILDKIT=1 docker build --progress=plain --build-arg VERSION=codex-check -t mnemonas:codex-check .`
 - `docker run -d --name mnemonas-smoke -p 127.0.0.1:18084:8080 mnemonas:codex-check` followed by `/health` and Web root smoke checks.
+- `./scripts/test-dataplane-start.sh`
+- `GOSUMDB=sum.golang.org GOTOOLCHAIN=auto make check`
+- `make scripts-check`
 
 ## Remaining Risks
 

@@ -71,9 +71,48 @@ env_value() {
 
 	[[ -f "$file" ]] || return 0
 	awk -F= -v key="$key" '
+		function strip_comment(text,    i, c, quote, escaped, out) {
+			quote = ""
+			escaped = 0
+			out = ""
+			for (i = 1; i <= length(text); i++) {
+				c = substr(text, i, 1)
+				if (quote == "\"") {
+					out = out c
+					if (escaped) {
+						escaped = 0
+						continue
+					}
+					if (c == "\\") {
+						escaped = 1
+						continue
+					}
+					if (c == quote) {
+						quote = ""
+					}
+					continue
+				}
+				if (quote == "\047") {
+					out = out c
+					if (c == quote) {
+						quote = ""
+					}
+					continue
+				}
+				if (c == "\"" || c == "\047") {
+					quote = c
+					out = out c
+					continue
+				}
+				if (c == "#") {
+					break
+				}
+				out = out c
+			}
+			return out
+		}
 		{
-			line = $0
-			sub(/[[:space:]]*#.*$/, "", line)
+			line = strip_comment($0)
 			gsub(/^[[:space:]]+|[[:space:]]+$/, "", line)
 			sub(/^export[[:space:]]+/, "", line)
 		}
@@ -96,19 +135,71 @@ env_value() {
 	' "$file"
 }
 
+env_assignment_value() {
+	local value="$1"
+
+	if [[ -z "$value" || "$value" == *[[:space:]#\"\\]* || "$value" == *"'"* ]]; then
+		value="${value//\\/\\\\}"
+		value="${value//\"/\\\"}"
+		printf '"%s"\n' "$value"
+	else
+		printf '%s\n' "$value"
+	fi
+}
+
 write_env_value() {
 	local key="$1"
-	local value="$2"
+	local value
 	local file="$3"
 	local tmp
 
+	value="$(env_assignment_value "$2")"
 	tmp="$(mktemp -t mnemonas-env.XXXXXX)"
 	awk -v key="$key" -v value="$value" '
+		function strip_comment(text,    i, c, quote, escaped, out) {
+			quote = ""
+			escaped = 0
+			out = ""
+			for (i = 1; i <= length(text); i++) {
+				c = substr(text, i, 1)
+				if (quote == "\"") {
+					out = out c
+					if (escaped) {
+						escaped = 0
+						continue
+					}
+					if (c == "\\") {
+						escaped = 1
+						continue
+					}
+					if (c == quote) {
+						quote = ""
+					}
+					continue
+				}
+				if (quote == "\047") {
+					out = out c
+					if (c == quote) {
+						quote = ""
+					}
+					continue
+				}
+				if (c == "\"" || c == "\047") {
+					quote = c
+					out = out c
+					continue
+				}
+				if (c == "#") {
+					break
+				}
+				out = out c
+			}
+			return out
+		}
 		BEGIN { done = 0 }
 		{
 			line = $0
-			match_line = line
-			sub(/[[:space:]]*#.*$/, "", match_line)
+			match_line = strip_comment(line)
 			gsub(/^[[:space:]]+|[[:space:]]+$/, "", match_line)
 			sub(/^export[[:space:]]+/, "", match_line)
 			name = match_line
