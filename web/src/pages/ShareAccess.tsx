@@ -228,7 +228,16 @@ export function ShareAccessPage() {
   }, [id])
 
   useEffect(() => {
-    loadShareInfo()
+    let cancelled = false
+    queueMicrotask(() => {
+      if (!cancelled) {
+        void loadShareInfo()
+      }
+    })
+
+    return () => {
+      cancelled = true
+    }
   }, [loadShareInfo])
 
   const handlePasswordSubmit = async (e: React.FormEvent) => {
@@ -371,7 +380,16 @@ export function ShareAccessPage() {
   }, [id, shareInfo, isAuthenticated, folderPath])
 
   useEffect(() => {
-    loadFolderItems()
+    let cancelled = false
+    queueMicrotask(() => {
+      if (!cancelled) {
+        void loadFolderItems()
+      }
+    })
+
+    return () => {
+      cancelled = true
+    }
   }, [loadFolderItems])
 
   // Loading state

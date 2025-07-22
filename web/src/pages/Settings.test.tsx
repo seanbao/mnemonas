@@ -1904,6 +1904,37 @@ describe('SettingsPage', () => {
     expect(mockUpdateSettings).not.toHaveBeenCalled()
   })
 
+  it('shows danger toast and skips save for unsupported alert webhook methods', async () => {
+    const user = userEvent.setup({ writeToClipboard: false })
+    mockGetSettings.mockResolvedValueOnce({
+      data: {
+        ...defaultSettingsResponse.data,
+        alerts: {
+          ...defaultSettingsResponse.data.alerts,
+          enabled: true,
+          webhook_method: 'PATCH',
+        },
+      },
+    })
+
+    render(<SettingsPage />)
+
+    await waitFor(() => {
+      expect(screen.getByText('保存设置')).toBeTruthy()
+    })
+
+    await user.click(screen.getByText('保存设置'))
+
+    await waitFor(() => {
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: 'Webhook 方法无效',
+        description: 'Webhook 方法必须是 GET 或 POST',
+        color: 'danger',
+      })
+    })
+    expect(mockUpdateSettings).not.toHaveBeenCalled()
+  })
+
   it('shows danger toast and skips save for invalid trash retention days', async () => {
     const user = userEvent.setup({ writeToClipboard: false })
     render(<SettingsPage />)

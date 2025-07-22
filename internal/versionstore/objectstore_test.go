@@ -6,9 +6,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/seanbao/mnemonas/internal/dataplane"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+
+	"github.com/seanbao/mnemonas/internal/dataplane"
 )
 
 func TestObjectStoreSetClient(t *testing.T) {
