@@ -23,6 +23,7 @@
 | 单元测试 | ≥80%       | 每次提交    | < 30s    |
 | 集成测试 | 关键路径   | 每次提交    | < 2min   |
 | E2E 测试 | 核心场景   | 每日/发布前 | < 10min  |
+| 测死矩阵 | 高风险路径 | 手动/定时   | 10-90min |
 
 ---
 
@@ -293,6 +294,55 @@ func FuzzPasswordValidation(f *testing.F) {
 ```bash
 go test -fuzz=FuzzPasswordValidation ./internal/auth/
 ```
+
+### 4.5 测死矩阵 (Torture Matrix)
+
+`make test-torture` 是发布前和深度排障入口，覆盖普通测试不容易暴露的问题：
+
+```bash
+make test-torture
+```
+
+默认矩阵包括：
+
+- Go race detector：控制面、认证、分享、存储、版本、数据面客户端、工作区等并发敏感包
+- Go 原生 fuzz：路径校验、路径越界防护、WebDAV 前缀归一化
+- 前端 property test：工具函数不变量和边界输入
+- Playwright 人类交互：文件页真实操作、路径稳定性、布局完整性、运行时错误扫描
+
+本地快速验证可降低耗时：
+
+```bash
+GO_FUZZTIME=2s RUN_GO_RACE=0 RUN_E2E_TORTURE=0 make test-torture
+```
+
+GitHub Actions 的 `.github/workflows/torture.yml` 提供手动和定时的非破坏性深度测试入口。该 workflow 固定 `RUN_LIVE_FAULTS=0`，不会触发杀进程或数据损坏测试。
+
+### 4.6 破坏性故障注入
+
+`scripts/fault-injection-test.sh` 专门验证崩溃恢复、并发写冲突、版本恢复、对象损坏和元数据损坏处理。它会杀死并重启目标 `nasd`，并可直接改写内部数据文件，所以默认拒绝运行。
+
+最小隔离运行示例：
+
+```bash
+MNEMONAS_LIVE_FAULTS=1 \
+BASE_URL=http://127.0.0.1:18080 \
+STORAGE_ROOT=/tmp/mnemonas-fault-target \
+NASD_BIN="$PWD/bin/nasd" \
+FAULT_INJECTION_ASSUME_YES=1 \
+RUN_CORRUPTION_TESTS=0 \
+./scripts/fault-injection-test.sh
+```
+
+安全边界：
+
+- 必须显式传入 `BASE_URL`、`STORAGE_ROOT` 和 `NASD_BIN`
+- 默认只允许 `/tmp` 或当前 checkout 下的 `STORAGE_ROOT`
+- 默认拒绝 `$HOME/.mnemonas`
+- 非交互环境必须设置 `FAULT_INJECTION_ASSUME_YES=1`
+- 真实存储路径必须额外设置 `ALLOW_REAL_STORAGE=1`
+
+这些门禁由 `scripts/test-fault-injection-safety.sh` 回归测试覆盖，并纳入 `make scripts-check`。
 
 ---
 
@@ -584,7 +634,12 @@ internal/
 │   └── matrix_test.go         # 配置矩阵测试
 scripts/
 ├── e2e-test.sh                # E2E 测试
+├── torture-test.sh            # 非破坏性测死矩阵
+├── fault-injection-test.sh    # 显式隔离目标上的破坏性故障注入
+├── test-fault-injection-safety.sh # 故障注入门禁回归测试
 └── benchmark.sh               # 性能测试
+.github/workflows/
+└── torture.yml                # 手动/定时非破坏性深度测试
 contracts/
 └── auth.pact.yaml             # API 契约
 testdata/
@@ -634,8 +689,6 @@ testdata/
 ---
 
 ## 10. 前端测试策略
-
-> 借鉴 Meridian 项目的优秀实践
 
 ### 10.1 测试分层
 
