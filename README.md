@@ -272,7 +272,6 @@ Docker 和 systemd 部署默认只对外提供 `8080`；`9090/9091` 是内部 da
 | [架构设计](docs/architecture.md) | 系统架构与技术选型 |
 | [安全指南](docs/security.md) | 认证与网络安全配置 |
 | [支持说明](SUPPORT.md) | 支持渠道、问题分流和维护边界 |
-| [行为准则](CODE_OF_CONDUCT.md) | 社区协作规则和问题报告方式 |
 
 ## 🔧 脚本工具
 
@@ -291,11 +290,5 @@ Docker 和 systemd 部署默认只对外提供 `8080`；`9090/9091` 是内部 da
 ## 📜 License
 
 MIT License - 详见 [LICENSE](LICENSE)
-
-## 🤝 贡献
-
-欢迎贡献！请查看 [CONTRIBUTING.md](CONTRIBUTING.md) 了解流程，并遵守 [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)。使用问题、Bug 报告和功能建议的分流方式见 [SUPPORT.md](SUPPORT.md)。
-
----
 
 *MnemoNAS - 自托管文件管理与版本历史*
