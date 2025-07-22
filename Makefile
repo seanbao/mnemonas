@@ -8,6 +8,8 @@ GO_PACKAGES ?=
 GO_PACKAGE_PATTERN ?= ./...
 GO_PACKAGE_EXCLUDE_PATTERN ?= /web/node_modules/|/proto$$
 GO_LINT_PACKAGES ?= ./...
+GOLANGCI_LINT ?= golangci-lint
+SKIP_GOLANGCI_LINT ?= 0
 GOVULNCHECK_VERSION ?= v1.3.0
 CARGO_AUDIT_VERSION ?= 0.22.1
 ACTIONLINT_VERSION ?= v1.7.7
@@ -209,10 +211,13 @@ fmt:
 # 代码检查
 lint:
 	@echo "🔍 Linting Go..."
-	@if command -v golangci-lint >/dev/null 2>&1; then \
-		golangci-lint run $(GO_LINT_PACKAGES); \
+	@if [ "$(SKIP_GOLANGCI_LINT)" = "1" ]; then \
+		echo "⚠️  Skipping golangci-lint because SKIP_GOLANGCI_LINT=1"; \
+	elif command -v "$(GOLANGCI_LINT)" >/dev/null 2>&1; then \
+		"$(GOLANGCI_LINT)" run $(GO_LINT_PACKAGES); \
 	else \
-		echo "⚠️  golangci-lint not installed, skipping"; \
+		echo "❌ golangci-lint not installed. Install golangci-lint, set GOLANGCI_LINT=/path/to/golangci-lint, or use SKIP_GOLANGCI_LINT=1 for a deliberate local-only skip." >&2; \
+		exit 1; \
 	fi
 	@echo "🔍 Linting Rust..."
 	cd dataplane && cargo clippy --all-targets --locked -- -D warnings
