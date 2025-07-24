@@ -6,7 +6,7 @@
 [![Go Report Card](https://goreportcard.com/badge/github.com/seanbao/mnemonas)](https://goreportcard.com/report/github.com/seanbao/mnemonas)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-> 🧠 **Your files. Your control.** — 自托管私有云存储
+> **Your files. Your control.** — 自托管私有云存储
 
 MnemoNAS 是一个开源的自托管 NAS 系统，提供 Web UI、WebDAV、版本历史、回收站、Scrub 和诊断包等日常文件管理能力。数据保存在自有存储目录中，迁移完整存储目录即可换机运行。
 
