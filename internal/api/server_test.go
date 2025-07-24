@@ -5210,6 +5210,7 @@ func TestValidatePath(t *testing.T) {
 		{"", "/", false},
 		{"foo..txt", "/foo..txt", false},
 		{"/nested/foo..txt", "/nested/foo..txt", false},
+		{"/nul\x00byte", "", true},
 		{"../etc/passwd", "", true},
 		{"/foo/../bar", "", true},
 		{"..\\etc\\passwd", "", true},
