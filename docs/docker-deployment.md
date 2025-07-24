@@ -243,11 +243,14 @@ gc_interval = "1h"       # 更频繁的版本清理
 enabled = true
 auth_type = "none"       # 仅限绑定到宿主机 127.0.0.1 的本地场景
 
+[security]
+allow_unsafe_no_auth = true  # 容器内监听 0.0.0.0 时必须显式确认外层端口已限本机
+
 [log]
 level = "debug"          # 开发时可用 debug
 ```
 
-Docker 中不要用 `server.host = "127.0.0.1"` 来限制宿主机访问范围；那会让进程只监听容器自己的 loopback，发布端口可能无法访问。需要本地-only 时，在 Compose 端口映射里写 `127.0.0.1:${MNEMONAS_HTTP_PORT:-8080}:8080`。`webdav.auth_type = "none"` 只关闭 WebDAV Basic Auth，Web UI/API 登录仍由 `[auth].enabled` 控制。
+Docker 中不要用 `server.host = "127.0.0.1"` 来限制宿主机访问范围；那会让进程只监听容器自己的 loopback，发布端口可能无法访问。需要本地-only 时，在 Compose 端口映射里写 `127.0.0.1:${MNEMONAS_HTTP_PORT:-8080}:8080`。`webdav.auth_type = "none"` 只关闭 WebDAV Basic Auth，Web UI/API 登录仍由 `[auth].enabled` 控制；由于容器内仍监听 `0.0.0.0`，必须设置 `security.allow_unsafe_no_auth = true` 来显式确认外层端口映射已经限制为本机。
 
 ### 场景三：多用户共享 NAS
 

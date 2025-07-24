@@ -282,6 +282,8 @@ bash ./scripts/with-test-dataplane.sh go test -coverprofile=coverage.out $GO_PAC
 go tool cover -html=coverage.out
 ```
 
+After installing frontend dependencies, do not use `go test ./...` or `go list ./...` as the repository package set; Go will traverse third-party packages under `web/node_modules`. Use `make --no-print-directory go-packages` for repository-wide Go checks.
+
 ### Rust
 
 ```bash

@@ -158,9 +158,12 @@ grpc_address = "0.0.0.0:9090"
 enabled = true
 auth_type = "none"
 
-[auth]
-enabled = false
-`)
+	[auth]
+	enabled = false
+
+	[security]
+	allow_unsafe_no_auth = true
+	`)
 
 	if err := os.WriteFile(configPath, configData, 0o600); err != nil {
 		t.Fatalf("WriteFile() error: %v", err)
