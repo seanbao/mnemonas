@@ -14,6 +14,8 @@ if [[ "$#" -eq 0 ]]; then
   set -- \
     .github/dependabot.yml \
     .github/dependabot.yaml \
+    .github/ISSUE_TEMPLATE/*.yml \
+    .github/ISSUE_TEMPLATE/*.yaml \
     codecov.yml \
     codecov.yaml \
     .pre-commit-config.yaml

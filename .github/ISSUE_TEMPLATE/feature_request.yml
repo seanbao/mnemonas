@@ -1,0 +1,56 @@
+name: Feature request / 功能建议
+description: Propose a scoped MnemoNAS improvement. 提交范围清晰的 MnemoNAS 改进建议。
+title: "feat: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Feature requests should describe the workflow, user impact, and affected surfaces. Security, data, deployment, and compatibility implications should be called out explicitly.
+
+        功能建议应说明流程、使用影响和受影响界面。安全、数据、部署和兼容性影响应明确列出。
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or workflow / 问题或流程
+      description: Current limitation, operational pain point, or missing workflow. 当前限制、运维痛点或缺失流程。
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior / 建议行为
+      description: Expected behavior, UI/API shape, or deployment flow. 期望行为、界面/API 形态或部署流程。
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered / 已考虑方案
+      description: Existing workarounds or rejected alternatives. 现有绕行方式或已排除方案。
+  - type: checkboxes
+    id: surfaces
+    attributes:
+      label: Affected surfaces / 受影响范围
+      options:
+        - label: Web UI / Web 界面
+        - label: WebDAV
+        - label: API
+        - label: Storage, backup, restore, scrub, or GC / 存储、备份、恢复、Scrub 或 GC
+        - label: Docker, systemd, reverse proxy, or public access / Docker、systemd、反向代理或公网访问
+        - label: Documentation / 文档
+  - type: textarea
+    id: risks
+    attributes:
+      label: Risks and compatibility / 风险与兼容性
+      description: Data migration, security, deployment, performance, or client-compatibility concerns. 数据迁移、安全、部署、性能或客户端兼容性影响。
+  - type: checkboxes
+    id: readiness
+    attributes:
+      label: Submission checklist / 提交检查
+      options:
+        - label: Existing roadmap, FAQ, and issues were checked. 已检查路线图、FAQ 和现有 Issues。
+          required: true
+        - label: The proposal is scoped to a concrete workflow. 建议已限定到具体流程。
+          required: true

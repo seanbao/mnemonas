@@ -1,0 +1,93 @@
+name: Bug report / 缺陷报告
+description: Report a reproducible MnemoNAS defect. 提交可复现的 MnemoNAS 缺陷。
+title: "bug: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Reports should include reproduction steps, deployment context, and diagnostics. Sensitive values such as passwords, tokens, cookies, private URLs, and internal addresses must be removed before posting logs.
+
+        报告应包含复现步骤、部署背景和诊断信息。粘贴日志前应移除密码、Token、Cookie、私密 URL 和内网敏感地址。
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary / 摘要
+      description: Concise description of the defect and affected workflow. 简要说明缺陷和受影响流程。
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Reproduction steps / 复现步骤
+      description: Minimal ordered steps that reproduce the issue. 可复现问题的最小顺序步骤。
+      placeholder: |
+        1. Start MnemoNAS with ...
+        2. Open ...
+        3. Run ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior / 期望行为
+      description: Expected result after following the reproduction steps. 执行复现步骤后的期望结果。
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior / 实际行为
+      description: Actual result, including visible errors or failed requests. 实际结果，包括可见错误或失败请求。
+    validations:
+      required: true
+  - type: dropdown
+    id: deployment
+    attributes:
+      label: Deployment path / 部署方式
+      options:
+        - Docker Compose
+        - Linux/systemd
+        - Manual binary
+        - Development environment
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit / 版本或提交
+      description: Release version, container tag, or Git commit. Release 版本、容器标签或 Git commit。
+      placeholder: v0.0.0 or c4f87616
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment / 环境
+      description: Operating system, filesystem, browser, WebDAV client, reverse proxy, and relevant deployment details. 操作系统、文件系统、浏览器、WebDAV 客户端、反向代理和相关部署细节。
+      placeholder: |
+        OS:
+        Filesystem:
+        Browser or client:
+        Reverse proxy:
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics / 诊断信息
+      description: Relevant sanitized logs, `mnemonas-doctor`, Docker preflight, browser console output, screenshots, or request IDs. 相关的脱敏日志、`mnemonas-doctor`、Docker 预检、浏览器控制台输出、截图或请求 ID。
+      render: text
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Submission checklist / 提交检查
+      options:
+        - label: Existing issues and FAQ were checked. 已检查现有 Issues 和 FAQ。
+          required: true
+        - label: Logs and screenshots are sanitized. 日志和截图已脱敏。
+          required: true
+        - label: Security-sensitive exploit details are not posted publicly. 未公开提交安全漏洞利用细节。
+          required: true

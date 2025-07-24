@@ -40,7 +40,7 @@ assert_docker_build_command_selected() {
 
 setup_repo() {
   local repo_dir="$1"
-  mkdir -p "$repo_dir/.github/workflows" "$repo_dir/scripts" "$repo_dir/dataplane/src" "$repo_dir/web/.husky" "$repo_dir/web/e2e" "$repo_dir/web/scripts" "$repo_dir/web/src"
+  mkdir -p "$repo_dir/.github/ISSUE_TEMPLATE" "$repo_dir/.github/workflows" "$repo_dir/scripts" "$repo_dir/dataplane/src" "$repo_dir/web/.husky" "$repo_dir/web/e2e" "$repo_dir/web/scripts" "$repo_dir/web/src"
   mkdir -p "$repo_dir/deploy/public-access/traefik/dynamic" "$repo_dir/deploy/public-access/cloudflare-tunnel"
   mkdir -p "$repo_dir/proto"
   mkdir -p "$repo_dir/tools/proto-gen"
@@ -69,7 +69,7 @@ toolchains-check:
 docker:
 	@:
 EOF
-  touch "$repo_dir/.github/dependabot.yml" "$repo_dir/.github/workflows/ci.yml" "$repo_dir/codecov.yml"
+  touch "$repo_dir/.github/dependabot.yml" "$repo_dir/.github/ISSUE_TEMPLATE/bug_report.yml" "$repo_dir/.github/workflows/ci.yml" "$repo_dir/codecov.yml"
   touch "$repo_dir/deploy/public-access/traefik/dynamic/mnemonas.yml"
   touch "$repo_dir/proto/dataplane.proto"
   touch "$repo_dir/tools/proto-gen/Cargo.toml" "$repo_dir/tools/proto-gen/Cargo.lock"
@@ -659,7 +659,7 @@ run_dependabot_config_change_selects_yaml_validation() {
   printf '%s\n' 'version: 2' 'updates: []' > "$case_dir/.github/dependabot.yml"
   run_dry_run "$case_dir" "$out"
 
-  assert_file_contains "$out" "Validate YAML config: ./scripts/check-yaml-configs.sh .github/dependabot.yml .github/dependabot.yaml codecov.yml codecov.yaml"
+  assert_file_contains "$out" "Validate YAML config: ./scripts/check-yaml-configs.sh .github/dependabot.yml .github/dependabot.yaml .github/ISSUE_TEMPLATE/*.yml .github/ISSUE_TEMPLATE/*.yaml codecov.yml codecov.yaml"
 }
 
 run_dependabot_yaml_config_change_selects_yaml_validation() {
@@ -670,7 +670,7 @@ run_dependabot_yaml_config_change_selects_yaml_validation() {
   printf '%s\n' 'version: 2' 'updates: []' > "$case_dir/.github/dependabot.yaml"
   run_dry_run "$case_dir" "$out"
 
-  assert_file_contains "$out" "Validate YAML config: ./scripts/check-yaml-configs.sh .github/dependabot.yml .github/dependabot.yaml codecov.yml codecov.yaml"
+  assert_file_contains "$out" "Validate YAML config: ./scripts/check-yaml-configs.sh .github/dependabot.yml .github/dependabot.yaml .github/ISSUE_TEMPLATE/*.yml .github/ISSUE_TEMPLATE/*.yaml codecov.yml codecov.yaml"
 }
 
 run_codecov_config_change_selects_yaml_validation() {
@@ -681,7 +681,7 @@ run_codecov_config_change_selects_yaml_validation() {
   printf '%s\n' 'coverage:' '  status: {}' > "$case_dir/codecov.yml"
   run_dry_run "$case_dir" "$out"
 
-  assert_file_contains "$out" "Validate YAML config: ./scripts/check-yaml-configs.sh .github/dependabot.yml .github/dependabot.yaml codecov.yml codecov.yaml"
+  assert_file_contains "$out" "Validate YAML config: ./scripts/check-yaml-configs.sh .github/dependabot.yml .github/dependabot.yaml .github/ISSUE_TEMPLATE/*.yml .github/ISSUE_TEMPLATE/*.yaml codecov.yml codecov.yaml"
 }
 
 run_codecov_yaml_config_change_selects_yaml_validation() {
@@ -692,7 +692,18 @@ run_codecov_yaml_config_change_selects_yaml_validation() {
   printf '%s\n' 'coverage:' '  status: {}' > "$case_dir/codecov.yaml"
   run_dry_run "$case_dir" "$out"
 
-  assert_file_contains "$out" "Validate YAML config: ./scripts/check-yaml-configs.sh .github/dependabot.yml .github/dependabot.yaml codecov.yml codecov.yaml"
+  assert_file_contains "$out" "Validate YAML config: ./scripts/check-yaml-configs.sh .github/dependabot.yml .github/dependabot.yaml .github/ISSUE_TEMPLATE/*.yml .github/ISSUE_TEMPLATE/*.yaml codecov.yml codecov.yaml"
+}
+
+run_issue_template_change_selects_yaml_validation() {
+  local case_dir="$TMP_ROOT/issue-template-change"
+  local out="$case_dir/out.log"
+  setup_repo "$case_dir"
+
+  printf '%s\n' 'name: Bug report' 'description: Report a defect' 'body: []' > "$case_dir/.github/ISSUE_TEMPLATE/bug_report.yml"
+  run_dry_run "$case_dir" "$out"
+
+  assert_file_contains "$out" "Validate YAML config: ./scripts/check-yaml-configs.sh .github/dependabot.yml .github/dependabot.yaml .github/ISSUE_TEMPLATE/*.yml .github/ISSUE_TEMPLATE/*.yaml codecov.yml codecov.yaml"
 }
 
 run_yaml_config_checker_validates_files() {
@@ -997,6 +1008,7 @@ run_dependabot_config_change_selects_yaml_validation
 run_dependabot_yaml_config_change_selects_yaml_validation
 run_codecov_config_change_selects_yaml_validation
 run_codecov_yaml_config_change_selects_yaml_validation
+run_issue_template_change_selects_yaml_validation
 run_yaml_config_checker_validates_files
 run_makefile_scripts_check_runs_web_node_script_checker
 run_makefile_clean_removes_proto_generator_target
