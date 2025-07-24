@@ -1,0 +1,52 @@
+name: Usage question / 使用问题
+description: Ask for deployment, operation, or compatibility help. 提交部署、运维或兼容性问题。
+title: "question: "
+labels:
+  - question
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Usage questions should include deployment context and diagnostics. For confirmed defects, use the bug report form instead.
+
+        使用问题应包含部署背景和诊断信息。已确认缺陷应使用缺陷报告表单。
+  - type: textarea
+    id: question
+    attributes:
+      label: Question / 问题
+      description: Specific deployment, operation, WebDAV, backup, restore, or public-access question. 具体的部署、运维、WebDAV、备份、恢复或公网访问问题。
+    validations:
+      required: true
+  - type: dropdown
+    id: deployment
+    attributes:
+      label: Deployment path / 部署方式
+      options:
+        - Docker Compose
+        - Linux/systemd
+        - Manual binary
+        - Development environment
+        - Not deployed yet
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment / 环境
+      description: Operating system, filesystem, browser, WebDAV client, reverse proxy, DNS, TLS, or firewall context when relevant. 相关的操作系统、文件系统、浏览器、WebDAV 客户端、反向代理、DNS、TLS 或防火墙背景。
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics / 诊断信息
+      description: Sanitized command output, logs, screenshots, or configuration excerpts. 已脱敏的命令输出、日志、截图或配置片段。
+      render: text
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Submission checklist / 提交检查
+      options:
+        - label: README, documentation index, FAQ, and support boundary were checked. 已检查 README、文档索引、FAQ 和支持边界。
+          required: true
+        - label: Logs and configuration snippets are sanitized. 日志和配置片段已脱敏。
+          required: true

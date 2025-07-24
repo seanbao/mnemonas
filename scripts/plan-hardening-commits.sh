@@ -92,7 +92,7 @@ declare -A GROUP_TITLES=(
 )
 
 declare -A GROUP_VALIDATION=(
-	["docs"]="make docs-check; Chinese style check; git diff --check"
+	["docs"]="make docs-check; ./scripts/check-yaml-configs.sh .github/ISSUE_TEMPLATE/*.yml .github/ISSUE_TEMPLATE/*.yaml; Chinese style check; git diff --check"
 	["build-ci"]="make scripts-check; ./scripts/verify-changed.sh --dry-run; ./scripts/check-secret-leaks.sh"
 	["feat-api"]="Go race tests from make verify-changed; path, archive, WebDAV, share, and access-rule tests"
 	["feat-core"]="Go race tests from make verify-changed; backup restore, quota, workspace, and storage-boundary tests"
@@ -162,7 +162,7 @@ classify_file() {
 	local file="$1"
 
 	case "$file" in
-		README.md|README.en.md|CHANGELOG.md|CHANGELOG.en.md|CONTRIBUTING.md|CONTRIBUTING.en.md|SECURITY.md|SECURITY.zh-CN.md|SUPPORT.md|SUPPORT.en.md|.github/copilot-instructions.md|docs/*|web/README.md|web/README.en.md|deploy/public-access/README.md|deploy/public-access/README.en.md)
+		README.md|README.en.md|CHANGELOG.md|CHANGELOG.en.md|CONTRIBUTING.md|CONTRIBUTING.en.md|SECURITY.md|SECURITY.zh-CN.md|SUPPORT.md|SUPPORT.en.md|.github/copilot-instructions.md|.github/pull_request_template.md|.github/ISSUE_TEMPLATE/*|docs/*|web/README.md|web/README.en.md|deploy/public-access/README.md|deploy/public-access/README.en.md)
 			append_to_group "docs" "$file"
 			return 0
 			;;
