@@ -16,11 +16,22 @@ describe('useKeyboardShortcuts', () => {
     document.dispatchEvent(event)
   }
 
+  const triggerKeyDownOn = (target: HTMLElement, key: string, options: Partial<KeyboardEvent> = {}) => {
+    const event = new KeyboardEvent('keydown', {
+      key,
+      bubbles: true,
+      cancelable: true,
+      ...options,
+    })
+    target.dispatchEvent(event)
+  }
+
   beforeEach(() => {
     vi.clearAllMocks()
   })
 
   afterEach(() => {
+    document.body.innerHTML = ''
     vi.restoreAllMocks()
   })
 
@@ -318,6 +329,65 @@ describe('useKeyboardShortcuts', () => {
         triggerKeyDown('Delete')
         triggerKeyDown('c', { ctrlKey: true })
       }).not.toThrow()
+    })
+  })
+
+  describe('ignored targets', () => {
+    it('does not trigger shortcuts from native form fields', () => {
+      const onDelete = vi.fn()
+      renderHook(() => useKeyboardShortcuts({ onDelete }))
+
+      for (const element of [
+        document.createElement('input'),
+        document.createElement('textarea'),
+        document.createElement('select'),
+      ]) {
+        document.body.appendChild(element)
+        triggerKeyDownOn(element, 'Delete')
+      }
+
+      expect(onDelete).not.toHaveBeenCalled()
+    })
+
+    it('does not trigger shortcuts from contenteditable elements', () => {
+      const onDelete = vi.fn()
+      const editor = document.createElement('div')
+      editor.contentEditable = 'true'
+      document.body.appendChild(editor)
+
+      renderHook(() => useKeyboardShortcuts({ onDelete }))
+
+      triggerKeyDownOn(editor, 'Delete')
+
+      expect(onDelete).not.toHaveBeenCalled()
+    })
+
+    it('does not trigger shortcuts from role textbox elements', () => {
+      const onDelete = vi.fn()
+      const editor = document.createElement('div')
+      editor.setAttribute('role', 'textbox')
+      document.body.appendChild(editor)
+
+      renderHook(() => useKeyboardShortcuts({ onDelete }))
+
+      triggerKeyDownOn(editor, 'Delete')
+
+      expect(onDelete).not.toHaveBeenCalled()
+    })
+
+    it('does not trigger shortcuts inside excluded elements', () => {
+      const onDelete = vi.fn()
+      const wrapper = document.createElement('div')
+      wrapper.className = 'shortcut-ignore'
+      const child = document.createElement('button')
+      wrapper.appendChild(child)
+      document.body.appendChild(wrapper)
+
+      renderHook(() => useKeyboardShortcuts({ onDelete }, { excludeElements: ['.shortcut-ignore'] }))
+
+      triggerKeyDownOn(child, 'Delete')
+
+      expect(onDelete).not.toHaveBeenCalled()
     })
   })
 

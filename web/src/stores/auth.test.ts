@@ -1,5 +1,15 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { useAuthStore } from './auth'
+import { renderHook } from '@testing-library/react'
+import {
+  useAuthError,
+  useAuthLoading,
+  useAuthStore,
+  useCanWrite,
+  useIsAdmin,
+  useIsAuthenticated,
+  useIsGuest,
+  useUser,
+} from './auth'
 
 const loginMock = vi.fn()
 const logoutMock = vi.fn()
@@ -335,5 +345,182 @@ describe('authStore', () => {
     expect(state.user?.username).toBe('user')
     expect(state.isAuthenticated).toBe(true)
     expect(state.isLoading).toBe(false)
+  })
+
+  it('initializes guest access when server auth is disabled', async () => {
+    getSetupStatusMock.mockResolvedValue({
+      success: true,
+      is_first_run: false,
+      auth_enabled: false,
+      webdav_enabled: true,
+      webdav_auth_type: 'none',
+    })
+
+    await expect(useAuthStore.getState().initialize()).resolves.toBeUndefined()
+
+    const state = useAuthStore.getState()
+    expect(state.authEnabled).toBe(false)
+    expect(state.isAuthenticated).toBe(true)
+    expect(state.isLoading).toBe(false)
+    expect(state.user).toEqual({
+      id: 'guest',
+      username: 'guest',
+      role: 'admin',
+      email: '',
+      homeDir: '/',
+    })
+    expect(getStoredTokenMock).not.toHaveBeenCalled()
+  })
+
+  it('initializes an authenticated session when the stored token validates', async () => {
+    const user = {
+      id: 'admin-1',
+      username: 'admin',
+      role: 'admin' as const,
+      email: '',
+      homeDir: '/',
+    }
+    getStoredTokenMock.mockReturnValue('access-1')
+    getStoredUserMock.mockReturnValue(user)
+    getCurrentUserMock.mockResolvedValue(user)
+
+    await expect(useAuthStore.getState().initialize()).resolves.toBeUndefined()
+
+    const state = useAuthStore.getState()
+    expect(state.user).toEqual(user)
+    expect(state.isAuthenticated).toBe(true)
+    expect(state.isLoading).toBe(false)
+  })
+
+  it('clears auth state when the stored token is invalid', async () => {
+    getStoredTokenMock.mockReturnValue('access-1')
+    getStoredUserMock.mockReturnValue({
+      id: 'cached-1',
+      username: 'cached-admin',
+      role: 'admin',
+      email: '',
+      homeDir: '/',
+    })
+    getCurrentUserMock.mockResolvedValue(null)
+
+    await expect(useAuthStore.getState().initialize()).resolves.toBeUndefined()
+
+    const state = useAuthStore.getState()
+    expect(state.user).toBeNull()
+    expect(state.isAuthenticated).toBe(false)
+    expect(state.isLoading).toBe(false)
+  })
+
+  it('clears auth state when current user validation fails without a cached session', async () => {
+    getStoredTokenMock.mockReturnValue('access-1')
+    getStoredUserMock.mockReturnValue(null)
+    getCurrentUserMock.mockRejectedValue(new Error('network down'))
+
+    await expect(useAuthStore.getState().initialize()).resolves.toBeUndefined()
+
+    const state = useAuthStore.getState()
+    expect(state.user).toBeNull()
+    expect(state.isAuthenticated).toBe(false)
+    expect(state.isLoading).toBe(false)
+  })
+
+  it('stores localized login errors and rethrows the original failure', async () => {
+    loginMock.mockRejectedValueOnce('bad credentials')
+
+    await expect(useAuthStore.getState().login('admin', 'wrong')).rejects.toBe('bad credentials')
+
+    const state = useAuthStore.getState()
+    expect(state.isLoading).toBe(false)
+    expect(state.error).toBe('登录失败')
+  })
+
+  it('clears errors and updates authEnabled through lightweight actions', () => {
+    useAuthStore.setState({ error: 'boom', authEnabled: true })
+
+    useAuthStore.getState().clearError()
+    useAuthStore.getState().setAuthEnabled(false)
+
+    const state = useAuthStore.getState()
+    expect(state.error).toBeNull()
+    expect(state.authEnabled).toBe(false)
+  })
+
+  it('ignores auth-cleared events when the store is already anonymous and idle', () => {
+    useAuthStore.setState({
+      user: null,
+      isAuthenticated: false,
+      isLoading: false,
+      error: null,
+      authEnabled: true,
+    })
+
+    window.dispatchEvent(new Event('mnemonas:auth-cleared'))
+
+    expect(clearQueryClientMock).not.toHaveBeenCalled()
+    expect(useAuthStore.getState().error).toBeNull()
+  })
+
+  it('uses the existing auth error when an auth-cleared event has no explicit message', () => {
+    useAuthStore.setState({
+      user: null,
+      isAuthenticated: false,
+      isLoading: true,
+      error: '已有认证错误',
+      authEnabled: true,
+    })
+
+    window.dispatchEvent(new Event('mnemonas:auth-cleared'))
+
+    expect(clearQueryClientMock).toHaveBeenCalledTimes(1)
+    expect(useAuthStore.getState().error).toBe('已有认证错误')
+  })
+
+  it('exposes selector hooks for auth state and permissions', () => {
+    const readHook = <T,>(hook: () => T): T => {
+      const { result, unmount } = renderHook(hook)
+      const value = result.current
+      unmount()
+      return value
+    }
+
+    useAuthStore.setState({
+      user: {
+        id: 'guest-1',
+        username: 'guest',
+        role: 'guest',
+        email: '',
+        homeDir: '/',
+      },
+      isAuthenticated: true,
+      isLoading: false,
+      error: 'read only',
+      authEnabled: true,
+    })
+
+    expect(readHook(() => useUser())?.username).toBe('guest')
+    expect(readHook(() => useIsAuthenticated())).toBe(true)
+    expect(readHook(() => useIsAdmin())).toBe(false)
+    expect(readHook(() => useIsGuest())).toBe(true)
+    expect(readHook(() => useCanWrite())).toBe(false)
+    expect(readHook(() => useAuthLoading())).toBe(false)
+    expect(readHook(() => useAuthError())).toBe('read only')
+
+    useAuthStore.setState({
+      user: null,
+      authEnabled: false,
+    })
+    expect(readHook(() => useCanWrite())).toBe(true)
+
+    useAuthStore.setState({
+      authEnabled: true,
+      user: {
+        id: 'user-1',
+        username: 'user',
+        role: 'user',
+        email: '',
+        homeDir: '/',
+      },
+    })
+    expect(readHook(() => useCanWrite())).toBe(true)
   })
 })

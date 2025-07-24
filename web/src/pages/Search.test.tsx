@@ -263,6 +263,17 @@ describe('SearchPage', () => {
       expect(searchApi.searchFiles).not.toHaveBeenCalled()
     })
 
+    it('clears query params when submitting an empty search', async () => {
+      const user = userEvent.setup()
+      renderSearchPage('report')
+
+      const input = await screen.findByDisplayValue('report')
+      await user.clear(input)
+      await user.keyboard('{Enter}')
+
+      expect(window.location.search).toBe('')
+    })
+
     it('keeps live search updates from adding browser history entries for every keystroke', async () => {
       const user = userEvent.setup()
       renderSearchPage()
@@ -372,9 +383,41 @@ describe('SearchPage', () => {
         })
       })
     })
+
+    it('shows danger toast when retrying search fails with a generic error', async () => {
+      const user = userEvent.setup()
+      vi.mocked(searchApi.searchFiles)
+        .mockRejectedValueOnce(new Error('Network error'))
+        .mockRejectedValueOnce(new Error('still down'))
+
+      renderSearchPage('report')
+
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: '重试搜索' })).toBeInTheDocument()
+      })
+
+      await user.click(screen.getByRole('button', { name: '重试搜索' }))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '搜索失败',
+          description: 'still down',
+          color: 'danger',
+        })
+      })
+    })
   })
 
   describe('navigation', () => {
+    it('navigates back from the header button', async () => {
+      const user = userEvent.setup()
+      renderSearchPage()
+
+      await user.click(screen.getByRole('button', { name: '返回上一页' }))
+
+      expect(mockNavigate).toHaveBeenCalledWith(-1)
+    })
+
     it('navigates to file location on click', async () => {
       const user = userEvent.setup()
       renderSearchPage()

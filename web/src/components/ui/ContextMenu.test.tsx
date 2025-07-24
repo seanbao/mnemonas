@@ -39,6 +39,25 @@ describe('ContextMenu', () => {
     expect(menu).toHaveStyle({ left: '200px', top: '300px' })
   })
 
+  it('keeps the menu inside the viewport near the lower right edge', () => {
+    const originalInnerWidth = window.innerWidth
+    const originalInnerHeight = window.innerHeight
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 180 })
+    Object.defineProperty(window, 'innerHeight', { configurable: true, value: 160 })
+
+    render(
+      <ContextMenu isOpen={true} position={{ x: 170, y: 150 }} onClose={() => {}}>
+        <ContextMenuItem>Test</ContextMenuItem>
+      </ContextMenu>
+    )
+
+    const menu = document.querySelector('[data-context-menu]')
+    expect(menu).toHaveStyle({ left: '72px', top: '52px' })
+
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: originalInnerWidth })
+    Object.defineProperty(window, 'innerHeight', { configurable: true, value: originalInnerHeight })
+  })
+
   it('renders via portal to body', () => {
     render(
       <div id="container">

@@ -6,6 +6,11 @@ import {
   getMimeType,
   canPreview,
   getFileExtension,
+  isAudioFile,
+  isImageFile,
+  isPdfFile,
+  isTextFile,
+  isVideoFile,
 } from './preview-utils'
 
 describe('getFileExtension', () => {
@@ -397,5 +402,33 @@ describe('canPreview', () => {
     expect(canPreview('doc.docx')).toBe(false)
     expect(canPreview('binary.exe')).toBe(false)
     expect(canPreview('noextension')).toBe(false)
+  })
+})
+
+describe('type guard helpers', () => {
+  it('identifies text and markdown preview files', () => {
+    expect(isTextFile('notes.txt')).toBe(true)
+    expect(isTextFile('readme.md')).toBe(true)
+    expect(isTextFile('photo.jpg')).toBe(false)
+  })
+
+  it('identifies image preview files', () => {
+    expect(isImageFile('photo.avif')).toBe(true)
+    expect(isImageFile('notes.txt')).toBe(false)
+  })
+
+  it('identifies PDF preview files', () => {
+    expect(isPdfFile('manual.pdf')).toBe(true)
+    expect(isPdfFile('manual.txt')).toBe(false)
+  })
+
+  it('identifies video preview files', () => {
+    expect(isVideoFile('clip.m4v')).toBe(true)
+    expect(isVideoFile('clip.mp3')).toBe(false)
+  })
+
+  it('identifies audio preview files', () => {
+    expect(isAudioFile('song.oga')).toBe(true)
+    expect(isAudioFile('song.mp4')).toBe(false)
   })
 })

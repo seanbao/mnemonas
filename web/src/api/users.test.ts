@@ -82,6 +82,29 @@ describe('Users API', () => {
     await expect(listUsers()).rejects.toThrow('Invalid users response')
   })
 
+  it('rejects list users responses with non-object user entries', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        success: true,
+        data: {
+          users: [null],
+        },
+      }),
+    })
+
+    await expect(listUsers()).rejects.toThrow('Invalid users response')
+  })
+
+  it('rejects unreadable successful list users responses', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.reject(new SyntaxError('Unexpected token < in JSON')),
+    })
+
+    await expect(listUsers()).rejects.toThrow('Invalid users response')
+  })
+
   it('rejects malformed successful create user responses', async () => {
     mockAuthFetch.mockResolvedValueOnce({
       ok: true,
@@ -140,6 +163,16 @@ describe('Users API', () => {
     })
 
     await expect(toggleUserStatus('u1', true)).rejects.toThrow('Failed to update user status')
+  })
+
+  it('uses the reset password fallback when its error body is invalid', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 500,
+      json: () => Promise.reject(new SyntaxError('Unexpected token < in JSON')),
+    })
+
+    await expect(resetUserPassword('u1', { new_password: 'password123' })).rejects.toThrow('Failed to reset password')
   })
 
   it('maps wrapped success for delete, reset password, and toggle status', async () => {

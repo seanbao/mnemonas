@@ -209,6 +209,58 @@ describe('ImagePreview', () => {
     expect(screen.getByText('10%')).toBeInTheDocument()
   })
 
+  it('supports wheel zoom in both directions', async () => {
+    await renderImage('/image.png', 'image.png')
+
+    const img = await screen.findByRole('img')
+    const container = img.parentElement as HTMLElement
+
+    fireEvent.wheel(container, { deltaY: -100 })
+    expect(screen.getByText('110%')).toBeInTheDocument()
+
+    fireEvent.wheel(container, { deltaY: 100 })
+    expect(screen.getByText('100%')).toBeInTheDocument()
+  })
+
+  it('drags the image when zoomed in', async () => {
+    await renderImage('/image.png', 'image.png')
+
+    fireEvent.click(screen.getByTitle('放大'))
+    const img = await screen.findByRole('img')
+    const container = img.parentElement as HTMLElement
+
+    fireEvent.mouseDown(container, { clientX: 10, clientY: 20 })
+    fireEvent.mouseMove(container, { clientX: 30, clientY: 55 })
+    fireEvent.mouseUp(container)
+
+    expect(img.style.transform).toContain('translate(20px, 35px)')
+  })
+
+  it('ignores drag gestures while the image is not zoomed', async () => {
+    await renderImage('/image.png', 'image.png')
+
+    const img = await screen.findByRole('img')
+    const container = img.parentElement as HTMLElement
+
+    fireEvent.mouseDown(container, { clientX: 10, clientY: 20 })
+    fireEvent.mouseMove(container, { clientX: 30, clientY: 55 })
+    fireEvent.mouseUp(container)
+
+    expect(img.style.transform).toContain('translate(0px, 0px)')
+  })
+
+  it('revokes blob URLs when unmounted', async () => {
+    const view = await renderImage('/image.png', 'image.png')
+
+    await waitFor(() => {
+      expect(URL.createObjectURL).toHaveBeenCalled()
+    })
+
+    view?.unmount()
+
+    expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:mock-image')
+  })
+
   it('resets state when path changes', async () => {
     const view = await renderImage('/image1.png', 'image1.png')
     const { rerender } = view!
