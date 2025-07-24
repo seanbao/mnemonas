@@ -5,7 +5,6 @@ import {
   login as apiLogin, 
   logout as apiLogout, 
   getCurrentUser,
-  getStoredToken,
   getStoredUser,
 } from '@/api/auth'
 import { acknowledgeSetup, getSetupStatus } from '@/api/setup'
@@ -72,18 +71,9 @@ export const useAuthStore = create<AuthState>((set) => ({
       // If we can't get setup status, assume auth is enabled for security
     }
     
-    // Check if there's a stored token
-    const token = getStoredToken()
-    if (!token) {
-      if (isCurrent()) {
-        set({ isLoading: false, isAuthenticated: false, user: null })
-      }
-      return
-    }
-
     const storedUser = getStoredUser()
     
-    // Try to get current user (validates token)
+    // Try to get current user. The browser sends the HttpOnly session cookie.
     try {
       const user = await getCurrentUser()
       if (!isCurrent()) {
@@ -103,7 +93,7 @@ export const useAuthStore = create<AuthState>((set) => ({
 
       // Terminal auth failures clear local state inside the auth API and return null above.
       // Preserve the cached session only when validation is temporarily unavailable.
-      if (storedUser && getStoredToken()) {
+      if (storedUser) {
         set({ user: storedUser, isAuthenticated: true, isLoading: false, error: null })
         return
       }

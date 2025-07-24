@@ -62,10 +62,11 @@ type TokenClaims struct {
 
 // TokenPair contains access and refresh tokens
 type TokenPair struct {
-	AccessToken  string    `json:"access_token"`
-	RefreshToken string    `json:"refresh_token"`
-	ExpiresAt    time.Time `json:"expires_at"`
-	TokenType    string    `json:"token_type"`
+	AccessToken      string    `json:"access_token"`
+	RefreshToken     string    `json:"refresh_token"`
+	ExpiresAt        time.Time `json:"expires_at"`
+	RefreshExpiresAt time.Time `json:"refresh_expires_at,omitempty"`
+	TokenType        string    `json:"token_type"`
 }
 
 // NewTokenManager creates a new token manager
@@ -304,10 +305,11 @@ func (tm *TokenManager) GenerateTokenPair(user *User) (*TokenPair, error) {
 	}
 
 	return &TokenPair{
-		AccessToken:  accessTokenString,
-		RefreshToken: refreshTokenString,
-		ExpiresAt:    accessExpiry,
-		TokenType:    "Bearer",
+		AccessToken:      accessTokenString,
+		RefreshToken:     refreshTokenString,
+		ExpiresAt:        accessExpiry,
+		RefreshExpiresAt: refreshExpiry,
+		TokenType:        "Bearer",
 	}, nil
 }
 

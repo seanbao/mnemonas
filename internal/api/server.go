@@ -1027,7 +1027,7 @@ func (s *Server) setupRoutes() {
 		s.router.Route("/api/v1/auth", func(r chi.Router) {
 			r.Post("/login", s.handleLoginWithActivity)
 			r.Post("/refresh", s.authHandler.HandleRefresh)
-			r.With(s.authMw.RequireAuth).Post("/logout", s.handleLogoutWithActivity)
+			r.With(s.authMw.OptionalAuth).Post("/logout", s.handleLogoutWithActivity)
 			r.With(s.authMw.RequireAuth).Get("/me", s.authHandler.HandleMe)
 			r.With(s.authMw.RequireAuth).Post("/password", s.authHandler.HandleChangePassword)
 			r.With(s.authMw.RequireAuth).Post("/download-session", s.authHandler.HandleCreateDownloadSession)

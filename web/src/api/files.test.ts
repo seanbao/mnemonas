@@ -64,6 +64,7 @@ class MockXMLHttpRequest {
   url = ''
   body: Document | XMLHttpRequestBodyInit | null = null
   headers = new Map<string, string>()
+  withCredentials = false
   private uploadListeners = new Map<string, Array<(event: ProgressEvent) => void>>()
   private listeners = new Map<string, Array<() => void>>()
 
@@ -212,11 +213,19 @@ describe('API: files', () => {
 
       await expect(uploadFile('/docs', new File(['content'], 'report.txt'))).resolves.toEqual({ warning: false, message: undefined })
 
-      expect(mockFetch).toHaveBeenNthCalledWith(1, '/api/v1/auth/refresh', expect.objectContaining({ method: 'POST' }))
-      expect(mockFetch).toHaveBeenNthCalledWith(2, '/api/v1/auth/download-session', expect.objectContaining({ method: 'POST' }))
+      expect(mockFetch).toHaveBeenNthCalledWith(1, '/api/v1/auth/refresh', expect.objectContaining({
+        method: 'POST',
+        credentials: 'same-origin',
+      }))
+      expect(mockFetch).toHaveBeenNthCalledWith(2, '/api/v1/auth/download-session', expect.objectContaining({
+        method: 'POST',
+        credentials: 'same-origin',
+      }))
       expect(MockXMLHttpRequest.instances).toHaveLength(2)
-      expect(MockXMLHttpRequest.instances[0]?.headers.get('Authorization')).toBe('Bearer access-1')
-      expect(MockXMLHttpRequest.instances[1]?.headers.get('Authorization')).toBe('Bearer access-2')
+      expect(MockXMLHttpRequest.instances[0]?.headers.get('Authorization')).toBeUndefined()
+      expect(MockXMLHttpRequest.instances[1]?.headers.get('Authorization')).toBeUndefined()
+      expect(MockXMLHttpRequest.instances[0]?.withCredentials).toBe(true)
+      expect(MockXMLHttpRequest.instances[1]?.withCredentials).toBe(true)
     })
 
     it('fails with unauthorized error when refresh does not recover the session', async () => {
@@ -1671,7 +1680,7 @@ describe('API: files', () => {
         await downloadFile('/docs/report.txt')
 
         expectFetchCall(1, '/api/v1/download/docs/report.txt?download=true', {
-          headers: { Authorization: 'Bearer test-token' },
+          headers: {},
         })
         expect(clickSpy).toHaveBeenCalled()
         expect(createObjectURLSpy).toHaveBeenCalledWith(blob)
