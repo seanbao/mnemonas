@@ -22,7 +22,7 @@ import {
   Users,
   CheckCircle,
 } from 'lucide-react'
-import { createShare, copyShareUrl, ShareError, type ShareCreateResult, type CreateShareRequest } from '@/api/share'
+import { createShare, copyShareUrl, formatShareUrl, ShareError, type ShareCreateResult, type CreateShareRequest } from '@/api/share'
 
 interface ShareDialogProps {
   isOpen: boolean
@@ -112,9 +112,7 @@ export function ShareDialog({
 
   const shareUrl = useMemo(() => {
     if (!createdShare) return ''
-    return createdShare.url.startsWith('http')
-      ? createdShare.url
-      : `${window.location.origin}${createdShare.url}`
+    return formatShareUrl(createdShare.url)
   }, [createdShare])
 
   const resetForm = useCallback(() => {

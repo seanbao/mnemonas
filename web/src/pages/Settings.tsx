@@ -211,6 +211,20 @@ function listensBeyondLoopback(host: string): boolean {
   return !normalized.startsWith('127.')
 }
 
+function isValidOptionalHTTPURL(value: string): boolean {
+  const trimmed = value.trim()
+  if (!trimmed) {
+    return true
+  }
+
+  try {
+    const parsed = new URL(trimmed)
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:'
+  } catch {
+    return false
+  }
+}
+
 // Setting row component
 function SettingRow({ 
   label, 
@@ -558,6 +572,8 @@ export function SettingsPage() {
     const trimmedAlertsCooldownPeriod = settings.alertsCooldownPeriod.trim()
     const trimmedAlertsThresholdPct = settings.alertsThresholdPct.trim()
     const trimmedAlertsCriticalPct = settings.alertsCriticalPct.trim()
+    const trimmedShareBaseURL = settings.shareBaseURL.trim()
+    const trimmedAlertsWebhookURL = settings.alertsWebhookURL.trim()
     const trimmedAlertsWebhookMethod = settings.alertsWebhookMethod.trim().toUpperCase()
     const alertsWebhookHeaders = settings.alertsWebhookHeaders
       .split('\n')
@@ -735,6 +751,24 @@ export function SettingsPage() {
       return
     }
 
+    if (!isValidOptionalHTTPURL(trimmedShareBaseURL)) {
+      addToast({
+        title: '分享基础 URL 无效',
+        description: '分享基础 URL 必须为空，或使用 http/https 的完整地址',
+        color: 'danger',
+      })
+      return
+    }
+
+    if (!isValidOptionalHTTPURL(trimmedAlertsWebhookURL)) {
+      addToast({
+        title: 'Webhook URL 无效',
+        description: 'Webhook URL 必须为空，或使用 http/https 的完整地址',
+        color: 'danger',
+      })
+      return
+    }
+
 	if (trimmedAlertsWebhookMethod !== 'GET' && trimmedAlertsWebhookMethod !== 'POST') {
 		addToast({
 			title: 'Webhook 方法无效',
@@ -804,7 +838,7 @@ export function SettingsPage() {
       },
       share: {
         enabled: settings.shareEnabled,
-        base_url: settings.shareBaseURL.trim(),
+        base_url: trimmedShareBaseURL,
       },
       favorites: {
         enabled: settings.favoritesEnabled,
@@ -816,7 +850,7 @@ export function SettingsPage() {
         critical_pct: parsedAlertsCriticalPct,
         min_free_bytes: alertsMinFreeBytes,
         cooldown_period: trimmedAlertsCooldownPeriod,
-        webhook_url: settings.alertsWebhookURL.trim(),
+        webhook_url: trimmedAlertsWebhookURL,
         webhook_method: trimmedAlertsWebhookMethod,
         webhook_headers: alertsWebhookHeaders,
       },
