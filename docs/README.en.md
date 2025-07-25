@@ -52,6 +52,8 @@ This directory contains MnemoNAS usage guides, deployment notes, and reference m
 | [支持说明](../SUPPORT.md) | Chinese support document |
 | [Contributing guide](../CONTRIBUTING.en.md) | Contribution flow, quality gates, and safety boundaries |
 | [贡献指南](../CONTRIBUTING.md) | Chinese contributing guide |
+| [Code of Conduct](../CODE_OF_CONDUCT.md) | Community conduct expectations and enforcement scope |
+| [行为准则](../CODE_OF_CONDUCT.zh-CN.md) | Chinese code of conduct |
 | [Security policy](../SECURITY.md) | Vulnerability reporting and deployment security |
 | [安全策略](../SECURITY.zh-CN.md) | Chinese security policy |
 
