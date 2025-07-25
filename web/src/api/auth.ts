@@ -110,10 +110,23 @@ function getMissingUserMessage(responseMessage?: string): string {
   return responseMessage || '账户不存在或已被删除，请重新登录'
 }
 
+function getMissingBrowserSessionMessage(): string {
+  return '登录会话未建立，请重新登录'
+}
+
 function hasStoredAuthState(): boolean {
+  return hasBrowserSessionState() || hasLegacyTokenState()
+}
+
+function hasBrowserSessionState(): boolean {
   return Boolean(
     localStorage.getItem(SESSION_MARKER_KEY) ||
-    localStorage.getItem(USER_KEY) ||
+    localStorage.getItem(USER_KEY)
+  )
+}
+
+function hasLegacyTokenState(): boolean {
+  return Boolean(
     localStorage.getItem(TOKEN_KEY) ||
     localStorage.getItem(REFRESH_TOKEN_KEY)
   )
@@ -148,6 +161,16 @@ function getAuthActionResult<T>(response: Response, body: AuthApiResponse<T> | u
   }
 }
 
+async function readAuthApiError(response: Response): Promise<AuthApiError | undefined> {
+  try {
+    const bodySource = typeof response.clone === 'function' ? response.clone() : response
+    const body: AuthApiResponse<never> = await bodySource.json()
+    return body.error
+  } catch {
+    return undefined
+  }
+}
+
 async function handleUnauthorizedSessionResponse(response: Response): Promise<void> {
   if (response.status !== 401 || !hasStoredAuthState()) {
     return
@@ -159,12 +182,11 @@ async function handleUnauthorizedSessionResponse(response: Response): Promise<vo
   }
 
   try {
-    const bodySource = typeof response.clone === 'function' ? response.clone() : response
-    const body: AuthApiResponse<never> = await bodySource.json()
-    if (body.error?.code === 'USER_NOT_FOUND') {
+    const error = await readAuthApiError(response)
+    if (error?.code === 'USER_NOT_FOUND') {
       detail = {
         reason: 'missing',
-        message: getMissingUserMessage(body.error.message),
+        message: getMissingUserMessage(error.message),
       }
     }
   } catch {
@@ -180,12 +202,11 @@ async function handleForbiddenSessionResponse(response: Response): Promise<void>
   }
 
   try {
-    const bodySource = typeof response.clone === 'function' ? response.clone() : response
-    const body: AuthApiResponse<never> = await bodySource.json()
-    if (body.error?.code === 'USER_DISABLED') {
+    const error = await readAuthApiError(response)
+    if (error?.code === 'USER_DISABLED') {
       clearTokens({
         reason: 'disabled',
-        message: getSessionEndedMessage(body.error.message),
+        message: getSessionEndedMessage(error.message),
       })
     }
   } catch {
@@ -274,12 +295,15 @@ function getDownloadSessionSyncMessage(responseMessage?: string): string {
 interface DownloadSessionResult {
   ok: boolean
   message?: string
+  authCleared?: boolean
+  status?: number
+  code?: string
 }
 
 async function syncDownloadSession(): Promise<DownloadSessionResult> {
-  const hadAuthState = hasStoredAuthState()
+  const hadBrowserSessionState = hasBrowserSessionState()
   clearLegacyTokenStorage()
-  if (!hadAuthState) {
+  if (!hadBrowserSessionState) {
     isDownloadSessionReady = true
     return { ok: true }
   }
@@ -292,16 +316,47 @@ async function syncDownloadSession(): Promise<DownloadSessionResult> {
 
     if (!response.ok) {
       let message = getDownloadSessionSyncMessage()
-      try {
-        const body: AuthApiResponse<never> = await response.json()
-        if (body.error?.message) {
-          message = getDownloadSessionSyncMessage(body.error.message)
+      const error = await readAuthApiError(response)
+
+      if (response.status === 401) {
+        message = error?.code === 'USER_NOT_FOUND'
+          ? getMissingUserMessage(error.message)
+          : error?.code === 'MISSING_AUTH_HEADER' || error?.code === 'NOT_AUTHENTICATED'
+            ? getMissingBrowserSessionMessage()
+            : '登录已过期，请重新登录'
+        clearTokens({
+          reason: error?.code === 'USER_NOT_FOUND' ? 'missing' : 'expired',
+          message,
+        })
+        return {
+          ok: false,
+          authCleared: true,
+          status: response.status,
+          code: error?.code,
+          message,
         }
-      } catch {
-        // Keep the default warning when the sync failure body is invalid.
+      }
+
+      if (response.status === 403 && error?.code === 'USER_DISABLED') {
+        message = getSessionEndedMessage(error.message)
+        clearTokens({
+          reason: 'disabled',
+          message,
+        })
+        return {
+          ok: false,
+          authCleared: true,
+          status: response.status,
+          code: error.code,
+          message,
+        }
+      }
+
+      if (error?.message) {
+        message = getDownloadSessionSyncMessage(error.message)
       }
       isDownloadSessionReady = false
-      return { ok: false, message }
+      return { ok: false, status: response.status, code: error?.code, message }
     }
 
     isDownloadSessionReady = true
@@ -400,8 +455,8 @@ async function tryRefreshToken(): Promise<boolean> {
       const body: AuthApiResponse<RefreshResponse> = await response.json()
       const data = parseAuthSessionData(readAuthSuccessData(body))
       storeSessionUser(data.user)
-      await syncDownloadSession()
-      return true
+      const downloadSession = await syncDownloadSession()
+      return !downloadSession.authCleared
     } catch {
       clearTokens()
       return false
@@ -447,6 +502,13 @@ export async function login(username: string, password: string): Promise<LoginAc
 
   storeSessionUser(data.user)
   const downloadSession = await syncDownloadSession()
+  if (downloadSession.authCleared) {
+    throw new AuthError(
+      downloadSession.message ?? getMissingBrowserSessionMessage(),
+      downloadSession.status ?? 401,
+      downloadSession.code,
+    )
+  }
   const action = getAuthActionResult(response, body)
 
   return {
@@ -546,6 +608,9 @@ export async function getCurrentUser(): Promise<User | null> {
   }
 
   storeSessionUser(user)
-  await syncDownloadSession()
+  const downloadSession = await syncDownloadSession()
+  if (downloadSession.authCleared) {
+    return null
+  }
   return user
 }

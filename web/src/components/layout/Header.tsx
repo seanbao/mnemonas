@@ -109,7 +109,7 @@ export function Header({ onMenuClick }: HeaderProps) {
         </div>
         <div className="hidden sm:block">
           <h1 className="text-lg font-semibold">私有云存储</h1>
-          <p className="text-muted-foreground text-xs">数据在自己手里，简单可靠地管理文件</p>
+          <p className="text-muted-foreground text-xs">文件、版本与共享统一管理</p>
         </div>
       </div>
 

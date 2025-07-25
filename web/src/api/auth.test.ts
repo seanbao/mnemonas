@@ -77,8 +77,18 @@ describe('auth API', () => {
     expect(localStorage.getItem('mnemonas_user')).toBeNull()
   })
 
-  it('syncs download session directly when auth state is stored', async () => {
+  it('clears legacy bearer tokens without syncing a download session', async () => {
     localStorage.setItem('mnemonas_token', 'access-1')
+    localStorage.setItem('mnemonas_refresh_token', 'refresh-1')
+
+    await expect(ensureDownloadSession()).resolves.toEqual({ ok: true })
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(localStorage.getItem('mnemonas_token')).toBeNull()
+    expect(localStorage.getItem('mnemonas_refresh_token')).toBeNull()
+  })
+
+  it('syncs download session directly when a browser session marker is stored', async () => {
+    localStorage.setItem('mnemonas_session', '1')
     fetchMock.mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({ success: true }) })
 
     await expect(ensureDownloadSession()).resolves.toEqual({ ok: true })
@@ -87,6 +97,48 @@ describe('auth API', () => {
       credentials: 'same-origin',
     }))
     expect(localStorage.getItem('mnemonas_token')).toBeNull()
+  })
+
+  it('clears stale browser auth state when download session has no access cookie', async () => {
+    const authCleared = vi.fn()
+    window.addEventListener(AUTH_CLEARED_EVENT, authCleared)
+    localStorage.setItem('mnemonas_session', '1')
+    localStorage.setItem('mnemonas_user', JSON.stringify({
+      id: 'u1',
+      username: 'admin',
+      role: 'admin',
+      homeDir: '/',
+    }))
+    fetchMock.mockResolvedValueOnce({
+      ok: false,
+      status: 401,
+      json: () => Promise.resolve({
+        success: false,
+        error: {
+          code: 'MISSING_AUTH_HEADER',
+          message: 'missing authorization header',
+        },
+      }),
+    })
+
+    await expect(ensureDownloadSession()).resolves.toMatchObject({
+      ok: false,
+      authCleared: true,
+      status: 401,
+      code: 'MISSING_AUTH_HEADER',
+      message: '登录会话未建立，请重新登录',
+    })
+    expect(localStorage.getItem('mnemonas_session')).toBeNull()
+    expect(localStorage.getItem('mnemonas_user')).toBeNull()
+    expect(authCleared).toHaveBeenCalledTimes(1)
+    expect(authCleared.mock.calls[0]?.[0]).toMatchObject({
+      detail: {
+        reason: 'expired',
+        message: '登录会话未建立，请重新登录',
+      },
+    })
+
+    window.removeEventListener(AUTH_CLEARED_EVENT, authCleared)
   })
 
   it('syncs download session after login', async () => {
@@ -118,6 +170,48 @@ describe('auth API', () => {
       method: 'POST',
       credentials: 'same-origin',
     }))
+  })
+
+  it('fails login cleanly when the browser did not establish the cookie session', async () => {
+    const authCleared = vi.fn()
+    window.addEventListener(AUTH_CLEARED_EVENT, authCleared)
+    fetchMock
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        headers: { get: () => null },
+        json: () => Promise.resolve({
+          success: true,
+          data: {
+            refresh_token: 'refresh-1',
+            expires_at: '2026-03-13T00:00:00Z',
+            token_type: 'Bearer',
+            user: { id: 'u1', username: 'admin', role: 'admin', home_dir: '/' },
+          },
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 401,
+        json: () => Promise.resolve({
+          success: false,
+          error: {
+            code: 'MISSING_AUTH_HEADER',
+            message: 'missing authorization header',
+          },
+        }),
+      })
+
+    await expect(login('admin', 'password')).rejects.toMatchObject({
+      message: '登录会话未建立，请重新登录',
+      status: 401,
+      code: 'MISSING_AUTH_HEADER',
+    })
+    expect(localStorage.getItem('mnemonas_session')).toBeNull()
+    expect(localStorage.getItem('mnemonas_user')).toBeNull()
+    expect(authCleared).toHaveBeenCalledTimes(1)
+
+    window.removeEventListener(AUTH_CLEARED_EVENT, authCleared)
   })
 
   it('returns warning metadata for successful login responses with warning headers', async () => {

@@ -40,6 +40,11 @@ describe('Share API', () => {
       expect(url).toBe('/api/v1/public/shares/abc123/download/folder/my%20file.txt')
     })
 
+    it('preserves literal percent sequences in shared folder download paths', () => {
+      const url = getShareFileDownloadUrl('abc123', '/folder/report%20%E4%B8%89.txt')
+      expect(url).toBe('/api/v1/public/shares/abc123/download/folder/report%2520%25E4%25B8%2589.txt')
+    })
+
     it('keeps absolute http and https share URLs', () => {
       expect(formatShareUrl('https://nas.example.com/s/share-1', 'https://local.example'))
         .toBe('https://nas.example.com/s/share-1')

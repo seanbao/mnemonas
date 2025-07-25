@@ -1676,6 +1676,10 @@ describe('API: files', () => {
         expect(getDownloadUrl('/文档/测试.txt')).toBe('/api/v1/download/%E6%96%87%E6%A1%A3/%E6%B5%8B%E8%AF%95.txt')
       })
 
+      it('preserves literal percent sequences by escaping them once for URLs', () => {
+        expect(getDownloadUrl('/docs/report%20%E4%B8%89.txt')).toBe('/api/v1/download/docs/report%2520%25E4%25B8%2589.txt')
+      })
+
       it('does not add auth query when token exists', () => {
         localStorage.setItem('mnemonas_token', 'test-token')
         expect(getDownloadUrl('/docs/file.pdf')).toBe('/api/v1/download/docs/file.pdf')

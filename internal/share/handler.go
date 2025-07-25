@@ -11,6 +11,7 @@ import (
 	"io"
 	"mime"
 	"net/http"
+	"net/url"
 	"path"
 	"strconv"
 	"strings"
@@ -254,6 +255,37 @@ func normalizeShareRelativePath(rawPath string) (string, error) {
 		return "", nil
 	}
 	return cleaned, nil
+}
+
+func shareDownloadPathFromRequest(r *http.Request, id string) (string, error) {
+	prefixes := []string{
+		"/s/" + url.PathEscape(id) + "/download",
+		"/api/v1/public/shares/" + url.PathEscape(id) + "/download",
+	}
+	escapedPath := r.URL.EscapedPath()
+	for _, prefix := range prefixes {
+		if !strings.HasPrefix(escapedPath, prefix) {
+			continue
+		}
+		encodedPath := strings.TrimPrefix(escapedPath, prefix)
+		if encodedPath == "" || encodedPath == "/" {
+			return "", nil
+		}
+		if !strings.HasPrefix(encodedPath, "/") {
+			return "", errors.New("invalid path")
+		}
+		decodedPath, err := url.PathUnescape(encodedPath)
+		if err != nil {
+			return "", errors.New("invalid path")
+		}
+		return decodedPath, nil
+	}
+
+	filePath := chi.URLParam(r, "*")
+	if filePath == "" {
+		return "", nil
+	}
+	return "/" + filePath, nil
 }
 
 func decodeJSONBodyStrict(r *http.Request, dst any) error {
@@ -932,14 +964,11 @@ func (h *Handler) DownloadShare(w http.ResponseWriter, r *http.Request) {
 // DownloadShareFile handles file download from shared folder
 func (h *Handler) DownloadShareFile(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	filePath := chi.URLParam(r, "*")
-	if filePath == "" {
-		prefix := "/s/" + id + "/download/"
-		if strings.HasPrefix(r.URL.Path, prefix) {
-			filePath = strings.TrimPrefix(r.URL.Path, prefix)
-		}
+	filePath, err := shareDownloadPathFromRequest(r, id)
+	if err != nil {
+		writeShareError(w, http.StatusBadRequest, "invalid path", "INVALID_PATH")
+		return
 	}
-	var err error
 	filePath, err = normalizeShareRelativePath(filePath)
 	if err != nil {
 		writeShareError(w, http.StatusBadRequest, "invalid path", "INVALID_PATH")

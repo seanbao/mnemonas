@@ -26,6 +26,7 @@ interface AuthState {
   
   // Whether auth is enabled on the server (default: true for security)
   authEnabled: boolean
+  shareEnabled: boolean | null
   
   // Actions
   initialize: () => Promise<void>
@@ -33,6 +34,7 @@ interface AuthState {
   logout: () => Promise<AuthActionResult>
   clearError: () => void
   setAuthEnabled: (enabled: boolean) => void
+  setShareEnabled: (enabled: boolean | null) => void
 }
 
 export const useAuthStore = create<AuthState>((set) => ({
@@ -42,6 +44,7 @@ export const useAuthStore = create<AuthState>((set) => ({
   error: null,
   // Default to true for security - auth is required unless explicitly disabled by server
   authEnabled: true,
+  shareEnabled: null,
   
   initialize: async () => {
     const runId = ++initializeRunId
@@ -56,11 +59,13 @@ export const useAuthStore = create<AuthState>((set) => ({
       if (!isCurrent()) {
         return
       }
+      set({ shareEnabled: setupStatus.share_enabled ?? null })
 
       if (!setupStatus.auth_enabled) {
         // Auth is disabled on server, skip login requirement
         set({ 
           authEnabled: false, 
+          shareEnabled: setupStatus.share_enabled ?? null,
           isAuthenticated: true, // Treat as authenticated when auth is disabled
           isLoading: false,
           user: { id: 'guest', username: 'guest', role: 'admin' as const, email: '', homeDir: '/' }
@@ -116,6 +121,7 @@ export const useAuthStore = create<AuthState>((set) => ({
         void (async () => {
           try {
             const setupStatus = await getSetupStatus()
+            useAuthStore.getState().setShareEnabled(setupStatus.share_enabled ?? null)
             if (setupStatus.is_first_run) {
               await acknowledgeSetup()
             }
@@ -154,6 +160,7 @@ export const useAuthStore = create<AuthState>((set) => ({
   clearError: () => set({ error: null }),
   
   setAuthEnabled: (enabled: boolean) => set({ authEnabled: enabled }),
+  setShareEnabled: (enabled: boolean | null) => set({ shareEnabled: enabled }),
 }))
 
 // Selector hooks for common use cases
@@ -175,6 +182,10 @@ export function useIsGuest() {
 
 export function useCanWrite() {
   return useAuthStore((state) => !state.authEnabled || state.user?.role === 'admin' || state.user?.role === 'user')
+}
+
+export function useShareEnabled() {
+  return useAuthStore((state) => state.shareEnabled)
 }
 
 export function useAuthLoading() {
