@@ -804,6 +804,78 @@ func TestStore_SizeAndReaderDoNotFollowSymlinkInsertedAfterValidation(t *testing
 	}
 }
 
+func TestStore_ReadOperationsRejectObjectSymlinkInsertedAfterValidation(t *testing.T) {
+	for _, operation := range []string{"get", "has", "size", "reader"} {
+		t.Run(operation, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			store, err := NewStore(tmpDir, nil)
+			if err != nil {
+				t.Fatalf("NewStore() error: %v", err)
+			}
+
+			hash := "3234567890abcdef1234567890abcdef"
+			objectPath := store.layout.FullPath(store.root, hash)
+			if err := os.MkdirAll(filepath.Dir(objectPath), 0755); err != nil {
+				t.Fatalf("MkdirAll(object dir) error: %v", err)
+			}
+			if err := os.WriteFile(objectPath, []byte("object-payload"), 0644); err != nil {
+				t.Fatalf("WriteFile(objectPath) error: %v", err)
+			}
+			linkedTarget := filepath.Join(filepath.Dir(objectPath), "linked-object")
+			if err := os.WriteFile(linkedTarget, []byte("linked-payload"), 0644); err != nil {
+				t.Fatalf("WriteFile(linkedTarget) error: %v", err)
+			}
+
+			originalHook := afterValidateCASPath
+			var hookErr error
+			swapped := false
+			afterValidateCASPath = func() {
+				if hookErr != nil || swapped {
+					return
+				}
+				swapped = true
+				if err := os.Remove(objectPath); err != nil {
+					hookErr = err
+					return
+				}
+				hookErr = os.Symlink(linkedTarget, objectPath)
+			}
+			defer func() {
+				afterValidateCASPath = originalHook
+			}()
+
+			switch operation {
+			case "get":
+				_, err = store.Get(hash)
+			case "has":
+				if store.Has(hash) {
+					err = errors.New("Has returned true for symlink object")
+				}
+			case "size":
+				_, err = store.Size(hash)
+			case "reader":
+				var reader ReadSeekCloser
+				reader, err = store.Reader(hash)
+				if reader != nil {
+					_ = reader.Close()
+				}
+			}
+			if hookErr != nil {
+				t.Fatalf("afterValidateCASPath hook error: %v", hookErr)
+			}
+			if operation == "has" {
+				if err != nil {
+					t.Fatal(err)
+				}
+				return
+			}
+			if !errors.Is(err, errCASPathSymlink) {
+				t.Fatalf("expected CAS symlink rejection, got %v", err)
+			}
+		})
+	}
+}
+
 func TestStore_Walk(t *testing.T) {
 	tmpDir := t.TempDir()
 

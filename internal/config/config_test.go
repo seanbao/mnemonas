@@ -946,6 +946,48 @@ func TestLoad_RejectsSymlinkParentDirectory(t *testing.T) {
 	}
 }
 
+func TestLoad_RejectsSymlinkInsertedAfterValidation(t *testing.T) {
+	tmpDir := t.TempDir()
+	configDir := filepath.Join(tmpDir, "config")
+	if err := os.MkdirAll(configDir, 0755); err != nil {
+		t.Fatalf("MkdirAll(config) error: %v", err)
+	}
+	configPath := filepath.Join(configDir, "config.toml")
+	if err := os.WriteFile(configPath, []byte("[server]\nport = 18080\n"), 0600); err != nil {
+		t.Fatalf("WriteFile(config) error: %v", err)
+	}
+	linkedTarget := filepath.Join(configDir, "linked.toml")
+	if err := os.WriteFile(linkedTarget, []byte("[server]\nport = 18081\n"), 0600); err != nil {
+		t.Fatalf("WriteFile(linked) error: %v", err)
+	}
+
+	originalHook := afterValidateManagedFilePath
+	var hookErr error
+	swapped := false
+	afterValidateManagedFilePath = func() {
+		if hookErr != nil || swapped {
+			return
+		}
+		swapped = true
+		if err := os.Remove(configPath); err != nil {
+			hookErr = err
+			return
+		}
+		hookErr = os.Symlink(linkedTarget, configPath)
+	}
+	defer func() {
+		afterValidateManagedFilePath = originalHook
+	}()
+
+	_, err := Load(configPath)
+	if hookErr != nil {
+		t.Fatalf("afterValidateManagedFilePath hook error: %v", hookErr)
+	}
+	if !errors.Is(err, errConfigFileSymlink) {
+		t.Fatalf("expected config symlink rejection, got %v", err)
+	}
+}
+
 func TestConfig_Save_DoesNotFollowSymlinkInsertedAfterValidation(t *testing.T) {
 	baseDir := t.TempDir()
 	configDir := filepath.Join(baseDir, "config")

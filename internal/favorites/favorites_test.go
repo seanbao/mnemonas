@@ -770,6 +770,52 @@ func TestNewStore_Load_DoesNotFollowSymlinkInsertedAfterValidation(t *testing.T)
 	}
 }
 
+func TestNewStore_LoadRejectsStoreSymlinkInsertedAfterValidation(t *testing.T) {
+	baseDir := t.TempDir()
+	favoritesDir := filepath.Join(baseDir, "favorites")
+	if err := os.MkdirAll(favoritesDir, 0755); err != nil {
+		t.Fatalf("failed to create favorites dir: %v", err)
+	}
+	storePath := filepath.Join(favoritesDir, "favorites.json")
+	writeFavoritesFixture(t, storePath, []Favorite{{
+		Path:      "/docs/original.txt",
+		UserID:    "user1",
+		CreatedAt: time.Now(),
+	}})
+	linkedTarget := filepath.Join(favoritesDir, "linked.json")
+	writeFavoritesFixture(t, linkedTarget, []Favorite{{
+		Path:      "/docs/linked.txt",
+		UserID:    "user1",
+		CreatedAt: time.Now(),
+	}})
+
+	originalHook := afterValidateFavoritesStorePath
+	var hookErr error
+	swapped := false
+	afterValidateFavoritesStorePath = func() {
+		if hookErr != nil || swapped {
+			return
+		}
+		swapped = true
+		if err := os.Remove(storePath); err != nil {
+			hookErr = err
+			return
+		}
+		hookErr = os.Symlink(linkedTarget, storePath)
+	}
+	defer func() {
+		afterValidateFavoritesStorePath = originalHook
+	}()
+
+	_, err := NewStore(storePath)
+	if hookErr != nil {
+		t.Fatalf("afterValidateFavoritesStorePath hook error: %v", hookErr)
+	}
+	if !errors.Is(err, errFavoritesStoreSymlink) {
+		t.Fatalf("expected favorites store symlink rejection, got %v", err)
+	}
+}
+
 func TestStore_Add_DoesNotFollowSymlinkInsertedAfterValidation(t *testing.T) {
 	baseDir := t.TempDir()
 	favoritesDir := filepath.Join(baseDir, "favorites")

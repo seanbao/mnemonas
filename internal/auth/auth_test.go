@@ -285,6 +285,45 @@ func TestUserStore_Create_DoesNotFollowSymlinkInsertedAfterValidation(t *testing
 	}
 }
 
+func TestNewUserStore_LoadRejectsUsersSymlinkInsertedAfterValidation(t *testing.T) {
+	managedDir := t.TempDir()
+	usersPath := filepath.Join(managedDir, "users.json")
+	existingData := `[{"id":"existing-admin","username":"admin","password_hash":"$2a$10$dummy","role":"admin","created_at":"2024-01-01T00:00:00Z","updated_at":"2024-01-01T00:00:00Z","home_dir":"/"}]`
+	if err := os.WriteFile(usersPath, []byte(existingData), 0600); err != nil {
+		t.Fatalf("failed to setup users file: %v", err)
+	}
+	linkedTarget := filepath.Join(managedDir, "linked-users.json")
+	if err := os.WriteFile(linkedTarget, []byte(`[]`), 0600); err != nil {
+		t.Fatalf("failed to setup linked users file: %v", err)
+	}
+
+	originalHook := afterValidateAuthFilePath
+	var hookErr error
+	swapped := false
+	afterValidateAuthFilePath = func() {
+		if hookErr != nil || swapped {
+			return
+		}
+		swapped = true
+		if err := os.Remove(usersPath); err != nil {
+			hookErr = err
+			return
+		}
+		hookErr = os.Symlink(linkedTarget, usersPath)
+	}
+	t.Cleanup(func() {
+		afterValidateAuthFilePath = originalHook
+	})
+
+	_, _, err := NewUserStore(usersPath)
+	if hookErr != nil {
+		t.Fatalf("afterValidateAuthFilePath hook error: %v", hookErr)
+	}
+	if !errors.Is(err, errUserStoreSymlink) {
+		t.Fatalf("expected users file symlink rejection, got %v", err)
+	}
+}
+
 func TestTokenManager_RevokeToken_DoesNotFollowSymlinkInsertedAfterValidation(t *testing.T) {
 	baseDir := t.TempDir()
 	managedDir := filepath.Join(baseDir, "managed")

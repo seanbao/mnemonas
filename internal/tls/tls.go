@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -411,7 +412,7 @@ func syncTLSRootDirectory(root *os.Root) error {
 func readTLSFileWithRoot(root *os.Root, path string, symlinkErr error, label string) ([]byte, error) {
 	afterValidateTLSFilePath()
 
-	file, err := root.Open(filepath.Base(path))
+	file, err := root.OpenFile(filepath.Base(path), os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 	if err != nil {
 		return nil, mapTLSRootPathError(err, symlinkErr)
 	}
@@ -544,7 +545,7 @@ func writeTLSFileAtomically(path string, data []byte, mode os.FileMode, symlinkE
 }
 
 func mapTLSRootPathError(err error, symlinkErr error) error {
-	if errors.Is(err, os.ErrPermission) || isTLSRootEscapeError(err) {
+	if errors.Is(err, os.ErrPermission) || errors.Is(err, syscall.ELOOP) || isTLSRootEscapeError(err) {
 		return symlinkErr
 	}
 	return err
