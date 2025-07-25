@@ -47,6 +47,12 @@ const PERMISSION_OPTIONS = [
   { value: 'read', label: '仅查看', icon: Eye },
 ]
 
+const maxSharePasswordBytes = 72
+
+function utf8ByteLength(value: string): number {
+  return new TextEncoder().encode(value).length
+}
+
 function getShareDialogActionErrorToast(error: unknown): {
   title: string
   description?: string
@@ -109,6 +115,12 @@ export function ShareDialog({
   const [description, setDescription] = useState('')
 
   const passwordRequiredButEmpty = usePassword && password.trim() === ''
+  const passwordTooLong = usePassword && utf8ByteLength(password) > maxSharePasswordBytes
+  const passwordErrorMessage = passwordRequiredButEmpty
+    ? '启用密码保护后必须输入密码'
+    : passwordTooLong
+      ? '分享密码最多 72 字节'
+      : undefined
 
   const shareUrl = useMemo(() => {
     if (!createdShare) return ''
@@ -167,6 +179,14 @@ export function ShareDialog({
       addToast({
         title: '请输入分享密码',
         description: '启用密码保护后，必须设置访问密码。',
+        color: 'warning',
+      })
+      return
+    }
+    if (passwordTooLong) {
+      addToast({
+        title: '分享密码过长',
+        description: '分享密码最多 72 字节。',
         color: 'warning',
       })
       return
@@ -345,11 +365,11 @@ export function ShareDialog({
                   <div className="space-y-2">
                     <Input
                       type="password"
-                      placeholder="设置访问密码"
+                      placeholder="设置访问密码（最多 72 字节）"
                       value={password}
                       onValueChange={setPassword}
-                      isInvalid={passwordRequiredButEmpty}
-                      errorMessage={passwordRequiredButEmpty ? '启用密码保护后必须输入密码' : undefined}
+                      isInvalid={passwordRequiredButEmpty || passwordTooLong}
+                      errorMessage={passwordErrorMessage}
                       classNames={{
                         inputWrapper: "bg-content2 border-divider",
                       }}
@@ -446,7 +466,7 @@ export function ShareDialog({
               <Button 
                 color="primary" 
                 onPress={handleCreate}
-                isDisabled={passwordRequiredButEmpty}
+                isDisabled={passwordRequiredButEmpty || passwordTooLong}
                 isLoading={isLoading}
                 startContent={!isLoading && <Link2 size={16} />}
                 className="rounded-lg"

@@ -88,7 +88,10 @@ Authenticated share and favorite management endpoints use `success + data (+ mes
 Some write endpoints may commit the visible mutation but fail a later persistence or cleanup step. They then return a success status with an HTTP `Warning` header, for example:
 
 - `199 MnemoNAS "activity log persistence failed"`
+- `199 MnemoNAS "auth state persistence incomplete"`
 - `199 MnemoNAS "workspace mutation persistence incomplete"`
+- `199 MnemoNAS "share persistence incomplete"`
+- `199 MnemoNAS "favorites persistence incomplete"`
 - `199 MnemoNAS "scrub result persistence incomplete"`
 - `199 MnemoNAS "trash restore metadata reconciliation failed"`
 - `199 MnemoNAS "delete cleanup incomplete"`
@@ -158,6 +161,8 @@ Admin role required.
 
 User roles are `admin`, `user`, and `guest`. Non-admin users are scoped by `home_dir`.
 
+Usernames are limited to 255 characters and must not contain `/`, `\`, control characters, `.`, or `..`. Passwords must be 8 to 72 bytes.
+
 ## System Endpoints
 
 | Method | Path | Auth | Description |
@@ -211,7 +216,9 @@ Some file mutations may return success with a `Warning` header if the file opera
 | --- | --- | --- |
 | `GET` | `/api/v1/thumbnails/{path}` | Get generated thumbnail for an image or supported preview |
 
-Download-session cookies are used for preview and thumbnail flows where browser media elements cannot attach Authorization headers. `POST /api/v1/auth/download-session` can be authenticated by the Web UI session cookie or by `Authorization: Bearer <access-token>` and sets `mnemonas_download_access` scoped to `/api/v1`.
+Download-session cookies are used for preview and thumbnail flows where browser media elements cannot attach Authorization headers. `POST /api/v1/auth/download-session` can be authenticated by the Web UI session cookie or by `Authorization: Bearer <access-token>` and sets `mnemonas_download_access` scoped to `/api/v1`. Thumbnail responses are generated images and include `nosniff` plus a sandbox CSP.
+
+Thumbnail generation rejects sources larger than 100 MiB, image dimensions above 10000x10000, or images above 50 million pixels.
 
 ## Version History
 
@@ -271,6 +278,8 @@ Create request:
 }
 ```
 
+`password` is optional; non-empty share passwords are limited to 72 bytes.
+
 Public endpoints:
 
 | Method | Path | Description |
@@ -321,9 +330,9 @@ Activity visibility follows user scope. Admins can see all activity.
 | `PUT` | `/api/v1/settings` | Update settings |
 | `GET` | `/api/v1/settings/webdav-credentials` | Get current WebDAV credential status |
 
-Settings updates can change WebDAV prefix, read-only mode, share configuration, alert configuration, and auth config at runtime. Some lower-level dataplane settings require restart.
+Settings updates can change WebDAV prefix, read-only mode, share configuration, favorite configuration, alert configuration, dataplane connection settings, and retention/versioning policies at runtime. Server listener/TLS changes and CDC chunk-size changes are saved but require restarting the affected service before they take effect.
 
-Non-empty `share.base_url` and `alerts.webhook_url` values must be absolute `http` or `https` URLs. Alert `webhook_method` supports `GET` and `POST`; custom webhook headers use `Key:Value` strings. Invalid settings return `400 Bad Request` without mutating the running config.
+`server.host` must be empty, `*`, a valid hostname, IPv4, or IPv6 literal, without a port, whitespace, or control characters; set the port through `server.port`. `webdav.prefix` is normalized to a `/`-prefixed URL path, must not contain backslash, `?`, `#`, or control characters, and when enabled must not overlap `/`, `/api`, `/s`, or `/health`. Non-empty `share.base_url` and `alerts.webhook_url` values must be absolute `http` or `https` URLs. Alert `webhook_method` supports `GET` and `POST`; custom webhook headers use `"Key: Value"` strings with valid HTTP token names and values without newlines or control characters. `dataplane.grpc_address` must be a valid `host:port` address with port 1-65535 and no whitespace or control characters. CDC chunk sizes must satisfy `65536 <= min_chunk_size < avg_chunk_size < max_chunk_size <= 67108864`. Invalid settings return `400 Bad Request` without mutating the running config.
 
 ## Maintenance
 
@@ -336,6 +345,8 @@ Non-empty `share.base_url` and `alerts.webhook_url` values must be absolute `htt
 | `GET` | `/api/v1/diagnostics-export` | Export diagnostic bundle |
 
 Maintenance endpoints are admin-oriented and may be long-running. The Web UI exposes the same operations from maintenance pages.
+Scrub object errors return stable public `errors[].message` values; lower-level IO, path, and verification details are kept in server logs.
+`GET /api/v1/maintenance/objects` accepts an optional `cursor` query parameter from the previous `next_cursor`; non-empty cursors must be 64-character hexadecimal object hashes.
 
 ## WebDAV
 
@@ -348,6 +359,8 @@ http://localhost:8080/dav
 By default it uses Basic Auth with credentials from `[webdav]` or generated credentials in `secrets.json`.
 
 Supported core methods include `OPTIONS`, `PROPFIND`, `GET`, `HEAD`, `PUT`, `DELETE`, `MKCOL`, `MOVE`, `COPY`, simplified `PROPPATCH`, simplified `LOCK`, and simplified `UNLOCK`.
+
+Browser requests with `Origin`, `Referer`, or `Sec-Fetch-Site` metadata are same-origin checked for WebDAV write methods. Script and WebDAV clients normally do not send those browser-origin headers. WebDAV file and directory-listing responses include `nosniff` and a sandbox CSP to reduce script execution when user files are opened in the browser.
 
 See [WebDAV compatibility](webdav-compatibility.en.md).
 

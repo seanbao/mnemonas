@@ -277,6 +277,26 @@ func TestNew_RejectsSymlinkDBDirectory(t *testing.T) {
 	}
 }
 
+func TestEnsureVersionStoreDir_RejectsSymlinkParent(t *testing.T) {
+	tmpDir := t.TempDir()
+	realParent := filepath.Join(tmpDir, "real-parent")
+	if err := os.MkdirAll(realParent, 0700); err != nil {
+		t.Fatalf("MkdirAll(realParent) error: %v", err)
+	}
+	linkedParent := filepath.Join(tmpDir, "linked-parent")
+	if err := os.Symlink(realParent, linkedParent); err != nil {
+		t.Fatalf("Symlink(linkedParent) error: %v", err)
+	}
+
+	err := ensureVersionStoreDir(filepath.Join(linkedParent, "db"), 0700)
+	if !errors.Is(err, errVersionStoreSymlink) {
+		t.Fatalf("ensureVersionStoreDir() error = %v, want errVersionStoreSymlink", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(realParent, "db")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("expected no directory to be created through symlink parent, got %v", statErr)
+	}
+}
+
 func TestNew_DoesNotFollowDBDirectorySymlinkInsertedAfterValidation(t *testing.T) {
 	tmpDir := t.TempDir()
 	dbDir := filepath.Join(tmpDir, "db")
@@ -325,6 +345,51 @@ func TestNew_DoesNotFollowDBDirectorySymlinkInsertedAfterValidation(t *testing.T
 	}
 	if _, err := os.Stat(filepath.Join(outsideDir, "test.db")); !os.IsNotExist(err) {
 		t.Fatalf("expected no outside database file, got %v", err)
+	}
+}
+
+func TestNew_RejectsDBFileSymlinkInsertedAfterValidation(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbDir := filepath.Join(tmpDir, "db")
+	if err := os.MkdirAll(dbDir, 0700); err != nil {
+		t.Fatalf("MkdirAll(dbDir) error: %v", err)
+	}
+	dbPath := filepath.Join(dbDir, "test.db")
+	if err := os.WriteFile(dbPath, []byte("placeholder"), 0600); err != nil {
+		t.Fatalf("WriteFile(test.db) error: %v", err)
+	}
+	linkedPath := filepath.Join(dbDir, "linked.db")
+	if err := os.WriteFile(linkedPath, []byte("linked"), 0600); err != nil {
+		t.Fatalf("WriteFile(linked.db) error: %v", err)
+	}
+
+	originalHook := afterValidateVersionStorePath
+	var hookErr error
+	swapped := false
+	afterValidateVersionStorePath = func() {
+		if hookErr != nil || swapped {
+			return
+		}
+		swapped = true
+		if err := os.Remove(dbPath); err != nil {
+			hookErr = err
+			return
+		}
+		hookErr = os.Symlink(filepath.Base(linkedPath), dbPath)
+	}
+	t.Cleanup(func() {
+		afterValidateVersionStorePath = originalHook
+	})
+
+	_, err := New(Config{
+		DBPath:    dbPath,
+		Dataplane: dataplane.NewClient("unused"),
+	})
+	if hookErr != nil {
+		t.Fatalf("afterValidateVersionStorePath hook error: %v", hookErr)
+	}
+	if !errors.Is(err, errVersionStoreSymlink) {
+		t.Fatalf("New() error = %v, want errVersionStoreSymlink", err)
 	}
 }
 
@@ -486,6 +551,9 @@ func TestStore_DeleteVersionRestoreVersionsAndReferenceChecks(t *testing.T) {
 	}
 	if err := s.RestoreVersions(ctx, []Version{{Path: "../escape", Hash: "bad"}}); !errors.Is(err, errInvalidStorePath) {
 		t.Fatalf("RestoreVersions(invalid path) error = %v, want %v", err, errInvalidStorePath)
+	}
+	if err := s.RestoreVersions(ctx, []Version{{Path: "/docs/report\x00.txt", Hash: "bad"}}); !errors.Is(err, errInvalidStorePath) {
+		t.Fatalf("RestoreVersions(NUL path) error = %v, want %v", err, errInvalidStorePath)
 	}
 }
 
@@ -750,6 +818,65 @@ func TestStore_Trash(t *testing.T) {
 	_, err = s.GetTrashItem(ctx, "trash123")
 	if err != ErrNotFound {
 		t.Errorf("GetTrashItem() after remove = %v, want ErrNotFound", err)
+	}
+}
+
+func TestStore_TrashRejectsAndSkipsInvalidIDsAndPaths(t *testing.T) {
+	s := setupStore(t)
+	ctx := context.Background()
+	now := time.Now()
+
+	if err := s.AddToTrash(ctx, &TrashItem{
+		ID:           "../escape",
+		OriginalPath: "/deleted.txt",
+		DeletedAt:    now,
+		ExpiresAt:    now.Add(time.Hour),
+	}); !errors.Is(err, errInvalidStoreID) {
+		t.Fatalf("AddToTrash() error = %v, want %v", err, errInvalidStoreID)
+	}
+
+	if err := s.AddToTrash(ctx, &TrashItem{
+		ID:           "valid-trash",
+		OriginalPath: "/valid.txt",
+		Size:         10,
+		DeletedAt:    now,
+		ExpiresAt:    now.Add(time.Hour),
+	}); err != nil {
+		t.Fatalf("AddToTrash(valid) error: %v", err)
+	}
+
+	if _, err := s.db.ExecContext(ctx,
+		`INSERT INTO trash (id, original_path, size, deleted_at, expires_at, is_dir, had_versions, restore_data)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		"../escape", "/evil.txt", 1, now.Unix(), now.Add(time.Hour).Unix(), false, false, []byte{}); err != nil {
+		t.Fatalf("insert invalid trash ID fixture: %v", err)
+	}
+	if _, err := s.db.ExecContext(ctx,
+		`INSERT INTO trash (id, original_path, size, deleted_at, expires_at, is_dir, had_versions, restore_data)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		"invalid-path", "../evil.txt", 1, now.Unix(), now.Add(time.Hour).Unix(), false, false, []byte{}); err != nil {
+		t.Fatalf("insert invalid trash path fixture: %v", err)
+	}
+
+	items, err := s.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash() error: %v", err)
+	}
+	if len(items) != 1 || items[0].ID != "valid-trash" {
+		t.Fatalf("ListTrash() = %+v, want only valid-trash", items)
+	}
+
+	if _, err := s.GetTrashItem(ctx, "../escape"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("GetTrashItem(invalid ID) error = %v, want %v", err, ErrNotFound)
+	}
+	if _, err := s.GetTrashItem(ctx, "invalid-path"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("GetTrashItem(invalid path row) error = %v, want %v", err, ErrNotFound)
+	}
+	if err := s.UpdateTrashRestoreData(ctx, "../escape", []byte("{}")); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("UpdateTrashRestoreData(invalid ID) error = %v, want %v", err, ErrNotFound)
+	}
+	if err := s.RemoveFromTrash(ctx, "../escape"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("RemoveFromTrash(invalid ID) error = %v, want %v", err, ErrNotFound)
 	}
 }
 

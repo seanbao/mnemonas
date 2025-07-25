@@ -106,6 +106,43 @@ func TestLoadOrCreateSecrets(t *testing.T) {
 		}
 	})
 
+	t.Run("repairs missing generated secrets in existing secrets file", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		secretsPath := filepath.Join(tmpDir, SecretsFile)
+
+		if err := os.WriteFile(secretsPath, []byte(`{"setup_shown":true}`), 0o600); err != nil {
+			t.Fatalf("failed to write incomplete secrets: %v", err)
+		}
+
+		secrets, isNew, err := LoadOrCreateSecrets(tmpDir)
+		if err != nil {
+			t.Fatalf("LoadOrCreateSecrets failed: %v", err)
+		}
+		if isNew {
+			t.Fatal("expected existing incomplete secrets to be repaired without marking the file new")
+		}
+		if strings.TrimSpace(secrets.JWTSecret) == "" {
+			t.Fatal("expected missing JWT secret to be repaired")
+		}
+		if strings.TrimSpace(secrets.WebDAVPassword) == "" {
+			t.Fatal("expected missing WebDAV password to be repaired")
+		}
+		if !secrets.SetupShown {
+			t.Fatal("expected unrelated secrets fields to be preserved")
+		}
+
+		reloaded, isNewReloaded, err := LoadOrCreateSecrets(tmpDir)
+		if err != nil {
+			t.Fatalf("LoadOrCreateSecrets reload failed: %v", err)
+		}
+		if isNewReloaded {
+			t.Fatal("expected repaired secrets to persist")
+		}
+		if reloaded.JWTSecret != secrets.JWTSecret || reloaded.WebDAVPassword != secrets.WebDAVPassword {
+			t.Fatalf("expected repaired secrets to persist, got %+v want %+v", reloaded, secrets)
+		}
+	})
+
 	t.Run("load existing secrets", func(t *testing.T) {
 		tmpDir := t.TempDir()
 

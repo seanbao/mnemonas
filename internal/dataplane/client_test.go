@@ -1,6 +1,7 @@
 package dataplane
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -229,6 +230,33 @@ type errReader struct {
 
 func (r errReader) Read([]byte) (int, error) {
 	return 0, r.err
+}
+
+type eofWithDataReader struct {
+	data []byte
+	done bool
+}
+
+func (r *eofWithDataReader) Read(p []byte) (int, error) {
+	if r.done {
+		return 0, io.EOF
+	}
+	r.done = true
+	return copy(p, r.data), io.EOF
+}
+
+type dataThenErrorReader struct {
+	data []byte
+	err  error
+	done bool
+}
+
+func (r *dataThenErrorReader) Read(p []byte) (int, error) {
+	if r.done {
+		return 0, r.err
+	}
+	r.done = true
+	return copy(p, r.data), r.err
 }
 
 func TestNewClient(t *testing.T) {
@@ -499,6 +527,50 @@ func TestPutFileClosesStreamOnReadError(t *testing.T) {
 	}
 	if len(stream.sentRequests) != 1 {
 		t.Fatalf("expected metadata send before read failure, got %d sends", len(stream.sentRequests))
+	}
+}
+
+func TestPutFileSendsBytesReturnedWithEOF(t *testing.T) {
+	stream := &fakePutFileStream{}
+	client := NewClient("localhost:9090")
+	client.client = &fakeDataPlaneClient{putFileStream: stream}
+
+	tail := []byte("final bytes")
+	if _, err := client.PutFile(context.Background(), "/test.txt", &eofWithDataReader{data: tail}); err != nil {
+		t.Fatalf("PutFile() error: %v", err)
+	}
+	if !stream.closeSendCalled {
+		t.Fatal("expected PutFile to close the stream")
+	}
+	if len(stream.sentRequests) != 2 {
+		t.Fatalf("expected metadata and one chunk send, got %d sends", len(stream.sentRequests))
+	}
+	chunk := stream.sentRequests[1].GetChunk()
+	if !bytes.Equal(chunk, tail) {
+		t.Fatalf("sent chunk = %q, want %q", chunk, tail)
+	}
+}
+
+func TestPutFileSendsPartialReadBeforeError(t *testing.T) {
+	stream := &fakePutFileStream{}
+	client := NewClient("localhost:9090")
+	client.client = &fakeDataPlaneClient{putFileStream: stream}
+
+	tail := []byte("partial bytes")
+	readErr := errors.New("read failed after data")
+	_, err := client.PutFile(context.Background(), "/test.txt", &dataThenErrorReader{data: tail, err: readErr})
+	if !errors.Is(err, readErr) {
+		t.Fatalf("PutFile() error = %v, want %v", err, readErr)
+	}
+	if !stream.closeSendCalled {
+		t.Fatal("expected PutFile to close the stream on read error")
+	}
+	if len(stream.sentRequests) != 2 {
+		t.Fatalf("expected metadata and partial chunk send, got %d sends", len(stream.sentRequests))
+	}
+	chunk := stream.sentRequests[1].GetChunk()
+	if !bytes.Equal(chunk, tail) {
+		t.Fatalf("sent chunk = %q, want %q", chunk, tail)
 	}
 }
 
@@ -926,6 +998,13 @@ func TestConcurrentIsConnected(t *testing.T) {
 
 	for i := 0; i < 10; i++ {
 		<-done
+	}
+}
+
+func TestGRPCMessageLimitHasVersionObjectHeadroom(t *testing.T) {
+	const defaultMaxVersionObjectSize = 100 * 1024 * 1024
+	if maxGRPCMessageSize <= defaultMaxVersionObjectSize {
+		t.Fatalf("maxGRPCMessageSize = %d, want > %d", maxGRPCMessageSize, defaultMaxVersionObjectSize)
 	}
 }
 

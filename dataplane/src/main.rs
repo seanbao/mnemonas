@@ -18,6 +18,7 @@ use tracing_subscriber::FmtSubscriber;
 
 use dataplane::{CasConfig, CasStore, ChunkerConfig, DataPlaneService};
 
+const MIN_CDC_CHUNK_SIZE: u32 = 64 * 1024;
 const MAX_CDC_CHUNK_SIZE: u32 = 64 * 1024 * 1024;
 
 /// MnemoNAS DataPlane - High-performance Rust data plane
@@ -89,8 +90,8 @@ fn chunker_config_from_args(args: &Args) -> Result<ChunkerConfig> {
     let avg_size = chunk_size_from_args(args.avg_chunk_size, args.avg_chunk_kb, "avg chunk size")?;
     let max_size = chunk_size_from_args(args.max_chunk_size, args.max_chunk_kb, "max chunk size")?;
 
-    if min_size == 0 {
-        bail!("min chunk size must be positive");
+    if min_size < MIN_CDC_CHUNK_SIZE {
+        bail!("min chunk size must be greater than or equal to {MIN_CDC_CHUNK_SIZE} bytes");
     }
     if min_size >= avg_size {
         bail!("min chunk size must be less than avg chunk size");
@@ -302,6 +303,15 @@ mod tests {
         let err = chunker_config_from_args(&args).expect_err("invalid chunker config");
 
         assert!(err.to_string().contains("min chunk size"));
+    }
+
+    #[test]
+    fn chunker_config_rejects_tiny_min_chunk() {
+        let args = args_with_chunk_sizes(MIN_CDC_CHUNK_SIZE - 1, 262_144, 1_048_576);
+
+        let err = chunker_config_from_args(&args).expect_err("undersized chunker config");
+
+        assert!(err.to_string().contains(&MIN_CDC_CHUNK_SIZE.to_string()));
     }
 
     #[test]

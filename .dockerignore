@@ -1,5 +1,7 @@
 .git
 .github
+.agents
+.codex
 .cache
 .env
 .env.*

@@ -113,6 +113,26 @@ func TestConfig_Validate(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name:    "Invalid server host whitespace",
+			modify:  func(c *Config) { c.Server.Host = "127.0.0.1\nbad" },
+			wantErr: true,
+		},
+		{
+			name:    "Invalid server host with port",
+			modify:  func(c *Config) { c.Server.Host = "[::1]:8080" },
+			wantErr: true,
+		},
+		{
+			name:    "Valid server host wildcard",
+			modify:  func(c *Config) { c.Server.Host = "*" },
+			wantErr: false,
+		},
+		{
+			name:    "Valid server host IPv6",
+			modify:  func(c *Config) { c.Server.Host = "::1" },
+			wantErr: false,
+		},
+		{
 			name:    "Invalid read timeout",
 			modify:  func(c *Config) { c.Server.ReadTimeout = 0 },
 			wantErr: true,
@@ -140,6 +160,16 @@ func TestConfig_Validate(t *testing.T) {
 		{
 			name:    "Filesystem root storage.root",
 			modify:  func(c *Config) { c.Storage.Root = string(os.PathSeparator) },
+			wantErr: true,
+		},
+		{
+			name:    "Protected storage.root",
+			modify:  func(c *Config) { c.Storage.Root = "/srv" },
+			wantErr: true,
+		},
+		{
+			name:    "Protected storage.root with trailing separator",
+			modify:  func(c *Config) { c.Storage.Root = "/tmp/" },
 			wantErr: true,
 		},
 		{
@@ -178,6 +208,54 @@ func TestConfig_Validate(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name:    "Invalid WebDAV root prefix",
+			modify:  func(c *Config) { c.WebDAV.Prefix = "/" },
+			wantErr: true,
+		},
+		{
+			name:    "Invalid WebDAV API prefix",
+			modify:  func(c *Config) { c.WebDAV.Prefix = "/api/v1" },
+			wantErr: true,
+		},
+		{
+			name:    "Invalid WebDAV public share prefix",
+			modify:  func(c *Config) { c.WebDAV.Prefix = "s/files" },
+			wantErr: true,
+		},
+		{
+			name:    "Invalid WebDAV health prefix",
+			modify:  func(c *Config) { c.WebDAV.Prefix = "/health" },
+			wantErr: true,
+		},
+		{
+			name:    "Invalid WebDAV prefix with backslash",
+			modify:  func(c *Config) { c.WebDAV.Prefix = `/dav\files` },
+			wantErr: true,
+		},
+		{
+			name:    "Invalid WebDAV prefix with query",
+			modify:  func(c *Config) { c.WebDAV.Prefix = "/dav?mount" },
+			wantErr: true,
+		},
+		{
+			name:    "Invalid WebDAV prefix with fragment",
+			modify:  func(c *Config) { c.WebDAV.Prefix = "/dav#mount" },
+			wantErr: true,
+		},
+		{
+			name:    "Invalid WebDAV prefix with control character",
+			modify:  func(c *Config) { c.WebDAV.Prefix = "/dav\nfiles" },
+			wantErr: true,
+		},
+		{
+			name: "Disabled WebDAV may keep a reserved inactive prefix",
+			modify: func(c *Config) {
+				c.WebDAV.Enabled = false
+				c.WebDAV.Prefix = "/api/v1"
+			},
+			wantErr: false,
+		},
+		{
 			name:    "Invalid share base URL scheme",
 			modify:  func(c *Config) { c.Share.BaseURL = "javascript:alert(1)" },
 			wantErr: true,
@@ -201,6 +279,16 @@ func TestConfig_Validate(t *testing.T) {
 			name:    "Invalid auth refresh token ttl",
 			modify:  func(c *Config) { c.Auth.RefreshTokenTTL = 0 },
 			wantErr: true,
+		},
+		{
+			name:    "Invalid short explicit JWT secret",
+			modify:  func(c *Config) { c.Auth.JWTSecret = "short-secret" },
+			wantErr: true,
+		},
+		{
+			name:    "Valid explicit JWT secret",
+			modify:  func(c *Config) { c.Auth.JWTSecret = strings.Repeat("a", 32) },
+			wantErr: false,
 		},
 		{
 			name: "Auth disabled beyond loopback requires explicit unsafe override",
@@ -283,6 +371,15 @@ func TestConfig_Validate(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name: "Invalid CDC min below safety floor",
+			modify: func(c *Config) {
+				c.DataPlane.CDC.MinChunkSize = MinCDCChunkSize - 1
+				c.DataPlane.CDC.AvgChunkSize = 256 * 1024
+				c.DataPlane.CDC.MaxChunkSize = 1024 * 1024
+			},
+			wantErr: true,
+		},
+		{
 			name: "Invalid CDC avg >= max",
 			modify: func(c *Config) {
 				c.DataPlane.CDC.AvgChunkSize = 5 * 1024 * 1024
@@ -298,6 +395,41 @@ func TestConfig_Validate(t *testing.T) {
 				c.DataPlane.CDC.MaxChunkSize = MaxCDCChunkSize + 1
 			},
 			wantErr: true,
+		},
+		{
+			name: "Invalid dataplane gRPC address missing port",
+			modify: func(c *Config) {
+				c.DataPlane.GRPCAddress = "127.0.0.1"
+			},
+			wantErr: true,
+		},
+		{
+			name: "Invalid dataplane gRPC address control character",
+			modify: func(c *Config) {
+				c.DataPlane.GRPCAddress = "127.0.0.1:9090\nlog_level=debug"
+			},
+			wantErr: true,
+		},
+		{
+			name: "Invalid dataplane gRPC address port",
+			modify: func(c *Config) {
+				c.DataPlane.GRPCAddress = "127.0.0.1:70000"
+			},
+			wantErr: true,
+		},
+		{
+			name: "Invalid dataplane gRPC address host",
+			modify: func(c *Config) {
+				c.DataPlane.GRPCAddress = "bad/host:9090"
+			},
+			wantErr: true,
+		},
+		{
+			name: "Valid dataplane gRPC hostname",
+			modify: func(c *Config) {
+				c.DataPlane.GRPCAddress = "localhost:9090"
+			},
+			wantErr: false,
 		},
 		{
 			name: "Invalid alerts webhook method",
@@ -321,6 +453,13 @@ func TestConfig_Validate(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name: "Invalid alerts webhook URL whitespace",
+			modify: func(c *Config) {
+				c.Alerts.WebhookURL = "https://hooks.example.com/alert\n"
+			},
+			wantErr: true,
+		},
+		{
 			name: "Valid alerts webhook URL",
 			modify: func(c *Config) {
 				c.Alerts.WebhookURL = "https://hooks.example.com/storage"
@@ -331,6 +470,20 @@ func TestConfig_Validate(t *testing.T) {
 			name: "Invalid alerts webhook header",
 			modify: func(c *Config) {
 				c.Alerts.WebhookHeaders = []string{"Authorization"}
+			},
+			wantErr: true,
+		},
+		{
+			name: "Invalid alerts webhook header name",
+			modify: func(c *Config) {
+				c.Alerts.WebhookHeaders = []string{"Bad Header: value"}
+			},
+			wantErr: true,
+		},
+		{
+			name: "Invalid alerts webhook header value control character",
+			modify: func(c *Config) {
+				c.Alerts.WebhookHeaders = []string{"X-MnemoNAS: ok\r\nX-Evil: injected"}
 			},
 			wantErr: true,
 		},
@@ -973,7 +1126,7 @@ func TestLoad_RejectsSymlinkInsertedAfterValidation(t *testing.T) {
 			hookErr = err
 			return
 		}
-		hookErr = os.Symlink(linkedTarget, configPath)
+		hookErr = os.Symlink(filepath.Base(linkedTarget), configPath)
 	}
 	defer func() {
 		afterValidateManagedFilePath = originalHook
@@ -1145,6 +1298,16 @@ func TestConfig_EnsureDirs(t *testing.T) {
 	}
 }
 
+func TestConfig_EnsureDirs_RejectsProtectedStorageRoot(t *testing.T) {
+	cfg := Default()
+	cfg.Storage.Root = "/tmp/"
+
+	err := cfg.EnsureDirs()
+	if err == nil || !strings.Contains(err.Error(), "protected system directory") {
+		t.Fatalf("EnsureDirs() error = %v, want protected system directory rejection", err)
+	}
+}
+
 func TestConfig_EnsureDirs_RejectsSymlinkParentDirectory(t *testing.T) {
 	tmpDir := t.TempDir()
 	realParent := filepath.Join(tmpDir, "real-parent")
@@ -1189,13 +1352,29 @@ func TestConfig_EnsureDirs_DoesNotCreateDirectoriesThroughSymlinkParent(t *testi
 }
 
 func TestConfig_Address(t *testing.T) {
-	cfg := Default()
-	cfg.Server.Host = "192.168.1.1"
-	cfg.Server.Port = 3000
+	tests := []struct {
+		name string
+		host string
+		port int
+		want string
+	}{
+		{name: "IPv4", host: "192.168.1.1", port: 3000, want: "192.168.1.1:3000"},
+		{name: "IPv6", host: "::1", port: 3000, want: "[::1]:3000"},
+		{name: "bracketed IPv6", host: "[::1]", port: 3000, want: "[::1]:3000"},
+		{name: "wildcard IPv6", host: "::", port: 3000, want: "[::]:3000"},
+		{name: "wildcard alias", host: "*", port: 3000, want: ":3000"},
+	}
 
-	addr := cfg.Address()
-	if addr != "192.168.1.1:3000" {
-		t.Errorf("Address() = %s, want 192.168.1.1:3000", addr)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Default()
+			cfg.Server.Host = tt.host
+			cfg.Server.Port = tt.port
+
+			if addr := cfg.Address(); addr != tt.want {
+				t.Errorf("Address() = %s, want %s", addr, tt.want)
+			}
+		})
 	}
 }
 

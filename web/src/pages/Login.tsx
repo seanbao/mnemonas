@@ -22,6 +22,22 @@ import { useAuthStore, useIsAuthenticated } from '@/stores/auth'
 import { getSetupStatus } from '@/api/setup'
 import { getHealth } from '@/api/files'
 
+function getPostLoginRedirectPath(state: unknown): string {
+  const from = (
+    typeof state === 'object' &&
+    state !== null &&
+    'from' in state
+  )
+    ? (state as { from?: unknown }).from
+    : undefined
+
+  if (typeof from !== 'string' || !from.startsWith('/') || from.startsWith('//')) {
+    return '/'
+  }
+
+  return from
+}
+
 export function LoginPage() {
   const navigate = useNavigate()
   const location = useLocation()
@@ -41,7 +57,7 @@ export function LoginPage() {
   // Redirect if already authenticated
   useEffect(() => {
     if (isAuthenticated) {
-      const from = (location.state as { from?: string })?.from || '/'
+      const from = getPostLoginRedirectPath(location.state)
       navigate(from, { replace: true })
     }
   }, [isAuthenticated, navigate, location])
@@ -122,7 +138,7 @@ export function LoginPage() {
       addToast(result.warning
         ? { title: result.message ?? '登录成功，但活动日志写入失败', color: 'warning' }
         : { title: '登录成功', color: 'success' })
-      const from = (location.state as { from?: string })?.from || '/'
+      const from = getPostLoginRedirectPath(location.state)
       navigate(from, { replace: true })
     } catch {
       // Error is exposed by auth store and rendered via displayError.

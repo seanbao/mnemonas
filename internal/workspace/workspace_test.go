@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/seanbao/mnemonas/internal/rootio"
 )
 
 func TestVisibleMutationWarningWrapperPreservesErrorSemantics(t *testing.T) {
@@ -28,6 +30,22 @@ func TestVisibleMutationWarningWrapperPreservesErrorSemantics(t *testing.T) {
 	}
 	if got := WrapVisibleMutationWarning(warningErr); got != warningErr {
 		t.Fatal("expected existing warning to be reused")
+	}
+}
+
+func TestSyncWorkspaceDirRejectsSymlink(t *testing.T) {
+	tmpDir := t.TempDir()
+	realDir := filepath.Join(tmpDir, "real")
+	if err := os.Mkdir(realDir, 0755); err != nil {
+		t.Fatalf("Mkdir(real) error: %v", err)
+	}
+	linkedDir := filepath.Join(tmpDir, "linked")
+	if err := os.Symlink(realDir, linkedDir); err != nil {
+		t.Fatalf("Symlink(linked) error: %v", err)
+	}
+
+	if err := syncWorkspaceDir(linkedDir); !rootio.IsSymlinkError(err) {
+		t.Fatalf("syncWorkspaceDir() error = %v, want symlink error", err)
 	}
 }
 
@@ -472,6 +490,12 @@ func TestWorkspace_OperationsRejectTraversalLikeNames(t *testing.T) {
 	if err := w.Walk(ctx, "../safe", func(path string, info *FileInfo) error { return nil }); err != ErrNotFound {
 		t.Fatalf("Walk(traversal) error = %v, want ErrNotFound", err)
 	}
+	if _, err := w.Stat(ctx, "/safe/existing\x00.txt"); err != ErrNotFound {
+		t.Fatalf("Stat(NUL) error = %v, want ErrNotFound", err)
+	}
+	if err := w.WriteFile(ctx, "/safe/nul\x00.txt", []byte("blocked")); err != ErrNotFound {
+		t.Fatalf("WriteFile(NUL) error = %v, want ErrNotFound", err)
+	}
 	if w.Exists(ctx, "../safe/existing.txt") {
 		t.Fatal("expected Exists(traversal) to return false")
 	}
@@ -492,6 +516,9 @@ func TestWorkspace_OperationsRejectTraversalLikeNames(t *testing.T) {
 	}
 	if w.Exists(ctx, "/escape-dir") {
 		t.Fatal("expected traversal mkdir not to create normalized /escape-dir")
+	}
+	if w.Exists(ctx, "/safe/nul.txt") {
+		t.Fatal("expected NUL write not to create normalized /safe/nul.txt")
 	}
 }
 
@@ -632,6 +659,36 @@ func TestWorkspace_ReadDir(t *testing.T) {
 
 	if len(entries) != 3 {
 		t.Errorf("ReadDir() returned %d entries, want 3", len(entries))
+	}
+}
+
+func TestWorkspace_ReadDir_HidesSymlinkEntries(t *testing.T) {
+	w := setupWorkspace(t)
+	ctx := context.Background()
+
+	if err := w.Mkdir(ctx, "/dir"); err != nil {
+		t.Fatalf("Mkdir(dir) error: %v", err)
+	}
+	if err := w.WriteFile(ctx, "/dir/visible.txt", []byte("visible")); err != nil {
+		t.Fatalf("WriteFile(visible.txt) error: %v", err)
+	}
+	outsidePath := filepath.Join(t.TempDir(), "outside.txt")
+	if err := os.WriteFile(outsidePath, []byte("outside"), 0644); err != nil {
+		t.Fatalf("WriteFile(outside.txt) error: %v", err)
+	}
+	if err := os.Symlink(outsidePath, filepath.Join(w.Root(), "dir", "linked.txt")); err != nil {
+		t.Fatalf("Symlink(linked.txt) error: %v", err)
+	}
+
+	entries, err := w.ReadDir(ctx, "/dir")
+	if err != nil {
+		t.Fatalf("ReadDir() error: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("ReadDir() returned %d entries, want 1: %+v", len(entries), entries)
+	}
+	if entries[0].Name != "visible.txt" {
+		t.Fatalf("ReadDir() entry = %q, want visible.txt", entries[0].Name)
 	}
 }
 
@@ -1177,6 +1234,81 @@ func TestWorkspace_Walk(t *testing.T) {
 	}
 }
 
+func TestWorkspace_Walk_HidesSymlinkEntries(t *testing.T) {
+	w := setupWorkspace(t)
+	ctx := context.Background()
+
+	if err := w.Mkdir(ctx, "/walktest"); err != nil {
+		t.Fatalf("Mkdir(walktest) error: %v", err)
+	}
+	if err := w.WriteFile(ctx, "/walktest/visible.txt", []byte("visible")); err != nil {
+		t.Fatalf("WriteFile(visible.txt) error: %v", err)
+	}
+	outsidePath := filepath.Join(t.TempDir(), "outside.txt")
+	if err := os.WriteFile(outsidePath, []byte("outside"), 0644); err != nil {
+		t.Fatalf("WriteFile(outside.txt) error: %v", err)
+	}
+	if err := os.Symlink(outsidePath, filepath.Join(w.Root(), "walktest", "linked.txt")); err != nil {
+		t.Fatalf("Symlink(linked.txt) error: %v", err)
+	}
+
+	var paths []string
+	err := w.Walk(ctx, "/walktest", func(path string, info *FileInfo) error {
+		paths = append(paths, path)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Walk() error: %v", err)
+	}
+
+	want := "/walktest|/walktest/visible.txt"
+	if got := strings.Join(paths, "|"); got != want {
+		t.Fatalf("Walk() paths = %v, want %s", paths, want)
+	}
+}
+
+func TestWorkspace_Walk_RejectsRootSymlinkInsertedAfterValidation(t *testing.T) {
+	w := setupWorkspace(t)
+	ctx := context.Background()
+
+	if err := w.Mkdir(ctx, "/walktest"); err != nil {
+		t.Fatalf("Mkdir(walktest) error: %v", err)
+	}
+	outsideDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outsideDir, "secret.txt"), []byte("outside"), 0644); err != nil {
+		t.Fatalf("WriteFile(secret.txt) error: %v", err)
+	}
+
+	walkRoot := filepath.Join(w.Root(), "walktest")
+	originalAfterValidateWorkspacePaths := afterValidateWorkspacePaths
+	afterValidateWorkspacePaths = func() error {
+		if err := os.RemoveAll(walkRoot); err != nil {
+			return err
+		}
+		return os.Symlink(outsideDir, walkRoot)
+	}
+	t.Cleanup(func() {
+		afterValidateWorkspacePaths = originalAfterValidateWorkspacePaths
+		if info, err := os.Lstat(walkRoot); err == nil && info.Mode()&os.ModeSymlink != 0 {
+			if removeErr := os.Remove(walkRoot); removeErr != nil {
+				t.Errorf("Remove(walk root symlink) error: %v", removeErr)
+			}
+		}
+	})
+
+	var paths []string
+	err := w.Walk(ctx, "/walktest", func(path string, info *FileInfo) error {
+		paths = append(paths, path)
+		return nil
+	})
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Walk() error = %v, want ErrNotFound", err)
+	}
+	if len(paths) != 0 {
+		t.Fatalf("expected no paths for symlink root, got %v", paths)
+	}
+}
+
 func TestWorkspace_Walk_ReturnsContextCanceledBeforeTraversal(t *testing.T) {
 	w := setupWorkspace(t)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1655,6 +1787,39 @@ func TestWorkspace_WriteFile_DoesNotFollowSymlinkInsertedAfterValidation(t *test
 	}
 }
 
+func TestWorkspace_WriteFileRejectsParentSymlinkInsertedAfterValidationInsideRoot(t *testing.T) {
+	w := setupWorkspace(t)
+	ctx := context.Background()
+
+	safeDir := filepath.Join(w.Root(), "safe")
+	if err := os.Mkdir(safeDir, 0755); err != nil {
+		t.Fatalf("Mkdir(safe) error: %v", err)
+	}
+	realDir := filepath.Join(w.Root(), "real")
+	if err := os.Mkdir(realDir, 0755); err != nil {
+		t.Fatalf("Mkdir(real) error: %v", err)
+	}
+
+	originalAfterValidateWorkspacePaths := afterValidateWorkspacePaths
+	afterValidateWorkspacePaths = func() error {
+		if err := os.Remove(safeDir); err != nil {
+			return err
+		}
+		return os.Symlink("real", safeDir)
+	}
+	t.Cleanup(func() {
+		afterValidateWorkspacePaths = originalAfterValidateWorkspacePaths
+	})
+
+	err := w.WriteFile(ctx, "/safe/child.txt", []byte("blocked"))
+	if err != ErrNotFound {
+		t.Fatalf("WriteFile() error = %v, want ErrNotFound", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(realDir, "child.txt")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("expected symlink target file to remain absent, got %v", statErr)
+	}
+}
+
 func TestWorkspace_ReadFile_DoesNotFollowSymlinkInsertedAfterValidation(t *testing.T) {
 	w := setupWorkspace(t)
 	ctx := context.Background()
@@ -1685,6 +1850,110 @@ func TestWorkspace_ReadFile_DoesNotFollowSymlinkInsertedAfterValidation(t *testi
 	}
 	if data != nil {
 		t.Fatal("expected no data for post-validation symlink swap")
+	}
+}
+
+func TestWorkspace_ReadFileRejectsFinalSymlinkInsertedAfterValidationInsideRoot(t *testing.T) {
+	w := setupWorkspace(t)
+	ctx := context.Background()
+
+	if err := w.Mkdir(ctx, "/safe"); err != nil {
+		t.Fatalf("Mkdir(safe) error: %v", err)
+	}
+	if err := w.WriteFile(ctx, "/safe/secret.txt", []byte("original")); err != nil {
+		t.Fatalf("WriteFile(secret) error: %v", err)
+	}
+	if err := w.WriteFile(ctx, "/safe/linked.txt", []byte("linked")); err != nil {
+		t.Fatalf("WriteFile(linked) error: %v", err)
+	}
+
+	secretPath := filepath.Join(w.Root(), "safe", "secret.txt")
+	originalAfterValidateWorkspacePaths := afterValidateWorkspacePaths
+	afterValidateWorkspacePaths = func() error {
+		if err := os.Remove(secretPath); err != nil {
+			return err
+		}
+		return os.Symlink("linked.txt", secretPath)
+	}
+	t.Cleanup(func() {
+		afterValidateWorkspacePaths = originalAfterValidateWorkspacePaths
+	})
+
+	data, err := w.ReadFile(ctx, "/safe/secret.txt")
+	if err != ErrNotFound {
+		t.Fatalf("ReadFile() error = %v, want ErrNotFound", err)
+	}
+	if data != nil {
+		t.Fatal("expected no data for final symlink swap inside root")
+	}
+}
+
+func TestWorkspace_DeleteDoesNotFollowSymlinkInsertedAfterValidation(t *testing.T) {
+	w := setupWorkspace(t)
+	ctx := context.Background()
+
+	safeDir := filepath.Join(w.Root(), "safe")
+	if err := os.Mkdir(safeDir, 0755); err != nil {
+		t.Fatalf("Mkdir(safe) error: %v", err)
+	}
+	outsideDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outsideDir, "child.txt"), []byte("outside"), 0644); err != nil {
+		t.Fatalf("WriteFile(outside child) error: %v", err)
+	}
+
+	originalAfterValidateWorkspacePaths := afterValidateWorkspacePaths
+	afterValidateWorkspacePaths = func() error {
+		if err := os.Remove(safeDir); err != nil {
+			return err
+		}
+		return os.Symlink(outsideDir, safeDir)
+	}
+	t.Cleanup(func() {
+		afterValidateWorkspacePaths = originalAfterValidateWorkspacePaths
+	})
+
+	err := w.Delete(ctx, "/safe/child.txt")
+	if err == nil {
+		t.Fatal("expected Delete() to reject post-validation symlink swap")
+	}
+	if _, statErr := os.Stat(filepath.Join(outsideDir, "child.txt")); statErr != nil {
+		t.Fatalf("outside child was removed or became inaccessible: %v", statErr)
+	}
+}
+
+func TestWorkspace_DeleteAllDoesNotFollowSymlinkInsertedAfterValidation(t *testing.T) {
+	w := setupWorkspace(t)
+	ctx := context.Background()
+
+	safeDir := filepath.Join(w.Root(), "safe")
+	if err := os.Mkdir(safeDir, 0755); err != nil {
+		t.Fatalf("Mkdir(safe) error: %v", err)
+	}
+	outsideDir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(outsideDir, "child"), 0755); err != nil {
+		t.Fatalf("Mkdir(outside child) error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(outsideDir, "child", "secret.txt"), []byte("outside"), 0644); err != nil {
+		t.Fatalf("WriteFile(outside secret) error: %v", err)
+	}
+
+	originalAfterValidateWorkspacePaths := afterValidateWorkspacePaths
+	afterValidateWorkspacePaths = func() error {
+		if err := os.Remove(safeDir); err != nil {
+			return err
+		}
+		return os.Symlink(outsideDir, safeDir)
+	}
+	t.Cleanup(func() {
+		afterValidateWorkspacePaths = originalAfterValidateWorkspacePaths
+	})
+
+	err := w.DeleteAll(ctx, "/safe/child")
+	if err == nil {
+		t.Fatal("expected DeleteAll() to reject post-validation symlink swap")
+	}
+	if _, statErr := os.Stat(filepath.Join(outsideDir, "child", "secret.txt")); statErr != nil {
+		t.Fatalf("outside child tree was removed or became inaccessible: %v", statErr)
 	}
 }
 

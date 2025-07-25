@@ -312,11 +312,16 @@ nvm use
 # 查看服务状态
 ./scripts/dev.sh --status    # 或 -s
 
+# 查看初始密码文件和 WebDAV 凭据位置；默认不打印明文 WebDAV 密码
+./scripts/dev.sh --creds     # 或 -c
+
 # 停止所有组件
 ./scripts/dev.sh --kill      # 或 -k
 ```
 
 脚本特性：
+
+- `--creds` 默认隐藏 WebDAV 明文密码；确需在本机终端显示时，使用 `MNEMONAS_DEV_SHOW_SECRETS=1 ./scripts/dev.sh --creds`
 
 - **自动构建**：启动前自动构建 Go 和 Rust 组件
 - **端口检测**：避免重复启动，自动跳过已占用的端口
@@ -533,7 +538,7 @@ npm run test:e2e:ui
 ### 集成测试
 
 ```bash
-# 当前默认配置启用 WebDAV Basic Auth；可通过 ./scripts/dev.sh --creds 查看凭据
+# 当前默认配置启用 WebDAV Basic Auth；可通过 ./scripts/dev.sh --creds 查看凭据位置
 WEBDAV_USER="<webdav-username>"
 WEBDAV_PASS="<webdav-password>"
 
@@ -789,8 +794,10 @@ export GOPROXY=https://goproxy.cn,direct
 ### Q: 如何重置开发数据？
 
 ```bash
-DATA_DIR="${MNEMONAS_DATA_DIR:-$HOME/.mnemonas}"
-test -n "$DATA_DIR" && test "$DATA_DIR" != "/" || { echo "refusing unsafe DATA_DIR"; exit 1; }
+DEFAULT_DATA_DIR="$HOME/.mnemonas"
+DATA_DIR="${MNEMONAS_DATA_DIR:-$DEFAULT_DATA_DIR}"
+[ "$DATA_DIR" = "$DEFAULT_DATA_DIR" ] || { echo "refusing non-default DATA_DIR; inspect and delete manually: $DATA_DIR"; exit 1; }
+[ ! -L "$DATA_DIR" ] || { echo "refusing symlink DATA_DIR: $DATA_DIR"; exit 1; }
 rm -rf -- "$DATA_DIR"
 # 重启服务会自动创建目录
 ```

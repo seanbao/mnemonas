@@ -80,6 +80,8 @@ Custom data directory or port:
 sudo env STORAGE_ROOT=/srv/mnemonas SERVER_PORT=8080 ./scripts/install-systemd.sh
 ```
 
+The systemd installer and uninstaller require absolute paths for `BIN_DIR`, `SHARE_DIR`, `CONFIG_DIR`, `CONFIG_PATH`, `SYSTEMD_DIR`, `STORAGE_ROOT`, and the Web UI directory, and none of those paths may contain symbolic-link components. `CONFIG_PATH` must stay under `CONFIG_DIR`; except for the Web UI directory living under `SHARE_DIR`, binary, shared-resource, config, systemd unit, and data paths must not overlap each other. To place data on a separate disk, mount the real filesystem at the target directory before running the installer; do not point `STORAGE_ROOT` at a symlink.
+
 The installer only fixes ownership of the managed top-level directories by default. If you manually copied data and need a recursive ownership repair:
 
 ```bash
@@ -234,6 +236,8 @@ Only remove config and data after verifying backups:
 ```bash
 sudo env REMOVE_CONFIG=1 REMOVE_DATA=1 CONFIRM_REMOVE_DATA=/srv/mnemonas mnemonas-uninstall-systemd
 ```
+
+The uninstaller also refuses install and data paths that contain symlink components. When removing data, `CONFIRM_REMOVE_DATA` must exactly match `STORAGE_ROOT` to avoid deleting a real mount point or a replaced directory tree by mistake.
 
 The service account is kept by default to preserve UID/GID reuse. Set `REMOVE_SERVICE_USER=1` if you also want to remove it.
 

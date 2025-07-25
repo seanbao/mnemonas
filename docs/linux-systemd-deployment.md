@@ -74,6 +74,8 @@ sudo ./scripts/install-systemd.sh
 sudo env STORAGE_ROOT=/srv/mnemonas SERVER_PORT=8080 ./scripts/install-systemd.sh
 ```
 
+systemd 安装与卸载脚本要求 `BIN_DIR`、`SHARE_DIR`、`CONFIG_DIR`、`CONFIG_PATH`、`SYSTEMD_DIR`、`STORAGE_ROOT` 和 Web UI 目录使用绝对路径，且路径组件不能包含符号链接。`CONFIG_PATH` 必须位于 `CONFIG_DIR` 下；除 Web UI 目录可位于 `SHARE_DIR` 内之外，二进制、共享资源、配置、systemd unit 和数据目录不能互相重叠。需要把数据放到单独磁盘时，先把真实文件系统挂载到目标目录，再运行安装脚本；不要把 `STORAGE_ROOT` 指向符号链接。
+
 安装脚本默认只修正 `/srv/mnemonas`、`files` 和 `.mnemonas` 这些顶层托管目录的所有者，不会在升级时递归改动已有数据。若你手动复制过数据导致服务用户无权访问，可显式运行：
 
 ```bash
@@ -235,6 +237,8 @@ sudo mnemonas-uninstall-systemd
 ```bash
 sudo env REMOVE_CONFIG=1 REMOVE_DATA=1 CONFIRM_REMOVE_DATA=/srv/mnemonas mnemonas-uninstall-systemd
 ```
+
+卸载脚本同样拒绝经过符号链接组件的安装路径和数据路径。删除数据时 `CONFIRM_REMOVE_DATA` 必须与 `STORAGE_ROOT` 完全一致，避免误删真实挂载点或被替换的目录树。
 
 服务账号默认保留，便于之后重新安装复用同一 UID/GID；如果确实要删除账号，可额外设置 `REMOVE_SERVICE_USER=1`。
 

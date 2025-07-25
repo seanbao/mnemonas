@@ -77,7 +77,7 @@
 | **WebDAV** | golang.org/x/net/webdav | 官方维护，成熟稳定 |
 | **gRPC** | tonic (Rust) / grpc-go | 流式传输、强类型、高性能 |
 | **哈希算法** | BLAKE3 | 比 SHA256 快 10 倍以上 |
-| **CDC 分块** | FastCDC | 性能优于 Rabin，行业标准 |
+| **CDC 分块** | Rust dataplane 文件 API 使用 FastCDC | 当前 Go 版本历史路径仍使用 whole-object CAS 快照；chunk 级版本引用追踪尚未接入 |
 | **日志** | zerolog (Go) / tracing (Rust) | 结构化、高性能 |
 
 ### 前端技术选型
@@ -110,7 +110,7 @@
 
 ### 存储形态：Loose Object 模式
 
-- **当前实现**：1 个 Chunk = 1 个文件（松散对象）
+- **当前实现**：1 个 CAS 对象 = 1 个 loose object 文件；版本历史保存 whole-object 快照
 - **理由**：利用文件系统原子性，避免自研 Packfile/GC 的早期复杂度
 - **未来**：可按需引入 Packfile 优化小文件存储
 

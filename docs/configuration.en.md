@@ -125,7 +125,7 @@ Controls the main HTTP server for Web UI, REST API, and WebDAV.
 
 | Option | Type | Default | Description |
 | --- | --- | --- | --- |
-| `host` | string | `"0.0.0.0"` | Listen address; use `127.0.0.1` for local-only |
+| `host` | string | `"0.0.0.0"` | Listen host; must be empty, `*`, a valid hostname, IPv4, or IPv6 literal, without a port, whitespace, or control characters. Use `127.0.0.1` or `::1` for local-only |
 | `port` | int | `8080` | HTTP port |
 | `read_timeout` | duration | `"30s"` | Request-read timeout |
 | `write_timeout` | duration | `"60s"` | Response-write timeout |
@@ -144,6 +144,8 @@ trusted_proxy_hops = 1
 ```
 
 `trusted_proxy_hops = 0` ignores client-supplied forwarded headers. Set it only when MnemoNAS is behind trusted proxies.
+
+`server.host` contains only the listen host; put the port in `server.port`. IPv6 may be written as `::1` or `[::1]`, and the runtime normalizes it for `net.JoinHostPort`. `*` and an empty string both mean wildcard listen.
 
 ## `[server.tls]`
 
@@ -220,7 +222,7 @@ The Rust dataplane gRPC address is for internal `nasd` communication. Do not exp
 
 | Option | Type | Default | Description |
 | --- | --- | --- | --- |
-| `grpc_address` | string | `"127.0.0.1:9090"` | Rust dataplane gRPC address |
+| `grpc_address` | string | `"127.0.0.1:9090"` | Rust dataplane gRPC address; must be `host:port` with port 1-65535 and no whitespace or control characters |
 | `timeout` | duration | `"30s"` | Connect/reconnect timeout budget |
 | `max_retries` | int | `3` | Maximum connection retries |
 
@@ -239,7 +241,7 @@ Content-defined chunking settings affect deduplication and metadata overhead.
 
 | Option | Type | Default | Description |
 | --- | --- | --- | --- |
-| `min_chunk_size` | uint32 | `262144` | Minimum chunk size, 256KB |
+| `min_chunk_size` | uint32 | `262144` | Minimum chunk size, 256KB; floored at `65536` (64KB) |
 | `avg_chunk_size` | uint32 | `1048576` | Average chunk size, 1MB |
 | `max_chunk_size` | uint32 | `4194304` | Maximum chunk size, 4MB; capped at `67108864` (64MB) |
 
@@ -254,7 +256,7 @@ Tuning guide:
 Constraint:
 
 ```text
-min_chunk_size < avg_chunk_size < max_chunk_size <= 67108864
+65536 <= min_chunk_size < avg_chunk_size < max_chunk_size <= 67108864
 ```
 
 The dataplane reads these values on startup. Restart dataplane after changing them. The 64MB cap prevents oversized streaming chunk buffers.
@@ -264,7 +266,7 @@ The dataplane reads these values on startup. Restart dataplane after changing th
 | Option | Type | Default | Description |
 | --- | --- | --- | --- |
 | `enabled` | bool | `true` | Enable WebDAV |
-| `prefix` | string | `"/dav"` | WebDAV URL prefix |
+| `prefix` | string | `"/dav"` | WebDAV URL prefix; normalized to a `/`-prefixed path and must not contain backslash, `?`, `#`, or control characters. When enabled it must not be `/`, `/api`, `/s`, `/health`, or a child of those reserved routes |
 | `read_only` | bool | `false` | Reject write methods |
 | `auth_type` | string | `"basic"` | `basic` or `none` |
 | `username` | string | `""` | Basic Auth username; empty uses runtime default `admin` |
@@ -274,6 +276,7 @@ Runtime behavior:
 
 - Settings API updates can switch prefix, read-only mode, and auth config without full restart.
 - Empty password with Basic Auth keeps using the generated password.
+- WebDAV is matched before the API and frontend handlers, so enabled prefixes cannot overlap reserved application routes.
 - WebDAV Basic Auth is a global service credential and does not carry app-level user identity.
 
 ## `[auth]`
@@ -281,7 +284,7 @@ Runtime behavior:
 | Option | Type | Default | Description |
 | --- | --- | --- | --- |
 | `enabled` | bool | `true` | Enable Web UI/API authentication |
-| `jwt_secret` | string | generated | JWT signing secret |
+| `jwt_secret` | string | generated | JWT signing secret. Leave empty to use the persistent generated secret in `secrets.json`; explicit values must be at least 32 bytes |
 | `access_token_ttl` | duration | `"15m"` | Access-token lifetime |
 | `refresh_token_ttl` | duration | `"168h"` | Refresh-token lifetime |
 | `users_file` | string | under `storage.root/.mnemonas` | User data file |
@@ -331,9 +334,9 @@ By default, `auth.enabled = false` or enabled WebDAV with `webdav.auth_type = "n
 | `cooldown_period` | duration | `"4h"` | Alert cooldown |
 | `webhook_url` | string | `""` | Alert webhook URL; non-empty values must be absolute `http` or `https` URLs |
 | `webhook_method` | string | `"POST"` | `POST` sends JSON; `GET` encodes fields into query |
-| `webhook_headers` | string[] | `[]` | Additional headers, `"Key:Value"` |
+| `webhook_headers` | string[] | `[]` | Additional headers, `"Key: Value"`; names must be valid HTTP tokens and values cannot contain newlines or control characters |
 
-Health pages and diagnostics show alert state but do not expose webhook URL or headers.
+Health pages and diagnostics show alert state but do not expose webhook URL or headers. Successful and failed webhook logs record only the URL scheme and host, not paths, query strings, credentials, or GET payload fields.
 
 ## `[log]`
 

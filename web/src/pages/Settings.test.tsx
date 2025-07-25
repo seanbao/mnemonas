@@ -242,6 +242,7 @@ describe('SettingsPage', () => {
       expect(mockGetWebDAVCredentials).toHaveBeenCalledTimes(2)
     })
     })
+
   })
 
   describe('tabs', () => {
@@ -495,7 +496,7 @@ describe('SettingsPage', () => {
       await openTab(user, '高级')
 
       await waitFor(() => {
-        expect(screen.getByText('配置内容定义分块算法；保存后需重启数据面服务，且仅影响后续新写入数据')).toBeTruthy()
+        expect(screen.getByText('配置 dataplane 文件分块 API；保存后需重启数据面服务')).toBeTruthy()
         expect(screen.getByText('配置与 Rust 数据面的 gRPC 连接；地址变更会立即校验并切换，超时与重试设置用于后续连接建立')).toBeTruthy()
       })
     })
@@ -656,6 +657,31 @@ describe('SettingsPage', () => {
           }),
         }))
       })
+    })
+
+    it('rejects invalid webhook header names before saving', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      render(<SettingsPage />)
+
+      await openTab(user, '高级')
+
+      await waitFor(() => {
+        expect(screen.getByText('存储告警')).toBeTruthy()
+      })
+
+      await user.click(screen.getByRole('switch', { name: '启用告警' }))
+      const headersInput = screen.getByLabelText('Webhook 自定义 Header')
+      fireEvent.change(headersInput, { target: { value: 'Bad Header: value' } })
+
+      await user.click(screen.getByText('保存设置'))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({
+          title: 'Webhook Header 格式无效',
+          color: 'danger',
+        }))
+      })
+      expect(mockUpdateSettings).not.toHaveBeenCalled()
     })
   })
 
@@ -1301,6 +1327,52 @@ describe('SettingsPage', () => {
       })
     })
 
+    it('rejects reserved WebDAV prefixes before saving', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      render(<SettingsPage />)
+
+      await openTab(user, 'WebDAV')
+
+      await waitFor(() => {
+        expect(screen.getByDisplayValue('/dav')).toBeTruthy()
+      })
+
+      fireEvent.change(screen.getByDisplayValue('/dav'), { target: { value: '/api/v1' } })
+      await user.click(screen.getByText('保存设置'))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: 'WebDAV 前缀不可用',
+          description: 'WebDAV 前缀不能是 /、/api、/s、/health 或它们的子路径',
+          color: 'danger',
+        })
+      })
+      expect(mockUpdateSettings).not.toHaveBeenCalled()
+    })
+
+    it('rejects malformed WebDAV prefixes before saving', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      render(<SettingsPage />)
+
+      await openTab(user, 'WebDAV')
+
+      await waitFor(() => {
+        expect(screen.getByDisplayValue('/dav')).toBeTruthy()
+      })
+
+      fireEvent.change(screen.getByDisplayValue('/dav'), { target: { value: '/dav\\files' } })
+      await user.click(screen.getByText('保存设置'))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: 'WebDAV 前缀格式无效',
+          description: 'WebDAV 前缀只能是 URL 路径，不能包含反斜杠、?、# 或控制字符',
+          color: 'danger',
+        })
+      })
+      expect(mockUpdateSettings).not.toHaveBeenCalled()
+    })
+
     it('renders read-only toggle', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
       render(<SettingsPage />)
@@ -1601,6 +1673,28 @@ describe('SettingsPage', () => {
     expect(mockUpdateSettings).not.toHaveBeenCalled()
   })
 
+  it('shows danger toast and skips save for invalid server host', async () => {
+    const user = userEvent.setup({ writeToClipboard: false })
+    render(<SettingsPage />)
+
+    await waitFor(() => {
+      expect(screen.getByDisplayValue('0.0.0.0')).toBeTruthy()
+    })
+
+    const hostInput = screen.getByDisplayValue('0.0.0.0')
+    fireEvent.change(hostInput, { target: { value: '[::1]:8080' } })
+    await user.click(screen.getByText('保存设置'))
+
+    await waitFor(() => {
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '监听地址格式无效',
+        description: '监听地址必须为空、*、合法主机名、IPv4 或 IPv6，且不能包含端口、空白或控制字符',
+        color: 'danger',
+      })
+    })
+    expect(mockUpdateSettings).not.toHaveBeenCalled()
+  })
+
   it('shows danger toast and skips save for blank max versions', async () => {
     const user = userEvent.setup({ writeToClipboard: false })
     render(<SettingsPage />)
@@ -1689,6 +1783,29 @@ describe('SettingsPage', () => {
       expect(mockAddToast).toHaveBeenCalledWith({
         title: 'CDC 分块参数无效',
         description: '最小、平均和最大块大小都必须大于 0',
+        color: 'danger',
+      })
+    })
+    expect(mockUpdateSettings).not.toHaveBeenCalled()
+  })
+
+  it('shows danger toast and skips save for CDC min chunk below safety floor', async () => {
+    const user = userEvent.setup({ writeToClipboard: false })
+    render(<SettingsPage />)
+
+    await openTab(user, '高级')
+
+    await waitFor(() => {
+      expect(screen.getByDisplayValue('256 KB')).toBeTruthy()
+    })
+
+    fireEvent.change(screen.getByDisplayValue('256 KB'), { target: { value: '32 KB' } })
+    await user.click(screen.getByText('保存设置'))
+
+    await waitFor(() => {
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: 'CDC 分块参数无效',
+        description: '最小块大小不能小于 64 KB',
         color: 'danger',
       })
     })
@@ -1827,6 +1944,29 @@ describe('SettingsPage', () => {
     expect(mockUpdateSettings).not.toHaveBeenCalled()
   })
 
+  it('shows danger toast and skips save for invalid dataplane grpc address', async () => {
+    const user = userEvent.setup({ writeToClipboard: false })
+    render(<SettingsPage />)
+
+    await openTab(user, '高级')
+
+    await waitFor(() => {
+      expect(screen.getByDisplayValue('127.0.0.1:9090')).toBeTruthy()
+    })
+
+    fireEvent.change(screen.getByDisplayValue('127.0.0.1:9090'), { target: { value: '127.0.0.1:70000' } })
+    await user.click(screen.getByText('保存设置'))
+
+    await waitFor(() => {
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '数据面地址格式无效',
+        description: 'gRPC 地址必须是合法的 host:port，端口为 1 到 65535，且不能包含空白或控制字符',
+        color: 'danger',
+      })
+    })
+    expect(mockUpdateSettings).not.toHaveBeenCalled()
+  })
+
   it('shows danger toast and skips save for out-of-range alert threshold', async () => {
     const user = userEvent.setup({ writeToClipboard: false })
     render(<SettingsPage />)
@@ -1934,7 +2074,7 @@ describe('SettingsPage', () => {
     await openTab(user, '分享管理')
 
     await user.click(await screen.findByRole('switch'))
-    fireEvent.change(screen.getByPlaceholderText('https://nas.example.com'), { target: { value: 'javascript:alert(1)' } })
+    fireEvent.change(screen.getByPlaceholderText('https://nas.example.com'), { target: { value: 'https://nas.example.com/base path' } })
     await user.click(screen.getByText('保存设置'))
 
     await waitFor(() => {
@@ -2034,7 +2174,7 @@ describe('SettingsPage', () => {
     await waitFor(() => {
       expect(mockAddToast).toHaveBeenCalledWith({
         title: 'Webhook Header 格式无效',
-        description: '每行必须使用 Key:Value 格式',
+        description: '每行必须使用合法的 HTTP Header 名称和值',
         color: 'danger',
       })
     })

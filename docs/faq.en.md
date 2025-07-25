@@ -316,8 +316,10 @@ This is destructive:
 
 ```bash
 docker compose down
-DATA_DIR="${MNEMONAS_DATA_DIR:-$HOME/.mnemonas}"
-test -n "$DATA_DIR" && test "$DATA_DIR" != "/" || { echo "refusing unsafe DATA_DIR"; exit 1; }
+DEFAULT_DATA_DIR="$HOME/.mnemonas"
+DATA_DIR="${MNEMONAS_DATA_DIR:-$DEFAULT_DATA_DIR}"
+[ "$DATA_DIR" = "$DEFAULT_DATA_DIR" ] || { echo "refusing non-default DATA_DIR; inspect and delete manually: $DATA_DIR"; exit 1; }
+[ ! -L "$DATA_DIR" ] || { echo "refusing symlink DATA_DIR: $DATA_DIR"; exit 1; }
 rm -rf -- "$DATA_DIR/files" "$DATA_DIR/.mnemonas"
 docker compose up -d
 ```

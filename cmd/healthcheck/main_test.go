@@ -10,7 +10,7 @@ import (
 func TestRunRejectsRequestError(t *testing.T) {
 	getenv := func(key string) string {
 		if key == "MNEMONAS_HEALTHCHECK_URL" {
-			return "://invalid-url"
+			return "http://127.0.0.1:1/health"
 		}
 		return ""
 	}
@@ -22,6 +22,34 @@ func TestRunRejectsRequestError(t *testing.T) {
 	}
 	if stderr.Len() == 0 {
 		t.Fatal("expected an error message")
+	}
+}
+
+func TestRunRejectsInvalidURL(t *testing.T) {
+	tests := []string{
+		"://invalid-url",
+		"file:///etc/passwd",
+		"http://127.0.0.1:8080/health\nX=1",
+		"/health",
+	}
+
+	for _, rawURL := range tests {
+		t.Run(rawURL, func(t *testing.T) {
+			getenv := func(key string) string {
+				if key == "MNEMONAS_HEALTHCHECK_URL" {
+					return rawURL
+				}
+				return ""
+			}
+
+			var stderr bytes.Buffer
+			if code := run(getenv, &stderr); code != 2 {
+				t.Fatalf("run() = %d, want 2; stderr=%s", code, stderr.String())
+			}
+			if stderr.Len() == 0 {
+				t.Fatal("expected an error message")
+			}
+		})
 	}
 }
 
@@ -73,6 +101,20 @@ func TestRunRejectsInvalidTimeout(t *testing.T) {
 	getenv := func(key string) string {
 		if key == "MNEMONAS_HEALTHCHECK_TIMEOUT" {
 			return "not-a-duration"
+		}
+		return ""
+	}
+
+	var stderr bytes.Buffer
+	if code := run(getenv, &stderr); code != 2 {
+		t.Fatalf("run() = %d, want 2", code)
+	}
+}
+
+func TestRunRejectsNonPositiveTimeout(t *testing.T) {
+	getenv := func(key string) string {
+		if key == "MNEMONAS_HEALTHCHECK_TIMEOUT" {
+			return "0s"
 		}
 		return ""
 	}

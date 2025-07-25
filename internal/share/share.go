@@ -17,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/seanbao/mnemonas/internal/rootio"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -27,9 +28,14 @@ var (
 	ErrInvalidPassword   = errors.New("invalid password")
 	ErrShareDisabled     = errors.New("share is disabled")
 	errInvalidSharePath  = errors.New("invalid share path")
+	errInvalidShareID    = errors.New("invalid share ID")
+	errInvalidShareType  = errors.New("invalid share type")
 	errInvalidMaxAccess  = errors.New("invalid max access")
+	errSharePasswordLong = errors.New("share password must be at most 72 bytes")
 	errShareStoreSymlink = errors.New("share store path must not be a symlink")
 )
+
+const maxSharePasswordBytes = 72
 
 // PersistenceWarningError reports that the shares mutation is already visible
 // on disk, but the final directory fsync did not complete.
@@ -331,6 +337,9 @@ func clonePathIndex(pathIdx map[string][]string) map[string][]string {
 
 func normalizeStoredSharePath(rawPath string) (string, error) {
 	normalized := strings.ReplaceAll(rawPath, "\\", "/")
+	if strings.ContainsRune(normalized, '\x00') {
+		return "", errInvalidSharePath
+	}
 	if strings.TrimSpace(normalized) == "" {
 		return "", errInvalidSharePath
 	}
@@ -343,11 +352,21 @@ func normalizeStoredSharePath(rawPath string) (string, error) {
 }
 
 func validateShareInvariants(share *Share) error {
+	if !isValidShareID(share.ID) {
+		return errInvalidShareID
+	}
+
 	cleanPath, err := normalizeStoredSharePath(share.Path)
 	if err != nil {
 		return err
 	}
 	share.Path = cleanPath
+
+	switch share.Type {
+	case ShareTypeFile, ShareTypeFolder:
+	default:
+		return errInvalidShareType
+	}
 
 	if share.MaxAccess < 0 {
 		return errInvalidMaxAccess
@@ -365,6 +384,20 @@ func validateShareInvariants(share *Share) error {
 func normalizeLegacyShareInvariants(share *Share) error {
 	share.Permission = normalizePermission(share.Permission)
 	return validateShareInvariants(share)
+}
+
+func isValidShareID(id string) bool {
+	if id == "" || len(id) > 128 {
+		return false
+	}
+	for i := 0; i < len(id); i++ {
+		b := id[i]
+		if (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '-' || b == '_' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func removeShareID(ids []string, id string) []string {
@@ -500,14 +533,14 @@ func normalizeShareStoreFilePath(path string) (string, error) {
 }
 
 func ensureShareStoreDirRoot(path string, create bool) (string, error) {
-	normalizedPath, _, err := ensureShareStoreDirRootWithState(path, create)
+	normalizedPath, _, _, err := ensureShareStoreDirRootWithState(path, create)
 	return normalizedPath, err
 }
 
-func ensureShareStoreDirRootWithState(path string, create bool) (string, *os.Root, error) {
+func ensureShareStoreDirRootWithState(path string, create bool) (string, *os.Root, []string, error) {
 	normalizedPath, err := normalizeShareStoreFilePath(path)
 	if err != nil {
-		return "", nil, err
+		return "", nil, nil, err
 	}
 	dir := filepath.Dir(normalizedPath)
 
@@ -515,39 +548,42 @@ func ensureShareStoreDirRootWithState(path string, create bool) (string, *os.Roo
 	root := shareStoreDirRoots[dir]
 	shareStoreDirRootsMu.RUnlock()
 	if root != nil {
-		return normalizedPath, nil, nil
+		return normalizedPath, nil, nil, nil
 	}
 
 	if err := validateShareStorePath(normalizedPath); err != nil {
-		return "", nil, err
+		return "", nil, nil, err
 	}
 
+	createdDirs := []string(nil)
 	if create {
-		if err := ensureShareDir(dir, 0755); err != nil {
-			return "", nil, fmt.Errorf("failed to create directory: %w", err)
+		var err error
+		createdDirs, err = ensureShareDir(dir, 0755)
+		if err != nil {
+			return "", nil, createdDirs, fmt.Errorf("failed to create directory: %w", err)
 		}
 	} else if _, err := os.Stat(dir); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return normalizedPath, nil, nil
+			return normalizedPath, nil, nil, nil
 		}
-		return "", nil, fmt.Errorf("failed to stat share store directory: %w", err)
+		return "", nil, nil, fmt.Errorf("failed to stat share store directory: %w", err)
 	}
 
 	root, err = os.OpenRoot(dir)
 	if err != nil {
-		return "", nil, fmt.Errorf("failed to open share store directory root: %w", err)
+		return "", nil, createdDirs, fmt.Errorf("failed to open share store directory root: %w", err)
 	}
 
 	shareStoreDirRootsMu.Lock()
 	if existing := shareStoreDirRoots[dir]; existing != nil {
 		shareStoreDirRootsMu.Unlock()
 		_ = root.Close()
-		return normalizedPath, nil, nil
+		return normalizedPath, nil, createdDirs, nil
 	}
 	shareStoreDirRoots[dir] = root
 	shareStoreDirRootsMu.Unlock()
 
-	return normalizedPath, root, nil
+	return normalizedPath, root, createdDirs, nil
 }
 
 func releaseRegisteredShareStoreDirRoot(dir string, root *os.Root) {
@@ -580,10 +616,20 @@ func readRegisteredShareStoreFile(path string) ([]byte, error) {
 		return nil, err
 	}
 	if !ok {
-		if err := validateShareStorePath(normalizedPath); err != nil {
+		normalizedPath, _, _, err = ensureShareStoreDirRootWithState(normalizedPath, false)
+		if err != nil {
 			return nil, err
 		}
-		return os.ReadFile(normalizedPath)
+		root, normalizedPath, ok, err = registeredShareStoreDirRoot(normalizedPath)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			if err := validateShareStorePath(normalizedPath); err != nil {
+				return nil, err
+			}
+			return nil, &os.PathError{Op: "open", Path: normalizedPath, Err: os.ErrNotExist}
+		}
 	}
 	return readShareStoreFileWithRoot(root, normalizedPath)
 }
@@ -594,7 +640,11 @@ func writeRegisteredShareStoreFileAtomically(path string, data []byte) error {
 		return err
 	}
 	if !ok {
-		return writeShareStoreFileAtomically(normalizedPath, data)
+		normalizedPath, _, _, err = ensureShareStoreDirRootWithState(normalizedPath, true)
+		if err != nil {
+			return err
+		}
+		return writeRegisteredShareStoreFileAtomically(normalizedPath, data)
 	}
 	return writeShareStoreFileAtomicallyWithRoot(root, normalizedPath, data)
 }
@@ -608,7 +658,10 @@ func renameRegisteredShareStoreFile(oldPath, newPath string) error {
 	if err != nil {
 		return err
 	}
-	if ok && filepath.Dir(normalizedOldPath) == filepath.Dir(normalizedNewPath) {
+	if filepath.Dir(normalizedOldPath) != filepath.Dir(normalizedNewPath) {
+		return fmt.Errorf("share store rename requires same parent directory")
+	}
+	if ok {
 		afterValidateShareStorePath()
 		if err := root.Rename(filepath.Base(normalizedOldPath), filepath.Base(normalizedNewPath)); err != nil {
 			return mapShareRootPathError(err)
@@ -621,8 +674,22 @@ func renameRegisteredShareStoreFile(oldPath, newPath string) error {
 	if err := validateShareStorePath(normalizedNewPath); err != nil {
 		return err
 	}
+	normalizedOldPath, _, _, err = ensureShareStoreDirRootWithState(normalizedOldPath, false)
+	if err != nil {
+		return err
+	}
+	root, normalizedOldPath, ok, err = registeredShareStoreDirRoot(normalizedOldPath)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return &os.PathError{Op: "rename", Path: normalizedOldPath, Err: os.ErrNotExist}
+	}
 	afterValidateShareStorePath()
-	return os.Rename(normalizedOldPath, normalizedNewPath)
+	if err := root.Rename(filepath.Base(normalizedOldPath), filepath.Base(normalizedNewPath)); err != nil {
+		return mapShareRootPathError(err)
+	}
+	return nil
 }
 
 func syncRegisteredShareStoreDir(path string) error {
@@ -639,7 +706,7 @@ func syncRegisteredShareStoreDir(path string) error {
 func readShareStoreFileWithRoot(root *os.Root, path string) ([]byte, error) {
 	afterValidateShareStorePath()
 
-	file, err := root.OpenFile(filepath.Base(path), os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	file, err := rootio.OpenFileNoFollow(root, filepath.Base(path), os.O_RDONLY, 0)
 	if err != nil {
 		return nil, mapShareRootPathError(err)
 	}
@@ -705,7 +772,7 @@ func createShareTempFile(root *os.Root, pattern string) (*os.File, string, error
 		if err != nil {
 			return nil, "", err
 		}
-		tmpFile, err := root.OpenFile(tmpName, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0600)
+		tmpFile, err := rootio.OpenFileNoFollow(root, tmpName, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0600)
 		if err == nil {
 			return tmpFile, tmpName, nil
 		}
@@ -754,55 +821,10 @@ func mapShareRootPathError(err error) error {
 	if err == nil {
 		return nil
 	}
-	if errors.Is(err, os.ErrPermission) || errors.Is(err, syscall.ELOOP) || isShareRootEscapeError(err) {
+	if errors.Is(err, os.ErrPermission) || errors.Is(err, syscall.ELOOP) || rootio.IsSymlinkError(err) || isShareRootEscapeError(err) {
 		return errShareStoreSymlink
 	}
 	return err
-}
-
-func writeShareStoreFileAtomically(path string, data []byte) error {
-	if err := validateShareStorePath(path); err != nil {
-		return err
-	}
-	afterValidateShareStorePath()
-
-	dir := filepath.Dir(path)
-	tmpFile, err := os.CreateTemp(dir, ".shares-*.tmp")
-	if err != nil {
-		return fmt.Errorf("failed to create temp shares file: %w", err)
-	}
-	tmpPath := tmpFile.Name()
-	cleanup := true
-	defer func() {
-		if cleanup {
-			_ = os.Remove(tmpPath)
-		}
-	}()
-
-	if err := tmpFile.Chmod(0600); err != nil {
-		_ = tmpFile.Close()
-		return fmt.Errorf("failed to set temp shares permissions: %w", err)
-	}
-	if _, err := tmpFile.Write(data); err != nil {
-		_ = tmpFile.Close()
-		return fmt.Errorf("failed to write shares file: %w", err)
-	}
-	if err := tmpFile.Sync(); err != nil {
-		_ = tmpFile.Close()
-		return fmt.Errorf("failed to sync shares file: %w", err)
-	}
-	if err := tmpFile.Close(); err != nil {
-		return fmt.Errorf("failed to close temp shares file: %w", err)
-	}
-	if err := os.Rename(tmpPath, path); err != nil {
-		return fmt.Errorf("failed to replace shares file: %w", err)
-	}
-	cleanup = false
-	if err := syncShareStoreDir(dir); err != nil {
-		return WrapPersistenceWarning(fmt.Errorf("failed to sync shares directory: %w", err))
-	}
-
-	return nil
 }
 
 func writeShareStoreFile(path string, data []byte) error {
@@ -816,42 +838,22 @@ func writeShareStoreFile(path string, data []byte) error {
 	if err := validateShareStorePath(normalizedPath); err != nil {
 		return err
 	}
-	createdDirs, err := collectMissingShareDirs(filepath.Dir(normalizedPath))
-	if err != nil {
-		return err
-	}
 	registeredRoot := (*os.Root)(nil)
-	normalizedPath, registeredRoot, err = ensureShareStoreDirRootWithState(normalizedPath, true)
+	createdDirs := []string(nil)
+	normalizedPath, registeredRoot, createdDirs, err = ensureShareStoreDirRootWithState(normalizedPath, true)
 	if err != nil {
 		releaseRegisteredShareStoreDirRoot(filepath.Dir(normalizedPath), registeredRoot)
 		return cleanupCreatedShareDirs(createdDirs, fmt.Errorf("failed to create directory: %w", err))
 	}
+	releaseRootOnError := registeredRoot != nil
 	if err := writeRegisteredShareStoreFileAtomically(normalizedPath, data); err != nil {
-		releaseRegisteredShareStoreDirRoot(filepath.Dir(normalizedPath), registeredRoot)
-		return cleanupCreatedShareDirs(createdDirs, err)
+		if releaseRootOnError {
+			releaseRegisteredShareStoreDirRoot(filepath.Dir(normalizedPath), registeredRoot)
+			return cleanupCreatedShareDirs(createdDirs, err)
+		}
+		return err
 	}
 	return nil
-}
-
-func collectMissingShareDirs(dir string) ([]string, error) {
-	missing := make([]string, 0)
-	current := filepath.Clean(dir)
-	for {
-		if _, err := os.Stat(current); err == nil {
-			break
-		} else if !errors.Is(err, os.ErrNotExist) {
-			return nil, err
-		}
-
-		missing = append(missing, current)
-		parent := filepath.Dir(current)
-		if parent == current {
-			break
-		}
-		current = parent
-	}
-
-	return missing, nil
 }
 
 func syncCreatedShareDirs(createdDirs []string) error {
@@ -863,19 +865,19 @@ func syncCreatedShareDirs(createdDirs []string) error {
 	return nil
 }
 
-func ensureShareDir(dir string, perm os.FileMode) error {
-	createdDirs, err := collectMissingShareDirs(dir)
+func ensureShareDir(dir string, perm os.FileMode) ([]string, error) {
+	createdDirs, err := rootio.MkdirAllPathNoFollowTracked(dir, perm)
 	if err != nil {
-		return err
+		if rootio.IsSymlinkError(err) {
+			return createdDirs, errShareStoreSymlink
+		}
+		return createdDirs, err
 	}
-	if err := os.MkdirAll(dir, perm); err != nil {
-		return err
-	}
-	return syncCreatedShareDirs(createdDirs)
+	return createdDirs, syncCreatedShareDirs(createdDirs)
 }
 
 func syncShareDir(dir string) error {
-	dirHandle, err := os.Open(dir)
+	dirHandle, err := rootio.OpenDirPathNoFollow(dir)
 	if err != nil {
 		return err
 	}
@@ -901,6 +903,9 @@ func (s *ShareStore) Create(opts CreateShareOptions) (*Share, error) {
 	id, err := generateShareID()
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate share ID: %w", err)
+	}
+	if err := validateSharePassword(opts.Password); err != nil {
+		return nil, err
 	}
 
 	now := time.Now()
@@ -947,6 +952,13 @@ func (s *ShareStore) Create(opts CreateShareOptions) (*Share, error) {
 			return nil, err
 		}
 	}
+}
+
+func validateSharePassword(password string) error {
+	if len([]byte(password)) > maxSharePasswordBytes {
+		return errSharePasswordLong
+	}
+	return nil
 }
 
 // Get retrieves a share by ID

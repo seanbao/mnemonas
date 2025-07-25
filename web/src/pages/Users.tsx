@@ -45,6 +45,11 @@ import { EmptyState } from '@/components/ui/EmptyState'
 import { StatCard } from '@/components/ui/StatCard'
 
 const usersUnavailableDescription = '用户配置当前不可用，请检查系统配置状态或稍后重试。'
+const maxPasswordBytes = 72
+
+function utf8ByteLength(value: string): number {
+  return new TextEncoder().encode(value).length
+}
 
 function isMissingUserError(error: unknown): boolean {
   return error instanceof UsersError && (error.status === 404 || error.code === 'USER_NOT_FOUND')
@@ -141,6 +146,14 @@ function getUsersActionErrorPresentation(
       return {
         title: '不能禁用最后一个管理员',
         description: '系统至少需要保留一个启用中的管理员账号。',
+        color: 'warning',
+      }
+    }
+
+    if (error.code === 'PASSWORD_TOO_LONG') {
+      return {
+        title: '密码过长',
+        description: `密码最多 ${maxPasswordBytes} 字节，请缩短后重试。`,
         color: 'warning',
       }
     }
@@ -502,6 +515,10 @@ export function UsersPage() {
       addToast({ title: '密码长度至少为 8 位', color: 'warning' })
       return
     }
+    if (utf8ByteLength(newPassword) > maxPasswordBytes) {
+      addToast({ title: `密码最多 ${maxPasswordBytes} 字节`, color: 'warning' })
+      return
+    }
     createMutation.mutate({
       request: {
         username: newUsername.trim(),
@@ -527,6 +544,10 @@ export function UsersPage() {
     }
     if (resetPassword.length < 8) {
       addToast({ title: '新密码长度至少为 8 位', color: 'warning' })
+      return
+    }
+    if (utf8ByteLength(resetPassword) > maxPasswordBytes) {
+      addToast({ title: `新密码最多 ${maxPasswordBytes} 字节`, color: 'warning' })
       return
     }
     resetPasswordMutation.mutate({ userId: resetTarget.id, password: resetPassword })
@@ -720,7 +741,7 @@ export function UsersPage() {
                 type="password"
                 label="密码"
                 aria-label="密码"
-                placeholder="请输入密码（至少 8 位）"
+                placeholder="请输入密码（8-72 字节）"
                 value={newPassword}
                 onValueChange={setNewPassword}
                 size="lg"
@@ -789,7 +810,7 @@ export function UsersPage() {
               color="primary"
               onPress={handleCreate}
               isLoading={createMutation.isPending}
-              isDisabled={!newUsername.trim() || !newPassword.trim() || newPassword.length < 8}
+              isDisabled={!newUsername.trim() || !newPassword.trim() || newPassword.length < 8 || utf8ByteLength(newPassword) > maxPasswordBytes}
               className="rounded-lg"
             >
               创建
@@ -877,7 +898,7 @@ export function UsersPage() {
                 type="password"
                 label="新密码"
                 aria-label="新密码"
-                placeholder="请输入新密码（至少 8 位）"
+                placeholder="请输入新密码（8-72 字节）"
                 value={resetPassword}
                 onValueChange={setResetPassword}
                 autoFocus
@@ -904,7 +925,7 @@ export function UsersPage() {
               color="primary"
               onPress={handleResetPassword}
               isLoading={resetPasswordMutation.isPending}
-              isDisabled={!resetPassword.trim() || resetPassword.length < 8}
+              isDisabled={!resetPassword.trim() || resetPassword.length < 8 || utf8ByteLength(resetPassword) > maxPasswordBytes}
               className="rounded-lg"
             >
               确认重置

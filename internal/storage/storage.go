@@ -21,6 +21,7 @@ import (
 	"github.com/zeebo/blake3"
 
 	"github.com/seanbao/mnemonas/internal/dataplane"
+	"github.com/seanbao/mnemonas/internal/rootio"
 	"github.com/seanbao/mnemonas/internal/versionstore"
 	"github.com/seanbao/mnemonas/internal/workspace"
 )
@@ -70,7 +71,7 @@ func isVisibleMutationWarning(err error) bool {
 
 var syncStoragePathDir = syncStorageDir
 var syncManagedStorageDir = func(root *os.Root, relName, absPath string) error {
-	dirHandle, err := root.Open(relName)
+	dirHandle, err := rootio.OpenDirNoFollow(root, relName)
 	if err != nil {
 		return mapStorageRootPathError(err)
 	}
@@ -331,6 +332,12 @@ func New(cfg *Config) (*FileSystem, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to create workspace: %w", err)
 	}
+	cleanupWorkspace := true
+	defer func() {
+		if cleanupWorkspace {
+			_ = ws.Close()
+		}
+	}()
 
 	// Create version store
 	vs, err := versionstore.New(versionstore.Config{
@@ -340,6 +347,12 @@ func New(cfg *Config) (*FileSystem, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to create version store: %w", err)
 	}
+	cleanupVersionStore := true
+	defer func() {
+		if cleanupVersionStore {
+			_ = vs.Close()
+		}
+	}()
 
 	// Create versioning policy
 	policy := versionstore.DefaultVersioningPolicy(vs)
@@ -362,11 +375,22 @@ func New(cfg *Config) (*FileSystem, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to open files root: %w", err)
 	}
+	cleanupFilesRoot := true
+	defer func() {
+		if cleanupFilesRoot {
+			_ = filesRootHandle.Close()
+		}
+	}()
 	trashRootHandle, err := os.OpenRoot(trashRoot)
 	if err != nil {
-		_ = filesRootHandle.Close()
 		return nil, fmt.Errorf("failed to open trash root: %w", err)
 	}
+	cleanupTrashRoot := true
+	defer func() {
+		if cleanupTrashRoot {
+			_ = trashRootHandle.Close()
+		}
+	}()
 	removeTrashPath := func(target string) error {
 		absTarget, err := normalizeStorageHostPath(target)
 		if err != nil {
@@ -378,6 +402,11 @@ func New(cfg *Config) (*FileSystem, error) {
 		}
 		return trashRootHandle.RemoveAll(rel)
 	}
+
+	cleanupWorkspace = false
+	cleanupVersionStore = false
+	cleanupFilesRoot = false
+	cleanupTrashRoot = false
 
 	return &FileSystem{
 		workspace:                 ws,
@@ -606,10 +635,7 @@ func (fs *FileSystem) WriteFile(ctx context.Context, name string, r io.Reader) e
 	if err != nil {
 		return err
 	}
-	createdWorkspaceDirs, err := fs.collectMissingWorkspaceParentDirs(name)
-	if err != nil {
-		return err
-	}
+	createdWorkspaceDirs := []string(nil)
 
 	var rollbackVersionHash string
 	var rollbackVersionRecorded bool
@@ -635,13 +661,17 @@ func (fs *FileSystem) WriteFile(ctx context.Context, name string, r io.Reader) e
 
 	hasher := blake3.New()
 
+	if err := fs.validateWorkspaceParentForWrite(name); err != nil {
+		return err
+	}
 	if err := beforeStorageWorkspaceWrite(); err != nil {
 		return rollbackMutation(err)
 	}
 
 	written, err := fs.workspace.WriteFileFromReaderWithOptions(ctx, name, io.TeeReader(r, hasher), workspace.WriteFileOptions{
-		MaxBytes:   defaultMaxWriteSize,
-		SyncParent: syncStoragePathDir,
+		MaxBytes:    defaultMaxWriteSize,
+		SyncParent:  syncStoragePathDir,
+		CreatedDirs: &createdWorkspaceDirs,
 	})
 	if err != nil {
 		mappedErr := mapWorkspaceWritablePathError(unwrapWorkspaceVisibleMutationError(err))
@@ -2198,38 +2228,7 @@ func (fs *FileSystem) DiskStats() (*DiskStats, error) {
 }
 
 func diskStatsForPath(root string) (*DiskStats, error) {
-	var stat syscall.Statfs_t
-	if err := syscall.Statfs(root, &stat); err != nil {
-		return nil, err
-	}
-	if stat.Bsize <= 0 {
-		return nil, errors.New("filesystem reported invalid block size")
-	}
-
-	blockSize := uint64(stat.Bsize)
-	totalBytes := stat.Blocks * blockSize
-	freeBytes := stat.Bfree * blockSize
-	availableBytes := stat.Bavail * blockSize
-	usedBytes := uint64(0)
-	if totalBytes > freeBytes {
-		usedBytes = totalBytes - freeBytes
-	}
-
-	usageRatio := 0.0
-	if totalBytes > 0 {
-		usageRatio = float64(usedBytes) / float64(totalBytes)
-	}
-
-	fsType := filesystemTypeForPath(root, uint64(stat.Type))
-	return &DiskStats{
-		TotalBytes:                totalBytes,
-		FreeBytes:                 freeBytes,
-		AvailableBytes:            availableBytes,
-		UsedBytes:                 usedBytes,
-		UsageRatio:                usageRatio,
-		FileSystemType:            fsType,
-		NativeDataChecksumSupport: filesystemHasNativeDataChecksumSupport(fsType),
-	}, nil
+	return diskStatsForHostPath(root)
 }
 
 func filesystemTypeForPath(root string, magic uint64) string {
@@ -2695,6 +2694,9 @@ func generateID() (string, error) {
 
 func normalizeStorageWorkspacePath(name string) (string, error) {
 	normalized := strings.ReplaceAll(name, "\\", "/")
+	if strings.ContainsRune(normalized, '\x00') {
+		return "", ErrNotFound
+	}
 	for _, segment := range strings.Split(normalized, "/") {
 		if segment == ".." {
 			return "", ErrNotFound
@@ -2762,7 +2764,7 @@ func mapStorageRootPathError(err error) error {
 	if err == nil {
 		return nil
 	}
-	if isStorageRootEscapeError(err) {
+	if isStorageRootEscapeError(err) || rootio.IsSymlinkError(err) {
 		return errStoragePathSymlink
 	}
 	return err
@@ -2786,7 +2788,7 @@ func createStorageTempFile(root *os.Root, parentName, prefix string) (*os.File, 
 		if err != nil {
 			return nil, "", err
 		}
-		tempFile, err := root.OpenFile(tempName, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0600)
+		tempFile, err := rootio.OpenFileNoFollow(root, tempName, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0600)
 		if err == nil {
 			return tempFile, tempName, nil
 		}
@@ -2866,42 +2868,6 @@ func (fs *FileSystem) resolveStoragePathRoot(target string) (*storagePathRoot, s
 	return nil, "", "", fmt.Errorf("managed path %q is outside storage roots", absPath)
 }
 
-func collectMissingStorageManagedDirs(root *storagePathRoot, relDir string) ([]string, error) {
-	if relDir == "." {
-		return nil, nil
-	}
-
-	missing := make([]string, 0)
-	current := filepath.Clean(relDir)
-	for {
-		info, err := root.handle.Stat(current)
-		if err == nil {
-			if !info.IsDir() {
-				return nil, syscall.ENOTDIR
-			}
-			break
-		}
-		if mappedErr := mapStorageRootPathError(err); mappedErr != err {
-			return nil, mappedErr
-		}
-		if !errors.Is(err, os.ErrNotExist) {
-			if errors.Is(err, syscall.ENOTDIR) {
-				return nil, err
-			}
-			return nil, err
-		}
-
-		missing = append(missing, current)
-		parent := filepath.Dir(current)
-		if parent == "." || parent == current {
-			break
-		}
-		current = parent
-	}
-
-	return missing, nil
-}
-
 func syncCreatedStorageManagedDirs(root *storagePathRoot, createdDirs []string) error {
 	for i := 0; i < len(createdDirs); i++ {
 		parent := filepath.Dir(createdDirs[i])
@@ -2923,18 +2889,37 @@ func cleanupCreatedStorageManagedDirs(root *storagePathRoot, createdDirs []strin
 	}
 }
 
+func ensureStorageManagedDirTracked(root *storagePathRoot, absDir string, perm os.FileMode) ([]string, error) {
+	relDir, ok := storageRelativePath(root.absRoot, absDir)
+	if !ok {
+		return nil, fmt.Errorf("managed directory %q is outside storage root %q", absDir, root.absRoot)
+	}
+	if relDir == "." {
+		return nil, nil
+	}
+
+	createdDirs, err := rootio.MkdirAllNoFollowTracked(root.handle, relDir, perm)
+	if err != nil {
+		cleanupCreatedStorageManagedDirs(root, createdDirs)
+		return nil, mapStorageRootPathError(err)
+	}
+	if err := syncCreatedStorageManagedDirs(root, createdDirs); err != nil {
+		return nil, err
+	}
+	return createdDirs, nil
+}
+
 func ensureStorageManagedDir(root *storagePathRoot, absDir string, perm os.FileMode) error {
 	relDir, ok := storageRelativePath(root.absRoot, absDir)
 	if !ok {
 		return fmt.Errorf("managed directory %q is outside storage root %q", absDir, root.absRoot)
 	}
 
-	createdDirs, err := collectMissingStorageManagedDirs(root, relDir)
-	if err != nil {
-		return err
-	}
+	var createdDirs []string
 	if relDir != "." {
-		if err := root.handle.MkdirAll(relDir, perm); err != nil {
+		var err error
+		createdDirs, err = rootio.MkdirAllNoFollowTracked(root.handle, relDir, perm)
+		if err != nil {
 			return mapStorageRootPathError(err)
 		}
 	}
@@ -2954,42 +2939,13 @@ func syncStorageManagedRenameDirs(oldRoot *storagePathRoot, oldRel string, newRo
 }
 
 func syncStorageDir(dir string) error {
-	dirHandle, err := os.Open(dir)
+	dirHandle, err := rootio.OpenDirPathNoFollow(dir)
 	if err != nil {
 		return err
 	}
 	defer dirHandle.Close()
 
 	return dirHandle.Sync()
-}
-
-func collectMissingStorageDirs(dir string) ([]string, error) {
-	missing := make([]string, 0)
-	current := filepath.Clean(dir)
-	for {
-		info, err := os.Stat(current)
-		if err == nil {
-			if !info.IsDir() {
-				return nil, syscall.ENOTDIR
-			}
-			break
-		}
-		if !errors.Is(err, os.ErrNotExist) {
-			if errors.Is(err, syscall.ENOTDIR) {
-				return nil, err
-			}
-			return nil, err
-		}
-
-		missing = append(missing, current)
-		parent := filepath.Dir(current)
-		if parent == current {
-			break
-		}
-		current = parent
-	}
-
-	return missing, nil
 }
 
 func syncCreatedStorageDirs(createdDirs []string) error {
@@ -3002,11 +2958,11 @@ func syncCreatedStorageDirs(createdDirs []string) error {
 }
 
 func ensureStorageDir(dir string, perm os.FileMode) error {
-	createdDirs, err := collectMissingStorageDirs(dir)
+	createdDirs, err := rootio.MkdirAllPathNoFollowTracked(dir, perm)
 	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(dir, perm); err != nil {
+		if rootio.IsSymlinkError(err) {
+			return errStoragePathSymlink
+		}
 		return err
 	}
 	return syncCreatedStorageDirs(createdDirs)
@@ -3036,23 +2992,22 @@ func (fs *FileSystem) copyFile(src, dst string) error {
 }
 
 func (fs *FileSystem) copyFileBetweenRoots(srcRoot *storagePathRoot, srcRel, srcAbs string, dstRoot *storagePathRoot, dstRel, dstAbs string) error {
-	srcInfo, err := srcRoot.handle.Stat(srcRel)
+	srcInfo, err := srcRoot.handle.Lstat(srcRel)
 	if err != nil {
 		return mapStorageRootPathError(err)
 	}
+	if srcInfo.Mode()&os.ModeSymlink != 0 {
+		return errStoragePathSymlink
+	}
 
-	srcFile, err := srcRoot.handle.Open(srcRel)
+	srcFile, err := rootio.OpenFileNoFollow(srcRoot.handle, srcRel, os.O_RDONLY, 0)
 	if err != nil {
 		return mapStorageRootPathError(err)
 	}
 	defer srcFile.Close()
 	dstParentRel := filepath.Dir(dstRel)
-	createdDirs, err := collectMissingStorageManagedDirs(dstRoot, dstParentRel)
+	createdDirs, err := ensureStorageManagedDirTracked(dstRoot, filepath.Dir(dstAbs), 0755)
 	if err != nil {
-		return err
-	}
-
-	if err := ensureStorageManagedDir(dstRoot, filepath.Dir(dstAbs), 0755); err != nil {
 		return err
 	}
 
@@ -3149,45 +3104,59 @@ func (fs *FileSystem) writeWorkspaceFile(ctx context.Context, name string, data 
 	return mappedErr
 }
 
-func (fs *FileSystem) collectMissingWorkspaceParentDirs(name string) ([]string, error) {
+func (fs *FileSystem) validateWorkspaceParentForWrite(name string) error {
 	parentAbsPath := filepath.Dir(fs.workspace.FullPath(name))
 	if fs.filesRootHandle != nil {
-		writeRoot := &storagePathRoot{absRoot: fs.workspace.Root(), handle: fs.filesRootHandle}
-		relDir, ok := storageRelativePath(writeRoot.absRoot, parentAbsPath)
+		relDir, ok := storageRelativePath(fs.workspace.Root(), parentAbsPath)
 		if !ok {
-			return nil, ErrNotFound
+			return ErrNotFound
 		}
-		missingDirs, err := collectMissingStorageManagedDirs(writeRoot, relDir)
-		if err != nil {
-			if errors.Is(err, syscall.ENOTDIR) {
-				return nil, ErrNotDir
-			}
-			return nil, err
+		if relDir == "." {
+			return nil
 		}
-		return missingDirs, nil
+		dirHandle, err := rootio.OpenDirNoFollow(fs.filesRootHandle, relDir)
+		if err == nil {
+			return dirHandle.Close()
+		}
+		if rootio.IsSymlinkError(err) {
+			return errStoragePathSymlink
+		}
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		if errors.Is(err, syscall.ENOTDIR) {
+			return ErrNotDir
+		}
+		return err
 	}
 
-	missingDirs, err := collectMissingStorageDirs(parentAbsPath)
-	if err != nil {
-		if errors.Is(err, syscall.ENOTDIR) {
-			return nil, ErrNotDir
-		}
-		return nil, err
+	dirHandle, err := rootio.OpenDirPathNoFollow(parentAbsPath)
+	if err == nil {
+		return dirHandle.Close()
 	}
-	relMissingDirs := make([]string, 0, len(missingDirs))
-	for _, dir := range missingDirs {
-		relDir, ok := storageRelativePath(fs.workspace.Root(), dir)
-		if !ok {
-			return nil, ErrNotFound
-		}
-		relMissingDirs = append(relMissingDirs, relDir)
+	if rootio.IsSymlinkError(err) {
+		return errStoragePathSymlink
 	}
-	return relMissingDirs, nil
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if errors.Is(err, syscall.ENOTDIR) {
+		return ErrNotDir
+	}
+	return err
 }
 
 func (fs *FileSystem) rollbackCreatedWorkspaceDirs(ctx context.Context, createdDirs []string) error {
 	var rollbackErr error
 	for _, dir := range createdDirs {
+		if filepath.IsAbs(dir) {
+			relDir, ok := storageRelativePath(fs.workspace.Root(), dir)
+			if !ok {
+				rollbackErr = errors.Join(rollbackErr, fmt.Errorf("created directory %s is outside workspace root", dir))
+				break
+			}
+			dir = relDir
+		}
 		if dir == "." {
 			continue
 		}
@@ -3402,9 +3371,12 @@ func (fs *FileSystem) movePath(src, dst string) error {
 		}
 	}
 
-	info, statErr := srcRoot.handle.Stat(srcRel)
+	info, statErr := srcRoot.handle.Lstat(srcRel)
 	if statErr != nil {
 		return mapStorageRootPathError(statErr)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return errStoragePathSymlink
 	}
 
 	if info.IsDir() {
@@ -3455,19 +3427,30 @@ func (fs *FileSystem) copyDir(src, dst string) error {
 }
 
 func (fs *FileSystem) copyDirBetweenRoots(srcRoot *storagePathRoot, srcRel, srcAbs string, dstRoot *storagePathRoot, dstRel, dstAbs string) error {
-	srcInfo, err := srcRoot.handle.Stat(srcRel)
+	srcInfo, err := srcRoot.handle.Lstat(srcRel)
 	if err != nil {
 		return mapStorageRootPathError(err)
+	}
+	if srcInfo.Mode()&os.ModeSymlink != 0 {
+		return errStoragePathSymlink
 	}
 
 	if err := ensureStorageManagedDir(dstRoot, dstAbs, srcInfo.Mode().Perm()); err != nil {
 		return err
 	}
-	if err := dstRoot.handle.Chmod(dstRel, srcInfo.Mode().Perm()); err != nil {
+	dstDir, err := rootio.OpenDirNoFollow(dstRoot.handle, dstRel)
+	if err != nil {
 		return mapStorageRootPathError(err)
 	}
+	if err := dstDir.Chmod(srcInfo.Mode().Perm()); err != nil {
+		_ = dstDir.Close()
+		return mapStorageRootPathError(err)
+	}
+	if err := dstDir.Close(); err != nil {
+		return err
+	}
 
-	srcDir, err := srcRoot.handle.Open(srcRel)
+	srcDir, err := rootio.OpenDirNoFollow(srcRoot.handle, srcRel)
 	if err != nil {
 		return mapStorageRootPathError(err)
 	}

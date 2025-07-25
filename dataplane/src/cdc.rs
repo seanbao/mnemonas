@@ -281,6 +281,37 @@ impl FileManifest {
         serde_json::from_slice(data)
     }
 
+    /// Validate manifest structure before reconstructing a file.
+    pub fn validate(&self) -> Result<(), String> {
+        let mut expected_offset = 0u64;
+
+        for (index, chunk) in self.chunks.iter().enumerate() {
+            crate::cas::validate_hash(&chunk.hash)
+                .map_err(|_| format!("chunk {index} has invalid hash"))?;
+            if chunk.size == 0 {
+                return Err(format!("chunk {index} has zero size"));
+            }
+            if chunk.offset != expected_offset {
+                return Err(format!(
+                    "chunk {index} offset is {}, expected {expected_offset}",
+                    chunk.offset
+                ));
+            }
+            expected_offset = expected_offset
+                .checked_add(chunk.size as u64)
+                .ok_or_else(|| format!("chunk {index} size overflows manifest"))?;
+        }
+
+        if expected_offset != self.size {
+            return Err(format!(
+                "chunk sizes sum to {expected_offset}, expected {}",
+                self.size
+            ));
+        }
+
+        Ok(())
+    }
+
     /// Calculate dedup ratio
     pub fn dedup_ratio(&self, unique_size: u64) -> f64 {
         if self.size == 0 {
@@ -344,17 +375,18 @@ mod tests {
                 offset: 0,
                 length: 1000,
                 data: vec![0; 1000],
-                hash: "hash1".to_string(),
+                hash: crate::cas::compute_hash(&vec![0; 1000]),
             },
             Chunk {
                 offset: 1000,
                 length: 2000,
                 data: vec![0; 2000],
-                hash: "hash2".to_string(),
+                hash: crate::cas::compute_hash(&vec![0; 2000]),
             },
         ];
 
         let manifest = FileManifest::from_chunks(&chunks);
+        manifest.validate().expect("valid manifest");
 
         assert_eq!(manifest.size, 3000);
         assert_eq!(manifest.chunks.len(), 2);
@@ -365,6 +397,40 @@ mod tests {
 
         assert_eq!(restored.size, manifest.size);
         assert_eq!(restored.chunks.len(), manifest.chunks.len());
+    }
+
+    #[test]
+    fn test_manifest_validate_rejects_invalid_shape() {
+        let manifest = FileManifest {
+            size: 10,
+            chunks: vec![ChunkRef {
+                hash: "0".repeat(64),
+                size: 10,
+                offset: 1,
+            }],
+            created_at: 0,
+        };
+
+        let err = manifest.validate().expect_err("invalid manifest shape");
+
+        assert!(err.contains("offset"));
+    }
+
+    #[test]
+    fn test_manifest_validate_rejects_invalid_hash() {
+        let manifest = FileManifest {
+            size: 10,
+            chunks: vec![ChunkRef {
+                hash: "../bad".to_string(),
+                size: 10,
+                offset: 0,
+            }],
+            created_at: 0,
+        };
+
+        let err = manifest.validate().expect_err("invalid manifest hash");
+
+        assert!(err.contains("invalid hash"));
     }
 
     #[test]

@@ -26,7 +26,7 @@ export function ImagePreview({ path, filename, className }: ImagePreviewProps) {
 
   const imageUrl = buildPreviewUrl(path, { includeAuth: false })
 
-  // Fetch image with auth token and create blob URL
+  // Fetch image with the same-origin session cookie and create a blob URL.
   useEffect(() => {
     let cancelled = false
     let currentBlobUrl: string | null = null

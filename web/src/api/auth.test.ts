@@ -366,6 +366,38 @@ describe('auth API', () => {
     expect(localStorage.getItem('mnemonas_token')).toBeNull()
   })
 
+  it('restores local session state and syncs download session from cookie-only current user lookup', async () => {
+    fetchMock
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({
+          success: true,
+          data: {
+            user: { id: 'u1', username: 'admin', role: 'admin', home_dir: '/' },
+          },
+        }),
+      })
+      .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({ success: true }) })
+
+    await expect(getCurrentUser()).resolves.toMatchObject({ username: 'admin', homeDir: '/' })
+
+    expect(fetchMock).toHaveBeenNthCalledWith(1, '/api/v1/auth/me', expect.objectContaining({
+      credentials: 'same-origin',
+    }))
+    expect(fetchMock).toHaveBeenNthCalledWith(2, '/api/v1/auth/download-session', expect.objectContaining({
+      method: 'POST',
+      credentials: 'same-origin',
+    }))
+    expect(localStorage.getItem('mnemonas_session')).toBe('1')
+    expect(JSON.parse(localStorage.getItem('mnemonas_user') || '{}')).toMatchObject({
+      username: 'admin',
+      homeDir: '/',
+    })
+    expect(localStorage.getItem('mnemonas_token')).toBeNull()
+    expect(localStorage.getItem('mnemonas_refresh_token')).toBeNull()
+  })
+
   it('clears local auth state when current user payload is malformed', async () => {
     localStorage.setItem('mnemonas_token', 'access-1')
     localStorage.setItem('mnemonas_refresh_token', 'refresh-1')

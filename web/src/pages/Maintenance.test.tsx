@@ -98,8 +98,8 @@ describe('MaintenancePage', () => {
     corrupted_objects: 3,
     missing_objects: 2,
     errors: [
-      { hash: 'abc123def456', error_type: 'corrupted', message: 'Hash mismatch' },
-      { hash: 'xyz789ghi012', error_type: 'missing', message: 'File not found' },
+      { hash: 'abc123def456', error_type: 'corrupted', message: 'object failed integrity verification' },
+      { hash: 'xyz789ghi012', error_type: 'missing', message: 'object is missing' },
     ],
   }
 

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/seanbao/mnemonas/internal/dataplane"
+	"github.com/seanbao/mnemonas/internal/rootio"
 	"github.com/seanbao/mnemonas/internal/versionstore"
 	"github.com/seanbao/mnemonas/internal/workspace"
 )
@@ -410,6 +411,22 @@ func TestEnsureStorageDir_SyncsCreatedDirectoriesDeepestParentFirst(t *testing.T
 	}
 	if strings.Join(synced, "|") != strings.Join(want, "|") {
 		t.Fatalf("synced directories = %v, want %v", synced, want)
+	}
+}
+
+func TestSyncStorageDirRejectsSymlink(t *testing.T) {
+	tmpDir := t.TempDir()
+	realDir := filepath.Join(tmpDir, "real")
+	if err := os.Mkdir(realDir, 0755); err != nil {
+		t.Fatalf("Mkdir(real) error: %v", err)
+	}
+	linkedDir := filepath.Join(tmpDir, "linked")
+	if err := os.Symlink(realDir, linkedDir); err != nil {
+		t.Fatalf("Symlink(linked) error: %v", err)
+	}
+
+	if err := syncStorageDir(linkedDir); !rootio.IsSymlinkError(err) {
+		t.Fatalf("syncStorageDir() error = %v, want symlink error", err)
 	}
 }
 
@@ -1302,6 +1319,12 @@ func TestFileSystem_OperationsRejectTraversalLikePaths(t *testing.T) {
 	if err := fs.RestoreFromTrashTo(ctx, trashID, "../restored.txt"); err != ErrNotFound {
 		t.Fatalf("RestoreFromTrashTo(traversal) error = %v, want ErrNotFound", err)
 	}
+	if _, err := fs.Stat(ctx, "/safe/versioned\x00.txt"); err != ErrNotFound {
+		t.Fatalf("Stat(NUL) error = %v, want ErrNotFound", err)
+	}
+	if err := fs.WriteFile(ctx, "/safe/nul\x00.txt", bytes.NewReader([]byte("blocked"))); err != ErrNotFound {
+		t.Fatalf("WriteFile(NUL) error = %v, want ErrNotFound", err)
+	}
 
 	file, err := fs.OpenFile(ctx, "/safe/versioned.txt")
 	if err != nil {
@@ -1326,6 +1349,9 @@ func TestFileSystem_OperationsRejectTraversalLikePaths(t *testing.T) {
 	}
 	if _, err := fs.Stat(ctx, "/restored.txt"); err != ErrNotFound {
 		t.Fatalf("expected no normalized /restored.txt after traversal restore, got %v", err)
+	}
+	if _, err := fs.Stat(ctx, "/safe/nul.txt"); err != ErrNotFound {
+		t.Fatalf("expected no normalized /safe/nul.txt after NUL write, got %v", err)
 	}
 
 	remainingTrash, err := fs.ListTrash(ctx)
@@ -6518,6 +6544,43 @@ func TestCopyFile_DoesNotFollowSymlinkInsertedAfterValidation(t *testing.T) {
 	}
 	if string(data) != "content" {
 		t.Fatalf("expected source content to remain unchanged, got %q", string(data))
+	}
+}
+
+func TestCopyFile_RejectsSourceSymlinkInsertedAfterValidationInsideRoot(t *testing.T) {
+	fs := setupManagedPathHelperFileSystem(t)
+	src := filepath.Join(fs.workspace.Root(), "src.txt")
+	dst := filepath.Join(fs.workspace.Root(), "dst.txt")
+	if err := os.WriteFile(src, []byte("original"), 0644); err != nil {
+		t.Fatalf("WriteFile(src) error: %v", err)
+	}
+	linkedTarget := filepath.Join(fs.workspace.Root(), "linked.txt")
+	if err := os.WriteFile(linkedTarget, []byte("linked"), 0644); err != nil {
+		t.Fatalf("WriteFile(linked) error: %v", err)
+	}
+
+	originalAfterValidateStoragePaths := afterValidateStoragePaths
+	swapped := false
+	afterValidateStoragePaths = func() error {
+		if swapped {
+			return nil
+		}
+		swapped = true
+		if err := os.Remove(src); err != nil {
+			return err
+		}
+		return os.Symlink(filepath.Base(linkedTarget), src)
+	}
+	t.Cleanup(func() {
+		afterValidateStoragePaths = originalAfterValidateStoragePaths
+	})
+
+	err := fs.copyFile(src, dst)
+	if !errors.Is(err, errStoragePathSymlink) {
+		t.Fatalf("copyFile() error = %v, want errStoragePathSymlink", err)
+	}
+	if _, statErr := os.Stat(dst); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("expected destination not to be created, got %v", statErr)
 	}
 }
 

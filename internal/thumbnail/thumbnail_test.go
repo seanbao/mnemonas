@@ -925,7 +925,11 @@ func TestGetThumbnail_RejectsCachePathSymlinkIntroducedAfterValidation(t *testin
 		if err := os.Remove(cachePath); err != nil {
 			t.Fatalf("Remove(cachePath) failed: %v", err)
 		}
-		if err := os.Symlink(targetPath, cachePath); err != nil {
+		relTarget, err := filepath.Rel(filepath.Dir(cachePath), targetPath)
+		if err != nil {
+			t.Fatalf("Rel(cache target) failed: %v", err)
+		}
+		if err := os.Symlink(relTarget, cachePath); err != nil {
 			t.Fatalf("Symlink(cachePath) failed: %v", err)
 		}
 	}
@@ -1053,6 +1057,49 @@ func TestService_SaveToCache_DoesNotFollowSymlinkParentInsertedAfterValidation(t
 	backupPath := filepath.Join(backupDir, filepath.Base(cachePath))
 	if _, err := os.Stat(backupPath); !os.IsNotExist(err) {
 		t.Fatalf("expected no thumbnail cache file to be created in original directory, got %v", err)
+	}
+}
+
+func TestService_SaveToCacheRejectsParentSymlinkInsertedAfterValidationInsideRoot(t *testing.T) {
+	tmpDir := t.TempDir()
+	svc, err := NewService(tmpDir)
+	if err != nil {
+		t.Fatalf("NewService failed: %v", err)
+	}
+
+	cacheKey := svc.cacheKey("/test/save-parent-internal-race.png", SizeSmall)
+	cachePath := svc.cachePath(cacheKey)
+	cacheDir := filepath.Dir(cachePath)
+	if err := os.MkdirAll(cacheDir, 0755); err != nil {
+		t.Fatalf("MkdirAll(cache dir) failed: %v", err)
+	}
+	realDir := filepath.Join(filepath.Dir(cacheDir), "real-cache")
+	if err := os.MkdirAll(realDir, 0755); err != nil {
+		t.Fatalf("MkdirAll(real cache dir) failed: %v", err)
+	}
+	backupDir := cacheDir + "-backup"
+
+	originalAfterValidateThumbnailCachePath := afterValidateThumbnailCachePath
+	afterValidateThumbnailCachePath = func() {
+		if err := os.Rename(cacheDir, backupDir); err != nil {
+			t.Fatalf("Rename(cacheDir) failed: %v", err)
+		}
+		if err := os.Symlink(filepath.Base(realDir), cacheDir); err != nil {
+			t.Fatalf("Symlink(cacheDir) failed: %v", err)
+		}
+	}
+	defer func() {
+		afterValidateThumbnailCachePath = originalAfterValidateThumbnailCachePath
+	}()
+
+	err = svc.saveToCache(cachePath, []byte("new-thumb"))
+	if !errors.Is(err, errThumbnailCacheSymlink) {
+		t.Fatalf("saveToCache() error = %v, want errThumbnailCacheSymlink", err)
+	}
+	if entries, readErr := os.ReadDir(realDir); readErr != nil {
+		t.Fatalf("ReadDir(realDir) failed: %v", readErr)
+	} else if len(entries) != 0 {
+		t.Fatalf("expected no thumbnail files in symlink target, got %v", entries)
 	}
 }
 

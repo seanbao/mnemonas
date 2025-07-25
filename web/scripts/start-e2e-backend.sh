@@ -22,6 +22,7 @@ DATAPLANE_HTTP="${MNEMONAS_E2E_DATAPLANE_HTTP:-127.0.0.1:19091}"
 DATAPLANE_GRPC="${MNEMONAS_E2E_DATAPLANE_GRPC:-127.0.0.1:19090}"
 NASD_HOST="${MNEMONAS_E2E_NASD_HOST:-127.0.0.1}"
 NASD_PORT="${MNEMONAS_E2E_NASD_PORT:-18080}"
+NASD_BASE_URL=""
 
 export GOTOOLCHAIN="${GOTOOLCHAIN:-local}"
 
@@ -40,6 +41,15 @@ extract_json_field() {
   printf '%s' "$json" | sed -n "s/.*\"${field}\":\"\([^\"]*\)\".*/\1/p"
 }
 
+http_host_for_url() {
+  local host="$1"
+  if [[ "$host" == *:* && "$host" != \[*\] ]]; then
+    printf '[%s]\n' "$host"
+    return 0
+  fi
+  printf '%s\n' "$host"
+}
+
 seed_e2e_fixtures() {
   local login_response token share_response share_id protected_share_id disabled_share_id folder_share_id
   local protected_share_password="playwright-secret"
@@ -56,7 +66,7 @@ seed_e2e_fixtures() {
     return 1
   fi
 
-  login_response=$(curl -sf -X POST "http://${NASD_HOST}:${NASD_PORT}/api/v1/auth/login" \
+  login_response=$(curl -sf -X POST "$NASD_BASE_URL/api/v1/auth/login" \
     -H 'Content-Type: application/json' \
     -d "{\"username\":\"admin\",\"password\":\"${password}\"}")
   token=$(extract_json_field "$login_response" 'access_token')
@@ -65,34 +75,34 @@ seed_e2e_fixtures() {
     return 1
   fi
 
-  curl -sf -X POST "http://${NASD_HOST}:${NASD_PORT}/api/v1/files/e2e-trash-fixture.txt" \
+  curl -sf -X POST "$NASD_BASE_URL/api/v1/files/e2e-trash-fixture.txt" \
     -H "Authorization: Bearer $token" \
     --data-binary 'fixture for trash e2e' >/dev/null
 
-  curl -sf -X POST "http://${NASD_HOST}:${NASD_PORT}/api/v1/files/e2e-share-fixture.txt" \
+  curl -sf -X POST "$NASD_BASE_URL/api/v1/files/e2e-share-fixture.txt" \
     -H "Authorization: Bearer $token" \
     --data-binary 'fixture for public share e2e' >/dev/null
 
-  curl -sf -X POST "http://${NASD_HOST}:${NASD_PORT}/api/v1/files/e2e-protected-share-fixture.txt" \
+  curl -sf -X POST "$NASD_BASE_URL/api/v1/files/e2e-protected-share-fixture.txt" \
     -H "Authorization: Bearer $token" \
     --data-binary 'fixture for protected public share e2e' >/dev/null
 
-  curl -sf -X POST "http://${NASD_HOST}:${NASD_PORT}/api/v1/files/e2e-disabled-share-fixture.txt" \
+  curl -sf -X POST "$NASD_BASE_URL/api/v1/files/e2e-disabled-share-fixture.txt" \
     -H "Authorization: Bearer $token" \
     --data-binary 'fixture for disabled public share e2e' >/dev/null
 
-  curl -sf -X POST "http://${NASD_HOST}:${NASD_PORT}/api/v1/directories/e2e-folder-share" \
+  curl -sf -X POST "$NASD_BASE_URL/api/v1/directories/e2e-folder-share" \
     -H "Authorization: Bearer $token" >/dev/null
-  curl -sf -X POST "http://${NASD_HOST}:${NASD_PORT}/api/v1/directories/e2e-folder-share/subdir" \
+  curl -sf -X POST "$NASD_BASE_URL/api/v1/directories/e2e-folder-share/subdir" \
     -H "Authorization: Bearer $token" >/dev/null
-  curl -sf -X POST "http://${NASD_HOST}:${NASD_PORT}/api/v1/files/e2e-folder-share/root-note.txt" \
+  curl -sf -X POST "$NASD_BASE_URL/api/v1/files/e2e-folder-share/root-note.txt" \
     -H "Authorization: Bearer $token" \
     --data-binary 'fixture for shared folder root file' >/dev/null
-  curl -sf -X POST "http://${NASD_HOST}:${NASD_PORT}/api/v1/files/e2e-folder-share/subdir/nested-note.txt" \
+  curl -sf -X POST "$NASD_BASE_URL/api/v1/files/e2e-folder-share/subdir/nested-note.txt" \
     -H "Authorization: Bearer $token" \
     --data-binary 'fixture for shared folder nested file' >/dev/null
 
-  share_response=$(curl -sf -X POST "http://${NASD_HOST}:${NASD_PORT}/api/v1/shares" \
+  share_response=$(curl -sf -X POST "$NASD_BASE_URL/api/v1/shares" \
     -H "Authorization: Bearer $token" \
     -H 'Content-Type: application/json' \
     -d '{"path":"/e2e-share-fixture.txt","type":"file","permission":"read","description":"playwright public share fixture"}')
@@ -103,7 +113,7 @@ seed_e2e_fixtures() {
   fi
   printf '%s\n' "$share_id" > "$PUBLIC_SHARE_ID_FILE"
 
-  share_response=$(curl -sf -X POST "http://${NASD_HOST}:${NASD_PORT}/api/v1/shares" \
+  share_response=$(curl -sf -X POST "$NASD_BASE_URL/api/v1/shares" \
     -H "Authorization: Bearer $token" \
     -H 'Content-Type: application/json' \
     -d "{\"path\":\"/e2e-protected-share-fixture.txt\",\"type\":\"file\",\"permission\":\"read\",\"password\":\"${protected_share_password}\",\"description\":\"playwright protected public share fixture\"}")
@@ -115,7 +125,7 @@ seed_e2e_fixtures() {
   printf '%s\n' "$protected_share_id" > "$PROTECTED_SHARE_ID_FILE"
   printf '%s\n' "$protected_share_password" > "$PROTECTED_SHARE_PASSWORD_FILE"
 
-  share_response=$(curl -sf -X POST "http://${NASD_HOST}:${NASD_PORT}/api/v1/shares" \
+  share_response=$(curl -sf -X POST "$NASD_BASE_URL/api/v1/shares" \
     -H "Authorization: Bearer $token" \
     -H 'Content-Type: application/json' \
     -d '{"path":"/e2e-disabled-share-fixture.txt","type":"file","permission":"read","description":"playwright disabled public share fixture"}')
@@ -125,13 +135,13 @@ seed_e2e_fixtures() {
     return 1
   fi
 
-  curl -sf -X PUT "http://${NASD_HOST}:${NASD_PORT}/api/v1/shares/${disabled_share_id}" \
+  curl -sf -X PUT "$NASD_BASE_URL/api/v1/shares/${disabled_share_id}" \
     -H "Authorization: Bearer $token" \
     -H 'Content-Type: application/json' \
     -d '{"enabled":false}' >/dev/null
   printf '%s\n' "$disabled_share_id" > "$DISABLED_SHARE_ID_FILE"
 
-  share_response=$(curl -sf -X POST "http://${NASD_HOST}:${NASD_PORT}/api/v1/shares" \
+  share_response=$(curl -sf -X POST "$NASD_BASE_URL/api/v1/shares" \
     -H "Authorization: Bearer $token" \
     -H 'Content-Type: application/json' \
     -d '{"path":"/e2e-folder-share","type":"folder","permission":"read","description":"playwright public folder share fixture"}')
@@ -142,7 +152,7 @@ seed_e2e_fixtures() {
   fi
   printf '%s\n' "$folder_share_id" > "$FOLDER_SHARE_ID_FILE"
 
-  curl -sf -X DELETE "http://${NASD_HOST}:${NASD_PORT}/api/v1/files/e2e-trash-fixture.txt" \
+  curl -sf -X DELETE "$NASD_BASE_URL/api/v1/files/e2e-trash-fixture.txt" \
     -H "Authorization: Bearer $token" >/dev/null
 }
 
@@ -160,8 +170,101 @@ wait_for_url() {
   return 1
 }
 
+path_has_parent_segment() {
+  local candidate="$1"
+  local segment
+  local -a segments
+  IFS='/' read -r -a segments <<< "$candidate"
+  for segment in "${segments[@]}"; do
+    if [[ "$segment" == ".." ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+is_valid_tcp_host() {
+  local host="$1"
+  local label
+  local -a labels
+
+  host="${host%.}"
+  [[ -n "$host" ]] || return 1
+  [[ "$host" != *"["* && "$host" != *"]"* ]] || return 1
+
+  if [[ "$host" == *:* ]]; then
+    [[ "$host" =~ ^[0-9A-Fa-f:.]+$ ]]
+    return
+  fi
+
+  [[ "${#host}" -le 253 ]] || return 1
+  IFS='.' read -r -a labels <<< "$host"
+  for label in "${labels[@]}"; do
+    [[ -n "$label" && "${#label}" -le 63 ]] || return 1
+    [[ "$label" != -* && "$label" != *- ]] || return 1
+    [[ "$label" =~ ^[A-Za-z0-9-]+$ ]] || return 1
+  done
+  return 0
+}
+
+require_safe_tcp_port() {
+  local value="$1"
+  local label="$2"
+
+  [[ -n "$value" ]] || { echo "$label cannot be empty" >&2; exit 1; }
+  [[ "$value" != *[[:space:]]* ]] || { echo "$label cannot contain whitespace: $value" >&2; exit 1; }
+  [[ "$value" =~ ^[0-9]+$ ]] || { echo "$label must be numeric: $value" >&2; exit 1; }
+  (( 10#$value >= 1 && 10#$value <= 65535 )) || { echo "$label must be between 1 and 65535: $value" >&2; exit 1; }
+}
+
+require_safe_tcp_addr() {
+  local value="$1"
+  local label="$2"
+  local host=""
+  local port=""
+
+  [[ -n "$value" ]] || { echo "$label cannot be empty" >&2; exit 1; }
+  [[ "$value" != *[[:space:]]* ]] || { echo "$label cannot contain whitespace: $value" >&2; exit 1; }
+
+  if [[ "$value" =~ ^\[([^][]+)\]:([0-9]+)$ ]]; then
+    host="${BASH_REMATCH[1]}"
+    port="${BASH_REMATCH[2]}"
+  elif [[ "$value" =~ ^([^:]+):([0-9]+)$ ]]; then
+    host="${BASH_REMATCH[1]}"
+    port="${BASH_REMATCH[2]}"
+  else
+    echo "$label must be a host:port address: $value" >&2
+    exit 1
+  fi
+
+  is_valid_tcp_host "$host" || { echo "$label host is invalid: $value" >&2; exit 1; }
+  require_safe_tcp_port "$port" "$label port"
+}
+
+require_safe_e2e_root() {
+  if path_has_parent_segment "$E2E_ROOT"; then
+    echo "MNEMONAS_E2E_ROOT must not contain '..' path segments: $E2E_ROOT" >&2
+    exit 1
+  fi
+
+  case "$E2E_ROOT" in
+    /tmp/*|"$PROJECT_ROOT"/*) ;;
+    *)
+      echo "MNEMONAS_E2E_ROOT must be under /tmp or this checkout: $E2E_ROOT" >&2
+      exit 1
+      ;;
+  esac
+}
+
 trap cleanup EXIT INT TERM
 
+require_safe_e2e_root
+is_valid_tcp_host "$NASD_HOST" || { echo "MNEMONAS_E2E_NASD_HOST host is invalid: $NASD_HOST" >&2; exit 1; }
+[[ "$NASD_HOST" != *[[:space:]]* ]] || { echo "MNEMONAS_E2E_NASD_HOST cannot contain whitespace: $NASD_HOST" >&2; exit 1; }
+require_safe_tcp_port "$NASD_PORT" "MNEMONAS_E2E_NASD_PORT"
+require_safe_tcp_addr "$DATAPLANE_HTTP" "MNEMONAS_E2E_DATAPLANE_HTTP"
+require_safe_tcp_addr "$DATAPLANE_GRPC" "MNEMONAS_E2E_DATAPLANE_GRPC"
+NASD_BASE_URL="http://$(http_host_for_url "$NASD_HOST"):${NASD_PORT}"
 rm -rf "$BACKEND_ROOT"
 mkdir -p "$STORAGE_ROOT" "$LOG_DIR"
 
@@ -264,7 +367,7 @@ fi
 ) &
 nasd_pid=$!
 
-if ! wait_for_url "http://${NASD_HOST}:${NASD_PORT}/health"; then
+if ! wait_for_url "$NASD_BASE_URL/health"; then
   echo "nasd failed to start; see $LOG_DIR/nasd.log" >&2
   exit 1
 fi
@@ -278,7 +381,7 @@ if ! seed_e2e_fixtures; then
   exit 1
 fi
 
-echo "MnemoNAS Playwright backend ready at http://${NASD_HOST}:${NASD_PORT}"
+echo "MnemoNAS Playwright backend ready at $NASD_BASE_URL"
 
 wait -n "$dataplane_pid" "$nasd_pid"
 exit $?

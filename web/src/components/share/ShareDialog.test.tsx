@@ -222,11 +222,34 @@ describe('ShareDialog', () => {
     )
 
     await user.click(screen.getByRole('checkbox'))
-    expect(screen.getByPlaceholderText('设置访问密码')).toBeInTheDocument()
+    expect(screen.getByPlaceholderText('设置访问密码（最多 72 字节）')).toBeInTheDocument()
 
     await user.click(screen.getByText('取消'))
 
     expect(onClose).toHaveBeenCalled()
+  })
+
+  it('blocks share creation when the password exceeds the bcrypt byte limit', async () => {
+    const user = userEvent.setup()
+
+    render(
+      <ShareDialog
+        isOpen={true}
+        onClose={() => {}}
+        filePath="/test/file.txt"
+      />
+    )
+
+    await user.click(screen.getByRole('checkbox'))
+    await user.type(screen.getByPlaceholderText('设置访问密码（最多 72 字节）'), 'a'.repeat(73))
+
+    expect(screen.getByText('分享密码最多 72 字节')).toBeInTheDocument()
+    const createButton = screen.getByText('创建分享链接').closest('button')
+    expect(createButton).toBeDisabled()
+    if (createButton) {
+      await user.click(createButton)
+    }
+    expect(createShare).not.toHaveBeenCalled()
   })
 
   it('shows a disabled state when share creation reports the feature is off', async () => {
@@ -379,7 +402,7 @@ describe('ShareDialog', () => {
     )
 
     await user.click(screen.getByRole('checkbox'))
-    await user.type(screen.getByPlaceholderText('设置访问密码'), 'secret-123')
+    await user.type(screen.getByPlaceholderText('设置访问密码（最多 72 字节）'), 'secret-123')
 
     const createButton = screen.getByText('创建分享链接')
     expect(createButton).not.toBeDisabled()

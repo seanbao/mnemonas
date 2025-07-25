@@ -322,6 +322,27 @@ describe('API: files', () => {
       })
     })
 
+    it('builds a single-slash upload URL for root uploads', async () => {
+      MockXMLHttpRequest.queuedResults.push({
+        type: 'load',
+        status: 201,
+        statusText: 'Created',
+        responseText: JSON.stringify({
+          success: true,
+          data: {
+            path: '/report.txt',
+          },
+        }),
+      })
+
+      await expect(uploadFile('/', new File(['content'], 'report.txt'))).resolves.toEqual({
+        warning: false,
+        message: undefined,
+      })
+
+      expect(MockXMLHttpRequest.instances[0]?.url).toBe('/api/v1/files/report.txt')
+    })
+
     it('reports computable upload progress and preserves data warnings', async () => {
       const onProgress = vi.fn()
       MockXMLHttpRequest.queuedResults.push({
@@ -1713,6 +1734,35 @@ describe('API: files', () => {
         await downloadFile('/docs/report.txt', { filename: 'custom.txt' })
 
         expect(createdLink?.download).toBe('custom.txt')
+        createElementSpy.mockRestore()
+      })
+
+      it('sanitizes filenames from content disposition before triggering download', async () => {
+        const blob = new Blob(['file-content'])
+        let createdLink: HTMLAnchorElement | undefined
+        const originalCreateElement = document.createElement.bind(document)
+        const createElementSpy = vi.spyOn(document, 'createElement').mockImplementation(((tagName: string) => {
+          const element = originalCreateElement(tagName)
+          if (tagName === 'a') {
+            createdLink = element as HTMLAnchorElement
+          }
+          return element
+        }) as typeof document.createElement)
+        vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:test')
+        vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {})
+        vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+
+        mockFetch.mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          statusText: 'OK',
+          headers: new Headers({ 'Content-Disposition': 'attachment; filename="folder/secret.txt"' }),
+          blob: () => Promise.resolve(blob),
+        })
+
+        await downloadFile('/docs/report.txt')
+
+        expect(createdLink?.download).toBe('folder_secret.txt')
         createElementSpy.mockRestore()
       })
 
