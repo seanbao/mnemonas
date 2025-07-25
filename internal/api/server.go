@@ -1033,26 +1033,42 @@ func isUnsafeHTTPMethod(method string) bool {
 
 func sameOriginBrowserMetadata(r *http.Request) bool {
 	if origin := strings.TrimSpace(r.Header.Get("Origin")); origin != "" {
-		return requestMetadataHostMatches(r, origin)
+		return requestMetadataOriginMatches(r, origin)
 	}
 	if referer := strings.TrimSpace(r.Header.Get("Referer")); referer != "" {
-		return requestMetadataHostMatches(r, referer)
+		return requestMetadataOriginMatches(r, referer)
 	}
 	return true
 }
 
-func requestMetadataHostMatches(r *http.Request, rawURL string) bool {
+func requestMetadataOriginMatches(r *http.Request, rawURL string) bool {
 	parsed, err := url.Parse(rawURL)
-	if err != nil || parsed.Host == "" {
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
 		return false
 	}
 
-	requestHost := normalizeHTTPHost(r.Host)
-	sourceHost := normalizeHTTPHost(parsed.Host)
-	return requestHost != "" && sourceHost != "" && requestHost == sourceHost
+	scheme := requestScheme(r)
+	requestHost := normalizeHTTPHostForScheme(scheme, r.Host)
+	sourceHost := normalizeHTTPHostForScheme(parsed.Scheme, parsed.Host)
+	return requestHost != "" &&
+		sourceHost != "" &&
+		requestHost == sourceHost &&
+		strings.EqualFold(parsed.Scheme, scheme)
 }
 
-func normalizeHTTPHost(rawHost string) string {
+func requestScheme(r *http.Request) string {
+	if r.TLS != nil {
+		return "https"
+	}
+	if requestip.TrustedProxyHops() > 0 &&
+		requestip.IsTrustedForwardedSource(requestip.RemoteIP(r.RemoteAddr)) &&
+		strings.EqualFold(strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")), "https") {
+		return "https"
+	}
+	return "http"
+}
+
+func normalizeHTTPHostForScheme(scheme, rawHost string) string {
 	host := strings.ToLower(strings.TrimSpace(rawHost))
 	host = strings.TrimSuffix(host, ".")
 	if host == "" {
@@ -1061,13 +1077,24 @@ func normalizeHTTPHost(rawHost string) string {
 
 	if splitHost, port, err := net.SplitHostPort(host); err == nil {
 		splitHost = strings.Trim(strings.TrimSuffix(strings.ToLower(splitHost), "."), "[]")
-		if port == "80" || port == "443" {
+		if isDefaultPortForScheme(scheme, port) {
 			return splitHost
 		}
 		return net.JoinHostPort(splitHost, port)
 	}
 
 	return strings.Trim(host, "[]")
+}
+
+func isDefaultPortForScheme(scheme, port string) bool {
+	switch strings.ToLower(strings.TrimSpace(scheme)) {
+	case "http":
+		return port == "80"
+	case "https":
+		return port == "443"
+	default:
+		return false
+	}
 }
 
 func (s *Server) setupRoutes() {

@@ -139,6 +139,8 @@ type CDCConfig struct {
 	MaxChunkSize uint32 `toml:"max_chunk_size"` // max chunk size (default 4MB)
 }
 
+const MaxCDCChunkSize uint32 = 64 * 1024 * 1024
+
 // WebDAVConfig holds WebDAV service configuration
 type WebDAVConfig struct {
 	Enabled  bool   `toml:"enabled"`
@@ -998,6 +1000,9 @@ func (c *Config) Validate() error {
 	}
 	if cdc.AvgChunkSize >= cdc.MaxChunkSize {
 		errs = append(errs, errors.New("avg_chunk_size must be less than max_chunk_size"))
+	}
+	if cdc.MaxChunkSize > MaxCDCChunkSize {
+		errs = append(errs, fmt.Errorf("max_chunk_size must be less than or equal to %d", MaxCDCChunkSize))
 	}
 
 	if c.Alerts.CheckInterval <= 0 {
