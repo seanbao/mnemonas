@@ -105,6 +105,73 @@ check_community_files() {
 	print_kv "community" "required community health files present"
 }
 
+extract_validation_target() {
+	local path="$1"
+
+	sed -nE 's/.*(validation target|验证目标)[^0-9a-fA-F]+([0-9a-fA-F]{7,40}).*/\2/p' "$path" \
+		| head -n 1 \
+		| tr '[:upper:]' '[:lower:]'
+}
+
+check_validation_evidence() {
+	local path
+	local path_target
+	local target=""
+	local evidence_files=(
+		"docs/hardening-progress.md"
+		"docs/hardening-progress.en.md"
+		"docs/hardening-review-summary.md"
+		"docs/hardening-review-summary.en.md"
+	)
+
+	for path in "${evidence_files[@]}"; do
+		[[ -f "$path" ]] || continue
+		path_target="$(extract_validation_target "$path")"
+		[[ -n "$path_target" ]] || continue
+		if [[ -z "$target" ]]; then
+			target="$path_target"
+			continue
+		fi
+		[[ "$path_target" == "$target" ]] || fail "validation evidence target mismatch: $path records $path_target, expected $target"
+	done
+
+	if [[ -z "$target" ]]; then
+		print_kv "validation" "full gate evidence target not recorded"
+		return
+	fi
+
+	if ! git rev-parse --verify --quiet "$target^{commit}" >/dev/null; then
+		fail "validation evidence target does not resolve: $target"
+	fi
+
+	local target_full
+	local target_short
+	local head_full
+	target_full="$(git rev-parse "$target^{commit}")"
+	target_short="$(git rev-parse --short=12 "$target_full")"
+	head_full="$(git rev-parse HEAD)"
+
+	if ! git merge-base --is-ancestor "$target_full" HEAD; then
+		fail "validation evidence target is not an ancestor of HEAD: $target_short"
+	fi
+
+	if [[ "$target_full" == "$head_full" ]]; then
+		print_kv "validation" "full gate evidence matches HEAD ($target_short)"
+		return
+	fi
+
+	local commits_since
+	local files_since
+	local since_shortstat
+	commits_since="$(git rev-list --count "$target_full..HEAD")"
+	files_since="$(git diff --name-only "$target_full..HEAD" | wc -l | tr -d '[:space:]')"
+	since_shortstat="$(git diff --shortstat "$target_full..HEAD")"
+	[[ -n "$since_shortstat" ]] || since_shortstat="no file changes"
+
+	print_kv "validation" "full gate evidence at $target_short; $commits_since commits and $files_since files changed since target"
+	print_kv "validation-diff" "$since_shortstat"
+}
+
 if ! git rev-parse --show-toplevel >/dev/null 2>&1; then
 	fail "must run inside a git repository"
 fi
@@ -155,6 +222,7 @@ while IFS= read -r line; do
 done <<<"$planner_output"
 
 check_community_files
+check_validation_evidence
 
 if [[ "$CHECK_CHECKLIST" -eq 1 ]]; then
 	verify_changed_cmd="GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master"
