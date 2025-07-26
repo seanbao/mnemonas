@@ -67,6 +67,43 @@ write_community_files() {
 		.github/pull_request_template.md
 }
 
+write_validation_docs() {
+	local target="$1"
+
+	mkdir -p docs
+	cat >docs/hardening-progress.md <<EOF
+# 硬化进度台账
+
+| 日期 | 命令 | 结果 |
+|------|------|------|
+| 2026-06-18 | \`GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master\` | 通过。覆盖验证目标 \`$target\` 的分支范围。 |
+EOF
+
+	cat >docs/hardening-progress.en.md <<EOF
+# Hardening Progress Ledger
+
+| Date | Command | Result |
+| --- | --- | --- |
+| 2026-06-18 | \`GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master\` | Passed. Covered validation target \`$target\` across the branch range. |
+EOF
+
+	cat >docs/hardening-review-summary.md <<EOF
+# 硬化审查摘要
+
+| 项目 | 当前状态 |
+|------|----------|
+| 最近完整验证 | \`GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master\` 在验证目标 \`$target\` 通过。 |
+EOF
+
+	cat >docs/hardening-review-summary.en.md <<EOF
+# Hardening Review Summary
+
+| Item | Current status |
+| --- | --- |
+| Latest broad validation | \`GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master\` passed at validation target \`$target\`. |
+EOF
+}
+
 mkdir -p "$tmp/scripts"
 cp "$READINESS" "$tmp/scripts/release-readiness.sh"
 cp "$PLANNER" "$tmp/scripts/plan-hardening-commits.sh"
@@ -81,6 +118,10 @@ write_checklists
 write_community_files
 git add .
 git commit -q -m "docs: initial checklist"
+validation_target="$(git rev-parse --short=12 HEAD)"
+write_validation_docs "$validation_target"
+git add docs
+git commit -q -m "docs: record validation evidence"
 
 git checkout -q -b release-readiness
 printf '# docs\n' >README.md
@@ -95,6 +136,9 @@ assert_file_contains "$output_dir/pass.out" "[release-readiness] diff:"
 assert_file_contains "$output_dir/pass.out" "[release-readiness] worktree:          clean"
 assert_file_contains "$output_dir/pass.out" "[release-readiness] planner          [hardening-commit-plan] no changed files detected"
 assert_file_contains "$output_dir/pass.out" "[release-readiness] community:"
+assert_file_contains "$output_dir/pass.out" "[release-readiness] validation:"
+assert_file_contains "$output_dir/pass.out" "full gate evidence at"
+assert_file_contains "$output_dir/pass.out" "[release-readiness] validation-diff:"
 assert_file_contains "$output_dir/pass.out" "[release-readiness] checklist:"
 assert_file_contains "$output_dir/pass.out" "[release-readiness] status:"
 assert_file_contains "$output_dir/pass.out" "release readiness summary completed"
