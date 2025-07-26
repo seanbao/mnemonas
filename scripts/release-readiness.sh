@@ -69,6 +69,42 @@ require_file_contains() {
 	}
 }
 
+require_community_file() {
+	local path="$1"
+
+	[[ -f "$path" ]] || fail "missing required community file: $path"
+}
+
+check_community_files() {
+	local path
+	local required_files=(
+		"README.md"
+		"README.en.md"
+		"LICENSE"
+		"CHANGELOG.md"
+		"CHANGELOG.en.md"
+		"CONTRIBUTING.md"
+		"CONTRIBUTING.en.md"
+		"CODE_OF_CONDUCT.md"
+		"CODE_OF_CONDUCT.zh-CN.md"
+		"SUPPORT.md"
+		"SUPPORT.en.md"
+		"SECURITY.md"
+		"SECURITY.zh-CN.md"
+		".github/ISSUE_TEMPLATE/config.yml"
+		".github/ISSUE_TEMPLATE/bug_report.yml"
+		".github/ISSUE_TEMPLATE/feature_request.yml"
+		".github/ISSUE_TEMPLATE/question.yml"
+		".github/pull_request_template.md"
+	)
+
+	for path in "${required_files[@]}"; do
+		require_community_file "$path"
+	done
+
+	print_kv "community" "required community health files present"
+}
+
 if ! git rev-parse --show-toplevel >/dev/null 2>&1; then
 	fail "must run inside a git repository"
 fi
@@ -117,6 +153,8 @@ while IFS= read -r line; do
 	[[ -n "$line" ]] || continue
 	printf '[release-readiness] planner          %s\n' "$line"
 done <<<"$planner_output"
+
+check_community_files
 
 if [[ "$CHECK_CHECKLIST" -eq 1 ]]; then
 	verify_changed_cmd="GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master"
