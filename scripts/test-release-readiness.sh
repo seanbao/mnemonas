@@ -47,6 +47,26 @@ EOF
 EOF
 }
 
+write_community_files() {
+	mkdir -p .github/ISSUE_TEMPLATE
+	touch \
+		README.en.md \
+		LICENSE \
+		CONTRIBUTING.md \
+		CONTRIBUTING.en.md \
+		CODE_OF_CONDUCT.md \
+		CODE_OF_CONDUCT.zh-CN.md \
+		SUPPORT.md \
+		SUPPORT.en.md \
+		SECURITY.md \
+		SECURITY.zh-CN.md \
+		.github/ISSUE_TEMPLATE/config.yml \
+		.github/ISSUE_TEMPLATE/bug_report.yml \
+		.github/ISSUE_TEMPLATE/feature_request.yml \
+		.github/ISSUE_TEMPLATE/question.yml \
+		.github/pull_request_template.md
+}
+
 mkdir -p "$tmp/scripts"
 cp "$READINESS" "$tmp/scripts/release-readiness.sh"
 cp "$PLANNER" "$tmp/scripts/plan-hardening-commits.sh"
@@ -58,6 +78,7 @@ git config user.email "mnemonas@example.invalid"
 git config user.name "MnemoNAS Test"
 
 write_checklists
+write_community_files
 git add .
 git commit -q -m "docs: initial checklist"
 
@@ -73,6 +94,7 @@ assert_file_contains "$output_dir/pass.out" "[release-readiness] commits:"
 assert_file_contains "$output_dir/pass.out" "[release-readiness] diff:"
 assert_file_contains "$output_dir/pass.out" "[release-readiness] worktree:          clean"
 assert_file_contains "$output_dir/pass.out" "[release-readiness] planner          [hardening-commit-plan] no changed files detected"
+assert_file_contains "$output_dir/pass.out" "[release-readiness] community:"
 assert_file_contains "$output_dir/pass.out" "[release-readiness] checklist:"
 assert_file_contains "$output_dir/pass.out" "[release-readiness] status:"
 assert_file_contains "$output_dir/pass.out" "release readiness summary completed"
@@ -87,6 +109,13 @@ assert_file_contains "$output_dir/dirty.err" "worktree has uncommitted changes"
 assert_file_contains "$output_dir/allow-dirty.out" "[release-readiness] worktree:          dirty (draft summary)"
 
 git checkout -q -- README.md
+rm -f .github/pull_request_template.md
+if ./scripts/release-readiness.sh --allow-dirty --skip-checklist >"$output_dir/missing-community.out" 2>"$output_dir/missing-community.err"; then
+	fail "release readiness accepted missing community files"
+fi
+assert_file_contains "$output_dir/missing-community.err" "missing required community file: .github/pull_request_template.md"
+
+touch .github/pull_request_template.md
 sed -i.bak '/release-readiness/d' CHANGELOG.en.md
 rm -f CHANGELOG.en.md.bak
 if ./scripts/release-readiness.sh --allow-dirty >"$output_dir/missing-checklist.out" 2>"$output_dir/missing-checklist.err"; then
