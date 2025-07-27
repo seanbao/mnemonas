@@ -113,6 +113,20 @@ extract_validation_target() {
 		| tr '[:upper:]' '[:lower:]'
 }
 
+is_validation_evidence_path() {
+	case "$1" in
+		docs/hardening-progress.md|\
+		docs/hardening-progress.en.md|\
+		docs/hardening-review-summary.md|\
+		docs/hardening-review-summary.en.md)
+			return 0
+			;;
+		*)
+			return 1
+			;;
+	esac
+}
+
 check_validation_evidence() {
 	local path
 	local path_target
@@ -163,12 +177,24 @@ check_validation_evidence() {
 	local commits_since
 	local files_since
 	local since_shortstat
+	local evidence_only=1
 	commits_since="$(git rev-list --count "$target_full..HEAD")"
 	files_since="$(git diff --name-only "$target_full..HEAD" | wc -l | tr -d '[:space:]')"
 	since_shortstat="$(git diff --shortstat "$target_full..HEAD")"
 	[[ -n "$since_shortstat" ]] || since_shortstat="no file changes"
+	while IFS= read -r path; do
+		[[ -n "$path" ]] || continue
+		if ! is_validation_evidence_path "$path"; then
+			evidence_only=0
+			break
+		fi
+	done < <(git diff --name-only "$target_full..HEAD")
 
-	print_kv "validation" "full gate evidence at $target_short; $commits_since commits and $files_since files changed since target"
+	if [[ "$files_since" != "0" && "$evidence_only" -eq 1 ]]; then
+		print_kv "validation" "full gate evidence at $target_short; only validation evidence docs changed since target ($commits_since commits, $files_since files)"
+	else
+		print_kv "validation" "full gate evidence at $target_short; $commits_since commits and $files_since files changed since target"
+	fi
 	print_kv "validation-diff" "$since_shortstat"
 }
 

@@ -50,6 +50,7 @@ EOF
 write_community_files() {
 	mkdir -p .github/ISSUE_TEMPLATE
 	touch \
+		README.md \
 		README.en.md \
 		LICENSE \
 		CONTRIBUTING.md \
@@ -123,6 +124,12 @@ write_validation_docs "$validation_target"
 git add docs
 git commit -q -m "docs: record validation evidence"
 
+./scripts/release-readiness.sh --base "$validation_target" >"$output_dir/evidence-only.out" 2>"$output_dir/evidence-only.err"
+assert_file_contains "$output_dir/evidence-only.out" "[release-readiness] validation:"
+assert_file_contains "$output_dir/evidence-only.out" "only validation evidence docs changed since target"
+assert_file_contains "$output_dir/evidence-only.out" "[release-readiness] validation-diff:"
+assert_file_contains "$output_dir/evidence-only.out" "release readiness summary completed"
+
 git checkout -q -b release-readiness
 printf '# docs\n' >README.md
 git add README.md
@@ -138,6 +145,7 @@ assert_file_contains "$output_dir/pass.out" "[release-readiness] planner        
 assert_file_contains "$output_dir/pass.out" "[release-readiness] community:"
 assert_file_contains "$output_dir/pass.out" "[release-readiness] validation:"
 assert_file_contains "$output_dir/pass.out" "full gate evidence at"
+assert_file_contains "$output_dir/pass.out" "files changed since target"
 assert_file_contains "$output_dir/pass.out" "[release-readiness] validation-diff:"
 assert_file_contains "$output_dir/pass.out" "[release-readiness] checklist:"
 assert_file_contains "$output_dir/pass.out" "[release-readiness] status:"
