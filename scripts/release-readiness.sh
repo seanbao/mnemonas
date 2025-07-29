@@ -15,7 +15,7 @@ Print a read-only release readiness summary for the current branch.
 Options:
   --base REF        Compare the current branch against REF. Defaults to master.
   --allow-dirty    Print a draft summary even when the worktree is dirty.
-  --skip-checklist  Skip release checklist command assertions.
+  --skip-checklist  Skip release checklist and release-note command assertions.
   -h, --help        Show this help.
 EOF
 }
@@ -198,6 +198,35 @@ check_validation_evidence() {
 	print_kv "validation-diff" "$since_shortstat"
 }
 
+check_release_notes() {
+	local path
+	local expected
+	local release_note_files=(
+		"docs/release-notes.md"
+		"docs/release-notes.en.md"
+	)
+	local required_texts=(
+		"GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master"
+		"make docs-check"
+		"make scripts-check"
+		"./scripts/test-release-package.sh"
+		"./scripts/test-release-artifacts.sh"
+		"gh release download"
+		"./scripts/verify-release-artifacts.sh"
+		"--require-targets"
+		"--check-image"
+	)
+
+	for path in "${release_note_files[@]}"; do
+		[[ -f "$path" ]] || fail "missing required release-notes file: $path"
+		for expected in "${required_texts[@]}"; do
+			require_file_contains "$path" "$expected"
+		done
+	done
+
+	print_kv "release-notes" "release-note verification commands present"
+}
+
 if ! git rev-parse --show-toplevel >/dev/null 2>&1; then
 	fail "must run inside a git repository"
 fi
@@ -264,6 +293,7 @@ if [[ "$CHECK_CHECKLIST" -eq 1 ]]; then
 	require_file_contains "CHANGELOG.en.md" "./scripts/plan-hardening-commits.sh --fail-on-manual"
 	require_file_contains "CHANGELOG.md" "$artifact_verify_cmd"
 	require_file_contains "CHANGELOG.en.md" "$artifact_verify_cmd"
+	check_release_notes
 	print_kv "checklist" "release commands present in CHANGELOG.md and CHANGELOG.en.md"
 fi
 
