@@ -47,6 +47,47 @@ EOF
 EOF
 }
 
+write_release_notes() {
+	mkdir -p docs
+	cat >docs/release-notes.md <<'EOF'
+# 发布说明草稿
+
+## 发布前验证
+
+- `GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master`
+- `make docs-check`
+- `make scripts-check`
+- `./scripts/test-release-package.sh`
+- `./scripts/test-release-artifacts.sh`
+
+## 发布后核验
+
+```bash
+gh release download v0.1.0 --repo seanbao/mnemonas --dir dist/release-check
+./scripts/verify-release-artifacts.sh --version v0.1.0 --repository seanbao/mnemonas --require-targets --check-image dist/release-check
+```
+EOF
+
+	cat >docs/release-notes.en.md <<'EOF'
+# Release Notes Draft
+
+## Pre-Release Validation
+
+- `GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master`
+- `make docs-check`
+- `make scripts-check`
+- `./scripts/test-release-package.sh`
+- `./scripts/test-release-artifacts.sh`
+
+## Post-Publish Verification
+
+```bash
+gh release download v0.1.0 --repo seanbao/mnemonas --dir dist/release-check
+./scripts/verify-release-artifacts.sh --version v0.1.0 --repository seanbao/mnemonas --require-targets --check-image dist/release-check
+```
+EOF
+}
+
 write_community_files() {
 	mkdir -p .github/ISSUE_TEMPLATE
 	touch \
@@ -116,6 +157,7 @@ git config user.email "mnemonas@example.invalid"
 git config user.name "MnemoNAS Test"
 
 write_checklists
+write_release_notes
 write_community_files
 git add .
 git commit -q -m "docs: initial checklist"
@@ -147,6 +189,7 @@ assert_file_contains "$output_dir/pass.out" "[release-readiness] validation:"
 assert_file_contains "$output_dir/pass.out" "full gate evidence at"
 assert_file_contains "$output_dir/pass.out" "files changed since target"
 assert_file_contains "$output_dir/pass.out" "[release-readiness] validation-diff:"
+assert_file_contains "$output_dir/pass.out" "[release-readiness] release-notes:"
 assert_file_contains "$output_dir/pass.out" "[release-readiness] checklist:"
 assert_file_contains "$output_dir/pass.out" "[release-readiness] status:"
 assert_file_contains "$output_dir/pass.out" "release readiness summary completed"
@@ -168,6 +211,14 @@ fi
 assert_file_contains "$output_dir/missing-community.err" "missing required community file: .github/pull_request_template.md"
 
 touch .github/pull_request_template.md
+sed -i.bak '/verify-release-artifacts/d' docs/release-notes.en.md
+rm -f docs/release-notes.en.md.bak
+if ./scripts/release-readiness.sh --allow-dirty >"$output_dir/missing-release-notes.out" 2>"$output_dir/missing-release-notes.err"; then
+	fail "release readiness accepted a missing release-notes command"
+fi
+assert_file_contains "$output_dir/missing-release-notes.err" "docs/release-notes.en.md is missing required text"
+git checkout -q -- docs/release-notes.en.md
+
 sed -i.bak '/release-readiness/d' CHANGELOG.en.md
 rm -f CHANGELOG.en.md.bak
 if ./scripts/release-readiness.sh --allow-dirty >"$output_dir/missing-checklist.out" 2>"$output_dir/missing-checklist.err"; then
