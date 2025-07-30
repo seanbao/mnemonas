@@ -299,6 +299,19 @@ describe('SettingsPage', () => {
       })
     })
 
+    it('clears the tab query string when switching back to general settings', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      window.history.pushState({}, '', '/settings?tab=webdav')
+      render(<SettingsPage />)
+
+      await openTab(user, '常规')
+
+      await waitFor(() => {
+        expect(screen.getByText('服务器')).toBeTruthy()
+        expect(window.location.search).toBe('')
+      })
+    })
+
     it('uses numeric input constraints for server port and retry settings', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
       render(<SettingsPage />)
@@ -1468,6 +1481,30 @@ describe('SettingsPage', () => {
           title: 'WebDAV 凭据暂不可用',
           description: '当前无法读取运行中的 WebDAV 凭据，请检查系统状态或稍后重试。',
           color: 'warning',
+        })
+      })
+    })
+
+    it('shows a generic toast when reloading WebDAV credentials fails with an unknown error', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockGetWebDAVCredentials.mockRejectedValueOnce(new Error('webdav credentials unavailable'))
+
+      render(<SettingsPage />)
+
+      await openTab(user, 'WebDAV')
+
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: '重新加载凭据' })).toBeTruthy()
+      })
+
+      mockGetWebDAVCredentials.mockRejectedValueOnce('webdav offline')
+      await user.click(screen.getByRole('button', { name: '重新加载凭据' }))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '刷新失败',
+          description: '请稍后重试',
+          color: 'danger',
         })
       })
     })

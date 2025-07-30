@@ -2446,9 +2446,6 @@ export function FilesPage() {
   const hasSelection = selectedFiles.size > 0
   const isAllSelected = sortedFiles.length > 0 && selectedFiles.size === sortedFiles.length
   const isPartialSelected = selectedFiles.size > 0 && selectedFiles.size < sortedFiles.length
-  const hasDownloadableSelection = selectedFiles.size > 0
-    && selectedCounts.files > 0
-    && selectedCounts.folders === 0
   const hasMultiSelection = selectedFiles.size > 1
   const showMultiSelectHint = hasMultiSelection || multiSelectHintVisible
 
@@ -2726,7 +2723,6 @@ export function FilesPage() {
                   className="rounded-lg"
                   startContent={<Download size={16} />}
                   onPress={handleBatchDownload}
-                  isDisabled={!hasDownloadableSelection}
                 >
                   批量下载（仅文件）
                 </Button>
@@ -2769,10 +2765,16 @@ export function FilesPage() {
                   {!canWrite && (
                     <span className="text-xs text-default-400">访客账户为只读，仅可查看和下载</span>
                   )}
-                  {!hasDownloadableSelection && selectedCounts.files > 0 && selectedCounts.folders > 0 && (
+                  {selectedCounts.files > 0 && selectedCounts.folders > 0 && (
                     <span className="text-xs text-default-400 flex items-center gap-1">
                       <Folder size={12} />
-                      包含文件夹时无法批量下载
+                      将跳过文件夹，仅下载文件
+                    </span>
+                  )}
+                  {selectedCounts.files === 0 && selectedCounts.folders > 0 && (
+                    <span className="text-xs text-default-400 flex items-center gap-1">
+                      <Folder size={12} />
+                      当前选择不含可下载文件
                     </span>
                   )}
                 </div>
@@ -3368,7 +3370,6 @@ export function FilesPage() {
                     handleBatchDownload()
                     contextMenu.hide()
                   }}
-                  disabled={!hasDownloadableSelection}
                 >
                   批量下载（仅文件）
                 </ContextMenuItem>
