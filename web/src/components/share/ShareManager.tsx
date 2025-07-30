@@ -97,24 +97,6 @@ function getShareLoadErrorToast(error: unknown): {
   description?: string
   color: 'warning' | 'danger'
 } {
-  if (error instanceof ShareError) {
-    if (error.isFeatureDisabled) {
-      return {
-        title: '分享功能已关闭',
-        description: '当前服务已关闭分享功能。启用后可在此管理已创建的分享链接。',
-        color: 'warning',
-      }
-    }
-
-    if (error.isUnavailable) {
-      return {
-        title: '分享功能暂不可用',
-        description: '分享服务当前不可用，请检查系统健康状态或稍后重试。',
-        color: 'warning',
-      }
-    }
-  }
-
   return {
     title: '刷新分享列表失败',
     description: error instanceof Error ? error.message : '请稍后重试',

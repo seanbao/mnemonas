@@ -248,6 +248,99 @@ describe('FilesPage upload queue', () => {
     expect(mockUploadFile).toHaveBeenCalledWith('/', file, expect.any(Function))
   })
 
+  it('uploads dropped files after showing and clearing the drag overlay', async () => {
+    mockUploadFile.mockImplementationOnce(async (_path, _file, onProgress) => {
+      onProgress(42)
+      return successActionResult
+    })
+
+    const { container } = render(<FilesPage />)
+
+    await act(async () => {
+      await vi.runOnlyPendingTimersAsync()
+    })
+
+    const dropZone = container.querySelector('.relative.flex.h-full.min-h-0.overflow-hidden') as HTMLElement | null
+    expect(dropZone).toBeTruthy()
+
+    const file = new File(['dropped'], 'dropped.txt', { type: 'text/plain' })
+    const dataTransfer = {
+      types: ['Files'],
+      files: [file],
+    }
+
+    fireEvent.dragEnter(dropZone as HTMLElement, { dataTransfer })
+    expect(screen.getByText('释放以上传')).toBeTruthy()
+
+    fireEvent.dragLeave(dropZone as HTMLElement, { dataTransfer })
+    expect(screen.queryByText('释放以上传')).toBeNull()
+
+    fireEvent.dragEnter(dropZone as HTMLElement, { dataTransfer })
+    fireEvent.dragOver(dropZone as HTMLElement, { dataTransfer })
+    fireEvent.drop(dropZone as HTMLElement, { dataTransfer })
+
+    await flushUi()
+
+    expect(mockUploadFile).toHaveBeenCalledWith('/', file, expect.any(Function))
+    expect(screen.queryByText('释放以上传')).toBeNull()
+    expect(screen.getByText('上传完成')).toBeTruthy()
+  })
+
+  it('ignores drag and drop upload attempts for read-only users', async () => {
+    useCanWriteMock.mockReturnValue(false)
+
+    const { container } = render(<FilesPage />)
+
+    await act(async () => {
+      await vi.runOnlyPendingTimersAsync()
+    })
+
+    const dropZone = container.querySelector('.relative.flex.h-full.min-h-0.overflow-hidden') as HTMLElement | null
+    expect(dropZone).toBeTruthy()
+
+    const file = new File(['readonly'], 'readonly.txt', { type: 'text/plain' })
+    const dataTransfer = {
+      types: ['Files'],
+      files: [file],
+    }
+
+    fireEvent.dragEnter(dropZone as HTMLElement, { dataTransfer })
+    fireEvent.dragOver(dropZone as HTMLElement, { dataTransfer })
+    fireEvent.drop(dropZone as HTMLElement, { dataTransfer })
+
+    await flushUi()
+
+    expect(screen.queryByText('释放以上传')).toBeNull()
+    expect(mockUploadFile).not.toHaveBeenCalled()
+  })
+
+  it('hides, reopens, and clears completed upload history', async () => {
+    render(<FilesPage />)
+
+    await act(async () => {
+      await vi.runOnlyPendingTimersAsync()
+    })
+
+    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement | null
+    expect(fileInput).toBeTruthy()
+    const file = new File(['data'], 'history.txt', { type: 'text/plain' })
+
+    fireEvent.change(fileInput as HTMLInputElement, { target: { files: [file] } })
+    await flushUi()
+
+    expect(screen.getByText('上传完成')).toBeTruthy()
+
+    fireEvent.click(screen.getByLabelText('隐藏上传记录'))
+    expect(screen.queryByText('上传完成')).toBeNull()
+
+    fireEvent.click(screen.getByLabelText('上传记录'))
+    expect(screen.getByText('上传完成')).toBeTruthy()
+
+    fireEvent.click(screen.getByLabelText('清空上传记录'))
+    expect(screen.queryByText('上传完成')).toBeNull()
+    expect(screen.queryByLabelText('上传记录')).toBeNull()
+  })
+
   it('clears only the latest upload timer', async () => {
     render(<FilesPage />)
 
@@ -362,6 +455,63 @@ describe('FilesPage upload queue', () => {
     expect(mockCreateDirectory).toHaveBeenCalledWith('/folder')
     expect(mockUploadFile).not.toHaveBeenCalled()
     expect(screen.getByText('权限不足')).toBeTruthy()
+  })
+
+  it('shows a success summary for a clean folder upload', async () => {
+    render(<FilesPage />)
+
+    await act(async () => {
+      await vi.runOnlyPendingTimersAsync()
+    })
+
+    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement | null
+    expect(fileInput).toBeTruthy()
+
+    const file = new File(['ok'], 'only.txt', { type: 'text/plain' })
+    Object.defineProperty(file, 'webkitRelativePath', { configurable: true, value: 'folder/only.txt' })
+
+    fireEvent.change(fileInput as HTMLInputElement, { target: { files: [file] } })
+
+    await flushUi()
+
+    expect(mockCreateDirectory).toHaveBeenCalledWith('/folder')
+    expect(mockUploadFile).toHaveBeenCalledWith('/folder', file, expect.any(Function))
+    expect(mockAddToast).toHaveBeenCalledWith({
+      title: '文件夹上传完成',
+      description: '成功上传 1 个文件',
+      color: 'success',
+    })
+  })
+
+  it('continues folder upload when the parent directory already exists and avoids duplicate directory creation', async () => {
+    render(<FilesPage />)
+
+    await act(async () => {
+      await vi.runOnlyPendingTimersAsync()
+    })
+
+    mockCreateDirectory.mockRejectedValueOnce(new ApiError('already exists', 409, 'Conflict'))
+
+    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement | null
+    expect(fileInput).toBeTruthy()
+
+    const firstFile = new File(['one'], 'one.txt', { type: 'text/plain' })
+    const secondFile = new File(['two'], 'two.txt', { type: 'text/plain' })
+    Object.defineProperty(firstFile, 'webkitRelativePath', { configurable: true, value: 'folder/one.txt' })
+    Object.defineProperty(secondFile, 'webkitRelativePath', { configurable: true, value: 'folder/two.txt' })
+
+    fireEvent.change(fileInput as HTMLInputElement, { target: { files: [firstFile, secondFile] } })
+
+    await flushUi()
+
+    expect(mockCreateDirectory).toHaveBeenCalledTimes(1)
+    expect(mockUploadFile).toHaveBeenCalledWith('/folder', firstFile, expect.any(Function))
+    expect(mockUploadFile).toHaveBeenCalledWith('/folder', secondFile, expect.any(Function))
+    expect(mockAddToast).toHaveBeenCalledWith({
+      title: '文件夹上传完成',
+      description: '成功上传 2 个文件',
+      color: 'success',
+    })
   })
 
   it('rejects oversized files before starting the upload request', async () => {

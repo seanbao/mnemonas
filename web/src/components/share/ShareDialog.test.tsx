@@ -287,6 +287,27 @@ describe('ShareDialog', () => {
     })
   })
 
+  it('shows generic fallback details when share creation throws an unknown value', async () => {
+    const user = userEvent.setup()
+    vi.mocked(createShare).mockRejectedValue('share failed')
+
+    render(
+      <ShareDialog
+        isOpen={true}
+        onClose={() => {}}
+        filePath="/test/file.txt"
+      />
+    )
+
+    await user.click(screen.getByText('创建分享链接'))
+
+    expect(mockAddToast).toHaveBeenCalledWith({
+      title: '创建分享失败',
+      description: '请稍后重试',
+      color: 'danger',
+    })
+  })
+
   it('shows a stale-target warning when share creation target no longer exists', async () => {
     const user = userEvent.setup()
     vi.mocked(createShare).mockRejectedValue(new ShareError('file not found', 404, 'FILE_NOT_FOUND'))
@@ -487,6 +508,38 @@ describe('ShareDialog', () => {
     expect(mockAddToast).toHaveBeenCalledWith({ title: '链接已复制', color: 'success' })
   })
 
+  it('uses absolute share URLs without adding the current origin', async () => {
+    const user = userEvent.setup()
+    vi.mocked(createShare).mockResolvedValue({
+      id: 'share-absolute',
+      path: '/test/file.txt',
+      type: 'file',
+      created_by: 'user-1',
+      created_at: new Date().toISOString(),
+      has_password: false,
+      permission: 'read',
+      enabled: true,
+      access_count: 0,
+      max_access: 0,
+      description: '',
+      url: 'https://shares.example.test/s/share-absolute',
+      warning: false,
+      message: undefined,
+    } as never)
+
+    render(
+      <ShareDialog
+        isOpen={true}
+        onClose={() => {}}
+        filePath="/test/file.txt"
+      />
+    )
+
+    await user.click(screen.getByText('创建分享链接'))
+
+    expect(await screen.findByText('https://shares.example.test/s/share-absolute')).toBeInTheDocument()
+  })
+
   it('shows a toast when copying the created link fails', async () => {
     const user = userEvent.setup()
     vi.mocked(createShare).mockResolvedValue({
@@ -557,6 +610,87 @@ describe('ShareDialog', () => {
     expect(screen.getByText('分享链接已创建，但存在警告')).toBeInTheDocument()
     expect(screen.getByText('share created with audit warning')).toBeInTheDocument()
     expect(screen.getByText('http://localhost:3000/s/share-1')).toBeInTheDocument()
+  })
+
+  it('uses a fallback warning title when warning metadata has no message', async () => {
+    const user = userEvent.setup()
+    vi.mocked(createShare).mockResolvedValue({
+      id: 'share-1',
+      path: '/test/file.txt',
+      type: 'file',
+      created_by: 'user-1',
+      created_at: new Date().toISOString(),
+      has_password: false,
+      permission: 'read',
+      enabled: true,
+      access_count: 0,
+      max_access: 0,
+      description: '',
+      url: '/s/share-1',
+      warning: true,
+      message: undefined,
+    } as never)
+
+    render(
+      <ShareDialog
+        isOpen={true}
+        onClose={() => {}}
+        filePath="/test/file.txt"
+      />
+    )
+
+    await user.click(screen.getByText('创建分享链接'))
+
+    expect(mockAddToast).toHaveBeenCalledWith({
+      title: '分享链接已创建，但存在警告',
+      color: 'warning',
+    })
+    expect(await screen.findByText('分享链接已创建，但存在警告')).toBeInTheDocument()
+  })
+
+  it('does not show an older created share after the dialog target changes', async () => {
+    const user = userEvent.setup()
+    const pendingShare = createDeferred<Awaited<ReturnType<typeof createShare>>>()
+    vi.mocked(createShare).mockImplementationOnce(() => pendingShare.promise as ReturnType<typeof createShare>)
+
+    const { rerender } = render(
+      <ShareDialog
+        isOpen={true}
+        onClose={() => {}}
+        filePath="/old/file.txt"
+      />
+    )
+
+    await user.click(screen.getByText('创建分享链接'))
+
+    rerender(
+      <ShareDialog
+        isOpen={true}
+        onClose={() => {}}
+        filePath="/new/file.txt"
+      />
+    )
+
+    await act(async () => {
+      pendingShare.resolve({
+        id: 'share-old',
+        path: '/old/file.txt',
+        type: 'file',
+        created_by: 'user-1',
+        created_at: new Date().toISOString(),
+        has_password: false,
+        permission: 'read',
+        enabled: true,
+        access_count: 0,
+        max_access: 0,
+        description: '',
+        url: '/s/share-old',
+      } as never)
+      await pendingShare.promise
+    })
+
+    expect(screen.getByText('/new/file.txt')).toBeInTheDocument()
+    expect(screen.queryByText('http://localhost:3000/s/share-old')).not.toBeInTheDocument()
   })
 
   it('keeps the dialog open while a pending create request is in flight', async () => {

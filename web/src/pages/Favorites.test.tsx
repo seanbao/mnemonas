@@ -747,6 +747,40 @@ describe('FavoritesPage', () => {
     })
   })
 
+  it('keeps still-present selected favorites selected after a single removal', async () => {
+    const user = userEvent.setup()
+    vi.mocked(favoritesApi.removeFavorite).mockResolvedValue({ message: 'favorite removed successfully' })
+    vi.mocked(favoritesApi.listFavorites).mockReset()
+    vi.mocked(favoritesApi.listFavorites).mockResolvedValueOnce(mockFavorites)
+    vi.mocked(favoritesApi.listFavorites).mockImplementation(() => pendingFavoritesRefetch())
+
+    render(<FavoritesPage />)
+
+    await waitFor(() => {
+      expect(screen.getByText('report.pdf')).toBeInTheDocument()
+      expect(screen.getByText('photos')).toBeInTheDocument()
+    })
+
+    const checkboxes = screen.getAllByRole('checkbox')
+    await user.click(checkboxes[0])
+
+    await waitFor(() => {
+      expect(screen.getByText((_, node) => node?.textContent?.replace(/\s+/g, '') === '已选择2项')).toBeInTheDocument()
+    })
+
+    await user.click(screen.getByRole('button', { name: '取消收藏 /docs/report.pdf' }))
+
+    await waitFor(() => {
+      expect(favoritesApi.removeFavorite).toHaveBeenCalledWith('/docs/report.pdf')
+    })
+
+    await waitFor(() => {
+      expect(screen.queryByText('report.pdf')).not.toBeInTheDocument()
+      expect(screen.getByText('photos')).toBeInTheDocument()
+      expect(screen.getByText((_, node) => node?.textContent?.replace(/\s+/g, '') === '已选择1项')).toBeInTheDocument()
+    })
+  })
+
   it('optimistically removes batch-removed favorites before refetch completes', async () => {
     const user = userEvent.setup()
     mockBatchResult = {

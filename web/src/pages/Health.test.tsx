@@ -192,6 +192,30 @@ describe('HealthPage', () => {
     })
     })
 
+    it('shows danger toast when refresh fails with a generic error', async () => {
+    const user = userEvent.setup()
+    mockGetDiagnostics.mockResolvedValueOnce(mockDiagnostics)
+    mockGetStorageStats.mockResolvedValueOnce(mockStats)
+    mockGetDiagnostics.mockRejectedValueOnce(new Error('refresh failed'))
+    mockGetStorageStats.mockResolvedValueOnce(mockStats)
+
+    render(<HealthPage />)
+
+    await waitFor(() => {
+      expect(screen.getByText('刷新')).toBeTruthy()
+    })
+
+    await user.click(screen.getByText('刷新'))
+
+    await waitFor(() => {
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '刷新失败',
+        description: 'refresh failed',
+        color: 'danger',
+      })
+    })
+    })
+
     it('refetches health queries when the auth scope changes', async () => {
       mockGetDiagnostics
         .mockResolvedValueOnce(mockDiagnostics)
@@ -293,6 +317,27 @@ describe('HealthPage', () => {
       })
     })
 
+    it('formats hour-level uptime and omits unknown build time', async () => {
+      mockGetDiagnostics.mockResolvedValue({
+        ...mockDiagnostics,
+        uptimeSecs: 7200,
+        version: {
+          name: 'MnemoNAS',
+          version: '0.3.0',
+          go: '1.25.9',
+          buildTime: 'unknown',
+        },
+      })
+
+      render(<HealthPage />)
+
+      await waitFor(() => {
+        expect(screen.getAllByText('2小时 0分钟').length).toBeGreaterThan(0)
+        expect(screen.getByText(/Go 1\.25\.9/)).toBeTruthy()
+        expect(screen.queryByText(/构建/)).toBeNull()
+      })
+    })
+
     it('displays storage alert runtime status when diagnostics provide it', async () => {
       mockGetDiagnostics.mockResolvedValue({
         ...mockDiagnostics,
@@ -329,6 +374,64 @@ describe('HealthPage', () => {
 
       await waitFor(() => {
         expect(screen.getByText('存储告警未启用')).toBeTruthy()
+      })
+    })
+
+    it('warns when alert monitoring runtime is unavailable', async () => {
+      mockGetDiagnostics.mockResolvedValue({
+        ...mockDiagnostics,
+        alerts: {
+          enabled: true,
+          runtimeAvailable: false,
+          webhookConfigured: true,
+        },
+      })
+
+      render(<HealthPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('存储告警运行态不可用')).toBeTruthy()
+      })
+    })
+
+    it('surfaces critical storage alert status', async () => {
+      mockGetDiagnostics.mockResolvedValue({
+        ...mockDiagnostics,
+        alerts: {
+          enabled: true,
+          runtimeAvailable: true,
+          webhookConfigured: false,
+          lastLevel: 'critical',
+          lastCheckedAt: '2026-04-29T10:30:00Z',
+          lastUsedPct: 95.5,
+          lastFreeBytes: 1024,
+        },
+      })
+
+      render(<HealthPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('存储告警处于严重级别')).toBeTruthy()
+        expect(screen.getByText(/使用率 95\.5%/)).toBeTruthy()
+        expect(screen.getByText(/剩余 1 KB/)).toBeTruthy()
+      })
+    })
+
+    it('shows enabled alert status when webhook is not configured yet', async () => {
+      mockGetDiagnostics.mockResolvedValue({
+        ...mockDiagnostics,
+        alerts: {
+          enabled: true,
+          runtimeAvailable: true,
+          webhookConfigured: false,
+        },
+      })
+
+      render(<HealthPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('存储告警已启用，未配置 Webhook')).toBeTruthy()
+        expect(screen.getByText(/等待首次检查/)).toBeTruthy()
       })
     })
   })
@@ -408,6 +511,45 @@ describe('HealthPage', () => {
       await waitFor(() => {
         expect(screen.getByText('建议使用 ZFS/Btrfs')).toBeTruthy()
         expect(screen.getByText('EXT4')).toBeTruthy()
+      })
+    })
+
+    it('warns when the disk filesystem is unknown', async () => {
+      mockGetStorageStats.mockResolvedValue({
+        ...mockStats,
+        diskFilesystemType: 'unknown',
+        diskNativeDataChecksumSupport: false,
+      })
+      render(<HealthPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('文件系统未知')).toBeTruthy()
+      })
+    })
+
+    it('warns strongly when storage is backed by tmpfs', async () => {
+      mockGetStorageStats.mockResolvedValue({
+        ...mockStats,
+        diskFilesystemType: 'tmpfs',
+        diskNativeDataChecksumSupport: false,
+      })
+      render(<HealthPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('临时文件系统')).toBeTruthy()
+      })
+    })
+
+    it('warns when storage is backed by network or FUSE filesystems', async () => {
+      mockGetStorageStats.mockResolvedValue({
+        ...mockStats,
+        diskFilesystemType: 'nfs4',
+        diskNativeDataChecksumSupport: false,
+      })
+      render(<HealthPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('网络或 FUSE 存储')).toBeTruthy()
       })
     })
 
