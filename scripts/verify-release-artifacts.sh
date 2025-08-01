@@ -189,6 +189,24 @@ validate_manifest_paths() {
 	[[ "$top" == "$expected_top" ]] || fail "archive top-level directory is $top, expected $expected_top"
 }
 
+validate_archive_entry_types() {
+	local listing="$1"
+	local line
+	local entry_type
+
+	while IFS= read -r line; do
+		[[ -n "$line" ]] || continue
+		entry_type="${line:0:1}"
+		case "$entry_type" in
+			-|d)
+				;;
+			*)
+				fail "archive contains unsupported entry type '$entry_type': $line"
+				;;
+		esac
+	done <"$listing"
+}
+
 validate_archive() {
 	local archive="$1"
 	local expected_version="$2"
@@ -196,6 +214,7 @@ validate_archive() {
 	local base
 	local expected_top
 	local manifest
+	local type_listing
 	local extract_parent
 	local extracted
 	local expected_image
@@ -203,12 +222,15 @@ validate_archive() {
 	base="$(basename "$archive")"
 	expected_top="${base%.tar.gz}"
 	manifest="$TMP_ROOT/${expected_top}.manifest"
+	type_listing="$TMP_ROOT/${expected_top}.types"
 	extract_parent="$TMP_ROOT/extract-${expected_top}"
 	extracted="$extract_parent/$expected_top"
 	expected_image="MNEMONAS_IMAGE=ghcr.io/${repository}:${expected_version#v}"
 
 	tar -tzf "$archive" >"$manifest" || fail "cannot list archive: $base"
 	validate_manifest_paths "$manifest" "$expected_top"
+	tar -tvzf "$archive" >"$type_listing" || fail "cannot inspect archive entry types: $base"
+	validate_archive_entry_types "$type_listing"
 
 	assert_manifest_contains "$manifest" "$expected_top/nasd"
 	assert_manifest_contains "$manifest" "$expected_top/dataplane"
