@@ -244,6 +244,7 @@ Docker and systemd deployments expose only `8080` by default. Data plane ports `
 | [Backup Guide](docs/backup-guide.en.md) | Backup and restore strategy |
 | [FAQ](docs/faq.en.md) | Frequently asked questions |
 | [Architecture](docs/architecture.en.md) | System design and technology choices |
+| [Roadmap](docs/roadmap.en.md) | Priorities from private file cloud to home and small-team NAS |
 | [Security Guide](docs/security.en.md) | Auth and network security |
 | [Support](SUPPORT.en.md) | Support channels and support boundary |
 
