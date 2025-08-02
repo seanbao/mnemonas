@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"path"
 	"path/filepath"
 	"runtime"
@@ -1342,6 +1343,7 @@ func (s *Server) setupRoutes() {
 			}
 			r.Get("/", s.handleGetSettings)
 			r.Put("/", s.handleUpdateSettings)
+			r.Get("/security-check", s.handleGetSecurityCheck)
 			r.Get("/webdav-credentials", s.handleGetWebDAVCredentials)
 		})
 
@@ -4486,6 +4488,362 @@ func (s *Server) handleLogoutWithActivity(w http.ResponseWriter, r *http.Request
 		}
 	}
 	rec.FlushTo(w)
+}
+
+type securityCheckStatus string
+
+const (
+	securityCheckPass    securityCheckStatus = "pass"
+	securityCheckWarning securityCheckStatus = "warning"
+	securityCheckBlock   securityCheckStatus = "block"
+)
+
+type securityCheckItem struct {
+	ID      string                 `json:"id"`
+	Status  securityCheckStatus    `json:"status"`
+	Title   string                 `json:"title"`
+	Message string                 `json:"message"`
+	Details map[string]interface{} `json:"details,omitempty"`
+}
+
+type securityCheckResponse struct {
+	Status      securityCheckStatus    `json:"status"`
+	GeneratedAt time.Time              `json:"generated_at"`
+	Checks      []securityCheckItem    `json:"checks"`
+	Request     map[string]interface{} `json:"request"`
+	Config      map[string]interface{} `json:"config"`
+}
+
+func securityCheckOverallStatus(checks []securityCheckItem) securityCheckStatus {
+	status := securityCheckPass
+	for _, check := range checks {
+		switch check.Status {
+		case securityCheckBlock:
+			return securityCheckBlock
+		case securityCheckWarning:
+			status = securityCheckWarning
+		}
+	}
+	return status
+}
+
+func securityListenHostIsLoopback(host string) bool {
+	trimmed := strings.TrimSpace(host)
+	if trimmed == "" || trimmed == "*" {
+		return false
+	}
+	if strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]") {
+		trimmed = strings.TrimPrefix(strings.TrimSuffix(trimmed, "]"), "[")
+	}
+	trimmed = strings.TrimSuffix(trimmed, ".")
+	if strings.EqualFold(trimmed, "localhost") {
+		return true
+	}
+	if parsed := net.ParseIP(trimmed); parsed != nil {
+		return parsed.IsLoopback()
+	}
+	return false
+}
+
+func securityTCPAddressHost(address string) string {
+	trimmed := strings.TrimSpace(address)
+	if trimmed == "" {
+		return ""
+	}
+	host, _, err := net.SplitHostPort(trimmed)
+	if err == nil {
+		return strings.Trim(host, "[]")
+	}
+	if strings.Count(trimmed, ":") == 0 {
+		return trimmed
+	}
+	return ""
+}
+
+func securityShareBaseURLUsesHTTPS(baseURL string) bool {
+	trimmed := strings.TrimSpace(baseURL)
+	if trimmed == "" {
+		return false
+	}
+	parsed, err := url.Parse(trimmed)
+	return err == nil && strings.EqualFold(parsed.Scheme, "https")
+}
+
+func (s *Server) handleGetSecurityCheck(w http.ResponseWriter, r *http.Request) {
+	cfg := s.currentConfig()
+	if cfg == nil {
+		ServiceUnavailable(w, "settings not available")
+		return
+	}
+
+	requestSchemeValue := requestScheme(r)
+	remoteIP := requestip.RemoteIP(r.RemoteAddr)
+	trustedForwardedSource := requestip.IsTrustedForwardedSource(remoteIP)
+	serverLoopback := securityListenHostIsLoopback(cfg.Server.Host)
+	dataplaneHost := securityTCPAddressHost(cfg.DataPlane.GRPCAddress)
+	dataplaneLoopback := securityListenHostIsLoopback(dataplaneHost)
+	initialPasswordFile := filepath.Join(filepath.Dir(cfg.Auth.UsersFile), "initial-password.txt")
+
+	checks := make([]securityCheckItem, 0, 8)
+
+	if s.authEnabled {
+		checks = append(checks, securityCheckItem{
+			ID:      "auth_enabled",
+			Status:  securityCheckPass,
+			Title:   "Web 登录认证已启用",
+			Message: "管理界面需要账号登录。",
+		})
+	} else {
+		checks = append(checks, securityCheckItem{
+			ID:      "auth_enabled",
+			Status:  securityCheckBlock,
+			Title:   "Web 登录认证未启用",
+			Message: "公网访问前必须启用账号登录。",
+		})
+	}
+
+	if requestSchemeValue == "https" {
+		checks = append(checks, securityCheckItem{
+			ID:      "https_request",
+			Status:  securityCheckPass,
+			Title:   "当前访问已使用 HTTPS",
+			Message: "浏览器请求已通过 TLS 或受信代理转发为 HTTPS。",
+			Details: map[string]interface{}{
+				"direct_tls":               r.TLS != nil,
+				"forwarded_proto":          strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")),
+				"trusted_forwarded_source": trustedForwardedSource,
+			},
+		})
+	} else {
+		checks = append(checks, securityCheckItem{
+			ID:      "https_request",
+			Status:  securityCheckWarning,
+			Title:   "当前访问不是 HTTPS",
+			Message: "公网访问前应通过内置 TLS 或受信反向代理提供 HTTPS。",
+			Details: map[string]interface{}{
+				"direct_tls":               r.TLS != nil,
+				"forwarded_proto":          strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")),
+				"trusted_forwarded_source": trustedForwardedSource,
+			},
+		})
+	}
+
+	if cfg.Server.TLS.Enabled || cfg.Server.TrustedProxyHops > 0 {
+		checks = append(checks, securityCheckItem{
+			ID:      "trusted_proxy_or_tls",
+			Status:  securityCheckPass,
+			Title:   "HTTPS 信任边界已配置",
+			Message: "已启用内置 TLS，或已配置受信代理层数用于识别反向代理转发头。",
+			Details: map[string]interface{}{
+				"tls_enabled":           cfg.Server.TLS.Enabled,
+				"trusted_proxy_hops":    cfg.Server.TrustedProxyHops,
+				"trusted_remote_source": trustedForwardedSource,
+			},
+		})
+	} else {
+		checks = append(checks, securityCheckItem{
+			ID:      "trusted_proxy_or_tls",
+			Status:  securityCheckWarning,
+			Title:   "未配置 HTTPS 信任边界",
+			Message: "如果通过反向代理发布公网，请将受信代理层数设为实际代理层数；如果直接提供 HTTPS，请启用 TLS。",
+			Details: map[string]interface{}{
+				"tls_enabled":        cfg.Server.TLS.Enabled,
+				"trusted_proxy_hops": cfg.Server.TrustedProxyHops,
+			},
+		})
+	}
+
+	if serverLoopback {
+		checks = append(checks, securityCheckItem{
+			ID:      "server_listen",
+			Status:  securityCheckPass,
+			Title:   "Web 服务仅监听本机地址",
+			Message: "适合放在反向代理后方，仅由本机代理转发公网流量。",
+			Details: map[string]interface{}{
+				"host": cfg.Server.Host,
+				"port": cfg.Server.Port,
+			},
+		})
+	} else {
+		status := securityCheckWarning
+		message := "Web 服务当前监听非本机地址；公网部署时建议只监听 127.0.0.1 或 ::1，并由反向代理对外暴露。"
+		if !s.authEnabled {
+			status = securityCheckBlock
+			message = "Web 服务监听非本机地址且登录认证未启用，公网访问前必须修复。"
+		}
+		checks = append(checks, securityCheckItem{
+			ID:      "server_listen",
+			Status:  status,
+			Title:   "Web 服务监听范围偏宽",
+			Message: message,
+			Details: map[string]interface{}{
+				"host": cfg.Server.Host,
+				"port": cfg.Server.Port,
+			},
+		})
+	}
+
+	if dataplaneLoopback {
+		checks = append(checks, securityCheckItem{
+			ID:      "dataplane_listen",
+			Status:  securityCheckPass,
+			Title:   "数据面 gRPC 仅监听本机",
+			Message: "数据面接口不会直接暴露到外部网络。",
+			Details: map[string]interface{}{
+				"grpc_address": cfg.DataPlane.GRPCAddress,
+			},
+		})
+	} else {
+		checks = append(checks, securityCheckItem{
+			ID:      "dataplane_listen",
+			Status:  securityCheckBlock,
+			Title:   "数据面 gRPC 不应暴露外网",
+			Message: "请将 dataplane.grpc_address 绑定到 127.0.0.1 或 ::1，并通过 Web 控制面访问文件能力。",
+			Details: map[string]interface{}{
+				"grpc_address": cfg.DataPlane.GRPCAddress,
+			},
+		})
+	}
+
+	switch {
+	case !cfg.WebDAV.Enabled:
+		checks = append(checks, securityCheckItem{
+			ID:      "webdav_auth",
+			Status:  securityCheckPass,
+			Title:   "WebDAV 未启用",
+			Message: "当前没有额外的 WebDAV 暴露面。",
+		})
+	case strings.EqualFold(cfg.WebDAV.AuthType, "basic"):
+		checks = append(checks, securityCheckItem{
+			ID:      "webdav_auth",
+			Status:  securityCheckPass,
+			Title:   "WebDAV 已启用认证",
+			Message: "WebDAV 入口使用 Basic 认证。",
+			Details: map[string]interface{}{
+				"prefix":    cfg.WebDAV.Prefix,
+				"auth_type": cfg.WebDAV.AuthType,
+				"read_only": cfg.WebDAV.ReadOnly,
+			},
+		})
+	case strings.EqualFold(cfg.WebDAV.AuthType, "none") && serverLoopback:
+		checks = append(checks, securityCheckItem{
+			ID:      "webdav_auth",
+			Status:  securityCheckWarning,
+			Title:   "WebDAV 当前无独立认证",
+			Message: "当前 Web 服务仅监听本机；如经反向代理公开 WebDAV，请在代理层或 WebDAV 配置中启用认证。",
+			Details: map[string]interface{}{
+				"prefix":    cfg.WebDAV.Prefix,
+				"auth_type": cfg.WebDAV.AuthType,
+				"read_only": cfg.WebDAV.ReadOnly,
+			},
+		})
+	default:
+		checks = append(checks, securityCheckItem{
+			ID:      "webdav_auth",
+			Status:  securityCheckBlock,
+			Title:   "WebDAV 暴露面缺少认证",
+			Message: "WebDAV 已启用但认证方式不是 basic，公网访问前必须启用认证或关闭 WebDAV。",
+			Details: map[string]interface{}{
+				"prefix":    cfg.WebDAV.Prefix,
+				"auth_type": cfg.WebDAV.AuthType,
+				"read_only": cfg.WebDAV.ReadOnly,
+			},
+		})
+	}
+
+	switch {
+	case !cfg.Share.Enabled:
+		checks = append(checks, securityCheckItem{
+			ID:      "share_base_url",
+			Status:  securityCheckPass,
+			Title:   "分享功能未启用",
+			Message: "当前不会生成公开分享链接。",
+		})
+	case securityShareBaseURLUsesHTTPS(cfg.Share.BaseURL):
+		checks = append(checks, securityCheckItem{
+			ID:      "share_base_url",
+			Status:  securityCheckPass,
+			Title:   "分享基础 URL 使用 HTTPS",
+			Message: "新分享链接会使用 HTTPS 基础地址。",
+			Details: map[string]interface{}{
+				"base_url": cfg.Share.BaseURL,
+			},
+		})
+	case strings.TrimSpace(cfg.Share.BaseURL) == "" && requestSchemeValue == "https":
+		checks = append(checks, securityCheckItem{
+			ID:      "share_base_url",
+			Status:  securityCheckWarning,
+			Title:   "分享基础 URL 未固定",
+			Message: "当前访问是 HTTPS，但建议配置固定的公网基础 URL，避免从内网地址生成分享链接。",
+		})
+	default:
+		checks = append(checks, securityCheckItem{
+			ID:      "share_base_url",
+			Status:  securityCheckWarning,
+			Title:   "分享基础 URL 未使用 HTTPS",
+			Message: "公开分享链接应使用 HTTPS 基础地址。",
+			Details: map[string]interface{}{
+				"base_url": cfg.Share.BaseURL,
+			},
+		})
+	}
+
+	if _, err := os.Stat(initialPasswordFile); err == nil {
+		checks = append(checks, securityCheckItem{
+			ID:      "initial_password_file",
+			Status:  securityCheckBlock,
+			Title:   "初始管理员密码文件仍存在",
+			Message: "请完成首次登录并确认该文件已被删除；公网访问前不要保留初始密码文件。",
+			Details: map[string]interface{}{
+				"path": initialPasswordFile,
+			},
+		})
+	} else if errors.Is(err, os.ErrNotExist) {
+		checks = append(checks, securityCheckItem{
+			ID:      "initial_password_file",
+			Status:  securityCheckPass,
+			Title:   "未发现初始密码文件",
+			Message: "初始管理员密码文件已不存在。",
+		})
+	} else {
+		checks = append(checks, securityCheckItem{
+			ID:      "initial_password_file",
+			Status:  securityCheckWarning,
+			Title:   "无法确认初始密码文件状态",
+			Message: "请在服务器上确认 initial-password.txt 不存在。",
+			Details: map[string]interface{}{
+				"path":  initialPasswordFile,
+				"error": err.Error(),
+			},
+		})
+	}
+
+	resp := securityCheckResponse{
+		Status:      securityCheckOverallStatus(checks),
+		GeneratedAt: apiTimeNow(),
+		Checks:      checks,
+		Request: map[string]interface{}{
+			"scheme":                   requestSchemeValue,
+			"direct_tls":               r.TLS != nil,
+			"host":                     r.Host,
+			"remote_ip":                remoteIP,
+			"trusted_forwarded_source": trustedForwardedSource,
+			"forwarded_proto":          strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")),
+		},
+		Config: map[string]interface{}{
+			"auth_enabled":        s.authEnabled,
+			"server_host":         cfg.Server.Host,
+			"server_port":         cfg.Server.Port,
+			"tls_enabled":         cfg.Server.TLS.Enabled,
+			"trusted_proxy_hops":  cfg.Server.TrustedProxyHops,
+			"dataplane_grpc_addr": cfg.DataPlane.GRPCAddress,
+			"webdav_enabled":      cfg.WebDAV.Enabled,
+			"webdav_auth_type":    cfg.WebDAV.AuthType,
+			"share_enabled":       cfg.Share.Enabled,
+		},
+	}
+
+	NewAPIResponse(resp).Write(w, http.StatusOK)
 }
 
 // handleGetSettings returns current settings
