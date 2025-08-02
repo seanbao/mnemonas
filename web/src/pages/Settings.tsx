@@ -211,6 +211,39 @@ function normalizeSettingsTab(value: string | null): SettingsTabKey {
   return 'general'
 }
 
+type PublicProxyKind = 'caddy' | 'nginx'
+
+function normalizePublicDomainInput(value: string): string {
+  let trimmed = value.trim()
+  if (trimmed === '') {
+    return ''
+  }
+
+  if (/^https?:\/\//i.test(trimmed)) {
+    try {
+      trimmed = new URL(trimmed).hostname
+    } catch {
+      return ''
+    }
+  }
+
+  trimmed = trimmed.replace(/\/.*$/, '').replace(/:\d+$/, '').toLowerCase()
+  if (trimmed === '' || /[\s/:]/.test(trimmed)) {
+    return ''
+  }
+  return trimmed
+}
+
+function publicDomainErrorMessage(value: string): string | undefined {
+  if (value.trim() === '') {
+    return undefined
+  }
+  if (normalizePublicDomainInput(value) === '') {
+    return '请输入域名，不要包含路径或端口'
+  }
+  return undefined
+}
+
 function hasControlChar(value: string): boolean {
   for (let index = 0; index < value.length; index += 1) {
     const code = value.charCodeAt(index)
@@ -400,7 +433,12 @@ function getSecurityStatusMeta(status: SecurityCheckStatus): {
   }
 }
 
-function SecurityCheckRow({ check }: { check: SecurityCheckItem }) {
+type SecurityCheckAction = {
+  label: string
+  onPress: () => void
+}
+
+function SecurityCheckRow({ check, action }: { check: SecurityCheckItem; action?: SecurityCheckAction }) {
   const meta = getSecurityStatusMeta(check.status)
   const Icon = meta.Icon
 
@@ -416,6 +454,16 @@ function SecurityCheckRow({ check }: { check: SecurityCheckItem }) {
         </div>
         <p className="break-anywhere mt-1 text-xs leading-relaxed text-default-600">{check.message}</p>
       </div>
+      {action && (
+        <Button
+          size="sm"
+          variant="flat"
+          className="shrink-0 rounded-lg"
+          onPress={action.onPress}
+        >
+          {action.label}
+        </Button>
+      )}
     </div>
   )
 }
@@ -426,12 +474,14 @@ function SecurityCheckCard({
   isLoading,
   isRefreshing,
   onRefresh,
+  getAction,
 }: {
   data?: SecurityCheckData
   error: unknown
   isLoading: boolean
   isRefreshing: boolean
   onRefresh: () => void
+  getAction?: (check: SecurityCheckItem) => SecurityCheckAction | undefined
 }) {
   const checks = data?.checks ?? []
   const issueChecks = checks.filter((check) => check.status !== 'pass')
@@ -512,7 +562,11 @@ function SecurityCheckCard({
             </div>
             <div className="space-y-2">
               {visibleChecks.map((check) => (
-                <SecurityCheckRow key={check.id} check={check} />
+                <SecurityCheckRow
+                  key={check.id}
+                  check={check}
+                  action={check.status === 'pass' ? undefined : getAction?.(check)}
+                />
               ))}
             </div>
             {issueChecks.length === 0 && (
@@ -524,6 +578,129 @@ function SecurityCheckCard({
         )}
       </CardBody>
     </Card>
+  )
+}
+
+function PublicAccessWizard({
+  domainInput,
+  normalizedDomain,
+  domainError,
+  proxy,
+  shareEnabled,
+  onDomainChange,
+  onProxyChange,
+  onApplyRecommendation,
+}: {
+  domainInput: string
+  normalizedDomain: string
+  domainError?: string
+  proxy: PublicProxyKind
+  shareEnabled: boolean
+  onDomainChange: (value: string) => void
+  onProxyChange: (value: PublicProxyKind) => void
+  onApplyRecommendation: () => void
+}) {
+  const domainForCommand = normalizedDomain || 'nas.example.com'
+  const publicBaseURL = normalizedDomain ? `https://${normalizedDomain}` : 'https://nas.example.com'
+  const setupCommand = `sudo mnemonas-public-setup --proxy ${proxy} ${domainForCommand} admin@example.com`
+  const doctorCommand = `sudo mnemonas-doctor --public-domain ${domainForCommand}`
+
+  return (
+    <SettingsSection
+      title="公网访问向导"
+      description="生成反向代理配置前，先把 MnemoNAS 调整为适合公网发布的本机监听模式"
+      icon={Globe}
+    >
+      <div className="space-y-4">
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-[minmax(0,1fr)_10rem]">
+          <div>
+            <label className="mb-1.5 block text-sm font-medium text-default-600">公网域名</label>
+            <Input
+              aria-label="公网域名"
+              placeholder="nas.example.com"
+              value={domainInput}
+              onValueChange={onDomainChange}
+              isInvalid={!!domainError}
+              errorMessage={domainError}
+              startContent={<Globe size={16} className="text-default-500" />}
+              classNames={{
+                inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary",
+              }}
+            />
+          </div>
+          <div>
+            <label className="mb-1.5 block text-sm font-medium text-default-600">反向代理</label>
+            <select
+              aria-label="反向代理"
+              value={proxy}
+              onChange={(event) => onProxyChange(event.target.value === 'nginx' ? 'nginx' : 'caddy')}
+              className="input-shell h-12 w-full rounded-medium border border-transparent bg-transparent px-3 py-2 text-sm outline-none focus:border-accent-primary"
+            >
+              <option value="caddy">Caddy</option>
+              <option value="nginx">Nginx</option>
+            </select>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+          <div className="rounded-lg border border-divider bg-content2/40 px-3 py-3">
+            <div className="text-xs text-default-500">Web 监听</div>
+            <div className="mt-1 font-mono text-sm font-semibold text-foreground">127.0.0.1</div>
+          </div>
+          <div className="rounded-lg border border-divider bg-content2/40 px-3 py-3">
+            <div className="text-xs text-default-500">受信代理层数</div>
+            <div className="mt-1 font-mono text-sm font-semibold text-foreground">1</div>
+          </div>
+          <div className="rounded-lg border border-divider bg-content2/40 px-3 py-3">
+            <div className="text-xs text-default-500">分享基础 URL</div>
+            <div className="break-anywhere mt-1 font-mono text-sm font-semibold text-foreground">
+              {shareEnabled ? publicBaseURL : '分享功能未启用'}
+            </div>
+          </div>
+        </div>
+
+        <div className="space-y-2">
+          <div className="text-xs font-medium text-default-500">服务器命令</div>
+          <Snippet
+            symbol=""
+            variant="flat"
+            className="w-full"
+            classNames={{
+              base: "bg-content1 border border-divider",
+              pre: "font-mono text-xs whitespace-pre-wrap break-all",
+            }}
+            hideSymbol
+          >
+            {setupCommand}
+          </Snippet>
+          <Snippet
+            symbol=""
+            variant="flat"
+            className="w-full"
+            classNames={{
+              base: "bg-content1 border border-divider",
+              pre: "font-mono text-xs whitespace-pre-wrap break-all",
+            }}
+            hideSymbol
+          >
+            {doctorCommand}
+          </Snippet>
+        </div>
+
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+          <p className="text-xs leading-relaxed text-default-500">
+            应用推荐只会更新当前表单；点击“保存设置”后，监听地址变更需要重启服务。
+          </p>
+          <Button
+            className="btn-primary rounded-lg"
+            startContent={<CheckCircle2 size={16} />}
+            onPress={onApplyRecommendation}
+          >
+            应用推荐到表单
+          </Button>
+        </div>
+      </div>
+    </SettingsSection>
   )
 }
 
@@ -589,6 +766,8 @@ export function SettingsPage() {
   // WebDAV credentials state
   const [showWebDAVPassword, setShowWebDAVPassword] = useState(false)
   const [copiedField, setCopiedField] = useState<string | null>(null)
+  const [publicAccessDomain, setPublicAccessDomain] = useState('')
+  const [publicAccessProxy, setPublicAccessProxy] = useState<PublicProxyKind>('caddy')
   
   // Fetch settings from API
   const { data: settingsData, dataUpdatedAt: settingsDataUpdatedAt, isLoading, error, refetch, isRefetching } = useQuery({
@@ -763,10 +942,88 @@ export function SettingsPage() {
     : webDAVPrefixUsesReservedRoute
       ? '前缀不能是 /、/api、/s、/health 或它们的子路径'
       : undefined
+  const normalizedPublicAccessDomain = useMemo(() => {
+    return normalizePublicDomainInput(publicAccessDomain)
+  }, [publicAccessDomain])
+  const publicAccessDomainError = publicDomainErrorMessage(publicAccessDomain)
+  const publicAccessBaseURL = normalizedPublicAccessDomain ? `https://${normalizedPublicAccessDomain}` : ''
 
   const updateDirtySettings = (updater: (prev: typeof draftSettings) => typeof draftSettings) => {
     setIsDirty(true)
     setDraftSettings((prev) => updater(isDirty ? prev : settings))
+  }
+
+  const applyPublicAccessRecommendation = () => {
+    updateDirtySettings((prev) => ({
+      ...prev,
+      serverHost: '127.0.0.1',
+      serverTrustedProxyHops: '1',
+      shareBaseURL: prev.shareEnabled && publicAccessBaseURL ? publicAccessBaseURL : prev.shareBaseURL,
+    }))
+    addToast({
+      title: '已应用公网访问推荐',
+      description: '保存设置后生效；监听地址变更需要重启服务。',
+      color: 'success',
+    })
+  }
+
+  const applySecurityCheckFix = (checkID: string) => {
+    switch (checkID) {
+      case 'https_request':
+      case 'trusted_proxy_or_tls':
+        updateDirtySettings((prev) => ({
+          ...prev,
+          serverHost: '127.0.0.1',
+          serverTrustedProxyHops: '1',
+        }))
+        addToast({ title: '已应用反向代理推荐', description: '保存设置后生效。', color: 'success' })
+        return
+      case 'server_listen':
+        updateDirtySettings((prev) => ({ ...prev, serverHost: '127.0.0.1' }))
+        addToast({ title: '已改为本机监听', description: '保存设置并重启服务后生效。', color: 'success' })
+        return
+      case 'dataplane_listen':
+        updateDirtySettings((prev) => ({ ...prev, dataplaneGrpcAddress: '127.0.0.1:9090' }))
+        addToast({ title: '已改为本机数据面地址', description: '保存设置后会校验并切换连接。', color: 'success' })
+        return
+      case 'webdav_auth':
+        updateDirtySettings((prev) => ({
+          ...prev,
+          webdavAuthType: 'basic',
+          webdavUsername: prev.webdavUsername.trim() || 'admin',
+        }))
+        addToast({ title: '已启用 WebDAV Basic 认证', description: '请确认用户名和密码后保存。', color: 'success' })
+        return
+      case 'share_base_url':
+        if (!publicAccessBaseURL) {
+          addToast({ title: '需要公网域名', description: '先在公网访问向导中填写域名。', color: 'warning' })
+          return
+        }
+        updateDirtySettings((prev) => ({ ...prev, shareBaseURL: publicAccessBaseURL }))
+        addToast({ title: '已更新分享基础 URL', description: '保存设置后影响新创建的分享链接。', color: 'success' })
+        return
+      default:
+        addToast({ title: '该项需要手动处理', color: 'warning' })
+    }
+  }
+
+  const getSecurityCheckAction = (check: SecurityCheckItem): SecurityCheckAction | undefined => {
+    switch (check.id) {
+      case 'https_request':
+        return { label: '应用代理推荐', onPress: () => applySecurityCheckFix(check.id) }
+      case 'trusted_proxy_or_tls':
+        return { label: '设置代理层数', onPress: () => applySecurityCheckFix(check.id) }
+      case 'server_listen':
+        return { label: '改为本机监听', onPress: () => applySecurityCheckFix(check.id) }
+      case 'dataplane_listen':
+        return { label: '改为本机地址', onPress: () => applySecurityCheckFix(check.id) }
+      case 'webdav_auth':
+        return { label: '启用认证', onPress: () => applySecurityCheckFix(check.id) }
+      case 'share_base_url':
+        return { label: '使用 HTTPS URL', onPress: () => applySecurityCheckFix(check.id) }
+      default:
+        return undefined
+    }
   }
 
   const handleReset = async () => {
@@ -1333,12 +1590,24 @@ export function SettingsPage() {
         >
           <Tab key="general" title="常规">
             <div className="space-y-6 mt-6">
+              <PublicAccessWizard
+                domainInput={publicAccessDomain}
+                normalizedDomain={normalizedPublicAccessDomain}
+                domainError={publicAccessDomainError}
+                proxy={publicAccessProxy}
+                shareEnabled={settings.shareEnabled}
+                onDomainChange={setPublicAccessDomain}
+                onProxyChange={setPublicAccessProxy}
+                onApplyRecommendation={applyPublicAccessRecommendation}
+              />
+
               <SecurityCheckCard
                 data={securityCheckResponse?.data}
                 error={securityCheckError}
                 isLoading={isLoadingSecurityCheck}
                 isRefreshing={isRefetchingSecurityCheck}
                 onRefresh={() => { void refetchSecurityCheck() }}
+                getAction={getSecurityCheckAction}
               />
 
               <SettingsSection
