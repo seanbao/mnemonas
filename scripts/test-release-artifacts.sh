@@ -270,6 +270,81 @@ run_archive_entry_hardlink_fails() {
 	assert_file_contains "$out" "archive contains unsupported entry type 'h'"
 }
 
+run_archive_duplicate_entry_fails() {
+	local case_dir="$TMP_ROOT/archive-duplicate-entry"
+	local dist_dir="$case_dir/dist"
+	local package_name="mnemonas-v1.2.3-linux-amd64"
+	local tar_path="$case_dir/$package_name.tar"
+	local out="$case_dir/out.log"
+	local status
+
+	mkdir -p "$dist_dir" "$case_dir/extract"
+	make_release_archive "$dist_dir" "v1.2.3" "linux-amd64" "seanbao/mnemonas"
+	tar -xzf "$dist_dir/$package_name.tar.gz" -C "$case_dir/extract"
+	rm -f -- "$dist_dir/$package_name.tar.gz"
+	tar -cf "$tar_path" -C "$case_dir/extract" "$package_name"
+	tar -rf "$tar_path" -C "$case_dir/extract" "$package_name/README.md"
+	gzip -c "$tar_path" >"$dist_dir/$package_name.tar.gz"
+	write_checksums "$dist_dir"
+
+	set +e
+	bash "$REPO_ROOT/scripts/verify-release-artifacts.sh" "$dist_dir" >"$out" 2>&1
+	status=$?
+	set -e
+
+	[[ "$status" -ne 0 ]] || fail "release artifact verifier accepted a duplicate archive entry"
+	assert_file_contains "$out" "archive contains duplicate entry: $package_name/README.md"
+}
+
+run_archive_dot_segment_entry_fails() {
+	local case_dir="$TMP_ROOT/archive-dot-segment-entry"
+	local dist_dir="$case_dir/dist"
+	local package_name="mnemonas-v1.2.3-linux-amd64"
+	local out="$case_dir/out.log"
+	local status
+
+	mkdir -p "$dist_dir" "$case_dir/extract"
+	make_release_archive "$dist_dir" "v1.2.3" "linux-amd64" "seanbao/mnemonas"
+	tar -xzf "$dist_dir/$package_name.tar.gz" -C "$case_dir/extract"
+	rm -f -- "$dist_dir/$package_name.tar.gz"
+	tar -czf "$dist_dir/$package_name.tar.gz" \
+		-C "$case_dir/extract" "$package_name" \
+		-C "$case_dir/extract" "$package_name/./README.md"
+	write_checksums "$dist_dir"
+
+	set +e
+	bash "$REPO_ROOT/scripts/verify-release-artifacts.sh" "$dist_dir" >"$out" 2>&1
+	status=$?
+	set -e
+
+	[[ "$status" -ne 0 ]] || fail "release artifact verifier accepted a dot-segment archive entry"
+	assert_file_contains "$out" "archive entry has an unsafe path segment: $package_name/./README.md"
+}
+
+run_archive_backslash_entry_fails() {
+	local case_dir="$TMP_ROOT/archive-backslash-entry"
+	local dist_dir="$case_dir/dist"
+	local package_name="mnemonas-v1.2.3-linux-amd64"
+	local out="$case_dir/out.log"
+	local status
+
+	mkdir -p "$dist_dir" "$case_dir/extract"
+	make_release_archive "$dist_dir" "v1.2.3" "linux-amd64" "seanbao/mnemonas"
+	tar -xzf "$dist_dir/$package_name.tar.gz" -C "$case_dir/extract"
+	printf 'unsafe\n' >"$case_dir/extract/$package_name/README\\evil.md"
+	rm -f -- "$dist_dir/$package_name.tar.gz"
+	tar -czf "$dist_dir/$package_name.tar.gz" -C "$case_dir/extract" "$package_name"
+	write_checksums "$dist_dir"
+
+	set +e
+	bash "$REPO_ROOT/scripts/verify-release-artifacts.sh" "$dist_dir" >"$out" 2>&1
+	status=$?
+	set -e
+
+	[[ "$status" -ne 0 ]] || fail "release artifact verifier accepted a backslash archive entry"
+	assert_file_contains "$out" "archive entry contains a backslash: $package_name/README"
+}
+
 run_wrong_env_image_fails() {
 	local case_dir="$TMP_ROOT/wrong-image"
 	local dist_dir="$case_dir/dist"
@@ -355,6 +430,9 @@ run_checksum_path_escape_fails_before_checksum
 run_archive_symlink_fails_before_checksum
 run_archive_entry_symlink_fails
 run_archive_entry_hardlink_fails
+run_archive_duplicate_entry_fails
+run_archive_dot_segment_entry_fails
+run_archive_backslash_entry_fails
 run_wrong_env_image_fails
 run_remote_image_check_uses_docker_manifest
 run_remote_image_check_failure_fails
