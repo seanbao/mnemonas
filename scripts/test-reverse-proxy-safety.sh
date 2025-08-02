@@ -54,7 +54,13 @@ run_email_validation_tests() {
     run_expect_failure "email-domain-invalid-label" "nas.example.com" "admin@bad-.example.com" "邮箱格式不安全"
 }
 
+run_config_rewrite_self_test() {
+    MNEMONAS_REVERSE_PROXY_SELF_TEST=1 bash "$REPO_ROOT/scripts/setup-reverse-proxy.sh" > "$TMP_ROOT/self-test.log" 2>&1
+    assert_file_contains "$TMP_ROOT/self-test.log" "[reverse-proxy-self-test] all checks passed"
+}
+
 run_domain_validation_tests
 run_email_validation_tests
+run_config_rewrite_self_test
 
 printf '[reverse-proxy-test] all checks passed\n'

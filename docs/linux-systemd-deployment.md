@@ -110,11 +110,13 @@ sudo mnemonas-doctor
 sudo cat /srv/mnemonas/.mnemonas/initial-password.txt
 ```
 
-打开浏览器访问：
+在局域网、服务器本机或 SSH 隧道中打开浏览器访问：
 
 ```text
 http://<server-ip>:8080
 ```
+
+公网域名访问不要直接开放 `8080`，请按 [公网服务器快速上线](public-server-quickstart.md) 配置 HTTPS 反向代理。
 
 登录后请立即修改管理员密码；初始密码文件如果仍存在，`mnemonas-doctor` 会提示。
 
@@ -156,6 +158,8 @@ sudo systemctl restart mnemonas
 - 不建议把 SSH 直接暴露到公网
 - 如果需要分享给外部用户，优先只暴露 HTTPS 反向代理后的 Web 入口
 - 使用 Caddy/Nginx/Traefik 时参考 [反向代理配置](reverse-proxy-setup.md)，并正确配置 `server.trusted_proxy_hops`
+
+如果目标是通过公网域名访问，优先按 [公网服务器快速上线](public-server-quickstart.md) 配置。该路径会把 MnemoNAS 后端收紧到 `127.0.0.1:8080`，公网只开放 Caddy/Nginx 的 `80/443`。
 
 推荐把两条链路分开规划：
 

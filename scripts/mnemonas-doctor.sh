@@ -8,6 +8,7 @@ WEB_DIR="${WEB_DIR:-/usr/local/share/mnemonas/web}"
 CONFIG_PATH="${CONFIG_PATH:-/etc/mnemonas/config.toml}"
 BACKUP_ROOT="${BACKUP_ROOT:-/backup/mnemonas}"
 MIN_FREE_BYTES="${MIN_FREE_BYTES:-10737418240}"
+PUBLIC_DOMAIN="${MNEMONAS_PUBLIC_DOMAIN:-}"
 
 FAILURES=0
 WARNINGS=0
@@ -31,8 +32,37 @@ die() {
   exit 1
 }
 
+usage() {
+  cat <<EOF
+Usage: mnemonas-doctor [--public-domain <domain>]
+
+Options:
+  --public-domain <domain>  Also verify the public HTTPS entry and direct-port exposure.
+  -h, --help                Show this help.
+EOF
+}
+
 have() {
   command -v "$1" >/dev/null 2>&1
+}
+
+parse_args() {
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --public-domain)
+        [[ $# -ge 2 ]] || die "--public-domain requires a domain"
+        PUBLIC_DOMAIN="$2"
+        shift 2
+        ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      *)
+        die "unknown argument: $1"
+        ;;
+    esac
+  done
 }
 
 toml_value() {
@@ -164,6 +194,27 @@ check_loopback_only_port() {
   fi
 }
 
+check_loopback_only_port_strict() {
+  local port="$1"
+  local label="$2"
+  local address host
+  local -a unsafe_addresses=()
+
+  while IFS= read -r address; do
+    [[ -n "$address" ]] || continue
+    host="$(host_from_ss_local_address "$address" "$port")"
+    if ! is_loopback_host "$host"; then
+      unsafe_addresses+=("$address")
+    fi
+  done < <(ss_local_addresses_for_port "$port")
+
+  if [[ "${#unsafe_addresses[@]}" -eq 0 ]]; then
+    ok "$label port $port is loopback-only"
+  else
+    fail "$label port $port is listening beyond loopback (${unsafe_addresses[*]}); public deployments must expose only the HTTPS reverse proxy"
+  fi
+}
+
 is_valid_tcp_host() {
   local host="$1"
   local label
@@ -230,12 +281,28 @@ require_safe_http_url() {
   [[ "$value" =~ ^https?://[^[:space:]]+$ ]] || die "$label must be an http(s) URL: $value"
 }
 
+require_safe_public_domain() {
+  local value="$1"
+
+  [[ -z "$value" ]] && return 0
+  [[ "$value" != *[[:space:]]* ]] || die "PUBLIC_DOMAIN cannot contain whitespace: $value"
+  [[ "$value" != *"/"* && "$value" != *":"* ]] || die "PUBLIC_DOMAIN must be a hostname without scheme or port: $value"
+  is_valid_tcp_host "$value" || die "PUBLIC_DOMAIN is invalid: $value"
+}
+
+parse_args "$@"
+require_safe_public_domain "$PUBLIC_DOMAIN"
+
 configured_storage_root=""
 configured_server_port=""
 configured_grpc_address=""
+configured_server_host=""
+configured_trusted_proxy_hops=""
 if [[ -f "$CONFIG_PATH" ]]; then
+  configured_server_host="$(toml_value server host "$CONFIG_PATH")"
   configured_storage_root="$(toml_value storage root "$CONFIG_PATH")"
   configured_server_port="$(toml_value server port "$CONFIG_PATH")"
+  configured_trusted_proxy_hops="$(toml_value server trusted_proxy_hops "$CONFIG_PATH")"
   configured_grpc_address="$(toml_value dataplane grpc_address "$CONFIG_PATH")"
 fi
 
@@ -351,6 +418,50 @@ check_http() {
   fi
 }
 
+check_http_unreachable() {
+  local url="$1"
+  local label="$2"
+  if ! have curl; then
+    warn "curl not available; skipping $label exposure check"
+    return
+  fi
+
+  if curl -fsS --connect-timeout 3 --max-time 5 "$url" >/dev/null 2>&1; then
+    fail "$label is publicly reachable: $url"
+  else
+    ok "$label is not publicly reachable: $url"
+  fi
+}
+
+tcp_connectable() {
+  local host="$1"
+  local port="$2"
+
+  if have timeout; then
+    timeout 3 bash -c "</dev/tcp/$host/$port" >/dev/null 2>&1
+    return $?
+  fi
+
+  return 2
+}
+
+check_tcp_unreachable() {
+  local host="$1"
+  local port="$2"
+  local label="$3"
+  local status=0
+
+  tcp_connectable "$host" "$port"
+  status=$?
+  if [[ "$status" -eq 0 ]]; then
+    fail "$label port $port is publicly reachable on $host"
+  elif [[ "$status" -eq 2 ]]; then
+    warn "timeout command not available; skipping $label public TCP exposure check"
+  else
+    ok "$label port $port is not publicly reachable on $host"
+  fi
+}
+
 format_kib() {
   local value="$1"
   awk -v kib="$value" '
@@ -439,6 +550,47 @@ check_ufw() {
   fi
   if ufw_allows_port "$status" "$DATAPLANE_HTTP_PORT"; then
     warn "ufw appears to allow dataplane HTTP port $DATAPLANE_HTTP_PORT; remove public allow rules for this port"
+  fi
+}
+
+check_public_domain() {
+  local domain="$1"
+  local public_health_url="https://$domain/health"
+
+  [[ -n "$domain" ]] || return
+
+  printf '\nPublic access checks for %s\n' "$domain"
+
+  if [[ "$configured_server_host" == "127.0.0.1" || "$configured_server_host" == "localhost" || "$configured_server_host" == "::1" || "$configured_server_host" == "[::1]" ]]; then
+    ok "public backend host is loopback-only: ${configured_server_host:-<unset>}"
+  else
+    fail "public backend host should be 127.0.0.1 behind a reverse proxy, got: ${configured_server_host:-<unset>}"
+  fi
+
+  if [[ "$configured_trusted_proxy_hops" =~ ^[0-9]+$ ]] && (( 10#$configured_trusted_proxy_hops >= 1 )); then
+    ok "trusted proxy hops configured: $configured_trusted_proxy_hops"
+  else
+    fail "server.trusted_proxy_hops should be at least 1 behind a public reverse proxy, got: ${configured_trusted_proxy_hops:-<unset>}"
+  fi
+
+  if have curl && curl -fsS "$public_health_url" >/dev/null 2>&1; then
+    ok "public HTTPS health reachable: $public_health_url"
+  else
+    fail "public HTTPS health not reachable: $public_health_url"
+  fi
+
+  check_http_unreachable "http://$domain:$SERVER_PORT/health" "public direct control plane"
+  check_tcp_unreachable "$domain" "$DATAPLANE_GRPC_PORT" "public dataplane gRPC"
+  check_tcp_unreachable "$domain" "$DATAPLANE_HTTP_PORT" "public dataplane HTTP"
+
+  if have ss; then
+    check_loopback_only_port_strict "$SERVER_PORT" "control plane"
+    check_loopback_only_port_strict "$DATAPLANE_GRPC_PORT" "dataplane gRPC"
+    check_loopback_only_port_strict "$DATAPLANE_HTTP_PORT" "dataplane HTTP"
+  fi
+
+  if [[ -f "$STORAGE_ROOT/.mnemonas/initial-password.txt" ]]; then
+    fail "initial admin password file still exists; change the admin password before public access"
   fi
 }
 
@@ -560,6 +712,7 @@ if have tailscale; then
 fi
 
 check_ufw
+check_public_domain "$PUBLIC_DOMAIN"
 
 printf '\nSummary: %d failure(s), %d warning(s)\n' "$FAILURES" "$WARNINGS"
 if [[ "$FAILURES" -gt 0 ]]; then

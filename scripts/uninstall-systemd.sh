@@ -239,6 +239,7 @@ main() {
   remove_installed_file "$BIN_DIR/dataplane"
   remove_installed_file "$BIN_DIR/mnemonas-dataplane-start"
   remove_installed_file "$BIN_DIR/mnemonas-doctor"
+  remove_installed_file "$BIN_DIR/mnemonas-public-setup"
   remove_installed_file "$BIN_DIR/mnemonas-uninstall-systemd"
   remove_installed_dir "$SHARE_DIR" "SHARE_DIR"
 

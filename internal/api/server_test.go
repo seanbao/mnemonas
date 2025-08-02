@@ -12192,7 +12192,8 @@ func TestServer_UpdateSettings_UnreachableDataplaneRejectedBeforeSave(t *testing
 	if !bytes.Equal(persistedConfig, baselineConfig) {
 		t.Fatalf("expected persisted config to stay unchanged, got %s", string(persistedConfig))
 	}
-	if bytes.Contains(persistedConfig, []byte("127.0.0.1:1")) {
+	if bytes.Contains(persistedConfig, []byte("grpc_address = '127.0.0.1:1'")) ||
+		bytes.Contains(persistedConfig, []byte(`grpc_address = "127.0.0.1:1"`)) {
 		t.Fatalf("expected unreachable dataplane address not to be persisted, got %s", string(persistedConfig))
 	}
 	_ = oldClient.Close()
