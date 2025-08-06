@@ -182,7 +182,7 @@ export function Sidebar({ collapsed = false, onClose }: SidebarProps) {
       </div>
 
       {/* Navigation */}
-      <nav className="flex-1 py-4 px-3 overflow-y-auto relative z-10 custom-scrollbar" aria-label="主导航">
+      <nav className="relative z-10 min-h-0 flex-1 overflow-y-auto py-4 px-3 custom-scrollbar" aria-label="主导航">
         {navSections
           .map((section) => ({
             ...section,

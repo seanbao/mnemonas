@@ -13,39 +13,8 @@ import (
 	"github.com/seanbao/mnemonas/internal/config"
 )
 
-func TestServer_RouteContract_CoversAllRESTEndpoints(t *testing.T) {
-	tmpDir := t.TempDir()
-	cfg := config.Default()
-	cfg.Storage.Root = tmpDir
-	cfg.Share.Enabled = true
-	cfg.Favorites.Enabled = true
-
-	server, err := NewServer(zerolog.Nop(), &ServerConfig{
-		Config:             cfg,
-		ConfigPath:         filepath.Join(tmpDir, "config.toml"),
-		AuthEnabled:        true,
-		AuthUsersFile:      filepath.Join(tmpDir, "users.json"),
-		AuthJWTSecret:      "route-contract-secret",
-		AuthAccessTTL:      15 * time.Minute,
-		AuthRefreshTTL:     24 * time.Hour,
-		ShareEnabled:       true,
-		ShareStoreFile:     filepath.Join(tmpDir, "shares.json"),
-		FavoritesEnabled:   true,
-		FavoritesStoreFile: filepath.Join(tmpDir, "favorites.json"),
-	})
-	if err != nil {
-		t.Fatalf("NewServer() error: %v", err)
-	}
-
-	actual := make(map[string]struct{})
-	if err := chi.Walk(server.router, func(method string, route string, _ http.Handler, _ ...func(http.Handler) http.Handler) error {
-		actual[method+" "+route] = struct{}{}
-		return nil
-	}); err != nil {
-		t.Fatalf("walking routes: %v", err)
-	}
-
-	expected := []string{
+func expectedRESTRouteContracts() []string {
+	return []string{
 		"GET /api/v1/activity/",
 		"GET /api/v1/activity/stats",
 		"DELETE /api/v1/activity/",
@@ -113,6 +82,41 @@ func TestServer_RouteContract_CoversAllRESTEndpoints(t *testing.T) {
 		"GET /s/{id}/download/*",
 		"GET /s/{id}/items",
 	}
+}
+
+func TestServer_RouteContract_CoversAllRESTEndpoints(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfg := config.Default()
+	cfg.Storage.Root = tmpDir
+	cfg.Share.Enabled = true
+	cfg.Favorites.Enabled = true
+
+	server, err := NewServer(zerolog.Nop(), &ServerConfig{
+		Config:             cfg,
+		ConfigPath:         filepath.Join(tmpDir, "config.toml"),
+		AuthEnabled:        true,
+		AuthUsersFile:      filepath.Join(tmpDir, "users.json"),
+		AuthJWTSecret:      "route-contract-secret",
+		AuthAccessTTL:      15 * time.Minute,
+		AuthRefreshTTL:     24 * time.Hour,
+		ShareEnabled:       true,
+		ShareStoreFile:     filepath.Join(tmpDir, "shares.json"),
+		FavoritesEnabled:   true,
+		FavoritesStoreFile: filepath.Join(tmpDir, "favorites.json"),
+	})
+	if err != nil {
+		t.Fatalf("NewServer() error: %v", err)
+	}
+
+	actual := make(map[string]struct{})
+	if err := chi.Walk(server.router, func(method string, route string, _ http.Handler, _ ...func(http.Handler) http.Handler) error {
+		actual[method+" "+route] = struct{}{}
+		return nil
+	}); err != nil {
+		t.Fatalf("walking routes: %v", err)
+	}
+
+	expected := expectedRESTRouteContracts()
 
 	expectedSet := make(map[string]struct{}, len(expected))
 	for _, route := range expected {

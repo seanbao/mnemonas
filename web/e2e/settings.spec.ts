@@ -59,7 +59,7 @@ test.describe('设置选项卡切换', () => {
       await page.waitForTimeout(500)
 
       // 检查 WebDAV 相关设置项
-      const webdavSwitch = page.getByText(/启用 WebDAV/i)
+      const webdavSwitch = page.getByRole('switch', { name: /启用 WebDAV/i })
       await expect(webdavSwitch).toBeVisible({ timeout: 5000 })
     }
   })

@@ -24,7 +24,7 @@ test.describe('搜索页面', () => {
   })
 
   test('应显示搜索页面标题', async ({ page }) => {
-    const title = page.getByText('搜索').first()
+    const title = page.getByRole('heading', { name: '搜索', exact: true })
     await expect(title).toBeVisible({ timeout: 5000 })
   })
 

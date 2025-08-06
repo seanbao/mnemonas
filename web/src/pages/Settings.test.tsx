@@ -283,7 +283,7 @@ describe('SettingsPage', () => {
 
       await waitFor(() => {
         expect(screen.getByText('WebDAV 服务')).toBeTruthy()
-        expect(screen.getByText('启用 WebDAV')).toBeTruthy()
+        expect(screen.getByRole('switch', { name: '启用 WebDAV' })).toBeTruthy()
       })
     })
 
@@ -667,7 +667,7 @@ describe('SettingsPage', () => {
       await openTab(user, '版本保留')
 
       await waitFor(() => {
-        expect(screen.getByText('启用回收站')).toBeTruthy()
+        expect(screen.getByRole('switch', { name: '启用回收站' })).toBeTruthy()
       })
 
       await user.click(screen.getByRole('switch'))
@@ -1285,7 +1285,7 @@ describe('SettingsPage', () => {
       await openTab(user, 'WebDAV')
 
       await waitFor(() => {
-        expect(screen.getByText('启用 WebDAV')).toBeTruthy()
+        expect(screen.getByRole('switch', { name: '启用 WebDAV' })).toBeTruthy()
       })
     })
 
