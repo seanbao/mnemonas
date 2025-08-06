@@ -186,7 +186,7 @@ classify_file() {
 			append_to_group "build-docker-deploy" "$file"
 			return 0
 			;;
-		.github/workflows/*|Makefile|scripts/check-*.sh|scripts/test-*.sh|scripts/verify-changed.sh|scripts/plan-hardening-commits.sh|scripts/e2e-test.sh|scripts/fault-injection-test.sh|scripts/torture-test.sh|scripts/run-*.sh|scripts/with-test-dataplane.sh|web/scripts/*|web/.husky/*)
+		.github/workflows/*|Makefile|scripts/check-*.sh|scripts/test-*.sh|scripts/verify-changed.sh|scripts/plan-hardening-commits.sh|scripts/e2e-test.sh|scripts/fault-injection-test.sh|scripts/torture-test.sh|scripts/run-*.sh|scripts/webdav-client-smoke.sh|scripts/with-test-dataplane.sh|web/scripts/*|web/.husky/*)
 			append_to_group "build-ci" "$file"
 			return 0
 			;;
