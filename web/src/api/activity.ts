@@ -99,6 +99,8 @@ export type ActionType =
   | 'trash_restore'
   | 'trash_delete'
   | 'trash_empty'
+  | 'disk_health'
+  | 'scrub'
 
 function isActionType(value: unknown): value is ActionType {
   return value === 'upload'
@@ -119,6 +121,8 @@ function isActionType(value: unknown): value is ActionType {
     || value === 'trash_restore'
     || value === 'trash_delete'
     || value === 'trash_empty'
+    || value === 'disk_health'
+    || value === 'scrub'
 }
 
 function isStringRecord(value: unknown): value is Record<string, string> {
@@ -274,6 +278,8 @@ export function getActionLabel(action: ActionType): string {
     trash_restore: '从回收站恢复',
     trash_delete: '从回收站删除',
     trash_empty: '清空回收站',
+    disk_health: '磁盘健康异常',
+    scrub: '数据校验',
   }
   return labels[action] || action
 }
@@ -299,6 +305,8 @@ export function getActionColor(action: ActionType): 'default' | 'primary' | 'suc
     trash_restore: 'success',
     trash_delete: 'danger',
     trash_empty: 'danger',
+    disk_health: 'warning',
+    scrub: 'warning',
   }
   return colors[action] || 'default'
 }

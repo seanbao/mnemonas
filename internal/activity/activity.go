@@ -75,6 +75,8 @@ const (
 	ActionTrashRestore ActionType = "trash_restore"
 	ActionTrashDelete  ActionType = "trash_delete"
 	ActionTrashEmpty   ActionType = "trash_empty"
+	ActionDiskHealth   ActionType = "disk_health"
+	ActionScrub        ActionType = "scrub"
 )
 
 // Entry represents a single activity log entry

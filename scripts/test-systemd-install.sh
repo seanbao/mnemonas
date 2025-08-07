@@ -801,6 +801,7 @@ run_doctor_public_domain_test() {
   local web_dir="$case_dir/web"
   local storage_dir="$case_dir/storage"
   local backup_dir="$case_dir/backup"
+  local status
   mkdir -p "$fake_path" "$bin_dir" "$web_dir" "$storage_dir/files" "$storage_dir/.mnemonas" "$backup_dir"
   chmod 0750 "$storage_dir" "$storage_dir/files"
   chmod 0700 "$storage_dir/.mnemonas"
@@ -821,13 +822,30 @@ run_doctor_public_domain_test() {
   write_executable "$fake_path/curl" \
     '#!/usr/bin/env bash' \
     'url="${@: -1}"' \
+    'if [[ "$*" == *" -w "* && "$url" == "http://nas.example.com/health" ]]; then printf "301 https://nas.example.com/health"; exit 0; fi' \
     'case "$url" in' \
     '  https://nas.example.com/health) printf "ok\n";;' \
     '  http://nas.example.com:18080/health) exit 7;;' \
     '  */) printf "<div id=\"root\"></div>\n";;' \
     '  *) printf "ok\n";;' \
     'esac'
-  write_executable "$fake_path/timeout" '#!/usr/bin/env bash' 'exit 1'
+  write_executable "$fake_path/openssl" \
+    '#!/usr/bin/env bash' \
+    'if [[ "${1:-}" == "s_client" ]]; then' \
+    '  printf "%s\n" "-----BEGIN CERTIFICATE-----" "FAKE" "-----END CERTIFICATE-----" "Verify return code: 0 (ok)"' \
+    '  exit 0' \
+    'fi' \
+    'if [[ "${1:-}" == "x509" ]]; then' \
+    '  case " $* " in' \
+    '    *" -checkend "*) [[ "${MNEMONAS_FAKE_CERT_EXPIRES_SOON:-0}" == "1" ]] && exit 1; exit 0;;' \
+    '    *" -enddate "*) printf "notAfter=Jun 01 12:00:00 2026 GMT\n"; exit 0;;' \
+    '  esac' \
+    'fi' \
+    'exit 1'
+  write_executable "$fake_path/timeout" \
+    '#!/usr/bin/env bash' \
+    'if [[ "${2:-}" == "openssl" ]]; then shift; exec "$@"; fi' \
+    'exit 1'
   write_executable "$fake_path/ss" \
     '#!/usr/bin/env bash' \
     'printf "LISTEN 0 4096 127.0.0.1:18080 0.0.0.0:*\n"' \
@@ -869,14 +887,36 @@ EOF
   assert_file_contains "$case_dir/doctor-public.log" "public backend host is loopback-only: 127.0.0.1"
   assert_file_contains "$case_dir/doctor-public.log" "trusted proxy hops configured: 1"
   assert_file_contains "$case_dir/doctor-public.log" "public HTTPS health reachable: https://nas.example.com/health"
+  assert_file_contains "$case_dir/doctor-public.log" "public HTTP redirects to HTTPS: http://nas.example.com/health -> https://nas.example.com/health"
+  assert_file_contains "$case_dir/doctor-public.log" "public HTTPS certificate matches nas.example.com"
+  assert_file_contains "$case_dir/doctor-public.log" "public HTTPS certificate is valid for at least 30 days"
+  assert_file_contains "$case_dir/doctor-public.log" "certificate automation detected: Caddy"
   assert_file_contains "$case_dir/doctor-public.log" "public direct control plane is not publicly reachable: http://nas.example.com:18080/health"
   assert_file_contains "$case_dir/doctor-public.log" "public dataplane gRPC port 19090 is not publicly reachable on nas.example.com"
   assert_file_contains "$case_dir/doctor-public.log" "control plane port 18080 is loopback-only"
+  assert_file_contains "$case_dir/doctor-public.log" "manual cloud firewall check: expose only 80/443 publicly; keep 18080/19090/19091 closed to the public internet"
   assert_file_contains "$case_dir/doctor-public.log" "Summary: 0 failure(s)"
+
+  set +e
+  PATH="$fake_path:$PATH" \
+    BIN_DIR="$bin_dir" \
+    WEB_DIR="$web_dir" \
+    CONFIG_PATH="$case_dir/config.toml" \
+    DATAPLANE_HTTP_PORT=19091 \
+    BACKUP_ROOT="$backup_dir" \
+    MNEMONAS_FAKE_CERT_EXPIRES_SOON=1 \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain nas.example.com > "$case_dir/doctor-public-expiring-cert.log"
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "public doctor accepted expiring public HTTPS certificate"
+  assert_file_contains "$case_dir/doctor-public-expiring-cert.log" "public HTTPS certificate expires within 30 days or cannot be parsed"
+  assert_file_contains "$case_dir/doctor-public-expiring-cert.log" "certificate failure triage for nas.example.com"
 
   write_executable "$fake_path/curl" \
     '#!/usr/bin/env bash' \
     'url="${@: -1}"' \
+    'if [[ "$*" == *" -w "* && "$url" == "http://nas.example.com/health" ]]; then printf "301 https://nas.example.com/health"; exit 0; fi' \
     'case "$url" in' \
     '  https://nas.example.com/health) printf "ok\n";;' \
     '  http://nas.example.com:18080/health) printf "open\n";;' \
@@ -905,7 +945,7 @@ EOF
     DATAPLANE_HTTP_PORT=19091 \
     BACKUP_ROOT="$backup_dir" \
     "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain nas.example.com > "$case_dir/doctor-public-unsafe.log"
-  local status=$?
+  status=$?
   set -e
 
   [[ "$status" -ne 0 ]] || fail "public doctor accepted unsafe public deployment"

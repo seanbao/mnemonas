@@ -1,0 +1,27 @@
+http:
+  routers:
+    mnemonas:
+      rule: "Host(`nas.example.com`)"
+      entryPoints:
+        - websecure
+      service: mnemonas
+      tls:
+        certResolver: letsencrypt
+      middlewares:
+        - security-headers
+
+  services:
+    mnemonas:
+      loadBalancer:
+        passHostHeader: true
+        servers:
+          - url: "http://127.0.0.1:8080"
+
+  middlewares:
+    security-headers:
+      headers:
+        stsSeconds: 63072000
+        stsIncludeSubdomains: false
+        stsPreload: false
+        contentTypeNosniff: true
+        referrerPolicy: no-referrer

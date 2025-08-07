@@ -71,6 +71,154 @@ docker compose stop
 docker compose start
 ```
 
+## Method 0: Built-in Backup Jobs
+
+MnemoNAS has a built-in backup job entry point that can run from the Maintenance page or API, report health, and run restore drills or remote consistency checks. Supported job types:
+
+- `local`: copy a source directory into a local snapshot with `manifest.json`.
+- `restic`: invoke the system `restic` executable and back up the source directory into a restic repository.
+- `rclone`: invoke the system `rclone` executable and sync the source directory to an rclone remote.
+
+Limits:
+
+- `local.destination` must be an absolute path outside `storage.root`, otherwise the backup can recurse into itself.
+- The default source is `storage.root`; for production data, prefer a ZFS, Btrfs, or LVM snapshot mount as `source`.
+- Symlinks inside the source directory abort the job so the backup cannot escape the intended source tree.
+- `restic` and `rclone` jobs do not build shell command strings; `command` must be a bare executable name or absolute path, and `extra_args` are appended to backup commands as argv entries. Restore commands do not reuse backup-specific extra args.
+- `password_file` and `config_file` must be regular files outside `source` and `storage.root` so backup credentials are not included in the data being backed up.
+- `schedule_interval` is a lightweight in-process scheduler for fixed intervals. For complex windows, bandwidth limits, network wake-up, and multi-stage recovery, continue to use systemd timers or external orchestration.
+
+Example config:
+
+```toml
+[backup]
+
+[[backup.jobs]]
+id = "external-disk"
+name = "External disk backup"
+type = "local"
+source = ""                                # empty means storage.root
+destination = "/mnt/backup-drive/mnemonas" # must be outside storage.root
+disabled = false
+schedule_interval = "24h"                  # run every 24 hours; zero or omitted means manual only
+schedule_window_start = "02:00"            # optional; automatic runs only start in this local-time window
+schedule_window_end = "05:00"              # may cross midnight, for example 22:00 to 06:00
+stale_after = "72h"                        # mark the job stale after 72 hours without a successful backup
+restore_drill_stale_after = "720h"         # remind after 30 days without a successful restore drill
+max_snapshots = 7                          # retain up to 7 snapshots
+max_age = "720h"                           # retain snapshots for up to 30 days
+include_config = true
+verify_after_backup = true
+exclude = [".mnemonas/thumbnails"]
+```
+
+Restic example:
+
+```toml
+[[backup.jobs]]
+id = "restic-remote"
+name = "Restic encrypted backup"
+type = "restic"
+source = "/mnt/snapshots/mnemonas-latest"
+repository = "rest:http://backup.example:8000/mnemonas"
+command = "restic"
+password_file = "/etc/mnemonas/restic.pass"
+schedule_interval = "24h"
+schedule_window_start = "02:00"
+schedule_window_end = "05:00"
+stale_after = "72h"
+restore_drill_stale_after = "720h"
+retention_policy = "external: restic forget --keep-daily 7 --keep-weekly 4 --prune"
+verify_after_backup = true
+exclude = [".mnemonas/thumbnails"]
+extra_args = ["--compression", "max"]
+```
+
+Rclone example:
+
+```toml
+[[backup.jobs]]
+id = "rclone-cloud"
+name = "Rclone cloud sync"
+type = "rclone"
+source = "/mnt/snapshots/mnemonas-latest"
+remote = "cloud:mnemonas/current"
+command = "rclone"
+config_file = "/etc/mnemonas/rclone.conf"
+schedule_interval = "24h"
+schedule_window_start = "02:00"
+schedule_window_end = "05:00"
+stale_after = "72h"
+restore_drill_stale_after = "720h"
+retention_policy = "external: cloud lifecycle keeps 30 daily versions"
+verify_after_backup = true
+exclude = [".mnemonas/thumbnails"]
+extra_args = ["--fast-list"]
+```
+
+`schedule_window_start` and `schedule_window_end` only restrict automatic scheduling; manual run-now operations are unaffected. The window uses the server local time in `HH:MM` format and may cross midnight. Local retention runs after a successful backup and always keeps the current snapshot. `max_snapshots = 0` and `max_age = "0"` disable the corresponding pruning dimension. Restic and rclone retention is managed by the external tool, such as `restic forget --prune`, a systemd timer, or lifecycle rules on the remote. Set `retention_policy` to mark that external policy as confirmed in the Maintenance page; otherwise the task shows a retention warning. `restore_drill_stale_after` controls periodic restore-drill reminders and defaults to 30 days when omitted. The Maintenance page shows job health, retention status, restore-drill status, next scheduled run, schedule window, latest backup, latest restore target, and how many old snapshots the latest local run pruned. Restore history keeps the latest 20 entries by default, including failed restore attempts and their error messages.
+
+After restarting the service:
+
+```bash
+# List jobs
+curl -b cookies.txt http://localhost:8080/api/v1/maintenance/backups
+
+# Run now
+curl -X POST -b cookies.txt http://localhost:8080/api/v1/maintenance/backups/external-disk/run
+
+# Restore-drill or remote consistency-check; local temporary restores are deleted by default
+curl -X POST -b cookies.txt \
+  http://localhost:8080/api/v1/maintenance/backups/external-disk/restore-drill \
+  -H 'Content-Type: application/json' \
+  -d '{"keep_artifact":false}'
+```
+
+For `local`, the restore drill copies the latest snapshot into a temporary directory and verifies every file size and SHA-256 from the manifest. Set `keep_artifact = true` to retain the restored directory for manual inspection. For `restic`, the drill currently runs `restic check`; for `rclone`, it runs `rclone check --one-way` to verify remote consistency.
+
+When you need to retrieve data from a `local`, `restic`, or `rclone` job, restore it into an explicit independent directory:
+
+```bash
+# Preview first: validate target safety and confirm estimated files, bytes, and sample paths
+curl -X POST -b cookies.txt \
+  http://localhost:8080/api/v1/maintenance/backups/external-disk/restore-preview \
+  -H 'Content-Type: application/json' \
+  -d '{"target_path":"/mnt/restore/mnemonas","include_config":true}'
+
+curl -X POST -b cookies.txt \
+  http://localhost:8080/api/v1/maintenance/backups/external-disk/restore \
+  -H 'Content-Type: application/json' \
+  -d '{"target_path":"/mnt/restore/mnemonas","include_config":true}'
+
+# Post-restore check: read-only target scan and storage-root layout detection
+curl -X POST -b cookies.txt \
+  http://localhost:8080/api/v1/maintenance/backups/external-disk/restore-verify \
+  -H 'Content-Type: application/json' \
+  -d '{"target_path":"/mnt/restore/mnemonas"}'
+
+# rclone job example: copy from remote and verify with rclone check before install
+curl -X POST -b cookies.txt \
+  http://localhost:8080/api/v1/maintenance/backups/rclone-cloud/restore \
+  -H 'Content-Type: application/json' \
+  -d '{"target_path":"/mnt/restore/mnemonas-rclone","include_config":false}'
+
+# restic job example: restore latest + job tag and install source contents at the target root
+curl -X POST -b cookies.txt \
+  http://localhost:8080/api/v1/maintenance/backups/restic-cloud/restore \
+  -H 'Content-Type: application/json' \
+  -d '{"target_path":"/mnt/restore/mnemonas-restic","include_config":false}'
+```
+
+`restore-preview` does not write target data and does not write restore history. It reuses the same restore-target safety checks and returns estimated file count, bytes, and up to 10 sample paths; the Maintenance page requires a successful preview that still matches the current target and config option before enabling restore. `target_path` must be an absolute server-side path outside the current `storage.root`, backup source, and any local backup destination or repository. Its parent must exist, and the target must not exist or must be empty. Local restore copies snapshot `data/` contents into the target root and verifies them immediately. With `include_config = true`, the config file is restored to `target_path/.mnemonas-restore/config.toml`. Restic preview uses `restic ls --json`, while restore runs `restic restore latest --tag mnemonas --tag job:<id> --path <source>` and installs the restored source directory contents at the target root. Rclone preview uses `rclone lsjson`, while restore runs `rclone copy <remote> <target>` and `rclone check <remote> <target> --one-way`. After restore, `restore-verify` scans the target read-only and reports file count, bytes, config presence, whether `files/` plus `.mnemonas/` look like a full storage root, and warnings for symlinks, special files, or incomplete layout. The Maintenance page enters the post-restore cutover checklist automatically after a successful restore.
+
+Cutover checklist:
+
+1. Confirm `restore-verify` has no unexplained warnings. For a full MnemoNAS storage-root restore, expect both `files/` and `.mnemonas/`.
+2. Keep the current config file and current `storage.root` as rollback points.
+3. Stop `mnemonas` and `mnemonas-dataplane`, then either point `storage.root` to the restored directory or move the restored directory into the production mount point.
+4. Start services and check health, login, file listing, upload, download, and version history.
+5. Keep the old directory until the restored instance is verified. To roll back, restore the old config and point `storage.root` back to the old directory.
+
 ## Method 1: rclone
 
 Install:
@@ -204,7 +352,8 @@ Stop MnemoNAS before restore. Restore to a temporary path first, validate it, th
 ```bash
 sudo systemctl stop mnemonas mnemonas-dataplane
 sudo mkdir -p /srv/mnemonas-restored
-sudo rclone sync remote:mnemonas-backup/current /srv/mnemonas-restored
+sudo rclone copy remote:mnemonas-backup/current /srv/mnemonas-restored
+sudo rclone check remote:mnemonas-backup/current /srv/mnemonas-restored --one-way
 
 sudo mv /srv/mnemonas /srv/mnemonas-old
 sudo mv /srv/mnemonas-restored /srv/mnemonas
@@ -223,6 +372,8 @@ restic restore <snapshot-id> \
   --repo /backup/mnemonas-restic \
   --target /restore/mnemonas
 ```
+
+When restoring a restic job through the Maintenance page or `/api/v1/maintenance/backups/{id}/restore`, MnemoNAS automatically selects the latest snapshot with the `mnemonas` and `job:<id>` tags and moves the restored source contents to the target root, so you do not have to manually move nested paths such as `/restore/.../srv/mnemonas`.
 
 For Docker, replace the systemd commands with `docker compose stop` and `docker compose start`, and ensure restored ownership matches `MNEMONAS_UID` and `MNEMONAS_GID`.
 
@@ -264,7 +415,18 @@ Store repository passwords and cloud credentials in a password manager or secret
 
 ## Backup Failure Alerts
 
-Add an exit trap to backup scripts:
+Built-in `[[backup.jobs]]` reuse `[alerts]` notification channels. MnemoNAS sends `backup_run` or `backup_restore_drill` events when a backup fails, a restore drill fails, a restore drill is missing or stale beyond `restore_drill_stale_after`, or a successful backup has retention warnings. Restore-drill reminders are rate-limited and recorded as `last_restore_drill_reminder_at` in the job view. Webhook and SMTP email channels can both receive these events. A Webhook channel can be enabled with:
+
+```toml
+[alerts]
+enabled = true
+webhook_url = "https://your-webhook.example/alert"
+webhook_method = "POST"
+```
+
+`POST` sends a JSON body with `type`, `level`, `message`, `timestamp`, `hostname`, and `details`. The details include the job ID, job name, run ID, status, error message, and snapshot path when available. `GET` mode encodes the same base fields into the query string and sends `details` as a JSON string.
+
+For external restic/rclone scripts, keep an exit trap:
 
 ```bash
 notify_failure() {

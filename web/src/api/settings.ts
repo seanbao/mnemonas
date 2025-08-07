@@ -68,6 +68,24 @@ export interface SettingsData {
     webhook_url: string
     webhook_method: string
     webhook_headers: string[]
+    telegram_enabled?: boolean
+    telegram_bot_token_configured?: boolean
+    telegram_chat_id?: string
+    email_enabled?: boolean
+    smtp_host?: string
+    smtp_port?: number
+    smtp_username?: string
+    smtp_password_configured?: boolean
+    smtp_from?: string
+    smtp_to?: string[]
+  }
+  maintenance?: {
+    scrub?: {
+      enabled: boolean
+      schedule_interval: string
+      retry_interval: string
+      max_retries: number
+    }
   }
   dataplane: {
     grpc_address: string
@@ -196,6 +214,24 @@ export interface UpdateSettingsRequest {
     webhook_url?: string
     webhook_method?: string
     webhook_headers?: string[]
+    telegram_enabled?: boolean
+    telegram_bot_token?: string
+    telegram_chat_id?: string
+    email_enabled?: boolean
+    smtp_host?: string
+    smtp_port?: number
+    smtp_username?: string
+    smtp_password?: string
+    smtp_from?: string
+    smtp_to?: string[]
+  }
+  maintenance?: {
+    scrub?: {
+      enabled?: boolean
+      schedule_interval?: string
+      retry_interval?: string
+      max_retries?: number
+    }
   }
   webdav?: {
     enabled?: boolean
@@ -355,8 +391,33 @@ function isValidSettingsData(value: unknown): value is SettingsData {
       || typeof value.alerts.cooldown_period !== 'string'
       || typeof value.alerts.webhook_url !== 'string'
       || typeof value.alerts.webhook_method !== 'string'
-      || !isStringArray(value.alerts.webhook_headers)) {
+      || !isStringArray(value.alerts.webhook_headers)
+      || (value.alerts.telegram_enabled !== undefined && typeof value.alerts.telegram_enabled !== 'boolean')
+      || (value.alerts.telegram_bot_token_configured !== undefined && typeof value.alerts.telegram_bot_token_configured !== 'boolean')
+      || (value.alerts.telegram_chat_id !== undefined && typeof value.alerts.telegram_chat_id !== 'string')
+      || (value.alerts.email_enabled !== undefined && typeof value.alerts.email_enabled !== 'boolean')
+      || (value.alerts.smtp_host !== undefined && typeof value.alerts.smtp_host !== 'string')
+      || (value.alerts.smtp_port !== undefined && typeof value.alerts.smtp_port !== 'number')
+      || (value.alerts.smtp_username !== undefined && typeof value.alerts.smtp_username !== 'string')
+      || (value.alerts.smtp_password_configured !== undefined && typeof value.alerts.smtp_password_configured !== 'boolean')
+      || (value.alerts.smtp_from !== undefined && typeof value.alerts.smtp_from !== 'string')
+      || (value.alerts.smtp_to !== undefined && !isStringArray(value.alerts.smtp_to))) {
       return false
+    }
+  }
+
+  if (value.maintenance !== undefined) {
+    if (!isRecord(value.maintenance)) {
+      return false
+    }
+    if (value.maintenance.scrub !== undefined) {
+      if (!isRecord(value.maintenance.scrub)
+        || typeof value.maintenance.scrub.enabled !== 'boolean'
+        || typeof value.maintenance.scrub.schedule_interval !== 'string'
+        || typeof value.maintenance.scrub.retry_interval !== 'string'
+        || typeof value.maintenance.scrub.max_retries !== 'number') {
+        return false
+      }
     }
   }
 

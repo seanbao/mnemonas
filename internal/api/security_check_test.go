@@ -37,6 +37,13 @@ func TestServer_GetSettingsSecurityCheck_ReportsPublicDeploymentRisks(t *testing
 	cfg.DataPlane.GRPCAddress = "0.0.0.0:9090"
 	cfg.WebDAV.Enabled = true
 	cfg.WebDAV.AuthType = "none"
+	cfg.SMB.Enabled = true
+	cfg.SMB.Listen = "0.0.0.0:1445"
+	cfg.SMB.Shares = []config.SMBShareConfig{{
+		Name:         "homes",
+		Path:         "/",
+		AllowedRoles: []string{"admin"},
+	}}
 	cfg.Share.Enabled = true
 	cfg.Share.BaseURL = "http://nas.example.test"
 
@@ -88,6 +95,9 @@ func TestServer_GetSettingsSecurityCheck_ReportsPublicDeploymentRisks(t *testing
 	}
 	if check := securityCheckByID(t, payload.Data.Checks, "webdav_auth"); check.Status != securityCheckBlock {
 		t.Fatalf("webdav_auth status = %q, want %q", check.Status, securityCheckBlock)
+	}
+	if check := securityCheckByID(t, payload.Data.Checks, "smb_preview"); check.Status != securityCheckWarning {
+		t.Fatalf("smb_preview status = %q, want %q", check.Status, securityCheckWarning)
 	}
 	if check := securityCheckByID(t, payload.Data.Checks, "initial_password_file"); check.Status != securityCheckBlock {
 		t.Fatalf("initial_password_file status = %q, want %q", check.Status, securityCheckBlock)
@@ -154,6 +164,9 @@ func TestServer_GetSettingsSecurityCheck_PassesTrustedProxyLoopbackSetup(t *test
 	}
 	if check := securityCheckByID(t, payload.Data.Checks, "https_request"); check.Status != securityCheckPass {
 		t.Fatalf("https_request status = %q, want %q", check.Status, securityCheckPass)
+	}
+	if check := securityCheckByID(t, payload.Data.Checks, "smb_preview"); check.Status != securityCheckPass {
+		t.Fatalf("smb_preview status = %q, want %q", check.Status, securityCheckPass)
 	}
 	if check := securityCheckByID(t, payload.Data.Checks, "initial_password_file"); check.Status != securityCheckPass {
 		t.Fatalf("initial_password_file status = %q, want %q", check.Status, securityCheckPass)

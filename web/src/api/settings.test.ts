@@ -124,6 +124,17 @@ describe('Settings API', () => {
         webhook_url: 'https://hooks.example.com/storage',
         webhook_method: 'POST',
         webhook_headers: ['X-Test: true'],
+        telegram_enabled: true,
+        telegram_bot_token_configured: true,
+        telegram_chat_id: '-1001234567890',
+      },
+      maintenance: {
+        scrub: {
+          enabled: true,
+          schedule_interval: '168h',
+          retry_interval: '1h',
+          max_retries: 1,
+        },
       },
     })
     mockAuthFetch.mockResolvedValueOnce({
@@ -136,6 +147,9 @@ describe('Settings API', () => {
     expect(result.data.server.tls?.cert_file).toBe('/cert.pem')
     expect(result.data.versioning?.auto_versioned_extensions).toEqual(['.txt', '.md'])
     expect(result.data.alerts?.webhook_headers).toEqual(['X-Test: true'])
+    expect(result.data.alerts?.telegram_bot_token_configured).toBe(true)
+    expect(result.data.alerts?.telegram_chat_id).toBe('-1001234567890')
+    expect(result.data.maintenance?.scrub?.schedule_interval).toBe('168h')
   })
 
   it('rejects malformed successful settings responses', async () => {
@@ -326,7 +340,8 @@ describe('Settings API', () => {
     ['trash', { trash: { enabled: true, retention_days: '30', max_size: 1024 } }],
     ['versioning', { versioning: { auto_versioned_extensions: ['.txt'], auto_versioned_filenames: [123], max_versioned_size: 1024 } }],
     ['favorites', { favorites: { enabled: true, runtime_available: 'yes' } }],
-    ['alerts', { alerts: { enabled: true, check_interval: '1m', threshold_pct: 80, critical_pct: 90, min_free_bytes: 1024, cooldown_period: '10m', webhook_url: 'https://hooks.example.com', webhook_method: 'POST', webhook_headers: [123] } }],
+    ['alerts', { alerts: { enabled: true, check_interval: '1m', threshold_pct: 80, critical_pct: 90, min_free_bytes: 1024, cooldown_period: '10m', webhook_url: 'https://hooks.example.com', webhook_method: 'POST', webhook_headers: [], telegram_enabled: true, telegram_bot_token_configured: 'yes' } }],
+    ['maintenance', { maintenance: { scrub: { enabled: true, schedule_interval: '168h', retry_interval: '1h', max_retries: '1' } } }],
   ])('rejects malformed optional %s settings sections', async (_name, override) => {
     mockAuthFetch.mockResolvedValueOnce({
       ok: true,

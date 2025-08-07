@@ -168,6 +168,7 @@ X-MnemoNAS-Session-Mode: cookie
 
 **失败行为**:
 - 同一 `username + 客户端地址` 组合连续登录失败达到限制时，返回 `429 Too Many Requests`，错误码为 `LOGIN_RATE_LIMITED`
+- 若已配置告警通道，登录限流会发送限频的 `login_rate_limited` warning 事件，事件只包含用户名和客户端地址，不包含密码或 token
 - `username` 分桶遵循账户名大小写不敏感语义，`handleruser` 与 `HANDLERUSER` 计入同一限流桶
 - 客户端地址默认不信任转发头，始终使用直连来源；只有显式设置 `server.trusted_proxy_hops > 0` 且请求直接来自 loopback 或私有网段代理时，才按 `X-Forwarded-For` 从右侧回溯客户端地址。多跳代理部署需要设置为代理总层数
 
@@ -521,8 +522,10 @@ GET /api/v1/diagnostics
       "dataplane_connected": true,
       "thumbnail_service_ready": true,
       "maintenance_history_ready": true,
+      "backup_manager_ready": true,
       "activity_log_ready": true,
-      "favorites_store_ready": true
+      "favorites_store_ready": true,
+      "smb_runtime_ready": false
     },
     "memory": {
       "alloc_mb": 50,
@@ -553,11 +556,55 @@ GET /api/v1/diagnostics
       "min_free_bytes": 21474836480,
       "cooldown_period": "2h0m0s",
       "webhook_configured": true,
+      "telegram_configured": true,
+      "email_configured": true,
       "webhook_method": "POST",
       "last_level": "warning",
       "last_checked_at": "2026-04-29T10:30:00Z",
       "last_used_pct": 87.5,
       "last_free_bytes": 9663676416
+    },
+    "maintenance": {
+      "history_ready": true,
+      "scrub_schedule_enabled": true,
+      "scrub_schedule_interval": "168h0m0s",
+      "scrub_retry_interval": "1h0m0s",
+      "scrub_max_retries": 1,
+      "last_scrub_status": "completed",
+      "last_scrub_at": "2026-05-13T08:30:00Z",
+      "scrub_failure_retries": 0
+    },
+    "disk_health": {
+      "enabled": true,
+      "runtime_available": true,
+      "check_interval": "1h0m0s",
+      "probe_timeout": "15s",
+      "cooldown_period": "4h0m0s",
+      "temperature_warning_c": 50,
+      "temperature_critical_c": 60,
+      "media_wear_warning_percent": 80,
+      "media_wear_critical_percent": 100,
+      "device_count": 1,
+      "last_status": "ok",
+      "last_checked_at": "2026-05-13T08:30:00Z",
+      "last_warning_count": 0,
+      "last_device_count": 1,
+      "last_critical_devices": 0,
+      "last_warning_devices": 0,
+      "last_unavailable_devices": 0
+    },
+    "smb": {
+      "enabled": true,
+      "runtime_available": false,
+      "implementation": "planned_sidecar",
+      "listen": "127.0.0.1:1445",
+      "server_name": "mnemonas",
+      "signing_required": true,
+      "encryption_required": false,
+      "share_count": 1,
+      "credentials_ready": true,
+      "gateway_configured": true,
+      "message": "SMB is configured but the protocol sidecar is not implemented in this build."
     },
     "storage": {
       "total_chunks": 1234,
@@ -580,7 +627,12 @@ GET /api/v1/diagnostics
 - 当回收站统计暂不可用时，`filesystem.trash_stats_available` 为 `false`，并且 `filesystem.trash_items` 和 `filesystem.trash_size` 会被省略，而不是回填 `0`。
 - `filesystem.disk_stats_available` 表示磁盘容量统计是否可用；不可用时 `filesystem.disk_*` 字段会被省略。可用时会同时包含 `filesystem.disk_filesystem_type` 和 `filesystem.disk_native_data_checksum_support`，便于健康页提示 ZFS/Btrfs 与普通文件系统的差异。
 - `alerts.runtime_available` 表示当前进程是否挂载了告警监控；`alerts.webhook_configured` 只表示是否配置了 Webhook，不会暴露 `webhook_url` 或 `webhook_headers`。
+- `alerts.telegram_configured` 只表示 Telegram 通知是否具备可用配置，不会暴露 `telegram_bot_token`。
+- `alerts.email_configured` 只表示 SMTP 邮件通知是否具备可用配置，不会暴露 `smtp_password`。
 - `alerts.last_*` 来自上一次告警检查；尚未完成首次检查时会被省略。
+- `maintenance` 是维护任务脱敏摘要；其中 `scrub_schedule_*` 反映 `[maintenance.scrub]` 周期计划，`last_scrub_*` 来自最近一次 Scrub 历史，`scrub_failure_retries` 只在最近一次 Scrub 失败时出现。
+- `disk_health` 是磁盘健康脱敏摘要；完整设备路径、序列号、温度和 SMART 状态通过管理员维护接口 `GET /api/v1/maintenance/disk-health` 获取。
+- `smb` 是 SMB/Samba 预览状态；当前版本不会启动 SMB 监听器，`runtime_available=false` 表示不可挂载，诊断只展示共享数量和配置状态，不暴露凭据文件内容。
 
 ### 指标信息
 
@@ -1420,6 +1472,8 @@ PATCH /api/v1/favorites/{path}
 
 **说明**:
 - 启用认证时，管理员可查看全量活动日志；普通用户仅返回当前账号自己的活动记录，`user` 查询参数不会越权查看其他账号
+- 系统级事件也会进入活动日志，例如磁盘健康周期检查产生的 `disk_health`
+- 手动数据校验会写入 `scrub` 活动；当 Scrub 失败、发现对象问题或结果持久化不完整时，会通过已配置的 Webhook/Telegram/SMTP 告警通道发送 `scrub_run` 事件。
 - 未配置活动日志时，接口返回空列表
 - 若活动日志已配置但初始化失败或当前不可用，接口返回 `503 Service Unavailable`
 
@@ -1532,6 +1586,7 @@ GET /api/v1/settings
       "read_timeout": "30s",
       "write_timeout": "60s",
       "idle_timeout": "120s",
+      "trusted_proxy_hops": 1,
       "tls": {
         "enabled": false,
         "cert_file": "",
@@ -1584,7 +1639,18 @@ GET /api/v1/settings
       "cooldown_period": "4h",
       "webhook_url": "",
       "webhook_method": "POST",
-      "webhook_headers": []
+      "webhook_headers": [],
+      "telegram_enabled": false,
+      "telegram_bot_token_configured": false,
+      "telegram_chat_id": ""
+    },
+    "maintenance": {
+      "scrub": {
+        "enabled": false,
+        "schedule_interval": "168h0m0s",
+        "retry_interval": "1h0m0s",
+        "max_retries": 1
+      }
     },
     "dataplane": {
       "grpc_address": "127.0.0.1:9090",
@@ -1603,6 +1669,81 @@ GET /api/v1/settings
 - `webdav.runtime_enabled` 表示当前进程中的 WebDAV 服务是否处于运行状态；当 `webdav.enabled = true` 但自动生成凭据不可用时，该值为 `false`
 - `favorites.runtime_available` 表示当前进程中的收藏接口是否可用；当 `favorites.enabled = true` 但收藏存储初始化失败或运行态依赖缺失时，该值为 `false`
 
+### 公网访问安全自检
+
+```
+GET /api/v1/settings/security-check
+```
+
+**需要管理员权限**
+
+该接口返回当前运行态中与公网暴露直接相关的配置检查结果。它用于 Web UI 的“公网访问安全自检”，也可供自动化部署工具读取。
+
+**响应示例**:
+```json
+{
+  "success": true,
+  "data": {
+    "status": "warning",
+    "generated_at": "2026-05-09T10:00:00Z",
+    "checks": [
+      {
+        "id": "https_request",
+        "status": "warning",
+        "title": "当前访问不是 HTTPS",
+        "message": "公网访问前应通过内置 TLS 或受信反向代理提供 HTTPS。",
+        "details": {
+          "direct_tls": false,
+          "forwarded_proto": "",
+          "trusted_forwarded_source": true
+        }
+      },
+      {
+        "id": "server_listen",
+        "status": "warning",
+        "title": "Web 服务监听范围偏宽",
+        "message": "Web 服务当前监听非本机地址；公网部署时建议只监听 127.0.0.1 或 ::1，并由反向代理对外暴露。",
+        "details": {
+          "host": "0.0.0.0",
+          "port": 8080
+        }
+      }
+    ],
+    "request": {
+      "scheme": "http",
+      "direct_tls": false,
+      "host": "localhost:8080",
+      "remote_ip": "127.0.0.1",
+      "trusted_forwarded_source": true,
+      "forwarded_proto": ""
+    },
+    "config": {
+      "auth_enabled": true,
+      "server_host": "0.0.0.0",
+      "server_port": 8080,
+      "tls_enabled": false,
+      "trusted_proxy_hops": 0,
+      "dataplane_grpc_addr": "127.0.0.1:9090",
+      "webdav_enabled": true,
+      "webdav_auth_type": "basic",
+      "share_enabled": false
+    }
+  }
+}
+```
+
+**字段说明**:
+- `data.status` 是整体状态，取值为 `pass`、`warning`、`block`
+- `checks[].status` 是单项状态，取值同上；存在任一 `block` 时整体为 `block`，否则存在任一 `warning` 时整体为 `warning`
+- `checks[].id` 当前包含 `auth_enabled`、`https_request`、`trusted_proxy_or_tls`、`server_listen`、`dataplane_listen`、`webdav_auth`、`smb_preview`、`share_base_url`、`initial_password_file`
+- `request` 描述当前请求如何被服务端识别，例如是否 HTTPS、是否来自受信转发源、`X-Forwarded-Proto` 是否被采纳
+- `config` 描述自检使用的关键运行配置
+
+**边界说明**:
+- 该接口只检查服务端能可靠读取到的运行态和当前请求语义
+- 它不能直接检查云厂商安全组、公网路由、真实外部端口暴露或证书链可用性
+- 公网部署仍应在服务器上运行 `sudo mnemonas-doctor --public-domain <domain>`，并在云控制台确认只开放 `80/443`
+
 ### 更新设置
 
 ```
@@ -1615,15 +1756,13 @@ PUT /api/v1/settings
 **请求体**:
 ```json
 {
-  "trash": {
-    "enabled": false
-  },
   "server": {
     "host": "0.0.0.0",
     "port": 8080,
     "read_timeout": "30s",
     "write_timeout": "60s",
     "idle_timeout": "120s",
+    "trusted_proxy_hops": 1,
     "tls": {
       "enabled": true,
       "auto_generate": true,
@@ -1661,7 +1800,44 @@ PUT /api/v1/settings
     "cooldown_period": "2h",
     "webhook_url": "https://hooks.example.com/storage",
     "webhook_method": "POST",
-    "webhook_headers": ["Authorization: Bearer token", "X-MnemoNAS: alerts"]
+    "webhook_headers": ["Authorization: Bearer token", "X-MnemoNAS: alerts"],
+    "telegram_enabled": true,
+    "telegram_bot_token": "123456:ABC...",
+    "telegram_chat_id": "-1001234567890",
+    "email_enabled": true,
+    "smtp_host": "smtp.example.com",
+    "smtp_port": 587,
+    "smtp_username": "alerts@example.com",
+    "smtp_password_configured": true,
+    "smtp_from": "MnemoNAS <alerts@example.com>",
+    "smtp_to": ["admin@example.com"]
+  },
+  "disk_health": {
+    "enabled": true,
+    "check_interval": "1h",
+    "probe_timeout": "15s",
+    "cooldown_period": "4h",
+    "command": "smartctl",
+    "temperature_warning_c": 50,
+    "temperature_critical_c": 60,
+    "media_wear_warning_percent": 80,
+    "media_wear_critical_percent": 100,
+    "devices": [
+      {
+        "name": "data-ssd",
+        "path": "/dev/disk/by-id/nvme-Samsung_SSD_1234",
+        "type": "nvme",
+        "serial": "S6..."
+      }
+    ]
+  },
+  "maintenance": {
+    "scrub": {
+      "enabled": true,
+      "schedule_interval": "168h",
+      "retry_interval": "1h",
+      "max_retries": 1
+    }
   },
   "dataplane": {
     "grpc_address": "127.0.0.1:9090",
@@ -1692,24 +1868,31 @@ PUT /api/v1/settings
 - 成功响应的 `message` 在仅包含热更新字段、或请求中携带但值未变化的重启类字段时为 `settings updated`；当 `server.host`、`server.port`、`server.read_timeout`、`server.write_timeout`、`server.idle_timeout`、`server.tls.*` 或 `cdc.*` 的值实际变化时为 `settings updated, some changes may require restart`
 - `trash` 支持更新 `enabled`、`retention_days`、`max_size`；保存后会立即影响运行中的回收站策略
 - `retention` 支持更新 `max_versions`、`max_age`、`min_free_space`、`gc_interval`；保存后会立即更新运行中的版本保留阈值与周期清理任务，`gc_interval` 设为 `0` 表示禁用周期清理
-- `server` 支持更新 `host`、`port`、`read_timeout`、`write_timeout`、`idle_timeout`；保存后需重启服务才能影响运行中的 HTTP 监听器
+- `server` 支持更新 `host`、`port`、`read_timeout`、`write_timeout`、`idle_timeout`、`trusted_proxy_hops`；监听地址和超时保存后需重启服务才能影响运行中的 HTTP 监听器，`trusted_proxy_hops` 会立即影响请求来源和 HTTPS 转发语义识别
 - `server.tls` 支持更新 `enabled`、`cert_file`、`key_file`、`auto_generate`、`cert_dir`；保存后需重启服务才能切换 HTTPS 监听
 - `cdc` 支持更新 `min_chunk_size`、`avg_chunk_size`、`max_chunk_size`；必须满足 `65536 <= min < avg < max <= 67108864`。Docker 和 systemd 启动入口会在 dataplane 重启时读取这些字节值，新对象写入才会使用新分块参数
 - `versioning` 支持更新 `auto_versioned_extensions`、`auto_versioned_filenames`、`max_versioned_size`；保存后会立即更新运行中的自动版本策略
 - `share` 支持更新 `enabled`、`base_url`；`enabled` 会立即影响公开分享访问和新分享创建，`base_url` 会立即影响后续新生成的分享链接，非空时必须是完整的 `http` 或 `https` URL
 - `favorites` 支持更新 `enabled`；保存后会立即影响收藏接口的可用性
-- `alerts` 支持更新 `enabled`、`check_interval`、`threshold_pct`、`critical_pct`、`min_free_bytes`、`cooldown_period`、`webhook_url`、`webhook_method`、`webhook_headers`；保存后会立即更新运行中的告警监控
+- `alerts` 支持更新 `enabled`、`check_interval`、`threshold_pct`、`critical_pct`、`min_free_bytes`、`cooldown_period`、`webhook_url`、`webhook_method`、`webhook_headers`、`telegram_enabled`、`telegram_bot_token`、`telegram_chat_id`、`email_enabled`、`smtp_host`、`smtp_port`、`smtp_username`、`smtp_password`、`smtp_from`、`smtp_to`；保存后会立即更新运行中的告警监控
+- `disk_health` 支持更新 `enabled`、`check_interval`、`probe_timeout`、`cooldown_period`、`command`、温度阈值、介质磨损阈值和 `devices`；保存后会立即更新运行中的磁盘健康监控
+- `maintenance.scrub` 支持更新 `enabled`、`schedule_interval`、`retry_interval`、`max_retries`；保存后会立即更新运行中的周期 Scrub 调度，关闭时会取消后台调度
 - `dataplane` 支持更新 `grpc_address`、`timeout`、`max_retries`；保存后会立即替换运行中的数据面 client，并用于后续按需重连和连接重试策略
 - 请求中的 `trash.retention_days` 不能为负数，`trash.max_size` 必须是正整数
 - 请求中的 `versioning.max_versioned_size` 必须是正整数，`versioning.auto_versioned_extensions` 每项必须以 `.` 开头，`versioning.auto_versioned_filenames` 不能包含空项
 - `webdav` 支持更新 `enabled`、`prefix`、`read_only`、`auth_type`、`username`、`password`；`prefix` 会归一化为以 `/` 开头的 URL 路径，不能包含反斜杠、`?`、`#` 或控制字符，启用时不能覆盖 `/`、`/api`、`/s`、`/health`；保存后会立即切换运行中的 WebDAV 前缀、鉴权方式和只读状态
 - 认证启用时，`webdav.username` 不得复用现有非 admin 用户名；WebDAV 基本认证是全局服务凭据，不携带应用层 `home_dir` 隔离
 - 请求中的 `server.host` 必须为空、`*`、合法主机名、IPv4 或 IPv6 字面量，不能包含端口、空白或控制字符；端口必须通过 `server.port` 设置
+- 请求中的 `server.trusted_proxy_hops` 不能为负数；默认值 `0` 表示不信任转发头
 - 请求中的 `server.read_timeout`、`server.write_timeout`、`server.idle_timeout` 必须是正的 `time.ParseDuration` 字符串，例如 `30s`、`2m`
 - 请求中的 `retention.max_age`、`retention.gc_interval` 必须是 `time.ParseDuration` 可解析的字符串，例如 `720h`、`24h`、`0`
 - 请求中的 `alerts.check_interval`、`alerts.cooldown_period` 必须是正的 `time.ParseDuration` 字符串
 - 请求中的 `alerts.webhook_url` 为空时禁用 Webhook 发送，非空时必须是完整的 `http` 或 `https` URL
 - 请求中的 `alerts.webhook_method` 仅支持 `GET` 或 `POST`；`POST` 发送 JSON body，`GET` 将告警字段编码到 URL query。`alerts.webhook_headers` 每项必须是 `"Key: Value"` 格式，Header 名称必须是合法 HTTP token，值不能包含换行或控制字符
+- `alerts.telegram_enabled = true` 时必须提供 `telegram_bot_token` 和 `telegram_chat_id`；`telegram_bot_token` 不能包含空白、`/`、`?` 或 `#`，诊断和设置读取响应不会明文返回该 Token
+- `alerts.email_enabled = true` 时必须提供 `smtp_host`、`smtp_from` 和至少一个 `smtp_to`，`smtp_port` 必须在 1-65535 范围内，发件人和收件人必须是合法邮件地址
+- 请求中的 `disk_health.check_interval`、`disk_health.probe_timeout`、`disk_health.cooldown_period` 必须是正的 `time.ParseDuration` 字符串；`disk_health.command` 必须是单个可执行文件名或绝对路径；`disk_health.media_wear_critical_percent` 不能低于 `disk_health.media_wear_warning_percent`；每个 `devices[].path` 必须是绝对路径，推荐 `/dev/disk/by-id/...`
+- 请求中的 `maintenance.scrub.schedule_interval`、`maintenance.scrub.retry_interval` 必须是正的 `time.ParseDuration` 字符串；`maintenance.scrub.max_retries` 必须是 `0` 或正整数
 - 请求中的 `dataplane.grpc_address` 必须是合法 `host:port` 地址，端口范围 1-65535，且不能包含空白或控制字符；`dataplane.timeout` 必须是正的 `time.ParseDuration` 字符串，`dataplane.max_retries` 必须是 `0` 或正整数
 - 配置校验失败时返回 `400 Bad Request` 和稳定错误消息 `invalid configuration`
 - 非法设置请求不会修改进程内当前生效配置
@@ -1745,6 +1928,62 @@ GET /api/v1/settings/webdav-credentials
 
 **说明**:
 - 启用认证时，维护操作仅管理员可用。
+
+### 获取磁盘健康
+
+立即运行一次磁盘健康探测并返回完整设备状态。该接口依赖 `[disk_health]` 配置和 `smartctl`；即使后台周期检查关闭，运行态监控未初始化时也会返回 `503`。
+
+```
+GET /api/v1/maintenance/disk-health
+```
+
+**响应示例**:
+```json
+{
+  "success": true,
+  "data": {
+    "enabled": true,
+    "status": "warning",
+    "checked_at": "2026-05-13T08:30:00Z",
+    "message": "one or more disks need attention",
+    "warnings": ["data-ssd: temperature 52 C reached warning threshold 50 C"],
+    "devices": [
+      {
+        "name": "data-ssd",
+        "path": "/dev/disk/by-id/nvme-Samsung_SSD_1234",
+        "type": "nvme",
+        "expected_serial": "S6...",
+        "serial": "S6...",
+        "model": "Samsung SSD",
+        "present": true,
+        "smart_available": true,
+        "smart_passed": true,
+        "temperature_c": 52,
+        "power_on_hours": 1234,
+        "wear_percent_used": 12,
+        "available_spare_percent": 95,
+        "available_spare_threshold_percent": 10,
+        "media_errors": 0,
+        "nvme_critical_warning": 0,
+        "status": "warning",
+        "message": "temperature 52 C reached warning threshold 50 C",
+        "temperature_warning_c": 50,
+        "temperature_critical_c": 60
+      }
+    ]
+  }
+}
+```
+
+**状态说明**:
+
+- `status` 可能为 `disabled`、`ok`、`warning`、`critical` 或 `unavailable`。
+- 设备路径不存在、SMART 自检失败、配置了序列号但实际序列号不匹配会返回 `critical`。
+- 温度达到提醒阈值返回 `warning`，达到严重阈值返回 `critical`。
+- NVMe critical warning、可用备用容量低于阈值、介质寿命已用百分比达到阈值或介质错误计数非零会影响设备状态。
+- `smartctl` 不可用、无 JSON 输出或 JSON 无法解析会返回 `unavailable`。
+- 后台周期检查发现 `warning`、`critical` 或 `unavailable` 时，会写入 `disk_health` 活动日志，路径为 `/system/disk-health`，用户为 `system`。
+- 当 `[alerts] enabled = true` 且配置了 Webhook、Telegram 或 SMTP 邮件时，后台周期检查会对 `warning`、`critical` 和 `unavailable` 发送 `disk_health` 告警事件。
 
 ### 获取数据校验结果
 
@@ -1804,6 +2043,7 @@ POST /api/v1/maintenance/scrub
 - 成功响应直接返回本次校验结果摘要；最近一次完整结果可通过 `GET /api/v1/maintenance/scrub` 再次读取
 - `errors[].message` 返回稳定的公开文案，底层 IO/路径/校验细节只写入服务端日志
 - 当校验已完成、但结果持久化失败时，接口仍返回 `200 OK`，并附带 `Warning` 响应头；响应 body 会包含 `warning: true`，`message` 为 `scrub completed with persistence warning`
+- 若 `[maintenance.scrub] enabled = true`，服务会以系统身份按 `schedule_interval` 自动执行完整 Scrub；失败后按 `retry_interval` 最多重试 `max_retries` 次。周期任务会写入维护历史、活动日志和告警事件，与手动 Scrub 使用同一套结果格式。
 
 **响应示例**:
 ```json
@@ -1925,6 +2165,209 @@ POST /api/v1/maintenance/gc
 }
 ```
 
+### 备份任务
+
+列出 `[[backup.jobs]]` 中配置的备份任务和最近状态。
+
+```
+GET /api/v1/maintenance/backups
+```
+
+**响应示例**:
+```json
+{
+  "success": true,
+  "data": [
+    {
+      "id": "external-disk",
+      "name": "外置硬盘备份",
+      "type": "local",
+      "source": "/srv/mnemonas",
+      "destination": "/mnt/backup-drive/mnemonas",
+      "disabled": false,
+      "schedule_interval": "24h0m0s",
+      "schedule_window_start": "02:00",
+      "schedule_window_end": "05:00",
+      "next_run_at": "2026-05-10T02:03:04Z",
+      "stale_after": "72h0m0s",
+      "restore_drill_stale_after": "720h0m0s",
+      "max_snapshots": 7,
+      "max_age": "720h0m0s",
+      "retention_status": "ok",
+      "retention_message": "本地快照自动清理已配置",
+      "health_status": "ok",
+      "health_message": "last successful backup completed recently",
+      "restore_drill_status": "ok",
+      "restore_drill_message": "恢复演练仍在预期窗口内",
+      "last_restore_drill_reminder_at": "2026-05-08T03:00:00Z",
+      "include_config": true,
+      "verify_after_backup": true,
+      "exclude": [".mnemonas/thumbnails"],
+      "running": false,
+      "last_run": {
+        "id": "20260509T020304.000000000Z",
+        "job_id": "external-disk",
+        "status": "completed",
+        "started_at": "2026-05-09T02:03:04Z",
+        "duration_ms": 1200,
+        "file_count": 42,
+        "total_bytes": 1048576,
+        "trigger": "scheduled",
+        "warning": false,
+        "warnings": [],
+        "pruned_snapshots": 1
+      }
+    }
+  ]
+}
+```
+
+获取单个任务：
+
+```
+GET /api/v1/maintenance/backups/{id}
+```
+
+立即执行备份：
+
+```
+POST /api/v1/maintenance/backups/{id}/run
+```
+
+请求体可为空，也可传 `{}`。备份任务支持三种类型：
+
+- `type = "local"`：复制本地目录到 `destination/<job-id>/snapshots/<run-id>/`，写入 `manifest.json`，并在 `verify_after_backup = true` 时校验快照文件大小和 SHA-256。
+- `type = "restic"`：调用 `command` 指定的 restic 可执行文件，执行 `restic -r <repository> --password-file <password_file> backup <source>`；`verify_after_backup = true` 时执行 `restic check`。
+- `type = "rclone"`：调用 `command` 指定的 rclone 可执行文件，执行 `rclone sync <source> <remote>`；`verify_after_backup = true` 时执行 `rclone check --one-way`。
+
+`restic` 和 `rclone` 不通过 shell 拼接命令；`command` 只能是可执行名或绝对路径，`extra_args` 会作为 argv 追加到备份命令，恢复命令不会复用备份专用参数。`password_file`、`config_file` 必须是 `source` 与 `storage.root` 之外的普通文件。
+
+任务可配置 `disabled`、`schedule_interval`、`schedule_window_start`、`schedule_window_end`、`stale_after`、`restore_drill_stale_after`、`max_snapshots`、`max_age` 和 `retention_policy`。`schedule_interval` 大于 0 时服务内置调度器会自动按间隔执行；设置 `schedule_window_start`/`schedule_window_end` 后，自动任务只会在服务器本地时间窗口内启动，手动执行不受影响。`local` 成功备份后会按 `max_snapshots` 和 `max_age` 清理旧快照，并在响应的 `pruned_snapshots` 中返回清理数量。`restic` 和 `rclone` 的远端保留策略由外部工具管理；配置 `retention_policy` 会把 `retention_status` 标记为 `ok`，否则会返回 `warning` 提醒确认。`restore_drill_stale_after` 未配置时默认 30 天，任务视图会通过 `restore_drill_status` 和 `restore_drill_message` 提示尚未演练、演练失败或演练过期；配置告警通道后，缺失或过期恢复演练会发送限频的 `backup_restore_drill` warning 事件，`trigger` 为 `restore_drill_reminder`，并持久化 `last_restore_drill_reminder_at`。`health_status` 只表示备份运行健康，可能为 `ok`、`manual`、`running`、`due`、`stale`、`failed` 或 `disabled`。任务视图会返回 `last_restore` 与最近恢复历史 `restore_history`，用于审计恢复目标、状态、文件数、字节数和失败原因；历史默认保留最近 20 条。
+
+当 `[alerts] enabled = true` 且配置了 Webhook、Telegram 或 SMTP 邮件时，备份失败、恢复演练失败、恢复演练缺失/过期提醒或备份完成但带警告会发送告警事件。事件 `type` 为 `backup_run` 或 `backup_restore_drill`，`level` 为 `warning` 或 `critical`，`details` 包含任务 ID、运行 ID、状态、错误信息、快照路径和文件/字节统计。
+
+对最近一次成功快照执行恢复演练，或对远端备份执行一致性校验：
+
+```
+POST /api/v1/maintenance/backups/{id}/restore-drill
+```
+
+**请求体** (可选):
+```json
+{
+  "keep_artifact": false
+}
+```
+
+`local` 默认会把快照恢复到临时目录、校验每个文件后删除临时目录；`keep_artifact = true` 会保留临时恢复目录并在响应中返回 `restored_path`。`restic` 当前执行 `restic check`，`rclone` 当前执行 `rclone check --one-way`；这用于验证仓库或远端一致性。需要真正恢复 restic/rclone 数据时使用 `/restore`。
+
+预览显式恢复，不写入目标目录，也不写入恢复历史：
+
+```
+POST /api/v1/maintenance/backups/{id}/restore-preview
+```
+
+**请求体**:
+```json
+{
+  "target_path": "/mnt/restore/mnemonas",
+  "include_config": true
+}
+```
+
+**响应示例**:
+```json
+{
+  "success": true,
+  "data": {
+    "id": "20260509T035900.000000000Z",
+    "job_id": "external-disk",
+    "status": "completed",
+    "source": "/srv/mnemonas",
+    "destination": "/mnt/backup-drive/mnemonas",
+    "target_path": "/mnt/restore/mnemonas",
+    "file_count": 42,
+    "total_bytes": 1048576,
+    "config_available": true,
+    "config_included": true,
+    "sample_paths": ["docs/note.txt", ".mnemonas-restore/config.toml"]
+  }
+}
+```
+
+`restore-preview` 会复用显式恢复的目标路径安全校验。`local` 从最近一次成功快照的 `manifest.json` 生成文件数、字节数和样例路径；`restic` 执行 `restic ls latest --json --tag mnemonas --tag job:<id> --path <source>`；`rclone` 执行 `rclone lsjson <remote> --recursive --files-only`。维护页要求成功预览与当前目标目录、配置选项一致后才允许开始恢复。
+
+把支持的备份任务恢复到指定目录：
+
+```
+POST /api/v1/maintenance/backups/{id}/restore
+```
+
+**请求体**:
+```json
+{
+  "target_path": "/mnt/restore/mnemonas",
+  "include_config": true
+}
+```
+
+当前显式恢复支持 `type = "local"`、`type = "restic"` 和 `type = "rclone"`。`target_path` 必须是服务器上的绝对路径，并且必须位于 `storage.root`、备份来源和本地备份目标/仓库之外；父目录必须已存在，目标目录不存在或为空。该接口不会覆盖当前在线数据目录。
+
+- `local`：把最近一次成功快照中的 `data/` 内容复制到 `target_path` 根目录并校验大小和 SHA-256；`include_config = true` 时，备份中的配置文件会恢复到 `target_path/.mnemonas-restore/config.toml`。
+- `restic`：执行 `restic restore latest --target <临时目录> --tag mnemonas --tag job:<id> --path <source>`，再把 restic 恢复出的来源目录内容安装到 `target_path` 根目录。`include_config` 对 restic 任务无特殊处理。
+- `rclone`：执行 `rclone copy <remote> <target>` 恢复远端内容，再执行 `rclone check <remote> <target> --one-way` 校验恢复目录。`include_config` 对 rclone 任务无特殊处理。
+
+恢复开始和结束都会写入备份状态文件。失败恢复也会进入 `restore_history`，便于之后排查目标路径、权限、外部命令或仓库问题。
+
+恢复完成后，对目标目录执行只读校验，不写入恢复历史：
+
+```
+POST /api/v1/maintenance/backups/{id}/restore-verify
+```
+
+**请求体**:
+```json
+{
+  "target_path": "/mnt/restore/mnemonas"
+}
+```
+
+**响应示例**:
+```json
+{
+  "success": true,
+  "data": {
+    "id": "20260509T040005.000000000Z",
+    "job_id": "external-disk",
+    "status": "completed",
+    "source": "/srv/mnemonas",
+    "destination": "/mnt/backup-drive/mnemonas",
+    "target_path": "/mnt/restore/mnemonas",
+    "file_count": 42,
+    "verified_bytes": 1048576,
+    "config_path": "/mnt/restore/mnemonas/.mnemonas-restore/config.toml",
+    "config_found": true,
+    "files_dir_found": true,
+    "internal_dir_found": true,
+    "index_found": true,
+    "objects_dir_found": true,
+    "looks_like_storage_root": true,
+    "warnings": []
+  }
+}
+```
+
+`restore-verify` 要求目标目录已存在，并且仍位于 `storage.root`、备份来源和本地备份目标/仓库之外。它会统计恢复目录中的常规文件和字节数，检查 `.mnemonas-restore/config.toml`、`files/`、`.mnemonas/`、`.mnemonas/index.db` 与 `.mnemonas/objects` 是否存在，并对符号链接、非常规文件或不像完整 `storage.root` 的目录给出警告。维护页在恢复成功后会自动调用该接口，并展示恢复后切换检查清单。
+
+**错误语义**:
+- 未配置备份管理器：`503 Service Unavailable`
+- 任务不存在：`404 Not Found`
+- 同一任务已有备份或恢复演练在运行：`409 Conflict`
+- 任务已停用：`409 Conflict`
+- 本地任务没有可预览、可演练或可恢复的成功快照：`409 Conflict`
+- 显式恢复目标目录非空：`409 Conflict`
+- 任务执行失败：`500 Internal Server Error`，错误响应 `details` 中包含失败的 run/drill 结果
+
 ### 导出诊断信息
 
 下载完整的诊断信息包（JSON 格式）。
@@ -1937,7 +2380,7 @@ GET /api/v1/diagnostics-export
 
 **响应**: 返回 JSON 文件下载
 
-导出的 JSON 会包含脱敏后的 `alerts` 运行态信息，例如 `enabled`、`runtime_available`、`webhook_configured`、阈值和最近一次检查级别；不会包含 Webhook URL 或自定义 Header。
+导出的 JSON 会包含脱敏后的 `alerts`、`disk_health` 和 `smb` 运行态信息，例如 `enabled`、`runtime_available`、通知通道配置状态、阈值、最近一次检查级别和 SMB 预览运行态；不会包含 Webhook URL、自定义 Header、Telegram Bot Token、SMTP 密码或 SMB 凭据内容。
 
 ---
 

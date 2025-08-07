@@ -13,7 +13,7 @@
 
 如果未找到配置文件，系统使用默认配置。Ubuntu/systemd 安装脚本默认生成 `/etc/mnemonas/config.toml`，并在 systemd unit 中用 `--config` 指向该文件。
 
-配置文件可能包含 `auth.jwt_secret`、WebDAV 密码和告警 Webhook Header 等敏感值。MnemoNAS 保存或读取已有配置文件时会把文件权限收紧为 `0600`。
+配置文件可能包含 `auth.jwt_secret`、WebDAV 密码、告警 Webhook Header 和 Telegram Bot Token 等敏感值。MnemoNAS 保存或读取已有配置文件时会把文件权限收紧为 `0600`。
 
 ## 配置检查
 
@@ -106,6 +106,30 @@ min_free_bytes = 10737418240
 cooldown_period = "4h"
 webhook_url = ""
 webhook_method = "POST"
+email_enabled = false
+smtp_host = ""
+smtp_port = 587
+smtp_username = ""
+smtp_password = ""
+smtp_from = ""
+smtp_to = []
+
+[disk_health]
+enabled = false
+check_interval = "1h"
+probe_timeout = "15s"
+cooldown_period = "4h"
+command = "smartctl"
+temperature_warning_c = 50
+temperature_critical_c = 60
+media_wear_warning_percent = 80
+media_wear_critical_percent = 100
+
+[[disk_health.devices]]
+name = "data-disk"
+path = "/dev/disk/by-id/ata-example"
+type = "sat"
+serial = ""
 
 [security]
 allow_unsafe_no_auth = false
@@ -405,6 +429,25 @@ password = "very-strong-password-here"
 
 ---
 
+### [smb] — SMB 网关预览配置
+
+当前版本不会启动 SMB/Samba 监听器。该配置段只保留给后续 SMB 网关侧车使用，启用后 `nasd --check-config` 会输出预览警告，健康页和诊断导出也会显示 SMB 运行态不可用。生产环境需要局域网挂载时，请继续使用 WebDAV。
+
+| 选项 | 类型 | 默认值 | 说明 |
+| ---- | ---- | ------ | ---- |
+| `enabled` | bool | `false` | 预览开关；当前不会启动 SMB 服务 |
+| `listen` | string | `"127.0.0.1:1445"` | 预留的 SMB 侧车监听地址 |
+| `server_name` | string | `"mnemonas"` | 预留的 SMB 服务名 |
+| `gateway_socket` | string | `<storage.root>/.mnemonas/run/smb-gateway.sock` | 预留的 MnemoNAS 网关 Unix socket |
+| `credential_file` | string | `<storage.root>/.mnemonas/smb-credentials.json` | 预留的 SMB 专用凭据文件；不复用 Web 登录密码 |
+| `signing_required` | bool | `true` | 预留的 SMB 签名要求 |
+| `encryption_required` | bool | `false` | 预留的 SMB 加密要求 |
+| `[[smb.shares]]` | array | `[]` | 预留的共享映射；启用预览开关时至少需要一个共享 |
+
+共享路径必须是 MnemoNAS 内部绝对路径，例如 `/` 或 `/team/docs`。后续侧车会继续通过 MnemoNAS 权限、`home_dir` 和网关 API 访问文件，避免直接把 `files/` 目录交给 Samba 后绕过版本历史、回收站和审计。
+
+---
+
 ### [auth] — 认证配置
 
 | 选项 | 类型 | 默认值 | 说明 |
@@ -480,8 +523,18 @@ base_url = "https://nas.example.com"
 | `webhook_url` | string | `""` | Webhook URL；非空时必须是完整的 `http` 或 `https` URL |
 | `webhook_method` | string | `POST` | Webhook 方法；`POST` 发送 JSON body，`GET` 将告警字段编码到 URL query |
 | `webhook_headers` | string[] | `[]` | 自定义 Header（`"Key: Value"`）；Header 名称必须是合法 HTTP token，值不能包含换行或控制字符 |
+| `telegram_enabled` | bool | `false` | 是否启用 Telegram 机器人通知 |
+| `telegram_bot_token` | string | `""` | Telegram Bot Token；不会在诊断或设置响应中明文返回 |
+| `telegram_chat_id` | string | `""` | Telegram Chat ID 或 `@channel` 用户名 |
+| `email_enabled` | bool | `false` | 是否启用 SMTP 邮件通知 |
+| `smtp_host` | string | `""` | SMTP 主机名，不包含端口 |
+| `smtp_port` | int | `587` | SMTP 端口 |
+| `smtp_username` | string | `""` | SMTP 用户名 |
+| `smtp_password` | string | `""` | SMTP 密码或应用专用密码 |
+| `smtp_from` | string | `""` | 发件人地址，例如 `MnemoNAS <alerts@example.com>` |
+| `smtp_to` | string[] | `[]` | 收件人地址列表 |
 
-健康页和诊断导出会显示告警是否启用、运行态是否可用、最近一次检查级别和是否配置了 Webhook；不会暴露 `webhook_url` 或 `webhook_headers`。Webhook 发送成功和失败日志只记录 URL 的 scheme 与 host，不记录路径、查询参数、凭据或 GET payload。
+健康页和诊断导出会显示告警是否启用、运行态是否可用、最近一次检查级别，以及是否配置了 Webhook、Telegram 或邮件；不会暴露 `webhook_url`、`webhook_headers`、`telegram_bot_token` 或 `smtp_password`。同一通知通道也用于备份失败、恢复演练失败、恢复演练缺失/过期提醒、磁盘健康异常、Scrub 异常和登录限流事件。Webhook 发送成功和失败日志只记录 URL 的 scheme 与 host，不记录路径、查询参数、凭据或 GET payload；Telegram 发送错误不会包含 Bot Token。
 
 **示例：**
 
@@ -494,6 +547,96 @@ critical_pct = 95.0
 min_free_bytes = 10737418240
 cooldown_period = "4h"
 webhook_url = "https://hooks.example.com/alert"
+telegram_enabled = true
+telegram_bot_token = "123456:ABC..."
+telegram_chat_id = "-1001234567890"
+email_enabled = true
+smtp_host = "smtp.example.com"
+smtp_port = 587
+smtp_username = "alerts@example.com"
+smtp_password = "app-password"
+smtp_from = "MnemoNAS <alerts@example.com>"
+smtp_to = ["admin@example.com"]
+```
+
+---
+
+### [disk_health] — 磁盘健康监控
+
+通过 `smartctl --json --all` 采集已配置设备的 SMART、自检结论、温度、通电时间和设备在线状态。默认关闭；启用前需要安装 `smartmontools`，并确保运行 `nasd` 的用户有权限读取目标设备。
+
+| 选项 | 类型 | 默认值 | 说明 |
+| ---- | ---- | ------ | ---- |
+| `enabled` | bool | `false` | 是否启用周期性磁盘健康检查 |
+| `check_interval` | duration | `1h` | 后台检查间隔 |
+| `probe_timeout` | duration | `15s` | 单块磁盘 `smartctl` 探测超时 |
+| `cooldown_period` | duration | `4h` | 同一健康级别重复告警的最小间隔 |
+| `command` | string | `smartctl` | `smartctl` 可执行文件名或绝对路径；不能包含空白或 shell 参数 |
+| `temperature_warning_c` | int | `50` | 默认温度提醒阈值，单位摄氏度 |
+| `temperature_critical_c` | int | `60` | 默认温度严重阈值，单位摄氏度 |
+| `media_wear_warning_percent` | int | `80` | 介质寿命已用百分比提醒阈值，`0` 表示使用默认值 |
+| `media_wear_critical_percent` | int | `100` | 介质寿命已用百分比严重阈值，`0` 表示使用默认值 |
+| `devices` | array | `[]` | 需要监控的设备列表 |
+
+`[[disk_health.devices]]` 字段：
+
+| 选项 | 类型 | 默认值 | 说明 |
+| ---- | ---- | ------ | ---- |
+| `name` | string | `""` | Web UI 中显示的设备名称 |
+| `path` | string | 必填 | 设备绝对路径，推荐使用 `/dev/disk/by-id/...` 这类稳定路径 |
+| `type` | string | `""` | 传给 `smartctl --device` 的设备类型，例如 `sat`、`scsi`、`nvme` 或 USB 桥接需要的类型 |
+| `serial` | string | `""` | 可选的期望序列号；配置后不匹配会标记为严重异常，用于发现换盘或路径漂移 |
+| `temperature_warning_c` | int | 全局值 | 覆盖该设备的提醒温度阈值 |
+| `temperature_critical_c` | int | 全局值 | 覆盖该设备的严重温度阈值 |
+
+**运行态行为：**
+
+- `GET /api/v1/maintenance/disk-health` 会立即探测并返回完整设备状态。
+- 诊断页和诊断导出只包含脱敏摘要，不包含设备序列号等细节。
+- 后台周期检查发现 `warning`、`critical` 或 `unavailable` 时，会以系统用户写入 `disk_health` 活动日志，并按 `cooldown_period` 控制重复记录。
+- NVMe `percentage_used`、`available_spare`、`critical_warning`、`media_errors` 以及常见 ATA 寿命属性会参与状态判断。
+- 当 `[alerts] enabled = true` 且配置了 Webhook、Telegram 或 SMTP 邮件时，磁盘缺失、SMART 失败、温度过高、序列号不匹配或 SMART 不可用会发送 `disk_health` 事件。
+- 设备路径不存在会标记为 `critical`；`smartctl` 不可用或返回无效 JSON 会标记为 `unavailable`。
+
+**示例：**
+
+```toml
+[disk_health]
+enabled = true
+check_interval = "30m"
+probe_timeout = "20s"
+command = "smartctl"
+temperature_warning_c = 50
+temperature_critical_c = 60
+media_wear_warning_percent = 80
+media_wear_critical_percent = 100
+
+[[disk_health.devices]]
+name = "data-ssd"
+path = "/dev/disk/by-id/nvme-Samsung_SSD_1234"
+type = "nvme"
+serial = "S6..."
+```
+
+---
+
+### [maintenance.scrub] — 数据校验计划
+
+| 配置项 | 类型 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `enabled` | bool | `false` | 是否启用后台周期 Scrub |
+| `schedule_interval` | duration | `168h` | 常规 Scrub 间隔 |
+| `retry_interval` | duration | `1h` | Scrub 失败后的自动重试间隔 |
+| `max_retries` | int | `1` | 单次失败后最多自动重试次数，`0` 表示不自动重试 |
+
+启用后，服务会在后台以系统身份触发完整 Scrub。成功、失败、对象异常和结果持久化警告都会继续复用维护历史、活动日志和已配置的告警通道。若上次 Scrub 失败，后台会先按 `retry_interval` 做有限重试；达到 `max_retries` 后，下一次常规计划仍按 `schedule_interval` 重新开始。这些字段也可通过 Web 设置页或 Settings API 更新，保存后会立即替换运行中的后台调度。
+
+```toml
+[maintenance.scrub]
+enabled = true
+schedule_interval = "168h"
+retry_interval = "1h"
+max_retries = 1
 ```
 
 ---

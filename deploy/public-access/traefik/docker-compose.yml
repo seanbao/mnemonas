@@ -1,0 +1,12 @@
+name: mnemonas-public-traefik
+
+services:
+  traefik:
+    image: traefik:v3.0
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - ./traefik.yml:/etc/traefik/traefik.yml:ro
+      - ./dynamic:/etc/traefik/dynamic:ro
+      - ./letsencrypt:/letsencrypt
+
