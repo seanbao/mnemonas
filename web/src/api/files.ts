@@ -35,6 +35,7 @@ export interface StorageStats {
   fileCountAvailable?: boolean
   storageStatsAvailable?: boolean
   diskStatsAvailable?: boolean
+  directoryQuotaStatsAvailable?: boolean
   totalSize?: number
   totalObjects?: number
   uniqueSize?: number
@@ -45,7 +46,23 @@ export interface StorageStats {
   diskUsed?: number
   diskUsageRatio?: number
   diskFilesystemType?: string
+  diskMountPoint?: string
+  diskMountSource?: string
+  diskMountOptions?: string
   diskNativeDataChecksumSupport?: boolean
+  directoryQuotas?: DirectoryQuotaUsage[]
+}
+
+export type DirectoryQuotaUsageStatus = 'normal' | 'warning' | 'exceeded' | 'missing'
+
+export interface DirectoryQuotaUsage {
+  path: string
+  quotaBytes: number
+  usedBytes: number
+  availableBytes: number
+  usageRatio: number
+  exists: boolean
+  status: DirectoryQuotaUsageStatus
 }
 
 export interface HealthStatus {
@@ -492,6 +509,7 @@ function isStorageStatsShape(value: unknown): value is {
   total_files_available?: boolean
   storage_stats_available?: boolean
   disk_stats_available?: boolean
+  directory_quota_stats_available?: boolean
   total_size?: number
   total_chunks?: number
   unique_size?: number
@@ -502,13 +520,26 @@ function isStorageStatsShape(value: unknown): value is {
   disk_used?: number
   disk_usage_ratio?: number
   disk_filesystem_type?: string
+  disk_mount_point?: string
+  disk_mount_source?: string
+  disk_mount_options?: string
   disk_native_data_checksum_support?: boolean
+  directory_quotas?: {
+    path: string
+    quota_bytes: number
+    used_bytes: number
+    available_bytes: number
+    usage_ratio: number
+    exists: boolean
+    status: DirectoryQuotaUsageStatus
+  }[]
 } {
   return isRecord(value)
     && isNumberOrUndefined(value.total_files)
     && isBooleanOrUndefined(value.total_files_available)
     && isBooleanOrUndefined(value.storage_stats_available)
     && isBooleanOrUndefined(value.disk_stats_available)
+    && isBooleanOrUndefined(value.directory_quota_stats_available)
     && isNumberOrUndefined(value.total_size)
     && isNumberOrUndefined(value.total_chunks)
     && isNumberOrUndefined(value.unique_size)
@@ -519,7 +550,37 @@ function isStorageStatsShape(value: unknown): value is {
     && isNumberOrUndefined(value.disk_used)
     && isNumberOrUndefined(value.disk_usage_ratio)
     && isStringOrUndefined(value.disk_filesystem_type)
+    && isStringOrUndefined(value.disk_mount_point)
+    && isStringOrUndefined(value.disk_mount_source)
+    && isStringOrUndefined(value.disk_mount_options)
     && isBooleanOrUndefined(value.disk_native_data_checksum_support)
+    && (value.directory_quotas === undefined || (Array.isArray(value.directory_quotas) && value.directory_quotas.every(isDirectoryQuotaUsageShape)))
+}
+
+function isDirectoryQuotaUsageShape(value: unknown): value is {
+  path: string
+  quota_bytes: number
+  used_bytes: number
+  available_bytes: number
+  usage_ratio: number
+  exists: boolean
+  status: DirectoryQuotaUsageStatus
+} {
+  return isRecord(value)
+    && typeof value.path === 'string'
+    && typeof value.quota_bytes === 'number'
+    && typeof value.used_bytes === 'number'
+    && typeof value.available_bytes === 'number'
+    && typeof value.usage_ratio === 'number'
+    && typeof value.exists === 'boolean'
+    && isDirectoryQuotaUsageStatus(value.status)
+}
+
+function isDirectoryQuotaUsageStatus(value: unknown): value is DirectoryQuotaUsageStatus {
+  return value === 'normal'
+    || value === 'warning'
+    || value === 'exceeded'
+    || value === 'missing'
 }
 
 function isMoveCopyActionShape(value: unknown): value is { from: string; to: string } {
@@ -1069,6 +1130,20 @@ export interface BackupRestoreDrillResult {
   file_count: number
   verified_bytes: number
   error_message?: string
+  failure_category?: string
+}
+
+export interface BackupRestoreDrillStats {
+  total_runs: number
+  successful_runs: number
+  failed_runs: number
+  success_rate: number
+  consecutive_successes?: number
+  consecutive_failures?: number
+  latest_success_at?: string
+  latest_failure_at?: string
+  last_failure_message?: string
+  last_failure_category?: string
 }
 
 export interface BackupRestoreResult {
@@ -1085,7 +1160,20 @@ export interface BackupRestoreResult {
   config_path?: string
   file_count: number
   verified_bytes: number
+  preflight_checks?: BackupRestorePreflightCheck[]
+  warnings?: string[]
+  cutover_checklist?: string[]
+  rollback_checklist?: string[]
   error_message?: string
+}
+
+export type BackupRestorePreflightStatus = 'passed' | 'warning' | 'failed'
+
+export interface BackupRestorePreflightCheck {
+  id: string
+  status: BackupRestorePreflightStatus
+  title: string
+  detail?: string
 }
 
 export interface BackupRestorePreviewResult {
@@ -1105,6 +1193,10 @@ export interface BackupRestorePreviewResult {
   config_available: boolean
   config_included: boolean
   sample_paths?: string[]
+  preflight_checks?: BackupRestorePreflightCheck[]
+  warnings?: string[]
+  cutover_checklist?: string[]
+  rollback_checklist?: string[]
   error_message?: string
 }
 
@@ -1127,6 +1219,81 @@ export interface BackupRestoreVerifyResult {
   index_found: boolean
   objects_dir_found: boolean
   looks_like_storage_root: boolean
+  warnings?: string[]
+  error_message?: string
+}
+
+export interface BackupRetentionCheckResult {
+  id: string
+  job_id: string
+  status: BackupTaskStatus
+  started_at: string
+  finished_at?: string
+  duration_ms: number
+  target: string
+  policy?: string
+  snapshot_count?: number
+  file_count?: number
+  total_bytes?: number
+  oldest_snapshot_at?: string
+  latest_snapshot_at?: string
+  warning?: boolean
+  warnings?: string[]
+  error_message?: string
+}
+
+export interface BackupBatchRestoreItemRequest {
+  job_id: string
+  target_path: string
+  include_config?: boolean
+}
+
+export interface BackupBatchRestorePreviewItemResult {
+  index: number
+  job_id: string
+  target_path: string
+  include_config: boolean
+  status: BackupTaskStatus
+  preview?: BackupRestorePreviewResult
+  error_message?: string
+}
+
+export interface BackupBatchRestorePreviewResult {
+  id: string
+  status: BackupTaskStatus
+  started_at: string
+  finished_at?: string
+  duration_ms: number
+  items: BackupBatchRestorePreviewItemResult[]
+  total_files: number
+  total_bytes: number
+  warning?: boolean
+  warnings?: string[]
+  error_message?: string
+}
+
+export interface BackupBatchRestoreItemResult {
+  index: number
+  job_id: string
+  target_path: string
+  include_config: boolean
+  status: BackupTaskStatus
+  restore?: BackupRestoreResult
+  verify?: BackupRestoreVerifyResult
+  warnings?: string[]
+  error_message?: string
+}
+
+export interface BackupBatchRestoreResult {
+  id: string
+  status: BackupTaskStatus
+  started_at: string
+  finished_at?: string
+  duration_ms: number
+  items: BackupBatchRestoreItemResult[]
+  total_files: number
+  verified_bytes: number
+  warning?: boolean
   warnings?: string[]
   error_message?: string
 }
@@ -1157,6 +1324,7 @@ export interface BackupJob {
   restore_drill_status: string
   restore_drill_message?: string
   last_restore_drill_reminder_at?: string
+  restore_drill_stats?: BackupRestoreDrillStats
   include_config: boolean
   verify_after_backup: boolean
   exclude: string[]
@@ -1164,12 +1332,35 @@ export interface BackupJob {
   last_run?: BackupRunResult
   last_successful_run?: BackupRunResult
   last_restore_drill?: BackupRestoreDrillResult
+  restore_drill_history?: BackupRestoreDrillResult[]
   last_restore?: BackupRestoreResult
+  last_restore_verify?: BackupRestoreVerifyResult
   restore_history?: BackupRestoreResult[]
+  last_retention_check?: BackupRetentionCheckResult
 }
 
 function isBackupStatus(value: unknown): value is BackupTaskStatus {
   return value === 'running' || value === 'completed' || value === 'failed'
+}
+
+function isBackupRestorePreflightStatus(value: unknown): value is BackupRestorePreflightStatus {
+  return value === 'passed' || value === 'warning' || value === 'failed'
+}
+
+function isStringArrayOrUndefined(value: unknown): value is string[] | undefined {
+  return value === undefined || (Array.isArray(value) && value.every((entry) => typeof entry === 'string'))
+}
+
+function isBackupRestorePreflightCheckShape(value: unknown): value is BackupRestorePreflightCheck {
+  return isRecord(value)
+    && typeof value.id === 'string'
+    && isBackupRestorePreflightStatus(value.status)
+    && typeof value.title === 'string'
+    && isStringOrUndefined(value.detail)
+}
+
+function isBackupRestorePreflightChecksOrUndefined(value: unknown): value is BackupRestorePreflightCheck[] | undefined {
+  return value === undefined || (Array.isArray(value) && value.every(isBackupRestorePreflightCheckShape))
 }
 
 function isBackupRunResultShape(value: unknown): value is BackupRunResult {
@@ -1209,6 +1400,21 @@ function isBackupRestoreDrillResultShape(value: unknown): value is BackupRestore
     && typeof value.file_count === 'number'
     && typeof value.verified_bytes === 'number'
     && isStringOrUndefined(value.error_message)
+    && isStringOrUndefined(value.failure_category)
+}
+
+function isBackupRestoreDrillStatsShape(value: unknown): value is BackupRestoreDrillStats {
+  return isRecord(value)
+    && typeof value.total_runs === 'number'
+    && typeof value.successful_runs === 'number'
+    && typeof value.failed_runs === 'number'
+    && typeof value.success_rate === 'number'
+    && isNumberOrUndefined(value.consecutive_successes)
+    && isNumberOrUndefined(value.consecutive_failures)
+    && isStringOrUndefined(value.latest_success_at)
+    && isStringOrUndefined(value.latest_failure_at)
+    && isStringOrUndefined(value.last_failure_message)
+    && isStringOrUndefined(value.last_failure_category)
 }
 
 function isBackupRestoreResultShape(value: unknown): value is BackupRestoreResult {
@@ -1226,6 +1432,10 @@ function isBackupRestoreResultShape(value: unknown): value is BackupRestoreResul
     && isStringOrUndefined(value.config_path)
     && typeof value.file_count === 'number'
     && typeof value.verified_bytes === 'number'
+    && isBackupRestorePreflightChecksOrUndefined(value.preflight_checks)
+    && isStringArrayOrUndefined(value.warnings)
+    && isStringArrayOrUndefined(value.cutover_checklist)
+    && isStringArrayOrUndefined(value.rollback_checklist)
     && isStringOrUndefined(value.error_message)
 }
 
@@ -1247,6 +1457,10 @@ function isBackupRestorePreviewResultShape(value: unknown): value is BackupResto
     && typeof value.config_available === 'boolean'
     && typeof value.config_included === 'boolean'
     && (value.sample_paths === undefined || (Array.isArray(value.sample_paths) && value.sample_paths.every((entry) => typeof entry === 'string')))
+    && isBackupRestorePreflightChecksOrUndefined(value.preflight_checks)
+    && isStringArrayOrUndefined(value.warnings)
+    && isStringArrayOrUndefined(value.cutover_checklist)
+    && isStringArrayOrUndefined(value.rollback_checklist)
     && isStringOrUndefined(value.error_message)
 }
 
@@ -1271,6 +1485,82 @@ function isBackupRestoreVerifyResultShape(value: unknown): value is BackupRestor
     && typeof value.objects_dir_found === 'boolean'
     && typeof value.looks_like_storage_root === 'boolean'
     && (value.warnings === undefined || (Array.isArray(value.warnings) && value.warnings.every((entry) => typeof entry === 'string')))
+    && isStringOrUndefined(value.error_message)
+}
+
+function isBackupRetentionCheckResultShape(value: unknown): value is BackupRetentionCheckResult {
+  return isRecord(value)
+    && typeof value.id === 'string'
+    && typeof value.job_id === 'string'
+    && isBackupStatus(value.status)
+    && typeof value.started_at === 'string'
+    && isStringOrUndefined(value.finished_at)
+    && typeof value.duration_ms === 'number'
+    && typeof value.target === 'string'
+    && isStringOrUndefined(value.policy)
+    && isNumberOrUndefined(value.snapshot_count)
+    && isNumberOrUndefined(value.file_count)
+    && isNumberOrUndefined(value.total_bytes)
+    && isStringOrUndefined(value.oldest_snapshot_at)
+    && isStringOrUndefined(value.latest_snapshot_at)
+    && isBooleanOrUndefined(value.warning)
+    && (value.warnings === undefined || (Array.isArray(value.warnings) && value.warnings.every((entry) => typeof entry === 'string')))
+    && isStringOrUndefined(value.error_message)
+}
+
+function isBackupBatchRestorePreviewItemResultShape(value: unknown): value is BackupBatchRestorePreviewItemResult {
+  return isRecord(value)
+    && typeof value.index === 'number'
+    && typeof value.job_id === 'string'
+    && typeof value.target_path === 'string'
+    && typeof value.include_config === 'boolean'
+    && isBackupStatus(value.status)
+    && (value.preview === undefined || isBackupRestorePreviewResultShape(value.preview))
+    && isStringOrUndefined(value.error_message)
+}
+
+function isBackupBatchRestorePreviewResultShape(value: unknown): value is BackupBatchRestorePreviewResult {
+  return isRecord(value)
+    && typeof value.id === 'string'
+    && isBackupStatus(value.status)
+    && typeof value.started_at === 'string'
+    && isStringOrUndefined(value.finished_at)
+    && typeof value.duration_ms === 'number'
+    && Array.isArray(value.items)
+    && value.items.every(isBackupBatchRestorePreviewItemResultShape)
+    && typeof value.total_files === 'number'
+    && typeof value.total_bytes === 'number'
+    && isBooleanOrUndefined(value.warning)
+    && isStringArrayOrUndefined(value.warnings)
+    && isStringOrUndefined(value.error_message)
+}
+
+function isBackupBatchRestoreItemResultShape(value: unknown): value is BackupBatchRestoreItemResult {
+  return isRecord(value)
+    && typeof value.index === 'number'
+    && typeof value.job_id === 'string'
+    && typeof value.target_path === 'string'
+    && typeof value.include_config === 'boolean'
+    && isBackupStatus(value.status)
+    && (value.restore === undefined || isBackupRestoreResultShape(value.restore))
+    && (value.verify === undefined || isBackupRestoreVerifyResultShape(value.verify))
+    && isStringArrayOrUndefined(value.warnings)
+    && isStringOrUndefined(value.error_message)
+}
+
+function isBackupBatchRestoreResultShape(value: unknown): value is BackupBatchRestoreResult {
+  return isRecord(value)
+    && typeof value.id === 'string'
+    && isBackupStatus(value.status)
+    && typeof value.started_at === 'string'
+    && isStringOrUndefined(value.finished_at)
+    && typeof value.duration_ms === 'number'
+    && Array.isArray(value.items)
+    && value.items.every(isBackupBatchRestoreItemResultShape)
+    && typeof value.total_files === 'number'
+    && typeof value.verified_bytes === 'number'
+    && isBooleanOrUndefined(value.warning)
+    && isStringArrayOrUndefined(value.warnings)
     && isStringOrUndefined(value.error_message)
 }
 
@@ -1301,6 +1591,7 @@ function isBackupJobShape(value: unknown): value is BackupJob {
     && typeof value.restore_drill_status === 'string'
     && isStringOrUndefined(value.restore_drill_message)
     && isStringOrUndefined(value.last_restore_drill_reminder_at)
+    && (value.restore_drill_stats === undefined || isBackupRestoreDrillStatsShape(value.restore_drill_stats))
     && typeof value.include_config === 'boolean'
     && typeof value.verify_after_backup === 'boolean'
     && Array.isArray(value.exclude)
@@ -1309,8 +1600,11 @@ function isBackupJobShape(value: unknown): value is BackupJob {
     && (value.last_run === undefined || isBackupRunResultShape(value.last_run))
     && (value.last_successful_run === undefined || isBackupRunResultShape(value.last_successful_run))
     && (value.last_restore_drill === undefined || isBackupRestoreDrillResultShape(value.last_restore_drill))
+    && (value.restore_drill_history === undefined || (Array.isArray(value.restore_drill_history) && value.restore_drill_history.every(isBackupRestoreDrillResultShape)))
     && (value.last_restore === undefined || isBackupRestoreResultShape(value.last_restore))
+    && (value.last_restore_verify === undefined || isBackupRestoreVerifyResultShape(value.last_restore_verify))
     && (value.restore_history === undefined || (Array.isArray(value.restore_history) && value.restore_history.every(isBackupRestoreResultShape)))
+    && (value.last_retention_check === undefined || isBackupRetentionCheckResultShape(value.last_retention_check))
 }
 
 // List files in a directory
@@ -1370,7 +1664,11 @@ export async function getStorageStats(): Promise<StorageStats> {
       || data.disk_available !== undefined
       || data.disk_used !== undefined
       || data.disk_usage_ratio !== undefined
+      || data.disk_filesystem_type !== undefined
+      || data.disk_mount_point !== undefined
+      || data.disk_mount_source !== undefined
     ),
+    directoryQuotaStatsAvailable: data.directory_quota_stats_available ?? data.directory_quotas !== undefined,
     totalSize: data.total_size,
     totalObjects: data.total_chunks,
     uniqueSize: data.unique_size,
@@ -1381,7 +1679,19 @@ export async function getStorageStats(): Promise<StorageStats> {
     diskUsed: data.disk_used,
     diskUsageRatio: data.disk_usage_ratio,
     diskFilesystemType: data.disk_filesystem_type,
+    diskMountPoint: data.disk_mount_point,
+    diskMountSource: data.disk_mount_source,
+    diskMountOptions: data.disk_mount_options,
     diskNativeDataChecksumSupport: data.disk_native_data_checksum_support,
+    directoryQuotas: data.directory_quotas?.map((quota) => ({
+      path: quota.path,
+      quotaBytes: quota.quota_bytes,
+      usedBytes: quota.used_bytes,
+      availableBytes: quota.available_bytes,
+      usageRatio: quota.usage_ratio,
+      exists: quota.exists,
+      status: quota.status,
+    })),
   }
 }
 
@@ -2013,6 +2323,20 @@ export async function runBackupRestoreDrill(id: string, keepArtifact = false): P
   return data
 }
 
+// Check backup retention policy and remote/local snapshot visibility
+export async function checkBackupRetentionJob(id: string): Promise<BackupRetentionCheckResult> {
+  const response = await authFetch(`${API_BASE}/maintenance/backups/${encodeURIComponent(id)}/retention-check`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: '{}',
+  })
+  const data = await handleWrappedResponse<unknown>(response, '检查备份保留策略失败')
+  if (!isBackupRetentionCheckResultShape(data)) {
+    throw new Error('服务器返回了无效的数据')
+  }
+  return data
+}
+
 // Preview a supported backup restore without writing target data
 export async function previewBackupRestoreJob(id: string, targetPath: string, includeConfig = false): Promise<BackupRestorePreviewResult> {
   const response = await authFetch(`${API_BASE}/maintenance/backups/${encodeURIComponent(id)}/restore-preview`, {
@@ -2022,6 +2346,20 @@ export async function previewBackupRestoreJob(id: string, targetPath: string, in
   })
   const data = await handleWrappedResponse<unknown>(response, '生成恢复预览失败')
   if (!isBackupRestorePreviewResultShape(data)) {
+    throw new Error('服务器返回了无效的数据')
+  }
+  return data
+}
+
+// Preview multiple backup restores without writing target data
+export async function previewBatchBackupRestore(items: BackupBatchRestoreItemRequest[]): Promise<BackupBatchRestorePreviewResult> {
+  const response = await authFetch(`${API_BASE}/maintenance/backups/batch-restore-preview`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ items }),
+  })
+  const data = await handleWrappedResponse<unknown>(response, '生成批量恢复预览失败')
+  if (!isBackupBatchRestorePreviewResultShape(data)) {
     throw new Error('服务器返回了无效的数据')
   }
   return data
@@ -2041,6 +2379,20 @@ export async function restoreBackupJob(id: string, targetPath: string, includeCo
   return data
 }
 
+// Restore multiple backup jobs sequentially to safe target directories
+export async function runBatchBackupRestore(items: BackupBatchRestoreItemRequest[]): Promise<BackupBatchRestoreResult> {
+  const response = await authFetch(`${API_BASE}/maintenance/backups/batch-restore`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ items }),
+  })
+  const data = await handleWrappedResponse<unknown>(response, '执行批量恢复失败')
+  if (!isBackupBatchRestoreResultShape(data)) {
+    throw new Error('服务器返回了无效的数据')
+  }
+  return data
+}
+
 // Verify a restored backup target without modifying it
 export async function verifyBackupRestoreJob(id: string, targetPath: string): Promise<BackupRestoreVerifyResult> {
   const response = await authFetch(`${API_BASE}/maintenance/backups/${encodeURIComponent(id)}/restore-verify`, {
@@ -2053,6 +2405,20 @@ export async function verifyBackupRestoreJob(id: string, targetPath: string): Pr
     throw new Error('服务器返回了无效的数据')
   }
   return data
+}
+
+// Download an audit report for one backup job restore state
+export async function downloadBackupRestoreReport(id: string): Promise<void> {
+  const response = await authFetch(`${API_BASE}/maintenance/backups/${encodeURIComponent(id)}/restore-report`)
+  if (!response.ok) {
+    await throwApiErrorFromResponse(response, '导出恢复报告失败')
+  }
+
+  const fallbackFilename = `mnemonas-restore-report-${id}-${new Date().toISOString().slice(0, 10)}.json`
+  const filename = getFilenameFromContentDisposition(response.headers.get('Content-Disposition'), fallbackFilename)
+
+  const blob = await response.blob()
+  triggerBrowserDownload(blob, filename)
 }
 
 // Download diagnostics export

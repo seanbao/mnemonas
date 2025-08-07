@@ -4744,6 +4744,64 @@ func TestHandler_UsersAuthCopyEnforcesQuota(t *testing.T) {
 	}
 }
 
+func TestHandler_PutEnforcesDirectoryQuota(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	handler.directoryQuotas = []DirectoryQuota{{Path: "/team", QuotaBytes: 10}}
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/team"); err != nil {
+		t.Fatalf("Mkdir(/team) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/team/existing.txt", strings.NewReader("12345678")); err != nil {
+		t.Fatalf("WriteFile(existing) error: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPut, "/dav/team/new.txt", strings.NewReader("123"))
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusInsufficientStorage {
+		t.Fatalf("directory quota PUT status = %d, want %d; body=%s", w.Code, http.StatusInsufficientStorage, w.Body.String())
+	}
+	if _, err := fs.Stat(ctx, "/team/new.txt"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("expected quota-rejected PUT to leave no file, got %v", err)
+	}
+}
+
+func TestHandler_MoveEnforcesDirectoryQuota(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	handler.directoryQuotas = []DirectoryQuota{{Path: "/team", QuotaBytes: 10}}
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/incoming"); err != nil {
+		t.Fatalf("Mkdir(/incoming) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/team"); err != nil {
+		t.Fatalf("Mkdir(/team) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/incoming/src.txt", strings.NewReader("123456")); err != nil {
+		t.Fatalf("WriteFile(src) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/team/used.txt", strings.NewReader("12345")); err != nil {
+		t.Fatalf("WriteFile(used) error: %v", err)
+	}
+
+	req := httptest.NewRequest("MOVE", "/dav/incoming/src.txt", nil)
+	req.Header.Set("Destination", "http://example.com/dav/team/src.txt")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusInsufficientStorage {
+		t.Fatalf("directory quota MOVE status = %d, want %d; body=%s", w.Code, http.StatusInsufficientStorage, w.Body.String())
+	}
+	if _, err := fs.Stat(ctx, "/incoming/src.txt"); err != nil {
+		t.Fatalf("expected quota-rejected MOVE to keep source, got %v", err)
+	}
+	if _, err := fs.Stat(ctx, "/team/src.txt"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("expected quota-rejected MOVE to leave destination absent, got %v", err)
+	}
+}
+
 func TestHandler_PathTraversal(t *testing.T) {
 	handler, _, _ := setupTestHandler(t)
 

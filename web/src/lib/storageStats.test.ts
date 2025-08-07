@@ -37,6 +37,13 @@ describe('storage stats helpers', () => {
     })).toBe(true)
   })
 
+  it('infers disk stats availability from legacy disk fields', () => {
+    expect(areDiskStatsAvailable({ diskTotal: 2048 })).toBe(true)
+    expect(areDiskStatsAvailable({ diskMountPoint: '/srv/mnemonas' })).toBe(true)
+    expect(areDiskStatsAvailable({})).toBe(false)
+    expect(areDiskStatsAvailable(undefined)).toBe(false)
+  })
+
   it('clamps disk usage percentages for display', () => {
     expect(clampUsagePercent(0.25)).toBe(25)
     expect(clampUsagePercent(2)).toBe(100)
