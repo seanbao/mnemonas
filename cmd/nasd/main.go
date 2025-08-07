@@ -28,6 +28,7 @@ import (
 
 	"github.com/seanbao/mnemonas/internal/alerts"
 	"github.com/seanbao/mnemonas/internal/api"
+	"github.com/seanbao/mnemonas/internal/auth"
 	"github.com/seanbao/mnemonas/internal/config"
 	"github.com/seanbao/mnemonas/internal/dataplane"
 	"github.com/seanbao/mnemonas/internal/diskhealth"
@@ -323,14 +324,31 @@ func buildWebDAVHandler(fs *storage.FileSystem, cfg api.WebDAVRuntimeConfig) (st
 		return "", nil
 	}
 
+	var userAuthenticator webdav.UserAuthenticator
+	if strings.EqualFold(cfg.AuthType, "users") && cfg.UserStore != nil {
+		userAuthenticator = func(ctx context.Context, username, password string) (*webdav.UserIdentity, error) {
+			user, err := cfg.UserStore.VerifyCredentials(username, password)
+			if err != nil {
+				return nil, err
+			}
+			return &webdav.UserIdentity{
+				Username:   user.Username,
+				Role:       string(user.Role),
+				HomeDir:    user.HomeDir,
+				QuotaBytes: user.QuotaBytes,
+			}, nil
+		}
+	}
+
 	prefix := config.NormalizeWebDAVPrefix(cfg.Prefix)
 	return prefix, webdav.NewHandler(webdav.Config{
-		FileSystem: fs,
-		Prefix:     prefix,
-		ReadOnly:   cfg.ReadOnly,
-		AuthType:   cfg.AuthType,
-		Username:   cfg.Username,
-		Password:   cfg.Password,
+		FileSystem:        fs,
+		Prefix:            prefix,
+		ReadOnly:          cfg.ReadOnly,
+		AuthType:          cfg.AuthType,
+		Username:          cfg.Username,
+		Password:          cfg.Password,
+		UserAuthenticator: userAuthenticator,
 	})
 }
 
@@ -440,7 +458,7 @@ func main() {
 	}
 	if cfg.WebDAV.Enabled && cfg.WebDAV.AuthType == "none" {
 		log.Warn().Msg("⚠️  WebDAV authentication is DISABLED - WebDAV access is unprotected!")
-		log.Warn().Msg("   Set [webdav].auth_type = \"basic\" to enable WebDAV authentication")
+		log.Warn().Msg("   Set [webdav].auth_type = \"users\" or \"basic\" to enable WebDAV authentication")
 	}
 	if !cfg.Server.TLS.Enabled {
 		log.Warn().Msg("⚠️  TLS/HTTPS is DISABLED - data transmitted in plain text!")
@@ -544,6 +562,15 @@ func main() {
 			Msg("disk health monitoring enabled")
 	}
 
+	var sharedUserStore *auth.UserStore
+	if cfg.Auth.Enabled {
+		userStore, _, err := auth.NewUserStore(cfg.Auth.UsersFile)
+		if err != nil {
+			log.Fatal().Err(err).Msg("failed to initialize user store")
+		}
+		sharedUserStore = userStore
+	}
+
 	// Mount API with data plane connection
 	activeWebDAV := api.WebDAVRuntimeConfig{
 		Enabled:             cfg.WebDAV.Enabled,
@@ -553,6 +580,7 @@ func main() {
 		Username:            cfg.WebDAV.Username,
 		Password:            cfg.WebDAV.Password,
 		PasswordIsGenerated: webdavPasswordGenerated,
+		UserStore:           sharedUserStore,
 	}
 	webdavPrefix, webdavHandler := buildWebDAVHandler(fs, activeWebDAV)
 	runtimeWebDAV := newSwitchableWebDAVHandler(webdavPrefix, webdavHandler)
@@ -571,6 +599,7 @@ func main() {
 		// Auth configuration
 		AuthEnabled:    cfg.Auth.Enabled,
 		AuthUsersFile:  cfg.Auth.UsersFile,
+		AuthUserStore:  sharedUserStore,
 		AuthJWTSecret:  cfg.Auth.JWTSecret,
 		AuthAccessTTL:  cfg.Auth.AccessTokenTTL,
 		AuthRefreshTTL: cfg.Auth.RefreshTokenTTL,
@@ -972,7 +1001,7 @@ func configWarnings(cfg *config.Config) []string {
 		warnings = append(warnings, "auth.enabled=false while server.host listens beyond loopback; Web UI/API will be reachable without login")
 	}
 	if serverBeyondLoopback && cfg.WebDAV.Enabled && strings.EqualFold(strings.TrimSpace(cfg.WebDAV.AuthType), "none") {
-		warnings = append(warnings, "webdav.auth_type=none while server.host listens beyond loopback; WebDAV will be reachable without Basic Auth")
+		warnings = append(warnings, "webdav.auth_type=none while server.host listens beyond loopback; WebDAV will be reachable without authentication")
 	}
 	if listensBeyondLoopback(hostFromTCPAddress(cfg.DataPlane.GRPCAddress)) {
 		warnings = append(warnings, "dataplane.grpc_address listens beyond loopback; dataplane has no external authentication")

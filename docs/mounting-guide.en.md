@@ -11,10 +11,10 @@ MnemoNAS exposes files through WebDAV. Use the Web UI for management and WebDAV 
 | Protocol | WebDAV over HTTP or HTTPS |
 | Default URL | `http://<server-ip>:8080/dav` |
 | Default local URL | `http://localhost:8080/dav` |
-| Username | Configured WebDAV username; empty config defaults to `admin` at runtime |
-| Password | Configured password, or the generated WebDAV password in `secrets.json` |
+| Username | MnemoNAS username when `auth_type = "users"`; configured WebDAV username in `basic` mode |
+| Password | MnemoNAS user password when `auth_type = "users"`; configured or generated WebDAV password in `basic` mode |
 
-WebDAV credentials are separate from the Web UI admin account. Check `<storage.root>/secrets.json` or the admin settings API if the password was auto-generated. See [configuration](configuration.en.md).
+Prefer `auth_type = "users"` for day-to-day mounting so WebDAV follows MnemoNAS roles, `home_dir`, and quota boundaries. The default legacy `basic` mode uses separate global WebDAV credentials; check `<storage.root>/secrets.json` or the admin settings API if that password was auto-generated. See [configuration](configuration.en.md).
 
 ## macOS
 

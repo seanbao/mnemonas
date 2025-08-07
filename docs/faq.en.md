@@ -109,6 +109,13 @@ For regular use, deploy HTTPS.
 [webdav]
 enabled = true
 prefix = "/dav"
+auth_type = "users"
+```
+
+For a separate global WebDAV credential, use:
+
+```toml
+[webdav]
 auth_type = "basic"
 username = "admin"
 password = "your-password-here"

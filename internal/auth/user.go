@@ -918,6 +918,26 @@ func (s *UserStore) GetByUsername(username string) (*User, error) {
 	return cloneUser(user), nil
 }
 
+// VerifyCredentials verifies username and password without mutating login state.
+func (s *UserStore) VerifyCredentials(username, password string) (*User, error) {
+	s.mu.RLock()
+	user, ok := s.byName[normalizeUsername(username)]
+	if !ok {
+		s.mu.RUnlock()
+		return nil, ErrInvalidCredentials
+	}
+	user = cloneUser(user)
+	s.mu.RUnlock()
+
+	if user.Disabled {
+		return nil, ErrUserDisabled
+	}
+	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(password)); err != nil {
+		return nil, ErrInvalidCredentials
+	}
+	return user, nil
+}
+
 // Authenticate verifies username and password
 func (s *UserStore) Authenticate(username, password string) (*User, error) {
 	normalizedUsername := normalizeUsername(username)

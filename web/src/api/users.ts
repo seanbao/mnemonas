@@ -30,6 +30,13 @@ export interface ResetPasswordRequest {
   new_password: string
 }
 
+export interface UpdateUserRequest {
+  email?: string
+  role?: User['role']
+  home_dir?: string
+  quota_bytes?: number
+}
+
 export interface ListUsersResponse {
   success: boolean
   users: User[]
@@ -187,6 +194,35 @@ export async function createUser(data: CreateUserRequest): Promise<UserResponse>
   const body = await parseUsersSuccess<{ user: User }>(response, 'Invalid create user response')
   if (!body.data || !isValidUser(body.data.user)) {
     throw new Error('Invalid create user response')
+  }
+
+  return {
+    success: body.success,
+    user: body.data.user,
+    warning: hasUsersWarning(response, body.data),
+    message: body.message,
+  }
+}
+
+/**
+ * Update user metadata, role, home directory, or quota (admin only)
+ */
+export async function updateUser(userId: string, data: UpdateUserRequest): Promise<UserResponse> {
+  const response = await authFetch(`${API_BASE}/${userId}`, {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(data),
+  })
+
+  if (!response.ok) {
+    throw await parseUsersError(response, 'Failed to update user')
+  }
+
+  const body = await parseUsersSuccess<{ user: User }>(response, 'Invalid update user response')
+  if (!body.data || !isValidUser(body.data.user)) {
+    throw new Error('Invalid update user response')
   }
 
   return {

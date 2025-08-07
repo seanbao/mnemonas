@@ -2,6 +2,7 @@ package auth
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -23,7 +24,10 @@ type Handler struct {
 	loginFailureLimit  int
 	loginFailureWindow time.Duration
 	loginLockDuration  time.Duration
+	usageResolver      UserUsageResolver
 }
+
+type UserUsageResolver func(context.Context, *User) (int64, error)
 
 type loginAttemptTracker struct {
 	mu       sync.Mutex
@@ -125,6 +129,10 @@ func NewHandler(us *UserStore, tm *TokenManager) *Handler {
 	}
 }
 
+func (h *Handler) SetUserUsageResolver(resolver UserUsageResolver) {
+	h.usageResolver = resolver
+}
+
 func decodeJSONBodyStrict(r *http.Request, dst any) error {
 	body, err := io.ReadAll(io.LimitReader(r.Body, defaultJSONRequestBodyLimit+1))
 	if err != nil {
@@ -218,6 +226,16 @@ func fullUserResponse(user *User) map[string]interface{} {
 	}
 	if user.LastLoginAt != nil {
 		info["last_login_at"] = user.LastLoginAt
+	}
+	return info
+}
+
+func (h *Handler) fullUserResponse(ctx context.Context, user *User) map[string]interface{} {
+	info := fullUserResponse(user)
+	if h != nil && h.usageResolver != nil {
+		if usedBytes, err := h.usageResolver(ctx, user); err == nil {
+			info["used_bytes"] = usedBytes
+		}
 	}
 	return info
 }
@@ -703,6 +721,14 @@ type CreateUserRequest struct {
 	Role     string `json:"role"`
 }
 
+// UpdateUserRequest is the update user request body.
+type UpdateUserRequest struct {
+	Email      *string `json:"email"`
+	Role       *string `json:"role"`
+	HomeDir    *string `json:"home_dir"`
+	QuotaBytes *int64  `json:"quota_bytes"`
+}
+
 // HandleListUsers handles GET /api/v1/admin/users
 func (h *Handler) HandleListUsers(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
@@ -719,7 +745,7 @@ func (h *Handler) HandleListUsers(w http.ResponseWriter, r *http.Request) {
 	userInfos := make([]map[string]interface{}, 0, len(users))
 
 	for _, u := range users {
-		userInfos = append(userInfos, fullUserResponse(u))
+		userInfos = append(userInfos, h.fullUserResponse(r.Context(), u))
 	}
 
 	writeSuccess(w, http.StatusOK, map[string]interface{}{
@@ -774,7 +800,7 @@ func (h *Handler) HandleCreateUser(w http.ResponseWriter, r *http.Request) {
 		if isAuthPersistenceWarning(err) && user != nil {
 			markAuthPersistenceWarningHeaders(w)
 			writeSuccess(w, http.StatusCreated, map[string]interface{}{
-				"user":    fullUserResponse(user),
+				"user":    h.fullUserResponse(r.Context(), user),
 				"warning": true,
 			}, "user created with persistence warning")
 			return
@@ -793,8 +819,112 @@ func (h *Handler) HandleCreateUser(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeSuccess(w, http.StatusCreated, map[string]interface{}{
-		"user": fullUserResponse(user),
+		"user": h.fullUserResponse(r.Context(), user),
 	}, "")
+}
+
+// HandleUpdateUser handles PUT /api/v1/admin/users/{id}
+func (h *Handler) HandleUpdateUser(w http.ResponseWriter, r *http.Request, userID string) {
+	if r.Method != http.MethodPut {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed", "METHOD_NOT_ALLOWED")
+		return
+	}
+
+	if !IsAdmin(r.Context()) {
+		writeError(w, http.StatusForbidden, "admin access required", "FORBIDDEN")
+		return
+	}
+
+	var req UpdateUserRequest
+	if err := decodeJSONBodyStrict(r, &req); err != nil {
+		writeJSONBodyError(w, err)
+		return
+	}
+	if req.Email == nil && req.Role == nil && req.HomeDir == nil && req.QuotaBytes == nil {
+		writeError(w, http.StatusBadRequest, "at least one field is required", "MISSING_FIELDS")
+		return
+	}
+
+	user, err := h.userStore.GetByID(userID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "user not found", "USER_NOT_FOUND")
+		return
+	}
+
+	if req.Email != nil {
+		user.Email = strings.TrimSpace(*req.Email)
+	}
+	if req.Role != nil {
+		role := Role(strings.ToLower(strings.TrimSpace(*req.Role)))
+		if role != RoleAdmin && role != RoleUser && role != RoleGuest {
+			writeError(w, http.StatusBadRequest, "invalid role, must be admin, user, or guest", "INVALID_ROLE")
+			return
+		}
+		currentUser := GetUserFromContext(r.Context())
+		if currentUser != nil && currentUser.ID == userID && role != RoleAdmin {
+			writeError(w, http.StatusBadRequest, "cannot change your own admin role", "SELF_ROLE_CHANGE")
+			return
+		}
+		if user.Role == RoleAdmin && !user.Disabled && role != RoleAdmin {
+			activeAdmins := 0
+			for _, u := range h.userStore.List() {
+				if u.Role == RoleAdmin && !u.Disabled {
+					activeAdmins++
+				}
+			}
+			if activeAdmins <= 1 {
+				writeError(w, http.StatusBadRequest, "cannot remove last admin user", "LAST_ADMIN")
+				return
+			}
+		}
+		user.Role = role
+	}
+	if req.HomeDir != nil {
+		user.HomeDir = strings.TrimSpace(*req.HomeDir)
+	}
+	if req.QuotaBytes != nil {
+		if *req.QuotaBytes < 0 {
+			writeError(w, http.StatusBadRequest, "quota_bytes must be greater than or equal to 0", "INVALID_QUOTA")
+			return
+		}
+		user.QuotaBytes = *req.QuotaBytes
+	}
+
+	if err := h.userStore.Update(user); err != nil {
+		if isAuthPersistenceWarning(err) {
+			updatedUser := user
+			if storedUser, getErr := h.userStore.GetByID(userID); getErr == nil {
+				updatedUser = storedUser
+			}
+			markAuthPersistenceWarningHeaders(w)
+			writeSuccess(w, http.StatusOK, map[string]interface{}{
+				"user":    h.fullUserResponse(r.Context(), updatedUser),
+				"warning": true,
+			}, "user updated with persistence warning")
+			return
+		}
+		switch {
+		case errors.Is(err, ErrUserNotFound):
+			writeError(w, http.StatusNotFound, "user not found", "USER_NOT_FOUND")
+		case errors.Is(err, ErrUserExists):
+			writeError(w, http.StatusConflict, "user already exists", "USER_EXISTS")
+		case errors.Is(err, ErrInvalidRole):
+			writeError(w, http.StatusBadRequest, "invalid role, must be admin, user, or guest", "INVALID_ROLE")
+		case errors.Is(err, errInvalidUserHomeDir):
+			writeError(w, http.StatusBadRequest, "invalid home_dir", "INVALID_HOME_DIR")
+		default:
+			writeError(w, http.StatusInternalServerError, "internal server error", "UPDATE_ERROR")
+		}
+		return
+	}
+
+	updatedUser := user
+	if storedUser, getErr := h.userStore.GetByID(userID); getErr == nil {
+		updatedUser = storedUser
+	}
+	writeSuccess(w, http.StatusOK, map[string]interface{}{
+		"user": h.fullUserResponse(r.Context(), updatedUser),
+	}, "user updated successfully")
 }
 
 // HandleDeleteUser handles DELETE /api/v1/admin/users/{id}

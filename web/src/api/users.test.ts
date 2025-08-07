@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi, type Mock } from 'vitest'
-import { createUser, deleteUser, listUsers, resetUserPassword, toggleUserStatus, UsersError } from './users'
+import { createUser, deleteUser, listUsers, resetUserPassword, toggleUserStatus, updateUser, UsersError } from './users'
 
 vi.mock('./auth', () => ({
   authFetch: vi.fn(),
@@ -68,6 +68,33 @@ describe('Users API', () => {
     expect(result.user.username).toBe('admin')
   })
 
+  it('unwraps wrapped update user responses', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        success: true,
+        data: {
+          user: { id: 'u1', username: 'admin', email: 'ops@example.com', role: 'admin', disabled: false, home_dir: '/', created_at: '2024-01-01', updated_at: '2024-01-02', quota_bytes: 1024, used_bytes: 512 },
+        },
+        message: 'user updated successfully',
+      }),
+    })
+
+    const result = await updateUser('u1', { email: 'ops@example.com', quota_bytes: 1024 })
+
+    expect(mockAuthFetch).toHaveBeenCalledWith('/api/v1/admin/users/u1', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: 'ops@example.com', quota_bytes: 1024 }),
+    })
+    expect(result).toMatchObject({
+      success: true,
+      user: { email: 'ops@example.com', quota_bytes: 1024, used_bytes: 512 },
+      warning: false,
+      message: 'user updated successfully',
+    })
+  })
+
   it('rejects malformed successful list users responses', async () => {
     mockAuthFetch.mockResolvedValueOnce({
       ok: true,
@@ -117,6 +144,20 @@ describe('Users API', () => {
     })
 
     await expect(createUser({ username: 'admin', password: 'password123' })).rejects.toThrow('Invalid create user response')
+  })
+
+  it('rejects malformed successful update user responses', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        success: true,
+        data: {
+          user: { id: 'u1', username: 'admin', email: '', role: 'admin', disabled: false, created_at: '2024-01-01', updated_at: '2024-01-01', quota_bytes: 0, used_bytes: 0 },
+        },
+      }),
+    })
+
+    await expect(updateUser('u1', { quota_bytes: 0 })).rejects.toThrow('Invalid update user response')
   })
 
   it('uses structured error messages', async () => {

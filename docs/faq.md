@@ -109,7 +109,14 @@ Restart-Service WebClient
 [webdav]
 enabled = true
 prefix = "/dav"
-auth_type = "basic"  # 启用 Basic Auth
+auth_type = "users"  # 使用 MnemoNAS 用户账号登录
+```
+
+如需单独的全局 WebDAV 凭据，可改用：
+
+```toml
+[webdav]
+auth_type = "basic"
 username = "admin"
 password = "your-password-here"
 ```

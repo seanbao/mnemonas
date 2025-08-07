@@ -112,6 +112,7 @@ type Server struct {
 	scrubSchedulerCancel  context.CancelFunc
 	scrubLastFailureID    string
 	scrubFailureRetries   int
+	quotaMu               sync.Mutex
 	loginAlertMu          sync.Mutex
 	loginRateLimitAlerts  map[string]time.Time
 	startTime             time.Time
@@ -154,6 +155,7 @@ type WebDAVRuntimeConfig struct {
 	Username            string
 	Password            string
 	PasswordIsGenerated bool
+	UserStore           *auth.UserStore
 }
 
 func cloneConfigSnapshot(cfg *config.Config) *config.Config {
@@ -1069,12 +1071,13 @@ func requestHasBody(r *http.Request) (bool, error) {
 
 func (s *Server) resolveWebDAVRuntimeConfig(cfg config.Config) WebDAVRuntimeConfig {
 	runtimeCfg := WebDAVRuntimeConfig{
-		Enabled:  cfg.WebDAV.Enabled,
-		Prefix:   cfg.WebDAV.Prefix,
-		ReadOnly: cfg.WebDAV.ReadOnly,
-		AuthType: cfg.WebDAV.AuthType,
-		Username: cfg.WebDAV.Username,
-		Password: cfg.WebDAV.Password,
+		Enabled:   cfg.WebDAV.Enabled,
+		Prefix:    cfg.WebDAV.Prefix,
+		ReadOnly:  cfg.WebDAV.ReadOnly,
+		AuthType:  cfg.WebDAV.AuthType,
+		Username:  cfg.WebDAV.Username,
+		Password:  cfg.WebDAV.Password,
+		UserStore: s.userStore,
 	}
 
 	if !runtimeCfg.Enabled || !strings.EqualFold(runtimeCfg.AuthType, "basic") {
@@ -1162,6 +1165,7 @@ type ServerConfig struct {
 	// Auth configuration
 	AuthEnabled    bool
 	AuthUsersFile  string
+	AuthUserStore  *auth.UserStore
 	AuthJWTSecret  string
 	AuthAccessTTL  time.Duration
 	AuthRefreshTTL time.Duration
@@ -1330,11 +1334,18 @@ func NewServer(logger zerolog.Logger, cfg *ServerConfig) (*Server, error) {
 		s.authEnabled = true
 
 		// Initialize user store
-		userStore, _, err := auth.NewUserStore(cfg.AuthUsersFile)
-		if err != nil {
-			return nil, fmt.Errorf("failed to initialize user store: %w", err)
+		userStore := cfg.AuthUserStore
+		if userStore == nil {
+			var err error
+			userStore, _, err = auth.NewUserStore(cfg.AuthUsersFile)
+			if err != nil {
+				return nil, fmt.Errorf("failed to initialize user store: %w", err)
+			}
 		}
 		s.userStore = userStore
+		activeWebDAV := s.currentActiveWebDAV()
+		activeWebDAV.UserStore = s.userStore
+		s.storeActiveWebDAV(activeWebDAV)
 
 		// Initialize token manager
 		accessTTL := cfg.AuthAccessTTL
@@ -1353,6 +1364,7 @@ func NewServer(logger zerolog.Logger, cfg *ServerConfig) (*Server, error) {
 
 		// Initialize auth handler and middleware
 		s.authHandler = auth.NewHandler(s.userStore, s.tokenManager)
+		s.authHandler.SetUserUsageResolver(s.resolveUserUsedBytes)
 		s.authMw = auth.NewMiddleware(s.userStore, s.tokenManager)
 
 		logger.Info().Msg("Authentication enabled")
@@ -1593,6 +1605,9 @@ func (s *Server) setupRoutes() {
 				r.Use(s.authMw.RequireRole(auth.RoleAdmin))
 				r.Get("/", s.authHandler.HandleListUsers)
 				r.Post("/", s.authHandler.HandleCreateUser)
+				r.Put("/{id}", func(w http.ResponseWriter, req *http.Request) {
+					s.authHandler.HandleUpdateUser(w, req, chi.URLParam(req, "id"))
+				})
 				r.Delete("/{id}", func(w http.ResponseWriter, req *http.Request) {
 					s.authHandler.HandleDeleteUser(w, req, chi.URLParam(req, "id"))
 				})
@@ -1889,6 +1904,278 @@ func (s *Server) authorizeUserPath(ctx context.Context, targetPath string) error
 	return nil
 }
 
+func (s *Server) currentUserQuota(ctx context.Context) (homeDir string, quotaBytes int64, scoped bool, err error) {
+	homeDir, homeScoped, err := s.currentUserHomeDir(ctx)
+	if err != nil {
+		return "", 0, false, err
+	}
+	if !homeScoped {
+		return "", 0, false, nil
+	}
+
+	user := auth.GetUserFromContext(ctx)
+	if user == nil || user.QuotaBytes <= 0 {
+		return "", 0, false, nil
+	}
+
+	return homeDir, user.QuotaBytes, true, nil
+}
+
+func (s *Server) resolveUserUsedBytes(ctx context.Context, user *auth.User) (int64, error) {
+	if s.fs == nil || user == nil || strings.TrimSpace(user.HomeDir) == "" {
+		return 0, nil
+	}
+	homeDir, err := validatePath(user.HomeDir)
+	if err != nil {
+		return user.UsedBytes, err
+	}
+	return s.pathLogicalSizeIfExists(ctx, homeDir)
+}
+
+func (s *Server) pathLogicalSizeIfExists(ctx context.Context, targetPath string) (int64, error) {
+	size, err := s.pathLogicalSize(ctx, targetPath)
+	if isStorageNotFound(err) {
+		return 0, nil
+	}
+	return size, err
+}
+
+func (s *Server) pathLogicalSize(ctx context.Context, targetPath string) (int64, error) {
+	info, err := s.fs.Stat(ctx, targetPath)
+	if err != nil {
+		return 0, err
+	}
+	return s.fileInfoLogicalSize(ctx, info)
+}
+
+func (s *Server) fileInfoLogicalSize(ctx context.Context, info *storage.FileInfo) (int64, error) {
+	if info == nil {
+		return 0, nil
+	}
+	if !info.IsDir {
+		return nonNegativeSize(info.Size), nil
+	}
+
+	children, err := s.fs.ReadDir(ctx, info.Path)
+	if err != nil {
+		return 0, err
+	}
+
+	var total int64
+	for _, child := range children {
+		size, err := s.fileInfoLogicalSize(ctx, child)
+		if err != nil {
+			return 0, err
+		}
+		total, err = addQuotaSize(total, size)
+		if err != nil {
+			return 0, err
+		}
+	}
+	return total, nil
+}
+
+func addQuotaSize(left, right int64) (int64, error) {
+	if right <= 0 {
+		return left, nil
+	}
+	const maxInt64 = int64(^uint64(0) >> 1)
+	if left > maxInt64-right {
+		return 0, errors.New("logical file size overflow")
+	}
+	return left + right, nil
+}
+
+func nonNegativeSize(size int64) int64 {
+	if size < 0 {
+		return 0
+	}
+	return size
+}
+
+func (s *Server) quotaCheckedUploadReader(ctx context.Context, targetPath string, reader io.Reader, contentLength int64) (io.Reader, func(), error) {
+	homeDir, quotaBytes, quotaScoped, err := s.currentUserQuota(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	if !quotaScoped {
+		return reader, func() {}, nil
+	}
+
+	s.quotaMu.Lock()
+	unlock := func() {
+		s.quotaMu.Unlock()
+	}
+
+	usedBytes, err := s.pathLogicalSizeIfExists(ctx, homeDir)
+	if err != nil {
+		unlock()
+		return nil, nil, err
+	}
+
+	replacedBytes, err := s.existingUploadTargetSize(ctx, targetPath)
+	if err != nil {
+		unlock()
+		return nil, nil, err
+	}
+
+	baseUsed := usedBytes - replacedBytes
+	if baseUsed < 0 {
+		baseUsed = 0
+	}
+	availableBytes := quotaBytes - baseUsed
+	if availableBytes < 0 {
+		availableBytes = 0
+	}
+
+	if contentLength >= 0 && contentLength > availableBytes {
+		unlock()
+		return nil, nil, newQuotaExceededError(usedBytes, quotaBytes, contentLength, availableBytes)
+	}
+
+	return &quotaLimitedReader{
+		reader:    reader,
+		remaining: availableBytes,
+		err:       newQuotaExceededError(usedBytes, quotaBytes, quotaStreamRequiredBytes(availableBytes), availableBytes),
+	}, unlock, nil
+}
+
+func (s *Server) existingUploadTargetSize(ctx context.Context, targetPath string) (int64, error) {
+	info, err := s.fs.Stat(ctx, targetPath)
+	if err != nil {
+		if isStorageNotFound(err) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	if info.IsDir {
+		return 0, storage.ErrIsDir
+	}
+	return nonNegativeSize(info.Size), nil
+}
+
+func (s *Server) copyResourceWithQuota(ctx context.Context, srcPath, dstPath string) error {
+	homeDir, quotaBytes, quotaScoped, err := s.currentUserQuota(ctx)
+	if err != nil {
+		return err
+	}
+	if !quotaScoped {
+		return s.copyResource(ctx, srcPath, dstPath)
+	}
+
+	s.quotaMu.Lock()
+	defer s.quotaMu.Unlock()
+
+	usedBytes, err := s.pathLogicalSizeIfExists(ctx, homeDir)
+	if err != nil {
+		return err
+	}
+	requiredBytes, err := s.pathLogicalSize(ctx, srcPath)
+	if err != nil {
+		return err
+	}
+	if err := ensureQuotaAvailable(usedBytes, quotaBytes, requiredBytes); err != nil {
+		return err
+	}
+
+	return s.copyResource(ctx, srcPath, dstPath)
+}
+
+func (s *Server) restoreFromTrashWithQuota(ctx context.Context, item *storage.TrashItem, restore func() error) error {
+	homeDir, quotaBytes, quotaScoped, err := s.currentUserQuota(ctx)
+	if err != nil {
+		return err
+	}
+	if !quotaScoped {
+		return restore()
+	}
+
+	s.quotaMu.Lock()
+	defer s.quotaMu.Unlock()
+
+	usedBytes, err := s.pathLogicalSizeIfExists(ctx, homeDir)
+	if err != nil {
+		return err
+	}
+	requiredBytes := int64(0)
+	if item != nil {
+		requiredBytes = nonNegativeSize(item.Size)
+	}
+	if err := ensureQuotaAvailable(usedBytes, quotaBytes, requiredBytes); err != nil {
+		return err
+	}
+
+	return restore()
+}
+
+func ensureQuotaAvailable(usedBytes, quotaBytes, requiredBytes int64) error {
+	requiredBytes = nonNegativeSize(requiredBytes)
+	availableBytes := quotaBytes - usedBytes
+	if availableBytes < 0 {
+		availableBytes = 0
+	}
+	if requiredBytes > availableBytes {
+		return newQuotaExceededError(usedBytes, quotaBytes, requiredBytes, availableBytes)
+	}
+	return nil
+}
+
+func newQuotaExceededError(usedBytes, quotaBytes, requiredBytes, availableBytes int64) *quotaExceededError {
+	if usedBytes < 0 {
+		usedBytes = 0
+	}
+	if quotaBytes < 0 {
+		quotaBytes = 0
+	}
+	if requiredBytes < 0 {
+		requiredBytes = 0
+	}
+	if availableBytes < 0 {
+		availableBytes = 0
+	}
+	return &quotaExceededError{
+		UsedBytes:      usedBytes,
+		QuotaBytes:     quotaBytes,
+		RequiredBytes:  requiredBytes,
+		AvailableBytes: availableBytes,
+	}
+}
+
+func quotaStreamRequiredBytes(availableBytes int64) int64 {
+	const maxInt64 = int64(^uint64(0) >> 1)
+	if availableBytes >= maxInt64 {
+		return maxInt64
+	}
+	return availableBytes + 1
+}
+
+type quotaLimitedReader struct {
+	reader    io.Reader
+	remaining int64
+	err       error
+}
+
+func (r *quotaLimitedReader) Read(p []byte) (int, error) {
+	if r.remaining <= 0 {
+		var probe [1]byte
+		n, err := r.reader.Read(probe[:])
+		if n > 0 {
+			return 0, r.err
+		}
+		if err != nil {
+			return 0, err
+		}
+		return 0, nil
+	}
+
+	if int64(len(p)) > r.remaining {
+		p = p[:r.remaining]
+	}
+	n, err := r.reader.Read(p)
+	r.remaining -= int64(n)
+	return n, err
+}
+
 func (s *Server) filterSearchResultsByHomeDir(ctx context.Context, results []*storage.SearchResult) ([]*storage.SearchResult, error) {
 	homeDir, scoped, err := s.currentUserHomeDir(ctx)
 	if err != nil {
@@ -2062,6 +2349,30 @@ func isMutationRootPath(targetPath string) bool {
 
 func forbiddenPathOutsideHome(w http.ResponseWriter) {
 	Forbidden(w, "path is outside the assigned home directory")
+}
+
+type quotaExceededError struct {
+	UsedBytes      int64 `json:"used_bytes"`
+	QuotaBytes     int64 `json:"quota_bytes"`
+	RequiredBytes  int64 `json:"required_bytes"`
+	AvailableBytes int64 `json:"available_bytes"`
+}
+
+func (e *quotaExceededError) Error() string {
+	return "user quota exceeded"
+}
+
+func respondQuotaExceeded(w http.ResponseWriter, err error) {
+	details := any(nil)
+	var quotaErr *quotaExceededError
+	if errors.As(err, &quotaErr) {
+		details = quotaErr
+	}
+	apiErr := NewAPIError(ErrCodeQuotaExceeded, "user quota exceeded")
+	if details != nil {
+		apiErr = apiErr.WithDetails(details)
+	}
+	apiErr.Write(w, http.StatusInsufficientStorage)
 }
 
 func (s *Server) respondHomeDirFilterError(w http.ResponseWriter, action string, err error) {
@@ -2350,11 +2661,33 @@ func (s *Server) handleUploadFile(w http.ResponseWriter, r *http.Request) {
 
 	// Limit request body size
 	r.Body = http.MaxBytesReader(w, r.Body, DefaultMaxUploadSize)
+	reader, releaseQuota, err := s.quotaCheckedUploadReader(r.Context(), filePath, r.Body, r.ContentLength)
+	if err != nil {
+		if errors.Is(err, storage.ErrIsDir) {
+			BadRequest(w, "cannot upload to directory")
+			return
+		}
+		if errors.Is(err, storage.ErrNotDir) {
+			Conflict(w, "parent path is not a directory")
+			return
+		}
+		if errors.As(err, new(*quotaExceededError)) {
+			respondQuotaExceeded(w, err)
+			return
+		}
+		s.respondInternalError(w, "check upload quota", err)
+		return
+	}
+	defer releaseQuota()
 
-	if err := s.fs.WriteFile(r.Context(), filePath, r.Body); err != nil {
+	if err := s.fs.WriteFile(r.Context(), filePath, reader); err != nil {
 		var maxBytesErr *http.MaxBytesError
 		if errors.As(err, &maxBytesErr) || errors.Is(err, storage.ErrFileTooLarge) {
 			respondPayloadTooLarge(w, fmt.Sprintf("file too large (max %d bytes)", DefaultMaxUploadSize))
+			return
+		}
+		if errors.As(err, new(*quotaExceededError)) {
+			respondQuotaExceeded(w, err)
 			return
 		}
 		if errors.Is(err, storage.ErrIsDir) {
@@ -2877,7 +3210,7 @@ func (s *Server) handleCopyFile(w http.ResponseWriter, r *http.Request) {
 		s.respondInternalError(w, "stat copy destination parent", err)
 		return
 	}
-	if err := s.copyResource(r.Context(), fromPath, toPath); err != nil {
+	if err := s.copyResourceWithQuota(r.Context(), fromPath, toPath); err != nil {
 		if errors.As(err, new(*storage.VisibleMutationWarningError)) {
 			markWorkspaceMutationWarningHeaders(w)
 			s.LogActivityWithWarning(w, r, activity.ActionCopy, fromPath, map[string]string{
@@ -2889,6 +3222,10 @@ func (s *Server) handleCopyFile(w http.ResponseWriter, r *http.Request) {
 				"to":      toPath,
 				"warning": true,
 			}).WithMessage("resource copied with persistence warning").Write(w, http.StatusCreated)
+			return
+		}
+		if errors.As(err, new(*quotaExceededError)) {
+			respondQuotaExceeded(w, err)
 			return
 		}
 		if isStorageConflict(err) {
@@ -4540,16 +4877,21 @@ func (s *Server) handleRestoreFromTrash(w http.ResponseWriter, r *http.Request) 
 
 	activityPath := item.OriginalPath
 
-	if newPath != "" {
-		// Restore to custom path
-		activityPath = newPath
-		err = s.fs.RestoreFromTrashTo(r.Context(), id, newPath)
-	} else {
+	err = s.restoreFromTrashWithQuota(r.Context(), item, func() error {
+		if newPath != "" {
+			// Restore to custom path
+			activityPath = newPath
+			return s.fs.RestoreFromTrashTo(r.Context(), id, newPath)
+		}
 		// Restore to original path
-		err = s.fs.RestoreFromTrash(r.Context(), id)
-	}
+		return s.fs.RestoreFromTrash(r.Context(), id)
+	})
 
 	if err != nil {
+		if errors.As(err, new(*quotaExceededError)) {
+			respondQuotaExceeded(w, err)
+			return
+		}
 		if errors.Is(err, storage.ErrNotDir) {
 			Conflict(w, "parent path is not a directory")
 			return
@@ -5545,12 +5887,16 @@ func (s *Server) handleGetSecurityCheck(w http.ResponseWriter, r *http.Request) 
 			Title:   "WebDAV 未启用",
 			Message: "当前没有额外的 WebDAV 暴露面。",
 		})
-	case strings.EqualFold(cfg.WebDAV.AuthType, "basic"):
+	case strings.EqualFold(cfg.WebDAV.AuthType, "basic") || strings.EqualFold(cfg.WebDAV.AuthType, "users"):
+		message := "WebDAV 入口使用独立 Basic 凭据。"
+		if strings.EqualFold(cfg.WebDAV.AuthType, "users") {
+			message = "WebDAV 入口使用 MnemoNAS 用户账号，并按角色、home_dir 和配额限制访问。"
+		}
 		checks = append(checks, securityCheckItem{
 			ID:      "webdav_auth",
 			Status:  securityCheckPass,
 			Title:   "WebDAV 已启用认证",
-			Message: "WebDAV 入口使用 Basic 认证。",
+			Message: message,
 			Details: map[string]interface{}{
 				"prefix":    cfg.WebDAV.Prefix,
 				"auth_type": cfg.WebDAV.AuthType,
@@ -5574,7 +5920,7 @@ func (s *Server) handleGetSecurityCheck(w http.ResponseWriter, r *http.Request) 
 			ID:      "webdav_auth",
 			Status:  securityCheckBlock,
 			Title:   "WebDAV 暴露面缺少认证",
-			Message: "WebDAV 已启用但认证方式不是 basic，公网访问前必须启用认证或关闭 WebDAV。",
+			Message: "WebDAV 已启用但认证方式不是 basic 或 users，公网访问前必须启用认证或关闭 WebDAV。",
 			Details: map[string]interface{}{
 				"prefix":    cfg.WebDAV.Prefix,
 				"auth_type": cfg.WebDAV.AuthType,
@@ -6560,6 +6906,7 @@ func (s *Server) applyRuntimeSettings(ctx context.Context, req UpdateSettingsReq
 		if preparedWebDAV != nil {
 			runtimeCfg = *preparedWebDAV
 		}
+		runtimeCfg.UserStore = s.userStore
 		s.storeActiveWebDAV(runtimeCfg)
 		if s.updateWebDAV != nil {
 			s.updateWebDAV(runtimeCfg)
