@@ -383,19 +383,23 @@ The default configuration writes the initial password file to `~/.mnemonas/.mnem
 ### WebDAV Smoke Test
 
 ```bash
-# These curl examples apply to webdav.auth_type=basic; use ./scripts/dev.sh --creds to find credential locations.
-# When webdav.auth_type=users is enabled, use a MnemoNAS username and password instead.
-WEBDAV_USER="<mnemonas-or-webdav-username>"
-WEBDAV_PASS="<mnemonas-or-webdav-password>"
+# Run an independent curl protocol smoke against a running service; the script creates and removes a temporary collection.
+WEBDAV_URL=http://localhost:8080/dav \
+MNEMONAS_WEBDAV_USERNAME="<mnemonas-or-webdav-username>" \
+MNEMONAS_WEBDAV_PASSWORD="<mnemonas-or-webdav-password>" \
+./scripts/webdav-client-smoke.sh
 
-curl -u "$WEBDAV_USER:$WEBDAV_PASS" -X PROPFIND http://localhost:8080/dav/ -H "Depth: 1"
-curl -u "$WEBDAV_USER:$WEBDAV_PASS" -X PUT http://localhost:8080/dav/test.txt -d "Hello World"
-curl -u "$WEBDAV_USER:$WEBDAV_PASS" http://localhost:8080/dav/test.txt
+# For a read-only routing check, a direct PROPFIND is enough.
+curl -u "<mnemonas-or-webdav-username>:<mnemonas-or-webdav-password>" \
+  -X PROPFIND http://localhost:8080/dav/ -H "Depth: 1"
 
 curl http://localhost:8080/health
 curl http://localhost:9091/health
 curl http://localhost:9091/stats
 ```
+
+`scripts/webdav-client-smoke.sh` covers `OPTIONS`, `MKCOL`, `PUT`, `PROPFIND`, `GET`, `HEAD`, `COPY`, `MOVE`, and `DELETE`. For `webdav.auth_type = "basic"`, use `./scripts/dev.sh --creds` to find credential locations. For `webdav.auth_type = "users"`, use a MnemoNAS username and password.
+The script passes authentication through a temporary curl config file so plaintext passwords are not printed in command arguments.
 
 `9091` should remain local/private.
 

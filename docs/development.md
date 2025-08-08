@@ -382,19 +382,23 @@ Playwright 默认启动隔离后端和前端服务器。
 ### WebDAV 烟测
 
 ```bash
-# 以下 curl 示例适用于 webdav.auth_type=basic；可用 ./scripts/dev.sh --creds 查看凭据位置。
-# 如果启用 webdav.auth_type=users，则改用 MnemoNAS 用户名和密码。
-WEBDAV_USER="<mnemonas-or-webdav-username>"
-WEBDAV_PASS="<mnemonas-or-webdav-password>"
+# 对已运行服务执行独立 curl 协议 smoke；脚本会创建临时集合并在结束时清理。
+WEBDAV_URL=http://localhost:8080/dav \
+MNEMONAS_WEBDAV_USERNAME="<mnemonas-or-webdav-username>" \
+MNEMONAS_WEBDAV_PASSWORD="<mnemonas-or-webdav-password>" \
+./scripts/webdav-client-smoke.sh
 
-curl -u "$WEBDAV_USER:$WEBDAV_PASS" -X PROPFIND http://localhost:8080/dav/ -H "Depth: 1"
-curl -u "$WEBDAV_USER:$WEBDAV_PASS" -X PUT http://localhost:8080/dav/test.txt -d "Hello World"
-curl -u "$WEBDAV_USER:$WEBDAV_PASS" http://localhost:8080/dav/test.txt
+# 仅需手动确认路由时，可直接执行只读 PROPFIND。
+curl -u "<mnemonas-or-webdav-username>:<mnemonas-or-webdav-password>" \
+  -X PROPFIND http://localhost:8080/dav/ -H "Depth: 1"
 
 curl http://localhost:8080/health
 curl http://localhost:9091/health
 curl http://localhost:9091/stats
 ```
+
+`scripts/webdav-client-smoke.sh` 覆盖 `OPTIONS`、`MKCOL`、`PUT`、`PROPFIND`、`GET`、`HEAD`、`COPY`、`MOVE` 和 `DELETE`。如果启用 `webdav.auth_type = "basic"`，可用 `./scripts/dev.sh --creds` 查看凭据位置；如果启用 `webdav.auth_type = "users"`，则使用 MnemoNAS 用户名和密码。
+脚本通过临时 curl 配置传递认证信息，避免在命令参数中输出明文密码。
 
 `9091` 应保持本地或私有网络可见。
 
