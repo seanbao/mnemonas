@@ -191,7 +191,14 @@ printf '# docs\n' >README.md
 git add README.md
 git commit -q -m "docs: update release docs"
 
-./scripts/release-readiness.sh >"$output_dir/pass.out" 2>"$output_dir/pass.err"
+if ./scripts/release-readiness.sh >"$output_dir/post-validation.out" 2>"$output_dir/post-validation.err"; then
+	fail "release readiness accepted non-release-documentation changes after validation target"
+fi
+assert_file_contains "$output_dir/post-validation.out" "[release-readiness] validation:"
+assert_file_contains "$output_dir/post-validation.out" "files changed since target"
+assert_file_contains "$output_dir/post-validation.err" "non-release-documentation changes exist after validation target"
+
+./scripts/release-readiness.sh --allow-post-validation-changes >"$output_dir/pass.out" 2>"$output_dir/pass.err"
 assert_file_contains "$output_dir/pass.out" "[release-readiness] branch:"
 assert_file_contains "$output_dir/pass.out" "[release-readiness] base:"
 assert_file_contains "$output_dir/pass.out" "[release-readiness] commits:"
@@ -214,7 +221,7 @@ if ./scripts/release-readiness.sh >"$output_dir/dirty.out" 2>"$output_dir/dirty.
 fi
 assert_file_contains "$output_dir/dirty.err" "worktree has uncommitted changes"
 
-./scripts/release-readiness.sh --allow-dirty >"$output_dir/allow-dirty.out" 2>"$output_dir/allow-dirty.err"
+./scripts/release-readiness.sh --allow-dirty --allow-post-validation-changes >"$output_dir/allow-dirty.out" 2>"$output_dir/allow-dirty.err"
 assert_file_contains "$output_dir/allow-dirty.out" "[release-readiness] worktree:          dirty (draft summary)"
 
 git checkout -q -- README.md
@@ -227,7 +234,7 @@ assert_file_contains "$output_dir/missing-community.err" "missing required commu
 touch .github/pull_request_template.md
 sed -i.bak '/verify-release-artifacts/d' docs/release-notes.en.md
 rm -f docs/release-notes.en.md.bak
-if ./scripts/release-readiness.sh --allow-dirty >"$output_dir/missing-release-notes.out" 2>"$output_dir/missing-release-notes.err"; then
+if ./scripts/release-readiness.sh --allow-dirty --allow-post-validation-changes >"$output_dir/missing-release-notes.out" 2>"$output_dir/missing-release-notes.err"; then
 	fail "release readiness accepted a missing release-notes command"
 fi
 assert_file_contains "$output_dir/missing-release-notes.err" "docs/release-notes.en.md is missing required text"
@@ -235,12 +242,12 @@ git checkout -q -- docs/release-notes.en.md
 
 sed -i.bak '/release-readiness/d' CHANGELOG.en.md
 rm -f CHANGELOG.en.md.bak
-if ./scripts/release-readiness.sh --allow-dirty >"$output_dir/missing-checklist.out" 2>"$output_dir/missing-checklist.err"; then
+if ./scripts/release-readiness.sh --allow-dirty --allow-post-validation-changes >"$output_dir/missing-checklist.out" 2>"$output_dir/missing-checklist.err"; then
 	fail "release readiness accepted a missing checklist command"
 fi
 assert_file_contains "$output_dir/missing-checklist.err" "CHANGELOG.en.md is missing required text"
 
-./scripts/release-readiness.sh --allow-dirty --skip-checklist >"$output_dir/skip-checklist.out" 2>"$output_dir/skip-checklist.err"
+./scripts/release-readiness.sh --allow-dirty --allow-post-validation-changes --skip-checklist >"$output_dir/skip-checklist.out" 2>"$output_dir/skip-checklist.err"
 assert_file_contains "$output_dir/skip-checklist.out" "[release-readiness] status:"
 assert_file_contains "$output_dir/skip-checklist.out" "release readiness summary completed"
 
