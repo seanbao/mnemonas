@@ -55,6 +55,7 @@ This project follows [Semantic Versioning 2.0.0](https://semver.org/).
 - `tools/proto-gen` Rust protobuf generator so normal dataplane and Docker builds do not require system `protoc`.
 - Script simulation tests and CI script checks.
 - Script simulation fixtures cover changed-file selection, WebDAV auth modes, public reverse-proxy exposure checks, benchmark paths, and Web Husky hooks.
+- `scripts/webdav-client-smoke.sh` runs curl protocol smoke checks against a running service, covering basic WebDAV read/write, copy, move, and delete operations, with a dedicated safety test in `make scripts-check`.
 - WebDAV COPY/MOVE destination regression coverage for absolute path-reference destinations and rejection of bare relative destinations, including `dav/path`.
 - `npm run typecheck` covers the frontend application, Playwright specs, and shared E2E helpers.
 - Toolchain hints through `.go-version`, `.nvmrc`, Go `toolchain`, and Rust `rust-version`.
