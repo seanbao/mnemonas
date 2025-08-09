@@ -14,6 +14,7 @@ This release candidate focuses on improving MnemoNAS stability, public-access sa
 - Expanded backend and frontend coverage for authentication, users, home directories, directory quotas, directory access rules, share policies, and secure session defaults.
 - Improved visible Web quality. Core pages, public entry points, mobile layouts, baseline accessibility, runtime errors, failed requests, and broken visible text are covered by Playwright scans.
 - Hardened systemd, Docker, reverse proxy, public-access templates, doctor, release package, and release artifact verification paths. The Release workflow checks archives, checksums, the required target set, archive entry types, duplicate entries, and ambiguous paths before creating the GitHub Release.
+- Added rerunnable WebDAV curl protocol smoke checks for validating basic read/write, copy, move, and delete operations against a running service, covered by the script gate.
 - Streamlined and synchronized Chinese and English documentation, including deployment, configuration, FAQ, roadmap, security, hardening progress, and pre-release review entry points.
 
 ## Release Artifacts
@@ -37,6 +38,7 @@ The current hardening branch has the following validation evidence. Final public
 - `make docs-check`
 - `./scripts/test-release-package.sh`
 - `./scripts/test-release-artifacts.sh`
+- WebDAV curl smoke safety test: `scripts/test-webdav-client-smoke.sh`
 - Release workflow incremental validation: `make workflows-check`, `make scripts-check`, `./scripts/check-secret-leaks.sh`, `make toolchains-check`, `git diff --check`
 - Playwright E2E: `369 passed`
 - Frontend unit tests: `3054 passed`
