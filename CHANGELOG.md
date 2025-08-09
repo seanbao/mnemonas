@@ -179,6 +179,7 @@
 - systemd/Docker 脚本模拟测试，并接入 CI 的脚本校验流程
 - 脚本模拟测试覆盖变更文件选择、WebDAV 认证模式、公网反向代理暴露检查、benchmark 路径和 Web Husky hooks
 - `scripts/webdav-client-smoke.sh` 可对已运行服务执行 curl 协议 smoke，覆盖 WebDAV 基础读写、复制、移动和删除，并通过独立 safety test 纳入 `make scripts-check`
+- `scripts/release-readiness.sh` 在记录的完整验证目标之后发现非发布文档变更时默认失败；草稿摘要可显式使用 `--allow-post-validation-changes` 放行
 - WebDAV COPY/MOVE 目标路径回归覆盖，验证绝对 path-reference 目标，并拒绝包括 `dav/path` 在内的裸相对目标
 - `npm run typecheck` 覆盖前端应用、Playwright 规格和共享 E2E helper
 - `.go-version`、`.nvmrc`、Go `toolchain` 与 Rust `rust-version` 共同记录本地开发工具链要求
