@@ -38,6 +38,7 @@ import {
   AlertCircle,
   Pencil,
   FolderOpen,
+  Tags,
 } from 'lucide-react'
 import { listUsers, createUser, deleteUser, resetUserPassword, toggleUserStatus, updateUser, UsersError, type ListUsersResponse, type User } from '@/api/users'
 import { getStoredUser } from '@/api/auth'
@@ -56,6 +57,7 @@ const quotaUnits = [
 ] as const
 
 type QuotaUnit = typeof quotaUnits[number]['key']
+const groupNamePattern = /^[A-Za-z0-9._-]+$/
 
 function utf8ByteLength(value: string): number {
   return new TextEncoder().encode(value).length
@@ -90,6 +92,33 @@ function quotaFormValueToBytes(value: string, unitKey: QuotaUnit): number | null
 
   const bytes = Math.round(numericValue * unit.multiplier)
   return Number.isSafeInteger(bytes) ? bytes : null
+}
+
+function parseGroupNames(value: string): { groups: string[]; error?: string } {
+  const groups = value
+    .split(/[,\s]+/)
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+    .map((entry) => entry.toLowerCase())
+  const seen = new Set<string>()
+  const normalized: string[] = []
+
+  for (const group of groups) {
+    if (!groupNamePattern.test(group)) {
+      return { groups: [], error: '用户组只能包含字母、数字、点、短横线和下划线。' }
+    }
+    if (!seen.has(group)) {
+      seen.add(group)
+      normalized.push(group)
+    }
+  }
+
+  normalized.sort()
+  return { groups: normalized }
+}
+
+function formatGroupNames(groups: string[] | undefined): string {
+  return (groups ?? []).join(', ')
 }
 
 function isMissingUserError(error: unknown): boolean {
@@ -211,6 +240,14 @@ function getUsersActionErrorPresentation(
       return {
         title: '配额无效',
         description: '配额必须大于或等于 0，0 表示不限额。',
+        color: 'warning',
+      }
+    }
+
+    if (error.code === 'INVALID_GROUPS') {
+      return {
+        title: '用户组无效',
+        description: '用户组只能包含字母、数字、点、短横线和下划线。',
         color: 'warning',
       }
     }
@@ -345,6 +382,18 @@ function UserCard({
               <div className="flex items-center gap-1 mt-0.5">
                 <RoleBadge role={user.role} />
               </div>
+              {user.groups && user.groups.length > 0 && (
+                <div className="mt-2 flex max-w-full flex-wrap gap-1">
+                  {user.groups.slice(0, 3).map((group) => (
+                    <Chip key={group} size="sm" variant="flat" color="default" className="max-w-full">
+                      <span className="max-w-24 truncate">{group}</span>
+                    </Chip>
+                  ))}
+                  {user.groups.length > 3 && (
+                    <Chip size="sm" variant="flat" color="default">+{user.groups.length - 3}</Chip>
+                  )}
+                </div>
+              )}
             </div>
           </div>
 
@@ -443,6 +492,7 @@ export function UsersPage() {
   const [editTarget, setEditTarget] = useState<User | null>(null)
   const [editEmail, setEditEmail] = useState('')
   const [editRole, setEditRole] = useState<User['role']>('user')
+  const [editGroups, setEditGroups] = useState('')
   const [editHomeDir, setEditHomeDir] = useState('')
   const [editQuotaValue, setEditQuotaValue] = useState('0')
   const [editQuotaUnit, setEditQuotaUnit] = useState<QuotaUnit>('GB')
@@ -452,11 +502,12 @@ export function UsersPage() {
   const [newPassword, setNewPassword] = useState('')
   const [newEmail, setNewEmail] = useState('')
   const [newRole, setNewRole] = useState<'admin' | 'user' | 'guest'>('user')
+  const [newGroups, setNewGroups] = useState('')
   const [resetPassword, setResetPassword] = useState('')
   const currentUserId = getStoredUser()?.id ?? 'anonymous'
   const usersQueryKey = ['users', currentUserId] as const
   const createSessionRef = useRef(0)
-  const createDraftRef = useRef({ username: '', password: '', email: '', role: 'user' })
+  const createDraftRef = useRef({ username: '', password: '', email: '', role: 'user', groups: '' })
 
   useLayoutEffect(() => {
     createDraftRef.current = {
@@ -464,8 +515,9 @@ export function UsersPage() {
       password: newPassword,
       email: newEmail,
       role: newRole,
+      groups: newGroups,
     }
-  }, [newEmail, newPassword, newRole, newUsername])
+  }, [newEmail, newGroups, newPassword, newRole, newUsername])
 
   const { data, isLoading, isRefetching, error, refetch } = useQuery({
     queryKey: usersQueryKey,
@@ -498,15 +550,17 @@ export function UsersPage() {
   })
 
   const updateMutation = useMutation({
-    mutationFn: ({ userId, email, role, homeDir, quotaBytes }: {
+    mutationFn: ({ userId, email, role, groups, homeDir, quotaBytes }: {
       userId: string
       email: string
       role: User['role']
+      groups: string[]
       homeDir: string
       quotaBytes: number
     }) => updateUser(userId, {
       email,
       role,
+      groups,
       home_dir: homeDir,
       quota_bytes: quotaBytes,
     }),

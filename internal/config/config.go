@@ -11,6 +11,7 @@ import (
 	"os"
 	urlpath "path"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -110,6 +111,9 @@ type StorageConfig struct {
 	// DirectoryQuotas limits logical file bytes under selected MnemoNAS paths.
 	DirectoryQuotas []DirectoryQuotaConfig `toml:"directory_quotas"`
 
+	// DirectoryAccessRules grants or denies non-admin access outside the user's home_dir.
+	DirectoryAccessRules []DirectoryAccessRuleConfig `toml:"directory_access_rules"`
+
 	// Version retention policy
 	Retention RetentionConfig `toml:"retention"`
 
@@ -124,6 +128,17 @@ type StorageConfig struct {
 type DirectoryQuotaConfig struct {
 	Path       string `toml:"path" json:"path"`
 	QuotaBytes int64  `toml:"quota_bytes" json:"quota_bytes"`
+}
+
+// DirectoryAccessRuleConfig controls read/write access for a logical directory.
+type DirectoryAccessRuleConfig struct {
+	Path        string   `toml:"path" json:"path"`
+	ReadUsers   []string `toml:"read_users" json:"read_users,omitempty"`
+	WriteUsers  []string `toml:"write_users" json:"write_users,omitempty"`
+	ReadGroups  []string `toml:"read_groups" json:"read_groups,omitempty"`
+	WriteGroups []string `toml:"write_groups" json:"write_groups,omitempty"`
+	ReadRoles   []string `toml:"read_roles" json:"read_roles,omitempty"`
+	WriteRoles  []string `toml:"write_roles" json:"write_roles,omitempty"`
 }
 
 // VersioningConfig holds versioning policy configuration
@@ -735,6 +750,7 @@ func Load(path string) (*Config, error) {
 
 	applyStorageRootDefaults(cfg, getDefaultStorageRoot())
 	cfg.Storage.DirectoryQuotas = NormalizeDirectoryQuotas(cfg.Storage.DirectoryQuotas)
+	cfg.Storage.DirectoryAccessRules = NormalizeDirectoryAccessRules(cfg.Storage.DirectoryAccessRules)
 	cfg.WebDAV.Prefix = NormalizeWebDAVPrefix(cfg.WebDAV.Prefix)
 	cfg.Share.BaseURL = strings.TrimSpace(cfg.Share.BaseURL)
 	cfg.Alerts.WebhookURL = strings.TrimSpace(cfg.Alerts.WebhookURL)
@@ -772,6 +788,60 @@ func NormalizeDirectoryQuotas(quotas []DirectoryQuotaConfig) []DirectoryQuotaCon
 		}
 		normalized = append(normalized, copied)
 	}
+	return normalized
+}
+
+// NormalizeDirectoryAccessRules returns a copy with clean paths and normalized principals.
+func NormalizeDirectoryAccessRules(rules []DirectoryAccessRuleConfig) []DirectoryAccessRuleConfig {
+	if len(rules) == 0 {
+		return nil
+	}
+
+	normalized := make([]DirectoryAccessRuleConfig, 0, len(rules))
+	for _, rule := range rules {
+		copied := rule
+		copied.Path = strings.TrimSpace(copied.Path)
+		if copied.Path != "" && strings.HasPrefix(copied.Path, "/") {
+			copied.Path = urlpath.Clean(copied.Path)
+		}
+		copied.ReadUsers = normalizeAccessRulePrincipalList(copied.ReadUsers)
+		copied.WriteUsers = normalizeAccessRulePrincipalList(copied.WriteUsers)
+		copied.ReadGroups = normalizeAccessRulePrincipalList(copied.ReadGroups)
+		copied.WriteGroups = normalizeAccessRulePrincipalList(copied.WriteGroups)
+		copied.ReadRoles = normalizeAccessRuleRoleList(copied.ReadRoles)
+		copied.WriteRoles = normalizeAccessRuleRoleList(copied.WriteRoles)
+		normalized = append(normalized, copied)
+	}
+	return normalized
+}
+
+func normalizeAccessRulePrincipalList(values []string) []string {
+	return normalizeUniqueLowercaseStrings(values)
+}
+
+func normalizeAccessRuleRoleList(values []string) []string {
+	return normalizeUniqueLowercaseStrings(values)
+}
+
+func normalizeUniqueLowercaseStrings(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(values))
+	normalized := make([]string, 0, len(values))
+	for _, value := range values {
+		cleaned := strings.ToLower(strings.TrimSpace(value))
+		if cleaned == "" {
+			normalized = append(normalized, cleaned)
+			continue
+		}
+		if _, ok := seen[cleaned]; ok {
+			continue
+		}
+		seen[cleaned] = struct{}{}
+		normalized = append(normalized, cleaned)
+	}
+	sort.Strings(normalized)
 	return normalized
 }
 
@@ -1374,6 +1444,9 @@ func (c *Config) Validate() error {
 	if err := validateDirectoryQuotas(c.Storage.DirectoryQuotas); err != nil {
 		errs = append(errs, err)
 	}
+	if err := validateDirectoryAccessRules(c.Storage.DirectoryAccessRules); err != nil {
+		errs = append(errs, err)
+	}
 	webdavAuthType := strings.ToLower(strings.TrimSpace(c.WebDAV.AuthType))
 	if webdavAuthType != "" && webdavAuthType != "none" && webdavAuthType != "basic" && webdavAuthType != "users" {
 		errs = append(errs, fmt.Errorf("invalid webdav.auth_type: %q", c.WebDAV.AuthType))
@@ -1753,6 +1826,91 @@ func validateDirectoryQuotas(quotas []DirectoryQuotaConfig) error {
 		}
 	}
 	return errors.Join(errs...)
+}
+
+func validateDirectoryAccessRules(rules []DirectoryAccessRuleConfig) error {
+	var errs []error
+	seen := map[string]struct{}{}
+	for i, rule := range rules {
+		fieldPrefix := fmt.Sprintf("storage.directory_access_rules[%d]", i)
+		if err := validateDirectoryQuotaPath(rule.Path, fieldPrefix+".path"); err != nil {
+			errs = append(errs, err)
+		}
+		if rule.Path != "" {
+			if _, ok := seen[rule.Path]; ok {
+				errs = append(errs, fmt.Errorf("duplicate directory access rule path: %q", rule.Path))
+			}
+			seen[rule.Path] = struct{}{}
+		}
+		if !directoryAccessRuleHasPrincipals(rule) {
+			errs = append(errs, fmt.Errorf("%s must grant at least one read or write principal", fieldPrefix))
+		}
+		errs = append(errs, validateAccessRulePrincipals(rule.ReadUsers, fieldPrefix+".read_users")...)
+		errs = append(errs, validateAccessRulePrincipals(rule.WriteUsers, fieldPrefix+".write_users")...)
+		errs = append(errs, validateAccessRulePrincipals(rule.ReadGroups, fieldPrefix+".read_groups")...)
+		errs = append(errs, validateAccessRulePrincipals(rule.WriteGroups, fieldPrefix+".write_groups")...)
+		errs = append(errs, validateAccessRuleRoles(rule.ReadRoles, fieldPrefix+".read_roles")...)
+		errs = append(errs, validateAccessRuleRoles(rule.WriteRoles, fieldPrefix+".write_roles")...)
+	}
+	return errors.Join(errs...)
+}
+
+func directoryAccessRuleHasPrincipals(rule DirectoryAccessRuleConfig) bool {
+	return len(rule.ReadUsers) > 0 ||
+		len(rule.WriteUsers) > 0 ||
+		len(rule.ReadGroups) > 0 ||
+		len(rule.WriteGroups) > 0 ||
+		len(rule.ReadRoles) > 0 ||
+		len(rule.WriteRoles) > 0
+}
+
+func validateAccessRulePrincipals(values []string, field string) []error {
+	var errs []error
+	seen := map[string]struct{}{}
+	for i, value := range values {
+		itemField := fmt.Sprintf("%s[%d]", field, i)
+		if err := validateAccessRulePrincipal(value, itemField); err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			errs = append(errs, fmt.Errorf("%s contains duplicate principal %q", field, value))
+		}
+		seen[value] = struct{}{}
+	}
+	return errs
+}
+
+func validateAccessRulePrincipal(value, field string) error {
+	if strings.TrimSpace(value) == "" {
+		return fmt.Errorf("%s cannot be empty", field)
+	}
+	if strings.TrimSpace(value) != value || strings.ToLower(value) != value {
+		return fmt.Errorf("%s must be normalized lowercase without surrounding whitespace", field)
+	}
+	for _, r := range value {
+		if r > 0x7f || !(r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '-' || r == '_' || r == '.') {
+			return fmt.Errorf("%s contains invalid characters", field)
+		}
+	}
+	return nil
+}
+
+func validateAccessRuleRoles(values []string, field string) []error {
+	var errs []error
+	seen := map[string]struct{}{}
+	for i, value := range values {
+		itemField := fmt.Sprintf("%s[%d]", field, i)
+		if value != "admin" && value != "user" && value != "guest" {
+			errs = append(errs, fmt.Errorf("%s must be one of admin, user, or guest", itemField))
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			errs = append(errs, fmt.Errorf("%s contains duplicate role %q", field, value))
+		}
+		seen[value] = struct{}{}
+	}
+	return errs
 }
 
 func validateDirectoryQuotaPath(value, field string) error {
