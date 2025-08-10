@@ -69,6 +69,36 @@ assert_manifest_contains() {
 	grep -Fxq -- "$expected" "$manifest" || fail "archive manifest is missing: $expected"
 }
 
+contains_control_character() {
+	local value="$1"
+
+	LC_ALL=C printf '%s' "$value" | LC_ALL=C grep -q '[[:cntrl:]]'
+}
+
+tar_is_gnu() {
+	tar --version 2>/dev/null | grep -qi 'gnu tar'
+}
+
+tar_list_archive() {
+	local archive="$1"
+
+	if tar_is_gnu; then
+		tar --quoting-style=literal -tzf "$archive"
+	else
+		tar -tzf "$archive"
+	fi
+}
+
+tar_list_archive_types() {
+	local archive="$1"
+
+	if tar_is_gnu; then
+		tar --quoting-style=literal -tvzf "$archive"
+	else
+		tar -tvzf "$archive"
+	fi
+}
+
 archive_target() {
 	local archive="$1"
 	local name
@@ -129,6 +159,9 @@ validate_checksums_manifest() {
 				;;
 		esac
 		[[ -n "$filename" ]] || fail "checksums.txt line $line_number has an empty filename"
+		if contains_control_character "$filename"; then
+			fail "checksums.txt contains a control character in file path: $filename"
+		fi
 		normalized="${filename#./}"
 		case "$normalized" in
 			mnemonas-*.tar.gz)
@@ -188,6 +221,9 @@ validate_manifest_paths() {
 				fail "archive entry contains a backslash: $path"
 				;;
 		esac
+		if contains_control_character "$path"; then
+			fail "archive entry contains a control character: $path"
+		fi
 		case "$path" in
 			*//*|./*|*/./*|*/.|.)
 				fail "archive entry has an unsafe path segment: $path"
@@ -242,9 +278,9 @@ validate_archive() {
 	extracted="$extract_parent/$expected_top"
 	expected_image="MNEMONAS_IMAGE=ghcr.io/${repository}:${expected_version#v}"
 
-	tar -tzf "$archive" >"$manifest" || fail "cannot list archive: $base"
+	tar_list_archive "$archive" >"$manifest" || fail "cannot list archive: $base"
 	validate_manifest_paths "$manifest" "$expected_top"
-	tar -tvzf "$archive" >"$type_listing" || fail "cannot inspect archive entry types: $base"
+	tar_list_archive_types "$archive" >"$type_listing" || fail "cannot inspect archive entry types: $base"
 	validate_archive_entry_types "$type_listing"
 
 	assert_manifest_contains "$manifest" "$expected_top/nasd"

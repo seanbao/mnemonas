@@ -79,7 +79,7 @@ This project follows [Semantic Versioning 2.0.0](https://semver.org/).
 - README, development docs, and testing docs use the Node.js engine range from `web/package.json`.
 - CI and release workflows use narrower permissions, concurrency controls, and job timeouts.
 - Release workflow verifies downloaded archives, checksums, and the required target set before creating the GitHub Release.
-- Release artifact verifier rejects unsafe checksum paths, symlinked archives, special archive entries, duplicate entries, backslash paths, and ambiguous path segments before running checksum validation.
+- Release artifact verifier rejects unsafe checksum paths, control-character paths, symlinked archives, special archive entries, duplicate entries, backslash paths, and ambiguous path segments before running checksum validation.
 - Security docs distinguish the Web UI initial admin password from generated WebDAV Basic Auth credentials.
 - Security docs and doctor checks warn that dataplane ports `9090/9091` should not be exposed to untrusted networks.
 - Added a public cloud firewall checklist covering common cloud security groups, VPC firewalls, IPv6, and port-forwarding mistakes.
