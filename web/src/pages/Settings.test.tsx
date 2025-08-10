@@ -16,11 +16,13 @@ import { SettingsError } from '@/api/settings'
 import { updateSettings } from '@/api/settings'
 import { getWebDAVCredentials } from '@/api/settings'
 import { getSecurityCheck } from '@/api/settings'
+import { checkDirectoryAccess } from '@/api/settings'
 
 const mockGetSettings = vi.mocked(getSettings)
 const mockUpdateSettings = vi.mocked(updateSettings)
 const mockGetWebDAVCredentials = vi.mocked(getWebDAVCredentials)
 const mockGetSecurityCheck = vi.mocked(getSecurityCheck)
+const mockCheckDirectoryAccess = vi.mocked(checkDirectoryAccess)
 
 const { defaultSettingsResponse, defaultSecurityCheckResponse } = vi.hoisted(() => ({
   defaultSettingsResponse: {
@@ -141,6 +143,16 @@ vi.mock('@/api/settings', () => ({
   getSettings: vi.fn().mockResolvedValue(defaultSettingsResponse),
   getSecurityCheck: vi.fn().mockResolvedValue(defaultSecurityCheckResponse),
   updateSettings: vi.fn().mockResolvedValue({ success: true }),
+  checkDirectoryAccess: vi.fn().mockResolvedValue({
+    username: 'alice',
+    user_id: 'u1',
+    role: 'user',
+    groups: ['family'],
+    home_dir: '/users/alice',
+    path: '/team/readme.txt',
+    read: { mode: 'read', allowed: true, source: 'directory_access_rule', matched_rule: { path: '/team', read_groups: ['family'] } },
+    write: { mode: 'write', allowed: false, source: 'directory_access_rule', matched_rule: { path: '/team', read_groups: ['family'] } },
+  }),
   getWebDAVCredentials: vi.fn().mockResolvedValue({
     success: true,
     enabled: true,
@@ -168,6 +180,16 @@ describe('SettingsPage', () => {
       auth_type: 'basic',
       username: 'admin',
       password: 'secret',
+    })
+    mockCheckDirectoryAccess.mockResolvedValue({
+      username: 'alice',
+      user_id: 'u1',
+      role: 'user',
+      groups: ['family'],
+      home_dir: '/users/alice',
+      path: '/team/readme.txt',
+      read: { mode: 'read', allowed: true, source: 'directory_access_rule', message: 'directory access rule grants read', matched_rule: { path: '/team', read_groups: ['family'] } },
+      write: { mode: 'write', allowed: false, source: 'directory_access_rule', message: 'directory access rule does not grant write', matched_rule: { path: '/team', read_groups: ['family'] } },
     })
     vi.spyOn(HeroUI, 'addToast').mockImplementation(((...args: unknown[]) => mockAddToast(...args)) as typeof HeroUI.addToast)
   })
@@ -1058,6 +1080,29 @@ describe('SettingsPage', () => {
           }),
         }))
       })
+    })
+
+    it('checks effective directory permissions', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      render(<SettingsPage />)
+
+      await openTab(user, '版本保留')
+
+      await user.type(await screen.findByLabelText('检查用户'), 'alice')
+      const pathInput = screen.getByLabelText('检查路径')
+      await user.clear(pathInput)
+      await user.type(pathInput, '/team/readme.txt')
+      await user.click(screen.getByRole('button', { name: '检查权限' }))
+
+      await waitFor(() => {
+        expect(mockCheckDirectoryAccess).toHaveBeenCalled()
+      })
+      expect(mockCheckDirectoryAccess.mock.calls[0]?.[0]).toEqual({ username: 'alice', path: '/team/readme.txt' })
+      expect(await screen.findByText('读取')).toBeTruthy()
+      expect(screen.getByText('写入')).toBeTruthy()
+      expect(screen.getByText('允许')).toBeTruthy()
+      expect(screen.getByText('拒绝')).toBeTruthy()
+      expect(screen.getAllByText(/目录规则/).length).toBeGreaterThanOrEqual(2)
     })
   })
 
