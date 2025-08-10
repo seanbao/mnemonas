@@ -230,7 +230,7 @@ curl -X POST -b cookies.txt \
 
 A batch can contain up to 20 items and rejects duplicate or nested targets within the same request. Batch preview does not write data. Batch restore runs items sequentially, and every successful item is followed by `restore-verify`. Partial failures set the overall `warning` flag, so always inspect each `items[]` entry for status, error, and verification output.
 
-The Maintenance page **Export report** action downloads a JSON restore audit report for the backup job, including latest backup, retention check, restore drill, restore-drill history, explicit restore, read-only verification, restore history, and findings. Download one before switching `storage.root`, and keep one with diagnostics after a failed restore.
+The Maintenance page **Export summary** action downloads a JSON restore summary for the backup job, including latest backup, retention check, restore drill, restore-drill history, explicit restore, read-only verification, restore history, and findings. Download one before switching `storage.root`, and keep one with diagnostics after a failed restore.
 
 Cutover checklist:
 

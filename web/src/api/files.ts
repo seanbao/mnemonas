@@ -2407,14 +2407,14 @@ export async function verifyBackupRestoreJob(id: string, targetPath: string): Pr
   return data
 }
 
-// Download an audit report for one backup job restore state
+// Download a restore summary for one backup job restore state.
 export async function downloadBackupRestoreReport(id: string): Promise<void> {
   const response = await authFetch(`${API_BASE}/maintenance/backups/${encodeURIComponent(id)}/restore-report`)
   if (!response.ok) {
-    await throwApiErrorFromResponse(response, '导出恢复报告失败')
+    await throwApiErrorFromResponse(response, '导出恢复摘要失败')
   }
 
-  const fallbackFilename = `mnemonas-restore-report-${id}-${new Date().toISOString().slice(0, 10)}.json`
+  const fallbackFilename = `mnemonas-restore-summary-${id}-${new Date().toISOString().slice(0, 10)}.json`
   const filename = getFilenameFromContentDisposition(response.headers.get('Content-Disposition'), fallbackFilename)
 
   const blob = await response.blob()

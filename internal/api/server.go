@@ -1794,6 +1794,8 @@ func (s *Server) setupRoutes() {
 			r.Get("/", s.handleGetSettings)
 			r.Put("/", s.handleUpdateSettings)
 			r.Post("/access-check", s.handleCheckPathAccess)
+			r.Post("/access-preview", s.handlePreviewPathAccess)
+			r.Post("/access-report", s.handleReportPathAccess)
 			r.Get("/security-check", s.handleGetSecurityCheck)
 			r.Get("/webdav-credentials", s.handleGetWebDAVCredentials)
 		})
@@ -5935,6 +5937,49 @@ type pathAccessCheckRequest struct {
 	Path     string `json:"path"`
 }
 
+type pathAccessReportRequest struct {
+	Path string `json:"path"`
+}
+
+type pathAccessPreviewRequest struct {
+	Path                 string                             `json:"path"`
+	DirectoryAccessRules []config.DirectoryAccessRuleConfig `json:"directory_access_rules"`
+}
+
+type pathAccessReportSummary struct {
+	Users                   int `json:"users"`
+	ReadAllowed             int `json:"read_allowed"`
+	ReadDenied              int `json:"read_denied"`
+	WriteAllowed            int `json:"write_allowed"`
+	WriteDenied             int `json:"write_denied"`
+	RelatedShares           int `json:"related_shares"`
+	ActiveRelatedShares     int `json:"active_related_shares"`
+	PasswordProtectedShares int `json:"password_protected_shares"`
+}
+
+type pathAccessReportResult struct {
+	Path    string                  `json:"path"`
+	Preview bool                    `json:"preview,omitempty"`
+	Summary pathAccessReportSummary `json:"summary"`
+	Users   []pathAccessCheckResult `json:"users"`
+	Shares  []pathAccessShareImpact `json:"shares,omitempty"`
+}
+
+type pathAccessShareImpact struct {
+	ID          string          `json:"id"`
+	Path        string          `json:"path"`
+	Type        share.ShareType `json:"type"`
+	CreatedBy   string          `json:"created_by"`
+	Relation    string          `json:"relation"`
+	Enabled     bool            `json:"enabled"`
+	Active      bool            `json:"active"`
+	HasPassword bool            `json:"has_password"`
+	AccessCount int64           `json:"access_count"`
+	MaxAccess   int64           `json:"max_access"`
+	ExpiresAt   *time.Time      `json:"expires_at,omitempty"`
+	URL         string          `json:"url,omitempty"`
+}
+
 func (s *Server) handleCheckPathAccess(w http.ResponseWriter, r *http.Request) {
 	if s.userStore == nil {
 		ServiceUnavailable(w, "user store not available")
@@ -5970,6 +6015,149 @@ func (s *Server) handleCheckPathAccess(w http.ResponseWriter, r *http.Request) {
 	}
 
 	NewAPIResponse(s.evaluateUserPathAccess(targetUser, targetPath)).Write(w, http.StatusOK)
+}
+
+func (s *Server) handleReportPathAccess(w http.ResponseWriter, r *http.Request) {
+	if s.userStore == nil {
+		ServiceUnavailable(w, "user store not available")
+		return
+	}
+
+	var req pathAccessReportRequest
+	if err := decodeJSONBody(r, &req); err != nil {
+		writeLimitedJSONBodyError(w, err, DefaultJSONRequestBodyLimit)
+		return
+	}
+
+	targetPath, err := validatePath(req.Path)
+	if err != nil {
+		BadRequest(w, "invalid path")
+		return
+	}
+
+	cfg := s.currentConfig()
+	var rules []config.DirectoryAccessRuleConfig
+	if cfg != nil {
+		rules = cfg.Storage.DirectoryAccessRules
+	}
+
+	NewAPIResponse(s.buildPathAccessReport(targetPath, rules, false)).Write(w, http.StatusOK)
+}
+
+func (s *Server) handlePreviewPathAccess(w http.ResponseWriter, r *http.Request) {
+	if s.userStore == nil {
+		ServiceUnavailable(w, "user store not available")
+		return
+	}
+
+	var req pathAccessPreviewRequest
+	if err := decodeJSONBody(r, &req); err != nil {
+		writeLimitedJSONBodyError(w, err, DefaultJSONRequestBodyLimit)
+		return
+	}
+
+	targetPath, err := validatePath(req.Path)
+	if err != nil {
+		BadRequest(w, "invalid path")
+		return
+	}
+
+	rules := config.NormalizeDirectoryAccessRules(req.DirectoryAccessRules)
+	if err := config.ValidateDirectoryAccessRules(rules); err != nil {
+		BadRequest(w, "invalid directory access rules")
+		return
+	}
+
+	NewAPIResponse(s.buildPathAccessReport(targetPath, rules, true)).Write(w, http.StatusOK)
+}
+
+func (s *Server) buildPathAccessReport(targetPath string, rules []config.DirectoryAccessRuleConfig, preview bool) pathAccessReportResult {
+	users := s.userStore.List()
+	report := pathAccessReportResult{
+		Path:    targetPath,
+		Preview: preview,
+		Users:   make([]pathAccessCheckResult, 0, len(users)),
+	}
+
+	for _, user := range users {
+		if user == nil {
+			continue
+		}
+		result := s.evaluateUserPathAccessWithRules(user, targetPath, rules)
+		report.Users = append(report.Users, result)
+		report.Summary.Users++
+		if result.Read.Allowed {
+			report.Summary.ReadAllowed++
+		} else {
+			report.Summary.ReadDenied++
+		}
+		if result.Write.Allowed {
+			report.Summary.WriteAllowed++
+		} else {
+			report.Summary.WriteDenied++
+		}
+	}
+	report.Shares = s.pathAccessShareImpacts(targetPath)
+	for _, shareImpact := range report.Shares {
+		report.Summary.RelatedShares++
+		if shareImpact.Active {
+			report.Summary.ActiveRelatedShares++
+		}
+		if shareImpact.HasPassword {
+			report.Summary.PasswordProtectedShares++
+		}
+	}
+	return report
+}
+
+func (s *Server) pathAccessShareImpacts(targetPath string) []pathAccessShareImpact {
+	if s.shareStore == nil {
+		return nil
+	}
+
+	targetPath = path.Clean(targetPath)
+	sharesList := s.shareStore.ListAll()
+	impacts := make([]pathAccessShareImpact, 0)
+	for _, item := range sharesList {
+		if item == nil {
+			continue
+		}
+		sharePath := path.Clean(item.Path)
+		relation := pathAccessShareRelation(targetPath, sharePath)
+		if relation == "" {
+			continue
+		}
+		impacts = append(impacts, pathAccessShareImpact{
+			ID:          item.ID,
+			Path:        sharePath,
+			Type:        item.Type,
+			CreatedBy:   item.CreatedBy,
+			Relation:    relation,
+			Enabled:     item.Enabled,
+			Active:      item.CanAccess() == nil,
+			HasPassword: item.HasPassword(),
+			AccessCount: item.AccessCount,
+			MaxAccess:   item.MaxAccess,
+			ExpiresAt:   item.ExpiresAt,
+			URL:         s.buildShareURL(item.ID),
+		})
+	}
+	return impacts
+}
+
+func pathAccessShareRelation(targetPath, sharePath string) string {
+	targetPath = path.Clean(targetPath)
+	sharePath = path.Clean(sharePath)
+	switch {
+	case targetPath == sharePath:
+		return "exact"
+	case pathWithinBase(sharePath, targetPath):
+		return "covers_path"
+	case pathWithinBase(targetPath, sharePath):
+		return "inside_path"
+	default:
+		return ""
+	}
 }
 
 // UpdateSettingsRequest represents settings update request

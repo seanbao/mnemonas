@@ -736,7 +736,7 @@ describe('MaintenancePage', () => {
       })
     })
 
-    it('downloads a restore report from the task list', async () => {
+    it('downloads a restore summary from the task list', async () => {
       const user = userEvent.setup()
       mockListBackupJobs.mockResolvedValue(mockBackupJobs)
 
@@ -746,11 +746,11 @@ describe('MaintenancePage', () => {
         expect(screen.getByText('外置硬盘备份')).toBeTruthy()
       })
 
-      await user.click(screen.getByRole('button', { name: /导出报告/ }))
+      await user.click(screen.getByRole('button', { name: /导出摘要/ }))
 
       await waitFor(() => {
         expect(mockDownloadBackupRestoreReport).toHaveBeenCalledWith('external-disk')
-        expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({ title: '恢复报告导出已开始' }))
+        expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({ title: '恢复摘要导出已开始' }))
       })
     })
 

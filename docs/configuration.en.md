@@ -337,7 +337,7 @@ The current release does not start an SMB/Samba listener. This section is a prev
 | `encryption_required` | bool | `false` | Reserved SMB encryption policy |
 | `[[smb.shares]]` | array | `[]` | Reserved share mapping; required when the preview switch is enabled |
 
-Share paths must be absolute MnemoNAS virtual paths such as `/` or `/team/docs`. The intended sidecar path is to keep file access behind MnemoNAS authorization, `home_dir`, and gateway APIs instead of sharing `files/` directly through Samba and bypassing version history, trash, and audit.
+Share paths must be absolute MnemoNAS virtual paths such as `/` or `/team/docs`. The intended sidecar path is to keep file access behind MnemoNAS authorization, `home_dir`, and gateway APIs instead of sharing `files/` directly through Samba and bypassing version history, trash, and activity history.
 
 ## `[auth]`
 

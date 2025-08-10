@@ -3015,7 +3015,7 @@ describe('API: files', () => {
       })
     })
 
-    it('downloads a backup restore report', async () => {
+    it('downloads a backup restore summary', async () => {
       const blob = new Blob(['{}'], { type: 'application/json' })
       let createdLink: HTMLAnchorElement | undefined
       const originalCreateElement = document.createElement.bind(document)
@@ -3026,7 +3026,7 @@ describe('API: files', () => {
         }
         return element
       }) as typeof document.createElement)
-      vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:restore-report')
+      vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:restore-summary')
       vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {})
       vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
 
@@ -3034,13 +3034,13 @@ describe('API: files', () => {
         ok: true,
         status: 200,
         statusText: 'OK',
-        headers: new Headers({ 'Content-Disposition': 'attachment; filename="restore-report.json"' }),
+        headers: new Headers({ 'Content-Disposition': 'attachment; filename="restore-summary.json"' }),
         blob: () => Promise.resolve(blob),
       })
 
       await downloadBackupRestoreReport('external-disk')
 
-      expect(createdLink?.download).toBe('restore-report.json')
+      expect(createdLink?.download).toBe('restore-summary.json')
       expectFetchCall(1, '/api/v1/maintenance/backups/external-disk/restore-report')
       createElementSpy.mockRestore()
     })

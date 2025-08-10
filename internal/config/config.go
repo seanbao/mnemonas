@@ -823,6 +823,11 @@ func normalizeAccessRuleRoleList(values []string) []string {
 	return normalizeUniqueLowercaseStrings(values)
 }
 
+// ValidateDirectoryAccessRules validates normalized directory access rules.
+func ValidateDirectoryAccessRules(rules []DirectoryAccessRuleConfig) error {
+	return validateDirectoryAccessRules(rules)
+}
+
 func normalizeUniqueLowercaseStrings(values []string) []string {
 	if len(values) == 0 {
 		return nil
