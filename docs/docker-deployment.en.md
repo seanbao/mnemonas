@@ -245,7 +245,7 @@ Do not use `server.host = "127.0.0.1"` inside the container to limit host access
 
 ## Multi-User NAS Example
 
-Admins can create users in the Web UI and set `home_dir` plus user quotas. Non-admin users are scoped to that configured root for file browsing, search, favorites, shares, trash, and activity; Web/API uploads, copies, and trash restores honor the configured quota.
+Admins can create users in the Web UI and set groups, `home_dir`, user quotas, and directory access rules. Non-admin users are scoped to that configured root unless a matching directory rule grants shared access; file browsing, search, favorites, shares, trash, activity, and WebDAV `users` mode use the same boundary. Web/API uploads, copies, and trash restores honor the configured quota.
 
 ```yaml
 services:

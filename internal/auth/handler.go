@@ -187,12 +187,12 @@ type LoginResponse struct {
 
 // UserInfo is public user information
 type UserInfo struct {
-	ID       string `json:"id"`
-	Username string `json:"username"`
-	Email    string `json:"email,omitempty"`
-	Role     Role   `json:"role"`
+	ID       string   `json:"id"`
+	Username string   `json:"username"`
+	Email    string   `json:"email,omitempty"`
+	Role     Role     `json:"role"`
 	Groups   []string `json:"groups,omitempty"`
-	HomeDir  string `json:"home_dir"`
+	HomeDir  string   `json:"home_dir"`
 }
 
 // RefreshRequest is the refresh token request body
@@ -719,20 +719,20 @@ func (h *Handler) HandleChangePassword(w http.ResponseWriter, r *http.Request) {
 
 // CreateUserRequest is the create user request body
 type CreateUserRequest struct {
-	Username string `json:"username"`
-	Password string `json:"password"`
-	Email    string `json:"email"`
-	Role     string `json:"role"`
+	Username string   `json:"username"`
+	Password string   `json:"password"`
+	Email    string   `json:"email"`
+	Role     string   `json:"role"`
 	Groups   []string `json:"groups,omitempty"`
 }
 
 // UpdateUserRequest is the update user request body.
 type UpdateUserRequest struct {
-	Email      *string `json:"email"`
-	Role       *string `json:"role"`
+	Email      *string   `json:"email"`
+	Role       *string   `json:"role"`
 	Groups     *[]string `json:"groups,omitempty"`
-	HomeDir    *string `json:"home_dir"`
-	QuotaBytes *int64  `json:"quota_bytes"`
+	HomeDir    *string   `json:"home_dir"`
+	QuotaBytes *int64    `json:"quota_bytes"`
 }
 
 // HandleListUsers handles GET /api/v1/admin/users

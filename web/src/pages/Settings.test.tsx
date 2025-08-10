@@ -1000,12 +1000,12 @@ describe('SettingsPage', () => {
 
       await waitFor(() => {
         expect(mockUpdateSettings).toHaveBeenCalledWith(expect.objectContaining({
-          storage: {
+          storage: expect.objectContaining({
             directory_quotas: [
               { path: '/team', quota_bytes: 2147483648 },
               { path: '/media', quota_bytes: 536870912 },
             ],
-          },
+          }),
         }))
       })
     })
@@ -1024,6 +1024,40 @@ describe('SettingsPage', () => {
       expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({
         title: '目录配额格式无效',
       }))
+    })
+
+    it('allows editing directory access rules and saves them', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockGetSettings.mockResolvedValueOnce({
+        ...defaultSettingsResponse,
+        data: {
+          ...defaultSettingsResponse.data,
+          storage: {
+            root: '~/.mnemonas',
+            directory_access_rules: [{ path: '/team', read_groups: ['family'], write_groups: ['editors'] }],
+          },
+        },
+      } as ReturnType<typeof getSettings>)
+      render(<SettingsPage />)
+
+      await openTab(user, '版本保留')
+
+      const accessInput = await screen.findByLabelText('目录权限')
+      expect(accessInput).toHaveValue('/team read_groups=family write_groups=editors')
+
+      await user.clear(accessInput)
+      await user.type(accessInput, '/media read_users=alice,bob write_roles=admin')
+      await user.click(screen.getByText('保存设置'))
+
+      await waitFor(() => {
+        expect(mockUpdateSettings).toHaveBeenCalledWith(expect.objectContaining({
+          storage: expect.objectContaining({
+            directory_access_rules: [
+              { path: '/media', read_users: ['alice', 'bob'], write_roles: ['admin'] },
+            ],
+          }),
+        }))
+      })
     })
   })
 

@@ -236,6 +236,7 @@ auto_generate = true
 | ---- | ---- | ------ | ---- |
 | `root` | string | `~/.mnemonas` | 存储根目录（用户文件在 `root/files`） |
 | `directory_quotas` | array | `[]` | 目录级容量配额；每项包含 `path` 和 `quota_bytes` |
+| `directory_access_rules` | array | `[]` | 面向用户、用户组和角色的目录读写授权 |
 
 **存储目录说明：**
 
@@ -243,6 +244,7 @@ auto_generate = true
 - 内部数据目录结构固定在 `root/.mnemonas` 下。
 - 启动时会将 `root` 和 `root/files` 权限收紧为 `0750`，内部目录为 `0700`。
 - `directory_quotas` 使用 MnemoNAS 逻辑路径，例如 `/team`。上传、复制、移动、回收站恢复、版本恢复和 WebDAV PUT/COPY/MOVE 会在写入前检查当前目录逻辑大小。根目录 `/` 可用于设置全局硬限制。管理员可在存储页查看每个目录配额的当前用量、剩余额度和状态。
+- `directory_access_rules` 使用干净的 MnemoNAS 绝对路径，例如 `/team`。每条规则可设置 `read_users`、`write_users`、`read_groups`、`write_groups`、`read_roles`、`write_roles`。匹配时采用最具体路径规则；写权限同时包含读权限，写操作必须显式命中写授权。非管理员 Web/API、WebDAV `users` 模式、搜索、分享、收藏、回收站和活动日志使用同一套权限判定。未命中规则的路径继续按用户 `home_dir` 边界处理。
 
 **示例：**
 
@@ -251,6 +253,10 @@ auto_generate = true
 root = "~/.mnemonas"
 directory_quotas = [
   { path = "/team", quota_bytes = 1099511627776 }, # 1 TiB
+]
+directory_access_rules = [
+  { path = "/team", read_groups = ["family"], write_groups = ["editors"] },
+  { path = "/team/public", read_roles = ["user"], write_users = ["alice"] },
 ]
 ```
 

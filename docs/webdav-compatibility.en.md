@@ -10,7 +10,7 @@ REST API resource copying is available at `/api/v1/files-copy`, but the WebDAV `
 
 Some write requests may return a successful status after the visible mutation is committed while a later persistence or cleanup step fails. In that case, MnemoNAS sends an HTTP `Warning` header such as `199 MnemoNAS "workspace mutation persistence incomplete"` or `199 MnemoNAS "delete cleanup incomplete"`.
 
-Authentication: `auth_type = "users"` accepts MnemoNAS user credentials, maps regular users' mount root to their `home_dir`, makes guest accounts read-only, and enforces user quotas for PUT/COPY. `auth_type = "basic"` remains the global service-credential compatibility mode.
+Authentication: `auth_type = "users"` accepts MnemoNAS user credentials, maps regular users' mount root to their `home_dir`, applies matching directory access rules for shared paths, makes guest accounts read-only, and enforces user quotas for PUT/COPY. `auth_type = "basic"` remains the global service-credential compatibility mode.
 
 ## Protocol Status
 
