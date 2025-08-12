@@ -218,11 +218,21 @@ make dev
 # 运行所有测试
 make test
 
+# 深度测试矩阵：Go race/fuzz、前端 property、Playwright 交互完整性
+make test-torture
+
 # 测试覆盖率
 make coverage
 
 # E2E 验收测试
 make e2e
+
+# 破坏性故障注入测试，必须指向隔离测试实例
+MNEMONAS_LIVE_FAULTS=1 \
+BASE_URL=http://127.0.0.1:18080 \
+STORAGE_ROOT=/tmp/mnemonas-fault-target \
+NASD_BIN="$PWD/bin/nasd" \
+./scripts/fault-injection-test.sh
 
 # 性能基准测试
 make bench
@@ -283,8 +293,9 @@ Docker 和 systemd 部署默认只对外提供 `8080`；`9090/9091` 是内部 da
 | [scripts/mnemonas-doctor.sh](scripts/mnemonas-doctor.sh) | 部署健康诊断脚本 |
 | [scripts/mnemonas-docker-preflight.sh](scripts/mnemonas-docker-preflight.sh) | Docker Compose 启动前预检脚本 |
 | [scripts/e2e-test.sh](scripts/e2e-test.sh) | E2E 验收测试 |
+| [scripts/torture-test.sh](scripts/torture-test.sh) | 非破坏性深度测试矩阵：race、fuzz、property、浏览器交互完整性 |
 | [scripts/benchmark.sh](scripts/benchmark.sh) | 性能基准测试 |
-| [scripts/fault-injection-test.sh](scripts/fault-injection-test.sh) | 故障注入测试 |
+| [scripts/fault-injection-test.sh](scripts/fault-injection-test.sh) | 破坏性故障注入测试；默认关闭，必须显式指定隔离目标 |
 | [scripts/setup-reverse-proxy.sh](scripts/setup-reverse-proxy.sh) | 反向代理配置 |
 
 ## 📜 License

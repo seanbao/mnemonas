@@ -10,6 +10,13 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
+if [[ -z "${GOCACHE:-}" ]]; then
+    TORTURE_TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/mnemonas-torture.XXXXXX")"
+    trap 'rm -rf "$TORTURE_TMP_ROOT"' EXIT
+    export GOCACHE="$TORTURE_TMP_ROOT/go-build"
+    mkdir -p "$GOCACHE"
+fi
+
 GO_TOOLCHAIN="${GOTOOLCHAIN:-local}"
 GO_FUZZTIME="${GO_FUZZTIME:-10s}"
 RUN_GO_RACE="${RUN_GO_RACE:-1}"
@@ -64,7 +71,7 @@ else
 fi
 
 if [[ "$RUN_LIVE_FAULTS" == "1" ]]; then
-    run bash ./scripts/fault-injection-test.sh
+    run env MNEMONAS_LIVE_FAULTS=1 bash ./scripts/fault-injection-test.sh
 else
     printf '\n==> skipping live fault injection; set RUN_LIVE_FAULTS=1 to enable\n'
 fi
