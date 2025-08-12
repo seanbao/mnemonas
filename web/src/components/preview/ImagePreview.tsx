@@ -125,9 +125,17 @@ export function ImagePreview({ path, filename, className }: ImagePreviewProps) {
 
   // Reset transform when path changes
   useEffect(() => {
-    setScale(1)
-    setRotation(0)
-    setPosition({ x: 0, y: 0 })
+    let cancelled = false
+    queueMicrotask(() => {
+      if (cancelled) return
+      setScale(1)
+      setRotation(0)
+      setPosition({ x: 0, y: 0 })
+    })
+
+    return () => {
+      cancelled = true
+    }
   }, [path])
 
   // Cleanup blob URL on unmount

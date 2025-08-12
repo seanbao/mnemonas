@@ -170,17 +170,30 @@ export function ShareManager({ showAllShares = false, featureEnabled = true }: S
     }
   }, [showAllShares])
 
+  const loadSharesRef = useRef(loadShares)
+
+  useEffect(() => {
+    loadSharesRef.current = loadShares
+  }, [loadShares])
+
   useEffect(() => {
     if (!featureEnabled) {
       loadRequestRef.current += 1
-      setIsLoading(false)
-      setLoadError(null)
-      setShares([])
+      let cancelled = false
+      queueMicrotask(() => {
+        if (cancelled) return
+        setIsLoading(false)
+        setLoadError(null)
+        setShares([])
+      })
       sharesRef.current = []
-      return
+      return () => {
+        cancelled = true
+      }
     }
-    loadShares()
-  }, [featureEnabled, loadShares])
+
+    void loadSharesRef.current()
+  }, [featureEnabled])
 
   if (!featureEnabled) {
     return (

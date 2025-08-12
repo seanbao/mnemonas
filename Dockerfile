@@ -37,7 +37,7 @@ FROM ${NODE_IMAGE} AS web-builder
 
 WORKDIR /build/web
 COPY web/package.json web/package-lock.json ./
-RUN --mount=type=cache,target=/root/.npm \
+RUN --mount=type=cache,target=/root/.npm,sharing=locked \
 	npm ci --prefer-offline
 
 COPY web ./

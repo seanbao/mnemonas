@@ -23,7 +23,7 @@ GO_FUZZ_TARGETS ?= ./internal/api:FuzzValidatePath ./internal/api:FuzzPathWithin
 GO_TORTURE_PACKAGES ?= ./internal/api ./internal/auth ./internal/share ./internal/storage ./internal/versionstore ./internal/dataplane ./internal/workspace
 WEB_TORTURE_SPECS ?= files.spec.ts interaction-integrity.spec.ts layout-integrity.spec.ts runtime-integrity.spec.ts
 DEPLOYMENT_SCRIPTS := scripts/install-systemd.sh scripts/uninstall-systemd.sh scripts/mnemonas-doctor.sh scripts/mnemonas-docker-preflight.sh scripts/docker-quickstart.sh scripts/mnemonas-dataplane-start.sh scripts/test-systemd-install.sh scripts/test-systemd-uninstall.sh scripts/test-docker-start.sh scripts/test-docker-preflight.sh scripts/test-docker-quickstart.sh scripts/test-fault-injection-safety.sh scripts/docker-start.sh scripts/setup-reverse-proxy.sh scripts/dev.sh scripts/benchmark.sh
-ACCEPTANCE_SCRIPTS := scripts/e2e-test.sh scripts/fault-injection-test.sh scripts/torture-test.sh
+ACCEPTANCE_SCRIPTS := scripts/e2e-test.sh scripts/fault-injection-test.sh scripts/torture-test.sh scripts/run-e2e-isolated.sh
 WEB_SCRIPTS := web/scripts/start-e2e-backend.sh
 
 define RESOLVE_GO_PACKAGES
@@ -60,7 +60,7 @@ help:
 	@echo "  rust-coverage - Run Rust coverage with cargo-llvm-cov"
 	@echo "  fmt        - Format code (Go + Rust)"
 	@echo "  workflows-check - Validate GitHub Actions workflows"
-	@echo "  e2e        - Run E2E acceptance tests"
+	@echo "  e2e        - Run isolated E2E acceptance tests"
 	@echo "  fault-injection - Run live destructive fault-injection tests"
 	@echo "  bench      - Run performance benchmarks"
 	@echo "  proto      - Generate protobuf code"
@@ -169,9 +169,9 @@ rust-coverage:
 
 # E2E 测试
 e2e:
-	@echo "🔗 Running E2E tests..."
-	@chmod +x scripts/e2e-test.sh
-	./scripts/e2e-test.sh
+	@echo "🔗 Running isolated E2E tests..."
+	@chmod +x scripts/e2e-test.sh scripts/run-e2e-isolated.sh
+	./scripts/run-e2e-isolated.sh
 
 fault-injection:
 	@echo "💥 Running live fault-injection tests against an explicit isolated target..."

@@ -153,4 +153,64 @@ describe('useBatchOperation', () => {
       color: 'warning',
     })
   })
+
+  it('uses the default success toast when every operation succeeds', async () => {
+    const operation = vi.fn(async () => undefined)
+
+    const { result } = renderHook(() => useBatchOperation({
+      operation,
+      messages: {
+        success: '{count} 项成功',
+        failure: '{count} 项失败',
+        partial: '{succeeded} 项成功，{failed} 项失败',
+      },
+    }))
+
+    let batchResult: Awaited<ReturnType<typeof result.current.execute>> | undefined
+    await act(async () => {
+      batchResult = await result.current.execute(['a', 'b'])
+    })
+
+    expect(batchResult).toMatchObject({
+      succeeded: 2,
+      failed: 0,
+      warningCount: 0,
+      warningMessages: [],
+    })
+    expect(mockAddToast).toHaveBeenCalledWith({
+      title: '2 项成功',
+      color: 'success',
+    })
+  })
+
+  it('ignores warning results without a message', async () => {
+    const operation = vi.fn(async () => ({
+      warning: true,
+    }))
+
+    const { result } = renderHook(() => useBatchOperation({
+      operation,
+      messages: {
+        success: '{count} 项成功',
+        failure: '{count} 项失败',
+        partial: '{succeeded} 项成功，{failed} 项失败',
+      },
+    }))
+
+    let batchResult: Awaited<ReturnType<typeof result.current.execute>> | undefined
+    await act(async () => {
+      batchResult = await result.current.execute(['a'])
+    })
+
+    expect(batchResult).toMatchObject({
+      succeeded: 1,
+      failed: 0,
+      warningCount: 0,
+      warningMessages: [],
+    })
+    expect(mockAddToast).toHaveBeenCalledWith({
+      title: '1 项成功',
+      color: 'success',
+    })
+  })
 })
