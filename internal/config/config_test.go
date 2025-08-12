@@ -10,6 +10,31 @@ import (
 	"time"
 )
 
+func TestCleanupManagedTempPath_ReturnsOperationError(t *testing.T) {
+	tmpDir := t.TempDir()
+	busyDir := filepath.Join(tmpDir, "busy")
+	if err := os.Mkdir(busyDir, 0700); err != nil {
+		t.Fatalf("failed to create busy temp dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(busyDir, "child"), []byte("data"), 0600); err != nil {
+		t.Fatalf("failed to create busy temp child: %v", err)
+	}
+
+	root, err := os.OpenRoot(tmpDir)
+	if err != nil {
+		t.Fatalf("failed to open root: %v", err)
+	}
+	defer root.Close()
+
+	operationErr := errors.New("write failed")
+	if got := cleanupManagedTempPath(root, "busy", operationErr); got != operationErr {
+		t.Fatalf("cleanupManagedTempPath() = %v, want original operation error", got)
+	}
+	if _, err := os.Stat(busyDir); err != nil {
+		t.Fatalf("expected busy temp path to remain after ignored cleanup error: %v", err)
+	}
+}
+
 func TestDefault(t *testing.T) {
 	cfg := Default()
 
@@ -277,6 +302,10 @@ func TestNormalizeWebDAVPrefix(t *testing.T) {
 		{name: "empty defaults to root", input: "", expected: "/"},
 		{name: "root stays root", input: "/", expected: "/"},
 		{name: "trims whitespace", input: " /dav ", expected: "/dav"},
+		{name: "trims whitespace after clean", input: "./0/0//0 /", expected: "/0/0/0"},
+		{name: "cleans after trimming path segment whitespace", input: "00/ /", expected: "/00"},
+		{name: "iterates until stable after clean", input: "0 / /", expected: "/0"},
+		{name: "collapses repeated slashes", input: "//dav//files///", expected: "/dav/files"},
 	}
 
 	for _, tt := range tests {
@@ -969,6 +998,31 @@ func TestConfig_Address(t *testing.T) {
 	addr := cfg.Address()
 	if addr != "192.168.1.1:3000" {
 		t.Errorf("Address() = %s, want 192.168.1.1:3000", addr)
+	}
+}
+
+func TestConfig_DerivedStoragePaths(t *testing.T) {
+	cfg := Default()
+	cfg.Storage.Root = filepath.Join(t.TempDir(), "storage")
+
+	tests := []struct {
+		name string
+		got  string
+		want string
+	}{
+		{name: "files", got: cfg.FilesDir(), want: filepath.Join(cfg.Storage.Root, "files")},
+		{name: "internal", got: cfg.InternalDir(), want: filepath.Join(cfg.Storage.Root, ".mnemonas")},
+		{name: "index", got: cfg.IndexDBPath(), want: filepath.Join(cfg.Storage.Root, ".mnemonas", "index.db")},
+		{name: "objects", got: cfg.ObjectsDir(), want: filepath.Join(cfg.Storage.Root, ".mnemonas", "objects")},
+		{name: "trash", got: cfg.TrashDir(), want: filepath.Join(cfg.Storage.Root, ".mnemonas", "trash")},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.got != tt.want {
+				t.Fatalf("path = %q, want %q", tt.got, tt.want)
+			}
+		})
 	}
 }
 

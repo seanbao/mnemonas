@@ -38,6 +38,68 @@ async function expectFolderView(page: Page, expectedPath: string, breadcrumbName
   await expect(page.getByRole('button', { name: breadcrumbName })).toBeVisible({ timeout: 5_000 })
 }
 
+async function startPathRecorder(page: Page) {
+  await page.evaluate(() => {
+    type PathRecorderWindow = Window & {
+      __mnemonasPathSamples?: string[]
+      __mnemonasStopPathRecorder?: () => void
+    }
+    const recorderWindow = window as PathRecorderWindow
+    recorderWindow.__mnemonasStopPathRecorder?.()
+    const samples: string[] = []
+    let stopped = false
+    const record = () => {
+      const pathname = window.location.pathname
+      if (samples[samples.length - 1] !== pathname) {
+        samples.push(pathname)
+      }
+    }
+    const originalPushState = window.history.pushState
+    const originalReplaceState = window.history.replaceState
+
+    window.history.pushState = function patchedPushState(...args) {
+      const result = originalPushState.apply(this, args)
+      record()
+      return result
+    }
+    window.history.replaceState = function patchedReplaceState(...args) {
+      const result = originalReplaceState.apply(this, args)
+      record()
+      return result
+    }
+
+    const onPopState = () => record()
+    const tick = () => {
+      if (stopped) return
+      record()
+      window.requestAnimationFrame(tick)
+    }
+
+    window.addEventListener('popstate', onPopState)
+    recorderWindow.__mnemonasPathSamples = samples
+    recorderWindow.__mnemonasStopPathRecorder = () => {
+      stopped = true
+      window.history.pushState = originalPushState
+      window.history.replaceState = originalReplaceState
+      window.removeEventListener('popstate', onPopState)
+    }
+    record()
+    window.requestAnimationFrame(tick)
+  })
+}
+
+async function stopPathRecorder(page: Page): Promise<string[]> {
+  return page.evaluate(() => {
+    type PathRecorderWindow = Window & {
+      __mnemonasPathSamples?: string[]
+      __mnemonasStopPathRecorder?: () => void
+    }
+    const recorderWindow = window as PathRecorderWindow
+    recorderWindow.__mnemonasStopPathRecorder?.()
+    return recorderWindow.__mnemonasPathSamples ?? []
+  })
+}
+
 test.describe('文件浏览页面', () => {
   test.beforeEach(async ({ page }) => {
     await ensureAuthenticatedAt(page, '/files')
@@ -116,6 +178,7 @@ test.describe('文件浏览页面', () => {
     const folderName = `e2e-nav-${testInfo.workerIndex}-${Date.now()}`
 
     await createFolder(page, folderName)
+    await startPathRecorder(page)
     await openFolder(page, folderName)
 
     const expectedPath = `/files/${folderName}`
@@ -124,6 +187,11 @@ test.describe('文件浏览页面', () => {
     await page.waitForTimeout(500)
     await expect(page).toHaveURL(new RegExp(`${escapeRegExp(expectedPath)}$`))
     await expect(page.getByText('这里空空如也')).toBeVisible({ timeout: 5_000 })
+
+    const pathSamples = await stopPathRecorder(page)
+    const enteredFolderIndex = pathSamples.indexOf(expectedPath)
+    expect(enteredFolderIndex).toBeGreaterThanOrEqual(0)
+    expect(pathSamples.slice(enteredFolderIndex + 1)).not.toContain('/files')
 
     await page.getByRole('button', { name: /根目录/ }).click()
     await expect(page).toHaveURL(/\/files$/)

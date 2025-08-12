@@ -22,6 +22,24 @@ import (
 	"github.com/seanbao/mnemonas/internal/requestip"
 )
 
+func TestAuthPersistenceWarningWrapperPreservesErrorSemantics(t *testing.T) {
+	baseErr := errors.New("directory sync failed")
+
+	if got := wrapAuthPersistenceWarning(nil); got != nil {
+		t.Fatalf("wrapAuthPersistenceWarning(nil) = %v, want nil", got)
+	}
+	warningErr := wrapAuthPersistenceWarning(baseErr)
+	if !isAuthPersistenceWarning(warningErr) {
+		t.Fatalf("expected auth persistence warning, got %T", warningErr)
+	}
+	if !errors.Is(warningErr, baseErr) {
+		t.Fatalf("expected auth persistence warning to unwrap %v", baseErr)
+	}
+	if warningErr.Error() != baseErr.Error() {
+		t.Fatalf("Error() = %q, want %q", warningErr.Error(), baseErr.Error())
+	}
+}
+
 func TestShouldPrintInitialPasswordToTerminal(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -342,6 +360,9 @@ func TestUserStore(t *testing.T) {
 		}
 		if user.Role != RoleUser {
 			t.Errorf("expected role user, got %s", user.Role)
+		}
+		if store.Count() != 2 {
+			t.Fatalf("expected default admin plus created user, got %d users", store.Count())
 		}
 
 		authUser, err := store.Authenticate("testuser", "password123")
@@ -1046,6 +1067,7 @@ func TestUserStore(t *testing.T) {
 		})
 
 		firstDone := make(chan error, 1)
+		waitForPersist := 15 * time.Second
 		go func() {
 			_, createErr := store.Create("firstuser", "password123", "first@example.com", RoleUser)
 			firstDone <- createErr
@@ -1053,7 +1075,7 @@ func TestUserStore(t *testing.T) {
 
 		select {
 		case <-firstStarted:
-		case <-time.After(time.Second):
+		case <-time.After(waitForPersist):
 			t.Fatal("timed out waiting for first user-store persist to start")
 		}
 
@@ -1078,13 +1100,13 @@ func TestUserStore(t *testing.T) {
 			if err != nil {
 				t.Fatalf("first Create() error: %v", err)
 			}
-		case <-time.After(2 * time.Second):
+		case <-time.After(waitForPersist):
 			t.Fatal("first Create() did not finish after releasing writer")
 		}
 
 		select {
 		case <-secondStarted:
-		case <-time.After(time.Second):
+		case <-time.After(waitForPersist):
 			t.Fatal("timed out waiting for second user-store persist to start")
 		}
 
@@ -1093,7 +1115,7 @@ func TestUserStore(t *testing.T) {
 			if err != nil {
 				t.Fatalf("second Create() error: %v", err)
 			}
-		case <-time.After(2 * time.Second):
+		case <-time.After(waitForPersist):
 			t.Fatal("second Create() did not finish")
 		}
 
@@ -2149,6 +2171,29 @@ func TestMiddleware(t *testing.T) {
 		}
 	})
 
+	t.Run("set exclude paths replaces default bypass list", func(t *testing.T) {
+		mwWithExclude := NewMiddleware(store, tm)
+		mwWithExclude.SetExcludePaths([]string{"/custom-public"})
+
+		handler := mwWithExclude.RequireAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusNoContent)
+		}))
+
+		req := httptest.NewRequest(http.MethodGet, "/custom-public", nil)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusNoContent {
+			t.Fatalf("expected custom excluded path to bypass auth, got status %d", rec.Code)
+		}
+
+		req = httptest.NewRequest(http.MethodGet, "/health", nil)
+		rec = httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("expected replaced default /health path to require auth, got status %d", rec.Code)
+		}
+	})
+
 	t.Run("path boundary matching", func(t *testing.T) {
 		mwWithExclude := NewMiddlewareWithExclude(store, tm, []string{"/health", "/api/v1/version", "/public/"})
 
@@ -2198,6 +2243,19 @@ func TestMiddleware(t *testing.T) {
 			if rec.Code != http.StatusUnauthorized {
 				t.Fatalf("expected same-prefix cookie path %s to require bearer auth, got status %d", blockedPath, rec.Code)
 			}
+		}
+	})
+
+	t.Run("with claims context preserves nil and stores non-nil claims", func(t *testing.T) {
+		ctx := context.Background()
+		if WithClaimsContext(ctx, nil) != ctx {
+			t.Fatal("expected nil claims to preserve original context")
+		}
+
+		claims := &TokenClaims{UserID: user.ID, Username: user.Username, Role: user.Role}
+		withClaims := WithClaimsContext(ctx, claims)
+		if got := GetClaimsFromContext(withClaims); got != claims {
+			t.Fatalf("claims from context = %#v, want original claims", got)
 		}
 	})
 }
@@ -2845,6 +2903,59 @@ func TestAuthHandler(t *testing.T) {
 		}
 		if cookies[0].Secure {
 			t.Fatal("expected trusted proxy hops disabled to leave cookie insecure")
+		}
+	})
+
+	t.Run("logout revokes current token and clears download session cookie", func(t *testing.T) {
+		user, _ := store.GetByUsername("handleruser")
+		pair, _ := tm.GenerateTokenPair(user)
+		claims, err := tm.ValidateAccessToken(pair.AccessToken)
+		if err != nil {
+			t.Fatalf("ValidateAccessToken(access) error: %v", err)
+		}
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/logout", nil)
+		req.AddCookie(&http.Cookie{Name: DownloadSessionCookieName, Value: pair.AccessToken})
+		req = req.WithContext(WithClaimsContext(req.Context(), claims))
+		rec := httptest.NewRecorder()
+
+		h.HandleLogout(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+		}
+		if _, err := tm.ValidateAccessToken(pair.AccessToken); err != ErrTokenRevoked {
+			t.Fatalf("expected access token to be revoked after logout, got %v", err)
+		}
+
+		cookies := rec.Result().Cookies()
+		if len(cookies) != 1 {
+			t.Fatalf("expected one cookie clearing header, got %d", len(cookies))
+		}
+		if cookies[0].Name != DownloadSessionCookieName {
+			t.Fatalf("cookie name = %q, want %q", cookies[0].Name, DownloadSessionCookieName)
+		}
+		if cookies[0].MaxAge != -1 {
+			t.Fatalf("cookie MaxAge = %d, want -1", cookies[0].MaxAge)
+		}
+		if cookies[0].Path != "/api/v1" {
+			t.Fatalf("cookie Path = %q, want /api/v1", cookies[0].Path)
+		}
+	})
+
+	t.Run("logout without claims still clears download session cookie", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/logout", nil)
+		req.AddCookie(&http.Cookie{Name: DownloadSessionCookieName, Value: "stale"})
+		rec := httptest.NewRecorder()
+
+		h.HandleLogout(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+		}
+		cookies := rec.Result().Cookies()
+		if len(cookies) != 1 || cookies[0].Name != DownloadSessionCookieName || cookies[0].MaxAge != -1 {
+			t.Fatalf("expected download session cookie to be cleared, got %+v", cookies)
 		}
 	})
 

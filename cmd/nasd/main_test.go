@@ -16,6 +16,7 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 
+	"github.com/seanbao/mnemonas/internal/api"
 	"github.com/seanbao/mnemonas/internal/config"
 	"github.com/seanbao/mnemonas/internal/dataplane"
 	"github.com/seanbao/mnemonas/internal/storage"
@@ -259,6 +260,53 @@ func TestLoadConfig_ReturnsErrorForMissingExplicitConfigPath(t *testing.T) {
 	}
 }
 
+func TestLoadConfig_UsesBuiltInDefaultsWhenNoConfigFileExists(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+
+	cfg, resolvedPath, err := loadConfig("")
+	if err != nil {
+		t.Fatalf("loadConfig(empty) error: %v", err)
+	}
+	if resolvedPath != "" {
+		t.Fatalf("resolvedPath = %q, want empty", resolvedPath)
+	}
+	if cfg == nil {
+		t.Fatal("expected non-nil default config")
+	}
+	if cfg.Server.Port != config.Default().Server.Port {
+		t.Fatalf("server port = %d, want default %d", cfg.Server.Port, config.Default().Server.Port)
+	}
+}
+
+func TestLoadConfig_UsesDefaultHomeConfigPath(t *testing.T) {
+	homeDir := t.TempDir()
+	configDir := filepath.Join(homeDir, ".mnemonas")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(configDir) error: %v", err)
+	}
+	configPath := filepath.Join(configDir, "config.toml")
+	storageRoot := filepath.Join(homeDir, "storage")
+	if err := os.WriteFile(configPath, []byte("[storage]\nroot = \""+storageRoot+"\"\n[server]\nport = 18080\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile(config) error: %v", err)
+	}
+	t.Setenv("HOME", homeDir)
+
+	cfg, resolvedPath, err := loadConfig("")
+	if err != nil {
+		t.Fatalf("loadConfig(empty) error: %v", err)
+	}
+	if resolvedPath != configPath {
+		t.Fatalf("resolvedPath = %q, want %q", resolvedPath, configPath)
+	}
+	if cfg.Server.Port != 18080 {
+		t.Fatalf("server port = %d, want 18080", cfg.Server.Port)
+	}
+	if cfg.Storage.Root != storageRoot {
+		t.Fatalf("storage root = %q, want %q", cfg.Storage.Root, storageRoot)
+	}
+}
+
 func TestHasFrontendIndex_RejectsViteSourceIndex(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "index.html"), []byte(`<script type="module" src="/src/main.tsx"></script>`), 0o644); err != nil {
@@ -278,6 +326,90 @@ func TestHasFrontendIndex_AcceptsBuiltIndex(t *testing.T) {
 
 	if !hasFrontendIndex(dir) {
 		t.Fatal("expected built frontend index to be accepted")
+	}
+}
+
+func TestDiscoverFrontendAssets_PrefersExplicitBuiltDirectory(t *testing.T) {
+	envDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(envDir, "index.html"), []byte(`<script type="module" src="/assets/index.js"></script>`), 0o644); err != nil {
+		t.Fatalf("WriteFile(index.html) error: %v", err)
+	}
+	fallbackRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(fallbackRoot, "web", "dist"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(web/dist) error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(fallbackRoot, "web", "dist", "index.html"), []byte(`<script type="module" src="/assets/fallback.js"></script>`), 0o644); err != nil {
+		t.Fatalf("WriteFile(fallback index.html) error: %v", err)
+	}
+
+	t.Setenv("MNEMONAS_WEB_DIR", envDir)
+	t.Chdir(fallbackRoot)
+
+	if got := discoverFrontendAssets(); got != envDir {
+		t.Fatalf("discoverFrontendAssets() = %q, want env dir %q", got, envDir)
+	}
+}
+
+func TestDiscoverFrontendAssets_FallsBackToWebDistAndSkipsSourceIndex(t *testing.T) {
+	root := t.TempDir()
+	webDir := filepath.Join(root, "web")
+	distDir := filepath.Join(webDir, "dist")
+	if err := os.MkdirAll(distDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(web/dist) error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(webDir, "index.html"), []byte(`<script type="module" src="/src/main.tsx"></script>`), 0o644); err != nil {
+		t.Fatalf("WriteFile(source index.html) error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(distDir, "index.html"), []byte(`<script type="module" src="/assets/index.js"></script>`), 0o644); err != nil {
+		t.Fatalf("WriteFile(dist index.html) error: %v", err)
+	}
+
+	t.Setenv("MNEMONAS_WEB_DIR", "")
+	t.Chdir(root)
+
+	if got := discoverFrontendAssets(); filepath.Clean(got) != filepath.Join("web", "dist") {
+		t.Fatalf("discoverFrontendAssets() = %q, want web/dist", got)
+	}
+}
+
+func TestDiscoverFrontendAssets_ReturnsEmptyWithoutBuiltIndex(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "web"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(web) error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "web", "index.html"), []byte(`<script type="module" src="/src/main.tsx"></script>`), 0o644); err != nil {
+		t.Fatalf("WriteFile(source index.html) error: %v", err)
+	}
+
+	t.Setenv("MNEMONAS_WEB_DIR", "")
+	t.Chdir(root)
+
+	if got := discoverFrontendAssets(); got != "" {
+		t.Fatalf("discoverFrontendAssets() = %q, want empty", got)
+	}
+}
+
+func TestBuildWebDAVHandler(t *testing.T) {
+	prefix, handler := buildWebDAVHandler(nil, api.WebDAVRuntimeConfig{Enabled: false, Prefix: "/dav"})
+	if prefix != "" || handler != nil {
+		t.Fatalf("disabled buildWebDAVHandler() = (%q, %#v), want empty and nil", prefix, handler)
+	}
+
+	prefix, handler = buildWebDAVHandler(nil, api.WebDAVRuntimeConfig{
+		Enabled:  true,
+		Prefix:   "/dav",
+		AuthType: "basic",
+		Username: "admin",
+		Password: "secret",
+	})
+	if prefix != "/dav" {
+		t.Fatalf("enabled prefix = %q, want /dav", prefix)
+	}
+	if handler == nil {
+		t.Fatal("expected enabled WebDAV handler")
+	}
+	if closer, ok := handler.(io.Closer); ok {
+		_ = closer.Close()
 	}
 }
 
@@ -414,6 +546,17 @@ func restoreGlobalLoggerState(t *testing.T) {
 	})
 }
 
+func TestInitLogger_ConfiguresInfoConsoleLogger(t *testing.T) {
+	restoreGlobalLoggerState(t)
+
+	zerolog.SetGlobalLevel(zerolog.DebugLevel)
+	initLogger()
+
+	if got := zerolog.GlobalLevel(); got != zerolog.InfoLevel {
+		t.Fatalf("global log level = %s, want %s", got, zerolog.InfoLevel)
+	}
+}
+
 func TestApplyLoggerConfig_WritesJSONLogsToConfiguredFile(t *testing.T) {
 	restoreGlobalLoggerState(t)
 
@@ -491,6 +634,188 @@ func TestApplyLoggerConfig_RespectsConfiguredLevel(t *testing.T) {
 	}
 	if !strings.Contains(content, `"message":"warn message"`) {
 		t.Fatalf("expected warn message in log output, got %s", content)
+	}
+}
+
+func TestResolveLogOutput_StdoutAndStderr(t *testing.T) {
+	writer, closer, _, err := resolveLogOutput(" stdout ")
+	if err != nil {
+		t.Fatalf("resolveLogOutput(stdout) error: %v", err)
+	}
+	if writer != os.Stdout {
+		t.Fatalf("resolveLogOutput(stdout) writer = %#v, want stdout", writer)
+	}
+	if closer != nil {
+		t.Fatalf("resolveLogOutput(stdout) closer = %#v, want nil", closer)
+	}
+
+	writer, closer, _, err = resolveLogOutput("STDERR")
+	if err != nil {
+		t.Fatalf("resolveLogOutput(stderr) error: %v", err)
+	}
+	if writer != os.Stderr {
+		t.Fatalf("resolveLogOutput(stderr) writer = %#v, want stderr", writer)
+	}
+	if closer != nil {
+		t.Fatalf("resolveLogOutput(stderr) closer = %#v, want nil", closer)
+	}
+}
+
+func TestResolveLogOutput_CreatesParentDirectoriesAndAppends(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "logs", "nested", "mnemonas.log")
+
+	writer, closer, noColor, err := resolveLogOutput(logPath)
+	if err != nil {
+		t.Fatalf("resolveLogOutput(file) error: %v", err)
+	}
+	if !noColor {
+		t.Fatal("file log output should disable color")
+	}
+	if closer == nil {
+		t.Fatal("expected file log output to return a closer")
+	}
+	if _, err := writer.Write([]byte("first\n")); err != nil {
+		t.Fatalf("Write(first) error: %v", err)
+	}
+	if err := closer.Close(); err != nil {
+		t.Fatalf("Close(first) error: %v", err)
+	}
+
+	writer, closer, _, err = resolveLogOutput(logPath)
+	if err != nil {
+		t.Fatalf("resolveLogOutput(file second) error: %v", err)
+	}
+	if _, err := writer.Write([]byte("second\n")); err != nil {
+		t.Fatalf("Write(second) error: %v", err)
+	}
+	if err := closer.Close(); err != nil {
+		t.Fatalf("Close(second) error: %v", err)
+	}
+
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("ReadFile(logPath) error: %v", err)
+	}
+	if string(data) != "first\nsecond\n" {
+		t.Fatalf("log file content = %q, want appended writes", string(data))
+	}
+}
+
+func TestNormalizeLogOutputPath(t *testing.T) {
+	tmpDir := t.TempDir()
+	absPath := filepath.Join(tmpDir, "mnemonas.log")
+
+	got, err := normalizeLogOutputPath(" " + absPath + " ")
+	if err != nil {
+		t.Fatalf("normalizeLogOutputPath(abs) error: %v", err)
+	}
+	if got != absPath {
+		t.Fatalf("normalizeLogOutputPath(abs) = %q, want %q", got, absPath)
+	}
+
+	previousDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd() error: %v", err)
+	}
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatalf("Chdir(tmpDir) error: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chdir(previousDir)
+	})
+
+	got, err = normalizeLogOutputPath(" logs/mnemonas.log ")
+	if err != nil {
+		t.Fatalf("normalizeLogOutputPath(rel) error: %v", err)
+	}
+	want := filepath.Join(tmpDir, "logs", "mnemonas.log")
+	if got != want {
+		t.Fatalf("normalizeLogOutputPath(rel) = %q, want %q", got, want)
+	}
+}
+
+func TestValidateLogOutputPath(t *testing.T) {
+	tmpDir := t.TempDir()
+	regularPath := filepath.Join(tmpDir, "mnemonas.log")
+	if err := os.WriteFile(regularPath, []byte("log"), 0o600); err != nil {
+		t.Fatalf("WriteFile(regular) error: %v", err)
+	}
+	if err := validateLogOutputPath(regularPath); err != nil {
+		t.Fatalf("validateLogOutputPath(regular) error: %v", err)
+	}
+
+	missingPath := filepath.Join(tmpDir, "missing", "mnemonas.log")
+	if err := validateLogOutputPath(missingPath); err != nil {
+		t.Fatalf("validateLogOutputPath(missing) error: %v", err)
+	}
+
+	targetPath := filepath.Join(tmpDir, "target.log")
+	if err := os.WriteFile(targetPath, []byte("target"), 0o600); err != nil {
+		t.Fatalf("WriteFile(target) error: %v", err)
+	}
+	symlinkPath := filepath.Join(tmpDir, "linked.log")
+	if err := os.Symlink(targetPath, symlinkPath); err != nil {
+		t.Fatalf("Symlink(log) error: %v", err)
+	}
+	if err := validateLogOutputPath(symlinkPath); !errors.Is(err, errLogOutputSymlink) {
+		t.Fatalf("validateLogOutputPath(symlink) error = %v, want %v", err, errLogOutputSymlink)
+	}
+}
+
+func TestResolveLogLevel(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		want    zerolog.Level
+		wantErr bool
+	}{
+		{name: "empty defaults info", input: "", want: zerolog.InfoLevel},
+		{name: "trimmed debug", input: " debug ", want: zerolog.DebugLevel},
+		{name: "warn", input: "WARN", want: zerolog.WarnLevel},
+		{name: "error", input: "error", want: zerolog.ErrorLevel},
+		{name: "invalid", input: "trace", want: zerolog.InfoLevel, wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := resolveLogLevel(tt.input)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("resolveLogLevel(%q) error = %v, wantErr %v", tt.input, err, tt.wantErr)
+			}
+			if got != tt.want {
+				t.Fatalf("resolveLogLevel(%q) = %s, want %s", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestResolveLogTimeFormats(t *testing.T) {
+	if got := resolveConsoleLogTimeFormat(""); got != time.RFC3339 {
+		t.Fatalf("default console time format = %q, want %q", got, time.RFC3339)
+	}
+	if got := resolveConsoleLogTimeFormat(" 15:04 "); got != "15:04" {
+		t.Fatalf("custom console time format = %q, want 15:04", got)
+	}
+
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{name: "default", in: "", want: time.RFC3339},
+		{name: "rfc3339", in: "rfc3339", want: time.RFC3339},
+		{name: "unix", in: "UNIX", want: zerolog.TimeFormatUnix},
+		{name: "unix milliseconds", in: "unixms", want: zerolog.TimeFormatUnixMs},
+		{name: "unix microseconds", in: "UNIXMICRO", want: zerolog.TimeFormatUnixMicro},
+		{name: "unix nanoseconds", in: "UNIXNANO", want: zerolog.TimeFormatUnixNano},
+		{name: "custom", in: " 2006-01-02 ", want: "2006-01-02"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := resolveJSONLogTimeFormat(tt.in); got != tt.want {
+				t.Fatalf("resolveJSONLogTimeFormat(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
 	}
 }
 

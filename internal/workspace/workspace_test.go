@@ -10,6 +10,27 @@ import (
 	"testing"
 )
 
+func TestVisibleMutationWarningWrapperPreservesErrorSemantics(t *testing.T) {
+	baseErr := errors.New("sync failed")
+
+	if got := WrapVisibleMutationWarning(nil); got != nil {
+		t.Fatalf("WrapVisibleMutationWarning(nil) = %v, want nil", got)
+	}
+	warningErr := WrapVisibleMutationWarning(baseErr)
+	if !IsVisibleMutationWarning(warningErr) {
+		t.Fatalf("expected visible mutation warning, got %T", warningErr)
+	}
+	if !errors.Is(warningErr, baseErr) {
+		t.Fatalf("expected warning to unwrap %v", baseErr)
+	}
+	if warningErr.Error() != baseErr.Error() {
+		t.Fatalf("Error() = %q, want %q", warningErr.Error(), baseErr.Error())
+	}
+	if got := WrapVisibleMutationWarning(warningErr); got != warningErr {
+		t.Fatal("expected existing warning to be reused")
+	}
+}
+
 func TestWorkspace_WriteFile_ReturnsDirectorySyncErrorAfterRename(t *testing.T) {
 	w := setupWorkspace(t)
 	originalSyncWorkspaceDir := syncWorkspaceDir
