@@ -219,6 +219,47 @@ run_checksum_control_character_path_fails_before_checksum() {
 	assert_file_contains "$out" "checksums.txt contains a control character in file path"
 }
 
+run_checksum_whitespace_path_fails_before_checksum() {
+	local case_dir="$TMP_ROOT/checksum-whitespace-path"
+	local dist_dir="$case_dir/dist"
+	local out="$case_dir/out.log"
+	local archive_name="mnemonas-v1.2.3 candidate-linux-amd64.tar.gz"
+	local status
+
+	mkdir -p "$dist_dir"
+	printf 'unsafe\n' >"$dist_dir/$archive_name"
+	printf '%064d  %s\n' 0 "$archive_name" >"$dist_dir/checksums.txt"
+
+	set +e
+	bash "$REPO_ROOT/scripts/verify-release-artifacts.sh" "$dist_dir" >"$out" 2>&1
+	status=$?
+	set -e
+
+	[[ "$status" -ne 0 ]] || fail "release artifact verifier accepted a checksum path with whitespace"
+	assert_file_contains "$out" "checksums.txt contains whitespace in file path"
+}
+
+run_archive_whitespace_filename_fails_before_checksum() {
+	local case_dir="$TMP_ROOT/archive-whitespace-filename"
+	local dist_dir="$case_dir/dist"
+	local out="$case_dir/out.log"
+	local archive_name="mnemonas-v1.2.3 candidate-linux-amd64.tar.gz"
+	local status
+
+	mkdir -p "$dist_dir"
+	make_release_archive "$dist_dir" "v1.2.3" "linux-amd64" "seanbao/mnemonas"
+	write_checksums "$dist_dir"
+	printf 'unsafe\n' >"$dist_dir/$archive_name"
+
+	set +e
+	bash "$REPO_ROOT/scripts/verify-release-artifacts.sh" "$dist_dir" >"$out" 2>&1
+	status=$?
+	set -e
+
+	[[ "$status" -ne 0 ]] || fail "release artifact verifier accepted an archive filename with whitespace"
+	assert_file_contains "$out" "release archive filename contains whitespace"
+}
+
 run_archive_symlink_fails_before_checksum() {
 	local case_dir="$TMP_ROOT/archive-symlink"
 	local source_dir="$case_dir/source"
@@ -473,6 +514,8 @@ run_missing_target_fails_in_strict_mode
 run_checksum_mismatch_fails
 run_checksum_path_escape_fails_before_checksum
 run_checksum_control_character_path_fails_before_checksum
+run_checksum_whitespace_path_fails_before_checksum
+run_archive_whitespace_filename_fails_before_checksum
 run_archive_symlink_fails_before_checksum
 run_archive_entry_symlink_fails
 run_archive_entry_hardlink_fails
