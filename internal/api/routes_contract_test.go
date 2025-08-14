@@ -78,6 +78,7 @@ func expectedRESTRouteContracts() []string {
 		"GET /api/v1/setup/",
 		"POST /api/v1/setup/acknowledge",
 		"GET /api/v1/shares/",
+		"GET /api/v1/shares/policy",
 		"POST /api/v1/shares/",
 		"GET /api/v1/shares/{id}",
 		"PUT /api/v1/shares/{id}",

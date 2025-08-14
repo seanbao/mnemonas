@@ -20,7 +20,7 @@ This project follows [Semantic Versioning 2.0.0](https://semver.org/).
 - Activity log with filters, details, statistics, and disk-health system events.
 - Storage page shows filesystem type, mount point, and backing device/dataset source.
 - User management with create/edit/delete, home directory and quota editing, password reset, and enable/disable flows.
-- Share management with link creation, password protection, expiration, access statistics, and public share access.
+- Share management with link creation, password protection, expiration, access statistics, public share access, risk filtering, soon-expiry reminders, policy presets, and one-click disable for high-risk links.
 - Settings for server, storage, retention, WebDAV, CDC parameters, scheduled Scrub, and data-plane connection status.
 - Public access wizard and security self-check entry point for HTTPS reverse proxy, trusted proxy hops, and share-domain configuration.
 - Desktop and mobile E2E coverage for the public access wizard.
@@ -33,7 +33,7 @@ This project follows [Semantic Versioning 2.0.0](https://semver.org/).
 - User groups and `storage.directory_access_rules` for shared-directory read/write grants by user, group, or role. Web/API, WebDAV users mode, search, shares, favorites, trash, and activity filtering use the same path authorization decision.
 - Effective access checks, unsaved-rule previews, per-path user matrix views, and related-share impact checks in the Settings API and Web settings page so admins can inspect why users can read or write a path.
 - WebDAV supports `auth_type = "users"` so clients can mount with MnemoNAS user accounts; non-admin mounts are rooted at the user's `home_dir`, guest accounts are read-only, and PUT/COPY writes honor user quotas.
-- Share-link APIs including public access and password checks.
+- Share-link APIs including public access, password checks, default expiry/access-limit policy, and share risk markers.
 - Activity log APIs, including scrub system events.
 - Runtime settings APIs, including public-access security self-check, certificate renewal and failure-triage guidance, scheduled Scrub updates, and hot updates for Webhook/Telegram/SMTP alert notifications.
 - Configured local backup jobs and command-backed restic/rclone remote targets with run-now execution, lightweight scheduling, automatic backup windows, local snapshot retention, automatic/manual retention checks, job health status, manifest-based local restore drills, non-destructive restore previews, batch restore preview/execution for up to 20 items with per-item restore and read-only verification results, restore preflight for target isolation/state/capacity/content/config handling, failed-preflight blocking, safe-directory local/restic/rclone restore, persisted post-restore verification reports, post-restore cutover and rollback checklists, restore summary export, scheduled restore-drill reminders, rate-limited stale/missing restore-drill alerts, restore-drill history, success-rate summary, failure categorization, restore result history, remote consistency checks, and Webhook/Telegram/SMTP events for backup failures, retention-check failures, and warnings.

@@ -1423,6 +1423,103 @@ func TestShare_CanAccess(t *testing.T) {
 	}
 }
 
+func TestShare_RiskReportsActiveWideOpenShareConcerns(t *testing.T) {
+	now := time.Date(2026, 5, 19, 12, 0, 0, 0, time.UTC)
+	share := &Share{
+		Path:      "/",
+		Type:      ShareTypeFolder,
+		CreatedBy: "user1",
+		CreatedAt: now.Add(-31 * 24 * time.Hour),
+		Enabled:   true,
+	}
+
+	risk := share.Risk(now)
+	if risk.Level != ShareRiskLevelHigh {
+		t.Fatalf("expected high risk, got %+v", risk)
+	}
+	for _, code := range []string{"root_folder", "no_password", "no_expiration", "unlimited_access", "unused_enabled"} {
+		if !shareRiskHasCode(risk, code) {
+			t.Fatalf("expected risk code %q in %+v", code, risk)
+		}
+	}
+}
+
+func TestShare_RiskIgnoresInactiveShares(t *testing.T) {
+	now := time.Date(2026, 5, 19, 12, 0, 0, 0, time.UTC)
+	expiredAt := now.Add(-time.Minute)
+	tests := []struct {
+		name  string
+		share Share
+	}{
+		{
+			name: "disabled",
+			share: Share{
+				Path:    "/docs",
+				Type:    ShareTypeFolder,
+				Enabled: false,
+			},
+		},
+		{
+			name: "expired",
+			share: Share{
+				Path:      "/docs",
+				Type:      ShareTypeFolder,
+				Enabled:   true,
+				ExpiresAt: &expiredAt,
+			},
+		},
+		{
+			name: "access limit reached",
+			share: Share{
+				Path:        "/docs",
+				Type:        ShareTypeFolder,
+				Enabled:     true,
+				MaxAccess:   1,
+				AccessCount: 1,
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			risk := tc.share.Risk(now)
+			if risk.Level != ShareRiskLevelNone || len(risk.Reasons) != 0 {
+				t.Fatalf("expected no risk for inactive share, got %+v", risk)
+			}
+		})
+	}
+}
+
+func TestShare_RiskReportsStaleEnabledShareAsLow(t *testing.T) {
+	now := time.Date(2026, 5, 19, 12, 0, 0, 0, time.UTC)
+	expiresAt := now.Add(24 * time.Hour)
+	lastAccess := now.Add(-91 * 24 * time.Hour)
+	share := &Share{
+		Path:         "/docs/report.pdf",
+		Type:         ShareTypeFile,
+		CreatedAt:    now.Add(-100 * 24 * time.Hour),
+		ExpiresAt:    &expiresAt,
+		PasswordHash: "configured",
+		Enabled:      true,
+		MaxAccess:    10,
+		LastAccess:   &lastAccess,
+	}
+
+	risk := share.Risk(now)
+	if risk.Level != ShareRiskLevelLow || !shareRiskHasCode(risk, "stale_enabled") || !shareRiskHasCode(risk, "expiring_soon") {
+		t.Fatalf("expected stale low risk, got %+v", risk)
+	}
+}
+
+func shareRiskHasCode(risk ShareRisk, code string) bool {
+	for _, reason := range risk.Reasons {
+		if reason.Code == code {
+			return true
+		}
+	}
+	return false
+}
+
 func TestShareStore_Access(t *testing.T) {
 	tempDir := t.TempDir()
 	storePath := filepath.Join(tempDir, "shares.json")

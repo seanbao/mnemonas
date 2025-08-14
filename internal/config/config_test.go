@@ -85,6 +85,12 @@ func TestDefault(t *testing.T) {
 	if cfg.Share.StoreFile != filepath.Join(internalRoot, "shares.json") {
 		t.Errorf("Default share store = %s, want %s", cfg.Share.StoreFile, filepath.Join(internalRoot, "shares.json"))
 	}
+	if cfg.Share.DefaultExpiresIn != 7*24*time.Hour {
+		t.Errorf("Default share expiry = %s, want 168h", cfg.Share.DefaultExpiresIn)
+	}
+	if cfg.Share.DefaultMaxAccess != 0 {
+		t.Errorf("Default share max access = %d, want 0", cfg.Share.DefaultMaxAccess)
+	}
 	if cfg.Favorites.StoreFile != filepath.Join(internalRoot, "favorites.json") {
 		t.Errorf("Default favorites store = %s, want %s", cfg.Favorites.StoreFile, filepath.Join(internalRoot, "favorites.json"))
 	}
@@ -405,6 +411,66 @@ func TestConfig_Validate(t *testing.T) {
 		{
 			name:    "Invalid share base URL relative",
 			modify:  func(c *Config) { c.Share.BaseURL = "/s/base" },
+			wantErr: true,
+		},
+		{
+			name:    "Invalid negative share default expiry",
+			modify:  func(c *Config) { c.Share.DefaultExpiresIn = -time.Hour },
+			wantErr: true,
+		},
+		{
+			name:    "Invalid negative share default max access",
+			modify:  func(c *Config) { c.Share.DefaultMaxAccess = -1 },
+			wantErr: true,
+		},
+		{
+			name: "Valid share policy rule",
+			modify: func(c *Config) {
+				c.Share.PolicyRules = []SharePolicyRuleConfig{{
+					Path:            "/Family",
+					RequirePassword: true,
+					MaxExpiresIn:    24 * time.Hour,
+					MaxAccess:       10,
+				}}
+			},
+			wantErr: false,
+		},
+		{
+			name: "Invalid share policy relative path",
+			modify: func(c *Config) {
+				c.Share.PolicyRules = []SharePolicyRuleConfig{{Path: "Family", RequirePassword: true}}
+			},
+			wantErr: true,
+		},
+		{
+			name: "Invalid share policy duplicate path",
+			modify: func(c *Config) {
+				c.Share.PolicyRules = []SharePolicyRuleConfig{
+					{Path: "/Family", RequirePassword: true},
+					{Path: "/Family", MaxAccess: 10},
+				}
+			},
+			wantErr: true,
+		},
+		{
+			name: "Invalid share policy negative max expiry",
+			modify: func(c *Config) {
+				c.Share.PolicyRules = []SharePolicyRuleConfig{{Path: "/Family", MaxExpiresIn: -time.Hour}}
+			},
+			wantErr: true,
+		},
+		{
+			name: "Invalid share policy negative max access",
+			modify: func(c *Config) {
+				c.Share.PolicyRules = []SharePolicyRuleConfig{{Path: "/Family", MaxAccess: -1}}
+			},
+			wantErr: true,
+		},
+		{
+			name: "Invalid empty share policy constraint",
+			modify: func(c *Config) {
+				c.Share.PolicyRules = []SharePolicyRuleConfig{{Path: "/Family"}}
+			},
 			wantErr: true,
 		},
 		{
@@ -1486,6 +1552,45 @@ smtp_to = [" admin@example.com ", " ops@example.com "]
 	}
 	if got := strings.Join(cfg.Alerts.SMTPTo, ","); got != "admin@example.com,ops@example.com" {
 		t.Fatalf("alerts SMTP recipients = %q, want trimmed recipients", got)
+	}
+}
+
+func TestLoad_NormalizesSharePolicyRules(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.toml")
+
+	content := []byte(`
+[share]
+
+[[share.policy_rules]]
+path = " /Family/Photos/ "
+require_password = true
+max_expires_in = "24h"
+max_access = 12
+`)
+	if err := os.WriteFile(configPath, content, 0644); err != nil {
+		t.Fatalf("failed to write config: %v", err)
+	}
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if len(cfg.Share.PolicyRules) != 1 {
+		t.Fatalf("share policy rules = %d, want 1", len(cfg.Share.PolicyRules))
+	}
+	rule := cfg.Share.PolicyRules[0]
+	if rule.Path != "/Family/Photos" {
+		t.Fatalf("policy rule path = %q, want clean path", rule.Path)
+	}
+	if !rule.RequirePassword {
+		t.Fatal("policy rule require_password = false, want true")
+	}
+	if rule.MaxExpiresIn != 24*time.Hour {
+		t.Fatalf("policy rule max expiry = %s, want 24h", rule.MaxExpiresIn)
+	}
+	if rule.MaxAccess != 12 {
+		t.Fatalf("policy rule max access = %d, want 12", rule.MaxAccess)
 	}
 }
 

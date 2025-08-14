@@ -279,9 +279,20 @@ type AuthConfig struct {
 
 // ShareConfig holds file sharing configuration
 type ShareConfig struct {
-	Enabled   bool   `toml:"enabled"`    // Enable file sharing
-	StoreFile string `toml:"store_file"` // Path to shares.json
-	BaseURL   string `toml:"base_url"`   // Base URL for share links (optional)
+	Enabled          bool                    `toml:"enabled"`            // Enable file sharing
+	StoreFile        string                  `toml:"store_file"`         // Path to shares.json
+	BaseURL          string                  `toml:"base_url"`           // Base URL for share links (optional)
+	DefaultExpiresIn time.Duration           `toml:"default_expires_in"` // Default expiry for newly-created shares
+	DefaultMaxAccess int64                   `toml:"default_max_access"` // Default max access count for newly-created shares
+	PolicyRules      []SharePolicyRuleConfig `toml:"policy_rules"`       // Path-scoped sharing constraints
+}
+
+// SharePolicyRuleConfig applies stricter share defaults under a MnemoNAS path.
+type SharePolicyRuleConfig struct {
+	Path            string        `toml:"path" json:"path"`
+	RequirePassword bool          `toml:"require_password" json:"require_password,omitempty"`
+	MaxExpiresIn    time.Duration `toml:"max_expires_in" json:"max_expires_in,omitempty"`
+	MaxAccess       int64         `toml:"max_access" json:"max_access,omitempty"`
 }
 
 // FavoritesConfig holds favorites configuration
@@ -445,8 +456,9 @@ func Default() *Config {
 			UsersFile:       filepath.Join(storageRoot, ".mnemonas", "users.json"),
 		},
 		Share: ShareConfig{
-			Enabled:   false, // disabled by default
-			StoreFile: filepath.Join(storageRoot, ".mnemonas", "shares.json"),
+			Enabled:          false, // disabled by default
+			StoreFile:        filepath.Join(storageRoot, ".mnemonas", "shares.json"),
+			DefaultExpiresIn: 7 * 24 * time.Hour,
 		},
 		Favorites: FavoritesConfig{
 			Enabled:   true, // enabled by default
@@ -753,6 +765,7 @@ func Load(path string) (*Config, error) {
 	cfg.Storage.DirectoryAccessRules = NormalizeDirectoryAccessRules(cfg.Storage.DirectoryAccessRules)
 	cfg.WebDAV.Prefix = NormalizeWebDAVPrefix(cfg.WebDAV.Prefix)
 	cfg.Share.BaseURL = strings.TrimSpace(cfg.Share.BaseURL)
+	cfg.Share.PolicyRules = NormalizeSharePolicyRules(cfg.Share.PolicyRules)
 	cfg.Alerts.WebhookURL = strings.TrimSpace(cfg.Alerts.WebhookURL)
 	cfg.Alerts.WebhookMethod = strings.ToUpper(strings.TrimSpace(cfg.Alerts.WebhookMethod))
 	cfg.Alerts.TelegramBotToken = strings.TrimSpace(cfg.Alerts.TelegramBotToken)
@@ -815,6 +828,24 @@ func NormalizeDirectoryAccessRules(rules []DirectoryAccessRuleConfig) []Director
 	return normalized
 }
 
+// NormalizeSharePolicyRules returns a copy with trimmed, clean MnemoNAS paths.
+func NormalizeSharePolicyRules(rules []SharePolicyRuleConfig) []SharePolicyRuleConfig {
+	if len(rules) == 0 {
+		return nil
+	}
+
+	normalized := make([]SharePolicyRuleConfig, 0, len(rules))
+	for _, rule := range rules {
+		copied := rule
+		copied.Path = strings.TrimSpace(copied.Path)
+		if copied.Path != "" && strings.HasPrefix(copied.Path, "/") {
+			copied.Path = urlpath.Clean(copied.Path)
+		}
+		normalized = append(normalized, copied)
+	}
+	return normalized
+}
+
 func normalizeAccessRulePrincipalList(values []string) []string {
 	return normalizeUniqueLowercaseStrings(values)
 }
@@ -862,6 +893,9 @@ func normalizeDurationFields(data []byte) ([]byte, error) {
 		}
 	}
 	if err := normalizeBackupJobDurationFields(raw); err != nil {
+		return nil, err
+	}
+	if err := normalizeSharePolicyRuleDurationFields(raw); err != nil {
 		return nil, err
 	}
 
@@ -957,6 +991,45 @@ func normalizeBackupJobDurationField(job map[string]any, index int, field string
 		return fmt.Errorf("invalid backup.jobs[%d].%s duration %q: %w", index, field, durationText, err)
 	}
 	job[field] = int64(parsedDuration)
+	return nil
+}
+
+func normalizeSharePolicyRuleDurationFields(raw map[string]any) error {
+	shareValue, ok := raw["share"]
+	if !ok {
+		return nil
+	}
+	shareMap, ok := shareValue.(map[string]any)
+	if !ok {
+		return errors.New("invalid config structure at share")
+	}
+	rulesValue, ok := shareMap["policy_rules"]
+	if !ok {
+		return nil
+	}
+	rules, ok := rulesValue.([]any)
+	if !ok {
+		return errors.New("invalid config structure at share.policy_rules")
+	}
+	for i, ruleValue := range rules {
+		ruleMap, ok := ruleValue.(map[string]any)
+		if !ok {
+			return fmt.Errorf("invalid config structure at share.policy_rules[%d]", i)
+		}
+		value, ok := ruleMap["max_expires_in"]
+		if !ok {
+			continue
+		}
+		durationText, ok := value.(string)
+		if !ok {
+			continue
+		}
+		parsedDuration, err := time.ParseDuration(durationText)
+		if err != nil {
+			return fmt.Errorf("invalid share.policy_rules[%d].max_expires_in duration %q: %w", i, durationText, err)
+		}
+		ruleMap["max_expires_in"] = int64(parsedDuration)
+	}
 	return nil
 }
 
@@ -1507,6 +1580,15 @@ func (c *Config) Validate() error {
 	if err := validateOptionalHTTPURL(c.Share.BaseURL, "share.base_url"); err != nil {
 		errs = append(errs, err)
 	}
+	if c.Share.DefaultExpiresIn < 0 {
+		errs = append(errs, errors.New("share.default_expires_in cannot be negative"))
+	}
+	if c.Share.DefaultMaxAccess < 0 {
+		errs = append(errs, errors.New("share.default_max_access cannot be negative"))
+	}
+	if err := validateSharePolicyRules(c.Share.PolicyRules); err != nil {
+		errs = append(errs, err)
+	}
 
 	if err := validateTCPAddress(c.DataPlane.GRPCAddress, "dataplane.grpc_address"); err != nil {
 		errs = append(errs, err)
@@ -1856,6 +1938,33 @@ func validateDirectoryAccessRules(rules []DirectoryAccessRuleConfig) error {
 		errs = append(errs, validateAccessRulePrincipals(rule.WriteGroups, fieldPrefix+".write_groups")...)
 		errs = append(errs, validateAccessRuleRoles(rule.ReadRoles, fieldPrefix+".read_roles")...)
 		errs = append(errs, validateAccessRuleRoles(rule.WriteRoles, fieldPrefix+".write_roles")...)
+	}
+	return errors.Join(errs...)
+}
+
+func validateSharePolicyRules(rules []SharePolicyRuleConfig) error {
+	var errs []error
+	seen := map[string]struct{}{}
+	for i, rule := range rules {
+		fieldPrefix := fmt.Sprintf("share.policy_rules[%d]", i)
+		if err := validateDirectoryQuotaPath(rule.Path, fieldPrefix+".path"); err != nil {
+			errs = append(errs, err)
+		}
+		if rule.Path != "" {
+			if _, ok := seen[rule.Path]; ok {
+				errs = append(errs, fmt.Errorf("duplicate share policy rule path: %q", rule.Path))
+			}
+			seen[rule.Path] = struct{}{}
+		}
+		if rule.MaxExpiresIn < 0 {
+			errs = append(errs, fmt.Errorf("%s.max_expires_in cannot be negative", fieldPrefix))
+		}
+		if rule.MaxAccess < 0 {
+			errs = append(errs, fmt.Errorf("%s.max_access cannot be negative", fieldPrefix))
+		}
+		if !rule.RequirePassword && rule.MaxExpiresIn == 0 && rule.MaxAccess == 0 {
+			errs = append(errs, fmt.Errorf("%s must set at least one constraint", fieldPrefix))
+		}
 	}
 	return errors.Join(errs...)
 }

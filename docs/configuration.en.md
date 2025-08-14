@@ -94,6 +94,14 @@ users_file = ""
 enabled = false
 store_file = ""
 base_url = ""
+default_expires_in = "168h"
+default_max_access = 0
+
+[[share.policy_rules]]
+path = "/Family"
+require_password = true
+max_expires_in = "24h"
+max_access = 20
 
 [favorites]
 enabled = true
@@ -364,8 +372,27 @@ The file is removed after first successful login for that administrator.
 | `enabled` | bool | `false` | Enable share links |
 | `store_file` | string | under `storage.root/.mnemonas` | Share metadata file |
 | `base_url` | string | `""` | Base URL used when returning share URLs; non-empty values must be absolute `http` or `https` URLs |
+| `default_expires_in` | duration | `168h` | Default expiration for newly-created shares; `0` or empty means no default expiration |
+| `default_max_access` | int | `0` | Default access-count limit for newly-created shares; `0` means unlimited |
+| `[[share.policy_rules]]` | array | `[]` | Stricter share constraints for a MnemoNAS path; the most specific matching path wins |
 
-`base_url` affects the URL returned by the API. It does not change the share ID itself. Empty values return relative `/s/{id}` URLs.
+Example:
+
+```toml
+[share]
+enabled = true
+base_url = "https://nas.example.com"
+default_expires_in = "168h"
+default_max_access = 0
+
+[[share.policy_rules]]
+path = "/Family"
+require_password = true
+max_expires_in = "24h"
+max_access = 20
+```
+
+`base_url` affects the URL returned by the API. It does not change the share ID itself. Empty values return relative `/s/{id}` URLs. Default expiration and access-count limits affect only future shares; explicit `expires_in` or `max_access` values in a create request take precedence. Policy rules can set `require_password`, `max_expires_in`, and `max_access`. When a rule matches, passwordless requests are rejected if required, and expiration or access-count values above the configured limits are capped.
 
 ## `[security]`
 

@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import {
   Card,
   CardBody,
@@ -116,10 +116,37 @@ function getMissingShareToast(): {
   }
 }
 
+function isRiskyShare(share: Share): boolean {
+  return share.enabled && !!share.risk && share.risk.level !== 'none'
+}
+
+function isHighRiskShare(share: Share): boolean {
+  return share.enabled && share.risk?.level === 'high'
+}
+
+function shareHasRiskCode(share: Share, code: string): boolean {
+  return share.enabled && (share.risk?.reasons?.some(reason => !reason.resolved && reason.code === code) ?? false)
+}
+
+function getRiskPresentation(level?: string): { label: string; color: 'default' | 'warning' | 'danger' | 'primary' } | null {
+  switch (level) {
+  case 'high':
+    return { label: '高风险', color: 'danger' }
+  case 'medium':
+    return { label: '需关注', color: 'warning' }
+  case 'low':
+    return { label: '低风险', color: 'primary' }
+  default:
+    return null
+  }
+}
+
 interface ShareManagerProps {
   showAllShares?: boolean
   featureEnabled?: boolean
 }
+
+type ShareReviewFilter = 'all' | 'review' | 'expiring' | 'passwordless' | 'broad'
 
 export function ShareManager({ showAllShares = false, featureEnabled = true }: ShareManagerProps) {
   const [shares, setShares] = useState<Share[]>([])
@@ -127,6 +154,8 @@ export function ShareManager({ showAllShares = false, featureEnabled = true }: S
   const [loadError, setLoadError] = useState<unknown | null>(null)
   const [deleteTarget, setDeleteTarget] = useState<Share | null>(null)
   const [isDeleting, setIsDeleting] = useState(false)
+  const [reviewFilter, setReviewFilter] = useState<ShareReviewFilter>('all')
+  const [isDisablingHighRisk, setIsDisablingHighRisk] = useState(false)
   const sharesRef = useRef<Share[]>([])
   const loadRequestRef = useRef(0)
 
@@ -195,6 +224,31 @@ export function ShareManager({ showAllShares = false, featureEnabled = true }: S
     void loadSharesRef.current()
   }, [featureEnabled])
 
+  const riskyShares = useMemo(() => shares.filter(isRiskyShare), [shares])
+  const highRiskShares = useMemo(() => shares.filter(isHighRiskShare), [shares])
+  const expiringSoonShares = useMemo(() => shares.filter(share => shareHasRiskCode(share, 'expiring_soon')), [shares])
+  const passwordlessShares = useMemo(() => shares.filter(share => shareHasRiskCode(share, 'no_password')), [shares])
+  const broadFolderShares = useMemo(() => shares.filter(share => (
+    shareHasRiskCode(share, 'root_folder') || shareHasRiskCode(share, 'broad_folder')
+  )), [shares])
+  const staleShares = useMemo(() => shares.filter(share => (
+    shareHasRiskCode(share, 'unused_enabled') || shareHasRiskCode(share, 'stale_enabled')
+  )), [shares])
+  const visibleShares = useMemo(() => {
+    switch (reviewFilter) {
+    case 'review':
+      return riskyShares
+    case 'expiring':
+      return expiringSoonShares
+    case 'passwordless':
+      return passwordlessShares
+    case 'broad':
+      return broadFolderShares
+    default:
+      return shares
+    }
+  }, [broadFolderShares, expiringSoonShares, passwordlessShares, reviewFilter, riskyShares, shares])
+
   if (!featureEnabled) {
     return (
       <EmptyState
@@ -238,6 +292,51 @@ export function ShareManager({ showAllShares = false, featureEnabled = true }: S
         unavailable: '分享操作暂不可用',
         failure: '操作失败',
       }))
+    }
+  }
+
+  const handleDisableHighRisk = async () => {
+    const targets = highRiskShares
+    if (targets.length === 0 || isDisablingHighRisk) {
+      return
+    }
+
+    setIsDisablingHighRisk(true)
+    try {
+      const results = await Promise.allSettled(targets.map(target => updateShare(target.id, { enabled: false })))
+      const disabledIds = new Set<string>()
+      let firstFailure: unknown | null = null
+
+      results.forEach((result, index) => {
+        if (result.status === 'fulfilled') {
+          disabledIds.add(targets[index].id)
+          return
+        }
+        if (firstFailure === null) {
+          firstFailure = result.reason
+        }
+      })
+
+      if (disabledIds.size > 0) {
+        setShares(prev => prev.map(s => (
+          disabledIds.has(s.id)
+            ? { ...s, enabled: false, risk: { level: 'none' } }
+            : s
+        )))
+        addToast({
+          title: `已停用 ${disabledIds.size} 个高风险分享`,
+          color: 'success',
+        })
+      }
+
+      if (firstFailure !== null) {
+        addToast(getShareActionErrorToast(firstFailure, {
+          unavailable: '分享操作暂不可用',
+          failure: '部分分享停用失败',
+        }))
+      }
+    } finally {
+      setIsDisablingHighRisk(false)
     }
   }
 
@@ -344,34 +443,120 @@ export function ShareManager({ showAllShares = false, featureEnabled = true }: S
   return (
     <div className="space-y-4">
       {/* Header */}
-      <div className="flex min-w-0 items-center justify-between gap-3">
-        <h2 className="text-lg font-semibold text-foreground">
-          我的分享 ({shares.length})
-        </h2>
-        <Button
-          isIconOnly
-          variant="flat"
-          size="sm"
-          onPress={loadShares}
-          aria-label="刷新分享列表"
-          className="rounded-lg"
-        >
-          <RefreshCw size={16} />
-        </Button>
+      <div className="flex min-w-0 flex-wrap items-center justify-between gap-3">
+        <div className="flex min-w-0 flex-wrap items-center gap-2">
+          <h2 className="text-lg font-semibold text-foreground">
+            我的分享 ({shares.length})
+          </h2>
+          {riskyShares.length > 0 && (
+            <Chip size="sm" color="warning" variant="flat">
+              风险 {riskyShares.length}
+            </Chip>
+          )}
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <Button
+            variant={reviewFilter === 'all' ? 'solid' : 'flat'}
+            size="sm"
+            onPress={() => setReviewFilter('all')}
+            className="rounded-lg"
+          >
+            全部
+          </Button>
+          <Button
+            variant={reviewFilter === 'review' ? 'solid' : 'flat'}
+            size="sm"
+            onPress={() => setReviewFilter('review')}
+            className="rounded-lg"
+            isDisabled={riskyShares.length === 0}
+          >
+            需复核 ({riskyShares.length})
+          </Button>
+          <Button
+            variant={reviewFilter === 'expiring' ? 'solid' : 'flat'}
+            size="sm"
+            onPress={() => setReviewFilter('expiring')}
+            className="rounded-lg"
+            isDisabled={expiringSoonShares.length === 0}
+          >
+            即将到期 ({expiringSoonShares.length})
+          </Button>
+          <Button
+            variant={reviewFilter === 'passwordless' ? 'solid' : 'flat'}
+            size="sm"
+            onPress={() => setReviewFilter('passwordless')}
+            className="rounded-lg"
+            isDisabled={passwordlessShares.length === 0}
+          >
+            无密码 ({passwordlessShares.length})
+          </Button>
+          <Button
+            variant={reviewFilter === 'broad' ? 'solid' : 'flat'}
+            size="sm"
+            onPress={() => setReviewFilter('broad')}
+            className="rounded-lg"
+            isDisabled={broadFolderShares.length === 0}
+          >
+            覆盖较大 ({broadFolderShares.length})
+          </Button>
+          {highRiskShares.length > 0 && (
+            <Button
+              color="danger"
+              variant="flat"
+              size="sm"
+              isLoading={isDisablingHighRisk}
+              onPress={handleDisableHighRisk}
+              className="rounded-lg"
+            >
+              停用高风险 ({highRiskShares.length})
+            </Button>
+          )}
+          <Button
+            isIconOnly
+            variant="flat"
+            size="sm"
+            onPress={loadShares}
+            aria-label="刷新分享列表"
+            className="rounded-lg"
+          >
+            <RefreshCw size={16} />
+          </Button>
+        </div>
       </div>
 
       {/* Share list */}
       <div className="space-y-3">
-        {shares.map((share) => (
-          <ShareItem
-            key={share.id}
-            share={share}
-            onCopy={() => handleCopy(share)}
-            onToggle={() => handleToggle(share)}
-            onDelete={() => setDeleteTarget(share)}
+        {visibleShares.length === 0 ? (
+          <EmptyState
+            icon={AlertCircle}
+            title="暂无符合条件的分享"
+            description="当前筛选条件下没有需要处理的分享链接"
+            className="py-10"
           />
-        ))}
+        ) : (
+          visibleShares.map((share) => (
+            <ShareItem
+              key={share.id}
+              share={share}
+              onCopy={() => handleCopy(share)}
+              onToggle={() => handleToggle(share)}
+              onDelete={() => setDeleteTarget(share)}
+            />
+          ))
+        )}
       </div>
+
+      {(riskyShares.length > 0 || expiringSoonShares.length > 0 || staleShares.length > 0) && (
+        <div className="rounded-lg border border-divider bg-content1 px-4 py-3 text-sm text-default-600">
+          <div className="flex flex-wrap items-center gap-x-5 gap-y-2">
+            <span>复核：{riskyShares.length}</span>
+            <span>即将到期：{expiringSoonShares.length}</span>
+            <span>无密码：{passwordlessShares.length}</span>
+            <span>覆盖较大：{broadFolderShares.length}</span>
+            <span>长期未访问：{staleShares.length}</span>
+          </div>
+        </div>
+      )}
 
       {/* Delete confirmation modal */}
       <Modal 
@@ -441,6 +626,8 @@ interface ShareItemProps {
 function ShareItem({ share, onCopy, onToggle, onDelete }: ShareItemProps) {
   const fileName = share.path.split('/').pop() || share.path
   const isExpired = share.expires_at && new Date(share.expires_at) < new Date()
+  const riskPresentation = getRiskPresentation(share.risk?.level)
+  const riskReasons = share.risk?.reasons?.filter(reason => !reason.resolved) ?? []
 
   return (
     <Card className="card-meridian">
@@ -464,6 +651,11 @@ function ShareItem({ share, onCopy, onToggle, onDelete }: ShareItemProps) {
               )}
               {isExpired && (
                 <Chip size="sm" color="danger" variant="flat">已过期</Chip>
+              )}
+              {riskPresentation && (
+                <Chip size="sm" color={riskPresentation.color} variant="flat">
+                  {riskPresentation.label}
+                </Chip>
               )}
             </div>
             
@@ -491,6 +683,20 @@ function ShareItem({ share, onCopy, onToggle, onDelete }: ShareItemProps) {
                 </span>
               </div>
             </div>
+
+            {riskReasons.length > 0 && (
+              <div className="mt-3 rounded-lg border border-warning/20 bg-warning/10 px-3 py-2 text-xs text-default-700">
+                <div className="mb-1 flex items-center gap-1 font-medium text-warning">
+                  <AlertCircle size={12} />
+                  <span>风险提醒</span>
+                </div>
+                <div className="space-y-1">
+                  {riskReasons.slice(0, 3).map(reason => (
+                    <div key={reason.code}>{reason.message}</div>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
 
           {/* Actions */}
