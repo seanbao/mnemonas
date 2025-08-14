@@ -2,23 +2,23 @@ import { test, expect } from '@playwright/test'
 import { ensureAuthenticatedAt } from './helpers/auth-check'
 
 /**
- * 存储管理页面 E2E 测试
+ * 空间与存储页面 E2E 测试
  * 认证状态由 auth.setup.ts 通过 storageState 自动注入
  * 如果认证启用但登录失败，测试会被跳过
  */
 
-test.describe('存储管理页面', () => {
+test.describe('空间与存储页面', () => {
   test.beforeEach(async ({ page }) => {
     await ensureAuthenticatedAt(page, '/storage')
   })
 
-  test('应显示存储管理页面', async ({ page }) => {
+  test('应显示空间与存储页面', async ({ page }) => {
     await expect(page).not.toHaveURL(/\/login/)
     await expect(page.locator('body')).toBeVisible()
   })
 
-  test('应显示存储管理标题', async ({ page }) => {
-    const title = page.getByText('存储管理').first()
+  test('应显示空间与存储标题', async ({ page }) => {
+    const title = page.getByText('空间与存储').first()
     await expect(title).toBeVisible()
   })
 
@@ -101,7 +101,7 @@ test.describe('维护操作卡片', () => {
   })
 })
 
-test.describe('存储管理刷新功能', () => {
+test.describe('空间与存储刷新功能', () => {
   test('点击刷新按钮应更新数据', async ({ page }) => {
     await ensureAuthenticatedAt(page, '/storage')
 
@@ -109,7 +109,7 @@ test.describe('存储管理刷新功能', () => {
     await expect(refreshBtn).toBeVisible()
     await refreshBtn.click()
 
-    const title = page.getByText('存储管理').first()
+    const title = page.getByText('空间与存储').first()
     await expect(title).toBeVisible()
   })
 })
@@ -123,7 +123,7 @@ test.describe('存储系统说明', () => {
   })
 })
 
-test.describe('存储管理页面响应式', () => {
+test.describe('空间与存储页面响应式', () => {
   test('移动端布局', async ({ page }) => {
     await page.setViewportSize({ width: 375, height: 667 })
     await ensureAuthenticatedAt(page, '/storage')
@@ -131,7 +131,7 @@ test.describe('存储管理页面响应式', () => {
     const body = page.locator('body')
     await expect(body).toBeVisible()
 
-    const title = page.getByText('存储管理').first()
+    const title = page.getByText('空间与存储').first()
     await expect(title).toBeVisible()
   })
 
@@ -139,7 +139,7 @@ test.describe('存储管理页面响应式', () => {
     await page.setViewportSize({ width: 768, height: 1024 })
     await ensureAuthenticatedAt(page, '/storage')
 
-    const title = page.getByText('存储管理').first()
+    const title = page.getByText('空间与存储').first()
     await expect(title).toBeVisible({ timeout: 5000 })
   })
 

@@ -287,29 +287,29 @@ function getUsersActionSuccessToast(
   description?: string
   color: 'success' | 'warning'
 } {
-  const warningDescription = '操作已提交，但用户配置持久化存在告警，请检查系统状态。'
+  const warningDescription = '操作已提交，但用户配置保存存在提醒，请检查设备状态。'
 
   switch (action) {
     case 'create':
       return options?.warning
-        ? { title: '用户已创建，但持久化存在告警', description: warningDescription, color: 'warning' }
+        ? { title: '用户已创建，但保存存在提醒', description: warningDescription, color: 'warning' }
         : { title: '用户创建成功', color: 'success' }
     case 'update':
       return options?.warning
-        ? { title: '用户已更新，但持久化存在告警', description: warningDescription, color: 'warning' }
+        ? { title: '用户已更新，但保存存在提醒', description: warningDescription, color: 'warning' }
         : { title: '用户已更新', color: 'success' }
     case 'delete':
       return options?.warning
-        ? { title: '用户已删除，但持久化存在告警', description: warningDescription, color: 'warning' }
+        ? { title: '用户已删除，但保存存在提醒', description: warningDescription, color: 'warning' }
         : { title: '用户已删除', color: 'success' }
     case 'reset-password':
       return options?.warning
-        ? { title: '密码已重置，但持久化存在告警', description: warningDescription, color: 'warning' }
+        ? { title: '密码已重置，但保存存在提醒', description: warningDescription, color: 'warning' }
         : { title: '密码已重置', color: 'success' }
     case 'toggle-status':
       if (options?.warning) {
         return {
-          title: options.disabled ? '用户已禁用，但持久化存在告警' : '用户已启用，但持久化存在告警',
+          title: options.disabled ? '用户已禁用，但保存存在提醒' : '用户已启用，但保存存在提醒',
           description: warningDescription,
           color: 'warning',
         }

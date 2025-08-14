@@ -33,7 +33,7 @@ function getStorageErrorPresentation(error: unknown): { title: string; descripti
   if (error instanceof ApiError && error.isUnavailable) {
     return {
       title: '存储统计暂不可用',
-      description: '存储统计服务当前不可用，请检查系统健康状态或稍后重试。',
+      description: '存储统计服务当前不可用，请检查设备状态或稍后重试。',
     }
   }
 
@@ -222,8 +222,8 @@ export function StoragePage() {
     return (
       <div className="p-4 space-y-6 sm:p-6 lg:p-8">
         <PageHeader
-          title="存储管理"
-          subtitle="原生文件 + CAS 版本历史"
+          title="空间与存储"
+          subtitle="文件占用、版本对象和目录配额"
           icon={HardDrive}
           actions={
             <Button
@@ -320,8 +320,8 @@ export function StoragePage() {
     <div className="p-4 space-y-6 sm:p-6 lg:p-8">
       {/* Header */}
       <PageHeader
-        title="存储管理"
-        subtitle="原生文件 + CAS 版本历史"
+        title="空间与存储"
+        subtitle="文件占用、版本对象和目录配额"
         icon={HardDrive}
         actions={
           <Button
@@ -428,7 +428,7 @@ export function StoragePage() {
               </div>
             ) : directoryQuotas.length === 0 ? (
               <div className="rounded-lg border border-divider bg-content1 p-4 text-sm text-default-500">
-                未配置目录配额。可在系统设置的版本保留页添加目录容量限制。
+                未配置目录配额。可在设置的版本保留页添加目录容量限制。
               </div>
             ) : (
               <div className="space-y-3">
@@ -471,10 +471,10 @@ export function StoragePage() {
       {/* Maintenance Actions */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         <MaintenanceCard
-          title="数据巡检 (Scrub)"
-          description="验证所有数据完整性"
+          title="完整性检查"
+          description="确认已存数据仍可正确读取"
           icon={Activity}
-          lastRun="在系统维护中执行"
+          lastRun="在备份与维护中执行"
           estimate="支持随时启动"
           buttonText={isAdmin ? '打开维护工具' : '仅管理员可用'}
           buttonColor="success"
@@ -483,10 +483,10 @@ export function StoragePage() {
         />
         
         <MaintenanceCard
-          title="垃圾回收 (GC)"
-          description="清理无引用的数据块"
+          title="清理历史对象"
+          description="清理不再被引用的版本数据"
           icon={Trash2}
-          lastRun="在系统维护中执行"
+          lastRun="在备份与维护中执行"
           estimate="支持干运行与保护期"
           buttonText={isAdmin ? '打开维护工具' : '仅管理员可用'}
           buttonColor="warning"

@@ -106,7 +106,8 @@ describe('LoginPage', () => {
       expect(screen.getByLabelText(/密码/i, { selector: 'input' })).toBeInTheDocument()
       expect(screen.getByRole('button', { name: /登录/i })).toBeInTheDocument()
       expect(screen.getByText(/支持 Linux 主机、容器和局域网部署/i)).toBeInTheDocument()
-      expect(screen.queryByText(/闲置 Ubuntu 笔记本/i)).not.toBeInTheDocument()
+      const discouragedDeploymentCopy = new RegExp(['闲置', 'Ubuntu', '笔记本'].join(' '), 'i')
+      expect(screen.queryByText(discouragedDeploymentCopy)).not.toBeInTheDocument()
       expect(screen.getByText(/开源自托管文件存储/i)).toBeInTheDocument()
     })
 
@@ -363,7 +364,7 @@ describe('LoginPage', () => {
       await user.click(screen.getByRole('button', { name: /登录/i }))
 
       expect(mockNavigate).toHaveBeenCalledWith('/', { replace: true })
-      expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({ title: '登录成功，但活动日志写入失败', color: 'warning' }))
+      expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({ title: '登录成功，但操作记录写入失败', color: 'warning' }))
     })
   })
 

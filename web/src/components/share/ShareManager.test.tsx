@@ -215,10 +215,10 @@ describe('ShareManager', () => {
 
     await waitFor(() => {
       expect(screen.getByText('风险 1')).toBeInTheDocument()
-      expect(screen.getByText('高风险')).toBeInTheDocument()
+      expect(screen.getByText('需处理')).toBeInTheDocument()
       expect(screen.getByText('未设置密码，拿到链接的人都能访问')).toBeInTheDocument()
       expect(screen.getByRole('button', { name: '需复核 (1)' })).toBeInTheDocument()
-      expect(screen.getByRole('button', { name: '停用高风险 (1)' })).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: '停用需处理 (1)' })).toBeInTheDocument()
     })
   })
 
@@ -369,16 +369,16 @@ describe('ShareManager', () => {
     render(<ShareManager />)
 
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: '停用高风险 (1)' })).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: '停用需处理 (1)' })).toBeInTheDocument()
     })
 
-    await user.click(screen.getByRole('button', { name: '停用高风险 (1)' }))
+    await user.click(screen.getByRole('button', { name: '停用需处理 (1)' }))
 
     await waitFor(() => {
       expect(shareApi.updateShare).toHaveBeenCalledWith('share-1', { enabled: false })
-      expect(mockAddToast).toHaveBeenCalledWith({ title: '已停用 1 个高风险分享', color: 'success' })
+      expect(mockAddToast).toHaveBeenCalledWith({ title: '已停用 1 个需处理分享', color: 'success' })
       expect(screen.getByText('已禁用')).toBeInTheDocument()
-      expect(screen.queryByText('高风险')).not.toBeInTheDocument()
+      expect(screen.queryByText('需处理')).not.toBeInTheDocument()
     })
   })
 
@@ -450,7 +450,7 @@ describe('ShareManager', () => {
 
     await waitFor(() => {
       expect(screen.getByText('分享功能暂不可用')).toBeInTheDocument()
-      expect(screen.getByText('分享服务当前不可用，请检查系统健康状态或稍后重试。')).toBeInTheDocument()
+      expect(screen.getByText('分享服务当前不可用，请检查设备状态或稍后重试。')).toBeInTheDocument()
     })
 
     expect(mockAddToast).not.toHaveBeenCalled()
@@ -599,7 +599,7 @@ describe('ShareManager', () => {
     await waitFor(() => {
       expect(mockAddToast).toHaveBeenCalledWith({
         title: '分享操作暂不可用',
-        description: '分享服务当前不可用，请检查系统健康状态或稍后重试。',
+        description: '分享服务当前不可用，请检查设备状态或稍后重试。',
         color: 'warning',
       })
     })
@@ -755,7 +755,7 @@ describe('ShareManager', () => {
     await waitFor(() => {
       expect(mockAddToast).toHaveBeenCalledWith({
         title: '删除分享暂不可用',
-        description: '分享服务当前不可用，请检查系统健康状态或稍后重试。',
+        description: '分享服务当前不可用，请检查设备状态或稍后重试。',
         color: 'warning',
       })
     })

@@ -136,7 +136,7 @@ sudo firewall-cmd --reload
 推荐操作路径：
 
 1. 在服务器上运行 `sudo mnemonas-public-setup --proxy caddy <domain> <email>` 或 `sudo mnemonas-public-setup --proxy nginx <domain> <email>`，生成并安装反向代理配置。
-2. 登录 Web UI 后打开 `系统设置 -> 常规 -> 公网访问向导`，根据部署方式应用 `server.host`、`trusted_proxy_hops`、分享域名等配置。
+2. 登录 Web UI 后打开 `设置 -> 常规 -> 公网访问向导`，根据部署方式应用 `server.host`、`trusted_proxy_hops`、分享域名等配置。
 3. 在 Web UI 运行“安全自检”，确认认证、HTTPS 请求语义、受信代理、监听地址、WebDAV 认证、分享 Base URL 和初始密码文件状态。
 4. 在服务器上运行 `sudo mnemonas-doctor --public-domain <domain>`，复核公网域名、反向代理和本机端口暴露情况。
 
@@ -286,7 +286,7 @@ curl https://<domain>/dav/
 
 - 当前版本已支持多用户与角色（admin/user/guest）
 - 当前版本已支持用户组和 `storage.directory_access_rules` 目录授权；非管理员默认按账号 `home_dir` 限制访问，命中目录规则时按用户、用户组或角色授权放行
-- 文件、搜索、收藏、分享、回收站、活动日志和 WebDAV `users` 模式使用同一套路径权限判定
+- 文件、搜索、收藏、分享、回收站、最近操作和 WebDAV `users` 模式使用同一套路径权限判定
 - 管理员可为用户设置 `quota_bytes`；非管理员通过 Web/API 上传、复制、回收站恢复，以及 `webdav.auth_type = "users"` 下的 WebDAV PUT/COPY 会按该用户 `home_dir` 的当前用量执行服务端配额限制
 - WebDAV `users` 模式携带应用层用户身份并执行角色、用户组、`home_dir` 和目录授权边界；`basic` 模式是全局服务凭据兼容模式，不携带应用层用户身份
 

@@ -76,7 +76,7 @@ function getVersionsErrorPresentation(error: unknown): { title: string; descript
   if (error instanceof ApiError && error.isUnavailable) {
     return {
       title: '版本历史暂不可用',
-      description: '版本存储当前不可用，请检查系统状态或稍后重试。',
+      description: '版本存储当前不可用，请检查设备状态或稍后重试。',
     }
   }
 
@@ -100,7 +100,7 @@ function getVersionsActionErrorToast(
   if (error instanceof ApiError && error.isUnavailable) {
     return {
       title: titles.unavailable,
-      description: '版本存储当前不可用，请检查系统状态或稍后重试。',
+      description: '版本存储当前不可用，请检查设备状态或稍后重试。',
       color: 'warning',
     }
   }

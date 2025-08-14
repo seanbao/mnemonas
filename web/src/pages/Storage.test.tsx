@@ -104,7 +104,7 @@ describe('StoragePage', () => {
       render(<StoragePage />)
 
       await waitFor(() => {
-        expect(screen.getByText('存储管理')).toBeTruthy()
+        expect(screen.getByText('空间与存储')).toBeTruthy()
       })
     })
 
@@ -112,7 +112,7 @@ describe('StoragePage', () => {
       render(<StoragePage />)
 
       await waitFor(() => {
-        expect(screen.getByText('原生文件 + CAS 版本历史')).toBeTruthy()
+        expect(screen.getByText('文件占用、版本对象和目录配额')).toBeTruthy()
       })
     })
 
@@ -259,7 +259,7 @@ describe('StoragePage', () => {
 
       await waitFor(() => {
         expect(screen.getByText('存储空间偏紧')).toBeTruthy()
-        expect(screen.getByText(/建议开启告警/)).toBeTruthy()
+        expect(screen.getByText(/建议开启提醒/)).toBeTruthy()
       })
     })
   })
@@ -326,7 +326,7 @@ describe('StoragePage', () => {
 
       await waitFor(() => {
         expect(screen.getByText('目录配额')).toBeTruthy()
-        expect(screen.getByText('未配置目录配额。可在系统设置的版本保留页添加目录容量限制。')).toBeTruthy()
+        expect(screen.getByText('未配置目录配额。可在设置的版本保留页添加目录容量限制。')).toBeTruthy()
       })
     })
 
@@ -409,8 +409,8 @@ describe('StoragePage', () => {
       render(<StoragePage />)
 
       await waitFor(() => {
-        expect(screen.getByText('数据巡检 (Scrub)')).toBeTruthy()
-        expect(screen.getByText('验证所有数据完整性')).toBeTruthy()
+        expect(screen.getByText('完整性检查')).toBeTruthy()
+        expect(screen.getByText('确认已存数据仍可正确读取')).toBeTruthy()
       })
     })
 
@@ -418,8 +418,8 @@ describe('StoragePage', () => {
       render(<StoragePage />)
 
       await waitFor(() => {
-        expect(screen.getByText('垃圾回收 (GC)')).toBeTruthy()
-        expect(screen.getByText('清理无引用的数据块')).toBeTruthy()
+        expect(screen.getByText('清理历史对象')).toBeTruthy()
+        expect(screen.getByText('清理不再被引用的版本数据')).toBeTruthy()
       })
     })
 
@@ -443,7 +443,7 @@ describe('StoragePage', () => {
       render(<StoragePage />)
 
       await waitFor(() => {
-        expect(screen.getAllByText('在系统维护中执行').length).toBeGreaterThan(0)
+        expect(screen.getAllByText('在备份与维护中执行').length).toBeGreaterThan(0)
       })
     })
 
@@ -490,7 +490,7 @@ describe('StoragePage', () => {
 
       await waitFor(() => {
         expect(screen.getByText('存储统计暂不可用')).toBeTruthy()
-        expect(screen.getByText('存储统计服务当前不可用，请检查系统健康状态或稍后重试。')).toBeTruthy()
+        expect(screen.getByText('存储统计服务当前不可用，请检查设备状态或稍后重试。')).toBeTruthy()
         expect(screen.getByRole('button', { name: '重新加载' })).toBeTruthy()
       })
     })
@@ -540,7 +540,7 @@ describe('StoragePage', () => {
       await waitFor(() => {
         expect(mockAddToast).toHaveBeenCalledWith({
           title: '存储统计暂不可用',
-          description: '存储统计服务当前不可用，请检查系统健康状态或稍后重试。',
+          description: '存储统计服务当前不可用，请检查设备状态或稍后重试。',
           color: 'warning',
         })
       })
@@ -573,7 +573,7 @@ describe('StoragePage', () => {
       render(<StoragePage />)
 
       await waitFor(() => {
-        expect(screen.getByText('存储管理')).toBeTruthy()
+        expect(screen.getByText('空间与存储')).toBeTruthy()
         expect(screen.getAllByText('统计不可用').length).toBeGreaterThan(0)
         expect(screen.getAllByText('--').length).toBeGreaterThan(0)
       })

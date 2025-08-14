@@ -150,7 +150,7 @@ describe('Header', () => {
   it('navigates admins to the alerts settings entry from the bell button', () => {
     render(<Header />)
 
-    screen.getByLabelText('系统提醒设置').click()
+    screen.getByLabelText('提醒设置').click()
 
     expect(navigateMock).toHaveBeenCalledWith('/settings?tab=advanced')
   })
@@ -159,7 +159,7 @@ describe('Header', () => {
     useIsAdminMock.mockReturnValue(false)
     render(<Header />)
 
-    screen.getByLabelText('系统提醒设置').click()
+    screen.getByLabelText('提醒设置').click()
 
     expect(mockAddToast).toHaveBeenCalledWith({
       title: '系统提醒设置仅管理员可用',
@@ -238,7 +238,7 @@ describe('Header', () => {
 
     await waitFor(() => {
       expect(mockAddToast).toHaveBeenCalledWith({
-        title: '已退出登录，但活动日志写入失败',
+        title: '已退出登录，但操作记录写入失败',
         color: 'warning',
       })
     })

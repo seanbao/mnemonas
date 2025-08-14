@@ -196,7 +196,7 @@ mnemonas/
 │   │   │   ├── Files.tsx        # 文件管理器
 │   │   │   ├── Album.tsx        # 相册
 │   │   │   ├── Versions.tsx     # 版本历史
-│   │   │   ├── Storage.tsx      # 存储管理
+│   │   │   ├── Storage.tsx      # 空间与存储
 │   │   │   └── Settings.tsx     # 设置
 │   │   ├── stores/              # Zustand 状态管理
 │   │   │   ├── theme.ts         # 主题状态

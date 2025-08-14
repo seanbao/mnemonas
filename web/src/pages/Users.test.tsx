@@ -554,8 +554,8 @@ describe('UsersPage', () => {
 
       await waitFor(() => {
         expect(mockAddToast).toHaveBeenCalledWith({
-          title: '用户已创建，但持久化存在告警',
-          description: '操作已提交，但用户配置持久化存在告警，请检查系统状态。',
+          title: '用户已创建，但保存存在提醒',
+          description: '操作已提交，但用户配置保存存在提醒，请检查设备状态。',
           color: 'warning',
         })
       })
@@ -810,8 +810,8 @@ describe('UsersPage', () => {
 
       await waitFor(() => {
         expect(mockAddToast).toHaveBeenCalledWith({
-          title: '用户已删除，但持久化存在告警',
-          description: '操作已提交，但用户配置持久化存在告警，请检查系统状态。',
+          title: '用户已删除，但保存存在提醒',
+          description: '操作已提交，但用户配置保存存在提醒，请检查设备状态。',
           color: 'warning',
         })
       })
@@ -988,8 +988,8 @@ describe('UsersPage', () => {
 
       await waitFor(() => {
         expect(mockAddToast).toHaveBeenCalledWith({
-          title: '密码已重置，但持久化存在告警',
-          description: '操作已提交，但用户配置持久化存在告警，请检查系统状态。',
+          title: '密码已重置，但保存存在提醒',
+          description: '操作已提交，但用户配置保存存在提醒，请检查设备状态。',
           color: 'warning',
         })
       })
@@ -1319,8 +1319,8 @@ describe('UsersPage', () => {
 
       await waitFor(() => {
         expect(mockAddToast).toHaveBeenCalledWith({
-          title: '用户已禁用，但持久化存在告警',
-          description: '操作已提交，但用户配置持久化存在告警，请检查系统状态。',
+          title: '用户已禁用，但保存存在提醒',
+          description: '操作已提交，但用户配置保存存在提醒，请检查设备状态。',
           color: 'warning',
         })
       })

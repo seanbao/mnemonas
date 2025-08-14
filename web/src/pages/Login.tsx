@@ -136,7 +136,7 @@ export function LoginPage() {
       const result = await login(trimmedUsername, password)
       clearError()
       addToast(result.warning
-        ? { title: result.message ?? '登录成功，但活动日志写入失败', color: 'warning' }
+        ? { title: result.message ?? '登录成功，但操作记录写入失败', color: 'warning' }
         : { title: '登录成功', color: 'success' })
       const from = getPostLoginRedirectPath(location.state)
       navigate(from, { replace: true })

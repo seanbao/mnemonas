@@ -758,10 +758,10 @@ describe('FilesPage upload queue', () => {
 
     expect(mockAddToast).toHaveBeenCalledWith({
       title: '文件夹上传暂不可用',
-      description: '文件系统当前不可用，请检查系统健康状态或稍后重试。',
+      description: '文件系统当前不可用，请检查设备状态或稍后重试。',
       color: 'warning',
     })
-    expect(screen.getByText('文件系统当前不可用，请检查系统健康状态或稍后重试。')).toBeTruthy()
+    expect(screen.getByText('文件系统当前不可用，请检查设备状态或稍后重试。')).toBeTruthy()
   })
 
   it('shows a generic failed upload row for unknown upload errors', async () => {

@@ -79,7 +79,7 @@ function getShareActionErrorToast(
     if (error.isUnavailable) {
       return {
         title: titles.unavailable,
-        description: '分享服务当前不可用，请检查系统健康状态或稍后重试。',
+        description: '分享服务当前不可用，请检查设备状态或稍后重试。',
         color: 'warning',
       }
     }
@@ -131,7 +131,7 @@ function shareHasRiskCode(share: Share, code: string): boolean {
 function getRiskPresentation(level?: string): { label: string; color: 'default' | 'warning' | 'danger' | 'primary' } | null {
   switch (level) {
   case 'high':
-    return { label: '高风险', color: 'danger' }
+    return { label: '需处理', color: 'danger' }
   case 'medium':
     return { label: '需关注', color: 'warning' }
   case 'low':
@@ -324,7 +324,7 @@ export function ShareManager({ showAllShares = false, featureEnabled = true }: S
             : s
         )))
         addToast({
-          title: `已停用 ${disabledIds.size} 个高风险分享`,
+          title: `已停用 ${disabledIds.size} 个需处理分享`,
           color: 'success',
         })
       }
@@ -403,7 +403,7 @@ export function ShareManager({ showAllShares = false, featureEnabled = true }: S
         <EmptyState
           icon={AlertCircle}
           title="分享功能暂不可用"
-          description="分享服务当前不可用，请检查系统健康状态或稍后重试。"
+          description="分享服务当前不可用，请检查设备状态或稍后重试。"
           action={
             <Button variant="bordered" className="rounded-lg" onPress={() => loadShares()}>
               重新加载
@@ -508,7 +508,7 @@ export function ShareManager({ showAllShares = false, featureEnabled = true }: S
               onPress={handleDisableHighRisk}
               className="rounded-lg"
             >
-              停用高风险 ({highRiskShares.length})
+              停用需处理 ({highRiskShares.length})
             </Button>
           )}
           <Button

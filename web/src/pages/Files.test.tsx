@@ -1621,7 +1621,7 @@ describe('FilesPage', () => {
       await waitFor(() => {
         expect(mockAddToast).toHaveBeenCalledWith({
           title: '批量下载暂不可用',
-          description: '文件系统当前不可用，请检查系统健康状态或稍后重试。',
+          description: '文件系统当前不可用，请检查设备状态或稍后重试。',
           color: 'warning',
         })
       })
@@ -1700,7 +1700,7 @@ describe('FilesPage', () => {
       await waitFor(() => {
         expect(mockAddToast).toHaveBeenCalledWith({
           title: '下载暂不可用',
-          description: '文件系统当前不可用，请检查系统健康状态或稍后重试。',
+          description: '文件系统当前不可用，请检查设备状态或稍后重试。',
           color: 'warning',
         })
       })
@@ -1838,7 +1838,7 @@ describe('FilesPage', () => {
       expect(mockFilesStoreState.clearSelection).not.toHaveBeenCalled()
       expect(mockAddToast).toHaveBeenCalledWith({
         title: '批量删除暂不可用',
-        description: '文件系统当前不可用，请检查系统健康状态或稍后重试。',
+        description: '文件系统当前不可用，请检查设备状态或稍后重试。',
         color: 'warning',
       })
     })
@@ -2034,7 +2034,7 @@ describe('FilesPage', () => {
       await waitFor(() => {
         expect(mockAddToast).toHaveBeenCalledWith({
           title: '刷新暂不可用',
-          description: '文件系统当前不可用，请检查系统健康状态或稍后重试。',
+          description: '文件系统当前不可用，请检查设备状态或稍后重试。',
           color: 'warning',
         })
       })
@@ -2171,7 +2171,7 @@ describe('FilesPage', () => {
       await waitFor(() => {
         expect(mockAddToast).toHaveBeenCalledWith({
           title: '批量复制暂不可用',
-          description: '文件系统当前不可用，请检查系统健康状态或稍后重试。',
+          description: '文件系统当前不可用，请检查设备状态或稍后重试。',
           color: 'warning',
         })
       })
@@ -2702,7 +2702,7 @@ describe('FilesPage', () => {
       await waitFor(() => {
         expect(mockAddToast).toHaveBeenCalledWith({
           title: '收藏功能暂不可用',
-          description: '收藏存储未成功初始化，请检查系统健康状态或稍后重试。',
+          description: '收藏存储未成功初始化，请检查设备状态或稍后重试。',
           color: 'warning',
         })
       })
@@ -2760,7 +2760,7 @@ describe('FilesPage', () => {
 
       await waitFor(() => {
         expect(screen.getByText('当前目录暂不可用')).toBeTruthy()
-        expect(screen.getByText('文件系统当前不可用，请检查系统健康状态或稍后重试。')).toBeTruthy()
+        expect(screen.getByText('文件系统当前不可用，请检查设备状态或稍后重试。')).toBeTruthy()
         expect(screen.getByRole('button', { name: '重新加载' })).toBeTruthy()
       })
     })
@@ -2789,7 +2789,7 @@ describe('FilesPage', () => {
 
     await waitFor(() => {
       expect(screen.getByText('收藏功能暂不可用')).toBeTruthy()
-      expect(screen.getByText('收藏存储未成功初始化，请检查系统健康状态或稍后重试。')).toBeTruthy()
+      expect(screen.getByText('收藏存储未成功初始化，请检查设备状态或稍后重试。')).toBeTruthy()
       expect(screen.queryByText('收藏状态不可用')).toBeNull()
     })
   })
@@ -2879,7 +2879,7 @@ describe('FilesPage', () => {
     await waitFor(() => {
       expect(mockAddToast).toHaveBeenCalledWith({
         title: '收藏功能暂不可用',
-        description: '收藏存储未成功初始化，请检查系统健康状态或稍后重试。',
+        description: '收藏存储未成功初始化，请检查设备状态或稍后重试。',
         color: 'warning',
       })
     })

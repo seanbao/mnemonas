@@ -65,7 +65,7 @@ Authorization: Bearer <access_token>
 
 ### 分享/收藏端点响应
 
-认证后的分享管理端点 `/api/v1/shares` 使用 `success + data (+ message)` 包装；公开分享 API 推荐使用 `/api/v1/public/shares/*`，其成功响应保持原始 JSON 对象或数组，错误响应使用 `success: false` 和结构化 `error` 对象。兼容路径 `/s/*` 继续返回相同的公开分享 JSON / 下载响应，适用于不经过 SPA 的直接调用。
+认证后的分享链接管理端点 `/api/v1/shares` 使用 `success + data (+ message)` 包装；公开分享 API 推荐使用 `/api/v1/public/shares/*`，其成功响应保持原始 JSON 对象或数组，错误响应使用 `success: false` 和结构化 `error` 对象。兼容路径 `/s/*` 继续返回相同的公开分享 JSON / 下载响应，适用于不经过 SPA 的直接调用。
 
 ```json
 {
@@ -100,7 +100,7 @@ Authorization: Bearer <access_token>
 | 429 | 请求过于频繁 / 密码尝试次数过多 |
 | 410 | 资源不可用（过期/禁用/访问上限） |
 | 413 | 文件过大 |
-| 503 | 服务暂不可用（如文件系统、分享服务、活动日志、版本存储未就绪） |
+| 503 | 服务暂不可用（如文件系统、分享服务、最近操作记录、版本存储未就绪） |
 | 507 | 用户容量配额不足 |
 | 500 | 服务器内部错误 |
 
@@ -118,7 +118,7 @@ Authorization: Bearer <access_token>
 - `199 MnemoNAS "delete cleanup incomplete"`
 - `199 MnemoNAS "trash delete cleanup incomplete"`
 
-调用方应优先检查 HTTP `Warning` 响应头，而不是只依赖 JSON body。部分 `/api/v1` 写接口会额外返回 `warning: true` 和 `message`，例如 `resource copied with persistence warning`、`version restored with persistence warning`；但活动日志补写失败等场景可能只有 `Warning` header，body 仍保持原成功结构。
+调用方应优先检查 HTTP `Warning` 响应头，而不是只依赖 JSON body。部分 `/api/v1` 写接口会额外返回 `warning: true` 和 `message`，例如 `resource copied with persistence warning`、`version restored with persistence warning`；但最近操作记录补写失败等场景可能只有 `Warning` header，body 仍保持原成功结构。
 
 ---
 
@@ -169,7 +169,7 @@ X-MnemoNAS-Session-Mode: cookie
 
 **失败行为**:
 - 同一 `username + 客户端地址` 组合连续登录失败达到限制时，返回 `429 Too Many Requests`，错误码为 `LOGIN_RATE_LIMITED`
-- 若已配置告警通道，登录限流会发送限频的 `login_rate_limited` warning 事件，事件只包含用户名和客户端地址，不包含密码或 token
+- 若已配置提醒通道，登录限流会发送限频的 `login_rate_limited` warning 事件，事件只包含用户名和客户端地址，不包含密码或 token
 - `username` 分桶遵循账户名大小写不敏感语义，`handleruser` 与 `HANDLERUSER` 计入同一限流桶
 - 客户端地址默认不信任转发头，始终使用直连来源；只有显式设置 `server.trusted_proxy_hops > 0` 且请求直接来自 loopback 或私有网段代理时，才按 `X-Forwarded-For` 从右侧回溯客户端地址。多跳代理部署需要设置为代理总层数
 
@@ -328,8 +328,8 @@ PUT /api/v1/admin/users/{id}
 ```
 
 - `quota_bytes = 0` 表示不限额；大于 0 时，非管理员用户的 Web/API 上传、复制、回收站恢复，以及 `webdav.auth_type = "users"` 下的 WebDAV PUT/COPY 会按该用户 `home_dir` 的当前逻辑大小执行硬限制。
-- 超出配额返回 `507 Insufficient Storage`，错误码为 `QUOTA_EXCEEDED`，`details` 包含 `used_bytes`、`quota_bytes`、`required_bytes` 和 `available_bytes`。如果已启用告警通道，Web/API 的上传、复制和回收站恢复超限会发送 `quota_exceeded` warning 事件，事件详情包含用户、主目录、操作类型、目标路径和配额字节数。
-- `storage.directory_quotas` 可配置目录级硬限制。命中的 Web/API 上传、复制、移动、回收站恢复、版本恢复，以及 WebDAV PUT/COPY/MOVE 会返回同样的 `QUOTA_EXCEEDED`，并在 `details` 中额外包含 `quota_type="directory"` 和 `quota_path`。Web/API 目录配额拒绝同样会发送 `quota_exceeded` 告警事件。
+- 超出配额返回 `507 Insufficient Storage`，错误码为 `QUOTA_EXCEEDED`，`details` 包含 `used_bytes`、`quota_bytes`、`required_bytes` 和 `available_bytes`。如果已启用提醒通道，Web/API 的上传、复制和回收站恢复超限会发送 `quota_exceeded` warning 事件，事件详情包含用户、主目录、操作类型、目标路径和配额字节数。
+- `storage.directory_quotas` 可配置目录级硬限制。命中的 Web/API 上传、复制、移动、回收站恢复、版本恢复，以及 WebDAV PUT/COPY/MOVE 会返回同样的 `QUOTA_EXCEEDED`，并在 `details` 中额外包含 `quota_type="directory"` 和 `quota_path`。Web/API 目录配额拒绝同样会发送 `quota_exceeded` 提醒事件。
 - `storage.directory_access_rules` 可配置目录读写授权。非管理员访问命中规则时按最具体路径规则判断用户、用户组或角色；写授权同时包含读权限。未命中规则的路径继续按 `home_dir` 边界处理。
 - `webdav.auth_type = "basic"` 仍是全局服务凭据兼容模式，不携带应用层 `home_dir` 用户身份。
 - 不允许把当前登录管理员自身角色改为非管理员，错误码为 `SELF_ROLE_CHANGE`；不允许移除最后一个启用管理员，错误码为 `LAST_ADMIN`。
@@ -403,7 +403,7 @@ GET /health
 ```
 
 **说明**:
-- 当已配置的数据面、缩略图缓存、维护历史、活动日志或收藏存储子系统未能初始化时，`status` 会降级为 `degraded`
+- 当已配置的数据面、缩略图缓存、维护历史、最近操作记录或收藏存储子系统未能初始化时，`status` 会降级为 `degraded`
 
 ### 版本信息
 
@@ -669,10 +669,10 @@ GET /api/v1/diagnostics
 - `filesystem.trash_stats_available` 表示回收站统计是否可用。
 - 当回收站统计暂不可用时，`filesystem.trash_stats_available` 为 `false`，并且 `filesystem.trash_items` 和 `filesystem.trash_size` 会被省略，而不是回填 `0`。
 - `filesystem.disk_stats_available` 表示磁盘容量统计是否可用；不可用时 `filesystem.disk_*` 字段会被省略。可用时会同时包含 `filesystem.disk_filesystem_type` 和 `filesystem.disk_native_data_checksum_support`，便于健康页提示 ZFS/Btrfs 与普通文件系统的差异。
-- `alerts.runtime_available` 表示当前进程是否挂载了告警监控；`alerts.webhook_configured` 只表示是否配置了 Webhook，不会暴露 `webhook_url` 或 `webhook_headers`。
+- `alerts.runtime_available` 表示当前进程是否挂载了提醒监控；`alerts.webhook_configured` 只表示是否配置了 Webhook，不会暴露 `webhook_url` 或 `webhook_headers`。
 - `alerts.telegram_configured` 只表示 Telegram 通知是否具备可用配置，不会暴露 `telegram_bot_token`。
 - `alerts.email_configured` 只表示 SMTP 邮件通知是否具备可用配置，不会暴露 `smtp_password`。
-- `alerts.last_*` 来自上一次告警检查；尚未完成首次检查时会被省略。
+- `alerts.last_*` 来自上一次提醒检查；尚未完成首次检查时会被省略。
 - `maintenance` 是维护任务脱敏摘要；其中 `scrub_schedule_*` 反映 `[maintenance.scrub]` 周期计划，`last_scrub_*` 来自最近一次 Scrub 历史，`scrub_failure_retries` 只在最近一次 Scrub 失败时出现。
 - `disk_health` 是磁盘健康脱敏摘要；完整设备路径、序列号、温度和 SMART 状态通过管理员维护接口 `GET /api/v1/maintenance/disk-health` 获取。
 - `smb` 是 SMB/Samba 预览状态；当前版本不会启动 SMB 监听器，`runtime_available=false` 表示不可挂载，诊断只展示共享数量和配置状态，不暴露凭据文件内容。
@@ -1559,18 +1559,18 @@ PATCH /api/v1/favorites/{path}
 
 ---
 
-## 活动日志
+## 最近操作记录
 
 ### 列出活动
 
 获取用户操作日志。
 
 **说明**:
-- 启用认证时，管理员可查看全量活动日志；普通用户仅返回当前账号自己的活动记录，`user` 查询参数不会越权查看其他账号
-- 系统级事件也会进入活动日志，例如磁盘健康周期检查产生的 `disk_health`
-- 手动数据校验会写入 `scrub` 活动；当 Scrub 失败、发现对象问题或结果持久化不完整时，会通过已配置的 Webhook/Telegram/SMTP 告警通道发送 `scrub_run` 事件。
-- 未配置活动日志时，接口返回空列表
-- 若活动日志已配置但初始化失败或当前不可用，接口返回 `503 Service Unavailable`
+- 启用认证时，管理员可查看全量最近操作记录；普通用户仅返回当前账号自己的活动记录，`user` 查询参数不会越权查看其他账号
+- 系统级事件也会进入最近操作记录，例如磁盘健康周期检查产生的 `disk_health`
+- 手动数据校验会写入 `scrub` 活动；当 Scrub 失败、发现对象问题或结果持久化不完整时，会通过已配置的 Webhook/Telegram/SMTP 提醒通道发送 `scrub_run` 事件。
+- 未配置最近操作记录时，接口返回空列表
+- 若最近操作记录已配置但初始化失败或当前不可用，接口返回 `503 Service Unavailable`
 
 ```
 GET /api/v1/activity
@@ -1612,8 +1612,8 @@ GET /api/v1/activity
 
 **说明**:
 - 启用认证时，管理员可查看全局统计；普通用户仅返回当前账号自己的活动统计
-- 未配置活动日志时，接口返回零统计
-- 若活动日志已配置但初始化失败或当前不可用，接口返回 `503 Service Unavailable`
+- 未配置最近操作记录时，接口返回零统计
+- 若最近操作记录已配置但初始化失败或当前不可用，接口返回 `503 Service Unavailable`
 
 ```
 GET /api/v1/activity/stats
@@ -1638,7 +1638,7 @@ GET /api/v1/activity/stats
 }
 ```
 
-### 清空活动日志（管理员）
+### 清空最近操作记录（管理员）
 
 ```
 DELETE /api/v1/activity
@@ -1656,7 +1656,7 @@ DELETE /api/v1/activity
 ```
 
 **说明**:
-- 若活动日志已配置但初始化失败或当前不可用，接口返回 `503 Service Unavailable`，而不是伪装成清理成功
+- 若最近操作记录已配置但初始化失败或当前不可用，接口返回 `503 Service Unavailable`，而不是伪装成清理成功
 
 ---
 
@@ -2108,7 +2108,7 @@ PUT /api/v1/settings
 - `share` 支持更新 `enabled`、`base_url`、`default_expires_in`、`default_max_access`、`policy_rules`；`enabled` 会立即影响公开分享访问和新分享创建，`base_url` 会立即影响后续新生成的分享链接，非空时必须是完整的 `http` 或 `https` URL；默认有效期和默认访问次数只影响之后创建的分享；`policy_rules` 每项必须使用干净的 MnemoNAS 绝对路径，并至少设置 `require_password`、`max_expires_in` 或 `max_access` 中的一项
 - `favorites` 支持更新 `enabled`；保存后会立即影响收藏接口的可用性
 - `storage.directory_access_rules` 每项必须使用干净的 MnemoNAS 绝对路径，并至少包含一个 `read_users`、`write_users`、`read_groups`、`write_groups`、`read_roles` 或 `write_roles` 授权；角色只能是 `admin`、`user`、`guest`
-- `alerts` 支持更新 `enabled`、`check_interval`、`threshold_pct`、`critical_pct`、`min_free_bytes`、`cooldown_period`、`webhook_url`、`webhook_method`、`webhook_headers`、`telegram_enabled`、`telegram_bot_token`、`telegram_chat_id`、`email_enabled`、`smtp_host`、`smtp_port`、`smtp_username`、`smtp_password`、`smtp_from`、`smtp_to`；保存后会立即更新运行中的告警监控
+- `alerts` 支持更新 `enabled`、`check_interval`、`threshold_pct`、`critical_pct`、`min_free_bytes`、`cooldown_period`、`webhook_url`、`webhook_method`、`webhook_headers`、`telegram_enabled`、`telegram_bot_token`、`telegram_chat_id`、`email_enabled`、`smtp_host`、`smtp_port`、`smtp_username`、`smtp_password`、`smtp_from`、`smtp_to`；保存后会立即更新运行中的提醒监控
 - `disk_health` 支持更新 `enabled`、`check_interval`、`probe_timeout`、`cooldown_period`、`command`、温度阈值、介质磨损阈值和 `devices`；保存后会立即更新运行中的磁盘健康监控
 - `maintenance.scrub` 支持更新 `enabled`、`schedule_interval`、`retry_interval`、`max_retries`；保存后会立即更新运行中的周期 Scrub 调度，关闭时会取消后台调度
 - `dataplane` 支持更新 `grpc_address`、`timeout`、`max_retries`；保存后会立即替换运行中的数据面 client，并用于后续按需重连和连接重试策略
@@ -2122,7 +2122,7 @@ PUT /api/v1/settings
 - 请求中的 `retention.max_age`、`retention.gc_interval` 必须是 `time.ParseDuration` 可解析的字符串，例如 `720h`、`24h`、`0`
 - 请求中的 `alerts.check_interval`、`alerts.cooldown_period` 必须是正的 `time.ParseDuration` 字符串
 - 请求中的 `alerts.webhook_url` 为空时禁用 Webhook 发送，非空时必须是完整的 `http` 或 `https` URL
-- 请求中的 `alerts.webhook_method` 仅支持 `GET` 或 `POST`；`POST` 发送 JSON body，`GET` 将告警字段编码到 URL query。`alerts.webhook_headers` 每项必须是 `"Key: Value"` 格式，Header 名称必须是合法 HTTP token，值不能包含换行或控制字符
+- 请求中的 `alerts.webhook_method` 仅支持 `GET` 或 `POST`；`POST` 发送 JSON body，`GET` 将提醒字段编码到 URL query。`alerts.webhook_headers` 每项必须是 `"Key: Value"` 格式，Header 名称必须是合法 HTTP token，值不能包含换行或控制字符
 - `alerts.telegram_enabled = true` 时必须提供 `telegram_bot_token` 和 `telegram_chat_id`；`telegram_bot_token` 不能包含空白、`/`、`?` 或 `#`，诊断和设置读取响应不会明文返回该 Token
 - `alerts.email_enabled = true` 时必须提供 `smtp_host`、`smtp_from` 和至少一个 `smtp_to`，`smtp_port` 必须在 1-65535 范围内，发件人和收件人必须是合法邮件地址
 - 请求中的 `disk_health.check_interval`、`disk_health.probe_timeout`、`disk_health.cooldown_period` 必须是正的 `time.ParseDuration` 字符串；`disk_health.command` 必须是单个可执行文件名或绝对路径；`disk_health.media_wear_critical_percent` 不能低于 `disk_health.media_wear_warning_percent`；每个 `devices[].path` 必须是绝对路径，推荐 `/dev/disk/by-id/...`
@@ -2216,8 +2216,8 @@ GET /api/v1/maintenance/disk-health
 - 温度达到提醒阈值返回 `warning`，达到严重阈值返回 `critical`。
 - NVMe critical warning、可用备用容量低于阈值、介质寿命已用百分比达到阈值或介质错误计数非零会影响设备状态。
 - `smartctl` 不可用、无 JSON 输出或 JSON 无法解析会返回 `unavailable`。
-- 后台周期检查发现 `warning`、`critical` 或 `unavailable` 时，会写入 `disk_health` 活动日志，路径为 `/system/disk-health`，用户为 `system`。
-- 当 `[alerts] enabled = true` 且配置了 Webhook、Telegram 或 SMTP 邮件时，后台周期检查会对 `warning`、`critical` 和 `unavailable` 发送 `disk_health` 告警事件。
+- 后台周期检查发现 `warning`、`critical` 或 `unavailable` 时，会写入 `disk_health` 最近操作记录，路径为 `/system/disk-health`，用户为 `system`。
+- 当 `[alerts] enabled = true` 且配置了 Webhook、Telegram 或 SMTP 邮件时，后台周期检查会对 `warning`、`critical` 和 `unavailable` 发送 `disk_health` 提醒事件。
 
 ### 获取数据校验结果
 
@@ -2277,7 +2277,7 @@ POST /api/v1/maintenance/scrub
 - 成功响应直接返回本次校验结果摘要；最近一次完整结果可通过 `GET /api/v1/maintenance/scrub` 再次读取
 - `errors[].message` 返回稳定的公开文案，底层 IO/路径/校验细节只写入服务端日志
 - 当校验已完成、但结果持久化失败时，接口仍返回 `200 OK`，并附带 `Warning` 响应头；响应 body 会包含 `warning: true`，`message` 为 `scrub completed with persistence warning`
-- 若 `[maintenance.scrub] enabled = true`，服务会以系统身份按 `schedule_interval` 自动执行完整 Scrub；失败后按 `retry_interval` 最多重试 `max_retries` 次。周期任务会写入维护历史、活动日志和告警事件，与手动 Scrub 使用同一套结果格式。
+- 若 `[maintenance.scrub] enabled = true`，服务会以系统身份按 `schedule_interval` 自动执行完整 Scrub；失败后按 `retry_interval` 最多重试 `max_retries` 次。周期任务会写入维护历史、最近操作记录和提醒事件，与手动 Scrub 使用同一套结果格式。
 
 **响应示例**:
 ```json
@@ -2500,9 +2500,9 @@ POST /api/v1/maintenance/backups/{id}/run
 
 `restic` 和 `rclone` 不通过 shell 拼接命令；`command` 只能是可执行名或绝对路径，`extra_args` 会作为 argv 追加到备份命令，恢复命令不会复用备份专用参数。`password_file`、`config_file` 必须是 `source` 与 `storage.root` 之外的普通文件。
 
-任务可配置 `disabled`、`schedule_interval`、`schedule_window_start`、`schedule_window_end`、`stale_after`、`restore_drill_stale_after`、`max_snapshots`、`max_age` 和 `retention_policy`。`schedule_interval` 大于 0 时服务内置调度器会自动按间隔执行；设置 `schedule_window_start`/`schedule_window_end` 后，自动任务只会在服务器本地时间窗口内启动，手动执行不受影响。`local` 成功备份后会按 `max_snapshots` 和 `max_age` 清理旧快照，并在响应的 `pruned_snapshots` 中返回清理数量。成功备份后会自动运行一次保留策略检测，也可调用 `POST /retention-check` 手动检查。`restic` 检测执行 `restic snapshots --json --tag mnemonas --tag job:<id>`，`rclone` 检测执行 `rclone lsjson <remote> --recursive --files-only`；检测结果写入 `last_retention_check`，并影响 `retention_status`/`retention_message`。`restic` 和 `rclone` 的远端保留策略仍由外部工具管理；配置 `retention_policy` 会把该外部策略标记为已确认，否则会返回 `warning` 提醒确认。`restore_drill_stale_after` 未配置时默认 30 天，任务视图会通过 `restore_drill_status` 和 `restore_drill_message` 提示尚未演练、演练失败或演练过期；配置告警通道后，缺失或过期恢复演练会发送限频的 `backup_restore_drill` warning 事件，`trigger` 为 `restore_drill_reminder`，并持久化 `last_restore_drill_reminder_at`。`health_status` 只表示备份运行健康，可能为 `ok`、`manual`、`running`、`due`、`stale`、`failed` 或 `disabled`。任务视图会返回 `last_restore_drill`、最近恢复演练历史 `restore_drill_history`、恢复演练统计 `restore_drill_stats`、`last_restore`、`last_restore_verify` 与最近恢复历史 `restore_history`；恢复演练历史和显式恢复历史默认都保留最近 20 条，失败演练和失败恢复也会记录错误信息。失败的恢复演练会返回稳定的 `failure_category`，当前可能值包括 `no_snapshot`、`unsupported_job_type`、`unsafe_path`、`integrity_check`、`external_command`、`cancelled`、`io` 和 `unknown`，并会透传到告警事件。`restore_drill_stats` 汇总最近保留窗口内的总次数、成功次数、失败次数、成功率、连续成功/失败次数、最近成功/失败时间、最近失败原因和失败类型，便于回顾恢复能力、恢复目标、恢复预检、只读校验结果、切换/回滚清单、状态、文件数和字节数。
+任务可配置 `disabled`、`schedule_interval`、`schedule_window_start`、`schedule_window_end`、`stale_after`、`restore_drill_stale_after`、`max_snapshots`、`max_age` 和 `retention_policy`。`schedule_interval` 大于 0 时服务内置调度器会自动按间隔执行；设置 `schedule_window_start`/`schedule_window_end` 后，自动任务只会在服务器本地时间窗口内启动，手动执行不受影响。`local` 成功备份后会按 `max_snapshots` 和 `max_age` 清理旧快照，并在响应的 `pruned_snapshots` 中返回清理数量。成功备份后会自动运行一次保留策略检测，也可调用 `POST /retention-check` 手动检查。`restic` 检测执行 `restic snapshots --json --tag mnemonas --tag job:<id>`，`rclone` 检测执行 `rclone lsjson <remote> --recursive --files-only`；检测结果写入 `last_retention_check`，并影响 `retention_status`/`retention_message`。`restic` 和 `rclone` 的远端保留策略仍由外部工具管理；配置 `retention_policy` 会把该外部策略标记为已确认，否则会返回 `warning` 提醒确认。`restore_drill_stale_after` 未配置时默认 30 天，任务视图会通过 `restore_drill_status` 和 `restore_drill_message` 提示尚未演练、演练失败或演练过期；配置提醒通道后，缺失或过期恢复演练会发送限频的 `backup_restore_drill` warning 事件，`trigger` 为 `restore_drill_reminder`，并持久化 `last_restore_drill_reminder_at`。`health_status` 只表示备份运行健康，可能为 `ok`、`manual`、`running`、`due`、`stale`、`failed` 或 `disabled`。任务视图会返回 `last_restore_drill`、最近恢复演练历史 `restore_drill_history`、恢复演练统计 `restore_drill_stats`、`last_restore`、`last_restore_verify` 与最近恢复历史 `restore_history`；恢复演练历史和显式恢复历史默认都保留最近 20 条，失败演练和失败恢复也会记录错误信息。失败的恢复演练会返回稳定的 `failure_category`，当前可能值包括 `no_snapshot`、`unsupported_job_type`、`unsafe_path`、`integrity_check`、`external_command`、`cancelled`、`io` 和 `unknown`，并会透传到提醒事件。`restore_drill_stats` 汇总最近保留窗口内的总次数、成功次数、失败次数、成功率、连续成功/失败次数、最近成功/失败时间、最近失败原因和失败类型，便于回顾恢复能力、恢复目标、恢复预检、只读校验结果、切换/回滚清单、状态、文件数和字节数。
 
-当 `[alerts] enabled = true` 且配置了 Webhook、Telegram 或 SMTP 邮件时，备份失败、恢复演练失败、恢复演练缺失/过期提醒、保留策略检测失败或备份完成但带警告会发送告警事件。事件 `type` 为 `backup_run`、`backup_restore_drill` 或 `backup_retention_check`，`level` 为 `warning` 或 `critical`，`details` 包含任务 ID、运行 ID、状态、错误信息、快照路径和文件/字节统计。
+当 `[alerts] enabled = true` 且配置了 Webhook、Telegram 或 SMTP 邮件时，备份失败、恢复演练失败、恢复演练缺失/过期提醒、保留策略检测失败或备份完成但带警告会发送提醒事件。事件 `type` 为 `backup_run`、`backup_restore_drill` 或 `backup_retention_check`，`level` 为 `warning` 或 `critical`，`details` 包含任务 ID、运行 ID、状态、错误信息、快照路径和文件/字节统计。
 
 手动检查快照保留策略和远端可见内容：
 
