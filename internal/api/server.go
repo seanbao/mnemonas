@@ -1687,6 +1687,9 @@ func (s *Server) setupRoutes() {
 				r.Post("/{id}/reset-password", func(w http.ResponseWriter, req *http.Request) {
 					s.authHandler.HandleResetUserPassword(w, req, chi.URLParam(req, "id"))
 				})
+				r.Post("/{id}/revoke-sessions", func(w http.ResponseWriter, req *http.Request) {
+					s.authHandler.HandleRevokeUserSessions(w, req, chi.URLParam(req, "id"))
+				})
 				r.Put("/{id}/status", func(w http.ResponseWriter, req *http.Request) {
 					s.authHandler.HandleToggleUserStatus(w, req, chi.URLParam(req, "id"))
 				})

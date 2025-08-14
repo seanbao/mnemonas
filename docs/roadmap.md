@@ -45,7 +45,7 @@ MnemoNAS 的优先目标不是复刻 TrueNAS、Synology DSM 或 Unraid 的全部
 | 部署可靠性 | Docker/systemd 路径已存在 | 固化升级、回滚和配置迁移流程 | release 包安装、升级、卸载、数据保留均有自动化测试 |
 | HTTPS 与安全向导 | 已有反向代理脚本、Traefik/Cloudflare Tunnel 模板、Web 向导、安全自检 API、doctor 公网/证书/HTTP 跳转检查、证书续期提示、证书失败排障引导、云安全组复核清单和桌面/移动端 E2E 回归 | 继续扩展失败案例和移动端向导覆盖 | 公网域名、局域网自签、反向代理 header、Secure/SameSite cookie、CSRF、下载会话、内部 dataplane 端口未暴露均有自动化测试和文档 |
 | 数据完整性 | 有 Scrub/GC/诊断；手动和周期 Scrub 会写入最近操作，失败、对象异常和结果持久化异常会进入 Webhook/Telegram/SMTP 通知；周期 Scrub 支持失败限次重试，并可在 Web 设置页热更新调度参数，设备状态页和诊断会展示调度状态 | 增加原生 ZFS/Btrfs scrub 协同和更细的失败处置指引 | Scrub 失败能在 UI、最近操作和通知中闭环 |
-| 安全默认值 | Web 主会话使用 HttpOnly cookie | 增加登录限速、会话吊销、管理员安全提醒和危险配置提醒 | 弱口令、默认密码、跨站请求、异常登录、公开分享误配置都有明确拦截或提醒 |
+| 安全默认值 | Web 主会话使用 HttpOnly cookie，已有登录限速和用户现有登录失效入口 | 完善管理员安全提醒和危险配置提醒 | 弱口令、默认密码、跨站请求、异常登录、公开分享误配置都有明确拦截或提醒 |
 | WebDAV 兼容性 | 已有基础矩阵 | 扩展 Windows/macOS/rclone 回归 | 关键客户端读写、重命名、删除、恢复均有记录 |
 
 ### P1：家庭 NAS 基线

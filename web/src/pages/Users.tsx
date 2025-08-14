@@ -39,8 +39,9 @@ import {
   Pencil,
   FolderOpen,
   Tags,
+  LogOut,
 } from 'lucide-react'
-import { listUsers, createUser, deleteUser, resetUserPassword, toggleUserStatus, updateUser, UsersError, type ListUsersResponse, type User } from '@/api/users'
+import { listUsers, createUser, deleteUser, resetUserPassword, revokeUserSessions, toggleUserStatus, updateUser, UsersError, type ListUsersResponse, type User } from '@/api/users'
 import { getStoredUser } from '@/api/auth'
 import { formatBytes, formatDate, cn } from '@/lib/utils'
 import { PageHeader } from '@/components/ui/PageHeader'
@@ -280,7 +281,7 @@ function getUsersRefreshErrorPresentation(error: unknown): {
 }
 
 function getUsersActionSuccessToast(
-  action: 'create' | 'update' | 'delete' | 'reset-password' | 'toggle-status',
+  action: 'create' | 'update' | 'delete' | 'reset-password' | 'revoke-sessions' | 'toggle-status',
   options?: { warning?: boolean; disabled?: boolean }
 ): {
   title: string
@@ -306,6 +307,10 @@ function getUsersActionSuccessToast(
       return options?.warning
         ? { title: '密码已重置，但保存存在提醒', description: warningDescription, color: 'warning' }
         : { title: '密码已重置', color: 'success' }
+    case 'revoke-sessions':
+      return options?.warning
+        ? { title: '登录已失效，但保存存在提醒', description: warningDescription, color: 'warning' }
+        : { title: '现有登录已失效', color: 'success' }
     case 'toggle-status':
       if (options?.warning) {
         return {
@@ -343,6 +348,7 @@ function UserCard({
   user,
   onEdit,
   onResetPassword,
+  onRevokeSessions,
   onDelete,
   onToggleStatus,
   isCurrentUser,
@@ -350,6 +356,7 @@ function UserCard({
   user: User
   onEdit: () => void
   onResetPassword: () => void
+  onRevokeSessions: () => void
   onDelete: () => void
   onToggleStatus: () => void
   isCurrentUser: boolean
@@ -435,6 +442,14 @@ function UserCard({
                   onPress={onResetPassword}
                 >
                   重置密码
+                </DropdownItem>
+                <DropdownItem
+                  key="revoke-sessions"
+                  startContent={<LogOut size={16} />}
+                  onPress={onRevokeSessions}
+                  isDisabled={isCurrentUser}
+                >
+                  让现有登录失效
                 </DropdownItem>
               </DropdownSection>
               <DropdownSection>
@@ -637,6 +652,25 @@ export function UsersPage() {
     },
   })
 
+  const revokeSessionsMutation = useMutation({
+    mutationFn: (userId: string) => revokeUserSessions(userId),
+    onSuccess: (result) => {
+      addToast(getUsersActionSuccessToast('revoke-sessions', { warning: result.warning }))
+    },
+    onError: (error, userId) => {
+      if (isMissingUserError(error)) {
+        syncMissingUserInCache(queryClient, userId)
+        addToast({ title: '用户已不存在，已同步更新', color: 'warning' })
+        return
+      }
+
+      addToast(getUsersActionErrorPresentation(error, {
+        unavailable: '吊销登录暂不可用',
+        failure: '吊销登录失败',
+      }))
+    },
+  })
+
   const toggleStatusMutation = useMutation({
     mutationFn: ({ userId, disabled }: { userId: string; disabled: boolean }) =>
       toggleUserStatus(userId, disabled),
@@ -809,6 +843,11 @@ export function UsersPage() {
     toggleStatusMutation.mutate({ userId: user.id, disabled: !user.disabled })
   }, [currentUserId, toggleStatusMutation])
 
+  const handleRevokeSessions = useCallback((user: User) => {
+    if (user.id === currentUserId) return
+    revokeSessionsMutation.mutate(user.id)
+  }, [currentUserId, revokeSessionsMutation])
+
   const handleRefreshUsers = useCallback(async () => {
 	const result = await refetch()
 	if (result.error) {
@@ -917,6 +956,7 @@ export function UsersPage() {
                   onResetPassword={() => handleOpenResetModal(user)}
                   onDelete={() => handleOpenDeleteModal(user)}
                   onToggleStatus={() => handleToggleStatus(user)}
+                  onRevokeSessions={() => handleRevokeSessions(user)}
                 />
               ))}
             </div>

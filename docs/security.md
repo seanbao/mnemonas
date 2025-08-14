@@ -320,7 +320,7 @@ location /api/ {
 - 对带浏览器 `Origin` / `Referer` / `Sec-Fetch-Site` 元数据的 REST 写请求和 WebDAV 写方法（`POST`、`PUT`、`PATCH`、`DELETE`、`MKCOL`、`COPY`、`MOVE`、`PROPPATCH`、`LOCK`、`UNLOCK`），服务端会拒绝来源 scheme、主机或端口与当前请求不一致的请求，并拒绝浏览器明确标记为 `cross-site` 或 `same-site` 的无 `Authorization` 写请求；无浏览器来源头的脚本客户端以及显式 `Authorization` API 客户端继续可用
 - API 客户端仍可使用 `Authorization: Bearer <access-token>` 与 JSON refresh token，兼容脚本和自动化调用
 - 服务端已设置基础安全响应头、CSP 与 `Permissions-Policy`；文件下载、版本预览、缩略图、WebDAV 文件与 WebDAV 目录列表响应额外带 `X-Content-Type-Options: nosniff` 和 sandbox CSP，降低同源打开用户文件时的脚本执行面。公网部署仍必须使用受信任的静态资源、HTTPS 反向代理和较新的浏览器，不要在同一域名下注入第三方脚本
-- 共用电脑上使用后应主动退出登录；修改密码、退出登录、删除或禁用用户会撤销或清理对应会话
+- 共用电脑上使用后应主动退出登录；修改密码、退出登录、删除用户、禁用用户或管理员手动让用户现有登录失效时，会撤销或清理对应会话
 
 #### 公开分享密码验证
 
@@ -335,7 +335,7 @@ location /api/ {
 
 | 状态 | 安全特性 |
 | ---- | -------- |
-| 已支持 | Web UI 登录、多用户/角色/用户组、用户根目录隔离、目录授权、WebDAV 用户认证/全局 Basic Auth、路径遍历保护、WebDAV 只读模式、公开分享密码验证与失败锁定 |
+| 已支持 | Web UI 登录、多用户/角色/用户组、用户根目录隔离、目录授权、用户会话吊销、WebDAV 用户认证/全局 Basic Auth、路径遍历保护、WebDAV 只读模式、公开分享密码验证与失败锁定 |
 | 建议通过反向代理补充 | HTTPS 证书自动续期、按 IP/用户限速、公网访问控制 |
 | 计划中 | OAuth/OIDC 集成、更细粒度的应用层访问策略 |
 

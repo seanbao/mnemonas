@@ -4257,6 +4257,131 @@ func TestAuthHandler(t *testing.T) {
 		}
 	})
 
+	t.Run("admin revoke user sessions revokes outstanding tokens", func(t *testing.T) {
+		admin, _ := store.GetByUsername("handleradmin")
+		revokeUser, err := store.Create("session-revoke", "password123", "session-revoke@test.com", RoleUser)
+		if err != nil {
+			t.Fatalf("failed to create revoke user: %v", err)
+		}
+
+		tokenPair, err := tm.GenerateTokenPair(revokeUser)
+		if err != nil {
+			t.Fatalf("GenerateTokenPair() error: %v", err)
+		}
+
+		req := httptest.NewRequest("POST", "/api/v1/admin/users/"+revokeUser.ID+"/revoke-sessions", nil)
+		req = req.WithContext(context.WithValue(req.Context(), ContextKeyUser, admin))
+		rec := httptest.NewRecorder()
+		h.HandleRevokeUserSessions(rec, req, revokeUser.ID)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected revoke sessions status 200, got %d: %s", rec.Code, rec.Body.String())
+		}
+
+		var envelope authEnvelope
+		if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
+			t.Fatalf("unmarshal revoke sessions envelope error: %v", err)
+		}
+		if !envelope.Success || envelope.Message != "user sessions revoked successfully" {
+			t.Fatalf("unexpected revoke sessions envelope: %+v", envelope)
+		}
+		var data map[string]interface{}
+		if err := json.Unmarshal(envelope.Data, &data); err != nil {
+			t.Fatalf("unmarshal revoke sessions payload error: %v", err)
+		}
+		if revoked, ok := data["revoked"].(bool); !ok || !revoked {
+			t.Fatalf("expected revoked=true payload, got %+v", data)
+		}
+
+		if _, err := tm.ValidateAccessToken(tokenPair.AccessToken); err != ErrTokenRevoked {
+			t.Fatalf("expected access token to be revoked after session revoke, got %v", err)
+		}
+		if _, err := tm.ValidateRefreshToken(tokenPair.RefreshToken); err != ErrTokenRevoked {
+			t.Fatalf("expected refresh token to be revoked after session revoke, got %v", err)
+		}
+	})
+
+	t.Run("admin revoke user sessions rejects missing user", func(t *testing.T) {
+		admin, _ := store.GetByUsername("handleradmin")
+		req := httptest.NewRequest("POST", "/api/v1/admin/users/missing-user/revoke-sessions", nil)
+		req = req.WithContext(context.WithValue(req.Context(), ContextKeyUser, admin))
+		rec := httptest.NewRecorder()
+		h.HandleRevokeUserSessions(rec, req, "missing-user")
+
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("expected revoke sessions status 404, got %d: %s", rec.Code, rec.Body.String())
+		}
+
+		var envelope authEnvelope
+		if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
+			t.Fatalf("unmarshal revoke missing envelope error: %v", err)
+		}
+		if envelope.Error == nil || envelope.Error.Code != "USER_NOT_FOUND" {
+			t.Fatalf("expected USER_NOT_FOUND error, got %+v", envelope.Error)
+		}
+	})
+
+	t.Run("admin revoke user sessions returns warning and revokes tokens when revocation persistence fails hard", func(t *testing.T) {
+		admin, err := store.GetByUsername("handleradmin")
+		if err != nil {
+			t.Fatalf("failed to get admin user: %v", err)
+		}
+		revokeUser, err := store.Create("hard-revoke-sessions", "password123", "hard-revoke-sessions@test.com", RoleUser)
+		if err != nil {
+			t.Fatalf("failed to create revoke user: %v", err)
+		}
+
+		tokenPair, err := tm.GenerateTokenPair(revokeUser)
+		if err != nil {
+			t.Fatalf("GenerateTokenPair() error: %v", err)
+		}
+
+		originalPersistTokenRevocations := persistTokenRevocations
+		persistTokenRevocations = func(tm *TokenManager) error {
+			return errors.New("write failed")
+		}
+		defer func() {
+			persistTokenRevocations = originalPersistTokenRevocations
+		}()
+
+		req := httptest.NewRequest("POST", "/api/v1/admin/users/"+revokeUser.ID+"/revoke-sessions", nil)
+		req = req.WithContext(context.WithValue(req.Context(), ContextKeyUser, admin))
+		rec := httptest.NewRecorder()
+		h.HandleRevokeUserSessions(rec, req, revokeUser.ID)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected revoke sessions status 200, got %d: %s", rec.Code, rec.Body.String())
+		}
+		if got := rec.Header().Get("Warning"); got != authPersistenceWarningHeader {
+			t.Fatalf("warning header = %q, want %q", got, authPersistenceWarningHeader)
+		}
+
+		var envelope authEnvelope
+		if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
+			t.Fatalf("unmarshal revoke sessions warning envelope error: %v", err)
+		}
+		if !envelope.Success || envelope.Message != "user sessions revoked with persistence warning" {
+			t.Fatalf("unexpected revoke sessions warning envelope: %+v", envelope)
+		}
+		var data map[string]interface{}
+		if err := json.Unmarshal(envelope.Data, &data); err != nil {
+			t.Fatalf("unmarshal revoke sessions warning payload error: %v", err)
+		}
+		if revoked, ok := data["revoked"].(bool); !ok || !revoked {
+			t.Fatalf("expected revoked=true payload, got %+v", data)
+		}
+		if warning, ok := data["warning"].(bool); !ok || !warning {
+			t.Fatalf("expected warning=true payload, got %+v", data)
+		}
+
+		if _, err := tm.ValidateAccessToken(tokenPair.AccessToken); err != ErrTokenRevoked {
+			t.Fatalf("expected access token to be revoked after session revoke warning, got %v", err)
+		}
+		if _, err := tm.ValidateRefreshToken(tokenPair.RefreshToken); err != ErrTokenRevoked {
+			t.Fatalf("expected refresh token to be revoked after session revoke warning, got %v", err)
+		}
+	})
+
 	t.Run("delete user revokes outstanding refresh tokens", func(t *testing.T) {
 		admin, _ := store.GetByUsername("handleradmin")
 		deleteUser, err := store.Create("delete-revoke", "password123", "delete-revoke@test.com", RoleUser)

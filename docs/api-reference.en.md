@@ -160,9 +160,12 @@ Admin role required.
 | `PUT` | `/api/v1/admin/users/{id}` | Update user metadata, role, home directory, or quota |
 | `DELETE` | `/api/v1/admin/users/{id}` | Delete user |
 | `POST` | `/api/v1/admin/users/{id}/reset-password` | Reset user password |
+| `POST` | `/api/v1/admin/users/{id}/revoke-sessions` | Revoke the user's active sessions |
 | `PUT` | `/api/v1/admin/users/{id}/status` | Enable or disable user |
 
 User roles are `admin`, `user`, and `guest`. Non-admin users are scoped by `home_dir` and any matching directory access rules. User responses include `groups`, `quota_bytes`, and `used_bytes`.
+
+`POST /api/v1/admin/users/{id}/revoke-sessions` invalidates that user's existing Web cookie sessions, access tokens, and refresh tokens without changing the user's password or enabled state. The user must sign in again on the next request.
 
 Usernames are limited to 255 characters and must not contain `/`, `\`, control characters, `.`, or `..`. Passwords must be 8 to 72 bytes.
 Group names are normalized to lowercase and may contain only letters, digits, `.`, `_`, and `-`.
