@@ -80,5 +80,6 @@ Then complete at least one archive-install smoke test, one Docker release-image 
 - Confirm this draft is updated with the final tag, validation results, and artifact names.
 - Confirm `git status --short --branch` is clean.
 - Confirm `./scripts/plan-hardening-commits.sh --fail-on-manual` reports no paths left to group.
+- Run `./scripts/release-readiness.sh` and confirm commit subjects, validation evidence, release-documentation commands, and community health files pass.
 - After creating and pushing the tag, confirm the Release workflow succeeds.
 - After publication, run the release artifact verifier and record the result.
