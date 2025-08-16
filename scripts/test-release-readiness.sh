@@ -230,6 +230,16 @@ fi
 assert_file_contains "$output_dir/bad-commit-message.err" "commit message does not follow project convention"
 assert_file_contains "$output_dir/bad-commit-message.err" "subject must use Conventional Commits"
 
+git checkout -q master
+git checkout -q -b autosquash-commit-message
+printf '# docs\n' >README.md
+git add README.md
+git commit -q -m "fixup! docs: update release docs"
+if ./scripts/release-readiness.sh --allow-post-validation-changes >"$output_dir/autosquash-commit-message.out" 2>"$output_dir/autosquash-commit-message.err"; then
+	fail "release readiness accepted a temporary autosquash branch commit"
+fi
+assert_file_contains "$output_dir/autosquash-commit-message.err" "temporary autosquash commit remains on release branch"
+
 git checkout -q release-readiness
 printf '# dirty docs\n' >>README.md
 if ./scripts/release-readiness.sh >"$output_dir/dirty.out" 2>"$output_dir/dirty.err"; then
