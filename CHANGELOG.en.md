@@ -57,7 +57,7 @@ This project follows [Semantic Versioning 2.0.0](https://semver.org/).
 - Script simulation fixtures cover changed-file selection, WebDAV auth modes, public reverse-proxy exposure checks, benchmark paths, and Web Husky hooks.
 - `scripts/webdav-client-smoke.sh` runs curl protocol smoke checks against a running service, covering basic WebDAV read/write, copy, move, and delete operations, with a dedicated safety test in `make scripts-check`.
 - `scripts/release-readiness.sh` fails by default when non-release-documentation changes exist after the recorded full-validation target; draft summaries can opt in with `--allow-post-validation-changes`.
-- `scripts/release-readiness.sh` checks that local commit subjects on the current release branch follow Conventional Commits.
+- `scripts/release-readiness.sh` checks that local commit subjects on the current release branch follow Conventional Commits and rejects leftover `fixup!` / `squash!` temporary commits.
 - WebDAV COPY/MOVE destination regression coverage for absolute path-reference destinations and rejection of bare relative destinations, including `dav/path`.
 - `npm run typecheck` covers the frontend application, Playwright specs, and shared E2E helpers.
 - Toolchain hints through `.go-version`, `.nvmrc`, Go `toolchain`, and Rust `rust-version`.

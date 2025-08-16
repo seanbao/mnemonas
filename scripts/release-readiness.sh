@@ -277,10 +277,15 @@ check_branch_commit_messages() {
 
 	while IFS= read -r commit; do
 		[[ -n "$commit" ]] || continue
+		subject="$(git log -1 --format=%s "$commit")"
+		case "$subject" in
+			fixup!\ *|squash!\ *)
+				fail "temporary autosquash commit remains on release branch: $(git rev-parse --short=12 "$commit") $subject"
+				;;
+		esac
 		git log -1 --format=%B "$commit" >"$message_file"
 		if ! output="$(./scripts/check-commit-message.sh "$message_file" 2>&1)"; then
 			printf '%s\n' "$output" >&2
-			subject="$(git log -1 --format=%s "$commit")"
 			fail "commit message does not follow project convention: $(git rev-parse --short=12 "$commit") $subject"
 		fi
 		commits_checked=$((commits_checked + 1))
@@ -289,7 +294,7 @@ check_branch_commit_messages() {
 	if [[ "$commits_checked" -eq 0 ]]; then
 		print_kv "commit-messages" "no branch commits to check"
 	else
-		print_kv "commit-messages" "$commits_checked commit subject(s) follow Conventional Commits"
+		print_kv "commit-messages" "$commits_checked commit subject(s) follow Conventional Commits; no temporary autosquash commits"
 	fi
 }
 
