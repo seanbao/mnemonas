@@ -123,6 +123,8 @@ case "$method" in
         status="200"
         if [[ "$url" == */hello.txt ]]; then
             body="mnemonas webdav smoke"$'\n'
+        elif [[ "$url" == */space%20name.txt ]]; then
+            body="mnemonas webdav smoke spaced path"$'\n'
         fi
         ;;
     HEAD)
@@ -205,10 +207,13 @@ run_success_test() {
     assert_file_contains "$curl_log" "PROPFIND http://127.0.0.1:18080/dav/smoke-test/"
     assert_file_contains "$curl_log" "GET http://127.0.0.1:18080/dav/smoke-test/hello.txt"
     assert_file_contains "$curl_log" "HEAD http://127.0.0.1:18080/dav/smoke-test/hello.txt"
+    assert_file_contains "$curl_log" "PUT http://127.0.0.1:18080/dav/smoke-test/space%20name.txt"
+    assert_file_contains "$curl_log" "GET http://127.0.0.1:18080/dav/smoke-test/space%20name.txt"
     assert_file_contains "$curl_log" "COPY http://127.0.0.1:18080/dav/smoke-test/hello.txt"
     assert_file_contains "$curl_log" "Destination: http://127.0.0.1:18080/dav/smoke-test/copied.txt"
     assert_file_contains "$curl_log" "MOVE http://127.0.0.1:18080/dav/smoke-test/copied.txt"
     assert_file_contains "$curl_log" "Destination: http://127.0.0.1:18080/dav/smoke-test/moved.txt"
+    assert_file_contains "$curl_log" "DELETE http://127.0.0.1:18080/dav/smoke-test/space%20name.txt"
     assert_file_contains "$curl_log" "DELETE http://127.0.0.1:18080/dav/smoke-test/"
     assert_file_not_contains "$curl_log" "$secret"
 }
@@ -220,6 +225,8 @@ run_docs_contract_test() {
     assert_file_contains "$REPO_ROOT/docs/testing-strategy.en.md" 'Standalone WebDAV smoke'
     assert_file_contains "$REPO_ROOT/docs/webdav-compatibility.md" 'curl 协议 smoke'
     assert_file_contains "$REPO_ROOT/docs/webdav-compatibility.en.md" 'curl protocol smoke'
+    assert_file_contains "$REPO_ROOT/docs/webdav-compatibility.md" 'URL 编码空格路径'
+    assert_file_contains "$REPO_ROOT/docs/webdav-compatibility.en.md" 'URL-encoded space paths'
 }
 
 trap cleanup EXIT

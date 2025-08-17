@@ -398,7 +398,7 @@ curl http://localhost:9091/health
 curl http://localhost:9091/stats
 ```
 
-`scripts/webdav-client-smoke.sh` covers `OPTIONS`, `MKCOL`, `PUT`, `PROPFIND`, `GET`, `HEAD`, `COPY`, `MOVE`, and `DELETE`. For `webdav.auth_type = "basic"`, use `./scripts/dev.sh --creds` to find credential locations. For `webdav.auth_type = "users"`, use a MnemoNAS username and password.
+`scripts/webdav-client-smoke.sh` covers `OPTIONS`, `MKCOL`, `PUT`, `PROPFIND`, `GET`, `HEAD`, `COPY`, `MOVE`, `DELETE`, and read/write checks for URL-encoded space paths. For `webdav.auth_type = "basic"`, use `./scripts/dev.sh --creds` to find credential locations. For `webdav.auth_type = "users"`, use a MnemoNAS username and password.
 The script passes authentication through a temporary curl config file so plaintext passwords are not printed in command arguments.
 
 `9091` should remain local/private.

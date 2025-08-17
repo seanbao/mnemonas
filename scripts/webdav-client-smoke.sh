@@ -146,12 +146,13 @@ expect_status() {
 }
 
 run_smoke() {
-    local base_url file_url copied_url moved_url
-    local upload_file download_file status
+    local base_url file_url spaced_file_url copied_url moved_url
+    local upload_file download_file spaced_upload_file spaced_download_file status
 
     base_url="${WEBDAV_URL%/}"
     root_url="$base_url/$WEBDAV_TEST_ROOT"
     file_url="$root_url/hello.txt"
+    spaced_file_url="$root_url/space%20name.txt"
     copied_url="$root_url/copied.txt"
     moved_url="$root_url/moved.txt"
 
@@ -165,7 +166,10 @@ run_smoke() {
 
     upload_file="$tmp_dir/upload.txt"
     download_file="$tmp_dir/download.txt"
+    spaced_upload_file="$tmp_dir/spaced-upload.txt"
+    spaced_download_file="$tmp_dir/spaced-download.txt"
     printf 'mnemonas webdav smoke\n' > "$upload_file"
+    printf 'mnemonas webdav smoke spaced path\n' > "$spaced_upload_file"
 
     log_info "probing $base_url"
     status="$(curl_request "OPTIONS" OPTIONS "$base_url/" "$tmp_dir/options.out")"
@@ -191,6 +195,16 @@ run_smoke() {
     status="$(curl_head_status "HEAD" "$file_url" "$tmp_dir/head.out")"
     expect_status "HEAD" "$status" 200
 
+    status="$(curl_request "PUT URL-encoded space path" PUT "$spaced_file_url" "$tmp_dir/put-spaced.out" -T "$spaced_upload_file")"
+    expect_status "PUT URL-encoded space path" "$status" 200 201 204
+
+    status="$(curl_request "GET URL-encoded space path" GET "$spaced_file_url" "$spaced_download_file")"
+    expect_status "GET URL-encoded space path" "$status" 200
+    if ! cmp -s "$spaced_upload_file" "$spaced_download_file"; then
+        fail "URL-encoded space path download content did not match uploaded content"
+    fi
+    log_ok "URL-encoded space path content matches uploaded content"
+
     status="$(curl_request "COPY" COPY "$file_url" "$tmp_dir/copy.out" -H "Destination: $copied_url")"
     expect_status "COPY" "$status" 201 204
 
@@ -202,6 +216,9 @@ run_smoke() {
 
     status="$(curl_request "DELETE moved file" DELETE "$moved_url" "$tmp_dir/delete-moved.out")"
     expect_status "DELETE moved file" "$status" 200 204
+
+    status="$(curl_request "DELETE URL-encoded space path" DELETE "$spaced_file_url" "$tmp_dir/delete-spaced.out")"
+    expect_status "DELETE URL-encoded space path" "$status" 200 204
 
     status="$(curl_request "DELETE collection" DELETE "$root_url/" "$tmp_dir/delete-root.out")"
     expect_status "DELETE collection" "$status" 200 204
