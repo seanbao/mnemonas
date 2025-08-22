@@ -17,9 +17,48 @@ toml_value() {
   fi
 
   awk -v section="[$section]" -v key="$key" '
+    function strip_comment(text,    i, c, quote, escaped, out) {
+      quote = ""
+      escaped = 0
+      out = ""
+      for (i = 1; i <= length(text); i++) {
+        c = substr(text, i, 1)
+        if (quote == "\"") {
+          out = out c
+          if (escaped) {
+            escaped = 0
+            continue
+          }
+          if (c == "\\") {
+            escaped = 1
+            continue
+          }
+          if (c == quote) {
+            quote = ""
+          }
+          continue
+        }
+        if (quote == "\047") {
+          out = out c
+          if (c == quote) {
+            quote = ""
+          }
+          continue
+        }
+        if (c == "\"" || c == "\047") {
+          quote = c
+          out = out c
+          continue
+        }
+        if (c == "#") {
+          break
+        }
+        out = out c
+      }
+      return out
+    }
     {
-      line = $0
-      sub("[[:space:]]*#.*$", "", line)
+      line = strip_comment($0)
       gsub("^[[:space:]]+|[[:space:]]+$", "", line)
       section_line = line
       if (section_line ~ "^\\[") {
@@ -71,16 +110,18 @@ append_configured_uint_arg() {
   local section=$3
   local key=$4
   local value
+  local normalized_value
 
   value="$(toml_value "$section" "$key" "$CONFIG_PATH")"
   if [[ -z "$value" ]]; then
     return 0
   fi
-  if [[ ! "$value" =~ ^[0-9]+$ ]]; then
+  if [[ ! "$value" =~ ^[0-9](_?[0-9])*$ ]]; then
     printf '[mnemonas-dataplane-start] ERROR: invalid [%s].%s value: %s\n' "$section" "$key" "$value" >&2
     return 1
   fi
-  target_args+=("$flag" "$value")
+  normalized_value="${value//_/}"
+  target_args+=("$flag" "$normalized_value")
 }
 
 storage_root="${STORAGE_ROOT:-$(toml_value storage root "$CONFIG_PATH")}"
