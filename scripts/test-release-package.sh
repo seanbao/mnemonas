@@ -204,6 +204,7 @@ assert_file_contains "$WORKFLOW" 'awk -v image="$release_image" -v version="$VER
 assert_file_contains "$WORKFLOW" '/^MNEMONAS_IMAGE=/ { print "MNEMONAS_IMAGE=" image; next }'
 assert_file_contains "$WORKFLOW" '/^MNEMONAS_VERSION=/ { print "MNEMONAS_VERSION=" version; next }'
 assert_release_workflow_contains \
+	'./scripts/check-release-tag.sh "$GITHUB_REF_NAME"' \
 	'Build image for smoke test' \
 	'platforms: linux/amd64' \
 	'push: false' \

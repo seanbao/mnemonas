@@ -14,6 +14,7 @@
 - 完善认证、用户、主目录、目录配额、目录访问规则、分享策略和会话安全默认值的后端与前端覆盖。
 - 提升 Web 可见质量，核心页面、公开入口、移动端布局、基础可访问性、运行时错误、失败请求和破碎可见文本已纳入 Playwright 扫描。
 - 加固 systemd、Docker、反向代理、公网访问模板、doctor、release package 和 release artifact 验证路径；Release workflow 会在创建 GitHub Release 前校验归档、checksums、必需目标集合、归档条目类型、重复条目、控制字符路径、空白字符路径、反斜杠路径和歧义路径。
+- Release tag 会在产物构建前校验，必须使用 `vMAJOR.MINOR.PATCH` 或 `v1.2.3-rc.1` 这类语义化预发布形式。
 - 新增可复跑的 WebDAV curl 协议 smoke，可对已运行服务验证基础读写、URL 编码空格路径、复制、移动和删除操作，并通过脚本门禁覆盖。
 - 收紧发布就绪摘要：记录的完整验证目标之后如出现非发布文档变更，`release-readiness` 默认失败，并要求刷新完整验证或显式草稿放行。
 - 精简并同步中英文文档，补齐部署、配置、FAQ、路线图、安全、硬化进度和发布前审查入口。
@@ -37,6 +38,7 @@ Release workflow 预期生成以下产物：
 - `GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master`
 - `make scripts-check`
 - `make docs-check`
+- `./scripts/test-release-tag.sh`
 - `./scripts/test-release-package.sh`
 - `./scripts/test-release-artifacts.sh`
 - WebDAV curl smoke safety test：`scripts/test-webdav-client-smoke.sh`
