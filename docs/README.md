@@ -35,6 +35,13 @@
 | [API 参考](api-reference.md) | REST API 端点与请求/响应格式 |
 | [扩展点设计](extension-points.md) | 阶段 2 接口草案（S3/插件/Runner） |
 
+### 支持与安全
+
+| 文档 | 说明 |
+|------|------|
+| [支持说明](../SUPPORT.md) | 支持渠道、问题分流和维护边界 |
+| [安全策略](../SECURITY.md) | 安全漏洞报告方式和部署安全提醒 |
+
 ### 配置参考
 
 | 文件 | 说明 |
@@ -42,7 +49,6 @@
 | [配置参考](configuration.md) | 完整配置选项说明 |
 | [mnemonas.example.toml](../mnemonas.example.toml) | 配置文件示例 |
 | [CHANGELOG](../CHANGELOG.md) | 版本更新记录 |
-| [支持说明](../SUPPORT.md) | 支持渠道、问题分流和维护边界 |
 
 ## 🔗 相关链接
 

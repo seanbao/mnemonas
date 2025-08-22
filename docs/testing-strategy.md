@@ -401,9 +401,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, master]
   pull_request:
-    branches: [main]
+    branches: [main, master]
 
 env:
   GO_VERSION: '1.25.9'
