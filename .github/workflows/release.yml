@@ -51,13 +51,7 @@ jobs:
           persist-credentials: false
 
       - name: Validate release tag
-        run: |
-          case "$GITHUB_REF_NAME" in
-            ""|*[!A-Za-z0-9._-]*)
-              echo "Release tag contains unsupported characters: $GITHUB_REF_NAME" >&2
-              exit 1
-              ;;
-          esac
+        run: ./scripts/check-release-tag.sh "$GITHUB_REF_NAME"
 
       - name: Setup Go
         uses: actions/setup-go@v5
