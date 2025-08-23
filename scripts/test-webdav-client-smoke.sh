@@ -85,6 +85,10 @@ while [[ $# -gt 0 ]]; do
         --config|--netrc-file)
             shift 2
             ;;
+        --connect-timeout=*|--max-time=*)
+            printf '%s\n' "$1" >> "$CURL_INVOKED_LOG"
+            shift
+            ;;
         --insecure|-s|-S|-sS|-f|-fsS)
             shift
             ;;
@@ -183,6 +187,17 @@ run_partial_credentials_test() {
     assert_file_contains "$case_dir/out.log" "both WebDAV username and password are required"
 }
 
+run_invalid_timeout_test() {
+    local case_dir="$TMP_ROOT/invalid-timeout"
+    mkdir -p "$case_dir"
+
+    run_expect_failure "$case_dir/out.log" env -u MNEMONAS_WEBDAV_USERNAME -u MNEMONAS_WEBDAV_PASSWORD \
+        WEBDAV_URL="http://127.0.0.1:18080/dav" \
+        CURL_CONNECT_TIMEOUT="0" \
+        bash "$REPO_ROOT/scripts/webdav-client-smoke.sh"
+    assert_file_contains "$case_dir/out.log" "CURL_CONNECT_TIMEOUT must be a positive integer number of seconds"
+}
+
 run_success_test() {
     local case_dir="$TMP_ROOT/success"
     local fake_bin="$case_dir/bin"
@@ -201,6 +216,8 @@ run_success_test() {
         bash "$REPO_ROOT/scripts/webdav-client-smoke.sh" > "$case_dir/out.log" 2>&1
 
     assert_file_contains "$case_dir/out.log" "WebDAV smoke passed for http://127.0.0.1:18080/dav"
+    assert_file_contains "$curl_log" "--connect-timeout=10"
+    assert_file_contains "$curl_log" "--max-time=30"
     assert_file_contains "$curl_log" "OPTIONS http://127.0.0.1:18080/dav/"
     assert_file_contains "$curl_log" "MKCOL http://127.0.0.1:18080/dav/smoke-test/"
     assert_file_contains "$curl_log" "PUT http://127.0.0.1:18080/dav/smoke-test/hello.txt"
@@ -227,6 +244,8 @@ run_docs_contract_test() {
     assert_file_contains "$REPO_ROOT/docs/webdav-compatibility.en.md" 'curl protocol smoke'
     assert_file_contains "$REPO_ROOT/docs/webdav-compatibility.md" 'URL 编码空格路径'
     assert_file_contains "$REPO_ROOT/docs/webdav-compatibility.en.md" 'URL-encoded space paths'
+    assert_file_contains "$REPO_ROOT/docs/webdav-compatibility.md" 'CURL_MAX_TIME'
+    assert_file_contains "$REPO_ROOT/docs/webdav-compatibility.en.md" 'CURL_MAX_TIME'
 }
 
 trap cleanup EXIT
@@ -234,6 +253,7 @@ mkdir -p "$TMP_ROOT"
 
 run_missing_url_test
 run_partial_credentials_test
+run_invalid_timeout_test
 run_success_test
 run_docs_contract_test
 

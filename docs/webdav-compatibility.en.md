@@ -202,7 +202,7 @@ MNEMONAS_WEBDAV_PASSWORD="<mnemonas-or-webdav-password>" \
 ./scripts/webdav-client-smoke.sh
 ```
 
-The script creates a temporary collection, verifies basic read, write, URL-encoded space path, copy, move, and delete operations, and removes the temporary data. It is a protocol-level regression check and does not replace real-client validation for Finder, Windows File Explorer, mobile file managers, or media players.
+The script creates a temporary collection, verifies basic read, write, URL-encoded space path, copy, move, and delete operations, and removes the temporary data. Each curl request uses `CURL_CONNECT_TIMEOUT=10` and `CURL_MAX_TIME=30` by default; increase these environment variables on high-latency links. It is a protocol-level regression check and does not replace real-client validation for Finder, Windows File Explorer, mobile file managers, or media players.
 
 ### davfs2 Example
 
