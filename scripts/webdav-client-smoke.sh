@@ -8,6 +8,8 @@ WEBDAV_USERNAME="${WEBDAV_USERNAME:-${MNEMONAS_WEBDAV_USERNAME:-}}"
 WEBDAV_PASSWORD="${WEBDAV_PASSWORD:-${MNEMONAS_WEBDAV_PASSWORD:-}}"
 WEBDAV_TEST_ROOT="${WEBDAV_TEST_ROOT:-mnemonas-smoke-$(date +%s)-$$}"
 CURL_INSECURE="${CURL_INSECURE:-0}"
+CURL_CONNECT_TIMEOUT="${CURL_CONNECT_TIMEOUT:-10}"
+CURL_MAX_TIME="${CURL_MAX_TIME:-30}"
 
 tmp_dir=""
 root_url=""
@@ -42,6 +44,8 @@ Environment:
   WEBDAV_TEST_ROOT        Optional one-segment temporary collection name.
   CURL_BIN                Optional curl binary path.
   CURL_INSECURE=1         Pass --insecure to curl for local TLS smoke tests.
+  CURL_CONNECT_TIMEOUT    Optional curl connection timeout in seconds; default 10.
+  CURL_MAX_TIME           Optional curl per-request timeout in seconds; default 30.
 EOF
 }
 
@@ -57,6 +61,14 @@ cleanup() {
 require_command() {
     if ! command -v "$CURL_BIN" >/dev/null 2>&1; then
         fail "curl is required; set CURL_BIN to a compatible curl binary"
+    fi
+}
+
+validate_positive_seconds() {
+    local name="$1"
+    local value="$2"
+    if [[ ! "$value" =~ ^[1-9][0-9]*$ ]]; then
+        fail "$name must be a positive integer number of seconds"
     fi
 }
 
@@ -81,6 +93,9 @@ validate_inputs() {
         [[ -n "$WEBDAV_USERNAME" && -n "$WEBDAV_PASSWORD" ]] || fail "both WebDAV username and password are required when authentication is used"
         [[ "$WEBDAV_USERNAME" != *[[:cntrl:]]* && "$WEBDAV_PASSWORD" != *[[:cntrl:]]* ]] || fail "WebDAV credentials must not contain control characters"
     fi
+
+    validate_positive_seconds "CURL_CONNECT_TIMEOUT" "$CURL_CONNECT_TIMEOUT"
+    validate_positive_seconds "CURL_MAX_TIME" "$CURL_MAX_TIME"
 }
 
 escape_curl_config_value() {
@@ -159,6 +174,10 @@ run_smoke() {
     if [[ "$CURL_INSECURE" == "1" ]]; then
         curl_common_args+=(--insecure)
     fi
+    curl_common_args+=(
+        "--connect-timeout=$CURL_CONNECT_TIMEOUT"
+        "--max-time=$CURL_MAX_TIME"
+    )
 
     tmp_dir="$(mktemp -d)"
     trap cleanup EXIT
