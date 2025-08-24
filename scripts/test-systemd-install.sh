@@ -79,6 +79,21 @@ make_doctor_path_without_openssl() {
   done
 }
 
+make_doctor_path_without_getent() {
+  local fake_path="$1"
+  local target_path="$2"
+  local cmd resolved
+
+  mkdir -p "$target_path"
+  for cmd in bash awk cat dirname grep mktemp python3 rm sed stat tail; do
+    resolved="$(command -v "$cmd")" || fail "required test command is missing: $cmd"
+    ln -sf "$resolved" "$target_path/$cmd"
+  done
+  for cmd in curl df findmnt id openssl ss systemctl timeout ufw; do
+    cp "$fake_path/$cmd" "$target_path/$cmd"
+  done
+}
+
 make_fake_admin_path() {
   local dir="$1"
   mkdir -p "$dir"
@@ -1350,7 +1365,10 @@ JSON
   printf '<div id="root"></div>\n' > "$web_dir/index.html"
 
   write_executable "$fake_path/id" '#!/usr/bin/env bash' 'exit 0'
-  write_executable "$fake_path/getent" '#!/usr/bin/env bash' 'exit 1'
+  write_executable "$fake_path/getent" \
+    '#!/usr/bin/env bash' \
+    'if [[ "${1:-}" == "ahosts" && "${2:-}" == "nas.example.com" ]]; then printf "203.0.113.10 STREAM nas.example.com\n"; exit 0; fi' \
+    'exit 1'
   write_executable "$fake_path/runuser" '#!/usr/bin/env bash' 'shift 3; "$@"'
   write_executable "$fake_path/systemctl" \
     '#!/usr/bin/env bash' \
@@ -1727,7 +1745,10 @@ EOF
   chmod 0600 "$storage_dir/secrets.json"
 
   write_executable "$fake_path/id" '#!/usr/bin/env bash' 'exit 0'
-  write_executable "$fake_path/getent" '#!/usr/bin/env bash' 'exit 1'
+  write_executable "$fake_path/getent" \
+    '#!/usr/bin/env bash' \
+    'if [[ "${1:-}" == "ahosts" && "${2:-}" == "nas.example.com" ]]; then printf "203.0.113.10 STREAM nas.example.com\n"; exit 0; fi' \
+    'exit 1'
   write_executable "$fake_path/systemctl" \
     '#!/usr/bin/env bash' \
     'if [[ "${1:-}" == "is-active" ]]; then exit 0; fi' \
@@ -1815,6 +1836,8 @@ EOF
     "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain nas.example.com > "$case_dir/doctor-public.log"
 
   assert_file_contains "$case_dir/doctor-public.log" "Public access checks for nas.example.com"
+  assert_file_contains "$case_dir/doctor-public.log" "getent is available for public DNS diagnostics"
+  assert_file_contains "$case_dir/doctor-public.log" "public domain resolves locally: nas.example.com (203.0.113.10)"
   assert_file_contains "$case_dir/doctor-public.log" "public backend host is loopback-only: 127.0.0.1"
   assert_file_contains "$case_dir/doctor-public.log" "trusted proxy hops configured: 1"
   assert_file_contains "$case_dir/doctor-public.log" "public HTTPS health reachable: https://nas.example.com/health"
@@ -1850,6 +1873,7 @@ EOF
     "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain NAS.EXAMPLE.COM. > "$case_dir/doctor-public-normalized-domain.log"
 
   assert_file_contains "$case_dir/doctor-public-normalized-domain.log" "Public access checks for nas.example.com"
+  assert_file_contains "$case_dir/doctor-public-normalized-domain.log" "public domain resolves locally: nas.example.com (203.0.113.10)"
   assert_file_contains "$case_dir/doctor-public-normalized-domain.log" "public HTTPS health reachable: https://nas.example.com/health"
   assert_file_contains "$case_dir/doctor-public-normalized-domain.log" "public HTTP redirects to HTTPS: http://nas.example.com/health -> https://nas.example.com/health"
   assert_file_contains "$case_dir/doctor-public-normalized-domain.log" "Summary: 0 failure(s)"
@@ -3260,6 +3284,44 @@ EOF
 
   [[ "$status" -ne 0 ]] || fail "public doctor accepted missing openssl"
   assert_file_contains "$case_dir/doctor-public-no-openssl.log" "openssl is required for public HTTPS certificate checks"
+
+  local no_getent_path="$case_dir/no-getent-bin"
+  make_doctor_path_without_getent "$fake_path" "$no_getent_path"
+
+  set +e
+  PATH="$no_getent_path" \
+    BIN_DIR="$bin_dir" \
+    WEB_DIR="$web_dir" \
+    CONFIG_PATH="$case_dir/config.toml" \
+    DATAPLANE_HTTP_PORT=19091 \
+    BACKUP_ROOT="$backup_dir" \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain nas.example.com > "$case_dir/doctor-public-no-getent.log"
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "public doctor accepted missing getent"
+  assert_file_contains "$case_dir/doctor-public-no-getent.log" "getent is required for public diagnostics"
+
+  write_executable "$fake_path/getent" '#!/usr/bin/env bash' 'exit 1'
+
+  set +e
+  PATH="$fake_path:$PATH" \
+    BIN_DIR="$bin_dir" \
+    WEB_DIR="$web_dir" \
+    CONFIG_PATH="$case_dir/config.toml" \
+    DATAPLANE_HTTP_PORT=19091 \
+    BACKUP_ROOT="$backup_dir" \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain nas.example.com > "$case_dir/doctor-public-dns-missing.log"
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "public doctor accepted a public domain without local DNS resolution"
+  assert_file_contains "$case_dir/doctor-public-dns-missing.log" "public domain does not resolve locally: nas.example.com"
+
+  write_executable "$fake_path/getent" \
+    '#!/usr/bin/env bash' \
+    'if [[ "${1:-}" == "ahosts" && "${2:-}" == "nas.example.com" ]]; then printf "203.0.113.10 STREAM nas.example.com\n"; exit 0; fi' \
+    'exit 1'
 
   cat > "$case_dir/config-dotted-no-auth.toml" <<EOF
 auth.enabled = false

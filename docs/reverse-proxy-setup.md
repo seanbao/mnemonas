@@ -34,7 +34,7 @@ systemd 安装会把源码中的 `scripts/setup-reverse-proxy.sh` 安装为 `mne
 普通基础检查在两个来源都不可读时，会提示无法确认端口暴露状态。
 如果基础检查确认 Web/API/WebDAV 后端或 dataplane 端口监听在非 loopback 地址，`mnemonas-public-setup` 会失败并要求修复后重新运行。
 公网严格检查要求同时覆盖 IPv4 和 IPv6 监听；没有 `ss` 时，`/proc/net/tcp` 和 `/proc/net/tcp6` 必须都可读，否则 `mnemonas-doctor --public-domain` 会失败，避免漏检 IPv6 `[::]` 暴露。
-公网严格检查还需要 `curl`、`python3` 和 `openssl`，用于检查公网 HTTP(S) 入口、解析 duration 配置、检查 `users.json` 管理员冗余、自动生成的 WebDAV 凭据和 HTTPS 证书；缺少任一工具时，`mnemonas-doctor --public-domain` 会失败。
+公网严格检查还需要 `curl`、`python3`、`getent` 和 `openssl`，用于检查公网 HTTP(S) 入口、解析 duration 配置、检查 DNS 解析、`users.json` 管理员冗余、自动生成的 WebDAV 凭据和 HTTPS 证书；缺少任一工具时，`mnemonas-doctor --public-domain` 会失败。
 
 调整 UFW 时，脚本会删除 `8080/9090/9091` 或自定义后端端口上的宽泛放行规则，再写入拒绝规则。
 后续 `mnemonas-doctor --public-domain` 会把本机 UFW 中仍宽泛放行后端 control plane 或 dataplane 端口的规则视为公网部署失败。
