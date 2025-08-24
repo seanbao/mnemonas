@@ -139,7 +139,7 @@ ss -tlnp | grep -E '80|443|8080|9090|9091'
 - 分享链接基础 URL 形态和公开分享 API 响应缓存边界；
 - 后端直连端口、dataplane 端口暴露情况，以及本机 UFW 是否仍宽泛放行后端 control plane 或 dataplane 端口。
 
-证书检查需要服务器上有 `openssl`；缺少 `openssl` 时，`mnemonas-doctor --public-domain` 会失败。云安全组或上游防火墙仍需按清单单独复核。
+DNS 检查需要服务器上有 `getent`；缺少 `getent`，或 `getent ahosts <domain>` 没有返回地址时，`mnemonas-doctor --public-domain` 会失败。证书检查需要服务器上有 `openssl`；缺少 `openssl` 时，`mnemonas-doctor --public-domain` 会失败。云安全组或上游防火墙仍需按清单单独复核。
 公网 HTTP 必须返回到同一域名的 HTTPS 跳转；HTTP 不可达、非重定向响应或跳转到其他域名都会导致 `mnemonas-doctor --public-domain` 失败。
 
 公开部署认证检查要求 `auth.enabled = true`、`security.allow_unsafe_no_auth = false`，且启用 WebDAV 时不能使用 `auth_type = "none"`。
@@ -185,7 +185,7 @@ ss -tlnp | grep -E '80|443|8080|9090|9091'
 - MnemoNAS Web/API/WebDAV 只监听 `127.0.0.1:8080`；
 - dataplane `9090/9091` 或自定义端口只监听 `127.0.0.1`。
 - 本机端口检查覆盖 IPv4 和 IPv6；推荐安装 `iproute2` 以提供 `ss`，没有 `ss` 时 `/proc/net/tcp` 和 `/proc/net/tcp6` 必须都可读。
-- 运行 `mnemonas-doctor --public-domain` 的主机已安装 `curl`、`python3` 和 `openssl`，用于校验公网 HTTP(S) 入口、duration 配置、`users.json` 管理员冗余、自动生成的 WebDAV 凭据和 HTTPS 证书。
+- 运行 `mnemonas-doctor --public-domain` 的主机已安装 `curl`、`python3`、`getent` 和 `openssl`，用于校验公网 HTTP(S) 入口、duration 配置、DNS 解析、`users.json` 管理员冗余、自动生成的 WebDAV 凭据和 HTTPS 证书。
 
 ## 4. WebDAV 地址
 
@@ -226,7 +226,7 @@ sudo systemctl restart mnemonas
 - [ ] `http://nas.example.com/health` 跳转到同一域名的 HTTPS 地址。
 - [ ] 公网 `8080/9090/9091` 或自定义后端端口不可访问。
 - [ ] 运行 `mnemonas-doctor --public-domain` 的主机可使用 `ss`，或可同时读取 `/proc/net/tcp` 和 `/proc/net/tcp6`。
-- [ ] 运行 `mnemonas-doctor --public-domain` 的主机已安装 `curl`、`python3` 和 `openssl`。
+- [ ] 运行 `mnemonas-doctor --public-domain` 的主机已安装 `curl`、`python3`、`getent` 和 `openssl`。
 - [ ] 本机 UFW 没有宽泛放行 `8080/9090/9091` 或自定义后端端口。
 - [ ] `/etc/mnemonas/config.toml` 是普通私有文件，路径组件不包含符号链接，且 TOML 语法有效。
 - [ ] `/etc/mnemonas/config.toml` 中 `server.host = "127.0.0.1"`。

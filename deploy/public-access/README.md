@@ -34,6 +34,6 @@ base_url = "https://nas.example.com"
 sudo mnemonas-doctor --public-domain nas.example.com
 ```
 
-公网诊断依赖本机监听端口检查。推荐安装 `iproute2` 以提供 `ss`；没有 `ss` 时，`/proc/net/tcp` 和 `/proc/net/tcp6` 必须都可读，确保 `mnemonas-doctor --public-domain` 同时覆盖 IPv4 和 IPv6 监听。运行诊断的主机还必须安装 `curl`、`python3` 和 `openssl`，用于校验公网 HTTP(S) 入口、duration 配置、管理员冗余、自动生成的 WebDAV 凭据和 HTTPS 证书。
+公网诊断依赖本机监听端口检查。推荐安装 `iproute2` 以提供 `ss`；没有 `ss` 时，`/proc/net/tcp` 和 `/proc/net/tcp6` 必须都可读，确保 `mnemonas-doctor --public-domain` 同时覆盖 IPv4 和 IPv6 监听。运行诊断的主机还必须安装 `curl`、`python3`、`getent` 和 `openssl`，用于校验公网 HTTP(S) 入口、duration 配置、DNS 解析、管理员冗余、自动生成的 WebDAV 凭据和 HTTPS 证书。
 
 云防火墙或安全组只开放 `80/443` 到公网。MnemoNAS 后端 `8080`、dataplane `9090/9091` 以及其他自定义后端或 dataplane 端口不得暴露到公网。具体复核项见 [公网云防火墙复核清单](../../docs/cloud-firewall-checklist.md)。
