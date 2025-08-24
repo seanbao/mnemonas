@@ -117,6 +117,8 @@ sudo ufw deny 9090/tcp comment "MnemoNAS dataplane gRPC"
 sudo ufw deny 9091/tcp comment "MnemoNAS dataplane HTTP"
 ```
 
+If you changed the Web backend port or dataplane ports, replace `8080/9090/9091` with the actual ports, and keep dataplane ports closed to public and untrusted networks.
+
 ### Public Access
 
 Do not expose MnemoNAS directly to the public internet. Put it behind HTTPS using Caddy, Nginx, Traefik, Cloudflare Tunnel, or another trusted reverse proxy.
@@ -125,7 +127,7 @@ Recommended path:
 
 1. Run `sudo mnemonas-public-setup --proxy caddy <domain> <email>` or `sudo mnemonas-public-setup --proxy nginx <domain> <email>` on the server to generate and install reverse-proxy configuration.
 2. After logging into the Web UI, open `System Settings -> General -> Public Access Wizard` and apply the recommended `server.host`, `trusted_proxy_hops`, share base URL, and related settings for the chosen deployment mode.
-3. Run the Web UI security self-check to verify authentication, HTTPS request semantics, trusted-proxy handling, listener scope, WebDAV authentication, share base URL, and initial password file state.
+3. Run the Web UI security self-check to verify authentication, HTTPS request semantics, trusted-proxy handling, listener scope, dataplane ports, WebDAV authentication, share base URL, initial password file state, and administrator-account redundancy.
 4. Run `sudo mnemonas-doctor --public-domain <domain>` on the server to re-check the public domain, reverse proxy, and local port exposure.
 
 The Web UI wizard updates MnemoNAS application settings and shows operational guidance. Certificate issuance, firewall rules, cloud security groups, and reverse-proxy installation still belong on the server or in the cloud console. The security self-check can only verify runtime state and request semantics that the MnemoNAS process can observe; it does not replace cloud security-group, real public-port, or certificate-chain checks.
@@ -219,7 +221,7 @@ cloudflared tunnel run mnemonas
 - [ ] `webdav.auth_type` is not `none` unless the server is loopback-only.
 - [ ] Public deployments use `server.host = "127.0.0.1"` and are reachable only through the HTTPS reverse proxy.
 - [ ] Dataplane gRPC/HTTP ports are loopback-only or private.
-- [ ] The Web UI security self-check has no `block` items; public deployments should resolve all `warning` items before exposure.
+- [ ] The Web UI security self-check has no `block` items; public deployments should resolve all `warning` items before exposure, especially `allow_unsafe_no_auth`, reverse-proxy headers, dataplane ports, and spare-administrator warnings.
 - [ ] `sudo mnemonas-doctor --public-domain <domain>` reports HTTP-to-HTTPS redirect behavior, a matching HTTPS certificate with at least 30 days remaining, verified renewal guidance, and no direct backend exposure, dataplane exposure, or UFW allow warnings.
 - [ ] The [Public cloud firewall checklist](cloud-firewall-checklist.en.md) has been applied: cloud security groups or public firewall rules expose only `80/443`; management ports, the Web backend port, and dataplane ports are not publicly reachable.
 - [ ] Public deployments use HTTPS.
@@ -237,6 +239,7 @@ curl -I https://<domain>/health
 
 curl --connect-timeout 3 http://<domain>:8080/health
 # expected: failed connection or timeout
+# If you use custom backend ports, check that those ports also fail or time out.
 
 curl https://<domain>/dav/
 # expected: 401 Unauthorized when WebDAV authentication is enabled

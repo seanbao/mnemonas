@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { fireEvent } from '@testing-library/react'
+import { fireEvent, within } from '@testing-library/react'
 import { render, screen, waitFor } from '@/test/utils'
 import userEvent from '@testing-library/user-event'
 import * as HeroUI from '@heroui/react'
@@ -769,8 +769,9 @@ describe('AlbumPage', () => {
       await user.click(screen.getByRole('button', { name: '显示图片信息' }))
 
       await waitFor(() => {
-        expect(screen.getByText('大小')).toBeTruthy()
-        expect(screen.getByText('--')).toBeTruthy()
+        const sizeField = screen.getByText('大小').closest('div')
+        expect(sizeField).toBeTruthy()
+        expect(within(sizeField as HTMLElement).getByText('--')).toBeTruthy()
       })
     })
 

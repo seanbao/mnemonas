@@ -335,7 +335,8 @@ export function formatShareUrl(shareUrl: string, origin = window.location.origin
   }
 
   const relativePath = trimmed.startsWith('/') ? trimmed : `/${trimmed}`
-  return `${origin}${relativePath}`
+  const normalizedOrigin = origin.replace(/\/+$/, '')
+  return `${normalizedOrigin}${relativePath}`
 }
 
 async function parseWrappedShareSuccess<T>(response: Response, invalidMessage: string): Promise<T> {
@@ -662,6 +663,9 @@ export function formatExpiration(expiresAt?: string): string {
   if (!expiresAt) return '永不过期'
   
   const expires = new Date(expiresAt)
+  if (Number.isNaN(expires.getTime())) {
+    return '过期时间无效'
+  }
   const now = new Date()
   const diff = expires.getTime() - now.getTime()
   

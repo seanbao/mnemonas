@@ -541,6 +541,105 @@ describe('SettingsPage', () => {
       }))
     })
 
+    it('applies public HTTP exposure recommendations to the settings form', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockGetSecurityCheck.mockResolvedValueOnce({
+        success: true,
+        data: {
+          status: 'block',
+          generated_at: '2026-05-08T00:00:00Z',
+          checks: [
+            {
+              id: 'public_http_exposure',
+              status: 'block',
+              title: '检测到公网 HTTP 直连风险',
+              message: '请只开放 80/443 给反向代理。',
+            },
+          ],
+          request: { scheme: 'http' },
+          config: { server_host: '0.0.0.0' },
+        },
+      })
+      render(<SettingsPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('检测到公网 HTTP 直连风险')).toBeTruthy()
+      })
+
+      await user.click(screen.getByRole('button', { name: '应用代理推荐' }))
+
+      expect(screen.getByDisplayValue('127.0.0.1')).toBeTruthy()
+      expect(screen.getByLabelText('受信代理层数')).toHaveValue(1)
+      expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({
+        title: '已应用反向代理推荐',
+      }))
+    })
+
+    it('shows manual guidance for unsafe no-auth overrides', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockGetSecurityCheck.mockResolvedValueOnce({
+        success: true,
+        data: {
+          status: 'block',
+          generated_at: '2026-05-08T00:00:00Z',
+          checks: [
+            {
+              id: 'unsafe_no_auth_override',
+              status: 'block',
+              title: '无认证暴露例外已开启',
+              message: '公网访问前必须修复。',
+            },
+          ],
+          request: { scheme: 'http' },
+          config: { allow_unsafe_no_auth: true },
+        },
+      })
+      render(<SettingsPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('无认证暴露例外已开启')).toBeTruthy()
+      })
+
+      await user.click(screen.getByRole('button', { name: '查看处理方式' }))
+
+      expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({
+        title: '需要编辑配置文件',
+        description: expect.stringContaining('allow_unsafe_no_auth'),
+      }))
+    })
+
+    it('opens user management for administrator-account warnings', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockGetSecurityCheck.mockResolvedValueOnce({
+        success: true,
+        data: {
+          status: 'warning',
+          generated_at: '2026-05-08T00:00:00Z',
+          checks: [
+            {
+              id: 'admin_accounts',
+              status: 'warning',
+              title: '只有一个启用中的管理员',
+              message: '建议创建一个备用管理员账号。',
+            },
+          ],
+          request: { scheme: 'https' },
+          config: { active_admins: 1 },
+        },
+      })
+      render(<SettingsPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('只有一个启用中的管理员')).toBeTruthy()
+      })
+
+      await user.click(screen.getByRole('button', { name: '管理用户' }))
+
+      await waitFor(() => {
+        expect(window.location.pathname).toBe('/users')
+      })
+    })
+
     it('switches to retention tab', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
       render(<SettingsPage />)

@@ -8,7 +8,7 @@ This guide is for a public Linux server where MnemoNAS runs locally and users ac
 Public 80/443 -> Caddy/Nginx -> 127.0.0.1:8080 -> MnemoNAS
 ```
 
-Do not expose MnemoNAS `8080` or dataplane `9090/9091` directly to the public internet.
+Do not expose MnemoNAS `8080` or dataplane `9090/9091` directly to the public internet. If you changed the backend ports, keep those custom ports private as well.
 
 ## Prerequisites
 
@@ -64,7 +64,7 @@ Caddy is the recommended default. The helper script will:
 - bind MnemoNAS `[server].host` to `127.0.0.1`;
 - set `trusted_proxy_hops = 1`;
 - restart `mnemonas.service`;
-- allow local `80/443` and restrict direct `8080/9090/9091`;
+- allow local `80/443` and restrict direct `8080/9090/9091` or the custom backend ports;
 - run basic public-entry checks.
 
 ```bash
@@ -129,7 +129,7 @@ Expected state:
 
 - Caddy/Nginx listens on `0.0.0.0:80` and `0.0.0.0:443`;
 - MnemoNAS Web/API/WebDAV listens only on `127.0.0.1:8080`;
-- dataplane `9090/9091` listen only on `127.0.0.1`.
+- dataplane `9090/9091`, or your custom dataplane ports, listen only on `127.0.0.1`.
 
 ## 4. WebDAV URL
 
@@ -155,10 +155,13 @@ sudo systemctl restart mnemonas
 ## 5. Go-Live Checklist
 
 - [ ] The initial administrator password has been changed, and `initial-password.txt` is gone or no longer needed.
+- [ ] At least two enabled administrator accounts exist, so one lost password does not lock out maintenance.
+- [ ] The Web UI security self-check has no `block` items; all `warning` items are fixed or explicitly accepted.
 - [ ] `https://nas.example.com/health` works.
-- [ ] Public `8080/9090/9091` are unreachable.
+- [ ] Public `8080/9090/9091`, or your custom backend ports, are unreachable.
 - [ ] `/etc/mnemonas/config.toml` has `server.host = "127.0.0.1"`.
 - [ ] `/etc/mnemonas/config.toml` has `trusted_proxy_hops = 1`.
+- [ ] `/etc/mnemonas/config.toml` has `security.allow_unsafe_no_auth = false`.
 - [ ] Cloud security group exposes only `80/443`, with SSH limited to trusted sources.
 - [ ] External backups exist; this public server is not the only copy of important data.
 

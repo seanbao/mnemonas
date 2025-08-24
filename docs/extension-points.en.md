@@ -74,7 +74,7 @@ Potential plugin areas:
 
 - File processors: thumbnails, metadata extraction, media analysis.
 - Notifications: webhook, email, chat integrations.
-- Authentication providers: custom enterprise login or OIDC adapters.
+- Authentication providers: family or small-team identity adapters such as OIDC.
 
 Interface sketch:
 

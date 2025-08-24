@@ -171,7 +171,7 @@ Recommended boundary:
 | --- | --- | --- |
 | LAN / private network | Admin, SSH, authorized user access | Allow `8080` only from trusted ranges |
 | HTTPS reverse proxy / tunnel | Public share links | Expose only `80/443` |
-| Dataplane `9090/9091` | Internal nasd-to-dataplane traffic | Keep loopback-only or container-internal |
+| Dataplane `9090/9091` or custom ports | Internal nasd-to-dataplane traffic | Keep loopback-only or container-internal |
 
 UFW example:
 
@@ -187,6 +187,8 @@ sudo ufw allow 443/tcp
 sudo ufw enable
 sudo ufw status numbered
 ```
+
+If you changed `SERVER_PORT`, `DATAPLANE_GRPC_ADDR`, or `DATAPLANE_HTTP_ADDR`, replace the example ports with the actual ports.
 
 If the reverse proxy and MnemoNAS run on the same machine, set `[server].host = "127.0.0.1"` when LAN direct access is not needed.
 

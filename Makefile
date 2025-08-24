@@ -1,4 +1,4 @@
-.PHONY: all build web-build test test-torture fault-injection clean deps dev proto proto-go proto-rust go-packages fmt lint workflows-check scripts-check security-check install-audit-tools docker e2e bench coverage check help
+.PHONY: all build web-build test test-torture fault-injection clean deps dev proto proto-go proto-rust go-packages fmt lint workflows-check scripts-check security-check install-audit-tools docker e2e bench coverage check verify-changed help
 
 # 版本信息
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
@@ -9,7 +9,7 @@ GO_PACKAGE_PATTERN ?= ./...
 GO_PACKAGE_EXCLUDE_PATTERN ?= /web/node_modules/|/proto$$
 GO_CMD_ENV ?= GOTOOLCHAIN=local
 GO_LIST_ENV ?= $(GO_CMD_ENV)
-GO_LINT_PACKAGES ?= ./...
+GO_LINT_PACKAGES ?=
 GOLANGCI_LINT ?= golangci-lint
 SKIP_GOLANGCI_LINT ?= 0
 GOVULNCHECK_VERSION ?= v1.3.0
@@ -28,6 +28,7 @@ GO_TORTURE_PACKAGES ?= ./internal/api ./internal/auth ./internal/share ./interna
 WEB_TORTURE_SPECS ?= files.spec.ts interaction-integrity.spec.ts layout-integrity.spec.ts runtime-integrity.spec.ts
 DEPLOYMENT_SCRIPTS := scripts/install-systemd.sh scripts/uninstall-systemd.sh scripts/mnemonas-doctor.sh scripts/mnemonas-docker-preflight.sh scripts/docker-quickstart.sh scripts/mnemonas-dataplane-start.sh scripts/test-systemd-install.sh scripts/test-systemd-uninstall.sh scripts/test-docker-start.sh scripts/test-docker-preflight.sh scripts/test-docker-quickstart.sh scripts/test-fault-injection-safety.sh scripts/test-e2e-safety.sh scripts/test-benchmark-safety.sh scripts/test-dataplane-start.sh scripts/test-dev-safety.sh scripts/test-reverse-proxy-safety.sh scripts/test-public-access-templates.sh scripts/test-with-test-dataplane-safety.sh scripts/docker-start.sh scripts/setup-reverse-proxy.sh scripts/dev.sh scripts/benchmark.sh
 ACCEPTANCE_SCRIPTS := scripts/e2e-test.sh scripts/fault-injection-test.sh scripts/torture-test.sh scripts/run-e2e-isolated.sh scripts/run-benchmark-isolated.sh scripts/with-test-dataplane.sh
+DEV_SCRIPTS := scripts/verify-changed.sh scripts/check-commit-message.sh scripts/test-commit-message.sh
 WEB_SCRIPTS := web/scripts/start-e2e-backend.sh
 
 export GO_FUZZTIME
@@ -62,6 +63,7 @@ help:
 	@echo "  test       - Run all tests"
 	@echo "  test-torture - Run race/fuzz/property/browser torture tests"
 	@echo "  coverage   - Run tests with coverage report"
+	@echo "  verify-changed - Run checks selected from changed files"
 	@echo "  lint       - Run linters (Go + Rust)"
 	@echo "  scripts-check - Validate deployment shell scripts"
 	@echo "  security-check - Run dependency vulnerability checks"
@@ -214,10 +216,15 @@ fmt:
 # 代码检查
 lint:
 	@echo "🔍 Linting Go..."
-	@if [ "$(SKIP_GOLANGCI_LINT)" = "1" ]; then \
+	@$(RESOLVE_GO_PACKAGES); \
+	lint_packages="$(GO_LINT_PACKAGES)"; \
+	if [ -z "$$lint_packages" ]; then \
+		lint_packages="$$packages"; \
+	fi; \
+	if [ "$(SKIP_GOLANGCI_LINT)" = "1" ]; then \
 		echo "⚠️  Skipping golangci-lint because SKIP_GOLANGCI_LINT=1"; \
 	elif command -v "$(GOLANGCI_LINT)" >/dev/null 2>&1; then \
-		"$(GOLANGCI_LINT)" run $(GO_LINT_PACKAGES); \
+		"$(GOLANGCI_LINT)" run $$lint_packages; \
 	else \
 		echo "❌ golangci-lint not installed. Install golangci-lint, set GOLANGCI_LINT=/path/to/golangci-lint, or use SKIP_GOLANGCI_LINT=1 for a deliberate local-only skip." >&2; \
 		exit 1; \
@@ -240,9 +247,9 @@ workflows-check:
 # 部署脚本检查
 scripts-check:
 	@echo "🔍 Checking deployment scripts..."
-	bash -n $(DEPLOYMENT_SCRIPTS) $(ACCEPTANCE_SCRIPTS) $(WEB_SCRIPTS)
+	bash -n $(DEPLOYMENT_SCRIPTS) $(ACCEPTANCE_SCRIPTS) $(DEV_SCRIPTS) $(WEB_SCRIPTS)
 	@if command -v shellcheck >/dev/null 2>&1; then \
-		shellcheck $(DEPLOYMENT_SCRIPTS) $(WEB_SCRIPTS); \
+		shellcheck $(DEPLOYMENT_SCRIPTS) $(DEV_SCRIPTS) $(WEB_SCRIPTS); \
 		shellcheck -e SC2155 -e SC2317 $(ACCEPTANCE_SCRIPTS); \
 	else \
 		echo "⚠️  shellcheck not installed, skipping"; \
@@ -260,6 +267,7 @@ scripts-check:
 	./scripts/test-with-test-dataplane-safety.sh
 	./scripts/test-e2e-safety.sh
 	./scripts/test-fault-injection-safety.sh
+	./scripts/test-commit-message.sh
 
 # 安全依赖检查
 security-check:
@@ -300,6 +308,9 @@ docker:
 # 运行所有检查 (CI 使用)
 check: workflows-check scripts-check lint test
 	@echo "✅ All checks passed"
+
+verify-changed:
+	./scripts/verify-changed.sh
 
 # 快速检查 (commit 前)
 quick-check:

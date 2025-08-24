@@ -5508,6 +5508,18 @@ func securityCheckOverallStatus(checks []securityCheckItem) securityCheckStatus 
 	return status
 }
 
+func securityRemoteIPIsPublic(remoteIP string) bool {
+	parsed := net.ParseIP(strings.TrimSpace(remoteIP))
+	if parsed == nil {
+		return false
+	}
+	return parsed.IsGlobalUnicast() &&
+		!parsed.IsLoopback() &&
+		!parsed.IsPrivate() &&
+		!parsed.IsLinkLocalUnicast() &&
+		!parsed.IsLinkLocalMulticast()
+}
+
 func securityListenHostIsLoopback(host string) bool {
 	trimmed := strings.TrimSpace(host)
 	if trimmed == "" || trimmed == "*" {
@@ -5535,9 +5547,6 @@ func securityTCPAddressHost(address string) string {
 	if err == nil {
 		return strings.Trim(host, "[]")
 	}
-	if strings.Count(trimmed, ":") == 0 {
-		return trimmed
-	}
 	return ""
 }
 
@@ -5563,11 +5572,20 @@ func (s *Server) handleGetSecurityCheck(w http.ResponseWriter, r *http.Request) 
 	serverLoopback := securityListenHostIsLoopback(cfg.Server.Host)
 	dataplaneHost := securityTCPAddressHost(cfg.DataPlane.GRPCAddress)
 	dataplaneLoopback := securityListenHostIsLoopback(dataplaneHost)
+	dataplaneHTTPAddress := strings.TrimSpace(os.Getenv("DATAPLANE_HTTP_ADDR"))
+	if dataplaneHTTPAddress == "" {
+		dataplaneHTTPAddress = "127.0.0.1:9091"
+	}
+	dataplaneHTTPHost := securityTCPAddressHost(dataplaneHTTPAddress)
+	dataplaneHTTPLoopback := securityListenHostIsLoopback(dataplaneHTTPHost)
 	smbHost := securityTCPAddressHost(cfg.SMB.Listen)
 	smbLoopback := securityListenHostIsLoopback(smbHost)
 	initialPasswordFile := filepath.Join(filepath.Dir(cfg.Auth.UsersFile), "initial-password.txt")
+	forwardedProto := strings.TrimSpace(r.Header.Get("X-Forwarded-Proto"))
+	remotePublic := securityRemoteIPIsPublic(remoteIP)
+	unsafeNoAuthRisk := cfg.Security.AllowUnsafeNoAuth && !serverLoopback && (!s.authEnabled || (cfg.WebDAV.Enabled && strings.EqualFold(cfg.WebDAV.AuthType, "none")))
 
-	checks := make([]securityCheckItem, 0, 9)
+	checks := make([]securityCheckItem, 0, 14)
 
 	if s.authEnabled {
 		checks = append(checks, securityCheckItem{
@@ -5582,6 +5600,37 @@ func (s *Server) handleGetSecurityCheck(w http.ResponseWriter, r *http.Request) 
 			Status:  securityCheckBlock,
 			Title:   "Web 登录认证未启用",
 			Message: "公网访问前必须启用账号登录。",
+		})
+	}
+
+	if cfg.Security.AllowUnsafeNoAuth {
+		status := securityCheckWarning
+		message := "已显式允许无认证服务绑定到非本机地址；如果不是临时调试，请关闭该例外。"
+		if unsafeNoAuthRisk {
+			status = securityCheckBlock
+			message = "当前允许无认证服务暴露到非本机地址。公网访问前必须重新启用认证，或关闭该例外并重启服务。"
+		}
+		checks = append(checks, securityCheckItem{
+			ID:      "unsafe_no_auth_override",
+			Status:  status,
+			Title:   "无认证暴露例外已开启",
+			Message: message,
+			Details: map[string]interface{}{
+				"allow_unsafe_no_auth": cfg.Security.AllowUnsafeNoAuth,
+				"auth_enabled":         s.authEnabled,
+				"webdav_enabled":       cfg.WebDAV.Enabled,
+				"webdav_auth_type":     cfg.WebDAV.AuthType,
+			},
+		})
+	} else {
+		checks = append(checks, securityCheckItem{
+			ID:      "unsafe_no_auth_override",
+			Status:  securityCheckPass,
+			Title:   "未启用无认证暴露例外",
+			Message: "危险配置例外保持关闭。",
+			Details: map[string]interface{}{
+				"allow_unsafe_no_auth": cfg.Security.AllowUnsafeNoAuth,
+			},
 		})
 	}
 
@@ -5611,6 +5660,47 @@ func (s *Server) handleGetSecurityCheck(w http.ResponseWriter, r *http.Request) 
 		})
 	}
 
+	switch {
+	case requestSchemeValue == "https":
+		checks = append(checks, securityCheckItem{
+			ID:      "public_http_exposure",
+			Status:  securityCheckPass,
+			Title:   "当前访问已使用 HTTPS",
+			Message: "当前请求没有经过明文 HTTP。",
+		})
+	case !serverLoopback && remotePublic:
+		checks = append(checks, securityCheckItem{
+			ID:      "public_http_exposure",
+			Status:  securityCheckBlock,
+			Title:   "检测到公网 HTTP 直连风险",
+			Message: "当前请求来自公网地址且未使用 HTTPS。请只开放 80/443 给反向代理，并避免直接暴露 MnemoNAS 后端端口。",
+			Details: map[string]interface{}{
+				"remote_ip":   remoteIP,
+				"server_host": cfg.Server.Host,
+				"server_port": cfg.Server.Port,
+			},
+		})
+	case !serverLoopback:
+		checks = append(checks, securityCheckItem{
+			ID:      "public_http_exposure",
+			Status:  securityCheckWarning,
+			Title:   "HTTP 直连仍可访问",
+			Message: "当前访问不是 HTTPS，且 Web 服务监听非本机地址。公网访问前请改为 HTTPS 反向代理入口。",
+			Details: map[string]interface{}{
+				"remote_ip":   remoteIP,
+				"server_host": cfg.Server.Host,
+				"server_port": cfg.Server.Port,
+			},
+		})
+	default:
+		checks = append(checks, securityCheckItem{
+			ID:      "public_http_exposure",
+			Status:  securityCheckPass,
+			Title:   "未检测到公网 HTTP 直连",
+			Message: "当前 Web 服务监听本机地址，适合作为反向代理后端。",
+		})
+	}
+
 	if cfg.Server.TLS.Enabled || cfg.Server.TrustedProxyHops > 0 {
 		checks = append(checks, securityCheckItem{
 			ID:      "trusted_proxy_or_tls",
@@ -5632,6 +5722,58 @@ func (s *Server) handleGetSecurityCheck(w http.ResponseWriter, r *http.Request) 
 			Details: map[string]interface{}{
 				"tls_enabled":        cfg.Server.TLS.Enabled,
 				"trusted_proxy_hops": cfg.Server.TrustedProxyHops,
+			},
+		})
+	}
+
+	switch {
+	case forwardedProto == "" && cfg.Server.TrustedProxyHops > 0 && requestSchemeValue != "https":
+		checks = append(checks, securityCheckItem{
+			ID:      "forwarded_proto_trust",
+			Status:  securityCheckWarning,
+			Title:   "反向代理未声明 HTTPS",
+			Message: "已配置受信代理层数，但当前请求没有 X-Forwarded-Proto=https。请确认代理会转发该 header，否则 Secure cookie 判断可能不符合预期。",
+			Details: map[string]interface{}{
+				"trusted_proxy_hops": cfg.Server.TrustedProxyHops,
+				"forwarded_proto":    forwardedProto,
+				"remote_ip":          remoteIP,
+			},
+		})
+	case forwardedProto != "" && cfg.Server.TrustedProxyHops == 0:
+		checks = append(checks, securityCheckItem{
+			ID:      "forwarded_proto_trust",
+			Status:  securityCheckWarning,
+			Title:   "反向代理 header 未启用信任",
+			Message: "检测到 X-Forwarded-Proto，但 trusted_proxy_hops 为 0。若正在通过反向代理访问，请设置受信代理层数；若不是，请移除上游伪造 header。",
+			Details: map[string]interface{}{
+				"trusted_proxy_hops": cfg.Server.TrustedProxyHops,
+				"forwarded_proto":    forwardedProto,
+				"remote_ip":          remoteIP,
+			},
+		})
+	case forwardedProto != "" && cfg.Server.TrustedProxyHops > 0 && !trustedForwardedSource:
+		checks = append(checks, securityCheckItem{
+			ID:      "forwarded_proto_trust",
+			Status:  securityCheckBlock,
+			Title:   "转发 header 来源不受信任",
+			Message: "请求携带反向代理 header，但直连来源不是本机或私有网段。请不要让公网客户端直接访问后端端口。",
+			Details: map[string]interface{}{
+				"trusted_proxy_hops":       cfg.Server.TrustedProxyHops,
+				"forwarded_proto":          forwardedProto,
+				"remote_ip":                remoteIP,
+				"trusted_forwarded_source": trustedForwardedSource,
+			},
+		})
+	default:
+		checks = append(checks, securityCheckItem{
+			ID:      "forwarded_proto_trust",
+			Status:  securityCheckPass,
+			Title:   "反向代理 header 信任状态正常",
+			Message: "未检测到被忽略或来源异常的转发 header。",
+			Details: map[string]interface{}{
+				"trusted_proxy_hops":       cfg.Server.TrustedProxyHops,
+				"forwarded_proto":          forwardedProto,
+				"trusted_forwarded_source": trustedForwardedSource,
 			},
 		})
 	}
@@ -5666,6 +5808,61 @@ func (s *Server) handleGetSecurityCheck(w http.ResponseWriter, r *http.Request) 
 		})
 	}
 
+	if !s.authEnabled {
+		checks = append(checks, securityCheckItem{
+			ID:      "admin_accounts",
+			Status:  securityCheckWarning,
+			Title:   "管理员账号检查不可用",
+			Message: "Web 登录认证未启用；请先启用认证，再为公网访问准备至少一个备用管理员。",
+		})
+	} else if s.userStore == nil {
+		checks = append(checks, securityCheckItem{
+			ID:      "admin_accounts",
+			Status:  securityCheckWarning,
+			Title:   "无法读取管理员账号",
+			Message: "当前无法确认是否有备用管理员，请检查用户配置文件状态。",
+		})
+	} else {
+		activeAdmins := 0
+		for _, user := range s.userStore.List() {
+			if user.Role == auth.RoleAdmin && !user.Disabled {
+				activeAdmins++
+			}
+		}
+		switch {
+		case activeAdmins == 0:
+			checks = append(checks, securityCheckItem{
+				ID:      "admin_accounts",
+				Status:  securityCheckBlock,
+				Title:   "没有可用管理员账号",
+				Message: "至少需要一个启用中的管理员账号。",
+				Details: map[string]interface{}{
+					"active_admins": activeAdmins,
+				},
+			})
+		case activeAdmins == 1:
+			checks = append(checks, securityCheckItem{
+				ID:      "admin_accounts",
+				Status:  securityCheckWarning,
+				Title:   "只有一个启用中的管理员",
+				Message: "公网访问前建议创建一个备用管理员账号，避免主账号遗失密码或被禁用后无法管理系统。",
+				Details: map[string]interface{}{
+					"active_admins": activeAdmins,
+				},
+			})
+		default:
+			checks = append(checks, securityCheckItem{
+				ID:      "admin_accounts",
+				Status:  securityCheckPass,
+				Title:   "管理员账号有备用",
+				Message: "已存在多个启用中的管理员账号。",
+				Details: map[string]interface{}{
+					"active_admins": activeAdmins,
+				},
+			})
+		}
+	}
+
 	if dataplaneLoopback {
 		checks = append(checks, securityCheckItem{
 			ID:      "dataplane_listen",
@@ -5684,6 +5881,28 @@ func (s *Server) handleGetSecurityCheck(w http.ResponseWriter, r *http.Request) 
 			Message: "请将 dataplane.grpc_address 绑定到 127.0.0.1 或 ::1，并通过 Web 控制面访问文件能力。",
 			Details: map[string]interface{}{
 				"grpc_address": cfg.DataPlane.GRPCAddress,
+			},
+		})
+	}
+
+	if dataplaneHTTPLoopback {
+		checks = append(checks, securityCheckItem{
+			ID:      "dataplane_http_listen",
+			Status:  securityCheckPass,
+			Title:   "数据面 HTTP 仅监听本机",
+			Message: "数据面健康与统计端口不会直接暴露到外部网络。",
+			Details: map[string]interface{}{
+				"http_address": dataplaneHTTPAddress,
+			},
+		})
+	} else {
+		checks = append(checks, securityCheckItem{
+			ID:      "dataplane_http_listen",
+			Status:  securityCheckBlock,
+			Title:   "数据面 HTTP 不应暴露外网",
+			Message: "请将 DATAPLANE_HTTP_ADDR 绑定到 127.0.0.1:9091 或 [::1]:9091，并通过 Web 控制面查看健康状态。",
+			Details: map[string]interface{}{
+				"http_address": dataplaneHTTPAddress,
 			},
 		})
 	}
@@ -5845,16 +6064,18 @@ func (s *Server) handleGetSecurityCheck(w http.ResponseWriter, r *http.Request) 
 			"forwarded_proto":          strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")),
 		},
 		Config: map[string]interface{}{
-			"auth_enabled":        s.authEnabled,
-			"server_host":         cfg.Server.Host,
-			"server_port":         cfg.Server.Port,
-			"tls_enabled":         cfg.Server.TLS.Enabled,
-			"trusted_proxy_hops":  cfg.Server.TrustedProxyHops,
-			"dataplane_grpc_addr": cfg.DataPlane.GRPCAddress,
-			"webdav_enabled":      cfg.WebDAV.Enabled,
-			"webdav_auth_type":    cfg.WebDAV.AuthType,
-			"smb_enabled":         cfg.SMB.Enabled,
-			"share_enabled":       cfg.Share.Enabled,
+			"auth_enabled":         s.authEnabled,
+			"server_host":          cfg.Server.Host,
+			"server_port":          cfg.Server.Port,
+			"tls_enabled":          cfg.Server.TLS.Enabled,
+			"trusted_proxy_hops":   cfg.Server.TrustedProxyHops,
+			"dataplane_grpc_addr":  cfg.DataPlane.GRPCAddress,
+			"dataplane_http_addr":  dataplaneHTTPAddress,
+			"webdav_enabled":       cfg.WebDAV.Enabled,
+			"webdav_auth_type":     cfg.WebDAV.AuthType,
+			"smb_enabled":          cfg.SMB.Enabled,
+			"share_enabled":        cfg.Share.Enabled,
+			"allow_unsafe_no_auth": cfg.Security.AllowUnsafeNoAuth,
 		},
 	}
 

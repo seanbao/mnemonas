@@ -177,11 +177,11 @@ curl -X POST \
 
 ### How does deduplication work?
 
-MnemoNAS stores version content in a CAS with content-defined chunking:
+MnemoNAS stores version content in a BLAKE3 whole-object CAS today:
 
-- Identical content is stored once.
-- Large files are split into 256KB-4MB chunks.
-- Similar versions can share unchanged chunks.
+- Identical full-file content is stored once.
+- The Rust dataplane has a FastCDC file API with typical chunk sizes in the 256KB-4MB range.
+- The current Go version-history path has not yet connected chunk-level reference tracking, so different versions share storage only when their full content is identical.
 
 Dataplane stats:
 
