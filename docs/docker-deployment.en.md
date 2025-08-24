@@ -239,7 +239,7 @@ services:
     restart: unless-stopped
 ```
 
-Do not use `server.host = "127.0.0.1"` inside the container to limit host access; that binds to the container's loopback. Restrict host exposure in the Compose port mapping instead.
+Do not use `server.host = "127.0.0.1"` inside the container to limit host access; that binds to the container's loopback. Restrict host exposure in the Compose port mapping instead. If you also disable WebDAV Basic Auth for a loopback-only developer container, keep `server.host = "0.0.0.0"` inside the container and set `security.allow_unsafe_no_auth = true` to explicitly confirm that the host port mapping is the access boundary.
 
 ## Multi-User NAS Example
 

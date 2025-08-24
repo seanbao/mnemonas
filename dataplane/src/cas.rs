@@ -6,12 +6,14 @@ use std::path::{Path, PathBuf};
 #[cfg(test)]
 use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use dashmap::DashMap;
 use thiserror::Error;
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
+use tokio::sync::Mutex;
 use tracing::{debug, info, instrument, warn};
 
 /// CAS storage error
@@ -25,6 +27,9 @@ pub enum CasError {
 
     #[error("Hash mismatch: expected={expected}, actual={actual}")]
     HashMismatch { expected: String, actual: String },
+
+    #[error("invalid object hash")]
+    InvalidHash,
 
     #[error("Compression error: {0}")]
     Compression(String),
@@ -73,6 +78,8 @@ pub struct CasStore {
     config: CasConfig,
     /// Memory index for fast existence check (hash -> original_size)
     index: DashMap<String, u64>,
+    /// Per-object write/delete locks. These avoid holding DashMap shard locks across async I/O.
+    write_locks: DashMap<String, Arc<Mutex<()>>>,
     /// Statistics
     stats: CasStats,
     temp_nonce: AtomicU64,
@@ -142,6 +149,7 @@ impl CasStore {
         let store = Self {
             config,
             index: DashMap::new(),
+            write_locks: DashMap::new(),
             stats: CasStats::default(),
             temp_nonce: AtomicU64::new(0),
             #[cfg(test)]
@@ -167,7 +175,24 @@ impl CasStore {
     pub async fn put_with_status(&self, data: &[u8]) -> Result<PutResult> {
         let hash = compute_hash(data);
         let original_size = data.len() as u64;
+        let write_lock = self.lock_for_hash(&hash);
 
+        let result = {
+            let _write_guard = write_lock.lock().await;
+            self.put_with_status_locked(hash.clone(), data, original_size)
+                .await
+        };
+
+        self.remove_hash_lock_if_idle(&hash, &write_lock);
+        result
+    }
+
+    async fn put_with_status_locked(
+        &self,
+        hash: String,
+        data: &[u8],
+        original_size: u64,
+    ) -> Result<PutResult> {
         if let Some(existing_size) = self.index.get(&hash).map(|r| *r) {
             if self.object_exists(&hash).await? {
                 debug!(hash = %hash, "dedup hit");
@@ -191,73 +216,59 @@ impl CasStore {
             }
         }
 
-        // Atomic check-and-insert using entry API (C3 fix - prevents TOCTOU race)
-        use dashmap::mapref::entry::Entry;
-        match self.index.entry(hash.clone()) {
-            Entry::Occupied(_) => {
-                debug!(hash = %hash, "dedup hit");
-                self.record_dedup_hit(original_size);
-                return Ok(PutResult {
-                    hash,
-                    deduplicated: true,
-                });
-            }
-            Entry::Vacant(entry) => {
-                #[cfg(test)]
-                self.maybe_fail_put()?;
+        #[cfg(test)]
+        self.maybe_fail_put()?;
 
-                let (write_data, path) = self.prepare_write_target(&hash, data)?;
+        let (write_data, path) = self.prepare_write_target(&hash, data)?;
 
-                let disk_size = write_data.len() as u64;
+        let disk_size = write_data.len() as u64;
 
-                // Create directory
-                if let Some(parent) = path.parent() {
-                    fs::create_dir_all(parent).await?;
-                }
-
-                // Atomic write
-                let (mut file, tmp_path) = self.create_temp_file(&path).await?;
-                if let Err(err) = file.write_all(&write_data).await {
-                    let _ = fs::remove_file(&tmp_path).await;
-                    return Err(CasError::Io(err));
-                }
-                if let Err(err) = file.sync_all().await {
-                    let _ = fs::remove_file(&tmp_path).await;
-                    return Err(CasError::Io(err));
-                }
-                drop(file);
-                if let Err(err) = fs::rename(&tmp_path, &path).await {
-                    let _ = fs::remove_file(&tmp_path).await;
-                    return Err(CasError::Io(err));
-                }
-                self.sync_parent_dir(&path).await?;
-
-                // Update index and stats
-                entry.insert(original_size);
-                self.stats
-                    .logical_size
-                    .fetch_add(original_size, Ordering::Relaxed);
-                self.stats.total_chunks.fetch_add(1, Ordering::Relaxed);
-                self.stats
-                    .total_size
-                    .fetch_add(original_size, Ordering::Relaxed);
-                self.stats
-                    .compressed_size
-                    .fetch_add(disk_size, Ordering::Relaxed);
-
-                debug!(
-                    hash = %hash,
-                    original_size,
-                    disk_size,
-                    compressed = path.extension().map(|e| e == "zst").unwrap_or(false),
-                    "stored successfully"
-                );
-                Ok(PutResult {
-                    hash,
-                    deduplicated: false,
-                })
-            }
+        // Create directory
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).await?;
         }
+
+        // Atomic write
+        let (mut file, tmp_path) = self.create_temp_file(&path).await?;
+        if let Err(err) = file.write_all(&write_data).await {
+            let _ = fs::remove_file(&tmp_path).await;
+            return Err(CasError::Io(err));
+        }
+        if let Err(err) = file.sync_all().await {
+            let _ = fs::remove_file(&tmp_path).await;
+            return Err(CasError::Io(err));
+        }
+        drop(file);
+        if let Err(err) = fs::rename(&tmp_path, &path).await {
+            let _ = fs::remove_file(&tmp_path).await;
+            return Err(CasError::Io(err));
+        }
+        self.sync_parent_dir(&path).await?;
+
+        // Update index and stats
+        self.index.insert(hash.clone(), original_size);
+        self.stats
+            .logical_size
+            .fetch_add(original_size, Ordering::Relaxed);
+        self.stats.total_chunks.fetch_add(1, Ordering::Relaxed);
+        self.stats
+            .total_size
+            .fetch_add(original_size, Ordering::Relaxed);
+        self.stats
+            .compressed_size
+            .fetch_add(disk_size, Ordering::Relaxed);
+
+        debug!(
+            hash = %hash,
+            original_size,
+            disk_size,
+            compressed = path.extension().map(|e| e == "zst").unwrap_or(false),
+            "stored successfully"
+        );
+        Ok(PutResult {
+            hash,
+            deduplicated: false,
+        })
     }
 
     fn record_dedup_hit(&self, original_size: u64) {
@@ -265,6 +276,23 @@ impl CasStore {
             .logical_size
             .fetch_add(original_size, Ordering::Relaxed);
         self.stats.hit_count.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn lock_for_hash(&self, hash: &str) -> Arc<Mutex<()>> {
+        self.write_locks
+            .entry(hash.to_string())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
+    }
+
+    fn remove_hash_lock_if_idle(&self, hash: &str, lock: &Arc<Mutex<()>>) {
+        if Arc::strong_count(lock) != 2 {
+            return;
+        }
+
+        self.write_locks.remove_if(hash, |_, existing| {
+            Arc::ptr_eq(existing, lock) && Arc::strong_count(existing) == 2
+        });
     }
 
     fn prepare_write_target(&self, hash: &str, data: &[u8]) -> Result<(Vec<u8>, PathBuf)> {
@@ -398,6 +426,8 @@ impl CasStore {
     /// Read data chunk
     #[instrument(skip(self))]
     pub async fn get(&self, hash: &str) -> Result<Vec<u8>> {
+        validate_hash(hash)?;
+
         let base_path = self.hash_to_path(hash);
         let compressed_path = base_path.with_extension("zst");
 
@@ -433,17 +463,36 @@ impl CasStore {
 
     /// Check if data chunk exists
     pub fn has(&self, hash: &str) -> bool {
+        if !is_valid_hash(hash) {
+            return false;
+        }
         self.index.contains_key(hash)
     }
 
     /// Get data chunk size (original uncompressed size)
     pub fn size(&self, hash: &str) -> Option<u64> {
+        if !is_valid_hash(hash) {
+            return None;
+        }
         self.index.get(hash).map(|r| *r)
     }
 
     /// Delete data chunk
     #[instrument(skip(self))]
     pub async fn delete(&self, hash: &str) -> Result<bool> {
+        validate_hash(hash)?;
+        let write_lock = self.lock_for_hash(hash);
+
+        let result = {
+            let _write_guard = write_lock.lock().await;
+            self.delete_locked(hash).await
+        };
+
+        self.remove_hash_lock_if_idle(hash, &write_lock);
+        result
+    }
+
+    async fn delete_locked(&self, hash: &str) -> Result<bool> {
         let base_path = self.hash_to_path(hash);
         let compressed_path = base_path.with_extension("zst");
 
@@ -501,6 +550,12 @@ impl CasStore {
     #[instrument(skip(self, hashes))]
     pub async fn scrub(&self, hashes: Option<&[String]>) -> Result<ScrubSummary> {
         use std::time::Instant;
+
+        if let Some(hashes) = hashes {
+            for hash in hashes {
+                validate_hash(hash)?;
+            }
+        }
 
         info!("starting scrub...");
         let start = Instant::now();
@@ -649,6 +704,8 @@ impl CasStore {
 
     /// Convert hash to file path
     fn hash_to_path(&self, hash: &str) -> PathBuf {
+        debug_assert!(is_valid_hash(hash), "invalid CAS hash");
+
         let mut path = self.config.root.clone();
 
         // Shard directories
@@ -682,7 +739,7 @@ impl CasStore {
             None => (file_name, false),
         };
 
-        if hash.len() != blake3::OUT_LEN * 2 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        if !is_valid_hash(hash) {
             return None;
         }
 
@@ -832,6 +889,20 @@ pub fn compute_hash(data: &[u8]) -> String {
     blake3::hash(data).to_hex().to_string()
 }
 
+/// Validate a BLAKE3 hex object hash used by external CAS callers.
+pub fn validate_hash(hash: &str) -> Result<()> {
+    if is_valid_hash(hash) {
+        Ok(())
+    } else {
+        Err(CasError::InvalidHash)
+    }
+}
+
+/// Returns true when hash is a fixed-width hexadecimal BLAKE3 digest.
+pub fn is_valid_hash(hash: &str) -> bool {
+    hash.len() == blake3::OUT_LEN * 2 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
 fn system_time_to_unix_timestamp(time: SystemTime) -> Option<i64> {
     let duration = time.duration_since(UNIX_EPOCH).ok()?;
     duration_to_unix_timestamp(duration)
@@ -877,6 +948,57 @@ mod tests {
                     .unwrap_or(false)
             })
             .collect()
+    }
+
+    #[test]
+    fn test_hash_validation_rejects_path_like_values() {
+        assert!(is_valid_hash(&"a".repeat(blake3::OUT_LEN * 2)));
+        assert!(is_valid_hash(&"A".repeat(blake3::OUT_LEN * 2)));
+
+        for hash in [
+            "",
+            "abc",
+            "/etc/passwd",
+            "../../outside",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaag",
+        ] {
+            assert!(
+                !is_valid_hash(hash),
+                "expected path-like or malformed hash to be rejected: {hash:?}"
+            );
+            assert!(matches!(validate_hash(hash), Err(CasError::InvalidHash)));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_cas_public_methods_reject_invalid_hash_paths() {
+        let dir = tempdir().unwrap();
+        let config = CasConfig {
+            root: dir.path().join("cas"),
+            compression_enabled: false,
+            ..Default::default()
+        };
+        let store = CasStore::new(config).await.unwrap();
+        let outside_path = dir.path().join("outside.txt");
+        std::fs::write(&outside_path, b"outside").unwrap();
+        let invalid_hash = outside_path.to_string_lossy().to_string();
+
+        assert!(matches!(
+            store.get(&invalid_hash).await,
+            Err(CasError::InvalidHash)
+        ));
+        assert!(matches!(
+            store.delete(&invalid_hash).await,
+            Err(CasError::InvalidHash)
+        ));
+        assert!(!store.has(&invalid_hash));
+        assert_eq!(store.size(&invalid_hash), None);
+
+        let hashes = vec![invalid_hash];
+        assert!(matches!(
+            store.scrub(Some(&hashes)).await,
+            Err(CasError::InvalidHash)
+        ));
     }
 
     #[tokio::test]

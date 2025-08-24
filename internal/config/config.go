@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	urlpath "path"
 	"path/filepath"
@@ -50,6 +51,7 @@ type Config struct {
 	Share     ShareConfig     `toml:"share"`
 	Favorites FavoritesConfig `toml:"favorites"`
 	Alerts    AlertsConfig    `toml:"alerts"`
+	Security  SecurityConfig  `toml:"security"`
 	Log       LogConfig       `toml:"log"`
 }
 
@@ -182,6 +184,11 @@ type AlertsConfig struct {
 	WebhookHeaders []string      `toml:"webhook_headers"` // Additional headers (key:value format)
 }
 
+// SecurityConfig holds explicit safety overrides for risky deployment modes.
+type SecurityConfig struct {
+	AllowUnsafeNoAuth bool `toml:"allow_unsafe_no_auth"` // Permit unauthenticated services on non-loopback binds
+}
+
 // LogConfig holds logging configuration
 type LogConfig struct {
 	Level      string `toml:"level"`       // debug, info, warn, error
@@ -288,6 +295,9 @@ func Default() *Config {
 			MinFreeBytes:   10 * 1024 * 1024 * 1024, // 10GB
 			CooldownPeriod: 4 * time.Hour,
 			WebhookMethod:  "POST",
+		},
+		Security: SecurityConfig{
+			AllowUnsafeNoAuth: false,
 		},
 		Log: LogConfig{
 			Level:      "info",
@@ -954,6 +964,13 @@ func (c *Config) Validate() error {
 			errs = append(errs, errors.New("storage.versioning.auto_versioned_filenames cannot contain empty entries"))
 		}
 	}
+	serverBeyondLoopback := listensBeyondLoopback(c.Server.Host)
+	if !c.Security.AllowUnsafeNoAuth && serverBeyondLoopback && !c.Auth.Enabled {
+		errs = append(errs, errors.New("auth.enabled=false requires server.host to be loopback or security.allow_unsafe_no_auth=true"))
+	}
+	if !c.Security.AllowUnsafeNoAuth && serverBeyondLoopback && c.WebDAV.Enabled && webdavAuthType == "none" {
+		errs = append(errs, errors.New("webdav.auth_type=none requires server.host to be loopback or security.allow_unsafe_no_auth=true"))
+	}
 
 	if c.DataPlane.GRPCAddress == "" {
 		errs = append(errs, errors.New("dataplane.grpc_address cannot be empty"))
@@ -1024,6 +1041,22 @@ func (c *Config) Validate() error {
 	}
 
 	return errors.Join(errs...)
+}
+
+func listensBeyondLoopback(host string) bool {
+	normalized := strings.ToLower(strings.Trim(strings.TrimSpace(host), "[]"))
+	switch normalized {
+	case "", "*":
+		return true
+	case "localhost", "ip6-localhost":
+		return false
+	}
+
+	ip := net.ParseIP(normalized)
+	if ip == nil {
+		return true
+	}
+	return !ip.IsLoopback()
 }
 
 // NormalizeWebDAVPrefix ensures the WebDAV prefix has a leading slash and no trailing slash.

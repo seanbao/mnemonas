@@ -20,6 +20,22 @@ pub mod proto {
 use proto::data_plane_server::{DataPlane, DataPlaneServer};
 use proto::*;
 
+fn invalid_hash_status(err: crate::cas::CasError) -> Status {
+    Status::invalid_argument(err.to_string())
+}
+
+fn validate_request_hash(hash: &str) -> Result<(), Status> {
+    crate::cas::validate_hash(hash).map_err(invalid_hash_status)
+}
+
+fn cas_read_status(err: crate::cas::CasError, not_found_message: &'static str) -> Status {
+    match err {
+        crate::cas::CasError::NotFound(_) => Status::not_found(not_found_message),
+        crate::cas::CasError::InvalidHash => Status::invalid_argument("invalid object hash"),
+        _ => Status::internal(err.to_string()),
+    }
+}
+
 /// DataPlane service implementation
 pub struct DataPlaneService {
     cas: Arc<CasStore>,
@@ -134,6 +150,7 @@ impl DataPlane for DataPlaneService {
 
         // If expected hash provided, verify first
         if let Some(expected) = &req.expected_hash {
+            validate_request_hash(expected)?;
             let actual = crate::cas::compute_hash(data);
             if &actual != expected {
                 return Err(Status::invalid_argument(format!(
@@ -164,10 +181,11 @@ impl DataPlane for DataPlaneService {
     ) -> Result<Response<GetChunkResponse>, Status> {
         let hash = &request.into_inner().hash;
 
-        let data = self.cas.get(hash).await.map_err(|e| match e {
-            crate::cas::CasError::NotFound(_) => Status::not_found("Object not found"),
-            _ => Status::internal(e.to_string()),
-        })?;
+        let data = self
+            .cas
+            .get(hash)
+            .await
+            .map_err(|e| cas_read_status(e, "Object not found"))?;
 
         Ok(Response::new(GetChunkResponse { data }))
     }
@@ -178,6 +196,7 @@ impl DataPlane for DataPlaneService {
         request: Request<HasChunkRequest>,
     ) -> Result<Response<HasChunkResponse>, Status> {
         let hash = &request.into_inner().hash;
+        validate_request_hash(hash)?;
         let exists = self.cas.has(hash);
         let size = self.cas.size(hash);
 
@@ -192,11 +211,10 @@ impl DataPlane for DataPlaneService {
     ) -> Result<Response<DeleteChunkResponse>, Status> {
         let hash = &request.into_inner().hash;
 
-        let deleted = self
-            .cas
-            .delete(hash)
-            .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+        let deleted = self.cas.delete(hash).await.map_err(|e| match e {
+            crate::cas::CasError::InvalidHash => Status::invalid_argument("invalid object hash"),
+            _ => Status::internal(e.to_string()),
+        })?;
 
         Ok(Response::new(DeleteChunkResponse { deleted }))
     }
@@ -425,12 +443,14 @@ impl DataPlane for DataPlaneService {
         request: Request<GetFileRequest>,
     ) -> Result<Response<Self::GetFileStream>, Status> {
         let manifest_hash = request.into_inner().manifest_hash;
+        validate_request_hash(&manifest_hash)?;
 
         // Get manifest
-        let manifest_data = self.cas.get(&manifest_hash).await.map_err(|e| match e {
-            crate::cas::CasError::NotFound(_) => Status::not_found("File not found"),
-            _ => Status::internal(e.to_string()),
-        })?;
+        let manifest_data = self
+            .cas
+            .get(&manifest_hash)
+            .await
+            .map_err(|e| cas_read_status(e, "File not found"))?;
 
         let manifest = FileManifest::from_json(&manifest_data)
             .map_err(|e| Status::data_loss(format!("Failed to parse manifest: {}", e)))?;
@@ -451,6 +471,9 @@ impl DataPlane for DataPlaneService {
                         let status = match e {
                             crate::cas::CasError::NotFound(_) => {
                                 Status::data_loss("File chunk missing from CAS")
+                            }
+                            crate::cas::CasError::InvalidHash => {
+                                Status::data_loss("File manifest contains invalid chunk hash")
                             }
                             _ => Status::internal(e.to_string()),
                         };
@@ -510,6 +533,9 @@ impl DataPlane for DataPlaneService {
         let hashes = if req.hashes.is_empty() {
             None
         } else {
+            for hash in &req.hashes {
+                validate_request_hash(hash)?;
+            }
             Some(req.hashes)
         };
 
@@ -517,7 +543,12 @@ impl DataPlane for DataPlaneService {
             .cas
             .scrub(hashes.as_deref())
             .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(|e| match e {
+                crate::cas::CasError::InvalidHash => {
+                    Status::invalid_argument("invalid object hash")
+                }
+                _ => Status::internal(e.to_string()),
+            })?;
 
         // Convert errors to proto format
         let errors: Vec<ScrubError> = summary
@@ -558,6 +589,9 @@ impl DataPlane for DataPlaneService {
         let req = request.into_inner();
         let limit = req.limit.unwrap_or(1000) as usize;
         let cursor = req.cursor.as_deref();
+        if let Some(cursor) = cursor {
+            validate_request_hash(cursor)?;
+        }
 
         let (objects, next_cursor) = self.cas.list_objects(cursor, limit);
 
@@ -615,6 +649,75 @@ mod tests {
             .expect("connect client");
 
         (client, shutdown_tx)
+    }
+
+    #[tokio::test]
+    async fn test_invalid_hash_requests_return_invalid_argument() {
+        let temp = tempdir().expect("tempdir");
+        let cas = Arc::new(
+            CasStore::new(CasConfig {
+                root: temp.path().join("cas"),
+                compression_enabled: false,
+                ..Default::default()
+            })
+            .await
+            .expect("cas init"),
+        );
+        let service = DataPlaneService::with_cas(cas, ChunkerConfig::default());
+        let (mut client, shutdown_tx) = setup_test_client(service).await;
+
+        let invalid_hash = "/etc/passwd".to_string();
+
+        let err = client
+            .get_chunk(GetChunkRequest {
+                hash: invalid_hash.clone(),
+            })
+            .await
+            .expect_err("get_chunk should reject invalid hash");
+        assert_eq!(err.code(), Code::InvalidArgument);
+
+        let err = client
+            .has_chunk(HasChunkRequest {
+                hash: invalid_hash.clone(),
+            })
+            .await
+            .expect_err("has_chunk should reject invalid hash");
+        assert_eq!(err.code(), Code::InvalidArgument);
+
+        let err = client
+            .delete_chunk(DeleteChunkRequest {
+                hash: invalid_hash.clone(),
+            })
+            .await
+            .expect_err("delete_chunk should reject invalid hash");
+        assert_eq!(err.code(), Code::InvalidArgument);
+
+        let err = client
+            .get_file(GetFileRequest {
+                manifest_hash: invalid_hash.clone(),
+            })
+            .await
+            .expect_err("get_file should reject invalid manifest hash");
+        assert_eq!(err.code(), Code::InvalidArgument);
+
+        let err = client
+            .scrub(ScrubRequest {
+                hashes: vec![invalid_hash.clone()],
+            })
+            .await
+            .expect_err("scrub should reject invalid hash filters");
+        assert_eq!(err.code(), Code::InvalidArgument);
+
+        let err = client
+            .list_objects(ListObjectsRequest {
+                cursor: Some(invalid_hash),
+                limit: Some(10),
+            })
+            .await
+            .expect_err("list_objects should reject invalid cursors");
+        assert_eq!(err.code(), Code::InvalidArgument);
+
+        let _ = shutdown_tx.send(());
     }
 
     #[tokio::test]
