@@ -2,6 +2,8 @@
 
 # MnemoNAS API 参考文档
 
+[English](api-reference.en.md) | 简体中文
+
 本文档描述 MnemoNAS REST API 的所有端点、请求/响应格式和错误处理。
 
 ## 基础信息
@@ -341,10 +343,10 @@ GET /health
   "status": "healthy",
   "timestamp": "2024-01-15T10:00:00Z",
   "uptime": "24h30m15s",
-  "version": "v0.2.0",
+  "version": "<version>",
   "dataplane": {
     "healthy": true,
-    "version": "0.3.0",
+    "version": "<dataplane-version>",
     "uptime": 86400
   }
 }
@@ -367,7 +369,7 @@ GET /api/v1/version
   "success": true,
   "data": {
     "name": "MnemoNAS",
-    "version": "v0.2.0",
+    "version": "<version>",
     "build_time": "2024-01-15T09:30:00Z",
     "go": "go1.25.9"
   },
@@ -488,7 +490,7 @@ GET /api/v1/diagnostics
     "uptime_secs": 86400,
     "version": {
       "name": "MnemoNAS",
-      "version": "v0.2.0",
+      "version": "<version>",
       "build_time": "2024-01-15T09:30:00Z",
       "go": "go1.25.9"
     },
@@ -543,7 +545,7 @@ GET /api/v1/diagnostics
     },
     "dataplane": {
       "healthy": true,
-      "version": "0.3.0",
+      "version": "<dataplane-version>",
       "uptime_sec": 86000
     }
   },
@@ -1912,7 +1914,7 @@ GET /api/v1/diagnostics-export
 
 ## WebDAV 接口
 
-MnemoNAS 支持标准 WebDAV 协议，可用于文件管理器挂载。
+MnemoNAS 实现 WebDAV RFC 4918 核心读写方法，可用于文件管理器挂载。
 
 **挂载地址**: `http://localhost:8080/dav/`
 
@@ -1965,26 +1967,6 @@ MnemoNAS 支持标准 WebDAV 协议，可用于文件管理器挂载。
 
 ---
 
-## 版本变更记录
+## 版本说明
 
-### v0.4.0
-- 新增认证系统 API（登录/用户管理）
-- 新增文件分享 API
-- 新增收藏夹 API
-- 新增活动日志 API
-- 新增设置管理 API
-- 新增文件搜索 API
-
-### v0.3.0
-- 新增缩略图服务 API
-- 新增数据校验 API
-- 新增回收站管理 API
-- 新增诊断导出 API
-
-### v0.2.0
-- 新增版本历史 API
-- 新增 WebDAV 支持
-
-### v0.1.0
-- 初始版本
-- 基础文件操作 API
+本文档描述当前主线的 REST API。具体发布版本、兼容性说明和变更历史以 Git tag 与 [CHANGELOG](../CHANGELOG.md) 为准。

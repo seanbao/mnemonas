@@ -1,5 +1,7 @@
 # 支持说明
 
+[English](SUPPORT.en.md) | 简体中文
+
 本文档说明 MnemoNAS 的支持渠道、问题分流方式和维护边界，帮助用户更快获得有效反馈。
 
 ## 支持渠道
@@ -18,7 +20,7 @@
 
 - [README](README.md) 和 [文档索引](docs/README.md)
 - [FAQ](docs/faq.md)
-- [Docker 部署指南](docs/docker-deployment.md) 或 [Ubuntu 笔记本部署指南](docs/ubuntu-laptop-deployment.md)
+- [Docker 部署指南](docs/docker-deployment.md) 或 [Linux/systemd 部署指南](docs/linux-systemd-deployment.md)
 - [WebDAV 兼容性](docs/webdav-compatibility.md)
 - 现有 Issues 是否已有相同问题
 
@@ -40,7 +42,7 @@
 
 当前重点支持：
 
-- Linux 服务器和常见 NAS/小主机场景
+- Linux 服务器和常见 NAS 部署场景
 - Docker Compose 和 Ubuntu/systemd 部署路径
 - 浏览器 Web UI 和常见 WebDAV 客户端
 - 数据可迁移性、备份、恢复和安全配置相关问题
@@ -49,7 +51,7 @@
 
 - 非官方二次打包或大规模改造版本
 - 直接暴露到公网且缺少反向代理、TLS、VPN 或防火墙保护的部署
-- 远超家庭/小团队定位的大规模生产环境容量规划
+- 大规模生产环境容量规划
 - 未提供复现信息、日志或诊断输出的问题
 
 商业支持、托管服务和企业级 SLA 当前不在项目支持范围内。

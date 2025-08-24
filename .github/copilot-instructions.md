@@ -130,7 +130,7 @@ BREAKING CHANGE: token format changed from JWT to opaque
 
 ## 项目概述
 
-MnemoNAS 是一个现代化的开源 NAS 系统，采用 **Go 控制面** + **Rust 数据面** 架构。核心理念：简单可靠、好看好用，优先服务家庭和小团队的日常文件管理。
+MnemoNAS 是一个开源的自托管 NAS 系统，采用 **Go 控制面** + **Rust 数据面** 架构，提供 Web UI、WebDAV、版本历史、回收站、Scrub 和诊断包等日常文件管理能力。
 
 **语言约定**：代码注释使用英文，日志/UI 使用中文。
 
@@ -190,7 +190,7 @@ make test
 # Deployment script checks
 make scripts-check
 
-# 一键启动开发环境（推荐）
+# 启动开发环境（推荐）
 ./scripts/dev.sh                # 启动所有组件
 ./scripts/dev.sh --backend      # 仅后端
 ./scripts/dev.sh --frontend     # 仅前端

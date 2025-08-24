@@ -2,6 +2,8 @@
 
 # WebDAV 客户端兼容性清单
 
+[English](webdav-compatibility.en.md) | 简体中文
+
 本文档记录 MnemoNAS WebDAV 服务的协议能力，以及常见客户端的预期兼容性。客户端版本、系统策略和网络环境会影响结果，发布前后应持续用真实客户端回归验证。
 
 说明：本文档描述的是 WebDAV 协议能力。REST API `/api/v1/files-copy` 现已支持递归目录复制，但不提供 `Overwrite: T/F` 控制。
@@ -39,7 +41,7 @@
 状态说明：
 
 - ✅ 已验证：有自动化或真实客户端回归记录。
-- ◐ 预期可用：依赖标准 WebDAV 能力，尚需真实客户端回归确认。
+- ◐ 预期可用：依赖核心 WebDAV 行为，尚需真实客户端回归确认。
 - ⚠️ 需要配置/待验证：已知需要额外系统设置，或还没有足够验证数据。
 
 当前自动化测试覆盖 `OPTIONS`、`MKCOL`、`PUT`、`PROPFIND`、`COPY`、`MOVE`、条件请求、Range/ETag、LOCK/UNLOCK 等核心协议行为；下表用于发布前后补齐真实客户端验证。

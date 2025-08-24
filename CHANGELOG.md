@@ -1,4 +1,6 @@
-# Changelog
+# 变更记录
+
+[English](CHANGELOG.en.md) | 简体中文
 
 所有重要变更都会记录在此文件中。
 
@@ -32,7 +34,7 @@
 - **Versions 版本历史**
   - 查看文件所有历史版本
   - 版本时间、大小对比
-  - 一键恢复到指定版本
+  - 恢复到指定版本
 
 - **Trash 回收站**
   - 已删除文件列表
@@ -128,15 +130,16 @@
 - .gitignore 完善
 
 #### 文档完善
-- Ubuntu 笔记本部署指南，覆盖 ZFS/Btrfs/mdadm 分层、systemd 安装、网络、备份、升级和故障排查
+- Linux/systemd 部署指南，覆盖 ZFS/Btrfs/mdadm 分层、systemd 安装、网络、备份、升级和故障排查
 - 备份指南（3-2-1 策略、rclone/restic 配置、恢复流程）
 - API 参考文档
 - README 徽章和快速开始指南
+- README、文档索引、主要专题文档、支持说明和安全策略提供中英文版本
 - Docker 部署指南补充 Compose v2 安装、非 root UID/GID、可配置 `MNEMONAS_HTTP_PORT`、弱网构建策略和 dataplane 端口边界
 
 ### Changed
 - Release archive 改为包含顶层目录，并随包附带 Web UI、安装/卸载脚本、诊断脚本和完整 docs 文档
-- 默认 `docker-compose.yml` 从源码构建 `mnemonas:local`，公开 release 镜像可按文档改用 `ghcr.io/seanbao/mnemonas:latest`
+- 默认 `docker-compose.yml` 从源码构建 `mnemonas:local`，公开 release 镜像可按文档改用明确版本标签
 - Docker Compose 宿主机 HTTP 端口改为通过 `.env` 中的 `MNEMONAS_HTTP_PORT` 配置
 - CI 固定 protobuf 生成器和 `protoc 3.20.1`，并检查 `make proto` 后生成文件无漂移
 - Rust CI/Makefile 检查覆盖 dataplane all-targets 和 `tools/proto-gen`
@@ -149,6 +152,7 @@
 - Release archive 随包附带 `SUPPORT.md`
 - CI push/pull_request 触发分支覆盖 `main` 和 `master`，避免当前仓库默认分支未切换时漏跑检查
 - pre-commit 的 `golangci-lint` 版本对齐 CI/Makefile 使用的 v2.11.4
+- Release archive 随包附带 README、支持说明和安全策略的中英文版本
 - 安全文档区分 Web UI 初始管理员密码与 WebDAV Basic Auth 自动密码
 - 安全文档和 doctor 明确提示 dataplane `9090/9091` 不应被防火墙放行到不可信网络
 - 备份文档补充运行中数据的一致性窗口和快照建议
@@ -179,14 +183,14 @@
 #### 核心功能
 - **CAS 存储引擎**：基于 BLAKE3 哈希的内容寻址存储
 - **CDC 分块**：使用 FastCDC 算法实现智能分块（256KB-4MB）
-- **版本管理**：按策略自动保留适合版本化的文件历史，支持一键恢复
+- **版本管理**：按策略自动保留适合版本化的文件历史，支持恢复
 - **软删除**：删除操作仅移除引用，数据由 GC 异步清理
 
 #### WebDAV 协议
 - 覆盖 RFC 4918 核心读写方法（PROPFIND, GET, PUT, DELETE, MKCOL, COPY, MOVE）
 - 虚拟锁实现（LOCK/UNLOCK）
 - Basic Auth 认证
-- 持续验证常见客户端（macOS Finder, Windows Explorer, Transmit, rclone 等）
+- 记录常见客户端兼容性矩阵，并在发布前后补充真实客户端回归
 
 #### 性能优化
 - PROPFIND 响应缓存（30 秒 TTL）
@@ -229,7 +233,7 @@
 - [ ] 部署脚本检查通过：`make scripts-check`
 - [ ] 全量测试通过：`make test`
 - [ ] 依赖安全检查通过：`make security-check`
-- [ ] 更新 CHANGELOG.md
+- [ ] 更新 CHANGELOG.md 和 CHANGELOG.en.md
 - [ ] 更新 README.md 中的版本号（如有）
 - [ ] 创建 Git tag：`git tag -a v0.1.0 -m "Release v0.1.0"`
 - [ ] 推送 tag：`git push origin v0.1.0`
