@@ -305,3 +305,43 @@ func TestServer_GetSettingsSecurityCheck_BlocksUntrustedForwardedProtoSource(t *
 		t.Fatalf("forwarded_proto_trust status = %q, want %q", check.Status, securityCheckBlock)
 	}
 }
+
+func TestServer_GetSettingsSecurityCheck_BlocksPrivateForwardedProtoWithoutTrustedCIDR(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfg := config.Default()
+	cfg.Storage.Root = tmpDir
+	cfg.Auth.Enabled = false
+	cfg.Auth.UsersFile = filepath.Join(tmpDir, ".mnemonas", "users.json")
+	cfg.Server.Host = "127.0.0.1"
+	cfg.Server.TrustedProxyHops = 1
+	cfg.DataPlane.GRPCAddress = "127.0.0.1:9090"
+	cfg.Share.Enabled = false
+	t.Setenv("DATAPLANE_HTTP_ADDR", "127.0.0.1:9091")
+
+	server, err := NewServer(zerolog.Nop(), &ServerConfig{Config: cfg})
+	if err != nil {
+		t.Fatalf("NewServer() error: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/settings/security-check", nil)
+	req.RemoteAddr = "10.0.0.2:1234"
+	req.Header.Set("X-Forwarded-Proto", "https")
+	rec := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("security check status = %d, want %d: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var payload struct {
+		Success bool                  `json:"success"`
+		Data    securityCheckResponse `json:"data"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode security check response: %v", err)
+	}
+	if check := securityCheckByID(t, payload.Data.Checks, "forwarded_proto_trust"); check.Status != securityCheckBlock {
+		t.Fatalf("forwarded_proto_trust status = %q, want %q", check.Status, securityCheckBlock)
+	}
+}

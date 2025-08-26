@@ -36,7 +36,7 @@ MnemoNAS 默认不信任 `X-Forwarded-*` 头。部署在受信反向代理后方
 trusted_proxy_hops = 1
 ```
 
-单层 Caddy/Nginx/Traefik 设置为 `1`；多跳链路设置为代理总层数。修改后重启 `mnemonas`。未设置时，服务仍可通过反向代理访问，但登录、分享下载等 cookie 的 `Secure` 判断和按客户端 IP 的限流会按直连来源处理。
+单层 Caddy/Nginx/Traefik 设置为 `1`；多跳链路设置为代理总层数。直连来源为本机 loopback 时无需额外配置；如果代理来自 Docker 网桥、内网负载均衡或其他非 loopback 地址，还需要设置 `trusted_proxy_cidrs = ["<proxy-ip-or-cidr>"]`。修改后重启 `mnemonas`。未设置时，服务仍可通过反向代理访问，但登录、分享下载等 cookie 的 `Secure` 判断和按客户端 IP 的限流会按直连来源处理。
 
 公网入口只应开放 80/443。`8080` 是 MnemoNAS Web/API/WebDAV 的默认直连端口；如果反向代理和 MnemoNAS 在同一台机器，建议把 `[server].host` 改为 `127.0.0.1` 或用防火墙限制直连端口只允许可信来源访问。`9090/9091` 是 dataplane 默认内部端口；如果你改过 dataplane 端口，也不要通过防火墙、端口映射或反向代理暴露到公网或不可信局域网。
 

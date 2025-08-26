@@ -1,6 +1,7 @@
 package requestip
 
 import (
+	"fmt"
 	"net"
 	"net/http"
 	"strings"
@@ -8,9 +9,11 @@ import (
 )
 
 var trustedProxyHops atomic.Int32
+var trustedProxyCIDRs atomic.Value
 
 func init() {
 	trustedProxyHops.Store(0)
+	trustedProxyCIDRs.Store([]*net.IPNet(nil))
 }
 
 func SetTrustedProxyHops(hops int) {
@@ -24,8 +27,32 @@ func TrustedProxyHops() int {
 	return int(trustedProxyHops.Load())
 }
 
+func SetTrustedProxyCIDRs(cidrs []string) error {
+	networks, err := parseTrustedProxyCIDRs(cidrs)
+	if err != nil {
+		return err
+	}
+	trustedProxyCIDRs.Store(networks)
+	return nil
+}
+
+func TrustedProxyCIDRs() []string {
+	networks := trustedProxyNetworks()
+	if len(networks) == 0 {
+		return nil
+	}
+	values := make([]string, 0, len(networks))
+	for _, network := range networks {
+		if network != nil {
+			values = append(values, network.String())
+		}
+	}
+	return values
+}
+
 // ClientIP returns the client IP for a request.
-// Forwarded headers are only trusted when the direct peer is loopback or private.
+// Forwarded headers are only trusted when the direct peer is loopback or an
+// explicitly configured trusted proxy.
 func ClientIP(r *http.Request) string {
 	remoteIP := RemoteIP(r.RemoteAddr)
 	if IsTrustedForwardedSource(remoteIP) {
@@ -120,5 +147,74 @@ func IsTrustedForwardedSource(ip string) bool {
 	if parsed == nil {
 		return false
 	}
-	return parsed.IsLoopback() || parsed.IsPrivate()
+	if parsed.IsLoopback() {
+		return true
+	}
+	for _, network := range trustedProxyNetworks() {
+		if network != nil && network.Contains(parsed) {
+			return true
+		}
+	}
+	return false
+}
+
+func parseTrustedProxyCIDRs(cidrs []string) ([]*net.IPNet, error) {
+	if len(cidrs) == 0 {
+		return nil, nil
+	}
+
+	networks := make([]*net.IPNet, 0, len(cidrs))
+	for index, raw := range cidrs {
+		value := strings.TrimSpace(raw)
+		if value == "" {
+			continue
+		}
+		network, err := parseTrustedProxyCIDR(value)
+		if err != nil {
+			return nil, fmt.Errorf("trusted proxy CIDR %d: %w", index, err)
+		}
+		networks = append(networks, network)
+	}
+	return networks, nil
+}
+
+func parseTrustedProxyCIDR(value string) (*net.IPNet, error) {
+	if strings.Contains(value, "/") {
+		ip, network, err := net.ParseCIDR(value)
+		if err != nil {
+			return nil, err
+		}
+		network.IP = normalizeNetworkIP(ip)
+		return network, nil
+	}
+
+	ip := ParseIP(value)
+	if ip == nil {
+		return nil, fmt.Errorf("invalid IP address %q", value)
+	}
+	ip = normalizeNetworkIP(ip)
+	bits := 128
+	if ip.To4() != nil {
+		bits = 32
+	}
+	return &net.IPNet{IP: ip, Mask: net.CIDRMask(bits, bits)}, nil
+}
+
+func normalizeNetworkIP(ip net.IP) net.IP {
+	if ipv4 := ip.To4(); ipv4 != nil {
+		return ipv4
+	}
+	return ip
+}
+
+func trustedProxyNetworks() []*net.IPNet {
+	value := trustedProxyCIDRs.Load()
+	if value == nil {
+		return nil
+	}
+	networks, ok := value.([]*net.IPNet)
+	if !ok || len(networks) == 0 {
+		return nil
+	}
+	return networks
 }
