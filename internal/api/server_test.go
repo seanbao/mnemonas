@@ -3695,6 +3695,45 @@ func TestServer_ListShares_IncludesCreatedSharesWhenAuthDisabled(t *testing.T) {
 	}
 }
 
+func TestServer_ManageShares_AllowsGetUpdateDeleteWhenAuthDisabled(t *testing.T) {
+	server, shareID := setupShareServer(t)
+	if server.authEnabled {
+		t.Fatal("expected auth to be disabled")
+	}
+
+	getReq := httptest.NewRequest(http.MethodGet, "/api/v1/shares/"+shareID, nil)
+	getRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(getRec, getReq)
+	if getRec.Code != http.StatusOK {
+		t.Fatalf("get share status = %d, want %d; body=%s", getRec.Code, http.StatusOK, getRec.Body.String())
+	}
+
+	updateReq := httptest.NewRequest(http.MethodPut, "/api/v1/shares/"+shareID, strings.NewReader(`{"description":"updated"}`))
+	updateReq.Header.Set("Content-Type", "application/json")
+	updateRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(updateRec, updateReq)
+	if updateRec.Code != http.StatusOK {
+		t.Fatalf("update share status = %d, want %d; body=%s", updateRec.Code, http.StatusOK, updateRec.Body.String())
+	}
+	updatedShare, err := server.shareStore.Get(shareID)
+	if err != nil {
+		t.Fatalf("Get(updated share) error: %v", err)
+	}
+	if updatedShare.Description != "updated" {
+		t.Fatalf("description = %q, want updated", updatedShare.Description)
+	}
+
+	deleteReq := httptest.NewRequest(http.MethodDelete, "/api/v1/shares/"+shareID, nil)
+	deleteRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(deleteRec, deleteReq)
+	if deleteRec.Code != http.StatusOK {
+		t.Fatalf("delete share status = %d, want %d; body=%s", deleteRec.Code, http.StatusOK, deleteRec.Body.String())
+	}
+	if _, err := server.shareStore.Get(shareID); !errors.Is(err, share.ErrShareNotFound) {
+		t.Fatalf("Get(deleted share) error = %v, want ErrShareNotFound", err)
+	}
+}
+
 func TestServer_CreateShare_LogsShareActivityPath(t *testing.T) {
 	server, _ := setupShareServer(t)
 	if server.activity == nil {
@@ -4035,6 +4074,95 @@ func TestServer_CreateShare_AppliesPathSharePolicyRule(t *testing.T) {
 	}
 	if expiresAt.Before(beforeCreate.Add(23*time.Hour)) || expiresAt.After(beforeCreate.Add(25*time.Hour)) {
 		t.Fatalf("expected path policy expiry roughly 24h from creation, got %s", expiresAt)
+	}
+}
+
+func TestServer_UpdateShare_AppliesPathSharePolicyRule(t *testing.T) {
+	server, _ := setupShareServer(t)
+	server.authEnabled = true
+	cfg := server.currentConfig()
+	cfg.Share.PolicyRules = []config.SharePolicyRuleConfig{{
+		Path:            "/docs",
+		RequirePassword: true,
+		MaxExpiresIn:    24 * time.Hour,
+		MaxAccess:       5,
+	}}
+	server.storeConfig(cfg)
+
+	initialExpiresIn := 12 * time.Hour
+	createdShare, err := server.shareStore.Create(share.CreateShareOptions{
+		Path:      "/docs/a.txt",
+		Type:      share.ShareTypeFile,
+		CreatedBy: "tester",
+		Password:  "secret-pass",
+		ExpiresIn: &initialExpiresIn,
+		MaxAccess: 5,
+	})
+	if err != nil {
+		t.Fatalf("Create(policy share) error: %v", err)
+	}
+
+	clearPasswordReq := httptest.NewRequest(http.MethodPut, "/api/v1/shares/"+createdShare.ID, strings.NewReader(`{"password":""}`))
+	clearPasswordReq.Header.Set("Content-Type", "application/json")
+	clearPasswordReq = clearPasswordReq.WithContext(auth.WithClaimsContext(clearPasswordReq.Context(), &auth.TokenClaims{
+		UserID:   "tester",
+		Username: "tester",
+		Role:     auth.RoleUser,
+	}))
+	clearPasswordRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(clearPasswordRec, clearPasswordReq)
+	if clearPasswordRec.Code != http.StatusBadRequest {
+		t.Fatalf("clear required password status = %d, want %d; body=%s", clearPasswordRec.Code, http.StatusBadRequest, clearPasswordRec.Body.String())
+	}
+	if !strings.Contains(clearPasswordRec.Body.String(), "SHARE_POLICY_PASSWORD_REQUIRED") {
+		t.Fatalf("expected password policy error, got %s", clearPasswordRec.Body.String())
+	}
+	currentShare, err := server.shareStore.Get(createdShare.ID)
+	if err != nil {
+		t.Fatalf("Get(after clear password rejection) error: %v", err)
+	}
+	if !currentShare.HasPassword() {
+		t.Fatal("expected rejected update to preserve password")
+	}
+
+	updateReq := httptest.NewRequest(http.MethodPut, "/api/v1/shares/"+createdShare.ID, strings.NewReader(`{"expires_in":"","max_access":0}`))
+	updateReq.Header.Set("Content-Type", "application/json")
+	updateReq = updateReq.WithContext(auth.WithClaimsContext(updateReq.Context(), &auth.TokenClaims{
+		UserID:   "tester",
+		Username: "tester",
+		Role:     auth.RoleUser,
+	}))
+	updateRec := httptest.NewRecorder()
+	beforeUpdate := time.Now()
+	server.Router().ServeHTTP(updateRec, updateReq)
+	if updateRec.Code != http.StatusOK {
+		t.Fatalf("update policy share status = %d, want %d; body=%s", updateRec.Code, http.StatusOK, updateRec.Body.String())
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal(updateRec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to parse update response: %v", err)
+	}
+	data, ok := payload["data"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected update response data")
+	}
+	if data["max_access"] != float64(5) {
+		t.Fatalf("expected max_access capped to 5, got %#v", data["max_access"])
+	}
+	if data["has_password"] != true {
+		t.Fatalf("expected has_password true, got %#v", data["has_password"])
+	}
+	expiresAtValue, ok := data["expires_at"].(string)
+	if !ok || expiresAtValue == "" {
+		t.Fatalf("expected capped expires_at, got %#v", data["expires_at"])
+	}
+	expiresAt, err := time.Parse(time.RFC3339Nano, expiresAtValue)
+	if err != nil {
+		t.Fatalf("failed to parse expires_at %q: %v", expiresAtValue, err)
+	}
+	if expiresAt.Before(beforeUpdate.Add(23*time.Hour)) || expiresAt.After(beforeUpdate.Add(25*time.Hour)) {
+		t.Fatalf("expected path policy expiry roughly 24h from update, got %s", expiresAt)
 	}
 }
 
