@@ -38,6 +38,7 @@ var (
 	errDestinationInsideSourceDirectory   = errors.New("destination cannot be inside source directory")
 	errDirectoryCopyOverwriteNotSupported = errors.New("overwriting an existing destination with a directory copy is not supported")
 	errWebDAVQuotaExceeded                = errors.New("user quota exceeded")
+	errWebDAVPathAccessDenied             = errors.New("path access denied")
 )
 
 const webdavLockTimeout = time.Hour
@@ -854,6 +855,10 @@ func (h *Handler) handleDelete(ctx context.Context, w http.ResponseWriter, r *ht
 			return
 		}
 	}
+	if err := h.authorizeTreeAccess(ctx, filePath, accessWrite); err != nil {
+		h.handleError(w, err)
+		return
+	}
 
 	etag := fmt.Sprintf(`"%s"`, info.ContentHash)
 	if h.writeFailedMutationPrecondition(w, r, etag, info.ModTime) {
@@ -1131,6 +1136,10 @@ func (h *Handler) copyRequiredBytes(ctx context.Context, srcPath, dstPath, depth
 }
 
 func (h *Handler) copyResource(ctx context.Context, srcPath, dstPath, depth string, allowOverwrite bool) error {
+	if !scopeFromContext(ctx).canAccess(dstPath, accessWrite) {
+		return errWebDAVPathAccessDenied
+	}
+
 	info, err := h.fs.Stat(ctx, srcPath)
 	if err != nil {
 		return err
@@ -1610,6 +1619,10 @@ func (h *Handler) handleMove(ctx context.Context, w http.ResponseWriter, r *http
 		h.handleError(w, err)
 		return
 	}
+	if err := h.authorizeMoveTreeAccess(ctx, srcPath, dst, dstExists); err != nil {
+		h.handleError(w, err)
+		return
+	}
 
 	h.quotaMu.Lock()
 	defer h.quotaMu.Unlock()
@@ -1790,6 +1803,115 @@ func (h *Handler) rejectDirectoryCopyOverwrite(ctx context.Context, srcPath, dst
 		return errDirectoryCopyOverwriteNotSupported
 	}
 	return nil
+}
+
+func (h *Handler) authorizeTreeAccess(ctx context.Context, rootPath string, mode accessMode) error {
+	scope := scopeFromContext(ctx)
+	if !scope.scoped {
+		return nil
+	}
+	if !scope.canAccess(rootPath, mode) {
+		return errWebDAVPathAccessDenied
+	}
+	if !scope.hasAccessRules() {
+		return nil
+	}
+
+	info, err := h.fs.Stat(ctx, rootPath)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir {
+		return nil
+	}
+
+	children, err := h.fs.ReadDir(ctx, rootPath)
+	if err != nil {
+		return err
+	}
+	for _, child := range children {
+		if child == nil {
+			continue
+		}
+		if err := h.authorizeTreeAccess(ctx, child.Path, mode); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (h *Handler) authorizeMappedTreeAccess(ctx context.Context, sourceRoot, destinationRoot string, mode accessMode) error {
+	scope := scopeFromContext(ctx)
+	if !scope.scoped {
+		return nil
+	}
+	if !scope.canAccess(destinationRoot, mode) {
+		return errWebDAVPathAccessDenied
+	}
+	if !scope.hasAccessRules() {
+		return nil
+	}
+
+	info, err := h.fs.Stat(ctx, sourceRoot)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir {
+		return nil
+	}
+
+	children, err := h.fs.ReadDir(ctx, sourceRoot)
+	if err != nil {
+		return err
+	}
+	for _, child := range children {
+		if child == nil {
+			continue
+		}
+		childDestination := mapWebDAVDescendantPath(sourceRoot, destinationRoot, child.Path)
+		if !scope.canAccess(childDestination, mode) {
+			return errWebDAVPathAccessDenied
+		}
+		if child.IsDir {
+			if err := h.authorizeMappedTreeAccess(ctx, child.Path, childDestination, mode); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (h *Handler) authorizeMoveTreeAccess(ctx context.Context, sourcePath, destinationPath string, destinationExists bool) error {
+	if err := h.authorizeTreeAccess(ctx, sourcePath, accessWrite); err != nil {
+		return err
+	}
+	if err := h.authorizeMappedTreeAccess(ctx, sourcePath, destinationPath, accessWrite); err != nil {
+		return err
+	}
+	if destinationExists {
+		if err := h.authorizeTreeAccess(ctx, destinationPath, accessWrite); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func mapWebDAVDescendantPath(sourceRoot, destinationRoot, currentPath string) string {
+	sourceRoot = path.Clean(sourceRoot)
+	destinationRoot = path.Clean(destinationRoot)
+	currentPath = path.Clean(currentPath)
+
+	relativePath := ""
+	if sourceRoot == "/" {
+		relativePath = strings.TrimPrefix(currentPath, "/")
+	} else {
+		relativePath = strings.TrimPrefix(currentPath, sourceRoot)
+		relativePath = strings.TrimPrefix(relativePath, "/")
+	}
+	if relativePath == "" {
+		return destinationRoot
+	}
+	return path.Clean(path.Join(destinationRoot, relativePath))
 }
 
 func isDescendantPath(parentPath, childPath string) bool {
@@ -2798,6 +2920,10 @@ func hasTraversalSegment(rawPath string) bool {
 func (h *Handler) handleError(w http.ResponseWriter, err error) {
 	if errors.Is(err, errWebDAVQuotaExceeded) {
 		http.Error(w, "user quota exceeded", http.StatusInsufficientStorage)
+		return
+	}
+	if errors.Is(err, errWebDAVPathAccessDenied) {
+		http.Error(w, "path access denied", http.StatusForbidden)
 		return
 	}
 	if errors.Is(err, storage.ErrNotFound) {

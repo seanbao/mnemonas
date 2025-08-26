@@ -2094,6 +2094,138 @@ func (s *Server) filterSharesByHomeDir(ctx context.Context, items []*share.Share
 	return filtered, nil
 }
 
+func (s *Server) authorizeUserTreeWritePath(ctx context.Context, targetPath string) error {
+	if !s.authEnabled || auth.IsAdmin(ctx) {
+		return nil
+	}
+	if err := s.authorizeUserWritePath(ctx, targetPath); err != nil {
+		return err
+	}
+	if s.fs == nil || !s.hasDirectoryAccessRules() {
+		return nil
+	}
+	return s.authorizeUserTreeDescendants(ctx, targetPath, "", pathAccessWrite)
+}
+
+func (s *Server) authorizeUserTreeMovePath(ctx context.Context, sourcePath, destinationPath string) error {
+	if !s.authEnabled || auth.IsAdmin(ctx) {
+		return nil
+	}
+	if err := s.authorizeUserWritePath(ctx, sourcePath); err != nil {
+		return err
+	}
+	if err := s.authorizeUserWritePath(ctx, destinationPath); err != nil {
+		return err
+	}
+	if s.fs == nil || !s.hasDirectoryAccessRules() {
+		return nil
+	}
+	return s.authorizeUserTreeDescendants(ctx, sourcePath, destinationPath, pathAccessWrite)
+}
+
+func (s *Server) authorizeUserTrashItemTreeWritePath(ctx context.Context, item *storage.TrashItem, destinationPath string) error {
+	if item == nil {
+		return storage.ErrNotFound
+	}
+	if !s.authEnabled || auth.IsAdmin(ctx) || s.fs == nil || !s.hasDirectoryAccessRules() {
+		return nil
+	}
+
+	sourceRoot := path.Clean(item.OriginalPath)
+	destinationRoot := ""
+	if destinationPath != "" {
+		destinationRoot = path.Clean(destinationPath)
+	}
+
+	return s.fs.WalkTrashItemRestorePaths(ctx, item.ID, func(restoredPath string, _ bool) error {
+		restoredPath = path.Clean(restoredPath)
+		if restoredPath != sourceRoot {
+			if err := s.authorizeUserPathFor(ctx, restoredPath, pathAccessWrite); err != nil {
+				return err
+			}
+		}
+		if destinationRoot != "" {
+			mappedPath := mapDescendantPath(sourceRoot, destinationRoot, restoredPath)
+			if mappedPath != destinationRoot {
+				if err := s.authorizeUserPathFor(ctx, mappedPath, pathAccessWrite); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	})
+}
+
+func (s *Server) authorizeUserTreeDescendants(ctx context.Context, sourcePath, destinationPath string, mode pathAccessMode) error {
+	info, err := s.fs.Stat(ctx, sourcePath)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir {
+		return nil
+	}
+
+	children, err := s.fs.ReadDir(ctx, sourcePath)
+	if err != nil {
+		return err
+	}
+	for _, child := range children {
+		if child == nil {
+			continue
+		}
+		if err := s.authorizeUserPathFor(ctx, child.Path, mode); err != nil {
+			return err
+		}
+		childDestination := ""
+		if destinationPath != "" {
+			childDestination = mapDescendantPath(sourcePath, destinationPath, child.Path)
+			if err := s.authorizeUserPathFor(ctx, childDestination, mode); err != nil {
+				return err
+			}
+		}
+		if child.IsDir {
+			if err := s.authorizeUserTreeDescendants(ctx, child.Path, childDestination, mode); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func mapDescendantPath(sourceRoot, destinationRoot, currentPath string) string {
+	sourceRoot = path.Clean(sourceRoot)
+	destinationRoot = path.Clean(destinationRoot)
+	currentPath = path.Clean(currentPath)
+
+	relativePath := ""
+	if sourceRoot == "/" {
+		relativePath = strings.TrimPrefix(currentPath, "/")
+	} else {
+		relativePath = strings.TrimPrefix(currentPath, sourceRoot)
+		relativePath = strings.TrimPrefix(relativePath, "/")
+	}
+	if relativePath == "" {
+		return destinationRoot
+	}
+	return path.Clean(path.Join(destinationRoot, relativePath))
+}
+
+func (s *Server) respondTreeMutationPreflightError(w http.ResponseWriter, action string, err error) {
+	if errors.Is(err, errPathAccessDenied) || errors.Is(err, errPathOutsideHomeDir) {
+		respondPathAccessError(w, err)
+		return
+	}
+	if errors.Is(err, storage.ErrNotDir) {
+		Conflict(w, "parent path is not a directory")
+		return
+	}
+	if isStorageNotFound(err) {
+		s.respondNotFound(w, action, err)
+		return
+	}
+	s.respondInternalError(w, action, err)
+}
+
 // validateHash validates a BLAKE3 hash string (64 hex characters).
 func validateHash(hash string) error {
 	if len(hash) != 64 {
@@ -2597,6 +2729,10 @@ func (s *Server) handleDeleteFile(w http.ResponseWriter, r *http.Request) {
 		ServiceUnavailable(w, "filesystem not initialized")
 		return
 	}
+	if err := s.authorizeUserTreeWritePath(r.Context(), filePath); err != nil {
+		s.respondTreeMutationPreflightError(w, "delete file", err)
+		return
+	}
 
 	if err := s.fs.Delete(r.Context(), filePath); err != nil {
 		deleteWarningDetails := map[string]string{}
@@ -2863,6 +2999,10 @@ func (s *Server) handleMoveFile(w http.ResponseWriter, r *http.Request) {
 		return
 	} else if !isStorageNotFound(err) {
 		s.respondInternalError(w, "stat move source", err)
+		return
+	}
+	if err := s.authorizeUserTreeMovePath(r.Context(), fromPath, toPath); err != nil {
+		s.respondTreeMutationPreflightError(w, "move file", err)
 		return
 	}
 
@@ -4694,6 +4834,14 @@ func (s *Server) handleRestoreFromTrash(w http.ResponseWriter, r *http.Request) 
 		s.respondNotFound(w, "restore from trash", storage.ErrNotFound)
 		return
 	}
+	restoreDestinationPath := ""
+	if newPath != "" {
+		restoreDestinationPath = newPath
+	}
+	if err := s.authorizeUserTrashItemTreeWritePath(r.Context(), item, restoreDestinationPath); err != nil {
+		s.respondTreeMutationPreflightError(w, "restore from trash", err)
+		return
+	}
 
 	activityPath := item.OriginalPath
 
@@ -4778,6 +4926,10 @@ func (s *Server) handleDeleteFromTrash(w http.ResponseWriter, r *http.Request) {
 		s.respondNotFound(w, "delete from trash", storage.ErrNotFound)
 		return
 	}
+	if err := s.authorizeUserTrashItemTreeWritePath(r.Context(), item, ""); err != nil {
+		s.respondTreeMutationPreflightError(w, "delete from trash", err)
+		return
+	}
 	activityPath := item.OriginalPath
 
 	if err := s.fs.DeleteFromTrash(r.Context(), id); err != nil {
@@ -4832,6 +4984,13 @@ func (s *Server) handleEmptyTrash(w http.ResponseWriter, r *http.Request) {
 		for _, item := range items {
 			if item == nil || s.authorizeUserWritePath(r.Context(), item.OriginalPath) != nil {
 				continue
+			}
+			if err := s.authorizeUserTrashItemTreeWritePath(r.Context(), item, ""); err != nil {
+				if errors.Is(err, errPathAccessDenied) || errors.Is(err, errPathOutsideHomeDir) {
+					continue
+				}
+				s.respondTreeMutationPreflightError(w, "empty trash", err)
+				return
 			}
 			if err := s.fs.DeleteFromTrash(r.Context(), item.ID); err != nil {
 				var warningErr *storage.TrashDeleteWarningError

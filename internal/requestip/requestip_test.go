@@ -78,6 +78,19 @@ func TestClientIP_FallsBackToXRealIPWhenForwardedForMissing(t *testing.T) {
 	}
 }
 
+func TestClientIP_TrustsConfiguredCIDRNetworkAddress(t *testing.T) {
+	setTrustedProxyHopsForTest(t, 1)
+	setTrustedProxyCIDRsForTest(t, []string{"192.168.1.10/24"})
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.RemoteAddr = "192.168.1.50:8080"
+	req.Header.Set("X-Forwarded-For", "198.51.100.20")
+
+	if got := ClientIP(req); got != "198.51.100.20" {
+		t.Fatalf("ClientIP() = %q, want %q", got, "198.51.100.20")
+	}
+}
+
 func TestParseIP_AllowsCommonForwardedHeaderAddressForms(t *testing.T) {
 	tests := []struct {
 		name  string
