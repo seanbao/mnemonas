@@ -423,7 +423,7 @@ The isolated runner avoids writing into a real user storage root.
 `STORAGE_ROOT` must not contain control characters, `..`, or symlink path components.
 For WebDAV `auth_type = "basic"`, the script can read Basic Auth credentials from config or `secrets.json`.
 For WebDAV `auth_type = "users"`, set `MNEMONAS_WEBDAV_USERNAME` and `MNEMONAS_WEBDAV_PASSWORD` explicitly.
-Set `RUN_RCLONE_WEBDAV=1` to make the isolated runner and `scripts/e2e-test.sh` run an additional WebDAV client smoke when `rclone` is installed. The smoke covers upload, download, move/rename, and list operations.
+Set `RUN_RCLONE_WEBDAV=1` to make the isolated runner and `scripts/e2e-test.sh` run an additional WebDAV client smoke when `rclone` is installed. The smoke covers upload, download, move/rename, list, and cleanup operations.
 
 The isolated E2E runner and Playwright backend accept only loopback Web and dataplane addresses: `localhost`, `ip6-localhost`, `::1`, or dotted-quad numeric `127.0.0.0/8` addresses. This prevents test backends from unintentionally listening on public or untrusted LAN interfaces.
 

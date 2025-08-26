@@ -77,7 +77,7 @@ REST API 资源复制接口位于 `/api/v1/files-copy`；WebDAV `Overwrite: T/F`
 - 条件请求、Range/ETag 和 LOCK/UNLOCK 行为；
 - 同源 `Destination` 解析和锁 `If` URI 解析；
 - `scripts/webdav-client-smoke.sh` 可对已运行服务执行独立 curl 协议 smoke，覆盖 `OPTIONS`、`MKCOL`、`PUT`、`PROPFIND`、`GET`、`HEAD`、`COPY`、`MOVE` 和 `DELETE`，并验证 URL 编码空格路径的读写删除；
-- 设置 `RUN_RCLONE_WEBDAV=1` 后，低层 E2E 会在已安装 `rclone` 的环境中执行 WebDAV 客户端上传、下载、移动/重命名和列表 smoke。
+- 设置 `RUN_RCLONE_WEBDAV=1` 后，低层 E2E 会在已安装 `rclone` 的环境中执行 WebDAV 客户端上传、下载、移动/重命名、列出和清理 smoke。
 
 下表仍用于跟踪桌面、移动和媒体客户端的剩余真实客户端验证工作。
 
@@ -88,7 +88,7 @@ REST API 资源复制接口位于 `/api/v1/files-copy`；WebDAV `Overwrite: T/F`
 | Nautilus / GNOME Files | 45+ | 预期可用 | 使用 GVfs DAV 支持 |
 | Dolphin | 23+ | 预期可用 | 内置 WebDAV 支持 |
 | davfs2 | 1.6+ | 预期可用 | 挂载为本地目录 |
-| rclone | 1.60+ | 已验证 | 可选 `RUN_RCLONE_WEBDAV=1` E2E 覆盖上传、下载、移动/重命名和列表 |
+| rclone | 1.60+ | 已验证 | 可选 `RUN_RCLONE_WEBDAV=1` E2E 覆盖上传、下载、移动/重命名、列出和清理 |
 
 ### macOS
 
