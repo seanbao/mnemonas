@@ -3271,6 +3271,9 @@ func validateDestination(source, destination string, storageRoot string) error {
 	if !filepath.IsAbs(destination) {
 		return fmt.Errorf("%w: destination must be absolute", ErrUnsafePath)
 	}
+	if err := validatePathComponentsNoSymlink(destination, "destination"); err != nil {
+		return err
+	}
 	sourceClean := filepath.Clean(source)
 	destinationClean := filepath.Clean(destination)
 	if sourceClean == destinationClean {
@@ -3285,6 +3288,34 @@ func validateDestination(source, destination string, storageRoot string) error {
 		rel, err := filepath.Rel(storageClean, destinationClean)
 		if err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 			return fmt.Errorf("%w: destination must not be inside storage.root", ErrUnsafePath)
+		}
+	}
+	return nil
+}
+
+func validatePathComponentsNoSymlink(targetPath, label string) error {
+	cleanPath := filepath.Clean(targetPath)
+	root := filepath.VolumeName(cleanPath) + string(filepath.Separator)
+	current := root
+	trimmed := strings.TrimPrefix(cleanPath, root)
+	if trimmed == "" {
+		return nil
+	}
+
+	for _, part := range strings.Split(trimmed, string(filepath.Separator)) {
+		if part == "" || part == "." {
+			continue
+		}
+		current = filepath.Join(current, part)
+		info, err := os.Lstat(current)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return nil
+			}
+			return fmt.Errorf("stat backup %s path: %w", label, err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("%w: %s path must not contain symlink", ErrUnsafePath, label)
 		}
 	}
 	return nil
@@ -3350,6 +3381,9 @@ func validateRestoreTargetPath(source, destination, storageRoot, targetPath stri
 	target = filepath.Clean(target)
 	if target == string(filepath.Separator) {
 		return "", fmt.Errorf("%w: restore target must not be filesystem root", ErrUnsafePath)
+	}
+	if err := validatePathComponentsNoSymlink(target, "restore target"); err != nil {
+		return "", err
 	}
 	for label, protected := range map[string]string{
 		"source":       source,
