@@ -15,6 +15,7 @@ export interface SettingsData {
     write_timeout: string
     idle_timeout: string
     trusted_proxy_hops: number
+    trusted_proxy_cidrs?: string[]
     tls?: {
       enabled: boolean
       cert_file: string
@@ -269,6 +270,7 @@ export interface UpdateSettingsRequest {
     write_timeout?: string
     idle_timeout?: string
     trusted_proxy_hops?: number
+    trusted_proxy_cidrs?: string[]
     tls?: {
       enabled?: boolean
       cert_file?: string
@@ -531,6 +533,7 @@ function isValidSettingsData(value: unknown): value is SettingsData {
     || typeof value.server.write_timeout !== 'string'
     || typeof value.server.idle_timeout !== 'string'
     || typeof value.server.trusted_proxy_hops !== 'number'
+    || (value.server.trusted_proxy_cidrs !== undefined && !isStringArray(value.server.trusted_proxy_cidrs))
     || !isRecord(value.storage)
     || typeof value.storage.root !== 'string'
     || !isRecord(value.retention)

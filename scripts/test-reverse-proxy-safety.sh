@@ -76,6 +76,17 @@ run_port_validation_tests() {
         MNEMONAS_DATAPLANE_GRPC_PORT=19090 MNEMONAS_DATAPLANE_HTTP_PORT=19090
 }
 
+run_upstream_host_validation_tests() {
+    run_expect_failure_with_env "upstream-host-url" "nas.example.com" "" "MNEMONAS_UPSTREAM_HOST 主机格式不安全" \
+        MNEMONAS_UPSTREAM_HOST=http://127.0.0.1
+    run_expect_failure_with_env "upstream-host-command-separator" "nas.example.com" "" "MNEMONAS_UPSTREAM_HOST 主机格式不安全" \
+        'MNEMONAS_UPSTREAM_HOST=127.0.0.1;bad'
+    run_expect_failure_with_env "upstream-host-invalid-label" "nas.example.com" "" "MNEMONAS_UPSTREAM_HOST 主机格式不安全" \
+        MNEMONAS_UPSTREAM_HOST=bad-.example.com
+    run_expect_failure_with_env "upstream-host-wildcard" "nas.example.com" "" "MNEMONAS_UPSTREAM_HOST 不能是通配监听地址" \
+        'MNEMONAS_UPSTREAM_HOST=*'
+}
+
 run_config_rewrite_self_test() {
     MNEMONAS_REVERSE_PROXY_SELF_TEST=1 bash "$REPO_ROOT/scripts/setup-reverse-proxy.sh" > "$TMP_ROOT/self-test.log" 2>&1
     assert_file_contains "$TMP_ROOT/self-test.log" "[reverse-proxy-self-test] all checks passed"
@@ -84,6 +95,7 @@ run_config_rewrite_self_test() {
 run_domain_validation_tests
 run_email_validation_tests
 run_port_validation_tests
+run_upstream_host_validation_tests
 run_config_rewrite_self_test
 
 printf '[reverse-proxy-test] all checks passed\n'

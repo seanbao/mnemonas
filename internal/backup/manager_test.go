@@ -75,6 +75,43 @@ func TestNewManagerRejectsSymlinkStateRootParent(t *testing.T) {
 	}
 }
 
+func TestManager_JobViewUsesEmptyExcludeArray(t *testing.T) {
+	tmpDir := t.TempDir()
+	source := filepath.Join(tmpDir, "source")
+	if err := os.Mkdir(source, 0700); err != nil {
+		t.Fatalf("Mkdir(source) error: %v", err)
+	}
+	manager, err := NewManager(ManagerConfig{
+		Root:        filepath.Join(tmpDir, "state"),
+		StorageRoot: source,
+		Jobs: []config.BackupJobConfig{{
+			ID:          "home",
+			Name:        "Home backup",
+			Type:        JobTypeLocal,
+			Source:      source,
+			Destination: filepath.Join(tmpDir, "backups"),
+		}},
+	})
+	if err != nil {
+		t.Fatalf("NewManager() error: %v", err)
+	}
+
+	jobs := manager.ListJobs()
+	if len(jobs) != 1 {
+		t.Fatalf("ListJobs() length = %d, want 1", len(jobs))
+	}
+	if jobs[0].Exclude == nil {
+		t.Fatal("ListJobs()[0].Exclude is nil, want empty array")
+	}
+	job, err := manager.GetJob("home")
+	if err != nil {
+		t.Fatalf("GetJob() error: %v", err)
+	}
+	if job.Exclude == nil {
+		t.Fatal("GetJob().Exclude is nil, want empty array")
+	}
+}
+
 func TestManager_RunJobAndRestoreDrill(t *testing.T) {
 	tmpDir := t.TempDir()
 	source := filepath.Join(tmpDir, "source")
@@ -758,6 +795,65 @@ func TestManager_RunJobRejectsSourceSymlink(t *testing.T) {
 	_, err = manager.RunJob(context.Background(), "home")
 	if !errors.Is(err, ErrSourceContainsSymlink) {
 		t.Fatalf("RunJob() error = %v, want ErrSourceContainsSymlink", err)
+	}
+}
+
+func TestManager_RunRemoteBackupRejectsSourceSymlink(t *testing.T) {
+	tmpDir := t.TempDir()
+	source := filepath.Join(tmpDir, "source")
+	passwordFile := filepath.Join(tmpDir, "restic.pass")
+	mustWriteFile(t, filepath.Join(source, "note.txt"), "backup")
+	mustWriteFile(t, passwordFile, "secret")
+	if err := os.Symlink("/etc/passwd", filepath.Join(source, "passwd-link")); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	commandPath, _ := newRecordingCommand(t, 0, "")
+
+	tests := []struct {
+		name string
+		job  config.BackupJobConfig
+	}{
+		{
+			name: "restic",
+			job: config.BackupJobConfig{
+				ID:           "restic-remote",
+				Name:         "Restic remote",
+				Type:         JobTypeRestic,
+				Source:       source,
+				Repository:   "rest:http://backup.example/repo",
+				Command:      commandPath,
+				PasswordFile: passwordFile,
+			},
+		},
+		{
+			name: "rclone",
+			job: config.BackupJobConfig{
+				ID:      "rclone-remote",
+				Name:    "Rclone remote",
+				Type:    JobTypeRclone,
+				Source:  source,
+				Remote:  "backup:mnemonas/source",
+				Command: commandPath,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			manager, err := NewManager(ManagerConfig{
+				Root:        filepath.Join(tmpDir, "state-"+tt.name),
+				StorageRoot: source,
+				Jobs:        []config.BackupJobConfig{tt.job},
+			})
+			if err != nil {
+				t.Fatalf("NewManager() error: %v", err)
+			}
+
+			_, err = manager.RunJob(context.Background(), tt.job.ID)
+			if !errors.Is(err, ErrSourceContainsSymlink) {
+				t.Fatalf("RunJob() error = %v, want ErrSourceContainsSymlink", err)
+			}
+		})
 	}
 }
 
@@ -1558,6 +1654,19 @@ func TestSafeJoinRejectsTraversalManifestPaths(t *testing.T) {
 		if _, err := safeJoin(t.TempDir(), archivePath); !errors.Is(err, ErrUnsafePath) {
 			t.Fatalf("safeJoin(%q) error = %v, want ErrUnsafePath", archivePath, err)
 		}
+	}
+}
+
+func TestSummarizeRestoredTreeRejectsSymlink(t *testing.T) {
+	root := t.TempDir()
+	mustWriteFile(t, filepath.Join(root, "docs", "note.txt"), "restored")
+	if err := os.Symlink("/etc/passwd", filepath.Join(root, "docs", "passwd-link")); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+
+	_, _, err := summarizeRestoredTree(context.Background(), root)
+	if !errors.Is(err, ErrUnsafePath) {
+		t.Fatalf("summarizeRestoredTree() error = %v, want ErrUnsafePath", err)
 	}
 }
 

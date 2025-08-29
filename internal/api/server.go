@@ -1024,6 +1024,27 @@ func settingsStringSlice(values []string) []string {
 	return values
 }
 
+func settingsDirectoryQuotas(values []config.DirectoryQuotaConfig) []config.DirectoryQuotaConfig {
+	if len(values) == 0 {
+		return []config.DirectoryQuotaConfig{}
+	}
+	return append([]config.DirectoryQuotaConfig(nil), values...)
+}
+
+func settingsDirectoryAccessRules(rules []config.DirectoryAccessRuleConfig) []config.DirectoryAccessRuleConfig {
+	if len(rules) == 0 {
+		return []config.DirectoryAccessRuleConfig{}
+	}
+	return cloneDirectoryAccessRules(rules)
+}
+
+func settingsDiskHealthDevices(devices []config.DiskHealthDeviceConfig) []config.DiskHealthDeviceConfig {
+	if len(devices) == 0 {
+		return []config.DiskHealthDeviceConfig{}
+	}
+	return append([]config.DiskHealthDeviceConfig(nil), devices...)
+}
+
 const (
 	auditStatusHeaderName               = "X-Mnemonas-Audit-Status"
 	auditStatusFailedValue              = "failed"
@@ -6306,7 +6327,7 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 			"write_timeout":       cfg.Server.WriteTimeout.String(),
 			"idle_timeout":        cfg.Server.IdleTimeout.String(),
 			"trusted_proxy_hops":  cfg.Server.TrustedProxyHops,
-			"trusted_proxy_cidrs": cfg.Server.TrustedProxyCIDRs,
+			"trusted_proxy_cidrs": settingsStringSlice(cfg.Server.TrustedProxyCIDRs),
 			"tls": map[string]interface{}{
 				"enabled":       cfg.Server.TLS.Enabled,
 				"cert_file":     cfg.Server.TLS.CertFile,
@@ -6317,8 +6338,8 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 		},
 		"storage": map[string]interface{}{
 			"root":                   cfg.Storage.Root,
-			"directory_quotas":       append([]config.DirectoryQuotaConfig(nil), cfg.Storage.DirectoryQuotas...),
-			"directory_access_rules": cloneDirectoryAccessRules(cfg.Storage.DirectoryAccessRules),
+			"directory_quotas":       settingsDirectoryQuotas(cfg.Storage.DirectoryQuotas),
+			"directory_access_rules": settingsDirectoryAccessRules(cfg.Storage.DirectoryAccessRules),
 		},
 		"trash": map[string]interface{}{
 			"enabled":        cfg.Storage.Trash.Enabled,
@@ -6386,7 +6407,7 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 			"temperature_critical_c":      cfg.DiskHealth.TemperatureCriticalC,
 			"media_wear_warning_percent":  cfg.DiskHealth.MediaWearWarningPct,
 			"media_wear_critical_percent": cfg.DiskHealth.MediaWearCriticalPct,
-			"devices":                     cfg.DiskHealth.Devices,
+			"devices":                     settingsDiskHealthDevices(cfg.DiskHealth.Devices),
 		},
 		"maintenance": map[string]interface{}{
 			"scrub": map[string]interface{}{

@@ -11,7 +11,7 @@ const mockAuthFetch = authFetch as Mock
 
 function createSettings(overrides: Partial<SettingsData> = {}): SettingsData {
   return {
-    server: { host: '0.0.0.0', port: 8080, read_timeout: '30s', write_timeout: '30s', idle_timeout: '60s', trusted_proxy_hops: 2 },
+    server: { host: '0.0.0.0', port: 8080, read_timeout: '30s', write_timeout: '30s', idle_timeout: '60s', trusted_proxy_hops: 2, trusted_proxy_cidrs: [] },
     storage: { root: '~/.mnemonas' },
     retention: { max_versions: 10, max_age: '24h', min_free_space: 1024, gc_interval: '1h' },
     webdav: { enabled: true, prefix: '/dav', read_only: false, auth_type: 'basic', username: 'admin' },
@@ -33,7 +33,7 @@ describe('Settings API', () => {
       json: () => Promise.resolve({
         success: true,
         data: {
-          server: { host: '0.0.0.0', port: 8080, read_timeout: '30s', write_timeout: '30s', idle_timeout: '60s', trusted_proxy_hops: 2 },
+          server: { host: '0.0.0.0', port: 8080, read_timeout: '30s', write_timeout: '30s', idle_timeout: '60s', trusted_proxy_hops: 2, trusted_proxy_cidrs: ['10.0.0.0/8'] },
           storage: { root: '~/.mnemonas' },
           retention: { max_versions: 10, max_age: '24h', min_free_space: 1024, gc_interval: '1h' },
           webdav: { enabled: true, prefix: '/dav', read_only: false, auth_type: 'basic', username: 'admin' },
@@ -48,6 +48,24 @@ describe('Settings API', () => {
 
     expect(result.data.server.port).toBe(8080)
     expect(result.data.server.trusted_proxy_hops).toBe(2)
+    expect(result.data.server.trusted_proxy_cidrs).toEqual(['10.0.0.0/8'])
+  })
+
+  it('rejects malformed trusted proxy CIDR settings responses', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        success: true,
+        data: createSettings({
+          server: {
+            ...createSettings().server,
+            trusted_proxy_cidrs: [10] as unknown as string[],
+          },
+        }),
+      }),
+    })
+
+    await expect(getSettings()).rejects.toThrow('Invalid settings response')
   })
 
   it('accepts directory quotas in settings responses', async () => {
@@ -351,6 +369,20 @@ describe('Settings API', () => {
     body: JSON.stringify({ server: { trusted_proxy_hops: 3 } }),
 	  }))
 	  })
+
+  it('sends trusted_proxy_cidrs in update payloads', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ success: true, data: null, message: 'settings updated' }),
+    })
+
+    await updateSettings({ server: { trusted_proxy_cidrs: ['10.0.0.0/8', '192.168.1.10'] } })
+
+    expect(mockAuthFetch).toHaveBeenCalledWith('/api/v1/settings/', expect.objectContaining({
+      method: 'PUT',
+      body: JSON.stringify({ server: { trusted_proxy_cidrs: ['10.0.0.0/8', '192.168.1.10'] } }),
+    }))
+  })
 
   it('sends directory access rules in update payloads', async () => {
     mockAuthFetch.mockResolvedValueOnce({

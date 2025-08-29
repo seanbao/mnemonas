@@ -20,6 +20,7 @@ RESTART_MNEMONAS="${MNEMONAS_RESTART_MNEMONAS:-1}"
 TRUSTED_PROXY_HOPS="${MNEMONAS_TRUSTED_PROXY_HOPS:-1}"
 UPSTREAM_HOST="${MNEMONAS_UPSTREAM_HOST:-127.0.0.1}"
 UPSTREAM_PORT="${MNEMONAS_UPSTREAM_PORT:-}"
+UPSTREAM_ENDPOINT=""
 SYSTEMD_DIR="${MNEMONAS_SYSTEMD_DIR:-/etc/systemd/system}"
 DATAPLANE_GRPC_PORT="${MNEMONAS_DATAPLANE_GRPC_PORT:-}"
 DATAPLANE_HTTP_PORT="${MNEMONAS_DATAPLANE_HTTP_PORT:-}"
@@ -106,6 +107,57 @@ require_safe_plain_value() {
     [[ -n "$value" ]] || fail "$label 不能为空"
     [[ "$value" != *[[:space:]]* ]] || fail "$label 不能包含空白字符: $value"
     [[ "$value" != *\"* && "$value" != *\\* ]] || fail "$label 不能包含引号或反斜杠: $value"
+}
+
+is_valid_tcp_host() {
+    local host="$1"
+    local label
+    local -a labels
+
+    if [[ "$host" =~ ^\[(.+)\]$ ]]; then
+        host="${BASH_REMATCH[1]}"
+    fi
+
+    host="${host%.}"
+    [[ -n "$host" ]] || return 1
+    [[ "$host" != *"["* && "$host" != *"]"* ]] || return 1
+
+    if [[ "$host" == *:* ]]; then
+        [[ "$host" =~ ^[0-9A-Fa-f:.]+$ ]]
+        return
+    fi
+
+    [[ "${#host}" -le 253 ]] || return 1
+    IFS='.' read -r -a labels <<< "$host"
+    for label in "${labels[@]}"; do
+        [[ -n "$label" && "${#label}" -le 63 ]] || return 1
+        [[ "$label" != -* && "$label" != *- ]] || return 1
+        [[ "$label" =~ ^[A-Za-z0-9-]+$ ]] || return 1
+    done
+    return 0
+}
+
+require_safe_upstream_host() {
+    local value="$1"
+
+    require_safe_plain_value "$value" "MNEMONAS_UPSTREAM_HOST"
+    [[ "$value" != "*" ]] || fail "MNEMONAS_UPSTREAM_HOST 不能是通配监听地址"
+    is_valid_tcp_host "$value" || fail "MNEMONAS_UPSTREAM_HOST 主机格式不安全: $value"
+}
+
+format_host_port_endpoint() {
+    local host="$1"
+    local port="$2"
+
+    if [[ "$host" =~ ^\[.+\]$ ]]; then
+        printf '%s:%s\n' "$host" "$port"
+        return
+    fi
+    if [[ "$host" == *:* ]]; then
+        printf '[%s]:%s\n' "$host" "$port"
+        return
+    fi
+    printf '%s:%s\n' "$host" "$port"
 }
 
 require_safe_config_path() {
@@ -315,7 +367,7 @@ validate_inputs_before_root() {
     fi
 
     require_safe_config_path
-    require_safe_plain_value "$UPSTREAM_HOST" "MNEMONAS_UPSTREAM_HOST"
+    require_safe_upstream_host "$UPSTREAM_HOST"
     [[ "$TRUSTED_PROXY_HOPS" =~ ^[0-9]+$ ]] || fail "MNEMONAS_TRUSTED_PROXY_HOPS 必须是非负整数"
     (( 10#$TRUSTED_PROXY_HOPS >= 1 )) || fail "公网反向代理至少需要 trusted_proxy_hops = 1"
 }
@@ -329,6 +381,7 @@ resolve_upstream_port() {
     UPSTREAM_PORT="${UPSTREAM_PORT:-${configured_port:-8080}}"
     require_safe_port "$UPSTREAM_PORT" "MNEMONAS_UPSTREAM_PORT"
     UPSTREAM_PORT="$(normalize_port "$UPSTREAM_PORT")"
+    UPSTREAM_ENDPOINT="$(format_host_port_endpoint "$UPSTREAM_HOST" "$UPSTREAM_PORT")"
 }
 
 resolve_dataplane_ports() {
@@ -515,7 +568,7 @@ configure_mnemonas() {
     log_info "已备份 MnemoNAS 配置: $backup"
 
     update_mnemonas_server_config "$CONFIG_PATH" "$UPSTREAM_HOST" "$TRUSTED_PROXY_HOPS"
-    log_info "已设置 MnemoNAS 后端监听: $UPSTREAM_HOST:$UPSTREAM_PORT"
+    log_info "已设置 MnemoNAS 后端监听: $UPSTREAM_ENDPOINT"
     log_info "已设置 server.trusted_proxy_hops = $TRUSTED_PROXY_HOPS"
 
     if command -v nasd >/dev/null 2>&1; then
@@ -602,7 +655,7 @@ install_caddy() {
 $DOMAIN {
     tls $EMAIL
 
-    reverse_proxy $UPSTREAM_HOST:$UPSTREAM_PORT {
+    reverse_proxy $UPSTREAM_ENDPOINT {
         header_up Host {host}
         header_up X-Real-IP {remote_host}
         header_up X-Forwarded-For {remote_host}
@@ -703,7 +756,7 @@ server {
 EOF
 
     domain_escaped="$(sed_replacement_escape "$DOMAIN")"
-    upstream_escaped="$(sed_replacement_escape "$UPSTREAM_HOST:$UPSTREAM_PORT")"
+    upstream_escaped="$(sed_replacement_escape "$UPSTREAM_ENDPOINT")"
     generated_escaped="$(sed_replacement_escape "$(date)")"
     sed -i "s/DOMAIN_PLACEHOLDER/$domain_escaped/g" "/etc/nginx/sites-available/$DOMAIN"
     sed -i "s/UPSTREAM_PLACEHOLDER/$upstream_escaped/g" "/etc/nginx/sites-available/$DOMAIN"
@@ -848,7 +901,7 @@ run_post_setup_checks() {
     fi
 
     if command -v mnemonas-doctor >/dev/null 2>&1; then
-        if SERVER_URL="http://127.0.0.1:$UPSTREAM_PORT" DATAPLANE_GRPC_PORT="$DATAPLANE_GRPC_PORT" DATAPLANE_HTTP_PORT="$DATAPLANE_HTTP_PORT" mnemonas-doctor --public-domain "$DOMAIN"; then
+        if SERVER_URL="http://$UPSTREAM_ENDPOINT" DATAPLANE_GRPC_PORT="$DATAPLANE_GRPC_PORT" DATAPLANE_HTTP_PORT="$DATAPLANE_HTTP_PORT" mnemonas-doctor --public-domain "$DOMAIN"; then
             log_info "mnemonas-doctor 检查通过"
         else
             log_warn "mnemonas-doctor 存在失败或警告，请按输出处理后再开放给真实用户"
@@ -866,7 +919,7 @@ print_summary() {
     echo ""
     echo "访问地址: https://$DOMAIN"
     echo "WebDAV:   https://$DOMAIN/dav"
-    echo "后端入口: http://$UPSTREAM_HOST:$UPSTREAM_PORT"
+    echo "后端入口: http://$UPSTREAM_ENDPOINT"
     echo ""
     echo "已处理:"
     echo "  - 反向代理: $PROXY_TYPE"
@@ -931,6 +984,16 @@ EOF
     [[ "$(tcp_addr_port '127.0.0.1:19090')" == "19090" ]] || fail "self-test failed: IPv4 port parsing"
     [[ "$(tcp_addr_port '[::1]:19091')" == "19091" ]] || fail "self-test failed: IPv6 port parsing"
     [[ "$(normalize_port '0443')" == "443" ]] || fail "self-test failed: port normalization"
+    is_valid_tcp_host "127.0.0.1" || fail "self-test failed: IPv4 host validation"
+    is_valid_tcp_host "localhost" || fail "self-test failed: localhost host validation"
+    is_valid_tcp_host "nas.example.com" || fail "self-test failed: hostname validation"
+    is_valid_tcp_host "::1" || fail "self-test failed: raw IPv6 host validation"
+    is_valid_tcp_host "[::1]" || fail "self-test failed: bracketed IPv6 host validation"
+    ! is_valid_tcp_host "bad-.example.com" || fail "self-test failed: invalid host accepted"
+    ! is_valid_tcp_host "http://127.0.0.1" || fail "self-test failed: URL host accepted"
+    [[ "$(format_host_port_endpoint '127.0.0.1' '8080')" == "127.0.0.1:8080" ]] || fail "self-test failed: IPv4 endpoint formatting"
+    [[ "$(format_host_port_endpoint '::1' '8080')" == "[::1]:8080" ]] || fail "self-test failed: raw IPv6 endpoint formatting"
+    [[ "$(format_host_port_endpoint '[::1]' '8080')" == "[::1]:8080" ]] || fail "self-test failed: bracketed IPv6 endpoint formatting"
 
     cat > "$tmp/mnemonas-dataplane.service" <<'EOF'
 [Service]
@@ -968,7 +1031,7 @@ main() {
     echo ""
     log_info "域名: $DOMAIN"
     log_info "证书邮箱: $EMAIL"
-    log_info "后端: $UPSTREAM_HOST:$UPSTREAM_PORT"
+    log_info "后端: $UPSTREAM_ENDPOINT"
     log_info "配置文件: $CONFIG_PATH"
 
     configure_mnemonas
