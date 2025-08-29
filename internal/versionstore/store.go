@@ -400,7 +400,7 @@ func syncVersionStoreDirectory(dir string) error {
 }
 
 func normalizeVersionStorePath(rawPath string) (string, error) {
-	normalized := strings.ReplaceAll(strings.TrimSpace(rawPath), "\\", "/")
+	normalized := strings.ReplaceAll(rawPath, "\\", "/")
 	if strings.ContainsRune(normalized, '\x00') {
 		return "", errInvalidStorePath
 	}

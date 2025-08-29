@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -15,10 +16,14 @@ import (
 	"time"
 	"unicode/utf16"
 
+	"github.com/seanbao/mnemonas/internal/rootio"
 	"golang.org/x/crypto/md4"
 )
 
 const credentialFileMode os.FileMode = 0600
+
+// ErrUnsafePath means the credential path resolves through an unsafe path component.
+var ErrUnsafePath = errors.New("unsafe SMB credential path")
 
 // Credential is the stored SMB authentication material for one MnemoNAS user.
 type Credential struct {
@@ -167,12 +172,12 @@ func (s *Store) List() []Credential {
 }
 
 func (s *Store) load() error {
-	data, err := os.ReadFile(s.filePath)
+	data, err := readCredentialFile(s.filePath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil
 		}
-		return fmt.Errorf("failed to read SMB credential file: %w", err)
+		return fmt.Errorf("failed to read SMB credential file: %w", mapCredentialPathError(err))
 	}
 	if len(strings.TrimSpace(string(data))) == 0 {
 		return nil
@@ -198,7 +203,7 @@ func (s *Store) load() error {
 }
 
 func (s *Store) saveLocked() error {
-	if err := os.MkdirAll(filepath.Dir(s.filePath), 0700); err != nil {
+	if err := ensureCredentialDir(filepath.Dir(s.filePath)); err != nil {
 		return fmt.Errorf("failed to create SMB credential directory: %w", err)
 	}
 
@@ -208,31 +213,40 @@ func (s *Store) saveLocked() error {
 	}
 	data = append(data, '\n')
 
-	tmpPath, err := tempCredentialPath(s.filePath)
+	dirRoot, err := os.OpenRoot(filepath.Dir(s.filePath))
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to open SMB credential directory: %w", mapCredentialPathError(err))
 	}
-	file, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, credentialFileMode)
+	defer dirRoot.Close()
+
+	file, tmpName, err := createCredentialTempFile(dirRoot)
 	if err != nil {
 		return fmt.Errorf("failed to create temporary SMB credential file: %w", err)
 	}
 	cleanup := true
 	defer func() {
 		if cleanup {
-			_ = os.Remove(tmpPath)
+			_ = dirRoot.Remove(tmpName)
 		}
 	}()
 	if _, err := file.Write(data); err != nil {
 		_ = file.Close()
 		return fmt.Errorf("failed to write temporary SMB credential file: %w", err)
 	}
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		return fmt.Errorf("failed to sync temporary SMB credential file: %w", err)
+	}
 	if err := file.Close(); err != nil {
 		return fmt.Errorf("failed to close temporary SMB credential file: %w", err)
 	}
-	if err := os.Rename(tmpPath, s.filePath); err != nil {
-		return fmt.Errorf("failed to replace SMB credential file: %w", err)
+	if err := dirRoot.Rename(tmpName, filepath.Base(s.filePath)); err != nil {
+		return fmt.Errorf("failed to replace SMB credential file: %w", mapCredentialPathError(err))
 	}
 	cleanup = false
+	if err := syncCredentialDir(dirRoot); err != nil {
+		return fmt.Errorf("failed to sync SMB credential directory: %w", err)
+	}
 	return nil
 }
 
@@ -257,12 +271,75 @@ func (s *Store) rebuildUsernameIndexLocked() {
 	}
 }
 
-func tempCredentialPath(filePath string) (string, error) {
+func readCredentialFile(filePath string) ([]byte, error) {
+	file, err := rootio.OpenFilePathNoFollow(filePath, os.O_RDONLY, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	return io.ReadAll(file)
+}
+
+func ensureCredentialDir(dir string) error {
+	if _, err := rootio.MkdirAllPathNoFollowTracked(dir, 0700); err != nil {
+		return mapCredentialPathError(err)
+	}
+	dirHandle, err := rootio.OpenDirPathNoFollow(dir)
+	if err != nil {
+		return mapCredentialPathError(err)
+	}
+	defer dirHandle.Close()
+	if err := dirHandle.Chmod(0700); err != nil {
+		return err
+	}
+	return nil
+}
+
+func createCredentialTempFile(root *os.Root) (*os.File, string, error) {
+	for range 32 {
+		tmpName, err := tempCredentialName()
+		if err != nil {
+			return nil, "", err
+		}
+		file, err := rootio.OpenFileNoFollow(root, tmpName, os.O_RDWR|os.O_CREATE|os.O_EXCL, credentialFileMode)
+		if err == nil {
+			return file, tmpName, nil
+		}
+		if errors.Is(err, os.ErrExist) {
+			continue
+		}
+		return nil, "", mapCredentialPathError(err)
+	}
+
+	return nil, "", errors.New("failed to allocate unique temporary SMB credential file")
+}
+
+func tempCredentialName() (string, error) {
 	var random [8]byte
 	if _, err := rand.Read(random[:]); err != nil {
 		return "", fmt.Errorf("failed to generate temporary SMB credential file name: %w", err)
 	}
-	return filepath.Join(filepath.Dir(filePath), ".smb-credentials-"+hex.EncodeToString(random[:])+".tmp"), nil
+	return ".smb-credentials-" + hex.EncodeToString(random[:]) + ".tmp", nil
+}
+
+func syncCredentialDir(root *os.Root) error {
+	dirHandle, err := root.Open(".")
+	if err != nil {
+		return err
+	}
+	defer dirHandle.Close()
+	return dirHandle.Sync()
+}
+
+func mapCredentialPathError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if rootio.IsSymlinkError(err) {
+		return fmt.Errorf("%w: path must not contain symlink components", ErrUnsafePath)
+	}
+	return err
 }
 
 func usernameKey(username string) string {
