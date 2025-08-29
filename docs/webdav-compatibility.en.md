@@ -217,9 +217,11 @@ sudo mount -t davfs http://localhost:8080/dav /mnt/nas
 
 ## Reporting Compatibility Problems
 
-Client compatibility reports should include:
+Use the [WebDAV compatibility report form](../.github/ISSUE_TEMPLATE/webdav_compatibility.yml) to submit client compatibility results. Reports should include:
 
 - Client name and version.
 - Operating system and version.
+- WebDAV authentication mode, access path, reverse proxy, and TLS context.
+- Tested operations, such as connect, browse, upload, download, rename, delete, large-file transfer, media seeking, or offline sync.
 - Reproduction steps.
 - Diagnostic bundle exported from the Web UI when possible.
