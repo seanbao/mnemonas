@@ -109,6 +109,7 @@ write_community_files() {
 		.github/ISSUE_TEMPLATE/bug_report.yml \
 		.github/ISSUE_TEMPLATE/feature_request.yml \
 		.github/ISSUE_TEMPLATE/question.yml \
+		.github/ISSUE_TEMPLATE/webdav_compatibility.yml \
 		.github/pull_request_template.md
 }
 

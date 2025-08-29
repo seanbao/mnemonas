@@ -217,9 +217,11 @@ sudo mount -t davfs http://localhost:8080/dav /mnt/nas
 
 ## 报告兼容性问题
 
-客户端兼容性报告应包含：
+使用 [WebDAV 兼容性报告表单](../.github/ISSUE_TEMPLATE/webdav_compatibility.yml) 提交客户端兼容性结果。报告应包含：
 
 - 客户端名称和版本。
 - 操作系统和版本。
+- WebDAV 认证方式、访问路径、反向代理和 TLS 背景。
+- 已测试的操作，例如连接、浏览、上传、下载、重命名、删除、大文件传输、媒体拖动或离线同步。
 - 复现步骤。
 - 可行时附上从 Web UI 导出的诊断包。
