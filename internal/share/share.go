@@ -353,8 +353,8 @@ func (s *ShareStore) load() error {
 			needsRewrite = true
 		}
 		s.shares[normalized.ID] = normalized
-		s.pathIdx[normalized.Path] = append(s.pathIdx[normalized.Path], normalized.ID)
 	}
+	s.pathIdx = rebuildPathIndex(s.shares)
 
 	if needsRewrite {
 		if err := saveShareState(s.filePath, s.shares); err != nil {
@@ -444,6 +444,17 @@ func clonePathIndex(pathIdx map[string][]string) map[string][]string {
 		cloned[path] = append([]string(nil), ids...)
 	}
 	return cloned
+}
+
+func rebuildPathIndex(shares map[string]*Share) map[string][]string {
+	pathIdx := make(map[string][]string, len(shares))
+	for id, share := range shares {
+		if share == nil {
+			continue
+		}
+		pathIdx[share.Path] = append(pathIdx[share.Path], id)
+	}
+	return pathIdx
 }
 
 func normalizeStoredSharePath(rawPath string) (string, error) {
