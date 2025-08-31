@@ -9,10 +9,12 @@ This document describes MnemoNAS support channels, issue triage, and support bou
 | Case | Recommended Channel | Notes |
 | --- | --- | --- |
 | Reproducible bug | [GitHub Issues](https://github.com/seanbao/mnemonas/issues) | Include reproduction steps and diagnostics |
+| WebDAV client compatibility | [WebDAV compatibility report form](https://github.com/seanbao/mnemonas/issues/new?template=webdav_compatibility.yml) | Submit client validation results, mount differences, or client-specific failures |
 | Feature or product suggestion | [GitHub Issues](https://github.com/seanbao/mnemonas/issues) | Describe the use case and expected benefit |
 | Security vulnerability | GitHub Private Vulnerability Reporting | Do not post exploit details publicly; see [SECURITY.md](SECURITY.md) |
 
 Usage questions can also be recorded in Issues. The title and body should make clear whether the report is a question or a confirmed bug.
+For WebDAV client compatibility results, mount differences, or client-specific failures, use the WebDAV compatibility report form first.
 
 ## Before Opening an Issue
 
@@ -23,6 +25,7 @@ Check:
 - [Docker deployment guide](docs/docker-deployment.en.md) or [Linux/systemd deployment guide](docs/linux-systemd-deployment.en.md)
 - [WebDAV compatibility](docs/webdav-compatibility.en.md)
 - Existing Issues for similar reports
+- Whether a WebDAV client issue is better suited for the [WebDAV compatibility report form](https://github.com/seanbao/mnemonas/issues/new?template=webdav_compatibility.yml)
 
 ## What to Include in Bug Reports
 
