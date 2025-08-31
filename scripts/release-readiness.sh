@@ -90,6 +90,13 @@ require_community_file() {
 	[[ -f "$path" ]] || fail "missing required community file: $path"
 }
 
+check_support_routes() {
+	local webdav_report_url="https://github.com/seanbao/mnemonas/issues/new?template=webdav_compatibility.yml"
+
+	require_file_contains "SUPPORT.md" "$webdav_report_url"
+	require_file_contains "SUPPORT.en.md" "$webdav_report_url"
+}
+
 check_community_files() {
 	local path
 	local required_files=(
@@ -118,7 +125,9 @@ check_community_files() {
 		require_community_file "$path"
 	done
 
-	print_kv "community" "required community health files present"
+	check_support_routes
+
+	print_kv "community" "required community health files and support routes present"
 }
 
 extract_validation_target() {
