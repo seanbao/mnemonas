@@ -111,6 +111,16 @@ write_community_files() {
 		.github/ISSUE_TEMPLATE/question.yml \
 		.github/ISSUE_TEMPLATE/webdav_compatibility.yml \
 		.github/pull_request_template.md
+	cat >SUPPORT.md <<'EOF'
+# 支持
+
+WebDAV 兼容性报告表单：https://github.com/seanbao/mnemonas/issues/new?template=webdav_compatibility.yml
+EOF
+	cat >SUPPORT.en.md <<'EOF'
+# Support
+
+WebDAV compatibility report form: https://github.com/seanbao/mnemonas/issues/new?template=webdav_compatibility.yml
+EOF
 }
 
 write_validation_docs() {
@@ -261,6 +271,14 @@ fi
 assert_file_contains "$output_dir/missing-community.err" "missing required community file: .github/pull_request_template.md"
 
 touch .github/pull_request_template.md
+sed -i.bak '/webdav_compatibility.yml/d' SUPPORT.en.md
+rm -f SUPPORT.en.md.bak
+if ./scripts/release-readiness.sh --allow-dirty --skip-checklist >"$output_dir/missing-support-route.out" 2>"$output_dir/missing-support-route.err"; then
+	fail "release readiness accepted a missing WebDAV support route"
+fi
+assert_file_contains "$output_dir/missing-support-route.err" "SUPPORT.en.md is missing required text"
+git checkout -q -- SUPPORT.en.md
+
 sed -i.bak '/verify-release-artifacts/d' docs/release-notes.en.md
 rm -f docs/release-notes.en.md.bak
 if ./scripts/release-readiness.sh --allow-dirty --allow-post-validation-changes >"$output_dir/missing-release-notes.out" 2>"$output_dir/missing-release-notes.err"; then
