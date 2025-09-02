@@ -15,11 +15,13 @@
 
 ### 认证方式
 
-当认证启用时，需要在请求头中携带 JWT Token：
+Web UI 使用同源 `HttpOnly` cookie 作为主会话。API 客户端仍可在请求头中携带 JWT Token：
 
 ```
 Authorization: Bearer <access_token>
 ```
+
+登录和刷新接口会设置 `mnemonas_access` 与 `mnemonas_refresh` cookie。浏览器客户端可发送请求头 `X-MnemoNAS-Session-Mode: cookie`，此时响应 JSON 不返回 bearer token，只返回用户信息与过期时间等非敏感字段。
 
 ## 通用响应格式
 
@@ -120,7 +122,7 @@ Authorization: Bearer <access_token>
 
 ### 用户登录
 
-使用用户名和密码登录获取令牌。
+使用用户名和密码登录。响应会设置 Web UI 使用的 `HttpOnly` 会话 cookie；API 客户端仍可从默认 JSON 响应中读取 bearer token。
 
 ```
 POST /api/v1/auth/login
@@ -153,6 +155,14 @@ POST /api/v1/auth/login
 }
 ```
 
+**Web cookie 会话模式**:
+
+```http
+X-MnemoNAS-Session-Mode: cookie
+```
+
+带该请求头时，响应 `data` 不包含 `access_token` 和 `refresh_token`，但仍会设置 `mnemonas_access` 与 `mnemonas_refresh` cookie。
+
 **失败行为**:
 - 同一 `username + 客户端地址` 组合连续登录失败达到限制时，返回 `429 Too Many Requests`，错误码为 `LOGIN_RATE_LIMITED`
 - `username` 分桶遵循账户名大小写不敏感语义，`handleruser` 与 `HANDLERUSER` 计入同一限流桶
@@ -160,7 +170,7 @@ POST /api/v1/auth/login
 
 ### 刷新令牌
 
-使用 refresh_token 获取新的 access_token。
+使用 refresh token 获取新的 access token，并轮换刷新令牌。API 客户端可提交 JSON body；浏览器 Web UI 可直接依赖 `mnemonas_refresh` cookie，body 可为空。
 
 ```
 POST /api/v1/auth/refresh
@@ -172,6 +182,8 @@ POST /api/v1/auth/refresh
   "refresh_token": "eyJ..."
 }
 ```
+
+当请求使用 refresh cookie，或发送 `X-MnemoNAS-Session-Mode: cookie` 时，成功响应不会在 JSON 中返回 bearer token，只会设置新的 `mnemonas_access` 与 `mnemonas_refresh` cookie。
 
 ### 获取当前用户信息
 
@@ -202,11 +214,12 @@ GET /api/v1/auth/me
 POST /api/v1/auth/logout
 ```
 
-**需要认证**: 是
+**需要认证**: 可选；有有效认证时会吊销当前 access token，无有效认证时仍会清理浏览器 cookie
 
 **行为说明**:
-- 当前 access token 会被吊销
-- `/api/v1` 作用域下的短期 `HttpOnly` download-session cookie 会一并清理
+- 如果请求携带有效 access token 或主会话 cookie，当前 access token 会被吊销
+- `mnemonas_access`、`mnemonas_refresh` 与 `/api/v1` 作用域下的短期 `mnemonas_download_access` cookie 会一并清理
+- 即使 access cookie 已过期，该端点也会尽力清理浏览器中的 HttpOnly cookie
 
 ### 创建下载会话 Cookie
 
@@ -218,7 +231,11 @@ POST /api/v1/auth/download-session
 
 **需要认证**: 是
 
-**请求头**:
+**认证方式**:
+
+- Web UI 可使用主会话 cookie
+- API 客户端可使用 bearer token:
+
 ```http
 Authorization: Bearer <access_token>
 ```
@@ -227,12 +244,12 @@ Authorization: Bearer <access_token>
 
 **成功行为**:
 - 返回 `200 OK`
-- 设置名为 `download-session` 的 `HttpOnly` cookie，路径为 `/api/v1`
+- 设置名为 `mnemonas_download_access` 的 `HttpOnly` cookie，路径为 `/api/v1`
 - cookie 过期时间与当前 access token 剩余有效期对齐
 - 当请求被后端识别为 HTTPS（直连 TLS，或显式启用 `trusted_proxy_hops > 0` 后由可信代理转发 `X-Forwarded-Proto: https`）时，cookie 带 `Secure`
 
 **失败行为**:
-- 该路由复用通用认证 middleware；缺少认证头时返回 `401`，错误码 `MISSING_AUTH_HEADER`
+- 该路由复用通用认证 middleware；缺少主会话 cookie 和认证头时返回 `401`，错误码 `MISSING_AUTH_HEADER`
 - `Authorization` 头格式非法时返回 `401`，错误码 `INVALID_AUTH_HEADER`
 - access token 已过期、已吊销或无效时分别返回 `401`，错误码 `TOKEN_EXPIRED`、`TOKEN_REVOKED`、`INVALID_TOKEN`
 - token 对应用户不存在或已被禁用时分别返回 `401/403`，错误码 `USER_NOT_FOUND`、`USER_DISABLED`
@@ -784,7 +801,7 @@ GET /api/v1/download/{path}
 
 **鉴权说明**:
 - API 客户端可使用现有认证会话或 `Authorization` 请求头
-- 浏览器下载、预览与外部打开使用短期 `HttpOnly` download-session cookie
+- 浏览器下载、预览与外部打开使用短期 `HttpOnly` `mnemonas_download_access` cookie
 - 当前实现不再支持通过 `auth` 查询参数传递访问令牌
 
 **响应**: 返回文件二进制数据；当前版本支持 Range 请求，历史版本不保证 Range
@@ -829,7 +846,7 @@ GET /api/v1/thumbnails/{path}
 
 **鉴权说明**:
 - API 客户端可使用现有认证会话或 `Authorization` 请求头
-- 浏览器缩略图请求依赖短期 `HttpOnly` download-session cookie
+- 浏览器缩略图请求依赖短期 `HttpOnly` `mnemonas_download_access` cookie
 - 当前实现不再支持通过 `auth` 查询参数传递访问令牌
 
 **支持格式**: JPEG, PNG, GIF, WebP

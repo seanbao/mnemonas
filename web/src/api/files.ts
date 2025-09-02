@@ -1,6 +1,6 @@
 import type { FileItem } from '@/stores/files'
 import { sanitizeFilename, normalizePath, encodePathForUrl } from '@/lib/utils'
-import { authFetch, getStoredToken, refreshAuthSession } from './auth'
+import { authFetch, refreshAuthSession } from './auth'
 
 export type { FileItem }
 
@@ -962,7 +962,6 @@ export async function uploadFile(
 
   const sendUpload = (retryCount: number): Promise<ActionResult> => new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest()
-    const token = getStoredToken()
 
     xhr.upload.addEventListener('progress', (e) => {
       if (e.lengthComputable && onProgress) {
@@ -1007,9 +1006,7 @@ export async function uploadFile(
 
     // Use REST API instead of WebDAV to avoid Basic Auth popup
     xhr.open('POST', url)
-    if (token) {
-      xhr.setRequestHeader('Authorization', `Bearer ${token}`)
-    }
+    xhr.withCredentials = true
     xhr.send(file)
   })
 
