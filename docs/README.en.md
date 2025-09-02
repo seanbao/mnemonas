@@ -33,6 +33,7 @@ Welcome to the MnemoNAS documentation. This directory contains usage guides, dep
 | --- | --- |
 | [Architecture](architecture.en.md) | System architecture and technology choices |
 | [Design decisions](design-decisions.en.md) | Design rationale and competitive goals |
+| [Roadmap](roadmap.en.md) | Priorities from private file cloud to home and small-team NAS |
 | [Development guide](development.en.md) | Local development setup |
 | [Testing strategy](testing-strategy.en.md) | Unit, integration, E2E, and torture test strategy |
 | [API reference](api-reference.en.md) | REST API endpoints and request/response formats |
