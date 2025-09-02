@@ -39,7 +39,7 @@ import { cn, copyTextToClipboard, parseByteSize, normalizeWebDAVPrefix, isValidW
 import { ShareManager } from '@/components/share'
 import { PageHeader } from '@/components/ui/PageHeader'
 import { EmptyState } from '@/components/ui/EmptyState'
-import { useUser } from '@/stores/auth'
+import { useAuthStore, useUser } from '@/stores/auth'
 import { SettingsError, getSettings, updateSettings, getWebDAVCredentials, type UpdateSettingsRequest } from '@/api/settings'
 
 const MIN_CDC_CHUNK_SIZE_BYTES = 64 * 1024
@@ -642,6 +642,7 @@ export function SettingsPage() {
     onSuccess: (result, variables) => {
       setSavedSettingsOverride(variables.submittedSettings)
       setSavedSettingsOverrideUpdatedAt(variables.baseSettingsUpdatedAt)
+      useAuthStore.getState().setShareEnabled(variables.submittedSettings.shareEnabled)
 
       if (shallowEqualSettingsDraft(draftSettingsRef.current, variables.submittedSettings)) {
         setIsDirty(false)

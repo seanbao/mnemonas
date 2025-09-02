@@ -50,6 +50,25 @@ test.describe('登录页面', () => {
     await expect(page).not.toHaveURL(/\/login/, { timeout: 5000 })
   })
 
+  test('正确凭据应建立 HttpOnly cookie 会话和下载会话', async ({ page, context }) => {
+    const { username: e2eUsername, password: e2ePassword } = resolveE2ECredentials()
+    test.skip(!e2ePassword, 'Skipped: no E2E password configured or discoverable')
+
+    await page.getByPlaceholder('请输入用户名').fill(e2eUsername)
+    await page.getByPlaceholder('请输入密码').fill(e2ePassword)
+    await page.getByRole('button', { name: /登录/i }).click()
+
+    await expect(page).not.toHaveURL(/\/login/, { timeout: 5000 })
+    const cookies = await context.cookies()
+    const accessCookie = cookies.find((cookie) => cookie.name === 'mnemonas_access')
+    const refreshCookie = cookies.find((cookie) => cookie.name === 'mnemonas_refresh')
+    const downloadCookie = cookies.find((cookie) => cookie.name === 'mnemonas_download_access')
+
+    expect(accessCookie).toMatchObject({ httpOnly: true, path: '/api/v1' })
+    expect(refreshCookie).toMatchObject({ httpOnly: true, path: '/api/v1/auth/refresh' })
+    expect(downloadCookie).toMatchObject({ httpOnly: true, path: '/api/v1' })
+  })
+
   test('视觉回归 - 登录页截图', async ({ page }) => {
     await expect(page).toHaveScreenshot('login-page.png', {
       maxDiffPixelRatio: 0.05,

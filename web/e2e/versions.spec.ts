@@ -1,8 +1,13 @@
 import { test, expect } from '@playwright/test'
 import { ensureAuthenticatedAt } from './helpers/auth-check'
+import { uploadTextFileThroughPicker } from './helpers/files'
 
 function getVersionPathInput(page: import('@playwright/test').Page) {
   return page.getByRole('textbox', { name: /输入文件路径|文件路径/i })
+}
+
+function getVersionsPageTitle(page: import('@playwright/test').Page) {
+  return page.getByRole('heading', { name: '版本历史', exact: true })
 }
 
 /**
@@ -22,7 +27,7 @@ test.describe('版本历史页面', () => {
   })
 
   test('应显示版本历史标题', async ({ page }) => {
-    const title = page.getByText('版本历史').first()
+    const title = getVersionsPageTitle(page)
     await expect(title).toBeVisible({ timeout: 5000 })
   })
 
@@ -72,7 +77,7 @@ test.describe('版本历史查询', () => {
     await expect(queryBtn).toBeVisible({ timeout: 2000 })
     await queryBtn.click()
 
-    const noHistory = page.getByText(/暂无版本历史/i)
+    const noHistory = page.getByText(/未找到版本记录/i)
     const errorTitle = page.getByText(/获取版本历史失败/i)
 
     await expect.poll(async () => {
@@ -80,6 +85,47 @@ test.describe('版本历史查询', () => {
       const hasError = await errorTitle.isVisible().catch(() => false)
       return hasNoHistory || hasError
     }, { timeout: 10000 }).toBe(true)
+  })
+
+  test('编码路径深链接没有历史时不应显示空白页', async ({ page }) => {
+    const targetPath = '/T145iNXfXqXXb1upjX.avif'
+    await ensureAuthenticatedAt(page, `/versions?path=${encodeURIComponent(targetPath)}`)
+
+    await expect(getVersionsPageTitle(page)).toBeVisible({ timeout: 5000 })
+    await expect(getVersionPathInput(page)).toHaveValue(targetPath, { timeout: 5000 })
+
+    const explicitStatus = page.getByText(/未找到版本记录|获取版本历史失败|版本历史暂不可用/i).first()
+    await expect(explicitStatus).toBeVisible({ timeout: 10000 })
+  })
+
+  test('只有当前版本的文件应显示版本页内容而不是错误兜底', async ({ page }) => {
+    const pageErrors: string[] = []
+    page.on('pageerror', (error) => {
+      pageErrors.push(error.stack || error.message)
+    })
+    page.on('console', (message) => {
+      if (message.type() === 'error') {
+        pageErrors.push(message.text())
+      }
+    })
+    const fileName = `single-version-${Date.now()}.avif`
+    const targetPath = `/${fileName}`
+
+    await ensureAuthenticatedAt(page, '/files')
+    await uploadTextFileThroughPicker(page, fileName, 'single current version')
+
+    await page.goto(`/versions?path=${encodeURIComponent(targetPath)}`, { waitUntil: 'domcontentloaded' })
+
+    await expect(
+      page.getByText('页面加载失败'),
+      pageErrors.join('\n\n') || 'page should not render the route error boundary'
+    ).toBeHidden({ timeout: 5000 })
+    await expect(getVersionsPageTitle(page)).toBeVisible({ timeout: 5000 })
+    await expect(getVersionPathInput(page)).toHaveValue(targetPath, { timeout: 5000 })
+    await expect(
+      page.getByText(/当前版本|仅有当前版本|未找到版本记录/i).first(),
+      pageErrors.join('\n\n') || 'single-version file should render an explicit version state'
+    ).toBeVisible({ timeout: 10000 })
   })
 })
 
@@ -103,7 +149,7 @@ test.describe('版本历史页面响应式', () => {
     await expect(body).toBeVisible()
 
     // 标题应可见
-    const title = page.getByText('版本历史').first()
+    const title = getVersionsPageTitle(page)
     await expect(title).toBeVisible({ timeout: 5000 })
   })
 

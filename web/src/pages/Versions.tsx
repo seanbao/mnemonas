@@ -5,12 +5,6 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { 
   Button, 
   Input,
-  Table,
-  TableHeader,
-  TableColumn,
-  TableBody,
-  TableRow,
-  TableCell,
   Chip,
   Modal,
   ModalContent,
@@ -21,17 +15,19 @@ import {
   Skeleton,
   addToast,
 } from '@heroui/react'
-import { 
-  History, 
-  Search, 
-  RotateCcw, 
-  Download, 
+import {
+  History,
+  Search,
+  RotateCcw,
+  Download,
   Eye,
   Clock,
   FileText,
   ChevronRight,
   AlertCircle,
-  Sparkles
+  Sparkles,
+  HardDrive,
+  Fingerprint,
 } from 'lucide-react'
 import { ensureDownloadSession } from '@/api/auth'
 import { ApiError, getVersions, buildDownloadUrl, downloadFile, restoreVersion, type ActionResult, type VersionInfo } from '@/api/files'
@@ -161,74 +157,96 @@ interface VersionRowProps {
 
 function VersionRow({ version, index, isLatest, canRestore, onPreview, onRestore, onDownload }: VersionRowProps) {
   return (
-    <TableRow key={version.hash} className="hover:bg-content2 transition-colors">
-      <TableCell>
-        <div className="flex items-center gap-2">
-          <div className="w-8 h-8 rounded-lg bg-accent-primary/15 flex items-center justify-center">
-            <span className="font-mono text-sm font-medium text-accent-primary">v{index + 1}</span>
+    <div
+      role="listitem"
+      className="grid gap-4 border-b border-divider px-4 py-4 last:border-b-0 lg:grid-cols-[minmax(180px,1.1fr)_minmax(150px,0.75fr)_minmax(90px,0.45fr)_minmax(180px,0.8fr)_auto] lg:items-center"
+    >
+      <div className="flex min-w-0 items-center gap-3">
+        <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg bg-accent-primary/12 text-accent-primary">
+          <span className="font-mono text-sm font-semibold">v{index + 1}</span>
+        </div>
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="font-medium text-foreground">
+              {isLatest ? '当前版本' : '历史版本'}
+            </span>
+            {isLatest && (
+              <Chip size="sm" variant="flat" className="chip-soft">
+                当前文件
+              </Chip>
+            )}
           </div>
-          {isLatest && (
-            <Chip size="sm" variant="flat" className="chip-soft">
-              当前版本
-            </Chip>
-          )}
+          <p className="mt-1 text-xs text-default-500">
+            {isLatest ? '文件当前保存状态' : '可预览、下载或恢复'}
+          </p>
         </div>
-      </TableCell>
-      <TableCell>
-        <div className="flex items-center gap-2 text-default-400">
-          <Clock size={14} />
-          <span>{formatDate(version.timestamp)}</span>
+      </div>
+
+      <div className="flex min-w-0 items-center gap-2 text-sm text-default-600">
+        <Clock size={14} className="shrink-0 text-default-400" />
+        <div className="min-w-0">
+          <div className="text-xs text-default-400 lg:hidden">保存时间</div>
+          <span className="truncate">{formatDate(version.timestamp)}</span>
         </div>
-      </TableCell>
-      <TableCell>
-        <span className="font-medium">{formatBytes(version.size)}</span>
-      </TableCell>
-      <TableCell>
-        <code className="text-xs bg-content2/50 border border-divider px-2 py-1 rounded-lg font-mono">
-          {version.hash.substring(0, 12)}...
-        </code>
-      </TableCell>
-      <TableCell>
-        <div className="flex items-center gap-1">
+      </div>
+
+      <div className="flex items-center gap-2 text-sm text-default-600">
+        <HardDrive size={14} className="text-default-400" />
+        <div>
+          <div className="text-xs text-default-400 lg:hidden">大小</div>
+          <span className="font-medium text-foreground">{formatBytes(version.size)}</span>
+        </div>
+      </div>
+
+      <div className="flex min-w-0 items-center gap-2 text-sm text-default-600">
+        <Fingerprint size={14} className="shrink-0 text-default-400" />
+        <div className="min-w-0">
+          <div className="text-xs text-default-400 lg:hidden">版本 ID</div>
+          <code className="block truncate font-mono text-xs text-default-500">
+            {version.hash}
+          </code>
+        </div>
+      </div>
+
+      <div className="flex flex-wrap items-center gap-2 lg:justify-end">
           <Button
-            isIconOnly
             size="sm"
-            variant="light"
+            variant="bordered"
             aria-label="预览此版本"
             onPress={onPreview}
             title="预览"
             className="btn-secondary btn-sm rounded-lg"
+            startContent={<Eye size={14} />}
           >
-            <Eye size={16} />
+            预览
           </Button>
           <Button
-            isIconOnly
             size="sm"
-            variant="light"
+            variant="bordered"
             aria-label="下载此版本"
             onPress={onDownload}
             title="下载此版本"
             className="btn-secondary btn-sm rounded-lg"
+            startContent={<Download size={14} />}
           >
-            <Download size={16} />
+            下载
           </Button>
           {canRestore && !isLatest && (
             <Button
-              isIconOnly
               size="sm"
-              variant="light"
+              variant="flat"
               color="warning"
               aria-label="恢复到此版本"
               onPress={onRestore}
               title="恢复到此版本"
-              className="btn-secondary btn-sm rounded-lg"
+              className="rounded-lg"
+              startContent={<RotateCcw size={14} />}
             >
-              <RotateCcw size={16} />
+              恢复
             </Button>
           )}
-        </div>
-      </TableCell>
-    </TableRow>
+      </div>
+    </div>
   )
 }
 
@@ -310,15 +328,15 @@ function VersionsPageContent({ authScopeKey, initialPath, isAdmin, scopedHomeDir
   const versionsErrorPresentation = getVersionsErrorPresentation(error)
 
   const handleRefreshVersions = async () => {
-  const result = await refetch()
-  if (result.error) {
-    addToast(getVersionsActionErrorToast(result.error, {
-      unavailable: '版本历史暂不可用',
-      failure: '刷新失败',
-    }))
-    return
-  }
-  addToast({ title: '版本历史已刷新', color: 'success' })
+    const result = await refetch()
+    if (result.error) {
+      addToast(getVersionsActionErrorToast(result.error, {
+        unavailable: '版本历史暂不可用',
+        failure: '刷新失败',
+      }))
+      return
+    }
+    addToast({ title: '版本历史已刷新', color: 'success' })
   }
 
   const restoreMutation = useMutation({
@@ -450,7 +468,7 @@ function VersionsPageContent({ authScopeKey, initialPath, isAdmin, scopedHomeDir
       {/* Header */}
       <PageHeader
         title="版本历史"
-        subtitle={hasInvalidHomeDir ? '主目录配置无效' : isAdmin ? '查看和恢复文件历史版本' : '查看文件历史版本'}
+        subtitle={hasInvalidHomeDir ? '主目录配置无效' : isAdmin ? '查看、下载或恢复文件版本' : '查看和下载文件版本'}
         icon={History}
       />
 
@@ -464,7 +482,7 @@ function VersionsPageContent({ authScopeKey, initialPath, isAdmin, scopedHomeDir
 
       {/* Search */}
       {!hasInvalidHomeDir && (
-      <div className="card-meridian rounded-lg p-4">
+      <div className="rounded-lg border border-divider bg-content1 p-4 shadow-[var(--shadow-soft)]">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:gap-4">
           <Input
             placeholder="输入文件路径，例如: /documents/report.pdf"
@@ -483,7 +501,7 @@ function VersionsPageContent({ authScopeKey, initialPath, isAdmin, scopedHomeDir
             onPress={handleSearch}
             className="rounded-lg font-medium sm:shrink-0"
           >
-            查询版本
+            查询
           </Button>
         </div>
       </div>
@@ -491,10 +509,10 @@ function VersionsPageContent({ authScopeKey, initialPath, isAdmin, scopedHomeDir
 
       {/* Version List */}
       {!hasInvalidHomeDir && selectedPath && (
-        <div className="card-meridian space-y-4 rounded-lg p-4 sm:p-6">
-          <div className="flex min-w-0 flex-wrap items-center gap-2 text-default-400">
+        <div className="space-y-4 rounded-lg border border-divider bg-content1 p-4 shadow-[var(--shadow-soft)] sm:p-6">
+          <div className="flex min-w-0 flex-wrap items-center gap-2 text-default-500">
             <History size={18} />
-            <span>文件路径:</span>
+            <span>当前文件</span>
             <code className="break-anywhere rounded-lg border border-divider bg-content2/50 px-3 py-1 font-mono text-sm text-foreground">
               {selectedPath}
             </code>
@@ -518,24 +536,26 @@ function VersionsPageContent({ authScopeKey, initialPath, isAdmin, scopedHomeDir
               </Button>
             </div>
           ) : versions && versions.length > 0 ? (
-            <div className="responsive-table">
-              <Table
-                aria-label="版本历史"
-                removeWrapper
-                classNames={{
-                  th: "table-head font-medium",
-                  td: "py-2.5",
-                }}
-              >
-                <TableHeader>
-                  <TableColumn>版本</TableColumn>
-                  <TableColumn>修改时间</TableColumn>
-                  <TableColumn>大小</TableColumn>
-                  <TableColumn>Hash</TableColumn>
-                  <TableColumn>操作</TableColumn>
-                </TableHeader>
-                <TableBody>
-                  {versions.map((version, index) => (
+            <div className="space-y-3">
+              {versions.length === 1 && (
+                <div className="flex items-start gap-3 rounded-lg border border-accent-primary/20 bg-accent-primary/10 px-4 py-3 text-sm">
+                  <History size={18} className="mt-0.5 shrink-0 text-accent-primary" />
+                  <div>
+                    <p className="font-medium text-foreground">仅有当前版本</p>
+                    <p className="mt-0.5 text-default-600">这个文件还没有可恢复的历史版本。文件更新后，旧版本会在这里保留。</p>
+                  </div>
+                </div>
+              )}
+
+              <div role="list" aria-label="版本历史" className="overflow-hidden rounded-lg border border-divider bg-content1">
+                <div className="hidden border-b border-divider bg-content2/40 px-4 py-2 text-xs font-medium text-default-500 lg:grid lg:grid-cols-[minmax(180px,1.1fr)_minmax(150px,0.75fr)_minmax(90px,0.45fr)_minmax(180px,0.8fr)_auto]">
+                  <span>版本</span>
+                  <span>保存时间</span>
+                  <span>大小</span>
+                  <span>版本 ID</span>
+                  <span className="text-right">操作</span>
+                </div>
+                {versions.map((version, index) => (
                     <VersionRow
                       key={version.hash}
                       version={version}
@@ -546,17 +566,16 @@ function VersionsPageContent({ authScopeKey, initialPath, isAdmin, scopedHomeDir
                       onRestore={() => handleRestore(version)}
                       onDownload={() => handleDownload(version)}
                     />
-                  ))}
-                </TableBody>
-              </Table>
+                ))}
+              </div>
             </div>
           ) : (
             <div className="flex flex-col items-center justify-center py-12 text-default-400">
               <div className="w-16 h-16 rounded-lg bg-default-100 flex items-center justify-center mb-4">
                 <History size={32} className="text-default-300" />
               </div>
-              <p className="font-medium mb-1">暂无版本历史</p>
-              <p className="text-sm">该文件可能是新创建的或路径不存在</p>
+              <p className="font-medium mb-1">未找到版本记录</p>
+              <p className="text-sm">请确认文件路径是否正确，或稍后在文件更新后再查看。</p>
             </div>
           )}
         </div>
@@ -568,13 +587,13 @@ function VersionsPageContent({ authScopeKey, initialPath, isAdmin, scopedHomeDir
           icon={Sparkles}
           title="查看文件版本历史"
           description={isAdmin
-            ? 'MnemoNAS 自动保留每个文件的历史版本。输入文件路径即可查看所有历史版本，支持预览、下载和一键回滚。'
-            : 'MnemoNAS 自动保留主目录内文件的历史版本。输入文件路径即可查看历史版本，支持预览和下载。'}
+            ? '输入文件路径后可查看版本记录，支持预览、下载和恢复。'
+            : '输入主目录内文件路径后可查看版本记录，支持预览和下载。'}
           action={
             <div className="flex flex-wrap items-center justify-center gap-2 rounded-lg bg-content2/50 px-4 py-2 text-sm text-default-500">
-              <span>提示: 也可以在文件管理器中右键点击文件</span>
+              <span>也可以在文件列表中打开文件菜单</span>
               <ChevronRight size={14} />
-              <span className="font-medium text-primary">"版本历史"</span>
+              <span className="font-medium text-primary">版本历史</span>
             </div>
           }
         />

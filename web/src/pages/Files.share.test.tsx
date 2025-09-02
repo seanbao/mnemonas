@@ -141,6 +141,7 @@ vi.mock('@/stores/auth', async (importOriginal) => {
 
 import { listFiles } from '@/api/files'
 import { listShares, ShareError } from '@/api/share'
+import { useAuthStore } from '@/stores/auth'
 
 const mockListFiles = vi.mocked(listFiles)
 const mockListShares = vi.mocked(listShares)
@@ -148,6 +149,7 @@ const mockListShares = vi.mocked(listShares)
 describe('FilesPage sharing behavior', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    useAuthStore.setState({ shareEnabled: null })
     useCanWriteMock.mockReturnValue(true)
     mockListShares.mockResolvedValue([])
     mockListFiles.mockResolvedValue({
@@ -245,6 +247,19 @@ describe('FilesPage sharing behavior', () => {
       await Promise.resolve()
     })
 
+    expect((await screen.findAllByText('分享功能已关闭')).length).toBeGreaterThan(0)
+    expect(screen.getByText('当前服务已关闭分享功能。请在系统设置中重新启用后再创建分享链接。')).toBeInTheDocument()
+  })
+
+  it('does not request shares when setup reports that sharing is off', async () => {
+    useAuthStore.setState({ shareEnabled: false })
+
+    await act(async () => {
+      render(<FilesPage />)
+      await Promise.resolve()
+    })
+
+    expect(mockListShares).not.toHaveBeenCalled()
     expect((await screen.findAllByText('分享功能已关闭')).length).toBeGreaterThan(0)
     expect(screen.getByText('当前服务已关闭分享功能。请在系统设置中重新启用后再创建分享链接。')).toBeInTheDocument()
   })

@@ -46,7 +46,7 @@ const navSections: NavSection[] = [
       { icon: Search, label: '搜索', path: '/search' },
       { icon: Image, label: '相册', path: '/album' },
       { icon: Star, label: '收藏', path: '/favorites' },
-      { icon: History, label: '时光回溯', path: '/versions', badge: '核心', badgeColor: 'bg-accent-primary/15 text-accent-primary' },
+      { icon: History, label: '版本历史', path: '/versions' },
     ]
   },
   {
@@ -165,7 +165,7 @@ export function Sidebar({ collapsed = false, onClose }: SidebarProps) {
                 MnemoNAS
               </div>
               <div className="mt-0.5 text-[10px] uppercase text-default-500">
-                Memory Palace
+                Private Storage
               </div>
             </div>
           )}

@@ -175,7 +175,7 @@ export function LoginPage() {
               <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-white/10">
                 <LogIn className="h-4 w-4" />
               </div>
-              <span>可部署在闲置 Ubuntu 笔记本上</span>
+              <span>支持 Linux 主机、容器和局域网部署</span>
             </div>
           </div>
 

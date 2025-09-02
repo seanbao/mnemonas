@@ -47,6 +47,7 @@ describe('authStore', () => {
       isLoading: true,
       error: null,
       authEnabled: true,
+      shareEnabled: null,
     })
 
     logoutMock.mockResolvedValue({ warning: false, message: undefined })
@@ -57,6 +58,7 @@ describe('authStore', () => {
       success: true,
       is_first_run: false,
       auth_enabled: true,
+      share_enabled: true,
       webdav_enabled: true,
       webdav_auth_type: 'basic',
     })
@@ -232,6 +234,21 @@ describe('authStore', () => {
     expect(state.isLoading).toBe(false)
   })
 
+  it('tracks share availability from setup status', async () => {
+    getSetupStatusMock.mockResolvedValue({
+      success: true,
+      is_first_run: false,
+      auth_enabled: true,
+      share_enabled: false,
+      webdav_enabled: true,
+      webdav_auth_type: 'basic',
+    })
+
+    await expect(useAuthStore.getState().initialize()).resolves.toBeUndefined()
+
+    expect(useAuthStore.getState().shareEnabled).toBe(false)
+  })
+
   it('restores secure authEnabled state when initialize runs after guest mode and auth is enabled again', async () => {
     useAuthStore.setState({
       user: {
@@ -345,6 +362,7 @@ describe('authStore', () => {
       success: true,
       is_first_run: false,
       auth_enabled: false,
+      share_enabled: true,
       webdav_enabled: true,
       webdav_auth_type: 'none',
     })
@@ -353,6 +371,7 @@ describe('authStore', () => {
 
     const state = useAuthStore.getState()
     expect(state.authEnabled).toBe(false)
+    expect(state.shareEnabled).toBe(true)
     expect(state.isAuthenticated).toBe(true)
     expect(state.isLoading).toBe(false)
     expect(state.user).toEqual({

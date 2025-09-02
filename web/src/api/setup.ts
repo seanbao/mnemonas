@@ -21,6 +21,7 @@ export interface SetupStatusResponse {
   success: boolean
   is_first_run: boolean
   auth_enabled: boolean
+  share_enabled?: boolean
   webdav_enabled: boolean
   webdav_auth_type: string
 }
@@ -62,7 +63,11 @@ export async function getSetupStatus(): Promise<SetupStatusResponse> {
   }
   
   const body = await parseSetupSuccess<Partial<SetupStatusResponse> & SetupSuccessResponse>(response, 'Invalid setup status response')
-  if (typeof body.is_first_run !== 'boolean' || typeof body.auth_enabled !== 'boolean' || typeof body.webdav_enabled !== 'boolean' || typeof body.webdav_auth_type !== 'string') {
+  if (typeof body.is_first_run !== 'boolean'
+    || typeof body.auth_enabled !== 'boolean'
+    || (body.share_enabled !== undefined && typeof body.share_enabled !== 'boolean')
+    || typeof body.webdav_enabled !== 'boolean'
+    || typeof body.webdav_auth_type !== 'string') {
     throw new Error('Invalid setup status response')
   }
 
