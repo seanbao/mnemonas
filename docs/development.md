@@ -789,7 +789,9 @@ export GOPROXY=https://goproxy.cn,direct
 ### Q: 如何重置开发数据？
 
 ```bash
-rm -rf ~/.mnemonas
+DATA_DIR="${MNEMONAS_DATA_DIR:-$HOME/.mnemonas}"
+test -n "$DATA_DIR" && test "$DATA_DIR" != "/" || { echo "refusing unsafe DATA_DIR"; exit 1; }
+rm -rf -- "$DATA_DIR"
 # 重启服务会自动创建目录
 ```
 

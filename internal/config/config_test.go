@@ -178,6 +178,21 @@ func TestConfig_Validate(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name:    "Invalid share base URL scheme",
+			modify:  func(c *Config) { c.Share.BaseURL = "javascript:alert(1)" },
+			wantErr: true,
+		},
+		{
+			name:    "Invalid share base URL relative",
+			modify:  func(c *Config) { c.Share.BaseURL = "/s/base" },
+			wantErr: true,
+		},
+		{
+			name:    "Valid share base URL",
+			modify:  func(c *Config) { c.Share.BaseURL = "https://nas.example.com" },
+			wantErr: false,
+		},
+		{
 			name:    "Invalid auth access token ttl",
 			modify:  func(c *Config) { c.Auth.AccessTokenTTL = 0 },
 			wantErr: true,
@@ -290,6 +305,27 @@ func TestConfig_Validate(t *testing.T) {
 				c.Alerts.WebhookMethod = "PATCH"
 			},
 			wantErr: true,
+		},
+		{
+			name: "Invalid alerts webhook URL scheme",
+			modify: func(c *Config) {
+				c.Alerts.WebhookURL = "file:///tmp/alert"
+			},
+			wantErr: true,
+		},
+		{
+			name: "Invalid alerts webhook URL host",
+			modify: func(c *Config) {
+				c.Alerts.WebhookURL = "https:///alert"
+			},
+			wantErr: true,
+		},
+		{
+			name: "Valid alerts webhook URL",
+			modify: func(c *Config) {
+				c.Alerts.WebhookURL = "https://hooks.example.com/storage"
+			},
+			wantErr: false,
 		},
 		{
 			name: "Invalid alerts webhook header",
@@ -470,6 +506,37 @@ trusted_proxy_hops = 2
 	}
 }
 
+func TestLoad_NormalizesOptionalURLFields(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.toml")
+
+	content := []byte(`
+[share]
+base_url = " https://nas.example.com/base/ "
+
+[alerts]
+webhook_url = " https://hooks.example.com/storage "
+webhook_method = "post"
+`)
+	if err := os.WriteFile(configPath, content, 0644); err != nil {
+		t.Fatalf("failed to write config: %v", err)
+	}
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if cfg.Share.BaseURL != "https://nas.example.com/base/" {
+		t.Fatalf("share base URL = %q, want trimmed URL", cfg.Share.BaseURL)
+	}
+	if cfg.Alerts.WebhookURL != "https://hooks.example.com/storage" {
+		t.Fatalf("alerts webhook URL = %q, want trimmed URL", cfg.Alerts.WebhookURL)
+	}
+	if cfg.Alerts.WebhookMethod != "POST" {
+		t.Fatalf("alerts webhook method = %q, want POST", cfg.Alerts.WebhookMethod)
+	}
+}
+
 func TestLoad_ExpandsHomeDirectoryInStorageRootAndDerivedPaths(t *testing.T) {
 	homeDir := t.TempDir()
 	t.Setenv("HOME", homeDir)
@@ -563,7 +630,15 @@ output = "~/logs/mnemonas.log"
 }
 
 func TestLoad_ExampleConfig(t *testing.T) {
-	configPath := filepath.Join("..", "..", "mnemonas.example.toml")
+	examplePath := filepath.Join("..", "..", "mnemonas.example.toml")
+	data, err := os.ReadFile(examplePath)
+	if err != nil {
+		t.Fatalf("failed to read example config: %v", err)
+	}
+	configPath := filepath.Join(t.TempDir(), "mnemonas.example.toml")
+	if err := os.WriteFile(configPath, data, 0644); err != nil {
+		t.Fatalf("failed to copy example config: %v", err)
+	}
 
 	cfg, err := Load(configPath)
 	if err != nil {
@@ -599,6 +674,13 @@ func TestConfig_SaveLoad(t *testing.T) {
 	if _, err := os.Stat(configPath); os.IsNotExist(err) {
 		t.Fatal("Config file was not created")
 	}
+	stat, err := os.Stat(configPath)
+	if err != nil {
+		t.Fatalf("failed to stat config file: %v", err)
+	}
+	if got := stat.Mode().Perm(); got != configFileMode {
+		t.Fatalf("saved config mode = %v, want %v", got, configFileMode)
+	}
 
 	loaded, err := Load(configPath)
 	if err != nil {
@@ -611,6 +693,35 @@ func TestConfig_SaveLoad(t *testing.T) {
 
 	if loaded.Log.Level != "debug" {
 		t.Errorf("Loaded log level = %s, want debug", loaded.Log.Level)
+	}
+}
+
+func TestLoad_TightensConfigFilePermissions(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.toml")
+
+	cfg := Default()
+	cfg.Server.Port = 9091
+	if err := cfg.Save(configPath); err != nil {
+		t.Fatalf("Save() error: %v", err)
+	}
+	if err := os.Chmod(configPath, 0644); err != nil {
+		t.Fatalf("failed to loosen config permissions: %v", err)
+	}
+
+	loaded, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if loaded.Server.Port != 9091 {
+		t.Fatalf("loaded server port = %d, want 9091", loaded.Server.Port)
+	}
+	stat, err := os.Stat(configPath)
+	if err != nil {
+		t.Fatalf("failed to stat config file: %v", err)
+	}
+	if got := stat.Mode().Perm(); got != configFileMode {
+		t.Fatalf("loaded config mode = %v, want %v", got, configFileMode)
 	}
 }
 

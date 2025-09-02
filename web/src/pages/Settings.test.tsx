@@ -1927,6 +1927,46 @@ describe('SettingsPage', () => {
     expect(mockUpdateSettings).not.toHaveBeenCalled()
   })
 
+  it('shows danger toast and skips save for invalid share base URL', async () => {
+    const user = userEvent.setup({ writeToClipboard: false })
+    render(<SettingsPage />)
+
+    await openTab(user, '分享管理')
+
+    await user.click(await screen.findByRole('switch'))
+    fireEvent.change(screen.getByPlaceholderText('https://nas.example.com'), { target: { value: 'javascript:alert(1)' } })
+    await user.click(screen.getByText('保存设置'))
+
+    await waitFor(() => {
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '分享基础 URL 无效',
+        description: '分享基础 URL 必须为空，或使用 http/https 的完整地址',
+        color: 'danger',
+      })
+    })
+    expect(mockUpdateSettings).not.toHaveBeenCalled()
+  })
+
+  it('shows danger toast and skips save for invalid alert webhook URL', async () => {
+    const user = userEvent.setup({ writeToClipboard: false })
+    render(<SettingsPage />)
+
+    await openTab(user, '高级')
+
+    await user.click(await screen.findByRole('switch', { name: '启用告警' }))
+    fireEvent.change(screen.getByPlaceholderText('https://hooks.example.com/alert'), { target: { value: 'ftp://hooks.example.com/storage' } })
+    await user.click(screen.getByText('保存设置'))
+
+    await waitFor(() => {
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: 'Webhook URL 无效',
+        description: 'Webhook URL 必须为空，或使用 http/https 的完整地址',
+        color: 'danger',
+      })
+    })
+    expect(mockUpdateSettings).not.toHaveBeenCalled()
+  })
+
   it('shows danger toast and skips save for unsupported alert webhook methods', async () => {
     const user = userEvent.setup({ writeToClipboard: false })
     mockGetSettings.mockResolvedValueOnce({

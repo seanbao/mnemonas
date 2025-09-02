@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { accessShareWithPassword, copyShareUrl, createShare, deleteShare, downloadShare, formatDuration, formatExpiration, getPublicShare, getPublicShareItems, getShare, listShares, getShareDownloadUrl, getShareFileDownloadUrl, ShareError, updateShare, type Share } from './share'
+import { accessShareWithPassword, copyShareUrl, createShare, deleteShare, downloadShare, formatDuration, formatExpiration, formatShareUrl, getPublicShare, getPublicShareItems, getShare, listShares, getShareDownloadUrl, getShareFileDownloadUrl, ShareError, updateShare, type Share } from './share'
 
 const mockCopyTextToClipboard = vi.fn()
 
@@ -35,10 +35,29 @@ describe('Share API', () => {
   })
 
   describe('URL helpers', () => {
-  it('encodes shared folder download path segments', () => {
-    const url = getShareFileDownloadUrl('abc123', '/folder/my file.txt')
-    expect(url).toBe('/api/v1/public/shares/abc123/download/folder/my%20file.txt')
-  })
+    it('encodes shared folder download path segments', () => {
+      const url = getShareFileDownloadUrl('abc123', '/folder/my file.txt')
+      expect(url).toBe('/api/v1/public/shares/abc123/download/folder/my%20file.txt')
+    })
+
+    it('keeps absolute http and https share URLs', () => {
+      expect(formatShareUrl('https://nas.example.com/s/share-1', 'https://local.example'))
+        .toBe('https://nas.example.com/s/share-1')
+      expect(formatShareUrl('http://nas.example.com/s/share-1', 'https://local.example'))
+        .toBe('http://nas.example.com/s/share-1')
+    })
+
+    it('resolves relative share URLs against the current origin', () => {
+      expect(formatShareUrl('/s/share-1', 'https://local.example')).toBe('https://local.example/s/share-1')
+      expect(formatShareUrl('s/share-1', 'https://local.example')).toBe('https://local.example/s/share-1')
+    })
+
+    it('does not treat non-http schemes as trusted absolute share URLs', () => {
+      expect(formatShareUrl('httpx://evil.example/s/share-1', 'https://local.example'))
+        .toBe('https://local.example/httpx://evil.example/s/share-1')
+      expect(formatShareUrl('javascript:alert(1)', 'https://local.example'))
+        .toBe('https://local.example/javascript:alert(1)')
+    })
 
   describe('downloadShare', () => {
     it('downloads the root shared file as a blob', async () => {

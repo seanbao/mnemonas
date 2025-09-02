@@ -4789,7 +4789,7 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 			updatedConfig.Share.Enabled = *req.Share.Enabled
 		}
 		if req.Share.BaseURL != nil {
-			updatedConfig.Share.BaseURL = *req.Share.BaseURL
+			updatedConfig.Share.BaseURL = strings.TrimSpace(*req.Share.BaseURL)
 		}
 	}
 
@@ -4829,7 +4829,7 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 			updatedConfig.Alerts.CooldownPeriod = d
 		}
 		if req.Alerts.WebhookURL != nil {
-			updatedConfig.Alerts.WebhookURL = *req.Alerts.WebhookURL
+			updatedConfig.Alerts.WebhookURL = strings.TrimSpace(*req.Alerts.WebhookURL)
 		}
 		if req.Alerts.WebhookMethod != nil {
 			updatedConfig.Alerts.WebhookMethod = strings.ToUpper(strings.TrimSpace(*req.Alerts.WebhookMethod))

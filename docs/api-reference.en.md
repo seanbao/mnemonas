@@ -321,7 +321,9 @@ Activity visibility follows user scope. Admins can see all activity.
 | `PUT` | `/api/v1/settings` | Update settings |
 | `GET` | `/api/v1/settings/webdav-credentials` | Get current WebDAV credential status |
 
-Settings updates can change WebDAV prefix, read-only mode, and auth config at runtime. Some lower-level dataplane settings require restart.
+Settings updates can change WebDAV prefix, read-only mode, share configuration, alert configuration, and auth config at runtime. Some lower-level dataplane settings require restart.
+
+Non-empty `share.base_url` and `alerts.webhook_url` values must be absolute `http` or `https` URLs. Alert `webhook_method` supports `GET` and `POST`; custom webhook headers use `Key:Value` strings. Invalid settings return `400 Bad Request` without mutating the running config.
 
 ## Maintenance
 

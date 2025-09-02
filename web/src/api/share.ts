@@ -259,6 +259,21 @@ async function readShareApiError(response: Response, fallback: string): Promise<
   return new ShareError(message, response.status, code)
 }
 
+export function formatShareUrl(shareUrl: string, origin = window.location.origin): string {
+  const trimmed = shareUrl.trim()
+  try {
+    const parsed = new URL(trimmed)
+    if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+      return trimmed
+    }
+  } catch {
+    // Relative share URLs are resolved against the current origin below.
+  }
+
+  const relativePath = trimmed.startsWith('/') ? trimmed : `/${trimmed}`
+  return `${origin}${relativePath}`
+}
+
 async function parseWrappedShareSuccess<T>(response: Response, invalidMessage: string): Promise<T> {
   let body: unknown
   try {
@@ -559,10 +574,7 @@ export async function downloadShare(id: string, options?: { filePath?: string; f
  * Copy share URL to clipboard
  */
 export async function copyShareUrl(share: Share): Promise<void> {
-  const url = share.url.startsWith('http') 
-    ? share.url 
-    : `${window.location.origin}${share.url}`
-  await copyTextToClipboard(url)
+  await copyTextToClipboard(formatShareUrl(share.url))
 }
 
 /**

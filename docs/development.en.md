@@ -450,7 +450,9 @@ sudo sysctl -p
 ### Reset Development Data
 
 ```bash
-rm -rf ~/.mnemonas
+DATA_DIR="${MNEMONAS_DATA_DIR:-$HOME/.mnemonas}"
+test -n "$DATA_DIR" && test "$DATA_DIR" != "/" || { echo "refusing unsafe DATA_DIR"; exit 1; }
+rm -rf -- "$DATA_DIR"
 ```
 
 ## Code Style
