@@ -71,4 +71,5 @@ coverage.txt
 .cache/
 
 # Local review notes
+docs/repo-review.md
 docs/review-progress.md
