@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -505,7 +506,7 @@ func syncRegisteredFavoritesStoreDir(path string) error {
 func readFavoritesStoreFileWithRoot(root *os.Root, path string) ([]byte, error) {
 	afterValidateFavoritesStorePath()
 
-	file, err := root.Open(filepath.Base(path))
+	file, err := root.OpenFile(filepath.Base(path), os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 	if err != nil {
 		return nil, mapFavoritesRootPathError(err)
 	}
@@ -618,7 +619,7 @@ func mapFavoritesRootPathError(err error) error {
 	if err == nil {
 		return nil
 	}
-	if errors.Is(err, os.ErrPermission) || isFavoritesRootEscapeError(err) {
+	if errors.Is(err, os.ErrPermission) || errors.Is(err, syscall.ELOOP) || isFavoritesRootEscapeError(err) {
 		return errFavoritesStoreSymlink
 	}
 	return err

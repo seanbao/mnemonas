@@ -465,6 +465,56 @@ func TestNewStore_Load_DoesNotFollowSymlinkInsertedAfterValidation(t *testing.T)
 	}
 }
 
+func TestNewStore_LoadRejectsLogSymlinkInsertedAfterValidation(t *testing.T) {
+	baseDir := t.TempDir()
+	activityDir := filepath.Join(baseDir, "activity")
+	if err := os.MkdirAll(activityDir, 0755); err != nil {
+		t.Fatalf("failed to create activity dir: %v", err)
+	}
+	logPath := filepath.Join(activityDir, "activity.json")
+	writeActivityFixture(t, logPath, []Entry{{
+		ID:        "original",
+		Timestamp: time.Now(),
+		Action:    ActionUpload,
+		Path:      "/docs/original.txt",
+		User:      "user1",
+	}})
+	linkedTarget := filepath.Join(activityDir, "linked.json")
+	writeActivityFixture(t, linkedTarget, []Entry{{
+		ID:        "linked",
+		Timestamp: time.Now(),
+		Action:    ActionDelete,
+		Path:      "/docs/linked.txt",
+		User:      "user2",
+	}})
+
+	originalHook := afterValidateActivityLogPath
+	var hookErr error
+	swapped := false
+	afterValidateActivityLogPath = func() {
+		if hookErr != nil || swapped {
+			return
+		}
+		swapped = true
+		if err := os.Remove(logPath); err != nil {
+			hookErr = err
+			return
+		}
+		hookErr = os.Symlink(linkedTarget, logPath)
+	}
+	defer func() {
+		afterValidateActivityLogPath = originalHook
+	}()
+
+	_, err := NewStore(activityDir)
+	if hookErr != nil {
+		t.Fatalf("afterValidateActivityLogPath hook error: %v", hookErr)
+	}
+	if !errors.Is(err, errActivityLogSymlink) {
+		t.Fatalf("expected activity log symlink rejection, got %v", err)
+	}
+}
+
 func TestStore_Log_DoesNotFollowSymlinkInsertedAfterValidation(t *testing.T) {
 	baseDir := t.TempDir()
 	activityDir := filepath.Join(baseDir, "activity")

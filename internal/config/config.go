@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/pelletier/go-toml/v2"
@@ -793,7 +794,7 @@ func readManagedFileWithRoot(root *os.Root, path string, symlinkErr error, label
 	}
 	afterValidateManagedFilePath()
 
-	file, err := root.Open(filepath.Base(path))
+	file, err := root.OpenFile(filepath.Base(path), os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 	if err != nil {
 		return nil, mapManagedRootPathError(err, symlinkErr)
 	}
@@ -845,7 +846,7 @@ func writeManagedFileAtomicallyWithRoot(root *os.Root, path string, data []byte,
 }
 
 func chmodManagedFileWithRoot(root *os.Root, path string, mode os.FileMode, symlinkErr error) error {
-	file, err := root.OpenFile(filepath.Base(path), os.O_RDONLY, 0)
+	file, err := root.OpenFile(filepath.Base(path), os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 	if err != nil {
 		return mapManagedRootPathError(err, symlinkErr)
 	}
@@ -898,7 +899,7 @@ func cleanupCreatedManagedDirs(createdDirs []string, label string, operationErr 
 }
 
 func mapManagedRootPathError(err error, symlinkErr error) error {
-	if errors.Is(err, os.ErrPermission) || isManagedRootEscapeError(err) {
+	if errors.Is(err, os.ErrPermission) || errors.Is(err, syscall.ELOOP) || isManagedRootEscapeError(err) {
 		return symlinkErr
 	}
 	return err
