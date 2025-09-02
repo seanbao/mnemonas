@@ -367,6 +367,17 @@ func New(cfg *Config) (*FileSystem, error) {
 		_ = filesRootHandle.Close()
 		return nil, fmt.Errorf("failed to open trash root: %w", err)
 	}
+	removeTrashPath := func(target string) error {
+		absTarget, err := normalizeStorageHostPath(target)
+		if err != nil {
+			return err
+		}
+		rel, ok := storageRelativePath(trashRoot, absTarget)
+		if !ok || rel == "." {
+			return errStoragePathSymlink
+		}
+		return trashRootHandle.RemoveAll(rel)
+	}
 
 	return &FileSystem{
 		workspace:                 ws,
@@ -397,7 +408,7 @@ func New(cfg *Config) (*FileSystem, error) {
 		renameWorkspacePath:       ws.Rename,
 		renameMetadataPath:        vs.RenamePath,
 		renameHistoryMetadataPath: vs.RenamePathHistory,
-		removeTrashPath:           os.RemoveAll,
+		removeTrashPath:           removeTrashPath,
 	}, nil
 }
 
@@ -3300,10 +3311,19 @@ func (fs *FileSystem) restoreTrashContent(src, dst string, isDir bool) error {
 }
 
 func (fs *FileSystem) removeTrashPathDurably(trashPath string) (bool, error) {
+	root, relPath, _, err := fs.resolveStoragePathRoot(trashPath)
+	if err != nil {
+		return false, err
+	}
+	if relPath == "." {
+		return false, errStoragePathSymlink
+	}
+
 	if err := fs.removeTrashPath(trashPath); err != nil {
 		return false, err
 	}
-	if err := syncStoragePathDir(path.Dir(trashPath)); err != nil {
+	parentRel := filepath.Dir(relPath)
+	if err := syncManagedStorageDir(root.handle, parentRel, storageAbsolutePath(root, parentRel)); err != nil {
 		return true, fmt.Errorf("failed to sync trash delete directory: %w", err)
 	}
 	return true, nil

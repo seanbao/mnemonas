@@ -49,6 +49,7 @@ const webdavWorkspaceMutationWarningHeader = `199 MnemoNAS "workspace mutation p
 const maxPropfindTraversalDepth = 64
 const webdavLockDepthZero = "0"
 const webdavLockDepthInfinity = "infinity"
+const maxWebDAVXMLRequestBody = 1 << 20
 
 var webdavRandomRead = rand.Read
 
@@ -1313,8 +1314,13 @@ func (h *Handler) handleProppatch(ctx context.Context, w http.ResponseWriter, r 
 		return
 	}
 
-	requestedProperties, err := parseProppatchProperties(r.Body)
+	requestedProperties, err := parseProppatchProperties(http.MaxBytesReader(w, r.Body, maxWebDAVXMLRequestBody))
 	if err != nil {
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			http.Error(w, "PROPPATCH request body too large", http.StatusRequestEntityTooLarge)
+			return
+		}
 		writeKnownWebDAVError(w, errInvalidProppatchBody, http.StatusBadRequest)
 		return
 	}

@@ -239,7 +239,7 @@ Content-defined chunking settings affect deduplication and metadata overhead.
 | --- | --- | --- | --- |
 | `min_chunk_size` | uint32 | `262144` | Minimum chunk size, 256KB |
 | `avg_chunk_size` | uint32 | `1048576` | Average chunk size, 1MB |
-| `max_chunk_size` | uint32 | `4194304` | Maximum chunk size, 4MB |
+| `max_chunk_size` | uint32 | `4194304` | Maximum chunk size, 4MB; capped at `67108864` (64MB) |
 
 Tuning guide:
 
@@ -252,10 +252,10 @@ Tuning guide:
 Constraint:
 
 ```text
-min_chunk_size < avg_chunk_size < max_chunk_size
+min_chunk_size < avg_chunk_size < max_chunk_size <= 67108864
 ```
 
-The dataplane reads these values on startup. Restart dataplane after changing them.
+The dataplane reads these values on startup. Restart dataplane after changing them. The 64MB cap prevents oversized streaming chunk buffers.
 
 ## `[webdav]`
 

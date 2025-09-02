@@ -326,7 +326,7 @@ max_retries = 5
 | ---- | ---- | ------ | ---- |
 | `min_chunk_size` | uint32 | `262144` (256KB) | 最小块大小（字节） |
 | `avg_chunk_size` | uint32 | `1048576` (1MB) | 平均块大小（字节） |
-| `max_chunk_size` | uint32 | `4194304` (4MB) | 最大块大小（字节） |
+| `max_chunk_size` | uint32 | `4194304` (4MB) | 最大块大小（字节），上限 `67108864` (64MB) |
 
 **参数调优指南：**
 
@@ -339,6 +339,7 @@ max_retries = 5
 **约束条件：**
 
 - `min_chunk_size < avg_chunk_size < max_chunk_size`
+- `max_chunk_size <= 67108864` (64MB)，避免 dataplane 为流式分块预留过大的内存缓冲
 - 建议：`min = avg / 4`，`max = avg * 4`
 
 这些参数由 Rust dataplane 在启动时读取。Docker 启动脚本和 systemd 安装的 `mnemonas-dataplane-start` helper 会把配置中的字节值传给 dataplane；修改后需要重启 dataplane 才会影响新的对象写入。

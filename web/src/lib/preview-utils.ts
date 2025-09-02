@@ -2,6 +2,8 @@
  * Preview utility functions for file type detection and URL building
  */
 
+import { encodePathForUrl, normalizePath } from '@/lib/utils'
+
 export type PreviewType = 
   | 'text' 
   | 'image' 
@@ -130,15 +132,8 @@ export function isAudioFile(filename: string): boolean {
  * Uses REST API endpoint for authenticated access (avoids Basic Auth popup)
  */
 export function buildPreviewUrl(path: string, options?: { includeAuth?: boolean }): string {
-  // Normalize path
-  const normalizedPath = path.startsWith('/') ? path : `/${path}`
-  
-  // Encode path segments
-  const encodedPath = normalizedPath
-    .split('/')
-    .map(segment => encodeURIComponent(segment))
-    .join('/')
-  
+  const normalizedPath = normalizePath(path)
+  const encodedPath = encodePathForUrl(normalizedPath)
   const url = `/api/v1/download${encodedPath}`
   void options
   return url

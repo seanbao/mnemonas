@@ -276,6 +276,15 @@ func TestConfig_Validate(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name: "Invalid CDC max exceeds memory safety cap",
+			modify: func(c *Config) {
+				c.DataPlane.CDC.MinChunkSize = 16 * 1024 * 1024
+				c.DataPlane.CDC.AvgChunkSize = 32 * 1024 * 1024
+				c.DataPlane.CDC.MaxChunkSize = MaxCDCChunkSize + 1
+			},
+			wantErr: true,
+		},
+		{
 			name: "Invalid alerts webhook method",
 			modify: func(c *Config) {
 				c.Alerts.WebhookMethod = "PATCH"
