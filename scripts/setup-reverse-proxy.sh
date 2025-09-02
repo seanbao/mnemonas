@@ -1,48 +1,59 @@
-#!/bin/bash
-# MnemoNAS 反向代理自动配置脚本 (Ubuntu)
-# 用法: sudo ./setup-reverse-proxy.sh <域名> [邮箱]
-# 示例: sudo ./setup-reverse-proxy.sh nas.example.com admin@example.com
+#!/usr/bin/env bash
+# MnemoNAS public HTTPS reverse-proxy setup helper.
+# Usage: sudo ./scripts/setup-reverse-proxy.sh [--proxy caddy|nginx] <domain> [email]
+# Example: sudo ./scripts/setup-reverse-proxy.sh --proxy caddy nas.example.com admin@example.com
 
 set -euo pipefail
 
-# 颜色输出
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
 
+DOMAIN=""
+EMAIL=""
+PROXY_TYPE="${MNEMONAS_PROXY_TYPE:-}"
+CONFIG_PATH="${MNEMONAS_CONFIG_PATH:-/etc/mnemonas/config.toml}"
+CONFIGURE_MNEMONAS="${MNEMONAS_CONFIGURE_MNEMONAS:-1}"
+CONFIGURE_FIREWALL="${MNEMONAS_CONFIGURE_FIREWALL:-1}"
+RESTART_MNEMONAS="${MNEMONAS_RESTART_MNEMONAS:-1}"
+TRUSTED_PROXY_HOPS="${MNEMONAS_TRUSTED_PROXY_HOPS:-1}"
+UPSTREAM_HOST="${MNEMONAS_UPSTREAM_HOST:-127.0.0.1}"
+UPSTREAM_PORT="${MNEMONAS_UPSTREAM_PORT:-}"
+
 log_info() { echo -e "${GREEN}[INFO]${NC} $1"; }
 log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 
-install_cron_line_once() {
-    local line="$1"
-    local current_cron
-    current_cron="$(mktemp)"
-
-    crontab -l > "$current_cron" 2>/dev/null || true
-    if grep -Fqx "$line" "$current_cron"; then
-        log_info "证书续期 cron 已存在，跳过重复写入"
-    else
-        { cat "$current_cron"; echo "$line"; } | crontab -
-        log_info "已写入证书续期 cron"
-    fi
-    rm -f -- "$current_cron"
+fail() {
+    log_error "$1"
+    exit 1
 }
 
-configure_certbot_renewal() {
-    if systemctl list-unit-files certbot.timer >/dev/null 2>&1; then
-        systemctl enable --now certbot.timer >/dev/null
-        log_info "已启用 certbot.timer 自动续期"
-        return 0
-    fi
+usage() {
+    cat <<EOF
+用法: sudo $0 [选项] <域名> [邮箱]
 
-    if command -v crontab >/dev/null 2>&1; then
-        install_cron_line_once "0 3 * * * certbot renew --quiet --post-hook 'systemctl reload nginx'"
-        return 0
-    fi
+选项:
+  --proxy caddy|nginx          反向代理类型，默认交互选择；非交互时默认 caddy
+  --config <path>              MnemoNAS 配置文件路径，默认 /etc/mnemonas/config.toml
+  --skip-mnemonas-config       不自动修改 MnemoNAS server.host/trusted_proxy_hops
+  --no-firewall                不修改 UFW 防火墙规则
+  --no-restart                 修改配置后不自动重启 mnemonas.service
+  -h, --help                   显示帮助
 
-    log_warn "未检测到 certbot.timer 或 crontab；请手动配置 certbot renew 自动续期"
+环境变量:
+  MNEMONAS_UPSTREAM_HOST       代理后端主机，默认 127.0.0.1
+  MNEMONAS_UPSTREAM_PORT       代理后端端口，默认读取 config.toml 的 server.port，否则 8080
+  MNEMONAS_TRUSTED_PROXY_HOPS  写入 server.trusted_proxy_hops 的值，默认 1
+
+示例:
+  sudo $0 --proxy caddy nas.example.com admin@example.com
+EOF
+}
+
+require_command() {
+    command -v "$1" >/dev/null 2>&1 || fail "缺少必要命令: $1"
 }
 
 domain_is_safe() {
@@ -83,119 +94,429 @@ email_is_safe() {
     domain_is_safe "$domain_part"
 }
 
-# 检查参数
-DOMAIN="${1:-}"
-EMAIL="${2:-}"
+require_safe_plain_value() {
+    local value="$1"
+    local label="$2"
 
-if [[ -z "$DOMAIN" ]]; then
-    echo "用法: sudo $0 <域名> [邮箱]"
-    echo "示例: sudo $0 nas.example.com admin@example.com"
-    exit 1
-fi
+    [[ -n "$value" ]] || fail "$label 不能为空"
+    [[ "$value" != *[[:space:]]* ]] || fail "$label 不能包含空白字符: $value"
+    [[ "$value" != *\"* && "$value" != *\\* ]] || fail "$label 不能包含引号或反斜杠: $value"
+}
 
-if ! domain_is_safe "$DOMAIN"; then
-    log_error "域名格式不安全: $DOMAIN"
-    exit 1
-fi
+require_safe_config_path() {
+    [[ "$CONFIG_PATH" == /* ]] || fail "--config 必须是绝对路径: $CONFIG_PATH"
+    [[ "$CONFIG_PATH" != *[[:space:]]* ]] || fail "--config 不能包含空白字符: $CONFIG_PATH"
+}
 
-if [[ -z "$EMAIL" ]]; then
-    EMAIL="admin@${DOMAIN}"
-    log_warn "未指定邮箱，使用默认: $EMAIL"
-fi
+require_safe_port() {
+    local value="$1"
+    local label="$2"
 
-if ! email_is_safe "$EMAIL"; then
-    log_error "邮箱格式不安全: $EMAIL"
-    exit 1
-fi
+    [[ "$value" =~ ^[0-9]+$ ]] || fail "$label 必须是数字端口: $value"
+    (( 10#$value >= 1 && 10#$value <= 65535 )) || fail "$label 必须在 1-65535 之间: $value"
+}
 
-# 检查 root 权限
-if [[ $EUID -ne 0 ]]; then
-    log_error "请使用 sudo 运行此脚本"
-    exit 1
-fi
+toml_value() {
+    local section="$1"
+    local key="$2"
+    local file="$3"
+    awk -v section="[$section]" -v key="$key" '
+        function strip_comment(text,    i, c, quote, escaped, out) {
+            quote = ""
+            escaped = 0
+            out = ""
+            for (i = 1; i <= length(text); i++) {
+                c = substr(text, i, 1)
+                if (quote == "\"") {
+                    out = out c
+                    if (escaped) {
+                        escaped = 0
+                        continue
+                    }
+                    if (c == "\\") {
+                        escaped = 1
+                        continue
+                    }
+                    if (c == quote) {
+                        quote = ""
+                    }
+                    continue
+                }
+                if (quote == "\047") {
+                    out = out c
+                    if (c == quote) {
+                        quote = ""
+                    }
+                    continue
+                }
+                if (c == "\"" || c == "\047") {
+                    quote = c
+                    out = out c
+                    continue
+                }
+                if (c == "#") {
+                    break
+                }
+                out = out c
+            }
+            return out
+        }
+        {
+            line = strip_comment($0)
+            gsub("^[[:space:]]+|[[:space:]]+$", "", line)
+            section_line = line
+            if (section_line ~ "^\\[") {
+                sub("^\\[[[:space:]]*", "[", section_line)
+                sub("[[:space:]]*\\]$", "]", section_line)
+                gsub("[[:space:]]*\\.[[:space:]]*", ".", section_line)
+            }
+        }
+        section_line == section {
+            in_section = 1
+            next
+        }
+        section_line ~ "^\\[" {
+            in_section = 0
+        }
+        in_section && line ~ "^[[:space:]]*" key "[[:space:]]*=" {
+            sub("^[[:space:]]*" key "[[:space:]]*=[[:space:]]*", "", line)
+            gsub("^[[:space:]]+|[[:space:]]+$", "", line)
+            gsub("^\"|\"$", "", line)
+            gsub("^\047|\047$", "", line)
+            print line
+            exit
+        }
+    ' "$file"
+}
 
-# 检查 Ubuntu 版本
-if ! grep -q "Ubuntu" /etc/os-release 2>/dev/null; then
-    log_warn "非 Ubuntu 系统，脚本可能不兼容"
-fi
+sed_replacement_escape() {
+    sed 's/[\/&]/\\&/g' <<< "$1"
+}
 
-log_info "配置域名: $DOMAIN"
-log_info "证书邮箱: $EMAIL"
+parse_args() {
+    local -a positional=()
 
-# 选择方案
-echo ""
-echo "请选择反向代理方案:"
-echo "  1) Caddy (推荐，自动 HTTPS)"
-echo "  2) Nginx + Certbot"
-echo ""
-read -r -p "选择 [1/2]: " CHOICE
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --proxy)
+                [[ $# -ge 2 ]] || fail "--proxy 需要 caddy 或 nginx"
+                PROXY_TYPE="$2"
+                shift 2
+                ;;
+            --config)
+                [[ $# -ge 2 ]] || fail "--config 需要路径"
+                CONFIG_PATH="$2"
+                shift 2
+                ;;
+            --skip-mnemonas-config)
+                CONFIGURE_MNEMONAS=0
+                shift
+                ;;
+            --no-firewall)
+                CONFIGURE_FIREWALL=0
+                shift
+                ;;
+            --no-restart)
+                RESTART_MNEMONAS=0
+                shift
+                ;;
+            -h|--help)
+                usage
+                exit 0
+                ;;
+            --)
+                shift
+                break
+                ;;
+            -*)
+                fail "未知参数: $1"
+                ;;
+            *)
+                positional+=("$1")
+                shift
+                ;;
+        esac
+    done
 
-case "$CHOICE" in
-    1|"")
-        PROXY_TYPE="caddy"
-        ;;
-    2)
-        PROXY_TYPE="nginx"
-        ;;
-    *)
-        log_error "无效选择"
+    while [[ $# -gt 0 ]]; do
+        positional+=("$1")
+        shift
+    done
+
+    DOMAIN="${positional[0]:-}"
+    EMAIL="${positional[1]:-}"
+    [[ "${#positional[@]}" -le 2 ]] || fail "参数过多"
+}
+
+validate_inputs_before_root() {
+    if [[ -z "$DOMAIN" ]]; then
+        usage
         exit 1
-        ;;
-esac
+    fi
 
-log_info "选择方案: $PROXY_TYPE"
+    domain_is_safe "$DOMAIN" || fail "域名格式不安全: $DOMAIN"
 
-#######################################
-# Caddy 安装配置
-#######################################
+    if [[ -z "$EMAIL" ]]; then
+        EMAIL="admin@${DOMAIN}"
+        log_warn "未指定邮箱，使用默认: $EMAIL"
+    fi
+    email_is_safe "$EMAIL" || fail "邮箱格式不安全: $EMAIL"
+
+    if [[ -n "$PROXY_TYPE" && "$PROXY_TYPE" != "caddy" && "$PROXY_TYPE" != "nginx" ]]; then
+        fail "--proxy 只能是 caddy 或 nginx"
+    fi
+
+    require_safe_config_path
+    require_safe_plain_value "$UPSTREAM_HOST" "MNEMONAS_UPSTREAM_HOST"
+    [[ "$TRUSTED_PROXY_HOPS" =~ ^[0-9]+$ ]] || fail "MNEMONAS_TRUSTED_PROXY_HOPS 必须是非负整数"
+    (( 10#$TRUSTED_PROXY_HOPS >= 1 )) || fail "公网反向代理至少需要 trusted_proxy_hops = 1"
+}
+
+resolve_upstream_port() {
+    local configured_port=""
+
+    if [[ -z "$UPSTREAM_PORT" && -f "$CONFIG_PATH" ]]; then
+        configured_port="$(toml_value server port "$CONFIG_PATH" || true)"
+    fi
+    UPSTREAM_PORT="${UPSTREAM_PORT:-${configured_port:-8080}}"
+    require_safe_port "$UPSTREAM_PORT" "MNEMONAS_UPSTREAM_PORT"
+}
+
+require_root() {
+    [[ $EUID -eq 0 ]] || fail "请使用 sudo 运行此脚本"
+}
+
+warn_if_not_ubuntu() {
+    if ! grep -q "Ubuntu" /etc/os-release 2>/dev/null; then
+        log_warn "非 Ubuntu 系统，安装命令可能不兼容；如需手动配置，请参考 docs/public-server-quickstart.md"
+    fi
+}
+
+select_proxy() {
+    local choice=""
+
+    if [[ -n "$PROXY_TYPE" ]]; then
+        log_info "选择方案: $PROXY_TYPE"
+        return
+    fi
+
+    if [[ -t 0 ]]; then
+        echo ""
+        echo "请选择反向代理方案:"
+        echo "  1) Caddy (推荐，自动 HTTPS)"
+        echo "  2) Nginx + Certbot"
+        echo ""
+        read -r -p "选择 [1/2]: " choice
+    else
+        choice="1"
+        log_warn "非交互环境，默认使用 Caddy"
+    fi
+
+    case "$choice" in
+        1|"")
+            PROXY_TYPE="caddy"
+            ;;
+        2)
+            PROXY_TYPE="nginx"
+            ;;
+        *)
+            fail "无效选择"
+            ;;
+    esac
+
+    log_info "选择方案: $PROXY_TYPE"
+}
+
+update_mnemonas_server_config() {
+    local path="$1"
+    local host="$2"
+    local hops="$3"
+    local tmp
+
+    tmp="$(mktemp)"
+    awk -v host="$host" -v hops="$hops" '
+        function trim(text) {
+            gsub("^[[:space:]]+|[[:space:]]+$", "", text)
+            return text
+        }
+        function emit_missing() {
+            if (in_server) {
+                if (!host_seen) {
+                    print "host = \"" host "\""
+                }
+                if (!hops_seen) {
+                    print "trusted_proxy_hops = " hops
+                }
+            }
+        }
+        {
+            trimmed = trim($0)
+            if (trimmed ~ "^\\[") {
+                if (in_server) {
+                    emit_missing()
+                    in_server = 0
+                }
+                if (trimmed == "[server]") {
+                    server_seen = 1
+                    in_server = 1
+                    host_seen = 0
+                    hops_seen = 0
+                }
+                print
+                next
+            }
+
+            if (in_server && trimmed ~ "^host[[:space:]]*=") {
+                print "host = \"" host "\""
+                host_seen = 1
+                next
+            }
+
+            if (in_server && trimmed ~ "^trusted_proxy_hops[[:space:]]*=") {
+                print "trusted_proxy_hops = " hops
+                hops_seen = 1
+                next
+            }
+
+            print
+        }
+        END {
+            if (in_server) {
+                emit_missing()
+            }
+            if (!server_seen) {
+                print ""
+                print "[server]"
+                print "host = \"" host "\""
+                print "trusted_proxy_hops = " hops
+            }
+        }
+    ' "$path" > "$tmp"
+
+    cat "$tmp" > "$path"
+    rm -f -- "$tmp"
+}
+
+configure_mnemonas() {
+    local backup=""
+    local check_log=""
+
+    if [[ "$CONFIGURE_MNEMONAS" != "1" ]]; then
+        log_warn "已跳过 MnemoNAS 配置修改；请手动设置 server.host 和 trusted_proxy_hops"
+        return
+    fi
+
+    if [[ ! -f "$CONFIG_PATH" ]]; then
+        log_warn "未找到 MnemoNAS 配置: $CONFIG_PATH"
+        log_warn "请手动加入: [server] host = \"$UPSTREAM_HOST\", trusted_proxy_hops = $TRUSTED_PROXY_HOPS"
+        return
+    fi
+
+    backup="${CONFIG_PATH}.bak.$(date +%Y%m%d%H%M%S)"
+    cp "$CONFIG_PATH" "$backup"
+    log_info "已备份 MnemoNAS 配置: $backup"
+
+    update_mnemonas_server_config "$CONFIG_PATH" "$UPSTREAM_HOST" "$TRUSTED_PROXY_HOPS"
+    log_info "已设置 MnemoNAS 后端监听: $UPSTREAM_HOST:$UPSTREAM_PORT"
+    log_info "已设置 server.trusted_proxy_hops = $TRUSTED_PROXY_HOPS"
+
+    if command -v nasd >/dev/null 2>&1; then
+        check_log="$(mktemp)"
+        if nasd --check-config --config "$CONFIG_PATH" >"$check_log" 2>&1; then
+            log_info "MnemoNAS 配置校验通过"
+        else
+            mv "$backup" "$CONFIG_PATH"
+            cat "$check_log" >&2 || true
+            rm -f -- "$check_log"
+            fail "MnemoNAS 配置校验失败，已恢复备份"
+        fi
+        rm -f -- "$check_log"
+    else
+        log_warn "未找到 nasd，跳过配置校验"
+    fi
+
+    if [[ "$RESTART_MNEMONAS" != "1" ]]; then
+        log_warn "已跳过 mnemonas.service 重启；请稍后手动重启"
+        return
+    fi
+
+    if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files mnemonas.service >/dev/null 2>&1; then
+        systemctl restart mnemonas.service
+        log_info "已重启 mnemonas.service"
+    else
+        log_warn "未检测到 mnemonas.service；如果不是 systemd 部署，请手动重启 MnemoNAS"
+    fi
+}
+
+install_cron_line_once() {
+    local line="$1"
+    local current_cron
+    current_cron="$(mktemp)"
+
+    crontab -l > "$current_cron" 2>/dev/null || true
+    if grep -Fqx "$line" "$current_cron"; then
+        log_info "证书续期 cron 已存在，跳过重复写入"
+    else
+        { cat "$current_cron"; echo "$line"; } | crontab -
+        log_info "已写入证书续期 cron"
+    fi
+    rm -f -- "$current_cron"
+}
+
+configure_certbot_renewal() {
+    if systemctl list-unit-files certbot.timer >/dev/null 2>&1; then
+        systemctl enable --now certbot.timer >/dev/null
+        log_info "已启用 certbot.timer 自动续期"
+        return 0
+    fi
+
+    if command -v crontab >/dev/null 2>&1; then
+        install_cron_line_once "0 3 * * * certbot renew --quiet --post-hook 'systemctl reload nginx'"
+        return 0
+    fi
+
+    log_warn "未检测到 certbot.timer 或 crontab；请手动配置 certbot renew 自动续期"
+}
+
 install_caddy() {
     log_info "安装 Caddy..."
-    
-    # 安装依赖
+
     apt-get update
     apt-get install -y debian-keyring debian-archive-keyring apt-transport-https curl gnupg
-    
-    # 添加 Caddy 仓库
+
     curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | \
         gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
     curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | \
         tee /etc/apt/sources.list.d/caddy-stable.list
-    
+
     apt-get update
     apt-get install -y caddy
-    
+
     log_info "配置 Caddyfile..."
-    
-    # 备份原配置
     if [[ -f /etc/caddy/Caddyfile ]]; then
         cp /etc/caddy/Caddyfile "/etc/caddy/Caddyfile.bak.$(date +%Y%m%d%H%M%S)"
     fi
-    
-    # 写入新配置
+
     cat > /etc/caddy/Caddyfile << EOF
-# MnemoNAS 反向代理配置
-# 生成时间: $(date)
+# MnemoNAS public HTTPS reverse proxy
+# Generated at: $(date)
 
 $DOMAIN {
-    # 自动 HTTPS (Let's Encrypt)
     tls $EMAIL
-    
-    # 反向代理到 MnemoNAS
-    reverse_proxy localhost:8080 {
+
+    reverse_proxy $UPSTREAM_HOST:$UPSTREAM_PORT {
         header_up Host {host}
         header_up X-Real-IP {remote_host}
         header_up X-Forwarded-For {remote_host}
         header_up X-Forwarded-Proto {scheme}
     }
-    
-    # 大文件上传支持 (10GB)
+
     request_body {
         max_size 10GB
     }
-    
-    # 访问日志
+
     log {
-        output file /var/log/caddy/access.log {
+        output file /var/log/caddy/mnemonas-access.log {
             roll_size 100mb
             roll_keep 5
         }
@@ -204,47 +525,39 @@ $DOMAIN {
 }
 EOF
 
-    # 创建日志目录
     mkdir -p /var/log/caddy
     chown caddy:caddy /var/log/caddy
-    
-    # 验证配置
+
     log_info "验证 Caddy 配置..."
     caddy validate --config /etc/caddy/Caddyfile
-    
-    # 启动服务
+
     systemctl enable caddy
     systemctl restart caddy
-    
-    log_info "Caddy 配置完成!"
+
+    log_info "Caddy 配置完成"
 }
 
-#######################################
-# Nginx + Certbot 安装配置
-#######################################
 install_nginx() {
+    local domain_escaped upstream_escaped generated_escaped
+
     log_info "安装 Nginx 和 Certbot..."
-    
     apt-get update
     apt-get install -y nginx certbot python3-certbot-nginx
-    
+
     log_info "配置 Nginx..."
-    
-    # 写入 Nginx 配置
+
     cat > "/etc/nginx/sites-available/$DOMAIN" << 'EOF'
-# MnemoNAS 反向代理配置
-# 生成时间: GENERATED_TIME
+# MnemoNAS public HTTPS reverse proxy
+# Generated at: GENERATED_TIME
 
 server {
     listen 80;
     server_name DOMAIN_PLACEHOLDER;
-    
-    # Certbot 验证
+
     location /.well-known/acme-challenge/ {
         root /var/www/certbot;
     }
-    
-    # HTTP 跳转 HTTPS
+
     location / {
         return 301 https://$host$request_uri;
     }
@@ -253,181 +566,311 @@ server {
 server {
     listen 443 ssl http2;
     server_name DOMAIN_PLACEHOLDER;
-    
-    # SSL 证书 (certbot 会自动配置)
+
     ssl_certificate /etc/letsencrypt/live/DOMAIN_PLACEHOLDER/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/DOMAIN_PLACEHOLDER/privkey.pem;
-    
-    # SSL 安全配置
+
     ssl_protocols TLSv1.2 TLSv1.3;
     ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384;
     ssl_prefer_server_ciphers off;
     ssl_session_cache shared:SSL:10m;
     ssl_session_timeout 1d;
-    
-    # HSTS
+
     add_header Strict-Transport-Security "max-age=63072000" always;
-    
-    # 大文件上传 (10GB)
+
     client_max_body_size 10G;
     client_body_timeout 3600s;
     proxy_read_timeout 3600s;
     proxy_send_timeout 3600s;
-    
-    # 禁用缓冲 (流式传输)
     proxy_buffering off;
     proxy_request_buffering off;
-    
-    # 反向代理
+
     location / {
-        proxy_pass http://127.0.0.1:8080;
+        proxy_pass http://UPSTREAM_PLACEHOLDER;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
-        
-        # HTTP/1.1 支持
+        proxy_pass_request_headers on;
+        proxy_set_header Destination $http_destination;
+
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";
     }
-    
-    # 访问日志
+
     access_log /var/log/nginx/DOMAIN_PLACEHOLDER.access.log;
     error_log /var/log/nginx/DOMAIN_PLACEHOLDER.error.log;
 }
 EOF
 
-    # 替换占位符
-    sed -i "s/DOMAIN_PLACEHOLDER/$DOMAIN/g" "/etc/nginx/sites-available/$DOMAIN"
-    sed -i "s/GENERATED_TIME/$(date)/g" "/etc/nginx/sites-available/$DOMAIN"
-    
-    # 创建 certbot 目录
+    domain_escaped="$(sed_replacement_escape "$DOMAIN")"
+    upstream_escaped="$(sed_replacement_escape "$UPSTREAM_HOST:$UPSTREAM_PORT")"
+    generated_escaped="$(sed_replacement_escape "$(date)")"
+    sed -i "s/DOMAIN_PLACEHOLDER/$domain_escaped/g" "/etc/nginx/sites-available/$DOMAIN"
+    sed -i "s/UPSTREAM_PLACEHOLDER/$upstream_escaped/g" "/etc/nginx/sites-available/$DOMAIN"
+    sed -i "s/GENERATED_TIME/$generated_escaped/g" "/etc/nginx/sites-available/$DOMAIN"
+
     mkdir -p /var/www/certbot
-    
-    # 启用站点
     ln -sf "/etc/nginx/sites-available/$DOMAIN" /etc/nginx/sites-enabled/
-    
-    # 删除默认站点
     rm -f -- /etc/nginx/sites-enabled/default
-    
-    # 创建临时配置用于申请证书
+
     cat > "/etc/nginx/sites-available/$DOMAIN.temp" << EOF
 server {
     listen 80;
     server_name $DOMAIN;
-    
+
     location /.well-known/acme-challenge/ {
         root /var/www/certbot;
     }
-    
+
     location / {
         return 200 'MnemoNAS setup in progress';
         add_header Content-Type text/plain;
     }
 }
 EOF
-    
-    # 先用临时配置启动
+
     ln -sf "/etc/nginx/sites-available/$DOMAIN.temp" "/etc/nginx/sites-enabled/$DOMAIN"
-    
-    # 测试并重载
     nginx -t
     systemctl enable nginx
     systemctl restart nginx
-    
+
     log_info "申请 Let's Encrypt 证书..."
     certbot certonly --webroot -w /var/www/certbot \
         -d "$DOMAIN" \
         --email "$EMAIL" \
         --agree-tos \
         --non-interactive
-    
-    # 切换到正式配置
+
     ln -sf "/etc/nginx/sites-available/$DOMAIN" "/etc/nginx/sites-enabled/$DOMAIN"
     rm -f -- "/etc/nginx/sites-available/$DOMAIN.temp"
-    
-    # 重载配置
+
     nginx -t
     systemctl reload nginx
-    
-    # 设置自动续期
+
     log_info "配置证书自动续期..."
     configure_certbot_renewal
-    
-    log_info "Nginx + Certbot 配置完成!"
+
+    log_info "Nginx + Certbot 配置完成"
 }
 
-#######################################
-# 防火墙配置
-#######################################
 configure_firewall() {
-    log_info "配置防火墙..."
-    
-    # 检查 ufw 是否已安装
-    if command -v ufw &> /dev/null; then
+    if [[ "$CONFIGURE_FIREWALL" != "1" ]]; then
+        log_warn "已跳过防火墙配置；请确认公网安全组只开放 80/443"
+        return
+    fi
+
+    log_info "配置本机 UFW 防火墙规则..."
+    if command -v ufw >/dev/null 2>&1; then
         ufw allow 80/tcp
         ufw allow 443/tcp
-        log_info "已开放 80/443 端口"
+        if [[ "$UPSTREAM_PORT" != "80" && "$UPSTREAM_PORT" != "443" ]]; then
+            ufw deny "$UPSTREAM_PORT/tcp" comment "MnemoNAS direct HTTP"
+        fi
+        ufw deny 9090/tcp comment "MnemoNAS dataplane gRPC"
+        ufw deny 9091/tcp comment "MnemoNAS dataplane HTTP"
+        log_info "已允许 80/443，并限制 $UPSTREAM_PORT/9090/9091"
     else
-        log_warn "未检测到 ufw，请手动配置防火墙"
+        log_warn "未检测到 ufw；请在云安全组或系统防火墙中只开放 80/443"
+    fi
+
+    log_warn "此脚本不能修改云厂商安全组；请确认公网只开放 TCP 80/443，SSH 仅限可信来源"
+}
+
+ss_local_addresses_for_port() {
+    local port="$1"
+    ss -lntH 2>/dev/null | awk -v suffix=":$port" '$4 ~ suffix "$" { print $4 }'
+}
+
+host_from_ss_local_address() {
+    local address="$1"
+    local port="$2"
+    local host="$address"
+
+    if [[ "$host" == *":$port" ]]; then
+        host="${host%:"$port"}"
+    fi
+    host="${host#\[}"
+    host="${host%\]}"
+    printf '%s\n' "$host"
+}
+
+is_loopback_host() {
+    local host="$1"
+    case "$host" in
+        localhost|ip6-localhost|127.*|::1)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+check_loopback_only_port() {
+    local port="$1"
+    local label="$2"
+    local address host
+    local -a unsafe_addresses=()
+
+    if ! command -v ss >/dev/null 2>&1; then
+        log_warn "ss 不可用，跳过 $label 端口检查"
+        return
+    fi
+
+    while IFS= read -r address; do
+        [[ -n "$address" ]] || continue
+        host="$(host_from_ss_local_address "$address" "$port")"
+        if ! is_loopback_host "$host"; then
+            unsafe_addresses+=("$address")
+        fi
+    done < <(ss_local_addresses_for_port "$port")
+
+    if [[ "${#unsafe_addresses[@]}" -eq 0 ]]; then
+        log_info "$label 端口 $port 仅本机监听或未监听"
+    else
+        log_warn "$label 端口 $port 仍监听在非 loopback 地址: ${unsafe_addresses[*]}"
     fi
 }
 
-#######################################
-# 主流程
-#######################################
+run_post_setup_checks() {
+    log_info "运行公网入口检查..."
+
+    check_loopback_only_port "$UPSTREAM_PORT" "MnemoNAS Web/API/WebDAV"
+    check_loopback_only_port 9090 "MnemoNAS dataplane gRPC"
+    check_loopback_only_port 9091 "MnemoNAS dataplane HTTP"
+
+    if command -v curl >/dev/null 2>&1; then
+        if curl -fsSI "https://$DOMAIN/health" >/dev/null 2>&1; then
+            log_info "HTTPS 健康检查通过: https://$DOMAIN/health"
+        else
+            log_warn "HTTPS 健康检查暂未通过；请确认 DNS 已解析到本机、公网 80/443 已放行、证书申请完成"
+        fi
+    fi
+
+    if command -v mnemonas-doctor >/dev/null 2>&1; then
+        if SERVER_URL="http://127.0.0.1:$UPSTREAM_PORT" mnemonas-doctor --public-domain "$DOMAIN"; then
+            log_info "mnemonas-doctor 检查通过"
+        else
+            log_warn "mnemonas-doctor 存在失败或警告，请按输出处理后再开放给真实用户"
+        fi
+    else
+        log_warn "未找到 mnemonas-doctor，跳过部署诊断"
+    fi
+}
+
+print_summary() {
+    echo ""
+    log_info "=========================================="
+    log_info "公网 HTTPS 入口配置完成"
+    log_info "=========================================="
+    echo ""
+    echo "访问地址: https://$DOMAIN"
+    echo "WebDAV:   https://$DOMAIN/dav"
+    echo "后端入口: http://$UPSTREAM_HOST:$UPSTREAM_PORT"
+    echo ""
+    echo "已处理:"
+    echo "  - 反向代理: $PROXY_TYPE"
+    echo "  - MnemoNAS 配置: server.host = \"$UPSTREAM_HOST\", trusted_proxy_hops = $TRUSTED_PROXY_HOPS"
+    echo "  - 本机防火墙: 允许 80/443，限制直接访问 $UPSTREAM_PORT/9090/9091"
+    echo ""
+    echo "仍需人工确认:"
+    echo "  - 云厂商安全组只开放 80/443；SSH 限制到可信 IP 或私有网络"
+    echo "  - 首次登录后已修改管理员密码"
+    echo "  - 已配置独立备份，不把公网服务作为唯一数据副本"
+    echo ""
+    echo "验证命令:"
+    echo "  curl -I https://$DOMAIN/health"
+    echo "  curl --connect-timeout 3 http://$DOMAIN:$UPSTREAM_PORT/health  # 应失败或超时"
+    echo "  WEBDAV_USER=<webdav-username>"
+    echo "  WEBDAV_PASS=<webdav-password>"
+    echo "  curl -u \"\$WEBDAV_USER:\$WEBDAV_PASS\" -X PROPFIND https://$DOMAIN/dav/ -H 'Depth: 0'"
+    echo ""
+
+    if [[ "$PROXY_TYPE" == "caddy" ]]; then
+        echo "管理命令:"
+        echo "  systemctl status caddy"
+        echo "  journalctl -u caddy -f"
+        echo "  caddy reload --config /etc/caddy/Caddyfile"
+    else
+        echo "管理命令:"
+        echo "  systemctl status nginx"
+        echo "  nginx -t"
+        echo "  systemctl reload nginx"
+        echo "  certbot certificates"
+    fi
+    echo ""
+}
+
+run_self_test() {
+    local tmp config
+    tmp="$(mktemp -d)"
+    trap 'rm -rf -- "$tmp"' RETURN
+
+    config="$tmp/config.toml"
+    cat > "$config" <<'EOF'
+[server]
+host = "0.0.0.0"
+port = 8080
+
+[server.tls]
+enabled = false
+EOF
+    update_mnemonas_server_config "$config" "127.0.0.1" "1"
+    grep -Fq 'host = "127.0.0.1"' "$config" || fail "self-test failed: host was not updated"
+    grep -Fq 'trusted_proxy_hops = 1' "$config" || fail "self-test failed: trusted_proxy_hops was not inserted"
+
+    config="$tmp/missing-server.toml"
+    cat > "$config" <<'EOF'
+[storage]
+root = "/srv/mnemonas"
+EOF
+    update_mnemonas_server_config "$config" "127.0.0.1" "1"
+    grep -Fq '[server]' "$config" || fail "self-test failed: server section was not appended"
+    grep -Fq 'host = "127.0.0.1"' "$config" || fail "self-test failed: appended host missing"
+
+    printf '[reverse-proxy-self-test] all checks passed\n'
+}
+
 main() {
+    parse_args "$@"
+    validate_inputs_before_root
+    require_root
+    require_command apt-get
+    require_command awk
+    require_command sed
+    require_command systemctl
+    warn_if_not_ubuntu
+    resolve_upstream_port
+    select_proxy
+
     echo ""
     log_info "=========================================="
-    log_info "MnemoNAS 反向代理自动配置"
+    log_info "MnemoNAS 公网 HTTPS 入口自动配置"
     log_info "=========================================="
     echo ""
-    
-    # 配置防火墙
+    log_info "域名: $DOMAIN"
+    log_info "证书邮箱: $EMAIL"
+    log_info "后端: $UPSTREAM_HOST:$UPSTREAM_PORT"
+    log_info "配置文件: $CONFIG_PATH"
+
+    configure_mnemonas
     configure_firewall
-    
-    # 安装反向代理
+
     if [[ "$PROXY_TYPE" == "caddy" ]]; then
         install_caddy
     else
         install_nginx
     fi
-    
-    echo ""
-    log_info "=========================================="
-    log_info "配置完成!"
-    log_info "=========================================="
-    echo ""
-    echo "访问地址: https://$DOMAIN"
-    echo "WebDAV:   https://$DOMAIN/dav"
-    echo ""
-    echo "MnemoNAS 配置提醒:"
-    echo "  在 /etc/mnemonas/config.toml 的 [server] 中设置 trusted_proxy_hops = 1"
-    echo "  如果前面有多层受信代理，请设置为代理总层数，然后重启 mnemonas"
-    echo "  公网入口只应开放 80/443；不要把 8080、9090、9091 直接暴露到公网"
-    echo "  如果反向代理和 MnemoNAS 在同一台机器，建议将 [server].host 改为 127.0.0.1 或用防火墙限制 8080"
-    echo ""
-    echo "验证命令:"
-    echo "  curl -I https://$DOMAIN/health"
-    echo "  WEBDAV_USER=<webdav-username>"
-    echo "  WEBDAV_PASS=<webdav-password>"
-    echo "  curl -u \"\$WEBDAV_USER:\$WEBDAV_PASS\" -X PROPFIND https://$DOMAIN/dav/ -H 'Depth: 0'"
-    echo ""
-    
-    if [[ "$PROXY_TYPE" == "caddy" ]]; then
-        echo "管理命令:"
-        echo "  systemctl status caddy    # 查看状态"
-        echo "  journalctl -u caddy -f    # 查看日志"
-        echo "  caddy reload              # 重载配置"
-    else
-        echo "管理命令:"
-        echo "  systemctl status nginx    # 查看状态"
-        echo "  nginx -t                  # 测试配置"
-        echo "  systemctl reload nginx    # 重载配置"
-        echo "  certbot certificates      # 查看证书"
-    fi
-    echo ""
+
+    run_post_setup_checks
+    print_summary
 }
 
-main
+if [[ "${MNEMONAS_REVERSE_PROXY_SELF_TEST:-0}" == "1" ]]; then
+    run_self_test
+    exit 0
+fi
+
+main "$@"

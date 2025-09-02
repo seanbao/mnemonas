@@ -116,11 +116,13 @@ Read the initial password:
 sudo cat /srv/mnemonas/.mnemonas/initial-password.txt
 ```
 
-Open:
+Open it on a LAN, on the server itself, or through an SSH tunnel:
 
 ```text
 http://<server-ip>:8080
 ```
+
+For public-domain access, do not expose `8080` directly. Follow the [Public server quickstart](public-server-quickstart.en.md) to configure an HTTPS reverse proxy.
 
 Change the administrator password after the first login. `mnemonas-doctor` reports if the initial-password file still exists.
 
@@ -160,6 +162,8 @@ For long-running deployments, start with trusted-network-only access.
 - Do not expose SSH directly to the public internet.
 - For external sharing, expose only HTTPS through a reverse proxy.
 - Configure `server.trusted_proxy_hops` correctly behind Caddy, Nginx, Traefik, or another trusted proxy.
+
+If the target is public-domain access, follow the [Public server quickstart](public-server-quickstart.en.md). That path binds the MnemoNAS backend to `127.0.0.1:8080` and exposes only Caddy/Nginx `80/443` publicly.
 
 Recommended boundary:
 

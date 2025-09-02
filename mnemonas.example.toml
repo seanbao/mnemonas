@@ -53,6 +53,22 @@ auth_type = "basic"          # none, basic
 username = "admin"           # Basic Auth 用户名（默认 admin）
 password = ""                # Basic Auth 密码（留空则首次启动时自动生成并写入 secrets.json）
 
+[smb]
+enabled = false
+listen = "127.0.0.1:1445"    # 建议由反向代理/端口转发绑定到 445；普通用户进程默认不能直接监听 445
+server_name = "mnemonas"
+gateway_socket = ""          # 默认 ~/.mnemonas/.mnemonas/run/smb-gateway.sock
+credential_file = ""         # 默认 ~/.mnemonas/.mnemonas/smb-credentials.json，独立于 Web 登录密码
+signing_required = true
+encryption_required = false
+
+# [[smb.shares]]
+# name = "homes"
+# path = "/"                  # MnemoNAS 内部绝对路径；非管理员仍受 home_dir 约束
+# read_only = false
+# allowed_roles = ["admin", "user"]
+# allowed_users = []
+
 [auth]
 enabled = true               # 启用后所有 API 需要 JWT 认证
 jwt_secret = ""              # JWT 签名密钥（留空则自动生成）

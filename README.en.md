@@ -87,7 +87,7 @@ sudo ./scripts/install-systemd.sh
 sudo mnemonas-doctor
 ```
 
-The default install path is `/usr/local/bin`, config is written to `/etc/mnemonas/config.toml`, data goes to `/srv/mnemonas`, and the Web UI listens on `http://<server-ip>:8080`. The first login password is stored at `/srv/mnemonas/.mnemonas/initial-password.txt`.
+The default install path is `/usr/local/bin`, config is written to `/etc/mnemonas/config.toml`, data goes to `/srv/mnemonas`, and the Web UI listens on `http://<server-ip>:8080`. The first login password is stored at `/srv/mnemonas/.mnemonas/initial-password.txt`. For public-domain access, follow the [Public server quickstart](docs/public-server-quickstart.en.md) to restrict the backend port and configure an HTTPS reverse proxy.
 
 See [Linux/systemd deployment](docs/linux-systemd-deployment.en.md).
 
@@ -236,6 +236,7 @@ Docker and systemd deployments expose only `8080` by default. Data plane ports `
 | [中文文档索引](docs/README.md) | Chinese documentation index |
 | [Development Guide](docs/development.en.md) | Local development setup and debugging |
 | [Linux/systemd Deployment](docs/linux-systemd-deployment.en.md) | systemd deployment for Linux servers |
+| [Public Server Quickstart](docs/public-server-quickstart.en.md) | Recommended public-domain HTTPS entry path |
 | [Docker Deployment](docs/docker-deployment.en.md) | Docker deployment guide |
 | [Mounting Guide](docs/mounting-guide.en.md) | WebDAV client setup |
 | [WebDAV Compatibility](docs/webdav-compatibility.en.md) | Client compatibility and protocol coverage |
@@ -263,7 +264,7 @@ Docker and systemd deployments expose only `8080` by default. Data plane ports `
 | [scripts/run-benchmark-isolated.sh](scripts/run-benchmark-isolated.sh) | Isolated benchmark runner used by `make bench` |
 | [scripts/benchmark.sh](scripts/benchmark.sh) | Benchmark an explicit service and storage root |
 | [scripts/fault-injection-test.sh](scripts/fault-injection-test.sh) | Destructive fault-injection test runner |
-| [scripts/setup-reverse-proxy.sh](scripts/setup-reverse-proxy.sh) | Reverse proxy setup helper |
+| [scripts/setup-reverse-proxy.sh](scripts/setup-reverse-proxy.sh) | Public HTTPS reverse proxy setup and MnemoNAS backend hardening |
 
 ## License
 

@@ -2,13 +2,23 @@
 
 [English](reverse-proxy-setup.en.md) | 简体中文
 
-本文档介绍如何通过反向代理配置 MnemoNAS 的 HTTPS 外网访问。
+本文档介绍如何通过反向代理配置 MnemoNAS 的 HTTPS 外网访问。如果你是从一台公网服务器开始部署，优先按 [公网服务器快速上线](public-server-quickstart.md) 走推荐路径；本文保留 Caddy、Nginx、Traefik 的细节配置。
 
 ## 前置条件
 
 - 一台公网服务器（或已配置好内网穿透）
 - 域名已解析到服务器 IP
 - 服务器开放 80/443 端口
+
+## 推荐脚本
+
+systemd 部署完成后，推荐用脚本自动生成公网 HTTPS 入口并收紧 MnemoNAS 后端监听：
+
+```bash
+sudo mnemonas-public-setup --proxy caddy nas.example.com admin@example.com
+```
+
+systemd 安装会把源码中的 `scripts/setup-reverse-proxy.sh` 安装为 `mnemonas-public-setup`。脚本会设置 `server.host = "127.0.0.1"`、`trusted_proxy_hops = 1`、配置 Caddy/Nginx、调整本机 UFW 规则并运行基础检查。云厂商安全组仍需人工确认只开放 `80/443`，不要开放 `8080/9090/9091`。
 
 ## MnemoNAS 配置
 

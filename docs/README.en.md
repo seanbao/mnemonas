@@ -13,6 +13,7 @@ Welcome to the MnemoNAS documentation. This directory contains usage guides, dep
 | [README](../README.en.md) | Project overview and quick start |
 | [中文 README](../README.md) | Chinese project overview |
 | [Linux/systemd deployment](linux-systemd-deployment.en.md) | Run MnemoNAS as systemd services on a Linux server |
+| [Public server quickstart](public-server-quickstart.en.md) | Recommended path for public domains, HTTPS, reverse proxy, and safety checks |
 | [Docker deployment](docker-deployment.en.md) | Deploy MnemoNAS with Docker Compose |
 | [Mounting guide](mounting-guide.en.md) | WebDAV mounting instructions for common platforms |
 | [Reverse proxy setup](reverse-proxy-setup.en.md) | HTTPS public entry setup with Caddy, Nginx, or Traefik |
@@ -68,7 +69,8 @@ Welcome to the MnemoNAS documentation. This directory contains usage guides, dep
 
 1. Read the [English README](../README.en.md) or [Chinese README](../README.md).
 2. For long-running deployment, start with [Linux/systemd deployment](linux-systemd-deployment.en.md). For temporary evaluation, start with [Docker deployment](docker-deployment.en.md).
-3. Use the [Mounting guide](mounting-guide.en.md) to connect WebDAV clients.
+3. If public access is needed, follow the [Public server quickstart](public-server-quickstart.en.md) for HTTPS entry setup.
+4. Use the [Mounting guide](mounting-guide.en.md) to connect WebDAV clients.
 
 **Troubleshooting:**
 

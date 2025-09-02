@@ -218,7 +218,7 @@ cloudflared tunnel run mnemonas
 - [ ] 已通过服务器端 `initial-password.txt` 完成首次 Web UI 登录，并已修改管理员密码
 - [ ] 已记录 WebDAV Basic Auth 凭据，或已设置自定义强密码
 - [ ] `auth_type` 不是 `none`（除非仅本地访问）
-- [ ] 如果 `host = "0.0.0.0"`，已配置防火墙
+- [ ] 公网部署时 `server.host = "127.0.0.1"`，只通过 HTTPS 反向代理访问
 - [ ] dataplane gRPC/HTTP 端口保持在 `127.0.0.1` 或受信私有网络内，没有直接暴露到公网
 - [ ] systemd 部署已运行 `sudo mnemonas-doctor`，并确认没有 dataplane 端口暴露或 UFW 放行警告
 - [ ] 生产环境使用 HTTPS
@@ -230,11 +230,14 @@ cloudflared tunnel run mnemonas
 ss -tlnp | grep 8080
 ss -tlnp | grep -E '9090|9091'
 
-# 检查外部可访问性（从另一台机器）
-curl http://<server-ip>:8080/health
+# 公网 HTTPS 应可用
+curl -I https://<domain>/health
+
+# 公网直连后端端口应失败或超时
+curl --connect-timeout 3 http://<domain>:8080/health
 
 # 检查认证是否生效
-curl http://<server-ip>:8080/dav/
+curl https://<domain>/dav/
 # 应该返回 401 Unauthorized
 ```
 
