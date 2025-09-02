@@ -120,15 +120,15 @@ func TestWriteShareStoreFileAtomicallyWithRoot_ReplacesExistingFile(t *testing.T
 	}
 }
 
-func TestWriteShareStoreFileAtomically_ReplacesExistingFile(t *testing.T) {
+func TestWriteShareStoreFile_ReplacesExistingFile(t *testing.T) {
 	tmpDir := t.TempDir()
 	storePath := filepath.Join(tmpDir, "shares.json")
 	if err := os.WriteFile(storePath, []byte("old"), 0600); err != nil {
 		t.Fatalf("failed to write existing store file: %v", err)
 	}
 
-	if err := writeShareStoreFileAtomically(storePath, []byte("[]")); err != nil {
-		t.Fatalf("writeShareStoreFileAtomically() error: %v", err)
+	if err := writeShareStoreFile(storePath, []byte("[]")); err != nil {
+		t.Fatalf("writeShareStoreFile() error: %v", err)
 	}
 
 	data, err := os.ReadFile(storePath)
@@ -475,9 +475,19 @@ func TestShareStore_CreateRejectsInvalidInvariants(t *testing.T) {
 			wantErr: errInvalidMaxAccess,
 		},
 		{
+			name:    "invalid share type",
+			opts:    CreateShareOptions{Path: "/test/file.txt", Type: ShareType("device"), CreatedBy: "user1"},
+			wantErr: errInvalidShareType,
+		},
+		{
 			name:    "unsupported permission",
 			opts:    CreateShareOptions{Path: "/test/file.txt", Type: ShareTypeFile, CreatedBy: "user1", Permission: PermissionReadWrite},
 			wantErr: errInvalidSharePermission,
+		},
+		{
+			name:    "overlong password",
+			opts:    CreateShareOptions{Path: "/test/file.txt", Type: ShareTypeFile, CreatedBy: "user1", Password: strings.Repeat("a", maxSharePasswordBytes+1)},
+			wantErr: errSharePasswordLong,
 		},
 	}
 
@@ -600,6 +610,24 @@ func TestNewShareStore_LoadNormalizesValidSharesAndDropsInvalidEntries(t *testin
 			Enabled:    true,
 		},
 		{
+			ID:         "invalid-nul",
+			Path:       "/docs/report\x00.pdf",
+			Type:       ShareTypeFile,
+			CreatedBy:  "user1",
+			CreatedAt:  time.Now(),
+			Permission: PermissionRead,
+			Enabled:    true,
+		},
+		{
+			ID:         "invalid/id",
+			Path:       "/docs/bad-id.txt",
+			Type:       ShareTypeFile,
+			CreatedBy:  "user1",
+			CreatedAt:  time.Now(),
+			Permission: PermissionRead,
+			Enabled:    true,
+		},
+		{
 			ID:         "invalid-max-access",
 			Path:       "/docs/limit.txt",
 			Type:       ShareTypeFile,
@@ -608,6 +636,15 @@ func TestNewShareStore_LoadNormalizesValidSharesAndDropsInvalidEntries(t *testin
 			Permission: PermissionRead,
 			Enabled:    true,
 			MaxAccess:  -1,
+		},
+		{
+			ID:         "invalid-type",
+			Path:       "/docs/invalid-type.txt",
+			Type:       ShareType("device"),
+			CreatedBy:  "user1",
+			CreatedAt:  time.Now(),
+			Permission: PermissionRead,
+			Enabled:    true,
 		},
 		{
 			ID:         "blank-path",
@@ -646,8 +683,17 @@ func TestNewShareStore_LoadNormalizesValidSharesAndDropsInvalidEntries(t *testin
 	if _, err := store.Get("invalid-path"); err != ErrShareNotFound {
 		t.Fatalf("expected invalid path share to be dropped on load, got %v", err)
 	}
+	if _, err := store.Get("invalid-nul"); err != ErrShareNotFound {
+		t.Fatalf("expected invalid NUL share to be dropped on load, got %v", err)
+	}
+	if _, err := store.Get("invalid/id"); err != ErrShareNotFound {
+		t.Fatalf("expected invalid ID share to be dropped on load, got %v", err)
+	}
 	if _, err := store.Get("invalid-max-access"); err != ErrShareNotFound {
 		t.Fatalf("expected invalid max_access share to be dropped on load, got %v", err)
+	}
+	if _, err := store.Get("invalid-type"); err != ErrShareNotFound {
+		t.Fatalf("expected invalid type share to be dropped on load, got %v", err)
 	}
 	if _, err := store.Get("blank-path"); err != ErrShareNotFound {
 		t.Fatalf("expected blank path share to be dropped on load, got %v", err)
@@ -1108,7 +1154,7 @@ func TestNewShareStore_LoadRejectsStoreSymlinkInsertedAfterValidation(t *testing
 			hookErr = err
 			return
 		}
-		hookErr = os.Symlink(linkedTarget, storePath)
+		hookErr = os.Symlink(filepath.Base(linkedTarget), storePath)
 	}
 	defer func() {
 		afterValidateShareStorePath = originalHook
@@ -1727,6 +1773,13 @@ func TestShareStore_UpdateRejectsInvalidInvariantsAndPreservesState(t *testing.T
 				s.MaxAccess = -1
 			},
 			wantErr: errInvalidMaxAccess,
+		},
+		{
+			name: "invalid share type",
+			mutate: func(s *Share) {
+				s.Type = ShareType("device")
+			},
+			wantErr: errInvalidShareType,
 		},
 		{
 			name: "unsupported permission",

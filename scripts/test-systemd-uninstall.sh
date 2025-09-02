@@ -5,7 +5,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP_ROOT="$(mktemp -d)"
-trap 'rm -rf "$TMP_ROOT"' EXIT
+trap 'rm -rf -- "$TMP_ROOT"' EXIT
 
 fail() {
   printf '[systemd-uninstall-test] ERROR: %s\n' "$*" >&2
@@ -153,6 +153,22 @@ run_refuse_protected_tree_removal_test() {
     SYSTEMCTL_LOG="$systemctl_log" \
     BIN_DIR="$install_dir/bin" \
     SHARE_DIR="$install_dir/share/mnemonas" \
+    CONFIG_DIR="/etc/" \
+    SYSTEMD_DIR="$install_dir/systemd" \
+    STORAGE_ROOT="$install_dir/storage" \
+    REMOVE_CONFIG=1 \
+    "$REPO_ROOT/scripts/uninstall-systemd.sh" > "$case_dir/uninstall-etc-slash.log" 2>&1
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "uninstaller accepted protected CONFIG_DIR=/etc/"
+  assert_file_contains "$case_dir/uninstall-etc-slash.log" "protected system directory"
+
+  set +e
+  PATH="$fake_path:$PATH" \
+    SYSTEMCTL_LOG="$systemctl_log" \
+    BIN_DIR="$install_dir/bin" \
+    SHARE_DIR="$install_dir/share/mnemonas" \
     CONFIG_DIR="$protected_etc" \
     SYSTEMD_DIR="$install_dir/systemd" \
     STORAGE_ROOT="/srv" \
@@ -164,6 +180,154 @@ run_refuse_protected_tree_removal_test() {
 
   [[ "$status" -ne 0 ]] || fail "uninstaller accepted protected STORAGE_ROOT=/srv"
   assert_file_contains "$case_dir/uninstall-data.log" "protected system directory"
+
+  set +e
+  PATH="$fake_path:$PATH" \
+    SYSTEMCTL_LOG="$systemctl_log" \
+    BIN_DIR="$install_dir/bin" \
+    SHARE_DIR="$install_dir/share/mnemonas" \
+    CONFIG_DIR="$protected_etc" \
+    SYSTEMD_DIR="$install_dir/systemd" \
+    STORAGE_ROOT="/srv/" \
+    REMOVE_DATA=1 \
+    CONFIRM_REMOVE_DATA="/srv/" \
+    "$REPO_ROOT/scripts/uninstall-systemd.sh" > "$case_dir/uninstall-data-slash.log" 2>&1
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "uninstaller accepted protected STORAGE_ROOT=/srv/"
+  assert_file_contains "$case_dir/uninstall-data-slash.log" "protected system directory"
+}
+
+run_refuse_parent_segment_remove_path_test() {
+  local case_dir="$TMP_ROOT/refuse-parent-segment"
+  local fake_path="$case_dir/fake-bin"
+  local install_dir="$case_dir/install"
+  local systemctl_log="$case_dir/systemctl.log"
+  local status
+  make_fake_admin_path "$fake_path"
+  make_install_tree "$install_dir"
+
+  set +e
+  PATH="$fake_path:$PATH" \
+    SYSTEMCTL_LOG="$systemctl_log" \
+    BIN_DIR="$install_dir/bin" \
+    SHARE_DIR="$install_dir/share/../mnemonas" \
+    CONFIG_DIR="$install_dir/etc/mnemonas" \
+    SYSTEMD_DIR="$install_dir/systemd" \
+    STORAGE_ROOT="$install_dir/storage" \
+    "$REPO_ROOT/scripts/uninstall-systemd.sh" > "$case_dir/uninstall.log" 2>&1
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "uninstaller accepted SHARE_DIR with parent segment"
+  assert_file_contains "$case_dir/uninstall.log" "SHARE_DIR cannot contain parent directory segments"
+  assert_exists "$install_dir/systemd/mnemonas.service"
+}
+
+run_refuse_overlapping_remove_paths_test() {
+  local case_dir="$TMP_ROOT/refuse-overlap"
+  local fake_path="$case_dir/fake-bin"
+  local install_dir="$case_dir/install"
+  local systemctl_log="$case_dir/systemctl.log"
+  local status
+  make_fake_admin_path "$fake_path"
+  make_install_tree "$install_dir"
+
+  set +e
+  PATH="$fake_path:$PATH" \
+    SYSTEMCTL_LOG="$systemctl_log" \
+    BIN_DIR="$install_dir/bin" \
+    SHARE_DIR="$install_dir/storage" \
+    CONFIG_DIR="$install_dir/etc/mnemonas" \
+    SYSTEMD_DIR="$install_dir/systemd" \
+    STORAGE_ROOT="$install_dir/storage" \
+    "$REPO_ROOT/scripts/uninstall-systemd.sh" > "$case_dir/share-storage.log" 2>&1
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "uninstaller accepted SHARE_DIR overlapping STORAGE_ROOT"
+  assert_file_contains "$case_dir/share-storage.log" "SHARE_DIR must not overlap STORAGE_ROOT"
+  assert_exists "$install_dir/storage/files/keep.txt"
+  assert_exists "$install_dir/systemd/mnemonas.service"
+
+  set +e
+  PATH="$fake_path:$PATH" \
+    SYSTEMCTL_LOG="$systemctl_log" \
+    BIN_DIR="$install_dir/bin" \
+    SHARE_DIR="$install_dir/share/mnemonas" \
+    CONFIG_DIR="$install_dir/storage/.mnemonas" \
+    SYSTEMD_DIR="$install_dir/systemd" \
+    STORAGE_ROOT="$install_dir/storage" \
+    REMOVE_CONFIG=1 \
+    "$REPO_ROOT/scripts/uninstall-systemd.sh" > "$case_dir/config-storage.log" 2>&1
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "uninstaller accepted CONFIG_DIR overlapping STORAGE_ROOT"
+  assert_file_contains "$case_dir/config-storage.log" "CONFIG_DIR must not overlap STORAGE_ROOT"
+  assert_exists "$install_dir/storage/files/keep.txt"
+  assert_exists "$install_dir/systemd/mnemonas.service"
+}
+
+run_refuse_root_service_account_test() {
+  local case_dir="$TMP_ROOT/refuse-root-account"
+  local fake_path="$case_dir/fake-bin"
+  local install_dir="$case_dir/install"
+  local systemctl_log="$case_dir/systemctl.log"
+  local status
+  make_fake_admin_path "$fake_path"
+  make_install_tree "$install_dir"
+
+  set +e
+  PATH="$fake_path:$PATH" \
+    SYSTEMCTL_LOG="$systemctl_log" \
+    BIN_DIR="$install_dir/bin" \
+    SHARE_DIR="$install_dir/share/mnemonas" \
+    CONFIG_DIR="$install_dir/etc/mnemonas" \
+    SYSTEMD_DIR="$install_dir/systemd" \
+    STORAGE_ROOT="$install_dir/storage" \
+    SERVICE_USER=root \
+    REMOVE_SERVICE_USER=1 \
+    "$REPO_ROOT/scripts/uninstall-systemd.sh" > "$case_dir/uninstall.log" 2>&1
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "uninstaller accepted SERVICE_USER=root"
+  assert_file_contains "$case_dir/uninstall.log" "SERVICE_USER must not be root"
+  assert_exists "$install_dir/systemd/mnemonas.service"
+}
+
+run_refuse_symlink_component_remove_path_test() {
+  local case_dir="$TMP_ROOT/refuse-symlink-component"
+  local fake_path="$case_dir/fake-bin"
+  local install_dir="$case_dir/install"
+  local systemctl_log="$case_dir/systemctl.log"
+  local target_dir="$case_dir/target"
+  local link_dir="$case_dir/link"
+  local status
+  make_fake_admin_path "$fake_path"
+  make_install_tree "$install_dir"
+  mkdir -p "$target_dir/share/mnemonas"
+  touch "$target_dir/share/mnemonas/sentinel.txt"
+  ln -s "$target_dir" "$link_dir"
+
+  set +e
+  PATH="$fake_path:$PATH" \
+    SYSTEMCTL_LOG="$systemctl_log" \
+    BIN_DIR="$install_dir/bin" \
+    SHARE_DIR="$link_dir/share/mnemonas" \
+    CONFIG_DIR="$install_dir/etc/mnemonas" \
+    SYSTEMD_DIR="$install_dir/systemd" \
+    STORAGE_ROOT="$install_dir/storage" \
+    "$REPO_ROOT/scripts/uninstall-systemd.sh" > "$case_dir/uninstall.log" 2>&1
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "uninstaller accepted SHARE_DIR with a symlink path component"
+  assert_file_contains "$case_dir/uninstall.log" "SHARE_DIR must not contain symlink path components"
+  assert_exists "$target_dir/share/mnemonas/sentinel.txt"
+  assert_exists "$install_dir/systemd/mnemonas.service"
 }
 
 run_remove_config_and_data_test() {
@@ -194,6 +358,10 @@ run_remove_config_and_data_test() {
 run_preserve_data_test
 run_refuse_unconfirmed_data_removal_test
 run_refuse_protected_tree_removal_test
+run_refuse_parent_segment_remove_path_test
+run_refuse_overlapping_remove_paths_test
+run_refuse_root_service_account_test
+run_refuse_symlink_component_remove_path_test
 run_remove_config_and_data_test
 
 printf '[systemd-uninstall-test] all checks passed\n'

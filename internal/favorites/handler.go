@@ -68,6 +68,9 @@ func getLegacyUserIdentifiers(r *http.Request) []string {
 
 func normalizeFavoritePath(rawPath string) (string, error) {
 	normalized := strings.ReplaceAll(rawPath, "\\", "/")
+	if strings.ContainsRune(normalized, '\x00') {
+		return "", errors.New("invalid path")
+	}
 	if hasFavoriteTraversalSegment(normalized) {
 		return "", errors.New("invalid path")
 	}

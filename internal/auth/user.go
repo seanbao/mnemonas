@@ -17,8 +17,10 @@ import (
 	"syscall"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/mattn/go-isatty"
+	"github.com/seanbao/mnemonas/internal/rootio"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -32,6 +34,12 @@ const (
 )
 
 const printInitialPasswordEnv = "MNEMONAS_PRINT_INITIAL_PASSWORD"
+
+const (
+	minPasswordLength    = 8
+	maxPasswordBytes     = 72
+	maxUsernameRuneCount = 255
+)
 
 // User represents a system user
 type User struct {
@@ -121,7 +129,9 @@ var (
 	ErrUserDisabled        = errors.New("user is disabled")
 	ErrInvalidCredentials  = errors.New("invalid credentials")
 	ErrInvalidUsername     = errors.New("invalid username")
+	ErrInvalidRole         = errors.New("invalid role")
 	ErrPasswordTooShort    = errors.New("password must be at least 8 characters")
+	ErrPasswordTooLong     = errors.New("password must be at most 72 bytes")
 	ErrLastAdmin           = errors.New("cannot delete last admin user")
 	errInvalidUserHomeDir  = errors.New("invalid home_dir")
 	errUserStoreSymlink    = errors.New("users file path must not be a symlink")
@@ -187,10 +197,14 @@ func (s *UserStore) load() error {
 		if u.ID == "" {
 			return fmt.Errorf("users file contains user with empty id at index %d", i)
 		}
-		normalizedUsername := normalizeUsername(u.Username)
-		if normalizedUsername == "" {
-			return fmt.Errorf("users file contains user with empty username at index %d", i)
+		cleanUsername, err := normalizeNewUsername(u.Username)
+		if err != nil {
+			return fmt.Errorf("users file contains invalid username at index %d: %w", i, err)
 		}
+		if err := validateRole(u.Role); err != nil {
+			return fmt.Errorf("users file contains invalid role for user %q: %w", cleanUsername, err)
+		}
+		normalizedUsername := normalizeUsername(cleanUsername)
 		if _, exists := loadedUsers[u.ID]; exists {
 			return fmt.Errorf("users file contains duplicate user id %q", u.ID)
 		}
@@ -203,6 +217,7 @@ func (s *UserStore) load() error {
 		}
 
 		loaded := cloneUser(u)
+		loaded.Username = cleanUsername
 		loaded.HomeDir = homeDir
 		loadedUsers[loaded.ID] = loaded
 		loadedByName[normalizedUsername] = loaded
@@ -386,17 +401,17 @@ func normalizeAuthFilePath(path string) (string, error) {
 }
 
 func ensureAuthDirRoot(path string, symlinkErr error, label string) (string, error) {
-	normalizedPath, _, err := ensureAuthDirRootWithState(path, symlinkErr, label)
+	normalizedPath, _, _, err := ensureAuthDirRootWithState(path, symlinkErr, label, true)
 	return normalizedPath, err
 }
 
-func ensureAuthDirRootWithState(path string, symlinkErr error, label string) (string, *os.Root, error) {
+func ensureAuthDirRootWithState(path string, symlinkErr error, label string, create bool) (string, *os.Root, []string, error) {
 	normalizedPath, err := normalizeAuthFilePath(path)
 	if err != nil {
-		return "", nil, err
+		return "", nil, nil, err
 	}
 	if err := validateAuthFilePath(normalizedPath, symlinkErr); err != nil {
-		return "", nil, err
+		return "", nil, nil, err
 	}
 
 	dir := filepath.Dir(normalizedPath)
@@ -404,28 +419,38 @@ func ensureAuthDirRootWithState(path string, symlinkErr error, label string) (st
 	root := authDirRoots[dir]
 	authDirRootsMu.RUnlock()
 	if root != nil {
-		return normalizedPath, nil, nil
+		return normalizedPath, nil, nil, nil
 	}
 
-	if err := ensureAuthDir(dir, 0755, label); err != nil {
-		return "", nil, fmt.Errorf("failed to create directory: %w", err)
+	createdDirs := []string(nil)
+	if create {
+		var err error
+		createdDirs, err = ensureAuthDir(dir, 0755, symlinkErr, label)
+		if err != nil {
+			return "", nil, createdDirs, fmt.Errorf("failed to create directory: %w", err)
+		}
+	} else if _, err := os.Stat(dir); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return normalizedPath, nil, nil, nil
+		}
+		return "", nil, nil, fmt.Errorf("failed to stat %s directory: %w", label, err)
 	}
 
 	root, err = os.OpenRoot(dir)
 	if err != nil {
-		return "", nil, fmt.Errorf("failed to open %s directory root: %w", label, err)
+		return "", nil, createdDirs, fmt.Errorf("failed to open %s directory root: %w", label, err)
 	}
 
 	authDirRootsMu.Lock()
 	if existing := authDirRoots[dir]; existing != nil {
 		authDirRootsMu.Unlock()
 		_ = root.Close()
-		return normalizedPath, nil, nil
+		return normalizedPath, nil, createdDirs, nil
 	}
 	authDirRoots[dir] = root
 	authDirRootsMu.Unlock()
 
-	return normalizedPath, root, nil
+	return normalizedPath, root, createdDirs, nil
 }
 
 func releaseRegisteredAuthDirRoot(dir string, root *os.Root) {
@@ -458,10 +483,17 @@ func readRegisteredAuthFile(path string, symlinkErr error) ([]byte, error) {
 		return nil, err
 	}
 	if !ok {
-		if err := validateAuthFilePath(normalizedPath, symlinkErr); err != nil {
+		normalizedPath, _, _, err = ensureAuthDirRootWithState(normalizedPath, symlinkErr, "auth", false)
+		if err != nil {
 			return nil, err
 		}
-		return os.ReadFile(normalizedPath)
+		root, normalizedPath, ok, err = registeredAuthDirRoot(normalizedPath)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			return nil, &os.PathError{Op: "open", Path: normalizedPath, Err: os.ErrNotExist}
+		}
 	}
 	return readAuthFileWithRoot(root, normalizedPath, symlinkErr)
 }
@@ -477,19 +509,32 @@ func writeRegisteredAuthFileAtomically(path string, data []byte, symlinkErr erro
 	if err := validateAuthFilePath(normalizedPath, symlinkErr); err != nil {
 		return err
 	}
-	createdDirs, err := collectMissingAuthDirs(filepath.Dir(normalizedPath))
-	if err != nil {
-		return err
-	}
 	registeredRoot := (*os.Root)(nil)
-	normalizedPath, registeredRoot, err = ensureAuthDirRootWithState(normalizedPath, symlinkErr, label)
+	releaseRootOnError := false
+	createdDirs := []string(nil)
+	normalizedPath, registeredRoot, createdDirs, err = ensureAuthDirRootWithState(normalizedPath, symlinkErr, label, true)
 	if err != nil {
 		releaseRegisteredAuthDirRoot(filepath.Dir(normalizedPath), registeredRoot)
 		return cleanupCreatedAuthDirs(createdDirs, label, err)
+	}
+	if registeredRoot != nil {
+		releaseRootOnError = true
+	} else {
+		root, normalizedPath, ok, err = registeredAuthDirRoot(normalizedPath)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return &os.PathError{Op: "open", Path: filepath.Dir(normalizedPath), Err: os.ErrNotExist}
+		}
+		registeredRoot = root
 	}
 	if err := writeAuthFileAtomicallyWithRoot(registeredRoot, normalizedPath, data, symlinkErr, pattern, label); err != nil {
-		releaseRegisteredAuthDirRoot(filepath.Dir(normalizedPath), registeredRoot)
-		return cleanupCreatedAuthDirs(createdDirs, label, err)
+		if releaseRootOnError {
+			releaseRegisteredAuthDirRoot(filepath.Dir(normalizedPath), registeredRoot)
+			return cleanupCreatedAuthDirs(createdDirs, label, err)
+		}
+		return err
 	}
 	return nil
 }
@@ -503,16 +548,34 @@ func renameRegisteredAuthFile(oldPath, newPath string, symlinkErr error) error {
 	if err != nil {
 		return err
 	}
+	if filepath.Dir(normalizedOldPath) != filepath.Dir(normalizedNewPath) {
+		return fmt.Errorf("auth file rename requires same parent directory")
+	}
+	if ok {
+		afterValidateAuthFilePath()
+		if err := root.Rename(filepath.Base(normalizedOldPath), filepath.Base(normalizedNewPath)); err != nil {
+			return mapAuthRootPathError(err, symlinkErr)
+		}
+		return nil
+	}
 	if err := validateAuthFilePath(normalizedOldPath, symlinkErr); err != nil {
 		return err
 	}
 	if err := validateAuthFilePath(normalizedNewPath, symlinkErr); err != nil {
 		return err
 	}
-	afterValidateAuthFilePath()
-	if !ok || filepath.Dir(normalizedOldPath) != filepath.Dir(normalizedNewPath) {
-		return os.Rename(normalizedOldPath, normalizedNewPath)
+	normalizedOldPath, _, _, err = ensureAuthDirRootWithState(normalizedOldPath, symlinkErr, "auth", false)
+	if err != nil {
+		return err
 	}
+	root, normalizedOldPath, ok, err = registeredAuthDirRoot(normalizedOldPath)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return &os.PathError{Op: "rename", Path: normalizedOldPath, Err: os.ErrNotExist}
+	}
+	afterValidateAuthFilePath()
 	if err := root.Rename(filepath.Base(normalizedOldPath), filepath.Base(normalizedNewPath)); err != nil {
 		return mapAuthRootPathError(err, symlinkErr)
 	}
@@ -529,10 +592,17 @@ func removeRegisteredAuthFile(path string, symlinkErr error) error {
 	}
 	afterValidateAuthFilePath()
 	if !ok {
-		if err := os.Remove(normalizedPath); err != nil && !os.IsNotExist(err) {
+		normalizedPath, _, _, err = ensureAuthDirRootWithState(normalizedPath, symlinkErr, "auth", false)
+		if err != nil {
 			return err
 		}
-		return nil
+		root, normalizedPath, ok, err = registeredAuthDirRoot(normalizedPath)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return nil
+		}
 	}
 	if err := root.Remove(filepath.Base(normalizedPath)); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return mapAuthRootPathError(err, symlinkErr)
@@ -557,7 +627,7 @@ func readAuthFileWithRoot(root *os.Root, path string, symlinkErr error) ([]byte,
 	}
 	afterValidateAuthFilePath()
 
-	file, err := root.OpenFile(filepath.Base(path), os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	file, err := rootio.OpenFileNoFollow(root, filepath.Base(path), os.O_RDONLY, 0)
 	if err != nil {
 		return nil, mapAuthRootPathError(err, symlinkErr)
 	}
@@ -627,7 +697,7 @@ func createAuthTempFile(root *os.Root, pattern string, symlinkErr error) (*os.Fi
 		if err != nil {
 			return nil, "", err
 		}
-		tmpFile, err := root.OpenFile(tmpName, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0600)
+		tmpFile, err := rootio.OpenFileNoFollow(root, tmpName, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0600)
 		if err == nil {
 			return tmpFile, tmpName, nil
 		}
@@ -680,80 +750,10 @@ func mapAuthRootPathError(err error, symlinkErr error) error {
 	if err == nil {
 		return nil
 	}
-	if errors.Is(err, syscall.ELOOP) || isAuthRootEscapeError(err) {
+	if errors.Is(err, syscall.ELOOP) || rootio.IsSymlinkError(err) || isAuthRootEscapeError(err) {
 		return symlinkErr
 	}
 	return err
-}
-
-func writeAuthFileAtomically(path string, data []byte, symlinkErr error, pattern, label string) error {
-	if err := validateAuthFilePath(path, symlinkErr); err != nil {
-		return err
-	}
-	afterValidateAuthFilePath()
-
-	dir := filepath.Dir(path)
-	if err := ensureAuthDir(dir, 0755, label); err != nil {
-		return fmt.Errorf("failed to create directory: %w", err)
-	}
-
-	tmpFile, err := os.CreateTemp(dir, pattern)
-	if err != nil {
-		return fmt.Errorf("failed to create temp %s file: %w", label, err)
-	}
-	tmpPath := tmpFile.Name()
-	cleanup := true
-	defer func() {
-		if cleanup {
-			_ = os.Remove(tmpPath)
-		}
-	}()
-
-	if err := tmpFile.Chmod(0600); err != nil {
-		_ = tmpFile.Close()
-		return fmt.Errorf("failed to set temp %s permissions: %w", label, err)
-	}
-	if _, err := tmpFile.Write(data); err != nil {
-		_ = tmpFile.Close()
-		return fmt.Errorf("failed to write %s file: %w", label, err)
-	}
-	if err := tmpFile.Sync(); err != nil {
-		_ = tmpFile.Close()
-		return fmt.Errorf("failed to sync %s file: %w", label, err)
-	}
-	if err := tmpFile.Close(); err != nil {
-		return fmt.Errorf("failed to close temp %s file: %w", label, err)
-	}
-	if err := os.Rename(tmpPath, path); err != nil {
-		return fmt.Errorf("failed to replace %s file: %w", label, err)
-	}
-	cleanup = false
-	if err := syncAuthFileDir(dir); err != nil {
-		return wrapAuthPersistenceWarning(fmt.Errorf("failed to sync %s directory: %w", label, err))
-	}
-
-	return nil
-}
-
-func collectMissingAuthDirs(dir string) ([]string, error) {
-	missing := make([]string, 0)
-	current := filepath.Clean(dir)
-	for {
-		if _, err := os.Stat(current); err == nil {
-			break
-		} else if !errors.Is(err, os.ErrNotExist) {
-			return nil, err
-		}
-
-		missing = append(missing, current)
-		parent := filepath.Dir(current)
-		if parent == current {
-			break
-		}
-		current = parent
-	}
-
-	return missing, nil
 }
 
 func syncCreatedAuthDirs(createdDirs []string, label string) error {
@@ -765,19 +765,19 @@ func syncCreatedAuthDirs(createdDirs []string, label string) error {
 	return nil
 }
 
-func ensureAuthDir(dir string, perm os.FileMode, label string) error {
-	createdDirs, err := collectMissingAuthDirs(dir)
+func ensureAuthDir(dir string, perm os.FileMode, symlinkErr error, label string) ([]string, error) {
+	createdDirs, err := rootio.MkdirAllPathNoFollowTracked(dir, perm)
 	if err != nil {
-		return err
+		if rootio.IsSymlinkError(err) {
+			return createdDirs, symlinkErr
+		}
+		return createdDirs, err
 	}
-	if err := os.MkdirAll(dir, perm); err != nil {
-		return err
-	}
-	return syncCreatedAuthDirs(createdDirs, label)
+	return createdDirs, syncCreatedAuthDirs(createdDirs, label)
 }
 
 func syncAuthDir(dir string) error {
-	dirHandle, err := os.Open(dir)
+	dirHandle, err := rootio.OpenDirPathNoFollow(dir)
 	if err != nil {
 		return err
 	}
@@ -998,9 +998,12 @@ func (s *UserStore) Create(username, password, email string, role Role) (*User, 
 	if err != nil {
 		return nil, err
 	}
+	if err := validateRole(role); err != nil {
+		return nil, err
+	}
 
-	if len(password) < 8 {
-		return nil, ErrPasswordTooShort
+	if err := validateNewPassword(password); err != nil {
+		return nil, err
 	}
 
 	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
@@ -1060,6 +1063,14 @@ func (s *UserStore) Update(user *User) error {
 		}
 
 		updated := cloneUser(user)
+		cleanUsername, err := normalizeNewUsername(updated.Username)
+		if err != nil {
+			return err
+		}
+		updated.Username = cleanUsername
+		if err := validateRole(updated.Role); err != nil {
+			return err
+		}
 		homeDir, err := normalizeHomeDir(updated.HomeDir)
 		if err != nil {
 			return err
@@ -1068,6 +1079,9 @@ func (s *UserStore) Update(user *User) error {
 		updated.UpdatedAt = time.Now()
 		oldName := normalizeUsername(existing.Username)
 		newName := normalizeUsername(updated.Username)
+		if other, ok := snapshot.byName[newName]; ok && other.ID != user.ID {
+			return ErrUserExists
+		}
 		snapshot.users[user.ID] = updated
 		delete(snapshot.byName, oldName)
 		snapshot.byName[newName] = updated
@@ -1086,8 +1100,8 @@ func (s *UserStore) Update(user *User) error {
 
 // ChangePassword changes a user's password
 func (s *UserStore) ChangePassword(id, oldPassword, newPassword string) error {
-	if len(newPassword) < 8 {
-		return ErrPasswordTooShort
+	if err := validateNewPassword(newPassword); err != nil {
+		return err
 	}
 
 	hash, err := bcrypt.GenerateFromPassword([]byte(newPassword), bcrypt.DefaultCost)
@@ -1128,8 +1142,8 @@ func (s *UserStore) ChangePassword(id, oldPassword, newPassword string) error {
 
 // ResetPassword resets a user's password (admin only)
 func (s *UserStore) ResetPassword(id, newPassword string) error {
-	if len(newPassword) < 8 {
-		return ErrPasswordTooShort
+	if err := validateNewPassword(newPassword); err != nil {
+		return err
 	}
 
 	hash, err := bcrypt.GenerateFromPassword([]byte(newPassword), bcrypt.DefaultCost)
@@ -1275,6 +1289,9 @@ func normalizeNewUsername(username string) (string, error) {
 	if trimmed == "" || trimmed == "." || trimmed == ".." {
 		return "", ErrInvalidUsername
 	}
+	if utf8.RuneCountInString(trimmed) > maxUsernameRuneCount {
+		return "", ErrInvalidUsername
+	}
 	if strings.ContainsAny(trimmed, "/\\") {
 		return "", ErrInvalidUsername
 	}
@@ -1284,8 +1301,30 @@ func normalizeNewUsername(username string) (string, error) {
 	return trimmed, nil
 }
 
+func validateNewPassword(password string) error {
+	if len(password) < minPasswordLength {
+		return ErrPasswordTooShort
+	}
+	if len([]byte(password)) > maxPasswordBytes {
+		return ErrPasswordTooLong
+	}
+	return nil
+}
+
+func validateRole(role Role) error {
+	switch role {
+	case RoleAdmin, RoleUser, RoleGuest:
+		return nil
+	default:
+		return ErrInvalidRole
+	}
+}
+
 func normalizeHomeDir(homeDir string) (string, error) {
 	normalized := strings.ReplaceAll(strings.TrimSpace(homeDir), "\\", "/")
+	if strings.ContainsRune(normalized, '\x00') {
+		return "", errInvalidUserHomeDir
+	}
 	if normalized == "" {
 		return "", errInvalidUserHomeDir
 	}

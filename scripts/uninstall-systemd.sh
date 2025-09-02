@@ -32,29 +32,134 @@ require_command() {
   command -v "$1" >/dev/null 2>&1 || fail "missing required command: $1"
 }
 
+normalize_absolute_path() {
+  local value="$1"
+  while [[ "$value" != "/" && "$value" == */ ]]; do
+    value="${value%/}"
+  done
+  printf '%s\n' "$value"
+}
+
+path_has_parent_segment() {
+  local value="$1"
+  local trimmed="${value#/}"
+  trimmed="${trimmed%/}"
+
+  local -a segments
+  IFS='/' read -r -a segments <<< "$trimmed"
+
+  local segment
+  for segment in "${segments[@]}"; do
+    [[ "$segment" == ".." ]] && return 0
+  done
+  return 1
+}
+
+require_no_symlink_components() {
+  local value="$1"
+  local label="$2"
+  local trimmed="${value#/}"
+  trimmed="${trimmed%/}"
+  local current="/"
+  local -a segments
+
+  IFS='/' read -r -a segments <<< "$trimmed"
+  for segment in "${segments[@]}"; do
+    [[ -n "$segment" && "$segment" != "." ]] || continue
+    if [[ "$current" == "/" ]]; then
+      current="/$segment"
+    else
+      current="$current/$segment"
+    fi
+    [[ ! -L "$current" ]] || fail "$label must not contain symlink path components: $current"
+    [[ -e "$current" ]] || break
+  done
+}
+
 require_absolute_path() {
   local value="$1"
   local label="$2"
   [[ "$value" == /* ]] || fail "$label must be an absolute path: $value"
   [[ "$value" != *[[:space:]]* ]] || fail "$label cannot contain whitespace: $value"
+  ! path_has_parent_segment "$value" || fail "$label cannot contain parent directory segments: $value"
+}
+
+require_safe_account_name() {
+  local value="$1"
+  local label="$2"
+  [[ -n "$value" ]] || fail "$label cannot be empty"
+  [[ "$value" != *[[:space:]]* ]] || fail "$label cannot contain whitespace: $value"
+  [[ "$value" != *$'\n'* && "$value" != *$'\r'* ]] || fail "$label cannot contain newline characters: $value"
+  [[ "$value" != *%* ]] || fail "$label cannot contain systemd specifiers (%): $value"
+  [[ "$value" != *\"* && "$value" != *\\* ]] || fail "$label cannot contain quote or backslash characters: $value"
+  [[ "$value" != "root" ]] || fail "$label must not be root"
+  [[ "$value" =~ ^[A-Za-z_][A-Za-z0-9_-]{0,63}\$?$ ]] || fail "$label must be a plain system account name: $value"
 }
 
 require_safe_remove_path() {
   local value="$1"
   local label="$2"
   require_absolute_path "$value" "$label"
-  [[ "$value" != "/" ]] || fail "$label cannot be /"
+  [[ "$(normalize_absolute_path "$value")" != "/" ]] || fail "$label cannot be /"
+  require_no_symlink_components "$value" "$label"
 }
 
 require_removable_tree_path() {
   local value="$1"
   local label="$2"
+  local normalized
   require_safe_remove_path "$value" "$label"
-  case "$value" in
+  normalized="$(normalize_absolute_path "$value")"
+  case "$normalized" in
     /bin|/boot|/dev|/etc|/home|/lib|/lib64|/media|/mnt|/opt|/proc|/root|/run|/sbin|/srv|/sys|/tmp|/usr|/usr/local|/usr/local/bin|/usr/local/share|/var)
       fail "$label points at a protected system directory and will not be removed: $value"
       ;;
-  esac
+	  esac
+}
+
+path_matches_or_contains() {
+  local parent child
+  parent="$(normalize_absolute_path "$1")"
+  child="$(normalize_absolute_path "$2")"
+  [[ "$parent" == "$child" ]] && return 0
+  [[ "$parent" != "/" && "$child" == "$parent"/* ]]
+}
+
+paths_overlap() {
+  local left="$1"
+  local right="$2"
+  path_matches_or_contains "$left" "$right" || path_matches_or_contains "$right" "$left"
+}
+
+require_no_path_overlap() {
+  local path="$1"
+  local label="$2"
+  local other_label="$3"
+  local other_path="${!other_label}"
+
+  if paths_overlap "$path" "$other_path"; then
+    fail "$label must not overlap $other_label: $other_path"
+  fi
+}
+
+require_uninstall_path_layout() {
+  local label
+
+  for label in BIN_DIR CONFIG_DIR SYSTEMD_DIR STORAGE_ROOT; do
+    require_no_path_overlap "$SHARE_DIR" "SHARE_DIR" "$label"
+  done
+
+  if [[ "$REMOVE_CONFIG" == "1" ]]; then
+    for label in BIN_DIR SYSTEMD_DIR STORAGE_ROOT; do
+      require_no_path_overlap "$CONFIG_DIR" "CONFIG_DIR" "$label"
+    done
+  fi
+
+  if [[ "$REMOVE_DATA" == "1" ]]; then
+    for label in BIN_DIR CONFIG_DIR SYSTEMD_DIR; do
+      require_no_path_overlap "$STORAGE_ROOT" "STORAGE_ROOT" "$label"
+    done
+  fi
 }
 
 stop_disable_remove_unit() {
@@ -69,14 +174,14 @@ stop_disable_remove_unit() {
   log "stopping and disabling $unit"
   systemctl stop "$unit" >/dev/null 2>&1 || true
   systemctl disable "$unit" >/dev/null 2>&1 || true
-  rm -f "$unit_path"
+  rm -f -- "$unit_path"
 }
 
 remove_installed_file() {
   local path="$1"
   if [[ -e "$path" || -L "$path" ]]; then
     log "removing $path"
-    rm -f "$path"
+    rm -f -- "$path"
   fi
 }
 
@@ -86,7 +191,7 @@ remove_installed_dir() {
   if [[ -d "$path" ]]; then
     require_removable_tree_path "$path" "$label"
     log "removing $path"
-    rm -rf "$path"
+    rm -rf -- "$path"
   fi
 }
 
@@ -109,11 +214,14 @@ remove_service_account() {
 main() {
   require_root
   require_command systemctl
+  require_safe_account_name "$SERVICE_USER" "SERVICE_USER"
+  require_safe_account_name "$SERVICE_GROUP" "SERVICE_GROUP"
   require_safe_remove_path "$BIN_DIR" "BIN_DIR"
   require_safe_remove_path "$SHARE_DIR" "SHARE_DIR"
   require_safe_remove_path "$CONFIG_DIR" "CONFIG_DIR"
   require_safe_remove_path "$SYSTEMD_DIR" "SYSTEMD_DIR"
   require_safe_remove_path "$STORAGE_ROOT" "STORAGE_ROOT"
+  require_uninstall_path_layout
 
   if [[ "$REMOVE_DATA" == "1" && "$CONFIRM_REMOVE_DATA" != "$STORAGE_ROOT" ]]; then
     fail "refusing to remove data; set CONFIRM_REMOVE_DATA=$STORAGE_ROOT together with REMOVE_DATA=1"

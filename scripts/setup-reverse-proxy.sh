@@ -27,7 +27,7 @@ install_cron_line_once() {
         { cat "$current_cron"; echo "$line"; } | crontab -
         log_info "已写入证书续期 cron"
     fi
-    rm -f "$current_cron"
+    rm -f -- "$current_cron"
 }
 
 configure_certbot_renewal() {
@@ -45,6 +45,44 @@ configure_certbot_renewal() {
     log_warn "未检测到 certbot.timer 或 crontab；请手动配置 certbot renew 自动续期"
 }
 
+domain_is_safe() {
+    local domain="$1"
+    local -a labels
+    local label
+
+    [[ -n "$domain" ]] || return 1
+    [[ ${#domain} -le 253 ]] || return 1
+    [[ "$domain" =~ ^[A-Za-z0-9.-]+$ ]] || return 1
+    [[ "$domain" != .* ]] || return 1
+    [[ "$domain" != *. ]] || return 1
+    [[ "$domain" != *..* ]] || return 1
+
+    IFS='.' read -r -a labels <<< "$domain"
+    for label in "${labels[@]}"; do
+        [[ -n "$label" ]] || return 1
+        [[ ${#label} -le 63 ]] || return 1
+        [[ "$label" =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?$ ]] || return 1
+    done
+
+    return 0
+}
+
+email_is_safe() {
+    local email="$1"
+    local local_part domain_part
+
+    [[ -n "$email" ]] || return 1
+    [[ ${#email} -le 254 ]] || return 1
+    [[ "$email" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+$ ]] || return 1
+
+    local_part="${email%@*}"
+    domain_part="${email#*@}"
+    [[ -n "$local_part" ]] || return 1
+    [[ "$local_part" != "$email" ]] || return 1
+    [[ ${#local_part} -le 64 ]] || return 1
+    domain_is_safe "$domain_part"
+}
+
 # 检查参数
 DOMAIN="${1:-}"
 EMAIL="${2:-}"
@@ -55,7 +93,7 @@ if [[ -z "$DOMAIN" ]]; then
     exit 1
 fi
 
-if [[ ! "$DOMAIN" =~ ^[A-Za-z0-9.-]+$ || "$DOMAIN" == .* || "$DOMAIN" == *..* || "$DOMAIN" == -* ]]; then
+if ! domain_is_safe "$DOMAIN"; then
     log_error "域名格式不安全: $DOMAIN"
     exit 1
 fi
@@ -65,8 +103,8 @@ if [[ -z "$EMAIL" ]]; then
     log_warn "未指定邮箱，使用默认: $EMAIL"
 fi
 
-if [[ "$EMAIL" == *[[:space:]]* ]]; then
-    log_error "邮箱不能包含空白字符"
+if ! email_is_safe "$EMAIL"; then
+    log_error "邮箱格式不安全: $EMAIL"
     exit 1
 fi
 
@@ -271,7 +309,7 @@ EOF
     ln -sf "/etc/nginx/sites-available/$DOMAIN" /etc/nginx/sites-enabled/
     
     # 删除默认站点
-    rm -f /etc/nginx/sites-enabled/default
+    rm -f -- /etc/nginx/sites-enabled/default
     
     # 创建临时配置用于申请证书
     cat > "/etc/nginx/sites-available/$DOMAIN.temp" << EOF
@@ -307,7 +345,7 @@ EOF
     
     # 切换到正式配置
     ln -sf "/etc/nginx/sites-available/$DOMAIN" "/etc/nginx/sites-enabled/$DOMAIN"
-    rm -f "/etc/nginx/sites-available/$DOMAIN.temp"
+    rm -f -- "/etc/nginx/sites-available/$DOMAIN.temp"
     
     # 重载配置
     nginx -t

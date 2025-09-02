@@ -5,7 +5,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP_ROOT="$(mktemp -d)"
-trap 'rm -rf "$TMP_ROOT"' EXIT
+trap 'rm -rf -- "$TMP_ROOT"' EXIT
 
 fail() {
   printf '[systemd-install-test] ERROR: %s\n' "$*" >&2
@@ -199,6 +199,436 @@ run_invalid_input_test() {
   [[ ! -f "$install_dir/systemd/mnemonas.service" ]] || fail "systemd unit was written after invalid input"
 }
 
+run_service_account_validation_test() {
+  local case_dir="$TMP_ROOT/service-account-validation"
+  local fake_path="$case_dir/fake-bin"
+  local release_dir="$case_dir/release"
+  local install_dir="$case_dir/install"
+  local status
+  mkdir -p "$install_dir"
+  make_fake_admin_path "$fake_path"
+  make_release_tree "$release_dir"
+
+  set +e
+  PATH="$fake_path:$PATH" \
+    RELEASE_DIR="$release_dir" \
+    BIN_DIR="$install_dir/bin" \
+    SHARE_DIR="$install_dir/share/mnemonas" \
+    CONFIG_DIR="$install_dir/etc/mnemonas" \
+    CONFIG_PATH="$install_dir/etc/mnemonas/config.toml" \
+    SYSTEMD_DIR="$install_dir/systemd" \
+    STORAGE_ROOT="$install_dir/storage" \
+    SERVICE_USER=root \
+    ENABLE_NOW=0 \
+    "$REPO_ROOT/scripts/install-systemd.sh" > "$case_dir/install.log" 2>&1
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "installer accepted SERVICE_USER=root"
+  assert_file_contains "$case_dir/install.log" "SERVICE_USER must not be root"
+  [[ ! -d "$install_dir/bin" ]] || fail "installer created files after rejecting SERVICE_USER=root"
+}
+
+run_server_host_validation_test() {
+  local case_dir="$TMP_ROOT/server-host-validation"
+  local fake_path="$case_dir/fake-bin"
+  local release_dir="$case_dir/release"
+  local invalid_install_dir="$case_dir/invalid-install"
+  local ipv6_install_dir="$case_dir/ipv6-install"
+  local status
+  mkdir -p "$invalid_install_dir" "$ipv6_install_dir"
+  make_fake_admin_path "$fake_path"
+  make_release_tree "$release_dir"
+
+  set +e
+  PATH="$fake_path:$PATH" \
+    RELEASE_DIR="$release_dir" \
+    BIN_DIR="$invalid_install_dir/bin" \
+    SHARE_DIR="$invalid_install_dir/share/mnemonas" \
+    CONFIG_DIR="$invalid_install_dir/etc/mnemonas" \
+    CONFIG_PATH="$invalid_install_dir/etc/mnemonas/config.toml" \
+    SYSTEMD_DIR="$invalid_install_dir/systemd" \
+    STORAGE_ROOT="$invalid_install_dir/storage" \
+    SERVER_HOST="[::1]:8080" \
+    ENABLE_NOW=0 \
+    "$REPO_ROOT/scripts/install-systemd.sh" > "$case_dir/invalid.log" 2>&1
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "SERVER_HOST with port was accepted"
+  assert_file_contains "$case_dir/invalid.log" "SERVER_HOST must not include brackets"
+  [[ ! -d "$invalid_install_dir/bin" ]] || fail "installer created files after rejecting invalid SERVER_HOST"
+
+  PATH="$fake_path:$PATH" \
+    RELEASE_DIR="$release_dir" \
+    BIN_DIR="$ipv6_install_dir/bin" \
+    SHARE_DIR="$ipv6_install_dir/share/mnemonas" \
+    CONFIG_DIR="$ipv6_install_dir/etc/mnemonas" \
+    CONFIG_PATH="$ipv6_install_dir/etc/mnemonas/config.toml" \
+    SYSTEMD_DIR="$ipv6_install_dir/systemd" \
+    STORAGE_ROOT="$ipv6_install_dir/storage" \
+    SERVER_HOST="::1" \
+    SERVER_PORT="18080" \
+    ENABLE_NOW=0 \
+    "$REPO_ROOT/scripts/install-systemd.sh" > "$case_dir/ipv6.log"
+
+  assert_file_contains "$case_dir/ipv6.log" "Open Web UI: http://[::1]:18080"
+}
+
+run_protected_web_dir_test() {
+  local case_dir="$TMP_ROOT/protected-web-dir"
+  local fake_path="$case_dir/fake-bin"
+  local release_dir="$case_dir/release"
+  local install_dir="$case_dir/install"
+  local status
+  mkdir -p "$install_dir"
+  make_fake_admin_path "$fake_path"
+  make_release_tree "$release_dir"
+
+  set +e
+  PATH="$fake_path:$PATH" \
+    RELEASE_DIR="$release_dir" \
+    BIN_DIR="$install_dir/bin" \
+    SHARE_DIR="$install_dir/share/mnemonas" \
+    WEB_DIR="/usr/local" \
+    CONFIG_DIR="$install_dir/etc/mnemonas" \
+    CONFIG_PATH="$install_dir/etc/mnemonas/config.toml" \
+    SYSTEMD_DIR="$install_dir/systemd" \
+    STORAGE_ROOT="$install_dir/storage" \
+    ENABLE_NOW=0 \
+    "$REPO_ROOT/scripts/install-systemd.sh" > "$case_dir/install.log" 2>&1
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "protected WEB_DIR was accepted"
+  assert_file_contains "$case_dir/install.log" "WEB_DIR points at a protected system directory"
+  [[ ! -d "$install_dir/bin" ]] || fail "installer created files after rejecting protected WEB_DIR"
+}
+
+run_share_dir_overlap_test() {
+  local case_dir="$TMP_ROOT/share-dir-overlap"
+  local fake_path="$case_dir/fake-bin"
+  local release_dir="$case_dir/release"
+  local install_dir="$case_dir/install"
+  local status
+  mkdir -p "$install_dir"
+  make_fake_admin_path "$fake_path"
+  make_release_tree "$release_dir"
+
+  set +e
+  PATH="$fake_path:$PATH" \
+    RELEASE_DIR="$release_dir" \
+    BIN_DIR="$install_dir/bin" \
+    SHARE_DIR="$install_dir/storage" \
+    WEB_DIR="$install_dir/share/mnemonas/web" \
+    CONFIG_DIR="$install_dir/etc/mnemonas" \
+    CONFIG_PATH="$install_dir/etc/mnemonas/config.toml" \
+    SYSTEMD_DIR="$install_dir/systemd" \
+    STORAGE_ROOT="$install_dir/storage" \
+    ENABLE_NOW=0 \
+    "$REPO_ROOT/scripts/install-systemd.sh" > "$case_dir/install.log" 2>&1
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "SHARE_DIR overlapping STORAGE_ROOT was accepted"
+  assert_file_contains "$case_dir/install.log" "SHARE_DIR must not overlap STORAGE_ROOT"
+  [[ ! -d "$install_dir/bin" ]] || fail "installer created files after rejecting overlapping SHARE_DIR"
+}
+
+run_web_dir_overlap_test() {
+  local case_dir="$TMP_ROOT/web-dir-overlap"
+  local fake_path="$case_dir/fake-bin"
+  local release_dir="$case_dir/release"
+  local install_dir="$case_dir/install"
+  local status
+  mkdir -p "$install_dir"
+  make_fake_admin_path "$fake_path"
+  make_release_tree "$release_dir"
+
+  set +e
+  PATH="$fake_path:$PATH" \
+    RELEASE_DIR="$release_dir" \
+    BIN_DIR="$install_dir/bin" \
+    SHARE_DIR="$install_dir/share/mnemonas" \
+    WEB_DIR="$install_dir/storage/web" \
+    CONFIG_DIR="$install_dir/etc/mnemonas" \
+    CONFIG_PATH="$install_dir/etc/mnemonas/config.toml" \
+    SYSTEMD_DIR="$install_dir/systemd" \
+    STORAGE_ROOT="$install_dir/storage" \
+    ENABLE_NOW=0 \
+    "$REPO_ROOT/scripts/install-systemd.sh" > "$case_dir/install.log" 2>&1
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "WEB_DIR under STORAGE_ROOT was accepted"
+  assert_file_contains "$case_dir/install.log" "WEB_DIR must not overlap STORAGE_ROOT"
+  [[ ! -d "$install_dir/bin" ]] || fail "installer created files after rejecting overlapping WEB_DIR"
+}
+
+run_core_path_overlap_test() {
+  local case_dir="$TMP_ROOT/core-path-overlap"
+  local fake_path="$case_dir/fake-bin"
+  local release_dir="$case_dir/release"
+  local install_dir="$case_dir/install"
+  local status
+  mkdir -p "$install_dir"
+  make_fake_admin_path "$fake_path"
+  make_release_tree "$release_dir"
+
+  set +e
+  PATH="$fake_path:$PATH" \
+    RELEASE_DIR="$release_dir" \
+    BIN_DIR="$install_dir/storage/bin" \
+    SHARE_DIR="$install_dir/share/mnemonas" \
+    CONFIG_DIR="$install_dir/etc/mnemonas" \
+    CONFIG_PATH="$install_dir/etc/mnemonas/config.toml" \
+    SYSTEMD_DIR="$install_dir/systemd" \
+    STORAGE_ROOT="$install_dir/storage" \
+    ENABLE_NOW=0 \
+    "$REPO_ROOT/scripts/install-systemd.sh" > "$case_dir/bin-storage.log" 2>&1
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "BIN_DIR under STORAGE_ROOT was accepted"
+  assert_file_contains "$case_dir/bin-storage.log" "BIN_DIR must not overlap STORAGE_ROOT"
+  [[ ! -d "$install_dir/storage/bin" ]] || fail "installer created BIN_DIR after rejecting overlap with STORAGE_ROOT"
+
+  set +e
+  PATH="$fake_path:$PATH" \
+    RELEASE_DIR="$release_dir" \
+    BIN_DIR="$install_dir/bin" \
+    SHARE_DIR="$install_dir/share/mnemonas" \
+    CONFIG_DIR="$install_dir/storage/.mnemonas" \
+    CONFIG_PATH="$install_dir/storage/.mnemonas/config.toml" \
+    SYSTEMD_DIR="$install_dir/systemd" \
+    STORAGE_ROOT="$install_dir/storage" \
+    ENABLE_NOW=0 \
+    "$REPO_ROOT/scripts/install-systemd.sh" > "$case_dir/config-storage.log" 2>&1
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "CONFIG_DIR under STORAGE_ROOT was accepted"
+  assert_file_contains "$case_dir/config-storage.log" "CONFIG_DIR must not overlap STORAGE_ROOT"
+  [[ ! -d "$install_dir/bin" ]] || fail "installer created files after rejecting CONFIG_DIR overlap"
+}
+
+run_protected_config_and_storage_test() {
+  local case_dir="$TMP_ROOT/protected-config-storage"
+  local fake_path="$case_dir/fake-bin"
+  local release_dir="$case_dir/release"
+  local install_dir="$case_dir/install"
+  local status
+  mkdir -p "$install_dir"
+  make_fake_admin_path "$fake_path"
+  make_release_tree "$release_dir"
+
+  set +e
+  PATH="$fake_path:$PATH" \
+    RELEASE_DIR="$release_dir" \
+    BIN_DIR="$install_dir/bin" \
+    SHARE_DIR="$install_dir/share/mnemonas" \
+    CONFIG_DIR="/etc" \
+    CONFIG_PATH="/etc/mnemonas.toml" \
+    SYSTEMD_DIR="$install_dir/systemd" \
+    STORAGE_ROOT="$install_dir/storage" \
+    ENABLE_NOW=0 \
+    "$REPO_ROOT/scripts/install-systemd.sh" > "$case_dir/config.log" 2>&1
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "protected CONFIG_DIR was accepted"
+  assert_file_contains "$case_dir/config.log" "CONFIG_DIR points at a protected system directory"
+  [[ ! -d "$install_dir/bin" ]] || fail "installer created files after rejecting protected CONFIG_DIR"
+
+  set +e
+  PATH="$fake_path:$PATH" \
+    RELEASE_DIR="$release_dir" \
+    BIN_DIR="$install_dir/bin" \
+    SHARE_DIR="$install_dir/share/mnemonas" \
+    CONFIG_DIR="$install_dir/etc/mnemonas" \
+    CONFIG_PATH="$install_dir/etc/mnemonas/config.toml" \
+    SYSTEMD_DIR="$install_dir/systemd" \
+    STORAGE_ROOT="/srv" \
+    ENABLE_NOW=0 \
+    "$REPO_ROOT/scripts/install-systemd.sh" > "$case_dir/storage.log" 2>&1
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "protected STORAGE_ROOT was accepted"
+  assert_file_contains "$case_dir/storage.log" "STORAGE_ROOT points at a protected system directory"
+  [[ ! -d "$install_dir/bin" ]] || fail "installer created files after rejecting protected STORAGE_ROOT"
+}
+
+run_config_path_scope_test() {
+  local case_dir="$TMP_ROOT/config-path-scope"
+  local fake_path="$case_dir/fake-bin"
+  local release_dir="$case_dir/release"
+  local install_dir="$case_dir/install"
+  local status
+  mkdir -p "$install_dir"
+  make_fake_admin_path "$fake_path"
+  make_release_tree "$release_dir"
+
+  set +e
+  PATH="$fake_path:$PATH" \
+    RELEASE_DIR="$release_dir" \
+    BIN_DIR="$install_dir/bin" \
+    SHARE_DIR="$install_dir/share/mnemonas" \
+    CONFIG_DIR="$install_dir/etc/mnemonas" \
+    CONFIG_PATH="$install_dir/etc/outside.toml" \
+    SYSTEMD_DIR="$install_dir/systemd" \
+    STORAGE_ROOT="$install_dir/storage" \
+    ENABLE_NOW=0 \
+    "$REPO_ROOT/scripts/install-systemd.sh" > "$case_dir/outside.log" 2>&1
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "CONFIG_PATH outside CONFIG_DIR was accepted"
+  assert_file_contains "$case_dir/outside.log" "CONFIG_PATH must be inside CONFIG_DIR"
+  [[ ! -d "$install_dir/bin" ]] || fail "installer created files after rejecting out-of-scope CONFIG_PATH"
+
+  set +e
+  PATH="$fake_path:$PATH" \
+    RELEASE_DIR="$release_dir" \
+    BIN_DIR="$install_dir/bin" \
+    SHARE_DIR="$install_dir/share/mnemonas" \
+    CONFIG_DIR="$install_dir/etc/mnemonas" \
+    CONFIG_PATH="$install_dir/etc/mnemonas/../outside.toml" \
+    SYSTEMD_DIR="$install_dir/systemd" \
+    STORAGE_ROOT="$install_dir/storage" \
+    ENABLE_NOW=0 \
+    "$REPO_ROOT/scripts/install-systemd.sh" > "$case_dir/parent.log" 2>&1
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "CONFIG_PATH with parent directory segment was accepted"
+  assert_file_contains "$case_dir/parent.log" "CONFIG_PATH cannot contain parent directory segments"
+}
+
+run_systemd_specifier_rejection_test() {
+  local case_dir="$TMP_ROOT/systemd-specifier"
+  local fake_path="$case_dir/fake-bin"
+  local release_dir="$case_dir/release"
+  local install_dir="$case_dir/install"
+  local status
+  mkdir -p "$install_dir"
+  make_fake_admin_path "$fake_path"
+  make_release_tree "$release_dir"
+
+  set +e
+  PATH="$fake_path:$PATH" \
+    RELEASE_DIR="$release_dir" \
+    BIN_DIR="$install_dir/bin" \
+    SHARE_DIR="$install_dir/share/mnemonas" \
+    CONFIG_DIR="$install_dir/etc/mnemonas" \
+    CONFIG_PATH="$install_dir/etc/mnemonas/config.toml" \
+    SYSTEMD_DIR="$install_dir/systemd" \
+    STORAGE_ROOT="$install_dir/storage-%h" \
+    ENABLE_NOW=0 \
+    "$REPO_ROOT/scripts/install-systemd.sh" > "$case_dir/install.log" 2>&1
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "systemd specifier in STORAGE_ROOT was accepted"
+  assert_file_contains "$case_dir/install.log" "STORAGE_ROOT cannot contain systemd specifiers"
+  [[ ! -d "$install_dir/bin" ]] || fail "installer created files after rejecting systemd specifier"
+}
+
+run_symlink_path_rejection_test() {
+  local case_dir="$TMP_ROOT/symlink-path"
+  local fake_path="$case_dir/fake-bin"
+  local release_dir="$case_dir/release"
+  local install_dir="$case_dir/install"
+  local target_dir="$case_dir/target"
+  local link_dir="$case_dir/link"
+  local status
+  mkdir -p "$install_dir" "$target_dir"
+  ln -s "$target_dir" "$link_dir"
+  make_fake_admin_path "$fake_path"
+  make_release_tree "$release_dir"
+
+  set +e
+  PATH="$fake_path:$PATH" \
+    RELEASE_DIR="$release_dir" \
+    BIN_DIR="$install_dir/bin" \
+    SHARE_DIR="$install_dir/share/mnemonas" \
+    CONFIG_DIR="$install_dir/etc/mnemonas" \
+    CONFIG_PATH="$install_dir/etc/mnemonas/config.toml" \
+    SYSTEMD_DIR="$install_dir/systemd" \
+    STORAGE_ROOT="$link_dir/storage" \
+    ENABLE_NOW=0 \
+    "$REPO_ROOT/scripts/install-systemd.sh" > "$case_dir/install.log" 2>&1
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "symlinked STORAGE_ROOT parent was accepted"
+  assert_file_contains "$case_dir/install.log" "STORAGE_ROOT must not contain symlink path components"
+  [[ ! -d "$target_dir/storage" ]] || fail "installer created storage through a symlink parent"
+  [[ ! -d "$install_dir/bin" ]] || fail "installer created files after rejecting symlinked path"
+}
+
+run_systemd_newline_rejection_test() {
+  local case_dir="$TMP_ROOT/systemd-newline"
+  local fake_path="$case_dir/fake-bin"
+  local release_dir="$case_dir/release"
+  local install_dir="$case_dir/install"
+  local grpc_addr
+  local status
+  mkdir -p "$install_dir"
+  make_fake_admin_path "$fake_path"
+  make_release_tree "$release_dir"
+
+  grpc_addr="127.0.0.1:19090"$'\n'"Environment=INJECTED=1"
+  set +e
+  PATH="$fake_path:$PATH" \
+    RELEASE_DIR="$release_dir" \
+    BIN_DIR="$install_dir/bin" \
+    SHARE_DIR="$install_dir/share/mnemonas" \
+    CONFIG_DIR="$install_dir/etc/mnemonas" \
+    CONFIG_PATH="$install_dir/etc/mnemonas/config.toml" \
+    SYSTEMD_DIR="$install_dir/systemd" \
+    STORAGE_ROOT="$install_dir/storage" \
+    DATAPLANE_GRPC_ADDR="$grpc_addr" \
+    ENABLE_NOW=0 \
+    "$REPO_ROOT/scripts/install-systemd.sh" > "$case_dir/install.log" 2>&1
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "newline in DATAPLANE_GRPC_ADDR was accepted"
+  assert_file_contains "$case_dir/install.log" "DATAPLANE_GRPC_ADDR cannot contain newline characters"
+  [[ ! -d "$install_dir/bin" ]] || fail "installer created files after rejecting systemd newline"
+}
+
+run_dataplane_addr_validation_test() {
+  local case_dir="$TMP_ROOT/dataplane-addr-validation"
+  local fake_path="$case_dir/fake-bin"
+  local release_dir="$case_dir/release"
+  local install_dir="$case_dir/install"
+  local status
+  mkdir -p "$install_dir"
+  make_fake_admin_path "$fake_path"
+  make_release_tree "$release_dir"
+
+  set +e
+  PATH="$fake_path:$PATH" \
+    RELEASE_DIR="$release_dir" \
+    BIN_DIR="$install_dir/bin" \
+    SHARE_DIR="$install_dir/share/mnemonas" \
+    CONFIG_DIR="$install_dir/etc/mnemonas" \
+    CONFIG_PATH="$install_dir/etc/mnemonas/config.toml" \
+    SYSTEMD_DIR="$install_dir/systemd" \
+    STORAGE_ROOT="$install_dir/storage" \
+    DATAPLANE_HTTP_ADDR="127.0.0.1:70000" \
+    ENABLE_NOW=0 \
+    "$REPO_ROOT/scripts/install-systemd.sh" > "$case_dir/install.log" 2>&1
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "invalid DATAPLANE_HTTP_ADDR port was accepted"
+  assert_file_contains "$case_dir/install.log" "DATAPLANE_HTTP_ADDR port must be between 1 and 65535"
+  [[ ! -d "$install_dir/bin" ]] || fail "installer created files after rejecting invalid dataplane address"
+}
+
 run_doctor_config_test() {
   local case_dir="$TMP_ROOT/doctor"
   local fake_path="$case_dir/fake-bin"
@@ -302,9 +732,55 @@ EOF
   assert_file_contains "$case_dir/doctor-unsafe.log" "Summary: 0 failure(s), 4 warning(s)"
 }
 
+run_doctor_input_validation_test() {
+  local case_dir="$TMP_ROOT/doctor-input-validation"
+  local status
+  mkdir -p "$case_dir"
+
+  set +e
+  SERVER_PORT="8080 bad" \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" > "$case_dir/server-port.log" 2>&1
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "doctor accepted SERVER_PORT with whitespace"
+  assert_file_contains "$case_dir/server-port.log" "SERVER_PORT cannot contain whitespace"
+
+  set +e
+  DATAPLANE_GRPC_ADDR="127.0.0.1:70000" \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" > "$case_dir/grpc-addr.log" 2>&1
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "doctor accepted invalid DATAPLANE_GRPC_ADDR port"
+  assert_file_contains "$case_dir/grpc-addr.log" "DATAPLANE_GRPC_ADDR port must be between 1 and 65535"
+
+  set +e
+  SERVER_URL="file:///etc/passwd" \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" > "$case_dir/server-url.log" 2>&1
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "doctor accepted a non-http SERVER_URL"
+  assert_file_contains "$case_dir/server-url.log" "SERVER_URL must be an http(s) URL"
+}
+
 run_fresh_install_test
 run_existing_config_test
 run_invalid_input_test
+run_service_account_validation_test
+run_server_host_validation_test
+run_protected_web_dir_test
+run_share_dir_overlap_test
+run_web_dir_overlap_test
+run_core_path_overlap_test
+run_protected_config_and_storage_test
+run_config_path_scope_test
+run_systemd_specifier_rejection_test
+run_symlink_path_rejection_test
+run_systemd_newline_rejection_test
+run_dataplane_addr_validation_test
 run_doctor_config_test
+run_doctor_input_validation_test
 
 printf '[systemd-install-test] all checks passed\n'

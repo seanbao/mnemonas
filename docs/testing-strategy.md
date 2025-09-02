@@ -81,7 +81,10 @@ func TestBoundaryConditions(t *testing.T) {
     }{
         {"empty password", "", ErrPasswordTooShort},
         {"min length password", "12345678", nil},
+        {"bcrypt byte limit", strings.Repeat("a", 72), nil},
+        {"password too long", strings.Repeat("a", 73), ErrPasswordTooLong},
         {"max length username", strings.Repeat("a", 255), nil},
+        {"username too long", strings.Repeat("a", 256), ErrInvalidUsername},
         {"unicode username", "用户名", nil},
     }
     // ...
@@ -260,17 +263,22 @@ interactions:
       path: /api/v1/auth/login
       headers:
         Content-Type: application/json
+        X-MnemoNAS-Session-Mode: cookie
       body:
         username: "admin"
         password: "validpassword"
     response:
       status: 200
+      headers:
+        Set-Cookie: !!regexp mnemonas_access=.*HttpOnly
       body:
         success: true
         data:
-          access_token: !!regexp ^eyJ.*
-          refresh_token: !!regexp ^eyJ.*
-          token_type: "Bearer"
+          user:
+            username: "admin"
+        absent:
+          - data.access_token
+          - data.refresh_token
 
   - description: "Login with invalid credentials"
     request:

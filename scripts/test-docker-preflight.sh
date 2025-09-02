@@ -5,7 +5,7 @@ set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP_ROOT="$(mktemp -d)"
-trap 'rm -rf "$TMP_ROOT"' EXIT
+trap 'rm -rf -- "$TMP_ROOT"' EXIT
 
 fail() {
 	printf '[docker-preflight-test] ERROR: %s\n' "$*" >&2
@@ -141,7 +141,7 @@ run_missing_data_dir_test() {
 	local out="$case_dir/out.log"
 	local status
 	make_case "$case_dir"
-	rm -rf "$case_dir/home/.mnemonas"
+	rm -rf -- "$case_dir/home/.mnemonas"
 	make_fake_bin "$fake_bin"
 
 	set +e
@@ -154,6 +154,31 @@ run_missing_data_dir_test() {
 
 	[[ "$status" -ne 0 ]] || fail "preflight accepted a missing data directory"
 	assert_file_contains "$out" "Data directory missing"
+}
+
+run_symlink_data_dir_test() {
+	local case_dir="$TMP_ROOT/symlink-data"
+	local fake_bin="$case_dir/bin"
+	local out="$case_dir/out.log"
+	local target_dir="$case_dir/target-data"
+	local link_dir="$case_dir/home/.mnemonas"
+	local status
+	make_case "$case_dir"
+	rm -rf -- "$link_dir"
+	mkdir -p "$target_dir"
+	ln -s "$target_dir" "$link_dir"
+	make_fake_bin "$fake_bin"
+
+	set +e
+	PATH="$fake_bin:$PATH" \
+		REPO_ROOT="$case_dir/repo" \
+		HOME="$case_dir/home" \
+		bash "$PROJECT_ROOT/scripts/mnemonas-docker-preflight.sh" > "$out"
+	status=$?
+	set -e
+
+	[[ "$status" -ne 0 ]] || fail "preflight accepted a symlink data directory"
+	assert_file_contains "$out" "Data directory must not contain symlink path components"
 }
 
 run_busy_port_test() {
@@ -240,12 +265,35 @@ TOML
 	assert_file_contains "$out" "Summary: 0 failure(s), 1 warning(s)"
 }
 
+run_invalid_min_free_bytes_test() {
+	local case_dir="$TMP_ROOT/invalid-min-free"
+	local fake_bin="$case_dir/bin"
+	local out="$case_dir/out.log"
+	local status
+	make_case "$case_dir"
+	make_fake_bin "$fake_bin"
+
+	set +e
+	PATH="$fake_bin:$PATH" \
+		REPO_ROOT="$case_dir/repo" \
+		HOME="$case_dir/home" \
+		MIN_FREE_BYTES="not-a-number" \
+		bash "$PROJECT_ROOT/scripts/mnemonas-docker-preflight.sh" > "$out"
+	status=$?
+	set -e
+
+	[[ "$status" -ne 0 ]] || fail "preflight accepted invalid MIN_FREE_BYTES"
+	assert_file_contains "$out" "MIN_FREE_BYTES must be a positive integer"
+}
+
 run_success_test
 run_missing_compose_test
 run_missing_data_dir_test
+run_symlink_data_dir_test
 run_busy_port_test
 run_custom_host_port_test
 run_invalid_existing_config_test
 run_custom_storage_root_warning_test
+run_invalid_min_free_bytes_test
 
 printf '[docker-preflight-test] all checks passed\n'

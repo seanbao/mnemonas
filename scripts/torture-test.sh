@@ -12,7 +12,7 @@ cd "$ROOT_DIR"
 
 if [[ -z "${GOCACHE:-}" ]]; then
     TORTURE_TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/mnemonas-torture.XXXXXX")"
-    trap 'rm -rf "$TORTURE_TMP_ROOT"' EXIT
+    trap 'rm -rf -- "$TORTURE_TMP_ROOT"' EXIT
     export GOCACHE="$TORTURE_TMP_ROOT/go-build"
     mkdir -p "$GOCACHE"
 fi

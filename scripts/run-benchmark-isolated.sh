@@ -19,10 +19,15 @@ NASD_HOST="${MNEMONAS_BENCH_NASD_HOST:-127.0.0.1}"
 NASD_PORT="${MNEMONAS_BENCH_NASD_PORT:-18181}"
 DATAPLANE_HTTP="${MNEMONAS_BENCH_DATAPLANE_HTTP:-127.0.0.1:19193}"
 DATAPLANE_GRPC="${MNEMONAS_BENCH_DATAPLANE_GRPC:-127.0.0.1:19192}"
-BASE_URL="http://${NASD_HOST}:${NASD_PORT}"
+BASE_URL=""
 READY_ATTEMPTS="${MNEMONAS_BENCH_READY_ATTEMPTS:-180}"
 
 require_safe_bench_root() {
+  if path_has_parent_segment "$BENCH_ROOT"; then
+    echo "MNEMONAS_BENCH_ROOT must not contain '..' path segments: $BENCH_ROOT" >&2
+    exit 1
+  fi
+
   case "$BENCH_ROOT" in
     /tmp/*|"$PROJECT_ROOT"/*) ;;
     *)
@@ -30,6 +35,103 @@ require_safe_bench_root() {
       exit 1
       ;;
   esac
+}
+
+path_has_parent_segment() {
+  local candidate="$1"
+  local segment
+  local -a segments
+  IFS='/' read -r -a segments <<< "$candidate"
+  for segment in "${segments[@]}"; do
+    if [[ "$segment" == ".." ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+is_valid_tcp_host() {
+  local host="$1"
+  local label
+  local -a labels
+
+  host="${host%.}"
+  [[ -n "$host" ]] || return 1
+  [[ "$host" != *"["* && "$host" != *"]"* ]] || return 1
+
+  if [[ "$host" == *:* ]]; then
+    [[ "$host" =~ ^[0-9A-Fa-f:.]+$ ]]
+    return
+  fi
+
+  [[ "${#host}" -le 253 ]] || return 1
+  IFS='.' read -r -a labels <<< "$host"
+  for label in "${labels[@]}"; do
+    [[ -n "$label" && "${#label}" -le 63 ]] || return 1
+    [[ "$label" != -* && "$label" != *- ]] || return 1
+    [[ "$label" =~ ^[A-Za-z0-9-]+$ ]] || return 1
+  done
+  return 0
+}
+
+http_host_for_url() {
+  local host="$1"
+  if [[ "$host" == *:* && "$host" != \[*\] ]]; then
+    printf '[%s]\n' "$host"
+    return 0
+  fi
+  printf '%s\n' "$host"
+}
+
+require_safe_tcp_host() {
+  local value="$1"
+  local label="$2"
+
+  [[ -n "$value" ]] || { echo "$label cannot be empty" >&2; exit 1; }
+  [[ "$value" != *[[:space:]]* ]] || { echo "$label cannot contain whitespace: $value" >&2; exit 1; }
+  is_valid_tcp_host "$value" || { echo "$label host is invalid: $value" >&2; exit 1; }
+}
+
+require_safe_tcp_port() {
+  local value="$1"
+  local label="$2"
+
+  [[ -n "$value" ]] || { echo "$label cannot be empty" >&2; exit 1; }
+  [[ "$value" != *[[:space:]]* ]] || { echo "$label cannot contain whitespace: $value" >&2; exit 1; }
+  [[ "$value" =~ ^[0-9]+$ ]] || { echo "$label must be numeric: $value" >&2; exit 1; }
+  (( 10#$value >= 1 && 10#$value <= 65535 )) || { echo "$label must be between 1 and 65535: $value" >&2; exit 1; }
+}
+
+require_safe_tcp_addr() {
+  local value="$1"
+  local label="$2"
+  local host=""
+  local port=""
+
+  [[ -n "$value" ]] || { echo "$label cannot be empty" >&2; exit 1; }
+  [[ "$value" != *[[:space:]]* ]] || { echo "$label cannot contain whitespace: $value" >&2; exit 1; }
+
+  if [[ "$value" =~ ^\[([^][]+)\]:([0-9]+)$ ]]; then
+    host="${BASH_REMATCH[1]}"
+    port="${BASH_REMATCH[2]}"
+  elif [[ "$value" =~ ^([^:]+):([0-9]+)$ ]]; then
+    host="${BASH_REMATCH[1]}"
+    port="${BASH_REMATCH[2]}"
+  else
+    echo "$label must be a host:port address: $value" >&2
+    exit 1
+  fi
+
+  is_valid_tcp_host "$host" || { echo "$label host is invalid: $value" >&2; exit 1; }
+  require_safe_tcp_port "$port" "$label port"
+}
+
+require_positive_integer() {
+  local value="$1"
+  local label="$2"
+
+  [[ "$value" =~ ^[0-9]+$ ]] || { echo "$label must be a positive integer: $value" >&2; exit 1; }
+  (( 10#$value > 0 )) || { echo "$label must be a positive integer: $value" >&2; exit 1; }
 }
 
 show_backend_logs() {
@@ -74,6 +176,12 @@ cleanup() {
 }
 
 require_safe_bench_root
+require_safe_tcp_host "$NASD_HOST" "MNEMONAS_BENCH_NASD_HOST"
+require_safe_tcp_port "$NASD_PORT" "MNEMONAS_BENCH_NASD_PORT"
+require_safe_tcp_addr "$DATAPLANE_HTTP" "MNEMONAS_BENCH_DATAPLANE_HTTP"
+require_safe_tcp_addr "$DATAPLANE_GRPC" "MNEMONAS_BENCH_DATAPLANE_GRPC"
+require_positive_integer "$READY_ATTEMPTS" "MNEMONAS_BENCH_READY_ATTEMPTS"
+BASE_URL="http://$(http_host_for_url "$NASD_HOST"):${NASD_PORT}"
 
 (
   cd "$PROJECT_ROOT"

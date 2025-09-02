@@ -58,11 +58,107 @@ require_port() {
 	(( 10#$value >= 1 && 10#$value <= 65535 )) || fail "--port must be a number from 1 to 65535: $value"
 }
 
+normalize_compare_path() {
+	local path="$1"
+	while [[ "$path" != "/" && "$path" == */ ]]; do
+		path="${path%/}"
+	done
+	if [[ -z "$path" ]]; then
+		path="/"
+	fi
+	printf '%s\n' "$path"
+}
+
+path_has_parent_segment() {
+	local value="$1"
+	local trimmed="${value#/}"
+	trimmed="${trimmed%/}"
+
+	local -a segments
+	IFS='/' read -r -a segments <<< "$trimmed"
+
+	local segment
+	for segment in "${segments[@]}"; do
+		[[ "$segment" == ".." ]] && return 0
+	done
+	return 1
+}
+
+require_no_symlink_components() {
+	local value="$1"
+	local label="$2"
+	local trimmed="$value"
+	local current="."
+	local -a segments
+
+	if [[ "$value" == /* ]]; then
+		trimmed="${value#/}"
+		current="/"
+	fi
+	trimmed="${trimmed%/}"
+
+	IFS='/' read -r -a segments <<< "$trimmed"
+	for segment in "${segments[@]}"; do
+		[[ -n "$segment" && "$segment" != "." ]] || continue
+		if [[ "$current" == "/" ]]; then
+			current="/$segment"
+		else
+			current="$current/$segment"
+		fi
+		[[ ! -L "$current" ]] || fail "$label must not contain symlink path components: $current"
+		[[ -e "$current" ]] || break
+	done
+}
+
+value_has_line_break() {
+	local value="$1"
+	[[ "$value" == *$'\n'* || "$value" == *$'\r'* ]]
+}
+
+require_no_line_breaks() {
+	local value="$1"
+	local label="$2"
+	! value_has_line_break "$value" || fail "$label cannot contain newline characters"
+}
+
 require_absolute_data_dir() {
+	require_no_line_breaks "$DATA_DIR" "--data-dir"
 	case "$DATA_DIR" in
 		/*) ;;
 		*) fail "--data-dir must be an absolute path because Docker Compose does not expand relative volume roots: $DATA_DIR" ;;
 	esac
+	! path_has_parent_segment "$DATA_DIR" || fail "--data-dir cannot contain parent directory segments: $DATA_DIR"
+	require_no_symlink_components "$DATA_DIR" "--data-dir"
+}
+
+require_safe_data_dir() {
+	local data_dir
+	require_absolute_data_dir
+	data_dir="$(normalize_compare_path "$DATA_DIR")"
+	case "$data_dir" in
+		/|/bin|/boot|/dev|/etc|/home|/lib|/lib64|/media|/mnt|/opt|/proc|/root|/run|/sbin|/srv|/sys|/tmp|/usr|/usr/local|/usr/local/bin|/usr/local/share|/var)
+			fail "--data-dir points at a protected system directory and will not be chmodded: $DATA_DIR"
+			;;
+	esac
+}
+
+require_safe_env_path() {
+	[[ -n "$ENV_PATH" ]] || fail "--env cannot be empty"
+	require_no_line_breaks "$ENV_PATH" "--env"
+	! path_has_parent_segment "$ENV_PATH" || fail "--env cannot contain parent directory segments: $ENV_PATH"
+	[[ ! -d "$ENV_PATH" ]] || fail "--env must point at a file, not a directory: $ENV_PATH"
+	[[ ! -L "$ENV_PATH" ]] || fail "--env must not be a symlink: $ENV_PATH"
+	require_no_symlink_components "$ENV_PATH" "--env"
+
+	if [[ "$ENV_PATH" == /* ]]; then
+		local env_path
+		env_path="$(normalize_compare_path "$ENV_PATH")"
+		case "$env_path" in
+			/|/bin|/boot|/dev|/etc|/etc/*|/lib|/lib/*|/lib64|/lib64/*|/proc|/proc/*|/root|/root/*|/run|/run/*|/sbin|/sys|/sys/*|/usr|/usr/*|/var|/var/lib/*|/var/log/*|/var/run/*)
+				fail "--env points at a protected system path and will not be overwritten: $ENV_PATH"
+				;;
+		esac
+	fi
 }
 
 env_value() {
@@ -153,6 +249,7 @@ write_env_value() {
 	local file="$3"
 	local tmp
 
+	require_no_line_breaks "$2" "$key"
 	value="$(env_assignment_value "$2")"
 	tmp="$(mktemp -t mnemonas-env.XXXXXX)"
 	awk -v key="$key" -v value="$value" '
@@ -351,11 +448,12 @@ while [[ $# -gt 0 ]]; do
 	esac
 done
 
+require_safe_env_path
 apply_existing_env_defaults
 DATA_DIR="${DATA_DIR:-$HOME/.mnemonas}"
 HOST_PORT="${HOST_PORT:-8080}"
 require_port "$HOST_PORT"
-require_absolute_data_dir
+require_safe_data_dir
 prepare_data_dir
 prepare_env
 run_preflight

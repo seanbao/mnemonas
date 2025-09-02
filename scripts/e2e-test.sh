@@ -66,6 +66,24 @@ log_fail()  { echo -e "${RED}[FAIL]${NC} $1"; ((FAILED+=1)); }
 log_warn()  { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_skip()  { echo -e "${YELLOW}[SKIP]${NC} $1"; ((SKIPPED+=1)); }
 
+require_safe_http_url() {
+    local value="$1"
+    local label="$2"
+
+    if [[ -z "$value" ]]; then
+        echo -e "${RED}ERROR:${NC} $label must not be empty" >&2
+        exit 1
+    fi
+    if [[ "$value" == *[[:space:]]* ]]; then
+        echo -e "${RED}ERROR:${NC} $label must not contain whitespace: $value" >&2
+        exit 1
+    fi
+    if [[ ! "$value" =~ ^https?://[^[:space:]]+$ ]]; then
+        echo -e "${RED}ERROR:${NC} $label must be an http(s) URL: $value" >&2
+        exit 1
+    fi
+}
+
 require_explicit_e2e_target() {
     local missing=()
 
@@ -78,6 +96,13 @@ require_explicit_e2e_target() {
     if [[ ${#missing[@]} -gt 0 ]]; then
         echo -e "${RED}ERROR:${NC} explicit ${missing[*]} required for scripts/e2e-test.sh" >&2
         echo "Use 'make e2e' or './scripts/run-e2e-isolated.sh' for the default isolated target." >&2
+        exit 1
+    fi
+
+    require_safe_http_url "$BASE_URL" "BASE_URL"
+
+    if path_has_parent_segment "$STORAGE_ROOT"; then
+        echo -e "${RED}ERROR:${NC} STORAGE_ROOT must not contain '..' path segments: $STORAGE_ROOT" >&2
         exit 1
     fi
 
@@ -96,6 +121,19 @@ require_explicit_e2e_target() {
         echo "Use 'make e2e' or set ALLOW_REAL_STORAGE=1 only for an intentionally disposable target." >&2
         exit 1
     fi
+}
+
+path_has_parent_segment() {
+    local candidate="$1"
+    local segment
+    local -a segments
+    IFS='/' read -r -a segments <<< "$candidate"
+    for segment in "${segments[@]}"; do
+        if [[ "$segment" == ".." ]]; then
+            return 0
+        fi
+    done
+    return 1
 }
 
 read_config_value() {
@@ -254,7 +292,7 @@ curl() {
 
 cleanup() {
     log_info "Cleaning up test directory..."
-    rm -rf "$TEST_DIR"
+    rm -rf -- "$TEST_DIR"
     if [[ "$CLEANUP_REMOTE_ENABLED" != "1" ]]; then
         return
     fi

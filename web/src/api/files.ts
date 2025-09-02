@@ -1,5 +1,5 @@
 import type { FileItem } from '@/stores/files'
-import { sanitizeFilename, normalizePath, encodePathForUrl } from '@/lib/utils'
+import { sanitizeFilename, normalizePath, encodePathForUrl, getFilenameFromContentDisposition } from '@/lib/utils'
 import { authFetch, refreshAuthSession } from './auth'
 
 export type { FileItem }
@@ -958,7 +958,8 @@ export async function uploadFile(
   const encodedPath = encodePathForUrl(normalizedPath)
   const encodedFilename = encodeURIComponent(safeFilename)
   
-  const url = `${API_BASE}/files${encodedPath}/${encodedFilename}`
+  const uploadBase = encodedPath === '/' ? `${API_BASE}/files` : `${API_BASE}/files${encodedPath}`
+  const url = `${uploadBase}/${encodedFilename}`
 
   const sendUpload = (retryCount: number): Promise<ActionResult> => new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest()
@@ -1018,29 +1019,15 @@ export function getDownloadUrl(path?: string): string {
   return buildDownloadUrl(path)
 }
 
-function getFilenameFromContentDisposition(contentDisposition: string | null, fallback: string): string {
-  if (!contentDisposition) {
-    return fallback
-  }
-
-  const utf8Match = contentDisposition.match(/filename\*=UTF-8''([^;]+)/i)
-  if (utf8Match?.[1]) {
-    try {
-      return decodeURIComponent(utf8Match[1])
-    } catch {
-      return utf8Match[1]
-    }
-  }
-
-  const filenameMatch = contentDisposition.match(/filename="?([^";]+)"?/i)
-  return filenameMatch?.[1] ?? fallback
-}
-
 function triggerBrowserDownload(blob: Blob, filename: string): void {
   const url = URL.createObjectURL(blob)
   const link = document.createElement('a')
   link.href = url
-  link.download = filename
+  try {
+    link.download = sanitizeFilename(filename)
+  } catch {
+    link.download = 'download'
+  }
   document.body.appendChild(link)
   link.click()
   document.body.removeChild(link)

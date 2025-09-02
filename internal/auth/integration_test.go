@@ -871,8 +871,7 @@ func TestBoundaryConditions_Password(t *testing.T) {
 		{"8 chars (min)", "12345678", nil},
 		{"16 chars", "1234567890123456", nil},
 		{"72 chars (bcrypt max)", strings.Repeat("a", 72), nil},
-		// Note: bcrypt silently truncates passwords > 72 bytes, so 100 chars still works
-		// but only the first 72 bytes are used for hashing
+		{"73 chars (above bcrypt max)", strings.Repeat("a", 73), ErrPasswordTooLong},
 	}
 
 	for _, tc := range cases {
@@ -913,6 +912,7 @@ func TestBoundaryConditions_Username(t *testing.T) {
 		{"slash path", "team/user", true},
 		{"single char", "x", false},
 		{"long name", strings.Repeat("a", 255), false},
+		{"too long name", strings.Repeat("a", 256), true},
 	}
 
 	for _, tc := range cases {

@@ -14,6 +14,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/seanbao/mnemonas/internal/rootio"
 )
 
 var errActivityLogSymlink = errors.New("activity log path must not be a symlink")
@@ -351,9 +353,14 @@ func normalizeActivityLogPath(path string) (string, error) {
 }
 
 func ensureActivityLogDirRoot(path string, create bool) (string, error) {
+	normalizedPath, _, err := ensureActivityLogDirRootWithState(path, create)
+	return normalizedPath, err
+}
+
+func ensureActivityLogDirRootWithState(path string, create bool) (string, *os.Root, error) {
 	normalizedPath, err := normalizeActivityLogPath(path)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	dir := filepath.Dir(normalizedPath)
 
@@ -361,39 +368,39 @@ func ensureActivityLogDirRoot(path string, create bool) (string, error) {
 	root := activityLogDirRoots[dir]
 	activityLogDirRootsMu.RUnlock()
 	if root != nil {
-		return normalizedPath, nil
+		return normalizedPath, nil, nil
 	}
 
 	if err := validateActivityLogPath(normalizedPath); err != nil {
-		return "", err
+		return "", nil, err
 	}
 
 	if create {
 		if err := ensureActivityDir(dir, 0750); err != nil {
-			return "", err
+			return "", nil, err
 		}
 	} else if _, err := os.Stat(dir); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return normalizedPath, nil
+			return normalizedPath, nil, nil
 		}
-		return "", err
+		return "", nil, err
 	}
 
 	root, err = os.OpenRoot(dir)
 	if err != nil {
-		return "", err
+		return "", nil, mapActivityRootPathError(err)
 	}
 
 	activityLogDirRootsMu.Lock()
 	if existing := activityLogDirRoots[dir]; existing != nil {
 		activityLogDirRootsMu.Unlock()
 		_ = root.Close()
-		return normalizedPath, nil
+		return normalizedPath, nil, nil
 	}
 	activityLogDirRoots[dir] = root
 	activityLogDirRootsMu.Unlock()
 
-	return normalizedPath, nil
+	return normalizedPath, root, nil
 }
 
 func registeredActivityLogDirRoot(path string) (*os.Root, string, bool, error) {
@@ -414,10 +421,20 @@ func openRegisteredActivityLogFile(path string) (io.ReadCloser, error) {
 		return nil, err
 	}
 	if !ok {
-		if err := validateActivityLogPath(normalizedPath); err != nil {
+		normalizedPath, _, err = ensureActivityLogDirRootWithState(normalizedPath, false)
+		if err != nil {
 			return nil, err
 		}
-		return os.Open(normalizedPath)
+		root, normalizedPath, ok, err = registeredActivityLogDirRoot(normalizedPath)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			if err := validateActivityLogPath(normalizedPath); err != nil {
+				return nil, err
+			}
+			return nil, &os.PathError{Op: "open", Path: normalizedPath, Err: os.ErrNotExist}
+		}
 	}
 	return openActivityLogFileWithRoot(root, normalizedPath)
 }
@@ -428,7 +445,11 @@ func writeRegisteredActivityLogFileAtomically(path string, data []byte) error {
 		return err
 	}
 	if !ok {
-		return writeActivityLogFileAtomically(normalizedPath, data)
+		normalizedPath, _, err = ensureActivityLogDirRootWithState(normalizedPath, true)
+		if err != nil {
+			return err
+		}
+		return writeRegisteredActivityLogFileAtomically(normalizedPath, data)
 	}
 	return writeActivityLogFileAtomicallyWithRoot(root, normalizedPath, data)
 }
@@ -442,7 +463,10 @@ func renameRegisteredActivityLogFile(oldPath, newPath string) error {
 	if err != nil {
 		return err
 	}
-	if ok && filepath.Dir(normalizedOldPath) == filepath.Dir(normalizedNewPath) {
+	if filepath.Dir(normalizedOldPath) != filepath.Dir(normalizedNewPath) {
+		return fmt.Errorf("activity log rename requires same parent directory")
+	}
+	if ok {
 		afterValidateActivityLogPath()
 		if err := root.Rename(filepath.Base(normalizedOldPath), filepath.Base(normalizedNewPath)); err != nil {
 			return mapActivityRootPathError(err)
@@ -455,8 +479,22 @@ func renameRegisteredActivityLogFile(oldPath, newPath string) error {
 	if err := validateActivityLogPath(normalizedNewPath); err != nil {
 		return err
 	}
+	normalizedOldPath, _, err = ensureActivityLogDirRootWithState(normalizedOldPath, false)
+	if err != nil {
+		return err
+	}
+	root, normalizedOldPath, ok, err = registeredActivityLogDirRoot(normalizedOldPath)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return &os.PathError{Op: "rename", Path: normalizedOldPath, Err: os.ErrNotExist}
+	}
 	afterValidateActivityLogPath()
-	return os.Rename(normalizedOldPath, normalizedNewPath)
+	if err := root.Rename(filepath.Base(normalizedOldPath), filepath.Base(normalizedNewPath)); err != nil {
+		return mapActivityRootPathError(err)
+	}
+	return nil
 }
 
 func syncRegisteredActivityLogDir(path string) error {
@@ -473,7 +511,7 @@ func syncRegisteredActivityLogDir(path string) error {
 func openActivityLogFileWithRoot(root *os.Root, path string) (*os.File, error) {
 	afterValidateActivityLogPath()
 
-	file, err := root.OpenFile(filepath.Base(path), os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	file, err := rootio.OpenFileNoFollow(root, filepath.Base(path), os.O_RDONLY, 0)
 	if err != nil {
 		return nil, mapActivityRootPathError(err)
 	}
@@ -537,7 +575,7 @@ func createActivityTempFile(root *os.Root, pattern string) (*os.File, string, er
 		if err != nil {
 			return nil, "", err
 		}
-		tmpFile, err := root.OpenFile(tmpName, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0640)
+		tmpFile, err := rootio.OpenFileNoFollow(root, tmpName, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0640)
 		if err == nil {
 			return tmpFile, tmpName, nil
 		}
@@ -575,55 +613,10 @@ func mapActivityRootPathError(err error) error {
 	if err == nil {
 		return nil
 	}
-	if errors.Is(err, os.ErrPermission) || errors.Is(err, syscall.ELOOP) || isActivityRootEscapeError(err) {
+	if errors.Is(err, os.ErrPermission) || errors.Is(err, syscall.ELOOP) || rootio.IsSymlinkError(err) || isActivityRootEscapeError(err) {
 		return errActivityLogSymlink
 	}
 	return err
-}
-
-func writeActivityLogFileAtomically(path string, data []byte) error {
-	if err := validateActivityLogPath(path); err != nil {
-		return err
-	}
-	afterValidateActivityLogPath()
-
-	dir := filepath.Dir(path)
-	f, err := os.CreateTemp(dir, ".activity-*.tmp")
-	if err != nil {
-		return err
-	}
-	tmpPath := f.Name()
-	cleanup := true
-	defer func() {
-		if cleanup {
-			_ = os.Remove(tmpPath)
-		}
-	}()
-
-	if err := f.Chmod(0640); err != nil {
-		_ = f.Close()
-		return err
-	}
-	if _, err := f.Write(data); err != nil {
-		_ = f.Close()
-		return err
-	}
-	if err := f.Sync(); err != nil {
-		_ = f.Close()
-		return err
-	}
-	if err := f.Close(); err != nil {
-		return err
-	}
-
-	if err := os.Rename(tmpPath, path); err != nil {
-		return err
-	}
-	cleanup = false
-	if err := syncActivityLogDir(dir); err != nil {
-		return fmt.Errorf("failed to sync activity log directory: %w", err)
-	}
-	return nil
 }
 
 func writeActivityLogFile(path string, data []byte) error {
@@ -632,27 +625,6 @@ func writeActivityLogFile(path string, data []byte) error {
 		return err
 	}
 	return writeRegisteredActivityLogFileAtomically(normalizedPath, data)
-}
-
-func collectMissingActivityDirs(dir string) ([]string, error) {
-	missing := make([]string, 0)
-	current := filepath.Clean(dir)
-	for {
-		if _, err := os.Stat(current); err == nil {
-			break
-		} else if !errors.Is(err, os.ErrNotExist) {
-			return nil, err
-		}
-
-		missing = append(missing, current)
-		parent := filepath.Dir(current)
-		if parent == current {
-			break
-		}
-		current = parent
-	}
-
-	return missing, nil
 }
 
 func syncCreatedActivityDirs(createdDirs []string) error {
@@ -665,18 +637,18 @@ func syncCreatedActivityDirs(createdDirs []string) error {
 }
 
 func ensureActivityDir(dir string, perm os.FileMode) error {
-	createdDirs, err := collectMissingActivityDirs(dir)
+	createdDirs, err := rootio.MkdirAllPathNoFollowTracked(dir, perm)
 	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(dir, perm); err != nil {
+		if rootio.IsSymlinkError(err) {
+			return errActivityLogSymlink
+		}
 		return err
 	}
 	return syncCreatedActivityDirs(createdDirs)
 }
 
 func syncActivityDir(dir string) error {
-	dirHandle, err := os.Open(dir)
+	dirHandle, err := rootio.OpenDirPathNoFollow(dir)
 	if err != nil {
 		return err
 	}

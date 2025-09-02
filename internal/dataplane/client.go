@@ -15,6 +15,8 @@ import (
 	pb "github.com/seanbao/mnemonas/proto"
 )
 
+const maxGRPCMessageSize = 128 * 1024 * 1024
+
 // Client wraps gRPC connection to data plane service
 type Client struct {
 	conn   *grpc.ClientConn
@@ -54,13 +56,13 @@ func (c *Client) Connect(ctx context.Context) error {
 		}
 	}
 
-	// V3-4 fix: Set max message size limits
-	const maxMsgSize = 100 * 1024 * 1024 // 100MB
+	// Keep this above the 100 MiB default whole-object version limit so
+	// protobuf framing does not reject a payload exactly at that boundary.
 	conn, err := grpc.NewClient(c.addr,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithDefaultCallOptions(
-			grpc.MaxCallRecvMsgSize(maxMsgSize),
-			grpc.MaxCallSendMsgSize(maxMsgSize),
+			grpc.MaxCallRecvMsgSize(maxGRPCMessageSize),
+			grpc.MaxCallSendMsgSize(maxGRPCMessageSize),
 		),
 	)
 	if err != nil {
@@ -264,20 +266,21 @@ func (c *Client) PutFile(ctx context.Context, path string, r io.Reader) (*FileIn
 	// Stream file data in chunks
 	buf := make([]byte, 64*1024) // 64KB buffer
 	for {
-		n, err := r.Read(buf)
-		if err == io.EOF {
+		n, readErr := r.Read(buf)
+		if n > 0 {
+			if err := stream.Send(&pb.PutFileRequest{
+				Payload: &pb.PutFileRequest_Chunk{
+					Chunk: buf[:n],
+				},
+			}); err != nil {
+				return nil, err
+			}
+		}
+		if readErr == io.EOF {
 			break
 		}
-		if err != nil {
-			return nil, err
-		}
-
-		if err := stream.Send(&pb.PutFileRequest{
-			Payload: &pb.PutFileRequest_Chunk{
-				Chunk: buf[:n],
-			},
-		}); err != nil {
-			return nil, err
+		if readErr != nil {
+			return nil, readErr
 		}
 	}
 

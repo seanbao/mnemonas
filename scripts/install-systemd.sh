@@ -43,18 +43,159 @@ require_command() {
   command -v "$1" >/dev/null 2>&1 || fail "missing required command: $1"
 }
 
+normalize_absolute_path() {
+  local value="$1"
+  while [[ "$value" != "/" && "$value" == */ ]]; do
+    value="${value%/}"
+  done
+  printf '%s\n' "$value"
+}
+
+path_has_parent_segment() {
+  local value="$1"
+  local trimmed="${value#/}"
+  trimmed="${trimmed%/}"
+
+  local -a segments
+  IFS='/' read -r -a segments <<< "$trimmed"
+
+  local segment
+  for segment in "${segments[@]}"; do
+    [[ "$segment" == ".." ]] && return 0
+  done
+  return 1
+}
+
+require_no_symlink_components() {
+  local value="$1"
+  local label="$2"
+  local trimmed="${value#/}"
+  trimmed="${trimmed%/}"
+  local current="/"
+  local -a segments
+
+  IFS='/' read -r -a segments <<< "$trimmed"
+  for segment in "${segments[@]}"; do
+    [[ -n "$segment" && "$segment" != "." ]] || continue
+    if [[ "$current" == "/" ]]; then
+      current="/$segment"
+    else
+      current="$current/$segment"
+    fi
+    [[ ! -L "$current" ]] || fail "$label must not contain symlink path components: $current"
+    [[ -e "$current" ]] || break
+  done
+}
+
+is_protected_system_directory() {
+  local value
+  value="$(normalize_absolute_path "$1")"
+  case "$value" in
+    /bin|/boot|/dev|/etc|/home|/lib|/lib64|/media|/mnt|/opt|/proc|/root|/run|/sbin|/srv|/sys|/tmp|/usr|/usr/local|/usr/local/bin|/usr/local/share|/var)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
 require_absolute_path() {
   local value="$1"
   local label="$2"
   [[ "$value" == /* ]] || fail "$label must be an absolute path for systemd deployment: $value"
   [[ "$value" != *[[:space:]]* ]] || fail "$label cannot contain whitespace for systemd deployment: $value"
+  ! path_has_parent_segment "$value" || fail "$label cannot contain parent directory segments: $value"
 }
 
 require_safe_directory_path() {
   local value="$1"
   local label="$2"
   require_absolute_path "$value" "$label"
-  [[ "$value" != "/" ]] || fail "$label cannot be /"
+  [[ "$(normalize_absolute_path "$value")" != "/" ]] || fail "$label cannot be /"
+  require_no_symlink_components "$value" "$label"
+}
+
+require_mutable_tree_path() {
+  local value="$1"
+  local label="$2"
+  require_safe_directory_path "$value" "$label"
+  ! is_protected_system_directory "$value" || fail "$label points at a protected system directory and will not be modified: $value"
+}
+
+require_removable_tree_path() {
+  local value="$1"
+  local label="$2"
+  require_safe_directory_path "$value" "$label"
+  ! is_protected_system_directory "$value" || fail "$label points at a protected system directory and will not be removed: $value"
+}
+
+path_matches_or_contains() {
+  local parent child
+  parent="$(normalize_absolute_path "$1")"
+  child="$(normalize_absolute_path "$2")"
+  [[ "$parent" == "$child" ]] && return 0
+  [[ "$parent" != "/" && "$child" == "$parent"/* ]]
+}
+
+paths_overlap() {
+  local left="$1"
+  local right="$2"
+  path_matches_or_contains "$left" "$right" || path_matches_or_contains "$right" "$left"
+}
+
+require_no_path_overlap() {
+  local path="$1"
+  local label="$2"
+  local other_label="$3"
+  local other_path="${!other_label}"
+
+  if paths_overlap "$path" "$other_path"; then
+    fail "$label must not overlap $other_label: $other_path"
+  fi
+}
+
+require_core_path_layout() {
+  require_no_path_overlap "$BIN_DIR" "BIN_DIR" "CONFIG_DIR"
+  require_no_path_overlap "$BIN_DIR" "BIN_DIR" "SYSTEMD_DIR"
+  require_no_path_overlap "$BIN_DIR" "BIN_DIR" "STORAGE_ROOT"
+  require_no_path_overlap "$CONFIG_DIR" "CONFIG_DIR" "SYSTEMD_DIR"
+  require_no_path_overlap "$CONFIG_DIR" "CONFIG_DIR" "STORAGE_ROOT"
+  require_no_path_overlap "$SYSTEMD_DIR" "SYSTEMD_DIR" "STORAGE_ROOT"
+}
+
+require_safe_share_dir() {
+  require_mutable_tree_path "$SHARE_DIR" "SHARE_DIR"
+
+  local label protected_path
+  for label in BIN_DIR CONFIG_DIR SYSTEMD_DIR STORAGE_ROOT; do
+    protected_path="${!label}"
+    if paths_overlap "$SHARE_DIR" "$protected_path"; then
+      fail "SHARE_DIR must not overlap $label: $protected_path"
+    fi
+  done
+}
+
+require_safe_web_dir() {
+  require_removable_tree_path "$WEB_DIR" "WEB_DIR"
+
+  local label protected_path
+  for label in BIN_DIR CONFIG_DIR SYSTEMD_DIR STORAGE_ROOT; do
+    protected_path="${!label}"
+    if paths_overlap "$WEB_DIR" "$protected_path"; then
+      fail "WEB_DIR must not overlap $label: $protected_path"
+    fi
+  done
+}
+
+require_config_path_under_config_dir() {
+  local config_dir config_path
+  config_dir="$(normalize_absolute_path "$CONFIG_DIR")"
+  config_path="$(normalize_absolute_path "$CONFIG_PATH")"
+
+  if [[ "$config_path" == "$config_dir" || "$config_path" != "$config_dir"/* ]]; then
+    fail "CONFIG_PATH must be inside CONFIG_DIR: $CONFIG_PATH"
+  fi
 }
 
 require_no_whitespace() {
@@ -62,6 +203,23 @@ require_no_whitespace() {
   local label="$2"
   [[ -n "$value" ]] || fail "$label cannot be empty"
   [[ "$value" != *[[:space:]]* ]] || fail "$label cannot contain whitespace: $value"
+}
+
+require_systemd_literal() {
+  local value="$1"
+  local label="$2"
+  [[ "$value" != *$'\n'* && "$value" != *$'\r'* ]] || fail "$label cannot contain newline characters: $value"
+  [[ "$value" != *%* ]] || fail "$label cannot contain systemd specifiers (%): $value"
+  [[ "$value" != *\"* && "$value" != *\\* ]] || fail "$label cannot contain quote or backslash characters for systemd deployment: $value"
+}
+
+require_safe_account_name() {
+  local value="$1"
+  local label="$2"
+  require_no_whitespace "$value" "$label"
+  require_systemd_literal "$value" "$label"
+  [[ "$value" != "root" ]] || fail "$label must not be root"
+  [[ "$value" =~ ^[A-Za-z_][A-Za-z0-9_-]{0,63}\$?$ ]] || fail "$label must be a plain system account name: $value"
 }
 
 endpoint_host() {
@@ -105,8 +263,87 @@ require_tcp_port() {
   (( value >= 1 && value <= 65535 )) || fail "$label must be between 1 and 65535: $value"
 }
 
+is_valid_tcp_host() {
+  local host="$1"
+  local label
+  local -a labels
+
+  host="${host%.}"
+  [[ -n "$host" ]] || return 1
+  [[ "$host" != *"["* && "$host" != *"]"* ]] || return 1
+
+  if [[ "$host" == *:* ]]; then
+    [[ "$host" =~ ^[0-9A-Fa-f:.]+$ ]]
+    return
+  fi
+
+  [[ "${#host}" -le 253 ]] || return 1
+  IFS='.' read -r -a labels <<< "$host"
+  for label in "${labels[@]}"; do
+    [[ -n "$label" && "${#label}" -le 63 ]] || return 1
+    [[ "$label" != -* && "$label" != *- ]] || return 1
+    [[ "$label" =~ ^[A-Za-z0-9-]+$ ]] || return 1
+  done
+  return 0
+}
+
+normalize_listen_host() {
+  local host="$1"
+  if [[ "$host" == "*" ]]; then
+    printf '\n'
+    return 0
+  fi
+  if [[ "$host" =~ ^\[([^][]+)\]$ ]]; then
+    printf '%s\n' "${BASH_REMATCH[1]}"
+    return 0
+  fi
+  printf '%s\n' "$host"
+}
+
+require_safe_listen_host() {
+  local value="$1"
+  local label="$2"
+  local host
+
+  [[ "$value" != *[[:space:]]* ]] || fail "$label cannot contain whitespace: $value"
+  host="$(normalize_listen_host "$value")"
+  if [[ -n "$host" && ( "$host" == *"["* || "$host" == *"]"* ) ]]; then
+    fail "$label must not include brackets unless it is a bracketed IPv6 literal: $value"
+  fi
+  [[ -z "$host" ]] || is_valid_tcp_host "$host" || fail "$label must be empty, *, a hostname, IPv4, or IPv6 literal without a port: $value"
+}
+
+require_safe_tcp_addr() {
+  local value="$1"
+  local label="$2"
+  local host=""
+  local port=""
+
+  require_no_whitespace "$value" "$label"
+
+  if [[ "$value" =~ ^\[([^][]+)\]:([0-9]+)$ ]]; then
+    host="${BASH_REMATCH[1]}"
+    port="${BASH_REMATCH[2]}"
+  elif [[ "$value" =~ ^([^:]+):([0-9]+)$ ]]; then
+    host="${BASH_REMATCH[1]}"
+    port="${BASH_REMATCH[2]}"
+  else
+    fail "$label must be a host:port address: $value"
+  fi
+
+  is_valid_tcp_host "$host" || fail "$label host is invalid: $value"
+  (( 10#$port >= 1 && 10#$port <= 65535 )) || fail "$label port must be between 1 and 65535: $value"
+}
+
 sed_replacement_escape() {
   printf '%s' "$1" | sed -e 's/[&|\\]/\\&/g'
+}
+
+toml_basic_string_escape() {
+  local value="$1"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  printf '%s' "$value"
 }
 
 first_existing_file() {
@@ -286,9 +523,9 @@ render_config() {
 
   log "creating config: $CONFIG_PATH"
   local server_host_escaped storage_root_escaped dataplane_grpc_addr_escaped
-  server_host_escaped="$(sed_replacement_escape "$SERVER_HOST")"
-  storage_root_escaped="$(sed_replacement_escape "$STORAGE_ROOT")"
-  dataplane_grpc_addr_escaped="$(sed_replacement_escape "$DATAPLANE_GRPC_ADDR")"
+  server_host_escaped="$(sed_replacement_escape "$(toml_basic_string_escape "$SERVER_HOST")")"
+  storage_root_escaped="$(sed_replacement_escape "$(toml_basic_string_escape "$STORAGE_ROOT")")"
+  dataplane_grpc_addr_escaped="$(sed_replacement_escape "$(toml_basic_string_escape "$DATAPLANE_GRPC_ADDR")")"
   sed \
     -e "s|^host = \".*\"|host = \"$server_host_escaped\"|" \
     -e "s|^port = .*|port = $SERVER_PORT|" \
@@ -393,13 +630,17 @@ detect_primary_ipv4() {
 }
 
 web_ui_url() {
-  local host="$SERVER_HOST"
+  local host
+  host="$(normalize_listen_host "$SERVER_HOST")"
   case "$host" in
-    0.0.0.0|::|\[::\])
+    ""|0.0.0.0|::)
       host="$(detect_primary_ipv4)"
       [[ -n "$host" ]] || host="<ubuntu-laptop-ip>"
       ;;
   esac
+  if [[ "$host" == *:* && "$host" != \[*\] ]]; then
+    host="[$host]"
+  fi
 
   printf 'http://%s:%s\n' "$host" "$SERVER_PORT"
 }
@@ -423,15 +664,28 @@ main() {
 
   apply_existing_config_defaults
   require_safe_directory_path "$BIN_DIR" "BIN_DIR"
-  require_safe_directory_path "$WEB_DIR" "WEB_DIR"
-  require_safe_directory_path "$CONFIG_DIR" "CONFIG_DIR"
-  require_absolute_path "$CONFIG_PATH" "CONFIG_PATH"
+		  require_mutable_tree_path "$CONFIG_DIR" "CONFIG_DIR"
+		  require_absolute_path "$CONFIG_PATH" "CONFIG_PATH"
+		  require_no_symlink_components "$CONFIG_PATH" "CONFIG_PATH"
+		  require_config_path_under_config_dir
   require_safe_directory_path "$SYSTEMD_DIR" "SYSTEMD_DIR"
-  require_safe_directory_path "$STORAGE_ROOT" "STORAGE_ROOT"
-  require_no_whitespace "$SERVER_HOST" "SERVER_HOST"
+  require_mutable_tree_path "$STORAGE_ROOT" "STORAGE_ROOT"
+  require_core_path_layout
+  require_safe_share_dir
+  require_safe_web_dir
+  require_safe_account_name "$SERVICE_USER" "SERVICE_USER"
+  require_safe_account_name "$SERVICE_GROUP" "SERVICE_GROUP"
+  require_systemd_literal "$BIN_DIR" "BIN_DIR"
+  require_systemd_literal "$CONFIG_DIR" "CONFIG_DIR"
+  require_systemd_literal "$CONFIG_PATH" "CONFIG_PATH"
+  require_systemd_literal "$STORAGE_ROOT" "STORAGE_ROOT"
+  require_systemd_literal "$WEB_DIR" "WEB_DIR"
+  require_systemd_literal "$DATAPLANE_GRPC_ADDR" "DATAPLANE_GRPC_ADDR"
+  require_systemd_literal "$DATAPLANE_HTTP_ADDR" "DATAPLANE_HTTP_ADDR"
+  require_safe_listen_host "$SERVER_HOST" "SERVER_HOST"
   require_tcp_port "$SERVER_PORT" "SERVER_PORT"
-  require_no_whitespace "$DATAPLANE_GRPC_ADDR" "DATAPLANE_GRPC_ADDR"
-  require_no_whitespace "$DATAPLANE_HTTP_ADDR" "DATAPLANE_HTTP_ADDR"
+  require_safe_tcp_addr "$DATAPLANE_GRPC_ADDR" "DATAPLANE_GRPC_ADDR"
+  require_safe_tcp_addr "$DATAPLANE_HTTP_ADDR" "DATAPLANE_HTTP_ADDR"
   warn_if_non_loopback_endpoint "$DATAPLANE_GRPC_ADDR" "DATAPLANE_GRPC_ADDR"
   warn_if_non_loopback_endpoint "$DATAPLANE_HTTP_ADDR" "DATAPLANE_HTTP_ADDR"
   create_service_user
@@ -451,7 +705,7 @@ main() {
   fi
 
   log "installing Web UI assets"
-  rm -rf "$WEB_DIR"
+  rm -rf -- "$WEB_DIR"
   mkdir -p "$WEB_DIR"
   cp -a "$web_src"/. "$WEB_DIR"/
   chmod -R a+rX "$SHARE_DIR"

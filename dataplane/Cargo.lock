@@ -290,6 +290,7 @@ dependencies = [
  "clap",
  "dashmap",
  "fastcdc",
+ "libc",
  "parking_lot",
  "prost",
  "serde",

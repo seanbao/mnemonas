@@ -44,6 +44,12 @@ type partialFailingReadCloser struct {
 	reader io.Reader
 }
 
+type dataAndErrorReader struct {
+	data []byte
+	err  error
+	done bool
+}
+
 type failFirstWriteResponseWriter struct {
 	header   http.Header
 	status   int
@@ -61,6 +67,33 @@ type failPartialWriteResponseWriter struct {
 	limit    int
 }
 
+func TestNormalizeSharePathsRejectNUL(t *testing.T) {
+	tests := []struct {
+		name      string
+		normalize func(string) (string, error)
+		input     string
+	}{
+		{
+			name:      "absolute path",
+			normalize: normalizeShareAbsolutePath,
+			input:     "/docs\x00secret.txt",
+		},
+		{
+			name:      "relative path",
+			normalize: normalizeShareRelativePath,
+			input:     "docs\x00secret.txt",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got, err := tt.normalize(tt.input); err == nil {
+				t.Fatalf("normalize(%q) = %q, want error", tt.input, got)
+			}
+		})
+	}
+}
+
 func (f *failingReadCloser) Read(p []byte) (int, error) {
 	return 0, f.err
 }
@@ -75,6 +108,47 @@ func (p *partialFailingReadCloser) Read(buf []byte) (int, error) {
 
 func (p *partialFailingReadCloser) Close() error {
 	return nil
+}
+
+func (r *dataAndErrorReader) Read(buf []byte) (int, error) {
+	if r.done {
+		return 0, io.EOF
+	}
+	r.done = true
+	return copy(buf, r.data), r.err
+}
+
+func TestPrefetchDownloadChunkPreservesEOFWithData(t *testing.T) {
+	chunk, exhausted, err := prefetchDownloadChunk(&dataAndErrorReader{
+		data: []byte("complete"),
+		err:  io.EOF,
+	})
+	if err != nil {
+		t.Fatalf("prefetchDownloadChunk() error: %v", err)
+	}
+	if !exhausted {
+		t.Fatal("prefetchDownloadChunk() exhausted = false, want true")
+	}
+	if string(chunk) != "complete" {
+		t.Fatalf("prefetchDownloadChunk() chunk = %q, want complete", string(chunk))
+	}
+}
+
+func TestPrefetchDownloadChunkReturnsPartialReadErrorBeforeStreaming(t *testing.T) {
+	readErr := errors.New("partial read failed")
+	chunk, exhausted, err := prefetchDownloadChunk(&dataAndErrorReader{
+		data: []byte("partial"),
+		err:  readErr,
+	})
+	if !errors.Is(err, readErr) {
+		t.Fatalf("prefetchDownloadChunk() error = %v, want %v", err, readErr)
+	}
+	if chunk != nil {
+		t.Fatalf("prefetchDownloadChunk() chunk = %q, want nil", string(chunk))
+	}
+	if exhausted {
+		t.Fatal("prefetchDownloadChunk() exhausted = true, want false")
+	}
 }
 
 func (w *failFirstWriteResponseWriter) Header() http.Header {
@@ -207,6 +281,47 @@ func decodeResponseBody(t *testing.T, recorder *httptest.ResponseRecorder) map[s
 		t.Fatalf("failed to decode response: %v", err)
 	}
 	return payload
+}
+
+func assertShareAccessCookiePaths(t *testing.T, cookies []*http.Cookie, id string) {
+	t.Helper()
+	expectedPaths := map[string]bool{
+		"/s/" + id:                    false,
+		"/api/v1/public/shares/" + id: false,
+	}
+	if len(cookies) != len(expectedPaths) {
+		t.Fatalf("expected %d share access cookies, got %d", len(expectedPaths), len(cookies))
+	}
+	for _, cookie := range cookies {
+		if cookie.Name != shareAccessCookieName(id) {
+			t.Fatalf("unexpected cookie name %q", cookie.Name)
+		}
+		if _, ok := expectedPaths[cookie.Path]; !ok {
+			t.Fatalf("unexpected share access cookie path %q", cookie.Path)
+		}
+		expectedPaths[cookie.Path] = true
+	}
+	for cookiePath, found := range expectedPaths {
+		if !found {
+			t.Fatalf("missing share access cookie path %q", cookiePath)
+		}
+	}
+}
+
+func assertUntrustedDownloadHeaders(t *testing.T, header http.Header) {
+	t.Helper()
+	if cacheControl := header.Get("Cache-Control"); cacheControl != "private, no-cache" {
+		t.Fatalf("download Cache-Control = %q, want private, no-cache", cacheControl)
+	}
+	if got := header.Get("X-Content-Type-Options"); got != "nosniff" {
+		t.Fatalf("download X-Content-Type-Options = %q, want nosniff", got)
+	}
+	if got := header.Get("Referrer-Policy"); got != "no-referrer" {
+		t.Fatalf("download Referrer-Policy = %q, want no-referrer", got)
+	}
+	if got := header.Get("Content-Security-Policy"); !strings.Contains(got, "sandbox") || !strings.Contains(got, "default-src 'none'") {
+		t.Fatalf("download Content-Security-Policy = %q, want sandboxed default-src none", got)
+	}
 }
 
 func decodeResponseBytes(t *testing.T, body []byte) map[string]any {
@@ -400,6 +515,12 @@ func TestHashPassword_GeneratesVerifiableHash(t *testing.T) {
 	}
 }
 
+func TestHashPassword_RejectsPasswordAboveBcryptLimit(t *testing.T) {
+	if _, err := hashPassword(strings.Repeat("a", maxSharePasswordBytes+1)); !errors.Is(err, errSharePasswordLong) {
+		t.Fatalf("hashPassword() error = %v, want %v", err, errSharePasswordLong)
+	}
+}
+
 func TestCreateShare_UsesBaseURL(t *testing.T) {
 	tempDir := t.TempDir()
 	storePath := filepath.Join(tempDir, "shares.json")
@@ -552,6 +673,48 @@ func TestCreateShare_InvalidNegativeExpiresInReturnsBadRequest(t *testing.T) {
 	}
 	if errorPayload["code"] != "INVALID_EXPIRES_IN" {
 		t.Fatalf("expected INVALID_EXPIRES_IN code, got %v", errorPayload["code"])
+	}
+}
+
+func TestCreateShare_RejectsPasswordAboveBcryptLimit(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	handler := NewHandler(store, &fakeShareFS{
+		statInfo: &storage.FileInfo{Path: "/docs/report.pdf", Name: "report.pdf", Size: 256},
+	})
+	body, err := json.Marshal(CreateShareRequest{
+		Path:     "/docs/report.pdf",
+		Type:     "file",
+		Password: strings.Repeat("a", maxSharePasswordBytes+1),
+	})
+	if err != nil {
+		t.Fatalf("failed to marshal request: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/shares", bytes.NewReader(body))
+	req = req.WithContext(auth.WithClaimsContext(req.Context(), &auth.TokenClaims{UserID: "user1"}))
+	recorder := httptest.NewRecorder()
+
+	handler.CreateShare(recorder, req)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected status 400, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+	payload := decodeResponseBody(t, recorder)
+	errorPayload, ok := payload["error"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected error payload, got %v", payload)
+	}
+	if errorPayload["code"] != "PASSWORD_TOO_LONG" {
+		t.Fatalf("expected PASSWORD_TOO_LONG code, got %v", errorPayload["code"])
+	}
+	if len(store.ListAll()) != 0 {
+		t.Fatal("expected overlong password create to leave no persisted share")
 	}
 }
 
@@ -1166,6 +1329,59 @@ func TestUpdateShare_InvalidExpiresInReturnsBadRequest(t *testing.T) {
 	}
 	if payload.Error.Message != "invalid expires_in format" {
 		t.Fatalf("unexpected error message: %q", payload.Error.Message)
+	}
+}
+
+func TestUpdateShare_RejectsPasswordAboveBcryptLimit(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	share, err := store.Create(CreateShareOptions{
+		Path:      "/docs/report.pdf",
+		Type:      ShareTypeFile,
+		CreatedBy: "user1",
+		Password:  "secret",
+	})
+	if err != nil {
+		t.Fatalf("failed to create share: %v", err)
+	}
+	originalHash := share.PasswordHash
+
+	handler := NewHandler(store, &fakeShareFS{})
+	overlongPassword := strings.Repeat("a", maxSharePasswordBytes+1)
+	body, err := json.Marshal(UpdateShareRequest{Password: &overlongPassword})
+	if err != nil {
+		t.Fatalf("failed to marshal request: %v", err)
+	}
+	req := newRouteRequest(http.MethodPut, "/api/v1/shares/"+share.ID, share.ID, body)
+	req = req.WithContext(auth.WithClaimsContext(req.Context(), &auth.TokenClaims{UserID: "user1"}))
+	recorder := httptest.NewRecorder()
+
+	handler.UpdateShare(recorder, req)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected status 400, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+	payload := decodeResponseBody(t, recorder)
+	errorPayload, ok := payload["error"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected error payload, got %v", payload)
+	}
+	if errorPayload["code"] != "PASSWORD_TOO_LONG" {
+		t.Fatalf("expected PASSWORD_TOO_LONG code, got %v", errorPayload["code"])
+	}
+
+	fresh, err := store.Get(share.ID)
+	if err != nil {
+		t.Fatalf("failed to reload share: %v", err)
+	}
+	if fresh.PasswordHash != originalHash {
+		t.Fatal("expected rejected password update to preserve the existing hash")
 	}
 }
 
@@ -1994,9 +2210,7 @@ func TestAccessShareWithPassword_FolderInfo(t *testing.T) {
 	if payload["folder_items"] != float64(2) {
 		t.Fatalf("expected folder_items 2, got %v", payload["folder_items"])
 	}
-	if len(recorder.Result().Cookies()) != 1 {
-		t.Fatalf("expected access cookie to be set")
-	}
+	assertShareAccessCookiePaths(t, recorder.Result().Cookies(), share.ID)
 }
 
 func TestAccessShareWithPassword_RejectsUnknownFields(t *testing.T) {
@@ -2150,14 +2364,11 @@ func TestAccessShareWithPassword_IgnoresSpoofedForwardedProtoForCookie(t *testin
 		t.Fatalf("expected status 200, got %d", recorder.Code)
 	}
 	cookies := recorder.Result().Cookies()
-	if len(cookies) != 1 {
-		t.Fatalf("expected one cookie, got %d", len(cookies))
-	}
-	if cookies[0].Secure {
-		t.Fatal("expected spoofed forwarded proto to leave share cookie insecure")
-	}
-	if cookies[0].Path != "/" {
-		t.Fatalf("expected share access cookie path to cover public API aliases, got %q", cookies[0].Path)
+	assertShareAccessCookiePaths(t, cookies, share.ID)
+	for _, cookie := range cookies {
+		if cookie.Secure {
+			t.Fatal("expected spoofed forwarded proto to leave share cookie insecure")
+		}
 	}
 }
 
@@ -2197,11 +2408,11 @@ func TestAccessShareWithPassword_IgnoresForwardedProtoWhenTrustedProxyHopsDisabl
 		t.Fatalf("expected status 200, got %d", recorder.Code)
 	}
 	cookies := recorder.Result().Cookies()
-	if len(cookies) != 1 {
-		t.Fatalf("expected one cookie, got %d", len(cookies))
-	}
-	if cookies[0].Secure {
-		t.Fatal("expected trusted proxy hops disabled to leave share cookie insecure")
+	assertShareAccessCookiePaths(t, cookies, share.ID)
+	for _, cookie := range cookies {
+		if cookie.Secure {
+			t.Fatal("expected trusted proxy hops disabled to leave share cookie insecure")
+		}
 	}
 }
 
@@ -2237,12 +2448,7 @@ func TestAccessShareWithPassword_SetsCookiePathForPublicAPIAlias(t *testing.T) {
 		t.Fatalf("expected status 200, got %d", recorder.Code)
 	}
 	cookies := recorder.Result().Cookies()
-	if len(cookies) != 1 {
-		t.Fatalf("expected one cookie, got %d", len(cookies))
-	}
-	if cookies[0].Path != "/" {
-		t.Fatalf("expected public share cookie path to include API alias routes, got %q", cookies[0].Path)
-	}
+	assertShareAccessCookiePaths(t, cookies, share.ID)
 }
 
 func TestAccessShareWithPassword_DoesNotIncrementAccessCount(t *testing.T) {
@@ -2677,6 +2883,46 @@ func TestAccessShare_WithValidCookieExposesInfo(t *testing.T) {
 	payload := decodeResponseBody(t, recorder)
 	if payload["file_name"] != "secret.pdf" {
 		t.Fatalf("expected file_name secret.pdf, got %v", payload["file_name"])
+	}
+}
+
+func TestAccessShare_ValidCookieWorksWhenStaleCookiePrecedesIt(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	share, err := store.Create(CreateShareOptions{
+		Path:      "/docs/secret.pdf",
+		Type:      ShareTypeFile,
+		CreatedBy: "user1",
+		Password:  "secret",
+	})
+	if err != nil {
+		t.Fatalf("failed to create share: %v", err)
+	}
+
+	handler := NewHandler(store, &fakeShareFS{
+		statInfo: &storage.FileInfo{Path: share.Path, Name: "secret.pdf", Size: 42, IsDir: false},
+	})
+
+	req := newRouteRequest(http.MethodGet, "/s/"+share.ID, share.ID, nil)
+	cookieName := shareAccessCookieName(share.ID)
+	req.Header.Set("Cookie", cookieName+"=stale; "+cookieName+"="+handler.shareAccessToken(share))
+	recorder := httptest.NewRecorder()
+
+	handler.AccessShare(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", recorder.Code)
+	}
+
+	payload := decodeResponseBody(t, recorder)
+	if payload["file_name"] != "secret.pdf" {
+		t.Fatalf("expected stale cookie not to shadow valid share access, got payload %v", payload)
 	}
 }
 
@@ -3149,6 +3395,7 @@ func TestDownloadShare_UsesExtensionContentType(t *testing.T) {
 	if contentType := recorder.Header().Get("Content-Type"); contentType != "image/png" {
 		t.Fatalf("share download Content-Type = %q, want %q", contentType, "image/png")
 	}
+	assertUntrustedDownloadHeaders(t, recorder.Header())
 }
 
 func TestDownloadShare_ReturnsInternalErrorWhenStreamingFailsBeforeWrite(t *testing.T) {
@@ -3746,6 +3993,7 @@ func TestDownloadShareFile_UsesExtensionContentType(t *testing.T) {
 	if contentType := recorder.Header().Get("Content-Type"); contentType != "application/pdf" {
 		t.Fatalf("share file download Content-Type = %q, want %q", contentType, "application/pdf")
 	}
+	assertUntrustedDownloadHeaders(t, recorder.Header())
 }
 
 func TestDownloadShareFile_ReturnsInternalErrorWhenStreamingFailsBeforeWrite(t *testing.T) {

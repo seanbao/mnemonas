@@ -14,6 +14,7 @@ import (
 	"image/gif"
 	"image/png"
 	"io"
+	"mime"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -877,6 +878,84 @@ type errReader struct{}
 
 func (errReader) Read([]byte) (int, error) {
 	return 0, errors.New("stream failed")
+}
+
+type eofWithDataReadCloser struct {
+	data []byte
+	done bool
+}
+
+func (r *eofWithDataReadCloser) Read(p []byte) (int, error) {
+	if r.done {
+		return 0, io.EOF
+	}
+	r.done = true
+	return copy(p, r.data), io.EOF
+}
+
+func (r *eofWithDataReadCloser) Close() error {
+	return nil
+}
+
+type errorWithDataReadCloser struct {
+	data []byte
+	err  error
+	done bool
+}
+
+func (r *errorWithDataReadCloser) Read(p []byte) (int, error) {
+	if r.done {
+		return 0, io.EOF
+	}
+	r.done = true
+	return copy(p, r.data), r.err
+}
+
+func (r *errorWithDataReadCloser) Close() error {
+	return nil
+}
+
+func TestRequestHasBody_PreservesProbeByteWhenReadReturnsEOFWithData(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/maintenance/scrub", nil)
+	req.Body = &eofWithDataReadCloser{data: []byte(`{`)}
+	req.ContentLength = -1
+
+	hasBody, err := requestHasBody(req)
+	if err != nil {
+		t.Fatalf("requestHasBody() error: %v", err)
+	}
+	if !hasBody {
+		t.Fatal("requestHasBody() = false, want true")
+	}
+	body, err := io.ReadAll(req.Body)
+	if err != nil {
+		t.Fatalf("ReadAll(probed body) error: %v", err)
+	}
+	if string(body) != `{` {
+		t.Fatalf("probed body = %q, want {", string(body))
+	}
+}
+
+func TestRequestHasBody_ReturnsNonEOFReadErrorWithData(t *testing.T) {
+	readErr := errors.New("probe read failed")
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/maintenance/scrub", nil)
+	req.Body = &errorWithDataReadCloser{data: []byte(`{`), err: readErr}
+	req.ContentLength = -1
+
+	hasBody, err := requestHasBody(req)
+	if !hasBody {
+		t.Fatal("requestHasBody() = false, want true")
+	}
+	if !errors.Is(err, readErr) {
+		t.Fatalf("requestHasBody() error = %v, want %v", err, readErr)
+	}
+	body, readBodyErr := io.ReadAll(req.Body)
+	if readBodyErr != nil {
+		t.Fatalf("ReadAll(probed body) error: %v", readBodyErr)
+	}
+	if string(body) != `{` {
+		t.Fatalf("probed body = %q, want {", string(body))
+	}
 }
 
 func TestServer_Health(t *testing.T) {
@@ -2837,10 +2916,33 @@ func TestServer_RejectsCrossOriginUnsafeBrowserRequests(t *testing.T) {
 		t.Fatalf("wrong-port login status = %d, want %d; body=%s", wrongPortRec.Code, http.StatusForbidden, wrongPortRec.Body.String())
 	}
 
+	fetchSiteReq := httptest.NewRequest(http.MethodPost, "https://nas.example.test/api/v1/auth/login", strings.NewReader(loginBody))
+	fetchSiteReq.Header.Set("Content-Type", "application/json")
+	fetchSiteReq.Header.Set("Sec-Fetch-Site", "cross-site")
+	fetchSiteRec := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(fetchSiteRec, fetchSiteReq)
+
+	if fetchSiteRec.Code != http.StatusForbidden {
+		t.Fatalf("cross-site fetch metadata login status = %d, want %d; body=%s", fetchSiteRec.Code, http.StatusForbidden, fetchSiteRec.Body.String())
+	}
+
+	sameSiteReq := httptest.NewRequest(http.MethodPost, "https://nas.example.test/api/v1/auth/login", strings.NewReader(loginBody))
+	sameSiteReq.Header.Set("Content-Type", "application/json")
+	sameSiteReq.Header.Set("Sec-Fetch-Site", "same-site")
+	sameSiteRec := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(sameSiteRec, sameSiteReq)
+
+	if sameSiteRec.Code != http.StatusForbidden {
+		t.Fatalf("same-site fetch metadata login status = %d, want %d; body=%s", sameSiteRec.Code, http.StatusForbidden, sameSiteRec.Body.String())
+	}
+
 	sameOriginReq := httptest.NewRequest(http.MethodPost, "https://nas.example.test/api/v1/auth/login", strings.NewReader(loginBody))
 	sameOriginReq.Host = "nas.example.test:443"
 	sameOriginReq.Header.Set("Content-Type", "application/json")
 	sameOriginReq.Header.Set("Origin", "https://nas.example.test")
+	sameOriginReq.Header.Set("Sec-Fetch-Site", "same-origin")
 	sameOriginRec := httptest.NewRecorder()
 
 	server.Router().ServeHTTP(sameOriginRec, sameOriginReq)
@@ -2877,6 +2979,69 @@ func TestServer_RejectsCrossOriginUnsafeBrowserRequests(t *testing.T) {
 
 	if apiClientRec.Code != http.StatusOK {
 		t.Fatalf("authorization client status = %d, want %d; body=%s", apiClientRec.Code, http.StatusOK, apiClientRec.Body.String())
+	}
+
+	basicAuthReq := httptest.NewRequest(http.MethodPost, "/api/v1/auth/download-session", nil)
+	basicAuthReq.Host = "nas.example.test"
+	basicAuthReq.SetBasicAuth("admin", "password")
+	basicAuthReq.Header.Set("Origin", "https://evil.example.test")
+	basicAuthRec := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(basicAuthRec, basicAuthReq)
+
+	if basicAuthRec.Code != http.StatusForbidden {
+		t.Fatalf("basic authorization cross-origin status = %d, want %d; body=%s", basicAuthRec.Code, http.StatusForbidden, basicAuthRec.Body.String())
+	}
+}
+
+func TestServer_RejectsCrossOriginUnsafePublicShareRequests(t *testing.T) {
+	server, shareID := setupShareServer(t)
+
+	req := httptest.NewRequest(http.MethodPost, "https://nas.example.test/api/v1/public/shares/"+shareID+"/access", strings.NewReader(`{"password":"guess"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", "https://evil.example.test")
+	rec := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("cross-origin public share access status = %d, want %d; body=%s", rec.Code, http.StatusForbidden, rec.Body.String())
+	}
+}
+
+func TestRejectCrossOriginUnsafeRequests_RejectsWebDAVMutationMethods(t *testing.T) {
+	reached := false
+	handler := RejectCrossOriginUnsafeRequests(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reached = true
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	for _, method := range []string{"MKCOL", "COPY", "MOVE", "PROPPATCH", "LOCK", "UNLOCK"} {
+		reached = false
+		req := httptest.NewRequest(method, "https://nas.example.test/dav/docs", nil)
+		req.Header.Set("Origin", "https://evil.example.test")
+		rec := httptest.NewRecorder()
+
+		handler.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("%s cross-origin status = %d, want %d", method, rec.Code, http.StatusForbidden)
+		}
+		if reached {
+			t.Fatalf("%s cross-origin request reached downstream handler", method)
+		}
+	}
+
+	req := httptest.NewRequest("PROPFIND", "https://nas.example.test/dav/docs", nil)
+	req.Header.Set("Origin", "https://evil.example.test")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("safe PROPFIND status = %d, want %d", rec.Code, http.StatusNoContent)
+	}
+	if !reached {
+		t.Fatal("safe PROPFIND did not reach downstream handler")
 	}
 }
 
@@ -5465,6 +5630,21 @@ func TestValidateHash(t *testing.T) {
 				t.Errorf("validateHash(%q) error = %v, wantErr %v", tt.hash, err, tt.wantErr)
 			}
 		})
+	}
+}
+
+func TestNormalizeHash(t *testing.T) {
+	hash := "ABCDEF1234567890ABCDEF1234567890ABCDEF1234567890ABCDEF1234567890"
+	normalized, err := normalizeHash(hash)
+	if err != nil {
+		t.Fatalf("normalizeHash() error = %v", err)
+	}
+	if normalized != strings.ToLower(hash) {
+		t.Fatalf("normalizeHash() = %q, want %q", normalized, strings.ToLower(hash))
+	}
+
+	if _, err := normalizeHash("not-a-hash"); err == nil {
+		t.Fatal("normalizeHash() accepted an invalid hash")
 	}
 }
 
@@ -8152,6 +8332,26 @@ func TestServer_Scrub_RejectsOversizedRequestBody(t *testing.T) {
 	}
 }
 
+func TestServer_Scrub_RejectsInvalidHashFilterBeforeDataplane(t *testing.T) {
+	server, err := NewServer(zerolog.Nop(), &ServerConfig{DataplaneAddr: "127.0.0.1:1"})
+	if err != nil {
+		t.Fatalf("NewServer() error: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/maintenance/scrub", strings.NewReader(`{"hashes":["not-a-hash"]}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("invalid scrub hash status = %d, want %d; body=%s", w.Code, http.StatusBadRequest, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "invalid hash") {
+		t.Fatalf("expected invalid hash response, got %s", w.Body.String())
+	}
+}
+
 func TestServer_Scrub_SaveCompletedResultFailureReturnsWarning(t *testing.T) {
 	server, _, tmpDir := setupTestServer(t)
 	maintRoot := filepath.Join(tmpDir, "maintenance")
@@ -8557,6 +8757,23 @@ func TestServer_GC_InvalidDryRunReturnsBadRequest(t *testing.T) {
 	}
 }
 
+func TestServer_GC_InvalidDryRunCheckedBeforeDataplane(t *testing.T) {
+	server, _, _ := setupTestServer(t)
+	server.dataplane = nil
+
+	req := httptest.NewRequest("POST", "/api/v1/maintenance/gc?dry_run=definitely-not-bool", nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("GC invalid dry_run status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+	if !strings.Contains(w.Body.String(), "dry_run parameter must be a boolean") {
+		t.Fatalf("expected invalid dry_run error, got %s", w.Body.String())
+	}
+}
+
 func TestServer_GC_RejectsOverflowingGracePeriod(t *testing.T) {
 	server, _, _ := setupTestServer(t)
 
@@ -8679,6 +8896,23 @@ func TestServer_Objects_RejectsOverlongCursor(t *testing.T) {
 	}
 }
 
+func TestServer_Objects_RejectsInvalidCursorBeforeDataplane(t *testing.T) {
+	server, _, _ := setupTestServer(t)
+	server.dataplane = nil
+
+	req := httptest.NewRequest("GET", "/api/v1/maintenance/objects?cursor=not-a-hash", nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("ListObjects invalid cursor status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+	if !strings.Contains(w.Body.String(), "cursor must be a 64-character hex object hash") {
+		t.Fatalf("expected cursor validation error, got %s", w.Body.String())
+	}
+}
+
 func TestServer_Objects_RejectsInvalidLimit(t *testing.T) {
 	server, _, _ := setupTestServer(t)
 
@@ -8776,6 +9010,13 @@ func TestServer_ScrubResult_DoesNotExposeInternalErrorMessage(t *testing.T) {
 		EndTime:      time.Now(),
 		Status:       "failed",
 		ErrorMessage: "dial tcp 127.0.0.1:9090: connection refused",
+		Errors: []maintenance.ScrubError{
+			{
+				Hash:      "abc123",
+				ErrorType: "io_error",
+				Message:   "read error: IO error: permission denied: /srv/mnemonas/cas/ab/c123",
+			},
+		},
 	}); err != nil {
 		t.Fatalf("SaveScrubResult() error: %v", err)
 	}
@@ -8792,8 +9033,36 @@ func TestServer_ScrubResult_DoesNotExposeInternalErrorMessage(t *testing.T) {
 	if strings.Contains(strings.ToLower(body), "connection refused") || strings.Contains(strings.ToLower(body), "dial tcp") {
 		t.Fatalf("expected scrub result to hide internal error details, got %s", body)
 	}
+	if strings.Contains(strings.ToLower(body), "permission denied") || strings.Contains(body, "/srv/mnemonas/cas") {
+		t.Fatalf("expected scrub result to hide internal object error details, got %s", body)
+	}
 	if !strings.Contains(body, scrubFailurePublicMessage) {
 		t.Fatalf("expected scrub result to include sanitized error message, got %s", body)
+	}
+	if !strings.Contains(body, scrubObjectReadPublicMessage) {
+		t.Fatalf("expected scrub result to include sanitized object error message, got %s", body)
+	}
+}
+
+func TestPublicScrubObjectErrorMessage(t *testing.T) {
+	tests := []struct {
+		errorType string
+		want      string
+	}{
+		{errorType: "corrupted", want: scrubObjectCorruptedPublicMessage},
+		{errorType: "missing", want: scrubObjectMissingPublicMessage},
+		{errorType: "io_error", want: scrubObjectReadPublicMessage},
+		{errorType: " IO_ERROR ", want: scrubObjectReadPublicMessage},
+		{errorType: "unexpected", want: scrubObjectUnknownPublicMessage},
+		{errorType: "", want: scrubObjectUnknownPublicMessage},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.errorType, func(t *testing.T) {
+			if got := publicScrubObjectErrorMessage(tt.errorType); got != tt.want {
+				t.Fatalf("publicScrubObjectErrorMessage(%q) = %q, want %q", tt.errorType, got, tt.want)
+			}
+		})
 	}
 }
 
@@ -8814,20 +9083,18 @@ func TestServer_Thumbnail_NoService(t *testing.T) {
 func TestServer_Thumbnail_Unsupported(t *testing.T) {
 	server, _, tmpDir := setupTestServer(t)
 
-	// Initialize thumbnail service
-	thumbRoot := path.Join(tmpDir, "thumbnails")
-	_, _ = server, thumbRoot // We need to modify the server setup for this test
+	server.thumbnail = newTestThumbnailService(t, path.Join(tmpDir, "thumbnails"))
 
-	// This test checks that unsupported files return BadRequest
-	// For now, verify the endpoint exists
 	req := httptest.NewRequest("GET", "/api/v1/thumbnails/document.pdf", nil)
 	w := httptest.NewRecorder()
 
 	server.Router().ServeHTTP(w, req)
 
-	// Without thumbnail service, should be ServiceUnavailable
-	if w.Code != http.StatusServiceUnavailable && w.Code != http.StatusBadRequest {
-		t.Errorf("Thumbnail for unsupported type status = %d", w.Code)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("thumbnail unsupported type status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+	if !strings.Contains(w.Body.String(), "file is not a supported image type") {
+		t.Fatalf("expected unsupported image type message, got %s", w.Body.String())
 	}
 }
 
@@ -9053,6 +9320,12 @@ func TestServer_Thumbnail_UsesPrivateRevalidationCacheHeaders(t *testing.T) {
 	if cacheControl := w.Header().Get("Cache-Control"); cacheControl != "private, no-cache" {
 		t.Fatalf("thumbnail Cache-Control = %q, want %q", cacheControl, "private, no-cache")
 	}
+	if got := w.Header().Get("X-Content-Type-Options"); got != "nosniff" {
+		t.Fatalf("thumbnail X-Content-Type-Options = %q, want nosniff", got)
+	}
+	if got := w.Header().Get("Content-Security-Policy"); !strings.Contains(got, "sandbox") || !strings.Contains(got, "default-src 'none'") {
+		t.Fatalf("thumbnail Content-Security-Policy = %q, want sandboxed default-src none", got)
+	}
 	etag := w.Header().Get("ETag")
 	if etag == "" {
 		t.Fatal("expected thumbnail response to include ETag")
@@ -9121,6 +9394,42 @@ func TestServer_Thumbnail_RejectsOversizedSourceImage(t *testing.T) {
 	}
 }
 
+func TestServer_Thumbnail_RejectsOversizedSourceBeforeHashing(t *testing.T) {
+	server, fs, tmpDir := setupTestServer(t)
+	ctx := context.Background()
+
+	server.thumbnail = newTestThumbnailService(t, path.Join(tmpDir, "thumbnails"))
+	source := createPNGThumbnailSourceWithAlpha(24, 24)
+	if len(source) < 2 {
+		t.Fatal("test thumbnail source unexpectedly small")
+	}
+	if err := fs.WriteFile(ctx, "/too-large-bytes.png", bytes.NewReader(source)); err != nil {
+		t.Fatalf("WriteFile(too-large-bytes.png) error: %v", err)
+	}
+
+	originalMax := maxThumbnailSourceBytes
+	maxThumbnailSourceBytes = int64(len(source) - 1)
+	t.Cleanup(func() {
+		maxThumbnailSourceBytes = originalMax
+	})
+	server.beforeThumbnailRead = func(filePath string) error {
+		t.Fatalf("thumbnail read hook should not run after source size rejection for %s", filePath)
+		return nil
+	}
+
+	req := httptest.NewRequest("GET", "/api/v1/thumbnails/too-large-bytes.png", nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("thumbnail oversized source bytes status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+	if !strings.Contains(w.Body.String(), "source image too large to thumbnail") {
+		t.Fatalf("expected oversized thumbnail message, got %s", w.Body.String())
+	}
+}
+
 func TestServer_DiagnosticsExport(t *testing.T) {
 	server, _, _ := setupTestServer(t)
 
@@ -9132,6 +9441,15 @@ func TestServer_DiagnosticsExport(t *testing.T) {
 	// Should return OK with zip content or service unavailable if maintenance not configured
 	if w.Code != http.StatusOK && w.Code != http.StatusServiceUnavailable {
 		t.Errorf("DiagnosticsExport status = %d", w.Code)
+	}
+	if w.Code == http.StatusOK {
+		mediaType, params, err := mime.ParseMediaType(w.Header().Get("Content-Disposition"))
+		if err != nil {
+			t.Fatalf("diagnostics export Content-Disposition is invalid: %v", err)
+		}
+		if mediaType != "attachment" || !strings.HasPrefix(params["filename"], "mnemonas-diagnostics-") || !strings.HasSuffix(params["filename"], ".json") {
+			t.Fatalf("unexpected diagnostics export Content-Disposition: media=%q params=%v", mediaType, params)
+		}
 	}
 }
 
@@ -10906,6 +11224,47 @@ func TestServer_UpdateSettings_NormalizesWebDAVPrefix(t *testing.T) {
 	}
 }
 
+func TestServer_UpdateSettings_RejectsInvalidWebDAVPrefixCharacters(t *testing.T) {
+	tests := []struct {
+		name   string
+		prefix string
+	}{
+		{name: "backslash", prefix: `/dav\files`},
+		{name: "query", prefix: "/dav?files"},
+		{name: "fragment", prefix: "/dav#files"},
+		{name: "control", prefix: "/dav\nfiles"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server, _, tmpDir := setupTestServer(t)
+			server.configPath = path.Join(tmpDir, "config.toml")
+			originalPrefix := server.config.WebDAV.Prefix
+
+			bodyBytes, err := json.Marshal(map[string]any{
+				"webdav": map[string]string{
+					"prefix": tt.prefix,
+				},
+			})
+			if err != nil {
+				t.Fatalf("failed to marshal request body: %v", err)
+			}
+			req := httptest.NewRequest(http.MethodPut, "/api/v1/settings", bytes.NewReader(bodyBytes))
+			req.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+
+			server.Router().ServeHTTP(w, req)
+
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("update settings status = %d, want %d; body=%s", w.Code, http.StatusBadRequest, w.Body.String())
+			}
+			if server.config.WebDAV.Prefix != originalPrefix {
+				t.Fatalf("expected config prefix to remain %q, got %q", originalPrefix, server.config.WebDAV.Prefix)
+			}
+		})
+	}
+}
+
 func TestServer_UpdateSettings_RejectsInvalidWebDAVAuthType(t *testing.T) {
 	server, _, tmpDir := setupTestServer(t)
 	server.configPath = path.Join(tmpDir, "config.toml")
@@ -10954,10 +11313,14 @@ func TestServer_UpdateSettings_RejectsInvalidShareBaseURL(t *testing.T) {
 }
 
 func TestServer_UpdateSettings_UpdatesTrustedProxyHops(t *testing.T) {
+	originalHops := requestip.TrustedProxyHops()
+	defer requestip.SetTrustedProxyHops(originalHops)
+
 	server, _, tmpDir := setupTestServer(t)
 	server.configPath = path.Join(tmpDir, "config.toml")
 	server.config.Server.TrustedProxyHops = 1
 	server.storeConfig(server.config)
+	requestip.SetTrustedProxyHops(1)
 
 	body := `{"server":{"trusted_proxy_hops":2}}`
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/settings", strings.NewReader(body))

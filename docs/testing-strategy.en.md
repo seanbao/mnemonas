@@ -172,8 +172,19 @@ interactions:
       path: /api/v1/auth/login
       headers:
         Content-Type: application/json
+        X-MnemoNAS-Session-Mode: cookie
     response:
       status: 200
+      headers:
+        Set-Cookie: !!regexp mnemonas_access=.*HttpOnly
+      body:
+        success: true
+        data:
+          user:
+            username: "admin"
+        absent:
+          - data.access_token
+          - data.refresh_token
 ```
 
 ### Mutation Testing

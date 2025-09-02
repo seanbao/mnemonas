@@ -228,15 +228,15 @@ func TestWriteTLSFile_ReturnsDirectorySyncError(t *testing.T) {
 	}
 }
 
-func TestWriteTLSFileAtomically_ReplacesExistingFileAndCleansTemp(t *testing.T) {
+func TestWriteTLSFile_ReplacesExistingFileAndCleansTemp(t *testing.T) {
 	tmpDir := t.TempDir()
 	filePath := filepath.Join(tmpDir, "server.key")
 	if err := os.WriteFile(filePath, []byte("old-key"), 0644); err != nil {
 		t.Fatalf("WriteFile(existing key) error: %v", err)
 	}
 
-	if err := writeTLSFileAtomically(filePath, []byte("new-key"), 0600, errKeyFileSymlink, ".tls-key-*.tmp", "private key file"); err != nil {
-		t.Fatalf("writeTLSFileAtomically() error: %v", err)
+	if err := writeTLSFile(filePath, []byte("new-key"), 0600, errKeyFileSymlink, ".tls-key-*.tmp", "private key file"); err != nil {
+		t.Fatalf("writeTLSFile() error: %v", err)
 	}
 
 	data, err := os.ReadFile(filePath)
@@ -356,7 +356,7 @@ func TestEnsureTLSDir_SyncsCreatedDirectoriesDeepestParentFirst(t *testing.T) {
 		syncTLSDir = originalSyncTLSDir
 	}()
 
-	if err := ensureTLSDir(nestedDir, 0755, "certificate file"); err != nil {
+	if _, err := ensureTLSDir(nestedDir, 0755, errCertFileSymlink, "certificate file"); err != nil {
 		t.Fatalf("ensureTLSDir() error: %v", err)
 	}
 
@@ -527,7 +527,7 @@ func TestReadTLSFileRejectsSymlinkInsertedAfterValidation(t *testing.T) {
 			hookErr = err
 			return
 		}
-		hookErr = os.Symlink(linkedTarget, certPath)
+		hookErr = os.Symlink(filepath.Base(linkedTarget), certPath)
 	}
 	defer func() {
 		afterValidateTLSFilePath = originalHook

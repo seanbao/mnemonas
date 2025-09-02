@@ -84,11 +84,13 @@ The data plane lives under `dataplane/`.
 Main responsibilities:
 
 - Store and retrieve content-addressed objects.
-- Chunk large content using FastCDC.
+- Chunk large content using FastCDC for dataplane file APIs.
 - Hash content with BLAKE3.
 - Optionally compress object payloads with zstd.
 - Run scrub and object listing operations.
 - Serve gRPC to `nasd` and an internal health/statistics HTTP endpoint.
+
+The Go version-history path currently stores historical snapshots as whole BLAKE3 CAS objects. The dataplane `PutFile` / `GetFile` RPCs provide FastCDC chunking, but chunk-level version reference tracking is not yet wired into the Go control plane.
 
 The data plane is intentionally not exposed to end users. In normal deployments, gRPC `9090` and HTTP `9091` stay on loopback or inside the container.
 
@@ -114,7 +116,7 @@ storage.root/
     └── users.json        # user data when auth uses the default file
 ```
 
-This gives users a readable current file tree while keeping version history deduplicated and verifiable.
+This gives users a readable current file tree while keeping version history content-addressed, whole-object deduplicated, and verifiable.
 
 Directly reading files under `files/` is safe for users with OS-level access. Directly writing or deleting files there while MnemoNAS is running bypasses version history, trash, activity logging, and metadata reconciliation.
 
@@ -136,7 +138,7 @@ SQLite is used for transactional metadata where ACID semantics matter. Some feat
 
 Security boundaries:
 
-- Web UI/API authentication is JWT based and enabled by default.
+- Web UI/API authentication is JWT-backed and enabled by default; browser sessions store access and refresh tokens in same-origin `HttpOnly` cookies.
 - User roles are `admin`, `user`, and `guest`.
 - Non-admin users are scoped to their configured `home_dir`.
 - WebDAV Basic Auth is a separate global service credential.

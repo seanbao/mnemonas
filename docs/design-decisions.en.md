@@ -29,7 +29,7 @@ Why MnemoNAS:
 | WebDAV | `golang.org/x/net/webdav` plus local behavior | Mature base implementation with project-specific compatibility work |
 | RPC | gRPC with grpc-go and tonic | Typed streaming interface between Go and Rust |
 | Hashing | BLAKE3 | Fast content addressing and verification |
-| Chunking | FastCDC | Practical content-defined chunking for deduplicated versions |
+| Chunking | FastCDC in dataplane file APIs | Practical content-defined chunking is available in Rust; Go version storage currently uses whole-object CAS snapshots |
 | Logging | zerolog and tracing | Structured logs with low overhead |
 
 ### Frontend
@@ -52,7 +52,7 @@ The interface target is a calm file-management tool: compact, readable, and suit
 
 MnemoNAS stores current files as normal files under `files/` and stores historical versions in a content-addressed object store.
 
-This avoids locking the user into a proprietary object-only layout for current data while still making versions deduplicated and verifiable.
+This avoids locking the user into a proprietary object-only layout for current data while still making versions whole-object deduplicated and verifiable.
 
 ### Loose Objects Before Packfiles
 
