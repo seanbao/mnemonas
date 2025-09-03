@@ -109,8 +109,42 @@ write_community_files() {
 		.github/ISSUE_TEMPLATE/bug_report.yml \
 		.github/ISSUE_TEMPLATE/feature_request.yml \
 		.github/ISSUE_TEMPLATE/question.yml \
-		.github/ISSUE_TEMPLATE/webdav_compatibility.yml \
-		.github/pull_request_template.md
+		.github/ISSUE_TEMPLATE/webdav_compatibility.yml
+	cat >.github/ISSUE_TEMPLATE/config.yml <<'EOF'
+blank_issues_enabled: true
+contact_links:
+  - name: Security vulnerability / 安全漏洞
+    url: https://github.com/seanbao/mnemonas/security/policy
+    about: Report security vulnerabilities through the private reporting channel. 安全漏洞通过私密报告渠道提交。
+  - name: Support boundary / 支持边界
+    url: https://github.com/seanbao/mnemonas/blob/master/SUPPORT.md
+    about: Review support channels and required diagnostics before filing operational questions. 提交运维问题前先查看支持渠道和诊断要求。
+EOF
+	cat >.github/pull_request_template.md <<'EOF'
+# Pull Request / 变更说明
+
+## Scope / 范围
+
+-
+
+## User-Visible Behavior / 用户可见行为
+
+-
+
+## Data, Security, And Deployment Impact / 数据、安全与部署影响
+
+-
+
+## Validation / 验证
+
+- [ ] `make verify-changed`
+- [ ] `make docs-check`
+- [ ] `make scripts-check`
+
+## Residual Risk / 残余风险
+
+-
+EOF
 	cat >SUPPORT.md <<'EOF'
 # 支持
 
@@ -270,7 +304,7 @@ if ./scripts/release-readiness.sh --allow-dirty --skip-checklist >"$output_dir/m
 fi
 assert_file_contains "$output_dir/missing-community.err" "missing required community file: .github/pull_request_template.md"
 
-touch .github/pull_request_template.md
+git checkout -q -- .github/pull_request_template.md
 sed -i.bak '/webdav_compatibility.yml/d' SUPPORT.en.md
 rm -f SUPPORT.en.md.bak
 if ./scripts/release-readiness.sh --allow-dirty --skip-checklist >"$output_dir/missing-support-route.out" 2>"$output_dir/missing-support-route.err"; then
@@ -278,6 +312,22 @@ if ./scripts/release-readiness.sh --allow-dirty --skip-checklist >"$output_dir/m
 fi
 assert_file_contains "$output_dir/missing-support-route.err" "SUPPORT.en.md is missing required text"
 git checkout -q -- SUPPORT.en.md
+
+sed -i.bak '\#security/policy#d' .github/ISSUE_TEMPLATE/config.yml
+rm -f .github/ISSUE_TEMPLATE/config.yml.bak
+if ./scripts/release-readiness.sh --allow-dirty --skip-checklist >"$output_dir/missing-issue-config-link.out" 2>"$output_dir/missing-issue-config-link.err"; then
+	fail "release readiness accepted a missing Issue config contact link"
+fi
+assert_file_contains "$output_dir/missing-issue-config-link.err" ".github/ISSUE_TEMPLATE/config.yml is missing required text"
+git checkout -q -- .github/ISSUE_TEMPLATE/config.yml
+
+sed -i.bak '/Data, Security, And Deployment Impact/d' .github/pull_request_template.md
+rm -f .github/pull_request_template.md.bak
+if ./scripts/release-readiness.sh --allow-dirty --skip-checklist >"$output_dir/missing-pr-section.out" 2>"$output_dir/missing-pr-section.err"; then
+	fail "release readiness accepted a missing PR template section"
+fi
+assert_file_contains "$output_dir/missing-pr-section.err" ".github/pull_request_template.md is missing required text"
+git checkout -q -- .github/pull_request_template.md
 
 sed -i.bak '/verify-release-artifacts/d' docs/release-notes.en.md
 rm -f docs/release-notes.en.md.bak
