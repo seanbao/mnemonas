@@ -141,6 +141,18 @@ Known Windows File Explorer caveats:
 | VLC | Cross-platform | Expected | Validate Range requests and seeking |
 | Kodi | Cross-platform | Needs validation | Requires WebDAV source configuration |
 
+## Real-Client Validation Standard
+
+Before changing a matrix client from Expected or Needs validation to Verified, keep reviewable validation evidence. Evidence may come from local test logs, Issues, release validation notes, or maintainer test notes.
+
+Minimum validation flow:
+
+1. Run the curl protocol smoke first: `scripts/webdav-client-smoke.sh`. Environments with `rclone` installed should also set `RUN_RCLONE_WEBDAV=1` for the optional E2E path.
+2. Record Client name and version, Operating system and version, WebDAV authentication mode, URL prefix, reverse proxy, TLS, and network location.
+3. Verify connect or mount, browse directories, upload, download, rename, and delete operations, plus persistent visibility after reconnecting.
+4. For large-file transfer, media seeking, offline sync, or background-sync clients, record whether the relevant operation passed or remained limited.
+5. When the result comes from an external user, prefer the WebDAV compatibility report form and include reproduction steps and a diagnostic bundle.
+
 ## Known Limits
 
 ### Virtual Locks
