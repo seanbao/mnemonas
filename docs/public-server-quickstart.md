@@ -116,6 +116,14 @@ Web UI 向导会把 MnemoNAS 调整为适合反向代理的表单配置，但证
 curl -I https://nas.example.com/health
 ```
 
+从外部网络运行公网 smoke：
+
+```bash
+./scripts/public-go-live-smoke.sh nas.example.com
+```
+
+该脚本会检查公网 HTTPS health、HTTP 到同一域名 HTTPS 的跳转，并确认 `8080/9090/9091` 从公网不返回任何 HTTP 状态码。无法运行仓库脚本时，可手动执行后续等价命令。
+
 直连后端端口应连接失败或超时；如果返回任何 HTTP 状态码（包括 `401`、`403`、`404`），都表示端口仍可从公网访问：
 
 ```bash
@@ -219,6 +227,7 @@ sudo systemctl restart mnemonas
 
 ## 5. 上线前清单
 
+- [ ] 已从外部网络运行 `./scripts/public-go-live-smoke.sh nas.example.com`，或手动完成等价的 HTTPS health、HTTP 跳转和后端端口不可达检查。
 - [ ] 管理员初始密码已修改，`initial-password.txt` 路径不存在，且没有保留符号链接、符号链接路径组件或非普通文件。
 - [ ] 至少保留两个启用中的管理员账号，避免唯一管理员丢失密码后无法维护。
 - [ ] Web UI “安全自检”没有 `block` 项；`warning` 项已逐条处理或确认。
