@@ -222,6 +222,29 @@ assert_file_contains "$output_dir/evidence-only.out" "only validation evidence d
 assert_file_contains "$output_dir/evidence-only.out" "[release-readiness] validation-diff:"
 assert_file_contains "$output_dir/evidence-only.out" "release readiness summary completed"
 
+git checkout -q master
+git checkout -q -b missing-validation-evidence-file
+rm -f docs/hardening-review-summary.en.md
+git add -A docs/hardening-review-summary.en.md
+git commit -q -m "docs: remove validation evidence"
+if ./scripts/release-readiness.sh --base "$validation_target" >"$output_dir/missing-validation-evidence.out" 2>"$output_dir/missing-validation-evidence.err"; then
+	fail "release readiness accepted a missing validation evidence document"
+fi
+assert_file_contains "$output_dir/missing-validation-evidence.err" "missing validation evidence file: docs/hardening-review-summary.en.md"
+
+git checkout -q master
+git checkout -q -b missing-validation-target
+validation_tick="$(printf '\140')"
+sed -i.bak "s/validation target ${validation_tick}[^${validation_tick}]*${validation_tick}/validation target missing/" docs/hardening-review-summary.en.md
+rm -f docs/hardening-review-summary.en.md.bak
+git add docs/hardening-review-summary.en.md
+git commit -q -m "docs: remove validation target"
+if ./scripts/release-readiness.sh --base "$validation_target" >"$output_dir/missing-validation-target.out" 2>"$output_dir/missing-validation-target.err"; then
+	fail "release readiness accepted validation evidence without a target"
+fi
+assert_file_contains "$output_dir/missing-validation-target.err" "validation evidence target not recorded in: docs/hardening-review-summary.en.md"
+
+git checkout -q master
 git checkout -q -b release-docs
 printf '\n- Release artifact verifier coverage updated.\n' >>CHANGELOG.en.md
 printf '\n- Release artifact verifier coverage updated.\n' >>docs/release-notes.en.md
