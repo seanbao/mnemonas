@@ -106,7 +106,7 @@
 
 - **用户管理 API**
   - 用户 CRUD
-  - 用户级容量配额，非管理员 Web/API 上传、复制和回收站恢复超限时返回 `QUOTA_EXCEEDED`，并可通过 Webhook/Telegram/SMTP 发送 `quota_exceeded` 提醒事件
+  - 用户级容量配额，非管理员 Web/API 上传、复制和回收站恢复超限时返回 `QUOTA_EXCEEDED`，并可通过 Webhook/Telegram/企业微信/钉钉/SMTP 发送 `quota_exceeded` 提醒事件
   - `storage.directory_quotas` 目录级硬限制和存储页目录配额用量展示，Web/API 上传、复制、移动、回收站恢复、版本恢复以及 WebDAV PUT/COPY/MOVE 会在写入前检查命中的目录配额
   - 用户组和 `storage.directory_access_rules` 目录读写授权，可按用户、用户组或角色授予共享目录权限；Web/API、WebDAV 用户模式、搜索、分享、收藏、回收站和活动过滤使用同一权限判定
   - 设置 API 和 Web 设置页支持有效权限检查、未保存规则预览、按路径用户矩阵和相关分享影响检查，管理员可查看用户对指定路径的读写结果与来源
@@ -142,19 +142,19 @@
   - 最近快照恢复演练与 manifest 校验；本地快照、restic 仓库和 rclone 远端可先生成恢复预览，再恢复到安全目录；支持最多 20 个条目的批量恢复预览与顺序执行，并逐项返回恢复和只读校验结果；恢复前预检目标隔离、目录状态、容量、备份内容和配置处理，失败预检会阻止恢复；恢复后只读校验、切换清单、回滚清单和恢复摘要导出；远端保留策略检测与周期化恢复演练提醒；恢复演练缺失/过期时发送限频提醒；恢复演练历史、成功率摘要与失败归因；恢复结果记录与历史记录；restic/rclone 任务支持远端一致性校验
   - 备份成功后自动检测保留策略，维护页可手动触发“检查保留”；本地任务统计快照范围，restic 解析 `snapshots --json`，rclone 解析 `lsjson`
   - 恢复后的只读校验结果持久化为 `last_restore_verify`，刷新维护页后仍可查看最近一次恢复检查
-  - 备份失败、恢复演练失败、保留策略检测失败和备份警告事件接入 Webhook/Telegram/SMTP 提醒
+  - 备份失败、恢复演练失败、保留策略检测失败和备份警告事件接入 Webhook/Telegram/企业微信/钉钉/SMTP 提醒
 
 - **磁盘健康 API**
   - `smartctl --json` 采集 SMART、自检状态、温度和通电时间
   - 解析 NVMe 介质磨损、可用备用容量、critical warning、介质错误和常见 ATA 寿命属性
-  - 设备缺失、SMART 失败、温度过高和序列号不匹配会标记异常，并写入最近操作或通过 Webhook/Telegram/SMTP 发送 `disk_health` 事件
+  - 设备缺失、SMART 失败、温度过高和序列号不匹配会标记异常，并写入最近操作或通过 Webhook/Telegram/企业微信/钉钉/SMTP 发送 `disk_health` 事件
 
 - **Scrub 数据完整性事件**
   - 手动 Scrub 完成后写入最近操作
   - `[maintenance.scrub]` 支持后台周期 Scrub 和失败后的限次自动重试
   - Settings API 和 Web 设置页可热更新周期 Scrub 调度配置
   - 诊断接口返回周期 Scrub 配置、最近执行状态和失败重试计数
-  - Scrub 失败、发现对象异常或结果持久化不完整时，通过 Webhook/Telegram/SMTP 发送 `scrub_run` 事件
+  - Scrub 失败、发现对象异常或结果持久化不完整时，通过 Webhook/Telegram/企业微信/钉钉/SMTP 发送 `scrub_run` 事件
 
 - **安全提醒事件**
   - 登录失败触发限流时发送限频的 `login_rate_limited` warning 事件
