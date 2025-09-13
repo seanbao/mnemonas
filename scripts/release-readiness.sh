@@ -200,7 +200,9 @@ is_release_documentation_path() {
 check_validation_evidence() {
 	local path
 	local path_target
+	local path_target_full
 	local target=""
+	local target_full=""
 	local evidence_files=(
 		"docs/hardening-progress.md"
 		"docs/hardening-progress.en.md"
@@ -212,11 +214,16 @@ check_validation_evidence() {
 		[[ -f "$path" ]] || fail "missing validation evidence file: $path"
 		path_target="$(extract_validation_target "$path")"
 		[[ -n "$path_target" ]] || fail "validation evidence target not recorded in: $path"
+		if ! git rev-parse --verify --quiet "$path_target^{commit}" >/dev/null; then
+			fail "validation evidence target does not resolve: $path records $path_target"
+		fi
+		path_target_full="$(git rev-parse "$path_target^{commit}")"
 		if [[ -z "$target" ]]; then
 			target="$path_target"
+			target_full="$path_target_full"
 			continue
 		fi
-		[[ "$path_target" == "$target" ]] || fail "validation evidence target mismatch: $path records $path_target, expected $target"
+		[[ "$path_target_full" == "$target_full" ]] || fail "validation evidence target mismatch: $path records $path_target, expected $target"
 	done
 
 	if [[ -z "$target" ]]; then
@@ -224,14 +231,8 @@ check_validation_evidence() {
 		return
 	fi
 
-	if ! git rev-parse --verify --quiet "$target^{commit}" >/dev/null; then
-		fail "validation evidence target does not resolve: $target"
-	fi
-
-	local target_full
 	local target_short
 	local head_full
-	target_full="$(git rev-parse "$target^{commit}")"
 	target_short="$(git rev-parse --short=12 "$target_full")"
 	head_full="$(git rev-parse HEAD)"
 
