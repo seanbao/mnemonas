@@ -20,6 +20,8 @@ sudo mnemonas-public-setup --proxy caddy nas.example.com admin@example.com
 
 systemd 安装会把源码中的 `scripts/setup-reverse-proxy.sh` 安装为 `mnemonas-public-setup`。脚本会设置 `server.host = "127.0.0.1"`、`trusted_proxy_hops = 1`、配置 Caddy/Nginx、调整本机 UFW 规则并运行基础检查。云厂商安全组仍需人工确认只开放 `80/443`，不要开放 `8080/9090/9091` 或改过的后端端口。
 
+脚本会拒绝配置文件路径中现有文件或父目录为符号链接的情况，以保持与 `nasd` 配置文件安全检查一致。
+
 如需通过 `MNEMONAS_UPSTREAM_HOST` 覆盖默认后端主机，该值必须是主机名、IPv4 或 IPv6 字面量，不包含协议、路径或端口；IPv6 可写作 `::1` 或 `[::1]`。
 
 如果需要 Traefik 或 Cloudflare Tunnel，不建议临时拼命令；优先从仓库模板开始：
