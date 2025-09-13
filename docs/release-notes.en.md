@@ -18,6 +18,7 @@ This release candidate focuses on improving MnemoNAS stability, public-access sa
 - Added rerunnable WebDAV curl protocol smoke checks for validating basic read/write, URL-encoded space paths, copy, move, and delete operations against a running service, covered by the script gate.
 - Added a WebDAV compatibility report form for collecting validation results or client-specific failures from Finder, Windows File Explorer, mobile file managers, media players, and CLI clients.
 - Tightened the release readiness summary: after the recorded full-validation target, `release-readiness` fails by default on non-release-documentation changes and requires refreshed full validation or an explicit draft override.
+- `release-readiness` now requires all four hardening evidence documents to exist and record the same full-validation target, preventing missing evidence from being skipped before release.
 - Streamlined and synchronized Chinese and English documentation, including deployment, configuration, FAQ, roadmap, security, hardening progress, and pre-release review entry points.
 
 ## Release Artifacts
@@ -83,6 +84,6 @@ Then complete at least one archive-install smoke test, one Docker release-image 
 - Confirm this draft is updated with the final tag, validation results, and artifact names.
 - Confirm `git status --short --branch` is clean.
 - Confirm `./scripts/plan-hardening-commits.sh --fail-on-manual` reports no paths left to group.
-- Run `./scripts/release-readiness.sh` and confirm commit subjects, temporary `fixup!` / `squash!` commits, validation evidence, release-documentation commands, and community health files pass.
+- Run `./scripts/release-readiness.sh` and confirm commit subjects, temporary `fixup!` / `squash!` commits, hardening validation evidence, release-documentation commands, and community health files pass.
 - After creating and pushing the tag, confirm the Release workflow succeeds.
 - After publication, run the release artifact verifier and record the result.
