@@ -77,6 +77,15 @@ sudo mnemonas-public-setup --proxy caddy nas.example.com admin@example.com
 sudo mnemonas-public-setup --proxy nginx nas.example.com admin@example.com
 ```
 
+如果已经登录 Web UI，也可以打开 `系统设置 -> 常规 -> 公网访问向导`：
+
+- 填写公网域名；
+- 选择 Caddy 或 Nginx；
+- 点击“应用推荐到表单”，再保存设置；
+- 按向导显示的 `mnemonas-public-setup` 和 `mnemonas-doctor --public-domain` 命令在服务器上完成代理配置与复核。
+
+Web UI 向导会把 MnemoNAS 调整为适合反向代理的表单配置，但证书签发、防火墙和反向代理安装仍需要在服务器上执行脚本。
+
 脚本不能修改云厂商安全组。运行后仍需在云控制台确认只开放：
 
 | 端口 | 建议 |

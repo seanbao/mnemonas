@@ -286,11 +286,64 @@ describe('SettingsPage', () => {
     it('shows general settings by default', async () => {
       render(<SettingsPage />)
       await waitFor(() => {
+        expect(screen.getByText('公网访问向导')).toBeTruthy()
         expect(screen.getByText('公网访问安全自检')).toBeTruthy()
         expect(screen.getByText('当前访问不是 HTTPS')).toBeTruthy()
         expect(screen.getByText('服务器')).toBeTruthy()
         expect(screen.getByText('存储路径')).toBeTruthy()
       })
+    })
+
+    it('applies public access recommendations to the settings form', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      render(<SettingsPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('公网访问向导')).toBeTruthy()
+        expect(screen.getByDisplayValue('0.0.0.0')).toBeTruthy()
+      })
+
+      fireEvent.change(screen.getByLabelText('公网域名'), { target: { value: 'nas.example.com' } })
+      await user.click(screen.getByRole('button', { name: '应用推荐到表单' }))
+
+      expect(screen.getByDisplayValue('127.0.0.1')).toBeTruthy()
+      expect(screen.getByLabelText('受信代理层数')).toHaveValue(1)
+      expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({
+        title: '已应用公网访问推荐',
+      }))
+    })
+
+    it('offers a repair action for security check findings', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockGetSecurityCheck.mockResolvedValueOnce({
+        success: true,
+        data: {
+          status: 'warning',
+          generated_at: '2026-05-08T00:00:00Z',
+          checks: [
+            {
+              id: 'server_listen',
+              status: 'warning',
+              title: 'Web 服务监听范围偏宽',
+              message: '建议只监听本机地址。',
+            },
+          ],
+          request: { scheme: 'http' },
+          config: { server_host: '0.0.0.0' },
+        },
+      })
+      render(<SettingsPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('Web 服务监听范围偏宽')).toBeTruthy()
+      })
+
+      await user.click(screen.getByRole('button', { name: '改为本机监听' }))
+
+      expect(screen.getByDisplayValue('127.0.0.1')).toBeTruthy()
+      expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({
+        title: '已改为本机监听',
+      }))
     })
 
     it('switches to retention tab', async () => {

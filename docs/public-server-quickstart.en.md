@@ -77,6 +77,15 @@ For Nginx:
 sudo mnemonas-public-setup --proxy nginx nas.example.com admin@example.com
 ```
 
+If you are already logged into the Web UI, you can also open `System Settings -> General -> Public Access Wizard`:
+
+- enter the public domain;
+- select Caddy or Nginx;
+- click "Apply recommendation to form", then save settings;
+- run the displayed `mnemonas-public-setup` and `mnemonas-doctor --public-domain` commands on the server to finish proxy setup and verification.
+
+The Web UI wizard adjusts the MnemoNAS form settings for a reverse-proxy deployment, but certificate issuance, firewall changes, and reverse-proxy installation still need to run on the server.
+
 The script cannot modify cloud-provider security groups. After running it, confirm in the cloud console:
 
 | Port | Recommendation |

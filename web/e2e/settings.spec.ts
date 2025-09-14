@@ -130,6 +130,94 @@ test.describe('设置表单交互', () => {
   })
 })
 
+test.describe('公网访问向导', () => {
+  test.beforeEach(async ({ page }) => {
+    await ensureAuthenticatedAt(page, '/settings')
+    await expect(page.getByText('加载设置...')).toHaveCount(0, { timeout: 15000 })
+  })
+
+  test('填写域名后应更新命令并应用推荐配置到表单', async ({ page }) => {
+    await expect(page.getByRole('heading', { name: '公网访问向导' })).toBeVisible({ timeout: 5000 })
+
+    await page.getByLabel('公网域名').fill('nas.example.com')
+    await expect(page.getByText('sudo mnemonas-public-setup --proxy caddy nas.example.com admin@example.com')).toBeVisible()
+    await expect(page.getByText('sudo mnemonas-doctor --public-domain nas.example.com')).toBeVisible()
+
+    await page.getByLabel('反向代理').selectOption('nginx')
+    await expect(page.getByText('sudo mnemonas-public-setup --proxy nginx nas.example.com admin@example.com')).toBeVisible()
+
+    await page.getByRole('button', { name: '应用推荐到表单' }).click()
+
+    await expect(page.getByPlaceholder('0.0.0.0')).toHaveValue('127.0.0.1')
+    await expect(page.getByLabel('受信代理层数')).toHaveValue('1')
+  })
+
+  test('应用推荐后保存应提交本机监听和受信代理配置', async ({ page }) => {
+    let submittedBody: unknown
+    await page.route('**/api/v1/settings/', async (route) => {
+      if (route.request().method() !== 'PUT') {
+        await route.continue()
+        return
+      }
+
+      submittedBody = JSON.parse(route.request().postData() || '{}')
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ success: true, data: null, message: 'settings updated, some changes may require restart' }),
+      })
+    })
+
+    await page.getByLabel('公网域名').fill('nas.example.com')
+    await page.getByRole('button', { name: '应用推荐到表单' }).click()
+    await page.getByRole('button', { name: /保存|保存设置/i }).click()
+
+    await expect(page.getByText('设置已保存，部分变更需要重启后生效')).toBeVisible({ timeout: 5000 })
+    expect(submittedBody).toMatchObject({
+      server: {
+        host: '127.0.0.1',
+        trusted_proxy_hops: 1,
+      },
+    })
+  })
+})
+
+test.describe('安全自检修复动作', () => {
+  test('监听范围风险应提供修复按钮并更新表单', async ({ page }) => {
+    await page.route('**/api/v1/settings/security-check', async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          success: true,
+          data: {
+            status: 'warning',
+            generated_at: '2026-05-08T00:00:00Z',
+            checks: [
+              {
+                id: 'server_listen',
+                status: 'warning',
+                title: 'Web 服务监听范围偏宽',
+                message: '建议只监听本机地址。',
+              },
+            ],
+            request: { scheme: 'http' },
+            config: { server_host: '0.0.0.0' },
+          },
+        }),
+      })
+    })
+
+    await ensureAuthenticatedAt(page, '/settings')
+    await expect(page.getByText('加载设置...')).toHaveCount(0, { timeout: 15000 })
+    await expect(page.getByText('Web 服务监听范围偏宽')).toBeVisible({ timeout: 5000 })
+
+    await page.getByRole('button', { name: '改为本机监听' }).click()
+
+    await expect(page.getByPlaceholder('0.0.0.0')).toHaveValue('127.0.0.1')
+  })
+})
+
 test.describe('设置页面响应式', () => {
   test('移动端布局', async ({ page }) => {
     await page.setViewportSize({ width: 375, height: 667 })
