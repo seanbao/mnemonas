@@ -3006,7 +3006,7 @@ export default function Maintenance() {
                   <Archive size={16} className="text-accent-primary" />
                   外置盘本地备份示例
                 </div>
-                <pre className="max-h-72 overflow-auto rounded-lg bg-content1 p-3 text-left text-xs leading-5 text-default-700">
+                <pre className="max-h-72 overflow-y-auto overflow-x-hidden whitespace-pre-wrap break-words rounded-lg bg-content1 p-3 text-left text-xs leading-5 text-default-700">
                   <code>{backupStarterConfigSnippet}</code>
                 </pre>
                 <p className="mt-3 text-xs leading-5 text-default-500">
