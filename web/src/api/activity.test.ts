@@ -346,6 +346,8 @@ describe('Activity API', () => {
       trash_restore: 'success',
       trash_delete: 'danger',
       trash_empty: 'danger',
+      disk_health: 'warning',
+      scrub: 'warning',
     }
 
     for (const [action, color] of Object.entries(expected) as Array<[ActionType, ReturnType<typeof getActionColor>]>) {

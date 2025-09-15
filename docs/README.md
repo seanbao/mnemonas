@@ -15,7 +15,8 @@
 | [公网服务器快速上线](public-server-quickstart.md) | [Public server quickstart](public-server-quickstart.en.md) | 公网域名、HTTPS、反向代理和安全检查的一条推荐路径 |
 | [Docker 部署指南](docker-deployment.md) | [Docker deployment](docker-deployment.en.md) | 使用 Docker 部署 MnemoNAS |
 | [挂载指南](mounting-guide.md) | [Mounting guide](mounting-guide.en.md) | 各平台 WebDAV 挂载教程 |
-| [反向代理配置](reverse-proxy-setup.md) | [Reverse proxy setup](reverse-proxy-setup.en.md) | HTTPS 外网访问配置（Caddy/Nginx/Traefik） |
+| [反向代理配置](reverse-proxy-setup.md) | [Reverse proxy setup](reverse-proxy-setup.en.md) | HTTPS 外网访问配置（Caddy/Nginx/Traefik/Cloudflare Tunnel） |
+| [公网云防火墙复核清单](cloud-firewall-checklist.md) | [Public cloud firewall checklist](cloud-firewall-checklist.en.md) | 云安全组、VPC 防火墙和端口暴露复核 |
 
 ### 用户指南
 

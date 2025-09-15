@@ -1,0 +1,10 @@
+tunnel: <tunnel-id>
+credentials-file: /etc/cloudflared/<tunnel-id>.json
+
+ingress:
+  - hostname: nas.example.com
+    service: http://127.0.0.1:8080
+    originRequest:
+      httpHostHeader: nas.example.com
+  - service: http_status:404
+

@@ -79,7 +79,8 @@ Packfiles may be introduced later if object count or small-object overhead becom
 | --- | --- | --- |
 | WebDAV | First supported mount protocol | Cross-platform and feasible to implement well enough for common clients |
 | S3 | Future extension | Useful for tools, less natural as a mounted filesystem |
-| SMB/NFS | Not in current scope | Compatibility and security surface are high for a small project |
+| SMB/Samba | Preview config only | The gateway contract exists, but this build does not start an SMB runtime |
+| NFS | Not in current scope | Permission and deployment boundaries are high for a small project |
 
 ## Release Quality Targets
 
@@ -100,7 +101,7 @@ Packfiles may be introduced later if object count or small-object overhead becom
 
 Current non-goals:
 
-- SMB/NFS protocol support.
+- SMB/NFS protocol stacks. SMB gateway config, credentials, and authorization are preview scaffolding only and are not mountable in this build.
 - RAID, filesystem creation, disk formatting, or volume management.
 - Multi-node consistency.
 - Treating deduplication as the core user-facing feature.

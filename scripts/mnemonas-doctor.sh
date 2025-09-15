@@ -9,12 +9,17 @@ CONFIG_PATH="${CONFIG_PATH:-/etc/mnemonas/config.toml}"
 BACKUP_ROOT="${BACKUP_ROOT:-/backup/mnemonas}"
 MIN_FREE_BYTES="${MIN_FREE_BYTES:-10737418240}"
 PUBLIC_DOMAIN="${MNEMONAS_PUBLIC_DOMAIN:-}"
+PUBLIC_CERT_FAILURE=0
 
 FAILURES=0
 WARNINGS=0
 
 ok() {
   printf '[OK] %s\n' "$*"
+}
+
+note() {
+  printf '[INFO] %s\n' "$*"
 }
 
 warn() {
@@ -433,6 +438,127 @@ check_http_unreachable() {
   fi
 }
 
+check_http_redirects_to_https() {
+  local domain="$1"
+  local url="http://$domain/health"
+  local curl_result status http_code redirect_url
+
+  if ! have curl; then
+    warn "curl not available; skipping public HTTP-to-HTTPS redirect check"
+    return
+  fi
+
+  curl_result="$(curl -sS -I --connect-timeout 3 --max-time 5 -o /dev/null -w '%{http_code} %{redirect_url}' "$url" 2>/dev/null)"
+  status=$?
+  if [[ "$status" -ne 0 ]]; then
+    warn "public HTTP redirect check was not reachable: $url"
+    return
+  fi
+
+  http_code="${curl_result%% *}"
+  redirect_url="${curl_result#* }"
+  if [[ "$http_code" =~ ^30(1|2|3|7|8)$ && "$redirect_url" == https://"$domain"* ]]; then
+    ok "public HTTP redirects to HTTPS: $url -> $redirect_url"
+  else
+    warn "public HTTP does not clearly redirect to HTTPS: $url returned ${http_code:-unknown}"
+  fi
+}
+
+check_https_certificate() {
+  local domain="$1"
+  local cert_out cert_err status enddate
+
+  if ! have openssl; then
+    warn "openssl not available; skipping public HTTPS certificate check"
+    return
+  fi
+
+  cert_out="$(mktemp -t mnemonas-doctor-cert.XXXXXX)"
+  cert_err="$(mktemp -t mnemonas-doctor-cert-err.XXXXXX)"
+
+  if have timeout; then
+    timeout 8 openssl s_client \
+      -connect "$domain:443" \
+      -servername "$domain" \
+      -verify_hostname "$domain" \
+      -verify_return_error \
+      </dev/null >"$cert_out" 2>"$cert_err"
+  else
+    openssl s_client \
+      -connect "$domain:443" \
+      -servername "$domain" \
+      -verify_hostname "$domain" \
+      -verify_return_error \
+      </dev/null >"$cert_out" 2>"$cert_err"
+  fi
+  status=$?
+
+  if [[ "$status" -ne 0 ]]; then
+    PUBLIC_CERT_FAILURE=1
+    fail "public HTTPS certificate verification failed for $domain:443"
+    rm -f "$cert_out" "$cert_err"
+    return
+  fi
+
+  if grep -Eq 'Verify return code: 0 \(ok\)|Verification: OK' "$cert_out" "$cert_err"; then
+    ok "public HTTPS certificate matches $domain"
+  else
+    PUBLIC_CERT_FAILURE=1
+    fail "public HTTPS certificate verification did not report success for $domain"
+  fi
+
+  if openssl x509 -noout -checkend 2592000 -in "$cert_out" >/dev/null 2>&1; then
+    enddate="$(openssl x509 -noout -enddate -in "$cert_out" 2>/dev/null | sed 's/^notAfter=//')"
+    if [[ -n "$enddate" ]]; then
+      ok "public HTTPS certificate is valid for at least 30 days (expires: $enddate)"
+    else
+      ok "public HTTPS certificate is valid for at least 30 days"
+    fi
+  else
+    PUBLIC_CERT_FAILURE=1
+    fail "public HTTPS certificate expires within 30 days or cannot be parsed"
+  fi
+
+  rm -f "$cert_out" "$cert_err"
+}
+
+check_certificate_renewal_automation() {
+  local found=0
+
+  if have certbot; then
+    ok "certificate renewal tool detected: certbot; verify with: sudo certbot renew --dry-run"
+    found=1
+  fi
+
+  if have caddy || (have systemctl && systemctl is-active --quiet caddy 2>/dev/null); then
+    ok "certificate automation detected: Caddy; check renewal logs with: sudo journalctl -u caddy --since '24 hours ago'"
+    found=1
+  fi
+
+  if have docker && docker ps --format '{{.Names}} {{.Image}}' 2>/dev/null | grep -Eiq 'traefik'; then
+    ok "certificate automation detected: Traefik container; verify ACME storage and container logs before relying on renewal"
+    found=1
+  fi
+
+  if [[ "$found" -eq 0 ]]; then
+    warn "no local certificate renewal automation detected; if TLS is not managed by Cloudflare or another provider, configure Caddy, certbot timer, or Traefik ACME before public use"
+  fi
+}
+
+print_certificate_failure_guidance() {
+  local domain="$1"
+  note "certificate failure triage for $domain: verify DNS A/AAAA records, cloud firewall 80/443, HTTP-01 challenge reachability, reverse-proxy logs, and then rerun: sudo mnemonas-doctor --public-domain $domain"
+  if have certbot; then
+    note "certbot triage: sudo certbot renew --dry-run; sudo journalctl -u certbot --since '24 hours ago'"
+  fi
+  if have caddy || (have systemctl && systemctl is-active --quiet caddy 2>/dev/null); then
+    note "Caddy triage: sudo systemctl status caddy --no-pager; sudo journalctl -u caddy --since '24 hours ago'"
+  fi
+  if have docker; then
+    note "Traefik triage: docker logs <traefik-container>; confirm acme.json is writable and persisted"
+  fi
+}
+
 tcp_connectable() {
   local host="$1"
   local port="$2"
@@ -578,6 +704,13 @@ check_public_domain() {
   else
     fail "public HTTPS health not reachable: $public_health_url"
   fi
+  check_http_redirects_to_https "$domain"
+  PUBLIC_CERT_FAILURE=0
+  check_https_certificate "$domain"
+  check_certificate_renewal_automation
+  if [[ "$PUBLIC_CERT_FAILURE" -eq 1 ]]; then
+    print_certificate_failure_guidance "$domain"
+  fi
 
   check_http_unreachable "http://$domain:$SERVER_PORT/health" "public direct control plane"
   check_tcp_unreachable "$domain" "$DATAPLANE_GRPC_PORT" "public dataplane gRPC"
@@ -592,6 +725,8 @@ check_public_domain() {
   if [[ -f "$STORAGE_ROOT/.mnemonas/initial-password.txt" ]]; then
     fail "initial admin password file still exists; change the admin password before public access"
   fi
+
+  note "manual cloud firewall check: expose only 80/443 publicly; keep $SERVER_PORT/$DATAPLANE_GRPC_PORT/$DATAPLANE_HTTP_PORT closed to the public internet"
 }
 
 printf 'MnemoNAS deployment doctor\n'

@@ -52,6 +52,7 @@
   - 按时间/操作类型筛选
   - 操作详情查看
   - 活动统计报表
+  - 磁盘健康异常系统事件记录
 
 - **Users 用户管理**
   - 用户列表与状态
@@ -73,16 +74,24 @@
   - WebDAV 配置（启用开关、URL 前缀、只读模式、用户认证）
   - CDC 分块参数说明
   - 数据面连接状态
+  - 周期 Scrub 调度开关、常规间隔、失败重试间隔和最大重试次数配置
+  - 公网访问向导和安全自检入口，辅助配置 HTTPS 反向代理、受信代理跳数和分享域名
+  - 公网访问向导桌面与移动端 E2E 回归覆盖
 
 - **Health 健康状态**
   - 系统运行时间
   - 数据面连接状态
   - 存储健康检查
+  - 磁盘 SMART、温度、介质磨损、设备缺失和序列号漂移健康状态
+  - 周期 Scrub 调度、最近状态和失败重试状态
+  - SMB 预览运行态提示，避免把已配置共享误判为可挂载服务
 
 - **Maintenance 系统维护**
   - Scrub 数据完整性校验
   - GC 垃圾回收
   - 对象列表浏览
+  - 磁盘健康即时探测
+  - 备份任务健康状态、定时计划、快照保留策略和恢复演练状态
   - 诊断包导出
 
 #### 后端 API
@@ -106,16 +115,51 @@
   - 活动记录
   - 活动查询
   - 统计接口
+  - Scrub 数据校验系统事件记录
 
 - **系统设置 API**
   - 配置读取
   - 配置更新
+  - 公网访问安全自检
+  - 公网访问向导增加证书续期检查和失败排障提示
+  - 磁盘健康配置热更新
+  - 周期 Scrub 调度配置热更新
+  - 告警 Webhook、Telegram 与 SMTP 邮件通知配置热更新
+
+- **备份与恢复 API**
+  - 配置化本地备份任务与 restic/rclone 命令型远端目标
+  - 立即执行备份
+  - 轻量定时调度、自动备份时间窗、成功快照保留策略和任务健康状态
+  - 最近快照恢复演练与 manifest 校验；本地快照、restic 仓库和 rclone 远端可先生成恢复预览，再恢复到安全目录；恢复后只读校验和切换清单；远端保留策略提示与周期化恢复演练提醒；恢复演练缺失/过期时发送限频告警；恢复结果审计与历史记录；restic/rclone 任务支持远端一致性校验
+  - 备份失败、恢复演练失败和备份警告事件接入 Webhook/Telegram/SMTP 告警
+
+- **磁盘健康 API**
+  - `smartctl --json` 采集 SMART、自检状态、温度和通电时间
+  - 解析 NVMe 介质磨损、可用备用容量、critical warning、介质错误和常见 ATA 寿命属性
+  - 设备缺失、SMART 失败、温度过高和序列号不匹配会标记异常，并写入活动日志或通过 Webhook/Telegram/SMTP 发送 `disk_health` 事件
+
+- **Scrub 数据完整性事件**
+  - 手动 Scrub 完成后写入活动日志
+  - `[maintenance.scrub]` 支持后台周期 Scrub 和失败后的限次自动重试
+  - Settings API 和 Web 设置页可热更新周期 Scrub 调度配置
+  - 诊断接口返回周期 Scrub 配置、最近执行状态和失败重试计数
+  - Scrub 失败、发现对象异常或结果持久化不完整时，通过 Webhook/Telegram/SMTP 发送 `scrub_run` 事件
+
+- **安全告警事件**
+  - 登录失败触发限流时发送限频的 `login_rate_limited` warning 事件
+  - 登录限流告警只包含用户名和客户端地址，不包含密码或 token
+
+- **SMB 预览诊断**
+  - 诊断接口和诊断导出返回脱敏的 `smb` 预览状态、共享数量和运行态说明
+  - `nasd --check-config` 在 `smb.enabled=true` 时提示当前版本不会启动 SMB/Samba 监听器
 
 #### 项目工程化
 - GitHub Actions CI/CD 工作流（Go/Rust/Frontend 测试、Docker 构建）
 - Release 自动化工作流（多平台二进制构建、Docker 镜像发布）
 - Ubuntu/systemd 安装脚本，可将 release 包安装为 `mnemonas` 与 `mnemonas-dataplane` 服务
-- `mnemonas-doctor` 部署诊断脚本，检查二进制、配置、systemd、健康端点、端口、存储挂载与备份目录
+- `mnemonas-doctor` 部署诊断脚本，检查二进制、配置、systemd、健康端点、端口、存储挂载、备份目录、公网 HTTPS 证书状态、HTTP 到 HTTPS 跳转，并提示云安全组人工复核项
+- `mnemonas-public-setup` 公网 HTTPS 反向代理配置助手
+- Traefik 和 Cloudflare Tunnel 公网访问模板，并通过脚本检查避免开放后端和 dataplane 端口
 - `mnemonas-uninstall-systemd` 卸载脚本，默认保留配置和数据，删除数据需要显式确认
 - Docker Compose 启动前预检脚本，检查 Compose v2、Buildx、端口、目录权限、磁盘空间和已有配置
 - Docker 镜像内置 `mnemonas-healthcheck` 健康检查二进制，不再依赖运行时 `curl`
@@ -131,7 +175,7 @@
 
 #### 文档完善
 - Linux/systemd 部署指南，覆盖 ZFS/Btrfs/mdadm 分层、systemd 安装、网络、备份、升级和故障排查
-- 备份指南（3-2-1 策略、rclone/restic 配置、恢复流程）
+- 备份指南（3-2-1 策略、内置本地备份任务、恢复演练、rclone/restic 配置、恢复流程）
 - API 参考文档
 - README 徽章和快速开始指南
 - README、文档索引、主要专题文档、支持说明和安全策略提供中英文版本
@@ -155,12 +199,14 @@
 - Release archive 随包附带 README、支持说明和安全策略的中英文版本
 - 安全文档区分 Web UI 初始管理员密码与 WebDAV Basic Auth 自动密码
 - 安全文档和 doctor 明确提示 dataplane `9090/9091` 不应被防火墙放行到不可信网络
+- 新增公网云防火墙复核清单，覆盖常见云安全组、VPC 防火墙、IPv6 和端口转发误配置
 - 备份文档补充运行中数据的一致性窗口和快照建议
 - 优化 Files 页面表格列布局，新增操作列
 - 优化 Vite 代理配置，添加 `/health` 端点代理
 - 改进配置加载逻辑，支持配置路径传递
 
 ### Fixed
+- 修复通过设置 API 修改 `server.trusted_proxy_hops` 后，运行态请求来源和 HTTPS 转发语义识别未立即同步的问题
 - 防止 systemd 安装和 `nasd` 静态文件发现误把 Vite 源码目录当成已构建 Web UI
 - 修复 `.gitignore` / `.dockerignore` 中 `nasd` 规则过宽，避免忽略 `cmd/nasd` 下的新文件或 Docker 构建上下文
 - 修复 Docker 运行镜像依赖 `apt-get` 安装健康检查工具的问题

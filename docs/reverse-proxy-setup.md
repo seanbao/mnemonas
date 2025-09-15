@@ -20,6 +20,13 @@ sudo mnemonas-public-setup --proxy caddy nas.example.com admin@example.com
 
 systemd 安装会把源码中的 `scripts/setup-reverse-proxy.sh` 安装为 `mnemonas-public-setup`。脚本会设置 `server.host = "127.0.0.1"`、`trusted_proxy_hops = 1`、配置 Caddy/Nginx、调整本机 UFW 规则并运行基础检查。云厂商安全组仍需人工确认只开放 `80/443`，不要开放 `8080/9090/9091`。
 
+如果需要 Traefik 或 Cloudflare Tunnel，不建议临时拼命令；优先从仓库模板开始：
+
+- `deploy/public-access/traefik/`：Linux 主机上运行 Traefik，MnemoNAS 仍由 systemd 监听 `127.0.0.1:8080`。
+- `deploy/public-access/cloudflare-tunnel/config.yml`：无公网 IP 或希望通过 Cloudflare Tunnel 暴露 HTTPS 域名时使用。
+
+复制模板后至少替换 `nas.example.com`、ACME 邮箱或 tunnel ID，并继续运行 `sudo mnemonas-doctor --public-domain <domain>`。
+
 ## MnemoNAS 配置
 
 MnemoNAS 默认不信任 `X-Forwarded-*` 头。部署在受信反向代理后方时，需要在 `config.toml` 中设置代理层数：
@@ -207,7 +214,22 @@ sudo certbot renew --dry-run
 
 ---
 
-## 方案三：Docker Compose 一体化
+## 方案三：Traefik 模板
+
+仓库提供了更适合 systemd MnemoNAS 的 Traefik file-provider 模板：
+
+```bash
+cp -r deploy/public-access/traefik ./mnemonas-traefik
+cd ./mnemonas-traefik
+
+# 编辑 traefik.yml 中的 ACME 邮箱
+# 编辑 dynamic/mnemonas.yml 中的 nas.example.com
+docker compose up -d
+```
+
+模板使用 `network_mode: host`，让容器内 Traefik 可以访问宿主机上的 `127.0.0.1:8080`。公网只应开放 `80/443`；不要给 `8080/9090/9091` 增加端口映射或安全组放行。
+
+### Docker Compose 一体化示例
 
 如果 MnemoNAS 和反向代理都用 Docker，可以用 Traefik。
 
@@ -258,6 +280,20 @@ services:
 示例没有启用 Traefik insecure dashboard。若需要 Traefik 管理界面，请单独配置认证、HTTPS 和内网访问限制；不要在公网环境使用 `--api.insecure=true`。
 
 Traefik 需要读取 Docker socket 才能发现容器标签。`/var/run/docker.sock:/var/run/docker.sock:ro` 只限制挂载文件系统的写入，并不等同于低权限 API；更严格的公网部署建议使用 Docker socket proxy，或改用 Caddy/Nginx 这类静态反向代理配置。
+
+---
+
+## 方案四：Cloudflare Tunnel 模板
+
+没有公网 IP，或不想直接开放入站 `80/443` 时，可以使用 Cloudflare Tunnel：
+
+```bash
+cp deploy/public-access/cloudflare-tunnel/config.yml ./cloudflared-config.yml
+# 替换 tunnel、credentials-file 和 nas.example.com
+cloudflared tunnel run --config ./cloudflared-config.yml
+```
+
+Cloudflare Tunnel 模板把外部 HTTPS 域名转发到本机 `http://127.0.0.1:8080`，最后一条 ingress 固定为 `http_status:404`，避免未匹配主机名落到 MnemoNAS。即使使用隧道，也应保持 dataplane `9090/9091` 仅本机或受信私网可达。
 
 ---
 
@@ -335,11 +371,19 @@ bantime = 3600
 # 检查证书状态
 sudo certbot certificates
 
-# 手动续期
-sudo certbot renew
+# 续期演练
+sudo certbot renew --dry-run
 
-# Caddy 证书位置
+# 查看 certbot 定时任务和最近日志
+systemctl list-timers 'certbot*' 'snap.certbot*'
+journalctl -u certbot --since '24 hours ago'
+
+# Caddy 证书位置与续期日志
 ls ~/.local/share/caddy/certificates/
+journalctl -u caddy --since '24 hours ago'
+
+# 统一复核证书 hostname、30 天有效期、续期提示和端口暴露
+sudo mnemonas-doctor --public-domain nas.example.com
 ```
 
 ### 连接超时

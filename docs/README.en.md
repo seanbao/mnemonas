@@ -16,7 +16,8 @@ Welcome to the MnemoNAS documentation. This directory contains usage guides, dep
 | [Public server quickstart](public-server-quickstart.en.md) | Recommended path for public domains, HTTPS, reverse proxy, and safety checks |
 | [Docker deployment](docker-deployment.en.md) | Deploy MnemoNAS with Docker Compose |
 | [Mounting guide](mounting-guide.en.md) | WebDAV mounting instructions for common platforms |
-| [Reverse proxy setup](reverse-proxy-setup.en.md) | HTTPS public entry setup with Caddy, Nginx, or Traefik |
+| [Reverse proxy setup](reverse-proxy-setup.en.md) | HTTPS public entry setup with Caddy, Nginx, Traefik, or Cloudflare Tunnel |
+| [Public cloud firewall checklist](cloud-firewall-checklist.en.md) | Cloud security group, VPC firewall, and port exposure review |
 
 ### User Guides
 

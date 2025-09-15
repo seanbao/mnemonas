@@ -79,6 +79,154 @@ docker compose stop
 docker compose start
 ```
 
+### 方法 0：内置备份任务
+
+MnemoNAS 提供内置备份任务入口，可在维护页或 API 中执行、查看健康状态和触发恢复演练。任务类型支持：
+
+- `local`：把来源目录复制成带 `manifest.json` 的本地快照，适合外置硬盘、已挂载 NAS 目录或文件系统快照挂载点。
+- `restic`：调用系统中的 `restic` 可执行文件，把来源目录写入 restic 仓库。
+- `rclone`：调用系统中的 `rclone` 可执行文件，把来源目录同步到 rclone remote。
+
+限制：
+
+- `local.destination` 必须是 `storage.root` 之外的绝对路径，避免递归把备份写回源目录。
+- 默认来源是 `storage.root`；生产环境更推荐把 `source` 指向 ZFS/Btrfs/LVM 快照挂载目录。
+- 源目录中遇到符号链接会中止任务，避免备份逃逸到源目录之外。
+- `restic` 和 `rclone` 任务不会通过 shell 拼接命令；`command` 只能是可执行名或绝对路径，`extra_args` 会作为 argv 追加到备份命令，恢复命令不会复用备份专用参数。
+- `password_file`、`config_file` 必须是 `source` 与 `storage.root` 之外的普通文件，避免把备份凭据重新纳入备份数据。
+- `schedule_interval` 是服务内置的轻量调度器，适合固定间隔任务；复杂窗口、限速、网络唤醒和多阶段恢复仍建议配合 systemd timer 或外部编排。
+
+本地快照示例：
+
+```toml
+[backup]
+
+[[backup.jobs]]
+id = "external-disk"
+name = "外置硬盘备份"
+type = "local"
+source = ""                                # 留空表示 storage.root
+destination = "/mnt/backup-drive/mnemonas" # 不能位于 storage.root 内
+disabled = false
+schedule_interval = "24h"                  # 每 24 小时自动执行；0 或留空表示仅手动执行
+schedule_window_start = "02:00"            # 可选；自动任务只在服务器本地时间窗口内启动
+schedule_window_end = "05:00"              # 支持跨午夜，例如 22:00 到 06:00
+stale_after = "72h"                        # 超过 72 小时无成功备份时显示过期
+restore_drill_stale_after = "720h"         # 超过 30 天无成功恢复演练时提醒
+max_snapshots = 7                          # 最多保留 7 个快照
+max_age = "720h"                           # 快照最长保留 30 天
+include_config = true
+verify_after_backup = true
+exclude = [".mnemonas/thumbnails"]
+```
+
+restic 示例：
+
+```toml
+[[backup.jobs]]
+id = "restic-remote"
+name = "Restic 加密备份"
+type = "restic"
+source = "/mnt/snapshots/mnemonas-latest"
+repository = "rest:http://backup.example:8000/mnemonas"
+command = "restic"
+password_file = "/etc/mnemonas/restic.pass"
+schedule_interval = "24h"
+schedule_window_start = "02:00"
+schedule_window_end = "05:00"
+stale_after = "72h"
+restore_drill_stale_after = "720h"
+retention_policy = "external: restic forget --keep-daily 7 --keep-weekly 4 --prune"
+verify_after_backup = true
+exclude = [".mnemonas/thumbnails"]
+extra_args = ["--compression", "max"]
+```
+
+rclone 示例：
+
+```toml
+[[backup.jobs]]
+id = "rclone-cloud"
+name = "Rclone 云端同步"
+type = "rclone"
+source = "/mnt/snapshots/mnemonas-latest"
+remote = "cloud:mnemonas/current"
+command = "rclone"
+config_file = "/etc/mnemonas/rclone.conf"
+schedule_interval = "24h"
+schedule_window_start = "02:00"
+schedule_window_end = "05:00"
+stale_after = "72h"
+restore_drill_stale_after = "720h"
+retention_policy = "external: cloud lifecycle keeps 30 daily versions"
+verify_after_backup = true
+exclude = [".mnemonas/thumbnails"]
+extra_args = ["--fast-list"]
+```
+
+`schedule_window_start`/`schedule_window_end` 只限制自动调度，手动“立即备份”不受影响。窗口使用服务器本地时间的 `HH:MM`，可以跨午夜。`local` 保留策略在成功备份后执行，始终保留当前快照；`max_snapshots = 0` 和 `max_age = "0"` 表示不启用对应维度的自动清理。`restic` 和 `rclone` 的保留策略由外部工具管理，例如 `restic forget --prune`、systemd timer 或 rclone 目标端生命周期规则；配置 `retention_policy` 后，维护页会把该任务标记为“远端保留策略已确认”，否则显示需要确认。`restore_drill_stale_after` 控制定期恢复演练提醒；未配置时默认 30 天。维护页会显示任务健康状态、保留策略状态、恢复演练状态、下次自动运行时间、自动窗口、最近备份、最近恢复目标和最近清理的旧快照数量。恢复历史默认保留最近 20 条，失败恢复也会记录错误信息。
+
+重启服务后可通过维护 API 执行：
+
+```bash
+# 查看任务
+curl -b cookies.txt http://localhost:8080/api/v1/maintenance/backups
+
+# 立即执行备份
+curl -X POST -b cookies.txt http://localhost:8080/api/v1/maintenance/backups/external-disk/run
+
+# 执行恢复演练或远端校验；local 默认临时恢复目录会在校验后删除
+curl -X POST -b cookies.txt \
+  http://localhost:8080/api/v1/maintenance/backups/external-disk/restore-drill \
+  -H 'Content-Type: application/json' \
+  -d '{"keep_artifact":false}'
+```
+
+`local` 恢复演练会把最近一次快照复制到临时目录，然后按 manifest 校验每个文件的大小和 SHA-256。`keep_artifact = true` 会保留临时恢复目录，便于人工抽查。`restic` 恢复演练当前执行 `restic check`；`rclone` 恢复演练当前执行 `rclone check --one-way`，用于验证仓库或远端一致性。
+
+需要真正取回数据时，`local`、`restic` 和 `rclone` 任务可以恢复到指定的独立目录：
+
+```bash
+# 先预览：校验目标目录安全性，并确认预计恢复的文件数、字节数和样例路径
+curl -X POST -b cookies.txt \
+  http://localhost:8080/api/v1/maintenance/backups/external-disk/restore-preview \
+  -H 'Content-Type: application/json' \
+  -d '{"target_path":"/mnt/restore/mnemonas","include_config":true}'
+
+curl -X POST -b cookies.txt \
+  http://localhost:8080/api/v1/maintenance/backups/external-disk/restore \
+  -H 'Content-Type: application/json' \
+  -d '{"target_path":"/mnt/restore/mnemonas","include_config":true}'
+
+# 恢复后检查：只读统计目标目录，并识别是否像完整 storage.root
+curl -X POST -b cookies.txt \
+  http://localhost:8080/api/v1/maintenance/backups/external-disk/restore-verify \
+  -H 'Content-Type: application/json' \
+  -d '{"target_path":"/mnt/restore/mnemonas"}'
+
+# rclone 任务示例：从 remote 复制到独立目录，并在安装前执行 rclone check
+curl -X POST -b cookies.txt \
+  http://localhost:8080/api/v1/maintenance/backups/rclone-cloud/restore \
+  -H 'Content-Type: application/json' \
+  -d '{"target_path":"/mnt/restore/mnemonas-rclone","include_config":false}'
+
+# restic 任务示例：恢复 latest + job tag，并把来源目录内容安装到目标根目录
+curl -X POST -b cookies.txt \
+  http://localhost:8080/api/v1/maintenance/backups/restic-cloud/restore \
+  -H 'Content-Type: application/json' \
+  -d '{"target_path":"/mnt/restore/mnemonas-restic","include_config":false}'
+```
+
+`restore-preview` 不会写入目标目录，也不会写入恢复历史。它会复用恢复目标安全校验，并返回预计文件数、字节数和最多 10 个样例路径；维护页会要求当前目标目录和配置选项已经成功预览后才允许开始恢复。`target_path` 必须是服务器上的绝对路径，并且必须位于当前 `storage.root`、备份来源和本地备份目标/仓库之外；父目录必须已存在，目标目录不存在或为空。`local` 恢复会把快照中的 `data/` 内容复制到目标目录根部并立即校验；`include_config = true` 时，配置文件会恢复到 `target_path/.mnemonas-restore/config.toml`。`restic` 恢复预览使用 `restic ls --json`，实际恢复执行 `restic restore latest --tag mnemonas --tag job:<id> --path <source>`，并把 restic 默认恢复出的来源目录内容整理到目标根目录。`rclone` 恢复预览使用 `rclone lsjson`，实际恢复执行 `rclone copy` 和 `rclone check --one-way`。恢复完成后，`restore-verify` 会只读检查目标目录，返回文件数、字节数、配置文件是否存在、是否检测到 `files/` 与 `.mnemonas/` 等完整 storage root 结构，并把符号链接、非常规文件或结构不完整情况作为警告返回。维护页会在恢复成功后自动进入恢复后切换清单。
+
+切换建议：
+
+1. 确认 `restore-verify` 没有无法解释的警告；如果恢复的是整个 MnemoNAS 存储根目录，应看到 `files/` 和 `.mnemonas/`。
+2. 将当前配置文件和当前 `storage.root` 保留为回滚点。
+3. 停止 `mnemonas` 和 `mnemonas-dataplane`，把 `storage.root` 指向恢复目录，或把恢复目录迁移到正式挂载点。
+4. 启动服务后检查健康端点、登录、文件列表、上传、下载和版本历史。
+5. 确认新目录可用后再清理旧目录；如果失败，恢复旧配置并指回旧 `storage.root`。
+
 ### 方法 1：使用 rclone
 
 [rclone](https://rclone.org/) 是强大的命令行同步工具，支持数十种云存储。
@@ -250,7 +398,8 @@ docker compose start
 # systemd 示例：恢复到临时目录
 sudo systemctl stop mnemonas mnemonas-dataplane
 sudo mkdir -p /srv/mnemonas-restored
-sudo rclone sync aliyun:mnemonas-backup/current /srv/mnemonas-restored
+sudo rclone copy aliyun:mnemonas-backup/current /srv/mnemonas-restored
+sudo rclone check aliyun:mnemonas-backup/current /srv/mnemonas-restored --one-way
 
 # 验证后替换原目录
 sudo mv /srv/mnemonas /srv/mnemonas-old
@@ -272,6 +421,8 @@ restic restore <snapshot-id> \
     --repo /backup/mnemonas-restic \
     --target /restore/mnemonas
 ```
+
+通过 MnemoNAS 维护页或 `/api/v1/maintenance/backups/{id}/restore` 恢复 restic 任务时，服务会自动使用 `mnemonas` 与 `job:<id>` tag 选择最近快照，并把 restic 默认生成的原始来源路径整理为目标目录根部，避免手动移动 `/restore/.../srv/mnemonas` 这类嵌套路径。
 
 如果恢复目标是 Docker 的宿主机目录，把上面的服务命令替换为 `docker compose stop` / `docker compose start`，并确认目录所有者与 `.env` 中的 `MNEMONAS_UID` / `MNEMONAS_GID` 一致。
 
@@ -326,7 +477,18 @@ rclone config
 
 ### 备份监控
 
-设置备份失败告警：
+内置 `[[backup.jobs]]` 会复用 `[alerts]` 通知通道：当备份失败、恢复演练失败、恢复演练超过 `restore_drill_stale_after` 后仍缺失或过期，或成功备份带有保留策略清理警告时，会发送 `backup_run` 或 `backup_restore_drill` 事件。恢复演练提醒会限频发送，并在任务视图中记录 `last_restore_drill_reminder_at`。可使用 Webhook，也可启用 SMTP 邮件。Webhook 启用方式：
+
+```toml
+[alerts]
+enabled = true
+webhook_url = "https://your-webhook.example/alert"
+webhook_method = "POST"
+```
+
+`POST` 会发送 JSON body，包含 `type`、`level`、`message`、`timestamp`、`hostname` 和 `details`；`details` 中包含任务 ID、任务名、运行 ID、状态、错误信息和快照路径等字段。`GET` 模式会把同样的基础字段编码进 query，并把 `details` 作为 JSON 字符串。
+
+外部 restic/rclone 脚本仍建议保留失败告警：
 
 ```bash
 # backup.sh 开头添加；set -e 退出时也能触发

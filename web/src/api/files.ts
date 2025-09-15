@@ -64,6 +64,38 @@ export interface HealthStatus {
   }
 }
 
+export interface DiskHealthDeviceStatus {
+  name?: string
+  path: string
+  type?: string
+  expectedSerial?: string
+  serial?: string
+  model?: string
+  present: boolean
+  smartAvailable: boolean
+  smartPassed?: boolean
+  temperatureC?: number
+  powerOnHours?: number
+  wearPercentUsed?: number
+  availableSparePercent?: number
+  availableSpareThresholdPercent?: number
+  mediaErrors?: number
+  nvmeCriticalWarning?: number
+  status: string
+  message?: string
+  temperatureWarningC?: number
+  temperatureCriticalC?: number
+}
+
+export interface DiskHealthReport {
+  enabled: boolean
+  status: string
+  checkedAt: string
+  devices: DiskHealthDeviceStatus[]
+  warnings?: string[]
+  message?: string
+}
+
 export interface DiagnosticsInfo {
   timestamp: string
   uptime: string
@@ -74,8 +106,10 @@ export interface DiagnosticsInfo {
     dataplaneConnected?: boolean
     thumbnailServiceReady?: boolean
     maintenanceHistoryReady?: boolean
+    backupManagerReady?: boolean
     activityLogReady?: boolean
     favoritesStoreReady?: boolean
+    smbRuntimeReady?: boolean
   }
   memory?: {
     allocMb?: number
@@ -105,11 +139,55 @@ export interface DiagnosticsInfo {
     minFreeBytes?: number
     cooldownPeriod?: string
     webhookConfigured?: boolean
+    telegramConfigured?: boolean
+    emailConfigured?: boolean
     webhookMethod?: string
     lastLevel?: string
     lastCheckedAt?: string
     lastUsedPct?: number
     lastFreeBytes?: number
+  }
+  maintenance?: {
+    historyReady?: boolean
+    scrubScheduleEnabled?: boolean
+    scrubScheduleInterval?: string
+    scrubRetryInterval?: string
+    scrubMaxRetries?: number
+    lastScrubStatus?: string
+    lastScrubAt?: string
+    scrubFailureRetries?: number
+  }
+  diskHealth?: {
+    enabled?: boolean
+    runtimeAvailable?: boolean
+    checkInterval?: string
+    probeTimeout?: string
+    cooldownPeriod?: string
+    temperatureWarningC?: number
+    temperatureCriticalC?: number
+    mediaWearWarningPercent?: number
+    mediaWearCriticalPercent?: number
+    deviceCount?: number
+    lastStatus?: string
+    lastCheckedAt?: string
+    lastWarningCount?: number
+    lastDeviceCount?: number
+    lastCriticalDevices?: number
+    lastWarningDevices?: number
+    lastUnavailableDevices?: number
+  }
+  smb?: {
+    enabled?: boolean
+    runtimeAvailable?: boolean
+    implementation?: string
+    listen?: string
+    serverName?: string
+    signingRequired?: boolean
+    encryptionRequired?: boolean
+    shareCount?: number
+    credentialsReady?: boolean
+    gatewayConfigured?: boolean
+    message?: string
   }
   storage?: {
     totalChunks?: number
@@ -544,6 +622,90 @@ function isHealthShape(value: unknown): value is HealthStatus {
   return true
 }
 
+function isDiskHealthDeviceShape(value: unknown): value is {
+  name?: string
+  path: string
+  type?: string
+  expected_serial?: string
+  serial?: string
+  model?: string
+  present: boolean
+  smart_available: boolean
+  smart_passed?: boolean
+  temperature_c?: number
+  power_on_hours?: number
+  wear_percent_used?: number
+  available_spare_percent?: number
+  available_spare_threshold_percent?: number
+  media_errors?: number
+  nvme_critical_warning?: number
+  status: string
+  message?: string
+  temperature_warning_c?: number
+  temperature_critical_c?: number
+} {
+  return isRecord(value)
+    && isStringOrUndefined(value.name)
+    && typeof value.path === 'string'
+    && isStringOrUndefined(value.type)
+    && isStringOrUndefined(value.expected_serial)
+    && isStringOrUndefined(value.serial)
+    && isStringOrUndefined(value.model)
+    && typeof value.present === 'boolean'
+    && typeof value.smart_available === 'boolean'
+    && isBooleanOrUndefined(value.smart_passed)
+    && isNumberOrUndefined(value.temperature_c)
+    && isNumberOrUndefined(value.power_on_hours)
+    && isNumberOrUndefined(value.wear_percent_used)
+    && isNumberOrUndefined(value.available_spare_percent)
+    && isNumberOrUndefined(value.available_spare_threshold_percent)
+    && isNumberOrUndefined(value.media_errors)
+    && isNumberOrUndefined(value.nvme_critical_warning)
+    && typeof value.status === 'string'
+    && isStringOrUndefined(value.message)
+    && isNumberOrUndefined(value.temperature_warning_c)
+    && isNumberOrUndefined(value.temperature_critical_c)
+}
+
+function isDiskHealthReportShape(value: unknown): value is {
+  enabled: boolean
+  status: string
+  checked_at: string
+  devices: Array<{
+    name?: string
+    path: string
+    type?: string
+    expected_serial?: string
+    serial?: string
+    model?: string
+    present: boolean
+    smart_available: boolean
+    smart_passed?: boolean
+    temperature_c?: number
+    power_on_hours?: number
+    wear_percent_used?: number
+    available_spare_percent?: number
+    available_spare_threshold_percent?: number
+    media_errors?: number
+    nvme_critical_warning?: number
+    status: string
+    message?: string
+    temperature_warning_c?: number
+    temperature_critical_c?: number
+  }>
+  warnings?: string[]
+  message?: string
+} {
+  return isRecord(value)
+    && typeof value.enabled === 'boolean'
+    && typeof value.status === 'string'
+    && typeof value.checked_at === 'string'
+    && Array.isArray(value.devices)
+    && value.devices.every(isDiskHealthDeviceShape)
+    && (value.warnings === undefined || (Array.isArray(value.warnings) && value.warnings.every((item) => typeof item === 'string')))
+    && isStringOrUndefined(value.message)
+}
+
 function isBooleanOrUndefined(value: unknown): value is boolean | undefined {
   return value === undefined || typeof value === 'boolean'
 }
@@ -566,8 +728,10 @@ function isDiagnosticsShape(value: unknown): value is {
     dataplane_connected?: boolean
     thumbnail_service_ready?: boolean
     maintenance_history_ready?: boolean
+    backup_manager_ready?: boolean
     activity_log_ready?: boolean
     favorites_store_ready?: boolean
+    smb_runtime_ready?: boolean
   }
   memory?: {
     alloc_mb?: number
@@ -597,11 +761,55 @@ function isDiagnosticsShape(value: unknown): value is {
     min_free_bytes?: number
     cooldown_period?: string
     webhook_configured?: boolean
+    telegram_configured?: boolean
+    email_configured?: boolean
     webhook_method?: string
     last_level?: string
     last_checked_at?: string
     last_used_pct?: number
     last_free_bytes?: number
+  }
+  maintenance?: {
+    history_ready?: boolean
+    scrub_schedule_enabled?: boolean
+    scrub_schedule_interval?: string
+    scrub_retry_interval?: string
+    scrub_max_retries?: number
+    last_scrub_status?: string
+    last_scrub_at?: string
+    scrub_failure_retries?: number
+  }
+  disk_health?: {
+    enabled?: boolean
+    runtime_available?: boolean
+    check_interval?: string
+    probe_timeout?: string
+    cooldown_period?: string
+    temperature_warning_c?: number
+    temperature_critical_c?: number
+    media_wear_warning_percent?: number
+    media_wear_critical_percent?: number
+    device_count?: number
+    last_status?: string
+    last_checked_at?: string
+    last_warning_count?: number
+    last_device_count?: number
+    last_critical_devices?: number
+    last_warning_devices?: number
+    last_unavailable_devices?: number
+  }
+  smb?: {
+    enabled?: boolean
+    runtime_available?: boolean
+    implementation?: string
+    listen?: string
+    server_name?: string
+    signing_required?: boolean
+    encryption_required?: boolean
+    share_count?: number
+    credentials_ready?: boolean
+    gateway_configured?: boolean
+    message?: string
   }
   storage?: {
     total_chunks?: number
@@ -629,8 +837,10 @@ function isDiagnosticsShape(value: unknown): value is {
       || !isBooleanOrUndefined(value.system.dataplane_connected)
       || !isBooleanOrUndefined(value.system.thumbnail_service_ready)
       || !isBooleanOrUndefined(value.system.maintenance_history_ready)
+      || !isBooleanOrUndefined(value.system.backup_manager_ready)
       || !isBooleanOrUndefined(value.system.activity_log_ready)
-      || !isBooleanOrUndefined(value.system.favorites_store_ready)) {
+      || !isBooleanOrUndefined(value.system.favorites_store_ready)
+      || !isBooleanOrUndefined(value.system.smb_runtime_ready)) {
       return false
     }
   }
@@ -671,11 +881,67 @@ function isDiagnosticsShape(value: unknown): value is {
       || !isNumberOrUndefined(value.alerts.min_free_bytes)
       || !isStringOrUndefined(value.alerts.cooldown_period)
       || !isBooleanOrUndefined(value.alerts.webhook_configured)
+      || !isBooleanOrUndefined(value.alerts.telegram_configured)
+      || !isBooleanOrUndefined(value.alerts.email_configured)
       || !isStringOrUndefined(value.alerts.webhook_method)
       || !isStringOrUndefined(value.alerts.last_level)
       || !isStringOrUndefined(value.alerts.last_checked_at)
       || !isNumberOrUndefined(value.alerts.last_used_pct)
       || !isNumberOrUndefined(value.alerts.last_free_bytes)) {
+      return false
+    }
+  }
+
+  if (value.maintenance !== undefined) {
+    if (!isRecord(value.maintenance)
+      || !isBooleanOrUndefined(value.maintenance.history_ready)
+      || !isBooleanOrUndefined(value.maintenance.scrub_schedule_enabled)
+      || !isStringOrUndefined(value.maintenance.scrub_schedule_interval)
+      || !isStringOrUndefined(value.maintenance.scrub_retry_interval)
+      || !isNumberOrUndefined(value.maintenance.scrub_max_retries)
+      || !isStringOrUndefined(value.maintenance.last_scrub_status)
+      || !isStringOrUndefined(value.maintenance.last_scrub_at)
+      || !isNumberOrUndefined(value.maintenance.scrub_failure_retries)) {
+      return false
+    }
+  }
+
+  if (value.disk_health !== undefined) {
+    if (!isRecord(value.disk_health)
+      || !isBooleanOrUndefined(value.disk_health.enabled)
+      || !isBooleanOrUndefined(value.disk_health.runtime_available)
+      || !isStringOrUndefined(value.disk_health.check_interval)
+      || !isStringOrUndefined(value.disk_health.probe_timeout)
+      || !isStringOrUndefined(value.disk_health.cooldown_period)
+      || !isNumberOrUndefined(value.disk_health.temperature_warning_c)
+      || !isNumberOrUndefined(value.disk_health.temperature_critical_c)
+      || !isNumberOrUndefined(value.disk_health.media_wear_warning_percent)
+      || !isNumberOrUndefined(value.disk_health.media_wear_critical_percent)
+      || !isNumberOrUndefined(value.disk_health.device_count)
+      || !isStringOrUndefined(value.disk_health.last_status)
+      || !isStringOrUndefined(value.disk_health.last_checked_at)
+      || !isNumberOrUndefined(value.disk_health.last_warning_count)
+      || !isNumberOrUndefined(value.disk_health.last_device_count)
+      || !isNumberOrUndefined(value.disk_health.last_critical_devices)
+      || !isNumberOrUndefined(value.disk_health.last_warning_devices)
+      || !isNumberOrUndefined(value.disk_health.last_unavailable_devices)) {
+      return false
+    }
+  }
+
+  if (value.smb !== undefined) {
+    if (!isRecord(value.smb)
+      || !isBooleanOrUndefined(value.smb.enabled)
+      || !isBooleanOrUndefined(value.smb.runtime_available)
+      || !isStringOrUndefined(value.smb.implementation)
+      || !isStringOrUndefined(value.smb.listen)
+      || !isStringOrUndefined(value.smb.server_name)
+      || !isBooleanOrUndefined(value.smb.signing_required)
+      || !isBooleanOrUndefined(value.smb.encryption_required)
+      || !isNumberOrUndefined(value.smb.share_count)
+      || !isBooleanOrUndefined(value.smb.credentials_ready)
+      || !isBooleanOrUndefined(value.smb.gateway_configured)
+      || !isStringOrUndefined(value.smb.message)) {
       return false
     }
   }
@@ -764,6 +1030,287 @@ function isRunScrubResponseShape(value: unknown): value is Omit<ScrubResult, 'ha
     ...value,
   }
   return isScrubResultShape(candidate)
+}
+
+export type BackupTaskStatus = 'running' | 'completed' | 'failed'
+
+export interface BackupRunResult {
+  id: string
+  job_id: string
+  status: BackupTaskStatus
+  started_at: string
+  finished_at?: string
+  duration_ms: number
+  source: string
+  destination: string
+  snapshot_path?: string
+  manifest_path?: string
+  file_count: number
+  total_bytes: number
+  config_included: boolean
+  trigger?: string
+  warning?: boolean
+  warnings?: string[]
+  pruned_snapshots?: number
+  error_message?: string
+}
+
+export interface BackupRestoreDrillResult {
+  id: string
+  job_id: string
+  status: BackupTaskStatus
+  started_at: string
+  finished_at?: string
+  duration_ms: number
+  snapshot_path?: string
+  manifest_path?: string
+  restored_path?: string
+  artifact_kept: boolean
+  file_count: number
+  verified_bytes: number
+  error_message?: string
+}
+
+export interface BackupRestoreResult {
+  id: string
+  job_id: string
+  status: BackupTaskStatus
+  started_at: string
+  finished_at?: string
+  duration_ms: number
+  snapshot_path?: string
+  manifest_path?: string
+  target_path: string
+  config_restored: boolean
+  config_path?: string
+  file_count: number
+  verified_bytes: number
+  error_message?: string
+}
+
+export interface BackupRestorePreviewResult {
+  id: string
+  job_id: string
+  status: BackupTaskStatus
+  started_at: string
+  finished_at?: string
+  duration_ms: number
+  source: string
+  destination: string
+  snapshot_path?: string
+  manifest_path?: string
+  target_path: string
+  file_count: number
+  total_bytes: number
+  config_available: boolean
+  config_included: boolean
+  sample_paths?: string[]
+  error_message?: string
+}
+
+export interface BackupRestoreVerifyResult {
+  id: string
+  job_id: string
+  status: BackupTaskStatus
+  started_at: string
+  finished_at?: string
+  duration_ms: number
+  source: string
+  destination: string
+  target_path: string
+  file_count: number
+  verified_bytes: number
+  config_path?: string
+  config_found: boolean
+  files_dir_found: boolean
+  internal_dir_found: boolean
+  index_found: boolean
+  objects_dir_found: boolean
+  looks_like_storage_root: boolean
+  warnings?: string[]
+  error_message?: string
+}
+
+export interface BackupJob {
+  id: string
+  name: string
+  type: string
+  source: string
+  destination: string
+  repository?: string
+  remote?: string
+  command?: string
+  disabled: boolean
+  schedule_interval?: string
+  schedule_window_start?: string
+  schedule_window_end?: string
+  next_run_at?: string
+  stale_after?: string
+  restore_drill_stale_after?: string
+  max_snapshots?: number
+  max_age?: string
+  retention_policy?: string
+  retention_status: string
+  retention_message?: string
+  health_status: string
+  health_message?: string
+  restore_drill_status: string
+  restore_drill_message?: string
+  last_restore_drill_reminder_at?: string
+  include_config: boolean
+  verify_after_backup: boolean
+  exclude: string[]
+  running: boolean
+  last_run?: BackupRunResult
+  last_successful_run?: BackupRunResult
+  last_restore_drill?: BackupRestoreDrillResult
+  last_restore?: BackupRestoreResult
+  restore_history?: BackupRestoreResult[]
+}
+
+function isBackupStatus(value: unknown): value is BackupTaskStatus {
+  return value === 'running' || value === 'completed' || value === 'failed'
+}
+
+function isBackupRunResultShape(value: unknown): value is BackupRunResult {
+  return isRecord(value)
+    && typeof value.id === 'string'
+    && typeof value.job_id === 'string'
+    && isBackupStatus(value.status)
+    && typeof value.started_at === 'string'
+    && isStringOrUndefined(value.finished_at)
+    && typeof value.duration_ms === 'number'
+    && typeof value.source === 'string'
+    && typeof value.destination === 'string'
+    && isStringOrUndefined(value.snapshot_path)
+    && isStringOrUndefined(value.manifest_path)
+    && typeof value.file_count === 'number'
+    && typeof value.total_bytes === 'number'
+    && typeof value.config_included === 'boolean'
+    && isStringOrUndefined(value.trigger)
+    && isBooleanOrUndefined(value.warning)
+    && (value.warnings === undefined || (Array.isArray(value.warnings) && value.warnings.every((entry) => typeof entry === 'string')))
+    && isNumberOrUndefined(value.pruned_snapshots)
+    && isStringOrUndefined(value.error_message)
+}
+
+function isBackupRestoreDrillResultShape(value: unknown): value is BackupRestoreDrillResult {
+  return isRecord(value)
+    && typeof value.id === 'string'
+    && typeof value.job_id === 'string'
+    && isBackupStatus(value.status)
+    && typeof value.started_at === 'string'
+    && isStringOrUndefined(value.finished_at)
+    && typeof value.duration_ms === 'number'
+    && isStringOrUndefined(value.snapshot_path)
+    && isStringOrUndefined(value.manifest_path)
+    && isStringOrUndefined(value.restored_path)
+    && typeof value.artifact_kept === 'boolean'
+    && typeof value.file_count === 'number'
+    && typeof value.verified_bytes === 'number'
+    && isStringOrUndefined(value.error_message)
+}
+
+function isBackupRestoreResultShape(value: unknown): value is BackupRestoreResult {
+  return isRecord(value)
+    && typeof value.id === 'string'
+    && typeof value.job_id === 'string'
+    && isBackupStatus(value.status)
+    && typeof value.started_at === 'string'
+    && isStringOrUndefined(value.finished_at)
+    && typeof value.duration_ms === 'number'
+    && isStringOrUndefined(value.snapshot_path)
+    && isStringOrUndefined(value.manifest_path)
+    && typeof value.target_path === 'string'
+    && typeof value.config_restored === 'boolean'
+    && isStringOrUndefined(value.config_path)
+    && typeof value.file_count === 'number'
+    && typeof value.verified_bytes === 'number'
+    && isStringOrUndefined(value.error_message)
+}
+
+function isBackupRestorePreviewResultShape(value: unknown): value is BackupRestorePreviewResult {
+  return isRecord(value)
+    && typeof value.id === 'string'
+    && typeof value.job_id === 'string'
+    && isBackupStatus(value.status)
+    && typeof value.started_at === 'string'
+    && isStringOrUndefined(value.finished_at)
+    && typeof value.duration_ms === 'number'
+    && typeof value.source === 'string'
+    && typeof value.destination === 'string'
+    && isStringOrUndefined(value.snapshot_path)
+    && isStringOrUndefined(value.manifest_path)
+    && typeof value.target_path === 'string'
+    && typeof value.file_count === 'number'
+    && typeof value.total_bytes === 'number'
+    && typeof value.config_available === 'boolean'
+    && typeof value.config_included === 'boolean'
+    && (value.sample_paths === undefined || (Array.isArray(value.sample_paths) && value.sample_paths.every((entry) => typeof entry === 'string')))
+    && isStringOrUndefined(value.error_message)
+}
+
+function isBackupRestoreVerifyResultShape(value: unknown): value is BackupRestoreVerifyResult {
+  return isRecord(value)
+    && typeof value.id === 'string'
+    && typeof value.job_id === 'string'
+    && isBackupStatus(value.status)
+    && typeof value.started_at === 'string'
+    && isStringOrUndefined(value.finished_at)
+    && typeof value.duration_ms === 'number'
+    && typeof value.source === 'string'
+    && typeof value.destination === 'string'
+    && typeof value.target_path === 'string'
+    && typeof value.file_count === 'number'
+    && typeof value.verified_bytes === 'number'
+    && isStringOrUndefined(value.config_path)
+    && typeof value.config_found === 'boolean'
+    && typeof value.files_dir_found === 'boolean'
+    && typeof value.internal_dir_found === 'boolean'
+    && typeof value.index_found === 'boolean'
+    && typeof value.objects_dir_found === 'boolean'
+    && typeof value.looks_like_storage_root === 'boolean'
+    && (value.warnings === undefined || (Array.isArray(value.warnings) && value.warnings.every((entry) => typeof entry === 'string')))
+    && isStringOrUndefined(value.error_message)
+}
+
+function isBackupJobShape(value: unknown): value is BackupJob {
+  return isRecord(value)
+    && typeof value.id === 'string'
+    && typeof value.name === 'string'
+    && typeof value.type === 'string'
+    && typeof value.source === 'string'
+    && typeof value.destination === 'string'
+    && isStringOrUndefined(value.repository)
+    && isStringOrUndefined(value.remote)
+    && isStringOrUndefined(value.command)
+    && typeof value.disabled === 'boolean'
+    && isStringOrUndefined(value.schedule_interval)
+    && isStringOrUndefined(value.schedule_window_start)
+    && isStringOrUndefined(value.schedule_window_end)
+    && isStringOrUndefined(value.next_run_at)
+    && isStringOrUndefined(value.stale_after)
+    && isStringOrUndefined(value.restore_drill_stale_after)
+    && isNumberOrUndefined(value.max_snapshots)
+    && isStringOrUndefined(value.max_age)
+    && isStringOrUndefined(value.retention_policy)
+    && typeof value.retention_status === 'string'
+    && isStringOrUndefined(value.retention_message)
+    && typeof value.health_status === 'string'
+    && isStringOrUndefined(value.health_message)
+    && typeof value.restore_drill_status === 'string'
+    && isStringOrUndefined(value.restore_drill_message)
+    && isStringOrUndefined(value.last_restore_drill_reminder_at)
+    && typeof value.include_config === 'boolean'
+    && typeof value.verify_after_backup === 'boolean'
+    && Array.isArray(value.exclude)
+    && value.exclude.every((entry) => typeof entry === 'string')
+    && typeof value.running === 'boolean'
+    && (value.last_run === undefined || isBackupRunResultShape(value.last_run))
+    && (value.last_successful_run === undefined || isBackupRunResultShape(value.last_successful_run))
+    && (value.last_restore_drill === undefined || isBackupRestoreDrillResultShape(value.last_restore_drill))
+    && (value.last_restore === undefined || isBackupRestoreResultShape(value.last_restore))
+    && (value.restore_history === undefined || (Array.isArray(value.restore_history) && value.restore_history.every(isBackupRestoreResultShape)))
 }
 
 // List files in a directory
@@ -859,6 +1406,75 @@ export async function getHealth(): Promise<HealthStatus> {
   return body
 }
 
+function normalizeDiskHealthReport(data: {
+  enabled: boolean
+  status: string
+  checked_at: string
+  devices: Array<{
+    name?: string
+    path: string
+    type?: string
+    expected_serial?: string
+    serial?: string
+    model?: string
+    present: boolean
+    smart_available: boolean
+    smart_passed?: boolean
+    temperature_c?: number
+    power_on_hours?: number
+    wear_percent_used?: number
+    available_spare_percent?: number
+    available_spare_threshold_percent?: number
+    media_errors?: number
+    nvme_critical_warning?: number
+    status: string
+    message?: string
+    temperature_warning_c?: number
+    temperature_critical_c?: number
+  }>
+  warnings?: string[]
+  message?: string
+}): DiskHealthReport {
+  return {
+    enabled: data.enabled,
+    status: data.status,
+    checkedAt: data.checked_at,
+    devices: data.devices.map((device) => ({
+      name: device.name,
+      path: device.path,
+      type: device.type,
+      expectedSerial: device.expected_serial,
+      serial: device.serial,
+      model: device.model,
+      present: device.present,
+      smartAvailable: device.smart_available,
+      smartPassed: device.smart_passed,
+      temperatureC: device.temperature_c,
+      powerOnHours: device.power_on_hours,
+      wearPercentUsed: device.wear_percent_used,
+      availableSparePercent: device.available_spare_percent,
+      availableSpareThresholdPercent: device.available_spare_threshold_percent,
+      mediaErrors: device.media_errors,
+      nvmeCriticalWarning: device.nvme_critical_warning,
+      status: device.status,
+      message: device.message,
+      temperatureWarningC: device.temperature_warning_c,
+      temperatureCriticalC: device.temperature_critical_c,
+    })),
+    warnings: data.warnings,
+    message: data.message,
+  }
+}
+
+export async function getDiskHealth(): Promise<DiskHealthReport> {
+  const response = await authFetch(`${API_BASE}/maintenance/disk-health`)
+  const data = await handleWrappedResponse<unknown>(response, '获取磁盘健康失败')
+  if (!isDiskHealthReportShape(data)) {
+    throw new Error('服务器返回了无效的数据')
+  }
+  return normalizeDiskHealthReport(data)
+}
+
 export async function getAppVersion(): Promise<AppVersionInfo> {
   const response = await authFetch(`${API_BASE}/version`)
   const data = await handleWrappedResponse<unknown>(response, '获取版本信息失败')
@@ -885,8 +1501,10 @@ export async function getDiagnostics(): Promise<DiagnosticsInfo> {
       dataplaneConnected: data.system.dataplane_connected,
       thumbnailServiceReady: data.system.thumbnail_service_ready,
       maintenanceHistoryReady: data.system.maintenance_history_ready,
+      backupManagerReady: data.system.backup_manager_ready,
       activityLogReady: data.system.activity_log_ready,
       favoritesStoreReady: data.system.favorites_store_ready,
+      smbRuntimeReady: data.system.smb_runtime_ready,
     } : undefined,
     memory: data.memory ? {
       allocMb: data.memory.alloc_mb,
@@ -916,11 +1534,55 @@ export async function getDiagnostics(): Promise<DiagnosticsInfo> {
       minFreeBytes: data.alerts.min_free_bytes,
       cooldownPeriod: data.alerts.cooldown_period,
       webhookConfigured: data.alerts.webhook_configured,
+      telegramConfigured: data.alerts.telegram_configured,
+      emailConfigured: data.alerts.email_configured,
       webhookMethod: data.alerts.webhook_method,
       lastLevel: data.alerts.last_level,
       lastCheckedAt: data.alerts.last_checked_at,
       lastUsedPct: data.alerts.last_used_pct,
       lastFreeBytes: data.alerts.last_free_bytes,
+    } : undefined,
+    maintenance: data.maintenance ? {
+      historyReady: data.maintenance.history_ready,
+      scrubScheduleEnabled: data.maintenance.scrub_schedule_enabled,
+      scrubScheduleInterval: data.maintenance.scrub_schedule_interval,
+      scrubRetryInterval: data.maintenance.scrub_retry_interval,
+      scrubMaxRetries: data.maintenance.scrub_max_retries,
+      lastScrubStatus: data.maintenance.last_scrub_status,
+      lastScrubAt: data.maintenance.last_scrub_at,
+      scrubFailureRetries: data.maintenance.scrub_failure_retries,
+    } : undefined,
+    diskHealth: data.disk_health ? {
+      enabled: data.disk_health.enabled,
+      runtimeAvailable: data.disk_health.runtime_available,
+      checkInterval: data.disk_health.check_interval,
+      probeTimeout: data.disk_health.probe_timeout,
+      cooldownPeriod: data.disk_health.cooldown_period,
+      temperatureWarningC: data.disk_health.temperature_warning_c,
+      temperatureCriticalC: data.disk_health.temperature_critical_c,
+      mediaWearWarningPercent: data.disk_health.media_wear_warning_percent,
+      mediaWearCriticalPercent: data.disk_health.media_wear_critical_percent,
+      deviceCount: data.disk_health.device_count,
+      lastStatus: data.disk_health.last_status,
+      lastCheckedAt: data.disk_health.last_checked_at,
+      lastWarningCount: data.disk_health.last_warning_count,
+      lastDeviceCount: data.disk_health.last_device_count,
+      lastCriticalDevices: data.disk_health.last_critical_devices,
+      lastWarningDevices: data.disk_health.last_warning_devices,
+      lastUnavailableDevices: data.disk_health.last_unavailable_devices,
+    } : undefined,
+    smb: data.smb ? {
+      enabled: data.smb.enabled,
+      runtimeAvailable: data.smb.runtime_available,
+      implementation: data.smb.implementation,
+      listen: data.smb.listen,
+      serverName: data.smb.server_name,
+      signingRequired: data.smb.signing_required,
+      encryptionRequired: data.smb.encryption_required,
+      shareCount: data.smb.share_count,
+      credentialsReady: data.smb.credentials_ready,
+      gatewayConfigured: data.smb.gateway_configured,
+      message: data.smb.message,
     } : undefined,
     storage: data.storage ? {
       totalChunks: data.storage.total_chunks,
@@ -1311,6 +1973,86 @@ export async function runScrub(hashes?: string[]): Promise<ScrubResult> {
     result.status = 'completed'
   }
   return result
+}
+
+// List configured backup jobs
+export async function listBackupJobs(): Promise<BackupJob[]> {
+  const response = await authFetch(`${API_BASE}/maintenance/backups`)
+  const data = await handleWrappedResponse<unknown>(response, '获取备份任务失败')
+  if (!Array.isArray(data) || !data.every(isBackupJobShape)) {
+    throw new Error('服务器返回了无效的数据')
+  }
+  return data
+}
+
+// Run a backup job immediately
+export async function runBackupJob(id: string): Promise<BackupRunResult> {
+  const response = await authFetch(`${API_BASE}/maintenance/backups/${encodeURIComponent(id)}/run`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: '{}',
+  })
+  const data = await handleWrappedResponse<unknown>(response, '执行备份任务失败')
+  if (!isBackupRunResultShape(data)) {
+    throw new Error('服务器返回了无效的数据')
+  }
+  return data
+}
+
+// Run a restore drill against the latest completed backup snapshot
+export async function runBackupRestoreDrill(id: string, keepArtifact = false): Promise<BackupRestoreDrillResult> {
+  const response = await authFetch(`${API_BASE}/maintenance/backups/${encodeURIComponent(id)}/restore-drill`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ keep_artifact: keepArtifact }),
+  })
+  const data = await handleWrappedResponse<unknown>(response, '执行恢复演练失败')
+  if (!isBackupRestoreDrillResultShape(data)) {
+    throw new Error('服务器返回了无效的数据')
+  }
+  return data
+}
+
+// Preview a supported backup restore without writing target data
+export async function previewBackupRestoreJob(id: string, targetPath: string, includeConfig = false): Promise<BackupRestorePreviewResult> {
+  const response = await authFetch(`${API_BASE}/maintenance/backups/${encodeURIComponent(id)}/restore-preview`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ target_path: targetPath, include_config: includeConfig }),
+  })
+  const data = await handleWrappedResponse<unknown>(response, '生成恢复预览失败')
+  if (!isBackupRestorePreviewResultShape(data)) {
+    throw new Error('服务器返回了无效的数据')
+  }
+  return data
+}
+
+// Restore a supported backup job to a safe target directory
+export async function restoreBackupJob(id: string, targetPath: string, includeConfig = false): Promise<BackupRestoreResult> {
+  const response = await authFetch(`${API_BASE}/maintenance/backups/${encodeURIComponent(id)}/restore`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ target_path: targetPath, include_config: includeConfig }),
+  })
+  const data = await handleWrappedResponse<unknown>(response, '恢复备份失败')
+  if (!isBackupRestoreResultShape(data)) {
+    throw new Error('服务器返回了无效的数据')
+  }
+  return data
+}
+
+// Verify a restored backup target without modifying it
+export async function verifyBackupRestoreJob(id: string, targetPath: string): Promise<BackupRestoreVerifyResult> {
+  const response = await authFetch(`${API_BASE}/maintenance/backups/${encodeURIComponent(id)}/restore-verify`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ target_path: targetPath }),
+  })
+  const data = await handleWrappedResponse<unknown>(response, '校验恢复目录失败')
+  if (!isBackupRestoreVerifyResultShape(data)) {
+    throw new Error('服务器返回了无效的数据')
+  }
+  return data
 }
 
 // Download diagnostics export

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/mail"
 	neturl "net/url"
 	"os"
 	urlpath "path"
@@ -46,21 +47,36 @@ var durationFieldPaths = [][]string{
 	{"auth", "refresh_token_ttl"},
 	{"alerts", "check_interval"},
 	{"alerts", "cooldown_period"},
+	{"disk_health", "check_interval"},
+	{"disk_health", "probe_timeout"},
+	{"disk_health", "cooldown_period"},
+	{"maintenance", "scrub", "schedule_interval"},
+	{"maintenance", "scrub", "retry_interval"},
+}
+
+var backupJobDurationFields = []string{
+	"schedule_interval",
+	"restore_drill_stale_after",
+	"max_age",
+	"stale_after",
 }
 
 // Config is the main configuration structure for MnemoNAS
 type Config struct {
-	Server    ServerConfig    `toml:"server"`
-	Storage   StorageConfig   `toml:"storage"`
-	DataPlane DataPlaneConfig `toml:"dataplane"`
-	WebDAV    WebDAVConfig    `toml:"webdav"`
-	SMB       SMBConfig       `toml:"smb"`
-	Auth      AuthConfig      `toml:"auth"`
-	Share     ShareConfig     `toml:"share"`
-	Favorites FavoritesConfig `toml:"favorites"`
-	Alerts    AlertsConfig    `toml:"alerts"`
-	Security  SecurityConfig  `toml:"security"`
-	Log       LogConfig       `toml:"log"`
+	Server      ServerConfig      `toml:"server"`
+	Storage     StorageConfig     `toml:"storage"`
+	DataPlane   DataPlaneConfig   `toml:"dataplane"`
+	WebDAV      WebDAVConfig      `toml:"webdav"`
+	SMB         SMBConfig         `toml:"smb"`
+	Backup      BackupConfig      `toml:"backup"`
+	Auth        AuthConfig        `toml:"auth"`
+	Share       ShareConfig       `toml:"share"`
+	Favorites   FavoritesConfig   `toml:"favorites"`
+	Alerts      AlertsConfig      `toml:"alerts"`
+	DiskHealth  DiskHealthConfig  `toml:"disk_health"`
+	Maintenance MaintenanceConfig `toml:"maintenance"`
+	Security    SecurityConfig    `toml:"security"`
+	Log         LogConfig         `toml:"log"`
 }
 
 // ServerConfig holds HTTP server configuration
@@ -183,6 +199,51 @@ type SMBShareConfig struct {
 	AllowedUsers []string `toml:"allowed_users"`
 }
 
+// BackupConfig holds configured backup jobs.
+type BackupConfig struct {
+	Jobs []BackupJobConfig `toml:"jobs"`
+}
+
+// MaintenanceConfig controls background maintenance jobs.
+type MaintenanceConfig struct {
+	Scrub ScrubMaintenanceConfig `toml:"scrub"`
+}
+
+// ScrubMaintenanceConfig controls scheduled data-integrity scrub runs.
+type ScrubMaintenanceConfig struct {
+	Enabled          bool          `toml:"enabled"`
+	ScheduleInterval time.Duration `toml:"schedule_interval"`
+	RetryInterval    time.Duration `toml:"retry_interval"`
+	MaxRetries       int           `toml:"max_retries"`
+}
+
+// BackupJobConfig describes a local backup job.
+type BackupJobConfig struct {
+	ID                     string        `toml:"id"`
+	Name                   string        `toml:"name"`
+	Type                   string        `toml:"type"`
+	Source                 string        `toml:"source"`
+	Destination            string        `toml:"destination"`
+	Repository             string        `toml:"repository"`
+	Remote                 string        `toml:"remote"`
+	Command                string        `toml:"command"`
+	PasswordFile           string        `toml:"password_file"`
+	ConfigFile             string        `toml:"config_file"`
+	ExtraArgs              []string      `toml:"extra_args"`
+	Disabled               bool          `toml:"disabled"`
+	ScheduleInterval       time.Duration `toml:"schedule_interval"`
+	ScheduleWindowStart    string        `toml:"schedule_window_start"`
+	ScheduleWindowEnd      string        `toml:"schedule_window_end"`
+	StaleAfter             time.Duration `toml:"stale_after"`
+	RestoreDrillStaleAfter time.Duration `toml:"restore_drill_stale_after"`
+	RetentionPolicy        string        `toml:"retention_policy"`
+	MaxSnapshots           int           `toml:"max_snapshots"`
+	MaxAge                 time.Duration `toml:"max_age"`
+	IncludeConfig          bool          `toml:"include_config"`
+	VerifyAfterBackup      bool          `toml:"verify_after_backup"`
+	Exclude                []string      `toml:"exclude"`
+}
+
 // AuthConfig holds authentication configuration
 type AuthConfig struct {
 	Enabled         bool          `toml:"enabled"`
@@ -207,15 +268,49 @@ type FavoritesConfig struct {
 
 // AlertsConfig holds storage space alerting configuration
 type AlertsConfig struct {
-	Enabled        bool          `toml:"enabled"`         // Enable storage alerts
-	CheckInterval  time.Duration `toml:"check_interval"`  // How often to check (default 1h)
-	ThresholdPct   float64       `toml:"threshold_pct"`   // Alert when usage exceeds this % (default 90)
-	CriticalPct    float64       `toml:"critical_pct"`    // Critical alert threshold (default 95)
-	MinFreeBytes   uint64        `toml:"min_free_bytes"`  // Alert when free space < this (default 10GB)
-	CooldownPeriod time.Duration `toml:"cooldown_period"` // Min time between alerts (default 4h)
-	WebhookURL     string        `toml:"webhook_url"`     // Webhook URL for notifications
-	WebhookMethod  string        `toml:"webhook_method"`  // POST or GET (default POST)
-	WebhookHeaders []string      `toml:"webhook_headers"` // Additional headers (key:value format)
+	Enabled          bool          `toml:"enabled"`            // Enable storage alerts
+	CheckInterval    time.Duration `toml:"check_interval"`     // How often to check (default 1h)
+	ThresholdPct     float64       `toml:"threshold_pct"`      // Alert when usage exceeds this % (default 90)
+	CriticalPct      float64       `toml:"critical_pct"`       // Critical alert threshold (default 95)
+	MinFreeBytes     uint64        `toml:"min_free_bytes"`     // Alert when free space < this (default 10GB)
+	CooldownPeriod   time.Duration `toml:"cooldown_period"`    // Min time between alerts (default 4h)
+	WebhookURL       string        `toml:"webhook_url"`        // Webhook URL for notifications
+	WebhookMethod    string        `toml:"webhook_method"`     // POST or GET (default POST)
+	WebhookHeaders   []string      `toml:"webhook_headers"`    // Additional headers (key:value format)
+	TelegramEnabled  bool          `toml:"telegram_enabled"`   // Enable Telegram notifications
+	TelegramBotToken string        `toml:"telegram_bot_token"` // Telegram bot token
+	TelegramChatID   string        `toml:"telegram_chat_id"`   // Telegram chat ID or @channel
+	EmailEnabled     bool          `toml:"email_enabled"`      // Enable SMTP email notifications
+	SMTPHost         string        `toml:"smtp_host"`          // SMTP host without port
+	SMTPPort         int           `toml:"smtp_port"`          // SMTP port
+	SMTPUsername     string        `toml:"smtp_username"`      // SMTP username
+	SMTPPassword     string        `toml:"smtp_password"`      // SMTP password
+	SMTPFrom         string        `toml:"smtp_from"`          // Sender email address
+	SMTPTo           []string      `toml:"smtp_to"`            // Recipient email addresses
+}
+
+// DiskHealthConfig holds SMART and temperature monitoring configuration.
+type DiskHealthConfig struct {
+	Enabled              bool                     `toml:"enabled"`
+	CheckInterval        time.Duration            `toml:"check_interval"`
+	ProbeTimeout         time.Duration            `toml:"probe_timeout"`
+	CooldownPeriod       time.Duration            `toml:"cooldown_period"`
+	Command              string                   `toml:"command"`
+	TemperatureWarningC  int                      `toml:"temperature_warning_c"`
+	TemperatureCriticalC int                      `toml:"temperature_critical_c"`
+	MediaWearWarningPct  int                      `toml:"media_wear_warning_percent"`
+	MediaWearCriticalPct int                      `toml:"media_wear_critical_percent"`
+	Devices              []DiskHealthDeviceConfig `toml:"devices"`
+}
+
+// DiskHealthDeviceConfig describes one disk device for SMART checks.
+type DiskHealthDeviceConfig struct {
+	Name                 string `toml:"name" json:"name,omitempty"`
+	Path                 string `toml:"path" json:"path"`
+	Type                 string `toml:"type" json:"type,omitempty"`
+	Serial               string `toml:"serial" json:"serial,omitempty"`
+	TemperatureWarningC  int    `toml:"temperature_warning_c" json:"temperature_warning_c,omitempty"`
+	TemperatureCriticalC int    `toml:"temperature_critical_c" json:"temperature_critical_c,omitempty"`
 }
 
 // SecurityConfig holds explicit safety overrides for risky deployment modes.
@@ -316,6 +411,9 @@ func Default() *Config {
 			SigningRequired: true,
 			Shares:          []SMBShareConfig{},
 		},
+		Backup: BackupConfig{
+			Jobs: []BackupJobConfig{},
+		},
 		Auth: AuthConfig{
 			Enabled:         true, // enabled by default for security
 			AccessTokenTTL:  15 * time.Minute,
@@ -338,6 +436,28 @@ func Default() *Config {
 			MinFreeBytes:   10 * 1024 * 1024 * 1024, // 10GB
 			CooldownPeriod: 4 * time.Hour,
 			WebhookMethod:  "POST",
+			SMTPPort:       587,
+			SMTPTo:         []string{},
+		},
+		DiskHealth: DiskHealthConfig{
+			Enabled:              false,
+			CheckInterval:        1 * time.Hour,
+			ProbeTimeout:         15 * time.Second,
+			CooldownPeriod:       4 * time.Hour,
+			Command:              "smartctl",
+			TemperatureWarningC:  50,
+			TemperatureCriticalC: 60,
+			MediaWearWarningPct:  80,
+			MediaWearCriticalPct: 100,
+			Devices:              []DiskHealthDeviceConfig{},
+		},
+		Maintenance: MaintenanceConfig{
+			Scrub: ScrubMaintenanceConfig{
+				Enabled:          false,
+				ScheduleInterval: 7 * 24 * time.Hour,
+				RetryInterval:    1 * time.Hour,
+				MaxRetries:       1,
+			},
 		},
 		Security: SecurityConfig{
 			AllowUnsafeNoAuth: false,
@@ -364,6 +484,14 @@ func applyStorageRootDefaults(cfg *Config, defaultRoot string) {
 	cfg.Storage.Versioning.AutoVersionedExtensions = normalizeStringSlice(cfg.Storage.Versioning.AutoVersionedExtensions)
 	cfg.Storage.Versioning.AutoVersionedFilenames = normalizeStringSlice(cfg.Storage.Versioning.AutoVersionedFilenames)
 	cfg.Alerts.WebhookHeaders = normalizeStringSlice(cfg.Alerts.WebhookHeaders)
+	cfg.Alerts.TelegramBotToken = strings.TrimSpace(cfg.Alerts.TelegramBotToken)
+	cfg.Alerts.TelegramChatID = strings.TrimSpace(cfg.Alerts.TelegramChatID)
+	cfg.Alerts.SMTPHost = strings.TrimSpace(cfg.Alerts.SMTPHost)
+	cfg.Alerts.SMTPUsername = strings.TrimSpace(cfg.Alerts.SMTPUsername)
+	cfg.Alerts.SMTPFrom = strings.TrimSpace(cfg.Alerts.SMTPFrom)
+	cfg.Alerts.SMTPTo = normalizeTrimmedStringSlice(cfg.Alerts.SMTPTo)
+	cfg.DiskHealth.Command = expandUserPath(strings.TrimSpace(cfg.DiskHealth.Command))
+	cfg.DiskHealth.Devices = normalizeDiskHealthDevices(cfg.DiskHealth.Devices)
 	cfg.Server.TLS.CertDir = expandUserPath(cfg.Server.TLS.CertDir)
 	cfg.Server.TLS.CertFile = expandUserPath(cfg.Server.TLS.CertFile)
 	cfg.Server.TLS.KeyFile = expandUserPath(cfg.Server.TLS.KeyFile)
@@ -373,6 +501,7 @@ func applyStorageRootDefaults(cfg *Config, defaultRoot string) {
 	cfg.SMB.GatewaySocket = expandUserPath(cfg.SMB.GatewaySocket)
 	cfg.SMB.CredentialFile = expandUserPath(cfg.SMB.CredentialFile)
 	cfg.SMB.Shares = normalizeSMBShares(cfg.SMB.Shares)
+	cfg.Backup.Jobs = normalizeBackupJobs(cfg.Backup.Jobs)
 	cfg.Log.Output = expandUserPath(cfg.Log.Output)
 
 	defaultInternal := filepath.Join(defaultRoot, ".mnemonas")
@@ -413,6 +542,30 @@ func applyStorageRootDefaults(cfg *Config, defaultRoot string) {
 	defaultSMBCredentialFile := filepath.Join(defaultInternal, "smb-credentials.json")
 	if cfg.SMB.CredentialFile == "" || cfg.SMB.CredentialFile == defaultSMBCredentialFile {
 		cfg.SMB.CredentialFile = filepath.Join(internal, "smb-credentials.json")
+	}
+	if cfg.DiskHealth.Command == "" {
+		cfg.DiskHealth.Command = "smartctl"
+	}
+	if cfg.DiskHealth.CheckInterval == 0 {
+		cfg.DiskHealth.CheckInterval = time.Hour
+	}
+	if cfg.DiskHealth.ProbeTimeout == 0 {
+		cfg.DiskHealth.ProbeTimeout = 15 * time.Second
+	}
+	if cfg.DiskHealth.CooldownPeriod == 0 {
+		cfg.DiskHealth.CooldownPeriod = 4 * time.Hour
+	}
+	if cfg.DiskHealth.TemperatureWarningC == 0 {
+		cfg.DiskHealth.TemperatureWarningC = 50
+	}
+	if cfg.DiskHealth.TemperatureCriticalC == 0 {
+		cfg.DiskHealth.TemperatureCriticalC = 60
+	}
+	if cfg.DiskHealth.MediaWearWarningPct == 0 {
+		cfg.DiskHealth.MediaWearWarningPct = 80
+	}
+	if cfg.DiskHealth.MediaWearCriticalPct == 0 {
+		cfg.DiskHealth.MediaWearCriticalPct = 100
 	}
 }
 
@@ -470,6 +623,19 @@ func normalizeStringSlice(values []string) []string {
 	return values
 }
 
+func normalizeTrimmedStringSlice(values []string) []string {
+	if values == nil {
+		return []string{}
+	}
+	normalized := make([]string, 0, len(values))
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			normalized = append(normalized, trimmed)
+		}
+	}
+	return normalized
+}
+
 func normalizeSMBShares(shares []SMBShareConfig) []SMBShareConfig {
 	if shares == nil {
 		return []SMBShareConfig{}
@@ -479,6 +645,55 @@ func normalizeSMBShares(shares []SMBShareConfig) []SMBShareConfig {
 		shares[i].AllowedUsers = normalizeStringSlice(shares[i].AllowedUsers)
 	}
 	return shares
+}
+
+func normalizeDiskHealthDevices(devices []DiskHealthDeviceConfig) []DiskHealthDeviceConfig {
+	if devices == nil {
+		return []DiskHealthDeviceConfig{}
+	}
+	for i := range devices {
+		devices[i].Name = strings.TrimSpace(devices[i].Name)
+		devices[i].Path = expandUserPath(strings.TrimSpace(devices[i].Path))
+		if devices[i].Path != "" {
+			devices[i].Path = filepath.Clean(devices[i].Path)
+		}
+		devices[i].Type = strings.TrimSpace(devices[i].Type)
+		devices[i].Serial = strings.TrimSpace(devices[i].Serial)
+	}
+	return devices
+}
+
+func normalizeBackupJobs(jobs []BackupJobConfig) []BackupJobConfig {
+	if jobs == nil {
+		return []BackupJobConfig{}
+	}
+	for i := range jobs {
+		jobs[i].ID = strings.TrimSpace(jobs[i].ID)
+		jobs[i].Name = strings.TrimSpace(jobs[i].Name)
+		jobs[i].Type = strings.ToLower(strings.TrimSpace(jobs[i].Type))
+		if jobs[i].Type == "" {
+			jobs[i].Type = "local"
+		}
+		jobs[i].Source = expandUserPath(strings.TrimSpace(jobs[i].Source))
+		jobs[i].Destination = expandUserPath(strings.TrimSpace(jobs[i].Destination))
+		jobs[i].Repository = strings.TrimSpace(jobs[i].Repository)
+		jobs[i].Remote = strings.TrimSpace(jobs[i].Remote)
+		jobs[i].Command = expandUserPath(strings.TrimSpace(jobs[i].Command))
+		jobs[i].PasswordFile = expandUserPath(strings.TrimSpace(jobs[i].PasswordFile))
+		jobs[i].ConfigFile = expandUserPath(strings.TrimSpace(jobs[i].ConfigFile))
+		jobs[i].ScheduleWindowStart = strings.TrimSpace(jobs[i].ScheduleWindowStart)
+		jobs[i].ScheduleWindowEnd = strings.TrimSpace(jobs[i].ScheduleWindowEnd)
+		jobs[i].RetentionPolicy = strings.TrimSpace(jobs[i].RetentionPolicy)
+		jobs[i].ExtraArgs = normalizeStringSlice(jobs[i].ExtraArgs)
+		for j := range jobs[i].ExtraArgs {
+			jobs[i].ExtraArgs[j] = strings.TrimSpace(jobs[i].ExtraArgs[j])
+		}
+		jobs[i].Exclude = normalizeStringSlice(jobs[i].Exclude)
+		for j := range jobs[i].Exclude {
+			jobs[i].Exclude[j] = strings.TrimSpace(filepath.ToSlash(jobs[i].Exclude[j]))
+		}
+	}
+	return jobs
 }
 
 // Load loads configuration from file
@@ -514,6 +729,15 @@ func Load(path string) (*Config, error) {
 	cfg.Share.BaseURL = strings.TrimSpace(cfg.Share.BaseURL)
 	cfg.Alerts.WebhookURL = strings.TrimSpace(cfg.Alerts.WebhookURL)
 	cfg.Alerts.WebhookMethod = strings.ToUpper(strings.TrimSpace(cfg.Alerts.WebhookMethod))
+	cfg.Alerts.TelegramBotToken = strings.TrimSpace(cfg.Alerts.TelegramBotToken)
+	cfg.Alerts.TelegramChatID = strings.TrimSpace(cfg.Alerts.TelegramChatID)
+	cfg.Alerts.SMTPHost = strings.TrimSpace(cfg.Alerts.SMTPHost)
+	cfg.Alerts.SMTPUsername = strings.TrimSpace(cfg.Alerts.SMTPUsername)
+	cfg.Alerts.SMTPFrom = strings.TrimSpace(cfg.Alerts.SMTPFrom)
+	cfg.Alerts.SMTPTo = normalizeTrimmedStringSlice(cfg.Alerts.SMTPTo)
+	if cfg.Alerts.SMTPPort == 0 {
+		cfg.Alerts.SMTPPort = 587
+	}
 	cfg.SMB.ServerName = strings.TrimSpace(cfg.SMB.ServerName)
 
 	if err := cfg.Validate(); err != nil {
@@ -533,6 +757,9 @@ func normalizeDurationFields(data []byte) ([]byte, error) {
 		if err := normalizeDurationFieldValue(raw, fieldPath); err != nil {
 			return nil, err
 		}
+	}
+	if err := normalizeBackupJobDurationFields(raw); err != nil {
+		return nil, err
 	}
 
 	normalizedData, err := toml.Marshal(raw)
@@ -579,6 +806,54 @@ func normalizeDurationFieldValue(raw map[string]any, fieldPath []string) error {
 	}
 
 	current[leafKey] = int64(parsedDuration)
+	return nil
+}
+
+func normalizeBackupJobDurationFields(raw map[string]any) error {
+	backupValue, ok := raw["backup"]
+	if !ok {
+		return nil
+	}
+	backupMap, ok := backupValue.(map[string]any)
+	if !ok {
+		return errors.New("invalid config structure at backup")
+	}
+	jobsValue, ok := backupMap["jobs"]
+	if !ok {
+		return nil
+	}
+	jobs, ok := jobsValue.([]any)
+	if !ok {
+		return errors.New("invalid config structure at backup.jobs")
+	}
+	for i, jobValue := range jobs {
+		jobMap, ok := jobValue.(map[string]any)
+		if !ok {
+			return fmt.Errorf("invalid config structure at backup.jobs[%d]", i)
+		}
+		for _, field := range backupJobDurationFields {
+			if err := normalizeBackupJobDurationField(jobMap, i, field); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func normalizeBackupJobDurationField(job map[string]any, index int, field string) error {
+	value, ok := job[field]
+	if !ok {
+		return nil
+	}
+	durationText, ok := value.(string)
+	if !ok {
+		return nil
+	}
+	parsedDuration, err := time.ParseDuration(durationText)
+	if err != nil {
+		return fmt.Errorf("invalid backup.jobs[%d].%s duration %q: %w", index, field, durationText, err)
+	}
+	job[field] = int64(parsedDuration)
 	return nil
 }
 
@@ -1108,6 +1383,15 @@ func (c *Config) Validate() error {
 	if err := validateSMBConfig(c.SMB); err != nil {
 		errs = append(errs, err)
 	}
+	if err := validateBackupConfig(c.Backup, c.Storage.Root); err != nil {
+		errs = append(errs, err)
+	}
+	if err := validateDiskHealthConfig(c.DiskHealth); err != nil {
+		errs = append(errs, err)
+	}
+	if err := validateMaintenanceConfig(c.Maintenance); err != nil {
+		errs = append(errs, err)
+	}
 	if err := validateOptionalHTTPURL(c.Share.BaseURL, "share.base_url"); err != nil {
 		errs = append(errs, err)
 	}
@@ -1172,6 +1456,12 @@ func (c *Config) Validate() error {
 			errs = append(errs, err)
 		}
 	}
+	if err := validateEmailAlertsConfig(c.Alerts); err != nil {
+		errs = append(errs, err)
+	}
+	if err := validateTelegramAlertsConfig(c.Alerts); err != nil {
+		errs = append(errs, err)
+	}
 	logLevel := strings.ToLower(strings.TrimSpace(c.Log.Level))
 	if logLevel != "debug" && logLevel != "info" && logLevel != "warn" && logLevel != "error" {
 		errs = append(errs, fmt.Errorf("invalid log.level: %q", c.Log.Level))
@@ -1206,6 +1496,68 @@ func validateWebhookHeader(header string) error {
 		return fmt.Errorf("invalid alerts.webhook_headers header value for %q", key)
 	}
 	return nil
+}
+
+func validateEmailAlertsConfig(alerts AlertsConfig) error {
+	var errs []error
+	if alerts.SMTPPort < 0 || alerts.SMTPPort > 65535 {
+		errs = append(errs, errors.New("alerts.smtp_port must be between 1 and 65535"))
+	}
+	if alerts.SMTPHost != "" && hasControlChar(alerts.SMTPHost) {
+		errs = append(errs, errors.New("alerts.smtp_host contains invalid control characters"))
+	}
+	if alerts.SMTPUsername != "" && hasControlChar(alerts.SMTPUsername) {
+		errs = append(errs, errors.New("alerts.smtp_username contains invalid control characters"))
+	}
+	if alerts.SMTPPassword != "" && hasControlChar(alerts.SMTPPassword) {
+		errs = append(errs, errors.New("alerts.smtp_password contains invalid control characters"))
+	}
+	if strings.TrimSpace(alerts.SMTPFrom) != "" {
+		if _, err := mail.ParseAddress(alerts.SMTPFrom); err != nil {
+			errs = append(errs, fmt.Errorf("alerts.smtp_from must be a valid email address: %w", err))
+		}
+	}
+	for _, recipient := range alerts.SMTPTo {
+		if _, err := mail.ParseAddress(recipient); err != nil {
+			errs = append(errs, fmt.Errorf("alerts.smtp_to contains invalid email address %q: %w", recipient, err))
+		}
+	}
+	if alerts.EmailEnabled {
+		if strings.TrimSpace(alerts.SMTPHost) == "" {
+			errs = append(errs, errors.New("alerts.smtp_host is required when email alerts are enabled"))
+		}
+		if alerts.SMTPPort <= 0 || alerts.SMTPPort > 65535 {
+			errs = append(errs, errors.New("alerts.smtp_port must be between 1 and 65535 when email alerts are enabled"))
+		}
+		if strings.TrimSpace(alerts.SMTPFrom) == "" {
+			errs = append(errs, errors.New("alerts.smtp_from is required when email alerts are enabled"))
+		}
+		if len(alerts.SMTPTo) == 0 {
+			errs = append(errs, errors.New("alerts.smtp_to must include at least one recipient when email alerts are enabled"))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func validateTelegramAlertsConfig(alerts AlertsConfig) error {
+	var errs []error
+	if alerts.TelegramBotToken != "" {
+		if strings.ContainsAny(alerts.TelegramBotToken, "/?#") || hasWhitespaceOrControl(alerts.TelegramBotToken) {
+			errs = append(errs, errors.New("alerts.telegram_bot_token contains invalid characters"))
+		}
+	}
+	if alerts.TelegramChatID != "" && hasWhitespaceOrControl(alerts.TelegramChatID) {
+		errs = append(errs, errors.New("alerts.telegram_chat_id contains invalid characters"))
+	}
+	if alerts.TelegramEnabled {
+		if strings.TrimSpace(alerts.TelegramBotToken) == "" {
+			errs = append(errs, errors.New("alerts.telegram_bot_token is required when telegram alerts are enabled"))
+		}
+		if strings.TrimSpace(alerts.TelegramChatID) == "" {
+			errs = append(errs, errors.New("alerts.telegram_chat_id is required when telegram alerts are enabled"))
+		}
+	}
+	return errors.Join(errs...)
 }
 
 func validateSMBConfig(smb SMBConfig) error {
@@ -1345,6 +1697,391 @@ func validateSMBSharePath(path string) error {
 		}
 	}
 	return nil
+}
+
+func validateBackupConfig(backup BackupConfig, storageRoot string) error {
+	var errs []error
+
+	seen := map[string]struct{}{}
+	for _, job := range backup.Jobs {
+		if err := validateBackupJob(job, storageRoot, seen); err != nil {
+			errs = append(errs, err)
+		}
+	}
+
+	return errors.Join(errs...)
+}
+
+func validateDiskHealthConfig(cfg DiskHealthConfig) error {
+	var errs []error
+
+	if cfg.CheckInterval <= 0 {
+		errs = append(errs, errors.New("disk_health.check_interval must be positive"))
+	}
+	if cfg.ProbeTimeout <= 0 {
+		errs = append(errs, errors.New("disk_health.probe_timeout must be positive"))
+	}
+	if cfg.CooldownPeriod <= 0 {
+		errs = append(errs, errors.New("disk_health.cooldown_period must be positive"))
+	}
+	if err := validateBackupCommand(cfg.Command, "disk_health.command"); err != nil {
+		errs = append(errs, err)
+	}
+	if err := validateTemperatureThresholds(cfg.TemperatureWarningC, cfg.TemperatureCriticalC, "disk_health"); err != nil {
+		errs = append(errs, err)
+	}
+	if err := validatePercentThresholds(cfg.MediaWearWarningPct, cfg.MediaWearCriticalPct, "disk_health.media_wear"); err != nil {
+		errs = append(errs, err)
+	}
+
+	for i, device := range cfg.Devices {
+		label := fmt.Sprintf("disk_health.devices[%d]", i)
+		if strings.Contains(device.Name, "\x00") || hasControlChar(device.Name) {
+			errs = append(errs, fmt.Errorf("%s.name contains invalid control characters", label))
+		}
+		if strings.Contains(device.Type, "\x00") || hasControlChar(device.Type) {
+			errs = append(errs, fmt.Errorf("%s.type contains invalid control characters", label))
+		}
+		if strings.Contains(device.Serial, "\x00") || hasControlChar(device.Serial) {
+			errs = append(errs, fmt.Errorf("%s.serial contains invalid control characters", label))
+		}
+		if strings.TrimSpace(device.Path) == "" {
+			errs = append(errs, fmt.Errorf("%s.path cannot be empty", label))
+		} else if !filepath.IsAbs(device.Path) {
+			errs = append(errs, fmt.Errorf("%s.path must be absolute", label))
+		} else if strings.Contains(device.Path, "\x00") || hasControlChar(device.Path) {
+			errs = append(errs, fmt.Errorf("%s.path contains invalid control characters", label))
+		}
+		warnC, criticalC := cfg.TemperatureWarningC, cfg.TemperatureCriticalC
+		if device.TemperatureWarningC != 0 {
+			warnC = device.TemperatureWarningC
+		}
+		if device.TemperatureCriticalC != 0 {
+			criticalC = device.TemperatureCriticalC
+		}
+		if err := validateTemperatureThresholds(warnC, criticalC, label); err != nil {
+			errs = append(errs, err)
+		}
+	}
+
+	return errors.Join(errs...)
+}
+
+func validateMaintenanceConfig(cfg MaintenanceConfig) error {
+	var errs []error
+
+	if cfg.Scrub.ScheduleInterval <= 0 {
+		errs = append(errs, errors.New("maintenance.scrub.schedule_interval must be positive"))
+	}
+	if cfg.Scrub.RetryInterval <= 0 {
+		errs = append(errs, errors.New("maintenance.scrub.retry_interval must be positive"))
+	}
+	if cfg.Scrub.MaxRetries < 0 {
+		errs = append(errs, errors.New("maintenance.scrub.max_retries cannot be negative"))
+	}
+
+	return errors.Join(errs...)
+}
+
+func validateTemperatureThresholds(warnC, criticalC int, label string) error {
+	if warnC < 0 || criticalC < 0 {
+		return fmt.Errorf("%s temperature thresholds cannot be negative", label)
+	}
+	if warnC > 0 && criticalC > 0 && criticalC < warnC {
+		return fmt.Errorf("%s temperature critical threshold must be greater than or equal to warning threshold", label)
+	}
+	return nil
+}
+
+func validatePercentThresholds(warnPct, criticalPct int, label string) error {
+	if warnPct < 0 || criticalPct < 0 {
+		return fmt.Errorf("%s thresholds cannot be negative", label)
+	}
+	if warnPct > 0 && criticalPct > 0 && criticalPct < warnPct {
+		return fmt.Errorf("%s critical threshold must be greater than or equal to warning threshold", label)
+	}
+	return nil
+}
+
+func validateBackupJob(job BackupJobConfig, storageRoot string, seen map[string]struct{}) error {
+	var errs []error
+
+	if !isValidBackupJobID(job.ID) {
+		errs = append(errs, fmt.Errorf("invalid backup job id: %q", job.ID))
+	} else {
+		key := strings.ToLower(job.ID)
+		if _, ok := seen[key]; ok {
+			errs = append(errs, fmt.Errorf("duplicate backup job id: %q", job.ID))
+		}
+		seen[key] = struct{}{}
+	}
+
+	if job.Name == "" {
+		errs = append(errs, fmt.Errorf("backup job %q name cannot be empty", job.ID))
+	}
+	if job.Type != "local" && job.Type != "restic" && job.Type != "rclone" {
+		errs = append(errs, fmt.Errorf("backup job %q has unsupported type: %q", job.ID, job.Type))
+	}
+	if err := validateBackupCommand(job.Command, fmt.Sprintf("backup job %q command", job.ID)); err != nil {
+		errs = append(errs, err)
+	}
+	for _, arg := range job.ExtraArgs {
+		if err := validateBackupCommandArg(arg, fmt.Sprintf("backup job %q extra_args", job.ID)); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if job.ScheduleInterval < 0 {
+		errs = append(errs, fmt.Errorf("backup job %q schedule_interval cannot be negative", job.ID))
+	}
+	if err := validateBackupScheduleWindow(job); err != nil {
+		errs = append(errs, err)
+	}
+	if job.StaleAfter < 0 {
+		errs = append(errs, fmt.Errorf("backup job %q stale_after cannot be negative", job.ID))
+	}
+	if job.RestoreDrillStaleAfter < 0 {
+		errs = append(errs, fmt.Errorf("backup job %q restore_drill_stale_after cannot be negative", job.ID))
+	}
+	if strings.ContainsRune(job.RetentionPolicy, '\x00') {
+		errs = append(errs, fmt.Errorf("backup job %q retention_policy cannot contain NUL bytes", job.ID))
+	}
+	if job.MaxSnapshots < 0 {
+		errs = append(errs, fmt.Errorf("backup job %q max_snapshots cannot be negative", job.ID))
+	}
+	if job.MaxAge < 0 {
+		errs = append(errs, fmt.Errorf("backup job %q max_age cannot be negative", job.ID))
+	}
+
+	source := job.Source
+	if source == "" {
+		source = storageRoot
+		if !filepath.IsAbs(source) {
+			if absSource, err := filepath.Abs(source); err == nil {
+				source = absSource
+			}
+		}
+	}
+	if err := validateBackupAbsoluteDirectory(source, fmt.Sprintf("backup job %q source", job.ID)); err != nil {
+		errs = append(errs, err)
+	}
+	switch job.Type {
+	case "local":
+		if err := validateBackupAbsoluteDirectory(job.Destination, fmt.Sprintf("backup job %q destination", job.ID)); err != nil {
+			errs = append(errs, err)
+		}
+		if source != "" && job.Destination != "" && pathContainsOrEquals(source, job.Destination) {
+			errs = append(errs, fmt.Errorf("backup job %q destination must not be inside source", job.ID))
+		}
+	case "restic":
+		if job.Repository == "" {
+			errs = append(errs, fmt.Errorf("backup job %q repository cannot be empty", job.ID))
+		}
+		if strings.Contains(job.Repository, "\x00") || hasControlChar(job.Repository) {
+			errs = append(errs, fmt.Errorf("backup job %q repository contains invalid control characters", job.ID))
+		}
+		if job.PasswordFile == "" {
+			errs = append(errs, fmt.Errorf("backup job %q password_file cannot be empty for restic", job.ID))
+		}
+	case "rclone":
+		if job.Remote == "" {
+			errs = append(errs, fmt.Errorf("backup job %q remote cannot be empty", job.ID))
+		}
+		if strings.Contains(job.Remote, "\x00") || hasControlChar(job.Remote) {
+			errs = append(errs, fmt.Errorf("backup job %q remote contains invalid control characters", job.ID))
+		}
+	}
+	storageRootForValidation := storageRoot
+	if storageRootForValidation != "" && !filepath.IsAbs(storageRootForValidation) {
+		if absStorageRoot, err := filepath.Abs(storageRootForValidation); err == nil {
+			storageRootForValidation = absStorageRoot
+		}
+	}
+	if job.Type == "local" && filepath.IsAbs(storageRootForValidation) && job.Destination != "" && pathContainsOrEquals(storageRootForValidation, job.Destination) {
+		errs = append(errs, fmt.Errorf("backup job %q destination must not be inside storage.root", job.ID))
+	}
+	for field, filePath := range map[string]string{
+		"password_file": job.PasswordFile,
+		"config_file":   job.ConfigFile,
+	} {
+		if err := validateBackupCredentialFile(filePath, field, job.ID, source, storageRootForValidation); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	for _, pattern := range job.Exclude {
+		if pattern == "" {
+			errs = append(errs, fmt.Errorf("backup job %q exclude patterns cannot contain empty entries", job.ID))
+			continue
+		}
+		if strings.Contains(pattern, "\x00") {
+			errs = append(errs, fmt.Errorf("backup job %q exclude pattern must not contain NUL", job.ID))
+		}
+	}
+
+	return errors.Join(errs...)
+}
+
+func validateBackupCommand(command string, label string) error {
+	if command == "" {
+		return nil
+	}
+	if strings.Contains(command, "\x00") || hasControlChar(command) || strings.ContainsAny(command, " \t\r\n") {
+		return fmt.Errorf("%s must be a single executable path without whitespace or control characters", label)
+	}
+	if filepath.IsAbs(command) {
+		return nil
+	}
+	if strings.ContainsRune(command, filepath.Separator) || (filepath.Separator != '/' && strings.ContainsRune(command, '/')) {
+		return fmt.Errorf("%s must be an absolute path or a bare executable name", label)
+	}
+	if command == "." || command == ".." {
+		return fmt.Errorf("%s must be an executable name", label)
+	}
+	return nil
+}
+
+func validateBackupScheduleWindow(job BackupJobConfig) error {
+	if job.ScheduleWindowStart == "" && job.ScheduleWindowEnd == "" {
+		return nil
+	}
+	if job.ScheduleWindowStart == "" || job.ScheduleWindowEnd == "" {
+		return fmt.Errorf("backup job %q schedule window requires both schedule_window_start and schedule_window_end", job.ID)
+	}
+	start, err := parseBackupWindowClock(job.ScheduleWindowStart, fmt.Sprintf("backup job %q schedule_window_start", job.ID))
+	if err != nil {
+		return err
+	}
+	end, err := parseBackupWindowClock(job.ScheduleWindowEnd, fmt.Sprintf("backup job %q schedule_window_end", job.ID))
+	if err != nil {
+		return err
+	}
+	if start == end {
+		return fmt.Errorf("backup job %q schedule window start and end cannot be equal", job.ID)
+	}
+	return nil
+}
+
+func parseBackupWindowClock(value string, label string) (int, error) {
+	if len(value) != len("15:04") || value[2] != ':' {
+		return 0, fmt.Errorf("%s must use HH:MM format", label)
+	}
+	hour, err := strconv.Atoi(value[:2])
+	if err != nil {
+		return 0, fmt.Errorf("%s must use HH:MM format", label)
+	}
+	minute, err := strconv.Atoi(value[3:])
+	if err != nil {
+		return 0, fmt.Errorf("%s must use HH:MM format", label)
+	}
+	if hour < 0 || hour > 23 || minute < 0 || minute > 59 {
+		return 0, fmt.Errorf("%s must be a valid 24-hour time", label)
+	}
+	return hour*60 + minute, nil
+}
+
+func hasControlChar(value string) bool {
+	return strings.IndexFunc(value, func(r rune) bool {
+		return r < 0x20 || r == 0x7f
+	}) >= 0
+}
+
+func hasWhitespaceOrControl(value string) bool {
+	return strings.IndexFunc(value, func(r rune) bool {
+		return r <= 0x20 || r == 0x7f
+	}) >= 0
+}
+
+func validateBackupCommandArg(arg string, label string) error {
+	if arg == "" {
+		return fmt.Errorf("%s cannot contain empty entries", label)
+	}
+	if strings.Contains(arg, "\x00") || hasControlChar(arg) {
+		return fmt.Errorf("%s contains invalid control characters", label)
+	}
+	return nil
+}
+
+func validateBackupCredentialFile(filePath string, field string, jobID string, source string, storageRoot string) error {
+	if filePath == "" {
+		return nil
+	}
+	if !filepath.IsAbs(filePath) {
+		return fmt.Errorf("backup job %q %s must be an absolute path", jobID, field)
+	}
+	if strings.Contains(filePath, "\x00") || hasControlChar(filePath) {
+		return fmt.Errorf("backup job %q %s contains invalid control characters", jobID, field)
+	}
+	if source != "" && filepath.IsAbs(source) && pathContainsOrEquals(source, filePath) {
+		return fmt.Errorf("backup job %q %s must not be inside backup source", jobID, field)
+	}
+	if storageRoot != "" && filepath.IsAbs(storageRoot) && pathContainsOrEquals(storageRoot, filePath) {
+		return fmt.Errorf("backup job %q %s must not be inside storage.root", jobID, field)
+	}
+	info, err := os.Lstat(filePath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("backup job %q %s does not exist", jobID, field)
+		}
+		return fmt.Errorf("backup job %q %s cannot be checked: %w", jobID, field, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("backup job %q %s must not be a symlink", jobID, field)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("backup job %q %s must be a regular file", jobID, field)
+	}
+	return nil
+}
+
+func isValidBackupJobID(id string) bool {
+	if id == "" || len(id) > 64 || id == "." || id == ".." {
+		return false
+	}
+	for _, r := range id {
+		switch {
+		case r >= 'a' && r <= 'z':
+		case r >= 'A' && r <= 'Z':
+		case r >= '0' && r <= '9':
+		case r == '-', r == '_', r == '.':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func validateBackupAbsoluteDirectory(value, field string) error {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return fmt.Errorf("%s cannot be empty", field)
+	}
+	if trimmed != value {
+		return fmt.Errorf("%s must not contain leading or trailing whitespace", field)
+	}
+	if strings.IndexFunc(trimmed, func(r rune) bool {
+		return r < 0x20 || r == 0x7f
+	}) >= 0 {
+		return fmt.Errorf("%s must not contain control characters", field)
+	}
+	if !filepath.IsAbs(trimmed) {
+		return fmt.Errorf("%s must be an absolute path", field)
+	}
+	if isFilesystemRoot(trimmed) || isProtectedStorageRoot(trimmed) {
+		return fmt.Errorf("%s must not be a protected system directory", field)
+	}
+	return nil
+}
+
+func pathContainsOrEquals(parent, child string) bool {
+	parentClean := filepath.Clean(parent)
+	childClean := filepath.Clean(child)
+	if parentClean == childClean {
+		return true
+	}
+	rel, err := filepath.Rel(parentClean, childClean)
+	if err != nil {
+		return false
+	}
+	return rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 func isValidHTTPHeaderToken(value string) bool {
