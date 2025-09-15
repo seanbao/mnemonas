@@ -198,6 +198,7 @@ function getSettingsSaveSuccessToast(message?: string): {
 const SETTINGS_TABS = ['general', 'retention', 'webdav', 'advanced', 'shares'] as const
 
 type SettingsTabKey = (typeof SETTINGS_TABS)[number]
+type WebDAVAuthType = 'users' | 'basic' | 'none'
 
 function isSettingsTabKey(value: string): value is SettingsTabKey {
   return SETTINGS_TABS.includes(value as SettingsTabKey)
@@ -1033,10 +1034,9 @@ export function SettingsPage() {
       case 'webdav_auth':
         updateDirtySettings((prev) => ({
           ...prev,
-          webdavAuthType: 'basic',
-          webdavUsername: prev.webdavUsername.trim() || 'admin',
+          webdavAuthType: 'users',
         }))
-        addToast({ title: '已启用 WebDAV Basic 认证', description: '请确认用户名和密码后保存。', color: 'success' })
+        addToast({ title: '已启用 WebDAV 用户认证', description: '保存后可使用 MnemoNAS 账号挂载。', color: 'success' })
         return
       case 'share_base_url':
         if (!publicAccessBaseURL) {
@@ -2127,6 +2127,53 @@ export function SettingsPage() {
               )}
 
               {/* WebDAV Credentials Card */}
+              {webdavCredentials?.enabled && webdavCredentials?.auth_type === 'users' && (
+                <SettingsSection
+                  title="WebDAV 挂载信息"
+                  description="使用 MnemoNAS 账号登录；普通用户会限制在自己的 home_dir，访客账号只读"
+                  icon={Key}
+                >
+                  <div className="space-y-4">
+                    <div className="p-4 rounded-lg bg-content2/50 border border-divider">
+                      <div className="space-y-1.5">
+                        <label className="text-xs text-default-500">WebDAV 地址</label>
+                        <div className="flex items-center gap-2">
+                          <Snippet
+                            symbol=""
+                            variant="flat"
+                            className="flex-1"
+                            classNames={{
+                              base: "bg-content1 border border-divider",
+                              pre: "font-mono text-sm",
+                            }}
+                            hideSymbol
+                            hideCopyButton
+                          >
+                            {webdavUrl}
+                          </Snippet>
+                          <Button
+                            isIconOnly
+                            size="sm"
+                            variant="flat"
+                            onPress={() => handleCopy('url', webdavUrl)}
+                          >
+                            <span className="sr-only">复制 WebDAV 地址</span>
+                            {copiedField === 'url' ? (
+                              <CheckCircle2 size={16} className="text-success" />
+                            ) : (
+                              <Copy size={16} />
+                            )}
+                          </Button>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="text-xs text-default-400">
+                      挂载时输入当前 MnemoNAS 用户名和密码；管理员可访问全局目录。
+                    </div>
+                  </div>
+                </SettingsSection>
+              )}
               {webdavCredentials?.enabled && webdavCredentials?.auth_type === 'basic' && (
                 <SettingsSection
                   title="WebDAV 访问凭据"
@@ -2348,12 +2395,13 @@ export function SettingsPage() {
                       value={settings.webdavAuthType}
                       onChange={(event) => updateDirtySettings((current) => ({
                         ...current,
-                        webdavAuthType: event.target.value as 'basic' | 'none',
+                        webdavAuthType: event.target.value as WebDAVAuthType,
                       }))}
                       disabled={!settings.webdavEnabled}
                       className="input-shell h-9 rounded-lg px-3 text-sm bg-content1 border border-divider min-w-[160px]"
                       aria-label="WebDAV 认证方式"
                     >
+                      <option value="users">MnemoNAS 用户账号</option>
                       <option value="basic">Basic Auth</option>
                       <option value="none">无认证</option>
                     </select>
@@ -2397,7 +2445,7 @@ export function SettingsPage() {
                         placeholder="admin"
                         value={settings.webdavUsername}
                         onValueChange={(v) => updateDirtySettings(s => ({ ...s, webdavUsername: v }))}
-                        isDisabled={!settings.webdavEnabled || settings.webdavAuthType === 'none'}
+                        isDisabled={!settings.webdavEnabled || settings.webdavAuthType !== 'basic'}
                         startContent={<User size={16} className="text-default-500" />}
                         classNames={{ 
                           inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary",
@@ -2411,7 +2459,7 @@ export function SettingsPage() {
                         placeholder="••••••••"
                         value={settings.webdavPassword}
                         onValueChange={(v) => updateDirtySettings(s => ({ ...s, webdavPassword: v }))}
-                        isDisabled={!settings.webdavEnabled || settings.webdavAuthType === 'none'}
+                        isDisabled={!settings.webdavEnabled || settings.webdavAuthType !== 'basic'}
                         startContent={<Lock size={16} className="text-default-500" />}
                         classNames={{ 
                           inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary",

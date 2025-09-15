@@ -292,16 +292,17 @@ The dataplane reads these values on startup. Restart dataplane after changing th
 | `enabled` | bool | `true` | Enable WebDAV |
 | `prefix` | string | `"/dav"` | WebDAV URL prefix; normalized to a `/`-prefixed path and must not contain backslash, `?`, `#`, or control characters. When enabled it must not be `/`, `/api`, `/s`, `/health`, or a child of those reserved routes |
 | `read_only` | bool | `false` | Reject write methods |
-| `auth_type` | string | `"basic"` | `basic` or `none` |
+| `auth_type` | string | `"basic"` | `users`, `basic`, or `none` |
 | `username` | string | `""` | Basic Auth username; empty uses runtime default `admin` |
 | `password` | string | `""` | Basic Auth password; empty uses/generated from `secrets.json` |
 
 Runtime behavior:
 
 - Settings API updates can switch prefix, read-only mode, and auth config without full restart.
+- `auth_type = "users"` uses MnemoNAS app users over HTTP Basic. Admins see the global namespace; regular users see their `home_dir` as the WebDAV root; guest users are read-only; user quotas are enforced for PUT/COPY writes.
 - Empty password with Basic Auth keeps using the generated password.
 - WebDAV is matched before the API and frontend handlers, so enabled prefixes cannot overlap reserved application routes.
-- WebDAV Basic Auth is a global service credential and does not carry app-level user identity.
+- `auth_type = "basic"` is the compatibility mode: one global service credential, without app-level `home_dir` isolation.
 
 ## `[smb]`
 
@@ -352,7 +353,7 @@ The file is removed after first successful login for that administrator.
 
 | Option | Type | Default | Description |
 | --- | --- | --- | --- |
-| `allow_unsafe_no_auth` | bool | `false` | Allow Web UI/API auth or WebDAV Basic Auth to be disabled while HTTP listens beyond loopback |
+| `allow_unsafe_no_auth` | bool | `false` | Allow Web UI/API auth or WebDAV authentication to be disabled while HTTP listens beyond loopback |
 
 By default, `auth.enabled = false` or enabled WebDAV with `webdav.auth_type = "none"` fails validation when `server.host` listens beyond loopback. Set this to `true` only when a firewall, container port binding, or reverse proxy deliberately limits access; MnemoNAS will still print a security warning.
 

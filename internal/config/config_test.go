@@ -260,6 +260,20 @@ func TestConfig_Validate(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name:    "WebDAV users auth type is valid when app auth is enabled",
+			modify:  func(c *Config) { c.WebDAV.AuthType = "users" },
+			wantErr: false,
+		},
+		{
+			name: "WebDAV users auth type requires app auth",
+			modify: func(c *Config) {
+				c.Server.Host = "127.0.0.1"
+				c.Auth.Enabled = false
+				c.WebDAV.AuthType = "users"
+			},
+			wantErr: true,
+		},
+		{
 			name:    "Invalid WebDAV root prefix",
 			modify:  func(c *Config) { c.WebDAV.Prefix = "/" },
 			wantErr: true,

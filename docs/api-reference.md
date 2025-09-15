@@ -101,6 +101,7 @@ Authorization: Bearer <access_token>
 | 410 | 资源不可用（过期/禁用/访问上限） |
 | 413 | 文件过大 |
 | 503 | 服务暂不可用（如文件系统、分享服务、活动日志、版本存储未就绪） |
+| 507 | 用户容量配额不足 |
 | 500 | 服务器内部错误 |
 
 ### Warning 响应头
@@ -292,7 +293,9 @@ GET /api/v1/admin/users
         "username": "admin",
         "role": "admin",
         "disabled": false,
-        "home_dir": "/"
+        "home_dir": "/",
+        "quota_bytes": 0,
+        "used_bytes": 0
       }
     ],
     "total": 1
@@ -306,6 +309,26 @@ POST /api/v1/admin/users
 ```
 
 用户名最多 255 个字符，不能包含 `/`、`\`、控制字符或 `.` / `..`；密码长度必须为 8 到 72 字节。
+
+**更新用户资料、角色、主目录或配额**:
+```
+PUT /api/v1/admin/users/{id}
+```
+
+**请求体**（至少包含一个字段）:
+```json
+{
+  "email": "user@example.com",
+  "role": "user",
+  "home_dir": "/alice",
+  "quota_bytes": 10737418240
+}
+```
+
+- `quota_bytes = 0` 表示不限额；大于 0 时，非管理员用户的 Web/API 上传、复制、回收站恢复，以及 `webdav.auth_type = "users"` 下的 WebDAV PUT/COPY 会按该用户 `home_dir` 的当前逻辑大小执行硬限制。
+- 超出配额返回 `507 Insufficient Storage`，错误码为 `QUOTA_EXCEEDED`，`details` 包含 `used_bytes`、`quota_bytes`、`required_bytes` 和 `available_bytes`。
+- `webdav.auth_type = "basic"` 仍是全局服务凭据兼容模式，不携带应用层 `home_dir` 用户身份。
+- 不允许把当前登录管理员自身角色改为非管理员，错误码为 `SELF_ROLE_CHANGE`；不允许移除最后一个启用管理员，错误码为 `LAST_ADMIN`。
 
 **删除用户**:
 ```
@@ -1880,8 +1903,8 @@ PUT /api/v1/settings
 - `dataplane` 支持更新 `grpc_address`、`timeout`、`max_retries`；保存后会立即替换运行中的数据面 client，并用于后续按需重连和连接重试策略
 - 请求中的 `trash.retention_days` 不能为负数，`trash.max_size` 必须是正整数
 - 请求中的 `versioning.max_versioned_size` 必须是正整数，`versioning.auto_versioned_extensions` 每项必须以 `.` 开头，`versioning.auto_versioned_filenames` 不能包含空项
-- `webdav` 支持更新 `enabled`、`prefix`、`read_only`、`auth_type`、`username`、`password`；`prefix` 会归一化为以 `/` 开头的 URL 路径，不能包含反斜杠、`?`、`#` 或控制字符，启用时不能覆盖 `/`、`/api`、`/s`、`/health`；保存后会立即切换运行中的 WebDAV 前缀、鉴权方式和只读状态
-- 认证启用时，`webdav.username` 不得复用现有非 admin 用户名；WebDAV 基本认证是全局服务凭据，不携带应用层 `home_dir` 隔离
+- `webdav` 支持更新 `enabled`、`prefix`、`read_only`、`auth_type`、`username`、`password`；`auth_type` 支持 `users`、`basic`、`none`；`prefix` 会归一化为以 `/` 开头的 URL 路径，不能包含反斜杠、`?`、`#` 或控制字符，启用时不能覆盖 `/`、`/api`、`/s`、`/health`；保存后会立即切换运行中的 WebDAV 前缀、鉴权方式和只读状态
+- `webdav.auth_type = "users"` 使用 MnemoNAS 用户账号登录，普通用户的 WebDAV 根目录映射到自己的 `home_dir`，guest 只读，用户配额约束 PUT/COPY；`basic` 模式下 `webdav.username` 不得复用现有非 admin 用户名，因为它是全局服务凭据
 - 请求中的 `server.host` 必须为空、`*`、合法主机名、IPv4 或 IPv6 字面量，不能包含端口、空白或控制字符；端口必须通过 `server.port` 设置
 - 请求中的 `server.trusted_proxy_hops` 不能为负数；默认值 `0` 表示不信任转发头
 - 请求中的 `server.read_timeout`、`server.write_timeout`、`server.idle_timeout` 必须是正的 `time.ParseDuration` 字符串，例如 `30s`、`2m`

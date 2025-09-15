@@ -241,11 +241,11 @@ services:
     restart: unless-stopped
 ```
 
-Do not use `server.host = "127.0.0.1"` inside the container to limit host access; that binds to the container's loopback. Restrict host exposure in the Compose port mapping instead. If you also disable WebDAV Basic Auth for a loopback-only developer container, keep `server.host = "0.0.0.0"` inside the container and set `security.allow_unsafe_no_auth = true` to explicitly confirm that the host port mapping is the access boundary.
+Do not use `server.host = "127.0.0.1"` inside the container to limit host access; that binds to the container's loopback. Restrict host exposure in the Compose port mapping instead. If you also disable WebDAV authentication for a loopback-only developer container, keep `server.host = "0.0.0.0"` inside the container and set `security.allow_unsafe_no_auth = true` to explicitly confirm that the host port mapping is the access boundary.
 
 ## Multi-User NAS Example
 
-Admins can create users in the Web UI and set `home_dir`. Non-admin users are scoped to that configured root for file browsing, search, favorites, shares, trash, and activity.
+Admins can create users in the Web UI and set `home_dir` plus user quotas. Non-admin users are scoped to that configured root for file browsing, search, favorites, shares, trash, and activity; Web/API uploads, copies, and trash restores honor the configured quota.
 
 ```yaml
 services:

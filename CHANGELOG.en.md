@@ -18,7 +18,7 @@ This project follows [Semantic Versioning 2.0.0](https://semver.org/).
 - Trash with time-based listing, restore, batch restore, and empty-trash flow.
 - Filename search with highlighted results and quick navigation.
 - Activity log with filters, details, statistics, and disk-health system events.
-- User management with create/edit/delete, password reset, and enable/disable flows.
+- User management with create/edit/delete, home directory and quota editing, password reset, and enable/disable flows.
 - Share management with link creation, password protection, expiration, access statistics, and public share access.
 - Settings for server, storage, retention, WebDAV, CDC parameters, scheduled Scrub, and data-plane connection status.
 - Public access wizard and security self-check entry point for HTTPS reverse proxy, trusted proxy hops, and share-domain configuration.
@@ -27,7 +27,8 @@ This project follows [Semantic Versioning 2.0.0](https://semver.org/).
 
 #### Backend API
 - Authentication APIs for JWT login, logout, refresh, password changes, and current-user lookup.
-- User management APIs.
+- User management APIs, including user-level quotas. Non-admin Web/API uploads, copies, and trash restores return `QUOTA_EXCEEDED` when they exceed the configured quota.
+- WebDAV supports `auth_type = "users"` so clients can mount with MnemoNAS user accounts; non-admin mounts are rooted at the user's `home_dir`, guest accounts are read-only, and PUT/COPY writes honor user quotas.
 - Share-link APIs including public access and password checks.
 - Activity log APIs, including scrub system events.
 - Runtime settings APIs, including public-access security self-check, certificate renewal and failure-triage guidance, scheduled Scrub updates, and hot updates for Webhook/Telegram/SMTP alert notifications.

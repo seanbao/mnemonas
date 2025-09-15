@@ -22,6 +22,7 @@ const (
 	ErrCodeNotFound        = "NOT_FOUND"
 	ErrCodeConflict        = "CONFLICT"
 	ErrCodePayloadTooLarge = "PAYLOAD_TOO_LARGE"
+	ErrCodeQuotaExceeded   = "QUOTA_EXCEEDED"
 	ErrCodeInternal        = "INTERNAL_ERROR"
 	ErrCodeServiceUnavail  = "SERVICE_UNAVAILABLE"
 	ErrCodeUnauthorized    = "UNAUTHORIZED"

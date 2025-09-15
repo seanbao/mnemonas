@@ -37,6 +37,7 @@ var (
 	errOverwriteDisabled                  = errors.New("destination exists and overwrite is disabled")
 	errDestinationInsideSourceDirectory   = errors.New("destination cannot be inside source directory")
 	errDirectoryCopyOverwriteNotSupported = errors.New("overwriting an existing destination with a directory copy is not supported")
+	errWebDAVQuotaExceeded                = errors.New("user quota exceeded")
 )
 
 const webdavLockTimeout = time.Hour
@@ -51,8 +52,114 @@ const webdavLockDepthZero = "0"
 const webdavLockDepthInfinity = "infinity"
 const maxWebDAVXMLRequestBody = 1 << 20
 const untrustedWebDAVContentSecurityPolicy = "sandbox; default-src 'none'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; img-src 'self' data: blob:; media-src 'self' data: blob:; style-src 'unsafe-inline'"
+const webDAVAuthTypeUsers = "users"
+
+const (
+	webDAVRoleAdmin = "admin"
+	webDAVRoleUser  = "user"
+	webDAVRoleGuest = "guest"
+)
 
 var webdavRandomRead = rand.Read
+
+type webDAVScopeContextKey struct{}
+
+type requestScope struct {
+	username   string
+	homeDir    string
+	scoped     bool
+	readOnly   bool
+	quotaBytes int64
+}
+
+func scopeFromContext(ctx context.Context) requestScope {
+	if ctx == nil {
+		return requestScope{}
+	}
+	scope, _ := ctx.Value(webDAVScopeContextKey{}).(requestScope)
+	return scope
+}
+
+func contextWithScope(ctx context.Context, scope requestScope) context.Context {
+	return context.WithValue(ctx, webDAVScopeContextKey{}, scope)
+}
+
+func (s requestScope) storagePath(clientPath string) (string, bool) {
+	cleanPath := path.Clean(clientPath)
+	if !path.IsAbs(cleanPath) {
+		cleanPath = "/" + cleanPath
+	}
+	if !s.scoped {
+		return cleanPath, true
+	}
+
+	if strings.TrimSpace(s.homeDir) == "" {
+		return "", false
+	}
+	if cleanPath == "/" {
+		return s.homeDir, true
+	}
+	relative := strings.TrimPrefix(cleanPath, "/")
+	if relative == "" {
+		return s.homeDir, true
+	}
+	return path.Clean(path.Join(s.homeDir, relative)), true
+}
+
+func (s requestScope) clientPath(storagePath string) (string, bool) {
+	cleanPath := path.Clean(storagePath)
+	if !path.IsAbs(cleanPath) {
+		cleanPath = "/" + cleanPath
+	}
+	if !s.scoped {
+		return cleanPath, true
+	}
+
+	homeDir := path.Clean(s.homeDir)
+	if !path.IsAbs(homeDir) {
+		homeDir = "/" + homeDir
+	}
+	if homeDir == "/" {
+		return cleanPath, true
+	}
+	if cleanPath == homeDir {
+		return "/", true
+	}
+	if strings.HasPrefix(cleanPath, homeDir+"/") {
+		clientPath := strings.TrimPrefix(cleanPath, homeDir)
+		if clientPath == "" {
+			return "/", true
+		}
+		return clientPath, true
+	}
+	return "", false
+}
+
+func (s requestScope) isClientRoot(storagePath string) bool {
+	clientPath, ok := s.clientPath(storagePath)
+	return ok && clientPath == "/"
+}
+
+func normalizeScopedHomeDir(homeDir string) (string, bool) {
+	trimmed := strings.TrimSpace(homeDir)
+	if trimmed == "" || hasTraversalSegment(trimmed) {
+		return "", false
+	}
+	normalized := path.Clean(strings.ReplaceAll(trimmed, "\\", "/"))
+	if !path.IsAbs(normalized) {
+		normalized = "/" + normalized
+	}
+	return normalized, true
+}
+
+type UserIdentity struct {
+	Username   string
+	Role       string
+	HomeDir    string
+	QuotaBytes int64
+}
+
+type UserAuthenticator func(ctx context.Context, username, password string) (*UserIdentity, error)
 
 type webdavLock struct {
 	token     string
@@ -91,10 +198,12 @@ type Handler struct {
 	lockCleanupDone      chan struct{}
 	newLockToken         func() (string, error)
 	// REM-1 fix: Authentication
-	authType       string
-	username       string
-	password       string
-	beforeCopyFile func(srcPath, dstPath string) error
+	authType          string
+	username          string
+	password          string
+	userAuthenticator UserAuthenticator
+	quotaMu           sync.Mutex
+	beforeCopyFile    func(srcPath, dstPath string) error
 }
 
 // Config holds WebDAV handler configuration
@@ -103,9 +212,10 @@ type Config struct {
 	Prefix     string // URL prefix, e.g., "/dav"
 	ReadOnly   bool
 	// REM-1 fix: Authentication configuration
-	AuthType string // "none", "basic"
-	Username string
-	Password string
+	AuthType          string // "none", "basic", "users"
+	Username          string
+	Password          string
+	UserAuthenticator UserAuthenticator
 }
 
 // NewHandler creates a WebDAV handler
@@ -122,9 +232,10 @@ func NewHandler(cfg Config) *Handler {
 		lockCleanupStop:     make(chan struct{}),
 		lockCleanupDone:     make(chan struct{}),
 		newLockToken:        generateOpaqueLockToken,
-		authType:            strings.ToLower(cfg.AuthType),
+		authType:            strings.ToLower(strings.TrimSpace(cfg.AuthType)),
 		username:            cfg.Username,
 		password:            cfg.Password,
+		userAuthenticator:   cfg.UserAuthenticator,
 	}
 }
 
@@ -194,9 +305,15 @@ func (h *Handler) startLockCleanupLoop() {
 // ServeHTTP handles WebDAV requests
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// REM-1 fix: Check authentication
-	if !h.checkAuth(r) {
+	identity, authenticated := h.authenticate(r)
+	if !authenticated {
 		w.Header().Set("WWW-Authenticate", `Basic realm="MnemoNAS WebDAV"`)
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+	scope, err := h.scopeForIdentity(identity)
+	if err != nil {
+		http.Error(w, "home directory is not available", http.StatusForbidden)
 		return
 	}
 
@@ -214,16 +331,22 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if !path.IsAbs(cleanPath) {
 		cleanPath = "/" + cleanPath
 	}
-	filePath, ok := trimWebDAVPrefix(cleanPath, h.prefix)
+	clientPath, ok := trimWebDAVPrefix(cleanPath, h.prefix)
 	if !ok {
 		http.NotFound(w, r)
 		return
 	}
+	filePath, ok := scope.storagePath(clientPath)
+	if !ok {
+		http.Error(w, "home directory is not available", http.StatusForbidden)
+		return
+	}
 
-	ctx := r.Context()
+	ctx := contextWithScope(r.Context(), scope)
+	r = r.WithContext(ctx)
 
 	// Check read-only mode
-	if h.readOnly && !isReadMethod(r.Method) {
+	if (h.readOnly || scope.readOnly) && !isReadMethod(r.Method) {
 		http.Error(w, "read-only mode", http.StatusForbidden)
 		return
 	}
@@ -363,6 +486,11 @@ func (h *Handler) serveDirectory(ctx context.Context, w http.ResponseWriter, r *
 		h.handleError(w, err)
 		return
 	}
+	scope := scopeFromContext(ctx)
+	displayPath, ok := scope.clientPath(filePath)
+	if !ok {
+		displayPath = filePath
+	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	setUntrustedWebDAVContentHeaders(w.Header())
@@ -373,10 +501,15 @@ func (h *Handler) serveDirectory(ctx context.Context, w http.ResponseWriter, r *
 <h1>Index of %s</h1>
 <hr>
 <pre>
-`, html.EscapeString(filePath), html.EscapeString(filePath))
+`, html.EscapeString(displayPath), html.EscapeString(displayPath))
 
-	if filePath != "/" {
-		parentHref := escapeDirectoryHref(path.Join(h.prefix, path.Dir(filePath)))
+	if !scope.isClientRoot(filePath) {
+		parentPath := path.Dir(filePath)
+		parentClientPath, ok := scope.clientPath(parentPath)
+		if !ok {
+			parentClientPath = parentPath
+		}
+		parentHref := escapeDirectoryHref(path.Join(h.prefix, parentClientPath))
 		fmt.Fprintf(w, `<a href="%s">..</a>
 `, html.EscapeString(parentHref))
 	}
@@ -389,7 +522,7 @@ func (h *Handler) serveDirectory(ctx context.Context, w http.ResponseWriter, r *
 		// V3-2 fix: Escape HTML to prevent XSS
 		fmt.Fprintf(w, `<a href="%s">%s</a>    %s    %d
 `,
-			html.EscapeString(escapeDirectoryHref(path.Join(h.prefix, child.Path))),
+			html.EscapeString(h.webdavHref(ctx, child.Path, child.IsDir)),
 			html.EscapeString(name),
 			child.ModTime.Format(time.RFC3339),
 			child.Size,
@@ -411,8 +544,12 @@ func setUntrustedWebDAVContentHeaders(header http.Header) {
 	header.Set("Content-Security-Policy", untrustedWebDAVContentSecurityPolicy)
 }
 
-func (h *Handler) webdavHref(filePath string, isDir bool) string {
-	rawHref := path.Join(h.prefix, filePath)
+func (h *Handler) webdavHref(ctx context.Context, filePath string, isDir bool) string {
+	clientPath, ok := scopeFromContext(ctx).clientPath(filePath)
+	if !ok {
+		clientPath = filePath
+	}
+	rawHref := path.Join(h.prefix, clientPath)
 	if isDir && !strings.HasSuffix(rawHref, "/") {
 		rawHref += "/"
 	}
@@ -507,7 +644,14 @@ func (h *Handler) handlePut(ctx context.Context, w http.ResponseWriter, r *http.
 	affectedPaths := []string{parent, filePath}
 	h.invalidatePropCache(affectedPaths...)
 
-	err := h.fs.WriteFile(ctx, filePath, r.Body)
+	reader, releaseQuota, err := h.quotaCheckedUploadReader(ctx, filePath, r.Body, r.ContentLength)
+	if err != nil {
+		h.handleError(w, err)
+		return
+	}
+	defer releaseQuota()
+
+	err = h.fs.WriteFile(ctx, filePath, reader)
 	if err != nil {
 		h.handleError(w, err)
 		return
@@ -733,7 +877,7 @@ func (h *Handler) handleCopy(ctx context.Context, w http.ResponseWriter, r *http
 	h.invalidatePropCache(affectedPaths...)
 
 	allowOverwrite := dstExists && !srcInfo.IsDir
-	copyErr := h.copyResource(ctx, srcPath, dst, copyDepth, allowOverwrite)
+	copyErr := h.copyResourceWithQuota(ctx, srcPath, dst, copyDepth, allowOverwrite)
 	if copyErr != nil && !isVisibleMutationWarning(copyErr) {
 		if strings.EqualFold(r.Header.Get("Overwrite"), "F") && errors.Is(copyErr, storage.ErrAlreadyExists) {
 			writeKnownWebDAVError(w, errOverwriteDisabled, http.StatusPreconditionFailed)
@@ -756,6 +900,56 @@ func (h *Handler) handleCopy(ctx context.Context, w http.ResponseWriter, r *http
 		return
 	}
 	w.WriteHeader(http.StatusCreated)
+}
+
+func (h *Handler) copyResourceWithQuota(ctx context.Context, srcPath, dstPath, depth string, allowOverwrite bool) error {
+	scope := scopeFromContext(ctx)
+	if !scope.scoped || scope.quotaBytes <= 0 {
+		return h.copyResource(ctx, srcPath, dstPath, depth, allowOverwrite)
+	}
+
+	h.quotaMu.Lock()
+	defer h.quotaMu.Unlock()
+
+	usedBytes, err := h.pathLogicalSizeIfExists(ctx, scope.homeDir)
+	if err != nil {
+		return err
+	}
+	requiredBytes, err := h.copyRequiredBytes(ctx, srcPath, dstPath, depth, allowOverwrite)
+	if err != nil {
+		return err
+	}
+	if err := ensureWebDAVQuotaAvailable(usedBytes, scope.quotaBytes, requiredBytes); err != nil {
+		return err
+	}
+
+	return h.copyResource(ctx, srcPath, dstPath, depth, allowOverwrite)
+}
+
+func (h *Handler) copyRequiredBytes(ctx context.Context, srcPath, dstPath, depth string, allowOverwrite bool) (int64, error) {
+	info, err := h.fs.Stat(ctx, srcPath)
+	if err != nil {
+		return 0, err
+	}
+	if info.IsDir && depth == "0" {
+		return 0, nil
+	}
+
+	requiredBytes, err := h.fileInfoLogicalSize(ctx, info)
+	if err != nil {
+		return 0, err
+	}
+	if allowOverwrite && !info.IsDir {
+		replacedBytes, err := h.existingUploadTargetSize(ctx, dstPath)
+		if err != nil {
+			return 0, err
+		}
+		requiredBytes -= replacedBytes
+		if requiredBytes < 0 {
+			requiredBytes = 0
+		}
+	}
+	return requiredBytes, nil
 }
 
 func (h *Handler) copyResource(ctx context.Context, srcPath, dstPath, depth string, allowOverwrite bool) error {
@@ -812,6 +1006,164 @@ func (h *Handler) copyResource(ctx context.Context, srcPath, dstPath, depth stri
 	defer reader.Close()
 
 	return h.fs.WriteFile(ctx, dstPath, reader)
+}
+
+func (h *Handler) quotaCheckedUploadReader(ctx context.Context, targetPath string, reader io.Reader, contentLength int64) (io.Reader, func(), error) {
+	scope := scopeFromContext(ctx)
+	if !scope.scoped || scope.quotaBytes <= 0 {
+		return reader, func() {}, nil
+	}
+
+	h.quotaMu.Lock()
+	unlock := func() {
+		h.quotaMu.Unlock()
+	}
+
+	usedBytes, err := h.pathLogicalSizeIfExists(ctx, scope.homeDir)
+	if err != nil {
+		unlock()
+		return nil, nil, err
+	}
+
+	replacedBytes, err := h.existingUploadTargetSize(ctx, targetPath)
+	if err != nil {
+		unlock()
+		return nil, nil, err
+	}
+
+	baseUsed := usedBytes - replacedBytes
+	if baseUsed < 0 {
+		baseUsed = 0
+	}
+	availableBytes := scope.quotaBytes - baseUsed
+	if availableBytes < 0 {
+		availableBytes = 0
+	}
+
+	if contentLength >= 0 && contentLength > availableBytes {
+		unlock()
+		return nil, nil, errWebDAVQuotaExceeded
+	}
+
+	return &quotaLimitedReader{
+		reader:    reader,
+		remaining: availableBytes,
+		err:       errWebDAVQuotaExceeded,
+	}, unlock, nil
+}
+
+func (h *Handler) existingUploadTargetSize(ctx context.Context, targetPath string) (int64, error) {
+	info, err := h.fs.Stat(ctx, targetPath)
+	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) || errors.Is(err, storage.ErrNotDir) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	if info.IsDir {
+		return 0, storage.ErrIsDir
+	}
+	return nonNegativeSize(info.Size), nil
+}
+
+func (h *Handler) pathLogicalSizeIfExists(ctx context.Context, targetPath string) (int64, error) {
+	size, err := h.pathLogicalSize(ctx, targetPath)
+	if errors.Is(err, storage.ErrNotFound) || errors.Is(err, storage.ErrNotDir) {
+		return 0, nil
+	}
+	return size, err
+}
+
+func (h *Handler) pathLogicalSize(ctx context.Context, targetPath string) (int64, error) {
+	info, err := h.fs.Stat(ctx, targetPath)
+	if err != nil {
+		return 0, err
+	}
+	return h.fileInfoLogicalSize(ctx, info)
+}
+
+func (h *Handler) fileInfoLogicalSize(ctx context.Context, info *storage.FileInfo) (int64, error) {
+	if info == nil {
+		return 0, nil
+	}
+	if !info.IsDir {
+		return nonNegativeSize(info.Size), nil
+	}
+
+	children, err := h.fs.ReadDir(ctx, info.Path)
+	if err != nil {
+		return 0, err
+	}
+
+	var total int64
+	for _, child := range children {
+		size, err := h.fileInfoLogicalSize(ctx, child)
+		if err != nil {
+			return 0, err
+		}
+		total, err = addWebDAVQuotaSize(total, size)
+		if err != nil {
+			return 0, err
+		}
+	}
+	return total, nil
+}
+
+func ensureWebDAVQuotaAvailable(usedBytes, quotaBytes, requiredBytes int64) error {
+	requiredBytes = nonNegativeSize(requiredBytes)
+	availableBytes := quotaBytes - usedBytes
+	if availableBytes < 0 {
+		availableBytes = 0
+	}
+	if requiredBytes > availableBytes {
+		return errWebDAVQuotaExceeded
+	}
+	return nil
+}
+
+func addWebDAVQuotaSize(left, right int64) (int64, error) {
+	if right <= 0 {
+		return left, nil
+	}
+	const maxInt64 = int64(^uint64(0) >> 1)
+	if left > maxInt64-right {
+		return 0, errors.New("logical file size overflow")
+	}
+	return left + right, nil
+}
+
+func nonNegativeSize(size int64) int64 {
+	if size < 0 {
+		return 0
+	}
+	return size
+}
+
+type quotaLimitedReader struct {
+	reader    io.Reader
+	remaining int64
+	err       error
+}
+
+func (r *quotaLimitedReader) Read(p []byte) (int, error) {
+	if r.remaining <= 0 {
+		var probe [1]byte
+		n, err := r.reader.Read(probe[:])
+		if n > 0 {
+			return 0, r.err
+		}
+		if err != nil {
+			return 0, err
+		}
+		return 0, nil
+	}
+
+	if int64(len(p)) > r.remaining {
+		p = p[:r.remaining]
+	}
+	n, err := r.reader.Read(p)
+	r.remaining -= int64(n)
+	return n, err
 }
 
 func isVisibleMutationWarning(err error) bool {
@@ -1213,10 +1565,13 @@ func (h *Handler) handlePropfind(ctx context.Context, w http.ResponseWriter, r *
 		return
 	}
 
+	cacheable := !scopeFromContext(ctx).scoped
 	// Check cache first
-	if responses, ok := h.propCache.Get(filePath, depth); ok {
-		h.writePropfindResponse(w, responses)
-		return
+	if cacheable {
+		if responses, ok := h.propCache.Get(filePath, depth); ok {
+			h.writePropfindResponse(w, responses)
+			return
+		}
 	}
 	generation := h.propCache.SnapshotGeneration()
 
@@ -1229,7 +1584,7 @@ func (h *Handler) handlePropfind(ctx context.Context, w http.ResponseWriter, r *
 	var responses []propfindResponse
 
 	// Add current resource
-	responses = append(responses, h.propResponse(filePath, info))
+	responses = append(responses, h.propResponse(ctx, filePath, info))
 
 	if err := h.appendPropfindChildren(ctx, filePath, info, depth, 0, &responses); err != nil {
 		if errors.Is(err, errPropfindDepthLimitExceeded) {
@@ -1241,7 +1596,7 @@ func (h *Handler) handlePropfind(ctx context.Context, w http.ResponseWriter, r *
 	}
 
 	// Cache the result for large directories
-	if len(responses) > 10 {
+	if cacheable && len(responses) > 10 {
 		h.propCache.SetIfUnchanged(filePath, depth, responses, generation)
 	}
 
@@ -1262,7 +1617,7 @@ func (h *Handler) appendPropfindChildren(ctx context.Context, filePath string, i
 	}
 
 	for _, child := range children {
-		*responses = append(*responses, h.propResponse(child.Path, child))
+		*responses = append(*responses, h.propResponse(ctx, child.Path, child))
 		if depth == "infinity" {
 			if err := h.appendPropfindChildren(ctx, child.Path, child, depth, currentDepth+1, responses); err != nil {
 				return err
@@ -1301,13 +1656,21 @@ func (h *Handler) writePropfindResponse(w http.ResponseWriter, responses []propf
 	enc.Encode(ms)
 }
 
-func (h *Handler) propResponse(filePath string, info *storage.FileInfo) propfindResponse {
-	href := h.webdavHref(filePath, info.IsDir)
+func (h *Handler) propResponse(ctx context.Context, filePath string, info *storage.FileInfo) propfindResponse {
+	href := h.webdavHref(ctx, filePath, info.IsDir)
+	clientPath, ok := scopeFromContext(ctx).clientPath(filePath)
+	if !ok {
+		clientPath = filePath
+	}
+	displayName := path.Base(clientPath)
+	if clientPath == "/" {
+		displayName = "/"
+	}
 
 	props := propstat{
 		Status: "HTTP/1.1 200 OK",
 		Prop: prop{
-			DisplayName:     path.Base(filePath),
+			DisplayName:     displayName,
 			GetLastModified: info.ModTime.UTC().Format(http.TimeFormat),
 		},
 	}
@@ -1349,11 +1712,11 @@ func (h *Handler) handleProppatch(ctx context.Context, w http.ResponseWriter, r 
 		return
 	}
 	if len(requestedProperties) == 0 {
-		h.writeProppatchNoOpResponse(w, filePath, info.IsDir)
+		h.writeProppatchNoOpResponse(ctx, w, filePath, info.IsDir)
 		return
 	}
 
-	h.writeProppatchUnsupportedResponse(w, filePath, info.IsDir, requestedProperties)
+	h.writeProppatchUnsupportedResponse(ctx, w, filePath, info.IsDir, requestedProperties)
 }
 
 func parseProppatchProperties(body io.Reader) ([]webdavPropertyElement, error) {
@@ -1415,7 +1778,7 @@ func parseProppatchProperties(body io.Reader) ([]webdavPropertyElement, error) {
 	return requestedProperties, nil
 }
 
-func (h *Handler) writeProppatchNoOpResponse(w http.ResponseWriter, filePath string, isDir bool) {
+func (h *Handler) writeProppatchNoOpResponse(ctx context.Context, w http.ResponseWriter, filePath string, isDir bool) {
 	w.Header().Set("Content-Type", "application/xml; charset=utf-8")
 	w.WriteHeader(http.StatusMultiStatus)
 	fmt.Fprint(w, xml.Header)
@@ -1426,10 +1789,10 @@ func (h *Handler) writeProppatchNoOpResponse(w http.ResponseWriter, filePath str
       <D:status>HTTP/1.1 200 OK</D:status>
     </D:propstat>
   </D:response>
-</D:multistatus>`, h.webdavHref(filePath, isDir))
+</D:multistatus>`, h.webdavHref(ctx, filePath, isDir))
 }
 
-func (h *Handler) writeProppatchUnsupportedResponse(w http.ResponseWriter, filePath string, isDir bool, requestedProperties []webdavPropertyElement) {
+func (h *Handler) writeProppatchUnsupportedResponse(ctx context.Context, w http.ResponseWriter, filePath string, isDir bool, requestedProperties []webdavPropertyElement) {
 	namespacePrefixes, orderedNamespaces := buildProppatchNamespacePrefixes(requestedProperties)
 	var response strings.Builder
 	response.WriteString(`<D:multistatus xmlns:D="DAV:"`)
@@ -1442,7 +1805,7 @@ func (h *Handler) writeProppatchUnsupportedResponse(w http.ResponseWriter, fileP
 	}
 	response.WriteString(`>`)
 	response.WriteString(`<D:response><D:href>`)
-	_ = xml.EscapeText(&response, []byte(h.webdavHref(filePath, isDir)))
+	_ = xml.EscapeText(&response, []byte(h.webdavHref(ctx, filePath, isDir)))
 	response.WriteString(`</D:href><D:propstat><D:prop>`)
 	for _, property := range requestedProperties {
 		writeProppatchPropertyElement(&response, namespacePrefixes, property)
@@ -1495,7 +1858,7 @@ func (h *Handler) handleLock(ctx context.Context, w http.ResponseWriter, r *http
 		http.Error(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
-	providedTokens := extractLockTokens(r, filePath, h.prefix)
+	providedTokens := extractLockTokens(r, filePath, h.prefix, scopePathMapper(ctx))
 	hasRefreshCondition := len(providedTokens) > 0 || r.Header.Get("If") != "" || r.Header.Get("Lock-Token") != ""
 
 	h.startLockCleanupLoop()
@@ -1617,7 +1980,15 @@ type providedLockToken struct {
 	tagged bool
 }
 
-func extractLockTokens(r *http.Request, requestPath, prefix string) []providedLockToken {
+func scopePathMapper(ctx context.Context) func(string) (string, bool) {
+	scope := scopeFromContext(ctx)
+	if !scope.scoped {
+		return nil
+	}
+	return scope.storagePath
+}
+
+func extractLockTokens(r *http.Request, requestPath, prefix string, mapPath func(string) (string, bool)) []providedLockToken {
 	seen := make(map[string]struct{})
 	tokens := make([]providedLockToken, 0, 2)
 
@@ -1652,6 +2023,9 @@ func extractLockTokens(r *http.Request, requestPath, prefix string) []providedLo
 				return tokens
 			}
 			resolvedPath, ok := resolveIfHeaderPath(ifHeader[1:uriEnd], requestHost(r), prefix)
+			if ok && mapPath != nil {
+				resolvedPath, ok = mapPath(resolvedPath)
+			}
 			if ok {
 				currentPath = resolvedPath
 			} else {
@@ -1784,7 +2158,7 @@ func (h *Handler) authorizeWriteLock(w http.ResponseWriter, r *http.Request, req
 }
 
 func (h *Handler) authorizeWriteLockWithScope(w http.ResponseWriter, r *http.Request, requestPath string, resourcePaths, namespacePaths, descendantRoots []string) bool {
-	providedTokens := extractLockTokens(r, requestPath, h.prefix)
+	providedTokens := extractLockTokens(r, requestPath, h.prefix, scopePathMapper(r.Context()))
 
 	h.locksMu.Lock()
 	defer h.locksMu.Unlock()
@@ -2103,8 +2477,11 @@ func (h *Handler) getDestination(r *http.Request) string {
 	if !ok {
 		return ""
 	}
+	if mappedPath, ok := scopeFromContext(r.Context()).storagePath(dstPath); ok {
+		return mappedPath
+	}
 
-	return dstPath
+	return ""
 }
 
 func trimWebDAVPrefix(cleanPath, prefix string) (string, bool) {
@@ -2147,6 +2524,10 @@ func hasTraversalSegment(rawPath string) bool {
 }
 
 func (h *Handler) handleError(w http.ResponseWriter, err error) {
+	if errors.Is(err, errWebDAVQuotaExceeded) {
+		http.Error(w, "user quota exceeded", http.StatusInsufficientStorage)
+		return
+	}
 	if errors.Is(err, storage.ErrNotFound) {
 		http.Error(w, "resource not found", http.StatusNotFound)
 		return
@@ -2183,23 +2564,62 @@ func isReadMethod(method string) bool {
 }
 
 // checkAuth verifies authentication based on configured auth type (REM-1 fix)
-func (h *Handler) checkAuth(r *http.Request) bool {
+func (h *Handler) authenticate(r *http.Request) (*UserIdentity, bool) {
 	switch h.authType {
 	case "basic":
 		user, pass, ok := r.BasicAuth()
 		if !ok {
-			return false
+			return nil, false
 		}
 		// Constant-time comparison to prevent timing attacks
 		userMatch := subtle.ConstantTimeCompare([]byte(user), []byte(h.username)) == 1
 		passMatch := subtle.ConstantTimeCompare([]byte(pass), []byte(h.password)) == 1
-		return userMatch && passMatch
+		if !userMatch || !passMatch {
+			return nil, false
+		}
+		return nil, true
+	case webDAVAuthTypeUsers:
+		if h.userAuthenticator == nil {
+			return nil, false
+		}
+		user, pass, ok := r.BasicAuth()
+		if !ok {
+			return nil, false
+		}
+		identity, err := h.userAuthenticator(r.Context(), user, pass)
+		if err != nil || identity == nil {
+			return nil, false
+		}
+		return identity, true
 	case "none", "":
-		return true
+		return nil, true
 	default:
 		// Unknown auth type, deny by default
-		return false
+		return nil, false
 	}
+}
+
+func (h *Handler) scopeForIdentity(identity *UserIdentity) (requestScope, error) {
+	if h.authType != webDAVAuthTypeUsers || identity == nil {
+		return requestScope{}, nil
+	}
+
+	role := strings.ToLower(strings.TrimSpace(identity.Role))
+	if role == webDAVRoleAdmin {
+		return requestScope{username: identity.Username, quotaBytes: identity.QuotaBytes}, nil
+	}
+
+	homeDir, ok := normalizeScopedHomeDir(identity.HomeDir)
+	if !ok {
+		return requestScope{}, errors.New("invalid user home directory")
+	}
+	return requestScope{
+		username:   identity.Username,
+		homeDir:    homeDir,
+		scoped:     true,
+		readOnly:   role == webDAVRoleGuest,
+		quotaBytes: identity.QuotaBytes,
+	}, nil
 }
 
 // matchETag checks if the given ETag matches the condition value

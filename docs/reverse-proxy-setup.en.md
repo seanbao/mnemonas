@@ -91,8 +91,8 @@ Verify:
 ```bash
 curl -I https://nas.example.com/health
 
-WEBDAV_USER="webdav"
-WEBDAV_PASS="your-webdav-password"
+WEBDAV_USER="admin" # use a MnemoNAS username when auth_type=users
+WEBDAV_PASS="your-mnemonas-password"
 curl -u "$WEBDAV_USER:$WEBDAV_PASS" -X PROPFIND https://nas.example.com/dav/ -H "Depth: 0"
 ```
 
@@ -319,8 +319,8 @@ ss -tlnp | grep -E '80|443|8080'
 WebDAV:
 
 ```bash
-WEBDAV_USER="webdav"
-WEBDAV_PASS="your-webdav-password"
+WEBDAV_USER="admin" # use a MnemoNAS username when auth_type=users
+WEBDAV_PASS="your-mnemonas-password"
 curl -u "$WEBDAV_USER:$WEBDAV_PASS" -X PROPFIND https://nas.example.com/dav/ \
   -H "Depth: 1" \
   -v

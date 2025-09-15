@@ -150,15 +150,16 @@ time_format = "RFC3339"
 | `enabled` | bool | `true` | 是否启用 WebDAV 服务 |
 | `prefix` | string | `"/dav"` | WebDAV 挂载前缀；会归一化为以 `/` 开头的 URL 路径，不能包含反斜杠、`?`、`#` 或控制字符；启用时不能使用 `/`、`/api`、`/s`、`/health` 或这些保留路由的子路径 |
 | `read_only` | bool | `false` | 是否禁止写入类 WebDAV 方法 |
-| `auth_type` | string | `"basic"` | 认证方式，支持 `basic` 和 `none` |
+| `auth_type` | string | `"basic"` | 认证方式，支持 `users`、`basic` 和 `none` |
 | `username` | string | `""` | `basic` 认证用户名，留空时运行态默认使用 `admin` |
 | `password` | string | `""` | `basic` 认证密码，留空时运行态使用 `secrets.json` 中的自动生成密码 |
 
 **运行态行为：**
 
 - 通过设置 API 更新 `webdav` 配置后，运行中的 WebDAV handler 会立即切换到新前缀、读写模式和认证配置
+- `auth_type = "users"` 时，WebDAV 使用 MnemoNAS 用户账号的 Basic 登录；管理员访问全局目录，普通用户的 WebDAV 根目录映射到自己的 `home_dir`，guest 账号只读，用户配额同样约束 PUT/COPY 写入
 - `password = ""` 且 `auth_type = "basic"` 时，运行态继续使用已有自动生成密码，不要求重启
-- 认证启用时，`username` 不应复用现有普通用户或 guest 用户名；WebDAV 基本认证是全局服务凭据，不携带应用层 `home_dir` 隔离
+- `auth_type = "basic"` 是兼容模式：`username/password` 是全局服务凭据，不携带应用层 `home_dir` 隔离；认证启用时，`username` 不应复用现有普通用户或 guest 用户名
 - WebDAV 在主 HTTP handler 中优先于 API/前端路由匹配，因此启用时前缀不能覆盖应用保留路由
 
 **示例：**
@@ -393,7 +394,7 @@ max_chunk_size = 1048576  # 1MB
 | `enabled` | bool | `true` | 是否启用 WebDAV 服务 |
 | `prefix` | string | `"/dav"` | WebDAV URL 前缀；会归一化为以 `/` 开头的路径，不能包含反斜杠、`?`、`#` 或控制字符；启用时不能覆盖 `/`、`/api`、`/s`、`/health` |
 | `read_only` | bool | `false` | 是否为只读模式 |
-| `auth_type` | string | `"basic"` | 认证类型：`none`（无认证）、`basic`（Basic Auth） |
+| `auth_type` | string | `"basic"` | 认证类型：`users`（MnemoNAS 用户账号）、`basic`（全局 Basic Auth）、`none`（无认证） |
 | `username` | string | `""` | Basic Auth 用户名 |
 | `password` | string | `""` | Basic Auth 密码 |
 
@@ -402,13 +403,14 @@ max_chunk_size = 1048576  # 1MB
 | 类型 | 说明 | 适用场景 |
 | ---- | ---- | ---------- |
 | `none` | 无认证，任何人可访问 | 本地开发、受信任网络 |
-| `basic` | HTTP Basic 认证 | 生产环境、外部访问 |
+| `users` | 使用 MnemoNAS 用户名/密码进行 HTTP Basic 登录；普通用户根目录映射到自己的 `home_dir`，guest 只读，并执行用户配额 | 推荐的日常挂载模式 |
+| `basic` | 单组全局 HTTP Basic 凭据，不携带应用用户身份 | 兼容旧配置或专用服务凭据 |
 
 **安全建议：**
 
 ⚠️ 生产环境务必：
 
-1. 设置 `auth_type = "basic"` 并配置强密码
+1. 优先设置 `auth_type = "users"`；如需兼容旧客户端或服务账号，再使用 `auth_type = "basic"` 并配置强密码
 2. 使用 HTTPS（通过反向代理）
 3. 考虑 `read_only = true` 限制写入
 
@@ -495,7 +497,7 @@ base_url = "https://nas.example.com"
 
 | 选项 | 类型 | 默认值 | 说明 |
 | ---- | ---- | ------ | ---- |
-| `allow_unsafe_no_auth` | bool | `false` | 允许在非 loopback 监听地址上关闭 Web UI/API 认证或 WebDAV Basic Auth |
+| `allow_unsafe_no_auth` | bool | `false` | 允许在非 loopback 监听地址上关闭 Web UI/API 认证或 WebDAV 认证 |
 
 默认情况下，`server.host` 监听非 loopback 地址时，`auth.enabled = false` 或启用 WebDAV 且 `webdav.auth_type = "none"` 会导致配置校验失败。只有在外层网络边界能确认限制访问范围时，才应把该值显式设为 `true`；设置后仍会输出安全警告。
 
