@@ -191,6 +191,7 @@ type UserInfo struct {
 	Username string `json:"username"`
 	Email    string `json:"email,omitempty"`
 	Role     Role   `json:"role"`
+	Groups   []string `json:"groups,omitempty"`
 	HomeDir  string `json:"home_dir"`
 }
 
@@ -217,6 +218,7 @@ func fullUserResponse(user *User) map[string]interface{} {
 		"username":    user.Username,
 		"email":       user.Email,
 		"role":        user.Role,
+		"groups":      append([]string(nil), user.Groups...),
 		"disabled":    user.Disabled,
 		"home_dir":    user.HomeDir,
 		"created_at":  user.CreatedAt,
@@ -253,6 +255,7 @@ func loginResponseFromTokenPair(tokenPair *TokenPair, user *User, includeTokens 
 			Username: user.Username,
 			Email:    user.Email,
 			Role:     user.Role,
+			Groups:   append([]string(nil), user.Groups...),
 			HomeDir:  user.HomeDir,
 		},
 	}
@@ -631,6 +634,7 @@ func (h *Handler) HandleMe(w http.ResponseWriter, r *http.Request) {
 			Username: user.Username,
 			Email:    user.Email,
 			Role:     user.Role,
+			Groups:   append([]string(nil), user.Groups...),
 			HomeDir:  user.HomeDir,
 		},
 	}
@@ -719,12 +723,14 @@ type CreateUserRequest struct {
 	Password string `json:"password"`
 	Email    string `json:"email"`
 	Role     string `json:"role"`
+	Groups   []string `json:"groups,omitempty"`
 }
 
 // UpdateUserRequest is the update user request body.
 type UpdateUserRequest struct {
 	Email      *string `json:"email"`
 	Role       *string `json:"role"`
+	Groups     *[]string `json:"groups,omitempty"`
 	HomeDir    *string `json:"home_dir"`
 	QuotaBytes *int64  `json:"quota_bytes"`
 }
@@ -795,7 +801,7 @@ func (h *Handler) HandleCreateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	user, err := h.userStore.Create(req.Username, req.Password, req.Email, role)
+	user, err := h.userStore.CreateWithGroups(req.Username, req.Password, req.Email, role, req.Groups)
 	if err != nil {
 		if isAuthPersistenceWarning(err) && user != nil {
 			markAuthPersistenceWarningHeaders(w)
@@ -812,6 +818,8 @@ func (h *Handler) HandleCreateUser(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "password must be at least 8 characters", "PASSWORD_TOO_SHORT")
 		case ErrPasswordTooLong:
 			writeError(w, http.StatusBadRequest, "password must be at most 72 bytes", "PASSWORD_TOO_LONG")
+		case errInvalidUserGroups:
+			writeError(w, http.StatusBadRequest, "invalid groups", "INVALID_GROUPS")
 		default:
 			writeError(w, http.StatusInternalServerError, "internal server error", "CREATE_ERROR")
 		}
@@ -840,7 +848,7 @@ func (h *Handler) HandleUpdateUser(w http.ResponseWriter, r *http.Request, userI
 		writeJSONBodyError(w, err)
 		return
 	}
-	if req.Email == nil && req.Role == nil && req.HomeDir == nil && req.QuotaBytes == nil {
+	if req.Email == nil && req.Role == nil && req.Groups == nil && req.HomeDir == nil && req.QuotaBytes == nil {
 		writeError(w, http.StatusBadRequest, "at least one field is required", "MISSING_FIELDS")
 		return
 	}
@@ -882,6 +890,9 @@ func (h *Handler) HandleUpdateUser(w http.ResponseWriter, r *http.Request, userI
 	if req.HomeDir != nil {
 		user.HomeDir = strings.TrimSpace(*req.HomeDir)
 	}
+	if req.Groups != nil {
+		user.Groups = append([]string(nil), (*req.Groups)...)
+	}
 	if req.QuotaBytes != nil {
 		if *req.QuotaBytes < 0 {
 			writeError(w, http.StatusBadRequest, "quota_bytes must be greater than or equal to 0", "INVALID_QUOTA")
@@ -912,6 +923,8 @@ func (h *Handler) HandleUpdateUser(w http.ResponseWriter, r *http.Request, userI
 			writeError(w, http.StatusBadRequest, "invalid role, must be admin, user, or guest", "INVALID_ROLE")
 		case errors.Is(err, errInvalidUserHomeDir):
 			writeError(w, http.StatusBadRequest, "invalid home_dir", "INVALID_HOME_DIR")
+		case errors.Is(err, errInvalidUserGroups):
+			writeError(w, http.StatusBadRequest, "invalid groups", "INVALID_GROUPS")
 		default:
 			writeError(w, http.StatusInternalServerError, "internal server error", "UPDATE_ERROR")
 		}

@@ -58,20 +58,6 @@ func (s *Server) currentUserHomeDir(ctx context.Context) (string, bool, error) {
 	return homeDir, true, nil
 }
 
-func (s *Server) authorizeUserPath(ctx context.Context, targetPath string) error {
-	homeDir, scoped, err := s.currentUserHomeDir(ctx)
-	if err != nil {
-		return err
-	}
-	if !scoped {
-		return nil
-	}
-	if !pathWithinBase(homeDir, targetPath) {
-		return errPathOutsideHomeDir
-	}
-	return nil
-}
-
 func (s *Server) currentUserQuota(ctx context.Context) (homeDir string, quotaBytes int64, scoped bool, err error) {
 	homeDir, homeScoped, err := s.currentUserHomeDir(ctx)
 	if err != nil {

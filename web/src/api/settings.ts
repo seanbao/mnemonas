@@ -26,6 +26,7 @@ export interface SettingsData {
   storage: {
     root: string
     directory_quotas?: DirectoryQuota[]
+    directory_access_rules?: DirectoryAccessRule[]
   }
   trash?: {
     enabled: boolean
@@ -105,6 +106,18 @@ export interface DirectoryQuota {
   quota_bytes: number
 }
 
+export type DirectoryAccessRole = 'admin' | 'user' | 'guest'
+
+export interface DirectoryAccessRule {
+  path: string
+  read_users?: string[]
+  write_users?: string[]
+  read_groups?: string[]
+  write_groups?: string[]
+  read_roles?: DirectoryAccessRole[]
+  write_roles?: DirectoryAccessRole[]
+}
+
 export interface SettingsResponse {
   success: boolean
   data: SettingsData
@@ -179,6 +192,7 @@ export interface UpdateSettingsRequest {
   }
   storage?: {
     directory_quotas?: DirectoryQuota[]
+    directory_access_rules?: DirectoryAccessRule[]
   }
   trash?: {
     enabled?: boolean
@@ -290,6 +304,21 @@ function isDirectoryQuota(value: unknown): value is DirectoryQuota {
     && typeof value.quota_bytes === 'number'
 }
 
+function isDirectoryAccessRole(value: unknown): value is DirectoryAccessRole {
+  return value === 'admin' || value === 'user' || value === 'guest'
+}
+
+function isDirectoryAccessRule(value: unknown): value is DirectoryAccessRule {
+  return isRecord(value)
+    && typeof value.path === 'string'
+    && (value.read_users === undefined || isStringArray(value.read_users))
+    && (value.write_users === undefined || isStringArray(value.write_users))
+    && (value.read_groups === undefined || isStringArray(value.read_groups))
+    && (value.write_groups === undefined || isStringArray(value.write_groups))
+    && (value.read_roles === undefined || (Array.isArray(value.read_roles) && value.read_roles.every(isDirectoryAccessRole)))
+    && (value.write_roles === undefined || (Array.isArray(value.write_roles) && value.write_roles.every(isDirectoryAccessRole)))
+}
+
 function isSecurityCheckStatus(value: unknown): value is SecurityCheckStatus {
   return value === 'pass' || value === 'warning' || value === 'block'
 }
@@ -372,6 +401,12 @@ function isValidSettingsData(value: unknown): value is SettingsData {
 
   if (value.storage.directory_quotas !== undefined) {
     if (!Array.isArray(value.storage.directory_quotas) || !value.storage.directory_quotas.every(isDirectoryQuota)) {
+      return false
+    }
+  }
+
+  if (value.storage.directory_access_rules !== undefined) {
+    if (!Array.isArray(value.storage.directory_access_rules) || !value.storage.directory_access_rules.every(isDirectoryAccessRule)) {
       return false
     }
   }
