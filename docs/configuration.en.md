@@ -188,12 +188,24 @@ For public deployments, a reverse proxy such as Caddy or Nginx is usually prefer
 | Option | Type | Default | Description |
 | --- | --- | --- | --- |
 | `root` | string | `~/.mnemonas` | Storage root; user files live under `root/files` |
+| `directory_quotas` | array | `[]` | Directory quota entries with `path` and `quota_bytes` |
 
 Rules:
 
 - `root` must not be `/`.
 - Startup tightens permissions on `root`, `files`, and internal directories.
 - Move the full storage root when migrating data.
+- `directory_quotas` use MnemoNAS logical paths such as `/team`. Uploads, copies, moves, trash restores, version restores, and WebDAV PUT/COPY/MOVE operations check current logical bytes before writing. Use `/` for a global hard limit. Admins can view current usage, remaining bytes, and status for each directory quota on the storage page.
+
+Example:
+
+```toml
+[storage]
+root = "~/.mnemonas"
+directory_quotas = [
+  { path = "/team", quota_bytes = 1099511627776 }, # 1 TiB
+]
+```
 
 ## `[storage.retention]`
 

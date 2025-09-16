@@ -164,7 +164,7 @@ exclude = [".mnemonas/thumbnails"]
 extra_args = ["--fast-list"]
 ```
 
-`schedule_window_start`/`schedule_window_end` 只限制自动调度，手动“立即备份”不受影响。窗口使用服务器本地时间的 `HH:MM`，可以跨午夜。`local` 保留策略在成功备份后执行，始终保留当前快照；`max_snapshots = 0` 和 `max_age = "0"` 表示不启用对应维度的自动清理。`restic` 和 `rclone` 的保留策略由外部工具管理，例如 `restic forget --prune`、systemd timer 或 rclone 目标端生命周期规则；配置 `retention_policy` 后，维护页会把该任务标记为“远端保留策略已确认”，否则显示需要确认。`restore_drill_stale_after` 控制定期恢复演练提醒；未配置时默认 30 天。维护页会显示任务健康状态、保留策略状态、恢复演练状态、下次自动运行时间、自动窗口、最近备份、最近恢复目标和最近清理的旧快照数量。恢复历史默认保留最近 20 条，失败恢复也会记录错误信息。
+`schedule_window_start`/`schedule_window_end` 只限制自动调度，手动“立即备份”不受影响。窗口使用服务器本地时间的 `HH:MM`，可以跨午夜。`local` 保留策略在成功备份后执行，始终保留当前快照；`max_snapshots = 0` 和 `max_age = "0"` 表示不启用对应维度的自动清理。`restic` 和 `rclone` 的保留策略由外部工具管理，例如 `restic forget --prune`、systemd timer 或 rclone 目标端生命周期规则；配置 `retention_policy` 后，维护页会把该任务标记为“远端保留策略已确认”，否则显示需要确认。每次成功备份后会自动执行一次保留策略检测，也可以在维护页手动点击“检查保留”：`local` 会统计本地快照范围，`restic` 会执行 `restic snapshots --json --tag mnemonas --tag job:<id>`，`rclone` 会执行 `rclone lsjson <remote> --recursive --files-only`。检测结果会写入 `last_retention_check`，并在快照缺失、远端为空、未填写 `retention_policy` 或命令失败时提示警告。`restore_drill_stale_after` 控制定期恢复演练提醒；未配置时默认 30 天。维护页会显示任务健康状态、保留策略状态、恢复演练状态、恢复演练历史与成功率摘要、下次自动运行时间、自动窗口、最近备份、最近恢复目标和最近清理的旧快照数量。恢复演练历史与显式恢复历史默认都保留最近 20 条，失败演练和失败恢复也会记录错误信息；失败演练还会记录稳定的 `failure_category`，用于区分无快照、完整性校验失败、外部命令失败、I/O 问题等常见原因。
 
 重启服务后可通过维护 API 执行：
 
@@ -174,6 +174,9 @@ curl -b cookies.txt http://localhost:8080/api/v1/maintenance/backups
 
 # 立即执行备份
 curl -X POST -b cookies.txt http://localhost:8080/api/v1/maintenance/backups/external-disk/run
+
+# 检查快照保留策略和远端可见内容
+curl -X POST -b cookies.txt http://localhost:8080/api/v1/maintenance/backups/external-disk/retention-check
 
 # 执行恢复演练或远端校验；local 默认临时恢复目录会在校验后删除
 curl -X POST -b cookies.txt \
@@ -217,7 +220,25 @@ curl -X POST -b cookies.txt \
   -d '{"target_path":"/mnt/restore/mnemonas-restic","include_config":false}'
 ```
 
-`restore-preview` 不会写入目标目录，也不会写入恢复历史。它会复用恢复目标安全校验，并返回预计文件数、字节数和最多 10 个样例路径；维护页会要求当前目标目录和配置选项已经成功预览后才允许开始恢复。`target_path` 必须是服务器上的绝对路径，并且必须位于当前 `storage.root`、备份来源和本地备份目标/仓库之外；父目录必须已存在，目标目录不存在或为空。`local` 恢复会把快照中的 `data/` 内容复制到目标目录根部并立即校验；`include_config = true` 时，配置文件会恢复到 `target_path/.mnemonas-restore/config.toml`。`restic` 恢复预览使用 `restic ls --json`，实际恢复执行 `restic restore latest --tag mnemonas --tag job:<id> --path <source>`，并把 restic 默认恢复出的来源目录内容整理到目标根目录。`rclone` 恢复预览使用 `rclone lsjson`，实际恢复执行 `rclone copy` 和 `rclone check --one-way`。恢复完成后，`restore-verify` 会只读检查目标目录，返回文件数、字节数、配置文件是否存在、是否检测到 `files/` 与 `.mnemonas/` 等完整 storage root 结构，并把符号链接、非常规文件或结构不完整情况作为警告返回。维护页会在恢复成功后自动进入恢复后切换清单。
+`restore-preview` 不会写入目标目录，也不会写入恢复历史。它会复用恢复目标安全校验，并返回预计文件数、字节数、最多 10 个样例路径、`preflight_checks`、`warnings`、`cutover_checklist` 和 `rollback_checklist`；维护页会要求当前目标目录和配置选项已经成功预览，且没有失败预检项后才允许开始恢复。预检覆盖目标路径隔离、目标目录状态、备份内容、目标文件系统容量和配置文件处理。`target_path` 必须是服务器上的绝对路径，并且必须位于当前 `storage.root`、备份来源和本地备份目标/仓库之外；父目录必须已存在，目标目录不存在或为空。`restore` 写入前会在服务端重新执行同一套预检；预检失败会拒绝恢复并写入失败恢复记录。`local` 恢复会把快照中的 `data/` 内容复制到目标目录根部并立即校验；`include_config = true` 时，配置文件会恢复到 `target_path/.mnemonas-restore/config.toml`。`restic` 恢复预览使用 `restic ls --json`，实际恢复执行 `restic restore latest --tag mnemonas --tag job:<id> --path <source>`，并把 restic 默认恢复出的来源目录内容整理到目标根目录。`rclone` 恢复预览使用 `rclone lsjson`，实际恢复执行 `rclone copy` 和 `rclone check --one-way`。恢复完成后，`restore-verify` 会只读检查目标目录，返回文件数、字节数、配置文件是否存在、是否检测到 `files/` 与 `.mnemonas/` 等完整 storage root 结构，并把符号链接、非常规文件或结构不完整情况作为警告返回；最近一次报告会持久化为 `last_restore_verify`，刷新维护页后仍可查看。维护页会在恢复成功后自动进入恢复后切换清单，并显示本次恢复的回滚清单。
+
+需要同时恢复多个独立任务或多个目标目录时，可以先调用批量预览，再执行批量恢复：
+
+```bash
+curl -X POST -b cookies.txt \
+  http://localhost:8080/api/v1/maintenance/backups/batch-restore-preview \
+  -H 'Content-Type: application/json' \
+  -d '{"items":[{"job_id":"external-disk","target_path":"/mnt/restore/a","include_config":true},{"job_id":"rclone-cloud","target_path":"/mnt/restore/b","include_config":false}]}'
+
+curl -X POST -b cookies.txt \
+  http://localhost:8080/api/v1/maintenance/backups/batch-restore \
+  -H 'Content-Type: application/json' \
+  -d '{"items":[{"job_id":"external-disk","target_path":"/mnt/restore/a","include_config":true},{"job_id":"rclone-cloud","target_path":"/mnt/restore/b","include_config":false}]}'
+```
+
+批量恢复最多包含 20 个条目，并会拒绝同一批次内重复或父子嵌套的目标目录。批量预览不写入数据；批量恢复按顺序执行，每个成功恢复都会立即运行一次 `restore-verify`。部分失败时总结果会带 `warning`，因此应逐项检查 `items[]` 的状态、错误和只读校验结果。
+
+维护页的“导出报告”会下载当前备份任务的恢复审计 JSON，内容包括最近备份、保留检测、恢复演练、恢复演练历史、显式恢复、只读校验、恢复历史和待处理发现项。建议在切换 `storage.root` 前下载一份，恢复失败时也可连同诊断包一起保存。
 
 切换建议：
 
@@ -477,7 +498,7 @@ rclone config
 
 ### 备份监控
 
-内置 `[[backup.jobs]]` 会复用 `[alerts]` 通知通道：当备份失败、恢复演练失败、恢复演练超过 `restore_drill_stale_after` 后仍缺失或过期，或成功备份带有保留策略清理警告时，会发送 `backup_run` 或 `backup_restore_drill` 事件。恢复演练提醒会限频发送，并在任务视图中记录 `last_restore_drill_reminder_at`。可使用 Webhook，也可启用 SMTP 邮件。Webhook 启用方式：
+内置 `[[backup.jobs]]` 会复用 `[alerts]` 通知通道：当备份失败、恢复演练失败、恢复演练超过 `restore_drill_stale_after` 后仍缺失或过期，成功备份带有保留策略检测警告，或手动保留策略检测失败/告警时，会发送 `backup_run`、`backup_restore_drill` 或 `backup_retention_check` 事件。恢复演练提醒会限频发送，并在任务视图中记录 `last_restore_drill_reminder_at`。可使用 Webhook，也可启用 SMTP 邮件。Webhook 启用方式：
 
 ```toml
 [alerts]

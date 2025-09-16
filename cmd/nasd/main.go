@@ -340,6 +340,14 @@ func buildWebDAVHandler(fs *storage.FileSystem, cfg api.WebDAVRuntimeConfig) (st
 		}
 	}
 
+	directoryQuotas := make([]webdav.DirectoryQuota, 0, len(cfg.DirectoryQuotas))
+	for _, quota := range cfg.DirectoryQuotas {
+		directoryQuotas = append(directoryQuotas, webdav.DirectoryQuota{
+			Path:       quota.Path,
+			QuotaBytes: quota.QuotaBytes,
+		})
+	}
+
 	prefix := config.NormalizeWebDAVPrefix(cfg.Prefix)
 	return prefix, webdav.NewHandler(webdav.Config{
 		FileSystem:        fs,
@@ -349,6 +357,7 @@ func buildWebDAVHandler(fs *storage.FileSystem, cfg api.WebDAVRuntimeConfig) (st
 		Username:          cfg.Username,
 		Password:          cfg.Password,
 		UserAuthenticator: userAuthenticator,
+		DirectoryQuotas:   directoryQuotas,
 	})
 }
 
@@ -581,6 +590,7 @@ func main() {
 		Password:            cfg.WebDAV.Password,
 		PasswordIsGenerated: webdavPasswordGenerated,
 		UserStore:           sharedUserStore,
+		DirectoryQuotas:     append([]config.DirectoryQuotaConfig(nil), cfg.Storage.DirectoryQuotas...),
 	}
 	webdavPrefix, webdavHandler := buildWebDAVHandler(fs, activeWebDAV)
 	runtimeWebDAV := newSwitchableWebDAVHandler(webdavPrefix, webdavHandler)

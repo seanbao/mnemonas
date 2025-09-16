@@ -6809,6 +6809,14 @@ func TestFilesystemTypeFromMountInfoSelectsDeepestMount(t *testing.T) {
 	if fsType != "zfs" {
 		t.Fatalf("filesystemTypeFromMountInfo() = %q, want zfs", fsType)
 	}
+
+	details, err := diskMountDetailsFromMountInfo("/srv/mnemonas/files", mountInfo)
+	if err != nil {
+		t.Fatalf("diskMountDetailsFromMountInfo() error: %v", err)
+	}
+	if details.FileSystemType != "zfs" || details.MountPoint != "/srv/mnemonas" || details.MountSource != "mnemonas/mirror" || details.MountOptions != "rw,relatime" {
+		t.Fatalf("diskMountDetailsFromMountInfo() = %+v, want zfs /srv/mnemonas mnemonas/mirror rw,relatime", details)
+	}
 }
 
 func TestFilesystemTypeFromMountInfoUnescapesMountPoint(t *testing.T) {
@@ -6820,6 +6828,14 @@ func TestFilesystemTypeFromMountInfoUnescapesMountPoint(t *testing.T) {
 	}
 	if fsType != "btrfs" {
 		t.Fatalf("filesystemTypeFromMountInfo() = %q, want btrfs", fsType)
+	}
+
+	details, err := diskMountDetailsFromMountInfo("/srv/Mnemo NAS/files", mountInfo)
+	if err != nil {
+		t.Fatalf("diskMountDetailsFromMountInfo() error: %v", err)
+	}
+	if details.MountPoint != "/srv/Mnemo NAS" || details.MountSource != "/dev/sdc1" {
+		t.Fatalf("diskMountDetailsFromMountInfo() = %+v, want unescaped mount point and source", details)
 	}
 }
 

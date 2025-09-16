@@ -25,6 +25,7 @@ export interface SettingsData {
   }
   storage: {
     root: string
+    directory_quotas?: DirectoryQuota[]
   }
   trash?: {
     enabled: boolean
@@ -99,6 +100,11 @@ export interface SettingsData {
   }
 }
 
+export interface DirectoryQuota {
+  path: string
+  quota_bytes: number
+}
+
 export interface SettingsResponse {
   success: boolean
   data: SettingsData
@@ -170,6 +176,9 @@ export interface UpdateSettingsRequest {
       auto_generate?: boolean
       cert_dir?: string
     }
+  }
+  storage?: {
+    directory_quotas?: DirectoryQuota[]
   }
   trash?: {
     enabled?: boolean
@@ -275,6 +284,12 @@ function isStringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((entry) => typeof entry === 'string')
 }
 
+function isDirectoryQuota(value: unknown): value is DirectoryQuota {
+  return isRecord(value)
+    && typeof value.path === 'string'
+    && typeof value.quota_bytes === 'number'
+}
+
 function isSecurityCheckStatus(value: unknown): value is SecurityCheckStatus {
   return value === 'pass' || value === 'warning' || value === 'block'
 }
@@ -351,6 +366,12 @@ function isValidSettingsData(value: unknown): value is SettingsData {
       || typeof value.server.tls.key_file !== 'string'
       || typeof value.server.tls.auto_generate !== 'boolean'
       || typeof value.server.tls.cert_dir !== 'string') {
+      return false
+    }
+  }
+
+  if (value.storage.directory_quotas !== undefined) {
+    if (!Array.isArray(value.storage.directory_quotas) || !value.storage.directory_quotas.every(isDirectoryQuota)) {
       return false
     }
   }

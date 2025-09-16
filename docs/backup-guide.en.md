@@ -156,7 +156,7 @@ exclude = [".mnemonas/thumbnails"]
 extra_args = ["--fast-list"]
 ```
 
-`schedule_window_start` and `schedule_window_end` only restrict automatic scheduling; manual run-now operations are unaffected. The window uses the server local time in `HH:MM` format and may cross midnight. Local retention runs after a successful backup and always keeps the current snapshot. `max_snapshots = 0` and `max_age = "0"` disable the corresponding pruning dimension. Restic and rclone retention is managed by the external tool, such as `restic forget --prune`, a systemd timer, or lifecycle rules on the remote. Set `retention_policy` to mark that external policy as confirmed in the Maintenance page; otherwise the task shows a retention warning. `restore_drill_stale_after` controls periodic restore-drill reminders and defaults to 30 days when omitted. The Maintenance page shows job health, retention status, restore-drill status, next scheduled run, schedule window, latest backup, latest restore target, and how many old snapshots the latest local run pruned. Restore history keeps the latest 20 entries by default, including failed restore attempts and their error messages.
+`schedule_window_start` and `schedule_window_end` only restrict automatic scheduling; manual run-now operations are unaffected. The window uses the server local time in `HH:MM` format and may cross midnight. Local retention runs after a successful backup and always keeps the current snapshot. `max_snapshots = 0` and `max_age = "0"` disable the corresponding pruning dimension. Restic and rclone retention is managed by the external tool, such as `restic forget --prune`, a systemd timer, or lifecycle rules on the remote. Set `retention_policy` to mark that external policy as confirmed in the Maintenance page; otherwise the task shows a retention warning. After each successful backup MnemoNAS also runs a retention check, and the Maintenance page exposes a manual "Check retention" action: `local` counts the local snapshot range, `restic` runs `restic snapshots --json --tag mnemonas --tag job:<id>`, and `rclone` runs `rclone lsjson <remote> --recursive --files-only`. Results are persisted as `last_retention_check` and warn when snapshots are missing, the remote is empty, `retention_policy` is not set, or the external command fails. `restore_drill_stale_after` controls periodic restore-drill reminders and defaults to 30 days when omitted. The Maintenance page shows job health, retention status, restore-drill status, restore-drill history and success-rate summary, next scheduled run, schedule window, latest backup, latest restore target, and how many old snapshots the latest local run pruned. Restore-drill history and explicit restore history both keep the latest 20 entries by default, including failed attempts and their error messages; failed drills also record a stable `failure_category` for common causes such as missing snapshots, integrity-check failures, external-command failures, and I/O errors.
 
 After restarting the service:
 
@@ -166,6 +166,9 @@ curl -b cookies.txt http://localhost:8080/api/v1/maintenance/backups
 
 # Run now
 curl -X POST -b cookies.txt http://localhost:8080/api/v1/maintenance/backups/external-disk/run
+
+# Check retention policy and visible remote/local contents
+curl -X POST -b cookies.txt http://localhost:8080/api/v1/maintenance/backups/external-disk/retention-check
 
 # Restore-drill or remote consistency-check; local temporary restores are deleted by default
 curl -X POST -b cookies.txt \
@@ -209,7 +212,25 @@ curl -X POST -b cookies.txt \
   -d '{"target_path":"/mnt/restore/mnemonas-restic","include_config":false}'
 ```
 
-`restore-preview` does not write target data and does not write restore history. It reuses the same restore-target safety checks and returns estimated file count, bytes, and up to 10 sample paths; the Maintenance page requires a successful preview that still matches the current target and config option before enabling restore. `target_path` must be an absolute server-side path outside the current `storage.root`, backup source, and any local backup destination or repository. Its parent must exist, and the target must not exist or must be empty. Local restore copies snapshot `data/` contents into the target root and verifies them immediately. With `include_config = true`, the config file is restored to `target_path/.mnemonas-restore/config.toml`. Restic preview uses `restic ls --json`, while restore runs `restic restore latest --tag mnemonas --tag job:<id> --path <source>` and installs the restored source directory contents at the target root. Rclone preview uses `rclone lsjson`, while restore runs `rclone copy <remote> <target>` and `rclone check <remote> <target> --one-way`. After restore, `restore-verify` scans the target read-only and reports file count, bytes, config presence, whether `files/` plus `.mnemonas/` look like a full storage root, and warnings for symlinks, special files, or incomplete layout. The Maintenance page enters the post-restore cutover checklist automatically after a successful restore.
+`restore-preview` does not write target data and does not write restore history. It reuses the same restore-target safety checks and returns estimated file count, bytes, up to 10 sample paths, `preflight_checks`, `warnings`, `cutover_checklist`, and `rollback_checklist`; the Maintenance page requires a successful preview that still matches the current target and config option and has no failed preflight checks before enabling restore. Preflight checks cover target isolation, target state, backup content, target filesystem capacity, and config handling. `target_path` must be an absolute server-side path outside the current `storage.root`, backup source, and any local backup destination or repository. Its parent must exist, and the target must not exist or must be empty. `restore` reruns the same server-side preflight before writing; failed checks reject the restore and are persisted with the failed restore record. Local restore copies snapshot `data/` contents into the target root and verifies them immediately. With `include_config = true`, the config file is restored to `target_path/.mnemonas-restore/config.toml`. Restic preview uses `restic ls --json`, while restore runs `restic restore latest --tag mnemonas --tag job:<id> --path <source>` and installs the restored source directory contents at the target root. Rclone preview uses `rclone lsjson`, while restore runs `rclone copy <remote> <target>` and `rclone check <remote> <target> --one-way`. After restore, `restore-verify` scans the target read-only and reports file count, bytes, config presence, whether `files/` plus `.mnemonas/` look like a full storage root, and warnings for symlinks, special files, or incomplete layout; the latest report is persisted as `last_restore_verify` so it remains visible after refreshing the Maintenance page. The Maintenance page enters the post-restore cutover checklist automatically after a successful restore and also displays the rollback checklist for that restore.
+
+When you need to restore multiple independent jobs or targets, preview the batch first and then run the batch restore:
+
+```bash
+curl -X POST -b cookies.txt \
+  http://localhost:8080/api/v1/maintenance/backups/batch-restore-preview \
+  -H 'Content-Type: application/json' \
+  -d '{"items":[{"job_id":"external-disk","target_path":"/mnt/restore/a","include_config":true},{"job_id":"rclone-cloud","target_path":"/mnt/restore/b","include_config":false}]}'
+
+curl -X POST -b cookies.txt \
+  http://localhost:8080/api/v1/maintenance/backups/batch-restore \
+  -H 'Content-Type: application/json' \
+  -d '{"items":[{"job_id":"external-disk","target_path":"/mnt/restore/a","include_config":true},{"job_id":"rclone-cloud","target_path":"/mnt/restore/b","include_config":false}]}'
+```
+
+A batch can contain up to 20 items and rejects duplicate or nested targets within the same request. Batch preview does not write data. Batch restore runs items sequentially, and every successful item is followed by `restore-verify`. Partial failures set the overall `warning` flag, so always inspect each `items[]` entry for status, error, and verification output.
+
+The Maintenance page **Export report** action downloads a JSON restore audit report for the backup job, including latest backup, retention check, restore drill, restore-drill history, explicit restore, read-only verification, restore history, and findings. Download one before switching `storage.root`, and keep one with diagnostics after a failed restore.
 
 Cutover checklist:
 
@@ -415,7 +436,7 @@ Store repository passwords and cloud credentials in a password manager or secret
 
 ## Backup Failure Alerts
 
-Built-in `[[backup.jobs]]` reuse `[alerts]` notification channels. MnemoNAS sends `backup_run` or `backup_restore_drill` events when a backup fails, a restore drill fails, a restore drill is missing or stale beyond `restore_drill_stale_after`, or a successful backup has retention warnings. Restore-drill reminders are rate-limited and recorded as `last_restore_drill_reminder_at` in the job view. Webhook and SMTP email channels can both receive these events. A Webhook channel can be enabled with:
+Built-in `[[backup.jobs]]` reuse `[alerts]` notification channels. MnemoNAS sends `backup_run`, `backup_restore_drill`, or `backup_retention_check` events when a backup fails, a restore drill fails, a restore drill is missing or stale beyond `restore_drill_stale_after`, a successful backup has retention-check warnings, or a manual retention check fails or reports warnings. Restore-drill reminders are rate-limited and recorded as `last_restore_drill_reminder_at` in the job view. Webhook and SMTP email channels can both receive these events. A Webhook channel can be enabled with:
 
 ```toml
 [alerts]

@@ -14,7 +14,7 @@ import {
   AlertCircle,
   ShieldCheck,
 } from 'lucide-react'
-import { ApiError, getStorageStats } from '@/api/files'
+import { ApiError, getStorageStats, type DirectoryQuotaUsage } from '@/api/files'
 import { formatBytes } from '@/lib/utils'
 import { areDiskStatsAvailable, areStorageStatsAvailable, clampUsagePercent, formatFilesystemType, formatUsagePercent, getDiskSpaceStatus } from '@/lib/storageStats'
 import { PageHeader } from '@/components/ui/PageHeader'
@@ -72,6 +72,45 @@ function getDiskSpacePanelClass(level: 'unknown' | 'normal' | 'warning' | 'criti
   return level === 'critical'
     ? 'border-danger/25 bg-danger/5 text-danger'
     : 'border-warning/25 bg-warning/5 text-warning'
+}
+
+function getDirectoryQuotaStatusLabel(quota: DirectoryQuotaUsage): string {
+  if (quota.status === 'missing') {
+    return '目录未创建'
+  }
+  if (quota.status === 'exceeded') {
+    return '已达上限'
+  }
+  if (quota.status === 'warning') {
+    return '接近上限'
+  }
+  return '正常'
+}
+
+function getDirectoryQuotaBadgeClass(status: DirectoryQuotaUsage['status']): string {
+  if (status === 'exceeded') {
+    return 'border-danger/25 bg-danger/10 text-danger'
+  }
+  if (status === 'warning') {
+    return 'border-warning/25 bg-warning/10 text-warning'
+  }
+  if (status === 'missing') {
+    return 'border-default-200 bg-content2 text-default-600'
+  }
+  return 'border-success/25 bg-success/10 text-success'
+}
+
+function getDirectoryQuotaBarClass(status: DirectoryQuotaUsage['status']): string {
+  if (status === 'exceeded') {
+    return 'bg-danger/70'
+  }
+  if (status === 'warning') {
+    return 'bg-warning/70'
+  }
+  if (status === 'missing') {
+    return 'bg-default-300'
+  }
+  return 'bg-success/70'
 }
 
 // Action card for maintenance operations
@@ -232,6 +271,7 @@ export function StoragePage() {
     : casBytes !== undefined
       ? `${formatBytes(casBytes)} CAS 数据 · 磁盘容量不可用`
       : '统计不可用'
+  const directoryQuotas = stats?.directoryQuotas ?? []
 
   const statsCards = [
     {
@@ -331,6 +371,18 @@ export function StoragePage() {
                 </div>
               </div>
             )}
+            {diskStatsAvailable && (stats?.diskMountPoint || stats?.diskMountSource) && (
+              <div className="mt-4 grid gap-3 rounded-lg border border-divider bg-content1 p-3 text-sm sm:grid-cols-2">
+                <div className="min-w-0">
+                  <p className="text-xs text-default-500">挂载点</p>
+                  <p className="mt-1 truncate font-medium text-foreground">{stats.diskMountPoint ?? '--'}</p>
+                </div>
+                <div className="min-w-0">
+                  <p className="text-xs text-default-500">存储源</p>
+                  <p className="mt-1 truncate font-medium text-foreground">{stats.diskMountSource ?? '--'}</p>
+                </div>
+              </div>
+            )}
           </div>
         </CardBody>
       </Card>
@@ -355,6 +407,66 @@ export function StoragePage() {
           </div>
         ))}
       </div>
+
+      {isAdmin && (
+        <Card className="card-meridian">
+          <CardHeader className="pb-0">
+            <div className="flex items-center gap-2">
+              <div className="gradient-meridian-subtle rounded-lg p-2">
+                <HardDrive className="h-4 w-4 text-accent-primary" />
+              </div>
+              <div>
+                <span className="font-semibold">目录配额</span>
+                <p className="text-xs text-default-500">按目录统计当前文件占用和剩余额度</p>
+              </div>
+            </div>
+          </CardHeader>
+          <CardBody>
+            {!stats?.directoryQuotaStatsAvailable ? (
+              <div className="rounded-lg border border-warning/25 bg-warning/5 p-4 text-sm text-default-600">
+                目录配额统计暂不可用，请稍后刷新或检查存储状态。
+              </div>
+            ) : directoryQuotas.length === 0 ? (
+              <div className="rounded-lg border border-divider bg-content1 p-4 text-sm text-default-500">
+                未配置目录配额。可在系统设置的版本保留页添加目录容量限制。
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {directoryQuotas.map((quota) => {
+                  const usagePercent = clampUsagePercent(quota.usageRatio) ?? 0
+                  return (
+                    <div key={quota.path} className="rounded-lg border border-divider bg-content1 p-4">
+                      <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                        <div className="min-w-0">
+                          <p className="truncate font-medium text-foreground">{quota.path}</p>
+                          <p className="mt-1 text-sm text-default-500">
+                            {formatBytes(quota.usedBytes)} / {formatBytes(quota.quotaBytes)}
+                            <span className="mx-2 text-default-300">·</span>
+                            剩余 {formatBytes(quota.availableBytes)}
+                          </p>
+                        </div>
+                        <span className={`w-fit rounded-full border px-2.5 py-1 text-xs font-medium ${getDirectoryQuotaBadgeClass(quota.status)}`}>
+                          {getDirectoryQuotaStatusLabel(quota)}
+                        </span>
+                      </div>
+                      <div className="mt-3 h-2 overflow-hidden rounded-full bg-content2">
+                        <div
+                          className={`h-full rounded-full ${getDirectoryQuotaBarClass(quota.status)}`}
+                          style={{ width: `${usagePercent}%` }}
+                        />
+                      </div>
+                      <div className="mt-2 flex justify-between text-xs text-default-500">
+                        <span>{quota.exists ? '当前目录' : '路径不存在'}</span>
+                        <span>{formatUsagePercent(quota.usageRatio)}</span>
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+            )}
+          </CardBody>
+        </Card>
+      )}
 
       {/* Maintenance Actions */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">

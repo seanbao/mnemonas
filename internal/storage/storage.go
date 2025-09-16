@@ -139,6 +139,9 @@ type DiskStats struct {
 	UsedBytes                 uint64
 	UsageRatio                float64
 	FileSystemType            string
+	MountPoint                string
+	MountSource               string
+	MountOptions              string
 	NativeDataChecksumSupport bool
 }
 
@@ -2231,20 +2234,39 @@ func diskStatsForPath(root string) (*DiskStats, error) {
 	return diskStatsForHostPath(root)
 }
 
+type diskMountDetails struct {
+	FileSystemType string
+	MountPoint     string
+	MountSource    string
+	MountOptions   string
+}
+
 func filesystemTypeForPath(root string, magic uint64) string {
+	return diskMountDetailsForPath(root, magic).FileSystemType
+}
+
+func diskMountDetailsForPath(root string, magic uint64) diskMountDetails {
 	mountInfo, err := readMountInfo()
 	if err == nil {
-		if fsType, err := filesystemTypeFromMountInfo(root, mountInfo); err == nil && fsType != "" {
-			return fsType
+		if details, err := diskMountDetailsFromMountInfo(root, mountInfo); err == nil && details.FileSystemType != "" {
+			return details
 		}
 	}
-	return filesystemTypeFromMagic(magic)
+	return diskMountDetails{FileSystemType: filesystemTypeFromMagic(magic)}
 }
 
 func filesystemTypeFromMountInfo(root string, mountInfo []byte) (string, error) {
-	target, err := normalizeStorageHostPath(root)
+	details, err := diskMountDetailsFromMountInfo(root, mountInfo)
 	if err != nil {
 		return "", err
+	}
+	return details.FileSystemType, nil
+}
+
+func diskMountDetailsFromMountInfo(root string, mountInfo []byte) (diskMountDetails, error) {
+	target, err := normalizeStorageHostPath(root)
+	if err != nil {
+		return diskMountDetails{}, err
 	}
 	if resolved, err := filepath.EvalSymlinks(target); err == nil {
 		target = resolved
@@ -2252,7 +2274,7 @@ func filesystemTypeFromMountInfo(root string, mountInfo []byte) (string, error) 
 	target = filepath.Clean(target)
 
 	bestMountLen := -1
-	bestType := ""
+	bestDetails := diskMountDetails{}
 	for _, line := range strings.Split(string(mountInfo), "\n") {
 		if strings.TrimSpace(line) == "" {
 			continue
@@ -2275,14 +2297,31 @@ func filesystemTypeFromMountInfo(root string, mountInfo []byte) (string, error) 
 			continue
 		}
 		if len(mountPoint) > bestMountLen {
+			mountSource := ""
+			if len(fsFields) >= 2 {
+				if decoded, err := unescapeMountInfoPath(fsFields[1]); err == nil {
+					mountSource = decoded
+				} else {
+					mountSource = fsFields[1]
+				}
+			}
+			mountOptions := ""
+			if len(mountFields) >= 6 {
+				mountOptions = mountFields[5]
+			}
 			bestMountLen = len(mountPoint)
-			bestType = fsFields[0]
+			bestDetails = diskMountDetails{
+				FileSystemType: strings.ToLower(fsFields[0]),
+				MountPoint:     mountPoint,
+				MountSource:    mountSource,
+				MountOptions:   mountOptions,
+			}
 		}
 	}
-	if bestType == "" {
-		return "", fmt.Errorf("mount info did not contain path %s", target)
+	if bestDetails.FileSystemType == "" {
+		return diskMountDetails{}, fmt.Errorf("mount info did not contain path %s", target)
 	}
-	return strings.ToLower(bestType), nil
+	return bestDetails, nil
 }
 
 func pathWithinMount(target, mountPoint string) bool {

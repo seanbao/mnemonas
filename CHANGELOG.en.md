@@ -18,6 +18,7 @@ This project follows [Semantic Versioning 2.0.0](https://semver.org/).
 - Trash with time-based listing, restore, batch restore, and empty-trash flow.
 - Filename search with highlighted results and quick navigation.
 - Activity log with filters, details, statistics, and disk-health system events.
+- Storage page shows filesystem type, mount point, and backing device/dataset source.
 - User management with create/edit/delete, home directory and quota editing, password reset, and enable/disable flows.
 - Share management with link creation, password protection, expiration, access statistics, and public share access.
 - Settings for server, storage, retention, WebDAV, CDC parameters, scheduled Scrub, and data-plane connection status.
@@ -27,12 +28,13 @@ This project follows [Semantic Versioning 2.0.0](https://semver.org/).
 
 #### Backend API
 - Authentication APIs for JWT login, logout, refresh, password changes, and current-user lookup.
-- User management APIs, including user-level quotas. Non-admin Web/API uploads, copies, and trash restores return `QUOTA_EXCEEDED` when they exceed the configured quota.
+- User management APIs, including user-level quotas. Non-admin Web/API uploads, copies, and trash restores return `QUOTA_EXCEEDED` when they exceed the configured quota and can emit `quota_exceeded` Webhook/Telegram/SMTP alert events.
+- `storage.directory_quotas` directory hard limits and storage-page directory quota usage summaries. Web/API uploads, copies, moves, trash restores, version restores, and WebDAV PUT/COPY/MOVE operations check matching directory quotas before writing.
 - WebDAV supports `auth_type = "users"` so clients can mount with MnemoNAS user accounts; non-admin mounts are rooted at the user's `home_dir`, guest accounts are read-only, and PUT/COPY writes honor user quotas.
 - Share-link APIs including public access and password checks.
 - Activity log APIs, including scrub system events.
 - Runtime settings APIs, including public-access security self-check, certificate renewal and failure-triage guidance, scheduled Scrub updates, and hot updates for Webhook/Telegram/SMTP alert notifications.
-- Configured local backup jobs and command-backed restic/rclone remote targets with run-now execution, lightweight scheduling, automatic backup windows, local snapshot retention, job health status, manifest-based local restore drills, non-destructive restore previews, safe-directory local/restic/rclone restore, post-restore read-only verification and cutover checklist, remote-retention guidance, scheduled restore-drill reminders, rate-limited stale/missing restore-drill alerts, restore result audit history, remote consistency checks, and Webhook/Telegram/SMTP events for backup failures/warnings.
+- Configured local backup jobs and command-backed restic/rclone remote targets with run-now execution, lightweight scheduling, automatic backup windows, local snapshot retention, automatic/manual retention checks, job health status, manifest-based local restore drills, non-destructive restore previews, batch restore preview/execution for up to 20 items with per-item restore and read-only verification results, restore preflight for target isolation/state/capacity/content/config handling, failed-preflight blocking, safe-directory local/restic/rclone restore, persisted post-restore verification reports, post-restore cutover and rollback checklists, restore report export, scheduled restore-drill reminders, rate-limited stale/missing restore-drill alerts, restore-drill history, success-rate summary, failure categorization, restore result audit history, remote consistency checks, and Webhook/Telegram/SMTP events for backup failures, retention-check failures, and warnings.
 - Disk health API and runtime settings for `smartctl --json` SMART checks, temperature thresholds, NVMe/ATA media-wear signals, missing-device detection, serial-drift detection, `disk_health` activity-log records, and Webhook/Telegram/SMTP events.
 - `[maintenance.scrub]` supports background scheduled Scrub with bounded failure retries; the Settings API and Web settings page can hot-update its scheduler, and diagnostics report schedule settings, latest Scrub state, and retry counts. Manual and scheduled scrub completion writes activity entries; scrub failures, object anomalies, and incomplete result persistence send `scrub_run` events through Webhook/Telegram/SMTP notifications.
 - Login rate limits send throttled `login_rate_limited` warning events through configured alert channels, containing only username and client address, never passwords or tokens.

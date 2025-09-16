@@ -30,14 +30,17 @@ func diskStatsForHostPath(root string) (*DiskStats, error) {
 		usageRatio = float64(usedBytes) / float64(totalBytes)
 	}
 
-	fsType := filesystemTypeForPath(root, uint64(stat.Type))
+	mountDetails := diskMountDetailsForPath(root, uint64(stat.Type))
 	return &DiskStats{
 		TotalBytes:                totalBytes,
 		FreeBytes:                 freeBytes,
 		AvailableBytes:            availableBytes,
 		UsedBytes:                 usedBytes,
 		UsageRatio:                usageRatio,
-		FileSystemType:            fsType,
-		NativeDataChecksumSupport: filesystemHasNativeDataChecksumSupport(fsType),
+		FileSystemType:            mountDetails.FileSystemType,
+		MountPoint:                mountDetails.MountPoint,
+		MountSource:               mountDetails.MountSource,
+		MountOptions:              mountDetails.MountOptions,
+		NativeDataChecksumSupport: filesystemHasNativeDataChecksumSupport(mountDetails.FileSystemType),
 	}, nil
 }

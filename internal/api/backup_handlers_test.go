@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -87,6 +88,9 @@ func TestServer_BackupEndpoints_RunAndRestoreDrill(t *testing.T) {
 	if len(previewResult.SamplePaths) != 2 || previewResult.SamplePaths[0] != "docs/note.txt" || previewResult.SamplePaths[1] != ".mnemonas-restore/config.toml" {
 		t.Fatalf("restore preview samples = %#v", previewResult.SamplePaths)
 	}
+	if len(previewResult.PreflightChecks) == 0 || len(previewResult.CutoverChecklist) == 0 || len(previewResult.RollbackChecklist) == 0 {
+		t.Fatalf("restore preview missing preflight/checklists: %+v", previewResult)
+	}
 	if _, err := os.Stat(restoreTarget); !os.IsNotExist(err) {
 		t.Fatalf("restore preview target stat error = %v, want not exist", err)
 	}
@@ -98,6 +102,9 @@ func TestServer_BackupEndpoints_RunAndRestoreDrill(t *testing.T) {
 	}
 	if restoreResult.TargetPath != restoreTarget || !restoreResult.ConfigRestored {
 		t.Fatalf("unexpected restore result: %+v", restoreResult)
+	}
+	if len(restoreResult.PreflightChecks) == 0 || len(restoreResult.CutoverChecklist) == 0 || len(restoreResult.RollbackChecklist) == 0 {
+		t.Fatalf("restore result missing preflight/checklists: %+v", restoreResult)
 	}
 	if _, err := os.Stat(filepath.Join(restoreTarget, "docs", "note.txt")); err != nil {
 		t.Fatalf("explicit restore file stat error: %v", err)
@@ -112,13 +119,64 @@ func TestServer_BackupEndpoints_RunAndRestoreDrill(t *testing.T) {
 	if verifyResult.TargetPath != restoreTarget || verifyResult.FileCount != restoreResult.FileCount || verifyResult.VerifiedBytes != restoreResult.VerifiedBytes || !verifyResult.ConfigFound {
 		t.Fatalf("unexpected restore verify result: %+v", verifyResult)
 	}
+	retentionResult := runBackupAPIRequest[backup.RetentionCheckResult](t, server, http.MethodPost, "/api/v1/maintenance/backups/home/retention-check", nil, http.StatusOK)
+	if retentionResult.Status != backup.StatusCompleted || retentionResult.SnapshotCount != 1 || !retentionResult.Warning {
+		t.Fatalf("unexpected retention check result: %+v", retentionResult)
+	}
 
 	jobView := runBackupAPIRequest[backup.JobView](t, server, http.MethodGet, "/api/v1/maintenance/backups/home", nil, http.StatusOK)
 	if jobView.LastRestore == nil || jobView.LastRestore.ID != restoreResult.ID || jobView.LastRestore.TargetPath != restoreTarget {
 		t.Fatalf("backup job missing latest restore audit: %+v", jobView.LastRestore)
 	}
+	if jobView.LastRestoreVerify == nil || jobView.LastRestoreVerify.ID != verifyResult.ID || jobView.LastRestoreVerify.TargetPath != restoreTarget {
+		t.Fatalf("backup job missing latest restore verify report: %+v", jobView.LastRestoreVerify)
+	}
+	if len(jobView.RestoreDrillHistory) != 1 || jobView.RestoreDrillHistory[0].ID != drillResult.ID {
+		t.Fatalf("backup job restore drill history = %+v, want latest drill", jobView.RestoreDrillHistory)
+	}
+	if jobView.RestoreDrillStats == nil || jobView.RestoreDrillStats.TotalRuns != 1 || jobView.RestoreDrillStats.SuccessfulRuns != 1 {
+		t.Fatalf("backup job restore drill stats = %+v, want one successful drill", jobView.RestoreDrillStats)
+	}
+	if jobView.LastRetentionCheck == nil || jobView.LastRetentionCheck.ID != retentionResult.ID {
+		t.Fatalf("backup job missing latest retention check: %+v", jobView.LastRetentionCheck)
+	}
 	if len(jobView.RestoreHistory) != 1 || jobView.RestoreHistory[0].ID != restoreResult.ID {
 		t.Fatalf("backup job restore history = %+v, want latest restore", jobView.RestoreHistory)
+	}
+
+	reportReq := httptest.NewRequest(http.MethodGet, "/api/v1/maintenance/backups/home/restore-report", nil)
+	reportResp := httptest.NewRecorder()
+	server.Router().ServeHTTP(reportResp, reportReq)
+	if reportResp.Code != http.StatusOK {
+		t.Fatalf("restore report status = %d, body = %s", reportResp.Code, reportResp.Body.String())
+	}
+	if contentDisposition := reportResp.Header().Get("Content-Disposition"); !strings.Contains(contentDisposition, "mnemonas-restore-report-home-") {
+		t.Fatalf("restore report Content-Disposition = %q", contentDisposition)
+	}
+	var report backup.RestoreReport
+	if err := json.NewDecoder(reportResp.Body).Decode(&report); err != nil {
+		t.Fatalf("decode restore report: %v", err)
+	}
+	if report.Job.ID != "home" || report.LastRestore == nil || report.LastRestoreVerify == nil || len(report.RestoreDrillHistory) != 1 || report.RestoreDrillStats == nil || len(report.Findings) == 0 {
+		t.Fatalf("unexpected restore report: %+v", report)
+	}
+
+	batchA := filepath.Join(tmpDir, "batch-a")
+	batchB := filepath.Join(tmpDir, "batch-b")
+	batchBody := []byte(`{"items":[{"job_id":"home","target_path":` + strconv.Quote(batchA) + `,"include_config":true},{"job_id":"home","target_path":` + strconv.Quote(batchB) + `,"include_config":false}]}`)
+	batchPreview := runBackupAPIRequest[backup.BatchRestorePreviewResult](t, server, http.MethodPost, "/api/v1/maintenance/backups/batch-restore-preview", batchBody, http.StatusOK)
+	if batchPreview.Status != backup.StatusCompleted || len(batchPreview.Items) != 2 || batchPreview.TotalFiles == 0 {
+		t.Fatalf("unexpected batch restore preview: %+v", batchPreview)
+	}
+	batchRestore := runBackupAPIRequest[backup.BatchRestoreResult](t, server, http.MethodPost, "/api/v1/maintenance/backups/batch-restore", batchBody, http.StatusOK)
+	if batchRestore.Status != backup.StatusCompleted || len(batchRestore.Items) != 2 || batchRestore.VerifiedBytes == 0 {
+		t.Fatalf("unexpected batch restore result: %+v", batchRestore)
+	}
+	if _, err := os.Stat(filepath.Join(batchA, "docs", "note.txt")); err != nil {
+		t.Fatalf("batch restored file A stat error: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(batchB, "docs", "note.txt")); err != nil {
+		t.Fatalf("batch restored file B stat error: %v", err)
 	}
 }
 
@@ -144,6 +202,9 @@ func TestServer_BackupEndpoints_ErrorMapping(t *testing.T) {
 	}
 
 	runBackupAPIRequest[json.RawMessage](t, server, http.MethodGet, "/api/v1/maintenance/backups/missing", nil, http.StatusNotFound)
+	runBackupAPIRequest[json.RawMessage](t, server, http.MethodGet, "/api/v1/maintenance/backups/missing/restore-report", nil, http.StatusNotFound)
+	runBackupAPIRequest[json.RawMessage](t, server, http.MethodPost, "/api/v1/maintenance/backups/missing/retention-check", nil, http.StatusNotFound)
+	runBackupAPIRequest[json.RawMessage](t, server, http.MethodPost, "/api/v1/maintenance/backups/batch-restore-preview", []byte(`{"items":[]}`), http.StatusBadRequest)
 	runBackupAPIRequest[json.RawMessage](t, server, http.MethodPost, "/api/v1/maintenance/backups/home/restore-drill", nil, http.StatusConflict)
 	runBackupAPIRequest[json.RawMessage](t, server, http.MethodPost, "/api/v1/maintenance/backups/home/restore-preview", []byte(`{"target_path":"relative"}`), http.StatusBadRequest)
 	runBackupAPIRequest[json.RawMessage](t, server, http.MethodPost, "/api/v1/maintenance/backups/home/restore-verify", []byte(`{"target_path":"relative"}`), http.StatusBadRequest)
@@ -165,6 +226,7 @@ func TestServer_BackupEndpoints_ErrorMapping(t *testing.T) {
 		t.Fatalf("NewServer() disabled error: %v", err)
 	}
 	runBackupAPIRequest[json.RawMessage](t, disabledServer, http.MethodPost, "/api/v1/maintenance/backups/disabled/run", nil, http.StatusConflict)
+	runBackupAPIRequest[json.RawMessage](t, disabledServer, http.MethodPost, "/api/v1/maintenance/backups/disabled/retention-check", nil, http.StatusConflict)
 }
 
 func TestServer_BackupEndpoints_FailureSendsAlertEvent(t *testing.T) {
@@ -231,6 +293,7 @@ func TestBackupAlertNotifier_MapsRestoreDrillReminderMetadata(t *testing.T) {
 		LastRestoreDrillAt:  &lastDrill,
 		StaleAfter:          "720h0m0s",
 		ReminderCooldown:    "24h0m0s",
+		FailureCategory:     backup.FailureCategoryNoSnapshot,
 		Timestamp:           time.Date(2026, 5, 10, 4, 0, 0, 0, time.UTC),
 	})
 	if err != nil {
@@ -245,6 +308,9 @@ func TestBackupAlertNotifier_MapsRestoreDrillReminderMetadata(t *testing.T) {
 	}
 	if details["stale_after"] != "720h0m0s" || details["reminder_cooldown"] != "24h0m0s" {
 		t.Fatalf("missing reminder timing details: %+v", details)
+	}
+	if details["failure_category"] != backup.FailureCategoryNoSnapshot {
+		t.Fatalf("failure_category detail = %#v, want %q", details["failure_category"], backup.FailureCategoryNoSnapshot)
 	}
 	if _, ok := details["last_successful_run_at"].(*time.Time); !ok {
 		t.Fatalf("last_successful_run_at detail = %#v, want *time.Time", details["last_successful_run_at"])
