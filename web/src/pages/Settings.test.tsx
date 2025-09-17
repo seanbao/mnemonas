@@ -39,8 +39,9 @@ const { defaultSettingsResponse, defaultSecurityCheckResponse } = vi.hoisted(() 
       webdav: { enabled: true, runtime_enabled: true, prefix: '/dav', read_only: false, auth_type: 'basic', username: 'admin' },
       share: { enabled: false, base_url: '' },
       favorites: { enabled: true, runtime_available: true },
-      alerts: { enabled: false, check_interval: '1h', threshold_pct: 90, critical_pct: 95, min_free_bytes: 10737418240, cooldown_period: '4h', webhook_url: '', webhook_method: 'POST', webhook_headers: [], telegram_enabled: false, telegram_bot_token_configured: false, telegram_chat_id: '' },
+      alerts: { enabled: false, check_interval: '1h', threshold_pct: 90, critical_pct: 95, min_free_bytes: 10737418240, cooldown_period: '4h', webhook_url: '', webhook_method: 'POST', webhook_headers: [], telegram_enabled: false, telegram_bot_token_configured: false, telegram_chat_id: '', email_enabled: false, smtp_host: '', smtp_port: 587, smtp_username: '', smtp_password_configured: false, smtp_from: '', smtp_to: [] },
       maintenance: { scrub: { enabled: false, schedule_interval: '168h', retry_interval: '1h', max_retries: 1 } },
+      disk_health: { enabled: false, check_interval: '1h', probe_timeout: '15s', cooldown_period: '4h', command: 'smartctl', temperature_warning_c: 50, temperature_critical_c: 60, media_wear_warning_percent: 80, media_wear_critical_percent: 100, devices: [] },
       cdc: { min_chunk_size: 262144, avg_chunk_size: 1048576, max_chunk_size: 4194304 },
       dataplane: { grpc_address: '127.0.0.1:9090', timeout: '30s', max_retries: 3 },
     },
@@ -1169,6 +1170,74 @@ describe('SettingsPage', () => {
         }))
       })
     })
+
+    it('shows danger toast and skips save when TLS certificate pair is incomplete', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      render(<SettingsPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('TLS / HTTPS')).toBeTruthy()
+      })
+
+      await user.click(screen.getAllByRole('switch')[0])
+      fireEvent.change(screen.getByPlaceholderText('/path/to/server.crt'), { target: { value: '/etc/mnemonas/tls/server.crt' } })
+      await user.click(screen.getByText('保存设置'))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: 'TLS 证书配置无效',
+          description: '证书文件和私钥文件必须同时设置或同时留空',
+          color: 'danger',
+        })
+      })
+      expect(mockUpdateSettings).not.toHaveBeenCalled()
+    })
+
+    it('shows danger toast and skips save when TLS certificate and key paths match', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      render(<SettingsPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('TLS / HTTPS')).toBeTruthy()
+      })
+
+      await user.click(screen.getAllByRole('switch')[0])
+      fireEvent.change(screen.getByPlaceholderText('/path/to/server.crt'), { target: { value: '/etc/mnemonas/tls/server.pem' } })
+      fireEvent.change(screen.getByPlaceholderText('/path/to/server.key'), { target: { value: '/etc/mnemonas/tls/server.pem' } })
+      await user.click(screen.getByText('保存设置'))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: 'TLS 证书配置无效',
+          description: '证书文件和私钥文件必须指向不同文件',
+          color: 'danger',
+        })
+      })
+      expect(mockUpdateSettings).not.toHaveBeenCalled()
+    })
+
+    it('shows danger toast and skips save when TLS has no certificate source without auto-generation', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      render(<SettingsPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('TLS / HTTPS')).toBeTruthy()
+      })
+
+      const switches = screen.getAllByRole('switch')
+      await user.click(switches[0])
+      await user.click(switches[1])
+      await user.click(screen.getByText('保存设置'))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: 'TLS 证书配置无效',
+          description: '禁用自动生成时必须配置证书目录或证书文件对',
+          color: 'danger',
+        })
+      })
+      expect(mockUpdateSettings).not.toHaveBeenCalled()
+    })
   })
 
   describe('alerts settings', () => {
@@ -1211,6 +1280,14 @@ describe('SettingsPage', () => {
       fireEvent.change(screen.getByLabelText('Telegram Bot Token'), { target: { value: '123456:secret-token' } })
       fireEvent.change(screen.getByLabelText('Telegram Chat ID'), { target: { value: '-1001234567890' } })
 
+      await user.click(screen.getByRole('switch', { name: '启用邮件通知' }))
+      fireEvent.change(screen.getByLabelText('SMTP 主机'), { target: { value: 'smtp.example.com' } })
+      fireEvent.change(screen.getByLabelText('SMTP 端口'), { target: { value: '2525' } })
+      fireEvent.change(screen.getByLabelText('SMTP 用户名'), { target: { value: 'alerts' } })
+      fireEvent.change(screen.getByLabelText('SMTP 密码'), { target: { value: 'smtp-secret' } })
+      fireEvent.change(screen.getByLabelText('SMTP 发件人'), { target: { value: 'MnemoNAS <alerts@example.com>' } })
+      fireEvent.change(screen.getByLabelText('SMTP 收件人'), { target: { value: 'admin@example.com\nops@example.com' } })
+
       await user.click(screen.getByText('保存设置'))
 
       await waitFor(() => {
@@ -1228,6 +1305,13 @@ describe('SettingsPage', () => {
             telegram_enabled: true,
             telegram_bot_token: '123456:secret-token',
             telegram_chat_id: '-1001234567890',
+            email_enabled: true,
+            smtp_host: 'smtp.example.com',
+            smtp_port: 2525,
+            smtp_username: 'alerts',
+            smtp_password: 'smtp-secret',
+            smtp_from: 'MnemoNAS <alerts@example.com>',
+            smtp_to: ['admin@example.com', 'ops@example.com'],
           }),
         }))
       })
@@ -1269,6 +1353,102 @@ describe('SettingsPage', () => {
       expect(mockUpdateSettings.mock.calls[0][0].alerts).not.toHaveProperty('telegram_bot_token')
     })
 
+    it('keeps existing SMTP password when the password field is left blank', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockGetSettings.mockResolvedValueOnce({
+        ...defaultSettingsResponse,
+        data: {
+          ...defaultSettingsResponse.data,
+          alerts: {
+            ...defaultSettingsResponse.data.alerts,
+            enabled: true,
+            email_enabled: true,
+            smtp_host: 'smtp.example.com',
+            smtp_port: 587,
+            smtp_username: 'alerts',
+            smtp_password_configured: true,
+            smtp_from: 'MnemoNAS <alerts@example.com>',
+            smtp_to: ['admin@example.com', 'ops@example.com'],
+          },
+        },
+      })
+      render(<SettingsPage />)
+
+      await openTab(user, '高级')
+
+      await waitFor(() => {
+        expect(screen.getByLabelText('SMTP 密码')).toHaveAttribute('placeholder', '已配置，留空不变')
+      })
+
+      await user.click(screen.getByText('保存设置'))
+
+      await waitFor(() => {
+        expect(mockUpdateSettings).toHaveBeenCalledWith(expect.objectContaining({
+          alerts: expect.objectContaining({
+            email_enabled: true,
+            smtp_host: 'smtp.example.com',
+            smtp_port: 587,
+            smtp_username: 'alerts',
+            smtp_from: 'MnemoNAS <alerts@example.com>',
+            smtp_to: ['admin@example.com', 'ops@example.com'],
+          }),
+        }))
+      })
+      expect(mockUpdateSettings.mock.calls[0][0].alerts).not.toHaveProperty('smtp_password')
+    })
+
+    it('rejects incomplete SMTP configuration before saving', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      render(<SettingsPage />)
+
+      await openTab(user, '高级')
+
+      await waitFor(() => {
+        expect(screen.getByText('提醒通知')).toBeTruthy()
+      })
+
+      await user.click(screen.getByRole('switch', { name: '启用提醒' }))
+      await user.click(screen.getByRole('switch', { name: '启用邮件通知' }))
+      await user.click(screen.getByText('保存设置'))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: 'SMTP 主机缺失',
+          description: '启用邮件通知时必须填写 SMTP 主机。',
+          color: 'danger',
+        })
+      })
+      expect(mockUpdateSettings).not.toHaveBeenCalled()
+    })
+
+    it('rejects invalid SMTP ports before saving', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      render(<SettingsPage />)
+
+      await openTab(user, '高级')
+
+      await waitFor(() => {
+        expect(screen.getByText('提醒通知')).toBeTruthy()
+      })
+
+      await user.click(screen.getByRole('switch', { name: '启用提醒' }))
+      await user.click(screen.getByRole('switch', { name: '启用邮件通知' }))
+      fireEvent.change(screen.getByLabelText('SMTP 主机'), { target: { value: 'smtp.example.com' } })
+      fireEvent.change(screen.getByLabelText('SMTP 端口'), { target: { value: '70000' } })
+      fireEvent.change(screen.getByLabelText('SMTP 发件人'), { target: { value: 'MnemoNAS <alerts@example.com>' } })
+      fireEvent.change(screen.getByLabelText('SMTP 收件人'), { target: { value: 'admin@example.com' } })
+      await user.click(screen.getByText('保存设置'))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: 'SMTP 端口格式无效',
+          description: 'SMTP 端口必须是 1 到 65535 之间的整数',
+          color: 'danger',
+        })
+      })
+      expect(mockUpdateSettings).not.toHaveBeenCalled()
+    })
+
     it('rejects invalid webhook header names before saving', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
       render(<SettingsPage />)
@@ -1290,6 +1470,82 @@ describe('SettingsPage', () => {
           title: 'Webhook Header 格式无效',
           color: 'danger',
         }))
+      })
+      expect(mockUpdateSettings).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('disk health settings', () => {
+    it('allows editing disk health configuration and saves it', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      render(<SettingsPage />)
+
+      await openTab(user, '高级')
+
+      await waitFor(() => {
+        expect(screen.getByText('磁盘健康监控')).toBeTruthy()
+      })
+
+      await user.click(screen.getByRole('switch', { name: '启用磁盘健康检查' }))
+      fireEvent.change(screen.getByLabelText('磁盘健康检查间隔'), { target: { value: '45m' } })
+      fireEvent.change(screen.getByLabelText('磁盘健康探测超时'), { target: { value: '20s' } })
+      fireEvent.change(screen.getByLabelText('磁盘健康冷却时间'), { target: { value: '3h' } })
+      fireEvent.change(screen.getByLabelText('磁盘健康探测命令'), { target: { value: '/usr/sbin/smartctl' } })
+      fireEvent.change(screen.getByLabelText('磁盘温度提醒阈值'), { target: { value: '47' } })
+      fireEvent.change(screen.getByLabelText('磁盘温度严重阈值'), { target: { value: '57' } })
+      fireEvent.change(screen.getByLabelText('介质磨损提醒阈值'), { target: { value: '82' } })
+      fireEvent.change(screen.getByLabelText('介质磨损严重阈值'), { target: { value: '98' } })
+      fireEvent.change(screen.getByLabelText('磁盘健康设备列表'), {
+        target: { value: '/dev/disk/by-id/test | Data | sat | SER123 | 45 | 55' },
+      })
+
+      await user.click(screen.getByText('保存设置'))
+
+      await waitFor(() => {
+        expect(mockUpdateSettings).toHaveBeenCalledWith(expect.objectContaining({
+          disk_health: {
+            enabled: true,
+            check_interval: '45m',
+            probe_timeout: '20s',
+            cooldown_period: '3h',
+            command: '/usr/sbin/smartctl',
+            temperature_warning_c: 47,
+            temperature_critical_c: 57,
+            media_wear_warning_percent: 82,
+            media_wear_critical_percent: 98,
+            devices: [{
+              path: '/dev/disk/by-id/test',
+              name: 'Data',
+              type: 'sat',
+              serial: 'SER123',
+              temperature_warning_c: 45,
+              temperature_critical_c: 55,
+            }],
+          },
+        }))
+      })
+    })
+
+    it('rejects invalid disk health devices before saving', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      render(<SettingsPage />)
+
+      await openTab(user, '高级')
+
+      await waitFor(() => {
+        expect(screen.getByText('磁盘健康监控')).toBeTruthy()
+      })
+
+      await user.click(screen.getByRole('switch', { name: '启用磁盘健康检查' }))
+      fireEvent.change(screen.getByLabelText('磁盘健康设备列表'), { target: { value: 'sda | Data' } })
+      await user.click(screen.getByText('保存设置'))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '磁盘健康设备格式无效',
+          description: '第 1 行设备路径必须是绝对路径',
+          color: 'danger',
+        })
       })
       expect(mockUpdateSettings).not.toHaveBeenCalled()
     })
@@ -2872,7 +3128,7 @@ describe('SettingsPage', () => {
     await openTab(user, '高级')
 
     await user.click(await screen.findByRole('switch', { name: '启用提醒' }))
-    fireEvent.change(screen.getByDisplayValue('4h'), { target: { value: '' } })
+    fireEvent.change(screen.getByLabelText('提醒冷却时间'), { target: { value: '' } })
     await user.click(screen.getByText('保存设置'))
 
     await waitFor(() => {

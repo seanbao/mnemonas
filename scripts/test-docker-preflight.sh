@@ -25,6 +25,14 @@ assert_file_contains() {
 	grep -Fq -- "$expected" "$path" || fail "$path does not contain: $expected"
 }
 
+assert_file_not_contains() {
+	local path="$1"
+	local unexpected="$2"
+	if grep -Fq -- "$unexpected" "$path"; then
+		fail "$path unexpectedly contains: $unexpected"
+	fi
+}
+
 make_fake_bin() {
 	local bin_dir="$1"
 	mkdir -p "$bin_dir"
@@ -156,6 +164,69 @@ run_missing_data_dir_test() {
 	assert_file_contains "$out" "Data directory missing"
 }
 
+run_relative_data_dir_test() {
+	local case_dir="$TMP_ROOT/relative-data"
+	local fake_bin="$case_dir/bin"
+	local out="$case_dir/out.log"
+	local status
+	make_case "$case_dir"
+	make_fake_bin "$fake_bin"
+
+	set +e
+	PATH="$fake_bin:$PATH" \
+		REPO_ROOT="$case_dir/repo" \
+		HOME="$case_dir/home" \
+		DATA_DIR="relative/data" \
+		bash "$PROJECT_ROOT/scripts/mnemonas-docker-preflight.sh" > "$out"
+	status=$?
+	set -e
+
+	[[ "$status" -ne 0 ]] || fail "preflight accepted a relative data directory"
+	assert_file_contains "$out" "Data directory must be an absolute path"
+}
+
+run_protected_data_dir_test() {
+	local case_dir="$TMP_ROOT/protected-data"
+	local fake_bin="$case_dir/bin"
+	local out="$case_dir/out.log"
+	local status
+	make_case "$case_dir"
+	make_fake_bin "$fake_bin"
+
+	set +e
+	PATH="$fake_bin:$PATH" \
+		REPO_ROOT="$case_dir/repo" \
+		HOME="$case_dir/home" \
+		DATA_DIR="/" \
+		bash "$PROJECT_ROOT/scripts/mnemonas-docker-preflight.sh" > "$out"
+	status=$?
+	set -e
+
+	[[ "$status" -ne 0 ]] || fail "preflight accepted a protected data directory"
+	assert_file_contains "$out" "Data directory points at a protected system directory"
+}
+
+run_data_dir_traversal_test() {
+	local case_dir="$TMP_ROOT/data-traversal"
+	local fake_bin="$case_dir/bin"
+	local out="$case_dir/out.log"
+	local status
+	make_case "$case_dir"
+	make_fake_bin "$fake_bin"
+
+	set +e
+	PATH="$fake_bin:$PATH" \
+		REPO_ROOT="$case_dir/repo" \
+		HOME="$case_dir/home" \
+		DATA_DIR="$case_dir/home/.mnemonas/../escape" \
+		bash "$PROJECT_ROOT/scripts/mnemonas-docker-preflight.sh" > "$out"
+	status=$?
+	set -e
+
+	[[ "$status" -ne 0 ]] || fail "preflight accepted a data directory with parent segments"
+	assert_file_contains "$out" "Data directory cannot contain parent directory segments"
+}
+
 run_symlink_data_dir_test() {
 	local case_dir="$TMP_ROOT/symlink-data"
 	local fake_bin="$case_dir/bin"
@@ -265,6 +336,27 @@ TOML
 	assert_file_contains "$out" "Summary: 0 failure(s), 1 warning(s)"
 }
 
+run_release_image_without_buildx_test() {
+	local case_dir="$TMP_ROOT/release-image-no-buildx"
+	local fake_bin="$case_dir/bin"
+	local out="$case_dir/out.log"
+	make_case "$case_dir"
+	make_fake_bin "$fake_bin"
+	cat >> "$case_dir/repo/.env" <<'ENV'
+MNEMONAS_IMAGE=ghcr.io/seanbao/mnemonas:v1.2.3
+ENV
+
+	PATH="$fake_bin:$PATH" \
+		REPO_ROOT="$case_dir/repo" \
+		HOME="$case_dir/home" \
+		FAKE_DOCKER_NO_BUILDX=1 \
+		bash "$PROJECT_ROOT/scripts/mnemonas-docker-preflight.sh" > "$out"
+
+	assert_file_contains "$out" "Docker Buildx plugin is not required for release image"
+	assert_file_not_contains "$out" "Docker Buildx plugin is missing"
+	assert_file_contains "$out" "Summary: 0 failure(s), 0 warning(s)"
+}
+
 run_invalid_min_free_bytes_test() {
 	local case_dir="$TMP_ROOT/invalid-min-free"
 	local fake_bin="$case_dir/bin"
@@ -289,11 +381,15 @@ run_invalid_min_free_bytes_test() {
 run_success_test
 run_missing_compose_test
 run_missing_data_dir_test
+run_relative_data_dir_test
+run_protected_data_dir_test
+run_data_dir_traversal_test
 run_symlink_data_dir_test
 run_busy_port_test
 run_custom_host_port_test
 run_invalid_existing_config_test
 run_custom_storage_root_warning_test
+run_release_image_without_buildx_test
 run_invalid_min_free_bytes_test
 
 printf '[docker-preflight-test] all checks passed\n'

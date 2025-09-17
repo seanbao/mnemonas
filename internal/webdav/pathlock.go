@@ -6,8 +6,8 @@ import (
 	"sync/atomic"
 )
 
-// PathLock provides per-path locking for concurrent write protection
-// I2 fix: Uses reference counting to prevent memory leak
+// PathLock provides per-path locking for concurrent write protection.
+// Entries are reference-counted and removed when no holder remains.
 type PathLock struct {
 	mu    sync.Mutex
 	locks map[string]*lockEntry

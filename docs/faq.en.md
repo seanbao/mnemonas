@@ -37,7 +37,7 @@ Docker release image:
 
 ```bash
 docker compose pull
-docker compose up -d
+docker compose up -d --no-build
 ```
 
 Ubuntu/systemd:
@@ -328,6 +328,8 @@ DATA_DIR="${MNEMONAS_DATA_DIR:-$DEFAULT_DATA_DIR}"
 [ "$DATA_DIR" = "$DEFAULT_DATA_DIR" ] || { echo "refusing non-default DATA_DIR; inspect and delete manually: $DATA_DIR"; exit 1; }
 [ ! -L "$DATA_DIR" ] || { echo "refusing symlink DATA_DIR: $DATA_DIR"; exit 1; }
 rm -rf -- "$DATA_DIR/files" "$DATA_DIR/.mnemonas"
+
+# For release images, use docker compose up -d --no-build instead.
 docker compose up -d
 ```
 

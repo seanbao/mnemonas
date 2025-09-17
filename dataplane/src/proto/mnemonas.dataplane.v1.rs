@@ -178,7 +178,7 @@ pub struct ObjectInfo {
     pub hash: ::prost::alloc::string::String,
     #[prost(uint64, tag = "2")]
     pub size: u64,
-    /// NEW-2 fix: Creation timestamp for GC grace period filtering
+    /// Creation timestamp for GC grace period filtering
     ///
     /// Unix timestamp in seconds
     #[prost(int64, optional, tag = "3")]

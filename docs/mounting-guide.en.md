@@ -14,7 +14,7 @@ MnemoNAS exposes files through WebDAV. Use the Web UI for management and WebDAV 
 | Username | MnemoNAS username when `auth_type = "users"`; configured WebDAV username in `basic` mode |
 | Password | MnemoNAS user password when `auth_type = "users"`; configured or generated WebDAV password in `basic` mode |
 
-Prefer `auth_type = "users"` for day-to-day mounting so WebDAV follows MnemoNAS roles, groups, `home_dir`, directory access rules, and quota boundaries. The default legacy `basic` mode uses separate global WebDAV credentials; check `<storage.root>/secrets.json` or the admin settings API if that password was auto-generated. See [configuration](configuration.en.md).
+Prefer `auth_type = "users"` for day-to-day mounting so WebDAV follows MnemoNAS roles, groups, `home_dir`, directory access rules, home-scoped user quotas, and directory quotas. The default legacy `basic` mode uses separate global WebDAV credentials; check `<storage.root>/secrets.json` or the admin settings API if that password was auto-generated. See [configuration](configuration.en.md).
 
 ## macOS
 

@@ -185,7 +185,6 @@ func (c *PropfindCache) evictOldest() {
 		oldest = append(oldest, kv{k, v.cachedAt})
 	}
 
-	// M2 fix: Use sort.Slice instead of bubble sort for O(n log n)
 	sort.Slice(oldest, func(i, j int) bool {
 		if oldest[i].cachedAt.Equal(oldest[j].cachedAt) {
 			return oldest[i].key < oldest[j].key

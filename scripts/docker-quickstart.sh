@@ -37,7 +37,7 @@ Usage:
 
 Options:
   --start              Prepare, run preflight, then start with docker compose up -d
-  --no-build           With --start, do not pass --build to docker compose up
+  --no-build           With --start, do not build the image locally
   --skip-preflight     Do not run scripts/mnemonas-docker-preflight.sh
   --port PORT          Host HTTP port for Web UI, API, and WebDAV
   --data-dir PATH      Host data directory mounted into the container as /data
@@ -370,9 +370,15 @@ run_preflight() {
 }
 
 start_compose() {
+	local image
 	local args=(compose -f "$REPO_ROOT/docker-compose.yml" --env-file "$ENV_PATH" up -d)
-	if [[ "$BUILD_IMAGE" == "1" ]]; then
+	image="$(env_value MNEMONAS_IMAGE "$ENV_PATH")"
+	if [[ -n "$image" && "$image" != "mnemonas:local" ]]; then
+		args+=(--pull missing --no-build)
+	elif [[ "$BUILD_IMAGE" == "1" ]]; then
 		args+=(--build)
+	else
+		args+=(--no-build)
 	fi
 
 	log "starting MnemoNAS with docker ${args[*]}"

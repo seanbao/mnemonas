@@ -48,6 +48,11 @@ func TestWriteHistoryFile_ReturnsDirectorySyncError(t *testing.T) {
 	if info.Mode().Perm() != 0644 {
 		t.Fatalf("expected history file permissions 0644, got %o", info.Mode().Perm())
 	}
+	if _, _, ok, rootErr := registeredHistoryDirRoot(historyPath); rootErr != nil {
+		t.Fatalf("registeredHistoryDirRoot() error: %v", rootErr)
+	} else if ok {
+		t.Fatal("expected failed first write to release the maintenance history directory root")
+	}
 }
 
 func TestHistoryPersistenceWarningWrapsAndUnwraps(t *testing.T) {

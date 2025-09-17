@@ -35,6 +35,7 @@ require_safe_e2e_root() {
       exit 1
       ;;
   esac
+  require_no_symlink_components "$E2E_ROOT" "MNEMONAS_E2E_ROOT"
 }
 
 path_has_parent_segment() {
@@ -48,6 +49,35 @@ path_has_parent_segment() {
     fi
   done
   return 1
+}
+
+require_no_symlink_components() {
+  local value="$1"
+  local label="$2"
+  local trimmed="$value"
+  local current="."
+  local -a segments
+
+  if [[ "$value" == /* ]]; then
+    trimmed="${value#/}"
+    current="/"
+  fi
+  trimmed="${trimmed%/}"
+
+  IFS='/' read -r -a segments <<< "$trimmed"
+  for segment in "${segments[@]}"; do
+    [[ -n "$segment" && "$segment" != "." ]] || continue
+    if [[ "$current" == "/" ]]; then
+      current="/$segment"
+    else
+      current="$current/$segment"
+    fi
+    if [[ -L "$current" ]]; then
+      echo "$label must not contain symlink path components: $current" >&2
+      exit 1
+    fi
+    [[ -e "$current" ]] || break
+  done
 }
 
 is_valid_tcp_host() {

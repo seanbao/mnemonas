@@ -179,11 +179,14 @@ export function ShareAccessPage() {
 
     const requestId = shareInfoRequestRef.current + 1
     shareInfoRequestRef.current = requestId
+    folderListRequestRef.current += 1
     setIsLoading(true)
     setError(null)
     setNeedsPassword(false)
     setIsAuthenticated(false)
     setPassword('')
+    setFolderItems([])
+    setListError(null)
     
     try {
       const info = await getPublicShare(id)

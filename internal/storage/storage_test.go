@@ -3212,6 +3212,109 @@ func TestFileSystem_RestoreFromTrash_DoesNotRemoveOutsideTrashItemDirAfterTrashR
 	}
 }
 
+func TestFileSystem_WalkTrashItemRestorePaths_UsesAnchoredTrashRootAfterTrashRootSwap(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/walk-trash-root"); err != nil {
+		t.Fatalf("Mkdir() error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/walk-trash-root/original.txt", bytes.NewReader([]byte("original"))); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+	if err := fs.Delete(ctx, "/walk-trash-root"); err != nil {
+		t.Fatalf("Delete() error: %v", err)
+	}
+
+	items, err := fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash() error: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected 1 trash item, got %d", len(items))
+	}
+
+	outsideRoot := t.TempDir()
+	outsideContent := filepath.Join(outsideRoot, items[0].ID, "content", "fake")
+	if err := os.MkdirAll(outsideContent, 0700); err != nil {
+		t.Fatalf("MkdirAll(outside content) error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(outsideContent, "secret.txt"), []byte("outside"), 0600); err != nil {
+		t.Fatalf("WriteFile(outside content) error: %v", err)
+	}
+
+	backupTrashRoot := fs.trashRoot + "-backup"
+	if err := os.Rename(fs.trashRoot, backupTrashRoot); err != nil {
+		t.Fatalf("Rename(trash root backup) error: %v", err)
+	}
+	if err := os.Symlink(outsideRoot, fs.trashRoot); err != nil {
+		t.Fatalf("Symlink(trash root) error: %v", err)
+	}
+	t.Cleanup(func() {
+		if info, err := os.Lstat(fs.trashRoot); err == nil && info.Mode()&os.ModeSymlink != 0 {
+			if removeErr := os.Remove(fs.trashRoot); removeErr != nil {
+				t.Errorf("Remove(trash root symlink) error: %v", removeErr)
+			}
+		}
+		if _, err := os.Stat(backupTrashRoot); err == nil {
+			if renameErr := os.Rename(backupTrashRoot, fs.trashRoot); renameErr != nil {
+				t.Errorf("Rename(backup trash root) error: %v", renameErr)
+			}
+		}
+	})
+
+	seen := make(map[string]bool)
+	err = fs.WalkTrashItemRestorePaths(ctx, items[0].ID, func(restoredPath string, _ bool) error {
+		seen[restoredPath] = true
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("WalkTrashItemRestorePaths() error: %v", err)
+	}
+	if !seen["/walk-trash-root"] || !seen["/walk-trash-root/original.txt"] {
+		t.Fatalf("expected anchored trash content paths, got %#v", seen)
+	}
+	if seen["/walk-trash-root/fake"] || seen["/walk-trash-root/fake/secret.txt"] {
+		t.Fatalf("walk followed swapped trash root, got %#v", seen)
+	}
+}
+
+func TestFileSystem_WalkTrashItemRestorePaths_RejectsSymlinkInsideTrashContent(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/walk-trash-symlink"); err != nil {
+		t.Fatalf("Mkdir() error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/walk-trash-symlink/original.txt", bytes.NewReader([]byte("original"))); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+	if err := fs.Delete(ctx, "/walk-trash-symlink"); err != nil {
+		t.Fatalf("Delete() error: %v", err)
+	}
+
+	items, err := fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash() error: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected 1 trash item, got %d", len(items))
+	}
+
+	outsideRoot := t.TempDir()
+	contentPath := filepath.Join(fs.trashRoot, items[0].ID, "content")
+	if err := os.Symlink(outsideRoot, filepath.Join(contentPath, "linked")); err != nil {
+		t.Fatalf("Symlink(trash content) error: %v", err)
+	}
+
+	err = fs.WalkTrashItemRestorePaths(ctx, items[0].ID, func(string, bool) error {
+		return nil
+	})
+	if !errors.Is(err, errStoragePathSymlink) {
+		t.Fatalf("WalkTrashItemRestorePaths() error = %v, want errStoragePathSymlink", err)
+	}
+}
+
 func TestFileSystem_RestoreFromTrash_RollsBackWhenIndexUpdateFails(t *testing.T) {
 	fs := setupFileSystem(t)
 	ctx := context.Background()

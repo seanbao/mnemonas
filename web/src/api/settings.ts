@@ -85,6 +85,18 @@ export interface SettingsData {
     smtp_from?: string
     smtp_to?: string[]
   }
+  disk_health?: {
+    enabled: boolean
+    check_interval: string
+    probe_timeout: string
+    cooldown_period: string
+    command: string
+    temperature_warning_c: number
+    temperature_critical_c: number
+    media_wear_warning_percent: number
+    media_wear_critical_percent: number
+    devices: DiskHealthDeviceSettings[]
+  }
   maintenance?: {
     scrub?: {
       enabled: boolean
@@ -127,6 +139,15 @@ export interface SharePolicyRule {
   require_password?: boolean
   max_expires_in?: string
   max_access?: number
+}
+
+export interface DiskHealthDeviceSettings {
+  name?: string
+  path: string
+  type?: string
+  serial?: string
+  temperature_warning_c?: number
+  temperature_critical_c?: number
 }
 
 export type DirectoryAccessDecisionSource =
@@ -340,6 +361,18 @@ export interface UpdateSettingsRequest {
     smtp_from?: string
     smtp_to?: string[]
   }
+  disk_health?: {
+    enabled?: boolean
+    check_interval?: string
+    probe_timeout?: string
+    cooldown_period?: string
+    command?: string
+    temperature_warning_c?: number
+    temperature_critical_c?: number
+    media_wear_warning_percent?: number
+    media_wear_critical_percent?: number
+    devices?: DiskHealthDeviceSettings[]
+  }
   maintenance?: {
     scrub?: {
       enabled?: boolean
@@ -427,6 +460,16 @@ function isSharePolicyRule(value: unknown): value is SharePolicyRule {
     && (value.require_password === undefined || typeof value.require_password === 'boolean')
     && (value.max_expires_in === undefined || typeof value.max_expires_in === 'string')
     && (value.max_access === undefined || typeof value.max_access === 'number')
+}
+
+function isDiskHealthDeviceSettings(value: unknown): value is DiskHealthDeviceSettings {
+  return isRecord(value)
+    && (value.name === undefined || typeof value.name === 'string')
+    && typeof value.path === 'string'
+    && (value.type === undefined || typeof value.type === 'string')
+    && (value.serial === undefined || typeof value.serial === 'string')
+    && (value.temperature_warning_c === undefined || typeof value.temperature_warning_c === 'number')
+    && (value.temperature_critical_c === undefined || typeof value.temperature_critical_c === 'number')
 }
 
 function isDirectoryAccessDecision(value: unknown): value is DirectoryAccessDecision {
@@ -635,6 +678,23 @@ function isValidSettingsData(value: unknown): value is SettingsData {
       || (value.alerts.smtp_password_configured !== undefined && typeof value.alerts.smtp_password_configured !== 'boolean')
       || (value.alerts.smtp_from !== undefined && typeof value.alerts.smtp_from !== 'string')
       || (value.alerts.smtp_to !== undefined && !isStringArray(value.alerts.smtp_to))) {
+      return false
+    }
+  }
+
+  if (value.disk_health !== undefined) {
+    if (!isRecord(value.disk_health)
+      || typeof value.disk_health.enabled !== 'boolean'
+      || typeof value.disk_health.check_interval !== 'string'
+      || typeof value.disk_health.probe_timeout !== 'string'
+      || typeof value.disk_health.cooldown_period !== 'string'
+      || typeof value.disk_health.command !== 'string'
+      || typeof value.disk_health.temperature_warning_c !== 'number'
+      || typeof value.disk_health.temperature_critical_c !== 'number'
+      || typeof value.disk_health.media_wear_warning_percent !== 'number'
+      || typeof value.disk_health.media_wear_critical_percent !== 'number'
+      || !Array.isArray(value.disk_health.devices)
+      || !value.disk_health.devices.every(isDiskHealthDeviceSettings)) {
       return false
     }
   }

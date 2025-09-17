@@ -75,6 +75,77 @@ func TestNewManagerRejectsSymlinkStateRootParent(t *testing.T) {
 	}
 }
 
+func TestNewManagerRejectsSymlinkStateFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	stateRoot := filepath.Join(tmpDir, "state")
+	outsideState := filepath.Join(tmpDir, "outside-status.json")
+	if err := os.Mkdir(stateRoot, 0700); err != nil {
+		t.Fatalf("Mkdir(stateRoot) error: %v", err)
+	}
+	if err := os.WriteFile(outsideState, []byte(`{"jobs":{}}`), 0600); err != nil {
+		t.Fatalf("WriteFile(outsideState) error: %v", err)
+	}
+	if err := os.Symlink(outsideState, filepath.Join(stateRoot, stateFileName)); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+
+	_, err := NewManager(ManagerConfig{
+		Root:        stateRoot,
+		StorageRoot: filepath.Join(tmpDir, "source"),
+	})
+	if !errors.Is(err, ErrUnsafePath) {
+		t.Fatalf("NewManager() error = %v, want %v", err, ErrUnsafePath)
+	}
+}
+
+func TestWriteJSONFileRejectsTempSymlink(t *testing.T) {
+	tmpDir := t.TempDir()
+	filePath := filepath.Join(tmpDir, "state", stateFileName)
+	outsideState := filepath.Join(tmpDir, "outside-status.json")
+	if err := os.MkdirAll(filepath.Dir(filePath), 0700); err != nil {
+		t.Fatalf("MkdirAll(state) error: %v", err)
+	}
+	if err := os.WriteFile(outsideState, []byte("original"), 0600); err != nil {
+		t.Fatalf("WriteFile(outsideState) error: %v", err)
+	}
+	if err := os.Symlink(outsideState, filePath+".tmp"); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+
+	err := writeJSONFile(filePath, map[string]string{"status": "updated"}, 0600)
+	if !errors.Is(err, ErrUnsafePath) {
+		t.Fatalf("writeJSONFile() error = %v, want %v", err, ErrUnsafePath)
+	}
+	assertFileContent(t, outsideState, "original")
+	if _, statErr := os.Lstat(filePath); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("state file stat error = %v, want not exist", statErr)
+	}
+}
+
+func TestWriteJSONFileRejectsFinalSymlink(t *testing.T) {
+	tmpDir := t.TempDir()
+	filePath := filepath.Join(tmpDir, "state", stateFileName)
+	outsideState := filepath.Join(tmpDir, "outside-status.json")
+	if err := os.MkdirAll(filepath.Dir(filePath), 0700); err != nil {
+		t.Fatalf("MkdirAll(state) error: %v", err)
+	}
+	if err := os.WriteFile(outsideState, []byte("original"), 0600); err != nil {
+		t.Fatalf("WriteFile(outsideState) error: %v", err)
+	}
+	if err := os.Symlink(outsideState, filePath); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+
+	err := writeJSONFile(filePath, map[string]string{"status": "updated"}, 0600)
+	if !errors.Is(err, ErrUnsafePath) {
+		t.Fatalf("writeJSONFile() error = %v, want %v", err, ErrUnsafePath)
+	}
+	assertFileContent(t, outsideState, "original")
+	if _, statErr := os.Lstat(filePath + ".tmp"); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("temp state file stat error = %v, want not exist", statErr)
+	}
+}
+
 func TestManager_JobViewUsesEmptyExcludeArray(t *testing.T) {
 	tmpDir := t.TempDir()
 	source := filepath.Join(tmpDir, "source")
@@ -484,6 +555,74 @@ func TestManager_RunRestoreRejectsTargetSymlinkAncestor(t *testing.T) {
 	}
 }
 
+func TestCreateNamedRestoreTargetRejectsSwappedSymlinkParent(t *testing.T) {
+	tmpDir := t.TempDir()
+	parent := filepath.Join(tmpDir, "restore-parent")
+	originalParent := filepath.Join(tmpDir, "restore-parent-original")
+	outside := filepath.Join(tmpDir, "outside")
+	if err := os.Mkdir(parent, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(outside, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(parent, originalParent); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, parent); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+
+	target := filepath.Join(parent, "restore-target")
+	_, err := createNamedRestoreTarget(target, ".partial-test")
+	if !errors.Is(err, ErrUnsafePath) {
+		t.Fatalf("createNamedRestoreTarget() error = %v, want ErrUnsafePath", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(outside, "restore-target.partial-test")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("outside staging stat error = %v, want not exist", statErr)
+	}
+}
+
+func TestInstallRestoreTargetRejectsSwappedSymlinkParentBeforeRemovingTarget(t *testing.T) {
+	tmpDir := t.TempDir()
+	parent := filepath.Join(tmpDir, "restore-parent")
+	originalParent := filepath.Join(tmpDir, "restore-parent-original")
+	outside := filepath.Join(tmpDir, "outside")
+	if err := os.Mkdir(parent, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(outside, 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	partial := filepath.Join(parent, "restore-target.partial-test")
+	if err := os.Mkdir(partial, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(parent, originalParent); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, parent); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	outsideTarget := filepath.Join(outside, "restore-target")
+	if err := os.Mkdir(outsideTarget, 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	target := filepath.Join(parent, "restore-target")
+	err := installRestoreTarget(partial, target)
+	if !errors.Is(err, ErrUnsafePath) {
+		t.Fatalf("installRestoreTarget() error = %v, want ErrUnsafePath", err)
+	}
+	if info, statErr := os.Stat(outsideTarget); statErr != nil || !info.IsDir() {
+		t.Fatalf("outside target was altered, stat = (%v, %v)", info, statErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(originalParent, "restore-target.partial-test")); statErr != nil {
+		t.Fatalf("original partial stat error = %v", statErr)
+	}
+}
+
 func TestManager_RunRestoreBlocksFailedPreflight(t *testing.T) {
 	tmpDir := t.TempDir()
 	source := filepath.Join(tmpDir, "source")
@@ -768,6 +907,162 @@ func TestManager_RunJobRejectsDestinationSymlink(t *testing.T) {
 	}
 }
 
+func TestManager_RunJobRejectsDestinationSymlinkInsertedAfterValidation(t *testing.T) {
+	tmpDir := t.TempDir()
+	source := filepath.Join(tmpDir, "source")
+	destination := filepath.Join(tmpDir, "backups")
+	outside := filepath.Join(tmpDir, "outside")
+	mustWriteFile(t, filepath.Join(source, "note.txt"), "backup")
+	if err := os.MkdirAll(outside, 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	oldHook := afterValidateLocalBackupDestination
+	var hookErr error
+	afterValidateLocalBackupDestination = func(validatedDestination string) {
+		if hookErr != nil || validatedDestination != destination {
+			return
+		}
+		hookErr = os.Symlink(outside, destination)
+	}
+	defer func() {
+		afterValidateLocalBackupDestination = oldHook
+	}()
+
+	manager, err := NewManager(ManagerConfig{
+		Root:        filepath.Join(tmpDir, "state"),
+		StorageRoot: source,
+		Jobs: []config.BackupJobConfig{{
+			ID:          "home",
+			Name:        "Home backup",
+			Type:        JobTypeLocal,
+			Source:      source,
+			Destination: destination,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("NewManager() error: %v", err)
+	}
+
+	_, err = manager.RunJob(context.Background(), "home")
+	if hookErr != nil {
+		t.Skipf("symlink unavailable: %v", hookErr)
+	}
+	if !errors.Is(err, ErrUnsafePath) {
+		t.Fatalf("RunJob() error = %v, want ErrUnsafePath", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(outside, "home")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("expected outside destination to remain untouched, got %v", statErr)
+	}
+}
+
+func TestCopySourceTreeRejectsDestinationSymlink(t *testing.T) {
+	tmpDir := t.TempDir()
+	source := filepath.Join(tmpDir, "source")
+	outside := filepath.Join(tmpDir, "outside")
+	destinationLink := filepath.Join(tmpDir, "data-link")
+	if err := os.MkdirAll(filepath.Join(source, "empty-dir"), 0700); err != nil {
+		t.Fatalf("MkdirAll(source/empty-dir) error: %v", err)
+	}
+	if err := os.Mkdir(outside, 0700); err != nil {
+		t.Fatalf("Mkdir(outside) error: %v", err)
+	}
+	if err := os.Symlink(outside, destinationLink); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+
+	_, _, err := copySourceTree(context.Background(), source, destinationLink, nil)
+	if !errors.Is(err, ErrUnsafePath) {
+		t.Fatalf("copySourceTree() error = %v, want %v", err, ErrUnsafePath)
+	}
+	if _, statErr := os.Stat(filepath.Join(outside, "empty-dir")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("outside directory stat error = %v, want not exist", statErr)
+	}
+}
+
+func TestManager_RunRestoreDrillRejectsDestinationSymlinkInsertedAfterBackup(t *testing.T) {
+	tmpDir := t.TempDir()
+	source := filepath.Join(tmpDir, "source")
+	destination := filepath.Join(tmpDir, "backups")
+	redirectedDestination := filepath.Join(tmpDir, "redirected-backups")
+	mustWriteFile(t, filepath.Join(source, "note.txt"), "backup")
+
+	manager, err := NewManager(ManagerConfig{
+		Root:        filepath.Join(tmpDir, "state"),
+		StorageRoot: source,
+		Jobs: []config.BackupJobConfig{{
+			ID:          "home",
+			Name:        "Home backup",
+			Type:        JobTypeLocal,
+			Source:      source,
+			Destination: destination,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("NewManager() error: %v", err)
+	}
+	if _, err := manager.RunJob(context.Background(), "home"); err != nil {
+		t.Fatalf("RunJob() error: %v", err)
+	}
+
+	if err := os.Rename(destination, redirectedDestination); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(redirectedDestination, destination); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+
+	_, err = manager.RunRestoreDrill(context.Background(), "home", RestoreDrillOptions{KeepArtifact: true})
+	if !errors.Is(err, ErrUnsafePath) {
+		t.Fatalf("RunRestoreDrill() error = %v, want ErrUnsafePath", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(redirectedDestination, "home", "restore-drills")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("redirected restore drill directory stat error = %v, want not exist", statErr)
+	}
+}
+
+func TestManager_RunRestorePreviewRejectsDestinationSymlinkInsertedAfterBackup(t *testing.T) {
+	tmpDir := t.TempDir()
+	source := filepath.Join(tmpDir, "source")
+	destination := filepath.Join(tmpDir, "backups")
+	redirectedDestination := filepath.Join(tmpDir, "redirected-backups")
+	restoreTarget := filepath.Join(tmpDir, "restore-target")
+	mustWriteFile(t, filepath.Join(source, "note.txt"), "backup")
+
+	manager, err := NewManager(ManagerConfig{
+		Root:        filepath.Join(tmpDir, "state"),
+		StorageRoot: source,
+		Jobs: []config.BackupJobConfig{{
+			ID:          "home",
+			Name:        "Home backup",
+			Type:        JobTypeLocal,
+			Source:      source,
+			Destination: destination,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("NewManager() error: %v", err)
+	}
+	if _, err := manager.RunJob(context.Background(), "home"); err != nil {
+		t.Fatalf("RunJob() error: %v", err)
+	}
+
+	if err := os.Rename(destination, redirectedDestination); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(redirectedDestination, destination); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+
+	_, err = manager.RunRestorePreview(context.Background(), "home", RestorePreviewOptions{TargetPath: restoreTarget})
+	if !errors.Is(err, ErrUnsafePath) {
+		t.Fatalf("RunRestorePreview() error = %v, want ErrUnsafePath", err)
+	}
+	if _, statErr := os.Stat(restoreTarget); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("restore target stat error = %v, want not exist", statErr)
+	}
+}
+
 func TestManager_RunJobRejectsSourceSymlink(t *testing.T) {
 	tmpDir := t.TempDir()
 	source := filepath.Join(tmpDir, "source")
@@ -854,6 +1149,99 @@ func TestManager_RunRemoteBackupRejectsSourceSymlink(t *testing.T) {
 				t.Fatalf("RunJob() error = %v, want ErrSourceContainsSymlink", err)
 			}
 		})
+	}
+}
+
+func TestCopyHostFileWithHashRejectsSymlinkInsertedAfterStat(t *testing.T) {
+	tmpDir := t.TempDir()
+	sourcePath := filepath.Join(tmpDir, "mnemonas.toml")
+	outsidePath := filepath.Join(tmpDir, "outside.toml")
+	destinationPath := filepath.Join(tmpDir, "snapshot", "config", "config.toml")
+	mustWriteFile(t, sourcePath, "safe config")
+	mustWriteFile(t, outsidePath, "outside config")
+	probeLink := filepath.Join(tmpDir, "probe-link")
+	if err := os.Symlink(outsidePath, probeLink); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	if err := os.Remove(probeLink); err != nil {
+		t.Fatal(err)
+	}
+
+	oldHook := afterCopyHostFileLstat
+	afterCopyHostFileLstat = func(path string) {
+		if path != sourcePath {
+			return
+		}
+		if err := os.Remove(sourcePath); err != nil {
+			t.Fatalf("Remove(sourcePath) error: %v", err)
+		}
+		if err := os.Symlink(outsidePath, sourcePath); err != nil {
+			t.Fatalf("Symlink(sourcePath) error: %v", err)
+		}
+	}
+	defer func() {
+		afterCopyHostFileLstat = oldHook
+	}()
+
+	_, err := copyHostFileWithHash(context.Background(), sourcePath, destinationPath, "config/config.toml", "mnemonas.toml")
+	if !errors.Is(err, ErrSourceContainsSymlink) {
+		t.Fatalf("copyHostFileWithHash() error = %v, want ErrSourceContainsSymlink", err)
+	}
+	if _, statErr := os.Stat(destinationPath); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("destination stat error = %v, want ErrNotExist", statErr)
+	}
+}
+
+func TestCopyOpenFileWithHashRejectsDestinationReplacedBeforeMetadata(t *testing.T) {
+	tmpDir := t.TempDir()
+	sourcePath := filepath.Join(tmpDir, "source.txt")
+	destinationPath := filepath.Join(tmpDir, "snapshot", "data", "source.txt")
+	outsidePath := filepath.Join(tmpDir, "outside.txt")
+	mustWriteFile(t, sourcePath, "source")
+	mustWriteFile(t, outsidePath, "outside")
+	probeLink := filepath.Join(tmpDir, "probe-link")
+	if err := os.Symlink(outsidePath, probeLink); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	if err := os.Remove(probeLink); err != nil {
+		t.Fatal(err)
+	}
+
+	source, sourceInfo, err := openRegularFileNoFollow(sourcePath, "source.txt")
+	if err != nil {
+		t.Fatalf("openRegularFileNoFollow() error: %v", err)
+	}
+	defer source.Close()
+
+	oldHook := afterCopyOpenFileBeforeMetadata
+	afterCopyOpenFileBeforeMetadata = func(path string) {
+		if path != destinationPath {
+			return
+		}
+		if err := os.Remove(destinationPath); err != nil {
+			t.Fatalf("Remove(destinationPath) error: %v", err)
+		}
+		if err := os.Symlink(outsidePath, destinationPath); err != nil {
+			t.Fatalf("Symlink(destinationPath) error: %v", err)
+		}
+	}
+	defer func() {
+		afterCopyOpenFileBeforeMetadata = oldHook
+	}()
+
+	_, err = copyOpenFileWithHash(context.Background(), source, sourceInfo, destinationPath, "data/source.txt", "source.txt")
+	if !errors.Is(err, ErrUnsafePath) {
+		t.Fatalf("copyOpenFileWithHash() error = %v, want ErrUnsafePath", err)
+	}
+	if _, statErr := os.Lstat(destinationPath); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("destination lstat error = %v, want ErrNotExist after cleanup", statErr)
+	}
+	data, readErr := os.ReadFile(outsidePath)
+	if readErr != nil {
+		t.Fatalf("ReadFile(outsidePath) error: %v", readErr)
+	}
+	if string(data) != "outside" {
+		t.Fatalf("outside content = %q, want outside", data)
 	}
 }
 

@@ -93,7 +93,7 @@ sudo mnemonas-doctor
 
 ### Docker Compose
 
-需要 Docker Engine、Compose v2 和 Buildx 插件；先确认 `docker compose version` 与 `docker buildx version` 可用。Ubuntu 24.04 上如果只有 `docker` 没有 `docker compose`，通常可先执行 `sudo apt install docker-compose-v2 docker-buildx`；使用 Docker 官方 apt 仓库时对应包名通常是 `docker-compose-plugin` 和 `docker-buildx-plugin`。
+需要 Docker Engine 和 Compose v2；源码本地构建还需要 Buildx 插件。先确认 `docker compose version` 可用，源码构建时再确认 `docker buildx version` 可用。Ubuntu 24.04 上如果只有 `docker` 没有 `docker compose`，通常可先执行 `sudo apt install docker-compose-v2 docker-buildx`；使用 Docker 官方 apt 仓库时对应包名通常是 `docker-compose-plugin` 和 `docker-buildx-plugin`。
 
 ```bash
 # 克隆项目
@@ -107,7 +107,7 @@ cd mnemonas
 # http://localhost:8080
 ```
 
-仓库自带的 `docker-compose.yml` 默认从当前源码构建 `mnemonas:local` 镜像，不要求宿主机安装 Go/Rust/Node.js，但需要能拉取 Docker 基础镜像。Dockerfile 使用 BuildKit 缓存和较小的 Alpine Go builder，弱网环境下重试构建不会从零下载所有依赖。`docker-quickstart.sh` 会创建或更新 `.env`，把 `MNEMONAS_UID`/`MNEMONAS_GID` 设置为当前宿主机用户，创建 `MNEMONAS_DATA_DIR`，运行 Docker 预检，并在 `--start` 时执行 `docker compose up -d --build`。如果 8080 已被占用，可运行 `./scripts/docker-quickstart.sh --port 8888 --start`。首次启动会在数据目录中自动生成持久化配置；Web 登录初始密码在 `<MNEMONAS_DATA_DIR>/.mnemonas/initial-password.txt`。发布镜像公开后的使用方式见 [Docker 部署指南](docs/docker-deployment.md)。
+仓库自带的 `docker-compose.yml` 默认从当前源码构建 `mnemonas:local` 镜像，不要求宿主机安装 Go/Rust/Node.js，但需要能拉取 Docker 基础镜像。Dockerfile 使用 BuildKit 缓存和较小的 Alpine Go builder，弱网环境下重试构建不会从零下载所有依赖。`docker-quickstart.sh` 会创建或更新 `.env`，把 `MNEMONAS_UID`/`MNEMONAS_GID` 设置为当前宿主机用户，创建 `MNEMONAS_DATA_DIR`，运行 Docker 预检，并在 `--start` 时按 `MNEMONAS_IMAGE` 选择启动方式：本地镜像执行源码构建，发布镜像使用 `docker compose up -d --pull missing --no-build`。GitHub Releases 的二进制归档会附带 `docker-compose.yml` 和 `.env.example`，归档内模板会把 `MNEMONAS_IMAGE` 预设为同一 release tag 的 GHCR 镜像。如果 8080 已被占用，可运行 `./scripts/docker-quickstart.sh --port 8888 --start`。首次启动会在数据目录中自动生成持久化配置；Web 登录初始密码在 `<MNEMONAS_DATA_DIR>/.mnemonas/initial-password.txt`。发布镜像使用方式见 [Docker 部署指南](docs/docker-deployment.md)。
 
 ### 二进制安装
 

@@ -136,6 +136,75 @@ run_start_test() {
 			--data-dir "$data_dir" > "$case_dir/out.log"
 
 	assert_file_contains "$capture_dir/docker.args" "compose -f $repo_dir/docker-compose.yml --env-file $repo_dir/.env up -d"
+	assert_file_contains "$capture_dir/docker.args" "--no-build"
+	assert_file_not_contains "$capture_dir/docker.args" "--build"
+}
+
+run_start_release_image_test() {
+	local case_dir="$TMP_ROOT/start-release-image"
+	local repo_dir="$case_dir/repo"
+	local data_dir="$case_dir/data"
+	local capture_dir="$case_dir/capture"
+	local fake_bin="$case_dir/bin"
+	local quickstart="$REPO_ROOT/scripts/docker-quickstart.sh"
+	mkdir -p "$capture_dir" "$fake_bin"
+	make_repo_case "$repo_dir"
+	cat > "$repo_dir/.env" <<EOF
+MNEMONAS_IMAGE=ghcr.io/seanbao/mnemonas:v1.2.3
+MNEMONAS_UID=999
+MNEMONAS_GID=999
+MNEMONAS_HTTP_PORT=18082
+MNEMONAS_DATA_DIR=$data_dir
+EOF
+	write_executable "$fake_bin/docker" \
+		'#!/usr/bin/env bash' \
+		'set -euo pipefail' \
+		'printf "%s\n" "$*" > "$CAPTURE_DIR/docker.args"'
+
+	CAPTURE_DIR="$capture_dir" \
+		REPO_ROOT="$repo_dir" \
+		PATH="$fake_bin:$PATH" \
+		bash "$quickstart" \
+			--start \
+			--skip-preflight > "$case_dir/out.log"
+
+	assert_file_contains "$repo_dir/.env" "MNEMONAS_IMAGE=ghcr.io/seanbao/mnemonas:v1.2.3"
+	assert_file_contains "$capture_dir/docker.args" "compose -f $repo_dir/docker-compose.yml --env-file $repo_dir/.env up -d"
+	assert_file_contains "$capture_dir/docker.args" "--pull missing --no-build"
+	assert_file_not_contains "$capture_dir/docker.args" "--build"
+}
+
+run_start_release_template_test() {
+	local case_dir="$TMP_ROOT/start-release-template"
+	local repo_dir="$case_dir/repo"
+	local data_dir="$case_dir/data"
+	local capture_dir="$case_dir/capture"
+	local fake_bin="$case_dir/bin"
+	local quickstart="$REPO_ROOT/scripts/docker-quickstart.sh"
+	mkdir -p "$capture_dir" "$fake_bin"
+	make_repo_case "$repo_dir"
+	awk '
+		/^MNEMONAS_IMAGE=/ { print "MNEMONAS_IMAGE=ghcr.io/seanbao/mnemonas:1.2.3"; next }
+		{ print }
+	' "$repo_dir/.env.example" > "$repo_dir/.env.example.tmp"
+	mv "$repo_dir/.env.example.tmp" "$repo_dir/.env.example"
+	write_executable "$fake_bin/docker" \
+		'#!/usr/bin/env bash' \
+		'set -euo pipefail' \
+		'printf "%s\n" "$*" > "$CAPTURE_DIR/docker.args"'
+
+	CAPTURE_DIR="$capture_dir" \
+		REPO_ROOT="$repo_dir" \
+		PATH="$fake_bin:$PATH" \
+		bash "$quickstart" \
+			--start \
+			--skip-preflight \
+			--port 18083 \
+			--data-dir "$data_dir" > "$case_dir/out.log"
+
+	assert_file_contains "$repo_dir/.env" "MNEMONAS_IMAGE=ghcr.io/seanbao/mnemonas:1.2.3"
+	assert_file_contains "$capture_dir/docker.args" "compose -f $repo_dir/docker-compose.yml --env-file $repo_dir/.env up -d"
+	assert_file_contains "$capture_dir/docker.args" "--pull missing --no-build"
 	assert_file_not_contains "$capture_dir/docker.args" "--build"
 }
 
@@ -330,6 +399,8 @@ run_env_symlink_test() {
 run_prepare_test
 run_existing_env_test
 run_start_test
+run_start_release_image_test
+run_start_release_template_test
 run_invalid_data_dir_test
 run_protected_data_dir_test
 run_data_dir_traversal_test

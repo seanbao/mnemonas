@@ -93,7 +93,7 @@ See [Linux/systemd deployment](docs/linux-systemd-deployment.en.md).
 
 ### Docker Compose
 
-Docker Engine, Compose v2, and Buildx are required. Verify `docker compose version` and `docker buildx version` first.
+Docker Engine and Compose v2 are required. Local source builds also require the Buildx plugin. Verify `docker compose version` first, and verify `docker buildx version` when building from source.
 
 ```bash
 git clone https://github.com/seanbao/mnemonas.git
@@ -105,7 +105,7 @@ cd mnemonas
 # http://localhost:8080
 ```
 
-The bundled `docker-compose.yml` builds `mnemonas:local` from source. The host does not need Go, Rust, or Node.js, but it must be able to pull Docker base images. The quickstart script creates or updates `.env`, writes the current host UID/GID, creates `MNEMONAS_DATA_DIR`, runs Docker preflight checks, and starts the service with `docker compose up -d --build`.
+The bundled `docker-compose.yml` builds `mnemonas:local` from source by default. The host does not need Go, Rust, or Node.js, but it must be able to pull Docker base images. The quickstart script creates or updates `.env`, writes the current host UID/GID, creates `MNEMONAS_DATA_DIR`, runs Docker preflight checks, and selects the start mode from `MNEMONAS_IMAGE`: local images use a source build, while release image tags use `docker compose up -d --pull missing --no-build`. Binary archives from GitHub Releases include `docker-compose.yml` and `.env.example`, and the packaged template presets `MNEMONAS_IMAGE` to the GHCR image for the same release tag.
 
 If port 8080 is already used:
 
@@ -113,7 +113,7 @@ If port 8080 is already used:
 ./scripts/docker-quickstart.sh --port 8888 --start
 ```
 
-On first startup, MnemoNAS creates persistent config in the data directory. The Web login initial password is stored at `<MNEMONAS_DATA_DIR>/.mnemonas/initial-password.txt`. Release image usage is documented in the [Docker deployment guide](docs/docker-deployment.en.md) after public images are available.
+On first startup, MnemoNAS creates persistent config in the data directory. The Web login initial password is stored at `<MNEMONAS_DATA_DIR>/.mnemonas/initial-password.txt`. Release image usage is documented in the [Docker deployment guide](docs/docker-deployment.en.md).
 
 ### Manual Binary Run
 

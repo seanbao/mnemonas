@@ -130,6 +130,47 @@ run_refuse_traversal_storage_test() {
 	assert_file_contains "$case_dir/out.log" "MNEMONAS_STORAGE_ROOT must not contain '..' path segments"
 }
 
+run_refuse_relative_storage_test() {
+	local case_dir="$TMP_ROOT/refuse-relative-storage"
+	mkdir -p "$case_dir"
+
+	run_expect_failure "$case_dir/out.log" env \
+		MNEMONAS_STORAGE_ROOT="relative-storage" \
+		ALLOW_REAL_STORAGE=1 \
+		bash "$REPO_ROOT/scripts/benchmark.sh" "http://127.0.0.1:9"
+
+	assert_file_contains "$case_dir/out.log" "MNEMONAS_STORAGE_ROOT must be an absolute path"
+}
+
+run_refuse_protected_storage_with_override_test() {
+	local case_dir="$TMP_ROOT/refuse-protected-storage"
+	mkdir -p "$case_dir"
+
+	run_expect_failure "$case_dir/out.log" env \
+		MNEMONAS_STORAGE_ROOT="/tmp" \
+		ALLOW_REAL_STORAGE=1 \
+		bash "$REPO_ROOT/scripts/benchmark.sh" "http://127.0.0.1:9"
+
+	assert_file_contains "$case_dir/out.log" "MNEMONAS_STORAGE_ROOT points at a protected system directory"
+}
+
+run_refuse_symlink_storage_test() {
+	local case_dir="$TMP_ROOT/refuse-symlink-storage"
+	local target_dir="$case_dir/target"
+	local link_dir="$case_dir/link"
+	mkdir -p "$target_dir/files/benchmark-test"
+	printf 'keep\n' > "$target_dir/files/benchmark-test/sentinel.txt"
+	ln -s "$target_dir" "$link_dir"
+
+	run_expect_failure "$case_dir/out.log" env \
+		HOME="$case_dir/home" \
+		MNEMONAS_STORAGE_ROOT="$link_dir" \
+		bash "$REPO_ROOT/scripts/benchmark.sh" "http://127.0.0.1:9"
+
+	assert_file_contains "$case_dir/out.log" "MNEMONAS_STORAGE_ROOT must not contain symlink path components"
+	assert_exists "$target_dir/files/benchmark-test/sentinel.txt"
+}
+
 run_refuse_traversal_isolated_root_test() {
 	local case_dir="$TMP_ROOT/refuse-traversal-isolated-root"
 	mkdir -p "$case_dir"
@@ -139,6 +180,21 @@ run_refuse_traversal_isolated_root_test() {
 		bash "$REPO_ROOT/scripts/run-benchmark-isolated.sh"
 
 	assert_file_contains "$case_dir/out.log" "MNEMONAS_BENCH_ROOT must not contain '..' path segments"
+}
+
+run_refuse_symlink_isolated_root_test() {
+	local case_dir="$TMP_ROOT/refuse-symlink-isolated-root"
+	local target_dir="$case_dir/target"
+	local link_dir="$case_dir/link"
+	mkdir -p "$target_dir"
+	ln -s "$target_dir" "$link_dir"
+
+	run_expect_failure "$case_dir/out.log" env \
+		MNEMONAS_BENCH_ROOT="$link_dir" \
+		bash "$REPO_ROOT/scripts/run-benchmark-isolated.sh"
+
+	assert_file_contains "$case_dir/out.log" "MNEMONAS_BENCH_ROOT must not contain symlink path components"
+	assert_not_exists "$target_dir/backend"
 }
 
 run_refuse_invalid_isolated_addr_test() {
@@ -198,7 +254,11 @@ run_missing_storage_root_test
 run_refuse_invalid_base_url_test
 run_refuse_unisolated_storage_test
 run_refuse_traversal_storage_test
+run_refuse_relative_storage_test
+run_refuse_protected_storage_with_override_test
+run_refuse_symlink_storage_test
 run_refuse_traversal_isolated_root_test
+run_refuse_symlink_isolated_root_test
 run_refuse_invalid_isolated_addr_test
 run_refuse_invalid_isolated_ready_attempts_test
 run_refuse_default_personal_storage_test
