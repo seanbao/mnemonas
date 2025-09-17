@@ -1,5 +1,6 @@
 const API_BASE = '/api/v1'
 
+import { readStructuredJsonErrorDetails } from '@/lib/jsonErrorResponse'
 import { normalizeUserHomeDir } from '@/lib/utils'
 
 export interface User {
@@ -65,6 +66,10 @@ export interface LoginActionResult extends AuthActionResult {
   user: User
 }
 
+export interface AuthRequestOptions {
+  signal?: AbortSignal
+}
+
 export interface AuthClearedDetail {
   message?: string
   reason?: 'expired' | 'disabled' | 'missing'
@@ -98,9 +103,20 @@ const USER_KEY = 'mnemonas_user'
 const SESSION_MARKER_KEY = 'mnemonas_session'
 const COOKIE_SESSION_HEADER = 'X-MnemoNAS-Session-Mode'
 const COOKIE_SESSION_VALUE = 'cookie'
+const INVALID_AUTH_RESPONSE_MESSAGE = '登录响应无效'
+const INVALID_USER_PAYLOAD_MESSAGE = '用户数据无效'
 export const AUTH_CLEARED_EVENT = 'mnemonas:auth-cleared'
 let refreshPromise: Promise<boolean> | null = null
 let isDownloadSessionReady = true
+let legacyAuthRequestCount = 0
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof DOMException && error.name === 'AbortError'
+}
+
+function isRequestSignalAborted(signal: RequestInit['signal']): boolean {
+  return signal instanceof AbortSignal && signal.aborted
+}
 
 function getSessionEndedMessage(responseMessage?: string): string {
   return responseMessage || '账户已被禁用，请联系管理员'
@@ -126,6 +142,10 @@ function hasBrowserSessionState(): boolean {
 }
 
 function hasLegacyTokenState(): boolean {
+  return legacyAuthRequestCount > 0 || hasLegacyTokenStorage()
+}
+
+function hasLegacyTokenStorage(): boolean {
   return Boolean(
     localStorage.getItem(TOKEN_KEY) ||
     localStorage.getItem(REFRESH_TOKEN_KEY)
@@ -138,7 +158,7 @@ function isUserRole(role: unknown): role is User['role'] {
 
 function parseAuthSessionData(data: LoginResponse | RefreshResponse | undefined): AuthSessionData {
   if (!data || data.user == null) {
-    throw new Error('invalid auth session data')
+    throw new Error(INVALID_AUTH_RESPONSE_MESSAGE)
   }
 
   return {
@@ -148,7 +168,7 @@ function parseAuthSessionData(data: LoginResponse | RefreshResponse | undefined)
 
 function readAuthSuccessData<T>(body: AuthApiResponse<T> | undefined): T {
   if (!body || body.success !== true || body.data === undefined) {
-    throw new Error('invalid auth response data')
+    throw new Error(INVALID_AUTH_RESPONSE_MESSAGE)
   }
 
   return body.data
@@ -161,7 +181,15 @@ function getAuthActionResult<T>(response: Response, body: AuthApiResponse<T> | u
   }
 }
 
-async function readAuthApiError(response: Response): Promise<AuthApiError | undefined> {
+async function readAuthApiError(response: Response, fallback = ''): Promise<AuthApiError | undefined> {
+  const structuredError = await readStructuredJsonErrorDetails(response, fallback)
+  if (structuredError) {
+    return {
+      code: structuredError.code,
+      message: structuredError.message,
+    }
+  }
+
   try {
     const bodySource = typeof response.clone === 'function' ? response.clone() : response
     const body: AuthApiResponse<never> = await bodySource.json()
@@ -246,7 +274,7 @@ function normalizeUser(user: ApiUser): User {
     homeDir.length === 0 ||
     (user.email !== undefined && typeof user.email !== 'string')
   ) {
-    throw new Error('invalid user payload')
+    throw new Error(INVALID_USER_PAYLOAD_MESSAGE)
   }
 
   const normalizedHomeDir = normalizeUserHomeDir(homeDir)
@@ -300,7 +328,12 @@ interface DownloadSessionResult {
   code?: string
 }
 
-async function syncDownloadSession(): Promise<DownloadSessionResult> {
+interface RefreshReplayRecoveryResult {
+  recovered: boolean
+  terminal: boolean
+}
+
+async function syncDownloadSession(options: AuthRequestOptions = {}): Promise<DownloadSessionResult> {
   const hadBrowserSessionState = hasBrowserSessionState()
   clearLegacyTokenStorage()
   if (!hadBrowserSessionState) {
@@ -312,6 +345,7 @@ async function syncDownloadSession(): Promise<DownloadSessionResult> {
     const response = await fetch(`${API_BASE}/auth/download-session`, {
       method: 'POST',
       credentials: 'same-origin',
+      ...(options.signal ? { signal: options.signal } : {}),
     })
 
     if (!response.ok) {
@@ -361,18 +395,21 @@ async function syncDownloadSession(): Promise<DownloadSessionResult> {
 
     isDownloadSessionReady = true
     return { ok: true }
-  } catch {
+  } catch (error) {
+    if (options.signal?.aborted || isAbortError(error)) {
+      throw error
+    }
     isDownloadSessionReady = false
     return { ok: false, message: getDownloadSessionSyncMessage() }
   }
 }
 
-export async function ensureDownloadSession(): Promise<DownloadSessionResult> {
+export async function ensureDownloadSession(options: AuthRequestOptions = {}): Promise<DownloadSessionResult> {
   if (!hasStoredAuthState()) {
     return { ok: true }
   }
 
-  return syncDownloadSession()
+  return syncDownloadSession(options)
 }
 
 // Auth header helper
@@ -403,30 +440,72 @@ function shouldRefreshToken(url: string, retryCount: number): boolean {
   return pathname !== `${API_BASE}/auth/login` && pathname !== `${API_BASE}/auth/refresh`
 }
 
-// Fetch with auth
-export async function authFetch(url: string, options: RequestInit = {}, retryCount = 0): Promise<Response> {
-  const hadAuthStateBeforeRequest = hasStoredAuthState()
-  const headers = mergeAuthHeaders(options.headers)
-  
-  const response = await fetch(url, {
-    ...options,
-    headers,
-    credentials: options.credentials ?? 'same-origin',
-  })
-  
-  // If unauthorized, try to refresh token
-  if (response.status === 401 && shouldRefreshToken(url, retryCount)) {
-    const refreshed = await tryRefreshToken(hadAuthStateBeforeRequest)
-    if (refreshed) {
-      return authFetch(url, options, retryCount + 1)
-    }
+async function shouldAttemptTokenRefresh(
+  response: Response,
+  url: string,
+  retryCount: number,
+  hadAuthState: boolean,
+): Promise<boolean> {
+  if (!shouldRefreshToken(url, retryCount)) {
+    return false
   }
 
-  await handleUnauthorizedSessionResponse(response)
+  if (refreshPromise) {
+    return true
+  }
 
-  await handleForbiddenSessionResponse(response)
-  
-  return response
+  if (hadAuthState) {
+    return true
+  }
+
+  const error = await readAuthApiError(response)
+  return error?.code === 'TOKEN_EXPIRED'
+}
+
+// Fetch with auth
+export async function authFetch(url: string, options: RequestInit = {}, retryCount = 0): Promise<Response> {
+  const hadLegacyAuthStateBeforeRequest = hasLegacyTokenStorage()
+  const hadAuthStateBeforeRequest = hasStoredAuthState()
+  if (hadLegacyAuthStateBeforeRequest) {
+    legacyAuthRequestCount += 1
+  }
+
+  try {
+    const headers = mergeAuthHeaders(options.headers)
+
+    const response = await fetch(url, {
+      ...options,
+      headers,
+      credentials: options.credentials ?? 'same-origin',
+    })
+
+    if (isRequestSignalAborted(options.signal)) {
+      return response
+    }
+
+    // If unauthorized, try to refresh token
+    const shouldRefresh = response.status === 401
+      && await shouldAttemptTokenRefresh(response, url, retryCount, hadAuthStateBeforeRequest)
+    if (shouldRefresh) {
+      const refreshed = await tryRefreshToken(hadAuthStateBeforeRequest)
+      if (refreshed) {
+        return authFetch(url, options, retryCount + 1)
+      }
+      if (hadAuthStateBeforeRequest) {
+        return response
+      }
+    }
+
+    await handleUnauthorizedSessionResponse(response)
+
+    await handleForbiddenSessionResponse(response)
+
+    return response
+  } finally {
+    if (hadLegacyAuthStateBeforeRequest) {
+      legacyAuthRequestCount = Math.max(0, legacyAuthRequestCount - 1)
+    }
+  }
 }
 
 export async function refreshAuthSession(): Promise<boolean> {
@@ -449,7 +528,17 @@ async function tryRefreshToken(hadAuthState = hasStoredAuthState()): Promise<boo
       })
 
       if (!response.ok) {
-        if (hadAuthState) {
+        const error = await readAuthApiError(response)
+        if (error?.code === 'TOKEN_REVOKED') {
+          const recovery = await recoverBrowserSessionAfterRefreshRevoked()
+          if (recovery.recovered) {
+            return true
+          }
+          if (!recovery.terminal) {
+            return false
+          }
+        }
+        if (hadAuthState && hasStoredAuthState()) {
           clearTokens()
         }
         return false
@@ -473,8 +562,35 @@ async function tryRefreshToken(hadAuthState = hasStoredAuthState()): Promise<boo
   return refreshPromise
 }
 
+async function recoverBrowserSessionAfterRefreshRevoked(): Promise<RefreshReplayRecoveryResult> {
+  try {
+    const response = await fetch(`${API_BASE}/auth/me`, {
+      credentials: 'same-origin',
+    })
+
+    if (!response.ok) {
+      if (response.status === 401 || response.status === 403) {
+        await handleUnauthorizedSessionResponse(response)
+        await handleForbiddenSessionResponse(response)
+        return { recovered: false, terminal: true }
+      }
+      return { recovered: false, terminal: false }
+    }
+
+    const body: AuthApiResponse<{ user: ApiUser }> = await response.json()
+    const data = readAuthSuccessData(body)
+    const user = normalizeUser(data.user)
+    storeSessionUser(user)
+
+    const downloadSession = await syncDownloadSession()
+    return { recovered: !downloadSession.authCleared, terminal: Boolean(downloadSession.authCleared) }
+  } catch {
+    return { recovered: false, terminal: false }
+  }
+}
+
 // Login
-export async function login(username: string, password: string): Promise<LoginActionResult> {
+export async function login(username: string, password: string, options: AuthRequestOptions = {}): Promise<LoginActionResult> {
   const response = await fetch(`${API_BASE}/auth/login`, {
     method: 'POST',
     headers: {
@@ -483,16 +599,15 @@ export async function login(username: string, password: string): Promise<LoginAc
     },
     credentials: 'same-origin',
     body: JSON.stringify({ username, password }),
+    ...(options.signal ? { signal: options.signal } : {}),
   })
   
   if (!response.ok) {
     let message = '登录失败'
     let code: string | undefined
-    try {
-      const body: AuthApiResponse<never> = await response.json()
-      if (body.error?.message) message = body.error.message
-      if (body.error?.code) code = body.error.code
-    } catch { /* ignore */ }
+    const error = await readAuthApiError(response, message)
+    if (error?.message) message = error.message
+    if (error?.code) code = error.code
     throw new AuthError(message, response.status, code)
   }
   
@@ -502,11 +617,11 @@ export async function login(username: string, password: string): Promise<LoginAc
     body = await response.json()
     data = parseAuthSessionData(readAuthSuccessData(body))
   } catch {
-    throw new AuthError('登录响应无效', response.status)
+    throw new AuthError(INVALID_AUTH_RESPONSE_MESSAGE, response.status)
   }
 
   storeSessionUser(data.user)
-  const downloadSession = await syncDownloadSession()
+  const downloadSession = await syncDownloadSession(options)
   if (downloadSession.authCleared) {
     throw new AuthError(
       downloadSession.message ?? getMissingBrowserSessionMessage(),
@@ -540,13 +655,9 @@ export async function logout(): Promise<AuthActionResult> {
   if (!response.ok) {
     let message = '退出登录失败'
     let code: string | undefined
-    try {
-      const body: AuthApiResponse<never> = await response.json()
-      if (body.error?.message) message = body.error.message
-      if (body.error?.code) code = body.error.code
-    } catch {
-      // Keep the generic logout error when the response body is invalid.
-    }
+    const error = await readAuthApiError(response, message)
+    if (error?.message) message = error.message
+    if (error?.code) code = error.code
     throw new AuthError(message, response.status, code)
   }
 
@@ -563,8 +674,11 @@ export async function logout(): Promise<AuthActionResult> {
 }
 
 // Get current user
-export async function getCurrentUser(): Promise<User | null> {
-  const response = await authFetch(`${API_BASE}/auth/me`)
+export async function getCurrentUser(options: AuthRequestOptions = {}): Promise<User | null> {
+  const response = await authFetch(
+    `${API_BASE}/auth/me`,
+    options.signal ? { signal: options.signal } : {},
+  )
   
   if (!response.ok) {
     if (response.status === 401 || response.status === 403) {
@@ -573,17 +687,9 @@ export async function getCurrentUser(): Promise<User | null> {
 
     let message = '获取当前用户失败'
     let code: string | undefined
-    try {
-      const body: AuthApiResponse<never> = await response.json()
-      if (body.error?.message) {
-        message = body.error.message
-      }
-      if (body.error?.code) {
-        code = body.error.code
-      }
-    } catch {
-      // Keep the generic error when the unavailable response body is invalid.
-    }
+    const error = await readAuthApiError(response, message)
+    if (error?.message) message = error.message
+    if (error?.code) code = error.code
 
     throw new AuthError(message, response.status, code)
   }
@@ -613,7 +719,7 @@ export async function getCurrentUser(): Promise<User | null> {
   }
 
   storeSessionUser(user)
-  const downloadSession = await syncDownloadSession()
+  const downloadSession = await syncDownloadSession(options)
   if (downloadSession.authCleared) {
     return null
   }

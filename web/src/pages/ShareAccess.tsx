@@ -27,10 +27,15 @@ import {
 import { EmptyState } from '@/components/ui/EmptyState'
 import { FileIcon } from '@/components/ui/FileIcon'
 import { formatBytes, formatDate } from '@/lib/utils'
+import { GENERIC_LOAD_ERROR_DESCRIPTION, getUserFacingErrorDescription } from '@/lib/apiMessages'
 import { getFolderPathAfterShareAuth } from './shareAccessUtils'
 
 function hasAuthorizedShareContent(info: PublicShareInfo): boolean {
   return info.file_name !== undefined || info.file_size !== undefined || info.folder_items !== undefined
+}
+
+function getShareArchiveFilename(name: string | undefined): string {
+  return `${name || 'share'}.zip`
 }
 
 function getGoneSharePresentation(error: ShareError): { title: string; description: string } | null {
@@ -51,7 +56,7 @@ function getGoneSharePresentation(error: ShareError): { title: string; descripti
   if (error.isExpired) {
     return {
       title: '分享已失效',
-      description: error.code === 'SHARE_EXPIRED' ? '该分享已过期，当前不可访问。' : error.message,
+      description: error.code === 'SHARE_EXPIRED' ? '该分享已过期，当前不可访问。' : '该分享已失效，当前不可访问。',
     }
   }
 
@@ -64,6 +69,13 @@ function getShareAccessErrorPresentation(error: unknown): { title: string; descr
       return {
         title: '分享功能已关闭',
         description: '当前服务已关闭分享功能，公开分享链接暂不可访问。',
+      }
+    }
+
+    if (error.isNotFound) {
+      return {
+        title: '分享不存在或已失效',
+        description: '该分享链接不存在、已被移除，或当前不可访问。',
       }
     }
 
@@ -80,9 +92,16 @@ function getShareAccessErrorPresentation(error: unknown): { title: string; descr
     }
   }
 
+  if (error instanceof Error && error.message === '无效的分享链接') {
+    return {
+      title: '无法访问分享',
+      description: '无效的分享链接',
+    }
+  }
+
   return {
     title: '无法访问分享',
-    description: error instanceof Error ? error.message : '加载分享信息失败',
+    description: getUserFacingErrorDescription(error, GENERIC_LOAD_ERROR_DESCRIPTION),
   }
 }
 
@@ -96,7 +115,7 @@ function getShareListErrorPresentation(error: unknown): { title: string; descrip
 
   return {
     title: '加载文件夹失败',
-    description: error instanceof Error ? error.message : '请稍后重试',
+    description: getUserFacingErrorDescription(error, GENERIC_LOAD_ERROR_DESCRIPTION),
   }
 }
 
@@ -139,7 +158,7 @@ function getShareActionErrorToast(
 
   return {
     title: titles.failure,
-    description: error instanceof Error ? error.message : '请稍后重试',
+    description: getUserFacingErrorDescription(error),
     color: 'danger',
   }
 }
@@ -159,15 +178,30 @@ export function ShareAccessPage() {
   const [listError, setListError] = useState<unknown | null>(null)
   const shareInfoRequestRef = useRef(0)
   const folderListRequestRef = useRef(0)
+  const shareInfoAbortControllerRef = useRef<AbortController | null>(null)
+  const folderListAbortControllerRef = useRef<AbortController | null>(null)
+  const downloadAbortControllerRef = useRef<AbortController | null>(null)
   const errorPresentation = getShareAccessErrorPresentation(error)
   const listErrorPresentation = getShareListErrorPresentation(listError)
 
   useEffect(() => () => {
     shareInfoRequestRef.current += 1
     folderListRequestRef.current += 1
+    shareInfoAbortControllerRef.current?.abort()
+    folderListAbortControllerRef.current?.abort()
+    downloadAbortControllerRef.current?.abort()
+    shareInfoAbortControllerRef.current = null
+    folderListAbortControllerRef.current = null
+    downloadAbortControllerRef.current = null
   }, [])
 
   const loadShareInfo = useCallback(async (options?: { notify?: boolean }) => {
+    shareInfoAbortControllerRef.current?.abort()
+    folderListAbortControllerRef.current?.abort()
+    downloadAbortControllerRef.current?.abort()
+    shareInfoAbortControllerRef.current = null
+    folderListAbortControllerRef.current = null
+    downloadAbortControllerRef.current = null
     if (!id) {
       setError(new Error('无效的分享链接'))
       setIsLoading(false)
@@ -180,6 +214,9 @@ export function ShareAccessPage() {
     const requestId = shareInfoRequestRef.current + 1
     shareInfoRequestRef.current = requestId
     folderListRequestRef.current += 1
+    const controller = new AbortController()
+    shareInfoAbortControllerRef.current = controller
+    setIsVerifying(false)
     setIsLoading(true)
     setError(null)
     setNeedsPassword(false)
@@ -189,7 +226,7 @@ export function ShareAccessPage() {
     setListError(null)
     
     try {
-      const info = await getPublicShare(id)
+      const info = await getPublicShare(id, { signal: controller.signal })
       if (requestId !== shareInfoRequestRef.current) {
         return
       }
@@ -209,6 +246,9 @@ export function ShareAccessPage() {
         addToast({ title: '分享信息已刷新', color: 'success' })
       }
     } catch (err) {
+      if (controller.signal.aborted) {
+        return
+      }
       if (requestId !== shareInfoRequestRef.current) {
         return
       }
@@ -224,6 +264,9 @@ export function ShareAccessPage() {
         }))
       }
     } finally {
+      if (shareInfoAbortControllerRef.current === controller) {
+        shareInfoAbortControllerRef.current = null
+      }
       if (requestId === shareInfoRequestRef.current) {
         setIsLoading(false)
       }
@@ -253,9 +296,16 @@ export function ShareAccessPage() {
 
     const requestId = shareInfoRequestRef.current + 1
     shareInfoRequestRef.current = requestId
+    shareInfoAbortControllerRef.current?.abort()
+    folderListAbortControllerRef.current?.abort()
+    downloadAbortControllerRef.current?.abort()
+    folderListAbortControllerRef.current = null
+    downloadAbortControllerRef.current = null
+    const controller = new AbortController()
+    shareInfoAbortControllerRef.current = controller
     setIsVerifying(true)
     try {
-      const info = await accessShareWithPassword(id, password)
+      const info = await accessShareWithPassword(id, password, { signal: controller.signal })
       if (requestId !== shareInfoRequestRef.current) {
         return
       }
@@ -267,6 +317,9 @@ export function ShareAccessPage() {
       setNeedsPassword(false)
       setPassword('')
     } catch (err) {
+      if (controller.signal.aborted) {
+        return
+      }
       if (requestId !== shareInfoRequestRef.current) {
         return
       }
@@ -279,6 +332,9 @@ export function ShareAccessPage() {
         }))
       }
     } finally {
+      if (shareInfoAbortControllerRef.current === controller) {
+        shareInfoAbortControllerRef.current = null
+      }
       if (requestId === shareInfoRequestRef.current) {
         setIsVerifying(false)
       }
@@ -289,10 +345,24 @@ export function ShareAccessPage() {
     if (!id) return
 
     const requestId = shareInfoRequestRef.current
+    downloadAbortControllerRef.current?.abort()
+    const controller = new AbortController()
+    downloadAbortControllerRef.current = controller
 
     try {
-      await downloadShare(id, { filename: shareInfo?.file_name })
+      if (shareInfo?.type === 'folder') {
+        await downloadShare(id, {
+          archive: 'zip',
+          filename: getShareArchiveFilename(shareInfo.file_name),
+          signal: controller.signal,
+        })
+      } else {
+        await downloadShare(id, { filename: shareInfo?.file_name, signal: controller.signal })
+      }
     } catch (err) {
+      if (controller.signal.aborted) {
+        return
+      }
       if (requestId !== shareInfoRequestRef.current) {
         return
       }
@@ -307,6 +377,10 @@ export function ShareAccessPage() {
         unavailable: '下载暂不可用',
         failure: '下载失败',
       }))
+    } finally {
+      if (downloadAbortControllerRef.current === controller) {
+        downloadAbortControllerRef.current = null
+      }
     }
   }
 
@@ -315,9 +389,24 @@ export function ShareAccessPage() {
 
     const requestId = shareInfoRequestRef.current
     const item = folderItems.find((folderItem) => folderItem.path === itemPath)
+    downloadAbortControllerRef.current?.abort()
+    const controller = new AbortController()
+    downloadAbortControllerRef.current = controller
     try {
-      await downloadShare(id, { filePath: itemPath, filename: item?.name })
+      if (item?.is_dir) {
+        await downloadShare(id, {
+          filePath: itemPath,
+          filename: getShareArchiveFilename(item.name),
+          archive: 'zip',
+          signal: controller.signal,
+        })
+      } else {
+        await downloadShare(id, { filePath: itemPath, filename: item?.name, signal: controller.signal })
+      }
     } catch (err) {
+      if (controller.signal.aborted) {
+        return
+      }
       if (requestId !== shareInfoRequestRef.current) {
         return
       }
@@ -332,6 +421,10 @@ export function ShareAccessPage() {
         unavailable: '下载暂不可用',
         failure: '下载失败',
       }))
+    } finally {
+      if (downloadAbortControllerRef.current === controller) {
+        downloadAbortControllerRef.current = null
+      }
     }
   }
 
@@ -348,22 +441,30 @@ export function ShareAccessPage() {
   }
 
   const loadFolderItems = useCallback(async () => {
+    folderListAbortControllerRef.current?.abort()
+    folderListAbortControllerRef.current = null
     if (!id || !shareInfo || shareInfo.type !== 'folder' || !isAuthenticated) return
 
     const requestId = folderListRequestRef.current + 1
     folderListRequestRef.current = requestId
+    const controller = new AbortController()
+    folderListAbortControllerRef.current = controller
     setIsListing(true)
     setListError(null)
     setFolderItems([])
     try {
       const data = await getPublicShareItems(id, {
         path: folderPath || undefined,
+        signal: controller.signal,
       })
       if (requestId !== folderListRequestRef.current) {
         return
       }
       setFolderItems(data.items)
     } catch (err) {
+      if (controller.signal.aborted) {
+        return
+      }
       if (requestId !== folderListRequestRef.current) {
         return
       }
@@ -376,6 +477,9 @@ export function ShareAccessPage() {
         setListError(err)
       }
     } finally {
+      if (folderListAbortControllerRef.current === controller) {
+        folderListAbortControllerRef.current = null
+      }
       if (requestId === folderListRequestRef.current) {
         setIsListing(false)
       }
@@ -549,16 +653,26 @@ export function ShareAccessPage() {
                       {folderPath ? `/${folderPath}` : '根目录'}
                     </span>
                   </div>
-                  {folderPath && (
+                  <div className="flex flex-wrap items-center gap-2">
                     <Button
                       size="sm"
                       variant="flat"
-                      onPress={handleNavigateUp}
-                      startContent={<ChevronLeft size={16} />}
+                      onPress={handleDownload}
+                      startContent={<Download size={16} />}
                     >
-                      返回上级
+                      下载为 ZIP
                     </Button>
-                  )}
+                    {folderPath && (
+                      <Button
+                        size="sm"
+                        variant="flat"
+                        onPress={handleNavigateUp}
+                        startContent={<ChevronLeft size={16} />}
+                      >
+                        返回上级
+                      </Button>
+                    )}
+                  </div>
                 </div>
 
                 {isListing && (
@@ -607,16 +721,14 @@ export function ShareAccessPage() {
                             </div>
                           </div>
                         </button>
-                        {!item.is_dir && (
-                          <Button
-                            size="sm"
-                            variant="flat"
-                            onPress={() => handleDownloadItem(item.path)}
-                            startContent={<Download size={16} />}
-                          >
-                            下载
-                          </Button>
-                        )}
+                        <Button
+                          size="sm"
+                          variant="flat"
+                          onPress={() => handleDownloadItem(item.path)}
+                          startContent={<Download size={16} />}
+                        >
+                          {item.is_dir ? '下载为 ZIP' : '下载'}
+                        </Button>
                       </div>
                     ))}
                   </div>

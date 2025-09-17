@@ -80,7 +80,33 @@ describe('ImagePreview', () => {
     await renderImage('/documents/photo.jpg', 'photo.jpg')
 
     await waitFor(() => {
-      expect(mockAuthFetch).toHaveBeenCalledWith('/api/v1/download/documents/photo.jpg')
+      expect(mockAuthFetch).toHaveBeenCalledWith('/api/v1/download/documents/photo.jpg', expect.anything())
+    })
+  })
+
+  it('passes an abort signal and cancels the pending image request when the path changes', async () => {
+    let firstSignal: AbortSignal | undefined
+    const firstRequest = new Promise<Response>(() => {})
+    mockAuthFetch
+      .mockImplementationOnce((_url, options) => {
+        firstSignal = options?.signal
+        return firstRequest
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        blob: () => Promise.resolve(new Blob(['second'], { type: 'image/png' })),
+      } as Response)
+
+    const { rerender } = render(<ImagePreview path="/first.png" filename="first.png" />)
+
+    await waitFor(() => {
+      expect(firstSignal).toBeInstanceOf(AbortSignal)
+    })
+
+    rerender(<ImagePreview path="/second.png" filename="second.png" />)
+
+    await waitFor(() => {
+      expect(firstSignal?.aborted).toBe(true)
     })
   })
 
@@ -96,6 +122,70 @@ describe('ImagePreview', () => {
     await waitFor(() => {
       expect(screen.getByText('无法加载图片')).toBeInTheDocument()
     })
+  })
+
+  it('rejects successful non-image JSON responses without reading them as preview errors', async () => {
+    const json = vi.fn(() => Promise.resolve({
+      success: false,
+      error: {
+        code: 'FILESYSTEM_UNAVAILABLE',
+        message: 'user JSON document content',
+      },
+    }))
+    const blob = vi.fn(() => Promise.resolve(new Blob(['{}'], { type: 'application/json' })))
+
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      headers: new Headers({ 'Content-Type': 'application/json' }),
+      clone: () => ({ json }),
+      blob,
+    } as unknown as Response)
+
+    await renderImage('/unavailable.png', 'unavailable.png')
+
+    await waitFor(() => {
+      expect(screen.getByText('无法加载图片')).toBeInTheDocument()
+    })
+    expect(json).not.toHaveBeenCalled()
+    expect(blob).not.toHaveBeenCalled()
+    expect(URL.createObjectURL).not.toHaveBeenCalled()
+  })
+
+  it('uses a stable message for structured JSON errors from non-OK preview responses', async () => {
+    const json = vi.fn(() => Promise.resolve({
+      success: false,
+      error: {
+        code: 'FILESYSTEM_UNAVAILABLE',
+        message: 'preview storage unavailable',
+      },
+    }))
+
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 503,
+      headers: new Headers({ 'Content-Type': 'application/json' }),
+      clone: () => ({ json }),
+    } as unknown as Response)
+
+    await renderImage('/unavailable.png', 'unavailable.png')
+
+    await waitFor(() => {
+      expect(screen.getByText('无法加载图片')).toBeInTheDocument()
+    })
+    expect(json).toHaveBeenCalled()
+    expect(screen.queryByText('preview storage unavailable')).not.toBeInTheDocument()
+    expect(URL.createObjectURL).not.toHaveBeenCalled()
+  })
+
+  it('does not expose raw request errors when image loading rejects', async () => {
+    mockAuthFetch.mockRejectedValueOnce(new Error('preview storage unavailable'))
+
+    await renderImage('/unavailable.png', 'unavailable.png')
+
+    await waitFor(() => {
+      expect(screen.getByText('无法加载图片')).toBeInTheDocument()
+    })
+    expect(screen.queryByText('preview storage unavailable')).not.toBeInTheDocument()
   })
 
   it('hides spinner after image loads', async () => {

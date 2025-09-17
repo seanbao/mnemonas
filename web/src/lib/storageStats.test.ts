@@ -4,6 +4,7 @@ import {
   areStorageStatsAvailable,
   clampUsagePercent,
   formatFilesystemType,
+  getFilesystemIntegrityStatus,
   formatUsagePercent,
   getDiskSpaceStatus,
 } from './storageStats'
@@ -61,6 +62,15 @@ describe('storage stats helpers', () => {
     expect(formatFilesystemType('fuse.sshfs')).toBe('fuse.sshfs')
     expect(formatFilesystemType('unknown')).toBe('未知')
     expect(formatFilesystemType(undefined)).toBe('未知')
+  })
+
+  it('classifies filesystem integrity support for storage safety hints', () => {
+    expect(getFilesystemIntegrityStatus('zfs', true).level).toBe('supported')
+    expect(getFilesystemIntegrityStatus('unknown', false).level).toBe('unknown')
+    expect(getFilesystemIntegrityStatus('tmpfs', false).level).toBe('volatile')
+    expect(getFilesystemIntegrityStatus('nfs4', false).level).toBe('remote')
+    expect(getFilesystemIntegrityStatus('fuse.sshfs', false).level).toBe('remote')
+    expect(getFilesystemIntegrityStatus('ext4', false).level).toBe('limited')
   })
 
   it('classifies disk space status from usage and available capacity', () => {

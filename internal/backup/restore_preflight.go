@@ -2,10 +2,11 @@ package backup
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 
 	"github.com/seanbao/mnemonas/internal/config"
 )
@@ -63,14 +64,14 @@ func buildRestorePreflight(job config.BackupJobConfig, targetPath string, result
 	}
 
 	addCheck("target_scope", RestorePreflightPassed, "目标路径隔离", "目标目录位于当前数据目录、备份来源和本地备份目标之外。")
-	addCheck("target_state", RestorePreflightPassed, "目标目录状态", "目标目录不存在或为空；恢复会先写入临时目录，再安装到目标路径。")
+	addCheck("target_state", RestorePreflightPassed, "目标目录状态", restoreTargetStatePreflightDetail(targetPath))
 	if result.FileCount == 0 {
 		addCheck("backup_content", RestorePreflightWarning, "备份内容", "预览未发现常规文件；请确认该备份目标确实包含可恢复数据。")
 	} else {
 		addCheck("backup_content", RestorePreflightPassed, "备份内容", fmt.Sprintf("预览发现 %d 个文件，预计恢复 %s。", result.FileCount, formatBytesForMessage(result.TotalBytes)))
 	}
 
-	if availableBytes, err := restoreAvailableBytesFunc(filepath.Dir(targetPath)); err != nil {
+	if availableBytes, err := restoreAvailableBytesFunc(restoreTargetCapacityProbePath(targetPath)); err != nil {
 		addCheck("target_capacity", RestorePreflightWarning, "目标容量", fmt.Sprintf("无法读取目标文件系统可用空间: %v", err))
 	} else if result.TotalBytes > 0 && availableBytes < result.TotalBytes {
 		addCheck("target_capacity", RestorePreflightFailed, "目标容量", fmt.Sprintf("目标文件系统可用空间 %s，小于预计恢复数据 %s。", formatBytesForMessage(availableBytes), formatBytesForMessage(result.TotalBytes)))
@@ -112,21 +113,26 @@ func buildRestorePreflight(job config.BackupJobConfig, targetPath string, result
 	return checks, warnings, cutover, rollback
 }
 
-func restoreAvailableBytes(path string) (int64, error) {
-	var stat syscall.Statfs_t
-	if err := syscall.Statfs(path, &stat); err != nil {
-		return 0, err
+func restoreTargetStatePreflightDetail(targetPath string) string {
+	info, err := os.Lstat(targetPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return "目标目录尚不存在；恢复会先写入临时目录，再安装到该路径。"
+		}
+		return "目标路径已通过安全校验；恢复执行前会再次确认目标状态。"
 	}
-	const maxInt64 = uint64(1<<63 - 1)
-	blockSize := uint64(stat.Bsize)
-	if blockSize > 0 && uint64(stat.Bavail) > maxInt64/blockSize {
-		return int64(maxInt64), nil
+	if info.IsDir() {
+		return "目标目录已存在且为空；恢复会先写入临时目录，再安装到该目录。"
 	}
-	available := uint64(stat.Bavail) * blockSize
-	if available > maxInt64 {
-		return int64(maxInt64), nil
+	return "目标路径已通过安全校验；恢复执行前会再次确认目标状态。"
+}
+
+func restoreTargetCapacityProbePath(targetPath string) string {
+	info, err := os.Lstat(targetPath)
+	if err == nil && info.IsDir() {
+		return targetPath
 	}
-	return int64(available), nil
+	return filepath.Dir(targetPath)
 }
 
 func firstFailedRestorePreflight(checks []RestorePreflightCheck) error {
@@ -138,7 +144,7 @@ func firstFailedRestorePreflight(checks []RestorePreflightCheck) error {
 		if detail == "" {
 			detail = check.Title
 		}
-		return fmt.Errorf("%w: restore preflight failed: %s", ErrUnsafePath, detail)
+		return invalidRestoreRequestErrorf("%w: restore preflight failed: %s", ErrUnsafePath, detail)
 	}
 	return nil
 }

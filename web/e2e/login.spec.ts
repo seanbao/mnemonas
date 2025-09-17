@@ -74,7 +74,7 @@ test.describe('登录页面', () => {
 
     expect(accessCookie).toMatchObject({ httpOnly: true, path: '/api/v1' })
     expect(refreshCookie).toMatchObject({ httpOnly: true, path: '/api/v1/auth/refresh' })
-    expect(downloadCookie).toMatchObject({ httpOnly: true, path: '/api/v1' })
+    expect(downloadCookie).toMatchObject({ httpOnly: true, path: '/api/v1', sameSite: 'Strict' })
   })
 
   test('视觉回归 - 登录页截图', async ({ page }) => {

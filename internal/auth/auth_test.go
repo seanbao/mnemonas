@@ -619,6 +619,58 @@ func TestUserStore(t *testing.T) {
 		}
 	})
 
+	t.Run("authenticate deletes initial password file after successful default admin login", func(t *testing.T) {
+		storeDir := t.TempDir()
+		usersFile := filepath.Join(storeDir, "users.json")
+		store, password, err := NewUserStore(usersFile)
+		if err != nil {
+			t.Fatalf("failed to create user store: %v", err)
+		}
+		passwordFile := filepath.Join(storeDir, "initial-password.txt")
+		if _, statErr := os.Stat(passwordFile); statErr != nil {
+			t.Fatalf("expected initial password file before login, got %v", statErr)
+		}
+
+		if _, err := store.Authenticate("admin", password); err != nil {
+			t.Fatalf("Authenticate(default admin) error: %v", err)
+		}
+		if _, statErr := os.Stat(passwordFile); !os.IsNotExist(statErr) {
+			t.Fatalf("expected initial password file to be deleted after login, got %v", statErr)
+		}
+	})
+
+	t.Run("authenticate keeps initial password file when default admin login persist fails hard", func(t *testing.T) {
+		storeDir := t.TempDir()
+		usersFile := filepath.Join(storeDir, "users.json")
+		store, password, err := NewUserStore(usersFile)
+		if err != nil {
+			t.Fatalf("failed to create user store: %v", err)
+		}
+		passwordFile := filepath.Join(storeDir, "initial-password.txt")
+		if _, statErr := os.Stat(passwordFile); statErr != nil {
+			t.Fatalf("expected initial password file before login, got %v", statErr)
+		}
+
+		originalWriter := userStoreWriter
+		userStoreWriter = func(path string, data []byte) error {
+			return errors.New("persist failed")
+		}
+		t.Cleanup(func() {
+			userStoreWriter = originalWriter
+		})
+
+		authUser, err := store.Authenticate("admin", password)
+		if err == nil || isAuthPersistenceWarning(err) {
+			t.Fatalf("expected hard persistence error, got %v", err)
+		}
+		if authUser != nil {
+			t.Fatalf("expected Authenticate() to fail closed on hard persistence error, got %+v", authUser)
+		}
+		if _, statErr := os.Stat(passwordFile); statErr != nil {
+			t.Fatalf("expected initial password file to remain after failed login persist, got %v", statErr)
+		}
+	})
+
 	t.Run("invalid stored role", func(t *testing.T) {
 		usersPath := filepath.Join(dir, "users-invalid-role.json")
 		content := `[
@@ -701,12 +753,83 @@ func TestUserStore(t *testing.T) {
 			t.Fatalf("expected invalid NUL home_dir error, got %v", err)
 		}
 
+		user.HomeDir = "/homefix/docs\x07secret"
+		if err := store.Update(user); !errors.Is(err, errInvalidUserHomeDir) {
+			t.Fatalf("expected invalid control-character home_dir error, got %v", err)
+		}
+
 		fresh, err = store.GetByID(user.ID)
 		if err != nil {
 			t.Fatalf("failed to reload user after rejected update: %v", err)
 		}
 		if fresh.HomeDir != "/homefix/docs" {
 			t.Fatalf("expected stored home_dir to remain /homefix/docs, got %s", fresh.HomeDir)
+		}
+	})
+
+	t.Run("create rejects root home dir for non-admin roles", func(t *testing.T) {
+		store, _, _ := NewUserStore(filepath.Join(dir, "users5-root-create-home-dir.json"))
+		rootHome := "/"
+
+		for _, tc := range []struct {
+			role     Role
+			username string
+		}{
+			{role: RoleUser, username: "rootuser"},
+			{role: RoleGuest, username: "rootguest"},
+		} {
+			_, err := store.CreateWithOptions(tc.username, "password123", "", tc.role, CreateUserOptions{HomeDir: &rootHome})
+			if !errors.Is(err, errInvalidUserHomeDir) {
+				t.Fatalf("CreateWithOptions(%s, root home_dir) error = %v, want errInvalidUserHomeDir", tc.role, err)
+			}
+			if _, err := store.GetByUsername(tc.username); !errors.Is(err, ErrUserNotFound) {
+				t.Fatalf("expected %s to remain unpersisted, got %v", tc.username, err)
+			}
+		}
+
+		admin, err := store.CreateWithOptions("rootadmin", "password123", "", RoleAdmin, CreateUserOptions{HomeDir: &rootHome})
+		if err != nil {
+			t.Fatalf("expected admin root home_dir to remain valid, got %v", err)
+		}
+		if admin.HomeDir != "/" {
+			t.Fatalf("admin home_dir = %q, want /", admin.HomeDir)
+		}
+	})
+
+	t.Run("update rejects root home dir for non-admin roles", func(t *testing.T) {
+		store, _, _ := NewUserStore(filepath.Join(dir, "users5-root-update-home-dir.json"))
+		rootHome := "/"
+
+		user, err := store.Create("rootupdateuser", "password123", "", RoleUser)
+		if err != nil {
+			t.Fatalf("Create(rootupdateuser) error: %v", err)
+		}
+		user.HomeDir = rootHome
+		if err := store.Update(user); !errors.Is(err, errInvalidUserHomeDir) {
+			t.Fatalf("Update(user root home_dir) error = %v, want errInvalidUserHomeDir", err)
+		}
+		fresh, err := store.GetByID(user.ID)
+		if err != nil {
+			t.Fatalf("GetByID(rootupdateuser) error: %v", err)
+		}
+		if fresh.HomeDir != "/rootupdateuser" {
+			t.Fatalf("expected rejected update to preserve /rootupdateuser, got %q", fresh.HomeDir)
+		}
+
+		admin, err := store.CreateWithOptions("rootupdateadmin", "password123", "", RoleAdmin, CreateUserOptions{HomeDir: &rootHome})
+		if err != nil {
+			t.Fatalf("CreateWithOptions(rootupdateadmin) error: %v", err)
+		}
+		admin.Role = RoleGuest
+		if err := store.Update(admin); !errors.Is(err, errInvalidUserHomeDir) {
+			t.Fatalf("Update(admin demotion with root home_dir) error = %v, want errInvalidUserHomeDir", err)
+		}
+		fresh, err = store.GetByID(admin.ID)
+		if err != nil {
+			t.Fatalf("GetByID(rootupdateadmin) error: %v", err)
+		}
+		if fresh.Role != RoleAdmin || fresh.HomeDir != "/" {
+			t.Fatalf("expected rejected demotion to preserve admin root home_dir, got role=%s home_dir=%q", fresh.Role, fresh.HomeDir)
 		}
 	})
 
@@ -895,6 +1018,47 @@ func TestUserStore(t *testing.T) {
 		err := store.Delete(admin.ID)
 		if err != ErrLastAdmin {
 			t.Errorf("expected ErrLastAdmin, got %v", err)
+		}
+	})
+
+	t.Run("update cannot remove last enabled admin", func(t *testing.T) {
+		store, _, err := NewUserStore(filepath.Join(dir, "users7-update-last-admin.json"))
+		if err != nil {
+			t.Fatalf("failed to create user store: %v", err)
+		}
+
+		admin, err := store.GetByUsername("admin")
+		if err != nil {
+			t.Fatalf("failed to get default admin: %v", err)
+		}
+
+		demoted := cloneUser(admin)
+		demoted.Role = RoleUser
+		if err := store.Update(demoted); !errors.Is(err, ErrLastAdmin) {
+			t.Fatalf("expected ErrLastAdmin when demoting only enabled admin, got %v", err)
+		}
+
+		disabled := cloneUser(admin)
+		disabled.Disabled = true
+		if err := store.Update(disabled); !errors.Is(err, ErrLastAdmin) {
+			t.Fatalf("expected ErrLastAdmin when disabling only enabled admin, got %v", err)
+		}
+
+		fresh, err := store.GetByID(admin.ID)
+		if err != nil {
+			t.Fatalf("failed to reload admin: %v", err)
+		}
+		if fresh.Role != RoleAdmin || fresh.Disabled {
+			t.Fatalf("expected rejected updates to preserve enabled admin, got role=%s disabled=%v", fresh.Role, fresh.Disabled)
+		}
+
+		secondAdmin, err := store.Create("second-admin", "password123", "", RoleAdmin)
+		if err != nil {
+			t.Fatalf("failed to create second admin: %v", err)
+		}
+		secondAdmin.Role = RoleUser
+		if err := store.Update(secondAdmin); err != nil {
+			t.Fatalf("expected demoting one of two enabled admins to succeed, got %v", err)
 		}
 	})
 
@@ -3048,6 +3212,104 @@ func TestAuthHandler(t *testing.T) {
 		}
 	})
 
+	t.Run("concurrent refresh consumes a token only once", func(t *testing.T) {
+		body := `{"username":"handleruser","password":"password123"}`
+		loginReq := httptest.NewRequest("POST", "/api/v1/auth/login", bytes.NewBufferString(body))
+		loginRec := httptest.NewRecorder()
+		h.HandleLogin(loginRec, loginReq)
+		if loginRec.Code != http.StatusOK {
+			t.Fatalf("login status = %d: %s", loginRec.Code, loginRec.Body.String())
+		}
+
+		var loginEnvelope authEnvelope
+		if err := json.Unmarshal(loginRec.Body.Bytes(), &loginEnvelope); err != nil {
+			t.Fatalf("unmarshal login envelope error: %v", err)
+		}
+		var loginResp LoginResponse
+		if err := json.Unmarshal(loginEnvelope.Data, &loginResp); err != nil {
+			t.Fatalf("unmarshal login payload error: %v", err)
+		}
+
+		originalRandomRead := tokenRandomRead
+		enteredTokenGeneration := make(chan int, 2)
+		releaseTokenGeneration := make(chan struct{})
+		var tokenGenerationCalls int32
+		var releaseOnce sync.Once
+		releaseGeneration := func() {
+			releaseOnce.Do(func() {
+				close(releaseTokenGeneration)
+			})
+		}
+		tokenRandomRead = func(b []byte) (int, error) {
+			call := int(atomic.AddInt32(&tokenGenerationCalls, 1))
+			enteredTokenGeneration <- call
+			<-releaseTokenGeneration
+			for i := range b {
+				b[i] = byte(call)
+			}
+			return len(b), nil
+		}
+		t.Cleanup(func() {
+			tokenRandomRead = originalRandomRead
+			releaseGeneration()
+		})
+
+		refreshBody, _ := json.Marshal(RefreshRequest{RefreshToken: loginResp.RefreshToken})
+		doRefresh := func() *httptest.ResponseRecorder {
+			req := httptest.NewRequest("POST", "/api/v1/auth/refresh", bytes.NewBuffer(refreshBody))
+			rec := httptest.NewRecorder()
+			h.HandleRefresh(rec, req)
+			return rec
+		}
+
+		firstDone := make(chan *httptest.ResponseRecorder, 1)
+		secondDone := make(chan *httptest.ResponseRecorder, 1)
+		go func() {
+			firstDone <- doRefresh()
+		}()
+
+		select {
+		case <-enteredTokenGeneration:
+		case <-time.After(2 * time.Second):
+			t.Fatal("first refresh did not reach token generation")
+		}
+
+		go func() {
+			secondDone <- doRefresh()
+		}()
+
+		var earlySecond *httptest.ResponseRecorder
+		select {
+		case <-enteredTokenGeneration:
+		case earlySecond = <-secondDone:
+		case <-time.After(2 * time.Second):
+			t.Fatal("second refresh neither failed nor reached token generation")
+		}
+		releaseGeneration()
+
+		firstRec := <-firstDone
+		secondRec := earlySecond
+		if secondRec == nil {
+			secondRec = <-secondDone
+		}
+
+		successes := 0
+		unauthorized := 0
+		for _, rec := range []*httptest.ResponseRecorder{firstRec, secondRec} {
+			switch rec.Code {
+			case http.StatusOK:
+				successes++
+			case http.StatusUnauthorized:
+				unauthorized++
+			default:
+				t.Fatalf("unexpected refresh status %d: %s", rec.Code, rec.Body.String())
+			}
+		}
+		if successes != 1 || unauthorized != 1 {
+			t.Fatalf("concurrent refresh statuses = [%d, %d], want one 200 and one 401", firstRec.Code, secondRec.Code)
+		}
+	})
+
 	t.Run("cookie session login omits bearer tokens and sets HttpOnly cookies", func(t *testing.T) {
 		body := `{"username":"handleruser","password":"password123"}`
 		req := httptest.NewRequest("POST", "/api/v1/auth/login", bytes.NewBufferString(body))
@@ -3159,6 +3421,114 @@ func TestAuthHandler(t *testing.T) {
 		}
 		if setCookies[RefreshSessionCookieName].Value == refreshCookie.Value {
 			t.Fatal("expected refresh cookie to rotate")
+		}
+	})
+
+	t.Run("cookie session refresh replay does not clear rotated cookies", func(t *testing.T) {
+		body := `{"username":"handleruser","password":"password123"}`
+		loginReq := httptest.NewRequest("POST", "/api/v1/auth/login", bytes.NewBufferString(body))
+		loginReq.Header.Set(sessionModeHeader, sessionModeCookie)
+		loginRec := httptest.NewRecorder()
+		h.HandleLogin(loginRec, loginReq)
+		if loginRec.Code != http.StatusOK {
+			t.Fatalf("login status = %d: %s", loginRec.Code, loginRec.Body.String())
+		}
+
+		var refreshCookie *http.Cookie
+		for _, cookie := range loginRec.Result().Cookies() {
+			if cookie.Name == RefreshSessionCookieName {
+				refreshCookie = cookie
+				break
+			}
+		}
+		if refreshCookie == nil {
+			t.Fatal("login did not set refresh cookie")
+		}
+
+		refreshReq := httptest.NewRequest("POST", "/api/v1/auth/refresh", nil)
+		refreshReq.AddCookie(refreshCookie)
+		refreshRec := httptest.NewRecorder()
+		h.HandleRefresh(refreshRec, refreshReq)
+		if refreshRec.Code != http.StatusOK {
+			t.Fatalf("refresh status = %d: %s", refreshRec.Code, refreshRec.Body.String())
+		}
+
+		replayReq := httptest.NewRequest("POST", "/api/v1/auth/refresh", nil)
+		replayReq.AddCookie(&http.Cookie{Name: AccessSessionCookieName, Value: "stale-access"})
+		replayReq.AddCookie(refreshCookie)
+		replayReq.AddCookie(&http.Cookie{Name: DownloadSessionCookieName, Value: "stale-download"})
+		replayRec := httptest.NewRecorder()
+		h.HandleRefresh(replayRec, replayReq)
+
+		if replayRec.Code != http.StatusUnauthorized {
+			t.Fatalf("replayed refresh cookie status = %d, want 401: %s", replayRec.Code, replayRec.Body.String())
+		}
+		for _, cookie := range replayRec.Result().Cookies() {
+			if cookie.Name == AccessSessionCookieName || cookie.Name == RefreshSessionCookieName || cookie.Name == DownloadSessionCookieName {
+				t.Fatalf("replayed refresh cookie unexpectedly cleared %s with path %q", cookie.Name, cookie.Path)
+			}
+		}
+	})
+
+	t.Run("cookie session refresh after user revocation clears stale cookies", func(t *testing.T) {
+		body := `{"username":"handleruser","password":"password123"}`
+		loginReq := httptest.NewRequest("POST", "/api/v1/auth/login", bytes.NewBufferString(body))
+		loginReq.Header.Set(sessionModeHeader, sessionModeCookie)
+		loginRec := httptest.NewRecorder()
+		h.HandleLogin(loginRec, loginReq)
+		if loginRec.Code != http.StatusOK {
+			t.Fatalf("login status = %d: %s", loginRec.Code, loginRec.Body.String())
+		}
+
+		var refreshCookie *http.Cookie
+		for _, cookie := range loginRec.Result().Cookies() {
+			if cookie.Name == RefreshSessionCookieName {
+				refreshCookie = cookie
+				break
+			}
+		}
+		if refreshCookie == nil {
+			t.Fatal("login did not set refresh cookie")
+		}
+
+		user, err := store.GetByUsername("handleruser")
+		if err != nil {
+			t.Fatalf("GetByUsername(handleruser) error: %v", err)
+		}
+		if err := tm.RevokeByUser(user.ID); err != nil {
+			t.Fatalf("RevokeByUser(handleruser) error: %v", err)
+		}
+
+		refreshReq := httptest.NewRequest("POST", "/api/v1/auth/refresh", nil)
+		refreshReq.AddCookie(&http.Cookie{Name: AccessSessionCookieName, Value: "stale-access"})
+		refreshReq.AddCookie(refreshCookie)
+		refreshReq.AddCookie(&http.Cookie{Name: DownloadSessionCookieName, Value: "stale-download"})
+		refreshRec := httptest.NewRecorder()
+		h.HandleRefresh(refreshRec, refreshReq)
+
+		if refreshRec.Code != http.StatusUnauthorized {
+			t.Fatalf("revoked user refresh status = %d, want 401: %s", refreshRec.Code, refreshRec.Body.String())
+		}
+		wantPaths := map[string]string{
+			AccessSessionCookieName:   sessionCookiePath,
+			RefreshSessionCookieName:  refreshSessionCookiePath,
+			DownloadSessionCookieName: downloadSessionCookiePath,
+		}
+		for _, cookie := range refreshRec.Result().Cookies() {
+			wantPath, ok := wantPaths[cookie.Name]
+			if !ok {
+				t.Fatalf("unexpected clearing cookie %q", cookie.Name)
+			}
+			if cookie.Path != wantPath {
+				t.Fatalf("cookie %s Path = %q, want %q", cookie.Name, cookie.Path, wantPath)
+			}
+			if cookie.MaxAge != -1 {
+				t.Fatalf("cookie %s MaxAge = %d, want -1", cookie.Name, cookie.MaxAge)
+			}
+			delete(wantPaths, cookie.Name)
+		}
+		if len(wantPaths) != 0 {
+			t.Fatalf("missing clearing cookies: %+v", wantPaths)
 		}
 	})
 
@@ -3341,6 +3711,9 @@ func TestAuthHandler(t *testing.T) {
 		}
 		if cookies[0].Path != "/api/v1" {
 			t.Fatalf("expected download cookie path, got %q", cookies[0].Path)
+		}
+		if cookies[0].SameSite != http.SameSiteStrictMode {
+			t.Fatalf("expected download cookie SameSite=Strict, got %v", cookies[0].SameSite)
 		}
 	})
 
@@ -3564,6 +3937,29 @@ func TestAuthHandler(t *testing.T) {
 		}
 	})
 
+	t.Run("admin create user with home directory and quota", func(t *testing.T) {
+		body := `{"username":"homequotauser","password":"newpass123","email":"quota@test.com","role":"user","home_dir":" /team/homequota ","quota_bytes":1048576}`
+		req := httptest.NewRequest("POST", "/api/v1/admin/users", bytes.NewBufferString(body))
+		admin, _ := store.GetByUsername("handleradmin")
+		req = req.WithContext(context.WithValue(req.Context(), ContextKeyUser, admin))
+		rec := httptest.NewRecorder()
+		h.HandleCreateUser(rec, req)
+
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("expected status 201, got %d: %s", rec.Code, rec.Body.String())
+		}
+		created, err := store.GetByUsername("homequotauser")
+		if err != nil {
+			t.Fatalf("GetByUsername(homequotauser) error: %v", err)
+		}
+		if created.HomeDir != "/team/homequota" {
+			t.Fatalf("created home_dir = %q, want /team/homequota", created.HomeDir)
+		}
+		if created.QuotaBytes != 1048576 {
+			t.Fatalf("created quota_bytes = %d, want 1048576", created.QuotaBytes)
+		}
+	})
+
 	t.Run("admin create user rejects invalid groups", func(t *testing.T) {
 		body := `{"username":"invalidgroups","password":"newpass123","role":"user","groups":["family/team"]}`
 		req := httptest.NewRequest("POST", "/api/v1/admin/users", bytes.NewBufferString(body))
@@ -3581,6 +3977,69 @@ func TestAuthHandler(t *testing.T) {
 		}
 		if envelope.Error == nil || envelope.Error.Code != "INVALID_GROUPS" {
 			t.Fatalf("expected INVALID_GROUPS error, got %+v", envelope.Error)
+		}
+	})
+
+	t.Run("admin create user rejects invalid home directory", func(t *testing.T) {
+		body := `{"username":"invalidhomedir","password":"newpass123","role":"user","home_dir":"../team/home"}`
+		req := httptest.NewRequest("POST", "/api/v1/admin/users", bytes.NewBufferString(body))
+		admin, _ := store.GetByUsername("handleradmin")
+		req = req.WithContext(context.WithValue(req.Context(), ContextKeyUser, admin))
+		rec := httptest.NewRecorder()
+		h.HandleCreateUser(rec, req)
+
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("expected status 400, got %d: %s", rec.Code, rec.Body.String())
+		}
+		var envelope authEnvelope
+		if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
+			t.Fatalf("unmarshal create error envelope: %v", err)
+		}
+		if envelope.Error == nil || envelope.Error.Code != "INVALID_HOME_DIR" {
+			t.Fatalf("expected INVALID_HOME_DIR error, got %+v", envelope.Error)
+		}
+	})
+
+	t.Run("admin create user rejects root home directory for non-admin", func(t *testing.T) {
+		body := `{"username":"rootnonadmin","password":"newpass123","role":"user","home_dir":"/"}`
+		req := httptest.NewRequest("POST", "/api/v1/admin/users", bytes.NewBufferString(body))
+		admin, _ := store.GetByUsername("handleradmin")
+		req = req.WithContext(context.WithValue(req.Context(), ContextKeyUser, admin))
+		rec := httptest.NewRecorder()
+		h.HandleCreateUser(rec, req)
+
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("expected status 400, got %d: %s", rec.Code, rec.Body.String())
+		}
+		var envelope authEnvelope
+		if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
+			t.Fatalf("unmarshal create error envelope: %v", err)
+		}
+		if envelope.Error == nil || envelope.Error.Code != "INVALID_HOME_DIR" {
+			t.Fatalf("expected INVALID_HOME_DIR error, got %+v", envelope.Error)
+		}
+		if _, err := store.GetByUsername("rootnonadmin"); !errors.Is(err, ErrUserNotFound) {
+			t.Fatalf("expected rootnonadmin to remain unpersisted, got %v", err)
+		}
+	})
+
+	t.Run("admin create user rejects negative quota", func(t *testing.T) {
+		body := `{"username":"invalidquota","password":"newpass123","role":"user","quota_bytes":-1}`
+		req := httptest.NewRequest("POST", "/api/v1/admin/users", bytes.NewBufferString(body))
+		admin, _ := store.GetByUsername("handleradmin")
+		req = req.WithContext(context.WithValue(req.Context(), ContextKeyUser, admin))
+		rec := httptest.NewRecorder()
+		h.HandleCreateUser(rec, req)
+
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("expected status 400, got %d: %s", rec.Code, rec.Body.String())
+		}
+		var envelope authEnvelope
+		if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
+			t.Fatalf("unmarshal create error envelope: %v", err)
+		}
+		if envelope.Error == nil || envelope.Error.Code != "INVALID_QUOTA" {
+			t.Fatalf("expected INVALID_QUOTA error, got %+v", envelope.Error)
 		}
 	})
 
@@ -3682,6 +4141,68 @@ func TestAuthHandler(t *testing.T) {
 		}
 		if got, want := strings.Join(updated.Groups, ","), "editors,family"; got != want {
 			t.Fatalf("updated groups = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("admin update user rejects control character home dir", func(t *testing.T) {
+		user, err := store.Create("controlhome", "password123", "", RoleUser)
+		if err != nil {
+			t.Fatalf("failed to create control home user: %v", err)
+		}
+
+		req := httptest.NewRequest("PUT", "/api/v1/admin/users/"+user.ID, bytes.NewBufferString(`{"home_dir":"/users/control\u0007home"}`))
+		admin, _ := store.GetByUsername("handleradmin")
+		req = req.WithContext(context.WithValue(req.Context(), ContextKeyUser, admin))
+		rec := httptest.NewRecorder()
+		h.HandleUpdateUser(rec, req, user.ID)
+
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("expected status 400, got %d: %s", rec.Code, rec.Body.String())
+		}
+		var envelope authEnvelope
+		if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
+			t.Fatalf("unmarshal update error envelope: %v", err)
+		}
+		if envelope.Error == nil || envelope.Error.Code != "INVALID_HOME_DIR" {
+			t.Fatalf("expected INVALID_HOME_DIR error, got %+v", envelope.Error)
+		}
+		fresh, err := store.GetByID(user.ID)
+		if err != nil {
+			t.Fatalf("GetByID(controlhome) error: %v", err)
+		}
+		if fresh.HomeDir != "/controlhome" {
+			t.Fatalf("expected rejected update to preserve home_dir /controlhome, got %q", fresh.HomeDir)
+		}
+	})
+
+	t.Run("admin update user rejects root home directory for non-admin", func(t *testing.T) {
+		user, err := store.Create("rootedithome", "password123", "", RoleUser)
+		if err != nil {
+			t.Fatalf("failed to create root edit user: %v", err)
+		}
+
+		req := httptest.NewRequest("PUT", "/api/v1/admin/users/"+user.ID, bytes.NewBufferString(`{"home_dir":"/"}`))
+		admin, _ := store.GetByUsername("handleradmin")
+		req = req.WithContext(context.WithValue(req.Context(), ContextKeyUser, admin))
+		rec := httptest.NewRecorder()
+		h.HandleUpdateUser(rec, req, user.ID)
+
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("expected status 400, got %d: %s", rec.Code, rec.Body.String())
+		}
+		var envelope authEnvelope
+		if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
+			t.Fatalf("unmarshal update error envelope: %v", err)
+		}
+		if envelope.Error == nil || envelope.Error.Code != "INVALID_HOME_DIR" {
+			t.Fatalf("expected INVALID_HOME_DIR error, got %+v", envelope.Error)
+		}
+		fresh, err := store.GetByID(user.ID)
+		if err != nil {
+			t.Fatalf("GetByID(rootedithome) error: %v", err)
+		}
+		if fresh.HomeDir != "/rootedithome" {
+			t.Fatalf("expected rejected update to preserve home_dir /rootedithome, got %q", fresh.HomeDir)
 		}
 	})
 
@@ -4507,6 +5028,25 @@ func TestUserStoreQuota(t *testing.T) {
 		}
 		if updated.UsedBytes != 1024*1024*50 {
 			t.Errorf("expected used 50MB, got %d", updated.UsedBytes)
+		}
+	})
+
+	t.Run("reject negative quota update", func(t *testing.T) {
+		fresh, err := store.GetByID(user.ID)
+		if err != nil {
+			t.Fatalf("failed to reload quota user: %v", err)
+		}
+		fresh.QuotaBytes = -1
+		if err := store.Update(fresh); !errors.Is(err, errInvalidQuotaBytes) {
+			t.Fatalf("expected invalid quota error, got %v", err)
+		}
+
+		updated, err := store.GetByID(user.ID)
+		if err != nil {
+			t.Fatalf("failed to reload quota user after rejected update: %v", err)
+		}
+		if updated.QuotaBytes < 0 {
+			t.Fatalf("expected rejected update to preserve non-negative quota, got %d", updated.QuotaBytes)
 		}
 	})
 }

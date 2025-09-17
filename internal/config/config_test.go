@@ -506,6 +506,46 @@ func TestConfig_Validate(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name:    "Invalid share base URL userinfo",
+			modify:  func(c *Config) { c.Share.BaseURL = "https://operator@nas.example.com" },
+			wantErr: true,
+		},
+		{
+			name:    "Invalid share base URL query",
+			modify:  func(c *Config) { c.Share.BaseURL = "https://nas.example.com?token=secret" },
+			wantErr: true,
+		},
+		{
+			name:    "Invalid share base URL empty query",
+			modify:  func(c *Config) { c.Share.BaseURL = "https://nas.example.com?" },
+			wantErr: true,
+		},
+		{
+			name:    "Invalid share base URL fragment",
+			modify:  func(c *Config) { c.Share.BaseURL = "https://nas.example.com#share" },
+			wantErr: true,
+		},
+		{
+			name:    "Invalid share base URL empty fragment",
+			modify:  func(c *Config) { c.Share.BaseURL = "https://nas.example.com#" },
+			wantErr: true,
+		},
+		{
+			name:    "Invalid share base URL empty host label",
+			modify:  func(c *Config) { c.Share.BaseURL = "https://nas..example.com" },
+			wantErr: true,
+		},
+		{
+			name:    "Invalid share base URL multiple trailing host dots",
+			modify:  func(c *Config) { c.Share.BaseURL = "https://nas.example.com.." },
+			wantErr: true,
+		},
+		{
+			name:    "Invalid share base URL host character",
+			modify:  func(c *Config) { c.Share.BaseURL = "https://nas_example.com" },
+			wantErr: true,
+		},
+		{
 			name:    "Invalid negative share default expiry",
 			modify:  func(c *Config) { c.Share.DefaultExpiresIn = -time.Hour },
 			wantErr: true,
@@ -599,6 +639,11 @@ func TestConfig_Validate(t *testing.T) {
 		{
 			name:    "Valid share base URL",
 			modify:  func(c *Config) { c.Share.BaseURL = "https://nas.example.com" },
+			wantErr: false,
+		},
+		{
+			name:    "Valid share base URL trailing dot",
+			modify:  func(c *Config) { c.Share.BaseURL = "https://NAS.EXAMPLE.COM." },
 			wantErr: false,
 		},
 		{
@@ -819,6 +864,13 @@ func TestConfig_Validate(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name: "Invalid alerts webhook duplicate header name",
+			modify: func(c *Config) {
+				c.Alerts.WebhookHeaders = []string{"Authorization: Bearer one", "authorization: Bearer two"}
+			},
+			wantErr: true,
+		},
+		{
 			name: "Invalid alerts email missing recipients",
 			modify: func(c *Config) {
 				c.Alerts.EmailEnabled = true
@@ -960,11 +1012,23 @@ func TestConfig_ValidateBackupJobs(t *testing.T) {
 	destination := filepath.Join(tmpDir, "destination")
 	resticPasswordFile := filepath.Join(tmpDir, "restic.pass")
 	rcloneConfigFile := filepath.Join(tmpDir, "rclone.conf")
+	realCredentialDir := filepath.Join(tmpDir, "real-credentials")
+	linkedCredentialDir := filepath.Join(tmpDir, "linked-credentials")
+	linkedParentCredentialFile := filepath.Join(linkedCredentialDir, "restic.pass")
 	if err := os.WriteFile(resticPasswordFile, []byte("test-password"), 0600); err != nil {
 		t.Fatalf("WriteFile(resticPasswordFile) error: %v", err)
 	}
 	if err := os.WriteFile(rcloneConfigFile, []byte("[remote]\ntype = local\n"), 0600); err != nil {
 		t.Fatalf("WriteFile(rcloneConfigFile) error: %v", err)
+	}
+	if err := os.Mkdir(realCredentialDir, 0700); err != nil {
+		t.Fatalf("Mkdir(realCredentialDir) error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(realCredentialDir, "restic.pass"), []byte("linked-parent-password"), 0600); err != nil {
+		t.Fatalf("WriteFile(linked parent credential) error: %v", err)
+	}
+	if err := os.Symlink(realCredentialDir, linkedCredentialDir); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
 	}
 
 	tests := []struct {
@@ -1147,6 +1211,20 @@ func TestConfig_ValidateBackupJobs(t *testing.T) {
 					Source:       source,
 					Repository:   "rest:http://backup.example/repo",
 					PasswordFile: filepath.Join(tmpDir, "missing-restic.pass"),
+				}}
+			},
+			wantErr: true,
+		},
+		{
+			name: "credential file rejects symlink parent",
+			modify: func(c *Config) {
+				c.Backup.Jobs = []BackupJobConfig{{
+					ID:           "restic-remote",
+					Name:         "Restic remote",
+					Type:         "restic",
+					Source:       source,
+					Repository:   "rest:http://backup.example/repo",
+					PasswordFile: linkedParentCredentialFile,
 				}}
 			},
 			wantErr: true,
@@ -1419,6 +1497,103 @@ max_age = "24h"
 	}
 }
 
+func TestLoad_AcceptsEmptyBackupJobScheduleInterval(t *testing.T) {
+	tmpDir := t.TempDir()
+	storageRoot := filepath.Join(tmpDir, "data")
+	backupRoot := filepath.Join(tmpDir, "backup")
+	configPath := filepath.Join(tmpDir, "config.toml")
+	content := fmt.Sprintf(`
+[storage]
+root = %q
+
+[[backup.jobs]]
+id = "manual-local"
+name = "Manual local backup"
+type = "local"
+destination = %q
+schedule_interval = ""
+`, storageRoot, backupRoot)
+	if err := os.WriteFile(configPath, []byte(content), 0600); err != nil {
+		t.Fatalf("WriteFile(config) error: %v", err)
+	}
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if len(cfg.Backup.Jobs) != 1 {
+		t.Fatalf("backup job count = %d, want 1", len(cfg.Backup.Jobs))
+	}
+	if cfg.Backup.Jobs[0].ScheduleInterval != 0 {
+		t.Fatalf("schedule interval = %s, want 0", cfg.Backup.Jobs[0].ScheduleInterval)
+	}
+}
+
+func TestLoad_AcceptsEmptyBackupJobRestoreDrillStaleAfter(t *testing.T) {
+	tmpDir := t.TempDir()
+	storageRoot := filepath.Join(tmpDir, "data")
+	backupRoot := filepath.Join(tmpDir, "backup")
+	configPath := filepath.Join(tmpDir, "config.toml")
+	content := fmt.Sprintf(`
+[storage]
+root = %q
+
+[[backup.jobs]]
+id = "manual-local"
+name = "Manual local backup"
+type = "local"
+destination = %q
+restore_drill_stale_after = ""
+`, storageRoot, backupRoot)
+	if err := os.WriteFile(configPath, []byte(content), 0600); err != nil {
+		t.Fatalf("WriteFile(config) error: %v", err)
+	}
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if len(cfg.Backup.Jobs) != 1 {
+		t.Fatalf("backup job count = %d, want 1", len(cfg.Backup.Jobs))
+	}
+	if cfg.Backup.Jobs[0].RestoreDrillStaleAfter != 0 {
+		t.Fatalf("restore drill stale after = %s, want 0", cfg.Backup.Jobs[0].RestoreDrillStaleAfter)
+	}
+}
+
+func TestLoad_RejectsEmptyBackupJobNonScheduleDurations(t *testing.T) {
+	for _, field := range []string{"stale_after", "max_age"} {
+		t.Run(field, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			storageRoot := filepath.Join(tmpDir, "data")
+			backupRoot := filepath.Join(tmpDir, "backup")
+			configPath := filepath.Join(tmpDir, "config.toml")
+			content := fmt.Sprintf(`
+[storage]
+root = %q
+
+[[backup.jobs]]
+id = "manual-local"
+name = "Manual local backup"
+type = "local"
+destination = %q
+%s = ""
+`, storageRoot, backupRoot, field)
+			if err := os.WriteFile(configPath, []byte(content), 0600); err != nil {
+				t.Fatalf("WriteFile(config) error: %v", err)
+			}
+
+			_, err := Load(configPath)
+			if err == nil {
+				t.Fatalf("Load() error = nil, want invalid %s duration", field)
+			}
+			if !strings.Contains(err.Error(), "invalid backup.jobs[0]."+field+" duration") {
+				t.Fatalf("Load() error = %v, want invalid %s duration", err, field)
+			}
+		})
+	}
+}
+
 func TestLoad_NormalizesMaintenanceScrubDurationFields(t *testing.T) {
 	tmpDir := t.TempDir()
 	storageRoot := filepath.Join(tmpDir, "data")
@@ -1499,6 +1674,37 @@ prefix = "dav/"
 	}
 	if cfg.WebDAV.Prefix != "/dav" {
 		t.Fatalf("expected normalized prefix /dav, got %q", cfg.WebDAV.Prefix)
+	}
+}
+
+func TestLoad_NormalizesWebDAVAuthType(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.toml")
+
+	content := []byte(`
+[webdav]
+auth_type = " BASIC "
+`)
+	if err := os.WriteFile(configPath, content, 0644); err != nil {
+		t.Fatalf("failed to write config: %v", err)
+	}
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if cfg.WebDAV.AuthType != "basic" {
+		t.Fatalf("expected normalized auth type basic, got %q", cfg.WebDAV.AuthType)
+	}
+}
+
+func TestNormalizeWebDAVAuthType_DefaultsBlankToBasic(t *testing.T) {
+	tests := []string{"", " \t "}
+
+	for _, input := range tests {
+		if got := NormalizeWebDAVAuthType(input); got != "basic" {
+			t.Fatalf("NormalizeWebDAVAuthType(%q) = %q, want basic", input, got)
+		}
 	}
 }
 
@@ -1708,6 +1914,65 @@ max_access = 12
 	}
 }
 
+func TestLoad_AcceptsZeroDurationStringSentinels(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.toml")
+
+	content := []byte(`
+[storage.retention]
+gc_interval = "0"
+
+[share]
+default_expires_in = "0"
+
+[[share.policy_rules]]
+path = "/Family"
+require_password = true
+max_expires_in = "0"
+`)
+	if err := os.WriteFile(configPath, content, 0644); err != nil {
+		t.Fatalf("failed to write config: %v", err)
+	}
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if cfg.Storage.Retention.GCInterval != 0 {
+		t.Fatalf("retention gc interval = %s, want 0", cfg.Storage.Retention.GCInterval)
+	}
+	if cfg.Share.DefaultExpiresIn != 0 {
+		t.Fatalf("share default expiry = %s, want 0", cfg.Share.DefaultExpiresIn)
+	}
+	if len(cfg.Share.PolicyRules) != 1 {
+		t.Fatalf("share policy rules = %d, want 1", len(cfg.Share.PolicyRules))
+	}
+	if cfg.Share.PolicyRules[0].MaxExpiresIn != 0 {
+		t.Fatalf("share policy max expiry = %s, want 0", cfg.Share.PolicyRules[0].MaxExpiresIn)
+	}
+}
+
+func TestLoad_AcceptsEmptyShareDefaultExpiresIn(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.toml")
+
+	content := []byte(`
+[share]
+default_expires_in = ""
+`)
+	if err := os.WriteFile(configPath, content, 0644); err != nil {
+		t.Fatalf("failed to write config: %v", err)
+	}
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if cfg.Share.DefaultExpiresIn != 0 {
+		t.Fatalf("share default expiry = %s, want 0", cfg.Share.DefaultExpiresIn)
+	}
+}
+
 func TestLoad_ExpandsHomeDirectoryInStorageRootAndDerivedPaths(t *testing.T) {
 	homeDir := t.TempDir()
 	t.Setenv("HOME", homeDir)
@@ -1853,6 +2118,8 @@ func TestLoad_ExampleConfig(t *testing.T) {
 	if cfg.Maintenance.Scrub.ScheduleInterval != 168*time.Hour {
 		t.Fatalf("expected scrub schedule interval 168h, got %s", cfg.Maintenance.Scrub.ScheduleInterval)
 	}
+	assertStorageRootDerivedInternalPaths(t, cfg)
+	assertDefaultVersioningPolicy(t, cfg)
 }
 
 func TestLoad_DocumentationConfigExamples(t *testing.T) {
@@ -1880,7 +2147,142 @@ func TestLoad_DocumentationConfigExamples(t *testing.T) {
 			if cfg.Maintenance.Scrub.ScheduleInterval != 168*time.Hour {
 				t.Fatalf("scrub schedule interval = %s, want 168h", cfg.Maintenance.Scrub.ScheduleInterval)
 			}
+			assertStorageRootDerivedInternalPaths(t, cfg)
+			assertDefaultVersioningPolicy(t, cfg)
 		})
+	}
+}
+
+func TestDocumentationEnvironmentOverridesAreMarkedUnsupported(t *testing.T) {
+	docs := []struct {
+		path          string
+		unsupported   string
+		forbiddenText []string
+	}{
+		{
+			path:        filepath.Join("..", "..", "docs", "configuration.md"),
+			unsupported: "环境变量配置覆盖尚未支持",
+			forbiddenText: []string{
+				"MNEMONAS_SERVER_PORT",
+				"MNEMONAS_LOG_LEVEL",
+				"MNEMONAS_WEBDAV_ENABLED",
+			},
+		},
+		{
+			path:        filepath.Join("..", "..", "docs", "configuration.en.md"),
+			unsupported: "Environment-variable config overrides are planned but not currently supported",
+			forbiddenText: []string{
+				"MNEMONAS_SERVER_PORT",
+				"MNEMONAS_LOG_LEVEL",
+				"MNEMONAS_WEBDAV_ENABLED",
+			},
+		},
+	}
+
+	for _, doc := range docs {
+		t.Run(filepath.Base(doc.path), func(t *testing.T) {
+			data, err := os.ReadFile(doc.path)
+			if err != nil {
+				t.Fatalf("failed to read configuration documentation: %v", err)
+			}
+			text := string(data)
+			if !strings.Contains(text, doc.unsupported) {
+				t.Fatalf("configuration documentation should state unsupported environment overrides with %q", doc.unsupported)
+			}
+			for _, forbidden := range doc.forbiddenText {
+				if strings.Contains(text, forbidden) {
+					t.Errorf("configuration documentation still contains unsupported environment override example %q", forbidden)
+				}
+			}
+		})
+	}
+}
+
+func TestDocumentationPublicWebDAVPrefersUserAuth(t *testing.T) {
+	docs := []struct {
+		path        string
+		start       string
+		end         string
+		mustContain []string
+	}{
+		{
+			path:  filepath.Join("..", "..", "docs", "public-server-quickstart.md"),
+			start: "## 4. WebDAV 地址",
+			end:   "## 5. 上线前清单",
+			mustContain: []string{
+				"auth_type = \"users\"",
+				"Web UI 用户账号",
+				"secrets.json",
+			},
+		},
+		{
+			path:  filepath.Join("..", "..", "docs", "public-server-quickstart.en.md"),
+			start: "## 4. WebDAV URL",
+			end:   "## 5. Go-Live Checklist",
+			mustContain: []string{
+				"auth_type = \"users\"",
+				"Web UI account credentials",
+				"secrets.json",
+			},
+		},
+	}
+
+	for _, doc := range docs {
+		t.Run(filepath.Base(doc.path), func(t *testing.T) {
+			data, err := os.ReadFile(doc.path)
+			if err != nil {
+				t.Fatalf("failed to read public server quickstart: %v", err)
+			}
+			section := documentationSectionBetween(t, string(data), doc.start, doc.end)
+			for _, expected := range doc.mustContain {
+				if !strings.Contains(section, expected) {
+					t.Errorf("public WebDAV section does not contain %q", expected)
+				}
+			}
+		})
+	}
+}
+
+func assertDefaultVersioningPolicy(t *testing.T, cfg *Config) {
+	t.Helper()
+
+	want := Default().Storage.Versioning
+	if !reflect.DeepEqual(cfg.Storage.Versioning.AutoVersionedExtensions, want.AutoVersionedExtensions) {
+		t.Fatalf("auto versioned extensions = %#v, want default %#v", cfg.Storage.Versioning.AutoVersionedExtensions, want.AutoVersionedExtensions)
+	}
+	if !reflect.DeepEqual(cfg.Storage.Versioning.AutoVersionedFilenames, want.AutoVersionedFilenames) {
+		t.Fatalf("auto versioned filenames = %#v, want default %#v", cfg.Storage.Versioning.AutoVersionedFilenames, want.AutoVersionedFilenames)
+	}
+	if cfg.Storage.Versioning.MaxVersionedSize != want.MaxVersionedSize {
+		t.Fatalf("max versioned size = %d, want default %d", cfg.Storage.Versioning.MaxVersionedSize, want.MaxVersionedSize)
+	}
+}
+
+func assertStorageRootDerivedInternalPaths(t *testing.T, cfg *Config) {
+	t.Helper()
+
+	internalRoot := filepath.Join(cfg.Storage.Root, ".mnemonas")
+	expected := map[string]string{
+		"server.tls.cert_dir":  filepath.Join(internalRoot, "certs"),
+		"auth.users_file":      filepath.Join(internalRoot, "users.json"),
+		"share.store_file":     filepath.Join(internalRoot, "shares.json"),
+		"favorites.store_file": filepath.Join(internalRoot, "favorites.json"),
+		"smb.gateway_socket":   filepath.Join(internalRoot, "run", "smb-gateway.sock"),
+		"smb.credential_file":  filepath.Join(internalRoot, "smb-credentials.json"),
+	}
+	actual := map[string]string{
+		"server.tls.cert_dir":  cfg.Server.TLS.CertDir,
+		"auth.users_file":      cfg.Auth.UsersFile,
+		"share.store_file":     cfg.Share.StoreFile,
+		"favorites.store_file": cfg.Favorites.StoreFile,
+		"smb.gateway_socket":   cfg.SMB.GatewaySocket,
+		"smb.credential_file":  cfg.SMB.CredentialFile,
+	}
+
+	for field, want := range expected {
+		if got := actual[field]; got != want {
+			t.Fatalf("%s = %q, want %q", field, got, want)
+		}
 	}
 }
 
@@ -1897,6 +2299,20 @@ func extractFirstTomlBlock(t *testing.T, markdown string) string {
 		t.Fatal("documentation config example TOML block is not closed")
 	}
 	return markdown[start : start+end]
+}
+
+func documentationSectionBetween(t *testing.T, markdown, startMarker, endMarker string) string {
+	t.Helper()
+	start := strings.Index(markdown, startMarker)
+	if start < 0 {
+		t.Fatalf("documentation does not contain start marker %q", startMarker)
+	}
+	endOffset := start + len(startMarker)
+	end := strings.Index(markdown[endOffset:], endMarker)
+	if end < 0 {
+		t.Fatalf("documentation section %q does not contain end marker %q", startMarker, endMarker)
+	}
+	return markdown[start : endOffset+end]
 }
 
 func TestConfig_SaveLoad(t *testing.T) {

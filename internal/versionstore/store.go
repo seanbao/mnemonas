@@ -1448,9 +1448,9 @@ func (s *Store) CountFiles(ctx context.Context) (int, error) {
 
 // SearchFiles searches the file index
 func (s *Store) SearchFiles(ctx context.Context, query string, limit int) ([]string, error) {
-	query = "%" + strings.ToLower(query) + "%"
+	query = "%" + escapeSQLiteLikeLiteral(strings.ToLower(query)) + "%"
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT path FROM files WHERE LOWER(path) LIKE ? LIMIT ?`,
+		`SELECT path FROM files WHERE LOWER(path) LIKE ? ESCAPE '\' ORDER BY path ASC LIMIT ?`,
 		query, limit)
 	if err != nil {
 		return nil, err
@@ -1467,6 +1467,11 @@ func (s *Store) SearchFiles(ctx context.Context, query string, limit int) ([]str
 	}
 
 	return paths, rows.Err()
+}
+
+func escapeSQLiteLikeLiteral(value string) string {
+	replacer := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+	return replacer.Replace(value)
 }
 
 // ============================================================================

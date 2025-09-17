@@ -3,9 +3,7 @@ import { test, expect } from '@playwright/test'
 test.describe('主页（认证禁用时）', () => {
   test('应显示主页内容或登录页', async ({ page }) => {
     await page.goto('/')
-    
-    // 等待页面加载
-    await page.waitForTimeout(1000)
+    await expect(page.locator('body')).toBeVisible()
     
     // 应该是主页或登录页
     const isHomePage = !page.url().includes('/login')
@@ -16,18 +14,23 @@ test.describe('主页（认证禁用时）', () => {
 
   test('侧边栏或登录表单应可见', async ({ page }) => {
     await page.goto('/')
-    await page.waitForTimeout(1000)
+    await expect(page.locator('body')).toBeVisible()
     
     const isLoginPage = page.url().includes('/login')
     
     if (!isLoginPage) {
-      const menuButton = page.getByRole('button', { name: '打开导航菜单' })
-      if (await menuButton.isVisible({ timeout: 1000 }).catch(() => false)) {
-        await expect(page.getByRole('navigation', { name: '移动端主导航' })).toBeVisible({ timeout: 5000 })
-      } else {
-        const nav = page.locator('aside, nav, [class*="sidebar"]').first()
-        await expect(nav).toBeVisible({ timeout: 5000 })
-      }
+      await expect
+        .poll(async () => {
+          const mobileMenuVisible = await page.getByRole('button', { name: '打开导航菜单' }).isVisible().catch(() => false)
+          const mobileNavVisible = await page.getByRole('navigation', { name: '移动端主导航' }).isVisible().catch(() => false)
+          const desktopNavVisible = await page.getByRole('navigation', { name: '主导航' }).isVisible().catch(() => false)
+
+          return mobileMenuVisible || mobileNavVisible || desktopNavVisible
+        }, {
+          message: 'home page should expose a visible navigation entry point',
+          timeout: 10_000,
+        })
+        .toBe(true)
     } else {
       // 认证启用，检查登录表单
       await expect(page.getByRole('button', { name: /登录/i })).toBeVisible()

@@ -99,6 +99,12 @@ func (m *Manager) RunBatchRestorePreview(ctx context.Context, opts BatchRestoreO
 			IncludeConfig: item.IncludeConfig,
 			Status:        StatusRunning,
 		}
+		if err := ctx.Err(); err != nil {
+			itemResult.Status = StatusFailed
+			itemResult.ErrorMessage = err.Error()
+			result.Items = append(result.Items, itemResult)
+			continue
+		}
 		if conflict := batchRestoreTargetConflict(targets, item.TargetPath, index); conflict != "" {
 			itemResult.Status = StatusFailed
 			itemResult.ErrorMessage = conflict
@@ -109,6 +115,9 @@ func (m *Manager) RunBatchRestorePreview(ctx context.Context, opts BatchRestoreO
 			TargetPath:    item.TargetPath,
 			IncludeConfig: item.IncludeConfig,
 		})
+		if preview != nil && strings.TrimSpace(preview.TargetPath) != "" {
+			itemResult.TargetPath = normalizeBatchRestoreTargetPath(item.TargetPath)
+		}
 		if err != nil {
 			itemResult.Status = StatusFailed
 			itemResult.Preview = preview
@@ -125,8 +134,6 @@ func (m *Manager) RunBatchRestorePreview(ctx context.Context, opts BatchRestoreO
 		}
 		itemResult.Status = StatusCompleted
 		itemResult.Preview = preview
-		result.TotalFiles += preview.FileCount
-		result.TotalBytes += preview.TotalBytes
 		result.Items = append(result.Items, itemResult)
 	}
 	finishBatchRestorePreview(result, m.now().UTC())
@@ -156,6 +163,12 @@ func (m *Manager) RunBatchRestore(ctx context.Context, opts BatchRestoreOptions)
 			IncludeConfig: item.IncludeConfig,
 			Status:        StatusRunning,
 		}
+		if err := ctx.Err(); err != nil {
+			itemResult.Status = StatusFailed
+			itemResult.ErrorMessage = err.Error()
+			result.Items = append(result.Items, itemResult)
+			continue
+		}
 		if conflict := batchRestoreTargetConflict(targets, item.TargetPath, index); conflict != "" {
 			itemResult.Status = StatusFailed
 			itemResult.ErrorMessage = conflict
@@ -167,15 +180,17 @@ func (m *Manager) RunBatchRestore(ctx context.Context, opts BatchRestoreOptions)
 			IncludeConfig: item.IncludeConfig,
 		})
 		itemResult.Restore = restore
+		if restore != nil && strings.TrimSpace(restore.TargetPath) != "" {
+			itemResult.TargetPath = normalizeBatchRestoreTargetPath(item.TargetPath)
+		}
 		if err != nil {
 			itemResult.Status = StatusFailed
 			itemResult.ErrorMessage = err.Error()
 			result.Items = append(result.Items, itemResult)
 			continue
 		}
-		itemResult.TargetPath = restore.TargetPath
 		itemResult.Warnings = append(itemResult.Warnings, restore.Warnings...)
-		verify, verifyErr := m.RunRestoreVerify(ctx, item.JobID, RestoreVerifyOptions{TargetPath: restore.TargetPath})
+		verify, verifyErr := m.RunRestoreVerify(ctx, item.JobID, RestoreVerifyOptions{TargetPath: normalizeBatchRestoreTargetPath(item.TargetPath)})
 		itemResult.Verify = verify
 		if verifyErr != nil {
 			itemResult.Status = StatusFailed
@@ -187,8 +202,6 @@ func (m *Manager) RunBatchRestore(ctx context.Context, opts BatchRestoreOptions)
 			itemResult.Warnings = append(itemResult.Warnings, verify.Warnings...)
 		}
 		itemResult.Status = StatusCompleted
-		result.TotalFiles += restore.FileCount
-		result.VerifiedBytes += restore.VerifiedBytes
 		result.Items = append(result.Items, itemResult)
 	}
 	finishBatchRestore(result, m.now().UTC())
@@ -197,10 +210,10 @@ func (m *Manager) RunBatchRestore(ctx context.Context, opts BatchRestoreOptions)
 
 func validateBatchRestoreItems(items []BatchRestoreItemOptions) error {
 	if len(items) == 0 {
-		return fmt.Errorf("%w: batch restore items are empty", ErrUnsafePath)
+		return invalidRestoreRequestErrorf("%w: batch restore items are empty", ErrUnsafePath)
 	}
 	if len(items) > batchRestoreLimit {
-		return fmt.Errorf("%w: batch restore supports at most %d items", ErrUnsafePath, batchRestoreLimit)
+		return invalidRestoreRequestErrorf("%w: batch restore supports at most %d items", ErrUnsafePath, batchRestoreLimit)
 	}
 	return nil
 }
@@ -209,6 +222,14 @@ func normalizeBatchRestoreItem(item BatchRestoreItemOptions) BatchRestoreItemOpt
 	item.JobID = strings.TrimSpace(item.JobID)
 	item.TargetPath = strings.TrimSpace(item.TargetPath)
 	return item
+}
+
+func normalizeBatchRestoreTargetPath(targetPath string) string {
+	target := strings.TrimSpace(targetPath)
+	if filepath.IsAbs(target) {
+		return filepath.Clean(target)
+	}
+	return target
 }
 
 func batchRestoreTargetConflict(targets map[string]int, targetPath string, itemIndex int) string {
@@ -228,14 +249,37 @@ func batchRestoreTargetConflict(targets map[string]int, targetPath string, itemI
 func finishBatchRestorePreview(result *BatchRestorePreviewResult, finishedAt time.Time) {
 	result.FinishedAt = &finishedAt
 	result.DurationMs = finishedAt.Sub(result.StartedAt).Milliseconds()
+	result.TotalFiles = 0
+	result.TotalBytes = 0
 	failures := 0
-	for _, item := range result.Items {
+	for index := range result.Items {
+		item := &result.Items[index]
 		if item.Status == StatusFailed {
 			failures++
 			if item.ErrorMessage != "" {
 				result.Warnings = append(result.Warnings, fmt.Sprintf("item %d: %s", item.Index, item.ErrorMessage))
 			}
 			continue
+		}
+		if item.Preview != nil {
+			nextTotalFiles, err := addBatchRestoreMetric(result.TotalFiles, item.Preview.FileCount, "preview file count")
+			if err != nil {
+				item.Status = StatusFailed
+				item.ErrorMessage = err.Error()
+				failures++
+				result.Warnings = append(result.Warnings, fmt.Sprintf("item %d: %s", item.Index, item.ErrorMessage))
+				continue
+			}
+			nextTotalBytes, err := addBatchRestoreMetric(result.TotalBytes, item.Preview.TotalBytes, "preview total bytes")
+			if err != nil {
+				item.Status = StatusFailed
+				item.ErrorMessage = err.Error()
+				failures++
+				result.Warnings = append(result.Warnings, fmt.Sprintf("item %d: %s", item.Index, item.ErrorMessage))
+				continue
+			}
+			result.TotalFiles = nextTotalFiles
+			result.TotalBytes = nextTotalBytes
 		}
 		if item.Preview != nil && len(item.Preview.Warnings) > 0 {
 			result.Warning = true
@@ -248,14 +292,37 @@ func finishBatchRestorePreview(result *BatchRestorePreviewResult, finishedAt tim
 func finishBatchRestore(result *BatchRestoreResult, finishedAt time.Time) {
 	result.FinishedAt = &finishedAt
 	result.DurationMs = finishedAt.Sub(result.StartedAt).Milliseconds()
+	result.TotalFiles = 0
+	result.VerifiedBytes = 0
 	failures := 0
-	for _, item := range result.Items {
+	for index := range result.Items {
+		item := &result.Items[index]
 		if item.Status == StatusFailed {
 			failures++
 			if item.ErrorMessage != "" {
 				result.Warnings = append(result.Warnings, fmt.Sprintf("item %d: %s", item.Index, item.ErrorMessage))
 			}
 			continue
+		}
+		if item.Verify != nil {
+			nextTotalFiles, err := addBatchRestoreMetric(result.TotalFiles, item.Verify.FileCount, "verified file count")
+			if err != nil {
+				item.Status = StatusFailed
+				item.ErrorMessage = err.Error()
+				failures++
+				result.Warnings = append(result.Warnings, fmt.Sprintf("item %d: %s", item.Index, item.ErrorMessage))
+				continue
+			}
+			nextVerifiedBytes, err := addBatchRestoreMetric(result.VerifiedBytes, item.Verify.VerifiedBytes, "verified bytes")
+			if err != nil {
+				item.Status = StatusFailed
+				item.ErrorMessage = err.Error()
+				failures++
+				result.Warnings = append(result.Warnings, fmt.Sprintf("item %d: %s", item.Index, item.ErrorMessage))
+				continue
+			}
+			result.TotalFiles = nextTotalFiles
+			result.VerifiedBytes = nextVerifiedBytes
 		}
 		if len(item.Warnings) > 0 {
 			result.Warning = true
@@ -280,6 +347,16 @@ func setBatchOutcome(status *string, warning *bool, errorMessage *string, failur
 	}
 }
 
+func addBatchRestoreMetric(total int64, value int64, label string) (int64, error) {
+	if value < 0 {
+		return 0, fmt.Errorf("%w: batch restore %s is negative", ErrUnsafePath, label)
+	}
+	if value > 0 && total > (1<<63-1)-value {
+		return 0, fmt.Errorf("%w: batch restore %s overflows int64", ErrUnsafePath, label)
+	}
+	return total + value, nil
+}
+
 func cloneBatchRestorePreviewResult(result *BatchRestorePreviewResult) *BatchRestorePreviewResult {
 	if result == nil {
 		return nil
@@ -289,13 +366,16 @@ func cloneBatchRestorePreviewResult(result *BatchRestorePreviewResult) *BatchRes
 	if len(result.Items) > 0 {
 		clone.Items = make([]BatchRestorePreviewItemResult, 0, len(result.Items))
 		for _, item := range result.Items {
+			item.TargetPath = sanitizeBackupTargetForAPI(item.TargetPath)
 			item.Preview = cloneRestorePreviewResult(item.Preview)
+			item.ErrorMessage = sanitizeBackupMessageForAPI(item.ErrorMessage)
 			clone.Items = append(clone.Items, item)
 		}
 	}
 	if len(result.Warnings) > 0 {
-		clone.Warnings = append([]string(nil), result.Warnings...)
+		clone.Warnings = sanitizeBackupMessagesForAPI(result.Warnings)
 	}
+	clone.ErrorMessage = sanitizeBackupMessageForAPI(clone.ErrorMessage)
 	return &clone
 }
 
@@ -308,16 +388,19 @@ func cloneBatchRestoreResult(result *BatchRestoreResult) *BatchRestoreResult {
 	if len(result.Items) > 0 {
 		clone.Items = make([]BatchRestoreItemResult, 0, len(result.Items))
 		for _, item := range result.Items {
+			item.TargetPath = sanitizeBackupTargetForAPI(item.TargetPath)
 			item.Restore = cloneRestoreResult(item.Restore)
 			item.Verify = cloneRestoreVerifyResult(item.Verify)
 			if len(item.Warnings) > 0 {
-				item.Warnings = append([]string(nil), item.Warnings...)
+				item.Warnings = sanitizeBackupMessagesForAPI(item.Warnings)
 			}
+			item.ErrorMessage = sanitizeBackupMessageForAPI(item.ErrorMessage)
 			clone.Items = append(clone.Items, item)
 		}
 	}
 	if len(result.Warnings) > 0 {
-		clone.Warnings = append([]string(nil), result.Warnings...)
+		clone.Warnings = sanitizeBackupMessagesForAPI(result.Warnings)
 	}
+	clone.ErrorMessage = sanitizeBackupMessageForAPI(clone.ErrorMessage)
 	return &clone
 }

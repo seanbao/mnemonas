@@ -12,6 +12,9 @@ interface HeaderProps {
 }
 
 const HELP_DOCS_URL = 'https://github.com/seanbao/mnemonas/tree/main/docs'
+const logoutWarningTitle = '已退出登录，但操作记录写入失败'
+const logoutFailureDescription = '退出登录失败，请稍后重试。'
+const refreshFailureDescription = '数据刷新失败，请稍后重试。'
 
 export function Header({ onMenuClick }: HeaderProps) {
   const navigate = useNavigate()
@@ -28,13 +31,13 @@ export function Header({ onMenuClick }: HeaderProps) {
       const result = await logout()
       queryClient.clear()
       addToast(result.warning
-        ? { title: result.message ?? '已退出登录，但操作记录写入失败', color: 'warning' }
+        ? { title: logoutWarningTitle, color: 'warning' }
         : { title: '已退出登录', color: 'success' })
       navigate('/login', { replace: true })
-    } catch (error) {
+    } catch {
       addToast({
         title: '退出登录失败',
-        description: error instanceof Error ? error.message : '退出登录失败，请稍后重试。',
+        description: logoutFailureDescription,
         color: 'danger',
       })
     }
@@ -64,10 +67,10 @@ export function Header({ onMenuClick }: HeaderProps) {
     try {
       await queryClient.refetchQueries({ type: 'active' }, { throwOnError: true })
       addToast({ title: '数据已刷新', color: 'success' })
-    } catch (error) {
+    } catch {
       addToast({
         title: '刷新失败',
-        description: error instanceof Error ? error.message : '数据刷新失败，请稍后重试。',
+        description: refreshFailureDescription,
         color: 'danger',
       })
     } finally {

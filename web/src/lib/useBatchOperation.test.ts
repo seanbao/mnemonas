@@ -81,6 +81,54 @@ describe('useBatchOperation', () => {
     })
   })
 
+  it('passes an abort signal to each operation', async () => {
+    const controller = new AbortController()
+    const operation = vi.fn(async () => undefined)
+
+    const { result } = renderHook(() => useBatchOperation({
+      operation,
+      messages: {
+        success: '{count} 项成功',
+        failure: '{count} 项失败',
+        partial: '{succeeded} 项成功，{failed} 项失败',
+      },
+    }))
+
+    await act(async () => {
+      await result.current.execute(['a', 'b'], { signal: controller.signal })
+    })
+
+    expect(operation).toHaveBeenCalledWith('a', { signal: controller.signal })
+    expect(operation).toHaveBeenCalledWith('b', { signal: controller.signal })
+  })
+
+  it('suppresses toast and completion callbacks after abort', async () => {
+    const controller = new AbortController()
+    const onComplete = vi.fn()
+    const operation = vi.fn(async () => {
+      controller.abort()
+      throw new DOMException('batch aborted', 'AbortError')
+    })
+
+    const { result } = renderHook(() => useBatchOperation({
+      operation,
+      messages: {
+        success: '{count} 项成功',
+        failure: '{count} 项失败',
+        partial: '{succeeded} 项成功，{failed} 项失败',
+      },
+      onComplete,
+    }))
+
+    await act(async () => {
+      await result.current.execute(['a'], { signal: controller.signal })
+    })
+
+    expect(mockAddToast).not.toHaveBeenCalled()
+    expect(onComplete).not.toHaveBeenCalled()
+    expect(result.current.isLoading).toBe(false)
+  })
+
   it('uses custom toast when all failures are unavailable', async () => {
     const operation = vi.fn(async () => {
       const error = new Error('filesystem unavailable') as Error & { status: number; code: string }
@@ -122,7 +170,7 @@ describe('useBatchOperation', () => {
     })
   })
 
-  it('uses a warning toast when successful operations return warnings', async () => {
+  it('uses a generic warning toast when successful operations return warnings', async () => {
     const operation = vi.fn(async () => ({
       warning: true,
       message: 'file restored with metadata warning',
@@ -149,7 +197,7 @@ describe('useBatchOperation', () => {
       warningMessages: ['file restored with metadata warning'],
     })
     expect(mockAddToast).toHaveBeenCalledWith({
-      title: 'file restored with metadata warning',
+      title: '1 项成功，但存在警告',
       color: 'warning',
     })
   })

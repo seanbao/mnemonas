@@ -39,10 +39,10 @@ run_underscore_chunk_values_test() {
 
 	cat > "$config_path" <<EOF
 [ storage ]
-root = "$case_dir/storage"
+root = "$case_dir/storage\u002droot"
 
 [ dataplane ]
-grpc_address = "127.0.0.1:19090"
+grpc_address = "127.0.0.1\u003a19090"
 
 [ dataplane . cdc ]
 min_chunk_size = 65_536
@@ -60,7 +60,7 @@ EOF
 		bash "$REPO_ROOT/scripts/mnemonas-dataplane-start.sh"
 
 	assert_file_contains "$capture_path" "--grpc 127.0.0.1:19090"
-	assert_file_contains "$capture_path" "--data-dir $case_dir/storage/.mnemonas/objects"
+	assert_file_contains "$capture_path" "--data-dir $case_dir/storage-root/.mnemonas/objects"
 	assert_file_contains "$capture_path" "--min-chunk-size 65536"
 	assert_file_contains "$capture_path" "--avg-chunk-size 1048576"
 	assert_file_contains "$capture_path" "--max-chunk-size 4194304"
@@ -320,6 +320,72 @@ EOF
 	assert_not_exists "$capture_path"
 }
 
+run_storage_root_newline_test() {
+	local case_dir="$TMP_ROOT/storage-root-newline"
+	local config_path="$case_dir/config.toml"
+	local capture_path="$case_dir/dataplane.args"
+	local dataplane_bin="$case_dir/capture-dataplane"
+	local storage_root
+	local status
+	mkdir -p "$case_dir"
+	storage_root="$case_dir/storage"$'\n'"escape"
+
+	cat > "$config_path" <<EOF
+[storage]
+root = "$case_dir/storage"
+EOF
+
+	write_executable "$dataplane_bin" \
+		'#!/usr/bin/env bash' \
+		'printf "%s\n" "$*" > "$CAPTURE_PATH"'
+
+	set +e
+	CAPTURE_PATH="$capture_path" \
+		CONFIG_PATH="$config_path" \
+		DATAPLANE_BIN="$dataplane_bin" \
+		STORAGE_ROOT="$storage_root" \
+		bash "$REPO_ROOT/scripts/mnemonas-dataplane-start.sh" > "$case_dir/out.log" 2>&1
+	status=$?
+	set -e
+
+	[[ "$status" -ne 0 ]] || fail "storage root newline was accepted"
+	assert_file_contains "$case_dir/out.log" "storage.root cannot contain newline characters"
+	assert_not_exists "$capture_path"
+}
+
+run_storage_root_control_character_test() {
+	local case_dir="$TMP_ROOT/storage-root-control"
+	local config_path="$case_dir/config.toml"
+	local capture_path="$case_dir/dataplane.args"
+	local dataplane_bin="$case_dir/capture-dataplane"
+	local storage_root
+	local status
+	mkdir -p "$case_dir"
+	storage_root="$case_dir/storage"$'\a'"escape"
+
+	cat > "$config_path" <<EOF
+[storage]
+root = "$case_dir/storage"
+EOF
+
+	write_executable "$dataplane_bin" \
+		'#!/usr/bin/env bash' \
+		'printf "%s\n" "$*" > "$CAPTURE_PATH"'
+
+	set +e
+	CAPTURE_PATH="$capture_path" \
+		CONFIG_PATH="$config_path" \
+		DATAPLANE_BIN="$dataplane_bin" \
+		STORAGE_ROOT="$storage_root" \
+		bash "$REPO_ROOT/scripts/mnemonas-dataplane-start.sh" > "$case_dir/out.log" 2>&1
+	status=$?
+	set -e
+
+	[[ "$status" -ne 0 ]] || fail "storage root control character was accepted"
+	assert_file_contains "$case_dir/out.log" "storage.root cannot contain control characters"
+	assert_not_exists "$capture_path"
+}
+
 run_config_path_symlink_test() {
 	local case_dir="$TMP_ROOT/config-path-symlink"
 	local real_dir="$case_dir/real"
@@ -448,6 +514,39 @@ EOF
 	assert_not_exists "$capture_path"
 }
 
+run_dataplane_data_dir_newline_test() {
+	local case_dir="$TMP_ROOT/dataplane-dir-newline"
+	local config_path="$case_dir/config.toml"
+	local capture_path="$case_dir/dataplane.args"
+	local dataplane_bin="$case_dir/capture-dataplane"
+	local data_dir
+	local status
+	mkdir -p "$case_dir"
+	data_dir="$case_dir/objects"$'\n'"escape"
+
+	cat > "$config_path" <<EOF
+[storage]
+root = "$case_dir/storage"
+EOF
+
+	write_executable "$dataplane_bin" \
+		'#!/usr/bin/env bash' \
+		'printf "%s\n" "$*" > "$CAPTURE_PATH"'
+
+	set +e
+	CAPTURE_PATH="$capture_path" \
+		CONFIG_PATH="$config_path" \
+		DATAPLANE_BIN="$dataplane_bin" \
+		DATAPLANE_DATA_DIR="$data_dir" \
+		bash "$REPO_ROOT/scripts/mnemonas-dataplane-start.sh" > "$case_dir/out.log" 2>&1
+	status=$?
+	set -e
+
+	[[ "$status" -ne 0 ]] || fail "DATAPLANE_DATA_DIR newline was accepted"
+	assert_file_contains "$case_dir/out.log" "DATAPLANE_DATA_DIR cannot contain newline characters"
+	assert_not_exists "$capture_path"
+}
+
 run_dataplane_data_dir_symlink_test() {
 	local case_dir="$TMP_ROOT/dataplane-dir-symlink"
 	local config_path="$case_dir/config.toml"
@@ -491,10 +590,13 @@ run_invalid_http_address_test
 run_quoted_hash_storage_root_test
 run_protected_storage_root_test
 run_storage_root_traversal_test
+run_storage_root_newline_test
+run_storage_root_control_character_test
 run_config_path_symlink_test
 run_storage_root_symlink_test
 run_protected_dataplane_data_dir_test
 run_dataplane_data_dir_traversal_test
+run_dataplane_data_dir_newline_test
 run_dataplane_data_dir_symlink_test
 
 printf '[dataplane-start-test] all checks passed\n'

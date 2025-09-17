@@ -1,5 +1,5 @@
 import { getInvalidHomeDirDescription, invalidHomeDirTitle, resolveUserHomeScope } from '@/lib/userScope'
-import { useCallback, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   Button,
@@ -34,6 +34,7 @@ import { FileIcon } from '@/components/ui/FileIcon'
 import { EmptyState } from '@/components/ui/EmptyState'
 import { formatBytes, cn, formatRelativeTime } from '@/lib/utils'
 import { useBatchOperation, type BatchOperationResult } from '@/lib/useBatchOperation'
+import { GENERIC_ACTION_ERROR_DESCRIPTION, GENERIC_LOAD_ERROR_DESCRIPTION, getUserFacingErrorDescription } from '@/lib/apiMessages'
 import { PageHeader } from '@/components/ui/PageHeader'
 import { useCanWrite, useUser } from '@/stores/auth'
 
@@ -76,12 +77,48 @@ function getAutoDeleteBadgeLabel(deletedAt: string, retentionDays: number | unde
 }
 
 const trashUnavailableDescription = '文件系统当前不可用，请稍后重试'
+const missingTrashItemTitle = '回收站条目已不存在，已同步更新'
 
 function getMissingTrashItemResult(): ActionResult {
   return {
     warning: true,
-    message: '回收站条目已不存在，已同步更新',
+    message: missingTrashItemTitle,
   }
+}
+
+function getTrashRestoreSuccessToast(result: ActionResult): {
+  title: string
+  color: 'success' | 'warning'
+} {
+  if (result.warning) {
+    return {
+      title: result.message === missingTrashItemTitle ? missingTrashItemTitle : '恢复完成，但存在警告',
+      color: 'warning',
+    }
+  }
+
+  return { title: '恢复成功', color: 'success' }
+}
+
+function getTrashDeleteSuccessToast(result: ActionResult): {
+  title: string
+  color: 'success' | 'warning'
+} {
+  if (result.warning) {
+    return {
+      title: result.message === missingTrashItemTitle ? missingTrashItemTitle : '已永久删除，但存在警告',
+      color: 'warning',
+    }
+  }
+
+  return { title: '已永久删除', color: 'success' }
+}
+
+function isAbortError(error: unknown): boolean {
+  return typeof error === 'object'
+    && error !== null
+    && 'name' in error
+    && (error as { name?: unknown }).name === 'AbortError'
 }
 
 function getTrashLoadErrorPresentation(error: unknown): {
@@ -100,7 +137,7 @@ function getTrashLoadErrorPresentation(error: unknown): {
   return {
     title: '加载回收站失败',
     subtitle: '加载失败',
-    description: error instanceof Error && error.message ? error.message : '请稍后重试',
+    description: getUserFacingErrorDescription(error, GENERIC_LOAD_ERROR_DESCRIPTION),
   }
 }
 
@@ -125,7 +162,7 @@ function getTrashActionErrorPresentation(
 
   return {
     title: titles.failure,
-    description: error instanceof Error && error.message ? error.message : '请稍后重试',
+    description: getUserFacingErrorDescription(error, GENERIC_ACTION_ERROR_DESCRIPTION),
     color: 'danger',
   }
 }
@@ -134,14 +171,16 @@ function getTrashBatchActionToast(
   result: BatchOperationResult,
   titles: {
     unavailable: string
+    warning: string
   }
 ) {
-	if (result.failed === 0 && result.warningCount > 0) {
-		return {
-			title: result.warningMessages[0] ?? `已恢复 ${result.succeeded} 项，但存在警告`,
-			color: 'warning' as const,
-		}
-	}
+  if (result.failed === 0 && result.warningCount > 0) {
+    return {
+      title: result.warningMessages.find((message) => message === missingTrashItemTitle)
+        ?? titles.warning.replace('{count}', String(result.succeeded)),
+      color: 'warning' as const,
+    }
+  }
 
   if (result.succeeded === 0 && result.failedErrors.length > 0 && result.failedErrors.every((error) => {
     return error instanceof ApiError && error.isUnavailable
@@ -273,10 +312,30 @@ export function TrashPage() {
   const [selectedItems, setSelectedItems] = useState<Set<string>>(new Set())
   const [actionItem, setActionItem] = useState<TrashItem | null>(null)
   const actionItemRef = useRef(actionItem)
+  const restoreAbortControllerRef = useRef<AbortController | null>(null)
+  const deleteAbortControllerRef = useRef<AbortController | null>(null)
+  const emptyAbortControllerRef = useRef<AbortController | null>(null)
+  const batchRestoreAbortControllerRef = useRef<AbortController | null>(null)
+  const batchDeleteAbortControllerRef = useRef<AbortController | null>(null)
 
   useLayoutEffect(() => {
     actionItemRef.current = actionItem
   }, [actionItem])
+
+  useEffect(() => {
+    return () => {
+      restoreAbortControllerRef.current?.abort()
+      restoreAbortControllerRef.current = null
+      deleteAbortControllerRef.current?.abort()
+      deleteAbortControllerRef.current = null
+      emptyAbortControllerRef.current?.abort()
+      emptyAbortControllerRef.current = null
+      batchRestoreAbortControllerRef.current?.abort()
+      batchRestoreAbortControllerRef.current = null
+      batchDeleteAbortControllerRef.current?.abort()
+      batchDeleteAbortControllerRef.current = null
+    }
+  }, [])
 
   const { isOpen: isDeleteOpen, onOpen: onDeleteOpen, onClose: onDeleteClose } = useDisclosure()
   const { isOpen: isBatchDeleteOpen, onOpen: onBatchDeleteOpen, onClose: onBatchDeleteClose } = useDisclosure()
@@ -284,7 +343,7 @@ export function TrashPage() {
 
   const { data, isLoading, error, refetch } = useQuery({
     queryKey: trashQueryKey,
-    queryFn: listTrash,
+    queryFn: ({ signal }) => listTrash({ signal }),
     enabled: !hasInvalidHomeDir,
   })
 
@@ -386,9 +445,9 @@ export function TrashPage() {
   addToast({ title: '回收站已刷新', color: 'success' })
   }, [refetch])
 
-  const restoreTrashItem = useCallback(async (id: string) => {
+  const restoreTrashItem = useCallback(async (id: string, options: { signal?: AbortSignal } = {}) => {
     try {
-      return await restoreFromTrash(id)
+      return await restoreFromTrash(id, undefined, options)
     } catch (error) {
       if (error instanceof ApiError && error.isNotFound) {
         return getMissingTrashItemResult()
@@ -398,9 +457,9 @@ export function TrashPage() {
     }
   }, [])
 
-  const deleteTrashItem = useCallback(async (id: string) => {
+  const deleteTrashItem = useCallback(async (id: string, options: { signal?: AbortSignal } = {}) => {
     try {
-      return await deleteFromTrash(id)
+      return await deleteFromTrash(id, options)
     } catch (error) {
       if (error instanceof ApiError && error.isNotFound) {
         return getMissingTrashItemResult()
@@ -412,70 +471,97 @@ export function TrashPage() {
 
   // Mutations
   const restoreMutation = useMutation({
-    mutationFn: (id: string) => restoreTrashItem(id),
-    onSuccess: (result, id) => {
+    mutationFn: ({ id, signal }: { id: string; signal: AbortSignal }) => restoreTrashItem(id, { signal }),
+    onSuccess: (result, variables) => {
+      if (variables.signal.aborted) {
+        return
+      }
+      const id = variables.id
       removeTrashItemsFromCache([id])
       removeSelectedIds([id])
       queryClient.invalidateQueries({ queryKey: trashQueryKey })
       queryClient.invalidateQueries({ queryKey: ['files'] })
-		if (result.warning) {
-			addToast({ title: result.message ?? '恢复完成，但存在警告', color: 'warning' })
-		} else {
-			addToast({ title: '恢复成功', color: 'success' })
-		}
+      addToast(getTrashRestoreSuccessToast(result))
     },
-    onError: (error) => {
+    onError: (error, variables) => {
+      if (variables.signal.aborted || isAbortError(error)) {
+        return
+      }
       addToast(getTrashActionErrorPresentation(error, {
         unavailable: '恢复暂不可用',
         failure: '恢复失败',
       }))
     },
+    onSettled: (_result, _error, variables) => {
+      if (restoreAbortControllerRef.current?.signal === variables?.signal) {
+        restoreAbortControllerRef.current = null
+      }
+    },
   })
 
   const deleteMutation = useMutation({
-    mutationFn: (id: string) => deleteTrashItem(id),
-    onSuccess: (result, id) => {
+    mutationFn: ({ id, signal }: { id: string; signal: AbortSignal }) => deleteTrashItem(id, { signal }),
+    onSuccess: (result, variables) => {
+      if (variables.signal.aborted) {
+        return
+      }
+      const id = variables.id
       removeTrashItemsFromCache([id])
       removeSelectedIds([id])
-	  queryClient.invalidateQueries({ queryKey: trashQueryKey })
-		if (result.warning) {
-			addToast({ title: result.message ?? '已永久删除，但存在警告', color: 'warning' })
-		} else {
-			addToast({ title: '已永久删除', color: 'success' })
-		}
+      queryClient.invalidateQueries({ queryKey: trashQueryKey })
+      addToast(getTrashDeleteSuccessToast(result))
       if (actionItemRef.current?.id === id) {
         onDeleteClose()
       }
       setActionItem((current) => current?.id === id ? null : current)
     },
-    onError: (error) => {
+    onError: (error, variables) => {
+      if (variables.signal.aborted || isAbortError(error)) {
+        return
+      }
       addToast(getTrashActionErrorPresentation(error, {
         unavailable: '永久删除暂不可用',
         failure: '删除失败',
       }))
     },
+    onSettled: (_result, _error, variables) => {
+      if (deleteAbortControllerRef.current?.signal === variables?.signal) {
+        deleteAbortControllerRef.current = null
+      }
+    },
   })
 
   const emptyMutation = useMutation({
-    mutationFn: emptyTrash,
-    onSuccess: (result) => {
+    mutationFn: ({ signal }: { signal: AbortSignal }) => emptyTrash({ signal }),
+    onSuccess: (result, variables) => {
+      if (variables.signal.aborted) {
+        return
+      }
       clearTrashCache()
       setSelectedItems(new Set())
       queryClient.invalidateQueries({ queryKey: trashQueryKey })
       if (result.partial) {
         addToast({ title: `回收站已部分清空，删除 ${result.deletedCount} 项`, color: 'warning' })
       } else if (result.warning) {
-        addToast({ title: result.message ?? `已清空回收站，删除 ${result.deletedCount} 项，但存在警告`, color: 'warning' })
+        addToast({ title: `已清空回收站，删除 ${result.deletedCount} 项，但存在警告`, color: 'warning' })
       } else {
         addToast({ title: `已清空回收站，删除 ${result.deletedCount} 项`, color: 'success' })
       }
       onEmptyClose()
     },
-    onError: (error) => {
+    onError: (error, variables) => {
+      if (variables.signal.aborted || isAbortError(error)) {
+        return
+      }
       addToast(getTrashActionErrorPresentation(error, {
         unavailable: '清空回收站暂不可用',
         failure: '清空失败',
       }))
+    },
+    onSettled: (_result, _error, variables) => {
+      if (emptyAbortControllerRef.current?.signal === variables?.signal) {
+        emptyAbortControllerRef.current = null
+      }
     },
   })
 
@@ -504,8 +590,8 @@ export function TrashPage() {
   }, [canWrite, items, visibleSelectedItems.size])
 
   // Batch restore using custom hook
-  const { execute: executeBatchRestore, isLoading: isBatchRestoring } = useBatchOperation({
-    operation: restoreTrashItem,
+  const { execute: executeBatchRestore, isLoading: isBatchRestoring } = useBatchOperation<string, ActionResult>({
+    operation: (id, context) => restoreTrashItem(id, { signal: context.signal }),
     messages: {
       success: '{count} 项恢复成功',
       failure: '{count} 项恢复失败',
@@ -513,6 +599,7 @@ export function TrashPage() {
     },
     getToast: (result) => getTrashBatchActionToast(result, {
       unavailable: '批量恢复暂不可用',
+      warning: '已恢复 {count} 项，但存在警告',
     }),
     onComplete: (result) => {
       removeTrashItemsFromCache(result.succeededItems as string[])
@@ -526,12 +613,21 @@ export function TrashPage() {
     if (!canWrite) return
     const ids = Array.from(visibleSelectedItems)
     if (ids.length === 0) return
-    await executeBatchRestore(ids)
+    batchRestoreAbortControllerRef.current?.abort()
+    const controller = new AbortController()
+    batchRestoreAbortControllerRef.current = controller
+    try {
+      await executeBatchRestore(ids, { signal: controller.signal })
+    } finally {
+      if (batchRestoreAbortControllerRef.current === controller) {
+        batchRestoreAbortControllerRef.current = null
+      }
+    }
   }, [canWrite, visibleSelectedItems, executeBatchRestore])
 
   // Batch delete using custom hook
-  const { execute: executeBatchDelete, isLoading: isBatchDeleting } = useBatchOperation({
-    operation: deleteTrashItem,
+  const { execute: executeBatchDelete, isLoading: isBatchDeleting } = useBatchOperation<string, ActionResult>({
+    operation: (id, context) => deleteTrashItem(id, { signal: context.signal }),
     messages: {
       success: '{count} 项已永久删除',
       failure: '{count} 项永久删除失败',
@@ -539,6 +635,7 @@ export function TrashPage() {
     },
     getToast: (result) => getTrashBatchActionToast(result, {
       unavailable: '批量永久删除暂不可用',
+      warning: '已永久删除 {count} 项，但存在警告',
     }),
     onComplete: (result) => {
       removeTrashItemsFromCache(result.succeededItems as string[])
@@ -558,8 +655,19 @@ export function TrashPage() {
     if (!canWrite) return
     const ids = Array.from(visibleSelectedItems)
     if (ids.length === 0) return
-    await executeBatchDelete(ids)
-    onBatchDeleteClose()
+    batchDeleteAbortControllerRef.current?.abort()
+    const controller = new AbortController()
+    batchDeleteAbortControllerRef.current = controller
+    try {
+      await executeBatchDelete(ids, { signal: controller.signal })
+      if (!controller.signal.aborted) {
+        onBatchDeleteClose()
+      }
+    } finally {
+      if (batchDeleteAbortControllerRef.current === controller) {
+        batchDeleteAbortControllerRef.current = null
+      }
+    }
   }, [canWrite, visibleSelectedItems, executeBatchDelete, onBatchDeleteClose])
 
   const handleDeleteClick = useCallback((item: TrashItem) => {
@@ -568,12 +676,31 @@ export function TrashPage() {
     onDeleteOpen()
   }, [canWrite, onDeleteOpen])
 
+  const handleRestoreClick = useCallback((item: TrashItem) => {
+    if (!canWrite) return
+    restoreAbortControllerRef.current?.abort()
+    const controller = new AbortController()
+    restoreAbortControllerRef.current = controller
+    restoreMutation.mutate({ id: item.id, signal: controller.signal })
+  }, [canWrite, restoreMutation])
+
   const handleConfirmDelete = useCallback(() => {
     if (!canWrite) return
     if (actionItem) {
-      deleteMutation.mutate(actionItem.id)
+      deleteAbortControllerRef.current?.abort()
+      const controller = new AbortController()
+      deleteAbortControllerRef.current = controller
+      deleteMutation.mutate({ id: actionItem.id, signal: controller.signal })
     }
   }, [canWrite, actionItem, deleteMutation])
+
+  const handleConfirmEmpty = useCallback(() => {
+    if (!canWrite) return
+    emptyAbortControllerRef.current?.abort()
+    const controller = new AbortController()
+    emptyAbortControllerRef.current = controller
+    emptyMutation.mutate({ signal: controller.signal })
+  }, [canWrite, emptyMutation])
 
   if (hasInvalidHomeDir) {
     return (
@@ -750,10 +877,7 @@ export function TrashPage() {
                 }
                 setSelectedItems(newSet)
               }}
-              onRestore={() => {
-                if (!canWrite) return
-                restoreMutation.mutate(item.id)
-              }}
+              onRestore={() => handleRestoreClick(item)}
               onDelete={() => handleDeleteClick(item)}
             />
           ))
@@ -908,7 +1032,7 @@ export function TrashPage() {
             </Button>
             <Button
               color="danger"
-              onPress={() => emptyMutation.mutate()}
+              onPress={handleConfirmEmpty}
               isLoading={emptyMutation.isPending}
               className="rounded-lg"
             >

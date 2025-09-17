@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -1768,6 +1769,39 @@ func TestStore_SearchFiles(t *testing.T) {
 
 	if len(results) != 1 {
 		t.Errorf("SearchFiles(readme) returned %d results, want 1", len(results))
+	}
+}
+
+func TestStore_SearchFiles_TreatsLikeWildcardsAsLiterals(t *testing.T) {
+	s := setupStore(t)
+	ctx := context.Background()
+	now := time.Now()
+
+	for _, indexedPath := range []string{
+		"/docs/literal%name.txt",
+		"/docs/literal_name.txt",
+		"/docs/literalXname.txt",
+		"/docs/other.txt",
+	} {
+		if err := s.UpdateFileIndex(ctx, indexedPath, 100, now, "hash-"+indexedPath); err != nil {
+			t.Fatalf("UpdateFileIndex(%s) error: %v", indexedPath, err)
+		}
+	}
+
+	percentResults, err := s.SearchFiles(ctx, "%", 10)
+	if err != nil {
+		t.Fatalf("SearchFiles(%%) error: %v", err)
+	}
+	if !reflect.DeepEqual(percentResults, []string{"/docs/literal%name.txt"}) {
+		t.Fatalf("SearchFiles(%%) = %v, want literal percent path only", percentResults)
+	}
+
+	underscoreResults, err := s.SearchFiles(ctx, "_", 10)
+	if err != nil {
+		t.Fatalf("SearchFiles(_) error: %v", err)
+	}
+	if !reflect.DeepEqual(underscoreResults, []string{"/docs/literal_name.txt"}) {
+		t.Fatalf("SearchFiles(_) = %v, want literal underscore path only", underscoreResults)
 	}
 }
 

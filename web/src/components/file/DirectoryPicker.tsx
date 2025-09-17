@@ -24,6 +24,8 @@ import { listFiles, createDirectory, ApiError, type FileItem } from '@/api/files
 import { EmptyState } from '@/components/ui/EmptyState'
 import { useUser } from '@/stores/auth'
 import { getFileQueryScopeKey, getFilesQueryKey } from '@/lib/fileQueryKey'
+import { getPathConflictErrorToast } from '@/lib/fileActionErrors'
+import { GENERIC_LOAD_ERROR_DESCRIPTION, getUserFacingErrorDescription } from '@/lib/apiMessages'
 import { cn, normalizePath } from '@/lib/utils'
 import { getInvalidHomeDirDescription, invalidHomeDirTitle, resolveUserHomeScope } from '@/lib/userScope'
 
@@ -46,7 +48,7 @@ function getDirectoryPickerRetryErrorToast(error: unknown): {
   return getDirectoryPickerErrorPresentation(error, {
     unavailable: '目录暂不可用',
     failure: '加载目录失败',
-  })
+  }, GENERIC_LOAD_ERROR_DESCRIPTION)
 }
 
 interface TreeNodeData {
@@ -64,7 +66,8 @@ function getDirectoryPickerErrorPresentation(
   titles: {
     unavailable: string
     failure: string
-  }
+  },
+  fallbackDescription?: string
 ): {
   title: string
   description: string
@@ -80,17 +83,17 @@ function getDirectoryPickerErrorPresentation(
 
   return {
     title: titles.failure,
-    description: error instanceof Error ? error.message : '请稍后重试',
+    description: getUserFacingErrorDescription(error, fallbackDescription),
     color: 'danger',
   }
 }
 
-function getDirectoryPickerCreateSuccessToast(message?: string): {
+function getDirectoryPickerCreateSuccessToast(): {
   title: string
   color: 'warning'
 } {
   return {
-    title: message ?? '文件夹创建完成，但存在警告',
+    title: '文件夹创建完成，但存在警告',
     color: 'warning',
   }
 }
@@ -100,7 +103,7 @@ function getDirectoryPickerCreateToast(result: { warning: boolean; message?: str
   color: 'warning'
 } | null {
   if (result.warning) {
-    return getDirectoryPickerCreateSuccessToast(result.message)
+    return getDirectoryPickerCreateSuccessToast()
   }
 
   if (result.message === 'directory already exists') {
@@ -118,22 +121,9 @@ function getDirectoryPickerCreateErrorToast(error: unknown): {
   description: string
   color: 'warning' | 'danger'
 } {
-  if (error instanceof Error) {
-    if (error.message === 'resource already exists') {
-      return {
-        title: '同名项目已存在',
-        description: '当前目录中已存在同名文件或文件夹，请使用其他名称。',
-        color: 'warning',
-      }
-    }
-
-    if (error.message === 'parent path is not a directory') {
-      return {
-        title: '目标位置不可用',
-        description: '当前目录状态已变更，请刷新列表后重试。',
-        color: 'warning',
-      }
-    }
+  const pathConflictToast = getPathConflictErrorToast(error)
+  if (pathConflictToast) {
+    return pathConflictToast
   }
 
   return getDirectoryPickerErrorPresentation(error, {
@@ -147,6 +137,14 @@ function pathWithinBase(basePath: string, targetPath: string): boolean {
     return targetPath.startsWith('/')
   }
   return targetPath === basePath || targetPath.startsWith(`${basePath}/`)
+}
+
+function pathDisplayName(filePath: string): string {
+  const normalized = normalizePath(filePath)
+  if (normalized === '/') {
+    return '根目录'
+  }
+  return normalized.split('/').filter(Boolean).pop() || normalized
 }
 
 function TreeNode({
@@ -242,16 +240,34 @@ export function DirectoryPicker({
   const user = useUser()
   const fileScopeKey = getFileQueryScopeKey(user)
   const { rootPath, hasInvalidHomeDir } = resolveUserHomeScope(user)
-  const effectiveRootPath = rootPath ?? '/'
+  const requestedInitialPath = useMemo(() => {
+    if (!rootPath) {
+      return '/'
+    }
+    try {
+      return normalizePath(initialPath || rootPath)
+    } catch {
+      return rootPath
+    }
+  }, [initialPath, rootPath])
+  const effectiveRootPath = useMemo(() => {
+    if (!rootPath) {
+      return '/'
+    }
+    if (requestedInitialPath !== '/' && !pathWithinBase(rootPath, requestedInitialPath)) {
+      return requestedInitialPath
+    }
+    return rootPath
+  }, [requestedInitialPath, rootPath])
   const rootFilesQueryKey = getFilesQueryKey(fileScopeKey, effectiveRootPath)
-  const rootLabel = effectiveRootPath === '/' ? '根目录' : '主目录'
+  const rootLabel = effectiveRootPath === '/' ? '根目录' : effectiveRootPath === rootPath ? '主目录' : pathDisplayName(effectiveRootPath)
   const normalizeInitialPath = useCallback((path: string) => {
     if (!rootPath) {
       return '/'
     }
-    const normalized = normalizePath(path || rootPath)
-    return pathWithinBase(rootPath, normalized) ? normalized : rootPath
-  }, [rootPath])
+    const normalized = normalizePath(path || effectiveRootPath)
+    return pathWithinBase(effectiveRootPath, normalized) ? normalized : effectiveRootPath
+  }, [effectiveRootPath, rootPath])
 
   const [selectedPath, setSelectedPath] = useState(() => normalizeInitialPath(initialPath))
   const [expandedPaths, setExpandedPaths] = useState<Set<string>>(new Set([effectiveRootPath]))
@@ -264,10 +280,47 @@ export function DirectoryPicker({
   const currentSelectedPathRef = useRef(normalizeInitialPath(initialPath))
   const currentNewFolderNameRef = useRef('')
   const currentOpenRef = useRef(isOpen)
+  const directoryLoadControllersRef = useRef(new Map<string, AbortController>())
+  const createFolderControllerRef = useRef<AbortController | null>(null)
+  const createFolderReloadControllerRef = useRef<AbortController | null>(null)
   const lastResetTargetRef = useRef({
     rootPath: effectiveRootPath,
     selectedPath: normalizeInitialPath(initialPath),
   })
+
+  const abortDirectoryLoads = useCallback(() => {
+    for (const controller of directoryLoadControllersRef.current.values()) {
+      controller.abort()
+    }
+    directoryLoadControllersRef.current.clear()
+  }, [])
+
+  const abortCreateFolderRequest = useCallback(() => {
+    createFolderControllerRef.current?.abort()
+    createFolderControllerRef.current = null
+  }, [])
+
+  const abortCreateFolderReload = useCallback(() => {
+    createFolderReloadControllerRef.current?.abort()
+    createFolderReloadControllerRef.current = null
+  }, [])
+
+  useEffect(() => {
+    return () => {
+      currentOpenRef.current = false
+      abortDirectoryLoads()
+      abortCreateFolderRequest()
+      abortCreateFolderReload()
+    }
+  }, [abortDirectoryLoads, abortCreateFolderRequest, abortCreateFolderReload])
+
+  useEffect(() => {
+    if (!isOpen) {
+      abortDirectoryLoads()
+      abortCreateFolderRequest()
+      abortCreateFolderReload()
+    }
+  }, [isOpen, abortDirectoryLoads, abortCreateFolderRequest, abortCreateFolderReload])
 
   useEffect(() => {
     currentSelectedPathRef.current = selectedPath
@@ -295,6 +348,9 @@ export function DirectoryPicker({
       rootPath: effectiveRootPath,
       selectedPath: nextSelectedPath,
     }
+    abortDirectoryLoads()
+    abortCreateFolderRequest()
+    abortCreateFolderReload()
     pickerSessionRef.current += 1
     let cancelled = false
     queueMicrotask(() => {
@@ -310,13 +366,13 @@ export function DirectoryPicker({
     return () => {
       cancelled = true
     }
-  }, [isOpen, initialPath, normalizeInitialPath, effectiveRootPath])
+  }, [isOpen, initialPath, normalizeInitialPath, effectiveRootPath, abortDirectoryLoads, abortCreateFolderRequest, abortCreateFolderReload])
 
   
   // Load root directory
   const { data: rootData, error: rootError, isLoading: isLoadingRoot, refetch: refetchRoot } = useQuery({
     queryKey: rootFilesQueryKey,
-    queryFn: () => listFiles(effectiveRootPath),
+    queryFn: ({ signal }) => listFiles(effectiveRootPath, { signal }),
     enabled: isOpen && !hasInvalidHomeDir,
   })
 
@@ -354,21 +410,31 @@ export function DirectoryPicker({
   const loadDirectory = useCallback(async (path: string) => {
     if (loadedPaths.has(path)) return true
     const sessionId = pickerSessionRef.current
+    directoryLoadControllersRef.current.get(path)?.abort()
+    const controller = new AbortController()
+    directoryLoadControllersRef.current.set(path, controller)
     
     try {
-      const data = await listFiles(path)
-      if (pickerSessionRef.current !== sessionId || !currentOpenRef.current) {
+      const data = await listFiles(path, { signal: controller.signal })
+      if (controller.signal.aborted || pickerSessionRef.current !== sessionId || !currentOpenRef.current) {
         return false
       }
       setFolderContents(prev => new Map(prev).set(path, data.files))
       setLoadedPaths(prev => new Set(prev).add(path))
       return true
     } catch (error) {
+      if (controller.signal.aborted) {
+        return false
+      }
       addToast(getDirectoryPickerErrorPresentation(error, {
         unavailable: '目录暂不可用',
         failure: '加载目录失败',
-      }))
+      }, GENERIC_LOAD_ERROR_DESCRIPTION))
       return false
+    } finally {
+      if (directoryLoadControllersRef.current.get(path) === controller) {
+        directoryLoadControllersRef.current.delete(path)
+      }
     }
   }, [loadedPaths])
 
@@ -416,18 +482,30 @@ export function DirectoryPicker({
 
     const sessionId = pickerSessionRef.current
     const parentPath = selectedPath
+    abortCreateFolderRequest()
+    const createController = new AbortController()
+    createFolderControllerRef.current = createController
+    let reloadController: AbortController | null = null
     
     setIsCreating(true)
     try {
       const newPath = parentPath === '/' 
         ? `/${trimmedFolderName}` 
         : `${parentPath}/${trimmedFolderName}`
-      const result = await createDirectory(newPath)
+      const result = await createDirectory(newPath, { signal: createController.signal })
+      if (createController.signal.aborted || pickerSessionRef.current !== sessionId || !currentOpenRef.current) {
+        return
+      }
       
       // Reload parent directory
-      const parentFiles = await listFiles(parentPath)
+      abortCreateFolderReload()
+      reloadController = new AbortController()
+      createFolderReloadControllerRef.current = reloadController
+      const parentFiles = await listFiles(parentPath, { signal: reloadController.signal })
 
       if (
+        !reloadController.signal.aborted
+        &&
         pickerSessionRef.current === sessionId
         && currentOpenRef.current
         && currentSelectedPathRef.current === parentPath
@@ -449,13 +527,28 @@ export function DirectoryPicker({
         addToast(createToast)
       }
     } catch (error) {
+      if (
+        createController.signal.aborted
+        ||
+        reloadController?.signal.aborted
+        || pickerSessionRef.current !== sessionId
+        || !currentOpenRef.current
+      ) {
+        return
+      }
       addToast(getDirectoryPickerCreateErrorToast(error))
     } finally {
+      if (createFolderControllerRef.current === createController) {
+        createFolderControllerRef.current = null
+      }
+      if (createFolderReloadControllerRef.current === reloadController) {
+        createFolderReloadControllerRef.current = null
+      }
       if (pickerSessionRef.current === sessionId && currentOpenRef.current) {
         setIsCreating(false)
       }
     }
-  }, [newFolderName, selectedPath])
+  }, [newFolderName, selectedPath, abortCreateFolderRequest, abortCreateFolderReload])
 
   const handleCancelCreateFolder = useCallback(() => {
     if (isCreating) {
@@ -509,7 +602,7 @@ export function DirectoryPicker({
           <div className="flex items-center gap-2 mb-4 p-2 bg-content2 rounded-lg">
             <Home size={14} className="text-default-500" />
             <span className="text-sm text-default-600 truncate">
-              {selectedPath === effectiveRootPath ? rootLabel : selectedPath}
+              {selectedPath === effectiveRootPath && (effectiveRootPath === '/' || effectiveRootPath === rootPath) ? rootLabel : selectedPath}
             </span>
           </div>
           
@@ -533,7 +626,7 @@ export function DirectoryPicker({
                 const errorPresentation = getDirectoryPickerErrorPresentation(rootError, {
                   unavailable: '目录暂不可用',
                   failure: '加载目录失败',
-                })
+                }, GENERIC_LOAD_ERROR_DESCRIPTION)
 
                 return (
               <div className="flex h-32 flex-col items-center justify-center gap-3 text-center">

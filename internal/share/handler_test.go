@@ -1,6 +1,7 @@
 package share
 
 import (
+	"archive/zip"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -25,6 +26,7 @@ import (
 
 type fakeShareFS struct {
 	statInfo       *storage.FileInfo
+	statInfoByPath map[string]*storage.FileInfo
 	beforeStat     func(string) error
 	statErrByPath  map[string]error
 	dirItems       []*storage.FileInfo
@@ -34,6 +36,17 @@ type fakeShareFS struct {
 	openErrByPath  map[string]error
 	beforeReadDir  func(string) error
 	readDirErr     error
+}
+
+type fakeShareSnapshotFS struct {
+	*fakeShareFS
+	snapshotByPath map[string]fakeShareSnapshot
+}
+
+type fakeShareSnapshot struct {
+	hostPath string
+	info     *storage.FileInfo
+	err      error
 }
 
 type failingReadCloser struct {
@@ -48,6 +61,10 @@ type dataAndErrorReader struct {
 	data []byte
 	err  error
 	done bool
+}
+
+type readSeekCloser struct {
+	*bytes.Reader
 }
 
 type failFirstWriteResponseWriter struct {
@@ -116,6 +133,10 @@ func (r *dataAndErrorReader) Read(buf []byte) (int, error) {
 	}
 	r.done = true
 	return copy(buf, r.data), r.err
+}
+
+func (r *readSeekCloser) Close() error {
+	return nil
 }
 
 func TestPrefetchDownloadChunkPreservesEOFWithData(t *testing.T) {
@@ -232,6 +253,28 @@ func (f *fakeShareFS) OpenFile(ctx context.Context, filePath string) (FileReader
 	return nil, nil
 }
 
+func (f *fakeShareSnapshotFS) OpenFileSnapshot(ctx context.Context, filePath string) (*os.File, *storage.FileInfo, error) {
+	if f.snapshotByPath == nil {
+		return nil, nil, storage.ErrNotFound
+	}
+	snapshot, ok := f.snapshotByPath[filePath]
+	if !ok {
+		return nil, nil, storage.ErrNotFound
+	}
+	if snapshot.err != nil {
+		return nil, nil, snapshot.err
+	}
+	file, err := os.Open(snapshot.hostPath)
+	if err != nil {
+		return nil, nil, err
+	}
+	if snapshot.info == nil {
+		_ = file.Close()
+		return nil, nil, storage.ErrNotFound
+	}
+	return file, snapshot.info, nil
+}
+
 func (f *fakeShareFS) Stat(ctx context.Context, filePath string) (*storage.FileInfo, error) {
 	if f.beforeStat != nil {
 		if err := f.beforeStat(filePath); err != nil {
@@ -241,6 +284,11 @@ func (f *fakeShareFS) Stat(ctx context.Context, filePath string) (*storage.FileI
 	if f.statErrByPath != nil {
 		if err, ok := f.statErrByPath[filePath]; ok {
 			return nil, err
+		}
+	}
+	if f.statInfoByPath != nil {
+		if info, ok := f.statInfoByPath[filePath]; ok {
+			return info, nil
 		}
 	}
 	if f.statInfo == nil {
@@ -299,6 +347,9 @@ func assertShareAccessCookiePaths(t *testing.T, cookies []*http.Cookie, id strin
 		if _, ok := expectedPaths[cookie.Path]; !ok {
 			t.Fatalf("unexpected share access cookie path %q", cookie.Path)
 		}
+		if cookie.SameSite != http.SameSiteStrictMode {
+			t.Fatalf("share access cookie SameSite = %v, want Strict", cookie.SameSite)
+		}
 		expectedPaths[cookie.Path] = true
 	}
 	for cookiePath, found := range expectedPaths {
@@ -321,6 +372,61 @@ func assertUntrustedDownloadHeaders(t *testing.T, header http.Header) {
 	}
 	if got := header.Get("Content-Security-Policy"); !strings.Contains(got, "sandbox") || !strings.Contains(got, "default-src 'none'") {
 		t.Fatalf("download Content-Security-Policy = %q, want sandboxed default-src none", got)
+	}
+}
+
+func readShareZipEntries(t *testing.T, data []byte) map[string][]byte {
+	t.Helper()
+
+	reader, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		t.Fatalf("zip.NewReader() error: %v", err)
+	}
+
+	entries := make(map[string][]byte, len(reader.File))
+	for _, file := range reader.File {
+		if file.FileInfo().IsDir() {
+			entries[file.Name] = nil
+			continue
+		}
+		rc, err := file.Open()
+		if err != nil {
+			t.Fatalf("open zip entry %q: %v", file.Name, err)
+		}
+		content, err := io.ReadAll(rc)
+		closeErr := rc.Close()
+		if err != nil {
+			t.Fatalf("read zip entry %q: %v", file.Name, err)
+		}
+		if closeErr != nil {
+			t.Fatalf("close zip entry %q: %v", file.Name, closeErr)
+		}
+		entries[file.Name] = content
+	}
+	return entries
+}
+
+func assertPublicShareJSONHeaders(t *testing.T, header http.Header) {
+	t.Helper()
+	if cacheControl := header.Get("Cache-Control"); cacheControl != "private, no-cache" {
+		t.Fatalf("public share JSON Cache-Control = %q, want private, no-cache", cacheControl)
+	}
+	if got := header.Get("X-Content-Type-Options"); got != "nosniff" {
+		t.Fatalf("public share JSON X-Content-Type-Options = %q, want nosniff", got)
+	}
+	if got := header.Get("Referrer-Policy"); got != "no-referrer" {
+		t.Fatalf("public share JSON Referrer-Policy = %q, want no-referrer", got)
+	}
+	foundVaryCookie := false
+	for _, value := range header.Values("Vary") {
+		for _, token := range strings.Split(value, ",") {
+			if strings.EqualFold(strings.TrimSpace(token), "Cookie") {
+				foundVaryCookie = true
+			}
+		}
+	}
+	if !foundVaryCookie {
+		t.Fatalf("public share JSON Vary = %q, want Cookie", header.Values("Vary"))
 	}
 }
 
@@ -446,7 +552,7 @@ func TestPublicRoutes_DispatchesPublicShareAccess(t *testing.T) {
 	if err := json.Unmarshal(recorder.Body.Bytes(), &info); err != nil {
 		t.Fatalf("failed to decode public share info: %v", err)
 	}
-	if info.ID != share.ID || info.FileName != "report.pdf" || info.FileSize != 42 || info.Description != "Quarterly report" {
+	if info.ID != share.ID || info.FileName != "report.pdf" || info.FileSize == nil || *info.FileSize != 42 || info.Description != "Quarterly report" {
 		t.Fatalf("unexpected public share info: %+v", info)
 	}
 }
@@ -1853,6 +1959,7 @@ func TestAccessShare_PublicInfoFile(t *testing.T) {
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected status 200, got %d", recorder.Code)
 	}
+	assertPublicShareJSONHeaders(t, recorder.Header())
 
 	payload := decodeResponseBody(t, recorder)
 	if payload["file_name"] != "report.pdf" {
@@ -1860,6 +1967,51 @@ func TestAccessShare_PublicInfoFile(t *testing.T) {
 	}
 	if payload["file_size"] != float64(1234) {
 		t.Fatalf("expected file_size 1234, got %v", payload["file_size"])
+	}
+}
+
+func TestAccessShare_PublicInfoZeroByteFileIncludesFileSize(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	share, err := store.Create(CreateShareOptions{
+		Path:      "/docs/empty.txt",
+		Type:      ShareTypeFile,
+		CreatedBy: "user1",
+	})
+	if err != nil {
+		t.Fatalf("failed to create share: %v", err)
+	}
+
+	handler := NewHandler(store, &fakeShareFS{
+		statInfo: &storage.FileInfo{
+			Path:  share.Path,
+			Name:  "empty.txt",
+			Size:  0,
+			IsDir: false,
+		},
+	})
+
+	req := newRouteRequest(http.MethodGet, "/s/"+share.ID, share.ID, nil)
+	recorder := httptest.NewRecorder()
+	handler.AccessShare(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", recorder.Code)
+	}
+
+	payload := decodeResponseBody(t, recorder)
+	fileSize, exists := payload["file_size"]
+	if !exists {
+		t.Fatalf("expected zero-byte file_size field to be present, got %s", recorder.Body.String())
+	}
+	if fileSize != float64(0) {
+		t.Fatalf("expected file_size 0, got %v", fileSize)
 	}
 }
 
@@ -2129,10 +2281,11 @@ func TestAccessShare_WithPasswordDoesNotExposeInfo(t *testing.T) {
 	}
 
 	share, err := store.Create(CreateShareOptions{
-		Path:      "/docs/secret.pdf",
-		Type:      ShareTypeFile,
-		CreatedBy: "user1",
-		Password:  "secret",
+		Path:        "/docs/secret.pdf",
+		Type:        ShareTypeFile,
+		CreatedBy:   "user1",
+		Password:    "secret",
+		Description: "confidential quarterly acquisition plan",
 	})
 	if err != nil {
 		t.Fatalf("failed to create share: %v", err)
@@ -2161,6 +2314,9 @@ func TestAccessShare_WithPasswordDoesNotExposeInfo(t *testing.T) {
 	}
 	if _, exists := payload["file_size"]; exists {
 		t.Fatalf("expected file_size to be omitted for password-protected share")
+	}
+	if _, exists := payload["description"]; exists {
+		t.Fatalf("expected description to be omitted for password-protected share")
 	}
 }
 
@@ -2202,6 +2358,7 @@ func TestAccessShareWithPassword_FolderInfo(t *testing.T) {
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected status 200, got %d", recorder.Code)
 	}
+	assertPublicShareJSONHeaders(t, recorder.Header())
 
 	payload := decodeResponseBody(t, recorder)
 	if payload["file_name"] != "docs" {
@@ -2209,6 +2366,143 @@ func TestAccessShareWithPassword_FolderInfo(t *testing.T) {
 	}
 	if payload["folder_items"] != float64(2) {
 		t.Fatalf("expected folder_items 2, got %v", payload["folder_items"])
+	}
+	assertShareAccessCookiePaths(t, recorder.Result().Cookies(), share.ID)
+}
+
+func TestAccessShareWithPassword_FolderInfoSkipsEntriesOutsideShareRoot(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	share, err := store.Create(CreateShareOptions{
+		Path:      "/docs",
+		Type:      ShareTypeFolder,
+		CreatedBy: "user1",
+		Password:  "secret",
+	})
+	if err != nil {
+		t.Fatalf("failed to create share: %v", err)
+	}
+
+	handler := NewHandler(store, &fakeShareFS{
+		dirItems: []*storage.FileInfo{
+			{Path: "/docs/a.txt", Name: "a.txt"},
+			{Path: "/outside/secret.txt", Name: "secret.txt"},
+		},
+	})
+
+	body, err := json.Marshal(map[string]string{"password": "secret"})
+	if err != nil {
+		t.Fatalf("failed to marshal request: %v", err)
+	}
+
+	req := newRouteRequest(http.MethodPost, "/s/"+share.ID, share.ID, body)
+	recorder := httptest.NewRecorder()
+	handler.AccessShareWithPassword(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", recorder.Code)
+	}
+
+	payload := decodeResponseBody(t, recorder)
+	if payload["folder_items"] != float64(1) {
+		t.Fatalf("expected folder_items 1 after skipping outside entry, got %v", payload["folder_items"])
+	}
+}
+
+func TestAccessShareWithPassword_FolderInfoSkipsNonDirectReadDirChildren(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	share, err := store.Create(CreateShareOptions{
+		Path:      "/docs",
+		Type:      ShareTypeFolder,
+		CreatedBy: "user1",
+		Password:  "secret",
+	})
+	if err != nil {
+		t.Fatalf("failed to create share: %v", err)
+	}
+
+	handler := NewHandler(store, &fakeShareFS{
+		dirItems: []*storage.FileInfo{
+			{Path: "/docs/a.txt", Name: "a.txt"},
+			{Path: "/docs/nested/secret.txt", Name: "secret.txt"},
+		},
+	})
+
+	body, err := json.Marshal(map[string]string{"password": "secret"})
+	if err != nil {
+		t.Fatalf("failed to marshal request: %v", err)
+	}
+
+	req := newRouteRequest(http.MethodPost, "/s/"+share.ID, share.ID, body)
+	recorder := httptest.NewRecorder()
+	handler.AccessShareWithPassword(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", recorder.Code)
+	}
+
+	payload := decodeResponseBody(t, recorder)
+	if payload["folder_items"] != float64(1) {
+		t.Fatalf("expected folder_items 1 after skipping non-direct entry, got %v", payload["folder_items"])
+	}
+}
+
+func TestAccessShareWithPassword_EmptyFolderInfoIncludesFolderItems(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	share, err := store.Create(CreateShareOptions{
+		Path:      "/empty",
+		Type:      ShareTypeFolder,
+		CreatedBy: "user1",
+		Password:  "secret",
+	})
+	if err != nil {
+		t.Fatalf("failed to create share: %v", err)
+	}
+
+	handler := NewHandler(store, &fakeShareFS{
+		dirItems: []*storage.FileInfo{},
+	})
+
+	body, err := json.Marshal(map[string]string{"password": "secret"})
+	if err != nil {
+		t.Fatalf("failed to marshal request: %v", err)
+	}
+
+	req := newRouteRequest(http.MethodPost, "/s/"+share.ID, share.ID, body)
+	recorder := httptest.NewRecorder()
+	handler.AccessShareWithPassword(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", recorder.Code)
+	}
+
+	payload := decodeResponseBody(t, recorder)
+	folderItems, exists := payload["folder_items"]
+	if !exists {
+		t.Fatalf("expected empty folder_items field to be present, got %s", recorder.Body.String())
+	}
+	if folderItems != float64(0) {
+		t.Fatalf("expected folder_items 0, got %v", folderItems)
 	}
 	assertShareAccessCookiePaths(t, recorder.Result().Cookies(), share.ID)
 }
@@ -2583,6 +2877,7 @@ func TestDownloadShareFile_ReturnsBadRequestWhenParentPathIsFile(t *testing.T) {
 	if recorder.Code != http.StatusBadRequest {
 		t.Fatalf("expected status 400, got %d", recorder.Code)
 	}
+	assertPublicShareJSONHeaders(t, recorder.Header())
 	payload := decodeResponseBody(t, recorder)
 	errorPayload, ok := payload["error"].(map[string]any)
 	if !ok {
@@ -2627,6 +2922,7 @@ func TestListShareItems_PublicFolder(t *testing.T) {
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected status 200, got %d", recorder.Code)
 	}
+	assertPublicShareJSONHeaders(t, recorder.Header())
 
 	var payload struct {
 		Path  string           `json:"path"`
@@ -2726,19 +3022,24 @@ func TestListShareItems_PathTraversal(t *testing.T) {
 
 	handler := NewHandler(store, &fakeShareFS{})
 
-	req := newRouteRequest(http.MethodGet, "/s/"+share.ID+"/items?path=../secret", share.ID, nil)
-	recorder := httptest.NewRecorder()
-	handler.ListShareItems(recorder, req)
+	for _, target := range []string{
+		"/s/" + share.ID + "/items?path=../secret",
+		"/s/" + share.ID + "/items?path=%2F%2F..%2Fsecret",
+	} {
+		req := newRouteRequest(http.MethodGet, target, share.ID, nil)
+		recorder := httptest.NewRecorder()
+		handler.ListShareItems(recorder, req)
 
-	if recorder.Code != http.StatusBadRequest {
-		t.Fatalf("expected status 400, got %d", recorder.Code)
-	}
-	current, err := store.Get(share.ID)
-	if err != nil {
-		t.Fatalf("failed to load share: %v", err)
-	}
-	if current.AccessCount != 0 {
-		t.Fatalf("expected invalid path request not to consume access count, got %d", current.AccessCount)
+		if recorder.Code != http.StatusBadRequest {
+			t.Fatalf("target %q expected status 400, got %d", target, recorder.Code)
+		}
+		current, err := store.Get(share.ID)
+		if err != nil {
+			t.Fatalf("failed to load share: %v", err)
+		}
+		if current.AccessCount != 0 {
+			t.Fatalf("target %q expected invalid path request not to consume access count, got %d", target, current.AccessCount)
+		}
 	}
 }
 
@@ -2837,6 +3138,7 @@ func TestListShareItems_ExpiredProtectedShareReturnsGoneWithoutCookie(t *testing
 	if recorder.Code != http.StatusGone {
 		t.Fatalf("expected status 410, got %d", recorder.Code)
 	}
+	assertPublicShareJSONHeaders(t, recorder.Header())
 	payload := decodeResponseBody(t, recorder)
 	errorPayload, ok := payload["error"].(map[string]any)
 	if !ok {
@@ -2966,6 +3268,7 @@ func TestAccessShare_ExpiredProtectedShareWithCookieReturnsGone(t *testing.T) {
 	if recorder.Code != http.StatusGone {
 		t.Fatalf("expected status 410, got %d", recorder.Code)
 	}
+	assertPublicShareJSONHeaders(t, recorder.Header())
 	payload := decodeResponseBody(t, recorder)
 	errorPayload, ok := payload["error"].(map[string]any)
 	if !ok {
@@ -3093,20 +3396,25 @@ func TestDownloadShareFile_PathTraversal(t *testing.T) {
 
 	handler := NewHandler(store, &fakeShareFS{})
 
-	req := newRouteRequest(http.MethodGet, "/s/"+share.ID+"/download/../secret", share.ID, nil)
-	recorder := httptest.NewRecorder()
-	handler.DownloadShareFile(recorder, req)
+	for _, target := range []string{
+		"/s/" + share.ID + "/download/../secret",
+		"/s/" + share.ID + "/download//../secret",
+	} {
+		req := newRouteRequest(http.MethodGet, target, share.ID, nil)
+		recorder := httptest.NewRecorder()
+		handler.DownloadShareFile(recorder, req)
 
-	if recorder.Code != http.StatusBadRequest {
-		t.Fatalf("expected status 400, got %d", recorder.Code)
-	}
-	payload := decodeResponseBody(t, recorder)
-	errorPayload, ok := payload["error"].(map[string]any)
-	if !ok {
-		t.Fatalf("expected error payload, got %v", payload)
-	}
-	if errorPayload["code"] != "INVALID_PATH" {
-		t.Fatalf("expected INVALID_PATH code, got %v", errorPayload["code"])
+		if recorder.Code != http.StatusBadRequest {
+			t.Fatalf("target %q expected status 400, got %d", target, recorder.Code)
+		}
+		payload := decodeResponseBody(t, recorder)
+		errorPayload, ok := payload["error"].(map[string]any)
+		if !ok {
+			t.Fatalf("target %q expected error payload, got %v", target, payload)
+		}
+		if errorPayload["code"] != "INVALID_PATH" {
+			t.Fatalf("target %q expected INVALID_PATH code, got %v", target, errorPayload["code"])
+		}
 	}
 }
 
@@ -3318,6 +3626,342 @@ func TestDownloadShare_OpenFileInvalidParentPathReturnsNotFound(t *testing.T) {
 	}
 }
 
+func TestDownloadShare_FolderArchiveAsZip(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	share, err := store.Create(CreateShareOptions{
+		Path:      "/docs",
+		Type:      ShareTypeFolder,
+		CreatedBy: "user1",
+		MaxAccess: 2,
+	})
+	if err != nil {
+		t.Fatalf("failed to create share: %v", err)
+	}
+
+	now := time.Unix(1700000000, 0)
+	handler := NewHandler(store, &fakeShareFS{
+		statInfoByPath: map[string]*storage.FileInfo{
+			"/docs": {Path: "/docs", Name: "docs", IsDir: true, ModTime: now},
+		},
+		dirItemsByPath: map[string][]*storage.FileInfo{
+			"/docs": {
+				{Path: "/docs/empty", Name: "empty", IsDir: true, ModTime: now},
+				{Path: "/docs/nested", Name: "nested", IsDir: true, ModTime: now},
+				{Path: "/docs/readme.txt", Name: "readme.txt", Size: 6, ModTime: now},
+				{Path: "/docs/trailing.txt ", Name: "trailing.txt ", Size: 8, ModTime: now},
+			},
+			"/docs/empty": {},
+			"/docs/nested": {
+				{Path: "/docs/nested/report.txt", Name: "report.txt", Size: 6, ModTime: now},
+			},
+		},
+		openByPath: map[string]FileReader{
+			"/docs/readme.txt":        io.NopCloser(strings.NewReader("readme")),
+			"/docs/nested/report.txt": io.NopCloser(strings.NewReader("report")),
+			"/docs/trailing.txt ":     io.NopCloser(strings.NewReader("trailing")),
+		},
+	})
+	req := newRouteRequest(http.MethodGet, "/s/"+share.ID+"/download?archive=zip", share.ID, nil)
+	recorder := httptest.NewRecorder()
+
+	handler.DownloadShare(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("folder archive status = %d, want %d; body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+	if contentType := recorder.Header().Get("Content-Type"); contentType != "application/zip" {
+		t.Fatalf("folder archive Content-Type = %q, want application/zip", contentType)
+	}
+	mediaType, params, err := mime.ParseMediaType(recorder.Header().Get("Content-Disposition"))
+	if err != nil {
+		t.Fatalf("folder archive Content-Disposition is invalid: %v", err)
+	}
+	if mediaType != "attachment" || params["filename"] != "docs.zip" {
+		t.Fatalf("folder archive Content-Disposition = media %q params %+v, want docs.zip attachment", mediaType, params)
+	}
+
+	entries := readShareZipEntries(t, recorder.Body.Bytes())
+	for _, name := range []string{"docs/", "docs/empty/", "docs/nested/", "docs/readme.txt", "docs/trailing.txt ", "docs/nested/report.txt"} {
+		if _, ok := entries[name]; !ok {
+			t.Fatalf("folder archive missing %q; entries=%v", name, entries)
+		}
+	}
+	if got := string(entries["docs/readme.txt"]); got != "readme" {
+		t.Fatalf("docs/readme.txt archive content = %q, want readme", got)
+	}
+	if got := string(entries["docs/nested/report.txt"]); got != "report" {
+		t.Fatalf("docs/nested/report.txt archive content = %q, want report", got)
+	}
+	if got := string(entries["docs/trailing.txt "]); got != "trailing" {
+		t.Fatalf("docs/trailing.txt archive content = %q, want trailing", got)
+	}
+
+	current, err := store.Get(share.ID)
+	if err != nil {
+		t.Fatalf("failed to reload share: %v", err)
+	}
+	if current.AccessCount != 1 {
+		t.Fatalf("folder archive access_count = %d, want 1", current.AccessCount)
+	}
+}
+
+func TestDownloadShare_FolderArchiveSkipsEntriesOutsideShareRoot(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	share, err := store.Create(CreateShareOptions{
+		Path:      "/docs",
+		Type:      ShareTypeFolder,
+		CreatedBy: "user1",
+		MaxAccess: 1,
+	})
+	if err != nil {
+		t.Fatalf("failed to create share: %v", err)
+	}
+
+	now := time.Unix(1700000000, 0)
+	handler := NewHandler(store, &fakeShareFS{
+		statInfoByPath: map[string]*storage.FileInfo{
+			"/docs": {Path: "/docs", Name: "docs", IsDir: true, ModTime: now},
+		},
+		dirItemsByPath: map[string][]*storage.FileInfo{
+			"/docs": {
+				{Path: "/other/secret.txt", Name: "secret.txt", Size: 6, ModTime: now},
+				{Path: "/docs/readme.txt", Name: "readme.txt", Size: 6, ModTime: now},
+			},
+		},
+		openByPath: map[string]FileReader{
+			"/other/secret.txt": io.NopCloser(strings.NewReader("secret")),
+			"/docs/readme.txt":  io.NopCloser(strings.NewReader("readme")),
+		},
+	})
+	req := newRouteRequest(http.MethodGet, "/s/"+share.ID+"/download?archive=zip", share.ID, nil)
+	recorder := httptest.NewRecorder()
+
+	handler.DownloadShare(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("folder archive status = %d, want %d; body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+	entries := readShareZipEntries(t, recorder.Body.Bytes())
+	if _, ok := entries["docs/secret.txt"]; ok {
+		t.Fatalf("folder archive included entry outside share root; entries=%v", entries)
+	}
+	if got := string(entries["docs/readme.txt"]); got != "readme" {
+		t.Fatalf("docs/readme.txt archive content = %q, want readme", got)
+	}
+	current, err := store.Get(share.ID)
+	if err != nil {
+		t.Fatalf("failed to reload share: %v", err)
+	}
+	if current.AccessCount != 1 {
+		t.Fatalf("folder archive access_count = %d, want 1", current.AccessCount)
+	}
+}
+
+func TestDownloadShare_FolderArchiveSkipsNonDirectReadDirChildren(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	share, err := store.Create(CreateShareOptions{
+		Path:      "/docs",
+		Type:      ShareTypeFolder,
+		CreatedBy: "user1",
+		MaxAccess: 1,
+	})
+	if err != nil {
+		t.Fatalf("failed to create share: %v", err)
+	}
+
+	now := time.Unix(1700000000, 0)
+	handler := NewHandler(store, &fakeShareFS{
+		statInfoByPath: map[string]*storage.FileInfo{
+			"/docs": {Path: "/docs", Name: "docs", IsDir: true, ModTime: now},
+		},
+		dirItemsByPath: map[string][]*storage.FileInfo{
+			"/docs": {
+				{Path: "/docs/nested/secret.txt", Name: "secret.txt", Size: 6, ModTime: now},
+				{Path: "/docs/readme.txt", Name: "readme.txt", Size: 6, ModTime: now},
+			},
+		},
+		openByPath: map[string]FileReader{
+			"/docs/nested/secret.txt": io.NopCloser(strings.NewReader("secret")),
+			"/docs/readme.txt":        io.NopCloser(strings.NewReader("readme")),
+		},
+	})
+	req := newRouteRequest(http.MethodGet, "/s/"+share.ID+"/download?archive=zip", share.ID, nil)
+	recorder := httptest.NewRecorder()
+
+	handler.DownloadShare(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("folder archive status = %d, want %d; body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+	entries := readShareZipEntries(t, recorder.Body.Bytes())
+	if _, ok := entries["docs/secret.txt"]; ok {
+		t.Fatalf("folder archive included flattened non-direct entry; entries=%v", entries)
+	}
+	if _, ok := entries["docs/nested/secret.txt"]; ok {
+		t.Fatalf("folder archive included non-direct entry; entries=%v", entries)
+	}
+	if got := string(entries["docs/readme.txt"]); got != "readme" {
+		t.Fatalf("docs/readme.txt archive content = %q, want readme", got)
+	}
+}
+
+func TestDownloadShare_FolderArchiveRejectsSnapshotSizeGrowthBeforeStreaming(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+
+	previousLimit := maxShareArchiveBytes
+	maxShareArchiveBytes = 5
+	t.Cleanup(func() {
+		maxShareArchiveBytes = previousLimit
+	})
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	share, err := store.Create(CreateShareOptions{
+		Path:      "/docs",
+		Type:      ShareTypeFolder,
+		CreatedBy: "user1",
+		MaxAccess: 1,
+	})
+	if err != nil {
+		t.Fatalf("failed to create share: %v", err)
+	}
+
+	snapshotHostPath := filepath.Join(tempDir, "growing.txt")
+	if err := os.WriteFile(snapshotHostPath, []byte("123456"), 0644); err != nil {
+		t.Fatalf("write snapshot host file: %v", err)
+	}
+
+	now := time.Unix(1700000000, 0)
+	handler := NewHandler(store, &fakeShareSnapshotFS{
+		fakeShareFS: &fakeShareFS{
+			statInfoByPath: map[string]*storage.FileInfo{
+				"/docs": {Path: "/docs", Name: "docs", IsDir: true, ModTime: now},
+			},
+			dirItemsByPath: map[string][]*storage.FileInfo{
+				"/docs": {
+					{Path: "/docs/growing.txt", Name: "growing.txt", Size: 4, ModTime: now},
+				},
+			},
+			openByPath: map[string]FileReader{
+				"/docs/growing.txt": io.NopCloser(strings.NewReader("123456")),
+			},
+		},
+		snapshotByPath: map[string]fakeShareSnapshot{
+			"/docs/growing.txt": {
+				hostPath: snapshotHostPath,
+				info: &storage.FileInfo{
+					Path:    "/docs/growing.txt",
+					Name:    "growing.txt",
+					Size:    6,
+					ModTime: now,
+				},
+			},
+		},
+	})
+	req := newRouteRequest(http.MethodGet, "/s/"+share.ID+"/download?archive=zip", share.ID, nil)
+	recorder := httptest.NewRecorder()
+
+	handler.DownloadShare(recorder, req)
+
+	if recorder.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("folder archive oversized snapshot status = %d, want %d; body=%s", recorder.Code, http.StatusRequestEntityTooLarge, recorder.Body.String())
+	}
+	payload := decodeResponseBody(t, recorder)
+	errorPayload, ok := payload["error"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected error payload, got %v", payload)
+	}
+	if errorPayload["code"] != "ARCHIVE_TOO_LARGE" {
+		t.Fatalf("expected ARCHIVE_TOO_LARGE code, got %v", errorPayload["code"])
+	}
+	current, err := store.Get(share.ID)
+	if err != nil {
+		t.Fatalf("failed to reload share: %v", err)
+	}
+	if current.AccessCount != 0 {
+		t.Fatalf("oversized archive access_count = %d, want rollback to 0", current.AccessCount)
+	}
+}
+
+func TestDownloadShareFile_SubfolderArchiveAsZip(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	share, err := store.Create(CreateShareOptions{
+		Path:      "/docs",
+		Type:      ShareTypeFolder,
+		CreatedBy: "user1",
+	})
+	if err != nil {
+		t.Fatalf("failed to create share: %v", err)
+	}
+
+	now := time.Unix(1700000000, 0)
+	handler := NewHandler(store, &fakeShareFS{
+		statInfoByPath: map[string]*storage.FileInfo{
+			"/docs/nested": {Path: "/docs/nested", Name: "nested", IsDir: true, ModTime: now},
+		},
+		dirItemsByPath: map[string][]*storage.FileInfo{
+			"/docs/nested": {
+				{Path: "/docs/nested/report.txt", Name: "report.txt", Size: 6, ModTime: now},
+			},
+		},
+		openByPath: map[string]FileReader{
+			"/docs/nested/report.txt": io.NopCloser(strings.NewReader("report")),
+		},
+	})
+	req := newRouteRequest(http.MethodGet, "/s/"+share.ID+"/download/nested?archive=zip", share.ID, nil)
+	recorder := httptest.NewRecorder()
+
+	handler.DownloadShareFile(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("subfolder archive status = %d, want %d; body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+	mediaType, params, err := mime.ParseMediaType(recorder.Header().Get("Content-Disposition"))
+	if err != nil {
+		t.Fatalf("subfolder archive Content-Disposition is invalid: %v", err)
+	}
+	if mediaType != "attachment" || params["filename"] != "nested.zip" {
+		t.Fatalf("subfolder archive Content-Disposition = media %q params %+v, want nested.zip attachment", mediaType, params)
+	}
+
+	entries := readShareZipEntries(t, recorder.Body.Bytes())
+	if got := string(entries["nested/report.txt"]); got != "report" {
+		t.Fatalf("nested/report.txt archive content = %q, want report", got)
+	}
+}
+
 func TestDownloadShare_EscapesQuotedFilenameInContentDisposition(t *testing.T) {
 	tempDir := t.TempDir()
 	storePath := filepath.Join(tempDir, "shares.json")
@@ -3396,6 +4040,104 @@ func TestDownloadShare_UsesExtensionContentType(t *testing.T) {
 		t.Fatalf("share download Content-Type = %q, want %q", contentType, "image/png")
 	}
 	assertUntrustedDownloadHeaders(t, recorder.Header())
+}
+
+func TestDownloadShare_SupportsRangeRequests(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	share, err := store.Create(CreateShareOptions{
+		Path:      "/media/video.mp4",
+		Type:      ShareTypeFile,
+		CreatedBy: "user1",
+		MaxAccess: 1,
+	})
+	if err != nil {
+		t.Fatalf("failed to create share: %v", err)
+	}
+
+	handler := NewHandler(store, &fakeShareFS{
+		openByPath: map[string]FileReader{
+			share.Path: &readSeekCloser{Reader: bytes.NewReader([]byte("abcdef"))},
+		},
+	})
+
+	req := newRouteRequest(http.MethodGet, "/s/"+share.ID+"/download", share.ID, nil)
+	req.Header.Set("Range", "bytes=1-3")
+	recorder := httptest.NewRecorder()
+
+	handler.DownloadShare(recorder, req)
+
+	if recorder.Code != http.StatusPartialContent {
+		t.Fatalf("range status = %d, want %d", recorder.Code, http.StatusPartialContent)
+	}
+	if acceptRanges := recorder.Header().Get("Accept-Ranges"); acceptRanges != "bytes" {
+		t.Fatalf("range Accept-Ranges = %q, want bytes", acceptRanges)
+	}
+	if contentRange := recorder.Header().Get("Content-Range"); contentRange != "bytes 1-3/6" {
+		t.Fatalf("range Content-Range = %q, want bytes 1-3/6", contentRange)
+	}
+	if body := recorder.Body.String(); body != "bcd" {
+		t.Fatalf("range body = %q, want bcd", body)
+	}
+	current, err := store.Get(share.ID)
+	if err != nil {
+		t.Fatalf("failed to reload share: %v", err)
+	}
+	if current.AccessCount != 1 {
+		t.Fatalf("range download access count = %d, want 1", current.AccessCount)
+	}
+}
+
+func TestDownloadShare_UnsatisfiableRangeDoesNotConsumeAccess(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	share, err := store.Create(CreateShareOptions{
+		Path:      "/media/video.mp4",
+		Type:      ShareTypeFile,
+		CreatedBy: "user1",
+		MaxAccess: 1,
+	})
+	if err != nil {
+		t.Fatalf("failed to create share: %v", err)
+	}
+
+	handler := NewHandler(store, &fakeShareFS{
+		openByPath: map[string]FileReader{
+			share.Path: &readSeekCloser{Reader: bytes.NewReader([]byte("abcdef"))},
+		},
+	})
+
+	req := newRouteRequest(http.MethodGet, "/s/"+share.ID+"/download", share.ID, nil)
+	req.Header.Set("Range", "bytes=99-100")
+	recorder := httptest.NewRecorder()
+
+	handler.DownloadShare(recorder, req)
+
+	if recorder.Code != http.StatusRequestedRangeNotSatisfiable {
+		t.Fatalf("unsatisfiable range status = %d, want %d", recorder.Code, http.StatusRequestedRangeNotSatisfiable)
+	}
+	if contentRange := recorder.Header().Get("Content-Range"); contentRange != "bytes */6" {
+		t.Fatalf("unsatisfiable range Content-Range = %q, want bytes */6", contentRange)
+	}
+	current, err := store.Get(share.ID)
+	if err != nil {
+		t.Fatalf("failed to reload share: %v", err)
+	}
+	if current.AccessCount != 0 {
+		t.Fatalf("unsatisfiable range access count = %d, want 0", current.AccessCount)
+	}
 }
 
 func TestDownloadShare_ReturnsInternalErrorWhenStreamingFailsBeforeWrite(t *testing.T) {
@@ -3809,6 +4551,7 @@ func TestDownloadShare_ExpiredProtectedShareReturnsGoneWithoutCookie(t *testing.
 	if recorder.Code != http.StatusGone {
 		t.Fatalf("expected status 410, got %d", recorder.Code)
 	}
+	assertPublicShareJSONHeaders(t, recorder.Header())
 	payload := decodeResponseBody(t, recorder)
 	errorPayload, ok := payload["error"].(map[string]any)
 	if !ok {
@@ -3994,6 +4737,106 @@ func TestDownloadShareFile_UsesExtensionContentType(t *testing.T) {
 		t.Fatalf("share file download Content-Type = %q, want %q", contentType, "application/pdf")
 	}
 	assertUntrustedDownloadHeaders(t, recorder.Header())
+}
+
+func TestDownloadShareFile_SupportsRangeRequests(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	share, err := store.Create(CreateShareOptions{
+		Path:      "/media",
+		Type:      ShareTypeFolder,
+		CreatedBy: "user1",
+		MaxAccess: 1,
+	})
+	if err != nil {
+		t.Fatalf("failed to create share: %v", err)
+	}
+
+	targetPath := "/media/video.mp4"
+	handler := NewHandler(store, &fakeShareFS{
+		openByPath: map[string]FileReader{
+			targetPath: &readSeekCloser{Reader: bytes.NewReader([]byte("abcdef"))},
+		},
+	})
+
+	req := newRouteRequest(http.MethodGet, "/s/"+share.ID+"/download/video.mp4", share.ID, nil)
+	req.Header.Set("Range", "bytes=2-4")
+	recorder := httptest.NewRecorder()
+
+	handler.DownloadShareFile(recorder, req)
+
+	if recorder.Code != http.StatusPartialContent {
+		t.Fatalf("range status = %d, want %d", recorder.Code, http.StatusPartialContent)
+	}
+	if acceptRanges := recorder.Header().Get("Accept-Ranges"); acceptRanges != "bytes" {
+		t.Fatalf("range Accept-Ranges = %q, want bytes", acceptRanges)
+	}
+	if contentRange := recorder.Header().Get("Content-Range"); contentRange != "bytes 2-4/6" {
+		t.Fatalf("range Content-Range = %q, want bytes 2-4/6", contentRange)
+	}
+	if body := recorder.Body.String(); body != "cde" {
+		t.Fatalf("range body = %q, want cde", body)
+	}
+	current, err := store.Get(share.ID)
+	if err != nil {
+		t.Fatalf("failed to reload share: %v", err)
+	}
+	if current.AccessCount != 1 {
+		t.Fatalf("range download access count = %d, want 1", current.AccessCount)
+	}
+}
+
+func TestDownloadShareFile_UnsatisfiableRangeDoesNotConsumeAccess(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	share, err := store.Create(CreateShareOptions{
+		Path:      "/media",
+		Type:      ShareTypeFolder,
+		CreatedBy: "user1",
+		MaxAccess: 1,
+	})
+	if err != nil {
+		t.Fatalf("failed to create share: %v", err)
+	}
+
+	targetPath := "/media/video.mp4"
+	handler := NewHandler(store, &fakeShareFS{
+		openByPath: map[string]FileReader{
+			targetPath: &readSeekCloser{Reader: bytes.NewReader([]byte("abcdef"))},
+		},
+	})
+
+	req := newRouteRequest(http.MethodGet, "/s/"+share.ID+"/download/video.mp4", share.ID, nil)
+	req.Header.Set("Range", "bytes=99-100")
+	recorder := httptest.NewRecorder()
+
+	handler.DownloadShareFile(recorder, req)
+
+	if recorder.Code != http.StatusRequestedRangeNotSatisfiable {
+		t.Fatalf("unsatisfiable range status = %d, want %d", recorder.Code, http.StatusRequestedRangeNotSatisfiable)
+	}
+	if contentRange := recorder.Header().Get("Content-Range"); contentRange != "bytes */6" {
+		t.Fatalf("unsatisfiable range Content-Range = %q, want bytes */6", contentRange)
+	}
+	current, err := store.Get(share.ID)
+	if err != nil {
+		t.Fatalf("failed to reload share: %v", err)
+	}
+	if current.AccessCount != 0 {
+		t.Fatalf("unsatisfiable range access count = %d, want 0", current.AccessCount)
+	}
 }
 
 func TestDownloadShareFile_ReturnsInternalErrorWhenStreamingFailsBeforeWrite(t *testing.T) {
@@ -5105,6 +5948,53 @@ func TestListShareItems_RejectsEntriesOutsideShareRoot(t *testing.T) {
 		dirItemsByPath: map[string][]*storage.FileInfo{
 			"/docs": {
 				{Path: "/other/secret.txt", Name: "secret.txt", Size: 1, IsDir: false},
+			},
+		},
+	})
+
+	req := newRouteRequest(http.MethodGet, "/s/"+share.ID+"/items", share.ID, nil)
+	recorder := httptest.NewRecorder()
+
+	handler.ListShareItems(recorder, req)
+
+	if recorder.Code != http.StatusInternalServerError {
+		t.Fatalf("expected status 500, got %d", recorder.Code)
+	}
+	payload := decodeResponseBody(t, recorder)
+	errorPayload, ok := payload["error"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected error payload, got %v", payload)
+	}
+	if errorPayload["code"] != "LIST_SHARE_ITEMS_FAILED" {
+		t.Fatalf("expected LIST_SHARE_ITEMS_FAILED code, got %v", errorPayload["code"])
+	}
+	if errorPayload["message"] != "internal server error" {
+		t.Fatalf("expected generic message, got %v", errorPayload["message"])
+	}
+}
+
+func TestListShareItems_RejectsNonDirectReadDirChildren(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	share, err := store.Create(CreateShareOptions{
+		Path:      "/docs",
+		Type:      ShareTypeFolder,
+		CreatedBy: "user1",
+	})
+	if err != nil {
+		t.Fatalf("failed to create share: %v", err)
+	}
+
+	handler := NewHandler(store, &fakeShareFS{
+		dirItemsByPath: map[string][]*storage.FileInfo{
+			"/docs": {
+				{Path: "/docs/nested/secret.txt", Name: "secret.txt", Size: 1, IsDir: false},
 			},
 		},
 	})

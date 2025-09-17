@@ -3,9 +3,12 @@ import { Button, Spinner } from '@heroui/react'
 import { AlertCircle } from 'lucide-react'
 import { buildPreviewUrl } from '@/lib/preview-utils'
 import { authFetch } from '@/api/auth'
+import { readDownloadJsonErrorDetails } from '@/lib/downloadResponse'
+import { getUserFacingErrorDescription } from '@/lib/apiMessages'
 import { cn } from '@/lib/utils'
 
 const pdfContentType = 'application/pdf'
+const pdfPreviewLoadErrorMessage = '无法加载 PDF'
 
 export interface PdfPreviewProps {
   path: string
@@ -26,6 +29,7 @@ export function PdfPreview({ path, filename, className }: PdfPreviewProps) {
   useEffect(() => {
     let cancelled = false
     let currentBlobUrl: string | null = null
+    const controller = new AbortController()
     
     const fetchPdf = async () => {
       setIsLoading(true)
@@ -33,9 +37,21 @@ export function PdfPreview({ path, filename, className }: PdfPreviewProps) {
       setBlobUrl(null)
       
       try {
-        const response = await authFetch(pdfUrl)
-        if (!response.ok) throw new Error(`HTTP ${response.status}`)
-        const contentType = response.headers.get('content-type')?.split(';')[0]?.trim().toLowerCase()
+        const response = await authFetch(pdfUrl, { signal: controller.signal })
+
+        if (!response.ok) {
+          const jsonError = await readDownloadJsonErrorDetails(response, '无法加载 PDF')
+          if (jsonError) {
+            if (!cancelled) {
+              setError(getUserFacingErrorDescription(new Error(jsonError.message), pdfPreviewLoadErrorMessage))
+              setIsLoading(false)
+            }
+            return
+          }
+          throw new Error(`HTTP ${response.status}`)
+        }
+
+        const contentType = response.headers?.get?.('content-type')?.split(';')[0]?.trim().toLowerCase()
         if (contentType && contentType !== pdfContentType) {
           throw new Error(`Unexpected PDF content type: ${contentType}`)
         }
@@ -47,8 +63,8 @@ export function PdfPreview({ path, filename, className }: PdfPreviewProps) {
           setIsLoading(false)
         }
       } catch {
-        if (!cancelled) {
-          setError('无法加载 PDF')
+        if (!cancelled && !controller.signal.aborted) {
+          setError(pdfPreviewLoadErrorMessage)
           setIsLoading(false)
         }
       }
@@ -57,6 +73,7 @@ export function PdfPreview({ path, filename, className }: PdfPreviewProps) {
     fetchPdf()
     return () => {
       cancelled = true
+      controller.abort()
       if (currentBlobUrl) URL.revokeObjectURL(currentBlobUrl)
     }
   }, [pdfUrl])

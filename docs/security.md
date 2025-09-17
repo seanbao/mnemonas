@@ -8,7 +8,7 @@
 
 ### Web UI 管理账号
 
-默认启用 Web UI 登录认证。首次启动且没有用户数据时，系统会创建一个管理员账号，并把初始密码写入：
+默认启用 Web UI 登录认证。首次启动且没有用户数据时，系统会创建一个管理员账号，并把初始密码写入 `auth.users_file` 同目录的 `initial-password.txt`。默认路径为：
 
 ```text
 <storage.root>/.mnemonas/initial-password.txt
@@ -58,16 +58,16 @@ password = ""  # 留空则首次启动时自动生成
 
 **自动生成密码**：
 
-- 首次启动时，如果 `password` 为空，系统会自动生成 16 位随机密码
+- 首次启动时，如果 `password` 为空，系统会自动生成 16 字符可读随机密码，至少包含小写字母、大写字母和数字，字符集会排除易混淆字符
 - 该密码用于 WebDAV 客户端，不是 Web UI 管理员密码
-- 密码会保存到 `<storage_root>/secrets.json`，启动日志只提示文件路径，不输出明文密码
+- 密码会保存到 `<storage.root>/secrets.json`，启动日志只提示文件路径，不输出明文密码
 - 后续启动会自动使用保存的密码
 
 **手动设置密码**（如需自定义）：
 
 ```toml
 [webdav]
-password = "your-strong-password"  # 至少 16 字符，混合大小写、数字、符号
+password = ""  # 留空使用自动生成密码；自定义时使用密码管理器生成的随机强密码
 ```
 
 **密码强度建议**：
@@ -180,6 +180,7 @@ server {
 
         # WebDAV 特殊头
         proxy_pass_request_headers on;
+        proxy_set_header Destination $http_destination;
     }
 }
 ```
@@ -235,12 +236,12 @@ cloudflared tunnel run mnemonas
 ### 部署前检查
 
 - [ ] 已通过服务器端 `initial-password.txt` 完成首次 Web UI 登录，并已修改管理员密码
-- [ ] WebDAV 使用 `auth_type = "users"`，或已记录全局 Basic Auth 凭据并设置自定义强密码
+- [ ] WebDAV 使用 `auth_type = "users"`，或已记录全局 Basic Auth 凭据并设置自定义强密码或自动生成密码，未保留示例密码
 - [ ] `auth_type` 不是 `none`（除非仅本地访问）
 - [ ] 公网部署时 `server.host = "127.0.0.1"`，只通过 HTTPS 反向代理访问
 - [ ] dataplane gRPC/HTTP 端口保持在 `127.0.0.1` 或受信私有网络内，没有直接暴露到公网
 - [ ] Web UI “安全自检”没有 `block` 项；公网部署前应处理所有 `warning`，尤其是 `allow_unsafe_no_auth`、反向代理 header、dataplane 端口和备用管理员提醒
-- [ ] systemd 部署已运行 `sudo mnemonas-doctor --public-domain <domain>`，并确认 HTTP 会跳转到 HTTPS、HTTPS 证书 hostname 匹配、30 天内不过期，续期路径已验证，且没有 Web 后端直连、dataplane 端口暴露或 UFW 放行警告
+- [ ] systemd 部署已运行 `sudo mnemonas-doctor --public-domain <domain>`，并确认 HTTP 会跳转到同一域名的 HTTPS、HTTPS 证书 hostname 匹配、30 天内不过期，续期路径已验证，匿名 WebDAV `PROPFIND` 被拒绝，且没有 Web 后端直连、dataplane 端口暴露或 UFW 放行警告
 - [ ] 已按 [公网云防火墙复核清单](cloud-firewall-checklist.md) 确认云安全组或防火墙公网入口只开放 `80/443`；管理端口、Web 后端端口和 dataplane 端口不对公网开放
 - [ ] 生产环境使用 HTTPS
 
@@ -249,7 +250,7 @@ cloudflared tunnel run mnemonas
 ```bash
 # MnemoNAS 自检
 sudo mnemonas-doctor --public-domain <domain>
-# 该命令会检查 HTTPS health、HTTP 到 HTTPS 跳转、证书 hostname、证书 30 天有效期、证书续期提示、后端直连端口和 dataplane 端口
+# 该命令会检查 HTTPS health、HTTP 是否跳转到同一域名的 HTTPS、证书 hostname、证书 30 天有效期、证书续期提示、匿名 WebDAV PROPFIND、后端直连端口和 dataplane 端口
 
 # 检查监听端口
 ss -tlnp | grep 8080
@@ -258,9 +259,9 @@ ss -tlnp | grep -E '9090|9091'
 # 公网 HTTPS 应可用
 curl -I https://<domain>/health
 
-# 公网直连后端端口应失败或超时
+# 公网直连后端端口应连接失败或超时；任何 HTTP 状态码都表示端口仍可公网访问
 curl --connect-timeout 3 http://<domain>:8080/health
-# 如果使用自定义后端端口，也要检查对应端口公网不可达
+# 如果使用自定义后端端口，也要检查对应端口公网不可达且不返回 HTTP 状态码
 
 # 检查认证是否生效
 curl https://<domain>/dav/
@@ -311,7 +312,7 @@ location /api/ {
 
 #### 浏览器预览鉴权参数
 
-- 文件下载、版本预览、音视频预览、缩略图与外部打开使用短期 `HttpOnly` download-session cookie，不再通过 URL 查询参数传递长期访问令牌
+- 文件下载、版本预览、音视频预览、缩略图与外部打开使用短期 `HttpOnly`、`SameSite=Strict` download-session cookie，不再通过 URL 查询参数传递长期访问令牌
 - 该 cookie 由已认证会话在登录、初始化或刷新令牌后同步到 `/api/v1` 路径，并覆盖下载与缩略图请求
 - 内部文件预览与缩略图链路不再依赖 `auth` 查询参数
 - `Secure` 标记只会在实际 HTTPS，或显式启用 `trusted_proxy_hops > 0` 且请求直接来自 loopback / `trusted_proxy_cidrs` 中的代理地址并携带 `X-Forwarded-Proto=https` 时启用，避免公网请求伪造 HTTPS 语义
@@ -327,8 +328,9 @@ location /api/ {
 
 #### 公开分享密码验证
 
-- 受密码保护的公开分享在浏览器完成一次密码验证后，会下发 `HttpOnly` cookie；cookie 只作用于对应的 `/s/<id>` 与 `/api/v1/public/shares/<id>` 路径
+- 受密码保护的公开分享在浏览器完成一次密码验证后，会下发 `HttpOnly`、`SameSite=Strict` cookie；cookie 只作用于对应的 `/s/<id>` 与 `/api/v1/public/shares/<id>` 路径
 - 文件夹浏览与文件下载依赖该 cookie，不再通过 URL 查询参数传递分享密码
+- 公开分享信息、密码验证响应与文件夹列表响应会返回 `Cache-Control: private, no-cache`、`Vary: Cookie`、`X-Content-Type-Options: nosniff` 和 `Referrer-Policy: no-referrer`，避免浏览器或中间缓存复用依赖 cookie 的分享元数据
 - 清除浏览器站点数据、切换浏览器或密码变更后，需要重新输入分享密码
 - 同一 share 与客户端地址组合连续 5 次口令失败后，会锁定 5 分钟并返回 `429 Too Many Requests`
 - 客户端地址默认不信任转发头，始终使用直连来源；只有显式设置 `server.trusted_proxy_hops > 0` 且请求直接来自 loopback 或 `server.trusted_proxy_cidrs` 中的代理地址时，才按 `X-Forwarded-For` 从右侧回溯客户端地址。多跳代理部署需要设置为代理总层数

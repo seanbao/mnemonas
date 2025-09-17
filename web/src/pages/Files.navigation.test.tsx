@@ -140,6 +140,10 @@ import { listShares } from '@/api/share'
 const mockListFiles = vi.mocked(listFiles)
 const mockListShares = vi.mocked(listShares)
 
+function expectListFilesCalledWithPath(path: string) {
+  expect(mockListFiles.mock.calls.some(([calledPath]) => calledPath === path)).toBe(true)
+}
+
 function LocationProbe({ onPath }: { onPath: (path: string) => void }) {
   const location = useLocation()
 
@@ -245,6 +249,6 @@ describe('FilesPage navigation integration', () => {
     })
 
     expect(observedPaths).not.toContain('/files')
-    expect(mockListFiles).toHaveBeenCalledWith('/documents')
+    expectListFilesCalledWithPath('/documents')
   })
 })

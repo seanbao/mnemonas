@@ -408,6 +408,48 @@ read_config_value() {
         return 0
     fi
 
+    if command -v python3 >/dev/null 2>&1; then
+        local value
+        if value=$(python3 - "$file" "$section" "$key" <<'PY'
+import sys
+
+try:
+    import tomllib
+except Exception:
+    sys.exit(2)
+
+path, section, key = sys.argv[1], sys.argv[2], sys.argv[3]
+try:
+    with open(path, "rb") as handle:
+        data = tomllib.load(handle)
+except Exception:
+    sys.exit(2)
+
+current = data
+for part in section.split("."):
+    if not isinstance(current, dict):
+        sys.exit(0)
+    current = current.get(part)
+    if current is None:
+        sys.exit(0)
+
+if not isinstance(current, dict) or key not in current:
+    sys.exit(0)
+
+value = current[key]
+if isinstance(value, bool):
+    sys.stdout.write("true" if value else "false")
+elif isinstance(value, (str, int, float)):
+    sys.stdout.write(str(value))
+elif hasattr(value, "isoformat"):
+    sys.stdout.write(value.isoformat())
+PY
+        ); then
+            printf '%s' "$value"
+            return 0
+        fi
+    fi
+
     awk -v section="[$section]" -v key="$key" '
         function strip_comment(text,    i, c, quote, escaped, out) {
             quote = ""
@@ -472,6 +514,36 @@ read_config_value() {
             exit
         }
     ' "$file"
+}
+
+read_json_string_value() {
+    local file=$1
+    local key=$2
+
+    if [ ! -f "$file" ]; then
+        return 0
+    fi
+
+    if command -v python3 >/dev/null 2>&1; then
+        python3 - "$file" "$key" <<'PY'
+import json
+import sys
+
+path, key = sys.argv[1], sys.argv[2]
+try:
+    with open(path, "r", encoding="utf-8") as handle:
+        data = json.load(handle)
+    value = data.get(key, "") if isinstance(data, dict) else ""
+except Exception:
+    value = ""
+
+if isinstance(value, str):
+    sys.stdout.write(value)
+PY
+        return 0
+    fi
+
+    grep -o '"'"$key"'"[[:space:]]*:[[:space:]]*"[^"]*"' "$file" | sed 's/.*: *"//' | sed 's/"$//' || true
 }
 
 expand_path() {
@@ -547,7 +619,7 @@ show_credentials() {
     local password="$configured_password"
     if [ -z "$password" ]; then
         if [ -f "$secrets_file" ]; then
-            password=$(grep -o '"webdav_password"[[:space:]]*:[[:space:]]*"[^"]*"' "$secrets_file" | sed 's/.*: *"//' | sed 's/"$//' || true)
+            password=$(read_json_string_value "$secrets_file" webdav_password)
             if [ -n "$password" ]; then
                 password_source="$secrets_file"
             fi
@@ -563,9 +635,9 @@ show_credentials() {
         return 0
     fi
 
-    echo -e "   用户名: ${GREEN}${username}${NC}"
+    printf '   用户名: %b%s%b\n' "$GREEN" "$username" "$NC"
     if dev_show_secrets; then
-        echo -e "   密码:   ${GREEN}${password}${NC}"
+        printf '   密码:   %b%s%b\n' "$GREEN" "$password" "$NC"
     else
         echo "   密码:   已隐藏；如确需在本机终端显示，设置 MNEMONAS_DEV_SHOW_SECRETS=1 后重新运行 ./scripts/dev.sh --creds"
     fi

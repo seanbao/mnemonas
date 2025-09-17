@@ -27,6 +27,7 @@ vi.mock('@/api/files', () => ({
   getDiagnostics: vi.fn(),
   getDiskHealth: vi.fn(),
   getStorageStats: vi.fn(),
+  downloadDiagnosticsExport: vi.fn(),
 }))
 
 vi.mock('@/stores/auth', async (importOriginal) => {
@@ -37,11 +38,20 @@ vi.mock('@/stores/auth', async (importOriginal) => {
   }
 })
 
-import { ApiError, getDiagnostics, getDiskHealth, getStorageStats } from '@/api/files'
+import { ApiError, getDiagnostics, getDiskHealth, getStorageStats, downloadDiagnosticsExport } from '@/api/files'
 
 const mockGetDiagnostics = getDiagnostics as ReturnType<typeof vi.fn>
 const mockGetDiskHealth = getDiskHealth as ReturnType<typeof vi.fn>
 const mockGetStorageStats = getStorageStats as ReturnType<typeof vi.fn>
+const mockDownloadDiagnosticsExport = downloadDiagnosticsExport as ReturnType<typeof vi.fn>
+
+function expectCalledWithAbortSignal(mockFn: ReturnType<typeof vi.fn>) {
+  const call = mockFn.mock.calls.find(([options]) => {
+    return (options as { signal?: AbortSignal } | undefined)?.signal instanceof AbortSignal
+  })
+  expect(call).toBeTruthy()
+  expect(Object.keys((call?.[0] ?? {}) as Record<string, unknown>).sort()).toEqual(['signal'])
+}
 
 describe('HealthPage', () => {
   const mockDiagnostics = {
@@ -136,6 +146,7 @@ describe('HealthPage', () => {
     mockGetDiagnostics.mockResolvedValue(mockDiagnostics)
     mockGetDiskHealth.mockResolvedValue(mockDiskHealth)
     mockGetStorageStats.mockResolvedValue(mockStats)
+    mockDownloadDiagnosticsExport.mockResolvedValue(undefined)
   })
 
   describe('loading state', () => {
@@ -150,6 +161,16 @@ describe('HealthPage', () => {
   })
 
   describe('header', () => {
+    it('passes abort signals to health queries', async () => {
+      render(<HealthPage />)
+
+      await waitFor(() => {
+        expectCalledWithAbortSignal(mockGetDiagnostics)
+        expectCalledWithAbortSignal(mockGetStorageStats)
+        expectCalledWithAbortSignal(mockGetDiskHealth)
+      })
+    })
+
     it('displays page title', async () => {
       render(<HealthPage />)
 
@@ -171,6 +192,72 @@ describe('HealthPage', () => {
 
       await waitFor(() => {
         expect(screen.getByText('刷新')).toBeTruthy()
+      })
+    })
+
+    it('downloads the diagnostics bundle from the health page', async () => {
+      const user = userEvent.setup()
+      render(<HealthPage />)
+
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: '下载诊断包' })).toBeTruthy()
+      })
+
+      await user.click(screen.getByRole('button', { name: '下载诊断包' }))
+
+      await waitFor(() => {
+        expect(mockDownloadDiagnosticsExport).toHaveBeenCalledWith(expect.objectContaining({
+          signal: expect.any(AbortSignal),
+        }))
+      })
+
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '诊断信息导出已开始',
+        color: 'success',
+      })
+    })
+
+    it('shows an unavailable warning when diagnostics export is temporarily unavailable', async () => {
+      const user = userEvent.setup()
+      mockDownloadDiagnosticsExport.mockRejectedValue(new ApiError('diagnostics unavailable', 503, 'SERVICE_UNAVAILABLE'))
+      render(<HealthPage />)
+
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: '下载诊断包' })).toBeTruthy()
+      })
+
+      await user.click(screen.getByRole('button', { name: '下载诊断包' }))
+
+      await waitFor(() => {
+        expect(mockDownloadDiagnosticsExport).toHaveBeenCalled()
+      })
+
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '诊断包暂不可用',
+        description: '诊断包服务当前不可用，请检查设备状态后重试。',
+        color: 'warning',
+      })
+    })
+
+    it('shows generic error feedback when diagnostics export fails', async () => {
+      const user = userEvent.setup()
+      mockDownloadDiagnosticsExport.mockRejectedValue(new Error('export failed'))
+      render(<HealthPage />)
+
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: '下载诊断包' })).toBeTruthy()
+      })
+
+      await user.click(screen.getByRole('button', { name: '下载诊断包' }))
+
+      await waitFor(() => {
+        expect(mockDownloadDiagnosticsExport).toHaveBeenCalled()
+      })
+
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '下载诊断包失败',
+        description: '操作未完成，请稍后重试。',
+        color: 'danger',
       })
     })
 
@@ -252,7 +339,7 @@ describe('HealthPage', () => {
     await waitFor(() => {
       expect(mockAddToast).toHaveBeenCalledWith({
         title: '刷新失败',
-        description: 'refresh failed',
+        description: '操作未完成，请稍后重试。',
         color: 'danger',
       })
     })
@@ -453,7 +540,7 @@ describe('HealthPage', () => {
       render(<HealthPage />)
 
       await waitFor(() => {
-        expect(screen.getAllByText('2小时 0分钟').length).toBeGreaterThan(0)
+        expect(screen.getAllByText('2 小时').length).toBeGreaterThan(0)
         expect(screen.getByText(/Go 1\.25\.9/)).toBeTruthy()
         expect(screen.queryByText(/构建/)).toBeNull()
       })
@@ -478,6 +565,7 @@ describe('HealthPage', () => {
       await waitFor(() => {
         expect(screen.getByText('可用空间偏紧')).toBeTruthy()
         expect(screen.getByText(/使用率 87\.5%/)).toBeTruthy()
+        expect(screen.getByText(/通知通道：Webhook/)).toBeTruthy()
       })
     })
 
@@ -505,6 +593,8 @@ describe('HealthPage', () => {
           enabled: true,
           runtimeAvailable: false,
           webhookConfigured: true,
+          telegramConfigured: false,
+          emailConfigured: true,
         },
       })
 
@@ -512,6 +602,7 @@ describe('HealthPage', () => {
 
       await waitFor(() => {
         expect(screen.getByText('空间提醒暂不可用')).toBeTruthy()
+        expect(screen.getByText(/通知通道：Webhook、邮件/)).toBeTruthy()
       })
     })
 
@@ -522,6 +613,8 @@ describe('HealthPage', () => {
           enabled: true,
           runtimeAvailable: true,
           webhookConfigured: false,
+          telegramConfigured: false,
+          emailConfigured: false,
           lastLevel: 'critical',
           lastCheckedAt: '2026-04-29T10:30:00Z',
           lastUsedPct: 95.5,
@@ -535,6 +628,7 @@ describe('HealthPage', () => {
         expect(screen.getByText('可用空间严重不足')).toBeTruthy()
         expect(screen.getByText(/使用率 95\.5%/)).toBeTruthy()
         expect(screen.getByText(/剩余 1 KB/)).toBeTruthy()
+        expect(screen.getByText(/未配置外部通知通道/)).toBeTruthy()
       })
     })
 
@@ -556,7 +650,7 @@ describe('HealthPage', () => {
       })
     })
 
-    it('treats Telegram as a configured alert notification channel', async () => {
+    it('lists Telegram as a configured alert notification channel', async () => {
       mockGetDiagnostics.mockResolvedValue({
         ...mockDiagnostics,
         alerts: {
@@ -572,7 +666,27 @@ describe('HealthPage', () => {
 
       await waitFor(() => {
         expect(screen.getByText('空间提醒已启用')).toBeTruthy()
-        expect(screen.getByText(/通知通道已配置/)).toBeTruthy()
+        expect(screen.getByText(/通知通道已配置：Telegram/)).toBeTruthy()
+      })
+    })
+
+    it('lists Webhook and email as configured alert notification channels', async () => {
+      mockGetDiagnostics.mockResolvedValue({
+        ...mockDiagnostics,
+        alerts: {
+          enabled: true,
+          runtimeAvailable: true,
+          webhookConfigured: true,
+          telegramConfigured: false,
+          emailConfigured: true,
+        },
+      })
+
+      render(<HealthPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('空间提醒已启用')).toBeTruthy()
+        expect(screen.getByText(/通知通道已配置：Webhook、邮件/)).toBeTruthy()
       })
     })
 
@@ -604,9 +718,60 @@ describe('HealthPage', () => {
 
       await waitFor(() => {
         expect(screen.getByText('磁盘健康严重异常')).toBeTruthy()
-        expect(screen.getByText('SMART self-assessment failed')).toBeTruthy()
+        expect(screen.getByText('SMART 自检未通过，请尽快备份并检查磁盘。')).toBeTruthy()
         expect(screen.getByText('严重')).toBeTruthy()
       })
+      expect(screen.queryByText('SMART self-assessment failed')).toBeNull()
+    })
+
+    it('maps disk health device backend messages before rendering them', async () => {
+      mockGetDiskHealth.mockResolvedValue({
+        ...mockDiskHealth,
+        status: 'warning',
+        devices: [
+          {
+            ...mockDiskHealth.devices[0],
+            name: 'hot-disk',
+            path: '/dev/disk/by-id/hot-disk',
+            status: 'warning',
+            message: 'temperature 55 C reached warning threshold 50 C',
+          },
+          {
+            ...mockDiskHealth.devices[0],
+            name: 'wear-disk',
+            path: '/dev/disk/by-id/wear-disk',
+            status: 'critical',
+            message: 'media wear used 98% reached critical threshold 95%',
+          },
+          {
+            ...mockDiskHealth.devices[0],
+            name: 'probe-disk',
+            path: '/dev/disk/by-id/probe-disk',
+            status: 'unavailable',
+            message: 'smart probe failed: permission denied',
+          },
+          {
+            ...mockDiskHealth.devices[0],
+            name: 'unknown-disk',
+            path: '/dev/disk/by-id/unknown-disk',
+            status: 'warning',
+            message: 'backend raw diagnostic text',
+          },
+        ],
+      })
+
+      render(<HealthPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('磁盘温度 55 C 已达到提醒阈值 50 C。')).toBeTruthy()
+        expect(screen.getByText('介质磨损 98% 已达到严重阈值 95%。')).toBeTruthy()
+        expect(screen.getByText('SMART 检测命令执行失败，请检查 smartctl 权限和设备路径。')).toBeTruthy()
+        expect(screen.getByText('磁盘健康存在提醒，请检查 SMART、温度、磨损和设备连接状态。')).toBeTruthy()
+      })
+      expect(screen.queryByText('temperature 55 C reached warning threshold 50 C')).toBeNull()
+      expect(screen.queryByText('media wear used 98% reached critical threshold 95%')).toBeNull()
+      expect(screen.queryByText('smart probe failed: permission denied')).toBeNull()
+      expect(screen.queryByText('backend raw diagnostic text')).toBeNull()
     })
 
     it('shows disabled disk health guidance', async () => {
@@ -632,7 +797,7 @@ describe('HealthPage', () => {
 
       await waitFor(() => {
         expect(screen.getByText('运行时间')).toBeTruthy()
-        expect(screen.getByText(/1天/)).toBeTruthy()
+        expect(screen.getByText(/1 天/)).toBeTruthy()
       })
     })
 
@@ -845,7 +1010,7 @@ describe('HealthPage', () => {
 
       await waitFor(() => {
         expect(screen.getByText('加载设备状态失败')).toBeTruthy()
-        expect(screen.getByText('Network error')).toBeTruthy()
+        expect(screen.getByText('数据加载失败，请检查网络或稍后重试。')).toBeTruthy()
         expect(screen.getByRole('button', { name: '重新加载' })).toBeTruthy()
       })
     })
@@ -877,7 +1042,7 @@ describe('HealthPage', () => {
       render(<HealthPage />)
 
       await waitFor(() => {
-        expect(screen.getAllByText('0分钟').length).toBeGreaterThan(0)
+        expect(screen.getAllByText('0 秒').length).toBeGreaterThan(0)
       })
     })
   })

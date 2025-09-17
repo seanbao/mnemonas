@@ -1,4 +1,4 @@
-.PHONY: all build web-build test test-torture fault-injection clean deps dev proto proto-go proto-rust go-packages fmt lint workflows-check scripts-check security-check install-audit-tools docker e2e bench coverage check verify-changed help
+.PHONY: all build web-build test test-torture fault-injection clean deps dev proto proto-go proto-rust go-packages fmt lint workflows-check scripts-check docs-check security-check install-audit-tools docker e2e bench coverage check verify-changed help
 
 # 版本信息
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
@@ -22,13 +22,14 @@ GO_COVERAGE_ENV ?= GOSUMDB=sum.golang.org GOTOOLCHAIN=auto
 GO_COVERAGE_MIN ?= 75
 RUST_COVERAGE_MIN ?= 70
 NPM_AUDIT ?= 0
+NPM_AUDIT_LEVEL ?= moderate
 GO_FUZZTIME ?= 10s
 GO_FUZZ_TARGETS ?= ./internal/api:FuzzValidatePath ./internal/api:FuzzPathWithinBase ./internal/config:FuzzNormalizeWebDAVPrefix
 GO_TORTURE_PACKAGES ?= ./internal/api ./internal/auth ./internal/share ./internal/storage ./internal/versionstore ./internal/dataplane ./internal/workspace
 WEB_TORTURE_SPECS ?= files.spec.ts interaction-integrity.spec.ts layout-integrity.spec.ts runtime-integrity.spec.ts
 DEPLOYMENT_SCRIPTS := scripts/install-systemd.sh scripts/uninstall-systemd.sh scripts/mnemonas-doctor.sh scripts/mnemonas-docker-preflight.sh scripts/docker-quickstart.sh scripts/mnemonas-dataplane-start.sh scripts/test-systemd-install.sh scripts/test-systemd-uninstall.sh scripts/test-docker-start.sh scripts/test-docker-preflight.sh scripts/test-docker-quickstart.sh scripts/test-fault-injection-safety.sh scripts/test-e2e-safety.sh scripts/test-benchmark-safety.sh scripts/test-dataplane-start.sh scripts/test-dev-safety.sh scripts/test-reverse-proxy-safety.sh scripts/test-public-access-templates.sh scripts/test-release-package.sh scripts/test-with-test-dataplane-safety.sh scripts/docker-start.sh scripts/setup-reverse-proxy.sh scripts/dev.sh scripts/benchmark.sh
 ACCEPTANCE_SCRIPTS := scripts/e2e-test.sh scripts/fault-injection-test.sh scripts/torture-test.sh scripts/run-e2e-isolated.sh scripts/run-benchmark-isolated.sh scripts/with-test-dataplane.sh
-DEV_SCRIPTS := scripts/verify-changed.sh scripts/check-commit-message.sh scripts/test-commit-message.sh
+DEV_SCRIPTS := scripts/verify-changed.sh scripts/check-commit-message.sh scripts/check-doc-links.sh scripts/test-commit-message.sh scripts/test-doc-links.sh
 WEB_SCRIPTS := web/scripts/start-e2e-backend.sh
 
 export GO_FUZZTIME
@@ -66,6 +67,7 @@ help:
 	@echo "  verify-changed - Run checks selected from changed files"
 	@echo "  lint       - Run linters (Go + Rust)"
 	@echo "  scripts-check - Validate deployment shell scripts"
+	@echo "  docs-check - Validate local documentation links"
 	@echo "  security-check - Run dependency vulnerability checks"
 	@echo "  install-audit-tools - Install pinned security scan tools"
 	@echo "  rust-coverage - Run Rust coverage with cargo-llvm-cov"
@@ -269,6 +271,11 @@ scripts-check:
 	./scripts/test-e2e-safety.sh
 	./scripts/test-fault-injection-safety.sh
 	./scripts/test-commit-message.sh
+	./scripts/test-doc-links.sh
+
+docs-check:
+	@echo "📚 Checking documentation links..."
+	./scripts/check-doc-links.sh
 
 # 安全依赖检查
 security-check:
@@ -290,9 +297,9 @@ security-check:
 	fi
 	@if [ "$(NPM_AUDIT)" = "1" ]; then \
 		echo "🔐 Scanning frontend dependencies..."; \
-		cd web && npm audit --audit-level=high; \
+		cd web && npm audit --audit-level="$(NPM_AUDIT_LEVEL)"; \
 	else \
-		echo "⚠️  Skipping npm audit by default because it sends the dependency tree to the configured npm registry. Run: make security-check NPM_AUDIT=1"; \
+		echo "⚠️  Skipping npm audit by default because it sends the dependency tree to the configured npm registry. Run: make security-check NPM_AUDIT=1 NPM_AUDIT_LEVEL=$(NPM_AUDIT_LEVEL)"; \
 	fi
 
 install-audit-tools:
@@ -307,7 +314,7 @@ docker:
 	@echo "✅ Docker image: mnemonas:$(VERSION)"
 
 # 运行所有检查 (CI 使用)
-check: workflows-check scripts-check lint test
+check: workflows-check scripts-check docs-check lint test
 	@echo "✅ All checks passed"
 
 verify-changed:

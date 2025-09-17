@@ -297,6 +297,30 @@ run_data_dir_newline_test() {
 	[[ ! -f "$repo_dir/.env" ]] || fail "env file was written after rejecting newline data dir"
 }
 
+run_data_dir_control_character_test() {
+	local case_dir="$TMP_ROOT/data-dir-control"
+	local repo_dir="$case_dir/repo"
+	local capture_dir="$case_dir/capture"
+	local quickstart="$REPO_ROOT/scripts/docker-quickstart.sh"
+	local injected_data_dir
+	local status
+	mkdir -p "$capture_dir"
+	make_repo_case "$repo_dir"
+
+	injected_data_dir="${case_dir}/data"$'\a'"escape"
+	set +e
+	CAPTURE_DIR="$capture_dir" \
+		REPO_ROOT="$repo_dir" \
+		bash "$quickstart" \
+			--data-dir "$injected_data_dir" > "$case_dir/out.log" 2>&1
+	status=$?
+	set -e
+
+	[[ "$status" -ne 0 ]] || fail "data dir with control character was accepted"
+	assert_file_contains "$case_dir/out.log" "--data-dir cannot contain control characters"
+	[[ ! -f "$repo_dir/.env" ]] || fail "env file was written after rejecting control-character data dir"
+}
+
 run_data_dir_symlink_test() {
 	local case_dir="$TMP_ROOT/data-dir-symlink"
 	local repo_dir="$case_dir/repo"
@@ -396,6 +420,38 @@ run_env_symlink_test() {
 	assert_file_contains "$target_env" "SENTINEL=keep"
 }
 
+run_env_missing_parent_test() {
+	local case_dir="$TMP_ROOT/env-missing-parent"
+	local repo_dir="$case_dir/repo"
+	local data_dir="$case_dir/data"
+	local capture_dir="$case_dir/capture"
+	local quickstart="$REPO_ROOT/scripts/docker-quickstart.sh"
+	local status
+	mkdir -p "$capture_dir"
+	make_repo_case "$repo_dir"
+
+	set +e
+	CAPTURE_DIR="$capture_dir" \
+		REPO_ROOT="$repo_dir" \
+		bash "$quickstart" \
+			--env "$case_dir/missing/.env" \
+			--data-dir "$data_dir" > "$case_dir/out.log" 2>&1
+	status=$?
+	set -e
+
+	[[ "$status" -ne 0 ]] || fail "missing env parent was accepted"
+	assert_file_contains "$case_dir/out.log" "--env parent directory does not exist"
+	[[ ! -d "$data_dir" ]] || fail "data dir was created after rejecting missing env parent"
+}
+
+run_compose_data_volume_contract_test() {
+	# Long bind syntax preserves host paths that contain ':' without changing the /data target.
+	assert_file_contains "$REPO_ROOT/docker-compose.yml" "type: bind"
+	assert_file_contains "$REPO_ROOT/docker-compose.yml" 'source: ${MNEMONAS_DATA_DIR:-${HOME}/.mnemonas}'
+	assert_file_contains "$REPO_ROOT/docker-compose.yml" "target: /data"
+	assert_file_contains "$REPO_ROOT/docker-compose.yml" "create_host_path: true"
+}
+
 run_prepare_test
 run_existing_env_test
 run_start_test
@@ -405,9 +461,12 @@ run_invalid_data_dir_test
 run_protected_data_dir_test
 run_data_dir_traversal_test
 run_data_dir_newline_test
+run_data_dir_control_character_test
 run_data_dir_symlink_test
 run_normalized_protected_data_dir_test
 run_protected_env_path_test
 run_env_symlink_test
+run_env_missing_parent_test
+run_compose_data_volume_contract_test
 
 printf '[docker-quickstart-test] all checks passed\n'

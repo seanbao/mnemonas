@@ -32,10 +32,21 @@ function shouldIgnoreConsoleError(text: string) {
   return ignoredConsoleErrorPatterns.some((pattern) => pattern.test(text))
 }
 
+function shouldIgnoreRequestFailure(resourceType: string, failureText: string) {
+  if (resourceType !== 'fetch' && resourceType !== 'xhr') {
+    return false
+  }
+
+  return /Load request cancell?ed|ERR_ABORTED|NS_BINDING_ABORTED/i.test(failureText)
+}
+
 async function prepareRoute(page: Page, route: string) {
   await ensureAuthenticatedAt(page, route)
   await expect(page.locator('body')).toBeVisible()
   await page.getByText('加载中...').waitFor({ state: 'hidden', timeout: 10_000 }).catch(() => {})
+  if (route === '/users') {
+    await page.getByText('加载用户列表...').waitFor({ state: 'hidden', timeout: 20_000 }).catch(() => {})
+  }
   await page.waitForLoadState('networkidle', { timeout: 5_000 }).catch(() => {})
   await page.waitForTimeout(300)
 }
@@ -119,11 +130,13 @@ test.describe('前端运行时完整性扫描', () => {
       if (shouldIgnoreConsoleError(text)) {
         return
       }
+      const location = message.location()
+      const locationLabel = location.url ? ` (${location.url})` : ''
 
       issues.push({
         route: currentRoute,
         rule: 'console-error',
-        message: text,
+        message: `${text}${locationLabel}`,
       })
     })
 
@@ -132,11 +145,15 @@ test.describe('前端运行时完整性扫描', () => {
       if (resourceType === 'websocket' || resourceType === 'eventsource') {
         return
       }
+      const failureText = request.failure()?.errorText ?? 'unknown error'
+      if (shouldIgnoreRequestFailure(resourceType, failureText)) {
+        return
+      }
 
       issues.push({
         route: currentRoute,
         rule: 'request-failed',
-        message: `${request.method()} ${request.url()} failed: ${request.failure()?.errorText ?? 'unknown error'}`,
+        message: `${request.method()} ${request.url()} failed: ${failureText}`,
       })
     })
 

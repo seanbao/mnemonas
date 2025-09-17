@@ -41,13 +41,44 @@ EOF
 	rm -f -- "$invoked_log"
 }
 
+make_fake_benchmark_curl() {
+	local bin_dir="$1"
+	local invoked_log="$2"
+	mkdir -p "$bin_dir"
+	cat > "$bin_dir/curl" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "$CURL_INVOKED_LOG"
+case " $* " in
+  *"/api/v1/auth/login"*)
+    printf '{\n  "success": true,\n  "data": {\n    "access_token": "access.pretty",\n    "refresh_token": "refresh.pretty"\n  }\n}\n'
+    exit 0
+    ;;
+  *"/api/v1/metrics"*)
+    printf '{"success":true,"data":{"requests":{"total":1,"error_rate":0},"latency":{"avg_ms":1.5,"max_ms":2.5}}}\n'
+    exit 0
+    ;;
+  *"%{http_code}"*|*"PROPFIND"*)
+    printf '207'
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+EOF
+	chmod +x "$bin_dir/curl"
+	: > "$invoked_log"
+	rm -f -- "$invoked_log"
+}
+
 run_expect_failure() {
 	local out="$1"
 	shift
 	local status
 
 	set +e
-	"$@" > "$out" 2>&1
+	"$@" </dev/null > "$out" 2>&1
 	status=$?
 	set -e
 
@@ -130,6 +161,47 @@ run_refuse_traversal_storage_test() {
 	assert_file_contains "$case_dir/out.log" "MNEMONAS_STORAGE_ROOT must not contain '..' path segments"
 }
 
+run_refuse_newline_storage_test() {
+	local case_dir="$TMP_ROOT/refuse-newline-storage"
+	local fake_bin="$case_dir/bin"
+	local invoked_log="$case_dir/curl.log"
+	local storage_root
+	mkdir -p "$case_dir"
+	make_fake_curl "$fake_bin" "$invoked_log"
+
+	storage_root="$case_dir/storage"$'\n'"escape"
+	run_expect_failure "$case_dir/out.log" env \
+		HOME="$case_dir/home" \
+		PATH="$fake_bin:$PATH" \
+		CURL_INVOKED_LOG="$invoked_log" \
+		MNEMONAS_STORAGE_ROOT="$storage_root" \
+		bash "$REPO_ROOT/scripts/benchmark.sh" "http://127.0.0.1:9"
+
+	assert_file_contains "$case_dir/out.log" "MNEMONAS_STORAGE_ROOT cannot contain newline characters"
+	assert_not_exists "$invoked_log"
+}
+
+run_refuse_control_character_storage_test() {
+	local case_dir="$TMP_ROOT/refuse-control-character-storage"
+	local fake_bin="$case_dir/bin"
+	local invoked_log="$case_dir/curl.log"
+	local storage_root
+	mkdir -p "$case_dir"
+	make_fake_curl "$fake_bin" "$invoked_log"
+
+	storage_root="$case_dir/storage"$'\a'"escape"
+	run_expect_failure "$case_dir/out.log" env \
+		HOME="$case_dir/home" \
+		PATH="$fake_bin:$PATH" \
+		CURL_INVOKED_LOG="$invoked_log" \
+		MNEMONAS_STORAGE_ROOT="$storage_root" \
+		bash "$REPO_ROOT/scripts/benchmark.sh" "http://127.0.0.1:9"
+
+	assert_file_contains "$case_dir/out.log" "MNEMONAS_STORAGE_ROOT cannot contain control characters"
+	assert_not_exists "$invoked_log"
+	assert_not_exists "$storage_root"
+}
+
 run_refuse_relative_storage_test() {
 	local case_dir="$TMP_ROOT/refuse-relative-storage"
 	mkdir -p "$case_dir"
@@ -171,6 +243,88 @@ run_refuse_symlink_storage_test() {
 	assert_exists "$target_dir/files/benchmark-test/sentinel.txt"
 }
 
+run_webdav_secret_json_escape_test() {
+	local case_dir="$TMP_ROOT/webdav-secret-json-escape"
+	local fake_bin="$case_dir/bin"
+	local invoked_log="$case_dir/curl.log"
+	local secret='quote"slash\value'
+	mkdir -p "$case_dir/storage"
+	make_fake_curl "$fake_bin" "$invoked_log"
+
+	cat > "$case_dir/config.toml" <<EOF
+[webdav]
+auth_type = "basic"
+username = "admin"
+password = ""
+EOF
+	printf '{"webdav_password": "quote\\"slash\\\\value"}\n' > "$case_dir/secrets.json"
+
+	run_expect_failure "$case_dir/out.log" env \
+		HOME="$case_dir/home" \
+		PATH="$fake_bin:$PATH" \
+		CURL_INVOKED_LOG="$invoked_log" \
+		MNEMONAS_STORAGE_ROOT="$case_dir/storage" \
+		CONFIG_FILE="$case_dir/config.toml" \
+		SECRETS_FILE="$case_dir/secrets.json" \
+		bash "$REPO_ROOT/scripts/benchmark.sh" "http://127.0.0.1:9"
+
+	assert_file_contains "$invoked_log" "admin:$secret"
+}
+
+run_webdav_config_toml_escape_test() {
+	local case_dir="$TMP_ROOT/webdav-config-toml-escape"
+	local fake_bin="$case_dir/bin"
+	local invoked_log="$case_dir/curl.log"
+	local secret='quote"slash\value'
+	mkdir -p "$case_dir/storage"
+	make_fake_curl "$fake_bin" "$invoked_log"
+
+	cat > "$case_dir/config.toml" <<EOF
+[webdav]
+auth_type = "basic"
+username = "admin"
+password = "quote\\"slash\\\\value"
+EOF
+
+	run_expect_failure "$case_dir/out.log" env \
+		HOME="$case_dir/home" \
+		PATH="$fake_bin:$PATH" \
+		CURL_INVOKED_LOG="$invoked_log" \
+		MNEMONAS_STORAGE_ROOT="$case_dir/storage" \
+		CONFIG_FILE="$case_dir/config.toml" \
+		SECRETS_FILE="$case_dir/secrets.json" \
+		bash "$REPO_ROOT/scripts/benchmark.sh" "http://127.0.0.1:9"
+
+	assert_file_contains "$invoked_log" "admin:$secret"
+}
+
+run_admin_login_json_escape_and_pretty_response_test() {
+	local case_dir="$TMP_ROOT/admin-login-json"
+	local fake_bin="$case_dir/bin"
+	local invoked_log="$case_dir/curl.log"
+	local secret='quote space"slash\value'
+	mkdir -p "$case_dir/storage/.mnemonas"
+	make_fake_benchmark_curl "$fake_bin" "$invoked_log"
+
+	cat > "$case_dir/config.toml" <<'EOF'
+[auth]
+enabled = true
+EOF
+	printf 'Password: %s\n' "$secret" > "$case_dir/storage/.mnemonas/initial-password.txt"
+
+	env \
+		HOME="$case_dir/home" \
+		PATH="$fake_bin:$PATH" \
+		CURL_INVOKED_LOG="$invoked_log" \
+		MNEMONAS_STORAGE_ROOT="$case_dir/storage" \
+		CONFIG_FILE="$case_dir/config.toml" \
+		INITIAL_PASSWORD_FILE="$case_dir/storage/.mnemonas/initial-password.txt" \
+		bash "$REPO_ROOT/scripts/benchmark.sh" "http://127.0.0.1:9" > "$case_dir/out.log" 2>&1
+
+	assert_file_contains "$invoked_log" '{"username":"admin","password":"quote space\"slash\\value"}'
+	assert_file_contains "$invoked_log" "Authorization: Bearer access.pretty"
+}
+
 run_refuse_traversal_isolated_root_test() {
 	local case_dir="$TMP_ROOT/refuse-traversal-isolated-root"
 	mkdir -p "$case_dir"
@@ -180,6 +334,35 @@ run_refuse_traversal_isolated_root_test() {
 		bash "$REPO_ROOT/scripts/run-benchmark-isolated.sh"
 
 	assert_file_contains "$case_dir/out.log" "MNEMONAS_BENCH_ROOT must not contain '..' path segments"
+}
+
+run_refuse_newline_isolated_root_test() {
+	local case_dir="$TMP_ROOT/refuse-newline-isolated-root"
+	local bench_root
+	mkdir -p "$case_dir"
+
+	bench_root="/tmp/mnemonas-benchmark"$'\n'"escape"
+	run_expect_failure "$case_dir/out.log" env \
+		MNEMONAS_BENCH_ROOT="$bench_root" \
+		MNEMONAS_BENCH_DATAPLANE_GRPC="127.0.0.1:70000" \
+		bash "$REPO_ROOT/scripts/run-benchmark-isolated.sh"
+
+	assert_file_contains "$case_dir/out.log" "MNEMONAS_BENCH_ROOT cannot contain newline characters"
+}
+
+run_refuse_control_character_isolated_root_test() {
+	local case_dir="$TMP_ROOT/refuse-control-character-isolated-root"
+	local bench_root
+	mkdir -p "$case_dir"
+
+	bench_root="$case_dir/root"$'\a'"escape"
+	run_expect_failure "$case_dir/out.log" env \
+		MNEMONAS_BENCH_ROOT="$bench_root" \
+		MNEMONAS_BENCH_DATAPLANE_GRPC="127.0.0.1:70000" \
+		bash "$REPO_ROOT/scripts/run-benchmark-isolated.sh"
+
+	assert_file_contains "$case_dir/out.log" "MNEMONAS_BENCH_ROOT cannot contain control characters"
+	assert_not_exists "$bench_root"
 }
 
 run_refuse_symlink_isolated_root_test() {
@@ -207,6 +390,48 @@ run_refuse_invalid_isolated_addr_test() {
 		bash "$REPO_ROOT/scripts/run-benchmark-isolated.sh"
 
 	assert_file_contains "$case_dir/out.log" "MNEMONAS_BENCH_DATAPLANE_GRPC port must be between 1 and 65535"
+	assert_not_exists "$case_dir/root/backend"
+}
+
+run_refuse_non_loopback_isolated_host_test() {
+	local case_dir="$TMP_ROOT/refuse-non-loopback-isolated-host"
+	mkdir -p "$case_dir"
+
+	run_expect_failure "$case_dir/out.log" env \
+		MNEMONAS_BENCH_ROOT="$case_dir/root" \
+		MNEMONAS_BENCH_NASD_HOST="0.0.0.0" \
+		MNEMONAS_BENCH_DATAPLANE_GRPC="127.0.0.1:70000" \
+		bash "$REPO_ROOT/scripts/run-benchmark-isolated.sh"
+
+	assert_file_contains "$case_dir/out.log" "MNEMONAS_BENCH_NASD_HOST must be loopback-only"
+	assert_not_exists "$case_dir/root/backend"
+}
+
+run_refuse_loopback_name_spoof_isolated_host_test() {
+	local case_dir="$TMP_ROOT/refuse-loopback-name-spoof-isolated-host"
+	mkdir -p "$case_dir"
+
+	run_expect_failure "$case_dir/out.log" env \
+		MNEMONAS_BENCH_ROOT="$case_dir/root" \
+		MNEMONAS_BENCH_NASD_HOST="127.example.com" \
+		MNEMONAS_BENCH_DATAPLANE_GRPC="127.0.0.1:70000" \
+		bash "$REPO_ROOT/scripts/run-benchmark-isolated.sh"
+
+	assert_file_contains "$case_dir/out.log" "MNEMONAS_BENCH_NASD_HOST must be loopback-only"
+	assert_not_exists "$case_dir/root/backend"
+}
+
+run_refuse_non_loopback_isolated_dataplane_test() {
+	local case_dir="$TMP_ROOT/refuse-non-loopback-isolated-dataplane"
+	mkdir -p "$case_dir"
+
+	run_expect_failure "$case_dir/out.log" env \
+		MNEMONAS_BENCH_ROOT="$case_dir/root" \
+		MNEMONAS_BENCH_DATAPLANE_HTTP="0.0.0.0:19193" \
+		MNEMONAS_BENCH_DATAPLANE_GRPC="127.0.0.1:70000" \
+		bash "$REPO_ROOT/scripts/run-benchmark-isolated.sh"
+
+	assert_file_contains "$case_dir/out.log" "MNEMONAS_BENCH_DATAPLANE_HTTP must be loopback-only"
 	assert_not_exists "$case_dir/root/backend"
 }
 
@@ -254,12 +479,22 @@ run_missing_storage_root_test
 run_refuse_invalid_base_url_test
 run_refuse_unisolated_storage_test
 run_refuse_traversal_storage_test
+run_refuse_newline_storage_test
+run_refuse_control_character_storage_test
 run_refuse_relative_storage_test
 run_refuse_protected_storage_with_override_test
 run_refuse_symlink_storage_test
+run_webdav_secret_json_escape_test
+run_webdav_config_toml_escape_test
+run_admin_login_json_escape_and_pretty_response_test
 run_refuse_traversal_isolated_root_test
+run_refuse_newline_isolated_root_test
+run_refuse_control_character_isolated_root_test
 run_refuse_symlink_isolated_root_test
 run_refuse_invalid_isolated_addr_test
+run_refuse_non_loopback_isolated_host_test
+run_refuse_loopback_name_spoof_isolated_host_test
+run_refuse_non_loopback_isolated_dataplane_test
 run_refuse_invalid_isolated_ready_attempts_test
 run_refuse_default_personal_storage_test
 run_isolated_target_reaches_health_check_test

@@ -8,6 +8,19 @@ vi.mock('./auth', () => ({
 import { authFetch } from './auth'
 
 const mockAuthFetch = authFetch as Mock
+const invalidResponseMessage = '服务器返回了无效的数据'
+const validUser = {
+  id: 'u1',
+  username: 'admin',
+  email: '',
+  role: 'admin' as const,
+  disabled: false,
+  home_dir: '/',
+  created_at: '2024-01-01',
+  updated_at: '2024-01-01',
+  quota_bytes: 0,
+  used_bytes: 0,
+}
 
 describe('Users API', () => {
   beforeEach(() => {
@@ -30,6 +43,58 @@ describe('Users API', () => {
 
     expect(result.users).toHaveLength(1)
     expect(result.total).toBe(1)
+  })
+
+  it('forwards abort signals when listing users', async () => {
+    const signal = new AbortController().signal
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        success: true,
+        data: {
+          users: [],
+        },
+      }),
+    })
+
+    await listUsers({ signal })
+
+    expect(mockAuthFetch).toHaveBeenCalledWith('/api/v1/admin/users/', { signal })
+  })
+
+  it('forwards abort signals for user management write operations', async () => {
+    const signal = new AbortController().signal
+    const user = validUser
+
+    mockAuthFetch
+      .mockResolvedValueOnce({
+        ok: true,
+        headers: { get: () => null },
+        json: () => Promise.resolve({ success: true, data: { user } }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        headers: { get: () => null },
+        json: () => Promise.resolve({ success: true, data: { user: { ...user, email: 'ops@example.com' } } }),
+      })
+      .mockResolvedValueOnce({ ok: true, headers: { get: () => null }, json: () => Promise.resolve({ success: true, data: null }) })
+      .mockResolvedValueOnce({ ok: true, headers: { get: () => null }, json: () => Promise.resolve({ success: true, data: null }) })
+      .mockResolvedValueOnce({ ok: true, headers: { get: () => null }, json: () => Promise.resolve({ success: true, data: { revoked: true } }) })
+      .mockResolvedValueOnce({ ok: true, headers: { get: () => null }, json: () => Promise.resolve({ success: true, data: { disabled: true } }) })
+
+    await createUser({ username: 'admin', password: 'password123' }, { signal })
+    await updateUser('u1', { email: 'ops@example.com' }, { signal })
+    await deleteUser('u1', { signal })
+    await resetUserPassword('u1', { new_password: 'password123' }, { signal })
+    await revokeUserSessions('u1', { signal })
+    await toggleUserStatus('u1', true, { signal })
+
+    expect(mockAuthFetch).toHaveBeenNthCalledWith(1, '/api/v1/admin/users/', expect.objectContaining({ method: 'POST', signal }))
+    expect(mockAuthFetch).toHaveBeenNthCalledWith(2, '/api/v1/admin/users/u1', expect.objectContaining({ method: 'PUT', signal }))
+    expect(mockAuthFetch).toHaveBeenNthCalledWith(3, '/api/v1/admin/users/u1', expect.objectContaining({ method: 'DELETE', signal }))
+    expect(mockAuthFetch).toHaveBeenNthCalledWith(4, '/api/v1/admin/users/u1/reset-password', expect.objectContaining({ method: 'POST', signal }))
+    expect(mockAuthFetch).toHaveBeenNthCalledWith(5, '/api/v1/admin/users/u1/revoke-sessions', expect.objectContaining({ method: 'POST', signal }))
+    expect(mockAuthFetch).toHaveBeenNthCalledWith(6, '/api/v1/admin/users/u1/status', expect.objectContaining({ method: 'PUT', signal }))
   })
 
   it('derives total users from the returned list when the summary field is missing', async () => {
@@ -89,6 +154,42 @@ describe('Users API', () => {
     expect(result.user.groups).toEqual(['editors', 'family'])
   })
 
+  it('forwards create-time home directory and quota fields', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      headers: { get: () => null },
+      json: () => Promise.resolve({
+        success: true,
+        data: {
+          user: { id: 'u1', username: 'editor', email: '', role: 'user', groups: ['editors'], disabled: false, home_dir: '/team/editor', created_at: '2024-01-01', updated_at: '2024-01-01', quota_bytes: 2147483648, used_bytes: 0 },
+        },
+      }),
+    })
+
+    const result = await createUser({
+      username: 'editor',
+      password: 'password123',
+      groups: ['editors'],
+      home_dir: '/team/editor',
+      quota_bytes: 2147483648,
+    })
+
+    expect(mockAuthFetch).toHaveBeenCalledWith('/api/v1/admin/users/', expect.objectContaining({
+      method: 'POST',
+      body: JSON.stringify({
+        username: 'editor',
+        password: 'password123',
+        groups: ['editors'],
+        home_dir: '/team/editor',
+        quota_bytes: 2147483648,
+      }),
+    }))
+    expect(result.user).toMatchObject({
+      home_dir: '/team/editor',
+      quota_bytes: 2147483648,
+    })
+  })
+
   it('unwraps wrapped update user responses', async () => {
     mockAuthFetch.mockResolvedValueOnce({
       ok: true,
@@ -127,7 +228,7 @@ describe('Users API', () => {
       }),
     })
 
-    await expect(listUsers()).rejects.toThrow('Invalid users response')
+    await expect(listUsers()).rejects.toThrow(invalidResponseMessage)
   })
 
   it('rejects list users responses with non-object user entries', async () => {
@@ -141,7 +242,40 @@ describe('Users API', () => {
       }),
     })
 
-    await expect(listUsers()).rejects.toThrow('Invalid users response')
+    await expect(listUsers()).rejects.toThrow(invalidResponseMessage)
+  })
+
+  it('rejects list users responses that omit the users array', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        success: true,
+        data: {
+          total: 0,
+        },
+      }),
+    })
+
+    await expect(listUsers()).rejects.toThrow(invalidResponseMessage)
+  })
+
+  it.each([
+    ['negative quota bytes', { users: [{ ...validUser, quota_bytes: -1 }] }],
+    ['fractional used bytes', { users: [{ ...validUser, used_bytes: 1.5 }] }],
+    ['unsafe quota bytes', { users: [{ ...validUser, quota_bytes: 9007199254740992 }] }],
+    ['unsafe total', { users: [validUser], total: 9007199254740992 }],
+    ['negative total', { users: [validUser], total: -1 }],
+    ['total smaller than returned users', { users: [validUser, { ...validUser, id: 'u2', username: 'guest', role: 'guest' as const }], total: 1 }],
+  ])('rejects list users responses with %s', async (_label, data) => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        success: true,
+        data,
+      }),
+    })
+
+    await expect(listUsers()).rejects.toThrow(invalidResponseMessage)
   })
 
   it('rejects unreadable successful list users responses', async () => {
@@ -150,7 +284,7 @@ describe('Users API', () => {
       json: () => Promise.reject(new SyntaxError('Unexpected token < in JSON')),
     })
 
-    await expect(listUsers()).rejects.toThrow('Invalid users response')
+    await expect(listUsers()).rejects.toThrow(invalidResponseMessage)
   })
 
   it('rejects malformed successful create user responses', async () => {
@@ -164,7 +298,7 @@ describe('Users API', () => {
       }),
     })
 
-    await expect(createUser({ username: 'admin', password: 'password123' })).rejects.toThrow('Invalid create user response')
+    await expect(createUser({ username: 'admin', password: 'password123' })).rejects.toThrow(invalidResponseMessage)
   })
 
   it('rejects malformed successful update user responses', async () => {
@@ -178,7 +312,43 @@ describe('Users API', () => {
       }),
     })
 
-    await expect(updateUser('u1', { quota_bytes: 0 })).rejects.toThrow('Invalid update user response')
+    await expect(updateUser('u1', { quota_bytes: 0 })).rejects.toThrow(invalidResponseMessage)
+  })
+
+  it.each([
+    ['create response with fractional quota', () => createUser({ username: 'admin', password: 'password123' }), { ...validUser, quota_bytes: 1.5 }],
+    ['create response with unsafe used bytes', () => createUser({ username: 'admin', password: 'password123' }), { ...validUser, used_bytes: 9007199254740992 }],
+    ['update response with negative quota', () => updateUser('u1', { quota_bytes: 0 }), { ...validUser, quota_bytes: -1 }],
+    ['update response with fractional used bytes', () => updateUser('u1', { quota_bytes: 0 }), { ...validUser, used_bytes: 1.5 }],
+  ])('rejects %s', async (_label, action, user) => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        success: true,
+        data: {
+          user,
+        },
+      }),
+    })
+
+    await expect(action()).rejects.toThrow(invalidResponseMessage)
+  })
+
+  it.each([
+    ['negative create quota', () => createUser({ username: 'admin', password: 'password123', quota_bytes: -1 }), 'INVALID_QUOTA'],
+    ['fractional create quota', () => createUser({ username: 'admin', password: 'password123', quota_bytes: 1.5 }), 'INVALID_QUOTA'],
+    ['unsafe create quota', () => createUser({ username: 'admin', password: 'password123', quota_bytes: 9007199254740992 }), 'INVALID_QUOTA'],
+    ['non-number create quota', () => createUser({ username: 'admin', password: 'password123', quota_bytes: '1GiB' as unknown as number }), 'INVALID_QUOTA'],
+    ['negative update quota', () => updateUser('u1', { quota_bytes: -1 }), 'INVALID_QUOTA'],
+    ['fractional update quota', () => updateUser('u1', { quota_bytes: 1.5 }), 'INVALID_QUOTA'],
+    ['unsafe update quota', () => updateUser('u1', { quota_bytes: 9007199254740992 }), 'INVALID_QUOTA'],
+    ['non-number update quota', () => updateUser('u1', { quota_bytes: '1GiB' as unknown as number }), 'INVALID_QUOTA'],
+  ])('rejects %s before calling the users API', async (_label, action, code) => {
+    await expect(action()).rejects.toMatchObject({
+      status: 0,
+      code,
+    })
+    expect(mockAuthFetch).not.toHaveBeenCalled()
   })
 
   it('uses structured error messages', async () => {
@@ -189,6 +359,28 @@ describe('Users API', () => {
     })
 
     await expect(createUser({ username: 'admin', password: 'password123' })).rejects.toThrow('user already exists')
+  })
+
+  it('surfaces problem-json users API errors', async () => {
+    const body = {
+      title: 'Service unavailable',
+      detail: 'user store unavailable',
+      status: 503,
+    }
+
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 503,
+      headers: new Headers({ 'Content-Type': 'application/problem+json' }),
+      clone: () => ({ json: () => Promise.resolve(body) }),
+      json: () => Promise.resolve(body),
+    })
+
+    await expect(listUsers()).rejects.toMatchObject({
+      message: 'user store unavailable',
+      status: 503,
+      isUnavailable: true,
+    })
   })
 
   it('preserves unavailable users API metadata', async () => {
@@ -224,7 +416,7 @@ describe('Users API', () => {
       json: () => Promise.reject(new SyntaxError('Unexpected token < in JSON')),
     })
 
-    await expect(toggleUserStatus('u1', true)).rejects.toThrow('Failed to update user status')
+    await expect(toggleUserStatus('u1', true)).rejects.toThrow('更新用户状态失败')
   })
 
   it('uses the reset password fallback when its error body is invalid', async () => {
@@ -234,7 +426,7 @@ describe('Users API', () => {
       json: () => Promise.reject(new SyntaxError('Unexpected token < in JSON')),
     })
 
-    await expect(resetUserPassword('u1', { new_password: 'password123' })).rejects.toThrow('Failed to reset password')
+    await expect(resetUserPassword('u1', { new_password: 'password123' })).rejects.toThrow('重置密码失败')
   })
 
   it('maps wrapped success for delete, reset password, revoke sessions, and toggle status', async () => {
@@ -319,10 +511,10 @@ describe('Users API', () => {
       .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({ success: true, data: {} }) })
       .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({ success: false, data: { disabled: true } }) })
 
-    await expect(deleteUser('u1')).rejects.toThrow('Invalid delete user response')
-    await expect(resetUserPassword('u1', { new_password: 'password123' })).rejects.toThrow('Invalid reset password response')
-    await expect(revokeUserSessions('u1')).rejects.toThrow('Invalid revoke sessions response')
-    await expect(toggleUserStatus('u1', true)).rejects.toThrow('Invalid update user status response')
+    await expect(deleteUser('u1')).rejects.toThrow(invalidResponseMessage)
+    await expect(resetUserPassword('u1', { new_password: 'password123' })).rejects.toThrow(invalidResponseMessage)
+    await expect(revokeUserSessions('u1')).rejects.toThrow(invalidResponseMessage)
+    await expect(toggleUserStatus('u1', true)).rejects.toThrow(invalidResponseMessage)
   })
 
   it('rejects toggle status success responses that omit the disabled field', async () => {
@@ -331,6 +523,6 @@ describe('Users API', () => {
       json: () => Promise.resolve({ success: true, data: {} }),
     })
 
-    await expect(toggleUserStatus('u1', true)).rejects.toThrow('Invalid update user status response')
+    await expect(toggleUserStatus('u1', true)).rejects.toThrow(invalidResponseMessage)
   })
 })

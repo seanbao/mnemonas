@@ -8,7 +8,7 @@ This guide explains how to set up a local MnemoNAS development environment, buil
 
 | Tool | Minimum | Recommended | Purpose |
 | --- | --- | --- | --- |
-| Go | 1.25.9 | 1.25.9+ | Go control plane |
+| Go | 1.25.10 | 1.25.10+ | Go control plane |
 | Rust | 1.92 | 1.92.x | Rust data plane |
 | Node.js | `^20.19.0` or `>=22.12.0` | `.nvmrc` 22.x | Frontend |
 | protoc | 3.20 | 3.20.1 for CI parity | Regenerate protobuf code |
@@ -53,7 +53,7 @@ cargo install cargo-watch --version 8.5.3
 ```bash
 sudo apt update
 
-GO_VERSION=1.25.9
+GO_VERSION=1.25.10
 wget "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz"
 sudo tar -C /usr/local -xzf "go${GO_VERSION}.linux-amd64.tar.gz"
 echo 'export PATH=$PATH:/usr/local/go/bin:$HOME/go/bin' >> ~/.bashrc
@@ -182,7 +182,7 @@ nvm use
 
 The script:
 
-- `--creds` shows the initial password file and WebDAV credential location without printing the WebDAV plaintext password. Use `MNEMONAS_DEV_SHOW_SECRETS=1 ./scripts/dev.sh --creds` only when you intentionally want to reveal it in the local terminal.
+- `--creds` shows the initial password file and WebDAV credential location without printing the WebDAV plaintext password. Set `MNEMONAS_DEV_SHOW_SECRETS=1 ./scripts/dev.sh --creds` only for deliberate local-terminal disclosure.
 
 - Builds Go and Rust components.
 - Starts dataplane, `nasd`, and optionally Vite.
@@ -220,7 +220,7 @@ npm run dev
 
 Frontend dev server: `http://localhost:5173`; API proxy target: `http://localhost:8080`.
 
-If you want `nasd` to serve the static Web UI directly, build the frontend first or set `MNEMONAS_WEB_DIR=web/dist`.
+To have `nasd` serve the static Web UI directly, build the frontend first or set `MNEMONAS_WEB_DIR=web/dist`.
 
 ## Ports
 
@@ -260,13 +260,17 @@ format = "console"
 Main entry points:
 
 ```bash
+make verify-changed
 make test
 make test-torture
 make e2e
 make bench
 make lint
 make check
+make docs-check
 ```
+
+`make verify-changed` selects workflow, script, Go/Rust, frontend, E2E, Docker, and documentation checks from the changed files in the worktree, staged area, or a configured base ref. Documentation-only changes run `make docs-check`, which validates local Markdown links against files and heading anchors in the repository and confirms that README, CHANGELOG, SUPPORT, SECURITY, the Web README, and documents under `docs/` keep Chinese and English pairs; documents under `docs/` must also appear in both documentation indexes.
 
 `make lint` and `make check` require `golangci-lint` unless `SKIP_GOLANGCI_LINT=1` is explicitly set for local troubleshooting.
 
@@ -283,6 +287,8 @@ bash ./scripts/with-test-dataplane.sh go test -v -cover $GO_PACKAGES
 bash ./scripts/with-test-dataplane.sh go test -coverprofile=coverage.out $GO_PACKAGES
 go tool cover -html=coverage.out
 ```
+
+The temporary dataplane started by `with-test-dataplane.sh` accepts only loopback gRPC/HTTP addresses: `localhost`, `ip6-localhost`, `::1`, or dotted-quad numeric `127.0.0.0/8` addresses. Overrides through `MNEMONAS_TEST_DATAPLANE_ADDR` or `MNEMONAS_TEST_DATAPLANE_HTTP_ADDR` must remain loopback and must not contain whitespace or control characters, so the test service is not exposed on public or untrusted LAN interfaces.
 
 After installing frontend dependencies, do not use `go test ./...` or `go list ./...` as the repository package set; Go will traverse third-party packages under `web/node_modules`. Use `make --no-print-directory go-packages` for repository-wide Go checks.
 
@@ -316,7 +322,7 @@ npm run test:e2e
 npm run test:e2e:ui
 ```
 
-Playwright starts isolated backend and frontend servers by default. To reuse existing services, set `MNEMONAS_E2E_REUSE_EXISTING=1`, `MNEMONAS_E2E_BACKEND_URL`, `MNEMONAS_E2E_FRONTEND_URL`, and `E2E_PASSWORD`.
+Playwright starts isolated backend and frontend servers by default. Local runs use 4 workers unless `MNEMONAS_E2E_WORKERS` is set to a positive integer; CI uses 1 worker. The isolated backend uses a 2-hour access-token lifetime and a 168-hour refresh-token lifetime so long parallel E2E runs do not enter concurrent refresh-token rotation after a shared storageState expires. To reuse existing services, set `MNEMONAS_E2E_REUSE_EXISTING=1`, `MNEMONAS_E2E_BACKEND_URL`, `MNEMONAS_E2E_FRONTEND_URL`, and `E2E_PASSWORD`.
 
 ### WebDAV Smoke Test
 
@@ -342,7 +348,9 @@ make e2e
 ./scripts/run-e2e-isolated.sh --quick
 ```
 
-The isolated runner avoids writing into a real user storage root. `scripts/e2e-test.sh` can target an explicit running service, but it requires explicit `BASE_URL`, `STORAGE_ROOT`, `CONFIG_FILE`, `SECRETS_FILE`, and `INITIAL_PASSWORD_FILE`. `STORAGE_ROOT` must not contain `..` or symlink path components.
+The isolated runner avoids writing into a real user storage root. `scripts/e2e-test.sh` can target an explicit running service, but it requires explicit `BASE_URL`, `STORAGE_ROOT`, `CONFIG_FILE`, `SECRETS_FILE`, and `INITIAL_PASSWORD_FILE`. `STORAGE_ROOT` must not contain control characters, `..`, or symlink path components.
+
+The isolated E2E runner and Playwright backend accept only loopback Web and dataplane addresses: `localhost`, `ip6-localhost`, `::1`, or dotted-quad numeric `127.0.0.0/8` addresses. This prevents test backends from unintentionally listening on public or untrusted LAN interfaces.
 
 ### Fault Injection
 
@@ -358,7 +366,7 @@ RUN_CORRUPTION_TESTS=0 \
 ./scripts/fault-injection-test.sh
 ```
 
-Safety checks are covered by `scripts/test-fault-injection-safety.sh` and `make scripts-check`. `BASE_URL`, `STORAGE_ROOT`, and `NASD_BIN` must be explicit. Real storage paths require `ALLOW_REAL_STORAGE=1`, must still be absolute, must not contain `..` or symlink path components, and must not point at protected system directories such as `/`, `/tmp`, or `/var`.
+Safety checks are covered by `scripts/test-fault-injection-safety.sh` and `make scripts-check`. `BASE_URL`, `STORAGE_ROOT`, and `NASD_BIN` must be explicit. Real storage paths require `ALLOW_REAL_STORAGE=1`, must still be absolute, must not contain control characters, `..`, or symlink path components, and must not point at protected system directories such as `/`, `/tmp`, or `/var`. `OBJECTS_DIR` and `INDEX_DB`, which may be read or modified by the destructive checks, must be under `STORAGE_ROOT`.
 
 ### Benchmarks
 
@@ -374,7 +382,9 @@ MNEMONAS_STORAGE_ROOT=/tmp/mnemonas-bench-target \
 ./scripts/benchmark.sh http://127.0.0.1:18080
 ```
 
-Manual benchmark targets create and remove `storage.root/files/benchmark-test`. Real storage paths require `ALLOW_REAL_STORAGE=1`, must still be absolute, must not contain `..` or symlink path components, and must not point at protected system directories.
+Manual benchmark targets create and remove `storage.root/files/benchmark-test`. Real storage paths require `ALLOW_REAL_STORAGE=1`, must still be absolute, must not contain control characters, `..`, or symlink path components, and must not point at protected system directories.
+
+The isolated benchmark runner uses the same loopback-only rule for Web and dataplane addresses. To benchmark a remote or shared-network instance, run `scripts/benchmark.sh` directly with an explicit isolated `MNEMONAS_STORAGE_ROOT`.
 
 ## Debugging
 
@@ -425,7 +435,7 @@ export PATH=$PATH:$(go env GOPATH)/bin
 
 ### Go Toolchain Download Fails
 
-The repo pins `toolchain go1.25.9`. If local network access blocks toolchain download but you have a compatible local Go 1.25.x:
+The repo pins `toolchain go1.25.10`. When local network access blocks toolchain download but a compatible local Go 1.25.x is available:
 
 ```bash
 packages=$(GOTOOLCHAIN=local make --no-print-directory go-packages)
@@ -433,7 +443,7 @@ GOTOOLCHAIN=local go test $packages
 GOTOOLCHAIN=local make build
 ```
 
-Release builds and vulnerability scans should use Go 1.25.9 or a newer 1.25.x patch version.
+Release builds and vulnerability scans should use Go 1.25.10 or a newer 1.25.x patch version.
 
 If `GOSUMDB=off` breaks toolchain verification:
 

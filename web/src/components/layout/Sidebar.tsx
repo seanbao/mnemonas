@@ -22,6 +22,7 @@ import {
 } from 'lucide-react'
 import { cn, formatBytes } from '@/lib/utils'
 import { areDiskStatsAvailable, clampUsagePercent } from '@/lib/storageStats'
+import { GENERIC_LOAD_ERROR_DESCRIPTION, getUserFacingErrorDescription } from '@/lib/apiMessages'
 import { ApiError, getAppVersion, getStorageStats } from '@/api/files'
 
 interface NavItem {
@@ -83,7 +84,7 @@ function getSidebarStorageErrorPresentation(error: unknown): { title: string; de
 
   return {
     title: '统计加载失败',
-    description: (error as Error).message || '请稍后重试',
+    description: getUserFacingErrorDescription(error, GENERIC_LOAD_ERROR_DESCRIPTION),
   }
 }
 
@@ -109,14 +110,14 @@ export function Sidebar({ collapsed = false, onClose }: SidebarProps) {
   // Fetch storage stats for the sidebar indicator
   const { data: storageStats, error: storageStatsError, refetch: refetchStorageStats, isRefetching: isRefetchingStorageStats } = useQuery({
     queryKey: ['storage-stats-sidebar'],
-    queryFn: getStorageStats,
+    queryFn: ({ signal }) => getStorageStats({ signal }),
     enabled: isAdmin && !collapsed,
     staleTime: 1000 * 60 * 5, // Cache for 5 minutes
     refetchInterval: 1000 * 60 * 5, // Refresh every 5 minutes
   })
   const { data: appVersion } = useQuery({
     queryKey: ['app-version'],
-    queryFn: getAppVersion,
+    queryFn: ({ signal }) => getAppVersion({ signal }),
     enabled: !collapsed,
     staleTime: 1000 * 60 * 10,
   })

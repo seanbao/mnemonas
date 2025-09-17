@@ -217,6 +217,15 @@ func TestWorkspace_RootMutationsAreRejected(t *testing.T) {
 		t.Fatalf("WriteFile(source.txt) error: %v", err)
 	}
 
+	if err := w.WriteFile(ctx, "/", []byte("blocked")); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("WriteFile(/) error = %v, want ErrNotFound", err)
+	}
+	if err := w.WriteFileFromReader(ctx, "/", strings.NewReader("blocked")); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("WriteFileFromReader(/) error = %v, want ErrNotFound", err)
+	}
+	if err := w.Mkdir(ctx, "/"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Mkdir(/) error = %v, want ErrNotFound", err)
+	}
 	if err := w.Delete(ctx, "/"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("Delete(/) error = %v, want ErrNotFound", err)
 	}
@@ -991,6 +1000,61 @@ func TestWorkspace_Rename_ReturnsDirectorySyncErrorAfterRename(t *testing.T) {
 	}
 }
 
+func TestWorkspace_Rename_ReturnsWarningWhenRollbackFailsAfterRename(t *testing.T) {
+	w := setupWorkspace(t)
+	ctx := context.Background()
+	if err := w.Mkdir(ctx, "/src-dir"); err != nil {
+		t.Fatalf("Mkdir(src-dir) error: %v", err)
+	}
+	if err := w.Mkdir(ctx, "/dst-dir"); err != nil {
+		t.Fatalf("Mkdir(dst-dir) error: %v", err)
+	}
+	if err := w.WriteFile(ctx, "/src-dir/source.txt", []byte("content")); err != nil {
+		t.Fatalf("WriteFile(source.txt) error: %v", err)
+	}
+
+	originalSyncWorkspaceDir := syncWorkspaceDir
+	syncFailed := false
+	var blockRollbackErr error
+	syncWorkspaceDir = func(dir string) error {
+		if !syncFailed {
+			syncFailed = true
+			blockRollbackErr = os.Mkdir(filepath.Join(w.Root(), "src-dir", "source.txt"), 0755)
+			return errors.New("sync dir failed")
+		}
+		return nil
+	}
+	t.Cleanup(func() {
+		syncWorkspaceDir = originalSyncWorkspaceDir
+	})
+
+	err := w.Rename(ctx, "/src-dir/source.txt", "/dst-dir/renamed.txt")
+	if blockRollbackErr != nil {
+		t.Fatalf("failed to arrange rollback conflict: %v", blockRollbackErr)
+	}
+	if !IsVisibleMutationWarning(err) {
+		t.Fatalf("Rename() error = %v, want visible mutation warning", err)
+	}
+	if !strings.Contains(err.Error(), "failed to rollback renamed path") {
+		t.Fatalf("expected rollback failure in warning, got %v", err)
+	}
+
+	data, readErr := w.ReadFile(ctx, "/dst-dir/renamed.txt")
+	if readErr != nil {
+		t.Fatalf("ReadFile(renamed.txt) after rollback failure error: %v", readErr)
+	}
+	if string(data) != "content" {
+		t.Fatalf("expected destination content after rollback failure, got %q", string(data))
+	}
+	info, statErr := w.Stat(ctx, "/src-dir/source.txt")
+	if statErr != nil {
+		t.Fatalf("Stat(source.txt) rollback blocker error: %v", statErr)
+	}
+	if !info.IsDir {
+		t.Fatal("expected rollback blocker to remain at original path as a directory")
+	}
+}
+
 func TestWorkspace_Rename_ReturnsErrNotFoundWhenDestinationParentMissing(t *testing.T) {
 	w := setupWorkspace(t)
 	ctx := context.Background()
@@ -1005,6 +1069,48 @@ func TestWorkspace_Rename_ReturnsErrNotFoundWhenDestinationParentMissing(t *test
 	}
 	if !w.Exists(ctx, "/rename-source.txt") {
 		t.Fatal("source should remain after rejected rename")
+	}
+}
+
+func TestWorkspace_Rename_DoesNotOverwriteTargetCreatedAfterPrecheck(t *testing.T) {
+	w := setupWorkspace(t)
+	ctx := context.Background()
+
+	if err := w.WriteFile(ctx, "/rename-source.txt", []byte("source")); err != nil {
+		t.Fatalf("WriteFile(source) error: %v", err)
+	}
+
+	originalBeforeWorkspaceRename := beforeWorkspaceRename
+	inserted := false
+	beforeWorkspaceRename = func() error {
+		if inserted {
+			return nil
+		}
+		inserted = true
+		return os.WriteFile(filepath.Join(w.Root(), "rename-dest.txt"), []byte("live target"), 0644)
+	}
+	t.Cleanup(func() {
+		beforeWorkspaceRename = originalBeforeWorkspaceRename
+	})
+
+	err := w.Rename(ctx, "/rename-source.txt", "/rename-dest.txt")
+	if !errors.Is(err, ErrAlreadyExists) {
+		t.Fatalf("Rename() error = %v, want ErrAlreadyExists", err)
+	}
+
+	sourceData, readErr := os.ReadFile(filepath.Join(w.Root(), "rename-source.txt"))
+	if readErr != nil {
+		t.Fatalf("ReadFile(source) after rejected rename error: %v", readErr)
+	}
+	if string(sourceData) != "source" {
+		t.Fatalf("source content = %q, want source", sourceData)
+	}
+	destData, readErr := os.ReadFile(filepath.Join(w.Root(), "rename-dest.txt"))
+	if readErr != nil {
+		t.Fatalf("ReadFile(dest) after rejected rename error: %v", readErr)
+	}
+	if string(destData) != "live target" {
+		t.Fatalf("dest content = %q, want live target", destData)
 	}
 }
 
@@ -1104,7 +1210,7 @@ func TestWorkspace_Copy_DoesNotOverwriteFileCreatedDuringCopy(t *testing.T) {
 	}
 }
 
-func TestWorkspace_Copy_PreservesDestinationWhenTempCleanupFailsAfterLink(t *testing.T) {
+func TestWorkspace_Copy_CompletesWhenTempCleanupRetrySucceedsAfterLink(t *testing.T) {
 	w := setupWorkspace(t)
 	ctx := context.Background()
 
@@ -1126,11 +1232,11 @@ func TestWorkspace_Copy_PreservesDestinationWhenTempCleanupFailsAfterLink(t *tes
 	})
 
 	err := w.Copy(ctx, "/source.txt", "/dest.txt")
-	if err == nil || !strings.Contains(err.Error(), "failed to finalize copied file") {
-		t.Fatalf("Copy() error = %v, want finalize cleanup failure", err)
+	if err != nil {
+		t.Fatalf("Copy() error = %v, want nil after successful temp cleanup retry", err)
 	}
 	if !w.Exists(ctx, "/dest.txt") {
-		t.Fatal("destination should remain after temp cleanup failure")
+		t.Fatal("destination should exist after temp cleanup retry")
 	}
 	destData, readErr := w.ReadFile(ctx, "/dest.txt")
 	if readErr != nil {
@@ -1142,7 +1248,57 @@ func TestWorkspace_Copy_PreservesDestinationWhenTempCleanupFailsAfterLink(t *tes
 	if matches, globErr := filepath.Glob(filepath.Join(w.Root(), ".workspace-*.tmp")); globErr != nil {
 		t.Fatalf("Glob(.workspace-*.tmp) error: %v", globErr)
 	} else if len(matches) != 0 {
-		t.Fatalf("expected no leftover temp files after finalize cleanup failure, got %v", matches)
+		t.Fatalf("expected no leftover temp files after finalize cleanup retry, got %v", matches)
+	}
+}
+
+func TestWorkspace_Copy_ReturnsWarningWhenTempCleanupRemainsAfterLink(t *testing.T) {
+	w := setupWorkspace(t)
+	ctx := context.Background()
+
+	if err := w.WriteFile(ctx, "/source.txt", []byte("source")); err != nil {
+		t.Fatalf("WriteFile(source.txt) error: %v", err)
+	}
+
+	originalFinalizeWorkspaceCopyTemp := finalizeWorkspaceCopyTemp
+	stuckTempRelPath := ""
+	finalizeWorkspaceCopyTemp = func(root *os.Root, tmpPath string) error {
+		stuckTempRelPath = tmpPath
+		tmpAbsPath := filepath.Join(w.Root(), filepath.FromSlash(tmpPath))
+		if err := os.Remove(tmpAbsPath); err != nil {
+			return err
+		}
+		if err := os.Mkdir(tmpAbsPath, 0755); err != nil {
+			return err
+		}
+		if err := os.WriteFile(filepath.Join(tmpAbsPath, "child"), []byte("stuck"), 0644); err != nil {
+			return err
+		}
+		return errors.New("remove temp link failed")
+	}
+	t.Cleanup(func() {
+		finalizeWorkspaceCopyTemp = originalFinalizeWorkspaceCopyTemp
+	})
+
+	err := w.Copy(ctx, "/source.txt", "/dest.txt")
+	if !IsVisibleMutationWarning(err) {
+		t.Fatalf("Copy() error = %v, want visible mutation warning", err)
+	}
+	if !strings.Contains(err.Error(), "failed to finalize copied file") {
+		t.Fatalf("expected finalize cleanup warning in error, got %v", err)
+	}
+	destData, readErr := w.ReadFile(ctx, "/dest.txt")
+	if readErr != nil {
+		t.Fatalf("ReadFile(dest.txt) error: %v", readErr)
+	}
+	if string(destData) != "source" {
+		t.Fatalf("destination content = %q, want %q", string(destData), "source")
+	}
+	if stuckTempRelPath == "" {
+		t.Fatal("expected finalize hook to capture temp path")
+	}
+	if _, statErr := os.Stat(filepath.Join(w.Root(), filepath.FromSlash(stuckTempRelPath))); statErr != nil {
+		t.Fatalf("expected stuck temp directory to remain for staging cleanup, got %v", statErr)
 	}
 }
 

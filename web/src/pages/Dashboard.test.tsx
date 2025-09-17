@@ -26,6 +26,7 @@ vi.mock('@/api/files', () => ({
   getHealth: vi.fn().mockResolvedValue({
     status: 'healthy',
     uptime: '1h30m',
+    uptimeSecs: 5400,
   }),
   getAppVersion: vi.fn().mockResolvedValue({
     name: 'MnemoNAS',
@@ -114,6 +115,20 @@ const mockGetStorageStats = getStorageStats as ReturnType<typeof vi.fn>
 const mockListBackupJobs = listBackupJobs as ReturnType<typeof vi.fn>
 const mockListActivity = listActivity as ReturnType<typeof vi.fn>
 
+function expectListActivityCalledWithSignal(options: { limit?: number }) {
+  const call = mockListActivity.mock.calls.find(([calledOptions]) => calledOptions?.limit === options.limit)
+  expect(call).toBeTruthy()
+  expect((call?.[0] as { signal?: AbortSignal } | undefined)?.signal).toBeInstanceOf(AbortSignal)
+}
+
+function expectCalledWithAbortSignal(mockFn: ReturnType<typeof vi.fn>) {
+  const call = mockFn.mock.calls.find(([options]) => {
+    return (options as { signal?: AbortSignal } | undefined)?.signal instanceof AbortSignal
+  })
+  expect(call).toBeTruthy()
+  expect(Object.keys((call?.[0] ?? {}) as Record<string, unknown>).sort()).toEqual(['signal'])
+}
+
 describe('DashboardPage', () => {
   beforeEach(() => {
     vi.clearAllMocks()
@@ -125,6 +140,7 @@ describe('DashboardPage', () => {
     mockGetHealth.mockResolvedValue({
       status: 'healthy',
       uptime: '1h30m',
+      uptimeSecs: 5400,
     })
     mockGetAppVersion.mockResolvedValue({
       name: 'MnemoNAS',
@@ -187,6 +203,18 @@ describe('DashboardPage', () => {
   })
 
   describe('content rendering', () => {
+    it('passes abort signals to dashboard status queries', async () => {
+      render(<DashboardPage />)
+
+      await waitFor(() => {
+        expectCalledWithAbortSignal(mockGetHealth)
+        expectCalledWithAbortSignal(mockGetStorageStats)
+        expectCalledWithAbortSignal(mockGetAppVersion)
+        expectListActivityCalledWithSignal({ limit: 5 })
+        expectCalledWithAbortSignal(mockListBackupJobs)
+      })
+    })
+
     it('renders dashboard header after loading', async () => {
       render(<DashboardPage />)
       
@@ -261,7 +289,7 @@ describe('DashboardPage', () => {
       render(<DashboardPage />)
       
       await waitFor(() => {
-        expect(screen.getByText('1h30m')).toBeTruthy()
+        expect(screen.getByText('1 小时 30 分钟')).toBeTruthy()
       })
     })
 
@@ -525,20 +553,28 @@ describe('DashboardPage', () => {
 
     it('hides admin quick actions for non-admin users', async () => {
       useIsAdminMock.mockReturnValue(false)
-      useUserMock.mockReturnValue({ id: 'scoped-user', username: 'member', role: 'user' })
+      useUserMock.mockReturnValue({ id: 'scoped-user', username: 'member', role: 'user', homeDir: '/member' })
       render(<DashboardPage />)
 
       await waitFor(() => {
         expect(screen.getByRole('button', { name: /文件/ })).toBeTruthy()
       })
 
-      expect(screen.queryByText('空间')).toBeNull()
-      expect(screen.queryByText('备份与维护')).toBeNull()
+    expect(screen.queryByText('空间')).toBeNull()
+    expect(screen.queryByText('备份与维护')).toBeNull()
+  })
+
+    it('passes an abort signal when loading recent activity', async () => {
+      render(<DashboardPage />)
+
+      await waitFor(() => {
+        expectListActivityCalledWithSignal({ limit: 5 })
+      })
     })
 
     it('does not reuse cached admin stats or recent activity for another user session', async () => {
     useIsAdminMock.mockReturnValue(false)
-    useUserMock.mockReturnValue({ id: 'scoped-user', username: 'member', role: 'user' })
+    useUserMock.mockReturnValue({ id: 'scoped-user', username: 'member', role: 'user', homeDir: '/member' })
     mockGetStorageStats.mockImplementation(() => new Promise(() => {}))
     mockListActivity.mockImplementation(() => new Promise(() => {}))
 
@@ -640,6 +676,23 @@ describe('DashboardPage', () => {
     expect(screen.queryByText('/member-old/secret.txt')).toBeNull()
     expect(screen.queryByText('2 KB')).toBeNull()
   })
+
+    it('does not load scoped dashboard data for non-admin users with invalid home directories', async () => {
+      useIsAdminMock.mockReturnValue(false)
+      useUserMock.mockReturnValue({ id: 'scoped-user', username: 'member', role: 'user', homeDir: '' })
+
+      render(<DashboardPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('主目录配置无效')).toBeTruthy()
+      })
+
+      expect(screen.getByText('当前账户未配置有效的主目录，无法查看空间和最近操作。请联系管理员修复账户 home_dir。')).toBeTruthy()
+      expect(mockGetStorageStats).not.toHaveBeenCalled()
+      expect(mockListActivity).not.toHaveBeenCalled()
+      expect(mockGetHealth).toHaveBeenCalled()
+      expect(mockGetAppVersion).toHaveBeenCalled()
+    })
 
     it('navigates to versions on version history click', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
