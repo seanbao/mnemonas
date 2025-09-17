@@ -129,7 +129,7 @@ func TestHandler_AddFavorite_EmptyPathReturnsBadRequest(t *testing.T) {
 	}
 	handler := NewHandler(store, zerolog.Nop())
 
-	tests := []string{"", "   ", "/", "."}
+	tests := []string{"", "   ", "/"}
 	for _, favoritePath := range tests {
 		t.Run(favoritePath, func(t *testing.T) {
 			body := strings.NewReader(`{"path":"` + favoritePath + `"}`)
@@ -264,7 +264,7 @@ func TestHandler_AddFavorite_RejectsTraversalPath(t *testing.T) {
 	}
 	handler := NewHandler(store, zerolog.Nop())
 
-	for _, favoritePath := range []string{"../docs/report.pdf", `..\\docs\\report.pdf`} {
+	for _, favoritePath := range []string{"../docs/report.pdf", `..\\docs\\report.pdf`, "/docs/./report.pdf", "./docs/report.pdf", "."} {
 		body := strings.NewReader(`{"path":"` + favoritePath + `"}`)
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/favorites", body)
 		req = req.WithContext(auth.WithClaimsContext(req.Context(), &auth.TokenClaims{UserID: "user-123"}))

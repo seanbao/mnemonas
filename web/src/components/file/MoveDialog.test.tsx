@@ -120,6 +120,26 @@ describe('MoveDialog', () => {
     expect(onClose).toHaveBeenCalledTimes(1)
   })
 
+  it('normalizes the current directory before blocking same-folder submissions', async () => {
+    const user = userEvent.setup({ writeToClipboard: false })
+
+    renderDialog({ currentPath: '/source/' })
+
+    await user.click(screen.getByText('点击选择目标文件夹'))
+    await waitFor(() => {
+      expect(screen.getByText('/source')).toBeTruthy()
+    })
+    await user.click(screen.getByRole('button', { name: '选择此目录' }))
+
+    expect(screen.getByText('目标目录与当前目录相同')).toBeTruthy()
+    const confirmButton = screen.getByRole('button', { name: '移动' })
+    expect(confirmButton).toBeDisabled()
+
+    await user.click(confirmButton)
+
+    expect(mockMoveFile).not.toHaveBeenCalled()
+  })
+
   it('keeps only failed files visible after partial move failure', async () => {
     const user = userEvent.setup({ writeToClipboard: false })
     const onClose = vi.fn()

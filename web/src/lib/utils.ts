@@ -181,8 +181,9 @@ export function normalizePath(path: string): string {
     normalized = normalized.slice(0, -1)
   }
   
-  // Check for path traversal attempts
-  if (normalized.includes('/../') || normalized.endsWith('/..') || normalized === '/..') {
+  // Reject dot segments so API paths have one canonical representation.
+  const segments = normalized.split('/').filter(Boolean)
+  if (segments.some((segment) => segment === '.' || segment === '..')) {
     throw new Error('非法路径')
   }
   

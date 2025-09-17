@@ -134,7 +134,7 @@ func enforceHomeDir(user *auth.User, targetPath string) error {
 
 func cleanVirtualPath(value string) (string, error) {
 	normalized := strings.ReplaceAll(value, "\\", "/")
-	if strings.ContainsRune(normalized, '\x00') || hasTraversalSegment(normalized) {
+	if strings.ContainsRune(normalized, '\x00') || hasDotSegment(normalized) {
 		return "", ErrInvalidPath
 	}
 	cleaned := path.Clean("/" + normalized)
@@ -144,9 +144,9 @@ func cleanVirtualPath(value string) (string, error) {
 	return cleaned, nil
 }
 
-func hasTraversalSegment(filePath string) bool {
+func hasDotSegment(filePath string) bool {
 	for _, segment := range strings.Split(filePath, "/") {
-		if segment == ".." {
+		if segment == "." || segment == ".." {
 			return true
 		}
 	}

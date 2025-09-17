@@ -460,29 +460,56 @@ func TestWorkspace_OperationsRejectTraversalLikeNames(t *testing.T) {
 	if _, err := w.Stat(ctx, "../safe/existing.txt"); err != ErrNotFound {
 		t.Fatalf("Stat(traversal) error = %v, want ErrNotFound", err)
 	}
+	if _, err := w.Stat(ctx, "/safe/./existing.txt"); err != ErrNotFound {
+		t.Fatalf("Stat(dot segment) error = %v, want ErrNotFound", err)
+	}
 	if _, err := w.ReadDir(ctx, "../safe"); err != ErrNotFound {
 		t.Fatalf("ReadDir(traversal) error = %v, want ErrNotFound", err)
+	}
+	if _, err := w.ReadDir(ctx, "./safe"); err != ErrNotFound {
+		t.Fatalf("ReadDir(dot segment) error = %v, want ErrNotFound", err)
 	}
 	if _, err := w.OpenFile(ctx, "../safe/existing.txt"); err != ErrNotFound {
 		t.Fatalf("OpenFile(traversal) error = %v, want ErrNotFound", err)
 	}
+	if _, err := w.OpenFile(ctx, "/safe/./existing.txt"); err != ErrNotFound {
+		t.Fatalf("OpenFile(dot segment) error = %v, want ErrNotFound", err)
+	}
 	if _, err := w.ReadFile(ctx, "../safe/existing.txt"); err != ErrNotFound {
 		t.Fatalf("ReadFile(traversal) error = %v, want ErrNotFound", err)
+	}
+	if _, err := w.ReadFile(ctx, "./safe/existing.txt"); err != ErrNotFound {
+		t.Fatalf("ReadFile(dot segment) error = %v, want ErrNotFound", err)
 	}
 	if err := w.WriteFile(ctx, "../escape.txt", []byte("blocked")); err != ErrNotFound {
 		t.Fatalf("WriteFile(traversal) error = %v, want ErrNotFound", err)
 	}
+	if err := w.WriteFile(ctx, "/safe/./blocked.txt", []byte("blocked")); err != ErrNotFound {
+		t.Fatalf("WriteFile(dot segment) error = %v, want ErrNotFound", err)
+	}
 	if err := w.WriteFileFromReader(ctx, "../escape-reader.txt", strings.NewReader("blocked")); err != ErrNotFound {
 		t.Fatalf("WriteFileFromReader(traversal) error = %v, want ErrNotFound", err)
+	}
+	if err := w.WriteFileFromReader(ctx, "./safe/blocked-reader.txt", strings.NewReader("blocked")); err != ErrNotFound {
+		t.Fatalf("WriteFileFromReader(dot segment) error = %v, want ErrNotFound", err)
 	}
 	if err := w.Mkdir(ctx, "../escape-dir"); err != ErrNotFound {
 		t.Fatalf("Mkdir(traversal) error = %v, want ErrNotFound", err)
 	}
+	if err := w.Mkdir(ctx, "/safe/./blocked-dir"); err != ErrNotFound {
+		t.Fatalf("Mkdir(dot segment) error = %v, want ErrNotFound", err)
+	}
 	if err := w.Delete(ctx, "../safe/existing.txt"); err != ErrNotFound {
 		t.Fatalf("Delete(traversal) error = %v, want ErrNotFound", err)
 	}
+	if err := w.Delete(ctx, "/safe/./existing.txt"); err != ErrNotFound {
+		t.Fatalf("Delete(dot segment) error = %v, want ErrNotFound", err)
+	}
 	if err := w.DeleteAll(ctx, "../safe"); err != ErrNotFound {
 		t.Fatalf("DeleteAll(traversal) error = %v, want ErrNotFound", err)
+	}
+	if err := w.DeleteAll(ctx, "./safe"); err != ErrNotFound {
+		t.Fatalf("DeleteAll(dot segment) error = %v, want ErrNotFound", err)
 	}
 	if err := w.Rename(ctx, "../safe/existing.txt", "/safe/renamed.txt"); err != ErrNotFound {
 		t.Fatalf("Rename(source traversal) error = %v, want ErrNotFound", err)
@@ -490,14 +517,29 @@ func TestWorkspace_OperationsRejectTraversalLikeNames(t *testing.T) {
 	if err := w.Rename(ctx, "/safe/existing.txt", "../renamed.txt"); err != ErrNotFound {
 		t.Fatalf("Rename(destination traversal) error = %v, want ErrNotFound", err)
 	}
+	if err := w.Rename(ctx, "/safe/./existing.txt", "/safe/renamed.txt"); err != ErrNotFound {
+		t.Fatalf("Rename(source dot segment) error = %v, want ErrNotFound", err)
+	}
+	if err := w.Rename(ctx, "/safe/existing.txt", "/safe/./renamed.txt"); err != ErrNotFound {
+		t.Fatalf("Rename(destination dot segment) error = %v, want ErrNotFound", err)
+	}
 	if err := w.Copy(ctx, "../safe/existing.txt", "/safe/copied.txt"); err != ErrNotFound {
 		t.Fatalf("Copy(source traversal) error = %v, want ErrNotFound", err)
 	}
 	if err := w.Copy(ctx, "/safe/existing.txt", "../copied.txt"); err != ErrNotFound {
 		t.Fatalf("Copy(destination traversal) error = %v, want ErrNotFound", err)
 	}
+	if err := w.Copy(ctx, "./safe/existing.txt", "/safe/copied.txt"); err != ErrNotFound {
+		t.Fatalf("Copy(source dot segment) error = %v, want ErrNotFound", err)
+	}
+	if err := w.Copy(ctx, "/safe/existing.txt", "/safe/./copied.txt"); err != ErrNotFound {
+		t.Fatalf("Copy(destination dot segment) error = %v, want ErrNotFound", err)
+	}
 	if err := w.Walk(ctx, "../safe", func(path string, info *FileInfo) error { return nil }); err != ErrNotFound {
 		t.Fatalf("Walk(traversal) error = %v, want ErrNotFound", err)
+	}
+	if err := w.Walk(ctx, "/safe/.", func(path string, info *FileInfo) error { return nil }); err != ErrNotFound {
+		t.Fatalf("Walk(dot segment) error = %v, want ErrNotFound", err)
 	}
 	if _, err := w.Stat(ctx, "/safe/existing\x00.txt"); err != ErrNotFound {
 		t.Fatalf("Stat(NUL) error = %v, want ErrNotFound", err)
@@ -508,8 +550,14 @@ func TestWorkspace_OperationsRejectTraversalLikeNames(t *testing.T) {
 	if w.Exists(ctx, "../safe/existing.txt") {
 		t.Fatal("expected Exists(traversal) to return false")
 	}
+	if w.Exists(ctx, "/safe/./existing.txt") {
+		t.Fatal("expected Exists(dot segment) to return false")
+	}
 	if w.IsDir(ctx, "../safe") {
 		t.Fatal("expected IsDir(traversal) to return false")
+	}
+	if w.IsDir(ctx, "./safe") {
+		t.Fatal("expected IsDir(dot segment) to return false")
 	}
 
 	if data, err := w.ReadFile(ctx, "/safe/existing.txt"); err != nil {
@@ -523,8 +571,17 @@ func TestWorkspace_OperationsRejectTraversalLikeNames(t *testing.T) {
 	if w.Exists(ctx, "/escape-reader.txt") {
 		t.Fatal("expected traversal reader write not to create normalized /escape-reader.txt")
 	}
+	if w.Exists(ctx, "/safe/blocked.txt") {
+		t.Fatal("expected dot-segment write not to create normalized /safe/blocked.txt")
+	}
+	if w.Exists(ctx, "/safe/blocked-reader.txt") {
+		t.Fatal("expected dot-segment reader write not to create normalized /safe/blocked-reader.txt")
+	}
 	if w.Exists(ctx, "/escape-dir") {
 		t.Fatal("expected traversal mkdir not to create normalized /escape-dir")
+	}
+	if w.Exists(ctx, "/safe/blocked-dir") {
+		t.Fatal("expected dot-segment mkdir not to create normalized /safe/blocked-dir")
 	}
 	if w.Exists(ctx, "/safe/nul.txt") {
 		t.Fatal("expected NUL write not to create normalized /safe/nul.txt")

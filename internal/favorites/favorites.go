@@ -112,6 +112,14 @@ func sortFavoritesCanonical(favorites []*Favorite) {
 }
 
 func normalizeStoredFavoritePath(rawPath string) (string, error) {
+	return normalizeStoredFavoritePathWithPolicy(rawPath, false)
+}
+
+func normalizeLegacyStoredFavoritePath(rawPath string) (string, error) {
+	return normalizeStoredFavoritePathWithPolicy(rawPath, true)
+}
+
+func normalizeStoredFavoritePathWithPolicy(rawPath string, allowCurrentDirSegment bool) (string, error) {
 	normalized := strings.ReplaceAll(rawPath, "\\", "/")
 	if strings.ContainsRune(normalized, '\x00') {
 		return "", errInvalidFavoritePath
@@ -120,11 +128,15 @@ func normalizeStoredFavoritePath(rawPath string) (string, error) {
 		return "", errInvalidFavoritePath
 	}
 	for _, segment := range strings.Split(normalized, "/") {
-		if segment == ".." {
+		if segment == ".." || (!allowCurrentDirSegment && segment == ".") {
 			return "", errInvalidFavoritePath
 		}
 	}
-	return path.Clean("/" + normalized), nil
+	cleaned := path.Clean("/" + normalized)
+	if cleaned == "/" {
+		return "", errInvalidFavoritePath
+	}
+	return cleaned, nil
 }
 
 func normalizeRestoredFavorite(favorite *Favorite) (*Favorite, error) {
@@ -178,7 +190,7 @@ func (s *Store) load() error {
 		if fav == nil {
 			return fmt.Errorf("favorites file contains null entry at index %d", i)
 		}
-		cleanPath, err := normalizeStoredFavoritePath(fav.Path)
+		cleanPath, err := normalizeLegacyStoredFavoritePath(fav.Path)
 		if err != nil {
 			needsRewrite = true
 			continue

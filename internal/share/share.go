@@ -466,6 +466,20 @@ func normalizeStoredSharePath(rawPath string) (string, error) {
 	if strings.TrimSpace(normalized) == "" {
 		return "", errInvalidSharePath
 	}
+	if hasShareDotSegment(normalized) {
+		return "", errInvalidSharePath
+	}
+	return path.Clean("/" + normalized), nil
+}
+
+func normalizeLegacyStoredSharePath(rawPath string) (string, error) {
+	normalized := strings.ReplaceAll(rawPath, "\\", "/")
+	if strings.ContainsRune(normalized, '\x00') {
+		return "", errInvalidSharePath
+	}
+	if strings.TrimSpace(normalized) == "" {
+		return "", errInvalidSharePath
+	}
 	for _, segment := range strings.Split(normalized, "/") {
 		if segment == ".." {
 			return "", errInvalidSharePath
@@ -474,12 +488,25 @@ func normalizeStoredSharePath(rawPath string) (string, error) {
 	return path.Clean("/" + normalized), nil
 }
 
+func hasShareDotSegment(filePath string) bool {
+	for _, segment := range strings.Split(filePath, "/") {
+		if segment == "." || segment == ".." {
+			return true
+		}
+	}
+	return false
+}
+
 func validateShareInvariants(share *Share) error {
+	return validateShareInvariantsWithPathNormalizer(share, normalizeStoredSharePath)
+}
+
+func validateShareInvariantsWithPathNormalizer(share *Share, normalizePath func(string) (string, error)) error {
 	if !isValidShareID(share.ID) {
 		return errInvalidShareID
 	}
 
-	cleanPath, err := normalizeStoredSharePath(share.Path)
+	cleanPath, err := normalizePath(share.Path)
 	if err != nil {
 		return err
 	}
@@ -506,7 +533,7 @@ func validateShareInvariants(share *Share) error {
 
 func normalizeLegacyShareInvariants(share *Share) error {
 	share.Permission = normalizePermission(share.Permission)
-	return validateShareInvariants(share)
+	return validateShareInvariantsWithPathNormalizer(share, normalizeLegacyStoredSharePath)
 }
 
 func isValidShareID(id string) bool {

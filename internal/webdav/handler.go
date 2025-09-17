@@ -334,7 +334,7 @@ func accessRuleAllowsScope(rule DirectoryAccessRule, scope requestScope, mode ac
 
 func normalizeScopedHomeDir(homeDir string) (string, bool) {
 	trimmed := strings.TrimSpace(homeDir)
-	if trimmed == "" || hasTraversalSegment(trimmed) {
+	if trimmed == "" || hasDotSegment(trimmed) {
 		return "", false
 	}
 	normalized := path.Clean(strings.ReplaceAll(trimmed, "\\", "/"))
@@ -342,6 +342,20 @@ func normalizeScopedHomeDir(homeDir string) (string, bool) {
 		normalized = "/" + normalized
 	}
 	return normalized, true
+}
+
+func hasDotSegment(rawPath string) bool {
+	normalized := strings.ReplaceAll(rawPath, "\\", "/")
+	if strings.ContainsRune(normalized, '\x00') {
+		return true
+	}
+	for _, segment := range strings.Split(normalized, "/") {
+		if segment == "." || segment == ".." {
+			return true
+		}
+	}
+
+	return false
 }
 
 type UserIdentity struct {
@@ -555,7 +569,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if requestPath == "" {
 		requestPath = "/"
 	}
-	if hasTraversalSegment(requestPath) {
+	if hasDotSegment(requestPath) {
 		http.Error(w, "invalid path", http.StatusBadRequest)
 		return
 	}
@@ -3214,7 +3228,7 @@ func resolveIfHeaderPath(rawPath, expectedHost, prefix string) (string, bool) {
 		return "", false
 	}
 	decodedPath, err := url.PathUnescape(u.EscapedPath())
-	if err != nil || hasTraversalSegment(decodedPath) {
+	if err != nil || hasDotSegment(decodedPath) {
 		return "", false
 	}
 	resolvedPath := path.Clean(decodedPath)
@@ -3578,7 +3592,7 @@ func (h *Handler) getDestination(r *http.Request) string {
 	if err != nil {
 		return ""
 	}
-	if hasTraversalSegment(decodedPath) {
+	if hasDotSegment(decodedPath) {
 		return ""
 	}
 
@@ -3688,20 +3702,6 @@ func defaultWebDAVPort(scheme string) string {
 	default:
 		return ""
 	}
-}
-
-func hasTraversalSegment(rawPath string) bool {
-	normalized := strings.ReplaceAll(rawPath, "\\", "/")
-	if strings.ContainsRune(normalized, '\x00') {
-		return true
-	}
-	for _, segment := range strings.Split(normalized, "/") {
-		if segment == ".." {
-			return true
-		}
-	}
-
-	return false
 }
 
 func (h *Handler) handleError(w http.ResponseWriter, err error) {

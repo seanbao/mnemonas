@@ -28,7 +28,7 @@ func FuzzValidatePath(f *testing.F) {
 		normalizedInput := strings.ReplaceAll(input, "\\", "/")
 
 		if err != nil {
-			if !hasTraversalSegment(normalizedInput) && !strings.ContainsRune(normalizedInput, '\x00') {
+			if !hasDotSegment(normalizedInput) && !strings.ContainsRune(normalizedInput, '\x00') {
 				t.Fatalf("validatePath(%q) returned unexpected error: %v", input, err)
 			}
 			return
@@ -46,8 +46,8 @@ func FuzzValidatePath(f *testing.F) {
 		if strings.Contains(got, "\\") {
 			t.Fatalf("validatePath(%q) = %q, want normalized separators", input, got)
 		}
-		if hasTraversalSegment(got) {
-			t.Fatalf("validatePath(%q) = %q, want no traversal segment", input, got)
+		if hasDotSegment(got) {
+			t.Fatalf("validatePath(%q) = %q, want no dot segment", input, got)
 		}
 		if got != path.Clean(got) {
 			t.Fatalf("validatePath(%q) = %q, want clean path %q", input, got, path.Clean(got))

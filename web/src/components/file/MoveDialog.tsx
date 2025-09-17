@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useRef } from 'react'
+import { useState, useCallback, useEffect, useMemo, useRef } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import {
   Button,
@@ -9,13 +9,14 @@ import {
   ModalFooter,
   addToast,
 } from '@heroui/react'
-import { Move, AlertTriangle } from 'lucide-react'
+import { Move, Copy, AlertTriangle } from 'lucide-react'
 import { DirectoryPicker } from './DirectoryPicker'
 import { moveFile, copyFile, ApiError } from '@/api/files'
 import { FileIcon } from '@/components/ui/FileIcon'
 import { useUser } from '@/stores/auth'
 import { getFileQueryScopeKey, getFilesQueryKey } from '@/lib/fileQueryKey'
 import { getSharedPathConflictErrorToast, getSharedQuotaExceededErrorToast } from '@/lib/fileActionErrors'
+import { normalizePath } from '@/lib/utils'
 
 const missingMoveSourceWarningTitle = '文件或文件夹已不存在，已同步更新'
 
@@ -117,7 +118,15 @@ function MoveDialogContent({
 
   const title = mode === 'move' ? '移动到' : '复制到'
   const actionText = mode === 'move' ? '移动' : '复制'
-  const Icon = mode === 'move' ? Move : Move // Could use different icons
+  const Icon = mode === 'move' ? Move : Copy
+  const normalizedCurrentPath = useMemo(() => {
+    try {
+      return normalizePath(currentPath)
+    } catch {
+      return currentPath
+    }
+  }, [currentPath])
+  const isTargetCurrentPath = targetPath === normalizedCurrentPath
 
   // Exclude paths that cannot be moved into (self and descendants)
   const excludePaths = pendingFiles.map(f => f.path)
@@ -143,7 +152,7 @@ function MoveDialogContent({
     if (!targetPath || isProcessing) return
 
     const filesToProcess = pendingFiles
-    const sourcePath = currentPath
+    const sourcePath = normalizedCurrentPath
     const destinationPath = targetPath
     const operationController = new AbortController()
     operationAbortControllerRef.current?.abort()
@@ -238,7 +247,7 @@ function MoveDialogContent({
         operationAbortControllerRef.current = null
       }
     }
-  }, [targetPath, isProcessing, pendingFiles, mode, currentPath, fileScopeKey, queryClient, onClose, actionText])
+  }, [targetPath, isProcessing, pendingFiles, mode, normalizedCurrentPath, fileScopeKey, queryClient, onClose, actionText])
 
   const handleClose = useCallback(() => {
     if (isProcessing) {
@@ -315,7 +324,7 @@ function MoveDialogContent({
             </div>
 
             {/* Warning for same directory */}
-            {targetPath === currentPath && (
+            {isTargetCurrentPath && (
               <div className="flex items-center gap-2 mt-4 p-3 bg-warning/10 rounded-lg text-warning">
                 <AlertTriangle size={16} />
                 <span className="text-sm">目标目录与当前目录相同</span>
@@ -331,7 +340,7 @@ function MoveDialogContent({
               color="primary"
               onPress={handleConfirm}
               isLoading={isProcessing}
-              isDisabled={!targetPath || targetPath === currentPath}
+              isDisabled={!targetPath || isTargetCurrentPath}
               className="rounded-lg"
             >
               {actionText}
@@ -348,7 +357,7 @@ function MoveDialogContent({
         title={`选择${actionText}目标`}
         description="选择要将文件放入的文件夹"
         excludePaths={excludePaths}
-        initialPath={currentPath}
+        initialPath={normalizedCurrentPath}
       />
     </>
   )

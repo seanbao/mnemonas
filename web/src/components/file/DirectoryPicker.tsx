@@ -26,8 +26,9 @@ import { useUser } from '@/stores/auth'
 import { getFileQueryScopeKey, getFilesQueryKey } from '@/lib/fileQueryKey'
 import { getPathConflictErrorToast } from '@/lib/fileActionErrors'
 import { GENERIC_LOAD_ERROR_DESCRIPTION, getUserFacingErrorDescription } from '@/lib/apiMessages'
-import { cn, normalizePath } from '@/lib/utils'
+import { cn, normalizePath, pathWithinBase } from '@/lib/utils'
 import { getInvalidHomeDirDescription, invalidHomeDirTitle, resolveUserHomeScope } from '@/lib/userScope'
+import { getPathSegmentNameValidationError, joinPathSegment } from '@/lib/pathSegmentName'
 
 export interface DirectoryPickerProps {
   isOpen: boolean
@@ -132,19 +133,32 @@ function getDirectoryPickerCreateErrorToast(error: unknown): {
   })
 }
 
-function pathWithinBase(basePath: string, targetPath: string): boolean {
-  if (basePath === '/') {
-    return targetPath.startsWith('/')
-  }
-  return targetPath === basePath || targetPath.startsWith(`${basePath}/`)
-}
-
 function pathDisplayName(filePath: string): string {
   const normalized = normalizePath(filePath)
   if (normalized === '/') {
     return '根目录'
   }
   return normalized.split('/').filter(Boolean).pop() || normalized
+}
+
+function normalizeExcludePaths(paths: string[]): string[] {
+  const normalizedPaths = new Set<string>()
+  for (const currentPath of paths) {
+    try {
+      normalizedPaths.add(normalizePath(currentPath))
+    } catch {
+      // Ignore malformed exclusion hints instead of breaking directory selection.
+    }
+  }
+  return [...normalizedPaths]
+}
+
+function isPathExcluded(path: string, excludePaths: string[]): boolean {
+  try {
+    return excludePaths.some((excludedPath) => pathWithinBase(excludedPath, path))
+  } catch {
+    return false
+  }
 }
 
 function TreeNode({
@@ -163,9 +177,7 @@ function TreeNode({
   onToggle: (path: string) => void
 }) {
   const isSelected = selectedPath === node.path
-  const isExcluded = excludePaths.some(p => 
-    node.path === p || node.path.startsWith(p + '/')
-  )
+  const isExcluded = isPathExcluded(node.path, excludePaths)
 
   return (
     <div>
@@ -261,12 +273,17 @@ export function DirectoryPicker({
   }, [requestedInitialPath, rootPath])
   const rootFilesQueryKey = getFilesQueryKey(fileScopeKey, effectiveRootPath)
   const rootLabel = effectiveRootPath === '/' ? '根目录' : effectiveRootPath === rootPath ? '主目录' : pathDisplayName(effectiveRootPath)
+  const normalizedExcludePaths = useMemo(() => normalizeExcludePaths(excludePaths), [excludePaths])
   const normalizeInitialPath = useCallback((path: string) => {
     if (!rootPath) {
       return '/'
     }
-    const normalized = normalizePath(path || effectiveRootPath)
-    return pathWithinBase(effectiveRootPath, normalized) ? normalized : effectiveRootPath
+    try {
+      const normalized = normalizePath(path || effectiveRootPath)
+      return pathWithinBase(effectiveRootPath, normalized) ? normalized : effectiveRootPath
+    } catch {
+      return effectiveRootPath
+    }
   }, [effectiveRootPath, rootPath])
 
   const [selectedPath, setSelectedPath] = useState(() => normalizeInitialPath(initialPath))
@@ -276,6 +293,10 @@ export function DirectoryPicker({
   const [isCreatingFolder, setIsCreatingFolder] = useState(false)
   const [newFolderName, setNewFolderName] = useState('')
   const [isCreating, setIsCreating] = useState(false)
+  const isRootExcluded = isPathExcluded(effectiveRootPath, normalizedExcludePaths)
+  const isSelectedPathExcluded = isPathExcluded(selectedPath, normalizedExcludePaths)
+  const folderNameValidationError = getPathSegmentNameValidationError(newFolderName, '请输入文件夹名称')
+  const displayedFolderNameValidationError = newFolderName.trim() ? folderNameValidationError : null
   const pickerSessionRef = useRef(0)
   const currentSelectedPathRef = useRef(normalizeInitialPath(initialPath))
   const currentNewFolderNameRef = useRef('')
@@ -477,9 +498,21 @@ export function DirectoryPicker({
   }, [expandedPaths, folderContents, loadedPaths, effectiveRootPath])
 
   const handleCreateFolder = useCallback(async () => {
-    const trimmedFolderName = newFolderName.trim()
-    if (!trimmedFolderName) return
+    if (isSelectedPathExcluded) {
+      return
+    }
 
+    const validationError = getPathSegmentNameValidationError(newFolderName, '请输入文件夹名称')
+    if (validationError) {
+      addToast({
+        title: '文件夹名称无效',
+        description: validationError,
+        color: 'warning',
+      })
+      return
+    }
+
+    const trimmedFolderName = newFolderName.trim()
     const sessionId = pickerSessionRef.current
     const parentPath = selectedPath
     abortCreateFolderRequest()
@@ -489,9 +522,7 @@ export function DirectoryPicker({
     
     setIsCreating(true)
     try {
-      const newPath = parentPath === '/' 
-        ? `/${trimmedFolderName}` 
-        : `${parentPath}/${trimmedFolderName}`
+      const newPath = joinPathSegment(parentPath, trimmedFolderName)
       const result = await createDirectory(newPath, { signal: createController.signal })
       if (createController.signal.aborted || pickerSessionRef.current !== sessionId || !currentOpenRef.current) {
         return
@@ -548,7 +579,7 @@ export function DirectoryPicker({
         setIsCreating(false)
       }
     }
-  }, [newFolderName, selectedPath, abortCreateFolderRequest, abortCreateFolderReload])
+  }, [isSelectedPathExcluded, newFolderName, selectedPath, abortCreateFolderRequest, abortCreateFolderReload])
 
   const handleCancelCreateFolder = useCallback(() => {
     if (isCreating) {
@@ -566,12 +597,12 @@ export function DirectoryPicker({
   }, [isCreating, onClose])
 
   const handleConfirm = useCallback(() => {
-    if (isCreating) {
+    if (isCreating || isSelectedPathExcluded) {
       return
     }
     onSelect(selectedPath)
     onClose()
-  }, [isCreating, onClose, onSelect, selectedPath])
+  }, [isCreating, isSelectedPathExcluded, onClose, onSelect, selectedPath])
 
   return (
     <Modal
@@ -648,9 +679,14 @@ export function DirectoryPicker({
                   className={cn(
                     "flex items-center gap-2 px-2 py-1.5 rounded-lg cursor-pointer transition-colors",
                     selectedPath === effectiveRootPath && "bg-accent-primary/10 text-accent-primary",
-                    selectedPath !== effectiveRootPath && "hover:bg-content2"
+                    selectedPath !== effectiveRootPath && !isRootExcluded && "hover:bg-content2",
+                    isRootExcluded && "opacity-50 cursor-not-allowed"
                   )}
-                  onClick={() => setSelectedPath(effectiveRootPath)}
+                  onClick={() => {
+                    if (!isRootExcluded) {
+                      setSelectedPath(effectiveRootPath)
+                    }
+                  }}
                 >
                   <div className="w-5 h-5" />
                   <Home size={18} className={selectedPath === effectiveRootPath ? "text-accent-primary" : "text-default-500"} />
@@ -664,7 +700,7 @@ export function DirectoryPicker({
                     node={node}
                     level={0}
                     selectedPath={selectedPath}
-                    excludePaths={excludePaths}
+                    excludePaths={normalizedExcludePaths}
                     onSelect={setSelectedPath}
                     onToggle={handleToggle}
                   />
@@ -680,7 +716,7 @@ export function DirectoryPicker({
           </div>
           
           {/* Create folder section */}
-          {allowCreateFolder && !hasInvalidHomeDir && (
+          {allowCreateFolder && !hasInvalidHomeDir && !isSelectedPathExcluded && (
             <div className="mt-4">
               {isCreatingFolder ? (
                 <div className="flex items-center gap-2">
@@ -690,6 +726,8 @@ export function DirectoryPicker({
                     onValueChange={setNewFolderName}
                     size="sm"
                     variant="bordered"
+                    isInvalid={Boolean(displayedFolderNameValidationError)}
+                    errorMessage={displayedFolderNameValidationError ?? undefined}
                     autoFocus
                     classNames={{
                       inputWrapper: "rounded-lg",
@@ -705,7 +743,7 @@ export function DirectoryPicker({
                     size="sm"
                     color="primary"
                     isLoading={isCreating}
-                    isDisabled={!newFolderName.trim()}
+                    isDisabled={Boolean(folderNameValidationError)}
                     onPress={handleCreateFolder}
                     className="rounded-lg"
                   >
@@ -743,7 +781,7 @@ export function DirectoryPicker({
           <Button 
             color="primary" 
             onPress={handleConfirm}
-            isDisabled={isCreating || hasInvalidHomeDir}
+            isDisabled={isCreating || hasInvalidHomeDir || isSelectedPathExcluded}
             className="rounded-lg"
           >
             选择此目录

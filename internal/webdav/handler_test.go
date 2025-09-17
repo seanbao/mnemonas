@@ -4787,6 +4787,83 @@ func setWebDAVTestBasicAuth(req *http.Request, username string) {
 	req.SetBasicAuth(username, "password123")
 }
 
+func TestNormalizeScopedHomeDirRejectsOnlyDotSegments(t *testing.T) {
+	tests := []struct {
+		name    string
+		homeDir string
+		want    string
+		wantOK  bool
+	}{
+		{
+			name:    "absolute",
+			homeDir: "/users/alice",
+			want:    "/users/alice",
+			wantOK:  true,
+		},
+		{
+			name:    "relative",
+			homeDir: "users/alice",
+			want:    "/users/alice",
+			wantOK:  true,
+		},
+		{
+			name:    "legal repeated dots",
+			homeDir: "/users/alice..bak",
+			want:    "/users/alice..bak",
+			wantOK:  true,
+		},
+		{
+			name:    "current directory segment",
+			homeDir: "/users/./alice",
+			wantOK:  false,
+		},
+		{
+			name:    "parent directory segment",
+			homeDir: "/users/../alice",
+			wantOK:  false,
+		},
+		{
+			name:    "nul byte",
+			homeDir: "/users/alice\x00",
+			wantOK:  false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := normalizeScopedHomeDir(tt.homeDir)
+			if ok != tt.wantOK || got != tt.want {
+				t.Fatalf("normalizeScopedHomeDir(%q) = (%q, %v), want (%q, %v)", tt.homeDir, got, ok, tt.want, tt.wantOK)
+			}
+		})
+	}
+}
+
+func TestHandler_UsersAuthRejectsDotSegmentHomeDir(t *testing.T) {
+	handler, _ := setupUsersModeHandler(t, map[string]webDAVTestCredential{
+		"alice": {
+			password: "password123",
+			identity: UserIdentity{
+				Role:    webDAVRoleUser,
+				HomeDir: "/users/./alice",
+			},
+		},
+	})
+
+	req := httptest.NewRequest("PROPFIND", "/dav/", nil)
+	req.Header.Set("Depth", "1")
+	setWebDAVTestBasicAuth(req, "alice")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("PROPFIND invalid dot-segment home_dir status = %d, want %d; body=%s", w.Code, http.StatusForbidden, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "home directory is not available") {
+		t.Fatalf("expected home directory error, got %q", w.Body.String())
+	}
+}
+
 func TestHandler_UsersAuthScopesHomeDirAsWebDAVRoot(t *testing.T) {
 	handler, fs := setupUsersModeHandler(t, map[string]webDAVTestCredential{
 		"alice": {
@@ -5856,6 +5933,8 @@ func TestHandler_PathTraversal(t *testing.T) {
 		"/dav/test/../../etc/passwd",
 		"/dav/..%2F..%2Fetc/passwd",
 		"/dav/..%5Csecret.txt",
+		"/dav/./secret.txt",
+		"/dav/%2e/secret.txt",
 	}
 
 	for _, path := range tests {
@@ -5997,12 +6076,20 @@ func TestHandler_GetDestination_RejectsCrossHostDestination(t *testing.T) {
 
 func TestHandler_GetDestination_RejectsPercentEncodedTraversal(t *testing.T) {
 	handler := NewHandler(Config{Prefix: "/dav", AuthType: "none"})
-	req := httptest.NewRequest("COPY", "/dav/src.txt", nil)
-	req.Host = "localhost"
-	req.Header.Set("Destination", "http://localhost/dav/%2e%2e/secret.txt")
 
-	if dst := handler.getDestination(req); dst != "" {
-		t.Fatalf("getDestination() = %q, want empty string for encoded traversal destination", dst)
+	for _, destination := range []string{
+		"http://localhost/dav/%2e%2e/secret.txt",
+		"http://localhost/dav/%2e/secret.txt",
+	} {
+		t.Run(destination, func(t *testing.T) {
+			req := httptest.NewRequest("COPY", "/dav/src.txt", nil)
+			req.Host = "localhost"
+			req.Header.Set("Destination", destination)
+
+			if dst := handler.getDestination(req); dst != "" {
+				t.Fatalf("getDestination() = %q, want empty string for encoded traversal destination", dst)
+			}
+		})
 	}
 }
 
@@ -6143,6 +6230,19 @@ func TestResolveIfHeaderPath_AllowsDefaultHTTPSPortWhenRequestHostOmitsPort(t *t
 	}
 	if resolved != "/locked.txt" {
 		t.Fatalf("resolveIfHeaderPath() = %q, want %q", resolved, "/locked.txt")
+	}
+}
+
+func TestResolveIfHeaderPath_RejectsDotSegments(t *testing.T) {
+	for _, rawPath := range []string{
+		"http://localhost/dav/%2e/locked.txt",
+		"http://localhost/dav/%2e%2e/locked.txt",
+	} {
+		t.Run(rawPath, func(t *testing.T) {
+			if resolved, ok := resolveIfHeaderPath(rawPath, "localhost", "/dav"); ok {
+				t.Fatalf("resolveIfHeaderPath() = %q, want rejection", resolved)
+			}
+		})
 	}
 }
 

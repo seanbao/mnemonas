@@ -238,9 +238,11 @@ func TestNewStore_LoadNormalizesAndDropsInvalidPaths(t *testing.T) {
 
 	legacy := []Favorite{
 		{Path: `docs\\report.pdf`, UserID: "user1", CreatedAt: time.Now(), Note: "normalized"},
+		{Path: "/docs/./dot.pdf", UserID: "user1", CreatedAt: time.Now(), Note: "legacy-dot"},
 		{Path: "../escape.txt", UserID: "user1", CreatedAt: time.Now(), Note: "invalid"},
 		{Path: "/docs/report\x00.pdf", UserID: "user1", CreatedAt: time.Now(), Note: "invalid-nul"},
 		{Path: "   ", UserID: "user1", CreatedAt: time.Now(), Note: "blank"},
+		{Path: ".", UserID: "user1", CreatedAt: time.Now(), Note: "root-like"},
 	}
 	data, err := json.Marshal(legacy)
 	if err != nil {
@@ -258,18 +260,31 @@ func TestNewStore_LoadNormalizesAndDropsInvalidPaths(t *testing.T) {
 	if !store.IsFavorite("user1", "/docs/report.pdf") {
 		t.Fatal("expected legacy favorite path to be normalized on load")
 	}
+	if !store.IsFavorite("user1", "/docs/dot.pdf") {
+		t.Fatal("expected legacy dot-segment favorite path to be normalized on load")
+	}
 	if store.IsFavorite("user1", "/escape.txt") {
 		t.Fatal("expected invalid traversal favorite to be dropped on load")
 	}
 	if store.IsFavorite("user1", "/docs/report\x00.pdf") {
 		t.Fatal("expected invalid NUL favorite to be dropped on load")
 	}
-	if count := store.Count("user1"); count != 1 {
+	if count := store.Count("user1"); count != 2 {
 		t.Fatalf("expected only normalized valid favorite to remain, got %d", count)
 	}
 	listed := store.List("user1")
-	if len(listed) != 1 || listed[0].Path != "/docs/report.pdf" {
+	if len(listed) != 2 {
 		t.Fatalf("expected normalized favorite path in list output, got %+v", listed)
+	}
+	listedByPath := make(map[string]Favorite, len(listed))
+	for _, favorite := range listed {
+		listedByPath[favorite.Path] = *favorite
+	}
+	if _, ok := listedByPath["/docs/report.pdf"]; !ok {
+		t.Fatalf("expected normalized report favorite in list output, got %+v", listed)
+	}
+	if _, ok := listedByPath["/docs/dot.pdf"]; !ok {
+		t.Fatalf("expected normalized legacy dot favorite in list output, got %+v", listed)
 	}
 
 	data, err = os.ReadFile(storePath)
@@ -280,11 +295,18 @@ func TestNewStore_LoadNormalizesAndDropsInvalidPaths(t *testing.T) {
 	if err := json.Unmarshal(data, &persisted); err != nil {
 		t.Fatalf("Unmarshal(persisted favorites) error: %v", err)
 	}
-	if len(persisted) != 1 {
-		t.Fatalf("expected normalized favorites file to contain one entry, got %d", len(persisted))
+	if len(persisted) != 2 {
+		t.Fatalf("expected normalized favorites file to contain two entries, got %d", len(persisted))
 	}
-	if persisted[0].Path != "/docs/report.pdf" {
-		t.Fatalf("expected normalized favorite path to be persisted, got %q", persisted[0].Path)
+	persistedByPath := make(map[string]Favorite, len(persisted))
+	for _, favorite := range persisted {
+		persistedByPath[favorite.Path] = favorite
+	}
+	if _, ok := persistedByPath["/docs/report.pdf"]; !ok {
+		t.Fatalf("expected normalized report favorite to be persisted, got %+v", persisted)
+	}
+	if _, ok := persistedByPath["/docs/dot.pdf"]; !ok {
+		t.Fatalf("expected normalized legacy dot favorite to be persisted, got %+v", persisted)
 	}
 }
 
@@ -585,6 +607,10 @@ func TestStore_AddRejectsTraversalLikePath(t *testing.T) {
 	testCases := []string{
 		"../escape.txt",
 		`..\\escape.txt`,
+		"/docs/./report.pdf",
+		"./docs/report.pdf",
+		".",
+		"/",
 		"   ",
 	}
 
