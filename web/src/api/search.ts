@@ -6,6 +6,7 @@
 import { authFetch } from './auth'
 import { INVALID_API_RESPONSE_MESSAGE } from '@/lib/apiMessages'
 import { readStructuredJsonErrorDetails } from '@/lib/jsonErrorResponse'
+import { normalizePath } from '@/lib/utils'
 
 interface SearchApiError {
   code?: string
@@ -74,11 +75,23 @@ function isNonNegativeSafeInteger(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
 }
 
+function isLogicalPathString(value: unknown): value is string {
+  if (typeof value !== 'string' || value.length === 0) {
+    return false
+  }
+
+  try {
+    return normalizePath(value) === value
+  } catch {
+    return false
+  }
+}
+
 function isSearchResultWire(value: unknown): value is SearchResultWire {
   return !!value
     && typeof value === 'object'
     && typeof (value as SearchResultWire).name === 'string'
-    && typeof (value as SearchResultWire).path === 'string'
+    && isLogicalPathString((value as SearchResultWire).path)
     && isNonNegativeSafeInteger((value as SearchResultWire).size)
     && (typeof (value as SearchResultWire).isDir === 'boolean' || typeof (value as SearchResultWire).is_dir === 'boolean')
     && (typeof (value as SearchResultWire).modTime === 'string' || typeof (value as SearchResultWire).mod_time === 'string')

@@ -38,6 +38,9 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.WebhookMethod != "POST" {
 		t.Fatalf("WebhookMethod = %q, want POST", cfg.WebhookMethod)
 	}
+	if cfg.WeComEnabled || cfg.WeComWebhookURL != "" {
+		t.Fatalf("unexpected WeCom defaults: enabled=%v url=%q", cfg.WeComEnabled, cfg.WeComWebhookURL)
+	}
 }
 
 func TestFormatBytes(t *testing.T) {
@@ -896,6 +899,140 @@ func TestTelegramErrorDoesNotExposeBotToken(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "secret-token") || strings.Contains(err.Error(), "123456") {
 		t.Fatalf("Telegram error leaked bot token: %s", err)
+	}
+}
+
+func TestSendEventSendsWeComWhenConfigured(t *testing.T) {
+	type weComRequest struct {
+		path    string
+		key     string
+		payload weComTextPayload
+	}
+	reqCh := make(chan weComRequest, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload weComTextPayload
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Errorf("Decode(wecom request) error: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		reqCh <- weComRequest{
+			path:    r.URL.Path,
+			key:     r.URL.Query().Get("key"),
+			payload: payload,
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"errcode":0,"errmsg":"ok"}`))
+	}))
+	defer server.Close()
+
+	monitor := NewMonitor(Config{
+		Enabled:         true,
+		WeComEnabled:    true,
+		WeComWebhookURL: server.URL + "/cgi-bin/webhook/send?key=secret-key",
+	}, t.TempDir(), zerolog.Nop())
+
+	err := monitor.SendEvent(context.Background(), EventPayload{
+		Type:      "backup_run",
+		Level:     AlertLevelCritical,
+		Message:   "backup failed",
+		Timestamp: time.Unix(1710000000, 0).UTC(),
+		Hostname:  "mnemonas-host",
+		Details: map[string]any{
+			"job_id": "external-disk",
+			"status": "failed",
+		},
+	})
+	if err != nil {
+		t.Fatalf("SendEvent() error: %v", err)
+	}
+
+	select {
+	case req := <-reqCh:
+		if req.path != "/cgi-bin/webhook/send" || req.key != "secret-key" {
+			t.Fatalf("wecom target = %q key=%q, want webhook path and key", req.path, req.key)
+		}
+		if req.payload.MsgType != "text" {
+			t.Fatalf("wecom msgtype = %q, want text", req.payload.MsgType)
+		}
+		if !strings.Contains(req.payload.Text.Content, "backup failed") || !strings.Contains(req.payload.Text.Content, "external-disk") {
+			t.Fatalf("wecom text missing event details:\n%s", req.payload.Text.Content)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for WeCom alert")
+	}
+}
+
+func TestSendStorageWeComPostsTextPayload(t *testing.T) {
+	reqCh := make(chan weComTextPayload, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload weComTextPayload
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Errorf("Decode(wecom request) error: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		reqCh <- payload
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"errcode":0}`))
+	}))
+	defer server.Close()
+
+	monitor := NewMonitor(Config{}, t.TempDir(), zerolog.Nop())
+	err := monitor.sendStorageWeCom(context.Background(), &StorageStats{
+		Path:      "/srv/mnemonas",
+		UsedBytes: 90,
+		FreeBytes: 10,
+		UsedPct:   90,
+		Level:     AlertLevelWarning,
+		CheckedAt: time.Unix(1710000001, 0).UTC(),
+	}, Config{
+		WeComEnabled:    true,
+		WeComWebhookURL: server.URL + "?key=secret-key",
+	}, "存储空间告警：使用率 90.0%，剩余 10 B", "mnemonas-host")
+	if err != nil {
+		t.Fatalf("sendStorageWeCom() error: %v", err)
+	}
+
+	select {
+	case payload := <-reqCh:
+		if payload.MsgType != "text" {
+			t.Fatalf("wecom msgtype = %q, want text", payload.MsgType)
+		}
+		for _, expected := range []string{"storage warning", "mnemonas-host", "/srv/mnemonas", "90.0%"} {
+			if !strings.Contains(payload.Text.Content, expected) {
+				t.Fatalf("wecom storage text missing %q:\n%s", expected, payload.Text.Content)
+			}
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for WeCom storage alert")
+	}
+}
+
+func TestWeComErrorDoesNotExposeWebhookKey(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"errcode":93000,"errmsg":"invalid key"}`))
+	}))
+	defer server.Close()
+
+	monitor := NewMonitor(Config{
+		Enabled:         true,
+		WeComEnabled:    true,
+		WeComWebhookURL: server.URL + "/cgi-bin/webhook/send?key=secret-key",
+	}, t.TempDir(), zerolog.Nop())
+	err := monitor.SendEvent(context.Background(), EventPayload{Type: "backup_run"})
+	if err == nil {
+		t.Fatal("expected WeCom send error")
+	}
+	text := err.Error()
+	for _, leaked := range []string{"secret-key", "/cgi-bin/webhook/send", "invalid key"} {
+		if strings.Contains(text, leaked) {
+			t.Fatalf("WeCom error leaked %q: %s", leaked, text)
+		}
+	}
+	if !strings.Contains(text, server.URL) || !strings.Contains(text, "errcode 93000") {
+		t.Fatalf("WeCom error should retain sanitized host and errcode, got %s", text)
 	}
 }
 

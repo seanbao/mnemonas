@@ -1,11 +1,12 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import type { ReactNode } from 'react'
-import { render, screen, waitFor } from '@/test/utils'
+import { render, screen, waitFor, within } from '@/test/utils'
 import { fireEvent } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { ActivityPage } from './Activity'
 import * as HeroUI from '@heroui/react'
+import { triggerBrowserDownload } from '@/lib/downloadResponse'
 
 const useIsAdminMock = vi.fn(() => true)
 const useUserMock = vi.fn(() => ({ id: 'admin-id', username: 'admin', role: 'admin' }))
@@ -79,6 +80,39 @@ vi.mock('@heroui/react', async () => {
         )
       }
 
+      if (placeholder === '复核时间') {
+        return (
+          <div>
+            <span>{placeholder}</span>
+            <button onClick={() => onSelectionChange?.(new Set(['7d']))}>筛选复核近 7 天</button>
+            <button onClick={() => onSelectionChange?.(new Set(['all']))}>筛选复核全部时间</button>
+            <div>{children}</div>
+          </div>
+        )
+      }
+
+      if (placeholder === '处置状态') {
+        return (
+          <div>
+            <span>{placeholder}</span>
+            <button onClick={() => onSelectionChange?.(new Set(['restored']))}>选择已恢复</button>
+            <button onClick={() => onSelectionChange?.(new Set(['needs_follow_up']))}>选择需跟进</button>
+            <div>{children}</div>
+          </div>
+        )
+      }
+
+      if (placeholder === '历史处置') {
+        return (
+          <div>
+            <span>{placeholder}</span>
+            <button onClick={() => onSelectionChange?.(new Set(['needs_follow_up']))}>筛选复核需跟进</button>
+            <button onClick={() => onSelectionChange?.(new Set(['all']))}>筛选复核全部处置</button>
+            <div>{children}</div>
+          </div>
+        )
+      }
+
       if (placeholder === '审计分组') {
         return (
           <div>
@@ -132,7 +166,11 @@ vi.mock('@/api/activity', () => ({
     'scrub',
   ],
   ACTIVITY_ACTION_GROUPS: ['risk', 'share'],
+  ACTIVITY_REVIEW_DISPOSITION_STATUSES: ['documented', 'confirmed', 'restored', 'disabled', 'needs_follow_up'],
   listActivity: vi.fn(),
+  listActivityReviewRecords: vi.fn(),
+  createActivityReviewRecord: vi.fn(),
+  updateActivityReviewRecordDisposition: vi.fn(),
   clearActivity: vi.fn(),
   getActivityStats: vi.fn(),
   ApiError: class ApiError extends Error {
@@ -152,7 +190,10 @@ vi.mock('@/api/activity', () => ({
       upload: '上传文件',
       download: '下载文件',
       delete: '删除文件',
+      move: '移动文件',
+      share: '创建分享',
       login: '登录',
+      trash_empty: '清空回收站',
       scrub: '数据校验',
     }
     return labels[action] || action
@@ -169,6 +210,10 @@ vi.mock('@/api/activity', () => ({
   }),
 }))
 
+vi.mock('@/lib/downloadResponse', () => ({
+  triggerBrowserDownload: vi.fn(),
+}))
+
 vi.mock('@/stores/auth', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/stores/auth')>()
   return {
@@ -178,11 +223,15 @@ vi.mock('@/stores/auth', async (importOriginal) => {
   }
 })
 
-import { ApiError, clearActivity, getActivityStats, listActivity } from '@/api/activity'
+import { ApiError, clearActivity, createActivityReviewRecord, getActivityStats, listActivity, listActivityReviewRecords, updateActivityReviewRecordDisposition } from '@/api/activity'
 
 const mockListActivity = listActivity as ReturnType<typeof vi.fn>
+const mockListActivityReviewRecords = listActivityReviewRecords as ReturnType<typeof vi.fn>
+const mockCreateActivityReviewRecord = createActivityReviewRecord as ReturnType<typeof vi.fn>
+const mockUpdateActivityReviewRecordDisposition = updateActivityReviewRecordDisposition as ReturnType<typeof vi.fn>
 const mockClearActivity = clearActivity as ReturnType<typeof vi.fn>
 const mockGetActivityStats = getActivityStats as ReturnType<typeof vi.fn>
+const mockTriggerBrowserDownload = triggerBrowserDownload as ReturnType<typeof vi.fn>
 
 function matchesOptionalString(actual: unknown, expected: string | RegExp | undefined): boolean {
   if (expected instanceof RegExp) {
@@ -281,6 +330,7 @@ function createDeferred<T>() {
 describe('ActivityPage', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    window.history.pushState({}, '', '/')
     vi.spyOn(HeroUI, 'addToast').mockImplementation(((...args: unknown[]) => mockAddToast(...args)) as typeof HeroUI.addToast)
     useIsAdminMock.mockReturnValue(true)
     useUserMock.mockReturnValue({ id: 'admin-id', username: 'admin', role: 'admin' })
@@ -331,6 +381,45 @@ describe('ActivityPage', () => {
         max_10m: 2,
       },
     })
+    mockListActivityReviewRecords.mockResolvedValue({
+      items: [],
+      total: 0,
+      limit: 5,
+      offset: 0,
+    })
+    mockCreateActivityReviewRecord.mockImplementation(async (input) => ({
+      id: 'review-record-1',
+      reviewed_at: new Date(Date.now() - 1000).toISOString(),
+      reviewer: 'admin',
+      note: input.note,
+      scope_label: input.scope_label,
+      filter_summary: input.filter_summary,
+      disposition_status: input.disposition_status,
+      action_counts: input.action_counts,
+      review_count: input.review_count,
+      total_count: input.total_count,
+      path_count: input.path_count,
+      user_count: input.user_count,
+      path_samples: input.path_samples,
+      user_samples: input.user_samples,
+      activity_entry_ids: input.activity_entry_ids,
+    }))
+    mockUpdateActivityReviewRecordDisposition.mockImplementation(async (id, input) => ({
+      id,
+      reviewed_at: new Date(Date.now() - 500).toISOString(),
+      reviewer: 'admin',
+      note: input.note ?? '复核记录已更新',
+      scope_label: '全部记录',
+      filter_summary: '未筛选',
+      disposition_status: input.disposition_status,
+      review_count: 1,
+      total_count: 1,
+      path_count: 1,
+      user_count: 1,
+      path_samples: ['/docs/report.pdf'],
+      user_samples: ['owner'],
+      activity_entry_ids: ['share-1'],
+    }))
     mockClearActivity.mockResolvedValue({ message: '最近操作已清空' })
   })
 
@@ -544,6 +633,673 @@ describe('ActivityPage', () => {
         const loginElements = screen.getAllByText('登录')
         expect(loginElements.length).toBeGreaterThanOrEqual(1)
       })
+    })
+
+    it('shows review details for review-worthy current page activity', async () => {
+      mockListActivity.mockResolvedValue({
+        items: [
+          {
+            id: 'delete-1',
+            timestamp: new Date(Date.now() - 1000 * 60).toISOString(),
+            action: 'delete',
+            path: '/old-file.txt',
+            user: 'user1',
+            details: {
+              cleanup_warning: 'true',
+            },
+          },
+          {
+            id: 'move-1',
+            timestamp: new Date(Date.now() - 1000 * 120).toISOString(),
+            action: 'move',
+            path: '/documents/report.pdf',
+            user: 'admin',
+            details: {
+              to: '/archive/report.pdf',
+            },
+          },
+          {
+            id: 'share-1',
+            timestamp: new Date(Date.now() - 1000 * 180).toISOString(),
+            action: 'share',
+            path: '/documents/report.pdf',
+            user: 'admin',
+            details: {
+              has_password: 'true',
+              max_access: '2',
+            },
+          },
+          {
+            id: 'login-1',
+            timestamp: new Date(Date.now() - 1000 * 240).toISOString(),
+            action: 'login',
+            user: 'admin',
+          },
+        ],
+        total: 4,
+        limit: 20,
+        offset: 0,
+      })
+
+      render(<ActivityPage />)
+
+      await waitFor(() => {
+        const review = within(screen.getByLabelText('当前页复核明细'))
+        expect(review.getByText('当前页复核明细')).toBeTruthy()
+        expect(review.getByText('当前页包含 3 条需复核记录')).toBeTruthy()
+        expect(review.getByText('路径: /old-file.txt')).toBeTruthy()
+        expect(review.getByText('复核: 清理状态: 残留数据清理不完整，请检查存储状态。')).toBeTruthy()
+        expect(review.getAllByText('路径: /documents/report.pdf')).toHaveLength(2)
+        expect(review.getByText('复核: 目标路径: /archive/report.pdf')).toBeTruthy()
+        expect(review.getByText('复核: 密码保护: 是')).toBeTruthy()
+        expect(review.queryByText('登录')).toBeNull()
+        const checklist = within(screen.getByLabelText('复核处置清单'))
+        expect(checklist.getByText('确认影响范围: 3 条记录，涉及 2 个路径、2 个用户。')).toBeTruthy()
+        expect(checklist.getByText('删除类操作: 检查回收站、版本历史和最近备份，确认是否需要恢复。')).toBeTruthy()
+        expect(checklist.getByText('路径变更: 核对来源和目标路径，确认移动或重命名是否符合预期。')).toBeTruthy()
+        expect(checklist.getByText('分享变更: 核对分享链接、密码、有效期和访问次数，关闭不再需要的公开链接。')).toBeTruthy()
+        expect(checklist.getByText('带警告记录: 先处理持久化或清理警告，再把本次复核标记为完成。')).toBeTruthy()
+        expect(checklist.getByText('记录处置结论: 在团队工单或运维记录中写明复核人、处理结果和时间。')).toBeTruthy()
+      })
+    })
+
+    it('persists a current-page review disposition note', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockListActivity.mockResolvedValue({
+        items: [
+          {
+            id: 'delete-1',
+            timestamp: new Date(Date.now() - 1000 * 60).toISOString(),
+            action: 'delete',
+            path: '/old-file.txt',
+            user: 'user1',
+          },
+          {
+            id: 'share-1',
+            timestamp: new Date(Date.now() - 1000 * 120).toISOString(),
+            action: 'share',
+            path: '/documents/report.pdf',
+            user: 'admin',
+          },
+          {
+            id: 'upload-1',
+            timestamp: new Date(Date.now() - 1000 * 180).toISOString(),
+            action: 'upload',
+            path: '/documents/report.pdf',
+            user: 'admin',
+          },
+        ],
+        total: 3,
+        limit: 20,
+        offset: 0,
+      })
+
+      render(<ActivityPage />)
+
+      await waitFor(() => {
+        expect(screen.getByLabelText('活动复核记录')).toBeTruthy()
+      })
+
+      const recorder = within(screen.getByLabelText('活动复核记录'))
+      const noteInput = recorder.getByLabelText('复核处置结论') as HTMLTextAreaElement
+      const recordButton = recorder.getByRole('button', { name: '记录本页复核' })
+      expect(recordButton).toBeDisabled()
+
+      await user.click(recorder.getByText('选择已恢复'))
+      await user.type(noteInput, '已确认删除可恢复，分享链接已关闭')
+      expect(recordButton).not.toBeDisabled()
+      await user.click(recordButton)
+
+      await waitFor(() => {
+        expect(mockCreateActivityReviewRecord).toHaveBeenCalledWith(expect.objectContaining({
+          note: '已确认删除可恢复，分享链接已关闭',
+          scope_label: '当前页',
+          filter_summary: '未筛选',
+          disposition_status: 'restored',
+          action_counts: {
+            delete: 1,
+            share: 1,
+          },
+          review_count: 2,
+          total_count: 3,
+          path_count: 2,
+          user_count: 2,
+          path_samples: ['/old-file.txt', '/documents/report.pdf'],
+          user_samples: ['user1', 'admin'],
+          activity_entry_ids: ['delete-1', 'share-1'],
+        }))
+        expect(recorder.getByText('已确认删除可恢复，分享链接已关闭')).toBeTruthy()
+        expect(recorder.getAllByText('已恢复').length).toBeGreaterThan(0)
+        expect(recorder.getByText('类型: 删除文件 1 · 创建分享 1')).toBeTruthy()
+        expect(recorder.getByText('路径样例: /old-file.txt, /documents/report.pdf')).toBeTruthy()
+        expect(recorder.getByText('用户样例: user1, admin')).toBeTruthy()
+        expect(recorder.getByText('当前页: 2 条待处置 / 3 条总记录 · 2 个路径 · 2 个用户')).toBeTruthy()
+        expect(recorder.getByText('条件: 未筛选')).toBeTruthy()
+        expect(recorder.getAllByText('admin').length).toBeGreaterThan(0)
+        expect(noteInput.value).toBe('')
+        expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({ title: '本页复核已记录', color: 'success' }))
+      })
+    })
+
+    it('records a filtered review across pages', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockListActivity.mockResolvedValueOnce({
+        items: [
+          {
+            id: 'upload-visible',
+            timestamp: new Date(Date.now() - 1000 * 60).toISOString(),
+            action: 'upload',
+            path: '/documents/new.pdf',
+            user: 'admin',
+          },
+        ],
+        total: 3,
+        limit: 20,
+        offset: 0,
+      }).mockResolvedValueOnce({
+        items: [
+          {
+            id: 'upload-visible',
+            timestamp: new Date(Date.now() - 1000 * 60).toISOString(),
+            action: 'upload',
+            path: '/documents/new.pdf',
+            user: 'admin',
+          },
+          {
+            id: 'delete-hidden',
+            timestamp: new Date(Date.now() - 1000 * 120).toISOString(),
+            action: 'delete',
+            path: '/documents/old.pdf',
+            user: 'owner',
+          },
+          {
+            id: 'share-hidden',
+            timestamp: new Date(Date.now() - 1000 * 180).toISOString(),
+            action: 'share',
+            path: '/team/report.pdf',
+            user: 'member',
+          },
+        ],
+        total: 3,
+        limit: 500,
+        offset: 0,
+      })
+
+      render(<ActivityPage />)
+
+      await waitFor(() => {
+        expect(screen.getByLabelText('活动复核记录')).toBeTruthy()
+      })
+
+      const recorder = within(screen.getByLabelText('活动复核记录'))
+      expect(recorder.getByRole('button', { name: '记录本页复核' })).toBeDisabled()
+
+      await user.click(recorder.getByText('选择需跟进'))
+      await user.type(recorder.getByLabelText('复核处置结论'), '跨页检查发现仍需跟进')
+      await user.click(recorder.getByRole('button', { name: '记录当前筛选复核' }))
+
+      await waitFor(() => {
+        expect(mockListActivity).toHaveBeenCalledWith(expect.objectContaining({
+          limit: 500,
+          offset: 0,
+        }))
+        expect(mockCreateActivityReviewRecord).toHaveBeenCalledWith(expect.objectContaining({
+          note: '跨页检查发现仍需跟进',
+          scope_label: '全部记录',
+          filter_summary: '未筛选',
+          disposition_status: 'needs_follow_up',
+          action_counts: {
+            delete: 1,
+            share: 1,
+          },
+          review_count: 2,
+          total_count: 3,
+          path_count: 2,
+          user_count: 2,
+          path_samples: ['/documents/old.pdf', '/team/report.pdf'],
+          user_samples: ['owner', 'member'],
+          activity_entry_ids: ['delete-hidden', 'share-hidden'],
+        }))
+        expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({ title: '当前筛选复核已记录', color: 'success' }))
+      })
+    })
+
+    it('shows persisted activity review records without requiring current-page risk entries', async () => {
+      mockListActivity.mockResolvedValue({
+        items: [
+          {
+            id: 'upload-1',
+            timestamp: new Date(Date.now() - 1000 * 60).toISOString(),
+            action: 'upload',
+            path: '/documents/report.pdf',
+            user: 'admin',
+          },
+        ],
+        total: 1,
+        limit: 20,
+        offset: 0,
+      })
+      mockListActivityReviewRecords.mockResolvedValue({
+        items: [
+          {
+            id: 'review-older',
+            reviewed_at: new Date(Date.now() - 1000 * 60 * 5).toISOString(),
+            reviewer: 'owner',
+            note: '批量删除已完成恢复确认',
+            scope_label: '集中窗口',
+            filter_summary: '窗口 2026-05-01 10:00 - 2026-05-01 10:08 · 分组 高风险变更',
+            disposition_status: 'restored',
+            action_counts: {
+              delete: 2,
+            },
+            review_count: 6,
+            total_count: 8,
+            path_count: 4,
+            user_count: 2,
+            path_samples: ['/family/photos/a.jpg', '/family/photos/b.jpg'],
+            user_samples: ['owner', 'member'],
+            activity_entry_ids: ['delete-1', 'delete-2'],
+          },
+        ],
+        total: 1,
+        limit: 5,
+        offset: 0,
+      })
+
+      render(<ActivityPage />)
+
+      await waitFor(() => {
+        const recorder = within(screen.getByLabelText('活动复核记录'))
+        expect(recorder.getByText('批量删除已完成恢复确认')).toBeTruthy()
+        expect(recorder.getAllByText('已恢复').length).toBeGreaterThan(0)
+        expect(recorder.getByText('类型: 删除文件 2')).toBeTruthy()
+        expect(recorder.getByText('路径样例: /family/photos/a.jpg, /family/photos/b.jpg')).toBeTruthy()
+        expect(recorder.getByText('用户样例: owner, member')).toBeTruthy()
+        expect(recorder.getByText('集中窗口: 6 条待处置 / 8 条总记录 · 4 个路径 · 2 个用户')).toBeTruthy()
+        expect(recorder.getByText('条件: 窗口 2026-05-01 10:00 - 2026-05-01 10:08 · 分组 高风险变更')).toBeTruthy()
+        expect(recorder.getByText('owner')).toBeTruthy()
+      })
+    })
+
+    it('filters persisted review records by reviewer, review time, and disposition status', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+
+      render(<ActivityPage />)
+
+      await waitFor(() => {
+        expect(screen.getByLabelText('复核历史筛选')).toBeTruthy()
+      })
+
+      mockListActivityReviewRecords.mockClear()
+      const reviewFilters = within(screen.getByLabelText('复核历史筛选'))
+      await user.type(reviewFilters.getByLabelText('按复核人筛选'), 'owner')
+      await user.click(reviewFilters.getByText('筛选复核近 7 天'))
+      await user.click(reviewFilters.getByText('筛选复核需跟进'))
+
+      await waitFor(() => {
+        expect(mockListActivityReviewRecords.mock.calls.some(([options]) => (
+          options?.limit === 5
+          && options?.reviewer === 'owner'
+          && options?.dispositionStatus === 'needs_follow_up'
+          && typeof options?.since === 'string'
+          && options.since.endsWith('Z')
+        ))).toBe(true)
+      })
+    })
+
+    it('quickly focuses review history on follow-up records', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+
+      render(<ActivityPage />)
+
+      await waitFor(() => {
+        expect(screen.getByLabelText('复核历史筛选')).toBeTruthy()
+      })
+
+      mockListActivityReviewRecords.mockClear()
+      const reviewFilters = within(screen.getByLabelText('复核历史筛选'))
+      await user.click(reviewFilters.getByRole('button', { name: '只看需跟进' }))
+
+      await waitFor(() => {
+        expect(mockListActivityReviewRecords.mock.calls.some(([options]) => (
+          options?.limit === 5
+          && options?.dispositionStatus === 'needs_follow_up'
+          && options?.reviewer === undefined
+          && options?.since === undefined
+        ))).toBe(true)
+        expect(reviewFilters.getByRole('button', { name: '只看需跟进' })).toBeDisabled()
+      })
+    })
+
+    it('shows a batch follow-up view for review records that still need action', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockListActivityReviewRecords.mockImplementation(async (options) => {
+        if (options?.limit === 3 && options?.dispositionStatus === 'needs_follow_up') {
+          return {
+            items: [
+              {
+                id: 'review-follow-up-1',
+                reviewed_at: new Date(Date.now() - 1000 * 60 * 10).toISOString(),
+                reviewer: 'owner',
+                note: '误删恢复仍未确认',
+                scope_label: '全部记录',
+                filter_summary: '分组 高风险变更',
+                disposition_status: 'needs_follow_up',
+                action_counts: {
+                  delete: 2,
+                },
+                review_count: 2,
+                total_count: 5,
+                path_count: 2,
+                user_count: 1,
+                path_samples: ['/photos/a.jpg', '/photos/b.jpg'],
+                user_samples: ['owner'],
+                activity_entry_ids: ['delete-1', 'delete-2'],
+              },
+            ],
+            total: 3,
+            limit: 3,
+            offset: 0,
+          }
+        }
+
+        return {
+          items: [],
+          total: 0,
+          limit: options?.limit ?? 5,
+          offset: 0,
+        }
+      })
+
+      render(<ActivityPage />)
+
+      await waitFor(() => {
+        const followUpView = within(screen.getByLabelText('需跟进复核批量视图'))
+        expect(followUpView.getByText('当前还有 3 条复核记录需跟进')).toBeTruthy()
+        expect(followUpView.getByText('误删恢复仍未确认')).toBeTruthy()
+        expect(followUpView.getByText('全部记录: 2 条待处置 / 5 条总记录')).toBeTruthy()
+        expect(followUpView.getByText('路径样例: /photos/a.jpg, /photos/b.jpg')).toBeTruthy()
+        expect(followUpView.getByText('其余 2 条未在此处展开')).toBeTruthy()
+      })
+
+      mockListActivity.mockClear()
+      mockGetActivityStats.mockClear()
+      await user.click(within(screen.getByLabelText('需跟进复核批量视图')).getByRole('button', { name: '追踪活动' }))
+
+      await waitFor(() => {
+        expectListActivityCalledWith({
+          limit: 20,
+          offset: 0,
+          actionGroup: 'risk',
+          path: '/photos/a.jpg',
+        })
+        expectGetActivityStatsCalledWithSignal({
+          actionGroup: 'risk',
+          path: '/photos/a.jpg',
+        })
+        expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({
+          title: '已切换到相关活动筛选',
+          color: 'success',
+        }))
+        expect(screen.getByText('分组：高风险变更')).toBeTruthy()
+        expect(screen.getByText('路径：/photos/a.jpg')).toBeTruthy()
+      })
+
+      await user.click(within(screen.getByLabelText('需跟进复核批量视图')).getByRole('button', { name: '查看版本' }))
+      expect(window.location.pathname).toBe('/versions')
+      expect(new URLSearchParams(window.location.search).get('path')).toBe('/photos/a.jpg')
+
+      await user.click(within(screen.getByLabelText('需跟进复核批量视图')).getByRole('button', { name: '查回收站' }))
+      expect(window.location.pathname).toBe('/trash')
+      expect(new URLSearchParams(window.location.search).get('path')).toBe('/photos/a.jpg')
+
+      mockListActivityReviewRecords.mockClear()
+      await user.click(within(screen.getByLabelText('需跟进复核批量视图')).getByRole('button', { name: '查看需跟进' }))
+
+      await waitFor(() => {
+        expect(mockListActivityReviewRecords.mock.calls.some(([options]) => (
+          options?.limit === 5
+          && options?.dispositionStatus === 'needs_follow_up'
+          && options?.reviewer === undefined
+          && options?.since === undefined
+        ))).toBe(true)
+      })
+    })
+
+    it('opens the path-scoped share disposition view from share review records', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockListActivityReviewRecords.mockImplementation(async (options) => {
+        if (options?.limit === 3 && options?.dispositionStatus === 'needs_follow_up') {
+          return {
+            items: [
+              {
+                id: 'review-share-follow-up-1',
+                reviewed_at: new Date(Date.now() - 1000 * 60 * 10).toISOString(),
+                reviewer: 'owner',
+                note: '分享链接仍需处理',
+                scope_label: '全部记录',
+                filter_summary: '分组 分享相关',
+                disposition_status: 'needs_follow_up',
+                action_counts: {
+                  share: 1,
+                },
+                review_count: 1,
+                total_count: 2,
+                path_count: 1,
+                user_count: 1,
+                path_samples: ['/docs/report.pdf'],
+                user_samples: ['owner'],
+                activity_entry_ids: ['share-1'],
+              },
+            ],
+            total: 1,
+            limit: 3,
+            offset: 0,
+          }
+        }
+
+        return {
+          items: [],
+          total: 0,
+          limit: options?.limit ?? 5,
+          offset: 0,
+        }
+      })
+
+      render(<ActivityPage />)
+
+      await waitFor(() => {
+        const followUpView = within(screen.getByLabelText('需跟进复核批量视图'))
+        expect(followUpView.getByText('分享链接仍需处理')).toBeTruthy()
+        expect(followUpView.getByRole('button', { name: '处理分享' })).toBeTruthy()
+      })
+
+      await user.click(within(screen.getByLabelText('需跟进复核批量视图')).getByRole('button', { name: '处理分享' }))
+
+      expect(window.location.pathname).toBe('/settings')
+      const params = new URLSearchParams(window.location.search)
+      expect(params.get('tab')).toBe('shares')
+      expect(params.get('share_path')).toBe('/docs/report.pdf')
+    })
+
+    it('writes back follow-up review record disposition status', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockListActivityReviewRecords.mockImplementation(async (options) => {
+        if (options?.limit === 3 && options?.dispositionStatus === 'needs_follow_up') {
+          return {
+            items: [
+              {
+                id: 'review-follow-up-1',
+                reviewed_at: new Date(Date.now() - 1000 * 60 * 10).toISOString(),
+                reviewer: 'owner',
+                note: '误删恢复仍未确认',
+                scope_label: '全部记录',
+                filter_summary: '分组 高风险变更',
+                disposition_status: 'needs_follow_up',
+                action_counts: {
+                  delete: 1,
+                },
+                review_count: 1,
+                total_count: 1,
+                path_count: 1,
+                user_count: 1,
+                path_samples: ['/photos/a.jpg'],
+                user_samples: ['owner'],
+                activity_entry_ids: ['delete-1'],
+              },
+            ],
+            total: 1,
+            limit: 3,
+            offset: 0,
+          }
+        }
+
+        return {
+          items: [],
+          total: 0,
+          limit: options?.limit ?? 5,
+          offset: 0,
+        }
+      })
+      mockUpdateActivityReviewRecordDisposition.mockImplementationOnce(async (id, input) => ({
+        id,
+        reviewed_at: new Date(Date.now() - 1000).toISOString(),
+        reviewer: 'admin',
+        note: input.note ?? '误删恢复仍未确认',
+        scope_label: '全部记录',
+        filter_summary: '分组 高风险变更',
+        disposition_status: input.disposition_status,
+        action_counts: {
+          delete: 1,
+        },
+        review_count: 1,
+        total_count: 1,
+        path_count: 1,
+        user_count: 1,
+        path_samples: ['/photos/a.jpg'],
+        user_samples: ['owner'],
+        activity_entry_ids: ['delete-1'],
+      }))
+
+      render(<ActivityPage />)
+
+      await waitFor(() => {
+        const followUpView = within(screen.getByLabelText('需跟进复核批量视图'))
+        expect(followUpView.getByText('误删恢复仍未确认')).toBeTruthy()
+        expect(followUpView.getByRole('button', { name: '标记已恢复' })).toBeTruthy()
+      })
+
+      await user.type(screen.getByLabelText('复核记录处置备注 review-follow-up-1'), '已从回收站恢复到原路径')
+      await user.click(within(screen.getByLabelText('需跟进复核批量视图')).getByRole('button', { name: '标记已恢复' }))
+
+      await waitFor(() => {
+        expect(mockUpdateActivityReviewRecordDisposition).toHaveBeenCalledWith('review-follow-up-1', {
+          disposition_status: 'restored',
+          note: '已从回收站恢复到原路径',
+        })
+        expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({
+          title: '复核状态已更新为已恢复',
+          color: 'success',
+        }))
+        expect(screen.queryByLabelText('需跟进复核批量视图')).toBeNull()
+      })
+    })
+
+    it('exports persisted review records as CSV', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+
+      render(<ActivityPage />)
+
+      await waitFor(() => {
+        expect(screen.getByLabelText('复核历史筛选')).toBeTruthy()
+      })
+
+      mockListActivityReviewRecords.mockClear()
+      mockListActivityReviewRecords.mockResolvedValueOnce({
+        items: [
+          {
+            id: 'review-export-1',
+            reviewed_at: '2026-06-03T10:30:00Z',
+            reviewer: 'owner',
+            note: '删除记录仍需跟进，已转入运维工单',
+            scope_label: '全部记录',
+            filter_summary: '分组 高风险变更',
+            disposition_status: 'needs_follow_up',
+            action_counts: {
+              delete: 1,
+              share: 1,
+            },
+            review_count: 2,
+            total_count: 4,
+            path_count: 2,
+            user_count: 2,
+            path_samples: ['/documents/old.pdf', '/team/report.pdf'],
+            user_samples: ['owner', 'member'],
+            activity_entry_ids: ['delete-1', 'share-1'],
+          },
+        ],
+        total: 1,
+        limit: 100,
+        offset: 0,
+      })
+
+      await user.click(screen.getByRole('button', { name: '导出复核记录' }))
+
+      await waitFor(() => {
+        expect(mockListActivityReviewRecords).toHaveBeenCalledWith(expect.objectContaining({
+          limit: 100,
+          offset: 0,
+          reviewer: undefined,
+          dispositionStatus: undefined,
+          since: undefined,
+        }))
+        expect(mockTriggerBrowserDownload).toHaveBeenCalledTimes(1)
+        expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({
+          title: '复核记录已导出',
+          color: 'success',
+        }))
+      })
+
+      const [blob, filename] = mockTriggerBrowserDownload.mock.calls[0] as [Blob, string]
+      expect(filename).toMatch(/^mnemonas-activity-review-records-.+\.csv$/)
+      const csv = await blob.text()
+      expect(csv).toContain('复核时间')
+      expect(csv).toContain('删除记录仍需跟进，已转入运维工单')
+      expect(csv).toContain('需跟进')
+      expect(csv).toContain('删除文件 1; 创建分享 1')
+      expect(csv).toContain('/documents/old.pdf; /team/report.pdf')
+    })
+
+    it('does not download an empty persisted review export', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+
+      render(<ActivityPage />)
+
+      await waitFor(() => {
+        expect(screen.getByLabelText('复核历史筛选')).toBeTruthy()
+      })
+
+      mockListActivityReviewRecords.mockClear()
+      mockListActivityReviewRecords.mockResolvedValueOnce({
+        items: [],
+        total: 0,
+        limit: 100,
+        offset: 0,
+      })
+
+      await user.click(screen.getByRole('button', { name: '导出复核记录' }))
+
+      await waitFor(() => {
+        expect(mockListActivityReviewRecords).toHaveBeenCalledWith(expect.objectContaining({
+          limit: 100,
+          offset: 0,
+        }))
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '没有可导出的复核记录',
+          color: 'warning',
+        })
+      })
+      expect(mockTriggerBrowserDownload).not.toHaveBeenCalled()
     })
 
     it('shows file paths', async () => {
@@ -1139,6 +1895,30 @@ describe('ActivityPage', () => {
         expect(screen.getByText('当前筛选:')).toBeTruthy()
         expect(screen.getByText('分组：分享相关')).toBeTruthy()
         expect(screen.getByText('当前筛选结果')).toBeTruthy()
+      })
+    })
+
+    it('loads share review filters from the URL query', async () => {
+      window.history.pushState({}, '', '/activity?action_group=share&path=%2Fdocs%2Freport.pdf')
+
+      render(<ActivityPage />)
+
+      await waitFor(() => {
+        expectListActivityCalledWith({
+          limit: 20,
+          offset: 0,
+          action: undefined,
+          actionGroup: 'share',
+          path: '/docs/report.pdf',
+        })
+        expectGetActivityStatsCalledWithSignal({
+          actionGroup: 'share',
+          path: '/docs/report.pdf',
+        })
+        expect(screen.getByText('当前筛选:')).toBeTruthy()
+        expect(screen.getByText('分组：分享相关')).toBeTruthy()
+        expect(screen.getByText('路径：/docs/report.pdf')).toBeTruthy()
+        expect(screen.getByPlaceholderText('按路径筛选')).toHaveValue('/docs/report.pdf')
       })
     })
 

@@ -1179,6 +1179,7 @@ count_enabled_admins() {
 
   python3 - "$users_file" <<'PY'
 import json
+import re
 import sys
 
 path = sys.argv[1]
@@ -1194,10 +1195,43 @@ if not isinstance(users, list):
     sys.exit(2)
 
 count = 0
-for user in users:
+seen_ids = set()
+seen_usernames = set()
+bcrypt_hash = re.compile(r"^\$2[aby]\$[0-9]{2}\$[./A-Za-z0-9]{53}$")
+for index, user in enumerate(users):
     if not isinstance(user, dict):
-        continue
-    if user.get("role") == "admin" and not bool(user.get("disabled", False)):
+        print(f"users file contains non-object entry at index {index}", file=sys.stderr)
+        sys.exit(2)
+    user_id = user.get("id")
+    if not isinstance(user_id, str) or not user_id:
+        print(f"users file contains user with empty id at index {index}", file=sys.stderr)
+        sys.exit(2)
+    if user_id in seen_ids:
+        print(f"users file contains duplicate user id {user_id!r}", file=sys.stderr)
+        sys.exit(2)
+    seen_ids.add(user_id)
+    username = user.get("username")
+    if not isinstance(username, str) or not username.strip():
+        print(f"users file contains invalid username at index {index}", file=sys.stderr)
+        sys.exit(2)
+    normalized_username = username.strip().lower()
+    if normalized_username in seen_usernames:
+        print(f"users file contains duplicate username {username!r}", file=sys.stderr)
+        sys.exit(2)
+    seen_usernames.add(normalized_username)
+    role = user.get("role")
+    if role not in {"admin", "user", "guest"}:
+        print(f"users file contains invalid role for user {username!r}", file=sys.stderr)
+        sys.exit(2)
+    disabled = user.get("disabled", False)
+    if not isinstance(disabled, bool):
+        print(f"users file contains invalid disabled flag for user {username!r}", file=sys.stderr)
+        sys.exit(2)
+    if role == "admin" and not disabled:
+        password_hash = user.get("password_hash")
+        if not isinstance(password_hash, str) or not bcrypt_hash.match(password_hash):
+            print(f"users file contains invalid password_hash for enabled administrator {username!r}", file=sys.stderr)
+            sys.exit(2)
         count += 1
 print(count)
 PY
@@ -1263,6 +1297,33 @@ initial_password_file() {
 
   users_file="$(effective_auth_users_file)"
   printf '%s\n' "$(dirname "$users_file")/initial-password.txt"
+}
+
+report_initial_password_issue() {
+  local severity="$1"
+  local message="$2"
+
+  if [[ "$severity" == "fail" ]]; then
+    fail "$message"
+  else
+    warn "$message"
+  fi
+}
+
+check_initial_password_file_absent() {
+  local path="$1"
+  local severity="$2"
+  local remediation="$3"
+
+  if [[ -L "$path" ]]; then
+    report_initial_password_issue "$severity" "initial admin password path is a symlink at $path; remove it before public or shared use"
+  elif [[ -f "$path" ]]; then
+    report_initial_password_issue "$severity" "initial admin password file still exists at $path; $remediation"
+  elif [[ -e "$path" ]]; then
+    report_initial_password_issue "$severity" "initial admin password path exists but is not a regular file at $path; remove it before public or shared use"
+  else
+    ok "initial admin password file is absent"
+  fi
 }
 
 format_kib() {
@@ -1480,6 +1541,7 @@ check_public_domain() {
   fi
 
   check_http_unreachable "http://$domain:$SERVER_PORT/health" "public direct control plane"
+  check_tcp_unreachable "$domain" "$SERVER_PORT" "public direct control plane TCP"
   check_tcp_unreachable "$domain" "$DATAPLANE_GRPC_PORT" "public dataplane gRPC"
   check_tcp_unreachable "$domain" "$DATAPLANE_HTTP_PORT" "public dataplane HTTP"
 
@@ -1491,9 +1553,7 @@ check_public_domain() {
 
   local password_file
   password_file="$(initial_password_file)"
-  if [[ -f "$password_file" ]]; then
-    fail "initial admin password file still exists at $password_file; change the admin password before public access"
-  fi
+  check_initial_password_file_absent "$password_file" fail "change the admin password before public access"
 
   note "manual cloud firewall check: expose only 80/443 publicly; keep $SERVER_PORT/$DATAPLANE_GRPC_PORT/$DATAPLANE_HTTP_PORT closed to the public internet"
 }
@@ -1585,11 +1645,7 @@ fi
 check_disk_space "$STORAGE_ROOT"
 
 password_file="$(initial_password_file)"
-if [[ -f "$password_file" ]]; then
-  warn "initial admin password file still exists at $password_file; log in once and change the password"
-else
-  ok "initial admin password file is absent"
-fi
+check_initial_password_file_absent "$password_file" warn "log in once and change the password"
 
 if [[ -d "$BACKUP_ROOT" ]]; then
   ok "backup root exists: $BACKUP_ROOT"

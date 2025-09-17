@@ -1,5 +1,6 @@
 import { getInvalidHomeDirDescription, invalidHomeDirTitle, resolveUserHomeScope } from '@/lib/userScope'
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   Button,
@@ -19,6 +20,7 @@ import {
   AlertTriangle,
   Clock,
   AlertCircle,
+  X,
 } from 'lucide-react'
 import {
   listTrash,
@@ -32,7 +34,7 @@ import {
 } from '@/api/files'
 import { FileIcon } from '@/components/ui/FileIcon'
 import { EmptyState } from '@/components/ui/EmptyState'
-import { formatBytes, cn, formatRelativeTime } from '@/lib/utils'
+import { formatBytes, cn, formatRelativeTime, normalizePath } from '@/lib/utils'
 import { useBatchOperation, type BatchOperationResult } from '@/lib/useBatchOperation'
 import { GENERIC_ACTION_ERROR_DESCRIPTION, GENERIC_LOAD_ERROR_DESCRIPTION, getUserFacingErrorDescription } from '@/lib/apiMessages'
 import { PageHeader } from '@/components/ui/PageHeader'
@@ -78,6 +80,29 @@ function getAutoDeleteBadgeLabel(deletedAt: string, retentionDays: number | unde
 
 const trashUnavailableDescription = '文件系统当前不可用，请稍后重试'
 const missingTrashItemTitle = '回收站条目已不存在，已同步更新'
+
+function normalizeTrashPathFilter(value: string | null): string {
+  const trimmed = value?.trim() ?? ''
+  if (!trimmed) {
+    return ''
+  }
+  try {
+    return normalizePath(trimmed)
+  } catch {
+    return ''
+  }
+}
+
+function trashItemMatchesPathFilter(item: TrashItem, pathFilter: string): boolean {
+  if (!pathFilter) {
+    return true
+  }
+  if (item.originalPath === pathFilter) {
+    return true
+  }
+  const directoryPrefix = pathFilter.endsWith('/') ? pathFilter : `${pathFilter}/`
+  return item.originalPath.startsWith(directoryPrefix)
+}
 
 function getMissingTrashItemResult(): ActionResult {
   return {
@@ -304,6 +329,7 @@ function TrashRow({
 
 export function TrashPage() {
   const queryClient = useQueryClient()
+  const [searchParams, setSearchParams] = useSearchParams()
   const canWrite = useCanWrite()
   const user = useUser()
   const { hasInvalidHomeDir } = resolveUserHomeScope(user)
@@ -348,12 +374,16 @@ export function TrashPage() {
   })
 
   const items = useMemo(() => data?.items ?? [], [data?.items])
+  const pathFilter = useMemo(() => normalizeTrashPathFilter(searchParams.get('path')), [searchParams])
+  const visibleItems = useMemo(() => {
+    return pathFilter ? items.filter((item) => trashItemMatchesPathFilter(item, pathFilter)) : items
+  }, [items, pathFilter])
   const visibleSelectedItems = useMemo(() => {
     if (selectedItems.size === 0) {
       return selectedItems
     }
 
-    const validIds = new Set(items.map((item) => item.id))
+    const validIds = new Set(visibleItems.map((item) => item.id))
     let changed = false
     const next = new Set<string>()
 
@@ -366,7 +396,7 @@ export function TrashPage() {
     }
 
     return changed ? next : selectedItems
-  }, [items, selectedItems])
+  }, [selectedItems, visibleItems])
 
   const removeSelectedIds = useCallback((ids: string[]) => {
     if (ids.length === 0) {
@@ -581,13 +611,13 @@ export function TrashPage() {
 
   const handleSelectAll = useCallback(() => {
     if (!canWrite) return
-    if (items.length === 0) return
-    if (visibleSelectedItems.size === items.length) {
+    if (visibleItems.length === 0) return
+    if (visibleSelectedItems.size === visibleItems.length) {
       setSelectedItems(new Set())
     } else {
-      setSelectedItems(new Set(items.map(item => item.id)))
+      setSelectedItems(new Set(visibleItems.map(item => item.id)))
     }
-  }, [canWrite, items, visibleSelectedItems.size])
+  }, [canWrite, visibleItems, visibleSelectedItems.size])
 
   // Batch restore using custom hook
   const { execute: executeBatchRestore, isLoading: isBatchRestoring } = useBatchOperation<string, ActionResult>({
@@ -702,6 +732,10 @@ export function TrashPage() {
     emptyMutation.mutate({ signal: controller.signal })
   }, [canWrite, emptyMutation])
 
+  const handleClearPathFilter = useCallback(() => {
+    setSearchParams({})
+  }, [setSearchParams])
+
   if (hasInvalidHomeDir) {
     return (
       <div className="flex h-full min-h-0 flex-col space-y-4 overflow-auto p-4 custom-scrollbar sm:p-6">
@@ -760,6 +794,7 @@ export function TrashPage() {
 
   const totalSize = data?.totalSize ?? items.reduce((sum, item) => sum + item.size, 0)
   const itemCount = data?.count ?? items.length
+  const visibleItemCount = visibleItems.length
   const retentionDays = data?.retentionDays
   const retentionEnabled = data?.retentionEnabled
   const retentionKnown = retentionEnabled !== undefined || retentionDays !== undefined
@@ -770,13 +805,16 @@ export function TrashPage() {
         ? '立即过期，等待清理'
         : `${retentionDays} 天后自动清理`
       : '自动清理未启用'
+  const pageSubtitle = pathFilter
+    ? `当前筛选 ${visibleItemCount} 项 / 共 ${itemCount} 项 · ${formatBytes(totalSize)} · ${retentionLabel}`
+    : `${itemCount} 项 · ${formatBytes(totalSize)} · ${retentionLabel}`
 
   return (
     <div className="flex h-full min-h-0 flex-col space-y-4 overflow-auto p-4 custom-scrollbar sm:p-6">
       {/* Header */}
       <PageHeader
         title="回收站"
-        subtitle={`${itemCount} 项 · ${formatBytes(totalSize)} · ${retentionLabel}`}
+        subtitle={pageSubtitle}
         icon={Trash2}
         actions={
           canWrite && itemCount > 0 ? (
@@ -792,6 +830,26 @@ export function TrashPage() {
           ) : null
         }
       />
+
+      {pathFilter && (
+        <div aria-label="回收站路径筛选" className="flex flex-col gap-2 rounded-lg border border-divider bg-content1 px-4 py-2.5 text-sm sm:flex-row sm:items-center sm:justify-between">
+          <div className="min-w-0">
+            <div className="text-xs text-default-500">路径筛选</div>
+            <div className="truncate font-medium text-foreground" title={pathFilter}>
+              路径：{pathFilter}
+            </div>
+          </div>
+          <Button
+            size="sm"
+            variant="light"
+            className="h-8 rounded-lg px-2 text-default-500"
+            startContent={<X size={14} />}
+            onPress={handleClearPathFilter}
+          >
+            清除路径筛选
+          </Button>
+        </div>
+      )}
 
       {/* Selection bar */}
       {canWrite && visibleSelectedItems.size > 0 && (
@@ -830,13 +888,13 @@ export function TrashPage() {
       )}
 
       {/* List header */}
-      {items.length > 0 && (
+      {visibleItems.length > 0 && (
         <div className="hidden items-center gap-4 px-4 py-2.5 bg-content2/50 backdrop-blur-sm rounded-lg border border-divider text-sm font-medium text-default-400 sm:flex">
           {canWrite ? (
             <Checkbox
-              aria-label={visibleSelectedItems.size === items.length && items.length > 0 ? '取消全选回收站项目' : '全选回收站项目'}
-              isSelected={visibleSelectedItems.size === items.length && items.length > 0}
-              isIndeterminate={visibleSelectedItems.size > 0 && visibleSelectedItems.size < items.length}
+              aria-label={visibleSelectedItems.size === visibleItems.length && visibleItems.length > 0 ? '取消全选回收站项目' : '全选回收站项目'}
+              isSelected={visibleSelectedItems.size === visibleItems.length && visibleItems.length > 0}
+              isIndeterminate={visibleSelectedItems.size > 0 && visibleSelectedItems.size < visibleItems.length}
               onValueChange={handleSelectAll}
               classNames={{
                 label: "sr-only",
@@ -858,8 +916,8 @@ export function TrashPage() {
 
       {/* Item list */}
       <div className="card-meridian min-h-0 flex-1 overflow-auto rounded-lg">
-        {items.length > 0 ? (
-          items.map(item => (
+        {visibleItems.length > 0 ? (
+          visibleItems.map(item => (
             <TrashRow
               key={item.id}
               item={item}
@@ -885,8 +943,8 @@ export function TrashPage() {
           <div className="flex items-center justify-center h-64">
             <EmptyState
               icon={Trash2}
-              title="回收站是空的"
-              description="删除的文件将按配置保留"
+              title={items.length > 0 && pathFilter ? '没有匹配的回收站条目' : '回收站是空的'}
+              description={items.length > 0 && pathFilter ? '当前路径筛选没有找到可恢复项目' : '删除的文件将按配置保留'}
             />
           </div>
         )}

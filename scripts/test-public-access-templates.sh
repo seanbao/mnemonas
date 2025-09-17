@@ -111,6 +111,10 @@ test_docs_avoid_webdav_placeholder_passwords() {
     assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.en.md" 'should not be copied into support requests, chats, or logs'
     assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.md" "自定义 \`auth.users_file\` 时会检查该文件所在目录"
     assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.en.md" "a custom \`auth.users_file\` moves the checked password file location"
+    assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.md" "bcrypt 格式的 \`password_hash\`"
+    assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.en.md" "bcrypt-format \`password_hash\`"
+    assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.md" "符号链接或非普通文件"
+    assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.en.md" "symlink or non-regular file"
     assert_file_contains "$REPO_ROOT/docs/security.md" '密码管理器生成的随机强密码'
     assert_file_contains "$REPO_ROOT/docs/security.en.md" 'password-manager value'
 }

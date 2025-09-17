@@ -205,7 +205,7 @@ function getAlertsPresentation(alerts: DiagnosticsInfo['alerts']): {
   const notificationChannels = getAlertNotificationChannels(alerts)
   const notificationText = notificationChannels.length > 0
     ? `通知通道已配置：${notificationChannels.join('、')}。`
-    : '如需外部通知，请在设置中配置 Webhook、Telegram 或邮件。'
+    : '如需外部通知，请在设置中配置 Webhook、Telegram、企业微信或邮件。'
 
   return {
     icon: BellRing,
@@ -223,6 +223,9 @@ function getAlertNotificationChannels(alerts: NonNullable<DiagnosticsInfo['alert
   }
   if (alerts.telegramConfigured) {
     channels.push('Telegram')
+  }
+  if (alerts.wecomConfigured) {
+    channels.push('企业微信')
   }
   if (alerts.emailConfigured) {
     channels.push('邮件')

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, useMemo } from 'react'
+import { useLocation, useNavigate } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Button,
@@ -40,20 +41,31 @@ import {
   Database,
   BarChart3,
   CalendarDays,
+  ListChecks,
+  ClipboardCheck,
   X,
 } from 'lucide-react'
 import {
   ApiError,
   ACTIVITY_ACTIONS,
   ACTIVITY_ACTION_GROUPS,
+  ACTIVITY_REVIEW_DISPOSITION_STATUSES,
   clearActivity,
+  createActivityReviewRecord,
   getActivityStats,
+  listActivityReviewRecords,
   listActivity,
+  updateActivityReviewRecordDisposition,
   getActionLabel,
   getActionColor,
+  type ActivityActionCountMap,
   type ActionType,
   type ActivityActionGroup,
   type ActivityEntry,
+  type ActivityReviewRecord,
+  type ActivityReviewRecordCreateInput,
+  type ActivityReviewDispositionStatus,
+  type ActivityReviewRecordListResponse,
   type ActivityStats,
 } from '@/api/activity'
 import { cn, formatDate, formatRelativeTime, normalizePath } from '@/lib/utils'
@@ -64,6 +76,7 @@ import { useIsAdmin, useUser } from '@/stores/auth'
 import { getInvalidHomeDirDescription, invalidHomeDirTitle, resolveUserHomeScope } from '@/lib/userScope'
 import { getUserFacingErrorDescription } from '@/lib/apiMessages'
 import { getActivityDetailEntries } from '@/lib/activityDetails'
+import { triggerBrowserDownload } from '@/lib/downloadResponse'
 
 const ACTIVITY_TIME_RANGES = [
   { key: 'all', label: '全部时间' },
@@ -76,6 +89,43 @@ const ACTIVITY_ACTION_GROUP_OPTIONS: Array<{ key: ActivityActionGroup; label: st
   { key: 'risk', label: '高风险变更' },
   { key: 'share', label: '分享相关' },
 ]
+
+const ACTIVITY_REVIEW_DISPOSITION_OPTIONS: Array<{ key: ActivityReviewDispositionStatus; label: string }> = [
+  { key: 'documented', label: '已记录' },
+  { key: 'confirmed', label: '确认保留' },
+  { key: 'restored', label: '已恢复' },
+  { key: 'disabled', label: '已禁用' },
+  { key: 'needs_follow_up', label: '需跟进' },
+]
+
+type ActivityReviewDispositionFilterKey = 'all' | ActivityReviewDispositionStatus
+
+const ACTIVITY_REVIEW_DISPOSITION_FILTER_OPTIONS: Array<{ key: ActivityReviewDispositionFilterKey; label: string }> = [
+  { key: 'all', label: '全部处置' },
+  ...ACTIVITY_REVIEW_DISPOSITION_OPTIONS,
+]
+
+const ACTIVITY_REVIEW_ACTIONS = new Set<ActionType>([
+  'delete',
+  'rename',
+  'move',
+  'restore',
+  'share',
+  'unshare',
+  'trash_restore',
+  'trash_delete',
+  'trash_empty',
+])
+
+const ACTIVITY_DESTRUCTIVE_ACTIONS = new Set<ActionType>(['delete', 'trash_delete', 'trash_empty'])
+const ACTIVITY_SHARE_ACTIONS = new Set<ActionType>(['share', 'unshare'])
+const ACTIVITY_RESTORE_ACTIONS = new Set<ActionType>(['restore', 'trash_restore'])
+const ACTIVITY_RECOVERY_FOLLOW_UP_ACTIONS = new Set<ActionType>(['delete', 'rename', 'move', 'restore', 'trash_restore', 'trash_delete', 'trash_empty'])
+const ACTIVITY_WARNING_DETAIL_KEYS = new Set(['persistence_warning', 'cleanup_warning', 'trash_cleanup_warning'])
+
+const ACTIVITY_REVIEW_FILTERED_LIMIT = 500
+const ACTIVITY_REVIEW_EXPORT_LIMIT = 100
+const ACTIVITY_REVIEW_FOLLOW_UP_LIMIT = 3
 
 const activityLoadErrorDescription = '最近操作加载失败，请检查网络或稍后重试。'
 
@@ -91,10 +141,30 @@ interface ActivityPathFilterState {
   errorMessage?: string
 }
 
+interface ActivityURLFilterState {
+  actionFilter: ActionType | ''
+  actionGroupFilter: ActivityActionGroup | ''
+  timeRangeFilter: ActivityTimeRangeKey
+  pathFilter: string
+  userFilter: string
+}
+
 const ACTIVITY_PATH_FILTER_ERROR = '路径不能包含 .、.. 或控制字符'
 
 function isActivityTimeRangeKey(value: string | undefined): value is ActivityTimeRangeKey {
   return ACTIVITY_TIME_RANGES.some((range) => range.key === value)
+}
+
+function isActivityAction(value: string | undefined): value is ActionType {
+  return ACTIVITY_ACTIONS.includes(value as ActionType)
+}
+
+function isActivityReviewDispositionStatus(value: string | undefined): value is ActivityReviewDispositionStatus {
+  return ACTIVITY_REVIEW_DISPOSITION_STATUSES.includes(value as ActivityReviewDispositionStatus)
+}
+
+function isActivityReviewDispositionFilterKey(value: string | undefined): value is ActivityReviewDispositionFilterKey {
+  return value === 'all' || isActivityReviewDispositionStatus(value)
 }
 
 function getActivityTimeRangeLabel(key: ActivityTimeRangeKey): string {
@@ -109,8 +179,35 @@ function getActivityActionGroupLabel(group: ActivityActionGroup): string {
   return ACTIVITY_ACTION_GROUP_OPTIONS.find((option) => option.key === group)?.label ?? group
 }
 
+function getActivityReviewDispositionStatusLabel(status?: ActivityReviewDispositionStatus): string {
+  return ACTIVITY_REVIEW_DISPOSITION_OPTIONS.find((option) => option.key === (status ?? 'documented'))?.label ?? '已记录'
+}
+
 function toRFC3339Seconds(date: Date): string {
   return date.toISOString().replace(/\.\d{3}Z$/, 'Z')
+}
+
+function getSingleActivitySearchParam(params: URLSearchParams, key: string): string | undefined {
+  const values = params.getAll(key)
+  return values.length === 1 ? values[0] : undefined
+}
+
+function parseActivityURLFilters(search: string): ActivityURLFilterState {
+  const params = new URLSearchParams(search)
+  const actionParam = getSingleActivitySearchParam(params, 'action')
+  const actionGroupParam = getSingleActivitySearchParam(params, 'action_group')
+  const timeRangeParam = getSingleActivitySearchParam(params, 'time_range')
+
+  const actionFilter = isActivityAction(actionParam) ? actionParam : ''
+  const actionGroupFilter = !actionFilter && isActivityActionGroup(actionGroupParam) ? actionGroupParam : ''
+
+  return {
+    actionFilter,
+    actionGroupFilter,
+    timeRangeFilter: isActivityTimeRangeKey(timeRangeParam) ? timeRangeParam : 'all',
+    pathFilter: getSingleActivitySearchParam(params, 'path') ?? '',
+    userFilter: getSingleActivitySearchParam(params, 'user')?.trim() ?? '',
+  }
 }
 
 function getActivityTimeRangeSince(range: ActivityTimeRangeKey, now = new Date()): string | undefined {
@@ -155,6 +252,128 @@ function formatActivityWindowLabel(window: ActivityReviewWindow): string {
     return '集中窗口'
   }
   return `${startedAt} - ${endedAt}`
+}
+
+function getActivityReviewScopeLabel(isFiltered: boolean, reviewWindow: ActivityReviewWindow | null): string {
+  return reviewWindow ? '集中窗口' : isFiltered ? '当前筛选结果' : '当前页'
+}
+
+function getActivityReviewFilteredScopeLabel(isFiltered: boolean, reviewWindow: ActivityReviewWindow | null): string {
+  return reviewWindow ? '集中窗口' : isFiltered ? '当前筛选结果' : '全部记录'
+}
+
+function getActivityReviewFilterSummary({
+  timeRangeFilter,
+  reviewWindow,
+  actionFilter,
+  actionGroupFilter,
+  pathFilter,
+  userFilter,
+}: {
+  timeRangeFilter: ActivityTimeRangeKey
+  reviewWindow: ActivityReviewWindow | null
+  actionFilter: ActionType | ''
+  actionGroupFilter: ActivityActionGroup | ''
+  pathFilter: string
+  userFilter: string
+}): string {
+  const filters: string[] = []
+  if (reviewWindow) {
+    filters.push(`窗口 ${formatActivityWindowLabel(reviewWindow)}`)
+  } else if (timeRangeFilter !== 'all') {
+    filters.push(`时间 ${getActivityTimeRangeLabel(timeRangeFilter)}`)
+  }
+  if (actionFilter) {
+    filters.push(`操作 ${getActionLabel(actionFilter)}`)
+  }
+  if (actionGroupFilter) {
+    filters.push(`分组 ${getActivityActionGroupLabel(actionGroupFilter)}`)
+  }
+  if (pathFilter) {
+    filters.push(`路径 ${pathFilter}`)
+  }
+  if (userFilter) {
+    filters.push(`用户 ${userFilter}`)
+  }
+  return filters.length > 0 ? filters.join(' · ') : '未筛选'
+}
+
+function activityReviewRecordMatchesFilters(
+  record: ActivityReviewRecord,
+  reviewerFilter: string,
+  sinceFilter?: string,
+  dispositionStatusFilter?: ActivityReviewDispositionStatus,
+): boolean {
+  if (reviewerFilter && record.reviewer !== reviewerFilter) {
+    return false
+  }
+  if (dispositionStatusFilter && (record.disposition_status ?? 'documented') !== dispositionStatusFilter) {
+    return false
+  }
+  if (sinceFilter && Date.parse(record.reviewed_at) < Date.parse(sinceFilter)) {
+    return false
+  }
+  return true
+}
+
+function prependActivityReviewRecord(
+  current: ActivityReviewRecordListResponse | undefined,
+  record: ActivityReviewRecord,
+  limit: number,
+): ActivityReviewRecordListResponse {
+  const currentItems = current?.items ?? []
+  const alreadyExists = currentItems.some((item) => item.id === record.id)
+  return {
+    items: [record, ...currentItems.filter((item) => item.id !== record.id)].slice(0, limit),
+    total: (current?.total ?? 0) + (alreadyExists ? 0 : 1),
+    limit: current?.limit ?? limit,
+    offset: current?.offset ?? 0,
+  }
+}
+
+function updateActivityReviewRecordList(
+  current: ActivityReviewRecordListResponse | undefined,
+  record: ActivityReviewRecord,
+  shouldKeep: (record: ActivityReviewRecord) => boolean,
+): ActivityReviewRecordListResponse | undefined {
+  if (!current) {
+    return current
+  }
+
+  const existed = current.items.some((item) => item.id === record.id)
+  const nextItems = shouldKeep(record)
+    ? current.items.map((item) => (item.id === record.id ? record : item))
+    : current.items.filter((item) => item.id !== record.id)
+
+  return {
+    ...current,
+    items: nextItems,
+    total: shouldKeep(record)
+      ? current.total
+      : Math.max(0, current.total - (existed ? 1 : 0)),
+  }
+}
+
+function getActivityReviewRecordPrimaryPath(record: ActivityReviewRecord): string {
+  return record.path_samples?.find((path) => path.trim().length > 0) ?? ''
+}
+
+function activityReviewRecordHasAction(record: ActivityReviewRecord, actions: Set<ActionType>): boolean {
+  return Object.entries(record.action_counts ?? {}).some(([action, count]) => actions.has(action as ActionType) && count > 0)
+}
+
+function getActivityReviewRecordTraceActionGroup(record: ActivityReviewRecord): ActivityActionGroup | '' {
+  if (activityReviewRecordHasAction(record, ACTIVITY_SHARE_ACTIONS)) {
+    return 'share'
+  }
+  if (activityReviewRecordHasAction(record, ACTIVITY_REVIEW_ACTIONS)) {
+    return 'risk'
+  }
+  return ''
+}
+
+function activityReviewRecordHasRecoveryFollowUp(record: ActivityReviewRecord): boolean {
+  return activityReviewRecordHasAction(record, ACTIVITY_RECOVERY_FOLLOW_UP_ACTIONS)
 }
 
 // Format relative time
@@ -302,6 +521,755 @@ function getActivityActionLabel(action: string): string {
   return ACTIVITY_ACTIONS.includes(action as ActionType) ? getActionLabel(action as ActionType) : '未知操作'
 }
 
+function hasActivityWarningDetails(entry: ActivityEntry): boolean {
+  return Object.entries(entry.details ?? {}).some(([key, value]) => (
+    ACTIVITY_WARNING_DETAIL_KEYS.has(key) && value === 'true'
+  ))
+}
+
+function shouldReviewActivityEntry(entry: ActivityEntry): boolean {
+  return ACTIVITY_REVIEW_ACTIONS.has(entry.action) || hasActivityWarningDetails(entry)
+}
+
+function getActivityReviewReasons(entry: ActivityEntry): string[] {
+  const reasons: string[] = []
+  if (ACTIVITY_DESTRUCTIVE_ACTIONS.has(entry.action)) {
+    reasons.push('删除或清空')
+  }
+  if (entry.action === 'rename' || entry.action === 'move') {
+    reasons.push('路径变更')
+  }
+  if (ACTIVITY_SHARE_ACTIONS.has(entry.action)) {
+    reasons.push('分享变更')
+  }
+  if (ACTIVITY_RESTORE_ACTIONS.has(entry.action)) {
+    reasons.push('恢复变更')
+  }
+  if (hasActivityWarningDetails(entry)) {
+    reasons.push('执行警告')
+  }
+  return reasons.length > 0 ? reasons : ['需要复核']
+}
+
+function getUniqueActivityReviewValues(entries: ActivityEntry[], selector: (entry: ActivityEntry) => string | undefined): string[] {
+  return Array.from(new Set(entries.map(selector).filter((value): value is string => Boolean(value && value.trim()))))
+}
+
+function getActivityReviewActionCounts(entries: ActivityEntry[]): ActivityActionCountMap {
+  return entries.reduce<ActivityActionCountMap>((counts, entry) => {
+    counts[entry.action] = (counts[entry.action] ?? 0) + 1
+    return counts
+  }, {})
+}
+
+function buildActivityReviewRecordInput({
+  reviewEntries,
+  totalEntries,
+  note,
+  scopeLabel,
+  filterSummary,
+  dispositionStatus,
+}: {
+  reviewEntries: ActivityEntry[]
+  totalEntries: number
+  note: string
+  scopeLabel: string
+  filterSummary: string
+  dispositionStatus: ActivityReviewDispositionStatus
+}): ActivityReviewRecordCreateInput {
+  const paths = getUniqueActivityReviewValues(reviewEntries, (entry) => entry.path)
+  const users = getUniqueActivityReviewValues(reviewEntries, (entry) => entry.user)
+  return {
+    note,
+    scope_label: scopeLabel,
+    filter_summary: filterSummary,
+    disposition_status: dispositionStatus,
+    action_counts: getActivityReviewActionCounts(reviewEntries),
+    review_count: reviewEntries.length,
+    total_count: totalEntries,
+    path_count: paths.length,
+    user_count: users.length,
+    path_samples: paths.slice(0, 10),
+    user_samples: users.slice(0, 10),
+    activity_entry_ids: reviewEntries.map((entry) => entry.id),
+  }
+}
+
+function formatActivityReviewActionCounts(actionCounts?: ActivityActionCountMap): string {
+  const labels = ACTIVITY_ACTIONS
+    .map((action) => ({ action, count: actionCounts?.[action] ?? 0 }))
+    .filter(({ count }) => count > 0)
+    .map(({ action, count }) => `${getActionLabel(action)} ${count}`)
+
+  if (labels.length === 0) {
+    return ''
+  }
+  if (labels.length <= 4) {
+    return labels.join(' · ')
+  }
+  return `${labels.slice(0, 4).join(' · ')} · +${labels.length - 4}`
+}
+
+function formatActivityReviewActionCountsForExport(actionCounts?: ActivityActionCountMap): string {
+  return ACTIVITY_ACTIONS
+    .map((action) => ({ action, count: actionCounts?.[action] ?? 0 }))
+    .filter(({ count }) => count > 0)
+    .map(({ action, count }) => `${getActionLabel(action)} ${count}`)
+    .join('; ')
+}
+
+function csvCell(value: string | number | undefined): string {
+  const text = String(value ?? '')
+  return `"${text.replaceAll('"', '""')}"`
+}
+
+function buildActivityReviewRecordsCSV(records: ActivityReviewRecord[]): string {
+  const headers = [
+    '复核时间',
+    '复核人',
+    '处置状态',
+    '结论',
+    '范围',
+    '筛选条件',
+    '待处置记录',
+    '总记录',
+    '路径数',
+    '用户数',
+    '操作统计',
+    '路径样例',
+    '用户样例',
+    '活动记录ID',
+  ]
+  const rows = records.map((record) => [
+    record.reviewed_at,
+    record.reviewer,
+    getActivityReviewDispositionStatusLabel(record.disposition_status),
+    record.note,
+    record.scope_label,
+    record.filter_summary || '未筛选',
+    record.review_count,
+    record.total_count,
+    record.path_count,
+    record.user_count,
+    formatActivityReviewActionCountsForExport(record.action_counts),
+    record.path_samples?.join('; ') ?? '',
+    record.user_samples?.join('; ') ?? '',
+    record.activity_entry_ids.join('; '),
+  ])
+  return [
+    headers.map(csvCell).join(','),
+    ...rows.map((row) => row.map(csvCell).join(',')),
+  ].join('\n')
+}
+
+function activityReviewExportFilename(now = new Date()): string {
+  return `mnemonas-activity-review-records-${toRFC3339Seconds(now).replaceAll(':', '-')}.csv`
+}
+
+function getActivityReviewDispositionItems(entries: ActivityEntry[]): string[] {
+  const paths = getUniqueActivityReviewValues(entries, (entry) => entry.path)
+  const users = getUniqueActivityReviewValues(entries, (entry) => entry.user)
+  const hasDestructive = entries.some((entry) => ACTIVITY_DESTRUCTIVE_ACTIONS.has(entry.action))
+  const hasPathChange = entries.some((entry) => entry.action === 'rename' || entry.action === 'move')
+  const hasShare = entries.some((entry) => ACTIVITY_SHARE_ACTIONS.has(entry.action))
+  const hasRestore = entries.some((entry) => ACTIVITY_RESTORE_ACTIONS.has(entry.action))
+  const hasWarning = entries.some(hasActivityWarningDetails)
+
+  const items = [
+    `确认影响范围: ${entries.length} 条记录，涉及 ${paths.length || 0} 个路径、${users.length || 0} 个用户。`,
+  ]
+
+  if (hasDestructive) {
+    items.push('删除类操作: 检查回收站、版本历史和最近备份，确认是否需要恢复。')
+  }
+  if (hasPathChange) {
+    items.push('路径变更: 核对来源和目标路径，确认移动或重命名是否符合预期。')
+  }
+  if (hasShare) {
+    items.push('分享变更: 核对分享链接、密码、有效期和访问次数，关闭不再需要的公开链接。')
+  }
+  if (hasRestore) {
+    items.push('恢复变更: 检查恢复后的文件、权限和相关分享/收藏状态。')
+  }
+  if (hasWarning) {
+    items.push('带警告记录: 先处理持久化或清理警告，再把本次复核标记为完成。')
+  }
+
+  items.push('记录处置结论: 在团队工单或运维记录中写明复核人、处理结果和时间。')
+  return items
+}
+
+function ActivityReviewDetails({
+  entries,
+  isFiltered,
+  reviewWindow,
+}: {
+  entries: ActivityEntry[]
+  isFiltered: boolean
+  reviewWindow: ActivityReviewWindow | null
+}) {
+  const reviewEntries = entries.filter(shouldReviewActivityEntry)
+  if (reviewEntries.length === 0) {
+    return null
+  }
+
+  const visibleEntries = reviewEntries.slice(0, 5)
+  const destructiveCount = reviewEntries.filter((entry) => ACTIVITY_DESTRUCTIVE_ACTIONS.has(entry.action)).length
+  const shareCount = reviewEntries.filter((entry) => ACTIVITY_SHARE_ACTIONS.has(entry.action)).length
+  const warningCount = reviewEntries.filter(hasActivityWarningDetails).length
+  const scopeLabel = getActivityReviewScopeLabel(isFiltered, reviewWindow)
+  const dispositionItems = getActivityReviewDispositionItems(reviewEntries)
+
+  return (
+    <div aria-label="当前页复核明细" className="rounded-lg border border-warning/20 bg-warning/10 px-4 py-3 text-sm">
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2 font-medium text-warning">
+            <AlertCircle size={16} />
+            <span>当前页复核明细</span>
+          </div>
+          <p className="mt-1 text-xs text-warning/80">
+            {scopeLabel}包含 {reviewEntries.length} 条需复核记录
+          </p>
+        </div>
+        <div className="grid grid-cols-3 gap-3 text-right text-xs text-warning/80 sm:min-w-[18rem]">
+          <div>
+            <div className="text-base font-semibold text-warning">{destructiveCount}</div>
+            <div>删除类</div>
+          </div>
+          <div>
+            <div className="text-base font-semibold text-warning">{shareCount}</div>
+            <div>分享类</div>
+          </div>
+          <div>
+            <div className="text-base font-semibold text-warning">{warningCount}</div>
+            <div>带警告</div>
+          </div>
+        </div>
+      </div>
+
+      <div className="mt-3 divide-y divide-warning/20">
+        {visibleEntries.map((entry) => {
+          const details = getActivityDetailEntries(entry.action, entry.details ?? {}).slice(0, 2)
+          return (
+            <div key={entry.id} className="grid gap-2 py-2 first:pt-0 last:pb-0 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-start">
+              <div className="min-w-0">
+                <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+                  <span className="font-medium text-foreground">{getActionLabel(entry.action)}</span>
+                  <span className="text-xs text-warning/80">{getActivityReviewReasons(entry).join(' · ')}</span>
+                </div>
+                <div className="mt-1 truncate text-xs text-default-600" title={entry.path || undefined}>
+                  路径: {entry.path || '全局操作'}
+                </div>
+                {details.length > 0 && (
+                  <div className="mt-1 flex min-w-0 flex-wrap gap-x-3 gap-y-1 text-xs text-default-500">
+                    {details.map((detail) => (
+                      <span key={detail.key} className="min-w-0 truncate">复核: {detail.label}: {detail.value}</span>
+                    ))}
+                  </div>
+                )}
+              </div>
+              <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-xs text-default-500 sm:justify-end">
+                {entry.user && (
+                  <span className="truncate">{entry.user}</span>
+                )}
+                <span className="shrink-0">{formatRelativeTime(entry.timestamp)}</span>
+              </div>
+            </div>
+          )
+        })}
+      </div>
+      {reviewEntries.length > visibleEntries.length && (
+        <div className="mt-2 text-xs text-warning/80">
+          还有 {reviewEntries.length - visibleEntries.length} 条需在下方列表继续复核
+        </div>
+      )}
+
+      <div aria-label="复核处置清单" className="mt-3 rounded-lg border border-warning/20 bg-content1/70 px-3 py-2">
+        <div className="flex items-center gap-2 text-xs font-medium text-warning">
+          <ListChecks size={14} />
+          <span>复核处置清单</span>
+        </div>
+        <ol className="mt-2 list-decimal space-y-1 pl-5 text-xs leading-5 text-default-600">
+          {dispositionItems.map((item) => (
+            <li key={item}>{item}</li>
+          ))}
+        </ol>
+      </div>
+    </div>
+  )
+}
+
+function ActivityReviewDispositionRecorder({
+  entries,
+  totalEntries,
+  isFiltered,
+  reviewWindow,
+  records,
+  recordsError,
+  followUpRecords,
+  followUpTotal,
+  followUpRecordsError,
+  reviewReviewerFilter,
+  reviewTimeRangeFilter,
+  reviewDispositionStatusFilter,
+  reviewDispositionStatus,
+  note,
+  onNoteChange,
+  onReviewReviewerFilterChange,
+  onReviewTimeRangeFilterChange,
+  onReviewDispositionStatusFilterChange,
+  onReviewDispositionStatusChange,
+  onClearReviewRecordFilters,
+  onExportReviewRecords,
+  onShowFollowUpRecords,
+  onTraceReviewRecord,
+  onOpenReviewRecordVersions,
+  onOpenReviewRecordTrash,
+  onOpenReviewRecordShares,
+  onUpdateReviewRecordDisposition,
+  onRecord,
+  onRecordFiltered,
+  isRecording,
+  isExportingReviewRecords,
+  updatingReviewRecordID,
+}: {
+  entries: ActivityEntry[]
+  totalEntries: number
+  isFiltered: boolean
+  reviewWindow: ActivityReviewWindow | null
+  records: ActivityReviewRecord[]
+  recordsError: unknown
+  followUpRecords: ActivityReviewRecord[]
+  followUpTotal: number
+  followUpRecordsError: unknown
+  reviewReviewerFilter: string
+  reviewTimeRangeFilter: ActivityTimeRangeKey
+  reviewDispositionStatusFilter: ActivityReviewDispositionFilterKey
+  reviewDispositionStatus: ActivityReviewDispositionStatus
+  note: string
+  onNoteChange: (value: string) => void
+  onReviewReviewerFilterChange: (value: string) => void
+  onReviewTimeRangeFilterChange: (value: string | undefined) => void
+  onReviewDispositionStatusFilterChange: (value: string | undefined) => void
+  onReviewDispositionStatusChange: (value: string | undefined) => void
+  onClearReviewRecordFilters: () => void
+  onExportReviewRecords: () => void
+  onShowFollowUpRecords: () => void
+  onTraceReviewRecord: (record: ActivityReviewRecord) => void
+  onOpenReviewRecordVersions: (record: ActivityReviewRecord) => void
+  onOpenReviewRecordTrash: (record: ActivityReviewRecord) => void
+  onOpenReviewRecordShares: (record: ActivityReviewRecord) => void
+  onUpdateReviewRecordDisposition: (record: ActivityReviewRecord, dispositionStatus: ActivityReviewDispositionStatus, note?: string) => void
+  onRecord: () => void
+  onRecordFiltered: () => void
+  isRecording: boolean
+  isExportingReviewRecords: boolean
+  updatingReviewRecordID: string | null
+}) {
+  const [reviewRecordDispositionNotes, setReviewRecordDispositionNotes] = useState<Record<string, string>>({})
+  const reviewEntries = entries.filter(shouldReviewActivityEntry)
+  if (reviewEntries.length === 0 && records.length === 0 && !recordsError && totalEntries <= entries.length) {
+    return null
+  }
+
+  const paths = getUniqueActivityReviewValues(reviewEntries, (entry) => entry.path)
+  const users = getUniqueActivityReviewValues(reviewEntries, (entry) => entry.user)
+  const scopeLabel = getActivityReviewScopeLabel(isFiltered, reviewWindow)
+  const trimmedNote = note.trim()
+  const hasRecordFilters = Boolean(reviewReviewerFilter.trim() || reviewTimeRangeFilter !== 'all' || reviewDispositionStatusFilter !== 'all')
+  const hasFollowUpRecords = followUpTotal > 0 || followUpRecords.length > 0
+  const hiddenFollowUpRecords = Math.max(followUpTotal - followUpRecords.length, 0)
+  const getReviewRecordDispositionNote = (record: ActivityReviewRecord): string => reviewRecordDispositionNotes[record.id] ?? ''
+  const getReviewRecordDispositionUpdateNote = (record: ActivityReviewRecord): string | undefined => {
+    const noteValue = getReviewRecordDispositionNote(record).trim()
+    return noteValue || undefined
+  }
+  const setReviewRecordDispositionNote = (record: ActivityReviewRecord, value: string) => {
+    setReviewRecordDispositionNotes((current) => ({
+      ...current,
+      [record.id]: value,
+    }))
+  }
+  const renderReviewRecordActions = (record: ActivityReviewRecord) => {
+    const isUpdating = updatingReviewRecordID === record.id
+    const isFollowUp = (record.disposition_status ?? 'documented') === 'needs_follow_up'
+    const dispositionNote = getReviewRecordDispositionNote(record)
+
+    return (
+      <>
+        <Button
+          size="sm"
+          variant="light"
+          className="h-7 rounded-lg px-2"
+          startContent={<Search size={13} />}
+          onPress={() => onTraceReviewRecord(record)}
+        >
+          追踪活动
+        </Button>
+        {getActivityReviewRecordPrimaryPath(record) && activityReviewRecordHasRecoveryFollowUp(record) && (
+          <>
+            <Button
+              size="sm"
+              variant="light"
+              className="h-7 rounded-lg px-2"
+              startContent={<RotateCcw size={13} />}
+              onPress={() => onOpenReviewRecordVersions(record)}
+            >
+              查看版本
+            </Button>
+            <Button
+              size="sm"
+              variant="light"
+              className="h-7 rounded-lg px-2"
+              startContent={<Trash2 size={13} />}
+              onPress={() => onOpenReviewRecordTrash(record)}
+            >
+              查回收站
+            </Button>
+          </>
+        )}
+        {getActivityReviewRecordPrimaryPath(record) && activityReviewRecordHasAction(record, ACTIVITY_SHARE_ACTIONS) && (
+          <Button
+            size="sm"
+            variant="light"
+            className="h-7 rounded-lg px-2"
+            startContent={<Share2 size={13} />}
+            onPress={() => onOpenReviewRecordShares(record)}
+          >
+            处理分享
+          </Button>
+        )}
+        {isFollowUp && (
+          <div className="mt-1 flex basis-full flex-col gap-1">
+            <textarea
+              aria-label={`复核记录处置备注 ${record.id}`}
+              className="min-h-9 w-full resize-y rounded-lg border border-divider bg-content2 px-2 py-1 text-xs text-foreground outline-none transition-colors placeholder:text-default-400 focus:border-primary"
+              maxLength={300}
+              placeholder="补充处置备注（可选）"
+              value={dispositionNote}
+              disabled={isUpdating}
+              onChange={(event) => setReviewRecordDispositionNote(record, event.target.value)}
+            />
+            <div className="flex flex-wrap gap-1">
+              <Button
+                size="sm"
+                variant="flat"
+                className="h-7 rounded-lg px-2"
+                isLoading={isUpdating}
+                isDisabled={isUpdating}
+                onPress={() => onUpdateReviewRecordDisposition(record, 'confirmed', getReviewRecordDispositionUpdateNote(record))}
+              >
+                确认保留
+              </Button>
+              <Button
+                size="sm"
+                variant="flat"
+                className="h-7 rounded-lg px-2"
+                isLoading={isUpdating}
+                isDisabled={isUpdating}
+                onPress={() => onUpdateReviewRecordDisposition(record, 'restored', getReviewRecordDispositionUpdateNote(record))}
+              >
+                标记已恢复
+              </Button>
+              <Button
+                size="sm"
+                variant="flat"
+                className="h-7 rounded-lg px-2"
+                isLoading={isUpdating}
+                isDisabled={isUpdating}
+                onPress={() => onUpdateReviewRecordDisposition(record, 'disabled', getReviewRecordDispositionUpdateNote(record))}
+              >
+                标记已禁用
+              </Button>
+            </div>
+          </div>
+        )}
+      </>
+    )
+  }
+
+  return (
+    <div aria-label="活动复核记录" className="rounded-lg border border-divider bg-content1 px-4 py-3 text-sm">
+      <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2 font-medium text-foreground">
+            <ClipboardCheck size={16} />
+            <span>活动复核记录</span>
+          </div>
+          <div className="mt-2 grid gap-2 text-xs text-default-600 sm:grid-cols-4">
+            <div>
+              <div className="text-base font-semibold text-foreground">{reviewEntries.length}</div>
+              <div>待处置记录</div>
+            </div>
+            <div>
+              <div className="text-base font-semibold text-foreground">{paths.length}</div>
+              <div>涉及路径</div>
+            </div>
+            <div>
+              <div className="text-base font-semibold text-foreground">{users.length}</div>
+              <div>涉及用户</div>
+            </div>
+            <div>
+              <div className="text-base font-semibold text-foreground">{totalEntries}</div>
+              <div>{scopeLabel}总数</div>
+            </div>
+          </div>
+        </div>
+
+        <div className="w-full min-w-0 lg:max-w-xl">
+          <Select
+            placeholder="处置状态"
+            size="sm"
+            className="mb-2 w-full sm:w-40"
+            aria-label="复核处置状态"
+            selectedKeys={[reviewDispositionStatus]}
+            onSelectionChange={(keys) => {
+              onReviewDispositionStatusChange(Array.from(keys)[0]?.toString())
+            }}
+            startContent={<ListChecks size={14} />}
+          >
+            {ACTIVITY_REVIEW_DISPOSITION_OPTIONS.map((option) => (
+              <SelectItem key={option.key}>
+                {option.label}
+              </SelectItem>
+            ))}
+          </Select>
+          <textarea
+            aria-label="复核处置结论"
+            className="min-h-20 w-full resize-y rounded-lg border border-divider bg-content2 px-3 py-2 text-sm text-foreground outline-none transition-colors placeholder:text-default-400 focus:border-primary"
+            maxLength={300}
+            placeholder="填写本页复核结论"
+            value={note}
+            onChange={(event) => onNoteChange(event.target.value)}
+          />
+          <div className="mt-2 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <span className="text-xs text-default-500">{trimmedNote.length}/300</span>
+            <div className="flex flex-col gap-2 sm:flex-row sm:justify-end">
+              <Button
+                size="sm"
+                variant="flat"
+                className="h-8 rounded-lg"
+                startContent={<ListChecks size={14} />}
+                isDisabled={totalEntries === 0 || trimmedNote.length === 0 || isRecording}
+                isLoading={isRecording}
+                onPress={onRecordFiltered}
+              >
+                记录当前筛选复核
+              </Button>
+              <Button
+                size="sm"
+                color="primary"
+                className="h-8 rounded-lg"
+                startContent={<ClipboardCheck size={14} />}
+                isDisabled={reviewEntries.length === 0 || trimmedNote.length === 0 || isRecording}
+                isLoading={isRecording}
+                onPress={onRecord}
+              >
+                记录本页复核
+              </Button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {Boolean(recordsError) && (
+        <div className="mt-3 rounded-lg border border-warning/20 bg-warning/10 px-3 py-2 text-xs text-warning">
+          复核历史暂不可用，当前页仍可继续查看和筛选。
+        </div>
+      )}
+
+      {(hasFollowUpRecords || Boolean(followUpRecordsError)) && (
+        <div aria-label="需跟进复核批量视图" className="mt-3 rounded-lg border border-warning/25 bg-warning/10 px-3 py-2">
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+            <div className="min-w-0">
+              <div className="flex items-center gap-2 text-xs font-medium text-warning">
+                <ListChecks size={14} />
+                <span>需跟进复核</span>
+              </div>
+              <div className="mt-1 text-xs text-warning/80">
+                {followUpRecordsError ? '需跟进复核暂不可用' : `当前还有 ${followUpTotal} 条复核记录需跟进`}
+              </div>
+            </div>
+            {hasFollowUpRecords && (
+              <Button
+                size="sm"
+                variant="flat"
+                color="warning"
+                className="h-8 rounded-lg px-2"
+                startContent={<ListChecks size={14} />}
+                onPress={onShowFollowUpRecords}
+              >
+                查看需跟进
+              </Button>
+            )}
+          </div>
+
+          {followUpRecords.length > 0 && (
+            <div className="mt-2 grid gap-2 lg:grid-cols-3">
+              {followUpRecords.map((record) => (
+                <div key={record.id} className="min-w-0 rounded-lg border border-warning/20 bg-content1/80 px-3 py-2">
+                  <div className="truncate text-xs font-medium text-foreground" title={record.note}>
+                    {record.note}
+                  </div>
+                  <div className="mt-1 text-xs text-default-500">
+                    {record.scope_label}: {record.review_count} 条待处置 / {record.total_count} 条总记录
+                  </div>
+                  {record.path_samples && record.path_samples.length > 0 && (
+                    <div className="mt-1 truncate text-xs text-default-500" title={record.path_samples.join(', ')}>
+                      路径样例: {record.path_samples.join(', ')}
+                    </div>
+                  )}
+                  <div className="mt-1 flex items-center justify-between gap-2 text-xs text-default-500">
+                    <span className="truncate">{record.reviewer}</span>
+                    <span>{formatRelativeTime(record.reviewed_at)}</span>
+                  </div>
+                  <div className="mt-2 flex flex-wrap gap-1">
+                    {renderReviewRecordActions(record)}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {hiddenFollowUpRecords > 0 && (
+            <div className="mt-2 text-xs text-warning/80">
+              其余 {hiddenFollowUpRecords} 条未在此处展开
+            </div>
+          )}
+        </div>
+      )}
+
+      <div aria-label="复核历史筛选" className="mt-3 flex flex-col gap-2 rounded-lg border border-divider bg-content2/60 px-3 py-2 sm:flex-row sm:items-start sm:justify-between">
+        <div className="flex min-w-0 flex-col gap-2 sm:flex-row sm:items-start">
+          <Input
+            aria-label="按复核人筛选"
+            placeholder="按复核人筛选"
+            size="sm"
+            className="w-full sm:w-40"
+            value={reviewReviewerFilter}
+            onValueChange={onReviewReviewerFilterChange}
+            startContent={<User size={14} />}
+          />
+          <Select
+            placeholder="复核时间"
+            size="sm"
+            className="w-full sm:w-36"
+            aria-label="筛选复核时间"
+            selectedKeys={[reviewTimeRangeFilter]}
+            onSelectionChange={(keys) => {
+              onReviewTimeRangeFilterChange(Array.from(keys)[0]?.toString())
+            }}
+            startContent={<CalendarDays size={14} />}
+          >
+            {ACTIVITY_TIME_RANGES.map((range) => (
+              <SelectItem key={range.key}>
+                {range.label}
+              </SelectItem>
+            ))}
+          </Select>
+          <Select
+            placeholder="历史处置"
+            size="sm"
+            className="w-full sm:w-36"
+            aria-label="筛选复核处置状态"
+            selectedKeys={[reviewDispositionStatusFilter]}
+            onSelectionChange={(keys) => {
+              onReviewDispositionStatusFilterChange(Array.from(keys)[0]?.toString())
+            }}
+            startContent={<ListChecks size={14} />}
+          >
+            {ACTIVITY_REVIEW_DISPOSITION_FILTER_OPTIONS.map((option) => (
+              <SelectItem key={option.key}>
+                {option.label}
+              </SelectItem>
+            ))}
+          </Select>
+        </div>
+        <div className="flex flex-col gap-2 sm:flex-row sm:justify-end">
+          <Button
+            size="sm"
+            variant="flat"
+            color="warning"
+            className="h-8 rounded-lg px-2"
+            startContent={<ListChecks size={14} />}
+            isDisabled={reviewDispositionStatusFilter === 'needs_follow_up'}
+            onPress={onShowFollowUpRecords}
+          >
+            只看需跟进
+          </Button>
+          <Button
+            size="sm"
+            variant="flat"
+            className="h-8 rounded-lg px-2"
+            startContent={<Download size={14} />}
+            isLoading={isExportingReviewRecords}
+            isDisabled={isExportingReviewRecords}
+            onPress={onExportReviewRecords}
+          >
+            导出复核记录
+          </Button>
+          <Button
+            size="sm"
+            variant="light"
+            className="h-8 rounded-lg px-2 text-default-500"
+            startContent={<X size={14} />}
+            isDisabled={!hasRecordFilters}
+            onPress={onClearReviewRecordFilters}
+          >
+            清除复核筛选
+          </Button>
+        </div>
+      </div>
+
+      {records.length > 0 && (
+        <div className="mt-3 divide-y divide-divider rounded-lg border border-divider">
+          {records.map((record) => (
+            <div key={record.id} className="grid gap-2 px-3 py-2 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-start">
+              <div className="min-w-0">
+                <div className="flex min-w-0 flex-wrap items-center gap-2">
+                  <span className="min-w-0 font-medium text-foreground">{record.note}</span>
+                  <Chip size="sm" variant="flat" color={record.disposition_status === 'needs_follow_up' ? 'warning' : 'primary'}>
+                    {getActivityReviewDispositionStatusLabel(record.disposition_status)}
+                  </Chip>
+                </div>
+                <div className="mt-1 text-xs text-default-500">
+                  {record.scope_label}: {record.review_count} 条待处置 / {record.total_count} 条总记录 · {record.path_count} 个路径 · {record.user_count} 个用户
+                </div>
+                {record.action_counts && (
+                  <div className="mt-1 truncate text-xs text-default-500" title={formatActivityReviewActionCounts(record.action_counts)}>
+                    类型: {formatActivityReviewActionCounts(record.action_counts)}
+                  </div>
+                )}
+                {record.path_samples && record.path_samples.length > 0 && (
+                  <div className="mt-1 truncate text-xs text-default-500" title={record.path_samples.join(', ')}>
+                    路径样例: {record.path_samples.join(', ')}
+                  </div>
+                )}
+                {record.user_samples && record.user_samples.length > 0 && (
+                  <div className="mt-1 truncate text-xs text-default-500" title={record.user_samples.join(', ')}>
+                    用户样例: {record.user_samples.join(', ')}
+                  </div>
+                )}
+                <div className="mt-1 truncate text-xs text-default-500" title={record.filter_summary || '未筛选'}>
+                  条件: {record.filter_summary || '未筛选'}
+                </div>
+              </div>
+              <div className="text-xs text-default-500 sm:text-right">
+                <div>{record.reviewer}</div>
+                <div>{formatRelativeTime(record.reviewed_at)}</div>
+                <div className="mt-2 flex flex-wrap gap-1 sm:justify-end">
+                  {renderReviewRecordActions(record)}
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function ActivityStatsOverview({ stats, error, isFiltered }: { stats?: ActivityStats; error: unknown; isFiltered: boolean }) {
   if (error) {
     return (
@@ -424,14 +1392,24 @@ function ActivityRiskInsight({
 }
 
 export function ActivityPage() {
+  const location = useLocation()
+  const navigate = useNavigate()
+  const [initialURLFilters] = useState(() => parseActivityURLFilters(location.search))
   const [page, setPage] = useState(1)
-  const [actionFilter, setActionFilter] = useState<ActionType | ''>('')
-  const [actionGroupFilter, setActionGroupFilter] = useState<ActivityActionGroup | ''>('')
-  const [timeRangeFilter, setTimeRangeFilter] = useState<ActivityTimeRangeKey>('all')
+  const [actionFilter, setActionFilter] = useState<ActionType | ''>(initialURLFilters.actionFilter)
+  const [actionGroupFilter, setActionGroupFilter] = useState<ActivityActionGroup | ''>(initialURLFilters.actionGroupFilter)
+  const [timeRangeFilter, setTimeRangeFilter] = useState<ActivityTimeRangeKey>(initialURLFilters.timeRangeFilter)
   const [reviewWindowFilter, setReviewWindowFilter] = useState<ActivityReviewWindow | null>(null)
-  const [pathFilter, setPathFilter] = useState('')
-  const [userFilter, setUserFilter] = useState('')
+  const [pathFilter, setPathFilter] = useState(initialURLFilters.pathFilter)
+  const [userFilter, setUserFilter] = useState(initialURLFilters.userFilter)
   const [isClearConfirmOpen, setIsClearConfirmOpen] = useState(false)
+  const [reviewDispositionNote, setReviewDispositionNote] = useState('')
+  const [reviewDispositionStatus, setReviewDispositionStatus] = useState<ActivityReviewDispositionStatus>('documented')
+  const [reviewRecordReviewerFilter, setReviewRecordReviewerFilter] = useState('')
+  const [reviewRecordTimeRangeFilter, setReviewRecordTimeRangeFilter] = useState<ActivityTimeRangeKey>('all')
+  const [reviewRecordDispositionStatusFilter, setReviewRecordDispositionStatusFilter] = useState<ActivityReviewDispositionFilterKey>('all')
+  const [isRecordingFilteredReview, setIsRecordingFilteredReview] = useState(false)
+  const [isExportingReviewRecords, setIsExportingReviewRecords] = useState(false)
   const pageSize = 20
   const user = useUser()
   const isAdmin = useIsAdmin()
@@ -441,10 +1419,23 @@ export function ActivityPage() {
   const queryClient = useQueryClient()
   const clearActivityAbortControllerRef = useRef<AbortController | null>(null)
   const normalizedUserFilter = isAdmin ? userFilter.trim() : ''
+  const normalizedReviewRecordReviewerFilter = isAdmin ? reviewRecordReviewerFilter.trim() : ''
+  const normalizedReviewRecordDispositionStatusFilter = isAdmin && reviewRecordDispositionStatusFilter !== 'all'
+    ? reviewRecordDispositionStatusFilter
+    : undefined
   const pathFilterState = useMemo(() => parseActivityPathFilter(pathFilter), [pathFilter])
   const normalizedPathFilter = pathFilterState.normalizedPath
   const pathFilterErrorMessage = pathFilterState.errorMessage
   const timeRangeSinceFilter = useMemo(() => getActivityTimeRangeSince(timeRangeFilter), [timeRangeFilter])
+  const reviewRecordSinceFilter = useMemo(() => getActivityTimeRangeSince(reviewRecordTimeRangeFilter), [reviewRecordTimeRangeFilter])
+  const activityReviewRecordsQueryKey = useMemo(
+    () => ['activity-review-records', authScopeKey, normalizedReviewRecordReviewerFilter, normalizedReviewRecordDispositionStatusFilter, reviewRecordSinceFilter] as const,
+    [authScopeKey, normalizedReviewRecordReviewerFilter, normalizedReviewRecordDispositionStatusFilter, reviewRecordSinceFilter],
+  )
+  const activityReviewFollowUpRecordsQueryKey = useMemo(
+    () => ['activity-review-follow-up-records', authScopeKey] as const,
+    [authScopeKey],
+  )
   const sinceFilter = reviewWindowFilter?.since ?? timeRangeSinceFilter
   const untilFilter = reviewWindowFilter?.until
   const hasActiveFilters = Boolean(actionFilter || actionGroupFilter || normalizedPathFilter || normalizedUserFilter || timeRangeFilter !== 'all' || reviewWindowFilter)
@@ -479,11 +1470,41 @@ export function ActivityPage() {
     enabled: !hasInvalidHomeDir && !pathFilterErrorMessage,
   })
 
+  const { data: reviewDispositionRecordsData, error: reviewDispositionRecordsError } = useQuery({
+    queryKey: activityReviewRecordsQueryKey,
+    queryFn: ({ signal }) => listActivityReviewRecords({
+      limit: 5,
+      reviewer: normalizedReviewRecordReviewerFilter || undefined,
+      dispositionStatus: normalizedReviewRecordDispositionStatusFilter,
+      since: reviewRecordSinceFilter,
+      signal,
+    }),
+    enabled: isAdmin && !hasInvalidHomeDir,
+  })
+
+  const { data: reviewFollowUpRecordsData, error: reviewFollowUpRecordsError } = useQuery({
+    queryKey: activityReviewFollowUpRecordsQueryKey,
+    queryFn: ({ signal }) => listActivityReviewRecords({
+      limit: ACTIVITY_REVIEW_FOLLOW_UP_LIMIT,
+      dispositionStatus: 'needs_follow_up',
+      signal,
+    }),
+    enabled: isAdmin && !hasInvalidHomeDir,
+  })
+
   const totalPages = useMemo(() => {
     if (!data?.total) return 1
     return Math.ceil(data.total / pageSize)
   }, [data?.total])
   const errorState = getActivityErrorState(error)
+  const entries = pathFilterErrorMessage ? [] : (data?.items ?? [])
+  const totalEntries = pathFilterErrorMessage ? 0 : (data?.total ?? entries.length)
+  const reviewDispositionRecords = reviewDispositionRecordsData?.items ?? []
+  const rawReviewFollowUpRecords = reviewFollowUpRecordsData?.items ?? []
+  const reviewFollowUpRecords = rawReviewFollowUpRecords.filter((record) => (record.disposition_status ?? 'documented') === 'needs_follow_up')
+  const reviewFollowUpTotal = rawReviewFollowUpRecords.length === reviewFollowUpRecords.length
+    ? (reviewFollowUpRecordsData?.total ?? reviewFollowUpRecords.length)
+    : reviewFollowUpRecords.length
 
   const clearActivityMutation = useMutation({
     mutationFn: async ({ signal }: { signal: AbortSignal }) => clearActivity({ signal }),
@@ -510,6 +1531,75 @@ export function ActivityPage() {
       if (clearActivityAbortControllerRef.current?.signal === variables.signal) {
         clearActivityAbortControllerRef.current = null
       }
+    },
+  })
+
+  const activityReviewMutation = useMutation({
+    mutationFn: ({ input }: { input: ActivityReviewRecordCreateInput; successTitle: string }) => createActivityReviewRecord(input),
+    retry: false,
+    onSuccess: (record, variables) => {
+      if (activityReviewRecordMatchesFilters(record, normalizedReviewRecordReviewerFilter, reviewRecordSinceFilter, normalizedReviewRecordDispositionStatusFilter)) {
+        queryClient.setQueryData<ActivityReviewRecordListResponse>(activityReviewRecordsQueryKey, (current) => {
+          return prependActivityReviewRecord(current, record, 5)
+        })
+      }
+      if ((record.disposition_status ?? 'documented') === 'needs_follow_up') {
+        queryClient.setQueryData<ActivityReviewRecordListResponse>(activityReviewFollowUpRecordsQueryKey, (current) => {
+          return prependActivityReviewRecord(current, record, ACTIVITY_REVIEW_FOLLOW_UP_LIMIT)
+        })
+      }
+      setReviewDispositionNote('')
+      setReviewDispositionStatus('documented')
+      addToast({ title: variables.successTitle, color: 'success' })
+    },
+    onError: (mutationError: unknown) => {
+      addToast({
+        title: '记录复核失败',
+        description: getUserFacingErrorDescription(mutationError),
+        color: 'danger',
+      })
+    },
+  })
+
+  const activityReviewStatusMutation = useMutation({
+    mutationFn: ({ recordID, dispositionStatus, note }: { recordID: string; dispositionStatus: ActivityReviewDispositionStatus; note?: string }) => {
+      return updateActivityReviewRecordDisposition(recordID, {
+        disposition_status: dispositionStatus,
+        ...(note ? { note } : {}),
+      })
+    },
+    retry: false,
+    onSuccess: (record) => {
+      queryClient.setQueryData<ActivityReviewRecordListResponse>(activityReviewRecordsQueryKey, (current) => (
+        updateActivityReviewRecordList(
+          current,
+          record,
+          (candidate) => activityReviewRecordMatchesFilters(
+            candidate,
+            normalizedReviewRecordReviewerFilter,
+            reviewRecordSinceFilter,
+            normalizedReviewRecordDispositionStatusFilter,
+          ),
+        )
+      ))
+      queryClient.setQueryData<ActivityReviewRecordListResponse>(activityReviewFollowUpRecordsQueryKey, (current) => (
+        updateActivityReviewRecordList(
+          current,
+          record,
+          (candidate) => (candidate.disposition_status ?? 'documented') === 'needs_follow_up',
+        )
+      ))
+      addToast({
+        title: `复核状态已更新为${getActivityReviewDispositionStatusLabel(record.disposition_status)}`,
+        color: 'success',
+      })
+    },
+    onError: (mutationError: unknown) => {
+      addToast({
+        title: '更新复核状态失败',
+        description: getUserFacingErrorDescription(mutationError),
+        color: 'danger',
+      })
     },
   })
 
@@ -575,6 +1665,133 @@ export function ActivityPage() {
     setPage(1)
   }
 
+  const handleReviewRecordTimeRangeChange = (nextValue: string | undefined) => {
+    setReviewRecordTimeRangeFilter(isActivityTimeRangeKey(nextValue) ? nextValue : 'all')
+  }
+
+  const handleReviewRecordDispositionStatusFilterChange = (nextValue: string | undefined) => {
+    setReviewRecordDispositionStatusFilter(isActivityReviewDispositionFilterKey(nextValue) ? nextValue : 'all')
+  }
+
+  const handleReviewDispositionStatusChange = (nextValue: string | undefined) => {
+    if (isActivityReviewDispositionStatus(nextValue)) {
+      setReviewDispositionStatus(nextValue)
+    }
+  }
+
+  const handleClearReviewRecordFilters = () => {
+    setReviewRecordReviewerFilter('')
+    setReviewRecordTimeRangeFilter('all')
+    setReviewRecordDispositionStatusFilter('all')
+  }
+
+  const handleShowFollowUpReviewRecords = () => {
+    setReviewRecordReviewerFilter('')
+    setReviewRecordTimeRangeFilter('all')
+    setReviewRecordDispositionStatusFilter('needs_follow_up')
+  }
+
+  const handleTraceReviewRecordActivity = (record: ActivityReviewRecord) => {
+    const nextPathFilter = getActivityReviewRecordPrimaryPath(record)
+    const nextActionGroupFilter = getActivityReviewRecordTraceActionGroup(record)
+    if (!nextPathFilter && !nextActionGroupFilter) {
+      addToast({ title: '没有可追踪的活动线索', color: 'warning' })
+      return
+    }
+
+    setReviewWindowFilter(null)
+    setTimeRangeFilter('all')
+    setActionFilter('')
+    setActionGroupFilter(nextActionGroupFilter)
+    setPathFilter(nextPathFilter)
+    setUserFilter('')
+    setPage(1)
+    const traceDescription = nextPathFilter
+      ? `路径 ${nextPathFilter}${nextActionGroupFilter ? ` · 分组 ${getActivityActionGroupLabel(nextActionGroupFilter)}` : ''}`
+      : nextActionGroupFilter
+        ? `分组 ${getActivityActionGroupLabel(nextActionGroupFilter)}`
+        : undefined
+    addToast({
+      title: '已切换到相关活动筛选',
+      description: traceDescription,
+      color: 'success',
+    })
+  }
+
+  const handleOpenReviewRecordVersions = (record: ActivityReviewRecord) => {
+    const path = getActivityReviewRecordPrimaryPath(record)
+    if (!path) {
+      addToast({ title: '没有可查看版本的路径', color: 'warning' })
+      return
+    }
+    navigate(`/versions?path=${encodeURIComponent(path)}`)
+  }
+
+  const handleOpenReviewRecordTrash = (record: ActivityReviewRecord) => {
+    const path = getActivityReviewRecordPrimaryPath(record)
+    if (!path) {
+      addToast({ title: '没有可查询回收站的路径', color: 'warning' })
+      return
+    }
+    navigate(`/trash?path=${encodeURIComponent(path)}`)
+  }
+
+  const handleOpenReviewRecordShares = (record: ActivityReviewRecord) => {
+    const path = getActivityReviewRecordPrimaryPath(record)
+    if (!path) {
+      addToast({ title: '没有可处理分享的路径', color: 'warning' })
+      return
+    }
+
+    const params = new URLSearchParams({
+      tab: 'shares',
+      share_path: path,
+    })
+    navigate(`/settings?${params.toString()}`)
+  }
+
+  const handleUpdateReviewRecordDisposition = (record: ActivityReviewRecord, dispositionStatus: ActivityReviewDispositionStatus, note?: string) => {
+    if (activityReviewStatusMutation.isPending) {
+      return
+    }
+    activityReviewStatusMutation.mutate({ recordID: record.id, dispositionStatus, note })
+  }
+
+  const handleExportReviewRecords = async () => {
+    setIsExportingReviewRecords(true)
+    try {
+      const result = await listActivityReviewRecords({
+        limit: ACTIVITY_REVIEW_EXPORT_LIMIT,
+        offset: 0,
+        reviewer: normalizedReviewRecordReviewerFilter || undefined,
+        dispositionStatus: normalizedReviewRecordDispositionStatusFilter,
+        since: reviewRecordSinceFilter,
+      })
+      if (result.items.length === 0) {
+        addToast({ title: '没有可导出的复核记录', color: 'warning' })
+        return
+      }
+
+      const csv = `\uFEFF${buildActivityReviewRecordsCSV(result.items)}`
+      triggerBrowserDownload(new Blob([csv], { type: 'text/csv;charset=utf-8' }), activityReviewExportFilename())
+      addToast({
+        title: '复核记录已导出',
+        description: result.total > result.items.length
+          ? `已导出最近 ${result.items.length} 条，当前筛选共有 ${result.total} 条。`
+          : `已导出 ${result.items.length} 条复核记录。`,
+        color: 'success',
+      })
+    } catch (exportError) {
+      addToast({
+        title: '导出复核记录失败',
+        description: getUserFacingErrorDescription(exportError),
+        color: 'danger',
+      })
+    } finally {
+      setIsExportingReviewRecords(false)
+    }
+  }
+
   const handlePathFilterChange = (nextValue: string) => {
     setPathFilter(nextValue)
     setPage(1)
@@ -611,6 +1828,105 @@ export function ActivityPage() {
     setPathFilter('')
     setUserFilter('')
     setPage(1)
+  }
+
+  const handleRecordActivityReview = () => {
+    const reviewEntries = entries.filter(shouldReviewActivityEntry)
+    const note = reviewDispositionNote.trim()
+    if (reviewEntries.length === 0) {
+      addToast({ title: '当前页没有待处置记录', color: 'warning' })
+      return
+    }
+    if (!note) {
+      addToast({ title: '请输入复核处置结论', color: 'warning' })
+      return
+    }
+
+    activityReviewMutation.mutate({
+      input: buildActivityReviewRecordInput({
+        reviewEntries,
+        totalEntries,
+        note,
+        scopeLabel: getActivityReviewScopeLabel(hasActiveFilters, reviewWindowFilter),
+        filterSummary: getActivityReviewFilterSummary({
+          timeRangeFilter,
+          reviewWindow: reviewWindowFilter,
+          actionFilter,
+          actionGroupFilter,
+          pathFilter: normalizedPathFilter,
+          userFilter: normalizedUserFilter,
+        }),
+        dispositionStatus: reviewDispositionStatus,
+      }),
+      successTitle: '本页复核已记录',
+    })
+  }
+
+  const handleRecordFilteredActivityReview = async () => {
+    const note = reviewDispositionNote.trim()
+    if (!note) {
+      addToast({ title: '请输入复核处置结论', color: 'warning' })
+      return
+    }
+
+    setIsRecordingFilteredReview(true)
+    let createStarted = false
+    try {
+      const result = await listActivity({
+        limit: ACTIVITY_REVIEW_FILTERED_LIMIT,
+        offset: 0,
+        action: actionFilter || undefined,
+        actionGroup: actionGroupFilter || undefined,
+        path: normalizedPathFilter || undefined,
+        user: normalizedUserFilter || undefined,
+        since: sinceFilter,
+        until: untilFilter,
+      })
+      if (result.total > ACTIVITY_REVIEW_FILTERED_LIMIT) {
+        addToast({
+          title: '当前筛选范围过大',
+          description: `当前筛选包含 ${result.total} 条记录，请先缩小到 ${ACTIVITY_REVIEW_FILTERED_LIMIT} 条以内再记录复核。`,
+          color: 'warning',
+        })
+        return
+      }
+
+      const reviewEntries = result.items.filter(shouldReviewActivityEntry)
+      if (reviewEntries.length === 0) {
+        addToast({ title: '当前筛选没有待处置记录', color: 'warning' })
+        return
+      }
+
+      createStarted = true
+      await activityReviewMutation.mutateAsync({
+        input: buildActivityReviewRecordInput({
+          reviewEntries,
+          totalEntries: result.total,
+          note,
+          scopeLabel: getActivityReviewFilteredScopeLabel(hasActiveFilters, reviewWindowFilter),
+          filterSummary: getActivityReviewFilterSummary({
+            timeRangeFilter,
+            reviewWindow: reviewWindowFilter,
+            actionFilter,
+            actionGroupFilter,
+            pathFilter: normalizedPathFilter,
+            userFilter: normalizedUserFilter,
+          }),
+          dispositionStatus: reviewDispositionStatus,
+        }),
+        successTitle: '当前筛选复核已记录',
+      })
+    } catch (reviewError) {
+      if (!createStarted && !isAbortError(reviewError)) {
+        addToast({
+          title: '记录复核失败',
+          description: getUserFacingErrorDescription(reviewError),
+          color: 'danger',
+        })
+      }
+    } finally {
+      setIsRecordingFilteredReview(false)
+    }
   }
 
   if (hasInvalidHomeDir) {
@@ -715,9 +2031,6 @@ export function ActivityPage() {
       </div>
     )
   }
-
-  const entries = pathFilterErrorMessage ? [] : (data?.items ?? [])
-  const totalEntries = pathFilterErrorMessage ? 0 : (data?.total ?? entries.length)
 
   return (
     <div className="flex h-full min-h-0 flex-col space-y-4 overflow-auto p-4 custom-scrollbar sm:p-6">
@@ -873,6 +2186,51 @@ export function ActivityPage() {
             />
           )}
         </>
+      )}
+
+      {!pathFilterErrorMessage && (
+        <ActivityReviewDetails
+          entries={entries}
+          isFiltered={hasActiveFilters}
+          reviewWindow={reviewWindowFilter}
+        />
+      )}
+
+      {isAdmin && !pathFilterErrorMessage && (
+        <ActivityReviewDispositionRecorder
+          entries={entries}
+          totalEntries={totalEntries}
+          isFiltered={hasActiveFilters}
+          reviewWindow={reviewWindowFilter}
+          records={reviewDispositionRecords}
+          recordsError={reviewDispositionRecordsError}
+          followUpRecords={reviewFollowUpRecords}
+          followUpTotal={reviewFollowUpTotal}
+          followUpRecordsError={reviewFollowUpRecordsError}
+          reviewReviewerFilter={reviewRecordReviewerFilter}
+          reviewTimeRangeFilter={reviewRecordTimeRangeFilter}
+          reviewDispositionStatusFilter={reviewRecordDispositionStatusFilter}
+          reviewDispositionStatus={reviewDispositionStatus}
+          note={reviewDispositionNote}
+          onNoteChange={setReviewDispositionNote}
+          onReviewReviewerFilterChange={setReviewRecordReviewerFilter}
+          onReviewTimeRangeFilterChange={handleReviewRecordTimeRangeChange}
+          onReviewDispositionStatusFilterChange={handleReviewRecordDispositionStatusFilterChange}
+          onReviewDispositionStatusChange={handleReviewDispositionStatusChange}
+          onClearReviewRecordFilters={handleClearReviewRecordFilters}
+          onExportReviewRecords={handleExportReviewRecords}
+          onShowFollowUpRecords={handleShowFollowUpReviewRecords}
+          onTraceReviewRecord={handleTraceReviewRecordActivity}
+          onOpenReviewRecordVersions={handleOpenReviewRecordVersions}
+          onOpenReviewRecordTrash={handleOpenReviewRecordTrash}
+          onOpenReviewRecordShares={handleOpenReviewRecordShares}
+          onUpdateReviewRecordDisposition={handleUpdateReviewRecordDisposition}
+          onRecord={handleRecordActivityReview}
+          onRecordFiltered={handleRecordFilteredActivityReview}
+          isRecording={activityReviewMutation.isPending || isRecordingFilteredReview}
+          isExportingReviewRecords={isExportingReviewRecords}
+          updatingReviewRecordID={activityReviewStatusMutation.isPending ? activityReviewStatusMutation.variables?.recordID ?? null : null}
+        />
       )}
 
       {/* Filter chips */}

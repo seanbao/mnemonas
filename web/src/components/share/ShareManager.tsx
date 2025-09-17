@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
+import { useNavigate } from 'react-router-dom'
 import {
   Card,
   CardBody,
@@ -27,6 +28,9 @@ import {
   Eye,
   RefreshCw,
   AlertCircle,
+  Activity,
+  ShieldAlert,
+  X,
 } from 'lucide-react'
 import { 
   listShares, 
@@ -41,6 +45,8 @@ import {
 import { EmptyState } from '@/components/ui/EmptyState'
 import { FileIcon } from '@/components/ui/FileIcon'
 import { GENERIC_LOAD_ERROR_DESCRIPTION, getUserFacingErrorDescription } from '@/lib/apiMessages'
+import { normalizePath } from '@/lib/utils'
+import { normalizeShareReviewFilter, type ShareReviewFilter } from './reviewFilters'
 
 function getShareFeatureState(error: unknown): 'disabled' | 'unavailable' | null {
   if (!(error instanceof ShareError)) {
@@ -162,9 +168,18 @@ function getRiskPresentation(level?: string): { label: string; color: 'default' 
 interface ShareManagerProps {
   showAllShares?: boolean
   featureEnabled?: boolean
+  initialReviewFilter?: ShareReviewFilter | string | null
+  pathFilter?: string | null
+  onClearPathFilter?: () => void
 }
 
-type ShareReviewFilter = 'all' | 'review' | 'expiring' | 'passwordless' | 'broad' | 'stale'
+interface ShareReviewSummaryMetric {
+  key: Exclude<ShareReviewFilter, 'all'>
+  label: string
+  value: number
+  description: string
+  color: 'default' | 'warning' | 'danger' | 'primary'
+}
 
 const shareRiskReasonMessages: Record<string, string> = {
   root_folder: '根目录分享会公开整个文件空间。',
@@ -194,13 +209,96 @@ function getShareRiskReasonMessage(reason: ShareRiskReason): string {
   return shareRiskReasonMessages[reason.code] ?? getShareRiskFallbackReasonMessage(reason.level)
 }
 
-export function ShareManager({ showAllShares = false, featureEnabled = true }: ShareManagerProps) {
+function getShareActivityReviewRoute(path: string): string {
+  const params = new URLSearchParams({
+    action_group: 'share',
+    path,
+  })
+  return `/activity?${params.toString()}`
+}
+
+function normalizeSharePathFilter(value: string | null | undefined): string {
+  const trimmed = value?.trim() ?? ''
+  if (!trimmed) {
+    return ''
+  }
+
+  try {
+    return normalizePath(trimmed)
+  } catch {
+    return ''
+  }
+}
+
+function shareMatchesPathFilter(share: Share, pathFilter: string): boolean {
+  if (!pathFilter) {
+    return true
+  }
+
+  let sharePath: string
+  try {
+    sharePath = normalizePath(share.path)
+  } catch {
+    return false
+  }
+
+  if (pathFilter === '/' || sharePath === '/') {
+    return true
+  }
+
+  return sharePath === pathFilter
+    || sharePath.startsWith(`${pathFilter}/`)
+    || pathFilter.startsWith(`${sharePath}/`)
+}
+
+function getShareReviewStatus(metrics: ShareReviewSummaryMetric[]): {
+  label: string
+  description: string
+  color: 'success' | 'warning' | 'danger'
+} {
+  const highRiskCount = metrics.find(metric => metric.key === 'review')?.value ?? 0
+  const broadCount = metrics.find(metric => metric.key === 'broad')?.value ?? 0
+  const passwordlessCount = metrics.find(metric => metric.key === 'passwordless')?.value ?? 0
+  const expiringCount = metrics.find(metric => metric.key === 'expiring')?.value ?? 0
+  const staleCount = metrics.find(metric => metric.key === 'stale')?.value ?? 0
+
+  if (highRiskCount > 0 || broadCount > 0 || passwordlessCount > 0) {
+    return {
+      label: '需处理',
+      description: '优先处理无密码、覆盖范围较大或其他高风险分享。',
+      color: 'danger',
+    }
+  }
+
+  if (expiringCount > 0 || staleCount > 0) {
+    return {
+      label: '需确认',
+      description: '存在即将到期或长期未访问的分享，建议确认是否保留。',
+      color: 'warning',
+    }
+  }
+
+  return {
+    label: '状态正常',
+    description: '当前没有需要复核的启用分享。',
+    color: 'success',
+  }
+}
+
+export function ShareManager({
+  showAllShares = false,
+  featureEnabled = true,
+  initialReviewFilter = 'all',
+  pathFilter = '',
+  onClearPathFilter,
+}: ShareManagerProps) {
+  const navigate = useNavigate()
   const [shares, setShares] = useState<Share[]>([])
   const [isLoading, setIsLoading] = useState(true)
   const [loadError, setLoadError] = useState<unknown | null>(null)
   const [deleteTarget, setDeleteTarget] = useState<Share | null>(null)
   const [isDeleting, setIsDeleting] = useState(false)
-  const [reviewFilter, setReviewFilter] = useState<ShareReviewFilter>('all')
+  const [reviewFilter, setReviewFilter] = useState<ShareReviewFilter>(() => normalizeShareReviewFilter(initialReviewFilter))
   const [isDisablingHighRisk, setIsDisablingHighRisk] = useState(false)
   const sharesRef = useRef<Share[]>([])
   const loadRequestRef = useRef(0)
@@ -299,16 +397,20 @@ export function ShareManager({ showAllShares = false, featureEnabled = true }: S
     void loadSharesRef.current()
   }, [featureEnabled])
 
-  const riskyShares = useMemo(() => shares.filter(isRiskyShare), [shares])
-  const highRiskShares = useMemo(() => shares.filter(isHighRiskShare), [shares])
-  const expiringSoonShares = useMemo(() => shares.filter(share => shareHasRiskCode(share, 'expiring_soon')), [shares])
-  const passwordlessShares = useMemo(() => shares.filter(share => shareHasRiskCode(share, 'no_password')), [shares])
-  const broadFolderShares = useMemo(() => shares.filter(share => (
+  const normalizedPathFilter = useMemo(() => normalizeSharePathFilter(pathFilter), [pathFilter])
+  const pathFilteredShares = useMemo(() => (
+    normalizedPathFilter ? shares.filter((share) => shareMatchesPathFilter(share, normalizedPathFilter)) : shares
+  ), [normalizedPathFilter, shares])
+  const riskyShares = useMemo(() => pathFilteredShares.filter(isRiskyShare), [pathFilteredShares])
+  const highRiskShares = useMemo(() => pathFilteredShares.filter(isHighRiskShare), [pathFilteredShares])
+  const expiringSoonShares = useMemo(() => pathFilteredShares.filter(share => shareHasRiskCode(share, 'expiring_soon')), [pathFilteredShares])
+  const passwordlessShares = useMemo(() => pathFilteredShares.filter(share => shareHasRiskCode(share, 'no_password')), [pathFilteredShares])
+  const broadFolderShares = useMemo(() => pathFilteredShares.filter(share => (
     shareHasRiskCode(share, 'root_folder') || shareHasRiskCode(share, 'broad_folder')
-  )), [shares])
-  const staleShares = useMemo(() => shares.filter(share => (
+  )), [pathFilteredShares])
+  const staleShares = useMemo(() => pathFilteredShares.filter(share => (
     shareHasRiskCode(share, 'unused_enabled') || shareHasRiskCode(share, 'stale_enabled')
-  )), [shares])
+  )), [pathFilteredShares])
   const visibleShares = useMemo(() => {
     switch (reviewFilter) {
     case 'review':
@@ -322,9 +424,47 @@ export function ShareManager({ showAllShares = false, featureEnabled = true }: S
     case 'stale':
       return staleShares
     default:
-      return shares
+      return pathFilteredShares
     }
-  }, [broadFolderShares, expiringSoonShares, passwordlessShares, reviewFilter, riskyShares, shares, staleShares])
+  }, [broadFolderShares, expiringSoonShares, passwordlessShares, pathFilteredShares, reviewFilter, riskyShares, staleShares])
+  const reviewSummaryMetrics = useMemo<ShareReviewSummaryMetric[]>(() => ([
+    {
+      key: 'review',
+      label: '需复核',
+      value: riskyShares.length,
+      description: '存在未解决风险的启用分享',
+      color: riskyShares.length > 0 ? 'warning' : 'default',
+    },
+    {
+      key: 'passwordless',
+      label: '无密码',
+      value: passwordlessShares.length,
+      description: '持有链接即可访问',
+      color: passwordlessShares.length > 0 ? 'danger' : 'default',
+    },
+    {
+      key: 'broad',
+      label: '覆盖较大',
+      value: broadFolderShares.length,
+      description: '根目录或顶层目录分享',
+      color: broadFolderShares.length > 0 ? 'danger' : 'default',
+    },
+    {
+      key: 'expiring',
+      label: '即将到期',
+      value: expiringSoonShares.length,
+      description: '需要确认延期或关闭',
+      color: expiringSoonShares.length > 0 ? 'primary' : 'default',
+    },
+    {
+      key: 'stale',
+      label: '长期未访问',
+      value: staleShares.length,
+      description: '建议确认是否仍需保留',
+      color: staleShares.length > 0 ? 'warning' : 'default',
+    },
+  ]), [broadFolderShares.length, expiringSoonShares.length, passwordlessShares.length, riskyShares.length, staleShares.length])
+  const reviewStatus = useMemo(() => getShareReviewStatus(reviewSummaryMetrics), [reviewSummaryMetrics])
 
   if (!featureEnabled) {
     return (
@@ -495,6 +635,10 @@ export function ShareManager({ showAllShares = false, featureEnabled = true }: S
     setDeleteTarget(null)
   }
 
+  const handleReviewActivity = (share: Share) => {
+    navigate(getShareActivityReviewRoute(share.path))
+  }
+
   if (isLoading) {
     return (
       <div className="flex items-center justify-center py-12">
@@ -566,7 +710,7 @@ export function ShareManager({ showAllShares = false, featureEnabled = true }: S
       <div className="flex min-w-0 flex-wrap items-center justify-between gap-3">
         <div className="flex min-w-0 flex-wrap items-center gap-2">
           <h2 className="text-lg font-semibold text-foreground">
-            我的分享 ({shares.length})
+            我的分享 ({normalizedPathFilter ? `${pathFilteredShares.length} / ${shares.length}` : shares.length})
           </h2>
           {riskyShares.length > 0 && (
             <Chip size="sm" color="warning" variant="flat">
@@ -628,18 +772,6 @@ export function ShareManager({ showAllShares = false, featureEnabled = true }: S
           >
             长期未访问 ({staleShares.length})
           </Button>
-          {highRiskShares.length > 0 && (
-            <Button
-              color="danger"
-              variant="flat"
-              size="sm"
-              isLoading={isDisablingHighRisk}
-              onPress={handleDisableHighRisk}
-              className="rounded-lg"
-            >
-              停用需处理 ({highRiskShares.length})
-            </Button>
-          )}
           <Button
             isIconOnly
             variant="flat"
@@ -650,6 +782,96 @@ export function ShareManager({ showAllShares = false, featureEnabled = true }: S
           >
             <RefreshCw size={16} />
           </Button>
+        </div>
+      </div>
+
+      {normalizedPathFilter && (
+        <div
+          role="region"
+          aria-label="分享路径筛选"
+          className="flex min-w-0 flex-col gap-2 rounded-lg border border-divider bg-content2/60 px-3 py-2 text-sm sm:flex-row sm:items-center sm:justify-between"
+        >
+          <div className="min-w-0 truncate text-default-600" title={normalizedPathFilter}>
+            路径：{normalizedPathFilter}
+          </div>
+          {onClearPathFilter && (
+            <Button
+              size="sm"
+              variant="light"
+              className="h-8 rounded-lg px-2 text-default-500"
+              startContent={<X size={14} />}
+              onPress={onClearPathFilter}
+            >
+              清除路径筛选
+            </Button>
+          )}
+        </div>
+      )}
+
+      <div
+        role="region"
+        aria-label="分享复核摘要"
+        className="rounded-lg border border-divider bg-content1 px-4 py-4"
+      >
+        <div className="flex min-w-0 flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+          <div className="flex min-w-0 items-start gap-3">
+            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-warning/10 text-warning">
+              <ShieldAlert size={18} />
+            </div>
+            <div className="min-w-0">
+              <div className="flex min-w-0 flex-wrap items-center gap-2">
+                <div className="text-sm font-semibold text-foreground">分享复核摘要</div>
+                <Chip size="sm" color={reviewStatus.color} variant="flat">
+                  {reviewStatus.label}
+                </Chip>
+              </div>
+              <div className="mt-1 text-xs text-default-500">
+                {reviewStatus.description}
+              </div>
+            </div>
+          </div>
+          {highRiskShares.length > 0 && (
+            <Button
+              color="danger"
+              variant="flat"
+              size="sm"
+              isLoading={isDisablingHighRisk}
+              onPress={handleDisableHighRisk}
+              className="self-start rounded-lg lg:self-center"
+            >
+              停用需处理 ({highRiskShares.length})
+            </Button>
+          )}
+        </div>
+
+        <div className="mt-4 grid gap-2 sm:grid-cols-2 xl:grid-cols-5">
+          {reviewSummaryMetrics.map(metric => (
+            <button
+              key={metric.key}
+              type="button"
+              onClick={() => metric.value > 0 && setReviewFilter(metric.key)}
+              disabled={metric.value === 0}
+              aria-label={`筛选${metric.label}分享 ${metric.value}`}
+              className={[
+                'min-h-24 rounded-lg border px-3 py-3 text-left transition',
+                reviewFilter === metric.key ? 'border-primary bg-primary/10' : 'border-divider bg-content2',
+                metric.value > 0 ? 'hover:border-primary/50 hover:bg-content3' : 'cursor-default opacity-70',
+              ].join(' ')}
+            >
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-xs text-default-500">{metric.label}</span>
+                <Chip size="sm" color={metric.color} variant="flat">
+                  {metric.value}
+                </Chip>
+              </div>
+              <div className="mt-2 text-lg font-semibold text-foreground">
+                {metric.value} 个
+              </div>
+              <div className="mt-1 text-xs leading-5 text-default-500">
+                {metric.description}
+              </div>
+            </button>
+          ))}
         </div>
       </div>
 
@@ -668,6 +890,7 @@ export function ShareManager({ showAllShares = false, featureEnabled = true }: S
               key={share.id}
               share={share}
               onCopy={() => handleCopy(share)}
+              onReviewActivity={() => handleReviewActivity(share)}
               onToggle={() => handleToggle(share)}
               onDelete={() => setDeleteTarget(share)}
             />
@@ -748,13 +971,14 @@ export function ShareManager({ showAllShares = false, featureEnabled = true }: S
 interface ShareItemProps {
   share: Share
   onCopy: () => void
+  onReviewActivity: () => void
   onToggle: () => void
   onDelete: () => void
 }
 
-function ShareItem({ share, onCopy, onToggle, onDelete }: ShareItemProps) {
+function ShareItem({ share, onCopy, onReviewActivity, onToggle, onDelete }: ShareItemProps) {
   const fileName = share.path.split('/').pop() || share.path
-  const isExpired = share.expires_at && new Date(share.expires_at) < new Date()
+  const isExpired = share.expires_at ? new Date(share.expires_at) <= new Date() : false
   const riskPresentation = getRiskPresentation(share.risk?.level)
   const riskReasons = share.risk?.reasons?.filter(reason => !reason.resolved) ?? []
 
@@ -840,6 +1064,16 @@ function ShareItem({ share, onCopy, onToggle, onDelete }: ShareItemProps) {
             >
               <Copy size={16} />
             </Button>
+            <Button
+              isIconOnly
+              variant="flat"
+              size="sm"
+              onPress={onReviewActivity}
+              aria-label={`${fileName} 查看分享活动`}
+              className="rounded-lg"
+            >
+              <Activity size={16} />
+            </Button>
             
             <Dropdown>
               <DropdownTrigger>
@@ -854,6 +1088,13 @@ function ShareItem({ share, onCopy, onToggle, onDelete }: ShareItemProps) {
                   onPress={onCopy}
                 >
                   复制链接
+                </DropdownItem>
+                <DropdownItem
+                  key="review-activity"
+                  startContent={<Activity size={14} />}
+                  onPress={onReviewActivity}
+                >
+                  查看分享活动
                 </DropdownItem>
                 <DropdownItem 
                   key="toggle"

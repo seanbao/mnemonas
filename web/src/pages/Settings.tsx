@@ -41,7 +41,7 @@ import {
 } from 'lucide-react'
 import { cn, copyTextToClipboard, parseByteSize, normalizeWebDAVPrefix, isValidWebDAVPrefix, webDAVPrefixOverlapsReservedRoute, formatWebDAVUrl, formatBytes } from '@/lib/utils'
 import { GENERIC_LOAD_ERROR_DESCRIPTION, getUserFacingErrorDescription } from '@/lib/apiMessages'
-import { ShareManager } from '@/components/share'
+import { ShareManager, normalizeShareReviewFilter } from '@/components/share'
 import { PageHeader } from '@/components/ui/PageHeader'
 import { EmptyState } from '@/components/ui/EmptyState'
 import { useAuthStore, useUser } from '@/stores/auth'
@@ -90,6 +90,7 @@ const REDACTED_SETTINGS_SECRET = '<redacted>'
 const ALERT_CHANNEL_LABELS: Record<string, string> = {
   webhook: 'Webhook',
   telegram: 'Telegram',
+  wecom: '企业微信',
   email: 'SMTP 邮件',
 }
 
@@ -927,15 +928,11 @@ function normalizeDirectoryQuotaPathInput(value: string): string | null {
   if (!trimmed.startsWith('/') || /[\s\\?#]/.test(trimmed) || hasControlChar(trimmed)) {
     return null
   }
-  const withoutTrailingSlash = trimmed === '/' ? '/' : trimmed.replace(/\/+$/, '')
-  if (withoutTrailingSlash === '') {
+  if (trimmed.split('/').some((segment) => segment === '.' || segment === '..')) {
     return null
   }
-  const segments = withoutTrailingSlash.split('/').slice(1)
-  if (segments.some((segment) => segment === '' || segment === '.' || segment === '..')) {
-    return null
-  }
-  return withoutTrailingSlash
+  const collapsed = trimmed.replace(/\/+/g, '/')
+  return collapsed === '/' ? '/' : collapsed.replace(/\/+$/, '')
 }
 
 const logicalPathInputErrorDescription = '路径必须是站内绝对路径，且不能包含空字符、. 或 .. 路径段。'
@@ -980,6 +977,135 @@ function parseDirectoryQuotaLines(value: string): { quotas: DirectoryQuota[]; er
   }
 
   return { quotas }
+}
+
+type DirectoryQuotaReviewKind = 'added' | 'changed' | 'removed'
+
+type DirectoryQuotaReviewItem = {
+  kind: DirectoryQuotaReviewKind
+  path: string
+  before?: DirectoryQuota
+  after?: DirectoryQuota
+}
+
+function buildDirectoryQuotaReview(
+  savedQuotas: DirectoryQuota[],
+  draftQuotas: DirectoryQuota[],
+): DirectoryQuotaReviewItem[] {
+  const savedByPath = new Map(savedQuotas.map((quota) => [quota.path, quota]))
+  const draftByPath = new Map(draftQuotas.map((quota) => [quota.path, quota]))
+  const items: DirectoryQuotaReviewItem[] = []
+
+  for (const draftQuota of draftQuotas) {
+    const savedQuota = savedByPath.get(draftQuota.path)
+    if (!savedQuota) {
+      items.push({ kind: 'added', path: draftQuota.path, after: draftQuota })
+      continue
+    }
+    if (savedQuota.quota_bytes !== draftQuota.quota_bytes) {
+      items.push({ kind: 'changed', path: draftQuota.path, before: savedQuota, after: draftQuota })
+    }
+  }
+
+  for (const savedQuota of savedQuotas) {
+    if (!draftByPath.has(savedQuota.path)) {
+      items.push({ kind: 'removed', path: savedQuota.path, before: savedQuota })
+    }
+  }
+
+  return items
+}
+
+function directoryQuotaReviewKindLabel(kind: DirectoryQuotaReviewKind): string {
+  switch (kind) {
+    case 'added':
+      return '新增'
+    case 'changed':
+      return '修改'
+    case 'removed':
+      return '删除'
+    default:
+      return kind
+  }
+}
+
+function directoryQuotaReviewTone(kind: DirectoryQuotaReviewKind): string {
+  switch (kind) {
+    case 'added':
+      return 'border-success/30 bg-success/5 text-success'
+    case 'changed':
+      return 'border-warning/30 bg-warning/5 text-warning'
+    case 'removed':
+      return 'border-danger/30 bg-danger/5 text-danger'
+    default:
+      return 'border-divider bg-content2 text-default-600'
+  }
+}
+
+function directoryQuotaReviewDescription(item: DirectoryQuotaReviewItem): string {
+  if (item.kind === 'changed' && item.before && item.after) {
+    return `配额从 ${formatBytes(item.before.quota_bytes)} 调整为 ${formatBytes(item.after.quota_bytes)}`
+  }
+  const quota = item.after ?? item.before
+  return quota ? `容量 ${formatBytes(quota.quota_bytes)}` : ''
+}
+
+function DirectoryQuotaChangeReview({
+  savedQuotas,
+  draftValue,
+}: {
+  savedQuotas: DirectoryQuota[]
+  draftValue: string
+}) {
+  const parsedDraft = parseDirectoryQuotaLines(draftValue)
+
+  if (parsedDraft.error) {
+    return (
+      <div className="rounded-lg border border-warning/20 bg-warning/10 px-3 py-2 text-xs text-warning">
+        目录配额变更复核暂不可用：{parsedDraft.error}
+      </div>
+    )
+  }
+
+  const reviewItems = buildDirectoryQuotaReview(savedQuotas, parsedDraft.quotas)
+  const added = reviewItems.filter((item) => item.kind === 'added').length
+  const changed = reviewItems.filter((item) => item.kind === 'changed').length
+  const removed = reviewItems.filter((item) => item.kind === 'removed').length
+
+  return (
+    <div className="rounded-lg border border-divider bg-content1/60 p-3" aria-label="目录配额变更复核">
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <div className="text-sm font-semibold text-foreground">目录配额变更复核</div>
+          <div className="mt-1 text-xs text-default-500">基于已保存目录配额和当前编辑内容生成。</div>
+        </div>
+        <div className="flex flex-wrap gap-2 text-xs">
+          <span className="rounded-full bg-success/10 px-2 py-1 text-success">新增 {added}</span>
+          <span className="rounded-full bg-warning/10 px-2 py-1 text-warning">修改 {changed}</span>
+          <span className="rounded-full bg-danger/10 px-2 py-1 text-danger">删除 {removed}</span>
+        </div>
+      </div>
+      {reviewItems.length === 0 ? (
+        <div className="mt-3 rounded-lg border border-divider bg-content2/40 px-3 py-2 text-sm text-default-500">
+          目录配额与已保存配置一致。
+        </div>
+      ) : (
+        <div className="mt-3 space-y-2">
+          {reviewItems.map((item) => (
+            <div key={`${item.kind}:${item.path}`} className="rounded-lg border border-divider bg-content2/40 px-3 py-2">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className={cn('rounded-full border px-2 py-0.5 text-xs font-medium', directoryQuotaReviewTone(item.kind))}>
+                  {directoryQuotaReviewKindLabel(item.kind)}
+                </span>
+                <span className="font-mono text-sm font-semibold text-foreground">{item.path}</span>
+              </div>
+              <div className="mt-1 text-xs text-default-500">{directoryQuotaReviewDescription(item)}</div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
 }
 
 const accessRulePrincipalPattern = /^[A-Za-z0-9._-]+$/
@@ -1244,6 +1370,275 @@ function normalizeSharePolicyRulesForSave(inputRules: SharePolicyRuleDraft[]): {
   return { rules }
 }
 
+type SharePolicyReviewInput = {
+  enabled: boolean
+  baseURL: string
+  defaultExpiresIn: string
+  defaultMaxAccess: string
+  rules: SharePolicyRuleDraft[]
+}
+
+type SharePolicyDefaultReviewItem = {
+  label: string
+  before: string
+  after: string
+}
+
+type SharePolicyRuleReviewKind = 'added' | 'changed' | 'removed'
+
+type SharePolicyRuleReviewItem = {
+  kind: SharePolicyRuleReviewKind
+  path: string
+  before?: SharePolicyRule
+  after?: SharePolicyRule
+  changedFields: string[]
+}
+
+const sharePolicyRuleReviewFields: Array<{
+  key: keyof Omit<SharePolicyRule, 'path'>
+  label: string
+}> = [
+  { key: 'require_password', label: '必须设置密码' },
+  { key: 'max_expires_in', label: '最长有效期' },
+  { key: 'max_access', label: '最多访问次数' },
+]
+
+function normalizeSharePolicyDurationForReview(value: string | undefined): string {
+  const trimmed = value?.trim() ?? ''
+  return !trimmed || isZeroDurationString(trimmed) ? '' : trimmed
+}
+
+function normalizeSharePolicyMaxAccessForReview(value: string | undefined): string {
+  const trimmed = value?.trim() ?? ''
+  const parsed = parseNonNegativeSafeIntegerInput(trimmed)
+  if (!parsed.valid) {
+    return trimmed
+  }
+  return parsed.value > 0 ? String(parsed.value) : ''
+}
+
+function sharePolicyOptionalValueLabel(value: string): string {
+  return value ? value : '未设置'
+}
+
+function sharePolicyLimitValueLabel(value: string): string {
+  return value ? value : '不限制'
+}
+
+function buildSharePolicyDefaultReview(
+  saved: SharePolicyReviewInput,
+  draft: SharePolicyReviewInput,
+): SharePolicyDefaultReviewItem[] {
+  const savedBaseURL = saved.baseURL.trim()
+  const draftBaseURL = draft.baseURL.trim()
+  const savedDefaultExpiresIn = normalizeSharePolicyDurationForReview(saved.defaultExpiresIn)
+  const draftDefaultExpiresIn = normalizeSharePolicyDurationForReview(draft.defaultExpiresIn)
+  const savedDefaultMaxAccess = normalizeSharePolicyMaxAccessForReview(saved.defaultMaxAccess)
+  const draftDefaultMaxAccess = normalizeSharePolicyMaxAccessForReview(draft.defaultMaxAccess)
+  const items: SharePolicyDefaultReviewItem[] = []
+
+  if (saved.enabled !== draft.enabled) {
+    items.push({
+      label: '分享功能',
+      before: saved.enabled ? '启用' : '停用',
+      after: draft.enabled ? '启用' : '停用',
+    })
+  }
+  if (savedBaseURL !== draftBaseURL) {
+    items.push({
+      label: '分享基础 URL',
+      before: sharePolicyOptionalValueLabel(savedBaseURL),
+      after: sharePolicyOptionalValueLabel(draftBaseURL),
+    })
+  }
+  if (savedDefaultExpiresIn !== draftDefaultExpiresIn) {
+    items.push({
+      label: '新分享默认有效期',
+      before: sharePolicyLimitValueLabel(savedDefaultExpiresIn),
+      after: sharePolicyLimitValueLabel(draftDefaultExpiresIn),
+    })
+  }
+  if (savedDefaultMaxAccess !== draftDefaultMaxAccess) {
+    items.push({
+      label: '新分享默认访问次数',
+      before: sharePolicyLimitValueLabel(savedDefaultMaxAccess),
+      after: sharePolicyLimitValueLabel(draftDefaultMaxAccess),
+    })
+  }
+
+  return items
+}
+
+function getSharePolicyRuleChangedFields(before: SharePolicyRule, after: SharePolicyRule): string[] {
+  return sharePolicyRuleReviewFields
+    .filter(({ key }) => before[key] !== after[key])
+    .map(({ label }) => label)
+}
+
+function buildSharePolicyRuleReview(
+  savedRules: SharePolicyRule[],
+  draftRules: SharePolicyRule[],
+): SharePolicyRuleReviewItem[] {
+  const savedByPath = new Map(savedRules.map((rule) => [rule.path, rule]))
+  const draftByPath = new Map(draftRules.map((rule) => [rule.path, rule]))
+  const items: SharePolicyRuleReviewItem[] = []
+
+  for (const draftRule of draftRules) {
+    const savedRule = savedByPath.get(draftRule.path)
+    if (!savedRule) {
+      items.push({
+        kind: 'added',
+        path: draftRule.path,
+        after: draftRule,
+        changedFields: [],
+      })
+      continue
+    }
+    const changedFields = getSharePolicyRuleChangedFields(savedRule, draftRule)
+    if (changedFields.length > 0) {
+      items.push({
+        kind: 'changed',
+        path: draftRule.path,
+        before: savedRule,
+        after: draftRule,
+        changedFields,
+      })
+    }
+  }
+
+  for (const savedRule of savedRules) {
+    if (!draftByPath.has(savedRule.path)) {
+      items.push({
+        kind: 'removed',
+        path: savedRule.path,
+        before: savedRule,
+        changedFields: [],
+      })
+    }
+  }
+
+  return items
+}
+
+function sharePolicyRuleReviewKindLabel(kind: SharePolicyRuleReviewKind): string {
+  switch (kind) {
+    case 'added':
+      return '新增'
+    case 'changed':
+      return '修改'
+    case 'removed':
+      return '删除'
+    default:
+      return kind
+  }
+}
+
+function sharePolicyRuleReviewTone(kind: SharePolicyRuleReviewKind): string {
+  switch (kind) {
+    case 'added':
+      return 'border-success/30 bg-success/5 text-success'
+    case 'changed':
+      return 'border-warning/30 bg-warning/5 text-warning'
+    case 'removed':
+      return 'border-danger/30 bg-danger/5 text-danger'
+    default:
+      return 'border-divider bg-content2 text-default-600'
+  }
+}
+
+function sharePolicyRuleSummary(rule: SharePolicyRule): string {
+  const parts = [
+    rule.require_password ? '必须设置密码' : '',
+    rule.max_expires_in ? `最长有效期: ${rule.max_expires_in}` : '',
+    rule.max_access && rule.max_access > 0 ? `最多访问: ${rule.max_access}` : '',
+  ].filter(Boolean)
+
+  return parts.length > 0 ? parts.join(' · ') : '未配置约束'
+}
+
+function SharePolicyChangeReview({
+  saved,
+  draft,
+}: {
+  saved: SharePolicyReviewInput
+  draft: SharePolicyReviewInput
+}) {
+  const normalizedSavedRules = normalizeSharePolicyRulesForSave(saved.rules)
+  const normalizedDraftRules = normalizeSharePolicyRulesForSave(draft.rules)
+  const normalizeError = normalizedSavedRules.error ?? normalizedDraftRules.error
+
+  if (normalizeError) {
+    return (
+      <div
+        className="rounded-lg border border-warning/20 bg-warning/10 px-3 py-2 text-xs text-warning"
+        aria-label="分享策略变更复核"
+      >
+        分享策略变更复核暂不可用：{normalizeError}
+      </div>
+    )
+  }
+
+  const defaultItems = buildSharePolicyDefaultReview(saved, draft)
+  const ruleItems = buildSharePolicyRuleReview(normalizedSavedRules.rules, normalizedDraftRules.rules)
+  const added = ruleItems.filter((item) => item.kind === 'added').length
+  const changed = ruleItems.filter((item) => item.kind === 'changed').length
+  const removed = ruleItems.filter((item) => item.kind === 'removed').length
+
+  return (
+    <div className="rounded-lg border border-divider bg-content1/60 p-3" aria-label="分享策略变更复核">
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <div className="text-sm font-semibold text-foreground">分享策略变更复核</div>
+          <div className="mt-1 text-xs text-default-500">基于已保存分享配置和当前编辑内容生成。</div>
+        </div>
+        <div className="flex flex-wrap gap-2 text-xs">
+          <span className="rounded-full bg-content2 px-2 py-1 text-default-600">默认项 {defaultItems.length}</span>
+          <span className="rounded-full bg-success/10 px-2 py-1 text-success">新增 {added}</span>
+          <span className="rounded-full bg-warning/10 px-2 py-1 text-warning">修改 {changed}</span>
+          <span className="rounded-full bg-danger/10 px-2 py-1 text-danger">删除 {removed}</span>
+        </div>
+      </div>
+      {defaultItems.length === 0 && ruleItems.length === 0 ? (
+        <div className="mt-3 rounded-lg border border-divider bg-content2/40 px-3 py-2 text-sm text-default-500">
+          分享策略与已保存配置一致。
+        </div>
+      ) : (
+        <div className="mt-3 space-y-2">
+          {defaultItems.map((item) => (
+            <div key={item.label} className="rounded-lg border border-divider bg-content2/40 px-3 py-2">
+              <div className="text-sm font-semibold text-foreground">{item.label}</div>
+              <div className="mt-1 break-anywhere text-xs text-default-500">
+                {item.before} -&gt; {item.after}
+              </div>
+            </div>
+          ))}
+          {ruleItems.map((item) => {
+            const activeRule = item.after ?? item.before
+            return (
+              <div key={`${item.kind}:${item.path}`} className="rounded-lg border border-divider bg-content2/40 px-3 py-2">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className={cn('rounded-full border px-2 py-0.5 text-xs font-medium', sharePolicyRuleReviewTone(item.kind))}>
+                    {sharePolicyRuleReviewKindLabel(item.kind)}
+                  </span>
+                  <span className="font-mono text-sm font-semibold text-foreground">{item.path}</span>
+                  {item.changedFields.length > 0 && (
+                    <span className="text-xs text-default-500">变更字段: {item.changedFields.join('、')}</span>
+                  )}
+                </div>
+                {activeRule && (
+                  <div className="mt-1 break-anywhere text-xs text-default-500">
+                    {sharePolicyRuleSummary(activeRule)}
+                  </div>
+                )}
+              </div>
+            )
+          })}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function directoryAccessSourceLabel(source: DirectoryAccessDecision['source']): string {
   switch (source) {
     case 'admin':
@@ -1427,6 +1822,323 @@ function DirectoryAccessReportResult({
   )
 }
 
+type DirectoryAccessRuleReviewKind = 'added' | 'changed' | 'removed'
+
+type DirectoryAccessRuleReviewItem = {
+  kind: DirectoryAccessRuleReviewKind
+  path: string
+  before?: DirectoryAccessRule
+  after?: DirectoryAccessRule
+  changedFields: string[]
+}
+
+const directoryAccessRuleReviewFields: Array<{
+  key: keyof Omit<DirectoryAccessRule, 'path'>
+  label: string
+}> = [
+  { key: 'read_users', label: '读用户' },
+  { key: 'write_users', label: '写用户' },
+  { key: 'read_groups', label: '读组' },
+  { key: 'write_groups', label: '写组' },
+  { key: 'read_roles', label: '读角色' },
+  { key: 'write_roles', label: '写角色' },
+]
+
+function normalizeDirectoryAccessReviewList(values: string[] | undefined): string[] {
+  return Array.from(new Set((values ?? []).map((value) => value.trim().toLowerCase()).filter(Boolean))).sort()
+}
+
+function directoryAccessReviewListEquals(left: string[] | undefined, right: string[] | undefined): boolean {
+  const normalizedLeft = normalizeDirectoryAccessReviewList(left)
+  const normalizedRight = normalizeDirectoryAccessReviewList(right)
+  return normalizedLeft.length === normalizedRight.length
+    && normalizedLeft.every((value, index) => value === normalizedRight[index])
+}
+
+function getDirectoryAccessRuleChangedFields(before: DirectoryAccessRule, after: DirectoryAccessRule): string[] {
+  return directoryAccessRuleReviewFields
+    .filter(({ key }) => !directoryAccessReviewListEquals(before[key], after[key]))
+    .map(({ label }) => label)
+}
+
+function directoryAccessRulePrincipalSummary(rule: DirectoryAccessRule): string {
+  const parts = directoryAccessRuleReviewFields
+    .map(({ key, label }) => {
+      const values = normalizeDirectoryAccessReviewList(rule[key])
+      return values.length > 0 ? `${label}: ${values.join(', ')}` : ''
+    })
+    .filter(Boolean)
+
+  return parts.length > 0 ? parts.join(' · ') : '未配置主体'
+}
+
+function addDirectoryAccessPrincipals(target: Set<string>, type: string, values: string[] | undefined) {
+  normalizeDirectoryAccessReviewList(values).forEach((value) => {
+    target.add(`${type}:${value}`)
+  })
+}
+
+function getDirectoryAccessRuleReadPrincipalSet(rule: DirectoryAccessRule): Set<string> {
+  const principals = new Set<string>()
+  addDirectoryAccessPrincipals(principals, 'user', rule.read_users)
+  addDirectoryAccessPrincipals(principals, 'group', rule.read_groups)
+  addDirectoryAccessPrincipals(principals, 'role', rule.read_roles)
+  addDirectoryAccessPrincipals(principals, 'user', rule.write_users)
+  addDirectoryAccessPrincipals(principals, 'group', rule.write_groups)
+  addDirectoryAccessPrincipals(principals, 'role', rule.write_roles)
+  return principals
+}
+
+function getDirectoryAccessRuleWritePrincipalSet(rule: DirectoryAccessRule): Set<string> {
+  const principals = new Set<string>()
+  addDirectoryAccessPrincipals(principals, 'user', rule.write_users)
+  addDirectoryAccessPrincipals(principals, 'group', rule.write_groups)
+  addDirectoryAccessPrincipals(principals, 'role', rule.write_roles)
+  return principals
+}
+
+function directoryAccessRuleHasWriteGrant(rule: DirectoryAccessRule): boolean {
+  return getDirectoryAccessRuleWritePrincipalSet(rule).size > 0
+}
+
+function getDirectoryAccessRuleAttentionReason(rule: DirectoryAccessRule): string | null {
+  const writeRoles = normalizeDirectoryAccessReviewList(rule.write_roles)
+  const readRoles = normalizeDirectoryAccessReviewList(rule.read_roles)
+  if (rule.path === '/') {
+    return '根路径授权'
+  }
+  if (writeRoles.includes('guest')) {
+    return '访客角色可写'
+  }
+  if (writeRoles.includes('user')) {
+    return '普通用户可写'
+  }
+  if (readRoles.includes('guest')) {
+    return '访客角色可读'
+  }
+  return null
+}
+
+function DirectoryAccessCoverageSummary({ draftValue }: { draftValue: string }) {
+  const parsedDraft = parseDirectoryAccessRuleLines(draftValue)
+
+  if (parsedDraft.error) {
+    return (
+      <div className="rounded-lg border border-warning/20 bg-warning/10 px-3 py-2 text-xs text-warning">
+        目录权限覆盖摘要暂不可用：{parsedDraft.error}
+      </div>
+    )
+  }
+
+  const rules = parsedDraft.rules
+  if (rules.length === 0) {
+    return (
+      <div aria-label="目录权限覆盖摘要" className="rounded-lg border border-dashed border-divider bg-content2/40 px-3 py-3 text-sm text-default-500">
+        暂无目录权限规则。未命中规则的路径会继续按用户 home_dir 边界处理。
+      </div>
+    )
+  }
+
+  const readPrincipals = new Set<string>()
+  const writePrincipals = new Set<string>()
+  rules.forEach((rule) => {
+    getDirectoryAccessRuleReadPrincipalSet(rule).forEach((principal) => readPrincipals.add(principal))
+    getDirectoryAccessRuleWritePrincipalSet(rule).forEach((principal) => writePrincipals.add(principal))
+  })
+  const writeRuleCount = rules.filter(directoryAccessRuleHasWriteGrant).length
+  const attentionItems = rules
+    .map((rule) => ({ rule, reason: getDirectoryAccessRuleAttentionReason(rule) }))
+    .filter((item): item is { rule: DirectoryAccessRule; reason: string } => Boolean(item.reason))
+    .slice(0, 5)
+
+  const summaryItems = [
+    { label: '规则总数', value: `${rules.length} 条`, detail: '按最具体路径生效' },
+    { label: '有效可读主体', value: `${readPrincipals.size} 个`, detail: '写权限同时计入读权限' },
+    { label: '可写主体', value: `${writePrincipals.size} 个`, detail: '仅统计显式写授权' },
+    { label: '写权限路径', value: `${writeRuleCount} 个`, detail: '需要重点复核写入边界' },
+  ]
+
+  return (
+    <div aria-label="目录权限覆盖摘要" className="rounded-lg border border-divider bg-content1/60 p-3">
+      <div className="flex flex-col gap-1">
+        <div className="text-sm font-semibold text-foreground">目录权限覆盖摘要</div>
+        <div className="text-xs text-default-500">基于当前编辑内容估算覆盖规模；最终结果仍以保存后的权限检查和用户矩阵为准。</div>
+      </div>
+      <div className="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+        {summaryItems.map((item) => (
+          <div key={item.label} className="rounded-lg border border-default-200 bg-content2/40 px-3 py-2">
+            <div className="text-xs text-default-500">{item.label}</div>
+            <div className="mt-1 text-base font-semibold text-foreground">{item.value}</div>
+            <div className="mt-1 text-xs text-default-500">{item.detail}</div>
+          </div>
+        ))}
+      </div>
+      {attentionItems.length > 0 ? (
+        <div className="mt-3 rounded-lg border border-warning/25 bg-warning/5 p-3">
+          <div className="flex items-center gap-2 text-xs font-medium text-warning">
+            <AlertCircle size={14} />
+            <span>权限关注项</span>
+          </div>
+          <div className="mt-2 space-y-2">
+            {attentionItems.map(({ rule, reason }) => (
+              <div key={`${reason}:${rule.path}`} className="text-xs text-default-600">
+                <span className="font-mono font-semibold text-foreground">{rule.path}</span>
+                <span className="mx-2 text-default-300">·</span>
+                <span className="text-warning">{reason}</span>
+                <span className="mx-2 text-default-300">·</span>
+                <span>{directoryAccessRulePrincipalSummary(rule)}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : (
+        <div className="mt-3 rounded-lg border border-success/20 bg-success/5 px-3 py-2 text-xs text-success">
+          未发现根路径授权、访客授权或普通用户宽写入规则。
+        </div>
+      )}
+    </div>
+  )
+}
+
+function buildDirectoryAccessRuleReview(
+  savedRules: DirectoryAccessRule[],
+  draftRules: DirectoryAccessRule[],
+): DirectoryAccessRuleReviewItem[] {
+  const savedByPath = new Map(savedRules.map((rule) => [rule.path, rule]))
+  const draftByPath = new Map(draftRules.map((rule) => [rule.path, rule]))
+  const items: DirectoryAccessRuleReviewItem[] = []
+
+  for (const draftRule of draftRules) {
+    const savedRule = savedByPath.get(draftRule.path)
+    if (!savedRule) {
+      items.push({
+        kind: 'added',
+        path: draftRule.path,
+        after: draftRule,
+        changedFields: [],
+      })
+      continue
+    }
+    const changedFields = getDirectoryAccessRuleChangedFields(savedRule, draftRule)
+    if (changedFields.length > 0) {
+      items.push({
+        kind: 'changed',
+        path: draftRule.path,
+        before: savedRule,
+        after: draftRule,
+        changedFields,
+      })
+    }
+  }
+
+  for (const savedRule of savedRules) {
+    if (!draftByPath.has(savedRule.path)) {
+      items.push({
+        kind: 'removed',
+        path: savedRule.path,
+        before: savedRule,
+        changedFields: [],
+      })
+    }
+  }
+
+  return items
+}
+
+function directoryAccessRuleReviewKindLabel(kind: DirectoryAccessRuleReviewKind): string {
+  switch (kind) {
+    case 'added':
+      return '新增'
+    case 'changed':
+      return '修改'
+    case 'removed':
+      return '删除'
+    default:
+      return kind
+  }
+}
+
+function directoryAccessRuleReviewTone(kind: DirectoryAccessRuleReviewKind): string {
+  switch (kind) {
+    case 'added':
+      return 'border-success/30 bg-success/5 text-success'
+    case 'changed':
+      return 'border-warning/30 bg-warning/5 text-warning'
+    case 'removed':
+      return 'border-danger/30 bg-danger/5 text-danger'
+    default:
+      return 'border-divider bg-content2 text-default-600'
+  }
+}
+
+function DirectoryAccessRuleChangeReview({
+  savedRules,
+  draftValue,
+}: {
+  savedRules: DirectoryAccessRule[]
+  draftValue: string
+}) {
+  const parsedDraft = parseDirectoryAccessRuleLines(draftValue)
+
+  if (parsedDraft.error) {
+    return (
+      <div className="rounded-lg border border-warning/20 bg-warning/10 px-3 py-2 text-xs text-warning">
+        目录权限变更复核暂不可用：{parsedDraft.error}
+      </div>
+    )
+  }
+
+  const reviewItems = buildDirectoryAccessRuleReview(savedRules, parsedDraft.rules)
+  const added = reviewItems.filter((item) => item.kind === 'added').length
+  const changed = reviewItems.filter((item) => item.kind === 'changed').length
+  const removed = reviewItems.filter((item) => item.kind === 'removed').length
+
+  return (
+    <div className="rounded-lg border border-divider bg-content1/60 p-3">
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <div className="text-sm font-semibold text-foreground">目录权限变更复核</div>
+          <div className="mt-1 text-xs text-default-500">基于已保存目录规则和当前编辑内容生成。</div>
+        </div>
+        <div className="flex flex-wrap gap-2 text-xs">
+          <span className="rounded-full bg-success/10 px-2 py-1 text-success">新增 {added}</span>
+          <span className="rounded-full bg-warning/10 px-2 py-1 text-warning">修改 {changed}</span>
+          <span className="rounded-full bg-danger/10 px-2 py-1 text-danger">删除 {removed}</span>
+        </div>
+      </div>
+      {reviewItems.length === 0 ? (
+        <div className="mt-3 rounded-lg border border-divider bg-content2/40 px-3 py-2 text-sm text-default-500">
+          目录权限与已保存配置一致。
+        </div>
+      ) : (
+        <div className="mt-3 space-y-2">
+          {reviewItems.map((item) => {
+            const activeRule = item.after ?? item.before
+            return (
+              <div key={`${item.kind}:${item.path}`} className="rounded-lg border border-divider bg-content2/40 px-3 py-2">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className={cn('rounded-full border px-2 py-0.5 text-xs font-medium', directoryAccessRuleReviewTone(item.kind))}>
+                    {directoryAccessRuleReviewKindLabel(item.kind)}
+                  </span>
+                  <span className="font-mono text-sm font-semibold text-foreground">{item.path}</span>
+                  {item.changedFields.length > 0 && (
+                    <span className="text-xs text-default-500">变更字段: {item.changedFields.join('、')}</span>
+                  )}
+                </div>
+                {activeRule && (
+                  <div className="mt-1 break-anywhere text-xs text-default-500">
+                    {directoryAccessRulePrincipalSummary(activeRule)}
+                  </div>
+                )}
+              </div>
+            )
+          })}
+        </div>
+      )}
+    </div>
+  )
+}
+
 interface DirectoryAccessRuleDraft {
   path: string
   readUsers: string
@@ -1439,6 +2151,12 @@ interface DirectoryAccessRuleDraft {
 
 type DirectoryAccessRuleDraftField = keyof DirectoryAccessRuleDraft
 
+type DirectoryAccessRulePreset = {
+  label: string
+  description: string
+  draft: DirectoryAccessRuleDraft
+}
+
 function emptyDirectoryAccessRuleDraft(): DirectoryAccessRuleDraft {
   return {
     path: '',
@@ -1450,6 +2168,39 @@ function emptyDirectoryAccessRuleDraft(): DirectoryAccessRuleDraft {
     writeRoles: '',
   }
 }
+
+const directoryAccessRulePresets: DirectoryAccessRulePreset[] = [
+  {
+    label: '全员协作',
+    description: '普通用户可读写 /shared，适合家庭共享或小团队资料。',
+    draft: {
+      ...emptyDirectoryAccessRuleDraft(),
+      path: '/shared',
+      readRoles: 'user',
+      writeRoles: 'user',
+    },
+  },
+  {
+    label: '全员只读',
+    description: '普通用户可读取 /library，只有管理员可写入。',
+    draft: {
+      ...emptyDirectoryAccessRuleDraft(),
+      path: '/library',
+      readRoles: 'user',
+      writeRoles: 'admin',
+    },
+  },
+  {
+    label: '管理员归档',
+    description: '仅管理员可读写 /archive，适合长期归档或敏感资料。',
+    draft: {
+      ...emptyDirectoryAccessRuleDraft(),
+      path: '/archive',
+      readRoles: 'admin',
+      writeRoles: 'admin',
+    },
+  },
+]
 
 function directoryAccessRuleToDraft(rule: DirectoryAccessRule): DirectoryAccessRuleDraft {
   return {
@@ -1544,6 +2295,14 @@ function formatDirectoryAccessRuleDrafts(drafts: DirectoryAccessRuleDraft[]): st
     .join('\n')
 }
 
+function isDirectoryAccessRuleDraftEmpty(draft: DirectoryAccessRuleDraft): boolean {
+  return Object.values(draft).every((value) => value.trim() === '')
+}
+
+function getDirectoryAccessDraftPathKey(draft: DirectoryAccessRuleDraft): string {
+  return normalizeDirectoryQuotaPathInput(draft.path) ?? draft.path.trim()
+}
+
 function DirectoryAccessRuleEditor({ value, onChange }: { value: string; onChange: (value: string) => void }) {
   const [editorState, setEditorState] = useState(() => ({
     sourceValue: value,
@@ -1573,6 +2332,19 @@ function DirectoryAccessRuleEditor({ value, onChange }: { value: string; onChang
     commitDrafts(nextDrafts)
   }
 
+  const applyPreset = (preset: DirectoryAccessRulePreset) => {
+    const presetDraft = { ...preset.draft }
+    const currentDrafts = drafts.length === 1 && isDirectoryAccessRuleDraftEmpty(drafts[0])
+      ? []
+      : drafts
+    const presetPathKey = getDirectoryAccessDraftPathKey(presetDraft)
+    const existingIndex = currentDrafts.findIndex((draft) => getDirectoryAccessDraftPathKey(draft) === presetPathKey)
+    const nextDrafts = existingIndex >= 0
+      ? currentDrafts.map((draft, index) => (index === existingIndex ? presetDraft : draft))
+      : [...currentDrafts, presetDraft]
+    commitDrafts(nextDrafts)
+  }
+
   const removeDraft = (index: number) => {
     const nextDrafts = drafts.filter((_, draftIndex) => draftIndex !== index)
     commitDrafts(nextDrafts)
@@ -1580,6 +2352,29 @@ function DirectoryAccessRuleEditor({ value, onChange }: { value: string; onChang
 
   return (
     <div className="space-y-3">
+      <div className="rounded-lg border border-divider bg-content1/60 p-3">
+        <div className="flex flex-col gap-1">
+          <div className="text-sm font-semibold text-foreground">权限策略预设</div>
+          <div className="text-xs leading-5 text-default-500">
+            从常见家庭和小团队目录策略开始，再按实际用户或用户组调整。
+          </div>
+        </div>
+        <div className="mt-3 grid gap-2 lg:grid-cols-3">
+          {directoryAccessRulePresets.map((preset) => (
+            <Button
+              key={preset.label}
+              variant="flat"
+              className="h-auto justify-start rounded-lg px-3 py-2 text-left"
+              onPress={() => applyPreset(preset)}
+            >
+              <span className="min-w-0">
+                <span className="block text-sm font-medium">{preset.label}</span>
+                <span className="mt-1 block whitespace-normal text-xs leading-5 text-default-500">{preset.description}</span>
+              </span>
+            </Button>
+          ))}
+        </div>
+      </div>
       {drafts.map((draft, index) => {
         const ruleNumber = index + 1
         return (
@@ -2108,11 +2903,9 @@ function SecurityCheckCard({
                 />
               ))}
             </div>
-            {issueChecks.length === 0 && (
-              <p className="text-xs text-default-500">
-                当前自检项均已通过。公网域名、云防火墙和端口暴露仍建议使用服务器上的 mnemonas-doctor 复核。
-              </p>
-            )}
+            <p className="text-xs text-default-500">
+              Web 自检只覆盖当前服务可观察到的运行态。公网域名、证书链、云防火墙和端口暴露仍需在服务器上运行 mnemonas-doctor 复核。
+            </p>
           </div>
         )}
       </CardBody>
@@ -2287,6 +3080,8 @@ export function SettingsPage() {
   const navigate = useNavigate()
   const [searchParams, setSearchParams] = useSearchParams()
   const selectedTab = normalizeSettingsTab(searchParams.get('tab'))
+  const sharePathFilter = selectedTab === 'shares' ? searchParams.get('share_path') ?? '' : ''
+  const shareReviewFilter = selectedTab === 'shares' ? normalizeShareReviewFilter(searchParams.get('share_filter')) : 'all'
   const defaultSettings = {
     serverHost: '0.0.0.0',
     serverPort: '8080',
@@ -2342,6 +3137,9 @@ export function SettingsPage() {
     alertsTelegramBotTokenConfigured: false,
     alertsTelegramBotTokenClear: false,
     alertsTelegramChatID: '',
+    alertsWeComEnabled: false,
+    alertsWeComWebhookURL: '',
+    alertsWeComWebhookURLConfigured: false,
     alertsEmailEnabled: false,
     alertsSMTPHost: '',
     alertsSMTPPort: '587',
@@ -2420,6 +3218,9 @@ export function SettingsPage() {
       next.alertsTelegramBotTokenConfigured = request.alerts.telegram_bot_token === ''
         ? false
         : settings.alertsTelegramBotTokenConfigured || (request.alerts.telegram_bot_token?.trim() ?? '') !== ''
+      const weComWebhookURL = request.alerts.wecom_webhook_url?.trim() ?? ''
+      next.alertsWeComWebhookURL = weComWebhookURL ? REDACTED_SETTINGS_SECRET : ''
+      next.alertsWeComWebhookURLConfigured = weComWebhookURL !== ''
       next.alertsSMTPPasswordConfigured = request.alerts.smtp_password === ''
         ? false
         : settings.alertsSMTPPasswordConfigured || (request.alerts.smtp_password?.trim() ?? '') !== ''
@@ -2455,6 +3256,10 @@ export function SettingsPage() {
     if (current.alertsTelegramBotTokenClear === submitted.alertsTelegramBotTokenClear) {
       next.alertsTelegramBotTokenClear = sanitizedSubmitted.alertsTelegramBotTokenClear
     }
+    if (current.alertsWeComWebhookURL === submitted.alertsWeComWebhookURL) {
+      next.alertsWeComWebhookURL = sanitizedSubmitted.alertsWeComWebhookURL
+      next.alertsWeComWebhookURLConfigured = sanitizedSubmitted.alertsWeComWebhookURLConfigured
+    }
     if (current.alertsSMTPPassword === submitted.alertsSMTPPassword) {
       next.alertsSMTPPassword = sanitizedSubmitted.alertsSMTPPassword
       next.alertsSMTPPasswordConfigured = sanitizedSubmitted.alertsSMTPPasswordConfigured
@@ -2473,6 +3278,12 @@ export function SettingsPage() {
       settings.alertsTelegramEnabled
       && settings.alertsTelegramChatID.trim() !== ''
       && (settings.alertsTelegramBotTokenConfigured || settings.alertsTelegramBotToken.trim() !== '')
+    ) {
+      return true
+    }
+    if (
+      settings.alertsWeComEnabled
+      && (settings.alertsWeComWebhookURLConfigured || settings.alertsWeComWebhookURL.trim() !== '')
     ) {
       return true
     }
@@ -2499,7 +3310,7 @@ export function SettingsPage() {
     if (!hasSavedAlertNotificationChannel(settings)) {
       return {
         title: '没有可用提醒通道',
-        description: '请至少配置 Webhook、Telegram 或邮件通道并保存后再发送测试提醒。',
+        description: '请至少配置 Webhook、Telegram、企业微信或邮件通道并保存后再发送测试提醒。',
       }
     }
     return null
@@ -2807,6 +3618,13 @@ export function SettingsPage() {
     setSearchParams({ tab: nextTab })
   }, [setSearchParams])
 
+  const handleClearSharePathFilter = useCallback(() => {
+    const nextParams = new URLSearchParams(searchParams)
+    nextParams.set('tab', 'shares')
+    nextParams.delete('share_path')
+    setSearchParams(nextParams)
+  }, [searchParams, setSearchParams])
+
   const mapServerSettings = useCallback((data: NonNullable<typeof settingsData>['data']) => {
     return {
       serverHost: data.server.host,
@@ -2863,6 +3681,9 @@ export function SettingsPage() {
       alertsTelegramBotTokenConfigured: data.alerts?.telegram_bot_token_configured ?? false,
       alertsTelegramBotTokenClear: false,
       alertsTelegramChatID: data.alerts?.telegram_chat_id ?? '',
+      alertsWeComEnabled: data.alerts?.wecom_enabled ?? false,
+      alertsWeComWebhookURL: data.alerts?.wecom_webhook_url ?? '',
+      alertsWeComWebhookURLConfigured: data.alerts?.wecom_webhook_url_configured ?? (data.alerts?.wecom_webhook_url ?? '') === REDACTED_SETTINGS_SECRET,
       alertsEmailEnabled: data.alerts?.email_enabled ?? false,
       alertsSMTPHost: data.alerts?.smtp_host ?? '',
       alertsSMTPPort: String(data.alerts?.smtp_port ?? 587),
@@ -2931,6 +3752,52 @@ export function SettingsPage() {
     : !isDirty && settingsData?.data
       ? mapServerSettings(settingsData.data)
       : draftSettings
+  const savedDirectoryQuotas = useMemo(() => {
+    const savedSettings = savedSettingsOverride
+      ?? (settingsData?.data ? mapServerSettings(settingsData.data) : null)
+    if (!savedSettings) {
+      return []
+    }
+    const parsedQuotas = parseDirectoryQuotaLines(savedSettings.directoryQuotas)
+    return parsedQuotas.error ? [] : parsedQuotas.quotas
+  }, [mapServerSettings, savedSettingsOverride, settingsData])
+  const savedDirectoryAccessRules = useMemo(() => {
+    const savedSettings = savedSettingsOverride
+      ?? (settingsData?.data ? mapServerSettings(settingsData.data) : null)
+    if (!savedSettings) {
+      return []
+    }
+    const parsedRules = parseDirectoryAccessRuleLines(savedSettings.directoryAccessRules)
+    return parsedRules.error ? [] : parsedRules.rules
+  }, [mapServerSettings, savedSettingsOverride, settingsData])
+  const savedSharePolicyReviewInput = useMemo<SharePolicyReviewInput>(() => {
+    const savedSettings = savedSettingsOverride
+      ?? (settingsData?.data ? mapServerSettings(settingsData.data) : null)
+    if (!savedSettings) {
+      return {
+        enabled: false,
+        baseURL: '',
+        defaultExpiresIn: '168h',
+        defaultMaxAccess: '0',
+        rules: [],
+      }
+    }
+
+    return {
+      enabled: savedSettings.shareEnabled,
+      baseURL: savedSettings.shareBaseURL,
+      defaultExpiresIn: savedSettings.shareDefaultExpiresIn,
+      defaultMaxAccess: savedSettings.shareDefaultMaxAccess,
+      rules: savedSettings.sharePolicyRules,
+    }
+  }, [mapServerSettings, savedSettingsOverride, settingsData])
+  const draftSharePolicyReviewInput: SharePolicyReviewInput = {
+    enabled: settings.shareEnabled,
+    baseURL: settings.shareBaseURL,
+    defaultExpiresIn: settings.shareDefaultExpiresIn,
+    defaultMaxAccess: settings.shareDefaultMaxAccess,
+    rules: settings.sharePolicyRules,
+  }
   const webdavNoAuthSelected = settings.webdavEnabled && settings.webdavAuthType === 'none'
   const serverBeyondLoopback = listensBeyondLoopback(settings.serverHost)
   const normalizedWebDAVPrefixDraft = normalizeWebDAVPrefix(settings.webdavPrefix)
@@ -3267,6 +4134,7 @@ export function SettingsPage() {
     const trimmedAlertsWebhookMethod = settings.alertsWebhookMethod.trim().toUpperCase()
     const trimmedAlertsTelegramBotToken = settings.alertsTelegramBotToken.trim()
     const trimmedAlertsTelegramChatID = settings.alertsTelegramChatID.trim()
+    const trimmedAlertsWeComWebhookURL = settings.alertsWeComWebhookURL.trim()
     const trimmedAlertsSMTPHost = settings.alertsSMTPHost.trim()
     const trimmedAlertsSMTPPort = settings.alertsSMTPPort.trim()
     const parsedAlertsSMTPPort = Number(trimmedAlertsSMTPPort)
@@ -3747,6 +4615,33 @@ export function SettingsPage() {
       return
     }
 
+    if (trimmedAlertsWeComWebhookURL === REDACTED_SETTINGS_SECRET && !settings.alertsWeComWebhookURLConfigured) {
+      addToast({
+        title: '企业微信 Webhook 占位符无效',
+        description: '只有服务端已保存的企业微信 Webhook URL 才能保留为 <redacted>；新增企业微信 Webhook 需要填写真实地址。',
+        color: 'danger',
+      })
+      return
+    }
+
+    if (trimmedAlertsWeComWebhookURL !== REDACTED_SETTINGS_SECRET && !isValidOptionalHTTPURL(trimmedAlertsWeComWebhookURL)) {
+      addToast({
+        title: '企业微信 Webhook URL 无效',
+        description: '企业微信 Webhook URL 必须为空，或使用 http/https 的完整地址',
+        color: 'danger',
+      })
+      return
+    }
+
+    if (settings.alertsWeComEnabled && !trimmedAlertsWeComWebhookURL && !settings.alertsWeComWebhookURLConfigured) {
+      addToast({
+        title: '企业微信 Webhook URL 缺失',
+        description: '启用企业微信通知时必须填写群机器人 Webhook URL。',
+        color: 'danger',
+      })
+      return
+    }
+
     if (!/^\d+$/.test(trimmedAlertsSMTPPort) || !Number.isInteger(parsedAlertsSMTPPort) || parsedAlertsSMTPPort < 1 || parsedAlertsSMTPPort > 65535) {
       addToast({
         title: 'SMTP 端口格式无效',
@@ -4069,6 +4964,8 @@ export function SettingsPage() {
         webhook_headers: alertsWebhookHeaders,
         telegram_enabled: settings.alertsTelegramEnabled,
         telegram_chat_id: trimmedAlertsTelegramChatID,
+        wecom_enabled: settings.alertsWeComEnabled,
+        wecom_webhook_url: trimmedAlertsWeComWebhookURL,
         email_enabled: settings.alertsEmailEnabled,
         smtp_host: trimmedAlertsSMTPHost,
         smtp_port: parsedAlertsSMTPPort,
@@ -4615,6 +5512,10 @@ export function SettingsPage() {
                     placeholder="/team 1 TB"
                     className="input-shell w-full rounded-medium border border-transparent bg-transparent px-3 py-2 font-mono text-sm outline-none focus:border-accent-primary"
                   />
+                  <DirectoryQuotaChangeReview
+                    savedQuotas={savedDirectoryQuotas}
+                    draftValue={settings.directoryQuotas}
+                  />
                   <div className="grid gap-2 text-xs text-default-500 sm:grid-cols-2">
                     <div className="rounded-lg border border-divider bg-content2/40 px-3 py-2">
                       每行一个目录，例如 <span className="font-mono text-foreground">/team 1 TB</span>
@@ -4636,6 +5537,11 @@ export function SettingsPage() {
                     value={settings.directoryAccessRules}
                     onChange={(nextValue) => updateDirtySettings(s => ({ ...s, directoryAccessRules: nextValue }))}
                   />
+                  <DirectoryAccessRuleChangeReview
+                    savedRules={savedDirectoryAccessRules}
+                    draftValue={settings.directoryAccessRules}
+                  />
+                  <DirectoryAccessCoverageSummary draftValue={settings.directoryAccessRules} />
                   <div className="grid gap-2 text-xs text-default-500 sm:grid-cols-2">
                     <div className="rounded-lg border border-divider bg-content2/40 px-3 py-2">
                       可用字段：<span className="font-mono text-foreground">read_users</span>、<span className="font-mono text-foreground">write_users</span>、<span className="font-mono text-foreground">read_groups</span>、<span className="font-mono text-foreground">write_groups</span>
@@ -5661,6 +6567,44 @@ export function SettingsPage() {
                   </div>
                   <Divider className="bg-divider" />
                   <SettingRow
+                    label="企业微信通知"
+                    description="将同一批提醒事件发送到企业微信/WeCom 群机器人"
+                  >
+                    <Switch
+                      aria-label="启用企业微信通知"
+                      isSelected={settings.alertsWeComEnabled}
+                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, alertsWeComEnabled: v }))}
+                      isDisabled={!settings.alertsEnabled}
+                      classNames={{
+                        wrapper: cn(
+                          "group-data-[selected=true]:bg-accent-primary",
+                          "bg-content2"
+                        ),
+                        label: "sr-only",
+                      }}
+                    >
+                      启用企业微信通知
+                    </Switch>
+                  </SettingRow>
+                  <Divider className="bg-divider" />
+                  <SettingRow
+                    label="企业微信 Webhook URL"
+                    description="企业微信群机器人 Webhook 地址；保存后仅显示已配置占位"
+                  >
+                    <Input
+                      type="url"
+                      aria-label="企业微信 Webhook URL"
+                      value={settings.alertsWeComWebhookURL}
+                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, alertsWeComWebhookURL: v }))}
+                      placeholder="https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=..."
+                      isDisabled={!settings.alertsEnabled || !settings.alertsWeComEnabled}
+                      classNames={{
+                        inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
+                      }}
+                    />
+                  </SettingRow>
+                  <Divider className="bg-divider" />
+                  <SettingRow
                     label="邮件通知"
                     description="将同一批提醒事件发送到 SMTP 收件人"
                   >
@@ -6005,25 +6949,34 @@ export function SettingsPage() {
                     />
                   </SettingRow>
                   <Divider className="bg-divider" />
-                  <SettingRow
-                    label="路径分享策略"
-                    description="为指定目录设置更严格的分享约束；更深的路径优先生效"
-                  >
-                    <SharePolicyRuleEditor
-                      rules={settings.sharePolicyRules}
-                      isDisabled={!settings.shareEnabled}
-                      onChange={(nextRules) => updateDirtySettings(s => ({ ...s, sharePolicyRules: nextRules }))}
-                    />
-                  </SettingRow>
-                </div>
-              </SettingsSection>
+	                  <SettingRow
+	                    label="路径分享策略"
+	                    description="为指定目录设置更严格的分享约束；更深的路径优先生效"
+	                  >
+	                    <SharePolicyRuleEditor
+	                      rules={settings.sharePolicyRules}
+	                      isDisabled={!settings.shareEnabled}
+	                      onChange={(nextRules) => updateDirtySettings(s => ({ ...s, sharePolicyRules: nextRules }))}
+	                    />
+	                  </SettingRow>
+	                  <SharePolicyChangeReview
+	                    saved={savedSharePolicyReviewInput}
+	                    draft={draftSharePolicyReviewInput}
+	                  />
+	                </div>
+	              </SettingsSection>
 
               <SettingsSection
                 title="分享链接"
                 description="查看和处理已创建的分享链接"
                 icon={Link2}
               >
-                <ShareManager featureEnabled={settings.shareEnabled} />
+                <ShareManager
+                  featureEnabled={settings.shareEnabled}
+                  initialReviewFilter={shareReviewFilter}
+                  pathFilter={sharePathFilter}
+                  onClearPathFilter={handleClearSharePathFilter}
+                />
               </SettingsSection>
             </div>
           </Tab>

@@ -3,7 +3,6 @@ package backup
 import (
 	"context"
 	"fmt"
-	"path/filepath"
 	"strings"
 	"time"
 )
@@ -215,6 +214,12 @@ func validateBatchRestoreItems(items []BatchRestoreItemOptions) error {
 	if len(items) > batchRestoreLimit {
 		return invalidRestoreRequestErrorf("%w: batch restore supports at most %d items", ErrUnsafePath, batchRestoreLimit)
 	}
+	for index, item := range items {
+		item = normalizeBatchRestoreItem(item)
+		if _, err := normalizeRestoreTargetPathSyntax(item.TargetPath); err != nil {
+			return markInvalidRestoreRequest(fmt.Errorf("batch restore item %d target_path: %w", index, err))
+		}
+	}
 	return nil
 }
 
@@ -225,18 +230,18 @@ func normalizeBatchRestoreItem(item BatchRestoreItemOptions) BatchRestoreItemOpt
 }
 
 func normalizeBatchRestoreTargetPath(targetPath string) string {
-	target := strings.TrimSpace(targetPath)
-	if filepath.IsAbs(target) {
-		return filepath.Clean(target)
+	target, err := normalizeRestoreTargetPathSyntax(targetPath)
+	if err == nil {
+		return target
 	}
-	return target
+	return strings.TrimSpace(targetPath)
 }
 
 func batchRestoreTargetConflict(targets map[string]int, targetPath string, itemIndex int) string {
-	if !filepath.IsAbs(targetPath) {
+	if !isCanonicalizableBatchRestoreTargetPath(targetPath) {
 		return ""
 	}
-	target := filepath.Clean(targetPath)
+	target := normalizeBatchRestoreTargetPath(targetPath)
 	for existing, index := range targets {
 		if pathContainsOrEquals(existing, target) || pathContainsOrEquals(target, existing) {
 			return fmt.Sprintf("%v: restore target conflicts with batch item %d", ErrRestoreTargetExists, index)
@@ -244,6 +249,11 @@ func batchRestoreTargetConflict(targets map[string]int, targetPath string, itemI
 	}
 	targets[target] = itemIndex
 	return ""
+}
+
+func isCanonicalizableBatchRestoreTargetPath(targetPath string) bool {
+	_, err := normalizeRestoreTargetPathSyntax(targetPath)
+	return err == nil
 }
 
 func finishBatchRestorePreview(result *BatchRestorePreviewResult, finishedAt time.Time) {

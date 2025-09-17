@@ -485,6 +485,15 @@ function getBackupScheduleWindowText(job: BackupJob): string {
   return `自动窗口: ${job.schedule_window_start}-${job.schedule_window_end}`
 }
 
+const backupStarterConfigSnippet = `[[backup.jobs]]
+id = "external-disk"
+name = "外置硬盘备份"
+type = "local"
+destination = "/mnt/backup-drive/mnemonas"
+schedule_interval = "24h"
+max_snapshots = 7
+verify_after_backup = true`
+
 function canRunBackupRestoreDrill(job: BackupJob): boolean {
   if (job.type === 'restic' || job.type === 'rclone') {
     return true
@@ -587,6 +596,20 @@ function getRestoreTargetDescription(job: BackupJob | null): string {
   return '目标目录必须在 storage.root、备份来源和备份目标之外；父目录存在，目标不存在或为空。'
 }
 
+function getRestoreTargetSlug(job: BackupJob): string {
+  const slug = job.id
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, '-')
+    .replace(/^[.-]+|[.-]+$/g, '')
+    .replace(/-+/g, '-')
+  return slug || 'backup'
+}
+
+function getSuggestedRestoreTargetPath(job: BackupJob): string {
+  return `/mnt/restore/${getRestoreTargetSlug(job)}`
+}
+
 function RestoreCheckRow({
   tone,
   title,
@@ -675,6 +698,157 @@ function RestorePreflightList({ checks }: { checks?: BackupRestorePreflightCheck
           description={check.detail || check.status}
         />
       ))}
+    </div>
+  )
+}
+
+function getRestorePreflightCounts(checks?: BackupRestorePreflightCheck[]): { passed: number; warning: number; failed: number } {
+  return (checks ?? []).reduce((counts, check) => {
+    if (check.status === 'passed') {
+      counts.passed += 1
+    } else if (check.status === 'warning') {
+      counts.warning += 1
+    } else if (check.status === 'failed') {
+      counts.failed += 1
+    }
+    return counts
+  }, { passed: 0, warning: 0, failed: 0 })
+}
+
+function getRestorePreflightDetail(checks: BackupRestorePreflightCheck[] | undefined, id: string): string | null {
+  const check = checks?.find((candidate) => candidate.id === id)
+  return check?.detail || check?.title || null
+}
+
+type RestoreImpactTone = 'success' | 'warning' | 'danger' | 'default'
+
+function getRestoreImpactItemClass(tone: RestoreImpactTone): string {
+  switch (tone) {
+  case 'success':
+    return 'border-success/20 bg-success/5'
+  case 'warning':
+    return 'border-warning/20 bg-warning/10'
+  case 'danger':
+    return 'border-danger/20 bg-danger/10'
+  default:
+    return 'border-divider bg-content2/60'
+  }
+}
+
+function RestoreImpactItem({
+  label,
+  value,
+  tone = 'default',
+}: {
+  label: string
+  value: string
+  tone?: RestoreImpactTone
+}) {
+  return (
+    <div className={`min-w-0 rounded-lg border p-3 ${getRestoreImpactItemClass(tone)}`}>
+      <div className="text-xs font-medium text-default-500">{label}</div>
+      <div className="mt-1 break-words text-sm text-default-700">{value}</div>
+    </div>
+  )
+}
+
+function RestoreImpactSummary({
+  result,
+  matches,
+}: {
+  result: BackupRestorePreviewResult
+  matches: boolean
+}) {
+  const counts = getRestorePreflightCounts(result.preflight_checks)
+  const hasWarnings = (result.warnings?.length ?? 0) > 0 || counts.warning > 0
+  const targetState = getRestorePreflightDetail(result.preflight_checks, 'target_state')
+    ?? '恢复执行前会再次确认目标目录不存在或为空。'
+  const conflictText = !matches
+    ? '目标目录或配置选项已变更，当前预览不能作为执行依据。'
+    : counts.failed > 0 || result.status === 'failed'
+      ? '存在失败预检，处理失败项并重新生成预览前不会执行恢复。'
+      : hasWarnings
+        ? '存在预检提醒，恢复前需要人工确认目标目录、容量或配置影响。'
+        : '未发现会覆盖当前 storage.root 的冲突；恢复写入独立目标目录。'
+  const permissionText = result.config_included
+    ? '配置文件会单独恢复到 .mnemonas-restore/config.toml；切换前需人工比对用户、目录权限、分享、告警和公开访问设置。'
+    : '本次不恢复配置文件，当前运行中的用户、目录权限、分享、告警和公开访问设置不会自动改变。'
+  const sampleText = result.sample_paths && result.sample_paths.length > 0
+    ? `样例: ${result.sample_paths.slice(0, 3).join('、')}`
+    : '预览未返回样例路径。'
+
+  return (
+    <div aria-label="恢复影响摘要" className="mt-3 rounded-lg border border-divider bg-content1 p-3">
+      <div className="flex items-center gap-2 text-sm font-medium text-default-800">
+        <ListChecks size={16} />
+        <span>恢复影响摘要</span>
+      </div>
+      <div className="mt-3 grid gap-2 sm:grid-cols-2">
+        <RestoreImpactItem label="目标状态" value={targetState} tone={matches && counts.failed === 0 ? 'success' : 'danger'} />
+        <RestoreImpactItem label="冲突与覆盖" value={conflictText} tone={!matches || counts.failed > 0 ? 'danger' : hasWarnings ? 'warning' : 'success'} />
+        <RestoreImpactItem label="权限影响" value={permissionText} tone={result.config_included ? 'warning' : 'success'} />
+        <RestoreImpactItem label="恢复范围" value={`${getBackupRestorePreviewMetricText(result)}；${sampleText}`} tone="default" />
+        <RestoreImpactItem
+          label="预检结果"
+          value={`${counts.passed} 项通过 · ${counts.warning} 项提醒 · ${counts.failed} 项失败`}
+          tone={counts.failed > 0 ? 'danger' : counts.warning > 0 ? 'warning' : 'success'}
+        />
+        <RestoreImpactItem
+          label="恢复后校验"
+          value="恢复完成后自动执行只读校验；切换 storage.root 前需保留旧目录和旧配置作为回滚点。"
+          tone="default"
+        />
+      </div>
+    </div>
+  )
+}
+
+function RestoreExecutionReview({
+  result,
+  matches,
+}: {
+  result: BackupRestorePreviewResult
+  matches: boolean
+}) {
+  const checks = result.preflight_checks ?? []
+  const { passed: passedCount, warning: warningCount, failed: failedCount } = getRestorePreflightCounts(checks)
+  const toneClass = !matches || failedCount > 0
+    ? 'border-danger/20 bg-danger/10'
+    : warningCount > 0 || (result.warnings?.length ?? 0) > 0
+      ? 'border-warning/20 bg-warning/10'
+      : 'border-success/20 bg-success/10'
+
+  const reviewItems = [
+    { label: '目标目录', value: result.target_path },
+    { label: '写入边界', value: '恢复只写入独立目录，不覆盖当前 storage.root。' },
+    { label: '恢复内容', value: getBackupRestorePreviewMetricText(result) },
+    {
+      label: '配置文件',
+      value: result.config_available
+        ? (result.config_included ? '将恢复到 .mnemonas-restore/config.toml' : '本次不恢复配置文件')
+        : '备份未提供可恢复配置文件',
+    },
+    {
+      label: '预检结果',
+      value: `${passedCount} 项通过 · ${warningCount} 项提醒 · ${failedCount} 项失败`,
+    },
+    { label: '恢复后检查', value: '恢复完成后自动执行只读校验，并显示切换步骤和回滚清单。' },
+  ]
+
+  return (
+    <div aria-label="恢复执行前复核" className={`mt-3 rounded-lg border p-3 text-sm ${toneClass}`}>
+      <div className="font-medium text-default-800">恢复执行前复核</div>
+      <div className="mt-3 grid gap-3 sm:grid-cols-2">
+        {reviewItems.map((item) => (
+          <div key={item.label} className="min-w-0">
+            <div className="text-xs text-default-500">{item.label}</div>
+            <div className="mt-1 break-words text-default-700">{item.value}</div>
+          </div>
+        ))}
+      </div>
+      {!matches && (
+        <div className="mt-3 text-xs text-danger">目标目录或配置选项已变更，当前复核不可用于执行恢复。</div>
+      )}
     </div>
   )
 }
@@ -985,6 +1159,40 @@ function BackupRestoreReportFindings({ findings }: { findings?: string[] }) {
   )
 }
 
+function BackupRestoreHistoryList({ history }: { history?: BackupRestoreResult[] }) {
+  if (!history || history.length <= 1) {
+    return null
+  }
+
+  const visibleHistory = history.slice(0, 3)
+  const failedCount = history.filter((entry) => entry.status === 'failed').length
+
+  return (
+    <div aria-label="最近恢复记录" className="mt-2 rounded-lg bg-default-50 p-2 text-xs text-default-500">
+      <div className="mb-1 font-medium text-default-600">最近恢复记录（{history.length} 条）</div>
+      <div className="space-y-2">
+        {visibleHistory.map((entry) => (
+          <div key={entry.id} className="space-y-1 border-t border-default-100 pt-2 first:border-t-0 first:pt-0">
+            <div className="flex items-center justify-between gap-2">
+              <span className={entry.status === 'failed' ? 'text-danger' : entry.status === 'running' ? 'text-warning' : 'text-default-500'}>
+                {getBackupTaskStatusLabel(entry.status)}
+              </span>
+              <span className="truncate text-default-400">{formatDateTime(entry.finished_at ?? entry.started_at)}</span>
+            </div>
+            <div className="truncate text-default-500" title={entry.target_path}>目标: {entry.target_path}</div>
+            <div className="text-default-400">{getBackupRestoreMetricText(entry)}</div>
+            {entry.error_message && <div className="text-danger">{getBackupDiagnosticDisplayMessage(entry.error_message)}</div>}
+            {entry.warnings && entry.warnings.length > 0 && <div className="text-warning">{getBackupDiagnosticDisplayMessage(entry.warnings[0])}</div>}
+          </div>
+        ))}
+      </div>
+      {failedCount > 0 && (
+        <div className="mt-2 text-warning">近 {history.length} 次包含 {failedCount} 次失败</div>
+      )}
+    </div>
+  )
+}
+
 function BackupRestoreSummary({ job }: { job: BackupJob }) {
   const result = job.last_restore
   if (!result) {
@@ -1012,9 +1220,7 @@ function BackupRestoreSummary({ job }: { job: BackupJob }) {
       <div className="max-w-[18rem] truncate text-default-400" title={result.target_path}>
         目标: {result.target_path}
       </div>
-      {job.restore_history && job.restore_history.length > 1 && (
-        <div className="text-default-400">历史 {job.restore_history.length} 条</div>
-      )}
+      <BackupRestoreHistoryList history={job.restore_history} />
       {verify && (
         <div className={verify.status === 'failed' ? 'text-danger' : verify.warnings && verify.warnings.length > 0 ? 'text-warning' : 'text-default-400'}>
           最近检查: {getBackupRestoreVerifyMetricText(verify)}
@@ -1069,6 +1275,10 @@ function getBackupConflictDescription(error: unknown, fallback: string): string 
 }
 
 function normalizeRestoreTargetForCompare(value: string): string {
+  const normalized = normalizeRestoreTargetForRequest(value)
+  if (normalized) {
+    return normalized
+  }
   const trimmed = value.trim()
   if (trimmed.length <= 1) {
     return trimmed
@@ -1078,37 +1288,38 @@ function normalizeRestoreTargetForCompare(value: string): string {
 
 function isAbsoluteRestoreTargetPath(value: string): boolean {
   const trimmed = value.trim()
-  return trimmed.startsWith('/') || /^[A-Za-z]:[\\/]/.test(trimmed) || trimmed.startsWith('\\\\')
+  return trimmed.startsWith('/')
 }
 
 function normalizeRestoreTargetSegments(pathBody: string, separatorPattern: RegExp): string[] {
-  const segments: string[] = []
-  for (const segment of pathBody.split(separatorPattern)) {
-    if (!segment || segment === '.') {
-      continue
-    }
-    if (segment === '..') {
-      segments.pop()
-      continue
-    }
-    segments.push(segment)
+  return pathBody.split(separatorPattern).filter(Boolean)
+}
+
+function hasUnsafeRestoreTargetSegment(value: string): boolean {
+  return value.trim().split('/').some((segment) => segment === '.' || segment === '..')
+}
+
+function normalizeRestoreTargetForRequest(value: string): string | null {
+  const trimmed = value.trim()
+  if (!trimmed.startsWith('/')) {
+    return null
   }
-  return segments
+  const segments = normalizeRestoreTargetSegments(trimmed.slice(1), /\/+/)
+  if (segments.length === 0 || segments.some((segment) => segment === '.' || segment === '..')) {
+    return null
+  }
+  return `/${segments.join('/')}`
+}
+
+function normalizeBatchRestoreItemsForRequest(items: BackupBatchRestoreItemRequest[]): BackupBatchRestoreItemRequest[] {
+  return items.map((item) => ({
+    ...item,
+    target_path: normalizeRestoreTargetForRequest(item.target_path) ?? item.target_path.trim(),
+  }))
 }
 
 function getRestoreTargetSafetyPath(value: string): string | null {
   const trimmed = value.trim()
-  const driveMatch = /^([A-Za-z]:)[\\/](.*)$/.exec(trimmed)
-  if (driveMatch) {
-    return `${driveMatch[1].toLowerCase()}/${normalizeRestoreTargetSegments(driveMatch[2], /[\\/]+/).join('/')}`
-  }
-  if (trimmed.startsWith('\\\\')) {
-    const parts = trimmed.slice(2).split(/[\\/]+/).filter(Boolean)
-    if (parts.length < 2) {
-      return '//'
-    }
-    return `//${parts.slice(0, 2).join('/').toLowerCase()}/${normalizeRestoreTargetSegments(parts.slice(2).join('\\'), /[\\/]+/).join('/')}`
-  }
   if (trimmed.startsWith('/')) {
     return `/${normalizeRestoreTargetSegments(trimmed.slice(1), /\/+/).join('/')}`
   }
@@ -1145,6 +1356,9 @@ function getRestoreTargetInputError(targetPath: string): string | null {
   if (!isAbsoluteRestoreTargetPath(trimmed)) {
     return '恢复目标必须是服务器上的绝对路径，例如 /mnt/restore/mnemonas。'
   }
+  if (hasUnsafeRestoreTargetSegment(trimmed)) {
+    return '恢复目标不能包含 . 或 .. 路径段。'
+  }
   if (isRestoreTargetProtectedPath(trimmed)) {
     return '恢复目标不能是文件系统根目录或受保护系统目录。'
   }
@@ -1168,23 +1382,6 @@ type RestoreTargetConflictKey = {
 
 function getRestoreTargetConflictKey(value: string): RestoreTargetConflictKey | null {
   const trimmed = value.trim()
-  const driveMatch = /^([A-Za-z]:)[\\/](.*)$/.exec(trimmed)
-  if (driveMatch) {
-    return {
-      root: driveMatch[1].toLowerCase(),
-      segments: normalizeRestoreTargetSegments(driveMatch[2].toLowerCase(), /[\\/]+/),
-    }
-  }
-  if (trimmed.startsWith('\\\\')) {
-    const parts = trimmed.slice(2).split(/[\\/]+/).filter(Boolean)
-    if (parts.length < 2) {
-      return { root: `unc:${parts.join('/').toLowerCase()}`, segments: [] }
-    }
-    return {
-      root: `unc:${parts.slice(0, 2).join('/').toLowerCase()}`,
-      segments: normalizeRestoreTargetSegments(parts.slice(2).join('\\').toLowerCase(), /[\\/]+/),
-    }
-  }
   if (trimmed.startsWith('/')) {
     return {
       root: '/',
@@ -1303,8 +1500,75 @@ function isCurrentBatchRestorePreview(
     const requestItem = requestItems[index]
     return requestItem?.job_id === item.job_id
       && Boolean(requestItem.include_config) === Boolean(item.include_config)
-      && normalizeRestoreTargetForCompare(requestItem.target_path) === normalizeRestoreTargetForCompare(item.target_path)
+    && normalizeRestoreTargetForCompare(requestItem.target_path) === normalizeRestoreTargetForCompare(item.target_path)
   })
+}
+
+function getBatchRestorePreflightCounts(result: BackupBatchRestorePreviewResult): { passed: number; warning: number; failed: number } {
+  return result.items.reduce((counts, item) => {
+    const itemCounts = getRestorePreflightCounts(item.preview?.preflight_checks)
+    counts.passed += itemCounts.passed
+    counts.warning += itemCounts.warning
+    counts.failed += itemCounts.failed
+    if (item.status === 'failed') {
+      counts.failed += 1
+    }
+    return counts
+  }, { passed: 0, warning: 0, failed: 0 })
+}
+
+function BatchRestoreImpactSummary({
+  result,
+  matches,
+}: {
+  result: BackupBatchRestorePreviewResult
+  matches: boolean
+}) {
+  const preflightCounts = getBatchRestorePreflightCounts(result)
+  const configIncludedCount = result.items.filter((item) => item.include_config).length
+  const failedItems = result.items.filter((item) => item.status === 'failed').length
+  const warningItems = result.items.filter((item) => (item.preview?.warnings?.length ?? 0) > 0 || item.preview?.preflight_checks?.some((check) => check.status === 'warning')).length
+  const hasFailures = failedItems > 0 || preflightCounts.failed > 0 || result.status === 'failed'
+  const hasWarnings = (result.warnings?.length ?? 0) > 0 || warningItems > 0 || preflightCounts.warning > 0 || result.warning
+  const conflictText = !matches
+    ? '选中的任务、目标目录或配置选项已变更，当前批量预览不能作为执行依据。'
+    : hasFailures
+      ? '存在失败项目或失败预检，处理后需重新生成批量预览。'
+      : hasWarnings
+        ? '存在提醒项目，执行前需要逐项确认目标目录、容量或配置影响。'
+        : '未发现批量目标目录重复或父子嵌套；恢复会按顺序写入独立目录。'
+  const permissionText = configIncludedCount > 0
+    ? `${configIncludedCount} 项会恢复配置文件到各自目标目录；切换前需逐项比对用户、目录权限、分享、告警和公开访问设置。`
+    : '本批次不恢复配置文件，当前运行中的用户、目录权限、分享、告警和公开访问设置不会自动改变。'
+
+  return (
+    <div aria-label="批量恢复影响摘要" className="rounded-lg border border-divider bg-content1 p-3">
+      <div className="flex items-center gap-2 text-sm font-medium text-default-800">
+        <ListChecks size={16} />
+        <span>批量恢复影响摘要</span>
+      </div>
+      <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+        <RestoreImpactItem
+          label="目标目录"
+          value={`${result.items.length} 个独立目标目录；批量执行前会阻止重复或父子嵌套目标。`}
+          tone={matches && !hasFailures ? 'success' : 'danger'}
+        />
+        <RestoreImpactItem label="冲突与覆盖" value={conflictText} tone={!matches || hasFailures ? 'danger' : hasWarnings ? 'warning' : 'success'} />
+        <RestoreImpactItem label="权限影响" value={permissionText} tone={configIncludedCount > 0 ? 'warning' : 'success'} />
+        <RestoreImpactItem label="恢复内容" value={`${result.total_files} 个文件 · ${formatBytes(result.total_bytes)}`} tone="default" />
+        <RestoreImpactItem
+          label="预检结果"
+          value={`${preflightCounts.passed} 项通过 · ${preflightCounts.warning} 项提醒 · ${preflightCounts.failed} 项失败`}
+          tone={preflightCounts.failed > 0 ? 'danger' : preflightCounts.warning > 0 ? 'warning' : 'success'}
+        />
+        <RestoreImpactItem
+          label="恢复后校验"
+          value="每个成功项目都会自动执行只读校验；批量结果汇总已校验文件数和字节数。"
+          tone="default"
+        />
+      </div>
+    </div>
+  )
 }
 
 function BatchRestorePreviewSummary({ result }: { result: BackupBatchRestorePreviewResult }) {
@@ -1341,6 +1605,51 @@ function BatchRestorePreviewSummary({ result }: { result: BackupBatchRestorePrev
           </div>
         ))}
       </div>
+    </div>
+  )
+}
+
+function BatchRestoreExecutionReview({
+  result,
+  matches,
+}: {
+  result: BackupBatchRestorePreviewResult
+  matches: boolean
+}) {
+  const preflightCounts = getBatchRestorePreflightCounts(result)
+  const configIncludedCount = result.items.filter((item) => item.include_config).length
+  const hasWarnings = result.warning || (result.warnings?.length ?? 0) > 0 || preflightCounts.warning > 0
+  const hasFailures = result.status === 'failed' || preflightCounts.failed > 0
+  const toneClass = !matches || hasFailures
+    ? 'border-danger/20 bg-danger/10'
+    : hasWarnings
+      ? 'border-warning/20 bg-warning/10'
+      : 'border-success/20 bg-success/10'
+  const targetSummary = `${result.items.length} 个互不重叠的独立目标目录`
+
+  const reviewItems = [
+    { label: '恢复项目', value: `${result.items.length} 项` },
+    { label: '目标目录', value: targetSummary },
+    { label: '恢复内容', value: `${result.total_files} 个文件 · ${formatBytes(result.total_bytes)}` },
+    { label: '配置文件', value: configIncludedCount > 0 ? `${configIncludedCount} 项会恢复配置文件` : '本次不恢复配置文件' },
+    { label: '预检结果', value: `${preflightCounts.passed} 项通过 · ${preflightCounts.warning} 项提醒 · ${preflightCounts.failed} 项失败` },
+    { label: '恢复后检查', value: '每个成功项目都会自动执行只读校验；批量结果会汇总已校验文件数和字节数。' },
+  ]
+
+  return (
+    <div aria-label="批量恢复执行前复核" className={`rounded-lg border p-3 text-sm ${toneClass}`}>
+      <div className="font-medium text-default-800">批量恢复执行前复核</div>
+      <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+        {reviewItems.map((item) => (
+          <div key={item.label} className="min-w-0">
+            <div className="text-xs text-default-500">{item.label}</div>
+            <div className="mt-1 break-words text-default-700">{item.value}</div>
+          </div>
+        ))}
+      </div>
+      {!matches && (
+        <div className="mt-3 text-xs text-danger">选中的任务、目标目录或配置选项已变更，当前复核不可用于执行批量恢复。</div>
+      )}
     </div>
   )
 }
@@ -1503,7 +1812,7 @@ export default function Maintenance() {
 
   const openRestoreModal = (job: BackupJob) => {
     setRestoreJob(job)
-    setRestoreTargetPath('')
+    setRestoreTargetPath(getSuggestedRestoreTargetPath(job))
     setRestoreIncludeConfig(job.type === 'local' && Boolean(job.include_config))
     setRestorePreview(null)
     setRestorePreviewRequest(null)
@@ -1542,11 +1851,15 @@ export default function Maintenance() {
 
   const openBatchRestoreModal = () => {
     const defaults: Record<string, boolean> = {}
+    const targetDefaults: Record<string, string> = {}
     backupJobs.forEach((job) => {
       defaults[job.id] = job.type === 'local' && Boolean(job.include_config)
+      if (!job.disabled && canRunBackupRestore(job)) {
+        targetDefaults[job.id] = getSuggestedRestoreTargetPath(job)
+      }
     })
     setBatchRestoreSelectedJobIds([])
-    setBatchRestoreTargets({})
+    setBatchRestoreTargets(targetDefaults)
     setBatchRestoreIncludeConfig(defaults)
     setBatchRestorePreview(null)
     setBatchRestorePreviewItems(null)
@@ -1847,8 +2160,9 @@ export default function Maintenance() {
       })
       return
     }
+    const normalizedTargetPath = normalizeRestoreTargetForRequest(targetPath) ?? targetPath.trim()
     const controller = createActionAbortController(restoreVerifyAbortControllerRef)
-    restoreVerifyMutation.mutate({ jobId, targetPath, signal: controller.signal })
+    restoreVerifyMutation.mutate({ jobId, targetPath: normalizedTargetPath, signal: controller.signal })
   }
 
   const restoreMutation = useMutation({
@@ -2060,8 +2374,7 @@ export default function Maintenance() {
 
   const startRestorePreview = () => {
     if (!restoreJob) return
-    const targetPath = restoreTargetPath.trim()
-    const targetInputError = getRestoreTargetInputError(targetPath)
+    const targetInputError = getRestoreTargetInputError(restoreTargetPath)
     if (targetInputError) {
       addToast({
         title: '恢复目标格式无效',
@@ -2070,6 +2383,8 @@ export default function Maintenance() {
       })
       return
     }
+    const targetPath = normalizeRestoreTargetForRequest(restoreTargetPath)
+    if (!targetPath) return
     const controller = createActionAbortController(restorePreviewAbortControllerRef)
     restorePreviewMutation.mutate({
       jobId: restoreJob.id,
@@ -2081,8 +2396,7 @@ export default function Maintenance() {
 
   const startRestore = () => {
     if (!restoreJob) return
-    const targetPath = restoreTargetPath.trim()
-    const targetInputError = getRestoreTargetInputError(targetPath)
+    const targetInputError = getRestoreTargetInputError(restoreTargetPath)
     if (targetInputError) {
       addToast({
         title: '恢复目标格式无效',
@@ -2091,6 +2405,8 @@ export default function Maintenance() {
       })
       return
     }
+    const targetPath = normalizeRestoreTargetForRequest(restoreTargetPath)
+    if (!targetPath) return
     const controller = createActionAbortController(restoreAbortControllerRef)
     restoreMutation.mutate({
       jobId: restoreJob.id,
@@ -2119,7 +2435,7 @@ export default function Maintenance() {
       return
     }
     const controller = createActionAbortController(batchRestorePreviewAbortControllerRef)
-    batchRestorePreviewMutation.mutate({ items: batchRestoreItems, signal: controller.signal })
+    batchRestorePreviewMutation.mutate({ items: normalizeBatchRestoreItemsForRequest(batchRestoreItems), signal: controller.signal })
   }
 
   const startBatchRestore = () => {
@@ -2141,7 +2457,7 @@ export default function Maintenance() {
       return
     }
     const controller = createActionAbortController(batchRestoreAbortControllerRef)
-    batchRestoreMutation.mutate({ items: batchRestoreItems, signal: controller.signal })
+    batchRestoreMutation.mutate({ items: normalizeBatchRestoreItemsForRequest(batchRestoreItems), signal: controller.signal })
   }
   
   const isRunning = scrubResult?.status === 'running' || isAwaitingRunningState
@@ -2356,10 +2672,24 @@ export default function Maintenance() {
               />
             </div>
           ) : backupJobs.length === 0 ? (
-            <div className="text-center py-8 text-default-500">
-              <HardDrive size={48} className="mx-auto mb-4 opacity-30" />
-              <p>尚未配置备份任务</p>
-              <p className="text-sm mt-1">在 config.toml 中添加 [[backup.jobs]] 后重启服务。</p>
+            <div className="grid grid-cols-1 gap-4 py-2 lg:grid-cols-[minmax(0,0.95fr)_minmax(0,1.05fr)]">
+              <div className="flex flex-col justify-center rounded-lg border border-dashed border-divider bg-content2/35 p-6 text-default-500">
+                <HardDrive size={42} className="mb-4 opacity-40" />
+                <p className="text-base font-medium text-foreground">尚未配置备份任务</p>
+                <p className="mt-2 text-sm leading-6">建议先配置一个独立外置盘或远端目标。配置后重启服务，再运行一次备份和恢复演练。</p>
+              </div>
+              <div className="rounded-lg border border-divider bg-content2/45 p-4">
+                <div className="mb-3 flex items-center gap-2 text-sm font-medium text-foreground">
+                  <Archive size={16} className="text-accent-primary" />
+                  外置盘本地备份示例
+                </div>
+                <pre className="max-h-72 overflow-auto rounded-lg bg-content1 p-3 text-left text-xs leading-5 text-default-700">
+                  <code>{backupStarterConfigSnippet}</code>
+                </pre>
+                <p className="mt-3 text-xs leading-5 text-default-500">
+                  把目标目录换成独立磁盘挂载点；不要把备份目标放在 storage.root 内。
+                </p>
+              </div>
             </div>
           ) : (
             <div className="responsive-table">
@@ -2579,6 +2909,11 @@ export default function Maintenance() {
                   isInvalid={Boolean(restoreTargetInputError)}
                   errorMessage={restoreTargetInputError ?? undefined}
                 />
+                {restoreJob && restoreTargetPath === getSuggestedRestoreTargetPath(restoreJob) && (
+                  <div className="rounded-lg border border-primary/20 bg-primary/5 p-3 text-xs leading-5 text-default-500">
+                    已填入建议目录，可按实际挂载点修改；执行前仍需生成预览并通过恢复预检。
+                  </div>
+                )}
                 {restoreJob?.type === 'local' && (
                   <Checkbox
                     isSelected={restoreIncludeConfig}
@@ -2610,6 +2945,8 @@ export default function Maintenance() {
                         配置文件: {restorePreview.config_included ? '将恢复到 .mnemonas-restore/config.toml' : '本次不恢复'}
                       </div>
                     )}
+                    <RestoreImpactSummary result={restorePreview} matches={restorePreviewMatches} />
+                    <RestoreExecutionReview result={restorePreview} matches={restorePreviewMatches} />
                     <RestorePreflightList checks={restorePreview.preflight_checks} />
                     {restorePreview.warnings && restorePreview.warnings.length > 0 && (
                       <div className="mt-3 rounded-lg border border-warning/20 bg-warning/10 p-3 text-xs text-warning">
@@ -2752,7 +3089,7 @@ export default function Maintenance() {
                                 value={batchRestoreTargets[job.id] ?? ''}
                                 onValueChange={(value) => handleBatchRestoreTargetChange(job.id, value)}
                                 isDisabled={!selected || batchRestoreActionPending}
-                                description={selected ? getRestoreTargetDescription(job) : '选择该任务后填写恢复目标目录。'}
+                                description={selected ? getRestoreTargetDescription(job) : '选择该任务后可使用建议目标目录，或改成自定义独立目录。'}
                                 isInvalid={Boolean(targetInputError)}
                                 errorMessage={targetInputError ?? undefined}
                               />
@@ -2787,12 +3124,14 @@ export default function Maintenance() {
                     {batchRestoreTargetInputError}
                   </div>
                 )}
-                {batchRestorePreview && (
-                  <>
-                    <BatchRestorePreviewSummary result={batchRestorePreview} />
-                    {!batchRestorePreviewMatches && (
-                      <div className="rounded-lg border border-warning/20 bg-warning/10 p-3 text-sm text-warning">
-                        选中的任务或目标目录已变更，请重新生成批量预览。
+	                {batchRestorePreview && (
+	                  <>
+	                    <BatchRestorePreviewSummary result={batchRestorePreview} />
+	                    <BatchRestoreImpactSummary result={batchRestorePreview} matches={batchRestorePreviewMatches} />
+	                    <BatchRestoreExecutionReview result={batchRestorePreview} matches={batchRestorePreviewMatches} />
+	                    {!batchRestorePreviewMatches && (
+	                      <div className="rounded-lg border border-warning/20 bg-warning/10 p-3 text-sm text-warning">
+	                        选中的任务或目标目录已变更，请重新生成批量预览。
                       </div>
                     )}
                     {batchRestorePreviewMatches && batchRestorePreviewHasFailed && (

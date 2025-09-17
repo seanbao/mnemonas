@@ -1,5 +1,17 @@
 import { beforeEach, describe, expect, it, vi, type Mock } from 'vitest'
-import { ACTIVITY_ACTIONS, ApiError, clearActivity, getActionColor, getActionLabel, getActivityStats, listActivity, type ActionType } from './activity'
+import {
+  ACTIVITY_ACTIONS,
+  ApiError,
+  clearActivity,
+  createActivityReviewRecord,
+  getActionColor,
+  getActionLabel,
+  getActivityStats,
+  listActivity,
+  listActivityReviewRecords,
+  updateActivityReviewRecordDisposition,
+  type ActionType,
+} from './activity'
 
 vi.mock('./auth', () => ({
   authFetch: vi.fn(),
@@ -98,6 +110,30 @@ describe('Activity API', () => {
     })
 
     expect(mockAuthFetch).toHaveBeenCalledWith('/api/v1/activity/?limit=10&offset=20&action=delete&action_group=risk&user=admin&path=%2Fphotos&since=2026-05-01T00%3A00%3A00Z&until=2026-05-02T00%3A00%3A00Z')
+  })
+
+  it('normalizes activity list path filters before sending requests', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        success: true,
+        data: {
+          items: [],
+          total: 0,
+          limit: 50,
+          offset: 0,
+        },
+      }),
+    })
+
+    await listActivity({ path: 'photos' })
+
+    expect(mockAuthFetch).toHaveBeenCalledWith('/api/v1/activity/?path=%2Fphotos')
+  })
+
+  it('rejects invalid activity list path filters before sending requests', async () => {
+    await expect(listActivity({ path: '/photos/./secret' })).rejects.toThrow('非法路径')
+    expect(mockAuthFetch).not.toHaveBeenCalled()
   })
 
   it('forwards abort signals to the authenticated fetch request', async () => {
@@ -275,6 +311,84 @@ describe('Activity API', () => {
     await expect(listActivity()).rejects.toThrow('服务器返回了无效的数据')
   })
 
+  it.each([
+    ['relative path', 'docs/report.txt'],
+    ['trailing-slash path', '/docs/report.txt/'],
+    ['unsafe path', '/docs/./report.txt'],
+  ])('rejects activity entries with noncanonical %s', async (_label, path) => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        success: true,
+        data: {
+          items: [{ id: '1', timestamp: '2026-03-14T00:00:00Z', action: 'upload', path }],
+          total: 1,
+          limit: 50,
+          offset: 0,
+        },
+      }),
+    })
+
+    await expect(listActivity()).rejects.toThrow('服务器返回了无效的数据')
+  })
+
+  it('accepts activity entries with canonical and hidden path details', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        success: true,
+        data: {
+          items: [{
+            id: '1',
+            timestamp: '2026-03-14T00:00:00Z',
+            action: 'move',
+            path: '/docs/source.txt',
+            details: {
+              to: '/docs/target.txt',
+              from: '',
+              note: 'external reference /not-a-logical-path/',
+            },
+          }],
+          total: 1,
+          limit: 50,
+          offset: 0,
+        },
+      }),
+    })
+
+    const result = await listActivity()
+
+    expect(result.items[0].details?.to).toBe('/docs/target.txt')
+    expect(result.items[0].details?.from).toBe('')
+  })
+
+  it.each([
+    ['relative detail path', { to: 'docs/report.txt' }],
+    ['trailing-slash detail path', { target_path: '/docs/report.txt/' }],
+    ['unsafe detail path', { from: '/docs/./report.txt' }],
+  ])('rejects activity entries with noncanonical %s', async (_label, details) => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        success: true,
+        data: {
+          items: [{
+            id: '1',
+            timestamp: '2026-03-14T00:00:00Z',
+            action: 'move',
+            path: '/docs/source.txt',
+            details,
+          }],
+          total: 1,
+          limit: 50,
+          offset: 0,
+        },
+      }),
+    })
+
+    await expect(listActivity()).rejects.toThrow('服务器返回了无效的数据')
+  })
+
   it('rejects activity entries with non-string detail values', async () => {
     mockAuthFetch.mockResolvedValueOnce({
       ok: true,
@@ -386,6 +500,11 @@ describe('Activity API', () => {
     expect(mockAuthFetch).toHaveBeenCalledWith('/api/v1/activity/stats?action=upload&action_group=share&user=admin&path=%2Fphotos&since=2026-05-01T00%3A00%3A00Z&until=2026-05-02T00%3A00%3A00Z', {
       signal: controller.signal,
     })
+  })
+
+  it('rejects invalid activity stats path filters before sending requests', async () => {
+    await expect(getActivityStats({ path: '/photos/./secret' })).rejects.toThrow('非法路径')
+    expect(mockAuthFetch).not.toHaveBeenCalled()
   })
 
   it('rejects malformed successful activity stats responses', async () => {
@@ -604,6 +723,178 @@ describe('Activity API', () => {
     const error = new ApiError('activity log unavailable', 503, 'Service Unavailable', 'SERVICE_UNAVAILABLE')
 
     expect(error.isUnavailable).toBe(true)
+  })
+
+  it('unwraps persisted activity review record lists', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        success: true,
+        data: {
+          items: [{
+            id: 'review-1',
+            reviewed_at: '2026-05-01T10:10:00Z',
+            reviewer: 'admin',
+            note: '已确认误删文件已恢复',
+            scope_label: '集中窗口',
+            filter_summary: '分组 高风险变更',
+            disposition_status: 'restored',
+            action_counts: {
+              delete: 1,
+              move: 1,
+            },
+            review_count: 3,
+            total_count: 5,
+            path_count: 2,
+            user_count: 1,
+            path_samples: ['/docs/deleted.txt', '/docs/moved.txt'],
+            user_samples: ['admin'],
+            activity_entry_ids: ['delete-1', 'move-1'],
+          }],
+          total: 1,
+          limit: 5,
+          offset: 0,
+        },
+      }),
+    })
+
+    const result = await listActivityReviewRecords({
+      limit: 5,
+      reviewer: 'admin',
+      activityEntryId: 'delete-1',
+      dispositionStatus: 'restored',
+      since: '2026-05-01T00:00:00Z',
+      until: '2026-05-02T00:00:00Z',
+    })
+
+    expect(mockAuthFetch).toHaveBeenCalledWith('/api/v1/activity/reviews?limit=5&reviewer=admin&activity_entry_id=delete-1&disposition_status=restored&since=2026-05-01T00%3A00%3A00Z&until=2026-05-02T00%3A00%3A00Z')
+    expect(result.items[0].note).toBe('已确认误删文件已恢复')
+    expect(result.items[0].disposition_status).toBe('restored')
+    expect(result.items[0].action_counts?.delete).toBe(1)
+    expect(result.items[0].path_samples).toEqual(['/docs/deleted.txt', '/docs/moved.txt'])
+    expect(result.items[0].activity_entry_ids).toEqual(['delete-1', 'move-1'])
+  })
+
+  it('creates persisted activity review records', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        success: true,
+        data: {
+          id: 'review-created',
+          reviewed_at: '2026-05-01T10:10:00Z',
+          reviewer: 'admin',
+          note: '分享链接已关闭',
+          scope_label: '当前页',
+          filter_summary: '未筛选',
+          disposition_status: 'disabled',
+          action_counts: {
+            share: 1,
+          },
+          review_count: 1,
+          total_count: 2,
+          path_count: 1,
+          user_count: 1,
+          path_samples: ['/docs/report.pdf'],
+          user_samples: ['admin'],
+          activity_entry_ids: ['share-1'],
+        },
+      }),
+    })
+
+    const input = {
+      note: '分享链接已关闭',
+      scope_label: '当前页',
+      filter_summary: '未筛选',
+      disposition_status: 'disabled' as const,
+      action_counts: {
+        share: 1,
+      },
+      review_count: 1,
+      total_count: 2,
+      path_count: 1,
+      user_count: 1,
+      path_samples: ['/docs/report.pdf'],
+      user_samples: ['admin'],
+      activity_entry_ids: ['share-1'],
+    }
+
+    const result = await createActivityReviewRecord(input)
+
+    expect(mockAuthFetch).toHaveBeenCalledWith('/api/v1/activity/reviews', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(input),
+    })
+    expect(result.id).toBe('review-created')
+  })
+
+  it('updates persisted activity review disposition status', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        success: true,
+        data: {
+          id: 'review-created',
+          reviewed_at: '2026-05-01T11:10:00Z',
+          reviewer: 'admin',
+          note: '分享链接已关闭',
+          scope_label: '当前页',
+          filter_summary: '未筛选',
+          disposition_status: 'disabled',
+          action_counts: {
+            share: 1,
+          },
+          review_count: 1,
+          total_count: 2,
+          path_count: 1,
+          user_count: 1,
+          path_samples: ['/docs/report.pdf'],
+          user_samples: ['admin'],
+          activity_entry_ids: ['share-1'],
+        },
+      }),
+    })
+
+    const result = await updateActivityReviewRecordDisposition('review-created', {
+      disposition_status: 'disabled',
+      note: '分享链接已关闭，访问入口已核对',
+    })
+
+    expect(mockAuthFetch).toHaveBeenCalledWith('/api/v1/activity/reviews/review-created', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ disposition_status: 'disabled', note: '分享链接已关闭，访问入口已核对' }),
+    })
+    expect(result.disposition_status).toBe('disabled')
+  })
+
+  it('rejects malformed activity review records', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        success: true,
+        data: {
+          items: [{
+            id: 'review-1',
+            reviewed_at: '2026-05-01T10:10:00Z',
+            reviewer: 'admin',
+            note: '',
+            scope_label: '当前页',
+            review_count: 0,
+            total_count: 0,
+            path_count: 0,
+            user_count: 0,
+            activity_entry_ids: [],
+          }],
+          total: 1,
+          limit: 5,
+          offset: 0,
+        },
+      }),
+    })
+
+    await expect(listActivityReviewRecords({ limit: 5 })).rejects.toThrow('服务器返回了无效的数据')
   })
 
   it('reads clear activity error message from response body', async () => {

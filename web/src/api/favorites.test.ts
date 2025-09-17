@@ -139,6 +139,29 @@ describe('Favorites API', () => {
     })
 
     it.each([
+      ['unsafe', '/docs/./report.pdf'],
+      ['relative', 'docs/report.pdf'],
+      ['trailing-slash', '/docs/report.pdf/'],
+    ])('rejects favorite list responses with %s paths', async (_label, path) => {
+      mockAuthFetch.mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({
+          success: true,
+          data: {
+            favorites: [{ path, user_id: 'user1', created_at: '2024-01-01' }],
+            count: 1,
+          },
+        }),
+      })
+
+      await expect(listFavorites()).rejects.toMatchObject({
+        message: invalidResponseMessage,
+        status: 200,
+      })
+    })
+
+    it.each([
       ['null data', null],
       ['missing count', { favorites: [] }],
       ['non-number count', { favorites: [], count: '0' }],
@@ -324,6 +347,30 @@ describe('Favorites API', () => {
       })
 
       await expect(addFavorite('/file.txt')).rejects.toMatchObject({
+        message: invalidResponseMessage,
+        status: 200,
+      })
+    })
+
+    it.each([
+      ['unsafe', '/docs/./report.pdf'],
+      ['relative', 'docs/report.pdf'],
+      ['trailing-slash', '/docs/report.pdf/'],
+    ])('rejects successful add favorite responses with %s paths', async (_label, path) => {
+      mockAuthFetch.mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({
+          success: true,
+          data: {
+            path,
+            user_id: 'user1',
+            created_at: '2024-01-01',
+          },
+        }),
+      })
+
+      await expect(addFavorite('/docs/report.pdf')).rejects.toMatchObject({
         message: invalidResponseMessage,
         status: 200,
       })

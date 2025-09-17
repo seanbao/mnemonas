@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { act, fireEvent } from '@testing-library/react'
-import { render, screen, waitFor } from '@/test/utils'
+import { render, screen, waitFor, within } from '@/test/utils'
 import userEvent from '@testing-library/user-event'
 import Maintenance from './Maintenance'
 
@@ -869,6 +869,11 @@ describe('MaintenancePage', () => {
 
       await waitFor(() => {
         expect(screen.getByText('尚未配置备份任务')).toBeTruthy()
+        expect(screen.getByText('外置盘本地备份示例')).toBeTruthy()
+        const starterSnippet = screen.getByText(/\[\[backup\.jobs\]\]/)
+        expect(starterSnippet.textContent).toContain('destination = "/mnt/backup-drive/mnemonas"')
+        expect(starterSnippet.textContent).toContain('verify_after_backup = true')
+        expect(screen.getByText(/不要把备份目标放在 storage\.root 内/)).toBeTruthy()
       })
     })
 
@@ -1142,7 +1147,7 @@ describe('MaintenancePage', () => {
       })
     })
 
-    it('shows restore history count when multiple restores exist', async () => {
+    it('shows restore history details when multiple restores exist', async () => {
       mockListBackupJobs.mockResolvedValue([{
         ...mockBackupJobs[0],
         restore_history: [
@@ -1150,7 +1155,11 @@ describe('MaintenancePage', () => {
           {
             ...mockBackupJobs[0].last_restore,
             id: '20260508T040000.000000000Z',
+            started_at: '2026-05-08T04:00:00Z',
+            finished_at: '2026-05-08T04:00:01Z',
             target_path: '/restore/older',
+            file_count: 3,
+            verified_bytes: 2048,
           },
         ],
       }])
@@ -1158,7 +1167,12 @@ describe('MaintenancePage', () => {
       render(<Maintenance />)
 
       await waitFor(() => {
-        expect(screen.getByText('历史 2 条')).toBeTruthy()
+        const history = within(screen.getByLabelText('最近恢复记录'))
+        expect(history.getByText('最近恢复记录（2 条）')).toBeTruthy()
+        expect(history.getByText('目标: /restore/mnemonas')).toBeTruthy()
+        expect(history.getByText('12 个文件 · 4 KB')).toBeTruthy()
+        expect(history.getByText('目标: /restore/older')).toBeTruthy()
+        expect(history.getByText('3 个文件 · 2 KB')).toBeTruthy()
       })
     })
 
@@ -1458,6 +1472,26 @@ describe('MaintenancePage', () => {
       })
     })
 
+    it('prefills a suggested restore target path', async () => {
+      mockListBackupJobs.mockResolvedValue(mockBackupJobs)
+
+      render(<Maintenance />)
+
+      await waitFor(() => {
+        expect(screen.getByText('外置硬盘备份')).toBeTruthy()
+      })
+
+      fireEvent.click(screen.getByRole('button', { name: /^恢复$/ }))
+
+      await waitFor(() => {
+        const targetInput = screen.getByLabelText('目标目录') as HTMLInputElement
+        expect(targetInput.value).toBe('/mnt/restore/external-disk')
+        expect(screen.getByText(/已填入建议目录/)).toBeTruthy()
+        expect((screen.getByRole('button', { name: /生成预览/ }) as HTMLButtonElement).disabled).toBe(false)
+        expect((screen.getByRole('button', { name: /开始恢复/ }) as HTMLButtonElement).disabled).toBe(true)
+      })
+    })
+
     it('restores a local backup from the task list', async () => {
       mockListBackupJobs.mockResolvedValue(mockBackupJobs)
 
@@ -1473,7 +1507,7 @@ describe('MaintenancePage', () => {
         expect(screen.getByText('恢复备份到目录')).toBeTruthy()
       })
 
-      fireEvent.change(screen.getByLabelText('目标目录'), { target: { value: '/restore/mnemonas' } })
+      fireEvent.change(screen.getByLabelText('目标目录'), { target: { value: ' /restore//mnemonas/ ' } })
       const restoreAction = screen.getByRole('button', { name: /开始恢复/ }) as HTMLButtonElement
       expect(restoreAction.disabled).toBe(true)
       fireEvent.click(screen.getByRole('button', { name: /生成预览/ }))
@@ -1483,6 +1517,12 @@ describe('MaintenancePage', () => {
           signal: expect.any(AbortSignal),
         }))
         expect(screen.getByText('预览已确认')).toBeTruthy()
+        const impact = within(screen.getByLabelText('恢复影响摘要'))
+        expect(impact.getByText('目标状态')).toBeTruthy()
+        expect(impact.getByText('冲突与覆盖')).toBeTruthy()
+        expect(impact.getByText('权限影响')).toBeTruthy()
+        expect(impact.getByText((content) => content.includes('配置文件会单独恢复到 .mnemonas-restore/config.toml'))).toBeTruthy()
+        expect(impact.getByText('恢复后校验')).toBeTruthy()
       })
 
       fireEvent.click(screen.getByRole('button', { name: /开始恢复/ }))
@@ -1533,6 +1573,26 @@ describe('MaintenancePage', () => {
       fireEvent.change(screen.getByLabelText('目标目录'), { target: { value: '/restore/\u0001bad' } })
 
       expect(screen.getByText('恢复目标不能包含控制字符。')).toBeTruthy()
+      const previewAction = screen.getByRole('button', { name: /生成预览/ }) as HTMLButtonElement
+      expect(previewAction.disabled).toBe(true)
+
+      fireEvent.click(previewAction)
+      expect(mockPreviewBackupRestoreJob).not.toHaveBeenCalled()
+    })
+
+    it('blocks restore preview when the target path contains dot segments', async () => {
+      mockListBackupJobs.mockResolvedValue(mockBackupJobs)
+
+      render(<Maintenance />)
+
+      await waitFor(() => {
+        expect(screen.getByText('外置硬盘备份')).toBeTruthy()
+      })
+
+      fireEvent.click(screen.getByRole('button', { name: /^恢复$/ }))
+      fireEvent.change(screen.getByLabelText('目标目录'), { target: { value: '/restore/../mnemonas' } })
+
+      expect(screen.getByText('恢复目标不能包含 . 或 .. 路径段。')).toBeTruthy()
       const previewAction = screen.getByRole('button', { name: /生成预览/ }) as HTMLButtonElement
       expect(previewAction.disabled).toBe(true)
 
@@ -1775,6 +1835,31 @@ describe('MaintenancePage', () => {
       expect(screen.queryByText('restore target already exists')).toBeNull()
     })
 
+    it('prefills suggested batch restore target paths', async () => {
+      mockListBackupJobs.mockResolvedValue(mockBackupJobs)
+
+      render(<Maintenance />)
+
+      await waitFor(() => {
+        expect(screen.getByText('外置硬盘备份')).toBeTruthy()
+      })
+
+      fireEvent.click(screen.getByRole('button', { name: /批量恢复/ }))
+
+      await waitFor(() => {
+        const targetInput = screen.getByLabelText('外置硬盘备份 目标目录') as HTMLInputElement
+        expect(targetInput.value).toBe('/mnt/restore/external-disk')
+        expect(targetInput.disabled).toBe(true)
+        expect(screen.getByText('选择该任务后可使用建议目标目录，或改成自定义独立目录。')).toBeTruthy()
+      })
+
+      fireEvent.click(screen.getAllByLabelText('选择 外置硬盘备份')[0])
+
+      const selectedTargetInput = screen.getByLabelText('外置硬盘备份 目标目录') as HTMLInputElement
+      expect(selectedTargetInput.value).toBe('/mnt/restore/external-disk')
+      expect(selectedTargetInput.disabled).toBe(false)
+    })
+
     it('previews and runs a batch restore from the backup card', async () => {
       mockListBackupJobs.mockResolvedValue(mockBackupJobs)
       const batchTarget = '/restore/token=batch-secret'
@@ -1897,15 +1982,34 @@ describe('MaintenancePage', () => {
       fireEvent.click(screen.getByRole('button', { name: /生成批量预览/ }))
 
       await waitFor(() => {
-        expect(mockPreviewBatchBackupRestore).toHaveBeenCalledWith([{
-          job_id: 'external-disk',
-          target_path: batchTarget,
-          include_config: true,
-        }], expect.objectContaining({
-          signal: expect.any(AbortSignal),
-        }))
-        expect(screen.getByText('批量预览结果')).toBeTruthy()
-      })
+	        expect(mockPreviewBatchBackupRestore).toHaveBeenCalledWith([{
+	          job_id: 'external-disk',
+	          target_path: batchTarget,
+	          include_config: true,
+	        }], expect.objectContaining({
+	          signal: expect.any(AbortSignal),
+	        }))
+	        expect(screen.getByText('批量预览结果')).toBeTruthy()
+	        const impact = within(screen.getByLabelText('批量恢复影响摘要'))
+	        expect(impact.getByText('目标目录')).toBeTruthy()
+	        expect(impact.getByText('冲突与覆盖')).toBeTruthy()
+	        expect(impact.getByText('权限影响')).toBeTruthy()
+	        expect(impact.getByText(/1 项会恢复配置文件到各自目标目录/)).toBeTruthy()
+	        expect(impact.getByText('恢复后校验')).toBeTruthy()
+	        const review = within(screen.getByLabelText('批量恢复执行前复核'))
+	        expect(review.getByText('恢复项目')).toBeTruthy()
+	        expect(review.getByText('1 项')).toBeTruthy()
+	        expect(review.getByText('目标目录')).toBeTruthy()
+	        expect(review.getByText('1 个互不重叠的独立目标目录')).toBeTruthy()
+	        expect(review.getByText('恢复内容')).toBeTruthy()
+	        expect(review.getByText('12 个文件 · 4 KB')).toBeTruthy()
+	        expect(review.getByText('配置文件')).toBeTruthy()
+	        expect(review.getByText('1 项会恢复配置文件')).toBeTruthy()
+	        expect(review.getByText('预检结果')).toBeTruthy()
+	        expect(review.getByText('1 项通过 · 0 项提醒 · 0 项失败')).toBeTruthy()
+	        expect(review.getByText('恢复后检查')).toBeTruthy()
+	        expect(review.getByText('每个成功项目都会自动执行只读校验；批量结果会汇总已校验文件数和字节数。')).toBeTruthy()
+	      })
 
       fireEvent.click(screen.getByRole('button', { name: /开始批量恢复/ }))
 
@@ -1957,33 +2061,20 @@ describe('MaintenancePage', () => {
       expect(mockPreviewBatchBackupRestore).not.toHaveBeenCalled()
     })
 
-    it('blocks batch restore preview when Windows target paths overlap', async () => {
-      const remoteJob = {
-        ...mockBackupJobs[0],
-        id: 'rclone-remote',
-        name: '远端备份',
-        type: 'rclone',
-        destination: 'remote:mnemonas',
-        include_config: false,
-        last_run: undefined,
-        last_successful_run: undefined,
-      }
-      mockListBackupJobs.mockResolvedValue([mockBackupJobs[0], remoteJob])
+    it('blocks batch restore preview when a selected target path uses Windows syntax', async () => {
+      mockListBackupJobs.mockResolvedValue(mockBackupJobs)
 
       render(<Maintenance />)
 
       await waitFor(() => {
         expect(screen.getByText('外置硬盘备份')).toBeTruthy()
-        expect(screen.getByText('远端备份')).toBeTruthy()
       })
 
       fireEvent.click(screen.getByRole('button', { name: /批量恢复/ }))
       fireEvent.click(screen.getAllByLabelText('选择 外置硬盘备份')[0])
       fireEvent.change(screen.getByLabelText('外置硬盘备份 目标目录'), { target: { value: 'C:\\restore\\batch' } })
-      fireEvent.click(screen.getAllByLabelText('选择 远端备份')[0])
-      fireEvent.change(screen.getByLabelText('远端备份 目标目录'), { target: { value: 'c:\\restore\\batch\\nested' } })
 
-      expect(screen.getByText('第 1 项和第 2 项的目标目录重复或存在父子嵌套，请改为互不包含的独立目录。')).toBeTruthy()
+      expect(screen.getByText('第 1 项: 恢复目标必须是服务器上的绝对路径，例如 /mnt/restore/mnemonas。')).toBeTruthy()
       expect((screen.getByRole('button', { name: /生成批量预览/ }) as HTMLButtonElement).disabled).toBe(true)
 
       fireEvent.click(screen.getByRole('button', { name: /生成批量预览/ }))
@@ -2126,6 +2217,27 @@ describe('MaintenancePage', () => {
       fireEvent.change(screen.getByLabelText('外置硬盘备份 目标目录'), { target: { value: '/etc' } })
 
       expect(screen.getByText('第 1 项: 恢复目标不能是文件系统根目录或受保护系统目录。')).toBeTruthy()
+      const previewAction = screen.getByRole('button', { name: /生成批量预览/ }) as HTMLButtonElement
+      expect(previewAction.disabled).toBe(true)
+
+      fireEvent.click(previewAction)
+      expect(mockPreviewBatchBackupRestore).not.toHaveBeenCalled()
+    })
+
+    it('blocks batch restore preview when a selected target path contains dot segments', async () => {
+      mockListBackupJobs.mockResolvedValue(mockBackupJobs)
+
+      render(<Maintenance />)
+
+      await waitFor(() => {
+        expect(screen.getByText('外置硬盘备份')).toBeTruthy()
+      })
+
+      fireEvent.click(screen.getByRole('button', { name: /批量恢复/ }))
+      fireEvent.click(screen.getAllByLabelText('选择 外置硬盘备份')[0])
+      fireEvent.change(screen.getByLabelText('外置硬盘备份 目标目录'), { target: { value: '/restore/./batch' } })
+
+      expect(screen.getByText('第 1 项: 恢复目标不能包含 . 或 .. 路径段。')).toBeTruthy()
       const previewAction = screen.getByRole('button', { name: /生成批量预览/ }) as HTMLButtonElement
       expect(previewAction.disabled).toBe(true)
 
@@ -2501,7 +2613,7 @@ describe('MaintenancePage', () => {
       })
 
       await user.click(screen.getByRole('button', { name: /^恢复$/ }))
-      await user.type(screen.getByLabelText('目标目录'), '/restore/mnemonas')
+      fireEvent.change(screen.getByLabelText('目标目录'), { target: { value: '/restore/mnemonas' } })
       await user.click(screen.getByRole('button', { name: /生成预览/ }))
 
       await waitFor(() => {
@@ -2548,7 +2660,7 @@ describe('MaintenancePage', () => {
       })
 
       await user.click(screen.getByRole('button', { name: /^恢复$/ }))
-      await user.type(screen.getByLabelText('目标目录'), '/restore/mnemonas')
+      fireEvent.change(screen.getByLabelText('目标目录'), { target: { value: '/restore/mnemonas' } })
       await user.click(screen.getByRole('button', { name: /生成预览/ }))
 
       await waitFor(() => {
@@ -2557,6 +2669,70 @@ describe('MaintenancePage', () => {
       })
 
       expect((screen.getByRole('button', { name: /开始恢复/ }) as HTMLButtonElement).disabled).toBe(true)
+      expect(mockRestoreBackupJob).not.toHaveBeenCalled()
+    })
+
+    it('shows a pre-submit restore execution review after preview succeeds', async () => {
+      const user = userEvent.setup()
+      mockListBackupJobs.mockResolvedValue(mockBackupJobs)
+      mockPreviewBackupRestoreJob.mockResolvedValueOnce({
+        id: '20260509T035900.000000000Z',
+        job_id: 'external-disk',
+        status: 'completed',
+        started_at: '2026-05-09T03:59:00Z',
+        finished_at: '2026-05-09T03:59:01Z',
+        duration_ms: 1000,
+        source: '/srv/mnemonas',
+        destination: '/mnt/backup-drive/mnemonas',
+        target_path: '/restore/mnemonas',
+        file_count: 12,
+        total_bytes: 4096,
+        config_available: true,
+        config_included: true,
+        preflight_checks: [
+          {
+            id: 'target_isolated',
+            status: 'passed',
+            title: '目标隔离',
+            detail: '恢复目标位于当前 storage.root 和备份目标之外。',
+          },
+          {
+            id: 'target_capacity',
+            status: 'warning',
+            title: '目标容量',
+            detail: '目标文件系统剩余空间接近下限。',
+          },
+        ],
+        warnings: ['目标文件系统剩余空间接近下限。'],
+      })
+
+      render(<Maintenance />)
+
+      await waitFor(() => {
+        expect(screen.getByText('外置硬盘备份')).toBeTruthy()
+      })
+
+      await user.click(screen.getByRole('button', { name: /^恢复$/ }))
+      fireEvent.change(screen.getByLabelText('目标目录'), { target: { value: '/restore/mnemonas' } })
+      await user.click(screen.getByRole('button', { name: /生成预览/ }))
+
+      await waitFor(() => {
+        const review = within(screen.getByLabelText('恢复执行前复核'))
+        expect(review.getByText('目标目录')).toBeTruthy()
+        expect(review.getByText('/restore/mnemonas')).toBeTruthy()
+        expect(review.getByText('写入边界')).toBeTruthy()
+        expect(review.getByText('恢复只写入独立目录，不覆盖当前 storage.root。')).toBeTruthy()
+        expect(review.getByText('恢复内容')).toBeTruthy()
+        expect(review.getByText('预计 12 个文件 · 4 KB')).toBeTruthy()
+        expect(review.getByText('配置文件')).toBeTruthy()
+        expect(review.getByText('将恢复到 .mnemonas-restore/config.toml')).toBeTruthy()
+        expect(review.getByText('预检结果')).toBeTruthy()
+        expect(review.getByText('1 项通过 · 1 项提醒 · 0 项失败')).toBeTruthy()
+        expect(review.getByText('恢复后检查')).toBeTruthy()
+        expect(review.getByText('恢复完成后自动执行只读校验，并显示切换步骤和回滚清单。')).toBeTruthy()
+      })
+
+      expect((screen.getByRole('button', { name: /开始恢复/ }) as HTMLButtonElement).disabled).toBe(false)
       expect(mockRestoreBackupJob).not.toHaveBeenCalled()
     })
 
@@ -2649,7 +2825,7 @@ describe('MaintenancePage', () => {
         expect(screen.queryByText('同时恢复备份中的配置文件')).toBeNull()
       })
 
-      await user.type(screen.getByLabelText('目标目录'), '/restore/rclone')
+      fireEvent.change(screen.getByLabelText('目标目录'), { target: { value: '/restore/rclone' } })
       await user.click(screen.getByRole('button', { name: /生成预览/ }))
       await waitFor(() => {
         expect(mockPreviewBackupRestoreJob).toHaveBeenCalledWith('rclone-remote', '/restore/rclone', false, expect.objectContaining({
@@ -2763,7 +2939,7 @@ describe('MaintenancePage', () => {
         expect(screen.queryByText('同时恢复备份中的配置文件')).toBeNull()
       })
 
-      await user.type(screen.getByLabelText('目标目录'), '/restore/restic')
+      fireEvent.change(screen.getByLabelText('目标目录'), { target: { value: '/restore/restic' } })
       await user.click(screen.getByRole('button', { name: /生成预览/ }))
       await waitFor(() => {
         expect(mockPreviewBackupRestoreJob).toHaveBeenCalledWith('restic-remote', '/restore/restic', false, expect.objectContaining({

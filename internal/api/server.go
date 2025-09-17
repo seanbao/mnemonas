@@ -103,28 +103,31 @@ type prependReadCloser struct {
 
 // Server is the API server
 type Server struct {
-	router                *chi.Mux
-	logger                zerolog.Logger
-	dataplane             *dataplane.Client
-	fs                    *storage.FileSystem
-	thumbnail             *thumbnail.Service
-	maintenance           *maintenance.HistoryStore
-	backupManager         *backup.Manager
-	activity              *activity.Store
-	thumbnailConfigured   bool
-	maintenanceConfigured bool
-	backupConfigured      bool
-	activityConfigured    bool
-	scrubSchedulerMu      sync.Mutex
-	scrubSchedulerCancel  context.CancelFunc
-	scrubLastFailureID    string
-	scrubFailureRetries   int
-	quotaMu               sync.Mutex
-	loginAlertMu          sync.Mutex
-	loginRateLimitAlerts  map[string]time.Time
-	startTime             time.Time
-	appVersion            string
-	buildTime             string
+	router                    *chi.Mux
+	logger                    zerolog.Logger
+	dataplane                 *dataplane.Client
+	fs                        *storage.FileSystem
+	thumbnail                 *thumbnail.Service
+	maintenance               *maintenance.HistoryStore
+	backupManager             *backup.Manager
+	activity                  *activity.Store
+	thumbnailConfigured       bool
+	maintenanceConfigured     bool
+	backupConfigured          bool
+	activityConfigured        bool
+	scrubSchedulerMu          sync.Mutex
+	scrubSchedulerCancel      context.CancelFunc
+	scrubLastFailureID        string
+	scrubFailureRetries       int
+	quotaMu                   sync.Mutex
+	loginAlertMu              sync.Mutex
+	loginRateLimitAlerts      map[string]time.Time
+	shareExpiryReminderMu     sync.Mutex
+	shareExpiryReminderSent   map[string]time.Time
+	shareExpiryReminderCancel context.CancelFunc
+	startTime                 time.Time
+	appVersion                string
+	buildTime                 string
 	// Auth components
 	userStore     *auth.UserStore
 	tokenManager  *auth.TokenManager
@@ -1572,6 +1575,9 @@ func NewServer(logger zerolog.Logger, cfg *ServerConfig) (*Server, error) {
 		} else {
 			logger.Info().Msg("File sharing configured but currently disabled")
 		}
+		if s.startShareExpiryReminderScheduler(context.Background()) {
+			logger.Info().Msg("Share expiry reminder scheduler started")
+		}
 	}
 
 	// Initialize favorites handler whenever a store is configured so runtime
@@ -1929,9 +1935,15 @@ func (s *Server) setupRoutes() {
 			r.Get("/", s.handleListActivity)
 			r.Get("/stats", s.handleActivityStats)
 			if s.authEnabled {
+				r.With(s.authMw.RequireRole(auth.RoleAdmin)).Get("/reviews", s.handleListActivityReviewRecords)
+				r.With(s.authMw.RequireRole(auth.RoleAdmin)).Post("/reviews", s.handleCreateActivityReviewRecord)
+				r.With(s.authMw.RequireRole(auth.RoleAdmin)).Patch("/reviews/{id}", s.handleUpdateActivityReviewRecord)
 				r.With(s.authMw.RequireRole(auth.RoleAdmin)).Delete("/", s.handleClearActivity)
 				return
 			}
+			r.Get("/reviews", s.handleListActivityReviewRecords)
+			r.Post("/reviews", s.handleCreateActivityReviewRecord)
+			r.Patch("/reviews/{id}", s.handleUpdateActivityReviewRecord)
 			r.Delete("/", s.handleClearActivity)
 		})
 
@@ -3184,16 +3196,24 @@ func (s *Server) handleDownloadFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	versionHash := r.URL.Query().Get("version")
-	forceDownload := r.URL.Query().Get("download") == "true"
-	archiveFormat := strings.TrimSpace(r.URL.Query().Get("archive"))
+	versionHash, err := downloadVersionHashFromRequest(r)
+	if err != nil {
+		badRequestInvalidHash(w)
+		return
+	}
+	forceDownload, err := forceDownloadFromRequest(r)
+	if err != nil {
+		BadRequest(w, "download parameter must appear at most once")
+		return
+	}
+	archiveFormat, err := downloadArchiveFormatFromRequest(r)
+	if err != nil {
+		BadRequest(w, "unsupported archive format")
+		return
+	}
 	if archiveFormat != "" {
 		if versionHash != "" {
 			BadRequest(w, "versioned archive downloads are not supported")
-			return
-		}
-		if archiveFormat != "zip" {
-			BadRequest(w, "unsupported archive format")
 			return
 		}
 		s.handleDownloadArchive(w, r, filePath)
@@ -3319,6 +3339,18 @@ func (s *Server) handleDownloadFile(w http.ResponseWriter, r *http.Request) {
 	if trackingWriter.writeErr == nil && !isDownloadProbeRequest(r) && trackingWriter.statusCode != http.StatusNotModified && trackingWriter.statusCode < http.StatusBadRequest {
 		s.LogActivity(r, activity.ActionDownload, filePath, nil)
 	}
+}
+
+func forceDownloadFromRequest(r *http.Request) (bool, error) {
+	value, err := singleQueryValue(r.URL.Query(), "download")
+	if err != nil {
+		return false, err
+	}
+	return value == "true", nil
+}
+
+func downloadVersionHashFromRequest(r *http.Request) (string, error) {
+	return singleQueryValue(r.URL.Query(), "version")
 }
 
 // MoveRequest represents a move/rename request
@@ -3921,7 +3953,11 @@ func (s *Server) handleRestoreVersion(w http.ResponseWriter, r *http.Request) {
 	hash = normalizedHash
 
 	// Get path from query parameter
-	filePath := r.URL.Query().Get("path")
+	filePath, err := restoreVersionPathFromRequest(r)
+	if err != nil {
+		badRequestInvalidPath(w)
+		return
+	}
 	if filePath == "" {
 		BadRequest(w, "path parameter is required")
 		return
@@ -3992,8 +4028,16 @@ func (s *Server) handleRestoreVersion(w http.ResponseWriter, r *http.Request) {
 	}).WithMessage("version restored successfully").Write(w, http.StatusOK)
 }
 
+func restoreVersionPathFromRequest(r *http.Request) (string, error) {
+	return singleQueryValue(r.URL.Query(), "path")
+}
+
 func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
-	query := strings.TrimSpace(r.URL.Query().Get("q"))
+	query, err := searchQueryFromRequest(r)
+	if err != nil {
+		BadRequest(w, "query parameter 'q' must appear exactly once")
+		return
+	}
 	if query == "" {
 		BadRequest(w, "query parameter 'q' is required")
 		return
@@ -4011,14 +4055,14 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Get optional limit parameter (default 50)
-	limit := 50
-	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
-		l, err := strconv.Atoi(limitStr)
-		if err != nil || l <= 0 || l > 100 {
-			BadRequest(w, "limit parameter must be between 1 and 100")
+	limit, err := searchLimitFromRequest(r)
+	if err != nil {
+		if errors.Is(err, errAmbiguousQueryParameter) {
+			BadRequest(w, "limit parameter must appear at most once")
 			return
 		}
-		limit = l
+		BadRequest(w, "limit parameter must be between 1 and 100")
+		return
 	}
 
 	homeDir, scoped, err := s.currentUserHomeDir(r.Context())
@@ -4204,6 +4248,7 @@ func (s *Server) alertsDiagnostics(cfg *config.Config) map[string]any {
 		info["cooldown_period"] = cfg.Alerts.CooldownPeriod.String()
 		info["webhook_configured"] = strings.TrimSpace(cfg.Alerts.WebhookURL) != ""
 		info["telegram_configured"] = cfg.Alerts.TelegramEnabled && strings.TrimSpace(cfg.Alerts.TelegramBotToken) != "" && strings.TrimSpace(cfg.Alerts.TelegramChatID) != ""
+		info["wecom_configured"] = cfg.Alerts.WeComEnabled && strings.TrimSpace(cfg.Alerts.WeComWebhookURL) != ""
 		info["email_configured"] = emailAlertsConfigured(cfg.Alerts)
 		method := strings.ToUpper(strings.TrimSpace(cfg.Alerts.WebhookMethod))
 		if method == "" {
@@ -4827,7 +4872,12 @@ func (s *Server) handleScrub(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleListObjects(w http.ResponseWriter, r *http.Request) {
 	// Parse pagination parameters
-	cursor := r.URL.Query().Get("cursor")
+	query := r.URL.Query()
+	cursor, err := singleQueryValue(query, "cursor")
+	if err != nil {
+		BadRequest(w, "cursor parameter must appear at most once")
+		return
+	}
 	if len(cursor) > maxObjectsCursorLength {
 		BadRequest(w, fmt.Sprintf("cursor exceeds maximum length (%d bytes)", maxObjectsCursorLength))
 		return
@@ -4840,7 +4890,11 @@ func (s *Server) handleListObjects(w http.ResponseWriter, r *http.Request) {
 		}
 		cursor = normalizedCursor
 	}
-	limitStr := r.URL.Query().Get("limit")
+	limitStr, err := singleQueryValue(query, "limit")
+	if err != nil {
+		BadRequest(w, "limit parameter must appear at most once")
+		return
+	}
 	var limit uint32 = maxListObjectsLimit
 	if limitStr != "" {
 		l, err := parseUint32(limitStr)
@@ -4885,29 +4939,17 @@ func (s *Server) handleListObjects(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGC(w http.ResponseWriter, r *http.Request) {
-	gracePeriod := 24 * time.Hour
-	if gpStr := r.URL.Query().Get("grace_period_hours"); gpStr != "" {
-		hours, err := strconv.ParseInt(gpStr, 10, 64)
-		if err != nil || hours < 0 {
-			BadRequest(w, "grace_period_hours must be a non-negative integer")
-			return
-		}
-		if hours > maxGCGracePeriodHours {
-			BadRequest(w, fmt.Sprintf("grace_period_hours must be between 0 and %d", maxGCGracePeriodHours))
-			return
-		}
-		gracePeriod = time.Duration(hours) * time.Hour
+	gracePeriod, errMessage := gcGracePeriodFromRequest(r)
+	if errMessage != "" {
+		BadRequest(w, errMessage)
+		return
 	}
 
 	// Delete unreferenced objects only when dry_run is explicitly false.
-	dryRun := true
-	if rawDryRun := r.URL.Query().Get("dry_run"); rawDryRun != "" {
-		parsedDryRun, err := strconv.ParseBool(rawDryRun)
-		if err != nil {
-			BadRequest(w, "dry_run parameter must be a boolean")
-			return
-		}
-		dryRun = parsedDryRun
+	dryRun, errMessage := gcDryRunFromRequest(r)
+	if errMessage != "" {
+		BadRequest(w, errMessage)
+		return
 	}
 
 	if !s.ensureDataplaneConnected(r.Context()) {
@@ -5015,6 +5057,40 @@ func (s *Server) handleGC(w http.ResponseWriter, r *http.Request) {
 	}
 
 	NewAPIResponse(resp).Write(w, http.StatusOK)
+}
+
+func gcGracePeriodFromRequest(r *http.Request) (time.Duration, string) {
+	gracePeriod := 24 * time.Hour
+	value, err := singleQueryValue(r.URL.Query(), "grace_period_hours")
+	if err != nil {
+		return 0, "grace_period_hours parameter must be specified at most once"
+	}
+	if value == "" {
+		return gracePeriod, ""
+	}
+	hours, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || hours < 0 {
+		return 0, "grace_period_hours must be a non-negative integer"
+	}
+	if hours > maxGCGracePeriodHours {
+		return 0, fmt.Sprintf("grace_period_hours must be between 0 and %d", maxGCGracePeriodHours)
+	}
+	return time.Duration(hours) * time.Hour, ""
+}
+
+func gcDryRunFromRequest(r *http.Request) (bool, string) {
+	value, err := singleQueryValue(r.URL.Query(), "dry_run")
+	if err != nil {
+		return false, "dry_run parameter must be specified at most once"
+	}
+	if value == "" {
+		return true, ""
+	}
+	dryRun, err := strconv.ParseBool(value)
+	if err != nil {
+		return false, "dry_run parameter must be a boolean"
+	}
+	return dryRun, ""
 }
 
 func (s *Server) handleGetScrubResult(w http.ResponseWriter, r *http.Request) {
@@ -5284,6 +5360,43 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	NewAPIResponse(response).Write(w, http.StatusOK)
 }
 
+var errAmbiguousQueryParameter = errors.New("ambiguous query parameter")
+
+func singleQueryValue(query url.Values, name string) (string, error) {
+	values, ok := query[name]
+	if !ok {
+		return "", nil
+	}
+	if len(values) != 1 {
+		return "", errAmbiguousQueryParameter
+	}
+	return values[0], nil
+}
+
+func searchQueryFromRequest(r *http.Request) (string, error) {
+	value, err := singleQueryValue(r.URL.Query(), "q")
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(value), nil
+}
+
+func searchLimitFromRequest(r *http.Request) (int, error) {
+	const defaultLimit = 50
+	value, err := singleQueryValue(r.URL.Query(), "limit")
+	if err != nil {
+		return 0, err
+	}
+	if value == "" {
+		return defaultLimit, nil
+	}
+	limit, err := strconv.Atoi(value)
+	if err != nil || limit <= 0 || limit > 100 {
+		return 0, errors.New("invalid search limit")
+	}
+	return limit, nil
+}
+
 // === Helper functions ===
 
 func (s *Server) json(w http.ResponseWriter, status int, data any) {
@@ -5440,9 +5553,12 @@ func (s *Server) handleRestoreFromTrash(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	newPath := r.URL.Query().Get("path")
+	newPath, err := trashRestorePathFromRequest(r)
+	if err != nil {
+		badRequestInvalidPath(w)
+		return
+	}
 	if newPath != "" {
-		var err error
 		newPath, err = validatePath(newPath)
 		if err != nil {
 			badRequestInvalidPath(w)
@@ -5594,6 +5710,10 @@ func (s *Server) handleRestoreFromTrash(w http.ResponseWriter, r *http.Request) 
 	s.LogActivityWithWarning(w, r, activity.ActionTrashRestore, activityPath, activityDetails)
 
 	NewAPIResponse(responseData).WithMessage(message).Write(w, http.StatusOK)
+}
+
+func trashRestorePathFromRequest(r *http.Request) (string, error) {
+	return singleQueryValue(r.URL.Query(), "path")
 }
 
 func (s *Server) handleDeleteFromTrash(w http.ResponseWriter, r *http.Request) {
@@ -5823,20 +5943,10 @@ func (s *Server) handleThumbnail(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Get size parameter
-	sizeParam := r.URL.Query().Get("size")
-	size := thumbnail.SizeMedium
-	if sizeParam != "" {
-		switch sizeParam {
-		case "small", "s":
-			size = thumbnail.SizeSmall
-		case "medium", "m":
-			size = thumbnail.SizeMedium
-		case "large", "l":
-			size = thumbnail.SizeLarge
-		default:
-			BadRequest(w, "size parameter must be one of: small, medium, large")
-			return
-		}
+	size, err := thumbnailSizeFromRequest(r)
+	if err != nil {
+		BadRequest(w, err.Error())
+		return
 	}
 
 	reader, err := s.fs.OpenFile(r.Context(), filePath)
@@ -5893,6 +6003,26 @@ func (s *Server) handleThumbnail(w http.ResponseWriter, r *http.Request) {
 	w.Write(data)
 }
 
+func thumbnailSizeFromRequest(r *http.Request) (thumbnail.Size, error) {
+	sizeParam, err := singleQueryValue(r.URL.Query(), "size")
+	if err != nil {
+		return "", errors.New("size parameter must appear at most once")
+	}
+	if sizeParam == "" {
+		return thumbnail.SizeMedium, nil
+	}
+	switch sizeParam {
+	case "small", "s":
+		return thumbnail.SizeSmall, nil
+	case "medium", "m":
+		return thumbnail.SizeMedium, nil
+	case "large", "l":
+		return thumbnail.SizeLarge, nil
+	default:
+		return "", errors.New("size parameter must be one of: small, medium, large")
+	}
+}
+
 func apiETagMatch(headerValue, currentETag string) bool {
 	for _, candidate := range strings.Split(headerValue, ",") {
 		trimmed := strings.TrimSpace(candidate)
@@ -5920,8 +6050,15 @@ func hashReadSeeker(reader io.ReadSeeker) (string, error) {
 // handleListActivity returns recent activity log entries
 func (s *Server) handleListActivity(w http.ResponseWriter, r *http.Request) {
 	// Parse query parameters
-	limitStr := r.URL.Query().Get("limit")
-	offsetStr := r.URL.Query().Get("offset")
+	query := r.URL.Query()
+	limitStr, ok := singleActivityQueryParam(w, query, "limit")
+	if !ok {
+		return
+	}
+	offsetStr, ok := singleActivityQueryParam(w, query, "offset")
+	if !ok {
+		return
+	}
 	filter, ok := parseActivityQueryFilter(w, r)
 	if !ok {
 		return
@@ -6045,25 +6182,293 @@ func (s *Server) handleActivityStats(w http.ResponseWriter, r *http.Request) {
 	NewAPIResponse(buildActivityStats(entries)).Write(w, http.StatusOK)
 }
 
+type createActivityReviewRecordRequest struct {
+	Note              string                           `json:"note"`
+	ScopeLabel        string                           `json:"scope_label"`
+	FilterSummary     string                           `json:"filter_summary"`
+	DispositionStatus activity.ReviewDispositionStatus `json:"disposition_status"`
+	ActionCounts      map[activity.ActionType]int      `json:"action_counts"`
+	ReviewCount       int                              `json:"review_count"`
+	TotalCount        int                              `json:"total_count"`
+	PathCount         int                              `json:"path_count"`
+	UserCount         int                              `json:"user_count"`
+	PathSamples       []string                         `json:"path_samples"`
+	UserSamples       []string                         `json:"user_samples"`
+	ActivityEntryIDs  []string                         `json:"activity_entry_ids"`
+}
+
+type updateActivityReviewRecordRequest struct {
+	DispositionStatus activity.ReviewDispositionStatus `json:"disposition_status"`
+	Note              *string                          `json:"note"`
+}
+
+func (s *Server) handleListActivityReviewRecords(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query()
+	limitStr, ok := singleActivityQueryParam(w, query, "limit")
+	if !ok {
+		return
+	}
+	offsetStr, ok := singleActivityQueryParam(w, query, "offset")
+	if !ok {
+		return
+	}
+	reviewer, ok := singleActivityQueryParam(w, query, "reviewer")
+	if !ok {
+		return
+	}
+	entryIDValue, ok := singleActivityQueryParam(w, query, "activity_entry_id")
+	if !ok {
+		return
+	}
+	dispositionStatusValue, ok := singleActivityQueryParam(w, query, "disposition_status")
+	if !ok {
+		return
+	}
+	sinceValue, ok := singleActivityQueryParam(w, query, "since")
+	if !ok {
+		return
+	}
+	untilValue, ok := singleActivityQueryParam(w, query, "until")
+	if !ok {
+		return
+	}
+
+	limit := 20
+	if limitStr != "" {
+		l, err := strconv.Atoi(limitStr)
+		if err != nil || l <= 0 || l > 100 {
+			BadRequest(w, "limit parameter must be between 1 and 100")
+			return
+		}
+		limit = l
+	}
+	offset := 0
+	if offsetStr != "" {
+		o, err := strconv.Atoi(offsetStr)
+		if err != nil || o < 0 {
+			BadRequest(w, "offset parameter must be a non-negative integer")
+			return
+		}
+		offset = o
+	}
+	activityEntryID, ok := parseActivityReviewEntryIDQueryParam(w, entryIDValue)
+	if !ok {
+		return
+	}
+	dispositionStatus, ok := parseActivityReviewDispositionStatusQueryParam(w, dispositionStatusValue)
+	if !ok {
+		return
+	}
+	since, ok := parseActivityTimeQueryParam(w, sinceValue, "since")
+	if !ok {
+		return
+	}
+	until, ok := parseActivityTimeQueryParam(w, untilValue, "until")
+	if !ok {
+		return
+	}
+	if since != nil && until != nil && since.After(*until) {
+		BadRequest(w, "since parameter must be before or equal to until parameter")
+		return
+	}
+
+	if s.activityConfiguredButUnavailable() {
+		ServiceUnavailable(w, "activity log unavailable")
+		return
+	}
+	if s.activity == nil {
+		NewAPIResponse(map[string]any{
+			"items":  []any{},
+			"total":  0,
+			"limit":  limit,
+			"offset": offset,
+		}).Write(w, http.StatusOK)
+		return
+	}
+
+	records, total := s.activity.ListReviewRecordsFiltered(limit, offset, activity.ReviewRecordFilter{
+		Reviewer:          strings.TrimSpace(reviewer),
+		ActivityEntryID:   activityEntryID,
+		DispositionStatus: dispositionStatus,
+		Since:             since,
+		Until:             until,
+	})
+	NewAPIResponse(map[string]any{
+		"items":  records,
+		"total":  total,
+		"limit":  limit,
+		"offset": offset,
+	}).Write(w, http.StatusOK)
+}
+
+func (s *Server) handleCreateActivityReviewRecord(w http.ResponseWriter, r *http.Request) {
+	if s.activityConfiguredButUnavailable() {
+		ServiceUnavailable(w, "activity log unavailable")
+		return
+	}
+	if s.activity == nil {
+		ServiceUnavailable(w, "activity log not configured")
+		return
+	}
+
+	var req createActivityReviewRecordRequest
+	if err := decodeJSONBody(r, &req); err != nil {
+		writeLimitedJSONBodyError(w, err, DefaultJSONRequestBodyLimit)
+		return
+	}
+
+	record, err := s.activity.RecordReview(activity.ReviewRecordInput{
+		Reviewer:          currentActivityReviewReviewer(r),
+		Note:              req.Note,
+		ScopeLabel:        req.ScopeLabel,
+		FilterSummary:     req.FilterSummary,
+		DispositionStatus: req.DispositionStatus,
+		ActionCounts:      req.ActionCounts,
+		ReviewCount:       req.ReviewCount,
+		TotalCount:        req.TotalCount,
+		PathCount:         req.PathCount,
+		UserCount:         req.UserCount,
+		PathSamples:       req.PathSamples,
+		UserSamples:       req.UserSamples,
+		ActivityEntryIDs:  req.ActivityEntryIDs,
+	})
+	if err != nil {
+		if errors.Is(err, activity.ErrInvalidReviewRecord) {
+			BadRequest(w, err.Error())
+			return
+		}
+		s.respondInternalError(w, "record activity review", err)
+		return
+	}
+
+	NewAPIResponse(record).Write(w, http.StatusCreated)
+}
+
+func (s *Server) handleUpdateActivityReviewRecord(w http.ResponseWriter, r *http.Request) {
+	if s.activityConfiguredButUnavailable() {
+		ServiceUnavailable(w, "activity log unavailable")
+		return
+	}
+	if s.activity == nil {
+		ServiceUnavailable(w, "activity log not configured")
+		return
+	}
+
+	recordID := chi.URLParam(r, "id")
+	var req updateActivityReviewRecordRequest
+	if err := decodeJSONBody(r, &req); err != nil {
+		writeLimitedJSONBodyError(w, err, DefaultJSONRequestBodyLimit)
+		return
+	}
+
+	record, err := s.activity.UpdateReviewRecordDisposition(
+		recordID,
+		currentActivityReviewReviewer(r),
+		req.DispositionStatus,
+		req.Note,
+	)
+	if err != nil {
+		if errors.Is(err, activity.ErrReviewRecordNotFound) {
+			NotFound(w, "activity review record not found")
+			return
+		}
+		if errors.Is(err, activity.ErrInvalidReviewRecord) {
+			BadRequest(w, err.Error())
+			return
+		}
+		s.respondInternalError(w, "update activity review", err)
+		return
+	}
+
+	NewAPIResponse(record).Write(w, http.StatusOK)
+}
+
+func parseActivityReviewEntryIDQueryParam(w http.ResponseWriter, value string) (string, bool) {
+	if strings.TrimSpace(value) == "" {
+		return "", true
+	}
+	trimmed := strings.TrimSpace(value)
+	if trimmed != value {
+		BadRequest(w, "activity_entry_id parameter is invalid")
+		return "", false
+	}
+	return trimmed, true
+}
+
+func parseActivityReviewDispositionStatusQueryParam(w http.ResponseWriter, value string) (activity.ReviewDispositionStatus, bool) {
+	if strings.TrimSpace(value) == "" {
+		return "", true
+	}
+	if strings.TrimSpace(value) != value {
+		BadRequest(w, "disposition_status parameter is invalid")
+		return "", false
+	}
+	status := activity.ReviewDispositionStatus(value)
+	switch status {
+	case activity.ReviewDispositionDocumented,
+		activity.ReviewDispositionConfirmed,
+		activity.ReviewDispositionRestored,
+		activity.ReviewDispositionDisabled,
+		activity.ReviewDispositionNeedsFollowUp:
+		return status, true
+	default:
+		BadRequest(w, "disposition_status parameter is invalid")
+		return "", false
+	}
+}
+
+func currentActivityReviewReviewer(r *http.Request) string {
+	claims := auth.GetClaimsFromContext(r.Context())
+	if claims != nil && strings.TrimSpace(claims.Username) != "" {
+		return claims.Username
+	}
+	return "admin"
+}
+
 func parseActivityQueryFilter(w http.ResponseWriter, r *http.Request) (activity.ListFilter, bool) {
 	query := r.URL.Query()
-	pathFilter, ok := parseActivityPathQueryParam(w, query.Get("path"))
+	pathValue, ok := singleActivityQueryParam(w, query, "path")
 	if !ok {
 		return activity.ListFilter{}, false
 	}
-	actionFilter, ok := parseActivityActionQueryParam(w, query.Get("action"))
+	actionValue, ok := singleActivityQueryParam(w, query, "action")
 	if !ok {
 		return activity.ListFilter{}, false
 	}
-	groupActions, ok := parseActivityActionGroupQueryParam(w, query.Get("action_group"))
+	actionGroupValue, ok := singleActivityQueryParam(w, query, "action_group")
 	if !ok {
 		return activity.ListFilter{}, false
 	}
-	since, ok := parseActivityTimeQueryParam(w, query.Get("since"), "since")
+	userValue, ok := singleActivityQueryParam(w, query, "user")
 	if !ok {
 		return activity.ListFilter{}, false
 	}
-	until, ok := parseActivityTimeQueryParam(w, query.Get("until"), "until")
+	sinceValue, ok := singleActivityQueryParam(w, query, "since")
+	if !ok {
+		return activity.ListFilter{}, false
+	}
+	untilValue, ok := singleActivityQueryParam(w, query, "until")
+	if !ok {
+		return activity.ListFilter{}, false
+	}
+
+	pathFilter, ok := parseActivityPathQueryParam(w, pathValue)
+	if !ok {
+		return activity.ListFilter{}, false
+	}
+	actionFilter, ok := parseActivityActionQueryParam(w, actionValue)
+	if !ok {
+		return activity.ListFilter{}, false
+	}
+	groupActions, ok := parseActivityActionGroupQueryParam(w, actionGroupValue)
+	if !ok {
+		return activity.ListFilter{}, false
+	}
+	since, ok := parseActivityTimeQueryParam(w, sinceValue, "since")
+	if !ok {
+		return activity.ListFilter{}, false
+	}
+	until, ok := parseActivityTimeQueryParam(w, untilValue, "until")
 	if !ok {
 		return activity.ListFilter{}, false
 	}
@@ -6075,11 +6480,20 @@ func parseActivityQueryFilter(w http.ResponseWriter, r *http.Request) (activity.
 	return activity.ListFilter{
 		Action:  actionFilter,
 		Actions: groupActions,
-		User:    query.Get("user"),
+		User:    userValue,
 		Path:    pathFilter,
 		Since:   since,
 		Until:   until,
 	}, true
+}
+
+func singleActivityQueryParam(w http.ResponseWriter, query url.Values, name string) (string, bool) {
+	value, err := singleQueryValue(query, name)
+	if err != nil {
+		BadRequest(w, fmt.Sprintf("%s parameter must appear at most once", name))
+		return "", false
+	}
+	return value, true
 }
 
 func parseActivityActionQueryParam(w http.ResponseWriter, value string) (activity.ActionType, bool) {
@@ -7465,6 +7879,9 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 			"telegram_enabled":              cfg.Alerts.TelegramEnabled,
 			"telegram_bot_token_configured": strings.TrimSpace(cfg.Alerts.TelegramBotToken) != "",
 			"telegram_chat_id":              cfg.Alerts.TelegramChatID,
+			"wecom_enabled":                 cfg.Alerts.WeComEnabled,
+			"wecom_webhook_url":             settingsWebhookURLForResponse(cfg.Alerts.WeComWebhookURL),
+			"wecom_webhook_url_configured":  strings.TrimSpace(cfg.Alerts.WeComWebhookURL) != "",
 			"email_enabled":                 cfg.Alerts.EmailEnabled,
 			"smtp_host":                     cfg.Alerts.SMTPHost,
 			"smtp_port":                     cfg.Alerts.SMTPPort,
@@ -7555,12 +7972,15 @@ func (s *Server) handleSendTestAlert(w http.ResponseWriter, r *http.Request) {
 }
 
 func configuredAlertChannels(cfg config.AlertsConfig) []string {
-	channels := make([]string, 0, 3)
+	channels := make([]string, 0, 5)
 	if strings.TrimSpace(cfg.WebhookURL) != "" {
 		channels = append(channels, "webhook")
 	}
 	if cfg.TelegramEnabled && strings.TrimSpace(cfg.TelegramBotToken) != "" && strings.TrimSpace(cfg.TelegramChatID) != "" {
 		channels = append(channels, "telegram")
+	}
+	if cfg.WeComEnabled && strings.TrimSpace(cfg.WeComWebhookURL) != "" {
+		channels = append(channels, "wecom")
 	}
 	if emailAlertsConfigured(cfg) {
 		channels = append(channels, "email")
@@ -7576,12 +7996,20 @@ func settingsWebhookURLForResponse(webhookURL string) string {
 }
 
 func resolveSettingsWebhookURL(existing, requested string) (string, error) {
+	return resolveSettingsSecretURL(existing, requested, "alerts.webhook_url")
+}
+
+func resolveSettingsWeComWebhookURL(existing, requested string) (string, error) {
+	return resolveSettingsSecretURL(existing, requested, "alerts.wecom_webhook_url")
+}
+
+func resolveSettingsSecretURL(existing, requested, fieldName string) (string, error) {
 	trimmed := strings.TrimSpace(requested)
 	if trimmed != redactedSettingsSecretValue {
 		return trimmed, nil
 	}
 	if strings.TrimSpace(existing) == "" {
-		return "", errors.New("invalid alerts.webhook_url redacted placeholder")
+		return "", fmt.Errorf("invalid %s redacted placeholder", fieldName)
 	}
 	return existing, nil
 }
@@ -8002,6 +8430,8 @@ type AlertsSettingsUpdate struct {
 	TelegramEnabled  *bool     `json:"telegram_enabled,omitempty"`
 	TelegramBotToken *string   `json:"telegram_bot_token,omitempty"`
 	TelegramChatID   *string   `json:"telegram_chat_id,omitempty"`
+	WeComEnabled     *bool     `json:"wecom_enabled,omitempty"`
+	WeComWebhookURL  *string   `json:"wecom_webhook_url,omitempty"`
 	EmailEnabled     *bool     `json:"email_enabled,omitempty"`
 	SMTPHost         *string   `json:"smtp_host,omitempty"`
 	SMTPPort         *int      `json:"smtp_port,omitempty"`
@@ -8420,6 +8850,17 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		if req.Alerts.TelegramChatID != nil {
 			updatedConfig.Alerts.TelegramChatID = strings.TrimSpace(*req.Alerts.TelegramChatID)
 		}
+		if req.Alerts.WeComEnabled != nil {
+			updatedConfig.Alerts.WeComEnabled = *req.Alerts.WeComEnabled
+		}
+		if req.Alerts.WeComWebhookURL != nil {
+			resolved, err := resolveSettingsWeComWebhookURL(currentConfig.Alerts.WeComWebhookURL, *req.Alerts.WeComWebhookURL)
+			if err != nil {
+				BadRequest(w, err.Error())
+				return
+			}
+			updatedConfig.Alerts.WeComWebhookURL = resolved
+		}
 		if req.Alerts.EmailEnabled != nil {
 			updatedConfig.Alerts.EmailEnabled = *req.Alerts.EmailEnabled
 		}
@@ -8576,6 +9017,7 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		s.respondInternalError(w, "validate webdav identity", err)
 		return
 	}
+	policyAlertEvent, shouldSendPolicyAlert := settingsPolicyChangedAlertEvent(*currentConfig, updatedConfig)
 
 	var preparedWebDAV *WebDAVRuntimeConfig
 	webDAVRuntimeChanged := req.WebDAV != nil || req.Storage != nil
@@ -8611,6 +9053,9 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	s.storeConfig(&updatedConfig)
 	s.applyRuntimeSettings(r.Context(), req, updatedConfig, preparedDataplane, preparedWebDAV)
 	preparedDataplane = nil
+	if shouldSendPolicyAlert {
+		s.sendSettingsPolicyChangedAlertEvent(r.Context(), policyAlertEvent)
+	}
 
 	s.logger.Info().Msg("settings updated and saved")
 
@@ -8736,6 +9181,8 @@ func (s *Server) applyRuntimeSettings(ctx context.Context, req UpdateSettingsReq
 			TelegramEnabled:  cfg.Alerts.TelegramEnabled,
 			TelegramBotToken: cfg.Alerts.TelegramBotToken,
 			TelegramChatID:   cfg.Alerts.TelegramChatID,
+			WeComEnabled:     cfg.Alerts.WeComEnabled,
+			WeComWebhookURL:  cfg.Alerts.WeComWebhookURL,
 			EmailEnabled:     cfg.Alerts.EmailEnabled,
 			SMTPHost:         cfg.Alerts.SMTPHost,
 			SMTPPort:         cfg.Alerts.SMTPPort,
@@ -9249,11 +9696,16 @@ func (s *Server) handleListShares(w http.ResponseWriter, r *http.Request) {
 		s.shareHandler.ListShares(w, r)
 		return
 	}
+	listAll, err := shareListAllFromRequest(r)
+	if err != nil {
+		writeShareErrorResponse(w, http.StatusBadRequest, "invalid request", "INVALID_REQUEST")
+		return
+	}
 
 	var sharesList []*share.Share
 	if !s.authEnabled {
 		sharesList = s.shareStore.ListAll()
-	} else if auth.IsAdmin(r.Context()) && r.URL.Query().Get("all") == "true" {
+	} else if auth.IsAdmin(r.Context()) && listAll {
 		sharesList = s.shareStore.ListAll()
 	} else {
 		sharesList = s.shareStore.ListByUser(getShareOwnerIdentifiersFromRequest(r.Context())...)
@@ -9275,6 +9727,14 @@ func (s *Server) handleListShares(w http.ResponseWriter, r *http.Request) {
 	}
 
 	NewAPIResponse(infos).Write(w, http.StatusOK)
+}
+
+func shareListAllFromRequest(r *http.Request) (bool, error) {
+	value, err := singleQueryValue(r.URL.Query(), "all")
+	if err != nil {
+		return false, err
+	}
+	return value == "true", nil
 }
 
 func (s *Server) handleGetSharePolicy(w http.ResponseWriter, r *http.Request) {
@@ -9934,7 +10394,10 @@ func readFavoriteBatchPaths(r *http.Request) ([]string, error) {
 }
 
 func readFavoriteQueryPath(r *http.Request) (string, error) {
-	queryPath := r.URL.Query().Get("path")
+	queryPath, err := singleQueryValue(r.URL.Query(), "path")
+	if err != nil {
+		return "", err
+	}
 	if strings.TrimSpace(queryPath) == "" {
 		return "", nil
 	}

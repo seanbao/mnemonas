@@ -6,6 +6,7 @@
 import { authFetch } from './auth'
 import { INVALID_API_RESPONSE_MESSAGE as INVALID_USERS_RESPONSE_MESSAGE } from '@/lib/apiMessages'
 import { readStructuredJsonErrorDetails } from '@/lib/jsonErrorResponse'
+import { normalizeUserHomeDir } from '@/lib/utils'
 
 export interface User {
   id: string
@@ -87,6 +88,22 @@ function isNonNegativeSafeInteger(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
 }
 
+function isCanonicalNonEmptyString(value: unknown): value is string {
+  return typeof value === 'string' && value.trim() === value && value.length > 0
+}
+
+function isValidUserHomeDir(value: unknown): value is string {
+  if (typeof value !== 'string') {
+    return false
+  }
+
+  try {
+    return normalizeUserHomeDir(value) === value
+  } catch {
+    return false
+  }
+}
+
 function isValidUser(value: unknown): value is User {
   if (!value || typeof value !== 'object') {
     return false
@@ -94,13 +111,13 @@ function isValidUser(value: unknown): value is User {
 
   const user = value as Partial<User>
   return (
-    typeof user.id === 'string' &&
-    typeof user.username === 'string' &&
+    isCanonicalNonEmptyString(user.id) &&
+    isCanonicalNonEmptyString(user.username) &&
     typeof user.email === 'string' &&
     isUserRole(user.role) &&
     (user.groups === undefined || (Array.isArray(user.groups) && user.groups.every((group) => typeof group === 'string'))) &&
     typeof user.disabled === 'boolean' &&
-    typeof user.home_dir === 'string' &&
+    isValidUserHomeDir(user.home_dir) &&
     typeof user.created_at === 'string' &&
     typeof user.updated_at === 'string' &&
     (user.last_login_at === undefined || typeof user.last_login_at === 'string') &&
@@ -148,6 +165,10 @@ const USERS_ERROR_MESSAGES = {
   updateStatus: '更新用户状态失败',
 } as const
 
+function userManagementUrl(userId: string): string {
+  return `${API_BASE}/${encodeURIComponent(userId)}`
+}
+
 async function parseUsersError(response: Response, fallback: string): Promise<UsersError> {
   const structuredError = await readStructuredJsonErrorDetails(response, fallback)
   if (structuredError) {
@@ -180,6 +201,21 @@ async function parseUsersSuccess<T>(response: Response, invalidMessage: string):
 function validateUserQuotaRequest(quotaBytes: unknown): void {
   if (quotaBytes !== undefined && !isNonNegativeSafeInteger(quotaBytes)) {
     throw new UsersError('用户配额必须是 0 或不超过安全范围的整数', 0, 'INVALID_QUOTA')
+  }
+}
+
+function normalizeUserHomeDirRequest<T extends { home_dir?: string }>(data: T): T {
+  if (data.home_dir === undefined) {
+    return data
+  }
+
+  try {
+    return {
+      ...data,
+      home_dir: normalizeUserHomeDir(data.home_dir),
+    }
+  } catch {
+    throw new UsersError('用户主目录路径无效', 0, 'INVALID_HOME_DIR')
   }
 }
 
@@ -220,6 +256,7 @@ export async function listUsers(options: UsersRequestOptions = {}): Promise<List
  */
 export async function createUser(data: CreateUserRequest, options: UsersRequestOptions = {}): Promise<UserResponse> {
   validateUserQuotaRequest(data.quota_bytes)
+  const request = normalizeUserHomeDirRequest(data)
 
   const response = await authFetch(`${API_BASE}/`, {
     ...options,
@@ -227,7 +264,7 @@ export async function createUser(data: CreateUserRequest, options: UsersRequestO
     headers: {
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify(data),
+    body: JSON.stringify(request),
   })
   
   if (!response.ok) {
@@ -252,14 +289,15 @@ export async function createUser(data: CreateUserRequest, options: UsersRequestO
  */
 export async function updateUser(userId: string, data: UpdateUserRequest, options: UsersRequestOptions = {}): Promise<UserResponse> {
   validateUserQuotaRequest(data.quota_bytes)
+  const request = normalizeUserHomeDirRequest(data)
 
-  const response = await authFetch(`${API_BASE}/${userId}`, {
+  const response = await authFetch(userManagementUrl(userId), {
     ...options,
     method: 'PUT',
     headers: {
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify(data),
+    body: JSON.stringify(request),
   })
 
   if (!response.ok) {
@@ -283,7 +321,7 @@ export async function updateUser(userId: string, data: UpdateUserRequest, option
  * Delete a user (admin only)
  */
 export async function deleteUser(userId: string, options: UsersRequestOptions = {}): Promise<UsersActionResult> {
-  const response = await authFetch(`${API_BASE}/${userId}`, {
+  const response = await authFetch(userManagementUrl(userId), {
     ...options,
     method: 'DELETE',
   })
@@ -311,7 +349,7 @@ export async function resetUserPassword(
   data: ResetPasswordRequest,
   options: UsersRequestOptions = {}
 ): Promise<UsersActionResult> {
-  const response = await authFetch(`${API_BASE}/${userId}/reset-password`, {
+  const response = await authFetch(`${userManagementUrl(userId)}/reset-password`, {
     ...options,
     method: 'POST',
     headers: {
@@ -339,7 +377,7 @@ export async function resetUserPassword(
  * Revoke a user's active sessions (admin only)
  */
 export async function revokeUserSessions(userId: string, options: UsersRequestOptions = {}): Promise<UsersActionResult> {
-  const response = await authFetch(`${API_BASE}/${userId}/revoke-sessions`, {
+  const response = await authFetch(`${userManagementUrl(userId)}/revoke-sessions`, {
     ...options,
     method: 'POST',
   })
@@ -367,7 +405,7 @@ export async function toggleUserStatus(
   disabled: boolean,
   options: UsersRequestOptions = {}
 ): Promise<UsersActionResult> {
-  const response = await authFetch(`${API_BASE}/${userId}/status`, {
+  const response = await authFetch(`${userManagementUrl(userId)}/status`, {
     ...options,
     method: 'PUT',
     headers: {

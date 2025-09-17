@@ -72,6 +72,7 @@ const webdavLockDepthInfinity = "infinity"
 const maxWebDAVXMLRequestBody = 1 << 20
 const untrustedWebDAVContentSecurityPolicy = "sandbox; default-src 'none'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; img-src 'self' data: blob:; media-src 'self' data: blob:; style-src 'unsafe-inline'"
 const webDAVAuthTypeUsers = "users"
+const webDAVAllowedMethods = "OPTIONS, GET, HEAD, PUT, DELETE, MKCOL, COPY, MOVE, PROPFIND, PROPPATCH, LOCK, UNLOCK"
 
 const (
 	webDAVRoleAdmin = "admin"
@@ -358,6 +359,17 @@ func hasDotSegment(rawPath string) bool {
 	return false
 }
 
+func cleanDecodedWebDAVURLPath(rawPath string) (string, bool) {
+	if hasDotSegment(rawPath) {
+		return "", false
+	}
+	cleanPath := path.Clean(strings.ReplaceAll(rawPath, "\\", "/"))
+	if !path.IsAbs(cleanPath) {
+		cleanPath = "/" + cleanPath
+	}
+	return cleanPath, true
+}
+
 type UserIdentity struct {
 	Username   string
 	Role       string
@@ -569,16 +581,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if requestPath == "" {
 		requestPath = "/"
 	}
-	if hasDotSegment(requestPath) {
+	cleanPath, ok := cleanDecodedWebDAVURLPath(requestPath)
+	if !ok {
 		http.Error(w, "invalid path", http.StatusBadRequest)
 		return
 	}
 
-	// Validate path to prevent path traversal attacks (C1 fix)
-	cleanPath := path.Clean(requestPath)
-	if !path.IsAbs(cleanPath) {
-		cleanPath = "/" + cleanPath
-	}
 	clientPath, ok := trimWebDAVPrefix(cleanPath, h.prefix)
 	if !ok {
 		http.NotFound(w, r)
@@ -592,6 +600,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	ctx := contextWithScope(r.Context(), scope)
 	r = r.WithContext(ctx)
+
+	if !isSupportedWebDAVMethod(r.Method) {
+		h.writeMethodNotAllowed(w, "method not supported")
+		return
+	}
 
 	if mode, ok := accessModeForMethod(r.Method); ok && !h.authorizeScopePath(ctx, w, scope, filePath, mode) {
 		return
@@ -627,7 +640,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "UNLOCK":
 		h.handleUnlock(ctx, w, r, filePath)
 	default:
-		http.Error(w, "method not supported", http.StatusMethodNotAllowed)
+		h.writeMethodNotAllowed(w, "method not supported")
 	}
 }
 
@@ -640,6 +653,15 @@ func accessModeForMethod(method string) (accessMode, bool) {
 	default:
 		return accessWrite, true
 	}
+}
+
+func isSupportedWebDAVMethod(method string) bool {
+	switch method {
+	case "OPTIONS", http.MethodGet, http.MethodHead, http.MethodPut, http.MethodDelete,
+		"MKCOL", "COPY", "MOVE", "PROPFIND", "PROPPATCH", "LOCK", "UNLOCK":
+		return true
+	}
+	return false
 }
 
 func authorizeScopePath(w http.ResponseWriter, scope requestScope, targetPath string, mode accessMode) bool {
@@ -676,10 +698,15 @@ func (h *Handler) scopeCanReadOrNavigate(ctx context.Context, scope requestScope
 }
 
 func (h *Handler) handleOptions(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Allow", "OPTIONS, GET, HEAD, PUT, DELETE, MKCOL, COPY, MOVE, PROPFIND, PROPPATCH, LOCK, UNLOCK")
+	w.Header().Set("Allow", webDAVAllowedMethods)
 	w.Header().Set("DAV", "1, 2")
 	w.Header().Set("MS-Author-Via", "DAV")
 	w.WriteHeader(http.StatusOK)
+}
+
+func (h *Handler) writeMethodNotAllowed(w http.ResponseWriter, message string) {
+	w.Header().Set("Allow", webDAVAllowedMethods)
+	http.Error(w, message, http.StatusMethodNotAllowed)
 }
 
 func (h *Handler) handleGet(ctx context.Context, w http.ResponseWriter, r *http.Request, filePath string) {
@@ -1032,7 +1059,7 @@ func (h *Handler) handleMkcol(ctx context.Context, w http.ResponseWriter, r *htt
 	}
 
 	if _, err := h.fs.Stat(ctx, filePath); err == nil {
-		http.Error(w, "resource already exists", http.StatusMethodNotAllowed)
+		h.writeMethodNotAllowed(w, "resource already exists")
 		return
 	} else if !errors.Is(err, storage.ErrNotFound) && !errors.Is(err, storage.ErrNotDir) {
 		h.handleError(w, err)
@@ -1065,7 +1092,7 @@ func (h *Handler) handleMkcol(ctx context.Context, w http.ResponseWriter, r *htt
 
 	if err := h.fs.Mkdir(ctx, filePath); err != nil {
 		if errors.Is(err, storage.ErrAlreadyExists) {
-			http.Error(w, "resource already exists", http.StatusMethodNotAllowed)
+			h.writeMethodNotAllowed(w, "resource already exists")
 			return
 		}
 		if errors.Is(err, storage.ErrNotDir) {
@@ -3228,14 +3255,14 @@ func resolveIfHeaderPath(rawPath, expectedHost, prefix string) (string, bool) {
 		return "", false
 	}
 	decodedPath, err := url.PathUnescape(u.EscapedPath())
-	if err != nil || hasDotSegment(decodedPath) {
+	if err != nil {
 		return "", false
 	}
-	resolvedPath := path.Clean(decodedPath)
-	if !path.IsAbs(resolvedPath) {
-		resolvedPath = "/" + resolvedPath
+	resolvedPath, ok := cleanDecodedWebDAVURLPath(decodedPath)
+	if !ok {
+		return "", false
 	}
-	resolvedPath, ok := trimWebDAVPrefix(resolvedPath, prefix)
+	resolvedPath, ok = trimWebDAVPrefix(resolvedPath, prefix)
 	if !ok {
 		return "", false
 	}
@@ -3592,17 +3619,12 @@ func (h *Handler) getDestination(r *http.Request) string {
 	if err != nil {
 		return ""
 	}
-	if hasDotSegment(decodedPath) {
+	dstPath, ok := cleanDecodedWebDAVURLPath(decodedPath)
+	if !ok {
 		return ""
 	}
 
-	// Get path and clean it
-	dstPath := path.Clean(decodedPath)
-	if !path.IsAbs(dstPath) {
-		dstPath = "/" + dstPath
-	}
-
-	dstPath, ok := trimWebDAVPrefix(dstPath, h.prefix)
+	dstPath, ok = trimWebDAVPrefix(dstPath, h.prefix)
 	if !ok {
 		return ""
 	}
@@ -3644,9 +3666,6 @@ func webDAVHostMatches(uriHost, requestHost, uriScheme string) bool {
 	if uriHost == "" || requestHost == "" {
 		return false
 	}
-	if strings.EqualFold(uriHost, requestHost) {
-		return true
-	}
 
 	uriName, uriPort, uriOK := splitWebDAVHostPort(uriHost)
 	requestName, requestPort, requestOK := splitWebDAVHostPort(requestHost)
@@ -3655,6 +3674,9 @@ func webDAVHostMatches(uriHost, requestHost, uriScheme string) bool {
 	}
 	if uriPort != "" && requestPort != "" {
 		return uriPort == requestPort
+	}
+	if strings.TrimSpace(uriScheme) == "" {
+		return uriPort == "" && requestPort == ""
 	}
 	defaultPort := defaultWebDAVPort(uriScheme)
 	if defaultPort == "" {
@@ -3675,22 +3697,48 @@ func splitWebDAVHostPort(value string) (string, string, bool) {
 		return "", "", false
 	}
 	if host, port, err := net.SplitHostPort(value); err == nil {
-		return strings.Trim(host, "[]"), port, true
+		host, ok := normalizeWebDAVHostName(strings.Trim(host, "[]"))
+		if !ok {
+			return "", "", false
+		}
+		return host, port, true
 	}
 	if strings.HasPrefix(value, "[") {
 		closing := strings.LastIndex(value, "]")
 		if closing == len(value)-1 && closing > 0 {
-			return value[1:closing], "", true
+			host, ok := normalizeWebDAVHostName(value[1:closing])
+			if !ok {
+				return "", "", false
+			}
+			return host, "", true
 		}
 		return "", "", false
 	}
 	if strings.Count(value, ":") == 0 {
-		return value, "", true
+		host, ok := normalizeWebDAVHostName(value)
+		if !ok {
+			return "", "", false
+		}
+		return host, "", true
 	}
 	if ip := net.ParseIP(value); ip != nil {
 		return value, "", true
 	}
 	return "", "", false
+}
+
+func normalizeWebDAVHostName(host string) (string, bool) {
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return "", false
+	}
+	if strings.HasSuffix(host, ".") {
+		host = strings.TrimSuffix(host, ".")
+		if host == "" || strings.HasSuffix(host, ".") {
+			return "", false
+		}
+	}
+	return host, true
 }
 
 func defaultWebDAVPort(scheme string) string {

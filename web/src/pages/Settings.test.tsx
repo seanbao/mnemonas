@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, waitFor } from '@/test/utils'
-import { act, fireEvent } from '@testing-library/react'
+import { act, fireEvent, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { SettingsPage } from './Settings'
 import * as HeroUI from '@heroui/react'
@@ -74,7 +74,7 @@ const { defaultSettingsResponse, defaultSecurityCheckResponse } = vi.hoisted(() 
       webdav: { enabled: true, runtime_enabled: true, prefix: '/dav', read_only: false, auth_type: 'basic', username: 'admin' },
       share: { enabled: false, base_url: '' },
       favorites: { enabled: true, runtime_available: true },
-      alerts: { enabled: false, check_interval: '1h', threshold_pct: 90, critical_pct: 95, min_free_bytes: 10737418240, cooldown_period: '4h', webhook_url: '', webhook_method: 'POST', webhook_headers: [], telegram_enabled: false, telegram_bot_token_configured: false, telegram_chat_id: '', email_enabled: false, smtp_host: '', smtp_port: 587, smtp_username: '', smtp_password_configured: false, smtp_from: '', smtp_to: [] },
+      alerts: { enabled: false, check_interval: '1h', threshold_pct: 90, critical_pct: 95, min_free_bytes: 10737418240, cooldown_period: '4h', webhook_url: '', webhook_method: 'POST', webhook_headers: [], telegram_enabled: false, telegram_bot_token_configured: false, telegram_chat_id: '', wecom_enabled: false, wecom_webhook_url: '', wecom_webhook_url_configured: false, email_enabled: false, smtp_host: '', smtp_port: 587, smtp_username: '', smtp_password_configured: false, smtp_from: '', smtp_to: [] },
       maintenance: { scrub: { enabled: false, schedule_interval: '168h', retry_interval: '1h', max_retries: 1 } },
       disk_health: { enabled: false, check_interval: '1h', probe_timeout: '15s', cooldown_period: '4h', command: 'smartctl', temperature_warning_c: 50, temperature_critical_c: 60, media_wear_warning_percent: 80, media_wear_critical_percent: 100, devices: [] },
       cdc: { min_chunk_size: 262144, avg_chunk_size: 1048576, max_chunk_size: 4194304 },
@@ -156,6 +156,10 @@ vi.mock('@heroui/react', async () => {
 
 vi.mock('@/components/share', () => ({
   ShareManager: () => <div>ShareManager</div>,
+  normalizeShareReviewFilter: (value: string | null | undefined) => {
+    const filters = new Set(['all', 'review', 'expiring', 'passwordless', 'broad', 'stale'])
+    return value && filters.has(value) ? value : 'all'
+  },
 }))
 
 vi.mock('@/stores/auth', async (importOriginal) => {
@@ -601,6 +605,7 @@ describe('SettingsPage', () => {
         expect(screen.getByText('证书续期检查')).toBeTruthy()
         expect(screen.getByText("sudo journalctl -u caddy --since '24 hours ago'")).toBeTruthy()
         expect(screen.getByText('当前访问不是 HTTPS')).toBeTruthy()
+        expect(screen.getByText('Web 自检只覆盖当前服务可观察到的运行态。公网域名、证书链、云防火墙和端口暴露仍需在服务器上运行 mnemonas-doctor 复核。')).toBeTruthy()
         expect(screen.getByText('服务器')).toBeTruthy()
         expect(screen.getByText('存储路径')).toBeTruthy()
       })
@@ -1583,6 +1588,9 @@ describe('SettingsPage', () => {
       const alertsWebhookInput = await screen.findByPlaceholderText('https://hooks.example.com/alert')
       expect(alertsWebhookInput).toHaveAttribute('type', 'url')
 
+      const wecomWebhookInput = await screen.findByPlaceholderText('https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=...')
+      expect(wecomWebhookInput).toHaveAttribute('type', 'url')
+
       await openTab(user, '分享')
 
       const shareBaseUrlInput = await screen.findByPlaceholderText('https://nas.example.com')
@@ -1958,6 +1966,82 @@ describe('SettingsPage', () => {
       })
     })
 
+    it('normalizes duplicate and trailing slashes in share policy paths before saving', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      render(<SettingsPage />)
+
+      await openTab(user, '分享')
+
+      await user.click(screen.getByRole('switch'))
+      await user.click(screen.getByRole('button', { name: '添加路径策略' }))
+      await user.clear(screen.getByLabelText('分享策略路径 1'))
+      await user.type(screen.getByLabelText('分享策略路径 1'), '/Family//Photos/')
+      await user.click(screen.getByText('保存设置'))
+
+      await waitFor(() => {
+        expectUpdateSettingsCalledWith(expect.objectContaining({
+          share: expect.objectContaining({
+            policy_rules: [{
+              path: '/Family/Photos',
+              require_password: true,
+            }],
+          }),
+        }))
+      })
+    })
+
+    it('summarizes unsaved share defaults and path policy changes', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockGetSettings.mockResolvedValueOnce({
+        ...defaultSettingsResponse,
+        data: {
+          ...defaultSettingsResponse.data,
+          share: {
+            ...defaultSettingsResponse.data.share,
+            enabled: true,
+            base_url: 'https://old.example.com',
+            default_expires_in: '168h',
+            default_max_access: 0,
+            policy_rules: [
+              { path: '/Family', require_password: true, max_expires_in: '24h' },
+              { path: '/Archive', require_password: true, max_access: 10 },
+            ],
+          },
+        },
+      })
+      render(<SettingsPage />)
+
+      await openTab(user, '分享')
+
+      const review = await screen.findByLabelText('分享策略变更复核')
+      expect(within(review).getByText('分享策略与已保存配置一致。')).toBeTruthy()
+
+      fireEvent.change(screen.getByPlaceholderText('https://nas.example.com'), {
+        target: { value: 'https://new.example.com' },
+      })
+      fireEvent.change(screen.getByPlaceholderText('0'), { target: { value: '30' } })
+      fireEvent.change(screen.getByLabelText('分享策略最长有效期 1'), { target: { value: '12h' } })
+      await user.click(screen.getByLabelText('删除分享策略 2'))
+      await user.click(screen.getByRole('button', { name: '添加路径策略' }))
+      fireEvent.change(screen.getByLabelText('分享策略路径 2'), { target: { value: '/Public' } })
+      fireEvent.change(screen.getByLabelText('分享策略最多访问次数 2'), { target: { value: '5' } })
+
+      const updatedReview = screen.getByLabelText('分享策略变更复核')
+      expect(within(updatedReview).getByText('默认项 2')).toBeTruthy()
+      expect(within(updatedReview).getByText('新增 1')).toBeTruthy()
+      expect(within(updatedReview).getByText('修改 1')).toBeTruthy()
+      expect(within(updatedReview).getByText('删除 1')).toBeTruthy()
+      expect(within(updatedReview).getByText('https://old.example.com -> https://new.example.com')).toBeTruthy()
+      expect(within(updatedReview).getByText('不限制 -> 30')).toBeTruthy()
+      expect(within(updatedReview).getByText('/Family')).toBeTruthy()
+      expect(within(updatedReview).getByText('/Public')).toBeTruthy()
+      expect(within(updatedReview).getByText('/Archive')).toBeTruthy()
+      expect(within(updatedReview).getByText('变更字段: 最长有效期')).toBeTruthy()
+      expect(within(updatedReview).getByText('必须设置密码 · 最长有效期: 12h')).toBeTruthy()
+      expect(within(updatedReview).getByText('必须设置密码 · 最多访问: 5')).toBeTruthy()
+      expect(within(updatedReview).getByText('必须设置密码 · 最多访问: 10')).toBeTruthy()
+    })
+
     it('rejects invalid share default policy values before saving', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
       render(<SettingsPage />)
@@ -2261,6 +2345,11 @@ describe('SettingsPage', () => {
       fireEvent.change(screen.getByLabelText('Telegram Bot Token'), { target: { value: '123456:secret-token' } })
       fireEvent.change(screen.getByLabelText('Telegram Chat ID'), { target: { value: '-1001234567890' } })
 
+      fireEvent.click(screen.getByRole('switch', { name: '启用企业微信通知' }))
+      fireEvent.change(screen.getByLabelText('企业微信 Webhook URL'), {
+        target: { value: 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=secret-key' },
+      })
+
       fireEvent.click(screen.getByRole('switch', { name: '启用邮件通知' }))
       fireEvent.change(screen.getByLabelText('SMTP 主机'), { target: { value: 'smtp.example.com' } })
       fireEvent.change(screen.getByLabelText('SMTP 端口'), { target: { value: '2525' } })
@@ -2286,6 +2375,8 @@ describe('SettingsPage', () => {
             telegram_enabled: true,
             telegram_bot_token: '123456:secret-token',
             telegram_chat_id: '-1001234567890',
+            wecom_enabled: true,
+            wecom_webhook_url: 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=secret-key',
             email_enabled: true,
             smtp_host: 'smtp.example.com',
             smtp_port: 2525,
@@ -2315,7 +2406,7 @@ describe('SettingsPage', () => {
       mockSendTestAlert.mockResolvedValueOnce({
         success: true,
         message: 'test alert sent',
-        data: { event_type: 'alert_test', channels: ['webhook', 'telegram', 'email'] },
+        data: { event_type: 'alert_test', channels: ['webhook', 'telegram', 'wecom', 'email'] },
       })
       render(<SettingsPage />)
 
@@ -2329,7 +2420,7 @@ describe('SettingsPage', () => {
       })
       expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({
         title: '测试提醒已发送',
-        description: '已发送到 Webhook / Telegram / SMTP 邮件',
+        description: '已发送到 Webhook / Telegram / 企业微信 / SMTP 邮件',
         color: 'success',
       }))
     })
@@ -2369,7 +2460,7 @@ describe('SettingsPage', () => {
       expect(mockSendTestAlert).not.toHaveBeenCalled()
       expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({
         title: '没有可用提醒通道',
-        description: '请至少配置 Webhook、Telegram 或邮件通道并保存后再发送测试提醒。',
+        description: '请至少配置 Webhook、Telegram、企业微信或邮件通道并保存后再发送测试提醒。',
         color: 'warning',
       }))
     })
@@ -2399,7 +2490,7 @@ describe('SettingsPage', () => {
       expect(mockSendTestAlert).not.toHaveBeenCalled()
       expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({
         title: '没有可用提醒通道',
-        description: '请至少配置 Webhook、Telegram 或邮件通道并保存后再发送测试提醒。',
+        description: '请至少配置 Webhook、Telegram、企业微信或邮件通道并保存后再发送测试提醒。',
         color: 'warning',
       }))
     })
@@ -2432,6 +2523,9 @@ describe('SettingsPage', () => {
             webhook_url_configured: true,
             webhook_headers: ['Authorization: <redacted>'],
             webhook_headers_configured: true,
+            wecom_enabled: true,
+            wecom_webhook_url: '<redacted>',
+            wecom_webhook_url_configured: true,
           },
         },
       })
@@ -2440,7 +2534,8 @@ describe('SettingsPage', () => {
       await openTab(user, '高级')
 
       await waitFor(() => {
-        expect(screen.getByDisplayValue('<redacted>')).toBeTruthy()
+        expect(screen.getByPlaceholderText('https://hooks.example.com/alert')).toHaveValue('<redacted>')
+        expect(screen.getByLabelText('企业微信 Webhook URL')).toHaveValue('<redacted>')
       })
 
       await user.click(screen.getByText('保存设置'))
@@ -2450,6 +2545,8 @@ describe('SettingsPage', () => {
           alerts: expect.objectContaining({
             webhook_url: '<redacted>',
             webhook_headers: ['Authorization: <redacted>'],
+            wecom_enabled: true,
+            wecom_webhook_url: '<redacted>',
           }),
         }))
       })
@@ -2470,6 +2567,28 @@ describe('SettingsPage', () => {
         expect(mockAddToast).toHaveBeenCalledWith({
           title: 'Webhook URL 占位符无效',
           description: '只有服务端已保存的 Webhook URL 才能保留为 <redacted>；新增 Webhook URL 需要填写真实地址。',
+          color: 'danger',
+        })
+      })
+      expect(mockUpdateSettings).not.toHaveBeenCalled()
+    })
+
+    it('rejects redacted WeCom webhook URL placeholders without a saved URL', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      render(<SettingsPage />)
+
+      await openTab(user, '高级')
+      await user.click(await screen.findByRole('switch', { name: '启用提醒' }))
+      await user.click(screen.getByRole('switch', { name: '启用企业微信通知' }))
+      fireEvent.change(screen.getByLabelText('企业微信 Webhook URL'), {
+        target: { value: '<redacted>' },
+      })
+      await user.click(screen.getByText('保存设置'))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '企业微信 Webhook 占位符无效',
+          description: '只有服务端已保存的企业微信 Webhook URL 才能保留为 <redacted>；新增企业微信 Webhook 需要填写真实地址。',
           color: 'danger',
         })
       })
@@ -2524,6 +2643,10 @@ describe('SettingsPage', () => {
       fireEvent.change(screen.getByLabelText('Telegram Chat ID'), {
         target: { value: '-1001234567890' },
       })
+      fireEvent.click(screen.getByRole('switch', { name: '启用企业微信通知' }))
+      fireEvent.change(screen.getByLabelText('企业微信 Webhook URL'), {
+        target: { value: 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=secret-key' },
+      })
       fireEvent.click(screen.getByRole('switch', { name: '启用邮件通知' }))
       fireEvent.change(screen.getByLabelText('SMTP 主机'), {
         target: { value: 'smtp.example.com' },
@@ -2546,6 +2669,7 @@ describe('SettingsPage', () => {
             webhook_url: 'https://hooks.example.com/secret-token',
             webhook_headers: ['Authorization: Bearer secret-token', 'X-Api-Key: api-secret'],
             telegram_bot_token: '123456:secret-token',
+            wecom_webhook_url: 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=secret-key',
             smtp_password: 'smtp-secret',
           }),
         }))
@@ -2558,7 +2682,9 @@ describe('SettingsPage', () => {
       })
       await waitFor(() => {
         expect(screen.queryByDisplayValue('https://hooks.example.com/secret-token')).toBeNull()
-        expect(screen.getByDisplayValue('<redacted>')).toBeTruthy()
+        expect(screen.queryByDisplayValue('https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=secret-key')).toBeNull()
+        expect(screen.getByPlaceholderText('https://hooks.example.com/alert')).toHaveValue('<redacted>')
+        expect(screen.getByLabelText('企业微信 Webhook URL')).toHaveValue('<redacted>')
         const headersInput = screen.getByLabelText('Webhook 自定义 Header') as HTMLTextAreaElement
         expect(headersInput.value).toContain('<redacted>')
         expect(headersInput.value).not.toContain('secret-token')
@@ -3162,6 +3288,66 @@ describe('SettingsPage', () => {
       })
     })
 
+    it('summarizes unsaved directory quota additions, updates, and removals', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockGetSettings.mockResolvedValueOnce({
+        ...defaultSettingsResponse,
+        data: {
+          ...defaultSettingsResponse.data,
+          storage: {
+            root: '~/.mnemonas',
+            directory_quotas: [
+              { path: '/team', quota_bytes: 1073741824 },
+              { path: '/archive', quota_bytes: 10737418240 },
+            ],
+          },
+        },
+      } as ReturnType<typeof getSettings>)
+
+      render(<SettingsPage />)
+
+      await openTab(user, '版本保留')
+
+      const review = await screen.findByLabelText('目录配额变更复核')
+      expect(within(review).getByText('目录配额与已保存配置一致。')).toBeTruthy()
+
+      const quotasInput = screen.getByLabelText('目录配额')
+      fireEvent.change(quotasInput, { target: { value: '/team 2 GB\n/media 512 MB' } })
+
+      expect(within(review).getByText('新增 1')).toBeTruthy()
+      expect(within(review).getByText('修改 1')).toBeTruthy()
+      expect(within(review).getByText('删除 1')).toBeTruthy()
+      expect(within(review).getByText('/team')).toBeTruthy()
+      expect(within(review).getByText('/media')).toBeTruthy()
+      expect(within(review).getByText('/archive')).toBeTruthy()
+      expect(within(review).getByText('配额从 1 GB 调整为 2 GB')).toBeTruthy()
+      expect(within(review).getByText('容量 512 MB')).toBeTruthy()
+      expect(within(review).getByText('容量 10 GB')).toBeTruthy()
+    })
+
+    it('normalizes duplicate and trailing slashes in scoped storage paths before saving', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      render(<SettingsPage />)
+
+      await openTab(user, '版本保留')
+
+      const quotasInput = await screen.findByLabelText('目录配额')
+      await user.clear(quotasInput)
+      await user.type(quotasInput, '/team// 2 GB')
+      fireEvent.change(await screen.findByLabelText('目录权限路径 1'), { target: { value: '/team//public/' } })
+      fireEvent.change(screen.getByLabelText('读组 1'), { target: { value: 'family' } })
+      await user.click(screen.getByText('保存设置'))
+
+      await waitFor(() => {
+        expectUpdateSettingsCalledWith(expect.objectContaining({
+          storage: expect.objectContaining({
+            directory_quotas: [{ path: '/team', quota_bytes: 2147483648 }],
+            directory_access_rules: [{ path: '/team/public', read_groups: ['family'] }],
+          }),
+        }))
+      })
+    })
+
     it('rejects invalid directory quota lines before saving', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
       render(<SettingsPage />)
@@ -3266,6 +3452,108 @@ describe('SettingsPage', () => {
             ],
           }),
         }))
+      })
+    })
+
+    it('applies directory access rule presets before saving', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      render(<SettingsPage />)
+
+      await openTab(user, '版本保留')
+
+      await user.click(await screen.findByRole('button', { name: /全员协作/ }))
+
+      expect(screen.getByLabelText('目录权限路径 1')).toHaveValue('/shared')
+      expect(screen.getByLabelText('读角色 1')).toHaveValue('user')
+      expect(screen.getByLabelText('写角色 1')).toHaveValue('user')
+
+      await user.click(screen.getByText('保存设置'))
+
+      await waitFor(() => {
+        expectUpdateSettingsCalledWith(expect.objectContaining({
+          storage: expect.objectContaining({
+            directory_access_rules: [
+              { path: '/shared', read_roles: ['user'], write_roles: ['user'] },
+            ],
+          }),
+        }))
+      })
+    })
+
+    it('summarizes unsaved directory access rule additions, updates, and removals', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockGetSettings.mockResolvedValueOnce({
+        data: {
+          ...defaultSettingsResponse.data,
+          storage: {
+            ...defaultSettingsResponse.data.storage,
+            directory_access_rules: [
+              { path: '/team', read_groups: ['family'] },
+              { path: '/archive', read_roles: ['admin'], write_roles: ['admin'] },
+            ],
+          },
+        },
+      })
+
+      render(<SettingsPage />)
+
+      await openTab(user, '版本保留')
+
+      await waitFor(() => {
+        expect(screen.getByText('目录权限与已保存配置一致。')).toBeTruthy()
+      })
+
+      fireEvent.change(screen.getByLabelText('写组 1'), { target: { value: 'family' } })
+      await user.click(screen.getByLabelText('删除目录权限规则 2'))
+      await user.click(screen.getByRole('button', { name: /添加规则/ }))
+      fireEvent.change(screen.getByLabelText('目录权限路径 2'), { target: { value: '/shared' } })
+      fireEvent.change(screen.getByLabelText('读角色 2'), { target: { value: 'user' } })
+
+      expect(screen.getByText('新增 1')).toBeTruthy()
+      expect(screen.getByText('修改 1')).toBeTruthy()
+      expect(screen.getByText('删除 1')).toBeTruthy()
+      expect(screen.getByText('变更字段: 写组')).toBeTruthy()
+      expect(screen.getByText('/team')).toBeTruthy()
+      expect(screen.getByText('/shared')).toBeTruthy()
+      expect(screen.getByText('/archive')).toBeTruthy()
+      expect(screen.getByText('读角色: user')).toBeTruthy()
+      expect(screen.getByText('读角色: admin · 写角色: admin')).toBeTruthy()
+    })
+
+    it('summarizes directory access rule coverage and attention items', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockGetSettings.mockResolvedValueOnce({
+        ...defaultSettingsResponse,
+        data: {
+          ...defaultSettingsResponse.data,
+          storage: {
+            ...defaultSettingsResponse.data.storage,
+            directory_access_rules: [
+              { path: '/', read_roles: ['user'] },
+              { path: '/shared', read_roles: ['user'], write_roles: ['user'] },
+              { path: '/team', read_groups: ['family'], write_groups: ['editors'] },
+            ],
+          },
+        },
+      } as ReturnType<typeof getSettings>)
+
+      render(<SettingsPage />)
+
+      await openTab(user, '版本保留')
+
+      await waitFor(() => {
+        const summary = within(screen.getByLabelText('目录权限覆盖摘要'))
+        expect(summary.getByText('目录权限覆盖摘要')).toBeTruthy()
+        expect(summary.getByText('规则总数')).toBeTruthy()
+        expect(summary.getByText('3 条')).toBeTruthy()
+        expect(summary.getByText('有效可读主体')).toBeTruthy()
+        expect(summary.getByText('3 个')).toBeTruthy()
+        expect(summary.getByText('可写主体')).toBeTruthy()
+        expect(summary.getByText('写权限路径')).toBeTruthy()
+        expect(summary.getAllByText('2 个')).toHaveLength(2)
+        expect(summary.getByText('权限关注项')).toBeTruthy()
+        expect(summary.getByText('根路径授权')).toBeTruthy()
+        expect(summary.getByText('普通用户可写')).toBeTruthy()
       })
     })
 

@@ -2,7 +2,6 @@ package backup
 
 import (
 	"fmt"
-	"path/filepath"
 	"strings"
 )
 
@@ -109,7 +108,7 @@ func restoreVerifyMatchesRestore(restore *RestoreResult, verify *RestoreVerifyRe
 	}
 	restoreTarget := strings.TrimSpace(restore.TargetPath)
 	verifyTarget := strings.TrimSpace(verify.TargetPath)
-	if restoreTarget == "" || verifyTarget == "" || filepath.Clean(restoreTarget) != filepath.Clean(verifyTarget) {
+	if restoreTarget == "" || verifyTarget == "" || restoreTarget != verifyTarget {
 		return false
 	}
 	restoreTime := restore.StartedAt

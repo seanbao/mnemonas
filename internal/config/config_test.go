@@ -843,6 +843,28 @@ func TestConfig_Validate(t *testing.T) {
 			wantErr: false,
 		},
 		{
+			name: "Invalid alerts WeCom URL scheme",
+			modify: func(c *Config) {
+				c.Alerts.WeComWebhookURL = "file:///tmp/wecom"
+			},
+			wantErr: true,
+		},
+		{
+			name: "Invalid alerts WeCom enabled without URL",
+			modify: func(c *Config) {
+				c.Alerts.WeComEnabled = true
+			},
+			wantErr: true,
+		},
+		{
+			name: "Valid alerts WeCom URL",
+			modify: func(c *Config) {
+				c.Alerts.WeComEnabled = true
+				c.Alerts.WeComWebhookURL = "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=secret-key"
+			},
+			wantErr: false,
+		},
+		{
 			name: "Invalid alerts webhook header",
 			modify: func(c *Config) {
 				c.Alerts.WebhookHeaders = []string{"Authorization"}
@@ -1375,6 +1397,25 @@ directory_quotas = [
 	}
 }
 
+func TestLoad_RejectsDirectoryQuotaDotSegmentPaths(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.toml")
+	data := []byte(`
+[storage]
+root = "` + filepath.ToSlash(filepath.Join(tmpDir, "data")) + `"
+directory_quotas = [
+  { path = "/team/../other", quota_bytes = 1048576 },
+]
+`)
+	if err := os.WriteFile(configPath, data, 0o600); err != nil {
+		t.Fatalf("WriteFile(config) error: %v", err)
+	}
+
+	if _, err := Load(configPath); err == nil || !strings.Contains(err.Error(), "storage.directory_quotas[0].path must be clean") {
+		t.Fatalf("Load() error = %v, want dirty directory quota path rejection", err)
+	}
+}
+
 func TestConfig_DirectoryAccessRules(t *testing.T) {
 	cfg := Default()
 	cfg.Storage.DirectoryAccessRules = []DirectoryAccessRuleConfig{
@@ -1409,6 +1450,25 @@ func TestConfig_DirectoryAccessRules(t *testing.T) {
 				t.Fatalf("Validate() error = %v, want substring %q", err, tt.errSub)
 			}
 		})
+	}
+}
+
+func TestLoad_RejectsDirectoryAccessRuleDotSegmentPaths(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.toml")
+	data := []byte(`
+[storage]
+root = "` + filepath.ToSlash(filepath.Join(tmpDir, "data")) + `"
+directory_access_rules = [
+  { path = "/team/./private", read_users = ["alice"] },
+]
+`)
+	if err := os.WriteFile(configPath, data, 0o600); err != nil {
+		t.Fatalf("WriteFile(config) error: %v", err)
+	}
+
+	if _, err := Load(configPath); err == nil || !strings.Contains(err.Error(), "storage.directory_access_rules[0].path must be clean") {
+		t.Fatalf("Load() error = %v, want dirty directory access rule path rejection", err)
 	}
 }
 
@@ -1842,6 +1902,7 @@ base_url = " https://nas.example.com/base/ "
 [alerts]
 webhook_url = " https://hooks.example.com/storage "
 webhook_method = "post"
+wecom_webhook_url = " https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=secret-key "
 smtp_host = " smtp.example.com "
 smtp_username = " alerts "
 smtp_from = " MnemoNAS <alerts@example.com> "
@@ -1863,6 +1924,9 @@ smtp_to = [" admin@example.com ", " ops@example.com "]
 	}
 	if cfg.Alerts.WebhookMethod != "POST" {
 		t.Fatalf("alerts webhook method = %q, want POST", cfg.Alerts.WebhookMethod)
+	}
+	if cfg.Alerts.WeComWebhookURL != "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=secret-key" {
+		t.Fatalf("alerts WeCom webhook URL = %q, want trimmed URL with query", cfg.Alerts.WeComWebhookURL)
 	}
 	if cfg.Alerts.SMTPHost != "smtp.example.com" || cfg.Alerts.SMTPUsername != "alerts" {
 		t.Fatalf("alerts SMTP fields were not normalized: %+v", cfg.Alerts)
@@ -1911,6 +1975,26 @@ max_access = 12
 	}
 	if rule.MaxAccess != 12 {
 		t.Fatalf("policy rule max access = %d, want 12", rule.MaxAccess)
+	}
+}
+
+func TestLoad_RejectsSharePolicyRuleDotSegmentPaths(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.toml")
+
+	content := []byte(`
+[share]
+
+[[share.policy_rules]]
+path = "/Family/../Private"
+require_password = true
+`)
+	if err := os.WriteFile(configPath, content, 0644); err != nil {
+		t.Fatalf("failed to write config: %v", err)
+	}
+
+	if _, err := Load(configPath); err == nil || !strings.Contains(err.Error(), "share.policy_rules[0].path must be clean") {
+		t.Fatalf("Load() error = %v, want dirty share policy path rejection", err)
 	}
 }
 

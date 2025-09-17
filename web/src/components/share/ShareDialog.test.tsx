@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { ShareDialog } from './ShareDialog'
 
@@ -205,7 +205,7 @@ describe('ShareDialog', () => {
       />
     )
 
-    expect(screen.getByText('有效期')).toBeInTheDocument()
+    expect(screen.getAllByText('有效期').length).toBeGreaterThan(0)
   })
 
   it('shows server default share policy in the form', async () => {
@@ -321,6 +321,44 @@ describe('ShareDialog', () => {
         password: 'family-secret',
       }))
     })
+  })
+
+  it('summarizes effective share policy before creating', async () => {
+    const user = userEvent.setup()
+    vi.mocked(getSharePolicy).mockResolvedValueOnce({
+      default_expires_in: '168h',
+      default_max_access: 0,
+      policy_rules: [{
+        path: '/Family',
+        require_password: true,
+        max_expires_in: '24h',
+        max_access: 5,
+      }],
+    })
+
+    render(
+      <ShareDialog
+        isOpen={true}
+        onClose={() => {}}
+        filePath="/Family/report.pdf"
+      />
+    )
+
+    const review = await screen.findByLabelText('分享创建前复核')
+    await waitFor(() => {
+      expect(within(review).getByText('路径策略 /Family')).toBeInTheDocument()
+      expect(within(review).getByText('必须设置密码')).toBeInTheDocument()
+    })
+
+    fireEvent.change(screen.getAllByRole('combobox')[0], { target: { value: '7 天' } })
+    await user.type(screen.getByPlaceholderText('使用系统默认'), '12')
+
+    expect(within(review).getByText('1 天（路径策略上限）')).toBeInTheDocument()
+    expect(within(review).getByText('5 次（路径策略上限）')).toBeInTheDocument()
+
+    await user.type(screen.getByPlaceholderText('设置访问密码（最多 72 字节）'), 'family-secret')
+
+    expect(within(review).getByText('已设置，满足路径策略')).toBeInTheDocument()
   })
 
   it('renders the access limit section without crashing', () => {
