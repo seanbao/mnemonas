@@ -333,8 +333,8 @@ service DataPlane {
 
 ### 认证
 
-- **Web UI/API 认证**：默认启用基于 JWT 的登录；浏览器主会话通过同源 `HttpOnly` cookie 保存 access/refresh token，多用户按角色和 `home_dir` 控制访问范围
-- **WebDAV 认证**：支持 MnemoNAS 用户账号模式，按角色、home_dir 与配额限制挂载范围；同时保留全局 Basic Auth 凭据作为兼容模式，适配 Finder、Windows 文件资源管理器、rclone 等客户端
+- **Web UI/API 认证**：默认启用基于 JWT 的登录；浏览器主会话通过同源 `HttpOnly` cookie 保存 access/refresh token，多用户按角色、用户组、`home_dir` 和目录授权控制访问范围
+- **WebDAV 认证**：支持 MnemoNAS 用户账号模式，按角色、用户组、`home_dir`、目录授权与配额限制挂载范围；同时保留全局 Basic Auth 凭据作为兼容模式，适配 Finder、Windows 文件资源管理器、rclone 等客户端
 - **公开分享认证**：每个 Share 使用独立标识，密码保护分享会使用短期 `HttpOnly` 访问 cookie
 - **网络暴露**：默认配置监听 `0.0.0.0:8080` 以便局域网访问；长期部署应配合防火墙、Tailscale/Headscale 或 HTTPS 反向代理限制访问面
 

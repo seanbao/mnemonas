@@ -1139,6 +1139,79 @@ directory_quotas = [
 	}
 }
 
+func TestConfig_DirectoryAccessRules(t *testing.T) {
+	cfg := Default()
+	cfg.Storage.DirectoryAccessRules = []DirectoryAccessRuleConfig{
+		{
+			Path:        "/team",
+			ReadGroups:  []string{"family"},
+			WriteGroups: []string{"editors"},
+			ReadRoles:   []string{"user"},
+		},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+
+	tests := []struct {
+		name   string
+		rule   DirectoryAccessRuleConfig
+		errSub string
+	}{
+		{name: "relative path", rule: DirectoryAccessRuleConfig{Path: "team", ReadUsers: []string{"alice"}}, errSub: "must be absolute"},
+		{name: "dirty path", rule: DirectoryAccessRuleConfig{Path: "/team/../other", ReadUsers: []string{"alice"}}, errSub: "must be clean"},
+		{name: "missing principals", rule: DirectoryAccessRuleConfig{Path: "/team"}, errSub: "must grant at least one"},
+		{name: "invalid principal", rule: DirectoryAccessRuleConfig{Path: "/team", ReadGroups: []string{"family/team"}}, errSub: "contains invalid characters"},
+		{name: "invalid role", rule: DirectoryAccessRuleConfig{Path: "/team", ReadRoles: []string{"owner"}}, errSub: "must be one of"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Default()
+			cfg.Storage.DirectoryAccessRules = []DirectoryAccessRuleConfig{tt.rule}
+			err := cfg.Validate()
+			if err == nil || !strings.Contains(err.Error(), tt.errSub) {
+				t.Fatalf("Validate() error = %v, want substring %q", err, tt.errSub)
+			}
+		})
+	}
+}
+
+func TestLoad_NormalizesDirectoryAccessRules(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.toml")
+	data := []byte(`
+[storage]
+root = "` + filepath.ToSlash(filepath.Join(tmpDir, "data")) + `"
+directory_access_rules = [
+  { path = "/team/", read_users = ["Alice", "alice"], write_groups = ["Editors", "editors"], read_roles = ["User"] },
+]
+`)
+	if err := os.WriteFile(configPath, data, 0o600); err != nil {
+		t.Fatalf("WriteFile(config) error: %v", err)
+	}
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if len(cfg.Storage.DirectoryAccessRules) != 1 {
+		t.Fatalf("directory access rules count = %d, want 1", len(cfg.Storage.DirectoryAccessRules))
+	}
+	rule := cfg.Storage.DirectoryAccessRules[0]
+	if rule.Path != "/team" {
+		t.Fatalf("directory access path = %q, want /team", rule.Path)
+	}
+	if got, want := strings.Join(rule.ReadUsers, ","), "alice"; got != want {
+		t.Fatalf("read users = %q, want %q", got, want)
+	}
+	if got, want := strings.Join(rule.WriteGroups, ","), "editors"; got != want {
+		t.Fatalf("write groups = %q, want %q", got, want)
+	}
+	if got, want := strings.Join(rule.ReadRoles, ","), "user"; got != want {
+		t.Fatalf("read roles = %q, want %q", got, want)
+	}
+}
+
 func TestLoad_NormalizesBackupJobDurationFields(t *testing.T) {
 	tmpDir := t.TempDir()
 	storageRoot := filepath.Join(tmpDir, "data")

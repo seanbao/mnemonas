@@ -285,9 +285,10 @@ curl https://<domain>/dav/
 #### 多用户权限边界
 
 - 当前版本已支持多用户与角色（admin/user/guest）
-- 非管理员用户按账号 `home_dir` 限制文件、搜索、收藏、分享、回收站与活动日志范围
+- 当前版本已支持用户组和 `storage.directory_access_rules` 目录授权；非管理员默认按账号 `home_dir` 限制访问，命中目录规则时按用户、用户组或角色授权放行
+- 文件、搜索、收藏、分享、回收站、活动日志和 WebDAV `users` 模式使用同一套路径权限判定
 - 管理员可为用户设置 `quota_bytes`；非管理员通过 Web/API 上传、复制、回收站恢复，以及 `webdav.auth_type = "users"` 下的 WebDAV PUT/COPY 会按该用户 `home_dir` 的当前用量执行服务端配额限制
-- WebDAV `users` 模式携带应用层用户身份并执行 `home_dir`/角色边界；`basic` 模式是全局服务凭据兼容模式，不携带应用层用户身份
+- WebDAV `users` 模式携带应用层用户身份并执行角色、用户组、`home_dir` 和目录授权边界；`basic` 模式是全局服务凭据兼容模式，不携带应用层用户身份
 
 #### 速率限制粒度
 
@@ -334,7 +335,7 @@ location /api/ {
 
 | 状态 | 安全特性 |
 | ---- | -------- |
-| 已支持 | Web UI 登录、多用户与角色、用户根目录隔离、WebDAV 用户认证/全局 Basic Auth、路径遍历保护、WebDAV 只读模式、公开分享密码验证与失败锁定 |
+| 已支持 | Web UI 登录、多用户/角色/用户组、用户根目录隔离、目录授权、WebDAV 用户认证/全局 Basic Auth、路径遍历保护、WebDAV 只读模式、公开分享密码验证与失败锁定 |
 | 建议通过反向代理补充 | HTTPS 证书自动续期、按 IP/用户限速、公网访问控制 |
 | 计划中 | OAuth/OIDC 集成、更细粒度的应用层访问策略 |
 

@@ -4607,6 +4607,84 @@ func TestHandler_UsersAuthScopesHomeDirAsWebDAVRoot(t *testing.T) {
 	}
 }
 
+func TestHandler_UsersAuthDirectoryAccessRulesGrantSharedPaths(t *testing.T) {
+	handler, fs := setupUsersModeHandler(t, map[string]webDAVTestCredential{
+		"alice": {
+			password: "password123",
+			identity: UserIdentity{
+				Role:    webDAVRoleUser,
+				Groups:  []string{"family"},
+				HomeDir: "/users/alice",
+			},
+		},
+	})
+	handler.directoryAccess = []DirectoryAccessRule{
+		{Path: "/team", ReadGroups: []string{"family"}},
+		{Path: "/team/private", ReadUsers: []string{"bob"}},
+		{Path: "/team/uploads", WriteGroups: []string{"family"}},
+	}
+	ctx := context.Background()
+	if err := fs.Mkdir(ctx, "/users"); err != nil {
+		t.Fatalf("Mkdir(/users) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/users/alice"); err != nil {
+		t.Fatalf("Mkdir(/users/alice) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/team"); err != nil {
+		t.Fatalf("Mkdir(/team) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/team/uploads"); err != nil {
+		t.Fatalf("Mkdir(/team/uploads) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/team/private"); err != nil {
+		t.Fatalf("Mkdir(/team/private) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/other"); err != nil {
+		t.Fatalf("Mkdir(/other) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/team/readme.txt", strings.NewReader("shared")); err != nil {
+		t.Fatalf("WriteFile shared error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/team/private/secret.txt", strings.NewReader("secret")); err != nil {
+		t.Fatalf("WriteFile private secret error: %v", err)
+	}
+
+	getReq := httptest.NewRequest(http.MethodGet, "/dav/team/readme.txt", nil)
+	setWebDAVTestBasicAuth(getReq, "alice")
+	getW := httptest.NewRecorder()
+	handler.ServeHTTP(getW, getReq)
+	if getW.Code != http.StatusOK || getW.Body.String() != "shared" {
+		t.Fatalf("shared GET status/body = %d %q, want 200 shared", getW.Code, getW.Body.String())
+	}
+
+	deniedPutReq := httptest.NewRequest(http.MethodPut, "/dav/team/blocked.txt", strings.NewReader("blocked"))
+	setWebDAVTestBasicAuth(deniedPutReq, "alice")
+	deniedPutW := httptest.NewRecorder()
+	handler.ServeHTTP(deniedPutW, deniedPutReq)
+	if deniedPutW.Code != http.StatusForbidden {
+		t.Fatalf("read-only shared PUT status = %d, want %d", deniedPutW.Code, http.StatusForbidden)
+	}
+
+	allowedPutReq := httptest.NewRequest(http.MethodPut, "/dav/team/uploads/ok.txt", strings.NewReader("ok"))
+	setWebDAVTestBasicAuth(allowedPutReq, "alice")
+	allowedPutW := httptest.NewRecorder()
+	handler.ServeHTTP(allowedPutW, allowedPutReq)
+	if allowedPutW.Code != http.StatusCreated {
+		t.Fatalf("write-granted PUT status = %d, want %d; body=%s", allowedPutW.Code, http.StatusCreated, allowedPutW.Body.String())
+	}
+	if _, err := fs.Stat(ctx, "/team/uploads/ok.txt"); err != nil {
+		t.Fatalf("expected WebDAV PUT to create shared file: %v", err)
+	}
+
+	deniedGetReq := httptest.NewRequest(http.MethodGet, "/dav/team/private/secret.txt", nil)
+	setWebDAVTestBasicAuth(deniedGetReq, "alice")
+	deniedGetW := httptest.NewRecorder()
+	handler.ServeHTTP(deniedGetW, deniedGetReq)
+	if deniedGetW.Code != http.StatusForbidden {
+		t.Fatalf("specific denied GET status = %d, want %d", deniedGetW.Code, http.StatusForbidden)
+	}
+}
+
 func TestHandler_UsersAuthAdminCanAccessGlobalNamespace(t *testing.T) {
 	handler, fs := setupUsersModeHandler(t, map[string]webDAVTestCredential{
 		"admin": {

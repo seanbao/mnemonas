@@ -334,6 +334,7 @@ func buildWebDAVHandler(fs *storage.FileSystem, cfg api.WebDAVRuntimeConfig) (st
 			return &webdav.UserIdentity{
 				Username:   user.Username,
 				Role:       string(user.Role),
+				Groups:     append([]string(nil), user.Groups...),
 				HomeDir:    user.HomeDir,
 				QuotaBytes: user.QuotaBytes,
 			}, nil
@@ -347,6 +348,18 @@ func buildWebDAVHandler(fs *storage.FileSystem, cfg api.WebDAVRuntimeConfig) (st
 			QuotaBytes: quota.QuotaBytes,
 		})
 	}
+	directoryAccess := make([]webdav.DirectoryAccessRule, 0, len(cfg.DirectoryAccessRules))
+	for _, rule := range cfg.DirectoryAccessRules {
+		directoryAccess = append(directoryAccess, webdav.DirectoryAccessRule{
+			Path:        rule.Path,
+			ReadUsers:   append([]string(nil), rule.ReadUsers...),
+			WriteUsers:  append([]string(nil), rule.WriteUsers...),
+			ReadGroups:  append([]string(nil), rule.ReadGroups...),
+			WriteGroups: append([]string(nil), rule.WriteGroups...),
+			ReadRoles:   append([]string(nil), rule.ReadRoles...),
+			WriteRoles:  append([]string(nil), rule.WriteRoles...),
+		})
+	}
 
 	prefix := config.NormalizeWebDAVPrefix(cfg.Prefix)
 	return prefix, webdav.NewHandler(webdav.Config{
@@ -358,7 +371,25 @@ func buildWebDAVHandler(fs *storage.FileSystem, cfg api.WebDAVRuntimeConfig) (st
 		Password:          cfg.Password,
 		UserAuthenticator: userAuthenticator,
 		DirectoryQuotas:   directoryQuotas,
+		DirectoryAccess:   directoryAccess,
 	})
+}
+
+func cloneConfigDirectoryAccessRules(rules []config.DirectoryAccessRuleConfig) []config.DirectoryAccessRuleConfig {
+	if len(rules) == 0 {
+		return nil
+	}
+	cloned := make([]config.DirectoryAccessRuleConfig, len(rules))
+	for i, rule := range rules {
+		cloned[i] = rule
+		cloned[i].ReadUsers = append([]string(nil), rule.ReadUsers...)
+		cloned[i].WriteUsers = append([]string(nil), rule.WriteUsers...)
+		cloned[i].ReadGroups = append([]string(nil), rule.ReadGroups...)
+		cloned[i].WriteGroups = append([]string(nil), rule.WriteGroups...)
+		cloned[i].ReadRoles = append([]string(nil), rule.ReadRoles...)
+		cloned[i].WriteRoles = append([]string(nil), rule.WriteRoles...)
+	}
+	return cloned
 }
 
 func buildApplicationHandler(runtimeWebDAV *switchableWebDAVHandler, frontend http.Handler, router http.Handler) http.Handler {
@@ -582,15 +613,16 @@ func main() {
 
 	// Mount API with data plane connection
 	activeWebDAV := api.WebDAVRuntimeConfig{
-		Enabled:             cfg.WebDAV.Enabled,
-		Prefix:              cfg.WebDAV.Prefix,
-		ReadOnly:            cfg.WebDAV.ReadOnly,
-		AuthType:            cfg.WebDAV.AuthType,
-		Username:            cfg.WebDAV.Username,
-		Password:            cfg.WebDAV.Password,
-		PasswordIsGenerated: webdavPasswordGenerated,
-		UserStore:           sharedUserStore,
-		DirectoryQuotas:     append([]config.DirectoryQuotaConfig(nil), cfg.Storage.DirectoryQuotas...),
+		Enabled:              cfg.WebDAV.Enabled,
+		Prefix:               cfg.WebDAV.Prefix,
+		ReadOnly:             cfg.WebDAV.ReadOnly,
+		AuthType:             cfg.WebDAV.AuthType,
+		Username:             cfg.WebDAV.Username,
+		Password:             cfg.WebDAV.Password,
+		PasswordIsGenerated:  webdavPasswordGenerated,
+		UserStore:            sharedUserStore,
+		DirectoryQuotas:      append([]config.DirectoryQuotaConfig(nil), cfg.Storage.DirectoryQuotas...),
+		DirectoryAccessRules: cloneConfigDirectoryAccessRules(cfg.Storage.DirectoryAccessRules),
 	}
 	webdavPrefix, webdavHandler := buildWebDAVHandler(fs, activeWebDAV)
 	runtimeWebDAV := newSwitchableWebDAVHandler(webdavPrefix, webdavHandler)

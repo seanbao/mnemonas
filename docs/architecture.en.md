@@ -73,7 +73,7 @@ Important modules:
 | `internal/webdav` | WebDAV request handling and client compatibility behavior |
 | `internal/api` | REST handlers and response contracts |
 | `internal/config` | TOML config loading and validation |
-| `internal/auth` | Users, roles, passwords, JWTs, login limits, and download sessions |
+| `internal/auth` | Users, groups, roles, passwords, JWTs, login limits, and download sessions |
 
 Current files are written to the native workspace first. When a file is eligible for versioning, historical content is committed to the CAS-backed version store.
 
@@ -128,7 +128,7 @@ The main logical entities are:
 - Version records keyed by path and content hash.
 - CAS objects addressed by BLAKE3 hash.
 - Trash records with original path, deletion time, and content reference.
-- Users with role and `home_dir`.
+- Users with role, groups, and `home_dir`.
 - Share links with optional password, expiration, and access limits.
 - Favorites and activity records scoped by per-user root directory.
 
@@ -140,8 +140,9 @@ Security boundaries:
 
 - Web UI/API authentication is JWT-backed and enabled by default; browser sessions store access and refresh tokens in same-origin `HttpOnly` cookies.
 - User roles are `admin`, `user`, and `guest`.
-- Non-admin users are scoped to their configured `home_dir`.
-- WebDAV can authenticate MnemoNAS users and apply role/`home_dir` boundaries; the legacy `basic` mode remains a separate global service credential.
+- Non-admin users are scoped to their configured `home_dir`, with optional `storage.directory_access_rules` grants for shared directories.
+- Directory access rules use the same most-specific path decision for files, search, shares, favorites, trash, activity logs, and WebDAV users mode.
+- WebDAV can authenticate MnemoNAS users and apply role, group, `home_dir`, and directory access-rule boundaries; the legacy `basic` mode remains a separate global service credential.
 - Share-link password validation uses short-lived HttpOnly cookies.
 - Download and preview flows use short-lived download-session cookies instead of long-lived tokens in URLs.
 
