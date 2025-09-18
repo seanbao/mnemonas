@@ -242,6 +242,7 @@
 - 修复设置 API 修改 `server.trusted_proxy_hops` 后，运行态请求来源和 HTTPS 转发语义识别未立即同步的问题
 - 修复 Web Husky pre-commit hook，使其解析仓库根目录、切换到 `web/`，并使用前端 lint-staged 配置
 - 修复前端认证初始化：复用已有服务的 E2E 可显式跳过认证状态写入，隔离 E2E 默认失败而不是静默保存空认证状态
+- 修复维护页移动端备份配置示例中长路径被代码块截断的问题
 - 防止 systemd 安装和 `nasd` 静态文件发现误把 Vite 源码目录当成已构建 Web UI
 - 修复 `.gitignore` / `.dockerignore` 中 `nasd` 规则过宽，避免忽略 `cmd/nasd` 下的新文件或 Docker 构建上下文
 - 修复 Docker 运行镜像依赖 `apt-get` 安装健康检查工具的问题

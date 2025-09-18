@@ -103,6 +103,7 @@ This project follows [Semantic Versioning 2.0.0](https://semver.org/).
 - Fixed `server.trusted_proxy_hops` updates through the settings API not immediately updating runtime client-IP and HTTPS forwarded-header interpretation.
 - Fixed the Web Husky pre-commit hook so it resolves the repository root, runs from `web/`, and uses the frontend lint-staged configuration.
 - Fixed frontend authentication setup so reused-server E2E runs can opt into auth-state skips, while isolated E2E runs fail instead of silently saving an empty auth state.
+- Fixed long backup-configuration example paths being clipped in the Maintenance page on mobile layouts.
 - Prevented systemd installation and static-file discovery from treating Vite source directories as built Web UI output.
 - Fixed broad `.gitignore` / `.dockerignore` rules for `nasd`.
 - Removed runtime `apt-get` dependency from Docker health checks.
