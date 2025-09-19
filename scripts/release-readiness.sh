@@ -7,6 +7,7 @@ ALLOW_DIRTY=0
 ALLOW_POST_VALIDATION_CHANGES=0
 CHECK_CHECKLIST=1
 COMMIT_MESSAGE_TMPDIR=""
+VALIDATION_TARGET_SHORT=""
 
 cleanup() {
 	if [[ -n "${COMMIT_MESSAGE_TMPDIR:-}" ]]; then
@@ -235,6 +236,7 @@ check_validation_evidence() {
 	local head_full
 	target_short="$(git rev-parse --short=12 "$target_full")"
 	head_full="$(git rev-parse HEAD)"
+	VALIDATION_TARGET_SHORT="$target_short"
 
 	if ! git merge-base --is-ancestor "$target_full" HEAD; then
 		fail "validation evidence target is not an ancestor of HEAD: $target_short"
@@ -300,12 +302,15 @@ check_release_notes() {
 
 	for path in "${release_note_files[@]}"; do
 		[[ -f "$path" ]] || fail "missing required release-notes file: $path"
+		if [[ -n "${VALIDATION_TARGET_SHORT:-}" ]]; then
+			require_file_contains "$path" "$VALIDATION_TARGET_SHORT"
+		fi
 		for expected in "${required_texts[@]}"; do
 			require_file_contains "$path" "$expected"
 		done
 	done
 
-	print_kv "release-notes" "release-note verification commands present"
+	print_kv "release-notes" "release-note validation target and verification commands present"
 }
 
 check_branch_commit_messages() {
