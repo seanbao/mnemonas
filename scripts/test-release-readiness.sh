@@ -49,11 +49,18 @@ EOF
 }
 
 write_release_notes() {
+	local target="$1"
+
 	mkdir -p docs
 	cat >docs/release-notes.md <<'EOF'
 # 发布说明草稿
 
 ## 发布前验证
+EOF
+	cat >>docs/release-notes.md <<EOF
+最近本地完整验证快照：验证目标 \`$target\`。
+EOF
+	cat >>docs/release-notes.md <<'EOF'
 
 - `GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master`
 - `make docs-check`
@@ -74,6 +81,11 @@ EOF
 # Release Notes Draft
 
 ## Pre-Release Validation
+EOF
+	cat >>docs/release-notes.en.md <<EOF
+Latest local full-validation snapshot: validation target \`$target\`.
+EOF
+	cat >>docs/release-notes.en.md <<'EOF'
 
 - `GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master`
 - `make docs-check`
@@ -206,13 +218,13 @@ git config user.email "mnemonas@example.invalid"
 git config user.name "MnemoNAS Test"
 
 write_checklists
-write_release_notes
 write_community_files
 git add .
 git commit -q -m "docs: initial checklist"
 validation_target="$(git rev-parse --short=12 HEAD)"
 validation_target_full="$(git rev-parse "$validation_target^{commit}")"
 validation_target_short="$(git rev-parse --short=7 "$validation_target")"
+write_release_notes "$validation_target"
 write_validation_docs "$validation_target"
 git add docs
 git commit -q -m "docs: record validation evidence"
@@ -220,7 +232,7 @@ git commit -q -m "docs: record validation evidence"
 ./scripts/release-readiness.sh --base "$validation_target" >"$output_dir/evidence-only.out" 2>"$output_dir/evidence-only.err"
 assert_file_contains "$output_dir/evidence-only.out" "[release-readiness] validation:"
 assert_file_contains "$output_dir/evidence-only.out" "[release-readiness] commit-messages:"
-assert_file_contains "$output_dir/evidence-only.out" "only validation evidence docs changed since target"
+assert_file_contains "$output_dir/evidence-only.out" "only release documentation changed since target"
 assert_file_contains "$output_dir/evidence-only.out" "[release-readiness] validation-diff:"
 assert_file_contains "$output_dir/evidence-only.out" "release readiness summary completed"
 
@@ -234,7 +246,7 @@ git add docs/hardening-progress.md docs/hardening-review-summary.en.md
 git commit -q -m "docs: mix validation target lengths"
 ./scripts/release-readiness.sh --base "$validation_target" >"$output_dir/mixed-validation-target-lengths.out" 2>"$output_dir/mixed-validation-target-lengths.err"
 assert_file_contains "$output_dir/mixed-validation-target-lengths.out" "[release-readiness] validation:"
-assert_file_contains "$output_dir/mixed-validation-target-lengths.out" "only validation evidence docs changed since target"
+assert_file_contains "$output_dir/mixed-validation-target-lengths.out" "only release documentation changed since target"
 
 git checkout -q master
 git checkout -q -b missing-validation-evidence-file
@@ -257,6 +269,18 @@ if ./scripts/release-readiness.sh --base "$validation_target" >"$output_dir/miss
 	fail "release readiness accepted validation evidence without a target"
 fi
 assert_file_contains "$output_dir/missing-validation-target.err" "validation evidence target not recorded in: docs/hardening-review-summary.en.md"
+
+git checkout -q master
+git checkout -q -b missing-release-note-validation-target
+sed -i.bak "s/${validation_target}/000000000000/" docs/release-notes.en.md
+rm -f docs/release-notes.en.md.bak
+git add docs/release-notes.en.md
+git commit -q -m "docs: stale release note validation target"
+if ./scripts/release-readiness.sh --base "$validation_target" >"$output_dir/missing-release-note-validation-target.out" 2>"$output_dir/missing-release-note-validation-target.err"; then
+	fail "release readiness accepted release notes without the validation target"
+fi
+assert_file_contains "$output_dir/missing-release-note-validation-target.err" "docs/release-notes.en.md is missing required text"
+assert_file_contains "$output_dir/missing-release-note-validation-target.err" "$validation_target"
 
 git checkout -q master
 git checkout -q -b release-docs
