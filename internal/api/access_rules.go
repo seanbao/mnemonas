@@ -20,6 +20,25 @@ const (
 
 var errPathAccessDenied = errors.New("path access denied by directory access rule")
 
+type pathAccessEvaluation struct {
+	Mode        pathAccessMode                    `json:"mode"`
+	Allowed     bool                              `json:"allowed"`
+	Source      string                            `json:"source"`
+	Message     string                            `json:"message,omitempty"`
+	MatchedRule *config.DirectoryAccessRuleConfig `json:"matched_rule,omitempty"`
+}
+
+type pathAccessCheckResult struct {
+	Username string               `json:"username"`
+	UserID   string               `json:"user_id"`
+	Role     auth.Role            `json:"role"`
+	Groups   []string             `json:"groups,omitempty"`
+	HomeDir  string               `json:"home_dir"`
+	Path     string               `json:"path"`
+	Read     pathAccessEvaluation `json:"read"`
+	Write    pathAccessEvaluation `json:"write"`
+}
+
 func (s *Server) authorizeUserReadPath(ctx context.Context, targetPath string) error {
 	return s.authorizeUserPathFor(ctx, targetPath, pathAccessRead)
 }
@@ -127,4 +146,93 @@ func directoryAccessRuleAllowsUser(rule config.DirectoryAccessRuleConfig, user *
 func (s *Server) hasDirectoryAccessRules() bool {
 	cfg := s.currentConfig()
 	return cfg != nil && len(cfg.Storage.DirectoryAccessRules) > 0
+}
+
+func (s *Server) evaluateUserPathAccess(user *auth.User, targetPath string) pathAccessCheckResult {
+	targetPath = path.Clean(targetPath)
+	result := pathAccessCheckResult{
+		Path: targetPath,
+	}
+	if user != nil {
+		result.Username = user.Username
+		result.UserID = user.ID
+		result.Role = user.Role
+		result.Groups = append([]string(nil), user.Groups...)
+		result.HomeDir = user.HomeDir
+	}
+	result.Read = s.evaluateUserPathAccessMode(user, targetPath, pathAccessRead)
+	result.Write = s.evaluateUserPathAccessMode(user, targetPath, pathAccessWrite)
+	return result
+}
+
+func (s *Server) evaluateUserPathAccessMode(user *auth.User, targetPath string, mode pathAccessMode) pathAccessEvaluation {
+	if !s.authEnabled {
+		return pathAccessEvaluation{
+			Mode:    mode,
+			Allowed: true,
+			Source:  "auth_disabled",
+			Message: "authentication is disabled",
+		}
+	}
+	if user == nil {
+		return pathAccessEvaluation{
+			Mode:    mode,
+			Allowed: false,
+			Source:  "user_not_found",
+			Message: "user was not found",
+		}
+	}
+	if user.Disabled {
+		return pathAccessEvaluation{
+			Mode:    mode,
+			Allowed: false,
+			Source:  "user_disabled",
+			Message: "user account is disabled",
+		}
+	}
+	if user.Role == auth.RoleAdmin {
+		return pathAccessEvaluation{
+			Mode:    mode,
+			Allowed: true,
+			Source:  "admin",
+			Message: "admin role has full access",
+		}
+	}
+
+	if rule, ok := s.matchDirectoryAccessRule(targetPath); ok {
+		matchedRule := rule
+		allowed := directoryAccessRuleAllowsUser(rule, user, mode)
+		message := "directory access rule does not grant " + string(mode)
+		if allowed {
+			message = "directory access rule grants " + string(mode)
+		}
+		return pathAccessEvaluation{
+			Mode:        mode,
+			Allowed:     allowed,
+			Source:      "directory_access_rule",
+			Message:     message,
+			MatchedRule: &matchedRule,
+		}
+	}
+
+	homeDir, err := validatePath(user.HomeDir)
+	if err != nil || strings.TrimSpace(user.HomeDir) == "" {
+		return pathAccessEvaluation{
+			Mode:    mode,
+			Allowed: false,
+			Source:  "invalid_home_dir",
+			Message: "user home_dir is invalid",
+		}
+	}
+	allowed := pathWithinBase(homeDir, targetPath)
+	message := "path is outside the user's home_dir"
+	if allowed {
+		message = "path is inside the user's home_dir"
+	}
+	return pathAccessEvaluation{
+		Mode:    mode,
+		Allowed: allowed,
+		Source:  "home_dir",
+		Message: message,
+	}
 }

@@ -1793,6 +1793,7 @@ func (s *Server) setupRoutes() {
 			}
 			r.Get("/", s.handleGetSettings)
 			r.Put("/", s.handleUpdateSettings)
+			r.Post("/access-check", s.handleCheckPathAccess)
 			r.Get("/security-check", s.handleGetSecurityCheck)
 			r.Get("/webdav-credentials", s.handleGetWebDAVCredentials)
 		})
@@ -5927,6 +5928,48 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 	}
 
 	NewAPIResponse(settings).Write(w, http.StatusOK)
+}
+
+type pathAccessCheckRequest struct {
+	Username string `json:"username"`
+	Path     string `json:"path"`
+}
+
+func (s *Server) handleCheckPathAccess(w http.ResponseWriter, r *http.Request) {
+	if s.userStore == nil {
+		ServiceUnavailable(w, "user store not available")
+		return
+	}
+
+	var req pathAccessCheckRequest
+	if err := decodeJSONBody(r, &req); err != nil {
+		writeLimitedJSONBodyError(w, err, DefaultJSONRequestBodyLimit)
+		return
+	}
+
+	username := strings.TrimSpace(req.Username)
+	if username == "" {
+		BadRequest(w, "username is required")
+		return
+	}
+
+	targetPath, err := validatePath(req.Path)
+	if err != nil {
+		BadRequest(w, "invalid path")
+		return
+	}
+
+	targetUser, err := s.userStore.GetByUsername(username)
+	if err != nil {
+		if errors.Is(err, auth.ErrUserNotFound) {
+			NotFound(w, "user not found")
+			return
+		}
+		s.respondInternalError(w, "lookup path access user", err)
+		return
+	}
+
+	NewAPIResponse(s.evaluateUserPathAccess(targetUser, targetPath)).Write(w, http.StatusOK)
 }
 
 // UpdateSettingsRequest represents settings update request

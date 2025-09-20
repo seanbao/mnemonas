@@ -6117,6 +6117,87 @@ func TestServer_DirectoryAccessRulesGrantSharedPaths(t *testing.T) {
 	}
 }
 
+func TestServer_CheckPathAccess_ExplainsEffectivePermissions(t *testing.T) {
+	server, session := newRouteSmokeServer(t)
+	targetUser, err := server.userStore.CreateWithGroups("alice", "password123", "", auth.RoleUser, []string{"family"})
+	if err != nil {
+		t.Fatalf("CreateWithGroups(alice) error: %v", err)
+	}
+	targetUser.HomeDir = "/users/alice"
+	if err := server.userStore.Update(targetUser); err != nil {
+		t.Fatalf("Update(alice home_dir) error: %v", err)
+	}
+	setDirectoryAccessRulesForTest(t, server, []config.DirectoryAccessRuleConfig{
+		{Path: "/team", ReadGroups: []string{"family"}},
+		{Path: "/team/uploads", WriteGroups: []string{"family"}},
+	})
+
+	postAccessCheck := func(targetPath string) pathAccessCheckResult {
+		t.Helper()
+		body := fmt.Sprintf(`{"username":"alice","path":%q}`, targetPath)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/settings/access-check", strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+session.accessToken)
+		rec := httptest.NewRecorder()
+		server.Router().ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("access-check(%s) status = %d, body = %s", targetPath, rec.Code, rec.Body.String())
+		}
+		var payload struct {
+			Data pathAccessCheckResult `json:"data"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+			t.Fatalf("decode access-check response: %v", err)
+		}
+		return payload.Data
+	}
+
+	sharedRead := postAccessCheck("/team/readme.txt")
+	if !sharedRead.Read.Allowed || sharedRead.Read.Source != "directory_access_rule" || sharedRead.Read.MatchedRule == nil || sharedRead.Read.MatchedRule.Path != "/team" {
+		t.Fatalf("shared read decision = %+v, want /team rule allow", sharedRead.Read)
+	}
+	if sharedRead.Write.Allowed || sharedRead.Write.Source != "directory_access_rule" {
+		t.Fatalf("shared write decision = %+v, want /team rule deny", sharedRead.Write)
+	}
+
+	sharedWrite := postAccessCheck("/team/uploads/file.txt")
+	if !sharedWrite.Write.Allowed || sharedWrite.Write.MatchedRule == nil || sharedWrite.Write.MatchedRule.Path != "/team/uploads" {
+		t.Fatalf("shared upload write decision = %+v, want /team/uploads rule allow", sharedWrite.Write)
+	}
+
+	homeFile := postAccessCheck("/users/alice/note.txt")
+	if !homeFile.Read.Allowed || !homeFile.Write.Allowed || homeFile.Read.Source != "home_dir" || homeFile.Write.Source != "home_dir" {
+		t.Fatalf("home_dir decisions = read %+v write %+v, want home_dir allow", homeFile.Read, homeFile.Write)
+	}
+
+	outside := postAccessCheck("/other/secret.txt")
+	if outside.Read.Allowed || outside.Write.Allowed || outside.Read.Source != "home_dir" || outside.Write.Source != "home_dir" {
+		t.Fatalf("outside decisions = read %+v write %+v, want home_dir deny", outside.Read, outside.Write)
+	}
+}
+
+func TestServer_CheckPathAccess_RejectsInvalidRequests(t *testing.T) {
+	server, session := newRouteSmokeServer(t)
+
+	for name, tt := range map[string]struct {
+		body       string
+		wantStatus int
+	}{
+		"missing username": {body: `{"path":"/"}`, wantStatus: http.StatusBadRequest},
+		"invalid path":     {body: `{"username":"admin","path":"../escape"}`, wantStatus: http.StatusBadRequest},
+		"missing user":     {body: `{"username":"missing","path":"/"}`, wantStatus: http.StatusNotFound},
+	} {
+		t.Run(name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/settings/access-check", strings.NewReader(tt.body))
+			req.Header.Set("Authorization", "Bearer "+session.accessToken)
+			rec := httptest.NewRecorder()
+			server.Router().ServeHTTP(rec, req)
+			if rec.Code != tt.wantStatus {
+				t.Fatalf("status = %d, want %d, body = %s", rec.Code, tt.wantStatus, rec.Body.String())
+			}
+		})
+	}
+}
+
 func TestServer_ListFiles_EmptyUserHomeDirReturnsForbidden(t *testing.T) {
 	server, fs, _, username, password := setupAuthServer(t)
 
