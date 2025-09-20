@@ -92,7 +92,7 @@ declare -A GROUP_TITLES=(
 )
 
 declare -A GROUP_VALIDATION=(
-	["docs"]="make docs-check; ./scripts/check-yaml-configs.sh .github/ISSUE_TEMPLATE/*.yml .github/ISSUE_TEMPLATE/*.yaml; Chinese style check; git diff --check"
+	["docs"]="make docs-check; ./scripts/check-yaml-configs.sh .github/ISSUE_TEMPLATE/*.yml .github/ISSUE_TEMPLATE/*.yaml; git diff --check"
 	["build-ci"]="make scripts-check; ./scripts/verify-changed.sh --dry-run; ./scripts/check-secret-leaks.sh"
 	["feat-api"]="Go race tests from make verify-changed; path, archive, WebDAV, share, and access-rule tests"
 	["feat-core"]="Go race tests from make verify-changed; backup restore, quota, workspace, and storage-boundary tests"
