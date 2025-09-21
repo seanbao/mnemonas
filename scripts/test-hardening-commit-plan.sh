@@ -114,6 +114,7 @@ assert_file_contains "$output_dir/commands.out" "# Validation:"
 
 ./scripts/plan-hardening-commits.sh --checks >"$output_dir/checks.out" 2>"$output_dir/checks.err"
 assert_file_contains "$output_dir/checks.out" "make docs-check"
+assert_file_contains "$output_dir/checks.out" "./scripts/check-yaml-configs.sh .github/ISSUE_TEMPLATE/*.yml .github/ISSUE_TEMPLATE/*.yaml"
 assert_file_contains "$output_dir/checks.out" "make scripts-check"
 assert_file_contains "$output_dir/checks.out" "GOTOOLCHAIN=local CGO_ENABLED=1 bash ./scripts/with-test-dataplane.sh go test -race ./internal/api ./internal/share ./internal/webdav"
 assert_file_contains "$output_dir/checks.out" "cd web && npm run test:e2e"
@@ -144,6 +145,14 @@ assert_file_contains "$output_dir/group-ci-commands.out" "[hardening-commit-plan
 assert_file_contains "$output_dir/group-ci-commands.out" "# build(ci): local and CI gates"
 assert_file_contains "$output_dir/group-ci-commands.out" "  Makefile"
 assert_file_not_contains "$output_dir/group-ci-commands.out" "  Dockerfile"
+
+./scripts/plan-hardening-commits.sh --group docs --checks >"$output_dir/group-docs-checks.out" 2>"$output_dir/group-docs-checks.err"
+assert_file_contains "$output_dir/group-docs-checks.out" "[hardening-commit-plan] showing group docs"
+assert_file_contains "$output_dir/group-docs-checks.out" "make docs-check"
+assert_file_contains "$output_dir/group-docs-checks.out" "./scripts/check-yaml-configs.sh .github/ISSUE_TEMPLATE/*.yml .github/ISSUE_TEMPLATE/*.yaml"
+assert_file_contains "$output_dir/group-docs-checks.out" ".github/ISSUE_TEMPLATE/bug_report.yml"
+assert_file_contains "$output_dir/group-docs-checks.out" "git diff --check -- \\"
+assert_file_not_contains "$output_dir/group-docs-checks.out" "web/src/App.tsx"
 
 ./scripts/plan-hardening-commits.sh --group feat-web --checks >"$output_dir/group-web-checks.out" 2>"$output_dir/group-web-checks.err"
 assert_file_contains "$output_dir/group-web-checks.out" "[hardening-commit-plan] showing group feat-web"
