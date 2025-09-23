@@ -196,7 +196,7 @@ E2E 分组：
 | WebDAV locks | LOCK/UNLOCK 虚拟锁 token 往返 | quick |
 | Versions | 版本历史 API | quick |
 | Concurrency | 并发读写 | quick |
-| Standalone WebDAV smoke | curl `OPTIONS`、`MKCOL`、`PUT`、`PROPFIND`、`GET`、`HEAD`、`COPY`、`MOVE`、`DELETE`、URL 编码空格路径和请求超时配置 | 手动指定已运行服务 |
+| Standalone WebDAV smoke | curl `OPTIONS`、`MKCOL`、`PUT`、`PROPFIND`、`GET`、`HEAD`、`COPY`、`MOVE`、`DELETE`、COPY/MOVE 后内容校验、URL 编码空格路径和请求超时配置 | 手动指定已运行服务 |
 | WebDAV client smoke | 可选 rclone 上传、下载、移动/重命名、列出和清理 | `RUN_RCLONE_WEBDAV=1` |
 | Large files | 100MB 路径 | full |
 | Crash recovery | 中断写入和重启行为 | full |

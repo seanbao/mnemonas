@@ -76,7 +76,7 @@ Current automation covers:
 - `OPTIONS`, `MKCOL`, `PUT`, `PROPFIND`, `COPY`, and `MOVE`;
 - conditional requests, Range/ETag, and LOCK/UNLOCK behavior;
 - same-origin `Destination` parsing and lock `If` URI parsing;
-- `scripts/webdav-client-smoke.sh` can run an independent curl protocol smoke against a running service, covering `OPTIONS`, `MKCOL`, `PUT`, `PROPFIND`, `GET`, `HEAD`, `COPY`, `MOVE`, and `DELETE`, including read, write, and delete checks for URL-encoded space paths;
+- `scripts/webdav-client-smoke.sh` can run an independent curl protocol smoke against a running service, covering `OPTIONS`, `MKCOL`, `PUT`, `PROPFIND`, `GET`, `HEAD`, `COPY`, `MOVE`, and `DELETE`, including content validation after COPY/MOVE and read, write, and delete checks for URL-encoded space paths;
 - With `RUN_RCLONE_WEBDAV=1`, the low-level E2E runner also executes a WebDAV client smoke for upload, download, move/rename, list, and cleanup operations when `rclone` is installed.
 
 The matrix below still tracks remaining real-client validation work for desktop, mobile, and media clients.
@@ -214,7 +214,7 @@ MNEMONAS_WEBDAV_PASSWORD="<mnemonas-or-webdav-password>" \
 ./scripts/webdav-client-smoke.sh
 ```
 
-The script creates a temporary collection, verifies basic read, write, URL-encoded space path, copy, move, and delete operations, and removes the temporary data. Each curl request uses `CURL_CONNECT_TIMEOUT=10` and `CURL_MAX_TIME=30` by default; increase these environment variables on high-latency links. It is a protocol-level regression check and does not replace real-client validation for Finder, Windows File Explorer, mobile file managers, or media players.
+The script creates a temporary collection, verifies basic read, write, URL-encoded space path, copy, move, post-move content consistency, and delete operations, and removes the temporary data. Each curl request uses `CURL_CONNECT_TIMEOUT=10` and `CURL_MAX_TIME=30` by default; increase these environment variables on high-latency links. It is a protocol-level regression check and does not replace real-client validation for Finder, Windows File Explorer, mobile file managers, or media players.
 
 ### davfs2 Example
 
