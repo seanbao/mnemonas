@@ -162,7 +162,7 @@ expect_status() {
 
 run_smoke() {
     local base_url file_url spaced_file_url copied_url moved_url
-    local upload_file download_file spaced_upload_file spaced_download_file status
+    local upload_file download_file spaced_upload_file spaced_download_file moved_download_file status
 
     base_url="${WEBDAV_URL%/}"
     root_url="$base_url/$WEBDAV_TEST_ROOT"
@@ -187,6 +187,7 @@ run_smoke() {
     download_file="$tmp_dir/download.txt"
     spaced_upload_file="$tmp_dir/spaced-upload.txt"
     spaced_download_file="$tmp_dir/spaced-download.txt"
+    moved_download_file="$tmp_dir/moved-download.txt"
     printf 'mnemonas webdav smoke\n' > "$upload_file"
     printf 'mnemonas webdav smoke spaced path\n' > "$spaced_upload_file"
 
@@ -229,6 +230,13 @@ run_smoke() {
 
     status="$(curl_request "MOVE" MOVE "$copied_url" "$tmp_dir/move.out" -H "Destination: $moved_url")"
     expect_status "MOVE" "$status" 201 204
+
+    status="$(curl_request "GET moved file" GET "$moved_url" "$moved_download_file")"
+    expect_status "GET moved file" "$status" 200
+    if ! cmp -s "$upload_file" "$moved_download_file"; then
+        fail "moved file content did not match uploaded content"
+    fi
+    log_ok "MOVE content matches uploaded content"
 
     status="$(curl_request "DELETE original file" DELETE "$file_url" "$tmp_dir/delete-file.out")"
     expect_status "DELETE original file" "$status" 200 204
