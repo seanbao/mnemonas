@@ -280,6 +280,130 @@ run_symlink_data_dir_test() {
 	assert_file_contains "$out" "Data directory must not contain symlink path components"
 }
 
+run_sensitive_files_private_test() {
+	local case_dir="$TMP_ROOT/sensitive-private"
+	local fake_bin="$case_dir/bin"
+	local out="$case_dir/out.log"
+	make_case "$case_dir"
+	make_fake_bin "$fake_bin"
+	mkdir -p "$case_dir/home/.mnemonas/.mnemonas"
+	chmod 700 "$case_dir/home/.mnemonas/.mnemonas"
+	printf '[]\n' > "$case_dir/home/.mnemonas/.mnemonas/users.json"
+	printf 'Password: test-password\n' > "$case_dir/home/.mnemonas/.mnemonas/initial-password.txt"
+	printf '{"jwt_secret":"secret","webdav_password":"password"}\n' > "$case_dir/home/.mnemonas/secrets.json"
+	cat > "$case_dir/home/.mnemonas/config.toml" <<'TOML'
+[storage]
+root = "/data"
+TOML
+	chmod 600 \
+		"$case_dir/home/.mnemonas/.mnemonas/users.json" \
+		"$case_dir/home/.mnemonas/.mnemonas/initial-password.txt" \
+		"$case_dir/home/.mnemonas/secrets.json" \
+		"$case_dir/home/.mnemonas/config.toml"
+
+	PATH="$fake_bin:$PATH" \
+		REPO_ROOT="$case_dir/repo" \
+		HOME="$case_dir/home" \
+		bash "$PROJECT_ROOT/scripts/mnemonas-docker-preflight.sh" > "$out"
+
+	assert_file_contains "$out" "Internal metadata directory is private to its owner"
+	assert_file_contains "$out" "Users file is private to its owner"
+	assert_file_contains "$out" "Initial admin password file is private to its owner"
+	assert_file_contains "$out" "Generated secrets file is private to its owner"
+	assert_file_contains "$out" "Docker config file is private to its owner"
+	assert_file_contains "$out" "Summary: 0 failure(s), 0 warning(s)"
+}
+
+run_sensitive_file_permission_warning_test() {
+	local case_dir="$TMP_ROOT/sensitive-permission"
+	local fake_bin="$case_dir/bin"
+	local out="$case_dir/out.log"
+	make_case "$case_dir"
+	make_fake_bin "$fake_bin"
+	mkdir -p "$case_dir/home/.mnemonas/.mnemonas"
+	chmod 700 "$case_dir/home/.mnemonas/.mnemonas"
+	printf 'Password: test-password\n' > "$case_dir/home/.mnemonas/.mnemonas/initial-password.txt"
+	chmod 0644 "$case_dir/home/.mnemonas/.mnemonas/initial-password.txt"
+
+	PATH="$fake_bin:$PATH" \
+		REPO_ROOT="$case_dir/repo" \
+		HOME="$case_dir/home" \
+		bash "$PROJECT_ROOT/scripts/mnemonas-docker-preflight.sh" > "$out"
+
+	assert_file_contains "$out" "Initial admin password file allows group or other access"
+	assert_file_contains "$out" "Summary: 0 failure(s), 1 warning(s)"
+}
+
+run_config_file_permission_warning_test() {
+	local case_dir="$TMP_ROOT/config-permission"
+	local fake_bin="$case_dir/bin"
+	local out="$case_dir/out.log"
+	make_case "$case_dir"
+	make_fake_bin "$fake_bin"
+	cat > "$case_dir/home/.mnemonas/config.toml" <<'TOML'
+[storage]
+root = "/data"
+TOML
+	chmod 0644 "$case_dir/home/.mnemonas/config.toml"
+
+	PATH="$fake_bin:$PATH" \
+		REPO_ROOT="$case_dir/repo" \
+		HOME="$case_dir/home" \
+		bash "$PROJECT_ROOT/scripts/mnemonas-docker-preflight.sh" > "$out"
+
+	assert_file_contains "$out" "Docker config file allows group or other access"
+	assert_file_contains "$out" "Existing Docker config uses [storage].root = /data"
+	assert_file_contains "$out" "Summary: 0 failure(s), 1 warning(s)"
+}
+
+run_sensitive_file_symlink_test() {
+	local case_dir="$TMP_ROOT/sensitive-symlink"
+	local fake_bin="$case_dir/bin"
+	local out="$case_dir/out.log"
+	local status
+	make_case "$case_dir"
+	make_fake_bin "$fake_bin"
+	printf '{"jwt_secret":"secret"}\n' > "$case_dir/secrets-real.json"
+	ln -s "$case_dir/secrets-real.json" "$case_dir/home/.mnemonas/secrets.json"
+
+	set +e
+	PATH="$fake_bin:$PATH" \
+		REPO_ROOT="$case_dir/repo" \
+		HOME="$case_dir/home" \
+		bash "$PROJECT_ROOT/scripts/mnemonas-docker-preflight.sh" > "$out"
+	status=$?
+	set -e
+
+	[[ "$status" -ne 0 ]] || fail "preflight accepted a symlink generated secrets file"
+	assert_file_contains "$out" "Generated secrets file must not be a symlink"
+}
+
+run_config_file_symlink_test() {
+	local case_dir="$TMP_ROOT/config-symlink"
+	local fake_bin="$case_dir/bin"
+	local out="$case_dir/out.log"
+	local status
+	make_case "$case_dir"
+	make_fake_bin "$fake_bin"
+	cat > "$case_dir/config-real.toml" <<'TOML'
+[storage]
+root = "/data"
+TOML
+	ln -s "$case_dir/config-real.toml" "$case_dir/home/.mnemonas/config.toml"
+
+	set +e
+	PATH="$fake_bin:$PATH" \
+		REPO_ROOT="$case_dir/repo" \
+		HOME="$case_dir/home" \
+		bash "$PROJECT_ROOT/scripts/mnemonas-docker-preflight.sh" > "$out"
+	status=$?
+	set -e
+
+	[[ "$status" -ne 0 ]] || fail "preflight accepted a symlink Docker config file"
+	assert_file_contains "$out" "Docker config file must not be a symlink"
+	assert_file_not_contains "$out" "Existing Docker config uses [storage].root"
+}
+
 run_busy_port_test() {
 	local case_dir="$TMP_ROOT/busy-port"
 	local fake_bin="$case_dir/bin"
@@ -370,16 +494,69 @@ TOML
 	assert_file_contains "$out" "does not set [storage].root"
 }
 
+run_invalid_toml_config_test() {
+	local case_dir="$TMP_ROOT/invalid-toml-config"
+	local fake_bin="$case_dir/bin"
+	local out="$case_dir/out.log"
+	local status
+	make_case "$case_dir"
+	make_fake_bin "$fake_bin"
+	cat > "$case_dir/home/.mnemonas/config.toml" <<'TOML'
+[storage
+root = "/data"
+TOML
+	chmod 0600 "$case_dir/home/.mnemonas/config.toml"
+
+	set +e
+	PATH="$fake_bin:$PATH" \
+		REPO_ROOT="$case_dir/repo" \
+		HOME="$case_dir/home" \
+		bash "$PROJECT_ROOT/scripts/mnemonas-docker-preflight.sh" > "$out"
+	status=$?
+	set -e
+
+	[[ "$status" -ne 0 ]] || fail "preflight accepted invalid TOML config"
+	assert_file_contains "$out" "Docker config file is not valid TOML"
+	assert_file_not_contains "$out" "does not set [storage].root"
+}
+
+run_relative_storage_root_config_test() {
+	local case_dir="$TMP_ROOT/relative-root-config"
+	local fake_bin="$case_dir/bin"
+	local out="$case_dir/out.log"
+	local status
+	make_case "$case_dir"
+	make_fake_bin "$fake_bin"
+	cat > "$case_dir/home/.mnemonas/config.toml" <<'TOML'
+[storage]
+root = "data"
+TOML
+	chmod 0600 "$case_dir/home/.mnemonas/config.toml"
+
+	set +e
+	PATH="$fake_bin:$PATH" \
+		REPO_ROOT="$case_dir/repo" \
+		HOME="$case_dir/home" \
+		bash "$PROJECT_ROOT/scripts/mnemonas-docker-preflight.sh" > "$out"
+	status=$?
+	set -e
+
+	[[ "$status" -ne 0 ]] || fail "preflight accepted a relative Docker storage root"
+	assert_file_contains "$out" "sets a relative [storage].root: data"
+	assert_file_contains "$out" "root = \"/data\""
+}
+
 run_custom_storage_root_warning_test() {
 	local case_dir="$TMP_ROOT/custom-root"
 	local fake_bin="$case_dir/bin"
 	local out="$case_dir/out.log"
 	make_case "$case_dir"
 	make_fake_bin "$fake_bin"
-	cat > "$case_dir/home/.mnemonas/config.toml" <<'TOML'
+cat > "$case_dir/home/.mnemonas/config.toml" <<'TOML'
 [storage]
 root = "/data\u0023root" # TOML escapes may encode characters in quoted values
 TOML
+	chmod 0600 "$case_dir/home/.mnemonas/config.toml"
 
 	PATH="$fake_bin:$PATH" \
 		REPO_ROOT="$case_dir/repo" \
@@ -408,6 +585,64 @@ ENV
 
 	assert_file_contains "$out" "Docker Buildx plugin is not required for release image"
 	assert_file_not_contains "$out" "Docker Buildx plugin is missing"
+	assert_file_contains "$out" "Release image tag is pinned"
+	assert_file_contains "$out" "Summary: 0 failure(s), 0 warning(s)"
+}
+
+run_release_image_latest_warning_test() {
+	local case_dir="$TMP_ROOT/release-image-latest"
+	local fake_bin="$case_dir/bin"
+	local out="$case_dir/out.log"
+	make_case "$case_dir"
+	make_fake_bin "$fake_bin"
+	cat >> "$case_dir/repo/.env" <<'ENV'
+MNEMONAS_IMAGE=ghcr.io/seanbao/mnemonas:latest
+ENV
+
+	PATH="$fake_bin:$PATH" \
+		REPO_ROOT="$case_dir/repo" \
+		HOME="$case_dir/home" \
+		bash "$PROJECT_ROOT/scripts/mnemonas-docker-preflight.sh" > "$out"
+
+	assert_file_contains "$out" "MNEMONAS_IMAGE uses the moving 'latest' tag"
+	assert_file_contains "$out" "Summary: 0 failure(s), 1 warning(s)"
+}
+
+run_release_image_missing_tag_warning_test() {
+	local case_dir="$TMP_ROOT/release-image-missing-tag"
+	local fake_bin="$case_dir/bin"
+	local out="$case_dir/out.log"
+	make_case "$case_dir"
+	make_fake_bin "$fake_bin"
+	cat >> "$case_dir/repo/.env" <<'ENV'
+MNEMONAS_IMAGE=ghcr.io/seanbao/mnemonas
+ENV
+
+	PATH="$fake_bin:$PATH" \
+		REPO_ROOT="$case_dir/repo" \
+		HOME="$case_dir/home" \
+		bash "$PROJECT_ROOT/scripts/mnemonas-docker-preflight.sh" > "$out"
+
+	assert_file_contains "$out" "MNEMONAS_IMAGE has no explicit tag or digest"
+	assert_file_contains "$out" "Summary: 0 failure(s), 1 warning(s)"
+}
+
+run_release_image_digest_test() {
+	local case_dir="$TMP_ROOT/release-image-digest"
+	local fake_bin="$case_dir/bin"
+	local out="$case_dir/out.log"
+	make_case "$case_dir"
+	make_fake_bin "$fake_bin"
+	cat >> "$case_dir/repo/.env" <<'ENV'
+MNEMONAS_IMAGE=ghcr.io/seanbao/mnemonas@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+ENV
+
+	PATH="$fake_bin:$PATH" \
+		REPO_ROOT="$case_dir/repo" \
+		HOME="$case_dir/home" \
+		bash "$PROJECT_ROOT/scripts/mnemonas-docker-preflight.sh" > "$out"
+
+	assert_file_contains "$out" "Release image is pinned by digest"
 	assert_file_contains "$out" "Summary: 0 failure(s), 0 warning(s)"
 }
 
@@ -440,12 +675,22 @@ run_protected_data_dir_test
 run_data_dir_traversal_test
 run_data_dir_control_character_test
 run_symlink_data_dir_test
+run_sensitive_files_private_test
+run_sensitive_file_permission_warning_test
+run_config_file_permission_warning_test
+run_sensitive_file_symlink_test
+run_config_file_symlink_test
 run_busy_port_test
 run_custom_host_port_test
 run_mnemonas_data_dir_env_override_test
 run_invalid_existing_config_test
+run_invalid_toml_config_test
+run_relative_storage_root_config_test
 run_custom_storage_root_warning_test
 run_release_image_without_buildx_test
+run_release_image_latest_warning_test
+run_release_image_missing_tag_warning_test
+run_release_image_digest_test
 run_invalid_min_free_bytes_test
 
 printf '[docker-preflight-test] all checks passed\n'

@@ -35,6 +35,7 @@ var errThumbnailCacheSymlink = errors.New("thumbnail cache path must not be a sy
 var syncThumbnailCacheDir = syncThumbnailDir
 var syncThumbnailCacheRootDir = syncThumbnailRootDir
 var createThumbnailCacheTempFile = createThumbnailTempFile
+var onThumbnailInProgressExpired = func(string) {}
 var walkThumbnailCache = func(cacheDir string, cacheRoot *os.Root, walkFn thumbnailWalkFunc) error {
 	if cacheRoot != nil {
 		return walkThumbnailCacheWithRoot(cacheRoot, ".", walkFn)
@@ -139,10 +140,12 @@ func (s *Service) clearInProgress(cacheKey string, result *thumbnailGenerationRe
 func (s *Service) scheduleInProgressExpiry(cacheKey string, result *thumbnailGenerationResult, ttl time.Duration) {
 	if ttl <= 0 {
 		s.clearInProgress(cacheKey, result)
+		onThumbnailInProgressExpired(cacheKey)
 		return
 	}
 	time.AfterFunc(ttl, func() {
 		s.clearInProgress(cacheKey, result)
+		onThumbnailInProgressExpired(cacheKey)
 	})
 }
 

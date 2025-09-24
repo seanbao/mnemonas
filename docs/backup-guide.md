@@ -165,7 +165,7 @@ exclude = [".mnemonas/thumbnails"]
 extra_args = ["--fast-list"]
 ```
 
-`schedule_window_start`/`schedule_window_end` 只限制自动调度，手动“立即备份”不受影响。窗口使用服务器本地时间的 `HH:MM`，可以跨午夜。`local` 保留策略在成功备份后执行，始终保留当前快照；`max_snapshots = 0` 和 `max_age = "0"` 表示不启用对应维度的自动清理。`restic` 和 `rclone` 的保留策略由外部工具管理，例如 `restic forget --prune`、systemd timer 或 rclone 目标端生命周期规则；配置 `retention_policy` 后，维护页会把该任务标记为“远端保留策略已确认”，否则显示需要确认。每次成功备份后会自动执行一次保留策略检测，也可以在维护页手动点击“检查保留”：`local` 会校验本地快照 `manifest.json` 和快照布局后统计快照范围，`restic` 会执行 `restic snapshots --json --tag mnemonas --tag job:<id>`，`rclone` 会执行 `rclone lsjson <remote> --recursive --files-only`。本地快照目录名不是规范运行 ID，或 `snapshots/` 根目录出现非快照条目（只有 `.partial` 目录会被当作未完成快照跳过），或 manifest 缺失、manifest 路径包含符号链接、manifest 不是常规文件，或 manifest 中出现任务 ID/运行 ID/`created_at` 不匹配、不安全归档路径、重复路径、负文件大小、无效权限位、无效 SHA-256、统计字段不一致、缺少 `data/` 目录、manifest 未登记的额外文件或顶层异常目录时，保留策略检测会失败并写入失败结果，避免把损坏快照当作可用快照。本地恢复预览、恢复和恢复演练解析最近一次快照时，还会要求持久化状态里的快照路径和 manifest 路径与当前 `local.destination/<job-id>/snapshots/<run-id>/manifest.json` 位置一致，且最新完成快照不能缺失或缺少 manifest，`snapshots/` 根目录不能包含非快照条目或非规范快照目录、manifest 路径不能包含符号链接、manifest 必须是常规文件；不一致会拒绝执行，避免使用当前备份目标之外的快照。检测结果会写入 `last_retention_check`，并在快照缺失、远端为空、未填写 `retention_policy` 或命令失败时提示警告。`restore_drill_stale_after` 控制定期恢复演练提醒；留空或未配置时默认 30 天。维护页会显示任务健康状态、保留策略状态、恢复演练状态、恢复演练历史与成功率摘要、下次自动运行时间、自动窗口、最近备份、最近恢复目标、最近恢复记录列表和最近清理的旧快照数量。备份、恢复、恢复演练、只读校验和保留检测开始执行时会先写入 `running` 状态；服务启动时，如果状态文件中仍有上次进程退出前遗留的 `running` 记录，会将其标记为失败并写回状态文件。恢复演练历史与显式恢复历史默认都保留最近 20 条，失败演练和失败恢复也会记录错误信息；失败演练还会记录稳定的 `failure_category`，用于区分无快照、完整性校验失败、外部命令失败、I/O 问题等常见原因。
+`schedule_window_start`/`schedule_window_end` 只限制自动调度，手动“立即备份”不受影响。窗口使用服务器本地时间的 `HH:MM`，可以跨午夜。`local` 保留策略在成功备份后执行，始终保留当前快照；`max_snapshots = 0` 和 `max_age = "0"` 表示不启用对应维度的自动清理。`restic` 和 `rclone` 的保留策略由外部工具管理，例如 `restic forget --prune`、systemd timer 或 rclone 目标端生命周期规则；配置 `retention_policy` 后，维护页会把该任务标记为“远端保留策略已确认”，否则显示需要确认。每次成功备份后会自动执行一次保留策略检测，也可以在维护页手动点击“检查保留”：`local` 会校验本地快照 `manifest.json` 和快照布局后统计快照范围，`restic` 会执行 `restic snapshots --json --tag mnemonas --tag job:<id>`，`rclone` 会执行 `rclone lsjson <remote> --recursive --files-only`。本地快照目录名不是规范运行 ID，或 `snapshots/` 根目录出现非快照条目（只有 `.partial` 目录会被当作未完成快照跳过），或 manifest 缺失、manifest 路径包含符号链接、manifest 不是常规文件，或 manifest 中出现任务 ID/运行 ID/`created_at` 不匹配、不安全归档路径、重复路径、负文件大小、无效权限位、无效 SHA-256、统计字段不一致、缺少 `data/` 目录、manifest 未登记的额外文件或顶层异常目录时，保留策略检测会失败并写入失败结果，避免把损坏快照当作可用快照。本地恢复预览、恢复和恢复演练解析最近一次快照时，还会要求持久化状态里的快照路径和 manifest 路径与当前 `local.destination/<job-id>/snapshots/<run-id>/manifest.json` 位置一致，且最新完成快照不能缺失或缺少 manifest，`snapshots/` 根目录不能包含非快照条目或非规范快照目录、manifest 路径不能包含符号链接、manifest 必须是常规文件；不一致会拒绝执行，避免使用当前备份目标之外的快照。检测结果会写入 `last_retention_check`，并在快照缺失、远端为空、未填写 `retention_policy` 或命令失败时提示警告。`restore_drill_stale_after` 控制定期恢复演练提醒；留空或未配置时默认 30 天。首页会按同一口径汇总备份需处理任务数量、主要原因和建议处理步骤。维护页会显示任务健康状态、保留策略状态、恢复演练状态、恢复演练历史与成功率摘要、下次自动运行时间、自动窗口、最近备份、最近恢复目标、最近恢复记录列表和最近清理的旧快照数量；存在备份失败、保留策略异常、恢复演练待处理、最近备份或恢复警告、恢复待校验或恢复检查失败/警告时，任务行会汇总显示“需处理”原因，并给出对应的建议处理步骤。备份、恢复、恢复演练、只读校验和保留检测开始执行时会先写入 `running` 状态；服务启动时，如果状态文件中仍有上次进程退出前遗留的 `running` 记录，会将其标记为失败并写回状态文件。恢复演练历史与显式恢复历史默认都保留最近 20 条，失败演练和失败恢复也会记录错误信息；失败演练还会记录稳定的 `failure_category`，用于区分无快照、完整性校验失败、外部命令失败、I/O 问题等常见原因。
 
 重启服务后可通过维护 API 执行：
 
@@ -225,7 +225,7 @@ curl -X POST -b cookies.txt \
 
 `restore-verify` 在检查目标目录是否存在之前，会复用同一套 `target_path` 校验，包括控制字符、反斜杠、`.` / `..` 路径段、Windows/UNC 语法、受保护目录、边界目录和符号链接路径组件检查。
 
-维护页和恢复报告只会把目标路径一致、校验时间不早于最近恢复完成时间，且最近恢复已成功完成的 `last_restore_verify` 关联到最近一次恢复；任务视图和恢复报告都会把该匹配结果写入 `last_matching_restore_verify`，不匹配时会提示最近恢复尚未完成匹配的只读校验。最近恢复仍在运行时，恢复报告会明确提示恢复未完成，且不会关联旧的只读校验结果。
+维护页和恢复报告只会把目标路径一致、校验时间不早于最近恢复完成时间，且最近恢复已成功完成的 `last_restore_verify` 关联到最近一次恢复；任务视图和恢复报告都会把该匹配结果写入 `last_matching_restore_verify`，不匹配时会提示最近恢复尚未完成匹配的只读校验。维护页可从备份任务列表直接对最近一次成功恢复的目标目录重新执行只读校验，用于补齐中断、刷新或人工排障后的“待校验”状态。最近恢复仍在运行时，恢复报告会明确提示恢复未完成，且不会关联旧的只读校验结果。
 
 批量恢复多个独立任务或多个目标目录时，应先调用批量预览，再执行批量恢复：
 
@@ -241,7 +241,7 @@ curl -X POST -b cookies.txt \
   -d '{"items":[{"job_id":"external-disk","target_path":"/mnt/restore/a","include_config":true},{"job_id":"rclone-cloud","target_path":"/mnt/restore/b","include_config":false}]}'
 ```
 
-批量恢复最多包含 20 个条目，并会拒绝同一批次内重复或父子嵌套的目标目录。批量预览不写入数据；维护页会在批量预览后展示恢复项目数、目标目录互斥状态、预计恢复内容、配置文件恢复项数、预检统计和恢复后只读校验安排的执行前复核，并以批量影响摘要汇总目标冲突、覆盖风险、配置与权限影响、失败/提醒预检和恢复后校验。批量恢复 API 在写入任何目标目录前会重新执行整批预检；如果任一条目目标冲突、预检失败或无法生成预览，本次批量恢复直接失败并返回逐项错误，且不会写入任何目标数据。整批预检通过后，批量恢复按顺序执行，每个成功恢复都会立即运行一次 `restore-verify`。顶层 `total_files` 与 `verified_bytes` 汇总已完成条目的只读校验结果。预检通过后的执行期故障仍可能导致部分失败并让总结果带 `warning`，因此应逐项检查 `items[]` 的状态、错误和只读校验结果。
+批量恢复最多包含 20 个条目，并会拒绝同一批次内重复或父子嵌套的目标目录。批量预览不写入数据；维护页会在批量恢复弹窗内显示准备度摘要，集中展示选中任务数、目标目录填写情况、配置文件恢复项数和预览状态。维护页还提供“选择待处理”“选择全部”和“清空选择”入口；“选择待处理”只选择当前可恢复且存在失败、过期、待校验、最近备份/恢复警告或恢复检查警告状态的任务，“选择全部”会选中当前可恢复任务，两者都会为未填写目标填入建议目录。批量预览后，维护页会展示恢复项目数、目标目录互斥状态、预计恢复内容、配置文件恢复项数、预检统计和恢复后只读校验安排的执行前复核，并以批量影响摘要汇总目标冲突、覆盖风险、配置与权限影响、失败/提醒预检和恢复后校验。批量恢复 API 在写入任何目标目录前会重新执行整批预检；如果任一条目目标冲突、预检失败或无法生成预览，本次批量恢复直接失败并返回逐项错误，且不会写入任何目标数据。整批预检通过后，批量恢复按顺序执行，每个成功恢复都会立即运行一次 `restore-verify`。顶层 `total_files` 与 `verified_bytes` 汇总已完成条目的只读校验结果。预检通过后的执行期故障仍可能导致部分失败并让总结果带 `warning`，因此应逐项检查 `items[]` 的状态、错误和只读校验结果。
 
 维护页会在任务摘要中展示恢复摘要发现项，并可通过“导出摘要”下载当前备份任务的恢复 JSON。该 JSON 包括最近备份、保留检测、恢复演练、恢复演练历史、显式恢复、只读校验、恢复历史和待处理发现项。建议在切换 `storage.root` 前下载一份，恢复失败时也可连同诊断包一起保存。
 
@@ -460,7 +460,11 @@ restic restore <snapshot-id> \
 # systemd 启动服务
 sudo systemctl start mnemonas-dataplane mnemonas
 sudo mnemonas-doctor
+```
 
+systemd 部署中，`mnemonas-doctor` 会检查 `BACKUP_ROOT` 是否位于 `storage.root` 内部，并在备份目标与主存储共享同一个 filesystem source 或不可写时给出风险提示。长期备份目标应使用独立磁盘、独立数据集或远端存储。
+
+```bash
 # Docker 启动服务；release 镜像可改用 docker compose up -d --no-build
 docker compose up -d
 
@@ -503,7 +507,7 @@ rclone config
 
 ### 备份监控
 
-内置 `[[backup.jobs]]` 会复用 `[alerts]` 通知通道：当备份失败、显式恢复失败、显式恢复完成但带警告、恢复后只读校验失败或带警告、恢复演练失败、恢复演练超过 `restore_drill_stale_after` 后仍缺失或过期，成功备份带有保留策略检测警告，或手动保留策略检测失败/提醒时，会发送 `backup_run`、`backup_restore`、`backup_restore_verify`、`backup_restore_drill` 或 `backup_retention_check` 事件。事件 `message` 使用固定公共摘要，不包含任务名称、路径或原始错误文本；事件详情只包含任务 ID、运行 ID、任务类型、触发原因、状态、时间、文件/字节/快照计数、警告数量、错误信息是否存在、失败分类，以及是否省略位置详情；不包含任务名称、来源、备份目标、恢复目标路径、快照路径、manifest 路径、原始 warning 或原始错误文本。恢复演练提醒会限频发送，并在任务视图中记录 `last_restore_drill_reminder_at`。可使用 Webhook、Telegram、企业微信或 SMTP 邮件。Webhook 启用方式：
+内置 `[[backup.jobs]]` 会复用 `[alerts]` 通知通道：当备份失败、显式恢复失败、显式恢复完成但带警告、恢复后只读校验失败或带警告、恢复演练失败、恢复演练超过 `restore_drill_stale_after` 后仍缺失或过期，成功备份带有保留策略检测警告，或手动保留策略检测失败/提醒时，会发送 `backup_run`、`backup_restore`、`backup_restore_verify`、`backup_restore_drill` 或 `backup_retention_check` 事件。事件 `message` 使用固定公共摘要，不包含任务名称、路径或原始错误文本；事件详情只包含任务 ID、运行 ID、任务类型、触发原因、状态、时间、文件/字节/快照计数、警告数量、错误信息是否存在、失败分类，以及是否省略位置详情；不包含任务名称、来源、备份目标、恢复目标路径、快照路径、manifest 路径、原始 warning 或原始错误文本。恢复演练提醒会限频发送，并在任务视图中记录 `last_restore_drill_reminder_at`。可使用 Webhook、Telegram、企业微信、钉钉或 SMTP 邮件。Webhook 启用方式：
 
 ```toml
 [alerts]

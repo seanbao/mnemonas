@@ -14,6 +14,7 @@ import (
 
 	"github.com/seanbao/mnemonas/internal/auth"
 	"github.com/seanbao/mnemonas/internal/config"
+	"github.com/seanbao/mnemonas/internal/share"
 )
 
 func securityCheckByID(t *testing.T, checks []securityCheckItem, id string) securityCheckItem {
@@ -34,6 +35,124 @@ func saveSecurityCheckGeneratedWebDAVSecret(t *testing.T, dataRoot string) {
 		WebDAVPassword: "GeneratedWebDAVPassword123!",
 	}); err != nil {
 		t.Fatalf("save generated WebDAV secret: %v", err)
+	}
+}
+
+func TestSecurityPublicShareBoundaryCheck_PrioritizesBoundaryBlockOverHTTPSWarning(t *testing.T) {
+	cfg := config.Default()
+	cfg.Share.Enabled = true
+	policy := share.PublicShareAccessPolicySnapshot()
+	policy.MetadataVaryCookie = false
+
+	check := securityPublicShareBoundaryCheckWithPolicy(cfg, "http", policy)
+
+	if check.Status != securityCheckBlock {
+		t.Fatalf("status = %q, want %q; check=%#v", check.Status, securityCheckBlock, check)
+	}
+	if check.Title != "公开分享浏览器边界异常" {
+		t.Fatalf("title = %q, want boundary block title", check.Title)
+	}
+	if got := check.Details["password_cookie_secure"]; got != false {
+		t.Fatalf("password_cookie_secure = %#v, want false", got)
+	}
+	if got := check.Details["metadata_vary_cookie"]; got != false {
+		t.Fatalf("metadata_vary_cookie = %#v, want false", got)
+	}
+}
+
+func TestSecurityPublicShareBoundaryCheck_BlocksWeakMetadataHeaders(t *testing.T) {
+	cfg := config.Default()
+	cfg.Share.Enabled = true
+
+	tests := []struct {
+		name          string
+		mutate        func(*share.PublicShareAccessPolicy)
+		detailKey     string
+		detailWant    any
+		cachePrivate  bool
+		cacheNoCache  bool
+		referrerValid bool
+	}{
+		{
+			name: "public cache",
+			mutate: func(policy *share.PublicShareAccessPolicy) {
+				policy.MetadataCacheControl = "public, max-age=3600"
+			},
+			detailKey:     "metadata_cache_private",
+			detailWant:    false,
+			cachePrivate:  false,
+			cacheNoCache:  false,
+			referrerValid: true,
+		},
+		{
+			name: "missing no-cache",
+			mutate: func(policy *share.PublicShareAccessPolicy) {
+				policy.MetadataCacheControl = "private"
+			},
+			detailKey:     "metadata_cache_no_cache",
+			detailWant:    false,
+			cachePrivate:  true,
+			cacheNoCache:  false,
+			referrerValid: true,
+		},
+		{
+			name: "weak referrer policy",
+			mutate: func(policy *share.PublicShareAccessPolicy) {
+				policy.MetadataReferrerPolicy = "origin"
+			},
+			detailKey:     "metadata_referrer_no_referrer",
+			detailWant:    false,
+			cachePrivate:  true,
+			cacheNoCache:  true,
+			referrerValid: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			policy := share.PublicShareAccessPolicySnapshot()
+			tt.mutate(&policy)
+
+			check := securityPublicShareBoundaryCheckWithPolicy(cfg, "https", policy)
+
+			if check.Status != securityCheckBlock {
+				t.Fatalf("status = %q, want %q; check=%#v", check.Status, securityCheckBlock, check)
+			}
+			if check.Title != "公开分享浏览器边界异常" {
+				t.Fatalf("title = %q, want boundary block title", check.Title)
+			}
+			if got := check.Details[tt.detailKey]; got != tt.detailWant {
+				t.Fatalf("%s = %#v, want %#v", tt.detailKey, got, tt.detailWant)
+			}
+			if got := check.Details["metadata_cache_private"]; got != tt.cachePrivate {
+				t.Fatalf("metadata_cache_private = %#v, want %#v", got, tt.cachePrivate)
+			}
+			if got := check.Details["metadata_cache_no_cache"]; got != tt.cacheNoCache {
+				t.Fatalf("metadata_cache_no_cache = %#v, want %#v", got, tt.cacheNoCache)
+			}
+			if got := check.Details["metadata_referrer_no_referrer"]; got != tt.referrerValid {
+				t.Fatalf("metadata_referrer_no_referrer = %#v, want %#v", got, tt.referrerValid)
+			}
+		})
+	}
+}
+
+func TestSecurityPublicShareBoundaryCheck_BlocksBroadCookiePaths(t *testing.T) {
+	cfg := config.Default()
+	cfg.Share.Enabled = true
+	policy := share.PublicShareAccessPolicySnapshot()
+	policy.CookiePaths = []string{"/"}
+
+	check := securityPublicShareBoundaryCheckWithPolicy(cfg, "https", policy)
+
+	if check.Status != securityCheckBlock {
+		t.Fatalf("status = %q, want %q; check=%#v", check.Status, securityCheckBlock, check)
+	}
+	if got := check.Details["password_cookie_paths_scoped"]; got != false {
+		t.Fatalf("password_cookie_paths_scoped = %#v, want false", got)
+	}
+	if got := check.Details["password_cookie_paths"]; got == nil {
+		t.Fatal("password_cookie_paths detail missing")
 	}
 }
 

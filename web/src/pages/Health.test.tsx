@@ -846,6 +846,7 @@ describe('HealthPage', () => {
       await waitFor(() => {
         expect(screen.getAllByText('磁盘使用').length).toBeGreaterThan(0)
         expect(screen.getAllByText('25.0%').length).toBeGreaterThan(0)
+        expect(screen.getByRole('progressbar', { name: '磁盘使用' })).toHaveAttribute('aria-valuetext', '25.0% 已用')
       })
     })
   })
@@ -940,6 +941,7 @@ describe('HealthPage', () => {
 
       await waitFor(() => {
         expect(screen.getByText('统计不可用')).toBeTruthy()
+        expect(screen.getByRole('progressbar', { name: '存储使用' })).toHaveAttribute('aria-valuetext', '统计不可用')
         expect(screen.queryByText('999')).toBeNull()
         expect(screen.queryByText('42.0%')).toBeNull()
       })

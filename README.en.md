@@ -87,7 +87,7 @@ sudo ./scripts/install-systemd.sh
 sudo mnemonas-doctor
 ```
 
-The default install path is `/usr/local/bin`, config is written to `/etc/mnemonas/config.toml`, data goes to `/srv/mnemonas`, and the Web UI listens on `http://<server-ip>:8080`. The first login password is stored at `/srv/mnemonas/.mnemonas/initial-password.txt`. For public-domain access, follow the [Public server quickstart](docs/public-server-quickstart.en.md) to restrict the backend port and configure an HTTPS reverse proxy.
+The default install path is `/usr/local/bin`, config is written to `/etc/mnemonas/config.toml`, data goes to `/srv/mnemonas`, and the Web UI listens on `http://<server-ip>:8080`. The first login password is stored at `/srv/mnemonas/.mnemonas/initial-password.txt`. Before upgrading, keep the extracted previous release directory so a failed upgrade can roll binaries and Web UI assets back by rerunning the old installer; the full procedure is in the deployment guide. For public-domain access, follow the [Public server quickstart](docs/public-server-quickstart.en.md) to restrict the backend port and configure an HTTPS reverse proxy.
 
 See [Linux/systemd deployment](docs/linux-systemd-deployment.en.md).
 
@@ -105,7 +105,7 @@ cd mnemonas
 # http://localhost:8080
 ```
 
-The bundled `docker-compose.yml` builds `mnemonas:local` from source by default. The host does not need Go, Rust, or Node.js, but it must be able to pull Docker base images. The quickstart script creates or updates `.env`, writes the current host UID/GID, creates `MNEMONAS_DATA_DIR`, runs Docker preflight checks, and selects the start mode from `MNEMONAS_IMAGE`: local images use a source build, while release image tags use `docker compose up -d --pull missing --no-build`. Binary archives from GitHub Releases include `docker-compose.yml` and `.env.example`, and the packaged template presets `MNEMONAS_IMAGE` to the GHCR image for the same release tag.
+The bundled `docker-compose.yml` builds `mnemonas:local` from source by default. The host does not need Go, Rust, or Node.js, but it must be able to pull Docker base images. The quickstart script creates or updates `.env`, writes the current host UID/GID, creates `MNEMONAS_DATA_DIR`, runs Docker preflight checks, and selects the start mode from `MNEMONAS_IMAGE`: local images use a source build, while release image tags use `docker compose up -d --pull missing --no-build`. After `--start`, the script waits for the local `/health` endpoint so a created container is not treated as ready before the service responds. Use `--skip-health-check` only when the host cannot reach the Docker-published port locally. Binary archives from GitHub Releases include `docker-compose.yml` and `.env.example`, and the packaged template presets `MNEMONAS_IMAGE` to the GHCR image for the same release tag.
 
 If port 8080 is already used:
 
@@ -215,6 +215,12 @@ make help
 GOLANGCI_LINT=/path/to/golangci-lint make lint
 ```
 
+Go linting inherits the local Go toolchain environment by default. Override it only when automatic toolchain download is required:
+
+```bash
+GO_LINT_ENV="GOSUMDB=sum.golang.org GOTOOLCHAIN=auto" make lint
+```
+
 Use `SKIP_GOLANGCI_LINT=1` only for temporary local troubleshooting; do not skip Go static analysis before committing.
 
 ### Ports
@@ -263,7 +269,8 @@ Docker and systemd deployments expose only `8080` by default. Data plane ports `
 | [scripts/torture-test.sh](scripts/torture-test.sh) | Non-destructive deep test matrix |
 | [scripts/run-benchmark-isolated.sh](scripts/run-benchmark-isolated.sh) | Isolated benchmark runner used by `make bench` |
 | [scripts/benchmark.sh](scripts/benchmark.sh) | Benchmark an explicit service and storage root |
-| [scripts/fault-injection-test.sh](scripts/fault-injection-test.sh) | Destructive fault-injection test runner |
+| [scripts/run-fault-injection-isolated.sh](scripts/run-fault-injection-isolated.sh) | Isolated destructive fault-injection runner used by `make fault-injection` |
+| [scripts/fault-injection-test.sh](scripts/fault-injection-test.sh) | Low-level destructive fault-injection runner for explicit targets |
 | [scripts/setup-reverse-proxy.sh](scripts/setup-reverse-proxy.sh) | Public HTTPS reverse proxy setup and MnemoNAS backend hardening |
 
 ## License

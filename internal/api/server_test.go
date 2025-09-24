@@ -118,6 +118,7 @@ type fakeAlertMonitor struct {
 	lastConfig  alerts.Config
 	lastStats   *alerts.StorageStats
 	events      []alerts.EventPayload
+	eventCh     chan alerts.EventPayload
 	sendErr     error
 }
 
@@ -140,30 +141,60 @@ func (m *fakeAlertMonitor) LastStats() *alerts.StorageStats {
 
 func (m *fakeAlertMonitor) SendEvent(_ context.Context, event alerts.EventPayload) error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	if m.sendErr != nil {
+		m.mu.Unlock()
 		return m.sendErr
 	}
 	m.events = append(m.events, event)
+	eventCh := m.eventCh
+	m.mu.Unlock()
+	if eventCh != nil {
+		select {
+		case eventCh <- event:
+		default:
+		}
+	}
 	return nil
+}
+
+func (m *fakeAlertMonitor) eventNotifications() <-chan alerts.EventPayload {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.eventCh == nil {
+		m.eventCh = make(chan alerts.EventPayload, 16)
+	}
+	return m.eventCh
+}
+
+func fakeAlertEventByType(monitor *fakeAlertMonitor, eventType string) (alerts.EventPayload, bool) {
+	monitor.mu.Lock()
+	defer monitor.mu.Unlock()
+	for _, event := range monitor.events {
+		if event.Type == eventType {
+			return event, true
+		}
+	}
+	return alerts.EventPayload{}, false
 }
 
 func waitForFakeAlertEvent(t *testing.T, monitor *fakeAlertMonitor, eventType string) alerts.EventPayload {
 	t.Helper()
-	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) {
-		monitor.mu.Lock()
-		for _, event := range monitor.events {
+	eventCh := monitor.eventNotifications()
+	timer := time.NewTimer(time.Second)
+	defer timer.Stop()
+	for {
+		if event, ok := fakeAlertEventByType(monitor, eventType); ok {
+			return event
+		}
+		select {
+		case event := <-eventCh:
 			if event.Type == eventType {
-				monitor.mu.Unlock()
 				return event
 			}
+		case <-timer.C:
+			t.Fatalf("timed out waiting for alert event %q", eventType)
 		}
-		monitor.mu.Unlock()
-		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatalf("timed out waiting for alert event %q", eventType)
-	return alerts.EventPayload{}
 }
 
 func fakeAlertEventCount(monitor *fakeAlertMonitor) int {
@@ -270,6 +301,35 @@ func setupDataplaneClient(t *testing.T) *dataplane.Client {
 
 	t.Cleanup(func() { client.Close() })
 	return client
+}
+
+func fastUnavailableDataplaneConfig() *config.Config {
+	cfg := config.Default()
+	cfg.DataPlane.Timeout = 50 * time.Millisecond
+	cfg.DataPlane.MaxRetries = 0
+	return cfg
+}
+
+func setupSettingsServer(t *testing.T) (*Server, string) {
+	t.Helper()
+
+	tmpDir := t.TempDir()
+	settings := config.Default()
+	settings.Storage.Root = tmpDir
+	configPath := filepath.Join(tmpDir, "config.toml")
+	if err := settings.Save(configPath); err != nil {
+		t.Fatalf("Save(config) error: %v", err)
+	}
+
+	server, err := NewServer(zerolog.Nop(), &ServerConfig{
+		Config:     settings,
+		ConfigPath: configPath,
+	})
+	if err != nil {
+		t.Fatalf("NewServer() error: %v", err)
+	}
+
+	return server, tmpDir
 }
 
 func setupTestServer(t *testing.T) (*Server, *storage.FileSystem, string) {
@@ -498,6 +558,30 @@ func getVersionStore(t *testing.T, fs *storage.FileSystem) *versionstore.Store {
 	return store
 }
 
+func setTrashDeletedAt(t *testing.T, fs *storage.FileSystem, ctx context.Context, originalPath string, deletedAt time.Time) {
+	t.Helper()
+
+	store := getVersionStore(t, fs)
+	items, err := store.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash(%s) before timestamp update error: %v", originalPath, err)
+	}
+	for _, item := range items {
+		if item.OriginalPath != originalPath {
+			continue
+		}
+		if err := store.RemoveFromTrash(ctx, item.ID); err != nil {
+			t.Fatalf("RemoveFromTrash(%s) before timestamp update error: %v", item.ID, err)
+		}
+		item.DeletedAt = deletedAt
+		if err := store.AddToTrash(ctx, &item); err != nil {
+			t.Fatalf("AddToTrash(%s) after timestamp update error: %v", item.ID, err)
+		}
+		return
+	}
+	t.Fatalf("trash item for %s not found before timestamp update", originalPath)
+}
+
 func getVersioningPolicy(t *testing.T, fs *storage.FileSystem) *versionstore.VersioningPolicy {
 	t.Helper()
 	fsValue := reflect.ValueOf(fs).Elem()
@@ -653,7 +737,6 @@ func setupAuthServer(t *testing.T) (*Server, *storage.FileSystem, string, string
 		Config:         settings,
 		ConfigPath:     configPath,
 		ActivityRoot:   path.Join(tmpDir, "activity"),
-		DataplaneAddr:  testDataplaneAddr(),
 		AuthEnabled:    true,
 		AuthUsersFile:  usersFile,
 		AuthJWTSecret:  "test-secret",
@@ -665,6 +748,41 @@ func setupAuthServer(t *testing.T) (*Server, *storage.FileSystem, string, string
 	}
 
 	return server, fs, tmpDir, username, password
+}
+
+func setupAuthSettingsServer(t *testing.T) (*Server, string) {
+	t.Helper()
+
+	tmpDir := t.TempDir()
+	usersFile := path.Join(tmpDir, "users.json")
+	userStore, _, err := auth.NewUserStore(usersFile)
+	if err != nil {
+		t.Fatalf("NewUserStore() error: %v", err)
+	}
+
+	settings := config.Default()
+	settings.Storage.Root = tmpDir
+	settings.Auth.UsersFile = usersFile
+	configPath := filepath.Join(tmpDir, "config.toml")
+	if err := settings.Save(configPath); err != nil {
+		t.Fatalf("Save(config) error: %v", err)
+	}
+
+	server, err := NewServer(zerolog.Nop(), &ServerConfig{
+		Config:         settings,
+		ConfigPath:     configPath,
+		AuthEnabled:    true,
+		AuthUsersFile:  usersFile,
+		AuthUserStore:  userStore,
+		AuthJWTSecret:  "test-secret",
+		AuthAccessTTL:  15 * time.Minute,
+		AuthRefreshTTL: 24 * time.Hour,
+	})
+	if err != nil {
+		t.Fatalf("NewServer() error: %v", err)
+	}
+
+	return server, tmpDir
 }
 
 func setupAuthServerWithFeatures(t *testing.T, shareEnabled, favoritesEnabled bool) (*Server, *storage.FileSystem, string, string, string) {
@@ -727,7 +845,6 @@ func setupAuthServerWithFeatures(t *testing.T, shareEnabled, favoritesEnabled bo
 		Config:             settings,
 		ConfigPath:         configPath,
 		ActivityRoot:       path.Join(tmpDir, "activity"),
-		DataplaneAddr:      testDataplaneAddr(),
 		AuthEnabled:        true,
 		AuthUsersFile:      usersFile,
 		AuthJWTSecret:      "test-secret",
@@ -961,7 +1078,6 @@ func setupShareServerWithOptions(t *testing.T, shareEnabled bool, baseURL string
 		ActivityRoot:   path.Join(internalRoot, "activity"),
 		Config:         settings,
 		ConfigPath:     configPath,
-		DataplaneAddr:  testDataplaneAddr(),
 		ShareEnabled:   shareEnabled,
 		ShareStoreFile: shareStorePath,
 		ShareBaseURL:   baseURL,
@@ -1018,7 +1134,6 @@ func setupFavoritesPathSyncServer(t *testing.T) *Server {
 		ActivityRoot:       path.Join(internalRoot, "activity"),
 		Config:             settings,
 		ConfigPath:         configPath,
-		DataplaneAddr:      testDataplaneAddr(),
 		FavoritesEnabled:   true,
 		FavoritesStoreFile: path.Join(tmpDir, "favorites.json"),
 	})
@@ -1227,7 +1342,10 @@ func TestServer_ObservabilityEndpoints_BypassThrottle(t *testing.T) {
 }
 
 func TestServer_Health_DataplaneFailureDoesNotExposeInternalError(t *testing.T) {
-	server, err := NewServer(zerolog.Nop(), &ServerConfig{DataplaneAddr: "127.0.0.1:1"})
+	server, err := NewServer(zerolog.Nop(), &ServerConfig{
+		Config:        fastUnavailableDataplaneConfig(),
+		DataplaneAddr: "127.0.0.1:1",
+	})
 	if err != nil {
 		t.Fatalf("NewServer() error: %v", err)
 	}
@@ -1900,7 +2018,7 @@ func TestServer_UploadFile_RejectsWorkspaceRootPath(t *testing.T) {
 }
 
 func TestServer_UploadFile_EnforcesUserQuota(t *testing.T) {
-	server, fs, _, username, password := setupAuthServer(t)
+	server, fs, _, username, _ := setupAuthServer(t)
 	ctx := context.Background()
 	monitor := &fakeAlertMonitor{}
 	server.alertMonitor = monitor
@@ -1915,7 +2033,7 @@ func TestServer_UploadFile_EnforcesUserQuota(t *testing.T) {
 		t.Fatalf("WriteFile(existing) error: %v", err)
 	}
 	setUserQuotaForTest(t, server, username, 10)
-	token := loginAndGetAccessToken(t, server, username, password)
+	token := issueAccessTokenWithoutActivity(t, server, username)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/files/tester/token=quota-secret/new.txt", strings.NewReader("12345"))
 	req.Header.Set("Authorization", "Bearer "+token)
@@ -4238,7 +4356,6 @@ func TestServer_LoginRateLimitSendsThrottledAlertEvent(t *testing.T) {
 	if w.Code != http.StatusTooManyRequests {
 		t.Fatalf("post-lock status = %d, want %d", w.Code, http.StatusTooManyRequests)
 	}
-	time.Sleep(50 * time.Millisecond)
 	if got := fakeAlertEventCount(monitor); got != 1 {
 		t.Fatalf("expected login rate-limit alert to be throttled, got %d events", got)
 	}
@@ -7184,6 +7301,8 @@ func TestServer_Diagnostics_IncludesSanitizedAlertsStatus(t *testing.T) {
 	cfg.Alerts.TelegramEnabled = true
 	cfg.Alerts.TelegramBotToken = "123456:secret-token"
 	cfg.Alerts.TelegramChatID = "-1001234567890"
+	cfg.Alerts.DingTalkEnabled = true
+	cfg.Alerts.DingTalkWebhookURL = "https://oapi.dingtalk.com/robot/send?access_token=secret-token"
 	cfg.Alerts.EmailEnabled = true
 	cfg.Alerts.SMTPHost = "smtp.example.com"
 	cfg.Alerts.SMTPFrom = "alerts@example.com"
@@ -7225,6 +7344,9 @@ func TestServer_Diagnostics_IncludesSanitizedAlertsStatus(t *testing.T) {
 	if telegramConfigured, ok := payload.Data.Alerts["telegram_configured"].(bool); !ok || !telegramConfigured {
 		t.Fatalf("alerts.telegram_configured = %v, want true", payload.Data.Alerts["telegram_configured"])
 	}
+	if dingTalkConfigured, ok := payload.Data.Alerts["dingtalk_configured"].(bool); !ok || !dingTalkConfigured {
+		t.Fatalf("alerts.dingtalk_configured = %v, want true", payload.Data.Alerts["dingtalk_configured"])
+	}
 	if emailConfigured, ok := payload.Data.Alerts["email_configured"].(bool); !ok || !emailConfigured {
 		t.Fatalf("alerts.email_configured = %v, want true", payload.Data.Alerts["email_configured"])
 	}
@@ -7248,6 +7370,9 @@ func TestServer_Diagnostics_IncludesSanitizedAlertsStatus(t *testing.T) {
 	}
 	if _, ok := payload.Data.Alerts["telegram_bot_token"]; ok {
 		t.Fatalf("alerts diagnostics must not expose telegram_bot_token")
+	}
+	if _, ok := payload.Data.Alerts["dingtalk_webhook_url"]; ok {
+		t.Fatalf("alerts diagnostics must not expose dingtalk_webhook_url")
 	}
 	if _, ok := payload.Data.Alerts["smtp_password"]; ok {
 		t.Fatalf("alerts diagnostics must not expose smtp_password")
@@ -10458,7 +10583,7 @@ func TestServer_CopyFile_ReturnsConflictWhenDestinationExists(t *testing.T) {
 }
 
 func TestServer_CopyFile_EnforcesUserQuota(t *testing.T) {
-	server, fs, _, username, password := setupAuthServer(t)
+	server, fs, _, username, _ := setupAuthServer(t)
 	ctx := context.Background()
 
 	if err := fs.Mkdir(ctx, "/tester"); err != nil {
@@ -10471,7 +10596,7 @@ func TestServer_CopyFile_EnforcesUserQuota(t *testing.T) {
 		t.Fatalf("WriteFile(used) error: %v", err)
 	}
 	setUserQuotaForTest(t, server, username, 10)
-	token := loginAndGetAccessToken(t, server, username, password)
+	token := issueAccessTokenWithoutActivity(t, server, username)
 
 	body := `{"from":"/tester/src.txt","to":"/tester/copied.txt"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/files-copy", strings.NewReader(body))
@@ -13528,7 +13653,10 @@ func TestServer_Scrub_RejectsOversizedRequestBody(t *testing.T) {
 }
 
 func TestServer_Scrub_RejectsInvalidHashFilterBeforeDataplane(t *testing.T) {
-	server, err := NewServer(zerolog.Nop(), &ServerConfig{DataplaneAddr: "127.0.0.1:1"})
+	server, err := NewServer(zerolog.Nop(), &ServerConfig{
+		Config:        fastUnavailableDataplaneConfig(),
+		DataplaneAddr: "127.0.0.1:1",
+	})
 	if err != nil {
 		t.Fatalf("NewServer() error: %v", err)
 	}
@@ -15105,6 +15233,8 @@ func TestServer_DiagnosticsExport_IncludesSanitizedAlertsStatus(t *testing.T) {
 	cfg.Alerts.TelegramEnabled = true
 	cfg.Alerts.TelegramBotToken = "123456:secret-token"
 	cfg.Alerts.TelegramChatID = "-1001234567890"
+	cfg.Alerts.DingTalkEnabled = true
+	cfg.Alerts.DingTalkWebhookURL = "https://oapi.dingtalk.com/robot/send?access_token=secret-token"
 	cfg.Alerts.EmailEnabled = true
 	cfg.Alerts.SMTPHost = "smtp.example.com"
 	cfg.Alerts.SMTPPort = 587
@@ -15149,6 +15279,9 @@ func TestServer_DiagnosticsExport_IncludesSanitizedAlertsStatus(t *testing.T) {
 	if telegramConfigured, ok := payload.Alerts["telegram_configured"].(bool); !ok || !telegramConfigured {
 		t.Fatalf("alerts.telegram_configured = %v, want true", payload.Alerts["telegram_configured"])
 	}
+	if dingTalkConfigured, ok := payload.Alerts["dingtalk_configured"].(bool); !ok || !dingTalkConfigured {
+		t.Fatalf("alerts.dingtalk_configured = %v, want true", payload.Alerts["dingtalk_configured"])
+	}
 	if emailConfigured, ok := payload.Alerts["email_configured"].(bool); !ok || !emailConfigured {
 		t.Fatalf("alerts.email_configured = %v, want true", payload.Alerts["email_configured"])
 	}
@@ -15160,6 +15293,9 @@ func TestServer_DiagnosticsExport_IncludesSanitizedAlertsStatus(t *testing.T) {
 	}
 	if _, ok := payload.Alerts["telegram_bot_token"]; ok {
 		t.Fatalf("diagnostics export must not expose telegram_bot_token")
+	}
+	if _, ok := payload.Alerts["dingtalk_webhook_url"]; ok {
+		t.Fatalf("diagnostics export must not expose dingtalk_webhook_url")
 	}
 	for _, key := range []string{"smtp_host", "smtp_username", "smtp_password", "smtp_from", "smtp_to"} {
 		if _, ok := payload.Alerts[key]; ok {
@@ -17670,7 +17806,7 @@ func TestServer_UpdateSettings_RejectsDotSegmentScopedPaths(t *testing.T) {
 }
 
 func TestServer_UpdateSettings_NormalizesWebDAVPrefix(t *testing.T) {
-	server, _, tmpDir := setupTestServer(t)
+	server, tmpDir := setupSettingsServer(t)
 	server.configPath = path.Join(tmpDir, "config.toml")
 	if err := config.SaveSecrets(tmpDir, &config.Secrets{JWTSecret: "jwt", WebDAVPassword: "auto-pass"}); err != nil {
 		t.Fatalf("failed to save secrets: %v", err)
@@ -17704,7 +17840,7 @@ func TestServer_UpdateSettings_RejectsInvalidWebDAVPrefixCharacters(t *testing.T
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			server, _, tmpDir := setupTestServer(t)
+			server, tmpDir := setupSettingsServer(t)
 			server.configPath = path.Join(tmpDir, "config.toml")
 			originalPrefix := server.config.WebDAV.Prefix
 
@@ -17733,7 +17869,7 @@ func TestServer_UpdateSettings_RejectsInvalidWebDAVPrefixCharacters(t *testing.T
 }
 
 func TestServer_UpdateSettings_RejectsInvalidWebDAVAuthType(t *testing.T) {
-	server, _, tmpDir := setupTestServer(t)
+	server, tmpDir := setupSettingsServer(t)
 	server.configPath = path.Join(tmpDir, "config.toml")
 	originalAuthType := server.config.WebDAV.AuthType
 
@@ -17756,7 +17892,7 @@ func TestServer_UpdateSettings_RejectsInvalidWebDAVAuthType(t *testing.T) {
 }
 
 func TestServer_UpdateSettings_DefaultsBlankWebDAVAuthTypeToBasic(t *testing.T) {
-	server, _, tmpDir := setupTestServer(t)
+	server, tmpDir := setupSettingsServer(t)
 	server.configPath = path.Join(tmpDir, "config.toml")
 
 	var applied WebDAVRuntimeConfig
@@ -17786,7 +17922,7 @@ func TestServer_UpdateSettings_DefaultsBlankWebDAVAuthTypeToBasic(t *testing.T) 
 }
 
 func TestServer_UpdateSettings_AcceptsWebDAVUsersAuthType(t *testing.T) {
-	server, _, tmpDir, _, _ := setupAuthServer(t)
+	server, tmpDir := setupAuthSettingsServer(t)
 	server.configPath = path.Join(tmpDir, "config.toml")
 
 	var applied WebDAVRuntimeConfig
@@ -17861,7 +17997,7 @@ func TestServer_UpdateSettings_RejectsInvalidShareBaseURL(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			server, _, tmpDir := setupTestServer(t)
+			server, tmpDir := setupSettingsServer(t)
 			server.configPath = path.Join(tmpDir, "config.toml")
 			server.config.Share.BaseURL = "https://old.example.com"
 			server.storeConfig(server.config)
@@ -18065,10 +18201,14 @@ func TestServer_UpdateSettings_SerializesConcurrentRuntimeApply(t *testing.T) {
 		secondResponse <- doRequest(`{"webdav":{"enabled":true,"auth_type":"basic","username":"runtime-user","password":"second-pass"}}`)
 	}()
 
+	if server.settingsMu.TryLock() {
+		server.settingsMu.Unlock()
+		t.Fatal("expected first settings update to keep the settings lock while runtime apply is blocked")
+	}
 	select {
 	case <-secondEntered:
 		t.Fatal("expected second settings update to wait for the first runtime apply")
-	case <-time.After(200 * time.Millisecond):
+	default:
 	}
 
 	close(allowFirst)
@@ -18214,7 +18354,7 @@ func TestServer_UpdateSettings_RejectsWebDAVUsernameMatchingNonAdminUser(t *test
 }
 
 func TestServer_UpdateSettings_InvalidConfigDoesNotLeakOrMutate(t *testing.T) {
-	server, _, tmpDir := setupTestServer(t)
+	server, tmpDir := setupSettingsServer(t)
 	server.configPath = path.Join(tmpDir, "config.toml")
 	originalMin := server.config.DataPlane.CDC.MinChunkSize
 	originalAvg := server.config.DataPlane.CDC.AvgChunkSize
@@ -18243,7 +18383,7 @@ func TestServer_UpdateSettings_InvalidConfigDoesNotLeakOrMutate(t *testing.T) {
 }
 
 func TestServer_UpdateSettings_RejectsUnknownFields(t *testing.T) {
-	server, _, tmpDir := setupTestServer(t)
+	server, tmpDir := setupSettingsServer(t)
 	server.configPath = path.Join(tmpDir, "config.toml")
 	originalMaxAge := server.config.Storage.Retention.MaxAge
 
@@ -18267,7 +18407,7 @@ func TestServer_UpdateSettings_RejectsUnknownFields(t *testing.T) {
 }
 
 func TestServer_UpdateSettings_RejectsOversizedRequestBody(t *testing.T) {
-	server, _, tmpDir := setupTestServer(t)
+	server, tmpDir := setupSettingsServer(t)
 	server.configPath = path.Join(tmpDir, "config.toml")
 	originalPort := server.config.Server.Port
 
@@ -18289,7 +18429,7 @@ func TestServer_UpdateSettings_RejectsOversizedRequestBody(t *testing.T) {
 }
 
 func TestServer_UpdateSettings_InvalidDurationRejected(t *testing.T) {
-	server, _, tmpDir := setupTestServer(t)
+	server, tmpDir := setupSettingsServer(t)
 	server.configPath = path.Join(tmpDir, "config.toml")
 	originalMaxAge := server.config.Storage.Retention.MaxAge
 
@@ -18313,7 +18453,7 @@ func TestServer_UpdateSettings_InvalidDurationRejected(t *testing.T) {
 }
 
 func TestServer_UpdateSettings_NegativeMaxAgeRejected(t *testing.T) {
-	server, _, tmpDir := setupTestServer(t)
+	server, tmpDir := setupSettingsServer(t)
 	server.configPath = path.Join(tmpDir, "config.toml")
 	originalMaxAge := server.config.Storage.Retention.MaxAge
 
@@ -18336,7 +18476,7 @@ func TestServer_UpdateSettings_NegativeMaxAgeRejected(t *testing.T) {
 }
 
 func TestServer_UpdateSettings_NegativeMaxVersionsRejected(t *testing.T) {
-	server, _, tmpDir := setupTestServer(t)
+	server, tmpDir := setupSettingsServer(t)
 	server.configPath = path.Join(tmpDir, "config.toml")
 	originalMaxVersions := server.config.Storage.Retention.MaxVersions
 
@@ -18359,7 +18499,7 @@ func TestServer_UpdateSettings_NegativeMaxVersionsRejected(t *testing.T) {
 }
 
 func TestServer_UpdateSettings_NegativeGCIntervalRejected(t *testing.T) {
-	server, _, tmpDir := setupTestServer(t)
+	server, tmpDir := setupSettingsServer(t)
 	server.configPath = path.Join(tmpDir, "config.toml")
 	originalGCInterval := server.config.Storage.Retention.GCInterval
 
@@ -18382,7 +18522,7 @@ func TestServer_UpdateSettings_NegativeGCIntervalRejected(t *testing.T) {
 }
 
 func TestServer_UpdateSettings_InvalidPortRejected(t *testing.T) {
-	server, _, tmpDir := setupTestServer(t)
+	server, tmpDir := setupSettingsServer(t)
 	server.configPath = path.Join(tmpDir, "config.toml")
 	originalPort := server.config.Server.Port
 
@@ -18411,7 +18551,7 @@ func TestServer_UpdateSettings_UpdatesAlertsConfig(t *testing.T) {
 	monitor := &fakeAlertMonitor{}
 	server.alertMonitor = monitor
 
-	body := `{"alerts":{"enabled":true,"check_interval":"30m","threshold_pct":85,"critical_pct":92,"min_free_bytes":21474836480,"cooldown_period":"2h","webhook_url":"https://hooks.example.com/storage","webhook_method":"POST","webhook_headers":["Authorization: Bearer token","X-MnemoNAS: alerts"],"telegram_enabled":true,"telegram_bot_token":"123456:secret-token","telegram_chat_id":"-1001234567890","wecom_enabled":true,"wecom_webhook_url":"https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=secret-key","email_enabled":true,"smtp_host":"smtp.example.com","smtp_port":587,"smtp_username":"alerts","smtp_password":"secret","smtp_from":"MnemoNAS <alerts@example.com>","smtp_to":["admin@example.com"]}}`
+	body := `{"alerts":{"enabled":true,"check_interval":"30m","threshold_pct":85,"critical_pct":92,"min_free_bytes":21474836480,"cooldown_period":"2h","webhook_url":"https://hooks.example.com/storage","webhook_method":"POST","webhook_headers":["Authorization: Bearer token","X-MnemoNAS: alerts"],"telegram_enabled":true,"telegram_bot_token":"123456:secret-token","telegram_chat_id":"-1001234567890","wecom_enabled":true,"wecom_webhook_url":"https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=secret-key","dingtalk_enabled":true,"dingtalk_webhook_url":"https://oapi.dingtalk.com/robot/send?access_token=secret-token","email_enabled":true,"smtp_host":"smtp.example.com","smtp_port":587,"smtp_username":"alerts","smtp_password":"secret","smtp_from":"MnemoNAS <alerts@example.com>","smtp_to":["admin@example.com"]}}`
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/settings", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -18454,6 +18594,9 @@ func TestServer_UpdateSettings_UpdatesAlertsConfig(t *testing.T) {
 	if !server.config.Alerts.WeComEnabled || server.config.Alerts.WeComWebhookURL != "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=secret-key" {
 		t.Fatalf("unexpected WeCom alert config: %+v", server.config.Alerts)
 	}
+	if !server.config.Alerts.DingTalkEnabled || server.config.Alerts.DingTalkWebhookURL != "https://oapi.dingtalk.com/robot/send?access_token=secret-token" {
+		t.Fatalf("unexpected DingTalk alert config: %+v", server.config.Alerts)
+	}
 	if !server.config.Alerts.EmailEnabled || server.config.Alerts.SMTPHost != "smtp.example.com" || server.config.Alerts.SMTPPort != 587 {
 		t.Fatalf("unexpected email alert config: %+v", server.config.Alerts)
 	}
@@ -18463,7 +18606,7 @@ func TestServer_UpdateSettings_UpdatesAlertsConfig(t *testing.T) {
 	if monitor.updateCount != 1 {
 		t.Fatalf("expected alert monitor update once, got %d", monitor.updateCount)
 	}
-	if monitor.lastConfig.CheckInterval != 30*time.Minute || monitor.lastConfig.WebhookURL != "https://hooks.example.com/storage" || !monitor.lastConfig.TelegramEnabled || monitor.lastConfig.TelegramChatID != "-1001234567890" || !monitor.lastConfig.WeComEnabled || monitor.lastConfig.WeComWebhookURL != "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=secret-key" || !monitor.lastConfig.EmailEnabled {
+	if monitor.lastConfig.CheckInterval != 30*time.Minute || monitor.lastConfig.WebhookURL != "https://hooks.example.com/storage" || !monitor.lastConfig.TelegramEnabled || monitor.lastConfig.TelegramChatID != "-1001234567890" || !monitor.lastConfig.WeComEnabled || monitor.lastConfig.WeComWebhookURL != "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=secret-key" || !monitor.lastConfig.DingTalkEnabled || monitor.lastConfig.DingTalkWebhookURL != "https://oapi.dingtalk.com/robot/send?access_token=secret-token" || !monitor.lastConfig.EmailEnabled {
 		t.Fatalf("unexpected alert monitor config: %+v", monitor.lastConfig)
 	}
 }
@@ -18477,6 +18620,8 @@ func TestServer_SendTestAlert_SendsConfiguredChannels(t *testing.T) {
 	server.config.Alerts.TelegramChatID = "-1001234567890"
 	server.config.Alerts.WeComEnabled = true
 	server.config.Alerts.WeComWebhookURL = "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=secret-key"
+	server.config.Alerts.DingTalkEnabled = true
+	server.config.Alerts.DingTalkWebhookURL = "https://oapi.dingtalk.com/robot/send?access_token=secret-token"
 	server.config.Alerts.EmailEnabled = true
 	server.config.Alerts.SMTPHost = "smtp.example.com"
 	server.config.Alerts.SMTPPort = 587
@@ -18504,8 +18649,8 @@ func TestServer_SendTestAlert_SendsConfiguredChannels(t *testing.T) {
 		t.Fatalf("test alert timestamp location = %v, want UTC", event.Timestamp.Location())
 	}
 	channels, ok := event.Details["channels"].([]string)
-	if !ok || !reflect.DeepEqual(channels, []string{"webhook", "telegram", "wecom", "email"}) {
-		t.Fatalf("test alert channels = %#v, want webhook/telegram/wecom/email", event.Details["channels"])
+	if !ok || !reflect.DeepEqual(channels, []string{"webhook", "telegram", "wecom", "dingtalk", "email"}) {
+		t.Fatalf("test alert channels = %#v, want webhook/telegram/wecom/dingtalk/email", event.Details["channels"])
 	}
 	if event.Details["trigger"] != "manual_test" || event.Details["source"] != "settings" {
 		t.Fatalf("unexpected test alert details: %+v", event.Details)
@@ -18767,11 +18912,12 @@ func TestServer_UpdateSettings_PreservesRedactedWebhookHeaders(t *testing.T) {
 	server.config.Alerts.WebhookURL = "https://hooks.example.com/storage?token=secret-token"
 	server.config.Alerts.WebhookHeaders = []string{"Authorization: Bearer secret-token", "X-MnemoNAS: alerts"}
 	server.config.Alerts.WeComWebhookURL = "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=secret-key"
+	server.config.Alerts.DingTalkWebhookURL = "https://oapi.dingtalk.com/robot/send?access_token=secret-token"
 	server.storeConfig(server.config)
 	monitor := &fakeAlertMonitor{}
 	server.alertMonitor = monitor
 
-	body := `{"alerts":{"threshold_pct":86,"webhook_url":"<redacted>","webhook_headers":["Authorization: <redacted>","X-MnemoNAS: <redacted>"],"wecom_webhook_url":"<redacted>"}}`
+	body := `{"alerts":{"threshold_pct":86,"webhook_url":"<redacted>","webhook_headers":["Authorization: <redacted>","X-MnemoNAS: <redacted>"],"wecom_webhook_url":"<redacted>","dingtalk_webhook_url":"<redacted>"}}`
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/settings", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -18787,11 +18933,14 @@ func TestServer_UpdateSettings_PreservesRedactedWebhookHeaders(t *testing.T) {
 	if server.config.Alerts.WeComWebhookURL != "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=secret-key" {
 		t.Fatalf("WeCom webhook URL = %q, want preserved secret URL", server.config.Alerts.WeComWebhookURL)
 	}
+	if server.config.Alerts.DingTalkWebhookURL != "https://oapi.dingtalk.com/robot/send?access_token=secret-token" {
+		t.Fatalf("DingTalk webhook URL = %q, want preserved secret URL", server.config.Alerts.DingTalkWebhookURL)
+	}
 	expected := []string{"Authorization: Bearer secret-token", "X-MnemoNAS: alerts"}
 	if !reflect.DeepEqual(server.config.Alerts.WebhookHeaders, expected) {
 		t.Fatalf("webhook headers = %#v, want %#v", server.config.Alerts.WebhookHeaders, expected)
 	}
-	if monitor.updateCount != 1 || !reflect.DeepEqual(monitor.lastConfig.WebhookHeaders, expected) || monitor.lastConfig.WeComWebhookURL != "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=secret-key" {
+	if monitor.updateCount != 1 || !reflect.DeepEqual(monitor.lastConfig.WebhookHeaders, expected) || monitor.lastConfig.WeComWebhookURL != "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=secret-key" || monitor.lastConfig.DingTalkWebhookURL != "https://oapi.dingtalk.com/robot/send?access_token=secret-token" {
 		t.Fatalf("unexpected alert monitor headers: count=%d config=%#v", monitor.updateCount, monitor.lastConfig.WebhookHeaders)
 	}
 }
@@ -18841,6 +18990,30 @@ func TestServer_UpdateSettings_RejectsUnknownRedactedWeComWebhookURL(t *testing.
 	}
 	if server.config.Alerts.WeComWebhookURL != "" {
 		t.Fatalf("WeCom webhook URL changed after rejected update: %q", server.config.Alerts.WeComWebhookURL)
+	}
+}
+
+func TestServer_UpdateSettings_RejectsUnknownRedactedDingTalkWebhookURL(t *testing.T) {
+	server, _, tmpDir := setupTestServer(t)
+	server.configPath = path.Join(tmpDir, "config.toml")
+	server.config.Alerts.DingTalkWebhookURL = ""
+	server.storeConfig(server.config)
+
+	body := `{"alerts":{"dingtalk_webhook_url":"<redacted>"}}`
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/settings", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("update settings unknown redacted DingTalk webhook URL status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+	if !strings.Contains(w.Body.String(), "invalid alerts.dingtalk_webhook_url redacted placeholder") {
+		t.Fatalf("expected redacted DingTalk webhook URL validation message, got %s", w.Body.String())
+	}
+	if server.config.Alerts.DingTalkWebhookURL != "" {
+		t.Fatalf("DingTalk webhook URL changed after rejected update: %q", server.config.Alerts.DingTalkWebhookURL)
 	}
 }
 
@@ -19072,6 +19245,39 @@ func TestServer_UpdateSettings_InvalidAlertsWeComWebhookURLDoesNotUpdateAlertMon
 	}
 }
 
+func TestServer_UpdateSettings_InvalidAlertsDingTalkWebhookURLDoesNotUpdateAlertMonitor(t *testing.T) {
+	server, _, tmpDir := setupTestServer(t)
+	server.configPath = path.Join(tmpDir, "config.toml")
+	server.config.Alerts.DingTalkEnabled = true
+	server.config.Alerts.DingTalkWebhookURL = "https://oapi.dingtalk.com/robot/send?access_token=old"
+	server.storeConfig(server.config)
+	monitor := &fakeAlertMonitor{}
+	server.alertMonitor = monitor
+
+	body := `{"alerts":{"dingtalk_webhook_url":"ftp://oapi.dingtalk.com/robot/send?access_token=secret-token"}}`
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/settings", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("update settings invalid alerts DingTalk webhook URL status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+	if !strings.Contains(w.Body.String(), "invalid configuration") {
+		t.Fatalf("expected invalid configuration message, got %s", w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), "secret-token") || strings.Contains(w.Body.String(), "access_token=secret-token") {
+		t.Fatalf("invalid DingTalk webhook URL response leaked secret token: %s", w.Body.String())
+	}
+	if server.config.Alerts.DingTalkWebhookURL != "https://oapi.dingtalk.com/robot/send?access_token=old" {
+		t.Fatalf("expected invalid DingTalk webhook URL update to leave config unchanged, got %q", server.config.Alerts.DingTalkWebhookURL)
+	}
+	if monitor.updateCount != 0 {
+		t.Fatalf("expected invalid configuration not to update alert monitor, got %d updates", monitor.updateCount)
+	}
+}
+
 func TestServer_UpdateSettings_InvalidAlertsTelegramDoesNotUpdateAlertMonitor(t *testing.T) {
 	server, _, tmpDir := setupTestServer(t)
 	server.configPath = path.Join(tmpDir, "config.toml")
@@ -19135,7 +19341,7 @@ func TestServer_UpdateSettings_UpdatesTrashConfig(t *testing.T) {
 	if err := fs.Delete(ctx, "/old.txt"); err != nil {
 		t.Fatalf("Delete(old) error: %v", err)
 	}
-	time.Sleep(1100 * time.Millisecond)
+	setTrashDeletedAt(t, fs, ctx, "/old.txt", time.Now().Add(-time.Hour))
 	if err := fs.WriteFile(ctx, "/new.txt", bytes.NewReader([]byte("1234567"))); err != nil {
 		t.Fatalf("WriteFile(new) error: %v", err)
 	}
@@ -19720,6 +19926,8 @@ func TestServer_GetSettings_RedactsWebhookHeaderValues(t *testing.T) {
 	server.config.Alerts.WebhookHeaders = []string{"Authorization: Bearer secret-token", "X-MnemoNAS: alerts"}
 	server.config.Alerts.WeComEnabled = true
 	server.config.Alerts.WeComWebhookURL = "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=secret-key"
+	server.config.Alerts.DingTalkEnabled = true
+	server.config.Alerts.DingTalkWebhookURL = "https://oapi.dingtalk.com/robot/send?access_token=secret-token"
 	server.storeConfig(server.config)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/settings", nil)
@@ -19735,13 +19943,16 @@ func TestServer_GetSettings_RedactsWebhookHeaderValues(t *testing.T) {
 		Success bool `json:"success"`
 		Data    struct {
 			Alerts struct {
-				WebhookURL                string   `json:"webhook_url"`
-				WebhookURLConfigured      bool     `json:"webhook_url_configured"`
-				WebhookHeaders            []string `json:"webhook_headers"`
-				WebhookHeadersConfigured  bool     `json:"webhook_headers_configured"`
-				WeComEnabled              bool     `json:"wecom_enabled"`
-				WeComWebhookURL           string   `json:"wecom_webhook_url"`
-				WeComWebhookURLConfigured bool     `json:"wecom_webhook_url_configured"`
+				WebhookURL                   string   `json:"webhook_url"`
+				WebhookURLConfigured         bool     `json:"webhook_url_configured"`
+				WebhookHeaders               []string `json:"webhook_headers"`
+				WebhookHeadersConfigured     bool     `json:"webhook_headers_configured"`
+				WeComEnabled                 bool     `json:"wecom_enabled"`
+				WeComWebhookURL              string   `json:"wecom_webhook_url"`
+				WeComWebhookURLConfigured    bool     `json:"wecom_webhook_url_configured"`
+				DingTalkEnabled              bool     `json:"dingtalk_enabled"`
+				DingTalkWebhookURL           string   `json:"dingtalk_webhook_url"`
+				DingTalkWebhookURLConfigured bool     `json:"dingtalk_webhook_url_configured"`
 			} `json:"alerts"`
 		} `json:"data"`
 	}
@@ -19757,6 +19968,9 @@ func TestServer_GetSettings_RedactsWebhookHeaderValues(t *testing.T) {
 	if !resp.Data.Alerts.WeComEnabled || resp.Data.Alerts.WeComWebhookURL != redactedSettingsSecretValue || !resp.Data.Alerts.WeComWebhookURLConfigured {
 		t.Fatalf("unexpected WeCom URL redaction state: %+v", resp.Data.Alerts)
 	}
+	if !resp.Data.Alerts.DingTalkEnabled || resp.Data.Alerts.DingTalkWebhookURL != redactedSettingsSecretValue || !resp.Data.Alerts.DingTalkWebhookURLConfigured {
+		t.Fatalf("unexpected DingTalk URL redaction state: %+v", resp.Data.Alerts)
+	}
 	if !resp.Data.Alerts.WebhookHeadersConfigured {
 		t.Fatal("expected webhook_headers_configured=true")
 	}
@@ -19765,7 +19979,7 @@ func TestServer_GetSettings_RedactsWebhookHeaderValues(t *testing.T) {
 		t.Fatalf("webhook_headers = %#v, want %#v", resp.Data.Alerts.WebhookHeaders, expected)
 	}
 	body := w.Body.String()
-	for _, leaked := range []string{"token=secret-token", "Bearer secret-token", "X-MnemoNAS: alerts", "secret-key", "/cgi-bin/webhook/send"} {
+	for _, leaked := range []string{"token=secret-token", "Bearer secret-token", "X-MnemoNAS: alerts", "secret-key", "/cgi-bin/webhook/send", "access_token=secret-token", "/robot/send"} {
 		if strings.Contains(body, leaked) {
 			t.Fatalf("settings response leaked webhook header value %q: %s", leaked, body)
 		}

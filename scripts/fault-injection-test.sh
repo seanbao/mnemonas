@@ -34,6 +34,7 @@ INITIAL_PASSWORD_FILE="${INITIAL_PASSWORD_FILE:-$INTERNAL_DIR/initial-password.t
 OBJECTS_DIR="${OBJECTS_DIR:-$INTERNAL_DIR/objects}"
 INDEX_DB="${INDEX_DB:-$INTERNAL_DIR/index.db}"
 NASD_BIN="${NASD_BIN:-./bin/nasd}"
+NASD_PID_FILE="${NASD_PID_FILE:-}"
 TEST_DIR="/tmp/mnemonas-fault-$$"
 MNEMONAS_LIVE_FAULTS="${MNEMONAS_LIVE_FAULTS:-0}"
 FAULT_INJECTION_ASSUME_YES="${FAULT_INJECTION_ASSUME_YES:-0}"
@@ -136,6 +137,9 @@ require_live_fault_target() {
     fi
     require_destructive_storage_path "$OBJECTS_DIR" "OBJECTS_DIR"
     require_destructive_storage_path "$INDEX_DB" "INDEX_DB"
+    if [[ -n "$NASD_PID_FILE" ]]; then
+        require_destructive_storage_path "$NASD_PID_FILE" "NASD_PID_FILE"
+    fi
     if [[ ! -x "$NASD_BIN" ]]; then
         die "NASD_BIN is not executable: $NASD_BIN"
     fi
@@ -254,6 +258,15 @@ resolve_nasd_pids() {
         printf '%s\n' "$NASD_PID"
         return
     fi
+    if [[ -n "$NASD_PID_FILE" && -f "$NASD_PID_FILE" ]]; then
+        local pid
+        pid="$(sed -n '1p' "$NASD_PID_FILE")"
+        require_safe_pid "$pid" "NASD_PID_FILE contents"
+        if [[ -n "$pid" ]]; then
+            printf '%s\n' "$pid"
+            return
+        fi
+    fi
     if [[ -n "$FAULT_KILL_PATTERN" ]]; then
         pgrep -f -- "$FAULT_KILL_PATTERN" || true
         return
@@ -282,6 +295,9 @@ restart_target_nasd() {
         "$NASD_BIN" &
     fi
     NASD_PID=$!
+    if [[ -n "$NASD_PID_FILE" ]]; then
+        printf '%s\n' "$NASD_PID" > "$NASD_PID_FILE"
+    fi
     sleep 2
     SERVICE_WAS_KILLED=0
 }

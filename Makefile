@@ -1,4 +1,4 @@
-.PHONY: all build web-build test test-torture fault-injection clean deps dev proto proto-go proto-rust go-packages fmt lint workflows-check scripts-check docs-check security-check install-audit-tools docker e2e bench coverage check verify-changed help
+.PHONY: all build web-build test test-torture fault-injection fault-injection-live clean deps dev proto proto-go proto-rust go-packages fmt lint workflows-check scripts-check docs-check security-check install-audit-tools docker e2e bench coverage check verify-changed help
 
 # 版本信息
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
@@ -9,6 +9,7 @@ GO_PACKAGE_PATTERN ?= ./...
 GO_PACKAGE_EXCLUDE_PATTERN ?= /web/node_modules/|/proto$$
 GO_CMD_ENV ?= GOTOOLCHAIN=local
 GO_LIST_ENV ?= $(GO_CMD_ENV)
+GO_LINT_ENV ?= $(GO_CMD_ENV)
 GO_LINT_PACKAGES ?=
 GOLANGCI_LINT ?= golangci-lint
 SKIP_GOLANGCI_LINT ?= 0
@@ -28,7 +29,7 @@ GO_FUZZ_TARGETS ?= ./internal/api:FuzzValidatePath ./internal/api:FuzzPathWithin
 GO_TORTURE_PACKAGES ?= ./internal/api ./internal/auth ./internal/share ./internal/storage ./internal/versionstore ./internal/dataplane ./internal/workspace
 WEB_TORTURE_SPECS ?= files.spec.ts interaction-integrity.spec.ts layout-integrity.spec.ts runtime-integrity.spec.ts
 DEPLOYMENT_SCRIPTS := scripts/install-systemd.sh scripts/uninstall-systemd.sh scripts/mnemonas-doctor.sh scripts/mnemonas-docker-preflight.sh scripts/docker-quickstart.sh scripts/mnemonas-dataplane-start.sh scripts/test-systemd-install.sh scripts/test-systemd-uninstall.sh scripts/test-docker-start.sh scripts/test-docker-preflight.sh scripts/test-docker-quickstart.sh scripts/test-fault-injection-safety.sh scripts/test-e2e-safety.sh scripts/test-benchmark-safety.sh scripts/test-dataplane-start.sh scripts/test-dev-safety.sh scripts/test-reverse-proxy-safety.sh scripts/test-public-access-templates.sh scripts/test-release-package.sh scripts/test-with-test-dataplane-safety.sh scripts/docker-start.sh scripts/setup-reverse-proxy.sh scripts/dev.sh scripts/benchmark.sh
-ACCEPTANCE_SCRIPTS := scripts/e2e-test.sh scripts/fault-injection-test.sh scripts/torture-test.sh scripts/run-e2e-isolated.sh scripts/run-benchmark-isolated.sh scripts/with-test-dataplane.sh
+ACCEPTANCE_SCRIPTS := scripts/e2e-test.sh scripts/fault-injection-test.sh scripts/torture-test.sh scripts/run-e2e-isolated.sh scripts/run-benchmark-isolated.sh scripts/run-fault-injection-isolated.sh scripts/with-test-dataplane.sh
 DEV_SCRIPTS := scripts/verify-changed.sh scripts/check-commit-message.sh scripts/check-doc-links.sh scripts/test-commit-message.sh scripts/test-doc-links.sh
 WEB_SCRIPTS := web/scripts/start-e2e-backend.sh
 
@@ -74,7 +75,7 @@ help:
 	@echo "  fmt        - Format code (Go + Rust)"
 	@echo "  workflows-check - Validate GitHub Actions workflows"
 	@echo "  e2e        - Run isolated E2E acceptance tests"
-	@echo "  fault-injection - Run live destructive fault-injection tests"
+	@echo "  fault-injection - Run destructive fault-injection tests in an isolated backend"
 	@echo "  bench      - Run isolated performance benchmarks"
 	@echo "  proto      - Generate protobuf code"
 	@echo "  go-packages - Print resolved Go package list"
@@ -143,7 +144,7 @@ test:
 	cd web && npm run test:run
 
 # 测死矩阵：race、fuzz、property、浏览器运行时完整性扫描。
-# Live fault injection 默认跳过，避免误杀本机服务；显式传 RUN_LIVE_FAULTS=1 才执行。
+# 隔离故障注入默认跳过；显式传 RUN_LIVE_FAULTS=1 才执行。
 test-torture:
 	@echo "🔥 Running torture test matrix..."
 	@chmod +x scripts/torture-test.sh
@@ -183,7 +184,12 @@ e2e:
 	./scripts/run-e2e-isolated.sh
 
 fault-injection:
-	@echo "💥 Running live fault-injection tests against an explicit isolated target..."
+	@echo "💥 Running isolated fault-injection tests..."
+	@chmod +x scripts/fault-injection-test.sh scripts/run-fault-injection-isolated.sh
+	./scripts/run-fault-injection-isolated.sh
+
+fault-injection-live:
+	@echo "💥 Running raw live fault-injection tests against an explicit target..."
 	@chmod +x scripts/fault-injection-test.sh
 	./scripts/fault-injection-test.sh
 
@@ -225,7 +231,7 @@ lint:
 	if [ "$(SKIP_GOLANGCI_LINT)" = "1" ]; then \
 		echo "⚠️  Skipping golangci-lint because SKIP_GOLANGCI_LINT=1"; \
 	elif command -v "$(GOLANGCI_LINT)" >/dev/null 2>&1; then \
-		"$(GOLANGCI_LINT)" run $$lint_packages; \
+		env $(GO_LINT_ENV) "$(GOLANGCI_LINT)" run $$lint_packages; \
 	else \
 		echo "❌ golangci-lint not installed. Install golangci-lint, set GOLANGCI_LINT=/path/to/golangci-lint, or use SKIP_GOLANGCI_LINT=1 for a deliberate local-only skip." >&2; \
 		exit 1; \

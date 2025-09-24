@@ -75,7 +75,7 @@ const { defaultSettingsResponse, defaultSecurityCheckResponse } = vi.hoisted(() 
       webdav: { enabled: true, runtime_enabled: true, prefix: '/dav', read_only: false, auth_type: 'basic', username: 'admin' },
       share: { enabled: false, base_url: '' },
       favorites: { enabled: true, runtime_available: true },
-      alerts: { enabled: false, check_interval: '1h', threshold_pct: 90, critical_pct: 95, min_free_bytes: 10737418240, cooldown_period: '4h', webhook_url: '', webhook_method: 'POST', webhook_headers: [], telegram_enabled: false, telegram_bot_token_configured: false, telegram_chat_id: '', wecom_enabled: false, wecom_webhook_url: '', wecom_webhook_url_configured: false, email_enabled: false, smtp_host: '', smtp_port: 587, smtp_username: '', smtp_password_configured: false, smtp_from: '', smtp_to: [] },
+      alerts: { enabled: false, check_interval: '1h', threshold_pct: 90, critical_pct: 95, min_free_bytes: 10737418240, cooldown_period: '4h', webhook_url: '', webhook_method: 'POST', webhook_headers: [], telegram_enabled: false, telegram_bot_token_configured: false, telegram_chat_id: '', wecom_enabled: false, wecom_webhook_url: '', wecom_webhook_url_configured: false, dingtalk_enabled: false, dingtalk_webhook_url: '', dingtalk_webhook_url_configured: false, email_enabled: false, smtp_host: '', smtp_port: 587, smtp_username: '', smtp_password_configured: false, smtp_from: '', smtp_to: [] },
       maintenance: { scrub: { enabled: false, schedule_interval: '168h', retry_interval: '1h', max_retries: 1 } },
       disk_health: { enabled: false, check_interval: '1h', probe_timeout: '15s', cooldown_period: '4h', command: 'smartctl', temperature_warning_c: 50, temperature_critical_c: 60, media_wear_warning_percent: 80, media_wear_critical_percent: 100, devices: [] },
       cdc: { min_chunk_size: 262144, avg_chunk_size: 1048576, max_chunk_size: 4194304 },
@@ -440,7 +440,6 @@ describe('SettingsPage', () => {
   })
 
   it('passes an abort signal when saving settings', async () => {
-    const user = userEvent.setup({ writeToClipboard: false })
     render(<SettingsPage />)
 
     await waitFor(() => {
@@ -448,9 +447,8 @@ describe('SettingsPage', () => {
     })
 
     const portInput = screen.getByDisplayValue('8080')
-    await user.clear(portInput)
-    await user.type(portInput, '9000')
-    await user.click(screen.getByText('保存设置'))
+    fireEvent.change(portInput, { target: { value: '9000' } })
+    fireEvent.click(screen.getByText('保存设置'))
 
     await waitFor(() => {
       expect(mockUpdateSettings).toHaveBeenCalledWith(
@@ -1231,6 +1229,42 @@ describe('SettingsPage', () => {
       expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({
         title: '已应用反向代理推荐',
       }))
+    })
+
+    it('shows public share boundary block guidance without proxy repair action', async () => {
+      mockGetSecurityCheck.mockResolvedValueOnce({
+        success: true,
+        data: {
+          status: 'block',
+          generated_at: '2026-05-08T00:00:00Z',
+          checks: [
+            {
+              id: 'public_share_boundary',
+              status: 'block',
+              title: '公开分享浏览器边界异常',
+              message: 'backend raw public share boundary block detail',
+              details: {
+                share_enabled: true,
+                password_cookie_secure: true,
+                password_cookie_same_site: 'Strict',
+                metadata_vary_cookie: false,
+              },
+            },
+          ],
+          request: { scheme: 'https' },
+          config: { auth_enabled: true, trusted_proxy_hops: 1 },
+        },
+      })
+
+      render(<SettingsPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('公开分享浏览器边界异常')).toBeTruthy()
+        expect(screen.getByText('公开分享访问 cookie、失败限速或缓存边界未满足公网安全要求。')).toBeTruthy()
+      })
+      expect(screen.queryByText('backend raw public share boundary block detail')).toBeNull()
+      expect(screen.queryByText('分享功能已启用，但当前访问未被识别为 HTTPS；受密码保护的公开分享访问 cookie 不会带 Secure 标记。')).toBeNull()
+      expect(screen.queryByRole('button', { name: '应用代理推荐' })).toBeNull()
     })
 
     it('repairs unsafe share default policy from the security check', async () => {
@@ -2333,6 +2367,9 @@ describe('SettingsPage', () => {
       const wecomWebhookInput = await screen.findByPlaceholderText('https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=...')
       expect(wecomWebhookInput).toHaveAttribute('type', 'url')
 
+      const dingTalkWebhookInput = await screen.findByPlaceholderText('https://oapi.dingtalk.com/robot/send?access_token=...')
+      expect(dingTalkWebhookInput).toHaveAttribute('type', 'url')
+
       await openTab(user, '分享')
 
       const shareBaseUrlInput = await screen.findByPlaceholderText('https://nas.example.com')
@@ -2757,6 +2794,15 @@ describe('SettingsPage', () => {
 
       const review = await screen.findByLabelText('分享策略变更复核')
       expect(within(review).getByText('分享策略与已保存配置一致。')).toBeTruthy()
+      const initialCoverage = within(screen.getByLabelText('分享策略覆盖摘要'))
+      expect(initialCoverage.getByText('分享策略覆盖摘要')).toBeTruthy()
+      expect(initialCoverage.getByText('关注项 3')).toBeTruthy()
+      expect(initialCoverage.getByText('默认访问次数')).toBeTruthy()
+      expect(initialCoverage.getByText('不限制')).toBeTruthy()
+      expect(initialCoverage.getByText('路径策略')).toBeTruthy()
+      expect(initialCoverage.getAllByText('2 条').length).toBeGreaterThanOrEqual(1)
+      expect(initialCoverage.getByText('1 条路径策略未限制最长有效期。')).toBeTruthy()
+      expect(initialCoverage.getByText('1 条路径策略未限制访问次数。')).toBeTruthy()
 
       fireEvent.change(screen.getByPlaceholderText('https://nas.example.com'), {
         target: { value: 'https://new.example.com' },
@@ -2782,6 +2828,14 @@ describe('SettingsPage', () => {
       expect(within(updatedReview).getByText('必须设置密码 · 最长有效期: 12h')).toBeTruthy()
       expect(within(updatedReview).getByText('必须设置密码 · 最多访问: 5')).toBeTruthy()
       expect(within(updatedReview).getByText('必须设置密码 · 最多访问: 10')).toBeTruthy()
+      const updatedCoverage = within(screen.getByLabelText('分享策略覆盖摘要'))
+      expect(updatedCoverage.getByText('关注项 2')).toBeTruthy()
+      expect(updatedCoverage.getByText('默认访问次数')).toBeTruthy()
+      expect(updatedCoverage.getByText('30')).toBeTruthy()
+      expect(updatedCoverage.getByText('强制密码路径')).toBeTruthy()
+      expect(updatedCoverage.getAllByText('2 条').length).toBeGreaterThanOrEqual(1)
+      expect(updatedCoverage.getByText('完整限制路径')).toBeTruthy()
+      expect(updatedCoverage.getByText('0 条')).toBeTruthy()
     })
 
     it('rejects invalid share default policy values before saving', async () => {
@@ -2858,6 +2912,7 @@ describe('SettingsPage', () => {
       await user.click(screen.getByText('保存设置'))
 
       await waitFor(() => {
+        expect(screen.getByText('分享策略覆盖摘要暂不可用：第 1 行至少需要一个约束')).toBeTruthy()
         expect(mockAddToast).toHaveBeenCalledWith({
           title: '分享路径策略格式无效',
           description: '第 1 行至少需要一个约束',
@@ -3092,6 +3147,11 @@ describe('SettingsPage', () => {
         target: { value: 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=secret-key' },
       })
 
+      fireEvent.click(screen.getByRole('switch', { name: '启用钉钉通知' }))
+      fireEvent.change(screen.getByLabelText('钉钉 Webhook URL'), {
+        target: { value: 'https://oapi.dingtalk.com/robot/send?access_token=secret-token' },
+      })
+
       fireEvent.click(screen.getByRole('switch', { name: '启用邮件通知' }))
       fireEvent.change(screen.getByLabelText('SMTP 主机'), { target: { value: 'smtp.example.com' } })
       fireEvent.change(screen.getByLabelText('SMTP 端口'), { target: { value: '2525' } })
@@ -3119,6 +3179,8 @@ describe('SettingsPage', () => {
             telegram_chat_id: '-1001234567890',
             wecom_enabled: true,
             wecom_webhook_url: 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=secret-key',
+            dingtalk_enabled: true,
+            dingtalk_webhook_url: 'https://oapi.dingtalk.com/robot/send?access_token=secret-token',
             email_enabled: true,
             smtp_host: 'smtp.example.com',
             smtp_port: 2525,
@@ -3148,7 +3210,7 @@ describe('SettingsPage', () => {
       mockSendTestAlert.mockResolvedValueOnce({
         success: true,
         message: 'test alert sent',
-        data: { event_type: 'alert_test', channels: ['webhook', 'telegram', 'wecom', 'email'] },
+        data: { event_type: 'alert_test', channels: ['webhook', 'telegram', 'wecom', 'dingtalk', 'email'] },
       })
       render(<SettingsPage />)
 
@@ -3162,7 +3224,7 @@ describe('SettingsPage', () => {
       })
       expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({
         title: '测试提醒已发送',
-        description: '已发送到 Webhook / Telegram / 企业微信 / SMTP 邮件',
+        description: '已发送到 Webhook / Telegram / 企业微信 / 钉钉 / SMTP 邮件',
         color: 'success',
       }))
     })
@@ -3202,7 +3264,7 @@ describe('SettingsPage', () => {
       expect(mockSendTestAlert).not.toHaveBeenCalled()
       expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({
         title: '没有可用提醒通道',
-        description: '请至少配置 Webhook、Telegram、企业微信或邮件通道并保存后再发送测试提醒。',
+        description: '请至少配置 Webhook、Telegram、企业微信、钉钉或邮件通道并保存后再发送测试提醒。',
         color: 'warning',
       }))
     })
@@ -3232,7 +3294,7 @@ describe('SettingsPage', () => {
       expect(mockSendTestAlert).not.toHaveBeenCalled()
       expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({
         title: '没有可用提醒通道',
-        description: '请至少配置 Webhook、Telegram、企业微信或邮件通道并保存后再发送测试提醒。',
+        description: '请至少配置 Webhook、Telegram、企业微信、钉钉或邮件通道并保存后再发送测试提醒。',
         color: 'warning',
       }))
     })
@@ -3268,6 +3330,9 @@ describe('SettingsPage', () => {
             wecom_enabled: true,
             wecom_webhook_url: '<redacted>',
             wecom_webhook_url_configured: true,
+            dingtalk_enabled: true,
+            dingtalk_webhook_url: '<redacted>',
+            dingtalk_webhook_url_configured: true,
           },
         },
       })
@@ -3278,6 +3343,7 @@ describe('SettingsPage', () => {
       await waitFor(() => {
         expect(screen.getByPlaceholderText('https://hooks.example.com/alert')).toHaveValue('<redacted>')
         expect(screen.getByLabelText('企业微信 Webhook URL')).toHaveValue('<redacted>')
+        expect(screen.getByLabelText('钉钉 Webhook URL')).toHaveValue('<redacted>')
       })
 
       await user.click(screen.getByText('保存设置'))
@@ -3289,6 +3355,8 @@ describe('SettingsPage', () => {
             webhook_headers: ['Authorization: <redacted>'],
             wecom_enabled: true,
             wecom_webhook_url: '<redacted>',
+            dingtalk_enabled: true,
+            dingtalk_webhook_url: '<redacted>',
           }),
         }))
       })
@@ -3331,6 +3399,28 @@ describe('SettingsPage', () => {
         expect(mockAddToast).toHaveBeenCalledWith({
           title: '企业微信 Webhook 占位符无效',
           description: '只有服务端已保存的企业微信 Webhook URL 才能保留为 <redacted>；新增企业微信 Webhook 需要填写真实地址。',
+          color: 'danger',
+        })
+      })
+      expect(mockUpdateSettings).not.toHaveBeenCalled()
+    })
+
+    it('rejects redacted DingTalk webhook URL placeholders without a saved URL', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      render(<SettingsPage />)
+
+      await openTab(user, '高级')
+      await user.click(await screen.findByRole('switch', { name: '启用提醒' }))
+      await user.click(screen.getByRole('switch', { name: '启用钉钉通知' }))
+      fireEvent.change(screen.getByLabelText('钉钉 Webhook URL'), {
+        target: { value: '<redacted>' },
+      })
+      await user.click(screen.getByText('保存设置'))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '钉钉 Webhook 占位符无效',
+          description: '只有服务端已保存的钉钉 Webhook URL 才能保留为 <redacted>；新增钉钉 Webhook 需要填写真实地址。',
           color: 'danger',
         })
       })
@@ -3389,6 +3479,10 @@ describe('SettingsPage', () => {
       fireEvent.change(screen.getByLabelText('企业微信 Webhook URL'), {
         target: { value: 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=secret-key' },
       })
+      fireEvent.click(screen.getByRole('switch', { name: '启用钉钉通知' }))
+      fireEvent.change(screen.getByLabelText('钉钉 Webhook URL'), {
+        target: { value: 'https://oapi.dingtalk.com/robot/send?access_token=secret-token' },
+      })
       fireEvent.click(screen.getByRole('switch', { name: '启用邮件通知' }))
       fireEvent.change(screen.getByLabelText('SMTP 主机'), {
         target: { value: 'smtp.example.com' },
@@ -3412,6 +3506,7 @@ describe('SettingsPage', () => {
             webhook_headers: ['Authorization: Bearer secret-token', 'X-Api-Key: api-secret'],
             telegram_bot_token: '123456:secret-token',
             wecom_webhook_url: 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=secret-key',
+            dingtalk_webhook_url: 'https://oapi.dingtalk.com/robot/send?access_token=secret-token',
             smtp_password: 'smtp-secret',
           }),
         }))
@@ -3425,8 +3520,10 @@ describe('SettingsPage', () => {
       await waitFor(() => {
         expect(screen.queryByDisplayValue('https://hooks.example.com/secret-token')).toBeNull()
         expect(screen.queryByDisplayValue('https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=secret-key')).toBeNull()
+        expect(screen.queryByDisplayValue('https://oapi.dingtalk.com/robot/send?access_token=secret-token')).toBeNull()
         expect(screen.getByPlaceholderText('https://hooks.example.com/alert')).toHaveValue('<redacted>')
         expect(screen.getByLabelText('企业微信 Webhook URL')).toHaveValue('<redacted>')
+        expect(screen.getByLabelText('钉钉 Webhook URL')).toHaveValue('<redacted>')
         const headersInput = screen.getByLabelText('Webhook 自定义 Header') as HTMLTextAreaElement
         expect(headersInput.value).toContain('<redacted>')
         expect(headersInput.value).not.toContain('secret-token')

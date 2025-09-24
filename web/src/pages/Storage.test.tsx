@@ -238,8 +238,10 @@ describe('StoragePage', () => {
       render(<StoragePage />)
 
       await waitFor(() => {
-        const progressBar = document.querySelector('[class*="flow-line"], [class*="bg-accent-primary"]')
+        const progressBar = screen.getByRole('progressbar', { name: '存储使用率' })
         expect(progressBar).toBeTruthy()
+        expect(progressBar).toHaveAttribute('aria-valuenow', '25')
+        expect(progressBar).toHaveAttribute('aria-valuetext', '25.0% 已用')
       })
     })
 
@@ -265,8 +267,8 @@ describe('StoragePage', () => {
       render(<StoragePage />)
 
       await waitFor(() => {
-        expect(screen.getByText('存储空间严重不足')).toBeTruthy()
-        expect(screen.getByText(/尽快清理回收站/)).toBeTruthy()
+        expect(screen.getAllByText('存储空间严重不足').length).toBeGreaterThanOrEqual(1)
+        expect(screen.getAllByText(/尽快清理回收站/).length).toBeGreaterThanOrEqual(1)
       })
     })
 
@@ -281,8 +283,67 @@ describe('StoragePage', () => {
       render(<StoragePage />)
 
       await waitFor(() => {
-        expect(screen.getByText('存储空间偏紧')).toBeTruthy()
-        expect(screen.getByText(/建议开启提醒/)).toBeTruthy()
+        expect(screen.getAllByText('存储空间偏紧').length).toBeGreaterThanOrEqual(1)
+        expect(screen.getAllByText(/建议开启提醒/).length).toBeGreaterThanOrEqual(1)
+      })
+    })
+
+    it('summarizes storage risks for administrator review', async () => {
+      render(<StoragePage />)
+
+      await waitFor(() => {
+        const summary = within(screen.getByLabelText('存储健康摘要'))
+        expect(summary.getByText('需要复核')).toBeTruthy()
+        expect(summary.getByText('未配置目录配额')).toBeTruthy()
+        expect(summary.getAllByText(/为家庭共享、媒体库或团队目录配置明确上限/).length).toBeGreaterThanOrEqual(2)
+        expect(summary.getByText('建议处理: 为家庭共享、媒体库或团队目录配置明确上限')).toBeTruthy()
+        expect(summary.getByText('容量：空间充足')).toBeTruthy()
+        expect(summary.getByText('校验：已支持')).toBeTruthy()
+      })
+    })
+
+    it('surfaces critical storage risk when capacity and quota boundaries fail', async () => {
+      mockGetStorageStats.mockResolvedValue({
+        ...mockStats,
+        diskAvailable: 512 * 1024 * 1024,
+        diskUsed: 20937965568,
+        diskUsageRatio: 0.975,
+        diskFilesystemType: 'ext4',
+        diskNativeDataChecksumSupport: false,
+        directoryQuotaStatsAvailable: true,
+        directoryQuotas: [
+          {
+            path: '/media',
+            quotaBytes: 1073741824,
+            usedBytes: 1610612736,
+            availableBytes: 0,
+            usageRatio: 1.5,
+            exists: true,
+            status: 'exceeded',
+          },
+          {
+            path: '/archive',
+            quotaBytes: 1073741824,
+            usedBytes: 1046898278,
+            availableBytes: 1678546,
+            usageRatio: 0.975,
+            exists: true,
+            status: 'warning',
+          },
+        ],
+      })
+
+      render(<StoragePage />)
+
+      await waitFor(() => {
+        const summary = within(screen.getByLabelText('存储健康摘要'))
+        expect(summary.getByText('需立即处理')).toBeTruthy()
+        expect(summary.getByText('存储空间严重不足')).toBeTruthy()
+        expect(summary.getByText('建议使用 ZFS/Btrfs')).toBeTruthy()
+        expect(summary.getByText('1 个目录已达配额上限')).toBeTruthy()
+        expect(summary.getByText('1 个目录接近配额上限')).toBeTruthy()
+        expect(summary.getByText('建议处理: 先清理回收站和临时数据，再安排扩容或迁移；保留独立备份，并定期运行完整性检查 等 4 步')).toBeTruthy()
+        expect(summary.getByText('配额异常：2 个')).toBeTruthy()
       })
     })
   })
@@ -409,6 +470,7 @@ describe('StoragePage', () => {
       })
       expect(screen.queryByText('数据校验能力')).toBeNull()
       expect(screen.queryByText('挂载选项')).toBeNull()
+      expect(screen.queryByText('存储健康摘要')).toBeNull()
       expect(screen.queryByRole('button', { name: '复制存储摘要' })).toBeNull()
     })
 
@@ -422,8 +484,8 @@ describe('StoragePage', () => {
       render(<StoragePage />)
 
       await waitFor(() => {
-        expect(screen.getByText('建议使用 ZFS/Btrfs')).toBeTruthy()
-        expect(screen.getByText(/当前未检测到底层数据校验/)).toBeTruthy()
+        expect(screen.getAllByText('建议使用 ZFS/Btrfs').length).toBeGreaterThanOrEqual(1)
+        expect(screen.getAllByText(/当前未检测到底层数据校验/).length).toBeGreaterThanOrEqual(1)
       })
     })
 
@@ -460,7 +522,7 @@ describe('StoragePage', () => {
 
       await waitFor(() => {
         expect(screen.getByText('目录配额')).toBeTruthy()
-        expect(screen.getByText('未配置目录配额')).toBeTruthy()
+        expect(screen.getAllByText('未配置目录配额').length).toBeGreaterThanOrEqual(1)
         expect(screen.getByText(/避免单个目录持续占满存储空间/)).toBeTruthy()
         const quotaExample = screen.getByText((content, element) => (
           element?.tagName.toLowerCase() === 'code' && content.includes('/team 2 GB')
@@ -514,6 +576,9 @@ describe('StoragePage', () => {
         expect(screen.getByText('/team')).toBeTruthy()
         expect(screen.getAllByText('/archive').length).toBeGreaterThanOrEqual(1)
         expect(screen.getAllByText('/missing').length).toBeGreaterThanOrEqual(1)
+        const teamQuotaProgress = screen.getByRole('progressbar', { name: '/team 目录配额使用率' })
+        expect(teamQuotaProgress).toHaveAttribute('aria-valuenow', '50')
+        expect(teamQuotaProgress).toHaveAttribute('aria-valuetext', '50.0% 已用，剩余 1 GB，正常')
         const quotaSummary = within(screen.getByLabelText('目录配额汇总'))
         expect(quotaSummary.getByText('配额目录')).toBeTruthy()
         expect(quotaSummary.getByText('3 个')).toBeTruthy()
@@ -522,10 +587,10 @@ describe('StoragePage', () => {
         expect(quotaSummary.getByText('1.97 GB')).toBeTruthy()
         expect(quotaSummary.getByText('/ 3.5 GB · 56.4%')).toBeTruthy()
         expect(quotaSummary.getByText('建议复核增长较快目录')).toBeTruthy()
-        expect(quotaSummary.getByText('已超限 0 个 · 路径不存在 1 个')).toBeTruthy()
+        expect(quotaSummary.getByText('接近上限 1 个 · 已超限 0 个 · 路径不存在 1 个')).toBeTruthy()
         const quotaAttention = within(screen.getByLabelText('目录配额关注清单'))
         expect(quotaAttention.getByText('目录配额关注清单')).toBeTruthy()
-        expect(quotaAttention.getByText('2 / 3 个需复核')).toBeTruthy()
+        expect(quotaAttention.getByText('显示 2 / 2 个需复核')).toBeTruthy()
         expect(quotaAttention.getByText('复核近期增长，并确认是否需要扩容或归档。')).toBeTruthy()
         expect(quotaAttention.getByText('创建目标目录，或删除不再使用的配额配置。')).toBeTruthy()
         expect(screen.getByText('正常')).toBeTruthy()
@@ -534,6 +599,168 @@ describe('StoragePage', () => {
         expect(screen.getByText('50.0%')).toBeTruthy()
         expect(screen.getAllByText('97.5%').length).toBeGreaterThanOrEqual(1)
         expect(screen.getByText('路径不存在')).toBeTruthy()
+      })
+    })
+
+    it('copies a directory quota summary for administrator review', async () => {
+      const user = userEvent.setup()
+      const writeText = vi.fn().mockResolvedValue(undefined)
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: { writeText },
+      })
+      mockGetStorageStats.mockResolvedValue({
+        ...mockStats,
+        directoryQuotaStatsAvailable: true,
+        directoryQuotas: [
+          {
+            path: '/team',
+            quotaBytes: 2147483648,
+            usedBytes: 1073741824,
+            availableBytes: 1073741824,
+            usageRatio: 0.5,
+            exists: true,
+            status: 'normal',
+          },
+          {
+            path: '/archive',
+            quotaBytes: 1073741824,
+            usedBytes: 1046898278,
+            availableBytes: 1678546,
+            usageRatio: 0.975,
+            exists: true,
+            status: 'warning',
+          },
+          {
+            path: '/missing',
+            quotaBytes: 536870912,
+            usedBytes: 0,
+            availableBytes: 536870912,
+            usageRatio: 0,
+            exists: false,
+            status: 'missing',
+          },
+        ],
+      })
+
+      render(<StoragePage />)
+
+      const copyButton = await screen.findByRole('button', { name: '复制配额摘要' })
+      await user.click(copyButton)
+
+      await waitFor(() => {
+        expect(writeText).toHaveBeenCalledTimes(1)
+      })
+      const report = writeText.mock.calls[0]?.[0] as string
+      expect(report).toContain('目录配额摘要')
+      expect(report).toContain('配额目录: 3 个')
+      expect(report).toContain('需复核: 2 个')
+      expect(report).toContain('路径 | 状态 | 用量 | 剩余 | 占比 | 存在状态 | 建议处理')
+      expect(report).toContain('/archive | 接近上限 | 998.4 MB / 1 GB | 1.6 MB | 97.5%')
+      expect(report).toContain('/missing | 目录未创建 | 0 B / 512 MB | 512 MB | 0.0%')
+      expect(report).toContain('创建目标目录，或删除不再使用的配额配置。')
+      expect(mockAddToast).toHaveBeenCalledWith({ title: '目录配额摘要已复制', color: 'success' })
+    })
+
+    it('filters directory quota cards to attention items', async () => {
+      const user = userEvent.setup()
+      mockGetStorageStats.mockResolvedValue({
+        ...mockStats,
+        directoryQuotaStatsAvailable: true,
+        directoryQuotas: [
+          {
+            path: '/team',
+            quotaBytes: 2147483648,
+            usedBytes: 1073741824,
+            availableBytes: 1073741824,
+            usageRatio: 0.5,
+            exists: true,
+            status: 'normal',
+          },
+          {
+            path: '/archive',
+            quotaBytes: 1073741824,
+            usedBytes: 1046898278,
+            availableBytes: 1678546,
+            usageRatio: 0.975,
+            exists: true,
+            status: 'warning',
+          },
+          {
+            path: '/missing',
+            quotaBytes: 536870912,
+            usedBytes: 0,
+            availableBytes: 536870912,
+            usageRatio: 0,
+            exists: false,
+            status: 'missing',
+          },
+        ],
+      })
+
+      render(<StoragePage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('/team')).toBeTruthy()
+        expect(screen.getByRole('group', { name: '目录配额筛选' })).toBeTruthy()
+      })
+
+      await user.click(screen.getByRole('button', { name: '配额关注' }))
+
+      await waitFor(() => {
+        expect(screen.queryByText('/team')).toBeNull()
+        expect(screen.getAllByText('/archive').length).toBeGreaterThanOrEqual(1)
+        expect(screen.getAllByText('/missing').length).toBeGreaterThanOrEqual(1)
+      })
+
+      await user.click(screen.getByRole('button', { name: '全部目录' }))
+
+      await waitFor(() => {
+        expect(screen.getByText('/team')).toBeTruthy()
+      })
+    })
+
+    it('shows an empty state when the attention filter has no matching directory quota', async () => {
+      const user = userEvent.setup()
+      mockGetStorageStats.mockResolvedValue({
+        ...mockStats,
+        directoryQuotaStatsAvailable: true,
+        directoryQuotas: [
+          {
+            path: '/team',
+            quotaBytes: 2147483648,
+            usedBytes: 1073741824,
+            availableBytes: 1073741824,
+            usageRatio: 0.5,
+            exists: true,
+            status: 'normal',
+          },
+          {
+            path: '/media',
+            quotaBytes: 4294967296,
+            usedBytes: 1073741824,
+            availableBytes: 3221225472,
+            usageRatio: 0.25,
+            exists: true,
+            status: 'normal',
+          },
+        ],
+      })
+
+      render(<StoragePage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('/team')).toBeTruthy()
+        expect(screen.getByText('/media')).toBeTruthy()
+      })
+
+      await user.click(screen.getByRole('button', { name: '配额关注' }))
+
+      await waitFor(() => {
+        expect(screen.getByText('暂无配额关注目录')).toBeTruthy()
+        expect(screen.getByText('所有已配置目录配额当前都处于正常范围。')).toBeTruthy()
+        expect(screen.queryByText('/team')).toBeNull()
+        expect(screen.queryByText('/media')).toBeNull()
       })
     })
 
@@ -578,6 +805,77 @@ describe('StoragePage', () => {
         const quotaAttention = screen.getByLabelText('目录配额关注清单')
         expect(quotaAttention.textContent).toMatch(/已达上限[\s\S]*\/media[\s\S]*目录未创建[\s\S]*\/missing[\s\S]*接近上限[\s\S]*\/archive/)
         expect(within(quotaAttention).getByText('清理目录内容、提高配额，或迁移部分数据。')).toBeTruthy()
+      })
+    })
+
+    it('shows how many attention items are currently visible when the list is truncated', async () => {
+      mockGetStorageStats.mockResolvedValue({
+        ...mockStats,
+        directoryQuotaStatsAvailable: true,
+        directoryQuotas: [
+          {
+            path: '/media',
+            quotaBytes: 1073741824,
+            usedBytes: 1610612736,
+            availableBytes: 0,
+            usageRatio: 1.5,
+            exists: true,
+            status: 'exceeded',
+          },
+          {
+            path: '/photos',
+            quotaBytes: 1073741824,
+            usedBytes: 1577058304,
+            availableBytes: 0,
+            usageRatio: 1.47,
+            exists: true,
+            status: 'exceeded',
+          },
+          {
+            path: '/missing-a',
+            quotaBytes: 536870912,
+            usedBytes: 0,
+            availableBytes: 536870912,
+            usageRatio: 0,
+            exists: false,
+            status: 'missing',
+          },
+          {
+            path: '/missing-b',
+            quotaBytes: 536870912,
+            usedBytes: 0,
+            availableBytes: 536870912,
+            usageRatio: 0,
+            exists: false,
+            status: 'missing',
+          },
+          {
+            path: '/archive',
+            quotaBytes: 1073741824,
+            usedBytes: 1046898278,
+            availableBytes: 1678546,
+            usageRatio: 0.975,
+            exists: true,
+            status: 'warning',
+          },
+          {
+            path: '/team',
+            quotaBytes: 1073741824,
+            usedBytes: 1009317315,
+            availableBytes: 64466309,
+            usageRatio: 0.94,
+            exists: true,
+            status: 'warning',
+          },
+        ],
+      })
+
+      render(<StoragePage />)
+
+      await waitFor(() => {
+        const quotaAttention = screen.getByLabelText('目录配额关注清单')
+        expect(within(quotaAttention).getByText('显示 5 / 6 个需复核')).toBeTruthy()
+        expect(within(quotaAttention).queryByText('/team')).toBeNull()
       })
     })
 

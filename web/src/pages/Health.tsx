@@ -27,6 +27,7 @@ import { GENERIC_ACTION_ERROR_DESCRIPTION, GENERIC_LOAD_ERROR_DESCRIPTION, getUs
 import { getDiskHealthDeviceDisplayMessage } from '@/lib/diskHealthMessages'
 import { PageHeader } from '@/components/ui/PageHeader'
 import { EmptyState } from '@/components/ui/EmptyState'
+import { StatCard } from '@/components/ui/StatCard'
 import { useUser } from '@/stores/auth'
 
 function StatusIndicator({ 
@@ -205,7 +206,7 @@ function getAlertsPresentation(alerts: DiagnosticsInfo['alerts']): {
   const notificationChannels = getAlertNotificationChannels(alerts)
   const notificationText = notificationChannels.length > 0
     ? `通知通道已配置：${notificationChannels.join('、')}。`
-    : '如需外部通知，请在设置中配置 Webhook、Telegram、企业微信或邮件。'
+    : '如需外部通知，请在设置中配置 Webhook、Telegram、企业微信、钉钉或邮件。'
 
   return {
     icon: BellRing,
@@ -226,6 +227,9 @@ function getAlertNotificationChannels(alerts: NonNullable<DiagnosticsInfo['alert
   }
   if (alerts.wecomConfigured) {
     channels.push('企业微信')
+  }
+  if (alerts.dingTalkConfigured) {
+    channels.push('钉钉')
   }
   if (alerts.emailConfigured) {
     channels.push('邮件')
@@ -522,6 +526,9 @@ export function HealthPage() {
   const storageStatsAvailable = areStorageStatsAvailable(stats)
   const diskStatsAvailable = areDiskStatsAvailable(stats)
   const diskUsagePercent = diskStatsAvailable ? clampUsagePercent(stats?.diskUsageRatio) : undefined
+  const storageDetailProgressValueText = diskStatsAvailable
+    ? `${formatUsagePercent(stats?.diskUsageRatio)} 已用`
+    : storageStatsAvailable ? '磁盘容量统计不可用，仅显示 CAS 数据' : '统计不可用'
   const diskFilesystemType = stats?.diskFilesystemType ?? diagnostics?.filesystem?.diskFilesystemType
   const diskNativeDataChecksumSupport = stats?.diskNativeDataChecksumSupport ?? diagnostics?.filesystem?.diskNativeDataChecksumSupport
   const filesystemPresentation = diskStatsAvailable
@@ -782,26 +789,17 @@ export function HealthPage() {
       )}
 
       {/* Stats Grid */}
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+      <div className="grid grid-cols-2 gap-2 sm:gap-3 lg:grid-cols-4">
         {statsCards.map((stat) => (
-          <div key={stat.title} className="stat-card">
-            <div className="relative">
-              <div className="flex items-start justify-between">
-                <div>
-                  <p className="text-default-500 text-sm">{stat.title}</p>
-                  <div className="mt-1 flex items-baseline gap-1">
-                    <span className="data-value-large">{stat.value}</span>
-                  </div>
-                  {stat.subtitle && (
-                    <p className="text-default-500 mt-1 text-xs">{stat.subtitle}</p>
-                  )}
-                </div>
-                <div className="gradient-meridian-subtle rounded-lg p-2.5">
-                  <stat.icon className="text-accent-primary h-5 w-5" />
-                </div>
-              </div>
-            </div>
-          </div>
+          <StatCard
+            key={stat.title}
+            title={stat.title}
+            value={stat.value}
+            subtitle={stat.subtitle}
+            icon={stat.icon}
+            tone="primary"
+            density="compact"
+          />
         ))}
       </div>
 
@@ -836,6 +834,7 @@ export function HealthPage() {
                   color="primary"
                   className="h-2"
                   aria-label="磁盘使用"
+                  aria-valuetext={storageDetailProgressValueText}
                 />
               ) : storageStatsAvailable ? (
                 <Progress 
@@ -843,9 +842,16 @@ export function HealthPage() {
                   color="primary" 
                   className="h-2"
                   aria-label="存储使用"
+                  aria-valuetext={storageDetailProgressValueText}
                 />
               ) : (
-                <div className="h-2 rounded-full bg-content2/50" aria-label="存储使用" />
+                <Progress
+                  value={0}
+                  color="primary"
+                  className="h-2 opacity-60"
+                  aria-label="存储使用"
+                  aria-valuetext={storageDetailProgressValueText}
+                />
               )}
               <p className="text-xs text-default-400 mt-2">
                 {diskStatsAvailable

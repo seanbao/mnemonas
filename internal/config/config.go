@@ -308,27 +308,29 @@ type FavoritesConfig struct {
 
 // AlertsConfig holds storage space alerting configuration
 type AlertsConfig struct {
-	Enabled          bool          `toml:"enabled"`            // Enable storage alerts
-	CheckInterval    time.Duration `toml:"check_interval"`     // How often to check (default 1h)
-	ThresholdPct     float64       `toml:"threshold_pct"`      // Alert when usage exceeds this % (default 90)
-	CriticalPct      float64       `toml:"critical_pct"`       // Critical alert threshold (default 95)
-	MinFreeBytes     uint64        `toml:"min_free_bytes"`     // Alert when free space < this (default 10GB)
-	CooldownPeriod   time.Duration `toml:"cooldown_period"`    // Min time between alerts (default 4h)
-	WebhookURL       string        `toml:"webhook_url"`        // Webhook URL for notifications
-	WebhookMethod    string        `toml:"webhook_method"`     // POST or GET (default POST)
-	WebhookHeaders   []string      `toml:"webhook_headers"`    // Additional headers (key:value format)
-	TelegramEnabled  bool          `toml:"telegram_enabled"`   // Enable Telegram notifications
-	TelegramBotToken string        `toml:"telegram_bot_token"` // Telegram bot token
-	TelegramChatID   string        `toml:"telegram_chat_id"`   // Telegram chat ID or @channel
-	WeComEnabled     bool          `toml:"wecom_enabled"`      // Enable WeCom group robot notifications
-	WeComWebhookURL  string        `toml:"wecom_webhook_url"`  // WeCom group robot webhook URL
-	EmailEnabled     bool          `toml:"email_enabled"`      // Enable SMTP email notifications
-	SMTPHost         string        `toml:"smtp_host"`          // SMTP host without port
-	SMTPPort         int           `toml:"smtp_port"`          // SMTP port
-	SMTPUsername     string        `toml:"smtp_username"`      // SMTP username
-	SMTPPassword     string        `toml:"smtp_password"`      // SMTP password
-	SMTPFrom         string        `toml:"smtp_from"`          // Sender email address
-	SMTPTo           []string      `toml:"smtp_to"`            // Recipient email addresses
+	Enabled            bool          `toml:"enabled"`              // Enable storage alerts
+	CheckInterval      time.Duration `toml:"check_interval"`       // How often to check (default 1h)
+	ThresholdPct       float64       `toml:"threshold_pct"`        // Alert when usage exceeds this % (default 90)
+	CriticalPct        float64       `toml:"critical_pct"`         // Critical alert threshold (default 95)
+	MinFreeBytes       uint64        `toml:"min_free_bytes"`       // Alert when free space < this (default 10GB)
+	CooldownPeriod     time.Duration `toml:"cooldown_period"`      // Min time between alerts (default 4h)
+	WebhookURL         string        `toml:"webhook_url"`          // Webhook URL for notifications
+	WebhookMethod      string        `toml:"webhook_method"`       // POST or GET (default POST)
+	WebhookHeaders     []string      `toml:"webhook_headers"`      // Additional headers (key:value format)
+	TelegramEnabled    bool          `toml:"telegram_enabled"`     // Enable Telegram notifications
+	TelegramBotToken   string        `toml:"telegram_bot_token"`   // Telegram bot token
+	TelegramChatID     string        `toml:"telegram_chat_id"`     // Telegram chat ID or @channel
+	WeComEnabled       bool          `toml:"wecom_enabled"`        // Enable WeCom group robot notifications
+	WeComWebhookURL    string        `toml:"wecom_webhook_url"`    // WeCom group robot webhook URL
+	DingTalkEnabled    bool          `toml:"dingtalk_enabled"`     // Enable DingTalk group robot notifications
+	DingTalkWebhookURL string        `toml:"dingtalk_webhook_url"` // DingTalk group robot webhook URL
+	EmailEnabled       bool          `toml:"email_enabled"`        // Enable SMTP email notifications
+	SMTPHost           string        `toml:"smtp_host"`            // SMTP host without port
+	SMTPPort           int           `toml:"smtp_port"`            // SMTP port
+	SMTPUsername       string        `toml:"smtp_username"`        // SMTP username
+	SMTPPassword       string        `toml:"smtp_password"`        // SMTP password
+	SMTPFrom           string        `toml:"smtp_from"`            // Sender email address
+	SMTPTo             []string      `toml:"smtp_to"`              // Recipient email addresses
 }
 
 // DiskHealthConfig holds SMART and temperature monitoring configuration.
@@ -531,6 +533,7 @@ func applyStorageRootDefaults(cfg *Config, defaultRoot string) {
 	cfg.Alerts.TelegramBotToken = strings.TrimSpace(cfg.Alerts.TelegramBotToken)
 	cfg.Alerts.TelegramChatID = strings.TrimSpace(cfg.Alerts.TelegramChatID)
 	cfg.Alerts.WeComWebhookURL = strings.TrimSpace(cfg.Alerts.WeComWebhookURL)
+	cfg.Alerts.DingTalkWebhookURL = strings.TrimSpace(cfg.Alerts.DingTalkWebhookURL)
 	cfg.Alerts.SMTPHost = strings.TrimSpace(cfg.Alerts.SMTPHost)
 	cfg.Alerts.SMTPUsername = strings.TrimSpace(cfg.Alerts.SMTPUsername)
 	cfg.Alerts.SMTPFrom = strings.TrimSpace(cfg.Alerts.SMTPFrom)
@@ -790,6 +793,7 @@ func Load(path string) (*Config, error) {
 	cfg.Alerts.TelegramBotToken = strings.TrimSpace(cfg.Alerts.TelegramBotToken)
 	cfg.Alerts.TelegramChatID = strings.TrimSpace(cfg.Alerts.TelegramChatID)
 	cfg.Alerts.WeComWebhookURL = strings.TrimSpace(cfg.Alerts.WeComWebhookURL)
+	cfg.Alerts.DingTalkWebhookURL = strings.TrimSpace(cfg.Alerts.DingTalkWebhookURL)
 	cfg.Alerts.SMTPHost = strings.TrimSpace(cfg.Alerts.SMTPHost)
 	cfg.Alerts.SMTPUsername = strings.TrimSpace(cfg.Alerts.SMTPUsername)
 	cfg.Alerts.SMTPFrom = strings.TrimSpace(cfg.Alerts.SMTPFrom)
@@ -1729,6 +1733,9 @@ func (c *Config) Validate() error {
 	if err := validateWeComAlertsConfig(c.Alerts); err != nil {
 		errs = append(errs, err)
 	}
+	if err := validateDingTalkAlertsConfig(c.Alerts); err != nil {
+		errs = append(errs, err)
+	}
 	logLevel := strings.ToLower(strings.TrimSpace(c.Log.Level))
 	if logLevel != "debug" && logLevel != "info" && logLevel != "warn" && logLevel != "error" {
 		errs = append(errs, fmt.Errorf("invalid log.level: %q", c.Log.Level))
@@ -1907,6 +1914,17 @@ func validateWeComAlertsConfig(alerts AlertsConfig) error {
 	}
 	if alerts.WeComEnabled && strings.TrimSpace(alerts.WeComWebhookURL) == "" {
 		errs = append(errs, errors.New("alerts.wecom_webhook_url is required when wecom alerts are enabled"))
+	}
+	return errors.Join(errs...)
+}
+
+func validateDingTalkAlertsConfig(alerts AlertsConfig) error {
+	var errs []error
+	if err := validateOptionalHTTPURL(alerts.DingTalkWebhookURL, "alerts.dingtalk_webhook_url"); err != nil {
+		errs = append(errs, err)
+	}
+	if alerts.DingTalkEnabled && strings.TrimSpace(alerts.DingTalkWebhookURL) == "" {
+		errs = append(errs, errors.New("alerts.dingtalk_webhook_url is required when dingtalk alerts are enabled"))
 	}
 	return errors.Join(errs...)
 }

@@ -320,6 +320,29 @@ func mustGenerateStorageID(t *testing.T) string {
 	return id
 }
 
+func setTrashDeletedAt(t *testing.T, fs *FileSystem, ctx context.Context, originalPath string, deletedAt time.Time) {
+	t.Helper()
+
+	items, err := fs.versions.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash(%s) before timestamp update error: %v", originalPath, err)
+	}
+	for _, item := range items {
+		if item.OriginalPath != originalPath {
+			continue
+		}
+		if err := fs.versions.RemoveFromTrash(ctx, item.ID); err != nil {
+			t.Fatalf("RemoveFromTrash(%s) before timestamp update error: %v", item.ID, err)
+		}
+		item.DeletedAt = deletedAt
+		if err := fs.versions.AddToTrash(ctx, &item); err != nil {
+			t.Fatalf("AddToTrash(%s) after timestamp update error: %v", item.ID, err)
+		}
+		return
+	}
+	t.Fatalf("trash item for %s not found before timestamp update", originalPath)
+}
+
 func TestNew(t *testing.T) {
 	client := setupDataplaneClient(t)
 	if client == nil {
@@ -1866,8 +1889,7 @@ func TestFileSystem_Delete_EvictsOldestTrashWhenMaxSizeExceeded(t *testing.T) {
 	if err := fs.Delete(ctx, "/old.txt"); err != nil {
 		t.Fatalf("Delete(old) error: %v", err)
 	}
-
-	time.Sleep(1100 * time.Millisecond)
+	setTrashDeletedAt(t, fs, ctx, "/old.txt", time.Now().Add(-time.Hour))
 
 	if err := fs.WriteFile(ctx, "/new.txt", bytes.NewReader([]byte("1234567"))); err != nil {
 		t.Fatalf("WriteFile(new) error: %v", err)
@@ -1923,8 +1945,7 @@ func TestFileSystem_Delete_EvictsExistingTrashBeforeKeepingOversizedNewestItem(t
 	if err := fs.Delete(ctx, "/old.txt"); err != nil {
 		t.Fatalf("Delete(old) error: %v", err)
 	}
-
-	time.Sleep(1100 * time.Millisecond)
+	setTrashDeletedAt(t, fs, ctx, "/old.txt", time.Now().Add(-time.Hour))
 
 	if err := fs.WriteFile(ctx, "/oversized.txt", bytes.NewReader([]byte("12345678901"))); err != nil {
 		t.Fatalf("WriteFile(oversized) error: %v", err)
@@ -1977,8 +1998,7 @@ func TestFileSystem_Delete_EvictsVersionMetadataWhenTrashCapacityRemovesOldItem(
 	if err := fs.Delete(ctx, "/old-versioned.md"); err != nil {
 		t.Fatalf("Delete(old) error: %v", err)
 	}
-
-	time.Sleep(1100 * time.Millisecond)
+	setTrashDeletedAt(t, fs, ctx, "/old-versioned.md", time.Now().Add(-time.Hour))
 
 	deletedHashes := make(map[string]int)
 	fs.deleteVersionObject = func(ctx context.Context, hash string) error {
@@ -6248,7 +6268,6 @@ func TestFileSystem_ListVersions(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		content := []byte("version " + string(rune('0'+i)))
 		fs.WriteFile(ctx, "/versioned.txt", bytes.NewReader(content))
-		time.Sleep(10 * time.Millisecond)
 	}
 
 	versions, err := fs.ListVersions(ctx, "/versioned.txt")

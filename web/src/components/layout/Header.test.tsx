@@ -49,8 +49,16 @@ vi.mock('@heroui/react', () => ({
   Avatar: ({ children }: { children?: React.ReactNode }) => <div>{children}</div>,
   Dropdown: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
   DropdownTrigger: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
-  DropdownMenu: ({ children, onAction }: { children: React.ReactNode; onAction?: (key: string) => void }) => (
-    <div>
+  DropdownMenu: ({
+    children,
+    onAction,
+    'aria-label': ariaLabel,
+  }: {
+    children: React.ReactNode
+    onAction?: (key: string) => void
+    'aria-label'?: string
+  }) => (
+    <div role="menu" aria-label={ariaLabel}>
       {React.Children.map(children, (child) => {
         if (!React.isValidElement(child)) {
           return child
@@ -145,6 +153,12 @@ describe('Header', () => {
 
     expect(screen.queryByText('设置')).toBeNull()
     expect(screen.getByText('帮助文档')).toBeTruthy()
+  })
+
+  it('uses a localized accessible label for the user menu', () => {
+    render(<Header />)
+
+    expect(screen.getByRole('menu', { name: '用户菜单' })).toBeTruthy()
   })
 
   it('navigates admins to the alerts settings entry from the bell button', () => {

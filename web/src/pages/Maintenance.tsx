@@ -51,6 +51,7 @@ import {
 } from '@/api/files'
 import { formatBytes, formatDuration } from '@/lib/utils'
 import { GENERIC_ACTION_ERROR_DESCRIPTION, GENERIC_LOAD_ERROR_DESCRIPTION, getUserFacingErrorDescription } from '@/lib/apiMessages'
+import { backupJobNeedsAttention, getBackupAttentionNextSteps, getBackupAttentionReasons } from '@/lib/backupAttention'
 import { useUser } from '@/stores/auth'
 
 type AbortControllerRef = { current: AbortController | null }
@@ -184,33 +185,49 @@ function ResultSummary({ result }: { result: ScrubResult }) {
   }
   
   return (
-    <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2 md:grid-cols-4">
+    <div className="mt-4 grid grid-cols-2 gap-2 sm:gap-3 md:grid-cols-4">
       <StatCard
         title="总对象数"
         value={formatCount(result.total_objects)}
         icon={Database}
         tone="primary"
+        density="compact"
       />
       <StatCard
         title="有效对象"
         value={formatCount(result.valid_objects)}
         icon={CheckCircle}
         tone="success"
+        density="compact"
       />
       <StatCard
         title="损坏对象"
         value={formatCount(result.corrupted_objects)}
         icon={AlertCircle}
         tone={toneForCount(result.corrupted_objects, 'danger')}
+        density="compact"
       />
       <StatCard
         title="缺失对象"
         value={formatCount(result.missing_objects)}
         icon={XCircle}
         tone={toneForCount(result.missing_objects, 'warning')}
+        density="compact"
       />
     </div>
   )
+}
+
+function getRunningScrubProgressText(result: ScrubResult | undefined): string {
+  if (
+    result?.valid_objects !== undefined
+    && result.total_objects !== undefined
+  ) {
+    const formatCount = (value: number): string => new Intl.NumberFormat('zh-CN').format(value)
+    return `正在校验数据完整性，已验证 ${formatCount(result.valid_objects)} / ${formatCount(result.total_objects)} 个对象`
+  }
+
+  return '正在校验数据完整性'
 }
 
 const scrubErrorTypeLabels: Record<string, string> = {
@@ -501,6 +518,8 @@ schedule_interval = "24h"
 max_snapshots = 7
 verify_after_backup = true`
 
+const batchRestoreItemLimit = 20
+
 function canRunBackupRestoreDrill(job: BackupJob): boolean {
   if (job.type === 'restic' || job.type === 'rclone') {
     return true
@@ -513,6 +532,56 @@ function canRunBackupRestore(job: BackupJob): boolean {
     return true
   }
   return job.type === 'local' && hasCompletedLocalBackupSnapshot(job)
+}
+
+function canVerifyLatestBackupRestore(job: BackupJob): boolean {
+  return job.last_restore?.status === 'completed' && Boolean(job.last_restore.target_path)
+}
+
+function BackupAttentionSummary({ job }: { job: BackupJob }) {
+  const reasons = getBackupAttentionReasons(job)
+  if (reasons.length === 0) {
+    return null
+  }
+
+  const nextSteps = getBackupAttentionNextSteps(job)
+  const hasFailure = reasons.some((reason) => reason.includes('失败') || reason.includes('异常'))
+  const visibleReasons = reasons.slice(0, 2)
+  const suffix = reasons.length > visibleReasons.length ? ` 等 ${reasons.length} 项` : ''
+  const summary = reasons.join('；')
+  const visibleSteps = nextSteps.slice(0, 2)
+  const stepSuffix = nextSteps.length > visibleSteps.length ? ` 等 ${nextSteps.length} 步` : ''
+  const stepSummary = nextSteps.join('；')
+
+  return (
+    <div className="space-y-1">
+      <div
+        aria-label={`待处理原因: ${summary}`}
+        className="flex flex-wrap items-center gap-1 text-xs text-warning"
+        title={summary}
+      >
+        <Chip
+          size="sm"
+          color={hasFailure ? 'danger' : 'warning'}
+          variant="flat"
+          startContent={<FileWarning size={14} />}
+        >
+          需处理
+        </Chip>
+        <span>{visibleReasons.join('、')}{suffix}</span>
+      </div>
+      {nextSteps.length > 0 && (
+        <div
+          aria-label={`建议处理: ${stepSummary}`}
+          className="flex items-center gap-1 text-xs text-default-500"
+          title={stepSummary}
+        >
+          <ListChecks size={14} className="shrink-0 text-warning" />
+          <span>建议: {visibleSteps.join('、')}{stepSuffix}</span>
+        </div>
+      )}
+    </div>
+  )
 }
 
 function hasCompletedLocalBackupSnapshot(job: BackupJob): boolean {
@@ -1709,6 +1778,85 @@ function BatchRestoreExecutionReview({
   )
 }
 
+function BatchRestoreReadinessSummary({
+  items,
+  withinLimit,
+  targetInputError,
+  targetConflict,
+  preview,
+  previewMatches,
+  previewHasFailed,
+}: {
+  items: BackupBatchRestoreItemRequest[]
+  withinLimit: boolean
+  targetInputError: string | null
+  targetConflict: string | null
+  preview: BackupBatchRestorePreviewResult | null
+  previewMatches: boolean
+  previewHasFailed: boolean
+}) {
+  const selectedCount = items.length
+  const filledTargetCount = items.filter((item) => item.target_path.trim().length > 0).length
+  const configIncludedCount = items.filter((item) => item.include_config).length
+  const previewCounts = preview ? getBatchRestorePreflightCounts(preview) : null
+  const previewHasWarnings = Boolean(preview && (
+    preview.warning
+    || (preview.warnings?.length ?? 0) > 0
+    || (previewCounts?.warning ?? 0) > 0
+  ))
+  const targetHasIssue = Boolean(targetInputError || targetConflict || !withinLimit)
+  const targetText = selectedCount === 0
+    ? '尚未选择目标'
+    : `${filledTargetCount} / ${selectedCount} 已填写${targetConflict ? '；存在重复或父子嵌套' : targetInputError ? '；存在格式错误' : ''}`
+  const previewText = selectedCount === 0
+    ? '选择任务后生成批量预览'
+    : targetHasIssue
+      ? '处理目标目录后再生成批量预览'
+      : !preview
+        ? '需要生成批量预览'
+        : !previewMatches
+          ? '选择、目标或配置已变更，需重新生成批量预览'
+          : previewHasFailed
+            ? '批量预检存在失败项'
+            : previewHasWarnings
+              ? '批量预览可用于执行，但存在提醒'
+              : '批量预览可用于执行'
+  const previewTone: RestoreImpactTone = selectedCount === 0 || !preview
+    ? 'default'
+    : !previewMatches || previewHasFailed
+      ? 'danger'
+      : previewHasWarnings
+        ? 'warning'
+        : 'success'
+
+  return (
+    <div aria-label="批量恢复准备度摘要" className="rounded-lg border border-divider bg-content1 p-3">
+      <div className="flex items-center gap-2 text-sm font-medium text-default-800">
+        <ListChecks size={16} />
+        <span>批量恢复准备度摘要</span>
+      </div>
+      <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+        <RestoreImpactItem
+          label="选择任务"
+          value={selectedCount === 0 ? '尚未选择任务' : `${selectedCount} / ${batchRestoreItemLimit} 项`}
+          tone={selectedCount === 0 ? 'default' : withinLimit ? 'success' : 'danger'}
+        />
+        <RestoreImpactItem
+          label="目标目录"
+          value={targetText}
+          tone={selectedCount === 0 ? 'default' : targetHasIssue ? 'danger' : filledTargetCount === selectedCount ? 'success' : 'warning'}
+        />
+        <RestoreImpactItem
+          label="配置文件"
+          value={configIncludedCount > 0 ? `${configIncludedCount} 项会恢复配置文件` : '本批次不恢复配置文件'}
+          tone={configIncludedCount > 0 ? 'warning' : 'success'}
+        />
+        <RestoreImpactItem label="预览状态" value={previewText} tone={previewTone} />
+      </div>
+    </div>
+  )
+}
+
 function BatchRestoreResultSummary({ result }: { result: BackupBatchRestoreResult }) {
   return (
     <div className="space-y-4">
@@ -1934,29 +2082,60 @@ export default function Maintenance() {
     setBatchRestoreResult(null)
   }
 
+  const resetBatchRestoreProgress = () => {
+    setBatchRestorePreview(null)
+    setBatchRestorePreviewItems(null)
+    setBatchRestoreResult(null)
+  }
+
+  const applyBatchRestoreSelection = (jobs: BackupJob[]) => {
+    const selectedJobs = jobs.slice(0, batchRestoreItemLimit)
+    const nextTargets = { ...batchRestoreTargets }
+    const nextIncludeConfig = { ...batchRestoreIncludeConfig }
+
+    selectedJobs.forEach((job) => {
+      if (!nextTargets[job.id]) {
+        nextTargets[job.id] = getSuggestedRestoreTargetPath(job)
+      }
+      nextIncludeConfig[job.id] = job.type === 'local' && Boolean(job.include_config)
+    })
+
+    setBatchRestoreSelectedJobIds(selectedJobs.map((job) => job.id))
+    setBatchRestoreTargets(nextTargets)
+    setBatchRestoreIncludeConfig(nextIncludeConfig)
+    resetBatchRestoreProgress()
+  }
+
+  const selectAllBatchRestoreJobs = () => {
+    applyBatchRestoreSelection(restorableBackupJobs)
+  }
+
+  const selectAttentionBatchRestoreJobs = () => {
+    applyBatchRestoreSelection(batchRestoreAttentionJobs)
+  }
+
+  const clearBatchRestoreSelection = () => {
+    setBatchRestoreSelectedJobIds([])
+    resetBatchRestoreProgress()
+  }
+
   const handleBatchRestoreSelectedChange = (jobId: string, selected: boolean) => {
     setBatchRestoreSelectedJobIds((current) => (
       selected
         ? (current.includes(jobId) ? current : [...current, jobId])
         : current.filter((currentJobId) => currentJobId !== jobId)
     ))
-    setBatchRestorePreview(null)
-    setBatchRestorePreviewItems(null)
-    setBatchRestoreResult(null)
+    resetBatchRestoreProgress()
   }
 
   const handleBatchRestoreTargetChange = (jobId: string, value: string) => {
     setBatchRestoreTargets((current) => ({ ...current, [jobId]: value }))
-    setBatchRestorePreview(null)
-    setBatchRestorePreviewItems(null)
-    setBatchRestoreResult(null)
+    resetBatchRestoreProgress()
   }
 
   const handleBatchRestoreIncludeConfigChange = (jobId: string, value: boolean) => {
     setBatchRestoreIncludeConfig((current) => ({ ...current, [jobId]: value }))
-    setBatchRestorePreview(null)
-    setBatchRestorePreviewItems(null)
-    setBatchRestoreResult(null)
+    resetBatchRestoreProgress()
   }
   
   // Run scrub mutation
@@ -2173,6 +2352,7 @@ export default function Maintenance() {
       if (request.signal.aborted) {
         return
       }
+      void queryClient.invalidateQueries({ queryKey: backupJobsQueryKey })
       setRestoreVerifyResult(result)
       const verifyWarnings = result.warnings ?? []
       addToast({
@@ -2516,6 +2696,7 @@ export default function Maintenance() {
   }
   
   const isRunning = scrubResult?.status === 'running' || isAwaitingRunningState
+  const runningScrubProgressText = getRunningScrubProgressText(scrubResult)
   const restoreIncludeConfigForRequest = effectiveRestoreIncludeConfig(restoreJob, restoreIncludeConfig)
   const restoreTargetInputError = getRestoreTargetInputError(restoreTargetPath)
   const restoreTargetReady = restoreTargetPath.trim() !== '' && !restoreTargetInputError
@@ -2523,8 +2704,9 @@ export default function Maintenance() {
   const restorePreviewHasFailedPreflight = hasFailedRestorePreflight(restorePreview)
   const restoreActionPending = restoreMutation.isPending || restorePreviewMutation.isPending || restoreVerifyMutation.isPending
   const restorableBackupJobs = backupJobs.filter((job) => !job.disabled && canRunBackupRestore(job))
+  const batchRestoreAttentionJobs = restorableBackupJobs.filter(backupJobNeedsAttention)
   const batchRestoreItems = buildBatchRestoreItems(backupJobs, batchRestoreSelectedJobIds, batchRestoreTargets, batchRestoreIncludeConfig)
-  const batchRestoreWithinLimit = batchRestoreItems.length <= 20
+  const batchRestoreWithinLimit = batchRestoreItems.length <= batchRestoreItemLimit
   const batchRestoreTargetInputError = getBatchRestoreTargetInputError(batchRestoreItems)
   const batchRestoreTargetConflict = getBatchRestoreTargetConflict(batchRestoreItems)
   const batchRestoreTargetsReady = batchRestoreItems.length > 0 && batchRestoreWithinLimit && !batchRestoreTargetInputError && !batchRestoreTargetConflict && batchRestoreItems.every((item) => item.target_path.length > 0)
@@ -2632,6 +2814,7 @@ export default function Maintenance() {
                     size="sm"
                     isIndeterminate
                     aria-label="校验进行中"
+                    aria-valuetext={runningScrubProgressText}
                     className="max-w-full"
                   />
                   <p className="text-sm text-default-500 mt-2">正在校验数据完整性，这可能需要一些时间...</p>
@@ -2764,8 +2947,9 @@ export default function Maintenance() {
                     const isCheckingRetention = retentionCheckMutation.isPending && retentionCheckMutation.variables?.jobId === job.id
                     const isRunningDrill = restoreDrillMutation.isPending && restoreDrillMutation.variables?.jobId === job.id
                     const isRunningRestore = restoreMutation.isPending && restoreMutation.variables?.jobId === job.id
+                    const isRunningRestoreVerify = restoreVerifyMutation.isPending && restoreVerifyMutation.variables?.jobId === job.id
                     const isExportingReport = exportingRestoreReportJobId === job.id
-                    const isBusy = job.running || isRunningBackup || isCheckingRetention || isRunningDrill || isRunningRestore
+                    const isBusy = job.running || isRunningBackup || isCheckingRetention || isRunningDrill || isRunningRestore || isRunningRestoreVerify
                     return (
                       <TableRow key={job.id}>
                         <TableCell>
@@ -2781,6 +2965,7 @@ export default function Maintenance() {
                             <div className="max-w-[22rem] truncate text-xs text-default-400" title={job.source}>
                               来源: {job.source}
                             </div>
+                            <BackupAttentionSummary job={job} />
                           </div>
                         </TableCell>
                         <TableCell>
@@ -2881,6 +3066,20 @@ export default function Maintenance() {
                               onPress={() => openRestoreModal(job)}
                             >
                               恢复
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="bordered"
+                              className="rounded-lg"
+                              startContent={isRunningRestoreVerify ? <RefreshCw size={16} className="animate-spin" /> : <CheckCircle size={16} />}
+                              isLoading={isRunningRestoreVerify}
+                              isDisabled={(isBusy && !isRunningRestoreVerify) || job.disabled || !canVerifyLatestBackupRestore(job)}
+                              onPress={() => {
+                                if (!job.last_restore) return
+                                startRestoreVerify(job.id, job.last_restore.target_path)
+                              }}
+                            >
+                              检查恢复
                             </Button>
                             <Button
                               size="sm"
@@ -3094,7 +3293,7 @@ export default function Maintenance() {
               <div>
                 <div>批量恢复到独立目录</div>
                 <div className="mt-1 text-xs font-normal text-default-500">
-                  已选 {batchRestoreItems.length} 项，最多 20 项
+                  已选 {batchRestoreItems.length} 项，最多 {batchRestoreItemLimit} 项
                 </div>
               </div>
             </div>
@@ -3107,6 +3306,54 @@ export default function Maintenance() {
                 <div className="flex items-start gap-2 rounded-lg border border-warning/20 bg-warning/10 p-3 text-sm text-warning">
                   <AlertCircle size={16} className="mt-0.5 shrink-0" />
                   <span>批量恢复会按顺序写入多个独立目录，不会覆盖当前数据目录。请先生成预览并检查每个目标目录。</span>
+                </div>
+                <BatchRestoreReadinessSummary
+                  items={batchRestoreItems}
+                  withinLimit={batchRestoreWithinLimit}
+                  targetInputError={batchRestoreTargetInputError}
+                  targetConflict={batchRestoreTargetConflict}
+                  preview={batchRestorePreview}
+                  previewMatches={batchRestorePreviewMatches}
+                  previewHasFailed={batchRestorePreviewHasFailed}
+                />
+                <div className="flex flex-col gap-3 rounded-lg border border-divider bg-content2/50 p-3 text-sm sm:flex-row sm:items-center sm:justify-between">
+                  <div>
+                    <div className="font-medium text-foreground">批量选择</div>
+                    <div className="mt-1 text-xs text-default-500">
+                      可恢复任务 {restorableBackupJobs.length} 项，待处理 {batchRestoreAttentionJobs.length} 项；选择后会保留已填写目标，空目标使用建议目录。
+                    </div>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Button
+                      size="sm"
+                      variant="bordered"
+                      className="rounded-lg"
+                      startContent={<AlertCircle size={16} />}
+                      isDisabled={batchRestoreActionPending || batchRestoreAttentionJobs.length === 0}
+                      onPress={selectAttentionBatchRestoreJobs}
+                    >
+                      {batchRestoreAttentionJobs.length > batchRestoreItemLimit ? `选择待处理前 ${batchRestoreItemLimit} 项` : '选择待处理'}
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="bordered"
+                      className="rounded-lg"
+                      startContent={<ListChecks size={16} />}
+                      isDisabled={batchRestoreActionPending || restorableBackupJobs.length === 0}
+                      onPress={selectAllBatchRestoreJobs}
+                    >
+                      {restorableBackupJobs.length > batchRestoreItemLimit ? `选择前 ${batchRestoreItemLimit} 项` : '选择全部'}
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="light"
+                      className="rounded-lg"
+                      isDisabled={batchRestoreActionPending || batchRestoreSelectedJobIds.length === 0}
+                      onPress={clearBatchRestoreSelection}
+                    >
+                      清空选择
+                    </Button>
+                  </div>
                 </div>
                 {restorableBackupJobs.length === 0 ? (
                   <EmptyState
@@ -3166,7 +3413,7 @@ export default function Maintenance() {
                 )}
                 {!batchRestoreWithinLimit && (
                   <div className="rounded-lg border border-danger/20 bg-danger/10 p-3 text-sm text-danger">
-                    一次最多恢复 20 项，请减少选择后重新生成预览。
+                    一次最多恢复 {batchRestoreItemLimit} 项，请减少选择后重新生成预览。
                   </div>
                 )}
                 {batchRestoreTargetConflict && (
@@ -3179,14 +3426,14 @@ export default function Maintenance() {
                     {batchRestoreTargetInputError}
                   </div>
                 )}
-	                {batchRestorePreview && (
-	                  <>
-	                    <BatchRestorePreviewSummary result={batchRestorePreview} />
-	                    <BatchRestoreImpactSummary result={batchRestorePreview} matches={batchRestorePreviewMatches} />
-	                    <BatchRestoreExecutionReview result={batchRestorePreview} matches={batchRestorePreviewMatches} />
-	                    {!batchRestorePreviewMatches && (
-	                      <div className="rounded-lg border border-warning/20 bg-warning/10 p-3 text-sm text-warning">
-	                        选中的任务或目标目录已变更，请重新生成批量预览。
+                {batchRestorePreview && (
+                  <>
+                    <BatchRestorePreviewSummary result={batchRestorePreview} />
+                    <BatchRestoreImpactSummary result={batchRestorePreview} matches={batchRestorePreviewMatches} />
+                    <BatchRestoreExecutionReview result={batchRestorePreview} matches={batchRestorePreviewMatches} />
+                    {!batchRestorePreviewMatches && (
+                      <div className="rounded-lg border border-warning/20 bg-warning/10 p-3 text-sm text-warning">
+                        选中的任务或目标目录已变更，请重新生成批量预览。
                       </div>
                     )}
                     {batchRestorePreviewMatches && batchRestorePreviewHasFailed && (

@@ -42,6 +42,9 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.WeComEnabled || cfg.WeComWebhookURL != "" {
 		t.Fatalf("unexpected WeCom defaults: enabled=%v url=%q", cfg.WeComEnabled, cfg.WeComWebhookURL)
 	}
+	if cfg.DingTalkEnabled || cfg.DingTalkWebhookURL != "" {
+		t.Fatalf("unexpected DingTalk defaults: enabled=%v url=%q", cfg.DingTalkEnabled, cfg.DingTalkWebhookURL)
+	}
 }
 
 func TestFormatBytes(t *testing.T) {
@@ -158,6 +161,15 @@ func TestAlertLevel(t *testing.T) {
 }
 
 func TestStartStop(t *testing.T) {
+	originalOnAlertMonitorLoopStart := onAlertMonitorLoopStart
+	defer func() {
+		onAlertMonitorLoopStart = originalOnAlertMonitorLoopStart
+	}()
+	started := make(chan struct{}, 1)
+	onAlertMonitorLoopStart = func(context.Context) {
+		started <- struct{}{}
+	}
+
 	logger := zerolog.New(os.Stderr).With().Timestamp().Logger()
 	cfg := Config{
 		Enabled:       true,
@@ -171,12 +183,49 @@ func TestStartStop(t *testing.T) {
 
 	ctx := context.Background()
 	monitor.Start(ctx)
-	time.Sleep(150 * time.Millisecond)
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for monitor loop start")
+	}
 	monitor.Stop()
+}
+
+func captureAlertMonitorChecks(t *testing.T) <-chan *StorageStats {
+	t.Helper()
+
+	checked := make(chan *StorageStats, 4)
+	originalOnAlertMonitorCheckComplete := onAlertMonitorCheckComplete
+	onAlertMonitorCheckComplete = func(_ context.Context, stats *StorageStats) {
+		select {
+		case checked <- stats:
+		default:
+		}
+	}
+	t.Cleanup(func() {
+		onAlertMonitorCheckComplete = originalOnAlertMonitorCheckComplete
+	})
+	return checked
+}
+
+func waitForAlertMonitorCheck(t *testing.T, checked <-chan *StorageStats) *StorageStats {
+	t.Helper()
+
+	select {
+	case stats := <-checked:
+		if stats == nil {
+			t.Fatal("expected alert monitor check stats, got nil")
+		}
+		return stats
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for alert monitor check")
+		return nil
+	}
 }
 
 func TestUpdateConfig_StartsMonitorAfterEnable(t *testing.T) {
 	logger := zerolog.New(os.Stderr).With().Timestamp().Logger()
+	checked := captureAlertMonitorChecks(t)
 	monitor := NewMonitor(Config{Enabled: false}, "/tmp", logger)
 	monitor.Start(context.Background())
 	t.Cleanup(func() { monitor.Stop() })
@@ -190,19 +239,14 @@ func TestUpdateConfig_StartsMonitorAfterEnable(t *testing.T) {
 		CooldownPeriod: time.Second,
 	})
 
-	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) {
-		if stats := monitor.LastStats(); stats != nil {
-			return
-		}
-		time.Sleep(20 * time.Millisecond)
+	if stats := waitForAlertMonitorCheck(t, checked); stats == nil {
+		t.Fatal("expected monitor to collect stats after enabling via UpdateConfig")
 	}
-
-	t.Fatal("expected monitor to collect stats after enabling via UpdateConfig")
 }
 
 func TestStart_IgnoresNonPositiveIntervalAndRecoversAfterUpdate(t *testing.T) {
 	logger := zerolog.New(os.Stderr).With().Timestamp().Logger()
+	checked := captureAlertMonitorChecks(t)
 	monitor := NewMonitor(Config{
 		Enabled:       true,
 		CheckInterval: 0,
@@ -213,7 +257,12 @@ func TestStart_IgnoresNonPositiveIntervalAndRecoversAfterUpdate(t *testing.T) {
 	monitor.Start(context.Background())
 	t.Cleanup(func() { monitor.Stop() })
 
-	time.Sleep(100 * time.Millisecond)
+	monitor.mu.Lock()
+	cancel := monitor.cancel
+	monitor.mu.Unlock()
+	if cancel != nil {
+		t.Fatal("expected non-positive interval not to start monitor loop")
+	}
 	if stats := monitor.LastStats(); stats != nil {
 		t.Fatalf("expected no stats to be collected for non-positive interval, got %+v", stats)
 	}
@@ -227,15 +276,9 @@ func TestStart_IgnoresNonPositiveIntervalAndRecoversAfterUpdate(t *testing.T) {
 		CooldownPeriod: time.Second,
 	})
 
-	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) {
-		if stats := monitor.LastStats(); stats != nil {
-			return
-		}
-		time.Sleep(20 * time.Millisecond)
+	if stats := waitForAlertMonitorCheck(t, checked); stats == nil {
+		t.Fatal("expected monitor to recover after updating to a positive interval")
 	}
-
-	t.Fatal("expected monitor to recover after updating to a positive interval")
 }
 
 func TestUpdateConfig_SerializesConcurrentRestarts(t *testing.T) {
@@ -1140,6 +1183,142 @@ func TestWeComErrorDoesNotExposeWebhookKey(t *testing.T) {
 	}
 	if !strings.Contains(text, server.URL) || !strings.Contains(text, "errcode 93000") {
 		t.Fatalf("WeCom error should retain sanitized host and errcode, got %s", text)
+	}
+}
+
+func TestSendEventSendsDingTalkWhenConfigured(t *testing.T) {
+	type dingTalkRequest struct {
+		path        string
+		accessToken string
+		payload     dingTalkTextPayload
+	}
+	reqCh := make(chan dingTalkRequest, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload dingTalkTextPayload
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Errorf("Decode(dingtalk request) error: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		reqCh <- dingTalkRequest{
+			path:        r.URL.Path,
+			accessToken: r.URL.Query().Get("access_token"),
+			payload:     payload,
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"errcode":0,"errmsg":"ok"}`))
+	}))
+	defer server.Close()
+
+	monitor := NewMonitor(Config{
+		Enabled:            true,
+		DingTalkEnabled:    true,
+		DingTalkWebhookURL: server.URL + "/robot/send?access_token=secret-token",
+	}, t.TempDir(), zerolog.Nop())
+
+	err := monitor.SendEvent(context.Background(), EventPayload{
+		Type:      "backup_run",
+		Level:     AlertLevelCritical,
+		Message:   "backup failed",
+		Timestamp: time.Unix(1710000000, 0).UTC(),
+		Hostname:  "mnemonas-host",
+		Details: map[string]any{
+			"job_id": "external-disk",
+			"status": "failed",
+		},
+	})
+	if err != nil {
+		t.Fatalf("SendEvent() error: %v", err)
+	}
+
+	select {
+	case req := <-reqCh:
+		if req.path != "/robot/send" || req.accessToken != "secret-token" {
+			t.Fatalf("dingtalk target = %q access_token=%q, want webhook path and token", req.path, req.accessToken)
+		}
+		if req.payload.MsgType != "text" {
+			t.Fatalf("dingtalk msgtype = %q, want text", req.payload.MsgType)
+		}
+		if !strings.Contains(req.payload.Text.Content, "backup failed") || !strings.Contains(req.payload.Text.Content, "external-disk") {
+			t.Fatalf("dingtalk text missing event details:\n%s", req.payload.Text.Content)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for DingTalk alert")
+	}
+}
+
+func TestSendStorageDingTalkPostsTextPayload(t *testing.T) {
+	reqCh := make(chan dingTalkTextPayload, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload dingTalkTextPayload
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Errorf("Decode(dingtalk request) error: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		reqCh <- payload
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"errcode":0}`))
+	}))
+	defer server.Close()
+
+	monitor := NewMonitor(Config{}, t.TempDir(), zerolog.Nop())
+	err := monitor.sendStorageDingTalk(context.Background(), &StorageStats{
+		Path:      "/srv/mnemonas",
+		UsedBytes: 90,
+		FreeBytes: 10,
+		UsedPct:   90,
+		Level:     AlertLevelWarning,
+		CheckedAt: time.Unix(1710000001, 0).UTC(),
+	}, Config{
+		DingTalkEnabled:    true,
+		DingTalkWebhookURL: server.URL + "?access_token=secret-token",
+	}, "存储空间告警：使用率 90.0%，剩余 10 B", "mnemonas-host")
+	if err != nil {
+		t.Fatalf("sendStorageDingTalk() error: %v", err)
+	}
+
+	select {
+	case payload := <-reqCh:
+		if payload.MsgType != "text" {
+			t.Fatalf("dingtalk msgtype = %q, want text", payload.MsgType)
+		}
+		for _, expected := range []string{"storage warning", "mnemonas-host", "Path scope: configured_storage_root", "90.0%"} {
+			if !strings.Contains(payload.Text.Content, expected) {
+				t.Fatalf("dingtalk storage text missing %q:\n%s", expected, payload.Text.Content)
+			}
+		}
+		if strings.Contains(payload.Text.Content, "/srv/mnemonas") {
+			t.Fatalf("dingtalk storage text leaked storage path:\n%s", payload.Text.Content)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for DingTalk storage alert")
+	}
+}
+
+func TestDingTalkErrorDoesNotExposeWebhookToken(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"errcode":310000,"errmsg":"invalid token"}`))
+	}))
+	defer server.Close()
+	monitor := NewMonitor(Config{
+		Enabled:            true,
+		DingTalkEnabled:    true,
+		DingTalkWebhookURL: server.URL + "/robot/send?access_token=secret-token",
+	}, t.TempDir(), zerolog.Nop())
+	err := monitor.SendEvent(context.Background(), EventPayload{Type: "backup_run"})
+	if err == nil {
+		t.Fatal("expected DingTalk send error")
+	}
+	text := err.Error()
+	for _, leaked := range []string{"secret-token", "/robot/send", "invalid token"} {
+		if strings.Contains(text, leaked) {
+			t.Fatalf("DingTalk error leaked %q: %s", leaked, text)
+		}
+	}
+	if !strings.Contains(text, server.URL) || !strings.Contains(text, "errcode 310000") {
+		t.Fatalf("DingTalk error should retain sanitized host and errcode, got %s", text)
 	}
 }
 

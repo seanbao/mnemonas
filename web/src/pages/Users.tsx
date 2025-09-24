@@ -20,6 +20,7 @@ import {
   DropdownItem,
   Select,
   SelectItem,
+  Progress,
   addToast,
 } from '@heroui/react'
 import {
@@ -40,10 +41,21 @@ import {
   FolderOpen,
   Tags,
   LogOut,
+  Copy,
+  ListChecks,
+  Search,
+  X,
+  ArrowUpDown,
+  Download,
 } from 'lucide-react'
 import { listUsers, createUser, deleteUser, resetUserPassword, revokeUserSessions, toggleUserStatus, updateUser, UsersError, type ListUsersResponse, type User } from '@/api/users'
 import { getStoredUser } from '@/api/auth'
 import { formatBytes, formatDate, cn, normalizeUserHomeDir } from '@/lib/utils'
+import { formatUserAccessReviewReport, getUserAccessContext, summarizeUserAccessReview } from '@/lib/userAccessContext'
+import { formatUserQuotaSummaryReport, getQuotaStatus, quotaBytesToFormValue, quotaFormValueToBytes, quotaUnits, userNeedsQuotaAttention, type QuotaUnit } from '@/lib/userQuota'
+import { formatUserAccountAttentionReport, summarizeUserAccountAttention } from '@/lib/userAccountAttention'
+import { buildUserListViewCsv, getUserListView, userListExportFilename, type UserListFilter, type UserListSort } from '@/lib/userListView'
+import { triggerBrowserDownload } from '@/lib/downloadResponse'
 import { PageHeader } from '@/components/ui/PageHeader'
 import { EmptyState } from '@/components/ui/EmptyState'
 import { StatCard } from '@/components/ui/StatCard'
@@ -51,50 +63,12 @@ import { getUserFacingErrorDescription } from '@/lib/apiMessages'
 
 const usersUnavailableDescription = '用户配置当前不可用，请检查系统配置状态或稍后重试。'
 const usersLoadErrorDescription = '用户列表加载失败，请检查网络或稍后重试。'
+const clipboardWriteFailureDescription = '请检查浏览器剪贴板权限。'
 const maxPasswordBytes = 72
-const quotaUnits = [
-  { key: 'B', label: 'B', multiplier: 1 },
-  { key: 'MB', label: 'MB', multiplier: 1024 ** 2 },
-  { key: 'GB', label: 'GB', multiplier: 1024 ** 3 },
-  { key: 'TB', label: 'TB', multiplier: 1024 ** 4 },
-] as const
-
-type QuotaUnit = typeof quotaUnits[number]['key']
 const groupNamePattern = /^[A-Za-z0-9._-]+$/
 
 function utf8ByteLength(value: string): number {
   return new TextEncoder().encode(value).length
-}
-
-function quotaBytesToFormValue(bytes: number): { value: string; unit: QuotaUnit } {
-  if (!Number.isFinite(bytes) || bytes <= 0) {
-    return { value: '0', unit: 'GB' }
-  }
-
-  for (const unit of [...quotaUnits].reverse()) {
-    const value = bytes / unit.multiplier
-    if (value >= 1 && Number.isInteger(value)) {
-      return { value: String(value), unit: unit.key }
-    }
-  }
-
-  return { value: String(bytes), unit: 'B' }
-}
-
-function quotaFormValueToBytes(value: string, unitKey: QuotaUnit): number | null {
-  const normalized = value.trim()
-  if (!normalized) {
-    return 0
-  }
-
-  const numericValue = Number(normalized)
-  const unit = quotaUnits.find((candidate) => candidate.key === unitKey)
-  if (!unit || !Number.isFinite(numericValue) || numericValue < 0) {
-    return null
-  }
-
-  const bytes = Math.round(numericValue * unit.multiplier)
-  return Number.isSafeInteger(bytes) ? bytes : null
 }
 
 function parseGroupNames(value: string): { groups: string[]; error?: string } {
@@ -131,6 +105,78 @@ function normalizesToRootHomeDir(homeDir: string): boolean {
 
 function isRootHomeDirForNonAdmin(role: User['role'], homeDir: string): boolean {
   return role !== 'admin' && normalizesToRootHomeDir(homeDir)
+}
+
+function getUserListEmptyTitle(filter: UserListFilter, isSearchActive: boolean): string {
+  if (isSearchActive) {
+    return '没有匹配的用户'
+  }
+  if (filter === 'account-attention') {
+    return '暂无账号关注用户'
+  }
+  if (filter === 'admin') {
+    return '暂无管理员'
+  }
+  if (filter === 'active') {
+    return '暂无活跃用户'
+  }
+  if (filter === 'disabled-account') {
+    return '暂无停用账号'
+  }
+  if (filter === 'never-login') {
+    return '暂无从未登录用户'
+  }
+  if (filter === 'access-review') {
+    return '暂无复核提示用户'
+  }
+  return '暂无配额关注用户'
+}
+
+function getUserListEmptyDescription(filter: UserListFilter, isSearchActive: boolean): string {
+  if (isSearchActive) {
+    return '请调整搜索关键词，或切换用户列表筛选条件。'
+  }
+  if (filter === 'account-attention') {
+    return '所有用户当前均为启用且已有登录记录。'
+  }
+  if (filter === 'admin') {
+    return '当前还没有管理员账号。'
+  }
+  if (filter === 'active') {
+    return '所有用户当前均处于停用状态。'
+  }
+  if (filter === 'disabled-account') {
+    return '所有用户当前均处于启用状态。'
+  }
+  if (filter === 'never-login') {
+    return '所有用户当前均已有登录记录。'
+  }
+  if (filter === 'access-review') {
+    return '所有用户当前暂无账号、权限或配额复核提示。'
+  }
+  return '所有已设置配额的用户当前都低于关注阈值。'
+}
+
+function getUserListEmptyIcon(filter: UserListFilter, isSearchActive: boolean): typeof Search {
+  if (isSearchActive) {
+    return Search
+  }
+  if (filter === 'account-attention' || filter === 'disabled-account') {
+    return UserX
+  }
+  if (filter === 'admin') {
+    return Shield
+  }
+  if (filter === 'active') {
+    return UserIcon
+  }
+  if (filter === 'never-login') {
+    return LogOut
+  }
+  if (filter === 'access-review') {
+    return ListChecks
+  }
+  return AlertCircle
 }
 
 function getHomeDirValidationIssue(
@@ -408,6 +454,13 @@ function UserCard({
   onToggleStatus: () => void
   isCurrentUser: boolean
 }) {
+  const quota = getQuotaStatus(user)
+  const accessContext = getUserAccessContext(user)
+  const quotaProgressValue = quota.percent === null ? 0 : Math.min(100, Math.max(0, quota.percent))
+  const quotaProgressValueText = quota.percent === null
+    ? `不限额，已用 ${formatBytes(user.used_bytes)}`
+    : `${quota.percent}% 已用，${quota.detail}`
+
   return (
     <Card className="card-meridian">
       <CardBody className="p-4">
@@ -525,6 +578,27 @@ function UserCard({
             <FolderOpen size={14} className="shrink-0" />
             <span className="truncate font-mono">{user.home_dir}</span>
           </div>
+          <div className="flex min-w-0 items-start gap-2 text-default-500">
+            <Shield size={14} className="mt-0.5 shrink-0" />
+            <div className="min-w-0 flex-1">
+              <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+                <span className="text-xs font-medium text-foreground">{accessContext.scopeLabel}</span>
+                <Chip size="sm" variant="flat" color={accessContext.scopeTone}>
+                  权限范围
+                </Chip>
+              </div>
+              <p className="mt-1 text-xs text-default-500">{accessContext.scopeDescription}</p>
+              {accessContext.reviewHints.length > 0 && (
+                <div className="mt-2 flex flex-wrap gap-1" aria-label={`${user.username} 复核提示`}>
+                  {accessContext.reviewHints.map((hint) => (
+                    <Chip key={hint.key} size="sm" variant="flat" color={hint.tone}>
+                      {hint.label}
+                    </Chip>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
           <div className="flex min-w-0 items-center gap-2 text-default-500">
             <Calendar size={14} className="shrink-0" />
             <span className="truncate">创建于 {formatDate(user.created_at)}</span>
@@ -541,6 +615,37 @@ function UserCard({
               已用 {formatBytes(user.used_bytes)}
               {user.quota_bytes > 0 && ` / ${formatBytes(user.quota_bytes)}`}
             </span>
+          </div>
+          <div className="rounded-lg border border-divider bg-content2/40 px-3 py-2">
+            <div className="mb-2 flex min-w-0 items-center justify-between gap-2">
+              <div className="min-w-0">
+                <div className="text-xs font-medium text-foreground">容量配额状态</div>
+                <div className="truncate text-xs text-default-500">{quota.detail}</div>
+              </div>
+              <Chip size="sm" variant="flat" color={quota.tone}>
+                {quota.label}
+              </Chip>
+            </div>
+            {quota.percent === null ? (
+              <Progress
+                value={0}
+                color="default"
+                className="h-2 opacity-60"
+                aria-label={`${user.username} 未设置用户容量限制`}
+                aria-valuetext={quotaProgressValueText}
+              />
+            ) : (
+              <Progress
+                value={quotaProgressValue}
+                color={quota.tone === 'danger' ? 'danger' : quota.tone === 'warning' ? 'warning' : 'success'}
+                className="h-2"
+                aria-label={`${user.username} 配额使用率`}
+                aria-valuetext={quotaProgressValueText}
+              />
+            )}
+            <div className="mt-1 text-right text-xs text-default-500">
+              {quota.percent === null ? '不限额' : `${quota.percent}%`}
+            </div>
           </div>
         </div>
       </CardBody>
@@ -573,6 +678,9 @@ export function UsersPage() {
   const [newQuotaValue, setNewQuotaValue] = useState('0')
   const [newQuotaUnit, setNewQuotaUnit] = useState<QuotaUnit>('GB')
   const [resetPassword, setResetPassword] = useState('')
+  const [userListFilter, setUserListFilter] = useState<UserListFilter>('all')
+  const [userSearchQuery, setUserSearchQuery] = useState('')
+  const [userListSort, setUserListSort] = useState<UserListSort>('default')
   const currentUserId = getStoredUser()?.id ?? 'anonymous'
   const usersQueryKey = ['users', currentUserId] as const
   const createSessionRef = useRef(0)
@@ -1043,19 +1151,128 @@ export function UsersPage() {
   }, [currentUserId, revokeSessionsMutation])
 
   const handleRefreshUsers = useCallback(async () => {
-	const result = await refetch()
-	if (result.error) {
-	  addToast(getUsersRefreshErrorPresentation(result.error))
-	  return
-	}
-	addToast({ title: '用户列表已刷新', color: 'success' })
+    const result = await refetch()
+    if (result.error) {
+      addToast(getUsersRefreshErrorPresentation(result.error))
+      return
+    }
+    addToast({ title: '用户列表已刷新', color: 'success' })
   }, [refetch])
+
+  const handleClearUserListView = useCallback(() => {
+    setUserListFilter('all')
+    setUserSearchQuery('')
+    setUserListSort('default')
+  }, [])
+
+  const handleFocusUserListFilter = useCallback((filter: UserListFilter) => {
+    setUserListFilter(filter)
+    setUserSearchQuery('')
+    setUserListSort('default')
+  }, [])
 
   const users = data?.users ?? []
   const totalUsers = data?.total ?? users.length
   const adminCount = users.filter((user) => user.role === 'admin').length
   const activeUserCount = users.filter((user) => !user.disabled).length
+  const accountAttentionSummary = summarizeUserAccountAttention(users)
+  const accountAttentionCount = accountAttentionSummary.attentionCount
+  const quotaAttentionCount = users.filter(userNeedsQuotaAttention).length
+  const accessReviewSummary = summarizeUserAccessReview(users)
+  const accessReviewCount = accessReviewSummary.reviewCount
+  const userListView = getUserListView(users, userListFilter, userSearchQuery, userListSort)
+  const visibleUsers = userListView.users
+  const isUserSearchActive = userListView.isSearchActive
+  const userAccountAttentionReport = users.length > 0 ? formatUserAccountAttentionReport(users) : ''
+  const userQuotaSummaryReport = users.length > 0 ? formatUserQuotaSummaryReport(users) : ''
+  const userAccessReviewReport = users.length > 0 ? formatUserAccessReviewReport(users) : ''
   const usersLoadError = error ? getUsersLoadErrorPresentation(error) : null
+
+  const handleCopyUserAccountAttention = async () => {
+    if (!navigator.clipboard?.writeText) {
+      addToast({
+        title: '无法复制用户账号摘要',
+        description: '当前浏览器不支持剪贴板写入。',
+        color: 'warning',
+      })
+      return
+    }
+
+    try {
+      await navigator.clipboard.writeText(userAccountAttentionReport)
+      addToast({ title: '用户账号摘要已复制', color: 'success' })
+    } catch {
+      addToast({
+        title: '无法复制用户账号摘要',
+        description: clipboardWriteFailureDescription,
+        color: 'danger',
+      })
+    }
+  }
+
+  const handleCopyUserQuotaSummary = async () => {
+    if (!navigator.clipboard?.writeText) {
+      addToast({
+        title: '无法复制用户配额摘要',
+        description: '当前浏览器不支持剪贴板写入。',
+        color: 'warning',
+      })
+      return
+    }
+
+    try {
+      await navigator.clipboard.writeText(userQuotaSummaryReport)
+      addToast({ title: '用户配额摘要已复制', color: 'success' })
+    } catch {
+      addToast({
+        title: '无法复制用户配额摘要',
+        description: clipboardWriteFailureDescription,
+        color: 'danger',
+      })
+    }
+  }
+
+  const handleCopyUserAccessReview = async () => {
+    if (!navigator.clipboard?.writeText) {
+      addToast({
+        title: '无法复制用户权限摘要',
+        description: '当前浏览器不支持剪贴板写入。',
+        color: 'warning',
+      })
+      return
+    }
+
+    try {
+      await navigator.clipboard.writeText(userAccessReviewReport)
+      addToast({ title: '用户权限摘要已复制', color: 'success' })
+    } catch {
+      addToast({
+        title: '无法复制用户权限摘要',
+        description: clipboardWriteFailureDescription,
+        color: 'danger',
+      })
+    }
+  }
+
+  const handleExportVisibleUserList = () => {
+    if (visibleUsers.length === 0) {
+      addToast({ title: '没有可导出的用户', color: 'warning' })
+      return
+    }
+
+    const csv = `\uFEFF${buildUserListViewCsv(visibleUsers, {
+      summaryText: userListView.summaryText,
+      filterLabel: userListView.filterLabel,
+      sortLabel: userListView.sortLabel,
+      searchQuery: userSearchQuery,
+    })}`
+    triggerBrowserDownload(new Blob([csv], { type: 'text/csv;charset=utf-8' }), userListExportFilename())
+    addToast({
+      title: '用户清单已导出',
+      description: `已导出当前视图 ${visibleUsers.length} 个用户。`,
+      color: 'success',
+    })
+  }
 
   return (
     <div className="flex h-full min-h-0 flex-col p-4 sm:p-6">
@@ -1088,31 +1305,259 @@ export function UsersPage() {
       />
 
       {/* Stats */}
-      <div className="grid grid-cols-1 gap-4 mb-6 sm:grid-cols-3">
+      <div className="grid grid-cols-2 gap-2 mb-4 sm:gap-3 xl:grid-cols-6">
         <StatCard
           title="总用户数"
           value={totalUsers}
           icon={UsersIcon}
           tone="primary"
+          density="compact"
+          onPress={() => handleFocusUserListFilter('all')}
+          ariaLabel="查看全部用户"
         />
         <StatCard
           title="管理员"
           value={adminCount}
           icon={Shield}
           tone="danger"
+          density="compact"
+          onPress={() => handleFocusUserListFilter('admin')}
+          ariaLabel="查看管理员"
         />
         <StatCard
           title="活跃用户"
           value={activeUserCount}
           icon={UserIcon}
           tone="success"
+          density="compact"
+          onPress={() => handleFocusUserListFilter('active')}
+          ariaLabel="查看活跃用户"
+        />
+        <StatCard
+          title="账号关注"
+          value={accountAttentionCount}
+          subtitle={accountAttentionCount > 0
+            ? `停用 ${accountAttentionSummary.disabledCount} 个 · 从未登录 ${accountAttentionSummary.neverLoggedInCount} 个`
+            : '暂无账号复核项'}
+          icon={UserX}
+          tone={accountAttentionCount > 0 ? 'warning' : 'success'}
+          density="compact"
+          onPress={() => handleFocusUserListFilter('account-attention')}
+          ariaLabel="查看账号关注用户"
+        />
+        <StatCard
+          title="配额关注"
+          value={quotaAttentionCount}
+          subtitle={quotaAttentionCount > 0 ? `${quotaAttentionCount} 个用户接近或超过上限` : '暂无接近上限用户'}
+          icon={AlertCircle}
+          tone={quotaAttentionCount > 0 ? 'warning' : 'success'}
+          density="compact"
+          onPress={() => handleFocusUserListFilter('quota-attention')}
+          ariaLabel="查看配额关注用户"
+        />
+        <StatCard
+          title="复核提示"
+          value={accessReviewCount}
+          subtitle={accessReviewCount > 0
+            ? `严重 ${accessReviewSummary.dangerReviewCount} 个 · 提醒 ${accessReviewSummary.warningReviewCount} 个 · 记录 ${accessReviewSummary.noteReviewCount} 个`
+            : '暂无复核提示'}
+          icon={ListChecks}
+          tone={accessReviewCount > 0 ? 'warning' : 'success'}
+          density="compact"
+          onPress={() => handleFocusUserListFilter('access-review')}
+          ariaLabel="查看复核提示用户"
         />
       </div>
 
       {/* User List */}
       <Card className="card-meridian min-h-0 flex-1 overflow-hidden">
-        <CardHeader className="border-b border-divider">
-          <h2 className="font-semibold text-foreground">用户列表</h2>
+        <CardHeader className="flex flex-col items-start gap-3 border-b border-divider sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <h2 className="font-semibold text-foreground">用户列表</h2>
+            <p className="mt-1 text-xs text-default-500">{userListView.summaryText}</p>
+          </div>
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+            {users.length > 0 && (
+              <div className="flex flex-wrap gap-2">
+                <Button
+                  size="sm"
+                  variant="flat"
+                  className="w-fit rounded-lg"
+                  startContent={<UserX size={14} />}
+                  onPress={handleCopyUserAccountAttention}
+                >
+                  复制账号摘要
+                </Button>
+                <Button
+                  size="sm"
+                  variant="flat"
+                  className="w-fit rounded-lg"
+                  startContent={<Copy size={14} />}
+                  onPress={handleCopyUserQuotaSummary}
+                >
+                  复制配额摘要
+                </Button>
+                <Button
+                  size="sm"
+                  variant="flat"
+                  className="w-fit rounded-lg"
+                  startContent={<Shield size={14} />}
+                  onPress={handleCopyUserAccessReview}
+                >
+                  复制权限摘要
+                </Button>
+                <Button
+                  size="sm"
+                  variant="flat"
+                  className="w-fit rounded-lg"
+                  startContent={<Download size={14} />}
+                  isDisabled={visibleUsers.length === 0}
+                  onPress={handleExportVisibleUserList}
+                >
+                  导出当前清单
+                </Button>
+              </div>
+            )}
+            <Dropdown placement="bottom-end">
+              <DropdownTrigger>
+                <Button
+                  size="sm"
+                  variant={userListView.isSortActive ? 'flat' : 'bordered'}
+                  className="w-fit rounded-lg"
+                  startContent={<ArrowUpDown size={14} />}
+                  aria-label={`排序：${userListView.sortLabel}`}
+                >
+                  排序：{userListView.sortLabel}
+                </Button>
+              </DropdownTrigger>
+              <DropdownMenu
+                aria-label="用户列表排序"
+                classNames={{ base: "bg-content1 border border-divider shadow-lg" }}
+              >
+                <DropdownItem key="default" onPress={() => setUserListSort('default')}>
+                  默认顺序
+                </DropdownItem>
+                <DropdownItem key="username" onPress={() => setUserListSort('username')}>
+                  按用户名
+                </DropdownItem>
+                <DropdownItem key="role" onPress={() => setUserListSort('role')}>
+                  按角色
+                </DropdownItem>
+                <DropdownItem key="quota-used" onPress={() => setUserListSort('quota-used')}>
+                  按容量用量
+                </DropdownItem>
+                <DropdownItem key="last-login" onPress={() => setUserListSort('last-login')}>
+                  按最后登录
+                </DropdownItem>
+              </DropdownMenu>
+            </Dropdown>
+            <Input
+              aria-label="搜索用户"
+              placeholder="搜索用户、邮箱、用户组或主目录"
+              value={userSearchQuery}
+              onValueChange={setUserSearchQuery}
+              size="sm"
+              variant="bordered"
+              startContent={<Search size={14} className="text-default-400" />}
+              className="w-full sm:w-72"
+              classNames={{
+                inputWrapper: "h-9 bg-content1 border-divider data-[focus=true]:!border-accent-primary",
+                input: "text-xs",
+              }}
+            />
+            {userListView.hasActiveControls && (
+              <Button
+                size="sm"
+                variant="light"
+                className="w-fit rounded-lg text-default-600"
+                startContent={<X size={14} />}
+                onPress={handleClearUserListView}
+              >
+                清除筛选
+              </Button>
+            )}
+            <div className="flex flex-wrap rounded-lg border border-divider bg-content2/50 p-1" role="group" aria-label="用户列表筛选">
+              <Button
+                size="sm"
+                variant={userListFilter === 'all' ? 'solid' : 'light'}
+                color={userListFilter === 'all' ? 'primary' : 'default'}
+                className="rounded-md"
+                onPress={() => setUserListFilter('all')}
+              >
+                全部用户
+              </Button>
+              <Button
+                size="sm"
+                variant={userListFilter === 'admin' ? 'solid' : 'light'}
+                color={userListFilter === 'admin' ? 'danger' : 'default'}
+                className="rounded-md"
+                startContent={<Shield size={14} />}
+                onPress={() => setUserListFilter('admin')}
+              >
+                管理员
+              </Button>
+              <Button
+                size="sm"
+                variant={userListFilter === 'active' ? 'solid' : 'light'}
+                color={userListFilter === 'active' ? 'success' : 'default'}
+                className="rounded-md"
+                startContent={<UserIcon size={14} />}
+                onPress={() => setUserListFilter('active')}
+              >
+                活跃用户
+              </Button>
+              <Button
+                size="sm"
+                variant={userListFilter === 'account-attention' ? 'solid' : 'light'}
+                color={userListFilter === 'account-attention' ? 'warning' : 'default'}
+                className="rounded-md"
+                startContent={<UserX size={14} />}
+                onPress={() => setUserListFilter('account-attention')}
+              >
+                账号关注
+              </Button>
+              <Button
+                size="sm"
+                variant={userListFilter === 'disabled-account' ? 'solid' : 'light'}
+                color={userListFilter === 'disabled-account' ? 'warning' : 'default'}
+                className="rounded-md"
+                startContent={<UserX size={14} />}
+                onPress={() => setUserListFilter('disabled-account')}
+              >
+                停用账号
+              </Button>
+              <Button
+                size="sm"
+                variant={userListFilter === 'never-login' ? 'solid' : 'light'}
+                color={userListFilter === 'never-login' ? 'warning' : 'default'}
+                className="rounded-md"
+                startContent={<LogOut size={14} />}
+                onPress={() => setUserListFilter('never-login')}
+              >
+                从未登录
+              </Button>
+              <Button
+                size="sm"
+                variant={userListFilter === 'quota-attention' ? 'solid' : 'light'}
+                color={userListFilter === 'quota-attention' ? 'warning' : 'default'}
+                className="rounded-md"
+                startContent={<AlertCircle size={14} />}
+                onPress={() => setUserListFilter('quota-attention')}
+              >
+                配额关注
+              </Button>
+              <Button
+                size="sm"
+                variant={userListFilter === 'access-review' ? 'solid' : 'light'}
+                color={userListFilter === 'access-review' ? 'warning' : 'default'}
+                className="rounded-md"
+                startContent={<ListChecks size={14} />}
+                onPress={() => setUserListFilter('access-review')}
+              >
+                复核提示
+              </Button>
+            </div>
+          </div>
         </CardHeader>
         <CardBody className="overflow-auto custom-scrollbar">
           {isLoading ? (
@@ -1139,9 +1584,24 @@ export function UsersPage() {
             <div className="flex items-center justify-center h-40">
               <EmptyState icon={UsersIcon} title="暂无用户" />
             </div>
+          ) : !visibleUsers.length ? (
+            <div className="flex items-center justify-center h-40">
+              <EmptyState
+                icon={getUserListEmptyIcon(userListFilter, isUserSearchActive)}
+                title={getUserListEmptyTitle(userListFilter, isUserSearchActive)}
+                description={getUserListEmptyDescription(userListFilter, isUserSearchActive)}
+                action={userListView.hasActiveControls
+                  ? (
+                    <Button variant="bordered" className="rounded-lg" onPress={handleClearUserListView}>
+                      清除筛选
+                    </Button>
+                  )
+                  : undefined}
+              />
+            </div>
           ) : (
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 p-1">
-              {users.map((user) => (
+              {visibleUsers.map((user) => (
                 <UserCard
                   key={user.id}
                   user={user}

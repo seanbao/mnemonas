@@ -7,8 +7,8 @@ delete process.env.NO_COLOR
 const STORAGE_STATE = './e2e/.auth/user.json'
 const CONFIG_DIR = path.dirname(fileURLToPath(import.meta.url))
 const E2E_ROOT = process.env.MNEMONAS_E2E_ROOT || '/tmp/mnemonas-playwright'
-const BACKEND_URL = process.env.MNEMONAS_E2E_BACKEND_URL || 'http://127.0.0.1:18080'
-const FRONTEND_URL = process.env.MNEMONAS_E2E_FRONTEND_URL || 'http://127.0.0.1:4173'
+const BACKEND_URL = process.env.MNEMONAS_E2E_BACKEND_URL || 'http://127.0.0.1:18180'
+const FRONTEND_URL = process.env.MNEMONAS_E2E_FRONTEND_URL || 'http://127.0.0.1:14173'
 const REUSE_EXISTING_SERVER = process.env.MNEMONAS_E2E_REUSE_EXISTING === '1'
 const BACKEND_PARSED_URL = new URL(BACKEND_URL)
 const BACKEND_PORT = BACKEND_PARSED_URL.port || (BACKEND_PARSED_URL.protocol === 'https:' ? '443' : '80')
@@ -166,7 +166,7 @@ export default defineConfig({
     },
     {
       name: 'mnemonas-e2e-frontend',
-      command: `npm run dev -- --host ${FRONTEND_HOST} --port ${FRONTEND_PORT}`,
+      command: `npm run build && npm run preview -- --host ${FRONTEND_HOST} --port ${FRONTEND_PORT}`,
       cwd: CONFIG_DIR,
       env: {
         ...WEB_SERVER_ENV,

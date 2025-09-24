@@ -345,6 +345,7 @@ describe('DashboardPage', () => {
 
       await waitFor(() => {
         expect(screen.getByText('备份需要查看')).toBeTruthy()
+        expect(screen.getByText('建议: 运行立即备份并查看最近备份结果')).toBeTruthy()
         expect(screen.getByRole('button', { name: '打开备份' })).toBeTruthy()
       })
 
@@ -375,7 +376,44 @@ describe('DashboardPage', () => {
       await waitFor(() => {
         expect(screen.getByText('备份需要查看')).toBeTruthy()
         expect(screen.getByText('1 项待处理')).toBeTruthy()
-        expect(screen.getAllByText('检查失败、过期、缺少演练或恢复校验的任务').length).toBeGreaterThan(0)
+        expect(screen.getAllByText('恢复待校验').length).toBeGreaterThan(0)
+        expect(screen.getByText('建议: 运行检查恢复完成只读校验')).toBeTruthy()
+      })
+    })
+
+    it('counts warning-only backup jobs as attention items', async () => {
+      mockListBackupJobs.mockResolvedValueOnce([{
+        id: 'external-disk',
+        name: '外置硬盘备份',
+        type: 'local',
+        disabled: false,
+        health_status: 'ok',
+        retention_status: 'ok',
+        restore_drill_status: 'ok',
+        running: false,
+        last_run: {
+          status: 'completed',
+          warning: true,
+          warnings: ['backup completed with warnings'],
+        },
+        last_restore: {
+          status: 'completed',
+          target_path: '/restore/mnemonas',
+          warnings: ['restore completed with warnings'],
+        },
+        last_matching_restore_verify: {
+          status: 'completed',
+          warnings: [],
+        },
+      }])
+
+      render(<DashboardPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('备份需要查看')).toBeTruthy()
+        expect(screen.getByText('1 项待处理')).toBeTruthy()
+        expect(screen.getAllByText('最近备份有警告、最近恢复有警告').length).toBeGreaterThan(0)
+        expect(screen.getByText('建议: 运行立即备份并查看最近备份结果、导出恢复摘要并复核恢复警告')).toBeTruthy()
       })
     })
 
@@ -479,8 +517,10 @@ describe('DashboardPage', () => {
       expect(await screen.findByText('首次部署检查')).toBeTruthy()
       expect(screen.getByText('初始登录凭据已处理')).toBeTruthy()
       expect(screen.getByText(/initial-password.txt/)).toBeTruthy()
+      expect(screen.getByText(/认证:\s*已启用/)).toBeTruthy()
       expect(screen.getByText(/分享:\s*可用/)).toBeTruthy()
       expect(screen.getByText(/WebDAV:\s*basic/)).toBeTruthy()
+      expect(screen.getByText('还需确认 4 项后才能关闭首次运行提示。')).toBeTruthy()
       const confirmButton = screen.getByRole('button', { name: '还需确认 4 项' })
 
       expect(confirmButton).toBeDisabled()
@@ -496,6 +536,7 @@ describe('DashboardPage', () => {
         await user.click(screen.getByRole('checkbox', { name: new RegExp(item) }))
       }
 
+      expect(screen.getByText('首次部署检查已完成，可以关闭首次运行提示。')).toBeTruthy()
       expect(confirmButton).not.toBeDisabled()
       await user.click(confirmButton)
 
@@ -545,6 +586,27 @@ describe('DashboardPage', () => {
         })
       })
       expect(screen.getByText('首次部署检查')).toBeTruthy()
+    })
+
+    it('shows first-run public exposure warning when setup security status is unsafe', async () => {
+      mockGetSetupStatus.mockResolvedValueOnce({
+        success: true,
+        is_first_run: true,
+        auth_enabled: false,
+        share_enabled: true,
+        webdav_enabled: true,
+        webdav_auth_type: 'none',
+      })
+
+      render(<DashboardPage />)
+
+      expect(await screen.findByText('首次部署检查')).toBeTruthy()
+      expect(screen.getByText(/认证:\s*需启用/)).toBeTruthy()
+      expect(screen.getByText(/分享:\s*可用/)).toBeTruthy()
+      expect(screen.getByText(/WebDAV:\s*匿名/)).toBeTruthy()
+      expect(screen.getByText(/Web UI\/API 认证未启用/)).toBeTruthy()
+      expect(screen.getByText(/WebDAV 匿名访问已启用/)).toBeTruthy()
+      expect(screen.getByText(/公网部署前应先处理/)).toBeTruthy()
     })
   })
 
@@ -865,8 +927,10 @@ describe('DashboardPage', () => {
       render(<DashboardPage />)
       
       await waitFor(() => {
-        const progressBar = document.querySelector('[class*="gradient"]')
+        const progressBar = screen.getByRole('progressbar', { name: '首页存储使用率' })
         expect(progressBar).toBeTruthy()
+        expect(progressBar).toHaveAttribute('aria-valuenow', '5')
+        expect(progressBar).toHaveAttribute('aria-valuetext', '5.0% 已用')
       })
     })
 

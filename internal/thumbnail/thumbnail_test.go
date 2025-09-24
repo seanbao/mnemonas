@@ -125,20 +125,25 @@ func createTestTIFF(width, height int) []byte {
 	return buf.Bytes()
 }
 
-// createTempDir creates a temporary directory that handles async cleanup properly
-// Returns the directory path and a cleanup function
-func createTempDir(t *testing.T) (string, func()) {
+func newTestThumbnailService(t *testing.T) (*Service, string) {
 	t.Helper()
 	tmpDir, err := os.MkdirTemp("", "thumbnail-test-*")
 	if err != nil {
 		t.Fatalf("failed to create temp dir: %v", err)
 	}
-	cleanup := func() {
-		// Wait for async cache operations to complete
-		time.Sleep(50 * time.Millisecond)
+
+	svc, err := NewService(tmpDir)
+	if err != nil {
 		os.RemoveAll(tmpDir)
+		t.Fatalf("NewService failed: %v", err)
 	}
-	return tmpDir, cleanup
+
+	t.Cleanup(func() {
+		svc.Wait()
+		os.RemoveAll(tmpDir)
+	})
+
+	return svc, tmpDir
 }
 
 func TestNewService(t *testing.T) {
@@ -541,13 +546,7 @@ func TestSizeDimensions(t *testing.T) {
 }
 
 func TestGetThumbnail(t *testing.T) {
-	tmpDir, cleanup := createTempDir(t)
-	defer cleanup()
-
-	svc, err := NewService(tmpDir)
-	if err != nil {
-		t.Fatalf("NewService failed: %v", err)
-	}
+	svc, _ := newTestThumbnailService(t)
 
 	imgData := createTestImage(800, 600)
 	reader := bytes.NewReader(imgData)
@@ -569,13 +568,7 @@ func TestGetThumbnail(t *testing.T) {
 }
 
 func TestGetThumbnail_DefaultSize(t *testing.T) {
-	tmpDir, cleanup := createTempDir(t)
-	defer cleanup()
-
-	svc, err := NewService(tmpDir)
-	if err != nil {
-		t.Fatalf("NewService failed: %v", err)
-	}
+	svc, _ := newTestThumbnailService(t)
 
 	imgData := createTestImage(400, 400)
 	reader := bytes.NewReader(imgData)
@@ -592,12 +585,7 @@ func TestGetThumbnail_DefaultSize(t *testing.T) {
 }
 
 func TestGetThumbnail_Caching(t *testing.T) {
-	tmpDir, cleanup := createTempDir(t)
-	defer cleanup()
-	svc, err := NewService(tmpDir)
-	if err != nil {
-		t.Fatalf("NewService failed: %v", err)
-	}
+	svc, _ := newTestThumbnailService(t)
 
 	imgData := createTestImage(500, 500)
 	ctx := context.Background()
@@ -609,8 +597,7 @@ func TestGetThumbnail_Caching(t *testing.T) {
 		t.Fatalf("first GetThumbnail failed: %v", err)
 	}
 
-	// Wait for async cache save
-	time.Sleep(100 * time.Millisecond)
+	svc.Wait()
 
 	// Second call - should use cache
 	reader2 := bytes.NewReader(imgData)
@@ -626,20 +613,15 @@ func TestGetThumbnail_Caching(t *testing.T) {
 }
 
 func TestGetThumbnailVersioned_BypassesStaleCacheForNewVersion(t *testing.T) {
-	tmpDir, cleanup := createTempDir(t)
-	defer cleanup()
-	svc, err := NewService(tmpDir)
-	if err != nil {
-		t.Fatalf("NewService failed: %v", err)
-	}
+	svc, _ := newTestThumbnailService(t)
 
 	ctx := context.Background()
 	if _, err := svc.GetThumbnailVersioned(ctx, "/test/versioned.png", "v1", SizeSmall, bytes.NewReader(createTestImage(64, 64))); err != nil {
 		t.Fatalf("GetThumbnailVersioned(v1) failed: %v", err)
 	}
 
-	// Wait for async cache persistence so a stale cache entry exists for v1.
-	time.Sleep(100 * time.Millisecond)
+	// Ensure async cache persistence completes so a stale cache entry exists for v1.
+	svc.Wait()
 
 	if _, err := svc.GetThumbnailVersioned(ctx, "/test/versioned.png", "v2", SizeSmall, bytes.NewReader([]byte("not-an-image"))); err == nil {
 		t.Fatal("expected new thumbnail version to bypass old cache entry and regenerate")
@@ -647,12 +629,7 @@ func TestGetThumbnailVersioned_BypassesStaleCacheForNewVersion(t *testing.T) {
 }
 
 func TestGetThumbnail_ReturnsInProgressGeneratedBytesBeforeCacheSaveCompletes(t *testing.T) {
-	tmpDir, cleanup := createTempDir(t)
-	defer cleanup()
-	svc, err := NewService(tmpDir)
-	if err != nil {
-		t.Fatalf("NewService failed: %v", err)
-	}
+	svc, _ := newTestThumbnailService(t)
 
 	cacheKey := svc.cacheKey("/test/in-progress.png", SizeSmall)
 	result := &thumbnailGenerationResult{done: make(chan struct{})}
@@ -694,12 +671,7 @@ func TestGetThumbnail_ReturnsInProgressGeneratedBytesBeforeCacheSaveCompletes(t 
 }
 
 func TestGetThumbnail_ReusesGeneratedBytesUntilAsyncCacheSaveCompletes(t *testing.T) {
-	tmpDir, cleanup := createTempDir(t)
-	defer cleanup()
-	svc, err := NewService(tmpDir)
-	if err != nil {
-		t.Fatalf("NewService failed: %v", err)
-	}
+	svc, _ := newTestThumbnailService(t)
 
 	started := make(chan struct{}, 1)
 	release := make(chan struct{})
@@ -745,29 +717,29 @@ func TestGetThumbnail_ReusesGeneratedBytesUntilAsyncCacheSaveCompletes(t *testin
 	}
 
 	close(release)
-	deadline := time.Now().Add(time.Second)
-	for {
-		svc.ipMu.Lock()
-		_, stillInProgress := svc.inProgress[cacheKey]
-		svc.ipMu.Unlock()
-		if !stillInProgress {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("expected in-progress entry to clear after cache save completed")
-		}
-		time.Sleep(10 * time.Millisecond)
+	svc.Wait()
+	svc.ipMu.Lock()
+	_, stillInProgress := svc.inProgress[cacheKey]
+	svc.ipMu.Unlock()
+	if stillInProgress {
+		t.Fatal("expected in-progress entry to clear after cache save completed")
 	}
 }
 
 func TestGetThumbnail_ReusesGeneratedBytesBrieflyAfterCacheSaveFailure(t *testing.T) {
-	tmpDir, cleanup := createTempDir(t)
-	defer cleanup()
-	svc, err := NewService(tmpDir)
-	if err != nil {
-		t.Fatalf("NewService failed: %v", err)
-	}
+	svc, _ := newTestThumbnailService(t)
 	svc.failedCacheReuseTTL = 50 * time.Millisecond
+	expired := make(chan string, 1)
+	originalOnThumbnailInProgressExpired := onThumbnailInProgressExpired
+	onThumbnailInProgressExpired = func(cacheKey string) {
+		select {
+		case expired <- cacheKey:
+		default:
+		}
+	}
+	t.Cleanup(func() {
+		onThumbnailInProgressExpired = originalOnThumbnailInProgressExpired
+	})
 
 	failedSave := make(chan struct{}, 1)
 	originalSyncThumbnailCacheRootDir := syncThumbnailCacheRootDir
@@ -810,7 +782,14 @@ func TestGetThumbnail_ReusesGeneratedBytesBrieflyAfterCacheSaveFailure(t *testin
 		t.Fatal("expected second GetThumbnail to return the first generated thumbnail bytes")
 	}
 
-	time.Sleep(svc.failedCacheReuseTTL + 20*time.Millisecond)
+	select {
+	case got := <-expired:
+		if got != cacheKey {
+			t.Fatalf("expired cache key = %q, want %q", got, cacheKey)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for failed-cache reuse entry to expire")
+	}
 	svc.ipMu.Lock()
 	_, stillInProgress := svc.inProgress[cacheKey]
 	svc.ipMu.Unlock()
@@ -824,12 +803,7 @@ func TestGetThumbnail_ReusesGeneratedBytesBrieflyAfterCacheSaveFailure(t *testin
 }
 
 func TestGetThumbnail_ReturnsInProgressGenerationError(t *testing.T) {
-	tmpDir, cleanup := createTempDir(t)
-	defer cleanup()
-	svc, err := NewService(tmpDir)
-	if err != nil {
-		t.Fatalf("NewService failed: %v", err)
-	}
+	svc, _ := newTestThumbnailService(t)
 
 	cacheKey := svc.cacheKey("/test/in-progress-error.png", SizeSmall)
 	expectedErr := errors.New("decode failed")
@@ -1131,8 +1105,7 @@ func TestGetThumbnail_DifferentSizes(t *testing.T) {
 		thumbs = append(thumbs, thumb)
 	}
 
-	// Wait for async cache saves to complete before cleanup
-	time.Sleep(50 * time.Millisecond)
+	svc.Wait()
 
 	// Larger sizes should generally produce larger files
 	if len(thumbs[0]) >= len(thumbs[2]) {
@@ -1141,13 +1114,7 @@ func TestGetThumbnail_DifferentSizes(t *testing.T) {
 }
 
 func TestGetThumbnail_ContextCancel(t *testing.T) {
-	tmpDir, cleanup := createTempDir(t)
-	defer cleanup()
-
-	svc, err := NewService(tmpDir)
-	if err != nil {
-		t.Fatalf("NewService failed: %v", err)
-	}
+	svc, _ := newTestThumbnailService(t)
 
 	imgData := createTestImage(2000, 2000) // Large image
 	reader := bytes.NewReader(imgData)
@@ -1155,22 +1122,17 @@ func TestGetThumbnail_ContextCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // Cancel immediately
 
-	_, err = svc.GetThumbnail(ctx, "/test/cancelled.png", SizeMedium, reader)
+	_, err := svc.GetThumbnail(ctx, "/test/cancelled.png", SizeMedium, reader)
 	if err == nil {
 		t.Log("Note: thumbnail generation completed before context was checked")
 	}
 }
 
 func TestGetThumbnail_RejectsOversizedSourceImage(t *testing.T) {
-	tmpDir, cleanup := createTempDir(t)
-	defer cleanup()
-	svc, err := NewService(tmpDir)
-	if err != nil {
-		t.Fatalf("NewService failed: %v", err)
-	}
+	svc, _ := newTestThumbnailService(t)
 
 	reader := bytes.NewReader(createTestPNGConfigOnly(maxThumbnailSourceDimension+1, maxThumbnailSourceDimension))
-	_, err = svc.GetThumbnail(context.Background(), "/test/oversized.png", SizeMedium, reader)
+	_, err := svc.GetThumbnail(context.Background(), "/test/oversized.png", SizeMedium, reader)
 	if !errors.Is(err, ErrThumbnailSourceTooLarge) {
 		t.Fatalf("expected ErrThumbnailSourceTooLarge, got %v", err)
 	}
@@ -1185,13 +1147,7 @@ func TestGetThumbnail_RejectsOversizedSourceImage(t *testing.T) {
 }
 
 func TestGetThumbnail_AlphaChannel(t *testing.T) {
-	tmpDir, cleanup := createTempDir(t)
-	defer cleanup()
-
-	svc, err := NewService(tmpDir)
-	if err != nil {
-		t.Fatalf("NewService failed: %v", err)
-	}
+	svc, _ := newTestThumbnailService(t)
 
 	imgData := createTestImageWithAlpha(400, 400)
 	reader := bytes.NewReader(imgData)
@@ -1207,12 +1163,7 @@ func TestGetThumbnail_AlphaChannel(t *testing.T) {
 }
 
 func TestGetThumbnail_SupportsDeclaredNonPNGFormats(t *testing.T) {
-	tmpDir, cleanup := createTempDir(t)
-	defer cleanup()
-	svc, err := NewService(tmpDir)
-	if err != nil {
-		t.Fatalf("NewService failed: %v", err)
-	}
+	svc, _ := newTestThumbnailService(t)
 
 	tests := []struct {
 		name     string
@@ -1241,12 +1192,7 @@ func TestGetThumbnail_SupportsDeclaredNonPNGFormats(t *testing.T) {
 }
 
 func TestCacheStats(t *testing.T) {
-	tmpDir, cleanup := createTempDir(t)
-	defer cleanup()
-	svc, err := NewService(tmpDir)
-	if err != nil {
-		t.Fatalf("NewService failed: %v", err)
-	}
+	svc, _ := newTestThumbnailService(t)
 
 	ctx := context.Background()
 
@@ -1267,8 +1213,7 @@ func TestCacheStats(t *testing.T) {
 		t.Fatalf("GetThumbnail failed: %v", err)
 	}
 
-	// Wait for cache save
-	time.Sleep(100 * time.Millisecond)
+	svc.Wait()
 
 	// Stats should show 1 file
 	count, size, err = svc.CacheStats(ctx)
@@ -1348,25 +1293,24 @@ func TestCacheStats_DoesNotBlockSaveToCache(t *testing.T) {
 }
 
 func TestCleanCache(t *testing.T) {
-	tmpDir, cleanup := createTempDir(t)
-	defer cleanup()
-	svc, err := NewService(tmpDir)
-	if err != nil {
-		t.Fatalf("NewService failed: %v", err)
-	}
+	svc, _ := newTestThumbnailService(t)
 
 	ctx := context.Background()
 
 	// Generate a thumbnail
 	imgData := createTestImage(300, 300)
 	reader := bytes.NewReader(imgData)
-	_, err = svc.GetThumbnail(ctx, "/test/clean.png", SizeSmall, reader)
+	_, err := svc.GetThumbnail(ctx, "/test/clean.png", SizeSmall, reader)
 	if err != nil {
 		t.Fatalf("GetThumbnail failed: %v", err)
 	}
 
-	// Wait for cache save
-	time.Sleep(100 * time.Millisecond)
+	svc.Wait()
+	cachePath := svc.cachePath(svc.cacheKey("/test/clean.png", SizeSmall))
+	staleTime := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(cachePath, staleTime, staleTime); err != nil {
+		t.Fatalf("Chtimes(cachePath) failed: %v", err)
+	}
 
 	// Clean with very short maxAge - should remove the file
 	cleaned, err := svc.CleanCache(ctx, 1*time.Millisecond)
@@ -1586,12 +1530,7 @@ func TestSaveToCache_ReplacesFileAtomically(t *testing.T) {
 }
 
 func TestInvalidateCache(t *testing.T) {
-	tmpDir, cleanup := createTempDir(t)
-	defer cleanup()
-	svc, err := NewService(tmpDir)
-	if err != nil {
-		t.Fatalf("NewService failed: %v", err)
-	}
+	svc, _ := newTestThumbnailService(t)
 
 	ctx := context.Background()
 
@@ -1601,14 +1540,13 @@ func TestInvalidateCache(t *testing.T) {
 
 	for _, size := range []Size{SizeSmall, SizeMedium, SizeLarge} {
 		reader := bytes.NewReader(imgData)
-		_, err = svc.GetThumbnail(ctx, filePath, size, reader)
+		_, err := svc.GetThumbnail(ctx, filePath, size, reader)
 		if err != nil {
 			t.Fatalf("GetThumbnail(%s) failed: %v", size, err)
 		}
 	}
 
-	// Wait for cache save
-	time.Sleep(100 * time.Millisecond)
+	svc.Wait()
 
 	// Verify cache has files
 	count, _, _ := svc.CacheStats(ctx)
@@ -1617,7 +1555,7 @@ func TestInvalidateCache(t *testing.T) {
 	}
 
 	// Invalidate cache for this file
-	err = svc.InvalidateCache(filePath)
+	err := svc.InvalidateCache(filePath)
 	if err != nil {
 		t.Fatalf("InvalidateCache failed: %v", err)
 	}

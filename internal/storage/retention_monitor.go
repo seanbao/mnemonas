@@ -30,6 +30,7 @@ type RetentionMonitor struct {
 }
 
 var onRetentionMonitorLoopStart = func(context.Context) {}
+var onRetentionMonitorSweepComplete = func(context.Context, error) {}
 
 func NewRetentionMonitor(fs *FileSystem, cfg RetentionMonitorConfig, logger zerolog.Logger) *RetentionMonitor {
 	return &RetentionMonitor{fs: fs, cfg: cfg, logger: logger}
@@ -101,9 +102,11 @@ func (m *RetentionMonitor) restartLocked(cfg RetentionMonitorConfig) {
 			case <-loopCtx.Done():
 				return
 			case <-ticker.C:
-				if err := m.fs.RunRetentionSweep(loopCtx); err != nil {
+				err := m.fs.RunRetentionSweep(loopCtx)
+				if err != nil {
 					m.logger.Warn().Err(err).Msg("Retention sweep failed")
 				}
+				onRetentionMonitorSweepComplete(loopCtx, err)
 			}
 		}
 	}(cfg.SweepInterval)

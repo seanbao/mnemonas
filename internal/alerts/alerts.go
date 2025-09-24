@@ -24,27 +24,29 @@ import (
 
 // Config holds alerting configuration
 type Config struct {
-	Enabled          bool          `toml:"enabled"`
-	CheckInterval    time.Duration `toml:"check_interval"`     // How often to check (default 1h)
-	ThresholdPct     float64       `toml:"threshold_pct"`      // Alert when usage exceeds this % (default 90)
-	CriticalPct      float64       `toml:"critical_pct"`       // Critical alert threshold (default 95)
-	MinFreeBytes     uint64        `toml:"min_free_bytes"`     // Alert when free space < this (default 10GB)
-	CooldownPeriod   time.Duration `toml:"cooldown_period"`    // Min time between alerts (default 4h)
-	WebhookURL       string        `toml:"webhook_url"`        // Webhook URL for notifications
-	WebhookMethod    string        `toml:"webhook_method"`     // POST or GET (default POST)
-	WebhookHeaders   []string      `toml:"webhook_headers"`    // Additional headers (key:value format)
-	TelegramEnabled  bool          `toml:"telegram_enabled"`   // Send Telegram notifications
-	TelegramBotToken string        `toml:"telegram_bot_token"` // Telegram bot token
-	TelegramChatID   string        `toml:"telegram_chat_id"`   // Telegram chat ID or @channel
-	WeComEnabled     bool          `toml:"wecom_enabled"`      // Send WeCom group robot notifications
-	WeComWebhookURL  string        `toml:"wecom_webhook_url"`  // WeCom group robot webhook URL
-	EmailEnabled     bool          `toml:"email_enabled"`      // Send email notifications
-	SMTPHost         string        `toml:"smtp_host"`          // SMTP host without port
-	SMTPPort         int           `toml:"smtp_port"`          // SMTP port
-	SMTPUsername     string        `toml:"smtp_username"`      // SMTP username
-	SMTPPassword     string        `toml:"smtp_password"`      // SMTP password
-	SMTPFrom         string        `toml:"smtp_from"`          // Sender address
-	SMTPTo           []string      `toml:"smtp_to"`            // Recipient addresses
+	Enabled            bool          `toml:"enabled"`
+	CheckInterval      time.Duration `toml:"check_interval"`       // How often to check (default 1h)
+	ThresholdPct       float64       `toml:"threshold_pct"`        // Alert when usage exceeds this % (default 90)
+	CriticalPct        float64       `toml:"critical_pct"`         // Critical alert threshold (default 95)
+	MinFreeBytes       uint64        `toml:"min_free_bytes"`       // Alert when free space < this (default 10GB)
+	CooldownPeriod     time.Duration `toml:"cooldown_period"`      // Min time between alerts (default 4h)
+	WebhookURL         string        `toml:"webhook_url"`          // Webhook URL for notifications
+	WebhookMethod      string        `toml:"webhook_method"`       // POST or GET (default POST)
+	WebhookHeaders     []string      `toml:"webhook_headers"`      // Additional headers (key:value format)
+	TelegramEnabled    bool          `toml:"telegram_enabled"`     // Send Telegram notifications
+	TelegramBotToken   string        `toml:"telegram_bot_token"`   // Telegram bot token
+	TelegramChatID     string        `toml:"telegram_chat_id"`     // Telegram chat ID or @channel
+	WeComEnabled       bool          `toml:"wecom_enabled"`        // Send WeCom group robot notifications
+	WeComWebhookURL    string        `toml:"wecom_webhook_url"`    // WeCom group robot webhook URL
+	DingTalkEnabled    bool          `toml:"dingtalk_enabled"`     // Send DingTalk group robot notifications
+	DingTalkWebhookURL string        `toml:"dingtalk_webhook_url"` // DingTalk group robot webhook URL
+	EmailEnabled       bool          `toml:"email_enabled"`        // Send email notifications
+	SMTPHost           string        `toml:"smtp_host"`            // SMTP host without port
+	SMTPPort           int           `toml:"smtp_port"`            // SMTP port
+	SMTPUsername       string        `toml:"smtp_username"`        // SMTP username
+	SMTPPassword       string        `toml:"smtp_password"`        // SMTP password
+	SMTPFrom           string        `toml:"smtp_from"`            // Sender address
+	SMTPTo             []string      `toml:"smtp_to"`              // Recipient addresses
 }
 
 // DefaultConfig returns default alerting configuration
@@ -146,6 +148,7 @@ type Monitor struct {
 }
 
 var onAlertMonitorLoopStart = func(context.Context) {}
+var onAlertMonitorCheckComplete = func(context.Context, *StorageStats) {}
 
 // NewMonitor creates a new storage monitor
 func NewMonitor(cfg Config, dataDir string, logger zerolog.Logger) *Monitor {
@@ -310,6 +313,9 @@ func (m *Monitor) SendEvent(ctx context.Context, event EventPayload) error {
 	if cfg.WeComEnabled {
 		sendErr = errors.Join(sendErr, m.sendEventWeCom(ctx, event, cfg))
 	}
+	if cfg.DingTalkEnabled {
+		sendErr = errors.Join(sendErr, m.sendEventDingTalk(ctx, event, cfg))
+	}
 	if cfg.EmailEnabled {
 		sendErr = errors.Join(sendErr, m.sendEventEmail(ctx, event, cfg))
 	}
@@ -334,6 +340,7 @@ func (m *Monitor) check(ctx context.Context) {
 	m.mu.Lock()
 	m.lastStats = cloneStorageStats(stats)
 	m.mu.Unlock()
+	onAlertMonitorCheckComplete(ctx, cloneStorageStats(stats))
 
 	level := stats.Level
 
@@ -456,6 +463,11 @@ func (m *Monitor) sendAlert(ctx context.Context, stats *StorageStats, cfg Config
 	}
 	if cfg.WeComEnabled {
 		if err := m.sendStorageWeCom(ctx, stats, cfg, message, hostname); err != nil {
+			sendErr = errors.Join(sendErr, err)
+		}
+	}
+	if cfg.DingTalkEnabled {
+		if err := m.sendStorageDingTalk(ctx, stats, cfg, message, hostname); err != nil {
 			sendErr = errors.Join(sendErr, err)
 		}
 	}
@@ -585,7 +597,8 @@ func hasNotificationChannel(cfg Config) bool {
 	return strings.TrimSpace(cfg.WebhookURL) != "" ||
 		cfg.EmailEnabled ||
 		cfg.TelegramEnabled ||
-		(cfg.WeComEnabled && strings.TrimSpace(cfg.WeComWebhookURL) != "")
+		(cfg.WeComEnabled && strings.TrimSpace(cfg.WeComWebhookURL) != "") ||
+		(cfg.DingTalkEnabled && strings.TrimSpace(cfg.DingTalkWebhookURL) != "")
 }
 
 type telegramMessagePayload struct {
@@ -709,6 +722,17 @@ type weComAPIResponse struct {
 	ErrCode int `json:"errcode"`
 }
 
+type dingTalkTextPayload struct {
+	MsgType string `json:"msgtype"`
+	Text    struct {
+		Content string `json:"content"`
+	} `json:"text"`
+}
+
+type dingTalkAPIResponse struct {
+	ErrCode int `json:"errcode"`
+}
+
 func (m *Monitor) sendStorageWeCom(ctx context.Context, stats *StorageStats, cfg Config, message, hostname string) error {
 	if stats == nil {
 		return nil
@@ -821,6 +845,120 @@ func sanitizedWeComWebhookRequestError(action, rawURL string, err error) error {
 		return fmt.Errorf("wecom webhook %s failed for %s: %s", action, target, detail)
 	}
 	return fmt.Errorf("wecom webhook %s failed for %s", action, target)
+}
+
+func (m *Monitor) sendStorageDingTalk(ctx context.Context, stats *StorageStats, cfg Config, message, hostname string) error {
+	if stats == nil {
+		return nil
+	}
+	lines := []string{
+		"[MnemoNAS] storage " + string(stats.Level),
+		message,
+		"",
+		"Host: " + hostname,
+		"Path scope: " + storageAlertPathScope(stats),
+		"Used: " + formatBytes(stats.UsedBytes) + " (" + strconv.FormatFloat(stats.UsedPct, 'f', 1, 64) + "%)",
+		"Free: " + formatBytes(stats.FreeBytes),
+		"Checked at: " + stats.CheckedAt.UTC().Format(time.RFC3339),
+	}
+	return m.sendDingTalk(ctx, cfg, strings.Join(lines, "\n"))
+}
+
+func (m *Monitor) sendEventDingTalk(ctx context.Context, event EventPayload, cfg Config) error {
+	lines := []string{
+		"[MnemoNAS] " + event.Type + " " + string(event.Level),
+		event.Message,
+		"",
+		"Host: " + event.Hostname,
+		"Timestamp: " + event.Timestamp.UTC().Format(time.RFC3339),
+	}
+	if len(event.Details) > 0 {
+		details, err := json.MarshalIndent(event.Details, "", "  ")
+		if err != nil {
+			return fmt.Errorf("marshal event details for dingtalk: %w", err)
+		}
+		lines = append(lines, "", "Details:", string(details))
+	}
+	return m.sendDingTalk(ctx, cfg, strings.Join(lines, "\n"))
+}
+
+func (m *Monitor) sendDingTalk(ctx context.Context, cfg Config, text string) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+	if !cfg.DingTalkEnabled {
+		return nil
+	}
+	webhookURL := strings.TrimSpace(cfg.DingTalkWebhookURL)
+	if webhookURL == "" {
+		return errors.New("dingtalk alert missing webhook URL")
+	}
+
+	payload := dingTalkTextPayload{MsgType: "text"}
+	payload.Text.Content = truncateDingTalkText(text)
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("marshal dingtalk payload: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, webhookURL, bytes.NewReader(data))
+	if err != nil {
+		return sanitizedDingTalkWebhookRequestError("create request", webhookURL, err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", "MnemoNAS-Alert/1.0")
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return sanitizedDingTalkWebhookRequestError("send request", webhookURL, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("dingtalk webhook request to %s returned status %d", redactWebhookURLForLog(webhookURL), resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return fmt.Errorf("read dingtalk webhook response from %s: %w", redactWebhookURLForLog(webhookURL), err)
+	}
+	if len(strings.TrimSpace(string(body))) > 0 {
+		var result dingTalkAPIResponse
+		if err := json.Unmarshal(body, &result); err != nil {
+			return fmt.Errorf("decode dingtalk webhook response from %s: invalid response", redactWebhookURLForLog(webhookURL))
+		}
+		if result.ErrCode != 0 {
+			return fmt.Errorf("dingtalk webhook request to %s returned errcode %d", redactWebhookURLForLog(webhookURL), result.ErrCode)
+		}
+	}
+
+	m.logger.Info().
+		Str("url", redactWebhookURLForLog(webhookURL)).
+		Msg("DingTalk alert sent successfully")
+	return nil
+}
+
+func truncateDingTalkText(text string) string {
+	const maxDingTalkMessageRunes = 4096
+	runes := []rune(text)
+	if len(runes) <= maxDingTalkMessageRunes {
+		return text
+	}
+	return string(runes[:maxDingTalkMessageRunes-1]) + "…"
+}
+
+func sanitizedDingTalkWebhookRequestError(action, rawURL string, err error) error {
+	target := redactWebhookURLForLog(rawURL)
+	if err == nil {
+		return fmt.Errorf("dingtalk webhook %s failed for %s", action, target)
+	}
+	if detail := sanitizedWebhookErrorDetail(err); detail != "" {
+		return fmt.Errorf("dingtalk webhook %s failed for %s: %s", action, target, detail)
+	}
+	return fmt.Errorf("dingtalk webhook %s failed for %s", action, target)
 }
 
 func (m *Monitor) sendStorageEmail(ctx context.Context, stats *StorageStats, cfg Config, message, hostname string) error {

@@ -1367,13 +1367,14 @@ function ActivityStatsOverview({ stats, error, isFiltered }: { stats?: ActivityS
   const topUser = getTopActivityMetric(stats?.by_user)
 
   return (
-    <div className="grid grid-cols-2 gap-3 sm:gap-4 xl:grid-cols-4">
+    <div className="grid grid-cols-2 gap-2 sm:gap-3 xl:grid-cols-4">
       <StatCard
         title="累计操作"
         value={stats?.total ?? '--'}
         subtitle={stats ? (isFiltered ? '当前筛选结果' : '历史记录总量') : '正在加载统计'}
         icon={BarChart3}
         tone="primary"
+        density="compact"
       />
       <StatCard
         title="今日操作"
@@ -1381,6 +1382,7 @@ function ActivityStatsOverview({ stats, error, isFiltered }: { stats?: ActivityS
         subtitle={stats ? '当天新增记录' : '正在加载统计'}
         icon={CalendarDays}
         tone="success"
+        density="compact"
       />
       <StatCard
         title="最常见操作"
@@ -1388,6 +1390,7 @@ function ActivityStatsOverview({ stats, error, isFiltered }: { stats?: ActivityS
         subtitle={topAction ? `${topAction.count} 次` : '暂无操作类型'}
         icon={Database}
         tone="warning"
+        density="compact"
       />
       <StatCard
         title="最活跃用户"
@@ -1395,6 +1398,7 @@ function ActivityStatsOverview({ stats, error, isFiltered }: { stats?: ActivityS
         subtitle={topUser ? `${topUser.count} 次` : '暂无用户记录'}
         icon={User}
         tone="secondary"
+        density="compact"
       />
     </div>
   )
