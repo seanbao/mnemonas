@@ -93,9 +93,9 @@ Packfiles may be introduced later if object count or small-object overhead becom
 | Recovery | Trash and version restore work from the Web UI/API |
 | Diagnostics | A diagnostic bundle can be exported for troubleshooting |
 | Crash consistency | Kill/restart tests do not leave half-written current files |
-| Authentication | Web UI users, roles, passwords, and login audit are implemented |
+| Authentication | Web UI users, roles, passwords, and login history are implemented |
 | Sharing | Passwords, expiration, and public access flow are implemented |
-| Activity | Important user operations are auditable |
+| Activity | Important user operations are traceable |
 
 ## Scope Boundaries
 

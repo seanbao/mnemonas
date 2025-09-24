@@ -19,6 +19,7 @@ import {
   Shield, 
   HardDrive,
   Clock,
+  Plus,
   Save,
   RefreshCw,
   Globe,
@@ -34,6 +35,7 @@ import {
   Key,
   AlertCircle,
   Star,
+  Trash2,
 } from 'lucide-react'
 import { cn, copyTextToClipboard, parseByteSize, normalizeWebDAVPrefix, isValidWebDAVPrefix, webDAVPrefixOverlapsReservedRoute, formatWebDAVUrl, formatBytes } from '@/lib/utils'
 import { ShareManager } from '@/components/share'
@@ -46,9 +48,12 @@ import {
   getSecurityCheck,
   getSettings,
   getWebDAVCredentials,
+  previewDirectoryAccess,
+  reportDirectoryAccess,
   updateSettings,
   type DirectoryAccessCheckData,
   type DirectoryAccessDecision,
+  type DirectoryAccessReportData,
   type DirectoryAccessRule,
   type DirectoryAccessRole,
   type DirectoryQuota,
@@ -643,6 +648,326 @@ function DirectoryAccessCheckResult({ result }: { result: DirectoryAccessCheckDa
   )
 }
 
+function directoryAccessShareRelationLabel(relation: string): string {
+  switch (relation) {
+    case 'exact':
+      return '直接分享'
+    case 'covers_path':
+      return '父级覆盖'
+    case 'inside_path':
+      return '子级分享'
+    default:
+      return relation
+  }
+}
+
+function DirectoryAccessReportResult({
+  report,
+  title = '用户矩阵',
+  ariaLabel = '目录权限用户矩阵',
+}: {
+  report: DirectoryAccessReportData
+  title?: string
+  ariaLabel?: string
+}) {
+  const shares = report.shares ?? []
+
+  return (
+    <div className="rounded-lg border border-divider bg-content2/40 p-3" aria-label={ariaLabel}>
+      <div className="mb-2 text-sm font-semibold text-foreground">{title}</div>
+      <div className="mb-3 flex flex-wrap items-center gap-2 text-xs text-default-500">
+        <span className="rounded-full bg-content1 px-2 py-1 font-mono text-foreground">{report.path}</span>
+        <span className="rounded-full bg-content1 px-2 py-1">用户 {report.summary.users}</span>
+        <span className="rounded-full bg-success/10 px-2 py-1 text-success">可读 {report.summary.read_allowed}</span>
+        <span className="rounded-full bg-success/10 px-2 py-1 text-success">可写 {report.summary.write_allowed}</span>
+        <span className="rounded-full bg-danger/10 px-2 py-1 text-danger">读拒绝 {report.summary.read_denied}</span>
+        <span className="rounded-full bg-danger/10 px-2 py-1 text-danger">写拒绝 {report.summary.write_denied}</span>
+        <span className="rounded-full bg-warning/10 px-2 py-1 text-warning">相关分享 {report.summary.related_shares}</span>
+        <span className="rounded-full bg-warning/10 px-2 py-1 text-warning">活跃分享 {report.summary.active_related_shares}</span>
+        <span className="rounded-full bg-content1 px-2 py-1">密码分享 {report.summary.password_protected_shares}</span>
+      </div>
+      <div className="max-h-72 overflow-auto rounded-lg border border-divider bg-content1">
+        {report.users.map((entry) => (
+          <div key={entry.user_id || entry.username} className="grid gap-3 border-b border-divider px-3 py-2 last:border-b-0 sm:grid-cols-[minmax(0,1.3fr)_minmax(0,1fr)_minmax(0,1fr)]">
+            <div className="min-w-0">
+              <div className="truncate text-sm font-semibold text-foreground">{entry.username}</div>
+              <div className="truncate text-xs text-default-500">{entry.role} · {entry.home_dir}</div>
+            </div>
+            <div className="flex items-center gap-2 text-sm">
+              <span className={cn('h-2.5 w-2.5 shrink-0 rounded-full', entry.read.allowed ? 'bg-success' : 'bg-danger')} />
+              <span className="min-w-0 truncate">读：{entry.read.allowed ? '允许' : '拒绝'} · {directoryAccessSourceLabel(entry.read.source)}</span>
+            </div>
+            <div className="flex items-center gap-2 text-sm">
+              <span className={cn('h-2.5 w-2.5 shrink-0 rounded-full', entry.write.allowed ? 'bg-success' : 'bg-danger')} />
+              <span className="min-w-0 truncate">写：{entry.write.allowed ? '允许' : '拒绝'} · {directoryAccessSourceLabel(entry.write.source)}</span>
+            </div>
+          </div>
+        ))}
+      </div>
+      <div className="mt-3 rounded-lg border border-divider bg-content1">
+        {shares.length === 0 ? (
+          <div className="px-3 py-2 text-sm text-default-500">无相关分享</div>
+        ) : shares.map((entry) => (
+          <div key={entry.id} className="grid gap-3 border-b border-divider px-3 py-2 last:border-b-0 sm:grid-cols-[minmax(0,1.4fr)_minmax(0,0.8fr)_minmax(0,1fr)]">
+            <div className="min-w-0">
+              <div className="truncate text-sm font-semibold text-foreground">{entry.path}</div>
+              <div className="truncate text-xs text-default-500">{entry.type === 'folder' ? '文件夹' : '文件'} · {directoryAccessShareRelationLabel(entry.relation)}</div>
+            </div>
+            <div className="flex flex-wrap items-center gap-1 text-xs">
+              <span className={cn('rounded-full px-2 py-0.5', entry.active ? 'bg-warning/10 text-warning' : 'bg-content2 text-default-500')}>
+                {entry.active ? '可访问' : '不可访问'}
+              </span>
+              {entry.has_password && <span className="rounded-full bg-content2 px-2 py-0.5 text-default-600">密码</span>}
+            </div>
+            <div className="min-w-0 truncate text-xs text-default-500">
+              访问 {entry.access_count}{entry.max_access > 0 ? ` / ${entry.max_access}` : ''}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+interface DirectoryAccessRuleDraft {
+  path: string
+  readUsers: string
+  writeUsers: string
+  readGroups: string
+  writeGroups: string
+  readRoles: string
+  writeRoles: string
+}
+
+type DirectoryAccessRuleDraftField = keyof DirectoryAccessRuleDraft
+
+function emptyDirectoryAccessRuleDraft(): DirectoryAccessRuleDraft {
+  return {
+    path: '',
+    readUsers: '',
+    writeUsers: '',
+    readGroups: '',
+    writeGroups: '',
+    readRoles: '',
+    writeRoles: '',
+  }
+}
+
+function directoryAccessRuleToDraft(rule: DirectoryAccessRule): DirectoryAccessRuleDraft {
+  return {
+    path: rule.path,
+    readUsers: (rule.read_users ?? []).join(', '),
+    writeUsers: (rule.write_users ?? []).join(', '),
+    readGroups: (rule.read_groups ?? []).join(', '),
+    writeGroups: (rule.write_groups ?? []).join(', '),
+    readRoles: (rule.read_roles ?? []).join(', '),
+    writeRoles: (rule.write_roles ?? []).join(', '),
+  }
+}
+
+function rawDirectoryAccessRuleLineToDraft(line: string): DirectoryAccessRuleDraft {
+  const draft = emptyDirectoryAccessRuleDraft()
+  const parts = line.trim().split(/\s+/).filter(Boolean)
+  draft.path = parts[0] ?? ''
+  for (const token of parts.slice(1)) {
+    const separator = token.indexOf('=')
+    if (separator <= 0 || separator === token.length - 1) {
+      continue
+    }
+    const key = token.slice(0, separator)
+    const value = token.slice(separator + 1).split(',').join(', ')
+    switch (key) {
+      case 'read_users':
+        draft.readUsers = value
+        break
+      case 'write_users':
+        draft.writeUsers = value
+        break
+      case 'read_groups':
+        draft.readGroups = value
+        break
+      case 'write_groups':
+        draft.writeGroups = value
+        break
+      case 'read_roles':
+        draft.readRoles = value
+        break
+      case 'write_roles':
+        draft.writeRoles = value
+        break
+    }
+  }
+  return draft
+}
+
+function directoryAccessRuleDraftsFromText(value: string): DirectoryAccessRuleDraft[] {
+  const parsed = parseDirectoryAccessRuleLines(value)
+  if (!parsed.error) {
+    return parsed.rules.length > 0
+      ? parsed.rules.map(directoryAccessRuleToDraft)
+      : [emptyDirectoryAccessRuleDraft()]
+  }
+
+  const drafts = value
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map(rawDirectoryAccessRuleLineToDraft)
+  return drafts.length > 0 ? drafts : [emptyDirectoryAccessRuleDraft()]
+}
+
+function directoryAccessDraftList(value: string): string[] {
+  return value
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+}
+
+function appendDirectoryAccessDraftList(parts: string[], key: string, value: string) {
+  const values = directoryAccessDraftList(value)
+  if (values.length > 0) {
+    parts.push(`${key}=${values.join(',')}`)
+  }
+}
+
+function formatDirectoryAccessRuleDrafts(drafts: DirectoryAccessRuleDraft[]): string {
+  return drafts
+    .map((draft) => {
+      const parts = [draft.path.trim()]
+      appendDirectoryAccessDraftList(parts, 'read_users', draft.readUsers)
+      appendDirectoryAccessDraftList(parts, 'write_users', draft.writeUsers)
+      appendDirectoryAccessDraftList(parts, 'read_groups', draft.readGroups)
+      appendDirectoryAccessDraftList(parts, 'write_groups', draft.writeGroups)
+      appendDirectoryAccessDraftList(parts, 'read_roles', draft.readRoles)
+      appendDirectoryAccessDraftList(parts, 'write_roles', draft.writeRoles)
+      return parts.filter(Boolean).join(' ')
+    })
+    .filter(Boolean)
+    .join('\n')
+}
+
+function DirectoryAccessRuleEditor({ value, onChange }: { value: string; onChange: (value: string) => void }) {
+  const [editorState, setEditorState] = useState(() => ({
+    sourceValue: value,
+    drafts: directoryAccessRuleDraftsFromText(value),
+  }))
+
+  const drafts = editorState.sourceValue === value
+    ? editorState.drafts
+    : directoryAccessRuleDraftsFromText(value)
+
+  const commitDrafts = (nextDrafts: DirectoryAccessRuleDraft[]) => {
+    const renderedDrafts = nextDrafts.length > 0 ? nextDrafts : [emptyDirectoryAccessRuleDraft()]
+    const serialized = formatDirectoryAccessRuleDrafts(renderedDrafts)
+    setEditorState({ sourceValue: serialized, drafts: renderedDrafts })
+    onChange(serialized)
+  }
+
+  const updateDraft = (index: number, field: DirectoryAccessRuleDraftField, nextValue: string) => {
+    const nextDrafts = drafts.map((draft, draftIndex) => (
+      draftIndex === index ? { ...draft, [field]: nextValue } : draft
+    ))
+    commitDrafts(nextDrafts)
+  }
+
+  const addDraft = () => {
+    const nextDrafts = [...drafts, emptyDirectoryAccessRuleDraft()]
+    commitDrafts(nextDrafts)
+  }
+
+  const removeDraft = (index: number) => {
+    const nextDrafts = drafts.filter((_, draftIndex) => draftIndex !== index)
+    commitDrafts(nextDrafts)
+  }
+
+  return (
+    <div className="space-y-3">
+      {drafts.map((draft, index) => {
+        const ruleNumber = index + 1
+        return (
+          <div key={index} className="rounded-lg border border-divider bg-content1/60 p-3">
+            <div className="mb-3 flex items-center justify-between gap-3">
+              <div className="text-sm font-semibold text-foreground">规则 {ruleNumber}</div>
+              <Button
+                isIconOnly
+                variant="light"
+                color="danger"
+                className="rounded-lg"
+                aria-label={`删除目录权限规则 ${ruleNumber}`}
+                onPress={() => removeDraft(index)}
+                isDisabled={drafts.length === 1 && !value.trim()}
+              >
+                <Trash2 size={16} />
+              </Button>
+            </div>
+            <div className="grid gap-3 lg:grid-cols-3">
+              <Input
+                label="路径"
+                aria-label={`目录权限路径 ${ruleNumber}`}
+                value={draft.path}
+                onValueChange={(nextValue) => updateDraft(index, 'path', nextValue)}
+                placeholder="/team"
+                className="input-shell lg:col-span-3"
+              />
+              <Input
+                label="读用户"
+                aria-label={`读用户 ${ruleNumber}`}
+                value={draft.readUsers}
+                onValueChange={(nextValue) => updateDraft(index, 'readUsers', nextValue)}
+                placeholder="alice,bob"
+                className="input-shell"
+              />
+              <Input
+                label="写用户"
+                aria-label={`写用户 ${ruleNumber}`}
+                value={draft.writeUsers}
+                onValueChange={(nextValue) => updateDraft(index, 'writeUsers', nextValue)}
+                placeholder="alice"
+                className="input-shell"
+              />
+              <Input
+                label="读组"
+                aria-label={`读组 ${ruleNumber}`}
+                value={draft.readGroups}
+                onValueChange={(nextValue) => updateDraft(index, 'readGroups', nextValue)}
+                placeholder="family"
+                className="input-shell"
+              />
+              <Input
+                label="写组"
+                aria-label={`写组 ${ruleNumber}`}
+                value={draft.writeGroups}
+                onValueChange={(nextValue) => updateDraft(index, 'writeGroups', nextValue)}
+                placeholder="editors"
+                className="input-shell"
+              />
+              <Input
+                label="读角色"
+                aria-label={`读角色 ${ruleNumber}`}
+                value={draft.readRoles}
+                onValueChange={(nextValue) => updateDraft(index, 'readRoles', nextValue)}
+                placeholder="user"
+                className="input-shell"
+              />
+              <Input
+                label="写角色"
+                aria-label={`写角色 ${ruleNumber}`}
+                value={draft.writeRoles}
+                onValueChange={(nextValue) => updateDraft(index, 'writeRoles', nextValue)}
+                placeholder="admin"
+                className="input-shell"
+              />
+            </div>
+          </div>
+        )
+      })}
+      <Button variant="bordered" className="rounded-lg" onPress={addDraft} startContent={<Plus size={16} />}>
+        添加规则
+      </Button>
+    </div>
+  )
+}
+
 // Setting row component
 function SettingRow({ 
   label, 
@@ -1130,6 +1455,24 @@ export function SettingsPage() {
       }))
     },
   })
+  const accessReportMutation = useMutation({
+    mutationFn: reportDirectoryAccess,
+    onError: (err) => {
+      addToast(getSettingsActionErrorToast(err, {
+        unavailable: '权限矩阵不可用',
+        failure: '权限矩阵生成失败',
+      }))
+    },
+  })
+  const accessPreviewMutation = useMutation({
+    mutationFn: previewDirectoryAccess,
+    onError: (err) => {
+      addToast(getSettingsActionErrorToast(err, {
+        unavailable: '权限预览不可用',
+        failure: '权限预览失败',
+      }))
+    },
+  })
 
   const handleCheckDirectoryAccess = () => {
     const username = accessCheckUsername.trim()
@@ -1143,6 +1486,44 @@ export function SettingsPage() {
       return
     }
     accessCheckMutation.mutate({ username, path: targetPath })
+  }
+
+  const handleReportDirectoryAccess = () => {
+    const targetPath = accessCheckPath.trim()
+    if (!targetPath) {
+      addToast({
+        title: '权限矩阵路径为空',
+        description: '请输入需要检查的路径。',
+        color: 'warning',
+      })
+      return
+    }
+    accessReportMutation.mutate({ path: targetPath })
+  }
+
+  const handlePreviewDirectoryAccess = () => {
+    const targetPath = accessCheckPath.trim()
+    if (!targetPath) {
+      addToast({
+        title: '权限预览路径为空',
+        description: '请输入需要预览的路径。',
+        color: 'warning',
+      })
+      return
+    }
+    const parsedRules = parseDirectoryAccessRuleLines(settings.directoryAccessRules)
+    if (parsedRules.error) {
+      addToast({
+        title: '目录权限格式无效',
+        description: parsedRules.error,
+        color: 'danger',
+      })
+      return
+    }
+    accessPreviewMutation.mutate({
+      path: targetPath,
+      directory_access_rules: parsedRules.rules,
+    })
   }
 
   const handleCopy = async (field: string, value: string) => {
@@ -1268,15 +1649,11 @@ export function SettingsPage() {
     }
   }, [isDirty, mapServerSettings, savedSettingsOverride, savedSettingsOverrideUpdatedAt, settingsData, settingsDataUpdatedAt])
 
-  const settings = useMemo(() => {
-    if (!isDirty && savedSettingsOverride) {
-      return savedSettingsOverride
-    }
-    if (!isDirty && settingsData?.data) {
-      return mapServerSettings(settingsData.data)
-    }
-    return draftSettings
-  }, [draftSettings, isDirty, mapServerSettings, savedSettingsOverride, settingsData])
+  const settings = !isDirty && savedSettingsOverride
+    ? savedSettingsOverride
+    : !isDirty && settingsData?.data
+      ? mapServerSettings(settingsData.data)
+      : draftSettings
   const webdavNoAuthSelected = settings.webdavEnabled && settings.webdavAuthType === 'none'
   const serverBeyondLoopback = listensBeyondLoopback(settings.serverHost)
   const normalizedWebDAVPrefixDraft = normalizeWebDAVPrefix(settings.webdavPrefix)
@@ -2410,13 +2787,9 @@ export function SettingsPage() {
                 icon={Shield}
               >
                 <div className="space-y-3">
-                  <textarea
-                    aria-label="目录权限"
+                  <DirectoryAccessRuleEditor
                     value={settings.directoryAccessRules}
-                    onChange={(event) => updateDirtySettings(s => ({ ...s, directoryAccessRules: event.target.value }))}
-                    rows={5}
-                    placeholder="/team read_groups=family write_groups=editors"
-                    className="input-shell w-full rounded-medium border border-transparent bg-transparent px-3 py-2 font-mono text-sm outline-none focus:border-accent-primary"
+                    onChange={(nextValue) => updateDirtySettings(s => ({ ...s, directoryAccessRules: nextValue }))}
                   />
                   <div className="grid gap-2 text-xs text-default-500 sm:grid-cols-2">
                     <div className="rounded-lg border border-divider bg-content2/40 px-3 py-2">
@@ -2427,7 +2800,7 @@ export function SettingsPage() {
                     </div>
                   </div>
                   <div className="rounded-lg border border-divider bg-content1/60 p-3">
-                    <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto]">
+                    <div className="grid gap-3 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto_auto_auto]">
                       <Input
                         label="检查用户"
                         value={accessCheckUsername}
@@ -2450,11 +2823,37 @@ export function SettingsPage() {
                       >
                         检查权限
                       </Button>
+                      <Button
+                        variant="bordered"
+                        className="self-end rounded-lg"
+                        onPress={handleReportDirectoryAccess}
+                        isLoading={accessReportMutation.isPending}
+                      >
+                        用户矩阵
+                      </Button>
+                      <Button
+                        variant="bordered"
+                        className="self-end rounded-lg"
+                        onPress={handlePreviewDirectoryAccess}
+                        isLoading={accessPreviewMutation.isPending}
+                      >
+                        预览变更
+                      </Button>
                     </div>
-                    <div className="mt-2 text-xs text-default-500">结果基于已保存的目录权限配置。</div>
+                    <div className="mt-2 text-xs text-default-500">用户矩阵基于已保存配置；预览变更基于当前编辑但尚未保存的规则。</div>
                   </div>
                   {accessCheckMutation.data && (
                     <DirectoryAccessCheckResult result={accessCheckMutation.data} />
+                  )}
+                  {accessReportMutation.data && (
+                    <DirectoryAccessReportResult report={accessReportMutation.data} />
+                  )}
+                  {accessPreviewMutation.data && (
+                    <DirectoryAccessReportResult
+                      report={accessPreviewMutation.data}
+                      title="变更预览"
+                      ariaLabel="目录权限变更预览"
+                    />
                   )}
                 </div>
               </SettingsSection>

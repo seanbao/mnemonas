@@ -118,7 +118,7 @@ Authorization: Bearer <access_token>
 - `199 MnemoNAS "delete cleanup incomplete"`
 - `199 MnemoNAS "trash delete cleanup incomplete"`
 
-调用方应优先检查 HTTP `Warning` 响应头，而不是只依赖 JSON body。部分 `/api/v1` 写接口会额外返回 `warning: true` 和 `message`，例如 `resource copied with persistence warning`、`version restored with persistence warning`；但审计补写失败等场景可能只有 `Warning` header，body 仍保持原成功结构。
+调用方应优先检查 HTTP `Warning` 响应头，而不是只依赖 JSON body。部分 `/api/v1` 写接口会额外返回 `warning: true` 和 `message`，例如 `resource copied with persistence warning`、`version restored with persistence warning`；但活动日志补写失败等场景可能只有 `Warning` header，body 仍保持原成功结构。
 
 ---
 
@@ -1737,6 +1737,97 @@ POST /api/v1/settings/access-check
 
 响应会同时返回 `read` 和 `write` 判定。每个判定包含 `allowed`、`source`、可选 `message`，以及由目录授权决定时的 `matched_rule`。`source` 可能是 `admin`、`home_dir`、`directory_access_rule`、`invalid_home_dir`、`user_disabled`、`user_not_found` 或 `auth_disabled`。
 
+### 目录权限用户矩阵
+
+```
+POST /api/v1/settings/access-report
+```
+
+**需要管理员权限**
+
+请求体：
+
+```json
+{
+  "path": "/team/report.pdf"
+}
+```
+
+响应会对所有用户生成同一路径下的读写判定，并返回 `summary` 汇总：
+
+```json
+{
+  "success": true,
+  "data": {
+    "path": "/team/report.pdf",
+    "summary": {
+      "users": 2,
+      "read_allowed": 1,
+      "read_denied": 1,
+      "write_allowed": 1,
+      "write_denied": 1,
+      "related_shares": 1,
+      "active_related_shares": 1,
+      "password_protected_shares": 1
+    },
+    "users": [
+      {
+        "username": "alice",
+        "user_id": "u1",
+        "role": "user",
+        "groups": ["family"],
+        "home_dir": "/users/alice",
+        "path": "/team/report.pdf",
+        "read": { "mode": "read", "allowed": true, "source": "directory_access_rule" },
+        "write": { "mode": "write", "allowed": true, "source": "directory_access_rule" }
+      }
+    ],
+    "shares": [
+      {
+        "id": "share-id",
+        "path": "/team",
+        "type": "folder",
+        "created_by": "u1",
+        "relation": "covers_path",
+        "enabled": true,
+        "active": true,
+        "has_password": true,
+        "access_count": 0,
+        "max_access": 0,
+        "url": "/s/share-id"
+      }
+    ]
+  }
+}
+```
+
+`shares[].relation` 说明分享与检查路径的关系：`exact` 表示直接分享该路径，`covers_path` 表示父级分享会覆盖该路径，`inside_path` 表示被检查目录下存在子级分享。
+
+### 预览目录权限变更
+
+```
+POST /api/v1/settings/access-preview
+```
+
+**需要管理员权限**
+
+请求体：
+
+```json
+{
+  "path": "/team/report.pdf",
+  "directory_access_rules": [
+    {
+      "path": "/team",
+      "read_groups": ["family"],
+      "write_groups": ["parents"]
+    }
+  ]
+}
+```
+
+该接口不保存配置，只用请求里的 `directory_access_rules` 临时生成同样的用户矩阵和相关分享影响，并在响应里返回 `preview: true`。适合在保存共享目录权限前检查家庭成员或小团队成员是否会被误拒绝、误开放。
+
 ### 公网访问安全自检
 
 ```
@@ -2344,7 +2435,7 @@ POST /api/v1/maintenance/backups/{id}/run
 
 `restic` 和 `rclone` 不通过 shell 拼接命令；`command` 只能是可执行名或绝对路径，`extra_args` 会作为 argv 追加到备份命令，恢复命令不会复用备份专用参数。`password_file`、`config_file` 必须是 `source` 与 `storage.root` 之外的普通文件。
 
-任务可配置 `disabled`、`schedule_interval`、`schedule_window_start`、`schedule_window_end`、`stale_after`、`restore_drill_stale_after`、`max_snapshots`、`max_age` 和 `retention_policy`。`schedule_interval` 大于 0 时服务内置调度器会自动按间隔执行；设置 `schedule_window_start`/`schedule_window_end` 后，自动任务只会在服务器本地时间窗口内启动，手动执行不受影响。`local` 成功备份后会按 `max_snapshots` 和 `max_age` 清理旧快照，并在响应的 `pruned_snapshots` 中返回清理数量。成功备份后会自动运行一次保留策略检测，也可调用 `POST /retention-check` 手动检查。`restic` 检测执行 `restic snapshots --json --tag mnemonas --tag job:<id>`，`rclone` 检测执行 `rclone lsjson <remote> --recursive --files-only`；检测结果写入 `last_retention_check`，并影响 `retention_status`/`retention_message`。`restic` 和 `rclone` 的远端保留策略仍由外部工具管理；配置 `retention_policy` 会把该外部策略标记为已确认，否则会返回 `warning` 提醒确认。`restore_drill_stale_after` 未配置时默认 30 天，任务视图会通过 `restore_drill_status` 和 `restore_drill_message` 提示尚未演练、演练失败或演练过期；配置告警通道后，缺失或过期恢复演练会发送限频的 `backup_restore_drill` warning 事件，`trigger` 为 `restore_drill_reminder`，并持久化 `last_restore_drill_reminder_at`。`health_status` 只表示备份运行健康，可能为 `ok`、`manual`、`running`、`due`、`stale`、`failed` 或 `disabled`。任务视图会返回 `last_restore_drill`、最近恢复演练历史 `restore_drill_history`、恢复演练统计 `restore_drill_stats`、`last_restore`、`last_restore_verify` 与最近恢复历史 `restore_history`；恢复演练历史和显式恢复历史默认都保留最近 20 条，失败演练和失败恢复也会记录错误信息。失败的恢复演练会返回稳定的 `failure_category`，当前可能值包括 `no_snapshot`、`unsupported_job_type`、`unsafe_path`、`integrity_check`、`external_command`、`cancelled`、`io` 和 `unknown`，并会透传到告警事件。`restore_drill_stats` 汇总最近保留窗口内的总次数、成功次数、失败次数、成功率、连续成功/失败次数、最近成功/失败时间、最近失败原因和失败类型，便于审计恢复能力、恢复目标、恢复预检、只读校验报告、切换/回滚清单、状态、文件数和字节数。
+任务可配置 `disabled`、`schedule_interval`、`schedule_window_start`、`schedule_window_end`、`stale_after`、`restore_drill_stale_after`、`max_snapshots`、`max_age` 和 `retention_policy`。`schedule_interval` 大于 0 时服务内置调度器会自动按间隔执行；设置 `schedule_window_start`/`schedule_window_end` 后，自动任务只会在服务器本地时间窗口内启动，手动执行不受影响。`local` 成功备份后会按 `max_snapshots` 和 `max_age` 清理旧快照，并在响应的 `pruned_snapshots` 中返回清理数量。成功备份后会自动运行一次保留策略检测，也可调用 `POST /retention-check` 手动检查。`restic` 检测执行 `restic snapshots --json --tag mnemonas --tag job:<id>`，`rclone` 检测执行 `rclone lsjson <remote> --recursive --files-only`；检测结果写入 `last_retention_check`，并影响 `retention_status`/`retention_message`。`restic` 和 `rclone` 的远端保留策略仍由外部工具管理；配置 `retention_policy` 会把该外部策略标记为已确认，否则会返回 `warning` 提醒确认。`restore_drill_stale_after` 未配置时默认 30 天，任务视图会通过 `restore_drill_status` 和 `restore_drill_message` 提示尚未演练、演练失败或演练过期；配置告警通道后，缺失或过期恢复演练会发送限频的 `backup_restore_drill` warning 事件，`trigger` 为 `restore_drill_reminder`，并持久化 `last_restore_drill_reminder_at`。`health_status` 只表示备份运行健康，可能为 `ok`、`manual`、`running`、`due`、`stale`、`failed` 或 `disabled`。任务视图会返回 `last_restore_drill`、最近恢复演练历史 `restore_drill_history`、恢复演练统计 `restore_drill_stats`、`last_restore`、`last_restore_verify` 与最近恢复历史 `restore_history`；恢复演练历史和显式恢复历史默认都保留最近 20 条，失败演练和失败恢复也会记录错误信息。失败的恢复演练会返回稳定的 `failure_category`，当前可能值包括 `no_snapshot`、`unsupported_job_type`、`unsafe_path`、`integrity_check`、`external_command`、`cancelled`、`io` 和 `unknown`，并会透传到告警事件。`restore_drill_stats` 汇总最近保留窗口内的总次数、成功次数、失败次数、成功率、连续成功/失败次数、最近成功/失败时间、最近失败原因和失败类型，便于回顾恢复能力、恢复目标、恢复预检、只读校验结果、切换/回滚清单、状态、文件数和字节数。
 
 当 `[alerts] enabled = true` 且配置了 Webhook、Telegram 或 SMTP 邮件时，备份失败、恢复演练失败、恢复演练缺失/过期提醒、保留策略检测失败或备份完成但带警告会发送告警事件。事件 `type` 为 `backup_run`、`backup_restore_drill` 或 `backup_retention_check`，`level` 为 `warning` 或 `critical`，`details` 包含任务 ID、运行 ID、状态、错误信息、快照路径和文件/字节统计。
 
@@ -2464,7 +2555,7 @@ POST /api/v1/maintenance/backups/{id}/restore
 }
 ```
 
-当前显式恢复支持 `type = "local"`、`type = "restic"` 和 `type = "rclone"`。`target_path` 必须是服务器上的绝对路径，并且必须位于 `storage.root`、备份来源和本地备份目标/仓库之外；父目录必须已存在，目标目录不存在或为空。该接口不会覆盖当前在线数据目录。服务端会在真正写入前重新执行同一套恢复预检；存在失败预检时恢复会被拒绝，失败结果仍写入恢复历史用于审计。
+当前显式恢复支持 `type = "local"`、`type = "restic"` 和 `type = "rclone"`。`target_path` 必须是服务器上的绝对路径，并且必须位于 `storage.root`、备份来源和本地备份目标/仓库之外；父目录必须已存在，目标目录不存在或为空。该接口不会覆盖当前在线数据目录。服务端会在真正写入前重新执行同一套恢复预检；存在失败预检时恢复会被拒绝，失败结果仍写入恢复历史，便于之后排查。
 
 - `local`：把最近一次成功快照中的 `data/` 内容复制到 `target_path` 根目录并校验大小和 SHA-256；`include_config = true` 时，备份中的配置文件会恢复到 `target_path/.mnemonas-restore/config.toml`。
 - `restic`：执行 `restic restore latest --target <临时目录> --tag mnemonas --tag job:<id> --path <source>`，再把 restic 恢复出的来源目录内容安装到 `target_path` 根目录。`include_config` 对 restic 任务无特殊处理。
@@ -2472,13 +2563,13 @@ POST /api/v1/maintenance/backups/{id}/restore
 
 恢复开始和结束都会写入备份状态文件。恢复结果会携带本次 `preflight_checks`、`warnings`、`cutover_checklist` 和 `rollback_checklist`。失败恢复也会进入 `restore_history`，便于之后排查目标路径、权限、外部命令或仓库问题。
 
-下载单个备份任务的恢复审计报告：
+下载单个备份任务的恢复摘要：
 
 ```
 GET /api/v1/maintenance/backups/{id}/restore-report
 ```
 
-响应为 `application/json` 附件，包含 `job`、最近备份、最近保留检测、最近恢复演练、恢复演练历史、最近恢复、最近恢复后只读校验、恢复历史和 `findings`。该报告适合在切换 storage.root 前留档，或在恢复失败后随诊断信息一起保存。
+响应为 `application/json` 附件，包含 `job`、最近备份、最近保留检测、最近恢复演练、恢复演练历史、最近恢复、最近恢复后只读校验、恢复历史和 `findings`。该摘要适合在切换 storage.root 前留档，或在恢复失败后随诊断信息一起保存。
 
 恢复完成后，对目标目录执行只读校验，不写入恢复历史：
 

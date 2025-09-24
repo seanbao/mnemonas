@@ -126,7 +126,7 @@ func TestServer_BackupEndpoints_RunAndRestoreDrill(t *testing.T) {
 
 	jobView := runBackupAPIRequest[backup.JobView](t, server, http.MethodGet, "/api/v1/maintenance/backups/home", nil, http.StatusOK)
 	if jobView.LastRestore == nil || jobView.LastRestore.ID != restoreResult.ID || jobView.LastRestore.TargetPath != restoreTarget {
-		t.Fatalf("backup job missing latest restore audit: %+v", jobView.LastRestore)
+		t.Fatalf("backup job missing latest restore record: %+v", jobView.LastRestore)
 	}
 	if jobView.LastRestoreVerify == nil || jobView.LastRestoreVerify.ID != verifyResult.ID || jobView.LastRestoreVerify.TargetPath != restoreTarget {
 		t.Fatalf("backup job missing latest restore verify report: %+v", jobView.LastRestoreVerify)
@@ -150,7 +150,7 @@ func TestServer_BackupEndpoints_RunAndRestoreDrill(t *testing.T) {
 	if reportResp.Code != http.StatusOK {
 		t.Fatalf("restore report status = %d, body = %s", reportResp.Code, reportResp.Body.String())
 	}
-	if contentDisposition := reportResp.Header().Get("Content-Disposition"); !strings.Contains(contentDisposition, "mnemonas-restore-report-home-") {
+	if contentDisposition := reportResp.Header().Get("Content-Disposition"); !strings.Contains(contentDisposition, "mnemonas-restore-summary-home-") {
 		t.Fatalf("restore report Content-Disposition = %q", contentDisposition)
 	}
 	var report backup.RestoreReport
