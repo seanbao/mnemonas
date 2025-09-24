@@ -68,7 +68,7 @@ objects/
 Reasons:
 
 - Simple crash-consistent writes using temporary files, `fsync`, and rename.
-- Easy backup and inspection.
+- Direct backup and inspection with common filesystem tools.
 - Low implementation risk for an early release.
 
 Packfiles may be introduced later if object count or small-object overhead becomes a real problem.
@@ -120,7 +120,7 @@ Not promised:
 
 ## Competitive Framing
 
-MnemoNAS is not trying to out-feature full NAS operating systems such as TrueNAS or OpenMediaVault. The target is a smaller, more focused self-hosted storage product that is easy to deploy, pleasant to use, and explicit about data recovery paths.
+MnemoNAS is not trying to out-feature full NAS operating systems such as TrueNAS or OpenMediaVault. The target is a smaller, more focused self-hosted storage product with a short deployment path, a readable daily-use interface, and explicit data recovery workflows.
 
 Compared with backup tools such as restic or borg, MnemoNAS is interactive file management first. Compared with object stores such as MinIO or Ceph, it is a private NAS first.
 

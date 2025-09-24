@@ -474,7 +474,7 @@ function ActivityRow({
                 <Button
                   size="sm"
                   variant="light"
-                  className="h-7 rounded-lg px-2 text-xs"
+                  className="h-8 rounded-lg px-2.5 text-xs"
                   startContent={<RotateCcw size={13} />}
                   onPress={() => onOpenVersions(entry)}
                 >
@@ -483,7 +483,7 @@ function ActivityRow({
                 <Button
                   size="sm"
                   variant="light"
-                  className="h-7 rounded-lg px-2 text-xs"
+                  className="h-8 rounded-lg px-2.5 text-xs"
                   startContent={<Trash2 size={13} />}
                   onPress={() => onOpenTrash(entry)}
                 >
@@ -495,7 +495,7 @@ function ActivityRow({
               <Button
                 size="sm"
                 variant="light"
-                className="h-7 rounded-lg px-2 text-xs"
+                className="h-8 rounded-lg px-2.5 text-xs"
                 startContent={<Share2 size={13} />}
                 onPress={() => onOpenShares(entry)}
               >
@@ -972,7 +972,7 @@ function ActivityReviewDispositionRecorder({
         <Button
           size="sm"
           variant="light"
-          className="h-7 rounded-lg px-2"
+          className="h-8 rounded-lg px-2.5"
           startContent={<Search size={13} />}
           onPress={() => onTraceReviewRecord(record)}
         >
@@ -983,7 +983,7 @@ function ActivityReviewDispositionRecorder({
             <Button
               size="sm"
               variant="light"
-              className="h-7 rounded-lg px-2"
+              className="h-8 rounded-lg px-2.5"
               startContent={<RotateCcw size={13} />}
               onPress={() => onOpenReviewRecordVersions(record)}
             >
@@ -992,7 +992,7 @@ function ActivityReviewDispositionRecorder({
             <Button
               size="sm"
               variant="light"
-              className="h-7 rounded-lg px-2"
+              className="h-8 rounded-lg px-2.5"
               startContent={<Trash2 size={13} />}
               onPress={() => onOpenReviewRecordTrash(record)}
             >
@@ -1004,7 +1004,7 @@ function ActivityReviewDispositionRecorder({
           <Button
             size="sm"
             variant="light"
-            className="h-7 rounded-lg px-2"
+            className="h-8 rounded-lg px-2.5"
             startContent={<Share2 size={13} />}
             onPress={() => onOpenReviewRecordShares(record)}
           >
@@ -1026,7 +1026,7 @@ function ActivityReviewDispositionRecorder({
               <Button
                 size="sm"
                 variant="flat"
-                className="h-7 rounded-lg px-2"
+                className="h-8 rounded-lg px-2.5"
                 isLoading={isUpdating}
                 isDisabled={isUpdating}
                 onPress={() => onUpdateReviewRecordDisposition(record, 'confirmed', getReviewRecordDispositionUpdateNote(record))}
@@ -1036,7 +1036,7 @@ function ActivityReviewDispositionRecorder({
               <Button
                 size="sm"
                 variant="flat"
-                className="h-7 rounded-lg px-2"
+                className="h-8 rounded-lg px-2.5"
                 isLoading={isUpdating}
                 isDisabled={isUpdating}
                 onPress={() => onUpdateReviewRecordDisposition(record, 'restored', getReviewRecordDispositionUpdateNote(record))}
@@ -1046,7 +1046,7 @@ function ActivityReviewDispositionRecorder({
               <Button
                 size="sm"
                 variant="flat"
-                className="h-7 rounded-lg px-2"
+                className="h-8 rounded-lg px-2.5"
                 isLoading={isUpdating}
                 isDisabled={isUpdating}
                 onPress={() => onUpdateReviewRecordDisposition(record, 'disabled', getReviewRecordDispositionUpdateNote(record))}
@@ -2431,7 +2431,7 @@ export function ActivityPage() {
           <Button
             size="sm"
             variant="light"
-            className="h-7 rounded-lg px-2 text-default-500"
+            className="h-8 rounded-lg px-2.5 text-default-500"
             startContent={<X size={14} />}
             onPress={handleClearAllFilters}
           >

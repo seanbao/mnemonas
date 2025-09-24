@@ -8,7 +8,7 @@
 
 ---
 
-## 🗄️ S3 兼容存储后端
+## S3 兼容存储后端
 
 ### S3 目标
 
@@ -103,7 +103,7 @@ type Store interface {
 
 ---
 
-## 🔌 插件系统
+## 插件系统
 
 ### 插件目标
 
@@ -208,7 +208,7 @@ func (fs *FileSystem) WriteFile(ctx context.Context, name string, data []byte) e
 
 ---
 
-## 🖥️ 远程 Runner（分布式处理）
+## 远程 Runner（分布式处理）
 
 ### Runner 目标
 
@@ -321,7 +321,7 @@ type InMemoryQueue struct {
 
 ---
 
-## 📋 扩展点检查清单
+## 扩展点检查清单
 
 ### 当前主线需要确保
 
@@ -344,7 +344,7 @@ type InMemoryQueue struct {
 
 ---
 
-## 📖 相关文档
+## 相关文档
 
 - [架构设计](architecture.md)
 - [开发指南](development.md)

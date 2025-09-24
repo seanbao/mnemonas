@@ -6,7 +6,7 @@
 
 如果目标是长期运行并希望开机自启、用 systemd 管理日志和重启，优先参考 [Linux/systemd 部署指南](linux-systemd-deployment.md)。Docker 更适合快速试用、已有容器平台或希望把 MnemoNAS 和其他服务一起编排的场景。
 
-## 📋 前置要求
+## 前置要求
 
 - Docker 20.10+ 和 Docker Compose v2 插件（命令形式是 `docker compose`，不是旧版 `docker-compose`）
 - 至少 1GB 可用内存
@@ -50,7 +50,7 @@ sudo apt-get -o APT::Architectures=amd64 install -y docker-compose-v2 docker-bui
 
 ---
 
-## 🚀 快速开始
+## 快速开始
 
 ### 1. 克隆项目
 
@@ -67,7 +67,7 @@ cd mnemonas
 ./scripts/docker-quickstart.sh --start
 ```
 
-这个脚本会创建或更新 `.env`，写入当前宿主机用户的 `MNEMONAS_UID`/`MNEMONAS_GID`，创建 `MNEMONAS_DATA_DIR`，运行 Docker 预检，启动 Compose 服务，并等待本机 `/health` 端点通过。`.env` 中 `MNEMONAS_IMAGE` 保持 `mnemonas:local` 时，`--start` 会执行本地构建；设置为发布镜像标签时，`--start` 会使用 `docker compose up --pull missing --no-build`，拉取缺失镜像且禁止本地构建。如果宿主机 8080 已被占用，可改用：
+这个脚本会创建或更新 `.env`，写入当前宿主机用户的 `MNEMONAS_UID`/`MNEMONAS_GID`，创建 `MNEMONAS_DATA_DIR`，运行 Docker 预检，启动 Compose 服务，并等待本机 `/health` 端点通过。`.env` 中 `MNEMONAS_IMAGE` 保持 `mnemonas:local` 时，`--start` 会执行本地构建；设置为发布镜像标签时，`--start` 会使用 `docker compose up --pull missing --no-build`，拉取缺失镜像且禁止本地构建。完成后会输出可直接执行的下一步，包括 Web UI、health 检查、读取初始密码、WebDAV、Compose 状态和日志命令。如果宿主机 8080 已被占用，可改用：
 
 ```bash
 ./scripts/docker-quickstart.sh --port 8888 --start
@@ -79,13 +79,13 @@ cd mnemonas
 ./scripts/docker-quickstart.sh
 ```
 
-首次启动会在 `<MNEMONAS_DATA_DIR>/config.toml` 自动生成持久化配置。启动后请先用 `<MNEMONAS_DATA_DIR>/.mnemonas/initial-password.txt` 中的初始管理员密码登录 Web UI 并修改密码；自动生成的 WebDAV 密码保存在 `<MNEMONAS_DATA_DIR>/secrets.json`，不会直接写入容器日志。如使用 WebDAV，也建议修改：
+首次启动会在 `<MNEMONAS_DATA_DIR>/config.toml` 自动生成持久化配置。默认情况下，启动后请先用 `<MNEMONAS_DATA_DIR>/.mnemonas/initial-password.txt` 中的初始管理员密码登录 Web UI 并修改密码；如果自定义 `[auth].users_file`，`initial-password.txt` 会位于用户文件同目录。自动生成的 WebDAV 密码保存在 `<MNEMONAS_DATA_DIR>/secrets.json`，不会直接写入容器日志。如使用 WebDAV，也建议修改：
 
 - `[webdav].password` - WebDAV 认证密码
 
 镜像默认以非 root 用户运行，容器内数据目录是 `/data`，默认对应宿主机 `~/.mnemonas`。如需改宿主机数据目录，优先使用 `./scripts/docker-quickstart.sh --data-dir /path/to/mnemonas --start`；脚本会把该路径写入 `.env` 的 `MNEMONAS_DATA_DIR`。Docker 中的自定义配置必须显式设置 `[storage].root`，通常保持 `root = "/data"`，且不能设置为 `/`。启动时如果已有配置里的 `[storage].root` 和 Docker 的 `STORAGE_ROOT` 不一致，容器日志会输出警告，并继续以配置文件为准。如修改为其他容器内路径，需额外挂载该路径；否则数据会写入容器临时层。例如设置 `root = "/data-root"` 时，需要在 `docker-compose.yml` 中增加指向 `/data-root` 的长语法 bind 挂载。
 
-Docker quickstart、容器启动入口和预检脚本都会要求数据目录为绝对路径，并拒绝控制字符、`..` 片段、受保护的系统目录以及符号链接路径组件，避免把配置或对象数据写入被替换或过宽的目录。仓库自带的 Compose 文件使用长卷语法挂载 `/data`，避免宿主机路径中的 `:` 被误解析为卷目标或挂载模式；自定义 Compose 片段也应使用长卷语法。容器启动入口还会在创建或修改权限前检查 `STORAGE_ROOT/files` 与 `STORAGE_ROOT/.mnemonas/objects`，这些托管子目录不能通过符号链接指向其他位置。Docker 预检还会检查已有的 `config.toml`、`.mnemonas/`、`.mnemonas/users.json`、`.mnemonas/initial-password.txt` 和 `secrets.json`，拒绝符号链接或非预期文件类型，提示过宽权限，并校验已有 `config.toml` 的 TOML 语法和绝对 `[storage].root`；预检只报告路径和权限状态，不输出密码或 secret 内容。容器内 `CONFIG_PATH` 必须是绝对路径，并且位于 `STORAGE_ROOT` 之下，且不能包含控制字符、父目录段或符号链接路径组件；默认即为 `/data/config.toml`。Docker 容器以内置 `config.toml` 中的 `[dataplane].grpc_address` 作为内部 gRPC 地址的唯一来源；启动时会拒绝与该配置不一致的 `DATAPLANE_GRPC_ADDR` 环境变量，防止控制面和数据面使用不同端点。如果需要自定义宿主机路径，请挂载真实目录而不是符号链接。
+Docker quickstart、容器启动入口和预检脚本都会要求数据目录为绝对路径，并拒绝控制字符、`..` 片段、受保护的系统目录以及符号链接路径组件，避免把配置或对象数据写入被替换或过宽的目录。仓库自带的 Compose 文件使用长卷语法挂载 `/data`，避免宿主机路径中的 `:` 被误解析为卷目标或挂载模式；自定义 Compose 片段也应使用长卷语法。容器启动入口还会在创建或修改权限前检查 `STORAGE_ROOT/files` 与 `STORAGE_ROOT/.mnemonas/objects`，这些托管子目录不能通过符号链接指向其他位置。Docker 预检还会检查已有的 `config.toml`、`.mnemonas/`、`.mnemonas/users.json`、`.mnemonas/initial-password.txt` 和 `secrets.json`，拒绝符号链接或非预期文件类型，提示过宽权限，并校验已有 `config.toml` 的 TOML 语法和绝对 `[storage].root`；如果 `auth.users_file` 自定义到容器 `/data` 挂载内，预检也会检查对应用户文件和同目录 `initial-password.txt` 的类型和权限；如果显式自定义到 `/data` 之外，预检会提示无法从宿主机数据目录检查该用户文件和初始密码文件。预检只报告路径和权限状态，不输出密码或 secret 内容。容器内 `CONFIG_PATH` 必须是绝对路径，并且位于 `STORAGE_ROOT` 之下，且不能包含控制字符、父目录段或符号链接路径组件；默认即为 `/data/config.toml`。Docker 容器以内置 `config.toml` 中的 `[dataplane].grpc_address` 作为内部 gRPC 地址的唯一来源；启动时会拒绝与该配置不一致的 `DATAPLANE_GRPC_ADDR` 环境变量，防止控制面和数据面使用不同端点。如果需要自定义宿主机路径，请挂载真实目录而不是符号链接。
 
 自定义 `--env` 路径必须指向已有目录中的文件。脚本不会隐式创建 `.env` 的父目录，避免输入错误时先创建数据目录再失败。
 
@@ -95,11 +95,11 @@ Docker quickstart、容器启动入口和预检脚本都会要求数据目录为
 MNEMONAS_UID="$(id -u)" MNEMONAS_GID="$(id -g)" docker compose up -d --build
 ```
 
-`./scripts/mnemonas-docker-preflight.sh` 不会启动或修改容器，只检查启动前最常见的失败点：Docker daemon、Compose v2 插件、Buildx、数据目录权限、可用磁盘空间、`MNEMONAS_HTTP_PORT` 端口占用、已有 `config.toml` 的 TOML 语法和绝对 `[storage].root`，以及 Compose 配置是否能渲染。预检有失败项时先按输出修复，再运行 `./scripts/docker-quickstart.sh --start`。
+`./scripts/mnemonas-docker-preflight.sh` 不会启动或修改容器，只检查启动前最常见的失败点：Docker daemon、Compose v2 插件、Buildx、数据目录权限、可用磁盘空间、`MNEMONAS_HTTP_PORT` 端口占用、已有 `config.toml` 的 TOML 语法、绝对 `[storage].root`、可映射的用户文件与初始密码文件权限，以及 Compose 配置是否能渲染。预检有失败项时先按输出修复，再运行 `./scripts/docker-quickstart.sh --start`。
 
 `./scripts/docker-quickstart.sh --start` 默认会等待 `http://127.0.0.1:<port>/health` 返回成功。若 Compose 启动失败或健康检查超时，脚本会输出对应的 `docker compose ps` 或 `docker compose logs --tail 100 mnemonas` 排查命令。若使用远程 Docker context、SSH 隧道或其他本机无法访问发布端口的环境，可传 `--skip-health-check` 跳过该检查；服务状态仍应通过 `docker compose ps`、`docker compose logs --tail 100 mnemonas` 或可访问入口的 `/health` 复核。
 
-健康检查通过后，quickstart 会提示 `<MNEMONAS_DATA_DIR>/.mnemonas/initial-password.txt` 是否存在，但不会输出密码内容。既有部署在首次登录后可能已删除该文件；全新部署如果没有生成该文件，应先查看容器日志。
+健康检查通过后，quickstart 会根据现有 `config.toml` 推导 `initial-password.txt` 位置。路径位于容器 `/data` 挂载内时，会提示对应的宿主机路径并给出 `cat` 读取命令；路径不在 `/data` 下时，会提示容器内路径并给出 `docker compose exec` 读取命令。脚本不会输出密码内容。既有部署在首次登录后可能已删除该文件；全新部署如果没有生成该文件，应先查看容器日志。
 
 ### 3. 手动启动服务
 
@@ -313,7 +313,7 @@ services:
 
 ---
 
-## 🔒 长期运行与反向代理配置
+## 长期运行与反向代理配置
 
 ### 使用 HTTPS（Nginx 反向代理）
 
@@ -433,7 +433,7 @@ services:
 
 ---
 
-## 📊 监控与日志
+## 监控与日志
 
 ### 查看日志
 
@@ -469,7 +469,7 @@ MnemoNAS 提供 `/api/v1/metrics` JSON 指标端点。
 
 ---
 
-## 🔄 升级与备份
+## 升级与备份
 
 ### 升级服务
 
@@ -529,7 +529,7 @@ docker compose up -d
 
 ---
 
-## 🔧 故障排除
+## 故障排除
 
 ### 容器无法启动
 
@@ -585,7 +585,7 @@ docker compose up -d
 
 ---
 
-## 📖 更多资源
+## 更多资源
 
 - [挂载指南](mounting-guide.md)
 - [FAQ](faq.md)

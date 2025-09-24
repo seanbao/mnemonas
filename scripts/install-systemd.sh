@@ -35,6 +35,57 @@ fail() {
   exit 1
 }
 
+shell_quote() {
+  printf '%q' "$1"
+}
+
+service_user_home() {
+  local entry home
+
+  if entry="$(getent passwd "$SERVICE_USER" 2>/dev/null)"; then
+    home="$(printf '%s\n' "$entry" | awk -F: '{ print $6; exit }')"
+    if [[ -n "$home" ]]; then
+      printf '%s\n' "$home"
+      return
+    fi
+  fi
+  printf '%s\n' "$STORAGE_ROOT"
+}
+
+expand_service_user_path() {
+  local value="$1"
+  local home
+
+  case "$value" in
+    \~)
+      service_user_home
+      ;;
+    \~/*)
+      home="$(service_user_home)"
+      printf '%s/%s\n' "$home" "${value#\~/}"
+      ;;
+    *)
+      printf '%s\n' "$value"
+      ;;
+  esac
+}
+
+initial_password_file_path() {
+  local users_file users_dir
+
+  users_file="$(toml_value auth users_file "$CONFIG_PATH")"
+  if [[ -n "$users_file" ]]; then
+    users_file="$(expand_service_user_path "$users_file")"
+  else
+    users_file="$STORAGE_ROOT/.mnemonas/users.json"
+  fi
+  users_dir="${users_file%/*}"
+  if [[ "$users_dir" == "$users_file" ]]; then
+    users_dir="."
+  fi
+  printf '%s/initial-password.txt\n' "$users_dir"
+}
+
 require_root() {
   [[ "$(id -u)" -eq 0 ]] || fail "run this installer as root, for example: sudo $0"
 }
@@ -996,19 +1047,24 @@ main() {
   fi
 
   local initial_password_file web_url
-  initial_password_file="$STORAGE_ROOT/.mnemonas/initial-password.txt"
+  local quoted_initial_password_file quoted_doctor_path quoted_public_setup_path quoted_uninstall_path
+  initial_password_file="$(initial_password_file_path)"
   web_url="$(web_ui_url)"
+  quoted_initial_password_file="$(shell_quote "$initial_password_file")"
+  quoted_doctor_path="$(shell_quote "$BIN_DIR/mnemonas-doctor")"
+  quoted_public_setup_path="$(shell_quote "$BIN_DIR/mnemonas-public-setup")"
+  quoted_uninstall_path="$(shell_quote "$BIN_DIR/mnemonas-uninstall-systemd")"
 
   log "installed successfully"
   log "Next steps:"
   log "  Open Web UI: $web_url"
-  log "  Read initial password: sudo cat $initial_password_file"
-  log "  Run doctor: sudo $BIN_DIR/mnemonas-doctor"
-  log "  Configure public HTTPS: sudo $BIN_DIR/mnemonas-public-setup --proxy caddy <domain> <email>"
+  log "  Read initial password: sudo cat $quoted_initial_password_file"
+  log "  Run doctor: sudo $quoted_doctor_path"
+  log "  Configure public HTTPS: sudo $quoted_public_setup_path --proxy caddy <domain> <email>"
   log "  Check status: systemctl status mnemonas --no-pager"
   log "  View logs: journalctl -u mnemonas -f"
   log "  Keep this release directory; rerun its installer to return to this version after a failed upgrade"
-  log "  Uninstall: sudo $BIN_DIR/mnemonas-uninstall-systemd"
+  log "  Uninstall: sudo $quoted_uninstall_path"
 }
 
 main "$@"

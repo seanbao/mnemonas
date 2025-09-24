@@ -19,7 +19,7 @@ English | [简体中文](faq.md)
 | Method | Strengths | Tradeoffs |
 | --- | --- | --- |
 | Linux/systemd | Auto-start, clear logs, good diagnostics, best for long-running servers | Linux host focused |
-| Docker | Easy start, isolated, easy to upgrade | Requires Docker and correct volume mapping |
+| Docker | Short setup, isolated runtime, straightforward upgrades | Requires Docker and correct volume mapping |
 | Manual binaries | Simple for debugging | Manual process management |
 
 For long-running service deployments, use [Linux/systemd deployment](linux-systemd-deployment.en.md). For quick evaluation or existing container hosts, use [Docker deployment](docker-deployment.en.md).

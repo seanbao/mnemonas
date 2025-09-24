@@ -6,21 +6,21 @@ English | [简体中文](README.md)
 [![Go Report Card](https://goreportcard.com/badge/github.com/seanbao/mnemonas)](https://goreportcard.com/report/github.com/seanbao/mnemonas)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-> Private files. Local control. A self-hosted private cloud storage system.
+> Private files and local control for self-hosted storage.
 
 MnemoNAS is an open-source self-hosted NAS system with a Web UI, WebDAV access, file versions, trash, scrub, and diagnostic bundles for daily file management. Data stays in the configured storage root, and moving that full root is enough to migrate the service.
 
 The name comes from Mnemosyne, the Greek goddess of memory and mother of the nine Muses.
 
-## Features
+## Capability Overview
 
 ### Core Capabilities
 
-- **Data ownership**: data stays on the configured disks; moving the full storage root is enough to migrate the service.
-- **Usable Web UI**: desktop and mobile views are designed for clear daily use instead of dense admin-only panels.
-- **Fast deployment**: Docker Compose and Linux/systemd deployment paths are provided.
+- **Data ownership**: data stays in the configured local storage root; capacity is determined by the underlying disks, and moving the full storage root is enough to migrate the service.
+- **Web interface**: desktop and mobile views are designed for clear daily use instead of dense admin-only panels.
+- **Deployment paths**: Docker Compose and Linux/systemd deployment methods are provided.
 - **Maintenance and diagnostics**: health checks, scrub, GC, and diagnostic bundles help discover and investigate data issues.
-- **Web and WebDAV**: browser-based management and common WebDAV clients are both supported.
+- **Web and WebDAV coverage**: browser-based management and common WebDAV clients are both supported.
 
 ### Feature Matrix
 
@@ -105,7 +105,7 @@ cd mnemonas
 # http://localhost:8080
 ```
 
-The bundled `docker-compose.yml` builds `mnemonas:local` from source by default. The host does not need Go, Rust, or Node.js, but it must be able to pull Docker base images. The quickstart script creates or updates `.env`, writes the current host UID/GID, creates `MNEMONAS_DATA_DIR`, runs Docker preflight checks, and selects the start mode from `MNEMONAS_IMAGE`: local images use a source build, while release image tags use `docker compose up -d --pull missing --no-build`. After `--start`, the script waits for the local `/health` endpoint so a created container is not treated as ready before the service responds. Use `--skip-health-check` only when the host cannot reach the Docker-published port locally. Binary archives from GitHub Releases include `docker-compose.yml` and `.env.example`, and the packaged template presets `MNEMONAS_IMAGE` to the GHCR image for the same release tag.
+The bundled `docker-compose.yml` builds `mnemonas:local` from source by default. The host does not need Go, Rust, or Node.js, but it must be able to pull Docker base images. The quickstart script creates or updates `.env`, writes the current host UID/GID, creates `MNEMONAS_DATA_DIR`, runs Docker preflight checks, and selects the start mode from `MNEMONAS_IMAGE`: local images use a source build, while release image tags use `docker compose up -d --pull missing --no-build`. After `--start`, the script waits for the local `/health` endpoint so a created container is not treated as ready before the service responds, then prints Web UI, health check, initial-password read, WebDAV, Compose status, and log commands. Use `--skip-health-check` only when the host cannot reach the Docker-published port locally. Binary archives from GitHub Releases include `docker-compose.yml` and `.env.example`, and the packaged template presets `MNEMONAS_IMAGE` to the GHCR image for the same release tag.
 
 If port 8080 is already used:
 
@@ -113,7 +113,7 @@ If port 8080 is already used:
 ./scripts/docker-quickstart.sh --port 8888 --start
 ```
 
-On first startup, MnemoNAS creates persistent config in the data directory. The Web login initial password is stored at `<MNEMONAS_DATA_DIR>/.mnemonas/initial-password.txt`. After the first administrator login, the dashboard shows a first-deployment checklist and requires explicit confirmation of initial credential handling, administrator redundancy, backup planning, and public-entry safety before the prompt can be closed. Release image usage is documented in the [Docker deployment guide](docs/docker-deployment.en.md).
+On first startup, MnemoNAS creates persistent config in the data directory. By default, the Web login initial password is stored at `<MNEMONAS_DATA_DIR>/.mnemonas/initial-password.txt`; if `auth.users_file` is customized, `initial-password.txt` is stored next to that users file. After the first administrator login, the dashboard shows a first-deployment checklist and requires explicit confirmation of initial credential handling, administrator redundancy, backup planning, and public-entry safety before the prompt can be closed. Release image usage is documented in the [Docker deployment guide](docs/docker-deployment.en.md).
 
 ### Manual Binary Run
 

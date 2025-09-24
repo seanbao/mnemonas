@@ -410,7 +410,7 @@ sudo systemctl start mnemonas-dataplane mnemonas
 sudo mnemonas-doctor
 ```
 
-For systemd deployments, `mnemonas-doctor` checks whether `BACKUP_ROOT` is inside `storage.root` and reports a risk when the backup target shares the same filesystem source as the main storage or is not writable. Long-running backup targets should use a separate disk, dataset, or remote storage.
+The Web UI security self-check checks enabled local backup job destinations and reports targets that are inside `storage.root` or the backup source, pass through symlink components, are not directories, are missing, or appear non-writable. For systemd deployments, `mnemonas-doctor` checks whether `BACKUP_ROOT` is inside `storage.root` and reports a risk when the backup target is a symlink, is not a directory, shares the same filesystem source as the main storage, or is not writable. Long-running backup targets should use a separate disk, dataset, or remote storage.
 
 ```bash
 # Docker start; for release images, use docker compose up -d --no-build instead.

@@ -608,6 +608,93 @@ PY
 	return 1
 }
 
+expand_container_home_path() {
+	local value="$1"
+
+	case "$value" in
+		\~)
+			printf '/data\n'
+			;;
+		\~/*)
+			printf '/data/%s\n' "${value#\~/}"
+			;;
+		*)
+			printf '%s\n' "$value"
+			;;
+	esac
+}
+
+map_container_data_path_to_host() {
+	local container_path="$1"
+
+	case "$container_path" in
+		/data)
+			printf '%s\n' "$DATA_DIR"
+			;;
+		/data/*)
+			printf '%s/%s\n' "$DATA_DIR" "${container_path#/data/}"
+			;;
+		*)
+			return 1
+			;;
+	esac
+}
+
+configured_auth_users_container_path() {
+	local config_path="$1"
+	local storage_root users_file
+
+	storage_root="$(toml_value storage root "$config_path")"
+	if [[ -n "$storage_root" ]]; then
+		storage_root="$(expand_container_home_path "$storage_root")"
+	else
+		storage_root="/data"
+	fi
+	users_file="$(toml_value auth users_file "$config_path")"
+	if [[ -n "$users_file" ]]; then
+		users_file="$(expand_container_home_path "$users_file")"
+	else
+		users_file="$storage_root/.mnemonas/users.json"
+	fi
+	printf '%s\n' "$users_file"
+}
+
+configured_initial_password_container_path() {
+	local users_file="$1"
+	local users_dir
+
+	users_dir="${users_file%/*}"
+	if [[ "$users_dir" == "$users_file" ]]; then
+		users_dir="."
+	fi
+	printf '%s/initial-password.txt\n' "$users_dir"
+}
+
+check_configured_auth_files() {
+	local config_path="$1"
+	local raw_users_file users_container users_host password_container password_host
+	local default_users_host="$DATA_DIR/.mnemonas/users.json"
+	local default_password_host="$DATA_DIR/.mnemonas/initial-password.txt"
+
+	raw_users_file="$(toml_value auth users_file "$config_path")"
+	users_container="$(configured_auth_users_container_path "$config_path")"
+	if users_host="$(map_container_data_path_to_host "$users_container")"; then
+		if [[ "$users_host" != "$default_users_host" ]]; then
+			check_private_existing_file "$users_host" "Configured users file"
+		fi
+	elif [[ -n "$raw_users_file" ]]; then
+		warn "Configured auth.users_file is outside the /data mount; Docker preflight cannot inspect that users file or sibling initial-password.txt: $users_container"
+		return
+	fi
+
+	password_container="$(configured_initial_password_container_path "$users_container")"
+	if password_host="$(map_container_data_path_to_host "$password_container")"; then
+		if [[ "$password_host" != "$default_password_host" ]]; then
+			check_private_existing_file "$password_host" "Configured initial admin password file"
+		fi
+	fi
+}
+
 check_sensitive_files() {
 	[[ -d "$DATA_DIR" ]] || return
 
@@ -692,6 +779,7 @@ check_data_dir() {
 	if ! check_toml_parse "$config_path" "Docker config file"; then
 		return
 	fi
+	check_configured_auth_files "$config_path"
 
 	configured_root="$(toml_value storage root "$config_path")"
 	if [[ -z "$configured_root" ]]; then

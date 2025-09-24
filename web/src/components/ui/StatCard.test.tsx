@@ -34,19 +34,31 @@ describe('StatCard', () => {
 
   it('supports an optional press action', () => {
     const onPress = vi.fn()
-    render(<StatCard title="Warnings" value={3} onPress={onPress} ariaLabel="查看告警" />)
+    const { container } = render(<StatCard title="Warnings" value={3} onPress={onPress} ariaLabel="查看告警" />)
 
-    fireEvent.click(screen.getByRole('button', { name: '查看告警' }))
+    const button = screen.getByRole('button', { name: '查看告警' })
+    expect(button).toHaveClass('min-h-[6rem]')
+
+    fireEvent.click(button)
 
     expect(onPress).toHaveBeenCalledTimes(1)
+    expect(container.querySelector('[class*="hover:border-primary/40"]')).toBeInTheDocument()
+  })
+
+  it('uses visible stat content as the default accessible name for pressable cards', () => {
+    const onPress = vi.fn()
+    render(<StatCard title="Storage" value="8 GB" subtitle="80% used" onPress={onPress} />)
+
+    expect(screen.getByRole('button', { name: 'Storage，8 GB，80% used' })).toBeInTheDocument()
   })
 
   it('supports compact density for dense mobile stat grids', () => {
-    render(<StatCard title="Users" value={6} subtitle="2 need review" icon={HardDrive} density="compact" />)
+    const { container } = render(<StatCard title="Users" value={6} subtitle="2 need review" icon={HardDrive} density="compact" />)
 
     expect(screen.getByText('Users')).toHaveClass('text-[11px]')
     expect(screen.getByText('6')).toHaveClass('text-xl')
     expect(screen.getByText('2 need review')).toHaveClass('text-[11px]')
-    expect(document.querySelector('svg')?.parentElement).toHaveClass('h-8', 'w-8')
+    expect(document.querySelector('svg')?.parentElement).toHaveClass('h-8', 'w-8', 'self-start')
+    expect(container.querySelector('[class*="min-h-[5rem]"]')).toBeInTheDocument()
   })
 })

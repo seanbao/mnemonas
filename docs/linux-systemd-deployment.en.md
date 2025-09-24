@@ -88,6 +88,8 @@ The installer only fixes ownership of the managed top-level directories by defau
 sudo env FIX_STORAGE_OWNERSHIP=1 ./scripts/install-systemd.sh
 ```
 
+After a successful installation, the script prints directly runnable next steps, including the Web UI URL, the `sudo cat .../initial-password.txt` command derived from the current `auth.users_file`, the `mnemonas-doctor` diagnostic command, and log inspection commands.
+
 If the installer fails while reloading, enabling, or starting the systemd services, it prints the failed stage and the relevant `systemctl cat`, `systemctl status`, or `journalctl` commands. Keep the config and data directories in place, inspect the reported unit or service logs, then rerun the installer after fixing the issue.
 
 If no release archive is available, build from source:
@@ -112,7 +114,7 @@ Run diagnostics:
 sudo mnemonas-doctor
 ```
 
-Read the initial password:
+Read the default initial password:
 
 ```bash
 sudo cat /srv/mnemonas/.mnemonas/initial-password.txt
@@ -142,7 +144,9 @@ sudo systemctl restart mnemonas-dataplane
 sudo mnemonas-doctor
 ```
 
-`mnemonas-doctor` checks service state, Web UI, the config file, runtime-sensitive files, directory permissions, filesystem type, free space, and backup-root placement. A non-regular `config.toml` is a failure; a symlinked or broadly readable config file is reported as a risk. When authentication is enabled, it reports a missing `users.json`; it also reports risks when `users.json`, `secrets.json`, or their relevant parent directories are symlinks, unexpected file types, or broadly readable. When `BACKUP_ROOT` exists, it must not equal or live under `storage.root`; it also reports a risk when both paths use the same filesystem source and when the service user or current diagnostic environment cannot write to it. Use a separate disk, dataset, or remote mount path for backup targets. The Web UI health and storage pages also show the underlying filesystem type, mount point, device or dataset source, redacted mount options, ZFS/Btrfs native-checksum hints, and space-alert runtime state. Administrators can download a diagnostic bundle from the health page and copy a storage-backing summary from the storage page for troubleshooting records. It also warns when UFW appears to expose dataplane ports.
+`mnemonas-doctor` checks service state, Web UI, the config file, runtime-sensitive files, directory permissions, filesystem type, free space, and backup-root placement. A non-regular `config.toml` is a failure; a config path that is a symlink, passes through symlink components, or is broadly readable is reported as a risk. When authentication is enabled, it reports a missing `users.json`; it also reports risks when `users.json`, `secrets.json`, or their relevant parent directories are symlinks, pass through symlink components, have unexpected file types, or are broadly readable. When `BACKUP_ROOT` exists, it must not equal or live under `storage.root`; it also reports a risk when it is a symlink, is not a directory, shares the same filesystem source as `storage.root`, or cannot be written by the service user or current diagnostic environment. Use a separate disk, dataset, or remote mount path for backup targets. The Web UI health and storage pages also show the underlying filesystem type, mount point, device or dataset source, redacted mount options, ZFS/Btrfs native-checksum hints, and space-alert runtime state. Administrators can download a diagnostic bundle from the health page and copy a storage-backing summary from the storage page for troubleshooting records. By default, the free-space check warns below 10 GiB; set `MIN_FREE_BYTES=<bytes> sudo mnemonas-doctor` to adjust the threshold.
+
+If UFW is installed, `mnemonas-doctor` also checks whether the firewall is enabled and warns when dataplane ports `9090/9091` appear exposed.
 
 After config changes:
 

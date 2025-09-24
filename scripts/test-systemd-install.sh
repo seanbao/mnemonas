@@ -80,9 +80,11 @@ run_fresh_install_test() {
   local release_dir="$case_dir/release"
   local install_dir="$case_dir/install"
   local storage_dir="$install_dir/storage&root"
+  local quoted_initial_password_file
   mkdir -p "$install_dir"
   make_fake_admin_path "$fake_path"
   make_release_tree "$release_dir"
+  quoted_initial_password_file="$(printf '%q' "$storage_dir/.mnemonas/initial-password.txt")"
 
   PATH="$fake_path:$PATH" \
     RELEASE_DIR="$release_dir" \
@@ -115,7 +117,7 @@ run_fresh_install_test() {
   assert_file_contains "$install_dir/systemd/mnemonas.service" "CapabilityBoundingSet="
   assert_file_contains "$install_dir/systemd/mnemonas.service" "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6"
   assert_file_contains "$case_dir/install.log" "Next steps:"
-  assert_file_contains "$case_dir/install.log" "Read initial password: sudo cat $storage_dir/.mnemonas/initial-password.txt"
+  assert_file_contains "$case_dir/install.log" "Read initial password: sudo cat $quoted_initial_password_file"
   assert_file_contains "$case_dir/install.log" "Configure public HTTPS: sudo $install_dir/bin/mnemonas-public-setup --proxy caddy <domain> <email>"
   assert_file_contains "$case_dir/install.log" "Keep this release directory; rerun its installer to return to this version after a failed upgrade"
   assert_file_contains "$case_dir/install.log" "Uninstall: sudo $install_dir/bin/mnemonas-uninstall-systemd"
@@ -508,9 +510,11 @@ run_existing_config_test() {
   local release_dir="$case_dir/release"
   local install_dir="$case_dir/install"
   local storage_dir="$case_dir/custom#storage"
+  local quoted_initial_password_file
   mkdir -p "$install_dir/etc/mnemonas" "$storage_dir"
   make_fake_admin_path "$fake_path"
   make_release_tree "$release_dir"
+  quoted_initial_password_file="$(printf '%q' "$storage_dir/custom-auth/initial-password.txt")"
 
   cat > "$install_dir/etc/mnemonas/config.toml" <<EOF
 [server]
@@ -527,6 +531,9 @@ grpc_address = "127.0.0.1\u003a19090"
 min_chunk_size = 524288
 avg_chunk_size = 2097152
 max_chunk_size = 8388608
+
+[auth]
+users_file = "~/custom-auth/users.json"
 EOF
 
   PATH="$fake_path:$PATH" \
@@ -540,6 +547,7 @@ EOF
     "$REPO_ROOT/scripts/install-systemd.sh" > "$case_dir/install.log"
 
   assert_file_contains "$case_dir/install.log" "Open Web UI: http://127.0.0.1:18080"
+  assert_file_contains "$case_dir/install.log" "Read initial password: sudo cat $quoted_initial_password_file"
   assert_file_contains "$install_dir/systemd/mnemonas-dataplane.service" "Environment=DATAPLANE_GRPC_ADDR=127.0.0.1:19090"
   assert_file_contains "$install_dir/systemd/mnemonas-dataplane.service" "Environment=DATAPLANE_DATA_DIR=$storage_dir/.mnemonas/objects"
   assert_file_contains "$install_dir/systemd/mnemonas.service" "Environment=DATAPLANE_HTTP_ADDR=127.0.0.1:9091"
@@ -1137,12 +1145,15 @@ run_doctor_config_test() {
   local storage_dir="$case_dir/storage-root"
   local backup_dir="$case_dir/backup"
   local systemd_dir="$case_dir/systemd"
+  local fake_admin_hash='$2a$10$ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0'
   mkdir -p "$fake_path" "$bin_dir" "$web_dir" "$storage_dir/.mnemonas" "$backup_dir" "$systemd_dir"
   chmod 0750 "$storage_dir"
   chmod 0700 "$storage_dir/.mnemonas"
-  cat > "$storage_dir/.mnemonas/users.json" <<'JSON'
-[]
-JSON
+  cat > "$storage_dir/.mnemonas/users.json" <<EOF
+[
+  {"id":"admin-1","username":"admin","password_hash":"$fake_admin_hash","role":"admin","disabled":false}
+]
+EOF
   chmod 0600 "$storage_dir/.mnemonas/users.json"
   cat > "$storage_dir/secrets.json" <<'JSON'
 {"jwt_secret":"test-jwt-secret-value","webdav_password":"GeneratedPass123"}
@@ -1176,7 +1187,7 @@ JSON
     '#!/usr/bin/env bash' \
     'path="${@: -1}"' \
     'case "$path" in' \
-    "  $backup_dir|$case_dir/non-writable-backup)" \
+    "  $backup_dir|$case_dir/non-writable-backup|$case_dir/symlink-backup)" \
     '    printf "tank/backup zfs %s\n" "$path"' \
     '    ;;' \
     '  *)' \
@@ -1231,11 +1242,70 @@ EOF
   assert_file_contains "$case_dir/doctor.log" "users file directory is private to its owner: $storage_dir/.mnemonas"
   assert_file_contains "$case_dir/doctor.log" "users file is private to its owner: $storage_dir/.mnemonas/users.json"
   assert_file_contains "$case_dir/doctor.log" "generated secrets file is private to its owner: $storage_dir/secrets.json"
+  assert_file_contains "$case_dir/doctor.log" "Web UI/API authentication is enabled"
+  assert_file_contains "$case_dir/doctor.log" "WebDAV authentication is configured: basic"
+  assert_file_contains "$case_dir/doctor.log" "administrator availability verified: 1 enabled administrator(s)"
   assert_file_contains "$case_dir/doctor.log" "backup root is outside storage root: $backup_dir"
   assert_file_contains "$case_dir/doctor.log" "backup root is writable by current user: $backup_dir"
   assert_file_contains "$case_dir/doctor.log" "backup root is on a separate filesystem source: tank/backup"
   assert_file_contains "$case_dir/doctor.log" "ufw is active"
   assert_file_contains "$case_dir/doctor.log" "Summary: 0 failure(s)"
+
+  cat > "$storage_dir/.mnemonas/users.json" <<'JSON'
+[]
+JSON
+  chmod 0600 "$storage_dir/.mnemonas/users.json"
+  PATH="$fake_path:$PATH" \
+    BIN_DIR="$bin_dir" \
+    WEB_DIR="$web_dir" \
+    CONFIG_PATH="$case_dir/config.toml" \
+    SYSTEMD_DIR="$systemd_dir" \
+    BACKUP_ROOT="$backup_dir" \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" > "$case_dir/doctor-no-admin.log"
+
+  assert_file_contains "$case_dir/doctor-no-admin.log" "users file has no enabled administrators; MnemoNAS will create a recovery administrator on next startup if auth is enabled"
+  assert_file_contains "$case_dir/doctor-no-admin.log" "Summary: 0 failure(s), 1 warning(s)"
+  cat > "$storage_dir/.mnemonas/users.json" <<EOF
+[
+  {"id":"admin-1","username":"admin","password_hash":"$fake_admin_hash","role":"admin","disabled":false}
+]
+EOF
+  chmod 0600 "$storage_dir/.mnemonas/users.json"
+
+  cat > "$case_dir/config-unsafe-no-auth.toml" <<EOF
+[server]
+host = "127.0.0.1"
+port = 18080
+
+[storage]
+root = "$storage_dir"
+
+[dataplane]
+grpc_address = "127.0.0.1:19090"
+
+[auth]
+enabled = false
+
+[webdav]
+auth_type = "none"
+
+[security]
+allow_unsafe_no_auth = true
+EOF
+  chmod 0600 "$case_dir/config-unsafe-no-auth.toml"
+
+  PATH="$fake_path:$PATH" \
+    BIN_DIR="$bin_dir" \
+    WEB_DIR="$web_dir" \
+    CONFIG_PATH="$case_dir/config-unsafe-no-auth.toml" \
+    SYSTEMD_DIR="$systemd_dir" \
+    BACKUP_ROOT="$backup_dir" \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" > "$case_dir/doctor-unsafe-no-auth.log"
+
+  assert_file_contains "$case_dir/doctor-unsafe-no-auth.log" "auth.enabled=false; Web UI/API access relies on a controlled network, VPN, or outer access-control layer"
+  assert_file_contains "$case_dir/doctor-unsafe-no-auth.log" "WebDAV auth_type=none; restrict access with loopback binding, VPN, firewall, or another trusted boundary"
+  assert_file_contains "$case_dir/doctor-unsafe-no-auth.log" "security.allow_unsafe_no_auth=true; verify that an outer boundary deliberately restricts unauthenticated access"
+  assert_file_contains "$case_dir/doctor-unsafe-no-auth.log" "Summary: 0 failure(s), 3 warning(s)"
 
   chmod 0644 "$storage_dir/.mnemonas/users.json" "$storage_dir/secrets.json"
   PATH="$fake_path:$PATH" \
@@ -1250,6 +1320,42 @@ EOF
   assert_file_contains "$case_dir/doctor-open-sensitive-files.log" "users file is not private"
   assert_file_contains "$case_dir/doctor-open-sensitive-files.log" "generated secrets file is not private"
   assert_file_contains "$case_dir/doctor-open-sensitive-files.log" "Summary: 0 failure(s), 2 warning(s)"
+
+  local real_runtime_auth_parent="$case_dir/real-runtime-auth"
+  local linked_runtime_auth_parent="$case_dir/linked-runtime-auth"
+  mkdir -p "$real_runtime_auth_parent/private"
+  cp "$storage_dir/.mnemonas/users.json" "$real_runtime_auth_parent/private/users.json"
+  chmod 0700 "$real_runtime_auth_parent" "$real_runtime_auth_parent/private"
+  chmod 0600 "$real_runtime_auth_parent/private/users.json"
+  ln -s "$real_runtime_auth_parent" "$linked_runtime_auth_parent"
+  cat > "$case_dir/config-runtime-symlink-component.toml" <<EOF
+[server]
+host = "127.0.0.1"
+port = 18080
+
+[storage]
+root = "$storage_dir"
+
+[dataplane]
+grpc_address = "127.0.0.1:19090"
+
+[auth]
+users_file = "$linked_runtime_auth_parent/private/users.json"
+EOF
+  chmod 0600 "$case_dir/config-runtime-symlink-component.toml"
+
+  PATH="$fake_path:$PATH" \
+    BIN_DIR="$bin_dir" \
+    WEB_DIR="$web_dir" \
+    CONFIG_PATH="$case_dir/config-runtime-symlink-component.toml" \
+    SYSTEMD_DIR="$systemd_dir" \
+    BACKUP_ROOT="$backup_dir" \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" > "$case_dir/doctor-runtime-symlink-component.log"
+
+  assert_file_contains "$case_dir/doctor-runtime-symlink-component.log" "users file directory path contains a symlink component; use a regular private directory path: $linked_runtime_auth_parent"
+  assert_file_contains "$case_dir/doctor-runtime-symlink-component.log" "users file path contains a symlink component; use a regular private file path: $linked_runtime_auth_parent"
+  assert_file_contains "$case_dir/doctor-runtime-symlink-component.log" "initial admin password path contains a symlink component at $linked_runtime_auth_parent"
+  assert_file_contains "$case_dir/doctor-runtime-symlink-component.log" "Summary: 0 failure(s), 3 warning(s)"
 
   chmod 0644 "$case_dir/config.toml"
   PATH="$fake_path:$PATH" \
@@ -1291,6 +1397,33 @@ EOF
 
   assert_file_contains "$case_dir/doctor-backup-same-source.log" "backup root shares filesystem source with storage root (tank/data)"
   assert_file_contains "$case_dir/doctor-backup-same-source.log" "Summary: 0 failure(s), 1 warning(s)"
+
+  local symlink_backup_dir="$case_dir/symlink-backup"
+  ln -s "$backup_dir" "$symlink_backup_dir"
+  PATH="$fake_path:$PATH" \
+    BIN_DIR="$bin_dir" \
+    WEB_DIR="$web_dir" \
+    CONFIG_PATH="$case_dir/config.toml" \
+    SYSTEMD_DIR="$systemd_dir" \
+    BACKUP_ROOT="$symlink_backup_dir" \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" > "$case_dir/doctor-backup-symlink.log"
+
+  assert_file_contains "$case_dir/doctor-backup-symlink.log" "backup root path is a symlink; use a real directory, dataset, mount point, or remote target: $symlink_backup_dir"
+  assert_file_contains "$case_dir/doctor-backup-symlink.log" "backup root exists: $symlink_backup_dir"
+  assert_file_contains "$case_dir/doctor-backup-symlink.log" "Summary: 0 failure(s), 1 warning(s)"
+
+  local backup_file="$case_dir/backup-file"
+  printf 'not a directory\n' > "$backup_file"
+  PATH="$fake_path:$PATH" \
+    BIN_DIR="$bin_dir" \
+    WEB_DIR="$web_dir" \
+    CONFIG_PATH="$case_dir/config.toml" \
+    SYSTEMD_DIR="$systemd_dir" \
+    BACKUP_ROOT="$backup_file" \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" > "$case_dir/doctor-backup-file.log"
+
+  assert_file_contains "$case_dir/doctor-backup-file.log" "backup root is not a directory: $backup_file"
+  assert_file_contains "$case_dir/doctor-backup-file.log" "Summary: 0 failure(s), 1 warning(s)"
 
   write_executable "$fake_path/ss" \
     '#!/usr/bin/env bash' \
@@ -1505,6 +1638,7 @@ EOF
   assert_file_contains "$case_dir/doctor-public.log" "public HTTPS certificate matches nas.example.com"
   assert_file_contains "$case_dir/doctor-public.log" "public HTTPS certificate is valid for at least 30 days"
   assert_file_contains "$case_dir/doctor-public.log" "certificate automation detected: Caddy"
+  assert_file_contains "$case_dir/doctor-public.log" "public config file path has no symlink components"
   assert_file_contains "$case_dir/doctor-public.log" "public auth.access_token_ttl is within 1h: 15m"
   assert_file_contains "$case_dir/doctor-public.log" "public auth.refresh_token_ttl is within 720h: 168h"
   assert_file_contains "$case_dir/doctor-public.log" "public users file directory is private to its owner: $storage_dir/.mnemonas"
@@ -1532,6 +1666,41 @@ EOF
   assert_file_contains "$case_dir/doctor-public-normalized-domain.log" "public HTTPS health reachable: https://nas.example.com/health"
   assert_file_contains "$case_dir/doctor-public-normalized-domain.log" "public HTTP redirects to HTTPS: http://nas.example.com/health -> https://nas.example.com/health"
   assert_file_contains "$case_dir/doctor-public-normalized-domain.log" "Summary: 0 failure(s)"
+
+  local linked_config_file="$case_dir/config-linked.toml"
+  ln -s "$case_dir/config.toml" "$linked_config_file"
+  set +e
+  PATH="$fake_path:$PATH" \
+    BIN_DIR="$bin_dir" \
+    WEB_DIR="$web_dir" \
+    CONFIG_PATH="$linked_config_file" \
+    DATAPLANE_HTTP_PORT=019091 \
+    BACKUP_ROOT="$backup_dir" \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain nas.example.com > "$case_dir/doctor-public-symlink-config.log"
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "public doctor accepted a symlink config file"
+  assert_file_contains "$case_dir/doctor-public-symlink-config.log" "public config file path is a symlink; use a regular private config file: $linked_config_file"
+
+  local real_config_component_parent="$case_dir/real-config-component"
+  local linked_config_component_parent="$case_dir/linked-config-component"
+  mkdir -p "$real_config_component_parent"
+  cp "$case_dir/config.toml" "$real_config_component_parent/config.toml"
+  ln -s "$real_config_component_parent" "$linked_config_component_parent"
+  set +e
+  PATH="$fake_path:$PATH" \
+    BIN_DIR="$bin_dir" \
+    WEB_DIR="$web_dir" \
+    CONFIG_PATH="$linked_config_component_parent/config.toml" \
+    DATAPLANE_HTTP_PORT=019091 \
+    BACKUP_ROOT="$backup_dir" \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain nas.example.com > "$case_dir/doctor-public-symlink-config-component.log"
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "public doctor accepted a symlink config path component"
+  assert_file_contains "$case_dir/doctor-public-symlink-config-component.log" "public config file path contains a symlink component; use a regular private config path: $linked_config_component_parent"
 
   cat > "$case_dir/config-long-auth-ttl.toml" <<EOF
 [server]
@@ -1663,6 +1832,44 @@ EOF
 
   [[ "$status" -ne 0 ]] || fail "public doctor accepted a symlink users file directory"
   assert_file_contains "$case_dir/doctor-public-symlink-auth-dir.log" "public users file directory path is a symlink; use a regular private directory"
+
+  local real_auth_component_parent="$case_dir/real-auth-component"
+  local linked_auth_component_parent="$case_dir/linked-auth-component"
+  mkdir -p "$real_auth_component_parent/private"
+  cp "$storage_dir/.mnemonas/users.json" "$real_auth_component_parent/private/users.json"
+  chmod 0700 "$real_auth_component_parent" "$real_auth_component_parent/private"
+  chmod 0600 "$real_auth_component_parent/private/users.json"
+  ln -s "$real_auth_component_parent" "$linked_auth_component_parent"
+  cat > "$case_dir/config-symlink-auth-component.toml" <<EOF
+[server]
+host = "127.0.0.1"
+port = 18080
+trusted_proxy_hops = 1
+
+[storage]
+root = "$storage_dir"
+
+[dataplane]
+grpc_address = "127.0.0.1:19090"
+
+[auth]
+users_file = "$linked_auth_component_parent/private/users.json"
+EOF
+
+  set +e
+  PATH="$fake_path:$PATH" \
+    BIN_DIR="$bin_dir" \
+    WEB_DIR="$web_dir" \
+    CONFIG_PATH="$case_dir/config-symlink-auth-component.toml" \
+    DATAPLANE_HTTP_PORT=19091 \
+    BACKUP_ROOT="$backup_dir" \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain nas.example.com > "$case_dir/doctor-public-symlink-auth-component.log"
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "public doctor accepted a symlink users file path component"
+  assert_file_contains "$case_dir/doctor-public-symlink-auth-component.log" "public users file directory path contains a symlink component; use a regular private directory path: $linked_auth_component_parent"
+  assert_file_contains "$case_dir/doctor-public-symlink-auth-component.log" "initial admin password path contains a symlink component at $linked_auth_component_parent"
 
   local custom_auth_dir="$case_dir/custom-auth"
   mkdir -p "$custom_auth_dir"
@@ -2009,6 +2216,46 @@ EOF
 
   [[ "$status" -ne 0 ]] || fail "public doctor accepted symlink generated WebDAV password file"
   assert_file_contains "$case_dir/doctor-public-symlink-webdav-secrets.log" "public WebDAV generated password file is a symlink"
+
+  local real_webdav_storage_parent="$case_dir/real-webdav-storage"
+  local linked_webdav_storage_parent="$case_dir/linked-webdav-storage"
+  local linked_webdav_storage_root="$linked_webdav_storage_parent/data"
+  mkdir -p "$real_webdav_storage_parent/data/files" "$real_webdav_storage_parent/data/.mnemonas"
+  cp "$storage_dir/secrets.json" "$real_webdav_storage_parent/data/secrets.json"
+  chmod 0750 "$real_webdav_storage_parent/data" "$real_webdav_storage_parent/data/files"
+  chmod 0700 "$real_webdav_storage_parent/data/.mnemonas"
+  chmod 0600 "$real_webdav_storage_parent/data/secrets.json"
+  ln -s "$real_webdav_storage_parent" "$linked_webdav_storage_parent"
+  cat > "$case_dir/config-symlink-webdav-secrets-component.toml" <<EOF
+[server]
+host = "127.0.0.1"
+port = 18080
+trusted_proxy_hops = 1
+
+[storage]
+root = "$linked_webdav_storage_root"
+
+[dataplane]
+grpc_address = "127.0.0.1:19090"
+
+[auth]
+users_file = "$storage_dir/.mnemonas/users.json"
+EOF
+
+  set +e
+  PATH="$fake_path:$PATH" \
+    BIN_DIR="$bin_dir" \
+    WEB_DIR="$web_dir" \
+    CONFIG_PATH="$case_dir/config-symlink-webdav-secrets-component.toml" \
+    DATAPLANE_HTTP_PORT=19091 \
+    BACKUP_ROOT="$backup_dir" \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain nas.example.com > "$case_dir/doctor-public-symlink-webdav-secrets-component.log"
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "public doctor accepted a symlink WebDAV generated password path component"
+  assert_file_contains "$case_dir/doctor-public-symlink-webdav-secrets-component.log" "generated secrets file path contains a symlink component; use a regular private file path: $linked_webdav_storage_parent"
+  assert_file_contains "$case_dir/doctor-public-symlink-webdav-secrets-component.log" "public WebDAV generated password file path contains a symlink component; use a regular private file path: $linked_webdav_storage_parent"
 
   chmod 0644 "$storage_dir/secrets.json"
   PATH="$fake_path:$PATH" \

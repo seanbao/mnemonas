@@ -207,6 +207,7 @@ export function Sidebar({ collapsed = false, onClose }: SidebarProps) {
         </div>
         {onClose && (
           <button
+            type="button"
             onClick={onClose}
             className="rounded-lg p-2 transition-colors hover:bg-content2 lg:hidden"
             aria-label="关闭导航菜单"

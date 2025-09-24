@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { useSearchParams } from 'react-router-dom'
 import { Card, CardBody, CardHeader, Button, Chip, Progress, Divider, Table, TableHeader, TableColumn, TableBody, TableRow, TableCell, Modal, ModalContent, ModalHeader, ModalBody, ModalFooter, Input, Checkbox, addToast } from '@heroui/react'
 import { 
   Archive,
@@ -49,7 +50,7 @@ import {
   type ScrubResult,
   type ScrubError,
 } from '@/api/files'
-import { formatBytes, formatDuration } from '@/lib/utils'
+import { cn, formatBytes, formatDuration } from '@/lib/utils'
 import { GENERIC_ACTION_ERROR_DESCRIPTION, GENERIC_LOAD_ERROR_DESCRIPTION, getUserFacingErrorDescription } from '@/lib/apiMessages'
 import { backupJobNeedsAttention, getBackupAttentionNextSteps, getBackupAttentionReasons } from '@/lib/backupAttention'
 import { useUser } from '@/stores/auth'
@@ -414,6 +415,10 @@ function formatBackupDuration(value?: string): string {
   }
 
   return value
+}
+
+function getBackupJobFocusElementId(jobId: string): string {
+  return `backup-job-${encodeURIComponent(jobId)}`
 }
 
 function getBackupTriggerLabel(trigger?: string): string {
@@ -1901,6 +1906,7 @@ function BatchRestoreResultSummary({ result }: { result: BackupBatchRestoreResul
 
 export default function Maintenance() {
   const queryClient = useQueryClient()
+  const [searchParams] = useSearchParams()
   const user = useUser()
   const diagnosticsExportAbortControllerRef = useRef<AbortController | null>(null)
   const restoreReportExportAbortControllerRef = useRef<AbortController | null>(null)
@@ -1973,6 +1979,18 @@ export default function Maintenance() {
     queryFn: ({ signal }) => listBackupJobs({ signal }),
   })
   const backupLoadErrorPresentation = getBackupLoadErrorPresentation(backupError)
+  const focusedBackupJobID = searchParams.get('backupJob')?.trim() ?? ''
+
+  useEffect(() => {
+    if (!focusedBackupJobID || backupJobs.length === 0) {
+      return
+    }
+
+    const element = document.getElementById(getBackupJobFocusElementId(focusedBackupJobID))
+    if (typeof element?.scrollIntoView === 'function') {
+      element.scrollIntoView({ block: 'center', behavior: 'smooth' })
+    }
+  }, [backupJobs, focusedBackupJobID])
 
   const handleRefreshScrubResult = async () => {
     const result = await refetch()
@@ -2950,14 +2968,28 @@ export default function Maintenance() {
                     const isRunningRestoreVerify = restoreVerifyMutation.isPending && restoreVerifyMutation.variables?.jobId === job.id
                     const isExportingReport = exportingRestoreReportJobId === job.id
                     const isBusy = job.running || isRunningBackup || isCheckingRetention || isRunningDrill || isRunningRestore || isRunningRestoreVerify
+                    const isFocusedBackupJob = focusedBackupJobID === job.id
                     return (
                       <TableRow key={job.id}>
                         <TableCell>
-                          <div className="space-y-1">
+                          <div
+                            id={getBackupJobFocusElementId(job.id)}
+                            className={cn(
+                              '-m-2 space-y-1 rounded-lg border border-transparent p-2',
+                              isFocusedBackupJob && 'border-warning/60 bg-warning/10 ring-2 ring-warning/30',
+                            )}
+                            data-backup-job-id={job.id}
+                            data-focused-backup-job={isFocusedBackupJob ? 'true' : undefined}
+                          >
                             <div className="flex items-center gap-2">
                               <span className="font-medium">{job.name}</span>
                               <BackupHealthChip status={job.health_status} />
                               {job.running && <BackupStatusChip status="running" />}
+                              {isFocusedBackupJob && (
+                                <Chip size="sm" color="warning" variant="flat">
+                                  安全自检定位
+                                </Chip>
+                              )}
                             </div>
                             <div className="text-xs text-default-500">
                               {job.id} · {job.type}

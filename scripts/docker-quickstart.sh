@@ -30,6 +30,178 @@ fail() {
 	exit 1
 }
 
+shell_quote() {
+	printf '%q' "$1"
+}
+
+config_value() {
+	local section="$1"
+	local key="$2"
+	local file="$DATA_DIR/config.toml"
+
+	[[ -f "$file" ]] || return 0
+	if command -v python3 >/dev/null 2>&1; then
+		local value
+		if value=$(python3 - "$file" "$section" "$key" <<'PY'
+import sys
+
+try:
+    import tomllib
+except Exception:
+    sys.exit(2)
+
+path, section, key = sys.argv[1], sys.argv[2], sys.argv[3]
+try:
+    with open(path, "rb") as handle:
+        data = tomllib.load(handle)
+except Exception:
+    sys.exit(2)
+
+current = data
+for part in section.split("."):
+    if not isinstance(current, dict):
+        sys.exit(0)
+    current = current.get(part)
+    if current is None:
+        sys.exit(0)
+
+if not isinstance(current, dict) or key not in current:
+    sys.exit(0)
+
+value = current[key]
+if isinstance(value, bool):
+    sys.stdout.write("true" if value else "false")
+elif isinstance(value, (str, int, float)):
+    sys.stdout.write(str(value))
+elif hasattr(value, "isoformat"):
+    sys.stdout.write(value.isoformat())
+PY
+		); then
+			printf '%s' "$value"
+			return 0
+		fi
+	fi
+
+	awk -v section="[$section]" -v key="$key" '
+		function strip_comment(text,    i, c, quote, escaped, out) {
+			quote = ""
+			escaped = 0
+			out = ""
+			for (i = 1; i <= length(text); i++) {
+				c = substr(text, i, 1)
+				if (quote == "\"") {
+					out = out c
+					if (escaped) {
+						escaped = 0
+						continue
+					}
+					if (c == "\\") {
+						escaped = 1
+						continue
+					}
+					if (c == quote) {
+						quote = ""
+					}
+					continue
+				}
+				if (quote == "\047") {
+					out = out c
+					if (c == quote) {
+						quote = ""
+					}
+					continue
+				}
+				if (c == "\"" || c == "\047") {
+					quote = c
+					out = out c
+					continue
+				}
+				if (c == "#") {
+					break
+				}
+				out = out c
+			}
+			return out
+		}
+		{
+			line = strip_comment($0)
+			gsub(/^[[:space:]]+|[[:space:]]+$/, "", line)
+			section_line = line
+			if (section_line ~ /^\[/) {
+				sub(/^\[[[:space:]]*/, "[", section_line)
+				sub(/[[:space:]]*\]$/, "]", section_line)
+				gsub(/[[:space:]]*\.[[:space:]]*/, ".", section_line)
+			}
+		}
+		section_line == section { in_section = 1; next }
+		section_line ~ /^\[/ { in_section = 0 }
+		in_section && line ~ "^[[:space:]]*" key "[[:space:]]*=" {
+			sub(/^[^=]*=[[:space:]]*/, "", line)
+			gsub(/^[[:space:]]+|[[:space:]]+$/, "", line)
+			gsub(/^"/, "", line)
+			gsub(/"$/, "", line)
+			gsub(/^\047/, "", line)
+			gsub(/\047$/, "", line)
+			print line
+			exit
+		}
+	' "$file"
+}
+
+expand_container_home_path() {
+	local value="$1"
+
+	case "$value" in
+		\~)
+			printf '/data\n'
+			;;
+		\~/*)
+			printf '/data/%s\n' "${value#\~/}"
+			;;
+		*)
+			printf '%s\n' "$value"
+			;;
+	esac
+}
+
+initial_password_container_path() {
+	local storage_root users_file users_dir
+
+	storage_root="$(config_value storage root)"
+	if [[ -n "$storage_root" ]]; then
+		storage_root="$(expand_container_home_path "$storage_root")"
+	else
+		storage_root="/data"
+	fi
+	users_file="$(config_value auth users_file)"
+	if [[ -n "$users_file" ]]; then
+		users_file="$(expand_container_home_path "$users_file")"
+	else
+		users_file="$storage_root/.mnemonas/users.json"
+	fi
+	users_dir="${users_file%/*}"
+	if [[ "$users_dir" == "$users_file" ]]; then
+		users_dir="."
+	fi
+	printf '%s/initial-password.txt' "$users_dir"
+}
+
+map_container_data_path_to_host() {
+	local container_path="$1"
+
+	case "$container_path" in
+		/data)
+			printf '%s\n' "$DATA_DIR"
+			;;
+		/data/*)
+			printf '%s/%s\n' "$DATA_DIR" "${container_path#/data/}"
+			;;
+		*)
+			return 1
+			;;
+	esac
+}
+
 usage() {
 	cat <<'EOF'
 MnemoNAS Docker quickstart
@@ -435,7 +607,13 @@ wait_for_health() {
 }
 
 report_initial_password_file() {
-	local password_path="$DATA_DIR/.mnemonas/initial-password.txt"
+	local container_path password_path
+
+	container_path="$(initial_password_container_path)"
+	if ! password_path="$(map_container_data_path_to_host "$container_path")"; then
+		log "initial password file is configured outside the /data mount; container path is: $container_path"
+		return
+	fi
 
 	if [[ -f "$password_path" ]]; then
 		log "initial password file is available: $password_path"
@@ -445,14 +623,25 @@ report_initial_password_file() {
 }
 
 print_next_steps() {
+	local compose_file env_file container_path initial_password_file
+	compose_file="$(shell_quote "$REPO_ROOT/docker-compose.yml")"
+	env_file="$(shell_quote "$ENV_PATH")"
+	container_path="$(initial_password_container_path)"
+
 	log "ready"
 	printf '\n'
 	printf 'Web UI:              http://localhost:%s\n' "$HOST_PORT"
 	printf 'Health:              curl http://localhost:%s/health\n' "$HOST_PORT"
-	printf 'Initial password:    %s/.mnemonas/initial-password.txt\n' "$DATA_DIR"
+	if initial_password_file="$(map_container_data_path_to_host "$container_path")"; then
+		printf 'Initial password:    %s\n' "$initial_password_file"
+		printf 'Read password:       cat %s\n' "$(shell_quote "$initial_password_file")"
+	else
+		printf 'Initial password:    %s (container path; not under /data)\n' "$container_path"
+		printf 'Read password:       docker compose -f %s --env-file %s exec mnemonas cat %s\n' "$compose_file" "$env_file" "$(shell_quote "$container_path")"
+	fi
 	printf 'WebDAV URL:          http://localhost:%s/dav\n' "$HOST_PORT"
-	printf 'Status:              docker compose -f %s --env-file %s ps\n' "$REPO_ROOT/docker-compose.yml" "$ENV_PATH"
-	printf 'Logs:                docker compose -f %s --env-file %s logs -f\n' "$REPO_ROOT/docker-compose.yml" "$ENV_PATH"
+	printf 'Status:              docker compose -f %s --env-file %s ps\n' "$compose_file" "$env_file"
+	printf 'Logs:                docker compose -f %s --env-file %s logs -f\n' "$compose_file" "$env_file"
 	if [[ "$START_AFTER_PREPARE" != "1" ]]; then
 		printf 'Start:               ./scripts/docker-quickstart.sh --start\n'
 	fi

@@ -17,6 +17,12 @@ interface StatCardProps {
   className?: string
 }
 
+function getDefaultAriaLabel(title: string, value: string | number, subtitle?: string): string {
+  return [title, String(value), subtitle]
+    .filter((part): part is string => typeof part === 'string' && part.trim().length > 0)
+    .join('，')
+}
+
 export function StatCard({
   title,
   value,
@@ -42,7 +48,7 @@ export function StatCard({
     <>
       {Icon && (
         <div className={cn(
-          "flex shrink-0 items-center justify-center rounded-lg border border-divider",
+          "flex shrink-0 items-center justify-center self-start rounded-lg border border-divider",
           density === 'compact' ? 'h-8 w-8' : 'h-10 w-10',
           toneClasses[tone],
         )}>
@@ -69,16 +75,16 @@ export function StatCard({
     <Card className={cn("card-meridian min-w-0", onPress && "transition-colors hover:border-primary/40", className)}>
       <CardBody className={cn(
         "p-0",
-        !onPress && "flex items-center gap-3",
-        !onPress && (density === 'compact' ? 'p-3' : 'p-4'),
+        !onPress && "flex items-start gap-3",
+        !onPress && (density === 'compact' ? 'min-h-[5rem] p-3' : 'min-h-[6rem] p-4'),
       )}>
         {onPress ? (
           <button
             type="button"
-            aria-label={ariaLabel ?? title}
+            aria-label={ariaLabel ?? getDefaultAriaLabel(title, value, subtitle)}
             className={cn(
-              "flex w-full items-center gap-3 text-left outline-none transition-colors focus-visible:ring-2 focus-visible:ring-primary/40",
-              density === 'compact' ? 'p-3' : 'p-4',
+              "flex w-full items-start gap-3 text-left outline-none transition-colors focus-visible:ring-2 focus-visible:ring-primary/40",
+              density === 'compact' ? 'min-h-[5rem] p-3' : 'min-h-[6rem] p-4',
             )}
             onClick={onPress}
           >
