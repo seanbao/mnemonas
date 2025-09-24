@@ -229,30 +229,30 @@ impl StreamingChunker {
     }
 }
 
-/// 文件清单 - 记录文件由哪些chunk组成
+/// File manifest recording the chunks that make up a file.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FileManifest {
-    /// 原始文件大小
+    /// Original file size.
     pub size: u64,
-    /// 组成文件的chunk hash列表（按顺序）
+    /// Ordered chunk hash references that make up the file.
     pub chunks: Vec<ChunkRef>,
-    /// 创建时间
+    /// Creation time as a Unix timestamp in seconds.
     pub created_at: u64,
 }
 
-/// Chunk引用
+/// Chunk reference.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ChunkRef {
-    /// Chunk的hash
+    /// Chunk hash.
     pub hash: String,
-    /// Chunk大小
+    /// Chunk size.
     pub size: u32,
-    /// 在原始文件中的偏移
+    /// Offset in the original file.
     pub offset: u64,
 }
 
 impl FileManifest {
-    /// 从chunk列表创建清单
+    /// Create a manifest from a chunk list.
     pub fn from_chunks(chunks: &[Chunk]) -> Self {
         let size = chunks.iter().map(|c| c.length as u64).sum();
         let chunk_refs = chunks
