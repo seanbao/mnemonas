@@ -123,7 +123,7 @@ function getFavoritesBannerContent(error: unknown): { title: string; description
     if (code === 'FAVORITES_UNAVAILABLE') {
       return {
         title: '收藏功能暂不可用',
-        description: '收藏存储未成功初始化，请检查系统健康状态或稍后重试。',
+        description: '收藏存储未成功初始化，请检查设备状态或稍后重试。',
       }
     }
   }
@@ -138,7 +138,7 @@ function getFilesLoadErrorPresentation(error: unknown): { title: string; descrip
   if (error instanceof ApiError && error.isUnavailable) {
     return {
       title: '当前目录暂不可用',
-      description: '文件系统当前不可用，请检查系统健康状态或稍后重试。',
+      description: '文件系统当前不可用，请检查设备状态或稍后重试。',
     }
   }
 
@@ -182,7 +182,7 @@ function getFilesActionErrorToast(
   if (isFilesystemUnavailableError(error)) {
     return {
       title: titles.unavailable,
-      description: '文件系统当前不可用，请检查系统健康状态或稍后重试。',
+      description: '文件系统当前不可用，请检查设备状态或稍后重试。',
       color: 'warning',
     }
   }
@@ -313,7 +313,7 @@ function getFavoriteActionErrorToast(error: unknown): {
   if (code === 'FAVORITES_UNAVAILABLE' || (status === 503 && code !== 'FAVORITES_FEATURE_DISABLED')) {
     return {
       title: '收藏功能暂不可用',
-      description: '收藏存储未成功初始化，请检查系统健康状态或稍后重试。',
+      description: '收藏存储未成功初始化，请检查设备状态或稍后重试。',
       color: 'warning',
     }
   }
@@ -344,7 +344,7 @@ function getFavoriteRefreshErrorToast(error: unknown): {
   if (code === 'FAVORITES_UNAVAILABLE' || (status === 503 && code !== 'FAVORITES_FEATURE_DISABLED')) {
     return {
       title: '收藏功能暂不可用',
-      description: '收藏存储未成功初始化，请检查系统健康状态或稍后重试。',
+      description: '收藏存储未成功初始化，请检查设备状态或稍后重试。',
       color: 'warning',
     }
   }
@@ -358,7 +358,7 @@ function getFavoriteRefreshErrorToast(error: unknown): {
 
 function getUploadQueueErrorMessage(error: unknown): string {
   if (isFilesystemUnavailableError(error)) {
-    return '文件系统当前不可用，请检查系统健康状态或稍后重试。'
+    return '文件系统当前不可用，请检查设备状态或稍后重试。'
   }
 
   return error instanceof Error ? error.message : '上传失败'
@@ -394,7 +394,7 @@ function getFolderUploadSummaryToast(
     if (errors.length > 0 && errors.every(isFilesystemUnavailableError)) {
       return {
         title: '文件夹上传暂不可用',
-        description: '文件系统当前不可用，请检查系统健康状态或稍后重试。',
+        description: '文件系统当前不可用，请检查设备状态或稍后重试。',
         color: 'warning',
       }
     }
@@ -445,14 +445,14 @@ function getPartialBatchActionToast(
 function getShareBannerContent(): { title: string; description: string } {
   return {
     title: '分享功能已关闭',
-    description: '当前服务已关闭分享功能。请在系统设置中重新启用后再创建分享链接。',
+    description: '当前服务已关闭分享功能。请在设置中重新启用后再创建分享链接。',
   }
 }
 
 function getShareUnavailableBannerContent(): { title: string; description: string } {
   return {
     title: '分享功能暂不可用',
-    description: '分享服务当前不可用，请检查系统健康状态或稍后重试。',
+    description: '分享服务当前不可用，请检查设备状态或稍后重试。',
   }
 }
 
@@ -2049,7 +2049,7 @@ export function FilesPage() {
         if (failedErrors.length > 0 && failedErrors.every(isFilesystemUnavailableError)) {
           addToast({
             title: '批量删除暂不可用',
-            description: '文件系统当前不可用，请检查系统健康状态或稍后重试。',
+            description: '文件系统当前不可用，请检查设备状态或稍后重试。',
             color: 'warning',
           })
         } else {
@@ -2090,7 +2090,7 @@ export function FilesPage() {
       if (failedErrors.length > 0 && failedErrors.every(isFilesystemUnavailableError)) {
         addToast({
           title: '批量下载暂不可用',
-          description: '文件系统当前不可用，请检查系统健康状态或稍后重试。',
+          description: '文件系统当前不可用，请检查设备状态或稍后重试。',
           color: 'warning',
         })
       } else {
@@ -2198,7 +2198,7 @@ export function FilesPage() {
       if (failedErrors.length > 0 && failedErrors.every(isFilesystemUnavailableError)) {
         addToast({
           title: `${operation === 'cut' ? '批量移动' : '批量复制'}暂不可用`,
-          description: '文件系统当前不可用，请检查系统健康状态或稍后重试。',
+          description: '文件系统当前不可用，请检查设备状态或稍后重试。',
           color: 'warning',
         })
       } else {

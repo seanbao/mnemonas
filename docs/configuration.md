@@ -13,7 +13,7 @@
 
 如果未找到配置文件，系统使用默认配置。Ubuntu/systemd 安装脚本默认生成 `/etc/mnemonas/config.toml`，并在 systemd unit 中用 `--config` 指向该文件。
 
-配置文件可能包含 `auth.jwt_secret`、WebDAV 密码、告警 Webhook Header 和 Telegram Bot Token 等敏感值。MnemoNAS 保存或读取已有配置文件时会把文件权限收紧为 `0600`。
+配置文件可能包含 `auth.jwt_secret`、WebDAV 密码、提醒 Webhook Header 和 Telegram Bot Token 等敏感值。MnemoNAS 保存或读取已有配置文件时会把文件权限收紧为 `0600`。
 
 ## 配置检查
 
@@ -252,7 +252,7 @@ auto_generate = true
 - 内部数据目录结构固定在 `root/.mnemonas` 下。
 - 启动时会将 `root` 和 `root/files` 权限收紧为 `0750`，内部目录为 `0700`。
 - `directory_quotas` 使用 MnemoNAS 逻辑路径，例如 `/team`。上传、复制、移动、回收站恢复、版本恢复和 WebDAV PUT/COPY/MOVE 会在写入前检查当前目录逻辑大小。根目录 `/` 可用于设置全局硬限制。管理员可在存储页查看每个目录配额的当前用量、剩余额度和状态。
-- `directory_access_rules` 使用干净的 MnemoNAS 绝对路径，例如 `/team`。每条规则可设置 `read_users`、`write_users`、`read_groups`、`write_groups`、`read_roles`、`write_roles`。匹配时采用最具体路径规则；写权限同时包含读权限，写操作必须显式命中写授权。非管理员 Web/API、WebDAV `users` 模式、搜索、分享、收藏、回收站和活动日志使用同一套权限判定。未命中规则的路径继续按用户 `home_dir` 边界处理。
+- `directory_access_rules` 使用干净的 MnemoNAS 绝对路径，例如 `/team`。每条规则可设置 `read_users`、`write_users`、`read_groups`、`write_groups`、`read_roles`、`write_roles`。匹配时采用最具体路径规则；写权限同时包含读权限，写操作必须显式命中写授权。非管理员 Web/API、WebDAV `users` 模式、搜索、分享、收藏、回收站和最近操作使用同一套权限判定。未命中规则的路径继续按用户 `home_dir` 边界处理。
 
 **示例：**
 
@@ -542,18 +542,18 @@ max_access = 20
 
 ---
 
-### [alerts] — 存储空间告警配置
+### [alerts] — 存储空间提醒配置
 
 | 选项 | 类型 | 默认值 | 说明 |
 | ---- | ---- | ------ | ---- |
-| `enabled` | bool | `false` | 是否启用存储告警 |
+| `enabled` | bool | `false` | 是否启用存储提醒 |
 | `check_interval` | duration | `1h` | 检查间隔 |
-| `threshold_pct` | float | `90` | 告警阈值（百分比） |
-| `critical_pct` | float | `95` | 严重告警阈值（百分比） |
+| `threshold_pct` | float | `90` | 提醒阈值（百分比） |
+| `critical_pct` | float | `95` | 严重提醒阈值（百分比） |
 | `min_free_bytes` | uint64 | `10737418240` | 最小可用空间（字节） |
-| `cooldown_period` | duration | `4h` | 告警冷却时间 |
+| `cooldown_period` | duration | `4h` | 提醒冷却时间 |
 | `webhook_url` | string | `""` | Webhook URL；非空时必须是完整的 `http` 或 `https` URL |
-| `webhook_method` | string | `POST` | Webhook 方法；`POST` 发送 JSON body，`GET` 将告警字段编码到 URL query |
+| `webhook_method` | string | `POST` | Webhook 方法；`POST` 发送 JSON body，`GET` 将提醒字段编码到 URL query |
 | `webhook_headers` | string[] | `[]` | 自定义 Header（`"Key: Value"`）；Header 名称必须是合法 HTTP token，值不能包含换行或控制字符 |
 | `telegram_enabled` | bool | `false` | 是否启用 Telegram 机器人通知 |
 | `telegram_bot_token` | string | `""` | Telegram Bot Token；不会在诊断或设置响应中明文返回 |
@@ -566,7 +566,7 @@ max_access = 20
 | `smtp_from` | string | `""` | 发件人地址，例如 `MnemoNAS <alerts@example.com>` |
 | `smtp_to` | string[] | `[]` | 收件人地址列表 |
 
-健康页和诊断导出会显示告警是否启用、运行态是否可用、最近一次检查级别，以及是否配置了 Webhook、Telegram 或邮件；不会暴露 `webhook_url`、`webhook_headers`、`telegram_bot_token` 或 `smtp_password`。同一通知通道也用于备份失败、恢复演练失败、恢复演练缺失/过期提醒、磁盘健康异常、Scrub 异常和登录限流事件。Webhook 发送成功和失败日志只记录 URL 的 scheme 与 host，不记录路径、查询参数、凭据或 GET payload；Telegram 发送错误不会包含 Bot Token。
+设备状态页和诊断导出会显示提醒是否启用、运行态是否可用、最近一次检查级别，以及是否配置了 Webhook、Telegram 或邮件；不会暴露 `webhook_url`、`webhook_headers`、`telegram_bot_token` 或 `smtp_password`。同一通知通道也用于备份失败、恢复演练失败、恢复演练缺失/过期提醒、磁盘健康异常、Scrub 异常和登录限流事件。Webhook 发送成功和失败日志只记录 URL 的 scheme 与 host，不记录路径、查询参数、凭据或 GET payload；Telegram 发送错误不会包含 Bot Token。
 
 **示例：**
 
@@ -602,7 +602,7 @@ smtp_to = ["admin@example.com"]
 | `enabled` | bool | `false` | 是否启用周期性磁盘健康检查 |
 | `check_interval` | duration | `1h` | 后台检查间隔 |
 | `probe_timeout` | duration | `15s` | 单块磁盘 `smartctl` 探测超时 |
-| `cooldown_period` | duration | `4h` | 同一健康级别重复告警的最小间隔 |
+| `cooldown_period` | duration | `4h` | 同一健康级别重复提醒的最小间隔 |
 | `command` | string | `smartctl` | `smartctl` 可执行文件名或绝对路径；不能包含空白或 shell 参数 |
 | `temperature_warning_c` | int | `50` | 默认温度提醒阈值，单位摄氏度 |
 | `temperature_critical_c` | int | `60` | 默认温度严重阈值，单位摄氏度 |
@@ -625,7 +625,7 @@ smtp_to = ["admin@example.com"]
 
 - `GET /api/v1/maintenance/disk-health` 会立即探测并返回完整设备状态。
 - 诊断页和诊断导出只包含脱敏摘要，不包含设备序列号等细节。
-- 后台周期检查发现 `warning`、`critical` 或 `unavailable` 时，会以系统用户写入 `disk_health` 活动日志，并按 `cooldown_period` 控制重复记录。
+- 后台周期检查发现 `warning`、`critical` 或 `unavailable` 时，会以系统用户写入 `disk_health` 最近操作，并按 `cooldown_period` 控制重复记录。
 - NVMe `percentage_used`、`available_spare`、`critical_warning`、`media_errors` 以及常见 ATA 寿命属性会参与状态判断。
 - 当 `[alerts] enabled = true` 且配置了 Webhook、Telegram 或 SMTP 邮件时，磁盘缺失、SMART 失败、温度过高、序列号不匹配或 SMART 不可用会发送 `disk_health` 事件。
 - 设备路径不存在会标记为 `critical`；`smartctl` 不可用或返回无效 JSON 会标记为 `unavailable`。
@@ -661,7 +661,7 @@ serial = "S6..."
 | `retry_interval` | duration | `1h` | Scrub 失败后的自动重试间隔 |
 | `max_retries` | int | `1` | 单次失败后最多自动重试次数，`0` 表示不自动重试 |
 
-启用后，服务会在后台以系统身份触发完整 Scrub。成功、失败、对象异常和结果持久化警告都会继续复用维护历史、活动日志和已配置的告警通道。若上次 Scrub 失败，后台会先按 `retry_interval` 做有限重试；达到 `max_retries` 后，下一次常规计划仍按 `schedule_interval` 重新开始。这些字段也可通过 Web 设置页或 Settings API 更新，保存后会立即替换运行中的后台调度。
+启用后，服务会在后台以系统身份触发完整 Scrub。成功、失败、对象异常和结果持久化警告都会继续复用维护历史、最近操作和已配置的提醒通道。若上次 Scrub 失败，后台会先按 `retry_interval` 做有限重试；达到 `max_retries` 后，下一次常规计划仍按 `schedule_interval` 重新开始。这些字段也可通过 Web 设置页或 Settings API 更新，保存后会立即替换运行中的后台调度。
 
 ```toml
 [maintenance.scrub]

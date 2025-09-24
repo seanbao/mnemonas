@@ -18,7 +18,7 @@ test.describe('设置页面', () => {
   })
 
   test('应显示设置页面标题', async ({ page }) => {
-    const title = page.getByRole('heading', { name: /系统设置|设置/i })
+    const title = page.getByRole('heading', { name: /设置/i })
     await expect(title).toBeVisible({ timeout: 5000 })
   })
 
@@ -223,7 +223,7 @@ test.describe('设置页面响应式', () => {
     await page.setViewportSize({ width: 375, height: 667 })
     await ensureAuthenticatedAt(page, '/settings')
 
-    const title = page.getByRole('heading', { name: /系统设置|设置/i })
+    const title = page.getByRole('heading', { name: /设置/i })
     await expect(title).toBeVisible({ timeout: 5000 })
   })
 
@@ -254,7 +254,7 @@ test.describe('设置页面响应式', () => {
     await page.setViewportSize({ width: 768, height: 1024 })
     await ensureAuthenticatedAt(page, '/settings')
 
-    const title = page.getByRole('heading', { name: /系统设置|设置/i })
+    const title = page.getByRole('heading', { name: /设置/i })
     await expect(title).toBeVisible({ timeout: 5000 })
   })
 })

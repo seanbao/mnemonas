@@ -170,7 +170,7 @@ test.describe('文件浏览页面', () => {
     await page.reload({ waitUntil: 'domcontentloaded' })
 
     await expect(page.getByText('当前目录暂不可用')).toBeVisible({ timeout: 10_000 })
-    await expect(page.getByText('文件系统当前不可用，请检查系统健康状态或稍后重试。')).toBeVisible()
+    await expect(page.getByText('文件系统当前不可用，请检查设备状态或稍后重试。')).toBeVisible()
     await expect(page.getByRole('button', { name: '重新加载' })).toBeVisible()
   })
 

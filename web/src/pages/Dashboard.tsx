@@ -22,10 +22,11 @@ import {
   MessageSquareText,
   TrendingUp,
   Database,
+  Archive,
   RefreshCw,
 } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
-import { ApiError as FilesApiError, getAppVersion, getHealth, getStorageStats } from '@/api/files'
+import { ApiError as FilesApiError, getAppVersion, getHealth, getStorageStats, listBackupJobs, type BackupJob } from '@/api/files'
 import { ApiError as ActivityApiError, listActivity, getActionLabel, type ActionType, type ActivityEntry } from '@/api/activity'
 import { formatBytes, cn, formatRelativeTime } from '@/lib/utils'
 import { areDiskStatsAvailable, clampUsagePercent, formatUsagePercent, getDiskSpaceStatus } from '@/lib/storageStats'
@@ -102,7 +103,7 @@ function getRecentActivityErrorPresentation(error: unknown): { title: string; de
   if (error instanceof ActivityApiError && error.isUnavailable) {
     return {
       title: '活动记录暂时不可用',
-      description: '活动日志当前不可用，请稍后重试，或前往活动页查看最新状态。',
+      description: '操作记录当前不可用，请稍后重试，或前往最近操作页查看最新状态。',
     }
   }
 
@@ -123,15 +124,68 @@ function getDashboardRefreshErrorToast(errors: Array<unknown>): { title: string;
   if (errors.some(isUnavailableRefreshError)) {
     return {
       title: '刷新暂不可用',
-      description: '部分系统概览数据当前不可用，请检查服务状态后重试。',
+      description: '部分首页数据当前不可用，请检查设备状态后重试。',
       color: 'warning',
     }
   }
 
   return {
     title: '刷新失败',
-    description: '系统概览刷新失败，请稍后重试。',
+    description: '首页刷新失败，请稍后重试。',
     color: 'danger',
+  }
+}
+
+function getBackupIssueCount(jobs: BackupJob[]): number {
+  return jobs.filter((job) => (
+    job.health_status === 'failed'
+    || job.health_status === 'stale'
+    || job.retention_status === 'failed'
+    || job.retention_status === 'warning'
+    || job.restore_drill_status === 'failed'
+    || job.restore_drill_status === 'stale'
+    || job.last_run?.status === 'failed'
+  )).length
+}
+
+function getBackupOverview(
+  isAdmin: boolean,
+  jobs: BackupJob[] | undefined,
+  isLoading: boolean,
+  error: unknown,
+): { value: string; trend: string; needsAttention: boolean } {
+  if (!isAdmin) {
+    return { value: '可用', trend: '由管理员维护备份', needsAttention: false }
+  }
+  if (isLoading) {
+    return { value: '--', trend: '正在读取备份状态', needsAttention: false }
+  }
+  if (error) {
+    return { value: '暂不可用', trend: '前往备份与维护查看', needsAttention: true }
+  }
+  if (!jobs || jobs.length === 0) {
+    return { value: '未配置', trend: '建议先添加外置盘或远端备份', needsAttention: true }
+  }
+  if (jobs.some((job) => job.running)) {
+    return { value: '运行中', trend: '有备份或恢复任务正在执行', needsAttention: false }
+  }
+
+  const issueCount = getBackupIssueCount(jobs)
+  if (issueCount > 0) {
+    return { value: `${issueCount} 项待处理`, trend: '检查失败、过期或缺少演练的任务', needsAttention: true }
+  }
+
+  const latestSuccess = jobs
+    .map((job) => job.last_successful_run?.finished_at ?? job.last_successful_run?.started_at)
+    .filter((value): value is string => Boolean(value))
+    .map((value) => new Date(value))
+    .filter((date) => !Number.isNaN(date.getTime()))
+    .sort((left, right) => right.getTime() - left.getTime())[0]
+
+  return {
+    value: '正常',
+    trend: latestSuccess ? `最近备份 ${formatRelativeTime(latestSuccess.toISOString())}` : '任务已配置，等待首次成功备份',
+    needsAttention: false,
   }
 }
 
@@ -248,25 +302,33 @@ export function DashboardPage() {
     queryFn: () => listActivity({ limit: 5 }),
     refetchInterval: 30000,
   })
+  const { data: backupJobs, isLoading: backupLoading, error: backupError, refetch: refetchBackupJobs } = useQuery({
+    queryKey: ['dashboard-backup-jobs', authScopeKey],
+    queryFn: listBackupJobs,
+    enabled: isAdmin,
+    refetchInterval: 60000,
+  })
 
   const isLoading = healthLoading || statsLoading || versionLoading
-  const hasPartialError = Boolean(healthError || statsError || versionError || recentActivityError)
+  const hasPartialError = Boolean(healthError || statsError || versionError || recentActivityError || backupError)
   const recentActivityErrorPresentation = recentActivityError
     ? getRecentActivityErrorPresentation(recentActivityError)
     : null
 
   const handleRetry = async () => {
-    const [healthResult, statsResult, versionResult, recentActivityResult] = await Promise.all([
+    const [healthResult, statsResult, versionResult, recentActivityResult, backupResult] = await Promise.all([
       refetchHealth(),
       refetchStats(),
       refetchVersion(),
       refetchRecentActivity(),
+      isAdmin ? refetchBackupJobs() : Promise.resolve({ error: null }),
     ])
     const refreshErrors = [
       healthResult.error,
       statsResult.error,
       versionResult.error,
       recentActivityResult.error,
+      isAdmin ? backupResult.error : null,
     ].filter((error): error is Error => Boolean(error))
 
     if (refreshErrors.length > 0) {
@@ -274,7 +336,7 @@ export function DashboardPage() {
       return
     }
 
-    addToast({ title: '系统概览已刷新', color: 'success' })
+    addToast({ title: '首页已刷新', color: 'success' })
   }
 
   if (isLoading) {
@@ -326,6 +388,7 @@ export function DashboardPage() {
   const storageStatsKnown = stats?.storageStatsAvailable === true
   const fileCountKnown = stats?.fileCountAvailable === true
   const storageUsageValue = diskStatsKnown ? formatStorageSize(stats?.diskUsed) : formatStorageSize(stats?.totalSize)
+  const backupOverview = getBackupOverview(isAdmin, backupJobs, backupLoading, backupError)
 
   const statsCards = [
     {
@@ -343,12 +406,10 @@ export function DashboardPage() {
       trend: fileCountKnown ? '文件索引计数' : '统计不可用',
     },
     {
-      title: '去重率',
-      value: storageStatsKnown && stats?.dedupRatio !== undefined
-        ? `${(stats.dedupRatio * 100).toFixed(1)}%`
-        : '--',
-      icon: Activity,
-      trend: '存储效率',
+      title: '备份状态',
+      value: backupOverview.value,
+      icon: Archive,
+      trend: backupOverview.trend,
     },
     {
       title: '运行时间',
@@ -362,8 +423,8 @@ export function DashboardPage() {
     <div className="p-4 space-y-6 sm:p-6 lg:p-8">
       {/* Header */}
       <PageHeader
-        title="系统概览"
-        subtitle="实时监控存储状态"
+        title="首页"
+        subtitle="空间、备份和最近操作"
         actions={
           <div className={cn(
             "flex items-center gap-2 rounded-full px-3 py-1.5 text-sm",
@@ -418,6 +479,29 @@ export function DashboardPage() {
               onPress={handleRetry}
             >
               重新加载
+            </Button>
+          </CardBody>
+        </Card>
+      )}
+
+      {backupOverview.needsAttention && (
+        <Card className="border-warning/30 bg-warning/5 shadow-none">
+          <CardBody className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+            <div className="flex items-start gap-3">
+              <AlertCircle size={18} className="mt-0.5 shrink-0 text-warning" />
+              <div>
+                <p className="text-sm font-medium text-foreground">备份需要查看</p>
+                <p className="text-xs text-default-600">{backupOverview.trend}</p>
+              </div>
+            </div>
+            <Button
+              size="sm"
+              variant="flat"
+              className="rounded-lg"
+              startContent={<Archive size={14} />}
+              onPress={() => navigate('/maintenance')}
+            >
+              打开备份
             </Button>
           </CardBody>
         </Card>
@@ -526,34 +610,34 @@ export function DashboardPage() {
 
       {/* Quick Actions */}
       <div>
-        <h2 className="font-medium mb-3">快速操作</h2>
+        <h2 className="font-medium mb-3">常用入口</h2>
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
           <QuickAction
             icon={FileBox}
-            label="文件管理"
-            description="浏览和管理文件"
+            label="文件"
+            description="上传、下载和整理文件"
             onClick={() => navigate('/files')}
           />
           {isAdmin && (
             <QuickAction
-              icon={HardDrive}
-              label="存储管理"
-              description="查看存储状态"
-              onClick={() => navigate('/storage')}
+              icon={Archive}
+              label="备份与维护"
+              description="查看备份并执行恢复演练"
+              onClick={() => navigate('/maintenance')}
             />
           )}
           {isAdmin && (
             <QuickAction
-              icon={Activity}
-              label="系统健康"
-              description="检查系统状态"
-              onClick={() => navigate('/system-health')}
+              icon={HardDrive}
+              label="空间"
+              description="查看磁盘和版本占用"
+              onClick={() => navigate('/storage')}
             />
           )}
           <QuickAction
             icon={Clock}
-            label="版本历史"
-            description="查看文件版本"
+            label="版本"
+            description="找回历史版本"
             onClick={() => navigate('/versions')}
           />
         </div>
@@ -568,8 +652,8 @@ export function DashboardPage() {
                 <TrendingUp className="text-accent-primary h-4 w-4" />
               </div>
               <div>
-                <span className="font-semibold">最近活动</span>
-                <p className="text-default-500 text-xs">系统活动记录</p>
+                <span className="font-semibold">最近操作</span>
+                <p className="text-default-500 text-xs">上传、下载、分享和恢复记录</p>
               </div>
             </div>
             <Button
@@ -599,7 +683,7 @@ export function DashboardPage() {
           ) : (
             <div className="py-8 text-center text-default-500">
               <Activity size={24} className="mx-auto mb-2 opacity-50" />
-              <p className="text-sm">暂无活动记录</p>
+              <p className="text-sm">暂无最近操作</p>
             </div>
           )}
         </CardBody>

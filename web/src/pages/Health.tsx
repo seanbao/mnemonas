@@ -166,8 +166,8 @@ function getAlertsPresentation(alerts: DiagnosticsInfo['alerts']): {
   if (alerts.enabled !== true) {
     return {
       icon: AlertCircle,
-      title: '存储告警未启用',
-      description: '建议在设置中启用存储告警，避免磁盘写满后才发现问题。',
+      title: '空间提醒未启用',
+      description: '建议在设置中启用空间提醒，避免磁盘写满后才发现问题。',
       className: 'border-warning/25 bg-warning/5',
       iconClassName: 'text-warning',
     }
@@ -176,8 +176,8 @@ function getAlertsPresentation(alerts: DiagnosticsInfo['alerts']): {
   if (alerts.runtimeAvailable === false) {
     return {
       icon: AlertCircle,
-      title: '存储告警运行态不可用',
-      description: '配置已启用，但当前进程没有挂载告警监控，请检查服务启动日志。',
+      title: '空间提醒暂不可用',
+      description: '配置已启用，但当前进程没有挂载提醒服务，请检查服务启动日志。',
       className: 'border-danger/25 bg-danger/5',
       iconClassName: 'text-danger',
     }
@@ -195,7 +195,7 @@ function getAlertsPresentation(alerts: DiagnosticsInfo['alerts']): {
   if (lastLevel === 'critical') {
     return {
       icon: AlertCircle,
-      title: '存储告警处于严重级别',
+      title: '可用空间严重不足',
       description: `${checkedText}${usageText}${freeText}。请尽快清理或扩容。`,
       className: 'border-danger/25 bg-danger/5',
       iconClassName: 'text-danger',
@@ -205,7 +205,7 @@ function getAlertsPresentation(alerts: DiagnosticsInfo['alerts']): {
   if (lastLevel === 'warning') {
     return {
       icon: AlertCircle,
-      title: '存储告警处于提醒级别',
+      title: '可用空间偏紧',
       description: `${checkedText}${usageText}${freeText}。建议安排清理或扩容。`,
       className: 'border-warning/25 bg-warning/5',
       iconClassName: 'text-warning',
@@ -219,7 +219,7 @@ function getAlertsPresentation(alerts: DiagnosticsInfo['alerts']): {
 
   return {
     icon: BellRing,
-    title: hasNotificationChannel ? '存储告警已启用' : '存储告警已启用，未配置通知通道',
+    title: hasNotificationChannel ? '空间提醒已启用' : '空间提醒已启用，未配置通知通道',
     description: `${checkedText}。${notificationText}`,
     className: 'border-success/25 bg-success/5',
     iconClassName: 'text-success',
@@ -428,14 +428,14 @@ function diskHealthDeviceMetricSummary(device: DiskHealthReport['devices'][numbe
 function getHealthLoadErrorPresentation(errors: Array<unknown>): { title: string; description: string } {
   if (errors.some((error) => error instanceof ApiError && error.isUnavailable)) {
     return {
-      title: '系统健康信息暂不可用',
-      description: '健康数据服务当前不可用，请检查系统状态或稍后重试。',
+      title: '设备状态暂不可用',
+      description: '状态数据当前不可用，请检查服务状态或稍后重试。',
     }
   }
 
   const firstError = errors.find(Boolean)
   return {
-    title: '加载系统健康信息失败',
+    title: '加载设备状态失败',
     description: firstError instanceof Error ? firstError.message : '请稍后重试',
   }
 }
@@ -511,7 +511,7 @@ export function HealthPage() {
       return
     }
 
-    addToast({ title: '健康数据已刷新', color: 'success' })
+    addToast({ title: '设备状态已刷新', color: 'success' })
   }
 
   const statsCards = [
@@ -561,8 +561,8 @@ export function HealthPage() {
     <div className="p-4 space-y-6 sm:p-6 lg:p-8">
       {/* Header */}
       <PageHeader
-        title="系统健康"
-        subtitle="监控系统状态和性能指标"
+        title="设备状态"
+        subtitle="磁盘、存储和后台服务是否正常"
         icon={Activity}
         actions={
           <Button
@@ -582,7 +582,7 @@ export function HealthPage() {
             <div className="flex items-start gap-3">
               <AlertCircle size={18} className="mt-0.5 shrink-0 text-warning" />
               <div>
-                <p className="text-sm font-medium text-foreground">部分健康数据加载失败</p>
+                <p className="text-sm font-medium text-foreground">部分状态数据加载失败</p>
                 <p className="text-xs text-default-600">当前页面展示的是可用数据，部分指标可能不是最新状态。</p>
               </div>
             </div>
@@ -607,8 +607,8 @@ export function HealthPage() {
               <Server size={16} className="text-white" />
             </div>
             <div>
-              <span className="font-semibold">系统状态</span>
-              <p className="text-default-500 text-xs">服务组件健康检查</p>
+              <span className="font-semibold">运行状态</span>
+              <p className="text-default-500 text-xs">关键服务是否正常</p>
             </div>
           </div>
         </CardHeader>
@@ -638,7 +638,7 @@ export function HealthPage() {
             )}
             <StatusIndicator 
               status={diagnostics?.system?.activityLogReady ?? 'unknown'} 
-              label="活动日志" 
+              label="最近操作"
             />
             {diagnostics?.system?.favoritesStoreReady !== undefined && (
               <StatusIndicator 

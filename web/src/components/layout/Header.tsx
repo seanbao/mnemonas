@@ -28,7 +28,7 @@ export function Header({ onMenuClick }: HeaderProps) {
       const result = await logout()
       queryClient.clear()
       addToast(result.warning
-        ? { title: result.message ?? '已退出登录，但活动日志写入失败', color: 'warning' }
+        ? { title: result.message ?? '已退出登录，但操作记录写入失败', color: 'warning' }
         : { title: '已退出登录', color: 'success' })
       navigate('/login', { replace: true })
     } catch (error) {
@@ -109,7 +109,7 @@ export function Header({ onMenuClick }: HeaderProps) {
         </div>
         <div className="hidden sm:block">
           <h1 className="text-lg font-semibold">私有云存储</h1>
-          <p className="text-muted-foreground text-xs">文件、版本与共享统一管理</p>
+          <p className="text-muted-foreground text-xs">文件、版本与分享，日常管理</p>
         </div>
       </div>
 
@@ -143,7 +143,7 @@ export function Header({ onMenuClick }: HeaderProps) {
           <RefreshCw size={18} className={isRefreshing ? 'animate-spin' : ''} />
         </Button>
 
-        <Button isIconOnly variant="light" size="sm" aria-label="系统提醒设置" onPress={handleAlertsSettings} className="hidden rounded-lg sm:inline-flex">
+        <Button isIconOnly variant="light" size="sm" aria-label="提醒设置" onPress={handleAlertsSettings} className="hidden rounded-lg sm:inline-flex">
           <Bell size={18} />
         </Button>
 

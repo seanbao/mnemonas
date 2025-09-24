@@ -45,6 +45,21 @@ vi.mock('@/api/files', () => ({
     diskUsed: 1073741824, // 1 GB
     diskUsageRatio: 0.05,
   }),
+  listBackupJobs: vi.fn().mockResolvedValue([{
+    id: 'external-disk',
+    name: '外置硬盘备份',
+    type: 'local',
+    disabled: false,
+    health_status: 'ok',
+    retention_status: 'ok',
+    restore_drill_status: 'ok',
+    running: false,
+    last_successful_run: {
+      status: 'completed',
+      started_at: '2026-05-18T10:00:00Z',
+      finished_at: '2026-05-18T10:05:00Z',
+    },
+  }]),
 }))
 
 vi.mock('@/api/activity', async (importOriginal) => {
@@ -90,12 +105,13 @@ vi.mock('@/stores/auth', async (importOriginal) => {
   }
 })
 
-import { ApiError as FilesApiError, getAppVersion, getHealth, getStorageStats } from '@/api/files'
+import { ApiError as FilesApiError, getAppVersion, getHealth, getStorageStats, listBackupJobs } from '@/api/files'
 import { ApiError, listActivity } from '@/api/activity'
 
 const mockGetHealth = getHealth as ReturnType<typeof vi.fn>
 const mockGetAppVersion = getAppVersion as ReturnType<typeof vi.fn>
 const mockGetStorageStats = getStorageStats as ReturnType<typeof vi.fn>
+const mockListBackupJobs = listBackupJobs as ReturnType<typeof vi.fn>
 const mockListActivity = listActivity as ReturnType<typeof vi.fn>
 
 describe('DashboardPage', () => {
@@ -128,6 +144,21 @@ describe('DashboardPage', () => {
       diskUsed: 1073741824, // 1 GB
       diskUsageRatio: 0.05,
     })
+    mockListBackupJobs.mockResolvedValue([{
+      id: 'external-disk',
+      name: '外置硬盘备份',
+      type: 'local',
+      disabled: false,
+      health_status: 'ok',
+      retention_status: 'ok',
+      restore_drill_status: 'ok',
+      running: false,
+      last_successful_run: {
+        status: 'completed',
+        started_at: '2026-05-18T10:00:00Z',
+        finished_at: '2026-05-18T10:05:00Z',
+      },
+    }])
     mockListActivity.mockResolvedValue({
       items: [
         { id: 'act-1', action: 'upload', path: '/docs/report.pdf', timestamp: '2024-01-15T10:00:00Z' },
@@ -160,7 +191,7 @@ describe('DashboardPage', () => {
       render(<DashboardPage />)
       
       await waitFor(() => {
-        expect(screen.getByText('系统概览')).toBeTruthy()
+        expect(screen.getByText('首页')).toBeTruthy()
       })
     })
 
@@ -204,8 +235,7 @@ describe('DashboardPage', () => {
       await waitFor(() => {
         expect(screen.getByText('存储使用')).toBeTruthy()
         expect(screen.getByText('文件数量')).toBeTruthy()
-        // Multiple elements may have '去重率' text
-        expect(screen.getAllByText('去重率').length).toBeGreaterThan(0)
+        expect(screen.getByText('备份状态')).toBeTruthy()
         expect(screen.getByText('运行时间')).toBeTruthy()
       })
     })
@@ -235,13 +265,38 @@ describe('DashboardPage', () => {
       })
     })
 
-    it('displays dedup ratio percentage', async () => {
+    it('displays backup status on the home page', async () => {
       render(<DashboardPage />)
       
       await waitFor(() => {
-        // 1.5 * 100 = 150%
-        expect(screen.getAllByText(/150.*%/i).length).toBeGreaterThan(0)
+        expect(screen.getByText('正常')).toBeTruthy()
+        expect(screen.getByText(/最近备份/)).toBeTruthy()
       })
+    })
+
+    it('surfaces backup issues from the overview', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockListBackupJobs.mockResolvedValueOnce([{
+        id: 'external-disk',
+        name: '外置硬盘备份',
+        type: 'local',
+        disabled: false,
+        health_status: 'failed',
+        retention_status: 'ok',
+        restore_drill_status: 'ok',
+        running: false,
+        last_run: { status: 'failed' },
+      }])
+
+      render(<DashboardPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('备份需要查看')).toBeTruthy()
+        expect(screen.getByRole('button', { name: '打开备份' })).toBeTruthy()
+      })
+
+      await user.click(screen.getByRole('button', { name: '打开备份' }))
+      expect(mockNavigate).toHaveBeenCalledWith('/maintenance')
     })
 
     it('shows disk capacity guidance when disk stats are available', async () => {
@@ -334,7 +389,7 @@ describe('DashboardPage', () => {
       await user.click(screen.getByText('重新加载'))
 
       await waitFor(() => {
-        expect(mockAddToast).toHaveBeenCalledWith({ title: '系统概览已刷新', color: 'success' })
+        expect(mockAddToast).toHaveBeenCalledWith({ title: '首页已刷新', color: 'success' })
       })
     })
 
@@ -362,7 +417,7 @@ describe('DashboardPage', () => {
       await waitFor(() => {
         expect(mockAddToast).toHaveBeenCalledWith({
           title: '刷新暂不可用',
-          description: '部分系统概览数据当前不可用，请检查服务状态后重试。',
+          description: '部分首页数据当前不可用，请检查设备状态后重试。',
           color: 'warning',
         })
       })
@@ -384,7 +439,7 @@ describe('DashboardPage', () => {
       await waitFor(() => {
         expect(mockAddToast).toHaveBeenCalledWith({
           title: '刷新失败',
-          description: '系统概览刷新失败，请稍后重试。',
+          description: '首页刷新失败，请稍后重试。',
           color: 'danger',
         })
       })
@@ -396,7 +451,7 @@ describe('DashboardPage', () => {
       render(<DashboardPage />)
       
       await waitFor(() => {
-        expect(screen.getByText('快速操作')).toBeTruthy()
+        expect(screen.getByText('常用入口')).toBeTruthy()
       })
     })
 
@@ -404,7 +459,7 @@ describe('DashboardPage', () => {
       render(<DashboardPage />)
       
       await waitFor(() => {
-        expect(screen.getByText('文件管理')).toBeTruthy()
+        expect(screen.getByText('文件')).toBeTruthy()
       })
     })
 
@@ -412,15 +467,15 @@ describe('DashboardPage', () => {
       render(<DashboardPage />)
       
       await waitFor(() => {
-        expect(screen.getByText('存储管理')).toBeTruthy()
+        expect(screen.getByText('空间')).toBeTruthy()
       })
     })
 
-    it('has system health action', async () => {
+    it('has backup and maintenance action', async () => {
       render(<DashboardPage />)
       
       await waitFor(() => {
-        expect(screen.getByText('系统健康')).toBeTruthy()
+        expect(screen.getByText('备份与维护')).toBeTruthy()
       })
     })
 
@@ -428,7 +483,7 @@ describe('DashboardPage', () => {
       render(<DashboardPage />)
       
       await waitFor(() => {
-        expect(screen.getByText('版本历史')).toBeTruthy()
+        expect(screen.getByRole('button', { name: /版本\s+找回历史版本/ })).toBeTruthy()
       })
     })
 
@@ -437,48 +492,48 @@ describe('DashboardPage', () => {
       render(<DashboardPage />)
       
       await waitFor(() => {
-        expect(screen.getByText('文件管理')).toBeTruthy()
+        expect(screen.getByText('文件')).toBeTruthy()
       })
 
-      await user.click(screen.getByText('文件管理'))
+      await user.click(screen.getByText('文件'))
       expect(mockNavigate).toHaveBeenCalledWith('/files')
     })
 
-    it('navigates to storage on storage management click', async () => {
+    it('navigates to storage on space click', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
       render(<DashboardPage />)
       
       await waitFor(() => {
-        expect(screen.getByText('存储管理')).toBeTruthy()
+        expect(screen.getByText('空间')).toBeTruthy()
       })
 
-      await user.click(screen.getByText('存储管理'))
+      await user.click(screen.getByText('空间'))
       expect(mockNavigate).toHaveBeenCalledWith('/storage')
     })
 
-    it('navigates to health on system health click', async () => {
+    it('navigates to maintenance on backup quick action click', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
       render(<DashboardPage />)
       
       await waitFor(() => {
-        expect(screen.getByText('系统健康')).toBeTruthy()
+        expect(screen.getByText('备份与维护')).toBeTruthy()
       })
 
-      await user.click(screen.getByText('系统健康'))
-      expect(mockNavigate).toHaveBeenCalledWith('/system-health')
+      await user.click(screen.getByText('备份与维护'))
+      expect(mockNavigate).toHaveBeenCalledWith('/maintenance')
     })
 
-    it('hides system health quick action for non-admin users', async () => {
+    it('hides admin quick actions for non-admin users', async () => {
       useIsAdminMock.mockReturnValue(false)
       useUserMock.mockReturnValue({ id: 'scoped-user', username: 'member', role: 'user' })
       render(<DashboardPage />)
 
       await waitFor(() => {
-        expect(screen.getByText('文件管理')).toBeTruthy()
+        expect(screen.getByRole('button', { name: /文件/ })).toBeTruthy()
       })
 
-      expect(screen.queryByText('存储管理')).toBeNull()
-      expect(screen.queryByText('系统健康')).toBeNull()
+      expect(screen.queryByText('空间')).toBeNull()
+      expect(screen.queryByText('备份与维护')).toBeNull()
     })
 
     it('does not reuse cached admin stats or recent activity for another user session', async () => {
@@ -591,10 +646,10 @@ describe('DashboardPage', () => {
       render(<DashboardPage />)
       
       await waitFor(() => {
-        expect(screen.getByText('版本历史')).toBeTruthy()
+        expect(screen.getByRole('button', { name: /版本\s+找回历史版本/ })).toBeTruthy()
       })
 
-      await user.click(screen.getByText('版本历史'))
+      await user.click(screen.getByRole('button', { name: /版本\s+找回历史版本/ }))
       expect(mockNavigate).toHaveBeenCalledWith('/versions')
     })
   })
@@ -647,7 +702,7 @@ describe('DashboardPage', () => {
       render(<DashboardPage />)
       
       await waitFor(() => {
-        expect(screen.getByText('系统概览')).toBeTruthy()
+        expect(screen.getByText('首页')).toBeTruthy()
       })
 
       expect(screen.getAllByText('统计不可用').length).toBeGreaterThan(0)
@@ -660,7 +715,7 @@ describe('DashboardPage', () => {
       render(<DashboardPage />)
       
       await waitFor(() => {
-        expect(screen.getByText('系统概览')).toBeTruthy()
+        expect(screen.getByText('首页')).toBeTruthy()
       })
 
       expect(screen.getByText('状态未知')).toBeTruthy()
@@ -684,7 +739,7 @@ describe('DashboardPage', () => {
 
       await waitFor(() => {
         expect(screen.getByText('活动记录暂时不可用')).toBeTruthy()
-        expect(screen.getByText('活动日志当前不可用，请稍后重试，或前往活动页查看最新状态。')).toBeTruthy()
+        expect(screen.getByText('操作记录当前不可用，请稍后重试，或前往最近操作页查看最新状态。')).toBeTruthy()
       })
     })
 

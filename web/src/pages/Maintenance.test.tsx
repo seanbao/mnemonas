@@ -513,7 +513,7 @@ describe('MaintenancePage', () => {
       render(<Maintenance />)
 
       await waitFor(() => {
-        expect(screen.getByText('系统维护')).toBeTruthy()
+        expect(screen.getByText('备份与维护')).toBeTruthy()
       })
     })
 
@@ -521,7 +521,7 @@ describe('MaintenancePage', () => {
       render(<Maintenance />)
 
       await waitFor(() => {
-        expect(screen.getByText('数据校验、备份与诊断工具')).toBeTruthy()
+        expect(screen.getByText('检查数据完整性，执行备份和恢复演练')).toBeTruthy()
       })
     })
 
@@ -529,7 +529,7 @@ describe('MaintenancePage', () => {
       render(<Maintenance />)
 
       await waitFor(() => {
-        expect(screen.getByText('导出诊断信息')).toBeTruthy()
+        expect(screen.getByText('下载诊断包')).toBeTruthy()
       })
     })
 
@@ -1428,10 +1428,10 @@ describe('MaintenancePage', () => {
       render(<Maintenance />)
 
       await waitFor(() => {
-        expect(screen.getByText('导出诊断信息')).toBeTruthy()
+        expect(screen.getByText('下载诊断包')).toBeTruthy()
       })
 
-      await user.click(screen.getByText('导出诊断信息'))
+      await user.click(screen.getByText('下载诊断包'))
 
       await waitFor(() => {
         expect(mockDownloadDiagnosticsExport).toHaveBeenCalled()
@@ -1449,17 +1449,17 @@ describe('MaintenancePage', () => {
       render(<Maintenance />)
 
       await waitFor(() => {
-        expect(screen.getByText('导出诊断信息')).toBeTruthy()
+        expect(screen.getByText('下载诊断包')).toBeTruthy()
       })
 
-      await user.click(screen.getByText('导出诊断信息'))
+      await user.click(screen.getByText('下载诊断包'))
 
       await waitFor(() => {
         expect(mockDownloadDiagnosticsExport).toHaveBeenCalled()
       })
 
       expect(mockAddToast).toHaveBeenCalledWith({
-        title: '导出诊断信息失败',
+        title: '下载诊断包失败',
         description: '磁盘不可用',
         color: 'danger',
       })
@@ -1471,18 +1471,18 @@ describe('MaintenancePage', () => {
       render(<Maintenance />)
 
       await waitFor(() => {
-        expect(screen.getByText('导出诊断信息')).toBeTruthy()
+        expect(screen.getByText('下载诊断包')).toBeTruthy()
       })
 
-      await user.click(screen.getByText('导出诊断信息'))
+      await user.click(screen.getByText('下载诊断包'))
 
       await waitFor(() => {
         expect(mockDownloadDiagnosticsExport).toHaveBeenCalled()
       })
 
       expect(mockAddToast).toHaveBeenCalledWith({
-        title: '诊断导出暂不可用',
-        description: '诊断导出服务当前不可用，请检查系统状态后重试。',
+        title: '诊断包暂不可用',
+        description: '诊断包服务当前不可用，请检查设备状态后重试。',
         color: 'warning',
       })
     })
@@ -1501,8 +1501,7 @@ describe('MaintenancePage', () => {
       render(<Maintenance />)
 
       await waitFor(() => {
-        // The BLAKE3 text is in the header description: "验证所有存储对象的 BLAKE3 哈希值"
-        expect(screen.getByText(/验证所有存储对象/)).toBeTruthy()
+        expect(screen.getByText(/检查已存数据是否仍可正确读取/)).toBeTruthy()
       })
     })
   })
@@ -1514,7 +1513,7 @@ describe('MaintenancePage', () => {
 
       await waitFor(() => {
         expect(screen.getByText('校验结果暂不可用')).toBeTruthy()
-        expect(screen.getByText('维护历史或数据面当前不可用，请检查系统状态或稍后重试。')).toBeTruthy()
+        expect(screen.getByText('维护历史或数据面当前不可用，请检查设备状态或稍后重试。')).toBeTruthy()
         expect(screen.getByRole('button', { name: '重新加载' })).toBeTruthy()
       })
     })
@@ -1564,7 +1563,7 @@ describe('MaintenancePage', () => {
       await waitFor(() => {
         expect(mockAddToast).toHaveBeenCalledWith({
           title: '校验结果暂不可用',
-          description: '维护历史或数据面当前不可用，请检查系统状态或稍后重试。',
+          description: '维护历史或数据面当前不可用，请检查设备状态或稍后重试。',
           color: 'warning',
         })
       })
@@ -1612,7 +1611,7 @@ describe('MaintenancePage', () => {
 
       expect(mockAddToast).toHaveBeenCalledWith({
         title: '数据校验暂不可用',
-        description: '数据面或维护服务当前不可用，请检查系统状态后重试。',
+        description: '数据面或维护服务当前不可用，请检查设备状态后重试。',
         color: 'warning',
       })
     })

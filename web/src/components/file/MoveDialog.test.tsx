@@ -301,7 +301,7 @@ describe('MoveDialog', () => {
     expect(onClose).not.toHaveBeenCalled()
     expect(mockAddToast).toHaveBeenCalledWith({
       title: '批量移动暂不可用',
-      description: '文件系统当前不可用，请检查系统健康状态或稍后重试。',
+      description: '文件系统当前不可用，请检查设备状态或稍后重试。',
       color: 'warning',
     })
   })

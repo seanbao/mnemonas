@@ -159,7 +159,7 @@ function getShareDialogActionErrorToast(error: unknown): {
     if (error.isUnavailable) {
       return {
         title: '创建分享暂不可用',
-        description: '分享服务当前不可用，请检查系统健康状态或稍后重试。',
+        description: '分享服务当前不可用，请检查设备状态或稍后重试。',
         color: 'warning',
       }
     }

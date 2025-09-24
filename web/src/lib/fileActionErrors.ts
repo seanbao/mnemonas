@@ -28,7 +28,7 @@ export function getFileDownloadErrorToast(error: unknown): {
   if (isFilesystemUnavailableError(error)) {
     return {
       title: '下载暂不可用',
-      description: '文件系统当前不可用，请检查系统健康状态或稍后重试。',
+      description: '文件系统当前不可用，请检查设备状态或稍后重试。',
       color: 'warning',
     }
   }

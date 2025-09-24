@@ -72,9 +72,9 @@ describe('Sidebar', () => {
 
     it('renders navigation sections', () => {
       render(<Sidebar />)
-      expect(screen.getByText('浏览')).toBeTruthy()
-      expect(screen.getByText('管理')).toBeTruthy()
-      expect(screen.getByText('系统')).toBeTruthy()
+      expect(screen.getByText('日常')).toBeTruthy()
+      expect(screen.getByText('找回')).toBeTruthy()
+      expect(screen.getByText('照看')).toBeTruthy()
     })
   })
 
@@ -96,7 +96,7 @@ describe('Sidebar', () => {
 
     it('renders versions link', () => {
       render(<Sidebar />)
-      expect(screen.getByText('版本历史')).toBeTruthy()
+      expect(screen.getByText('版本')).toBeTruthy()
     })
 
     it('renders trash link', () => {
@@ -106,17 +106,17 @@ describe('Sidebar', () => {
 
     it('renders storage link', () => {
       render(<Sidebar />)
-      expect(screen.getByText('存储')).toBeTruthy()
+      expect(screen.getByText('空间')).toBeTruthy()
     })
 
     it('renders maintenance link', () => {
       render(<Sidebar />)
-      expect(screen.getByText('守护')).toBeTruthy()
+      expect(screen.getByText('备份与维护')).toBeTruthy()
     })
 
     it('renders health link', () => {
       render(<Sidebar />)
-      expect(screen.getByText('健康')).toBeTruthy()
+      expect(screen.getByText('设备状态')).toBeTruthy()
     })
 
     it('renders settings link', () => {
@@ -146,7 +146,7 @@ describe('Sidebar', () => {
 
     it('has correct href for versions', () => {
       render(<Sidebar />)
-      const link = screen.getByText('版本历史').closest('a')
+      const link = screen.getByText('版本').closest('a')
       expect(link).toHaveAttribute('href', '/versions')
     })
 
@@ -158,19 +158,19 @@ describe('Sidebar', () => {
 
     it('has correct href for storage', () => {
       render(<Sidebar />)
-      const link = screen.getByText('存储').closest('a')
+      const link = screen.getByText('空间').closest('a')
       expect(link).toHaveAttribute('href', '/storage')
     })
 
     it('has correct href for maintenance', () => {
       render(<Sidebar />)
-      const link = screen.getByText('守护').closest('a')
+      const link = screen.getByText('备份与维护').closest('a')
       expect(link).toHaveAttribute('href', '/maintenance')
     })
 
     it('has correct href for health', () => {
       render(<Sidebar />)
-      const link = screen.getByText('健康').closest('a')
+      const link = screen.getByText('设备状态').closest('a')
       expect(link).toHaveAttribute('href', '/system-health')
     })
 
@@ -301,7 +301,7 @@ describe('Sidebar', () => {
     expect(screen.queryByText('设置')).toBeFalsy()
     expect(screen.queryByText('存储空间')).toBeFalsy()
     expect(screen.getAllByText('MnemoNAS').length).toBeGreaterThan(0)
-    expect(screen.getByText('活动')).toBeTruthy()
+    expect(screen.getByText('最近操作')).toBeTruthy()
     expect(mockGetStorageStats).not.toHaveBeenCalled()
   })
 })

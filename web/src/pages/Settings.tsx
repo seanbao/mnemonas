@@ -125,7 +125,7 @@ function getSettingsLoadErrorPresentation(error: unknown): { title: string; desc
   if (error instanceof SettingsError && error.isUnavailable) {
     return {
       title: '设置服务暂不可用',
-      description: '系统设置当前不可用，请检查服务健康状态或稍后重试。',
+      description: '设置当前不可用，请检查设备状态或稍后重试。',
     }
   }
 
@@ -139,7 +139,7 @@ function getWebDAVCredentialsErrorPresentation(error: unknown): { title: string;
   if (error instanceof SettingsError && error.isUnavailable) {
     return {
       title: 'WebDAV 凭据暂不可用',
-      description: '当前无法读取运行中的 WebDAV 凭据，请检查系统状态或稍后重试。',
+      description: '当前无法读取运行中的 WebDAV 凭据，请检查设备状态或稍后重试。',
     }
   }
 
@@ -157,7 +157,7 @@ function getWebDAVCredentialsRefreshErrorToast(error: unknown): {
   if (error instanceof SettingsError && error.isUnavailable) {
     return {
       title: 'WebDAV 凭据暂不可用',
-      description: '当前无法读取运行中的 WebDAV 凭据，请检查系统状态或稍后重试。',
+      description: '当前无法读取运行中的 WebDAV 凭据，请检查设备状态或稍后重试。',
       color: 'warning',
     }
   }
@@ -199,7 +199,7 @@ function getSettingsActionErrorToast(
   if (error instanceof SettingsError && error.isUnavailable) {
     return {
       title: titles.unavailable,
-      description: '系统设置当前不可用，请检查服务健康状态或稍后重试。',
+      description: '设置当前不可用，请检查设备状态或稍后重试。',
       color: 'warning',
     }
   }
@@ -2287,7 +2287,7 @@ export function SettingsPage() {
 
     if (!trimmedAlertsCheckInterval) {
       addToast({
-        title: '告警检查间隔格式无效',
+        title: '提醒检查间隔格式无效',
         description: '检查间隔不能为空',
         color: 'danger',
       })
@@ -2296,7 +2296,7 @@ export function SettingsPage() {
 
     if (!trimmedAlertsCooldownPeriod) {
       addToast({
-        title: '告警冷却时间格式无效',
+        title: '提醒冷却时间格式无效',
         description: '冷却时间不能为空',
         color: 'danger',
       })
@@ -2305,8 +2305,8 @@ export function SettingsPage() {
 
     if (!Number.isFinite(parsedAlertsThresholdPct) || parsedAlertsThresholdPct < 0 || parsedAlertsThresholdPct > 100) {
       addToast({
-        title: '告警阈值格式无效',
-        description: '告警阈值必须在 0 到 100 之间',
+        title: '提醒阈值格式无效',
+        description: '提醒阈值必须在 0 到 100 之间',
         color: 'danger',
       })
       return
@@ -2314,8 +2314,8 @@ export function SettingsPage() {
 
     if (!Number.isFinite(parsedAlertsCriticalPct) || parsedAlertsCriticalPct < 0 || parsedAlertsCriticalPct > 100) {
       addToast({
-        title: '严重告警阈值格式无效',
-        description: '严重告警阈值必须在 0 到 100 之间',
+        title: '严重提醒阈值格式无效',
+        description: '严重提醒阈值必须在 0 到 100 之间',
         color: 'danger',
       })
       return
@@ -2323,8 +2323,8 @@ export function SettingsPage() {
 
     if (parsedAlertsCriticalPct < parsedAlertsThresholdPct) {
       addToast({
-        title: '告警阈值关系无效',
-        description: '严重告警阈值不能小于普通告警阈值',
+        title: '提醒阈值关系无效',
+        description: '严重提醒阈值不能小于普通提醒阈值',
         color: 'danger',
       })
       return
@@ -2576,8 +2576,8 @@ export function SettingsPage() {
       <div className="h-full overflow-auto custom-scrollbar">
         <div className="max-w-4xl mx-auto p-4 sm:p-6 lg:p-7">
           <PageHeader
-            title="系统设置"
-            subtitle="配置 MnemoNAS 系统参数"
+            title="设置"
+            subtitle="调整网络、访问和数据保留"
             actions={
               <>
                 <Button
@@ -2635,8 +2635,8 @@ export function SettingsPage() {
       <div className="max-w-4xl mx-auto p-4 sm:p-6 lg:p-7">
         {/* Header */}
         <PageHeader
-          title="系统设置"
-          subtitle="配置 MnemoNAS 系统参数"
+          title="设置"
+          subtitle="调整网络、访问和数据保留"
           actions={
             <>
               <Button
@@ -3658,7 +3658,7 @@ export function SettingsPage() {
 
               <SettingsSection
                 title="数据巡检计划"
-                description="配置后台周期 Scrub；保存后立即更新调度，失败会按重试策略进入告警和健康状态"
+                description="配置后台周期 Scrub；保存后立即更新调度，失败会按重试策略进入提醒和设备状态"
                 icon={Clock}
               >
                 <div className="space-y-4">
@@ -3738,17 +3738,17 @@ export function SettingsPage() {
               </SettingsSection>
 
               <SettingsSection
-                title="系统告警"
-                description="配置磁盘空间监控、备份事件和 Webhook 通知；保存后立即更新运行态"
+                title="提醒通知"
+                description="配置磁盘空间、备份事件和外部通知；保存后立即更新运行态"
                 icon={AlertCircle}
               >
                 <div className="space-y-4">
                   <SettingRow
-                    label="启用告警"
-                    description="启用后定期检查存储空间，并在备份失败或备份警告时发送通知"
+                    label="启用提醒"
+                    description="启用后定期检查存储空间，并在备份失败或备份提醒时发送通知"
                   >
                     <Switch
-                      aria-label="启用告警"
+                      aria-label="启用提醒"
                       isSelected={settings.alertsEnabled}
                       onValueChange={(v) => updateDirtySettings(s => ({ ...s, alertsEnabled: v }))}
                       classNames={{
@@ -3759,7 +3759,7 @@ export function SettingsPage() {
                         label: "sr-only",
                       }}
                     >
-                      启用告警
+                      启用提醒
                     </Switch>
                   </SettingRow>
                   <Divider className="bg-divider" />
@@ -3768,7 +3768,7 @@ export function SettingsPage() {
                     description="磁盘空间检查频率"
                   >
                     <Input
-                      aria-label="告警检查间隔"
+                      aria-label="提醒检查间隔"
                       value={settings.alertsCheckInterval}
                       onValueChange={(v) => updateDirtySettings(s => ({ ...s, alertsCheckInterval: v }))}
                       placeholder="1h"
@@ -3782,7 +3782,7 @@ export function SettingsPage() {
                   <Divider className="bg-divider" />
                   <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                     <div>
-                      <label className="text-sm font-medium text-default-600 mb-1.5 block">普通告警阈值 (%)</label>
+                      <label className="text-sm font-medium text-default-600 mb-1.5 block">提醒阈值 (%)</label>
                       <Input
                         type="number"
                         min={0}
@@ -3795,7 +3795,7 @@ export function SettingsPage() {
                       />
                     </div>
                     <div>
-                      <label className="text-sm font-medium text-default-600 mb-1.5 block">严重告警阈值 (%)</label>
+                      <label className="text-sm font-medium text-default-600 mb-1.5 block">严重提醒阈值 (%)</label>
                       <Input
                         type="number"
                         min={0}
@@ -3811,7 +3811,7 @@ export function SettingsPage() {
                   <Divider className="bg-divider" />
                   <SettingRow
                     label="最小剩余空间"
-                    description="剩余空间低于该值时发送告警"
+                    description="剩余空间低于该值时发送提醒"
                   >
                     <Input
                       value={settings.alertsMinFreeSpace}
@@ -3826,10 +3826,10 @@ export function SettingsPage() {
                   <Divider className="bg-divider" />
                   <SettingRow
                     label="冷却时间"
-                    description="同级别连续告警之间的最小间隔"
+                    description="同级别连续提醒之间的最小间隔"
                   >
                     <Input
-                      aria-label="告警冷却时间"
+                      aria-label="提醒冷却时间"
                       value={settings.alertsCooldownPeriod}
                       onValueChange={(v) => updateDirtySettings(s => ({ ...s, alertsCooldownPeriod: v }))}
                       placeholder="4h"
@@ -3893,7 +3893,7 @@ export function SettingsPage() {
                   <Divider className="bg-divider" />
                   <SettingRow
                     label="Telegram 通知"
-                    description="将同一批告警事件发送到 Telegram 机器人"
+                    description="将同一批提醒事件发送到 Telegram 机器人"
                   >
                     <Switch
                       aria-label="启用 Telegram 通知"
@@ -3988,7 +3988,7 @@ export function SettingsPage() {
             </div>
           </Tab>
 
-          <Tab key="shares" title="分享管理">
+          <Tab key="shares" title="分享">
             <div className="space-y-6 mt-6">
               <SettingsSection
                 title="分享功能配置"
@@ -4110,8 +4110,8 @@ export function SettingsPage() {
               </SettingsSection>
 
               <SettingsSection
-                title="分享链接管理"
-                description="管理所有已创建的分享链接"
+                title="分享链接"
+                description="查看和处理已创建的分享链接"
                 icon={Link2}
               >
                 <ShareManager featureEnabled={settings.shareEnabled} />
