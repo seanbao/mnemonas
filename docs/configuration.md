@@ -92,6 +92,14 @@ users_file = ""
 enabled = false
 store_file = ""
 base_url = ""
+default_expires_in = "168h"
+default_max_access = 0
+
+[[share.policy_rules]]
+path = "/Family"
+require_password = true
+max_expires_in = "24h"
+max_access = 20
 
 [favorites]
 enabled = true
@@ -491,6 +499,9 @@ refresh_token_ttl = "168h"
 | `enabled` | bool | `false` | 是否启用分享 |
 | `store_file` | string | `~/.mnemonas/.mnemonas/shares.json` | 分享数据文件路径 |
 | `base_url` | string | `""` | 分享链接基础 URL；用于生成分享响应中的 `url` 字段，留空时返回相对路径 `/s/{id}` |
+| `default_expires_in` | duration | `168h` | 新创建分享的默认有效期；设为 `0` 或留空表示默认不过期 |
+| `default_max_access` | int | `0` | 新创建分享的默认访问次数上限；`0` 表示不限制 |
+| `[[share.policy_rules]]` | array | `[]` | 按 MnemoNAS 路径设置更严格的分享约束；最具体路径规则优先生效 |
 
 **示例：**
 
@@ -498,9 +509,17 @@ refresh_token_ttl = "168h"
 [share]
 enabled = true
 base_url = "https://nas.example.com"
+default_expires_in = "168h"
+default_max_access = 0
+
+[[share.policy_rules]]
+path = "/Family"
+require_password = true
+max_expires_in = "24h"
+max_access = 20
 ```
 
-`base_url` 只影响接口返回给调用方的分享链接展示值，不改变分享 `id` 本身。配置为空时，后端返回相对路径 `/s/{id}`；非空时必须是完整的 `http` 或 `https` URL。
+`base_url` 只影响接口返回给调用方的分享链接展示值，不改变分享 `id` 本身。配置为空时，后端返回相对路径 `/s/{id}`；非空时必须是完整的 `http` 或 `https` URL。默认有效期和默认访问次数只影响之后创建的分享；请求体显式传入 `expires_in` 或 `max_access` 时以请求体为准。路径策略可以设置 `require_password`、`max_expires_in` 和 `max_access`。命中策略时，未设置密码的请求会被拒绝；超过策略上限的有效期和访问次数会自动压到上限。
 
 ---
 

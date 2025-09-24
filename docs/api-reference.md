@@ -1155,6 +1155,31 @@ GET /api/v1/search?q={query}
 
 ## 分享链接
 
+### 获取分享默认策略
+
+```
+GET /api/v1/shares/policy
+```
+
+**响应示例**:
+```json
+{
+  "success": true,
+  "data": {
+    "default_expires_in": "168h",
+    "default_max_access": 0,
+    "policy_rules": [
+      {
+        "path": "/Family",
+        "require_password": true,
+        "max_expires_in": "24h",
+        "max_access": 20
+      }
+    ]
+  }
+}
+```
+
 ### 创建分享
 
 创建文件或目录的分享链接。
@@ -1179,9 +1204,13 @@ POST /api/v1/shares
 **字段说明**:
 - `type`: `file` | `folder`
 - `password`: 可选分享访问密码；非空时最多 72 字节
+- `expires_in`: 可选；省略时使用 `share.default_expires_in`
 - `permission`: `read`
+- `max_access`: 可选；省略时使用 `share.default_max_access`
+- 如果路径命中 `share.policy_rules`，最具体路径规则会生效：`require_password` 会拒绝未设置密码的请求；`max_expires_in` 和 `max_access` 会把超过上限的请求值压到上限
 - 响应中的 `url` 为动态生成字段：当 `share.base_url` 已配置时返回 `<base_url>/s/{id}`；未配置时返回相对路径 `/s/{id}`
 - `share.base_url` 为空时返回相对路径；非空时必须是完整的 `http` 或 `https` URL
+- 认证后的分享响应包含 `risk.level` 和可选 `risk.reasons`，用于标记无密码、不过期、无限访问、覆盖范围过大、长期未访问或即将到期的分享
 
 **响应示例**:
 ```json
@@ -1201,7 +1230,10 @@ POST /api/v1/shares
     "max_access": 0,
     "last_access": null,
     "description": "",
-    "url": "http://localhost:8080/s/share-abc123"
+    "url": "http://localhost:8080/s/share-abc123",
+    "risk": {
+      "level": "none"
+    }
   }
 }
 ```
@@ -1234,7 +1266,17 @@ GET /api/v1/shares
       "max_access": 0,
       "last_access": null,
       "description": "",
-      "url": "http://localhost:8080/s/share-abc123"
+      "url": "http://localhost:8080/s/share-abc123",
+      "risk": {
+        "level": "medium",
+        "reasons": [
+          {
+            "code": "unlimited_access",
+            "level": "medium",
+            "message": "未设置访问次数上限"
+          }
+        ]
+      }
     }
   ]
 }
@@ -1276,7 +1318,17 @@ PUT /api/v1/shares/{id}
     "max_access": 0,
     "last_access": null,
     "description": "",
-    "url": "http://localhost:8080/s/share-abc123"
+    "url": "http://localhost:8080/s/share-abc123",
+    "risk": {
+      "level": "high",
+      "reasons": [
+        {
+          "code": "no_password",
+          "level": "high",
+          "message": "未设置密码，拿到链接的人都能访问"
+        }
+      ]
+    }
   }
 }
 ```
@@ -1668,7 +1720,10 @@ GET /api/v1/settings
     },
     "share": {
       "enabled": false,
-      "base_url": ""
+      "base_url": "",
+      "default_expires_in": "168h",
+      "default_max_access": 0,
+      "policy_rules": []
     },
     "favorites": {
       "enabled": true,
@@ -1954,7 +2009,17 @@ PUT /api/v1/settings
   },
   "share": {
     "enabled": true,
-    "base_url": "https://share.example.com"
+    "base_url": "https://share.example.com",
+    "default_expires_in": "168h",
+    "default_max_access": 0,
+    "policy_rules": [
+      {
+        "path": "/Family",
+        "require_password": true,
+        "max_expires_in": "24h",
+        "max_access": 20
+      }
+    ]
   },
   "favorites": {
     "enabled": false
@@ -2040,7 +2105,7 @@ PUT /api/v1/settings
 - `server.tls` 支持更新 `enabled`、`cert_file`、`key_file`、`auto_generate`、`cert_dir`；保存后需重启服务才能切换 HTTPS 监听
 - `cdc` 支持更新 `min_chunk_size`、`avg_chunk_size`、`max_chunk_size`；必须满足 `65536 <= min < avg < max <= 67108864`。Docker 和 systemd 启动入口会在 dataplane 重启时读取这些字节值，新对象写入才会使用新分块参数
 - `versioning` 支持更新 `auto_versioned_extensions`、`auto_versioned_filenames`、`max_versioned_size`；保存后会立即更新运行中的自动版本策略
-- `share` 支持更新 `enabled`、`base_url`；`enabled` 会立即影响公开分享访问和新分享创建，`base_url` 会立即影响后续新生成的分享链接，非空时必须是完整的 `http` 或 `https` URL
+- `share` 支持更新 `enabled`、`base_url`、`default_expires_in`、`default_max_access`、`policy_rules`；`enabled` 会立即影响公开分享访问和新分享创建，`base_url` 会立即影响后续新生成的分享链接，非空时必须是完整的 `http` 或 `https` URL；默认有效期和默认访问次数只影响之后创建的分享；`policy_rules` 每项必须使用干净的 MnemoNAS 绝对路径，并至少设置 `require_password`、`max_expires_in` 或 `max_access` 中的一项
 - `favorites` 支持更新 `enabled`；保存后会立即影响收藏接口的可用性
 - `storage.directory_access_rules` 每项必须使用干净的 MnemoNAS 绝对路径，并至少包含一个 `read_users`、`write_users`、`read_groups`、`write_groups`、`read_roles` 或 `write_roles` 授权；角色只能是 `admin`、`user`、`guest`
 - `alerts` 支持更新 `enabled`、`check_interval`、`threshold_pct`、`critical_pct`、`min_free_bytes`、`cooldown_period`、`webhook_url`、`webhook_method`、`webhook_headers`、`telegram_enabled`、`telegram_bot_token`、`telegram_chat_id`、`email_enabled`、`smtp_host`、`smtp_port`、`smtp_username`、`smtp_password`、`smtp_from`、`smtp_to`；保存后会立即更新运行中的告警监控
