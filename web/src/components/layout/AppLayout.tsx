@@ -72,7 +72,7 @@ export function AppLayout() {
       <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
         <Header onMenuClick={() => setSidebarOpen(true)} />
         
-        <main className="min-w-0 flex-1 overflow-auto pb-20 scroll-pb-28 scroll-pt-4 lg:pb-0 lg:scroll-pb-0">
+        <main className="mb-[calc(5rem+env(safe-area-inset-bottom))] min-w-0 flex-1 overflow-auto pb-4 scroll-pb-28 scroll-pt-4 lg:mb-0 lg:pb-0 lg:scroll-pb-0">
           <div className="mx-auto h-full min-h-full w-full max-w-7xl">
             <Outlet />
           </div>

@@ -172,6 +172,27 @@ func fakeAlertEventCount(monitor *fakeAlertMonitor) int {
 	return len(monitor.events)
 }
 
+func requireQuotaAlertHidesPaths(t *testing.T, event alerts.EventPayload, forbiddenFragments ...string) {
+	t.Helper()
+	for _, key := range []string{"target_path", "home_dir", "quota_path", "username"} {
+		if _, ok := event.Details[key]; ok {
+			t.Fatalf("quota alert detail %q should be omitted: %+v", key, event.Details)
+		}
+	}
+	data, err := json.Marshal(event.Details)
+	if err != nil {
+		t.Fatalf("marshal quota alert details: %v", err)
+	}
+	for _, fragment := range forbiddenFragments {
+		if fragment == "" {
+			continue
+		}
+		if strings.Contains(string(data), fragment) {
+			t.Fatalf("quota alert details leaked %q: %s", fragment, data)
+		}
+	}
+}
+
 type fakeRetentionMonitor struct {
 	updateCount int
 	lastConfig  storage.RetentionMonitorConfig
@@ -1887,13 +1908,16 @@ func TestServer_UploadFile_EnforcesUserQuota(t *testing.T) {
 	if err := fs.Mkdir(ctx, "/tester"); err != nil {
 		t.Fatalf("Mkdir(/tester) error: %v", err)
 	}
+	if err := fs.Mkdir(ctx, "/tester/token=quota-secret"); err != nil {
+		t.Fatalf("Mkdir(/tester/token=quota-secret) error: %v", err)
+	}
 	if err := fs.WriteFile(ctx, "/tester/existing.txt", strings.NewReader("12345678")); err != nil {
 		t.Fatalf("WriteFile(existing) error: %v", err)
 	}
 	setUserQuotaForTest(t, server, username, 10)
 	token := loginAndGetAccessToken(t, server, username, password)
 
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/files/tester/new.txt", strings.NewReader("12345"))
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/files/tester/token=quota-secret/new.txt", strings.NewReader("12345"))
 	req.Header.Set("Authorization", "Bearer "+token)
 	w := httptest.NewRecorder()
 	server.Router().ServeHTTP(w, req)
@@ -1904,7 +1928,7 @@ func TestServer_UploadFile_EnforcesUserQuota(t *testing.T) {
 	if !strings.Contains(w.Body.String(), `"code":"QUOTA_EXCEEDED"`) {
 		t.Fatalf("expected quota error code, got %s", w.Body.String())
 	}
-	if _, err := fs.Stat(ctx, "/tester/new.txt"); !errors.Is(err, storage.ErrNotFound) {
+	if _, err := fs.Stat(ctx, "/tester/token=quota-secret/new.txt"); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("expected rejected upload to leave no file, got %v", err)
 	}
 	if len(monitor.events) != 1 {
@@ -1914,12 +1938,15 @@ func TestServer_UploadFile_EnforcesUserQuota(t *testing.T) {
 	if event.Type != quotaExceededAlertType || event.Level != alerts.AlertLevelWarning {
 		t.Fatalf("quota alert event = %s/%s, want %s/warning", event.Type, event.Level, quotaExceededAlertType)
 	}
-	if event.Details["username"] != username || event.Details["operation"] != "upload" || event.Details["target_path"] != "/tester/new.txt" {
+	if event.Details["operation"] != "upload" ||
+		event.Details["quota_type"] != quotaTypeUser ||
+		event.Details["actor_scope"] != "authenticated_user" {
 		t.Fatalf("unexpected quota alert details: %+v", event.Details)
 	}
 	if event.Details["quota_bytes"] != int64(10) || event.Details["required_bytes"] != int64(5) {
 		t.Fatalf("quota alert size details = %+v", event.Details)
 	}
+	requireQuotaAlertHidesPaths(t, event, username, "quota-secret", "/tester")
 }
 
 func TestServer_UploadFile_UserQuotaDoesNotApplyOutsideHomeDir(t *testing.T) {
@@ -1965,37 +1992,39 @@ func TestServer_UploadFile_EnforcesDirectoryQuota(t *testing.T) {
 	ctx := context.Background()
 	monitor := &fakeAlertMonitor{}
 	server.alertMonitor = monitor
-	setDirectoryQuotasForTest(t, server, []config.DirectoryQuotaConfig{{Path: "/team", QuotaBytes: 10}})
+	setDirectoryQuotasForTest(t, server, []config.DirectoryQuotaConfig{{Path: "/team/token=quota-secret", QuotaBytes: 10}})
 
 	if err := fs.Mkdir(ctx, "/team"); err != nil {
 		t.Fatalf("Mkdir(/team) error: %v", err)
 	}
-	if err := fs.WriteFile(ctx, "/team/existing.txt", strings.NewReader("12345678")); err != nil {
+	if err := fs.Mkdir(ctx, "/team/token=quota-secret"); err != nil {
+		t.Fatalf("Mkdir(/team/token=quota-secret) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/team/token=quota-secret/existing.txt", strings.NewReader("12345678")); err != nil {
 		t.Fatalf("WriteFile(existing) error: %v", err)
 	}
 
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/files/team/new.txt", strings.NewReader("123"))
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/files/team/token=quota-secret/new.txt", strings.NewReader("123"))
 	w := httptest.NewRecorder()
 	server.Router().ServeHTTP(w, req)
 
 	if w.Code != http.StatusInsufficientStorage {
 		t.Fatalf("directory quota upload status = %d, want %d; body=%s", w.Code, http.StatusInsufficientStorage, w.Body.String())
 	}
-	if !strings.Contains(w.Body.String(), `"quota_type":"directory"`) || !strings.Contains(w.Body.String(), `"quota_path":"/team"`) {
+	if !strings.Contains(w.Body.String(), `"quota_type":"directory"`) || !strings.Contains(w.Body.String(), `"quota_path":"/team/token=quota-secret"`) {
 		t.Fatalf("expected directory quota details, got %s", w.Body.String())
 	}
-	if _, err := fs.Stat(ctx, "/team/new.txt"); !errors.Is(err, storage.ErrNotFound) {
+	if _, err := fs.Stat(ctx, "/team/token=quota-secret/new.txt"); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("expected rejected upload to leave no file, got %v", err)
 	}
 	if len(monitor.events) != 1 {
 		t.Fatalf("directory quota alert event count = %d, want 1", len(monitor.events))
 	}
-	if got := monitor.events[0].Details["quota_type"]; got != quotaTypeDirectory {
+	event := monitor.events[0]
+	if got := event.Details["quota_type"]; got != quotaTypeDirectory {
 		t.Fatalf("alert quota_type = %v, want %s", got, quotaTypeDirectory)
 	}
-	if got := monitor.events[0].Details["quota_path"]; got != "/team" {
-		t.Fatalf("alert quota_path = %v, want /team", got)
-	}
+	requireQuotaAlertHidesPaths(t, event, "quota-secret", "/team")
 }
 
 func TestServer_UploadFile_AllowsReplacingWithinUserQuota(t *testing.T) {
@@ -4182,8 +4211,24 @@ func TestServer_LoginRateLimitSendsThrottledAlertEvent(t *testing.T) {
 	if event.Level != alerts.AlertLevelWarning {
 		t.Fatalf("login alert level = %q, want warning", event.Level)
 	}
-	if event.Details["username"] != username || event.Details["client_ip"] != "203.0.113.10" {
+	if _, ok := event.Details["username"]; ok {
+		t.Fatalf("login alert details exposed username: %+v", event.Details)
+	}
+	if _, ok := event.Details["client_ip"]; ok {
+		t.Fatalf("login alert details exposed client_ip: %+v", event.Details)
+	}
+	if event.Details["trigger"] != "rate_limited" ||
+		event.Details["key_scope"] != "username_client_ip" ||
+		event.Details["username_status"] != "provided" ||
+		event.Details["client_ip_scope"] != "public" {
 		t.Fatalf("unexpected login alert details: %+v", event.Details)
+	}
+	detailsJSON, err := json.Marshal(event.Details)
+	if err != nil {
+		t.Fatalf("marshal login alert details: %v", err)
+	}
+	if strings.Contains(string(detailsJSON), username) || strings.Contains(string(detailsJSON), "203.0.113.10") {
+		t.Fatalf("login alert details leaked raw login metadata: %s", detailsJSON)
 	}
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", strings.NewReader(body))
@@ -4222,12 +4267,21 @@ func TestServer_LoginRateLimitAlertSanitizesInvalidUsername(t *testing.T) {
 	}
 
 	event := waitForFakeAlertEvent(t, monitor, "login_rate_limited")
-	username, ok := event.Details["username"].(string)
-	if !ok {
-		t.Fatalf("login alert username detail = %#v, want string", event.Details["username"])
+	if _, ok := event.Details["username"]; ok {
+		t.Fatalf("login alert details exposed username: %+v", event.Details)
 	}
-	if strings.Contains(username, "SECRET_TOKEN") || strings.Contains(username, "\n") || len([]rune(username)) > 255 {
-		t.Fatalf("login alert leaked unsanitized username %q", username)
+	if event.Details["username_status"] != "invalid" {
+		t.Fatalf("login alert username_status = %#v, want invalid", event.Details["username_status"])
+	}
+	detailsJSON, err := json.Marshal(event.Details)
+	if err != nil {
+		t.Fatalf("marshal login alert details: %v", err)
+	}
+	if strings.Contains(string(detailsJSON), "SECRET_TOKEN") ||
+		strings.Contains(string(detailsJSON), invalidUsername) ||
+		strings.Contains(string(detailsJSON), "\n") ||
+		strings.Contains(string(detailsJSON), "203.0.113.10") {
+		t.Fatalf("login alert leaked raw login metadata: %s", detailsJSON)
 	}
 }
 
@@ -6574,7 +6628,7 @@ func TestServer_Stats_IncludesDiskStats(t *testing.T) {
 	}
 }
 
-func TestServer_Stats_RedactsSensitiveMountOptions(t *testing.T) {
+func TestServer_Stats_RedactsSensitiveMountMetadata(t *testing.T) {
 	server, _, _ := setupTestServer(t)
 	originalGetDiskStats := getDiskStats
 	getDiskStats = func(_ *storage.FileSystem) (*storage.DiskStats, error) {
@@ -6585,8 +6639,8 @@ func TestServer_Stats_RedactsSensitiveMountOptions(t *testing.T) {
 			UsedBytes:      750,
 			UsageRatio:     0.75,
 			FileSystemType: "cifs",
-			MountPoint:     "/srv/mnemonas",
-			MountSource:    "//nas/share",
+			MountPoint:     "/mnt/token=mount-point-secret/mnemonas",
+			MountSource:    "//alice:source-secret@nas.internal/private?token=mount-token&share=docs",
 			MountOptions:   "rw,relatime,credentials=/root/.smbcred,username=alice,password=secret,iocharset=utf8",
 		}, nil
 	}
@@ -6605,6 +6659,30 @@ func TestServer_Stats_RedactsSensitiveMountOptions(t *testing.T) {
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
 		t.Fatalf("Failed to parse response JSON: %v", err)
+	}
+	mountPoint, ok := payload.Data["disk_mount_point"].(string)
+	if !ok {
+		t.Fatalf("disk_mount_point = %v, want string", payload.Data["disk_mount_point"])
+	}
+	if strings.Contains(mountPoint, "mount-point-secret") {
+		t.Fatalf("disk_mount_point leaked secret-like path segment: %q", mountPoint)
+	}
+	if !strings.Contains(mountPoint, "/mnt/token=<redacted>/mnemonas") {
+		t.Fatalf("disk_mount_point = %q, want redacted token path segment", mountPoint)
+	}
+	mountSource, ok := payload.Data["disk_mount_source"].(string)
+	if !ok {
+		t.Fatalf("disk_mount_source = %v, want string", payload.Data["disk_mount_source"])
+	}
+	for _, leaked := range []string{"alice", "source-secret", "mount-token"} {
+		if strings.Contains(mountSource, leaked) {
+			t.Fatalf("disk_mount_source leaked %q: %q", leaked, mountSource)
+		}
+	}
+	for _, expected := range []string{"//<redacted>@nas.internal/private", "token=<redacted>", "share=docs"} {
+		if !strings.Contains(mountSource, expected) {
+			t.Fatalf("disk_mount_source = %q, want %q", mountSource, expected)
+		}
 	}
 	mountOptions, ok := payload.Data["disk_mount_options"].(string)
 	if !ok {
@@ -7019,7 +7097,7 @@ func TestServer_Diagnostics_IncludesDiskStats(t *testing.T) {
 	}
 }
 
-func TestServer_Diagnostics_RedactsSensitiveMountOptions(t *testing.T) {
+func TestServer_Diagnostics_RedactsSensitiveMountMetadata(t *testing.T) {
 	server, _, _ := setupTestServer(t)
 	originalGetDiskStats := getDiskStats
 	getDiskStats = func(_ *storage.FileSystem) (*storage.DiskStats, error) {
@@ -7029,6 +7107,8 @@ func TestServer_Diagnostics_RedactsSensitiveMountOptions(t *testing.T) {
 			AvailableBytes: 450,
 			UsedBytes:      1500,
 			UsageRatio:     0.75,
+			MountPoint:     "/mnt/password=mount-point-secret/mnemonas",
+			MountSource:    "//diagnostics-user:source-secret@nas.internal/private?access_token=mount-token",
 			MountOptions:   "rw,credentials=/root/.smbcred,username=alice,password=secret,cache=strict",
 		}, nil
 	}
@@ -7049,6 +7129,30 @@ func TestServer_Diagnostics_RedactsSensitiveMountOptions(t *testing.T) {
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
 		t.Fatalf("failed to parse diagnostics response: %v", err)
+	}
+	mountPoint, ok := payload.Data.Filesystem["disk_mount_point"].(string)
+	if !ok {
+		t.Fatalf("disk_mount_point = %v, want string", payload.Data.Filesystem["disk_mount_point"])
+	}
+	if strings.Contains(mountPoint, "mount-point-secret") {
+		t.Fatalf("diagnostics leaked mount point secret-like path segment: %q", mountPoint)
+	}
+	if !strings.Contains(mountPoint, "/mnt/password=<redacted>/mnemonas") {
+		t.Fatalf("diagnostics mount point = %q, want redacted password path segment", mountPoint)
+	}
+	mountSource, ok := payload.Data.Filesystem["disk_mount_source"].(string)
+	if !ok {
+		t.Fatalf("disk_mount_source = %v, want string", payload.Data.Filesystem["disk_mount_source"])
+	}
+	for _, leaked := range []string{"diagnostics-user", "source-secret", "mount-token"} {
+		if strings.Contains(mountSource, leaked) {
+			t.Fatalf("diagnostics leaked mount source value %q: %q", leaked, mountSource)
+		}
+	}
+	for _, expected := range []string{"//<redacted>@nas.internal/private", "access_token=<redacted>"} {
+		if !strings.Contains(mountSource, expected) {
+			t.Fatalf("diagnostics mount source = %q, want %q", mountSource, expected)
+		}
 	}
 	mountOptions, ok := payload.Data.Filesystem["disk_mount_options"].(string)
 	if !ok {
@@ -11149,6 +11253,70 @@ func TestServer_RestoreFromTrash_EnforcesUserQuota(t *testing.T) {
 	}
 }
 
+func TestServer_RestoreFromTrash_DirectoryEnforcesUserQuota(t *testing.T) {
+	server, fs, _, username, password := setupAuthServer(t)
+	ctx := context.Background()
+	monitor := &fakeAlertMonitor{}
+	server.alertMonitor = monitor
+
+	if err := fs.Mkdir(ctx, "/tester"); err != nil {
+		t.Fatalf("Mkdir(/tester) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/tester/deleted"); err != nil {
+		t.Fatalf("Mkdir(/tester/deleted) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/tester/deleted/a.txt", strings.NewReader("12345")); err != nil {
+		t.Fatalf("WriteFile(deleted/a) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/tester/deleted/b.txt", strings.NewReader("678")); err != nil {
+		t.Fatalf("WriteFile(deleted/b) error: %v", err)
+	}
+	if err := fs.Delete(ctx, "/tester/deleted"); err != nil {
+		t.Fatalf("Delete(deleted directory) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/tester/used.txt", strings.NewReader("12345")); err != nil {
+		t.Fatalf("WriteFile(used) error: %v", err)
+	}
+	items, err := fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash() error: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("trash item count = %d, want 1", len(items))
+	}
+	if !items[0].IsDir || items[0].Size != 8 {
+		t.Fatalf("trash item = %+v, want directory with total size 8", items[0])
+	}
+
+	setUserQuotaForTest(t, server, username, 10)
+	token := loginAndGetAccessToken(t, server, username, password)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/trash/"+items[0].ID+"/restore", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusInsufficientStorage {
+		t.Fatalf("directory trash restore quota status = %d, want %d; body=%s", w.Code, http.StatusInsufficientStorage, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"quota_type":"user"`) || !strings.Contains(w.Body.String(), `"quota_path":"/tester"`) {
+		t.Fatalf("expected user quota details for directory restore, got %s", w.Body.String())
+	}
+	if _, err := fs.Stat(ctx, "/tester/deleted"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("expected rejected directory restore to leave original path absent, got %v", err)
+	}
+	remaining, err := fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash(after rejected restore) error: %v", err)
+	}
+	if len(remaining) != 1 || remaining[0].ID != items[0].ID {
+		t.Fatalf("expected rejected restore to keep trash item, got %+v", remaining)
+	}
+	if len(monitor.events) != 1 || monitor.events[0].Details["operation"] != "trash_restore" || monitor.events[0].Details["quota_type"] != quotaTypeUser {
+		t.Fatalf("unexpected quota alert events: %+v", monitor.events)
+	}
+}
+
 func TestServer_RestoreFromTrash_CustomPathEnforcesUserQuotaAtDestination(t *testing.T) {
 	server, fs, _, username, password := setupAuthServer(t)
 	ctx := context.Background()
@@ -11164,6 +11332,9 @@ func TestServer_RestoreFromTrash_CustomPathEnforcesUserQuotaAtDestination(t *tes
 		if err := fs.Mkdir(ctx, dir); err != nil {
 			t.Fatalf("Mkdir(%s) error: %v", dir, err)
 		}
+	}
+	if err := fs.Mkdir(ctx, "/tester/token=quota-secret"); err != nil {
+		t.Fatalf("Mkdir(/tester/token=quota-secret) error: %v", err)
 	}
 	if err := fs.WriteFile(ctx, "/team/deleted.txt", strings.NewReader("12345")); err != nil {
 		t.Fatalf("WriteFile(deleted) error: %v", err)
@@ -11183,7 +11354,7 @@ func TestServer_RestoreFromTrash_CustomPathEnforcesUserQuotaAtDestination(t *tes
 	}
 
 	token := loginAndGetAccessToken(t, server, username, password)
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/trash/"+items[0].ID+"/restore?path=%2Ftester%2Frestored.txt", nil)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/trash/"+items[0].ID+"/restore?path=%2Ftester%2Ftoken%3Dquota-secret%2Frestored.txt", nil)
 	req.Header.Set("Authorization", "Bearer "+token)
 	w := httptest.NewRecorder()
 	server.Router().ServeHTTP(w, req)
@@ -11194,12 +11365,13 @@ func TestServer_RestoreFromTrash_CustomPathEnforcesUserQuotaAtDestination(t *tes
 	if !strings.Contains(w.Body.String(), `"quota_type":"user"`) || !strings.Contains(w.Body.String(), `"quota_path":"/tester"`) {
 		t.Fatalf("expected user quota details for destination, got %s", w.Body.String())
 	}
-	if _, err := fs.Stat(ctx, "/tester/restored.txt"); !errors.Is(err, storage.ErrNotFound) {
+	if _, err := fs.Stat(ctx, "/tester/token=quota-secret/restored.txt"); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("expected rejected custom restore to leave destination absent, got %v", err)
 	}
-	if len(monitor.events) != 1 || monitor.events[0].Details["operation"] != "trash_restore" || monitor.events[0].Details["target_path"] != "/tester/restored.txt" {
+	if len(monitor.events) != 1 || monitor.events[0].Details["operation"] != "trash_restore" || monitor.events[0].Details["quota_type"] != quotaTypeUser {
 		t.Fatalf("unexpected quota alert events: %+v", monitor.events)
 	}
+	requireQuotaAlertHidesPaths(t, monitor.events[0], "quota-secret", "/tester")
 }
 
 func TestServer_RestoreFromTrash_CustomPathRejectsExistingDestinationBeforeQuota(t *testing.T) {
@@ -11678,12 +11850,15 @@ func TestServer_RestoreFromTrash_CustomPathEnforcesDirectoryQuotaAtDestination(t
 	ctx := context.Background()
 	monitor := &fakeAlertMonitor{}
 	server.alertMonitor = monitor
-	setDirectoryQuotasForTest(t, server, []config.DirectoryQuotaConfig{{Path: "/team", QuotaBytes: 4}})
+	setDirectoryQuotasForTest(t, server, []config.DirectoryQuotaConfig{{Path: "/team/token=quota-secret", QuotaBytes: 4}})
 
 	for _, dir := range []string{"/source", "/team"} {
 		if err := fs.Mkdir(ctx, dir); err != nil {
 			t.Fatalf("Mkdir(%s) error: %v", dir, err)
 		}
+	}
+	if err := fs.Mkdir(ctx, "/team/token=quota-secret"); err != nil {
+		t.Fatalf("Mkdir(/team/token=quota-secret) error: %v", err)
 	}
 	if err := fs.WriteFile(ctx, "/source/deleted.txt", strings.NewReader("12345")); err != nil {
 		t.Fatalf("WriteFile(deleted) error: %v", err)
@@ -11699,22 +11874,23 @@ func TestServer_RestoreFromTrash_CustomPathEnforcesDirectoryQuotaAtDestination(t
 		t.Fatalf("trash item count = %d, want 1", len(items))
 	}
 
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/trash/"+items[0].ID+"/restore?path=%2Fteam%2Frestored.txt", nil)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/trash/"+items[0].ID+"/restore?path=%2Fteam%2Ftoken%3Dquota-secret%2Frestored.txt", nil)
 	w := httptest.NewRecorder()
 	server.Router().ServeHTTP(w, req)
 
 	if w.Code != http.StatusInsufficientStorage {
 		t.Fatalf("custom trash restore directory quota status = %d, want %d; body=%s", w.Code, http.StatusInsufficientStorage, w.Body.String())
 	}
-	if !strings.Contains(w.Body.String(), `"quota_type":"directory"`) || !strings.Contains(w.Body.String(), `"quota_path":"/team"`) {
+	if !strings.Contains(w.Body.String(), `"quota_type":"directory"`) || !strings.Contains(w.Body.String(), `"quota_path":"/team/token=quota-secret"`) {
 		t.Fatalf("expected directory quota details for destination, got %s", w.Body.String())
 	}
-	if _, err := fs.Stat(ctx, "/team/restored.txt"); !errors.Is(err, storage.ErrNotFound) {
+	if _, err := fs.Stat(ctx, "/team/token=quota-secret/restored.txt"); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("expected rejected custom restore to leave destination absent, got %v", err)
 	}
 	if len(monitor.events) != 1 || monitor.events[0].Details["operation"] != "trash_restore" || monitor.events[0].Details["quota_type"] != quotaTypeDirectory {
 		t.Fatalf("unexpected quota alert events: %+v", monitor.events)
 	}
+	requireQuotaAlertHidesPaths(t, monitor.events[0], "quota-secret", "/team")
 }
 
 func TestServer_RestoreFromTrash_CustomPathEnforcesDescendantDirectoryQuota(t *testing.T) {
@@ -11722,7 +11898,7 @@ func TestServer_RestoreFromTrash_CustomPathEnforcesDescendantDirectoryQuota(t *t
 	ctx := context.Background()
 	monitor := &fakeAlertMonitor{}
 	server.alertMonitor = monitor
-	setDirectoryQuotasForTest(t, server, []config.DirectoryQuotaConfig{{Path: "/archive/private", QuotaBytes: 4}})
+	setDirectoryQuotasForTest(t, server, []config.DirectoryQuotaConfig{{Path: "/archive/private/token=quota-secret", QuotaBytes: 4}})
 
 	if err := fs.Mkdir(ctx, "/deleted"); err != nil {
 		t.Fatalf("Mkdir(/deleted) error: %v", err)
@@ -11730,8 +11906,11 @@ func TestServer_RestoreFromTrash_CustomPathEnforcesDescendantDirectoryQuota(t *t
 	if err := fs.Mkdir(ctx, "/deleted/private"); err != nil {
 		t.Fatalf("Mkdir(/deleted/private) error: %v", err)
 	}
-	if err := fs.WriteFile(ctx, "/deleted/private/big.txt", strings.NewReader("12345")); err != nil {
-		t.Fatalf("WriteFile(deleted/private/big) error: %v", err)
+	if err := fs.Mkdir(ctx, "/deleted/private/token=quota-secret"); err != nil {
+		t.Fatalf("Mkdir(/deleted/private/token=quota-secret) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/deleted/private/token=quota-secret/big.txt", strings.NewReader("12345")); err != nil {
+		t.Fatalf("WriteFile(deleted/private/token=quota-secret/big) error: %v", err)
 	}
 	if err := fs.Delete(ctx, "/deleted"); err != nil {
 		t.Fatalf("Delete(deleted) error: %v", err)
@@ -11751,7 +11930,7 @@ func TestServer_RestoreFromTrash_CustomPathEnforcesDescendantDirectoryQuota(t *t
 	if w.Code != http.StatusInsufficientStorage {
 		t.Fatalf("custom trash restore descendant quota status = %d, want %d; body=%s", w.Code, http.StatusInsufficientStorage, w.Body.String())
 	}
-	if !strings.Contains(w.Body.String(), `"quota_type":"directory"`) || !strings.Contains(w.Body.String(), `"quota_path":"/archive/private"`) {
+	if !strings.Contains(w.Body.String(), `"quota_type":"directory"`) || !strings.Contains(w.Body.String(), `"quota_path":"/archive/private/token=quota-secret"`) {
 		t.Fatalf("expected descendant directory quota details, got %s", w.Body.String())
 	}
 	if _, err := fs.Stat(ctx, "/archive"); !errors.Is(err, storage.ErrNotFound) {
@@ -11760,9 +11939,10 @@ func TestServer_RestoreFromTrash_CustomPathEnforcesDescendantDirectoryQuota(t *t
 	if remaining, err := fs.ListTrash(ctx); err != nil || len(remaining) != 1 {
 		t.Fatalf("expected quota-rejected restore to keep trash item, remaining=%+v err=%v", remaining, err)
 	}
-	if len(monitor.events) != 1 || monitor.events[0].Details["operation"] != "trash_restore" || monitor.events[0].Details["quota_path"] != "/archive/private" {
+	if len(monitor.events) != 1 || monitor.events[0].Details["operation"] != "trash_restore" || monitor.events[0].Details["quota_type"] != quotaTypeDirectory {
 		t.Fatalf("unexpected quota alert events: %+v", monitor.events)
 	}
+	requireQuotaAlertHidesPaths(t, monitor.events[0], "quota-secret", "/archive")
 }
 
 func TestServer_RestoreVersion_EnforcesDirectoryQuota(t *testing.T) {
@@ -11770,18 +11950,21 @@ func TestServer_RestoreVersion_EnforcesDirectoryQuota(t *testing.T) {
 	ctx := context.Background()
 	monitor := &fakeAlertMonitor{}
 	server.alertMonitor = monitor
-	setDirectoryQuotasForTest(t, server, []config.DirectoryQuotaConfig{{Path: "/team", QuotaBytes: 4}})
+	setDirectoryQuotasForTest(t, server, []config.DirectoryQuotaConfig{{Path: "/team/token=quota-secret", QuotaBytes: 4}})
 
 	if err := fs.Mkdir(ctx, "/team"); err != nil {
 		t.Fatalf("Mkdir(/team) error: %v", err)
 	}
-	if err := fs.WriteFile(ctx, "/team/doc.md", strings.NewReader("12345")); err != nil {
+	if err := fs.Mkdir(ctx, "/team/token=quota-secret"); err != nil {
+		t.Fatalf("Mkdir(/team/token=quota-secret) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/team/token=quota-secret/doc.md", strings.NewReader("12345")); err != nil {
 		t.Fatalf("WriteFile(v1) error: %v", err)
 	}
-	if err := fs.WriteFile(ctx, "/team/doc.md", strings.NewReader("12")); err != nil {
+	if err := fs.WriteFile(ctx, "/team/token=quota-secret/doc.md", strings.NewReader("12")); err != nil {
 		t.Fatalf("WriteFile(v2) error: %v", err)
 	}
-	versions, err := fs.ListVersions(ctx, "/team/doc.md")
+	versions, err := fs.ListVersions(ctx, "/team/token=quota-secret/doc.md")
 	if err != nil {
 		t.Fatalf("ListVersions() error: %v", err)
 	}
@@ -11796,17 +11979,17 @@ func TestServer_RestoreVersion_EnforcesDirectoryQuota(t *testing.T) {
 		t.Fatalf("expected historical version with size 5, got %+v", versions)
 	}
 
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/versions/"+restoreHash+"/restore?path=/team/doc.md", nil)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/versions/"+restoreHash+"/restore?path=/team/token=quota-secret/doc.md", nil)
 	w := httptest.NewRecorder()
 	server.Router().ServeHTTP(w, req)
 
 	if w.Code != http.StatusInsufficientStorage {
 		t.Fatalf("restore version directory quota status = %d, want %d; body=%s", w.Code, http.StatusInsufficientStorage, w.Body.String())
 	}
-	if !strings.Contains(w.Body.String(), `"quota_type":"directory"`) || !strings.Contains(w.Body.String(), `"quota_path":"/team"`) {
+	if !strings.Contains(w.Body.String(), `"quota_type":"directory"`) || !strings.Contains(w.Body.String(), `"quota_path":"/team/token=quota-secret"`) {
 		t.Fatalf("expected directory quota details, got %s", w.Body.String())
 	}
-	reader, err := fs.OpenFile(ctx, "/team/doc.md")
+	reader, err := fs.OpenFile(ctx, "/team/token=quota-secret/doc.md")
 	if err != nil {
 		t.Fatalf("OpenFile(current) error: %v", err)
 	}
@@ -11828,9 +12011,10 @@ func TestServer_RestoreVersion_EnforcesDirectoryQuota(t *testing.T) {
 	if event.Message != "directory quota exceeded" {
 		t.Fatalf("quota alert message = %q, want directory quota exceeded", event.Message)
 	}
-	if event.Details["operation"] != "version_restore" || event.Details["quota_type"] != quotaTypeDirectory || event.Details["quota_path"] != "/team" {
+	if event.Details["operation"] != "version_restore" || event.Details["quota_type"] != quotaTypeDirectory {
 		t.Fatalf("unexpected quota alert details: %+v", event.Details)
 	}
+	requireQuotaAlertHidesPaths(t, event, "quota-secret", "/team")
 }
 
 func TestServer_RestoreVersion_NotFound(t *testing.T) {
@@ -13644,12 +13828,13 @@ func TestServer_RunScheduledScrubRecordsPreflightFailure(t *testing.T) {
 }
 
 func TestScrubCompletedAlertEvent_MarksCorruptionCritical(t *testing.T) {
+	objectHash := strings.Repeat("a", 64)
 	event, ok := scrubCompletedAlertEvent(&maintenance.ScrubResult{ID: "scrub-1"}, &dataplane.ScrubResult{
 		TotalObjects:     3,
 		ValidObjects:     2,
 		CorruptedObjects: 1,
 		Errors: []dataplane.ScrubError{{
-			Hash:      strings.Repeat("a", 64),
+			Hash:      objectHash,
 			ErrorType: "corrupted",
 			Message:   "internal checksum mismatch",
 		}},
@@ -13666,6 +13851,19 @@ func TestScrubCompletedAlertEvent_MarksCorruptionCritical(t *testing.T) {
 	}
 	if samples[0]["message"] != scrubObjectCorruptedPublicMessage {
 		t.Fatalf("sample error message = %q, want %q", samples[0]["message"], scrubObjectCorruptedPublicMessage)
+	}
+	if samples[0]["error_type"] != "corrupted" {
+		t.Fatalf("sample error type = %q, want corrupted", samples[0]["error_type"])
+	}
+	if _, ok := samples[0]["hash"]; ok {
+		t.Fatalf("scrub alert sample must not expose object hash: %+v", samples[0])
+	}
+	detailsJSON, err := json.Marshal(event.Details)
+	if err != nil {
+		t.Fatalf("marshal scrub alert details: %v", err)
+	}
+	if strings.Contains(string(detailsJSON), objectHash) || strings.Contains(string(detailsJSON), "internal checksum mismatch") {
+		t.Fatalf("scrub alert details leaked internal object details: %s", detailsJSON)
 	}
 }
 
@@ -14823,7 +15021,7 @@ func TestServer_DiagnosticsExport_IncludesDiskStats(t *testing.T) {
 	}
 }
 
-func TestServer_DiagnosticsExport_RedactsSensitiveMountOptions(t *testing.T) {
+func TestServer_DiagnosticsExport_RedactsSensitiveMountMetadata(t *testing.T) {
 	server, _, _ := setupTestServer(t)
 	originalGetDiskStats := getDiskStats
 	getDiskStats = func(_ *storage.FileSystem) (*storage.DiskStats, error) {
@@ -14834,8 +15032,8 @@ func TestServer_DiagnosticsExport_RedactsSensitiveMountOptions(t *testing.T) {
 			UsedBytes:      3000,
 			UsageRatio:     0.75,
 			FileSystemType: "cifs",
-			MountPoint:     "/srv/mnemonas",
-			MountSource:    "//nas/share",
+			MountPoint:     "/mnt/secret=mount-point-secret/mnemonas",
+			MountSource:    "smb://export-user:source-secret@nas.internal/private?token=mount-token",
 			MountOptions:   "rw,credentials=/root/.smbcred,username=alice,password=secret,cache=strict",
 		}, nil
 	}
@@ -14853,6 +15051,30 @@ func TestServer_DiagnosticsExport_RedactsSensitiveMountOptions(t *testing.T) {
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
 		t.Fatalf("failed to parse diagnostics export response: %v", err)
+	}
+	mountPoint, ok := payload.Filesystem["disk_mount_point"].(string)
+	if !ok {
+		t.Fatalf("disk_mount_point = %v, want string", payload.Filesystem["disk_mount_point"])
+	}
+	if strings.Contains(mountPoint, "mount-point-secret") {
+		t.Fatalf("diagnostics export leaked mount point secret-like path segment: %q", mountPoint)
+	}
+	if !strings.Contains(mountPoint, "/mnt/secret=<redacted>/mnemonas") {
+		t.Fatalf("diagnostics export mount point = %q, want redacted secret path segment", mountPoint)
+	}
+	mountSource, ok := payload.Filesystem["disk_mount_source"].(string)
+	if !ok {
+		t.Fatalf("disk_mount_source = %v, want string", payload.Filesystem["disk_mount_source"])
+	}
+	for _, leaked := range []string{"export-user", "source-secret", "mount-token"} {
+		if strings.Contains(mountSource, leaked) {
+			t.Fatalf("diagnostics export leaked mount source value %q: %q", leaked, mountSource)
+		}
+	}
+	for _, expected := range []string{"smb://<redacted>@nas.internal/private", "token=<redacted>"} {
+		if !strings.Contains(mountSource, expected) {
+			t.Fatalf("diagnostics export mount source = %q, want %q", mountSource, expected)
+		}
 	}
 	mountOptions, ok := payload.Filesystem["disk_mount_options"].(string)
 	if !ok {
@@ -17289,7 +17511,7 @@ func TestServer_UpdateSettings_SendsPolicyChangeAlert(t *testing.T) {
 	monitor := &fakeAlertMonitor{}
 	server.alertMonitor = monitor
 
-	body := `{"storage":{"directory_access_rules":[{"path":"/team/","read_groups":["Family"],"write_groups":["Editors"]}]},"share":{"enabled":true,"default_expires_in":"24h","default_max_access":10,"policy_rules":[{"path":"/team/","require_password":true,"max_expires_in":"24h","max_access":10}]}}`
+	body := `{"storage":{"directory_access_rules":[{"path":"/team/token=access-secret","read_groups":["Family"],"write_groups":["Editors"]}]},"share":{"enabled":true,"default_expires_in":"24h","default_max_access":10,"policy_rules":[{"path":"/team/token=share-secret","require_password":true,"max_expires_in":"24h","max_access":10}]}}`
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/settings", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -17321,8 +17543,8 @@ func TestServer_UpdateSettings_SendsPolicyChangeAlert(t *testing.T) {
 	if event.Details["directory_access_rules_changed"] != true || event.Details["directory_access_rule_count"] != 1 {
 		t.Fatalf("unexpected directory access alert details: %+v", event.Details)
 	}
-	if got, want := event.Details["directory_access_rule_paths"], []string{"/team"}; !reflect.DeepEqual(got, want) {
-		t.Fatalf("directory access rule paths = %#v, want %#v", got, want)
+	if _, ok := event.Details["directory_access_rule_paths"]; ok {
+		t.Fatalf("directory access rule paths must not be sent in alert details: %+v", event.Details)
 	}
 	for _, key := range []string{
 		"share_policy_changed",
@@ -17338,8 +17560,17 @@ func TestServer_UpdateSettings_SendsPolicyChangeAlert(t *testing.T) {
 	if event.Details["share_policy_rule_count"] != 1 {
 		t.Fatalf("share policy rule count = %#v, want 1", event.Details["share_policy_rule_count"])
 	}
-	if got, want := event.Details["share_policy_rule_paths"], []string{"/team"}; !reflect.DeepEqual(got, want) {
-		t.Fatalf("share policy rule paths = %#v, want %#v", got, want)
+	if _, ok := event.Details["share_policy_rule_paths"]; ok {
+		t.Fatalf("share policy rule paths must not be sent in alert details: %+v", event.Details)
+	}
+	detailsJSON, err := json.Marshal(event.Details)
+	if err != nil {
+		t.Fatalf("marshal policy alert details: %v", err)
+	}
+	for _, leaked := range []string{"access-secret", "share-secret", "token=access-secret", "token=share-secret"} {
+		if strings.Contains(string(detailsJSON), leaked) {
+			t.Fatalf("policy alert details leaked path secret %q: %s", leaked, string(detailsJSON))
+		}
 	}
 }
 
@@ -18374,8 +18605,10 @@ func TestServer_SendShareExpiryReminderAlerts_SendsAggregateEvent(t *testing.T) 
 	server.alertMonitor = monitor
 
 	now := time.Date(2026, 6, 3, 8, 0, 0, 0, time.UTC)
-	firstShare := createShareExpiryReminderTestShare(t, server.shareStore, "/docs/a.txt", now.Add(48*time.Hour), func(s *share.Share) {})
-	createShareExpiryReminderTestShare(t, server.shareStore, "/team/soon.txt", now.Add(24*time.Hour), func(s *share.Share) {})
+	firstShare := createShareExpiryReminderTestShare(t, server.shareStore, "/docs/token=share-secret/a.txt", now.Add(48*time.Hour), func(s *share.Share) {})
+	createShareExpiryReminderTestShare(t, server.shareStore, "/team/token=share-secret/soon", now.Add(24*time.Hour), func(s *share.Share) {
+		s.Type = share.ShareTypeFolder
+	})
 	createShareExpiryReminderTestShare(t, server.shareStore, "/team/later.txt", now.Add(96*time.Hour), func(s *share.Share) {})
 	createShareExpiryReminderTestShare(t, server.shareStore, "/team/expired.txt", now.Add(-time.Hour), func(s *share.Share) {})
 	createShareExpiryReminderTestShare(t, server.shareStore, "/team/disabled.txt", now.Add(24*time.Hour), func(s *share.Share) {
@@ -18413,11 +18646,24 @@ func TestServer_SendShareExpiryReminderAlerts_SendsAggregateEvent(t *testing.T) 
 	if event.Details["expires_before"] != now.Add(shareExpiryReminderWindow).Format(time.RFC3339) {
 		t.Fatalf("expires_before = %#v, want %s", event.Details["expires_before"], now.Add(shareExpiryReminderWindow).Format(time.RFC3339))
 	}
-	if got, want := event.Details["share_paths"], []string{"/docs/a.txt", "/team/soon.txt"}; !reflect.DeepEqual(got, want) {
-		t.Fatalf("share expiry paths = %#v, want %#v", got, want)
+	if event.Details["file_share_count"] != 1 || event.Details["folder_share_count"] != 1 {
+		t.Fatalf("unexpected share type counts in expiry alert: %+v", event.Details)
+	}
+	if event.Details["passwordless_share_count"] != 2 || event.Details["unlimited_access_share_count"] != 2 {
+		t.Fatalf("unexpected share risk counts in expiry alert: %+v", event.Details)
+	}
+	for _, key := range []string{"share_paths", "additional_path_count"} {
+		if _, ok := event.Details[key]; ok {
+			t.Fatalf("share expiry alert detail %q should be omitted: %+v", key, event.Details)
+		}
 	}
 	if strings.Contains(fmt.Sprint(event.Details), firstShare.ID) {
 		t.Fatalf("share expiry alert leaked share id in details: %+v", event.Details)
+	}
+	for _, leaked := range []string{"share-secret", "token=share-secret", "/docs/", "/team/"} {
+		if strings.Contains(fmt.Sprint(event.Details), leaked) {
+			t.Fatalf("share expiry alert leaked path fragment %q in details: %+v", leaked, event.Details)
+		}
 	}
 
 	sent = server.sendShareExpiryReminderAlerts(context.Background(), now.Add(time.Hour))
@@ -18769,7 +19015,7 @@ func TestServer_UpdateSettings_InvalidAlertsWebhookURLDoesNotUpdateAlertMonitor(
 	monitor := &fakeAlertMonitor{}
 	server.alertMonitor = monitor
 
-	body := `{"alerts":{"webhook_url":"ftp://hooks.example.com/storage"}}`
+	body := `{"alerts":{"webhook_url":"ftp://hooks.example.com/storage?token=secret-token"}}`
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/settings", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -18781,6 +19027,9 @@ func TestServer_UpdateSettings_InvalidAlertsWebhookURLDoesNotUpdateAlertMonitor(
 	}
 	if !strings.Contains(w.Body.String(), "invalid configuration") {
 		t.Fatalf("expected invalid configuration message, got %s", w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), "secret-token") || strings.Contains(w.Body.String(), "token=secret-token") {
+		t.Fatalf("invalid webhook URL response leaked secret token: %s", w.Body.String())
 	}
 	if server.config.Alerts.WebhookURL != "https://hooks.example.com/old" {
 		t.Fatalf("expected invalid webhook URL update to leave config unchanged, got %q", server.config.Alerts.WebhookURL)
@@ -18811,6 +19060,9 @@ func TestServer_UpdateSettings_InvalidAlertsWeComWebhookURLDoesNotUpdateAlertMon
 	}
 	if !strings.Contains(w.Body.String(), "invalid configuration") {
 		t.Fatalf("expected invalid configuration message, got %s", w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), "secret-key") || strings.Contains(w.Body.String(), "key=secret-key") {
+		t.Fatalf("invalid WeCom webhook URL response leaked secret key: %s", w.Body.String())
 	}
 	if server.config.Alerts.WeComWebhookURL != "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=old" {
 		t.Fatalf("expected invalid WeCom webhook URL update to leave config unchanged, got %q", server.config.Alerts.WeComWebhookURL)
@@ -19141,6 +19393,127 @@ func TestServer_UpdateSettings_UpdatesServerTimeouts(t *testing.T) {
 	}
 	if server.config.Server.IdleTimeout != 5*time.Minute {
 		t.Fatalf("expected idle timeout 5m, got %s", server.config.Server.IdleTimeout)
+	}
+}
+
+func TestServer_UpdateSettings_UpdatesAuthTokenTTLs(t *testing.T) {
+	server, _, tmpDir := setupTestServer(t)
+	server.configPath = path.Join(tmpDir, "config.toml")
+	server.tokenManager = auth.NewTokenManager("settings-auth-ttl-secret", 15*time.Minute, 24*time.Hour)
+
+	body := `{"auth":{"access_token_ttl":"45m","refresh_token_ttl":"720h"}}`
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/settings", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("update settings auth TTL status = %d, want %d: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+	if server.config.Auth.AccessTokenTTL != 45*time.Minute {
+		t.Fatalf("access token TTL = %s, want 45m", server.config.Auth.AccessTokenTTL)
+	}
+	if server.config.Auth.RefreshTokenTTL != 720*time.Hour {
+		t.Fatalf("refresh token TTL = %s, want 720h", server.config.Auth.RefreshTokenTTL)
+	}
+
+	loaded, err := config.Load(server.configPath)
+	if err != nil {
+		t.Fatalf("Load(configPath) error: %v", err)
+	}
+	if loaded.Auth.AccessTokenTTL != 45*time.Minute {
+		t.Fatalf("persisted access token TTL = %s, want 45m", loaded.Auth.AccessTokenTTL)
+	}
+	if loaded.Auth.RefreshTokenTTL != 720*time.Hour {
+		t.Fatalf("persisted refresh token TTL = %s, want 720h", loaded.Auth.RefreshTokenTTL)
+	}
+
+	getReq := httptest.NewRequest(http.MethodGet, "/api/v1/settings", nil)
+	getRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(getRec, getReq)
+	if getRec.Code != http.StatusOK {
+		t.Fatalf("get settings status = %d, want %d: %s", getRec.Code, http.StatusOK, getRec.Body.String())
+	}
+	var settingsPayload struct {
+		Data struct {
+			Auth struct {
+				AccessTokenTTL  string `json:"access_token_ttl"`
+				RefreshTokenTTL string `json:"refresh_token_ttl"`
+			} `json:"auth"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(getRec.Body).Decode(&settingsPayload); err != nil {
+		t.Fatalf("decode settings response: %v", err)
+	}
+	if settingsPayload.Data.Auth.AccessTokenTTL != "45m0s" {
+		t.Fatalf("settings auth.access_token_ttl = %q, want 45m0s", settingsPayload.Data.Auth.AccessTokenTTL)
+	}
+	if settingsPayload.Data.Auth.RefreshTokenTTL != "720h0m0s" {
+		t.Fatalf("settings auth.refresh_token_ttl = %q, want 720h0m0s", settingsPayload.Data.Auth.RefreshTokenTTL)
+	}
+
+	issuedAt := time.Now()
+	tokenPair, err := server.tokenManager.GenerateTokenPair(&auth.User{
+		ID:       "settings-auth-ttl-user",
+		Username: "settings-auth-ttl-user",
+		Role:     auth.RoleAdmin,
+	})
+	if err != nil {
+		t.Fatalf("GenerateTokenPair() error: %v", err)
+	}
+	if tokenPair.ExpiresAt.Before(issuedAt.Add(44*time.Minute)) || tokenPair.ExpiresAt.After(issuedAt.Add(46*time.Minute)) {
+		t.Fatalf("access token expiry = %s, want about 45m after %s", tokenPair.ExpiresAt, issuedAt)
+	}
+	if tokenPair.RefreshExpiresAt.Before(issuedAt.Add(719*time.Hour)) || tokenPair.RefreshExpiresAt.After(issuedAt.Add(721*time.Hour)) {
+		t.Fatalf("refresh token expiry = %s, want about 720h after %s", tokenPair.RefreshExpiresAt, issuedAt)
+	}
+}
+
+func TestServer_UpdateSettings_InvalidAuthTokenTTLRejected(t *testing.T) {
+	tests := []struct {
+		name      string
+		body      string
+		wantError string
+	}{
+		{
+			name:      "invalid access ttl",
+			body:      `{"auth":{"access_token_ttl":"not-a-duration"}}`,
+			wantError: "invalid auth.access_token_ttl",
+		},
+		{
+			name:      "zero refresh ttl",
+			body:      `{"auth":{"refresh_token_ttl":"0"}}`,
+			wantError: "invalid auth.refresh_token_ttl",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server, _, tmpDir := setupTestServer(t)
+			server.configPath = path.Join(tmpDir, "config.toml")
+			originalAccessTTL := server.config.Auth.AccessTokenTTL
+			originalRefreshTTL := server.config.Auth.RefreshTokenTTL
+
+			req := httptest.NewRequest(http.MethodPut, "/api/v1/settings", strings.NewReader(tt.body))
+			req.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+
+			server.Router().ServeHTTP(w, req)
+
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("update settings invalid auth TTL status = %d, want %d", w.Code, http.StatusBadRequest)
+			}
+			if !strings.Contains(w.Body.String(), tt.wantError) {
+				t.Fatalf("expected %q message, got %s", tt.wantError, w.Body.String())
+			}
+			if server.config.Auth.AccessTokenTTL != originalAccessTTL {
+				t.Fatalf("invalid auth TTL update changed access TTL")
+			}
+			if server.config.Auth.RefreshTokenTTL != originalRefreshTTL {
+				t.Fatalf("invalid auth TTL update changed refresh TTL")
+			}
+		})
 	}
 }
 
@@ -20163,6 +20536,12 @@ func TestServer_ListActivity_FiltersByActionGroup(t *testing.T) {
 	if err := server.activity.Log(activity.ActionUpload, "/tester/photos/a.jpg", username, "127.0.0.1", nil); err != nil {
 		t.Fatalf("log upload activity error: %v", err)
 	}
+	if err := server.activity.Log(activity.ActionRestore, "/tester/photos/a.jpg", username, "127.0.0.1", map[string]string{"restore_source": "version"}); err != nil {
+		t.Fatalf("log restore activity error: %v", err)
+	}
+	if err := server.activity.Log(activity.ActionTrashRestore, "/tester/photos/a.jpg", username, "127.0.0.1", nil); err != nil {
+		t.Fatalf("log trash_restore activity error: %v", err)
+	}
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/activity/?action_group=share", nil)
 	req.Header.Set("Authorization", "Bearer "+issueAccessTokenWithoutActivity(t, server, "admin"))
@@ -20188,6 +20567,33 @@ func TestServer_ListActivity_FiltersByActionGroup(t *testing.T) {
 	for _, entry := range payload.Data.Items {
 		if entry.Action != activity.ActionShare && entry.Action != activity.ActionUnshare {
 			t.Fatalf("share action group included unexpected entry: %s", w.Body.String())
+		}
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/v1/activity/?action_group=risk", nil)
+	req.Header.Set("Authorization", "Bearer "+issueAccessTokenWithoutActivity(t, server, "admin"))
+	w = httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("list activity with risk action group status = %d, want %d: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to parse risk list activity response: %v", err)
+	}
+	if payload.Data.Total != 4 || len(payload.Data.Items) != 4 {
+		t.Fatalf("expected four risk-group activity entries, got %s", w.Body.String())
+	}
+	seenActions := map[activity.ActionType]bool{}
+	for _, entry := range payload.Data.Items {
+		seenActions[entry.Action] = true
+		if entry.Action == activity.ActionUpload {
+			t.Fatalf("risk action group included upload: %s", w.Body.String())
+		}
+	}
+	for _, action := range []activity.ActionType{activity.ActionShare, activity.ActionUnshare, activity.ActionRestore, activity.ActionTrashRestore} {
+		if !seenActions[action] {
+			t.Fatalf("risk action group did not include %q: %s", action, w.Body.String())
 		}
 	}
 }
@@ -20329,6 +20735,12 @@ func TestServer_ActivityStats_HonorsActionGroupFilter(t *testing.T) {
 	if err := server.activity.Log(activity.ActionUpload, "/tester/photos/a.jpg", username, "127.0.0.1", nil); err != nil {
 		t.Fatalf("log upload activity error: %v", err)
 	}
+	if err := server.activity.Log(activity.ActionRestore, "/tester/photos/a.jpg", username, "127.0.0.1", map[string]string{"restore_source": "version"}); err != nil {
+		t.Fatalf("log restore activity error: %v", err)
+	}
+	if err := server.activity.Log(activity.ActionTrashRestore, "/tester/photos/a.jpg", username, "127.0.0.1", nil); err != nil {
+		t.Fatalf("log trash_restore activity error: %v", err)
+	}
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/activity/stats?action_group=share", nil)
 	req.Header.Set("Authorization", "Bearer "+issueAccessTokenWithoutActivity(t, server, "admin"))
@@ -20353,6 +20765,24 @@ func TestServer_ActivityStats_HonorsActionGroupFilter(t *testing.T) {
 	}
 	if payload.Data.ByAction[string(activity.ActionShare)] != 1 || payload.Data.ByAction[string(activity.ActionUnshare)] != 1 || payload.Data.ByAction[string(activity.ActionUpload)] != 0 {
 		t.Fatalf("expected stats to include only share group, got %+v", payload.Data.ByAction)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/v1/activity/stats?action_group=risk", nil)
+	req.Header.Set("Authorization", "Bearer "+issueAccessTokenWithoutActivity(t, server, "admin"))
+	w = httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("activity stats with risk action group status = %d, want %d: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to parse risk activity stats response: %v", err)
+	}
+	if payload.Data.Total != 4 {
+		t.Fatalf("expected risk action-group stats total = 4, got %d (%s)", payload.Data.Total, w.Body.String())
+	}
+	if payload.Data.ByAction[string(activity.ActionRestore)] != 1 || payload.Data.ByAction[string(activity.ActionTrashRestore)] != 1 || payload.Data.ByAction[string(activity.ActionUpload)] != 0 {
+		t.Fatalf("expected stats to include restore actions in risk group and exclude upload, got %+v", payload.Data.ByAction)
 	}
 }
 
@@ -21528,9 +21958,11 @@ func TestBuildActivityStats_IncludesRiskSummary(t *testing.T) {
 	stats := buildActivityStats([]activity.Entry{
 		{Action: activity.ActionDelete, User: "admin", Timestamp: time.Date(2026, time.April, 7, 9, 0, 0, 0, loc)},
 		{Action: activity.ActionMove, User: "admin", Timestamp: time.Date(2026, time.April, 7, 9, 4, 0, 0, loc)},
+		{Action: activity.ActionRestore, User: "admin", Timestamp: time.Date(2026, time.April, 7, 9, 6, 0, 0, loc)},
 		{Action: activity.ActionShare, User: "admin", Timestamp: time.Date(2026, time.April, 7, 9, 9, 0, 0, loc)},
 		{Action: activity.ActionRename, User: "admin", Timestamp: time.Date(2026, time.April, 7, 9, 30, 0, 0, loc)},
 		{Action: activity.ActionUpload, User: "admin", Timestamp: time.Date(2026, time.April, 7, 9, 31, 0, 0, loc)},
+		{Action: activity.ActionTrashRestore, User: "admin", Timestamp: time.Date(2026, time.April, 6, 23, 58, 0, 0, loc)},
 		{Action: activity.ActionTrashEmpty, User: "admin", Timestamp: time.Date(2026, time.April, 6, 23, 59, 0, 0, loc)},
 	})
 
@@ -21538,14 +21970,14 @@ func TestBuildActivityStats_IncludesRiskSummary(t *testing.T) {
 	if !ok {
 		t.Fatalf("risk_summary type assertion failed: %#v", stats["risk_summary"])
 	}
-	if riskSummary["total"] != 5 {
-		t.Fatalf("risk summary total = %#v, want 5", riskSummary["total"])
+	if riskSummary["total"] != 7 {
+		t.Fatalf("risk summary total = %#v, want 7", riskSummary["total"])
 	}
-	if riskSummary["today"] != 4 {
-		t.Fatalf("risk summary today = %#v, want 4", riskSummary["today"])
+	if riskSummary["today"] != 5 {
+		t.Fatalf("risk summary today = %#v, want 5", riskSummary["today"])
 	}
-	if riskSummary["max_10m"] != 3 {
-		t.Fatalf("risk summary max_10m = %#v, want 3", riskSummary["max_10m"])
+	if riskSummary["max_10m"] != 4 {
+		t.Fatalf("risk summary max_10m = %#v, want 4", riskSummary["max_10m"])
 	}
 	if riskSummary["max_10m_started_at"] != "2026-04-07T09:00:00+08:00" || riskSummary["max_10m_ended_at"] != "2026-04-07T09:09:00+08:00" {
 		t.Fatalf("unexpected risk window bounds: %#v", riskSummary)
@@ -21774,6 +22206,23 @@ func TestServer_RestoreVersion_Success(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Errorf("RestoreVersion status = %d, want %d", w.Code, http.StatusOK)
 	}
+
+	entries, total := server.activity.List(10, 0, activity.ActionRestore, "")
+	if total != 1 {
+		t.Fatalf("expected one version restore activity entry, got %d", total)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected one listed version restore activity entry, got %d", len(entries))
+	}
+	if entries[0].Path != "/restore-version/file.txt" {
+		t.Fatalf("expected version restore activity path %q, got %q", "/restore-version/file.txt", entries[0].Path)
+	}
+	if entries[0].Details["restore_source"] != "version" {
+		t.Fatalf("expected version restore source detail, got %+v", entries[0].Details)
+	}
+	if entries[0].Details["hash"] != hashToRestore {
+		t.Fatalf("expected restored hash detail %q, got %+v", hashToRestore, entries[0].Details)
+	}
 }
 
 func TestServer_RestoreVersion_ReturnsWarningWhenWorkspaceSyncFailsAfterVisibleRestore(t *testing.T) {
@@ -21855,6 +22304,17 @@ func TestServer_RestoreVersion_ReturnsWarningWhenWorkspaceSyncFailsAfterVisibleR
 	}
 	if string(data) != "version 1" {
 		t.Fatalf("expected restored content after warning response, got %q", string(data))
+	}
+
+	entries, total := server.activity.List(10, 0, activity.ActionRestore, "")
+	if total != 1 {
+		t.Fatalf("expected one warning version restore activity entry, got %d", total)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected one listed warning version restore activity entry, got %d", len(entries))
+	}
+	if entries[0].Details["restore_source"] != "version" || entries[0].Details["hash"] != hashToRestore || entries[0].Details["persistence_warning"] != "true" {
+		t.Fatalf("unexpected warning version restore activity details: %+v", entries[0].Details)
 	}
 }
 

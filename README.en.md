@@ -27,13 +27,13 @@ The name comes from Mnemosyne, the Greek goddess of memory and mother of the nin
 | Area | Description |
 | --- | --- |
 | File management | List/grid views, drag-and-drop upload, batch actions, breadcrumbs, thumbnails |
-| Version history | Policy-based file versions, version comparison, restore to a previous version |
+| Version history | Policy-based file versions, version comparison, restore to a previous version, pre-restore impact review, and restore-result activity details |
 | Trash | Soft delete, time-based browsing, restore, scheduled cleanup |
 | Album mode | Image waterfall layout, thumbnails, immersive browsing |
 | Search | Filename search with quick navigation |
 | User management | Multiple users, roles, password policy, login history |
 | Share links | Public/private links, password protection, expiration, access statistics |
-| Activity log | Key operation history, statistics overview, high-risk summary with concentrated-window review scoped to the high-risk group, current-page and current-filter cross-page review, disposition checklists, persisted review records with structured bulk-disposition summaries, batch follow-up view for review records, follow-up disposition status and note write-back, review-record export, disposition entry points from review records to related activity, version history, trash, and share-disposition views, review-history filters by reviewer/time/disposition status, quick focus for follow-up reviews, time-range, path, review-group, type, and user filters, administrator-only clear action, and home/small-team activity review |
+| Activity log | Key operation history, statistics overview, high-risk summary with concentrated-window review scoped to the high-risk group, current-page and current-filter cross-page review, disposition checklists, persisted review records with structured bulk-disposition summaries, batch follow-up view for review records, follow-up disposition status and note write-back, review-record export, disposition entry points from individual activity rows and review records to related activity, version history, trash, and share-disposition views, review-history filters by reviewer, linked activity, time, and disposition status, quick focus for follow-up reviews, time-range, path, review-group, type, and user filters, administrator-only clear action, and home/small-team activity review |
 | Settings | Server, storage, retention, and WebDAV configuration |
 | Maintenance | Scrub, GC, object browsing, diagnostic bundle, system metrics |
 | WebDAV | Core RFC 4918 read/write methods with Basic Auth and a maintained compatibility matrix |
@@ -170,7 +170,7 @@ mnemonas/
 
 ### Requirements
 
-- Go 1.25.10+
+- Go 1.25.11+
 - Rust 1.92+
 - Node.js `^20.19.0` or `>=22.12.0` (Node 22 from `.nvmrc` is recommended)
 - Docker Engine + Compose v2

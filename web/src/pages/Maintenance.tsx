@@ -417,9 +417,16 @@ const backupDiagnosticMessagesByBackendMessage: Record<string, string> = {
   'verify failed': '恢复校验失败',
   'restore target already exists': '恢复目标已存在',
   'all batch restore items failed': '所有批量恢复项目均失败',
+  'batch restore preflight failed before writes; no target data was written': '批量恢复预检未通过，未写入任何目标数据',
+  'batch restore preflight failed before this item started': '批量恢复预检未通过，该项目未开始写入',
 }
 
 function getBackupDiagnosticDisplayMessageForNormalized(normalized: string): string | null {
+  const partialBatchFailure = normalized.match(/^(\d+) of (\d+) batch restore items failed$/)
+  if (partialBatchFailure) {
+    return `${Number(partialBatchFailure[1])} / ${Number(partialBatchFailure[2])} 个批量恢复项目失败`
+  }
+
   const batchTargetConflict = normalized.match(/^restore target already exists: restore target conflicts with batch item (\d+)$/)
   if (batchTargetConflict) {
     return `恢复目标与第 ${Number(batchTargetConflict[1]) + 1} 项重复或存在父子嵌套。`
@@ -1193,6 +1200,51 @@ function BackupRestoreHistoryList({ history }: { history?: BackupRestoreResult[]
   )
 }
 
+function BackupRestoreVerifyChip({
+  needsMatchingVerify,
+  verify,
+}: {
+  needsMatchingVerify: boolean
+  verify: BackupRestoreVerifyResult | null
+}) {
+  if (needsMatchingVerify) {
+    return (
+      <Chip size="sm" color="warning" variant="flat" startContent={<Clock size={14} />}>
+        待校验
+      </Chip>
+    )
+  }
+  if (!verify) {
+    return null
+  }
+  if (verify.status === 'running') {
+    return (
+      <Chip size="sm" color="warning" variant="flat" startContent={<RefreshCw size={14} className="animate-spin" />}>
+        检查中
+      </Chip>
+    )
+  }
+  if (verify.status === 'failed') {
+    return (
+      <Chip size="sm" color="danger" variant="flat" startContent={<XCircle size={14} />}>
+        检查失败
+      </Chip>
+    )
+  }
+  if ((verify.warnings?.length ?? 0) > 0) {
+    return (
+      <Chip size="sm" color="warning" variant="flat" startContent={<FileWarning size={14} />}>
+        检查有警告
+      </Chip>
+    )
+  }
+  return (
+    <Chip size="sm" color="success" variant="flat" startContent={<CheckCircle size={14} />}>
+      已校验
+    </Chip>
+  )
+}
+
 function BackupRestoreSummary({ job }: { job: BackupJob }) {
   const result = job.last_restore
   if (!result) {
@@ -1212,6 +1264,9 @@ function BackupRestoreSummary({ job }: { job: BackupJob }) {
     <div className="space-y-1 text-sm">
       <div className="flex items-center gap-2">
         <BackupStatusChip status={result.status} warning={restoreWarnings.length > 0} />
+        {result.status === 'completed' && (
+          <BackupRestoreVerifyChip needsMatchingVerify={needsMatchingVerify} verify={verify} />
+        )}
         <span className="text-default-500">{formatDateTime(result.finished_at ?? result.started_at)}</span>
       </div>
       <div className="text-default-500">

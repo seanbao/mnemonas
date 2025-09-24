@@ -17,8 +17,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/seanbao/mnemonas/internal/rootio"
 	"golang.org/x/crypto/bcrypt"
+
+	"github.com/seanbao/mnemonas/internal/rootio"
 )
 
 var (

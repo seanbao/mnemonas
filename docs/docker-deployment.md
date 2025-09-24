@@ -126,19 +126,20 @@ docker build \
   --build-arg VERSION=local \
   --build-arg BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   -t mnemonas:local .
+mkdir -p "$HOME/.mnemonas"
 docker run --rm --user "$(id -u):$(id -g)" -p 8080:8080 \
   --mount type=bind,source="$HOME/.mnemonas",target=/data \
   mnemonas:local
 ```
 
-手动运行镜像时同样只需要 `-p 8080:8080`。`9090/9091` 是容器内部 dataplane 端口，不需要也不应发布。
+手动运行镜像前应先创建宿主机数据目录；如果目录不存在，Docker 可能以 root 创建该目录，导致非 root 容器用户首次启动时无法写入 `/data/config.toml`。手动运行镜像时同样只需要 `-p 8080:8080`。`9090/9091` 是容器内部 dataplane 端口，不需要也不应发布。
 
 构建阶段的基础镜像可以通过 build args 覆盖，便于使用内部镜像缓存或区域镜像源：
 
 ```bash
 docker build -t mnemonas:local \
   --build-arg NODE_IMAGE=node:22-bookworm-slim \
-  --build-arg GO_IMAGE=golang:1.25.10-alpine \
+  --build-arg GO_IMAGE=golang:1.25.11-alpine \
   --build-arg RUST_IMAGE=rust:1.92 \
   --build-arg RUNTIME_IMAGE=debian:bookworm-slim \
   --build-arg VERSION=local \

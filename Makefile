@@ -67,7 +67,7 @@ help:
 	@echo "  verify-changed - Run checks selected from changed files"
 	@echo "  lint       - Run linters (Go + Rust)"
 	@echo "  scripts-check - Validate deployment shell scripts"
-	@echo "  docs-check - Validate local documentation links"
+	@echo "  docs-check - Validate local documentation links and structured examples"
 	@echo "  security-check - Run dependency vulnerability checks"
 	@echo "  install-audit-tools - Install pinned security scan tools"
 	@echo "  rust-coverage - Run Rust coverage with cargo-llvm-cov"
@@ -218,10 +218,9 @@ fmt:
 # 代码检查
 lint:
 	@echo "🔍 Linting Go..."
-	@$(RESOLVE_GO_PACKAGES); \
-	lint_packages="$(GO_LINT_PACKAGES)"; \
+	@lint_packages="$(GO_LINT_PACKAGES)"; \
 	if [ -z "$$lint_packages" ]; then \
-		lint_packages="$$packages"; \
+		lint_packages="./..."; \
 	fi; \
 	if [ "$(SKIP_GOLANGCI_LINT)" = "1" ]; then \
 		echo "⚠️  Skipping golangci-lint because SKIP_GOLANGCI_LINT=1"; \
@@ -274,7 +273,7 @@ scripts-check:
 	./scripts/test-doc-links.sh
 
 docs-check:
-	@echo "📚 Checking documentation links..."
+	@echo "📚 Checking documentation links and structured examples..."
 	./scripts/check-doc-links.sh
 
 # 安全依赖检查

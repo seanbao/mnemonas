@@ -570,6 +570,30 @@ webdav_basic_password_risk() {
   return 1
 }
 
+json_string_value() {
+  local file="$1"
+  local key="$2"
+
+  python3 - "$file" "$key" <<'PY'
+import json
+import sys
+
+path, key = sys.argv[1], sys.argv[2]
+try:
+    with open(path, "r", encoding="utf-8") as handle:
+        data = json.load(handle)
+except Exception:
+    sys.exit(2)
+
+if not isinstance(data, dict):
+    sys.exit(3)
+value = data.get(key)
+if not isinstance(value, str):
+    sys.exit(3)
+sys.stdout.write(value)
+PY
+}
+
 parse_args "$@"
 require_safe_public_domain "$PUBLIC_DOMAIN"
 PUBLIC_DOMAIN="$(normalize_public_domain "$PUBLIC_DOMAIN")"
@@ -582,6 +606,10 @@ configured_server_host=""
 configured_trusted_proxy_hops=""
 configured_auth_enabled=""
 configured_auth_users_file=""
+configured_auth_access_token_ttl=""
+configured_auth_access_token_ttl_set=0
+configured_auth_refresh_token_ttl=""
+configured_auth_refresh_token_ttl_set=0
 configured_webdav_enabled=""
 configured_webdav_auth_type=""
 configured_webdav_prefix=""
@@ -590,6 +618,9 @@ configured_webdav_password=""
 configured_allow_unsafe_no_auth=""
 configured_share_enabled=""
 configured_share_base_url=""
+configured_share_default_expires_in=""
+configured_share_default_expires_in_set=0
+configured_share_default_max_access=""
 if [[ -f "$CONFIG_PATH" ]]; then
   configured_server_host="$(toml_value server host "$CONFIG_PATH")"
   configured_storage_root="$(toml_value storage root "$CONFIG_PATH")"
@@ -598,6 +629,14 @@ if [[ -f "$CONFIG_PATH" ]]; then
   configured_grpc_address="$(toml_value dataplane grpc_address "$CONFIG_PATH")"
   configured_auth_enabled="$(toml_value auth enabled "$CONFIG_PATH")"
   configured_auth_users_file="$(toml_value auth users_file "$CONFIG_PATH")"
+  configured_auth_access_token_ttl="$(toml_value auth access_token_ttl "$CONFIG_PATH")"
+  configured_auth_refresh_token_ttl="$(toml_value auth refresh_token_ttl "$CONFIG_PATH")"
+  if toml_key_exists auth access_token_ttl "$CONFIG_PATH"; then
+    configured_auth_access_token_ttl_set=1
+  fi
+  if toml_key_exists auth refresh_token_ttl "$CONFIG_PATH"; then
+    configured_auth_refresh_token_ttl_set=1
+  fi
   configured_webdav_enabled="$(toml_value webdav enabled "$CONFIG_PATH")"
   configured_webdav_auth_type="$(toml_value webdav auth_type "$CONFIG_PATH")"
   configured_webdav_prefix="$(toml_value webdav prefix "$CONFIG_PATH")"
@@ -608,6 +647,11 @@ if [[ -f "$CONFIG_PATH" ]]; then
   configured_allow_unsafe_no_auth="$(toml_value security allow_unsafe_no_auth "$CONFIG_PATH")"
   configured_share_enabled="$(toml_value share enabled "$CONFIG_PATH")"
   configured_share_base_url="$(toml_value share base_url "$CONFIG_PATH")"
+  configured_share_default_expires_in="$(toml_value share default_expires_in "$CONFIG_PATH")"
+  configured_share_default_max_access="$(toml_value share default_max_access "$CONFIG_PATH")"
+  if toml_key_exists share default_expires_in "$CONFIG_PATH"; then
+    configured_share_default_expires_in_set=1
+  fi
 fi
 configured_http_address="$(systemd_env_value DATAPLANE_HTTP_ADDR "$SYSTEMD_DIR/mnemonas-dataplane.service")"
 
@@ -733,6 +777,28 @@ check_private_dir_mode() {
   fi
 }
 
+check_private_file_mode() {
+  local path="$1"
+  local label="$2"
+
+  [[ -f "$path" ]] || return
+  if ! have stat; then
+    return
+  fi
+
+  local mode mode_tail group other
+  mode="$(stat -c '%a' "$path" 2>/dev/null || true)"
+  [[ -n "$mode" ]] || return
+  mode_tail="${mode: -3}"
+  group="${mode_tail:1:1}"
+  other="${mode_tail:2:1}"
+  if (( 10#$group == 0 && 10#$other == 0 )); then
+    ok "$label is private to its owner: $path"
+  else
+    warn "$label is not private (mode $mode); consider chmod 600 $path"
+  fi
+}
+
 check_http() {
   local url="$1"
   local label="$2"
@@ -803,6 +869,71 @@ check_http_redirects_to_https() {
   else
     warn "public HTTP does not clearly redirect to HTTPS: $url returned ${http_code:-unknown}"
   fi
+}
+
+response_header_has_token() {
+  local headers_file="$1"
+  local header_lc="${2,,}"
+  local token_lc="${3,,}"
+
+  awk -v header="$header_lc" -v token="$token_lc" '
+    function trim(value) {
+      gsub(/^[ \t]+|[ \t]+$/, "", value)
+      return value
+    }
+    {
+      sub(/\r$/, "", $0)
+      idx = index($0, ":")
+      if (idx < 1) {
+        next
+      }
+      name = tolower(substr($0, 1, idx - 1))
+      if (name != header) {
+        next
+      }
+      value = substr($0, idx + 1)
+      count = split(value, parts, ",")
+      for (i = 1; i <= count; i++) {
+        if (tolower(trim(parts[i])) == token) {
+          found = 1
+        }
+      }
+    }
+    END {
+      exit found ? 0 : 1
+    }
+  ' "$headers_file"
+}
+
+response_header_equals() {
+  local headers_file="$1"
+  local header_lc="${2,,}"
+  local expected_lc="${3,,}"
+
+  awk -v header="$header_lc" -v expected="$expected_lc" '
+    function trim(value) {
+      gsub(/^[ \t]+|[ \t]+$/, "", value)
+      return value
+    }
+    {
+      sub(/\r$/, "", $0)
+      idx = index($0, ":")
+      if (idx < 1) {
+        next
+      }
+      name = tolower(substr($0, 1, idx - 1))
+      if (name != header) {
+        next
+      }
+      value = tolower(trim(substr($0, idx + 1)))
+      if (value == expected) {
+        found = 1
+      }
+    }
+    END {
+      exit found ? 0 : 1
+    }
+  ' "$headers_file"
 }
 
 check_https_certificate() {
@@ -1030,6 +1161,311 @@ trim_ascii_whitespace() {
   printf '%s\n' "$value"
 }
 
+go_duration_to_nanoseconds() {
+  local value="$1"
+
+  have python3 || return 127
+  python3 - "$value" <<'PY'
+from decimal import Decimal, InvalidOperation
+import re
+import sys
+
+value = sys.argv[1].strip()
+if value == "":
+    sys.exit(4)
+if value == "0":
+    print(0)
+    sys.exit(0)
+if value.startswith("-"):
+    sys.exit(3)
+if value.startswith("+"):
+    value = value[1:]
+
+unit_ns = {
+    "ns": Decimal(1),
+    "us": Decimal(1000),
+    "ms": Decimal(1000000),
+    "s": Decimal(1000000000),
+    "m": Decimal(60 * 1000000000),
+    "h": Decimal(60 * 60 * 1000000000),
+}
+pattern = re.compile(r"([0-9]+(?:\.[0-9]*)?|\.[0-9]+)(ns|us|ms|s|m|h)")
+pos = 0
+total = Decimal(0)
+matched = False
+while pos < len(value):
+    match = pattern.match(value, pos)
+    if not match:
+        sys.exit(2)
+    try:
+        amount = Decimal(match.group(1))
+    except InvalidOperation:
+        sys.exit(2)
+    total += amount * unit_ns[match.group(2)]
+    pos = match.end()
+    matched = True
+
+if not matched or total < 0:
+    sys.exit(2)
+print(int(total))
+PY
+}
+
+check_public_share_default_policy() {
+  local raw_expires_in
+  local expires_in
+  local expires_ns
+  local parse_status
+  local max_access
+  local recommended_ns
+
+  recommended_ns=$((30 * 24 * 60 * 60 * 1000000000))
+  max_access="$(trim_ascii_whitespace "${configured_share_default_max_access:-0}")"
+  [[ -n "$max_access" ]] || max_access="0"
+  if [[ ! "$max_access" =~ ^-?[0-9]+$ ]]; then
+    fail "public share.default_max_access must be zero or greater: $max_access"
+  elif [[ "$max_access" == -* ]]; then
+    fail "public share.default_max_access must be zero or greater: $max_access"
+  elif [[ "$max_access" =~ ^0+$ ]]; then
+    warn "public share.default_max_access leaves new share links without an access limit; set a default such as 20"
+  else
+    ok "public share.default_max_access limits new share link accesses: $max_access"
+  fi
+
+  if [[ "$configured_share_default_expires_in_set" == "1" ]]; then
+    raw_expires_in="${configured_share_default_expires_in:-}"
+  else
+    raw_expires_in="168h"
+  fi
+  expires_in="$(trim_ascii_whitespace "$raw_expires_in")"
+  if [[ -z "$expires_in" || "$expires_in" == "0" ]]; then
+    warn "public share.default_expires_in leaves new share links without an expiry; set a default such as 168h"
+    return
+  fi
+
+  expires_ns="$(go_duration_to_nanoseconds "$expires_in")"
+  parse_status=$?
+  case "$parse_status" in
+    0)
+      ;;
+    127)
+      warn "python3 not available; skipping public share.default_expires_in duration check"
+      return
+      ;;
+    3)
+      fail "public share.default_expires_in must be empty, 0, or a non-negative duration: $expires_in"
+      return
+      ;;
+    *)
+      fail "public share.default_expires_in must be empty, 0, or a non-negative duration: $expires_in"
+      return
+      ;;
+  esac
+
+  if (( expires_ns == 0 )); then
+    warn "public share.default_expires_in leaves new share links without an expiry; set a default such as 168h"
+    return
+  fi
+
+  if (( expires_ns > recommended_ns )); then
+    warn "public share.default_expires_in is longer than 720h: $expires_in"
+  else
+    ok "public share.default_expires_in is within 720h: $expires_in"
+  fi
+}
+
+check_public_share_response_boundary() {
+  local domain="$1"
+  local probe_id="mnemonas-doctor-probe"
+  local url="https://$domain/api/v1/public/shares/$probe_id"
+  local headers_file
+  local curl_result status http_code
+  local missing=()
+
+  if ! have curl; then
+    warn "curl not available; skipping public share response boundary check"
+    return
+  fi
+
+  headers_file="$(mktemp -t mnemonas-doctor-share-headers.XXXXXX)" || {
+    warn "could not create temporary header file; skipping public share response boundary check"
+    return
+  }
+
+  curl_result="$(curl -sS --connect-timeout 3 --max-time 5 -o /dev/null -D "$headers_file" -w '%{http_code}' "$url" 2>/dev/null)"
+  status=$?
+  http_code="${curl_result//$'\n'/}"
+  if [[ "$status" -ne 0 || ! "$http_code" =~ ^[0-9][0-9][0-9]$ || "$http_code" == "000" ]]; then
+    warn "public share API probe was not readable: $url"
+    rm -f "$headers_file"
+    return
+  fi
+
+  case "$http_code" in
+    404)
+      ok "public share API probe reached MnemoNAS: $url (HTTP $http_code)"
+      ;;
+    410)
+      fail "public share API reports sharing disabled despite share.enabled=true: $url (HTTP $http_code)"
+      ;;
+    2??)
+      fail "public share API probe unexpectedly returned success for a reserved probe id: $url (HTTP $http_code)"
+      ;;
+    401|403)
+      warn "public share API probe was blocked before MnemoNAS share lookup: $url (HTTP $http_code); verify public share routing if share links should be accessible"
+      ;;
+    3??)
+      warn "public share API probe redirected before MnemoNAS share lookup: $url (HTTP $http_code); verify reverse-proxy share routing"
+      ;;
+    *)
+      warn "public share API probe returned HTTP $http_code at $url; verify share routing before public use"
+      ;;
+  esac
+
+  response_header_has_token "$headers_file" "Cache-Control" "private" || missing+=("Cache-Control=private")
+  response_header_has_token "$headers_file" "Cache-Control" "no-cache" || missing+=("Cache-Control=no-cache")
+  response_header_has_token "$headers_file" "Vary" "Cookie" || missing+=("Vary=Cookie")
+  response_header_equals "$headers_file" "X-Content-Type-Options" "nosniff" || missing+=("X-Content-Type-Options=nosniff")
+  response_header_equals "$headers_file" "Referrer-Policy" "no-referrer" || missing+=("Referrer-Policy=no-referrer")
+
+  if (( ${#missing[@]} > 0 )); then
+    fail "public share JSON response is missing cache/security headers (${missing[*]}): $url (HTTP $http_code)"
+  else
+    ok "public share JSON responses use private cache and Cookie Vary boundaries: $url"
+  fi
+
+  rm -f "$headers_file"
+}
+
+effective_secrets_file() {
+  printf '%s\n' "$STORAGE_ROOT/secrets.json"
+}
+
+check_public_webdav_generated_password() {
+  local secrets_file
+  local password
+  local password_risk
+  local parse_status
+
+  secrets_file="$(effective_secrets_file)"
+  if [[ -L "$secrets_file" ]]; then
+    fail "public WebDAV generated password file is a symlink; use a regular private file: $secrets_file"
+    return
+  fi
+  if [[ ! -e "$secrets_file" ]]; then
+    fail "public WebDAV generated password file is missing; start MnemoNAS once or set webdav.password before public access: $secrets_file"
+    return
+  fi
+  if [[ ! -f "$secrets_file" ]]; then
+    fail "public WebDAV generated password path is not a regular file: $secrets_file"
+    return
+  fi
+
+  check_private_file_mode "$secrets_file" "public WebDAV generated password file"
+  if ! have python3; then
+    warn "python3 not available; skipping public WebDAV generated password strength check"
+    return
+  fi
+
+  password="$(json_string_value "$secrets_file" webdav_password)"
+  parse_status=$?
+  case "$parse_status" in
+    0)
+      ;;
+    2)
+      fail "public WebDAV generated password file could not be parsed; cannot verify Basic Auth password: $secrets_file"
+      return
+      ;;
+    *)
+      fail "public WebDAV generated password is missing from secrets.json; start MnemoNAS once or set webdav.password before public access"
+      return
+      ;;
+  esac
+
+  if [[ -z "$password" ]]; then
+    fail "public WebDAV generated password is empty in secrets.json; start MnemoNAS once or set webdav.password before public access"
+  elif password_risk="$(webdav_basic_password_risk "$password")"; then
+    warn "public WebDAV generated Basic Auth password should be changed before public access (risk: $password_risk)"
+  else
+    ok "public WebDAV generated Basic Auth password is available"
+  fi
+}
+
+check_public_session_token_ttl() {
+  local access_raw
+  local refresh_raw
+  local access_ttl
+  local refresh_ttl
+  local access_ns
+  local refresh_ns
+  local parse_status
+  local recommended_access_ns
+  local recommended_refresh_ns
+
+  recommended_access_ns=$((60 * 60 * 1000000000))
+  recommended_refresh_ns=$((30 * 24 * 60 * 60 * 1000000000))
+
+  if [[ "$configured_auth_access_token_ttl_set" == "1" ]]; then
+    access_raw="${configured_auth_access_token_ttl:-}"
+  else
+    access_raw="15m"
+  fi
+  if [[ "$configured_auth_refresh_token_ttl_set" == "1" ]]; then
+    refresh_raw="${configured_auth_refresh_token_ttl:-}"
+  else
+    refresh_raw="168h"
+  fi
+
+  access_ttl="$(trim_ascii_whitespace "$access_raw")"
+  refresh_ttl="$(trim_ascii_whitespace "$refresh_raw")"
+
+  access_ns="$(go_duration_to_nanoseconds "$access_ttl")"
+  parse_status=$?
+  case "$parse_status" in
+    0)
+      ;;
+    127)
+      warn "python3 not available; skipping public auth token TTL duration check"
+      return
+      ;;
+    *)
+      fail "public auth.access_token_ttl must be a positive duration: ${access_ttl:-<empty>}"
+      return
+      ;;
+  esac
+
+  refresh_ns="$(go_duration_to_nanoseconds "$refresh_ttl")"
+  parse_status=$?
+  case "$parse_status" in
+    0)
+      ;;
+    127)
+      warn "python3 not available; skipping public auth token TTL duration check"
+      return
+      ;;
+    *)
+      fail "public auth.refresh_token_ttl must be a positive duration: ${refresh_ttl:-<empty>}"
+      return
+      ;;
+  esac
+
+  if (( access_ns <= 0 )); then
+    fail "public auth.access_token_ttl must be a positive duration: ${access_ttl:-<empty>}"
+  elif (( access_ns > recommended_access_ns )); then
+    warn "public auth.access_token_ttl is longer than 1h: $access_ttl"
+  else
+    ok "public auth.access_token_ttl is within 1h: $access_ttl"
+  fi
+
+  if (( refresh_ns <= 0 )); then
+    fail "public auth.refresh_token_ttl must be a positive duration: ${refresh_ttl:-<empty>}"
+  elif (( refresh_ns > recommended_refresh_ns )); then
+    warn "public auth.refresh_token_ttl is longer than 720h: $refresh_ttl"
+  else
+    ok "public auth.refresh_token_ttl is within 720h: $refresh_ttl"
+  fi
+}
+
 clean_url_path_prefix() {
   local value="$1"
   local segment
@@ -1239,18 +1675,30 @@ PY
 
 check_public_admin_redundancy() {
   local users_file
+  local users_dir
   local active_admins
   local parse_error
 
   users_file="$(effective_auth_users_file)"
+  users_dir="$(dirname "$users_file")"
   if is_false_value "${configured_auth_enabled:-true}"; then
     warn "public administrator redundancy check skipped because auth.enabled=false"
+    return
+  fi
+  if [[ -L "$users_dir" ]]; then
+    fail "public users file directory path is a symlink; use a regular private directory: $users_dir"
+    return
+  fi
+  if [[ -L "$users_file" ]]; then
+    fail "public users file path is a symlink; use a regular private file: $users_file"
     return
   fi
   if [[ ! -f "$users_file" ]]; then
     fail "public users file is missing; cannot verify administrator redundancy: $users_file"
     return
   fi
+  check_private_dir_mode "$users_dir" "public users file directory"
+  check_private_file_mode "$users_file" "public users file"
   if ! have python3; then
     warn "python3 not available; skipping public administrator redundancy check"
     return
@@ -1453,6 +1901,7 @@ check_public_domain() {
     fail "public auth.enabled must remain true"
   else
     ok "public auth.enabled is enabled"
+    check_public_session_token_ttl
   fi
   check_public_admin_redundancy
 
@@ -1469,7 +1918,9 @@ check_public_domain() {
     fail "public WebDAV must not use auth_type=none"
   else
     if [[ "$public_webdav_auth_type" == "basic" ]]; then
-      if public_webdav_password_risk="$(webdav_basic_password_risk "$configured_webdav_password")"; then
+      if [[ -z "$(trim_ascii_whitespace "$configured_webdav_password")" ]]; then
+        check_public_webdav_generated_password
+      elif public_webdav_password_risk="$(webdav_basic_password_risk "$configured_webdav_password")"; then
         warn "public WebDAV Basic Auth password should be changed before public access (risk: $public_webdav_password_risk)"
       else
         ok "public WebDAV is configured with Basic Auth"
@@ -1523,6 +1974,8 @@ check_public_domain() {
         fi
       fi
     fi
+    check_public_share_default_policy
+    check_public_share_response_boundary "$domain"
   else
     ok "public share links are disabled"
   fi

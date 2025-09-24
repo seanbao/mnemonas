@@ -668,10 +668,40 @@ function VersionsPageContent({ authScopeKey, initialPath, isAdmin, hasInvalidHom
                   </div>
                 </div>
               )}
-              <div className="flex items-start gap-2 text-warning text-sm bg-warning/10 border border-warning/20 rounded-lg p-3">
-                <AlertCircle size={16} className="mt-0.5 shrink-0" />
-                <span>当前版本将被保存为新的历史版本</span>
-              </div>
+              {selectedPath && selectedVersion && (
+                <div aria-label="版本恢复执行前复核" className="rounded-lg border border-warning/20 bg-warning/10 p-3 text-sm">
+                  <div className="flex items-center gap-2 font-medium text-warning">
+                    <AlertCircle size={16} />
+                    <span>恢复影响复核</span>
+                  </div>
+                  <dl className="mt-3 space-y-2 text-default-600">
+                    <div className="grid gap-1 sm:grid-cols-[6rem_minmax(0,1fr)]">
+                      <dt className="text-default-400">目标文件</dt>
+                      <dd>
+                        <code className="break-anywhere rounded border border-divider bg-content1/70 px-2 py-0.5 font-mono text-xs text-foreground">
+                          {selectedPath}
+                        </code>
+                      </dd>
+                    </div>
+                    <div className="grid gap-1 sm:grid-cols-[6rem_minmax(0,1fr)]">
+                      <dt className="text-default-400">覆盖影响</dt>
+                      <dd>当前可见文件会被所选历史版本覆盖。</dd>
+                    </div>
+                    <div className="grid gap-1 sm:grid-cols-[6rem_minmax(0,1fr)]">
+                      <dt className="text-default-400">安全保留</dt>
+                      <dd>恢复前的当前内容会保存为新的历史版本。</dd>
+                    </div>
+                    <div className="grid gap-1 sm:grid-cols-[6rem_minmax(0,1fr)]">
+                      <dt className="text-default-400">执行校验</dt>
+                      <dd>服务端会重新校验管理员权限、目录配额和目标父目录状态。</dd>
+                    </div>
+                    <div className="grid gap-1 sm:grid-cols-[6rem_minmax(0,1fr)]">
+                      <dt className="text-default-400">冲突处理</dt>
+                      <dd>版本不匹配、父目录冲突或版本存储不可用时会拒绝恢复并保留现状。</dd>
+                    </div>
+                  </dl>
+                </div>
+              )}
             </div>
           </ModalBody>
           <ModalFooter>

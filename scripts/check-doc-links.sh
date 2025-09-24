@@ -220,8 +220,53 @@ checkDocumentationIndexCoverage()
 for (const file of files) {
   const text = fs.readFileSync(path.join(repoRoot, file), 'utf8')
 
+  checkJsonCodeFences(file, text)
   for (const target of extractMarkdownLinkTargets(text)) {
     checkTarget(file, target)
+  }
+}
+
+function checkJsonCodeFences(sourceFile, markdown) {
+  const lines = markdown.split('\n')
+  let inFence = false
+  let fenceChar = ''
+  let language = ''
+  let startLine = 0
+  let content = []
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index]
+    if (!inFence) {
+      const match = /^ {0,3}(`{3,}|~{3,})\s*(.*)$/.exec(line)
+      if (!match) {
+        continue
+      }
+      inFence = true
+      fenceChar = match[1][0]
+      language = (match[2] || '').trim().split(/\s+/, 1)[0].toLowerCase()
+      startLine = index + 1
+      content = []
+      continue
+    }
+
+    const closePattern = fenceChar === '`' ? /^ {0,3}`{3,}\s*$/ : /^ {0,3}~{3,}\s*$/
+    if (closePattern.test(line)) {
+      if (language === 'json') {
+        try {
+          JSON.parse(content.join('\n'))
+        } catch (error) {
+          errors.push(`${sourceFile}:${startLine}: invalid json code fence: ${error.message}`)
+        }
+      }
+      inFence = false
+      fenceChar = ''
+      language = ''
+      startLine = 0
+      content = []
+      continue
+    }
+
+    content.push(line)
   }
 }
 
@@ -248,3 +293,130 @@ if (errors.length > 0) {
 
 console.log(`[docs-link-check] checked ${files.length} markdown files`)
 NODE
+
+toml_check_program="$(mktemp "${TMPDIR:-/tmp}/mnemonas-doc-toml-check.XXXXXX.go")"
+trap 'rm -f -- "$toml_check_program"' EXIT
+cat > "$toml_check_program" <<'GO'
+package main
+
+import (
+	"fmt"
+	"os"
+	"os/exec"
+	"regexp"
+	"strings"
+
+	toml "github.com/pelletier/go-toml/v2"
+)
+
+func gitFiles(args ...string) ([]string, error) {
+	out, err := exec.Command("git", args...).Output()
+	if err != nil {
+		return nil, err
+	}
+	lines := strings.Split(string(out), "\n")
+	files := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if line != "" {
+			files = append(files, line)
+		}
+	}
+	return files, nil
+}
+
+func main() {
+	tracked, err := gitFiles("ls-files", "--", "*.md")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to list tracked markdown files: %v\n", err)
+		os.Exit(1)
+	}
+	untracked, err := gitFiles("ls-files", "--others", "--exclude-standard", "--", "*.md")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to list untracked markdown files: %v\n", err)
+		os.Exit(1)
+	}
+
+	seen := map[string]bool{}
+	files := make([]string, 0, len(tracked)+len(untracked))
+	for _, file := range append(tracked, untracked...) {
+		if !seen[file] {
+			seen[file] = true
+			files = append(files, file)
+		}
+	}
+
+	errors := []string{}
+	tomlFenceCount := 0
+	openFence := regexp.MustCompile("^ {0,3}(`{3,}|~{3,})\\s*(.*)$")
+	closeBacktick := regexp.MustCompile("^ {0,3}`{3,}\\s*$")
+	closeTilde := regexp.MustCompile("^ {0,3}~{3,}\\s*$")
+
+	for _, file := range files {
+		data, err := os.ReadFile(file)
+		if err != nil {
+			errors = append(errors, fmt.Sprintf("%s: failed to read file: %v", file, err))
+			continue
+		}
+
+		inFence := false
+		fenceChar := ""
+		language := ""
+		startLine := 0
+		content := []string{}
+
+		for index, line := range strings.Split(string(data), "\n") {
+			lineNumber := index + 1
+			if !inFence {
+				match := openFence.FindStringSubmatch(line)
+				if match == nil {
+					continue
+				}
+				inFence = true
+				fenceChar = match[1][:1]
+				fields := strings.Fields(strings.TrimSpace(match[2]))
+				if len(fields) > 0 {
+					language = strings.ToLower(fields[0])
+				} else {
+					language = ""
+				}
+				startLine = lineNumber
+				content = []string{}
+				continue
+			}
+
+			closed := (fenceChar == "`" && closeBacktick.MatchString(line)) || (fenceChar == "~" && closeTilde.MatchString(line))
+			if closed {
+				if language == "toml" {
+					tomlFenceCount++
+					raw := strings.TrimSpace(strings.Join(content, "\n"))
+					if raw != "" {
+						var decoded map[string]any
+						if err := toml.Unmarshal([]byte(raw), &decoded); err != nil {
+							errors = append(errors, fmt.Sprintf("%s:%d: invalid toml code fence: %v", file, startLine, err))
+						}
+					}
+				}
+				inFence = false
+				fenceChar = ""
+				language = ""
+				startLine = 0
+				content = []string{}
+				continue
+			}
+
+			content = append(content, line)
+		}
+	}
+
+	if len(errors) > 0 {
+		fmt.Fprintln(os.Stderr, "Documentation TOML example check failed:")
+		for _, err := range errors {
+			fmt.Fprintf(os.Stderr, "  - %s\n", err)
+		}
+		os.Exit(1)
+	}
+
+	fmt.Printf("[docs-toml-check] checked %d TOML code fences\n", tomlFenceCount)
+}
+GO
+GOTOOLCHAIN=local go run "$toml_check_program"

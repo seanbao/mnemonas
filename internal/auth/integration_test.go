@@ -274,6 +274,24 @@ func TestUsersFilePermissions(t *testing.T) {
 	}
 }
 
+func TestUsersFileDirectoryPermissions(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "auth")
+	usersFile := filepath.Join(dir, "users.json")
+
+	_, _, err := NewUserStore(usersFile)
+	if err != nil {
+		t.Fatalf("failed to create user store: %v", err)
+	}
+
+	info, err := os.Stat(dir)
+	if err != nil {
+		t.Fatalf("failed to stat users file directory: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0700 {
+		t.Errorf("users file directory permissions=%o, expected=0700", perm)
+	}
+}
+
 // TestPasswordFileContent tests the format of password file
 func TestPasswordFileContent(t *testing.T) {
 	dir := t.TempDir()
