@@ -11,6 +11,7 @@ YELLOW='\033[1;33m'
 NC='\033[0m'
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROGRAM_NAME="${0##*/}"
 DOMAIN=""
 EMAIL=""
 PROXY_TYPE="${MNEMONAS_PROXY_TYPE:-}"
@@ -42,7 +43,7 @@ fail() {
 
 usage() {
     cat <<EOF
-用法: sudo $0 [选项] <域名> [邮箱]
+用法: sudo $PROGRAM_NAME [选项] <域名> [邮箱]
 
 选项:
   --proxy caddy|nginx          反向代理类型，默认交互选择；非交互时默认 caddy
@@ -60,7 +61,7 @@ usage() {
   MNEMONAS_DATAPLANE_HTTP_PORT 数据面 HTTP 端口，默认读取 systemd 单元，否则 9091
 
 示例:
-  sudo $0 --proxy caddy nas.example.com admin@example.com
+  sudo $PROGRAM_NAME --proxy caddy nas.example.com admin@example.com
 EOF
 }
 
@@ -293,6 +294,30 @@ clean_url_path_prefix() {
     fi
     printf '/%s' "${output_segments[@]}"
     printf '\n'
+}
+
+url_path_escape() {
+    local value="$1"
+    local LC_ALL=C
+    local escaped=""
+    local char
+    local encoded
+    local i
+
+    for ((i = 0; i < ${#value}; i++)); do
+        char="${value:i:1}"
+        case "$char" in
+            [-._~/a-zA-Z0-9])
+                escaped+="$char"
+                ;;
+            *)
+                printf -v encoded '%%%02X' "'$char"
+                escaped+="$encoded"
+                ;;
+        esac
+    done
+
+    printf '%s\n' "$escaped"
 }
 
 normalize_webdav_prefix() {
@@ -1656,7 +1681,7 @@ check_loopback_only_port() {
 
     if ! can_inspect_local_ports; then
         log_warn "$label 端口 $port 无法检查；请安装 iproute2/ss 或确保 /proc/net/tcp 可读"
-        return
+        return 0
     fi
 
     while IFS= read -r address; do
@@ -1671,22 +1696,34 @@ check_loopback_only_port() {
         log_info "$label 端口 $port 仅本机监听或未监听"
     else
         log_warn "$label 端口 $port 仍监听在非 loopback 地址: ${unsafe_addresses[*]}"
+        return 1
     fi
 }
 
 run_post_setup_checks() {
+    local failed=0
+
     log_info "运行公网入口检查..."
 
-    check_loopback_only_port "$UPSTREAM_PORT" "MnemoNAS Web/API/WebDAV"
-    check_loopback_only_port "$DATAPLANE_GRPC_PORT" "MnemoNAS dataplane gRPC"
-    check_loopback_only_port "$DATAPLANE_HTTP_PORT" "MnemoNAS dataplane HTTP"
+    if ! check_loopback_only_port "$UPSTREAM_PORT" "MnemoNAS Web/API/WebDAV"; then
+        failed=1
+    fi
+    if ! check_loopback_only_port "$DATAPLANE_GRPC_PORT" "MnemoNAS dataplane gRPC"; then
+        failed=1
+    fi
+    if ! check_loopback_only_port "$DATAPLANE_HTTP_PORT" "MnemoNAS dataplane HTTP"; then
+        failed=1
+    fi
 
     if command -v curl >/dev/null 2>&1; then
         if curl -fsSI "https://$DOMAIN/health" >/dev/null 2>&1; then
             log_info "HTTPS 健康检查通过: https://$DOMAIN/health"
         else
             log_warn "HTTPS 健康检查暂未通过；请确认 DNS 已解析到本机、公网 80/443 已放行、证书申请完成"
+            failed=1
         fi
+    else
+        log_warn "未找到 curl，跳过 HTTPS 健康检查"
     fi
 
     if command -v mnemonas-doctor >/dev/null 2>&1; then
@@ -1694,16 +1731,22 @@ run_post_setup_checks() {
             log_info "mnemonas-doctor 检查通过"
         else
             log_warn "mnemonas-doctor 存在失败或警告，请按输出处理后再开放给真实用户"
+            failed=1
         fi
     else
         log_warn "未找到 mnemonas-doctor，跳过部署诊断"
     fi
+
+    if [[ "$failed" == "1" ]]; then
+        fail "公网入口检查未通过；请按上方输出修复后重新运行 $PROGRAM_NAME"
+    fi
 }
 
 print_summary() {
-    local webdav_url webdav_probe_url
+    local escaped_webdav_prefix webdav_url webdav_probe_url
 
-    webdav_url="https://$DOMAIN$WEBDAV_PREFIX"
+    escaped_webdav_prefix="$(url_path_escape "$WEBDAV_PREFIX")"
+    webdav_url="https://$DOMAIN$escaped_webdav_prefix"
     if [[ "$WEBDAV_PREFIX" == "/" ]]; then
         webdav_url="https://$DOMAIN/"
         webdav_probe_url="$webdav_url"
@@ -1759,9 +1802,12 @@ print_summary() {
     echo "验证命令:"
     echo "  curl -I https://$DOMAIN/health"
     echo "  curl --connect-timeout 3 http://$DOMAIN:$UPSTREAM_PORT/health  # 应失败或超时"
-    echo "  WEBDAV_USER=<webdav-username>"
-    echo "  WEBDAV_PASS=<webdav-password>"
-    echo "  curl -u \"\$WEBDAV_USER:\$WEBDAV_PASS\" -X PROPFIND $webdav_probe_url -H 'Depth: 0'"
+    echo "  # auth_type=users: 使用 MnemoNAS 用户名和密码"
+    echo "  # auth_type=basic: 使用 WebDAV 用户名和密码；设置页显示 Basic 用户名和可读取的自动生成密码"
+    echo "  # 自定义 Basic 密码不会回显；自动生成密码在 <storage.root>/secrets.json 的 webdav_password 字段"
+    echo "  WEBDAV_USER=\"<mnemonas-or-webdav-username>\""
+    echo "  WEBDAV_PASS=\"<mnemonas-or-webdav-password>\""
+    echo "  curl -u \"\$WEBDAV_USER:\$WEBDAV_PASS\" -X PROPFIND '$webdav_probe_url' -H 'Depth: 0'"
     echo ""
 
     if [[ "$PROXY_TYPE" == "caddy" ]]; then
@@ -1827,7 +1873,10 @@ EOF
     [[ "$(normalize_webdav_prefix ' /files/ ')" == "/files" ]] || fail "self-test failed: spaced WebDAV prefix formatting"
     [[ "$(normalize_webdav_prefix '/files/../dav//team/./')" == "/dav/team" ]] || fail "self-test failed: clean WebDAV prefix formatting"
     [[ "$(normalize_webdav_prefix '/files/team/../../dav/')" == "/dav" ]] || fail "self-test failed: repeated WebDAV prefix parent cleanup"
+    [[ "$(normalize_webdav_prefix '/team /sub')" == "/team /sub" ]] || fail "self-test failed: WebDAV prefix segment spaces were not preserved"
     [[ "$(normalize_configured_webdav_prefix '/files/../dav//team/./')" == "/dav/team" ]] || fail "self-test failed: configured WebDAV prefix formatting"
+    [[ "$(normalize_configured_webdav_prefix '/team/ spaced /file')" == "/team/ spaced /file" ]] || fail "self-test failed: configured WebDAV prefix segment spaces were not preserved"
+    [[ "$(url_path_escape '/team /sub')" == "/team%20/sub" ]] || fail "self-test failed: WebDAV URL path escaping"
     if (normalize_configured_webdav_prefix '' >/dev/null 2>&1); then
         fail "self-test failed: configured empty WebDAV prefix was accepted"
     fi
@@ -1875,6 +1924,16 @@ EOF
     grep -Fq 'MnemoNAS 配置: 已跳过' "$tmp/summary-skipped.log" || fail "self-test failed: skipped MnemoNAS config summary missing"
     grep -Fq '本机防火墙: 已跳过' "$tmp/summary-skipped.log" || fail "self-test failed: skipped firewall summary missing"
     ! grep -Fq 'MnemoNAS 配置: server.host =' "$tmp/summary-skipped.log" || fail "self-test failed: skipped summary claimed MnemoNAS config was changed"
+    grep -Fq 'auth_type=users: 使用 MnemoNAS 用户名和密码' "$tmp/summary-skipped.log" || fail "self-test failed: users WebDAV auth hint missing"
+    grep -Fq 'auth_type=basic: 使用 WebDAV 用户名和密码' "$tmp/summary-skipped.log" || fail "self-test failed: basic WebDAV auth hint missing"
+    grep -Fq '自定义 Basic 密码不会回显' "$tmp/summary-skipped.log" || fail "self-test failed: custom WebDAV password disclosure hint missing"
+    grep -Fq 'WEBDAV_USER="<mnemonas-or-webdav-username>"' "$tmp/summary-skipped.log" || fail "self-test failed: WebDAV username placeholder missing"
+    grep -Fq 'WEBDAV_PASS="<mnemonas-or-webdav-password>"' "$tmp/summary-skipped.log" || fail "self-test failed: WebDAV password placeholder missing"
+
+    WEBDAV_PREFIX="/team /sub"
+    print_summary > "$tmp/summary-spaced-webdav.log"
+    grep -Fq 'WebDAV:   https://nas.example.com/team%20/sub' "$tmp/summary-spaced-webdav.log" || fail "self-test failed: summary did not URL-escape WebDAV prefix spaces"
+    grep -Fq "curl -u \"\$WEBDAV_USER:\$WEBDAV_PASS\" -X PROPFIND 'https://nas.example.com/team%20/sub/' -H 'Depth: 0'" "$tmp/summary-spaced-webdav.log" || fail "self-test failed: summary WebDAV probe command was not shell-safe"
 
     fake_bin="$tmp/fake-bin"
     fake_ufw_log="$tmp/ufw.log"
@@ -1918,6 +1977,44 @@ EOF
     grep -Fq 'DATAPLANE_HTTP_PORT=19091' "$tmp/doctor-env.log" || fail "self-test failed: doctor did not receive DATAPLANE_HTTP_PORT"
     grep -Fq 'args=--public-domain nas.example.com' "$tmp/doctor-env.log" || fail "self-test failed: doctor was not invoked with public domain"
 
+    cat > "$fake_bin/curl" <<'EOF'
+#!/usr/bin/env bash
+exit 28
+EOF
+    cat > "$fake_bin/mnemonas-doctor" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+    chmod +x "$fake_bin/curl" "$fake_bin/mnemonas-doctor"
+    set +e
+    # shellcheck disable=SC2030,SC2031 # The fake PATH is intentionally scoped to this subshell.
+    (PATH="$fake_bin:$PATH"; run_post_setup_checks) > "$tmp/post-setup-curl-failure.log" 2>&1
+    status=$?
+    set -e
+    [[ "$status" -ne 0 ]] || fail "self-test failed: post setup checks accepted a failed HTTPS health check"
+    grep -Fq 'HTTPS 健康检查暂未通过' "$tmp/post-setup-curl-failure.log" || fail "self-test failed: post setup checks omitted HTTPS failure warning"
+    grep -Fq '公网入口检查未通过' "$tmp/post-setup-curl-failure.log" || fail "self-test failed: post setup checks omitted final failure"
+
+    cat > "$fake_bin/curl" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+    cat > "$fake_bin/mnemonas-doctor" <<'EOF'
+#!/usr/bin/env bash
+printf 'simulated doctor failure\n' >&2
+exit 4
+EOF
+    chmod +x "$fake_bin/curl" "$fake_bin/mnemonas-doctor"
+    set +e
+    # shellcheck disable=SC2030,SC2031 # The fake PATH is intentionally scoped to this subshell.
+    (PATH="$fake_bin:$PATH"; run_post_setup_checks) > "$tmp/post-setup-doctor-failure.log" 2>&1
+    status=$?
+    set -e
+    [[ "$status" -ne 0 ]] || fail "self-test failed: post setup checks accepted a failed doctor run"
+    grep -Fq 'simulated doctor failure' "$tmp/post-setup-doctor-failure.log" || fail "self-test failed: post setup checks hid doctor output"
+    grep -Fq 'mnemonas-doctor 存在失败或警告' "$tmp/post-setup-doctor-failure.log" || fail "self-test failed: post setup checks omitted doctor failure warning"
+    grep -Fq '公网入口检查未通过' "$tmp/post-setup-doctor-failure.log" || fail "self-test failed: post setup checks omitted final doctor failure"
+
     cat > "$tmp/proc-net-tcp" <<'EOF'
   sl  local_address rem_address st tx_queue rx_queue tr tm->when retrnsmt uid timeout inode
    0: 0100007F:46A0 00000000:0000 0A 00000000:00000000 00:00000000 00000000 0 0 1
@@ -1927,12 +2024,16 @@ EOF
   sl  local_address                         remote_address                        st tx_queue rx_queue tr tm->when retrnsmt uid timeout inode
    0: 00000000000000000000000001000000:4A93 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000 0 0 3
 EOF
+    set +e
     (
         MNEMONAS_REVERSE_PROXY_DISABLE_SS=1
         PROC_NET_TCP_PATH="$tmp/proc-net-tcp"
         PROC_NET_TCP6_PATH="$tmp/proc-net-tcp6"
         check_loopback_only_port "19090" "MnemoNAS dataplane gRPC"
     ) > "$tmp/proc-port-unsafe.log"
+    status=$?
+    set -e
+    [[ "$status" -ne 0 ]] || fail "self-test failed: proc net fallback accepted wildcard IPv4 listeners"
     grep -Fq 'MnemoNAS dataplane gRPC 端口 19090 仍监听在非 loopback 地址: 0.0.0.0:19090' "$tmp/proc-port-unsafe.log" || fail "self-test failed: proc net fallback did not report wildcard IPv4 listeners"
     (
         MNEMONAS_REVERSE_PROXY_DISABLE_SS=1
@@ -1948,6 +2049,33 @@ EOF
         check_loopback_only_port "19092" "MnemoNAS dataplane HTTP"
     ) > "$tmp/proc-port-uninspectable.log"
     grep -Fq 'MnemoNAS dataplane HTTP 端口 19092 无法检查；请安装 iproute2/ss 或确保 /proc/net/tcp 可读' "$tmp/proc-port-uninspectable.log" || fail "self-test failed: unavailable port inspection source was not reported"
+
+    cat > "$fake_bin/curl" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+    cat > "$fake_bin/mnemonas-doctor" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+    chmod +x "$fake_bin/curl" "$fake_bin/mnemonas-doctor"
+    UPSTREAM_PORT="19090"
+    DATAPLANE_GRPC_PORT="19091"
+    DATAPLANE_HTTP_PORT="19092"
+    set +e
+    # shellcheck disable=SC2030,SC2031 # The fake PATH is intentionally scoped to this subshell.
+    (
+        PATH="$fake_bin:$PATH"
+        MNEMONAS_REVERSE_PROXY_DISABLE_SS=1
+        PROC_NET_TCP_PATH="$tmp/proc-net-tcp"
+        PROC_NET_TCP6_PATH="$tmp/proc-net-tcp6"
+        run_post_setup_checks
+    ) > "$tmp/post-setup-unsafe-port.log" 2>&1
+    status=$?
+    set -e
+    [[ "$status" -ne 0 ]] || fail "self-test failed: post setup checks accepted a non-loopback backend listener"
+    grep -Fq 'MnemoNAS Web/API/WebDAV 端口 19090 仍监听在非 loopback 地址: 0.0.0.0:19090' "$tmp/post-setup-unsafe-port.log" || fail "self-test failed: post setup checks omitted unsafe backend listener warning"
+    grep -Fq '公网入口检查未通过' "$tmp/post-setup-unsafe-port.log" || fail "self-test failed: post setup checks omitted unsafe backend final failure"
 
     cat > "$fake_bin/ufw" <<'EOF'
 #!/usr/bin/env bash

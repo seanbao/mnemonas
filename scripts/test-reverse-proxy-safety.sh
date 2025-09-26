@@ -136,6 +136,24 @@ EOF
     assert_file_contains "$case_dir/self-test.log" "[reverse-proxy-self-test] all checks passed"
 }
 
+run_public_setup_help_uses_command_name_test() {
+    local case_dir="$TMP_ROOT/public-setup-help"
+    local helper
+    mkdir -p "$case_dir/bin"
+
+    bash "$REPO_ROOT/scripts/setup-reverse-proxy.sh" --help > "$case_dir/source-help.log"
+    assert_file_contains "$case_dir/source-help.log" "用法: sudo setup-reverse-proxy.sh [选项] <域名> [邮箱]"
+    assert_file_contains "$case_dir/source-help.log" "sudo setup-reverse-proxy.sh --proxy caddy nas.example.com admin@example.com"
+    assert_file_not_contains "$case_dir/source-help.log" "$REPO_ROOT/scripts/setup-reverse-proxy.sh"
+
+    helper="$case_dir/bin/mnemonas-public-setup"
+    cp "$REPO_ROOT/scripts/setup-reverse-proxy.sh" "$helper"
+    bash "$helper" --help > "$case_dir/installed-help.log"
+    assert_file_contains "$case_dir/installed-help.log" "用法: sudo mnemonas-public-setup [选项] <域名> [邮箱]"
+    assert_file_contains "$case_dir/installed-help.log" "sudo mnemonas-public-setup --proxy caddy nas.example.com admin@example.com"
+    assert_file_not_contains "$case_dir/installed-help.log" "$case_dir"
+}
+
 run_nginx_webdav_docs_include_destination_header_test() {
     local doc
     local -a docs=(
@@ -166,6 +184,14 @@ run_reverse_proxy_docs_include_dataplane_port_audit_test() {
     assert_file_contains "$REPO_ROOT/docs/reverse-proxy-setup.en.md" "ss -tlnp | grep -E '80|443|8080|9090|9091'"
     assert_file_contains "$REPO_ROOT/docs/reverse-proxy-setup.md" "/proc/net/tcp"
     assert_file_contains "$REPO_ROOT/docs/reverse-proxy-setup.en.md" "/proc/net/tcp"
+    assert_file_contains "$REPO_ROOT/docs/reverse-proxy-setup.md" "公网严格检查要求同时覆盖 IPv4 和 IPv6 监听"
+    assert_file_contains "$REPO_ROOT/docs/reverse-proxy-setup.en.md" "Public strict checks must cover both IPv4 and IPv6 listeners"
+    assert_file_contains "$REPO_ROOT/docs/reverse-proxy-setup.md" "公网严格检查还需要 \`curl\`、\`python3\` 和 \`openssl\`"
+    assert_file_contains "$REPO_ROOT/docs/reverse-proxy-setup.en.md" "Public strict checks also require \`curl\`, \`python3\`, and \`openssl\`"
+    assert_file_contains "$REPO_ROOT/docs/reverse-proxy-setup.md" "如果基础检查确认 Web/API/WebDAV 后端或 dataplane 端口监听在非 loopback 地址"
+    assert_file_contains "$REPO_ROOT/docs/reverse-proxy-setup.en.md" "If the basic checks confirm that the Web/API/WebDAV backend or dataplane ports listen on non-loopback addresses"
+    assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.md" "不会输出完成摘要"
+    assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.en.md" "instead of printing the completion summary"
 }
 
 run_webdav_docs_avoid_placeholder_password_test() {
@@ -173,10 +199,30 @@ run_webdav_docs_avoid_placeholder_password_test() {
     assert_file_not_contains "$REPO_ROOT/docs/reverse-proxy-setup.en.md" 'change-this-webdav-password'
     assert_file_not_contains "$REPO_ROOT/docs/reverse-proxy-setup.md" '/srv/mnemonas/.mnemonas/secrets.json'
     assert_file_not_contains "$REPO_ROOT/docs/reverse-proxy-setup.en.md" '/srv/mnemonas/.mnemonas/secrets.json'
-    assert_file_contains "$REPO_ROOT/docs/reverse-proxy-setup.md" 'WEBDAV_PASS="<实际 WebDAV 密码>"'
-    assert_file_contains "$REPO_ROOT/docs/reverse-proxy-setup.md" '/srv/mnemonas/secrets.json 中的 webdav_password 字段'
-    assert_file_contains "$REPO_ROOT/docs/reverse-proxy-setup.en.md" 'WEBDAV_PASS="<actual WebDAV password>"'
+    assert_file_contains "$REPO_ROOT/docs/reverse-proxy-setup.md" 'WEBDAV_USER="<mnemonas-or-webdav-username>"'
+    assert_file_contains "$REPO_ROOT/docs/reverse-proxy-setup.md" 'WEBDAV_PASS="<mnemonas-or-webdav-password>"'
+    assert_file_contains "$REPO_ROOT/docs/reverse-proxy-setup.md" '生成密码位于 /srv/mnemonas/secrets.json 的 webdav_password 字段'
+    assert_file_contains "$REPO_ROOT/docs/reverse-proxy-setup.en.md" 'WEBDAV_USER="<mnemonas-or-webdav-username>"'
+    assert_file_contains "$REPO_ROOT/docs/reverse-proxy-setup.en.md" 'WEBDAV_PASS="<mnemonas-or-webdav-password>"'
     assert_file_contains "$REPO_ROOT/docs/reverse-proxy-setup.en.md" 'webdav_password field in /srv/mnemonas/secrets.json'
+}
+
+run_reverse_proxy_docs_warn_against_insecure_traefik_dashboard_test() {
+    # shellcheck disable=SC2016 # Match literal Markdown snippets containing backticks.
+    assert_file_contains "$REPO_ROOT/docs/reverse-proxy-setup.md" '不要在公网环境使用 `--api.insecure=true`'
+    # shellcheck disable=SC2016 # Match literal Markdown snippets containing backticks.
+    assert_file_contains "$REPO_ROOT/docs/reverse-proxy-setup.en.md" 'Do not use `--api.insecure=true` in public deployments'
+}
+
+run_cloudflare_tunnel_docs_keep_backend_ports_private_test() {
+    # shellcheck disable=SC2016 # Match literal Markdown snippets containing backticks.
+    assert_file_contains "$REPO_ROOT/docs/reverse-proxy-setup.md" '即使使用隧道，也不要把 `8080` 或改过的后端端口暴露到公网'
+    # shellcheck disable=SC2016 # Match literal Markdown snippets containing backticks.
+    assert_file_contains "$REPO_ROOT/docs/reverse-proxy-setup.md" 'dataplane `9090/9091` 或改过的 dataplane 端口也应仅本机或受信私网可达'
+    # shellcheck disable=SC2016 # Match literal Markdown snippets containing backticks.
+    assert_file_contains "$REPO_ROOT/docs/reverse-proxy-setup.en.md" 'Even with a tunnel, do not expose `8080` or custom backend ports to the public network'
+    # shellcheck disable=SC2016 # Match literal Markdown snippets containing backticks.
+    assert_file_contains "$REPO_ROOT/docs/reverse-proxy-setup.en.md" 'Keep dataplane `9090/9091`, or custom dataplane ports, loopback-only or private-network-only'
 }
 
 run_domain_validation_tests
@@ -186,9 +232,12 @@ run_upstream_host_validation_tests
 run_config_path_validation_tests
 run_config_rewrite_self_test
 run_release_layout_nasd_discovery_test
+run_public_setup_help_uses_command_name_test
 run_nginx_webdav_docs_include_destination_header_test
 run_docker_proxy_docs_include_trusted_proxy_cidrs_test
 run_reverse_proxy_docs_include_dataplane_port_audit_test
 run_webdav_docs_avoid_placeholder_password_test
+run_reverse_proxy_docs_warn_against_insecure_traefik_dashboard_test
+run_cloudflare_tunnel_docs_keep_backend_ports_private_test
 
 printf '[reverse-proxy-test] all checks passed\n'

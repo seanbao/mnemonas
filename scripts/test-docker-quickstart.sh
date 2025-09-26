@@ -722,11 +722,24 @@ run_env_missing_parent_test() {
 }
 
 run_compose_data_volume_contract_test() {
+	assert_file_contains "$REPO_ROOT/docker-compose.yml" 'image: ${MNEMONAS_IMAGE:-mnemonas:local}'
+	assert_file_contains "$REPO_ROOT/docker-compose.yml" 'user: "${MNEMONAS_UID:-1000}:${MNEMONAS_GID:-1000}"'
+	assert_file_contains "$REPO_ROOT/docker-compose.yml" "init: true"
+	assert_file_contains "$REPO_ROOT/docker-compose.yml" '      - "${MNEMONAS_HTTP_PORT:-8080}:8080"'
+	assert_file_not_contains "$REPO_ROOT/docker-compose.yml" "9090:"
+	assert_file_not_contains "$REPO_ROOT/docker-compose.yml" "9091:"
 	# Long bind syntax preserves host paths that contain ':' without changing the /data target.
 	assert_file_contains "$REPO_ROOT/docker-compose.yml" "type: bind"
 	assert_file_contains "$REPO_ROOT/docker-compose.yml" 'source: ${MNEMONAS_DATA_DIR:-${HOME}/.mnemonas}'
 	assert_file_contains "$REPO_ROOT/docker-compose.yml" "target: /data"
 	assert_file_contains "$REPO_ROOT/docker-compose.yml" "create_host_path: true"
+	assert_file_contains "$REPO_ROOT/docker-compose.yml" "restart: unless-stopped"
+	assert_file_contains "$REPO_ROOT/docker-compose.yml" "healthcheck:"
+	assert_file_contains "$REPO_ROOT/docker-compose.yml" 'test: ["CMD", "/app/mnemonas-healthcheck"]'
+	assert_file_contains "$REPO_ROOT/docker-compose.yml" "interval: 30s"
+	assert_file_contains "$REPO_ROOT/docker-compose.yml" "timeout: 10s"
+	assert_file_contains "$REPO_ROOT/docker-compose.yml" "retries: 3"
+	assert_file_contains "$REPO_ROOT/docker-compose.yml" "start_period: 10s"
 }
 
 run_prepare_test

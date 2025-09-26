@@ -19,6 +19,66 @@ write_executable() {
   chmod +x "$path"
 }
 
+make_doctor_path_without_ss() {
+  local fake_path="$1"
+  local target_path="$2"
+  local cmd resolved
+
+  mkdir -p "$target_path"
+  for cmd in bash awk cat dirname grep mktemp python3 rm sed stat tail; do
+    resolved="$(command -v "$cmd")" || fail "required test command is missing: $cmd"
+    ln -sf "$resolved" "$target_path/$cmd"
+  done
+  for cmd in curl df findmnt getent id openssl systemctl timeout ufw; do
+    cp "$fake_path/$cmd" "$target_path/$cmd"
+  done
+}
+
+make_doctor_path_without_python() {
+  local fake_path="$1"
+  local target_path="$2"
+  local cmd resolved
+
+  mkdir -p "$target_path"
+  for cmd in bash awk cat dirname grep mktemp rm sed stat tail; do
+    resolved="$(command -v "$cmd")" || fail "required test command is missing: $cmd"
+    ln -sf "$resolved" "$target_path/$cmd"
+  done
+  for cmd in curl df findmnt getent id openssl ss systemctl timeout ufw; do
+    cp "$fake_path/$cmd" "$target_path/$cmd"
+  done
+}
+
+make_doctor_path_without_curl() {
+  local fake_path="$1"
+  local target_path="$2"
+  local cmd resolved
+
+  mkdir -p "$target_path"
+  for cmd in bash awk cat dirname grep mktemp python3 rm sed stat tail; do
+    resolved="$(command -v "$cmd")" || fail "required test command is missing: $cmd"
+    ln -sf "$resolved" "$target_path/$cmd"
+  done
+  for cmd in df findmnt getent id openssl ss systemctl timeout ufw; do
+    cp "$fake_path/$cmd" "$target_path/$cmd"
+  done
+}
+
+make_doctor_path_without_openssl() {
+  local fake_path="$1"
+  local target_path="$2"
+  local cmd resolved
+
+  mkdir -p "$target_path"
+  for cmd in bash awk cat dirname grep mktemp python3 rm sed stat tail; do
+    resolved="$(command -v "$cmd")" || fail "required test command is missing: $cmd"
+    ln -sf "$resolved" "$target_path/$cmd"
+  done
+  for cmd in curl df findmnt getent id ss systemctl timeout ufw; do
+    cp "$fake_path/$cmd" "$target_path/$cmd"
+  done
+}
+
 make_fake_admin_path() {
   local dir="$1"
   mkdir -p "$dir"
@@ -125,6 +185,58 @@ run_fresh_install_test() {
   assert_mode "$storage_dir/files" "750"
   assert_mode "$storage_dir/.mnemonas" "700"
   assert_mode "$storage_dir/.mnemonas/objects" "700"
+}
+
+run_storage_ownership_repair_is_explicit_test() {
+  local case_dir="$TMP_ROOT/storage-ownership"
+  local fake_path="$case_dir/fake-bin"
+  local release_dir="$case_dir/release"
+  local install_dir="$case_dir/install"
+  local storage_dir="$install_dir/storage"
+  local chown_log="$case_dir/chown.log"
+  mkdir -p "$storage_dir/files/projects" "$storage_dir/.mnemonas/objects"
+  printf 'existing user data\n' > "$storage_dir/files/projects/report.txt"
+  make_fake_admin_path "$fake_path"
+  make_release_tree "$release_dir"
+  write_executable "$fake_path/chown" \
+    '#!/usr/bin/env bash' \
+    'printf "%s\n" "$*" >> "$CHOWN_LOG"' \
+    'exit 0'
+
+  CHOWN_LOG="$chown_log" \
+    PATH="$fake_path:$PATH" \
+    RELEASE_DIR="$release_dir" \
+    BIN_DIR="$install_dir/bin" \
+    SHARE_DIR="$install_dir/share/mnemonas" \
+    CONFIG_DIR="$install_dir/etc/mnemonas" \
+    CONFIG_PATH="$install_dir/etc/mnemonas/config.toml" \
+    SYSTEMD_DIR="$install_dir/systemd" \
+    STORAGE_ROOT="$storage_dir" \
+    ENABLE_NOW=0 \
+    "$REPO_ROOT/scripts/install-systemd.sh" > "$case_dir/install.log"
+
+  assert_file_contains "$storage_dir/files/projects/report.txt" "existing user data"
+  assert_file_contains "$case_dir/install.log" "leaving existing storage contents ownership unchanged; set FIX_STORAGE_OWNERSHIP=1 to repair recursively"
+  if grep -Fq -- "-R" "$chown_log"; then
+    fail "default install recursively changed storage ownership"
+  fi
+
+  : > "$chown_log"
+  CHOWN_LOG="$chown_log" \
+    PATH="$fake_path:$PATH" \
+    RELEASE_DIR="$release_dir" \
+    BIN_DIR="$install_dir/bin" \
+    SHARE_DIR="$install_dir/share/mnemonas" \
+    CONFIG_DIR="$install_dir/etc/mnemonas" \
+    CONFIG_PATH="$install_dir/etc/mnemonas/config.toml" \
+    SYSTEMD_DIR="$install_dir/systemd" \
+    STORAGE_ROOT="$storage_dir" \
+    ENABLE_NOW=0 \
+    FIX_STORAGE_OWNERSHIP=1 \
+    "$REPO_ROOT/scripts/install-systemd.sh" > "$case_dir/repair.log"
+
+  assert_file_contains "$case_dir/repair.log" "recursively fixing storage ownership under $storage_dir"
+  assert_file_contains "$chown_log" "-R mnemonas:mnemonas $storage_dir"
 }
 
 run_web_install_preserves_share_sibling_permissions_test() {
@@ -510,13 +622,15 @@ run_existing_config_test() {
   local release_dir="$case_dir/release"
   local install_dir="$case_dir/install"
   local storage_dir="$case_dir/custom#storage"
+  local config_path="$install_dir/etc/mnemonas/config.toml"
+  local expected_config="$case_dir/expected-config.toml"
   local quoted_initial_password_file
   mkdir -p "$install_dir/etc/mnemonas" "$storage_dir"
   make_fake_admin_path "$fake_path"
   make_release_tree "$release_dir"
   quoted_initial_password_file="$(printf '%q' "$storage_dir/custom-auth/initial-password.txt")"
 
-  cat > "$install_dir/etc/mnemonas/config.toml" <<EOF
+  cat > "$expected_config" <<EOF
 [server]
 host = "127.0.0.1"
 port = 18080
@@ -535,17 +649,19 @@ max_chunk_size = 8388608
 [auth]
 users_file = "~/custom-auth/users.json"
 EOF
+  cp "$expected_config" "$config_path"
 
   PATH="$fake_path:$PATH" \
     RELEASE_DIR="$release_dir" \
     BIN_DIR="$install_dir/bin" \
     SHARE_DIR="$install_dir/share/mnemonas" \
     CONFIG_DIR="$install_dir/etc/mnemonas" \
-    CONFIG_PATH="$install_dir/etc/mnemonas/config.toml" \
+    CONFIG_PATH="$config_path" \
     SYSTEMD_DIR="$install_dir/systemd" \
     ENABLE_NOW=0 \
     "$REPO_ROOT/scripts/install-systemd.sh" > "$case_dir/install.log"
 
+  cmp -s "$expected_config" "$config_path" || fail "installer rewrote existing config.toml during upgrade"
   assert_file_contains "$case_dir/install.log" "Open Web UI: http://127.0.0.1:18080"
   assert_file_contains "$case_dir/install.log" "Read initial password: sudo cat $quoted_initial_password_file"
   assert_file_contains "$install_dir/systemd/mnemonas-dataplane.service" "Environment=DATAPLANE_GRPC_ADDR=127.0.0.1:19090"
@@ -557,7 +673,7 @@ EOF
     '#!/usr/bin/env bash' \
     'printf "%s\n" "$*" > "$CAPTURE_FILE"'
   CAPTURE_FILE="$case_dir/dataplane.args" \
-    CONFIG_PATH="$install_dir/etc/mnemonas/config.toml" \
+    CONFIG_PATH="$config_path" \
     DATAPLANE_BIN="$case_dir/capture-dataplane" \
     DATAPLANE_DATA_DIR="$storage_dir/.mnemonas/objects" \
     "$install_dir/bin/mnemonas-dataplane-start"
@@ -1589,6 +1705,8 @@ EOF
     '#!/usr/bin/env bash' \
     'if [[ "${2:-}" == "openssl" ]]; then shift; exec "$@"; fi' \
     'if [[ "${MNEMONAS_FAKE_PUBLIC_CONTROL_TCP_OPEN:-0}" == "1" && "$*" == *"/dev/tcp/nas.example.com/18080"* ]]; then exit 0; fi' \
+    'if [[ "${MNEMONAS_FAKE_PUBLIC_DATAPLANE_GRPC_TCP_OPEN:-0}" == "1" && "$*" == *"/dev/tcp/nas.example.com/19090"* ]]; then exit 0; fi' \
+    'if [[ "${MNEMONAS_FAKE_PUBLIC_DATAPLANE_HTTP_TCP_OPEN:-0}" == "1" && "$*" == *"/dev/tcp/nas.example.com/19091"* ]]; then exit 0; fi' \
     'exit 1'
   write_executable "$fake_path/ss" \
     '#!/usr/bin/env bash' \
@@ -1609,7 +1727,7 @@ EOF
   cat > "$case_dir/config.toml" <<EOF
 [server]
 host = "127.0.0.1"
-port = 018080
+port = 18080
 trusted_proxy_hops = 1
 
 [storage]
@@ -1650,7 +1768,10 @@ EOF
   assert_file_contains "$case_dir/doctor-public.log" "public direct control plane is not publicly reachable: http://nas.example.com:18080/health"
   assert_file_contains "$case_dir/doctor-public.log" "public direct control plane TCP port 18080 is not publicly reachable on nas.example.com"
   assert_file_contains "$case_dir/doctor-public.log" "public dataplane gRPC port 19090 is not publicly reachable on nas.example.com"
+  assert_file_contains "$case_dir/doctor-public.log" "public dataplane HTTP port 19091 is not publicly reachable on nas.example.com"
   assert_file_contains "$case_dir/doctor-public.log" "control plane port 18080 is loopback-only"
+  assert_file_contains "$case_dir/doctor-public.log" "dataplane gRPC port 19090 is loopback-only"
+  assert_file_contains "$case_dir/doctor-public.log" "dataplane HTTP port 19091 is loopback-only"
   assert_file_contains "$case_dir/doctor-public.log" "manual cloud firewall check: expose only 80/443 publicly; keep 18080/19090/19091 closed to the public internet"
   assert_file_contains "$case_dir/doctor-public.log" "Summary: 0 failure(s)"
 
@@ -1666,6 +1787,124 @@ EOF
   assert_file_contains "$case_dir/doctor-public-normalized-domain.log" "public HTTPS health reachable: https://nas.example.com/health"
   assert_file_contains "$case_dir/doctor-public-normalized-domain.log" "public HTTP redirects to HTTPS: http://nas.example.com/health -> https://nas.example.com/health"
   assert_file_contains "$case_dir/doctor-public-normalized-domain.log" "Summary: 0 failure(s)"
+
+  cat > "$case_dir/public-proc-net-tcp" <<'EOF'
+  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
+   0: 0100007F:46A0 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 1
+   1: 00000000:4A92 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 2
+EOF
+  cat > "$case_dir/public-proc-net-tcp6" <<'EOF'
+  sl  local_address                         remote_address                        st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
+   0: 00000000000000000000000000000000:4A93 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 3
+EOF
+
+  local no_ss_path="$case_dir/no-ss-bin"
+  make_doctor_path_without_ss "$fake_path" "$no_ss_path"
+  set +e
+  PATH="$no_ss_path" \
+    MNEMONAS_PROC_NET_TCP_PATH="$case_dir/public-proc-net-tcp" \
+    MNEMONAS_PROC_NET_TCP6_PATH="$case_dir/public-proc-net-tcp6" \
+    BIN_DIR="$bin_dir" \
+    WEB_DIR="$web_dir" \
+    CONFIG_PATH="$case_dir/config.toml" \
+    DATAPLANE_HTTP_PORT=019091 \
+    BACKUP_ROOT="$backup_dir" \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain nas.example.com > "$case_dir/doctor-public-proc-net-open.log"
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "public doctor accepted non-loopback backend ports when only /proc/net/tcp was available"
+  assert_file_contains "$case_dir/doctor-public-proc-net-open.log" "dataplane gRPC port 19090 is listening beyond loopback (0.0.0.0:19090)"
+  assert_file_contains "$case_dir/doctor-public-proc-net-open.log" "dataplane HTTP port 19091 is listening beyond loopback ([::]:19091)"
+
+  cat > "$case_dir/public-proc-net-tcp-loopback-only" <<'EOF'
+  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
+   0: 0100007F:46A0 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 1
+   1: 0100007F:4A92 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 2
+   2: 0100007F:4A93 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 3
+EOF
+
+  set +e
+  PATH="$no_ss_path" \
+    MNEMONAS_PROC_NET_TCP_PATH="$case_dir/public-proc-net-tcp-loopback-only" \
+    MNEMONAS_PROC_NET_TCP6_PATH="$case_dir/missing-public-proc-net-tcp6" \
+    BIN_DIR="$bin_dir" \
+    WEB_DIR="$web_dir" \
+    CONFIG_PATH="$case_dir/config.toml" \
+    DATAPLANE_HTTP_PORT=019091 \
+    BACKUP_ROOT="$backup_dir" \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain nas.example.com > "$case_dir/doctor-public-proc-net-missing-ipv6.log"
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "public doctor accepted incomplete local port inspection without ss"
+  assert_file_contains "$case_dir/doctor-public-proc-net-missing-ipv6.log" "control plane port 18080 cannot be fully inspected"
+  assert_file_contains "$case_dir/doctor-public-proc-net-missing-ipv6.log" "$case_dir/public-proc-net-tcp-loopback-only"
+  assert_file_contains "$case_dir/doctor-public-proc-net-missing-ipv6.log" "$case_dir/missing-public-proc-net-tcp6"
+
+  write_executable "$fake_path/ufw" \
+    '#!/usr/bin/env bash' \
+    'printf "Status: active\n\n"' \
+    'printf "To                         Action      From\n"' \
+    'printf "18080/tcp                  ALLOW       Anywhere\n"'
+
+  set +e
+  PATH="$fake_path:$PATH" \
+    BIN_DIR="$bin_dir" \
+    WEB_DIR="$web_dir" \
+    CONFIG_PATH="$case_dir/config.toml" \
+    DATAPLANE_HTTP_PORT=019091 \
+    BACKUP_ROOT="$backup_dir" \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain nas.example.com > "$case_dir/doctor-public-ufw-backend-open.log"
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "public doctor accepted broad UFW allow rule for control plane"
+  assert_file_contains "$case_dir/doctor-public-ufw-backend-open.log" "ufw appears to broadly allow public control plane port 18080"
+
+  write_executable "$fake_path/ufw" \
+    '#!/usr/bin/env bash' \
+    'printf "Status: active\n\n"' \
+    'printf "To                         Action      From\n"' \
+    'printf "19090/tcp                  ALLOW       Anywhere\n"'
+
+  set +e
+  PATH="$fake_path:$PATH" \
+    BIN_DIR="$bin_dir" \
+    WEB_DIR="$web_dir" \
+    CONFIG_PATH="$case_dir/config.toml" \
+    DATAPLANE_HTTP_PORT=019091 \
+    BACKUP_ROOT="$backup_dir" \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain nas.example.com > "$case_dir/doctor-public-ufw-dataplane-grpc-open.log"
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "public doctor accepted broad UFW allow rule for dataplane gRPC"
+  assert_file_contains "$case_dir/doctor-public-ufw-dataplane-grpc-open.log" "ufw appears to broadly allow public dataplane gRPC port 19090"
+
+  write_executable "$fake_path/ufw" \
+    '#!/usr/bin/env bash' \
+    'printf "Status: active\n\n"' \
+    'printf "To                         Action      From\n"' \
+    'printf "19091/tcp                  ALLOW       Anywhere (v6)\n"'
+
+  set +e
+  PATH="$fake_path:$PATH" \
+    BIN_DIR="$bin_dir" \
+    WEB_DIR="$web_dir" \
+    CONFIG_PATH="$case_dir/config.toml" \
+    DATAPLANE_HTTP_PORT=019091 \
+    BACKUP_ROOT="$backup_dir" \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain nas.example.com > "$case_dir/doctor-public-ufw-dataplane-http-open.log"
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "public doctor accepted broad UFW allow rule for dataplane HTTP"
+  assert_file_contains "$case_dir/doctor-public-ufw-dataplane-http-open.log" "ufw appears to broadly allow public dataplane HTTP port 19091"
+
+  write_executable "$fake_path/ufw" \
+    '#!/usr/bin/env bash' \
+    'printf "Status: active\n"'
 
   local linked_config_file="$case_dir/config-linked.toml"
   ln -s "$case_dir/config.toml" "$linked_config_file"
@@ -1763,6 +2002,54 @@ EOF
   assert_file_contains "$case_dir/doctor-public-open-auth-users.log" "public users file directory is not private"
   assert_file_contains "$case_dir/doctor-public-open-auth-users.log" "public users file is not private"
   assert_file_contains "$case_dir/doctor-public-open-auth-users.log" "Summary: 0 failure(s)"
+
+  local home_dir="$case_dir/home"
+  local home_storage_dir="$home_dir/storage"
+  local home_auth_dir="$home_dir/auth"
+  mkdir -p "$home_storage_dir/files" "$home_storage_dir/.mnemonas" "$home_auth_dir"
+  chmod 0750 "$home_storage_dir" "$home_storage_dir/files"
+  chmod 0700 "$home_storage_dir/.mnemonas" "$home_auth_dir"
+  cp "$storage_dir/.mnemonas/users.json" "$home_auth_dir/users.json"
+  cp "$storage_dir/secrets.json" "$home_storage_dir/secrets.json"
+  chmod 0600 "$home_auth_dir/users.json" "$home_storage_dir/secrets.json"
+  touch "$home_auth_dir/initial-password.txt"
+  chmod 0600 "$home_auth_dir/initial-password.txt"
+  local literal_home_initial_password
+  literal_home_initial_password="$(printf '%s' '~')/auth/initial-password.txt"
+  cat > "$case_dir/config-home-auth-users.toml" <<'EOF'
+[server]
+host = "127.0.0.1"
+port = 18080
+trusted_proxy_hops = 1
+
+[storage]
+root = "~/storage"
+
+[dataplane]
+grpc_address = "127.0.0.1:19090"
+
+[auth]
+users_file = "~/auth/users.json"
+EOF
+
+  set +e
+  HOME="$home_dir" \
+    STORAGE_ROOT='' \
+    PATH="$fake_path:$PATH" \
+    BIN_DIR="$bin_dir" \
+    WEB_DIR="$web_dir" \
+    CONFIG_PATH="$case_dir/config-home-auth-users.toml" \
+    DATAPLANE_HTTP_PORT=19091 \
+    BACKUP_ROOT="$backup_dir" \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain nas.example.com > "$case_dir/doctor-public-home-auth-users.log"
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "public doctor accepted home-expanded initial password file"
+  assert_file_contains "$case_dir/doctor-public-home-auth-users.log" "Storage: $home_storage_dir"
+  assert_file_contains "$case_dir/doctor-public-home-auth-users.log" "public users file is private to its owner: $home_auth_dir/users.json"
+  assert_file_contains "$case_dir/doctor-public-home-auth-users.log" "initial admin password file still exists at $home_auth_dir/initial-password.txt"
+  assert_file_not_contains "$case_dir/doctor-public-home-auth-users.log" "$literal_home_initial_password"
 
   local linked_users_file="$case_dir/linked-users.json"
   ln -s "$storage_dir/.mnemonas/users.json" "$linked_users_file"
@@ -2002,6 +2289,189 @@ EOF
   assert_file_contains "$case_dir/doctor-public-share-route-prefix.log" "public share.base_url should be the site origin or base path before /s; current value will generate nested /s/s share links"
   assert_file_contains "$case_dir/doctor-public-share-route-prefix.log" "Summary: 0 failure(s)"
 
+  cat > "$case_dir/config-share-escaped-route-prefix.toml" <<EOF
+[server]
+host = "127.0.0.1"
+port = 18080
+trusted_proxy_hops = 1
+
+[storage]
+root = "$storage_dir"
+
+[dataplane]
+grpc_address = "127.0.0.1:19090"
+
+[share]
+enabled = true
+base_url = "https://nas.example.com/base%2Fs"
+EOF
+
+  PATH="$fake_path:$PATH" \
+    BIN_DIR="$bin_dir" \
+    WEB_DIR="$web_dir" \
+    CONFIG_PATH="$case_dir/config-share-escaped-route-prefix.toml" \
+    DATAPLANE_HTTP_PORT=19091 \
+    BACKUP_ROOT="$backup_dir" \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain nas.example.com > "$case_dir/doctor-public-share-escaped-route-prefix.log"
+
+  assert_file_contains "$case_dir/doctor-public-share-escaped-route-prefix.log" "public share.base_url should be the site origin or base path before /s; current value will generate nested /s/s share links"
+  assert_file_contains "$case_dir/doctor-public-share-escaped-route-prefix.log" "Summary: 0 failure(s)"
+
+  cat > "$case_dir/config-share-duplicate-slashes.toml" <<EOF
+[server]
+host = "127.0.0.1"
+port = 18080
+trusted_proxy_hops = 1
+
+[storage]
+root = "$storage_dir"
+
+[dataplane]
+grpc_address = "127.0.0.1:19090"
+
+[share]
+enabled = true
+base_url = "https://nas.example.com/shares//team"
+EOF
+
+  set +e
+  PATH="$fake_path:$PATH" \
+    BIN_DIR="$bin_dir" \
+    WEB_DIR="$web_dir" \
+    CONFIG_PATH="$case_dir/config-share-duplicate-slashes.toml" \
+    DATAPLANE_HTTP_PORT=19091 \
+    BACKUP_ROOT="$backup_dir" \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain nas.example.com > "$case_dir/doctor-public-share-duplicate-slashes.log"
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "public doctor accepted share.base_url path with duplicate slashes"
+  assert_file_contains "$case_dir/doctor-public-share-duplicate-slashes.log" "public share.base_url path must not contain duplicate slashes"
+
+  cat > "$case_dir/config-share-escaped-duplicate-slashes.toml" <<EOF
+[server]
+host = "127.0.0.1"
+port = 18080
+trusted_proxy_hops = 1
+
+[storage]
+root = "$storage_dir"
+
+[dataplane]
+grpc_address = "127.0.0.1:19090"
+
+[share]
+enabled = true
+base_url = "https://nas.example.com/shares%2F%2Fteam"
+EOF
+
+  set +e
+  PATH="$fake_path:$PATH" \
+    BIN_DIR="$bin_dir" \
+    WEB_DIR="$web_dir" \
+    CONFIG_PATH="$case_dir/config-share-escaped-duplicate-slashes.toml" \
+    DATAPLANE_HTTP_PORT=19091 \
+    BACKUP_ROOT="$backup_dir" \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain nas.example.com > "$case_dir/doctor-public-share-escaped-duplicate-slashes.log"
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "public doctor accepted share.base_url path with escaped duplicate slashes"
+  assert_file_contains "$case_dir/doctor-public-share-escaped-duplicate-slashes.log" "public share.base_url path must not contain duplicate slashes"
+
+  cat > "$case_dir/config-share-backslash-path.toml" <<EOF
+[server]
+host = "127.0.0.1"
+port = 18080
+trusted_proxy_hops = 1
+
+[storage]
+root = "$storage_dir"
+
+[dataplane]
+grpc_address = "127.0.0.1:19090"
+
+[share]
+enabled = true
+base_url = 'https://nas.example.com/shares\team'
+EOF
+
+  set +e
+  PATH="$fake_path:$PATH" \
+    BIN_DIR="$bin_dir" \
+    WEB_DIR="$web_dir" \
+    CONFIG_PATH="$case_dir/config-share-backslash-path.toml" \
+    DATAPLANE_HTTP_PORT=19091 \
+    BACKUP_ROOT="$backup_dir" \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain nas.example.com > "$case_dir/doctor-public-share-backslash-path.log"
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "public doctor accepted share.base_url path with backslashes"
+  assert_file_contains "$case_dir/doctor-public-share-backslash-path.log" "public share.base_url path must not contain backslashes"
+
+  cat > "$case_dir/config-share-host-relative-backslash-path.toml" <<EOF
+[server]
+host = "127.0.0.1"
+port = 18080
+trusted_proxy_hops = 1
+
+[storage]
+root = "$storage_dir"
+
+[dataplane]
+grpc_address = "127.0.0.1:19090"
+
+[share]
+enabled = true
+base_url = 'https://nas.example.com\shares'
+EOF
+
+  set +e
+  PATH="$fake_path:$PATH" \
+    BIN_DIR="$bin_dir" \
+    WEB_DIR="$web_dir" \
+    CONFIG_PATH="$case_dir/config-share-host-relative-backslash-path.toml" \
+    DATAPLANE_HTTP_PORT=19091 \
+    BACKUP_ROOT="$backup_dir" \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain nas.example.com > "$case_dir/doctor-public-share-host-relative-backslash-path.log"
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "public doctor accepted share.base_url host-relative path with backslashes"
+  assert_file_contains "$case_dir/doctor-public-share-host-relative-backslash-path.log" "public share.base_url path must not contain backslashes"
+
+  cat > "$case_dir/config-share-escaped-backslash-path.toml" <<EOF
+[server]
+host = "127.0.0.1"
+port = 18080
+trusted_proxy_hops = 1
+
+[storage]
+root = "$storage_dir"
+
+[dataplane]
+grpc_address = "127.0.0.1:19090"
+
+[share]
+enabled = true
+base_url = "https://nas.example.com/shares%5Cteam"
+EOF
+
+  set +e
+  PATH="$fake_path:$PATH" \
+    BIN_DIR="$bin_dir" \
+    WEB_DIR="$web_dir" \
+    CONFIG_PATH="$case_dir/config-share-escaped-backslash-path.toml" \
+    DATAPLANE_HTTP_PORT=19091 \
+    BACKUP_ROOT="$backup_dir" \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain nas.example.com > "$case_dir/doctor-public-share-escaped-backslash-path.log"
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "public doctor accepted share.base_url path with escaped backslashes"
+  assert_file_contains "$case_dir/doctor-public-share-escaped-backslash-path.log" "public share.base_url path must not contain backslashes"
+
   cat > "$case_dir/config-share-no-expiry.toml" <<EOF
 [server]
 host = "127.0.0.1"
@@ -2131,6 +2601,44 @@ EOF
   write_executable "$fake_path/curl" \
     '#!/usr/bin/env bash' \
     'url="${@: -1}"' \
+    'headers_file=""' \
+    'previous=""' \
+    'for arg in "$@"; do' \
+    '  if [[ "$previous" == "-D" ]]; then headers_file="$arg"; fi' \
+    '  previous="$arg"' \
+    'done' \
+    'write_share_probe_headers() {' \
+    '  [[ -n "$headers_file" && "$headers_file" != "-" ]] || return 0' \
+    '  printf "HTTP/2 404\r\nCache-Control: private, no-cache\r\nVary: Cookie\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nSet-Cookie: mnemonas_share_probe=unexpected; HttpOnly\r\n\r\n" > "$headers_file"' \
+    '}' \
+    'if [[ "$*" == *" -X PROPFIND "* && "$url" == "https://nas.example.com/dav/" ]]; then printf "401"; exit 0; fi' \
+    'if [[ "$url" == "https://nas.example.com/api/v1/public/shares/mnemonas-doctor-probe" ]]; then write_share_probe_headers; printf "404"; exit 0; fi' \
+    'if [[ "$*" == *" -w "* && "$url" == "http://nas.example.com/health" ]]; then printf "301 https://nas.example.com/health"; exit 0; fi' \
+    'case "$url" in' \
+    '  https://nas.example.com/health) printf "ok\n";;' \
+    '  http://nas.example.com:18080/health) exit 7;;' \
+    '  */) printf "<div id=\"root\"></div>\n";;' \
+    '  *) printf "ok\n";;' \
+    'esac'
+
+  set +e
+  PATH="$fake_path:$PATH" \
+    BIN_DIR="$bin_dir" \
+    WEB_DIR="$web_dir" \
+    CONFIG_PATH="$case_dir/config-share-trimmed.toml" \
+    DATAPLANE_HTTP_PORT=19091 \
+    BACKUP_ROOT="$backup_dir" \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain nas.example.com > "$case_dir/doctor-public-share-cookie.log"
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "public doctor accepted public share JSON setting cookies on missing share probe"
+  assert_file_contains "$case_dir/doctor-public-share-cookie.log" "public share API probe reached MnemoNAS"
+  assert_file_contains "$case_dir/doctor-public-share-cookie.log" "public share JSON response is missing cache/security headers (Set-Cookie must be absent on missing-share probes)"
+
+  write_executable "$fake_path/curl" \
+    '#!/usr/bin/env bash' \
+    'url="${@: -1}"' \
     'if [[ "$*" == *" -X PROPFIND "* && "$url" == "https://nas.example.com/dav/" ]]; then printf "401"; exit 0; fi' \
     'if [[ "$url" == "https://nas.example.com/api/v1/public/shares/mnemonas-doctor-probe" ]]; then printf "403"; exit 0; fi' \
     'if [[ "$*" == *" -w "* && "$url" == "http://nas.example.com/health" ]]; then printf "301 https://nas.example.com/health"; exit 0; fi' \
@@ -2141,6 +2649,7 @@ EOF
     '  *) printf "ok\n";;' \
     'esac'
 
+  set +e
   PATH="$fake_path:$PATH" \
     BIN_DIR="$bin_dir" \
     WEB_DIR="$web_dir" \
@@ -2148,10 +2657,12 @@ EOF
     DATAPLANE_HTTP_PORT=19091 \
     BACKUP_ROOT="$backup_dir" \
     "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain nas.example.com > "$case_dir/doctor-public-share-proxy-blocked.log"
+  status=$?
+  set -e
 
+  [[ "$status" -ne 0 ]] || fail "public doctor accepted blocked public share API routing"
   assert_file_contains "$case_dir/doctor-public-share-proxy-blocked.log" "public share API probe was blocked before MnemoNAS share lookup: https://nas.example.com/api/v1/public/shares/mnemonas-doctor-probe (HTTP 403)"
   assert_file_not_contains "$case_dir/doctor-public-share-proxy-blocked.log" "public share JSON response is missing cache/security headers"
-  assert_file_contains "$case_dir/doctor-public-share-proxy-blocked.log" "Summary: 0 failure(s)"
 
   cat > "$case_dir/config-webdav-placeholder-password.toml" <<EOF
 [server]
@@ -2350,6 +2861,46 @@ EOF
   [[ "$status" -ne 0 ]] || fail "public doctor accepted reserved WebDAV prefix"
   assert_file_contains "$case_dir/doctor-public-webdav-reserved-prefix.log" "public WebDAV prefix is invalid: /api/v1"
 
+  cat > "$case_dir/config-webdav-spaced-prefix.toml" <<EOF
+[server]
+host = "127.0.0.1"
+port = 18080
+trusted_proxy_hops = 1
+
+[storage]
+root = "$storage_dir"
+
+[dataplane]
+grpc_address = "127.0.0.1:19090"
+
+[webdav]
+enabled = true
+prefix = "/team /sub"
+EOF
+
+  write_executable "$fake_path/curl" \
+    '#!/usr/bin/env bash' \
+    'url="${@: -1}"' \
+    'if [[ "$*" == *" -X PROPFIND "* && "$url" == "https://nas.example.com/team%20/sub/" ]]; then printf "401"; exit 0; fi' \
+    'if [[ "$*" == *" -w "* && "$url" == "http://nas.example.com/health" ]]; then printf "301 https://nas.example.com/health"; exit 0; fi' \
+    'case "$url" in' \
+    '  https://nas.example.com/health) printf "ok\n";;' \
+    '  http://nas.example.com:18080/health) exit 7;;' \
+    '  */) printf "<div id=\"root\"></div>\n";;' \
+    '  *) printf "ok\n";;' \
+    'esac'
+
+  PATH="$fake_path:$PATH" \
+    BIN_DIR="$bin_dir" \
+    WEB_DIR="$web_dir" \
+    CONFIG_PATH="$case_dir/config-webdav-spaced-prefix.toml" \
+    DATAPLANE_HTTP_PORT=19091 \
+    BACKUP_ROOT="$backup_dir" \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain nas.example.com > "$case_dir/doctor-public-webdav-spaced-prefix.log"
+
+  assert_file_contains "$case_dir/doctor-public-webdav-spaced-prefix.log" "public WebDAV anonymous PROPFIND is rejected: https://nas.example.com/team%20/sub/ (HTTP 401)"
+  assert_file_contains "$case_dir/doctor-public-webdav-spaced-prefix.log" "Summary: 0 failure(s)"
+
   write_executable "$fake_path/curl" \
     '#!/usr/bin/env bash' \
     'url="${@: -1}"' \
@@ -2387,6 +2938,7 @@ EOF
     '  *) printf "ok\n";;' \
     'esac'
 
+  set +e
   PATH="$fake_path:$PATH" \
     BIN_DIR="$bin_dir" \
     WEB_DIR="$web_dir" \
@@ -2394,7 +2946,10 @@ EOF
     DATAPLANE_HTTP_PORT=19091 \
     BACKUP_ROOT="$backup_dir" \
     "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain nas.example.com > "$case_dir/doctor-public-bad-redirect.log"
+  status=$?
+  set -e
 
+  [[ "$status" -ne 0 ]] || fail "public doctor accepted HTTP redirect to the wrong domain"
   assert_file_contains "$case_dir/doctor-public-bad-redirect.log" "public HTTP does not clearly redirect to HTTPS"
 
   set +e
@@ -2466,6 +3021,36 @@ EOF
   [[ "$status" -ne 0 ]] || fail "public doctor accepted direct control plane TCP exposure"
   assert_file_contains "$case_dir/doctor-public-direct-tcp-open.log" "public direct control plane is not publicly reachable: http://nas.example.com:18080/health"
   assert_file_contains "$case_dir/doctor-public-direct-tcp-open.log" "public direct control plane TCP port 18080 is publicly reachable on nas.example.com"
+
+  set +e
+  PATH="$fake_path:$PATH" \
+    BIN_DIR="$bin_dir" \
+    WEB_DIR="$web_dir" \
+    CONFIG_PATH="$case_dir/config.toml" \
+    DATAPLANE_HTTP_PORT=19091 \
+    BACKUP_ROOT="$backup_dir" \
+    MNEMONAS_FAKE_PUBLIC_DATAPLANE_GRPC_TCP_OPEN=1 \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain nas.example.com > "$case_dir/doctor-public-dataplane-grpc-tcp-open.log"
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "public doctor accepted public dataplane gRPC TCP exposure"
+  assert_file_contains "$case_dir/doctor-public-dataplane-grpc-tcp-open.log" "public dataplane gRPC port 19090 is publicly reachable on nas.example.com"
+
+  set +e
+  PATH="$fake_path:$PATH" \
+    BIN_DIR="$bin_dir" \
+    WEB_DIR="$web_dir" \
+    CONFIG_PATH="$case_dir/config.toml" \
+    DATAPLANE_HTTP_PORT=19091 \
+    BACKUP_ROOT="$backup_dir" \
+    MNEMONAS_FAKE_PUBLIC_DATAPLANE_HTTP_TCP_OPEN=1 \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain nas.example.com > "$case_dir/doctor-public-dataplane-http-tcp-open.log"
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "public doctor accepted public dataplane HTTP TCP exposure"
+  assert_file_contains "$case_dir/doctor-public-dataplane-http-tcp-open.log" "public dataplane HTTP port 19091 is publicly reachable on nas.example.com"
 
   write_executable "$fake_path/curl" \
     '#!/usr/bin/env bash' \
@@ -2558,6 +3143,91 @@ EOF
   assert_file_contains "$case_dir/doctor-public-no-auth.log" "public auth.enabled must remain true"
   assert_file_contains "$case_dir/doctor-public-no-auth.log" "security.allow_unsafe_no_auth must be false for public deployments"
   assert_file_contains "$case_dir/doctor-public-no-auth.log" "public WebDAV must not use auth_type=none"
+
+  local no_curl_path="$case_dir/no-curl-bin"
+  make_doctor_path_without_curl "$fake_path" "$no_curl_path"
+
+  set +e
+  PATH="$no_curl_path" \
+    BIN_DIR="$bin_dir" \
+    WEB_DIR="$web_dir" \
+    CONFIG_PATH="$case_dir/config.toml" \
+    DATAPLANE_HTTP_PORT=19091 \
+    BACKUP_ROOT="$backup_dir" \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain nas.example.com > "$case_dir/doctor-public-no-curl.log"
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "public doctor accepted missing curl"
+  assert_file_contains "$case_dir/doctor-public-no-curl.log" "curl is required for public diagnostics"
+
+  local no_python_path="$case_dir/no-python-bin"
+  make_doctor_path_without_python "$fake_path" "$no_python_path"
+
+  set +e
+  PATH="$no_python_path" \
+    BIN_DIR="$bin_dir" \
+    WEB_DIR="$web_dir" \
+    CONFIG_PATH="$case_dir/config.toml" \
+    DATAPLANE_HTTP_PORT=19091 \
+    BACKUP_ROOT="$backup_dir" \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain nas.example.com > "$case_dir/doctor-public-no-python.log"
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "public doctor accepted missing python3"
+  assert_file_contains "$case_dir/doctor-public-no-python.log" "python3 is required for public diagnostics"
+
+  local no_openssl_path="$case_dir/no-openssl-bin"
+  make_doctor_path_without_openssl "$fake_path" "$no_openssl_path"
+
+  set +e
+  PATH="$no_openssl_path" \
+    BIN_DIR="$bin_dir" \
+    WEB_DIR="$web_dir" \
+    CONFIG_PATH="$case_dir/config.toml" \
+    DATAPLANE_HTTP_PORT=19091 \
+    BACKUP_ROOT="$backup_dir" \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain nas.example.com > "$case_dir/doctor-public-no-openssl.log"
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "public doctor accepted missing openssl"
+  assert_file_contains "$case_dir/doctor-public-no-openssl.log" "openssl is required for public HTTPS certificate checks"
+
+  cat > "$case_dir/config-dotted-no-auth.toml" <<EOF
+auth.enabled = false
+webdav.enabled = true
+webdav.auth_type = "none"
+security.allow_unsafe_no_auth = true
+
+[server]
+host = "127.0.0.1"
+port = 18080
+trusted_proxy_hops = 1
+
+[storage]
+root = "$storage_dir"
+
+[dataplane]
+grpc_address = "127.0.0.1:19090"
+EOF
+
+  set +e
+  PATH="$no_python_path" \
+    BIN_DIR="$bin_dir" \
+    WEB_DIR="$web_dir" \
+    CONFIG_PATH="$case_dir/config-dotted-no-auth.toml" \
+    DATAPLANE_HTTP_PORT=19091 \
+    BACKUP_ROOT="$backup_dir" \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain nas.example.com > "$case_dir/doctor-public-dotted-no-auth-no-python.log"
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "public doctor accepted dotted-key disabled authentication without python3"
+  assert_file_contains "$case_dir/doctor-public-dotted-no-auth-no-python.log" "public auth.enabled must remain true"
+  assert_file_contains "$case_dir/doctor-public-dotted-no-auth-no-python.log" "security.allow_unsafe_no_auth must be false for public deployments"
+  assert_file_contains "$case_dir/doctor-public-dotted-no-auth-no-python.log" "public WebDAV must not use auth_type=none"
 
   cat > "$case_dir/config-webdav-spaced-none.toml" <<EOF
 [server]
@@ -2776,6 +3446,68 @@ EOF
   [[ "$status" -ne 0 ]] || fail "public doctor accepted share base URL with a non-default HTTPS port"
   assert_file_contains "$case_dir/doctor-public-share-non-default-port.log" "public share.base_url must use the HTTPS default port 443"
 
+  cat > "$case_dir/config-share-nonnumeric-port.toml" <<EOF
+[server]
+host = "127.0.0.1"
+port = 18080
+trusted_proxy_hops = 1
+
+[storage]
+root = "$storage_dir"
+
+[dataplane]
+grpc_address = "127.0.0.1:19090"
+
+[share]
+enabled = true
+base_url = "https://nas.example.com:abc"
+EOF
+
+  set +e
+  PATH="$fake_path:$PATH" \
+    BIN_DIR="$bin_dir" \
+    WEB_DIR="$web_dir" \
+    CONFIG_PATH="$case_dir/config-share-nonnumeric-port.toml" \
+    DATAPLANE_HTTP_PORT=19091 \
+    BACKUP_ROOT="$backup_dir" \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain nas.example.com > "$case_dir/doctor-public-share-nonnumeric-port.log"
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "public doctor accepted share base URL with a non-numeric HTTPS port"
+  assert_file_contains "$case_dir/doctor-public-share-nonnumeric-port.log" "public share.base_url host is invalid"
+
+  cat > "$case_dir/config-share-empty-port.toml" <<EOF
+[server]
+host = "127.0.0.1"
+port = 18080
+trusted_proxy_hops = 1
+
+[storage]
+root = "$storage_dir"
+
+[dataplane]
+grpc_address = "127.0.0.1:19090"
+
+[share]
+enabled = true
+base_url = "https://nas.example.com:"
+EOF
+
+  set +e
+  PATH="$fake_path:$PATH" \
+    BIN_DIR="$bin_dir" \
+    WEB_DIR="$web_dir" \
+    CONFIG_PATH="$case_dir/config-share-empty-port.toml" \
+    DATAPLANE_HTTP_PORT=19091 \
+    BACKUP_ROOT="$backup_dir" \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain nas.example.com > "$case_dir/doctor-public-share-empty-port.log"
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "public doctor accepted share base URL with an empty HTTPS port"
+  assert_file_contains "$case_dir/doctor-public-share-empty-port.log" "public share.base_url host is invalid"
+
   cat > "$case_dir/config-share-userinfo.toml" <<EOF
 [server]
 host = "127.0.0.1"
@@ -2961,6 +3693,99 @@ EOF
 
   [[ "$status" -ne 0 ]] || fail "public doctor accepted share base URL with an invalid host"
   assert_file_contains "$case_dir/doctor-public-share-invalid-host.log" "public share.base_url host is invalid"
+
+  cat > "$case_dir/config-share-unbracketed-ipv6.toml" <<EOF
+[server]
+host = "127.0.0.1"
+port = 18080
+trusted_proxy_hops = 1
+
+[storage]
+root = "$storage_dir"
+
+[dataplane]
+grpc_address = "127.0.0.1:19090"
+
+[share]
+enabled = true
+base_url = "https://2001:db8::1"
+EOF
+
+  set +e
+  PATH="$fake_path:$PATH" \
+    BIN_DIR="$bin_dir" \
+    WEB_DIR="$web_dir" \
+    CONFIG_PATH="$case_dir/config-share-unbracketed-ipv6.toml" \
+    DATAPLANE_HTTP_PORT=19091 \
+    BACKUP_ROOT="$backup_dir" \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain nas.example.com > "$case_dir/doctor-public-share-unbracketed-ipv6.log"
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "public doctor accepted share base URL with an unbracketed IPv6 host"
+  assert_file_contains "$case_dir/doctor-public-share-unbracketed-ipv6.log" "public share.base_url host is invalid"
+
+  cat > "$case_dir/config-share-invalid-bracketed-ipv6.toml" <<EOF
+[server]
+host = "127.0.0.1"
+port = 18080
+trusted_proxy_hops = 1
+
+[storage]
+root = "$storage_dir"
+
+[dataplane]
+grpc_address = "127.0.0.1:19090"
+
+[share]
+enabled = true
+base_url = "https://[::::]"
+EOF
+
+  set +e
+  PATH="$fake_path:$PATH" \
+    BIN_DIR="$bin_dir" \
+    WEB_DIR="$web_dir" \
+    CONFIG_PATH="$case_dir/config-share-invalid-bracketed-ipv6.toml" \
+    DATAPLANE_HTTP_PORT=19091 \
+    BACKUP_ROOT="$backup_dir" \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain nas.example.com > "$case_dir/doctor-public-share-invalid-bracketed-ipv6.log"
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "public doctor accepted share base URL with an invalid bracketed IPv6 host"
+  assert_file_contains "$case_dir/doctor-public-share-invalid-bracketed-ipv6.log" "public share.base_url host is invalid"
+
+  cat > "$case_dir/config-share-dot-segment.toml" <<EOF
+[server]
+host = "127.0.0.1"
+port = 18080
+trusted_proxy_hops = 1
+
+[storage]
+root = "$storage_dir"
+
+[dataplane]
+grpc_address = "127.0.0.1:19090"
+
+[share]
+enabled = true
+base_url = "https://nas.example.com/shares/%2e%2e/team"
+EOF
+
+  set +e
+  PATH="$fake_path:$PATH" \
+    BIN_DIR="$bin_dir" \
+    WEB_DIR="$web_dir" \
+    CONFIG_PATH="$case_dir/config-share-dot-segment.toml" \
+    DATAPLANE_HTTP_PORT=19091 \
+    BACKUP_ROOT="$backup_dir" \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain nas.example.com > "$case_dir/doctor-public-share-dot-segment.log"
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "public doctor accepted share base URL with a dot segment path"
+  assert_file_contains "$case_dir/doctor-public-share-dot-segment.log" "public share.base_url path must not contain . or .. segments"
 
   cat > "$case_dir/config-missing-users.toml" <<EOF
 [server]
@@ -3235,7 +4060,74 @@ run_doctor_input_validation_test() {
   assert_file_contains "$case_dir/public-domain-control.log" "PUBLIC_DOMAIN cannot contain control characters"
 }
 
+run_doctor_invalid_toml_syntax_test() {
+  local case_dir="$TMP_ROOT/doctor-invalid-toml"
+  local fake_path="$case_dir/fake-bin"
+  local bin_dir="$case_dir/bin"
+  local web_dir="$case_dir/web"
+  local storage_dir="$case_dir/storage"
+  local backup_dir="$case_dir/backup"
+  local status
+  mkdir -p "$fake_path" "$bin_dir" "$web_dir" "$storage_dir/files" "$storage_dir/.mnemonas" "$backup_dir"
+  chmod 0750 "$storage_dir" "$storage_dir/files"
+  chmod 0700 "$storage_dir/.mnemonas"
+
+  write_executable "$bin_dir/nasd" \
+    '#!/usr/bin/env bash' \
+    'if [[ "${1:-}" == "--check-config" ]]; then exit 0; fi' \
+    'exit 0'
+  write_executable "$bin_dir/dataplane" '#!/usr/bin/env bash' 'exit 0'
+  printf '<div id="root"></div>\n' > "$web_dir/index.html"
+  write_executable "$fake_path/id" '#!/usr/bin/env bash' 'exit 0'
+  write_executable "$fake_path/getent" '#!/usr/bin/env bash' 'exit 1'
+  write_executable "$fake_path/systemctl" '#!/usr/bin/env bash' 'exit 0'
+  write_executable "$fake_path/curl" \
+    '#!/usr/bin/env bash' \
+    'url="${@: -1}"' \
+    'if [[ "$url" == */ ]]; then printf "<div id=\"root\"></div>\n"; else printf "ok\n"; fi'
+  write_executable "$fake_path/ss" \
+    '#!/usr/bin/env bash' \
+    'printf "LISTEN 0 4096 127.0.0.1:18080 0.0.0.0:*\n"' \
+    'printf "LISTEN 0 4096 127.0.0.1:19090 0.0.0.0:*\n"' \
+    'printf "LISTEN 0 4096 127.0.0.1:19091 0.0.0.0:*\n"'
+  write_executable "$fake_path/findmnt" \
+    '#!/usr/bin/env bash' \
+    'printf "tank/data zfs %s\n" "${@: -1}"'
+  write_executable "$fake_path/df" \
+    '#!/usr/bin/env bash' \
+    'printf "Filesystem 1024-blocks Used Available Capacity Mounted on\n"' \
+    'printf "/dev/fake 20971520 5242880 15728640 25%% %s\n" "${@: -1}"'
+
+  cat > "$case_dir/config-invalid.toml" <<EOF
+[server]
+host = "127.0.0.1"
+port = 18080
+
+[broken
+EOF
+
+  set +e
+  PATH="$fake_path:$PATH" \
+    BIN_DIR="$bin_dir" \
+    WEB_DIR="$web_dir" \
+    CONFIG_PATH="$case_dir/config-invalid.toml" \
+    STORAGE_ROOT="$storage_dir" \
+    DATAPLANE_GRPC_ADDR="127.0.0.1:19090" \
+    DATAPLANE_HTTP_ADDR="127.0.0.1:19091" \
+    BACKUP_ROOT="$backup_dir" \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" > "$case_dir/doctor-invalid-toml.log" 2>&1
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "doctor accepted an invalid TOML config when nasd --check-config succeeded"
+  assert_file_contains "$case_dir/doctor-invalid-toml.log" "config TOML syntax is invalid: $case_dir/config-invalid.toml"
+  assert_file_contains "$case_dir/doctor-invalid-toml.log" "TOML parse error:"
+  assert_file_contains "$case_dir/doctor-invalid-toml.log" "skipping nasd --check-config because config TOML syntax is invalid"
+  assert_file_not_contains "$case_dir/doctor-invalid-toml.log" "config validates"
+}
+
 run_fresh_install_test
+run_storage_ownership_repair_is_explicit_test
 run_web_install_preserves_share_sibling_permissions_test
 run_web_install_preserves_existing_assets_on_copy_failure_test
 run_install_preserves_existing_runtime_on_config_check_failure_test
@@ -3265,5 +4157,6 @@ run_dataplane_addr_validation_test
 run_doctor_config_test
 run_doctor_public_domain_test
 run_doctor_input_validation_test
+run_doctor_invalid_toml_syntax_test
 
 printf '[systemd-install-test] all checks passed\n'

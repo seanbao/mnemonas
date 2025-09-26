@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # MnemoNAS Fault Injection Tests
-# 故障注入回归测试 - 验证数据安全性
+# Fault injection regression tests for data safety.
 #
-# 测试场景：
-# 1. 写入过程中进程被 kill
-# 2. 对象文件损坏
-# 3. 元数据文件损坏
-# 4. 磁盘空间不足
+# Test scenarios:
+# 1. Process killed during write
+# 2. Object file corruption
+# 3. Metadata file corruption
+# 4. Low disk space
+# When WebDAV uses auth_type=users, MNEMONAS_WEBDAV_USERNAME and MNEMONAS_WEBDAV_PASSWORD must be set explicitly.
 
 set -euo pipefail
 
@@ -509,36 +510,59 @@ if isinstance(found, str):
     printf '%s' "$json" | sed -n "s/.*\"${field}\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p"
 }
 
+normalize_webdav_auth_type() {
+    local value="$1"
+
+    value="${value#"${value%%[![:space:]]*}"}"
+    value="${value%"${value##*[![:space:]]}"}"
+    value="${value,,}"
+    if [[ -z "$value" ]]; then
+        value="basic"
+    fi
+    printf '%s' "$value"
+}
+
 configure_webdav_auth() {
-    local auth_type=$(read_config_value webdav auth_type)
-    local username
-    local password
+    local auth_type="${MNEMONAS_WEBDAV_AUTH_TYPE:-$(read_config_value webdav auth_type)}"
+    local username=""
+    local password=""
 
-    if [[ -z "$auth_type" ]]; then
-        auth_type="basic"
-    fi
+    auth_type="$(normalize_webdav_auth_type "$auth_type")"
 
-    if [[ "$auth_type" != "basic" ]]; then
-        return 0
-    fi
-
-    username=$(read_config_value webdav username)
-    password=$(read_config_value webdav password)
-
-    if [[ -z "$username" ]]; then
-        username="admin"
-    fi
-    if [[ -z "$password" ]]; then
-        password=$(read_secret_value webdav_password)
-    fi
-
-    if [[ -z "$password" ]]; then
-        log_warn "WebDAV basic auth is enabled but no password was found; WebDAV fault tests may fail"
-        return 0
-    fi
+    case "$auth_type" in
+        basic)
+            username="${MNEMONAS_WEBDAV_USERNAME:-$(read_config_value webdav username)}"
+            password="${MNEMONAS_WEBDAV_PASSWORD:-$(read_config_value webdav password)}"
+            if [[ -z "$username" ]]; then
+                username="admin"
+            fi
+            if [[ -z "$password" ]]; then
+                password=$(read_secret_value webdav_password)
+            fi
+            if [[ -z "$password" ]]; then
+                log_warn "WebDAV basic auth is enabled but no password was found; WebDAV fault tests may fail"
+                return 0
+            fi
+            ;;
+        users)
+            username="${MNEMONAS_WEBDAV_USERNAME:-}"
+            password="${MNEMONAS_WEBDAV_PASSWORD:-}"
+            if [[ -z "$username" || -z "$password" ]]; then
+                die "WebDAV users auth requires MNEMONAS_WEBDAV_USERNAME and MNEMONAS_WEBDAV_PASSWORD"
+            fi
+            ;;
+        none)
+            log_warn "WebDAV auth_type=none; WebDAV fault tests will run without credentials"
+            return 0
+            ;;
+        *)
+            log_warn "Unrecognized WebDAV auth_type '$auth_type'; WebDAV fault tests will run without credentials"
+            return 0
+            ;;
+    esac
 
     WEBDAV_AUTH_ARGS=(-u "$username:$password")
-    log_info "Using WebDAV basic auth credentials for user: $username"
+    log_info "Using WebDAV $auth_type auth credentials for user: $username"
 }
 
 load_initial_admin_password() {
@@ -633,7 +657,7 @@ setup() {
 }
 
 # ==============================================================================
-# Test 1: Crash During Write (进程中断测试)
+# Test 1: Crash During Write
 # ==============================================================================
 
 test_crash_during_write() {
@@ -694,7 +718,7 @@ test_crash_during_write() {
 }
 
 # ==============================================================================
-# Test 2: Object Corruption (对象损坏检测)
+# Test 2: Object Corruption
 # ==============================================================================
 
 test_object_corruption() {
@@ -756,7 +780,7 @@ test_object_corruption() {
 }
 
 # ==============================================================================
-# Test 3: Metadata Corruption (元数据损坏)
+# Test 3: Metadata Corruption
 # ==============================================================================
 
 test_metadata_corruption() {
@@ -791,7 +815,7 @@ test_metadata_corruption() {
 }
 
 # ==============================================================================
-# Test 4: Concurrent Write Conflict (并发写入冲突)
+# Test 4: Concurrent Write Conflict
 # ==============================================================================
 
 test_concurrent_write_conflict() {
@@ -802,6 +826,10 @@ test_concurrent_write_conflict() {
     
     # Get ETag
     local etag=$(curl -sf "$WEBDAV_URL/fault-test/conflict.txt" -I | grep -i "^etag:" | awk '{print $2}' | tr -d '\r')
+    if [[ -z "$etag" ]]; then
+        log_fail "Could not read ETag for concurrent write conflict test"
+        return
+    fi
     
     # First writer with correct ETag
     local status1=$(echo "version 1" | curl -s -X PUT "$WEBDAV_URL/fault-test/conflict.txt" \
@@ -831,7 +859,7 @@ test_concurrent_write_conflict() {
 }
 
 # ==============================================================================
-# Test 5: Recovery Verification (恢复验证)
+# Test 5: Recovery Verification
 # ==============================================================================
 
 test_recovery_verification() {

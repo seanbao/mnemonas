@@ -25,6 +25,14 @@ assert_file_contains() {
 	grep -Fq -- "$expected" "$path" || fail "$path does not contain: $expected"
 }
 
+assert_file_not_contains() {
+	local path="$1"
+	local unexpected="$2"
+	if grep -Fq -- "$unexpected" "$path"; then
+		fail "$path contains unsafe text: $unexpected"
+	fi
+}
+
 assert_not_exists() {
 	local path="$1"
 	[[ ! -e "$path" ]] || fail "$path unexpectedly exists"
@@ -443,6 +451,100 @@ run_fault_injection_docs_use_isolated_runner_test() {
 	assert_file_contains "$REPO_ROOT/docs/testing-strategy.en.md" "scripts/run-fault-injection-isolated.sh"
 }
 
+run_fault_injection_webdav_users_requires_explicit_credentials_test() {
+	assert_file_contains "$REPO_ROOT/scripts/fault-injection-test.sh" 'MNEMONAS_WEBDAV_AUTH_TYPE:-$(read_config_value webdav auth_type)'
+	assert_file_contains "$REPO_ROOT/scripts/fault-injection-test.sh" 'WebDAV users auth requires MNEMONAS_WEBDAV_USERNAME and MNEMONAS_WEBDAV_PASSWORD'
+	assert_file_contains "$REPO_ROOT/scripts/fault-injection-test.sh" 'Using WebDAV $auth_type auth credentials for user'
+}
+
+run_fault_injection_webdav_users_missing_credentials_test() {
+	local case_dir="$TMP_ROOT/webdav-users-missing"
+	local fake_bin="$case_dir/bin"
+	local fake_nasd="$case_dir/nasd"
+	local curl_log="$case_dir/curl.log"
+	local nasd_log="$case_dir/nasd.log"
+	mkdir -p "$case_dir/storage/.mnemonas/objects"
+	make_fake_curl "$fake_bin" "$curl_log"
+	make_fake_nasd "$fake_nasd"
+
+	run_expect_failure "$case_dir/out.log" env \
+		HOME="$case_dir/home" \
+		PATH="$fake_bin:$PATH" \
+		CURL_INVOKED_LOG="$curl_log" \
+		MNEMONAS_LIVE_FAULTS=1 \
+		FAULT_INJECTION_ASSUME_YES=1 \
+		RUN_CORRUPTION_TESTS=0 \
+		FAULT_UPLOAD_SIZE_MB=0 \
+		BASE_URL="http://127.0.0.1:18080" \
+		STORAGE_ROOT="$case_dir/storage" \
+		OBJECTS_DIR="$case_dir/storage/.mnemonas/objects" \
+		INDEX_DB="$case_dir/storage/.mnemonas/index.db" \
+		NASD_BIN="$fake_nasd" \
+		NASD_INVOKED_LOG="$nasd_log" \
+		MNEMONAS_WEBDAV_AUTH_TYPE="users" \
+		bash "$REPO_ROOT/scripts/fault-injection-test.sh"
+
+	assert_file_contains "$case_dir/out.log" "WebDAV users auth requires MNEMONAS_WEBDAV_USERNAME and MNEMONAS_WEBDAV_PASSWORD"
+	assert_file_contains "$curl_log" "/health"
+	assert_file_not_contains "$curl_log" "/dav/fault-test/"
+}
+
+run_fault_injection_webdav_users_env_credentials_test() {
+	local case_dir="$TMP_ROOT/webdav-users-env"
+	local fake_bin="$case_dir/bin"
+	local fake_nasd="$case_dir/nasd"
+	local curl_log="$case_dir/curl.log"
+	local nasd_log="$case_dir/nasd.log"
+	local secret="mnemonas-user-secret"
+	mkdir -p "$case_dir/storage"
+	make_fake_curl "$fake_bin" "$curl_log"
+	make_fake_nasd "$fake_nasd"
+
+	run_expect_failure "$case_dir/out.log" env \
+		HOME="$case_dir/home" \
+		PATH="$fake_bin:$PATH" \
+		CURL_INVOKED_LOG="$curl_log" \
+		MNEMONAS_LIVE_FAULTS=1 \
+		FAULT_INJECTION_ASSUME_YES=1 \
+		RUN_CORRUPTION_TESTS=0 \
+		FAULT_UPLOAD_SIZE_MB=0 \
+		BASE_URL="http://127.0.0.1:18080" \
+		STORAGE_ROOT="$case_dir/storage" \
+		OBJECTS_DIR="$case_dir/storage/.mnemonas/objects" \
+		INDEX_DB="$case_dir/storage/.mnemonas/index.db" \
+		NASD_BIN="$fake_nasd" \
+		NASD_INVOKED_LOG="$nasd_log" \
+		MNEMONAS_WEBDAV_AUTH_TYPE=" Users " \
+		MNEMONAS_WEBDAV_USERNAME="family-user" \
+		MNEMONAS_WEBDAV_PASSWORD="$secret" \
+		bash "$REPO_ROOT/scripts/fault-injection-test.sh"
+
+	assert_file_contains "$case_dir/out.log" "Using WebDAV users auth credentials for user: family-user"
+	assert_file_contains "$curl_log" "family-user:$secret"
+	assert_file_contains "$curl_log" "-u family-user:$secret -sf -X MKCOL http://127.0.0.1:18080/dav/fault-test/"
+}
+
+run_concurrent_conflict_fails_when_etag_missing_test() {
+	local script="$REPO_ROOT/scripts/fault-injection-test.sh"
+	local function_body="$TMP_ROOT/concurrent-write-conflict-function.txt"
+
+	awk '
+		/^test_concurrent_write_conflict\(\) \{/ {
+			in_function = 1
+		}
+		in_function {
+			print
+		}
+		in_function && /^}/ {
+			exit
+		}
+	' "$script" > "$function_body"
+
+	# shellcheck disable=SC2016 # Match literal script text.
+	assert_file_contains "$function_body" 'if [[ -z "$etag" ]]; then'
+	assert_file_contains "$function_body" 'log_fail "Could not read ETag for concurrent write conflict test"'
+}
+
 run_default_disabled_test
 run_missing_explicit_target_test
 run_refuse_unisolated_storage_test
@@ -462,5 +564,9 @@ run_health_failure_does_not_restart_test
 run_isolated_runner_refuse_untrusted_root_test
 run_isolated_runner_refuse_non_loopback_host_test
 run_fault_injection_docs_use_isolated_runner_test
+run_fault_injection_webdav_users_requires_explicit_credentials_test
+run_fault_injection_webdav_users_missing_credentials_test
+run_fault_injection_webdav_users_env_credentials_test
+run_concurrent_conflict_fails_when_etag_missing_test
 
 printf '[fault-injection-safety-test] all checks passed\n'

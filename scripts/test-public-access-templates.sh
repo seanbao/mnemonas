@@ -27,12 +27,58 @@ assert_file_not_contains() {
     fi
 }
 
+compose_has_ports_section() {
+    local path="$1"
+    grep -Eq '^[[:space:]]*ports[[:space:]]*:' "$path"
+}
+
+assert_compose_has_no_ports_section() {
+    local path="$1"
+    if compose_has_ports_section "$path"; then
+        fail "$path must not define a ports section; public Traefik templates use host networking and must not publish backend ports"
+    fi
+}
+
 assert_tree_not_contains() {
     local path="$1"
     local unexpected="$2"
     if grep -R -Fq -- "$unexpected" "$path"; then
         fail "$path contains unsafe text: $unexpected"
     fi
+}
+
+test_public_compose_ports_detector() {
+    local tmpdir
+    local bad_compose
+
+    tmpdir="$(mktemp -d)"
+    bad_compose="$tmpdir/docker-compose.yml"
+
+    cat >"$bad_compose" <<'YAML'
+services:
+  traefik:
+    image: traefik:v3.0
+    network_mode: host
+    ports:
+      - target: 9090
+        published: 9090
+        protocol: tcp
+YAML
+
+    if ! compose_has_ports_section "$bad_compose"; then
+        rm -rf "$tmpdir"
+        fail "public compose ports detector missed long-form ports"
+    fi
+
+    rm -rf "$tmpdir"
+}
+
+test_public_access_yaml_templates_are_valid() {
+    "$REPO_ROOT/scripts/check-yaml-configs.sh" \
+        "$TRAEFIK_DIR/docker-compose.yml" \
+        "$TRAEFIK_DIR/traefik.yml" \
+        "$TRAEFIK_DIR/dynamic/mnemonas.yml" \
+        "$CLOUDFLARE_CONFIG" >/dev/null
 }
 
 test_traefik_template() {
@@ -45,6 +91,7 @@ test_traefik_template() {
     [[ -f "$dynamic" ]] || fail "missing Traefik dynamic template"
 
     assert_file_contains "$compose" "network_mode: host"
+    assert_compose_has_no_ports_section "$compose"
     assert_file_not_contains "$compose" "8080:"
     assert_file_not_contains "$compose" "9090:"
     assert_file_not_contains "$compose" "9091:"
@@ -87,6 +134,12 @@ test_public_access_readmes() {
     assert_file_contains "$PUBLIC_ACCESS_README" "trusted_proxy_hops = 1"
     assert_file_contains "$PUBLIC_ACCESS_README" 'base_url = "https://nas.example.com"'
     assert_file_contains "$PUBLIC_ACCESS_README" "trusted_proxy_cidrs"
+    assert_file_contains "$PUBLIC_ACCESS_README" "反斜杠、重复路径斜杠或 \`.\`/\`..\` 路径段"
+    assert_file_contains "$PUBLIC_ACCESS_README" "重复路径斜杠、\`.\`/\`..\` 路径段和无效主机名判为失败"
+    assert_file_contains "$PUBLIC_ACCESS_README" "公网诊断依赖本机监听端口检查"
+    assert_file_contains "$PUBLIC_ACCESS_README" "/proc/net/tcp6"
+    assert_file_contains "$PUBLIC_ACCESS_README" "运行诊断的主机还必须安装 \`curl\`、\`python3\` 和 \`openssl\`"
+    assert_file_contains "$PUBLIC_ACCESS_README" "[公网云防火墙复核清单](../../docs/cloud-firewall-checklist.md)"
 
     assert_file_contains "$PUBLIC_ACCESS_README_EN" "Public Access Templates"
     assert_file_contains "$PUBLIC_ACCESS_README_EN" "[简体中文](README.md)"
@@ -98,6 +151,12 @@ test_public_access_readmes() {
     assert_file_contains "$PUBLIC_ACCESS_README_EN" "trusted_proxy_hops = 1"
     assert_file_contains "$PUBLIC_ACCESS_README_EN" 'base_url = "https://nas.example.com"'
     assert_file_contains "$PUBLIC_ACCESS_README_EN" "trusted_proxy_cidrs"
+    assert_file_contains "$PUBLIC_ACCESS_README_EN" "backslash, duplicated path slash, or \`.\`/\`..\` path segments"
+    assert_file_contains "$PUBLIC_ACCESS_README_EN" "duplicated path slashes, \`.\`/\`..\` path segments, and invalid hostnames"
+    assert_file_contains "$PUBLIC_ACCESS_README_EN" "Public diagnostics depend on local listener inspection"
+    assert_file_contains "$PUBLIC_ACCESS_README_EN" "/proc/net/tcp6"
+    assert_file_contains "$PUBLIC_ACCESS_README_EN" "must also have \`curl\`, \`python3\`, and \`openssl\` installed"
+    assert_file_contains "$PUBLIC_ACCESS_README_EN" "[Public cloud firewall checklist](../../docs/cloud-firewall-checklist.en.md)"
 }
 
 test_docker_docs_mount_syntax() {
@@ -125,8 +184,10 @@ test_docs_avoid_webdav_placeholder_passwords() {
     assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.en.md" "users file and its directory must not be symlinks and must not pass through symlink components"
     assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.md" "符号链接、路径组件包含符号链接或该路径是非普通文件"
     assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.en.md" "symlink, symlink component, or non-regular file"
-    assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.md" "\`secrets.json\` 必须存在、不能是符号链接、路径组件不能包含符号链接"
-    assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.en.md" "\`secrets.json\` must exist, must not be a symlink, must not pass through symlink components"
+    assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.md" "\`secrets.json\` 必须存在，且必须是私有普通文件"
+    assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.md" "该文件不能是符号链接，路径组件也不能包含符号链接"
+    assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.en.md" "\`secrets.json\` must exist, be a private regular file"
+    assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.en.md" "not be a symlink, and not pass through symlink path components"
     assert_file_contains "$REPO_ROOT/docs/security.md" '用户文件及其目录不是符号链接、路径组件不包含符号链接且权限为私有'
     assert_file_contains "$REPO_ROOT/docs/security.en.md" 'non-symlink users file and users-file directory that do not pass through symlink components and have private permissions'
     assert_file_contains "$REPO_ROOT/docs/security.md" '自动 WebDAV 凭据文件不是符号链接、路径组件不包含符号链接且权限私有'
@@ -135,14 +196,34 @@ test_docs_avoid_webdav_placeholder_passwords() {
     assert_file_contains "$REPO_ROOT/docs/security.en.md" 'password-manager value'
     assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.md" 'auth.access_token_ttl'
     assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.en.md" 'auth.access_token_ttl'
-    assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.md" '/etc/mnemonas/config.toml` 是普通私有文件，路径组件不包含符号链接'
-    assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.en.md" '/etc/mnemonas/config.toml` is a private regular file and does not pass through symlink components'
+    assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.md" '/etc/mnemonas/config.toml` 是普通私有文件，路径组件不包含符号链接，且 TOML 语法有效'
+    assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.en.md" '/etc/mnemonas/config.toml` is a private regular file, does not pass through symlink components, and parses as valid TOML'
     assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.md" 'share.default_expires_in'
     assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.en.md" 'share.default_expires_in'
     assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.md" "share.default_max_access\` 大于 \`0\`"
     assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.en.md" "share.default_max_access\` is greater than \`0\`"
+    assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.md" "运行 \`mnemonas-doctor --public-domain\` 的主机可使用 \`ss\`"
+    assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.en.md" "The host running \`mnemonas-doctor --public-domain\` can use \`ss\`"
+    assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.md" "运行 \`mnemonas-doctor --public-domain\` 的主机已安装 \`curl\`、\`python3\` 和 \`openssl\`"
+    assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.en.md" "The host running \`mnemonas-doctor --public-domain\` has \`curl\`, \`python3\`, and \`openssl\` installed"
+    assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.md" "公网 HTTP 必须返回到同一域名的 HTTPS 跳转"
+    assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.en.md" "Public HTTP must redirect to HTTPS on the same domain"
+    assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.md" "启用公开分享时，公开分享 API 探测必须到达 MnemoNAS"
+    assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.en.md" "When public sharing is enabled, the public-share API probe must reach MnemoNAS"
+    assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.md" "反斜杠、重复的路径斜杠或 \`.\`/\`..\` 路径段"
+    assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.en.md" "backslash, duplicated path slash, or \`.\`/\`..\` path segments"
+    assert_file_contains "$REPO_ROOT/docs/api-reference.md" "反斜杠、重复路径斜杠、\`.\`/\`..\` 路径段或非法主机名报告为 \`block\`"
+    assert_file_contains "$REPO_ROOT/docs/api-reference.en.md" "backslashes, duplicated path slashes, \`.\`/\`..\` path segments, or an invalid host name is reported as \`block\`"
+    assert_file_contains "$REPO_ROOT/docs/security.md" "反斜杠、重复路径斜杠或 \`.\`/\`..\` 路径段"
+    assert_file_contains "$REPO_ROOT/docs/security.en.md" "backslash, duplicated path slash, or \`.\`/\`..\` path segments"
+    assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.md" "[公网云防火墙复核清单](cloud-firewall-checklist.md)"
+    assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.en.md" "[Public cloud firewall checklist](cloud-firewall-checklist.en.md)"
+    assert_file_contains "$REPO_ROOT/docs/README.md" "[公网云防火墙复核清单](cloud-firewall-checklist.md)"
+    assert_file_contains "$REPO_ROOT/docs/README.en.md" "[Public cloud firewall checklist](cloud-firewall-checklist.en.md)"
 }
 
+test_public_compose_ports_detector
+test_public_access_yaml_templates_are_valid
 test_traefik_template
 test_cloudflare_tunnel_template
 test_public_access_readmes

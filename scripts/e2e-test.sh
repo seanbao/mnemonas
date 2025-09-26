@@ -4,6 +4,8 @@
 #
 # Usage: BASE_URL=... STORAGE_ROOT=... CONFIG_FILE=... SECRETS_FILE=... \
 #   INITIAL_PASSWORD_FILE=... ./scripts/e2e-test.sh [--quick|--full]
+#   With webdav.auth_type=users, also set MNEMONAS_WEBDAV_USERNAME and MNEMONAS_WEBDAV_PASSWORD.
+#   Set RUN_RCLONE_WEBDAV=1 to run the optional rclone WebDAV client smoke test.
 #   --quick: Skip slow tests (crash injection, large files)
 #   --full:  Run all tests including stress tests (default)
 
@@ -26,6 +28,7 @@ STORAGE_ROOT_EXPLICIT="${STORAGE_ROOT+x}"
 CONFIG_FILE_EXPLICIT="${CONFIG_FILE+x}"
 SECRETS_FILE_EXPLICIT="${SECRETS_FILE+x}"
 INITIAL_PASSWORD_FILE_EXPLICIT="${INITIAL_PASSWORD_FILE+x}"
+USERS_FILE_EXPLICIT="${USERS_FILE+x}"
 BASE_URL="${BASE_URL:-http://localhost:8080}"
 WEBDAV_URL="${BASE_URL}/dav"
 API_URL="${BASE_URL}/api/v1"
@@ -57,6 +60,8 @@ ADMIN_ACCESS_TOKEN=""
 ADMIN_REFRESH_TOKEN=""
 ADMIN_API_BODY=""
 ADMIN_API_STATUS=""
+WEBDAV_USERNAME=""
+WEBDAV_PASSWORD=""
 WEBDAV_AUTH_ARGS=()
 
 # Utility functions
@@ -336,6 +341,52 @@ PY
     ' "$CONFIG_FILE"
 }
 
+expand_user_path() {
+    local path="$1"
+
+    case "$path" in
+        "")
+            printf '%s\n' ""
+            ;;
+        \~)
+            if [[ -n "${HOME:-}" ]]; then
+                printf '%s\n' "$HOME"
+            else
+                printf '%s\n' "$path"
+            fi
+            ;;
+        \~/*)
+            if [[ -n "${HOME:-}" ]]; then
+                printf '%s/%s\n' "$HOME" "${path#\~/}"
+            else
+                printf '%s\n' "$path"
+            fi
+            ;;
+        *)
+            printf '%s\n' "$path"
+            ;;
+    esac
+}
+
+configure_auth_paths() {
+    if [[ -n "$USERS_FILE_EXPLICIT" ]]; then
+        return
+    fi
+
+    local users_file
+    users_file="$(read_config_value auth users_file)"
+    if [[ -z "$users_file" ]]; then
+        return
+    fi
+
+    require_no_control_characters "$users_file" "auth.users_file"
+    if path_has_parent_segment "$users_file"; then
+        echo -e "${RED}ERROR:${NC} auth.users_file must not contain '..' path segments: $users_file" >&2
+        exit 1
+    fi
+    USERS_FILE="$(expand_user_path "$users_file")"
+}
+
 read_secret_value() {
     local key=$1
 
@@ -433,36 +484,62 @@ if isinstance(found, str):
     printf '%s' "$json" | sed -n "s/.*\"${field}\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p"
 }
 
+normalize_webdav_auth_type() {
+    local value="$1"
+
+    value="${value#"${value%%[![:space:]]*}"}"
+    value="${value%"${value##*[![:space:]]}"}"
+    value="${value,,}"
+    if [[ -z "$value" ]]; then
+        value="basic"
+    fi
+    printf '%s' "$value"
+}
+
 configure_webdav_auth() {
-    local auth_type=$(read_config_value webdav auth_type)
-    local username
-    local password
+    local auth_type="${MNEMONAS_WEBDAV_AUTH_TYPE:-$(read_config_value webdav auth_type)}"
+    local username=""
+    local password=""
 
-    if [[ -z "$auth_type" ]]; then
-        auth_type="basic"
-    fi
+    auth_type="$(normalize_webdav_auth_type "$auth_type")"
 
-    if [[ "$auth_type" != "basic" ]]; then
-        return 0
-    fi
-
-    username=$(read_config_value webdav username)
-    password=$(read_config_value webdav password)
-
-    if [[ -z "$username" ]]; then
-        username="admin"
-    fi
-    if [[ -z "$password" ]]; then
-        password=$(read_secret_value webdav_password)
-    fi
-
-    if [[ -z "$password" ]]; then
-        log_warn "WebDAV basic auth is enabled but no password was found; WebDAV tests may fail"
-        return 0
-    fi
+    case "$auth_type" in
+        basic)
+            username="${MNEMONAS_WEBDAV_USERNAME:-$(read_config_value webdav username)}"
+            password="${MNEMONAS_WEBDAV_PASSWORD:-$(read_config_value webdav password)}"
+            if [[ -z "$username" ]]; then
+                username="admin"
+            fi
+            if [[ -z "$password" ]]; then
+                password=$(read_secret_value webdav_password)
+            fi
+            if [[ -z "$password" ]]; then
+                log_warn "WebDAV basic auth is enabled but no password was found; WebDAV tests may fail"
+                return 0
+            fi
+            ;;
+        users)
+            username="${MNEMONAS_WEBDAV_USERNAME:-}"
+            password="${MNEMONAS_WEBDAV_PASSWORD:-}"
+            if [[ -z "$username" || -z "$password" ]]; then
+                echo -e "${RED}ERROR:${NC} WebDAV users auth requires MNEMONAS_WEBDAV_USERNAME and MNEMONAS_WEBDAV_PASSWORD" >&2
+                exit 1
+            fi
+            ;;
+        none)
+            log_warn "WebDAV auth_type=none; WebDAV tests will run without credentials"
+            return 0
+            ;;
+        *)
+            log_warn "Unrecognized WebDAV auth_type '$auth_type'; WebDAV tests will run without credentials"
+            return 0
+            ;;
+    esac
 
     WEBDAV_AUTH_ARGS=(-u "$username:$password")
-    log_info "Using WebDAV basic auth credentials for user: $username"
+    WEBDAV_USERNAME="$username"
+    WEBDAV_PASSWORD="$password"
+    log_info "Using WebDAV $auth_type auth credentials for user: $username"
 }
 
 load_initial_admin_password() {
@@ -471,6 +548,17 @@ load_initial_admin_password() {
     fi
 
     sed -n 's/^Password:[[:space:]]*//p' "$INITIAL_PASSWORD_FILE" | head -n1
+}
+
+auth_appears_configured() {
+    local auth_enabled
+    auth_enabled="$(read_config_value auth enabled)"
+
+    if [[ "$auth_enabled" == "false" ]]; then
+        return 1
+    fi
+
+    [[ -z "$auth_enabled" || "$auth_enabled" == "true" || -f "$INITIAL_PASSWORD_FILE" || -f "$USERS_FILE" ]]
 }
 
 authenticated_api_curl() {
@@ -520,6 +608,7 @@ setup() {
     log_info "Setting up test environment..."
     require_explicit_e2e_target
     mkdir -p "$TEST_DIR"
+    configure_auth_paths
     configure_webdav_auth
     
     # Check service health
@@ -648,6 +737,56 @@ test_propfind() {
     fi
 }
 
+test_lock_unlock() {
+    log_info "Testing WebDAV LOCK/UNLOCK..."
+    local lock_payload="$TEST_DIR/webdav-lock.xml"
+    local lock_headers="$TEST_DIR/webdav-lock.headers"
+    local lock_body="$TEST_DIR/webdav-lock.body"
+    local lock_token
+    local status
+
+    cat > "$lock_payload" <<'XML'
+<D:lockinfo xmlns:D="DAV:">
+  <D:lockscope><D:exclusive/></D:lockscope>
+  <D:locktype><D:write/></D:locktype>
+  <D:owner><D:href>mnemonas-e2e</D:href></D:owner>
+</D:lockinfo>
+XML
+
+    status=$(curl -sS -X LOCK "$WEBDAV_URL/e2e-test/test.txt" \
+        -H "Depth: 0" \
+        -H "Timeout: Second-3600" \
+        -H "Content-Type: application/xml" \
+        --data-binary "@$lock_payload" \
+        -D "$lock_headers" \
+        -o "$lock_body" \
+        -w "%{http_code}" 2>/dev/null || true)
+    if [[ "$status" != "200" ]]; then
+        log_fail "WebDAV LOCK failed (status: $status)"
+        return
+    fi
+
+    lock_token=$(awk 'tolower($0) ~ /^lock-token:/ {sub(/^[^:]*:[[:space:]]*/, ""); gsub(/\r/, ""); print; exit}' "$lock_headers")
+    if [[ ! "$lock_token" =~ ^\<opaquelocktoken:[^[:space:]\>]+\>$ ]]; then
+        log_fail "WebDAV LOCK returned invalid Lock-Token: $lock_token"
+        return
+    fi
+    if ! grep -Eq '<[^/][^>]*lockdiscovery([[:space:]>])' "$lock_body"; then
+        log_fail "WebDAV LOCK response missing lockdiscovery"
+        return
+    fi
+
+    status=$(curl -sS -X UNLOCK "$WEBDAV_URL/e2e-test/test.txt" \
+        -H "Lock-Token: $lock_token" \
+        -o /dev/null \
+        -w "%{http_code}" 2>/dev/null || true)
+    if [[ "$status" == "204" ]]; then
+        log_ok "WebDAV LOCK/UNLOCK round trip successful"
+    else
+        log_fail "WebDAV UNLOCK failed (status: $status)"
+    fi
+}
+
 test_file_copy() {
     log_info "Testing file copy (COPY)..."
     local status=$(curl -sf -X COPY "$WEBDAV_URL/e2e-test/test.txt" \
@@ -685,6 +824,72 @@ test_file_move() {
     fi
 }
 
+test_rclone_webdav_smoke() {
+    log_info "Testing optional rclone WebDAV smoke..."
+    if [[ "${RUN_RCLONE_WEBDAV:-0}" != "1" ]]; then
+        log_skip "rclone WebDAV smoke disabled; set RUN_RCLONE_WEBDAV=1 to enable"
+        return
+    fi
+    if ! command -v rclone >/dev/null 2>&1; then
+        log_skip "rclone WebDAV smoke requires rclone"
+        return
+    fi
+
+    local remote=":webdav:"
+    local rclone_config="$TEST_DIR/rclone.conf"
+    local upload_file="$TEST_DIR/rclone-smoke.txt"
+    local download_file="$TEST_DIR/rclone-smoke-downloaded.txt"
+    local log_file="$TEST_DIR/rclone-smoke.log"
+    local -a rclone_args=(
+        --config "$rclone_config"
+        --webdav-url "$WEBDAV_URL"
+        --webdav-vendor other
+        --retries 1
+        --low-level-retries 1
+        --stats-one-line
+    )
+
+    : > "$rclone_config"
+    printf 'rclone webdav smoke\n' > "$upload_file"
+
+    if [[ -n "$WEBDAV_USERNAME" && -n "$WEBDAV_PASSWORD" ]]; then
+        local obscured_password
+        obscured_password="$(command rclone obscure "$WEBDAV_PASSWORD" 2>/dev/null)"
+        if [[ -z "$obscured_password" ]]; then
+            log_fail "rclone could not obscure WebDAV password"
+            return
+        fi
+        rclone_args+=(--webdav-user "$WEBDAV_USERNAME" --webdav-pass "$obscured_password")
+    fi
+
+    if ! command rclone copyto "$upload_file" "${remote}e2e-test/rclone-smoke.txt" "${rclone_args[@]}" > "$log_file" 2>&1; then
+        log_fail "rclone WebDAV upload failed: $(tail -n 1 "$log_file")"
+        return
+    fi
+    if ! command rclone copyto "${remote}e2e-test/rclone-smoke.txt" "$download_file" "${rclone_args[@]}" > "$log_file" 2>&1; then
+        log_fail "rclone WebDAV download failed: $(tail -n 1 "$log_file")"
+        return
+    fi
+    if ! cmp -s "$upload_file" "$download_file"; then
+        log_fail "rclone WebDAV download content mismatch"
+        return
+    fi
+    if ! command rclone moveto "${remote}e2e-test/rclone-smoke.txt" "${remote}e2e-test/rclone-smoke-moved.txt" "${rclone_args[@]}" > "$log_file" 2>&1; then
+        log_fail "rclone WebDAV move failed: $(tail -n 1 "$log_file")"
+        return
+    fi
+    if ! command rclone lsf "${remote}e2e-test/" "${rclone_args[@]}" > "$log_file" 2>&1; then
+        log_fail "rclone WebDAV list failed: $(tail -n 1 "$log_file")"
+        return
+    fi
+    if ! grep -Fxq "rclone-smoke-moved.txt" "$log_file"; then
+        log_fail "rclone WebDAV list did not include moved object"
+        return
+    fi
+
+    log_ok "rclone WebDAV smoke succeeded"
+}
+
 # ==============================================================================
 # Test Group 3: ETag / Conditional Requests
 # ==============================================================================
@@ -702,6 +907,10 @@ test_etag_returned() {
 test_if_none_match() {
     log_info "Testing If-None-Match (304 Not Modified)..."
     local etag=$(curl -sf "$WEBDAV_URL/e2e-test/test.txt" -I | grep -i "^etag:" | awk '{print $2}' | tr -d '\r')
+    if [[ -z "$etag" ]]; then
+        log_fail "If-None-Match test could not read ETag header"
+        return
+    fi
     local status=$(curl -s -w "%{http_code}" -o /dev/null "$WEBDAV_URL/e2e-test/test.txt" \
         -H "If-None-Match: $etag")
     if [[ "$status" == "304" ]]; then
@@ -714,6 +923,10 @@ test_if_none_match() {
 test_if_match_success() {
     log_info "Testing If-Match (precondition success)..."
     local etag=$(curl -sf "$WEBDAV_URL/e2e-test/test.txt" -I | grep -i "^etag:" | awk '{print $2}' | tr -d '\r')
+    if [[ -z "$etag" ]]; then
+        log_fail "If-Match success test could not read ETag header"
+        return
+    fi
     echo "Updated content" > "$TEST_DIR/update.txt"
     local status=$(curl -sf -X PUT "$WEBDAV_URL/e2e-test/test.txt" \
         -H "If-Match: $etag" \
@@ -754,7 +967,11 @@ test_version_history() {
     local status=$(authenticated_api_curl -s -w "%{http_code}" -o "$history_file" "$API_URL/versions/e2e-test/versioned.txt")
     local resp=$(cat "$history_file" 2>/dev/null || echo "")
     if [[ "$status" == "200" ]] && echo "$resp" | grep -q "versions\|hash"; then
-        log_ok "Version history API returns data"
+        if [[ -z "$ADMIN_ACCESS_TOKEN" ]] && auth_appears_configured; then
+            log_fail "Version history API allowed unauthenticated access while auth appears configured"
+        else
+            log_ok "Version history API returns data"
+        fi
     elif [[ -z "$ADMIN_ACCESS_TOKEN" && ( "$status" == "401" || "$status" == "403" ) ]]; then
         log_skip "Version history API requires admin authentication"
     else
@@ -844,6 +1061,8 @@ test_metrics_api() {
     admin_api_request GET "$API_URL/metrics"
     if [[ -z "$ADMIN_ACCESS_TOKEN" && ( "$ADMIN_API_STATUS" == "401" || "$ADMIN_API_STATUS" == "403" ) ]]; then
         log_skip "Metrics API requires admin authentication"
+    elif [[ -z "$ADMIN_ACCESS_TOKEN" && "$ADMIN_API_STATUS" == "200" ]] && auth_appears_configured; then
+        log_fail "Metrics API allowed unauthenticated access while auth appears configured"
     elif [[ "$ADMIN_API_STATUS" == "200" ]] && echo "$ADMIN_API_BODY" | grep -q "requests"; then
         log_ok "Metrics API returns request statistics"
     else
@@ -856,6 +1075,8 @@ test_scrub_api() {
     admin_api_request GET "$API_URL/maintenance/scrub"
     if [[ -z "$ADMIN_ACCESS_TOKEN" && ( "$ADMIN_API_STATUS" == "401" || "$ADMIN_API_STATUS" == "403" ) ]]; then
         log_skip "Scrub API requires admin authentication"
+    elif [[ -z "$ADMIN_ACCESS_TOKEN" && "$ADMIN_API_STATUS" == "200" ]] && auth_appears_configured; then
+        log_fail "Scrub API allowed unauthenticated access while auth appears configured"
     elif [[ "$ADMIN_API_STATUS" == "200" ]] && echo "$ADMIN_API_BODY" | grep -q "success\|has_result\|running"; then
         log_ok "Scrub API returns status"
     else
@@ -868,6 +1089,8 @@ test_scrub_trigger() {
     admin_api_request POST "$API_URL/maintenance/scrub"
     if [[ -z "$ADMIN_ACCESS_TOKEN" && ( "$ADMIN_API_STATUS" == "401" || "$ADMIN_API_STATUS" == "403" ) ]]; then
         log_skip "Scrub trigger API requires admin authentication"
+    elif [[ -z "$ADMIN_ACCESS_TOKEN" && "$ADMIN_API_STATUS" == "200" ]] && auth_appears_configured; then
+        log_fail "Scrub trigger API allowed unauthenticated access while auth appears configured"
     elif [[ "$ADMIN_API_STATUS" == "200" ]] && echo "$ADMIN_API_BODY" | grep -q "success\|started\|running"; then
         log_ok "Scrub trigger API works"
     else
@@ -880,6 +1103,8 @@ test_diagnostics_export() {
     admin_api_request GET "$API_URL/diagnostics"
     if [[ -z "$ADMIN_ACCESS_TOKEN" && ( "$ADMIN_API_STATUS" == "401" || "$ADMIN_API_STATUS" == "403" ) ]]; then
         log_skip "Diagnostics export requires admin authentication"
+    elif [[ -z "$ADMIN_ACCESS_TOKEN" && "$ADMIN_API_STATUS" == "200" ]] && auth_appears_configured; then
+        log_fail "Diagnostics export allowed unauthenticated access while auth appears configured"
     elif [[ "$ADMIN_API_STATUS" == "200" ]] && echo "$ADMIN_API_BODY" | grep -q "system\|storage\|success"; then
         log_ok "Diagnostics export returns system info"
     else
@@ -1017,7 +1242,7 @@ test_auth_login_success() {
 
 test_auth_login_failure() {
     log_info "Testing auth login with invalid credentials..."
-    
+
     local status=$(curl -s -X POST "$API_URL/auth/login" \
         -H "Content-Type: application/json" \
         -d '{"username":"admin","password":"wrongpassword"}' \
@@ -1026,7 +1251,11 @@ test_auth_login_failure() {
     if [[ "$status" == "401" ]]; then
         log_ok "Auth login correctly rejects invalid password (401)"
     elif [[ "$status" == "000" ]]; then
-        log_skip "Auth endpoint not available (auth may be disabled)"
+        if auth_appears_configured; then
+            log_fail "Auth login endpoint unavailable while auth appears configured"
+        else
+            log_skip "Auth endpoint not available (auth may be disabled)"
+        fi
     else
         log_fail "Auth login should return 401 for invalid password (got $status)"
     fi
@@ -1039,12 +1268,16 @@ test_auth_password_file_deleted_after_login() {
     
     # If auth is enabled and we just logged in, file should be deleted
     if [[ -f "$password_file" ]]; then
-        # File still exists - either we haven't logged in yet, or deletion failed
-        log_skip "Password file still exists (login may not have occurred)"
+        if [[ -n "$ADMIN_ACCESS_TOKEN" ]]; then
+            log_fail "Password file still exists after successful login"
+        else
+            log_skip "Password file still exists (login may not have occurred)"
+        fi
     else
-        # File doesn't exist - could be already deleted, or auth disabled
-        # Check if users.json exists to confirm auth is set up
-        if [[ -f "$USERS_FILE" ]]; then
+        # A successful login proves this run used the bootstrap password file.
+        if [[ -n "$ADMIN_ACCESS_TOKEN" ]]; then
+            log_ok "Password file correctly deleted after login"
+        elif [[ -f "$USERS_FILE" ]]; then
             log_ok "Password file correctly deleted after login"
         else
             log_skip "Auth not initialized (no users.json)"
@@ -1061,7 +1294,11 @@ test_auth_protected_endpoint() {
     if [[ "$status" == "401" ]]; then
         log_ok "Protected endpoint correctly returns 401 without token"
     elif [[ "$status" == "200" ]]; then
-        log_skip "Auth may be disabled (endpoint returned 200)"
+        if auth_appears_configured; then
+            log_fail "Protected endpoint allowed unauthenticated access while auth appears configured"
+        else
+            log_skip "Auth may be disabled (endpoint returned 200)"
+        fi
     else
         log_fail "Protected endpoint returned unexpected status: $status"
     fi
@@ -1073,9 +1310,8 @@ test_auth_token_refresh() {
     local password_file="$INITIAL_PASSWORD_FILE"
     local refresh_token="$ADMIN_REFRESH_TOKEN"
     
-    # Need to get a valid token first
-    # This test requires auth to be enabled and initial password available
-    if [[ ! -f "$password_file" ]] && [[ ! -f "$USERS_FILE" ]]; then
+    # Existing refresh tokens from a successful login do not require auth files at default paths.
+    if [[ -z "$refresh_token" && ! -f "$password_file" && ! -f "$USERS_FILE" ]]; then
         log_skip "Auth not configured for token refresh test"
         return
     fi
@@ -1141,9 +1377,11 @@ main() {
     test_file_download
     test_directory_create
     test_propfind
+    test_lock_unlock
     test_file_copy
     test_file_move
     test_file_delete
+    test_rclone_webdav_smoke
 
     # Group 3: ETag
     # Re-create test file for ETag tests

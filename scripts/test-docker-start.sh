@@ -74,6 +74,50 @@ run_default_config_test() {
 	assert_mode "$data_dir/.mnemonas/objects" "700"
 }
 
+run_existing_config_preserved_test() {
+	local case_dir="$TMP_ROOT/existing-config-preserved"
+	local app_dir="$case_dir/app"
+	local data_dir="$case_dir/data"
+	local configured_dir="$case_dir/configured-data"
+	local capture_dir="$case_dir/capture"
+	mkdir -p "$data_dir" "$capture_dir"
+	make_fake_app "$app_dir"
+	cat > "$data_dir/config.toml" <<EOF
+# Hand-edited Docker config. Preserve comments and formatting.
+[server]
+host = "0.0.0.0"
+port = 8080
+
+[storage]
+# Keep single-quoted roots valid for TOML.
+root = '$configured_dir'
+
+[dataplane]
+grpc_address = "127.0.0.1:19090"
+
+[dataplane.cdc]
+min_chunk_size = 131_072
+avg_chunk_size = 524_288
+max_chunk_size = 2_097_152
+EOF
+	cp "$data_dir/config.toml" "$case_dir/config.expected"
+
+	CAPTURE_DIR="$capture_dir" \
+		APP_DIR="$app_dir" \
+		STORAGE_ROOT="$data_dir" \
+		CONFIG_PATH="$data_dir/config.toml" \
+		bash "$REPO_ROOT/scripts/docker-start.sh" > "$case_dir/start.log" 2>&1
+
+	cmp -s "$case_dir/config.expected" "$data_dir/config.toml" || fail "existing Docker config was rewritten"
+	assert_file_contains "$case_dir/start.log" "[WARN] Configured [storage].root is $configured_dir, but Docker STORAGE_ROOT is $data_dir"
+	assert_file_contains "$capture_dir/dataplane.args" "--grpc 127.0.0.1:19090"
+	assert_file_contains "$capture_dir/dataplane.args" "--data-dir $configured_dir/.mnemonas/objects"
+	assert_file_contains "$capture_dir/dataplane.args" "--min-chunk-size 131072"
+	assert_file_contains "$capture_dir/dataplane.args" "--avg-chunk-size 524288"
+	assert_file_contains "$capture_dir/dataplane.args" "--max-chunk-size 2097152"
+	assert_file_contains "$capture_dir/nasd.args" "--config $data_dir/config.toml"
+}
+
 run_mismatched_storage_root_warning_test() {
 	local case_dir="$TMP_ROOT/mismatched-root"
 	local app_dir="$case_dir/app"
@@ -682,9 +726,11 @@ run_manual_docker_run_docs_prepare_data_dir_test() {
 
 run_dockerfile_default_config_permission_test() {
 	assert_file_contains "$REPO_ROOT/Dockerfile" "COPY --chmod=0644 mnemonas.example.toml /app/mnemonas.example.toml"
+	assert_file_contains "$REPO_ROOT/Dockerfile" "COPY --chmod=0755 scripts/docker-start.sh /app/start.sh"
 }
 
 run_default_config_test
+run_existing_config_preserved_test
 run_mismatched_storage_root_warning_test
 run_toml_escaped_storage_root_test
 run_missing_storage_root_test
