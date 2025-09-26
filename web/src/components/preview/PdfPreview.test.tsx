@@ -10,7 +10,7 @@ vi.mock('@/api/auth', () => ({
 
 vi.mock('@heroui/react', () => ({
   Spinner: ({ size }: { size: string }) => (
-    <div data-testid="spinner" data-size={size}>Loading...</div>
+    <div role="status" aria-label={`加载中 ${size}`}>Loading...</div>
   ),
   Button: ({ children, ...props }: { children?: ReactNode } & AnchorHTMLAttributes<HTMLAnchorElement>) => (
     <a {...props}>{children}</a>
@@ -42,6 +42,14 @@ describe('PdfPreview', () => {
     } as Response)
   })
 
+  it('shows a named loading status while fetching the PDF preview', () => {
+    mockAuthFetch.mockImplementationOnce(() => new Promise<Response>(() => {}))
+
+    render(<PdfPreview path="/docs/file.pdf" filename="file.pdf" />)
+
+    expect(screen.getByRole('status', { name: '加载 PDF 预览' })).toBeInTheDocument()
+  })
+
   it('loads pdf content through authFetch', async () => {
     render(<PdfPreview path="/docs/file.pdf" filename="file.pdf" />)
 
@@ -49,7 +57,7 @@ describe('PdfPreview', () => {
       expect(mockAuthFetch).toHaveBeenCalledWith('/api/v1/download/docs/file.pdf', expect.anything())
     })
 
-    expect(await screen.findByTitle('file.pdf')).toBeInTheDocument()
+    expect(await screen.findByLabelText('file.pdf PDF 预览')).toBeInTheDocument()
   })
 
   it('passes an abort signal and cancels the pending pdf request when unmounted', async () => {
@@ -73,7 +81,7 @@ describe('PdfPreview', () => {
   it('forces the preview blob to application/pdf', async () => {
     render(<PdfPreview path="/docs/file.pdf" filename="file.pdf" />)
 
-    await screen.findByTitle('file.pdf')
+    await screen.findByLabelText('file.pdf PDF 预览')
 
     const createObjectURL = vi.mocked(URL.createObjectURL)
     const blob = createObjectURL.mock.calls[0]?.[0] as Blob | undefined
@@ -158,6 +166,32 @@ describe('PdfPreview', () => {
     })
     expect(json).toHaveBeenCalled()
     expect(screen.queryByText('preview storage unavailable')).not.toBeInTheDocument()
+    expect(URL.createObjectURL).not.toHaveBeenCalled()
+  })
+
+  it('shows missing-file guidance for structured not-found preview responses', async () => {
+    const json = vi.fn(() => Promise.resolve({
+      success: false,
+      error: {
+        code: 'FILE_NOT_FOUND',
+        message: 'file not found',
+      },
+    }))
+
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 404,
+      headers: new Headers({ 'Content-Type': 'application/json' }),
+      clone: () => ({ json }),
+    } as unknown as Response)
+
+    render(<PdfPreview path="/docs/missing.pdf" filename="missing.pdf" />)
+
+    await waitFor(() => {
+      expect(screen.getByText('该文件可能已被移动或删除，请刷新列表后重试。')).toBeInTheDocument()
+    })
+    expect(json).toHaveBeenCalled()
+    expect(screen.queryByText('file not found')).not.toBeInTheDocument()
     expect(URL.createObjectURL).not.toHaveBeenCalled()
   })
 

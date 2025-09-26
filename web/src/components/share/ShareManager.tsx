@@ -133,6 +133,16 @@ function getShareDeleteSuccessToast(result: { warning: boolean }): {
     : { title: '分享已删除', color: 'success' }
 }
 
+function getShareToggleSuccessToast(enabled: boolean, warning: boolean): {
+  title: string
+  color: 'success' | 'warning'
+} {
+  const actionTitle = enabled ? '分享已启用' : '分享已禁用'
+  return warning
+    ? { title: `${actionTitle}，但存在警告`, color: 'warning' }
+    : { title: actionTitle, color: 'success' }
+}
+
 function isAbortError(error: unknown): boolean {
   return typeof error === 'object'
     && error !== null
@@ -493,18 +503,15 @@ export function ShareManager({
     const controller = new AbortController()
     toggleAbortControllersRef.current.set(share.id, controller)
     try {
-      await updateShare(share.id, { enabled: !share.enabled }, { signal: controller.signal })
+      const result = await updateShare(share.id, { enabled: !share.enabled }, { signal: controller.signal })
       if (controller.signal.aborted) {
         return
       }
 
-      setShares(prev => prev.map(s => 
-        s.id === share.id ? { ...s, enabled: !s.enabled } : s
-      ))
-      addToast({ 
-        title: share.enabled ? '分享已禁用' : '分享已启用', 
-        color: 'success' 
-      })
+      setShares(prev => prev.map(s => (
+        s.id === share.id ? result : s
+      )))
+      addToast(getShareToggleSuccessToast(result.enabled, result.warning))
     } catch (err) {
       if (controller.signal.aborted || isAbortError(err)) {
         return
@@ -547,10 +554,14 @@ export function ShareManager({
 
       const disabledIds = new Set<string>()
       let firstFailure: unknown | null = null
+      let warningCount = 0
 
       results.forEach((result, index) => {
         if (result.status === 'fulfilled') {
           disabledIds.add(targets[index].id)
+          if (result.value.warning) {
+            warningCount++
+          }
           return
         }
         if (firstFailure === null) {
@@ -565,8 +576,10 @@ export function ShareManager({
             : s
         )))
         addToast({
-          title: `已停用 ${disabledIds.size} 个需处理分享`,
-          color: 'success',
+          title: warningCount > 0
+            ? `已停用 ${disabledIds.size} 个需处理分享，但存在警告`
+            : `已停用 ${disabledIds.size} 个需处理分享`,
+          color: warningCount > 0 ? 'warning' : 'success',
         })
       }
 
@@ -983,7 +996,7 @@ function ShareItem({ share, onCopy, onReviewActivity, onToggle, onDelete }: Shar
   const riskReasons = share.risk?.reasons?.filter(reason => !reason.resolved) ?? []
 
   return (
-    <Card className="card-meridian">
+    <Card className="card-mnemonas">
       <CardBody className="p-4">
         <div className="flex flex-col gap-4 sm:flex-row sm:items-start">
           {/* Icon */}

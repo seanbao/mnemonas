@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { addToast } from '@heroui/react'
+import { getNonBlankJsonString } from './jsonErrorResponse'
 
 /**
  * Result of a batch operation
@@ -59,6 +60,8 @@ export interface UseBatchOperationOptions<T, R = void> {
   operation: (item: T, context: BatchOperationContext) => Promise<R>
   /** Message templates for toast notifications */
   messages: BatchOperationMessages
+  /** Optional mapper for locally safe warning messages. Backend messages are not exposed by default. */
+  getWarningMessage?: (result: R) => string | undefined
   /** Optional custom toast builder for batch results */
   getToast?: (result: BatchOperationResult) => BatchOperationToast | null | undefined
   /** Optional callback when operation completes */
@@ -74,9 +77,9 @@ export interface UseBatchOperationOptions<T, R = void> {
  * const { execute, isLoading } = useBatchOperation({
  *   operation: deleteFile,
  *   messages: {
- *     success: '{count} 项删除成功',
- *     failure: '{count} 项删除失败',
- *     partial: '{succeeded} 项删除成功，{failed} 项失败',
+ *     success: '{count} files deleted',
+ *     failure: '{count} files failed',
+ *     partial: '{succeeded} files deleted, {failed} failed',
  *   },
  *   onComplete: () => clearSelection(),
  * })
@@ -88,7 +91,7 @@ export interface UseBatchOperationOptions<T, R = void> {
 export function useBatchOperation<T, R = void>(
   options: UseBatchOperationOptions<T, R>
 ) {
-  const { operation, messages, getToast, onComplete } = options
+  const { operation, messages, getWarningMessage, getToast, onComplete } = options
   const [isLoading, setIsLoading] = useState(false)
   const mountedRef = useRef(true)
 
@@ -127,7 +130,7 @@ export function useBatchOperation<T, R = void>(
         const failedErrors = results
           .filter((result): result is PromiseRejectedResult => result.status === 'rejected')
           .map((result) => result.reason)
-        const warningMessages = results.flatMap((result) => {
+        const warningResults = results.flatMap((result) => {
           if (result.status !== 'fulfilled') {
             return []
           }
@@ -135,7 +138,11 @@ export function useBatchOperation<T, R = void>(
           if (!isWarningAwareActionResult(value) || value.warning !== true) {
             return []
           }
-          return typeof value.message === 'string' && value.message ? [value.message] : []
+          return [result.value]
+        })
+        const warningMessages = warningResults.flatMap((value) => {
+          const message = getNonBlankJsonString(getWarningMessage?.(value))
+          return message === undefined ? [] : [message]
         })
 
         const result = {
@@ -145,7 +152,7 @@ export function useBatchOperation<T, R = void>(
           succeededItems,
           failedItems,
           failedErrors,
-          warningCount: warningMessages.length,
+          warningCount: warningResults.length,
           warningMessages,
         }
 
@@ -155,7 +162,7 @@ export function useBatchOperation<T, R = void>(
 
         // Show appropriate toast
         const toast = getToast?.(result) ?? (failed === 0
-          ? warningMessages.length > 0
+          ? result.warningCount > 0
             ? {
               title: getDefaultWarningSuccessTitle(messages, succeeded),
               color: 'warning' as const,
@@ -188,7 +195,7 @@ export function useBatchOperation<T, R = void>(
         }
       }
     },
-    [operation, messages, getToast, onComplete]
+    [operation, messages, getWarningMessage, getToast, onComplete]
   )
 
   return { execute, isLoading }

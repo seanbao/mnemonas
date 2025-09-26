@@ -190,13 +190,22 @@ vi.mock('@/api/activity', () => ({
       upload: '上传文件',
       download: '下载文件',
       delete: '删除文件',
+      rename: '重命名',
       move: '移动文件',
+      copy: '复制文件',
+      create: '创建文件夹',
       share: '创建分享',
+      unshare: '取消分享',
+      favorite: '添加收藏',
+      unfavorite: '取消收藏',
+      favorite_note_update: '更新收藏备注',
       restore: '恢复版本',
       login: '登录',
+      logout: '登出',
       trash_restore: '从回收站恢复',
       trash_delete: '永久删除回收站项目',
       trash_empty: '清空回收站',
+      disk_health: '磁盘健康异常',
       scrub: '数据校验',
     }
     return labels[action] || action
@@ -206,7 +215,22 @@ vi.mock('@/api/activity', () => ({
       upload: 'success',
       delete: 'danger',
       download: 'warning',
+      rename: 'warning',
+      move: 'warning',
+      copy: 'primary',
+      create: 'success',
+      share: 'primary',
+      unshare: 'warning',
+      favorite: 'primary',
+      unfavorite: 'warning',
+      favorite_note_update: 'primary',
+      restore: 'success',
       login: 'default',
+      logout: 'default',
+      trash_restore: 'success',
+      trash_delete: 'danger',
+      trash_empty: 'danger',
+      disk_health: 'warning',
       scrub: 'warning',
     }
     return colors[action] || 'primary'
@@ -423,7 +447,7 @@ describe('ActivityPage', () => {
       user_samples: ['owner'],
       activity_entry_ids: ['share-1'],
     }))
-    mockClearActivity.mockResolvedValue({ message: '最近操作已清空' })
+    mockClearActivity.mockResolvedValue({ warning: false, message: '最近操作已清空' })
   })
 
   describe('rendering', () => {
@@ -431,9 +455,8 @@ describe('ActivityPage', () => {
       mockListActivity.mockImplementation(() => new Promise(() => {}))
       render(<ActivityPage />)
       
-      // Should show skeleton loaders
-      const skeletons = document.querySelectorAll('[class*="skeleton"], [class*="animate"]')
-      expect(skeletons.length).toBeGreaterThan(0)
+      expect(screen.getByRole('status', { name: '加载最近操作' })).toBeInTheDocument()
+      expect(screen.getByText('加载最近操作...')).toBeInTheDocument()
     })
 
     it('shows an invalid-home error instead of loading activity for non-admin users without a home directory', async () => {
@@ -472,19 +495,20 @@ describe('ActivityPage', () => {
       render(<ActivityPage />)
 
       await waitFor(() => {
-        expect(screen.getByText('累计操作')).toBeTruthy()
-        expect(screen.getByText('今日操作')).toBeTruthy()
-        expect(screen.getByText('最常见操作')).toBeTruthy()
-        expect(screen.getByText('最活跃用户')).toBeTruthy()
+        const totalCard = screen.getByRole('group', { name: '累计操作，12，历史记录总量' })
+        const todayCard = screen.getByRole('group', { name: '今日操作，3，当天新增记录' })
+        const topActionCard = screen.getByRole('group', { name: '最常见操作，上传文件，7 次' })
+        const topUserCard = screen.getByRole('group', { name: '最活跃用户，admin，8 次' })
+
+        expect(within(totalCard).getByText('12')).toBeTruthy()
+        expect(within(todayCard).getByText('3')).toBeTruthy()
+        expect(within(topActionCard).getByText('上传文件')).toBeTruthy()
+        expect(within(topActionCard).getByText('7 次')).toBeTruthy()
+        expect(within(topUserCard).getByText('admin')).toBeTruthy()
+        expect(within(topUserCard).getByText('8 次')).toBeTruthy()
         expect(screen.getByText('高风险摘要')).toBeTruthy()
         expect(screen.getByText('未发现明显集中批量变更')).toBeTruthy()
         expect(screen.getByText('10 分钟最多')).toBeTruthy()
-        expect(screen.getAllByText('上传文件').length).toBeGreaterThan(1)
-        expect(screen.getAllByText('admin').length).toBeGreaterThan(1)
-        expect(screen.getAllByText('12').length).toBeGreaterThan(0)
-        expect(screen.getAllByText('3').length).toBeGreaterThan(0)
-        expect(screen.getByText('7 次')).toBeTruthy()
-        expect(screen.getByText('8 次')).toBeTruthy()
       })
     })
 
@@ -690,19 +714,19 @@ describe('ActivityPage', () => {
         const review = within(screen.getByLabelText('当前页复核明细'))
         expect(review.getByText('当前页复核明细')).toBeTruthy()
         expect(review.getByText('当前页包含 3 条需复核记录')).toBeTruthy()
-        expect(review.getByText('路径: /old-file.txt')).toBeTruthy()
-        expect(review.getByText('复核: 清理状态: 残留数据清理不完整，请检查存储状态。')).toBeTruthy()
-        expect(review.getAllByText('路径: /documents/report.pdf')).toHaveLength(2)
-        expect(review.getByText('复核: 目标路径: /archive/report.pdf')).toBeTruthy()
-        expect(review.getByText('复核: 密码保护: 是')).toBeTruthy()
+        expect(review.getByText('路径：/old-file.txt')).toBeTruthy()
+        expect(review.getByText('复核：清理状态：残留数据清理不完整，请检查存储状态。')).toBeTruthy()
+        expect(review.getAllByText('路径：/documents/report.pdf')).toHaveLength(2)
+        expect(review.getByText('复核：目标路径：/archive/report.pdf')).toBeTruthy()
+        expect(review.getByText('复核：密码保护：是')).toBeTruthy()
         expect(review.queryByText('登录')).toBeNull()
         const checklist = within(screen.getByLabelText('复核处置清单'))
-        expect(checklist.getByText('确认影响范围: 3 条记录，涉及 2 个路径、2 个用户。')).toBeTruthy()
-        expect(checklist.getByText('删除类操作: 检查回收站、版本历史和最近备份，确认是否需要恢复。')).toBeTruthy()
-        expect(checklist.getByText('路径变更: 核对来源和目标路径，确认移动或重命名是否符合预期。')).toBeTruthy()
-        expect(checklist.getByText('分享变更: 核对分享链接、密码、有效期和访问次数，关闭不再需要的公开链接。')).toBeTruthy()
-        expect(checklist.getByText('带警告记录: 先处理持久化或清理警告，再把本次复核标记为完成。')).toBeTruthy()
-        expect(checklist.getByText('记录处置结论: 在团队工单或运维记录中写明复核人、处理结果和时间。')).toBeTruthy()
+        expect(checklist.getByText('确认影响范围：3 条记录，涉及 2 个路径、2 个用户。')).toBeTruthy()
+        expect(checklist.getByText('删除类操作：检查回收站、版本历史和最近备份，确认是否需要恢复。')).toBeTruthy()
+        expect(checklist.getByText('路径变更：核对来源和目标路径，确认移动或重命名是否符合预期。')).toBeTruthy()
+        expect(checklist.getByText('分享变更：核对分享链接、密码、有效期和访问次数，关闭不再需要的公开链接。')).toBeTruthy()
+        expect(checklist.getByText('带警告记录：先处理持久化或清理警告，再把本次复核标记为完成。')).toBeTruthy()
+        expect(checklist.getByText('记录处置结论：在团队工单或运维记录中写明复核人、处理结果和时间。')).toBeTruthy()
       })
     })
 
@@ -773,11 +797,11 @@ describe('ActivityPage', () => {
         }))
         expect(recorder.getByText('已确认删除可恢复，分享链接已关闭')).toBeTruthy()
         expect(recorder.getAllByText('已恢复').length).toBeGreaterThan(0)
-        expect(recorder.getByText('类型: 删除文件 1 · 创建分享 1')).toBeTruthy()
-        expect(recorder.getByText('路径样例: /old-file.txt, /documents/report.pdf')).toBeTruthy()
-        expect(recorder.getByText('用户样例: user1, admin')).toBeTruthy()
-        expect(recorder.getByText('当前页: 2 条待处置 / 3 条总记录 · 2 个路径 · 2 个用户')).toBeTruthy()
-        expect(recorder.getByText('条件: 未筛选')).toBeTruthy()
+        expect(recorder.getByText('类型：删除文件 1 · 创建分享 1')).toBeTruthy()
+        expect(recorder.getByText('路径样例：/old-file.txt, /documents/report.pdf')).toBeTruthy()
+        expect(recorder.getByText('用户样例：user1, admin')).toBeTruthy()
+        expect(recorder.getByText('当前页：2 条待处置 / 3 条总记录 · 2 个路径 · 2 个用户')).toBeTruthy()
+        expect(recorder.getByText('条件：未筛选')).toBeTruthy()
         expect(recorder.getAllByText('admin').length).toBeGreaterThan(0)
         expect(noteInput.value).toBe('')
         expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({ title: '本页复核已记录', color: 'success' }))
@@ -915,11 +939,11 @@ describe('ActivityPage', () => {
         const recorder = within(screen.getByLabelText('活动复核记录'))
         expect(recorder.getByText('批量删除已完成恢复确认')).toBeTruthy()
         expect(recorder.getAllByText('已恢复').length).toBeGreaterThan(0)
-        expect(recorder.getByText('类型: 删除文件 2')).toBeTruthy()
-        expect(recorder.getByText('路径样例: /family/photos/a.jpg, /family/photos/b.jpg')).toBeTruthy()
-        expect(recorder.getByText('用户样例: owner, member')).toBeTruthy()
-        expect(recorder.getByText('集中窗口: 6 条待处置 / 8 条总记录 · 4 个路径 · 2 个用户')).toBeTruthy()
-        expect(recorder.getByText('条件: 窗口 2026-05-01 10:00 - 2026-05-01 10:08 · 分组 高风险变更')).toBeTruthy()
+        expect(recorder.getByText('类型：删除文件 2')).toBeTruthy()
+        expect(recorder.getByText('路径样例：/family/photos/a.jpg, /family/photos/b.jpg')).toBeTruthy()
+        expect(recorder.getByText('用户样例：owner, member')).toBeTruthy()
+        expect(recorder.getByText('集中窗口：6 条待处置 / 8 条总记录 · 4 个路径 · 2 个用户')).toBeTruthy()
+        expect(recorder.getByText('条件：窗口 2026-05-01 10:00 - 2026-05-01 10:08 · 分组 高风险变更')).toBeTruthy()
         expect(recorder.getByText('owner')).toBeTruthy()
       })
     })
@@ -1023,8 +1047,8 @@ describe('ActivityPage', () => {
         const followUpView = within(screen.getByLabelText('需跟进复核批量视图'))
         expect(followUpView.getByText('当前还有 3 条复核记录需跟进')).toBeTruthy()
         expect(followUpView.getByText('误删恢复仍未确认')).toBeTruthy()
-        expect(followUpView.getByText('全部记录: 2 条待处置 / 5 条总记录')).toBeTruthy()
-        expect(followUpView.getByText('路径样例: /photos/a.jpg, /photos/b.jpg')).toBeTruthy()
+        expect(followUpView.getByText('全部记录：2 条待处置 / 5 条总记录')).toBeTruthy()
+        expect(followUpView.getByText('路径样例：/photos/a.jpg, /photos/b.jpg')).toBeTruthy()
         expect(followUpView.getByText('其余 2 条未在此处展开')).toBeTruthy()
       })
 
@@ -1373,8 +1397,8 @@ describe('ActivityPage', () => {
       render(<ActivityPage />)
 
       await waitFor(() => {
-        expect(screen.getByText('client: web')).toBeTruthy()
-        expect(screen.getByText('result: ok')).toBeTruthy()
+        expect(screen.getByText('client：web')).toBeTruthy()
+        expect(screen.getByText('result：ok')).toBeTruthy()
       })
     })
 
@@ -1405,12 +1429,12 @@ describe('ActivityPage', () => {
       render(<ActivityPage />)
 
       await waitFor(() => {
-        expect(screen.getByText('类型: 文件')).toBeTruthy()
-        expect(screen.getByText('权限: 只读')).toBeTruthy()
-        expect(screen.getByText('密码保护: 是')).toBeTruthy()
-        expect(screen.getByText('访问次数: 1 次')).toBeTruthy()
-        expect(screen.getByText('访问上限: 2 次')).toBeTruthy()
-        expect(screen.getByText(/^过期时间:/)).toBeTruthy()
+        expect(screen.getByText('类型：文件')).toBeTruthy()
+        expect(screen.getByText('权限：只读')).toBeTruthy()
+        expect(screen.getByText('密码保护：是')).toBeTruthy()
+        expect(screen.getByText('访问次数：1 次')).toBeTruthy()
+        expect(screen.getByText('访问上限：2 次')).toBeTruthy()
+        expect(screen.getByText(/^过期时间：/)).toBeTruthy()
         expect(screen.queryByText('has_password: true')).toBeNull()
         expect(screen.queryByText('max_access: 2')).toBeNull()
       })
@@ -1451,16 +1475,16 @@ describe('ActivityPage', () => {
       render(<ActivityPage />)
 
       await waitFor(() => {
-        expect(screen.getByText('状态: 严重异常')).toBeTruthy()
-        expect(screen.getByText('诊断: 磁盘健康严重异常，请尽快备份并检查 SMART、温度、磨损和设备连接状态。')).toBeTruthy()
-        expect(screen.getByText('严重异常设备: data、未命名设备 等 2 个')).toBeTruthy()
-        expect(screen.getByText('首个异常设备: 未命名设备')).toBeTruthy()
-        expect(screen.getByText('设备状态: 严重异常')).toBeTruthy()
-        expect(screen.getByText('设备诊断: 磁盘温度 61 C 已达到严重阈值 60 C。')).toBeTruthy()
-        expect(screen.getByText('温度: 61 C')).toBeTruthy()
-        expect(screen.getByText('介质磨损: 98%')).toBeTruthy()
-        expect(screen.getByText('可用备用空间: 5%')).toBeTruthy()
-        expect(screen.getByText('介质错误: 7 个')).toBeTruthy()
+        expect(screen.getByText('状态：严重异常')).toBeTruthy()
+        expect(screen.getByText('诊断：磁盘健康严重异常，请尽快备份并检查 SMART、温度、磨损和设备连接状态。')).toBeTruthy()
+        expect(screen.getByText('严重异常设备：data、未命名设备 等 2 个')).toBeTruthy()
+        expect(screen.getByText('首个异常设备：未命名设备')).toBeTruthy()
+        expect(screen.getByText('设备状态：严重异常')).toBeTruthy()
+        expect(screen.getByText('设备诊断：磁盘温度 61 C 已达到严重阈值 60 C。')).toBeTruthy()
+        expect(screen.getByText('温度：61 C')).toBeTruthy()
+        expect(screen.getByText('介质磨损：98%')).toBeTruthy()
+        expect(screen.getByText('可用备用空间：5%')).toBeTruthy()
+        expect(screen.getByText('介质错误：7 个')).toBeTruthy()
       })
       expect(screen.queryByText(/temperature 61 C reached critical threshold 60 C/)).toBeNull()
       expect(screen.queryByText('device_status: critical')).toBeNull()
@@ -1501,18 +1525,18 @@ describe('ActivityPage', () => {
       render(<ActivityPage />)
 
       await waitFor(() => {
-        expect(screen.getByText('状态: 已完成')).toBeTruthy()
-        expect(screen.getByText('触发方式: 定时任务')).toBeTruthy()
-        expect(screen.getByText('总对象: 12 个')).toBeTruthy()
-        expect(screen.getByText('有效对象: 10 个')).toBeTruthy()
-        expect(screen.getByText('损坏对象: 1 个')).toBeTruthy()
-        expect(screen.getByText('缺失对象: 1 个')).toBeTruthy()
-        expect(screen.getByText('校验数据量: 2 KB')).toBeTruthy()
-        expect(screen.getByText('耗时: 1 分 30 秒')).toBeTruthy()
-        expect(screen.getByText('错误数: 2 个')).toBeTruthy()
-        expect(screen.getByText('记录持久化: 结果记录保存异常，请检查维护历史。')).toBeTruthy()
-        expect(screen.getByText(/^开始时间:/)).toBeTruthy()
-        expect(screen.getByText(/^完成时间:/)).toBeTruthy()
+        expect(screen.getByText('状态：已完成')).toBeTruthy()
+        expect(screen.getByText('触发方式：定时任务')).toBeTruthy()
+        expect(screen.getByText('总对象：12 个')).toBeTruthy()
+        expect(screen.getByText('有效对象：10 个')).toBeTruthy()
+        expect(screen.getByText('损坏对象：1 个')).toBeTruthy()
+        expect(screen.getByText('缺失对象：1 个')).toBeTruthy()
+        expect(screen.getByText('校验数据量：2 KB')).toBeTruthy()
+        expect(screen.getByText('耗时：1 分 30 秒')).toBeTruthy()
+        expect(screen.getByText('错误数：2 个')).toBeTruthy()
+        expect(screen.getByText('记录持久化：结果记录保存异常，请检查维护历史。')).toBeTruthy()
+        expect(screen.getByText(/^开始时间：/)).toBeTruthy()
+        expect(screen.getByText(/^完成时间：/)).toBeTruthy()
       })
       expect(screen.queryByText('status: completed')).toBeNull()
       expect(screen.queryByText('trigger: scheduled')).toBeNull()
@@ -1555,11 +1579,11 @@ describe('ActivityPage', () => {
       render(<ActivityPage />)
 
       await waitFor(() => {
-        expect(screen.getByText('项目数: 3 项')).toBeTruthy()
-        expect(screen.getByText('执行结果: 仅完成部分项目')).toBeTruthy()
-        expect(screen.getByText('清理状态: 部分垃圾箱数据清理不完整，请检查存储状态。')).toBeTruthy()
-        expect(screen.getByText('记录持久化: 操作已完成，但变更记录保存异常。')).toBeTruthy()
-        expect(screen.getByText('关联元数据: 关联分享或收藏恢复失败，请检查相关记录。')).toBeTruthy()
+        expect(screen.getByText('项目数：3 项')).toBeTruthy()
+        expect(screen.getByText('执行结果：仅完成部分项目')).toBeTruthy()
+        expect(screen.getByText('清理状态：部分垃圾箱数据清理不完整，请检查存储状态。')).toBeTruthy()
+        expect(screen.getByText('记录持久化：操作已完成，但变更记录保存异常。')).toBeTruthy()
+        expect(screen.getByText('关联元数据：关联分享或收藏恢复失败，请检查相关记录。')).toBeTruthy()
       })
       expect(screen.queryByText('count: 3')).toBeNull()
       expect(screen.queryByText('partial: true')).toBeNull()
@@ -1622,12 +1646,12 @@ describe('ActivityPage', () => {
       render(<ActivityPage />)
 
       await waitFor(() => {
-        expect(screen.getByText('目标路径: /archive/report.pdf')).toBeTruthy()
-        expect(screen.getByText('记录持久化: 操作已完成，但变更记录保存异常。')).toBeTruthy()
-        expect(screen.getByText('类型: 文件夹')).toBeTruthy()
-        expect(screen.getByText('清理状态: 残留数据清理不完整，请检查存储状态。')).toBeTruthy()
-        expect(screen.getByText('回收站清理: 回收站关联数据清理不完整，请检查回收站状态。')).toBeTruthy()
-        expect(screen.getByText('版本哈希: abcdef123456...')).toBeTruthy()
+        expect(screen.getByText('目标路径：/archive/report.pdf')).toBeTruthy()
+        expect(screen.getByText('记录持久化：操作已完成，但变更记录保存异常。')).toBeTruthy()
+        expect(screen.getByText('类型：文件夹')).toBeTruthy()
+        expect(screen.getByText('清理状态：残留数据清理不完整，请检查存储状态。')).toBeTruthy()
+        expect(screen.getByText('回收站清理：回收站关联数据清理不完整，请检查回收站状态。')).toBeTruthy()
+        expect(screen.getByText('版本哈希：abcdef123456...')).toBeTruthy()
       })
       expect(screen.queryByText('to: /archive/report.pdf')).toBeNull()
       expect(screen.queryByText('type: directory')).toBeNull()
@@ -1706,8 +1730,8 @@ describe('ActivityPage', () => {
       render(<ActivityPage />)
 
       await waitFor(() => {
-        expect(screen.getByText('归档格式: ZIP')).toBeTruthy()
-        expect(screen.getByText('归档项目数: 128 项')).toBeTruthy()
+        expect(screen.getByText('归档格式：ZIP')).toBeTruthy()
+        expect(screen.getByText('归档项目数：128 项')).toBeTruthy()
       })
       expect(screen.queryByText('archive: zip')).toBeNull()
       expect(screen.queryByText('entries: 128')).toBeNull()
@@ -1717,7 +1741,7 @@ describe('ActivityPage', () => {
       render(<ActivityPage />)
       
       await waitFor(() => {
-        // Should show "5 分钟前" or similar
+        // Should show localized relative-time text.
         expect(screen.getByText(/分钟前/)).toBeTruthy()
       })
     })
@@ -1876,8 +1900,20 @@ describe('ActivityPage', () => {
         expect(screen.getByText('筛选操作')).toBeTruthy()
         expect(screen.getByText('审计分组')).toBeTruthy()
         expect(screen.getByText('时间范围')).toBeTruthy()
-        expect(screen.getByPlaceholderText('按路径筛选')).toBeTruthy()
+        expect(screen.getByLabelText('按路径筛选')).toBeTruthy()
         expect(screen.getAllByText('数据校验').length).toBeGreaterThan(0)
+        expect(screen.getByText('重命名')).toBeTruthy()
+        expect(screen.getByText('复制文件')).toBeTruthy()
+        expect(screen.getByText('创建文件夹')).toBeTruthy()
+        expect(screen.getByText('取消分享')).toBeTruthy()
+        expect(screen.getByText('更新收藏备注')).toBeTruthy()
+        expect(screen.getByText('磁盘健康异常')).toBeTruthy()
+        expect(screen.queryByText('rename')).toBeNull()
+        expect(screen.queryByText('copy')).toBeNull()
+        expect(screen.queryByText('create')).toBeNull()
+        expect(screen.queryByText('unshare')).toBeNull()
+        expect(screen.queryByText('favorite_note_update')).toBeNull()
+        expect(screen.queryByText('disk_health')).toBeNull()
       })
     })
 
@@ -1885,7 +1921,7 @@ describe('ActivityPage', () => {
       const { unmount } = render(<ActivityPage />)
 
       await waitFor(() => {
-        expect(screen.getByPlaceholderText('按用户筛选')).toBeTruthy()
+        expect(screen.getByLabelText('按用户筛选')).toBeTruthy()
       })
 
       unmount()
@@ -1898,7 +1934,7 @@ describe('ActivityPage', () => {
         expect(screen.getAllByText(/共 3 条记录/).length).toBeGreaterThan(0)
       })
 
-      expect(screen.queryByPlaceholderText('按用户筛选')).toBeNull()
+      expect(screen.queryByLabelText('按用户筛选')).toBeNull()
     })
 
     it('renders refresh button', async () => {
@@ -1928,7 +1964,7 @@ describe('ActivityPage', () => {
         expectGetActivityStatsCalledWithSignal({
           action: 'delete',
         })
-        expect(screen.getByText('当前筛选:')).toBeTruthy()
+        expect(screen.getByText('当前筛选：')).toBeTruthy()
         expect(screen.getByText('当前筛选结果')).toBeTruthy()
       })
     })
@@ -1955,7 +1991,7 @@ describe('ActivityPage', () => {
         expectGetActivityStatsCalledWithSignal({
           actionGroup: 'share',
         })
-        expect(screen.getByText('当前筛选:')).toBeTruthy()
+        expect(screen.getByText('当前筛选：')).toBeTruthy()
         expect(screen.getByText('分组：分享相关')).toBeTruthy()
         expect(screen.getByText('当前筛选结果')).toBeTruthy()
       })
@@ -1978,10 +2014,10 @@ describe('ActivityPage', () => {
           actionGroup: 'share',
           path: '/docs/report.pdf',
         })
-        expect(screen.getByText('当前筛选:')).toBeTruthy()
+        expect(screen.getByText('当前筛选：')).toBeTruthy()
         expect(screen.getByText('分组：分享相关')).toBeTruthy()
         expect(screen.getByText('路径：/docs/report.pdf')).toBeTruthy()
-        expect(screen.getByPlaceholderText('按路径筛选')).toHaveValue('/docs/report.pdf')
+        expect(screen.getByLabelText('按路径筛选')).toHaveValue('/docs/report.pdf')
       })
     })
 
@@ -2029,14 +2065,14 @@ describe('ActivityPage', () => {
           offset: 0,
           action: 'scrub',
         })
-        expect(screen.getByText('当前筛选:')).toBeTruthy()
+        expect(screen.getByText('当前筛选：')).toBeTruthy()
       })
     })
 
     it('requests the entered user and shows the active user filter chip', async () => {
       render(<ActivityPage />)
 
-      const userFilterInput = await screen.findByPlaceholderText('按用户筛选')
+      const userFilterInput = await screen.findByLabelText('按用户筛选')
       fireEvent.change(userFilterInput, { target: { value: 'user1' } })
 
       await waitFor(() => {
@@ -2049,7 +2085,7 @@ describe('ActivityPage', () => {
         expectGetActivityStatsCalledWithSignal({
           user: 'user1',
         })
-        expect(screen.getByText('当前筛选:')).toBeTruthy()
+        expect(screen.getByText('当前筛选：')).toBeTruthy()
         expect(screen.getByText('用户：user1')).toBeTruthy()
       })
     })
@@ -2057,7 +2093,7 @@ describe('ActivityPage', () => {
     it('requests the entered path and shows the active path filter chip', async () => {
       render(<ActivityPage />)
 
-      const pathFilterInput = await screen.findByPlaceholderText('按路径筛选')
+      const pathFilterInput = await screen.findByLabelText('按路径筛选')
       fireEvent.change(pathFilterInput, { target: { value: 'photos' } })
 
       await waitFor(() => {
@@ -2071,7 +2107,7 @@ describe('ActivityPage', () => {
         expectGetActivityStatsCalledWithSignal({
           path: '/photos',
         })
-        expect(screen.getByText('当前筛选:')).toBeTruthy()
+        expect(screen.getByText('当前筛选：')).toBeTruthy()
         expect(screen.getByText('路径：/photos')).toBeTruthy()
         expect(screen.getByText('当前筛选结果')).toBeTruthy()
       })
@@ -2081,7 +2117,7 @@ describe('ActivityPage', () => {
       const user = userEvent.setup({ writeToClipboard: false })
       render(<ActivityPage />)
 
-      const pathFilterInput = await screen.findByPlaceholderText('按路径筛选')
+      const pathFilterInput = await screen.findByLabelText('按路径筛选')
       await waitFor(() => {
         expect(mockListActivity).toHaveBeenCalled()
         expect(mockGetActivityStats).toHaveBeenCalled()
@@ -2142,7 +2178,7 @@ describe('ActivityPage', () => {
         expectGetActivityStatsCalledWithSignal({
           since: /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/,
         })
-        expect(screen.getByText('当前筛选:')).toBeTruthy()
+        expect(screen.getByText('当前筛选：')).toBeTruthy()
         expect(screen.getByText('时间：今天')).toBeTruthy()
         expect(screen.getByText('当前筛选结果')).toBeTruthy()
       })
@@ -2181,7 +2217,7 @@ describe('ActivityPage', () => {
       const user = userEvent.setup({ writeToClipboard: false })
       render(<ActivityPage />)
 
-      const pathFilterInput = await screen.findByPlaceholderText('按路径筛选')
+      const pathFilterInput = await screen.findByLabelText('按路径筛选')
       fireEvent.change(pathFilterInput, { target: { value: '/photos' } })
 
       await waitFor(() => {
@@ -2214,13 +2250,13 @@ describe('ActivityPage', () => {
       await user.click(screen.getByText('筛选删除文件'))
 
       await waitFor(() => {
-        expect(screen.getByText('当前筛选:')).toBeTruthy()
+        expect(screen.getByText('当前筛选：')).toBeTruthy()
       })
 
       await user.click(screen.getByText('清除筛选'))
 
       await waitFor(() => {
-        expect(screen.queryByText('当前筛选:')).toBeNull()
+        expect(screen.queryByText('当前筛选：')).toBeNull()
       })
     })
 
@@ -2228,7 +2264,7 @@ describe('ActivityPage', () => {
       const user = userEvent.setup({ writeToClipboard: false })
       render(<ActivityPage />)
 
-      const userFilterInput = await screen.findByPlaceholderText('按用户筛选')
+      const userFilterInput = await screen.findByLabelText('按用户筛选')
       fireEvent.change(userFilterInput, { target: { value: 'user1' } })
 
       await waitFor(() => {
@@ -2253,14 +2289,14 @@ describe('ActivityPage', () => {
       const user = userEvent.setup({ writeToClipboard: false })
       render(<ActivityPage />)
 
-      const pathFilterInput = await screen.findByPlaceholderText('按路径筛选')
+      const pathFilterInput = await screen.findByLabelText('按路径筛选')
       fireEvent.change(pathFilterInput, { target: { value: 'photos' } })
 
       await waitFor(() => {
         expect(screen.getByText('路径：/photos')).toBeTruthy()
       })
 
-      const userFilterInput = await screen.findByPlaceholderText('按用户筛选')
+      const userFilterInput = await screen.findByLabelText('按用户筛选')
       fireEvent.change(userFilterInput, { target: { value: 'user1' } })
 
       await waitFor(() => {
@@ -2284,9 +2320,9 @@ describe('ActivityPage', () => {
           until: undefined,
         })
         expectGetActivityStatsCalledWithSignal()
-        expect(screen.queryByText('当前筛选:')).toBeNull()
-        expect((screen.getByPlaceholderText('按路径筛选') as HTMLInputElement).value).toBe('')
-        expect((screen.getByPlaceholderText('按用户筛选') as HTMLInputElement).value).toBe('')
+        expect(screen.queryByText('当前筛选：')).toBeNull()
+        expect((screen.getByLabelText('按路径筛选') as HTMLInputElement).value).toBe('')
+        expect((screen.getByLabelText('按用户筛选') as HTMLInputElement).value).toBe('')
       })
     })
   })
@@ -2316,7 +2352,7 @@ describe('ActivityPage', () => {
 
       render(<ActivityPage />)
 
-      const pathFilterInput = await screen.findByPlaceholderText('按路径筛选')
+      const pathFilterInput = await screen.findByLabelText('按路径筛选')
       await waitFor(() => {
         expect(mockListActivity).toHaveBeenCalled()
         expect(mockGetActivityStats).toHaveBeenCalled()
@@ -2342,6 +2378,28 @@ describe('ActivityPage', () => {
       })
       expect(mockListActivity).not.toHaveBeenCalled()
       expect(mockGetActivityStats).not.toHaveBeenCalled()
+    })
+
+    it('keeps Unicode control path filters local', async () => {
+      render(<ActivityPage />)
+
+      const pathFilterInput = await screen.findByLabelText('按路径筛选')
+      await waitFor(() => {
+        expect(mockListActivity).toHaveBeenCalled()
+        expect(mockGetActivityStats).toHaveBeenCalled()
+      })
+
+      mockListActivity.mockClear()
+      mockGetActivityStats.mockClear()
+      fireEvent.change(pathFilterInput, { target: { value: '/photos\u0085secret' } })
+
+      await waitFor(() => {
+        expect(screen.getAllByText('路径不能包含 .、.. 或控制字符').length).toBeGreaterThan(0)
+        expect(pathFilterInput).toHaveAttribute('aria-invalid', 'true')
+      })
+      expect(mockListActivity).not.toHaveBeenCalled()
+      expect(mockGetActivityStats).not.toHaveBeenCalled()
+      expect(screen.queryByText('路径：/photos\u0085secret')).toBeNull()
     })
 
     it('shows warning toast when activity reload is temporarily unavailable', async () => {
@@ -2403,8 +2461,40 @@ describe('ActivityPage', () => {
         expect(mockClearActivity).toHaveBeenCalledWith({
           signal: expect.any(AbortSignal),
         })
-        expect(mockAddToast).toHaveBeenCalledWith({ title: '最近操作已清空', color: 'success' })
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '最近操作已清空',
+          description: undefined,
+          color: 'success',
+        })
       })
+    })
+
+    it('shows warning toast when activity clear succeeds with warnings', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockClearActivity.mockResolvedValueOnce({
+        warning: true,
+        message: 'activity clear completed with persistence warning --password activity-secret',
+      })
+
+      render(<ActivityPage />)
+
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: '清空记录' })).toBeTruthy()
+      })
+
+      await user.click(screen.getByRole('button', { name: '清空记录' }))
+      await user.click(await screen.findByRole('button', { name: '确认清空' }))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '最近操作已清空，但存在警告',
+          description: 'activity clear completed with persistence warning --password <redacted>',
+          color: 'warning',
+        })
+      })
+      expect(mockAddToast).not.toHaveBeenCalledWith(expect.objectContaining({
+        description: expect.stringContaining('activity-secret'),
+      }))
     })
 
     it('hides the clear action for non-admin users', async () => {

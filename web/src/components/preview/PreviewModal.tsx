@@ -4,9 +4,9 @@ import { X, ChevronLeft, ChevronRight, Download, ExternalLink, AlertCircle, Musi
 import { downloadFile } from '@/api/files'
 import { authFetch, ensureDownloadSession, refreshAuthSession } from '@/api/auth'
 import { getPreviewType, buildPreviewUrl } from '@/lib/preview-utils'
-import { getFileDownloadErrorToast } from '@/lib/fileActionErrors'
+import { getFileDownloadErrorToast, getFileLoadErrorDescription } from '@/lib/fileActionErrors'
 import { readRangedDownloadJsonErrorDetails, type DownloadJsonErrorDetails } from '@/lib/downloadResponse'
-import { GENERIC_LOAD_ERROR_DESCRIPTION, getUserFacingErrorDescription } from '@/lib/apiMessages'
+import { GENERIC_LOAD_ERROR_DESCRIPTION } from '@/lib/apiMessages'
 import { TextPreview } from './TextPreview'
 import { ImagePreview } from './ImagePreview'
 import { PdfPreview } from './PdfPreview'
@@ -45,7 +45,7 @@ function getPreviewProbeErrorMessage(error: DownloadJsonErrorDetails | undefined
     return fallback
   }
 
-  return getUserFacingErrorDescription(new Error(error.message), fallback)
+  return getFileLoadErrorDescription(error, fallback)
 }
 
 function useRetryableMediaUrl(baseUrl: string, errorMessage: string) {
@@ -308,6 +308,7 @@ export function PreviewModal({
                 className="text-white bg-white/10 hover:bg-white/20"
                 onPress={handleDownload}
                 title="下载"
+                aria-label="下载"
               >
                 <Download size={18} />
               </Button>
@@ -318,6 +319,7 @@ export function PreviewModal({
                 className="text-white bg-white/10 hover:bg-white/20"
                 onPress={handleOpenExternal}
                 title="在新标签页打开"
+                aria-label="在新标签页打开"
               >
                 <ExternalLink size={18} />
               </Button>
@@ -328,6 +330,7 @@ export function PreviewModal({
                 className="text-white bg-white/10 hover:bg-white/20"
                 onPress={onClose}
                 title="关闭 (Esc)"
+                aria-label="关闭"
               >
                 <X size={18} />
               </Button>
@@ -348,6 +351,7 @@ export function PreviewModal({
                 onPress={handlePrev}
                 isDisabled={!canNavigatePrev}
                 title="上一个 (←)"
+                aria-label="上一个 (←)"
               >
                 <ChevronLeft size={24} />
               </Button>
@@ -362,6 +366,7 @@ export function PreviewModal({
                 onPress={handleNext}
                 isDisabled={!canNavigateNext}
                 title="下一个 (→)"
+                aria-label="下一个 (→)"
               >
                 <ChevronRight size={24} />
               </Button>
@@ -379,7 +384,7 @@ export function PreviewModal({
 }
 
 // Simple video preview using native video element
-function VideoPreview({ path }: { path: string; filename: string }) {
+function VideoPreview({ path, filename }: { path: string; filename: string }) {
   const url = buildStreamUrl(path)
   const {
     mediaUrl,
@@ -402,6 +407,7 @@ function VideoPreview({ path }: { path: string; filename: string }) {
         {!error && (
           <video
             src={mediaUrl}
+            aria-label={`视频预览 ${filename}`}
             controls
             preload="metadata"
             autoPlay
@@ -449,6 +455,7 @@ function AudioPreview({ path, filename }: { path: string; filename: string }) {
       {!error && (
         <audio
           src={mediaUrl}
+          aria-label={`音频预览 ${filename}`}
           controls
           preload="metadata"
           autoPlay

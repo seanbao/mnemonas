@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, waitFor } from '@/test/utils'
+import { render, screen, waitFor, within } from '@/test/utils'
 import userEvent from '@testing-library/user-event'
 import React from 'react'
 import { FilesPage } from './Files'
@@ -26,8 +26,8 @@ vi.mock('@heroui/react', async () => {
 
   return {
     HeroUIProvider: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
-    Button: ({ children, onPress, isDisabled, isLoading, startContent }: { children: React.ReactNode; onPress?: () => void; isDisabled?: boolean; isLoading?: boolean; startContent?: React.ReactNode }) => (
-      <button disabled={isDisabled || isLoading} onClick={onPress}>{startContent}{children}</button>
+    Button: ({ children, onPress, isDisabled, isLoading, startContent, ...props }: React.ComponentProps<'button'> & { onPress?: () => void; isDisabled?: boolean; isLoading?: boolean; startContent?: React.ReactNode }) => (
+      <button {...props} disabled={isDisabled || isLoading} onClick={onPress}>{startContent}{children}</button>
     ),
     Modal: ({ children, isOpen }: { children: React.ReactNode; isOpen: boolean }) =>
       isOpen ? <div>{children}</div> : null,
@@ -169,6 +169,12 @@ const mockListFiles = vi.mocked(listFiles)
 const mockDeleteFile = vi.mocked(deleteFile)
 const mockListShares = vi.mocked(listShares)
 
+async function clickPhotoAction(user: ReturnType<typeof userEvent.setup>, actionName: string | RegExp) {
+  await user.click(screen.getByLabelText('photo.jpg 操作菜单'))
+  const actionArea = await screen.findByRole('group', { name: 'photo.jpg 操作控制' })
+  await user.click(within(actionArea).getByRole('button', { name: actionName }))
+}
+
 describe('FilesPage single delete modal', () => {
   beforeEach(() => {
     vi.clearAllMocks()
@@ -193,8 +199,7 @@ describe('FilesPage single delete modal', () => {
       expect(screen.getByText('photo.jpg')).toBeTruthy()
     })
 
-    await user.click(screen.getByLabelText('photo.jpg 操作菜单'))
-    await user.click(screen.getAllByText('删除')[0])
+    await clickPhotoAction(user, '删除')
 
     await waitFor(() => {
       expect(screen.getByText('确认删除')).toBeTruthy()
@@ -204,8 +209,7 @@ describe('FilesPage single delete modal', () => {
       }).length).toBeGreaterThan(0)
     })
 
-    const deleteButtons = screen.getAllByRole('button', { name: '删除' })
-    await user.click(deleteButtons[deleteButtons.length - 1])
+    await user.click(screen.getByRole('button', { name: '确认删除 photo.jpg' }))
 
     await waitFor(() => {
       expect(mockDeleteFile).toHaveBeenCalledWith('/photo.jpg', expect.anything())

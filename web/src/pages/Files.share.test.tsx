@@ -58,14 +58,16 @@ vi.mock('@heroui/react', async () => {
 
 vi.mock('@/components/share', () => ({
   ShareDialog: ({ isOpen, isFolder, onClose, onFeatureDisabled }: { isOpen: boolean; isFolder?: boolean; onClose?: () => void; onFeatureDisabled?: () => void }) => (
-    <div data-testid="share-dialog" data-open={isOpen ? 'true' : 'false'} data-folder={isFolder ? 'true' : 'false'}>
-      {isOpen && (
-        <>
-          <button onClick={onClose}>close share dialog</button>
-          <button onClick={onFeatureDisabled}>disable share feature</button>
-        </>
-      )}
-    </div>
+    isOpen ? (
+      <div role="dialog" aria-label={isFolder ? '文件夹分享对话框' : '文件分享对话框'}>
+        <button onClick={onClose}>close share dialog</button>
+        <button onClick={onFeatureDisabled}>disable share feature</button>
+      </div>
+    ) : (
+      <div role="status" aria-label="分享对话框状态">
+        分享对话框已关闭:{isFolder ? '文件夹' : '文件'}
+      </div>
+    )
   ),
 }))
 
@@ -175,9 +177,7 @@ describe('FilesPage sharing behavior', () => {
       await Promise.resolve()
     })
 
-    const dialog = await screen.findByTestId('share-dialog')
-    expect(dialog.getAttribute('data-open')).toBe('true')
-    expect(dialog.getAttribute('data-folder')).toBe('true')
+    expect(await screen.findByRole('dialog', { name: '文件夹分享对话框' })).toBeInTheDocument()
   })
 
   it('opens share dialog for files with isFolder=false', async () => {
@@ -192,9 +192,7 @@ describe('FilesPage sharing behavior', () => {
       await Promise.resolve()
     })
 
-    const dialog = await screen.findByTestId('share-dialog')
-    expect(dialog.getAttribute('data-open')).toBe('true')
-    expect(dialog.getAttribute('data-folder')).toBe('false')
+    expect(await screen.findByRole('dialog', { name: '文件分享对话框' })).toBeInTheDocument()
   })
 
   it('closes the share dialog and clears the selected share file', async () => {
@@ -208,15 +206,11 @@ describe('FilesPage sharing behavior', () => {
     const shareButtons = await screen.findAllByText('创建分享链接')
     await user.click(shareButtons[1])
 
-    let dialog = await screen.findByTestId('share-dialog')
-    expect(dialog.getAttribute('data-open')).toBe('true')
-    expect(dialog.getAttribute('data-folder')).toBe('false')
+    expect(await screen.findByRole('dialog', { name: '文件分享对话框' })).toBeInTheDocument()
 
     await user.click(screen.getByText('close share dialog'))
 
-    dialog = await screen.findByTestId('share-dialog')
-    expect(dialog.getAttribute('data-open')).toBe('false')
-    expect(dialog.getAttribute('data-folder')).toBe('false')
+    expect(await screen.findByRole('status', { name: '分享对话框状态' })).toHaveTextContent('分享对话框已关闭:文件')
   })
 
   it('disables share entry points after the dialog reports the feature is off', async () => {

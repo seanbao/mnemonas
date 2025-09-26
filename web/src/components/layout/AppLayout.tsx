@@ -17,7 +17,7 @@ function MobileTabBar() {
   return (
     <nav
       aria-label="移动端主导航"
-      className="mobile-tabbar fixed inset-x-0 bottom-0 z-30 border-t border-divider bg-content1/95 px-2 pt-1.5 pb-[calc(env(safe-area-inset-bottom)+0.375rem)] shadow-[0_-10px_24px_rgba(15,23,42,0.08)] backdrop-blur lg:hidden"
+      className="mobile-tabbar z-30 shrink-0 border-t border-divider bg-content1/95 px-2 pt-1.5 pb-[calc(env(safe-area-inset-bottom)+0.375rem)] shadow-[0_-10px_24px_rgba(15,23,42,0.08)] backdrop-blur lg:hidden"
     >
       <div className="mx-auto grid max-w-md grid-cols-5 gap-1">
         {mobilePrimaryNav.map((item) => (
@@ -48,8 +48,9 @@ export function AppLayout() {
     <div className="app-shell flex h-dvh overflow-hidden font-sans text-foreground">
       {/* Mobile sidebar overlay */}
       {sidebarOpen && (
-        <div 
-          data-testid="mobile-sidebar-overlay"
+        <button
+          type="button"
+          aria-label="关闭导航遮罩"
           className="fixed inset-0 z-40 bg-black/45 backdrop-blur-sm lg:hidden"
           onClick={() => setSidebarOpen(false)}
         />
@@ -63,7 +64,6 @@ export function AppLayout() {
             ? 'visible translate-x-0 pointer-events-auto'
             : 'invisible -translate-x-full pointer-events-none lg:visible lg:translate-x-0 lg:pointer-events-auto'
         )}
-        data-testid="app-sidebar-shell"
       >
         <Sidebar onClose={() => setSidebarOpen(false)} />
       </div>
@@ -72,8 +72,8 @@ export function AppLayout() {
       <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
         <Header onMenuClick={() => setSidebarOpen(true)} />
         
-        <main className="mb-[calc(5rem+env(safe-area-inset-bottom))] min-w-0 flex-1 overflow-auto pb-4 scroll-pb-28 scroll-pt-4 lg:mb-0 lg:pb-0 lg:scroll-pb-0">
-          <div className="mx-auto h-full min-h-full w-full max-w-7xl">
+        <main className="min-w-0 flex-1 overflow-auto pb-4 scroll-pb-4 scroll-pt-4 lg:pb-0 lg:scroll-pb-0">
+          <div className="mx-auto min-h-full w-full max-w-7xl">
             <Outlet />
           </div>
         </main>

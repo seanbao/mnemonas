@@ -238,22 +238,29 @@ function expectDownloadFileCalledWithOptions(path: string, options: Record<strin
   }))
 }
 
+async function getFileItem(name: string) {
+  return screen.findByRole('group', { name: `${name} 文件项` })
+}
+
 async function openContextMenuFor(name: string, coordinates = { clientX: 120, clientY: 80 }) {
-  const target = (await screen.findAllByText(name))[0]
-  fireEvent.contextMenu(target, coordinates)
+  fireEvent.contextMenu(await getFileItem(name), coordinates)
 
   return waitFor(() => {
-    const menu = document.querySelector('[data-context-menu]')
+    const menu = screen.getByRole('menu', { name: '上下文菜单' })
     expect(menu).toBeTruthy()
-    return menu as HTMLElement
+    return menu
   })
 }
 
 async function getFileActionArea(name: string) {
-  const trigger = await screen.findByLabelText(`${name} 操作菜单`)
-  const area = trigger.closest('.group')
-  expect(area).toBeTruthy()
-  return area as HTMLElement
+  const area = await getFileItem(name)
+  expect(within(area).getByLabelText(`${name} 操作菜单`)).toBeTruthy()
+  return area
+}
+
+async function clickFileAction(user: ReturnType<typeof userEvent.setup>, fileName: string, actionName: string | RegExp) {
+  const actionArea = await getFileActionArea(fileName)
+  await user.click(await within(actionArea).findByRole('button', { name: actionName }))
 }
 
 describe('FilesPage', () => {
@@ -288,7 +295,7 @@ describe('FilesPage', () => {
       '/photo.jpg': false,
       '/video.mp4': false,
     })
-    mockToggleFavorite.mockResolvedValue(true)
+    mockToggleFavorite.mockResolvedValue({ isFavorited: true, warning: false, message: undefined })
     // Default mock response
     mockListFiles.mockResolvedValue({
       files: [
@@ -541,11 +548,8 @@ describe('FilesPage', () => {
     it('renders view mode toggle buttons', async () => {
       render(<FilesPage />)
       
-      await waitFor(() => {
-        // Find list and grid toggle buttons
-        const buttons = document.querySelectorAll('button')
-        expect(buttons.length).toBeGreaterThan(2)
-      })
+      expect(await screen.findByRole('button', { name: '列表视图' })).toBeTruthy()
+      expect(screen.getByRole('button', { name: '网格视图' })).toBeTruthy()
     })
 
     it('hides guest write actions from the selection toolbar but keeps batch download', async () => {
@@ -580,7 +584,7 @@ describe('FilesPage', () => {
 
       await waitFor(() => {
         expect(screen.getByRole('heading', { name: '新建文件夹' })).toBeTruthy()
-        expect(screen.getByPlaceholderText('请输入文件夹名称')).toBeTruthy()
+        expect(screen.getByLabelText('文件夹名称')).toBeTruthy()
       })
     })
 
@@ -597,10 +601,10 @@ describe('FilesPage', () => {
       await user.click(screen.getByRole('button', { name: '新建文件夹' }))
 
       await waitFor(() => {
-        expect(screen.getByPlaceholderText('请输入文件夹名称')).toBeTruthy()
+        expect(screen.getByLabelText('文件夹名称')).toBeTruthy()
       })
 
-      const input = screen.getByPlaceholderText('请输入文件夹名称')
+      const input = screen.getByLabelText('文件夹名称')
       await user.type(input, 'new-folder')
 
       const createBtn = screen.getByRole('button', { name: '创建' })
@@ -625,10 +629,10 @@ describe('FilesPage', () => {
       await user.click(screen.getByRole('button', { name: '新建文件夹' }))
 
       await waitFor(() => {
-        expect(screen.getByPlaceholderText('请输入文件夹名称')).toBeTruthy()
+        expect(screen.getByLabelText('文件夹名称')).toBeTruthy()
       })
 
-      const input = screen.getByPlaceholderText('请输入文件夹名称')
+      const input = screen.getByLabelText('文件夹名称')
       await user.type(input, '  spaced-folder  ')
       await user.click(screen.getByRole('button', { name: '创建' }))
 
@@ -648,7 +652,7 @@ describe('FilesPage', () => {
 
       await user.click(screen.getByRole('button', { name: '新建文件夹' }))
 
-      const input = await screen.findByPlaceholderText('请输入文件夹名称')
+      const input = await screen.findByLabelText('文件夹名称')
       await user.type(input, '../escape')
 
       expect(screen.getByText('名称不能包含路径分隔符、空字符，且不能为 . 或 ..。')).toBeTruthy()
@@ -674,7 +678,7 @@ describe('FilesPage', () => {
 
       await user.click(screen.getByRole('button', { name: '新建文件夹' }))
 
-      const input = await screen.findByPlaceholderText('请输入文件夹名称')
+      const input = await screen.findByLabelText('文件夹名称')
       await user.type(input, 'first-folder')
       await user.click(screen.getByRole('button', { name: '创建' }))
 
@@ -685,7 +689,7 @@ describe('FilesPage', () => {
       await user.click(screen.getByRole('button', { name: '取消' }))
 
       expect(screen.getByRole('heading', { name: '新建文件夹' })).toBeTruthy()
-      expect(screen.getByDisplayValue('first-folder')).toBeTruthy()
+      expect(screen.getByLabelText('文件夹名称')).toHaveValue('first-folder')
 
       firstCreate.resolve(successActionResult)
 
@@ -707,7 +711,7 @@ describe('FilesPage', () => {
 
       await user.click(screen.getByRole('button', { name: '新建文件夹' }))
 
-      const input = await screen.findByPlaceholderText('请输入文件夹名称')
+      const input = await screen.findByLabelText('文件夹名称')
       await user.type(input, 'failed-folder')
       await user.click(screen.getByRole('button', { name: '创建' }))
 
@@ -718,7 +722,7 @@ describe('FilesPage', () => {
       await user.click(screen.getByRole('button', { name: '取消' }))
 
       expect(screen.getByRole('heading', { name: '新建文件夹' })).toBeTruthy()
-      expect(screen.getByDisplayValue('failed-folder')).toBeTruthy()
+      expect(screen.getByLabelText('文件夹名称')).toHaveValue('failed-folder')
 
       await act(async () => {
         firstCreate.reject(new Error('create failed'))
@@ -733,7 +737,7 @@ describe('FilesPage', () => {
       })
 
       expect(screen.getByRole('heading', { name: '新建文件夹' })).toBeTruthy()
-      expect(screen.getByDisplayValue('failed-folder')).toBeTruthy()
+      expect(screen.getByLabelText('文件夹名称')).toHaveValue('failed-folder')
     })
 
     it('aborts a pending create folder request when the page unmounts', async () => {
@@ -744,7 +748,7 @@ describe('FilesPage', () => {
       const { unmount } = render(<FilesPage />)
 
       await user.click(await screen.findByRole('button', { name: '新建文件夹' }))
-      await user.type(await screen.findByPlaceholderText('请输入文件夹名称'), 'aborted-folder')
+      await user.type(await screen.findByLabelText('文件夹名称'), 'aborted-folder')
       await user.click(screen.getByRole('button', { name: '创建' }))
 
       let createSignal: AbortSignal | undefined
@@ -796,7 +800,7 @@ describe('FilesPage', () => {
       })
 
       await user.click(screen.getByRole('button', { name: '新建文件夹' }))
-      await user.type(await screen.findByPlaceholderText('请输入文件夹名称'), 'warn-folder')
+      await user.type(await screen.findByLabelText('文件夹名称'), 'warn-folder')
       await user.click(screen.getByRole('button', { name: '创建' }))
 
       await waitFor(() => {
@@ -818,7 +822,7 @@ describe('FilesPage', () => {
       })
 
       await user.click(screen.getByRole('button', { name: '新建文件夹' }))
-      await user.type(await screen.findByPlaceholderText('请输入文件夹名称'), 'existing-folder')
+      await user.type(await screen.findByLabelText('文件夹名称'), 'existing-folder')
       await user.click(screen.getByRole('button', { name: '创建' }))
 
       await waitFor(() => {
@@ -844,7 +848,7 @@ describe('FilesPage', () => {
       })
 
       await user.click(screen.getByRole('button', { name: '新建文件夹' }))
-      await user.type(await screen.findByPlaceholderText('请输入文件夹名称'), 'conflict-folder')
+      await user.type(await screen.findByLabelText('文件夹名称'), 'conflict-folder')
       await user.click(screen.getByRole('button', { name: '创建' }))
 
       await waitFor(() => {
@@ -856,7 +860,7 @@ describe('FilesPage', () => {
       })
 
       expect(screen.getByRole('heading', { name: '新建文件夹' })).toBeTruthy()
-      expect(screen.getByDisplayValue('conflict-folder')).toBeTruthy()
+      expect(screen.getByLabelText('文件夹名称')).toHaveValue('conflict-folder')
     })
 
     it('keeps the create folder modal open with a localized warning when the parent path stops being a directory', async () => {
@@ -866,7 +870,7 @@ describe('FilesPage', () => {
       render(<FilesPage />)
 
       await user.click(await screen.findByRole('button', { name: '新建文件夹' }))
-      await user.type(await screen.findByPlaceholderText('请输入文件夹名称'), 'stale-parent')
+      await user.type(await screen.findByLabelText('文件夹名称'), 'stale-parent')
       await user.click(screen.getByRole('button', { name: '创建' }))
 
       await waitFor(() => {
@@ -878,18 +882,17 @@ describe('FilesPage', () => {
       })
 
       expect(screen.getByRole('heading', { name: '新建文件夹' })).toBeTruthy()
-      expect(screen.getByDisplayValue('stale-parent')).toBeTruthy()
+      expect(screen.getByLabelText('文件夹名称')).toHaveValue('stale-parent')
     })
   })
 
-	  describe('file selection', () => {
+  describe('file selection', () => {
     it('renders checkboxes for each file', async () => {
+      mockFilesStoreState.viewMode = 'grid'
       render(<FilesPage />)
       
-      await waitFor(() => {
-        const checkboxes = document.querySelectorAll('[class*="border-2"]')
-        expect(checkboxes.length).toBeGreaterThan(0)
-      })
+      expect(await screen.findByRole('checkbox', { name: '选择 photo.jpg' })).toBeTruthy()
+      expect(screen.getByRole('checkbox', { name: '选择 documents' })).toBeTruthy()
     })
 
     it('activates a row for details without entering selection mode', async () => {
@@ -918,11 +921,10 @@ describe('FilesPage', () => {
 
       await user.click(await screen.findByText('documents'))
 
-      const detailsPanel = document.querySelector('aside')
-      expect(detailsPanel).toBeTruthy()
-      expect(within(detailsPanel as HTMLElement).getByRole('heading', { name: 'documents' })).toBeTruthy()
-      expect(within(detailsPanel as HTMLElement).getAllByText('文件夹').length).toBeGreaterThanOrEqual(2)
-      expect(within(detailsPanel as HTMLElement).queryByText('DOCUMENTS')).toBeNull()
+      const detailsPanel = screen.getByRole('complementary', { name: '文件详情' })
+      expect(within(detailsPanel).getByRole('heading', { name: 'documents' })).toBeTruthy()
+      expect(within(detailsPanel).getAllByText('文件夹').length).toBeGreaterThanOrEqual(2)
+      expect(within(detailsPanel).queryByText('DOCUMENTS')).toBeNull()
     })
 
     it('selects a row only from its checkbox', async () => {
@@ -957,24 +959,24 @@ describe('FilesPage', () => {
       mockFilesStoreState.viewMode = 'grid'
       render(<FilesPage />)
 
-      const checkbox = await screen.findByRole('checkbox', { name: '选择 photo.jpg' })
-      const checkboxShell = checkbox.closest('.absolute')
-      expect(checkboxShell).toBeTruthy()
+      const card = await screen.findByRole('group', { name: 'photo.jpg 文件项' })
+      const checkbox = within(card).getByRole('checkbox', { name: '选择 photo.jpg' })
+      const checkboxShell = within(card).getByRole('group', { name: 'photo.jpg 选择控制' })
+      expect(within(checkboxShell).getByRole('checkbox', { name: '选择 photo.jpg' })).toBe(checkbox)
 
       mockFilesStoreState.setSelection.mockClear()
       mockFilesStoreState.toggleFileSelection.mockClear()
 
-      fireEvent.click(checkboxShell as HTMLElement)
-      fireEvent.doubleClick(checkboxShell as HTMLElement)
-      fireEvent.contextMenu(checkboxShell as HTMLElement)
+      fireEvent.click(checkboxShell)
+      fireEvent.doubleClick(checkboxShell)
+      fireEvent.contextMenu(checkboxShell)
 
-      const actionButton = screen.getByLabelText('photo.jpg 操作菜单')
-      const actionShell = actionButton.closest('.absolute')
-      expect(actionShell).toBeTruthy()
+      const actionShell = within(card).getByRole('group', { name: 'photo.jpg 操作控制' })
+      expect(within(actionShell).getByLabelText('photo.jpg 操作菜单')).toBeTruthy()
 
-      fireEvent.click(actionShell as HTMLElement)
-      fireEvent.doubleClick(actionShell as HTMLElement)
-      fireEvent.contextMenu(actionShell as HTMLElement)
+      fireEvent.click(actionShell)
+      fireEvent.doubleClick(actionShell)
+      fireEvent.contextMenu(actionShell)
 
       expect(mockFilesStoreState.setSelection).not.toHaveBeenCalledWith(['/photo.jpg'])
       expect(mockFilesStoreState.toggleFileSelection).not.toHaveBeenCalled()
@@ -985,11 +987,10 @@ describe('FilesPage', () => {
       mockFilesStoreState.selectedFiles = new Set(['/photo.jpg'])
       render(<FilesPage />)
 
-      const gridContainer = (await screen.findAllByText('photo.jpg'))[0].closest('.custom-scrollbar')
-      expect(gridContainer).toBeTruthy()
+      const gridContainer = await screen.findByRole('region', { name: '文件网格内容' })
 
       vi.useFakeTimers()
-      fireEvent.click(gridContainer as HTMLElement)
+      fireEvent.click(gridContainer)
       expect(mockFilesStoreState.clearSelection).toHaveBeenCalled()
 
       act(() => {
@@ -1003,12 +1004,11 @@ describe('FilesPage', () => {
       mockFilesStoreState.selectedFiles = new Set(['/photo.jpg'])
       const { unmount } = render(<FilesPage />)
 
-      const gridContainer = (await screen.findAllByText('photo.jpg'))[0].closest('.custom-scrollbar')
-      expect(gridContainer).toBeTruthy()
+      const gridContainer = await screen.findByRole('region', { name: '文件网格内容' })
 
       vi.useFakeTimers()
-      fireEvent.click(gridContainer as HTMLElement)
-      fireEvent.click(gridContainer as HTMLElement)
+      fireEvent.click(gridContainer)
+      fireEvent.click(gridContainer)
       unmount()
       vi.useRealTimers()
 
@@ -1193,7 +1193,7 @@ describe('FilesPage', () => {
         document.dispatchEvent(new KeyboardEvent('keydown', { key: 'F2', bubbles: true }))
       })
 
-      expect(await screen.findByDisplayValue('photo.jpg')).toBeTruthy()
+      expect(await screen.findByLabelText('新名称')).toHaveValue('photo.jpg')
     })
 
     it('shows selection summary when items are selected', async () => {
@@ -1263,9 +1263,8 @@ describe('FilesPage', () => {
 
       expect(mockFilesStoreState.setSelection).toHaveBeenCalledWith(['/documents', '/photo.jpg', '/video.mp4'])
 
-      const photoCard = (await screen.findByText('photo.jpg')).closest('.group')
-      expect(photoCard).toBeTruthy()
-      fireEvent.click(photoCard as HTMLElement, { ctrlKey: true })
+      const photoCard = await screen.findByRole('group', { name: 'photo.jpg 文件项' })
+      fireEvent.click(photoCard, { ctrlKey: true })
 
       expect(mockFilesStoreState.toggleFileSelection).toHaveBeenCalledWith('/photo.jpg')
       expect(mockFilesStoreState.setCurrentPath).not.toHaveBeenCalled()
@@ -1345,7 +1344,7 @@ describe('FilesPage', () => {
       expect(mockClipboardState.cut).not.toHaveBeenCalled()
       expect(mockCopyFile).not.toHaveBeenCalled()
       expect(screen.queryByRole('heading', { name: '批量删除' })).toBeFalsy()
-      expect(screen.queryByPlaceholderText('请输入新名称')).toBeFalsy()
+      expect(screen.queryByLabelText('新名称')).toBeFalsy()
     })
 
     it('opens batch delete from the keyboard when files are already selected', async () => {
@@ -1376,11 +1375,11 @@ describe('FilesPage', () => {
       render(<FilesPage />)
 
       await screen.findByText('上传文件')
-      const inputs = document.querySelectorAll('input[type="file"]')
-      expect(inputs).toHaveLength(2)
+      const fileInput = screen.getByLabelText('选择上传文件') as HTMLInputElement
+      const folderInput = screen.getByLabelText('选择上传文件夹') as HTMLInputElement
 
-      const fileInputClick = vi.spyOn(inputs[0] as HTMLInputElement, 'click').mockImplementation(() => undefined)
-      const folderInputClick = vi.spyOn(inputs[1] as HTMLInputElement, 'click').mockImplementation(() => undefined)
+      const fileInputClick = vi.spyOn(fileInput, 'click').mockImplementation(() => undefined)
+      const folderInputClick = vi.spyOn(folderInput, 'click').mockImplementation(() => undefined)
 
       await user.click(screen.getByRole('button', { name: '上传文件' }))
       expect(fileInputClick).toHaveBeenCalled()
@@ -1399,8 +1398,7 @@ describe('FilesPage', () => {
       render(<FilesPage />)
 
       await screen.findByText('上传文件')
-      const inputs = document.querySelectorAll('input[type="file"]')
-      const fileInput = inputs[0] as HTMLInputElement
+      const fileInput = screen.getByLabelText('选择上传文件') as HTMLInputElement
       fireEvent.change(fileInput, {
         target: { files: [new File(['content'], 'report.txt', { type: 'text/plain' })] },
       })
@@ -1423,8 +1421,7 @@ describe('FilesPage', () => {
       render(<FilesPage />)
 
       await screen.findByText('上传文件')
-      const inputs = document.querySelectorAll('input[type="file"]')
-      const fileInput = inputs[0] as HTMLInputElement
+      const fileInput = screen.getByLabelText('选择上传文件') as HTMLInputElement
       fireEvent.change(fileInput, {
         target: { files: [oversizedFile] },
       })
@@ -1442,8 +1439,7 @@ describe('FilesPage', () => {
       render(<FilesPage />)
 
       await screen.findByText('上传文件')
-      const inputs = document.querySelectorAll('input[type="file"]')
-      const folderInput = inputs[1] as HTMLInputElement
+      const folderInput = screen.getByLabelText('选择上传文件夹') as HTMLInputElement
       fireEvent.change(folderInput, {
         target: { files: [invalidFolderFile] },
       })
@@ -1477,8 +1473,7 @@ describe('FilesPage', () => {
       render(<FilesPage />)
 
       await screen.findByText('上传文件')
-      const inputs = document.querySelectorAll('input[type="file"]')
-      const fileInput = inputs[0] as HTMLInputElement
+      const fileInput = screen.getByLabelText('选择上传文件') as HTMLInputElement
       fireEvent.change(fileInput, {
         target: { files: [new File(['content'], 'report.txt', { type: 'text/plain' })] },
       })
@@ -1589,7 +1584,7 @@ describe('FilesPage', () => {
         expect(mockFilesStoreState.setSelection).toHaveBeenCalledWith(['/photo.jpg'])
       })
     })
-	  })
+  })
 
   describe('context menu', () => {
     it('runs copy actions from the grid card menu', async () => {
@@ -1639,7 +1634,7 @@ describe('FilesPage', () => {
       const actionArea = await getFileActionArea('photo.jpg')
 
       await user.click(within(actionArea).getByText('重命名'))
-      expect(await screen.findByDisplayValue('photo.jpg')).toBeTruthy()
+      expect(await screen.findByLabelText('新名称')).toHaveValue('photo.jpg')
       await user.click(screen.getByRole('button', { name: '取消' }))
 
       await user.click(within(actionArea).getByText('删除'))
@@ -1702,7 +1697,7 @@ describe('FilesPage', () => {
 
       let menu = await openContextMenuFor('photo.jpg')
       expect(mockFilesStoreState.setSelection).toHaveBeenCalledWith(['/photo.jpg'])
-      await user.click(within(menu).getByRole('button', { name: '复制路径' }))
+      await user.click(within(menu).getByRole('menuitem', { name: '复制路径' }))
 
       await waitFor(() => {
         expect(writeText).toHaveBeenCalledWith('/photo.jpg')
@@ -1710,14 +1705,14 @@ describe('FilesPage', () => {
       })
 
       menu = await openContextMenuFor('photo.jpg', { clientX: 140, clientY: 90 })
-      await user.click(within(menu).getByRole('button', { name: '下载' }))
+      await user.click(within(menu).getByRole('menuitem', { name: '下载' }))
 
       await waitFor(() => {
         expectDownloadFileCalledWithOptions('/photo.jpg', { filename: 'photo.jpg' })
       })
 
       menu = await openContextMenuFor('photo.jpg', { clientX: 160, clientY: 100 })
-      await user.click(within(menu).getByRole('button', { name: '查看版本历史' }))
+      await user.click(within(menu).getByRole('menuitem', { name: '查看版本历史' }))
 
       expect(mockNavigate).toHaveBeenCalledWith('/versions?path=%2Fphoto.jpg')
     })
@@ -1732,16 +1727,16 @@ describe('FilesPage', () => {
       mockNavigate.mockClear()
 
       const menu = await openContextMenuFor('documents')
-      expect(within(menu).getByRole('button', { name: '查看版本历史' })).toBeDisabled()
+      expect(within(menu).getByRole('menuitem', { name: '查看版本历史' })).toBeDisabled()
 
-      await user.click(within(menu).getByRole('button', { name: '打开文件夹' }))
+      await user.click(within(menu).getByRole('menuitem', { name: '打开文件夹' }))
 
       expect(mockFilesStoreState.setCurrentPath).toHaveBeenCalledWith('/documents')
       expect(mockNavigate).toHaveBeenCalledWith('/files/documents', { replace: false })
 
       mockDownloadFile.mockResolvedValueOnce(undefined)
       const downloadMenu = await openContextMenuFor('documents', { clientX: 150, clientY: 120 })
-      await user.click(within(downloadMenu).getByRole('button', { name: '下载为 ZIP' }))
+      await user.click(within(downloadMenu).getByRole('menuitem', { name: '下载为 ZIP' }))
 
       await waitFor(() => {
         expectDownloadFileCalledWithOptions('/documents', { archive: 'zip', filename: 'documents.zip' })
@@ -1762,19 +1757,19 @@ describe('FilesPage', () => {
 
       let menu = await openContextMenuFor('photo.jpg')
       expect(within(menu).getByText('已选 2 项')).toBeTruthy()
-      await user.click(within(menu).getByRole('button', { name: '反选' }))
+      await user.click(within(menu).getByRole('menuitem', { name: '反选' }))
       expect(mockFilesStoreState.setSelection).toHaveBeenCalledWith(['/documents'])
 
       menu = await openContextMenuFor('photo.jpg', { clientX: 150, clientY: 90 })
-      await user.click(within(menu).getByRole('button', { name: '仅文件（2）' }))
+      await user.click(within(menu).getByRole('menuitem', { name: '仅文件（2）' }))
       expect(mockFilesStoreState.setSelection).toHaveBeenCalledWith(['/photo.jpg', '/video.mp4'])
 
       menu = await openContextMenuFor('photo.jpg', { clientX: 160, clientY: 100 })
-      await user.click(within(menu).getByRole('button', { name: '仅文件夹（1）' }))
+      await user.click(within(menu).getByRole('menuitem', { name: '仅文件夹（1）' }))
       expect(mockFilesStoreState.setSelection).toHaveBeenCalledWith(['/documents'])
 
       menu = await openContextMenuFor('photo.jpg', { clientX: 170, clientY: 110 })
-      await user.click(within(menu).getByRole('button', { name: '批量下载' }))
+      await user.click(within(menu).getByRole('menuitem', { name: '批量下载' }))
 
       await waitFor(() => {
         expectDownloadFileCalledWithOptions('/photo.jpg', { filename: 'photo.jpg' })
@@ -1782,11 +1777,11 @@ describe('FilesPage', () => {
       })
 
       menu = await openContextMenuFor('photo.jpg', { clientX: 180, clientY: 120 })
-      await user.click(within(menu).getByRole('button', { name: '清空选择' }))
+      await user.click(within(menu).getByRole('menuitem', { name: '清空选择' }))
       expect(mockFilesStoreState.clearSelection).toHaveBeenCalled()
 
       menu = await openContextMenuFor('photo.jpg', { clientX: 190, clientY: 130 })
-      await user.click(within(menu).getByRole('button', { name: '批量删除（进回收站）' }))
+      await user.click(within(menu).getByRole('menuitem', { name: '批量删除（进回收站）' }))
       expect(screen.getByRole('heading', { name: '批量删除' })).toBeTruthy()
     })
 
@@ -1798,13 +1793,13 @@ describe('FilesPage', () => {
       render(<FilesPage />)
 
       let menu = await openContextMenuFor('photo.jpg')
-      await user.click(within(menu).getByRole('button', { name: '批量移动' }))
+      await user.click(within(menu).getByRole('menuitem', { name: '批量移动' }))
       expect(await screen.findByText('移动到')).toBeTruthy()
 
       await user.click(screen.getByRole('button', { name: '取消' }))
 
       menu = await openContextMenuFor('photo.jpg', { clientX: 150, clientY: 100 })
-      await user.click(within(menu).getByRole('button', { name: '批量复制' }))
+      await user.click(within(menu).getByRole('menuitem', { name: '批量复制' }))
       expect(await screen.findByText('复制到')).toBeTruthy()
     })
 
@@ -1817,32 +1812,32 @@ describe('FilesPage', () => {
       await screen.findByText('photo.jpg')
 
       let menu = await openContextMenuFor('photo.jpg')
-      await user.click(within(menu).getByRole('button', { name: '重命名' }))
-      expect(await screen.findByDisplayValue('photo.jpg')).toBeTruthy()
+      await user.click(within(menu).getByRole('menuitem', { name: '重命名' }))
+      expect(await screen.findByLabelText('新名称')).toHaveValue('photo.jpg')
       await user.click(screen.getByRole('button', { name: '取消' }))
 
       menu = await openContextMenuFor('photo.jpg', { clientX: 150, clientY: 90 })
-      await user.click(within(menu).getByRole('button', { name: '移动到...' }))
+      await user.click(within(menu).getByRole('menuitem', { name: '移动到...' }))
       expect(await screen.findByText('移动到')).toBeTruthy()
       await user.click(screen.getByRole('button', { name: '取消' }))
 
       menu = await openContextMenuFor('photo.jpg', { clientX: 160, clientY: 100 })
-      await user.click(within(menu).getByRole('button', { name: '复制到...' }))
+      await user.click(within(menu).getByRole('menuitem', { name: '复制到...' }))
       expect(await screen.findByText('复制到')).toBeTruthy()
       await user.click(screen.getByRole('button', { name: '取消' }))
 
       menu = await openContextMenuFor('photo.jpg', { clientX: 170, clientY: 110 })
-      await user.click(within(menu).getByRole('button', { name: '添加收藏' }))
+      await user.click(within(menu).getByRole('menuitem', { name: '添加收藏' }))
       await waitFor(() => {
         expectToggleFavoriteCalledWithAbortSignal('/photo.jpg', false)
       })
 
       menu = await openContextMenuFor('photo.jpg', { clientX: 180, clientY: 120 })
-      await user.click(within(menu).getByRole('button', { name: '创建分享链接' }))
+      await user.click(within(menu).getByRole('menuitem', { name: '创建分享链接' }))
       expect(screen.getAllByText('创建分享链接').length).toBeGreaterThan(0)
 
       menu = await openContextMenuFor('photo.jpg', { clientX: 190, clientY: 130 })
-      await user.click(within(menu).getByRole('button', { name: '删除' }))
+      await user.click(within(menu).getByRole('menuitem', { name: '删除' }))
       expect(await screen.findByRole('heading', { name: '确认删除' })).toBeTruthy()
     })
 
@@ -1860,7 +1855,7 @@ describe('FilesPage', () => {
       await screen.findByText('photo.jpg')
 
       let menu = await openContextMenuFor('photo.jpg')
-      await user.click(within(menu).getByRole('button', { name: '下载' }))
+      await user.click(within(menu).getByRole('menuitem', { name: '下载' }))
 
       await waitFor(() => {
         expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({
@@ -1870,7 +1865,7 @@ describe('FilesPage', () => {
       })
 
       menu = await openContextMenuFor('photo.jpg', { clientX: 150, clientY: 95 })
-      await user.click(within(menu).getByRole('button', { name: '复制路径' }))
+      await user.click(within(menu).getByRole('menuitem', { name: '复制路径' }))
 
       await waitFor(() => {
         expect(mockAddToast).toHaveBeenCalledWith({ title: '复制失败', color: 'danger' })
@@ -1940,6 +1935,53 @@ describe('FilesPage', () => {
         expect(mockAddToast).toHaveBeenCalledWith({
           title: '批量下载暂不可用',
           description: '文件系统当前不可用，请检查设备状态或稍后重试。',
+          color: 'warning',
+        })
+      })
+    })
+
+    it('shows missing-file guidance when batch download fully fails because files were removed', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockFilesStoreState.selectedFiles = new Set(['/photo.jpg', '/video.mp4'])
+      mockDownloadFile.mockRejectedValue(new ApiError('file not found', 404, 'FILE_NOT_FOUND'))
+
+      render(<FilesPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('批量下载')).toBeTruthy()
+      })
+
+      await user.click(screen.getByText('批量下载'))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '批量下载失败',
+          description: '所选文件可能已被移动或删除，请刷新列表后重试。',
+          color: 'warning',
+        })
+      })
+    })
+
+    it('shows actionable archive toast when batch archive download fully fails', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockFilesStoreState.selectedFiles = new Set(['/documents'])
+      mockDownloadFile.mockRejectedValue(Object.assign(new Error('归档内容过大'), {
+        status: 413,
+        code: 'PAYLOAD_TOO_LARGE',
+      }))
+
+      render(<FilesPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('批量下载')).toBeTruthy()
+      })
+
+      await user.click(screen.getByText('批量下载'))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '批量归档下载失败',
+          description: '归档内容过大，请缩小选择范围后重试。',
           color: 'warning',
         })
       })
@@ -2045,7 +2087,7 @@ describe('FilesPage', () => {
         expect(screen.getAllByText('下载').length).toBeGreaterThan(0)
       })
 
-      await user.click(screen.getAllByText('下载')[0])
+      await clickFileAction(user, 'photo.jpg', '下载')
 
       await waitFor(() => {
         expectDownloadFileCalledWithOptions('/photo.jpg', { filename: 'photo.jpg' })
@@ -2055,6 +2097,25 @@ describe('FilesPage', () => {
         expect(mockAddToast).toHaveBeenCalledWith({
           title: '下载暂不可用',
           description: '文件系统当前不可用，请检查设备状态或稍后重试。',
+          color: 'warning',
+        })
+      })
+    })
+
+    it('shows actionable archive download errors for single-item downloads', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockDownloadFile.mockRejectedValue(new ApiError('文件内容已变更，请刷新后重试', 409, 'Conflict', 'CONFLICT'))
+      mockFilesStoreState.viewMode = 'grid'
+
+      render(<FilesPage />)
+
+      await screen.findByText('photo.jpg')
+      await clickFileAction(user, 'photo.jpg', '下载')
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '归档下载失败',
+          description: '文件内容已变更，请刷新列表后重新下载。',
           color: 'warning',
         })
       })
@@ -2082,7 +2143,7 @@ describe('FilesPage', () => {
         expect(screen.getAllByText('下载').length).toBeGreaterThan(0)
       })
 
-      await user.click(screen.getAllByText('下载')[0])
+      await clickFileAction(user, 'photo.jpg', '下载')
 
       await waitFor(() => {
         expectDownloadFileCalledWithOptions('/photo.jpg', { filename: 'photo.jpg' })
@@ -2112,14 +2173,13 @@ describe('FilesPage', () => {
 
       mockListFiles.mockImplementation(() => pendingFilesRefetch())
 
-      await user.click(screen.getAllByRole('button', { name: '删除' })[1])
+      await clickFileAction(user, 'photo.jpg', '删除')
 
       await waitFor(() => {
         expect(screen.getByRole('heading', { name: '确认删除' })).toBeTruthy()
       })
 
-      const deleteButtons = screen.getAllByRole('button', { name: '删除' })
-      await user.click(deleteButtons[deleteButtons.length - 1])
+      await user.click(screen.getByRole('button', { name: '确认删除 photo.jpg' }))
 
       await waitFor(() => {
         expect(mockAddToast).toHaveBeenCalledWith({
@@ -2147,14 +2207,13 @@ describe('FilesPage', () => {
         expect(screen.getAllByText('photo.jpg').length).toBeGreaterThan(0)
       })
 
-      await user.click(screen.getAllByRole('button', { name: '删除' })[1])
+      await clickFileAction(user, 'photo.jpg', '删除')
 
       await waitFor(() => {
         expect(screen.getByRole('heading', { name: '确认删除' })).toBeTruthy()
       })
 
-      const deleteButtons = screen.getAllByRole('button', { name: '删除' })
-      await user.click(deleteButtons[deleteButtons.length - 1])
+      await user.click(screen.getByRole('button', { name: '确认删除 photo.jpg' }))
 
       let deleteSignal: AbortSignal | undefined
       await waitFor(() => {
@@ -2470,6 +2529,57 @@ describe('FilesPage', () => {
       })
     })
 
+    it('includes archive failure guidance when batch download partially fails on a folder', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockFilesStoreState.selectedFiles = new Set(['/photo.jpg', '/documents'])
+      mockDownloadFile
+        .mockResolvedValueOnce(undefined)
+        .mockRejectedValueOnce(Object.assign(new Error('文件内容已变更，请刷新后重试'), {
+          status: 409,
+          code: 'CONFLICT',
+        }))
+
+      render(<FilesPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('批量下载')).toBeTruthy()
+      })
+
+      await user.click(screen.getByText('批量下载'))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '部分项目开始下载',
+          description: '已开始 1 项，失败 1 项；文件内容已变更，请刷新列表后重新下载。',
+          color: 'warning',
+        })
+      })
+    })
+
+    it('includes missing-file guidance when batch download partially fails because a file was removed', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockFilesStoreState.selectedFiles = new Set(['/photo.jpg', '/video.mp4'])
+      mockDownloadFile
+        .mockResolvedValueOnce(undefined)
+        .mockRejectedValueOnce(new ApiError('file not found', 404, 'FILE_NOT_FOUND'))
+
+      render(<FilesPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('批量下载')).toBeTruthy()
+      })
+
+      await user.click(screen.getByText('批量下载'))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '部分项目开始下载',
+          description: '已开始 1 项，失败 1 项；所选文件可能已被移动或删除，请刷新列表后重试。',
+          color: 'warning',
+        })
+      })
+    })
+
     it('shows success toast only after keyboard refresh succeeds', async () => {
       render(<FilesPage />)
 
@@ -2600,6 +2710,66 @@ describe('FilesPage', () => {
       expect(mockAddToast).toHaveBeenCalledWith({
         title: '批量移动部分完成',
         description: '成功 1 个，失败 1 个',
+        color: 'warning',
+      })
+    })
+
+    it('includes conflict guidance after partial copy paste target conflict', async () => {
+      mockClipboardState.paths = ['/source/photo.jpg', '/source/video.mp4']
+      mockClipboardState.operation = 'copy'
+      mockClipboardState.sourcePath = '/source'
+      mockClipboardState.hasPaths.mockReturnValue(true)
+      mockCopyFile
+        .mockResolvedValueOnce(successActionResult)
+        .mockRejectedValueOnce(new ApiError('resource already exists', 409))
+
+      render(<FilesPage />)
+
+      await waitFor(() => {
+        expect(mockListFiles).toHaveBeenCalled()
+      })
+
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'v', ctrlKey: true, bubbles: true }))
+
+      await waitFor(() => {
+        expect(mockCopyFile).toHaveBeenCalledTimes(2)
+      })
+
+      expect(mockClipboardState.clear).not.toHaveBeenCalled()
+      expect(mockClipboardState.copy).not.toHaveBeenCalled()
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '批量复制部分完成',
+        description: '成功 1 个，失败 1 个；当前目录中已存在同名文件或文件夹，请使用其他名称。',
+        color: 'warning',
+      })
+    })
+
+    it('includes quota guidance after partial cut paste target quota failure', async () => {
+      mockClipboardState.paths = ['/source/photo.jpg', '/source/video.mp4']
+      mockClipboardState.operation = 'cut'
+      mockClipboardState.sourcePath = '/source'
+      mockClipboardState.hasPaths.mockReturnValue(true)
+      mockMoveFile
+        .mockResolvedValueOnce(successActionResult)
+        .mockRejectedValueOnce(new ApiError('directory quota exceeded', 507, 'QUOTA_EXCEEDED'))
+
+      render(<FilesPage />)
+
+      await waitFor(() => {
+        expect(mockListFiles).toHaveBeenCalled()
+      })
+
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'v', ctrlKey: true, bubbles: true }))
+
+      await waitFor(() => {
+        expect(mockMoveFile).toHaveBeenCalledTimes(2)
+      })
+
+      expect(mockClipboardState.cut).toHaveBeenCalledWith(['/source/video.mp4'], '/source')
+      expect(mockClipboardState.clear).not.toHaveBeenCalled()
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '批量移动部分完成',
+        description: '成功 1 个，失败 1 个；目标目录的容量配额不足，请清理空间或调整目录配额后重试。',
         color: 'warning',
       })
     })
@@ -3029,7 +3199,7 @@ describe('FilesPage', () => {
         document.dispatchEvent(new KeyboardEvent('keydown', { key: 'F2', bubbles: true }))
       })
 
-      const renameInput = await screen.findByPlaceholderText('请输入新名称')
+      const renameInput = await screen.findByLabelText('新名称')
       await user.clear(renameInput)
       await user.type(renameInput, '../escape')
 
@@ -3059,7 +3229,7 @@ describe('FilesPage', () => {
         document.dispatchEvent(new KeyboardEvent('keydown', { key: 'F2', bubbles: true }))
       })
 
-      const renameInput = await screen.findByPlaceholderText('请输入新名称')
+      const renameInput = await screen.findByLabelText('新名称')
       await user.clear(renameInput)
       await user.type(renameInput, 'photo-renamed.jpg')
       await user.click(screen.getByRole('button', { name: '确定' }))
@@ -3071,7 +3241,7 @@ describe('FilesPage', () => {
       await user.click(screen.getByRole('button', { name: '取消' }))
 
       expect(screen.getByText('重命名')).toBeTruthy()
-      expect(screen.getByDisplayValue('photo-renamed.jpg')).toBeTruthy()
+      expect(screen.getByLabelText('新名称')).toHaveValue('photo-renamed.jpg')
 
       await act(async () => {
         firstRename.resolve(successActionResult)
@@ -3099,7 +3269,7 @@ describe('FilesPage', () => {
         document.dispatchEvent(new KeyboardEvent('keydown', { key: 'F2', bubbles: true }))
       })
 
-      const renameInput = await screen.findByPlaceholderText('请输入新名称')
+      const renameInput = await screen.findByLabelText('新名称')
       await user.clear(renameInput)
       await user.type(renameInput, 'photo-failed.jpg')
       await user.click(screen.getByRole('button', { name: '确定' }))
@@ -3111,7 +3281,7 @@ describe('FilesPage', () => {
       await user.click(screen.getByRole('button', { name: '取消' }))
 
       expect(screen.getByText('重命名')).toBeTruthy()
-      expect(screen.getByDisplayValue('photo-failed.jpg')).toBeTruthy()
+      expect(screen.getByLabelText('新名称')).toHaveValue('photo-failed.jpg')
 
       await act(async () => {
         firstRename.reject(new Error('rename failed'))
@@ -3126,7 +3296,7 @@ describe('FilesPage', () => {
       })
 
       expect(screen.getByText('重命名')).toBeTruthy()
-      expect(screen.getByDisplayValue('photo-failed.jpg')).toBeTruthy()
+      expect(screen.getByLabelText('新名称')).toHaveValue('photo-failed.jpg')
     })
 
     it('aborts a pending rename request when the page unmounts', async () => {
@@ -3145,7 +3315,7 @@ describe('FilesPage', () => {
         document.dispatchEvent(new KeyboardEvent('keydown', { key: 'F2', bubbles: true }))
       })
 
-      const renameInput = await screen.findByPlaceholderText('请输入新名称')
+      const renameInput = await screen.findByLabelText('新名称')
       await user.clear(renameInput)
       await user.type(renameInput, 'photo-aborted.jpg')
       await user.click(screen.getByRole('button', { name: '确定' }))
@@ -3181,7 +3351,7 @@ describe('FilesPage', () => {
         document.dispatchEvent(new KeyboardEvent('keydown', { key: 'F2', bubbles: true }))
       })
 
-      const renameInput = await screen.findByPlaceholderText('请输入新名称')
+      const renameInput = await screen.findByLabelText('新名称')
       await user.clear(renameInput)
       await user.type(renameInput, 'video.mp4')
       await user.click(screen.getByRole('button', { name: '确定' }))
@@ -3199,7 +3369,7 @@ describe('FilesPage', () => {
       })
 
       expect(screen.getByText('重命名')).toBeTruthy()
-      expect(screen.getByDisplayValue('video.mp4')).toBeTruthy()
+      expect(screen.getByLabelText('新名称')).toHaveValue('video.mp4')
     })
 
     it('keeps the rename modal open with a localized warning when the parent path stops being a directory', async () => {
@@ -3217,7 +3387,7 @@ describe('FilesPage', () => {
         document.dispatchEvent(new KeyboardEvent('keydown', { key: 'F2', bubbles: true }))
       })
 
-      const renameInput = await screen.findByPlaceholderText('请输入新名称')
+      const renameInput = await screen.findByLabelText('新名称')
       await user.clear(renameInput)
       await user.type(renameInput, 'photo-stale.jpg')
       await user.click(screen.getByRole('button', { name: '确定' }))
@@ -3235,7 +3405,7 @@ describe('FilesPage', () => {
       })
 
       expect(screen.getByText('重命名')).toBeTruthy()
-      expect(screen.getByDisplayValue('photo-stale.jpg')).toBeTruthy()
+      expect(screen.getByLabelText('新名称')).toHaveValue('photo-stale.jpg')
     })
 
     it('shows warning toast when rename succeeds with a persistence warning', async () => {
@@ -3253,7 +3423,7 @@ describe('FilesPage', () => {
         document.dispatchEvent(new KeyboardEvent('keydown', { key: 'F2', bubbles: true }))
       })
 
-      const renameInput = await screen.findByPlaceholderText('请输入新名称')
+      const renameInput = await screen.findByLabelText('新名称')
       await user.clear(renameInput)
       await user.type(renameInput, 'photo-warning.jpg')
       await user.click(screen.getByRole('button', { name: '确定' }))
@@ -3284,7 +3454,7 @@ describe('FilesPage', () => {
         document.dispatchEvent(new KeyboardEvent('keydown', { key: 'F2', bubbles: true }))
       })
 
-      const renameInput = await screen.findByPlaceholderText('请输入新名称')
+      const renameInput = await screen.findByLabelText('新名称')
       await user.clear(renameInput)
       await user.type(renameInput, 'photo-gone.jpg')
       await user.click(screen.getByRole('button', { name: '确定' }))
@@ -3301,7 +3471,7 @@ describe('FilesPage', () => {
       })
 
       await waitFor(() => {
-        expect(screen.queryByPlaceholderText('请输入新名称')).toBeFalsy()
+        expect(screen.queryByLabelText('新名称')).toBeFalsy()
         expect(screen.queryByRole('button', { name: '确定' })).toBeFalsy()
         expect(screen.queryAllByText('photo.jpg')).toHaveLength(0)
         expect(screen.getByText('video.mp4')).toBeTruthy()
@@ -3313,21 +3483,14 @@ describe('FilesPage', () => {
     it('supports list view mode', async () => {
       render(<FilesPage />)
       
-      await waitFor(() => {
-        // In list mode, there should be grid layout columns
-        const gridLayout = document.querySelector('[class*="grid-cols"]')
-        expect(gridLayout).toBeTruthy()
-      })
+      expect(await screen.findByRole('button', { name: '列表视图' })).toHaveAttribute('aria-pressed', 'true')
     })
 
     it('has view mode toggle buttons', async () => {
       render(<FilesPage />)
       
-      await waitFor(() => {
-        // Grid and list toggle buttons should be present
-        const buttons = document.querySelectorAll('button')
-        expect(buttons.length).toBeGreaterThan(3) // Upload, new folder, list, grid
-      })
+      expect(await screen.findByRole('button', { name: '列表视图' })).toBeTruthy()
+      expect(screen.getByRole('button', { name: '网格视图' })).toBeTruthy()
     })
 
     it('exposes sort controls', async () => {
@@ -3402,8 +3565,7 @@ describe('FilesPage', () => {
       render(<FilesPage />)
       
       await waitFor(() => {
-        const homeButton = screen.getByText('根目录').closest('button')
-        expect(homeButton).toBeTruthy()
+        expect(screen.getByRole('button', { name: '根目录' })).toBeTruthy()
       })
     })
   })
@@ -3622,7 +3784,7 @@ describe('FilesPage', () => {
   it('shows a success toast after adding a favorite', async () => {
     const user = userEvent.setup({ writeToClipboard: false })
     mockFilesStoreState.viewMode = 'grid'
-    mockToggleFavorite.mockResolvedValueOnce(true)
+    mockToggleFavorite.mockResolvedValueOnce({ isFavorited: true, warning: false, message: undefined })
 
     render(<FilesPage />)
 
@@ -3635,6 +3797,30 @@ describe('FilesPage', () => {
       expect(mockAddToast).toHaveBeenCalledWith({
         title: '已添加收藏',
         color: 'success',
+      })
+    })
+  })
+
+  it('shows a warning toast after adding a favorite with persistence warnings', async () => {
+    const user = userEvent.setup({ writeToClipboard: false })
+    mockFilesStoreState.viewMode = 'grid'
+    mockToggleFavorite.mockResolvedValueOnce({
+      isFavorited: true,
+      warning: true,
+      message: 'favorite added with persistence warning',
+    })
+
+    render(<FilesPage />)
+
+    await screen.findByText('photo.jpg')
+    const actionArea = await getFileActionArea('photo.jpg')
+    await user.click(within(actionArea).getByText('添加收藏'))
+
+    await waitFor(() => {
+      expectToggleFavoriteCalledWithAbortSignal('/photo.jpg', false)
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '已添加收藏，但存在警告',
+        color: 'warning',
       })
     })
   })
@@ -3669,7 +3855,7 @@ describe('FilesPage', () => {
       '/photo.jpg': true,
       '/video.mp4': false,
     })
-    mockToggleFavorite.mockResolvedValueOnce(false)
+    mockToggleFavorite.mockResolvedValueOnce({ isFavorited: false, warning: false, message: undefined })
 
     render(<FilesPage />)
 
@@ -3682,6 +3868,35 @@ describe('FilesPage', () => {
       expect(mockAddToast).toHaveBeenCalledWith({
         title: '已取消收藏',
         color: 'success',
+      })
+    })
+  })
+
+  it('shows a warning toast after removing a favorite with persistence warnings', async () => {
+    const user = userEvent.setup({ writeToClipboard: false })
+    mockFilesStoreState.viewMode = 'grid'
+    mockCheckFavorites.mockResolvedValueOnce({
+      '/documents': false,
+      '/photo.jpg': true,
+      '/video.mp4': false,
+    })
+    mockToggleFavorite.mockResolvedValueOnce({
+      isFavorited: false,
+      warning: true,
+      message: 'favorite removed with persistence warning',
+    })
+
+    render(<FilesPage />)
+
+    await screen.findByText('photo.jpg')
+    const actionArea = await getFileActionArea('photo.jpg')
+    await user.click(await within(actionArea).findByText('取消收藏'))
+
+    await waitFor(() => {
+      expectToggleFavoriteCalledWithAbortSignal('/photo.jpg', true)
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '已取消收藏，但存在警告',
+        color: 'warning',
       })
     })
   })
@@ -3783,7 +3998,7 @@ describe('FilesPage', () => {
       expect(screen.getAllByText('添加收藏').length).toBeGreaterThan(0)
     })
 
-    await user.click(screen.getAllByText('添加收藏')[0])
+    await clickFileAction(user, 'photo.jpg', '添加收藏')
 
     await waitFor(() => {
       expect(mockAddToast).toHaveBeenCalledWith({
@@ -3958,7 +4173,7 @@ describe('FilesPage', () => {
       expect(screen.getAllByText('取消收藏').length).toBeGreaterThan(0)
     })
 
-    await user.click(screen.getAllByText('取消收藏')[0])
+    await clickFileAction(user, 'photo.jpg', '取消收藏')
 
     await waitFor(() => {
       expect(mockAddToast).toHaveBeenCalledWith({

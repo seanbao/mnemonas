@@ -35,6 +35,8 @@ import { formatBytes, cn, formatRelativeTime, formatUptimeSeconds } from '@/lib/
 import { areDiskStatsAvailable, clampUsagePercent, formatUsagePercent, getDiskSpaceStatus } from '@/lib/storageStats'
 import { backupJobNeedsAttention, getBackupAttentionNextStepSummary, getBackupAttentionReasonSummary } from '@/lib/backupAttention'
 import { getInvalidHomeDirDescription, invalidHomeDirTitle, resolveUserHomeScope } from '@/lib/userScope'
+import { getUserFacingErrorDescription } from '@/lib/apiMessages'
+import { getRedactedDiagnosticMessage } from '@/lib/diagnosticMessages'
 import { PageHeader } from '@/components/ui/PageHeader'
 import { StatCard } from '@/components/ui/StatCard'
 import { useIsAdmin, useUser } from '@/stores/auth'
@@ -54,7 +56,7 @@ function QuickAction({ icon: Icon, label, description, onClick }: QuickActionPro
       onClick={onClick}
     >
       <div className="relative">
-        <div className="gradient-meridian-subtle mb-3 flex h-10 w-10 items-center justify-center rounded-lg">
+        <div className="gradient-mnemonas-subtle mb-3 flex h-10 w-10 items-center justify-center rounded-lg">
           <Icon size={20} className="text-accent-primary" />
         </div>
         <h3 className="font-medium text-foreground mb-0.5">{label}</h3>
@@ -71,7 +73,7 @@ function QuickAction({ icon: Icon, label, description, onClick }: QuickActionPro
 
 // Get icon for action type
 function ActionIcon({ action }: { action: ActionType }) {
-  const icons: Record<ActionType, React.ComponentType<{ size?: number; className?: string }>> = {
+  const icons: Record<ActionType, React.ComponentType<{ size?: number; className?: string; 'aria-hidden'?: boolean }>> = {
     upload: Upload,
     download: Download,
     delete: Trash2,
@@ -94,7 +96,7 @@ function ActionIcon({ action }: { action: ActionType }) {
     scrub: Database,
   }
   const Icon = icons[action] || Activity
-  return <Icon size={14} />
+  return <Icon size={14} aria-hidden={true} />
 }
 
 function formatStorageSize(value: number | undefined): string {
@@ -159,8 +161,21 @@ function getBackupIssueCount(jobs: BackupJob[]): number {
 
 type SetupSafetyTone = 'default' | 'success' | 'warning'
 
+function formatWebDAVAuthType(authType: string): string {
+  switch (authType) {
+    case 'users':
+      return '用户认证'
+    case 'basic':
+      return 'Basic Auth'
+    case 'none':
+      return '匿名'
+    default:
+      return '未知认证方式'
+  }
+}
+
 function getSetupSafetyHighlights(status: SetupStatusResponse): Array<{ label: string; value: string; tone: SetupSafetyTone }> {
-  const webdavAuthType = status.webdav_auth_type === 'none' ? '匿名' : status.webdav_auth_type
+  const webdavAuthType = formatWebDAVAuthType(status.webdav_auth_type)
 
   return [
     { label: '认证', value: status.auth_enabled ? '已启用' : '需启用', tone: status.auth_enabled ? 'success' : 'warning' },
@@ -193,6 +208,8 @@ function getSetupChecklistProgressText(remainingItems: number): string {
   }
   return `还需确认 ${remainingItems} 项后才能关闭首次运行提示。`
 }
+
+const getNonBlankToastDescription = getRedactedDiagnosticMessage
 
 const setupChecklistItems = [
   {
@@ -421,14 +438,18 @@ export function DashboardPage() {
 
     setIsAcknowledgingSetup(true)
     try {
-      await acknowledgeSetup()
+      const result = await acknowledgeSetup()
       await refetchSetupStatus()
       setSetupChecklist({})
-      addToast({ title: '首次部署检查已确认', color: 'success' })
+      addToast({
+        title: result.warning ? '首次部署检查已确认，但存在警告' : '首次部署检查已确认',
+        description: result.warning ? getNonBlankToastDescription(result.message) : undefined,
+        color: result.warning ? 'warning' : 'success',
+      })
     } catch (error) {
       addToast({
         title: '确认初始化失败',
-        description: error instanceof Error && error.message ? error.message : '请稍后重试。',
+        description: getUserFacingErrorDescription(error),
         color: 'danger',
       })
     } finally {
@@ -438,7 +459,12 @@ export function DashboardPage() {
 
   if (isLoading) {
     return (
-      <div className="p-4 space-y-6 sm:p-6 lg:p-8">
+      <div
+        role="status"
+        aria-label="加载首页"
+        aria-busy="true"
+        className="p-4 space-y-6 sm:p-6 lg:p-8"
+      >
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div>
             <Skeleton className="w-48 h-8 rounded-lg mb-2 bg-content3" />
@@ -605,19 +631,27 @@ export function DashboardPage() {
 
       {setupStatus?.is_first_run && (
         <Card className="border-accent-primary/25 bg-accent-primary/5 shadow-none">
-          <CardBody className="space-y-4">
+          <CardBody className="space-y-3 sm:space-y-4">
             <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
               <div className="flex items-start gap-3">
                 <CheckCircle2 size={18} className="mt-0.5 shrink-0 text-accent-primary" />
                 <div>
                   <p className="text-sm font-medium text-foreground">首次部署检查</p>
-                  <p className="text-xs text-default-600">确认关键入口后关闭首次运行提示。</p>
+                  <p className="hidden text-xs text-default-600 sm:block">确认关键入口后关闭首次运行提示。</p>
                 </div>
               </div>
               <div className="flex flex-wrap gap-2">
+                <Chip
+                  size="sm"
+                  variant="flat"
+                  color={isSetupChecklistComplete ? 'success' : 'primary'}
+                  className="rounded-lg"
+                >
+                  {isSetupChecklistComplete ? '可关闭提示' : `${remainingSetupChecklistItems} 项待确认`}
+                </Chip>
                 {getSetupSafetyHighlights(setupStatus).map((item) => (
                   <Chip key={item.label} size="sm" variant="flat" color={item.tone} className="rounded-lg">
-                    {item.label}: {item.value}
+                    {item.label}：{item.value}
                   </Chip>
                 ))}
               </div>
@@ -627,25 +661,26 @@ export function DashboardPage() {
                 {setupSafetyWarning}
               </div>
             )}
-            <div className="grid grid-cols-1 gap-2 md:grid-cols-2">
+            <div className="grid grid-cols-1 gap-1.5 sm:gap-2 md:grid-cols-2">
               {setupChecklistItems.map((item) => (
                 <Checkbox
                   key={item.id}
+                  aria-label={`${item.label}。${item.description}`}
                   isSelected={setupChecklist[item.id] === true}
                   onValueChange={(selected) => {
                     setSetupChecklist((current) => ({ ...current, [item.id]: selected }))
                   }}
-                  className="m-0 rounded-lg bg-content1/60 px-3 py-2"
+                  className="m-0 min-h-0 rounded-lg bg-content1/60 px-2.5 py-2 sm:px-3"
                   classNames={{
                     label: 'w-full',
                   }}
                 >
                   <span className="block text-xs font-medium text-foreground">{item.label}</span>
-                  <span className="block text-xs text-default-500">{item.description}</span>
+                  <span className="hidden text-xs text-default-500 sm:block">{item.description}</span>
                 </Checkbox>
               ))}
             </div>
-            <p className="text-xs text-default-600">
+            <p className="hidden text-xs text-default-600 sm:block">
               {getSetupChecklistProgressText(remainingSetupChecklistItems)}
             </p>
             <div className="grid grid-cols-2 gap-2 sm:flex sm:flex-row sm:flex-wrap sm:items-center">
@@ -681,7 +716,7 @@ export function DashboardPage() {
                 <p className="text-sm font-medium text-foreground">备份需要查看</p>
                 <p className="text-xs text-default-600">{backupOverview.trend}</p>
                 {backupOverview.nextStep && (
-                  <p className="mt-1 text-xs text-default-600">建议: {backupOverview.nextStep}</p>
+                  <p className="mt-1 text-xs text-default-600">建议：{backupOverview.nextStep}</p>
                 )}
               </div>
             </div>
@@ -737,10 +772,10 @@ export function DashboardPage() {
       </div>
 
       {/* Storage Overview */}
-      <Card className="card-meridian">
+      <Card className="card-mnemonas">
         <CardHeader className="pb-0">
           <div className="flex items-center gap-2">
-            <div className="gradient-meridian rounded-lg p-2">
+            <div className="gradient-mnemonas rounded-lg p-2">
               <Database className="h-4 w-4 text-white" />
             </div>
             <div>
@@ -836,7 +871,7 @@ export function DashboardPage() {
       </div>
 
       {/* Recent Activity */}
-      <Card className="card-meridian">
+      <Card className="card-mnemonas">
         <CardHeader className="pb-0">
           <div className="flex w-full items-center justify-between">
             <div className="flex items-center gap-2">

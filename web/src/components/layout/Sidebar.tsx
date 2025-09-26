@@ -181,6 +181,7 @@ export function Sidebar({ collapsed = false, onClose }: SidebarProps) {
 
   return (
     <aside 
+      aria-label="侧边栏"
       className={cn(
         "sidebar-surface flex h-dvh flex-col overflow-hidden border-r border-divider transition-all duration-300",
         collapsed ? "w-16" : "w-[calc(100vw-2rem)] max-w-72 lg:w-[264px]"
@@ -190,7 +191,7 @@ export function Sidebar({ collapsed = false, onClose }: SidebarProps) {
       <div className="relative z-10 flex items-center justify-between border-b border-divider p-4">
         <div className="flex items-center gap-3">
           <div className="relative">
-            <div className="gradient-meridian logo-glow flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-lg">
+            <div className="gradient-mnemonas logo-glow flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-lg">
               <Archive size={20} className="text-white" />
             </div>
           </div>
@@ -281,7 +282,7 @@ export function Sidebar({ collapsed = false, onClose }: SidebarProps) {
         ))}
       </nav>
 
-      {/* Storage Status - 存储状态底栏 */}
+      {/* Storage status footer */}
       {!collapsed && (
         <div className="relative z-10 border-t border-divider p-4">
           {isAdmin && (

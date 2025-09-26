@@ -30,7 +30,7 @@ export function FileIcon({
 }: FileIconProps) {
 	const iconType = getFileIcon(name, isDir)
 
-	const icons: Record<string, ComponentType<{ size?: number; className?: string }>> = {
+	const icons: Record<string, ComponentType<{ size?: number; className?: string; 'aria-hidden'?: boolean; focusable?: boolean }>> = {
 		folder: Folder,
 		file: File,
 		image: Image,
@@ -66,7 +66,14 @@ export function FileIcon({
 	}
 
 	if (variant === 'bare') {
-		return <Icon size={size} className={cn(bareColors[iconType] || bareColors.file, className)} />
+		return (
+			<Icon
+				aria-hidden={true}
+				focusable={false}
+				size={size}
+				className={cn(bareColors[iconType] || bareColors.file, className)}
+			/>
+		)
 	}
 
 	const sizeClass = size >= 28 ? 'w-10 h-10' : size >= 22 ? 'w-9 h-9' : 'w-7 h-7'
@@ -74,6 +81,7 @@ export function FileIcon({
 
 	return (
 		<div
+			aria-hidden={true}
 			className={cn(
 				'flex items-center justify-center rounded-lg border border-divider',
 				sizeClass,
@@ -81,7 +89,7 @@ export function FileIcon({
 				className,
 			)}
 		>
-			<Icon size={iconSize} className="text-current" />
+			<Icon aria-hidden={true} focusable={false} size={iconSize} className="text-current" />
 		</div>
 	)
 }

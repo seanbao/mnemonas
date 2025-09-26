@@ -73,60 +73,79 @@ function isProblemJsonContentType(contentType: string | null): boolean {
 }
 
 function isStructuredErrorBody(body: Record<string, unknown>, allowCodeOnly: boolean, problemJson: boolean): boolean {
-  const hasErrorField = typeof body.error === 'string' && body.error.length > 0
+  const errorMessage = isRecord(body.error) ? getNonBlankJsonString(body.error.message) : undefined
+  const errorCode = isRecord(body.error) ? getNonBlankJsonString(body.error.code) : undefined
+  const topLevelCode = getNonBlankJsonString(body.code)
+  const topLevelMessage = getNonBlankJsonString(body.message)
+  const problemDetail = getNonBlankJsonString(body.detail)
+  const problemTitle = getNonBlankJsonString(body.title)
+  const hasErrorField = getNonBlankJsonString(body.error) !== undefined
     || (isRecord(body.error) && (
-      allowCodeOnly && typeof body.error.code === 'string' && body.error.code.length > 0
-      || typeof body.error.message === 'string' && body.error.message.length > 0
+      allowCodeOnly && errorCode !== undefined
+      || errorMessage !== undefined
     ))
-  const hasTopLevelError = typeof body.code === 'string'
-    && typeof body.message === 'string'
-    && body.message.length > 0
+  const hasTopLevelError = topLevelCode !== undefined && topLevelMessage !== undefined
   const hasFalseSuccessError = body.success === false && (
-    allowCodeOnly && typeof body.code === 'string' && body.code.length > 0
-    || typeof body.message === 'string' && body.message.length > 0
+    allowCodeOnly && topLevelCode !== undefined
+    || topLevelMessage !== undefined
   )
   const hasProblemError = problemJson && (
-    typeof body.detail === 'string' && body.detail.length > 0
-    || typeof body.title === 'string' && body.title.length > 0
+    problemDetail !== undefined
+    || problemTitle !== undefined
   )
 
   return hasErrorField || hasTopLevelError || hasFalseSuccessError || hasProblemError
 }
 
 function getErrorCode(body: Record<string, unknown>): string | undefined {
-  if (isRecord(body.error) && typeof body.error.code === 'string') {
-    return body.error.code
+  if (isRecord(body.error)) {
+    const errorCode = getNonBlankJsonString(body.error.code)
+    if (errorCode !== undefined) {
+      return errorCode
+    }
   }
 
-  if (typeof body.code === 'string') {
-    return body.code
+  return getNonBlankJsonString(body.code)
+}
+
+function getExplicitErrorMessage(body: Record<string, unknown>, problemJson: boolean): string | undefined {
+  const stringError = getNonBlankJsonString(body.error)
+  if (stringError !== undefined) {
+    return stringError
+  }
+
+  if (isRecord(body.error)) {
+    const errorMessage = getNonBlankJsonString(body.error.message)
+    if (errorMessage !== undefined) {
+      return errorMessage
+    }
+  }
+
+  const message = getNonBlankJsonString(body.message)
+  if (message !== undefined) {
+    return message
+  }
+
+  const detail = problemJson ? getNonBlankJsonString(body.detail) : undefined
+  if (detail !== undefined) {
+    return detail
+  }
+
+  const title = problemJson ? getNonBlankJsonString(body.title) : undefined
+  if (title !== undefined) {
+    return title
   }
 
   return undefined
 }
 
-function getExplicitErrorMessage(body: Record<string, unknown>, problemJson: boolean): string | undefined {
-  if (typeof body.error === 'string' && body.error) {
-    return body.error
+export function getNonBlankJsonString(value: unknown): string | undefined {
+  if (typeof value !== 'string') {
+    return undefined
   }
 
-  if (isRecord(body.error) && typeof body.error.message === 'string' && body.error.message) {
-    return body.error.message
-  }
-
-  if (typeof body.message === 'string' && body.message) {
-    return body.message
-  }
-
-  if (problemJson && typeof body.detail === 'string' && body.detail) {
-    return body.detail
-  }
-
-  if (problemJson && typeof body.title === 'string' && body.title) {
-    return body.title
-  }
-
-  return undefined
+  const trimmed = value.trim()
+  return trimmed.length > 0 ? trimmed : undefined
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

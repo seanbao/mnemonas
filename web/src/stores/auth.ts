@@ -9,6 +9,7 @@ import {
 } from '@/api/auth'
 import { getSetupStatus } from '@/api/setup'
 import { queryClient } from '@/lib/queryClient'
+import { getRedactedDiagnosticMessage } from '@/lib/diagnosticMessages'
 
 let authStateEpoch = 0
 let initializeRunId = 0
@@ -31,8 +32,8 @@ function cancelPendingPostLoginSetup(): void {
 }
 
 function getAuthStoreActionErrorMessage(error: unknown, fallback: string): string {
-  if (error instanceof Error && error.name === 'AuthError' && error.message) {
-    return error.message
+  if (error instanceof Error && error.name === 'AuthError') {
+    return getRedactedDiagnosticMessage(error.message) ?? fallback
   }
 
   return fallback
@@ -49,12 +50,16 @@ interface AuthState {
   shareEnabled: boolean | null
   
   // Actions
-  initialize: () => Promise<void>
+  initialize: (options?: AuthInitializeOptions) => Promise<void>
   login: (username: string, password: string) => Promise<AuthActionResult>
   logout: () => Promise<AuthActionResult>
   clearError: () => void
   setAuthEnabled: (enabled: boolean) => void
   setShareEnabled: (enabled: boolean | null) => void
+}
+
+export interface AuthInitializeOptions {
+  validateSession?: boolean
 }
 
 export const useAuthStore = create<AuthState>((set) => ({
@@ -66,7 +71,7 @@ export const useAuthStore = create<AuthState>((set) => ({
   authEnabled: true,
   shareEnabled: null,
   
-  initialize: async () => {
+  initialize: async (options: AuthInitializeOptions = {}) => {
     cancelPendingInitialize()
     const runId = ++initializeRunId
     const startEpoch = authStateEpoch
@@ -107,6 +112,11 @@ export const useAuthStore = create<AuthState>((set) => ({
       }
 
       if (!isCurrent()) {
+        return
+      }
+
+      if (options.validateSession === false) {
+        set({ user: null, isAuthenticated: false, isLoading: false })
         return
       }
 
@@ -273,7 +283,7 @@ if (typeof window !== 'undefined') {
         isAuthenticated: false,
         isLoading: false,
         shareEnabled: null,
-        error: detail?.message ?? state.error ?? '登录已过期，请重新登录',
+        error: getRedactedDiagnosticMessage(detail?.message) ?? state.error ?? '登录已过期，请重新登录',
       })
     })
 

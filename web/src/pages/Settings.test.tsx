@@ -414,10 +414,10 @@ describe('SettingsPage', () => {
   }
 
   const openTab = async (user: ReturnType<typeof userEvent.setup>, label: string) => {
-	await waitFor(() => {
-		expect(screen.getByRole('tab', { name: label })).toBeTruthy()
-	})
-	await user.click(screen.getByRole('tab', { name: label }))
+    await waitFor(() => {
+      expect(screen.getByRole('tab', { name: label })).toBeTruthy()
+    })
+    await user.click(screen.getByRole('tab', { name: label }))
   }
 
   it('passes abort signals to settings and security-check queries', async () => {
@@ -442,11 +442,7 @@ describe('SettingsPage', () => {
   it('passes an abort signal when saving settings', async () => {
     render(<SettingsPage />)
 
-    await waitFor(() => {
-      expect(screen.getByDisplayValue('8080')).toBeTruthy()
-    })
-
-    const portInput = screen.getByDisplayValue('8080')
+    const portInput = await screen.findByLabelText('服务器端口')
     fireEvent.change(portInput, { target: { value: '9000' } })
     fireEvent.click(screen.getByText('保存设置'))
 
@@ -472,11 +468,7 @@ describe('SettingsPage', () => {
     })
     const view = render(<SettingsPage />)
 
-    await waitFor(() => {
-      expect(screen.getByDisplayValue('8080')).toBeTruthy()
-    })
-
-    const portInput = screen.getByDisplayValue('8080')
+    const portInput = await screen.findByLabelText('服务器端口')
     await user.clear(portInput)
     await user.type(portInput, '9000')
     await user.click(screen.getByText('保存设置'))
@@ -616,13 +608,13 @@ describe('SettingsPage', () => {
 
       await waitFor(() => {
         expect(screen.getByText('公网访问向导')).toBeTruthy()
-        expect(screen.getByDisplayValue('0.0.0.0')).toBeTruthy()
+        expect(screen.getByLabelText('服务器监听地址')).toHaveValue('0.0.0.0')
       })
 
       fireEvent.change(screen.getByLabelText('公网域名'), { target: { value: 'nas.example.com' } })
       await user.click(screen.getByRole('button', { name: '应用推荐到表单' }))
 
-      expect(screen.getByDisplayValue('127.0.0.1')).toBeTruthy()
+      expect(screen.getByLabelText('服务器监听地址')).toHaveValue('127.0.0.1')
       expect(screen.getByLabelText('受信代理层数')).toHaveValue(1)
       expect(screen.getByLabelText('访问令牌有效期')).toHaveValue('15m0s')
       expect(screen.getByLabelText('刷新令牌有效期')).toHaveValue('168h0m0s')
@@ -824,7 +816,7 @@ describe('SettingsPage', () => {
 
       await user.click(screen.getByRole('button', { name: '应用推荐到表单' }))
 
-      expect(screen.queryByDisplayValue('https://nas.example.com')).toBeNull()
+      expect(screen.getByLabelText('公网域名')).toHaveValue('https://nas.example.com:8443/path')
     })
 
     it('rejects public access domains with invalid hostname labels', async () => {
@@ -856,6 +848,24 @@ describe('SettingsPage', () => {
       expect(screen.getByText('sudo certbot renew --dry-run')).toBeTruthy()
     })
 
+    it('uses localized accessible names for public access copy buttons', async () => {
+      render(<SettingsPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('公网访问向导')).toBeTruthy()
+      })
+
+      expect(screen.getByRole('button', { name: '复制公网配置命令' })).toBeTruthy()
+      expect(screen.getByRole('button', { name: '复制公网自检命令' })).toBeTruthy()
+      expect(screen.getByRole('button', { name: '复制证书续期日志命令' })).toBeTruthy()
+      expect(screen.queryByRole('button', { name: 'Copy to clipboard' })).toBeNull()
+
+      fireEvent.change(screen.getByLabelText('反向代理'), { target: { value: 'nginx' } })
+
+      expect(screen.getByRole('button', { name: '复制证书续期演练命令' })).toBeTruthy()
+      expect(screen.queryByRole('button', { name: '复制证书续期日志命令' })).toBeNull()
+    })
+
     it('offers a repair action for security check findings', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
       mockGetSecurityCheck.mockResolvedValueOnce({
@@ -883,7 +893,7 @@ describe('SettingsPage', () => {
 
       await user.click(screen.getByRole('button', { name: '改为本机监听' }))
 
-      expect(screen.getByDisplayValue('127.0.0.1')).toBeTruthy()
+      expect(screen.getByLabelText('服务器监听地址')).toHaveValue('127.0.0.1')
       expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({
         title: '已改为本机监听',
       }))
@@ -1013,6 +1023,41 @@ describe('SettingsPage', () => {
       expect(screen.queryByText('backend raw custom probe detail')).toBeNull()
     })
 
+    it('shows SMB preview security guidance without exposing raw backend text', async () => {
+      mockGetSecurityCheck.mockResolvedValueOnce({
+        success: true,
+        data: {
+          status: 'warning',
+          generated_at: '2026-05-08T00:00:00Z',
+          checks: [
+            {
+              id: 'smb_preview',
+              status: 'warning',
+              title: 'SMB 仍是预览能力',
+              message: 'backend raw smb preview detail',
+              details: {
+                runtime_available: false,
+                listen: '0.0.0.0:1445',
+                listen_loopback: false,
+                share_count: 1,
+              },
+            },
+          ],
+          request: { scheme: 'https' },
+          config: { auth_enabled: true },
+        },
+      })
+
+      render(<SettingsPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('SMB 仍是预览能力')).toBeTruthy()
+        expect(screen.getByText('当前构建未包含可挂载的 SMB/Samba 运行组件；启用前应先收紧监听范围和防火墙。')).toBeTruthy()
+      })
+      expect(screen.queryByText('backend raw smb preview detail')).toBeNull()
+      expect(screen.queryByText(/未内置/)).toBeNull()
+    })
+
     it('shows users file access security guidance without exposing raw backend text', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
       mockGetSecurityCheck.mockResolvedValueOnce({
@@ -1094,6 +1139,51 @@ describe('SettingsPage', () => {
         title: '需要检查配置文件路径',
         description: expect.stringContaining('/srv/mnemonas/config/config.toml 是普通文件、路径组件不经过符号链接'),
       }))
+    })
+
+    it('redacts sensitive path fragments in security check action toasts', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockGetSecurityCheck.mockResolvedValueOnce({
+        success: true,
+        data: {
+          status: 'block',
+          generated_at: '2026-05-08T00:00:00Z',
+          checks: [
+            {
+              id: 'config_file_access',
+              status: 'block',
+              title: '配置文件路径包含敏感片段',
+              message: 'backend raw config file detail token=config-secret',
+              details: {
+                path: '/srv/mnemonas/token=config-secret/config.toml',
+                path_kind: 'symlink_component',
+                symlink_component: '/srv/mnemonas/token=config-secret',
+              },
+            },
+          ],
+          request: { scheme: 'https' },
+          config: { auth_enabled: true },
+        },
+      })
+
+      render(<SettingsPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('配置文件路径包含敏感片段')).toBeTruthy()
+      })
+      expect(screen.queryByText('backend raw config file detail token=config-secret')).toBeNull()
+
+      await user.click(screen.getByRole('button', { name: '查看配置路径' }))
+
+      expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({
+        title: '需要检查配置文件路径',
+        description: expect.stringContaining('token=<redacted>'),
+      }))
+      const toastDescriptions = mockAddToast.mock.calls
+        .map(([toast]) => (toast as { description?: unknown }).description)
+        .filter((description): description is string => typeof description === 'string')
+        .join('\n')
+      expect(toastDescriptions).not.toContain('config-secret')
     })
 
     it('shows generated WebDAV secrets symlink component guidance without exposing raw backend text', async () => {
@@ -1178,6 +1268,57 @@ describe('SettingsPage', () => {
       expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({
         title: '需要检查本地备份目标',
         description: expect.stringContaining('备份作业 external-disk 的目标目录 /srv/mnemonas/data/backups'),
+      }))
+      expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({
+        description: expect.stringContaining('移出 storage.root'),
+      }))
+      await waitFor(() => {
+        expect(window.location.pathname).toBe('/maintenance')
+        expect(new URLSearchParams(window.location.search).get('backupJob')).toBe('external-disk')
+      })
+    })
+
+    it('shows writable local backup destination action guidance', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockGetSecurityCheck.mockResolvedValueOnce({
+        success: true,
+        data: {
+          status: 'warning',
+          generated_at: '2026-05-08T00:00:00Z',
+          checks: [
+            {
+              id: 'backup_local_destinations',
+              status: 'warning',
+              title: '本地备份目标不可写',
+              message: 'backend raw backup writable detail',
+              details: {
+                job_id: 'external-disk',
+                destination: '/mnt/backup-drive/mnemonas',
+                destination_kind: 'not_writable',
+              },
+            },
+          ],
+          request: { scheme: 'https' },
+          config: { auth_enabled: true },
+        },
+      })
+
+      render(<SettingsPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('本地备份目标不可写')).toBeTruthy()
+        expect(screen.getByText('本地备份目标目录没有写权限位；请确认 MnemoNAS 服务账号可以写入该目录。')).toBeTruthy()
+      })
+      expect(screen.queryByText('backend raw backup writable detail')).toBeNull()
+
+      await user.click(screen.getByRole('button', { name: '查看备份目标' }))
+
+      expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({
+        title: '需要检查本地备份目标',
+        description: expect.stringContaining('授予 MnemoNAS 服务账号写权限'),
+      }))
+      expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({
+        description: expect.stringContaining('/mnt/backup-drive/mnemonas'),
       }))
       await waitFor(() => {
         expect(window.location.pathname).toBe('/maintenance')
@@ -1378,7 +1519,7 @@ describe('SettingsPage', () => {
 
       await user.click(screen.getByRole('button', { name: '应用代理推荐' }))
 
-      expect(screen.getByDisplayValue('127.0.0.1')).toBeTruthy()
+      expect(screen.getByLabelText('服务器监听地址')).toHaveValue('127.0.0.1')
       expect(screen.getByLabelText('受信代理层数')).toHaveValue(1)
       expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({
         title: '已应用反向代理推荐',
@@ -1421,7 +1562,7 @@ describe('SettingsPage', () => {
 
       await user.click(screen.getByRole('button', { name: '应用代理推荐' }))
 
-      expect(screen.getByDisplayValue('127.0.0.1')).toBeTruthy()
+      expect(screen.getByLabelText('服务器监听地址')).toHaveValue('127.0.0.1')
       expect(screen.getByLabelText('受信代理层数')).toHaveValue(1)
       expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({
         title: '已应用反向代理推荐',
@@ -1518,8 +1659,8 @@ describe('SettingsPage', () => {
 
       await openTab(user, '分享')
 
-      expect(screen.getByDisplayValue('168h')).toBeTruthy()
-      expect(screen.getByDisplayValue('20')).toBeTruthy()
+      expect(screen.getByLabelText('新分享默认有效期')).toHaveValue('168h')
+      expect(screen.getByLabelText('新分享默认访问次数')).toHaveValue('20')
     })
 
     it('repairs unlimited share default access count from the security check', async () => {
@@ -1779,6 +1920,273 @@ describe('SettingsPage', () => {
       })
     })
 
+    it('repairs share base URLs that include an escaped share route', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockGetSettings.mockResolvedValueOnce({
+        data: {
+          ...defaultSettingsResponse.data,
+          share: {
+            ...defaultSettingsResponse.data.share,
+            enabled: true,
+            base_url: 'https://nas.example.com/base%2Fs/',
+          },
+        },
+      })
+      mockGetSecurityCheck.mockResolvedValueOnce({
+        success: true,
+        data: {
+          status: 'warning',
+          generated_at: '2026-05-08T00:00:00Z',
+          checks: [
+            {
+              id: 'share_base_url',
+              status: 'warning',
+              title: '分享基础 URL 包含分享路由',
+              message: '当前值会生成重复的 /s/s 分享链接。',
+              details: {
+                base_url: 'https://nas.example.com/base%2Fs/',
+                base_url_path: '/base/s/',
+              },
+            },
+          ],
+          request: { scheme: 'https', host: 'nas.example.com' },
+          config: { share_enabled: true },
+        },
+      })
+
+      render(<SettingsPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('分享基础 URL 已包含 /s 分享路由，继续使用会生成重复的 /s/s 分享链接。')).toBeTruthy()
+      })
+
+      await user.click(screen.getByRole('button', { name: '使用 HTTPS URL' }))
+      await user.click(screen.getByText('保存设置'))
+
+      await waitFor(() => {
+        expectUpdateSettingsCalledWith(expect.objectContaining({
+          share: expect.objectContaining({
+            enabled: true,
+            base_url: 'https://nas.example.com/base/',
+          }),
+        }))
+      })
+    })
+
+    it('repairs share base URLs with duplicate path slashes', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockGetSettings.mockResolvedValueOnce({
+        data: {
+          ...defaultSettingsResponse.data,
+          share: {
+            ...defaultSettingsResponse.data.share,
+            enabled: true,
+            base_url: 'https://nas.example.com/shares%2F%2Fteam',
+          },
+        },
+      })
+      mockGetSecurityCheck.mockResolvedValueOnce({
+        success: true,
+        data: {
+          status: 'block',
+          generated_at: '2026-05-08T00:00:00Z',
+          checks: [
+            {
+              id: 'share_base_url',
+              status: 'block',
+              title: '分享基础 URL 路径包含重复斜杠',
+              message: 'backend raw duplicate slash detail',
+              details: {
+                base_url: 'https://nas.example.com/shares%2F%2Fteam',
+                base_url_path: '/shares//team',
+              },
+            },
+          ],
+          request: { scheme: 'https', host: 'nas.example.com' },
+          config: { share_enabled: true },
+        },
+      })
+
+      render(<SettingsPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('分享基础 URL 路径包含重复斜杠')).toBeTruthy()
+        expect(screen.getByText('分享基础 URL 路径包含重复斜杠，继续使用可能被代理或浏览器规范化为不一致的分享地址。')).toBeTruthy()
+      })
+      expect(screen.queryByText('backend raw duplicate slash detail')).toBeNull()
+
+      await user.click(screen.getByRole('button', { name: '使用 HTTPS URL' }))
+      await user.click(screen.getByText('保存设置'))
+
+      await waitFor(() => {
+        expectUpdateSettingsCalledWith(expect.objectContaining({
+          share: expect.objectContaining({
+            enabled: true,
+            base_url: 'https://nas.example.com/shares/team',
+          }),
+        }))
+      })
+    })
+
+    it.each([
+      [
+        'host-relative backslash path',
+        '分享基础 URL 路径包含反斜杠',
+        'backend raw host-relative backslash detail',
+        { base_url: String.raw`https://nas.example.com\shares`, base_url_path: String.raw`\shares` },
+        '分享基础 URL 路径包含反斜杠，继续使用可能被代理或浏览器规范化为不一致的分享地址。',
+      ],
+      [
+        'backslash path',
+        '分享基础 URL 路径包含反斜杠',
+        'backend raw backslash detail',
+        { base_url: 'https://nas.example.com/shares%5Cteam', base_url_path: '/shares\\team' },
+        '分享基础 URL 路径包含反斜杠，继续使用可能被代理或浏览器规范化为不一致的分享地址。',
+      ],
+      [
+        'dot segment path',
+        '分享基础 URL 路径包含点段',
+        'backend raw dot segment detail',
+        { base_url: 'https://nas.example.com/shares/%2e%2e/team', base_url_path: '/shares/../team' },
+        '分享基础 URL 路径包含 . 或 .. 路径段，继续使用可能被代理或浏览器规范化为不一致的分享地址。',
+      ],
+    ])('shows a specific security check message for share base URL with %s', async (_label, title, backendMessage, details, expectedMessage) => {
+      mockGetSecurityCheck.mockResolvedValueOnce({
+        success: true,
+        data: {
+          status: 'block',
+          generated_at: '2026-05-08T00:00:00Z',
+          checks: [
+            {
+              id: 'share_base_url',
+              status: 'block',
+              title,
+              message: backendMessage,
+              details,
+            },
+          ],
+          request: { scheme: 'https', host: 'nas.example.com' },
+          config: { share_enabled: true },
+        },
+      })
+
+      render(<SettingsPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText(title)).toBeTruthy()
+        expect(screen.getByText(expectedMessage)).toBeTruthy()
+      })
+      expect(screen.queryByText(backendMessage)).toBeNull()
+    })
+
+    it('repairs share base URLs with host-relative backslashes', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockGetSettings.mockResolvedValueOnce({
+        data: {
+          ...defaultSettingsResponse.data,
+          share: {
+            ...defaultSettingsResponse.data.share,
+            enabled: true,
+            base_url: String.raw`https://nas.example.com\shares`,
+          },
+        },
+      })
+      mockGetSecurityCheck.mockResolvedValueOnce({
+        success: true,
+        data: {
+          status: 'block',
+          generated_at: '2026-05-08T00:00:00Z',
+          checks: [
+            {
+              id: 'share_base_url',
+              status: 'block',
+              title: '分享基础 URL 路径包含反斜杠',
+              message: 'backend raw host-relative backslash repair detail',
+              details: {
+                base_url: String.raw`https://nas.example.com\shares`,
+                base_url_path: String.raw`\shares`,
+              },
+            },
+          ],
+          request: { scheme: 'https', host: 'nas.example.com' },
+          config: { share_enabled: true },
+        },
+      })
+
+      render(<SettingsPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('分享基础 URL 路径包含反斜杠')).toBeTruthy()
+      })
+
+      await user.click(screen.getByRole('button', { name: '使用 HTTPS URL' }))
+      await user.click(screen.getByText('保存设置'))
+
+      await waitFor(() => {
+        expectUpdateSettingsCalledWith(expect.objectContaining({
+          share: expect.objectContaining({
+            enabled: true,
+            base_url: 'https://nas.example.com/shares',
+          }),
+        }))
+      })
+      expect(screen.queryByText('backend raw host-relative backslash repair detail')).toBeNull()
+    })
+
+    it('repairs share base URLs with escaped backslashes', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockGetSettings.mockResolvedValueOnce({
+        data: {
+          ...defaultSettingsResponse.data,
+          share: {
+            ...defaultSettingsResponse.data.share,
+            enabled: true,
+            base_url: 'https://nas.example.com/shares%5Cteam',
+          },
+        },
+      })
+      mockGetSecurityCheck.mockResolvedValueOnce({
+        success: true,
+        data: {
+          status: 'block',
+          generated_at: '2026-05-08T00:00:00Z',
+          checks: [
+            {
+              id: 'share_base_url',
+              status: 'block',
+              title: '分享基础 URL 路径包含反斜杠',
+              message: 'backend raw backslash repair detail',
+              details: {
+                base_url: 'https://nas.example.com/shares%5Cteam',
+                base_url_path: '/shares\\team',
+              },
+            },
+          ],
+          request: { scheme: 'https', host: 'nas.example.com' },
+          config: { share_enabled: true },
+        },
+      })
+
+      render(<SettingsPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('分享基础 URL 路径包含反斜杠')).toBeTruthy()
+      })
+
+      await user.click(screen.getByRole('button', { name: '使用 HTTPS URL' }))
+      await user.click(screen.getByText('保存设置'))
+
+      await waitFor(() => {
+        expectUpdateSettingsCalledWith(expect.objectContaining({
+          share: expect.objectContaining({
+            enabled: true,
+            base_url: 'https://nas.example.com/shares/team',
+          }),
+        }))
+      })
+      expect(screen.queryByText('backend raw backslash repair detail')).toBeNull()
+    })
+
     it('shows stable fallback text when the security check cannot load', async () => {
       mockGetSecurityCheck.mockRejectedValueOnce(new Error('security check failed'))
 
@@ -1817,7 +2225,7 @@ describe('SettingsPage', () => {
 
       await user.click(screen.getByRole('button', { name: '应用代理推荐' }))
 
-      expect(screen.getByDisplayValue('127.0.0.1')).toBeTruthy()
+      expect(screen.getByLabelText('服务器监听地址')).toHaveValue('127.0.0.1')
       expect(screen.getByLabelText('受信代理层数')).toHaveValue(1)
       expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({
         title: '已应用反向代理推荐',
@@ -2100,7 +2508,7 @@ describe('SettingsPage', () => {
               id: 'share_base_url',
               status: 'block',
               title: '分享基础 URL 使用非标准 HTTPS 端口',
-              message: '公开分享链接应使用 HTTPS 默认端口 443。',
+              message: 'backend raw non-default port detail',
               details: { base_url: 'https://operator@share.example.com:8443/base/' },
             },
           ],
@@ -2112,7 +2520,9 @@ describe('SettingsPage', () => {
 
       await waitFor(() => {
         expect(screen.getByText('分享基础 URL 使用非标准 HTTPS 端口')).toBeTruthy()
+        expect(screen.getByText('分享基础 URL 使用非标准 HTTPS 端口，公网分享通常应使用默认 443 端口，避免额外暴露入口。')).toBeTruthy()
       })
+      expect(screen.queryByText('backend raw non-default port detail')).toBeNull()
 
       await user.click(screen.getByRole('button', { name: '使用 HTTPS URL' }))
       await user.click(screen.getByText('保存设置'))
@@ -2258,8 +2668,8 @@ describe('SettingsPage', () => {
 
       await user.click(screen.getByRole('button', { name: '修正代理设置' }))
 
-      expect(screen.getByDisplayValue('0.0.0.0')).toBeTruthy()
-      expect(screen.getByLabelText('受信代理层数')).toHaveValue(1)
+        expect(screen.getByLabelText('服务器监听地址')).toHaveValue('0.0.0.0')
+        expect(screen.getByLabelText('受信代理层数')).toHaveValue(1)
       expect(screen.getByLabelText('受信代理来源')).toHaveValue('10.0.0.0/8\n172.18.0.3')
       expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({
         title: '已加入受信代理来源',
@@ -2338,8 +2748,8 @@ describe('SettingsPage', () => {
 
       await user.click(screen.getByRole('button', { name: '设置代理层数' }))
 
-      expect(screen.getByDisplayValue('0.0.0.0')).toBeTruthy()
-      expect(screen.getByLabelText('受信代理层数')).toHaveValue(1)
+        expect(screen.getByLabelText('服务器监听地址')).toHaveValue('0.0.0.0')
+        expect(screen.getByLabelText('受信代理层数')).toHaveValue(1)
       expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({
         title: '已设置受信代理层数',
       }))
@@ -2376,6 +2786,35 @@ describe('SettingsPage', () => {
         title: '需要编辑配置文件',
         description: expect.stringContaining('allow_unsafe_no_auth'),
       }))
+    })
+
+    it('does not imply non-loopback exposure for unsafe no-auth warning states', async () => {
+      mockGetSecurityCheck.mockResolvedValueOnce({
+        success: true,
+        data: {
+          status: 'warning',
+          generated_at: '2026-05-08T00:00:00Z',
+          checks: [
+            {
+              id: 'unsafe_no_auth_override',
+              status: 'warning',
+              title: '无认证暴露例外已开启',
+              message: 'backend warning should be normalized',
+            },
+          ],
+          request: { scheme: 'https' },
+          config: { allow_unsafe_no_auth: true },
+        },
+      })
+      render(<SettingsPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('无认证暴露例外已开启')).toBeTruthy()
+      })
+
+      expect(screen.getByText('无认证例外已开启；该设置只适合受控网络边界或临时调试，公网访问前请关闭该例外。')).toBeTruthy()
+      expect(screen.queryByText(/绑定到非本机地址/)).toBeNull()
+      expect(screen.getByRole('button', { name: '关闭例外' })).toBeTruthy()
     })
 
     it('shows manual guidance when Web login auth is disabled', async () => {
@@ -2534,22 +2973,14 @@ describe('SettingsPage', () => {
       const user = userEvent.setup({ writeToClipboard: false })
       render(<SettingsPage />)
 
-      await waitFor(() => {
-        expect(screen.getByDisplayValue('8080')).toBeTruthy()
-      })
-
-      const portInput = screen.getByDisplayValue('8080')
+      const portInput = await screen.findByLabelText('服务器端口')
       expect(portInput).toHaveAttribute('type', 'number')
       expect(portInput).toHaveAttribute('min', '1')
       expect(portInput).toHaveAttribute('max', '65535')
 
       await openTab(user, '高级')
 
-      await waitFor(() => {
-        expect(screen.getByDisplayValue('3')).toBeTruthy()
-      })
-
-      const maxRetriesInput = screen.getByDisplayValue('3')
+      const maxRetriesInput = await screen.findByLabelText('数据面最大重试次数')
       expect(maxRetriesInput).toHaveAttribute('type', 'number')
       expect(maxRetriesInput).toHaveAttribute('min', '0')
     })
@@ -2560,18 +2991,18 @@ describe('SettingsPage', () => {
 
       await openTab(user, '高级')
 
-      const alertsWebhookInput = await screen.findByPlaceholderText('https://hooks.example.com/alert')
+      const alertsWebhookInput = await screen.findByLabelText('Webhook URL')
       expect(alertsWebhookInput).toHaveAttribute('type', 'url')
 
-      const wecomWebhookInput = await screen.findByPlaceholderText('https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=...')
+      const wecomWebhookInput = await screen.findByLabelText('企业微信 Webhook URL')
       expect(wecomWebhookInput).toHaveAttribute('type', 'url')
 
-      const dingTalkWebhookInput = await screen.findByPlaceholderText('https://oapi.dingtalk.com/robot/send?access_token=...')
+      const dingTalkWebhookInput = await screen.findByLabelText('钉钉 Webhook URL')
       expect(dingTalkWebhookInput).toHaveAttribute('type', 'url')
 
       await openTab(user, '分享')
 
-      const shareBaseUrlInput = await screen.findByPlaceholderText('https://nas.example.com')
+      const shareBaseUrlInput = await screen.findByLabelText('分享基础 URL')
       expect(shareBaseUrlInput).toHaveAttribute('type', 'url')
     })
 
@@ -2581,12 +3012,12 @@ describe('SettingsPage', () => {
 
       await openTab(user, '版本保留')
 
-      expect(await screen.findByPlaceholderText('2160h')).toBeTruthy()
-      expect(screen.getByPlaceholderText('24h')).toBeTruthy()
+      expect(await screen.findByLabelText('最大保留时间')).toHaveAttribute('placeholder', '2160h')
+      expect(screen.getByLabelText('GC 运行间隔')).toHaveAttribute('placeholder', '24h')
 
       await openTab(user, '高级')
 
-      expect(await screen.findByPlaceholderText('30s')).toBeTruthy()
+      expect(await screen.findByLabelText('数据面连接超时')).toHaveAttribute('placeholder', '30s')
       expect(screen.getByLabelText('提醒检查间隔')).toHaveAttribute('placeholder', '1h')
       expect(screen.getByLabelText('提醒冷却时间')).toHaveAttribute('placeholder', '4h')
     })
@@ -2674,10 +3105,10 @@ describe('SettingsPage', () => {
       const switches = screen.getAllByRole('switch')
       await user.click(switches[0])
       await user.click(switches[0])
-      fireEvent.change(screen.getByDisplayValue('/dav'), { target: { value: 'remote' } })
+      fireEvent.change(screen.getByLabelText('WebDAV URL 前缀'), { target: { value: 'remote' } })
       await user.click(switches[1])
-      fireEvent.change(screen.getByDisplayValue('admin'), { target: { value: 'webdav-admin' } })
-      fireEvent.change(screen.getByPlaceholderText('••••••••'), { target: { value: 'new-secret' } })
+      fireEvent.change(screen.getByLabelText('WebDAV 用户名'), { target: { value: 'webdav-admin' } })
+      fireEvent.change(screen.getByLabelText('WebDAV 密码'), { target: { value: 'new-secret' } })
 
       await user.click(screen.getByText('保存设置'))
 
@@ -2694,6 +3125,29 @@ describe('SettingsPage', () => {
       })
     })
 
+    it('normalizes WebDAV prefixes with path-segment spaces like the server', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      render(<SettingsPage />)
+
+      await openTab(user, 'WebDAV')
+
+      await waitFor(() => {
+        expect(screen.getByLabelText('WebDAV URL 前缀')).toHaveValue('/dav')
+      })
+
+      fireEvent.change(screen.getByLabelText('WebDAV URL 前缀'), { target: { value: '/team /sub ' } })
+      await user.click(screen.getByText('保存设置'))
+
+      await waitFor(() => {
+        expectUpdateSettingsCalledWith(expect.objectContaining({
+          webdav: expect.objectContaining({
+            enabled: true,
+            prefix: '/team /sub',
+          }),
+        }))
+      })
+    })
+
     it('clears newly saved WebDAV password while waiting for refreshed settings', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
       mockGetSettings
@@ -2703,7 +3157,7 @@ describe('SettingsPage', () => {
 
       await openTab(user, 'WebDAV')
 
-      const passwordInput = await screen.findByPlaceholderText('••••••••')
+      const passwordInput = await screen.findByLabelText('WebDAV 密码')
       fireEvent.change(passwordInput, { target: { value: 'new-webdav-secret' } })
       await user.click(screen.getByText('保存设置'))
 
@@ -2716,8 +3170,7 @@ describe('SettingsPage', () => {
         }))
       })
       await waitFor(() => {
-        expect(screen.queryByDisplayValue('new-webdav-secret')).toBeNull()
-        expect(screen.getByPlaceholderText('••••••••')).toHaveValue('')
+        expect(screen.getByLabelText('WebDAV 密码')).toHaveValue('')
       })
     })
 
@@ -2780,17 +3233,13 @@ describe('SettingsPage', () => {
 
       await openTab(user, '高级')
 
-      await waitFor(() => {
-        expect(screen.getByDisplayValue('127.0.0.1:9090')).toBeTruthy()
-      })
-
-      const grpcInput = screen.getByDisplayValue('127.0.0.1:9090')
+      const grpcInput = await screen.findByLabelText('数据面 gRPC 地址')
       fireEvent.change(grpcInput, { target: { value: '10.0.0.2:9091' } })
 
-      const timeoutInput = screen.getByDisplayValue('30s')
+      const timeoutInput = screen.getByLabelText('数据面连接超时')
       fireEvent.change(timeoutInput, { target: { value: '45s' } })
 
-      const retriesInput = screen.getByDisplayValue('3')
+      const retriesInput = screen.getByLabelText('数据面最大重试次数')
       fireEvent.change(retriesInput, { target: { value: '5' } })
       fireEvent.click(screen.getByText('保存设置'))
 
@@ -2895,12 +3344,12 @@ describe('SettingsPage', () => {
       })
 
       await user.click(screen.getByRole('switch'))
-      const baseUrlInput = screen.getByPlaceholderText('https://nas.example.com')
+      const baseUrlInput = screen.getByLabelText('分享基础 URL')
       await user.type(baseUrlInput, 'https://share.example.com')
-      await user.clear(screen.getByPlaceholderText('168h'))
-      await user.type(screen.getByPlaceholderText('168h'), '24h')
-      await user.clear(screen.getByPlaceholderText('0'))
-      await user.type(screen.getByPlaceholderText('0'), '3')
+      await user.clear(screen.getByLabelText('新分享默认有效期'))
+      await user.type(screen.getByLabelText('新分享默认有效期'), '24h')
+      await user.clear(screen.getByLabelText('新分享默认访问次数'))
+      await user.type(screen.getByLabelText('新分享默认访问次数'), '3')
       await user.click(screen.getByText('保存设置'))
 
       await waitFor(() => {
@@ -2968,6 +3417,31 @@ describe('SettingsPage', () => {
       })
     })
 
+    it('allows share policy paths with spaces', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      render(<SettingsPage />)
+
+      await openTab(user, '分享')
+
+      await user.click(screen.getByRole('switch'))
+      await user.click(screen.getByRole('button', { name: '添加路径策略' }))
+      expect(screen.getByText(/分享策略路径填写 MnemoNAS 逻辑路径/)).toBeTruthy()
+      await user.clear(screen.getByLabelText('分享策略路径 1'))
+      fireEvent.change(screen.getByLabelText('分享策略路径 1'), { target: { value: '/Family Photos' } })
+      await user.click(screen.getByText('保存设置'))
+
+      await waitFor(() => {
+        expectUpdateSettingsCalledWith(expect.objectContaining({
+          share: expect.objectContaining({
+            policy_rules: [{
+              path: '/Family Photos',
+              require_password: true,
+            }],
+          }),
+        }))
+      })
+    })
+
     it('summarizes unsaved share defaults and path policy changes', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
       mockGetSettings.mockResolvedValueOnce({
@@ -3003,10 +3477,10 @@ describe('SettingsPage', () => {
       expect(initialCoverage.getByText('1 条路径策略未限制最长有效期。')).toBeTruthy()
       expect(initialCoverage.getByText('1 条路径策略未限制访问次数。')).toBeTruthy()
 
-      fireEvent.change(screen.getByPlaceholderText('https://nas.example.com'), {
+      fireEvent.change(screen.getByLabelText('分享基础 URL'), {
         target: { value: 'https://new.example.com' },
       })
-      fireEvent.change(screen.getByPlaceholderText('0'), { target: { value: '30' } })
+      fireEvent.change(screen.getByLabelText('新分享默认访问次数'), { target: { value: '30' } })
       fireEvent.change(screen.getByLabelText('分享策略最长有效期 1'), { target: { value: '12h' } })
       await user.click(screen.getByLabelText('删除分享策略 2'))
       await user.click(screen.getByRole('button', { name: '添加路径策略' }))
@@ -3023,10 +3497,10 @@ describe('SettingsPage', () => {
       expect(within(updatedReview).getByText('/Family')).toBeTruthy()
       expect(within(updatedReview).getByText('/Public')).toBeTruthy()
       expect(within(updatedReview).getByText('/Archive')).toBeTruthy()
-      expect(within(updatedReview).getByText('变更字段: 最长有效期')).toBeTruthy()
-      expect(within(updatedReview).getByText('必须设置密码 · 最长有效期: 12h')).toBeTruthy()
-      expect(within(updatedReview).getByText('必须设置密码 · 最多访问: 5')).toBeTruthy()
-      expect(within(updatedReview).getByText('必须设置密码 · 最多访问: 10')).toBeTruthy()
+      expect(within(updatedReview).getByText('变更字段：最长有效期')).toBeTruthy()
+      expect(within(updatedReview).getByText('必须设置密码 · 最长有效期：12h')).toBeTruthy()
+      expect(within(updatedReview).getByText('必须设置密码 · 最多访问：5')).toBeTruthy()
+      expect(within(updatedReview).getByText('必须设置密码 · 最多访问：10')).toBeTruthy()
       const updatedCoverage = within(screen.getByLabelText('分享策略覆盖摘要'))
       expect(updatedCoverage.getByText('关注项 2')).toBeTruthy()
       expect(updatedCoverage.getByText('默认访问次数')).toBeTruthy()
@@ -3044,8 +3518,8 @@ describe('SettingsPage', () => {
       await openTab(user, '分享')
 
       await user.click(screen.getByRole('switch'))
-      await user.clear(screen.getByPlaceholderText('168h'))
-      await user.type(screen.getByPlaceholderText('168h'), '7d')
+      await user.clear(screen.getByLabelText('新分享默认有效期'))
+      await user.type(screen.getByLabelText('新分享默认有效期'), '7d')
       await user.click(screen.getByText('保存设置'))
 
       await waitFor(() => {
@@ -3057,10 +3531,10 @@ describe('SettingsPage', () => {
       })
       expect(mockUpdateSettings).not.toHaveBeenCalled()
 
-      await user.clear(screen.getByPlaceholderText('168h'))
-      await user.type(screen.getByPlaceholderText('168h'), '24h')
-      await user.clear(screen.getByPlaceholderText('0'))
-      await user.type(screen.getByPlaceholderText('0'), '-1')
+      await user.clear(screen.getByLabelText('新分享默认有效期'))
+      await user.type(screen.getByLabelText('新分享默认有效期'), '24h')
+      await user.clear(screen.getByLabelText('新分享默认访问次数'))
+      await user.type(screen.getByLabelText('新分享默认访问次数'), '-1')
       await user.click(screen.getByText('保存设置'))
 
       await waitFor(() => {
@@ -3083,8 +3557,8 @@ describe('SettingsPage', () => {
       await openTab(user, '分享')
 
       await user.click(screen.getByRole('switch'))
-      await user.clear(screen.getByPlaceholderText('0'))
-      await user.type(screen.getByPlaceholderText('0'), maxAccess)
+      await user.clear(screen.getByLabelText('新分享默认访问次数'))
+      await user.type(screen.getByLabelText('新分享默认访问次数'), maxAccess)
       await user.click(screen.getByText('保存设置'))
 
       await waitFor(() => {
@@ -3115,6 +3589,33 @@ describe('SettingsPage', () => {
         expect(mockAddToast).toHaveBeenCalledWith({
           title: '分享路径策略格式无效',
           description: '第 1 行至少需要一个约束',
+          color: 'danger',
+        })
+      })
+      expect(mockUpdateSettings).not.toHaveBeenCalled()
+    })
+
+    it.each([
+      ['dot segment', '/Family/./Photos'],
+      ['backslash', '/Family\\Photos'],
+      ['query marker', '/Family?Photos'],
+      ['fragment marker', '/Family#Photos'],
+    ])('rejects invalid share path policy paths with %s before saving', async (_label, invalidPath) => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      render(<SettingsPage />)
+
+      await openTab(user, '分享')
+
+      await user.click(screen.getByRole('switch'))
+      await user.click(screen.getByRole('button', { name: '添加路径策略' }))
+      await user.clear(screen.getByLabelText('分享策略路径 1'))
+      fireEvent.change(screen.getByLabelText('分享策略路径 1'), { target: { value: invalidPath } })
+      await user.click(screen.getByText('保存设置'))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '分享路径策略格式无效',
+          description: '第 1 行路径无效',
           color: 'danger',
         })
       })
@@ -3206,13 +3707,13 @@ describe('SettingsPage', () => {
       await user.click(switches[1])
       await user.click(switches[1])
 
-      const certInput = screen.getByPlaceholderText('/path/to/server.crt')
+      const certInput = screen.getByLabelText('TLS 证书文件')
       fireEvent.change(certInput, { target: { value: '/etc/mnemonas/tls/server.crt' } })
 
-      const keyInput = screen.getByPlaceholderText('/path/to/server.key')
+      const keyInput = screen.getByLabelText('TLS 私钥文件')
       fireEvent.change(keyInput, { target: { value: '/etc/mnemonas/tls/server.key' } })
 
-      const certDirInput = screen.getByPlaceholderText('<storage.root>/.mnemonas/certs')
+      const certDirInput = screen.getByLabelText('TLS 证书目录')
       fireEvent.change(certDirInput, { target: { value: '/etc/mnemonas/tls' } })
 
       await user.click(screen.getByText('保存设置'))
@@ -3240,8 +3741,8 @@ describe('SettingsPage', () => {
         expect(screen.getByText('TLS / HTTPS')).toBeTruthy()
       })
 
-      await user.click(screen.getAllByRole('switch')[0])
-      fireEvent.change(screen.getByPlaceholderText('/path/to/server.crt'), { target: { value: '/etc/mnemonas/tls/server.crt' } })
+      await user.click(screen.getByRole('switch', { name: '启用 HTTPS' }))
+      fireEvent.change(screen.getByLabelText('TLS 证书文件'), { target: { value: '/etc/mnemonas/tls/server.crt' } })
       await user.click(screen.getByText('保存设置'))
 
       await waitFor(() => {
@@ -3262,9 +3763,9 @@ describe('SettingsPage', () => {
         expect(screen.getByText('TLS / HTTPS')).toBeTruthy()
       })
 
-      await user.click(screen.getAllByRole('switch')[0])
-      fireEvent.change(screen.getByPlaceholderText('/path/to/server.crt'), { target: { value: '/etc/mnemonas/tls/server.pem' } })
-      fireEvent.change(screen.getByPlaceholderText('/path/to/server.key'), { target: { value: '/etc/mnemonas/tls/server.pem' } })
+      await user.click(screen.getByRole('switch', { name: '启用 HTTPS' }))
+      fireEvent.change(screen.getByLabelText('TLS 证书文件'), { target: { value: '/etc/mnemonas/tls/server.pem' } })
+      fireEvent.change(screen.getByLabelText('TLS 私钥文件'), { target: { value: '/etc/mnemonas/tls/server.pem' } })
       await user.click(screen.getByText('保存设置'))
 
       await waitFor(() => {
@@ -3317,19 +3818,19 @@ describe('SettingsPage', () => {
       const checkIntervalInput = screen.getByLabelText('提醒检查间隔')
       fireEvent.change(checkIntervalInput, { target: { value: '30m' } })
 
-      const thresholdInput = screen.getByDisplayValue('90')
+      const thresholdInput = screen.getByLabelText('提醒阈值')
       fireEvent.change(thresholdInput, { target: { value: '85' } })
 
-      const criticalInput = screen.getByDisplayValue('95')
+      const criticalInput = screen.getByLabelText('严重提醒阈值')
       fireEvent.change(criticalInput, { target: { value: '92' } })
 
-      const minFreeInput = screen.getByDisplayValue('10 GB')
+      const minFreeInput = screen.getByLabelText('最小剩余空间')
       fireEvent.change(minFreeInput, { target: { value: '20GB' } })
 
       const cooldownInput = screen.getByLabelText('提醒冷却时间')
       fireEvent.change(cooldownInput, { target: { value: '2h' } })
 
-      const webhookInput = screen.getByPlaceholderText('https://hooks.example.com/alert')
+      const webhookInput = screen.getByLabelText('Webhook URL')
       fireEvent.change(webhookInput, { target: { value: 'https://hooks.example.com/storage' } })
 
       fireEvent.change(screen.getByLabelText('Webhook 方法'), { target: { value: 'GET' } })
@@ -3425,6 +3926,78 @@ describe('SettingsPage', () => {
         title: '测试提醒已发送',
         description: '已发送到 Webhook / Telegram / 企业微信 / 钉钉 / SMTP 邮件',
         color: 'success',
+      }))
+    })
+
+    it('does not expose raw unknown alert channel keys in the test alert toast', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockGetSettings.mockResolvedValueOnce({
+        ...defaultSettingsResponse,
+        data: {
+          ...defaultSettingsResponse.data,
+          alerts: {
+            ...defaultSettingsResponse.data.alerts,
+            enabled: true,
+            webhook_url: '<redacted>',
+            webhook_url_configured: true,
+          },
+        },
+      })
+      mockSendTestAlert.mockResolvedValueOnce({
+        success: true,
+        data: { event_type: 'alert_test', channels: ['webhook', 'backend_custom_channel'] },
+      })
+      render(<SettingsPage />)
+
+      await openTab(user, '高级')
+      await user.click(await screen.findByRole('button', { name: '发送测试提醒' }))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({
+          title: '测试提醒已发送',
+          description: '已发送到 Webhook / 未知通道',
+          color: 'success',
+        }))
+      })
+      expect(mockAddToast).not.toHaveBeenCalledWith(expect.objectContaining({
+        description: expect.stringContaining('backend_custom_channel'),
+      }))
+    })
+
+    it('shows a warning toast when a saved test alert succeeds with warnings', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockGetSettings.mockResolvedValueOnce({
+        ...defaultSettingsResponse,
+        data: {
+          ...defaultSettingsResponse.data,
+          alerts: {
+            ...defaultSettingsResponse.data.alerts,
+            enabled: true,
+            webhook_url: '<redacted>',
+            webhook_url_configured: true,
+          },
+        },
+      })
+      mockSendTestAlert.mockResolvedValueOnce({
+        success: true,
+        warning: true,
+        message: 'test alert sent with delivery warning token=webhook-secret Authorization: Bearer bearer-secret',
+        data: { event_type: 'alert_test', channels: ['webhook'] },
+      })
+      render(<SettingsPage />)
+
+      await openTab(user, '高级')
+      await user.click(await screen.findByRole('button', { name: '发送测试提醒' }))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({
+          title: '测试提醒已发送，但存在警告',
+          description: 'test alert sent with delivery warning token=<redacted> Authorization: Bearer <redacted>',
+          color: 'warning',
+        }))
+      })
+      expect(mockAddToast).not.toHaveBeenCalledWith(expect.objectContaining({
+        description: expect.stringMatching(/webhook-secret|bearer-secret/),
       }))
     })
 
@@ -3540,10 +4113,13 @@ describe('SettingsPage', () => {
       await openTab(user, '高级')
 
       await waitFor(() => {
-        expect(screen.getByPlaceholderText('https://hooks.example.com/alert')).toHaveValue('<redacted>')
+        expect(screen.getByLabelText('Webhook URL')).toHaveValue('<redacted>')
         expect(screen.getByLabelText('企业微信 Webhook URL')).toHaveValue('<redacted>')
         expect(screen.getByLabelText('钉钉 Webhook URL')).toHaveValue('<redacted>')
       })
+      expect(screen.getByText('企业微信群机器人 Webhook 地址；保存后不会回显完整地址')).toBeTruthy()
+      expect(screen.getByText('钉钉群机器人 Webhook 地址；保存后不会回显完整地址')).toBeTruthy()
+      expect(screen.queryByText(/已配置占位/)).toBeNull()
 
       await user.click(screen.getByText('保存设置'))
 
@@ -3561,28 +4137,28 @@ describe('SettingsPage', () => {
       })
     })
 
-    it('rejects redacted webhook URL placeholders without a saved URL', async () => {
+    it('rejects redacted webhook URL values without a saved URL', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
       render(<SettingsPage />)
 
       await openTab(user, '高级')
       await user.click(await screen.findByRole('switch', { name: '启用提醒' }))
-      fireEvent.change(screen.getByPlaceholderText('https://hooks.example.com/alert'), {
+      fireEvent.change(screen.getByLabelText('Webhook URL'), {
         target: { value: '<redacted>' },
       })
       await user.click(screen.getByText('保存设置'))
 
       await waitFor(() => {
         expect(mockAddToast).toHaveBeenCalledWith({
-          title: 'Webhook URL 占位符无效',
-          description: '只有服务端已保存的 Webhook URL 才能保留为 <redacted>；新增 Webhook URL 需要填写真实地址。',
+          title: 'Webhook URL 无法保留',
+          description: '当前没有已保存的 Webhook URL；新增 Webhook URL 需要填写真实地址。',
           color: 'danger',
         })
       })
       expect(mockUpdateSettings).not.toHaveBeenCalled()
     })
 
-    it('rejects redacted WeCom webhook URL placeholders without a saved URL', async () => {
+    it('rejects redacted WeCom webhook URL values without a saved URL', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
       render(<SettingsPage />)
 
@@ -3596,15 +4172,15 @@ describe('SettingsPage', () => {
 
       await waitFor(() => {
         expect(mockAddToast).toHaveBeenCalledWith({
-          title: '企业微信 Webhook 占位符无效',
-          description: '只有服务端已保存的企业微信 Webhook URL 才能保留为 <redacted>；新增企业微信 Webhook 需要填写真实地址。',
+          title: '企业微信 Webhook 无法保留',
+          description: '当前没有已保存的企业微信 Webhook URL；新增企业微信 Webhook 需要填写真实地址。',
           color: 'danger',
         })
       })
       expect(mockUpdateSettings).not.toHaveBeenCalled()
     })
 
-    it('rejects redacted DingTalk webhook URL placeholders without a saved URL', async () => {
+    it('rejects redacted DingTalk webhook URL values without a saved URL', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
       render(<SettingsPage />)
 
@@ -3618,15 +4194,15 @@ describe('SettingsPage', () => {
 
       await waitFor(() => {
         expect(mockAddToast).toHaveBeenCalledWith({
-          title: '钉钉 Webhook 占位符无效',
-          description: '只有服务端已保存的钉钉 Webhook URL 才能保留为 <redacted>；新增钉钉 Webhook 需要填写真实地址。',
+          title: '钉钉 Webhook 无法保留',
+          description: '当前没有已保存的钉钉 Webhook URL；新增钉钉 Webhook 需要填写真实地址。',
           color: 'danger',
         })
       })
       expect(mockUpdateSettings).not.toHaveBeenCalled()
     })
 
-    it('rejects redacted webhook header placeholders without a saved header', async () => {
+    it('rejects redacted webhook header values without a saved header', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
       render(<SettingsPage />)
 
@@ -3639,7 +4215,7 @@ describe('SettingsPage', () => {
 
       await waitFor(() => {
         expect(mockAddToast).toHaveBeenCalledWith({
-          title: 'Webhook Header 占位符无效',
+          title: 'Webhook Header 无法保留',
           description: 'Header Authorization 没有已保存的值；新增或改名的 Header 需要填写真实值。',
           color: 'danger',
         })
@@ -3661,7 +4237,7 @@ describe('SettingsPage', () => {
       await openTab(user, '高级')
 
       fireEvent.click(await screen.findByRole('switch', { name: '启用提醒' }))
-      fireEvent.change(screen.getByPlaceholderText('https://hooks.example.com/alert'), {
+      fireEvent.change(screen.getByLabelText('Webhook URL'), {
         target: { value: 'https://hooks.example.com/secret-token' },
       })
       fireEvent.change(screen.getByLabelText('Webhook 自定义 Header'), {
@@ -3717,10 +4293,7 @@ describe('SettingsPage', () => {
         resolveUpdateSettings({ success: true })
       })
       await waitFor(() => {
-        expect(screen.queryByDisplayValue('https://hooks.example.com/secret-token')).toBeNull()
-        expect(screen.queryByDisplayValue('https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=secret-key')).toBeNull()
-        expect(screen.queryByDisplayValue('https://oapi.dingtalk.com/robot/send?access_token=secret-token')).toBeNull()
-        expect(screen.getByPlaceholderText('https://hooks.example.com/alert')).toHaveValue('<redacted>')
+        expect(screen.getByLabelText('Webhook URL')).toHaveValue('<redacted>')
         expect(screen.getByLabelText('企业微信 Webhook URL')).toHaveValue('<redacted>')
         expect(screen.getByLabelText('钉钉 Webhook URL')).toHaveValue('<redacted>')
         const headersInput = screen.getByLabelText('Webhook 自定义 Header') as HTMLTextAreaElement
@@ -3989,6 +4562,31 @@ describe('SettingsPage', () => {
       await user.click(screen.getByRole('switch', { name: '启用提醒' }))
       const headersInput = screen.getByLabelText('Webhook 自定义 Header')
       fireEvent.change(headersInput, { target: { value: 'Bad Header: value' } })
+
+      await user.click(screen.getByText('保存设置'))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({
+          title: 'Webhook Header 格式无效',
+          color: 'danger',
+        }))
+      })
+      expect(mockUpdateSettings).not.toHaveBeenCalled()
+    })
+
+    it('rejects Unicode control characters in webhook header values before saving', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      render(<SettingsPage />)
+
+      await openTab(user, '高级')
+
+      await waitFor(() => {
+        expect(screen.getByText('提醒通知')).toBeTruthy()
+      })
+
+      await user.click(screen.getByRole('switch', { name: '启用提醒' }))
+      const headersInput = screen.getByLabelText('Webhook 自定义 Header')
+      fireEvent.change(headersInput, { target: { value: 'X-MnemoNAS: alerts\u0081private' } })
 
       await user.click(screen.getByText('保存设置'))
 
@@ -4273,7 +4871,7 @@ describe('SettingsPage', () => {
       const filenamesInput = screen.getByLabelText('自动版本化文件名')
       fireEvent.change(filenamesInput, { target: { value: 'README\nDockerfile\nCargo.toml' } })
 
-      const maxSizeInput = await screen.findByDisplayValue('100 MB')
+      const maxSizeInput = await screen.findByLabelText('最大自动版本化文件大小')
       fireEvent.change(maxSizeInput, { target: { value: '256MB' } })
 
       await user.click(screen.getByText('保存设置'))
@@ -4320,6 +4918,78 @@ describe('SettingsPage', () => {
             directory_quotas: [
               { path: '/team', quota_bytes: 2147483648 },
               { path: '/media', quota_bytes: 536870912 },
+            ],
+          }),
+        }))
+      })
+    })
+
+    it('allows quoted directory quota paths with spaces', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockGetSettings.mockResolvedValueOnce({
+        ...defaultSettingsResponse,
+        data: {
+          ...defaultSettingsResponse.data,
+          storage: {
+            root: '~/.mnemonas',
+            directory_quotas: [{ path: '/Family Photos', quota_bytes: 1073741824 }],
+          },
+        },
+      } as ReturnType<typeof getSettings>)
+      render(<SettingsPage />)
+
+      await openTab(user, '版本保留')
+
+      const quotasInput = await screen.findByLabelText('目录配额')
+      expect(quotasInput).toHaveValue('"/Family Photos" 1 GB')
+      expect(screen.getByText(/路径含空格或双引号时使用双引号/)).toBeTruthy()
+
+      fireEvent.change(quotasInput, {
+        target: { value: '"/Family Photos" 2 GB\n"/Media Archive" 512 MB' },
+      })
+      await user.click(screen.getByText('保存设置'))
+
+      await waitFor(() => {
+        expectUpdateSettingsCalledWith(expect.objectContaining({
+          storage: expect.objectContaining({
+            directory_quotas: [
+              { path: '/Family Photos', quota_bytes: 2147483648 },
+              { path: '/Media Archive', quota_bytes: 536870912 },
+            ],
+          }),
+        }))
+      })
+    })
+
+    it('escapes directory quota paths with literal quotes', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockGetSettings.mockResolvedValueOnce({
+        ...defaultSettingsResponse,
+        data: {
+          ...defaultSettingsResponse.data,
+          storage: {
+            root: '~/.mnemonas',
+            directory_quotas: [{ path: '/Family "Photos"', quota_bytes: 1073741824 }],
+          },
+        },
+      } as ReturnType<typeof getSettings>)
+      render(<SettingsPage />)
+
+      await openTab(user, '版本保留')
+
+      const quotasInput = await screen.findByLabelText('目录配额')
+      expect(quotasInput).toHaveValue('"/Family \\"Photos\\"" 1 GB')
+
+      fireEvent.change(quotasInput, {
+        target: { value: '"/Family \\"Photos\\"" 2 GB' },
+      })
+      await user.click(screen.getByText('保存设置'))
+
+      await waitFor(() => {
+        expectUpdateSettingsCalledWith(expect.objectContaining({
+          storage: expect.objectContaining({
+            directory_quotas: [
+              { path: '/Family "Photos"', quota_bytes: 2147483648 },
             ],
           }),
         }))
@@ -4402,6 +5072,40 @@ describe('SettingsPage', () => {
       }))
     })
 
+    it('rejects Unicode control characters in directory quota paths before saving', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      render(<SettingsPage />)
+
+      await openTab(user, '版本保留')
+
+      const quotasInput = await screen.findByLabelText('目录配额')
+      fireEvent.change(quotasInput, { target: { value: '/team\u0081private 1 GB' } })
+      await user.click(screen.getByText('保存设置'))
+
+      expect(mockUpdateSettings).not.toHaveBeenCalled()
+      expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({
+        title: '目录配额格式无效',
+        description: '第 1 行路径无效',
+      }))
+    })
+
+    it('rejects unclosed quoted directory quota paths before saving', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      render(<SettingsPage />)
+
+      await openTab(user, '版本保留')
+
+      const quotasInput = await screen.findByLabelText('目录配额')
+      fireEvent.change(quotasInput, { target: { value: '"/Family Photos 1 GB' } })
+      await user.click(screen.getByText('保存设置'))
+
+      expect(mockUpdateSettings).not.toHaveBeenCalled()
+      expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({
+        title: '目录配额格式无效',
+        description: '第 1 行路径引号未闭合',
+      }))
+    })
+
     it('rejects unsafe directory quota sizes before saving', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
       render(<SettingsPage />)
@@ -4458,6 +5162,127 @@ describe('SettingsPage', () => {
           }),
         }))
       })
+    })
+
+    it('allows directory access rule paths with spaces', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockGetSettings.mockResolvedValueOnce({
+        ...defaultSettingsResponse,
+        data: {
+          ...defaultSettingsResponse.data,
+          storage: {
+            root: '~/.mnemonas',
+            directory_access_rules: [{ path: '/Family Photos', read_groups: ['family'] }],
+          },
+        },
+      } as ReturnType<typeof getSettings>)
+      render(<SettingsPage />)
+
+      await openTab(user, '版本保留')
+
+      expect(await screen.findByLabelText('目录权限路径 1')).toHaveValue('/Family Photos')
+      expect(screen.getByText(/路径直接填写 MnemoNAS 逻辑路径/)).toBeTruthy()
+      expect(screen.getByLabelText('读组 1')).toHaveValue('family')
+
+      fireEvent.change(screen.getByLabelText('写组 1'), { target: { value: 'editors' } })
+      await user.click(screen.getByText('保存设置'))
+
+      await waitFor(() => {
+        expectUpdateSettingsCalledWith(expect.objectContaining({
+          storage: expect.objectContaining({
+            directory_access_rules: [
+              { path: '/Family Photos', read_groups: ['family'], write_groups: ['editors'] },
+            ],
+          }),
+        }))
+      })
+    })
+
+    it('escapes directory access rule paths with literal quotes', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockGetSettings.mockResolvedValueOnce({
+        ...defaultSettingsResponse,
+        data: {
+          ...defaultSettingsResponse.data,
+          storage: {
+            root: '~/.mnemonas',
+            directory_access_rules: [{ path: '/Family "Photos"', read_groups: ['family'] }],
+          },
+        },
+      } as ReturnType<typeof getSettings>)
+      render(<SettingsPage />)
+
+      await openTab(user, '版本保留')
+
+      expect(await screen.findByLabelText('目录权限路径 1')).toHaveValue('/Family "Photos"')
+      expect(screen.getByLabelText('读组 1')).toHaveValue('family')
+
+      fireEvent.change(screen.getByLabelText('写组 1'), { target: { value: 'editors' } })
+      await user.click(screen.getByText('保存设置'))
+
+      await waitFor(() => {
+        expectUpdateSettingsCalledWith(expect.objectContaining({
+          storage: expect.objectContaining({
+            directory_access_rules: [
+              { path: '/Family "Photos"', read_groups: ['family'], write_groups: ['editors'] },
+            ],
+          }),
+        }))
+      })
+    })
+
+    it('rejects line-syntax quotes in structured directory access rule paths before saving', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockGetSettings.mockResolvedValueOnce({
+        ...defaultSettingsResponse,
+        data: {
+          ...defaultSettingsResponse.data,
+          storage: {
+            root: '~/.mnemonas',
+            directory_access_rules: [{ path: '/team', read_groups: ['family'] }],
+          },
+        },
+      } as ReturnType<typeof getSettings>)
+      render(<SettingsPage />)
+
+      await openTab(user, '版本保留')
+
+      const pathInput = await screen.findByLabelText('目录权限路径 1')
+      fireEvent.change(pathInput, { target: { value: '"/Family Photos' } })
+      await user.click(screen.getByText('保存设置'))
+
+      expect(mockUpdateSettings).not.toHaveBeenCalled()
+      expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({
+        title: '目录权限格式无效',
+        description: '第 1 行路径无效',
+      }))
+    })
+
+    it('rejects Unicode control characters in directory access rule paths before saving', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockGetSettings.mockResolvedValueOnce({
+        ...defaultSettingsResponse,
+        data: {
+          ...defaultSettingsResponse.data,
+          storage: {
+            root: '~/.mnemonas',
+            directory_access_rules: [{ path: '/team', read_groups: ['family'] }],
+          },
+        },
+      } as ReturnType<typeof getSettings>)
+      render(<SettingsPage />)
+
+      await openTab(user, '版本保留')
+
+      const pathInput = await screen.findByLabelText('目录权限路径 1')
+      fireEvent.change(pathInput, { target: { value: '/team\u0081private' } })
+      await user.click(screen.getByText('保存设置'))
+
+      expect(mockUpdateSettings).not.toHaveBeenCalled()
+      expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({
+        title: '目录权限格式无效',
+        description: '第 1 行路径无效',
+      }))
     })
 
     it('adds directory access rule rows', async () => {
@@ -4550,7 +5375,7 @@ describe('SettingsPage', () => {
       expect(screen.getByText('新增 1')).toBeTruthy()
       expect(screen.getByText('修改 1')).toBeTruthy()
       expect(screen.getByText('删除 1')).toBeTruthy()
-      expect(screen.getByText('变更字段: 写组')).toBeTruthy()
+      expect(screen.getByText('变更字段：写组')).toBeTruthy()
       expect(screen.getByText('/team')).toBeTruthy()
       expect(screen.getByText('/shared')).toBeTruthy()
       expect(screen.getByText('/archive')).toBeTruthy()
@@ -4621,7 +5446,12 @@ describe('SettingsPage', () => {
       expect(screen.getAllByText(/目录规则/).length).toBeGreaterThanOrEqual(2)
     })
 
-    it('rejects malformed directory access check paths before checking', async () => {
+    it.each([
+      ['dot segment', '/team/./readme.txt'],
+      ['backslash', '/team\\readme.txt'],
+      ['query marker', '/team?readme.txt'],
+      ['fragment marker', '/team#readme.txt'],
+    ])('rejects malformed directory access check paths with %s before checking', async (_label, invalidPath) => {
       const user = userEvent.setup({ writeToClipboard: false })
       render(<SettingsPage />)
 
@@ -4630,13 +5460,13 @@ describe('SettingsPage', () => {
       await user.type(await screen.findByLabelText('检查用户'), 'alice')
       const pathInput = screen.getByLabelText('检查路径')
       await user.clear(pathInput)
-      await user.type(pathInput, '/team/./readme.txt')
+      fireEvent.change(pathInput, { target: { value: invalidPath } })
       await user.click(screen.getByRole('button', { name: '检查权限' }))
 
       expect(mockCheckDirectoryAccess).not.toHaveBeenCalled()
       expect(mockAddToast).toHaveBeenCalledWith({
         title: '权限检查路径无效',
-        description: '路径必须是站内绝对路径，且不能包含空字符、. 或 .. 路径段。',
+        description: '路径必须是站内绝对路径，且不能包含反斜杠、?、#、控制字符、. 或 .. 路径段。',
         color: 'warning',
       })
     })
@@ -4654,7 +5484,7 @@ describe('SettingsPage', () => {
           mode: 'read',
           allowed: true,
           source: 'directory_access_rule',
-          message: 'directory access rule grants read through a descendant',
+          message: 'directory access rule grants read through an existing descendant',
           matched_rule: { path: '/team/projects', read_roles: ['user'] },
         },
         write: {
@@ -4676,10 +5506,10 @@ describe('SettingsPage', () => {
       await user.click(screen.getByRole('button', { name: '检查权限' }))
 
       await waitFor(() => {
-        expect(screen.getByText('子目录存在读取规则，因此允许查看相关路径。')).toBeTruthy()
+        expect(screen.getByText('已存在的子目录命中读取规则，因此允许查看相关路径。')).toBeTruthy()
         expect(screen.getByText('路径位于该用户主目录外。')).toBeTruthy()
       })
-      expect(screen.queryByText('directory access rule grants read through a descendant')).toBeNull()
+      expect(screen.queryByText('directory access rule grants read through an existing descendant')).toBeNull()
       expect(screen.queryByText('path is outside the user\'s home_dir')).toBeNull()
     })
 
@@ -4728,7 +5558,7 @@ describe('SettingsPage', () => {
       expect(mockReportDirectoryAccess).not.toHaveBeenCalled()
       expect(mockAddToast).toHaveBeenCalledWith({
         title: '权限矩阵路径无效',
-        description: '路径必须是站内绝对路径，且不能包含空字符、. 或 .. 路径段。',
+        description: '路径必须是站内绝对路径，且不能包含反斜杠、?、#、控制字符、. 或 .. 路径段。',
         color: 'warning',
       })
     })
@@ -4774,7 +5604,7 @@ describe('SettingsPage', () => {
       expect(mockPreviewDirectoryAccess).not.toHaveBeenCalled()
       expect(mockAddToast).toHaveBeenCalledWith({
         title: '权限预览路径无效',
-        description: '路径必须是站内绝对路径，且不能包含空字符、. 或 .. 路径段。',
+        description: '路径必须是站内绝对路径，且不能包含反斜杠、?、#、控制字符、. 或 .. 路径段。',
         color: 'warning',
       })
     })
@@ -4847,9 +5677,9 @@ describe('SettingsPage', () => {
         expect(screen.getByText('版本策略')).toBeTruthy()
       })
 
-      fireEvent.change(screen.getByDisplayValue('8760h'), { target: { value: '720h' } })
-      fireEvent.change(screen.getAllByDisplayValue('10 GB')[1], { target: { value: '5GB' } })
-      fireEvent.change(screen.getByDisplayValue('24h'), { target: { value: '12h' } })
+      fireEvent.change(screen.getByLabelText('最大保留时间'), { target: { value: '720h' } })
+      fireEvent.change(screen.getByLabelText('最小空闲空间'), { target: { value: '5GB' } })
+      fireEvent.change(screen.getByLabelText('GC 运行间隔'), { target: { value: '12h' } })
 
       await user.click(screen.getByText('保存设置'))
 
@@ -4916,19 +5746,15 @@ describe('SettingsPage', () => {
       const user = userEvent.setup({ writeToClipboard: false })
       render(<SettingsPage />)
 
-      await waitFor(() => {
-        expect(screen.getByDisplayValue('30s')).toBeTruthy()
-      })
-
-      const readTimeoutInput = screen.getByDisplayValue('30s')
+      const readTimeoutInput = await screen.findByLabelText('服务器读取超时')
       await user.clear(readTimeoutInput)
       await user.type(readTimeoutInput, '45s')
 
-      const writeTimeoutInput = screen.getByDisplayValue('60s')
+      const writeTimeoutInput = screen.getByLabelText('服务器写入超时')
       await user.clear(writeTimeoutInput)
       await user.type(writeTimeoutInput, '90s')
 
-      const idleTimeoutInput = screen.getByDisplayValue('120s')
+      const idleTimeoutInput = screen.getByLabelText('服务器空闲超时')
       await user.clear(idleTimeoutInput)
       await user.type(idleTimeoutInput, '5m')
 
@@ -5081,16 +5907,14 @@ describe('SettingsPage', () => {
     it('renders server host input', async () => {
       render(<SettingsPage />)
       await waitFor(() => {
-        const input = screen.getByDisplayValue('0.0.0.0')
-        expect(input).toBeTruthy()
+        expect(screen.getByLabelText('服务器监听地址')).toHaveValue('0.0.0.0')
       })
     })
 
     it('renders server port input', async () => {
       render(<SettingsPage />)
       await waitFor(() => {
-        const input = screen.getByDisplayValue('8080')
-        expect(input).toBeTruthy()
+        expect(screen.getByLabelText('服务器端口')).toHaveValue(8080)
       })
     })
 
@@ -5106,13 +5930,9 @@ describe('SettingsPage', () => {
       const user = userEvent.setup({ writeToClipboard: false })
       render(<SettingsPage />)
 
-      await waitFor(() => {
-        expect(screen.getByDisplayValue('0.0.0.0')).toBeTruthy()
-      })
-      
-      const input = screen.getByDisplayValue('0.0.0.0')
-      await user.clear(input)
-      await user.type(input, '127.0.0.1')
+        const input = await screen.findByLabelText('服务器监听地址')
+        await user.clear(input)
+        await user.type(input, '127.0.0.1')
 
       expect(input).toHaveValue('127.0.0.1')
     })
@@ -5155,22 +5975,18 @@ describe('SettingsPage', () => {
 
       render(<SettingsPage />)
 
-      await waitFor(() => {
-        expect(screen.getByDisplayValue('0.0.0.0')).toBeTruthy()
-      })
-
-      const input = screen.getByDisplayValue('0.0.0.0')
-      await user.clear(input)
-      await user.type(input, '127.0.0.1')
+        const input = await screen.findByLabelText('服务器监听地址')
+        await user.clear(input)
+        await user.type(input, '127.0.0.1')
       expect(input).toHaveValue('127.0.0.1')
 
       await act(async () => {
         window.dispatchEvent(new Event('focus'))
       })
 
-      await waitFor(() => {
-        expect(screen.getByDisplayValue('127.0.0.1')).toBeTruthy()
-      })
+        await waitFor(() => {
+          expect(screen.getByLabelText('服务器监听地址')).toHaveValue('127.0.0.1')
+        })
     })
 
     it('keeps saved values visible until the post-save refetch completes', async () => {
@@ -5185,13 +6001,9 @@ describe('SettingsPage', () => {
 
       render(<SettingsPage />)
 
-      await waitFor(() => {
-        expect(screen.getByDisplayValue('8080')).toBeTruthy()
-      })
-
-      const input = screen.getByDisplayValue('8080')
-      await user.clear(input)
-      await user.type(input, '9000')
+        const input = await screen.findByLabelText('服务器端口')
+        await user.clear(input)
+        await user.type(input, '9000')
 
       await user.click(screen.getByText('保存设置'))
 
@@ -5200,7 +6012,7 @@ describe('SettingsPage', () => {
         expect(mockGetSettings).toHaveBeenCalledTimes(2)
       })
 
-      expect(screen.getByDisplayValue('9000')).toBeTruthy()
+      expect(screen.getByLabelText('服务器端口')).toHaveValue(9000)
 
       await act(async () => {
         resolveRefetch?.({
@@ -5215,7 +6027,7 @@ describe('SettingsPage', () => {
       })
 
       await waitFor(() => {
-        expect(screen.getByDisplayValue('9000')).toBeTruthy()
+        expect(screen.getByLabelText('服务器端口')).toHaveValue(9000)
       })
     })
 
@@ -5228,11 +6040,9 @@ describe('SettingsPage', () => {
 
       render(<SettingsPage />)
 
-      await waitFor(() => {
-        expect(screen.getByDisplayValue('8080')).toBeTruthy()
-      })
+    expect(await screen.findByLabelText('服务器端口')).toHaveValue(8080)
 
-      await user.click(screen.getByText('保存设置'))
+    await user.click(screen.getByText('保存设置'))
 
       await waitFor(() => {
         expect(mockAddToast).toHaveBeenCalledWith({
@@ -5243,28 +6053,52 @@ describe('SettingsPage', () => {
       })
     })
 
+    it('shows a warning toast when the backend marks a save as successful with warnings', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockUpdateSettings.mockResolvedValueOnce({
+        success: true,
+        warning: true,
+        message: 'settings saved with persistence warning --password repo:pass/with/slash',
+      })
+
+      render(<SettingsPage />)
+
+        expect(await screen.findByLabelText('服务器端口')).toHaveValue(8080)
+
+        await user.click(screen.getByText('保存设置'))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '设置已保存，但存在警告',
+          description: 'settings saved with persistence warning --password <redacted>',
+          color: 'warning',
+        })
+      })
+      expect(mockAddToast).not.toHaveBeenCalledWith(expect.objectContaining({
+        description: expect.stringMatching(/repo:pass|with\/slash/),
+      }))
+    })
+
     it('shows a success toast when the backend reports a hot-applied save', async () => {
-    const user = userEvent.setup({ writeToClipboard: false })
-    mockUpdateSettings.mockResolvedValueOnce({
-      success: true,
-      message: 'settings updated',
-    })
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockUpdateSettings.mockResolvedValueOnce({
+        success: true,
+        message: 'settings updated',
+      })
 
-    render(<SettingsPage />)
+      render(<SettingsPage />)
 
-    await waitFor(() => {
-      expect(screen.getByDisplayValue('8080')).toBeTruthy()
-    })
+      expect(await screen.findByLabelText('服务器端口')).toHaveValue(8080)
 
-    await user.click(screen.getByText('保存设置'))
+      await user.click(screen.getByText('保存设置'))
 
-    await waitFor(() => {
-      expect(mockAddToast).toHaveBeenCalledWith({
-        title: '设置已保存',
-        color: 'success',
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '设置已保存',
+          color: 'success',
+        })
       })
     })
-  })
 
     it('preserves newer local edits when an older save resolves', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
@@ -5287,13 +6121,9 @@ describe('SettingsPage', () => {
 
       render(<SettingsPage />)
 
-      await waitFor(() => {
-        expect(screen.getByDisplayValue('8080')).toBeTruthy()
-      })
-
-      const input = screen.getByDisplayValue('8080')
-      await user.clear(input)
-      await user.type(input, '9000')
+        const input = await screen.findByLabelText('服务器端口')
+        await user.clear(input)
+        await user.type(input, '9000')
       await user.click(screen.getByText('保存设置'))
 
       await waitFor(() => {
@@ -5304,18 +6134,18 @@ describe('SettingsPage', () => {
         }))
       })
 
-      await user.clear(input)
-      await user.type(input, '9001')
-      expect(screen.getByDisplayValue('9001')).toBeTruthy()
+        await user.clear(input)
+        await user.type(input, '9001')
+        expect(input).toHaveValue(9001)
 
       await act(async () => {
         firstSave.resolve({ success: true, message: 'ok' })
       })
 
-      await waitFor(() => {
-        expect(mockGetSettings).toHaveBeenCalledTimes(2)
-        expect(screen.getByDisplayValue('9001')).toBeTruthy()
-      })
+        await waitFor(() => {
+          expect(mockGetSettings).toHaveBeenCalledTimes(2)
+          expect(screen.getByLabelText('服务器端口')).toHaveValue(9001)
+        })
 
       await user.click(screen.getByText('保存设置'))
 
@@ -5337,12 +6167,8 @@ describe('SettingsPage', () => {
 
       render(<SettingsPage />)
 
-      await waitFor(() => {
-        expect(screen.getByDisplayValue('8080')).toBeTruthy()
-      })
-
-      const input = screen.getByDisplayValue('8080')
-      await user.clear(input)
+        const input = await screen.findByLabelText('服务器端口')
+        await user.clear(input)
       await user.type(input, '9000')
       await user.click(screen.getByText('保存设置'))
 
@@ -5384,10 +6210,10 @@ describe('SettingsPage', () => {
       render(<SettingsPage />)
 
       await waitFor(() => {
-        expect(screen.getByDisplayValue('10.0.0.1')).toBeTruthy()
+        expect(screen.getByLabelText('服务器监听地址')).toHaveValue('10.0.0.1')
       })
 
-      const input = screen.getByDisplayValue('10.0.0.1')
+      const input = screen.getByLabelText('服务器监听地址')
       await user.clear(input)
       await user.type(input, '127.0.0.1')
       expect(input).toHaveValue('127.0.0.1')
@@ -5395,7 +6221,7 @@ describe('SettingsPage', () => {
       await user.click(screen.getByText('重置'))
 
       await waitFor(() => {
-        expect(screen.getByDisplayValue('10.0.0.1')).toBeTruthy()
+        expect(screen.getByLabelText('服务器监听地址')).toHaveValue('10.0.0.1')
       })
     })
   })
@@ -5408,7 +6234,7 @@ describe('SettingsPage', () => {
       await openTab(user, '版本保留')
 
       await waitFor(() => {
-        const input = screen.getByDisplayValue('100')
+        const input = screen.getByLabelText('最大版本数')
         expect(input).toBeTruthy()
       })
     })
@@ -5420,7 +6246,7 @@ describe('SettingsPage', () => {
       await openTab(user, '版本保留')
 
       await waitFor(() => {
-        const input = screen.getByDisplayValue('8760h')
+        const input = screen.getByLabelText('最大保留时间')
         expect(input).toBeTruthy()
       })
     })
@@ -5432,10 +6258,10 @@ describe('SettingsPage', () => {
       await openTab(user, '版本保留')
 
       await waitFor(() => {
-        expect(screen.getByDisplayValue('100')).toBeTruthy()
+        expect(screen.getByLabelText('最大版本数')).toHaveValue(100)
       })
 
-      const input = screen.getByDisplayValue('100')
+      const input = screen.getByLabelText('最大版本数')
       await user.clear(input)
       await user.type(input, '50')
 
@@ -5462,8 +6288,7 @@ describe('SettingsPage', () => {
       await openTab(user, 'WebDAV')
 
       await waitFor(() => {
-        const input = screen.getByDisplayValue('/dav')
-        expect(input).toBeTruthy()
+        expect(screen.getByLabelText('WebDAV URL 前缀')).toHaveValue('/dav')
       })
     })
 
@@ -5474,10 +6299,10 @@ describe('SettingsPage', () => {
       await openTab(user, 'WebDAV')
 
       await waitFor(() => {
-        expect(screen.getByDisplayValue('/dav')).toBeTruthy()
+        expect(screen.getByLabelText('WebDAV URL 前缀')).toHaveValue('/dav')
       })
 
-      fireEvent.change(screen.getByDisplayValue('/dav'), { target: { value: '/api/v1' } })
+      fireEvent.change(screen.getByLabelText('WebDAV URL 前缀'), { target: { value: '/api/v1' } })
       await user.click(screen.getByText('保存设置'))
 
       await waitFor(() => {
@@ -5497,10 +6322,10 @@ describe('SettingsPage', () => {
       await openTab(user, 'WebDAV')
 
       await waitFor(() => {
-        expect(screen.getByDisplayValue('/dav')).toBeTruthy()
+        expect(screen.getByLabelText('WebDAV URL 前缀')).toHaveValue('/dav')
       })
 
-      fireEvent.change(screen.getByDisplayValue('/dav'), { target: { value: '/dav\\files' } })
+      fireEvent.change(screen.getByLabelText('WebDAV URL 前缀'), { target: { value: '/dav\\files' } })
       await user.click(screen.getByText('保存设置'))
 
       await waitFor(() => {
@@ -5531,8 +6356,7 @@ describe('SettingsPage', () => {
       await openTab(user, 'WebDAV')
 
       await waitFor(() => {
-        const input = screen.getByDisplayValue('admin')
-        expect(input).toBeTruthy()
+        expect(screen.getByLabelText('WebDAV 用户名')).toHaveValue('admin')
       })
     })
 
@@ -5546,15 +6370,15 @@ describe('SettingsPage', () => {
         expect(screen.getByText('WebDAV 访问凭据')).toBeTruthy()
       })
 
-      expect(screen.getByText('复制 WebDAV 地址')).toBeTruthy()
-      expect(screen.getByText('复制 WebDAV 用户名')).toBeTruthy()
-      const showPasswordText = screen.getByText('显示 WebDAV 密码')
-      expect(showPasswordText).toBeTruthy()
-      expect(screen.getByText('复制 WebDAV 密码')).toBeTruthy()
+      expect(screen.getAllByRole('button', { name: '复制 WebDAV 地址' }).length).toBeGreaterThan(0)
+      expect(screen.getByRole('button', { name: '复制 WebDAV 用户名' })).toBeTruthy()
+      const showPasswordButton = screen.getByRole('button', { name: '显示 WebDAV 密码' })
+      expect(showPasswordButton).toBeTruthy()
+      expect(screen.getByRole('button', { name: '复制 WebDAV 密码' })).toBeTruthy()
 
-      await user.click(showPasswordText.closest('button') as HTMLButtonElement)
+      await user.click(showPasswordButton)
 
-      expect(screen.getByText('隐藏 WebDAV 密码')).toBeTruthy()
+      expect(screen.getByRole('button', { name: '隐藏 WebDAV 密码' })).toBeTruthy()
     })
 
     it('copies WebDAV credential values and clears the copied indicator', async () => {
@@ -5576,21 +6400,21 @@ describe('SettingsPage', () => {
       vi.useFakeTimers()
       try {
         await act(async () => {
-          fireEvent.click(screen.getByText('复制 WebDAV 地址').closest('button') as HTMLButtonElement)
+          fireEvent.click(screen.getByRole('button', { name: '复制 WebDAV 地址' }))
           await Promise.resolve()
         })
 
         expect(writeText).toHaveBeenCalledWith(expect.stringContaining('/dav/'))
 
         await act(async () => {
-          fireEvent.click(screen.getByText('复制 WebDAV 用户名').closest('button') as HTMLButtonElement)
+          fireEvent.click(screen.getByRole('button', { name: '复制 WebDAV 用户名' }))
           await Promise.resolve()
         })
 
         expect(writeText).toHaveBeenCalledWith('admin')
 
         await act(async () => {
-          fireEvent.click(screen.getByText('复制 WebDAV 密码').closest('button') as HTMLButtonElement)
+          fireEvent.click(screen.getByRole('button', { name: '复制 WebDAV 密码' }))
           await Promise.resolve()
         })
 
@@ -5619,7 +6443,7 @@ describe('SettingsPage', () => {
         expect(screen.getByText('WebDAV 访问凭据')).toBeTruthy()
       })
 
-      await user.click(screen.getByText('复制 WebDAV 用户名').closest('button') as HTMLButtonElement)
+      await user.click(screen.getByRole('button', { name: '复制 WebDAV 用户名' }))
 
       await waitFor(() => {
         expect(mockAddToast).toHaveBeenCalledWith({ title: '复制失败', color: 'danger' })
@@ -5741,9 +6565,9 @@ describe('SettingsPage', () => {
       await openTab(user, '高级')
 
       await waitFor(() => {
-        expect(screen.getByText('最小块大小')).toBeTruthy()
-        expect(screen.getByText('平均块大小')).toBeTruthy()
-        expect(screen.getByText('最大块大小')).toBeTruthy()
+        expect(screen.getByLabelText('最小块大小')).toHaveValue('256 KB')
+        expect(screen.getByLabelText('平均块大小')).toHaveValue('1 MB')
+        expect(screen.getByLabelText('最大块大小')).toHaveValue('4 MB')
       })
     })
 
@@ -5755,9 +6579,9 @@ describe('SettingsPage', () => {
 
       await waitFor(() => {
         expect(screen.getByText('gRPC 地址')).toBeTruthy()
-        expect(screen.getByDisplayValue('127.0.0.1:9090')).toBeTruthy()
-        expect(screen.getByDisplayValue('30s')).toBeTruthy()
-        expect(screen.getByDisplayValue('3')).toBeTruthy()
+        expect(screen.getByLabelText('数据面 gRPC 地址')).toHaveValue('127.0.0.1:9090')
+        expect(screen.getByLabelText('数据面连接超时')).toHaveValue('30s')
+        expect(screen.getByLabelText('数据面最大重试次数')).toHaveValue(3)
       })
     })
 
@@ -5771,9 +6595,9 @@ describe('SettingsPage', () => {
         expect(screen.getByText('CDC 分块参数')).toBeTruthy()
       })
 
-      fireEvent.change(screen.getByDisplayValue('256 KB'), { target: { value: '512KB' } })
-      fireEvent.change(screen.getByDisplayValue('1 MB'), { target: { value: '2MB' } })
-      fireEvent.change(screen.getByDisplayValue('4 MB'), { target: { value: '8MB' } })
+      fireEvent.change(screen.getByLabelText('最小块大小'), { target: { value: '512KB' } })
+      fireEvent.change(screen.getByLabelText('平均块大小'), { target: { value: '2MB' } })
+      fireEvent.change(screen.getByLabelText('最大块大小'), { target: { value: '8MB' } })
 
       await user.click(screen.getByText('保存设置'))
 
@@ -5794,11 +6618,7 @@ describe('SettingsPage', () => {
     const user = userEvent.setup({ writeToClipboard: false })
     render(<SettingsPage />)
 
-    await waitFor(() => {
-      expect(screen.getByDisplayValue('8080')).toBeTruthy()
-    })
-
-    const portInput = screen.getByDisplayValue('8080')
+    const portInput = await screen.findByLabelText('服务器端口')
     await user.clear(portInput)
     await user.type(portInput, '70000')
     await user.click(screen.getByText('保存设置'))
@@ -5817,11 +6637,7 @@ describe('SettingsPage', () => {
     const user = userEvent.setup({ writeToClipboard: false })
     render(<SettingsPage />)
 
-    await waitFor(() => {
-      expect(screen.getByDisplayValue('0.0.0.0')).toBeTruthy()
-    })
-
-    const hostInput = screen.getByDisplayValue('0.0.0.0')
+    const hostInput = await screen.findByLabelText('服务器监听地址')
     fireEvent.change(hostInput, { target: { value: '[::1]:8080' } })
     await user.click(screen.getByText('保存设置'))
 
@@ -5842,19 +6658,19 @@ describe('SettingsPage', () => {
     await openTab(user, '版本保留')
 
     await waitFor(() => {
-      expect(screen.getByDisplayValue('100')).toBeTruthy()
+      expect(screen.getByLabelText('最大版本数')).toHaveValue(100)
     })
 
-    const maxVersionsInput = screen.getByDisplayValue('100')
+    const maxVersionsInput = screen.getByLabelText('最大版本数')
     await user.clear(maxVersionsInput)
     await user.click(screen.getByText('保存设置'))
 
     await waitFor(() => {
-        expect(mockAddToast).toHaveBeenCalledWith({
-          title: '最大版本数格式无效',
-          description: '最大版本数必须是 0 或不超过安全范围的整数',
-          color: 'danger',
-        })
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '最大版本数格式无效',
+        description: '最大版本数必须是 0 或不超过安全范围的整数',
+        color: 'danger',
+      })
     })
     expect(mockUpdateSettings).not.toHaveBeenCalled()
   })
@@ -5895,10 +6711,10 @@ describe('SettingsPage', () => {
     await openTab(user, '高级')
 
     await waitFor(() => {
-      expect(screen.getByDisplayValue('1 MB')).toBeTruthy()
+      expect(screen.getByLabelText('平均块大小')).toHaveValue('1 MB')
     })
 
-    const avgChunkInput = screen.getByDisplayValue('1 MB')
+    const avgChunkInput = screen.getByLabelText('平均块大小')
     await user.clear(avgChunkInput)
     await user.type(avgChunkInput, '128 KB')
     await user.click(screen.getByText('保存设置'))
@@ -5920,17 +6736,18 @@ describe('SettingsPage', () => {
     await openTab(user, '版本保留')
 
     await waitFor(() => {
-      expect(screen.getAllByDisplayValue('10 GB').length).toBeGreaterThan(1)
+      expect(screen.getByLabelText('最小空闲空间')).toHaveValue('10 GB')
     })
 
-    fireEvent.change(screen.getAllByDisplayValue('10 GB')[1], { target: { value: 'not-a-size' } })
+    fireEvent.change(screen.getByLabelText('最小空闲空间'), { target: { value: 'not-a-size' } })
     await user.click(screen.getByText('保存设置'))
 
     await waitFor(() => {
-      expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({
+      expect(mockAddToast).toHaveBeenCalledWith({
         title: '大小格式无效',
+        description: '请使用 1024、1 KB、1.5 MB 之类的格式。',
         color: 'danger',
-      }))
+      })
     })
     expect(mockUpdateSettings).not.toHaveBeenCalled()
   })
@@ -5970,10 +6787,10 @@ describe('SettingsPage', () => {
     await openTab(user, '高级')
 
     await waitFor(() => {
-      expect(screen.getByDisplayValue('256 KB')).toBeTruthy()
+      expect(screen.getByLabelText('最小块大小')).toHaveValue('256 KB')
     })
 
-    fireEvent.change(screen.getByDisplayValue('256 KB'), { target: { value: '0' } })
+    fireEvent.change(screen.getByLabelText('最小块大小'), { target: { value: '0' } })
     await user.click(screen.getByText('保存设置'))
 
     await waitFor(() => {
@@ -5993,10 +6810,10 @@ describe('SettingsPage', () => {
     await openTab(user, '高级')
 
     await waitFor(() => {
-      expect(screen.getByDisplayValue('256 KB')).toBeTruthy()
+      expect(screen.getByLabelText('最小块大小')).toHaveValue('256 KB')
     })
 
-    fireEvent.change(screen.getByDisplayValue('256 KB'), { target: { value: '32 KB' } })
+    fireEvent.change(screen.getByLabelText('最小块大小'), { target: { value: '32 KB' } })
     await user.click(screen.getByText('保存设置'))
 
     await waitFor(() => {
@@ -6016,10 +6833,10 @@ describe('SettingsPage', () => {
     await openTab(user, '高级')
 
     await waitFor(() => {
-      expect(screen.getByDisplayValue('4 MB')).toBeTruthy()
+      expect(screen.getByLabelText('最大块大小')).toHaveValue('4 MB')
     })
 
-    fireEvent.change(screen.getByDisplayValue('4 MB'), { target: { value: '65 MB' } })
+    fireEvent.change(screen.getByLabelText('最大块大小'), { target: { value: '65 MB' } })
     await user.click(screen.getByText('保存设置'))
 
     await waitFor(() => {
@@ -6036,11 +6853,7 @@ describe('SettingsPage', () => {
     const user = userEvent.setup({ writeToClipboard: false })
     render(<SettingsPage />)
 
-    await waitFor(() => {
-      expect(screen.getByDisplayValue('30s')).toBeTruthy()
-    })
-
-    fireEvent.change(screen.getByDisplayValue('30s'), { target: { value: '' } })
+    fireEvent.change(await screen.findByLabelText('服务器读取超时'), { target: { value: '' } })
     await user.click(screen.getByText('保存设置'))
 
     await waitFor(() => {
@@ -6057,11 +6870,7 @@ describe('SettingsPage', () => {
     const user = userEvent.setup({ writeToClipboard: false })
     render(<SettingsPage />)
 
-    await waitFor(() => {
-      expect(screen.getByDisplayValue('60s')).toBeTruthy()
-    })
-
-    fireEvent.change(screen.getByDisplayValue('60s'), { target: { value: '' } })
+    fireEvent.change(await screen.findByLabelText('服务器写入超时'), { target: { value: '' } })
     await user.click(screen.getByText('保存设置'))
 
     await waitFor(() => {
@@ -6078,11 +6887,7 @@ describe('SettingsPage', () => {
     const user = userEvent.setup({ writeToClipboard: false })
     render(<SettingsPage />)
 
-    await waitFor(() => {
-      expect(screen.getByDisplayValue('120s')).toBeTruthy()
-    })
-
-    fireEvent.change(screen.getByDisplayValue('120s'), { target: { value: '' } })
+    fireEvent.change(await screen.findByLabelText('服务器空闲超时'), { target: { value: '' } })
     await user.click(screen.getByText('保存设置'))
 
     await waitFor(() => {
@@ -6099,11 +6904,7 @@ describe('SettingsPage', () => {
     const user = userEvent.setup({ writeToClipboard: false })
     render(<SettingsPage />)
 
-    await waitFor(() => {
-      expect(screen.getByDisplayValue('30s')).toBeTruthy()
-    })
-
-    fireEvent.change(screen.getByDisplayValue('30s'), { target: { value: 'soon' } })
+    fireEvent.change(await screen.findByLabelText('服务器读取超时'), { target: { value: 'soon' } })
     await user.click(screen.getByText('保存设置'))
 
     await waitFor(() => {
@@ -6123,10 +6924,10 @@ describe('SettingsPage', () => {
     await openTab(user, '版本保留')
 
     await waitFor(() => {
-      expect(screen.getByDisplayValue('8760h')).toBeTruthy()
+      expect(screen.getByLabelText('最大保留时间')).toHaveValue('8760h')
     })
 
-    fireEvent.change(screen.getByDisplayValue('8760h'), { target: { value: 'forever' } })
+    fireEvent.change(screen.getByLabelText('最大保留时间'), { target: { value: 'forever' } })
     await user.click(screen.getByText('保存设置'))
 
     await waitFor(() => {
@@ -6145,11 +6946,7 @@ describe('SettingsPage', () => {
 
     await openTab(user, '高级')
 
-    await waitFor(() => {
-      expect(screen.getByDisplayValue('3')).toBeTruthy()
-    })
-
-    fireEvent.change(screen.getByDisplayValue('3'), { target: { value: '-1' } })
+    fireEvent.change(await screen.findByLabelText('数据面最大重试次数'), { target: { value: '-1' } })
     await user.click(screen.getByText('保存设置'))
 
     await waitFor(() => {
@@ -6211,11 +7008,7 @@ describe('SettingsPage', () => {
 
     await openTab(user, '高级')
 
-    await waitFor(() => {
-      expect(screen.getByDisplayValue('30s')).toBeTruthy()
-    })
-
-    fireEvent.change(screen.getByDisplayValue('30s'), { target: { value: '' } })
+    fireEvent.change(await screen.findByLabelText('数据面连接超时'), { target: { value: '' } })
     await user.click(screen.getByText('保存设置'))
 
     await waitFor(() => {
@@ -6234,11 +7027,7 @@ describe('SettingsPage', () => {
 
     await openTab(user, '高级')
 
-    await waitFor(() => {
-      expect(screen.getByDisplayValue('127.0.0.1:9090')).toBeTruthy()
-    })
-
-    fireEvent.change(screen.getByDisplayValue('127.0.0.1:9090'), { target: { value: '127.0.0.1:70000' } })
+    fireEvent.change(await screen.findByLabelText('数据面 gRPC 地址'), { target: { value: '127.0.0.1:70000' } })
     await user.click(screen.getByText('保存设置'))
 
     await waitFor(() => {
@@ -6258,7 +7047,7 @@ describe('SettingsPage', () => {
     await openTab(user, '高级')
 
     await user.click(await screen.findByRole('switch', { name: '启用提醒' }))
-    fireEvent.change(screen.getByDisplayValue('90'), { target: { value: '120' } })
+    fireEvent.change(screen.getByLabelText('提醒阈值'), { target: { value: '120' } })
     await user.click(screen.getByText('保存设置'))
 
     await waitFor(() => {
@@ -6278,7 +7067,7 @@ describe('SettingsPage', () => {
     await openTab(user, '高级')
 
     await user.click(await screen.findByRole('switch', { name: '启用提醒' }))
-    fireEvent.change(screen.getByDisplayValue('90'), { target: { value: '90.5' } })
+    fireEvent.change(screen.getByLabelText('提醒阈值'), { target: { value: '90.5' } })
     await user.click(screen.getByText('保存设置'))
 
     await waitFor(() => {
@@ -6298,7 +7087,7 @@ describe('SettingsPage', () => {
     await openTab(user, '高级')
 
     await user.click(await screen.findByRole('switch', { name: '启用提醒' }))
-    fireEvent.change(screen.getByDisplayValue('90'), { target: { value: '' } })
+    fireEvent.change(screen.getByLabelText('提醒阈值'), { target: { value: '' } })
     await user.click(screen.getByText('保存设置'))
 
     await waitFor(() => {
@@ -6358,7 +7147,7 @@ describe('SettingsPage', () => {
     await openTab(user, '高级')
 
     await user.click(await screen.findByRole('switch', { name: '启用提醒' }))
-    fireEvent.change(screen.getByDisplayValue('95'), { target: { value: '120' } })
+    fireEvent.change(screen.getByLabelText('严重提醒阈值'), { target: { value: '120' } })
     await user.click(screen.getByText('保存设置'))
 
     await waitFor(() => {
@@ -6378,7 +7167,7 @@ describe('SettingsPage', () => {
     await openTab(user, '高级')
 
     await user.click(await screen.findByRole('switch', { name: '启用提醒' }))
-    fireEvent.change(screen.getByDisplayValue('95'), { target: { value: '95.5' } })
+    fireEvent.change(screen.getByLabelText('严重提醒阈值'), { target: { value: '95.5' } })
     await user.click(screen.getByText('保存设置'))
 
     await waitFor(() => {
@@ -6398,7 +7187,7 @@ describe('SettingsPage', () => {
     await openTab(user, '高级')
 
     await user.click(await screen.findByRole('switch', { name: '启用提醒' }))
-    fireEvent.change(screen.getByDisplayValue('95'), { target: { value: '' } })
+    fireEvent.change(screen.getByLabelText('严重提醒阈值'), { target: { value: '' } })
     await user.click(screen.getByText('保存设置'))
 
     await waitFor(() => {
@@ -6418,7 +7207,7 @@ describe('SettingsPage', () => {
     await openTab(user, '高级')
 
     await user.click(await screen.findByRole('switch', { name: '启用提醒' }))
-    fireEvent.change(screen.getByDisplayValue('90'), { target: { value: '96' } })
+    fireEvent.change(screen.getByLabelText('提醒阈值'), { target: { value: '96' } })
     await user.click(screen.getByText('保存设置'))
 
     await waitFor(() => {
@@ -6439,6 +7228,13 @@ describe('SettingsPage', () => {
     ['empty fragment marker', 'https://nas.example.com#'],
     ['invalid host labels', 'https://nas..example.com'],
     ['spaces', 'https://nas.example.com/base path'],
+    ['host-relative backslash path', 'https://nas.example.com\\shares'],
+    ['backslash path', 'https://nas.example.com/shares\\team'],
+    ['escaped backslash path', 'https://nas.example.com/shares%5Cteam'],
+    ['duplicate path slashes', 'https://nas.example.com/shares//team'],
+    ['escaped duplicate path slashes', 'https://nas.example.com/shares%2F%2Fteam'],
+    ['dot segment path', 'https://nas.example.com/shares/./team'],
+    ['escaped dot segment path', 'https://nas.example.com/shares/%2e%2e/team'],
   ])('shows danger toast and skips save for invalid share base URL with %s', async (_label, baseURL) => {
     const user = userEvent.setup({ writeToClipboard: false })
     render(<SettingsPage />)
@@ -6446,15 +7242,86 @@ describe('SettingsPage', () => {
     await openTab(user, '分享')
 
     await user.click(await screen.findByRole('switch'))
-    fireEvent.change(screen.getByPlaceholderText('https://nas.example.com'), { target: { value: baseURL } })
+    fireEvent.change(screen.getByLabelText('分享基础 URL'), { target: { value: baseURL } })
     await user.click(screen.getByText('保存设置'))
 
     await waitFor(() => {
       expect(mockAddToast).toHaveBeenCalledWith({
         title: '分享基础 URL 无效',
-        description: '分享基础 URL 必须为空，或使用不含 userinfo、查询参数、片段且主机名有效的 http/https 地址',
+        description: '分享基础 URL 必须为空，或使用不含 userinfo、查询参数、片段、反斜杠、重复路径斜杠、. 或 .. 路径段且主机名有效的 http/https 地址',
         color: 'danger',
       })
+    })
+    expect(mockUpdateSettings).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    [
+      'HTTP URL',
+      'http://nas.example.com',
+      '公网分享建议使用 HTTPS 基础 URL；HTTP 链接只适用于内网或受控测试环境。',
+    ],
+    [
+      'non-default HTTPS port',
+      'https://nas.example.com:8443/base',
+      'HTTPS 非标准端口需要额外公网入口和防火墙规则；公网分享建议使用默认 443 端口。',
+    ],
+    [
+      'host-relative backslash path',
+      'https://nas.example.com\\shares',
+      '路径包含反斜杠；公网部署中代理或浏览器可能规范化为不同的分享地址。',
+    ],
+    [
+      'backslash path',
+      'https://nas.example.com/shares\\team',
+      '路径包含反斜杠；公网部署中代理或浏览器可能规范化为不同的分享地址。',
+    ],
+    [
+      'escaped backslash path',
+      'https://nas.example.com/shares%5Cteam',
+      '路径包含反斜杠；公网部署中代理或浏览器可能规范化为不同的分享地址。',
+    ],
+    [
+      'duplicate path slashes',
+      'https://nas.example.com/shares//team',
+      '路径包含重复斜杠；公网部署中代理或浏览器可能规范化为不同的分享地址。',
+    ],
+    [
+      'escaped duplicate path slashes',
+      'https://nas.example.com/shares%2F%2Fteam',
+      '路径包含重复斜杠；公网部署中代理或浏览器可能规范化为不同的分享地址。',
+    ],
+    [
+      'dot segment path',
+      'https://nas.example.com/shares/./team',
+      '路径包含 . 或 .. 路径段；公网部署中代理或浏览器可能规范化为不同的分享地址。',
+    ],
+    [
+      'escaped dot segment path',
+      'https://nas.example.com/shares/%2e%2e/team',
+      '路径包含 . 或 .. 路径段；公网部署中代理或浏览器可能规范化为不同的分享地址。',
+    ],
+    [
+      'embedded share route',
+      'https://nas.example.com/s/',
+      '基础 URL 已包含 /s 分享路由，生成的链接会出现重复的 /s/s。',
+    ],
+    [
+      'escaped embedded share route',
+      'https://nas.example.com/base%2Fs',
+      '基础 URL 已包含 /s 分享路由，生成的链接会出现重复的 /s/s。',
+    ],
+  ])('shows an inline public review warning for share base URL with %s', async (_label, baseURL, warning) => {
+    const user = userEvent.setup({ writeToClipboard: false })
+    render(<SettingsPage />)
+
+    await openTab(user, '分享')
+
+    await user.click(await screen.findByRole('switch', { name: '启用分享功能' }))
+    fireEvent.change(screen.getByLabelText('分享基础 URL'), { target: { value: baseURL } })
+
+    await waitFor(() => {
+      expect(screen.getByText(warning)).toBeTruthy()
     })
     expect(mockUpdateSettings).not.toHaveBeenCalled()
   })
@@ -6466,7 +7333,7 @@ describe('SettingsPage', () => {
     await openTab(user, '高级')
 
     await user.click(await screen.findByRole('switch', { name: '启用提醒' }))
-    fireEvent.change(screen.getByPlaceholderText('https://hooks.example.com/alert'), { target: { value: 'ftp://hooks.example.com/storage' } })
+    fireEvent.change(screen.getByLabelText('Webhook URL'), { target: { value: 'ftp://hooks.example.com/storage' } })
     await user.click(screen.getByText('保存设置'))
 
     await waitFor(() => {
@@ -6557,17 +7424,11 @@ describe('SettingsPage', () => {
       const user = userEvent.setup({ writeToClipboard: false })
       render(<SettingsPage />)
 
-      await waitFor(() => {
-        expect(screen.getByText('保存设置')).toBeTruthy()
-      })
-
-      const saveBtn = screen.getByText('保存设置')
+      const saveBtn = await screen.findByRole('button', { name: '保存设置' })
       await user.click(saveBtn)
 
-      // Button should show loading state
       await waitFor(() => {
-        const btn = screen.getByText('保存设置').closest('button')
-        expect(btn).toBeTruthy()
+        expect(screen.getByRole('button', { name: '保存设置' })).toBeTruthy()
       })
     })
 
@@ -6668,10 +7529,10 @@ describe('SettingsPage', () => {
       })
     })
 
-    it('shows a validation warning when WebDAV username conflicts with a non-admin user', async () => {
+    it('shows a validation warning for normalized WebDAV username conflict messages', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
       mockUpdateSettings.mockRejectedValueOnce(
-        new SettingsError('webdav.username must not match a non-admin user when auth is enabled', 400)
+        new SettingsError('  WebDAV.Username Must Not Match A Non-Admin User when auth is enabled  ', 400)
       )
 
       render(<SettingsPage />)

@@ -31,7 +31,7 @@ vi.mock('react-router-dom', () => ({
 }))
 
 vi.mock('@/components/ThemeToggle', () => ({
-  ThemeToggle: () => <div data-testid="theme-toggle" />,
+  ThemeToggle: () => <button type="button" aria-label="切换主题" />,
 }))
 
 vi.mock('@/lib/utils', async () => {
@@ -194,7 +194,7 @@ describe('Header', () => {
     locationPathname = '/search'
     render(<Header />)
 
-    const searchInput = screen.getByPlaceholderText('搜索文件')
+    const searchInput = screen.getByLabelText('全局搜索文件')
     fireEvent.change(searchInput, { target: { value: 'report' } })
     fireEvent.keyDown(searchInput, { key: 'Enter' })
 
@@ -204,9 +204,7 @@ describe('Header', () => {
   it('navigates to search when clicking the empty search shell outside the search page', () => {
     render(<Header />)
 
-    const searchShell = screen.getByPlaceholderText('搜索文件').parentElement
-    expect(searchShell).toBeTruthy()
-    fireEvent.click(searchShell!)
+    fireEvent.click(screen.getByRole('search', { name: '全局搜索' }))
 
     expect(navigateMock).toHaveBeenCalledWith('/search', { replace: false })
   })
@@ -215,9 +213,9 @@ describe('Header', () => {
     locationPathname = '/search'
     render(<Header />)
 
-    const searchInput = screen.getByPlaceholderText('搜索文件')
+    const searchInput = screen.getByLabelText('全局搜索文件')
     fireEvent.change(searchInput, { target: { value: '  quarterly report  ' } })
-    fireEvent.click(searchInput.parentElement!)
+    fireEvent.click(screen.getByRole('search', { name: '全局搜索' }))
 
     expect(navigateMock).toHaveBeenCalledWith('/search?q=quarterly%20report', { replace: true })
   })
@@ -225,7 +223,7 @@ describe('Header', () => {
   it('does not submit search when clicking directly inside the input', () => {
     render(<Header />)
 
-    fireEvent.click(screen.getByPlaceholderText('搜索文件'))
+    fireEvent.click(screen.getByLabelText('全局搜索文件'))
 
     expect(navigateMock).not.toHaveBeenCalled()
   })

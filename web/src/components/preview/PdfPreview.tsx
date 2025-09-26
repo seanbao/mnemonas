@@ -4,7 +4,7 @@ import { AlertCircle } from 'lucide-react'
 import { buildPreviewUrl } from '@/lib/preview-utils'
 import { authFetch } from '@/api/auth'
 import { readDownloadJsonErrorDetails } from '@/lib/downloadResponse'
-import { getUserFacingErrorDescription } from '@/lib/apiMessages'
+import { getFileLoadErrorDescription } from '@/lib/fileActionErrors'
 import { cn } from '@/lib/utils'
 
 const pdfContentType = 'application/pdf'
@@ -43,7 +43,7 @@ export function PdfPreview({ path, filename, className }: PdfPreviewProps) {
           const jsonError = await readDownloadJsonErrorDetails(response, '无法加载 PDF')
           if (jsonError) {
             if (!cancelled) {
-              setError(getUserFacingErrorDescription(new Error(jsonError.message), pdfPreviewLoadErrorMessage))
+              setError(getFileLoadErrorDescription(jsonError, pdfPreviewLoadErrorMessage))
               setIsLoading(false)
             }
             return
@@ -100,7 +100,11 @@ export function PdfPreview({ path, filename, className }: PdfPreviewProps) {
       
       {/* Content */}
       <div className="flex-1 flex items-center justify-center">
-        {isLoading && <Spinner size="lg" />}
+        {isLoading && (
+          <div role="status" aria-label="加载 PDF 预览" aria-busy="true">
+            <Spinner size="lg" />
+          </div>
+        )}
         {error && (
           <div className="text-center text-danger">
             <AlertCircle size={48} className="mx-auto mb-4" />
@@ -110,6 +114,7 @@ export function PdfPreview({ path, filename, className }: PdfPreviewProps) {
         {blobUrl && (
           <iframe
             src={blobUrl}
+            aria-label={`${filename} PDF 预览`}
             className="w-full h-full border-0"
             title={filename}
           />

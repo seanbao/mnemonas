@@ -122,10 +122,9 @@ const mockToggleFavorite = vi.mocked(toggleFavorite)
 const mockListShares = vi.mocked(listShares)
 
 async function getFileActionArea(name: string) {
-  const trigger = await screen.findByLabelText(`${name} 操作菜单`)
-  const area = trigger.closest('.group')
-  expect(area).toBeTruthy()
-  return area as HTMLElement
+  const row = await screen.findByRole('group', { name: `${name} 文件项` })
+  expect(within(row).getByRole('button', { name: `${name} 操作菜单` })).toBeTruthy()
+  return row
 }
 
 function expectToggleFavoriteCalledWithAbortSignal(path: string, isFavorited: boolean) {
@@ -159,7 +158,7 @@ describe('FilesPage list row actions', () => {
       '/photo.jpg': false,
       '/video.mp4': false,
     })
-    mockToggleFavorite.mockResolvedValue(true)
+    mockToggleFavorite.mockResolvedValue({ isFavorited: true, warning: false, message: undefined })
     mockListFiles.mockResolvedValue({
       files: [
         { name: 'documents', path: '/documents', isDir: true, size: 0, modTime: '2024-01-01T00:00:00Z' },
@@ -240,8 +239,7 @@ describe('FilesPage list row actions', () => {
     const user = userEvent.setup({ writeToClipboard: false })
     render(<FilesPage />)
 
-    const row = (await screen.findByText('photo.jpg')).closest('.group')
-    expect(row).toBeTruthy()
+    const row = await screen.findByRole('group', { name: 'photo.jpg 文件项' })
 
     mockFilesStoreState.setSelection.mockClear()
     mockFilesStoreState.toggleFileSelection.mockClear()
@@ -252,22 +250,21 @@ describe('FilesPage list row actions', () => {
     expect(mockFilesStoreState.setSelection).toHaveBeenCalledWith(['/photo.jpg'])
 
     const checkbox = screen.getByRole('checkbox', { name: '选择 photo.jpg' })
-    const checkboxShell = checkbox.parentElement
-    expect(checkboxShell).toBeTruthy()
+    const checkboxShell = within(row).getByRole('group', { name: 'photo.jpg 选择控制' })
+    expect(within(checkboxShell).getByRole('checkbox', { name: '选择 photo.jpg' })).toBe(checkbox)
 
-    fireEvent.click(checkboxShell as HTMLElement)
-    fireEvent.doubleClick(checkboxShell as HTMLElement)
-    fireEvent.contextMenu(checkboxShell as HTMLElement)
+    fireEvent.click(checkboxShell)
+    fireEvent.doubleClick(checkboxShell)
+    fireEvent.contextMenu(checkboxShell)
 
     await user.click(checkbox)
     expect(mockFilesStoreState.toggleFileSelection).toHaveBeenCalledWith('/photo.jpg')
 
-    const actionButton = screen.getByLabelText('photo.jpg 操作菜单')
-    const actionShell = actionButton.closest('.flex.items-center.justify-center')
-    expect(actionShell).toBeTruthy()
+    const actionShell = within(row).getByRole('group', { name: 'photo.jpg 操作控制' })
+    expect(within(actionShell).getByLabelText('photo.jpg 操作菜单')).toBeTruthy()
 
-    fireEvent.doubleClick(actionShell as HTMLElement)
-    fireEvent.contextMenu(actionShell as HTMLElement)
+    fireEvent.doubleClick(actionShell)
+    fireEvent.contextMenu(actionShell)
 
     await user.dblClick(row as HTMLElement)
     expect(screen.getAllByText('photo.jpg').length).toBeGreaterThan(0)
@@ -280,7 +277,7 @@ describe('FilesPage list row actions', () => {
     const actionArea = await getFileActionArea('photo.jpg')
 
     await user.click(within(actionArea).getByText('重命名'))
-    expect(await screen.findByPlaceholderText('请输入新名称')).toBeTruthy()
+    expect(await screen.findByLabelText('新名称')).toBeTruthy()
     await user.click(screen.getByRole('button', { name: '取消' }))
 
     await user.click(within(actionArea).getByText('删除'))
@@ -300,11 +297,10 @@ describe('FilesPage list row actions', () => {
 
     render(<FilesPage />)
 
-    const listContainer = (await screen.findAllByText('photo.jpg'))[0].closest('.custom-scrollbar')
-    expect(listContainer).toBeTruthy()
+    const listContainer = await screen.findByRole('region', { name: '文件列表内容' })
 
     vi.useFakeTimers()
-    fireEvent.click(listContainer as HTMLElement)
+    fireEvent.click(listContainer)
     expect(mockFilesStoreState.clearSelection).toHaveBeenCalled()
 
     act(() => {

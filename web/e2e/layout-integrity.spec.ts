@@ -1,5 +1,7 @@
 import { test, expect, type Page } from '@playwright/test'
 import { ensureAuthenticatedAt } from './helpers/auth-check'
+import { publicEntryRoutes } from './helpers/public-share-fixtures'
+import { waitForRouteSettled } from './helpers/route-ready'
 
 const routes = [
   '/',
@@ -15,6 +17,7 @@ const routes = [
   '/maintenance',
   '/users',
   '/settings',
+  '/nonexistent-page-xyz123',
 ]
 
 type LayoutIssue = {
@@ -26,9 +29,7 @@ type LayoutIssue = {
 
 async function prepareRoute(page: Page, route: string) {
   await ensureAuthenticatedAt(page, route)
-  await expect(page.locator('body')).toBeVisible()
-  await page.getByText('加载中...').waitFor({ state: 'hidden', timeout: 10_000 }).catch(() => {})
-  await page.waitForTimeout(500)
+  await waitForRouteSettled(page, route)
 }
 
 async function collectLayoutIssues(page: Page, route: string): Promise<LayoutIssue[]> {
@@ -53,13 +54,11 @@ async function collectLayoutIssues(page: Page, route: string): Promise<LayoutIss
     const describeTarget = (element: Element) => {
       const tagName = element.tagName.toLowerCase()
       const role = element.getAttribute('role')
-      const testId = element.getAttribute('data-testid')
       const ariaLabel = element.getAttribute('aria-label')
       const text = (element.textContent ?? '').replace(/\s+/g, ' ').trim()
       const parts = [tagName]
 
       if (role) parts.push(`[role="${role}"]`)
-      if (testId) parts.push(`[data-testid="${testId}"]`)
       if (ariaLabel) parts.push(`[aria-label="${ariaLabel}"]`)
       if (text) parts.push(`"${text.slice(0, 60)}"`)
 
@@ -142,6 +141,27 @@ test.describe('响应式布局完整性扫描', () => {
     const issues: LayoutIssue[] = []
     for (const route of routes) {
       await prepareRoute(page, route)
+      issues.push(...await collectLayoutIssues(page, route))
+    }
+
+    expect(
+      issues.map((issue) => `[${issue.rule}] ${issue.route} ${issue.target}: ${issue.message}`),
+    ).toEqual([])
+  })
+})
+
+test.describe('公开入口响应式布局完整性扫描', () => {
+  test.use({
+    storageState: { cookies: [], origins: [] },
+  })
+
+  test('登录页和公开分享页不应出现横向溢出或可见元素越界', async ({ page }, testInfo) => {
+    testInfo.setTimeout(60_000)
+
+    const issues: LayoutIssue[] = []
+    for (const route of publicEntryRoutes()) {
+      await page.goto(route, { waitUntil: 'domcontentloaded' })
+      await waitForRouteSettled(page, route, { waitForNetworkIdle: true })
       issues.push(...await collectLayoutIssues(page, route))
     }
 

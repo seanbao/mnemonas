@@ -108,9 +108,8 @@ describe('StoragePage', () => {
       mockGetStorageStats.mockImplementation(() => new Promise(() => {}))
       render(<StoragePage />)
 
-      // Should show skeleton elements with HeroUI skeleton classes
-      const skeletons = document.querySelectorAll('[class*="skeleton"], [class*="animate"], [class*="rounded-lg"]')
-      expect(skeletons.length).toBeGreaterThan(0)
+      expect(screen.getByRole('status', { name: '加载空间与存储' })).toBeInTheDocument()
+      expect(screen.queryByRole('heading', { name: '空间与存储' })).not.toBeInTheDocument()
     })
   })
 
@@ -296,7 +295,7 @@ describe('StoragePage', () => {
         expect(summary.getByText('需要复核')).toBeTruthy()
         expect(summary.getByText('未配置目录配额')).toBeTruthy()
         expect(summary.getAllByText(/为家庭共享、媒体库或团队目录配置明确上限/).length).toBeGreaterThanOrEqual(2)
-        expect(summary.getByText('建议处理: 为家庭共享、媒体库或团队目录配置明确上限')).toBeTruthy()
+        expect(summary.getByText('建议处理：为家庭共享、媒体库或团队目录配置明确上限')).toBeTruthy()
         expect(summary.getByText('容量：空间充足')).toBeTruthy()
         expect(summary.getByText('校验：已支持')).toBeTruthy()
       })
@@ -342,7 +341,7 @@ describe('StoragePage', () => {
         expect(summary.getByText('建议使用 ZFS/Btrfs')).toBeTruthy()
         expect(summary.getByText('1 个目录已达配额上限')).toBeTruthy()
         expect(summary.getByText('1 个目录接近配额上限')).toBeTruthy()
-        expect(summary.getByText('建议处理: 先清理回收站和临时数据，再安排扩容或迁移；保留独立备份，并定期运行完整性检查 等 4 步')).toBeTruthy()
+        expect(summary.getByText('建议处理：先清理回收站和临时数据，再安排扩容或迁移；保留独立备份，并定期运行完整性检查 等 4 步')).toBeTruthy()
         expect(summary.getByText('配额异常：2 个')).toBeTruthy()
       })
     })
@@ -653,8 +652,8 @@ describe('StoragePage', () => {
       })
       const report = writeText.mock.calls[0]?.[0] as string
       expect(report).toContain('目录配额摘要')
-      expect(report).toContain('配额目录: 3 个')
-      expect(report).toContain('需复核: 2 个')
+      expect(report).toContain('配额目录：3 个')
+      expect(report).toContain('需复核：2 个')
       expect(report).toContain('路径 | 状态 | 用量 | 剩余 | 占比 | 存在状态 | 建议处理')
       expect(report).toContain('/archive | 接近上限 | 998.4 MB / 1 GB | 1.6 MB | 97.5%')
       expect(report).toContain('/missing | 目录未创建 | 0 B / 512 MB | 512 MB | 0.0%')

@@ -39,8 +39,9 @@ import {
   Trash2,
   Send,
 } from 'lucide-react'
-import { cn, copyTextToClipboard, parseByteSize, normalizeWebDAVPrefix, isValidWebDAVPrefix, webDAVPrefixOverlapsReservedRoute, formatWebDAVUrl, formatBytes } from '@/lib/utils'
+import { cn, copyTextToClipboard, parseByteSize, normalizeWebDAVPrefix, isValidWebDAVPrefix, webDAVPrefixOverlapsReservedRoute, formatWebDAVUrl, formatBytes, hasControlCharacter } from '@/lib/utils'
 import { GENERIC_LOAD_ERROR_DESCRIPTION, getUserFacingErrorDescription } from '@/lib/apiMessages'
+import { getRedactedDiagnosticMessage } from '@/lib/diagnosticMessages'
 import { ShareManager, normalizeShareReviewFilter } from '@/components/share'
 import { PageHeader } from '@/components/ui/PageHeader'
 import { EmptyState } from '@/components/ui/EmptyState'
@@ -87,6 +88,7 @@ const DEFAULT_VERSIONING_FILENAMES = [
   '.gitignore', '.dockerignore', '.editorconfig',
 ].join('\n')
 const REDACTED_SETTINGS_SECRET = '<redacted>'
+const BYTE_SIZE_FORMAT_ERROR_DESCRIPTION = '请使用 1024、1 KB、1.5 MB 之类的格式。'
 const ALERT_CHANNEL_LABELS: Record<string, string> = {
   webhook: 'Webhook',
   telegram: 'Telegram',
@@ -100,7 +102,7 @@ function formatAlertChannelLabel(channel: string): string {
   if (!trimmed) {
     return ''
   }
-  return ALERT_CHANNEL_LABELS[trimmed.toLowerCase()] ?? trimmed
+  return ALERT_CHANNEL_LABELS[trimmed.toLowerCase()] ?? '未知通道'
 }
 
 function formatAlertChannelSummary(channels: string[]): string {
@@ -108,6 +110,12 @@ function formatAlertChannelSummary(channels: string[]): string {
     .map(formatAlertChannelLabel)
     .filter(Boolean)
     .join(' / ')
+}
+
+const getNonBlankToastDescription = getRedactedDiagnosticMessage
+
+function redactSecurityActionToastDescription(description: string): string {
+  return getRedactedDiagnosticMessage(description) ?? description
 }
 
 function redactWebhookHeaderLine(header: string): string {
@@ -164,9 +172,9 @@ function SettingsSection({
   children: React.ReactNode 
 }) {
   return (
-    <Card className="card-meridian">
+    <Card className="card-mnemonas">
       <CardHeader className="flex min-w-0 gap-4 pb-2">
-        <div className="gradient-meridian shrink-0 rounded-lg p-2.5 shadow-sm">
+        <div className="gradient-mnemonas shrink-0 rounded-lg p-2.5 shadow-sm">
           <Icon size={20} className="text-white" />
         </div>
         <div className="min-w-0 flex-1">
@@ -245,6 +253,10 @@ function shallowEqualSettingsDraft<T extends Record<string, unknown>>(left: T, r
   return leftKeys.every((key) => settingsDraftValueEqual(left[key], right[key]))
 }
 
+function normalizeBackendMessage(value: string): string {
+  return value.trim().replace(/\s+/g, ' ').toLowerCase()
+}
+
 function getSettingsActionErrorToast(
   error: unknown,
   titles: {
@@ -264,7 +276,7 @@ function getSettingsActionErrorToast(
     }
   }
 
-  if (error instanceof Error && error.message.includes('webdav.username must not match a non-admin user')) {
+  if (error instanceof Error && normalizeBackendMessage(error.message).includes('webdav.username must not match a non-admin user')) {
     return {
       title: 'WebDAV 用户名不可用',
       description: '当前 WebDAV 用户名与现有非管理员账号冲突，请改用管理员账号或其他专用用户名。',
@@ -283,7 +295,7 @@ function isAbortError(error: unknown): boolean {
   return error instanceof Error && error.name === 'AbortError'
 }
 
-function getSettingsSaveSuccessToast(message?: string): {
+function getSettingsSaveSuccessToast(message?: string, warning = false): {
   title: string
   description?: string
   color: 'success' | 'warning'
@@ -292,6 +304,14 @@ function getSettingsSaveSuccessToast(message?: string): {
     return {
       title: '设置已保存，部分变更需要重启后生效',
       description: '部分配置项需要重启相关服务后才会生效。',
+      color: 'warning',
+    }
+  }
+
+  if (warning) {
+    return {
+      title: '设置已保存，但存在警告',
+      description: getNonBlankToastDescription(message),
       color: 'warning',
     }
   }
@@ -394,20 +414,12 @@ function publicDomainErrorMessage(value: string): string | undefined {
 }
 
 function hasControlChar(value: string): boolean {
-  for (let index = 0; index < value.length; index += 1) {
-    const code = value.charCodeAt(index)
-    if (code <= 0x1f || code === 0x7f) {
-      return true
-    }
-  }
-
-  return false
+  return hasControlCharacter(value)
 }
 
 function hasInvalidHTTPHeaderValueChar(value: string): boolean {
-  for (let index = 0; index < value.length; index += 1) {
-    const code = value.charCodeAt(index)
-    if (code === 0x7f || (code <= 0x1f && code !== 0x09)) {
+  for (const char of value) {
+    if (char !== '\t' && hasControlCharacter(char)) {
       return true
     }
   }
@@ -450,6 +462,9 @@ function isValidOptionalHTTPURL(value: string): boolean {
   if (/\s/.test(trimmed) || hasControlChar(trimmed)) {
     return false
   }
+  if (pathHasBackslashes(trimmed)) {
+    return false
+  }
 
   try {
     const parsed = new URL(trimmed)
@@ -479,13 +494,20 @@ function isValidShareBaseURL(value: string): boolean {
   if (/\s/.test(trimmed) || hasControlChar(trimmed)) {
     return false
   }
+  if (pathHasBackslashes(trimmed)) {
+    return false
+  }
 
   try {
     const parsed = new URL(trimmed)
+    const rawPathname = rawHTTPURLPathname(trimmed)
     if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
       return false
     }
     if (parsed.username || parsed.password || trimmed.includes('?') || trimmed.includes('#') || parsed.search || parsed.hash) {
+      return false
+    }
+    if (pathHasBackslashes(rawPathname) || pathHasDuplicateSlashes(rawPathname) || pathHasDotSegments(rawPathname)) {
       return false
     }
     return isValidTCPHost(urlHostnameForTCPValidation(parsed.hostname))
@@ -766,8 +788,49 @@ function trustedProxySourceFromSecurityCheck(check: SecurityCheckItem): string |
 }
 
 function pathEndsWithShareRoute(pathname: string): boolean {
-  const trimmedPath = pathname.replace(/\/+$/u, '')
+  const trimmedPath = decodeEscapedPathSlashes(pathname).replace(/\/+$/u, '')
   return trimmedPath === '/s' || trimmedPath.endsWith('/s')
+}
+
+function pathHasBackslashes(pathname: string): boolean {
+  return /\\|%5c/iu.test(pathname)
+}
+
+function pathHasDuplicateSlashes(pathname: string): boolean {
+  return /\/{2,}/u.test(decodeEscapedPathSlashes(pathname))
+}
+
+function pathHasDotSegments(pathname: string): boolean {
+  return decodeEscapedPathDots(decodeEscapedPathSlashes(pathname))
+    .split('/')
+    .some(segment => segment === '.' || segment === '..')
+}
+
+function collapseDuplicatePathSlashes(pathname: string): string {
+  return decodeEscapedPathSlashes(pathname).replace(/\/{2,}/gu, '/')
+}
+
+function decodeEscapedPathSlashes(pathname: string): string {
+  return pathname.replace(/%2f/giu, '/')
+}
+
+function decodeEscapedPathDots(pathname: string): string {
+  return pathname.replace(/%2e/giu, '.')
+}
+
+function decodeEscapedPathSeparators(pathname: string): string {
+  return decodeEscapedPathSlashes(pathname).replace(/\\|%5c/giu, '/')
+}
+
+function rawHTTPURLPathname(value: string): string {
+  const withoutScheme = value.replace(/^[a-z][a-z0-9+.-]*:\/\//iu, '')
+  const pathStart = withoutScheme.search(/[/?#\\]/u)
+  if (pathStart < 0 || (withoutScheme[pathStart] !== '/' && withoutScheme[pathStart] !== '\\')) {
+    return '/'
+  }
+  const rawPath = withoutScheme.slice(pathStart)
+  const queryStart = rawPath.search(/[?#]/u)
+  return queryStart >= 0 ? rawPath.slice(0, queryStart) || '/' : rawPath || '/'
 }
 
 function stripShareRouteSuffix(pathname: string): string {
@@ -817,6 +880,53 @@ function securityCheckNumberDetail(check: SecurityCheckItem, key: string): numbe
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined
 }
 
+function securityCheckShareBaseURLHasNonDefaultHTTPSPort(check: SecurityCheckItem): boolean {
+  const baseURL = securityCheckStringDetail(check, 'base_url')
+  if (!baseURL) {
+    return false
+  }
+  try {
+    const parsed = new URL(baseURL)
+    return parsed.protocol === 'https:' && parsed.port !== '' && parsed.port !== '443'
+  } catch {
+    return false
+  }
+}
+
+function getBackupLocalDestinationFixDescription(check: SecurityCheckItem): string {
+  const destination = securityCheckStringDetail(check, 'destination')
+  const jobID = securityCheckStringDetail(check, 'job_id')
+  const subject = destination
+    ? `备份作业 ${jobID || '<unknown>'} 的目标目录 ${destination}`
+    : '本地备份作业目标目录'
+  const symlinkComponent = securityCheckStringDetail(check, 'symlink_component')
+
+  switch (securityCheckStringDetail(check, 'destination_kind')) {
+    case 'inside_storage_root':
+      return `将${subject}移出 storage.root，改到独立磁盘、独立数据集或远端备份目标；迁移后重新运行安全自检。`
+    case 'inside_source':
+      return `将${subject}移出备份来源目录，避免源数据和备份一起损坏或被同步删除；迁移后重新运行安全自检。`
+    case 'symlink_component':
+      return symlinkComponent
+        ? `将${subject}改为不经过符号链接组件 ${symlinkComponent} 的普通目录，或改用独立磁盘、独立数据集或远端备份目标。`
+        : `将${subject}改为不经过符号链接组件的普通目录，或改用独立磁盘、独立数据集或远端备份目标。`
+    case 'symlink':
+      return `将${subject}从符号链接改为普通目录，或改用独立磁盘、独立数据集或远端备份目标。`
+    case 'not_directory':
+      return `将${subject}恢复为普通目录，或改用独立磁盘、独立数据集或远端备份目标。`
+    case 'missing':
+      return `确认${subject}的父目录已挂载，并且 MnemoNAS 服务账号可以创建目标目录；长期备份目标建议提前创建并监控挂载状态。`
+    case 'not_writable':
+      return `为${subject}授予 MnemoNAS 服务账号写权限，或改用服务账号可写的独立备份目录；修复后重新运行安全自检。`
+    case 'relative':
+      return `将${subject}改为绝对路径，并放在 storage.root 和备份来源目录之外的独立位置。`
+    default:
+      return destination
+        ? `在服务器上检查${subject}，确认它不是符号链接、不在主存储或来源目录内，并且 MnemoNAS 服务账号可以写入。`
+        : '在服务器上检查本地备份作业目标目录，确认它不是符号链接、不在主存储或来源目录内，并且 MnemoNAS 服务账号可以写入。'
+  }
+}
+
 function shareDefaultExpiresNeedsSecurityRepair(check: SecurityCheckItem): boolean {
   if (check.details?.default_expires_in_unlimited === true || check.details?.default_expires_in_too_long === true) {
     return true
@@ -856,7 +966,7 @@ function httpsShareBaseURLFromSecurityCheck(check: SecurityCheckItem): string {
     if (requestHost && !/[\s/:]/.test(requestHost)) {
       parsed.hostname = requestHost
     }
-    parsed.pathname = stripShareRouteSuffix(parsed.pathname)
+    parsed.pathname = stripShareRouteSuffix(collapseDuplicatePathSlashes(decodeEscapedPathSeparators(parsed.pathname)))
 
     if (parsed.pathname === '/' && parsed.search === '') {
       return parsed.origin
@@ -865,6 +975,40 @@ function httpsShareBaseURLFromSecurityCheck(check: SecurityCheckItem): string {
   } catch {
     return ''
   }
+}
+
+function shareBaseURLPublicReviewMessage(value: string): string | undefined {
+  const trimmed = value.trim()
+  if (!trimmed) {
+    return undefined
+  }
+
+  try {
+    const parsed = new URL(trimmed)
+    const rawPathname = rawHTTPURLPathname(trimmed)
+    if (parsed.protocol === 'http:') {
+      return '公网分享建议使用 HTTPS 基础 URL；HTTP 链接只适用于内网或受控测试环境。'
+    }
+    if (parsed.protocol === 'https:' && parsed.port && parsed.port !== '443') {
+      return 'HTTPS 非标准端口需要额外公网入口和防火墙规则；公网分享建议使用默认 443 端口。'
+    }
+    if (pathHasBackslashes(rawPathname)) {
+      return '路径包含反斜杠；公网部署中代理或浏览器可能规范化为不同的分享地址。'
+    }
+    if (pathHasDuplicateSlashes(rawPathname)) {
+      return '路径包含重复斜杠；公网部署中代理或浏览器可能规范化为不同的分享地址。'
+    }
+    if (pathHasDotSegments(rawPathname)) {
+      return '路径包含 . 或 .. 路径段；公网部署中代理或浏览器可能规范化为不同的分享地址。'
+    }
+    if (pathEndsWithShareRoute(rawPathname)) {
+      return '基础 URL 已包含 /s 分享路由，生成的链接会出现重复的 /s/s。'
+    }
+  } catch {
+    return undefined
+  }
+
+  return undefined
 }
 
 function loopbackAddressWithOriginalPort(address: string, fallback: string): string {
@@ -1010,13 +1154,13 @@ function findDuplicateWebhookHeaderName(headers: string[]): string | null {
 
 function formatDirectoryQuotaLines(quotas: DirectoryQuota[] | undefined): string {
   return (quotas ?? [])
-    .map((quota) => `${quota.path} ${formatBytes(quota.quota_bytes)}`)
+    .map((quota) => `${formatLogicalPathLineToken(quota.path)} ${formatBytes(quota.quota_bytes)}`)
     .join('\n')
 }
 
 function normalizeDirectoryQuotaPathInput(value: string): string | null {
   const trimmed = value.trim()
-  if (!trimmed.startsWith('/') || /[\s\\?#]/.test(trimmed) || hasControlChar(trimmed)) {
+  if (!trimmed.startsWith('/') || /[\\?#]/.test(trimmed) || hasControlChar(trimmed)) {
     return null
   }
   if (trimmed.split('/').some((segment) => segment === '.' || segment === '..')) {
@@ -1026,7 +1170,54 @@ function normalizeDirectoryQuotaPathInput(value: string): string | null {
   return collapsed === '/' ? '/' : collapsed.replace(/\/+$/, '')
 }
 
-const logicalPathInputErrorDescription = '路径必须是站内绝对路径，且不能包含空字符、. 或 .. 路径段。'
+const logicalPathInputErrorDescription = '路径必须是站内绝对路径，且不能包含反斜杠、?、#、控制字符、. 或 .. 路径段。'
+
+function formatLogicalPathLineToken(path: string): string {
+  const normalizedPath = normalizeDirectoryQuotaPathInput(path) ?? path.trim()
+  if (!/\s|"/.test(normalizedPath)) {
+    return normalizedPath
+  }
+  return `"${normalizedPath.replaceAll('"', '\\"')}"`
+}
+
+function parseLogicalPathLineHead(line: string, lineNumber: number): { path: string; rest: string; error?: string } {
+  const trimmed = line.trim()
+  if (!trimmed) {
+    return { path: '', rest: '' }
+  }
+
+  if (!trimmed.startsWith('"')) {
+    const [pathToken = '', ...restTokens] = trimmed.split(/\s+/)
+    return { path: pathToken, rest: restTokens.join(' ') }
+  }
+
+  let pathToken = ''
+  let escaping = false
+  for (let index = 1; index < trimmed.length; index += 1) {
+    const char = trimmed[index]
+    if (escaping) {
+      pathToken += char === '"' ? '"' : `\\${char}`
+      escaping = false
+      continue
+    }
+    if (char === '\\') {
+      escaping = true
+      continue
+    }
+    if (char === '"') {
+      return {
+        path: pathToken,
+        rest: trimmed.slice(index + 1).trim(),
+      }
+    }
+    pathToken += char
+  }
+
+  if (escaping) {
+    pathToken += '\\'
+  }
+  return { path: pathToken, rest: '', error: `第 ${lineNumber} 行路径引号未闭合` }
+}
 
 function parseDirectoryQuotaLines(value: string): { quotas: DirectoryQuota[]; error?: string } {
   const lines = value.split('\n')
@@ -1039,12 +1230,15 @@ function parseDirectoryQuotaLines(value: string): { quotas: DirectoryQuota[]; er
       continue
     }
 
-    const parts = line.split(/\s+/)
-    if (parts.length < 2) {
+    const parsedLine = parseLogicalPathLineHead(line, index + 1)
+    if (parsedLine.error) {
+      return { quotas: [], error: parsedLine.error }
+    }
+    if (!parsedLine.rest) {
       return { quotas: [], error: `第 ${index + 1} 行需要填写路径和容量` }
     }
 
-    const quotaPath = normalizeDirectoryQuotaPathInput(parts[0])
+    const quotaPath = normalizeDirectoryQuotaPathInput(parsedLine.path)
     if (!quotaPath) {
       return { quotas: [], error: `第 ${index + 1} 行路径无效` }
     }
@@ -1052,7 +1246,7 @@ function parseDirectoryQuotaLines(value: string): { quotas: DirectoryQuota[]; er
       return { quotas: [], error: `第 ${index + 1} 行路径重复` }
     }
 
-    const sizeText = parts.slice(1).join(' ')
+    const sizeText = parsedLine.rest
     let quotaBytes: number
     try {
       quotaBytes = parseByteSize(sizeText)
@@ -1216,7 +1410,7 @@ function formatAccessRuleList(label: string, values: string[] | undefined): stri
 function formatDirectoryAccessRuleLines(rules: DirectoryAccessRule[] | undefined): string {
   return (rules ?? [])
     .map((rule) => [
-      rule.path,
+      formatLogicalPathLineToken(rule.path),
       formatAccessRuleList('read_users', rule.read_users),
       formatAccessRuleList('write_users', rule.write_users),
       formatAccessRuleList('read_groups', rule.read_groups),
@@ -1269,8 +1463,11 @@ function parseDirectoryAccessRuleLines(value: string): { rules: DirectoryAccessR
       continue
     }
 
-    const parts = line.split(/\s+/)
-    const rulePath = normalizeDirectoryQuotaPathInput(parts[0])
+    const parsedLine = parseLogicalPathLineHead(line, lineNumber)
+    if (parsedLine.error) {
+      return { rules: [], error: parsedLine.error }
+    }
+    const rulePath = normalizeDirectoryQuotaPathInput(parsedLine.path)
     if (!rulePath) {
       return { rules: [], error: `第 ${lineNumber} 行路径无效` }
     }
@@ -1279,7 +1476,8 @@ function parseDirectoryAccessRuleLines(value: string): { rules: DirectoryAccessR
     }
 
     const rule: DirectoryAccessRule = { path: rulePath }
-    for (const token of parts.slice(1)) {
+    const tokens = parsedLine.rest ? parsedLine.rest.split(/\s+/) : []
+    for (const token of tokens) {
       const separator = token.indexOf('=')
       if (separator <= 0 || separator === token.length - 1) {
         return { rules: [], error: `第 ${lineNumber} 行规则格式无效` }
@@ -1640,8 +1838,8 @@ function sharePolicyRuleReviewTone(kind: SharePolicyRuleReviewKind): string {
 function sharePolicyRuleSummary(rule: SharePolicyRule): string {
   const parts = [
     rule.require_password ? '必须设置密码' : '',
-    rule.max_expires_in ? `最长有效期: ${rule.max_expires_in}` : '',
-    rule.max_access && rule.max_access > 0 ? `最多访问: ${rule.max_access}` : '',
+    rule.max_expires_in ? `最长有效期：${rule.max_expires_in}` : '',
+    rule.max_access && rule.max_access > 0 ? `最多访问：${rule.max_access}` : '',
   ].filter(Boolean)
 
   return parts.length > 0 ? parts.join(' · ') : '未配置约束'
@@ -1713,7 +1911,7 @@ function SharePolicyChangeReview({
                   </span>
                   <span className="font-mono text-sm font-semibold text-foreground">{item.path}</span>
                   {item.changedFields.length > 0 && (
-                    <span className="text-xs text-default-500">变更字段: {item.changedFields.join('、')}</span>
+                    <span className="text-xs text-default-500">变更字段：{item.changedFields.join('、')}</span>
                   )}
                 </div>
                 {activeRule && (
@@ -1845,8 +2043,8 @@ function getDirectoryAccessDecisionDisplayMessage(decision: DirectoryAccessDecis
   const modeLabel = directoryAccessModeLabel(decision.mode)
   const normalizedMessage = decision.message?.trim().toLowerCase()
 
-  if (normalizedMessage === 'directory access rule grants read through a descendant') {
-    return '子目录存在读取规则，因此允许查看相关路径。'
+  if (normalizedMessage === 'directory access rule grants read through an existing descendant') {
+    return '已存在的子目录命中读取规则，因此允许查看相关路径。'
   }
 
   switch (decision.source) {
@@ -2299,7 +2497,7 @@ function DirectoryAccessRuleChangeReview({
                   </span>
                   <span className="font-mono text-sm font-semibold text-foreground">{item.path}</span>
                   {item.changedFields.length > 0 && (
-                    <span className="text-xs text-default-500">变更字段: {item.changedFields.join('、')}</span>
+                    <span className="text-xs text-default-500">变更字段：{item.changedFields.join('、')}</span>
                   )}
                 </div>
                 {activeRule && (
@@ -2393,9 +2591,10 @@ function directoryAccessRuleToDraft(rule: DirectoryAccessRule): DirectoryAccessR
 
 function rawDirectoryAccessRuleLineToDraft(line: string): DirectoryAccessRuleDraft {
   const draft = emptyDirectoryAccessRuleDraft()
-  const parts = line.trim().split(/\s+/).filter(Boolean)
-  draft.path = parts[0] ?? ''
-  for (const token of parts.slice(1)) {
+  const parsedLine = parseLogicalPathLineHead(line, 0)
+  draft.path = parsedLine.path
+  const tokens = parsedLine.rest ? parsedLine.rest.split(/\s+/).filter(Boolean) : []
+  for (const token of tokens) {
     const separator = token.indexOf('=')
     if (separator <= 0 || separator === token.length - 1) {
       continue
@@ -2459,7 +2658,8 @@ function appendDirectoryAccessDraftList(parts: string[], key: string, value: str
 function formatDirectoryAccessRuleDrafts(drafts: DirectoryAccessRuleDraft[]): string {
   return drafts
     .map((draft) => {
-      const parts = [draft.path.trim()]
+      const trimmedPath = draft.path.trim()
+      const parts = [trimmedPath ? formatLogicalPathLineToken(trimmedPath) : '']
       appendDirectoryAccessDraftList(parts, 'read_users', draft.readUsers)
       appendDirectoryAccessDraftList(parts, 'write_users', draft.writeUsers)
       appendDirectoryAccessDraftList(parts, 'read_groups', draft.readGroups)
@@ -2865,9 +3065,12 @@ function getSecurityCheckDisplayMessage(check: SecurityCheckItem): string {
         ? '管理界面已启用登录认证。'
         : '管理界面未启用登录认证，公网访问前必须启用认证。'
     case 'unsafe_no_auth_override':
-      return check.status === 'pass'
-        ? '未启用无认证公网暴露例外。'
-        : '当前允许无认证服务绑定到非本机地址，公网访问前必须关闭该例外或重新启用认证。'
+      if (check.status === 'pass') {
+        return '未启用无认证公网暴露例外。'
+      }
+      return check.status === 'block'
+        ? '当前允许无认证服务暴露到非本机地址，公网访问前必须关闭该例外或重新启用认证。'
+        : '无认证例外已开启；该设置只适合受控网络边界或临时调试，公网访问前请关闭该例外。'
     case 'https_request':
       return check.status === 'pass'
         ? '当前访问已通过 HTTPS 或受信代理转发。'
@@ -3028,9 +3231,33 @@ function getSecurityCheckDisplayMessage(check: SecurityCheckItem): string {
       return 'WebDAV 前缀会覆盖站点根路径或缺少明确挂载点；请改为 /dav 或其他独立路径。'
     case 'smb_preview':
       return check.status === 'pass'
-        ? 'SMB 预览未启用，不会启动额外的 SMB/Samba 监听器。'
-        : '当前版本仍未内置可挂载的 SMB/Samba 运行时；启用前应先收紧监听范围和防火墙。'
+        ? 'SMB 预览未启用，当前构建不会启动额外的 SMB/Samba 监听器。'
+        : '当前构建未包含可挂载的 SMB/Samba 运行组件；启用前应先收紧监听范围和防火墙。'
     case 'share_base_url':
+      if (
+        check.status === 'block'
+        && typeof check.details?.base_url_path === 'string'
+        && pathHasBackslashes(check.details.base_url_path)
+      ) {
+        return '分享基础 URL 路径包含反斜杠，继续使用可能被代理或浏览器规范化为不一致的分享地址。'
+      }
+      if (
+        check.status === 'block'
+        && typeof check.details?.base_url_path === 'string'
+        && pathHasDuplicateSlashes(check.details.base_url_path)
+      ) {
+        return '分享基础 URL 路径包含重复斜杠，继续使用可能被代理或浏览器规范化为不一致的分享地址。'
+      }
+      if (
+        check.status === 'block'
+        && typeof check.details?.base_url_path === 'string'
+        && pathHasDotSegments(check.details.base_url_path)
+      ) {
+        return '分享基础 URL 路径包含 . 或 .. 路径段，继续使用可能被代理或浏览器规范化为不一致的分享地址。'
+      }
+      if (check.status === 'block' && securityCheckShareBaseURLHasNonDefaultHTTPSPort(check)) {
+        return '分享基础 URL 使用非标准 HTTPS 端口，公网分享通常应使用默认 443 端口，避免额外暴露入口。'
+      }
       if (
         check.status === 'warning'
         && typeof check.details?.base_url_path === 'string'
@@ -3178,10 +3405,10 @@ function SecurityCheckCard({
   const Icon = meta.Icon
 
   return (
-    <Card className="card-meridian">
+    <Card className="card-mnemonas">
       <CardHeader className="flex min-w-0 flex-col gap-4 pb-2 sm:flex-row sm:items-start sm:justify-between">
         <div className="flex min-w-0 gap-4">
-          <div className="gradient-meridian shrink-0 rounded-lg p-2.5 shadow-sm">
+          <div className="gradient-mnemonas shrink-0 rounded-lg p-2.5 shadow-sm">
             <Shield size={20} className="text-white" />
           </div>
           <div className="min-w-0 flex-1">
@@ -3293,6 +3520,9 @@ function PublicAccessWizard({
     ? 'sudo certbot renew --dry-run'
     : "sudo journalctl -u caddy --since '24 hours ago'"
   const renewalLabel = proxy === 'nginx' ? '续期演练' : '续期日志'
+  const setupCopyLabel = '复制公网配置命令'
+  const doctorCopyLabel = '复制公网自检命令'
+  const renewalCopyLabel = `复制证书${renewalLabel}命令`
 
   return (
     <SettingsSection
@@ -3362,6 +3592,8 @@ function PublicAccessWizard({
               pre: "font-mono text-xs whitespace-pre-wrap break-all",
               copyButton: PUBLIC_ACCESS_SNIPPET_COPY_BUTTON_CLASS,
             }}
+            tooltipProps={{ content: setupCopyLabel }}
+            copyButtonProps={{ 'aria-label': setupCopyLabel }}
             hideSymbol
           >
             {setupCommand}
@@ -3375,6 +3607,8 @@ function PublicAccessWizard({
               pre: "font-mono text-xs whitespace-pre-wrap break-all",
               copyButton: PUBLIC_ACCESS_SNIPPET_COPY_BUTTON_CLASS,
             }}
+            tooltipProps={{ content: doctorCopyLabel }}
+            copyButtonProps={{ 'aria-label': doctorCopyLabel }}
             hideSymbol
           >
             {doctorCommand}
@@ -3397,6 +3631,8 @@ function PublicAccessWizard({
               pre: "font-mono text-xs whitespace-pre-wrap break-all",
               copyButton: PUBLIC_ACCESS_SNIPPET_COPY_BUTTON_CLASS,
             }}
+            tooltipProps={{ content: renewalCopyLabel }}
+            copyButtonProps={{ 'aria-label': renewalCopyLabel }}
             hideSymbol
           >
             {renewalCommand}
@@ -3684,13 +3920,13 @@ export function SettingsPage() {
     }
     return null
   }
-  
+
   // WebDAV credentials state
   const [showWebDAVPassword, setShowWebDAVPassword] = useState(false)
   const [copiedField, setCopiedField] = useState<string | null>(null)
   const [publicAccessDomain, setPublicAccessDomain] = useState('')
   const [publicAccessProxy, setPublicAccessProxy] = useState<PublicProxyKind>('caddy')
-  
+
   // Fetch settings from API
   const { data: settingsData, dataUpdatedAt: settingsDataUpdatedAt, isLoading, error, refetch, isRefetching } = useQuery({
     queryKey: ['settings', user?.id ?? 'anonymous'],
@@ -3812,9 +4048,11 @@ export function SettingsPage() {
       }
       const channels = formatAlertChannelSummary(result.data.channels)
       addToast({
-        title: '测试提醒已发送',
-        description: channels ? `已发送到 ${channels}` : result.message,
-        color: 'success',
+        title: result.warning === true ? '测试提醒已发送，但存在警告' : '测试提醒已发送',
+        description: result.warning === true
+          ? getNonBlankToastDescription(result.message) ?? (channels ? `已发送到 ${channels}` : undefined)
+          : channels ? `已发送到 ${channels}` : getNonBlankToastDescription(result.message),
+        color: result.warning === true ? 'warning' : 'success',
       })
     },
     onError: (err, variables) => {
@@ -4182,6 +4420,9 @@ export function SettingsPage() {
     : webDAVPrefixUsesReservedRoute
       ? '前缀不能是 /、/api、/s、/health 或它们的子路径'
       : undefined
+  const shareBaseURLReviewMessage = settings.shareEnabled
+    ? shareBaseURLPublicReviewMessage(settings.shareBaseURL)
+    : undefined
   const normalizedPublicAccessDomain = useMemo(() => {
     return normalizePublicDomainInput(publicAccessDomain)
   }, [publicAccessDomain])
@@ -4388,13 +4629,10 @@ export function SettingsPage() {
         return
       case 'backup_local_destinations':
         {
-          const destination = securityCheckStringDetail(check, 'destination')
           const jobID = securityCheckStringDetail(check, 'job_id')
           addToast({
             title: '需要检查本地备份目标',
-            description: destination
-              ? `在服务器上检查备份作业 ${jobID || '<unknown>'} 的目标目录 ${destination}，确认它不是符号链接、不在主存储或来源目录内，并且 MnemoNAS 服务账号可以写入。`
-              : '在服务器上检查本地备份作业目标目录，确认它不是符号链接、不在主存储或来源目录内，并且 MnemoNAS 服务账号可以写入。',
+            description: redactSecurityActionToastDescription(getBackupLocalDestinationFixDescription(check)),
             color: 'warning',
           })
           navigate(jobID ? `/maintenance?backupJob=${encodeURIComponent(jobID)}` : '/maintenance')
@@ -4412,9 +4650,11 @@ export function SettingsPage() {
           const configPath = securityCheckStringDetail(check, 'path')
           addToast({
             title: '需要检查配置文件路径',
-            description: configPath
-              ? `在服务器上确认 ${configPath} 是普通文件、路径组件不经过符号链接，并将权限设为 0600 后重新检查。`
-              : '在服务器上确认 MnemoNAS 使用的 config.toml 是普通文件、路径组件不经过符号链接，并将权限设为 0600 后重新检查。',
+            description: redactSecurityActionToastDescription(
+              configPath
+                ? `在服务器上确认 ${configPath} 是普通文件、路径组件不经过符号链接，并将权限设为 0600 后重新检查。`
+                : '在服务器上确认 MnemoNAS 使用的 config.toml 是普通文件、路径组件不经过符号链接，并将权限设为 0600 后重新检查。',
+            ),
             color: 'warning',
           })
         }
@@ -4424,9 +4664,11 @@ export function SettingsPage() {
           const secretsPath = securityCheckStringDetail(check, 'path')
           addToast({
             title: '需要检查自动 WebDAV 凭据',
-            description: secretsPath
-              ? `在服务器上确认 ${secretsPath} 是普通文件、路径组件不经过符号链接，并将权限设为 0600；也可以改用 WebDAV 用户认证或设置自定义强密码。`
-              : '在服务器上确认 storage.root 下的 secrets.json 是普通文件、路径组件不经过符号链接，并将权限设为 0600；也可以改用 WebDAV 用户认证或设置自定义强密码。',
+            description: redactSecurityActionToastDescription(
+              secretsPath
+                ? `在服务器上确认 ${secretsPath} 是普通文件、路径组件不经过符号链接，并将权限设为 0600；也可以改用 WebDAV 用户认证或设置自定义强密码。`
+                : '在服务器上确认 storage.root 下的 secrets.json 是普通文件、路径组件不经过符号链接，并将权限设为 0600；也可以改用 WebDAV 用户认证或设置自定义强密码。',
+            ),
             color: 'warning',
           })
         }
@@ -4440,7 +4682,7 @@ export function SettingsPage() {
             : '在服务器上移除符号链接，并将用户文件目录设为 0700、users.json 设为 0600 后重新检查。'
           addToast({
             title: '需要收紧用户文件权限',
-            description: permissionHint,
+            description: redactSecurityActionToastDescription(permissionHint),
             color: 'warning',
           })
         }
@@ -4450,9 +4692,11 @@ export function SettingsPage() {
           const initialPasswordPath = securityCheckStringDetail(check, 'path')
           addToast({
             title: '需要移除初始密码路径',
-            description: initialPasswordPath
-              ? `完成首次登录并修改密码后，在服务器上删除 ${initialPasswordPath}；如果该路径是符号链接或目录，也一并移除后重新检查。`
-              : '完成首次登录并修改密码后，在服务器上删除 initial-password.txt；如果该路径是符号链接或目录，也一并移除后重新检查。',
+            description: redactSecurityActionToastDescription(
+              initialPasswordPath
+                ? `完成首次登录并修改密码后，在服务器上删除 ${initialPasswordPath}；如果该路径是符号链接或目录，也一并移除后重新检查。`
+                : '完成首次登录并修改密码后，在服务器上删除 initial-password.txt；如果该路径是符号链接或目录，也一并移除后重新检查。',
+            ),
             color: 'warning',
           })
         }
@@ -4633,7 +4877,7 @@ export function SettingsPage() {
         setIsDirty(false)
       }
 
-      addToast(getSettingsSaveSuccessToast(result.message))
+      addToast(getSettingsSaveSuccessToast(result.message, result.warning === true))
       void refetch()
       if (selectedTab === 'general') {
         void refetchSecurityCheck()
@@ -4787,10 +5031,10 @@ export function SettingsPage() {
       minChunkBytes = parseByteSize(settings.minChunkSize)
       avgChunkBytes = parseByteSize(settings.avgChunkSize)
       maxChunkBytes = parseByteSize(settings.maxChunkSize)
-    } catch (err) {
+    } catch {
       addToast({
         title: '大小格式无效',
-        description: err instanceof Error ? err.message : '请使用 1024、1 KB、1.5 MB 之类的格式',
+        description: BYTE_SIZE_FORMAT_ERROR_DESCRIPTION,
         color: 'danger',
       })
       return
@@ -5099,7 +5343,7 @@ export function SettingsPage() {
     if (!isValidShareBaseURL(trimmedShareBaseURL)) {
       addToast({
         title: '分享基础 URL 无效',
-        description: '分享基础 URL 必须为空，或使用不含 userinfo、查询参数、片段且主机名有效的 http/https 地址',
+        description: '分享基础 URL 必须为空，或使用不含 userinfo、查询参数、片段、反斜杠、重复路径斜杠、. 或 .. 路径段且主机名有效的 http/https 地址',
         color: 'danger',
       })
       return
@@ -5125,8 +5369,8 @@ export function SettingsPage() {
 
     if (trimmedAlertsWebhookURL === REDACTED_SETTINGS_SECRET && !settings.alertsWebhookURLConfigured) {
       addToast({
-        title: 'Webhook URL 占位符无效',
-        description: '只有服务端已保存的 Webhook URL 才能保留为 <redacted>；新增 Webhook URL 需要填写真实地址。',
+        title: 'Webhook URL 无法保留',
+        description: '当前没有已保存的 Webhook URL；新增 Webhook URL 需要填写真实地址。',
         color: 'danger',
       })
       return
@@ -5197,8 +5441,8 @@ export function SettingsPage() {
 
     if (trimmedAlertsWeComWebhookURL === REDACTED_SETTINGS_SECRET && !settings.alertsWeComWebhookURLConfigured) {
       addToast({
-        title: '企业微信 Webhook 占位符无效',
-        description: '只有服务端已保存的企业微信 Webhook URL 才能保留为 <redacted>；新增企业微信 Webhook 需要填写真实地址。',
+        title: '企业微信 Webhook 无法保留',
+        description: '当前没有已保存的企业微信 Webhook URL；新增企业微信 Webhook 需要填写真实地址。',
         color: 'danger',
       })
       return
@@ -5224,8 +5468,8 @@ export function SettingsPage() {
 
     if (trimmedAlertsDingTalkWebhookURL === REDACTED_SETTINGS_SECRET && !settings.alertsDingTalkWebhookURLConfigured) {
       addToast({
-        title: '钉钉 Webhook 占位符无效',
-        description: '只有服务端已保存的钉钉 Webhook URL 才能保留为 <redacted>；新增钉钉 Webhook 需要填写真实地址。',
+        title: '钉钉 Webhook 无法保留',
+        description: '当前没有已保存的钉钉 Webhook URL；新增钉钉 Webhook 需要填写真实地址。',
         color: 'danger',
       })
       return
@@ -5454,7 +5698,7 @@ export function SettingsPage() {
     )
     if (unknownRedactedWebhookHeader) {
       addToast({
-        title: 'Webhook Header 占位符无效',
+        title: 'Webhook Header 无法保留',
         description: `Header ${unknownRedactedWebhookHeader} 没有已保存的值；新增或改名的 Header 需要填写真实值。`,
         color: 'danger',
       })
@@ -5674,7 +5918,7 @@ export function SettingsPage() {
             className="mb-8"
           />
 
-          <Card className="card-meridian">
+          <Card className="card-mnemonas">
             <CardBody className="py-16">
               <div className="text-center">
                 <div className="w-12 h-12 border-3 border-accent-primary border-t-transparent rounded-full animate-spin mx-auto mb-4" />
@@ -5695,7 +5939,7 @@ export function SettingsPage() {
           title={settingsLoadErrorPresentation!.title}
           description={settingsLoadErrorPresentation!.description}
           action={
-		    <Button variant="bordered" className="rounded-lg" onPress={handleRefreshSettings} isLoading={isRefetching}>
+            <Button variant="bordered" className="rounded-lg" onPress={handleRefreshSettings} isLoading={isRefetching}>
               重新加载
             </Button>
           }
@@ -5815,11 +6059,12 @@ export function SettingsPage() {
                     <div>
                       <label className="text-sm font-medium text-default-600 mb-1.5 block">监听地址</label>
                       <Input
+                        aria-label="服务器监听地址"
                         placeholder="0.0.0.0"
                         value={settings.serverHost}
                         onValueChange={(v) => updateDirtySettings(s => ({ ...s, serverHost: v }))}
                         startContent={<Globe size={16} className="text-default-500" />}
-                        classNames={{ 
+                        classNames={{
                           inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary",
                         }}
                       />
@@ -5827,6 +6072,7 @@ export function SettingsPage() {
                     <div>
                       <label className="text-sm font-medium text-default-600 mb-1.5 block">端口</label>
                       <Input
+                        aria-label="服务器端口"
                         placeholder="8080"
                         type="number"
                         min={1}
@@ -5834,7 +6080,7 @@ export function SettingsPage() {
                         inputMode="numeric"
                         value={settings.serverPort}
                         onValueChange={(v) => updateDirtySettings(s => ({ ...s, serverPort: v }))}
-                        classNames={{ 
+                        classNames={{
                           inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary",
                         }}
                       />
@@ -5842,39 +6088,42 @@ export function SettingsPage() {
                   </div>
                   <Divider className="bg-divider" />
                   <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
-                  <div>
-                    <label className="text-sm font-medium text-default-600 mb-1.5 block">读取超时</label>
-                    <Input
-                      placeholder="30s"
-                      value={settings.serverReadTimeout}
-                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, serverReadTimeout: v }))}
-                      classNames={{ 
-                        inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary",
-                      }}
-                    />
-                  </div>
-                  <div>
-                    <label className="text-sm font-medium text-default-600 mb-1.5 block">写入超时</label>
-                    <Input
-                      placeholder="60s"
-                      value={settings.serverWriteTimeout}
-                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, serverWriteTimeout: v }))}
-                      classNames={{ 
-                        inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary",
-                      }}
-                    />
-                  </div>
-                  <div>
-                    <label className="text-sm font-medium text-default-600 mb-1.5 block">空闲超时</label>
-                    <Input
-                      placeholder="120s"
-                      value={settings.serverIdleTimeout}
-                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, serverIdleTimeout: v }))}
-                      classNames={{ 
-                        inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary",
-                      }}
-                    />
-                  </div>
+                    <div>
+                      <label className="text-sm font-medium text-default-600 mb-1.5 block">读取超时</label>
+                      <Input
+                        aria-label="服务器读取超时"
+                        placeholder="30s"
+                        value={settings.serverReadTimeout}
+                        onValueChange={(v) => updateDirtySettings(s => ({ ...s, serverReadTimeout: v }))}
+                        classNames={{
+                          inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary",
+                        }}
+                      />
+                    </div>
+                    <div>
+                      <label className="text-sm font-medium text-default-600 mb-1.5 block">写入超时</label>
+                      <Input
+                        aria-label="服务器写入超时"
+                        placeholder="60s"
+                        value={settings.serverWriteTimeout}
+                        onValueChange={(v) => updateDirtySettings(s => ({ ...s, serverWriteTimeout: v }))}
+                        classNames={{
+                          inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary",
+                        }}
+                      />
+                    </div>
+                    <div>
+                      <label className="text-sm font-medium text-default-600 mb-1.5 block">空闲超时</label>
+                      <Input
+                        aria-label="服务器空闲超时"
+                        placeholder="120s"
+                        value={settings.serverIdleTimeout}
+                        onValueChange={(v) => updateDirtySettings(s => ({ ...s, serverIdleTimeout: v }))}
+                        classNames={{
+                          inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary",
+                        }}
+                      />
+                    </div>
                   </div>
                   <Divider className="bg-divider" />
                   <SettingRow
@@ -5911,90 +6160,93 @@ export function SettingsPage() {
                 </div>
               </SettingsSection>
 
-        <SettingsSection
-        title="TLS / HTTPS"
-        description="配置 HTTPS 证书与自动生成策略；保存后需重启服务才能切换运行中的监听器"
-        icon={Shield}
-        >
-        <div className="space-y-4">
-          <SettingRow
-          label="启用 HTTPS"
-          description="启用后服务将使用 TLS 证书提供 HTTPS"
-          >
-          <Switch
-            aria-label="启用 HTTPS"
-            isSelected={settings.tlsEnabled}
-            onValueChange={(v) => updateDirtySettings(s => ({ ...s, tlsEnabled: v }))}
-            classNames={{
-            wrapper: cn(
-              "group-data-[selected=true]:bg-accent-primary",
-              "bg-content2"
-            ),
-            label: "sr-only",
-            }}
-          >
-            启用 HTTPS
-          </Switch>
-          </SettingRow>
-          <Divider className="bg-divider" />
-          <SettingRow
-          label="自动生成证书"
-          description="证书缺失时自动生成自签名证书"
-          >
-          <Switch
-            aria-label="自动生成证书"
-            isSelected={settings.tlsAutoGenerate}
-            onValueChange={(v) => updateDirtySettings(s => ({ ...s, tlsAutoGenerate: v }))}
-            isDisabled={!settings.tlsEnabled}
-            classNames={{
-            wrapper: cn(
-              "group-data-[selected=true]:bg-accent-primary",
-              "bg-content2"
-            ),
-            label: "sr-only",
-            }}
-          >
-            自动生成证书
-          </Switch>
-          </SettingRow>
-          <Divider className="bg-divider" />
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-          <div>
-            <label className="text-sm font-medium text-default-600 mb-1.5 block">证书文件</label>
-            <Input
-            value={settings.tlsCertFile}
-            onValueChange={(v) => updateDirtySettings(s => ({ ...s, tlsCertFile: v }))}
-            placeholder="/path/to/server.crt"
-            isDisabled={!settings.tlsEnabled}
-            classNames={{ inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary" }}
-            />
-          </div>
-          <div>
-            <label className="text-sm font-medium text-default-600 mb-1.5 block">私钥文件</label>
-            <Input
-            value={settings.tlsKeyFile}
-            onValueChange={(v) => updateDirtySettings(s => ({ ...s, tlsKeyFile: v }))}
-            placeholder="/path/to/server.key"
-            isDisabled={!settings.tlsEnabled}
-            classNames={{ inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary" }}
-            />
-          </div>
-          </div>
-          <Divider className="bg-divider" />
-          <SettingRow
-          label="证书目录"
-          description="自动生成证书时使用的存放目录"
-          >
-          <Input
-            value={settings.tlsCertDir}
-            onValueChange={(v) => updateDirtySettings(s => ({ ...s, tlsCertDir: v }))}
-            placeholder="<storage.root>/.mnemonas/certs"
-            isDisabled={!settings.tlsEnabled || !settings.tlsAutoGenerate}
-            classNames={{ inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9" }}
-          />
-          </SettingRow>
-        </div>
-        </SettingsSection>
+              <SettingsSection
+                title="TLS / HTTPS"
+                description="配置 HTTPS 证书与自动生成策略；保存后需重启服务才能切换运行中的监听器"
+                icon={Shield}
+              >
+                <div className="space-y-4">
+                  <SettingRow
+                    label="启用 HTTPS"
+                    description="启用后服务将使用 TLS 证书提供 HTTPS"
+                  >
+                    <Switch
+                      aria-label="启用 HTTPS"
+                      isSelected={settings.tlsEnabled}
+                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, tlsEnabled: v }))}
+                      classNames={{
+                        wrapper: cn(
+                          "group-data-[selected=true]:bg-accent-primary",
+                          "bg-content2"
+                        ),
+                        label: "sr-only",
+                      }}
+                    >
+                      启用 HTTPS
+                    </Switch>
+                  </SettingRow>
+                  <Divider className="bg-divider" />
+                  <SettingRow
+                    label="自动生成证书"
+                    description="证书缺失时自动生成自签名证书"
+                  >
+                    <Switch
+                      aria-label="自动生成证书"
+                      isSelected={settings.tlsAutoGenerate}
+                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, tlsAutoGenerate: v }))}
+                      isDisabled={!settings.tlsEnabled}
+                      classNames={{
+                        wrapper: cn(
+                          "group-data-[selected=true]:bg-accent-primary",
+                          "bg-content2"
+                        ),
+                        label: "sr-only",
+                      }}
+                    >
+                      自动生成证书
+                    </Switch>
+                  </SettingRow>
+                  <Divider className="bg-divider" />
+                  <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                    <div>
+                      <label className="text-sm font-medium text-default-600 mb-1.5 block">证书文件</label>
+                      <Input
+                        aria-label="TLS 证书文件"
+                        value={settings.tlsCertFile}
+                        onValueChange={(v) => updateDirtySettings(s => ({ ...s, tlsCertFile: v }))}
+                        placeholder="/path/to/server.crt"
+                        isDisabled={!settings.tlsEnabled}
+                        classNames={{ inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary" }}
+                      />
+                    </div>
+                    <div>
+                      <label className="text-sm font-medium text-default-600 mb-1.5 block">私钥文件</label>
+                      <Input
+                        aria-label="TLS 私钥文件"
+                        value={settings.tlsKeyFile}
+                        onValueChange={(v) => updateDirtySettings(s => ({ ...s, tlsKeyFile: v }))}
+                        placeholder="/path/to/server.key"
+                        isDisabled={!settings.tlsEnabled}
+                        classNames={{ inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary" }}
+                      />
+                    </div>
+                  </div>
+                  <Divider className="bg-divider" />
+                  <SettingRow
+                    label="证书目录"
+                    description="自动生成证书时使用的存放目录"
+                  >
+                    <Input
+                      aria-label="TLS 证书目录"
+                      value={settings.tlsCertDir}
+                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, tlsCertDir: v }))}
+                      placeholder="<storage.root>/.mnemonas/certs"
+                      isDisabled={!settings.tlsEnabled || !settings.tlsAutoGenerate}
+                      classNames={{ inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9" }}
+                    />
+                  </SettingRow>
+                </div>
+              </SettingsSection>
 
               <SettingsSection
                 title="存储路径"
@@ -6029,7 +6281,7 @@ export function SettingsPage() {
                     description="关闭后删除操作将直接永久删除，不再进入回收站"
                   >
                     <Switch
-                    aria-label="启用回收站"
+                      aria-label="启用回收站"
                       isSelected={settings.trashEnabled}
                       onValueChange={(v) => updateDirtySettings(s => ({ ...s, trashEnabled: v }))}
                       classNames={{
@@ -6045,37 +6297,37 @@ export function SettingsPage() {
                   </SettingRow>
                   <Divider className="bg-divider" />
                   <SettingRow
-                  label="回收站保留天数"
-                  description="回收站项目的保留时间；设置为 0 表示进入后立即过期，等待清理任务删除"
+                    label="回收站保留天数"
+                    description="回收站项目的保留时间；设置为 0 表示进入后立即过期，等待清理任务删除"
                   >
-                  <Input
-                    aria-label="回收站保留天数"
-                    type="number"
-                    min={0}
-                    step={1}
-                    inputMode="numeric"
-                    value={settings.trashRetentionDays}
-                    onValueChange={(v) => updateDirtySettings(s => ({ ...s, trashRetentionDays: v }))}
-                    className="w-24"
-                    classNames={{ 
-                    inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
-                    }}
-                  />
+                    <Input
+                      aria-label="回收站保留天数"
+                      type="number"
+                      min={0}
+                      step={1}
+                      inputMode="numeric"
+                      value={settings.trashRetentionDays}
+                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, trashRetentionDays: v }))}
+                      className="w-24"
+                      classNames={{
+                        inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
+                      }}
+                    />
                   </SettingRow>
                   <Divider className="bg-divider" />
                   <SettingRow
-                  label="回收站最大容量"
-                  description="超过该上限时，系统会优先清理最早删除的项目，为最新删除的项目腾出空间"
+                    label="回收站最大容量"
+                    description="超过该上限时，系统会优先清理最早删除的项目，为最新删除的项目腾出空间"
                   >
-                  <Input
-                    aria-label="回收站最大容量"
-                    value={settings.trashMaxSize}
-                    onValueChange={(v) => updateDirtySettings(s => ({ ...s, trashMaxSize: v }))}
-                    className="w-32"
-                    classNames={{ 
-                    inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
-                    }}
-                  />
+                    <Input
+                      aria-label="回收站最大容量"
+                      value={settings.trashMaxSize}
+                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, trashMaxSize: v }))}
+                      className="w-32"
+                      classNames={{
+                        inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
+                      }}
+                    />
                   </SettingRow>
                   <Divider className="bg-divider" />
                   <SettingRow
@@ -6091,9 +6343,9 @@ export function SettingsPage() {
                       value={settings.maxVersions}
                       onValueChange={(v) => updateDirtySettings(s => ({ ...s, maxVersions: v }))}
                       className="w-24"
-                      classNames={{ 
-                        inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
-                      }}
+                        classNames={{
+                          inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
+                        }}
                     />
                   </SettingRow>
                   <Divider className="bg-divider" />
@@ -6102,13 +6354,14 @@ export function SettingsPage() {
                     description="历史版本的最长保留期限"
                   >
                     <Input
+                      aria-label="最大保留时间"
                       value={settings.maxAge}
                       onValueChange={(v) => updateDirtySettings(s => ({ ...s, maxAge: v }))}
                       placeholder="2160h"
                       className="w-24"
-                      classNames={{ 
-                        inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
-                      }}
+                        classNames={{
+                          inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
+                        }}
                     />
                   </SettingRow>
                   <Divider className="bg-divider" />
@@ -6121,9 +6374,9 @@ export function SettingsPage() {
                       value={settings.minFreeSpace}
                       onValueChange={(v) => updateDirtySettings(s => ({ ...s, minFreeSpace: v }))}
                       className="w-24"
-                      classNames={{ 
-                        inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
-                      }}
+                        classNames={{
+                          inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
+                        }}
                     />
                   </SettingRow>
                   <Divider className="bg-divider" />
@@ -6132,13 +6385,14 @@ export function SettingsPage() {
                     description="后台历史版本清理任务的执行周期；设为 0 表示禁用周期清理"
                   >
                     <Input
+                      aria-label="GC 运行间隔"
                       value={settings.gcInterval}
                       onValueChange={(v) => updateDirtySettings(s => ({ ...s, gcInterval: v }))}
                       placeholder="24h"
                       className="w-24"
-                      classNames={{ 
-                        inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
-                      }}
+                        classNames={{
+                          inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
+                        }}
                     />
                   </SettingRow>
                 </div>
@@ -6155,7 +6409,7 @@ export function SettingsPage() {
                     value={settings.directoryQuotas}
                     onChange={(event) => updateDirtySettings(s => ({ ...s, directoryQuotas: event.target.value }))}
                     rows={4}
-                    placeholder="/team 1 TB"
+                    placeholder={'/team 1 TB\n"/Family Photos" 500 GB'}
                     className="input-shell w-full rounded-medium border border-transparent bg-transparent px-3 py-2 font-mono text-sm outline-none focus:border-accent-primary"
                   />
                   <DirectoryQuotaChangeReview
@@ -6164,7 +6418,7 @@ export function SettingsPage() {
                   />
                   <div className="grid gap-2 text-xs text-default-500 sm:grid-cols-2">
                     <div className="rounded-lg border border-divider bg-content2/40 px-3 py-2">
-                      每行一个目录，例如 <span className="font-mono text-foreground">/team 1 TB</span>
+                      每行一个目录，例如 <span className="font-mono text-foreground">/team 1 TB</span>；路径含空格或双引号时使用双引号，路径内双引号写作 \"
                     </div>
                     <div className="rounded-lg border border-divider bg-content2/40 px-3 py-2">
                       命中上传、复制、移动、回收站恢复、版本恢复和 WebDAV 写入
@@ -6190,10 +6444,10 @@ export function SettingsPage() {
                   <DirectoryAccessCoverageSummary draftValue={settings.directoryAccessRules} />
                   <div className="grid gap-2 text-xs text-default-500 sm:grid-cols-2">
                     <div className="rounded-lg border border-divider bg-content2/40 px-3 py-2">
-                      可用字段：<span className="font-mono text-foreground">read_users</span>、<span className="font-mono text-foreground">write_users</span>、<span className="font-mono text-foreground">read_groups</span>、<span className="font-mono text-foreground">write_groups</span>
+                      路径直接填写 MnemoNAS 逻辑路径；包含空格或双引号时不需要额外加引号
                     </div>
                     <div className="rounded-lg border border-divider bg-content2/40 px-3 py-2">
-                      角色字段：<span className="font-mono text-foreground">read_roles</span>、<span className="font-mono text-foreground">write_roles</span>；多个值用英文逗号分隔
+                      读/写用户、用户组和角色支持多个值，使用英文逗号分隔
                     </div>
                   </div>
                   <div className="rounded-lg border border-divider bg-content1/60 p-3">
@@ -6317,7 +6571,7 @@ export function SettingsPage() {
                     size="sm"
                     variant="bordered"
                     className="rounded-lg"
-				    onPress={handleRefreshWebDAVCredentials}
+                    onPress={handleRefreshWebDAVCredentials}
                     isLoading={isRefetchingWebDAVCredentials}
                   >
                     重新加载凭据
@@ -6354,9 +6608,9 @@ export function SettingsPage() {
                             isIconOnly
                             size="sm"
                             variant="flat"
+                            aria-label="复制 WebDAV 地址"
                             onPress={() => handleCopy('url', webdavUrl)}
                           >
-                            <span className="sr-only">复制 WebDAV 地址</span>
                             {copiedField === 'url' ? (
                               <CheckCircle2 size={16} className="text-success" />
                             ) : (
@@ -6403,9 +6657,9 @@ export function SettingsPage() {
                               isIconOnly
                               size="sm"
                               variant="flat"
+                              aria-label="复制 WebDAV 地址"
                               onPress={() => handleCopy('url', webdavUrl)}
                             >
-                              <span className="sr-only">复制 WebDAV 地址</span>
                               {copiedField === 'url' ? (
                                 <CheckCircle2 size={16} className="text-success" />
                               ) : (
@@ -6414,7 +6668,7 @@ export function SettingsPage() {
                             </Button>
                           </div>
                         </div>
-                        
+
                         {/* Username */}
                         <div className="space-y-1.5">
                           <label className="text-xs text-default-500">用户名</label>
@@ -6436,9 +6690,9 @@ export function SettingsPage() {
                               isIconOnly
                               size="sm"
                               variant="flat"
+                              aria-label="复制 WebDAV 用户名"
                               onPress={() => handleCopy('username', webdavCredentials.username || 'admin')}
                             >
-                              <span className="sr-only">复制 WebDAV 用户名</span>
                               {copiedField === 'username' ? (
                                 <CheckCircle2 size={16} className="text-success" />
                               ) : (
@@ -6471,19 +6725,19 @@ export function SettingsPage() {
                               isIconOnly
                               size="sm"
                               variant="flat"
+                              aria-label={showWebDAVPassword ? '隐藏 WebDAV 密码' : '显示 WebDAV 密码'}
                               onPress={() => setShowWebDAVPassword(!showWebDAVPassword)}
                             >
-                              <span className="sr-only">{showWebDAVPassword ? '隐藏 WebDAV 密码' : '显示 WebDAV 密码'}</span>
                               {showWebDAVPassword ? <EyeOff size={16} /> : <Eye size={16} />}
                             </Button>
                             <Button
                               isIconOnly
                               size="sm"
                               variant="flat"
+                              aria-label="复制 WebDAV 密码"
                               onPress={() => handleCopy('password', webdavCredentials.password || '')}
                               isDisabled={!webdavCredentials.password}
                             >
-                              <span className="sr-only">复制 WebDAV 密码</span>
                               {copiedField === 'password' ? (
                                 <CheckCircle2 size={16} className="text-success" />
                               ) : (
@@ -6494,7 +6748,7 @@ export function SettingsPage() {
                         </div>
                       </div>
                     </div>
-                    
+
                     <div className="text-xs text-default-400">
                       使用以上凭据在文件管理器中挂载 WebDAV 网络驱动器。
                       Windows: 映射网络驱动器 | macOS: 前往 → 连接服务器
@@ -6545,13 +6799,14 @@ export function SettingsPage() {
                     description="WebDAV 挂载点路径"
                   >
                     <Input
+                      aria-label="WebDAV URL 前缀"
                       value={settings.webdavPrefix}
                       onValueChange={(v) => updateDirtySettings(s => ({ ...s, webdavPrefix: v }))}
                       className="w-32"
                       isInvalid={settings.webdavEnabled && Boolean(webDAVPrefixErrorMessage)}
                       errorMessage={settings.webdavEnabled ? webDAVPrefixErrorMessage : undefined}
                       isDisabled={!settings.webdavEnabled}
-                      classNames={{ 
+                      classNames={{
                         inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
                       }}
                     />
@@ -6641,12 +6896,13 @@ export function SettingsPage() {
                     <div>
                       <label className="text-sm font-medium text-default-600 mb-1.5 block">用户名</label>
                       <Input
+                        aria-label="WebDAV 用户名"
                         placeholder="admin"
                         value={settings.webdavUsername}
                         onValueChange={(v) => updateDirtySettings(s => ({ ...s, webdavUsername: v }))}
                         isDisabled={!settings.webdavEnabled || settings.webdavAuthType !== 'basic'}
                         startContent={<User size={16} className="text-default-500" />}
-                        classNames={{ 
+                        classNames={{
                           inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary",
                         }}
                       />
@@ -6655,13 +6911,14 @@ export function SettingsPage() {
                       <label className="text-sm font-medium text-default-600 mb-1.5 block">密码</label>
                       <Input
                         type="password"
+                        aria-label="WebDAV 密码"
                         placeholder="••••••••"
                         value={settings.webdavPassword}
                         onValueChange={(v) => updateDirtySettings(s => ({ ...s, webdavPassword: v, webdavUseGeneratedPassword: false }))}
                         isDisabled={!settings.webdavEnabled || settings.webdavAuthType !== 'basic' || settings.webdavUseGeneratedPassword}
                         startContent={<Lock size={16} className="text-default-500" />}
                         description={settings.webdavUseGeneratedPassword ? '保存后使用 secrets.json 中的自动生成密码' : '留空保留当前密码；勾选下方选项可切回自动生成密码'}
-                        classNames={{ 
+                        classNames={{
                           inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary",
                         }}
                       />
@@ -6705,16 +6962,17 @@ export function SettingsPage() {
                       </div>
                     </div>
                   </div>
-                  
+
                   <SettingRow
                     label="最小块大小"
                     description="分块的最小尺寸"
                   >
                     <Input
+                      aria-label="最小块大小"
                       value={settings.minChunkSize}
                       onValueChange={(v) => updateDirtySettings(s => ({ ...s, minChunkSize: v }))}
                       className="w-24"
-                      classNames={{ 
+                      classNames={{
                         inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
                       }}
                     />
@@ -6725,10 +6983,11 @@ export function SettingsPage() {
                     description="分块的目标平均尺寸"
                   >
                     <Input
+                      aria-label="平均块大小"
                       value={settings.avgChunkSize}
                       onValueChange={(v) => updateDirtySettings(s => ({ ...s, avgChunkSize: v }))}
                       className="w-24"
-                      classNames={{ 
+                      classNames={{
                         inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
                       }}
                     />
@@ -6739,10 +6998,11 @@ export function SettingsPage() {
                     description="分块的最大尺寸"
                   >
                     <Input
+                      aria-label="最大块大小"
                       value={settings.maxChunkSize}
                       onValueChange={(v) => updateDirtySettings(s => ({ ...s, maxChunkSize: v }))}
                       className="w-24"
-                      classNames={{ 
+                      classNames={{
                         inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
                       }}
                     />
@@ -6761,6 +7021,7 @@ export function SettingsPage() {
                     description="Rust 数据面服务地址"
                   >
                     <Input
+                      aria-label="数据面 gRPC 地址"
                       value={settings.dataplaneGrpcAddress}
                       onValueChange={(v) => updateDirtySettings(s => ({ ...s, dataplaneGrpcAddress: v }))}
                       className="w-56"
@@ -6775,6 +7036,7 @@ export function SettingsPage() {
                     description="gRPC 调用超时时间"
                   >
                     <Input
+                      aria-label="数据面连接超时"
                       value={settings.dataplaneTimeout}
                       onValueChange={(v) => updateDirtySettings(s => ({ ...s, dataplaneTimeout: v }))}
                       placeholder="30s"
@@ -7102,6 +7364,7 @@ export function SettingsPage() {
                     <div>
                       <label className="text-sm font-medium text-default-600 mb-1.5 block">提醒阈值 (%)</label>
                       <Input
+                        aria-label="提醒阈值"
                         type="number"
                         min={0}
                         max={100}
@@ -7116,6 +7379,7 @@ export function SettingsPage() {
                     <div>
                       <label className="text-sm font-medium text-default-600 mb-1.5 block">严重提醒阈值 (%)</label>
                       <Input
+                        aria-label="严重提醒阈值"
                         type="number"
                         min={0}
                         max={100}
@@ -7168,6 +7432,7 @@ export function SettingsPage() {
                   >
                     <Input
                       type="url"
+                      aria-label="Webhook URL"
                       value={settings.alertsWebhookURL}
                       onValueChange={(v) => updateDirtySettings(s => ({ ...s, alertsWebhookURL: v }))}
                       placeholder="https://hooks.example.com/alert"
@@ -7235,7 +7500,7 @@ export function SettingsPage() {
                   <Divider className="bg-divider" />
                   <SettingRow
                     label="企业微信 Webhook URL"
-                    description="企业微信群机器人 Webhook 地址；保存后仅显示已配置占位"
+                    description="企业微信群机器人 Webhook 地址；保存后不会回显完整地址"
                   >
                     <Input
                       type="url"
@@ -7273,7 +7538,7 @@ export function SettingsPage() {
                   <Divider className="bg-divider" />
                   <SettingRow
                     label="钉钉 Webhook URL"
-                    description="钉钉群机器人 Webhook 地址；保存后仅显示已配置占位"
+                    description="钉钉群机器人 Webhook 地址；保存后不会回显完整地址"
                   >
                     <Input
                       type="url"
@@ -7562,9 +7827,12 @@ export function SettingsPage() {
                       value={settings.shareBaseURL}
                       onValueChange={(v) => updateDirtySettings(s => ({ ...s, shareBaseURL: v }))}
                       placeholder="https://nas.example.com"
+                      description={shareBaseURLReviewMessage}
+                      color={shareBaseURLReviewMessage ? 'warning' : 'default'}
                       isDisabled={!settings.shareEnabled}
                       classNames={{
                         inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
+                        description: "text-warning",
                       }}
                     />
                   </SettingRow>
@@ -7636,23 +7904,28 @@ export function SettingsPage() {
                     />
                   </SettingRow>
                   <Divider className="bg-divider" />
-	                  <SettingRow
-	                    label="路径分享策略"
-	                    description="为指定目录设置更严格的分享约束；更深的路径优先生效"
-	                  >
-	                    <SharePolicyRuleEditor
-	                      rules={settings.sharePolicyRules}
-	                      isDisabled={!settings.shareEnabled}
-	                      onChange={(nextRules) => updateDirtySettings(s => ({ ...s, sharePolicyRules: nextRules }))}
-	                    />
-	                  </SettingRow>
-	                  <SharePolicyChangeReview
-	                    saved={savedSharePolicyReviewInput}
-	                    draft={draftSharePolicyReviewInput}
-	                  />
-                    <SharePolicyCoverageSummary draft={draftSharePolicyReviewInput} />
-	                </div>
-	              </SettingsSection>
+                  <SettingRow
+                    label="路径分享策略"
+                    description="为指定目录设置更严格的分享约束；更深的路径优先生效"
+                  >
+                    <div>
+                      <SharePolicyRuleEditor
+                        rules={settings.sharePolicyRules}
+                        isDisabled={!settings.shareEnabled}
+                        onChange={(nextRules) => updateDirtySettings(s => ({ ...s, sharePolicyRules: nextRules }))}
+                      />
+                      <div className="mt-2 text-xs text-default-500">
+                        分享策略路径填写 MnemoNAS 逻辑路径；包含空格或双引号时不需要额外加引号
+                      </div>
+                    </div>
+                  </SettingRow>
+                  <SharePolicyChangeReview
+                    saved={savedSharePolicyReviewInput}
+                    draft={draftSharePolicyReviewInput}
+                  />
+                  <SharePolicyCoverageSummary draft={draftSharePolicyReviewInput} />
+                </div>
+              </SettingsSection>
 
               <SettingsSection
                 title="分享链接"

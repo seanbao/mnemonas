@@ -5,6 +5,7 @@ import {
   getDiskHealthReportDisplayMessage,
   getDiskHealthStatusLabel,
 } from '@/lib/diskHealthMessages'
+import { redactDiagnosticSecretFragments } from '@/lib/diagnosticMessages'
 
 const ACTIVITY_DETAIL_LABELS: Record<string, string> = {
   type: '类型',
@@ -187,7 +188,7 @@ function getScrubActivityStatusLabel(status: string): string {
     running: '运行中',
     cancelled: '已取消',
   }
-  return labels[status.trim().toLowerCase()] ?? status
+  return labels[status.trim().toLowerCase()] ?? '未知状态'
 }
 
 function getScrubActivityTriggerLabel(trigger: string): string {
@@ -197,7 +198,7 @@ function getScrubActivityTriggerLabel(trigger: string): string {
     retry: '自动重试',
     scheduled_retry: '自动重试',
   }
-  return labels[trigger.trim().toLowerCase()] ?? trigger
+  return labels[trigger.trim().toLowerCase()] ?? '未知触发方式'
 }
 
 function getScrubActivityDiagnosticMessage(message: string): string {
@@ -300,6 +301,7 @@ function formatTrashActivityDetailValue(key: string, value: string): string {
     if (value === 'ok' || value === 'succeeded') {
       return '正常'
     }
+    return '状态未知'
   }
 
   return value
@@ -324,7 +326,7 @@ function formatActivityDetailValue(action: ActionType, key: string, value: strin
       folder: '文件夹',
       directory: '文件夹',
     }
-    return labels[value] ?? value
+    return labels[value] ?? '未知类型'
   }
 
   if (key === 'hash') {
@@ -337,18 +339,22 @@ function formatActivityDetailValue(action: ActionType, key: string, value: strin
       trash: '回收站',
       backup: '备份',
     }
-    return labels[value.trim().toLowerCase()] ?? value
+    return labels[value.trim().toLowerCase()] ?? '未知来源'
   }
 
   if (key === 'archive') {
     const labels: Record<string, string> = {
       zip: 'ZIP',
     }
-    return labels[value.trim().toLowerCase()] ?? value
+    return labels[value.trim().toLowerCase()] ?? '未知归档格式'
   }
 
   if (key === 'entries') {
     return formatPositiveIntegerDetail(value, '项')
+  }
+
+  if (key === 'message' || key === 'error_message') {
+    return redactDiagnosticSecretFragments(value)
   }
 
   if (key === 'persistence_warning') {
@@ -383,7 +389,7 @@ function formatActivityDetailValue(action: ActionType, key: string, value: strin
       read: '只读',
       read_write: '读写',
     }
-    return labels[value] ?? value
+    return labels[value] ?? '未知权限'
   }
 
   if (key === 'has_password') {

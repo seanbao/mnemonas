@@ -10,6 +10,7 @@ const E2E_ROOT = process.env.MNEMONAS_E2E_ROOT || '/tmp/mnemonas-playwright'
 const BACKEND_URL = process.env.MNEMONAS_E2E_BACKEND_URL || 'http://127.0.0.1:18180'
 const FRONTEND_URL = process.env.MNEMONAS_E2E_FRONTEND_URL || 'http://127.0.0.1:14173'
 const REUSE_EXISTING_SERVER = process.env.MNEMONAS_E2E_REUSE_EXISTING === '1'
+const ALLOW_AUTH_SKIP = process.env.MNEMONAS_E2E_ALLOW_AUTH_SKIP ?? (REUSE_EXISTING_SERVER ? '1' : '0')
 const BACKEND_PARSED_URL = new URL(BACKEND_URL)
 const BACKEND_PORT = BACKEND_PARSED_URL.port || (BACKEND_PARSED_URL.protocol === 'https:' ? '443' : '80')
 const FRONTEND_PARSED_URL = new URL(FRONTEND_URL)
@@ -23,7 +24,11 @@ const LOCAL_WORKERS = parseOptionalPositiveInteger('MNEMONAS_E2E_WORKERS', proce
 delete WEB_SERVER_ENV.NO_COLOR
 
 process.env.E2E_USERNAME ||= 'admin'
-process.env.E2E_PASSWORD_FILE ||= path.join(E2E_ROOT, 'backend', 'e2e-password.txt')
+if (!REUSE_EXISTING_SERVER) {
+  // The isolated backend writes this file; reused environments should keep caller credentials authoritative.
+  process.env.E2E_PASSWORD_FILE ||= path.join(E2E_ROOT, 'backend', 'e2e-password.txt')
+}
+process.env.MNEMONAS_E2E_ALLOW_AUTH_SKIP = ALLOW_AUTH_SKIP
 
 assertSafeTcpPort('MNEMONAS_E2E_BACKEND_URL port', BACKEND_PORT)
 assertSafeTcpPort('MNEMONAS_E2E_FRONTEND_URL port', FRONTEND_PORT)
@@ -89,19 +94,21 @@ function parseOptionalPositiveInteger(label: string, value: string | undefined):
 }
 
 /**
- * Playwright E2E 测试配置
+ * Playwright E2E test configuration.
  * @see https://playwright.dev/docs/test-configuration
- * 
- * 认证说明：
- * - setup project 会先执行登录并保存状态到 .auth/user.json
- * - chromium 和 mobile projects 依赖 setup，会复用登录状态
- * - 默认启动隔离的后端/前端测试环境，不依赖用户本地 8080/5173 实例
- * - 测试账号优先读 E2E_USERNAME / E2E_PASSWORD，其次回退到 E2E_PASSWORD_FILE
+ *
+ * Authentication notes:
+ * - The setup project logs in first and stores state in .auth/user.json.
+ * - Chromium and mobile projects depend on setup and reuse that login state.
+ * - The default run starts isolated backend/frontend test servers instead of
+ *   relying on local user instances on 8080/5173.
+ * - Test credentials prefer E2E_USERNAME / E2E_PASSWORD, then E2E_PASSWORD_FILE.
+ * - Reused environments leave E2E_PASSWORD_FILE unset unless provided by the caller.
  */
 export default defineConfig({
   testDir: './e2e',
   fullyParallel: true,
-  forbidOnly: !!process.env.CI,
+  forbidOnly: true,
   retries: process.env.CI ? 2 : 0,
   workers: process.env.CI ? 1 : LOCAL_WORKERS,
   reporter: [

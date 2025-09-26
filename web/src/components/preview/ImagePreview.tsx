@@ -5,7 +5,7 @@ import { buildPreviewUrl } from '@/lib/preview-utils'
 import { cn } from '@/lib/utils'
 import { authFetch } from '@/api/auth'
 import { readDownloadJsonErrorDetails } from '@/lib/downloadResponse'
-import { getUserFacingErrorDescription } from '@/lib/apiMessages'
+import { getFileLoadErrorDescription } from '@/lib/fileActionErrors'
 
 const imagePreviewLoadErrorMessage = '无法加载图片'
 
@@ -48,7 +48,7 @@ export function ImagePreview({ path, filename, className }: ImagePreviewProps) {
           const jsonError = await readDownloadJsonErrorDetails(response, '无法加载图片')
           if (jsonError) {
             if (!cancelled) {
-              setError(getUserFacingErrorDescription(new Error(jsonError.message), imagePreviewLoadErrorMessage))
+              setError(getFileLoadErrorDescription(jsonError, imagePreviewLoadErrorMessage))
               setIsLoading(false)
             }
             return
@@ -157,17 +157,12 @@ export function ImagePreview({ path, filename, className }: ImagePreviewProps) {
     }
   }, [path])
 
-  // Cleanup blob URL on unmount
-  useEffect(() => {
-    return () => {
-      if (blobUrl) {
-        URL.revokeObjectURL(blobUrl)
-      }
-    }
-  }, [blobUrl])
-
   return (
-    <div className={cn("h-full flex flex-col bg-content1 rounded-lg overflow-hidden", className)}>
+    <div
+      role="region"
+      aria-label={`${filename} 图片预览`}
+      className={cn("h-full flex flex-col bg-content1 rounded-lg overflow-hidden", className)}
+    >
       {/* Toolbar */}
       <div className="flex items-center justify-between gap-3 border-b border-divider bg-content2 px-3 py-2 sm:px-4">
         <span className="min-w-0 truncate text-sm font-medium">{filename}</span>
@@ -178,6 +173,7 @@ export function ImagePreview({ path, filename, className }: ImagePreviewProps) {
             variant="light"
             onPress={handleZoomOut}
             title="缩小"
+            aria-label="缩小"
             className="rounded-lg"
           >
             <ZoomOut size={16} />
@@ -191,6 +187,7 @@ export function ImagePreview({ path, filename, className }: ImagePreviewProps) {
             variant="light"
             onPress={handleZoomIn}
             title="放大"
+            aria-label="放大"
             className="rounded-lg"
           >
             <ZoomIn size={16} />
@@ -202,6 +199,7 @@ export function ImagePreview({ path, filename, className }: ImagePreviewProps) {
             variant="light"
             onPress={handleRotate}
             title="旋转"
+            aria-label="旋转"
             className="rounded-lg"
           >
             <RotateCw size={16} />
@@ -212,6 +210,7 @@ export function ImagePreview({ path, filename, className }: ImagePreviewProps) {
             variant="light"
             onPress={handleReset}
             title="重置"
+            aria-label="重置"
             className="rounded-lg"
           >
             <Maximize2 size={16} />
@@ -222,6 +221,8 @@ export function ImagePreview({ path, filename, className }: ImagePreviewProps) {
       {/* Image container */}
       <div 
         ref={containerRef}
+        role="region"
+        aria-label={`${filename} 图片预览画布`}
         className={cn(
           "flex-1 flex items-center justify-center overflow-hidden bg-default-100",
           scale > 1 && "cursor-grab",
@@ -234,7 +235,12 @@ export function ImagePreview({ path, filename, className }: ImagePreviewProps) {
         onWheel={handleWheel}
       >
         {isLoading && (
-          <div className="absolute inset-0 flex items-center justify-center">
+          <div
+            role="status"
+            aria-label="加载图片预览"
+            aria-busy="true"
+            className="absolute inset-0 flex items-center justify-center"
+          >
             <Spinner size="lg" />
           </div>
         )}

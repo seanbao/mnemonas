@@ -213,6 +213,8 @@ describe('FilesPage upload queue', () => {
     return { promise, resolve, reject }
   }
 
+  const getUploadFileInput = () => screen.getByLabelText('选择上传文件') as HTMLInputElement
+
   it('clears successful uploads after timeout', async () => {
     render(<FilesPage />)
 
@@ -220,11 +222,10 @@ describe('FilesPage upload queue', () => {
       await vi.runOnlyPendingTimersAsync()
     })
 
-    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement | null
-    expect(fileInput).toBeTruthy()
+    const fileInput = getUploadFileInput()
     const file = new File(['data'], 'test.txt', { type: 'text/plain' })
 
-    fireEvent.change(fileInput as HTMLInputElement, { target: { files: [file] } })
+    fireEvent.change(fileInput, { target: { files: [file] } })
 
     await flushUi()
 
@@ -250,21 +251,20 @@ describe('FilesPage upload queue', () => {
       await vi.runOnlyPendingTimersAsync()
     })
 
-    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement | null
-    expect(fileInput).toBeTruthy()
+    const fileInput = getUploadFileInput()
 
     const file = new File(['data'], 'test.txt', { type: 'text/plain' })
-    Object.defineProperty(fileInput as HTMLInputElement, 'value', {
+    Object.defineProperty(fileInput, 'value', {
       configurable: true,
       writable: true,
       value: 'C:\\fakepath\\test.txt',
     })
 
-    fireEvent.change(fileInput as HTMLInputElement, { target: { files: [file] } })
+    fireEvent.change(fileInput, { target: { files: [file] } })
 
     await flushUi()
 
-    expect((fileInput as HTMLInputElement).value).toBe('')
+    expect((fileInput).value).toBe('')
     expectUploadFileCalledWithSignal('/', file)
   })
 
@@ -274,14 +274,13 @@ describe('FilesPage upload queue', () => {
       return successActionResult
     })
 
-    const { container } = render(<FilesPage />)
+    render(<FilesPage />)
 
     await act(async () => {
       await vi.runOnlyPendingTimersAsync()
     })
 
-    const dropZone = container.querySelector('.relative.flex.h-full.min-h-0.overflow-hidden') as HTMLElement | null
-    expect(dropZone).toBeTruthy()
+    const dropZone = screen.getByRole('region', { name: '文件上传区域' })
 
     const file = new File(['dropped'], 'dropped.txt', { type: 'text/plain' })
     const dataTransfer = {
@@ -289,15 +288,15 @@ describe('FilesPage upload queue', () => {
       files: [file],
     }
 
-    fireEvent.dragEnter(dropZone as HTMLElement, { dataTransfer })
+    fireEvent.dragEnter(dropZone, { dataTransfer })
     expect(screen.getByText('释放以上传')).toBeTruthy()
 
-    fireEvent.dragLeave(dropZone as HTMLElement, { dataTransfer })
+    fireEvent.dragLeave(dropZone, { dataTransfer })
     expect(screen.queryByText('释放以上传')).toBeNull()
 
-    fireEvent.dragEnter(dropZone as HTMLElement, { dataTransfer })
-    fireEvent.dragOver(dropZone as HTMLElement, { dataTransfer })
-    fireEvent.drop(dropZone as HTMLElement, { dataTransfer })
+    fireEvent.dragEnter(dropZone, { dataTransfer })
+    fireEvent.dragOver(dropZone, { dataTransfer })
+    fireEvent.drop(dropZone, { dataTransfer })
 
     await flushUi()
 
@@ -309,14 +308,13 @@ describe('FilesPage upload queue', () => {
   it('ignores drag and drop upload attempts for read-only users', async () => {
     useCanWriteMock.mockReturnValue(false)
 
-    const { container } = render(<FilesPage />)
+    render(<FilesPage />)
 
     await act(async () => {
       await vi.runOnlyPendingTimersAsync()
     })
 
-    const dropZone = container.querySelector('.relative.flex.h-full.min-h-0.overflow-hidden') as HTMLElement | null
-    expect(dropZone).toBeTruthy()
+    const dropZone = screen.getByRole('region', { name: '文件上传区域' })
 
     const file = new File(['readonly'], 'readonly.txt', { type: 'text/plain' })
     const dataTransfer = {
@@ -324,9 +322,9 @@ describe('FilesPage upload queue', () => {
       files: [file],
     }
 
-    fireEvent.dragEnter(dropZone as HTMLElement, { dataTransfer })
-    fireEvent.dragOver(dropZone as HTMLElement, { dataTransfer })
-    fireEvent.drop(dropZone as HTMLElement, { dataTransfer })
+    fireEvent.dragEnter(dropZone, { dataTransfer })
+    fireEvent.dragOver(dropZone, { dataTransfer })
+    fireEvent.drop(dropZone, { dataTransfer })
 
     await flushUi()
 
@@ -341,11 +339,10 @@ describe('FilesPage upload queue', () => {
       await vi.runOnlyPendingTimersAsync()
     })
 
-    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement | null
-    expect(fileInput).toBeTruthy()
+    const fileInput = getUploadFileInput()
     const file = new File(['data'], 'history.txt', { type: 'text/plain' })
 
-    fireEvent.change(fileInput as HTMLInputElement, { target: { files: [file] } })
+    fireEvent.change(fileInput, { target: { files: [file] } })
     await flushUi()
 
     expect(screen.getByText('上传完成')).toBeTruthy()
@@ -368,13 +365,12 @@ describe('FilesPage upload queue', () => {
       await vi.runOnlyPendingTimersAsync()
     })
 
-    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement | null
-    expect(fileInput).toBeTruthy()
+    const fileInput = getUploadFileInput()
 
     const firstFile = new File(['data1'], 'first.txt', { type: 'text/plain' })
     const secondFile = new File(['data2'], 'second.txt', { type: 'text/plain' })
 
-    fireEvent.change(fileInput as HTMLInputElement, { target: { files: [firstFile] } })
+    fireEvent.change(fileInput, { target: { files: [firstFile] } })
     await flushUi()
 
     expect(screen.getByText('上传完成')).toBeTruthy()
@@ -383,7 +379,7 @@ describe('FilesPage upload queue', () => {
       vi.advanceTimersByTime(1000)
     })
 
-    fireEvent.change(fileInput as HTMLInputElement, { target: { files: [secondFile] } })
+    fireEvent.change(fileInput, { target: { files: [secondFile] } })
     await flushUi()
 
     expect(screen.getByText('上传完成')).toBeTruthy()
@@ -414,19 +410,18 @@ describe('FilesPage upload queue', () => {
       .mockImplementationOnce(() => firstUpload.promise)
       .mockImplementationOnce(() => secondUpload.promise)
 
-    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement | null
-    expect(fileInput).toBeTruthy()
+    const fileInput = getUploadFileInput()
 
     const firstFile = new File(['data1'], 'first.txt', { type: 'text/plain' })
     const secondFile = new File(['data2'], 'second.txt', { type: 'text/plain' })
 
-    fireEvent.change(fileInput as HTMLInputElement, { target: { files: [firstFile] } })
+    fireEvent.change(fileInput, { target: { files: [firstFile] } })
     await flushUi()
 
     expect(screen.getByText('上传中 (0/1)')).toBeTruthy()
     expect(screen.getByText('first.txt')).toBeTruthy()
 
-    fireEvent.change(fileInput as HTMLInputElement, { target: { files: [secondFile] } })
+    fireEvent.change(fileInput, { target: { files: [secondFile] } })
     await flushUi()
 
     expect(screen.getByText('上传中 (0/1)')).toBeTruthy()
@@ -491,19 +486,18 @@ describe('FilesPage upload queue', () => {
       })
       .mockResolvedValueOnce(successActionResult)
 
-    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement | null
-    expect(fileInput).toBeTruthy()
+    const fileInput = getUploadFileInput()
 
     const firstFile = new File(['data1'], 'first.txt', { type: 'text/plain' })
     const secondFile = new File(['data2'], 'second.txt', { type: 'text/plain' })
 
-    fireEvent.change(fileInput as HTMLInputElement, { target: { files: [firstFile] } })
+    fireEvent.change(fileInput, { target: { files: [firstFile] } })
     await flushUi()
 
     expect(firstSignal).toBeInstanceOf(AbortSignal)
     expect(firstSignal?.aborted).toBe(false)
 
-    fireEvent.change(fileInput as HTMLInputElement, { target: { files: [secondFile] } })
+    fireEvent.change(fileInput, { target: { files: [secondFile] } })
     await flushUi()
 
     expect(firstSignal?.aborted).toBe(true)
@@ -539,21 +533,20 @@ describe('FilesPage upload queue', () => {
       })
       .mockResolvedValueOnce(successActionResult)
 
-    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement | null
-    expect(fileInput).toBeTruthy()
+    const fileInput = getUploadFileInput()
 
     const firstFile = new File(['data1'], 'first.txt', { type: 'text/plain' })
     Object.defineProperty(firstFile, 'webkitRelativePath', { configurable: true, value: 'folder/first.txt' })
     const secondFile = new File(['data2'], 'second.txt', { type: 'text/plain' })
     Object.defineProperty(secondFile, 'webkitRelativePath', { configurable: true, value: 'folder/second.txt' })
 
-    fireEvent.change(fileInput as HTMLInputElement, { target: { files: [firstFile] } })
+    fireEvent.change(fileInput, { target: { files: [firstFile] } })
     await flushUi()
 
     expect(directorySignal).toBeInstanceOf(AbortSignal)
     expect(directorySignal?.aborted).toBe(false)
 
-    fireEvent.change(fileInput as HTMLInputElement, { target: { files: [secondFile] } })
+    fireEvent.change(fileInput, { target: { files: [secondFile] } })
     await flushUi()
 
     expect(directorySignal?.aborted).toBe(true)
@@ -571,12 +564,11 @@ describe('FilesPage upload queue', () => {
 
     mockCreateDirectory.mockRejectedValueOnce(new Error('权限不足'))
 
-    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement | null
-    expect(fileInput).toBeTruthy()
+    const fileInput = getUploadFileInput()
     const file = new File(['data'], 'test.txt', { type: 'text/plain' })
     Object.defineProperty(file, 'webkitRelativePath', { configurable: true, value: 'folder/test.txt' })
 
-    fireEvent.change(fileInput as HTMLInputElement, { target: { files: [file] } })
+    fireEvent.change(fileInput, { target: { files: [file] } })
 
     await flushUi()
 
@@ -592,13 +584,12 @@ describe('FilesPage upload queue', () => {
       await vi.runOnlyPendingTimersAsync()
     })
 
-    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement | null
-    expect(fileInput).toBeTruthy()
+    const fileInput = getUploadFileInput()
 
     const file = new File(['ok'], 'only.txt', { type: 'text/plain' })
     Object.defineProperty(file, 'webkitRelativePath', { configurable: true, value: 'folder/only.txt' })
 
-    fireEvent.change(fileInput as HTMLInputElement, { target: { files: [file] } })
+    fireEvent.change(fileInput, { target: { files: [file] } })
 
     await flushUi()
 
@@ -618,15 +609,14 @@ describe('FilesPage upload queue', () => {
 
     mockCreateDirectory.mockRejectedValueOnce(new ApiError('already exists', 409, 'Conflict'))
 
-    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement | null
-    expect(fileInput).toBeTruthy()
+    const fileInput = getUploadFileInput()
 
     const firstFile = new File(['one'], 'one.txt', { type: 'text/plain' })
     const secondFile = new File(['two'], 'two.txt', { type: 'text/plain' })
     Object.defineProperty(firstFile, 'webkitRelativePath', { configurable: true, value: 'folder/one.txt' })
     Object.defineProperty(secondFile, 'webkitRelativePath', { configurable: true, value: 'folder/two.txt' })
 
-    fireEvent.change(fileInput as HTMLInputElement, { target: { files: [firstFile, secondFile] } })
+    fireEvent.change(fileInput, { target: { files: [firstFile, secondFile] } })
 
     await flushUi()
 
@@ -644,8 +634,7 @@ describe('FilesPage upload queue', () => {
       await vi.runOnlyPendingTimersAsync()
     })
 
-    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement | null
-    expect(fileInput).toBeTruthy()
+    const fileInput = getUploadFileInput()
 
     const oversizedFile = new File(['data'], 'huge.bin', { type: 'application/octet-stream' })
     Object.defineProperty(oversizedFile, 'size', {
@@ -653,7 +642,7 @@ describe('FilesPage upload queue', () => {
       value: MAX_UPLOAD_FILE_SIZE_BYTES + 1,
     })
 
-    fireEvent.change(fileInput as HTMLInputElement, { target: { files: [oversizedFile] } })
+    fireEvent.change(fileInput, { target: { files: [oversizedFile] } })
 
     await flushUi()
 
@@ -673,8 +662,7 @@ describe('FilesPage upload queue', () => {
       await vi.runOnlyPendingTimersAsync()
     })
 
-    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement | null
-    expect(fileInput).toBeTruthy()
+    const fileInput = getUploadFileInput()
 
     const oversizedFile = new File(['data'], 'huge.bin', { type: 'application/octet-stream' })
     Object.defineProperty(oversizedFile, 'size', {
@@ -683,7 +671,7 @@ describe('FilesPage upload queue', () => {
     })
     const smallFile = new File(['ok'], 'small.txt', { type: 'text/plain' })
 
-    fireEvent.change(fileInput as HTMLInputElement, { target: { files: [oversizedFile, smallFile] } })
+    fireEvent.change(fileInput, { target: { files: [oversizedFile, smallFile] } })
 
     await flushUi()
 
@@ -708,21 +696,94 @@ describe('FilesPage upload queue', () => {
       .mockResolvedValueOnce(successActionResult)
       .mockRejectedValueOnce(new Error('网络错误'))
 
-    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement | null
-    expect(fileInput).toBeTruthy()
+    const fileInput = getUploadFileInput()
 
     const firstFile = new File(['ok'], 'first.txt', { type: 'text/plain' })
     const secondFile = new File(['bad'], 'second.txt', { type: 'text/plain' })
     Object.defineProperty(firstFile, 'webkitRelativePath', { configurable: true, value: 'folder/first.txt' })
     Object.defineProperty(secondFile, 'webkitRelativePath', { configurable: true, value: 'folder/second.txt' })
 
-    fireEvent.change(fileInput as HTMLInputElement, { target: { files: [firstFile, secondFile] } })
+    fireEvent.change(fileInput, { target: { files: [firstFile, secondFile] } })
 
     await flushUi()
 
     expect(mockAddToast).toHaveBeenCalledWith({
       title: '文件夹上传部分完成',
       description: '成功上传 1 个文件，失败 1 个',
+      color: 'warning',
+    })
+  })
+
+  it('shows quota guidance when folder uploads fully fail due to quota', async () => {
+    render(<FilesPage />)
+
+    await act(async () => {
+      await vi.runOnlyPendingTimersAsync()
+    })
+
+    mockUploadFile.mockRejectedValue(new ApiError('directory quota exceeded', 507, 'Insufficient Storage', 'QUOTA_EXCEEDED'))
+
+    const fileInput = getUploadFileInput()
+
+    const file = new File(['bad'], 'only.txt', { type: 'text/plain' })
+    Object.defineProperty(file, 'webkitRelativePath', { configurable: true, value: 'folder/only.txt' })
+
+    fireEvent.change(fileInput, { target: { files: [file] } })
+
+    await flushUi()
+
+    expect(mockAddToast).toHaveBeenCalledWith({
+      title: '容量配额不足',
+      description: '目标目录的容量配额不足，请清理空间或调整目录配额后重试。',
+      color: 'warning',
+    })
+  })
+
+  it('shows quota guidance in failed upload rows', async () => {
+    render(<FilesPage />)
+
+    await act(async () => {
+      await vi.runOnlyPendingTimersAsync()
+    })
+
+    mockUploadFile.mockRejectedValueOnce(new ApiError('user quota exceeded', 507, 'Insufficient Storage', 'QUOTA_EXCEEDED'))
+
+    const fileInput = getUploadFileInput()
+    const file = new File(['bad'], 'quota.txt', { type: 'text/plain' })
+
+    fireEvent.change(fileInput, { target: { files: [file] } })
+
+    await flushUi()
+
+    expect(screen.getByText('quota.txt')).toBeTruthy()
+    expect(screen.getByText('当前用户的容量配额不足，请清理空间或调整用户配额后重试。')).toBeTruthy()
+  })
+
+  it('shows quota guidance when folder uploads partially fail due to quota', async () => {
+    render(<FilesPage />)
+
+    await act(async () => {
+      await vi.runOnlyPendingTimersAsync()
+    })
+
+    mockUploadFile
+      .mockResolvedValueOnce(successActionResult)
+      .mockRejectedValueOnce(new ApiError('directory quota exceeded', 507, 'Insufficient Storage', 'QUOTA_EXCEEDED'))
+
+    const fileInput = getUploadFileInput()
+
+    const firstFile = new File(['ok'], 'first.txt', { type: 'text/plain' })
+    const secondFile = new File(['bad'], 'second.txt', { type: 'text/plain' })
+    Object.defineProperty(firstFile, 'webkitRelativePath', { configurable: true, value: 'folder/first.txt' })
+    Object.defineProperty(secondFile, 'webkitRelativePath', { configurable: true, value: 'folder/second.txt' })
+
+    fireEvent.change(fileInput, { target: { files: [firstFile, secondFile] } })
+
+    await flushUi()
+
+    expect(mockAddToast).toHaveBeenCalledWith({
+      title: '文件夹上传部分完成',
+      description: '成功上传 1 个文件，失败 1 个；目标目录的容量配额不足，请清理空间或调整目录配额后重试。',
       color: 'warning',
     })
   })
@@ -736,13 +797,12 @@ describe('FilesPage upload queue', () => {
 
     mockCreateDirectory.mockResolvedValueOnce(warningActionResult('directory created with persistence warning'))
 
-    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement | null
-    expect(fileInput).toBeTruthy()
+    const fileInput = getUploadFileInput()
 
     const file = new File(['ok'], 'first.txt', { type: 'text/plain' })
     Object.defineProperty(file, 'webkitRelativePath', { configurable: true, value: 'folder/first.txt' })
 
-    fireEvent.change(fileInput as HTMLInputElement, { target: { files: [file] } })
+    fireEvent.change(fileInput, { target: { files: [file] } })
 
     await flushUi()
 
@@ -762,13 +822,12 @@ describe('FilesPage upload queue', () => {
 
     mockUploadFile.mockResolvedValueOnce({ warning: true, message: undefined })
 
-    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement | null
-    expect(fileInput).toBeTruthy()
+    const fileInput = getUploadFileInput()
 
     const file = new File(['ok'], 'first.txt', { type: 'text/plain' })
     Object.defineProperty(file, 'webkitRelativePath', { configurable: true, value: 'folder/first.txt' })
 
-    fireEvent.change(fileInput as HTMLInputElement, { target: { files: [file] } })
+    fireEvent.change(fileInput, { target: { files: [file] } })
 
     await flushUi()
 
@@ -788,12 +847,11 @@ describe('FilesPage upload queue', () => {
 
     mockUploadFile.mockResolvedValueOnce(warningActionResult('file uploaded with persistence warning'))
 
-    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement | null
-    expect(fileInput).toBeTruthy()
+    const fileInput = getUploadFileInput()
 
     const file = new File(['ok'], 'warn.txt', { type: 'text/plain' })
 
-    fireEvent.change(fileInput as HTMLInputElement, { target: { files: [file] } })
+    fireEvent.change(fileInput, { target: { files: [file] } })
 
     await flushUi()
 
@@ -813,12 +871,11 @@ describe('FilesPage upload queue', () => {
 
     mockUploadFile.mockResolvedValueOnce({ warning: true, message: undefined })
 
-    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement | null
-    expect(fileInput).toBeTruthy()
+    const fileInput = getUploadFileInput()
 
     const file = new File(['ok'], 'warn.txt', { type: 'text/plain' })
 
-    fireEvent.change(fileInput as HTMLInputElement, { target: { files: [file] } })
+    fireEvent.change(fileInput, { target: { files: [file] } })
 
     await flushUi()
 
@@ -840,15 +897,14 @@ describe('FilesPage upload queue', () => {
       .mockResolvedValueOnce(warningActionResult('file uploaded with persistence warning'))
       .mockRejectedValueOnce(new Error('网络错误'))
 
-    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement | null
-    expect(fileInput).toBeTruthy()
+    const fileInput = getUploadFileInput()
 
     const firstFile = new File(['ok'], 'first.txt', { type: 'text/plain' })
     const secondFile = new File(['bad'], 'second.txt', { type: 'text/plain' })
     Object.defineProperty(firstFile, 'webkitRelativePath', { configurable: true, value: 'folder/first.txt' })
     Object.defineProperty(secondFile, 'webkitRelativePath', { configurable: true, value: 'folder/second.txt' })
 
-    fireEvent.change(fileInput as HTMLInputElement, { target: { files: [firstFile, secondFile] } })
+    fireEvent.change(fileInput, { target: { files: [firstFile, secondFile] } })
 
     await flushUi()
 
@@ -868,13 +924,12 @@ describe('FilesPage upload queue', () => {
 
     mockUploadFile.mockRejectedValue(new ApiError('filesystem not initialized', 503, 'Service Unavailable', 'SERVICE_UNAVAILABLE'))
 
-    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement | null
-    expect(fileInput).toBeTruthy()
+    const fileInput = getUploadFileInput()
 
     const file = new File(['bad'], 'only.txt', { type: 'text/plain' })
     Object.defineProperty(file, 'webkitRelativePath', { configurable: true, value: 'folder/only.txt' })
 
-    fireEvent.change(fileInput as HTMLInputElement, { target: { files: [file] } })
+    fireEvent.change(fileInput, { target: { files: [file] } })
 
     await flushUi()
 
@@ -895,12 +950,11 @@ describe('FilesPage upload queue', () => {
 
     mockUploadFile.mockRejectedValueOnce('upload stopped')
 
-    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement | null
-    expect(fileInput).toBeTruthy()
+    const fileInput = getUploadFileInput()
 
     const file = new File(['bad'], 'unknown.txt', { type: 'text/plain' })
 
-    fireEvent.change(fileInput as HTMLInputElement, { target: { files: [file] } })
+    fireEvent.change(fileInput, { target: { files: [file] } })
 
     await flushUi()
 

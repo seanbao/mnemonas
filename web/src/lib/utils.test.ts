@@ -10,6 +10,7 @@ import {
   formatUptimeSeconds,
   formatRelativeTime,
   sanitizeFilename,
+  hasControlCharacter,
   normalizePath,
   normalizeWebDAVPrefix,
   isValidWebDAVPrefix,
@@ -108,6 +109,21 @@ describe('openUrlInNewTab', () => {
 
     expect(openUrlInNewTab('javascript:alert(1)')).toBe(false)
     expect(openUrlInNewTab('file:///etc/passwd')).toBe(false)
+    expect(openSpy).not.toHaveBeenCalled()
+
+    openSpy.mockRestore()
+  })
+
+  it('allows same-origin blob URLs and refuses cross-origin or opaque blob URLs', () => {
+    const openSpy = vi.spyOn(window, 'open').mockReturnValue({ opener: window } as unknown as Window)
+    const sameOriginBlob = `blob:${window.location.origin}/preview-id`
+
+    expect(openUrlInNewTab(sameOriginBlob)).toBe(true)
+    expect(openSpy).toHaveBeenCalledWith(sameOriginBlob, '_blank', 'noopener,noreferrer')
+
+    openSpy.mockClear()
+    expect(openUrlInNewTab('blob:https://example.invalid/preview-id')).toBe(false)
+    expect(openUrlInNewTab('blob:opaque-preview-id')).toBe(false)
     expect(openSpy).not.toHaveBeenCalled()
 
     openSpy.mockRestore()
@@ -241,6 +257,12 @@ describe('formatRelativeTime', () => {
 })
 
 describe('sanitizeFilename', () => {
+  it('detects ASCII and Unicode control characters', () => {
+    expect(hasControlCharacter('report\x00.txt')).toBe(true)
+    expect(hasControlCharacter('report\u0085.txt')).toBe(true)
+    expect(hasControlCharacter('report.txt')).toBe(false)
+  })
+
   it('removes path separators', () => {
     expect(sanitizeFilename('path/to/file.txt')).toBe('path_to_file.txt')
     expect(sanitizeFilename('path\\to\\file.txt')).toBe('path_to_file.txt')
@@ -248,6 +270,16 @@ describe('sanitizeFilename', () => {
 
   it('removes parent directory references', () => {
     expect(sanitizeFilename('../../../etc/passwd')).toBe('______etc_passwd')
+  })
+
+  it('removes ASCII and Unicode control characters', () => {
+    expect(sanitizeFilename('report\x00.txt')).toBe('report.txt')
+    expect(sanitizeFilename('report\u0085.txt')).toBe('report.txt')
+  })
+
+  it('removes invisible format characters that can spoof filenames', () => {
+    expect(sanitizeFilename('photo\u202Ecod.exe')).toBe('photocod.exe')
+    expect(sanitizeFilename('report\u200Bfinal.txt')).toBe('reportfinal.txt')
   })
 
   it('throws error for empty or whitespace names', () => {
@@ -351,6 +383,10 @@ describe('normalizePath', () => {
     expect(() => normalizePath('/docs/report\0.pdf')).toThrow('非法路径')
   })
 
+  it('throws on Unicode control characters', () => {
+    expect(() => normalizePath('/docs/report\u0085.pdf')).toThrow('非法路径')
+  })
+
   it('normalizes backslashes as path separators', () => {
     expect(normalizePath('docs\\report.txt')).toBe('/docs/report.txt')
   })
@@ -372,6 +408,13 @@ describe('normalizeWebDAVPrefix', () => {
     expect(normalizeWebDAVPrefix('safe/../api')).toBe('/api')
   })
 
+  it('preserves non-edge spaces inside path segments like the server config loader', () => {
+    expect(normalizeWebDAVPrefix('/team name /dav')).toBe('/team name /dav')
+    expect(normalizeWebDAVPrefix('/team /sub ')).toBe('/team /sub')
+    expect(normalizeWebDAVPrefix('/ team/sub')).toBe('/ team/sub')
+    expect(normalizeWebDAVPrefix('/team/ spaced /file')).toBe('/team/ spaced /file')
+  })
+
   it('returns / for empty or root input', () => {
     expect(normalizeWebDAVPrefix('')).toBe('/')
     expect(normalizeWebDAVPrefix(' / ')).toBe('/')
@@ -384,6 +427,7 @@ describe('normalizeWebDAVPrefix', () => {
     expect(isValidWebDAVPrefix('/dav?files')).toBe(false)
     expect(isValidWebDAVPrefix('/dav#files')).toBe(false)
     expect(isValidWebDAVPrefix('/dav\nfiles')).toBe(false)
+    expect(isValidWebDAVPrefix('/dav\u0081files')).toBe(false)
   })
 
   it('detects prefixes that overlap reserved application routes', () => {

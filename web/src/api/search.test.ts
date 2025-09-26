@@ -158,6 +158,20 @@ describe('Search API', () => {
     }
   })
 
+  it('ignores blank legacy error messages and codes on failure', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 500,
+      statusText: 'Internal Server Error',
+      json: () => Promise.resolve({ success: false, error: { code: '   ', message: '   ' }, message: '  ', code: '   ' }),
+    })
+
+    await expect(searchFiles('report')).rejects.toMatchObject({
+      message: '搜索失败',
+      code: undefined,
+    })
+  })
+
   it('surfaces problem-json search errors', async () => {
     const body = {
       title: 'Service unavailable',

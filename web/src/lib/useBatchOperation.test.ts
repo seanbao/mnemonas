@@ -170,10 +170,10 @@ describe('useBatchOperation', () => {
     })
   })
 
-  it('uses a generic warning toast when successful operations return warnings', async () => {
+  it('uses a generic warning toast without exposing backend warning messages', async () => {
     const operation = vi.fn(async () => ({
       warning: true,
-      message: 'file restored with metadata warning',
+      message: 'token=backend-secret',
     }))
 
     const { result } = renderHook(() => useBatchOperation({
@@ -194,7 +194,42 @@ describe('useBatchOperation', () => {
       succeeded: 1,
       failed: 0,
       warningCount: 1,
-      warningMessages: ['file restored with metadata warning'],
+      warningMessages: [],
+    })
+    expect(mockAddToast).toHaveBeenCalledWith({
+      title: '1 项成功，但存在警告',
+      color: 'warning',
+    })
+  })
+
+  it('preserves warning messages only through an explicit safe mapper', async () => {
+    const operation = vi.fn(async () => ({
+      warning: true,
+      message: 'item already missing',
+    }))
+
+    const { result } = renderHook(() => useBatchOperation({
+      operation,
+      messages: {
+        success: '{count} 项成功',
+        failure: '{count} 项失败',
+        partial: '{succeeded} 项成功，{failed} 项失败',
+      },
+      getWarningMessage: (operationResult) => {
+        return operationResult.message === 'item already missing' ? '项目已不存在，已同步更新' : undefined
+      },
+    }))
+
+    let batchResult: Awaited<ReturnType<typeof result.current.execute>> | undefined
+    await act(async () => {
+      batchResult = await result.current.execute(['a'])
+    })
+
+    expect(batchResult).toMatchObject({
+      succeeded: 1,
+      failed: 0,
+      warningCount: 1,
+      warningMessages: ['项目已不存在，已同步更新'],
     })
     expect(mockAddToast).toHaveBeenCalledWith({
       title: '1 项成功，但存在警告',
@@ -231,7 +266,7 @@ describe('useBatchOperation', () => {
     })
   })
 
-  it('ignores warning results without a message', async () => {
+  it('counts warning results without a message', async () => {
     const operation = vi.fn(async () => ({
       warning: true,
     }))
@@ -253,12 +288,44 @@ describe('useBatchOperation', () => {
     expect(batchResult).toMatchObject({
       succeeded: 1,
       failed: 0,
-      warningCount: 0,
+      warningCount: 1,
       warningMessages: [],
     })
     expect(mockAddToast).toHaveBeenCalledWith({
-      title: '1 项成功',
-      color: 'success',
+      title: '1 项成功，但存在警告',
+      color: 'warning',
+    })
+  })
+
+  it('counts warning results with blank messages without exposing them', async () => {
+    const operation = vi.fn(async () => ({
+      warning: true,
+      message: '   ',
+    }))
+
+    const { result } = renderHook(() => useBatchOperation({
+      operation,
+      messages: {
+        success: '{count} 项成功',
+        failure: '{count} 项失败',
+        partial: '{succeeded} 项成功，{failed} 项失败',
+      },
+    }))
+
+    let batchResult: Awaited<ReturnType<typeof result.current.execute>> | undefined
+    await act(async () => {
+      batchResult = await result.current.execute(['a'])
+    })
+
+    expect(batchResult).toMatchObject({
+      succeeded: 1,
+      failed: 0,
+      warningCount: 1,
+      warningMessages: [],
+    })
+    expect(mockAddToast).toHaveBeenCalledWith({
+      title: '1 项成功，但存在警告',
+      color: 'warning',
     })
   })
 })

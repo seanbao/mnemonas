@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test'
+import { test, expect, type Page } from '@playwright/test'
 import { ensureAuthenticatedAt } from './helpers/auth-check'
 
 const usersFixture = [
@@ -44,26 +44,30 @@ const usersFixture = [
   },
 ] as const
 
+async function routeUserList(page: Page) {
+  await page.route('**/api/v1/admin/users/', async (route) => {
+    if (route.request().method() !== 'GET') {
+      await route.continue()
+      return
+    }
+
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        success: true,
+        data: {
+          users: usersFixture,
+          total: usersFixture.length,
+        },
+      }),
+    })
+  })
+}
+
 test.describe('用户管理页面', () => {
   test('用户卡片应直接显示主目录边界', async ({ page }) => {
-    await page.route('**/api/v1/admin/users/', async (route) => {
-      if (route.request().method() !== 'GET') {
-        await route.continue()
-        return
-      }
-
-      await route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify({
-          success: true,
-          data: {
-            users: usersFixture,
-            total: usersFixture.length,
-          },
-        }),
-      })
-    })
+    await routeUserList(page)
 
     await ensureAuthenticatedAt(page, '/users')
 
@@ -86,6 +90,32 @@ test.describe('用户管理页面', () => {
 
     await page.getByRole('button', { name: '查看全部用户' }).click()
     await expect(page.getByText('reviewer', { exact: true })).toBeVisible()
+  })
+
+  test('移动端用户列表不应被底部导航裁剪', async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 })
+    await routeUserList(page)
+
+    await ensureAuthenticatedAt(page, '/users')
+
+    await expect(page.getByRole('heading', { name: '用户管理' })).toBeVisible({ timeout: 5000 })
+    await expect(page.getByRole('navigation', { name: '移动端主导航' })).toBeVisible()
+    await expect.poll(
+      async () => page.locator('main').evaluate((main) => main.scrollHeight > main.clientHeight),
+      { message: '用户列表移动端内容应由主内容区滚动呈现' }
+    ).toBe(true)
+
+    const reviewerAction = page.getByRole('button', { name: 'reviewer 用户操作' })
+    await reviewerAction.scrollIntoViewIfNeeded()
+    await expect(reviewerAction).toBeVisible()
+    await expect(page.getByText('/shared/review', { exact: true })).toBeVisible()
+
+    const mobileNavBox = await page.getByRole('navigation', { name: '移动端主导航' }).boundingBox()
+    const actionBox = await reviewerAction.boundingBox()
+
+    expect(mobileNavBox).not.toBeNull()
+    expect(actionBox).not.toBeNull()
+    expect(actionBox!.y + actionBox!.height).toBeLessThanOrEqual(mobileNavBox!.y - 4)
   })
 
   test('创建用户时应可一次设置主目录和配额', async ({ page }) => {

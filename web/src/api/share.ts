@@ -1,8 +1,8 @@
 import { authFetch } from './auth'
 import { readDownloadJsonErrorDetails, triggerBrowserDownload } from '@/lib/downloadResponse'
 import { INVALID_API_RESPONSE_MESSAGE } from '@/lib/apiMessages'
-import { readStructuredJsonErrorDetails } from '@/lib/jsonErrorResponse'
-import { copyTextToClipboard, encodePathForUrl, ensureZipExtension, getFilenameFromContentDisposition, normalizePath } from '@/lib/utils'
+import { getNonBlankJsonString, readStructuredJsonErrorDetails } from '@/lib/jsonErrorResponse'
+import { copyTextToClipboard, encodePathForUrl, ensureZipExtension, getFilenameFromContentDisposition, hasControlCharacter, normalizePath } from '@/lib/utils'
 
 const API_BASE = '/api/v1'
 const PUBLIC_SHARE_API_BASE = `${API_BASE}/public/shares`
@@ -105,6 +105,7 @@ export interface ShareActionResult {
 }
 
 export type ShareCreateResult = Share & ShareActionResult
+export type ShareUpdateResult = Share & ShareActionResult
 
 export interface ShareRequestOptions {
   signal?: AbortSignal
@@ -180,6 +181,7 @@ interface ShareApiError {
 interface ShareApiResponse<T> {
   success: boolean
   data?: T
+  warning?: boolean
   message?: string
   error?: ShareApiError | string
 }
@@ -202,6 +204,12 @@ const localizedPublicShareErrorMessages: Record<string, string> = {
   FILE_NOT_FOUND: '分享文件不存在或已被移除',
   FILESYSTEM_UNAVAILABLE: '分享内容暂不可用',
   INVALID_SHARE_TYPE: '分享类型不支持',
+  INVALID_ARCHIVE_FORMAT: '归档格式不受支持',
+  ARCHIVE_TOO_MANY_ENTRIES: '归档包含的条目过多',
+  ARCHIVE_TOO_LARGE: '归档内容过大',
+  ARCHIVE_DUPLICATE_ENTRY: '归档条目名称冲突，请刷新后重试',
+  ARCHIVE_ENTRY_CHANGED: '分享内容已变更，请刷新后重试',
+  DOWNLOAD_SHARE_ARCHIVE_FAILED: '生成分享归档失败，请稍后重试',
 }
 
 function isShareType(value: unknown): value is ShareType {
@@ -292,11 +300,8 @@ function isSafePublicShareName(value: unknown): value is string {
     return false
   }
 
-  for (let index = 0; index < value.length; index += 1) {
-    const code = value.charCodeAt(index)
-    if (code < 0x20 || code === 0x7f) {
-      return false
-    }
+  if (hasControlCharacter(value)) {
+    return false
   }
 
   return true
@@ -394,25 +399,33 @@ function getShareErrorMessage(
     }
   }
 
-  if (typeof body.error === 'string' && body.error) {
-    return body.error
+  const stringError = getNonBlankJsonString(body.error)
+  if (stringError !== undefined) {
+    return stringError
   }
-  if (body.error && typeof body.error === 'object' && 'message' in body.error && body.error.message) {
-    return body.error.message
+  if (body.error && typeof body.error === 'object' && 'message' in body.error) {
+    const errorMessage = getNonBlankJsonString(body.error.message)
+    if (errorMessage !== undefined) {
+      return errorMessage
+    }
   }
-  if (body.message) {
-    return body.message
+  const message = getNonBlankJsonString(body.message)
+  if (message !== undefined) {
+    return message
   }
   return fallback
 }
 
 function getShareErrorCode(body: ShareErrorBody): string | undefined {
-  if (body.error && typeof body.error === 'object' && 'code' in body.error && typeof body.error.code === 'string') {
-    return body.error.code
+  if (body.error && typeof body.error === 'object' && 'code' in body.error) {
+    const errorCode = getNonBlankJsonString(body.error.code)
+    if (errorCode !== undefined) {
+      return errorCode
+    }
   }
 
-  if ('code' in body && typeof body.code === 'string') {
-    return body.code
+  if ('code' in body) {
+    return getNonBlankJsonString(body.code)
   }
 
   return undefined
@@ -479,7 +492,18 @@ async function throwShareDownloadJsonError(response: Response): Promise<void> {
 }
 
 function normalizePublicShareRelativePath(filePath: string): string {
+  if (filePath.includes('\\') || hasControlCharacter(filePath)) {
+    throw new Error('非法路径')
+  }
   return normalizePath(filePath).split('/').filter(Boolean).join('/')
+}
+
+function normalizePublicShareDownloadPath(filePath: string): string {
+  const normalizedPath = normalizePublicShareRelativePath(filePath)
+  if (!normalizedPath) {
+    throw new Error('非法路径')
+  }
+  return normalizedPath
 }
 
 function encodeShareIdForUrl(id: string): string {
@@ -499,6 +523,11 @@ export function formatShareUrl(shareUrl: string, origin = window.location.origin
   try {
     const parsed = new URL(trimmed)
     if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+      if (parsed.username || parsed.password) {
+        parsed.username = ''
+        parsed.password = ''
+        return parsed.toString()
+      }
       return trimmed
     }
   } catch {
@@ -533,8 +562,9 @@ async function parseWrappedShareSuccess<T>(response: Response, invalidMessage: s
 function getShareActionResult(response: Response, body: ShareApiResponse<unknown>): ShareActionResult {
   return {
     warning: response.headers?.get?.('Warning') != null
+      || body.warning === true
       || (!!body.data && typeof body.data === 'object' && 'warning' in body.data && body.data.warning === true),
-    message: typeof body.message === 'string' && body.message ? body.message : undefined,
+    message: getNonBlankJsonString(body.message),
   }
 }
 
@@ -639,7 +669,7 @@ export async function getShare(id: string, options: ShareRequestOptions = {}): P
 /**
  * Update share
  */
-export async function updateShare(id: string, req: UpdateShareRequest, options: ShareRequestOptions = {}): Promise<Share> {
+export async function updateShare(id: string, req: UpdateShareRequest, options: ShareRequestOptions = {}): Promise<ShareUpdateResult> {
   validateShareMaxAccessRequest(req.max_access)
 
   const response = await authFetch(authenticatedShareUrl(id), {
@@ -657,7 +687,10 @@ export async function updateShare(id: string, req: UpdateShareRequest, options: 
   if (!isValidShare(body.data)) {
     throw new ShareError(INVALID_API_RESPONSE_MESSAGE, response.status)
   }
-  return body.data
+  return {
+    ...body.data,
+    ...getShareActionResult(response, body),
+  }
 }
 
 /**
@@ -783,8 +816,8 @@ export function getShareDownloadUrl(id: string, options?: { archive?: 'zip' }): 
  * Get download URL for file in shared folder
  */
 export function getShareFileDownloadUrl(id: string, filePath: string, options?: { archive?: 'zip' }): string {
-  const normalizedPath = normalizePath(filePath)
-  const encodedPath = encodePathForUrl(normalizedPath)
+  const normalizedPath = normalizePublicShareDownloadPath(filePath)
+  const encodedPath = encodePathForUrl(`/${normalizedPath}`)
   const trimmedPath = encodedPath.startsWith('/') ? encodedPath.slice(1) : encodedPath
   return withShareDownloadArchiveParam(`${publicShareUrl(id)}/download/${trimmedPath}`, options?.archive)
 }
@@ -798,8 +831,9 @@ function withShareDownloadArchiveParam(url: string, archive?: 'zip'): string {
 }
 
 export async function downloadShare(id: string, options: PublicShareDownloadOptions = {}): Promise<void> {
-  const url = options?.filePath
-    ? getShareFileDownloadUrl(id, options.filePath, { archive: options.archive })
+  const normalizedFilePath = options?.filePath ? normalizePublicShareDownloadPath(options.filePath) : undefined
+  const url = normalizedFilePath
+    ? getShareFileDownloadUrl(id, normalizedFilePath, { archive: options.archive })
     : getShareDownloadUrl(id, { archive: options?.archive })
   const response = await fetch(url, getPublicShareFetchOptions(options.signal))
 
@@ -815,7 +849,7 @@ export async function downloadShare(id: string, options: PublicShareDownloadOpti
     throw await readPublicShareApiError(response, message)
   }
 
-  const pathFilename = options?.filePath ? normalizePath(options.filePath).split('/').filter(Boolean).pop() : undefined
+  const pathFilename = normalizedFilePath ? normalizedFilePath.split('/').filter(Boolean).pop() : undefined
   const baseFilename = options?.filename ?? pathFilename ?? 'download'
   const fallbackFilename = options?.archive === 'zip' ? ensureZipExtension(baseFilename) : baseFilename
   const contentDisposition = response.headers.get('Content-Disposition')

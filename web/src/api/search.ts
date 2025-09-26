@@ -5,7 +5,7 @@
 
 import { authFetch } from './auth'
 import { INVALID_API_RESPONSE_MESSAGE } from '@/lib/apiMessages'
-import { readStructuredJsonErrorDetails } from '@/lib/jsonErrorResponse'
+import { getNonBlankJsonString, readStructuredJsonErrorDetails } from '@/lib/jsonErrorResponse'
 import { normalizePath } from '@/lib/utils'
 
 interface SearchApiError {
@@ -146,15 +146,13 @@ export async function searchFiles(query: string, optionsOrLimit: SearchFilesOpti
     let code: string | undefined
     try {
       const body = await response.json() as SearchApiResponse<never> & { code?: string }
-      const topLevelCode = typeof body.code === 'string' ? body.code : undefined
+      const topLevelCode = getNonBlankJsonString(body.code)
       message = typeof body.error === 'string'
-        ? body.error
-        : body.error?.message || body.message || SEARCH_FAILED_MESSAGE
-      if (typeof body.error !== 'string' && typeof body.error?.code === 'string') {
-        code = body.error.code
-      } else if (topLevelCode) {
-        code = topLevelCode
-      }
+        ? getNonBlankJsonString(body.error) ?? SEARCH_FAILED_MESSAGE
+        : getNonBlankJsonString(body.error?.message) ?? getNonBlankJsonString(body.message) ?? SEARCH_FAILED_MESSAGE
+      code = typeof body.error !== 'string'
+        ? getNonBlankJsonString(body.error?.code) ?? topLevelCode
+        : topLevelCode
     } catch {
       // Fall back to a generic error when the backend did not return valid JSON.
     }

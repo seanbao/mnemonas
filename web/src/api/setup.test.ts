@@ -114,6 +114,15 @@ describe('Setup API', () => {
     await expect(getSetupStatus()).rejects.toThrow('获取初始化状态失败')
   })
 
+  it('uses fallback setup status error when legacy messages are blank', async () => {
+    vi.mocked(global.fetch).mockResolvedValueOnce({
+      ok: false,
+      json: () => Promise.resolve({ success: false, error: { message: '   ' }, message: '  ' }),
+    } as Response)
+
+    await expect(getSetupStatus()).rejects.toThrow('获取初始化状态失败')
+  })
+
   it('uses fallback setup status error when the error payload is unreadable', async () => {
     vi.mocked(global.fetch).mockResolvedValueOnce({
       ok: false,
@@ -131,6 +140,7 @@ describe('Setup API', () => {
 
     await expect(acknowledgeSetup()).resolves.toEqual({
       success: true,
+      warning: false,
       message: '',
     })
     expect(authFetch).toHaveBeenCalledWith('/api/v1/setup/acknowledge', {
@@ -161,7 +171,56 @@ describe('Setup API', () => {
 
     await expect(acknowledgeSetup()).resolves.toEqual({
       success: true,
+      warning: false,
       message: 'acknowledged',
+    })
+  })
+
+  it('returns warning details for successful acknowledge responses with warning metadata', async () => {
+    vi.mocked(authFetch).mockResolvedValueOnce({
+      ok: true,
+      headers: new Headers({ Warning: '199 mnemonas "setup acknowledge warning"' }),
+      json: () => Promise.resolve({
+        success: true,
+        warning: true,
+        message: 'setup acknowledged with warning',
+      }),
+    } as Response)
+
+    await expect(acknowledgeSetup()).resolves.toEqual({
+      success: true,
+      warning: true,
+      message: 'setup acknowledged with warning',
+    })
+  })
+
+  it('returns warning details for successful acknowledge responses with data warning flags', async () => {
+    vi.mocked(authFetch).mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        success: true,
+        data: { warning: true },
+        message: 'setup acknowledged with data warning',
+      }),
+    } as Response)
+
+    await expect(acknowledgeSetup()).resolves.toEqual({
+      success: true,
+      warning: true,
+      message: 'setup acknowledged with data warning',
+    })
+  })
+
+  it('normalizes blank acknowledge setup messages to an empty string', async () => {
+    vi.mocked(authFetch).mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ success: true, message: '   ' }),
+    } as Response)
+
+    await expect(acknowledgeSetup()).resolves.toEqual({
+      success: true,
+      warning: false,
+      message: '',
     })
   })
 

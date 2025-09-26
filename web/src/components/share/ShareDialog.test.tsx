@@ -8,7 +8,7 @@ const mockAddToast = vi.fn()
 // Mock HeroUI components
 vi.mock('@heroui/react', () => ({
   Modal: ({ children, isOpen }: { children: React.ReactNode; isOpen: boolean }) =>
-    isOpen ? <div data-testid="modal">{children}</div> : null,
+    isOpen ? <div role="dialog" aria-label="分享对话框">{children}</div> : null,
   ModalContent: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
   ModalHeader: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
   ModalBody: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
@@ -25,6 +25,7 @@ vi.mock('@heroui/react', () => ({
     <button onClick={onPress} disabled={isDisabled}>{children}</button>
   ),
   Input: ({
+    'aria-label': ariaLabel,
     label,
     placeholder,
     value,
@@ -32,6 +33,7 @@ vi.mock('@heroui/react', () => ({
     type,
     errorMessage,
   }: {
+    'aria-label'?: string
     label?: string
     placeholder?: string
     value?: string
@@ -41,7 +43,7 @@ vi.mock('@heroui/react', () => ({
   }) => (
     <div>
       <input
-        aria-label={label ?? placeholder}
+        aria-label={ariaLabel ?? label ?? placeholder}
         placeholder={placeholder}
         type={type}
         value={value ?? ''}
@@ -51,9 +53,11 @@ vi.mock('@heroui/react', () => ({
     </div>
   ),
   Select: ({
+    'aria-label': ariaLabel,
     children,
     onSelectionChange,
   }: {
+    'aria-label'?: string
     children: React.ReactNode
     onSelectionChange?: (keys: Set<string>) => void
   }) => {
@@ -69,6 +73,7 @@ vi.mock('@heroui/react', () => ({
     }
     return (
       <select
+        aria-label={ariaLabel}
         onChange={(event) => onSelectionChange?.(new Set([mapLabelToValue(event.target.value)]))}
       >
         {children}
@@ -77,15 +82,21 @@ vi.mock('@heroui/react', () => ({
   },
   SelectItem: ({ children }: { children: React.ReactNode }) => <option>{children}</option>,
   Switch: ({
+    'aria-label': ariaLabel,
     isSelected,
+    isDisabled,
     onValueChange,
   }: {
+    'aria-label'?: string
     isSelected?: boolean
+    isDisabled?: boolean
     onValueChange?: (value: boolean) => void
   }) => (
     <input
+      aria-label={ariaLabel}
       type="checkbox"
       checked={isSelected ?? false}
+      disabled={isDisabled}
       onChange={(event) => onValueChange?.(event.target.checked)}
     />
   ),
@@ -154,7 +165,7 @@ describe('ShareDialog', () => {
       />
     )
 
-    expect(screen.getByTestId('modal')).toBeInTheDocument()
+    expect(screen.getByRole('dialog', { name: '分享对话框' })).toBeInTheDocument()
     expect(screen.getByText('分享文件')).toBeInTheDocument()
     expect(screen.getByText('/test/file.txt')).toBeInTheDocument()
   })
@@ -168,7 +179,7 @@ describe('ShareDialog', () => {
       />
     )
 
-    expect(screen.queryByTestId('modal')).not.toBeInTheDocument()
+    expect(screen.queryByRole('dialog', { name: '分享对话框' })).not.toBeInTheDocument()
   })
 
   it('shows folder text when isFolder is true', () => {
@@ -311,7 +322,7 @@ describe('ShareDialog', () => {
     expect(createButton).toBeDisabled()
     expect(screen.getByText('当前路径要求设置分享密码')).toBeInTheDocument()
 
-    await user.type(screen.getByPlaceholderText('设置访问密码（最多 72 字节）'), 'family-secret')
+    await user.type(screen.getByLabelText('分享访问密码'), 'family-secret')
     expect(createButton).not.toBeDisabled()
     await user.click(createButton)
 
@@ -320,6 +331,97 @@ describe('ShareDialog', () => {
         path: '/Family/report.pdf',
         password: 'family-secret',
       }))
+    })
+  })
+
+  it('matches server share policy paths after runtime path normalization', async () => {
+    vi.mocked(getSharePolicy).mockResolvedValueOnce({
+      default_expires_in: '168h',
+      default_max_access: 0,
+      policy_rules: [{
+        path: '/Family//Reports/',
+        require_password: true,
+        max_expires_in: '24h',
+      }],
+    })
+
+    render(
+      <ShareDialog
+        isOpen={true}
+        onClose={() => {}}
+        filePath="/Family/Reports/report.pdf"
+      />
+    )
+
+    const review = await screen.findByLabelText('分享创建前复核')
+    await waitFor(() => {
+      expect(screen.getByText('当前路径分享规则')).toBeInTheDocument()
+      expect(screen.getByText('此路径要求设置分享密码。')).toBeInTheDocument()
+      expect(within(review).getByText('路径策略 /Family/Reports')).toBeInTheDocument()
+    })
+  })
+
+  it('ignores invalid server share policy paths in the dialog preview', async () => {
+    vi.mocked(getSharePolicy).mockResolvedValueOnce({
+      default_expires_in: '168h',
+      default_max_access: 0,
+      policy_rules: [
+        {
+          path: 'Family',
+          require_password: true,
+          max_access: 2,
+        },
+        {
+          path: '/Family',
+          max_access: 5,
+        },
+      ],
+    })
+
+    render(
+      <ShareDialog
+        isOpen={true}
+        onClose={() => {}}
+        filePath="/Family/report.pdf"
+      />
+    )
+
+    const review = await screen.findByLabelText('分享创建前复核')
+    await waitFor(() => {
+      expect(screen.getByText('当前路径分享规则')).toBeInTheDocument()
+      expect(screen.getByText('访问次数最多 5 次。')).toBeInTheDocument()
+      expect(screen.queryByText('此路径要求设置分享密码。')).not.toBeInTheDocument()
+      expect(screen.queryByText('当前路径要求设置分享密码')).not.toBeInTheDocument()
+      expect(within(review).getByText('路径策略 /Family')).toBeInTheDocument()
+      expect(within(review).queryByText('必须设置密码')).not.toBeInTheDocument()
+    })
+  })
+
+  it('ignores server share policy paths with Unicode control characters', async () => {
+    vi.mocked(getSharePolicy).mockResolvedValueOnce({
+      default_expires_in: '168h',
+      default_max_access: 0,
+      policy_rules: [{
+        path: '/Family\u0081Private',
+        require_password: true,
+        max_access: 2,
+      }],
+    })
+
+    render(
+      <ShareDialog
+        isOpen={true}
+        onClose={() => {}}
+        filePath="/Family\u0081Private/report.pdf"
+      />
+    )
+
+    await screen.findByText('系统默认：7 天')
+    const review = await screen.findByLabelText('分享创建前复核')
+    await waitFor(() => {
+      expect(screen.queryByText('当前路径分享规则')).not.toBeInTheDocument()
+      expect(screen.queryByText('此路径要求设置分享密码。')).not.toBeInTheDocument()
+      expect(within(review).getByText('系统默认')).toBeInTheDocument()
     })
   })
 
@@ -350,13 +452,13 @@ describe('ShareDialog', () => {
       expect(within(review).getByText('必须设置密码')).toBeInTheDocument()
     })
 
-    fireEvent.change(screen.getAllByRole('combobox')[0], { target: { value: '7 天' } })
-    await user.type(screen.getByPlaceholderText('使用系统默认'), '12')
+    fireEvent.change(screen.getByLabelText('分享有效期'), { target: { value: '7 天' } })
+    await user.type(screen.getByLabelText('分享访问次数限制'), '12')
 
     expect(within(review).getByText('1 天（路径策略上限）')).toBeInTheDocument()
     expect(within(review).getByText('5 次（路径策略上限）')).toBeInTheDocument()
 
-    await user.type(screen.getByPlaceholderText('设置访问密码（最多 72 字节）'), 'family-secret')
+    await user.type(screen.getByLabelText('分享访问密码'), 'family-secret')
 
     expect(within(review).getByText('已设置，满足路径策略')).toBeInTheDocument()
   })
@@ -371,7 +473,26 @@ describe('ShareDialog', () => {
     )
 
     expect(screen.getByText('访问次数限制')).toBeInTheDocument()
-    expect(screen.getByPlaceholderText('使用系统默认')).toBeInTheDocument()
+    expect(screen.getByLabelText('分享访问次数限制')).toBeInTheDocument()
+  })
+
+  it('labels share creation controls for assistive technology', async () => {
+    const user = userEvent.setup()
+    render(
+      <ShareDialog
+        isOpen={true}
+        onClose={() => {}}
+        filePath="/test/file.txt"
+      />
+    )
+
+    await user.click(screen.getByRole('checkbox', { name: '启用密码保护' }))
+
+    expect(screen.getByLabelText('分享访问密码')).toBeInTheDocument()
+    expect(screen.getByLabelText('分享有效期')).toBeInTheDocument()
+    expect(screen.getByLabelText('分享权限')).toBeInTheDocument()
+    expect(screen.getByLabelText('分享访问次数限制')).toBeInTheDocument()
+    expect(screen.getByLabelText('分享备注')).toBeInTheDocument()
   })
 
   it('shows create button', () => {
@@ -399,7 +520,7 @@ describe('ShareDialog', () => {
     )
 
     await user.click(screen.getByRole('checkbox'))
-    expect(screen.getByPlaceholderText('设置访问密码（最多 72 字节）')).toBeInTheDocument()
+    expect(screen.getByLabelText('分享访问密码')).toBeInTheDocument()
 
     await user.click(screen.getByText('取消'))
 
@@ -418,14 +539,12 @@ describe('ShareDialog', () => {
     )
 
     await user.click(screen.getByRole('checkbox'))
-    await user.type(screen.getByPlaceholderText('设置访问密码（最多 72 字节）'), 'a'.repeat(73))
+    await user.type(screen.getByLabelText('分享访问密码'), 'a'.repeat(73))
 
     expect(screen.getByText('分享密码最多 72 字节')).toBeInTheDocument()
-    const createButton = screen.getByText('创建分享链接').closest('button')
+    const createButton = screen.getByRole('button', { name: '创建分享链接' })
     expect(createButton).toBeDisabled()
-    if (createButton) {
-      await user.click(createButton)
-    }
+    await user.click(createButton)
     expect(createShare).not.toHaveBeenCalled()
   })
 
@@ -579,7 +698,7 @@ describe('ShareDialog', () => {
     )
 
     await user.click(screen.getByRole('checkbox'))
-    await user.type(screen.getByPlaceholderText('设置访问密码（最多 72 字节）'), 'secret-123')
+    await user.type(screen.getByLabelText('分享访问密码'), 'secret-123')
 
     const createButton = screen.getByText('创建分享链接')
     expect(createButton).not.toBeDisabled()
@@ -622,10 +741,10 @@ describe('ShareDialog', () => {
       />
     )
 
-    fireEvent.change(screen.getAllByRole('combobox')[0], { target: { value: '7 天' } })
-    fireEvent.change(screen.getAllByRole('combobox')[1], { target: { value: '仅查看' } })
-    await user.type(screen.getByPlaceholderText('使用系统默认'), '12')
-    await user.type(screen.getByPlaceholderText('添加备注信息'), '  release package  ')
+    fireEvent.change(screen.getByLabelText('分享有效期'), { target: { value: '7 天' } })
+    fireEvent.change(screen.getByLabelText('分享权限'), { target: { value: '仅查看' } })
+    await user.type(screen.getByLabelText('分享访问次数限制'), '12')
+    await user.type(screen.getByLabelText('分享备注'), '  release package  ')
     await user.click(screen.getByText('创建分享链接'))
 
     expectCreateShareCalledWithAbortSignal(expect.objectContaining({
@@ -660,7 +779,7 @@ describe('ShareDialog', () => {
       />
     )
 
-    await user.type(screen.getByPlaceholderText('使用系统默认'), '0')
+    await user.type(screen.getByLabelText('分享访问次数限制'), '0')
     await user.click(screen.getByText('创建分享链接'))
 
     expectCreateShareCalledWithAbortSignal(expect.objectContaining({
@@ -682,13 +801,13 @@ describe('ShareDialog', () => {
       />
     )
 
-    await user.type(screen.getByPlaceholderText('使用系统默认'), maxAccess)
+    await user.type(screen.getByLabelText('分享访问次数限制'), maxAccess)
 
-    const createButton = screen.getByText('创建分享链接').closest('button')
+    const createButton = screen.getByRole('button', { name: '创建分享链接' })
     expect(createButton).toBeDisabled()
     expect(screen.getByText(message)).toBeInTheDocument()
 
-    await user.click(screen.getByText('创建分享链接'))
+    await user.click(createButton)
 
     expect(mockAddToast).not.toHaveBeenCalledWith(expect.objectContaining({
       title: '分享链接已创建',

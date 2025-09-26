@@ -4,7 +4,8 @@ import { FileCode, AlertCircle } from 'lucide-react'
 import { buildPreviewUrl, getLanguageFromExtension } from '@/lib/preview-utils'
 import { authFetch } from '@/api/auth'
 import { readDownloadJsonErrorDetails } from '@/lib/downloadResponse'
-import { GENERIC_LOAD_ERROR_DESCRIPTION, getUserFacingErrorDescription } from '@/lib/apiMessages'
+import { GENERIC_LOAD_ERROR_DESCRIPTION } from '@/lib/apiMessages'
+import { getFileLoadErrorDescription } from '@/lib/fileActionErrors'
 import { cn } from '@/lib/utils'
 
 const maxPreviewBytes = 1024 * 1024
@@ -90,7 +91,7 @@ function getTextPreviewErrorMessage(error: unknown): string {
     return textPreviewTooLargeMessage
   }
 
-  return getUserFacingErrorDescription(error, GENERIC_LOAD_ERROR_DESCRIPTION)
+  return getFileLoadErrorDescription(error, GENERIC_LOAD_ERROR_DESCRIPTION)
 }
 
 async function readLimitedText(response: Response, signal?: AbortSignal): Promise<string> {
@@ -179,12 +180,12 @@ export function TextPreview({ path, filename, className }: TextPreviewProps) {
           const jsonError = await readDownloadJsonErrorDetails(response, '加载失败')
           if (jsonError) {
             if (!cancelled) {
-              setError(getTextPreviewErrorMessage(new Error(jsonError.message)))
+              setError(getTextPreviewErrorMessage(jsonError))
             }
             return
           }
 
-          throw new Error(`加载失败: ${response.statusText}`)
+          throw new Error(`加载失败：${response.statusText}`)
         }
         
         const text = await readLimitedText(response, controller.signal)
@@ -212,7 +213,12 @@ export function TextPreview({ path, filename, className }: TextPreviewProps) {
 
   if (isLoading) {
     return (
-      <div className={cn("flex items-center justify-center h-full", className)}>
+      <div
+        role="status"
+        aria-label="加载文本预览"
+        aria-busy="true"
+        className={cn("flex items-center justify-center h-full", className)}
+      >
         <div className="text-center">
           <Spinner size="lg" />
           <p className="text-default-500 mt-4">加载文件内容...</p>
@@ -239,7 +245,11 @@ export function TextPreview({ path, filename, className }: TextPreviewProps) {
   const lines = content.split('\n')
 
   return (
-    <div className={cn("h-full flex flex-col bg-content1 rounded-lg overflow-hidden", className)}>
+    <div
+      role="region"
+      aria-label={`${filename} 文本预览`}
+      className={cn("h-full flex flex-col bg-content1 rounded-lg overflow-hidden", className)}
+    >
       {/* Header */}
       <div className="flex items-center gap-2 px-4 py-2 bg-content2 border-b border-divider">
         <FileCode size={16} className="text-default-500" />
