@@ -63,7 +63,9 @@ When `password` is empty and Basic Auth is enabled, MnemoNAS generates a 16-char
 
 This WebDAV password is separate from the Web UI administrator password. Startup logs show where to find the credentials but do not print the password.
 
-`mnemonas-doctor` reports whether `config.toml` is a symlink, passes through symlink components, has an unexpected file type, or is broadly readable. It also reports a missing `users.json` when authentication is enabled, and reports whether `users.json`, `secrets.json`, or their relevant parent directories are symlinks, pass through symlink components, have unexpected file types, or are broadly readable. The Web UI security self-check also marks runtime config-file, generated WebDAV credentials, users-file, or initial-password paths that pass through symlink components as `block`, and reports broadly readable config and generated WebDAV credentials files. Long-running deployments should keep these paths as private regular files and directories.
+`mnemonas-doctor` reports whether `config.toml` is a symlink, passes through symlink components, has an unexpected file type, or is broadly readable. It also reports a missing `users.json` when authentication is enabled, and reports whether `users.json`, `secrets.json`, or their relevant parent directories are symlinks, pass through symlink components, have unexpected file types, or are broadly readable.
+
+The Web UI security self-check also marks runtime config-file, generated WebDAV credentials, users-file, or initial-password paths that pass through symlink components as `block`, and reports broadly readable config and generated WebDAV credentials files. Long-running deployments should keep these paths as private regular files and directories.
 
 When authentication is enabled, `mnemonas-doctor` parses `users.json` and confirms that at least one enabled administrator is available. If no usable administrator exists, the next startup creates a recovery administrator and the diagnostic output reports that recovery posture.
 
@@ -230,8 +232,12 @@ cloudflared tunnel run mnemonas
 - [ ] Public deployments use `server.host = "127.0.0.1"` and are reachable only through the HTTPS reverse proxy.
 - [ ] The administrator Dashboard first-run checklist has no authentication-disabled or anonymous-WebDAV warning. If a warning is present, the corresponding configuration or outer access-control layer has been handled.
 - [ ] Dataplane gRPC/HTTP ports are loopback-only or private.
-- [ ] The Web UI security self-check has no `block` items; public deployments should resolve all `warning` items before exposure, especially `allow_unsafe_no_auth`, session-token lifetimes, login throttling, browser session-cookie boundaries, public-share cookie/cache boundaries, config-file permissions, generated WebDAV credentials-file permissions, users-file permissions, reverse-proxy headers, dataplane ports, local backup destinations, share default policy, and spare-administrator warnings.
-- [ ] `sudo mnemonas-doctor --public-domain <domain>` reports HTTP redirects to HTTPS on the same public domain, a matching HTTPS certificate with at least 30 days remaining, verified renewal guidance, a non-symlink config file path that does not pass through symlink components, usable administrator-account redundancy, public-safe session-token lifetimes, a non-symlink users file and users-file directory that do not pass through symlink components and have private permissions, a non-symlink generated WebDAV credentials file that does not pass through symlink components and has private permissions, an absent `initial-password.txt` path with no symlink, symlink component, or non-regular file left behind, reviewed public-share default policy and public-share JSON response boundaries, rejected anonymous WebDAV `PROPFIND`, and no direct backend exposure, dataplane exposure, or UFW allow warnings.
+- [ ] The Web UI security self-check has no `block` items; public deployments should resolve all `warning` items before exposure.
+- [ ] The security self-check covers `allow_unsafe_no_auth`, session-token lifetimes, login throttling, browser session-cookie boundaries, public-share cookie/cache boundaries, config-file permissions, generated WebDAV credentials-file permissions, users-file permissions, reverse-proxy headers, dataplane ports, local backup destinations, share base URL, share default policy, and spare-administrator warnings.
+- [ ] `sudo mnemonas-doctor --public-domain <domain>` reports HTTP redirects to HTTPS on the same public domain, a matching HTTPS certificate with at least 30 days remaining, verified renewal guidance, and a non-symlink config file path that does not pass through symlink components and parses as valid TOML.
+- [ ] `mnemonas-doctor --public-domain` reports usable administrator-account redundancy, public-safe session-token lifetimes, a non-symlink users file and users-file directory that do not pass through symlink components and have private permissions, and a non-symlink generated WebDAV credentials file that does not pass through symlink components and has private permissions.
+- [ ] `mnemonas-doctor --public-domain` reports an absent `initial-password.txt` path with no symlink, symlink component, or non-regular file left behind.
+- [ ] Public-share base URL, public-share default policy, and public-share JSON response boundaries have been reviewed (private cache, `Vary: Cookie`, no probe cookie), anonymous WebDAV `PROPFIND` is rejected, and there are no direct backend exposure, dataplane exposure, or UFW allow warnings.
 - [ ] The [Public cloud firewall checklist](cloud-firewall-checklist.en.md) has been applied: cloud security groups or public firewall rules expose only `80/443`; management ports, the Web backend port, and dataplane ports are not publicly reachable.
 - [ ] Public deployments use HTTPS.
 
@@ -325,6 +331,8 @@ After clearing site data, switching browser, or changing the share password, the
 Five failed password attempts for the same share and client address lock access for five minutes and return `429 Too Many Requests`.
 
 For family public sharing, keep newly created shares expiring by default, for example after 7 days, and set an explicit default access-count limit. The security self-check reports no default expiry, values above `720h` (30 days), or unlimited default access counts as warnings.
+
+When sharing is enabled, `share.base_url` should use HTTPS on the default port, have a valid host, and contain no userinfo, query string, fragment, backslash, duplicated path slash, or `.`/`..` path segments. It should be the site origin or application base path and should not include the `/s` share route. The security self-check and `mnemonas-doctor --public-domain` report base URLs that do not meet public-deployment requirements.
 
 ## Security Capability Status
 

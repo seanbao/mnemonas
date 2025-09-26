@@ -2,7 +2,7 @@
 
 English | [简体中文](SUPPORT.md)
 
-This document describes MnemoNAS support channels, issue triage, and maintenance boundaries.
+This document describes MnemoNAS support channels, issue triage, and support boundaries.
 
 ## Support Channels
 
@@ -12,11 +12,11 @@ This document describes MnemoNAS support channels, issue triage, and maintenance
 | Feature or product suggestion | [GitHub Issues](https://github.com/seanbao/mnemonas/issues) | Describe the use case and expected benefit |
 | Security vulnerability | GitHub Private Vulnerability Reporting | Do not post exploit details publicly; see [SECURITY.md](SECURITY.md) |
 
-Usage questions can also be recorded in Issues. Please make it clear whether the report is a question or a confirmed bug.
+Usage questions can also be recorded in Issues. The title and body should make clear whether the report is a question or a confirmed bug.
 
 ## Before Opening an Issue
 
-Please check:
+Check:
 
 - [README](README.en.md) and [documentation index](docs/README.en.md)
 - [FAQ](docs/faq.en.md)

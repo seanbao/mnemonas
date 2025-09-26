@@ -1,118 +1,92 @@
 <!-- markdownlint-disable MD022 MD031 MD032 MD036 MD040 MD060 -->
 
-# MnemoNAS API 参考文档
+# MnemoNAS API 参考
 
 [English](api-reference.en.md) | 简体中文
 
-本文档描述 MnemoNAS REST API 的所有端点、请求/响应格式和错误处理。
+本文档描述 MnemoNAS REST API 的约定、端点分组和请求/响应形状。默认 Base URL 为：
 
-## 基础信息
-
-- **Base URL**: `http://localhost:8080` (默认)
-- **Content-Type**: `application/json` (除文件上传外)
-- **认证**: 支持 JWT Token 认证（可通过配置启用/禁用）
-- JSON 请求体采用严格解析：写接口会拒绝未知字段和拼接的多个 JSON 值，并返回 `400 invalid request body`
-
-### 认证方式
-
-Web UI 使用同源 `HttpOnly` cookie 作为主会话。API 客户端仍可在请求头中携带 JWT Token：
-
+```text
+http://localhost:8080
 ```
+
+多数端点使用 JSON。文件上传、文件下载和归档下载端点使用文件载荷或流式响应。
+
+JSON 请求体采用严格解析。写入端点会拒绝未知字段和拼接的多个 JSON 值，并返回 `400 invalid request body`。
+
+## 认证
+
+启用 Web UI/API 认证时，Web UI 使用同源 `HttpOnly` cookie 作为主会话。API 客户端仍可携带：
+
+```http
 Authorization: Bearer <access_token>
 ```
 
-登录和刷新接口会设置 `mnemonas_access` 与 `mnemonas_refresh` cookie。浏览器客户端可发送请求头 `X-MnemoNAS-Session-Mode: cookie`，此时响应 JSON 不返回 bearer token，只返回用户信息与过期时间等非敏感字段。
+登录和刷新会设置 `mnemonas_access` 与 `mnemonas_refresh` cookie。浏览器客户端可以发送 `X-MnemoNAS-Session-Mode: cookie`；在该模式下，JSON 响应不会返回 bearer token，只返回用户和会话元数据。
 
-## 通用响应格式
+WebDAV `auth_type = "users"` 接受 MnemoNAS 用户凭据的 HTTP Basic 登录，并应用角色、用户组、`home_dir`、目录访问规则、home 范围用户配额和目录配额边界。WebDAV `auth_type = "basic"` 仍是独立的全局服务凭据模式。
 
-### 成功响应（多数 /api/v1 端点）
+## 响应格式
+
+多数 `/api/v1` 成功响应：
 
 ```json
 {
   "success": true,
-  "data": {
-    "id": "example"
-  },
-  "message": "操作成功",
+  "data": {},
+  "message": "ok",
   "request_id": "optional",
   "timestamp": "2024-01-15T10:00:00Z"
 }
 ```
 
-### 错误响应（多数 /api/v1 端点）
+多数 `/api/v1` 错误响应：
 
 ```json
 {
   "code": "BAD_REQUEST",
-  "message": "错误描述",
-  "details": {
-    "field": "path"
-  },
+  "message": "error description",
+  "details": {},
   "request_id": "optional",
   "timestamp": "2024-01-15T10:00:00Z"
 }
 ```
 
-### 认证端点响应（auth 模块）
-
-认证模块成功响应与多数 `/api/v1` 端点一致，业务数据位于 `data` 字段；错误响应使用 `success: false` 和结构化 `error` 对象：
+认证和公开分享错误使用：
 
 ```json
 {
   "success": false,
   "error": {
     "code": "ERROR_CODE",
-    "message": "错误描述"
+    "message": "error description"
   }
 }
 ```
 
-### 分享/收藏端点响应
+认证后的分享和收藏管理端点使用 `success + data (+ message)`。`/api/v1/public/shares/*` 下的公开分享端点在成功时返回原始 JSON 对象或数组，失败时返回结构化的 `success: false` 错误。
 
-认证后的分享链接管理端点 `/api/v1/shares` 使用 `success + data (+ message)` 包装；公开分享 API 推荐使用 `/api/v1/public/shares/*`，其成功响应保持原始 JSON 对象或数组，错误响应使用 `success: false` 和结构化 `error` 对象。兼容路径 `/s/*` 继续返回相同的公开分享 JSON / 下载响应，适用于不经过 SPA 的直接调用。
+## HTTP 状态码
 
-```json
-{
-  "success": true,
-  "data": {
-    "id": "example"
-  }
-}
-```
+| 状态码 | 含义 |
+| --- | --- |
+| `200` | 成功 |
+| `201` | 已创建 |
+| `400` | 请求无效 |
+| `401` | 未认证或 token 已过期 |
+| `403` | 已认证但无权限 |
+| `404` | 未找到 |
+| `409` | 资源冲突或操作当前不可执行 |
+| `410` | 资源不可用、已过期、已禁用或达到访问上限 |
+| `413` | 文件过大 |
+| `429` | 已限流 |
+| `507` | 用户或目录配额不足 |
+| `500` | 内部错误 |
+| `503` | 服务依赖不可用 |
 
-公开分享错误响应示例：
+## Warning 响应头
 
-```json
-{
-  "success": false,
-  "error": {
-    "code": "SHARE_PASSWORD_RATE_LIMITED",
-    "message": "too many attempts, try later"
-  }
-}
-```
-
-### HTTP 状态码
-
-| 状态码 | 说明 |
-|--------|------|
-| 200 | 成功 |
-| 201 | 创建成功 |
-| 400 | 请求参数错误 |
-| 401 | 未认证或认证已失效 |
-| 403 | 已认证但无权限 |
-| 409 | 资源状态冲突 / 当前操作不可执行 |
-| 404 | 资源不存在 |
-| 429 | 请求过于频繁 / 密码尝试次数过多 |
-| 410 | 资源不可用（过期/禁用/访问上限） |
-| 413 | 文件过大 |
-| 503 | 服务暂不可用（如文件系统、分享服务、最近操作记录、版本存储未就绪） |
-| 507 | 用户或目录容量配额不足 |
-| 500 | 服务器内部错误 |
-
-### Warning 响应头
-
-部分写接口在变更已经对外可见、但后续持久化或清理步骤失败时，仍返回成功状态码，并附带 HTTP `Warning` 响应头。当前使用的 warning 文案包括：
+部分写入端点可能已经提交可见变更，但后续持久化或清理步骤失败。此时端点仍返回成功状态，并附带 HTTP `Warning` 响应头，例如：
 
 - `199 MnemoNAS "activity log persistence failed"`
 - `199 MnemoNAS "auth state persistence incomplete"`
@@ -124,25 +98,30 @@ Authorization: Bearer <access_token>
 - `199 MnemoNAS "delete cleanup incomplete"`
 - `199 MnemoNAS "trash delete cleanup incomplete"`
 
-调用方应优先检查 HTTP `Warning` 响应头，而不是只依赖 JSON body。部分 `/api/v1` 写接口会额外返回 `warning: true` 和 `message`，例如 `resource copied with persistence warning`、`version restored with persistence warning`；但最近操作记录补写失败等场景可能只有 `Warning` header，body 仍保持原成功结构。
+客户端应同时检查 HTTP `Warning` 响应头和 JSON body。
 
-### MnemoNAS 路径约定
+## MnemoNAS 路径约定
 
-文件、目录、收藏、活动筛选、`home_dir`、目录配额和目录访问规则使用 MnemoNAS 逻辑绝对路径。路径以 `/` 分隔，并归一化为以 `/` 开头的形式；空字符和独立的 `.` / `..` 路径段无效，合法文件名中的连续点号（如 `foo..txt`）不受影响。根路径 `/` 只在端点明确允许时有效。路径作为 URL 参数时应按路径段编码，并保留 `/` 分隔符。
+文件、目录、收藏、活动筛选、`home_dir`、目录配额和目录访问规则字段使用 MnemoNAS 逻辑绝对路径：
 
----
+- 路径使用 `/` 分隔，并归一化为以 `/` 开头的形式。
+- 控制字符和独立的 `.` 或 `..` 路径段无效；合法名称中的连续点号（例如 `foo..txt`）仍有效。
+- 根路径 `/` 只在端点明确允许时有效。
+- URL 路径参数按路径段编码，同时保留 `/` 分隔符。
 
 ## 认证端点
 
-### 用户登录
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| `POST` | `/api/v1/auth/login` | 使用用户名和密码登录 |
+| `POST` | `/api/v1/auth/refresh` | 用 refresh token 换取新的 access token |
+| `GET` | `/api/v1/auth/me` | 获取当前用户 |
+| `POST` | `/api/v1/auth/logout` | 退出登录 |
+| `POST` | `/api/v1/auth/download-session` | 创建短期下载会话 cookie |
+| `POST` | `/api/v1/auth/password` | 修改当前用户密码 |
 
-使用用户名和密码登录。响应会设置 Web UI 使用的 `HttpOnly` 会话 cookie；API 客户端仍可从默认 JSON 响应中读取 bearer token。
+登录请求：
 
-```
-POST /api/v1/auth/login
-```
-
-**请求体**:
 ```json
 {
   "username": "admin",
@@ -150,7 +129,8 @@ POST /api/v1/auth/login
 }
 ```
 
-**响应示例**:
+API 客户端登录响应：
+
 ```json
 {
   "success": true,
@@ -171,46 +151,12 @@ POST /api/v1/auth/login
 }
 ```
 
-**Web cookie 会话模式**:
+Cookie 会话登录也会设置 `mnemonas_access` 与 `mnemonas_refresh`。携带 `X-MnemoNAS-Session-Mode: cookie` 时，`data` 对象会省略 `access_token` 和 `refresh_token`。
 
-```http
-X-MnemoNAS-Session-Mode: cookie
-```
+刷新端点接受 API 客户端提交的 JSON refresh token，也接受 Web UI 使用的 `mnemonas_refresh` cookie。刷新会轮换 refresh token，并设置新的 access/refresh cookie。使用 refresh cookie，或携带 `X-MnemoNAS-Session-Mode: cookie` 时，JSON 响应不返回 bearer token。
 
-带该请求头时，响应 `data` 不包含 `access_token` 和 `refresh_token`，但仍会设置 `mnemonas_access` 与 `mnemonas_refresh` cookie。
+当前用户响应示例：
 
-**失败行为**:
-- 同一 `username + 客户端地址` 组合连续登录失败达到限制时，返回 `429 Too Many Requests`，错误码为 `LOGIN_RATE_LIMITED`
-- 若已配置提醒通道，登录限流会发送限频的 `login_rate_limited` warning 事件，事件详情只包含 `trigger`、`key_scope`、`username_status` 和 `client_ip_scope` 分类字段，不包含原始用户名、客户端地址、密码或 token；`username_status` 使用 `unknown`、`invalid` 或 `provided` 表示用户名状态，`client_ip_scope` 使用 `public`、`private`、`loopback`、`link_local`、`multicast`、`unspecified` 或 `unknown` 表示客户端地址范围
-- `username` 分桶遵循账户名大小写不敏感语义，`handleruser` 与 `HANDLERUSER` 计入同一限流桶
-- 客户端地址默认不信任转发头，始终使用直连来源；只有显式设置 `server.trusted_proxy_hops > 0` 且请求直接来自 loopback 或 `server.trusted_proxy_cidrs` 中的代理地址时，才按 `X-Forwarded-For` 从右侧回溯客户端地址。多跳代理部署需要设置为代理总层数
-
-### 刷新令牌
-
-使用 refresh token 获取新的 access token，并轮换刷新令牌。API 客户端可提交 JSON body；浏览器 Web UI 可直接依赖 `mnemonas_refresh` cookie，body 可为空。
-
-```
-POST /api/v1/auth/refresh
-```
-
-**请求体**:
-```json
-{
-  "refresh_token": "eyJ..."
-}
-```
-
-当请求使用 refresh cookie，或发送 `X-MnemoNAS-Session-Mode: cookie` 时，成功响应不会在 JSON 中返回 bearer token，只会设置新的 `mnemonas_access` 与 `mnemonas_refresh` cookie。
-
-### 获取当前用户信息
-
-```
-GET /api/v1/auth/me
-```
-
-**需要认证**: 是
-
-**响应示例**:
 ```json
 {
   "success": true,
@@ -227,20 +173,14 @@ GET /api/v1/auth/me
 }
 ```
 
-### 退出登录
+请求包含有效 bearer token 或会话 cookie 时，退出登录会吊销当前 access token，并清理 `mnemonas_access`、`mnemonas_refresh` 和短期 `mnemonas_download_access` cookie。即使 access cookie 已过期，端点仍会尝试清理 cookie。
 
-```
-POST /api/v1/auth/logout
-```
+`POST /api/v1/auth/download-session` 创建短期下载会话 cookie，用于浏览器预览、缩略图和下载等无法附加 `Authorization` 头的流程。
 
-**需要认证**: 可选；有有效认证时会吊销当前 access token，无有效认证时仍会清理浏览器 cookie
+该 cookie 为 `HttpOnly`、`SameSite=Strict`，作用域为 `/api/v1`，过期时间与当前 access token 一致；后端识别请求为 HTTPS 时会设置 `Secure`。
 
-**行为说明**:
-- 如果请求携带有效 access token 或主会话 cookie，当前 access token 会被吊销
-- `mnemonas_access`、`mnemonas_refresh` 与 `/api/v1` 作用域下的短期 `mnemonas_download_access` cookie 会一并清理
-- 即使 access cookie 已过期，该端点也会尽力清理浏览器中的 HttpOnly cookie
+退出登录响应示例：
 
-**响应示例**:
 ```json
 {
   "success": true,
@@ -249,34 +189,8 @@ POST /api/v1/auth/logout
 }
 ```
 
-### 创建下载会话 Cookie
+下载会话响应示例：
 
-为浏览器下载、预览、缩略图等无法稳定附带 `Authorization` header 的请求创建短期 `HttpOnly` cookie。
-
-```
-POST /api/v1/auth/download-session
-```
-
-**需要认证**: 是
-
-**认证方式**:
-
-- Web UI 可使用主会话 cookie
-- API 客户端可使用 bearer token:
-
-```http
-Authorization: Bearer <access_token>
-```
-
-**请求体**: 无
-
-**成功行为**:
-- 返回 `200 OK`
-- 设置名为 `mnemonas_download_access` 的 `HttpOnly`、`SameSite=Strict` cookie，路径为 `/api/v1`
-- cookie 过期时间与当前 access token 剩余有效期对齐
-- 当请求被后端识别为 HTTPS（直连 TLS，或显式启用 `trusted_proxy_hops > 0` 后由可信代理转发 `X-Forwarded-Proto: https`）时，cookie 带 `Secure`
-
-**响应示例**:
 ```json
 {
   "success": true,
@@ -284,21 +198,8 @@ Authorization: Bearer <access_token>
 }
 ```
 
-**失败行为**:
-- 该路由复用通用认证 middleware；缺少主会话 cookie 和认证头时返回 `401`，错误码 `MISSING_AUTH_HEADER`
-- `Authorization` 头格式非法时返回 `401`，错误码 `INVALID_AUTH_HEADER`
-- access token 已过期、已吊销或无效时分别返回 `401`，错误码 `TOKEN_EXPIRED`、`TOKEN_REVOKED`、`INVALID_TOKEN`
-- token 对应用户不存在或已被禁用时分别返回 `401/403`，错误码 `USER_NOT_FOUND`、`USER_DISABLED`
+修改密码请求：
 
-### 修改密码
-
-```
-POST /api/v1/auth/password
-```
-
-**需要认证**: 是
-
-**请求体**:
 ```json
 {
   "old_password": "current_password",
@@ -306,7 +207,8 @@ POST /api/v1/auth/password
 }
 ```
 
-**响应示例**:
+修改密码响应示例：
+
 ```json
 {
   "success": true,
@@ -315,14 +217,34 @@ POST /api/v1/auth/password
 }
 ```
 
-### 用户管理（管理员）
+登录失败按用户名和客户端地址限流：
 
-**列出用户**:
-```
-GET /api/v1/admin/users
-```
+- 客户端地址默认使用直连来源。
+- 仅当配置了 `server.trusted_proxy_hops`，且请求来自 loopback 或 `server.trusted_proxy_cidrs` 中列出的代理地址时，才根据转发头解析客户端地址。
+- 配置提醒通道时，登录限流会发送限频的 `login_rate_limited` warning 事件。
+- 事件详情只包含 `trigger`、`key_scope`、`username_status` 和 `client_ip_scope` 分类字段，不包含原始用户名、客户端地址、密码或 token。
+- `username_status` 为 `unknown`、`invalid` 或 `provided`；`client_ip_scope` 为 `public`、`private`、`loopback`、`link_local`、`multicast`、`unspecified` 或 `unknown`。
 
-**响应示例**:
+## 管理员用户端点
+
+需要管理员角色。
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| `GET` | `/api/v1/admin/users` | 列出用户 |
+| `POST` | `/api/v1/admin/users` | 创建用户 |
+| `PUT` | `/api/v1/admin/users/{id}` | 更新用户元数据、角色、home 目录或配额 |
+| `DELETE` | `/api/v1/admin/users/{id}` | 删除用户 |
+| `POST` | `/api/v1/admin/users/{id}/reset-password` | 重置用户密码 |
+| `POST` | `/api/v1/admin/users/{id}/revoke-sessions` | 吊销用户现有会话 |
+| `PUT` | `/api/v1/admin/users/{id}/status` | 启用或禁用用户 |
+
+用户角色为 `admin`、`user` 和 `guest`。非管理员用户受 `home_dir` 和匹配的目录访问规则约束。
+
+用户响应包含 `id`、`username`、`email`、`role`、`groups`、`disabled`、`home_dir`、`created_at`、`updated_at`、可选 `last_login_at`、`quota_bytes` 和 `used_bytes`。
+
+列表响应示例：
+
 ```json
 {
   "success": true,
@@ -348,15 +270,8 @@ GET /api/v1/admin/users
 }
 ```
 
-**创建用户**:
-```
-POST /api/v1/admin/users
-```
+创建请求示例：
 
-用户名最多 255 个字符，不能包含 `/`、`\`、控制字符或 `.` / `..`；密码长度必须为 8 到 72 字节。用户组名称会归一化为小写，只能包含字母、数字、`.`、`_` 和 `-`。
-`home_dir` 可选；省略时默认使用 `/<username>`。提供时会归一化为干净的 MnemoNAS 绝对路径，不能为空，不能包含 `.` / `..` 路径段或控制字符。`user` 和 `guest` 角色不能使用 `/` 作为 `home_dir`；`admin` 可使用 `/` 表示全局命名空间。`quota_bytes` 可选，`0` 表示不限额。
-
-**请求体**:
 ```json
 {
   "username": "alice",
@@ -369,7 +284,8 @@ POST /api/v1/admin/users
 }
 ```
 
-**响应示例**:
+创建响应示例：
+
 ```json
 {
   "success": true,
@@ -391,12 +307,20 @@ POST /api/v1/admin/users
 }
 ```
 
-**更新用户资料、角色、主目录或配额**:
-```
-PUT /api/v1/admin/users/{id}
-```
+`POST /api/v1/admin/users/{id}/revoke-sessions` 会让该用户现有 Web cookie 会话、access token 和 refresh token 失效，但不改变用户密码或启用状态。用户下一次请求需要重新登录。
 
-**请求体**（至少包含一个字段）:
+创建和更新用户时应用下列字段规则：
+
+- 用户名最长 255 个字符，不能包含 `/`、`\`、控制字符、`.` 或 `..`。
+- 密码长度必须为 8 到 72 字节。
+- 创建时可省略 `home_dir`，默认值为 `/<username>`。
+- 提供 `home_dir` 时，会归一化为干净的 MnemoNAS 绝对路径，且不能为空，不能包含 `.`、`..` 路径段或控制字符。
+- `user` 和 `guest` 角色不能使用 `/` 作为 `home_dir`；`admin` 可以使用 `/` 访问全局命名空间。
+- `quota_bytes` 可选，`0` 表示不限制。
+- 用户组名会归一化为小写，只允许字母、数字、`.`、`_` 和 `-`。
+
+`PUT /api/v1/admin/users/{id}` 至少接受下列字段之一：
+
 ```json
 {
   "email": "user@example.com",
@@ -407,7 +331,8 @@ PUT /api/v1/admin/users/{id}
 }
 ```
 
-**响应示例**:
+更新响应示例：
+
 ```json
 {
   "success": true,
@@ -431,19 +356,8 @@ PUT /api/v1/admin/users/{id}
 }
 ```
 
-- `quota_bytes = 0` 表示不限额；大于 0 时，非管理员用户的 Web/API 上传、复制、移动、回收站恢复，以及 `webdav.auth_type = "users"` 下的 WebDAV PUT/COPY/MOVE，在写入目标位于该用户 `home_dir` 内时，会按 `home_dir` 当前逻辑大小执行硬限制。共享目录容量应通过 `storage.directory_quotas` 设置目录级限制。
-- 超出配额返回 `507 Insufficient Storage`，错误码为 `QUOTA_EXCEEDED`，`details` 包含 `quota_type`、`quota_path`、`used_bytes`、`quota_bytes`、`required_bytes` 和 `available_bytes`。如果已启用提醒通道，Web/API 的上传、复制、移动和回收站恢复超限会发送 `quota_exceeded` warning 事件，事件详情包含操作类型、访问者范围 `actor_scope`、配额类型和配额字节数；事件详情不包含账号名、主目录、目标路径或配额路径。
-- `storage.directory_quotas` 可配置目录级硬限制。命中的 Web/API 上传、复制、移动、回收站恢复、版本恢复，以及 WebDAV PUT/COPY/MOVE 会返回同样的 `QUOTA_EXCEEDED`，并在 `details` 中额外包含 `quota_type="directory"` 和 `quota_path`。Web/API 目录配额拒绝（包括版本恢复）同样会发送 `quota_exceeded` 提醒事件，但不会暴露命中的目录路径。
-- `storage.directory_access_rules` 可配置目录读写授权。非管理员访问命中规则时按最具体路径规则判断用户、用户组或角色；写授权同时包含读权限。未命中规则的路径继续按 `home_dir` 边界处理。
-- `webdav.auth_type = "basic"` 仍是全局服务凭据兼容模式，不携带应用层 `home_dir` 用户身份。
-- 不允许把当前登录管理员自身角色改为非管理员，错误码为 `SELF_ROLE_CHANGE`；角色更新或状态更新不允许移除最后一个启用管理员，错误码为 `LAST_ADMIN`。
+删除响应示例：
 
-**删除用户**:
-```
-DELETE /api/v1/admin/users/{id}
-```
-
-**响应示例**:
 ```json
 {
   "success": true,
@@ -452,14 +366,10 @@ DELETE /api/v1/admin/users/{id}
 }
 ```
 
-- 用户被删除或禁用后，该用户创建的公开分享不再公开元数据、下载或文件夹列表。相关公开请求返回 `404 Not Found` 和错误码 `SHARE_NOT_FOUND`，避免链接暴露历史 owner 账号是否存在。
+用户被删除或禁用后，该用户创建的公开分享不再暴露元数据、下载或文件夹列表；公开请求返回 `404 Not Found` 和 `SHARE_NOT_FOUND`，避免泄露所有者账户是否曾存在。
 
-**重置用户密码**:
-```
-POST /api/v1/admin/users/{id}/reset-password
-```
+重置密码响应示例：
 
-**响应示例**:
 ```json
 {
   "success": true,
@@ -468,12 +378,8 @@ POST /api/v1/admin/users/{id}/reset-password
 }
 ```
 
-**让用户现有登录失效**:
-```
-POST /api/v1/admin/users/{id}/revoke-sessions
-```
+吊销会话响应示例：
 
-**响应示例**:
 ```json
 {
   "success": true,
@@ -484,21 +390,8 @@ POST /api/v1/admin/users/{id}/revoke-sessions
 }
 ```
 
-- 不修改用户密码或启用状态；该用户已有的 Web cookie 会话、access token 和 refresh token 会在后续请求中失效，需要重新登录。
+启用或禁用响应示例：
 
-**切换用户状态**:
-```
-PUT /api/v1/admin/users/{id}/status
-```
-
-**请求体**:
-```json
-{
-  "disabled": true
-}
-```
-
-**响应示例**:
 ```json
 {
   "success": true,
@@ -509,28 +402,48 @@ PUT /api/v1/admin/users/{id}/status
 }
 ```
 
-**约束**:
-- 仅管理员可调用
-- 不允许禁用当前登录用户自身，错误码为 `SELF_DISABLE`
-- 不允许禁用最后一个仍处于启用状态的管理员，错误码为 `LAST_ADMIN`
-- 当用户被禁用时，服务端会撤销其现有令牌
+用户配额：
 
----
+- `quota_bytes = 0` 表示无限制。
+- 大于零时，服务端配额检查会应用于非管理员 Web/API 上传、复制、移动、回收站恢复。
+- 当 `webdav.auth_type = "users"` 且写入目标位于用户 `home_dir` 内时，WebDAV PUT/COPY/MOVE 也会应用该检查。
+- 检查基于 `home_dir` 下的当前逻辑大小；共享目录应使用 `storage.directory_quotas` 限制。
+- 超出配额返回 `507 Insufficient Storage`，错误码为 `QUOTA_EXCEEDED`。
+- `details` 包含 `quota_type`、`quota_path`、`used_bytes`、`quota_bytes`、`required_bytes` 和 `available_bytes`。
+- 启用提醒通道时，Web/API 上传、复制、移动和回收站恢复的配额拒绝也会发送 `quota_exceeded` warning 事件。
+  事件详情只保留操作、`actor_scope`、配额类型和字节数，不包含账户名、home 目录、目标路径或配额路径。
+
+目录配额：
+
+- `storage.directory_quotas` 可为 MnemoNAS 逻辑目录定义硬限制。
+- 匹配的 Web/API 上传、复制、移动、回收站恢复、版本恢复和 WebDAV PUT/COPY/MOVE 返回同样的 `QUOTA_EXCEEDED` 错误。
+- 目录配额拒绝会在 `details` 中加入 `quota_type="directory"` 与 `quota_path`。
+- Web/API 目录配额拒绝，包括版本恢复，也会发送不含匹配目录路径的 `quota_exceeded` 提醒事件。
+
+`storage.directory_access_rules` 可按用户、用户组或角色授予共享目录读写访问。对非管理员用户，匹配规则使用最具体路径，并在该路径上覆盖 `home_dir` 边界。写入授权同时允许读取；写操作必须有写授权。
+
+`webdav.auth_type = "basic"` 仍是全局服务凭据兼容模式，不携带应用用户的 `home_dir` 身份。
+
+把当前管理员自己的角色改为非管理员会被 `SELF_ROLE_CHANGE` 拒绝。会移除最后一个已启用管理员的角色或状态更新会被 `LAST_ADMIN` 拒绝。
 
 ## 系统端点
 
-### 健康检查
+| 方法 | 路径 | 认证 | 说明 |
+| --- | --- | --- | --- |
+| `GET` | `/health` | 否 | 健康检查 |
+| `HEAD` | `/health` | 否 | 只返回健康状态和响应头，不返回 body |
+| `GET` | `/api/v1/version` | 通常否 | 版本和构建信息 |
+| `GET` | `/api/v1/setup/` | 否 | 初始设置状态 |
+| `POST` | `/api/v1/setup/acknowledge` | 启用认证时需管理员 | 确认已查看初始化信息 |
+| `GET` | `/api/v1/stats` | 是 | 存储统计 |
+| `GET` | `/api/v1/diagnostics` | 管理员 | 诊断信息 |
+| `GET` | `/api/v1/diagnostics-export` | 管理员 | 下载脱敏诊断包 |
+| `GET` | `/api/v1/metrics` | 启用认证时需管理员 | JSON 指标 |
 
-检查系统运行状态。
+Prometheus 不能直接以原生 exposition 格式抓取 `/api/v1/metrics`。需要使用 JSON exporter 或转换层。
 
-```
-GET /health
-HEAD /health
-```
+健康检查响应：
 
-`HEAD /health` 返回与 `GET /health` 相同的状态码和响应头，不返回响应体。
-
-**响应示例**:
 ```json
 {
   "status": "healthy",
@@ -546,41 +459,18 @@ HEAD /health
 }
 ```
 
-**说明**:
-- `uptime` 保留 Go duration 字符串，`uptime_secs` 提供整秒值，便于客户端稳定展示运行时长
-- 当已配置的数据面、缩略图缓存、维护历史、最近操作记录、收藏存储或 WebDAV 凭据子系统未能初始化时，`status` 会降级为 `degraded`
-
-### 版本信息
-
-获取系统版本信息。
-
-```
-GET /api/v1/version
-```
-
-**响应示例**:
-```json
-{
-  "success": true,
-  "data": {
-    "name": "MnemoNAS",
-    "version": "<version>",
-    "build_time": "2024-01-15T09:30:00Z",
-    "go": "go1.25.11"
-  },
-  "timestamp": "2024-01-15T10:00:00Z"
-}
-```
+`uptime` 保留 Go duration 字符串，`uptime_secs` 提供整秒数，便于客户端稳定展示。配置的数据平面、缩略图缓存、维护历史、活动日志、收藏存储或 WebDAV 凭据子系统初始化失败时，`status` 会降级为 `degraded`。
 
 ### 初始化状态
 
-获取首次启动的初始化状态。
+返回首次运行设置状态。
 
-```
+```http
 GET /api/v1/setup/
 ```
 
-**响应示例**:
+响应示例：
+
 ```json
 {
   "success": true,
@@ -592,26 +482,29 @@ GET /api/v1/setup/
 }
 ```
 
-**说明**:
-- 该接口不再返回任何初始密码或用户名
-- 首次启动生成的 Web 登录初始管理员密码仅写入 `auth.users_file` 同目录的 `initial-password.txt`；默认路径为 `<storage.root>/.mnemonas/initial-password.txt`，非交互启动日志只提示该文件路径
-- 该接口返回 setup 专用平铺 JSON，不使用通用 `data` wrapper
+说明：
 
-### 确认已查看初始化信息
+- 该端点不返回初始用户名或密码。
+- 首次运行的 Web 管理员密码只写入 `auth.users_file` 旁的 `initial-password.txt`；默认路径为 `<storage.root>/.mnemonas/initial-password.txt`，非交互启动日志只报告文件路径。
+- 该端点返回 setup 专用的扁平 JSON，不使用通用 `data` 包装。
 
-将首次启动提示标记为已查看，后续 `GET /api/v1/setup/` 会返回 `is_first_run=false`。
+### 确认初始化信息
 
-```
+标记首次运行信息已展示。之后 `GET /api/v1/setup/` 返回 `is_first_run=false`。
+
+```http
 POST /api/v1/setup/acknowledge
 ```
 
-**需要认证**:
-- 当认证启用时，需要管理员权限
-- 当认证未启用时，可匿名调用
+认证要求：
 
-**请求体**: 无
+- 启用认证时需要管理员权限。
+- 禁用认证时可以匿名调用。
 
-**响应示例**:
+请求体：无。
+
+响应示例：
+
 ```json
 {
   "success": true,
@@ -619,586 +512,160 @@ POST /api/v1/setup/acknowledge
 }
 ```
 
-**失败行为**:
-- 认证启用但未登录时返回 `401`
-- 认证启用但非管理员时返回 `403`
-- 运行时 secrets 不可用时返回 `503`，message 为 `setup acknowledge unavailable`
-- 该接口同样返回 setup 专用 JSON，而不是通用 `data` wrapper
+失败行为：
 
-### 存储统计
+- 启用认证且调用方未登录时返回 `401`。
+- 启用认证且调用方不是管理员时返回 `403`。
+- 运行时密钥不可用时返回 `503`，消息为 `setup acknowledge unavailable`。
+- 该端点同样返回 setup 专用 JSON，不使用通用 `data` 包装。
 
-获取存储使用统计。
+`GET /api/v1/stats` 返回各统计组的可用性标志。
 
-```
-GET /api/v1/stats
-```
+管理员响应可包含来自 Linux mountinfo 的磁盘挂载元数据：
 
-**响应示例**:
-```json
-{
-  "success": true,
-  "data": {
-    "total_files_available": true,
-    "storage_stats_available": true,
-    "disk_stats_available": true,
-    "directory_quota_stats_available": true,
-    "total_files": 0,
-    "disk_total": 21474836480,
-    "disk_free": 16106127360,
-    "disk_available": 16106127360,
-    "disk_used": 5368709120,
-    "disk_usage_ratio": 0.25,
-    "disk_filesystem_type": "zfs",
-    "disk_mount_point": "/srv/mnemonas",
-    "disk_mount_source": "tank/mnemonas",
-    "disk_mount_options": "rw,relatime",
-    "disk_native_data_checksum_support": true,
-    "total_size": 5368709120,
-    "unique_size": 2147483648,
-    "dedup_ratio": 0.35,
-    "total_chunks": 1234,
-    "directory_quotas": [
-      {
-        "path": "/team",
-        "quota_bytes": 10737418240,
-        "used_bytes": 5368709120,
-        "available_bytes": 5368709120,
-        "usage_ratio": 0.5,
-        "exists": true,
-        "status": "normal"
-      }
-    ]
-  },
-  "timestamp": "2024-01-15T10:00:00Z"
-}
-```
+- `disk_mount_point`
+- `disk_mount_source`
+- `disk_mount_options`
 
-**说明**:
-- `total_files` 统计当前 `files/` workspace 中的文件数量，不包含目录；直接导入到 `files/` 的现有文件也会计入。
-- `total_chunks` 统计数据面中的存储对象（chunk）数量，不等同于用户文件数。
-- `disk_total` / `disk_used` / `disk_available` 来自托管 `files/` workspace 所在文件系统，可用于显示真实磁盘容量和剩余空间；`disk_free` 是底层文件系统报告的原始空闲空间。
-- `disk_filesystem_type` 是托管 `files/` workspace 所在挂载点的文件系统类型；`disk_mount_point`、`disk_mount_source` 和 `disk_mount_options` 来自 Linux mountinfo，可用于确认实际承载 MnemoNAS 的挂载点和设备/数据集；`disk_mount_point` 中的 secret-like 路径片段会被脱敏，`disk_mount_source` 中的 URL userinfo 和 secret-like 参数会被脱敏，`disk_mount_options` 中的凭据、用户名、密码、密钥和令牌类选项值也会被脱敏；`disk_native_data_checksum_support` 表示是否检测到 ZFS/Btrfs 级别的原生数据校验与 scrub 能力。
-- `directory_quotas` 返回已配置目录配额的当前逻辑用量，`status` 可能为 `normal`、`warning`、`exceeded` 或 `missing`。
-- `total_files_available` 表示文件计数是否可用；`storage_stats_available` 表示数据面统计是否可用；`disk_stats_available` 表示磁盘容量统计是否可用；`directory_quota_stats_available` 表示目录配额用量统计是否可用。
-- 当文件计数、数据面统计、磁盘容量统计或目录配额统计暂不可用时，对应字段会被省略，而不是回填误导性的 `0`。
+这些字段用于确认承载 MnemoNAS 的文件系统、设备或数据集：
 
-### 诊断信息
+- `disk_mount_point` 中类似 secret 的路径片段会被脱敏。
+- `disk_mount_source` 中的 URL userinfo 和类似 secret 的参数会被脱敏。
+- 凭据、用户名、密码、密钥和 token 等敏感 mount option 值也会被脱敏。
 
-获取详细的系统诊断信息。
+管理员响应还可包含 `directory_quota_stats_available` 与 `directory_quotas`。每个目录配额条目包含 `path`、`quota_bytes`、`used_bytes`、`available_bytes`、`usage_ratio`、`exists` 和 `status`。目录配额 `status` 为 `normal`、`warning`、`exceeded` 或 `missing`。
 
-**需要认证**: 当 `auth.enabled = true` 时需要管理员 JWT；未开启认证时可直接访问
-
-```
-GET /api/v1/diagnostics
-```
-
-响应包含 `Cache-Control: no-store`，避免浏览器或代理缓存运行态诊断信息。
-
-**响应示例**:
-```json
-{
-  "success": true,
-  "data": {
-    "timestamp": "2024-01-15T10:00:00Z",
-    "uptime": "24h30m15s",
-    "uptime_secs": 86400,
-    "version": {
-      "name": "MnemoNAS",
-      "version": "<version>",
-      "build_time": "2024-01-15T09:30:00Z",
-      "go": "go1.25.11"
-    },
-    "system": {
-      "filesystem_initialized": true,
-      "dataplane_connected": true,
-      "thumbnail_service_ready": true,
-      "maintenance_history_ready": true,
-      "backup_manager_ready": true,
-      "activity_log_ready": true,
-      "favorites_store_ready": true,
-      "smb_runtime_ready": false
-    },
-    "memory": {
-      "alloc_mb": 50,
-      "total_alloc_mb": 100,
-      "sys_mb": 150,
-      "num_gc": 10
-    },
-    "goroutines": 25,
-    "filesystem": {
-      "trash_stats_available": true,
-      "trash_items": 5,
-      "trash_size": 52428800,
-      "disk_stats_available": true,
-      "disk_total": 21474836480,
-      "disk_free": 16106127360,
-      "disk_available": 16106127360,
-      "disk_used": 5368709120,
-      "disk_usage_ratio": 0.25,
-      "disk_filesystem_type": "zfs",
-      "disk_mount_point": "/srv/mnemonas",
-      "disk_mount_source": "tank/mnemonas",
-      "disk_mount_options": "rw,relatime",
-      "disk_native_data_checksum_support": true
-    },
-    "alerts": {
-      "enabled": true,
-      "runtime_available": true,
-      "check_interval": "30m0s",
-      "threshold_pct": 85,
-      "critical_pct": 92,
-      "min_free_bytes": 21474836480,
-      "cooldown_period": "2h0m0s",
-      "webhook_configured": true,
-      "telegram_configured": true,
-      "dingtalk_configured": true,
-      "email_configured": true,
-      "webhook_method": "POST",
-      "last_level": "warning",
-      "last_checked_at": "2026-04-29T10:30:00Z",
-      "last_used_pct": 87.5,
-      "last_free_bytes": 9663676416
-    },
-    "maintenance": {
-      "history_ready": true,
-      "scrub_schedule_enabled": true,
-      "scrub_schedule_interval": "168h0m0s",
-      "scrub_retry_interval": "1h0m0s",
-      "scrub_max_retries": 1,
-      "last_scrub_status": "completed",
-      "last_scrub_at": "2026-05-13T08:30:00Z",
-      "scrub_failure_retries": 0
-    },
-    "disk_health": {
-      "enabled": true,
-      "runtime_available": true,
-      "check_interval": "1h0m0s",
-      "probe_timeout": "15s",
-      "cooldown_period": "4h0m0s",
-      "temperature_warning_c": 50,
-      "temperature_critical_c": 60,
-      "media_wear_warning_percent": 80,
-      "media_wear_critical_percent": 100,
-      "device_count": 1,
-      "last_status": "ok",
-      "last_checked_at": "2026-05-13T08:30:00Z",
-      "last_warning_count": 0,
-      "last_device_count": 1,
-      "last_critical_devices": 0,
-      "last_warning_devices": 0,
-      "last_unavailable_devices": 0
-    },
-    "smb": {
-      "enabled": true,
-      "runtime_available": false,
-      "implementation": "planned_sidecar",
-      "listen": "127.0.0.1:1445",
-      "server_name": "mnemonas",
-      "signing_required": true,
-      "encryption_required": false,
-      "share_count": 1,
-      "credentials_ready": true,
-      "gateway_configured": true,
-      "message": "SMB is configured but the protocol sidecar is not implemented in this build."
-    },
-    "storage": {
-      "total_chunks": 1234,
-      "total_size": 5368709120,
-      "unique_size": 2147483648,
-      "dedup_ratio": 0.35
-    },
-    "dataplane": {
-      "healthy": true,
-      "version": "<dataplane-version>",
-      "uptime_sec": 86000
-    }
-  },
-  "timestamp": "2024-01-15T10:00:00Z"
-}
-```
-
-**说明**:
-- `filesystem.trash_stats_available` 表示回收站统计是否可用。
-- 当回收站统计暂不可用时，`filesystem.trash_stats_available` 为 `false`，并且 `filesystem.trash_items` 和 `filesystem.trash_size` 会被省略，而不是回填 `0`。
-- `filesystem.disk_stats_available` 表示磁盘容量统计是否可用；不可用时 `filesystem.disk_*` 字段会被省略。可用时会同时包含 `filesystem.disk_filesystem_type`、脱敏后的 `filesystem.disk_mount_point`、脱敏后的 `filesystem.disk_mount_source`、脱敏后的 `filesystem.disk_mount_options` 和 `filesystem.disk_native_data_checksum_support`，用于确认实际承载 MnemoNAS 的挂载点、设备/数据集和文件系统校验能力。
-- `alerts.runtime_available` 表示当前进程是否挂载了提醒监控；`alerts.webhook_configured` 只表示是否配置了 Webhook，不会暴露 `webhook_url` 或 `webhook_headers`。
-- `alerts.telegram_configured` 只表示 Telegram 通知是否具备可用配置，不会暴露 `telegram_bot_token`。
-- `alerts.wecom_configured` 只表示企业微信通知是否具备可用配置，不会暴露 `wecom_webhook_url`。
-- `alerts.dingtalk_configured` 只表示钉钉通知是否具备可用配置，不会暴露 `dingtalk_webhook_url`。
-- `alerts.email_configured` 只表示 SMTP 邮件通知是否具备可用配置，包括启用邮件通知、SMTP 主机、端口、发件人和至少一个非空收件人；不会暴露 `smtp_host`、`smtp_username`、`smtp_password`、`smtp_from` 或 `smtp_to`。
-- `alerts.last_*` 来自上一次提醒检查；尚未完成首次检查时会被省略。
-- `maintenance` 是维护任务脱敏摘要；其中 `scrub_schedule_*` 反映 `[maintenance.scrub]` 周期计划，`last_scrub_*` 来自最近一次 Scrub 历史，`scrub_failure_retries` 只在最近一次 Scrub 失败时出现。
-- `disk_health` 是磁盘健康脱敏摘要；完整设备路径、序列号、温度和 SMART 状态通过管理员维护接口 `GET /api/v1/maintenance/disk-health` 获取。
-- `smb` 是 SMB/Samba 预览状态；当前版本不会启动 SMB 监听器，`runtime_available=false` 表示不可挂载，诊断只展示共享数量和配置状态，不暴露凭据文件内容。
-
-### 指标信息
-
-获取 JSON 格式的指标数据。
-
-**需要认证**: 当 `auth.enabled = true` 时需要管理员 JWT；未开启认证时可直接访问
-
-```
-GET /api/v1/metrics
-```
-
-**响应示例**:
-```json
-{
-  "success": true,
-  "data": {
-    "requests": {
-      "total": 100,
-      "by_method": {"GET": 90},
-      "count_2xx": 95,
-      "count_4xx": 3,
-      "count_5xx": 2,
-      "error_rate": 0.02
-    },
-    "latency": {
-      "avg_ms": 12,
-      "max_ms": 200
-    },
-    "throughput": {
-      "bytes_in": 1024,
-      "bytes_out": 2048,
-      "mb_per_s": 0.5
-    },
-    "uptime_secs": 3600,
-    "slow_requests": [
-      {
-        "method": "GET",
-        "path": "/api/v1/files/",
-        "duration_ms": 180,
-        "time": "2024-01-15T10:00:00Z"
-      }
-    ]
-  },
-  "timestamp": "2024-01-15T10:00:00Z"
-}
-```
-
----
+启用认证时，home 范围非管理员用户不会收到全局磁盘、CAS、文件数量或目录配额统计。
 
 ## 文件操作
 
-### 列出文件
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| `GET` | `/api/v1/files/{path}` | 列出目录或获取文件元数据 |
+| `POST` | `/api/v1/files/{path}` | 上传或覆盖文件 |
+| `DELETE` | `/api/v1/files/{path}` | 启用回收站时移入回收站 |
+| `POST` | `/api/v1/files-move` | 移动或重命名资源 |
+| `POST` | `/api/v1/files-copy` | 递归复制文件或目录 |
+| `GET` | `/api/v1/download/{path}` | 认证后的文件下载或 ZIP 归档下载 |
+| `POST` | `/api/v1/directories/{path}` | 创建目录 |
 
-列出指定目录下的文件和文件夹。
+目录列表权限：
 
-```
-GET /api/v1/files/{path}
-```
+- 对非管理员调用方，目录列表会对请求目录及其直接子项应用相同的 `home_dir` 和最具体的 `storage.directory_access_rules` 检查。
+- 无读取权限的子项会从响应中省略。
+- 请求根目录 `/` 时，只返回用户的 `home_dir` 和可读共享目录的顶层入口，不返回其他全局根内容。
+- 仅授予嵌套共享目录时，已存在的祖先目录可作为只读导航入口；在这些祖先下创建、移动或复制仍需要显式写授权。
 
-**路径参数**:
-- `path`: 目录路径，默认为根目录 `/`
+列表响应会为当前目录和每个条目返回 `capabilities`：
 
-非管理员请求会按 `home_dir` 和最具体的 `storage.directory_access_rules` 判定目标目录及其直接子项；未获读取授权的子项不会出现在列表响应中。请求根目录 `/` 时，响应只包含该用户的 `home_dir` 和可读共享目录的顶层入口，不返回全局根目录的其它内容。若仅授权嵌套共享目录，已存在的祖先目录可用于只读导航，祖先目录下的新建、移动和复制仍需显式写授权。
+- `read` 表示路径可列出或作为导航打开。
+- `concreteRead` 表示允许下载、复制源、分享或收藏等精确资源读取动作。
+- `write` 表示可在该路径或容器内执行变更。
 
-列表响应会在当前目录和每个返回项上包含 `capabilities`。`read` 表示该路径可用于列表或导航，`concreteRead` 表示下载、复制源、分享、收藏等精确资源读取操作可用，`write` 表示该路径或容器可执行修改操作。例如，允许在根目录下上传或新建时，根目录可返回 `write: true`，但仍返回 `concreteRead: false`，因为根目录本身不是可下载或可复制资源。
+例如，根目录可能因允许在根下上传或创建而返回 `write: true`，同时因根目录本身不可下载或复制而返回 `concreteRead: false`。
 
-**查询参数**:
-- 无
+`GET /api/v1/download/{path}` 默认返回文件字节。支持的查询参数：
 
-**响应示例**:
-```json
-{
-  "success": true,
-  "data": {
-    "path": "/documents",
-    "capabilities": {
-      "read": true,
-      "concreteRead": true,
-      "write": true
-    },
-    "files": [
-      {
-        "name": "report.pdf",
-        "path": "/documents/report.pdf",
-        "isDir": false,
-        "size": 1048576,
-        "modTime": "2024-01-15T10:00:00Z",
-        "hash": "abc123...",
-        "versioned": true,
-        "capabilities": {
-          "read": true,
-          "concreteRead": true,
-          "write": true
-        }
-      },
-      {
-        "name": "images",
-        "path": "/documents/images",
-        "isDir": true,
-        "size": 0,
-        "modTime": "2024-01-14T15:30:00Z",
-        "capabilities": {
-          "read": true,
-          "concreteRead": true,
-          "write": true
-        }
-      }
-    ]
-  },
-  "timestamp": "2024-01-15T10:00:00Z"
-}
-```
+- `download=true`：最多出现一次，用于强制附件文件名。
+- `version=<hash>`：最多出现一次，用于下载历史版本。
+- `archive=zip`：最多出现一次，用于将目标路径下载为 ZIP。
 
-### 上传文件
+ZIP 归档语义：
 
-上传文件到指定路径。
+- 适用于目录和单个文件，不能与 `version` 同时使用。
+- 要求目标和所有包含条目具备具体读取权限，不允许只读导航祖先被归档。
+- 最多包含 10000 个条目和 20 GiB 文件内容。
+- 超过条目数量或内容大小上限返回 `413 Request Entity Too Large`。
+- 重复归档条目名称或开始传输前检测到条目快照变化返回 `409 Conflict`。
+- 归档条目名称会拒绝路径穿越、绝对路径、反斜杠、冒号和控制字符，以避免跨平台解压歧义。
+- 归档附件文件名使用目标路径 basename；根路径使用 `mnemonas-files.zip`，已以 `.zip` 结尾的名称不会重复添加后缀。
+- 当前文件和历史版本下载支持 Range 请求；ZIP 归档下载不保证支持 Range。
 
-```
-POST /api/v1/files/{path}
-```
+`POST /api/v1/files/{path}` 要求 `{path}` 指向非根文件路径。根路径或等价根路径上传目标返回 `400 Bad Request` 和 `invalid path`。
 
-**Content-Type**: `application/octet-stream`
+`POST /api/v1/directories/{path}` 只创建一个目录，且直接父目录必须已存在。直接父目录不存在时返回 `409 Conflict`，不会创建中间目录。
 
-**限制**:
-- 单文件最大: 10GB
-- 请求超时: 30 分钟（可通过 server 配置调整）
-
-说明：`{path}` 必须指向非根文件路径。根路径或根等价上传目标会返回 `400 Bad Request` 和 `invalid path`。
-
-**响应示例**:
-```json
-{
-  "success": true,
-  "data": {
-    "path": "/documents/report.pdf"
-  },
-  "message": "file uploaded successfully",
-  "timestamp": "2024-01-15T10:00:00Z"
-}
-```
-
-### 删除文件
-
-删除指定文件或目录（移入回收站）。
-
-```
-DELETE /api/v1/files/{path}
-```
-
-说明：当删除已经生效、但后续目录持久化或历史对象清理失败时，接口仍返回成功状态码，并附带 `Warning` 响应头；`message` 会区分 persistence warning 与 cleanup warning。
-
-常见 `message` 包括：`file deleted with persistence warning`、`file deleted with cleanup warning`、`file deleted with trash cleanup warning`。
-
-**响应示例**:
-```json
-{
-  "success": true,
-  "data": {
-    "path": "/documents/report.pdf"
-  },
-  "message": "file deleted successfully",
-  "timestamp": "2024-01-15T10:00:00Z"
-}
-```
-
-### 移动/重命名文件
-
-```
-POST /api/v1/files-move
-```
-
-**请求体**:
-```json
-{
-  "from": "/documents/old-name.txt",
-  "to": "/documents/new-name.txt"
-}
-```
-
-**响应示例**:
-```json
-{
-  "success": true,
-  "data": {
-    "from": "/documents/old-name.txt",
-    "to": "/documents/new-name.txt"
-  },
-  "message": "file moved successfully",
-  "timestamp": "2024-01-15T10:00:00Z"
-}
-```
-
-说明：目标路径必须不存在，且目标路径不能已有历史版本元数据；目录移动时该检查包含目标路径下的后代路径。发生目标冲突时接口返回 `409 Conflict`，不会执行配额检查或发送配额告警。
-
-说明：当移动或重命名已经完成、但后续工作区持久化失败时，接口仍返回 `200 OK` 并附带 `Warning: 199 MnemoNAS "workspace mutation persistence incomplete"`；响应 `data.warning` 为 `true`，`message` 为 `resource moved with persistence warning`。
-
-### 复制资源
-
-```
-POST /api/v1/files-copy
-```
-
-说明：该 REST 端点支持复制单个文件或递归复制目录。源路径与目标路径必须不同，目标路径必须不存在，目录不能复制到自身后代路径；如需 `Overwrite: T/F` 语义，请使用 WebDAV `COPY`。
-
-说明：当复制已经完成、仅最后的目录持久化失败时，接口返回 `201 Created` 并附带 `Warning: 199 MnemoNAS "workspace mutation persistence incomplete"`；响应 `message` 为 `resource copied with persistence warning`。
-
-**请求体**:
-```json
-{
-  "from": "/documents/source.txt",
-  "to": "/documents/copy.txt"
-}
-```
-
-目录复制示例：
+移动请求：
 
 ```json
 {
-  "from": "/projects/demo",
-  "to": "/projects/demo-copy"
+  "from": "/documents/old.txt",
+  "to": "/documents/new.txt"
 }
 ```
 
-**响应示例**:
+目标路径不能已存在，也不能保留历史版本元数据。目录移动会检查目标下的后代路径元数据。目标冲突会在配额检查前返回 `409 Conflict`，且不发送配额提醒。
+
+移动或重命名已完成但后续 workspace 持久化失败时，端点仍返回 `200 OK`，并附带 `Warning: 199 MnemoNAS "workspace mutation persistence incomplete"`。响应 body 包含 `data.warning: true` 和 `message: "resource moved with persistence warning"`。
+
+复制请求：
+
 ```json
 {
-  "success": true,
-  "data": {
-    "from": "/documents/source.txt",
-    "to": "/documents/copy.txt"
-  },
-  "message": "resource copied successfully",
-  "timestamp": "2024-01-15T10:00:00Z"
+  "from": "/documents/report.txt",
+  "to": "/archive/report.txt"
 }
 ```
 
-### 下载文件（认证）
+该 REST 端点复制单个文件或目录树。源路径和目标路径必须不同，目标路径不能已存在，目录复制不能以源目录的后代为目标。需要 WebDAV `Overwrite: T/F` 语义时使用 WebDAV `COPY`。
 
-```
-GET /api/v1/download/{path}
-```
+复制已完成但后续 workspace 持久化失败时，端点仍返回 `201 Created`，并附带 `Warning: 199 MnemoNAS "workspace mutation persistence incomplete"`。响应 body 包含 `data.warning: true` 和 `message: "resource copied with persistence warning"`。
 
-**需要认证**: 是
-
-**查询参数**:
-- `download`: 最多指定一次；设置为 `true` 时强制下载（设置 `Content-Disposition`）
-- `version`: 最多指定一次；指定版本哈希（64 位 BLAKE3）下载历史版本
-- `archive`: 最多指定一次，且设置为 `zip` 时将目标路径打包为 ZIP；可用于目录或单个文件，不能与 `version` 同时使用。目录归档要求调用者对目标目录及其中每个条目具备具体读取权限，只读导航祖先不能被打包下载。归档响应最多包含 10000 个条目和 20 GiB 文件内容。ZIP 附件名使用目标路径末段；根路径使用 `mnemonas-files.zip`，已以 `.zip` 结尾的名称不会重复追加后缀。
-
-**鉴权说明**:
-- API 客户端可使用现有认证会话或 `Authorization` 请求头
-- 浏览器下载、预览与外部打开使用短期 `HttpOnly`、`SameSite=Strict` `mnemonas_download_access` cookie
-- 当前实现不再支持通过 `auth` 查询参数传递访问令牌
-
-**响应**: 返回文件二进制数据；当前文件与历史版本下载均支持 Range 请求。`archive=zip` 返回 `application/zip` 附件，不保证支持 Range。
-
-### 创建目录
-
-```
-POST /api/v1/directories/{path}
-```
-
-父目录要求：该接口仅在直接父目录已存在时创建目标目录；直接父目录不存在时返回 `409 Conflict`，不会隐式创建中间目录。
-
-持久化警告：当目录已经创建成功、仅最后的工作区持久化失败时，接口返回 `201 Created` 并附带 `Warning: 199 MnemoNAS "workspace mutation persistence incomplete"`；响应 `message` 为 `directory created with persistence warning`。
-
-**响应示例**:
-```json
-{
-  "success": true,
-  "data": {
-    "path": "/documents/new-folder"
-  },
-  "message": "directory created successfully",
-  "timestamp": "2024-01-15T10:00:00Z"
-}
-```
-
----
+其他文件变更也可能在文件操作成功但后续元数据、活动或清理工作未完全完成时，返回成功状态和 `Warning` 响应头。
 
 ## 缩略图
 
-### 获取缩略图
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| `GET` | `/api/v1/thumbnails/{path}` | 获取图片或受支持预览的生成缩略图 |
 
-获取图片文件的缩略图。
+预览和缩略图流程使用下载会话 cookie，因为浏览器媒体元素不能附加 Authorization 头。
 
-```
-GET /api/v1/thumbnails/{path}
-```
+`POST /api/v1/auth/download-session` 可由 Web UI 会话 cookie 或 `Authorization: Bearer <access-token>` 认证，并设置 `mnemonas_download_access`。该 cookie 为 `HttpOnly`、`SameSite=Strict`，作用域为 `/api/v1`。缩略图响应是生成图片，并包含 `nosniff` 和 sandbox CSP。
 
-**需要认证**: 是
+`GET /api/v1/thumbnails/{path}` 接受可选 `size` 查询参数，最多出现一次。支持值为 `small` 或 `s`（150 px）、`medium` 或 `m`（300 px）、`large` 或 `l`（600 px）。省略 `size` 时默认为 `medium`。
 
-**查询参数**:
-- `size`: 缩略图尺寸，至多出现一次；可选值: `small` / `s` (150px), `medium` / `m` (300px), `large` / `l` (600px)，省略时默认为 `medium`
-- 传入未列出的 `size` 值时返回 `400 Bad Request`
-- 源文件超过 100 MiB，或图片尺寸超过 10000x10000 / 5000 万像素时返回 `400 Bad Request`
-
-**鉴权说明**:
-- API 客户端可使用现有认证会话或 `Authorization` 请求头
-- 浏览器缩略图请求依赖短期 `HttpOnly`、`SameSite=Strict` `mnemonas_download_access` cookie
-- 当前实现不再支持通过 `auth` 查询参数传递访问令牌
-
-**支持格式**: JPEG, PNG, GIF, WebP
-
-**响应**: 返回图片二进制数据
-
-缩略图响应是服务端生成的图片，并带 `X-Content-Type-Options: nosniff` 与 sandbox CSP。
-
----
+缩略图生成会拒绝超过 100 MiB 的源文件、超过 10000x10000 的图片尺寸，或超过 5000 万像素的图片。
 
 ## 版本历史
 
-### 列出版本
-
-获取文件的历史版本列表。
-
-```
-GET /api/v1/versions/{path}
-```
-
-**响应示例**:
-```json
-{
-  "success": true,
-  "data": {
-    "path": "/documents/report.pdf",
-    "versions": [
-      {
-        "version": 1,
-        "hash": "abc123...",
-        "size": 1048576,
-        "timestamp": "2024-01-15T10:00:00Z",
-        "comment": "(current)"
-      },
-      {
-        "version": 2,
-        "hash": "def456...",
-        "size": 1024000,
-        "timestamp": "2024-01-14T15:00:00Z",
-        "comment": ""
-      }
-    ]
-  },
-  "timestamp": "2024-01-15T10:00:00Z"
-}
-```
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| `GET` | `/api/v1/versions/{path}` | 列出文件版本 |
+| `POST` | `/api/v1/versions/{hash}/restore` | 将版本恢复到指定路径 |
 
 ### 恢复版本
 
-将文件恢复到指定的历史版本。
+将文件恢复到指定历史版本。
 
-**需要认证**: 是
+**认证**：需要
 
-**权限要求**: 管理员
+**权限**：管理员
 
-```
+```text
 POST /api/v1/versions/{hash}/restore
 ```
 
-**请求参数**:
-- `path`: 文件路径（必填，最多指定一次）
+**查询参数**：
 
-说明：`path` 必须指向非根文件路径。根路径或根等价值会返回 `400 Bad Request` 和 `invalid path`。
+- `path`：文件路径，必填，最多出现一次。
 
-说明：当版本内容已经恢复成功、仅最后的工作区持久化失败时，接口仍返回 `200 OK`，并附带 `Warning: 199 MnemoNAS "workspace mutation persistence incomplete"`；响应 `message` 为 `version restored with persistence warning`。
+`path` 必须指向非根文件路径。根路径或等价根路径返回 `400 Bad Request` 和 `invalid path`。
 
-说明：恢复成功后会写入 `restore` 最近操作记录，`details.restore_source` 为 `version`，`details.hash` 为恢复的版本哈希；若存在工作区持久化告警，还会包含 `details.persistence_warning="true"`。
+版本内容已经恢复但最终 workspace 元数据持久化失败时，API 仍返回 `200 OK`，附带 `Warning: 199 MnemoNAS "workspace mutation persistence incomplete"`，响应 `message` 为 `version restored with persistence warning`。
 
-**响应示例**:
+成功恢复会写入一条 `restore` 活动记录，`details.restore_source` 为 `version`，`details.hash` 为被恢复的版本 hash。workspace 持久化 warning 还会包含 `details.persistence_warning="true"`。
+
+请求示例：
+
+```bash
+curl -X POST \
+  -H "Authorization: Bearer <access-token>" \
+  "http://localhost:8080/api/v1/versions/<hash>/restore?path=/documents/report.txt"
+```
+
+响应示例：
+
 ```json
 {
   "success": true,
@@ -1211,114 +678,44 @@ POST /api/v1/versions/{hash}/restore
 }
 ```
 
----
-
 ## 回收站
 
-### 列出回收站
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| `GET` | `/api/v1/trash` | 列出回收站项目 |
+| `GET` | `/api/v1/trash/{id}` | 获取回收站项目详情 |
+| `POST` | `/api/v1/trash/{id}/restore` | 恢复回收站项目 |
+| `DELETE` | `/api/v1/trash/{id}` | 永久删除单个项目 |
+| `DELETE` | `/api/v1/trash` | 清空回收站 |
 
-获取回收站中的文件列表。
+回收站可见性遵循当前用户配置的 `home_dir` 边界。
 
-```
-GET /api/v1/trash
-```
+`POST /api/v1/trash/{id}/restore` 默认恢复到原路径。
 
-**响应示例**:
-```json
-{
-  "success": true,
-  "data": {
-    "items": [
-      {
-        "id": "trash-123",
-        "originalPath": "/documents/old-file.txt",
-        "deletedAt": "2024-01-15T10:00:00Z",
-        "name": "old-file.txt",
-        "isDir": false,
-        "size": 1024,
-        "hadVersions": true
-      }
-    ],
-    "count": 1,
-    "totalSize": 52428800,
-    "retentionDays": 30,
-    "retentionEnabled": true,
-    "retentionMaxSize": 10737418240
-  },
-  "timestamp": "2024-01-15T10:00:00Z"
-}
-```
+自定义恢复目标：
 
-### 获取回收站项目详情
+- `path` 查询参数最多出现一次，用于恢复到自定义目标路径。
+- 自定义目标必须可写，必须是非根路径，直接父目录必须已存在，目标本身不能已存在。
+- 根路径或等价根目标返回 `400 Bad Request` 和 `invalid path`。
+- 直接父目录不存在时返回 `409 Conflict`，不会创建中间目录。
 
-获取单个回收站项目的详细信息。
-
-```
-GET /api/v1/trash/{id}
-```
-
-### 从回收站恢复
-
-将文件从回收站恢复到原位置。可通过至多出现一次的 `path` 查询参数指定自定义恢复目标路径。
-
-```
-POST /api/v1/trash/{id}/restore
-```
-
-说明：自定义恢复目标必须位于可写路径内、必须是非根路径、直接父目录必须已存在，且目标路径不能已存在；根路径或根等价自定义目标会返回 `400 Bad Request` 和 `invalid path`；直接父目录不存在时返回 `409 Conflict`，不会隐式创建中间目录。若回收站项目包含历史版本，并且原路径已有活动文件，或另一个回收站项目仍引用与来源或目标重叠的版本元数据路径（目录恢复时包括后代路径），接口返回 `409 Conflict`，不会执行配额检查或发送配额告警。
-
-说明：当文件内容已经恢复成功、但 share/favorite 等关联 metadata 恢复失败时，接口仍返回 `200 OK`，并附带 `Warning` 响应头；响应 body 会包含 `warning: true`，`message` 为 `file restored with metadata warning`。
-
-**响应示例**:
-```json
-{
-  "success": true,
-  "data": {
-    "id": "trash-123",
-    "restored": true
-  },
-  "message": "file restored successfully",
-  "timestamp": "2024-01-15T10:00:00Z"
-}
-```
-
-### 永久删除
-
-从回收站中永久删除文件。
-
-```
-DELETE /api/v1/trash/{id}
-```
-
-说明：当回收站条目已经删除成功、但后续历史对象 cleanup 失败时，接口仍返回 `200 OK`，并附带 `Warning` 响应头；响应 body 会包含 `warning: true`，`message` 为 `item permanently deleted with cleanup warning`。
-
-### 清空回收站
-
-清空整个回收站。
-
-```
-DELETE /api/v1/trash
-```
-
-说明：当回收站已经清空、但部分历史对象 cleanup 仅部分完成时，接口仍返回 `200 OK`，并附带 `Warning` 响应头；响应 body 会包含 `warning: true`，`message` 为 `trash emptied with cleanup warning`。若前面已有条目删除成功且带 cleanup warning，随后又有其他条目硬失败，则接口仍返回 `200 OK`，同时保留 `partial: true`、`warning: true`，`message` 为 `trash emptied partially with cleanup warning`。
-
----
+如果回收站项目包含历史版本，且原路径已被 live 文件占用，或其他回收站项目仍引用重叠的源/目标版本元数据路径，端点会在配额检查前返回 `409 Conflict`，且不发送配额提醒。目录恢复也会检查后代路径的重叠版本元数据。
 
 ## 搜索
 
-### 文件搜索
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| `GET` | `/api/v1/search?q={query}` | 按名称搜索文件 |
 
-按文件名搜索文件。
+搜索结果受配置的 `home_dir` 限制。
 
-```
-GET /api/v1/search?q={query}
-```
+查询参数：
 
-**查询参数**:
-- `q`: 搜索关键词（必填，最长 100 字符，必须且只能出现一次）
-- `limit`: 返回数量限制（默认 50，最大 100，至多出现一次）
+- `q`：必填搜索词，最多 100 个字符，必须恰好出现一次。
+- `limit`：最大结果数量。默认值为 50，最大值为 100，最多出现一次。
 
-**响应示例**:
+搜索响应：
+
 ```json
 {
   "success": true,
@@ -1334,163 +731,68 @@ GET /api/v1/search?q={query}
       }
     ],
     "count": 1
-  },
-  "timestamp": "2024-01-15T10:00:00Z"
-}
-```
-
----
-
-## 分享链接
-
-### 获取分享默认策略
-
-```
-GET /api/v1/shares/policy
-```
-
-**响应示例**:
-```json
-{
-  "success": true,
-  "data": {
-    "default_expires_in": "168h",
-    "default_max_access": 0,
-    "policy_rules": [
-      {
-        "path": "/Family",
-        "require_password": true,
-        "max_expires_in": "24h",
-        "max_access": 20
-      }
-    ]
   }
 }
 ```
 
-### 创建分享
+## 分享链接
 
-创建文件或目录的分享链接。
+认证管理端点：
 
-```
-POST /api/v1/shares
-```
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| `POST` | `/api/v1/shares` | 创建分享 |
+| `GET` | `/api/v1/shares` | 列出分享 |
+| `GET` | `/api/v1/shares/policy` | 获取新建分享的默认策略 |
+| `GET` | `/api/v1/shares/{id}` | 获取分享详情 |
+| `PUT` | `/api/v1/shares/{id}` | 更新分享 |
+| `DELETE` | `/api/v1/shares/{id}` | 删除分享 |
 
-**请求体**:
+创建请求：
+
 ```json
 {
   "path": "/documents/report.pdf",
   "type": "file",
-  "password": "optional_password",
+  "password": "optional-password",
   "expires_in": "72h",
   "permission": "read",
-  "max_access": 0,
+  "max_access": 100,
   "description": ""
 }
 ```
 
-**字段说明**:
-- `type`: `file` | `folder`
-- `password`: 可选分享访问密码；非空时最多 72 字节
-- `expires_in`: 可选；省略时使用 `share.default_expires_in`
-- `permission`: `read`
-- `max_access`: 可选；省略时使用 `share.default_max_access`
-- 如果路径命中 `share.policy_rules`，最具体路径规则会生效：`require_password` 会拒绝未设置密码的请求；`max_expires_in` 和 `max_access` 会把超过上限的请求值压到上限
-- 响应中的 `url` 为动态生成字段：当 `share.base_url` 已配置时返回 `<base_url>/s/{id}`；未配置时返回相对路径 `/s/{id}`
-- `share.base_url` 为空时返回相对路径；非空时必须是完整的 `http` 或 `https` URL，不能包含 userinfo、查询参数或片段，且主机名必须有效
-- 认证后的分享响应包含 `risk.level` 和可选 `risk.reasons`，用于标记无密码、不过期、无限访问、覆盖范围过大、长期未访问或即将到期的分享。启用分享创建 30 天后仍未访问会标记为 `unused_enabled`；最近一次访问距今 90 天以上会标记为 `stale_enabled`。
-- 当 `[alerts] enabled = true` 且至少配置一个可用提醒通道时，服务端会按小时扫描启用且 72 小时内到期的分享，并发送聚合 `share_expiring_soon` warning 事件；同一进程内同一分享到期时间只提醒一次。事件 `details` 包含 `source = "share"`、分享数量、扫描窗口、最早到期时间、文件/文件夹分享数量、无密码分享数量和不限访问次数分享数量，不包含分享路径、分享 URL、访问密码或分享 ID。
+`GET /api/v1/shares` 列出当前调用方的分享。管理员可将 `all=true` 指定最多一次，用于列出所有用户的分享。
 
-**响应示例**:
-```json
-{
-  "success": true,
-  "data": {
-    "id": "share-abc123",
-    "path": "/documents/report.pdf",
-    "type": "file",
-    "created_by": "user-123",
-    "created_at": "2024-01-15T10:00:00Z",
-    "expires_at": "2024-02-15T00:00:00Z",
-    "has_password": true,
-    "permission": "read",
-    "enabled": true,
-    "access_count": 0,
-    "max_access": 0,
-    "last_access": null,
-    "description": "",
-    "url": "http://localhost:8080/s/share-abc123",
-    "risk": {
-      "level": "none"
-    }
-  }
-}
-```
+`GET /api/v1/shares/policy` 返回 `default_expires_in`、`default_max_access` 和 `policy_rules` 条目，规则字段包括 `path`、`require_password`、`max_expires_in` 和 `max_access`。
 
-### 列出分享
+创建分享字段规则：
 
-```
-GET /api/v1/shares
-```
+- `type` 为 `file` 或 `folder`；省略时默认为 `file`。
+- `permission` 当前接受 `read` 或省略值。
+- `password` 可选；非空分享密码最长 72 字节。
+- 省略 `expires_in` 或 `max_access` 时，服务端应用 `share.default_expires_in` 和 `share.default_max_access`。
+- 路径匹配 `share.policy_rules` 时，最具体路径规则生效。
+- `require_password` 会拒绝无密码请求，`max_expires_in` 和 `max_access` 会限制超过规则上限的值。
 
-**查询参数**:
-- `all=true`: 管理员查看所有用户的分享，至多出现一次
+认证分享响应包含 `risk.level`（`none`、`low`、`medium`、`high`）和可选原因对象。
 
-**响应示例**:
-```json
-{
-  "success": true,
-  "data": [
-    {
-      "id": "share-abc123",
-      "path": "/documents/report.pdf",
-      "type": "file",
-      "created_by": "user-123",
-      "created_at": "2024-01-15T10:00:00Z",
-      "expires_at": "2024-02-15T00:00:00Z",
-      "has_password": true,
-      "permission": "read",
-      "enabled": true,
-      "access_count": 0,
-      "max_access": 0,
-      "last_access": null,
-      "description": "",
-      "url": "http://localhost:8080/s/share-abc123",
-      "risk": {
-        "level": "medium",
-        "reasons": [
-          {
-            "code": "unlimited_access",
-            "level": "medium",
-            "message": "未设置访问次数上限"
-          }
-        ]
-      }
-    }
-  ]
-}
-```
+风险原因用于标识无密码、长期、宽范围文件夹、无限制、长期未访问或即将过期的链接。已启用分享在创建后 30 天从未被访问会报告为 `unused_enabled`；已启用分享的最近访问超过 90 天会报告为 `stale_enabled`。
 
-### 获取分享详情
+分享过期提醒：
 
-```
-GET /api/v1/shares/{id}
-```
+- 启用 `[alerts] enabled = true` 且至少配置一个提醒通道时，服务端每小时扫描 72 小时内过期的已启用分享。
+- 扫描会发送聚合的 `share_expiring_soon` warning 事件。
+- 同一进程生命周期内，相同分享过期时间只提醒一次。
+- 事件 `details` 包含 `source = "share"`、分享数量、扫描窗口、最早过期时间、文件/文件夹分享数量、无密码分享数量和无限访问分享数量。
+- 事件不包含分享路径、分享 URL、访问密码或分享 ID。
 
-**说明**:
-- 返回中的 `url` 字段遵循相同规则：优先使用 `share.base_url`，否则返回相对路径 `/s/{id}`
+更新请求：
 
-### 更新分享
-
-```
-PUT /api/v1/shares/{id}
-```
-
-**请求体**:
 ```json
 {
   "enabled": true,
-  "password": "optional_password",
+  "password": "optional-password",
   "expires_in": "",
   "permission": "read",
   "max_access": 0,
@@ -1498,160 +800,80 @@ PUT /api/v1/shares/{id}
 }
 ```
 
-**说明**:
-- 更新分享不会改变 `id`；响应中的 `url` 会根据当前运行时 `share.base_url` 重新生成
-- `enabled`、`password`、`expires_in`、`permission`、`max_access` 和 `description` 均为可选字段；省略的字段通常保持原值
-- `password` 设为空字符串会清除密码；`expires_in` 设为空字符串会清除过期时间；`permission` 目前仅支持 `read`
-- 命中 `share.policy_rules` 的分享在更新后仍必须满足路径策略；`require_password` 会拒绝会使分享保持或变为无密码的更新；`max_expires_in` 和 `max_access` 会将显式清空或超过上限的请求值压到策略上限，若请求省略该字段但既有分享缺少对应限制或超过策略上限，也会在本次更新中压到上限
+分享更新规则：
 
-**响应示例**:
-```json
-{
-  "success": true,
-  "data": {
-    "id": "share-abc123",
-    "path": "/documents/report.pdf",
-    "type": "file",
-    "created_by": "user-123",
-    "created_at": "2024-01-15T10:00:00Z",
-    "expires_at": null,
-    "has_password": false,
-    "permission": "read",
-    "enabled": true,
-    "access_count": 0,
-    "max_access": 0,
-    "last_access": null,
-    "description": "",
-    "url": "http://localhost:8080/s/share-abc123",
-    "risk": {
-      "level": "high",
-      "reasons": [
-        {
-          "code": "no_password",
-          "level": "high",
-          "message": "未设置密码，拿到链接的人都能访问"
-        }
-      ]
-    }
-  }
-}
-```
+- 所有更新字段均可选；省略字段通常保留当前值。
+- 空 `password` 清除密码，空 `expires_in` 清除过期时间，`permission` 当前只接受 `read`。
+- 匹配 `share.policy_rules` 的分享更新也必须满足路径规则。
+- `require_password` 会拒绝让匹配分享保持无密码的更新。
+- `max_expires_in` 和 `max_access` 会限制清除或超过配置上限的显式值。
+- 当已存分享没有相应限制或超过路径规则时，省略字段也会被上限限制。
 
-### 删除分享
+公开端点：
 
-```
-DELETE /api/v1/shares/{id}
-```
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| `GET` | `/api/v1/public/shares/{share_id}` | 获取公开分享元数据 |
+| `POST` | `/api/v1/public/shares/{share_id}/access` | 提交密码并获得分享 cookie |
+| `GET` | `/api/v1/public/shares/{share_id}/download` | 下载分享文件或分享文件夹 ZIP |
+| `GET` | `/api/v1/public/shares/{share_id}/items?path=subdir` | 列出分享目录条目 |
+| `GET` | `/api/v1/public/shares/{share_id}/download/{path}` | 下载分享目录中的条目或 ZIP |
 
-**响应示例**:
-```json
-{
-  "success": true,
-  "message": "share deleted successfully"
-}
-```
+密码保护分享在密码验证成功后使用 `HttpOnly`、`SameSite=Strict` cookie。密码失败会被限流。
 
-### 访问分享链接（公开）
+公开分享行为：
 
-公开分享前端入口使用 `/s/{share_id}`；直接访问兼容接口可使用 `GET /s/{share_id}` 和 `POST /s/{share_id}`。公开分享数据 API 推荐使用 `/api/v1/public/shares/*`，避免与前端路由冲突。
+- 无有效访问 cookie 的密码保护分享只返回 `id`、`type`、`has_password` 和 `permission`，不返回 `description` 或文件/文件夹元数据。
+- 公开分享，以及带有效访问 cookie 的密码保护分享，会按情况返回 `description`、`file_name`、`file_size` 或 `folder_items` 元数据。
+- 根文件夹公开分享的 `file_name` 使用稳定展示名 `mnemonas-share`，而不是 `/`。
+- 已授权的零字节文件返回 `file_size: 0`；已授权的空文件夹返回 `folder_items: 0`。
+- `max_access > 0` 且 `access_count` 已达到上限时，公开访问返回 `410 Gone` 和 `SHARE_ACCESS_LIMIT_REACHED`。
+- 当前时间达到或超过 `expires_at` 后，分享视为过期，并返回 `410 Gone` 和 `SHARE_EXPIRED`。
+- 禁用分享返回 `410 Gone` 和 `SHARE_DISABLED`。
+- 由已禁用或已删除所有者创建的分享，在公开元数据、下载和文件夹列表请求中返回 `404 Not Found` 和 `SHARE_NOT_FOUND`。
+- 下载和文件夹列表请求会递增 `access_count`。通过 `POST /api/v1/public/shares/{share_id}/access` 或兼容路径 `POST /s/{share_id}` 验证密码不会递增。
+- `items?path=` 和 `download/{path}` 中的子路径相对于分享文件夹根目录。
+  文件夹列表 `path` 查询参数最多出现一次。
+  控制字符和独立的 `.` 或 `..` 路径段无效，合法名称中的连续点号（例如 `foo..txt`）仍有效。
+  无效子路径不递增 `access_count`。
+- 文件夹列表响应中的 `path` 和 `items[].path` 为相对于分享文件夹根目录的规范路径，不以 `/` 开头；根文件夹响应使用空 `path`。响应只包含对分享所有者仍可见的直接子项。
+- 下载或文件夹列表响应一旦开始写入客户端，该请求即会计数，即使后续流式传输失败。
+- 后端文件 reader 支持 seek 时，公开分享下载支持 HTTP Range 请求。
+  MnemoNAS 本地存储支持该路径，用于断点续传和浏览器媒体播放。
+  Range 响应只有在实际返回至少一个内容字节时才递增 `access_count`；零字节文件的普通完整下载仍会计数。
+- 在公开下载端点上设置 `archive=zip` 最多一次，可将分享文件夹根、子文件夹或文件下载为 ZIP。
+  公开 ZIP 归档返回 `application/zip`，不保证支持 Range，会跳过对分享所有者不再可见的条目，并限制为最多 10000 个条目和 20 GiB 文件内容。
+  超过条目数量或内容大小上限返回 `413 Request Entity Too Large` 和归档错误码；重复归档条目名称或开始传输前检测到条目快照变化返回 `409 Conflict` 和归档错误码。
+  归档条目名称会拒绝路径穿越、绝对路径、反斜杠、冒号和控制字符，以避免跨平台解压歧义。
+  归档附件文件名使用被归档目标名称；分享根路径为 `/` 时使用 `mnemonas-share.zip`，已以 `.zip` 结尾的名称不会重复添加后缀。
+- 返回 `416 Requested Range Not Satisfiable` 的不可满足 Range 请求，以及 `bytes=-0` 等零长度 Range 请求，不递增 `access_count`。
+- 成功密码验证会设置 `HttpOnly`、`SameSite=Strict` 访问 cookie；后续下载和文件夹列表请求使用 cookie，而不是密码查询参数。
+- 公开分享元数据、密码验证响应、文件夹列表响应和公开下载 JSON 错误响应包含 `Cache-Control: private, no-cache`、`Vary: Cookie`、`X-Content-Type-Options: nosniff` 和 `Referrer-Policy: no-referrer`。
+- 重复密码失败返回 `429 Too Many Requests` 和 `SHARE_PASSWORD_RATE_LIMITED`。
+- 密码失败限流按分享 ID 和客户端地址分桶。默认忽略转发头；仅当 `server.trusted_proxy_hops > 0` 且直连来源为 loopback 或属于 `server.trusted_proxy_cidrs` 时，才使用转发头。
+- 兼容路径 `GET /s/{share_id}` 和 `POST /s/{share_id}` 提供相同公开 JSON 行为，适合脚本或非 SPA 直接调用。
+- 兼容路径 `GET /s/{share_id}/items`、`GET /s/{share_id}/download` 和 `GET /s/{share_id}/download/{path}` 提供相同文件夹列表和下载行为，适合脚本或非 SPA 直接调用。
 
-```
-GET /api/v1/public/shares/{share_id}
-```
+## 收藏
 
-如果分享有密码保护，需要 POST 并提供密码：
+收藏路径必须归一化为非根绝对路径：
 
-```
-POST /api/v1/public/shares/{share_id}/access
-```
+- 空值和根路径返回 `400 Bad Request` 和 `MISSING_PATH`。
+- 包含独立 `.` 或 `..` 路径段的值返回 `400 Bad Request` 和 `INVALID_PATH`。
+- 单路径检查端点的 `path` 查询参数最多出现一次。
+- 该校验先于非管理员 `home_dir` 授权。
 
-请求体：
-```json
-{ "password": "xxx" }
-```
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| `GET` | `/api/v1/favorites` | 列出收藏 |
+| `POST` | `/api/v1/favorites` | 添加收藏 |
+| `GET` | `/api/v1/favorites/check?path=/documents/file.pdf` | 检查单个路径 |
+| `POST` | `/api/v1/favorites/check-batch` | 检查多个路径 |
+| `DELETE` | `/api/v1/favorites/{path}` | 移除收藏 |
+| `PATCH` | `/api/v1/favorites/{path}` | 更新备注 |
 
-**公开访问响应示例**:
-```json
-{
-  "id": "share-abc123",
-  "type": "file",
-  "has_password": true,
-  "permission": "read"
-}
-```
+列表响应：
 
-**说明**:
-- 需要密码且尚未通过验证的分享只返回 `id`、`type`、`has_password` 和 `permission`；不会返回 `description` 或文件/文件夹元数据
-- 当分享不需要密码，或已通过密码验证后，会返回 `description` 以及适用的 `file_name` / `file_size` / `folder_items`
-- 根目录文件夹分享的 `file_name` 使用稳定显示名 `mnemonas-share`，不会返回 `/` 作为文件名
-- 零字节文件会返回 `file_size: 0`；空文件夹会返回 `folder_items: 0`
-- 当 `max_access > 0` 且 `access_count` 达到上限时，返回 `410 Gone`，错误码为 `SHARE_ACCESS_LIMIT_REACHED`
-- 当当前时间达到或超过 `expires_at` 时，分享视为已过期，返回 `410 Gone`，错误码为 `SHARE_EXPIRED`
-- 当分享本身被停用时，返回 `410 Gone`，错误码为 `SHARE_DISABLED`
-- 当创建该分享的用户被禁用或删除后，公开访问、下载和文件夹列表都会返回 `404 Not Found`，错误码为 `SHARE_NOT_FOUND`
-- `access_count` 在下载与文件夹列表请求时递增；`POST /api/v1/public/shares/{share_id}/access` 与兼容路径 `POST /s/{share_id}` 的密码验证不会计数
-- `items?path=` 和 `download/{path}` 中的子路径相对于分享文件夹根目录；文件夹列表的 `path` 查询参数至多出现一次。空字符和独立的 `.` / `..` 路径段无效，合法文件名中的连续点号（如 `foo..txt`）不受影响。非法子路径不会递增 `access_count`
-- 文件夹列表响应中的 `path` 与 `items[].path` 均为相对于分享文件夹根目录的规范路径，不以 `/` 开头；根目录响应的 `path` 为空字符串。响应只包含当前目录下对分享 owner 仍可见的直接子项。
-- 一旦下载或文件夹列表响应已经开始向客户端写出字节，即使后续流式传输中断，该次访问仍计入 `access_count`
-- 底层文件读取器支持 seek 时，公开分享下载会处理 HTTP Range 请求；MnemoNAS 本地存储支持该路径，可用于断点续传和浏览器媒体播放
-- 公开下载端点最多指定一次 `archive`，且设置为 `archive=zip` 时，可将分享文件夹根目录、子文件夹或单个文件打包为 ZIP；归档响应返回 `application/zip`，不保证支持 Range，会跳过分享 owner 已不可见的条目，最多包含 10000 个条目和 20 GiB 文件内容。ZIP 附件名使用打包目标名称；分享根目录为 `/` 时使用 `mnemonas-share.zip`，已以 `.zip` 结尾的名称不会重复追加后缀
-- 返回 `416 Requested Range Not Satisfiable` 的不可满足 Range 请求不会递增 `access_count`
-- 密码验证成功后，服务端通过 `HttpOnly`、`SameSite=Strict` cookie 记录访问状态；后续下载和文件夹列表请求不使用 `password` 查询参数
-- 公开分享信息、密码验证响应、文件夹列表响应和公开下载 JSON 错误响应会返回 `Cache-Control: private, no-cache` 和 `Vary: Cookie`，并附带 `X-Content-Type-Options: nosniff` 与 `Referrer-Policy: no-referrer`
-- 连续密码错误达到限制时，返回 `429 Too Many Requests`，错误码为 `SHARE_PASSWORD_RATE_LIMITED`
-- 口令失败限流默认按 share ID 与客户端地址组合统计；默认不信任转发头，只有显式设置 `server.trusted_proxy_hops > 0` 且请求直接来自 loopback 或 `server.trusted_proxy_cidrs` 中的代理地址时，才按 `X-Forwarded-For` 从右侧回溯客户端地址
-- 兼容路径 `GET /s/{share_id}` 与 `POST /s/{share_id}` 保持相同 JSON 行为，适用于非 SPA 或直接脚本调用
-
-**下载文件或分享文件夹 ZIP**:
-```
-GET /api/v1/public/shares/{share_id}/download
-```
-
-**列出分享文件夹内容**:
-```
-GET /api/v1/public/shares/{share_id}/items?path=subdir
-```
-
-**响应示例**:
-```json
-{
-  "path": "subdir",
-  "items": [
-    {
-      "name": "report.pdf",
-      "path": "subdir/report.pdf",
-      "is_dir": false,
-      "size": 1234,
-      "mod_time": "2024-01-15T10:00:00Z"
-    }
-  ]
-}
-```
-
-**下载分享文件夹内文件或 ZIP**:
-```
-GET /api/v1/public/shares/{share_id}/download/{path}
-```
-
-**说明**:
-- `{path}` 需要按路径段进行 URL 编码（保留 `/` 分隔）
-- `archive=zip` 可用于分享文件夹根目录、分享文件夹内子文件夹或单个文件；不设置该参数时，目录路径仍按普通文件下载规则返回错误
-- 分享启用密码时，需先通过 `POST /api/v1/public/shares/{share_id}/access` 完成密码验证，再使用返回的 `HttpOnly`、`SameSite=Strict` cookie 访问下载和文件夹列表接口
-- 兼容路径 `GET /s/{share_id}/items`、`GET /s/{share_id}/download`、`GET /s/{share_id}/download/{path}` 保持相同行为，适用于非 SPA 直接访问
-
----
-
-## 收藏夹
-
-收藏路径必须规范化为非根绝对路径。空值或根路径会以 `400 Bad Request` 和 `MISSING_PATH` 拒绝；包含独立 `.` / `..` 路径段的值会以 `400 Bad Request` 和 `INVALID_PATH` 拒绝。单路径检查接口的 `path` 查询参数至多出现一次。该校验先于非管理员 `home_dir` 授权执行。
-
-### 列出收藏
-
-```
-GET /api/v1/favorites
-```
-
-**响应示例**:
 ```json
 {
   "success": true,
@@ -1669,40 +891,31 @@ GET /api/v1/favorites
 }
 ```
 
-### 添加收藏
+添加请求：
 
-```
-POST /api/v1/favorites
-```
-
-**请求体**:
 ```json
 {
-  "path": "/documents/important.pdf",
-  "note": "可选备注"
+  "path": "/documents/report.pdf",
+  "note": "quarterly report"
 }
 ```
 
-**响应示例**:
+添加响应：
+
 ```json
 {
   "success": true,
   "data": {
-    "path": "/documents/important.pdf",
+    "path": "/documents/report.pdf",
     "user_id": "user-123",
     "created_at": "2024-01-15T10:00:00Z",
-    "note": "可选备注"
+    "note": "quarterly report"
   }
 }
 ```
 
-### 检查是否已收藏
+检查响应：
 
-```
-GET /api/v1/favorites/check?path=/documents/file.pdf
-```
-
-**响应示例**:
 ```json
 {
   "success": true,
@@ -1713,20 +926,16 @@ GET /api/v1/favorites/check?path=/documents/file.pdf
 }
 ```
 
-### 批量检查收藏状态
+批量检查请求：
 
-```
-POST /api/v1/favorites/check-batch
-```
-
-**请求体**:
 ```json
 {
   "paths": ["/file1.txt", "/file2.pdf"]
 }
 ```
 
-**响应示例**:
+批量检查响应：
+
 ```json
 {
   "success": true,
@@ -1739,16 +948,10 @@ POST /api/v1/favorites/check-batch
 }
 ```
 
-### 取消收藏
+对 `DELETE /api/v1/favorites/{path}` 和 `PATCH /api/v1/favorites/{path}`，`{path}` 按路径段 URL 编码，同时保留 `/` 分隔符。成功移除和备注更新响应包含 `success: true`、`data: null` 和状态消息。
 
-```
-DELETE /api/v1/favorites/{path}
-```
+移除响应：
 
-**说明**:
-- `{path}` 需要 URL 编码，支持包含 `/` 的完整路径
-
-**响应示例**:
 ```json
 {
   "success": true,
@@ -1757,16 +960,8 @@ DELETE /api/v1/favorites/{path}
 }
 ```
 
-### 更新备注
+备注更新响应：
 
-```
-PATCH /api/v1/favorites/{path}
-```
-
-**说明**:
-- `{path}` 需要 URL 编码，支持包含 `/` 的完整路径
-
-**响应示例**:
 ```json
 {
   "success": true,
@@ -1775,44 +970,48 @@ PATCH /api/v1/favorites/{path}
 }
 ```
 
----
-
-## 最近操作记录
+## 活动日志
 
 ### 列出活动
 
-获取用户操作日志。
+返回用户活动条目。
 
-**说明**:
-- 启用认证时，管理员可查看全量最近操作记录；普通用户仅返回当前账号自己的活动记录，`user` 查询参数不会越权查看其他账号
-- 系统级事件也会进入最近操作记录，例如磁盘健康周期检查产生的 `disk_health`
-- 手动和周期数据校验会写入 `scrub` 活动；当 Scrub 失败、发现对象问题或结果持久化不完整时，会通过已配置的 Webhook/Telegram/企业微信/钉钉/SMTP 提醒通道发送 `scrub_run` 事件。提醒详情只包含计数、状态、公开错误类型和公开文案，不包含对象 hash 或底层错误文本。
-- `share` 和 `unshare` 活动的 `details` 会记录分享类型、权限、是否需要密码、过期时间和访问次数上限等复核摘要；不会写入分享密码、公开 URL 或分享 ID。
-- 版本恢复会写入 `restore` 活动，`details.restore_source="version"` 表示来源为版本历史，`details.hash` 记录恢复的版本哈希。
-- 未配置最近操作记录时，接口返回空列表
-- 若最近操作记录已配置但初始化失败或当前不可用，接口返回 `503 Service Unavailable`
+说明：
 
-```
+- 启用认证时，管理员可以查看完整活动日志。非管理员用户只接收当前账户可见的条目，`user` 查询参数不能越过该范围。
+- 系统事件也会写入活动日志，包括周期性的 `disk_health` 检查。
+- 手动和定时 Scrub 运行会写入 `scrub` 活动条目。
+  Scrub 失败、对象校验问题和结果持久化不完整会通过已配置的 Webhook、Telegram、WeCom、DingTalk 或 SMTP 提醒通道发送 `scrub_run` 事件。
+  提醒详情使用计数、状态、公开错误类型和公开消息，不包含对象 hash 或底层错误文本。
+- `share` 和 `unshare` 活动的 `details` 包含分享类型、权限、密码要求、过期时间和访问上限等复核元数据，不包含分享密码、公开 URL 或分享 ID。
+- 版本恢复会写入 `restore` 活动，`details.restore_source="version"` 表示来源为版本历史，`details.hash` 为被恢复版本 hash。
+- 未配置活动日志时，API 返回空列表。
+- 活动日志已配置但初始化失败或当前不可用时，API 返回 `503 Service Unavailable`。
+
+```text
 GET /api/v1/activity
 ```
 
-**查询参数**:
-下列查询参数均至多出现一次。
+查询参数：
 
-- `limit`: 返回数量（默认 50，最大 500）
-- `offset`: 分页偏移
-- `action`: 按操作类型过滤；当前支持 `upload`、`download`、`delete`、`rename`、`move`、`copy`、`create`、`restore`、`share`、`unshare`、`favorite`、`unfavorite`、`favorite_note_update`、`login`、`logout`、`trash_restore`、`trash_delete`、`trash_empty`、`disk_health`、`scrub`
-- `action_group`: 按审计分组过滤；当前支持 `share`（分享/取消分享）和 `risk`（删除、移动、重命名、版本恢复、回收站恢复、分享、取消分享、回收站永久删除、清空回收站）
-- `path`: 按路径或目录过滤；匹配该路径本身、其子路径，以及 `from`、`to` 等活动详情中的路径字段
-- `user`: 按用户过滤
-- `since`: 仅返回该时间点之后或等于该时间点的记录，格式为 RFC3339 时间戳
-- `until`: 仅返回该时间点之前或等于该时间点的记录，格式为 RFC3339 时间戳
+每个参数最多出现一次。
 
-`action` 和 `action_group` 可组合使用，此时结果取交集。`path` 会按 MnemoNAS 绝对路径规则规范化，包含独立 `.` / `..` 路径段时返回 `400 Bad Request`。`action`、`action_group` 无效、时间参数格式无效，或 `since` 晚于 `until` 时，接口返回 `400 Bad Request`。
+- `limit`：结果数量。默认值为 50，最大值为 500。
+- `offset`：分页偏移。
+- `action`：按动作类型筛选。
+  当前值包括 `upload`、`download`、`delete`、`rename`、`move`、`copy`、`create`、`restore`、`share`、`unshare`、`favorite`、`unfavorite`、`favorite_note_update`、`login`、`logout`、`trash_restore`、`trash_delete`、`trash_empty`、`disk_health` 和 `scrub`。
+- `action_group`：按复核分组筛选。当前值为 `share`（share/unshare 事件）和 `risk`（delete、move、rename、版本恢复、回收站恢复、share、unshare、永久删除回收站项目和清空回收站事件）。
+- `path`：按路径或目录筛选。筛选会匹配路径本身、后代路径，以及 `from`、`to` 等路径型活动详情。
+- `user`：按用户筛选。
+- `since`：返回此 RFC3339 时间戳或之后的条目。
+- `until`：返回此 RFC3339 时间戳或之前的条目。
 
-普通用户使用 `path` 过滤时，`/` 表示当前账号可见范围；若目标路径不在当前账号可见范围内，接口返回空列表，不会通过已隐藏的活动详情暴露不可见路径是否存在。
+`action` 和 `action_group` 可以组合，结果取交集。`path` 使用 MnemoNAS 绝对路径规则归一化，包含遍历路径段时返回 `400 Bad Request`。无效 `action` 或 `action_group`、无效时间格式，或 `since` 晚于 `until`，都会返回 `400 Bad Request`。
 
-**响应示例**:
+对非管理员用户，`path=/` 表示当前账户可见范围。范围外的 `path` 筛选返回空列表，且不会泄露隐藏活动详情中的匹配记录。
+
+响应示例：
+
 ```json
 {
   "success": true,
@@ -1840,32 +1039,35 @@ GET /api/v1/activity
 
 ### 活动统计
 
-**说明**:
-- 启用认证时，管理员可查看全局统计；普通用户仅返回当前账号自己的活动统计
-- 统计接口支持与列表接口相同的 `action`、`action_group`、`path`、`user`、`since`、`until` 查询参数；启用筛选时，`total`、`today`、`by_action`、`by_user` 和 `risk_summary` 均基于筛选后的记录计算
-- `risk_summary` 汇总高风险操作，包括删除、移动、重命名、分享、取消分享、回收站永久删除和清空回收站；`max_10m` 表示任意 10 分钟窗口内的最高集中次数，`max_10m_started_at` 和 `max_10m_ended_at` 标识该集中窗口，便于复核对应时段的记录
-- 未配置最近操作记录时，接口返回零统计
-- 若最近操作记录已配置但初始化失败或当前不可用，接口返回 `503 Service Unavailable`
+说明：
 
-```
+- 启用认证时，管理员接收全局统计。非管理员用户接收当前账户可见活动条目的统计。
+- 统计端点支持与列表端点相同的 `action`、`action_group`、`path`、`user`、`since` 和 `until` 查询参数。存在筛选条件时，`total`、`today`、`by_action`、`by_user` 和 `risk_summary` 都基于筛选后的记录计算。
+- `risk_summary` 汇总高风险动作，包括 delete、move、rename、share、unshare、永久删除回收站项目和清空回收站。`max_10m` 是任意 10 分钟窗口内匹配高风险动作的最大数量，`max_10m_started_at` 和 `max_10m_ended_at` 标识该窗口，便于聚焦复核。
+- 未配置活动日志时，API 返回零统计。
+- 活动日志已配置但初始化失败或当前不可用时，API 返回 `503 Service Unavailable`。
+
+```text
 GET /api/v1/activity/stats
 ```
 
-**查询参数**:
-下列查询参数均至多出现一次。
+查询参数：
 
-- `action`: 按操作类型过滤；取值同列表接口的 `action`
-- `action_group`: 按审计分组过滤；当前支持 `share` 和 `risk`
-- `path`: 按路径或目录过滤；匹配该路径本身、其子路径，以及 `from`、`to` 等活动详情中的路径字段
-- `user`: 按用户过滤
-- `since`: 仅统计该时间点之后或等于该时间点的记录，格式为 RFC3339 时间戳
-- `until`: 仅统计该时间点之前或等于该时间点的记录，格式为 RFC3339 时间戳
+每个参数最多出现一次。
 
-`action`、`action_group`、`path`、`user`、`since` 和 `until` 的错误处理与列表接口一致。
+- `action`：按动作类型筛选，使用与列表端点相同的值。
+- `action_group`：按复核分组筛选。当前值为 `share` 和 `risk`。
+- `path`：按路径或目录筛选。筛选会匹配路径本身、后代路径，以及 `from`、`to` 等路径型活动详情。
+- `user`：按用户筛选。
+- `since`：统计此 RFC3339 时间戳或之后的条目。
+- `until`：统计此 RFC3339 时间戳或之前的条目。
 
-普通用户使用 `/` 作为 `path` 过滤条件时，统计结果限定在当前账号可见范围内；使用不可见路径作为 `path` 过滤条件时，统计结果返回零值，不会通过活动详情中的路径字段计入隐藏记录。
+`action`、`action_group`、`path`、`user`、`since` 和 `until` 使用与列表端点相同的错误处理。
 
-**响应示例**:
+对非管理员用户，`path=/` 只统计当前账户可见范围内的记录。不可访问的 `path` 筛选返回零统计，且不会统计只由隐藏活动详情匹配的记录。
+
+响应示例：
+
 ```json
 {
   "success": true,
@@ -1893,25 +1095,26 @@ GET /api/v1/activity/stats
 
 ### 列出活动复核记录（管理员）
 
-获取已持久化的活动复核处置记录。
+返回已持久化的活动复核处置记录。
 
-```
+```text
 GET /api/v1/activity/reviews
 ```
 
-**查询参数**:
+查询参数：
 
-- `limit`: 返回数量（默认 20，最大 100）
-- `offset`: 分页偏移
-- `reviewer`: 按复核人过滤
-- `activity_entry_id`: 仅返回关联指定最近操作记录 ID 的复核记录
-- `disposition_status`: 按处置状态过滤，允许值为 `documented`、`confirmed`、`restored`、`disabled`、`needs_follow_up`
-- `since`: 仅返回该时间点之后或等于该时间点的复核记录，格式为 RFC3339 时间戳
-- `until`: 仅返回该时间点之前或等于该时间点的复核记录，格式为 RFC3339 时间戳
+- `limit`：结果数量。默认值为 20，最大值为 100。
+- `offset`：分页偏移。
+- `reviewer`：按复核人筛选。
+- `activity_entry_id`：仅返回关联到指定活动条目 ID 的复核记录。
+- `disposition_status`：按处置状态筛选。允许值为 `documented`、`confirmed`、`restored`、`disabled` 和 `needs_follow_up`。
+- `since`：返回此 RFC3339 时间戳或之后的复核记录。
+- `until`：返回此 RFC3339 时间戳或之前的复核记录。
 
-`since` 晚于 `until`、时间格式无效、`activity_entry_id` 非规范值或 `disposition_status` 非允许值时，接口返回 `400 Bad Request`。
+无效时间格式、`since` 晚于 `until`、非规范 `activity_entry_id` 或不支持的 `disposition_status` 返回 `400 Bad Request`。
 
-**响应示例**:
+响应示例：
+
 ```json
 {
   "success": true,
@@ -1921,9 +1124,9 @@ GET /api/v1/activity/reviews
         "id": "review-123",
         "reviewed_at": "2024-01-15T10:05:00Z",
         "reviewer": "admin",
-        "note": "已确认误删文件已从回收站恢复",
-        "scope_label": "集中窗口",
-        "filter_summary": "分组 高风险变更",
+        "note": "Deleted files were confirmed restored from trash",
+        "scope_label": "concentrated window",
+        "filter_summary": "group risk changes",
         "disposition_status": "restored",
         "action_counts": {
           "delete": 2,
@@ -1948,18 +1151,19 @@ GET /api/v1/activity/reviews
 
 ### 创建活动复核记录（管理员）
 
-记录一次活动复核处置结论。服务端会使用当前认证账号作为 `reviewer`，并写入 `reviewed_at`。
+记录一次活动复核处置。服务端使用当前认证账户作为 `reviewer`，并设置 `reviewed_at`。
 
-```
+```text
 POST /api/v1/activity/reviews
 ```
 
-**请求体**:
+请求体：
+
 ```json
 {
-  "note": "已确认误删文件已从回收站恢复",
-  "scope_label": "当前页",
-  "filter_summary": "分组 高风险变更",
+  "note": "Deleted files were confirmed restored from trash",
+  "scope_label": "current page",
+  "filter_summary": "group risk changes",
   "disposition_status": "restored",
   "action_counts": {
     "delete": 2,
@@ -1975,43 +1179,50 @@ POST /api/v1/activity/reviews
 }
 ```
 
-**说明**:
-- `note`、`scope_label` 和 `activity_entry_ids` 必填；`review_count` 必须大于 0，且 `total_count` 不能小于 `review_count`
-- `disposition_status` 可选，缺省为 `documented`；允许值为 `documented`、`confirmed`、`restored`、`disabled`、`needs_follow_up`
-- `action_counts` 可选；键必须是已知最近操作类型，值必须为正整数，且计数总和必须等于 `review_count`
-- `path_samples` 和 `user_samples` 可选，最多各 10 个；路径会按最近操作路径规则规范化，重复样例会被拒绝
-- 若最近操作记录未配置、初始化失败或当前不可用，接口返回 `503 Service Unavailable`
+说明：
+
+- `note`、`scope_label` 和 `activity_entry_ids` 必填。`review_count` 必须大于零，`total_count` 不能小于 `review_count`。
+- `note`、`scope_label`、`filter_summary` 和 `user_samples` 不能包含控制字符；服务端生成的 `reviewer` 也使用同一文本约束。
+- `disposition_status` 可选，默认值为 `documented`。允许值为 `documented`、`confirmed`、`restored`、`disabled` 和 `needs_follow_up`。
+- `action_counts` 可选。键必须是已知活动动作类型，值必须是正整数，且总和必须等于 `review_count`。
+- `path_samples` 和 `user_samples` 可选，各最多 10 项。路径使用与活动条目相同的逻辑路径规则归一化，重复样本会被拒绝。
+- 活动日志未配置、初始化失败或当前不可用时，API 返回 `503 Service Unavailable`。
 
 ### 更新活动复核记录处置状态（管理员）
 
-更新一条已持久化活动复核记录的当前处置状态，并可同步更新处置备注。服务端会使用当前认证账号覆盖 `reviewer`，并将 `reviewed_at` 更新为本次状态回写时间；未传 `note` 时保留原备注，样例、计数和关联活动记录保持不变。
+更新已持久化活动复核记录的当前处置状态，并可替换处置备注。
 
-```
+服务端将 `reviewer` 替换为当前认证账户，并将 `reviewed_at` 更新为状态写回时间；省略 `note` 时保留之前的备注。样本、计数和关联活动条目保持不变。
+
+```text
 PATCH /api/v1/activity/reviews/{id}
 ```
 
-**请求体**:
+请求体：
+
 ```json
 {
   "disposition_status": "disabled",
-  "note": "分享链接已关闭，访问入口已核对"
+  "note": "The share link was disabled and the access entry point was verified"
 }
 ```
 
-**说明**:
-- `disposition_status` 必填；允许值为 `documented`、`confirmed`、`restored`、`disabled`、`needs_follow_up`
-- `note` 可选；传入时必须为非空文本，服务端会按活动复核备注规则去除首尾空白并校验长度
-- `{id}` 非规范或 `disposition_status` 非允许值时返回 `400 Bad Request`
-- 复核记录不存在时返回 `404 Not Found`
-- 若最近操作记录未配置、初始化失败或当前不可用，接口返回 `503 Service Unavailable`
+说明：
 
-### 清空最近操作记录（管理员）
+- `disposition_status` 必填。允许值为 `documented`、`confirmed`、`restored`、`disabled` 和 `needs_follow_up`。
+- `note` 可选。提供时必须是非空文本，不能包含控制字符；服务端会裁剪首尾空白，并应用活动复核备注长度限制。
+- 非规范 `{id}` 或不支持的 `disposition_status` 返回 `400 Bad Request`。
+- 复核记录不存在时返回 `404 Not Found`。
+- 活动日志未配置、初始化失败或当前不可用时，API 返回 `503 Service Unavailable`。
 
-```
+### 清空活动日志（管理员）
+
+```text
 DELETE /api/v1/activity
 ```
 
-**响应示例**:
+响应示例：
+
 ```json
 {
   "success": true,
@@ -2022,163 +1233,143 @@ DELETE /api/v1/activity
 }
 ```
 
-**说明**:
-- 若最近操作记录已配置但初始化失败或当前不可用，接口返回 `503 Service Unavailable`，而不是伪装成清理成功
+说明：
 
----
+- 活动日志已配置但初始化失败或当前不可用时，API 返回 `503 Service Unavailable`，而不是报告清空成功。
 
-## 设置管理
+## 设置
 
-### 获取设置
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| `GET` | `/api/v1/settings` | 获取当前设置 |
+| `POST` | `/api/v1/settings/access-check` | 检查用户和路径的有效读写权限 |
+| `POST` | `/api/v1/settings/access-preview` | 使用未保存目录规则预览读写权限矩阵 |
+| `POST` | `/api/v1/settings/access-report` | 为一个路径生成所有用户的读写权限矩阵 |
+| `POST` | `/api/v1/settings/alerts/test` | 通过已保存提醒通道发送测试提醒 |
+| `GET` | `/api/v1/settings/security-check` | 运行公网访问安全自检 |
+| `PUT` | `/api/v1/settings` | 更新设置 |
+| `GET` | `/api/v1/settings/webdav-credentials` | 获取当前 WebDAV 凭据状态 |
 
-```
-GET /api/v1/settings
-```
+设置更新可在运行时改变以下配置：
 
-**需要管理员权限**
+- 目录配额、目录访问规则、WebDAV prefix、只读模式、认证模式、分享配置、收藏配置和保留/版本策略。
+- Web UI 认证 token 生命周期。`auth.access_token_ttl` 和 `auth.refresh_token_ttl` 更新必须是正 Go duration 字符串，并立即影响新签发的 Web UI access 和 refresh token；已签发 token 保持原到期时间。
+- Webhook、Telegram、WeCom、DingTalk 和 SMTP 邮件提醒设置。
+- 磁盘健康温度阈值和介质磨损阈值。
+- 定时 Scrub 维护。更新会立即替换运行中的后台调度器。
+- 数据平面连接设置。服务监听/TLS 变更和 CDC chunk-size 变更会保存，但需要重启对应服务后生效。
 
-**响应示例**:
+目录配额和访问规则更新会热应用到 Web/API 和 WebDAV 运行时。
+
+路径字段规则：
+
+- `storage.directory_quotas`、`storage.directory_access_rules` 和 `share.policy_rules` 中的 `path` 字段使用相同的 MnemoNAS 逻辑路径规则。
+- 路径必须以 `/` 开头，不能包含 Windows 或 UNC 语法、反斜杠、查询或片段字符、控制字符，或 `.`/`..` 路径段。
+- Settings API 会裁剪首尾空白，并归一化重复和末尾斜杠；包含 `.` 或 `..` 的路径不会被折叠，而是直接拒绝。
+- Web 设置页的目录配额行式输入会用双引号包裹包含空格或双引号的路径；路径内双引号写作 `\"`，例如 `"/Family Photos" 500 GB`。
+- 目录权限和分享路径策略使用结构化路径输入框，路径含空格或双引号时直接填写路径文本，不需要手动加引号。
+
+Web 设置页会基于当前未保存草稿生成分享策略覆盖摘要。摘要展示默认过期时间、默认访问上限、路径策略数量、要求密码的路径数量，以及宽松默认值或路径策略的注意项。
+
+该摘要仅用于保存前复核；实际强制行为仍来自 Settings API 保存成功后的服务端策略。
+
+设置保存成功后，如果 `storage.directory_access_rules` 或分享策略字段实际发生变化，服务端会向提醒运行时提交 `settings_policy_changed` warning 事件。
+
+触发字段包括 `share.enabled`、`share.default_expires_in`、`share.default_max_access` 和 `share.policy_rules`。
+
+事件 `details` 包含 `source = "settings"`、`changed_sections`、目录访问和分享策略字段是否变化的布尔值，以及规则数量。事件不包含规则路径、`share.base_url`、提醒通道 secret 或用户/成员详情。
+
+归一化后无变化的提交不会发送该事件。提醒投递失败会写日志，但不导致设置保存失败。
+
+### 设置验证规则
+
+`PUT /api/v1/settings` 会按字段组执行服务端校验。无效设置返回 `400 Bad Request`，且不会改变运行中配置。
+
+- 服务器监听：`server.host` 必须为空、`*`、合法主机名、IPv4 或 IPv6 字面量，不能包含端口、空白或控制字符；端口通过 `server.port` 设置。
+- 反向代理：`server.trusted_proxy_hops` 控制是否信任反向代理提供的转发头，用于评估 HTTPS 请求语义。`server.trusted_proxy_cidrs` 列出可提供这些转发头的非 loopback 代理 IP 或 CIDR。
+- Web UI 认证：`auth.access_token_ttl` 和 `auth.refresh_token_ttl` 必须是正 Go duration 字符串。公网部署建议 `auth.access_token_ttl <= 1h`、`auth.refresh_token_ttl <= 720h`。
+- 存储规则：`storage.root` 通过 Settings API 只读。`storage.directory_quotas` 接受 MnemoNAS 逻辑路径和正 `quota_bytes`。
+  `storage.directory_access_rules` 接受 MnemoNAS 逻辑路径，以及针对 `*_users`、`*_groups` 和 `*_roles` 的读写授权；最具体匹配规则生效，写授权同时允许读取。
+- WebDAV 认证：`webdav.auth_type` 支持 `users`、`basic` 和 `none`；空值归一化为 `basic`，`users` 要求应用认证保持启用。
+- WebDAV prefix：`webdav.prefix` 会归一化为以 `/` 开头的 URL path，不能包含反斜杠、`?`、`#` 或控制字符，启用时不能与 `/`、`/api`、`/s` 或 `/health` 重叠。
+- WebDAV 密码：省略 `webdav.password` 会保留现有 WebDAV 密码；提交空字符串会切回 `secrets.json` 中生成的 Basic Auth 密码。
+- URL 字段：非空 `share.base_url`、`alerts.webhook_url`、`alerts.wecom_webhook_url` 和 `alerts.dingtalk_webhook_url` 必须是绝对 `http` 或 `https` URL，并使用合法主机名或 IP 地址。
+  `share.base_url` 还不能包含 userinfo、查询字符串、片段、反斜杠、重复路径斜杠或 `.`/`..` 路径段。
+- 分享策略：`share.default_expires_in` 必须为空、`0` 或非负 Go duration 字符串；`share.default_max_access` 必须大于或等于零。
+  `share.policy_rules` 条目必须使用 MnemoNAS 逻辑路径，并设置 `require_password`、`max_expires_in` 或 `max_access` 中至少一个字段。
+- Alert Webhook：`webhook_method` 支持 `GET` 和 `POST`。自定义 webhook header 使用 `"Key: Value"` 字符串，header 名必须是合法 HTTP token 且大小写不敏感地唯一，值不能包含换行或控制字符。
+- 存储容量提醒：`storage_alert` 投递保留容量指标和 `path_scope = "configured_storage_root"`，但将 `path` 设为 `<omitted>`，文本通道不包含原始存储根目录路径。
+- Secret 响应：`GET /api/v1/settings` 不返回 Webhook URL/header、WeCom webhook URL 或 DingTalk webhook URL。
+  `alerts.webhook_url`、`alerts.webhook_headers`、`alerts.wecom_webhook_url` 和 `alerts.dingtalk_webhook_url` 对已配置值使用 `<redacted>` 占位符，并通过 `*_configured` 布尔值表示是否存在。
+- Secret 更新：`PUT /api/v1/settings` 可以提交真实 Webhook URL/header、WeCom webhook URL 和 DingTalk webhook URL 来更新配置；提交相同的 `<redacted>` 占位符会保留对应现有值。
+  省略 `alerts.telegram_bot_token` 或 `alerts.smtp_password` 会保留已存 secret；提交空字符串会清除对应 secret。
+- Telegram：`alerts.telegram_enabled` 仍为 true 时，清空 `alerts.telegram_bot_token` 无效。
+  启用 `alerts.telegram_enabled` 时，`telegram_bot_token` 和 `telegram_chat_id` 必填；bot token 不能包含空白、`/`、`?` 或 `#`，且永远不会由 settings 或 diagnostics 响应返回。
+- WeCom 和 DingTalk：启用 `alerts.wecom_enabled` 时，`wecom_webhook_url` 必填且永远不会由 settings 或 diagnostics 响应返回。启用 `alerts.dingtalk_enabled` 时，`dingtalk_webhook_url` 必填且永远不会由 settings 或 diagnostics 响应返回。
+- 邮件提醒：启用 `alerts.email_enabled` 时，`smtp_host`、`smtp_from` 和至少一个 `smtp_to` 收件人必填；`smtp_port` 必须为 1-65535，发件人和收件人必须是合法邮箱地址。
+- 磁盘健康：`disk_health.command` 必须是单个可执行文件名或绝对路径，`disk_health.media_wear_critical_percent` 不能低于 `disk_health.media_wear_warning_percent`，每个 `disk_health.devices[].path` 必须是绝对路径。
+- 维护：`maintenance.scrub.schedule_interval` 和 `maintenance.scrub.retry_interval` 必须是正 duration 字符串，`maintenance.scrub.max_retries` 必须大于或等于零。
+- 数据面：`dataplane.grpc_address` 必须是合法 `host:port` 地址，端口在 1-65535 范围内，且不含空白或控制字符。
+  CDC chunk size 必须满足 `65536 <= min_chunk_size < avg_chunk_size < max_chunk_size <= 67108864`。
+
+设置响应或请求片段示例（展示字段形状；`storage.root` 通过 Settings API 只读）：
+
 ```json
 {
-  "success": true,
-  "data": {
-    "server": {
-      "host": "0.0.0.0",
-      "port": 8080,
-      "read_timeout": "30s",
-      "write_timeout": "60s",
-      "idle_timeout": "120s",
-      "trusted_proxy_hops": 1,
-      "trusted_proxy_cidrs": ["10.0.0.0/8"],
-      "tls": {
-        "enabled": false,
-        "cert_file": "",
-        "key_file": "",
-        "auto_generate": true,
-        "cert_dir": "/srv/mnemonas/.mnemonas/certs"
-      }
-    },
-    "storage": {
-      "root": "/srv/mnemonas",
-      "directory_quotas": [
-        { "path": "/team", "quota_bytes": 1099511627776 }
-      ],
-      "directory_access_rules": [
-        { "path": "/team", "read_groups": ["family"], "write_groups": ["editors"] }
-      ]
-    },
-    "retention": {
-      "max_versions": 50,
-      "max_age": "2160h",
-      "min_free_space": 10737418240,
-      "gc_interval": "24h"
-    },
-    "versioning": {
-      "auto_versioned_extensions": [
-        ".md", ".txt", ".org", ".rst", ".tex",
-        ".go", ".rs", ".py", ".ts", ".js", ".tsx", ".jsx",
-        ".c", ".cpp", ".h", ".java", ".kt", ".swift",
-        ".toml", ".yaml", ".yml", ".json", ".xml",
-        ".sh", ".bash", ".zsh", ".fish"
-      ],
-      "auto_versioned_filenames": [
-        "Makefile", "Dockerfile", "Vagrantfile",
-        "LICENSE", "README", "CHANGELOG",
-        ".gitignore", ".dockerignore", ".editorconfig"
-      ],
-      "max_versioned_size": 104857600
-    },
-    "webdav": {
-      "enabled": true,
-      "runtime_enabled": true,
-      "prefix": "/dav",
-      "read_only": false,
-      "auth_type": "basic",
-      "username": "admin"
-    },
-    "share": {
-      "enabled": false,
-      "base_url": "",
-      "default_expires_in": "168h",
-      "default_max_access": 0,
-      "policy_rules": []
-    },
-    "favorites": {
-      "enabled": true,
-      "runtime_available": true
-    },
-    "trash": {
-      "enabled": true,
-      "retention_days": 30,
-      "max_size": 10737418240
-    },
-    "alerts": {
-      "enabled": false,
-      "check_interval": "1h",
-      "threshold_pct": 90,
-      "critical_pct": 95,
-      "min_free_bytes": 10737418240,
-      "cooldown_period": "4h",
-      "webhook_url": "",
-      "webhook_url_configured": false,
-      "webhook_method": "POST",
-      "webhook_headers": [],
-      "webhook_headers_configured": false,
-      "telegram_enabled": false,
-      "telegram_bot_token_configured": false,
-      "telegram_chat_id": "",
-      "wecom_enabled": false,
-      "wecom_webhook_url": "",
-      "wecom_webhook_url_configured": false,
-      "dingtalk_enabled": false,
-      "dingtalk_webhook_url": "",
-      "dingtalk_webhook_url_configured": false
-    },
-    "maintenance": {
-      "scrub": {
-        "enabled": false,
-        "schedule_interval": "168h0m0s",
-        "retry_interval": "1h0m0s",
-        "max_retries": 1
-      }
-    },
-    "dataplane": {
-      "grpc_address": "127.0.0.1:9090",
-      "timeout": "30s",
-      "max_retries": 3
-    },
-    "cdc": {
-      "min_chunk_size": 262144,
-      "avg_chunk_size": 1048576,
-      "max_chunk_size": 4194304
+  "server": {
+    "tls": {
+      "cert_dir": "/srv/mnemonas/.mnemonas/certs"
     }
+  },
+  "storage": {
+    "root": "/srv/mnemonas"
   }
 }
 ```
 
-- `webdav.runtime_enabled` 表示当前进程中的 WebDAV 服务是否处于运行状态；当 `webdav.enabled = true` 但自动生成凭据不可用时，该值为 `false`
-- `favorites.runtime_available` 表示当前进程中的收藏接口是否可用；当 `favorites.enabled = true` 但收藏存储初始化失败或运行态依赖缺失时，该值为 `false`
+### 发送测试提醒
 
-### 检查有效目录权限
-
-```
-POST /api/v1/settings/access-check
+```text
+POST /api/v1/settings/alerts/test
 ```
 
-**需要管理员权限**
+**需要管理员访问**
 
-请求体：
+该端点通过当前已保存的提醒通道发送一个 `alert_test` warning 事件。调用要求如下：
+
+- `[alerts] enabled = true`。
+- 至少配置一个 Webhook、Telegram、WeCom、DingTalk 或 SMTP 邮件通道。
+- 提醒运行时可用。
+
+WeCom 和 DingTalk 通道仅在通道启用且 webhook URL 非空时视为已配置。SMTP 邮件通道仅在启用邮件提醒，且 SMTP host、port、sender 和至少一个非空 recipient 都存在时视为已配置。
+
+测试事件详情只包含 `trigger = "manual_test"`、`source = "settings"` 和通道列表；不包含 Webhook、Telegram、WeCom、DingTalk 或 SMTP secret。
+
+响应示例：
 
 ```json
 {
-  "username": "alice",
-  "path": "/team/report.pdf"
+  "success": true,
+  "data": {
+    "event_type": "alert_test",
+    "channels": ["webhook", "email"]
+  },
+  "message": "test alert sent"
 }
 ```
 
-响应会同时返回 `read` 和 `write` 判定。每个判定包含 `allowed`、`source`、可选 `message`，以及由目录授权决定时的 `matched_rule`。`source` 可能是 `admin`、`home_dir`、`directory_access_rule`、`invalid_home_dir`、`user_disabled`、`user_not_found` 或 `auth_disabled`。当只读导航祖先由嵌套目录授权放行时，`matched_rule` 指向对应的后代规则。
+提醒禁用或缺少通道时返回 `409 Conflict`；提醒运行时不可用时返回 `503 Service Unavailable`；投递失败时返回通用 `500` 错误，不暴露通道 secret。
 
-**响应示例**:
+`POST /api/v1/settings/access-check` 接受 `{"username":"alice","path":"/team/report.pdf"}`，并返回 read/write 决策。
+
+每个决策包含 `allowed`、`source`、可选 `message`，以及由目录访问规则决定结果时的 `matched_rule`。
+
+`source` 可为 `admin`、`home_dir`、`directory_access_rule`、`invalid_home_dir`、`user_disabled`、`user_not_found` 或 `auth_disabled`。
+
+嵌套目录授权仅在后代目录当前存在时允许只读导航祖先；此时 `matched_rule` 指向该后代规则。
+
+Access-check 响应：
+
 ```json
 {
   "success": true,
@@ -2213,23 +1404,13 @@ POST /api/v1/settings/access-check
 }
 ```
 
-### 目录权限用户矩阵
+`POST /api/v1/settings/access-report` 接受 `{"path":"/team/report.pdf"}`，为每个用户返回相同 read/write 决策。
 
-```
-POST /api/v1/settings/access-report
-```
+响应包含 `summary`，其中包括用户数量、允许/拒绝读取数量、允许/拒绝写入数量和相关分享数量。
 
-**需要管理员权限**
+可选 `shares` 列表报告与路径精确匹配、覆盖该路径的父文件夹分享，以及被检查目录下的子分享。该端点用于管理员在修改共享目录或分享规则前检查权限影响。
 
-请求体：
-
-```json
-{
-  "path": "/team/report.pdf"
-}
-```
-
-响应会对所有用户生成同一路径下的读写判定，并返回 `summary` 汇总：
+Access-report 响应：
 
 ```json
 {
@@ -2277,34 +1458,12 @@ POST /api/v1/settings/access-report
 }
 ```
 
-`shares[].relation` 说明分享与检查路径的关系：`exact` 表示直接分享该路径，`covers_path` 表示父级分享会覆盖该路径，`inside_path` 表示被检查目录下存在子级分享。
+`POST /api/v1/settings/access-preview` 接受 `{"path":"/team/report.pdf","directory_access_rules":[...]}`，只使用提交的未保存规则返回相同用户矩阵和相关分享影响。
 
-### 预览目录权限变更
+该端点不持久化设置，并返回 `preview: true`。嵌套目录授权同样仅在后代目录当前存在时按只读导航祖先评估，因此可在保存家庭或小团队共享目录规则前预览实际影响。
 
-```
-POST /api/v1/settings/access-preview
-```
+Access-preview 响应：
 
-**需要管理员权限**
-
-请求体：
-
-```json
-{
-  "path": "/team/report.pdf",
-  "directory_access_rules": [
-    {
-      "path": "/team",
-      "read_groups": ["family"],
-      "write_groups": ["parents"]
-    }
-  ]
-}
-```
-
-该接口不保存配置，只用请求里的 `directory_access_rules` 临时生成同样的用户矩阵和相关分享影响，并在响应里返回 `preview: true`。嵌套目录授权同样会把祖先路径评估为只读导航入口。适合在保存共享目录权限前检查家庭成员或小团队成员是否会被误拒绝、误开放。
-
-**响应示例**:
 ```json
 {
   "success": true,
@@ -2337,17 +1496,27 @@ POST /api/v1/settings/access-preview
 }
 ```
 
+WebDAV 凭据响应：
+
+```json
+{
+  "success": true,
+  "data": {
+    "enabled": true,
+    "url": "/dav/",
+    "auth_type": "basic",
+    "username": "admin",
+    "password": "***"
+  }
+}
+```
+
+`password` 字段只在运行中的 WebDAV 服务使用自动生成的 Basic Auth 密码时出现。自定义 WebDAV 密码不会返回。
+
 ### 公网访问安全自检
 
-```
-GET /api/v1/settings/security-check
-```
+`GET /api/v1/settings/security-check` 需要管理员访问。该端点返回 Web UI 安全自检使用的运行时检查，也可由部署自动化消费：
 
-**需要管理员权限**
-
-该接口返回当前运行态中与公网暴露直接相关的配置检查结果。它用于 Web UI 的“公网访问安全自检”，也可供自动化部署工具读取。
-
-**响应示例**:
 ```json
 {
   "success": true,
@@ -2358,22 +1527,12 @@ GET /api/v1/settings/security-check
       {
         "id": "https_request",
         "status": "warning",
-        "title": "当前访问不是 HTTPS",
-        "message": "公网访问前应通过内置 TLS 或受信反向代理提供 HTTPS。",
+        "title": "Current request is not HTTPS",
+        "message": "Public access should use built-in TLS or a trusted HTTPS reverse proxy.",
         "details": {
           "direct_tls": false,
           "forwarded_proto": "",
           "trusted_forwarded_source": true
-        }
-      },
-      {
-        "id": "server_listen",
-        "status": "warning",
-        "title": "Web 服务监听范围偏宽",
-        "message": "Web 服务当前监听非本机地址；公网部署时建议只监听 127.0.0.1 或 ::1，并由反向代理对外暴露。",
-        "details": {
-          "host": "0.0.0.0",
-          "port": 8080
         }
       }
     ],
@@ -2407,675 +1566,110 @@ GET /api/v1/settings/security-check
 }
 ```
 
-**字段说明**:
-- `data.status` 是整体状态，取值为 `pass`、`warning`、`block`
-- `checks[].status` 是单项状态，取值同上；存在任一 `block` 时整体为 `block`，否则存在任一 `warning` 时整体为 `warning`
-- `checks[].id` 当前包含 `auth_enabled`、`session_token_ttl`、`login_rate_limit`、`browser_session_boundary`、`public_share_boundary`、`unsafe_no_auth_override`、`config_file_access`、`secrets_file_access`、`users_file_access`、`https_request`、`public_http_exposure`、`trusted_proxy_or_tls`、`forwarded_proto_trust`、`server_listen`、`admin_accounts`、`dataplane_listen`、`dataplane_http_listen`、`webdav_prefix`、`webdav_auth`、`smb_preview`、`share_base_url`、`share_default_policy`、`backup_local_destinations`、`initial_password_file`
-- `session_token_ttl` 检查 Web UI 访问令牌和刷新令牌有效期；公网部署建议 `auth.access_token_ttl <= 1h`、`auth.refresh_token_ttl <= 720h`，超过建议值会标记为 `warning`，响应只返回 TTL 文本、秒数和是否过长，不返回任何令牌内容
-- `login_rate_limit` 检查 Web UI 连续失败登录限速；启用认证后，默认按用户名和客户端 IP 统计失败次数，达到阈值后短期锁定并发送 `login_rate_limited` 提醒事件；响应返回阈值、统计窗口、锁定时长、提醒冷却时间和 key 范围，不返回用户名、密码或 token
-- `browser_session_boundary` 检查当前浏览器访问路径是否会让 Web UI 会话 cookie 和下载 cookie 带 `Secure` 标记，并确认浏览器写请求同源元数据校验处于启用状态；未启用 Web 登录认证或当前请求未被识别为 HTTPS 时会标记为 `warning`，响应只返回 cookie 属性、请求 scheme、代理信任和同源校验布尔值，不返回任何 token 或 cookie 内容
-- `public_share_boundary` 在分享功能启用时检查公开分享访问 cookie、口令失败限速与公开分享 JSON 响应缓存边界；如果 HttpOnly、SameSite、cookie 路径范围、失败限速、`Cache-Control: private`、`Cache-Control: no-cache`、`Vary: Cookie`、`nosniff` 或 `Referrer-Policy: no-referrer` 边界异常，会标记为 `block`；只有这些边界满足要求但当前请求未被识别为 HTTPS 时，才会将受密码保护分享 cookie 缺少 `Secure` 标记为 `warning`；响应只返回 cookie 属性和路径范围状态、公开分享 JSON 缓存与 referrer 边界状态、`Vary: Cookie`、`nosniff` 和口令失败限速参数，不返回分享口令、cookie 值或分享 ID
-- `config_file_access` 检查当前运行时使用的配置文件；路径为空、缺失或无法确认时标记为 `warning`，路径组件包含符号链接、文件本身是符号链接或非普通文件时标记为 `block`，文件允许组或其他用户访问时标记为 `warning`；响应会在 `details.path`、`details.mode`、`details.path_kind`、`details.symlink_component` 和 `details.group_or_other_access` 中返回可观测路径、权限和类型信息，其中 `details.path_kind` 可为 `missing`、`regular`、`symlink`、`symlink_component` 或 `not_regular`
-- `secrets_file_access` 在 WebDAV 使用 `secrets.json` 中的自动生成 Basic 密码时检查凭据文件；未使用该自动密码时为 `pass`，路径为空、缺失、无法确认、路径组件包含符号链接、文件本身是符号链接或非普通文件时标记为 `block`，文件允许组或其他用户访问时标记为 `warning`；响应会在 `details.path`、`details.mode`、`details.path_kind`、`details.symlink_component`、`details.group_or_other_access`、`details.generated_webdav_password_required`、`details.webdav_enabled` 和 `details.webdav_auth_type` 中返回可观测元数据，不返回任何密码内容
-- `users_file_access` 检查当前运行时使用的用户文件；路径缺失、目录不可读、目录路径包含符号链接组件、目录本身是符号链接、文件不可读、文件是符号链接或非普通文件会标记为 `block`，目录或文件仍允许组或其他用户访问会标记为 `warning`；响应会在 `details.path`、`details.dir`、`details.file_mode`、`details.dir_mode`、`details.file_kind`、`details.dir_kind`、`details.symlink_component`、`details.file_group_or_other_access` 和 `details.dir_group_or_other_access` 中返回可观测的路径、权限和类型信息，其中路径组件符号链接会把 `details.dir_kind` 设为 `symlink_component`
-- `admin_accounts` 检查启用中的管理员数量；认证关闭或用户存储不可读时为 `warning`，没有启用中的管理员为 `block`，只有一个启用中的管理员为 `warning`，两个及以上为 `pass`；可读时会在 `details.active_admins` 返回启用管理员数量
-- `initial_password_file` 检查 `auth.users_file` 同目录的 `initial-password.txt`；如果文件已不存在则为 `pass`，并在 `details.path_kind` 返回 `missing`；如果无法确定检查路径，或发现普通文件残留、符号链接、路径组件符号链接、非普通文件，均为 `block`，响应会在 `details.path` 返回检查路径；路径为空时表示无法从用户文件路径推导初始密码文件位置；可观测时会通过 `details.mode`、`details.path_kind` 和 `details.symlink_component` 返回权限和路径类型，其中符号链接、路径组件符号链接和非普通文件会在 `details.path_kind` 中分别返回 `symlink`、`symlink_component` 或 `not_regular`
-- `webdav_prefix` 在 WebDAV 启用时检查 WebDAV URL 前缀；空前缀、站点根路径、包含无效路径字符，或位于 `/api`、`/s`、`/health` 保留路由下的前缀会标记为 `block`，并返回 `details.prefix_risk` 和 `details.normalized_prefix`
-- `webdav_auth` 在 WebDAV 启用时检查认证方式；`auth_type = "none"` 会在非本机监听时标记为 `block`。全局 Basic Auth 显式配置常见占位密码或少于 16 字符的密码会标记为需更换的 `warning`，响应只包含 `password_source` 和 `password_risk` 类型，不返回密码值。使用自动生成密码时，运行态密码不可用会标记为 `block` 并返回 `generated_password_available=false`，自动生成密码偏弱会标记为 `warning`
-- `share_base_url` 在分享功能启用时检查公网分享链接基础 URL；HTTP、非 443 的 HTTPS 端口、包含 userinfo、查询参数、片段或主机名格式无效的 URL 会标记为 `block`，空值、其他域名或以 `/s` 分享路由结尾的基础路径会保留为需人工复核的告警
-- `share_default_policy` 在分享功能启用时检查新分享默认有效期和默认访问次数；默认不过期、长于 `720h` 或默认访问次数不限制会标记为 `warning`，负值会标记为 `block`，响应只返回默认有效期、默认访问次数和策略规则数量
-- `backup_local_destinations` 检查启用中的本地备份作业目标；没有本地作业或本地作业均停用时为 `pass`，目标为空、不是绝对路径、位于备份来源或 `storage.root` 内、路径组件包含符号链接、目标本身是符号链接或非目录时标记为 `block`，目标目录不存在、无法确认或没有写权限位时标记为 `warning`；响应会在 `details.job_id`、`details.destination`、`details.source`、`details.storage_root`、`details.destination_kind`、`details.symlink_component`、`details.local_job_count` 和 `details.enabled_local_job_count` 中返回可观测元数据
-- `forwarded_proto_trust` 检查 `X-Forwarded-Proto` 与受信代理配置：未配置 `trusted_proxy_hops` 时出现该 header 会标记为 `warning`，header 来自非受信来源会标记为 `block`，来自受信来源但值不是 `https` 会标记为 `warning`
-- `request` 描述当前请求如何被服务端识别，例如是否 HTTPS、是否来自受信转发源、`X-Forwarded-Proto` 是否被采纳
-- `config` 描述自检使用的关键运行配置
+`data.status` 和 `checks[].status` 使用 `pass`、`warning` 或 `block`。聚合状态中 `block` 优先于 `warning`，`warning` 优先于 `pass`。
+
+当前检查项 ID 包括
+`auth_enabled`、`session_token_ttl`、`login_rate_limit`、`browser_session_boundary`、`public_share_boundary`、`unsafe_no_auth_override`、
+`config_file_access`、`secrets_file_access`、`users_file_access`、`https_request`、`public_http_exposure`、`trusted_proxy_or_tls`、
+`forwarded_proto_trust`、`server_listen`、`admin_accounts`、`dataplane_listen`、`dataplane_http_listen`、`webdav_prefix`、`webdav_auth`、
+`smb_preview`、`share_base_url`、`share_default_policy`、`backup_local_destinations` 和 `initial_password_file`。
+
+按范围分组如下：
+
+- 认证与会话：`auth_enabled`、`session_token_ttl`、`login_rate_limit`、`browser_session_boundary`、`unsafe_no_auth_override`、`admin_accounts`、`initial_password_file`。
+- 公网入口与代理：`https_request`、`public_http_exposure`、`trusted_proxy_or_tls`、`forwarded_proto_trust`、`server_listen`。
+- 运行时文件权限：`config_file_access`、`secrets_file_access`、`users_file_access`。
+- 数据面和协议入口：`dataplane_listen`、`dataplane_http_listen`、`webdav_prefix`、`webdav_auth`、`smb_preview`。
+- 分享和备份策略：`public_share_boundary`、`share_base_url`、`share_default_policy`、`backup_local_destinations`。
+
+主要检查语义如下：
+
+- `session_token_ttl` 检查 Web UI access-token 和 refresh-token 生命周期。
+  公网部署建议 `auth.access_token_ttl <= 1h`、`auth.refresh_token_ttl <= 720h`，更长值报告为 `warning`。
+  详情只包含 TTL 文本、秒数和长 TTL 布尔值，不包含 token 内容。
+- `login_rate_limit` 检查 Web UI 连续登录失败节流。
+  启用认证时，失败按用户名和客户端 IP 计数，达到阈值后应用短锁定，并发送 `login_rate_limited` 提醒事件。
+  详情只包含阈值、计数窗口、锁定时长、提醒冷却和 key scope，不包含用户名、密码或 token。
+- `browser_session_boundary` 检查当前浏览器访问路径是否会为 Web UI 会话 cookie 和下载 cookie 设置 `Secure`，并确认浏览器写请求的 same-origin 元数据校验已启用。
+  Web 登录认证禁用或当前请求未识别为 HTTPS 时报告 `warning`。
+  详情只包含 cookie 属性、请求 scheme、代理信任和 same-origin 校验布尔值，不包含 token 或 cookie 值。
+- `public_share_boundary` 在启用分享时检查公开分享访问 cookie、密码失败节流和公开分享 JSON 响应缓存边界。
+  HttpOnly、SameSite、cookie path 作用域、失败节流、`Cache-Control: private`、`Cache-Control: no-cache`、`Vary: Cookie`、`nosniff` 或 `Referrer-Policy: no-referrer` 边界无效时报告 `block`。
+  只有这些边界有效且当前请求未识别为 HTTPS 时，缺少 `Secure` 的密码保护分享 cookie 才报告 `warning`。
+  详情只包含 cookie 属性和路径作用域状态、公开分享 JSON 缓存与 referrer 边界状态、`Vary: Cookie`、`nosniff` 和密码失败限流参数，不包含分享密码、cookie 值或分享 ID。
+- `config_file_access` 检查运行时配置文件路径。
+  空路径、缺失或未确认路径报告为 `warning`；路径组件为 symlink、文件本身为 symlink 或非普通文件报告为 `block`；文件允许 group 或 other 访问报告为 `warning`。
+  详情通过 `details.path`、`details.mode`、`details.path_kind`、`details.symlink_component` 和 `details.group_or_other_access` 暴露可观测路径、模式、类型、symlink 组件和 group/other 访问字段。
+  `details.path_kind` 可为 `missing`、`regular`、`symlink`、`symlink_component` 或 `not_regular`。
+- `secrets_file_access` 在 WebDAV 使用 `secrets.json` 中生成的 Basic Auth 密码时检查该文件。
+  不需要生成密码时检查为 `pass`；空路径、缺失或未确认路径、路径组件为 symlink、文件本身为 symlink 或非普通文件报告为 `block`；group 或 other 访问报告为 `warning`。
+  详情只包含 `details.path`、`details.mode`、`details.path_kind`、`details.symlink_component`、`details.group_or_other_access`、`details.generated_webdav_password_required`、`details.webdav_enabled` 和 `details.webdav_auth_type`，不包含密码内容。
+- `users_file_access` 检查运行时用户文件路径。
+  缺失路径、不可读目录、symlink 路径组件、symlink 目录、不可读文件、symlink 文件或非普通文件报告为 `block`；目录或文件允许 group/other 访问报告为 `warning`。
+  详情包含 `details.path`、`details.dir`、`details.file_mode`、`details.dir_mode`、`details.file_kind`、`details.dir_kind`、`details.symlink_component`、`details.file_group_or_other_access` 和 `details.dir_group_or_other_access`。
+  symlink 路径组件使 `details.dir_kind` 为 `symlink_component`。
+- `admin_accounts` 检查已启用管理员数量。
+  禁用认证或用户存储不可读为 `warning`，零个已启用管理员为 `block`，一个为 `warning`，两个或更多为 `pass`。
+  可读时 `details.active_admins` 包含启用管理员数量。
+- `initial_password_file` 检查 `auth.users_file` 旁的 `initial-password.txt`。
+  不存在时以 `details.path_kind="missing"` 报告 `pass`；仍存在的普通文件、symlink、symlink 路径组件或非普通文件报告为 `block`。
+  详情包含 `details.path`，可观测时还包含 `details.mode`、`details.path_kind` 和 `details.symlink_component`。
+  symlink、symlink 路径组件或非普通文件分别返回 `details.path_kind` 为 `symlink`、`symlink_component` 或 `not_regular`。
+- `webdav_prefix` 在启用 WebDAV 时检查 URL prefix。
+  空 prefix、根 prefix、非法路径字符，或位于 `/api`、`/s`、`/health` 下的 prefix 报告为 `block`，详情包含 `details.prefix_risk` 和 `details.normalized_prefix`。
+- `webdav_auth` 检查认证模式。
+  非 loopback 监听下的 `auth_type = "none"` 报告为 `block`。
+  全局 Basic Auth 密码如果是明确的常见占位符或短于 16 字符，会以 `password_source` 和 `password_risk` 类型报告 `warning`，不返回密码值。
+  Basic Auth 使用生成密码时，运行时密码不可用报告为 `block` 并设置 `generated_password_available=false`，弱生成密码报告为 `warning`。
+- `forwarded_proto_trust` 检查 `X-Forwarded-Proto` 和 trusted-proxy 设置。
+  没有 `trusted_proxy_hops` 却收到该头为 `warning`，来自不可信直连来源的该头为 `block`，可信直连来源转发非 `https` 值为 `warning`。
+- `share_base_url` 在启用分享时检查公开分享链接 Base URL。
+  HTTP、非 443 HTTPS 端口、URL userinfo、查询字符串、片段、反斜杠、重复路径斜杠、`.`/`..` 路径段或非法主机名报告为 `block`。
+  空值、不同主机或基础路径以 `/s` 分享路由结尾仍是需要人工复核的 `warning`。
+- `share_default_policy` 检查新建分享的默认过期时间和默认访问次数。
+  启用分享时，没有默认过期时间、值长于 `720h` 或默认无限访问次数为 `warning`，负数默认值为 `block`。
+  详情只包含默认过期/访问限制元数据和 policy-rule 数量。
+- `backup_local_destinations` 检查已启用本地备份任务目标。
+  没有本地任务或全部本地任务禁用为 `pass`；空目标、相对目标、目标位于备份来源或 `storage.root` 内、symlink 路径组件、symlink 目标或非目录目标为 `block`；缺失、未确认或不可写目标为 `warning`。
+  详情通过 `details.job_id`、`details.destination`、`details.source`、`details.storage_root`、`details.destination_kind`、`details.symlink_component`、`details.local_job_count` 和 `details.enabled_local_job_count` 暴露可观测元数据。
+
+该端点只能验证 MnemoNAS 进程可观察到的运行时配置和当前请求代理/TLS 语义，不能直接验证云安全组、公网路由、外部暴露端口或证书链有效性。
+
+公网部署仍应在服务器运行 `sudo mnemonas-doctor --public-domain <domain>`，并在云控制台确认仅 `80/443` 对公网开放。
+
+如果运行时 users-file 路径为空，`initial_password_file` 返回 `block`，并使用空 `details.path`，不会探测当前工作目录。
+
+## 维护
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| `GET` | `/api/v1/maintenance/scrub` | 获取最近 Scrub 结果 |
+| `POST` | `/api/v1/maintenance/scrub` | 启动 Scrub |
+| `GET` | `/api/v1/maintenance/disk-health` | 运行并返回磁盘 SMART/温度健康状态 |
+| `GET` | `/api/v1/maintenance/objects` | 列出存储对象 |
+| `POST` | `/api/v1/maintenance/gc` | 运行垃圾回收 |
+| `GET` | `/api/v1/maintenance/backups` | 列出已配置备份任务 |
+| `GET` | `/api/v1/maintenance/backups/{id}` | 获取单个备份任务状态 |
+| `POST` | `/api/v1/maintenance/backups/{id}/run` | 立即运行备份任务 |
+| `POST` | `/api/v1/maintenance/backups/{id}/retention-check` | 检查本地或远程保留状态 |
+| `POST` | `/api/v1/maintenance/backups/batch-restore-preview` | 预览多个显式恢复目标，不写入数据 |
+| `POST` | `/api/v1/maintenance/backups/batch-restore` | 顺序恢复多个备份任务或目标 |
+| `POST` | `/api/v1/maintenance/backups/{id}/restore` | 将受支持备份任务恢复到安全目标目录 |
+| `POST` | `/api/v1/maintenance/backups/{id}/restore-drill` | 对最近完成快照执行恢复演练 |
+| `POST` | `/api/v1/maintenance/backups/{id}/restore-preview` | 预览一次显式恢复，不写入目标数据 |
+| `GET` | `/api/v1/maintenance/backups/{id}/restore-report` | 下载单个备份任务的 JSON 恢复摘要 |
+| `POST` | `/api/v1/maintenance/backups/{id}/restore-verify` | 只读校验已恢复目标目录 |
+| `GET` | `/api/v1/diagnostics-export` | 导出诊断包 |
+
+`POST /api/v1/maintenance/gc` 启动未引用数据块垃圾回收。查询参数：
+
+- `dry_run`：可选布尔值，最多出现一次。默认值为 `true`；只有显式设置为 `false` 时才执行删除。
+- `grace_period_hours`：可选非负整数，最多出现一次。默认值为 `24`；宽限期内创建的对象会被跳过。
+
+`dry_run=false` 且部分删除失败时，响应包含 `failed_count` 和 `delete_failures`。
 
-**边界说明**:
-- 该接口只检查服务端能可靠读取到的运行态和当前请求语义
-- 它不能直接检查云厂商安全组、公网路由、真实外部端口暴露或证书链可用性
-- 公网部署仍应在服务器上运行 `sudo mnemonas-doctor --public-domain <domain>`，并在云控制台确认只开放 `80/443`
+恢复预览请求：
 
-### 更新设置
-
-```
-PUT /api/v1/settings
-```
-
-**说明**:
-- `storage.root` 路径为只读配置，需修改配置文件并重启服务
-- `storage.directory_quotas` 和 `storage.directory_access_rules` 可通过设置 API 热更新，并同步到 Web/API 与 WebDAV 运行态
-
-**请求体**:
-```json
-{
-  "server": {
-    "host": "0.0.0.0",
-    "port": 8080,
-    "read_timeout": "30s",
-    "write_timeout": "60s",
-    "idle_timeout": "120s",
-    "trusted_proxy_hops": 1,
-    "trusted_proxy_cidrs": ["10.0.0.0/8"],
-    "tls": {
-      "enabled": true,
-      "auto_generate": true,
-      "cert_dir": "/etc/mnemonas/tls"
-    }
-  },
-  "storage": {
-    "directory_quotas": [
-      { "path": "/team", "quota_bytes": 1099511627776 }
-    ],
-    "directory_access_rules": [
-      { "path": "/team", "read_groups": ["family"], "write_groups": ["editors"] }
-    ]
-  },
-  "auth": {
-    "access_token_ttl": "1h",
-    "refresh_token_ttl": "720h"
-  },
-  "retention": {
-    "max_versions": 10,
-    "max_age": "720h",
-    "min_free_space": 10737418240
-  },
-  "versioning": {
-    "auto_versioned_extensions": [".md", ".txt", ".rs"],
-    "auto_versioned_filenames": ["README", "Dockerfile", "Cargo.toml"],
-    "max_versioned_size": 268435456
-  },
-  "trash": {
-    "enabled": true,
-    "retention_days": 14,
-    "max_size": 2147483648
-  },
-  "share": {
-    "enabled": true,
-    "base_url": "https://share.example.com",
-    "default_expires_in": "168h",
-    "default_max_access": 0,
-    "policy_rules": [
-      {
-        "path": "/Family",
-        "require_password": true,
-        "max_expires_in": "24h",
-        "max_access": 20
-      }
-    ]
-  },
-  "favorites": {
-    "enabled": false
-  },
-  "alerts": {
-    "enabled": true,
-    "check_interval": "30m",
-    "threshold_pct": 85,
-    "critical_pct": 92,
-    "min_free_bytes": 21474836480,
-    "cooldown_period": "2h",
-    "webhook_url": "https://hooks.example.com/storage",
-    "webhook_method": "POST",
-    "webhook_headers": ["Authorization: Bearer token", "X-MnemoNAS: alerts"],
-    "telegram_enabled": true,
-    "telegram_bot_token": "123456:ABC...",
-    "telegram_chat_id": "-1001234567890",
-    "wecom_enabled": true,
-    "wecom_webhook_url": "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=...",
-    "dingtalk_enabled": true,
-    "dingtalk_webhook_url": "https://oapi.dingtalk.com/robot/send?access_token=...",
-    "email_enabled": true,
-    "smtp_host": "smtp.example.com",
-    "smtp_port": 587,
-    "smtp_username": "alerts@example.com",
-    "smtp_password": "smtp-secret",
-    "smtp_from": "MnemoNAS <alerts@example.com>",
-    "smtp_to": ["admin@example.com"]
-  },
-  "disk_health": {
-    "enabled": true,
-    "check_interval": "1h",
-    "probe_timeout": "15s",
-    "cooldown_period": "4h",
-    "command": "smartctl",
-    "temperature_warning_c": 50,
-    "temperature_critical_c": 60,
-    "media_wear_warning_percent": 80,
-    "media_wear_critical_percent": 100,
-    "devices": [
-      {
-        "name": "data-ssd",
-        "path": "/dev/disk/by-id/nvme-Samsung_SSD_1234",
-        "type": "nvme",
-        "serial": "S6..."
-      }
-    ]
-  },
-  "maintenance": {
-    "scrub": {
-      "enabled": true,
-      "schedule_interval": "168h",
-      "retry_interval": "1h",
-      "max_retries": 1
-    }
-  },
-  "dataplane": {
-    "grpc_address": "127.0.0.1:9090",
-    "timeout": "30s",
-    "max_retries": 3
-  },
-  "cdc": {
-    "min_chunk_size": 262144,
-    "avg_chunk_size": 1048576,
-    "max_chunk_size": 4194304
-  },
-  "webdav": {
-    "enabled": true,
-    "read_only": false
-  }
-}
-```
-
-**响应示例**:
-```json
-{
-  "success": true,
-  "message": "settings updated"
-}
-```
-
-设置请求中的 `storage.directory_quotas[].path`、`storage.directory_access_rules[].path` 和 `share.policy_rules[].path` 使用同一套 MnemoNAS 逻辑路径规则：路径必须以 `/` 开头，不能包含 Windows/UNC 语法、反斜杠、查询或片段字符、控制字符，或独立的 `.` / `..` 路径段。设置 API 会规范化首尾空白、重复斜杠与末尾斜杠；包含 `.` 或 `..` 的路径不会被折叠，会被拒绝。
-
-**失败行为**:
-- 成功响应的 `message` 在仅包含热更新字段、或请求中携带但值未变化的重启类字段时为 `settings updated`；当 `server.host`、`server.port`、`server.read_timeout`、`server.write_timeout`、`server.idle_timeout`、`server.tls.*` 或 `cdc.*` 的值实际变化时为 `settings updated, some changes may require restart`
-- `trash` 支持更新 `enabled`、`retention_days`、`max_size`；保存后会立即影响运行中的回收站策略
-- `auth` 支持更新 `access_token_ttl`、`refresh_token_ttl`；两者必须是正的 `time.ParseDuration` 字符串，保存后会立即影响新签发的 Web UI 访问令牌和刷新令牌，已签发 token 的过期时间不变
-- `retention` 支持更新 `max_versions`、`max_age`、`min_free_space`、`gc_interval`；保存后会立即更新运行中的版本保留阈值与周期清理任务，`gc_interval` 设为 `0` 表示禁用周期清理
-- `server` 支持更新 `host`、`port`、`read_timeout`、`write_timeout`、`idle_timeout`、`trusted_proxy_hops`、`trusted_proxy_cidrs`；监听地址和超时保存后需重启服务才能影响运行中的 HTTP 监听器，`trusted_proxy_hops` 与 `trusted_proxy_cidrs` 会立即影响请求来源和 HTTPS 转发语义识别
-- `server.tls` 支持更新 `enabled`、`cert_file`、`key_file`、`auto_generate`、`cert_dir`；保存后需重启服务才能切换 HTTPS 监听
-- `cdc` 支持更新 `min_chunk_size`、`avg_chunk_size`、`max_chunk_size`；必须满足 `65536 <= min < avg < max <= 67108864`。Docker 和 systemd 启动入口会在 dataplane 重启时读取这些字节值，新对象写入才会使用新分块参数
-- `versioning` 支持更新 `auto_versioned_extensions`、`auto_versioned_filenames`、`max_versioned_size`；保存后会立即更新运行中的自动版本策略
-- `share` 支持更新 `enabled`、`base_url`、`default_expires_in`、`default_max_access`、`policy_rules`；`enabled` 会立即影响公开分享访问和新分享创建，`base_url` 会立即影响后续新生成的分享链接，非空时必须是完整的 `http` 或 `https` URL，不能包含 userinfo、查询参数或片段，且主机名必须有效；默认有效期和默认访问次数只影响之后创建的分享；`policy_rules` 每项 `path` 遵循上述逻辑路径规则，并至少设置 `require_password`、`max_expires_in` 或 `max_access` 中的一项
-- Web 设置页会基于当前编辑内容显示分享策略覆盖摘要，集中展示默认有效期、默认访问次数、路径策略数量、强制密码路径和宽松策略关注项；该摘要仅用于保存前复核，实际限制仍以设置 API 保存后的服务端策略为准
-- `favorites` 支持更新 `enabled`；保存后会立即影响收藏接口的可用性
-- `storage.directory_quotas` 每项 `path` 遵循上述逻辑路径规则，`quota_bytes` 必须是正整数
-- `storage.directory_access_rules` 每项 `path` 遵循上述逻辑路径规则，并至少包含一个 `read_users`、`write_users`、`read_groups`、`write_groups`、`read_roles` 或 `write_roles` 授权；角色只能是 `admin`、`user`、`guest`
-- 保存成功后，如果 `storage.directory_access_rules` 或分享策略字段 `share.enabled`、`share.default_expires_in`、`share.default_max_access`、`share.policy_rules` 发生实际变化，服务端会向提醒运行态提交 `settings_policy_changed` warning 事件；事件 `details` 包含 `source = "settings"`、`changed_sections`、目录授权和分享策略的变更布尔值及规则数量，不包含规则路径、`share.base_url`、提醒通道密钥或用户成员明细；规范化后等价的提交不会产生该事件；事件发送失败只写入服务端日志，不会导致设置保存失败
-- `alerts` 支持更新 `enabled`、`check_interval`、`threshold_pct`、`critical_pct`、`min_free_bytes`、`cooldown_period`、`webhook_url`、`webhook_method`、`webhook_headers`、`telegram_enabled`、`telegram_bot_token`、`telegram_chat_id`、`wecom_enabled`、`wecom_webhook_url`、`dingtalk_enabled`、`dingtalk_webhook_url`、`email_enabled`、`smtp_host`、`smtp_port`、`smtp_username`、`smtp_password`、`smtp_from`、`smtp_to`；保存后会立即更新运行中的提醒监控
-- `disk_health` 支持更新 `enabled`、`check_interval`、`probe_timeout`、`cooldown_period`、`command`、温度阈值、介质磨损阈值和 `devices`；保存后会立即更新运行中的磁盘健康监控
-- `maintenance.scrub` 支持更新 `enabled`、`schedule_interval`、`retry_interval`、`max_retries`；保存后会立即更新运行中的周期 Scrub 调度，关闭时会取消后台调度
-- `dataplane` 支持更新 `grpc_address`、`timeout`、`max_retries`；保存后会立即替换运行中的数据面 client，并用于后续按需重连和连接重试策略
-- 请求中的 `trash.retention_days` 不能为负数，`trash.max_size` 必须是正整数
-- 请求中的 `versioning.max_versioned_size` 必须是正整数，`versioning.auto_versioned_extensions` 每项必须以 `.` 开头，`versioning.auto_versioned_filenames` 不能包含空项
-- `webdav` 支持更新 `enabled`、`prefix`、`read_only`、`auth_type`、`username`、`password`；`auth_type` 支持 `users`、`basic`、`none`，空值会归一化为 `basic`；`prefix` 会归一化为以 `/` 开头的 URL 路径，不能包含反斜杠、`?`、`#` 或控制字符，启用时不能覆盖 `/`、`/api`、`/s`、`/health`；省略 `webdav.password` 会保留现有 WebDAV 密码，提交空字符串会把 Basic Auth 切回 `secrets.json` 中的自动生成密码；保存后会立即切换运行中的 WebDAV 前缀、鉴权方式和只读状态
-- `webdav.auth_type = "users"` 使用 MnemoNAS 用户账号登录，普通用户的 WebDAV 根目录映射到自己的 `home_dir`，并会列出可导航到已授权共享目录的顶层入口；嵌套授权产生的祖先入口仅用于只读导航，写操作仍需命中写授权；guest 只读，用户配额约束写入 `home_dir` 的 PUT/COPY/MOVE；`basic` 模式下 `webdav.username` 不得复用现有非 admin 用户名，因为它是全局服务凭据
-- 请求中的 `server.host` 必须为空、`*`、合法主机名、IPv4 或 IPv6 字面量，不能包含端口、空白或控制字符；端口必须通过 `server.port` 设置
-- 请求中的 `server.trusted_proxy_hops` 不能为负数；默认值 `0` 表示不信任转发头。`server.trusted_proxy_cidrs` 每项必须是 IP 地址或 CIDR；loopback 来源不需要写入该列表
-- 请求中的 `server.read_timeout`、`server.write_timeout`、`server.idle_timeout` 必须是正的 `time.ParseDuration` 字符串，例如 `30s`、`2m`
-- 请求中的 `auth.access_token_ttl` 和 `auth.refresh_token_ttl` 必须是正的 `time.ParseDuration` 字符串；公网部署建议访问令牌不超过 `1h`，刷新令牌不超过 `720h`
-- 请求中的 `retention.max_age`、`retention.gc_interval` 必须是 `time.ParseDuration` 可解析的字符串，例如 `720h`、`24h`、`0`
-- 请求中的 `alerts.check_interval`、`alerts.cooldown_period` 必须是正的 `time.ParseDuration` 字符串
-- 请求中的 `alerts.webhook_url` 为空时禁用 Webhook 发送，非空时必须是完整的 `http` 或 `https` URL
-- 请求中的 `alerts.webhook_method` 仅支持 `GET` 或 `POST`；`POST` 发送 JSON body，`GET` 将提醒字段编码到 URL query。`storage_alert` 外发时保留容量指标和 `path_scope = "configured_storage_root"`，但 `path` 固定为 `<omitted>`，文本通道也不包含原始存储根路径。`alerts.webhook_headers` 每项必须是 `"Key: Value"` 格式，Header 名称必须是合法 HTTP token，不能重复（大小写不敏感），值不能包含换行或控制字符
-- `GET /api/v1/settings` 不返回 Webhook URL 或 Header 值；响应中的 `alerts.webhook_url` 和 `alerts.webhook_headers` 使用 `<redacted>` 占位符表示已配置值，`alerts.webhook_url_configured` 与 `alerts.webhook_headers_configured` 表示是否存在对应配置。`PUT /api/v1/settings` 可提交真实 Webhook URL/Header 值来更新配置；如果提交原样的 `<redacted>` 占位值，服务端会保留对应的既有值。
-- 省略 `alerts.telegram_bot_token` 或 `alerts.smtp_password` 会保留既有密钥；提交空字符串会清除对应密钥。`alerts.telegram_enabled = true` 时清除 `telegram_bot_token` 会因缺少必需 Token 被拒绝。
-- `alerts.telegram_enabled = true` 时必须提供 `telegram_bot_token` 和 `telegram_chat_id`；`telegram_bot_token` 不能包含空白、`/`、`?` 或 `#`，诊断和设置读取响应不会明文返回该 Token
-- `alerts.wecom_enabled = true` 时必须提供 `wecom_webhook_url`；非空 `wecom_webhook_url` 必须是完整的 `http` 或 `https` URL。`GET /api/v1/settings` 使用 `<redacted>` 和 `wecom_webhook_url_configured` 表示已保存的企业微信 Webhook，`PUT /api/v1/settings` 提交同样的 `<redacted>` 占位值会保留既有 URL。
-- `alerts.dingtalk_enabled = true` 时必须提供 `dingtalk_webhook_url`；非空 `dingtalk_webhook_url` 必须是完整的 `http` 或 `https` URL。`GET /api/v1/settings` 使用 `<redacted>` 和 `dingtalk_webhook_url_configured` 表示已保存的钉钉 Webhook，`PUT /api/v1/settings` 提交同样的 `<redacted>` 占位值会保留既有 URL。
-- `alerts.email_enabled = true` 时必须提供 `smtp_host`、`smtp_from` 和至少一个 `smtp_to`，`smtp_port` 必须在 1-65535 范围内，发件人和收件人必须是合法邮件地址
-- 请求中的 `disk_health.check_interval`、`disk_health.probe_timeout`、`disk_health.cooldown_period` 必须是正的 `time.ParseDuration` 字符串；`disk_health.command` 必须是单个可执行文件名或绝对路径；`disk_health.media_wear_critical_percent` 不能低于 `disk_health.media_wear_warning_percent`；每个 `devices[].path` 必须是绝对路径，推荐 `/dev/disk/by-id/...`
-- 请求中的 `maintenance.scrub.schedule_interval`、`maintenance.scrub.retry_interval` 必须是正的 `time.ParseDuration` 字符串；`maintenance.scrub.max_retries` 必须是 `0` 或正整数
-- 请求中的 `dataplane.grpc_address` 必须是合法 `host:port` 地址，端口范围 1-65535，且不能包含空白或控制字符；`dataplane.timeout` 必须是正的 `time.ParseDuration` 字符串，`dataplane.max_retries` 必须是 `0` 或正整数
-- 配置校验失败时返回 `400 Bad Request` 和稳定错误消息 `invalid configuration`
-- 非法设置请求不会修改进程内当前生效配置
-
-### 发送测试提醒
-
-```
-POST /api/v1/settings/alerts/test
-```
-
-**需要管理员权限**
-
-该接口会通过当前已保存的提醒通道发送一次 `alert_test` warning 事件，用于验证 Webhook、Telegram、企业微信、钉钉或 SMTP 邮件链路。它要求 `[alerts] enabled = true`、至少存在一个已配置的通知通道，并且当前进程已挂载提醒运行态；企业微信和钉钉通道只有在启用对应通知且 Webhook URL 非空时才计入通道列表，SMTP 邮件通道只有在启用邮件通知、SMTP 主机、端口、发件人和至少一个非空收件人均存在时才计入通道列表。测试事件的 `details` 只包含 `trigger = "manual_test"`、`source = "settings"` 和通道名称列表，不包含 Webhook、Telegram、企业微信、钉钉或 SMTP 密钥。
-
-**响应示例**:
-```json
-{
-  "success": true,
-  "data": {
-    "event_type": "alert_test",
-    "channels": ["webhook", "email"]
-  },
-  "message": "test alert sent"
-}
-```
-
-提醒未启用或没有可用通道时返回 `409 Conflict`；提醒运行态不可用时返回 `503 Service Unavailable`；通道发送失败时返回通用 `500` 错误，不返回通道密钥。
-
-### 获取 WebDAV 凭据
-
-```
-GET /api/v1/settings/webdav-credentials
-```
-
-**响应示例**:
-```json
-{
-  "success": true,
-  "data": {
-    "enabled": true,
-    "url": "/dav/",
-    "auth_type": "basic",
-    "username": "admin",
-    "password": "***"
-  }
-}
-```
-
-**说明**:
-- 认证启用时，该端点仅对 `admin` 角色开放
-- 该端点返回当前运行中的 WebDAV 服务凭据，并与最近一次成功应用到运行态的 WebDAV 配置保持一致
-- `password` 仅在使用自动生成密码时可返回
-
----
-
-## 维护操作
-
-**说明**:
-- 启用认证时，维护操作仅管理员可用。
-
-### 获取磁盘健康
-
-立即运行一次磁盘健康探测并返回完整设备状态。该接口依赖 `[disk_health]` 配置和 `smartctl`；即使后台周期检查关闭，运行态监控未初始化时也会返回 `503`。
-
-```
-GET /api/v1/maintenance/disk-health
-```
-
-**响应示例**:
-```json
-{
-  "success": true,
-  "data": {
-    "enabled": true,
-    "status": "warning",
-    "checked_at": "2026-05-13T08:30:00Z",
-    "message": "one or more disks need attention",
-    "warnings": ["data-ssd: temperature 52 C reached warning threshold 50 C"],
-    "devices": [
-      {
-        "name": "data-ssd",
-        "path": "/dev/disk/by-id/nvme-Samsung_SSD_1234",
-        "type": "nvme",
-        "expected_serial": "S6...",
-        "serial": "S6...",
-        "model": "Samsung SSD",
-        "present": true,
-        "smart_available": true,
-        "smart_passed": true,
-        "temperature_c": 52,
-        "power_on_hours": 1234,
-        "wear_percent_used": 12,
-        "available_spare_percent": 95,
-        "available_spare_threshold_percent": 10,
-        "media_errors": 0,
-        "nvme_critical_warning": 0,
-        "status": "warning",
-        "message": "temperature 52 C reached warning threshold 50 C",
-        "temperature_warning_c": 50,
-        "temperature_critical_c": 60
-      }
-    ]
-  }
-}
-```
-
-**状态说明**:
-
-- `status` 可能为 `disabled`、`ok`、`warning`、`critical` 或 `unavailable`。
-- 设备路径不存在、SMART 自检失败、配置了序列号但实际序列号不匹配会返回 `critical`。
-- 温度达到提醒阈值返回 `warning`，达到严重阈值返回 `critical`。
-- NVMe critical warning、可用备用容量低于阈值、介质寿命已用百分比达到阈值或介质错误计数非零会影响设备状态。
-- `smartctl` 不可用、无 JSON 输出或 JSON 无法解析会返回 `unavailable`。
-- 后台周期检查发现 `warning`、`critical` 或 `unavailable` 时，会写入 `disk_health` 最近操作记录，路径为 `/system/disk-health`，用户为 `system`。
-- 当 `[alerts] enabled = true` 且配置了 Webhook、Telegram、企业微信、钉钉或 SMTP 邮件时，后台周期检查会对 `warning`、`critical` 和 `unavailable` 发送 `disk_health` 提醒事件。最近操作记录中的设备摘要使用配置的 `name`；提醒事件详情只包含聚合计数，不包含设备名、完整设备路径、序列号或 warning 文本。完整设备路径和 SMART 明细仅通过管理员维护接口返回。
-
-### 获取数据校验结果
-
-获取最近一次数据完整性校验（Scrub）的结果。
-
-```
-GET /api/v1/maintenance/scrub
-```
-
-**响应示例**:
-```json
-{
-  "success": true,
-  "data": {
-    "has_result": true,
-    "status": "completed",
-    "id": "scrub-20240115-100000",
-    "start_time": "2024-01-15T10:00:00Z",
-    "end_time": "2024-01-15T10:00:05Z",
-    "duration_ms": 5000,
-    "total_objects": 1000,
-    "valid_objects": 998,
-    "corrupted_objects": 1,
-    "missing_objects": 1,
-    "total_size": 5368709120,
-    "errors": [
-      {
-        "hash": "abc123...",
-        "error_type": "corrupted",
-        "message": "object failed integrity verification"
-      }
-    ],
-    "error_message": ""
-  }
-}
-```
-
-### 执行数据校验
-
-执行数据完整性校验，并在当前请求内返回本次校验结果摘要。
-
-```
-POST /api/v1/maintenance/scrub
-```
-
-**请求体** (可选):
-```json
-{
-  "hashes": ["abc123...", "def456..."]
-}
-```
-
-如果不提供 `hashes`，将校验所有对象。
-
-**说明**:
-- 此接口为同步执行，不会先返回 `running` 再异步完成
-- 成功响应直接返回本次校验结果摘要；最近一次完整结果可通过 `GET /api/v1/maintenance/scrub` 再次读取
-- `errors[].message` 返回稳定的公开文案，底层 IO/路径/校验细节只写入服务端日志
-- 当校验已完成、但结果持久化失败时，接口仍返回 `200 OK`，并附带 `Warning` 响应头；响应 body 会包含 `warning: true`，`message` 为 `scrub completed with persistence warning`
-- 若 `[maintenance.scrub] enabled = true`，服务会以系统身份按 `schedule_interval` 自动执行完整 Scrub；失败后按 `retry_interval` 最多重试 `max_retries` 次。周期任务会写入维护历史、最近操作记录和提醒事件，与手动 Scrub 使用同一套结果格式；提醒详情不包含对象 hash 或底层错误文本。
-
-**响应示例**:
-```json
-{
-  "success": true,
-  "data": {
-    "total_objects": 1000,
-    "valid_objects": 998,
-    "corrupted_objects": 1,
-    "missing_objects": 1,
-    "total_size": 5368709120,
-    "duration_ms": 5000,
-    "errors": [
-      {
-        "hash": "abc123...",
-        "error_type": "corrupted",
-        "message": "object failed integrity verification"
-      }
-    ]
-  },
-  "timestamp": "2024-01-15T10:00:05Z"
-}
-```
-
-### 列出存储对象
-
-列出 CAS 存储中的所有对象。
-
-```
-GET /api/v1/maintenance/objects
-```
-
-**查询参数**:
-- `limit`: 返回数量限制（默认 1000，最大 1000，至多出现一次）
-- `cursor`: 游标（从上一次返回的 `next_cursor` 开始，必须是 64 位十六进制对象 hash，至多出现一次）
-
-**说明**:
-- 当前响应仅返回 `hash` 和 `size`
-- 服务端内部会读取对象时间戳用于 GC grace period 判断，但该字段不通过此接口暴露
-
-**响应示例**:
-```json
-{
-  "success": true,
-  "data": {
-    "objects": [
-      {
-        "hash": "abc123...",
-        "size": 1048576
-      }
-    ],
-    "count": 1,
-    "next_cursor": "abc123..."
-  },
-  "timestamp": "2024-01-15T10:00:00Z"
-}
-```
-
-### 执行垃圾回收
-
-启动垃圾回收，清理无引用的数据块。
-
-```
-POST /api/v1/maintenance/gc
-```
-
-**查询参数**:
-- `dry_run`: 是否仅计算不删除，至多出现一次（默认 `true`，只有显式传入 `false` 才会执行删除）
-- `grace_period_hours`: 跳过最近创建对象的小时数，至多出现一次（默认 24）
-
-**说明**:
-- GC 会跳过 grace period 内的新对象，避免删除正在上传或刚写入的数据块
-- 当对象缺少可用时间戳时，也会按保守策略计入 `skipped_by_grace`，不会直接进入删除集合
-- dataplane 会优先使用对象创建时间，无法获取时回退到修改时间
-- `deleted_count` 表示实际删除成功的对象数量
-- 当 `dry_run=false` 且存在部分失败时，响应会额外返回 `failed_count` 和 `delete_failures`
-
-**响应示例**:
-```json
-{
-  "success": true,
-  "data": {
-    "dry_run": true,
-    "grace_period_hours": 24,
-    "total_objects": 1000,
-    "referenced": 900,
-    "unreferenced": 100,
-    "unreferenced_size": 104857600,
-    "skipped_by_grace": 5,
-    "deleted_count": 0
-  },
-  "timestamp": "2024-01-15T10:00:00Z"
-}
-```
-
-执行删除时，如果存在部分失败：
-
-```json
-{
-  "success": true,
-  "data": {
-    "dry_run": false,
-    "grace_period_hours": 0,
-    "total_objects": 1000,
-    "referenced": 900,
-    "unreferenced": 100,
-    "unreferenced_size": 104857600,
-    "skipped_by_grace": 0,
-    "deleted_count": 99,
-    "failed_count": 1,
-    "delete_failures": [
-      {
-        "hash": "abc123...",
-        "message": "failed to delete chunk"
-      }
-    ]
-  },
-  "timestamp": "2024-01-15T10:00:00Z"
-}
-```
-
-### 备份任务
-
-列出 `[[backup.jobs]]` 中配置的备份任务和最近状态。
-
-```
-GET /api/v1/maintenance/backups
-```
-
-**响应示例**:
-```json
-{
-  "success": true,
-  "data": [
-    {
-      "id": "external-disk",
-      "name": "外置硬盘备份",
-      "type": "local",
-      "source": "/srv/mnemonas",
-      "destination": "/mnt/backup-drive/mnemonas",
-      "disabled": false,
-      "schedule_interval": "24h0m0s",
-      "schedule_window_start": "02:00",
-      "schedule_window_end": "05:00",
-      "next_run_at": "2026-05-10T02:03:04Z",
-      "stale_after": "72h0m0s",
-      "restore_drill_stale_after": "720h0m0s",
-      "max_snapshots": 7,
-      "max_age": "720h0m0s",
-      "retention_status": "ok",
-      "retention_message": "本地快照自动清理已配置",
-      "health_status": "ok",
-      "health_message": "last successful backup completed recently",
-      "restore_drill_status": "ok",
-      "restore_drill_message": "恢复演练仍在预期窗口内",
-      "last_restore_drill_reminder_at": "2026-05-08T03:00:00Z",
-      "include_config": true,
-      "verify_after_backup": true,
-      "exclude": [".mnemonas/thumbnails"],
-      "running": false,
-      "last_run": {
-        "id": "20260509T020304.000000000Z",
-        "job_id": "external-disk",
-        "status": "completed",
-        "started_at": "2026-05-09T02:03:04Z",
-        "duration_ms": 1200,
-        "file_count": 42,
-        "total_bytes": 1048576,
-        "trigger": "scheduled",
-        "warning": false,
-        "warnings": [],
-        "pruned_snapshots": 1
-      },
-      "last_retention_check": {
-        "id": "20260509T021000.000000000Z",
-        "job_id": "external-disk",
-        "status": "completed",
-        "started_at": "2026-05-09T02:10:00Z",
-        "finished_at": "2026-05-09T02:10:01Z",
-        "duration_ms": 1000,
-        "target": "/mnt/backup-drive/mnemonas",
-        "snapshot_count": 7,
-        "warning": false
-      },
-      "last_restore_verify": {
-        "id": "20260509T041500.000000000Z",
-        "job_id": "external-disk",
-        "status": "completed",
-        "started_at": "2026-05-09T04:15:00Z",
-        "finished_at": "2026-05-09T04:15:01Z",
-        "duration_ms": 1000,
-        "snapshot_path": "/mnt/backup-drive/mnemonas/external-disk/snapshots/20260509T020304.000000000Z",
-        "manifest_path": "/mnt/backup-drive/mnemonas/external-disk/snapshots/20260509T020304.000000000Z/manifest.json",
-        "target_path": "/restore/mnemonas",
-        "file_count": 42,
-        "verified_bytes": 1048576,
-        "looks_like_storage_root": true,
-        "warnings": []
-      },
-      "last_matching_restore_verify": {
-        "id": "20260509T041500.000000000Z",
-        "job_id": "external-disk",
-        "status": "completed",
-        "started_at": "2026-05-09T04:15:00Z",
-        "finished_at": "2026-05-09T04:15:01Z",
-        "duration_ms": 1000,
-        "snapshot_path": "/mnt/backup-drive/mnemonas/external-disk/snapshots/20260509T020304.000000000Z",
-        "manifest_path": "/mnt/backup-drive/mnemonas/external-disk/snapshots/20260509T020304.000000000Z/manifest.json",
-        "target_path": "/restore/mnemonas",
-        "file_count": 42,
-        "verified_bytes": 1048576,
-        "looks_like_storage_root": true,
-        "warnings": []
-      },
-      "restore_report_findings": [
-        "未发现阻塞项；仍需在切换前按恢复清单人工复核。"
-      ]
-    }
-  ]
-}
-```
-
-获取单个任务：
-
-```
-GET /api/v1/maintenance/backups/{id}
-```
-
-立即执行备份：
-
-```
-POST /api/v1/maintenance/backups/{id}/run
-```
-
-请求体可为空，也可传 `{}`。备份任务支持三种类型：
-
-- `type = "local"`：复制本地目录到 `destination/<job-id>/snapshots/<run-id>/`，写入 `manifest.json`，并在 `verify_after_backup = true` 时校验快照文件大小和 SHA-256。
-- `type = "restic"`：调用 `command` 指定的 restic 可执行文件，执行 `restic -r <repository> --password-file <password_file> backup <source>`；`verify_after_backup = true` 时执行 `restic check`。
-- `type = "rclone"`：调用 `command` 指定的 rclone 可执行文件，执行 `rclone sync <source> <remote>`；`verify_after_backup = true` 时执行 `rclone check --one-way`。
-
-`restic` 和 `rclone` 不通过 shell 拼接命令；`command` 只能是可执行名或绝对路径，`extra_args` 会作为 argv 追加到备份命令，恢复命令不会复用备份专用参数。`local` 的 `destination` 必须位于 `storage.root` 之外，且已存在的路径组件不能是符号链接；本地恢复预览、恢复和恢复演练在读取快照 manifest 或创建演练产物前也会重新检查该目标路径。备份运行前会拒绝 `source` 树中的符号链接；`rclone` 恢复演练也会在执行远端校验前应用同一检查。`password_file`、`config_file` 必须是 `source` 与 `storage.root` 之外的普通文件。API 任务视图、运行结果、恢复/预览结果、恢复报告和批量恢复结果会对 `repository`、`remote`、`destination`、`target_path`、`snapshot_path`、`manifest_path`、`config_path` 等展示字段中的 userinfo、token、密码、secret 和 key 参数做 `<redacted>` 脱敏；API 可见的备份 `error_message`、`warnings` 和预检详情中出现的同类模式也会脱敏。备份提醒事件不会外发来源、目标、恢复目录、快照/manifest 路径或原始错误/警告文本，只保留状态、触发原因、计数、时间、失败分类和是否省略位置/错误详情的摘要字段。实际 restic/rclone 命令仍使用配置中的原始值。调用方在串联 `restore-preview`、`restore` 和 `restore-verify` 时，应保留并复用原请求中的 `target_path`；响应中的脱敏 `target_path` 仅适合作为展示值。
-
-任务可配置 `disabled`、`schedule_interval`、`schedule_window_start`、`schedule_window_end`、`stale_after`、`restore_drill_stale_after`、`max_snapshots`、`max_age` 和 `retention_policy`。`schedule_interval` 大于 0 时服务内置调度器会自动按间隔执行；设置 `schedule_window_start`/`schedule_window_end` 后，自动任务只会在服务器本地时间窗口内启动，手动执行不受影响。`local` 成功备份后会按 `max_snapshots` 和 `max_age` 清理旧快照，并在响应的 `pruned_snapshots` 中返回清理数量。成功备份后会自动运行一次保留策略检测，也可调用 `POST /retention-check` 手动检查。`restic` 检测执行 `restic snapshots --json --tag mnemonas --tag job:<id>`，`rclone` 检测执行 `rclone lsjson <remote> --recursive --files-only`；检测结果写入 `last_retention_check`，并影响 `retention_status`/`retention_message`。`restic` 和 `rclone` 的远端保留策略仍由外部工具管理；配置 `retention_policy` 会把该外部策略标记为已确认，否则会返回 `warning` 提醒确认。`restore_drill_stale_after` 留空或未配置时默认 30 天，任务视图会通过 `restore_drill_status` 和 `restore_drill_message` 提示尚未演练、演练失败或演练过期；配置提醒通道后，缺失或过期恢复演练会发送限频的 `backup_restore_drill` warning 事件，`trigger` 为 `restore_drill_reminder`，并持久化 `last_restore_drill_reminder_at`。`health_status` 只表示备份运行健康，可能为 `ok`、`manual`、`running`、`due`、`stale`、`failed` 或 `disabled`。任务视图会返回 `last_restore_drill`、最近恢复演练历史 `restore_drill_history`、恢复演练统计 `restore_drill_stats`、`last_restore`、`last_restore_verify`、最近恢复匹配的只读校验 `last_matching_restore_verify` 与最近恢复历史 `restore_history`；恢复演练历史和显式恢复历史默认都保留最近 20 条，失败演练和失败恢复也会记录错误信息。失败的恢复演练会返回稳定的 `failure_category`，当前可能值包括 `no_snapshot`、`unsupported_job_type`、`unsafe_path`、`integrity_check`、`external_command`、`cancelled`、`io` 和 `unknown`，并会透传到提醒事件。`restore_drill_stats` 汇总最近保留窗口内的总次数、成功次数、失败次数、成功率、连续成功/失败次数、最近成功/失败时间、最近失败原因和失败类型，便于回顾恢复能力、恢复目标、恢复预检、只读校验结果、切换/回滚清单、状态、文件数和字节数。
-
-备份、恢复、恢复演练、只读校验和保留检测开始执行时会先写入 `running` 状态。服务启动时，状态文件中遗留的 `running` 记录会被标记为失败并写回状态文件，避免重启后长期显示并未实际运行的任务。
-
-当 `[alerts] enabled = true` 且配置了 Webhook、Telegram、企业微信、钉钉或 SMTP 邮件时，备份失败、显式恢复失败或带警告、恢复后只读校验失败或带警告、恢复演练失败、恢复演练缺失/过期提醒、保留策略检测失败或备份完成但带警告会发送提醒事件。事件 `type` 为 `backup_run`、`backup_restore`、`backup_restore_verify`、`backup_restore_drill` 或 `backup_retention_check`，`level` 为 `warning` 或 `critical`；`message` 使用固定公共摘要，不包含任务名称、路径或原始错误文本。`details` 只包含有值的摘要字段，可包括任务 ID、运行 ID、任务类型、触发原因、状态、时间、文件/字节/快照计数、警告数量、错误信息是否存在、失败分类，以及是否省略位置详情；不包含任务名称、来源、备份目标、恢复目标路径、快照路径、manifest 路径、原始 warning 或原始错误文本。
-
-手动检查快照保留策略和远端可见内容：
-
-```
-POST /api/v1/maintenance/backups/{id}/retention-check
-```
-
-请求体可为空，也可传 `{}`。响应的 `data` 为 `RetentionCheckResult`，包含 `snapshot_count`、`file_count`、`total_bytes`、`oldest_snapshot_at`、`latest_snapshot_at`、`warning` 和 `warnings` 等字段。检测失败会返回 `500`，并把失败结果放入 `details`。
-
-对最近一次成功快照执行恢复演练，或对远端备份执行一致性校验：
-
-```
-POST /api/v1/maintenance/backups/{id}/restore-drill
-```
-
-**请求体** (可选):
-```json
-{
-  "keep_artifact": false
-}
-```
-
-`local` 默认会把快照恢复到临时目录、校验每个文件后删除临时目录；`keep_artifact = true` 会保留临时恢复目录并在响应中返回 `restored_path`。`restic` 当前执行 `restic check`，`rclone` 当前执行 `rclone check --one-way`；这用于验证仓库或远端一致性。需要真正恢复 restic/rclone 数据时使用 `/restore`。
-
-预览显式恢复，不写入目标目录，也不写入恢复历史：
-
-```
-POST /api/v1/maintenance/backups/{id}/restore-preview
-```
-
-**请求体**:
 ```json
 {
   "target_path": "/mnt/restore/mnemonas",
@@ -3083,7 +1677,8 @@ POST /api/v1/maintenance/backups/{id}/restore-preview
 }
 ```
 
-**响应示例**:
+恢复预览响应：
+
 ```json
 {
   "success": true,
@@ -3135,39 +1730,24 @@ POST /api/v1/maintenance/backups/{id}/restore-preview
       }
     ],
     "warnings": [],
-    "cutover_checklist": ["先对恢复目录执行只读校验"],
-    "rollback_checklist": ["切换失败时停止服务，将配置指回原 storage.root"]
+    "cutover_checklist": ["Run read-only verification on the restored directory first"],
+    "rollback_checklist": ["If cutover fails, stop services and point storage.root back to the previous directory"]
   }
 }
 ```
 
-`restore-preview` 会复用显式恢复的目标路径安全校验，并返回 `preflight_checks`、`warnings`、`cutover_checklist` 和 `rollback_checklist`。预检会覆盖目标路径隔离、`target_state` 目标目录状态、备份内容、目标文件系统容量和配置文件处理。`target_state` 会区分目标目录尚不存在与目标目录已存在且为空两种允许状态；目标不存在时容量预检读取父目录可用空间，目标目录已存在且为空时读取该目录所在文件系统可用空间。`preflight_checks[].status` 可能为 `passed`、`warning` 或 `failed`；`status = "warning"` 表示恢复可以继续但需要人工确认，`status = "failed"` 会阻止维护页开始恢复，并会在 `/restore` 写入前被服务端预检拒绝。`warnings` 会汇总 warning 与 failed 预检详情，供客户端在预览卡片、批量预览和恢复历史中展示。`local` 从最近一次成功快照的 `manifest.json` 生成文件数、字节数和样例路径；`restic` 执行 `restic ls latest --json --tag mnemonas --tag job:<id> --path <source>`；`rclone` 执行 `rclone lsjson <remote> --recursive --files-only`。维护页要求成功预览与当前目标目录、配置选项一致，并且没有 `status = "failed"` 的预检项后才允许开始恢复。
+`restore-preview` 复用显式恢复目标安全校验，并返回 `preflight_checks`、`warnings`、`cutover_checklist` 和 `rollback_checklist`。
 
-批量预览多个恢复目标：
+预检覆盖目标隔离、`target_state`、备份内容、目标文件系统容量和配置处理。`target_state` 区分两种允许状态：目标目录不存在，或目标目录已存在且为空。
 
-```
-POST /api/v1/maintenance/backups/batch-restore-preview
-```
+目标不存在时使用父目录做容量探测；已存在的空目标目录使用目标目录所在文件系统。
 
-**请求体**:
-```json
-{
-  "items": [
-    {
-      "job_id": "external-disk",
-      "target_path": "/mnt/restore/mnemonas-a",
-      "include_config": true
-    },
-    {
-      "job_id": "rclone-cloud",
-      "target_path": "/mnt/restore/mnemonas-b",
-      "include_config": false
-    }
-  ]
-}
-```
+`preflight_checks[].status` 可为 `passed`、`warning` 或 `failed`。`status = "warning"` 表示复核后可继续恢复；`status = "failed"` 会阻止维护页开始恢复，并在 `/restore` 写入数据前被服务端预检拒绝。
 
-**批量预览响应**:
+`warnings` 汇总 warning 和 failed 预检详情，供预览卡片、批量预览和恢复历史使用。
+
+批量预览响应：
+
 ```json
 {
   "success": true,
@@ -3210,13 +1790,8 @@ POST /api/v1/maintenance/backups/batch-restore-preview
 }
 ```
 
-执行批量恢复：
+批量恢复响应：
 
-```
-POST /api/v1/maintenance/backups/batch-restore
-```
-
-**批量恢复响应**:
 ```json
 {
   "success": true,
@@ -3275,169 +1850,183 @@ POST /api/v1/maintenance/backups/batch-restore
 }
 ```
 
-批量接口最多接受 20 个条目。每个条目复用单任务恢复的 `target_path` 与 `include_config` 语义；服务端会拒绝重复目标、父子嵌套目标和同一批次中互相覆盖的目标路径。批量预览不写入目标目录，也不写入恢复历史；响应的 `items[]` 会分别返回每个条目的 `index`、`status`、`error_message` 和 `preview`，预览警告位于 `preview.warnings`，汇总提示位于顶层 `warnings`。批量恢复按顺序执行每个条目；成功恢复后会立即对对应目标执行 `restore-verify`，并在条目结果中返回 `restore`、`verify`、`warnings` 和 `error_message`。顶层 `total_files` 与 `verified_bytes` 汇总已完成条目的只读校验结果。批量结果中的错误和警告同样会脱敏远端目标内嵌的凭据模式。部分条目失败时，批量结果 `status = "completed"` 且 `warning = true`；全部条目失败时，`status = "failed"`。调用方应始终读取 `items[]` 的逐项状态，而不是只看批量总状态。
+失败项会包含 `error_message`；成功项可省略该字段。单项 warning 位于 `items[].warnings` 或 `items[].preview.warnings`，聚合消息位于顶层 `warnings`。
 
-把支持的备份任务恢复到指定目录：
+维护端点面向管理员，部分操作可能长时间运行。Web UI 在维护页面暴露相同操作。
 
+维护和诊断行为：
+
+- Scrub 对象错误返回稳定的公开 `errors[].message` 值；更底层的 IO、路径和校验细节只保留在服务端日志中。
+- 手动 Scrub 会写入 `scrub` 活动日志。启用 `[maintenance.scrub] enabled = true` 时，服务端按 `schedule_interval` 以系统用户身份运行完整 Scrub 后台任务；失败后按 `retry_interval` 重试，最多 `max_retries` 次。
+- 定时运行与手动运行使用相同的维护历史、活动日志详情、结果形状和提醒事件。
+  Scrub 失败、对象校验问题和结果持久化不完整会通过 Webhook、Telegram、WeCom、DingTalk 或 SMTP 提醒通道发送 `scrub_run` 事件；提醒详情不包含对象 hash 或底层错误文本。
+- `GET /api/v1/maintenance/disk-health` 使用 `[disk_health]` 和 `smartctl --json --all` 报告 `disabled`、`ok`、`warning`、`critical` 或 `unavailable`。
+  缺失设备、SMART 失败、序列号不匹配、临界温度、NVMe critical warning、spare capacity 耗尽、介质磨损阈值和介质错误都会影响设备状态。
+- 周期检查发现 warning、critical 或 unavailable 时，会为 `system` 用户在 `/system/disk-health` 写入 `disk_health` 活动日志。
+  配置提醒通道时，周期磁盘健康检查会为 warning、critical 和 unavailable 状态发送 `disk_health` 事件。
+- 活动条目摘要使用配置的设备 `name`；提醒事件详情只使用聚合计数，不包含设备名、完整设备路径、序列号或 warning 文本。
+  完整设备路径和 SMART 详情只由管理员维护端点返回。
+- `GET /api/v1/maintenance/objects` 接受可选 `limit` 和 `cursor` 查询参数。
+  `limit` 默认值和最大值均为 1000；`cursor` 来自上一页 `next_cursor`，非空时必须是 64 字符十六进制对象 hash。
+  `limit` 和 `cursor` 均最多出现一次。
+
+诊断响应：
+
+- `GET /api/v1/diagnostics` 和 `/diagnostics-export` 包含脱敏文件系统统计。
+  `filesystem.disk_stats_available=true` 时，`filesystem.disk_*` 可包含容量值、`disk_filesystem_type`、脱敏 Linux mountinfo 元数据和 `disk_native_data_checksum_support`。
+- 两个诊断端点都设置 `Cache-Control: no-store`、`X-Content-Type-Options: nosniff` 和 `Referrer-Policy: no-referrer`，因为诊断内容可能包含运行状态。`/diagnostics-export` 返回附件，并设置根 `schema_version = 1`；`export_time` 和附件文件名时间戳使用 UTC。
+- 诊断响应只暴露 Webhook、Telegram、WeCom、DingTalk 和 SMTP 邮件的通道布尔值。
+  SMTP 邮件布尔值只有在启用邮件提醒，且 SMTP host、port、sender 和至少一个非空 recipient 都存在时为 true。
+- 诊断响应永远不包含 Webhook URL/header、Telegram bot token、WeCom webhook URL、DingTalk webhook URL、SMTP host、SMTP username、SMTP password、sender address 或 recipient address。
+- 诊断响应包含脱敏的 `maintenance` 摘要，其中包括 `history_ready`、`[maintenance.scrub]` 调度设置、最近 Scrub 状态/时间，以及最近失败 Scrub 的 retry count。
+- 诊断响应包含脱敏的 `smb` 预览状态。当前构建不捆绑 SMB/Samba 运行时，因此 `runtime_available=false` 表示配置的 SMB 共享不可挂载。
+  诊断只暴露共享数量、运行时状态和稳定的“当前局域网挂载使用 WebDAV”提示，不包含 SMB 凭据内容。
+
+备份任务类型和命令执行：
+
+- 备份端点操作 `[[backup.jobs]]` 下配置的任务。支持任务类型为 `local`、`restic` 和 `rclone`。
+- 本地任务复制到 `destination/<job-id>/snapshots/<run-id>/`，并可按 `max_snapshots` 和 `max_age` 清理旧快照。
+- Restic 任务调用 `restic -r <repository> --password-file <password_file> backup <source>`，并可选调用 `restic check`。
+  rclone 任务调用 `rclone sync <source> <remote>`，并可选调用 `rclone check --one-way`。
+- 外部命令不经 shell 执行。`command` 必须是裸可执行文件名或绝对路径，`extra_args` 会作为 argv 追加到备份命令；恢复命令不复用备份专用 extra args。
+- 备份运行拒绝 `source` 树中的 symlink；`rclone` 恢复演练在远程校验前应用相同检查。
+- `password_file` 和 `config_file` 必须是位于 `source` 和 `storage.root` 之外的普通文件。
+
+备份脱敏和提醒边界：
+
+- API 任务视图、运行结果、恢复或预览结果、恢复报告和批量恢复结果会对展示字段中的 userinfo、token、密码、secret 和 key 参数脱敏。
+  受影响字段包括 `repository`、`remote`、`destination`、`target_path`、`snapshot_path`、`manifest_path` 和 `config_path`。
+- API 可见的备份 `error_message`、`warnings` 和预检详情也使用相同脱敏规则。
+- 备份提醒事件不包含 source、destination、恢复目标路径、snapshot 或 manifest 路径，也不包含原始 warning/error 文本。
+  事件只保留 status、trigger、计数、时间戳、failure category 和位置/错误详情已省略标记等摘要字段。
+- Restic/rclone 命令仍接收原始配置值。串联 `restore-preview`、`restore` 和 `restore-verify` 的客户端应保留并复用原始请求 `target_path`；响应中的脱敏 `target_path` 仅用于展示。
+- 任务视图的 `restore_report_findings` 和恢复报告下载中的 `findings` 文本也使用同一套备份凭据脱敏规则。
+- 恢复报告下载响应设置 `Cache-Control: no-store`、`Pragma: no-cache`、`X-Content-Type-Options: nosniff` 和 `Referrer-Policy: no-referrer`，因为报告可能包含恢复状态和运维判断。
+
+调度、保留和状态：
+
+- 任务可定义 `disabled`、`schedule_interval`、`schedule_window_start`、`schedule_window_end`、`stale_after`、`restore_drill_stale_after`、`max_snapshots`、`max_age` 和 `retention_policy`。
+- 正数 `schedule_interval` 会启用进程内调度器。两个 schedule-window 字段同时设置时，自动运行只会在服务器本地 `HH:MM` 窗口内开始，手动立即运行不受影响。
+- 任务视图包含备份 `health_status`（`ok`、`manual`、`running`、`due`、`stale`、`failed` 或 `disabled`）、`retention_status` 和 `restore_drill_status`，以及可选消息。
+- 成功备份会自动运行保留检查，`POST /retention-check` 可手动运行。
+  Local 检查统计本地快照范围，restic 检查运行 `restic snapshots --json --tag mnemonas --tag job:<id>`，rclone 检查运行 `rclone lsjson <remote> --recursive --files-only`。
+- 保留检查结果持久化为 `last_retention_check`，并驱动 `retention_status`/`retention_message`。
+  `retention_policy` 将 restic/rclone 远程保留标记为外部确认；否则远程任务报告保留 warning。
+
+恢复演练和恢复报告：
+
+- `restore_drill_stale_after` 为空或省略时默认为 30 天，并驱动恢复演练提醒状态。
+  配置提醒通道时，过期或缺失恢复演练会发送限频 `backup_restore_drill` warning 事件，`trigger=restore_drill_reminder`，并持久化 `last_restore_drill_reminder_at`。
+- 恢复演练历史最多保留最近 20 项，记录状态、文件/字节数、artifact 路径、失败消息，以及失败演练的稳定 `failure_category`。
+  当前分类为 `no_snapshot`、`unsupported_job_type`、`unsafe_path`、`integrity_check`、`external_command`、`cancelled`、`io` 和 `unknown`。
+- 失败分类会转发到提醒事件详情。任务视图还返回 `restore_drill_stats`，汇总该保留窗口内的总次数、成功、失败、成功率、连续成功或失败次数、最近成功/失败时间、最近失败消息和最近失败分类。
+- 恢复历史同样最多保留最近 20 项，记录目标路径、状态、文件/字节数、预检、warning、rollback/cutover checklist 和失败消息。
+  `last_restore_verify` 会在页面刷新后持久化最近一次只读恢复后校验结果。
+- 任务视图在最近恢复有匹配只读校验时返回 `last_matching_restore_verify`，并返回与恢复报告相同待处理发现的 `restore_report_findings`。
+- `GET /restore-report` 下载 `application/json` 附件，包含任务视图、最近备份、保留检查、恢复演练、恢复演练历史和统计、最近恢复、最近恢复校验、匹配校验、恢复历史和 findings。
+
+备份提醒事件：
+
+- 启用 `[alerts] enabled = true` 且配置提醒通道时，备份失败、显式恢复失败或 warning、恢复后只读校验失败或 warning、恢复演练失败、恢复演练过期/缺失提醒、保留检查失败/warning 和备份 warning 运行会发送事件。
+- 事件类型为 `backup_run`、`backup_restore`、`backup_restore_verify`、`backup_restore_drill` 或 `backup_retention_check`，级别为 `warning` 或 `critical`。
+- `message` 是固定公开摘要，不包含任务名、路径或原始错误文本。
+- 非空 `details` 摘要字段可包含 job ID、run ID、任务类型、trigger、status、时间戳、文件/字节/快照数量、warning 数量、错误消息是否存在、failure category，以及位置详情是否省略。
+  `details` 不包含任务名、source、备份目标、恢复目标路径、snapshot 路径、manifest 路径、原始 warning 或原始错误文本。
+
+备份操作语义：
+
+- `POST /run` 接受空 body 或 `{}`。
+- `POST /retention-check` 接受空 body 或 `{}`，并返回 `snapshot_count`、`file_count`、`total_bytes`、snapshot 时间范围、`warning` 和 `warnings`；失败返回 `500`，并在 `details` 中包含失败检查。
+- `POST /restore-drill` 接受可选 `{"keep_artifact": true}`。
+  local 任务临时恢复并校验最近快照，restic 任务运行 `restic check`，rclone 任务运行 `rclone check --one-way`。
+- `POST /restore-preview` 使用与 restore 相同的目标规则，但不创建目标数据或写入恢复历史。
+  它返回目标隔离、目标状态、备份内容、目标文件系统容量和配置处理对应的 `preflight_checks`、`warnings`、`cutover_checklist` 和 `rollback_checklist`。
+- Local 任务汇总最新 manifest，restic 任务运行 `restic ls latest --json --tag mnemonas --tag job:<id> --path <source>`，rclone 任务运行 `rclone lsjson <remote> --recursive --files-only`。
+
+批量恢复：
+
+- `POST /batch-restore-preview` 接受 `{"items":[{"job_id":"external-disk","target_path":"/absolute/restore/a","include_config":true}]}`，最多 20 项。
+  该端点拒绝同一批次中的重复或嵌套目标路径，并返回每项预览状态、`error_message` 和 warning，不写入目标数据或恢复历史。
+- `POST /batch-restore` 使用相同请求形状，顺序执行条目，并在每个成功恢复后运行只读 `restore-verify`。
+  响应返回每项 `restore`、`verify`、`warnings` 和 `error_message` 字段。
+- 顶层 `total_files` 和 `verified_bytes` 聚合已完成条目的只读校验结果。批量恢复错误和 warning 文本使用相同远程目标凭据脱敏。
+- 部分失败时整体返回 `status="completed"` 且 `warning=true`；全部条目失败时返回 `status="failed"`，因此客户端必须检查 `items[]`。
+- 批量预览响应中，单项预览 warning 位于 `items[].preview.warnings`；聚合消息位于顶层 `warnings`。
+
+显式恢复和只读校验：
+
+- `POST /restore` 支持 local、restic 和 rclone 任务，并要求 `{"target_path": "/absolute/restore/path", "include_config": true}`。
+- 目标必须是以 `/` 开头的服务端 POSIX 绝对路径，不能包含控制字符、反斜杠或 `.`/`..` 路径段，不能是文件系统根目录或受保护系统目录。
+  目标还必须位于 `storage.root`、备份来源以及任何本地备份目标或仓库之外。
+- Windows 和 UNC 路径不是合法服务端恢复目标。目标父目录必须存在，目标本身必须不存在或为空。
+- 服务端会在写入前重新运行相同恢复预检；失败预检会拒绝恢复，并和失败恢复结果一起持久化。
+- Local 恢复将快照 `data/` 内容复制到目标根目录，校验大小和 SHA-256，并在请求时把配置恢复到 `.mnemonas-restore/config.toml`。
+- Restic 恢复运行 `restic restore latest --target <临时目录> --tag mnemonas --tag job:<id> --path <source>`。
+  服务端拒绝恢复出的 symlink 和特殊文件后，将恢复出的 source 目录内容安装到目标根。
+- Rclone 恢复运行 `rclone copy <remote> <临时目录>`，再运行 `rclone check <remote> <临时目录> --one-way`。
+  安装到 `target_path` 前同样拒绝恢复出的 symlink 和特殊文件，再把临时目录安装到 `target_path`。
+- `include_config` 对 restic 或 rclone 任务没有特殊处理。恢复开始和完成会持久化，失败恢复尝试也会记录，便于后续排查。
+- `POST /restore-verify` 要求目标目录已存在，应用相同服务端 POSIX 路径规则、受保护路径边界以及控制字符或点段拒绝规则，不修改数据。
+  该端点持久化最近一次校验报告为 `last_restore_verify`，并报告文件/字节数量和关键目录或文件是否存在。
+- 校验字段包括 `.mnemonas-restore/config.toml`、`files/`、`.mnemonas/`、`.mnemonas/index.db` 和 `.mnemonas/objects`；warning 会指出 symlink、特殊文件或看起来不像完整 `storage.root` 的目标。
+- Local 任务会优先和同一目标最近一次成功恢复快照比较，否则和最近 local 快照比较，并返回比较用的 `snapshot_path` 和 `manifest_path`。
+
+错误和边界条件：
+
+- 无效恢复 `target_path` 和无效批量恢复请求条目返回 `400`。
+- 由配置路径、备份来源内容或外部命令导致的备份任务执行失败返回 `500`，并在 `details` 中包含失败运行、演练或恢复结果。
+- 未知任务返回 `404`；禁用任务、并发操作、没有任何完成快照的 local 恢复/恢复演练，以及非空恢复目标返回 `409`。
+- 包含反斜杠的恢复目标路径会被 `restore-preview`、`restore` 和 `restore-verify` 拒绝为无效 Windows 或 UNC 风格语法。
+- restic 预览和 rclone 预览/保留检查会拒绝输出中的不安全文件路径，包括空路径、控制字符、反斜杠、Windows/UNC 语法、`.`/`..` 路径段，或越过已配置来源边界的绝对路径。
+- 备份、恢复、恢复演练、只读校验和保留检查操作会在执行前持久化 `running` 记录。
+  服务启动期间，前一个进程退出留下的 `running` 记录会标记为 failed，并写回状态文件。
+- 任务视图和恢复报告只在最近恢复成功完成、目标路径匹配且校验时间不早于最近恢复完成时间时，才将 `last_restore_verify` 关联到 `last_restore`。
+  任务视图为该匹配校验和待处理 findings 暴露 `last_matching_restore_verify` 与 `restore_report_findings`，语义与恢复报告相同。
+- 任务视图和恢复报告会把匹配结果复制到 `last_matching_restore_verify`；否则省略该字段，并用 findings 表示最近恢复仍需要匹配的只读校验。
+  最近恢复仍在运行时，恢复报告 findings 会说明恢复尚未完成，并避免把旧校验结果关联到该恢复。
+- 本地备份目标会拒绝已有 symlink 路径组件。本地恢复预览、恢复和恢复演练会在读取快照 manifest 或创建演练 artifact 前重新检查目标。
+  相同 symlink 路径组件检查也应用于 `POST /restore-preview`、`POST /restore` 和 `POST /restore-verify` 的目标路径。
+
+## WebDAV
+
+WebDAV 服务地址为：
+
+```text
+http://localhost:8080/dav
 ```
-POST /api/v1/maintenance/backups/{id}/restore
-```
 
-**请求体**:
-```json
-{
-  "target_path": "/mnt/restore/mnemonas",
-  "include_config": true
-}
-```
+WebDAV 访问和方法语义：
 
-当前显式恢复支持 `type = "local"`、`type = "restic"` 和 `type = "rclone"`。`target_path` 必须是服务器上的 POSIX 绝对路径（以 `/` 开头），不能包含控制字符、反斜杠、`.` 或 `..` 路径段，不能是文件系统根目录或受保护系统目录，并且必须位于 `storage.root`、备份来源和本地备份目标/仓库之外；Windows 或 UNC 路径不是有效的服务器恢复目标。父目录必须已存在，目标目录不存在或为空，且已存在的路径组件不能是符号链接。该接口不会覆盖当前在线数据目录。服务端会在真正写入前重新执行同一套恢复预检；存在失败预检时恢复会被拒绝，失败结果仍写入恢复历史，便于之后排查。
+- 默认使用 `[webdav]` 中的旧全局 Basic Auth 凭据，或 `secrets.json` 中生成的凭据。
+- 设置 `webdav.auth_type = "users"` 后，可以使用 MnemoNAS 用户账户挂载，并应用每个用户的 `home_dir` 边界。
+  普通用户在 WebDAV 根目录也能看到已授权共享目录的顶层导航入口。
+- 为嵌套授权合成的祖先入口只是只读导航；写入仍需要匹配写授权。
+- 支持的核心方法包括 `OPTIONS`、`PROPFIND`、`GET`、`HEAD`、`PUT`、`DELETE`、`MKCOL`、`MOVE`、`COPY`、简化 `PROPPATCH`、简化 `LOCK` 和简化 `UNLOCK`。
+- 直接父目录不存在时，`MKCOL` 返回 `409 Conflict`；目标已存在时，返回带 `Allow` 的 `405 Method Not Allowed`。
+- 不支持的 WebDAV 方法返回 `405 Method Not Allowed`，并在 `Allow` 响应头列出当前范围可用方法。
+  只读挂载和只读用户只列出 `OPTIONS`、`GET`、`HEAD` 和 `PROPFIND`。
+- 对 WebDAV `MOVE`，若目标路径不存在但保留历史版本元数据，则返回 `409 Conflict`。
+  目录移动还会检查目标路径下的后代版本元数据。该目标冲突在用户配额或目录配额检查前返回。
+- 带 `Origin`、`Referer` 或 `Sec-Fetch-Site` 元数据的浏览器请求，会对 WebDAV 写方法执行 same-origin 检查。
+  脚本和 WebDAV 客户端通常不会发送这些浏览器 origin 头。
+- WebDAV 文件和目录列表响应包含 `nosniff` 和 sandbox CSP，用于降低浏览器打开用户文件时执行脚本的风险。
 
-- `local`：把最近一次成功快照中的 `data/` 内容复制到 `target_path` 根目录并校验大小和 SHA-256；`include_config = true` 时，备份中的配置文件会恢复到 `target_path/.mnemonas-restore/config.toml`。
-- `restic`：执行 `restic restore latest --target <临时目录> --tag mnemonas --tag job:<id> --path <source>`，再把 restic 恢复出的来源目录内容安装到 `target_path` 根目录。安装目标前会拒绝恢复出的符号链接和非常规文件。`include_config` 对 restic 任务无特殊处理。
-- `rclone`：执行 `rclone copy <remote> <临时目录>` 恢复远端内容，再执行 `rclone check <remote> <临时目录> --one-way` 校验临时目录。拒绝恢复出的符号链接和非常规文件后，再把临时目录安装到 `target_path`。`include_config` 对 rclone 任务无特殊处理。
-
-恢复开始和结束都会写入备份状态文件。恢复结果会携带本次 `preflight_checks`、`warnings`、`cutover_checklist` 和 `rollback_checklist`。失败恢复也会进入 `restore_history`，便于之后排查目标路径、权限、外部命令或仓库问题。
-
-下载单个备份任务的恢复摘要：
-
-```
-GET /api/v1/maintenance/backups/{id}/restore-report
-```
-
-响应为 `application/json` 附件，包含 `job`、最近备份、最近保留检测、最近恢复演练、恢复演练历史、最近恢复、最近恢复后只读校验、最近恢复匹配的只读校验 `last_matching_restore_verify`、恢复历史和 `findings`。该摘要适合在切换 storage.root 前留档，或在恢复失败后随诊断信息一起保存。
-
-恢复完成后，对目标目录执行只读校验，不写入恢复历史：
-
-```
-POST /api/v1/maintenance/backups/{id}/restore-verify
-```
-
-**请求体**:
-```json
-{
-  "target_path": "/mnt/restore/mnemonas"
-}
-```
-
-**响应示例**:
-```json
-{
-  "success": true,
-  "data": {
-    "id": "20260509T040005.000000000Z",
-    "job_id": "external-disk",
-    "status": "completed",
-    "source": "/srv/mnemonas",
-    "destination": "/mnt/backup-drive/mnemonas",
-    "snapshot_path": "/mnt/backup-drive/mnemonas/external-disk/snapshots/20260509T020304.000000000Z",
-    "manifest_path": "/mnt/backup-drive/mnemonas/external-disk/snapshots/20260509T020304.000000000Z/manifest.json",
-    "target_path": "/mnt/restore/mnemonas",
-    "file_count": 42,
-    "verified_bytes": 1048576,
-    "config_path": "/mnt/restore/mnemonas/.mnemonas-restore/config.toml",
-    "config_found": true,
-    "files_dir_found": true,
-    "internal_dir_found": true,
-    "index_found": true,
-    "objects_dir_found": true,
-    "looks_like_storage_root": true,
-    "warnings": []
-  }
-}
-```
-
-`restore-verify` 要求目标目录已存在，目标路径必须是服务器上的 POSIX 绝对路径（以 `/` 开头），不能包含控制字符、反斜杠、`.` 或 `..` 路径段，不能是文件系统根目录或受保护系统目录，并且仍位于 `storage.root`、备份来源和本地备份目标/仓库之外；Windows 或 UNC 路径不是有效的服务器恢复目标，目标路径中已存在的路径组件也不能是符号链接。它会统计恢复目录中的常规文件和字节数，检查 `.mnemonas-restore/config.toml`、`files/`、`.mnemonas/`、`.mnemonas/index.db` 与 `.mnemonas/objects` 是否存在，并对符号链接、非常规文件或不像完整 `storage.root` 的目录给出警告。`local` 任务会优先对照同一目标最近一次成功恢复所用的快照，找不到匹配恢复记录时再对照最新本地快照；响应中的 `snapshot_path` 和 `manifest_path` 表示实际对照对象。维护页在恢复成功后会自动调用该接口，并展示恢复后切换检查清单。
-
-任务视图和恢复报告中的最近恢复摘要只会把目标路径一致、校验时间不早于最近恢复完成时间，且最近恢复已成功完成的 `last_restore_verify` 关联到 `last_restore`。任务视图会返回 `last_matching_restore_verify` 和 `restore_report_findings`，用于展示与恢复报告 `last_matching_restore_verify` 和 `findings` 相同的匹配校验与待处理发现项。任务视图和恢复报告会把匹配结果复制到 `last_matching_restore_verify`；不匹配时，该字段省略，并输出最近恢复尚未完成匹配只读校验的发现项。最近恢复仍在运行时，恢复报告会输出恢复未完成的发现项，并避免把旧校验结果关联到本次恢复。
-
-**错误语义**:
-- 未配置备份管理器：`503 Service Unavailable`
-- 任务不存在：`404 Not Found`
-- 同一任务已有备份或恢复演练在运行：`409 Conflict`
-- 任务已停用：`409 Conflict`
-- 本地任务没有可预览、可演练或可恢复的成功快照：`409 Conflict`
-- 恢复请求的 `target_path` 或批量请求条目无效：`400 Bad Request`
-- 显式恢复目标目录非空：`409 Conflict`
-- 任务配置路径、备份源树或外部命令导致执行失败：`500 Internal Server Error`，错误响应 `details` 中包含失败的 run/drill/restore 结果
-
-### 导出诊断信息
-
-下载完整的诊断信息包（JSON 格式）。
-
-**需要认证**: 当 `auth.enabled = true` 时需要管理员 JWT；未开启认证时可直接访问
-
-```
-GET /api/v1/diagnostics-export
-```
-
-**响应**: 返回 JSON 文件下载；响应包含 `Content-Disposition: attachment`，并通过 `Cache-Control: no-store` 禁止缓存。
-
-导出的 JSON 根对象包含 `schema_version = 1`，用于标识诊断包结构版本。内容会包含脱敏后的 `alerts`、`disk_health` 和 `smb` 运行态信息，例如 `enabled`、`runtime_available`、通知通道配置状态、阈值、最近一次检查级别和 SMB 预览运行态；不会包含 Webhook URL、自定义 Header、Telegram Bot Token、企业微信 Webhook URL、钉钉 Webhook URL、`smtp_host`、`smtp_username`、`smtp_password`、`smtp_from`、`smtp_to` 或 SMB 凭据内容。
-
----
-
-## WebDAV 接口
-
-MnemoNAS 实现 WebDAV RFC 4918 核心读写方法，可用于文件管理器挂载。
-
-**挂载地址**: `http://localhost:8080/dav/`
-
-浏览器携带 `Origin` / `Referer` / `Sec-Fetch-Site` 元数据访问 WebDAV 写方法时，会执行同源检查；脚本客户端和标准 WebDAV 客户端通常不会发送这些浏览器来源头。WebDAV 文件和目录列表响应会带 `nosniff` 与 sandbox CSP，以降低用户文件在浏览器中同源打开时的脚本执行面。
-
-支持的 WebDAV 方法:
-- `PROPFIND` - 列出目录
-- `GET` - 下载文件
-- `PUT` - 上传文件  
-- `DELETE` - 删除文件
-- `MKCOL` - 创建目录；直接父目录不存在时返回 `409 Conflict`，目标已存在时返回带 `Allow` 的 `405 Method Not Allowed`
-- `COPY` - 复制文件
-- `MOVE` - 移动/重命名文件
-- `LOCK/UNLOCK` - 文件锁定（虚拟实现）
-
-不支持的 WebDAV 方法会返回 `405 Method Not Allowed`，并通过 `Allow` 响应头列出当前支持的方法。
-
-WebDAV `MOVE` 的目标路径不存在但仍保留历史版本元数据时会返回 `409 Conflict`；目录移动会同时检查目标路径下的后代版本元数据。该目标冲突会先于用户配额和目录配额检查返回。
-
-### 客户端配置示例
-
-**macOS Finder**:
-1. Finder → 前往 → 连接服务器
-2. 输入: `http://localhost:8080/dav/`
-
-**Windows 文件资源管理器**:
-1. 此电脑 → 添加网络位置
-2. 输入: `http://localhost:8080/dav/`
-
-**Linux (GNOME Files)**:
-1. 其他位置 → 连接到服务器
-2. 输入: `dav://localhost:8080/dav/`
-
----
+参见 [WebDAV 兼容性](webdav-compatibility.md)。
 
 ## 错误代码
 
-| 错误代码 | 说明 |
-|----------|------|
-| `INVALID_PATH` | 无效的文件路径 |
-| `PATH_TRAVERSAL` | 检测到路径遍历攻击 |
-| `FILE_NOT_FOUND` | 文件不存在 |
-| `FILE_TOO_LARGE` | 文件超过大小限制 |
-| `INVALID_HASH` | 无效的哈希值 |
-| `DATAPLANE_ERROR` | 数据面服务错误 |
-| `INTERNAL_ERROR` | 内部服务器错误 |
+常见错误代码类别：
 
----
+| 类别 | 示例 |
+| --- | --- |
+| 认证 | `UNAUTHORIZED`、`LOGIN_RATE_LIMITED`、`TOKEN_EXPIRED` |
+| 请求 | `BAD_REQUEST`、`INVALID_REQUEST_BODY`、`VALIDATION_ERROR` |
+| 文件 | `NOT_FOUND`、`CONFLICT`、`FILE_TOO_LARGE` |
+| 分享 | `SHARE_NOT_FOUND`、`SHARE_EXPIRED`、`SHARE_PASSWORD_RATE_LIMITED` |
+| 服务 | `SERVICE_UNAVAILABLE`、`INTERNAL_ERROR` |
 
-## 速率限制
-
-- 默认并发请求限制: 100
-- 单文件上传超时: 30 分钟
-- 健康检查超时: 5 秒
-- 数据面连接超时: 10 秒
-
----
+广义控制流应使用 HTTP 状态码；面向用户展示或分支处理时使用 JSON 错误代码。
 
 ## 版本说明
 
-本文档描述当前主线的 REST API。具体发布版本、兼容性说明和变更历史以 Git tag 与 [CHANGELOG](../CHANGELOG.md) 为准。
+本文档描述当前 main 分支 REST API。已发布版本、兼容性说明和变更历史由 Git tag 和 [CHANGELOG](../CHANGELOG.md) 跟踪。

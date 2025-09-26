@@ -2,7 +2,7 @@
 
 English | [简体中文](README.md)
 
-Welcome to the MnemoNAS documentation. This directory contains usage guides, deployment notes, and reference material.
+This directory contains MnemoNAS usage guides, deployment notes, and reference material.
 
 ## Documentation Index
 
@@ -24,10 +24,10 @@ Welcome to the MnemoNAS documentation. This directory contains usage guides, dep
 | Document | Description |
 | --- | --- |
 | [FAQ](faq.en.md) | Common questions and troubleshooting |
-| [Storage internals and best practices](storage-internals.en.md) | CAS design, filesystem recommendations, and tuning |
+| [Storage internals and operations guidance](storage-internals.en.md) | CAS design, filesystem recommendations, and tuning |
 | [Backup guide](backup-guide.en.md) | 3-2-1 backup strategy and restore flow |
 | [WebDAV compatibility](webdav-compatibility.en.md) | Client compatibility and protocol support |
-| [Security guide](security.en.md) | Authentication, HTTPS, and network security configuration |
+| [Security hardening guide](security.en.md) | Authentication, HTTPS, and network security configuration |
 
 ### Development
 
@@ -38,6 +38,9 @@ Welcome to the MnemoNAS documentation. This directory contains usage guides, dep
 | [Roadmap](roadmap.en.md) | Priorities from private file cloud to home and small-team NAS |
 | [Development guide](development.en.md) | Local development setup |
 | [Testing strategy](testing-strategy.en.md) | Unit, integration, E2E, and torture test strategy |
+| [Hardening progress ledger](hardening-progress.en.md) | Completed hardening areas, verification evidence, and remaining work routing |
+| [Hardening review summary](hardening-review-summary.en.md) | Current hardening worktree review groups, residual risks, and pre-release checks |
+| [Release notes draft](release-notes.en.md) | Draft notes, validation evidence, and post-publish verification entry point for the next public release |
 | [API reference](api-reference.en.md) | REST API endpoints and request/response formats |
 | [Extension points](extension-points.en.md) | Future interface draft for S3, plugins, and runners |
 
@@ -45,7 +48,7 @@ Welcome to the MnemoNAS documentation. This directory contains usage guides, dep
 
 | Document | Description |
 | --- | --- |
-| [Support](../SUPPORT.en.md) | Support channels and maintenance boundary |
+| [Support](../SUPPORT.en.md) | Support channels and support boundary |
 | [支持说明](../SUPPORT.md) | Chinese support document |
 | [Security policy](../SECURITY.md) | Vulnerability reporting and deployment security |
 | [安全策略](../SECURITY.zh-CN.md) | Chinese security policy |

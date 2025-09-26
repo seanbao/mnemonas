@@ -8,7 +8,9 @@ English | [简体中文](README.md)
 
 > Private files and local control for self-hosted storage.
 
-MnemoNAS is an open-source self-hosted NAS system with a Web UI, WebDAV access, file versions, trash, scrub, and diagnostic bundles for daily file management. Data stays in the configured storage root, and moving that full root is enough to migrate the service.
+MnemoNAS is an open-source self-hosted NAS system for daily file management.
+It provides a Web UI, WebDAV access, file versions, trash, scrub, and diagnostic bundles.
+Data stays in the configured storage root, and moving that full root is enough to migrate the service.
 
 The name comes from Mnemosyne, the Greek goddess of memory and mother of the nine Muses.
 
@@ -33,10 +35,20 @@ The name comes from Mnemosyne, the Greek goddess of memory and mother of the nin
 | Search | Filename search with quick navigation |
 | User management | Multiple users, roles, password policy, login history |
 | Share links | Public/private links, password protection, expiration, access statistics |
-| Activity log | Key operation history, statistics overview, high-risk summary with concentrated-window review scoped to the high-risk group, current-page and current-filter cross-page review, disposition checklists, persisted review records with structured bulk-disposition summaries, batch follow-up view for review records, follow-up disposition status and note write-back, review-record export, disposition entry points from individual activity rows and review records to related activity, version history, trash, and share-disposition views, review-history filters by reviewer, linked activity, time, and disposition status, quick focus for follow-up reviews, time-range, path, review-group, type, and user filters, administrator-only clear action, and home/small-team activity review |
+| Activity log | Operation history, statistics, high-risk review, filters, disposition records, export, and administrator-only clear action |
 | Settings | Server, storage, retention, and WebDAV configuration |
-| Maintenance | Scrub, GC, object browsing, diagnostic bundle, system metrics |
-| WebDAV | Core RFC 4918 read/write methods with Basic Auth and a maintained compatibility matrix |
+| Backup and maintenance | Backup jobs, restore drills, scrub, GC, object listing, diagnostic bundle, system metrics |
+| WebDAV | Core RFC 4918 read/write methods with MnemoNAS user authentication or Basic Auth and a maintained compatibility matrix |
+
+Activity review includes:
+
+- high-risk summaries;
+- concentrated-window review;
+- current-page and current-filter cross-page review;
+- structured bulk-disposition summaries;
+- follow-up review status.
+
+Activity rows also link to related versions, trash entries, shares, and review records.
 
 ## Architecture
 
@@ -71,7 +83,7 @@ MnemoNAS uses a hybrid layout: current files are stored as native files under `f
 - **Filesystem-neutral**: ext4, XFS, Btrfs, and ZFS are supported; ZFS mirror is recommended for stronger storage hygiene.
 - **Migratable**: moving the full storage root keeps current files, history, trash, and metadata together.
 
-See [Storage Internals and Best Practices](docs/storage-internals.en.md).
+See [Storage Internals and Operations Guidance](docs/storage-internals.en.md).
 
 ## Quick Start
 
@@ -87,13 +99,28 @@ sudo ./scripts/install-systemd.sh
 sudo mnemonas-doctor
 ```
 
-The default install path is `/usr/local/bin`, config is written to `/etc/mnemonas/config.toml`, data goes to `/srv/mnemonas`, and the Web UI listens on `http://<server-ip>:8080`. The first login password is stored at `/srv/mnemonas/.mnemonas/initial-password.txt`. Before upgrading, keep the extracted previous release directory so a failed upgrade can roll binaries and Web UI assets back by rerunning the old installer; the full procedure is in the deployment guide. For public-domain access, follow the [Public server quickstart](docs/public-server-quickstart.en.md) to restrict the backend port and configure an HTTPS reverse proxy.
+Default locations:
+
+- binaries: `/usr/local/bin`;
+- config: `/etc/mnemonas/config.toml`;
+- data: `/srv/mnemonas`;
+- Web UI: `http://<server-ip>:8080`;
+- first login password: `/srv/mnemonas/.mnemonas/initial-password.txt`.
+
+Before upgrading, keep the extracted previous release directory.
+If an upgrade fails, rerun the old installer to roll binaries and Web UI assets back; the full procedure is in the deployment guide.
+For public-domain access, follow the [Public server quickstart](docs/public-server-quickstart.en.md) to restrict the backend port and configure an HTTPS reverse proxy.
 
 See [Linux/systemd deployment](docs/linux-systemd-deployment.en.md).
 
 ### Docker Compose
 
-Docker Engine and Compose v2 are required. Local source builds also require the Buildx plugin. Verify `docker compose version` first, and verify `docker buildx version` when building from source. On Ubuntu 24.04 systems where `docker` is available but `docker compose` is missing, the Ubuntu packages are usually `docker-compose-v2` and `docker-buildx`; Docker's official apt repository usually uses `docker-compose-plugin` and `docker-buildx-plugin`.
+Docker Engine and Compose v2 are required.
+Local source builds also require the Buildx plugin.
+Verify `docker compose version` first, and verify `docker buildx version` when building from source.
+
+On Ubuntu 24.04 systems where `docker` is available but `docker compose` is missing, the Ubuntu packages are usually `docker-compose-v2` and `docker-buildx`.
+Docker's official apt repository usually uses `docker-compose-plugin` and `docker-buildx-plugin`.
 
 ```bash
 git clone https://github.com/seanbao/mnemonas.git
@@ -105,7 +132,24 @@ cd mnemonas
 # http://localhost:8080
 ```
 
-The bundled `docker-compose.yml` builds `mnemonas:local` from source by default. The host does not need Go, Rust, or Node.js, but it must be able to pull Docker base images. The quickstart script creates or updates `.env`, writes the current host UID/GID, creates `MNEMONAS_DATA_DIR`, runs Docker preflight checks, and selects the start mode from `MNEMONAS_IMAGE`: local images use a source build, while release image tags use `docker compose up -d --pull missing --no-build`. After `--start`, the script waits for the local `/health` endpoint so a created container is not treated as ready before the service responds, then prints Web UI, health check, initial-password read, WebDAV, Compose status, and log commands. Use `--skip-health-check` only when the host cannot reach the Docker-published port locally. Binary archives from GitHub Releases include `docker-compose.yml` and `.env.example`, and the packaged template presets `MNEMONAS_IMAGE` to the GHCR image for the same release tag.
+The bundled `docker-compose.yml` builds `mnemonas:local` from source by default.
+The host does not need Go, Rust, or Node.js, but it must be able to pull Docker base images.
+
+The quickstart script:
+
+- creates or updates `.env`;
+- writes the current host UID/GID;
+- creates `MNEMONAS_DATA_DIR`;
+- runs Docker preflight checks;
+- selects the start mode from `MNEMONAS_IMAGE`.
+
+Local images use a source build.
+Release image tags use `docker compose up -d --pull missing --no-build`.
+After `--start`, the script waits for the local `/health` endpoint, then prints Web UI, health check, initial-password read, WebDAV, Compose status, and log commands.
+Use `--skip-health-check` only when the host cannot reach the Docker-published port locally.
+
+Binary archives from GitHub Releases include `docker-compose.yml` and `.env.example`.
+The packaged template presets `MNEMONAS_IMAGE` to the GHCR image for the same release tag.
 
 If port 8080 is already used:
 
@@ -113,7 +157,13 @@ If port 8080 is already used:
 ./scripts/docker-quickstart.sh --port 8888 --start
 ```
 
-On first startup, MnemoNAS creates persistent config in the data directory. By default, the Web login initial password is stored at `<MNEMONAS_DATA_DIR>/.mnemonas/initial-password.txt`; if `auth.users_file` is customized, `initial-password.txt` is stored next to that users file. After the first administrator login, the dashboard shows a first-deployment checklist and requires explicit confirmation of initial credential handling, administrator redundancy, backup planning, and public-entry safety before the prompt can be closed. Release image usage is documented in the [Docker deployment guide](docs/docker-deployment.en.md).
+On first startup, MnemoNAS creates persistent config in the data directory.
+By default, the Web login initial password is stored at `<MNEMONAS_DATA_DIR>/.mnemonas/initial-password.txt`.
+If `auth.users_file` is customized, `initial-password.txt` is stored next to that users file.
+
+After the first administrator login, the dashboard shows a first-deployment checklist.
+The prompt closes only after explicit confirmation of initial credential handling, administrator redundancy, backup planning, and public-entry safety.
+Release image usage is documented in the [Docker deployment guide](docs/docker-deployment.en.md).
 
 ### Manual Binary Run
 
@@ -144,7 +194,12 @@ MnemoNAS exposes WebDAV for common desktop, mobile, and CLI clients:
 | Android | Solid Explorer | `http://<server-ip>:8080/dav` |
 | CLI | rclone | `webdav:` remote |
 
-WebDAV Basic Auth is enabled by default. Use the current WebDAV username and password from configuration or the admin settings API.
+For day-to-day mounting, `auth_type = "users"` is preferred so clients use MnemoNAS usernames and passwords and follow the same `home_dir`, directory-access, and quota boundaries.
+The default example still enables `basic` mode, which uses separate WebDAV credentials.
+
+The running Web UI exposes the mount URL, Basic username, and readable generated password on the Settings -> WebDAV tab.
+Custom Basic passwords are not echoed back and should come from the config file or password manager.
+Generated Basic Auth passwords are also stored in `<storage.root>/secrets.json`.
 
 See [Mounting Guide](docs/mounting-guide.en.md).
 
@@ -195,15 +250,56 @@ The script builds and starts the Go control plane, Rust data plane, and frontend
 ### Make Targets
 
 ```bash
+# Full build: protobuf, Web UI, Go control plane, and Rust data plane
 make build
+
+# Fast debug build for local development
 make dev
+
+# Change-aware validation; run this first before committing local changes
+make verify-changed
+
+# Fast local checks
+make quick-check
+
+# Full project check: workflows, scripts, toolchains, docs, lint, and tests
+make check
+
+# All tests
 make test
+
+# Deep race/fuzz/property/browser torture matrix
 make test-torture
+
+# Coverage reports
 make coverage
+
+# Documentation, script, and workflow checks
+make docs-check
+make scripts-check
+make workflows-check
+make toolchains-check
+
+# Dependency vulnerability checks
+make security-check
+
+# Isolated E2E acceptance tests
 make e2e
+
+# Isolated destructive fault-injection tests
+make fault-injection
+
+# Isolated performance benchmarks
 make bench
+
+# Docker image build and container smoke test
+make docker-check
+
+# Linting and formatting
 make lint
 make fmt
+
+# Dependency installation, cleanup, and help
 make deps
 make clean
 make help
@@ -247,12 +343,12 @@ Docker and systemd deployments expose only `8080` by default. Data plane ports `
 | [Mounting Guide](docs/mounting-guide.en.md) | WebDAV client setup |
 | [WebDAV Compatibility](docs/webdav-compatibility.en.md) | Client compatibility and protocol coverage |
 | [Reverse Proxy Setup](docs/reverse-proxy-setup.en.md) | HTTPS and public entry setup |
-| [Storage Internals](docs/storage-internals.en.md) | CAS, filesystem choices, and tuning |
+| [Storage Internals and Operations Guidance](docs/storage-internals.en.md) | CAS, filesystem choices, and tuning |
 | [Backup Guide](docs/backup-guide.en.md) | Backup and restore strategy |
 | [FAQ](docs/faq.en.md) | Frequently asked questions |
 | [Architecture](docs/architecture.en.md) | System design and technology choices |
 | [Roadmap](docs/roadmap.en.md) | Priorities from private file cloud to home and small-team NAS |
-| [Security Guide](docs/security.en.md) | Auth and network security |
+| [Security Hardening Guide](docs/security.en.md) | Auth and network security |
 | [Support](SUPPORT.en.md) | Support channels and support boundary |
 
 ## Script Tools
@@ -263,7 +359,9 @@ Docker and systemd deployments expose only `8080` by default. Data plane ports `
 | [scripts/install-systemd.sh](scripts/install-systemd.sh) | systemd installer for release archives |
 | [scripts/uninstall-systemd.sh](scripts/uninstall-systemd.sh) | systemd uninstaller |
 | [scripts/mnemonas-doctor.sh](scripts/mnemonas-doctor.sh) | Deployment diagnostics |
+| [scripts/docker-quickstart.sh](scripts/docker-quickstart.sh) | Docker Compose quickstart script |
 | [scripts/mnemonas-docker-preflight.sh](scripts/mnemonas-docker-preflight.sh) | Docker Compose preflight checks |
+| [scripts/docker-smoke.sh](scripts/docker-smoke.sh) | Loopback container smoke test for a built image |
 | [scripts/run-e2e-isolated.sh](scripts/run-e2e-isolated.sh) | Isolated E2E runner used by `make e2e` |
 | [scripts/e2e-test.sh](scripts/e2e-test.sh) | E2E checks against an explicit running service |
 | [scripts/torture-test.sh](scripts/torture-test.sh) | Non-destructive deep test matrix |
