@@ -1475,6 +1475,12 @@ func TestFileSystem_OperationsRejectTraversalLikePaths(t *testing.T) {
 	if err := fs.WriteFile(ctx, "/safe/nul\x00.txt", bytes.NewReader([]byte("blocked"))); err != ErrNotFound {
 		t.Fatalf("WriteFile(NUL) error = %v, want ErrNotFound", err)
 	}
+	if _, err := fs.Stat(ctx, "/safe/versioned\n.txt"); err != ErrNotFound {
+		t.Fatalf("Stat(control character) error = %v, want ErrNotFound", err)
+	}
+	if err := fs.WriteFile(ctx, "/safe/delete\x7f.txt", bytes.NewReader([]byte("blocked"))); err != ErrNotFound {
+		t.Fatalf("WriteFile(delete control character) error = %v, want ErrNotFound", err)
+	}
 
 	file, err := fs.OpenFile(ctx, "/safe/versioned.txt")
 	if err != nil {
@@ -1637,6 +1643,60 @@ func TestStorageReadDirChildPathRejectsNonDirectChildren(t *testing.T) {
 			child:    &workspace.FileInfo{Name: "report.txt"},
 			wantPath: "/docs/report.txt",
 			wantName: "report.txt",
+		},
+		{
+			name:      "backslash child path",
+			parent:    "/docs",
+			child:     &workspace.FileInfo{Path: "/docs\\report.txt", Name: "report.txt"},
+			wantError: true,
+		},
+		{
+			name:      "dot segment child path",
+			parent:    "/docs",
+			child:     &workspace.FileInfo{Path: "/docs/./report.txt", Name: "report.txt"},
+			wantError: true,
+		},
+		{
+			name:      "parent segment child path",
+			parent:    "/docs",
+			child:     &workspace.FileInfo{Path: "/docs/../report.txt", Name: "report.txt"},
+			wantError: true,
+		},
+		{
+			name:      "dot segment fallback name",
+			parent:    "/docs",
+			child:     &workspace.FileInfo{Name: "./report.txt"},
+			wantError: true,
+		},
+		{
+			name:      "leading slash fallback name",
+			parent:    "/docs",
+			child:     &workspace.FileInfo{Name: "/report.txt"},
+			wantError: true,
+		},
+		{
+			name:      "trailing slash fallback name",
+			parent:    "/docs",
+			child:     &workspace.FileInfo{Name: "report.txt/"},
+			wantError: true,
+		},
+		{
+			name:      "backslash fallback name",
+			parent:    "/docs",
+			child:     &workspace.FileInfo{Name: "nested\\report.txt"},
+			wantError: true,
+		},
+		{
+			name:      "control character child path",
+			parent:    "/docs",
+			child:     &workspace.FileInfo{Path: "/docs/report\n2026.txt", Name: "report\n2026.txt"},
+			wantError: true,
+		},
+		{
+			name:      "control character fallback name",
+			parent:    "/docs",
+			child:     &workspace.FileInfo{Name: "report\x7f.txt"},
+			wantError: true,
 		},
 		{
 			name:      "similar prefix sibling",
@@ -3867,6 +3927,54 @@ func TestFileSystem_WalkTrashItemRestorePaths_RejectsSymlinkInsideTrashContent(t
 	})
 	if !errors.Is(err, errStoragePathSymlink) {
 		t.Fatalf("WalkTrashItemRestorePaths() error = %v, want errStoragePathSymlink", err)
+	}
+}
+
+func TestFileSystem_WalkTrashItemRestorePaths_RejectsUnsafeEntryNames(t *testing.T) {
+	tests := []struct {
+		name      string
+		entryName string
+	}{
+		{name: "backslash", entryName: "nested\\report.txt"},
+		{name: "newline", entryName: "report\n2026.txt"},
+		{name: "delete-control", entryName: "report\x7f.txt"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fs := setupFileSystem(t)
+			ctx := context.Background()
+
+			if err := fs.Mkdir(ctx, "/walk-trash-unsafe"); err != nil {
+				t.Fatalf("Mkdir() error: %v", err)
+			}
+			if err := fs.WriteFile(ctx, "/walk-trash-unsafe/original.txt", bytes.NewReader([]byte("original"))); err != nil {
+				t.Fatalf("WriteFile() error: %v", err)
+			}
+			if err := fs.Delete(ctx, "/walk-trash-unsafe"); err != nil {
+				t.Fatalf("Delete() error: %v", err)
+			}
+
+			items, err := fs.ListTrash(ctx)
+			if err != nil {
+				t.Fatalf("ListTrash() error: %v", err)
+			}
+			if len(items) != 1 {
+				t.Fatalf("expected 1 trash item, got %d", len(items))
+			}
+
+			contentPath := filepath.Join(fs.trashRoot, items[0].ID, "content")
+			if err := os.WriteFile(filepath.Join(contentPath, tt.entryName), []byte("unsafe"), 0600); err != nil {
+				t.Skipf("platform does not support unsafe filename %q: %v", tt.entryName, err)
+			}
+
+			err = fs.WalkTrashItemRestorePaths(ctx, items[0].ID, func(string, bool, int64) error {
+				return nil
+			})
+			if !errors.Is(err, ErrNotFound) {
+				t.Fatalf("WalkTrashItemRestorePaths() error = %v, want ErrNotFound", err)
+			}
+		})
 	}
 }
 
@@ -7899,6 +8007,40 @@ func TestCopyDir_CleansDestinationWhenSourceTreeContainsSymlink(t *testing.T) {
 	}
 }
 
+func TestCopyDirRejectsUnsafeSourceEntryNames(t *testing.T) {
+	tests := []struct {
+		name      string
+		entryName string
+	}{
+		{name: "backslash", entryName: "nested\\report.txt"},
+		{name: "newline", entryName: "report\n2026.txt"},
+		{name: "delete-control", entryName: "report\x7f.txt"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fs := setupManagedPathHelperFileSystem(t)
+			src := filepath.Join(fs.workspace.Root(), "src")
+			dst := filepath.Join(fs.workspace.Root(), "dst")
+
+			if err := os.MkdirAll(src, 0755); err != nil {
+				t.Fatalf("MkdirAll(src) error: %v", err)
+			}
+			if err := os.WriteFile(filepath.Join(src, tt.entryName), []byte("content"), 0644); err != nil {
+				t.Skipf("platform does not support unsafe filename %q: %v", tt.entryName, err)
+			}
+
+			err := fs.copyDir(src, dst)
+			if !errors.Is(err, ErrNotFound) {
+				t.Fatalf("copyDir() error = %v, want ErrNotFound", err)
+			}
+			if _, statErr := os.Stat(dst); !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatalf("expected failed copy destination to be removed, got %v", statErr)
+			}
+		})
+	}
+}
+
 func TestMovePath_RejectsSymlinkDestinationParent(t *testing.T) {
 	fs := setupManagedPathHelperFileSystem(t)
 	src := filepath.Join(fs.workspace.Root(), "src.txt")
@@ -8262,6 +8404,61 @@ func TestFileSystem_DiskStatsReportsWorkspaceFilesystemCapacity(t *testing.T) {
 	}
 	if stats.FileSystemType == "" {
 		t.Fatal("expected filesystem type to be reported")
+	}
+}
+
+func TestDiskStatsFromUsageHandlesInvalidCapacity(t *testing.T) {
+	mountDetails := diskMountDetails{
+		FileSystemType: "btrfs",
+		MountPoint:     "/srv/mnemonas",
+		MountSource:    "/dev/sda1",
+		MountOptions:   "rw,compress=zstd",
+	}
+
+	zero := diskStatsFromUsage(0, 0, 0, mountDetails)
+	if zero.UsedBytes != 0 || zero.UsageRatio != 0 {
+		t.Fatalf("zero-capacity stats = %+v, want zero usage", zero)
+	}
+	if !zero.NativeDataChecksumSupport {
+		t.Fatalf("expected btrfs native checksum support in zero-capacity stats: %+v", zero)
+	}
+
+	clamped := diskStatsFromUsage(100, 120, 130, mountDetails)
+	if clamped.FreeBytes != 100 || clamped.AvailableBytes != 100 || clamped.UsedBytes != 0 || clamped.UsageRatio != 0 {
+		t.Fatalf("clamped stats = %+v, want free/available clamped to total", clamped)
+	}
+
+	used := diskStatsFromUsage(100, 25, 20, mountDetails)
+	if used.UsedBytes != 75 || used.UsageRatio != 0.75 {
+		t.Fatalf("regular usage stats = %+v, want used=75 ratio=0.75", used)
+	}
+	if used.MountPoint != mountDetails.MountPoint || used.MountSource != mountDetails.MountSource || used.MountOptions != mountDetails.MountOptions {
+		t.Fatalf("mount details not preserved: %+v", used)
+	}
+}
+
+func TestDiskStatsFromStatfsBlocksValidatesBlockSizeAndOverflow(t *testing.T) {
+	mountDetails := diskMountDetails{FileSystemType: "zfs"}
+
+	stats, err := diskStatsFromStatfsBlocks(10, 4, 2, 4096, mountDetails)
+	if err != nil {
+		t.Fatalf("diskStatsFromStatfsBlocks() error: %v", err)
+	}
+	if stats.TotalBytes != 40960 || stats.FreeBytes != 16384 || stats.AvailableBytes != 8192 || stats.UsedBytes != 24576 {
+		t.Fatalf("unexpected statfs stats: %+v", stats)
+	}
+	if !stats.NativeDataChecksumSupport {
+		t.Fatalf("expected zfs native checksum support: %+v", stats)
+	}
+
+	for _, blockSize := range []int64{0, -4096} {
+		if _, err := diskStatsFromStatfsBlocks(10, 4, 2, blockSize, mountDetails); !errors.Is(err, errDiskStatsInvalidBlockSize) {
+			t.Fatalf("block size %d error = %v, want invalid block size", blockSize, err)
+		}
+	}
+
+	if _, err := diskStatsFromStatfsBlocks(^uint64(0), 4, 2, 2, mountDetails); !errors.Is(err, errDiskStatsCapacityOverflow) {
+		t.Fatalf("overflow error = %v, want capacity overflow", err)
 	}
 }
 

@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/bits"
 	"os"
 	"path"
 	"path/filepath"
@@ -18,6 +19,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode"
 
 	"github.com/zeebo/blake3"
 
@@ -144,6 +146,66 @@ type DiskStats struct {
 	MountSource               string
 	MountOptions              string
 	NativeDataChecksumSupport bool
+}
+
+var (
+	errDiskStatsInvalidBlockSize = errors.New("filesystem reported invalid block size")
+	errDiskStatsCapacityOverflow = errors.New("filesystem capacity exceeds uint64")
+)
+
+func diskStatsFromStatfsBlocks(blocks, freeBlocks, availableBlocks uint64, blockSize int64, mountDetails diskMountDetails) (DiskStats, error) {
+	if blockSize <= 0 {
+		return DiskStats{}, errDiskStatsInvalidBlockSize
+	}
+
+	totalBytes, err := diskStatsBytes(blocks, uint64(blockSize))
+	if err != nil {
+		return DiskStats{}, err
+	}
+	freeBytes, err := diskStatsBytes(freeBlocks, uint64(blockSize))
+	if err != nil {
+		return DiskStats{}, err
+	}
+	availableBytes, err := diskStatsBytes(availableBlocks, uint64(blockSize))
+	if err != nil {
+		return DiskStats{}, err
+	}
+
+	return diskStatsFromUsage(totalBytes, freeBytes, availableBytes, mountDetails), nil
+}
+
+func diskStatsBytes(blocks, blockSize uint64) (uint64, error) {
+	hi, lo := bits.Mul64(blocks, blockSize)
+	if hi != 0 {
+		return 0, errDiskStatsCapacityOverflow
+	}
+	return lo, nil
+}
+
+func diskStatsFromUsage(totalBytes, freeBytes, availableBytes uint64, mountDetails diskMountDetails) DiskStats {
+	if freeBytes > totalBytes {
+		freeBytes = totalBytes
+	}
+	if availableBytes > totalBytes {
+		availableBytes = totalBytes
+	}
+	usedBytes := totalBytes - freeBytes
+	usageRatio := 0.0
+	if totalBytes > 0 {
+		usageRatio = float64(usedBytes) / float64(totalBytes)
+	}
+	return DiskStats{
+		TotalBytes:                totalBytes,
+		FreeBytes:                 freeBytes,
+		AvailableBytes:            availableBytes,
+		UsedBytes:                 usedBytes,
+		UsageRatio:                usageRatio,
+		FileSystemType:            mountDetails.FileSystemType,
+		MountPoint:                mountDetails.MountPoint,
+		MountSource:               mountDetails.MountSource,
+		MountOptions:              mountDetails.MountOptions,
+		NativeDataChecksumSupport: filesystemHasNativeDataChecksumSupport(mountDetails.FileSystemType),
+	}
 }
 
 type PathDeleteHookResult struct {
@@ -572,13 +634,34 @@ func storageReadDirChildPath(parentPath string, child *workspace.FileInfo) (stri
 	cleanParent := path.Clean(parentPath)
 	childPath := child.Path
 	if childPath == "" {
-		childPath = path.Join(cleanParent, child.Name)
+		childName, err := safeStorageReadDirFallbackChildName(child.Name)
+		if err != nil {
+			return "", "", err
+		}
+		childPath = path.Join(cleanParent, childName)
 	}
-	cleanChild := path.Clean(childPath)
+	if strings.Contains(childPath, "\\") {
+		return "", "", ErrNotFound
+	}
+	cleanChild, err := normalizeStorageWorkspacePath(childPath)
+	if err != nil {
+		return "", "", err
+	}
 	if cleanChild == cleanParent || path.Dir(cleanChild) != cleanParent {
 		return "", "", ErrNotFound
 	}
 	return cleanChild, path.Base(cleanChild), nil
+}
+
+func safeStorageReadDirFallbackChildName(name string) (string, error) {
+	childName := strings.ReplaceAll(name, "\\", "/")
+	if childName == "" || strings.Contains(childName, "/") {
+		return "", ErrNotFound
+	}
+	if _, err := normalizeStorageWorkspacePath(childName); err != nil {
+		return "", err
+	}
+	return childName, nil
 }
 
 // OpenFile opens a file for reading
@@ -1799,7 +1882,11 @@ func (fs *FileSystem) walkTrashContentRestorePaths(ctx context.Context, contentR
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		childRel := filepath.Join(currentRel, entry.Name())
+		entryName, err := safeStorageReadDirFallbackChildName(entry.Name())
+		if err != nil {
+			return err
+		}
+		childRel := filepath.Join(currentRel, entryName)
 		info, err := fs.trashRootHandle.Lstat(childRel)
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) {
@@ -3083,7 +3170,7 @@ func generateID() (string, error) {
 
 func normalizeStorageWorkspacePath(name string) (string, error) {
 	normalized := strings.ReplaceAll(name, "\\", "/")
-	if strings.ContainsRune(normalized, '\x00') {
+	if strings.IndexFunc(normalized, unicode.IsControl) >= 0 {
 		return "", ErrNotFound
 	}
 	for _, segment := range strings.Split(normalized, "/") {
@@ -3919,8 +4006,12 @@ func (fs *FileSystem) copyDirBetweenRoots(srcRoot *storagePathRoot, srcRel, srcA
 			return abortCopy(errStoragePathSymlink)
 		}
 
-		srcPathRel := filepath.Join(srcRel, entry.Name())
-		dstPathRel := filepath.Join(dstRel, entry.Name())
+		entryName, err := safeStorageReadDirFallbackChildName(entry.Name())
+		if err != nil {
+			return abortCopy(err)
+		}
+		srcPathRel := filepath.Join(srcRel, entryName)
+		dstPathRel := filepath.Join(dstRel, entryName)
 		srcPathAbs := storageAbsolutePath(srcRoot, srcPathRel)
 		dstPathAbs := storageAbsolutePath(dstRoot, dstPathRel)
 

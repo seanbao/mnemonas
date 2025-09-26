@@ -609,6 +609,8 @@ func TestStore_AddRejectsTraversalLikePath(t *testing.T) {
 		`..\\escape.txt`,
 		"/docs/./report.pdf",
 		"./docs/report.pdf",
+		"/docs\a/report.pdf",
+		"/docs\x7f/report.pdf",
 		".",
 		"/",
 		"   ",

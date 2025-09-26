@@ -151,7 +151,7 @@ func (m *Manager) RunBatchRestore(ctx context.Context, opts BatchRestoreOptions)
 		return nil, err
 	}
 	if batchRestorePreviewHasFailure(preview) {
-		return cloneBatchRestoreResult(batchRestoreResultFromFailedPreflight(preview)), nil
+		return cloneBatchRestoreResult(batchRestoreResultFromFailedPreflight(preview, m.now().UTC())), nil
 	}
 	afterBatchRestorePreflightPassed(preview)
 
@@ -234,8 +234,8 @@ func batchRestorePreviewItemHasFailedPreflight(item BatchRestorePreviewItemResul
 	return item.Preview != nil && firstFailedRestorePreflight(item.Preview.PreflightChecks) != nil
 }
 
-func batchRestoreResultFromFailedPreflight(preview *BatchRestorePreviewResult) *BatchRestoreResult {
-	startedAt := time.Now().UTC()
+func batchRestoreResultFromFailedPreflight(preview *BatchRestorePreviewResult, now time.Time) *BatchRestoreResult {
+	startedAt := now.UTC()
 	finishedAt := startedAt
 	result := &BatchRestoreResult{
 		ID:        formatRunID(startedAt),

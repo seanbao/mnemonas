@@ -547,6 +547,12 @@ func TestWorkspace_OperationsRejectTraversalLikeNames(t *testing.T) {
 	if err := w.WriteFile(ctx, "/safe/nul\x00.txt", []byte("blocked")); err != ErrNotFound {
 		t.Fatalf("WriteFile(NUL) error = %v, want ErrNotFound", err)
 	}
+	if _, err := w.Stat(ctx, "/safe/existing\n.txt"); err != ErrNotFound {
+		t.Fatalf("Stat(control character) error = %v, want ErrNotFound", err)
+	}
+	if err := w.WriteFile(ctx, "/safe/delete\x7f.txt", []byte("blocked")); err != ErrNotFound {
+		t.Fatalf("WriteFile(delete control character) error = %v, want ErrNotFound", err)
+	}
 	if w.Exists(ctx, "../safe/existing.txt") {
 		t.Fatal("expected Exists(traversal) to return false")
 	}
@@ -755,6 +761,44 @@ func TestWorkspace_ReadDir_HidesSymlinkEntries(t *testing.T) {
 	}
 	if entries[0].Name != "visible.txt" {
 		t.Fatalf("ReadDir() entry = %q, want visible.txt", entries[0].Name)
+	}
+}
+
+func TestWorkspace_ReadDirRejectsUnsafeEntryNames(t *testing.T) {
+	w := setupWorkspace(t)
+	ctx := context.Background()
+
+	if err := w.Mkdir(ctx, "/dir"); err != nil {
+		t.Fatalf("Mkdir(dir) error: %v", err)
+	}
+
+	unsafeNames := []string{
+		"nested\\report.txt",
+		"report\n2026.txt",
+		"report\x7f.txt",
+	}
+	tested := 0
+	for _, unsafeName := range unsafeNames {
+		unsafePath := filepath.Join(w.Root(), "dir", unsafeName)
+		if err := os.WriteFile(unsafePath, []byte("unsafe"), 0644); err != nil {
+			t.Logf("skipping unsupported unsafe filename %q: %v", unsafeName, err)
+			continue
+		}
+		tested++
+
+		entries, err := w.ReadDir(ctx, "/dir")
+		if !errors.Is(err, ErrNotFound) {
+			t.Fatalf("ReadDir() with unsafe entry %q error = %v, want ErrNotFound", unsafeName, err)
+		}
+		if entries != nil {
+			t.Fatalf("expected no entries after unsafe entry %q, got %d", unsafeName, len(entries))
+		}
+		if err := os.Remove(unsafePath); err != nil {
+			t.Fatalf("Remove(%q) error: %v", unsafeName, err)
+		}
+	}
+	if tested == 0 {
+		t.Skip("platform does not support unsafe filenames for this test")
 	}
 }
 
@@ -1475,6 +1519,34 @@ func TestWorkspace_Walk_HidesSymlinkEntries(t *testing.T) {
 	}
 
 	want := "/walktest|/walktest/visible.txt"
+	if got := strings.Join(paths, "|"); got != want {
+		t.Fatalf("Walk() paths = %v, want %s", paths, want)
+	}
+}
+
+func TestWorkspace_WalkRejectsUnsafeEntryNames(t *testing.T) {
+	w := setupWorkspace(t)
+	ctx := context.Background()
+
+	if err := w.Mkdir(ctx, "/walktest"); err != nil {
+		t.Fatalf("Mkdir(walktest) error: %v", err)
+	}
+	unsafeName := "nested\\report.txt"
+	unsafePath := filepath.Join(w.Root(), "walktest", unsafeName)
+	if err := os.WriteFile(unsafePath, []byte("unsafe"), 0644); err != nil {
+		t.Skipf("platform does not support unsafe filename %q: %v", unsafeName, err)
+	}
+
+	var paths []string
+	err := w.Walk(ctx, "/walktest", func(path string, info *FileInfo) error {
+		paths = append(paths, path)
+		return nil
+	})
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Walk() with unsafe entry error = %v, want ErrNotFound", err)
+	}
+
+	want := "/walktest"
 	if got := strings.Join(paths, "|"); got != want {
 		t.Fatalf("Walk() paths = %v, want %s", paths, want)
 	}

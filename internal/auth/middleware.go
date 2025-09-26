@@ -191,6 +191,10 @@ func (m *Middleware) RequireRole(roles ...Role) func(http.Handler) http.Handler 
 				writeError(w, http.StatusUnauthorized, "not authenticated", "NOT_AUTHENTICATED")
 				return
 			}
+			if user.Disabled {
+				writeError(w, http.StatusForbidden, "user account is disabled", "USER_DISABLED")
+				return
+			}
 
 			// Check if user has required role
 			hasRole := false
@@ -265,8 +269,8 @@ func WithClaimsContext(ctx context.Context, claims *TokenClaims) context.Context
 	return context.WithValue(ctx, ContextKeyClaims, claims)
 }
 
-// IsAdmin checks if the user in context is admin
+// IsAdmin checks if the context user is an enabled admin.
 func IsAdmin(ctx context.Context) bool {
 	user := GetUserFromContext(ctx)
-	return user != nil && user.Role == RoleAdmin
+	return user != nil && user.Role == RoleAdmin && !user.Disabled
 }

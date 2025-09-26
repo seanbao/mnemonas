@@ -54,7 +54,7 @@ func (e *APIError) WithRequestID(id string) *APIError {
 func (e *APIError) Write(w http.ResponseWriter, status int) error {
 	payload, err := json.Marshal(e)
 	if err != nil {
-		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		writeInternalJSONError(w)
 		return err
 	}
 
@@ -132,7 +132,7 @@ func (r *APIResponse) WithRequestID(id string) *APIResponse {
 func (r *APIResponse) Write(w http.ResponseWriter, status int) error {
 	payload, err := json.Marshal(r)
 	if err != nil {
-		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		writeInternalJSONError(w)
 		return err
 	}
 
@@ -142,4 +142,11 @@ func (r *APIResponse) Write(w http.ResponseWriter, status int) error {
 		return err
 	}
 	return nil
+}
+
+func writeInternalJSONError(w http.ResponseWriter) {
+	payload := []byte(`{"code":"` + ErrCodeInternal + `","message":"internal server error","timestamp":"` + time.Now().UTC().Format(time.RFC3339) + `"}`)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusInternalServerError)
+	_, _ = w.Write(payload)
 }

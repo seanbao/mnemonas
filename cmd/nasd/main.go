@@ -9,6 +9,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"mime"
 	"net"
 	"net/http"
 	"os"
@@ -16,6 +17,7 @@ import (
 	"path"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -157,12 +159,22 @@ func (h *frontendHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	cleanPath := path.Clean("/" + strings.TrimPrefix(r.URL.Path, "/"))
+	rawFirstSegment := firstRequestPathSegment(r.URL.Path)
+	rawPathHasDotSegment := requestPathHasDotSegment(r.URL.Path)
+	if rawFirstSegment == "assets" && rawPathHasDotSegment {
+		http.NotFound(w, r)
+		return
+	}
 	if cleanPath != "/" {
 		localPath, err := filepath.Localize(strings.TrimPrefix(cleanPath, "/"))
 		if err == nil {
 			if h.serveLocalFileNoFollow(w, r, localPath) {
 				return
 			}
+		}
+		if isFrontendBuildAssetPath(cleanPath) {
+			http.NotFound(w, r)
+			return
 		}
 	}
 
@@ -194,8 +206,15 @@ func (h *frontendHandler) serveLocalFileNoFollow(w http.ResponseWriter, r *http.
 		return false
 	}
 
+	if localPath == "index.html" {
+		setHeaderIfAbsent(w.Header(), "Cache-Control", "no-cache")
+	}
 	http.ServeContent(w, r, path.Base(localPath), info.ModTime(), file)
 	return true
+}
+
+func isFrontendBuildAssetPath(cleanPath string) bool {
+	return cleanPath == "/assets" || strings.HasPrefix(cleanPath, "/assets/")
 }
 
 func discoverFrontendAssets() string {
@@ -253,6 +272,14 @@ func shouldServeFrontend(r *http.Request) bool {
 		return false
 	}
 
+	rawFirstSegment := firstRequestPathSegment(r.URL.Path)
+	if rawFirstSegment == "api" || rawFirstSegment == "health" {
+		return false
+	}
+	if rawFirstSegment == "s" && requestPathHasDotSegment(r.URL.Path) {
+		return false
+	}
+
 	cleanPath := path.Clean("/" + strings.TrimPrefix(r.URL.Path, "/"))
 	switch {
 	case cleanPath == "/health":
@@ -269,16 +296,95 @@ func shouldServeFrontend(r *http.Request) bool {
 }
 
 func isShareFrontendRoute(cleanPath string, r *http.Request) bool {
-	if !requestAcceptsHTML(r) {
+	if !requestExplicitlyAcceptsHTML(r) {
 		return false
 	}
 	parts := strings.Split(strings.Trim(cleanPath, "/"), "/")
 	return len(parts) == 2 && parts[0] == "s" && parts[1] != ""
 }
 
+func firstRequestPathSegment(requestPath string) string {
+	trimmed := strings.TrimLeft(requestPath, "/")
+	segment, _, _ := strings.Cut(trimmed, "/")
+	return segment
+}
+
+func requestPathHasDotSegment(requestPath string) bool {
+	for _, segment := range strings.Split(requestPath, "/") {
+		if segment == "." || segment == ".." {
+			return true
+		}
+	}
+	return false
+}
+
 func requestAcceptsHTML(r *http.Request) bool {
-	accept := r.Header.Get("Accept")
-	return accept == "" || strings.Contains(accept, "text/html")
+	return requestAcceptsHTMLWithWildcards(r, true)
+}
+
+func requestExplicitlyAcceptsHTML(r *http.Request) bool {
+	return requestAcceptsHTMLWithWildcards(r, false)
+}
+
+func requestAcceptsHTMLWithWildcards(r *http.Request, allowWildcards bool) bool {
+	accept := strings.TrimSpace(r.Header.Get("Accept"))
+	if accept == "" {
+		return allowWildcards
+	}
+
+	htmlQ, htmlSeen := 0.0, false
+	textWildcardQ, textWildcardSeen := 0.0, false
+	broadWildcardQ, broadWildcardSeen := 0.0, false
+	for _, rawMediaRange := range strings.Split(accept, ",") {
+		mediaType, params, err := mime.ParseMediaType(strings.TrimSpace(rawMediaRange))
+		if err != nil {
+			continue
+		}
+		qValue, ok := parseAcceptQuality(params["q"])
+		if !ok {
+			continue
+		}
+		mediaType = strings.ToLower(mediaType)
+		switch mediaType {
+		case "text/html":
+			if !htmlSeen || qValue > htmlQ {
+				htmlQ = qValue
+			}
+			htmlSeen = true
+		case "text/*":
+			if allowWildcards && (!textWildcardSeen || qValue > textWildcardQ) {
+				textWildcardQ = qValue
+				textWildcardSeen = true
+			}
+		case "*/*":
+			if allowWildcards && (!broadWildcardSeen || qValue > broadWildcardQ) {
+				broadWildcardQ = qValue
+				broadWildcardSeen = true
+			}
+		}
+	}
+	switch {
+	case htmlSeen:
+		return htmlQ > 0
+	case textWildcardSeen:
+		return textWildcardQ > 0
+	case broadWildcardSeen:
+		return broadWildcardQ > 0
+	default:
+		return false
+	}
+}
+
+func parseAcceptQuality(raw string) (float64, bool) {
+	q := strings.TrimSpace(raw)
+	if q == "" {
+		return 1, true
+	}
+	value, err := strconv.ParseFloat(q, 64)
+	if err != nil || value < 0 || value > 1 {
+		return 0, false
+	}
+	return value, true
 }
 
 func (s *switchableWebDAVHandler) ServeIfMatches(w http.ResponseWriter, r *http.Request) bool {
@@ -607,7 +713,11 @@ func main() {
 	if cfg.Auth.Enabled {
 		userStore, _, err := auth.NewUserStore(cfg.Auth.UsersFile)
 		if err != nil {
-			log.Fatal().Err(err).Msg("failed to initialize user store")
+			if auth.IsPersistenceWarning(err) && userStore != nil {
+				log.Warn().Err(err).Msg("user store initialized with an auth persistence warning")
+			} else {
+				log.Fatal().Err(err).Msg("failed to initialize user store")
+			}
 		}
 		sharedUserStore = userStore
 	}
@@ -840,14 +950,16 @@ func applyLoggerConfig(cfg config.LogConfig) (io.Closer, error) {
 		zerolog.TimeFieldFormat = resolveJSONLogTimeFormat(cfg.TimeFormat)
 		log.Logger = zerolog.New(writer).With().Timestamp().Caller().Logger()
 	} else {
-		zerolog.TimeFieldFormat = time.RFC3339
-		log.Logger = zerolog.New(
-			zerolog.ConsoleWriter{
-				Out:        writer,
-				TimeFormat: resolveConsoleLogTimeFormat(cfg.TimeFormat),
-				NoColor:    noColor,
-			},
-		).With().Timestamp().Caller().Logger()
+		zerolog.TimeFieldFormat = resolveConsoleLogTimeFieldFormat(cfg.TimeFormat)
+		consoleWriter := zerolog.ConsoleWriter{
+			Out:        writer,
+			TimeFormat: resolveConsoleLogTimeFormat(cfg.TimeFormat),
+			NoColor:    noColor,
+		}
+		if formatter := resolveConsoleLogTimestampFormatter(cfg.TimeFormat); formatter != nil {
+			consoleWriter.FormatTimestamp = formatter
+		}
+		log.Logger = zerolog.New(consoleWriter).With().Timestamp().Caller().Logger()
 	}
 
 	zerolog.SetGlobalLevel(level)
@@ -943,27 +1055,73 @@ func resolveLogLevel(level string) (zerolog.Level, error) {
 }
 
 func resolveConsoleLogTimeFormat(timeFormat string) string {
-	trimmed := strings.TrimSpace(timeFormat)
-	if trimmed == "" {
+	if format, ok := resolveNamedRFCLogTimeFormat(timeFormat); ok {
+		return format
+	}
+	if _, ok := resolveNamedUnixLogTimeFormat(timeFormat); ok {
 		return time.RFC3339
 	}
-	return trimmed
+	return strings.TrimSpace(timeFormat)
+}
+
+func resolveConsoleLogTimeFieldFormat(timeFormat string) string {
+	if format, ok := resolveNamedLogTimeFormat(timeFormat); ok {
+		return format
+	}
+	return time.RFC3339
+}
+
+func resolveConsoleLogTimestampFormatter(timeFormat string) zerolog.Formatter {
+	if _, ok := resolveNamedUnixLogTimeFormat(timeFormat); ok {
+		return formatRawLogTimestamp
+	}
+	return nil
+}
+
+func formatRawLogTimestamp(value interface{}) string {
+	if value == nil {
+		return "<nil>"
+	}
+	return fmt.Sprint(value)
 }
 
 func resolveJSONLogTimeFormat(timeFormat string) string {
+	if format, ok := resolveNamedLogTimeFormat(timeFormat); ok {
+		return format
+	}
+	return strings.TrimSpace(timeFormat)
+}
+
+func resolveNamedLogTimeFormat(timeFormat string) (string, bool) {
+	if format, ok := resolveNamedRFCLogTimeFormat(timeFormat); ok {
+		return format, true
+	}
+	return resolveNamedUnixLogTimeFormat(timeFormat)
+}
+
+func resolveNamedRFCLogTimeFormat(timeFormat string) (string, bool) {
 	switch strings.ToUpper(strings.TrimSpace(timeFormat)) {
 	case "", "RFC3339":
-		return time.RFC3339
-	case "UNIX":
-		return zerolog.TimeFormatUnix
-	case "UNIXMS":
-		return zerolog.TimeFormatUnixMs
-	case "UNIXMICRO":
-		return zerolog.TimeFormatUnixMicro
-	case "UNIXNANO":
-		return zerolog.TimeFormatUnixNano
+		return time.RFC3339, true
+	case "RFC3339NANO":
+		return time.RFC3339Nano, true
 	default:
-		return strings.TrimSpace(timeFormat)
+		return "", false
+	}
+}
+
+func resolveNamedUnixLogTimeFormat(timeFormat string) (string, bool) {
+	switch strings.ToUpper(strings.TrimSpace(timeFormat)) {
+	case "UNIX":
+		return zerolog.TimeFormatUnix, true
+	case "UNIXMS":
+		return zerolog.TimeFormatUnixMs, true
+	case "UNIXMICRO":
+		return zerolog.TimeFormatUnixMicro, true
+	case "UNIXNANO":
+		return zerolog.TimeFormatUnixNano, true
+	default:
+		return "", false
 	}
 }
 

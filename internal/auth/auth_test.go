@@ -39,6 +39,12 @@ func TestAuthPersistenceWarningWrapperPreservesErrorSemantics(t *testing.T) {
 	if warningErr.Error() != baseErr.Error() {
 		t.Fatalf("Error() = %q, want %q", warningErr.Error(), baseErr.Error())
 	}
+	if got := WrapPersistenceWarning(nil); got != nil {
+		t.Fatalf("WrapPersistenceWarning(nil) = %v, want nil", got)
+	}
+	if got := WrapPersistenceWarning(warningErr); got != warningErr {
+		t.Fatalf("WrapPersistenceWarning(existing warning) = %T, want original warning", got)
+	}
 }
 
 func TestShouldPrintInitialPasswordToTerminal(t *testing.T) {
@@ -678,6 +684,55 @@ func TestUserStore(t *testing.T) {
 		}
 		if _, statErr := os.Stat(passwordFile); statErr != nil {
 			t.Fatalf("expected initial password file to remain after failed login persist, got %v", statErr)
+		}
+	})
+
+	t.Run("new user store keeps default admin password when users save returns persistence warning", func(t *testing.T) {
+		storeDir := t.TempDir()
+		usersFile := filepath.Join(storeDir, "users.json")
+		passwordFile := filepath.Join(storeDir, "initial-password.txt")
+
+		originalWriter := userStoreWriter
+		userStoreWriter = func(path string, data []byte) error {
+			if err := originalWriter(path, data); err != nil {
+				return err
+			}
+			return wrapAuthPersistenceWarning(errors.New("directory fsync failed"))
+		}
+		t.Cleanup(func() {
+			userStoreWriter = originalWriter
+		})
+
+		store, password, err := NewUserStore(usersFile)
+		if !isAuthPersistenceWarning(err) {
+			t.Fatalf("expected persistence warning from NewUserStore, got %v", err)
+		}
+		if store == nil {
+			t.Fatal("expected user store to be returned with persistence warning")
+		}
+		if password == "" {
+			t.Fatal("expected initial password to be returned with persistence warning")
+		}
+		if _, statErr := os.Stat(passwordFile); statErr != nil {
+			t.Fatalf("expected initial password file to remain after persistence warning, got %v", statErr)
+		}
+		if _, statErr := os.Stat(usersFile); statErr != nil {
+			t.Fatalf("expected users file to remain after persistence warning, got %v", statErr)
+		}
+		if _, authErr := store.Authenticate("admin", password); !isAuthPersistenceWarning(authErr) {
+			t.Fatalf("expected returned store to authenticate default admin with persistence warning, got %v", authErr)
+		}
+
+		userStoreWriter = originalWriter
+		reloaded, reloadedPassword, err := NewUserStore(usersFile)
+		if err != nil {
+			t.Fatalf("expected reload after warning to succeed, got %v", err)
+		}
+		if reloadedPassword != "" {
+			t.Fatalf("expected reload to avoid creating another password, got %q", reloadedPassword)
+		}
+		if _, authErr := reloaded.Authenticate("admin", password); authErr != nil {
+			t.Fatalf("expected reloaded store to authenticate default admin, got %v", authErr)
 		}
 	})
 
@@ -2597,6 +2652,28 @@ func TestMiddleware(t *testing.T) {
 		}
 	})
 
+	t.Run("require role - disabled context user is rejected", func(t *testing.T) {
+		handler := mw.RequireRole(RoleAdmin)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			t.Error("handler should not be called")
+		}))
+
+		req := httptest.NewRequest("GET", "/admin", nil)
+		req = req.WithContext(context.WithValue(req.Context(), ContextKeyUser, &User{
+			Username: "disabled-admin",
+			Role:     RoleAdmin,
+			Disabled: true,
+		}))
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("expected status 403, got %d", rec.Code)
+		}
+		if !bytes.Contains(rec.Body.Bytes(), []byte(`"code":"USER_DISABLED"`)) {
+			t.Fatalf("expected USER_DISABLED payload, got %s", rec.Body.String())
+		}
+	})
+
 	t.Run("optional auth - with token", func(t *testing.T) {
 		called := false
 		handler := mw.OptionalAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -2772,6 +2849,31 @@ func TestMiddleware(t *testing.T) {
 		withClaims := WithClaimsContext(ctx, claims)
 		if got := GetClaimsFromContext(withClaims); got != claims {
 			t.Fatalf("claims from context = %#v, want original claims", got)
+		}
+	})
+
+	t.Run("is admin requires enabled admin user", func(t *testing.T) {
+		tests := []struct {
+			name string
+			user *User
+			want bool
+		}{
+			{name: "missing user"},
+			{name: "regular user", user: &User{Role: RoleUser}},
+			{name: "disabled admin", user: &User{Role: RoleAdmin, Disabled: true}},
+			{name: "enabled admin", user: &User{Role: RoleAdmin}, want: true},
+		}
+
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				ctx := context.Background()
+				if tt.user != nil {
+					ctx = context.WithValue(ctx, ContextKeyUser, tt.user)
+				}
+				if got := IsAdmin(ctx); got != tt.want {
+					t.Fatalf("IsAdmin() = %v, want %v", got, tt.want)
+				}
+			})
 		}
 	})
 }
@@ -3767,6 +3869,29 @@ func TestAuthHandler(t *testing.T) {
 		}
 	})
 
+	t.Run("me endpoint rejects disabled user context", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/api/v1/auth/me", nil)
+		req = req.WithContext(context.WithValue(req.Context(), ContextKeyUser, &User{
+			ID:       "disabled-user",
+			Username: "disabled-user",
+			Role:     RoleUser,
+			Disabled: true,
+		}))
+		rec := httptest.NewRecorder()
+		h.HandleMe(rec, req)
+
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("expected status 403, got %d: %s", rec.Code, rec.Body.String())
+		}
+		var envelope authEnvelope
+		if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
+			t.Fatalf("unmarshal me disabled envelope error: %v", err)
+		}
+		if envelope.Error == nil || envelope.Error.Code != "USER_DISABLED" {
+			t.Fatalf("expected USER_DISABLED error, got %+v", envelope.Error)
+		}
+	})
+
 	t.Run("download session endpoint", func(t *testing.T) {
 		user, _ := store.GetByUsername("handleruser")
 		pair, _ := tm.GenerateTokenPair(user)
@@ -3802,6 +3927,41 @@ func TestAuthHandler(t *testing.T) {
 		}
 		if cookies[0].SameSite != http.SameSiteStrictMode {
 			t.Fatalf("expected download cookie SameSite=Strict, got %v", cookies[0].SameSite)
+		}
+	})
+
+	t.Run("download session rejects disabled user context", func(t *testing.T) {
+		req := httptest.NewRequest("POST", "/api/v1/auth/download-session", nil)
+		ctx := context.WithValue(req.Context(), ContextKeyUser, &User{
+			ID:       "disabled-user",
+			Username: "disabled-user",
+			Role:     RoleUser,
+			Disabled: true,
+		})
+		ctx = context.WithValue(ctx, ContextKeyClaims, &TokenClaims{
+			RegisteredClaims: jwt.RegisteredClaims{ExpiresAt: jwt.NewNumericDate(time.Now().Add(15 * time.Minute))},
+			UserID:           "disabled-user",
+			Username:         "disabled-user",
+			Role:             RoleUser,
+		})
+		ctx = context.WithValue(ctx, ContextKeyAccessToken, "disabled-access-token")
+		req = req.WithContext(ctx)
+		rec := httptest.NewRecorder()
+
+		h.HandleCreateDownloadSession(rec, req)
+
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("expected status 403, got %d: %s", rec.Code, rec.Body.String())
+		}
+		if cookies := rec.Result().Cookies(); len(cookies) != 0 {
+			t.Fatalf("expected no download session cookie, got %d", len(cookies))
+		}
+		var envelope authEnvelope
+		if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
+			t.Fatalf("unmarshal disabled download session envelope error: %v", err)
+		}
+		if envelope.Error == nil || envelope.Error.Code != "USER_DISABLED" {
+			t.Fatalf("expected USER_DISABLED error, got %+v", envelope.Error)
 		}
 	})
 
@@ -4366,6 +4526,49 @@ func TestAuthHandler(t *testing.T) {
 		}
 		if _, err := store.GetByUsername("toolongpass"); err == nil {
 			t.Fatal("expected long password create to be rejected before persistence")
+		}
+	})
+
+	t.Run("change password rejects disabled user context without mutating password", func(t *testing.T) {
+		disabledUser, err := store.Create("disabled-change-handler", "password123", "disabled-change-handler@test.com", RoleUser)
+		if err != nil {
+			t.Fatalf("create disabled change user error: %v", err)
+		}
+		disabledUser.Disabled = true
+		if err := store.Update(disabledUser); err != nil {
+			t.Fatalf("disable change user error: %v", err)
+		}
+
+		req := httptest.NewRequest("POST", "/api/v1/auth/password", bytes.NewBufferString(`{"old_password":"password123","new_password":"newpassword456"}`))
+		req = req.WithContext(context.WithValue(req.Context(), ContextKeyUser, disabledUser))
+		rec := httptest.NewRecorder()
+
+		h.HandleChangePassword(rec, req)
+
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("expected status 403, got %d: %s", rec.Code, rec.Body.String())
+		}
+		var envelope authEnvelope
+		if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
+			t.Fatalf("unmarshal disabled change password envelope error: %v", err)
+		}
+		if envelope.Error == nil || envelope.Error.Code != "USER_DISABLED" {
+			t.Fatalf("expected USER_DISABLED error, got %+v", envelope.Error)
+		}
+
+		refreshed, err := store.GetByID(disabledUser.ID)
+		if err != nil {
+			t.Fatalf("reload disabled change user error: %v", err)
+		}
+		refreshed.Disabled = false
+		if err := store.Update(refreshed); err != nil {
+			t.Fatalf("reenable change user error: %v", err)
+		}
+		if _, err := store.Authenticate("disabled-change-handler", "password123"); err != nil {
+			t.Fatalf("expected old password to remain valid, got %v", err)
+		}
+		if _, err := store.Authenticate("disabled-change-handler", "newpassword456"); err != ErrInvalidCredentials {
+			t.Fatalf("expected new password to be rejected, got %v", err)
 		}
 	})
 
@@ -5042,8 +5245,22 @@ func TestWriteSuccess_InvalidPayloadReturnsInternalServerError(t *testing.T) {
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("expected status 500, got %d", rec.Code)
 	}
-	if rec.Body.String() != "Internal Server Error\n" {
-		t.Fatalf("expected internal server error body, got %q", rec.Body.String())
+	if got := rec.Header().Get("Content-Type"); got != "application/json" {
+		t.Fatalf("content type = %q, want application/json", got)
+	}
+
+	var envelope struct {
+		Success bool         `json:"success"`
+		Error   *ErrorDetail `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
+		t.Fatalf("unmarshal fallback envelope error: %v; body=%s", err, rec.Body.String())
+	}
+	if envelope.Success || envelope.Error == nil {
+		t.Fatalf("expected error envelope, got %s", rec.Body.String())
+	}
+	if envelope.Error.Code != "INTERNAL_ERROR" || envelope.Error.Message != "internal server error" {
+		t.Fatalf("unexpected fallback error: %+v", envelope.Error)
 	}
 }
 

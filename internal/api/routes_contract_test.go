@@ -183,12 +183,12 @@ func TestServer_RouteContract_ShareMutationFieldsAreDocumented(t *testing.T) {
 			}
 			doc := string(data)
 			createSection := apiReferenceSectionBetweenAny(t, doc,
-				[]string{"POST /api/v1/shares", "Create request:"},
+				[]string{"POST /api/v1/shares", "Create request:", "创建请求："},
 				[]string{"GET /api/v1/shares", "### 列出分享", "Update request:", "Public endpoints:"},
 			)
 			assertAPIDocFields(t, createSection, createFields)
 			updateSection := apiReferenceSectionBetweenAny(t, doc,
-				[]string{"PUT /api/v1/shares/{id}", "Update request:"},
+				[]string{"PUT /api/v1/shares/{id}", "Update request:", "更新请求："},
 				[]string{"DELETE /api/v1/shares/{id}", "### 删除分享", "Public endpoints:"},
 			)
 			assertAPIDocFields(t, updateSection, updateFields)
@@ -204,8 +204,8 @@ func TestServer_RouteContract_FavoriteActionResponsesDocumentNullData(t *testing
 	}{
 		{
 			path:         filepath.Join("..", "..", "docs", "api-reference.md"),
-			startMarkers: []string{"## 收藏夹"},
-			endMarkers:   []string{"## 最近操作记录"},
+			startMarkers: []string{"## 收藏"},
+			endMarkers:   []string{"## 活动日志"},
 		},
 		{
 			path:         filepath.Join("..", "..", "docs", "api-reference.en.md"),
@@ -267,8 +267,8 @@ func TestServer_RouteContract_ActivityResponseFieldsAreDocumented(t *testing.T) 
 	}{
 		{
 			path:         filepath.Join("..", "..", "docs", "api-reference.md"),
-			startMarkers: []string{"## 最近操作记录"},
-			endMarkers:   []string{"## 设置管理"},
+			startMarkers: []string{"## 活动日志"},
+			endMarkers:   []string{"## 设置"},
 		},
 		{
 			path:         filepath.Join("..", "..", "docs", "api-reference.en.md"),
@@ -302,7 +302,7 @@ func TestServer_RouteContract_AdminUserResponseFieldsAreDocumented(t *testing.T)
 	}{
 		{
 			path:         filepath.Join("..", "..", "docs", "api-reference.md"),
-			startMarkers: []string{"### 用户管理（管理员）"},
+			startMarkers: []string{"## 管理员用户端点"},
 			endMarkers:   []string{"## 系统端点"},
 		},
 		{
@@ -341,7 +341,7 @@ func TestServer_RouteContract_AuthResponseFieldsAreDocumented(t *testing.T) {
 		{
 			path:         filepath.Join("..", "..", "docs", "api-reference.md"),
 			startMarkers: []string{"## 认证端点"},
-			endMarkers:   []string{"### 用户管理（管理员）"},
+			endMarkers:   []string{"## 管理员用户端点"},
 		},
 		{
 			path:         filepath.Join("..", "..", "docs", "api-reference.en.md"),
@@ -377,7 +377,7 @@ func TestServer_RouteContract_SettingsAccessResponseFieldsAreDocumented(t *testi
 	}{
 		{
 			path:         filepath.Join("..", "..", "docs", "api-reference.md"),
-			startMarkers: []string{"### 检查有效目录权限"},
+			startMarkers: []string{"Access-check 响应："},
 			endMarkers:   []string{"### 公网访问安全自检"},
 		},
 		{
@@ -415,8 +415,8 @@ func TestServer_RouteContract_SettingsWebDAVCredentialsFieldsAreDocumented(t *te
 	}{
 		{
 			path:         filepath.Join("..", "..", "docs", "api-reference.md"),
-			startMarkers: []string{"### 获取 WebDAV 凭据"},
-			endMarkers:   []string{"## 磁盘健康"},
+			startMarkers: []string{"WebDAV 凭据响应："},
+			endMarkers:   []string{"### 公网访问安全自检"},
 		},
 		{
 			path:         filepath.Join("..", "..", "docs", "api-reference.en.md"),
@@ -479,8 +479,8 @@ func TestServer_RouteContract_BackupBatchRestoreResponseFieldsAreDocumented(t *t
 	}{
 		{
 			path:         filepath.Join("..", "..", "docs", "api-reference.md"),
-			startMarkers: []string{"POST /api/v1/maintenance/backups/batch-restore-preview"},
-			endMarkers:   []string{"把支持的备份任务恢复到指定目录"},
+			startMarkers: []string{"批量预览响应："},
+			endMarkers:   []string{"维护端点面向管理员"},
 		},
 		{
 			path:         filepath.Join("..", "..", "docs", "api-reference.en.md"),

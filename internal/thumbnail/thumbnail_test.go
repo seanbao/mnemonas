@@ -1292,6 +1292,35 @@ func TestCacheStats_DoesNotBlockSaveToCache(t *testing.T) {
 	}
 }
 
+func TestCacheStatsRejectsUnsafeEntryNames(t *testing.T) {
+	tests := []struct {
+		name      string
+		entryName string
+	}{
+		{name: "backslash", entryName: "nested\\thumb.jpg"},
+		{name: "newline", entryName: "thumb\n2026.jpg"},
+		{name: "delete-control", entryName: "thumb\x7f.jpg"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			svc, err := NewService(tmpDir)
+			if err != nil {
+				t.Fatalf("NewService failed: %v", err)
+			}
+			if err := os.WriteFile(filepath.Join(tmpDir, tt.entryName), []byte("thumbnail"), 0644); err != nil {
+				t.Skipf("platform does not support unsafe filename %q: %v", tt.entryName, err)
+			}
+
+			_, _, err = svc.CacheStats(context.Background())
+			if !errors.Is(err, errThumbnailCacheSymlink) {
+				t.Fatalf("CacheStats() error = %v, want errThumbnailCacheSymlink", err)
+			}
+		})
+	}
+}
+
 func TestCleanCache(t *testing.T) {
 	svc, _ := newTestThumbnailService(t)
 

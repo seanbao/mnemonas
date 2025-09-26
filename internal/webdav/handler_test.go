@@ -48,6 +48,38 @@ func getStorageHook[T any](t *testing.T, fs *storage.FileSystem, fieldName strin
 	return hook
 }
 
+type noProgressQuotaReader struct{}
+
+func (noProgressQuotaReader) Read([]byte) (int, error) {
+	return 0, nil
+}
+
+func TestQuotaLimitedReaderReturnsNoProgressWhenProbeStalls(t *testing.T) {
+	reader := &quotaLimitedReader{
+		reader:    noProgressQuotaReader{},
+		remaining: 0,
+		err:       errors.New("quota exceeded"),
+	}
+
+	n, err := reader.Read(make([]byte, 1))
+	if n != 0 || !errors.Is(err, io.ErrNoProgress) {
+		t.Fatalf("Read() = (%d, %v), want (0, io.ErrNoProgress)", n, err)
+	}
+}
+
+func TestQuotaLimitedReaderAllowsZeroLengthRead(t *testing.T) {
+	reader := &quotaLimitedReader{
+		reader:    noProgressQuotaReader{},
+		remaining: 0,
+		err:       errors.New("quota exceeded"),
+	}
+
+	n, err := reader.Read(nil)
+	if n != 0 || err != nil {
+		t.Fatalf("zero-length Read() = (%d, %v), want (0, nil)", n, err)
+	}
+}
+
 // testDataplaneAddr is the address of the test dataplane server
 func testDataplaneAddr() string {
 	if addr := os.Getenv("MNEMONAS_TEST_DATAPLANE_ADDR"); addr != "" {
@@ -154,11 +186,48 @@ func TestHandler_UnsupportedMethodSetsAllowHeader(t *testing.T) {
 func assertWebDAVAllowHeader(t *testing.T, w *httptest.ResponseRecorder) {
 	t.Helper()
 
-	allow := w.Header().Get("Allow")
-	for _, method := range []string{"OPTIONS", "PROPFIND", "GET", "PUT", "DELETE", "MKCOL", "COPY", "MOVE", "PROPPATCH", "LOCK", "UNLOCK"} {
-		if !strings.Contains(allow, method) {
-			t.Fatalf("Allow header = %q, missing %s", allow, method)
+	allow := webDAVAllowHeaderMethods(w)
+	for _, method := range []string{"OPTIONS", "PROPFIND", "GET", "HEAD", "PUT", "DELETE", "MKCOL", "COPY", "MOVE", "PROPPATCH", "LOCK", "UNLOCK"} {
+		if !allow[method] {
+			t.Fatalf("Allow header = %q, missing %s", w.Header().Get("Allow"), method)
 		}
+	}
+}
+
+func assertWebDAVReadOnlyAllowHeader(t *testing.T, w *httptest.ResponseRecorder) {
+	t.Helper()
+
+	allow := webDAVAllowHeaderMethods(w)
+	for _, method := range []string{"OPTIONS", "PROPFIND", "GET", "HEAD"} {
+		if !allow[method] {
+			t.Fatalf("read-only Allow header = %q, missing %s", w.Header().Get("Allow"), method)
+		}
+	}
+	for _, method := range []string{"PUT", "DELETE", "MKCOL", "COPY", "MOVE", "PROPPATCH", "LOCK", "UNLOCK"} {
+		if allow[method] {
+			t.Fatalf("read-only Allow header = %q, unexpectedly includes %s", w.Header().Get("Allow"), method)
+		}
+	}
+}
+
+func webDAVAllowHeaderMethods(w *httptest.ResponseRecorder) map[string]bool {
+	methods := make(map[string]bool)
+	for _, method := range strings.Split(w.Header().Get("Allow"), ",") {
+		method = strings.TrimSpace(method)
+		if method != "" {
+			methods[method] = true
+		}
+	}
+	return methods
+}
+
+func assertUntrustedWebDAVContentHeaders(t *testing.T, header http.Header) {
+	t.Helper()
+	if got := header.Get("X-Content-Type-Options"); got != "nosniff" {
+		t.Fatalf("X-Content-Type-Options = %q, want nosniff", got)
+	}
+	if got := header.Get("Content-Security-Policy"); !strings.Contains(got, "sandbox") || !strings.Contains(got, "default-src 'none'") {
+		t.Fatalf("Content-Security-Policy = %q, want sandboxed default-src none", got)
 	}
 }
 
@@ -1459,6 +1528,82 @@ func TestHandler_COPY(t *testing.T) {
 	}
 }
 
+func TestHandler_COPY_AllowsAbsolutePathReferenceDestination(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/src"); err != nil {
+		t.Fatalf("Mkdir(src) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/dst"); err != nil {
+		t.Fatalf("Mkdir(dst) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/src/file.txt", bytes.NewReader([]byte("copy me"))); err != nil {
+		t.Fatalf("WriteFile(src) error: %v", err)
+	}
+
+	req := httptest.NewRequest("COPY", "/dav/src/file.txt", nil)
+	req.Header.Set("Destination", "/dav/dst/copied.txt")
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("COPY absolute-path Destination status = %d, want %d; body=%s", w.Code, http.StatusCreated, w.Body.String())
+	}
+	if _, err := fs.Stat(ctx, "/src/file.txt"); err != nil {
+		t.Fatalf("expected source to remain after COPY, got %v", err)
+	}
+	if info, err := fs.Stat(ctx, "/dst/copied.txt"); err != nil {
+		t.Fatalf("expected absolute-path Destination COPY to create file: %v", err)
+	} else if info.Size != int64(len("copy me")) {
+		t.Fatalf("copied file size = %d, want %d", info.Size, len("copy me"))
+	}
+}
+
+func TestHandler_COPY_RejectsBareRelativeDestination(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/src"); err != nil {
+		t.Fatalf("Mkdir(src) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/dst"); err != nil {
+		t.Fatalf("Mkdir(dst) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/src/file.txt", bytes.NewReader([]byte("copy me"))); err != nil {
+		t.Fatalf("WriteFile(src) error: %v", err)
+	}
+
+	tests := []struct {
+		destination string
+		path        string
+	}{
+		{destination: "copied.txt", path: "/copied.txt"},
+		{destination: "dav/dst/copied.txt", path: "/dst/copied.txt"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.destination, func(t *testing.T) {
+			req := httptest.NewRequest("COPY", "/dav/src/file.txt", nil)
+			req.Header.Set("Destination", tt.destination)
+			w := httptest.NewRecorder()
+
+			handler.ServeHTTP(w, req)
+
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("COPY bare relative Destination status = %d, want %d", w.Code, http.StatusBadRequest)
+			}
+			if _, err := fs.Stat(ctx, "/src/file.txt"); err != nil {
+				t.Fatalf("expected source to remain after rejected COPY, got %v", err)
+			}
+			if _, err := fs.Stat(ctx, tt.path); !errors.Is(err, storage.ErrNotFound) {
+				t.Fatalf("expected rejected COPY to leave destination absent, got %v", err)
+			}
+		})
+	}
+}
+
 func TestHandler_COPY_OverwriteFalse(t *testing.T) {
 	handler, fs, _ := setupTestHandler(t)
 	ctx := context.Background()
@@ -2183,6 +2328,86 @@ func TestHandler_MOVE(t *testing.T) {
 	}
 }
 
+func TestHandler_MOVE_AllowsAbsolutePathReferenceDestination(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/movetest"); err != nil {
+		t.Fatalf("Mkdir(movetest) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/movetest/orig.txt", bytes.NewReader([]byte("move me"))); err != nil {
+		t.Fatalf("WriteFile(orig) error: %v", err)
+	}
+
+	req := httptest.NewRequest("MOVE", "/dav/movetest/orig.txt", nil)
+	req.Header.Set("Destination", "/dav/movetest/moved.txt")
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("MOVE absolute-path Destination status = %d, want %d; body=%s", w.Code, http.StatusCreated, w.Body.String())
+	}
+	if _, err := fs.Stat(ctx, "/movetest/orig.txt"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("expected source to be moved away, got %v", err)
+	}
+	f, err := fs.OpenFile(ctx, "/movetest/moved.txt")
+	if err != nil {
+		t.Fatalf("expected absolute-path Destination MOVE to create file: %v", err)
+	}
+	defer f.Close()
+	data, err := io.ReadAll(f)
+	if err != nil {
+		t.Fatalf("ReadAll(moved) error: %v", err)
+	}
+	if string(data) != "move me" {
+		t.Fatalf("moved file content = %q, want %q", data, "move me")
+	}
+}
+
+func TestHandler_MOVE_RejectsBareRelativeDestination(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/movetest"); err != nil {
+		t.Fatalf("Mkdir(movetest) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/dst"); err != nil {
+		t.Fatalf("Mkdir(dst) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/movetest/orig.txt", bytes.NewReader([]byte("move me"))); err != nil {
+		t.Fatalf("WriteFile(orig) error: %v", err)
+	}
+
+	tests := []struct {
+		destination string
+		path        string
+	}{
+		{destination: "moved.txt", path: "/moved.txt"},
+		{destination: "dav/dst/moved.txt", path: "/dst/moved.txt"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.destination, func(t *testing.T) {
+			req := httptest.NewRequest("MOVE", "/dav/movetest/orig.txt", nil)
+			req.Header.Set("Destination", tt.destination)
+			w := httptest.NewRecorder()
+
+			handler.ServeHTTP(w, req)
+
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("MOVE bare relative Destination status = %d, want %d", w.Code, http.StatusBadRequest)
+			}
+			if _, err := fs.Stat(ctx, "/movetest/orig.txt"); err != nil {
+				t.Fatalf("expected source to remain after rejected MOVE, got %v", err)
+			}
+			if _, err := fs.Stat(ctx, tt.path); !errors.Is(err, storage.ErrNotFound) {
+				t.Fatalf("expected rejected MOVE to leave destination absent, got %v", err)
+			}
+		})
+	}
+}
+
 func TestHandler_MOVE_DirectoryInvalidDepthReturnsBadRequest(t *testing.T) {
 	handler, fs, _ := setupTestHandler(t)
 	ctx := context.Background()
@@ -2902,6 +3127,10 @@ func TestHandler_LOCK(t *testing.T) {
 		if lockToken := w.Header().Get("Lock-Token"); lockToken == "" {
 			t.Fatal("LOCK should return Lock-Token header")
 		}
+		if contentType := w.Header().Get("Content-Type"); contentType != "application/xml; charset=utf-8" {
+			t.Fatalf("LOCK Content-Type = %q, want application/xml; charset=utf-8", contentType)
+		}
+		assertUntrustedWebDAVContentHeaders(t, w.Header())
 	})
 
 	t.Run("MissingResource", func(t *testing.T) {
@@ -3415,6 +3644,10 @@ func TestHandler_PROPFIND_EscapesHrefSpecialCharacters(t *testing.T) {
 	if w.Code != http.StatusMultiStatus {
 		t.Fatalf("status = %d, want %d", w.Code, http.StatusMultiStatus)
 	}
+	if contentType := w.Header().Get("Content-Type"); contentType != "application/xml; charset=utf-8" {
+		t.Fatalf("Content-Type = %q, want %q", contentType, "application/xml; charset=utf-8")
+	}
+	assertUntrustedWebDAVContentHeaders(t, w.Header())
 	body := w.Body.String()
 	if !strings.Contains(body, `<href>/dav/propfind-special/hash%20%23file%3F.txt</href>`) {
 		t.Fatalf("expected PROPFIND href to be percent-encoded, got %q", body)
@@ -3455,6 +3688,7 @@ func TestHandler_PROPPATCH_SetsXMLContentTypeAndEscapesHref(t *testing.T) {
 	if contentType := w.Header().Get("Content-Type"); contentType != "application/xml; charset=utf-8" {
 		t.Fatalf("Content-Type = %q, want %q", contentType, "application/xml; charset=utf-8")
 	}
+	assertUntrustedWebDAVContentHeaders(t, w.Header())
 	body := w.Body.String()
 	if !strings.Contains(body, `<D:href>/dav/prop-patch/hash%20%23file%3F.txt</D:href>`) {
 		t.Fatalf("expected PROPPATCH href to be percent-encoded, got %q", body)
@@ -3470,6 +3704,7 @@ func TestHandler_WriteProppatchNoOpResponseEscapesXMLHref(t *testing.T) {
 	if w.Code != http.StatusMultiStatus {
 		t.Fatalf("status = %d, want %d", w.Code, http.StatusMultiStatus)
 	}
+	assertUntrustedWebDAVContentHeaders(t, w.Header())
 	body := w.Body.String()
 	if strings.Contains(body, `<D:href>/dav/prop-patch/a&b.txt</D:href>`) {
 		t.Fatalf("expected PROPPATCH href to be XML-escaped, got %q", body)
@@ -4733,6 +4968,12 @@ func TestHandler_ReadOnlyMode(t *testing.T) {
 			if w.Code != tt.wantStatus {
 				t.Errorf("%s status = %d, want %d", tt.method, w.Code, tt.wantStatus)
 			}
+			switch tt.method {
+			case "OPTIONS":
+				assertWebDAVReadOnlyAllowHeader(t, w)
+			case "PUT", "DELETE", "MKCOL":
+				assertWebDAVReadOnlyAllowHeader(t, w)
+			}
 		})
 	}
 }
@@ -4749,7 +4990,7 @@ func TestHandler_ReadOnlyModeUnsupportedMethodReturnsMethodNotAllowed(t *testing
 	if w.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("unsupported method in read-only mode status = %d, want %d", w.Code, http.StatusMethodNotAllowed)
 	}
-	assertWebDAVAllowHeader(t, w)
+	assertWebDAVReadOnlyAllowHeader(t, w)
 }
 
 func TestHandler_BasicAuth(t *testing.T) {
@@ -4918,6 +5159,16 @@ func TestNormalizeScopedHomeDirRejectsOnlyDotSegments(t *testing.T) {
 			homeDir: "/users/alice\x00",
 			wantOK:  false,
 		},
+		{
+			name:    "control character",
+			homeDir: "/users/alice\x07",
+			wantOK:  false,
+		},
+		{
+			name:    "delete control character",
+			homeDir: "/users/alice\x7f",
+			wantOK:  false,
+		},
 	}
 
 	for _, tt := range tests {
@@ -4927,6 +5178,154 @@ func TestNormalizeScopedHomeDirRejectsOnlyDotSegments(t *testing.T) {
 				t.Fatalf("normalizeScopedHomeDir(%q) = (%q, %v), want (%q, %v)", tt.homeDir, got, ok, tt.want, tt.wantOK)
 			}
 		})
+	}
+}
+
+func TestCleanWebDAVRuntimePolicyPathsRejectControlCharacters(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+	}{
+		{name: "nul byte", input: "/private\x00secret"},
+		{name: "bell", input: "/private\x07secret"},
+		{name: "delete", input: "/private\x7fsecret"},
+		{name: "unicode next line", input: "/private\u0085secret"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := cleanWebDAVQuotaPath(tt.input); got != "" {
+				t.Fatalf("cleanWebDAVQuotaPath(%q) = %q, want empty", tt.input, got)
+			}
+			if got := cleanWebDAVAccessRulePath(tt.input); got != "" {
+				t.Fatalf("cleanWebDAVAccessRulePath(%q) = %q, want empty", tt.input, got)
+			}
+		})
+	}
+}
+
+func TestCleanWebDAVRuntimeTargetPathPreservesLegalWhitespace(t *testing.T) {
+	if got := cleanWebDAVRuntimeTargetPath("/team/report.txt "); got != "/team/report.txt " {
+		t.Fatalf("cleanWebDAVRuntimeTargetPath() = %q, want trailing-space path preserved", got)
+	}
+	if got := cleanWebDAVRuntimeTargetPath("/team/../private/report.txt"); got != "" {
+		t.Fatalf("cleanWebDAVRuntimeTargetPath() = %q, want traversal rejected", got)
+	}
+	if got := cleanWebDAVRuntimeTargetPath(`/team\private\report.txt`); got != "" {
+		t.Fatalf("cleanWebDAVRuntimeTargetPath() = %q, want backslash path rejected", got)
+	}
+}
+
+func TestRequestScopePathMappingRejectsDirtyRuntimePaths(t *testing.T) {
+	scope := requestScope{
+		scoped:   true,
+		username: "alice",
+		homeDir:  "/users/alice",
+	}
+
+	for _, clientPath := range []string{
+		"/docs/../private/secret.txt",
+		`/docs\private\secret.txt`,
+		"/docs\x00secret.txt",
+	} {
+		t.Run("storage "+clientPath, func(t *testing.T) {
+			if got, ok := scope.storagePath(clientPath); ok {
+				t.Fatalf("storagePath(%q) = %q, true; want false", clientPath, got)
+			}
+		})
+	}
+
+	for _, storagePath := range []string{
+		"/users/alice/../bob/secret.txt",
+		`/users/alice\secret.txt`,
+		"/users/alice\x00secret.txt",
+	} {
+		t.Run("client "+storagePath, func(t *testing.T) {
+			if got, ok := scope.clientPath(storagePath); ok {
+				t.Fatalf("clientPath(%q) = %q, true; want false", storagePath, got)
+			}
+		})
+	}
+}
+
+func TestRequestScopePathMappingPreservesLegalWhitespace(t *testing.T) {
+	scope := requestScope{
+		scoped:   true,
+		username: "alice",
+		homeDir:  "/users/alice",
+	}
+
+	storagePath, ok := scope.storagePath("/docs/report.txt ")
+	if !ok {
+		t.Fatal("storagePath() = false, want true for trailing-space file name")
+	}
+	if storagePath != "/users/alice/docs/report.txt " {
+		t.Fatalf("storagePath() = %q, want trailing-space path under home directory", storagePath)
+	}
+
+	clientPath, ok := scope.clientPath("/users/alice/docs/report.txt ")
+	if !ok {
+		t.Fatal("clientPath() = false, want true for trailing-space file name")
+	}
+	if clientPath != "/docs/report.txt " {
+		t.Fatalf("clientPath() = %q, want trailing-space client path", clientPath)
+	}
+}
+
+func TestRequestScopeAccessHelpersRejectDirtyTargetPaths(t *testing.T) {
+	scope := requestScope{
+		scoped:   true,
+		username: "alice",
+		homeDir:  "/users/alice",
+		accessRules: []DirectoryAccessRule{
+			{Path: "/private", ReadUsers: []string{"alice"}, WriteUsers: []string{"alice"}},
+			{Path: "/team/private", ReadUsers: []string{"alice"}},
+		},
+	}
+
+	for _, targetPath := range []string{
+		"/team/../private/secret.txt",
+		`/private\secret.txt`,
+		"/private\x00secret.txt",
+	} {
+		t.Run(targetPath, func(t *testing.T) {
+			if scope.canAccess(targetPath, accessRead) {
+				t.Fatalf("canAccess(%q) = true, want false", targetPath)
+			}
+			if rule, ok := scope.matchAccessRule(targetPath); ok {
+				t.Fatalf("matchAccessRule(%q) = %+v, true; want no match", targetPath, rule)
+			}
+			if scope.hasReadableSharedRootPath(targetPath) {
+				t.Fatalf("hasReadableSharedRootPath(%q) = true, want false", targetPath)
+			}
+			if got := scope.readableDescendantRulePaths(targetPath); len(got) != 0 {
+				t.Fatalf("readableDescendantRulePaths(%q) = %+v, want empty", targetPath, got)
+			}
+		})
+	}
+}
+
+func TestRequestScopeAccessHelpersDoNotTrimRuntimeTargetPath(t *testing.T) {
+	scope := requestScope{
+		scoped:   true,
+		username: "alice",
+		homeDir:  "/users/alice",
+		accessRules: []DirectoryAccessRule{
+			{Path: "/team/file.txt", ReadUsers: []string{"alice"}},
+		},
+	}
+
+	targetPath := "/team/file.txt "
+	if scope.canAccess(targetPath, accessRead) {
+		t.Fatalf("canAccess(%q) = true, want false for exact rule without trailing space", targetPath)
+	}
+	if rule, ok := scope.matchAccessRule(targetPath); ok {
+		t.Fatalf("matchAccessRule(%q) = %+v, true; want no exact match after preserving trailing space", targetPath, rule)
+	}
+
+	scope.accessRules = append(scope.accessRules, DirectoryAccessRule{Path: "/team", ReadUsers: []string{"alice"}})
+	if !scope.canAccess(targetPath, accessRead) {
+		t.Fatalf("canAccess(%q) = false, want parent directory rule to allow trailing-space child", targetPath)
 	}
 }
 
@@ -4952,6 +5351,48 @@ func TestHandler_UsersAuthRejectsDotSegmentHomeDir(t *testing.T) {
 	}
 	if !strings.Contains(w.Body.String(), "home directory is not available") {
 		t.Fatalf("expected home directory error, got %q", w.Body.String())
+	}
+}
+
+func TestHandler_UsersAuthRejectsUnknownRole(t *testing.T) {
+	handler, fs := setupUsersModeHandler(t, map[string]webDAVTestCredential{
+		"alice": {
+			password: "password123",
+			identity: UserIdentity{
+				Role:    "owner",
+				HomeDir: "/users/alice",
+			},
+		},
+	})
+	ctx := context.Background()
+	if err := fs.Mkdir(ctx, "/users"); err != nil {
+		t.Fatalf("Mkdir(/users) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/users/alice"); err != nil {
+		t.Fatalf("Mkdir(/users/alice) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/users/alice/report.txt", strings.NewReader("secret")); err != nil {
+		t.Fatalf("WriteFile(/users/alice/report.txt) error: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/dav/report.txt", nil)
+	setWebDAVTestBasicAuth(req, "alice")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("GET unknown-role user status = %d, want %d; body=%s", w.Code, http.StatusForbidden, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "home directory is not available") {
+		t.Fatalf("expected scope rejection message, got %q", w.Body.String())
+	}
+}
+
+func TestHandler_UsersAuthScopeForIdentityRejectsBlankUsername(t *testing.T) {
+	handler := NewHandler(Config{AuthType: webDAVAuthTypeUsers})
+
+	if _, err := handler.scopeForIdentity(&UserIdentity{Username: " \t ", Role: webDAVRoleAdmin}); err == nil {
+		t.Fatal("expected blank WebDAV user identity username to be rejected")
 	}
 }
 
@@ -5055,9 +5496,9 @@ func TestHandler_UsersAuthDirectoryAccessRulesGrantSharedPaths(t *testing.T) {
 		},
 	})
 	handler.directoryAccess = []DirectoryAccessRule{
-		{Path: "/team", ReadGroups: []string{"family"}},
+		{Path: "/team", ReadGroups: []string{" FAMILY "}},
 		{Path: "/team/private", ReadUsers: []string{"bob"}},
-		{Path: "/team/uploads", WriteGroups: []string{"family"}},
+		{Path: "/team/uploads", WriteGroups: []string{" FAMILY "}},
 	}
 	ctx := context.Background()
 	if err := fs.Mkdir(ctx, "/users"); err != nil {
@@ -5118,6 +5559,174 @@ func TestHandler_UsersAuthDirectoryAccessRulesGrantSharedPaths(t *testing.T) {
 	handler.ServeHTTP(deniedGetW, deniedGetReq)
 	if deniedGetW.Code != http.StatusForbidden {
 		t.Fatalf("specific denied GET status = %d, want %d", deniedGetW.Code, http.StatusForbidden)
+	}
+}
+
+func TestHandler_UsersAuthDirectoryAccessRuleNormalizesRuntimePathForAuthorization(t *testing.T) {
+	handler, fs := setupUsersModeHandler(t, map[string]webDAVTestCredential{
+		"alice": {
+			password: "password123",
+			identity: UserIdentity{
+				Role:    webDAVRoleUser,
+				HomeDir: "/users/alice",
+			},
+		},
+	})
+	handler.directoryAccess = []DirectoryAccessRule{
+		{Path: "/team/", ReadUsers: []string{" ALICE "}},
+		{Path: "/shared//uploads/", WriteUsers: []string{" ALICE "}},
+	}
+	ctx := context.Background()
+	for _, dir := range []string{"/users", "/users/alice", "/team", "/shared", "/shared/uploads"} {
+		if err := fs.Mkdir(ctx, dir); err != nil {
+			t.Fatalf("Mkdir(%s) error: %v", dir, err)
+		}
+	}
+	if err := fs.WriteFile(ctx, "/team/readme.txt", strings.NewReader("shared")); err != nil {
+		t.Fatalf("WriteFile shared readme error: %v", err)
+	}
+
+	getReq := httptest.NewRequest(http.MethodGet, "/dav/team/readme.txt", nil)
+	setWebDAVTestBasicAuth(getReq, "alice")
+	getW := httptest.NewRecorder()
+	handler.ServeHTTP(getW, getReq)
+	if getW.Code != http.StatusOK || getW.Body.String() != "shared" {
+		t.Fatalf("normalized read rule GET status/body = %d %q, want 200 shared", getW.Code, getW.Body.String())
+	}
+
+	putReq := httptest.NewRequest(http.MethodPut, "/dav/shared/uploads/new.txt", strings.NewReader("upload"))
+	setWebDAVTestBasicAuth(putReq, "alice")
+	putW := httptest.NewRecorder()
+	handler.ServeHTTP(putW, putReq)
+	if putW.Code != http.StatusCreated {
+		t.Fatalf("normalized write rule PUT status = %d, want %d; body=%s", putW.Code, http.StatusCreated, putW.Body.String())
+	}
+	if _, err := fs.Stat(ctx, "/shared/uploads/new.txt"); err != nil {
+		t.Fatalf("expected normalized write rule to create shared upload: %v", err)
+	}
+}
+
+func TestHandler_UsersAuthCopyMoveAllowAbsolutePathReferenceDestination(t *testing.T) {
+	handler, fs := setupUsersModeHandler(t, map[string]webDAVTestCredential{
+		"alice": {
+			password: "password123",
+			identity: UserIdentity{
+				Role:    webDAVRoleUser,
+				HomeDir: "/users/alice",
+			},
+		},
+	})
+	handler.directoryAccess = []DirectoryAccessRule{
+		{Path: "/team", WriteUsers: []string{"alice"}},
+	}
+
+	ctx := context.Background()
+	for _, dir := range []string{"/users", "/users/alice", "/users/alice/src", "/team"} {
+		if err := fs.Mkdir(ctx, dir); err != nil {
+			t.Fatalf("Mkdir(%s) error: %v", dir, err)
+		}
+	}
+	if err := fs.WriteFile(ctx, "/users/alice/src/copy.txt", strings.NewReader("copy")); err != nil {
+		t.Fatalf("WriteFile copy source error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/users/alice/src/move.txt", strings.NewReader("move")); err != nil {
+		t.Fatalf("WriteFile move source error: %v", err)
+	}
+
+	copyReq := httptest.NewRequest("COPY", "/dav/src/copy.txt", nil)
+	copyReq.Header.Set("Destination", "/dav/team/copied.txt")
+	setWebDAVTestBasicAuth(copyReq, "alice")
+	copyW := httptest.NewRecorder()
+	handler.ServeHTTP(copyW, copyReq)
+	if copyW.Code != http.StatusCreated {
+		t.Fatalf("users COPY absolute-path Destination status = %d, want %d; body=%s", copyW.Code, http.StatusCreated, copyW.Body.String())
+	}
+	if _, err := fs.Stat(ctx, "/users/alice/src/copy.txt"); err != nil {
+		t.Fatalf("expected COPY source to remain: %v", err)
+	}
+	copiedFile, err := fs.OpenFile(ctx, "/team/copied.txt")
+	if err != nil {
+		t.Fatalf("OpenFile(copied) error: %v", err)
+	}
+	copiedData, err := io.ReadAll(copiedFile)
+	if err != nil {
+		t.Fatalf("ReadAll(copied) error: %v", err)
+	}
+	if string(copiedData) != "copy" {
+		t.Fatalf("copied content = %q, want %q", string(copiedData), "copy")
+	}
+
+	moveReq := httptest.NewRequest("MOVE", "/dav/src/move.txt", nil)
+	moveReq.Header.Set("Destination", "/dav/team/moved.txt")
+	setWebDAVTestBasicAuth(moveReq, "alice")
+	moveW := httptest.NewRecorder()
+	handler.ServeHTTP(moveW, moveReq)
+	if moveW.Code != http.StatusCreated {
+		t.Fatalf("users MOVE absolute-path Destination status = %d, want %d; body=%s", moveW.Code, http.StatusCreated, moveW.Body.String())
+	}
+	if _, err := fs.Stat(ctx, "/users/alice/src/move.txt"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("expected MOVE source to be removed, got %v", err)
+	}
+	movedFile, err := fs.OpenFile(ctx, "/team/moved.txt")
+	if err != nil {
+		t.Fatalf("OpenFile(moved) error: %v", err)
+	}
+	movedData, err := io.ReadAll(movedFile)
+	if err != nil {
+		t.Fatalf("ReadAll(moved) error: %v", err)
+	}
+	if string(movedData) != "move" {
+		t.Fatalf("moved content = %q, want %q", string(movedData), "move")
+	}
+}
+
+func TestHandler_UsersAuthDirectoryAccessRuleRejectsDirtyRuntimePath(t *testing.T) {
+	handler, fs := setupUsersModeHandler(t, map[string]webDAVTestCredential{
+		"alice": {
+			password: "password123",
+			identity: UserIdentity{
+				Role:    webDAVRoleUser,
+				HomeDir: "/users/alice",
+			},
+		},
+	})
+	handler.directoryAccess = []DirectoryAccessRule{
+		{Path: "/team/../private", ReadUsers: []string{"alice"}},
+		{Path: `/team\private`, ReadUsers: []string{"alice"}},
+		{Path: `\team\..\private`, ReadUsers: []string{"alice"}},
+		{Path: "private", ReadUsers: []string{"alice"}},
+		{Path: "/private?token=secret", ReadUsers: []string{"alice"}},
+		{Path: "/private#fragment", ReadUsers: []string{"alice"}},
+		{Path: "/private\x00secret", ReadUsers: []string{"alice"}},
+	}
+	ctx := context.Background()
+	for _, dir := range []string{"/users", "/users/alice", "/private"} {
+		if err := fs.Mkdir(ctx, dir); err != nil {
+			t.Fatalf("Mkdir(%s) error: %v", dir, err)
+		}
+	}
+	if err := fs.WriteFile(ctx, "/private/secret.txt", strings.NewReader("secret")); err != nil {
+		t.Fatalf("WriteFile private secret error: %v", err)
+	}
+
+	rootReq := httptest.NewRequest("PROPFIND", "/dav/", nil)
+	rootReq.Header.Set("Depth", "1")
+	setWebDAVTestBasicAuth(rootReq, "alice")
+	rootW := httptest.NewRecorder()
+	handler.ServeHTTP(rootW, rootReq)
+	if rootW.Code != http.StatusMultiStatus {
+		t.Fatalf("root PROPFIND status = %d, want %d; body=%s", rootW.Code, http.StatusMultiStatus, rootW.Body.String())
+	}
+	if strings.Contains(rootW.Body.String(), "/dav/private") || strings.Contains(rootW.Body.String(), "secret.txt") {
+		t.Fatalf("dirty access rule exposed private path in listing: %s", rootW.Body.String())
+	}
+
+	getReq := httptest.NewRequest(http.MethodGet, "/dav/private/secret.txt", nil)
+	setWebDAVTestBasicAuth(getReq, "alice")
+	getW := httptest.NewRecorder()
+	handler.ServeHTTP(getW, getReq)
+	if getW.Code == http.StatusOK || strings.Contains(getW.Body.String(), "secret") {
+		t.Fatalf("dirty access rule exposed private file: status=%d body=%q", getW.Code, getW.Body.String())
 	}
 }
 
@@ -5534,6 +6143,25 @@ func TestHandler_UsersAuthGuestIsReadOnly(t *testing.T) {
 	if putW.Code != http.StatusForbidden {
 		t.Fatalf("guest PUT status = %d, want %d", putW.Code, http.StatusForbidden)
 	}
+	assertWebDAVReadOnlyAllowHeader(t, putW)
+
+	optionsReq := httptest.NewRequest("OPTIONS", "/dav/", nil)
+	setWebDAVTestBasicAuth(optionsReq, "guest")
+	optionsW := httptest.NewRecorder()
+	handler.ServeHTTP(optionsW, optionsReq)
+	if optionsW.Code != http.StatusOK {
+		t.Fatalf("guest OPTIONS status = %d, want %d", optionsW.Code, http.StatusOK)
+	}
+	assertWebDAVReadOnlyAllowHeader(t, optionsW)
+
+	unsupportedReq := httptest.NewRequest("ACL", "/dav/read.txt", nil)
+	setWebDAVTestBasicAuth(unsupportedReq, "guest")
+	unsupportedW := httptest.NewRecorder()
+	handler.ServeHTTP(unsupportedW, unsupportedReq)
+	if unsupportedW.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("guest unsupported method status = %d, want %d", unsupportedW.Code, http.StatusMethodNotAllowed)
+	}
+	assertWebDAVReadOnlyAllowHeader(t, unsupportedW)
 }
 
 func TestHandler_UsersAuthPutEnforcesQuota(t *testing.T) {
@@ -5859,6 +6487,78 @@ func TestHandler_PutEnforcesDirectoryQuota(t *testing.T) {
 	}
 }
 
+func TestHandler_PutIgnoresDirtyRuntimeDirectoryQuotaPath(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	handler.directoryQuotas = []DirectoryQuota{
+		{Path: "/team/../private", QuotaBytes: 1},
+		{Path: `\team\..\private`, QuotaBytes: 1},
+		{Path: "private", QuotaBytes: 1},
+		{Path: "/private?token=secret", QuotaBytes: 1},
+		{Path: "/private#fragment", QuotaBytes: 1},
+		{Path: "/private\x00secret", QuotaBytes: 1},
+	}
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/private"); err != nil {
+		t.Fatalf("Mkdir(/private) error: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPut, "/dav/private/new.txt", strings.NewReader("ok"))
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("dirty quota path PUT status = %d, want %d; body=%s", w.Code, http.StatusCreated, w.Body.String())
+	}
+	reader, err := fs.OpenFile(ctx, "/private/new.txt")
+	if err != nil {
+		t.Fatalf("expected PUT with ignored dirty quota path to create file: %v", err)
+	}
+	defer reader.Close()
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("ReadAll(new file) error: %v", err)
+	}
+	if string(data) != "ok" {
+		t.Fatalf("created file content = %q, want ok", data)
+	}
+}
+
+func TestHandler_PutIgnoresBackslashRuntimeDirectoryQuotaPath(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	handler.directoryQuotas = []DirectoryQuota{
+		{Path: `/private\secret`, QuotaBytes: 1},
+	}
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/private"); err != nil {
+		t.Fatalf("Mkdir(/private) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/private/secret"); err != nil {
+		t.Fatalf("Mkdir(/private/secret) error: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPut, "/dav/private/secret/new.txt", strings.NewReader("ok"))
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("backslash quota path PUT status = %d, want %d; body=%s", w.Code, http.StatusCreated, w.Body.String())
+	}
+	reader, err := fs.OpenFile(ctx, "/private/secret/new.txt")
+	if err != nil {
+		t.Fatalf("expected PUT with ignored backslash quota path to create file: %v", err)
+	}
+	defer reader.Close()
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("ReadAll(new file) error: %v", err)
+	}
+	if string(data) != "ok" {
+		t.Fatalf("created file content = %q, want ok", data)
+	}
+}
+
 func TestHandler_MoveEnforcesDirectoryQuota(t *testing.T) {
 	handler, fs, _ := setupTestHandler(t)
 	handler.directoryQuotas = []DirectoryQuota{{Path: "/team", QuotaBytes: 10}}
@@ -6093,6 +6793,32 @@ func TestHandler_RequestPathNormalizesBackslashSeparators(t *testing.T) {
 	}
 }
 
+func TestHandler_ServeHTTP_RejectsBareRelativeRequestPath(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/slashes"); err != nil {
+		t.Fatalf("Mkdir(slashes) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/slashes/note.txt", bytes.NewReader([]byte("ok"))); err != nil {
+		t.Fatalf("WriteFile(note.txt) error: %v", err)
+	}
+
+	for _, requestPath := range []string{"dav/slashes/note.txt", `\dav\slashes\note.txt`} {
+		t.Run(requestPath, func(t *testing.T) {
+			req := httptest.NewRequest("GET", "/dav/slashes/note.txt", nil)
+			req.URL.Path = requestPath
+			w := httptest.NewRecorder()
+
+			handler.ServeHTTP(w, req)
+
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("GET bare relative request path status = %d, want %d", w.Code, http.StatusBadRequest)
+			}
+		})
+	}
+}
+
 func TestHandler_ServeHTTP_RejectsSimilarPrefix(t *testing.T) {
 	handler := NewHandler(Config{Prefix: "/dav", AuthType: "none"})
 	req := httptest.NewRequest("GET", "/davish/file.txt", nil)
@@ -6105,15 +6831,28 @@ func TestHandler_ServeHTTP_RejectsSimilarPrefix(t *testing.T) {
 	}
 }
 
-func TestHandler_ServeHTTP_RejectsNULPath(t *testing.T) {
-	handler := NewHandler(Config{Prefix: "/dav", AuthType: "none"})
-	req := httptest.NewRequest("GET", "/dav/%00.txt", nil)
-	w := httptest.NewRecorder()
+func TestHandler_ServeHTTP_RejectsControlPath(t *testing.T) {
+	tests := []struct {
+		name   string
+		target string
+	}{
+		{name: "NUL", target: "/dav/%00.txt"},
+		{name: "newline", target: "/dav/report%0A2026.txt"},
+		{name: "delete", target: "/dav/report%7F2026.txt"},
+	}
 
-	handler.ServeHTTP(w, req)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			handler := NewHandler(Config{Prefix: "/dav", AuthType: "none"})
+			req := httptest.NewRequest("GET", tt.target, nil)
+			w := httptest.NewRecorder()
 
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("GET NUL path status = %d, want %d", w.Code, http.StatusBadRequest)
+			handler.ServeHTTP(w, req)
+
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("GET control path status = %d, want %d", w.Code, http.StatusBadRequest)
+			}
+		})
 	}
 }
 
@@ -6153,6 +6892,35 @@ func TestHandler_GetDestination_ExactPrefixMapsToRoot(t *testing.T) {
 
 	if dst != "/" {
 		t.Fatalf("getDestination() = %q, want root path", dst)
+	}
+}
+
+func TestHandler_GetDestination_AllowsAbsolutePathReference(t *testing.T) {
+	handler := NewHandler(Config{Prefix: "/dav", AuthType: "none"})
+	req := httptest.NewRequest("COPY", "/dav/src.txt", nil)
+	req.Host = "localhost"
+	req.Header.Set("Destination", "/dav/dst.txt")
+
+	dst := handler.getDestination(req)
+
+	if dst != "/dst.txt" {
+		t.Fatalf("getDestination() = %q, want %q", dst, "/dst.txt")
+	}
+}
+
+func TestHandler_GetDestination_RejectsBareRelativeReference(t *testing.T) {
+	handler := NewHandler(Config{Prefix: "/dav", AuthType: "none"})
+
+	for _, destination := range []string{"dst.txt", "dav/dst.txt", `\dav\dst.txt`, `%2Fdav/dst.txt`} {
+		t.Run(destination, func(t *testing.T) {
+			req := httptest.NewRequest("COPY", "/dav/src.txt", nil)
+			req.Host = "localhost"
+			req.Header.Set("Destination", destination)
+
+			if dst := handler.getDestination(req); dst != "" {
+				t.Fatalf("getDestination() = %q, want empty string for bare relative reference", dst)
+			}
+		})
 	}
 }
 
@@ -6315,6 +7083,14 @@ func TestMapWebDAVDescendantPathRejectsNonDescendants(t *testing.T) {
 			wantOK:          true,
 		},
 		{
+			name:            "same source root",
+			sourceRoot:      "/docs",
+			destinationRoot: "/copy",
+			currentPath:     "/docs",
+			wantPath:        "/copy",
+			wantOK:          true,
+		},
+		{
 			name:            "root child",
 			sourceRoot:      "/",
 			destinationRoot: "/copy",
@@ -6336,6 +7112,48 @@ func TestMapWebDAVDescendantPathRejectsNonDescendants(t *testing.T) {
 			currentPath:     "/",
 			wantOK:          false,
 		},
+		{
+			name:            "root source does not map root itself",
+			sourceRoot:      "/",
+			destinationRoot: "/copy",
+			currentPath:     "/",
+			wantOK:          false,
+		},
+		{
+			name:            "dirty source root",
+			sourceRoot:      "/docs/.",
+			destinationRoot: "/copy",
+			currentPath:     "/docs/report.txt",
+			wantOK:          false,
+		},
+		{
+			name:            "relative destination root",
+			sourceRoot:      "/docs",
+			destinationRoot: "copy",
+			currentPath:     "/docs/report.txt",
+			wantOK:          false,
+		},
+		{
+			name:            "dirty destination root",
+			sourceRoot:      "/docs",
+			destinationRoot: "/copy/../public",
+			currentPath:     "/docs/report.txt",
+			wantOK:          false,
+		},
+		{
+			name:            "dirty current path",
+			sourceRoot:      "/docs",
+			destinationRoot: "/copy",
+			currentPath:     "/docs/./report.txt",
+			wantOK:          false,
+		},
+		{
+			name:            "current path with query",
+			sourceRoot:      "/docs",
+			destinationRoot: "/copy",
+			currentPath:     "/docs/report.txt?download",
+			wantOK:          false,
+		},
 	}
 
 	for _, tt := range tests {
@@ -6343,6 +7161,78 @@ func TestMapWebDAVDescendantPathRejectsNonDescendants(t *testing.T) {
 			gotPath, gotOK := mapWebDAVDescendantPath(tt.sourceRoot, tt.destinationRoot, tt.currentPath)
 			if gotOK != tt.wantOK || gotPath != tt.wantPath {
 				t.Fatalf("mapWebDAVDescendantPath() = (%q, %v), want (%q, %v)", gotPath, gotOK, tt.wantPath, tt.wantOK)
+			}
+		})
+	}
+}
+
+func TestMappedWebDAVTreePathForQuota(t *testing.T) {
+	tests := []struct {
+		name       string
+		treeRoot   string
+		mappedRoot string
+		quotaPath  string
+		wantPath   string
+		wantOK     bool
+	}{
+		{
+			name:       "quota covers destination root",
+			treeRoot:   "/src",
+			mappedRoot: "/dst",
+			quotaPath:  "/dst",
+			wantPath:   "/src",
+			wantOK:     true,
+		},
+		{
+			name:       "quota covers destination descendant",
+			treeRoot:   "/src",
+			mappedRoot: "/dst",
+			quotaPath:  "/dst/private",
+			wantPath:   "/src/private",
+			wantOK:     true,
+		},
+		{
+			name:       "destination outside quota",
+			treeRoot:   "/src",
+			mappedRoot: "/dst",
+			quotaPath:  "/archive/private",
+			wantOK:     false,
+		},
+		{
+			name:       "reject dirty tree root",
+			treeRoot:   "/src/../secret",
+			mappedRoot: "/dst",
+			quotaPath:  "/dst/private",
+			wantOK:     false,
+		},
+		{
+			name:       "reject dirty mapped root",
+			treeRoot:   "/src",
+			mappedRoot: `/dst\private`,
+			quotaPath:  "/dst/private",
+			wantOK:     false,
+		},
+		{
+			name:       "reject dirty quota path",
+			treeRoot:   "/src",
+			mappedRoot: "/dst",
+			quotaPath:  "/dst/../private",
+			wantOK:     false,
+		},
+		{
+			name:       "reject relative quota path",
+			treeRoot:   "/src",
+			mappedRoot: "/dst",
+			quotaPath:  "dst/private",
+			wantOK:     false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotPath, gotOK := mappedTreePathForQuota(tt.treeRoot, tt.mappedRoot, tt.quotaPath)
+			if gotPath != tt.wantPath || gotOK != tt.wantOK {
+				t.Fatalf("mappedTreePathForQuota() = (%q, %v), want (%q, %v)", gotPath, gotOK, tt.wantPath, tt.wantOK)
 			}
 		})
 	}
@@ -6377,6 +7267,54 @@ func TestWebDAVReadDirChildPathRejectsNonDirectChildren(t *testing.T) {
 			child:    &storage.FileInfo{Name: "report.txt"},
 			wantPath: "/docs/report.txt",
 			wantName: "report.txt",
+		},
+		{
+			name:      "control character child path",
+			parent:    "/docs",
+			child:     &storage.FileInfo{Path: "/docs/report\n2026.txt", Name: "report\n2026.txt"},
+			wantError: true,
+		},
+		{
+			name:      "control character fallback name",
+			parent:    "/docs",
+			child:     &storage.FileInfo{Name: "report\x7f.txt"},
+			wantError: true,
+		},
+		{
+			name:      "backslash child path",
+			parent:    "/docs",
+			child:     &storage.FileInfo{Path: "/docs\\report.txt", Name: "report.txt"},
+			wantError: true,
+		},
+		{
+			name:      "dot segment child path",
+			parent:    "/docs",
+			child:     &storage.FileInfo{Path: "/docs/./report.txt", Name: "report.txt"},
+			wantError: true,
+		},
+		{
+			name:      "parent segment child path",
+			parent:    "/docs",
+			child:     &storage.FileInfo{Path: "/docs/../report.txt", Name: "report.txt"},
+			wantError: true,
+		},
+		{
+			name:      "leading slash fallback name",
+			parent:    "/docs",
+			child:     &storage.FileInfo{Name: "/report.txt"},
+			wantError: true,
+		},
+		{
+			name:      "trailing slash fallback name",
+			parent:    "/docs",
+			child:     &storage.FileInfo{Name: "report.txt/"},
+			wantError: true,
+		},
+		{
+			name:      "backslash fallback name",
+			parent:    "/docs",
+			child:     &storage.FileInfo{Name: "nested\\report.txt"},
+			wantError: true,
 		},
 		{
 			name:      "similar prefix sibling",
@@ -6424,6 +7362,26 @@ func TestResolveIfHeaderPath_ExactPrefixMapsToRoot(t *testing.T) {
 	}
 	if resolved != "/" {
 		t.Fatalf("resolveIfHeaderPath() = %q, want root path", resolved)
+	}
+}
+
+func TestResolveIfHeaderPath_AllowsAbsolutePathReference(t *testing.T) {
+	resolved, ok := resolveIfHeaderPath("/dav/locked.txt", "localhost", "/dav")
+	if !ok {
+		t.Fatal("expected absolute-path If URI to resolve")
+	}
+	if resolved != "/locked.txt" {
+		t.Fatalf("resolveIfHeaderPath() = %q, want %q", resolved, "/locked.txt")
+	}
+}
+
+func TestResolveIfHeaderPath_RejectsBareRelativeReference(t *testing.T) {
+	for _, rawPath := range []string{"locked.txt", "dav/locked.txt", `\dav\locked.txt`, `%2Fdav/locked.txt`} {
+		t.Run(rawPath, func(t *testing.T) {
+			if resolved, ok := resolveIfHeaderPath(rawPath, "localhost", "/dav"); ok {
+				t.Fatalf("resolveIfHeaderPath() = %q, want bare relative reference rejection", resolved)
+			}
+		})
 	}
 }
 

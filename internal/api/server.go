@@ -62,6 +62,8 @@ const untrustedDownloadContentSecurityPolicy = "sandbox; default-src 'none'; bas
 
 var errScrubDataplaneNotConnected = errors.New("dataplane not connected")
 
+var newAuthUserStore = auth.NewUserStore
+
 var startScrub = func(store *maintenance.HistoryStore) (*maintenance.ScrubResult, error) {
 	return store.StartScrub()
 }
@@ -777,9 +779,13 @@ func backupAlertDetails(event backup.NotificationEvent) map[string]any {
 	addString("stale_after", event.StaleAfter)
 	addString("reminder_cooldown", event.ReminderCooldown)
 	addInt("pruned_snapshots", event.PrunedSnapshots)
-	addInt("warning_count", len(event.Warnings))
-	addBool("error_message_present", strings.TrimSpace(event.ErrorMessage) != "")
-	addBool("location_details_omitted", backupAlertHasLocationDetails(event))
+	warningCount := event.WarningCount
+	if warningCount == 0 {
+		warningCount = len(event.Warnings)
+	}
+	addInt("warning_count", warningCount)
+	addBool("error_message_present", event.ErrorMessagePresent || strings.TrimSpace(event.ErrorMessage) != "")
+	addBool("location_details_omitted", event.LocationOmitted || backupAlertHasLocationDetails(event))
 	addString("failure_category", event.FailureCategory)
 	return details
 }
@@ -1567,9 +1573,13 @@ func NewServer(logger zerolog.Logger, cfg *ServerConfig) (*Server, error) {
 		userStore := cfg.AuthUserStore
 		if userStore == nil {
 			var err error
-			userStore, _, err = auth.NewUserStore(s.authUsersFile)
+			userStore, _, err = newAuthUserStore(s.authUsersFile)
 			if err != nil {
-				return nil, fmt.Errorf("failed to initialize user store: %w", err)
+				if auth.IsPersistenceWarning(err) && userStore != nil {
+					logger.Warn().Err(err).Msg("user store initialized with an auth persistence warning")
+				} else {
+					return nil, fmt.Errorf("failed to initialize user store: %w", err)
+				}
 			}
 		}
 		s.userStore = userStore
@@ -1690,7 +1700,7 @@ func RejectCrossOriginUnsafeRequests(next http.Handler) http.Handler {
 
 func hasBearerAuthorization(r *http.Request) bool {
 	fields := strings.Fields(r.Header.Get("Authorization"))
-	return len(fields) >= 2 && strings.EqualFold(fields[0], "Bearer")
+	return len(fields) == 2 && strings.EqualFold(fields[0], "Bearer")
 }
 
 func isUnsafeHTTPMethod(method string) bool {
@@ -1802,6 +1812,7 @@ func (s *Server) setupRoutes() {
 	// Public share access (no auth required)
 	if s.shareHandler != nil {
 		s.router.Route("/s", func(r chi.Router) {
+			r.MethodNotAllowed(handlePublicShareMethodNotAllowed)
 			r.Get("/{id}", s.handleAccessShare)
 			r.Post("/{id}", s.handleAccessShareWithPassword)
 			r.Get("/{id}/items", s.handleListShareItems)
@@ -1810,6 +1821,7 @@ func (s *Server) setupRoutes() {
 		})
 
 		s.router.Route("/api/v1/public/shares", func(r chi.Router) {
+			r.MethodNotAllowed(handlePublicShareMethodNotAllowed)
 			r.Get("/{id}", s.handleAccessShare)
 			r.Post("/{id}/access", s.handleAccessShareWithPassword)
 			r.Get("/{id}/items", s.handleListShareItems)
@@ -2039,7 +2051,7 @@ func (s *Server) Router() http.Handler {
 // validatePath validates and cleans a file path, preventing path traversal attacks.
 func validatePath(filePath string) (string, error) {
 	normalized := strings.ReplaceAll(filePath, "\\", "/")
-	if strings.ContainsRune(normalized, '\x00') {
+	if strings.IndexFunc(normalized, unicode.IsControl) >= 0 {
 		return "", errInvalidPath
 	}
 
@@ -2449,9 +2461,12 @@ func (s *Server) authorizeUserTreeDescendants(ctx context.Context, sourcePath, d
 }
 
 func mapDescendantPath(sourceRoot, destinationRoot, currentPath string) (string, bool) {
-	sourceRoot = path.Clean(sourceRoot)
-	destinationRoot = path.Clean(destinationRoot)
-	currentPath = path.Clean(currentPath)
+	sourceRoot = cleanRuntimePathRulePath(sourceRoot)
+	destinationRoot = cleanRuntimePathRulePath(destinationRoot)
+	currentPath = cleanRuntimePathRulePath(currentPath)
+	if sourceRoot == "" || destinationRoot == "" || currentPath == "" {
+		return "", false
+	}
 
 	relativePath := ""
 	if sourceRoot == "/" {
@@ -2864,10 +2879,6 @@ func (s *Server) visibleScopedRootFileInfos(ctx context.Context) ([]*storage.Fil
 	if !s.authEnabled || auth.IsAdmin(ctx) {
 		return nil, false, nil
 	}
-	user := auth.GetUserFromContext(ctx)
-	if user == nil {
-		return nil, false, nil
-	}
 	homeDir, scoped, err := s.currentUserHomeDir(ctx)
 	if err != nil {
 		return nil, true, err
@@ -2875,6 +2886,7 @@ func (s *Server) visibleScopedRootFileInfos(ctx context.Context) ([]*storage.Fil
 	if !scoped {
 		return nil, false, nil
 	}
+	user := auth.GetUserFromContext(ctx)
 
 	seen := make(map[string]struct{})
 	files := make([]*storage.FileInfo, 0)
@@ -2909,11 +2921,10 @@ func (s *Server) visibleScopedRootFileInfos(ctx context.Context) ([]*storage.Fil
 		return files, true, nil
 	}
 	for _, rule := range cfg.Storage.DirectoryAccessRules {
-		rulePath := strings.TrimSpace(rule.Path)
+		rulePath := cleanRuntimePathRulePath(rule.Path)
 		if rulePath == "" {
 			continue
 		}
-		rulePath = path.Clean(rulePath)
 		if rulePath == "/" || !directoryAccessRuleAllowsUser(rule, user, pathAccessRead) {
 			continue
 		}
@@ -3332,7 +3343,7 @@ func (s *Server) handleDownloadFile(w http.ResponseWriter, r *http.Request) {
 
 		trackingWriter := &apiDownloadResponseWriter{ResponseWriter: w}
 		http.ServeContent(trackingWriter, r, path.Base(filePath), versionModTime, reader)
-		if trackingWriter.writeErr == nil && !isDownloadProbeRequest(r) && trackingWriter.statusCode != http.StatusNotModified && trackingWriter.statusCode < http.StatusBadRequest {
+		if downloadResponseShouldLogActivity(r, trackingWriter) {
 			s.LogActivity(r, activity.ActionDownload, filePath, map[string]string{"hash": versionHash})
 		}
 		return
@@ -3379,7 +3390,7 @@ func (s *Server) handleDownloadFile(w http.ResponseWriter, r *http.Request) {
 	// Use http.ServeContent for proper Range support and content type detection
 	trackingWriter := &apiDownloadResponseWriter{ResponseWriter: w}
 	http.ServeContent(trackingWriter, r, path.Base(filePath), snapshotInfo.ModTime, file)
-	if trackingWriter.writeErr == nil && !isDownloadProbeRequest(r) && trackingWriter.statusCode != http.StatusNotModified && trackingWriter.statusCode < http.StatusBadRequest {
+	if downloadResponseShouldLogActivity(r, trackingWriter) {
 		s.LogActivity(r, activity.ActionDownload, filePath, nil)
 	}
 }
@@ -3807,13 +3818,28 @@ func apiReadDirChildPath(parentPath string, child *storage.FileInfo) (string, st
 	cleanParent := path.Clean(parentPath)
 	childPath := child.Path
 	if childPath == "" {
-		childPath = path.Join(cleanParent, child.Name)
+		childName, err := safeAPIReadDirFallbackChildName(child.Name)
+		if err != nil {
+			return "", "", err
+		}
+		childPath = path.Join(cleanParent, childName)
+	}
+	if strings.Contains(childPath, "\\") || strings.IndexFunc(childPath, unicode.IsControl) >= 0 || hasDotSegment(childPath) {
+		return "", "", errInvalidPath
 	}
 	cleanChild := path.Clean(childPath)
 	if cleanChild == cleanParent || path.Dir(cleanChild) != cleanParent {
 		return "", "", errInvalidPath
 	}
 	return cleanChild, path.Base(cleanChild), nil
+}
+
+func safeAPIReadDirFallbackChildName(name string) (string, error) {
+	childName := strings.ReplaceAll(name, "\\", "/")
+	if childName == "" || strings.Contains(childName, "/") || strings.IndexFunc(childName, unicode.IsControl) >= 0 || hasDotSegment(childName) {
+		return "", errInvalidPath
+	}
+	return childName, nil
 }
 
 func apiNormalizeReadDirChildren(parentPath string, children []*storage.FileInfo) ([]*storage.FileInfo, error) {
@@ -4117,7 +4143,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 
 	homeDir, scoped, err := s.currentUserHomeDir(r.Context())
 	if err != nil {
-		forbiddenPathOutsideHome(w)
+		respondPathAccessError(w, err)
 		return
 	}
 
@@ -4232,24 +4258,46 @@ func addDiskStatsToMap(target map[string]any, stats *storage.DiskStats) {
 	if stats == nil {
 		return
 	}
-	target["disk_total"] = stats.TotalBytes
-	target["disk_free"] = stats.FreeBytes
-	target["disk_available"] = stats.AvailableBytes
-	target["disk_used"] = stats.UsedBytes
-	target["disk_usage_ratio"] = stats.UsageRatio
-	if stats.FileSystemType != "" {
-		target["disk_filesystem_type"] = stats.FileSystemType
+	normalized := normalizeDiskStatsForAPI(stats)
+	target["disk_total"] = normalized.TotalBytes
+	target["disk_free"] = normalized.FreeBytes
+	target["disk_available"] = normalized.AvailableBytes
+	target["disk_used"] = normalized.UsedBytes
+	target["disk_usage_ratio"] = normalized.UsageRatio
+	if normalized.FileSystemType != "" {
+		target["disk_filesystem_type"] = normalized.FileSystemType
 	}
-	if stats.MountPoint != "" {
-		target["disk_mount_point"] = sanitizeDiskMountPath(stats.MountPoint)
+	if normalized.MountPoint != "" {
+		target["disk_mount_point"] = sanitizeDiskMountPath(normalized.MountPoint)
 	}
-	if stats.MountSource != "" {
-		target["disk_mount_source"] = sanitizeDiskMountSource(stats.MountSource)
+	if normalized.MountSource != "" {
+		target["disk_mount_source"] = sanitizeDiskMountSource(normalized.MountSource)
 	}
-	if stats.MountOptions != "" {
-		target["disk_mount_options"] = sanitizeDiskMountOptions(stats.MountOptions)
+	if normalized.MountOptions != "" {
+		target["disk_mount_options"] = sanitizeDiskMountOptions(normalized.MountOptions)
 	}
-	target["disk_native_data_checksum_support"] = stats.NativeDataChecksumSupport
+	target["disk_native_data_checksum_support"] = normalized.NativeDataChecksumSupport
+}
+
+func normalizeDiskStatsForAPI(stats *storage.DiskStats) storage.DiskStats {
+	normalized := *stats
+	if normalized.TotalBytes == 0 {
+		normalized.FreeBytes = 0
+		normalized.AvailableBytes = 0
+		normalized.UsedBytes = 0
+		normalized.UsageRatio = 0
+		return normalized
+	}
+
+	if normalized.FreeBytes > normalized.TotalBytes {
+		normalized.FreeBytes = normalized.TotalBytes
+	}
+	if normalized.AvailableBytes > normalized.TotalBytes {
+		normalized.AvailableBytes = normalized.TotalBytes
+	}
+	normalized.UsedBytes = normalized.TotalBytes - normalized.FreeBytes
+	normalized.UsageRatio = float64(normalized.UsedBytes) / float64(normalized.TotalBytes)
+	return normalized
 }
 
 func sanitizeDiskMountPath(mountPath string) string {
@@ -4458,7 +4506,7 @@ func (s *Server) smbDiagnostics(cfg *config.Config) map[string]any {
 		"share_count":        0,
 		"credentials_ready":  false,
 		"gateway_configured": false,
-		"message":            "SMB sidecar is not bundled in this build; use WebDAV for current LAN mounts.",
+		"message":            "SMB runtime is not bundled in this build; use WebDAV for current LAN mounts.",
 	}
 	if cfg == nil {
 		return info
@@ -4473,7 +4521,7 @@ func (s *Server) smbDiagnostics(cfg *config.Config) map[string]any {
 	info["credentials_ready"] = strings.TrimSpace(cfg.SMB.CredentialFile) != ""
 	info["gateway_configured"] = strings.TrimSpace(cfg.SMB.GatewaySocket) != ""
 	if cfg.SMB.Enabled {
-		info["message"] = "SMB is configured but the protocol sidecar is not implemented in this build."
+		info["message"] = "SMB is configured, but the SMB runtime is not bundled in this build; use WebDAV for current LAN mounts."
 	}
 	return info
 }
@@ -4481,10 +4529,11 @@ func (s *Server) smbDiagnostics(cfg *config.Config) map[string]any {
 func (s *Server) handleDiagnostics(w http.ResponseWriter, r *http.Request) {
 	dataplaneConnected := s.ensureDataplaneConnected(r.Context())
 	cfg := s.currentConfig()
+	now := apiTimeNow().UTC()
 
 	// Collect diagnostic information
 	diag := map[string]any{
-		"timestamp":   time.Now().UTC().Format(time.RFC3339),
+		"timestamp":   now.Format(time.RFC3339),
 		"uptime":      time.Since(s.startTime).String(),
 		"uptime_secs": int64(time.Since(s.startTime).Seconds()),
 		"version": map[string]any{
@@ -5231,9 +5280,10 @@ func (s *Server) handleGetScrubResult(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleDiagnosticsExport(w http.ResponseWriter, r *http.Request) {
 	cfg := s.currentConfig()
+	now := apiTimeNow().UTC()
 	export := map[string]any{
 		"schema_version": 1,
-		"export_time":    time.Now().Format(time.RFC3339),
+		"export_time":    now.Format(time.RFC3339),
 		"version":        s.appVersion,
 		"build_time":     s.buildTime,
 	}
@@ -5326,16 +5376,21 @@ func (s *Server) handleDiagnosticsExport(w http.ResponseWriter, r *http.Request)
 	}
 
 	// Set filename for download
-	filename := fmt.Sprintf("mnemonas-diagnostics-%s.json", time.Now().Format("20060102-150405"))
+	filename := fmt.Sprintf("mnemonas-diagnostics-%s.json", now.Format("20060102-150405"))
 	setDiagnosticsResponseHeaders(w)
 	w.Header().Set("Content-Disposition", formatAttachmentHeader(filename))
 	s.json(w, http.StatusOK, export)
 }
 
 func setDiagnosticsResponseHeaders(w http.ResponseWriter) {
+	setSensitiveJSONResponseHeaders(w)
+}
+
+func setSensitiveJSONResponseHeaders(w http.ResponseWriter) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Pragma", "no-cache")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Referrer-Policy", "no-referrer")
 }
 
 func sanitizeScrubErrorMessage(message string) string {
@@ -5400,9 +5455,10 @@ func apiStreamResponseStarted(err error) bool {
 
 type apiDownloadResponseWriter struct {
 	http.ResponseWriter
-	started    bool
-	statusCode int
-	writeErr   error
+	started      bool
+	statusCode   int
+	bytesWritten int64
+	writeErr     error
 }
 
 func (w *apiDownloadResponseWriter) WriteHeader(statusCode int) {
@@ -5419,10 +5475,32 @@ func (w *apiDownloadResponseWriter) Write(p []byte) (int, error) {
 			w.statusCode = http.StatusOK
 		}
 	}
+	w.bytesWritten += int64(n)
 	if err != nil {
 		w.writeErr = err
 	}
 	return n, err
+}
+
+func downloadResponseShouldLogActivity(r *http.Request, writer *apiDownloadResponseWriter) bool {
+	if r == nil || r.Method != http.MethodGet || writer == nil || writer.writeErr != nil || isDownloadProbeRequest(r) {
+		return false
+	}
+	statusCode := writer.statusCode
+	if statusCode == 0 {
+		statusCode = http.StatusOK
+	}
+	if statusCode == http.StatusNotModified || statusCode >= http.StatusBadRequest {
+		return false
+	}
+	if requestHasRangeHeader(r) {
+		return writer.bytesWritten > 0
+	}
+	return true
+}
+
+func requestHasRangeHeader(r *http.Request) bool {
+	return strings.TrimSpace(r.Header.Get("Range")) != ""
 }
 
 func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
@@ -5496,7 +5574,7 @@ func searchLimitFromRequest(r *http.Request) (int, error) {
 func (s *Server) json(w http.ResponseWriter, status int, data any) {
 	payload, err := json.Marshal(data)
 	if err != nil {
-		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		writeInternalJSONError(w)
 		return
 	}
 
@@ -5878,7 +5956,7 @@ func (s *Server) handleEmptyTrash(w http.ResponseWriter, r *http.Request) {
 	}
 	_, scoped, err := s.currentUserHomeDir(r.Context())
 	if err != nil {
-		forbiddenPathOutsideHome(w)
+		respondPathAccessError(w, err)
 		return
 	}
 	if scoped {
@@ -6178,7 +6256,11 @@ func (s *Server) handleListActivity(w http.ResponseWriter, r *http.Request) {
 		offset = o
 	}
 
-	currentUserFilter := s.currentActivityUserFilter(r)
+	currentUserFilter, err := s.currentActivityUserFilter(r)
+	if err != nil {
+		s.respondHomeDirFilterError(w, "resolve current activity user", err)
+		return
+	}
 	if currentUserFilter != "" {
 		filter.User = currentUserFilter
 	}
@@ -6256,7 +6338,12 @@ func (s *Server) handleActivityStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if currentUserFilter := s.currentActivityUserFilter(r); currentUserFilter != "" {
+	currentUserFilter, err := s.currentActivityUserFilter(r)
+	if err != nil {
+		s.respondHomeDirFilterError(w, "resolve current activity stats user", err)
+		return
+	}
+	if currentUserFilter != "" {
 		filter.User = currentUserFilter
 		if !s.currentUserCanUseActivityPathFilter(r.Context(), filter.Path) {
 			NewAPIResponse(buildActivityStats(nil)).Write(w, http.StatusOK)
@@ -6512,11 +6599,33 @@ func parseActivityReviewDispositionStatusQueryParam(w http.ResponseWriter, value
 }
 
 func currentActivityReviewReviewer(r *http.Request) string {
-	claims := auth.GetClaimsFromContext(r.Context())
-	if claims != nil && strings.TrimSpace(claims.Username) != "" {
-		return claims.Username
+	if username, ok := currentRequestUsernameFromContext(r.Context()); ok {
+		return username
 	}
 	return "admin"
+}
+
+func currentRequestUsernameFromContext(ctx context.Context) (string, bool) {
+	if user := auth.GetUserFromContext(ctx); user != nil && user.Disabled {
+		return "", false
+	}
+	if claims := auth.GetClaimsFromContext(ctx); claims != nil {
+		if username := strings.TrimSpace(claims.Username); username != "" {
+			return username, true
+		}
+		if userID := strings.TrimSpace(claims.UserID); userID != "" {
+			return userID, true
+		}
+	}
+	if user := auth.GetUserFromContext(ctx); user != nil && !user.Disabled {
+		if username := strings.TrimSpace(user.Username); username != "" {
+			return username, true
+		}
+		if userID := strings.TrimSpace(user.ID); userID != "" {
+			return userID, true
+		}
+	}
+	return "", false
 }
 
 func parseActivityQueryFilter(w http.ResponseWriter, r *http.Request) (activity.ListFilter, bool) {
@@ -6638,15 +6747,22 @@ func parseActivityTimeQueryParam(w http.ResponseWriter, value, name string) (*ti
 	return &parsed, true
 }
 
-func (s *Server) currentActivityUserFilter(r *http.Request) string {
+func (s *Server) currentActivityUserFilter(r *http.Request) (string, error) {
 	if !s.authEnabled || auth.IsAdmin(r.Context()) {
-		return ""
+		return "", nil
+	}
+	user := auth.GetUserFromContext(r.Context())
+	if user != nil && user.Disabled {
+		return "", errPathAccessDenied
 	}
 	claims := auth.GetClaimsFromContext(r.Context())
-	if claims == nil {
-		return ""
+	if claims != nil && strings.TrimSpace(claims.Username) != "" {
+		return strings.TrimSpace(claims.Username), nil
 	}
-	return claims.Username
+	if user == nil || strings.TrimSpace(user.Username) == "" {
+		return "", errPathAccessDenied
+	}
+	return strings.TrimSpace(user.Username), nil
 }
 
 func (s *Server) currentUserCanUseActivityPathFilter(ctx context.Context, filterPath string) bool {
@@ -6795,8 +6911,8 @@ func (s *Server) LogActivityWithWarning(w http.ResponseWriter, r *http.Request, 
 func (s *Server) logActivity(r *http.Request, action activity.ActionType, path string, details map[string]string) error {
 	user := "anonymous"
 	if s.authEnabled {
-		if claims := auth.GetClaimsFromContext(r.Context()); claims != nil {
-			user = claims.Username
+		if username, ok := currentRequestUsernameFromContext(r.Context()); ok {
+			user = username
 		}
 	}
 
@@ -6896,8 +7012,8 @@ func markDeleteCleanupWarningHeaders(w http.ResponseWriter) {
 func (s *Server) handleLoginWithActivity(w http.ResponseWriter, r *http.Request) {
 	user := "unknown"
 	if s.activity != nil {
-		if claims := auth.GetClaimsFromContext(r.Context()); claims != nil {
-			user = claims.Username
+		if username, ok := currentRequestUsernameFromContext(r.Context()); ok {
+			user = username
 		} else {
 			loginUser, err := readLoginUsername(r)
 			if err != nil {
@@ -7069,8 +7185,8 @@ func readLoginUsername(r *http.Request) (string, error) {
 func (s *Server) handleLogoutWithActivity(w http.ResponseWriter, r *http.Request) {
 	user := "unknown"
 	if s.activity != nil {
-		if claims := auth.GetClaimsFromContext(r.Context()); claims != nil {
-			user = claims.Username
+		if username, ok := currentRequestUsernameFromContext(r.Context()); ok {
+			user = username
 		}
 	}
 	ip := requestip.ClientIP(r)
@@ -7196,6 +7312,13 @@ func securityPathContainsOrEquals(parent, child string) bool {
 	return rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
+func securityCheckErrorDetail(err error) string {
+	if err == nil {
+		return ""
+	}
+	return backup.SanitizeNotificationText(err.Error())
+}
+
 func (s *Server) securityUsersFileAccessCheck(cfg *config.Config) securityCheckItem {
 	const checkID = "users_file_access"
 
@@ -7225,7 +7348,7 @@ func (s *Server) securityUsersFileAccessCheck(cfg *config.Config) securityCheckI
 	}
 	dirInfo, err := os.Lstat(usersDir)
 	if err != nil {
-		details["error"] = err.Error()
+		details["error"] = securityCheckErrorDetail(err)
 		return securityCheckItem{
 			ID:      checkID,
 			Status:  securityCheckBlock,
@@ -7246,7 +7369,7 @@ func (s *Server) securityUsersFileAccessCheck(cfg *config.Config) securityCheckI
 		}
 	}
 	if symlinkComponent, ok, err := securityFirstSymlinkPathComponent(usersDir); err != nil {
-		details["error"] = err.Error()
+		details["error"] = securityCheckErrorDetail(err)
 		return securityCheckItem{
 			ID:      checkID,
 			Status:  securityCheckBlock,
@@ -7278,7 +7401,7 @@ func (s *Server) securityUsersFileAccessCheck(cfg *config.Config) securityCheckI
 
 	fileInfo, err := os.Lstat(usersFile)
 	if err != nil {
-		details["error"] = err.Error()
+		details["error"] = securityCheckErrorDetail(err)
 		return securityCheckItem{
 			ID:      checkID,
 			Status:  securityCheckBlock,
@@ -7422,7 +7545,7 @@ func securityBackupLocalDestinationsCheck(cfg *config.Config) securityCheckItem 
 
 		destinationAbs, err := securityAbsCleanPath(destination)
 		if err != nil {
-			details["error"] = err.Error()
+			details["error"] = securityCheckErrorDetail(err)
 			return securityCheckItem{
 				ID:      checkID,
 				Status:  securityCheckBlock,
@@ -7432,7 +7555,7 @@ func securityBackupLocalDestinationsCheck(cfg *config.Config) securityCheckItem 
 			}
 		}
 		if storageRootAbs, err := securityAbsCleanPath(cfg.Storage.Root); err != nil {
-			details["error"] = err.Error()
+			details["error"] = securityCheckErrorDetail(err)
 			return securityCheckItem{
 				ID:      checkID,
 				Status:  securityCheckBlock,
@@ -7451,7 +7574,7 @@ func securityBackupLocalDestinationsCheck(cfg *config.Config) securityCheckItem 
 			}
 		}
 		if sourceAbs, err := securityAbsCleanPath(source); err != nil {
-			details["error"] = err.Error()
+			details["error"] = securityCheckErrorDetail(err)
 			return securityCheckItem{
 				ID:      checkID,
 				Status:  securityCheckBlock,
@@ -7471,7 +7594,7 @@ func securityBackupLocalDestinationsCheck(cfg *config.Config) securityCheckItem 
 		}
 
 		if symlinkComponent, ok, err := securityFirstSymlinkPathComponent(destination); err != nil {
-			details["error"] = err.Error()
+			details["error"] = securityCheckErrorDetail(err)
 			return securityCheckItem{
 				ID:      checkID,
 				Status:  securityCheckBlock,
@@ -7503,7 +7626,7 @@ func securityBackupLocalDestinationsCheck(cfg *config.Config) securityCheckItem 
 					Details: details,
 				}
 			}
-			details["error"] = err.Error()
+			details["error"] = securityCheckErrorDetail(err)
 			return securityCheckItem{
 				ID:      checkID,
 				Status:  securityCheckWarning,
@@ -7573,7 +7696,7 @@ func securityConfigFileAccessCheck(configPath string) securityCheckItem {
 	}
 
 	if symlinkComponent, ok, err := securityFirstSymlinkPathComponent(configPath); err != nil {
-		details["error"] = err.Error()
+		details["error"] = securityCheckErrorDetail(err)
 		return securityCheckItem{
 			ID:      checkID,
 			Status:  securityCheckWarning,
@@ -7605,7 +7728,7 @@ func securityConfigFileAccessCheck(configPath string) securityCheckItem {
 				Details: details,
 			}
 		}
-		details["error"] = err.Error()
+		details["error"] = securityCheckErrorDetail(err)
 		return securityCheckItem{
 			ID:      checkID,
 			Status:  securityCheckWarning,
@@ -7694,7 +7817,7 @@ func securitySecretsFileAccessCheck(cfg *config.Config, webDAVAuthType string) s
 	}
 
 	if symlinkComponent, ok, err := securityFirstSymlinkPathComponent(secretsPath); err != nil {
-		details["error"] = err.Error()
+		details["error"] = securityCheckErrorDetail(err)
 		return securityCheckItem{
 			ID:      checkID,
 			Status:  securityCheckBlock,
@@ -7726,7 +7849,7 @@ func securitySecretsFileAccessCheck(cfg *config.Config, webDAVAuthType string) s
 				Details: details,
 			}
 		}
-		details["error"] = err.Error()
+		details["error"] = securityCheckErrorDetail(err)
 		return securityCheckItem{
 			ID:      checkID,
 			Status:  securityCheckBlock,
@@ -7798,7 +7921,7 @@ func securityInitialPasswordFileCheck(initialPasswordFile string) securityCheckI
 	}
 
 	if symlinkComponent, ok, err := securityFirstSymlinkPathComponent(initialPasswordFile); err != nil {
-		details["error"] = err.Error()
+		details["error"] = securityCheckErrorDetail(err)
 		return securityCheckItem{
 			ID:      checkID,
 			Status:  securityCheckWarning,
@@ -7830,7 +7953,7 @@ func securityInitialPasswordFileCheck(initialPasswordFile string) securityCheckI
 				Details: details,
 			}
 		}
-		details["error"] = err.Error()
+		details["error"] = securityCheckErrorDetail(err)
 		return securityCheckItem{
 			ID:      checkID,
 			Status:  securityCheckWarning,
@@ -7927,6 +8050,13 @@ func securityShareBaseURLPublicRisk(baseURL string) string {
 	if trimmed == "" {
 		return "empty"
 	}
+	rawScheme, _, hasScheme := strings.Cut(trimmed, "://")
+	if hasScheme && securityShareBaseURLRawAuthority(trimmed) != "" && strings.Contains(securityShareBaseURLRawPath(trimmed), "\\") {
+		if !strings.EqualFold(rawScheme, "https") {
+			return "not_https"
+		}
+		return "backslash_path"
+	}
 	parsed, err := url.Parse(trimmed)
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
 		return "invalid"
@@ -7943,8 +8073,20 @@ func securityShareBaseURLPublicRisk(baseURL string) string {
 	if port := parsed.Port(); port != "" && port != "443" {
 		return "non_default_https_port"
 	}
+	if strings.Contains(securityShareBaseURLRawPath(trimmed), "\\") {
+		return "backslash_path"
+	}
 	if !securityShareBaseURLHostIsValid(parsed.Hostname()) {
 		return "invalid_host"
+	}
+	if securityShareBaseURLPathHasBackslashes(parsed.Path) {
+		return "backslash_path"
+	}
+	if securityShareBaseURLPathHasDuplicateSlashes(parsed.Path) {
+		return "duplicate_slash_path"
+	}
+	if securityShareBaseURLPathHasDotSegments(parsed.Path) {
+		return "dot_segment_path"
 	}
 	if securityShareBaseURLPathEndsWithShareRoute(parsed.Path) {
 		return "nested_share_route"
@@ -7952,9 +8094,72 @@ func securityShareBaseURLPublicRisk(baseURL string) string {
 	return ""
 }
 
+func securityShareBaseURLPathHasBackslashes(path string) bool {
+	return strings.Contains(path, "\\")
+}
+
+func securityShareBaseURLPathHasDuplicateSlashes(path string) bool {
+	return strings.Contains(path, "//")
+}
+
+func securityShareBaseURLPathHasDotSegments(urlPath string) bool {
+	for _, segment := range strings.Split(urlPath, "/") {
+		if segment == "." || segment == ".." {
+			return true
+		}
+	}
+	return false
+}
+
 func securityShareBaseURLPathEndsWithShareRoute(path string) bool {
 	trimmedPath := strings.TrimRight(path, "/")
 	return trimmedPath == "/s" || strings.HasSuffix(trimmedPath, "/s")
+}
+
+func securityShareBaseURLRawAuthority(rawURL string) string {
+	_, withoutScheme, ok := strings.Cut(strings.TrimSpace(rawURL), "://")
+	if !ok {
+		return ""
+	}
+	end := len(withoutScheme)
+	for i, r := range withoutScheme {
+		if r == '/' || r == '\\' || r == '?' || r == '#' {
+			end = i
+			break
+		}
+	}
+	return withoutScheme[:end]
+}
+
+func securityShareBaseURLRawPath(rawURL string) string {
+	trimmed := strings.TrimSpace(rawURL)
+	withoutScheme := trimmed
+	if schemeIndex := strings.Index(withoutScheme, "://"); schemeIndex >= 0 {
+		withoutScheme = withoutScheme[schemeIndex+3:]
+	}
+	pathStart := -1
+	for i, r := range withoutScheme {
+		switch r {
+		case '/', '\\':
+			pathStart = i
+		case '?', '#':
+			return "/"
+		}
+		if pathStart >= 0 {
+			break
+		}
+	}
+	if pathStart < 0 {
+		return "/"
+	}
+	pathPart := withoutScheme[pathStart:]
+	if cut := strings.IndexAny(pathPart, "?#"); cut >= 0 {
+		pathPart = pathPart[:cut]
+	}
+	if pathPart == "" {
+		return "/"
+	}
+	return pathPart
 }
 
 func securityShareBaseURLHostIsValid(host string) bool {
@@ -8005,6 +8210,10 @@ func securityShareBaseURLHost(baseURL string) string {
 }
 
 func securityShareBaseURLPath(baseURL string) string {
+	rawPath := securityShareBaseURLRawPath(baseURL)
+	if strings.Contains(rawPath, "\\") {
+		return rawPath
+	}
 	parsed, err := url.Parse(strings.TrimSpace(baseURL))
 	if err != nil {
 		return ""
@@ -8063,10 +8272,8 @@ func securityWebDAVPrefixRisk(prefix string) (string, string) {
 	if trimmed == "" {
 		return normalized, "empty"
 	}
-	for _, r := range normalized {
-		if r < 0x20 || r == 0x7f {
-			return normalized, "invalid_characters"
-		}
+	if strings.IndexFunc(normalized, unicode.IsControl) >= 0 {
+		return normalized, "invalid_characters"
 	}
 	if strings.ContainsAny(normalized, "\\?#") {
 		return normalized, "invalid_characters"
@@ -8678,7 +8885,7 @@ func (s *Server) handleGetSecurityCheck(w http.ResponseWriter, r *http.Request) 
 
 	if cfg.Security.AllowUnsafeNoAuth {
 		status := securityCheckWarning
-		message := "已显式允许无认证服务绑定到非本机地址；如果不是临时调试，请关闭该例外。"
+		message := "已显式允许无认证例外；该设置只适合受控网络边界或临时调试，公网访问前请关闭该例外。"
 		if unsafeNoAuthRisk {
 			status = securityCheckBlock
 			message = "当前允许无认证服务暴露到非本机地址。公网访问前必须重新启用认证，或关闭该例外并重启服务。"
@@ -9012,13 +9219,13 @@ func (s *Server) handleGetSecurityCheck(w http.ResponseWriter, r *http.Request) 
 			ID:      "smb_preview",
 			Status:  securityCheckPass,
 			Title:   "SMB 预览未启用",
-			Message: "当前版本不会启动 SMB/Samba 监听器，局域网挂载请使用 WebDAV。",
+			Message: "当前构建未包含 SMB/Samba 运行组件，局域网挂载请使用 WebDAV。",
 		})
 	} else {
 		status := securityCheckWarning
-		message := "当前版本只保留 SMB 网关配置，不会启动可挂载的 SMB/Samba 运行时。"
+		message := "SMB 已配置，但当前构建未包含 SMB/Samba 运行组件；局域网挂载请使用 WebDAV。"
 		if !smbLoopback {
-			message = "SMB 预览监听地址配置为非本机地址，但当前版本仍不会启动 SMB/Samba 运行时；后续启用前需先收紧监听范围和防火墙。"
+			message = "SMB 监听地址配置为非本机地址，但当前构建未包含 SMB/Samba 运行组件；后续启用前需先收紧监听范围和防火墙。"
 		}
 		checks = append(checks, securityCheckItem{
 			ID:      "smb_preview",
@@ -9133,6 +9340,39 @@ func (s *Server) handleGetSecurityCheck(w http.ResponseWriter, r *http.Request) 
 			Message: "公开分享链接基础地址不能包含查询参数或片段，否则会生成错误的分享链接。",
 			Details: map[string]interface{}{
 				"base_url": cfg.Share.BaseURL,
+			},
+		})
+	case shareBaseURLRisk == "duplicate_slash_path":
+		checks = append(checks, securityCheckItem{
+			ID:      "share_base_url",
+			Status:  securityCheckBlock,
+			Title:   "分享基础 URL 路径包含重复斜杠",
+			Message: "公开分享链接基础路径不能包含重复斜杠，避免代理或浏览器规范化后生成不一致的分享地址。",
+			Details: map[string]interface{}{
+				"base_url":      cfg.Share.BaseURL,
+				"base_url_path": securityShareBaseURLPath(cfg.Share.BaseURL),
+			},
+		})
+	case shareBaseURLRisk == "dot_segment_path":
+		checks = append(checks, securityCheckItem{
+			ID:      "share_base_url",
+			Status:  securityCheckBlock,
+			Title:   "分享基础 URL 路径包含点段",
+			Message: "公开分享链接基础路径不能包含 . 或 .. 路径段，避免代理或浏览器规范化后生成不一致的分享地址。",
+			Details: map[string]interface{}{
+				"base_url":      cfg.Share.BaseURL,
+				"base_url_path": securityShareBaseURLPath(cfg.Share.BaseURL),
+			},
+		})
+	case shareBaseURLRisk == "backslash_path":
+		checks = append(checks, securityCheckItem{
+			ID:      "share_base_url",
+			Status:  securityCheckBlock,
+			Title:   "分享基础 URL 路径包含反斜杠",
+			Message: "公开分享链接基础路径不能包含反斜杠，避免代理或浏览器规范化后生成不一致的分享地址。",
+			Details: map[string]interface{}{
+				"base_url":      cfg.Share.BaseURL,
+				"base_url_path": securityShareBaseURLPath(cfg.Share.BaseURL),
 			},
 		})
 	case shareBaseURLRisk == "non_default_https_port":
@@ -9568,7 +9808,12 @@ func (s *Server) handleCheckPathAccess(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	NewAPIResponse(s.evaluateUserPathAccess(targetUser, targetPath)).Write(w, http.StatusOK)
+	result, err := s.evaluateUserPathAccess(r.Context(), targetUser, targetPath)
+	if err != nil {
+		s.respondInternalError(w, "evaluate path access", err)
+		return
+	}
+	NewAPIResponse(result).Write(w, http.StatusOK)
 }
 
 func (s *Server) handleReportPathAccess(w http.ResponseWriter, r *http.Request) {
@@ -9595,7 +9840,12 @@ func (s *Server) handleReportPathAccess(w http.ResponseWriter, r *http.Request) 
 		rules = cfg.Storage.DirectoryAccessRules
 	}
 
-	NewAPIResponse(s.buildPathAccessReport(targetPath, rules, false)).Write(w, http.StatusOK)
+	report, err := s.buildPathAccessReport(r.Context(), targetPath, rules, false)
+	if err != nil {
+		s.respondInternalError(w, "build path access report", err)
+		return
+	}
+	NewAPIResponse(report).Write(w, http.StatusOK)
 }
 
 func (s *Server) handlePreviewPathAccess(w http.ResponseWriter, r *http.Request) {
@@ -9622,10 +9872,15 @@ func (s *Server) handlePreviewPathAccess(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	NewAPIResponse(s.buildPathAccessReport(targetPath, rules, true)).Write(w, http.StatusOK)
+	report, err := s.buildPathAccessReport(r.Context(), targetPath, rules, true)
+	if err != nil {
+		s.respondInternalError(w, "build path access preview", err)
+		return
+	}
+	NewAPIResponse(report).Write(w, http.StatusOK)
 }
 
-func (s *Server) buildPathAccessReport(targetPath string, rules []config.DirectoryAccessRuleConfig, preview bool) pathAccessReportResult {
+func (s *Server) buildPathAccessReport(ctx context.Context, targetPath string, rules []config.DirectoryAccessRuleConfig, preview bool) (pathAccessReportResult, error) {
 	users := s.userStore.List()
 	report := pathAccessReportResult{
 		Path:    targetPath,
@@ -9637,7 +9892,10 @@ func (s *Server) buildPathAccessReport(targetPath string, rules []config.Directo
 		if user == nil {
 			continue
 		}
-		result := s.evaluateUserPathAccessWithRules(user, targetPath, rules)
+		result, err := s.evaluateUserPathAccessWithRules(ctx, user, targetPath, rules)
+		if err != nil {
+			return report, err
+		}
 		report.Users = append(report.Users, result)
 		report.Summary.Users++
 		if result.Read.Allowed {
@@ -9661,7 +9919,7 @@ func (s *Server) buildPathAccessReport(targetPath string, rules []config.Directo
 			report.Summary.PasswordProtectedShares++
 		}
 	}
-	return report
+	return report, nil
 }
 
 func (s *Server) pathAccessShareImpacts(targetPath string) []pathAccessShareImpact {
@@ -9669,14 +9927,20 @@ func (s *Server) pathAccessShareImpacts(targetPath string) []pathAccessShareImpa
 		return nil
 	}
 
-	targetPath = path.Clean(targetPath)
+	targetPath, ok := cleanPathAccessShareImpactPath(targetPath)
+	if !ok {
+		return nil
+	}
 	sharesList := s.shareStore.ListAll()
 	impacts := make([]pathAccessShareImpact, 0)
 	for _, item := range sharesList {
 		if item == nil {
 			continue
 		}
-		sharePath := path.Clean(item.Path)
+		sharePath, ok := cleanPathAccessShareImpactPath(item.Path)
+		if !ok {
+			continue
+		}
 		relation := pathAccessShareRelation(targetPath, sharePath)
 		if relation == "" {
 			continue
@@ -9700,8 +9964,15 @@ func (s *Server) pathAccessShareImpacts(targetPath string) []pathAccessShareImpa
 }
 
 func pathAccessShareRelation(targetPath, sharePath string) string {
-	targetPath = path.Clean(targetPath)
-	sharePath = path.Clean(sharePath)
+	var ok bool
+	targetPath, ok = cleanPathAccessShareImpactPath(targetPath)
+	if !ok {
+		return ""
+	}
+	sharePath, ok = cleanPathAccessShareImpactPath(sharePath)
+	if !ok {
+		return ""
+	}
 	switch {
 	case targetPath == sharePath:
 		return "exact"
@@ -9712,6 +9983,17 @@ func pathAccessShareRelation(targetPath, sharePath string) string {
 	default:
 		return ""
 	}
+}
+
+func cleanPathAccessShareImpactPath(rawPath string) (string, bool) {
+	if strings.TrimSpace(rawPath) == "" {
+		return "", false
+	}
+	cleaned, err := validatePath(rawPath)
+	if err != nil {
+		return "", false
+	}
+	return cleaned, true
 }
 
 // UpdateSettingsRequest represents settings update request
@@ -10840,6 +11122,49 @@ func writeShareErrorResponse(w http.ResponseWriter, status int, message, code st
 	})
 }
 
+func handlePublicShareMethodNotAllowed(w http.ResponseWriter, r *http.Request) {
+	writePublicShareMethodNotAllowed(w, r)
+}
+
+func writePublicShareMethodNotAllowed(w http.ResponseWriter, r *http.Request) {
+	setPublicShareResponseHeaders(w)
+	w.Header().Set("Allow", publicShareAllowedMethods(r))
+	if r.Method == http.MethodHead {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	writeShareErrorResponse(w, http.StatusMethodNotAllowed, "method not allowed", "METHOD_NOT_ALLOWED")
+}
+
+func publicShareAllowedMethods(r *http.Request) string {
+	if r == nil || r.URL == nil {
+		return http.MethodGet
+	}
+	cleanPath := path.Clean(r.URL.Path)
+	if isShortPublicShareRootPath(cleanPath) {
+		return http.MethodGet + ", " + http.MethodPost
+	}
+	if isPublicShareAPIAccessPath(cleanPath) {
+		return http.MethodPost
+	}
+	return http.MethodGet
+}
+
+func isShortPublicShareRootPath(cleanPath string) bool {
+	shareID, ok := strings.CutPrefix(cleanPath, "/s/")
+	return ok && shareID != "" && !strings.Contains(shareID, "/")
+}
+
+func isPublicShareAPIAccessPath(cleanPath string) bool {
+	const prefix = "/api/v1/public/shares/"
+	rest, ok := strings.CutPrefix(cleanPath, prefix)
+	if !ok {
+		return false
+	}
+	shareID, suffix, ok := strings.Cut(rest, "/")
+	return ok && shareID != "" && suffix == "access"
+}
+
 func setPublicShareResponseHeaders(w http.ResponseWriter) {
 	header := w.Header()
 	header.Set("Cache-Control", "private, no-cache")
@@ -10876,7 +11201,7 @@ func writeFavoritesErrorResponse(w http.ResponseWriter, status int, message, cod
 func writeRawJSON(w http.ResponseWriter, status int, data any) {
 	payload, err := json.Marshal(data)
 	if err != nil {
-		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		writeInternalJSONError(w)
 		return
 	}
 
@@ -10961,7 +11286,11 @@ func (s *Server) authorizeShareOwnerPath(ctx context.Context, shareInfo *share.S
 	if err != nil {
 		return share.ErrShareNotFound
 	}
-	if !pathWithinBase(shareInfo.Path, targetPath) {
+	sharePath, err := validatePath(shareInfo.Path)
+	if err != nil {
+		return share.ErrShareNotFound
+	}
+	if !pathWithinBase(sharePath, targetPath) {
 		return share.ErrShareNotFound
 	}
 
@@ -11020,8 +11349,7 @@ func (s *Server) resolveShareOwner(ownerRef string) (*auth.User, error) {
 }
 
 func getShareOwnerIdentifiersFromRequest(ctx context.Context) []string {
-	claims := auth.GetClaimsFromContext(ctx)
-	if claims == nil {
+	if user := auth.GetUserFromContext(ctx); user != nil && user.Disabled {
 		return nil
 	}
 
@@ -11039,21 +11367,39 @@ func getShareOwnerIdentifiersFromRequest(ctx context.Context) []string {
 		identifiers = append(identifiers, trimmed)
 	}
 
-	appendUnique(claims.UserID)
-	appendUnique(claims.Username)
+	if claims := auth.GetClaimsFromContext(ctx); claims != nil {
+		appendUnique(claims.UserID)
+		appendUnique(claims.Username)
+		if len(identifiers) > 0 {
+			return identifiers
+		}
+	}
+	if user := auth.GetUserFromContext(ctx); user != nil && !user.Disabled {
+		appendUnique(user.ID)
+		appendUnique(user.Username)
+	}
 	return identifiers
 }
 
 func getFavoriteUserIdentifiersFromRequest(ctx context.Context) (string, []string) {
-	claims := auth.GetClaimsFromContext(ctx)
-	if claims == nil {
+	if user := auth.GetUserFromContext(ctx); user != nil && user.Disabled {
 		return "anonymous", nil
 	}
-	primary := strings.TrimSpace(claims.UserID)
+
+	var primary, legacy string
+	if claims := auth.GetClaimsFromContext(ctx); claims != nil {
+		primary = strings.TrimSpace(claims.UserID)
+		legacy = strings.TrimSpace(claims.Username)
+	}
+	if primary == "" {
+		if user := auth.GetUserFromContext(ctx); user != nil && !user.Disabled {
+			primary = strings.TrimSpace(user.ID)
+			legacy = strings.TrimSpace(user.Username)
+		}
+	}
 	if primary == "" {
 		primary = "anonymous"
 	}
-	legacy := strings.TrimSpace(claims.Username)
 	if legacy == "" || legacy == primary {
 		return primary, nil
 	}
@@ -11062,6 +11408,10 @@ func getFavoriteUserIdentifiersFromRequest(ctx context.Context) (string, []strin
 
 func (s *Server) handleAccessShare(w http.ResponseWriter, r *http.Request) {
 	setPublicShareResponseHeaders(w)
+	if r.Method != http.MethodGet {
+		writePublicShareMethodNotAllowed(w, r)
+		return
+	}
 	if !s.isShareFeatureEnabled() {
 		s.writeShareFeatureDisabled(w, http.StatusGone)
 		return
@@ -11079,6 +11429,10 @@ func (s *Server) handleAccessShare(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleAccessShareWithPassword(w http.ResponseWriter, r *http.Request) {
 	setPublicShareResponseHeaders(w)
+	if r.Method != http.MethodPost {
+		writePublicShareMethodNotAllowed(w, r)
+		return
+	}
 	if !s.isShareFeatureEnabled() {
 		s.writeShareFeatureDisabled(w, http.StatusGone)
 		return
@@ -11096,6 +11450,10 @@ func (s *Server) handleAccessShareWithPassword(w http.ResponseWriter, r *http.Re
 
 func (s *Server) handleDownloadShare(w http.ResponseWriter, r *http.Request) {
 	setPublicShareResponseHeaders(w)
+	if r.Method != http.MethodGet {
+		writePublicShareMethodNotAllowed(w, r)
+		return
+	}
 	if !s.isShareFeatureEnabled() {
 		s.writeShareFeatureDisabled(w, http.StatusGone)
 		return
@@ -11113,6 +11471,10 @@ func (s *Server) handleDownloadShare(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleDownloadShareFile(w http.ResponseWriter, r *http.Request) {
 	setPublicShareResponseHeaders(w)
+	if r.Method != http.MethodGet {
+		writePublicShareMethodNotAllowed(w, r)
+		return
+	}
 	if !s.isShareFeatureEnabled() {
 		s.writeShareFeatureDisabled(w, http.StatusGone)
 		return
@@ -11130,6 +11492,10 @@ func (s *Server) handleDownloadShareFile(w http.ResponseWriter, r *http.Request)
 
 func (s *Server) handleListShareItems(w http.ResponseWriter, r *http.Request) {
 	setPublicShareResponseHeaders(w)
+	if r.Method != http.MethodGet {
+		writePublicShareMethodNotAllowed(w, r)
+		return
+	}
 	if !s.isShareFeatureEnabled() {
 		s.writeShareFeatureDisabled(w, http.StatusGone)
 		return
@@ -11751,26 +12117,27 @@ func matchSharePolicyRule(rules []config.SharePolicyRuleConfig, targetPath strin
 	if len(rules) == 0 {
 		return config.SharePolicyRuleConfig{}, false
 	}
-	targetPath = path.Clean(targetPath)
-	bestIndex := -1
+	targetPath = cleanRuntimePathRulePath(targetPath)
+	if targetPath == "" {
+		return config.SharePolicyRuleConfig{}, false
+	}
+	var bestRule config.SharePolicyRuleConfig
 	bestLength := -1
-	for i, rule := range rules {
-		rulePath := strings.TrimSpace(rule.Path)
-		if rulePath == "" {
-			continue
-		}
-		if !pathWithinBase(path.Clean(rulePath), targetPath) {
+	for _, rule := range rules {
+		rulePath := cleanRuntimePathRulePath(rule.Path)
+		if rulePath == "" || !pathWithinBase(rulePath, targetPath) {
 			continue
 		}
 		if len(rulePath) > bestLength {
-			bestIndex = i
+			rule.Path = rulePath
+			bestRule = rule
 			bestLength = len(rulePath)
 		}
 	}
-	if bestIndex < 0 {
+	if bestLength < 0 {
 		return config.SharePolicyRuleConfig{}, false
 	}
-	return rules[bestIndex], true
+	return bestRule, true
 }
 
 func parseShareCreateDurationForPolicy(value string) (time.Duration, error) {

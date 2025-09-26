@@ -2,6 +2,7 @@ package favorites
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -23,6 +24,58 @@ func TestGetUserIDFromClaims(t *testing.T) {
 
 	if got := getUserID(req); got != "user-123" {
 		t.Fatalf("expected user-123, got %s", got)
+	}
+}
+
+func TestGetUserIDFromUserContextWhenClaimsAreMissing(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req = req.WithContext(context.WithValue(req.Context(), auth.ContextKeyUser, &auth.User{
+		ID:       "user-ctx",
+		Username: "alice",
+	}))
+
+	if got := getUserID(req); got != "user-ctx" {
+		t.Fatalf("expected user-ctx, got %s", got)
+	}
+	if got := getLegacyUserIdentifiers(req); len(got) != 1 || got[0] != "alice" {
+		t.Fatalf("legacy identifiers = %#v, want [alice]", got)
+	}
+}
+
+func TestGetUserIDIgnoresDisabledUserContextWhenClaimsAreMissing(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req = req.WithContext(context.WithValue(req.Context(), auth.ContextKeyUser, &auth.User{
+		ID:       "disabled-user",
+		Username: "alice",
+		Disabled: true,
+	}))
+
+	if got := getUserID(req); got != "anonymous" {
+		t.Fatalf("expected anonymous, got %s", got)
+	}
+	if got := getLegacyUserIdentifiers(req); len(got) != 0 {
+		t.Fatalf("legacy identifiers = %#v, want empty", got)
+	}
+}
+
+func TestGetUserIDIgnoresDisabledUserContextEvenWithClaims(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	ctx := context.WithValue(req.Context(), auth.ContextKeyUser, &auth.User{
+		ID:       "disabled-user",
+		Username: "alice",
+		Disabled: true,
+	})
+	ctx = auth.WithClaimsContext(ctx, &auth.TokenClaims{
+		UserID:   "disabled-user",
+		Username: "alice",
+	})
+	req = req.WithContext(ctx)
+
+	if got := getUserID(req); got != "anonymous" {
+		t.Fatalf("expected anonymous, got %s", got)
+	}
+	if got := getLegacyUserIdentifiers(req); len(got) != 0 {
+		t.Fatalf("legacy identifiers = %#v, want empty", got)
 	}
 }
 
@@ -79,8 +132,25 @@ func TestHandler_JSON_InvalidPayloadReturnsInternalServerError(t *testing.T) {
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("expected status 500, got %d", rec.Code)
 	}
-	if rec.Body.String() != "Internal Server Error\n" {
-		t.Fatalf("expected internal server error body, got %q", rec.Body.String())
+	if got := rec.Header().Get("Content-Type"); got != "application/json" {
+		t.Fatalf("content type = %q, want application/json", got)
+	}
+
+	var payload struct {
+		Success bool `json:"success"`
+		Error   *struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to decode fallback error response: %v; body=%s", err, rec.Body.String())
+	}
+	if payload.Success || payload.Error == nil {
+		t.Fatalf("expected structured fallback error, got %s", rec.Body.String())
+	}
+	if payload.Error.Code != "INTERNAL_ERROR" || payload.Error.Message != "internal server error" {
+		t.Fatalf("unexpected fallback error: %+v", payload.Error)
 	}
 }
 
@@ -325,6 +395,51 @@ func TestHandler_AddFavorite_RejectsNULPath(t *testing.T) {
 	}
 	if store.IsFavorite("user-123", "/docs/report.pdf") {
 		t.Fatal("expected NUL favorite request to be rejected before persistence")
+	}
+}
+
+func TestHandler_AddFavorite_RejectsControlPath(t *testing.T) {
+	store, err := NewStore(filepath.Join(t.TempDir(), "favorites.json"))
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+	handler := NewHandler(store, zerolog.Nop())
+
+	tests := []struct {
+		name string
+		body string
+	}{
+		{name: "control character", body: `{"path":"/docs/report\u0007.pdf"}`},
+		{name: "delete control character", body: `{"path":"/docs/report\u007f.pdf"}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/favorites", strings.NewReader(tt.body))
+			req = req.WithContext(auth.WithClaimsContext(req.Context(), &auth.TokenClaims{UserID: "user-123"}))
+			rec := httptest.NewRecorder()
+
+			handler.AddFavorite(rec, req)
+
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("expected status 400, got %d: %s", rec.Code, rec.Body.String())
+			}
+			var payload struct {
+				Success bool `json:"success"`
+				Error   *struct {
+					Code string `json:"code"`
+				} `json:"error"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+				t.Fatalf("failed to decode response: %v", err)
+			}
+			if payload.Success || payload.Error == nil || payload.Error.Code != "INVALID_PATH" {
+				t.Fatalf("expected INVALID_PATH error, got %s", rec.Body.String())
+			}
+		})
+	}
+
+	if len(store.List("user-123")) != 0 {
+		t.Fatal("expected control-character favorite request to be rejected before persistence")
 	}
 }
 
