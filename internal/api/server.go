@@ -7530,6 +7530,16 @@ func (s *Server) buildShareURL(id string) string {
 	return "/s/" + id
 }
 
+func withNoAuthShareManagementContext(r *http.Request) *http.Request {
+	ctx := context.WithValue(r.Context(), auth.ContextKeyUser, &auth.User{
+		Role: auth.RoleAdmin,
+	})
+	ctx = auth.WithClaimsContext(ctx, &auth.TokenClaims{
+		Role: auth.RoleAdmin,
+	})
+	return r.WithContext(ctx)
+}
+
 func (s *Server) ensureShareWithinOwnerHome(id string) (*share.Share, error) {
 	if s.shareStore == nil {
 		return nil, share.ErrShareNotFound
@@ -7784,6 +7794,9 @@ func (s *Server) handleGetShare(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if !s.authEnabled {
+		r = withNoAuthShareManagementContext(r)
+	}
 	s.shareHandler.GetShare(w, r)
 }
 
@@ -7792,8 +7805,12 @@ func (s *Server) handleUpdateShare(w http.ResponseWriter, r *http.Request) {
 		s.writeShareFeatureDisabled(w, http.StatusServiceUnavailable)
 		return
 	}
+	id := chi.URLParam(r, "id")
+	var shareInfo *share.Share
 	if !auth.IsAdmin(r.Context()) {
-		if _, err := s.ensureShareWithinOwnerHome(chi.URLParam(r, "id")); err != nil {
+		var err error
+		shareInfo, err = s.ensureShareWithinOwnerHome(id)
+		if err != nil {
 			if errors.Is(err, share.ErrShareNotFound) {
 				writeShareErrorResponse(w, http.StatusNotFound, "share not found", "SHARE_NOT_FOUND")
 				return
@@ -7801,6 +7818,25 @@ func (s *Server) handleUpdateShare(w http.ResponseWriter, r *http.Request) {
 			s.respondInternalError(w, "authorize share update", err)
 			return
 		}
+	}
+	if err := s.prepareUpdateShareRequest(r, id, shareInfo); err != nil {
+		if errors.Is(err, share.ErrShareNotFound) {
+			writeShareErrorResponse(w, http.StatusNotFound, "share not found", "SHARE_NOT_FOUND")
+			return
+		}
+		if errors.Is(err, errSharePolicyPasswordRequired) {
+			writeShareErrorResponse(w, http.StatusBadRequest, "password required by share policy", "SHARE_POLICY_PASSWORD_REQUIRED")
+			return
+		}
+		if errors.Is(err, errSharePolicyInvalidExpiresIn) {
+			writeShareErrorResponse(w, http.StatusBadRequest, "invalid expires_in format", "INVALID_EXPIRES_IN")
+			return
+		}
+		writeLimitedJSONBodyError(w, err, DefaultJSONRequestBodyLimit)
+		return
+	}
+	if !s.authEnabled {
+		r = withNoAuthShareManagementContext(r)
 	}
 	s.shareHandler.UpdateShare(w, r)
 }
@@ -8046,6 +8082,9 @@ func (s *Server) handleDeleteShareWithActivity(w http.ResponseWriter, r *http.Re
 	}
 
 	rec := newBufferedResponseRecorder()
+	if !s.authEnabled {
+		r = withNoAuthShareManagementContext(r)
+	}
 	s.shareHandler.DeleteShare(rec, r)
 
 	// Log successful share deletions regardless of whether the handler responds 200 or 204.
@@ -8096,6 +8135,35 @@ func (s *Server) prepareCreateShareRequest(r *http.Request) (string, error) {
 	return cleanPath, nil
 }
 
+func (s *Server) prepareUpdateShareRequest(r *http.Request, id string, currentShare *share.Share) error {
+	cfg := s.currentConfig()
+	if cfg == nil || len(cfg.Share.PolicyRules) == 0 {
+		return nil
+	}
+	if currentShare == nil {
+		if s.shareStore == nil {
+			return nil
+		}
+		var err error
+		currentShare, err = s.shareStore.Get(id)
+		if err != nil {
+			return err
+		}
+	}
+	if _, ok := matchSharePolicyRule(cfg.Share.PolicyRules, currentShare.Path); !ok {
+		return nil
+	}
+
+	var req share.UpdateShareRequest
+	if err := decodeJSONBody(r, &req); err != nil {
+		return err
+	}
+	if err := applySharePolicyRuleToUpdateRequest(&req, currentShare, cfg.Share.PolicyRules); err != nil {
+		return err
+	}
+	return resetJSONRequestBody(r, &req)
+}
+
 func applySharePolicyRuleToCreateRequest(req *share.CreateShareRequest, cleanPath string, rules []config.SharePolicyRuleConfig) error {
 	rule, ok := matchSharePolicyRule(rules, cleanPath)
 	if !ok {
@@ -8121,6 +8189,49 @@ func applySharePolicyRuleToCreateRequest(req *share.CreateShareRequest, cleanPat
 	}
 	if rule.MaxAccess > 0 {
 		if req.MaxAccess == nil || *req.MaxAccess <= 0 || *req.MaxAccess > rule.MaxAccess {
+			maxAccess := rule.MaxAccess
+			req.MaxAccess = &maxAccess
+		}
+	}
+	return nil
+}
+
+func applySharePolicyRuleToUpdateRequest(req *share.UpdateShareRequest, currentShare *share.Share, rules []config.SharePolicyRuleConfig) error {
+	if req == nil || currentShare == nil {
+		return nil
+	}
+	rule, ok := matchSharePolicyRule(rules, currentShare.Path)
+	if !ok {
+		return nil
+	}
+
+	if rule.RequirePassword {
+		if req.Password != nil {
+			if strings.TrimSpace(*req.Password) == "" {
+				return errSharePolicyPasswordRequired
+			}
+		} else if currentShare.PasswordHash == "" {
+			return errSharePolicyPasswordRequired
+		}
+	}
+	if rule.MaxExpiresIn > 0 && req.ExpiresIn != nil {
+		currentExpiresIn := strings.TrimSpace(*req.ExpiresIn)
+		if currentExpiresIn == "" {
+			cappedExpiresIn := formatOptionalSettingsDuration(rule.MaxExpiresIn)
+			req.ExpiresIn = &cappedExpiresIn
+		} else {
+			duration, err := parseShareCreateDurationForPolicy(currentExpiresIn)
+			if err != nil {
+				return errSharePolicyInvalidExpiresIn
+			}
+			if duration > rule.MaxExpiresIn {
+				cappedExpiresIn := formatOptionalSettingsDuration(rule.MaxExpiresIn)
+				req.ExpiresIn = &cappedExpiresIn
+			}
+		}
+	}
+	if rule.MaxAccess > 0 && req.MaxAccess != nil {
+		if *req.MaxAccess <= 0 || *req.MaxAccess > rule.MaxAccess {
 			maxAccess := rule.MaxAccess
 			req.MaxAccess = &maxAccess
 		}

@@ -312,6 +312,8 @@ Create request:
 
 `password` is optional; non-empty share passwords are limited to 72 bytes. If `expires_in` or `max_access` is omitted, the server applies `share.default_expires_in` and `share.default_max_access`. If the path matches `share.policy_rules`, the most specific path rule wins: `require_password` rejects passwordless requests, while `max_expires_in` and `max_access` cap values above the rule limit. Authenticated share responses include `risk.level` (`none`, `low`, `medium`, `high`) plus optional reason objects so admins can find passwordless, long-lived, broad-folder, unlimited, stale, or soon-expiring links.
 
+Updates to shares that match `share.policy_rules` must also satisfy the path rule. `require_password` rejects updates that would leave a matching share passwordless, and explicit `expires_in` or `max_access` update fields that clear or exceed the configured limits are capped to the rule limit.
+
 Public endpoints:
 
 | Method | Path | Description |
