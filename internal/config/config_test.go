@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -49,6 +50,9 @@ func TestDefault(t *testing.T) {
 
 	if cfg.Server.TrustedProxyHops != 0 {
 		t.Errorf("Default trusted proxy hops = %d, want 0", cfg.Server.TrustedProxyHops)
+	}
+	if len(cfg.Server.TrustedProxyCIDRs) != 0 {
+		t.Errorf("Default trusted proxy cidrs = %v, want empty", cfg.Server.TrustedProxyCIDRs)
 	}
 
 	if cfg.Storage.Root == "" {
@@ -208,6 +212,11 @@ func TestConfig_Validate(t *testing.T) {
 		{
 			name:    "Invalid trusted proxy hops",
 			modify:  func(c *Config) { c.Server.TrustedProxyHops = -1 },
+			wantErr: true,
+		},
+		{
+			name:    "Invalid trusted proxy CIDR",
+			modify:  func(c *Config) { c.Server.TrustedProxyCIDRs = []string{"not-a-cidr"} },
 			wantErr: true,
 		},
 		{
@@ -1508,6 +1517,28 @@ trusted_proxy_hops = 2
 	}
 	if cfg.Server.TrustedProxyHops != 2 {
 		t.Fatalf("trusted proxy hops = %d, want 2", cfg.Server.TrustedProxyHops)
+	}
+}
+
+func TestLoad_ParsesTrustedProxyCIDRs(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.toml")
+
+	content := []byte(`
+[server]
+trusted_proxy_cidrs = ["10.0.0.0/8", " 192.168.1.10 "]
+`)
+	if err := os.WriteFile(configPath, content, 0644); err != nil {
+		t.Fatalf("failed to write config: %v", err)
+	}
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	want := []string{"10.0.0.0/8", "192.168.1.10"}
+	if !reflect.DeepEqual(cfg.Server.TrustedProxyCIDRs, want) {
+		t.Fatalf("trusted proxy cidrs = %v, want %v", cfg.Server.TrustedProxyCIDRs, want)
 	}
 }
 

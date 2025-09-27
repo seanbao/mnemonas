@@ -6367,6 +6367,7 @@ func TestServer_WebDAVCredentials_RequiresAdminWhenAuthEnabled(t *testing.T) {
 func TestServer_GetSettings_IncludesTrustedProxyHops(t *testing.T) {
 	server, _, _ := setupTestServer(t)
 	server.config.Server.TrustedProxyHops = 2
+	server.config.Server.TrustedProxyCIDRs = []string{"10.0.0.0/8"}
 	server.storeConfig(server.config)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/settings", nil)
@@ -6382,7 +6383,8 @@ func TestServer_GetSettings_IncludesTrustedProxyHops(t *testing.T) {
 		Success bool `json:"success"`
 		Data    struct {
 			Server struct {
-				TrustedProxyHops int `json:"trusted_proxy_hops"`
+				TrustedProxyHops  int      `json:"trusted_proxy_hops"`
+				TrustedProxyCIDRs []string `json:"trusted_proxy_cidrs"`
 			} `json:"server"`
 		} `json:"data"`
 	}
@@ -6394,6 +6396,9 @@ func TestServer_GetSettings_IncludesTrustedProxyHops(t *testing.T) {
 	}
 	if payload.Data.Server.TrustedProxyHops != 2 {
 		t.Fatalf("trusted proxy hops = %d, want %d", payload.Data.Server.TrustedProxyHops, 2)
+	}
+	if !reflect.DeepEqual(payload.Data.Server.TrustedProxyCIDRs, []string{"10.0.0.0/8"}) {
+		t.Fatalf("trusted proxy cidrs = %v, want [10.0.0.0/8]", payload.Data.Server.TrustedProxyCIDRs)
 	}
 }
 
@@ -8305,6 +8310,48 @@ func TestServer_CopyFile_CopiesDirectoryRecursively(t *testing.T) {
 	}
 	if _, err := fs.Stat(ctx, "/copy-dir/nested/child.txt"); err != nil {
 		t.Fatalf("expected source directory to remain after copy, got %v", err)
+	}
+}
+
+func TestServer_CopyFile_RejectsUnreadableNestedDirectoryAccessRule(t *testing.T) {
+	server, fs, _, username, password := setupAuthServer(t)
+	setUserHomeDirForTest(t, server, username, "/tester")
+	setUserGroupsForTest(t, server, username, []string{"family"})
+	setDirectoryAccessRulesForTest(t, server, []config.DirectoryAccessRuleConfig{
+		{Path: "/team", ReadGroups: []string{"family"}},
+		{Path: "/team/private", ReadUsers: []string{"bob"}},
+	})
+
+	ctx := context.Background()
+	if err := fs.Mkdir(ctx, "/team"); err != nil {
+		t.Fatalf("Mkdir(/team) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/team/private"); err != nil {
+		t.Fatalf("Mkdir(/team/private) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/tester"); err != nil {
+		t.Fatalf("Mkdir(/tester) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/team/readme.txt", bytes.NewReader([]byte("shared"))); err != nil {
+		t.Fatalf("WriteFile(/team/readme.txt) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/team/private/secret.txt", bytes.NewReader([]byte("secret"))); err != nil {
+		t.Fatalf("WriteFile(/team/private/secret.txt) error: %v", err)
+	}
+
+	token := loginAndGetAccessToken(t, server, username, password)
+	body := `{"from":"/team","to":"/tester/team-copy"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/files-copy", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("copy unreadable nested directory status = %d, want %d; body=%s", w.Code, http.StatusForbidden, w.Body.String())
+	}
+	if _, err := fs.Stat(ctx, "/tester/team-copy"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("expected rejected copy to leave no destination, got %v", err)
 	}
 }
 
@@ -11708,6 +11755,85 @@ func TestServer_CreateShare_AllowsDirectoryAccessRulePathForNonAdmin(t *testing.
 	}
 }
 
+func TestServer_PublicFolderShare_FiltersNestedDirectoryAccessRules(t *testing.T) {
+	server, fs, _, username, password := setupAuthServerWithFeatures(t, true, false)
+	setUserHomeDirForTest(t, server, username, "/tester")
+	setUserGroupsForTest(t, server, username, []string{"family"})
+	setDirectoryAccessRulesForTest(t, server, []config.DirectoryAccessRuleConfig{
+		{Path: "/team", ReadGroups: []string{"family"}},
+		{Path: "/team/private", ReadUsers: []string{"bob"}},
+	})
+
+	ctx := context.Background()
+	if err := fs.Mkdir(ctx, "/team"); err != nil {
+		t.Fatalf("Mkdir(/team) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/team/private"); err != nil {
+		t.Fatalf("Mkdir(/team/private) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/team/public.txt", bytes.NewReader([]byte("public"))); err != nil {
+		t.Fatalf("WriteFile(/team/public.txt) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/team/private/secret.txt", bytes.NewReader([]byte("secret"))); err != nil {
+		t.Fatalf("WriteFile(/team/private/secret.txt) error: %v", err)
+	}
+
+	token := loginAndGetAccessToken(t, server, username, password)
+	createReq := httptest.NewRequest(http.MethodPost, "/api/v1/shares", strings.NewReader(`{"path":"/team","type":"folder"}`))
+	createReq.Header.Set("Authorization", "Bearer "+token)
+	createReq.Header.Set("Content-Type", "application/json")
+	createRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(createRec, createReq)
+	if createRec.Code != http.StatusCreated {
+		t.Fatalf("folder share create status = %d, want %d; body=%s", createRec.Code, http.StatusCreated, createRec.Body.String())
+	}
+
+	var createPayload struct {
+		Data struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(createRec.Body.Bytes(), &createPayload); err != nil {
+		t.Fatalf("decode share create response error: %v", err)
+	}
+	shareID := createPayload.Data.ID
+	if shareID == "" {
+		t.Fatalf("expected created share id, body=%s", createRec.Body.String())
+	}
+
+	listReq := httptest.NewRequest(http.MethodGet, "/api/v1/public/shares/"+shareID+"/items", nil)
+	listRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(listRec, listReq)
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("public share list status = %d, want %d; body=%s", listRec.Code, http.StatusOK, listRec.Body.String())
+	}
+
+	var listPayload share.PublicShareListResponse
+	if err := json.Unmarshal(listRec.Body.Bytes(), &listPayload); err != nil {
+		t.Fatalf("decode public share list response error: %v", err)
+	}
+	seen := make(map[string]bool)
+	for _, item := range listPayload.Items {
+		seen[item.Path] = true
+	}
+	if !seen["public.txt"] {
+		t.Fatalf("expected public file in share listing, got %s", listRec.Body.String())
+	}
+	if seen["private"] {
+		t.Fatalf("expected private directory to be filtered from share listing, got %s", listRec.Body.String())
+	}
+
+	downloadReq := httptest.NewRequest(http.MethodGet, "/api/v1/public/shares/"+shareID+"/download/private/secret.txt", nil)
+	downloadRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(downloadRec, downloadReq)
+	if downloadRec.Code != http.StatusNotFound {
+		t.Fatalf("private file public download status = %d, want %d; body=%s", downloadRec.Code, http.StatusNotFound, downloadRec.Body.String())
+	}
+	if downloadRec.Body.String() == "secret" {
+		t.Fatal("private file content leaked through public folder share")
+	}
+}
+
 func TestServer_CreateShare_RejectsUnknownFieldsBeforeHomeScopeCheck(t *testing.T) {
 	server, fs, _, username, password := setupAuthServerWithFeatures(t, true, false)
 
@@ -13369,14 +13495,24 @@ func TestServer_UpdateSettings_RejectsInvalidShareBaseURL(t *testing.T) {
 func TestServer_UpdateSettings_UpdatesTrustedProxyHops(t *testing.T) {
 	originalHops := requestip.TrustedProxyHops()
 	defer requestip.SetTrustedProxyHops(originalHops)
+	originalCIDRs := requestip.TrustedProxyCIDRs()
+	defer func() {
+		if err := requestip.SetTrustedProxyCIDRs(originalCIDRs); err != nil {
+			t.Fatalf("restore trusted proxy cidrs error: %v", err)
+		}
+	}()
 
 	server, _, tmpDir := setupTestServer(t)
 	server.configPath = path.Join(tmpDir, "config.toml")
 	server.config.Server.TrustedProxyHops = 1
+	server.config.Server.TrustedProxyCIDRs = []string{"127.0.0.1/32"}
 	server.storeConfig(server.config)
 	requestip.SetTrustedProxyHops(1)
+	if err := requestip.SetTrustedProxyCIDRs([]string{"127.0.0.1/32"}); err != nil {
+		t.Fatalf("SetTrustedProxyCIDRs() error: %v", err)
+	}
 
-	body := `{"server":{"trusted_proxy_hops":2}}`
+	body := `{"server":{"trusted_proxy_hops":2,"trusted_proxy_cidrs":["10.0.0.0/8","192.168.1.10"]}}`
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/settings", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -13401,6 +13537,9 @@ func TestServer_UpdateSettings_UpdatesTrustedProxyHops(t *testing.T) {
 	if current := requestip.TrustedProxyHops(); current != 2 {
 		t.Fatalf("requestip trusted proxy hops = %d, want %d", current, 2)
 	}
+	if cidrs := requestip.TrustedProxyCIDRs(); !reflect.DeepEqual(cidrs, []string{"10.0.0.0/8", "192.168.1.10/32"}) {
+		t.Fatalf("requestip trusted proxy cidrs = %v, want [10.0.0.0/8 192.168.1.10/32]", cidrs)
+	}
 
 	loaded, err := config.Load(server.configPath)
 	if err != nil {
@@ -13408,6 +13547,9 @@ func TestServer_UpdateSettings_UpdatesTrustedProxyHops(t *testing.T) {
 	}
 	if loaded.Server.TrustedProxyHops != 2 {
 		t.Fatalf("persisted trusted proxy hops = %d, want %d", loaded.Server.TrustedProxyHops, 2)
+	}
+	if !reflect.DeepEqual(loaded.Server.TrustedProxyCIDRs, []string{"10.0.0.0/8", "192.168.1.10"}) {
+		t.Fatalf("persisted trusted proxy cidrs = %v, want [10.0.0.0/8 192.168.1.10]", loaded.Server.TrustedProxyCIDRs)
 	}
 }
 
@@ -13431,6 +13573,31 @@ func TestServer_UpdateSettings_RejectsNegativeTrustedProxyHops(t *testing.T) {
 	}
 	if server.config.Server.TrustedProxyHops != originalTrustedProxyHops {
 		t.Fatalf("expected invalid trusted proxy hops update to leave config unchanged")
+	}
+}
+
+func TestServer_UpdateSettings_RejectsInvalidTrustedProxyCIDRs(t *testing.T) {
+	server, _, tmpDir := setupTestServer(t)
+	server.configPath = path.Join(tmpDir, "config.toml")
+	server.config.Server.TrustedProxyCIDRs = []string{"127.0.0.1/32"}
+	server.storeConfig(server.config)
+	originalTrustedProxyCIDRs := append([]string(nil), server.config.Server.TrustedProxyCIDRs...)
+
+	body := `{"server":{"trusted_proxy_cidrs":["not-a-cidr"]}}`
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/settings", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("update settings invalid trusted proxy cidrs status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+	if !strings.Contains(w.Body.String(), "invalid configuration") {
+		t.Fatalf("expected invalid configuration message, got %s", w.Body.String())
+	}
+	if !reflect.DeepEqual(server.config.Server.TrustedProxyCIDRs, originalTrustedProxyCIDRs) {
+		t.Fatalf("expected invalid trusted proxy cidrs update to leave config unchanged")
 	}
 }
 

@@ -171,7 +171,7 @@ X-MnemoNAS-Session-Mode: cookie
 - 同一 `username + 客户端地址` 组合连续登录失败达到限制时，返回 `429 Too Many Requests`，错误码为 `LOGIN_RATE_LIMITED`
 - 若已配置提醒通道，登录限流会发送限频的 `login_rate_limited` warning 事件，事件只包含用户名和客户端地址，不包含密码或 token
 - `username` 分桶遵循账户名大小写不敏感语义，`handleruser` 与 `HANDLERUSER` 计入同一限流桶
-- 客户端地址默认不信任转发头，始终使用直连来源；只有显式设置 `server.trusted_proxy_hops > 0` 且请求直接来自 loopback 或私有网段代理时，才按 `X-Forwarded-For` 从右侧回溯客户端地址。多跳代理部署需要设置为代理总层数
+- 客户端地址默认不信任转发头，始终使用直连来源；只有显式设置 `server.trusted_proxy_hops > 0` 且请求直接来自 loopback 或 `server.trusted_proxy_cidrs` 中的代理地址时，才按 `X-Forwarded-For` 从右侧回溯客户端地址。多跳代理部署需要设置为代理总层数
 
 ### 刷新令牌
 
@@ -1394,7 +1394,7 @@ POST /api/v1/public/shares/{share_id}/access
 - 一旦下载或文件夹列表响应已经开始向客户端写出字节，即使后续流式传输中断，该次访问仍计入 `access_count`
 - 密码验证成功后，服务端通过 HttpOnly cookie 记录访问状态；后续下载和文件夹列表请求不使用 `password` 查询参数
 - 连续密码错误达到限制时，返回 `429 Too Many Requests`，错误码为 `SHARE_PASSWORD_RATE_LIMITED`
-- 口令失败限流默认按 share ID 与客户端地址组合统计；默认不信任转发头，只有显式设置 `server.trusted_proxy_hops > 0` 且请求直接来自 loopback 或私有网段代理时，才按 `X-Forwarded-For` 从右侧回溯客户端地址
+- 口令失败限流默认按 share ID 与客户端地址组合统计；默认不信任转发头，只有显式设置 `server.trusted_proxy_hops > 0` 且请求直接来自 loopback 或 `server.trusted_proxy_cidrs` 中的代理地址时，才按 `X-Forwarded-For` 从右侧回溯客户端地址
 - 兼容路径 `/s/{share_id}` 与 `POST /s/{share_id}` 保持相同 JSON 行为，适用于非 SPA 或直接脚本调用
 
 **下载文件**:
@@ -1690,6 +1690,7 @@ GET /api/v1/settings
       "write_timeout": "60s",
       "idle_timeout": "120s",
       "trusted_proxy_hops": 1,
+      "trusted_proxy_cidrs": ["10.0.0.0/8"],
       "tls": {
         "enabled": false,
         "cert_file": "",
@@ -1945,6 +1946,7 @@ GET /api/v1/settings/security-check
       "server_port": 8080,
       "tls_enabled": false,
       "trusted_proxy_hops": 0,
+      "trusted_proxy_cidrs": [],
       "dataplane_grpc_addr": "127.0.0.1:9090",
       "dataplane_http_addr": "127.0.0.1:9091",
       "webdav_enabled": true,
@@ -1989,6 +1991,7 @@ PUT /api/v1/settings
     "write_timeout": "60s",
     "idle_timeout": "120s",
     "trusted_proxy_hops": 1,
+    "trusted_proxy_cidrs": ["10.0.0.0/8"],
     "tls": {
       "enabled": true,
       "auto_generate": true,
@@ -2112,7 +2115,7 @@ PUT /api/v1/settings
 - 成功响应的 `message` 在仅包含热更新字段、或请求中携带但值未变化的重启类字段时为 `settings updated`；当 `server.host`、`server.port`、`server.read_timeout`、`server.write_timeout`、`server.idle_timeout`、`server.tls.*` 或 `cdc.*` 的值实际变化时为 `settings updated, some changes may require restart`
 - `trash` 支持更新 `enabled`、`retention_days`、`max_size`；保存后会立即影响运行中的回收站策略
 - `retention` 支持更新 `max_versions`、`max_age`、`min_free_space`、`gc_interval`；保存后会立即更新运行中的版本保留阈值与周期清理任务，`gc_interval` 设为 `0` 表示禁用周期清理
-- `server` 支持更新 `host`、`port`、`read_timeout`、`write_timeout`、`idle_timeout`、`trusted_proxy_hops`；监听地址和超时保存后需重启服务才能影响运行中的 HTTP 监听器，`trusted_proxy_hops` 会立即影响请求来源和 HTTPS 转发语义识别
+- `server` 支持更新 `host`、`port`、`read_timeout`、`write_timeout`、`idle_timeout`、`trusted_proxy_hops`、`trusted_proxy_cidrs`；监听地址和超时保存后需重启服务才能影响运行中的 HTTP 监听器，`trusted_proxy_hops` 与 `trusted_proxy_cidrs` 会立即影响请求来源和 HTTPS 转发语义识别
 - `server.tls` 支持更新 `enabled`、`cert_file`、`key_file`、`auto_generate`、`cert_dir`；保存后需重启服务才能切换 HTTPS 监听
 - `cdc` 支持更新 `min_chunk_size`、`avg_chunk_size`、`max_chunk_size`；必须满足 `65536 <= min < avg < max <= 67108864`。Docker 和 systemd 启动入口会在 dataplane 重启时读取这些字节值，新对象写入才会使用新分块参数
 - `versioning` 支持更新 `auto_versioned_extensions`、`auto_versioned_filenames`、`max_versioned_size`；保存后会立即更新运行中的自动版本策略
@@ -2128,7 +2131,7 @@ PUT /api/v1/settings
 - `webdav` 支持更新 `enabled`、`prefix`、`read_only`、`auth_type`、`username`、`password`；`auth_type` 支持 `users`、`basic`、`none`；`prefix` 会归一化为以 `/` 开头的 URL 路径，不能包含反斜杠、`?`、`#` 或控制字符，启用时不能覆盖 `/`、`/api`、`/s`、`/health`；保存后会立即切换运行中的 WebDAV 前缀、鉴权方式和只读状态
 - `webdav.auth_type = "users"` 使用 MnemoNAS 用户账号登录，普通用户的 WebDAV 根目录映射到自己的 `home_dir`，guest 只读，用户配额约束 PUT/COPY；`basic` 模式下 `webdav.username` 不得复用现有非 admin 用户名，因为它是全局服务凭据
 - 请求中的 `server.host` 必须为空、`*`、合法主机名、IPv4 或 IPv6 字面量，不能包含端口、空白或控制字符；端口必须通过 `server.port` 设置
-- 请求中的 `server.trusted_proxy_hops` 不能为负数；默认值 `0` 表示不信任转发头
+- 请求中的 `server.trusted_proxy_hops` 不能为负数；默认值 `0` 表示不信任转发头。`server.trusted_proxy_cidrs` 每项必须是 IP 地址或 CIDR；loopback 来源不需要写入该列表
 - 请求中的 `server.read_timeout`、`server.write_timeout`、`server.idle_timeout` 必须是正的 `time.ParseDuration` 字符串，例如 `30s`、`2m`
 - 请求中的 `retention.max_age`、`retention.gc_interval` 必须是 `time.ParseDuration` 可解析的字符串，例如 `720h`、`24h`、`0`
 - 请求中的 `alerts.check_interval`、`alerts.cooldown_period` 必须是正的 `time.ParseDuration` 字符串

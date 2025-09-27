@@ -163,6 +163,7 @@ Controls the main HTTP server for Web UI, REST API, and WebDAV.
 | `write_timeout` | duration | `"60s"` | Response-write timeout |
 | `idle_timeout` | duration | `"120s"` | Keep-alive idle timeout |
 | `trusted_proxy_hops` | int | `0` | Number of trusted reverse proxy hops used to interpret forwarded headers |
+| `trusted_proxy_cidrs` | string[] | `[]` | Direct-peer IP addresses or CIDRs for trusted reverse proxies; loopback peers are always trusted |
 
 Example:
 
@@ -173,9 +174,10 @@ port = 8443
 read_timeout = "60s"
 write_timeout = "120s"
 trusted_proxy_hops = 1
+trusted_proxy_cidrs = ["10.0.0.0/8"]
 ```
 
-`trusted_proxy_hops = 0` ignores client-supplied forwarded headers. Set it only when MnemoNAS is behind trusted proxies.
+`trusted_proxy_hops = 0` ignores client-supplied forwarded headers. Set it only when MnemoNAS is behind trusted proxies. Direct peers from `127.0.0.1` or `::1` are trusted automatically. Proxies reached through Docker bridge networks, internal load balancers, or other non-loopback addresses must be listed in `trusted_proxy_cidrs`.
 
 `server.host` contains only the listen host; put the port in `server.port`. IPv6 may be written as `::1` or `[::1]`, and the runtime normalizes it for `net.JoinHostPort`. `*` and an empty string both mean wildcard listen.
 
