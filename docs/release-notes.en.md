@@ -37,7 +37,7 @@ Archives should include a top-level directory, `nasd`, `dataplane`, Web UI stati
 
 The current hardening branch has the following validation evidence. Final publication should use the latest tag, Release workflow result, and required environment validation as the source of truth:
 
-Latest local full-validation snapshot: validation target `19661bafabf4`; `GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master` passed, covering `make check`, dependency security scans, example config validation, public-access templates, protobuf regeneration stability, Rust fmt/test/clippy, frontend lint/typecheck/unit/build, 369 Playwright E2E cases, WebDAV post-COPY/MOVE content-consistency smoke, Docker build, and Docker smoke. The Docker smoke used the Docker-assigned loopback port `http://127.0.0.1:32801`.
+Latest local full-validation snapshot: validation target `a3ce27ec5220`; `GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master` passed, covering `make check`, dependency security scans, example config validation, public-access templates, protobuf regeneration stability, Rust fmt/test/clippy, frontend lint/typecheck/unit/build, 369 Playwright E2E cases, WebDAV post-COPY/MOVE content-consistency and MOVE source-cleanup smoke, Docker build, and Docker smoke. The Docker smoke used the Docker-assigned loopback port `http://127.0.0.1:32802`.
 
 - `GOTOOLCHAIN=local ./scripts/verify-changed.sh`
 - `GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master`
