@@ -4186,6 +4186,22 @@ run_doctor_input_validation_test() {
 
   [[ "$status" -ne 0 ]] || fail "doctor accepted PUBLIC_DOMAIN with control character"
   assert_file_contains "$case_dir/public-domain-control.log" "PUBLIC_DOMAIN cannot contain control characters"
+
+  set +e
+  "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain localhost > "$case_dir/public-domain-localhost.log" 2>&1
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "doctor accepted localhost as PUBLIC_DOMAIN"
+  assert_file_contains "$case_dir/public-domain-localhost.log" "PUBLIC_DOMAIN must be a fully qualified hostname"
+
+  set +e
+  "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain 127.0.0.1 > "$case_dir/public-domain-ip.log" 2>&1
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "doctor accepted IP address as PUBLIC_DOMAIN"
+  assert_file_contains "$case_dir/public-domain-ip.log" "PUBLIC_DOMAIN must be a hostname, not an IP address"
 }
 
 run_doctor_invalid_toml_syntax_test() {
