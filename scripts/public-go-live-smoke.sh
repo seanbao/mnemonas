@@ -55,6 +55,20 @@ validate_positive_seconds() {
     fi
 }
 
+is_ipv4_literal_host() {
+    local host="$1"
+    local octet
+    local -a octets
+
+    IFS='.' read -r -a octets <<< "$host"
+    [[ "${#octets[@]}" -eq 4 ]] || return 1
+    for octet in "${octets[@]}"; do
+        [[ "$octet" =~ ^[0-9]{1,3}$ ]] || return 1
+        (( 10#$octet >= 0 && 10#$octet <= 255 )) || return 1
+    done
+    return 0
+}
+
 normalize_domain() {
     local value="$1"
     value="${value,,}"
@@ -71,6 +85,9 @@ validate_domain() {
     [[ "$value" != *":"* ]] || fail "public domain must not include a port"
     [[ "$value" =~ ^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$ ]] || fail "public domain must be an ASCII hostname"
     [[ "$value" != *".."* ]] || fail "public domain must not contain empty labels"
+    [[ "$value" == *.* ]] || fail "public domain must be a fully qualified hostname"
+    [[ "$value" != "localhost" && "$value" != *.localhost ]] || fail "public domain must not be localhost"
+    ! is_ipv4_literal_host "$value" || fail "public domain must be a hostname, not an IP address"
 }
 
 validate_backend_targets() {
