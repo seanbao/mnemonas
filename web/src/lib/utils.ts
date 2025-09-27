@@ -361,15 +361,21 @@ export function decodePathFromUrl(path: string): string {
 }
 
 export function formatBytes(bytes: number, decimals = 2): string {
+  if (!Number.isFinite(bytes)) return '--'
   if (bytes === 0) return '0 B'
 
   const k = 1024
   const dm = decimals < 0 ? 0 : decimals
   const sizes = ['B', 'KB', 'MB', 'GB', 'TB', 'PB']
+  const sign = bytes < 0 ? '-' : ''
+  const absoluteBytes = Math.abs(bytes)
 
-  const i = Math.floor(Math.log(bytes) / Math.log(k))
+  const i = Math.min(
+    Math.max(0, Math.floor(Math.log(absoluteBytes) / Math.log(k))),
+    sizes.length - 1,
+  )
 
-  return `${parseFloat((bytes / Math.pow(k, i)).toFixed(dm))} ${sizes[i]}`
+  return `${sign}${parseFloat((absoluteBytes / Math.pow(k, i)).toFixed(dm))} ${sizes[i]}`
 }
 
 export function parseByteSize(value: string): number {
@@ -422,6 +428,9 @@ export function formatDuration(ms: number): string {
 
 export function formatDate(dateStr: string): string {
   const date = new Date(dateStr)
+  if (Number.isNaN(date.getTime())) {
+    return '--'
+  }
   return date.toLocaleString('zh-CN', {
     year: 'numeric',
     month: '2-digit',
@@ -433,6 +442,9 @@ export function formatDate(dateStr: string): string {
 
 export function formatRelativeTime(dateStr: string): string {
   const date = new Date(dateStr)
+  if (Number.isNaN(date.getTime())) {
+    return '--'
+  }
   const now = new Date()
   const diffMs = now.getTime() - date.getTime()
   const diffSeconds = Math.floor(diffMs / 1000)
@@ -454,7 +466,7 @@ export function getFileIcon(name: string, isDir: boolean): string {
   
   const ext = name.split('.').pop()?.toLowerCase()
   
-  const imageExts = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'ico', 'bmp']
+  const imageExts = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'ico', 'bmp', 'avif', 'heic', 'heif', 'tiff', 'tif']
   const videoExts = ['mp4', 'mkv', 'avi', 'mov', 'wmv', 'flv', 'webm']
   const audioExts = ['mp3', 'wav', 'flac', 'aac', 'ogg', 'm4a']
   const docExts = ['pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx']

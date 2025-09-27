@@ -8,7 +8,7 @@
 公网 80/443 -> Caddy/Nginx -> 127.0.0.1:8080 -> MnemoNAS
 ```
 
-不要把 MnemoNAS 的 `8080` 或 dataplane 的 `9090/9091` 直接暴露到公网。
+不要把 MnemoNAS 的 `8080` 或 dataplane 的 `9090/9091` 直接暴露到公网；如果改过端口，同样不要暴露对应的自定义后端端口。
 
 ## 前置条件
 
@@ -64,7 +64,7 @@ http://localhost:18080
 - 将 MnemoNAS 的 `[server].host` 收紧到 `127.0.0.1`；
 - 设置 `trusted_proxy_hops = 1`；
 - 重启 `mnemonas.service`；
-- 允许本机 `80/443`，限制直接访问 `8080/9090/9091`；
+- 允许本机 `80/443`，限制直接访问 `8080/9090/9091` 或自定义后端端口；
 - 运行基础公网入口检查。
 
 ```bash
@@ -129,7 +129,7 @@ ss -tlnp | grep -E '80|443|8080|9090|9091'
 
 - Caddy/Nginx 监听 `0.0.0.0:80` 和 `0.0.0.0:443`；
 - MnemoNAS Web/API/WebDAV 只监听 `127.0.0.1:8080`；
-- dataplane `9090/9091` 只监听 `127.0.0.1`。
+- dataplane `9090/9091` 或自定义端口只监听 `127.0.0.1`。
 
 ## 4. WebDAV 地址
 
@@ -155,10 +155,13 @@ sudo systemctl restart mnemonas
 ## 5. 上线前清单
 
 - [ ] 管理员初始密码已修改，`initial-password.txt` 已删除或不再存在。
+- [ ] 至少保留两个启用中的管理员账号，避免唯一管理员丢失密码后无法维护。
+- [ ] Web UI “安全自检”没有 `block` 项；`warning` 项已逐条处理或确认。
 - [ ] `https://nas.example.com/health` 正常返回。
-- [ ] 公网 `8080/9090/9091` 不可访问。
+- [ ] 公网 `8080/9090/9091` 或自定义后端端口不可访问。
 - [ ] `/etc/mnemonas/config.toml` 中 `server.host = "127.0.0.1"`。
 - [ ] `/etc/mnemonas/config.toml` 中 `trusted_proxy_hops = 1`。
+- [ ] `/etc/mnemonas/config.toml` 中 `security.allow_unsafe_no_auth = false`。
 - [ ] 云安全组只开放 `80/443`，SSH 只允许可信来源。
 - [ ] 已配置外部备份，不把这台公网服务器当作唯一数据副本。
 

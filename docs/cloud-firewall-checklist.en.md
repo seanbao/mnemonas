@@ -15,13 +15,13 @@ Use this checklist before exposing MnemoNAS through a public domain. Cloud provi
 | `9090` | TCP | No public source | Internal dataplane gRPC | Not public |
 | `9091` | TCP | No public source | Internal dataplane HTTP | Not public |
 
-If you use Cloudflare Tunnel, Tailscale, Headscale, or another tunnel/VPN and do not need direct public ingress, `80/443` may also stay closed. Still keep `8080/9090/9091` private.
+If you changed the MnemoNAS direct port or dataplane ports, treat those custom ports as not public too. If you use Cloudflare Tunnel, Tailscale, Headscale, or another tunnel/VPN and do not need direct public ingress, `80/443` may also stay closed. Still keep `8080/9090/9091` and custom backend ports private.
 
 ## Provider Mapping
 
 | Provider or platform | Common rule location | Confirm |
 | --- | --- | --- |
-| AWS EC2 | Security Group inbound rules, Network ACL | Every Security Group attached to the instance keeps `8080/9090/9091` closed; `22` is restricted to trusted sources |
+| AWS EC2 | Security Group inbound rules, Network ACL | Every Security Group attached to the instance keeps `8080/9090/9091` and custom backend ports closed; `22` is restricted to trusted sources |
 | Azure VM | Network Security Group inbound rules | Check both NIC-level and subnet-level NSGs; higher-priority rules must not allow backend ports |
 | Google Cloud VM | VPC firewall rules, instance network tags | Rules matching the instance tag or service account do not expose backend ports |
 | Oracle Cloud | Security Lists, Network Security Groups | Check both subnet Security Lists and instance NSGs |
@@ -53,12 +53,12 @@ Expected result:
 - `http://nas.example.com:8080/health` fails or times out.
 - `http://nas.example.com:9090/` fails or times out.
 - `http://nas.example.com:9091/health` fails or times out.
+- Any custom backend ports also fail or time out.
 
 ## Common Mistakes
 
-- Opening `8080` for temporary testing and forgetting to remove it.
+- Opening `8080` or a custom backend port for temporary testing and forgetting to remove it.
 - Blocking `8080` in a cloud security group while local UFW or a router still forwards it.
-- Accidentally publishing dataplane `9090/9091` through Docker Compose, router NAT, or cloud security groups.
+- Accidentally publishing dataplane `9090/9091` or custom dataplane ports through Docker Compose, router NAT, or cloud security groups.
 - Exposing SSH `22` to `0.0.0.0/0` without additional rate limiting, key policy, or a bastion host.
 - Fixing IPv4 rules but leaving backend ports open through IPv6 `::/0`.
-

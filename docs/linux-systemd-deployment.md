@@ -167,7 +167,7 @@ sudo systemctl restart mnemonas
 | --- | --- | --- |
 | 局域网 / Tailscale / Headscale | 管理、SSH、授权用户访问 | 只允许可信网段访问 `8080`；SSH 仅走私有网络 |
 | HTTPS 反向代理 / FRP / 隧道 | 给外部用户打开分享链接 | 公网只开放 `80/443`，代理到 MnemoNAS 的 Web 入口 |
-| dataplane `9090/9091` | `nasd` 与 Rust 数据面内部通信 | 只绑定 loopback，不做端口映射，不走公网代理 |
+| dataplane `9090/9091` 或自定义端口 | `nasd` 与 Rust 数据面内部通信 | 只绑定 loopback，不做端口映射，不走公网代理 |
 
 如果使用 UFW，先按自己的 LAN/Tailnet 网段替换示例中的地址，再应用规则：
 
@@ -186,6 +186,8 @@ sudo ufw allow 443/tcp
 sudo ufw enable
 sudo ufw status numbered
 ```
+
+如果修改过 `SERVER_PORT`、`DATAPLANE_GRPC_ADDR` 或 `DATAPLANE_HTTP_ADDR`，请把示例中的端口替换为实际端口。
 
 如果反向代理和 MnemoNAS 在同一台机器，最稳妥的做法是把 `[server].host` 改为 `127.0.0.1`，让公网只通过代理访问。需要局域网直连时，再用防火墙把 `8080` 限制到可信网段。
 

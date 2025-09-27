@@ -414,15 +414,18 @@ Settings updates can change directory quotas, directory access rules, WebDAV pre
       "tls_enabled": false,
       "trusted_proxy_hops": 0,
       "dataplane_grpc_addr": "127.0.0.1:9090",
+      "dataplane_http_addr": "127.0.0.1:9091",
       "webdav_enabled": true,
       "webdav_auth_type": "basic",
+      "smb_enabled": false,
+      "allow_unsafe_no_auth": false,
       "share_enabled": false
     }
   }
 }
 ```
 
-`data.status` and `checks[].status` use `pass`, `warning`, or `block`; `block` dominates `warning`, and `warning` dominates `pass` for the aggregate status. Current check IDs include `auth_enabled`, `https_request`, `trusted_proxy_or_tls`, `server_listen`, `dataplane_listen`, `webdav_auth`, `smb_preview`, `share_base_url`, and `initial_password_file`. The endpoint can verify only what the MnemoNAS process can observe: runtime configuration and the current request's proxy/TLS semantics. It cannot directly verify cloud security groups, public routing, externally exposed ports, or certificate-chain validity. Public deployments should still run `sudo mnemonas-doctor --public-domain <domain>` on the server and confirm in the cloud console that only `80/443` are publicly reachable.
+`data.status` and `checks[].status` use `pass`, `warning`, or `block`; `block` dominates `warning`, and `warning` dominates `pass` for the aggregate status. Current check IDs include `auth_enabled`, `unsafe_no_auth_override`, `https_request`, `public_http_exposure`, `trusted_proxy_or_tls`, `forwarded_proto_trust`, `server_listen`, `admin_accounts`, `dataplane_listen`, `dataplane_http_listen`, `webdav_auth`, `smb_preview`, `share_base_url`, and `initial_password_file`. The endpoint can verify only what the MnemoNAS process can observe: runtime configuration and the current request's proxy/TLS semantics. It cannot directly verify cloud security groups, public routing, externally exposed ports, or certificate-chain validity. Public deployments should still run `sudo mnemonas-doctor --public-domain <domain>` on the server and confirm in the cloud console that only `80/443` are publicly reachable.
 
 ## Maintenance
 

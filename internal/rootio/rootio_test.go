@@ -86,6 +86,31 @@ func TestOpenFileNoFollowRejectsParentSymlinkInsideRoot(t *testing.T) {
 	}
 }
 
+func TestOpenFileNoFollowRejectsParentSegmentBeforeCleaning(t *testing.T) {
+	rootPath := t.TempDir()
+	if err := os.Mkdir(filepath.Join(rootPath, "dir"), 0755); err != nil {
+		t.Fatalf("Mkdir(dir) error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(rootPath, "target.txt"), []byte("target"), 0644); err != nil {
+		t.Fatalf("WriteFile(target.txt) error: %v", err)
+	}
+
+	root, err := os.OpenRoot(rootPath)
+	if err != nil {
+		t.Fatalf("OpenRoot() error: %v", err)
+	}
+	defer root.Close()
+
+	file, err := OpenFileNoFollow(root, "dir"+string(filepath.Separator)+".."+string(filepath.Separator)+"target.txt", os.O_RDONLY, 0)
+	if !errors.Is(err, errEscape) {
+		t.Fatalf("OpenFileNoFollow() error = %v, want errEscape", err)
+	}
+	if file != nil {
+		_ = file.Close()
+		t.Fatal("expected no file handle for path with parent segment")
+	}
+}
+
 func TestOpenDirNoFollowOpensRealDirectory(t *testing.T) {
 	rootPath := t.TempDir()
 	if err := os.Mkdir(filepath.Join(rootPath, "dir"), 0755); err != nil {
@@ -129,6 +154,27 @@ func TestMkdirAllNoFollowRejectsParentSymlinkInsideRoot(t *testing.T) {
 	}
 	if _, statErr := os.Stat(filepath.Join(rootPath, "real", "child")); !errors.Is(statErr, os.ErrNotExist) {
 		t.Fatalf("expected symlink target child not to be created, got %v", statErr)
+	}
+}
+
+func TestMkdirAllNoFollowRejectsParentSegmentBeforeCleaning(t *testing.T) {
+	rootPath := t.TempDir()
+	if err := os.Mkdir(filepath.Join(rootPath, "dir"), 0755); err != nil {
+		t.Fatalf("Mkdir(dir) error: %v", err)
+	}
+
+	root, err := os.OpenRoot(rootPath)
+	if err != nil {
+		t.Fatalf("OpenRoot() error: %v", err)
+	}
+	defer root.Close()
+
+	err = MkdirAllNoFollow(root, "dir"+string(filepath.Separator)+".."+string(filepath.Separator)+"created", 0755)
+	if !errors.Is(err, errEscape) {
+		t.Fatalf("MkdirAllNoFollow() error = %v, want errEscape", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(rootPath, "created")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("expected parent-cleaned directory not to be created, got %v", statErr)
 	}
 }
 

@@ -6,6 +6,7 @@ SERVICE_USER="${SERVICE_USER:-mnemonas}"
 BIN_DIR="${BIN_DIR:-/usr/local/bin}"
 WEB_DIR="${WEB_DIR:-/usr/local/share/mnemonas/web}"
 CONFIG_PATH="${CONFIG_PATH:-/etc/mnemonas/config.toml}"
+SYSTEMD_DIR="${SYSTEMD_DIR:-/etc/systemd/system}"
 BACKUP_ROOT="${BACKUP_ROOT:-/backup/mnemonas}"
 MIN_FREE_BYTES="${MIN_FREE_BYTES:-10737418240}"
 PUBLIC_DOMAIN="${MNEMONAS_PUBLIC_DOMAIN:-}"
@@ -143,6 +144,29 @@ toml_value() {
   ' "$file"
 }
 
+systemd_env_value() {
+  local key="$1"
+  local file="$2"
+
+  [[ -f "$file" ]] || return 0
+  awk -v key="$key" '
+    /^[[:space:]]*Environment=/ {
+      line = $0
+      sub(/^[[:space:]]*Environment=/, "", line)
+      count = split(line, parts, /[[:space:]]+/)
+      for (i = 1; i <= count; i++) {
+        item = parts[i]
+        gsub(/^"|"$/, "", item)
+        if (substr(item, 1, length(key) + 1) == key "=") {
+          sub("^" key "=", "", item)
+          print item
+          exit
+        }
+      }
+    }
+  ' "$file"
+}
+
 port_listening() {
   local port="$1"
   ss_local_addresses_for_port "$port" | grep -q .
@@ -254,6 +278,26 @@ require_safe_tcp_port() {
   (( 10#$value >= 1 && 10#$value <= 65535 )) || die "$label must be between 1 and 65535: $value"
 }
 
+normalize_tcp_port() {
+  local value="$1"
+
+  printf '%s\n' "$((10#$value))"
+}
+
+tcp_addr_port() {
+  local value="$1"
+
+  if [[ "$value" =~ ^\[([^][]+)\]:([0-9]+)$ ]]; then
+    printf '%s\n' "${BASH_REMATCH[2]}"
+    return 0
+  fi
+  if [[ "$value" =~ ^[^:]+:([0-9]+)$ ]]; then
+    printf '%s\n' "${BASH_REMATCH[1]}"
+    return 0
+  fi
+  return 1
+}
+
 require_safe_tcp_addr() {
   local value="$1"
   local label="$2"
@@ -301,6 +345,7 @@ require_safe_public_domain "$PUBLIC_DOMAIN"
 configured_storage_root=""
 configured_server_port=""
 configured_grpc_address=""
+configured_http_address=""
 configured_server_host=""
 configured_trusted_proxy_hops=""
 if [[ -f "$CONFIG_PATH" ]]; then
@@ -310,19 +355,25 @@ if [[ -f "$CONFIG_PATH" ]]; then
   configured_trusted_proxy_hops="$(toml_value server trusted_proxy_hops "$CONFIG_PATH")"
   configured_grpc_address="$(toml_value dataplane grpc_address "$CONFIG_PATH")"
 fi
+configured_http_address="$(systemd_env_value DATAPLANE_HTTP_ADDR "$SYSTEMD_DIR/mnemonas-dataplane.service")"
 
 STORAGE_ROOT="${STORAGE_ROOT:-${configured_storage_root:-/srv/mnemonas}}"
 SERVER_PORT="${SERVER_PORT:-${configured_server_port:-8080}}"
 DATAPLANE_GRPC_ADDR="${DATAPLANE_GRPC_ADDR:-${configured_grpc_address:-127.0.0.1:9090}}"
-DATAPLANE_GRPC_PORT="${DATAPLANE_GRPC_PORT:-${DATAPLANE_GRPC_ADDR##*:}}"
-DATAPLANE_HTTP_PORT="${DATAPLANE_HTTP_PORT:-9091}"
-SERVER_URL="${SERVER_URL:-http://127.0.0.1:$SERVER_PORT}"
-DATAPLANE_URL="${DATAPLANE_URL:-http://127.0.0.1:$DATAPLANE_HTTP_PORT}"
+DATAPLANE_HTTP_ADDR="${DATAPLANE_HTTP_ADDR:-${configured_http_address:-127.0.0.1:9091}}"
+DATAPLANE_GRPC_PORT="${DATAPLANE_GRPC_PORT:-$(tcp_addr_port "$DATAPLANE_GRPC_ADDR" || true)}"
+DATAPLANE_HTTP_PORT="${DATAPLANE_HTTP_PORT:-$(tcp_addr_port "$DATAPLANE_HTTP_ADDR" || true)}"
 
 require_safe_tcp_port "$SERVER_PORT" "SERVER_PORT"
 require_safe_tcp_addr "$DATAPLANE_GRPC_ADDR" "DATAPLANE_GRPC_ADDR"
+require_safe_tcp_addr "$DATAPLANE_HTTP_ADDR" "DATAPLANE_HTTP_ADDR"
 require_safe_tcp_port "$DATAPLANE_GRPC_PORT" "DATAPLANE_GRPC_PORT"
 require_safe_tcp_port "$DATAPLANE_HTTP_PORT" "DATAPLANE_HTTP_PORT"
+SERVER_PORT="$(normalize_tcp_port "$SERVER_PORT")"
+DATAPLANE_GRPC_PORT="$(normalize_tcp_port "$DATAPLANE_GRPC_PORT")"
+DATAPLANE_HTTP_PORT="$(normalize_tcp_port "$DATAPLANE_HTTP_PORT")"
+SERVER_URL="${SERVER_URL:-http://127.0.0.1:$SERVER_PORT}"
+DATAPLANE_URL="${DATAPLANE_URL:-http://127.0.0.1:$DATAPLANE_HTTP_PORT}"
 require_safe_http_url "$SERVER_URL" "SERVER_URL"
 require_safe_http_url "$DATAPLANE_URL" "DATAPLANE_URL"
 

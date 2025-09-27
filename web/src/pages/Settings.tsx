@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useQuery, useMutation } from '@tanstack/react-query'
-import { useSearchParams } from 'react-router-dom'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 import { 
   Card, 
   CardBody, 
@@ -1553,6 +1553,7 @@ function PublicAccessWizard({
 
 export function SettingsPage() {
   const user = useUser()
+  const navigate = useNavigate()
   const [searchParams, setSearchParams] = useSearchParams()
   const selectedTab = normalizeSettingsTab(searchParams.get('tab'))
   const defaultSettings = {
@@ -1921,7 +1922,9 @@ export function SettingsPage() {
   const applySecurityCheckFix = (checkID: string) => {
     switch (checkID) {
       case 'https_request':
+      case 'public_http_exposure':
       case 'trusted_proxy_or_tls':
+      case 'forwarded_proto_trust':
         updateDirtySettings((prev) => ({
           ...prev,
           serverHost: '127.0.0.1',
@@ -1952,6 +1955,23 @@ export function SettingsPage() {
         updateDirtySettings((prev) => ({ ...prev, shareBaseURL: publicAccessBaseURL }))
         addToast({ title: '已更新分享基础 URL', description: '保存设置后影响新创建的分享链接。', color: 'success' })
         return
+      case 'unsafe_no_auth_override':
+        addToast({
+          title: '需要编辑配置文件',
+          description: '将 [security].allow_unsafe_no_auth 改为 false，并确认 Web 登录和 WebDAV 认证已启用后重启服务。',
+          color: 'warning',
+        })
+        return
+      case 'dataplane_http_listen':
+        addToast({
+          title: '需要调整启动环境',
+          description: '将 DATAPLANE_HTTP_ADDR 设为 127.0.0.1:9091 后重启 dataplane 和 MnemoNAS 服务。',
+          color: 'warning',
+        })
+        return
+      case 'admin_accounts':
+        navigate('/users')
+        return
       default:
         addToast({ title: '该项需要手动处理', color: 'warning' })
     }
@@ -1961,16 +1981,26 @@ export function SettingsPage() {
     switch (check.id) {
       case 'https_request':
         return { label: '应用代理推荐', onPress: () => applySecurityCheckFix(check.id) }
+      case 'public_http_exposure':
+        return { label: '应用代理推荐', onPress: () => applySecurityCheckFix(check.id) }
       case 'trusted_proxy_or_tls':
         return { label: '设置代理层数', onPress: () => applySecurityCheckFix(check.id) }
+      case 'forwarded_proto_trust':
+        return { label: '修正代理设置', onPress: () => applySecurityCheckFix(check.id) }
       case 'server_listen':
         return { label: '改为本机监听', onPress: () => applySecurityCheckFix(check.id) }
       case 'dataplane_listen':
         return { label: '改为本机地址', onPress: () => applySecurityCheckFix(check.id) }
+      case 'dataplane_http_listen':
+        return { label: '查看处理方式', onPress: () => applySecurityCheckFix(check.id) }
       case 'webdav_auth':
         return { label: '启用认证', onPress: () => applySecurityCheckFix(check.id) }
       case 'share_base_url':
         return { label: '使用 HTTPS URL', onPress: () => applySecurityCheckFix(check.id) }
+      case 'unsafe_no_auth_override':
+        return { label: '查看处理方式', onPress: () => applySecurityCheckFix(check.id) }
+      case 'admin_accounts':
+        return { label: '管理用户', onPress: () => applySecurityCheckFix(check.id) }
       default:
         return undefined
     }

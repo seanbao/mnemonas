@@ -66,7 +66,7 @@ MnemoNAS uses a hybrid layout: current files are stored as native files under `f
 
 - **Readable current files**: the current version lives in a normal directory and can be migrated or backed up offline by users with OS-level access.
 - **Content-addressed versions**: historical content is addressed by BLAKE3 hashes.
-- **CDC chunking**: large versioned files are split into 256KB-4MB content-defined chunks for finer-grained deduplication.
+- **CDC capability**: the Rust data plane exposes FastCDC file APIs; the current Go version-history path stores whole-object CAS snapshots, so edited versions only share storage when the full file content is identical.
 - **Clear boundary**: reading files directly from `files/` is safe; writing around Web UI/WebDAV/API will not create versions or trash records.
 - **Filesystem-neutral**: ext4, XFS, Btrfs, and ZFS are supported; ZFS mirror is recommended for stronger storage hygiene.
 - **Migratable**: moving the full storage root keeps current files, history, trash, and metadata together.
@@ -226,7 +226,7 @@ Use `SKIP_GOLANGCI_LINT=1` only for temporary local troubleshooting; do not skip
 | Rust data plane gRPC | 9090 | CAS storage service |
 | Frontend dev server | 5173 | Vite dev server |
 
-Docker and systemd deployments expose only `8080` by default. Data plane ports `9090/9091` are internal and should stay inside the container or on `127.0.0.1`.
+Docker and systemd deployments expose only `8080` by default. Data plane ports `9090/9091` are internal and should stay inside the container or on `127.0.0.1`. If you change the Web or dataplane ports, keep those custom backend ports private as well.
 
 ## Documentation
 

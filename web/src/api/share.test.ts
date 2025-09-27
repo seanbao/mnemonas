@@ -57,6 +57,10 @@ describe('Share API', () => {
       expect(formatShareUrl('s/share-1', 'https://local.example')).toBe('https://local.example/s/share-1')
     })
 
+    it('normalizes trailing slashes in the origin before resolving relative share URLs', () => {
+      expect(formatShareUrl('/s/share-1', 'https://local.example/')).toBe('https://local.example/s/share-1')
+    })
+
     it('does not treat non-http schemes as trusted absolute share URLs', () => {
       expect(formatShareUrl('httpx://evil.example/s/share-1', 'https://local.example'))
         .toBe('https://local.example/httpx://evil.example/s/share-1')
@@ -985,6 +989,7 @@ describe('Share API', () => {
         expect(formatExpiration('2026-05-04T03:00:00Z')).toBe('3 小时后过期')
         expect(formatExpiration('2026-05-04T00:30:00Z')).toBe('即将过期')
         expect(formatExpiration('2026-05-03T23:59:00Z')).toBe('已过期')
+        expect(formatExpiration('not-a-date')).toBe('过期时间无效')
       } finally {
         vi.useRealTimers()
       }

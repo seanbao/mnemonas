@@ -119,6 +119,7 @@ describe('formatBytes', () => {
 
   it('formats bytes', () => {
     expect(formatBytes(512)).toBe('512 B')
+    expect(formatBytes(0.5)).toBe('0.5 B')
   })
 
   it('formats kilobytes', () => {
@@ -142,6 +143,16 @@ describe('formatBytes', () => {
 
   it('clamps negative decimals to zero', () => {
     expect(formatBytes(1536, -2)).toBe('2 KB')
+  })
+
+  it('formats negative byte counts without producing NaN labels', () => {
+    expect(formatBytes(-512)).toBe('-512 B')
+    expect(formatBytes(-1536)).toBe('-1.5 KB')
+  })
+
+  it('falls back for non-finite byte counts', () => {
+    expect(formatBytes(Number.NaN)).toBe('--')
+    expect(formatBytes(Number.POSITIVE_INFINITY)).toBe('--')
   })
 })
 
@@ -201,6 +212,10 @@ describe('formatRelativeTime', () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+
+  it('falls back for invalid timestamps', () => {
+    expect(formatRelativeTime('not-a-date')).toBe('--')
   })
 })
 
@@ -391,6 +406,9 @@ describe('getFileIcon', () => {
 
   it('returns image for image files', () => {
     expect(getFileIcon('photo.jpg', false)).toBe('image')
+    expect(getFileIcon('photo.avif', false)).toBe('image')
+    expect(getFileIcon('photo.heic', false)).toBe('image')
+    expect(getFileIcon('scan.tiff', false)).toBe('image')
   })
 
   it('returns video for video files', () => {
@@ -457,5 +475,9 @@ describe('formatDate', () => {
     const date = new Date('2024-06-20T15:00:00Z')
     const result = formatDate(date.toISOString())
     expect(result).toMatch(/2024/)
+  })
+
+  it('falls back for invalid date strings', () => {
+    expect(formatDate('not-a-date')).toBe('--')
   })
 })

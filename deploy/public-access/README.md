@@ -11,4 +11,4 @@ Public deployments should still run:
 sudo mnemonas-doctor --public-domain nas.example.com
 ```
 
-Cloud firewalls or security groups must expose only `80/443` publicly. Do not expose MnemoNAS backend `8080` or dataplane `9090/9091` to the public internet.
+Cloud firewalls or security groups must expose only `80/443` publicly. Do not expose MnemoNAS backend `8080`, dataplane `9090/9091`, or any custom backend/dataplane ports to the public internet.
