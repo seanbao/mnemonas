@@ -346,6 +346,13 @@ DELETE /api/v1/admin/users/{id}
 POST /api/v1/admin/users/{id}/reset-password
 ```
 
+**让用户现有登录失效**:
+```
+POST /api/v1/admin/users/{id}/revoke-sessions
+```
+
+- 不修改用户密码或启用状态；该用户已有的 Web cookie 会话、access token 和 refresh token 会在后续请求中失效，需要重新登录。
+
 **切换用户状态**:
 ```
 PUT /api/v1/admin/users/{id}/status

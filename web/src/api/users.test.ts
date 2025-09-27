@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi, type Mock } from 'vitest'
-import { createUser, deleteUser, listUsers, resetUserPassword, toggleUserStatus, updateUser, UsersError } from './users'
+import { createUser, deleteUser, listUsers, resetUserPassword, revokeUserSessions, toggleUserStatus, updateUser, UsersError } from './users'
 
 vi.mock('./auth', () => ({
   authFetch: vi.fn(),
@@ -237,15 +237,18 @@ describe('Users API', () => {
     await expect(resetUserPassword('u1', { new_password: 'password123' })).rejects.toThrow('Failed to reset password')
   })
 
-  it('maps wrapped success for delete, reset password, and toggle status', async () => {
+  it('maps wrapped success for delete, reset password, revoke sessions, and toggle status', async () => {
     mockAuthFetch
       .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({ success: true, data: null, message: 'user deleted successfully' }) })
       .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({ success: true, data: null, message: 'password reset successfully' }) })
+      .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({ success: true, data: { revoked: true }, message: 'user sessions revoked successfully' }) })
       .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({ success: true, data: { disabled: true }, message: 'user status updated successfully' }) })
 
     await expect(deleteUser('u1')).resolves.toEqual({ success: true, warning: false, message: 'user deleted successfully' })
     await expect(resetUserPassword('u1', { new_password: 'password123' })).resolves.toEqual({ success: true, warning: false, message: 'password reset successfully' })
+    await expect(revokeUserSessions('u1')).resolves.toEqual({ success: true, warning: false, message: 'user sessions revoked successfully' })
     await expect(toggleUserStatus('u1', true)).resolves.toEqual({ success: true, warning: false, message: 'user status updated successfully' })
+    expect(mockAuthFetch).toHaveBeenNthCalledWith(3, '/api/v1/admin/users/u1/revoke-sessions', { method: 'POST' })
   })
 
   it('preserves warning metadata for wrapped user management success responses', async () => {
@@ -274,6 +277,11 @@ describe('Users API', () => {
       .mockResolvedValueOnce({
         ok: true,
         headers: { get: () => null },
+        json: () => Promise.resolve({ success: true, data: { revoked: true, warning: true }, message: 'user sessions revoked with persistence warning' }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        headers: { get: () => null },
         json: () => Promise.resolve({ success: true, data: { disabled: true, warning: true }, message: 'user status updated with persistence warning' }),
       })
 
@@ -292,6 +300,11 @@ describe('Users API', () => {
       warning: true,
       message: 'password reset with persistence warning',
     })
+    await expect(revokeUserSessions('u1')).resolves.toEqual({
+      success: true,
+      warning: true,
+      message: 'user sessions revoked with persistence warning',
+    })
     await expect(toggleUserStatus('u1', true)).resolves.toEqual({
       success: true,
       warning: true,
@@ -299,14 +312,16 @@ describe('Users API', () => {
     })
   })
 
-  it('rejects malformed successful delete/reset/toggle responses instead of treating them as success', async () => {
+  it('rejects malformed successful delete/reset/revoke/toggle responses instead of treating them as success', async () => {
     mockAuthFetch
       .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({ success: true, message: 'user deleted successfully' }) })
       .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({ success: true, message: 'password reset successfully' }) })
+      .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({ success: true, data: {} }) })
       .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({ success: false, data: { disabled: true } }) })
 
     await expect(deleteUser('u1')).rejects.toThrow('Invalid delete user response')
     await expect(resetUserPassword('u1', { new_password: 'password123' })).rejects.toThrow('Invalid reset password response')
+    await expect(revokeUserSessions('u1')).rejects.toThrow('Invalid revoke sessions response')
     await expect(toggleUserStatus('u1', true)).rejects.toThrow('Invalid update user status response')
   })
 

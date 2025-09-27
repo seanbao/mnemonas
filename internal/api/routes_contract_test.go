@@ -23,6 +23,7 @@ func expectedRESTRouteContracts() []string {
 		"PUT /api/v1/admin/users/{id}",
 		"DELETE /api/v1/admin/users/{id}",
 		"POST /api/v1/admin/users/{id}/reset-password",
+		"POST /api/v1/admin/users/{id}/revoke-sessions",
 		"PUT /api/v1/admin/users/{id}/status",
 		"POST /api/v1/auth/download-session",
 		"POST /api/v1/auth/login",
