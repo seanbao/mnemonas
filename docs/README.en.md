@@ -50,6 +50,8 @@ This directory contains MnemoNAS usage guides, deployment notes, and reference m
 | --- | --- |
 | [Support](../SUPPORT.en.md) | Support channels and support boundary |
 | [支持说明](../SUPPORT.md) | Chinese support document |
+| [Contributing guide](../CONTRIBUTING.en.md) | Contribution flow, quality gates, and safety boundaries |
+| [贡献指南](../CONTRIBUTING.md) | Chinese contributing guide |
 | [Security policy](../SECURITY.md) | Vulnerability reporting and deployment security |
 | [安全策略](../SECURITY.zh-CN.md) | Chinese security policy |
 

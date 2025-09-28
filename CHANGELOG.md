@@ -304,12 +304,13 @@
 发布新版本前应完成以下检查：
 
 - [ ] 记录当前基线并保持工作树干净：`git status --short --branch`
-- [ ] 变更感知完整验证通过：`GOTOOLCHAIN=local timeout 45m ./scripts/verify-changed.sh --base master`
+- [ ] 变更感知完整验证通过：`GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master`
 - [ ] 文档检查通过：`make docs-check`
 - [ ] 脚本检查通过：`make scripts-check`
 - [ ] 依赖安全检查通过：`make security-check NPM_AUDIT=1`
 - [ ] Docker 构建和烟测通过：`make docker-check`
 - [ ] `./scripts/plan-hardening-commits.sh --fail-on-manual` 确认没有未归类路径
+- [ ] 发布前就绪摘要通过：`./scripts/release-readiness.sh`
 - [ ] 更新 CHANGELOG.md、CHANGELOG.en.md、README 版本引用和 [发布说明草稿](docs/release-notes.md)
 - [ ] 创建 Git tag：`git tag -a v0.1.0 -m "Release v0.1.0"`
 - [ ] 推送 tag：`git push origin v0.1.0`
@@ -318,7 +319,7 @@
   - checksums
   - 二进制文件（Linux x86_64, ARM64, macOS）
   - Docker 镜像标签
-- [ ] 发布后运行 `./scripts/verify-release-artifacts.sh --require-targets --check-image`，验证 release 产物、checksums 和容器镜像标签
+- [ ] 发布后下载 GitHub Release 产物，并运行 `./scripts/verify-release-artifacts.sh --version <tag> --repository seanbao/mnemonas --require-targets --check-image <artifact-dir>`，验证 release 产物、checksums 和容器镜像标签
 - [ ] 发布后验证 release 归档安装、Docker release 镜像启动和公开文档链接
 
 ---

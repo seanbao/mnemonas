@@ -48,6 +48,7 @@
 | 中文 | English | 说明 |
 |------|---------|------|
 | [支持说明](../SUPPORT.md) | [Support](../SUPPORT.en.md) | 支持渠道、问题分流和支持边界 |
+| [贡献指南](../CONTRIBUTING.md) | [Contributing guide](../CONTRIBUTING.en.md) | 贡献流程、质量门禁和安全边界 |
 | [安全策略](../SECURITY.zh-CN.md) | [Security policy](../SECURITY.md) | 安全漏洞报告方式和部署安全提醒 |
 
 ### 配置参考
