@@ -13,7 +13,7 @@
 - 加强路径、归档下载、WebDAV、公开分享、工作区、CAS 和备份恢复相关边界检查，覆盖符号链接、路径穿越、百分号编码点段、控制字符和回滚错误情况。
 - 完善认证、用户、主目录、目录配额、目录访问规则、分享策略和会话安全默认值的后端与前端覆盖。
 - 提升 Web 可见质量，核心页面、公开入口、移动端布局、基础可访问性、运行时错误、失败请求和破碎可见文本已纳入 Playwright 扫描。
-- 加固 systemd、Docker、反向代理、公网访问模板、doctor、release package 和 release artifact 验证路径；Release workflow 会在创建 GitHub Release 前校验归档、checksums、必需目标集合、归档条目类型、重复条目、控制字符路径、空白字符路径、反斜杠路径和歧义路径。
+- 加固 systemd、Docker、反向代理、公网访问模板、doctor、公网域名就绪校验、release package 和 release artifact 验证路径；Release workflow 会在创建 GitHub Release 前校验归档、checksums、必需目标集合、归档条目类型、重复条目、控制字符路径、空白字符路径、反斜杠路径和歧义路径。
 - Release tag 会在产物构建前校验，必须使用 `vMAJOR.MINOR.PATCH` 或 `v1.2.3-rc.1` 这类语义化预发布形式。
 - 新增可复跑的 WebDAV curl 协议 smoke，可对已运行服务验证基础读写、URL 编码空格路径、复制、移动和删除操作，并通过脚本门禁覆盖。
 - 新增 WebDAV 兼容性报告表单，用于收集 Finder、Windows File Explorer、移动端文件管理器、媒体播放器和命令行客户端的验证结果或客户端特定失败。
@@ -37,7 +37,7 @@ Release workflow 预期生成以下产物：
 
 当前硬化分支已有以下验证证据；最终发布前应以最新 tag、Release workflow 结果和必要的环境验证为准：
 
-最近本地完整验证快照：验证目标 `a3ce27ec5220`，`GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master` 通过，覆盖 `make check`、依赖安全扫描、示例配置、public-access 模板、proto 再生成稳定性、Rust fmt/test/clippy、前端 lint/typecheck/unit/build、Playwright 369 个 E2E 用例、WebDAV COPY/MOVE 后内容一致性和 MOVE 源路径清理 smoke、Docker build 和 Docker smoke。Docker smoke 使用 Docker 自动分配的 loopback 端口 `http://127.0.0.1:32802`。
+最近本地完整验证快照：验证目标 `76b38fb85c7d`，`GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master` 通过，覆盖 `make check`、依赖安全扫描、示例配置、public-access 模板、公网 go-live/doctor public-domain 完整域名与 `localhost`/IPv4 字面量拒绝校验、proto 再生成稳定性、Rust fmt/test/clippy、前端 lint/typecheck/unit/build、Playwright 369 个 E2E 用例、WebDAV COPY/MOVE 后内容一致性和 MOVE 源路径清理 smoke、Docker build 和 Docker smoke。Docker smoke 使用 Docker 自动分配的 loopback 端口 `http://127.0.0.1:32803`。
 
 - `GOTOOLCHAIN=local ./scripts/verify-changed.sh`
 - `GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master`
