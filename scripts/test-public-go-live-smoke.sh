@@ -152,6 +152,18 @@ run_invalid_domain_test() {
 
     run_expect_failure "$case_dir/ip-address.log" bash "$REPO_ROOT/scripts/public-go-live-smoke.sh" "127.0.0.1"
     assert_file_contains "$case_dir/ip-address.log" "public domain must be a hostname, not an IP address"
+
+    run_expect_failure "$case_dir/leading-label-hyphen.log" bash "$REPO_ROOT/scripts/public-go-live-smoke.sh" "nas.-example.com"
+    assert_file_contains "$case_dir/leading-label-hyphen.log" "public domain must be a valid ASCII hostname"
+
+    run_expect_failure "$case_dir/trailing-label-hyphen.log" bash "$REPO_ROOT/scripts/public-go-live-smoke.sh" "nas.example-.com"
+    assert_file_contains "$case_dir/trailing-label-hyphen.log" "public domain must be a valid ASCII hostname"
+
+    run_expect_failure "$case_dir/long-label.log" bash "$REPO_ROOT/scripts/public-go-live-smoke.sh" "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.example.com"
+    assert_file_contains "$case_dir/long-label.log" "public domain must be a valid ASCII hostname"
+
+    run_expect_failure "$case_dir/repeated-trailing-dot.log" bash "$REPO_ROOT/scripts/public-go-live-smoke.sh" "nas.example.com.."
+    assert_file_contains "$case_dir/repeated-trailing-dot.log" "public domain must be a valid ASCII hostname"
 }
 
 run_invalid_timeout_test() {
