@@ -148,6 +148,23 @@ curl_head_status_and_redirect() {
         "$url"
 }
 
+https_redirect_targets_domain() {
+    local domain="$1"
+    local redirect_url="$2"
+
+    case "$redirect_url" in
+        "https://$domain"|"https://$domain/"*|"https://$domain?"*|"https://$domain#"*)
+            return 0
+            ;;
+        "https://$domain:443"|"https://$domain:443/"*|"https://$domain:443?"*|"https://$domain:443#"*)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
 check_https_health() {
     local domain="$1"
     local status
@@ -174,14 +191,11 @@ check_http_redirect() {
         *) fail "HTTP health returned HTTP $status, expected a redirect to HTTPS on the same domain" ;;
     esac
 
-    case "$redirect" in
-        "https://$domain/"*|"https://$domain:443/"*)
-            log_ok "HTTP health redirects to HTTPS on the same domain"
-            ;;
-        *)
-            fail "HTTP health redirect target is not same-domain HTTPS: ${redirect:-<empty>}"
-            ;;
-    esac
+    if https_redirect_targets_domain "$domain" "$redirect"; then
+        log_ok "HTTP health redirects to HTTPS on the same domain"
+    else
+        fail "HTTP health redirect target is not same-domain HTTPS: ${redirect:-<empty>}"
+    fi
 }
 
 check_backend_target_private() {
