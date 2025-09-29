@@ -65,6 +65,7 @@ const allowedEnglishDocChineseLinkLabels = new Set([
   '中文 README',
   '支持说明',
   '贡献指南',
+  '行为准则',
   '安全策略',
 ])
 const shellFenceLanguages = new Set(['bash', 'sh', 'shell', 'console', 'zsh'])
@@ -73,6 +74,7 @@ const directScriptCommandPattern = /(^|[^\w./-])(\.\/scripts\/([A-Za-z0-9._-]+\.
 const requiredDocumentPairs = [
   ['README.md', 'README.en.md', 'English', 'Chinese'],
   ['CHANGELOG.md', 'CHANGELOG.en.md', 'English', 'Chinese'],
+  ['CODE_OF_CONDUCT.zh-CN.md', 'CODE_OF_CONDUCT.md', 'English', 'Chinese'],
   ['CONTRIBUTING.md', 'CONTRIBUTING.en.md', 'English', 'Chinese'],
   ['SUPPORT.md', 'SUPPORT.en.md', 'English', 'Chinese'],
   ['SECURITY.zh-CN.md', 'SECURITY.md', 'English', 'Chinese'],

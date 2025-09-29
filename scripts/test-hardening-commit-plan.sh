@@ -43,15 +43,19 @@ git init -q
 git config user.email "mnemonas@example.invalid"
 git config user.name "MnemoNAS Test"
 
-mkdir -p .github/workflows dataplane/src docs internal/api internal/auth scripts web/e2e web/scripts web/src tools/proto-gen
-touch README.md CONTRIBUTING.md CONTRIBUTING.en.md Makefile Dockerfile go.mod dataplane/src/lib.rs tools/proto-gen/Cargo.toml
+mkdir -p .github/ISSUE_TEMPLATE .github/workflows dataplane/src docs internal/api internal/auth scripts web/e2e web/scripts web/src tools/proto-gen
+touch README.md CODE_OF_CONDUCT.md CODE_OF_CONDUCT.zh-CN.md CONTRIBUTING.md CONTRIBUTING.en.md .github/pull_request_template.md .github/ISSUE_TEMPLATE/bug_report.yml Makefile Dockerfile go.mod dataplane/src/lib.rs tools/proto-gen/Cargo.toml
 touch docs/testing-strategy.md internal/api/server.go internal/auth/user.go web/package.json web/src/App.tsx web/e2e/files.spec.ts
 git add .
 git commit -q -m "test: initial"
 
 printf '%s\n' '# docs changed' >README.md
+printf '%s\n' '# code of conduct changed' >CODE_OF_CONDUCT.md
+printf '%s\n' '# chinese code of conduct changed' >CODE_OF_CONDUCT.zh-CN.md
 printf '%s\n' '# contribution docs changed' >CONTRIBUTING.md
 printf '%s\n' '# contributing docs changed' >CONTRIBUTING.en.md
+printf '%s\n' '# pull request template changed' >.github/pull_request_template.md
+printf '%s\n' 'name: Bug report' >.github/ISSUE_TEMPLATE/bug_report.yml
 printf '%s\n' 'check: ; @true' >Makefile
 printf '%s\n' 'FROM scratch' >Dockerfile
 printf '%s\n' 'module example.invalid/mnemonas' >go.mod
@@ -68,11 +72,15 @@ printf '%s\n' 'manual' >misc.txt
 
 ./scripts/plan-hardening-commits.sh >"$output_dir/plan.out" 2>"$output_dir/plan.err"
 
-assert_file_contains "$output_dir/plan.out" "[hardening-commit-plan] grouped 16 changed file(s)"
+assert_file_contains "$output_dir/plan.out" "[hardening-commit-plan] grouped 20 changed file(s)"
 assert_file_contains "$output_dir/plan.out" "docs: documentation compaction and bilingual index"
 assert_file_contains "$output_dir/plan.out" "README.md"
+assert_file_contains "$output_dir/plan.out" "CODE_OF_CONDUCT.md"
+assert_file_contains "$output_dir/plan.out" "CODE_OF_CONDUCT.zh-CN.md"
 assert_file_contains "$output_dir/plan.out" "CONTRIBUTING.md"
 assert_file_contains "$output_dir/plan.out" "CONTRIBUTING.en.md"
+assert_file_contains "$output_dir/plan.out" ".github/pull_request_template.md"
+assert_file_contains "$output_dir/plan.out" ".github/ISSUE_TEMPLATE/bug_report.yml"
 assert_file_contains "$output_dir/plan.out" "build(ci): local and CI gates"
 assert_file_contains "$output_dir/plan.out" "Makefile"
 assert_file_contains "$output_dir/plan.out" "web/scripts/check-node.cjs"
@@ -163,7 +171,7 @@ rm -f misc.txt
 	cat "$output_dir/no-manual.err" >&2
 	fail "planner rejected fully classified paths in strict mode"
 }
-assert_file_contains "$output_dir/no-manual.out" "[hardening-commit-plan] grouped 15 changed file(s)"
+assert_file_contains "$output_dir/no-manual.out" "[hardening-commit-plan] grouped 19 changed file(s)"
 
 ./scripts/plan-hardening-commits.sh --group review-manual >"$output_dir/group-manual-empty.out" 2>"$output_dir/group-manual-empty.err"
 assert_file_contains "$output_dir/group-manual-empty.out" "group review-manual has no changed files"
