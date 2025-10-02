@@ -6508,6 +6508,63 @@ func TestServer_DirectoryAccessRulesGrantSharedPaths(t *testing.T) {
 	}
 }
 
+func TestServer_ListFiles_FiltersDeniedDirectoryAccessRuleChildren(t *testing.T) {
+	server, fs, _, username, password := setupAuthServer(t)
+	setUserHomeDirForTest(t, server, username, "/tester")
+	setUserGroupsForTest(t, server, username, []string{"family"})
+	setDirectoryAccessRulesForTest(t, server, []config.DirectoryAccessRuleConfig{
+		{Path: "/team", ReadGroups: []string{"family"}},
+		{Path: "/team/private", ReadUsers: []string{"bob"}},
+	})
+
+	ctx := context.Background()
+	if err := fs.Mkdir(ctx, "/team"); err != nil {
+		t.Fatalf("Mkdir(/team) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/team/private"); err != nil {
+		t.Fatalf("Mkdir(/team/private) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/team/public.txt", bytes.NewReader([]byte("public"))); err != nil {
+		t.Fatalf("WriteFile(/team/public.txt) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/team/private/secret.txt", bytes.NewReader([]byte("secret"))); err != nil {
+		t.Fatalf("WriteFile(/team/private/secret.txt) error: %v", err)
+	}
+
+	token := loginAndGetAccessToken(t, server, username, password)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/files/team", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	server.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("shared list status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var payload struct {
+		Data struct {
+			Files []struct {
+				Name string `json:"name"`
+				Path string `json:"path"`
+			} `json:"files"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode list files response: %v", err)
+	}
+
+	seen := map[string]bool{}
+	for _, item := range payload.Data.Files {
+		seen[item.Path] = true
+		if item.Name == "private" || item.Path == "/team/private" {
+			t.Fatalf("denied child leaked through list response: %s", rec.Body.String())
+		}
+	}
+	if !seen["/team/public.txt"] {
+		t.Fatalf("expected readable child in list response, got %s", rec.Body.String())
+	}
+}
+
 func TestServer_DeleteDirectoryRejectsDeniedDescendantAccessRule(t *testing.T) {
 	server, fs, _, username, password := setupAuthServer(t)
 	setUserHomeDirForTest(t, server, username, "/tester")
