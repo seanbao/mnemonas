@@ -4685,6 +4685,129 @@ func TestHandler_UsersAuthDirectoryAccessRulesGrantSharedPaths(t *testing.T) {
 	}
 }
 
+func TestHandler_UsersAuthDeleteDirectoryRejectsDeniedDescendantAccessRule(t *testing.T) {
+	handler, fs := setupUsersModeHandler(t, map[string]webDAVTestCredential{
+		"alice": {
+			password: "password123",
+			identity: UserIdentity{
+				Role:    webDAVRoleUser,
+				HomeDir: "/users/alice",
+			},
+		},
+	})
+	handler.directoryAccess = []DirectoryAccessRule{
+		{Path: "/team", WriteUsers: []string{"alice"}},
+		{Path: "/team/private", WriteUsers: []string{"bob"}},
+	}
+
+	ctx := context.Background()
+	if err := fs.Mkdir(ctx, "/team"); err != nil {
+		t.Fatalf("Mkdir(/team) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/team/private"); err != nil {
+		t.Fatalf("Mkdir(/team/private) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/team/private/secret.txt", strings.NewReader("secret")); err != nil {
+		t.Fatalf("WriteFile(/team/private/secret.txt) error: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodDelete, "/dav/team", nil)
+	setWebDAVTestBasicAuth(req, "alice")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("DELETE directory status = %d, want %d; body=%s", w.Code, http.StatusForbidden, w.Body.String())
+	}
+	if _, err := fs.Stat(ctx, "/team/private/secret.txt"); err != nil {
+		t.Fatalf("expected denied descendant to remain after rejected DELETE: %v", err)
+	}
+}
+
+func TestHandler_UsersAuthMoveDirectoryRejectsDeniedDestinationDescendantAccessRule(t *testing.T) {
+	handler, fs := setupUsersModeHandler(t, map[string]webDAVTestCredential{
+		"alice": {
+			password: "password123",
+			identity: UserIdentity{
+				Role:    webDAVRoleUser,
+				HomeDir: "/users/alice",
+			},
+		},
+	})
+	handler.directoryAccess = []DirectoryAccessRule{
+		{Path: "/team", WriteUsers: []string{"alice"}},
+		{Path: "/team/copied/private", WriteUsers: []string{"bob"}},
+	}
+
+	ctx := context.Background()
+	for _, dir := range []string{"/users", "/users/alice", "/users/alice/src", "/users/alice/src/private", "/team"} {
+		if err := fs.Mkdir(ctx, dir); err != nil {
+			t.Fatalf("Mkdir(%s) error: %v", dir, err)
+		}
+	}
+	if err := fs.WriteFile(ctx, "/users/alice/src/private/secret.txt", strings.NewReader("secret")); err != nil {
+		t.Fatalf("WriteFile(/users/alice/src/private/secret.txt) error: %v", err)
+	}
+
+	req := httptest.NewRequest("MOVE", "/dav/src", nil)
+	req.Header.Set("Destination", "http://example.com/dav/team/copied")
+	setWebDAVTestBasicAuth(req, "alice")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("MOVE directory status = %d, want %d; body=%s", w.Code, http.StatusForbidden, w.Body.String())
+	}
+	if _, err := fs.Stat(ctx, "/users/alice/src/private/secret.txt"); err != nil {
+		t.Fatalf("expected source tree to remain after rejected MOVE: %v", err)
+	}
+	if _, err := fs.Stat(ctx, "/team/copied"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("expected destination tree to remain absent after rejected MOVE, got %v", err)
+	}
+}
+
+func TestHandler_UsersAuthCopyDirectoryRejectsDeniedDestinationDescendantAccessRule(t *testing.T) {
+	handler, fs := setupUsersModeHandler(t, map[string]webDAVTestCredential{
+		"alice": {
+			password: "password123",
+			identity: UserIdentity{
+				Role:    webDAVRoleUser,
+				HomeDir: "/users/alice",
+			},
+		},
+	})
+	handler.directoryAccess = []DirectoryAccessRule{
+		{Path: "/team", WriteUsers: []string{"alice"}},
+		{Path: "/team/copied/private", WriteUsers: []string{"bob"}},
+	}
+
+	ctx := context.Background()
+	for _, dir := range []string{"/users", "/users/alice", "/users/alice/src", "/users/alice/src/private", "/team"} {
+		if err := fs.Mkdir(ctx, dir); err != nil {
+			t.Fatalf("Mkdir(%s) error: %v", dir, err)
+		}
+	}
+	if err := fs.WriteFile(ctx, "/users/alice/src/private/secret.txt", strings.NewReader("secret")); err != nil {
+		t.Fatalf("WriteFile(/users/alice/src/private/secret.txt) error: %v", err)
+	}
+
+	req := httptest.NewRequest("COPY", "/dav/src", nil)
+	req.Header.Set("Destination", "http://example.com/dav/team/copied")
+	setWebDAVTestBasicAuth(req, "alice")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("COPY directory status = %d, want %d; body=%s", w.Code, http.StatusForbidden, w.Body.String())
+	}
+	if _, err := fs.Stat(ctx, "/users/alice/src/private/secret.txt"); err != nil {
+		t.Fatalf("expected source tree to remain after rejected COPY: %v", err)
+	}
+	if _, err := fs.Stat(ctx, "/team/copied"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("expected destination tree to be rolled back after rejected COPY, got %v", err)
+	}
+}
+
 func TestHandler_UsersAuthAdminCanAccessGlobalNamespace(t *testing.T) {
 	handler, fs := setupUsersModeHandler(t, map[string]webDAVTestCredential{
 		"admin": {
