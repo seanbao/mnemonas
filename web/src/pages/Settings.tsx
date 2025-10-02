@@ -411,6 +411,104 @@ function isValidTCPAddress(value: string): boolean {
   return isValidTCPHost(host) && Number.isInteger(port) && port >= 1 && port <= 65535
 }
 
+function isValidIPv4Address(value: string): boolean {
+  const parts = value.split('.')
+  if (parts.length !== 4) {
+    return false
+  }
+
+  return parts.every((part) => {
+    if (!/^\d+$/.test(part)) {
+      return false
+    }
+    const octet = Number(part)
+    return Number.isInteger(octet) && octet >= 0 && octet <= 255
+  })
+}
+
+function isValidIPv6Address(value: string): boolean {
+  if (!value || /[\s[\]%]/.test(value) || hasControlChar(value)) {
+    return false
+  }
+
+  let address = value
+  let embeddedIPv4Groups = 0
+  if (address.includes('.')) {
+    const lastColon = address.lastIndexOf(':')
+    if (lastColon < 0 || !isValidIPv4Address(address.slice(lastColon + 1))) {
+      return false
+    }
+    const prefix = address.slice(0, lastColon)
+    if (!prefix) {
+      return false
+    }
+    address = prefix.endsWith(':') ? `${prefix}:` : prefix
+    embeddedIPv4Groups = 2
+  }
+
+  const compressedParts = address.split('::')
+  if (compressedParts.length > 2) {
+    return false
+  }
+
+  const parseGroups = (part: string): string[] | null => {
+    if (!part) {
+      return []
+    }
+    const groups = part.split(':')
+    if (groups.some(group => !/^[0-9A-Fa-f]{1,4}$/.test(group))) {
+      return null
+    }
+    return groups
+  }
+
+  const leftGroups = parseGroups(compressedParts[0])
+  const rightGroups = parseGroups(compressedParts[1] ?? '')
+  if (!leftGroups || !rightGroups) {
+    return false
+  }
+
+  const groupCount = leftGroups.length + rightGroups.length + embeddedIPv4Groups
+  if (compressedParts.length === 2) {
+    return groupCount < 8
+  }
+  return groupCount === 8
+}
+
+function ipAddressKind(value: string): 'ipv4' | 'ipv6' | null {
+  if (isValidIPv4Address(value)) {
+    return 'ipv4'
+  }
+  if (isValidIPv6Address(value)) {
+    return 'ipv6'
+  }
+  return null
+}
+
+function isValidTrustedProxyCIDR(value: string): boolean {
+  const trimmed = value.trim()
+  if (!trimmed || trimmed !== value || /\s/.test(trimmed) || hasControlChar(trimmed)) {
+    return false
+  }
+
+  const parts = trimmed.split('/')
+  if (parts.length === 1) {
+    return ipAddressKind(trimmed) !== null
+  }
+  if (parts.length !== 2) {
+    return false
+  }
+
+  const kind = ipAddressKind(parts[0])
+  if (!kind || !/^\d+$/.test(parts[1])) {
+    return false
+  }
+
+  const prefixLength = Number(parts[1])
+  const maxPrefixLength = kind === 'ipv4' ? 32 : 128
+  return Number.isInteger(prefixLength) && prefixLength >= 0 && prefixLength <= maxPrefixLength
+}
+
 const httpHeaderNamePattern = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/
 
 function isValidWebhookHeaderLine(header: string): boolean {
@@ -1563,6 +1661,7 @@ export function SettingsPage() {
     serverWriteTimeout: '60s',
     serverIdleTimeout: '120s',
     serverTrustedProxyHops: '0',
+    serverTrustedProxyCIDRs: '',
     tlsEnabled: false,
     tlsCertFile: '',
     tlsKeyFile: '',
@@ -1792,6 +1891,7 @@ export function SettingsPage() {
       serverWriteTimeout: data.server.write_timeout,
       serverIdleTimeout: data.server.idle_timeout,
       serverTrustedProxyHops: String(data.server.trusted_proxy_hops ?? 0),
+      serverTrustedProxyCIDRs: (data.server.trusted_proxy_cidrs ?? []).join('\n'),
       tlsEnabled: data.server.tls?.enabled ?? false,
       tlsCertFile: data.server.tls?.cert_file ?? '',
       tlsKeyFile: data.server.tls?.key_file ?? '',
@@ -2144,6 +2244,10 @@ export function SettingsPage() {
       .split('\n')
       .map(entry => entry.trim())
       .filter(Boolean)
+    const trustedProxyCIDRs = settings.serverTrustedProxyCIDRs
+      .split('\n')
+      .map(entry => entry.trim())
+      .filter(Boolean)
     const parsedDirectoryQuotas = parseDirectoryQuotaLines(settings.directoryQuotas)
     if (parsedDirectoryQuotas.error) {
       addToast({
@@ -2278,6 +2382,17 @@ export function SettingsPage() {
     })
     return
   }
+
+    for (const cidr of trustedProxyCIDRs) {
+      if (!isValidTrustedProxyCIDR(cidr)) {
+        addToast({
+          title: '受信代理来源格式无效',
+          description: '每行必须是 IP 地址或 CIDR，例如 10.0.0.0/8、192.168.1.10 或 fd00::/8',
+          color: 'danger',
+        })
+        return
+      }
+    }
 
     if (!/^\d+$/.test(trimmedMaxVersions) || !Number.isInteger(parsedMaxVersions) || parsedMaxVersions < 0) {
       addToast({
@@ -2515,6 +2630,7 @@ export function SettingsPage() {
         write_timeout: trimmedWriteTimeout,
         idle_timeout: trimmedIdleTimeout,
         trusted_proxy_hops: parsedTrustedProxyHops,
+        trusted_proxy_cidrs: trustedProxyCIDRs,
         tls: {
           enabled: settings.tlsEnabled,
           cert_file: settings.tlsCertFile.trim(),
@@ -2814,6 +2930,19 @@ export function SettingsPage() {
                       classNames={{
                         inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
                       }}
+                    />
+                  </SettingRow>
+                  <SettingRow
+                    label="受信代理来源"
+                    description="逐行填写非 loopback 代理直连来源的 IP 或 CIDR；为空时仅信任本机代理"
+                  >
+                    <textarea
+                      aria-label="受信代理来源"
+                      rows={3}
+                      value={settings.serverTrustedProxyCIDRs}
+                      onChange={(event) => updateDirtySettings(s => ({ ...s, serverTrustedProxyCIDRs: event.target.value }))}
+                      className="input-shell min-h-24 w-full rounded-medium border border-transparent bg-transparent px-3 py-2 font-mono text-sm outline-none focus:border-accent-primary"
+                      placeholder={'172.16.0.0/12\n192.168.1.10\nfd00::/8'}
                     />
                   </SettingRow>
                 </div>

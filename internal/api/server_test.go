@@ -6402,6 +6402,48 @@ func TestServer_GetSettings_IncludesTrustedProxyHops(t *testing.T) {
 	}
 }
 
+func TestServer_GetSettings_UsesEmptyArraysForNilSlices(t *testing.T) {
+	server, _, _ := setupTestServer(t)
+	server.config.Server.TrustedProxyCIDRs = nil
+	server.config.Storage.DirectoryQuotas = nil
+	server.config.Storage.DirectoryAccessRules = nil
+	server.config.DiskHealth.Devices = nil
+	server.storeConfig(server.config)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/settings", nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("get settings status = %d, want %d", w.Code, http.StatusOK)
+	}
+
+	var payload map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to parse settings response: %v", err)
+	}
+	data := payload["data"].(map[string]interface{})
+	serverData := data["server"].(map[string]interface{})
+	storageData := data["storage"].(map[string]interface{})
+	diskHealthData := data["disk_health"].(map[string]interface{})
+
+	for label, value := range map[string]interface{}{
+		"server.trusted_proxy_cidrs":     serverData["trusted_proxy_cidrs"],
+		"storage.directory_quotas":       storageData["directory_quotas"],
+		"storage.directory_access_rules": storageData["directory_access_rules"],
+		"disk_health.devices":            diskHealthData["devices"],
+	} {
+		items, ok := value.([]interface{})
+		if !ok {
+			t.Fatalf("%s encoded as %T, want JSON array", label, value)
+		}
+		if len(items) != 0 {
+			t.Fatalf("%s length = %d, want 0", label, len(items))
+		}
+	}
+}
+
 func TestServer_ListFiles_EnforcesHomeDirForNonAdmin(t *testing.T) {
 	server, fs, _, username, password := setupAuthServer(t)
 

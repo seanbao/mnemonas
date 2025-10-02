@@ -1045,7 +1045,7 @@ func (m *Manager) jobViewLocked(id string, job config.BackupJobConfig) JobView {
 		RestoreDrillStats:          cloneRestoreDrillStats(restoreDrillStats),
 		IncludeConfig:              job.IncludeConfig,
 		VerifyAfterBackup:          job.VerifyAfterBackup,
-		Exclude:                    append([]string(nil), job.Exclude...),
+		Exclude:                    cloneStringSlice(job.Exclude),
 		Running:                    running,
 		LastRun:                    cloneRunResult(state.LastRun),
 		LastSuccessfulRun:          cloneRunResult(state.LastSuccessfulRun),
@@ -1161,6 +1161,9 @@ func (m *Manager) runResticBackup(ctx context.Context, job config.BackupJobConfi
 	if strings.TrimSpace(job.PasswordFile) == "" {
 		return fmt.Errorf("%w: restic password_file is empty", ErrUnsafePath)
 	}
+	if err := validateSourceTreeNoSymlinks(ctx, source); err != nil {
+		return err
+	}
 
 	args := []string{"-r", job.Repository, "--password-file", job.PasswordFile, "backup", source, "--tag", "mnemonas", "--tag", "job:" + job.ID}
 	for _, pattern := range job.Exclude {
@@ -1186,6 +1189,9 @@ func (m *Manager) runRcloneBackup(ctx context.Context, job config.BackupJobConfi
 	}
 	if strings.TrimSpace(job.Remote) == "" {
 		return fmt.Errorf("%w: rclone remote is empty", ErrUnsafePath)
+	}
+	if err := validateSourceTreeNoSymlinks(ctx, source); err != nil {
+		return err
 	}
 
 	args := append(rcloneBaseArgs(job), "sync", source, job.Remote, "--create-empty-src-dirs")
@@ -1643,6 +1649,9 @@ func (m *Manager) runRcloneRestoreDrill(ctx context.Context, job config.BackupJo
 	}
 	if strings.TrimSpace(job.Remote) == "" {
 		return fmt.Errorf("%w: rclone remote is empty", ErrUnsafePath)
+	}
+	if err := validateSourceTreeNoSymlinks(ctx, source); err != nil {
+		return err
 	}
 	args := append(rcloneBaseArgs(job), "check", source, job.Remote, "--one-way")
 	for _, pattern := range job.Exclude {
@@ -2177,6 +2186,52 @@ func copySourceTree(ctx context.Context, source, destination string, excludes []
 	return entries, totalBytes, nil
 }
 
+func validateSourceTreeNoSymlinks(ctx context.Context, source string) error {
+	root, err := os.OpenRoot(source)
+	if err != nil {
+		return fmt.Errorf("open backup source: %w", err)
+	}
+	defer root.Close()
+
+	return validateSourceTreeEntryNoSymlinks(ctx, root, ".")
+}
+
+func validateSourceTreeEntryNoSymlinks(ctx context.Context, root *os.Root, relPath string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	info, err := root.Lstat(relPath)
+	if err != nil {
+		return mapSourceRootError(err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("%w: %s", ErrSourceContainsSymlink, relPath)
+	}
+	if !info.IsDir() {
+		return nil
+	}
+
+	dir, err := rootio.OpenDirNoFollow(root, relPath)
+	if err != nil {
+		return mapSourceRootError(err)
+	}
+	children, readErr := dir.ReadDir(-1)
+	closeErr := dir.Close()
+	if readErr != nil {
+		return fmt.Errorf("read backup source directory %s: %w", relPath, readErr)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("close backup source directory %s: %w", relPath, closeErr)
+	}
+	for _, child := range children {
+		if err := validateSourceTreeEntryNoSymlinks(ctx, root, childRelPath(relPath, child.Name())); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func copySourceTreeEntry(ctx context.Context, root *os.Root, relPath, destination string, excludes []string, entries *[]ManifestEntry, totalBytes *int64) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -2569,6 +2624,13 @@ func cloneJob(job config.BackupJobConfig) config.BackupJobConfig {
 	job.ExtraArgs = append([]string(nil), job.ExtraArgs...)
 	job.Exclude = append([]string(nil), job.Exclude...)
 	return job
+}
+
+func cloneStringSlice(values []string) []string {
+	if len(values) == 0 {
+		return []string{}
+	}
+	return append([]string(nil), values...)
 }
 
 func cloneRunResult(result *RunResult) *RunResult {
@@ -3510,15 +3572,27 @@ func summarizeRestoredTree(ctx context.Context, root string) (int64, int64, erro
 		if filePath == root {
 			return nil
 		}
+		relPath, err := filepath.Rel(root, filePath)
+		if err != nil {
+			relPath = filePath
+		}
+		relPath = filepath.ToSlash(relPath)
 		info, err := entry.Info()
 		if err != nil {
 			return fmt.Errorf("stat restored entry: %w", err)
 		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("%w: restored entry must not be a symlink: %s", ErrUnsafePath, relPath)
+		}
+		if info.IsDir() {
+			return nil
+		}
 		if info.Mode().IsRegular() {
 			fileCount++
 			totalBytes += info.Size()
+			return nil
 		}
-		return nil
+		return fmt.Errorf("%w: restored entry has unsupported file type: %s", ErrUnsafePath, relPath)
 	})
 	if err != nil {
 		return 0, 0, fmt.Errorf("summarize restored tree: %w", err)

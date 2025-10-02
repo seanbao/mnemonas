@@ -125,6 +125,9 @@ func TestServer_BackupEndpoints_RunAndRestoreDrill(t *testing.T) {
 	}
 
 	jobView := runBackupAPIRequest[backup.JobView](t, server, http.MethodGet, "/api/v1/maintenance/backups/home", nil, http.StatusOK)
+	if jobView.Exclude == nil {
+		t.Fatal("backup job exclude array is nil, want empty array")
+	}
 	if jobView.LastRestore == nil || jobView.LastRestore.ID != restoreResult.ID || jobView.LastRestore.TargetPath != restoreTarget {
 		t.Fatalf("backup job missing latest restore record: %+v", jobView.LastRestore)
 	}

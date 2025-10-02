@@ -31,7 +31,7 @@ const mockReportDirectoryAccess = vi.mocked(reportDirectoryAccess)
 const { defaultSettingsResponse, defaultSecurityCheckResponse } = vi.hoisted(() => ({
   defaultSettingsResponse: {
     data: {
-      server: { host: '0.0.0.0', port: 8080, read_timeout: '30s', write_timeout: '60s', idle_timeout: '120s', trusted_proxy_hops: 1, read_timeout_seconds: 60, write_timeout_seconds: 300 },
+      server: { host: '0.0.0.0', port: 8080, read_timeout: '30s', write_timeout: '60s', idle_timeout: '120s', trusted_proxy_hops: 1, trusted_proxy_cidrs: ['10.0.0.0/8'], read_timeout_seconds: 60, write_timeout_seconds: 300 },
       storage: { root: '~/.mnemonas' },
     trash: { enabled: true, retention_days: 30, max_size: 10737418240 },
       retention: { max_versions: 100, max_age: '8760h', min_free_space: 10737418240, gc_interval: '24h' },
@@ -65,7 +65,7 @@ const { defaultSettingsResponse, defaultSecurityCheckResponse } = vi.hoisted(() 
         },
       ],
       request: { scheme: 'http' },
-      config: { trusted_proxy_hops: 1 },
+      config: { trusted_proxy_hops: 1, trusted_proxy_cidrs: ['10.0.0.0/8'] },
     },
   },
 }))
@@ -1712,47 +1712,91 @@ describe('SettingsPage', () => {
     })
 
     it('renders trusted proxy hops input', async () => {
-    render(<SettingsPage />)
-    await waitFor(() => {
-    expect(screen.getByLabelText('受信代理层数')).toHaveValue(1)
+      render(<SettingsPage />)
+      await waitFor(() => {
+        expect(screen.getByLabelText('受信代理层数')).toHaveValue(1)
+      })
     })
+
+    it('renders trusted proxy CIDR input', async () => {
+      render(<SettingsPage />)
+      await waitFor(() => {
+        expect(screen.getByLabelText('受信代理来源')).toHaveValue('10.0.0.0/8')
+      })
     })
 
     it('allows editing trusted proxy hops and saves it', async () => {
-    const user = userEvent.setup({ writeToClipboard: false })
-    render(<SettingsPage />)
+      const user = userEvent.setup({ writeToClipboard: false })
+      render(<SettingsPage />)
 
-    const input = await screen.findByLabelText('受信代理层数')
-    await user.clear(input)
-    await user.type(input, '2')
-    await user.click(screen.getByText('保存设置'))
+      const input = await screen.findByLabelText('受信代理层数')
+      await user.clear(input)
+      await user.type(input, '2')
+      await user.click(screen.getByText('保存设置'))
 
-    await waitFor(() => {
-    expect(mockUpdateSettings).toHaveBeenCalledWith(expect.objectContaining({
-      server: expect.objectContaining({
-      trusted_proxy_hops: 2,
-      }),
-    }))
+      await waitFor(() => {
+        expect(mockUpdateSettings).toHaveBeenCalledWith(expect.objectContaining({
+          server: expect.objectContaining({
+            trusted_proxy_hops: 2,
+          }),
+        }))
+      })
     })
+
+    it('allows editing trusted proxy CIDRs and saves them', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      render(<SettingsPage />)
+
+      const input = await screen.findByLabelText('受信代理来源')
+      await user.clear(input)
+      await user.type(input, '10.0.0.0/8\n192.168.1.10\nfd00::/8')
+      await user.click(screen.getByText('保存设置'))
+
+      await waitFor(() => {
+        expect(mockUpdateSettings).toHaveBeenCalledWith(expect.objectContaining({
+          server: expect.objectContaining({
+            trusted_proxy_cidrs: ['10.0.0.0/8', '192.168.1.10', 'fd00::/8'],
+          }),
+        }))
+      })
     })
 
     it('rejects negative trusted proxy hops before saving', async () => {
-    const user = userEvent.setup({ writeToClipboard: false })
-    render(<SettingsPage />)
+      const user = userEvent.setup({ writeToClipboard: false })
+      render(<SettingsPage />)
 
-    const input = await screen.findByLabelText('受信代理层数')
-    await user.clear(input)
-    await user.type(input, '-1')
-    await user.click(screen.getByText('保存设置'))
+      const input = await screen.findByLabelText('受信代理层数')
+      await user.clear(input)
+      await user.type(input, '-1')
+      await user.click(screen.getByText('保存设置'))
 
-    await waitFor(() => {
-    expect(mockAddToast).toHaveBeenCalledWith({
-      title: '受信代理层数格式无效',
-      description: '受信代理层数必须是 0 或正整数',
-      color: 'danger',
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '受信代理层数格式无效',
+          description: '受信代理层数必须是 0 或正整数',
+          color: 'danger',
+        })
+      })
+      expect(mockUpdateSettings).not.toHaveBeenCalled()
     })
-    })
-    expect(mockUpdateSettings).not.toHaveBeenCalled()
+
+    it('rejects invalid trusted proxy CIDRs before saving', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      render(<SettingsPage />)
+
+      const input = await screen.findByLabelText('受信代理来源')
+      await user.clear(input)
+      await user.type(input, 'not-a-cidr')
+      await user.click(screen.getByText('保存设置'))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '受信代理来源格式无效',
+          description: '每行必须是 IP 地址或 CIDR，例如 10.0.0.0/8、192.168.1.10 或 fd00::/8',
+          color: 'danger',
+        })
+      })
+      expect(mockUpdateSettings).not.toHaveBeenCalled()
     })
 
     it('renders server host input', async () => {

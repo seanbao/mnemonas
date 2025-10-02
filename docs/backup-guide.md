@@ -91,7 +91,7 @@ MnemoNAS 提供内置备份任务入口，可在维护页或 API 中执行、查
 
 - `local.destination` 必须是 `storage.root` 之外的绝对路径，且已存在的路径组件不能是符号链接，避免递归把备份写回源目录或写入符号链接指向的位置。
 - 默认来源是 `storage.root`；生产环境更推荐把 `source` 指向 ZFS/Btrfs/LVM 快照挂载目录。
-- 源目录中遇到符号链接会中止任务，避免备份逃逸到源目录之外。
+- 源目录中遇到符号链接会中止备份任务，避免备份逃逸到源目录之外；`rclone` 恢复演练也会在执行远端校验前拒绝当前源树中的符号链接。
 - `restic` 和 `rclone` 任务不会通过 shell 拼接命令；`command` 只能是可执行名或绝对路径，`extra_args` 会作为 argv 追加到备份命令，恢复命令不会复用备份专用参数。
 - `password_file`、`config_file` 必须是 `source` 与 `storage.root` 之外的普通文件，避免把备份凭据重新纳入备份数据。
 - `schedule_interval` 是服务内置的轻量调度器，适合固定间隔任务；复杂窗口、限速、网络唤醒和多阶段恢复仍建议配合 systemd timer 或外部编排。
@@ -220,7 +220,7 @@ curl -X POST -b cookies.txt \
   -d '{"target_path":"/mnt/restore/mnemonas-restic","include_config":false}'
 ```
 
-`restore-preview` 不会写入目标目录，也不会写入恢复历史。它会复用恢复目标安全校验，并返回预计文件数、字节数、最多 10 个样例路径、`preflight_checks`、`warnings`、`cutover_checklist` 和 `rollback_checklist`；维护页会要求当前目标目录和配置选项已经成功预览，且没有失败预检项后才允许开始恢复。预检覆盖目标路径隔离、目标目录状态、备份内容、目标文件系统容量和配置文件处理。`target_path` 必须是服务器上的绝对路径，并且必须位于当前 `storage.root`、备份来源和本地备份目标/仓库之外；父目录必须已存在，目标目录不存在或为空，且已存在的路径组件不能是符号链接。`restore` 写入前会在服务端重新执行同一套预检；预检失败会拒绝恢复并写入失败恢复记录。`local` 恢复会把快照中的 `data/` 内容复制到目标目录根部并立即校验；`include_config = true` 时，配置文件会恢复到 `target_path/.mnemonas-restore/config.toml`。`restic` 恢复预览使用 `restic ls --json`，实际恢复执行 `restic restore latest --tag mnemonas --tag job:<id> --path <source>`，并把 restic 默认恢复出的来源目录内容整理到目标根目录。`rclone` 恢复预览使用 `rclone lsjson`，实际恢复执行 `rclone copy` 和 `rclone check --one-way`。恢复完成后，`restore-verify` 会只读检查目标目录，返回文件数、字节数、配置文件是否存在、是否检测到 `files/` 与 `.mnemonas/` 等完整 storage root 结构，并把符号链接、非常规文件或结构不完整情况作为警告返回；最近一次报告会持久化为 `last_restore_verify`，刷新维护页后仍可查看。维护页会在恢复成功后自动进入恢复后切换清单，并显示本次恢复的回滚清单。
+`restore-preview` 不会写入目标目录，也不会写入恢复历史。它会复用恢复目标安全校验，并返回预计文件数、字节数、最多 10 个样例路径、`preflight_checks`、`warnings`、`cutover_checklist` 和 `rollback_checklist`；维护页会要求当前目标目录和配置选项已经成功预览，且没有失败预检项后才允许开始恢复。预检覆盖目标路径隔离、目标目录状态、备份内容、目标文件系统容量和配置文件处理。`target_path` 必须是服务器上的绝对路径，并且必须位于当前 `storage.root`、备份来源和本地备份目标/仓库之外；父目录必须已存在，目标目录不存在或为空，且已存在的路径组件不能是符号链接。`restore` 写入前会在服务端重新执行同一套预检；预检失败会拒绝恢复并写入失败恢复记录。`local` 恢复会把快照中的 `data/` 内容复制到目标目录根部并立即校验；`include_config = true` 时，配置文件会恢复到 `target_path/.mnemonas-restore/config.toml`。`restic` 恢复预览使用 `restic ls --json`，实际恢复执行 `restic restore latest --tag mnemonas --tag job:<id> --path <source>`，并把 restic 默认恢复出的来源目录内容整理到目标根目录。`rclone` 恢复预览使用 `rclone lsjson`，实际恢复执行 `rclone copy` 和 `rclone check --one-way`。`restic` 与 `rclone` 恢复在安装目标目录前会拒绝恢复出的符号链接和非常规文件。恢复完成后，`restore-verify` 会只读检查目标目录，返回文件数、字节数、配置文件是否存在、是否检测到 `files/` 与 `.mnemonas/` 等完整 storage root 结构，并把符号链接、非常规文件或结构不完整情况作为警告返回；最近一次报告会持久化为 `last_restore_verify`，刷新维护页后仍可查看。维护页会在恢复成功后自动进入恢复后切换清单，并显示本次恢复的回滚清单。
 
 需要同时恢复多个独立任务或多个目标目录时，可以先调用批量预览，再执行批量恢复：
 
