@@ -1549,7 +1549,6 @@ func TestStore_OperationsRejectTraversalLikePaths(t *testing.T) {
 	testCases := []string{
 		"../escape.txt",
 		`..\\escape.txt`,
-		"   ",
 	}
 
 	for _, rawPath := range testCases {
@@ -1650,6 +1649,96 @@ func TestStore_NormalizesDirectPathInputs(t *testing.T) {
 	}
 	if _, _, _, err := s.GetFileIndex(ctx, "/docs/report.txt"); err != ErrNotFound {
 		t.Fatalf("expected old normalized path index to be absent, got %v", err)
+	}
+}
+
+func TestStore_PreservesWhitespaceInPaths(t *testing.T) {
+	s := setupStore(t)
+	ctx := context.Background()
+	now := time.Now().Truncate(time.Second)
+	plainPath := "/docs/report.txt"
+	spacedPath := "/docs/report.txt "
+
+	if err := s.AddVersion(ctx, plainPath, "hash-plain", 100, ""); err != nil {
+		t.Fatalf("AddVersion(plain) error: %v", err)
+	}
+	if err := s.AddVersion(ctx, spacedPath, "hash-spaced", 200, ""); err != nil {
+		t.Fatalf("AddVersion(spaced) error: %v", err)
+	}
+
+	plainVersions, err := s.GetVersions(ctx, plainPath)
+	if err != nil {
+		t.Fatalf("GetVersions(plain) error: %v", err)
+	}
+	if len(plainVersions) != 1 || plainVersions[0].Path != plainPath || plainVersions[0].Hash != "hash-plain" {
+		t.Fatalf("plain versions = %+v, want only %q", plainVersions, plainPath)
+	}
+	spacedVersions, err := s.GetVersions(ctx, spacedPath)
+	if err != nil {
+		t.Fatalf("GetVersions(spaced) error: %v", err)
+	}
+	if len(spacedVersions) != 1 || spacedVersions[0].Path != spacedPath || spacedVersions[0].Hash != "hash-spaced" {
+		t.Fatalf("spaced versions = %+v, want only %q", spacedVersions, spacedPath)
+	}
+
+	if err := s.UpdateFileIndex(ctx, plainPath, 100, now, "index-plain"); err != nil {
+		t.Fatalf("UpdateFileIndex(plain) error: %v", err)
+	}
+	if err := s.UpdateFileIndex(ctx, spacedPath, 200, now, "index-spaced"); err != nil {
+		t.Fatalf("UpdateFileIndex(spaced) error: %v", err)
+	}
+	if plainSize, _, plainHash, err := s.GetFileIndex(ctx, plainPath); err != nil || plainSize != 100 || plainHash != "index-plain" {
+		t.Fatalf("GetFileIndex(plain) = (%d, %q, %v), want (100, index-plain, nil)", plainSize, plainHash, err)
+	}
+	if spacedSize, _, spacedHash, err := s.GetFileIndex(ctx, spacedPath); err != nil || spacedSize != 200 || spacedHash != "index-spaced" {
+		t.Fatalf("GetFileIndex(spaced) = (%d, %q, %v), want (200, index-spaced, nil)", spacedSize, spacedHash, err)
+	}
+
+	if err := s.SetVersioningOverride(ctx, plainPath, false); err != nil {
+		t.Fatalf("SetVersioningOverride(plain) error: %v", err)
+	}
+	if err := s.SetVersioningOverride(ctx, spacedPath, true); err != nil {
+		t.Fatalf("SetVersioningOverride(spaced) error: %v", err)
+	}
+	if enabled, exists := s.GetVersioningOverride(ctx, plainPath); !exists || enabled {
+		t.Fatalf("GetVersioningOverride(plain) = (%v, %v), want (false, true)", enabled, exists)
+	}
+	if enabled, exists := s.GetVersioningOverride(ctx, spacedPath); !exists || !enabled {
+		t.Fatalf("GetVersioningOverride(spaced) = (%v, %v), want (true, true)", enabled, exists)
+	}
+
+	if err := s.AcquireLock(ctx, plainPath, "plain-holder", WriteLock, time.Minute); err != nil {
+		t.Fatalf("AcquireLock(plain) error: %v", err)
+	}
+	if err := s.AcquireLock(ctx, spacedPath, "spaced-holder", WriteLock, time.Minute); err != nil {
+		t.Fatalf("AcquireLock(spaced) error: %v", err)
+	}
+	if lock, err := s.GetLock(ctx, plainPath); err != nil || lock.Holder != "plain-holder" {
+		t.Fatalf("GetLock(plain) = (%+v, %v), want holder plain-holder", lock, err)
+	}
+	if lock, err := s.GetLock(ctx, spacedPath); err != nil || lock.Holder != "spaced-holder" {
+		t.Fatalf("GetLock(spaced) = (%+v, %v), want holder spaced-holder", lock, err)
+	}
+
+	if err := s.AddToTrash(ctx, &TrashItem{ID: "trash-plain", OriginalPath: plainPath, DeletedAt: now, ExpiresAt: now.Add(time.Hour)}); err != nil {
+		t.Fatalf("AddToTrash(plain) error: %v", err)
+	}
+	if err := s.AddToTrash(ctx, &TrashItem{ID: "trash-spaced", OriginalPath: spacedPath, DeletedAt: now, ExpiresAt: now.Add(time.Hour)}); err != nil {
+		t.Fatalf("AddToTrash(spaced) error: %v", err)
+	}
+	plainTrash, err := s.GetTrashItem(ctx, "trash-plain")
+	if err != nil {
+		t.Fatalf("GetTrashItem(plain) error: %v", err)
+	}
+	if plainTrash.OriginalPath != plainPath {
+		t.Fatalf("plain trash path = %q, want %q", plainTrash.OriginalPath, plainPath)
+	}
+	spacedTrash, err := s.GetTrashItem(ctx, "trash-spaced")
+	if err != nil {
+		t.Fatalf("GetTrashItem(spaced) error: %v", err)
+	}
+	if spacedTrash.OriginalPath != spacedPath {
+		t.Fatalf("spaced trash path = %q, want %q", spacedTrash.OriginalPath, spacedPath)
 	}
 }
 
