@@ -4126,6 +4126,22 @@ run_doctor_input_validation_test() {
   local status
   mkdir -p "$case_dir"
 
+  expect_doctor_public_domain_failure() {
+    local name="$1"
+    local domain="$2"
+    local expected="$3"
+    local output="$case_dir/$name.log"
+    local status
+
+    set +e
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain "$domain" > "$output" 2>&1
+    status=$?
+    set -e
+
+    [[ "$status" -ne 0 ]] || fail "doctor accepted PUBLIC_DOMAIN for $name"
+    assert_file_contains "$output" "$expected"
+  }
+
   set +e
   SERVER_PORT="8080 bad" \
     "$REPO_ROOT/scripts/mnemonas-doctor.sh" > "$case_dir/server-port.log" 2>&1
@@ -4171,37 +4187,15 @@ run_doctor_input_validation_test() {
   [[ "$status" -ne 0 ]] || fail "doctor accepted SERVER_URL with control character"
   assert_file_contains "$case_dir/server-url-control.log" "SERVER_URL cannot contain control characters"
 
-  set +e
-  "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain https://nas.example.com > "$case_dir/public-domain.log" 2>&1
-  status=$?
-  set -e
-
-  [[ "$status" -ne 0 ]] || fail "doctor accepted PUBLIC_DOMAIN with scheme"
-  assert_file_contains "$case_dir/public-domain.log" "PUBLIC_DOMAIN must be a hostname without scheme or port"
-
-  set +e
-  "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain "nas.example.com"$'\a' > "$case_dir/public-domain-control.log" 2>&1
-  status=$?
-  set -e
-
-  [[ "$status" -ne 0 ]] || fail "doctor accepted PUBLIC_DOMAIN with control character"
-  assert_file_contains "$case_dir/public-domain-control.log" "PUBLIC_DOMAIN cannot contain control characters"
-
-  set +e
-  "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain localhost > "$case_dir/public-domain-localhost.log" 2>&1
-  status=$?
-  set -e
-
-  [[ "$status" -ne 0 ]] || fail "doctor accepted localhost as PUBLIC_DOMAIN"
-  assert_file_contains "$case_dir/public-domain-localhost.log" "PUBLIC_DOMAIN must be a fully qualified hostname"
-
-  set +e
-  "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain 127.0.0.1 > "$case_dir/public-domain-ip.log" 2>&1
-  status=$?
-  set -e
-
-  [[ "$status" -ne 0 ]] || fail "doctor accepted IP address as PUBLIC_DOMAIN"
-  assert_file_contains "$case_dir/public-domain-ip.log" "PUBLIC_DOMAIN must be a hostname, not an IP address"
+  expect_doctor_public_domain_failure "public-domain-scheme" "https://nas.example.com" "PUBLIC_DOMAIN must be a hostname without scheme or port"
+  expect_doctor_public_domain_failure "public-domain-control" "nas.example.com"$'\a' "PUBLIC_DOMAIN cannot contain control characters"
+  expect_doctor_public_domain_failure "public-domain-localhost" "localhost" "PUBLIC_DOMAIN must be a fully qualified hostname"
+  expect_doctor_public_domain_failure "public-domain-ip" "127.0.0.1" "PUBLIC_DOMAIN must be a hostname, not an IP address"
+  expect_doctor_public_domain_failure "public-domain-leading-label-hyphen" "nas.-example.com" "PUBLIC_DOMAIN is invalid"
+  expect_doctor_public_domain_failure "public-domain-trailing-label-hyphen" "nas.example-.com" "PUBLIC_DOMAIN is invalid"
+  expect_doctor_public_domain_failure "public-domain-long-label" "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.example.com" "PUBLIC_DOMAIN is invalid"
+  expect_doctor_public_domain_failure "public-domain-repeated-trailing-dot" "nas.example.com.." "PUBLIC_DOMAIN is invalid"
+  expect_doctor_public_domain_failure "public-domain-empty-label" "nas..example.com" "PUBLIC_DOMAIN is invalid"
 }
 
 run_doctor_invalid_toml_syntax_test() {
