@@ -721,6 +721,94 @@ func TestNewShareStore_LoadNormalizesValidSharesAndDropsInvalidEntries(t *testin
 	}
 }
 
+func TestNewShareStore_LoadRebuildsPathIndexAfterDuplicateIDs(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+	createdAt := time.Date(2026, time.May, 21, 9, 0, 0, 0, time.UTC)
+
+	writeShareFixture(t, storePath, []*Share{
+		{
+			ID:          "duplicate",
+			Path:        "/old/report.pdf",
+			Type:        ShareTypeFile,
+			CreatedBy:   "user1",
+			CreatedAt:   createdAt,
+			Permission:  PermissionRead,
+			Enabled:     true,
+			Description: "old",
+		},
+		{
+			ID:          "duplicate",
+			Path:        "/docs/report.pdf",
+			Type:        ShareTypeFile,
+			CreatedBy:   "user1",
+			CreatedAt:   createdAt.Add(time.Minute),
+			Permission:  PermissionRead,
+			Enabled:     true,
+			Description: "middle",
+		},
+		{
+			ID:          "duplicate",
+			Path:        `docs\\report.pdf`,
+			Type:        ShareTypeFile,
+			CreatedBy:   "user1",
+			CreatedAt:   createdAt.Add(2 * time.Minute),
+			Permission:  PermissionReadWrite,
+			Enabled:     true,
+			Description: "latest",
+		},
+		{
+			ID:         "other",
+			Path:       "/docs/report.pdf",
+			Type:       ShareTypeFile,
+			CreatedBy:  "user2",
+			CreatedAt:  createdAt.Add(3 * time.Minute),
+			Permission: PermissionRead,
+			Enabled:    true,
+		},
+	})
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("NewShareStore() error: %v", err)
+	}
+
+	loaded, err := store.Get("duplicate")
+	if err != nil {
+		t.Fatalf("Get(duplicate) error: %v", err)
+	}
+	if loaded.Path != "/docs/report.pdf" || loaded.Description != "latest" || loaded.Permission != PermissionRead {
+		t.Fatalf("expected duplicate share to keep final normalized entry, got %+v", loaded)
+	}
+	if shares := store.GetByPath("/old/report.pdf"); len(shares) != 0 {
+		t.Fatalf("expected old duplicate path to be removed from path index, got %+v", shares)
+	}
+
+	shares := store.GetByPath("/docs/report.pdf")
+	if len(shares) != 2 {
+		t.Fatalf("expected two unique shares at normalized path, got %+v", shares)
+	}
+	seen := map[string]int{}
+	for _, item := range shares {
+		seen[item.ID]++
+	}
+	if seen["duplicate"] != 1 || seen["other"] != 1 {
+		t.Fatalf("expected path index to contain each final share once, got counts %+v from %+v", seen, shares)
+	}
+
+	data, err := os.ReadFile(storePath)
+	if err != nil {
+		t.Fatalf("ReadFile(shares.json) error: %v", err)
+	}
+	var persisted []*Share
+	if err := json.Unmarshal(data, &persisted); err != nil {
+		t.Fatalf("Unmarshal(persisted shares) error: %v", err)
+	}
+	if len(persisted) != 2 {
+		t.Fatalf("expected normalized shares file to contain two unique shares, got %d", len(persisted))
+	}
+}
+
 func TestNewShareStore_LoadNormalizationIgnoresPersistenceWarning(t *testing.T) {
 	tempDir := t.TempDir()
 	storePath := filepath.Join(tempDir, "shares.json")
