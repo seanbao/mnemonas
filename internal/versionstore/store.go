@@ -408,7 +408,7 @@ func normalizeVersionStorePath(rawPath string) (string, error) {
 		return "", errInvalidStorePath
 	}
 	for _, segment := range strings.Split(normalized, "/") {
-		if segment == ".." {
+		if segment == "." || segment == ".." {
 			return "", errInvalidStorePath
 		}
 	}

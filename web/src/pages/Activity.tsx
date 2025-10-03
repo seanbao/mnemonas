@@ -91,7 +91,7 @@ interface ActivityPathFilterState {
   errorMessage?: string
 }
 
-const ACTIVITY_PATH_FILTER_ERROR = '路径不能包含 .. 或控制字符'
+const ACTIVITY_PATH_FILTER_ERROR = '路径不能包含 .、.. 或控制字符'
 
 function isActivityTimeRangeKey(value: string | undefined): value is ActivityTimeRangeKey {
   return ACTIVITY_TIME_RANGES.some((range) => range.key === value)

@@ -1450,7 +1450,7 @@ func normalizeHomeDir(homeDir string) (string, error) {
 		return "", errInvalidUserHomeDir
 	}
 	for _, segment := range strings.Split(normalized, "/") {
-		if segment == ".." {
+		if segment == "." || segment == ".." {
 			return "", errInvalidUserHomeDir
 		}
 	}

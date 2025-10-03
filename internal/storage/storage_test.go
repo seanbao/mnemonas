@@ -1359,23 +1359,44 @@ func TestFileSystem_OperationsRejectTraversalLikePaths(t *testing.T) {
 	if _, err := fs.Stat(ctx, "../safe/versioned.txt"); err != ErrNotFound {
 		t.Fatalf("Stat(traversal) error = %v, want ErrNotFound", err)
 	}
+	if _, err := fs.Stat(ctx, "/safe/./versioned.txt"); err != ErrNotFound {
+		t.Fatalf("Stat(dot segment) error = %v, want ErrNotFound", err)
+	}
 	if _, err := fs.ReadDir(ctx, "../safe"); err != ErrNotFound {
 		t.Fatalf("ReadDir(traversal) error = %v, want ErrNotFound", err)
+	}
+	if _, err := fs.ReadDir(ctx, "./safe"); err != ErrNotFound {
+		t.Fatalf("ReadDir(dot segment) error = %v, want ErrNotFound", err)
 	}
 	if _, err := fs.OpenFile(ctx, "../safe/versioned.txt"); err != ErrNotFound {
 		t.Fatalf("OpenFile(traversal) error = %v, want ErrNotFound", err)
 	}
+	if _, err := fs.OpenFile(ctx, "/safe/./versioned.txt"); err != ErrNotFound {
+		t.Fatalf("OpenFile(dot segment) error = %v, want ErrNotFound", err)
+	}
 	if err := fs.WriteFile(ctx, "../escape.txt", bytes.NewReader([]byte("blocked"))); err != ErrNotFound {
 		t.Fatalf("WriteFile(traversal) error = %v, want ErrNotFound", err)
+	}
+	if err := fs.WriteFile(ctx, "/safe/./escape.txt", bytes.NewReader([]byte("blocked"))); err != ErrNotFound {
+		t.Fatalf("WriteFile(dot segment) error = %v, want ErrNotFound", err)
 	}
 	if err := fs.Mkdir(ctx, "../escape-dir"); err != ErrNotFound {
 		t.Fatalf("Mkdir(traversal) error = %v, want ErrNotFound", err)
 	}
+	if err := fs.Mkdir(ctx, "./safe/escape-dir"); err != ErrNotFound {
+		t.Fatalf("Mkdir(dot segment) error = %v, want ErrNotFound", err)
+	}
 	if err := fs.Delete(ctx, "../safe/versioned.txt"); err != ErrNotFound {
 		t.Fatalf("Delete(traversal) error = %v, want ErrNotFound", err)
 	}
+	if err := fs.Delete(ctx, "/safe/./versioned.txt"); err != ErrNotFound {
+		t.Fatalf("Delete(dot segment) error = %v, want ErrNotFound", err)
+	}
 	if err := fs.PermanentDelete(ctx, "../safe/versioned.txt"); err != ErrNotFound {
 		t.Fatalf("PermanentDelete(traversal) error = %v, want ErrNotFound", err)
+	}
+	if err := fs.PermanentDelete(ctx, "./safe/versioned.txt"); err != ErrNotFound {
+		t.Fatalf("PermanentDelete(dot segment) error = %v, want ErrNotFound", err)
 	}
 	if err := fs.Rename(ctx, "../safe/versioned.txt", "/safe/renamed.txt"); err != ErrNotFound {
 		t.Fatalf("Rename(source traversal) error = %v, want ErrNotFound", err)
@@ -1383,23 +1404,47 @@ func TestFileSystem_OperationsRejectTraversalLikePaths(t *testing.T) {
 	if err := fs.Rename(ctx, "/safe/versioned.txt", "../renamed.txt"); err != ErrNotFound {
 		t.Fatalf("Rename(destination traversal) error = %v, want ErrNotFound", err)
 	}
+	if err := fs.Rename(ctx, "/safe/./versioned.txt", "/safe/renamed.txt"); err != ErrNotFound {
+		t.Fatalf("Rename(source dot segment) error = %v, want ErrNotFound", err)
+	}
+	if err := fs.Rename(ctx, "/safe/versioned.txt", "/safe/./renamed.txt"); err != ErrNotFound {
+		t.Fatalf("Rename(destination dot segment) error = %v, want ErrNotFound", err)
+	}
 	if _, err := fs.ListVersions(ctx, "../safe/versioned.txt"); err != ErrNotFound {
 		t.Fatalf("ListVersions(traversal) error = %v, want ErrNotFound", err)
+	}
+	if _, err := fs.ListVersions(ctx, "/safe/./versioned.txt"); err != ErrNotFound {
+		t.Fatalf("ListVersions(dot segment) error = %v, want ErrNotFound", err)
 	}
 	if _, err := fs.GetVersion(ctx, "../safe/versioned.txt", "missing-hash"); err != ErrNotFound {
 		t.Fatalf("GetVersion(traversal) error = %v, want ErrNotFound", err)
 	}
+	if _, err := fs.GetVersion(ctx, "./safe/versioned.txt", "missing-hash"); err != ErrNotFound {
+		t.Fatalf("GetVersion(dot segment) error = %v, want ErrNotFound", err)
+	}
 	if err := fs.RestoreVersion(ctx, "../safe/versioned.txt", "missing-hash"); err != ErrNotFound {
 		t.Fatalf("RestoreVersion(traversal) error = %v, want ErrNotFound", err)
+	}
+	if err := fs.RestoreVersion(ctx, "/safe/./versioned.txt", "missing-hash"); err != ErrNotFound {
+		t.Fatalf("RestoreVersion(dot segment) error = %v, want ErrNotFound", err)
 	}
 	if err := fs.SetVersioning(ctx, "../safe/versioned.txt", true); err != ErrNotFound {
 		t.Fatalf("SetVersioning(traversal) error = %v, want ErrNotFound", err)
 	}
+	if err := fs.SetVersioning(ctx, "./safe/versioned.txt", true); err != ErrNotFound {
+		t.Fatalf("SetVersioning(dot segment) error = %v, want ErrNotFound", err)
+	}
 	if _, _, err := fs.GetVersioningStatus(ctx, "../safe/versioned.txt"); err != ErrNotFound {
 		t.Fatalf("GetVersioningStatus(traversal) error = %v, want ErrNotFound", err)
 	}
+	if _, _, err := fs.GetVersioningStatus(ctx, "/safe/./versioned.txt"); err != ErrNotFound {
+		t.Fatalf("GetVersioningStatus(dot segment) error = %v, want ErrNotFound", err)
+	}
 	if err := fs.RestoreFromTrashTo(ctx, trashID, "../restored.txt"); err != ErrNotFound {
 		t.Fatalf("RestoreFromTrashTo(traversal) error = %v, want ErrNotFound", err)
+	}
+	if err := fs.RestoreFromTrashTo(ctx, trashID, "/safe/./restored.txt"); err != ErrNotFound {
+		t.Fatalf("RestoreFromTrashTo(dot segment) error = %v, want ErrNotFound", err)
 	}
 	if _, err := fs.Stat(ctx, "/safe/versioned\x00.txt"); err != ErrNotFound {
 		t.Fatalf("Stat(NUL) error = %v, want ErrNotFound", err)
@@ -1426,11 +1471,23 @@ func TestFileSystem_OperationsRejectTraversalLikePaths(t *testing.T) {
 	if _, err := fs.Stat(ctx, "/escape-dir"); err != ErrNotFound {
 		t.Fatalf("expected no normalized /escape-dir after traversal mkdir, got %v", err)
 	}
+	if _, err := fs.Stat(ctx, "/safe/escape.txt"); err != ErrNotFound {
+		t.Fatalf("expected no normalized /safe/escape.txt after dot-segment write, got %v", err)
+	}
+	if _, err := fs.Stat(ctx, "/safe/escape-dir"); err != ErrNotFound {
+		t.Fatalf("expected no normalized /safe/escape-dir after dot-segment mkdir, got %v", err)
+	}
 	if _, err := fs.Stat(ctx, "/renamed.txt"); err != ErrNotFound {
 		t.Fatalf("expected no normalized /renamed.txt after traversal rename, got %v", err)
 	}
+	if _, err := fs.Stat(ctx, "/safe/renamed.txt"); err != ErrNotFound {
+		t.Fatalf("expected no normalized /safe/renamed.txt after dot-segment rename, got %v", err)
+	}
 	if _, err := fs.Stat(ctx, "/restored.txt"); err != ErrNotFound {
 		t.Fatalf("expected no normalized /restored.txt after traversal restore, got %v", err)
+	}
+	if _, err := fs.Stat(ctx, "/safe/restored.txt"); err != ErrNotFound {
+		t.Fatalf("expected no normalized /safe/restored.txt after dot-segment restore, got %v", err)
 	}
 	if _, err := fs.Stat(ctx, "/safe/nul.txt"); err != ErrNotFound {
 		t.Fatalf("expected no normalized /safe/nul.txt after NUL write, got %v", err)

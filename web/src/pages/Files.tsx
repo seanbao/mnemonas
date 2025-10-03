@@ -86,6 +86,7 @@ import {
   getSharedPathConflictErrorToast,
   getSharedQuotaExceededErrorToast,
 } from '@/lib/fileActionErrors'
+import { getPathSegmentNameValidationError, joinPathSegment } from '@/lib/pathSegmentName'
 import { copyTextToClipboard, decodePathFromUrl, encodePathForUrl, formatBytes, formatDate, cn, normalizePath } from '@/lib/utils'
 import { getInvalidHomeDirDescription, invalidHomeDirTitle, resolveUserHomeScope } from '@/lib/userScope'
 
@@ -1163,6 +1164,10 @@ export function FilesPage() {
   
   const [newFolderName, setNewFolderName] = useState('')
   const [renameValue, setRenameValue] = useState('')
+  const newFolderNameValidationError = getPathSegmentNameValidationError(newFolderName, '请输入文件夹名称')
+  const displayedNewFolderNameValidationError = newFolderName.trim() ? newFolderNameValidationError : null
+  const renameNameValidationError = getPathSegmentNameValidationError(renameValue, '请输入新名称')
+  const displayedRenameNameValidationError = renameValue.trim() ? renameNameValidationError : null
   const [actionFile, setActionFile] = useState<FileItem | null>(null)
   const [deleteTarget, setDeleteTarget] = useState<FileItem | null>(null)
   const newFolderSessionRef = useRef(0)
@@ -1796,9 +1801,17 @@ export function FilesPage() {
 
   const handleCreateFolder = useCallback(() => {
     if (!currentPathCanWrite || createFolderMutation.isPending) return
+    const validationError = getPathSegmentNameValidationError(newFolderName, '请输入文件夹名称')
+    if (validationError) {
+      addToast({
+        title: '文件夹名称无效',
+        description: validationError,
+        color: 'warning',
+      })
+      return
+    }
     const trimmedFolderName = newFolderName.trim()
-    if (!trimmedFolderName) return
-    const path = currentPath === '/' ? `/${trimmedFolderName}` : `${currentPath}/${trimmedFolderName}`
+    const path = joinPathSegment(currentPath, trimmedFolderName)
     const controller = new AbortController()
     createFolderAbortControllerRef.current?.abort()
     createFolderAbortControllerRef.current = controller
@@ -1814,11 +1827,20 @@ export function FilesPage() {
   const handleRename = useCallback(() => {
     if (renameMutation.isPending) return
     const trimmedRenameValue = renameValue.trim()
-    if (!actionFile || !trimmedRenameValue) return
+    const validationError = getPathSegmentNameValidationError(renameValue, '请输入新名称')
+    if (validationError) {
+      addToast({
+        title: '名称无效',
+        description: validationError,
+        color: 'warning',
+      })
+      return
+    }
+    if (!actionFile) return
     if (!canWriteFile(actionFile)) return
     if (trimmedRenameValue === actionFile.name) return
     const parentPath = actionFile.path.substring(0, actionFile.path.lastIndexOf('/')) || '/'
-    const newPath = parentPath === '/' ? `/${trimmedRenameValue}` : `${parentPath}/${trimmedRenameValue}`
+    const newPath = joinPathSegment(parentPath, trimmedRenameValue)
     const controller = new AbortController()
     renameAbortControllerRef.current?.abort()
     renameAbortControllerRef.current = controller
@@ -2440,6 +2462,17 @@ export function FilesPage() {
     const { paths, operation, sourcePath } = clipboard
     if (!operation || !sourcePath) return
 
+    const normalizedCurrentPath = normalizePath(currentPath)
+    const normalizedSourcePath = normalizePath(sourcePath)
+    if (normalizedSourcePath === normalizedCurrentPath) {
+      addToast({
+        title: operation === 'cut' ? '无法移动到原目录' : '无法复制到原目录',
+        description: '目标目录与源目录相同，请选择其他文件夹。',
+        color: 'warning',
+      })
+      return
+    }
+
     pasteAbortControllerRef.current?.abort()
     const controller = new AbortController()
     pasteAbortControllerRef.current = controller
@@ -2459,7 +2492,7 @@ export function FilesPage() {
         }
 
         const fileName = path.split('/').pop() || ''
-        const destPath = currentPath === '/' ? `/${fileName}` : `${currentPath}/${fileName}`
+        const destPath = normalizedCurrentPath === '/' ? `/${fileName}` : `${normalizedCurrentPath}/${fileName}`
 
         try {
           if (operation === 'cut') {
@@ -2518,8 +2551,8 @@ export function FilesPage() {
       }
 
       queryClient.invalidateQueries({ queryKey: filesQueryKey })
-      if (sourcePath !== currentPath) {
-        queryClient.invalidateQueries({ queryKey: getFilesQueryKey(fileScopeKey, sourcePath) })
+      if (normalizedSourcePath !== normalizedCurrentPath) {
+        queryClient.invalidateQueries({ queryKey: getFilesQueryKey(fileScopeKey, normalizedSourcePath) })
       }
 
       if (errorCount === 0) {
@@ -3531,11 +3564,18 @@ export function FilesPage() {
                 autoFocus
                 size="lg"
                 variant="bordered"
+                isInvalid={Boolean(displayedNewFolderNameValidationError)}
+                errorMessage={displayedNewFolderNameValidationError ?? undefined}
                 classNames={{
                   inputWrapper: "bg-default-50 border-default-200 hover:border-default-300 data-[focus=true]:!border-accent-primary",
                   input: "text-sm placeholder:text-default-400",
                 }}
               />
+              {displayedNewFolderNameValidationError && (
+                <p className="mt-2 text-xs text-warning">
+                  {displayedNewFolderNameValidationError}
+                </p>
+              )}
               <div className="flex items-center justify-between text-xs mt-2">
                 <span className="text-default-500">支持中文与英文名称</span>
                 <span className="text-default-400">建议 2-24 个字符</span>
@@ -3544,7 +3584,7 @@ export function FilesPage() {
           </ModalBody>
           <ModalFooter className="px-6 pb-6 pt-2 gap-2">
             <Button variant="flat" onPress={handleCloseNewFolderModal} isDisabled={createFolderMutation.isPending} className="text-default-600 rounded-lg">取消</Button>
-            <Button color="primary" onPress={handleCreateFolder} isLoading={createFolderMutation.isPending} isDisabled={!newFolderName.trim()} className="rounded-lg">创建</Button>
+            <Button color="primary" onPress={handleCreateFolder} isLoading={createFolderMutation.isPending} isDisabled={Boolean(newFolderNameValidationError)} className="rounded-lg">创建</Button>
           </ModalFooter>
         </ModalContent>
       </Modal>
@@ -3579,16 +3619,23 @@ export function FilesPage() {
                 autoFocus
                 size="lg"
                 variant="bordered"
+                isInvalid={Boolean(displayedRenameNameValidationError)}
+                errorMessage={displayedRenameNameValidationError ?? undefined}
                 classNames={{
                   inputWrapper: "bg-default-50 border-default-200 hover:border-default-300 data-[focus=true]:!border-accent-primary",
                   input: "text-sm placeholder:text-default-400",
                 }}
               />
+              {displayedRenameNameValidationError && (
+                <p className="mt-2 text-xs text-warning">
+                  {displayedRenameNameValidationError}
+                </p>
+              )}
             </div>
           </ModalBody>
           <ModalFooter className="px-6 pb-6 pt-2 gap-2">
             <Button variant="flat" onPress={handleCloseRenameModal} isDisabled={renameMutation.isPending} className="text-default-600 rounded-lg">取消</Button>
-            <Button color="primary" onPress={handleRename} isLoading={renameMutation.isPending} isDisabled={!renameValue.trim() || renameValue.trim() === actionFile?.name} className="rounded-lg">确定</Button>
+            <Button color="primary" onPress={handleRename} isLoading={renameMutation.isPending} isDisabled={Boolean(renameNameValidationError) || renameValue.trim() === actionFile?.name} className="rounded-lg">确定</Button>
           </ModalFooter>
         </ModalContent>
       </Modal>

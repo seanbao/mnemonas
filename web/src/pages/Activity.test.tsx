@@ -1246,15 +1246,15 @@ describe('ActivityPage', () => {
 
       mockListActivity.mockClear()
       mockGetActivityStats.mockClear()
-      fireEvent.change(pathFilterInput, { target: { value: '../secret' } })
+      fireEvent.change(pathFilterInput, { target: { value: '/photos/./secret' } })
 
       await waitFor(() => {
-        expect(screen.getAllByText('路径不能包含 .. 或控制字符').length).toBeGreaterThan(0)
+        expect(screen.getAllByText('路径不能包含 .、.. 或控制字符').length).toBeGreaterThan(0)
         expect(pathFilterInput).toHaveAttribute('aria-invalid', 'true')
       })
       expect(mockListActivity).not.toHaveBeenCalled()
       expect(mockGetActivityStats).not.toHaveBeenCalled()
-      expect(screen.queryByText('路径：/../secret')).toBeNull()
+      expect(screen.queryByText('路径：/photos/./secret')).toBeNull()
       expect(screen.getAllByText('路径筛选无效').length).toBeGreaterThan(0)
       expect(screen.queryByText('/documents/report.pdf')).toBeNull()
       expect(screen.queryByText('累计操作')).toBeNull()
@@ -1485,7 +1485,7 @@ describe('ActivityPage', () => {
       fireEvent.change(pathFilterInput, { target: { value: '../secret' } })
 
       await waitFor(() => {
-        expect(screen.getAllByText('路径不能包含 .. 或控制字符').length).toBeGreaterThan(0)
+        expect(screen.getAllByText('路径不能包含 .、.. 或控制字符').length).toBeGreaterThan(0)
       })
 
       await user.click(screen.getByText('刷新'))
@@ -1493,7 +1493,7 @@ describe('ActivityPage', () => {
       await waitFor(() => {
         expect(mockAddToast).toHaveBeenCalledWith({
           title: '路径筛选无效',
-          description: '路径不能包含 .. 或控制字符',
+          description: '路径不能包含 .、.. 或控制字符',
           color: 'warning',
         })
       })

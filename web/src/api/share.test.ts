@@ -387,6 +387,23 @@ describe('Share API', () => {
       expect(global.fetch).toHaveBeenCalledWith('/api/v1/public/shares/share-1/items?path=docs', { credentials: 'same-origin' })
     })
 
+    it('normalizes folder item paths before requesting items', async () => {
+      ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ path: 'docs', items: [] }),
+      })
+
+      await getPublicShareItems('share-1', { path: '/docs/' })
+
+      expect(global.fetch).toHaveBeenCalledWith('/api/v1/public/shares/share-1/items?path=docs', { credentials: 'same-origin' })
+    })
+
+    it('rejects unsafe folder item paths before requesting items', async () => {
+      await expect(getPublicShareItems('share-1', { path: 'docs/./report' })).rejects.toThrow('非法路径')
+
+      expect(global.fetch).not.toHaveBeenCalled()
+    })
+
     it('forwards abort signal when requesting folder items', async () => {
       const controller = new AbortController()
       ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({

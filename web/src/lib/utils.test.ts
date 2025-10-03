@@ -332,6 +332,12 @@ describe('normalizePath', () => {
     expect(() => normalizePath('/safe\\..\\secret.txt')).toThrow('非法路径')
   })
 
+  it('throws on ambiguous current-directory path segments', () => {
+    expect(() => normalizePath('/docs/./report.pdf')).toThrow('非法路径')
+    expect(() => normalizePath('/docs/.')).toThrow('非法路径')
+    expect(() => normalizePath('./docs/report.pdf')).toThrow('非法路径')
+  })
+
   it('throws on null byte paths instead of silently rewriting them', () => {
     expect(() => normalizePath('/docs/report\0.pdf')).toThrow('非法路径')
   })

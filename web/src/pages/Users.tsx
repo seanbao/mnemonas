@@ -43,7 +43,7 @@ import {
 } from 'lucide-react'
 import { listUsers, createUser, deleteUser, resetUserPassword, revokeUserSessions, toggleUserStatus, updateUser, UsersError, type ListUsersResponse, type User } from '@/api/users'
 import { getStoredUser } from '@/api/auth'
-import { formatBytes, formatDate, cn } from '@/lib/utils'
+import { formatBytes, formatDate, cn, normalizeUserHomeDir } from '@/lib/utils'
 import { PageHeader } from '@/components/ui/PageHeader'
 import { EmptyState } from '@/components/ui/EmptyState'
 import { StatCard } from '@/components/ui/StatCard'
@@ -131,6 +131,35 @@ function normalizesToRootHomeDir(homeDir: string): boolean {
 
 function isRootHomeDirForNonAdmin(role: User['role'], homeDir: string): boolean {
   return role !== 'admin' && normalizesToRootHomeDir(homeDir)
+}
+
+function getHomeDirValidationIssue(
+  role: User['role'],
+  homeDir: string,
+  options: { allowEmpty?: boolean } = {}
+): { title: string; description?: string } | null {
+  const trimmed = homeDir.trim()
+  if (!trimmed) {
+    return options.allowEmpty ? null : { title: '主目录必须以 / 开头' }
+  }
+  if (!trimmed.startsWith('/')) {
+    return { title: '主目录必须以 / 开头' }
+  }
+  try {
+    normalizeUserHomeDir(trimmed)
+  } catch {
+    return {
+      title: '主目录无效',
+      description: '主目录不能包含空字符、. 或 .. 路径段。',
+    }
+  }
+  if (isRootHomeDirForNonAdmin(role, trimmed)) {
+    return {
+      title: '非管理员主目录不能为 /',
+      description: '请选择具体目录，例如 /alice。',
+    }
+  }
+  return null
 }
 
 function isMissingUserError(error: unknown): boolean {
@@ -563,6 +592,8 @@ export function UsersPage() {
   const resetPasswordAbortControllerRef = useRef<AbortController | null>(null)
   const revokeSessionsAbortControllerRef = useRef<AbortController | null>(null)
   const toggleStatusAbortControllerRef = useRef<AbortController | null>(null)
+  const newHomeDirValidationIssue = getHomeDirValidationIssue(newRole, newHomeDir, { allowEmpty: true })
+  const editHomeDirValidationIssue = getHomeDirValidationIssue(editRole, editHomeDir)
 
   useEffect(() => {
     return () => {
@@ -865,16 +896,8 @@ export function UsersPage() {
       return
     }
     const homeDir = newHomeDir.trim()
-    if (homeDir && !homeDir.startsWith('/')) {
-      addToast({ title: '主目录必须以 / 开头', color: 'warning' })
-      return
-    }
-    if (homeDir && isRootHomeDirForNonAdmin(newRole, homeDir)) {
-      addToast({
-        title: '非管理员主目录不能为 /',
-        description: '请选择具体目录，例如 /alice。',
-        color: 'warning',
-      })
+    if (newHomeDirValidationIssue) {
+      addToast({ ...newHomeDirValidationIssue, color: 'warning' })
       return
     }
     const quotaBytes = quotaFormValueToBytes(newQuotaValue, newQuotaUnit)
@@ -899,7 +922,7 @@ export function UsersPage() {
       createSession: createSessionRef.current,
       signal: controller.signal,
     })
-  }, [newUsername, newPassword, newEmail, newGroups, newHomeDir, newQuotaUnit, newQuotaValue, newRole, createMutation])
+  }, [newUsername, newPassword, newEmail, newGroups, newHomeDir, newHomeDirValidationIssue, newQuotaUnit, newQuotaValue, newRole, createMutation])
 
   const handleOpenEditModal = useCallback((user: User) => {
     const quota = quotaBytesToFormValue(user.quota_bytes)
@@ -922,16 +945,8 @@ export function UsersPage() {
   const handleUpdateUser = useCallback(() => {
     if (!editTarget) return
     const homeDir = editHomeDir.trim()
-    if (!homeDir.startsWith('/')) {
-      addToast({ title: '主目录必须以 / 开头', color: 'warning' })
-      return
-    }
-    if (isRootHomeDirForNonAdmin(editRole, homeDir)) {
-      addToast({
-        title: '非管理员主目录不能为 /',
-        description: '请选择具体目录，例如 /alice。',
-        color: 'warning',
-      })
+    if (editHomeDirValidationIssue) {
+      addToast({ ...editHomeDirValidationIssue, color: 'warning' })
       return
     }
     const quotaBytes = quotaFormValueToBytes(editQuotaValue, editQuotaUnit)
@@ -957,7 +972,7 @@ export function UsersPage() {
       quotaBytes,
       signal: controller.signal,
     })
-  }, [editEmail, editGroups, editHomeDir, editQuotaUnit, editQuotaValue, editRole, editTarget, updateMutation])
+  }, [editEmail, editGroups, editHomeDir, editHomeDirValidationIssue, editQuotaUnit, editQuotaValue, editRole, editTarget, updateMutation])
 
   const handleDelete = useCallback(() => {
     if (!deleteTarget) return
@@ -1267,6 +1282,12 @@ export function UsersPage() {
                 placeholder="/username"
                 value={newHomeDir}
                 onValueChange={setNewHomeDir}
+                isInvalid={Boolean(newHomeDir.trim() && newHomeDirValidationIssue)}
+                errorMessage={
+                  newHomeDir.trim() && newHomeDirValidationIssue
+                    ? (newHomeDirValidationIssue.description ?? newHomeDirValidationIssue.title)
+                    : undefined
+                }
                 size="lg"
                 variant="bordered"
                 labelPlacement="outside"
@@ -1334,8 +1355,7 @@ export function UsersPage() {
                 || !newPassword.trim()
                 || newPassword.length < 8
                 || utf8ByteLength(newPassword) > maxPasswordBytes
-                || Boolean(newHomeDir.trim() && !newHomeDir.trim().startsWith('/'))
-                || Boolean(newHomeDir.trim() && isRootHomeDirForNonAdmin(newRole, newHomeDir))
+                || Boolean(newHomeDirValidationIssue)
                 || quotaFormValueToBytes(newQuotaValue, newQuotaUnit) == null
               }
               className="rounded-lg"
@@ -1436,6 +1456,12 @@ export function UsersPage() {
               placeholder="/username"
               value={editHomeDir}
               onValueChange={setEditHomeDir}
+              isInvalid={Boolean(editHomeDirValidationIssue)}
+              errorMessage={
+                editHomeDirValidationIssue
+                  ? (editHomeDirValidationIssue.description ?? editHomeDirValidationIssue.title)
+                  : undefined
+              }
               size="lg"
               variant="bordered"
               labelPlacement="outside"
@@ -1505,8 +1531,7 @@ export function UsersPage() {
               isLoading={updateMutation.isPending}
               isDisabled={
                 !editTarget
-                || !editHomeDir.trim()
-                || isRootHomeDirForNonAdmin(editRole, editHomeDir)
+                || Boolean(editHomeDirValidationIssue)
                 || quotaFormValueToBytes(editQuotaValue, editQuotaUnit) == null
               }
               className="rounded-lg"

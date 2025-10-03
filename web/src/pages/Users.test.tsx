@@ -448,6 +448,21 @@ describe('UsersPage', () => {
       expect(usersApi.createUser).not.toHaveBeenCalled()
     })
 
+    it('disables create button for malformed home directory path segments', async () => {
+      const user = userEvent.setup()
+      renderUsersPage()
+
+      await user.click(screen.getByRole('button', { name: /添加用户/i }))
+
+      fireEvent.change(await screen.findByLabelText(/用户名/i), { target: { value: 'dotuser' } })
+      fireEvent.change(screen.getByLabelText(/密码/i), { target: { value: 'password123' } })
+      fireEvent.change(screen.getByLabelText('主目录'), { target: { value: '/team/./dotuser' } })
+
+      expect(screen.getByText('主目录不能包含空字符、. 或 .. 路径段。')).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: '创建' })).toBeDisabled()
+      expect(usersApi.createUser).not.toHaveBeenCalled()
+    })
+
     it('disables create button when form is incomplete', async () => {
       const user = userEvent.setup()
       renderUsersPage()
@@ -698,6 +713,28 @@ describe('UsersPage', () => {
 
       fireEvent.change(screen.getByLabelText('主目录'), { target: { value: '/' } })
 
+      expect(screen.getByRole('button', { name: '保存' })).toBeDisabled()
+      expect(usersApi.updateUser).not.toHaveBeenCalled()
+    })
+
+    it('disables update button for malformed home directory path segments', async () => {
+      const user = userEvent.setup()
+      renderUsersPage()
+
+      await waitFor(() => {
+        expect(screen.getByText('testuser')).toBeInTheDocument()
+      })
+
+      await user.click(screen.getByRole('button', { name: 'testuser 用户操作' }))
+      await user.click(screen.getAllByRole('menuitem').find((item) => item.textContent?.includes('编辑用户'))!)
+
+      await waitFor(() => {
+        expect(screen.getByRole('heading', { name: '编辑用户' })).toBeInTheDocument()
+      })
+
+      fireEvent.change(screen.getByLabelText('主目录'), { target: { value: '/team/./editors' } })
+
+      expect(screen.getByText('主目录不能包含空字符、. 或 .. 路径段。')).toBeInTheDocument()
       expect(screen.getByRole('button', { name: '保存' })).toBeDisabled()
       expect(usersApi.updateUser).not.toHaveBeenCalled()
     })

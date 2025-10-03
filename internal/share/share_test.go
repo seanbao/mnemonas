@@ -470,6 +470,11 @@ func TestShareStore_CreateRejectsInvalidInvariants(t *testing.T) {
 			wantErr: errInvalidSharePath,
 		},
 		{
+			name:    "dot segment path",
+			opts:    CreateShareOptions{Path: "/docs/./report.pdf", Type: ShareTypeFile, CreatedBy: "user1"},
+			wantErr: errInvalidSharePath,
+		},
+		{
 			name:    "negative max access",
 			opts:    CreateShareOptions{Path: "/test/file.txt", Type: ShareTypeFile, CreatedBy: "user1", MaxAccess: -1},
 			wantErr: errInvalidMaxAccess,
@@ -601,6 +606,15 @@ func TestNewShareStore_LoadNormalizesValidSharesAndDropsInvalidEntries(t *testin
 			Enabled:    true,
 		},
 		{
+			ID:         "legacy-dot",
+			Path:       "/docs/./dot.pdf",
+			Type:       ShareTypeFile,
+			CreatedBy:  "user1",
+			CreatedAt:  time.Now(),
+			Permission: PermissionRead,
+			Enabled:    true,
+		},
+		{
 			ID:         "invalid-path",
 			Path:       "../escape.txt",
 			Type:       ShareTypeFile,
@@ -679,6 +693,13 @@ func TestNewShareStore_LoadNormalizesValidSharesAndDropsInvalidEntries(t *testin
 	if share.Permission != PermissionRead {
 		t.Fatalf("expected unsupported permission to normalize to read, got %q", share.Permission)
 	}
+	legacyDot, err := store.Get("legacy-dot")
+	if err != nil {
+		t.Fatalf("Get(legacy-dot) error: %v", err)
+	}
+	if legacyDot.Path != "/docs/dot.pdf" {
+		t.Fatalf("expected legacy dot-segment share path to normalize on load, got %q", legacyDot.Path)
+	}
 
 	if _, err := store.Get("invalid-path"); err != ErrShareNotFound {
 		t.Fatalf("expected invalid path share to be dropped on load, got %v", err)
@@ -701,6 +722,9 @@ func TestNewShareStore_LoadNormalizesValidSharesAndDropsInvalidEntries(t *testin
 	if shares := store.GetByPath("/docs/report.pdf"); len(shares) != 1 || shares[0].ID != "valid" {
 		t.Fatalf("expected only normalized valid share in path index, got %+v", shares)
 	}
+	if shares := store.GetByPath("/docs/dot.pdf"); len(shares) != 1 || shares[0].ID != "legacy-dot" {
+		t.Fatalf("expected normalized legacy-dot share in path index, got %+v", shares)
+	}
 
 	data, err = os.ReadFile(storePath)
 	if err != nil {
@@ -710,14 +734,29 @@ func TestNewShareStore_LoadNormalizesValidSharesAndDropsInvalidEntries(t *testin
 	if err := json.Unmarshal(data, &persisted); err != nil {
 		t.Fatalf("Unmarshal(persisted shares) error: %v", err)
 	}
-	if len(persisted) != 1 {
-		t.Fatalf("expected normalized shares file to contain one entry, got %d", len(persisted))
+	if len(persisted) != 2 {
+		t.Fatalf("expected normalized shares file to contain two entries, got %d", len(persisted))
 	}
-	if persisted[0].Path != "/docs/report.pdf" {
-		t.Fatalf("expected normalized share path to be persisted, got %q", persisted[0].Path)
+	persistedByID := make(map[string]*Share, len(persisted))
+	for _, share := range persisted {
+		persistedByID[share.ID] = share
 	}
-	if persisted[0].Permission != PermissionRead {
-		t.Fatalf("expected normalized share permission to be persisted as read, got %q", persisted[0].Permission)
+	validPersisted, ok := persistedByID["valid"]
+	if !ok {
+		t.Fatalf("expected valid share to be persisted, got %+v", persistedByID)
+	}
+	if validPersisted.Path != "/docs/report.pdf" {
+		t.Fatalf("expected normalized valid share path to be persisted, got %q", validPersisted.Path)
+	}
+	if validPersisted.Permission != PermissionRead {
+		t.Fatalf("expected normalized share permission to be persisted as read, got %q", validPersisted.Permission)
+	}
+	legacyDotPersisted, ok := persistedByID["legacy-dot"]
+	if !ok {
+		t.Fatalf("expected legacy-dot share to be persisted, got %+v", persistedByID)
+	}
+	if legacyDotPersisted.Path != "/docs/dot.pdf" {
+		t.Fatalf("expected normalized legacy-dot share path to be persisted, got %q", legacyDotPersisted.Path)
 	}
 }
 
