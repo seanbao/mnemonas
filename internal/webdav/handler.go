@@ -305,7 +305,6 @@ type Handler struct {
 	lockCleanupStop      chan struct{}
 	lockCleanupDone      chan struct{}
 	newLockToken         func() (string, error)
-	// REM-1 fix: Authentication
 	authType          string
 	username          string
 	password          string
@@ -321,7 +320,6 @@ type Config struct {
 	FileSystem *storage.FileSystem
 	Prefix     string // URL prefix, e.g., "/dav"
 	ReadOnly   bool
-	// REM-1 fix: Authentication configuration
 	AuthType          string // "none", "basic", "users"
 	Username          string
 	Password          string
@@ -442,7 +440,6 @@ func (h *Handler) startLockCleanupLoop() {
 
 // ServeHTTP handles WebDAV requests
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	// REM-1 fix: Check authentication
 	identity, authenticated := h.authenticate(r)
 	if !authenticated {
 		w.Header().Set("WWW-Authenticate", `Basic realm="MnemoNAS WebDAV"`)
@@ -683,7 +680,7 @@ func (h *Handler) serveDirectory(ctx context.Context, w http.ResponseWriter, r *
 		if child.IsDir {
 			name += "/"
 		}
-		// V3-2 fix: Escape HTML to prevent XSS
+		// Escape child names and HREFs before rendering the HTML fallback.
 		fmt.Fprintf(w, `<a href="%s">%s</a>    %s    %d
 `,
 			html.EscapeString(h.webdavHref(ctx, child.Path, child.IsDir)),
@@ -1043,6 +1040,12 @@ func (h *Handler) handleCopy(ctx context.Context, w http.ResponseWriter, r *http
 		h.handleError(w, err)
 		return
 	}
+	if srcInfo.IsDir && copyDepth != "0" {
+		if err := h.authorizeCopyDestinationTreeAccess(ctx, srcPath, dst); err != nil {
+			h.handleError(w, err)
+			return
+		}
+	}
 
 	affectedPaths := []string{path.Dir(dst), dst}
 	h.invalidatePropCache(affectedPaths...)
@@ -1076,7 +1079,8 @@ func (h *Handler) handleCopy(ctx context.Context, w http.ResponseWriter, r *http
 func (h *Handler) copyResourceWithQuota(ctx context.Context, srcPath, dstPath, depth string, allowOverwrite bool) error {
 	scope := scopeFromContext(ctx)
 	directoryRules := h.directoryQuotaRulesForTarget(dstPath)
-	if (!scope.scoped || scope.quotaBytes <= 0) && len(directoryRules) == 0 {
+	userQuotaApplies := scope.scoped && scope.quotaBytes > 0 && strings.TrimSpace(scope.homeDir) != "" && pathMatchesOrDescendant(scope.homeDir, dstPath)
+	if !userQuotaApplies && len(directoryRules) == 0 {
 		return h.copyResource(ctx, srcPath, dstPath, depth, allowOverwrite)
 	}
 
@@ -1087,7 +1091,7 @@ func (h *Handler) copyResourceWithQuota(ctx context.Context, srcPath, dstPath, d
 	if err != nil {
 		return err
 	}
-	if scope.scoped && scope.quotaBytes > 0 {
+	if userQuotaApplies {
 		usedBytes, err := h.pathLogicalSizeIfExists(ctx, scope.homeDir)
 		if err != nil {
 			return err
@@ -1118,7 +1122,7 @@ func (h *Handler) copyRequiredBytes(ctx context.Context, srcPath, dstPath, depth
 		return 0, nil
 	}
 
-	requiredBytes, err := h.fileInfoLogicalSize(ctx, info)
+	requiredBytes, err := h.copySourceLogicalSize(ctx, info)
 	if err != nil {
 		return 0, err
 	}
@@ -1133,6 +1137,40 @@ func (h *Handler) copyRequiredBytes(ctx context.Context, srcPath, dstPath, depth
 		}
 	}
 	return requiredBytes, nil
+}
+
+func (h *Handler) copySourceLogicalSize(ctx context.Context, info *storage.FileInfo) (int64, error) {
+	if info == nil {
+		return 0, nil
+	}
+	scope := scopeFromContext(ctx)
+	if scope.scoped && !scope.canAccess(info.Path, accessRead) {
+		return 0, nil
+	}
+	if !info.IsDir {
+		return nonNegativeSize(info.Size), nil
+	}
+
+	children, err := h.fs.ReadDir(ctx, info.Path)
+	if err != nil {
+		return 0, err
+	}
+
+	var total int64
+	for _, child := range children {
+		if child == nil {
+			continue
+		}
+		size, err := h.copySourceLogicalSize(ctx, child)
+		if err != nil {
+			return 0, err
+		}
+		total, err = addWebDAVQuotaSize(total, size)
+		if err != nil {
+			return 0, err
+		}
+	}
+	return total, nil
 }
 
 func (h *Handler) copyResource(ctx context.Context, srcPath, dstPath, depth string, allowOverwrite bool) error {
@@ -1202,7 +1240,8 @@ func (h *Handler) copyResource(ctx context.Context, srcPath, dstPath, depth stri
 func (h *Handler) quotaCheckedUploadReader(ctx context.Context, targetPath string, reader io.Reader, contentLength int64) (io.Reader, func(), error) {
 	scope := scopeFromContext(ctx)
 	directoryRules := h.directoryQuotaRulesForTarget(targetPath)
-	if (!scope.scoped || scope.quotaBytes <= 0) && len(directoryRules) == 0 {
+	userQuotaApplies := scope.scoped && scope.quotaBytes > 0 && strings.TrimSpace(scope.homeDir) != "" && pathMatchesOrDescendant(scope.homeDir, targetPath)
+	if !userQuotaApplies && len(directoryRules) == 0 {
 		return reader, func() {}, nil
 	}
 
@@ -1218,7 +1257,7 @@ func (h *Handler) quotaCheckedUploadReader(ctx context.Context, targetPath strin
 	}
 
 	availableBytes := int64(^uint64(0) >> 1)
-	if scope.scoped && scope.quotaBytes > 0 {
+	if userQuotaApplies {
 		usedBytes, err := h.pathLogicalSizeIfExists(ctx, scope.homeDir)
 		if err != nil {
 			unlock()
@@ -1351,9 +1390,11 @@ func (h *Handler) directoryQuotaRulesForTarget(targetPath string) []DirectoryQuo
 	return matched
 }
 
-func (h *Handler) ensureMoveDirectoryQuota(ctx context.Context, srcPath, dstPath string, dstExists bool) error {
+func (h *Handler) ensureMoveQuota(ctx context.Context, srcPath, dstPath string, dstExists bool) error {
+	scope := scopeFromContext(ctx)
 	directoryRules := h.directoryQuotaRulesForTarget(dstPath)
-	if len(directoryRules) == 0 {
+	userQuotaApplies := scope.scoped && scope.quotaBytes > 0 && strings.TrimSpace(scope.homeDir) != "" && pathMatchesOrDescendant(scope.homeDir, dstPath) && !pathMatchesOrDescendant(scope.homeDir, srcPath)
+	if !userQuotaApplies && len(directoryRules) == 0 {
 		return nil
 	}
 
@@ -1366,6 +1407,20 @@ func (h *Handler) ensureMoveDirectoryQuota(ctx context.Context, srcPath, dstPath
 	if dstExists {
 		replacedBytes, err = h.pathLogicalSizeIfExists(ctx, dstPath)
 		if err != nil {
+			return err
+		}
+	}
+
+	if userQuotaApplies {
+		usedBytes, err := h.pathLogicalSizeIfExists(ctx, scope.homeDir)
+		if err != nil {
+			return err
+		}
+		deltaBytes := requiredBytes - replacedBytes
+		if deltaBytes < 0 {
+			deltaBytes = 0
+		}
+		if err := ensureWebDAVQuotaAvailable(usedBytes, scope.quotaBytes, deltaBytes); err != nil {
 			return err
 		}
 	}
@@ -1626,7 +1681,7 @@ func (h *Handler) handleMove(ctx context.Context, w http.ResponseWriter, r *http
 
 	h.quotaMu.Lock()
 	defer h.quotaMu.Unlock()
-	if err := h.ensureMoveDirectoryQuota(ctx, srcPath, dst, dstExists); err != nil {
+	if err := h.ensureMoveQuota(ctx, srcPath, dst, dstExists); err != nil {
 		h.handleError(w, err)
 		return
 	}
@@ -1874,6 +1929,47 @@ func (h *Handler) authorizeMappedTreeAccess(ctx context.Context, sourceRoot, des
 		}
 		if child.IsDir {
 			if err := h.authorizeMappedTreeAccess(ctx, child.Path, childDestination, mode); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (h *Handler) authorizeCopyDestinationTreeAccess(ctx context.Context, sourceRoot, destinationRoot string) error {
+	scope := scopeFromContext(ctx)
+	if !scope.scoped {
+		return nil
+	}
+	if !scope.canAccess(destinationRoot, accessWrite) {
+		return errWebDAVPathAccessDenied
+	}
+	if !scope.hasAccessRules() {
+		return nil
+	}
+
+	info, err := h.fs.Stat(ctx, sourceRoot)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir {
+		return nil
+	}
+
+	children, err := h.fs.ReadDir(ctx, sourceRoot)
+	if err != nil {
+		return err
+	}
+	for _, child := range children {
+		if child == nil || !scope.canAccess(child.Path, accessRead) {
+			continue
+		}
+		childDestination := mapWebDAVDescendantPath(sourceRoot, destinationRoot, child.Path)
+		if !scope.canAccess(childDestination, accessWrite) {
+			return errWebDAVPathAccessDenied
+		}
+		if child.IsDir {
+			if err := h.authorizeCopyDestinationTreeAccess(ctx, child.Path, childDestination); err != nil {
 				return err
 			}
 		}
@@ -2845,7 +2941,6 @@ func (h *Handler) getDestination(r *http.Request) string {
 		return ""
 	}
 
-	// Parse URL properly (I6 fix)
 	u, err := url.Parse(dst)
 	if err != nil {
 		return ""
@@ -2961,7 +3056,7 @@ func isReadMethod(method string) bool {
 	return false
 }
 
-// checkAuth verifies authentication based on configured auth type (REM-1 fix)
+// authenticate verifies authentication based on the configured auth type.
 func (h *Handler) authenticate(r *http.Request) (*UserIdentity, bool) {
 	switch h.authType {
 	case "basic":

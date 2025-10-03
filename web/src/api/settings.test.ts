@@ -194,6 +194,25 @@ describe('Settings API', () => {
         telegram_bot_token_configured: true,
         telegram_chat_id: '-1001234567890',
       },
+      disk_health: {
+        enabled: true,
+        check_interval: '1h',
+        probe_timeout: '15s',
+        cooldown_period: '4h',
+        command: 'smartctl',
+        temperature_warning_c: 45,
+        temperature_critical_c: 55,
+        media_wear_warning_percent: 80,
+        media_wear_critical_percent: 95,
+        devices: [{
+          name: 'Data',
+          path: '/dev/disk/by-id/test',
+          type: 'sat',
+          serial: 'SER123',
+          temperature_warning_c: 42,
+          temperature_critical_c: 52,
+        }],
+      },
       maintenance: {
         scrub: {
           enabled: true,
@@ -215,6 +234,7 @@ describe('Settings API', () => {
     expect(result.data.alerts?.webhook_headers).toEqual(['X-Test: true'])
     expect(result.data.alerts?.telegram_bot_token_configured).toBe(true)
     expect(result.data.alerts?.telegram_chat_id).toBe('-1001234567890')
+    expect(result.data.disk_health?.devices[0]?.path).toBe('/dev/disk/by-id/test')
     expect(result.data.maintenance?.scrub?.schedule_interval).toBe('168h')
   })
 
@@ -409,6 +429,46 @@ describe('Settings API', () => {
             read_groups: ['family'],
             write_groups: ['editors'],
           }],
+        },
+      }),
+    }))
+  })
+
+  it('sends disk health settings in update payloads', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ success: true, data: null, message: 'settings updated' }),
+    })
+
+    await updateSettings({
+      disk_health: {
+        enabled: true,
+        check_interval: '1h',
+        probe_timeout: '15s',
+        cooldown_period: '4h',
+        command: 'smartctl',
+        temperature_warning_c: 45,
+        temperature_critical_c: 55,
+        media_wear_warning_percent: 80,
+        media_wear_critical_percent: 95,
+        devices: [{ name: 'Data', path: '/dev/disk/by-id/test', type: 'sat', serial: 'SER123' }],
+      },
+    })
+
+    expect(mockAuthFetch).toHaveBeenCalledWith('/api/v1/settings/', expect.objectContaining({
+      method: 'PUT',
+      body: JSON.stringify({
+        disk_health: {
+          enabled: true,
+          check_interval: '1h',
+          probe_timeout: '15s',
+          cooldown_period: '4h',
+          command: 'smartctl',
+          temperature_warning_c: 45,
+          temperature_critical_c: 55,
+          media_wear_warning_percent: 80,
+          media_wear_critical_percent: 95,
+          devices: [{ name: 'Data', path: '/dev/disk/by-id/test', type: 'sat', serial: 'SER123' }],
         },
       }),
     }))
@@ -643,6 +703,7 @@ describe('Settings API', () => {
     ['versioning', { versioning: { auto_versioned_extensions: ['.txt'], auto_versioned_filenames: [123], max_versioned_size: 1024 } }],
     ['favorites', { favorites: { enabled: true, runtime_available: 'yes' } }],
     ['alerts', { alerts: { enabled: true, check_interval: '1m', threshold_pct: 80, critical_pct: 90, min_free_bytes: 1024, cooldown_period: '10m', webhook_url: 'https://hooks.example.com', webhook_method: 'POST', webhook_headers: [], telegram_enabled: true, telegram_bot_token_configured: 'yes' } }],
+    ['disk_health', { disk_health: { enabled: true, check_interval: '1h', probe_timeout: '15s', cooldown_period: '4h', command: 'smartctl', temperature_warning_c: 45, temperature_critical_c: 55, media_wear_warning_percent: 80, media_wear_critical_percent: 95, devices: [{ path: 12 }] } }],
     ['maintenance', { maintenance: { scrub: { enabled: true, schedule_interval: '168h', retry_interval: '1h', max_retries: '1' } } }],
   ])('rejects malformed optional %s settings sections', async (_name, override) => {
     mockAuthFetch.mockResolvedValueOnce({

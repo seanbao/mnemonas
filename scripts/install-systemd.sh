@@ -260,7 +260,12 @@ require_tcp_port() {
   local label="$2"
   require_no_whitespace "$value" "$label"
   [[ "$value" =~ ^[0-9]+$ ]] || fail "$label must be a numeric TCP port: $value"
-  (( value >= 1 && value <= 65535 )) || fail "$label must be between 1 and 65535: $value"
+  (( 10#$value >= 1 && 10#$value <= 65535 )) || fail "$label must be between 1 and 65535: $value"
+}
+
+normalize_tcp_port() {
+  local value="$1"
+  printf '%s\n' "$((10#$value))"
 }
 
 is_valid_tcp_host() {
@@ -749,6 +754,7 @@ main() {
   require_systemd_literal "$DATAPLANE_HTTP_ADDR" "DATAPLANE_HTTP_ADDR"
   require_safe_listen_host "$SERVER_HOST" "SERVER_HOST"
   require_tcp_port "$SERVER_PORT" "SERVER_PORT"
+  SERVER_PORT="$(normalize_tcp_port "$SERVER_PORT")"
   require_safe_tcp_addr "$DATAPLANE_GRPC_ADDR" "DATAPLANE_GRPC_ADDR"
   require_safe_tcp_addr "$DATAPLANE_HTTP_ADDR" "DATAPLANE_HTTP_ADDR"
   warn_if_non_loopback_endpoint "$DATAPLANE_GRPC_ADDR" "DATAPLANE_GRPC_ADDR"

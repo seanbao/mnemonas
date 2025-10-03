@@ -26,17 +26,21 @@ import (
 )
 
 var (
-	errCertFileSymlink       = errors.New("TLS certificate file path must not be a symlink")
-	errKeyFileSymlink        = errors.New("TLS private key file path must not be a symlink")
-	syncTLSDir               = syncTLSDirectory
-	syncTLSRootDir           = syncTLSRootDirectory
-	afterValidateTLSFilePath = func() {}
+	errCertFileSymlink          = errors.New("TLS certificate file path must not be a symlink")
+	errKeyFileSymlink           = errors.New("TLS private key file path must not be a symlink")
+	errTLSCertKeyPairIncomplete = errors.New("TLS certificate and private key files must be set together")
+	errTLSCertKeySamePath       = errors.New("TLS certificate and private key files must be different")
+	syncTLSDir                  = syncTLSDirectory
+	syncTLSRootDir              = syncTLSRootDirectory
+	afterValidateTLSFilePath    = func() {}
+	tlsRandomRead               = rand.Read
 )
 
 var tlsDirRootsMu sync.RWMutex
 var tlsDirRoots = map[string]*os.Root{}
 
 const tlsRootEscapeError = "path escapes from parent"
+const maxTLSTempAttempts = 32
 
 func syncTLSDirectory(dir string) error {
 	parentDir, err := rootio.OpenDirPathNoFollow(dir)
@@ -110,6 +114,12 @@ func (m *Manager) loadOrGenerateCert() (tls.Certificate, error) {
 		keyFile = filepath.Join(m.config.CertDir, "server.key")
 	}
 
+	var err error
+	certFile, keyFile, err = normalizeTLSCertKeyPair(certFile, keyFile)
+	if err != nil {
+		return tls.Certificate{}, err
+	}
+
 	// Try to load existing certificate
 	if certFile != "" && keyFile != "" {
 		normalizedCertFile, err := ensureTLSDirRoot(certFile, errCertFileSymlink, "certificate file", false)
@@ -140,6 +150,28 @@ func (m *Manager) loadOrGenerateCert() (tls.Certificate, error) {
 	}
 
 	return m.generateSelfSignedCert(certFile, keyFile)
+}
+
+func normalizeTLSCertKeyPair(certFile, keyFile string) (string, string, error) {
+	if certFile == "" && keyFile == "" {
+		return "", "", nil
+	}
+	if certFile == "" || keyFile == "" {
+		return "", "", errTLSCertKeyPairIncomplete
+	}
+
+	normalizedCertFile, err := normalizeTLSFilePath(certFile, "certificate file")
+	if err != nil {
+		return "", "", err
+	}
+	normalizedKeyFile, err := normalizeTLSFilePath(keyFile, "private key file")
+	if err != nil {
+		return "", "", err
+	}
+	if normalizedCertFile == normalizedKeyFile {
+		return "", "", errTLSCertKeySamePath
+	}
+	return normalizedCertFile, normalizedKeyFile, nil
 }
 
 // generateSelfSignedCert generates a new self-signed certificate
@@ -206,13 +238,88 @@ func (m *Manager) generateSelfSignedCert(certFile, keyFile string) (tls.Certific
 
 // saveCertFiles saves certificate and key to files
 func (m *Manager) saveCertFiles(certFile, keyFile string, certPEM, keyPEM []byte) error {
-	if err := writeTLSFile(certFile, certPEM, 0644, errCertFileSymlink, ".tls-cert-*.tmp", "certificate file"); err != nil {
+	certSnapshot, certExisted, err := snapshotTLSFile(certFile, errCertFileSymlink, "certificate file")
+	if err != nil {
 		return err
 	}
-	if err := writeTLSFile(keyFile, keyPEM, 0600, errKeyFileSymlink, ".tls-key-*.tmp", "private key file"); err != nil {
+	keySnapshot, keyExisted, err := snapshotTLSFile(keyFile, errKeyFileSymlink, "private key file")
+	if err != nil {
 		return err
 	}
 
+	if err := writeTLSFile(certFile, certPEM, 0644, errCertFileSymlink, ".tls-cert-*.tmp", "certificate file"); err != nil {
+		return rollbackTLSCertPairAfterSaveFailure(certFile, keyFile, certSnapshot, certExisted, keySnapshot, keyExisted, err)
+	}
+	if err := writeTLSFile(keyFile, keyPEM, 0600, errKeyFileSymlink, ".tls-key-*.tmp", "private key file"); err != nil {
+		return rollbackTLSCertPairAfterSaveFailure(certFile, keyFile, certSnapshot, certExisted, keySnapshot, keyExisted, err)
+	}
+
+	return nil
+}
+
+func snapshotTLSFile(path string, symlinkErr error, label string) ([]byte, bool, error) {
+	normalizedPath, err := ensureTLSDirRoot(path, symlinkErr, label, false)
+	if err != nil {
+		return nil, false, err
+	}
+	data, err := readRegisteredTLSFile(normalizedPath, symlinkErr, label)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, false, nil
+		}
+		return nil, false, err
+	}
+	return data, true, nil
+}
+
+func rollbackTLSCertPairAfterSaveFailure(certFile, keyFile string, certSnapshot []byte, certExisted bool, keySnapshot []byte, keyExisted bool, cause error) error {
+	certRollbackErr := restoreTLSFileSnapshot(certFile, certSnapshot, certExisted, 0644, errCertFileSymlink, ".tls-cert-*.tmp", "certificate file")
+	keyRollbackErr := restoreTLSFileSnapshot(keyFile, keySnapshot, keyExisted, 0600, errKeyFileSymlink, ".tls-key-*.tmp", "private key file")
+	return errors.Join(
+		cause,
+		wrapTLSRollbackError("certificate file", certRollbackErr),
+		wrapTLSRollbackError("private key file", keyRollbackErr),
+	)
+}
+
+func restoreTLSFileSnapshot(path string, data []byte, existed bool, mode os.FileMode, symlinkErr error, pattern, label string) error {
+	if existed {
+		return writeTLSFile(path, data, mode, symlinkErr, pattern, label)
+	}
+	return removeTLSFile(path, symlinkErr, label)
+}
+
+func wrapTLSRollbackError(label string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("failed to rollback %s: %w", label, err)
+}
+
+func removeTLSFile(path string, symlinkErr error, label string) error {
+	root, normalizedPath, ok, err := registeredTLSDirRoot(path, label)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		normalizedPath, _, _, err = ensureTLSDirRootWithState(normalizedPath, symlinkErr, label, false)
+		if err != nil {
+			return err
+		}
+		root, normalizedPath, ok, err = registeredTLSDirRoot(normalizedPath, label)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return nil
+		}
+	}
+	if err := root.Remove(filepath.Base(normalizedPath)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return mapTLSRootPathError(err, symlinkErr)
+	}
+	if err := syncRegisteredTLSDir(normalizedPath, label); err != nil {
+		return fmt.Errorf("failed to sync %s directory: %w", label, err)
+	}
 	return nil
 }
 
@@ -477,20 +584,27 @@ func writeTLSFileAtomicallyWithRoot(root *os.Root, path string, data []byte, mod
 }
 
 func createTLSTempFile(root *os.Root, pattern string, symlinkErr error) (*os.File, string, error) {
-	tmpName, err := newTLSTempName(pattern)
-	if err != nil {
-		return nil, "", err
-	}
-	tmpFile, err := rootio.OpenFileNoFollow(root, tmpName, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0600)
-	if err != nil {
+	for range maxTLSTempAttempts {
+		tmpName, err := newTLSTempName(pattern)
+		if err != nil {
+			return nil, "", err
+		}
+		tmpFile, err := rootio.OpenFileNoFollow(root, tmpName, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0600)
+		if err == nil {
+			return tmpFile, tmpName, nil
+		}
+		if errors.Is(err, os.ErrExist) {
+			continue
+		}
 		return nil, "", mapTLSRootPathError(err, symlinkErr)
 	}
-	return tmpFile, tmpName, nil
+
+	return nil, "", errors.New("failed to allocate unique TLS temp file")
 }
 
 func newTLSTempName(pattern string) (string, error) {
 	random := make([]byte, 8)
-	if _, err := rand.Read(random); err != nil {
+	if _, err := tlsRandomRead(random); err != nil {
 		return "", err
 	}
 	name := strings.Replace(pattern, "*", hex.EncodeToString(random), 1)

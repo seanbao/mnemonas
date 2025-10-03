@@ -1804,6 +1804,44 @@ func TestServer_UploadFile_EnforcesUserQuota(t *testing.T) {
 	}
 }
 
+func TestServer_UploadFile_UserQuotaDoesNotApplyOutsideHomeDir(t *testing.T) {
+	server, fs, _, username, password := setupAuthServer(t)
+	ctx := context.Background()
+	monitor := &fakeAlertMonitor{}
+	server.alertMonitor = monitor
+	setUserHomeDirForTest(t, server, username, "/tester")
+	setUserQuotaForTest(t, server, username, 5)
+	setDirectoryAccessRulesForTest(t, server, []config.DirectoryAccessRuleConfig{
+		{Path: "/team", WriteUsers: []string{username}},
+	})
+
+	if err := fs.Mkdir(ctx, "/tester"); err != nil {
+		t.Fatalf("Mkdir(/tester) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/team"); err != nil {
+		t.Fatalf("Mkdir(/team) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/tester/used.txt", strings.NewReader("12345")); err != nil {
+		t.Fatalf("WriteFile(used) error: %v", err)
+	}
+
+	token := loginAndGetAccessToken(t, server, username, password)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/files/team/shared.txt", strings.NewReader("shared"))
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("shared upload status = %d, want %d; body=%s", w.Code, http.StatusCreated, w.Body.String())
+	}
+	if _, err := fs.Stat(ctx, "/team/shared.txt"); err != nil {
+		t.Fatalf("expected shared upload to exist: %v", err)
+	}
+	if len(monitor.events) != 0 {
+		t.Fatalf("expected no quota alert for shared upload, got %+v", monitor.events)
+	}
+}
+
 func TestServer_UploadFile_EnforcesDirectoryQuota(t *testing.T) {
 	server, fs, _ := setupTestServer(t)
 	ctx := context.Background()
@@ -7219,6 +7257,53 @@ func TestServer_MoveFile_EnforcesDirectoryQuotaWhenMovingIntoQuota(t *testing.T)
 	}
 }
 
+func TestServer_MoveFile_EnforcesUserQuotaWhenMovingSharedPathIntoHome(t *testing.T) {
+	server, fs, _, username, password := setupAuthServer(t)
+	ctx := context.Background()
+	monitor := &fakeAlertMonitor{}
+	server.alertMonitor = monitor
+	setUserQuotaForTest(t, server, username, 10)
+	setDirectoryAccessRulesForTest(t, server, []config.DirectoryAccessRuleConfig{
+		{Path: "/team", WriteUsers: []string{username}},
+	})
+
+	if err := fs.Mkdir(ctx, "/tester"); err != nil {
+		t.Fatalf("Mkdir(/tester) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/team"); err != nil {
+		t.Fatalf("Mkdir(/team) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/tester/used.txt", strings.NewReader("12345678")); err != nil {
+		t.Fatalf("WriteFile(used) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/team/src.txt", strings.NewReader("12345")); err != nil {
+		t.Fatalf("WriteFile(src) error: %v", err)
+	}
+
+	token := loginAndGetAccessToken(t, server, username, password)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/files-move", strings.NewReader(`{"from":"/team/src.txt","to":"/tester/src.txt"}`))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusInsufficientStorage {
+		t.Fatalf("move user quota status = %d, want %d; body=%s", w.Code, http.StatusInsufficientStorage, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"quota_type":"user"`) || !strings.Contains(w.Body.String(), `"quota_path":"/tester"`) {
+		t.Fatalf("expected user quota details, got %s", w.Body.String())
+	}
+	if _, err := fs.Stat(ctx, "/team/src.txt"); err != nil {
+		t.Fatalf("expected rejected move to keep source, got %v", err)
+	}
+	if _, err := fs.Stat(ctx, "/tester/src.txt"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("expected rejected move to leave destination absent, got %v", err)
+	}
+	if len(monitor.events) != 1 || monitor.events[0].Details["operation"] != "move" || monitor.events[0].Details["quota_type"] != quotaTypeUser {
+		t.Fatalf("unexpected quota alert events: %+v", monitor.events)
+	}
+}
+
 func TestServer_CopyFile_RejectsWorkspaceRootPath(t *testing.T) {
 	server, _, _ := setupTestServer(t)
 
@@ -8323,6 +8408,46 @@ func TestServer_CopyFile_EnforcesUserQuota(t *testing.T) {
 	}
 }
 
+func TestServer_CopyFile_UserQuotaDoesNotApplyOutsideHomeDir(t *testing.T) {
+	server, fs, _, username, password := setupAuthServer(t)
+	ctx := context.Background()
+	monitor := &fakeAlertMonitor{}
+	server.alertMonitor = monitor
+	setUserHomeDirForTest(t, server, username, "/tester")
+	setUserQuotaForTest(t, server, username, 5)
+	setDirectoryAccessRulesForTest(t, server, []config.DirectoryAccessRuleConfig{
+		{Path: "/team", WriteUsers: []string{username}},
+	})
+
+	if err := fs.Mkdir(ctx, "/tester"); err != nil {
+		t.Fatalf("Mkdir(/tester) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/team"); err != nil {
+		t.Fatalf("Mkdir(/team) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/tester/src.txt", strings.NewReader("12345")); err != nil {
+		t.Fatalf("WriteFile(src) error: %v", err)
+	}
+
+	token := loginAndGetAccessToken(t, server, username, password)
+	body := `{"from":"/tester/src.txt","to":"/team/copied.txt"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/files-copy", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("shared copy status = %d, want %d; body=%s", w.Code, http.StatusCreated, w.Body.String())
+	}
+	if _, err := fs.Stat(ctx, "/team/copied.txt"); err != nil {
+		t.Fatalf("expected shared copy to exist: %v", err)
+	}
+	if len(monitor.events) != 0 {
+		t.Fatalf("expected no quota alert for shared copy, got %+v", monitor.events)
+	}
+}
+
 func TestServer_CopyFile_RejectsOversizedRequestBody(t *testing.T) {
 	server, _, _ := setupTestServer(t)
 
@@ -8519,6 +8644,100 @@ func TestServer_CopyFile_RejectsUnreadableNestedDirectoryAccessRule(t *testing.T
 	}
 	if _, err := fs.Stat(ctx, "/tester/team-copy"); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("expected rejected copy to leave no destination, got %v", err)
+	}
+}
+
+func TestServer_CopyFile_RejectsUnreadableNestedDirectoryBeforeQuota(t *testing.T) {
+	server, fs, _, username, password := setupAuthServer(t)
+	setUserHomeDirForTest(t, server, username, "/tester")
+	setUserGroupsForTest(t, server, username, []string{"family"})
+	setUserQuotaForTest(t, server, username, 1)
+	setDirectoryAccessRulesForTest(t, server, []config.DirectoryAccessRuleConfig{
+		{Path: "/team", ReadGroups: []string{"family"}},
+		{Path: "/team/private", ReadUsers: []string{"bob"}},
+	})
+	monitor := &fakeAlertMonitor{}
+	server.alertMonitor = monitor
+
+	ctx := context.Background()
+	if err := fs.Mkdir(ctx, "/team"); err != nil {
+		t.Fatalf("Mkdir(/team) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/team/private"); err != nil {
+		t.Fatalf("Mkdir(/team/private) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/tester"); err != nil {
+		t.Fatalf("Mkdir(/tester) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/team/readme.txt", bytes.NewReader([]byte("shared"))); err != nil {
+		t.Fatalf("WriteFile(/team/readme.txt) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/team/private/secret.txt", bytes.NewReader([]byte("secret"))); err != nil {
+		t.Fatalf("WriteFile(/team/private/secret.txt) error: %v", err)
+	}
+
+	token := loginAndGetAccessToken(t, server, username, password)
+	body := `{"from":"/team","to":"/tester/team-copy"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/files-copy", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("copy unreadable nested directory with quota status = %d, want %d; body=%s", w.Code, http.StatusForbidden, w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), ErrCodeQuotaExceeded) {
+		t.Fatalf("expected access denial before quota response, got %s", w.Body.String())
+	}
+	if _, err := fs.Stat(ctx, "/tester/team-copy"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("expected rejected copy to leave no destination, got %v", err)
+	}
+	if len(monitor.events) != 0 {
+		t.Fatalf("expected no quota alert for access-denied copy, got %+v", monitor.events)
+	}
+}
+
+func TestServer_CopyFile_RejectsDeniedDestinationDescendantBeforeQuota(t *testing.T) {
+	server, fs, _, username, password := setupAuthServer(t)
+	setUserHomeDirForTest(t, server, username, "/tester")
+	setUserQuotaForTest(t, server, username, 1)
+	setDirectoryAccessRulesForTest(t, server, []config.DirectoryAccessRuleConfig{
+		{Path: "/team", WriteUsers: []string{username}},
+		{Path: "/team/copied/private", WriteUsers: []string{"bob"}},
+	})
+	monitor := &fakeAlertMonitor{}
+	server.alertMonitor = monitor
+
+	ctx := context.Background()
+	for _, dir := range []string{"/tester", "/tester/src", "/tester/src/private", "/team"} {
+		if err := fs.Mkdir(ctx, dir); err != nil {
+			t.Fatalf("Mkdir(%s) error: %v", dir, err)
+		}
+	}
+	if err := fs.WriteFile(ctx, "/tester/src/private/secret.txt", bytes.NewReader([]byte("secret"))); err != nil {
+		t.Fatalf("WriteFile(/tester/src/private/secret.txt) error: %v", err)
+	}
+
+	token := loginAndGetAccessToken(t, server, username, password)
+	body := `{"from":"/tester/src","to":"/team/copied"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/files-copy", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("copy denied destination descendant with quota status = %d, want %d; body=%s", w.Code, http.StatusForbidden, w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), ErrCodeQuotaExceeded) {
+		t.Fatalf("expected destination access denial before quota response, got %s", w.Body.String())
+	}
+	if _, err := fs.Stat(ctx, "/team/copied"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("expected rejected copy to leave no destination, got %v", err)
+	}
+	if len(monitor.events) != 0 {
+		t.Fatalf("expected no quota alert for access-denied copy, got %+v", monitor.events)
 	}
 }
 
@@ -8788,6 +9007,153 @@ func TestServer_RestoreFromTrash_EnforcesUserQuota(t *testing.T) {
 	}
 	if _, err := fs.Stat(ctx, "/tester/deleted.txt"); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("expected rejected restore to leave original path absent, got %v", err)
+	}
+}
+
+func TestServer_RestoreFromTrash_CustomPathEnforcesUserQuotaAtDestination(t *testing.T) {
+	server, fs, _, username, password := setupAuthServer(t)
+	ctx := context.Background()
+	monitor := &fakeAlertMonitor{}
+	server.alertMonitor = monitor
+	setUserHomeDirForTest(t, server, username, "/tester")
+	setUserQuotaForTest(t, server, username, 10)
+	setDirectoryAccessRulesForTest(t, server, []config.DirectoryAccessRuleConfig{
+		{Path: "/team", WriteUsers: []string{username}},
+	})
+
+	for _, dir := range []string{"/tester", "/team"} {
+		if err := fs.Mkdir(ctx, dir); err != nil {
+			t.Fatalf("Mkdir(%s) error: %v", dir, err)
+		}
+	}
+	if err := fs.WriteFile(ctx, "/team/deleted.txt", strings.NewReader("12345")); err != nil {
+		t.Fatalf("WriteFile(deleted) error: %v", err)
+	}
+	if err := fs.Delete(ctx, "/team/deleted.txt"); err != nil {
+		t.Fatalf("Delete(deleted) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/tester/used.txt", strings.NewReader("12345678")); err != nil {
+		t.Fatalf("WriteFile(used) error: %v", err)
+	}
+	items, err := fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash() error: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("trash item count = %d, want 1", len(items))
+	}
+
+	token := loginAndGetAccessToken(t, server, username, password)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/trash/"+items[0].ID+"/restore?path=%2Ftester%2Frestored.txt", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusInsufficientStorage {
+		t.Fatalf("custom trash restore quota status = %d, want %d; body=%s", w.Code, http.StatusInsufficientStorage, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"quota_type":"user"`) || !strings.Contains(w.Body.String(), `"quota_path":"/tester"`) {
+		t.Fatalf("expected user quota details for destination, got %s", w.Body.String())
+	}
+	if _, err := fs.Stat(ctx, "/tester/restored.txt"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("expected rejected custom restore to leave destination absent, got %v", err)
+	}
+	if len(monitor.events) != 1 || monitor.events[0].Details["operation"] != "trash_restore" || monitor.events[0].Details["target_path"] != "/tester/restored.txt" {
+		t.Fatalf("unexpected quota alert events: %+v", monitor.events)
+	}
+}
+
+func TestServer_RestoreFromTrash_CustomPathDoesNotApplyUserQuotaOutsideHome(t *testing.T) {
+	server, fs, _, username, password := setupAuthServer(t)
+	ctx := context.Background()
+	monitor := &fakeAlertMonitor{}
+	server.alertMonitor = monitor
+	setUserHomeDirForTest(t, server, username, "/tester")
+	setUserQuotaForTest(t, server, username, 10)
+	setDirectoryAccessRulesForTest(t, server, []config.DirectoryAccessRuleConfig{
+		{Path: "/team", WriteUsers: []string{username}},
+	})
+
+	for _, dir := range []string{"/tester", "/team"} {
+		if err := fs.Mkdir(ctx, dir); err != nil {
+			t.Fatalf("Mkdir(%s) error: %v", dir, err)
+		}
+	}
+	if err := fs.WriteFile(ctx, "/tester/deleted.txt", strings.NewReader("12345")); err != nil {
+		t.Fatalf("WriteFile(deleted) error: %v", err)
+	}
+	if err := fs.Delete(ctx, "/tester/deleted.txt"); err != nil {
+		t.Fatalf("Delete(deleted) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/tester/used.txt", strings.NewReader("1234567890")); err != nil {
+		t.Fatalf("WriteFile(used) error: %v", err)
+	}
+	items, err := fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash() error: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("trash item count = %d, want 1", len(items))
+	}
+
+	token := loginAndGetAccessToken(t, server, username, password)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/trash/"+items[0].ID+"/restore?path=%2Fteam%2Frestored.txt", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("custom shared trash restore status = %d, want %d; body=%s", w.Code, http.StatusOK, w.Body.String())
+	}
+	if _, err := fs.Stat(ctx, "/team/restored.txt"); err != nil {
+		t.Fatalf("expected shared custom restore to exist: %v", err)
+	}
+	if len(monitor.events) != 0 {
+		t.Fatalf("expected no user quota alert for shared custom restore, got %+v", monitor.events)
+	}
+}
+
+func TestServer_RestoreFromTrash_CustomPathEnforcesDirectoryQuotaAtDestination(t *testing.T) {
+	server, fs, _ := setupTestServer(t)
+	ctx := context.Background()
+	monitor := &fakeAlertMonitor{}
+	server.alertMonitor = monitor
+	setDirectoryQuotasForTest(t, server, []config.DirectoryQuotaConfig{{Path: "/team", QuotaBytes: 4}})
+
+	for _, dir := range []string{"/source", "/team"} {
+		if err := fs.Mkdir(ctx, dir); err != nil {
+			t.Fatalf("Mkdir(%s) error: %v", dir, err)
+		}
+	}
+	if err := fs.WriteFile(ctx, "/source/deleted.txt", strings.NewReader("12345")); err != nil {
+		t.Fatalf("WriteFile(deleted) error: %v", err)
+	}
+	if err := fs.Delete(ctx, "/source/deleted.txt"); err != nil {
+		t.Fatalf("Delete(deleted) error: %v", err)
+	}
+	items, err := fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash() error: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("trash item count = %d, want 1", len(items))
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/trash/"+items[0].ID+"/restore?path=%2Fteam%2Frestored.txt", nil)
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusInsufficientStorage {
+		t.Fatalf("custom trash restore directory quota status = %d, want %d; body=%s", w.Code, http.StatusInsufficientStorage, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"quota_type":"directory"`) || !strings.Contains(w.Body.String(), `"quota_path":"/team"`) {
+		t.Fatalf("expected directory quota details for destination, got %s", w.Body.String())
+	}
+	if _, err := fs.Stat(ctx, "/team/restored.txt"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("expected rejected custom restore to leave destination absent, got %v", err)
+	}
+	if len(monitor.events) != 1 || monitor.events[0].Details["operation"] != "trash_restore" || monitor.events[0].Details["quota_type"] != quotaTypeDirectory {
+		t.Fatalf("unexpected quota alert events: %+v", monitor.events)
 	}
 }
 
@@ -14393,7 +14759,7 @@ func TestServer_UpdateSettings_UpdatesDiskHealthConfig(t *testing.T) {
 	monitor := &fakeDiskHealthMonitor{}
 	server.diskHealth = monitor
 
-	body := `{"disk_health":{"enabled":true,"check_interval":"45m","probe_timeout":"20s","cooldown_period":"3h","command":"smartctl","temperature_warning_c":47,"temperature_critical_c":57,"media_wear_warning_percent":82,"media_wear_critical_percent":98,"devices":[{"name":"Data","path":"/dev/disk/by-id/test","type":"sat","serial":"SER123","temperature_warning_c":45,"temperature_critical_c":55}]}}`
+	body := `{"disk_health":{"enabled":true,"check_interval":"45m","probe_timeout":"20s","cooldown_period":"3h","command":"smartctl","temperature_warning_c":47,"temperature_critical_c":57,"media_wear_warning_percent":82,"media_wear_critical_percent":98,"devices":[{"name":" Data ","path":" /dev/disk/by-id/../by-id/test ","type":" sat ","serial":" SER123 ","temperature_warning_c":45,"temperature_critical_c":55}]}}`
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/settings", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -14420,6 +14786,9 @@ func TestServer_UpdateSettings_UpdatesDiskHealthConfig(t *testing.T) {
 	}
 	if len(server.config.DiskHealth.Devices) != 1 || server.config.DiskHealth.Devices[0].Path != "/dev/disk/by-id/test" {
 		t.Fatalf("unexpected disk health devices: %+v", server.config.DiskHealth.Devices)
+	}
+	if device := server.config.DiskHealth.Devices[0]; device.Name != "Data" || device.Type != "sat" || device.Serial != "SER123" {
+		t.Fatalf("expected normalized disk health device fields, got %+v", device)
 	}
 	if monitor.updateCount != 1 {
 		t.Fatalf("expected disk health monitor update once, got %d", monitor.updateCount)

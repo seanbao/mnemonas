@@ -7,6 +7,7 @@ read_timeout = "30s"
 write_timeout = "60s"
 idle_timeout = "120s"
 trusted_proxy_hops = 0        # 默认不信任 X-Forwarded-*；反向代理后方部署时设置为实际代理层数
+trusted_proxy_cidrs = []      # 非 loopback 反向代理直连来源；如 Docker 网桥或内网负载均衡 CIDR
 
 [server.tls]
 enabled = false              # 启用 HTTPS
@@ -18,6 +19,12 @@ cert_dir = ""                # 证书存放目录（默认 ~/.mnemonas/.mnemonas
 [storage]
 # 存储根目录，默认 ~/.mnemonas（无需 root 权限）
 root = "~/.mnemonas"
+# directory_quotas = [
+#   { path = "/team", quota_bytes = 1099511627776 },
+# ]
+# directory_access_rules = [
+#   { path = "/team", read_groups = ["family"], write_groups = ["editors"] },
+# ]
 
 [storage.retention]
 max_versions = 50            # 每个文件最多保留50个版本
@@ -49,7 +56,7 @@ max_chunk_size = 4194304     # 4MB
 enabled = true
 prefix = "/dav"              # 不能使用 /、/api、/s、/health 或这些保留路由的子路径
 read_only = false
-auth_type = "basic"          # none, basic
+auth_type = "basic"          # users, basic, none
 username = "admin"           # Basic Auth 用户名（默认 admin）
 password = ""                # Basic Auth 密码（留空则首次启动时自动生成并写入 secrets.json）
 
@@ -84,6 +91,7 @@ encryption_required = false
 # schedule_window_start = "02:00" # 可选；自动任务只在服务器本地时间窗口内启动
 # schedule_window_end = "05:00"   # 支持跨午夜，例如 22:00 到 06:00
 # stale_after = "72h"          # 超过该时间没有成功备份时，健康状态显示为过期
+# restore_drill_stale_after = "720h" # 超过该时间没有成功恢复演练时提醒；留空默认 30 天
 # max_snapshots = 7            # 最多保留的本地快照数；0 表示不按数量清理
 # max_age = "720h"             # 快照最长保留时间；0 表示不按时间清理
 # include_config = true       # 同时复制当前 config.toml
@@ -102,6 +110,8 @@ encryption_required = false
 # schedule_window_start = "02:00"
 # schedule_window_end = "05:00"
 # stale_after = "72h"
+# restore_drill_stale_after = "720h"
+# retention_policy = "external: restic forget --keep-daily 7 --prune"
 # verify_after_backup = true               # 执行 restic check
 # exclude = [".mnemonas/thumbnails"]
 # extra_args = ["--compression", "max"]
@@ -118,6 +128,8 @@ encryption_required = false
 # schedule_window_start = "02:00"
 # schedule_window_end = "05:00"
 # stale_after = "72h"
+# restore_drill_stale_after = "720h"
+# retention_policy = "external: cloud lifecycle keeps 30 daily versions"
 # verify_after_backup = true               # 执行 rclone check --one-way
 # exclude = [".mnemonas/thumbnails"]
 # extra_args = ["--fast-list"]
@@ -139,6 +151,14 @@ users_file = ""              # 用户数据文件路径（默认 ~/.mnemonas/.mn
 enabled = false              # 启用文件分享功能
 store_file = ""              # 分享数据文件路径（默认 ~/.mnemonas/.mnemonas/shares.json）
 base_url = ""                # 分享链接基础 URL（可选，用于生成完整链接）
+default_expires_in = "168h"  # 新建分享默认有效期；0 表示默认不过期
+default_max_access = 0       # 新建分享默认访问次数上限；0 表示不限制
+
+# [[share.policy_rules]]
+# path = "/Family"
+# require_password = true
+# max_expires_in = "24h"
+# max_access = 20
 
 [favorites]
 enabled = true               # 启用收藏功能
@@ -153,10 +173,34 @@ min_free_bytes = 10737418240 # 剩余空间低于此值时告警（10GB）
 cooldown_period = "4h"       # 同级别告警冷却时间
 webhook_url = ""             # Webhook URL（如企业微信机器人、Slack 等）
 webhook_method = "POST"      # HTTP 方法；GET 时将告警字段编码到 URL query
-# webhook_headers = ["Authorization: Bearer xxx"] # 自定义请求头；名称必须是合法 HTTP header token，值不能包含换行或控制字符
+webhook_headers = []         # 自定义请求头；名称必须是合法 HTTP header token，值不能包含换行或控制字符
 telegram_enabled = false     # 启用 Telegram 机器人通知
 telegram_bot_token = ""      # Telegram Bot Token；仅写入配置文件，不会在诊断或设置响应中明文返回
 telegram_chat_id = ""        # Telegram Chat ID 或 @channel 用户名
+email_enabled = false        # 启用 SMTP 邮件通知
+smtp_host = ""               # SMTP 主机名，不包含端口
+smtp_port = 587              # SMTP 端口
+smtp_username = ""           # SMTP 用户名
+smtp_password = ""           # SMTP 密码或应用专用密码
+smtp_from = ""               # 发件人地址
+smtp_to = []                 # 收件人地址列表
+
+[disk_health]
+enabled = false
+check_interval = "1h"
+probe_timeout = "15s"
+cooldown_period = "4h"
+command = "smartctl"
+temperature_warning_c = 50
+temperature_critical_c = 60
+media_wear_warning_percent = 80
+media_wear_critical_percent = 100
+
+# [[disk_health.devices]]
+# name = "data-disk"
+# path = "/dev/disk/by-id/ata-example"
+# type = "sat"
+# serial = ""
 
 [security]
 allow_unsafe_no_auth = false  # 仅在明确接受非 loopback 无认证暴露风险时才设为 true

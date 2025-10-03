@@ -93,9 +93,19 @@ require_live_fault_target() {
     require_safe_http_url "$BASE_URL" "BASE_URL"
     require_safe_pid "$NASD_PID" "NASD_PID"
 
+    if [[ -z "$STORAGE_ROOT" ]]; then
+        die "STORAGE_ROOT must not be empty"
+    fi
     if path_has_parent_segment "$STORAGE_ROOT"; then
         die "STORAGE_ROOT must not contain '..' path segments: $STORAGE_ROOT"
     fi
+    if [[ "$STORAGE_ROOT" != /* ]]; then
+        die "STORAGE_ROOT must be an absolute path: $STORAGE_ROOT"
+    fi
+    if is_protected_storage_root "$STORAGE_ROOT"; then
+        die "STORAGE_ROOT points at a protected system directory: $STORAGE_ROOT"
+    fi
+    require_no_symlink_components "$STORAGE_ROOT" "STORAGE_ROOT"
 
     if [[ "$ALLOW_REAL_STORAGE" != "1" ]]; then
         case "$STORAGE_ROOT" in
@@ -126,6 +136,57 @@ path_has_parent_segment() {
         fi
     done
     return 1
+}
+
+require_no_symlink_components() {
+    local value="$1"
+    local label="$2"
+    local trimmed="$value"
+    local current="."
+    local -a segments
+
+    if [[ "$value" == /* ]]; then
+        trimmed="${value#/}"
+        current="/"
+    fi
+    trimmed="${trimmed%/}"
+
+    IFS='/' read -r -a segments <<< "$trimmed"
+    for segment in "${segments[@]}"; do
+        [[ -n "$segment" && "$segment" != "." ]] || continue
+        if [[ "$current" == "/" ]]; then
+            current="/$segment"
+        else
+            current="$current/$segment"
+        fi
+        if [[ -L "$current" ]]; then
+            die "$label must not contain symlink path components: $current"
+        fi
+        [[ -e "$current" ]] || break
+    done
+}
+
+normalize_absolute_path() {
+    local value="$1"
+
+    while [[ "$value" != "/" && "$value" == */ ]]; do
+        value="${value%/}"
+    done
+    printf '%s\n' "$value"
+}
+
+is_protected_storage_root() {
+    local value
+
+    value="$(normalize_absolute_path "$1")"
+    case "$value" in
+        /|/bin|/boot|/dev|/etc|/home|/lib|/lib64|/media|/mnt|/opt|/proc|/root|/run|/sbin|/srv|/sys|/tmp|/usr|/usr/local|/usr/local/bin|/usr/local/share|/var)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
 }
 
 confirm_live_fault_target() {

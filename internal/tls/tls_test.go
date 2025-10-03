@@ -192,6 +192,45 @@ func TestGetTLSConfig_MissingCertNoAutoGenerate(t *testing.T) {
 	}
 }
 
+func TestGetTLSConfig_RejectsIncompleteCertificatePair(t *testing.T) {
+	tempDir := t.TempDir()
+	certFile := filepath.Join(tempDir, "server.crt")
+
+	manager := NewManager(Config{
+		Enabled:      true,
+		AutoGenerate: true,
+		CertFile:     certFile,
+	})
+
+	_, err := manager.GetTLSConfig()
+	if !errors.Is(err, errTLSCertKeyPairIncomplete) {
+		t.Fatalf("expected incomplete certificate pair rejection, got %v", err)
+	}
+	if _, statErr := os.Stat(certFile); !os.IsNotExist(statErr) {
+		t.Fatalf("expected no generated certificate file, got %v", statErr)
+	}
+}
+
+func TestGetTLSConfig_RejectsSameCertificateAndKeyPath(t *testing.T) {
+	tempDir := t.TempDir()
+	pairFile := filepath.Join(tempDir, "server.pem")
+
+	manager := NewManager(Config{
+		Enabled:      true,
+		AutoGenerate: true,
+		CertFile:     pairFile,
+		KeyFile:      pairFile,
+	})
+
+	_, err := manager.GetTLSConfig()
+	if !errors.Is(err, errTLSCertKeySamePath) {
+		t.Fatalf("expected same certificate and key path rejection, got %v", err)
+	}
+	if _, statErr := os.Stat(pairFile); !os.IsNotExist(statErr) {
+		t.Fatalf("expected no generated certificate/key file, got %v", statErr)
+	}
+}
+
 func TestWriteTLSFile_ReturnsDirectorySyncError(t *testing.T) {
 	tmpDir := t.TempDir()
 	filePath := filepath.Join(tmpDir, "server.crt")
@@ -262,6 +301,104 @@ func TestWriteTLSFile_ReplacesExistingFileAndCleansTemp(t *testing.T) {
 		if strings.HasPrefix(entry.Name(), ".tls-key-") && strings.HasSuffix(entry.Name(), ".tmp") {
 			t.Fatalf("temporary TLS key file was not cleaned up: %s", entry.Name())
 		}
+	}
+}
+
+func TestWriteTLSFile_RetriesTempNameCollision(t *testing.T) {
+	tmpDir := t.TempDir()
+	filePath := filepath.Join(tmpDir, "server.crt")
+	collisionName := ".tls-cert-aaaaaaaaaaaaaaaa.tmp"
+	if err := os.WriteFile(filepath.Join(tmpDir, collisionName), []byte("existing temp"), 0600); err != nil {
+		t.Fatalf("WriteFile(collision temp) error: %v", err)
+	}
+
+	originalTLSRandomRead := tlsRandomRead
+	calls := 0
+	tlsRandomRead = func(b []byte) (int, error) {
+		calls++
+		fill := byte(0xaa)
+		if calls > 1 {
+			fill = 0xbb
+		}
+		for i := range b {
+			b[i] = fill
+		}
+		return len(b), nil
+	}
+	defer func() {
+		tlsRandomRead = originalTLSRandomRead
+	}()
+
+	if err := writeTLSFile(filePath, []byte("certificate"), 0644, errCertFileSymlink, ".tls-cert-*.tmp", "certificate file"); err != nil {
+		t.Fatalf("writeTLSFile() error after temp-name collision: %v", err)
+	}
+	if calls < 2 {
+		t.Fatalf("expected TLS temp-name retry after collision, got %d call(s)", calls)
+	}
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		t.Fatalf("ReadFile(server.crt) error: %v", err)
+	}
+	if string(data) != "certificate" {
+		t.Fatalf("server.crt content = %q, want certificate", string(data))
+	}
+	collisionData, err := os.ReadFile(filepath.Join(tmpDir, collisionName))
+	if err != nil {
+		t.Fatalf("ReadFile(collision temp) error: %v", err)
+	}
+	if string(collisionData) != "existing temp" {
+		t.Fatalf("collision temp content = %q, want existing temp", string(collisionData))
+	}
+}
+
+func TestSaveCertFiles_RestoresExistingPairWhenKeyWriteFailsAfterReplace(t *testing.T) {
+	tmpDir := t.TempDir()
+	certFile := filepath.Join(tmpDir, "server.crt")
+	keyFile := filepath.Join(tmpDir, "server.key")
+	oldCert := []byte("old-cert")
+	oldKey := []byte("old-key")
+	if err := os.WriteFile(certFile, oldCert, 0644); err != nil {
+		t.Fatalf("WriteFile(cert) error: %v", err)
+	}
+	if err := os.WriteFile(keyFile, oldKey, 0600); err != nil {
+		t.Fatalf("WriteFile(key) error: %v", err)
+	}
+
+	originalSyncTLSRootDir := syncTLSRootDir
+	syncCalls := 0
+	syncTLSRootDir = func(root *os.Root) error {
+		syncCalls++
+		if syncCalls == 2 {
+			return errors.New("key directory fsync failed")
+		}
+		return originalSyncTLSRootDir(root)
+	}
+	defer func() {
+		syncTLSRootDir = originalSyncTLSRootDir
+	}()
+
+	manager := NewManager(Config{})
+	err := manager.saveCertFiles(certFile, keyFile, []byte("new-cert"), []byte("new-key"))
+	if err == nil {
+		t.Fatal("expected saveCertFiles() to fail when key directory sync fails")
+	}
+	if !strings.Contains(err.Error(), "key directory fsync failed") {
+		t.Fatalf("expected key sync failure in error, got %v", err)
+	}
+
+	certData, err := os.ReadFile(certFile)
+	if err != nil {
+		t.Fatalf("ReadFile(cert) error: %v", err)
+	}
+	if !bytes.Equal(certData, oldCert) {
+		t.Fatalf("certificate content = %q, want %q", certData, oldCert)
+	}
+	keyData, err := os.ReadFile(keyFile)
+	if err != nil {
+		t.Fatalf("ReadFile(key) error: %v", err)
+	}
+	if !bytes.Equal(keyData, oldKey) {
+		t.Fatalf("key content = %q, want %q", keyData, oldKey)
 	}
 }
 

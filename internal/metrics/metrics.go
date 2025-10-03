@@ -34,7 +34,7 @@ type RequestMetrics struct {
 	bytesOut atomic.Int64
 
 	// Start time for uptime calculation
-	startTime time.Time
+	startTimeUnixNano atomic.Int64
 }
 
 type slowRequest struct {
@@ -46,11 +46,12 @@ type slowRequest struct {
 
 // NewRequestMetrics creates a new metrics collector
 func NewRequestMetrics() *RequestMetrics {
-	return &RequestMetrics{
+	m := &RequestMetrics{
 		methodCounts: make(map[string]*atomic.Int64),
 		slowRequests: make([]slowRequest, 0, 10),
-		startTime:    time.Now(),
 	}
+	m.startTimeUnixNano.Store(time.Now().UnixNano())
+	return m
 }
 
 // RecordRequest records a request with its duration and status
@@ -207,7 +208,11 @@ func (m *RequestMetrics) GetStats() Stats {
 
 	bytesIn := m.bytesIn.Load()
 	bytesOut := m.bytesOut.Load()
-	uptime := time.Since(m.startTime).Seconds()
+	startTimeUnixNano := m.startTimeUnixNano.Load()
+	var uptime float64
+	if startTimeUnixNano > 0 {
+		uptime = time.Since(time.Unix(0, startTimeUnixNano)).Seconds()
+	}
 	var throughputMBs float64
 	if uptime > 0 {
 		throughputMBs = float64(bytesIn+bytesOut) / 1024 / 1024 / uptime
@@ -262,7 +267,7 @@ func (m *RequestMetrics) Reset() {
 	m.slowRequests = make([]slowRequest, 0, 10)
 	m.slowRequestsMu.Unlock()
 
-	m.startTime = time.Now()
+	m.startTimeUnixNano.Store(time.Now().UnixNano())
 }
 
 // Global metrics instance
@@ -301,15 +306,27 @@ type responseWriter struct {
 	http.ResponseWriter
 	status       int
 	bytesWritten int
+	wroteHeader  bool
 }
 
 func (rw *responseWriter) WriteHeader(code int) {
+	if rw.wroteHeader {
+		return
+	}
 	rw.status = code
+	rw.wroteHeader = true
 	rw.ResponseWriter.WriteHeader(code)
 }
 
 func (rw *responseWriter) Write(b []byte) (int, error) {
+	if !rw.wroteHeader {
+		rw.wroteHeader = true
+	}
 	n, err := rw.ResponseWriter.Write(b)
 	rw.bytesWritten += n
 	return n, err
+}
+
+func (rw *responseWriter) Unwrap() http.ResponseWriter {
+	return rw.ResponseWriter
 }

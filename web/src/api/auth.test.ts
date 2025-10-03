@@ -33,6 +33,8 @@ describe('auth API', () => {
   })
 
   it('returns empty auth state when nothing is stored', async () => {
+    const authCleared = vi.fn()
+    window.addEventListener(AUTH_CLEARED_EVENT, authCleared)
     fetchMock
       .mockResolvedValueOnce({
         ok: false,
@@ -52,6 +54,9 @@ describe('auth API', () => {
     expect(fetchMock).toHaveBeenNthCalledWith(1, '/api/v1/auth/me', expect.objectContaining({
       credentials: 'same-origin',
     }))
+    expect(authCleared).not.toHaveBeenCalled()
+
+    window.removeEventListener(AUTH_CLEARED_EVENT, authCleared)
   })
 
   it('logs out with the HttpOnly cookie session and clears local auth state', async () => {

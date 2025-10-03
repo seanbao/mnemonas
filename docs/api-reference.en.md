@@ -24,7 +24,7 @@ Authorization: Bearer <access_token>
 
 Login and refresh set `mnemonas_access` and `mnemonas_refresh` cookies. Browser clients can send `X-MnemoNAS-Session-Mode: cookie`; in that mode the JSON response omits bearer tokens and returns only user/session metadata.
 
-WebDAV `auth_type = "users"` accepts MnemoNAS user credentials over HTTP Basic and applies role, group, `home_dir`, directory access-rule, and quota boundaries. WebDAV `auth_type = "basic"` remains a separate global service credential mode.
+WebDAV `auth_type = "users"` accepts MnemoNAS user credentials over HTTP Basic and applies role, group, `home_dir`, directory access-rule, home-scoped user-quota, and directory-quota boundaries. WebDAV `auth_type = "basic"` remains a separate global service credential mode.
 
 ## Response Formats
 
@@ -182,7 +182,7 @@ Group names are normalized to lowercase and may contain only letters, digits, `.
 }
 ```
 
-`quota_bytes = 0` means unlimited. When it is greater than zero, server-side quota checks apply to non-admin Web/API uploads, copies, trash restores, and WebDAV PUT/COPY writes when `webdav.auth_type = "users"`. Checks use the current logical size under the user's `home_dir`. Exceeding quota returns `507 Insufficient Storage` with code `QUOTA_EXCEEDED` and details containing `used_bytes`, `quota_bytes`, `required_bytes`, and `available_bytes`. When alert channels are enabled, Web/API upload, copy, and trash-restore quota denials also send a `quota_exceeded` warning event with user, home directory, operation, target path, and quota byte details.
+`quota_bytes = 0` means unlimited. When it is greater than zero, server-side quota checks apply to non-admin Web/API uploads, copies, moves, trash restores, and WebDAV PUT/COPY/MOVE writes when `webdav.auth_type = "users"` and the write target is inside that user's `home_dir`. Checks use the current logical size under the `home_dir`; use `storage.directory_quotas` to limit shared directories. Exceeding quota returns `507 Insufficient Storage` with code `QUOTA_EXCEEDED` and details containing `used_bytes`, `quota_bytes`, `required_bytes`, and `available_bytes`. When alert channels are enabled, Web/API upload, copy, move, and trash-restore quota denials also send a `quota_exceeded` warning event with user, home directory, operation, target path, and quota byte details.
 
 `storage.directory_quotas` can define hard limits for MnemoNAS logical directories. Matching Web/API uploads, copies, moves, trash restores, version restores, and WebDAV PUT/COPY/MOVE operations return the same `QUOTA_EXCEEDED` code and add `quota_type="directory"` plus `quota_path` to `details`. Web/API directory quota denials also emit `quota_exceeded` alert events.
 
@@ -196,13 +196,71 @@ Group names are normalized to lowercase and may contain only letters, digits, `.
 | --- | --- | --- | --- |
 | `GET` | `/health` | No | Health check |
 | `GET` | `/api/v1/version` | Usually no | Version/build info |
-| `GET` | `/api/v1/setup/` | Depends on setup state | Initial setup status |
-| `POST` | `/api/v1/setup/acknowledge` | Yes | Acknowledge initial info |
+| `GET` | `/api/v1/setup/` | No | Initial setup status |
+| `POST` | `/api/v1/setup/acknowledge` | Admin when auth enabled | Acknowledge initial info |
 | `GET` | `/api/v1/stats` | Yes | Storage statistics |
 | `GET` | `/api/v1/diagnostics` | Admin | Diagnostic information |
 | `GET` | `/api/v1/metrics` | Admin when auth enabled | JSON metrics |
 
 Prometheus cannot directly scrape `/api/v1/metrics` as native exposition format. Use a JSON exporter or conversion layer.
+
+### Setup Status
+
+Returns first-run setup status.
+
+```http
+GET /api/v1/setup/
+```
+
+Example response:
+
+```json
+{
+  "success": true,
+  "is_first_run": true,
+  "auth_enabled": true,
+  "share_enabled": true,
+  "webdav_enabled": true,
+  "webdav_auth_type": "basic"
+}
+```
+
+Notes:
+
+- The endpoint does not return initial usernames or passwords.
+- The first-run Web administrator password is written only to `<storage.root>/.mnemonas/initial-password.txt`; non-interactive startup logs only report that file path.
+- The endpoint returns a setup-specific flat JSON payload and does not use the common `data` wrapper.
+
+### Acknowledge Setup Information
+
+Marks the first-run setup information as shown. Later `GET /api/v1/setup/` responses return `is_first_run=false`.
+
+```http
+POST /api/v1/setup/acknowledge
+```
+
+Authentication:
+
+- When authentication is enabled, administrator access is required.
+- When authentication is disabled, the endpoint can be called anonymously.
+
+Request body: none.
+
+Example response:
+
+```json
+{
+  "success": true,
+  "message": "setup acknowledged"
+}
+```
+
+Failure behavior:
+
+- Returns `401` when authentication is enabled and the caller is not logged in.
+- Returns `403` when authentication is enabled and the caller is not an administrator.
+- Returns `503` with message `setup acknowledge unavailable` when runtime secrets are unavailable.
+- This endpoint also returns setup-specific JSON and does not use the common `data` wrapper.
 
 `GET /api/v1/stats` returns availability flags for each stats group. Admin responses can include disk mount metadata from Linux mountinfo: `disk_mount_point`, `disk_mount_source`, and `disk_mount_options`, which help confirm the filesystem/device or dataset hosting MnemoNAS. Admin responses can also include `directory_quota_stats_available` and `directory_quotas` entries with `path`, `quota_bytes`, `used_bytes`, `available_bytes`, `usage_ratio`, `exists`, and `status`. Directory quota `status` is one of `normal`, `warning`, `exceeded`, or `missing`. When auth is enabled, home-scoped non-admin users do not receive global disk, CAS, file-count, or directory-quota stats.
 
@@ -258,12 +316,43 @@ Thumbnail generation rejects sources larger than 100 MiB, image dimensions above
 | `GET` | `/api/v1/versions/{path}` | List versions for a file |
 | `POST` | `/api/v1/versions/{hash}/restore` | Restore a version to the requested path |
 
-Restore request often includes the target path as a query parameter:
+### Restore Version
+
+Restore a file to a specific historical version.
+
+**Authentication**: Required
+
+**Permission**: Admin
+
+```text
+POST /api/v1/versions/{hash}/restore
+```
+
+**Query parameters**:
+- `path`: file path (required)
+
+When the version content has already been restored but final workspace metadata persistence fails, the API still returns `200 OK` with `Warning: 199 MnemoNAS "workspace mutation persistence incomplete"` and the response `message` set to `version restored with persistence warning`.
+
+Example request:
 
 ```bash
 curl -X POST \
   -H "Authorization: Bearer <access-token>" \
   "http://localhost:8080/api/v1/versions/<hash>/restore?path=/documents/report.txt"
+```
+
+Example response:
+
+```json
+{
+  "success": true,
+  "data": {
+    "path": "/documents/report.pdf",
+    "restored": "abc123..."
+  },
+  "message": "version restored successfully",
+  "timestamp": "2024-01-15T10:00:00Z"
+}
 ```
 
 ## Trash
@@ -352,6 +441,25 @@ Public share behavior:
 | `DELETE` | `/api/v1/favorites/{path}` | Remove favorite |
 | `PATCH` | `/api/v1/favorites/{path}` | Update note |
 
+List response:
+
+```json
+{
+  "success": true,
+  "data": {
+    "favorites": [
+      {
+        "path": "/documents/important.pdf",
+        "user_id": "user-123",
+        "created_at": "2024-01-15T10:00:00Z",
+        "note": ""
+      }
+    ],
+    "count": 1
+  }
+}
+```
+
 Add request:
 
 ```json
@@ -361,6 +469,56 @@ Add request:
 }
 ```
 
+Add response:
+
+```json
+{
+  "success": true,
+  "data": {
+    "path": "/documents/report.pdf",
+    "user_id": "user-123",
+    "created_at": "2024-01-15T10:00:00Z",
+    "note": "quarterly report"
+  }
+}
+```
+
+Check response:
+
+```json
+{
+  "success": true,
+  "data": {
+    "path": "/documents/file.pdf",
+    "is_favorite": true
+  }
+}
+```
+
+Batch check request:
+
+```json
+{
+  "paths": ["/file1.txt", "/file2.pdf"]
+}
+```
+
+Batch check response:
+
+```json
+{
+  "success": true,
+  "data": {
+    "favorites": {
+      "/file1.txt": true,
+      "/file2.pdf": false
+    }
+  }
+}
+```
+
+For `DELETE /api/v1/favorites/{path}` and `PATCH /api/v1/favorites/{path}`, `{path}` is URL-encoded by path segment while preserving `/` separators. Successful remove and note-update responses include `success: true`, `data: null`, and a status message.
+
 ## Activity Log
 
 | Method | Path | Description |
@@ -369,7 +527,7 @@ Add request:
 | `GET` | `/api/v1/activity/stats` | Activity statistics |
 | `DELETE` | `/api/v1/activity` | Clear activity log; admin only |
 
-Activity visibility follows user scope. Admins can see all activity. System events, such as periodic `disk_health` checks, are also written to the activity log.
+Activity visibility follows user scope. Admins can see all activity. System events, such as periodic `disk_health` checks, are also written to the activity log. Manual and scheduled Scrub runs write `scrub` activity entries; Scrub failures, object verification problems, and incomplete result persistence send `scrub_run` events through configured Webhook, Telegram, or SMTP alert channels.
 
 ## Settings
 
@@ -470,12 +628,13 @@ Maintenance endpoints are admin-oriented and may be long-running. The Web UI exp
 Scrub object errors return stable public `errors[].message` values; lower-level IO, path, and verification details are kept in server logs.
 Manual scrub runs write `scrub` activity-log entries. When `[maintenance.scrub] enabled = true`, the server runs full Scrub jobs in the background as the system user according to `schedule_interval`; failed runs retry after `retry_interval` up to `max_retries`. Scheduled runs use the same maintenance history, activity-log details, result shape, and alert events as manual runs. Scrub failures, object verification problems, and incomplete result persistence send `scrub_run` events through configured Webhook/Telegram/SMTP alert channels.
 `GET /api/v1/maintenance/disk-health` uses `[disk_health]` and `smartctl --json --all` to report `disabled`, `ok`, `warning`, `critical`, or `unavailable`. Missing devices, SMART failures, serial mismatches, critical temperatures, NVMe critical warnings, exhausted spare capacity, media-wear thresholds, and media errors affect device status. Periodic checks that find warning, critical, or unavailable status write a `disk_health` activity-log entry at `/system/disk-health` for the `system` user. When `[alerts]` has Webhook, Telegram, or SMTP email configured, periodic disk-health checks send `disk_health` events for warning, critical, and unavailable states.
+`GET /api/v1/diagnostics` and `/diagnostics-export` include sanitized filesystem stats. When `filesystem.disk_stats_available=true`, `filesystem.disk_*` can include capacity values, `disk_filesystem_type`, Linux mountinfo metadata (`disk_mount_point`, `disk_mount_source`, and `disk_mount_options`), and `disk_native_data_checksum_support`.
 `GET /api/v1/diagnostics` and `/diagnostics-export` include a sanitized `maintenance` summary with `history_ready`, `[maintenance.scrub]` schedule settings, the latest Scrub status/time, and the retry count for the latest failed Scrub.
 `GET /api/v1/diagnostics` and `/diagnostics-export` include sanitized `smb` preview state. Current builds do not start an SMB/Samba listener, so `runtime_available=false` means the configured SMB shares are not mountable; diagnostics expose share counts and runtime state but never SMB credential contents.
 `GET /api/v1/maintenance/objects` accepts an optional `cursor` query parameter from the previous `next_cursor`; non-empty cursors must be 64-character hexadecimal object hashes.
 Backup endpoints operate on jobs configured under `[[backup.jobs]]`. Supported job types are `local`, `restic`, and `rclone`. Local jobs copy into `destination/<job-id>/snapshots/<run-id>/` and can prune old snapshots by `max_snapshots` and `max_age`. Restic jobs invoke `restic -r <repository> --password-file <password_file> backup <source>` and optionally `restic check`; rclone jobs invoke `rclone sync <source> <remote>` and optionally `rclone check --one-way`. External commands are executed without a shell; `command` must be a bare executable name or absolute path, and `extra_args` are appended to backup commands as argv entries. Restore commands do not reuse backup-specific extra args. Backup runs reject symlinks in the `source` tree; `rclone` restore drills apply the same check before remote verification. Jobs may define `disabled`, `schedule_interval`, `schedule_window_start`, `schedule_window_end`, `stale_after`, `restore_drill_stale_after`, `max_snapshots`, `max_age`, and `retention_policy`; a positive `schedule_interval` enables the in-process scheduler. If both schedule-window fields are set, automatic runs only start inside that server-local `HH:MM` window, while manual run-now operations are unaffected. Job views include backup `health_status` (`ok`, `manual`, `running`, `due`, `stale`, `failed`, or `disabled`), `retention_status`, and `restore_drill_status` plus optional messages. Successful backups now run a retention check automatically, and `POST /retention-check` can run it manually. Local checks count the local snapshot range, restic checks run `restic snapshots --json --tag mnemonas --tag job:<id>`, and rclone checks run `rclone lsjson <remote> --recursive --files-only`; results persist as `last_retention_check` and feed `retention_status`/`retention_message`. `retention_policy` marks restic/rclone remote retention as externally confirmed; otherwise remote jobs report a retention warning. `restore_drill_stale_after` defaults to 30 days and drives restore-drill reminder status; when alert channels are configured, stale or missing restore drills send rate-limited `backup_restore_drill` warning events with `trigger=restore_drill_reminder` and persist `last_restore_drill_reminder_at`. Restore-drill history is capped to the latest 20 entries and records status, file/byte counts, artifact paths, failure messages, and stable `failure_category` values for failed drills. Current categories are `no_snapshot`, `unsupported_job_type`, `unsafe_path`, `integrity_check`, `external_command`, `cancelled`, `io`, and `unknown`, and they are forwarded to alert event details. Job views also return `restore_drill_stats`, which summarizes total runs, successes, failures, success rate, consecutive successes or failures, latest success/failure time, latest failure message, and latest failure category across that retained window. Restore history is also capped to the latest 20 entries and records target path, status, file/byte counts, preflight checks, warnings, rollback/cutover checklists, and failure messages; `last_restore_verify` persists the latest read-only post-restore verification result after page refresh. `GET /restore-report` downloads an `application/json` attachment with the job view, latest backup, retention check, restore drill, restore-drill history and stats, latest restore, latest restore verification, restore history, and findings for handoff or incident records. When `[alerts] enabled = true` and Webhook, Telegram, or SMTP email is configured, backup failures, restore-drill failures, stale/missing restore-drill reminders, retention-check failures/warnings, and backup-warning runs send events with type `backup_run`, `backup_restore_drill`, or `backup_retention_check`, level `warning` or `critical`, and task/run/error details. `POST /run` accepts an empty body or `{}`. `POST /retention-check` accepts an empty body or `{}` and returns `snapshot_count`, `file_count`, `total_bytes`, snapshot time range, `warning`, and `warnings`; failures return `500` with the failed check in `details`. `POST /restore-drill` accepts optional `{"keep_artifact": true}`; local jobs temporarily restore and verify the latest snapshot, restic jobs run `restic check`, and rclone jobs run `rclone check --one-way`. `POST /restore-preview` validates the same target rules as restore but does not create target data or write restore history; it returns `preflight_checks`, `warnings`, `cutover_checklist`, and `rollback_checklist` for target isolation, target state, backup content, target filesystem capacity, and config handling. Local jobs summarize the latest manifest, restic jobs run `restic ls latest --json --tag mnemonas --tag job:<id> --path <source>`, and rclone jobs run `rclone lsjson <remote> --recursive --files-only`. `POST /batch-restore-preview` accepts `{"items":[{"job_id":"external-disk","target_path":"/absolute/restore/a","include_config":true}]}` with at most 20 items, rejects duplicate or nested target paths in the same batch, and returns per-item preview status, `error_message`, and warnings without writing target data or restore history. `POST /batch-restore` uses the same request shape, executes items sequentially, runs read-only `restore-verify` after every successful restore, and returns per-item `restore`, `verify`, `warnings`, and `error_message` fields. Partial failures return overall `status="completed"` with `warning=true`; all item failures return `status="failed"`, so clients must inspect `items[]`. `POST /restore` supports local, restic, and rclone jobs and requires `{"target_path": "/absolute/restore/path", "include_config": true}`. The target must be outside `storage.root`, the backup source, and any local backup destination or repository. Its parent must exist, and the target must not exist or must be empty. The server reruns the same restore preflight before writing; failed preflight checks reject the restore and are persisted with the failed restore result. Local restore copies snapshot `data/` contents into the target root, verifies size and SHA-256, and restores config to `.mnemonas-restore/config.toml` when requested. Restic restore runs `restic restore latest --target <staging> --tag mnemonas --tag job:<id> --path <source>`, then installs the restored source directory contents into the target root after rejecting restored symlinks and special files. Rclone restore runs `rclone copy <remote> <target>` and then `rclone check <remote> <target> --one-way`; restored symlinks and special files are rejected before the target directory is installed. `include_config` has no special handling for restic or rclone jobs. Restore start and completion are persisted, and failed restore attempts are also recorded for later troubleshooting. `POST /restore-verify` requires an existing target directory, applies the same protected-path boundaries, does not modify data, persists the latest verification report as `last_restore_verify`, and reports file/byte counts plus whether `.mnemonas-restore/config.toml`, `files/`, `.mnemonas/`, `.mnemonas/index.db`, and `.mnemonas/objects` were found; warnings call out symlinks, special files, or targets that do not look like a complete `storage.root`. Backup failures return `500` with the failed run result in `details`; unknown jobs return `404`; disabled jobs, concurrent operations, local restore/restore-drill operations without any completed snapshot, and non-empty restore targets return `409`.
 
-Local backup destinations reject existing symlink path components. The same symlink path-component check applies to `POST /restore-preview`, `POST /restore`, and `POST /restore-verify` target paths.
+Local backup destinations reject existing symlink path components. Local restore previews, restores, and restore drills recheck that destination before reading snapshot manifests or creating drill artifacts. The same symlink path-component check applies to `POST /restore-preview`, `POST /restore`, and `POST /restore-verify` target paths.
 
 ## WebDAV
 

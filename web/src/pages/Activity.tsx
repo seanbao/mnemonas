@@ -34,6 +34,7 @@ import {
 } from 'lucide-react'
 import {
   ApiError,
+  ACTIVITY_ACTIONS,
   listActivity,
   getActionLabel,
   getActionColor,
@@ -124,14 +125,6 @@ function ActivityRow({ entry }: { entry: ActivityEntry }) {
     </div>
   )
 }
-
-// All action types for filter
-const ALL_ACTIONS: ActionType[] = [
-  'upload', 'download', 'delete', 'rename', 'move', 'copy',
-  'create', 'restore', 'share', 'unshare', 'login', 'logout',
-  'favorite', 'unfavorite', 'favorite_note_update',
-  'trash_restore', 'trash_delete', 'trash_empty', 'disk_health',
-]
 
 function getActivityErrorState(error: unknown): 'unavailable' | null {
   if (error instanceof ApiError && error.isUnavailable) {
@@ -336,7 +329,7 @@ export function ActivityPage() {
               }}
               startContent={<Filter size={14} />}
             >
-              {ALL_ACTIONS.map((action) => (
+              {ACTIVITY_ACTIONS.map((action) => (
                 <SelectItem key={action}>
                   {getActionLabel(action)}
                 </SelectItem>

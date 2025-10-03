@@ -71,6 +71,9 @@ const (
 )
 
 var restoreAvailableBytesFunc = restoreAvailableBytes
+var afterCopyHostFileLstat = func(string) {}
+var afterCopyOpenFileBeforeMetadata = func(string) {}
+var afterValidateLocalBackupDestination = func(string) {}
 
 var (
 	ErrJobNotFound           = errors.New("backup job not found")
@@ -1079,25 +1082,17 @@ func (m *Manager) runLocalBackup(ctx context.Context, job config.BackupJobConfig
 	if err := validateDestination(source, job.Destination, m.storageRoot); err != nil {
 		return err
 	}
+	afterValidateLocalBackupDestination(job.Destination)
 
 	snapshotRoot := filepath.Join(job.Destination, job.ID, "snapshots")
 	partialPath := filepath.Join(snapshotRoot, result.ID+".partial")
 	finalPath := filepath.Join(snapshotRoot, result.ID)
-	if err := os.MkdirAll(snapshotRoot, 0700); err != nil {
-		return fmt.Errorf("create snapshot directory: %w", err)
+	if err := rootio.MkdirAllPathNoFollow(snapshotRoot, 0700); err != nil {
+		return fmt.Errorf("create snapshot directory: %w", mapBackupNoFollowError(err, "destination"))
 	}
-	if err := os.RemoveAll(partialPath); err != nil {
-		return fmt.Errorf("cleanup partial snapshot: %w", err)
+	if err := rootio.MkdirPathNoFollow(partialPath, 0700); err != nil {
+		return fmt.Errorf("create partial snapshot: %w", mapBackupNoFollowError(err, "destination"))
 	}
-	if err := os.Mkdir(partialPath, 0700); err != nil {
-		return fmt.Errorf("create partial snapshot: %w", err)
-	}
-	cleanupPartial := true
-	defer func() {
-		if cleanupPartial {
-			_ = os.RemoveAll(partialPath)
-		}
-	}()
 
 	dataPath := filepath.Join(partialPath, "data")
 	entries, totalBytes, err := copySourceTree(ctx, source, dataPath, job.Exclude)
@@ -1138,10 +1133,9 @@ func (m *Manager) runLocalBackup(ctx context.Context, job config.BackupJobConfig
 			return fmt.Errorf("verify backup snapshot: %w", err)
 		}
 	}
-	if err := os.Rename(partialPath, finalPath); err != nil {
-		return fmt.Errorf("finalize backup snapshot: %w", err)
+	if err := rootio.ReplaceEmptyDirPathNoFollow(partialPath, finalPath); err != nil {
+		return fmt.Errorf("finalize backup snapshot: %w", mapBackupNoFollowError(err, "destination"))
 	}
-	cleanupPartial = false
 
 	result.SnapshotPath = finalPath
 	result.ManifestPath = filepath.Join(finalPath, manifestFileName)
@@ -1225,6 +1219,10 @@ func (m *Manager) runRestoreDrill(ctx context.Context, job config.BackupJobConfi
 	if job.Type != JobTypeLocal {
 		return ErrUnsupportedJobType
 	}
+	source := effectiveSource(job, m.storageRoot)
+	if err := validateDestination(source, job.Destination, m.storageRoot); err != nil {
+		return err
+	}
 	snapshotPath, manifestPath, manifest, err := m.latestManifest(job)
 	if err != nil {
 		return err
@@ -1232,13 +1230,15 @@ func (m *Manager) runRestoreDrill(ctx context.Context, job config.BackupJobConfi
 
 	drillRoot := filepath.Join(job.Destination, job.ID, "restore-drills", result.ID)
 	restoredPath := filepath.Join(drillRoot, "restored")
-	if err := os.MkdirAll(restoredPath, 0700); err != nil {
-		return fmt.Errorf("create restore drill directory: %w", err)
+	if err := rootio.MkdirAllPathNoFollow(restoredPath, 0700); err != nil {
+		return fmt.Errorf("create restore drill directory: %w", mapBackupNoFollowError(err, "restore drill"))
 	}
 	cleanupDrill := !opts.KeepArtifact
 	defer func() {
 		if cleanupDrill {
-			_ = os.RemoveAll(drillRoot)
+			if err := validatePathComponentsNoSymlink(drillRoot, "restore drill"); err == nil {
+				_ = os.RemoveAll(drillRoot)
+			}
 		}
 	}()
 
@@ -1817,6 +1817,10 @@ func (m *Manager) runRcloneRetentionCheck(ctx context.Context, job config.Backup
 }
 
 func (m *Manager) latestManifest(job config.BackupJobConfig) (string, string, Manifest, error) {
+	if err := validateDestination(effectiveSource(job, m.storageRoot), job.Destination, m.storageRoot); err != nil {
+		return "", "", Manifest{}, err
+	}
+
 	m.mu.Lock()
 	state := m.state.Jobs[job.ID]
 	lastRun := cloneRunResult(state.LastRun)
@@ -1831,12 +1835,20 @@ func (m *Manager) latestManifest(job config.BackupJobConfig) (string, string, Ma
 	}
 
 	snapshotsPath := filepath.Join(job.Destination, job.ID, "snapshots")
-	entries, err := os.ReadDir(snapshotsPath)
+	snapshotDir, err := rootio.OpenDirPathNoFollow(snapshotsPath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return "", "", Manifest{}, ErrNoSnapshots
 		}
-		return "", "", Manifest{}, fmt.Errorf("list backup snapshots: %w", err)
+		return "", "", Manifest{}, fmt.Errorf("list backup snapshots: %w", mapBackupNoFollowError(err, "backup snapshots"))
+	}
+	entries, readErr := snapshotDir.ReadDir(-1)
+	closeErr := snapshotDir.Close()
+	if readErr != nil {
+		return "", "", Manifest{}, fmt.Errorf("list backup snapshots: %w", readErr)
+	}
+	if closeErr != nil {
+		return "", "", Manifest{}, fmt.Errorf("close backup snapshots: %w", closeErr)
 	}
 	names := make([]string, 0, len(entries))
 	for _, entry := range entries {
@@ -2106,12 +2118,20 @@ type snapshotInfo struct {
 
 func listLocalSnapshots(job config.BackupJobConfig) ([]snapshotInfo, error) {
 	snapshotRoot := filepath.Join(job.Destination, job.ID, "snapshots")
-	entries, err := os.ReadDir(snapshotRoot)
+	snapshotDir, err := rootio.OpenDirPathNoFollow(snapshotRoot)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, nil
 		}
-		return nil, fmt.Errorf("list snapshots: %w", err)
+		return nil, fmt.Errorf("list snapshots: %w", mapBackupNoFollowError(err, "backup snapshots"))
+	}
+	entries, readErr := snapshotDir.ReadDir(-1)
+	closeErr := snapshotDir.Close()
+	if readErr != nil {
+		return nil, fmt.Errorf("list snapshots: %w", readErr)
+	}
+	if closeErr != nil {
+		return nil, fmt.Errorf("close snapshots: %w", closeErr)
 	}
 
 	snapshots := make([]snapshotInfo, 0, len(entries))
@@ -2257,11 +2277,11 @@ func copySourceTreeEntry(ctx context.Context, root *os.Root, relPath, destinatio
 
 	if info.IsDir() {
 		if relPath != "." {
-			if err := os.MkdirAll(filepath.Join(destination, relPath), info.Mode().Perm()); err != nil {
-				return fmt.Errorf("create backup directory %s: %w", relPath, err)
+			if err := rootio.MkdirAllPathNoFollow(filepath.Join(destination, relPath), info.Mode().Perm()); err != nil {
+				return fmt.Errorf("create backup directory %s: %w", relPath, mapBackupNoFollowError(err, "destination"))
 			}
-		} else if err := os.MkdirAll(destination, 0700); err != nil {
-			return fmt.Errorf("create backup data directory: %w", err)
+		} else if err := rootio.MkdirAllPathNoFollow(destination, 0700); err != nil {
+			return fmt.Errorf("create backup data directory: %w", mapBackupNoFollowError(err, "destination"))
 		}
 
 		dir, err := rootio.OpenDirNoFollow(root, relPath)
@@ -2325,24 +2345,46 @@ func copyHostFileWithHash(ctx context.Context, sourcePath, destinationPath, arch
 	if !info.Mode().IsRegular() {
 		return nil, fmt.Errorf("%w: %s", ErrUnsupportedFileType, sourceLabel)
 	}
-	sourceFile, err := os.Open(sourcePath)
+
+	afterCopyHostFileLstat(sourcePath)
+	sourceFile, openedInfo, err := openRegularFileNoFollow(sourcePath, sourceLabel)
 	if err != nil {
 		return nil, fmt.Errorf("open source file: %w", err)
 	}
 	defer sourceFile.Close()
-	return copyOpenFileWithHash(ctx, sourceFile, info, destinationPath, archivePath, sourceLabel)
+	return copyOpenFileWithHash(ctx, sourceFile, openedInfo, destinationPath, archivePath, sourceLabel)
+}
+
+func openRegularFileNoFollow(filePath, sourceLabel string) (*os.File, os.FileInfo, error) {
+	file, err := rootio.OpenFilePathNoFollow(filePath, os.O_RDONLY, 0)
+	if err != nil {
+		if rootio.IsSymlinkError(err) {
+			return nil, nil, fmt.Errorf("%w: %s", ErrSourceContainsSymlink, sourceLabel)
+		}
+		return nil, nil, err
+	}
+	info, err := file.Stat()
+	if err != nil {
+		_ = file.Close()
+		return nil, nil, err
+	}
+	if !info.Mode().IsRegular() {
+		_ = file.Close()
+		return nil, nil, fmt.Errorf("%w: %s", ErrUnsupportedFileType, sourceLabel)
+	}
+	return file, info, nil
 }
 
 func copyOpenFileWithHash(ctx context.Context, source *os.File, sourceInfo os.FileInfo, destinationPath, archivePath, sourceLabel string) (*ManifestEntry, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if err := os.MkdirAll(filepath.Dir(destinationPath), 0700); err != nil {
-		return nil, fmt.Errorf("create destination directory: %w", err)
+	if err := rootio.MkdirAllPathNoFollow(filepath.Dir(destinationPath), 0700); err != nil {
+		return nil, fmt.Errorf("create destination directory: %w", mapBackupNoFollowError(err, "destination"))
 	}
-	destination, err := os.OpenFile(destinationPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, sourceInfo.Mode().Perm())
+	destination, err := rootio.OpenFilePathNoFollow(destinationPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, sourceInfo.Mode().Perm())
 	if err != nil {
-		return nil, fmt.Errorf("create backup file %s: %w", archivePath, err)
+		return nil, fmt.Errorf("create backup file %s: %w", archivePath, mapBackupNoFollowError(err, "destination"))
 	}
 	cleanup := true
 	defer func() {
@@ -2357,14 +2399,18 @@ func copyOpenFileWithHash(ctx context.Context, source *os.File, sourceInfo os.Fi
 	if err != nil {
 		return nil, fmt.Errorf("copy backup file %s: %w", archivePath, err)
 	}
+	afterCopyOpenFileBeforeMetadata(destinationPath)
+	if err := setOpenFileTimes(destination, destinationPath, sourceInfo.ModTime()); err != nil {
+		return nil, fmt.Errorf("preserve backup file time %s: %w", archivePath, err)
+	}
+	if err := ensureOpenFileStillAtPath(destination, destinationPath, archivePath); err != nil {
+		return nil, err
+	}
 	if err := destination.Sync(); err != nil {
 		return nil, fmt.Errorf("sync backup file %s: %w", archivePath, err)
 	}
 	if err := destination.Close(); err != nil {
 		return nil, fmt.Errorf("close backup file %s: %w", archivePath, err)
-	}
-	if err := os.Chtimes(destinationPath, sourceInfo.ModTime(), sourceInfo.ModTime()); err != nil {
-		return nil, fmt.Errorf("preserve backup file time %s: %w", archivePath, err)
 	}
 	cleanup = false
 
@@ -2375,6 +2421,34 @@ func copyOpenFileWithHash(ctx context.Context, source *os.File, sourceInfo os.Fi
 		Mode:        uint32(sourceInfo.Mode().Perm()),
 		SHA256:      hex.EncodeToString(hasher.Sum(nil)),
 	}, nil
+}
+
+func ensureOpenFileStillAtPath(file *os.File, destinationPath, archivePath string) error {
+	openedInfo, err := file.Stat()
+	if err != nil {
+		return fmt.Errorf("stat opened backup file %s: %w", archivePath, err)
+	}
+	pathInfo, err := os.Lstat(destinationPath)
+	if err != nil {
+		return fmt.Errorf("stat backup file %s: %w", archivePath, err)
+	}
+	if pathInfo.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("%w: destination path changed to a symlink: %s", ErrUnsafePath, archivePath)
+	}
+	if !pathInfo.Mode().IsRegular() {
+		return fmt.Errorf("%w: destination path changed to an unsupported file type: %s", ErrUnsupportedFileType, archivePath)
+	}
+	if !os.SameFile(openedInfo, pathInfo) {
+		return fmt.Errorf("%w: destination path changed while writing backup file: %s", ErrUnsafePath, archivePath)
+	}
+	return nil
+}
+
+func mapBackupNoFollowError(err error, label string) error {
+	if rootio.IsSymlinkError(err) {
+		return fmt.Errorf("%w: %s path must not contain symlink", ErrUnsafePath, label)
+	}
+	return err
 }
 
 func verifyManifestFiles(ctx context.Context, root string, manifest Manifest) (int64, int64, error) {
@@ -2405,17 +2479,7 @@ func verifyManifestFiles(ctx context.Context, root string, manifest Manifest) (i
 }
 
 func hashFile(ctx context.Context, filePath string) (int64, string, error) {
-	info, err := os.Lstat(filePath)
-	if err != nil {
-		return 0, "", err
-	}
-	if info.Mode()&os.ModeSymlink != 0 {
-		return 0, "", ErrSourceContainsSymlink
-	}
-	if !info.Mode().IsRegular() {
-		return 0, "", ErrUnsupportedFileType
-	}
-	file, err := os.Open(filePath)
+	file, _, err := openRegularFileNoFollow(filePath, filePath)
 	if err != nil {
 		return 0, "", err
 	}
@@ -2501,11 +2565,19 @@ func (m *Manager) updateLastRetentionCheck(result *RetentionCheckResult) error {
 }
 
 func (m *Manager) loadState() error {
-	data, err := os.ReadFile(m.statePath())
+	file, err := rootio.OpenFilePathNoFollow(m.statePath(), os.O_RDONLY, 0)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil
 		}
+		if rootio.IsSymlinkError(err) {
+			return fmt.Errorf("%w: backup state path must not contain symlink", ErrUnsafePath)
+		}
+		return fmt.Errorf("read backup state: %w", err)
+	}
+	defer file.Close()
+	data, err := io.ReadAll(file)
+	if err != nil {
 		return fmt.Errorf("read backup state: %w", err)
 	}
 	var state persistedState
@@ -2535,22 +2607,49 @@ func writeJSONFile(filePath string, value any, perm os.FileMode) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(filePath), 0700); err != nil {
-		return err
+	if err := rootio.MkdirAllPathNoFollow(filepath.Dir(filePath), 0700); err != nil {
+		return mapBackupNoFollowError(err, "backup json")
 	}
 	tmpPath := filePath + ".tmp"
-	if err := os.WriteFile(tmpPath, data, perm); err != nil {
+	tmpFile, err := rootio.OpenFilePathNoFollow(tmpPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, perm)
+	if err != nil {
+		return mapBackupNoFollowError(err, "backup json")
+	}
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+	if err := tmpFile.Chmod(perm); err != nil {
+		_ = tmpFile.Close()
 		return err
 	}
-	if err := os.Rename(tmpPath, filePath); err != nil {
-		_ = os.Remove(tmpPath)
+	if _, err := tmpFile.Write(data); err != nil {
+		_ = tmpFile.Close()
 		return err
 	}
+	if err := tmpFile.Sync(); err != nil {
+		_ = tmpFile.Close()
+		return err
+	}
+	if err := tmpFile.Close(); err != nil {
+		return err
+	}
+	if err := rootio.ReplaceFilePathNoFollow(tmpPath, filePath); err != nil {
+		return mapBackupNoFollowError(err, "backup json")
+	}
+	cleanup = false
 	return nil
 }
 
 func readManifest(filePath string) (Manifest, error) {
-	data, err := os.ReadFile(filePath)
+	file, err := rootio.OpenFilePathNoFollow(filePath, os.O_RDONLY, 0)
+	if err != nil {
+		return Manifest{}, fmt.Errorf("read backup manifest: %w", mapBackupNoFollowError(err, "backup manifest"))
+	}
+	defer file.Close()
+	data, err := io.ReadAll(file)
 	if err != nil {
 		return Manifest{}, fmt.Errorf("read backup manifest: %w", err)
 	}
@@ -3492,13 +3591,11 @@ func createPartialRestoreTarget(targetPath, runID string) (string, error) {
 
 func createNamedRestoreTarget(targetPath, suffix string) (string, error) {
 	namedPath := targetPath + suffix
-	if _, err := os.Lstat(namedPath); err == nil {
-		return "", ErrRestoreTargetExists
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return "", fmt.Errorf("stat restore staging target: %w", err)
-	}
-	if err := os.Mkdir(namedPath, 0700); err != nil {
-		return "", fmt.Errorf("create restore staging target: %w", err)
+	if err := rootio.MkdirPathNoFollow(namedPath, 0700); err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return "", ErrRestoreTargetExists
+		}
+		return "", fmt.Errorf("create restore staging target: %w", mapRestorePathError(err, "restore staging target path must not contain symlink"))
 	}
 	return namedPath, nil
 }
@@ -3684,6 +3781,12 @@ func dirExistsNoFollow(path string) (bool, error) {
 }
 
 func installRestoreTarget(partialPath, targetPath string) error {
+	if err := validatePathComponentsNoSymlink(targetPath, "restore target"); err != nil {
+		return err
+	}
+	if err := validatePathComponentsNoSymlink(partialPath, "restore staging target"); err != nil {
+		return err
+	}
 	if info, err := os.Lstat(targetPath); err == nil {
 		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
 			return fmt.Errorf("%w: restore target changed before install", ErrUnsafePath)
@@ -3695,16 +3798,23 @@ func installRestoreTarget(partialPath, targetPath string) error {
 		if len(entries) > 0 {
 			return ErrRestoreTargetExists
 		}
-		if err := os.Remove(targetPath); err != nil {
-			return fmt.Errorf("remove empty restore target: %w", err)
-		}
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("stat restore target before install: %w", err)
 	}
-	if err := os.Rename(partialPath, targetPath); err != nil {
-		return fmt.Errorf("install restore target: %w", err)
+	if err := rootio.ReplaceEmptyDirPathNoFollow(partialPath, targetPath); err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return ErrRestoreTargetExists
+		}
+		return fmt.Errorf("install restore target: %w", mapRestorePathError(err, "restore target changed before install"))
 	}
 	return nil
+}
+
+func mapRestorePathError(err error, message string) error {
+	if rootio.IsSymlinkError(err) {
+		return fmt.Errorf("%w: %s", ErrUnsafePath, message)
+	}
+	return err
 }
 
 func restoreManifestToTarget(ctx context.Context, snapshotPath, targetPath string, manifest Manifest, includeConfig bool) (int64, int64, bool, string, error) {

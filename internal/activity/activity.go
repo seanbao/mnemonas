@@ -355,14 +355,14 @@ func normalizeActivityLogPath(path string) (string, error) {
 }
 
 func ensureActivityLogDirRoot(path string, create bool) (string, error) {
-	normalizedPath, _, err := ensureActivityLogDirRootWithState(path, create)
+	normalizedPath, _, _, err := ensureActivityLogDirRootWithState(path, create)
 	return normalizedPath, err
 }
 
-func ensureActivityLogDirRootWithState(path string, create bool) (string, *os.Root, error) {
+func ensureActivityLogDirRootWithState(path string, create bool) (string, *os.Root, []string, error) {
 	normalizedPath, err := normalizeActivityLogPath(path)
 	if err != nil {
-		return "", nil, err
+		return "", nil, nil, err
 	}
 	dir := filepath.Dir(normalizedPath)
 
@@ -370,39 +370,54 @@ func ensureActivityLogDirRootWithState(path string, create bool) (string, *os.Ro
 	root := activityLogDirRoots[dir]
 	activityLogDirRootsMu.RUnlock()
 	if root != nil {
-		return normalizedPath, nil, nil
+		return normalizedPath, nil, nil, nil
 	}
 
 	if err := validateActivityLogPath(normalizedPath); err != nil {
-		return "", nil, err
+		return "", nil, nil, err
 	}
 
+	createdDirs := []string(nil)
 	if create {
-		if err := ensureActivityDir(dir, 0750); err != nil {
-			return "", nil, err
+		var err error
+		createdDirs, err = ensureActivityDirTracked(dir, 0750)
+		if err != nil {
+			return "", nil, createdDirs, err
 		}
 	} else if _, err := os.Stat(dir); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return normalizedPath, nil, nil
+			return normalizedPath, nil, nil, nil
 		}
-		return "", nil, err
+		return "", nil, nil, err
 	}
 
 	root, err = os.OpenRoot(dir)
 	if err != nil {
-		return "", nil, mapActivityRootPathError(err)
+		return "", nil, createdDirs, mapActivityRootPathError(err)
 	}
 
 	activityLogDirRootsMu.Lock()
 	if existing := activityLogDirRoots[dir]; existing != nil {
 		activityLogDirRootsMu.Unlock()
 		_ = root.Close()
-		return normalizedPath, nil, nil
+		return normalizedPath, nil, createdDirs, nil
 	}
 	activityLogDirRoots[dir] = root
 	activityLogDirRootsMu.Unlock()
 
-	return normalizedPath, root, nil
+	return normalizedPath, root, createdDirs, nil
+}
+
+func releaseRegisteredActivityLogDirRoot(dir string, root *os.Root) {
+	if root == nil {
+		return
+	}
+	activityLogDirRootsMu.Lock()
+	if activityLogDirRoots[dir] == root {
+		delete(activityLogDirRoots, dir)
+	}
+	activityLogDirRootsMu.Unlock()
+	_ = root.Close()
 }
 
 func registeredActivityLogDirRoot(path string) (*os.Root, string, bool, error) {
@@ -423,7 +438,7 @@ func openRegisteredActivityLogFile(path string) (io.ReadCloser, error) {
 		return nil, err
 	}
 	if !ok {
-		normalizedPath, _, err = ensureActivityLogDirRootWithState(normalizedPath, false)
+		normalizedPath, _, _, err = ensureActivityLogDirRootWithState(normalizedPath, false)
 		if err != nil {
 			return nil, err
 		}
@@ -447,11 +462,32 @@ func writeRegisteredActivityLogFileAtomically(path string, data []byte) error {
 		return err
 	}
 	if !ok {
-		normalizedPath, _, err = ensureActivityLogDirRootWithState(normalizedPath, true)
+		registeredRoot := (*os.Root)(nil)
+		createdDirs := []string(nil)
+		normalizedPath, registeredRoot, createdDirs, err = ensureActivityLogDirRootWithState(normalizedPath, true)
 		if err != nil {
+			releaseRegisteredActivityLogDirRoot(filepath.Dir(normalizedPath), registeredRoot)
+			return cleanupCreatedActivityDirs(createdDirs, err)
+		}
+		releaseRootOnError := registeredRoot != nil
+		if registeredRoot == nil {
+			root, normalizedPath, ok, err = registeredActivityLogDirRoot(normalizedPath)
+			if err != nil {
+				return err
+			}
+			if !ok {
+				return &os.PathError{Op: "open", Path: filepath.Dir(normalizedPath), Err: os.ErrNotExist}
+			}
+			registeredRoot = root
+		}
+		if err := writeActivityLogFileAtomicallyWithRoot(registeredRoot, normalizedPath, data); err != nil {
+			if releaseRootOnError {
+				releaseRegisteredActivityLogDirRoot(filepath.Dir(normalizedPath), registeredRoot)
+				return cleanupCreatedActivityDirs(createdDirs, err)
+			}
 			return err
 		}
-		return writeRegisteredActivityLogFileAtomically(normalizedPath, data)
+		return nil
 	}
 	return writeActivityLogFileAtomicallyWithRoot(root, normalizedPath, data)
 }
@@ -481,7 +517,7 @@ func renameRegisteredActivityLogFile(oldPath, newPath string) error {
 	if err := validateActivityLogPath(normalizedNewPath); err != nil {
 		return err
 	}
-	normalizedOldPath, _, err = ensureActivityLogDirRootWithState(normalizedOldPath, false)
+	normalizedOldPath, _, _, err = ensureActivityLogDirRootWithState(normalizedOldPath, false)
 	if err != nil {
 		return err
 	}
@@ -622,11 +658,7 @@ func mapActivityRootPathError(err error) error {
 }
 
 func writeActivityLogFile(path string, data []byte) error {
-	normalizedPath, err := ensureActivityLogDirRoot(path, true)
-	if err != nil {
-		return err
-	}
-	return writeRegisteredActivityLogFileAtomically(normalizedPath, data)
+	return writeRegisteredActivityLogFileAtomically(path, data)
 }
 
 func syncCreatedActivityDirs(createdDirs []string) error {
@@ -638,15 +670,31 @@ func syncCreatedActivityDirs(createdDirs []string) error {
 	return nil
 }
 
-func ensureActivityDir(dir string, perm os.FileMode) error {
+func ensureActivityDirTracked(dir string, perm os.FileMode) ([]string, error) {
 	createdDirs, err := rootio.MkdirAllPathNoFollowTracked(dir, perm)
 	if err != nil {
 		if rootio.IsSymlinkError(err) {
-			return errActivityLogSymlink
+			return createdDirs, errActivityLogSymlink
 		}
-		return err
+		return createdDirs, err
 	}
-	return syncCreatedActivityDirs(createdDirs)
+	return createdDirs, syncCreatedActivityDirs(createdDirs)
+}
+
+func ensureActivityDir(dir string, perm os.FileMode) error {
+	_, err := ensureActivityDirTracked(dir, perm)
+	return err
+}
+
+func cleanupCreatedActivityDirs(createdDirs []string, operationErr error) error {
+	rollbackErr := operationErr
+	for _, dir := range createdDirs {
+		if removeErr := os.Remove(dir); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+			rollbackErr = errors.Join(rollbackErr, fmt.Errorf("cleanup created activity directory %s: %w", dir, removeErr))
+			break
+		}
+	}
+	return rollbackErr
 }
 
 func syncActivityDir(dir string) error {

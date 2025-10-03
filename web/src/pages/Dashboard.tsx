@@ -27,7 +27,7 @@ import {
 } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
 import { ApiError as FilesApiError, getAppVersion, getHealth, getStorageStats, listBackupJobs, type BackupJob } from '@/api/files'
-import { ApiError as ActivityApiError, listActivity, getActionLabel, type ActionType, type ActivityEntry } from '@/api/activity'
+import { ApiError as ActivityApiError, listActivity, getActionLabel, getActionColor, type ActionType, type ActivityEntry } from '@/api/activity'
 import { formatBytes, cn, formatRelativeTime } from '@/lib/utils'
 import { areDiskStatsAvailable, clampUsagePercent, formatUsagePercent, getDiskSpaceStatus } from '@/lib/storageStats'
 import { resolveUserHomeScope } from '@/lib/userScope'
@@ -118,6 +118,17 @@ function isUnavailableRefreshError(error: unknown): boolean {
     (error instanceof FilesApiError && error.isUnavailable) ||
     (error instanceof ActivityApiError && error.isUnavailable)
   )
+}
+
+function getRecentActivityIconClass(action: ActionType): string {
+  const colors: Record<ReturnType<typeof getActionColor>, string> = {
+    default: 'text-zinc-500',
+    primary: 'text-blue-500',
+    success: 'text-emerald-500',
+    warning: 'text-amber-500',
+    danger: 'text-red-500',
+  }
+  return colors[getActionColor(action)]
 }
 
 function getDashboardRefreshErrorToast(errors: Array<unknown>): { title: string; description: string; color: 'warning' | 'danger' } {
@@ -211,31 +222,7 @@ function getDiskUsageBarClass(level: 'unknown' | 'normal' | 'warning' | 'critica
 
 // Recent activity item
 function RecentActivityItem({ entry }: { entry: ActivityEntry }) {
-  const colorMap: Record<string, string> = {
-    upload: 'text-emerald-500',
-    download: 'text-blue-500',
-    delete: 'text-red-500',
-    rename: 'text-amber-500',
-    move: 'text-amber-500',
-    create: 'text-emerald-500',
-    restore: 'text-emerald-500',
-    share: 'text-violet-500',
-    login: 'text-emerald-500',
-    logout: 'text-zinc-500',
-    trash_restore: 'text-emerald-500',
-    trash_delete: 'text-red-500',
-    trash_empty: 'text-red-500',
-    disk_health: 'text-amber-500',
-  }
-
-  const statusMap: Record<string, 'success' | 'warning' | 'primary'> = {
-    upload: 'success',
-    download: 'primary',
-    delete: 'warning',
-    create: 'success',
-    share: 'primary',
-    disk_health: 'warning',
-  }
+  const color = getActionColor(entry.action)
 
   return (
     <div className="flex items-center justify-between gap-3 rounded-lg bg-content2/30 p-3 transition-colors hover:bg-content2/50">
@@ -243,8 +230,15 @@ function RecentActivityItem({ entry }: { entry: ActivityEntry }) {
         <span className="data-value hidden w-20 shrink-0 text-xs text-default-500 sm:block">
           {formatRelativeTime(entry.timestamp)}
         </span>
-        <div className={cn("h-2 w-2 shrink-0 rounded-full", colorMap[entry.action] ? 'status-online' : 'bg-primary')} />
-        <div className={cn("flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-content2", colorMap[entry.action])}>
+        <div className={cn(
+          "h-2 w-2 shrink-0 rounded-full",
+          color === 'success' && 'status-online',
+          color === 'warning' && 'status-warning',
+          color === 'danger' && 'bg-danger',
+          color === 'primary' && 'bg-primary',
+          color === 'default' && 'status-offline',
+        )} />
+        <div className={cn("flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-content2", getRecentActivityIconClass(entry.action))}>
           <ActionIcon action={entry.action} />
         </div>
         <div className="flex-1 min-w-0">
@@ -261,7 +255,7 @@ function RecentActivityItem({ entry }: { entry: ActivityEntry }) {
       </div>
       <Chip
         size="sm"
-        color={statusMap[entry.action] || 'primary'}
+        color={color}
         variant="flat"
         className="hidden shrink-0 sm:inline-flex"
       >

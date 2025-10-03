@@ -342,7 +342,7 @@ make e2e
 ./scripts/run-e2e-isolated.sh --quick
 ```
 
-The isolated runner avoids writing into a real user storage root. `scripts/e2e-test.sh` can target an explicit running service, but it requires explicit `BASE_URL`, `STORAGE_ROOT`, `CONFIG_FILE`, `SECRETS_FILE`, and `INITIAL_PASSWORD_FILE`.
+The isolated runner avoids writing into a real user storage root. `scripts/e2e-test.sh` can target an explicit running service, but it requires explicit `BASE_URL`, `STORAGE_ROOT`, `CONFIG_FILE`, `SECRETS_FILE`, and `INITIAL_PASSWORD_FILE`. `STORAGE_ROOT` must not contain `..` or symlink path components.
 
 ### Fault Injection
 
@@ -358,7 +358,7 @@ RUN_CORRUPTION_TESTS=0 \
 ./scripts/fault-injection-test.sh
 ```
 
-Safety checks are covered by `scripts/test-fault-injection-safety.sh` and `make scripts-check`.
+Safety checks are covered by `scripts/test-fault-injection-safety.sh` and `make scripts-check`. `BASE_URL`, `STORAGE_ROOT`, and `NASD_BIN` must be explicit. Real storage paths require `ALLOW_REAL_STORAGE=1`, must still be absolute, must not contain `..` or symlink path components, and must not point at protected system directories such as `/`, `/tmp`, or `/var`.
 
 ### Benchmarks
 
@@ -374,7 +374,7 @@ MNEMONAS_STORAGE_ROOT=/tmp/mnemonas-bench-target \
 ./scripts/benchmark.sh http://127.0.0.1:18080
 ```
 
-Real storage paths require `ALLOW_REAL_STORAGE=1`.
+Manual benchmark targets create and remove `storage.root/files/benchmark-test`. Real storage paths require `ALLOW_REAL_STORAGE=1`, must still be absolute, must not contain `..` or symlink path components, and must not point at protected system directories.
 
 ## Debugging
 

@@ -25,6 +25,9 @@ const credentialFileMode os.FileMode = 0600
 // ErrUnsafePath means the credential path resolves through an unsafe path component.
 var ErrUnsafePath = errors.New("unsafe SMB credential path")
 
+// ErrDuplicateUsername means two MnemoNAS users are assigned the same SMB username.
+var ErrDuplicateUsername = errors.New("duplicate SMB credential username")
+
 // Credential is the stored SMB authentication material for one MnemoNAS user.
 type Credential struct {
 	UserID    string    `json:"user_id"`
@@ -97,6 +100,13 @@ func (s *Store) SetCredential(userID, username, ntHashHex string, enabled bool) 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if username != "" {
+		if existingUserID, ok := s.byUsername[usernameKey(username)]; ok && existingUserID != userID {
+			return Credential{}, ErrDuplicateUsername
+		}
+	}
+
+	previous := cloneCredentialMap(s.byUserID)
 	now := time.Now().UTC()
 	credential, ok := s.byUserID[userID]
 	if !ok {
@@ -113,6 +123,8 @@ func (s *Store) SetCredential(userID, username, ntHashHex string, enabled bool) 
 	s.byUserID[userID] = credential
 	s.rebuildUsernameIndexLocked()
 	if err := s.saveLocked(); err != nil {
+		s.byUserID = previous
+		s.rebuildUsernameIndexLocked()
 		return Credential{}, err
 	}
 	return credential, nil
@@ -132,10 +144,13 @@ func (s *Store) Disable(userID string) error {
 	if !ok {
 		return nil
 	}
+	previous := cloneCredentialMap(s.byUserID)
 	credential.Enabled = false
 	credential.UpdatedAt = time.Now().UTC()
 	s.byUserID[userID] = credential
 	if err := s.saveLocked(); err != nil {
+		s.byUserID = previous
+		s.rebuildUsernameIndexLocked()
 		return err
 	}
 	return nil
@@ -187,17 +202,40 @@ func (s *Store) load() error {
 	if err := json.Unmarshal(data, &payload); err != nil {
 		return fmt.Errorf("failed to parse SMB credential file: %w", err)
 	}
-	for _, credential := range payload.Credentials {
-		if credential.UserID == "" {
-			return errors.New("SMB credential file contains an empty user ID")
+	loaded := map[string]Credential{}
+	seenUsernames := map[string]string{}
+	for index, credential := range payload.Credentials {
+		userID := strings.TrimSpace(credential.UserID)
+		if userID == "" {
+			return fmt.Errorf("SMB credential file contains an empty user ID at index %d", index)
+		}
+		if userID != credential.UserID || strings.IndexFunc(userID, isInvalidNameRune) >= 0 {
+			return fmt.Errorf("invalid SMB credential user ID at index %d: %q", index, credential.UserID)
+		}
+		if _, exists := loaded[userID]; exists {
+			return fmt.Errorf("SMB credential file contains duplicate user ID %q", userID)
 		}
 		normalizedHash, err := NormalizeNTHashHex(credential.NTHashHex)
 		if err != nil {
-			return fmt.Errorf("invalid SMB credential hash for user %q: %w", credential.UserID, err)
+			return fmt.Errorf("invalid SMB credential hash for user %q: %w", userID, err)
 		}
+		username := strings.TrimSpace(credential.Username)
+		if username != credential.Username || strings.IndexFunc(username, isInvalidNameRune) >= 0 {
+			return fmt.Errorf("invalid SMB credential username for user %q: %q", userID, credential.Username)
+		}
+		if username != "" {
+			key := usernameKey(username)
+			if existingUserID, exists := seenUsernames[key]; exists {
+				return fmt.Errorf("%w: username %q is used by both %q and %q", ErrDuplicateUsername, username, existingUserID, userID)
+			}
+			seenUsernames[key] = userID
+		}
+		credential.UserID = userID
+		credential.Username = username
 		credential.NTHashHex = normalizedHash
-		s.byUserID[credential.UserID] = credential
+		loaded[userID] = credential
 	}
+	s.byUserID = loaded
 	s.rebuildUsernameIndexLocked()
 	return nil
 }
@@ -259,6 +297,14 @@ func (s *Store) snapshotLocked() []Credential {
 		return credentials[i].UserID < credentials[j].UserID
 	})
 	return credentials
+}
+
+func cloneCredentialMap(credentials map[string]Credential) map[string]Credential {
+	clone := make(map[string]Credential, len(credentials))
+	for userID, credential := range credentials {
+		clone[userID] = credential
+	}
+	return clone
 }
 
 func (s *Store) rebuildUsernameIndexLocked() {

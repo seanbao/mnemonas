@@ -84,12 +84,12 @@ test.describe('维护操作卡片', () => {
   })
 
   test('应显示数据巡检卡片', async ({ page }) => {
-    const scrubCard = page.getByText(/数据巡检|Scrub/i)
+    const scrubCard = page.getByRole('heading', { name: '完整性检查' })
     await expect(scrubCard).toBeVisible()
   })
 
   test('应显示垃圾回收卡片', async ({ page }) => {
-    const gcCard = page.getByText(/垃圾回收|GC/i)
+    const gcCard = page.getByRole('heading', { name: '清理历史对象' })
     await expect(gcCard).toBeVisible()
   })
 
@@ -118,7 +118,7 @@ test.describe('存储系统说明', () => {
   test('应显示混合存储描述', async ({ page }) => {
     await ensureAuthenticatedAt(page, '/storage')
 
-    const casDescription = page.getByText(/原生文件 \+ CAS 版本历史/i)
+    const casDescription = page.getByText(/文件占用、版本对象和目录配额/i)
     await expect(casDescription).toBeVisible()
   })
 })

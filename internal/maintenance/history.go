@@ -461,14 +461,14 @@ func validateHistoryFilePath(path string) error {
 }
 
 func ensureHistoryDirRoot(path string, create bool) (string, error) {
-	normalizedPath, _, err := ensureHistoryDirRootWithState(path, create)
+	normalizedPath, _, _, err := ensureHistoryDirRootWithState(path, create)
 	return normalizedPath, err
 }
 
-func ensureHistoryDirRootWithState(path string, create bool) (string, *os.Root, error) {
+func ensureHistoryDirRootWithState(path string, create bool) (string, *os.Root, []string, error) {
 	normalizedPath, err := normalizeHistoryFilePath(path)
 	if err != nil {
-		return "", nil, err
+		return "", nil, nil, err
 	}
 	dir := filepath.Dir(normalizedPath)
 
@@ -476,39 +476,54 @@ func ensureHistoryDirRootWithState(path string, create bool) (string, *os.Root, 
 	root := historyFileDirRoots[dir]
 	historyFileDirRootsMu.RUnlock()
 	if root != nil {
-		return normalizedPath, nil, nil
+		return normalizedPath, nil, nil, nil
 	}
 
 	if err := validateHistoryFilePath(normalizedPath); err != nil {
-		return "", nil, err
+		return "", nil, nil, err
 	}
 
+	createdDirs := []string(nil)
 	if create {
-		if err := ensureHistoryDir(dir, 0755); err != nil {
-			return "", nil, err
+		var err error
+		createdDirs, err = ensureHistoryDirTracked(dir, 0755)
+		if err != nil {
+			return "", nil, createdDirs, err
 		}
 	} else if _, err := os.Stat(dir); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return normalizedPath, nil, nil
+			return normalizedPath, nil, nil, nil
 		}
-		return "", nil, err
+		return "", nil, nil, err
 	}
 
 	root, err = os.OpenRoot(dir)
 	if err != nil {
-		return "", nil, mapHistoryRootPathError(err)
+		return "", nil, createdDirs, mapHistoryRootPathError(err)
 	}
 
 	historyFileDirRootsMu.Lock()
 	if existing := historyFileDirRoots[dir]; existing != nil {
 		historyFileDirRootsMu.Unlock()
 		_ = root.Close()
-		return normalizedPath, nil, nil
+		return normalizedPath, nil, createdDirs, nil
 	}
 	historyFileDirRoots[dir] = root
 	historyFileDirRootsMu.Unlock()
 
-	return normalizedPath, root, nil
+	return normalizedPath, root, createdDirs, nil
+}
+
+func releaseRegisteredHistoryDirRoot(dir string, root *os.Root) {
+	if root == nil {
+		return
+	}
+	historyFileDirRootsMu.Lock()
+	if historyFileDirRoots[dir] == root {
+		delete(historyFileDirRoots, dir)
+	}
+	historyFileDirRootsMu.Unlock()
+	_ = root.Close()
 }
 
 func registeredHistoryDirRoot(path string) (*os.Root, string, bool, error) {
@@ -529,7 +544,7 @@ func readRegisteredHistoryFile(path string) ([]byte, error) {
 		return nil, err
 	}
 	if !ok {
-		normalizedPath, _, err = ensureHistoryDirRootWithState(normalizedPath, false)
+		normalizedPath, _, _, err = ensureHistoryDirRootWithState(normalizedPath, false)
 		if err != nil {
 			return nil, err
 		}
@@ -553,11 +568,32 @@ func writeRegisteredHistoryFileAtomically(path string, data []byte) error {
 		return err
 	}
 	if !ok {
-		normalizedPath, _, err = ensureHistoryDirRootWithState(normalizedPath, true)
+		registeredRoot := (*os.Root)(nil)
+		createdDirs := []string(nil)
+		normalizedPath, registeredRoot, createdDirs, err = ensureHistoryDirRootWithState(normalizedPath, true)
 		if err != nil {
+			releaseRegisteredHistoryDirRoot(filepath.Dir(normalizedPath), registeredRoot)
+			return cleanupCreatedHistoryDirs(createdDirs, err)
+		}
+		releaseRootOnError := registeredRoot != nil
+		if registeredRoot == nil {
+			root, normalizedPath, ok, err = registeredHistoryDirRoot(normalizedPath)
+			if err != nil {
+				return err
+			}
+			if !ok {
+				return &os.PathError{Op: "open", Path: filepath.Dir(normalizedPath), Err: os.ErrNotExist}
+			}
+			registeredRoot = root
+		}
+		if err := writeHistoryFileAtomicallyWithRoot(registeredRoot, normalizedPath, data); err != nil {
+			if releaseRootOnError {
+				releaseRegisteredHistoryDirRoot(filepath.Dir(normalizedPath), registeredRoot)
+				return cleanupCreatedHistoryDirs(createdDirs, err)
+			}
 			return err
 		}
-		return writeRegisteredHistoryFileAtomically(normalizedPath, data)
+		return nil
 	}
 	return writeHistoryFileAtomicallyWithRoot(root, normalizedPath, data)
 }
@@ -587,7 +623,7 @@ func renameRegisteredHistoryFile(oldPath, newPath string) error {
 	if err := validateHistoryFilePath(normalizedNewPath); err != nil {
 		return err
 	}
-	normalizedOldPath, _, err = ensureHistoryDirRootWithState(normalizedOldPath, false)
+	normalizedOldPath, _, _, err = ensureHistoryDirRootWithState(normalizedOldPath, false)
 	if err != nil {
 		return err
 	}
@@ -730,11 +766,7 @@ func mapHistoryRootPathError(err error) error {
 }
 
 func writeHistoryFile(path string, data []byte) error {
-	normalizedPath, err := ensureHistoryDirRoot(path, true)
-	if err != nil {
-		return err
-	}
-	return writeRegisteredHistoryFileAtomically(normalizedPath, data)
+	return writeRegisteredHistoryFileAtomically(path, data)
 }
 
 func syncCreatedHistoryDirs(createdDirs []string) error {
@@ -746,15 +778,31 @@ func syncCreatedHistoryDirs(createdDirs []string) error {
 	return nil
 }
 
-func ensureHistoryDir(dir string, perm os.FileMode) error {
+func ensureHistoryDirTracked(dir string, perm os.FileMode) ([]string, error) {
 	createdDirs, err := rootio.MkdirAllPathNoFollowTracked(dir, perm)
 	if err != nil {
 		if rootio.IsSymlinkError(err) {
-			return errHistoryFileSymlink
+			return createdDirs, errHistoryFileSymlink
 		}
-		return err
+		return createdDirs, err
 	}
-	return syncCreatedHistoryDirs(createdDirs)
+	return createdDirs, syncCreatedHistoryDirs(createdDirs)
+}
+
+func ensureHistoryDir(dir string, perm os.FileMode) error {
+	_, err := ensureHistoryDirTracked(dir, perm)
+	return err
+}
+
+func cleanupCreatedHistoryDirs(createdDirs []string, operationErr error) error {
+	rollbackErr := operationErr
+	for _, dir := range createdDirs {
+		if removeErr := os.Remove(dir); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+			rollbackErr = errors.Join(rollbackErr, fmt.Errorf("cleanup created maintenance history directory %s: %w", dir, removeErr))
+			break
+		}
+	}
+	return rollbackErr
 }
 
 func syncHistoryDir(dir string) error {

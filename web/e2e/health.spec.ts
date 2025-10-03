@@ -12,7 +12,7 @@ test.describe('设备状态页面', () => {
   })
 
   test('刷新按钮应可见', async ({ page }) => {
-    await expect(page.getByRole('button', { name: '刷新', exact: true })).toBeVisible()
+    await expect(page.locator('main').getByRole('button', { name: /刷新/ })).toBeVisible()
   })
 
   test('应显示存储文件系统提示', async ({ page }) => {

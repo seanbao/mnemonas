@@ -398,3 +398,86 @@ func TestOpenDirPathNoFollowOpensRealDirectory(t *testing.T) {
 		t.Fatalf("ReadDir() error: %v", err)
 	}
 }
+
+func TestReplaceEmptyDirPathNoFollowRejectsOldSymlinkBeforeRemovingTarget(t *testing.T) {
+	rootPath := t.TempDir()
+	realOld := filepath.Join(rootPath, "real-old")
+	oldLink := filepath.Join(rootPath, "old-link")
+	target := filepath.Join(rootPath, "target")
+	if err := os.Mkdir(realOld, 0755); err != nil {
+		t.Fatalf("Mkdir(real-old) error: %v", err)
+	}
+	if err := os.Mkdir(target, 0755); err != nil {
+		t.Fatalf("Mkdir(target) error: %v", err)
+	}
+	if err := os.Symlink(realOld, oldLink); err != nil {
+		t.Fatalf("Symlink(old-link) error: %v", err)
+	}
+
+	err := ReplaceEmptyDirPathNoFollow(oldLink, target)
+	if !IsSymlinkError(err) {
+		t.Fatalf("ReplaceEmptyDirPathNoFollow() error = %v, want ErrSymlink", err)
+	}
+	if info, statErr := os.Stat(target); statErr != nil || !info.IsDir() {
+		t.Fatalf("target was altered, stat = (%v, %v)", info, statErr)
+	}
+}
+
+func TestReplaceFilePathNoFollowRejectsOldSymlink(t *testing.T) {
+	rootPath := t.TempDir()
+	realOld := filepath.Join(rootPath, "real-old.txt")
+	oldLink := filepath.Join(rootPath, "old-link.txt")
+	target := filepath.Join(rootPath, "target.txt")
+	if err := os.WriteFile(realOld, []byte("old"), 0644); err != nil {
+		t.Fatalf("WriteFile(real-old) error: %v", err)
+	}
+	if err := os.WriteFile(target, []byte("target"), 0644); err != nil {
+		t.Fatalf("WriteFile(target) error: %v", err)
+	}
+	if err := os.Symlink(realOld, oldLink); err != nil {
+		t.Fatalf("Symlink(old-link) error: %v", err)
+	}
+
+	err := ReplaceFilePathNoFollow(oldLink, target)
+	if !IsSymlinkError(err) {
+		t.Fatalf("ReplaceFilePathNoFollow() error = %v, want ErrSymlink", err)
+	}
+	data, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("ReadFile(target) error: %v", err)
+	}
+	if string(data) != "target" {
+		t.Fatalf("target content = %q, want target", data)
+	}
+}
+
+func TestReplaceFilePathNoFollowRejectsNewSymlink(t *testing.T) {
+	rootPath := t.TempDir()
+	oldPath := filepath.Join(rootPath, "old.txt")
+	realTarget := filepath.Join(rootPath, "real-target.txt")
+	targetLink := filepath.Join(rootPath, "target-link.txt")
+	if err := os.WriteFile(oldPath, []byte("old"), 0644); err != nil {
+		t.Fatalf("WriteFile(old) error: %v", err)
+	}
+	if err := os.WriteFile(realTarget, []byte("target"), 0644); err != nil {
+		t.Fatalf("WriteFile(real-target) error: %v", err)
+	}
+	if err := os.Symlink(realTarget, targetLink); err != nil {
+		t.Fatalf("Symlink(target-link) error: %v", err)
+	}
+
+	err := ReplaceFilePathNoFollow(oldPath, targetLink)
+	if !IsSymlinkError(err) {
+		t.Fatalf("ReplaceFilePathNoFollow() error = %v, want ErrSymlink", err)
+	}
+	data, err := os.ReadFile(realTarget)
+	if err != nil {
+		t.Fatalf("ReadFile(real-target) error: %v", err)
+	}
+	if string(data) != "target" {
+		t.Fatalf("real target content = %q, want target", data)
+	}
+	if _, statErr := os.Lstat(oldPath); statErr != nil {
+		t.Fatalf("old file was moved on failure: %v", statErr)
+	}
+}

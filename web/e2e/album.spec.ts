@@ -22,10 +22,12 @@ test.describe('相册页面', () => {
   })
 
   test('有图片时应可打开预览，空相册时应保持空状态提示', async ({ page }) => {
+    await expect(page.getByText(/共 \d+ 张图片/)).toBeVisible({ timeout: 5000 })
+
     const emptyStateHeading = page.getByRole('heading', { name: '暂无图片', exact: true })
     const thumbnails = page.locator('main img[alt]')
 
-    if (await thumbnails.count() > 0) {
+    if (await thumbnails.first().isVisible({ timeout: 1000 }).catch(() => false)) {
       await thumbnails.first().click({ force: true })
       await expect(page.getByRole('button', { name: '关闭预览' })).toBeVisible({ timeout: 5000 })
       return

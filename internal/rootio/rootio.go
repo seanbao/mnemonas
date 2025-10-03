@@ -95,6 +95,71 @@ func MkdirAllPathNoFollowTracked(path string, perm os.FileMode) ([]string, error
 	return created, err
 }
 
+// MkdirPathNoFollow creates one directory without following symlinks in any
+// parent path component.
+func MkdirPathNoFollow(path string, perm os.FileMode) error {
+	rootPath, relPath, err := splitHostPath(path)
+	if err != nil {
+		return err
+	}
+	if relPath == "" {
+		return rootPathError("mkdir", path, os.ErrExist)
+	}
+
+	root, err := os.OpenRoot(rootPath)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+
+	return MkdirNoFollow(root, relPath, perm)
+}
+
+// ReplaceEmptyDirPathNoFollow renames oldPath to newPath after removing
+// newPath when it is an empty directory. Both paths must be siblings. Symlinks
+// in parent components or at newPath are rejected.
+func ReplaceEmptyDirPathNoFollow(oldPath, newPath string) error {
+	oldClean := filepath.Clean(oldPath)
+	newClean := filepath.Clean(newPath)
+	if oldClean == newClean || filepath.Dir(oldClean) != filepath.Dir(newClean) {
+		return rootPathError("rename", newPath, errEscape)
+	}
+
+	oldName := filepath.Base(oldClean)
+	newName := filepath.Base(newClean)
+	if oldName == "." || oldName == ".." || newName == "." || newName == ".." {
+		return rootPathError("rename", newPath, errEscape)
+	}
+
+	rootPath, relParent, err := splitHostPath(filepath.Dir(newClean))
+	if err != nil {
+		return err
+	}
+	return replaceEmptyDirPathNoFollow(rootPath, relParent, oldName, newName, oldClean, newClean)
+}
+
+// ReplaceFilePathNoFollow renames oldPath to newPath after rejecting symlinks
+// in parent components and at either file path. Both paths must be siblings.
+func ReplaceFilePathNoFollow(oldPath, newPath string) error {
+	oldClean := filepath.Clean(oldPath)
+	newClean := filepath.Clean(newPath)
+	if oldClean == newClean || filepath.Dir(oldClean) != filepath.Dir(newClean) {
+		return rootPathError("rename", newPath, errEscape)
+	}
+
+	oldName := filepath.Base(oldClean)
+	newName := filepath.Base(newClean)
+	if oldName == "." || oldName == ".." || newName == "." || newName == ".." {
+		return rootPathError("rename", newPath, errEscape)
+	}
+
+	rootPath, relParent, err := splitHostPath(filepath.Dir(newClean))
+	if err != nil {
+		return err
+	}
+	return replaceFilePathNoFollow(rootPath, relParent, oldName, newName, oldClean, newClean)
+}
+
 // MkdirAllNoFollowTracked creates name and missing parents relative to root
 // without following symlinks in any path component. It returns only directories
 // created by this call, deepest first for rollback.

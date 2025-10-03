@@ -88,6 +88,41 @@ func TestWriteActivityLogFile_ReturnsDirectorySyncError(t *testing.T) {
 	if info.Mode().Perm() != 0640 {
 		t.Fatalf("expected activity log permissions 0640, got %o", info.Mode().Perm())
 	}
+	if _, _, ok, rootErr := registeredActivityLogDirRoot(logPath); rootErr != nil {
+		t.Fatalf("registeredActivityLogDirRoot() error: %v", rootErr)
+	} else if ok {
+		t.Fatal("expected failed first write to release the activity log directory root")
+	}
+}
+
+func TestWriteActivityLogFile_CleansCreatedDirectoryWhenTempNameFails(t *testing.T) {
+	tmpDir := t.TempDir()
+	logDir := filepath.Join(tmpDir, "nested", "activity")
+	logPath := filepath.Join(logDir, "activity.json")
+
+	originalActivityRandomRead := activityRandomRead
+	activityRandomRead = func([]byte) (int, error) {
+		return 0, errors.New("entropy unavailable")
+	}
+	defer func() {
+		activityRandomRead = originalActivityRandomRead
+	}()
+
+	err := writeActivityLogFile(logPath, []byte("[]"))
+	if err == nil {
+		t.Fatal("expected writeActivityLogFile() to fail when temp file naming fails")
+	}
+	if !strings.Contains(err.Error(), "entropy unavailable") {
+		t.Fatalf("expected entropy failure, got %v", err)
+	}
+	if _, _, ok, rootErr := registeredActivityLogDirRoot(logPath); rootErr != nil {
+		t.Fatalf("registeredActivityLogDirRoot() error: %v", rootErr)
+	} else if ok {
+		t.Fatal("expected failed first write to release the activity log directory root")
+	}
+	if _, statErr := os.Stat(logDir); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("expected newly-created activity log directory to be removed, got %v", statErr)
+	}
 }
 
 func TestWriteActivityLogFile_ReplacesExistingFileAndCleansTemp(t *testing.T) {

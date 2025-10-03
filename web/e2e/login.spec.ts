@@ -8,6 +8,14 @@ test.use({
 test.describe('登录页面', () => {
   test.beforeEach(async ({ page }) => {
     await page.goto('/login')
+    const usernameInput = page.getByPlaceholder('请输入用户名')
+    if (await usernameInput.isVisible({ timeout: 2000 }).catch(() => false)) {
+      await usernameInput.fill('visual-clean')
+      await usernameInput.clear()
+      await usernameInput.evaluate((element) => {
+        if (element instanceof HTMLElement) element.blur()
+      })
+    }
   })
 
   test('应显示登录表单', async ({ page }) => {
@@ -80,6 +88,14 @@ test.describe('登录页响应式', () => {
   test('移动端布局', async ({ page }) => {
     await page.setViewportSize({ width: 375, height: 667 })
     await page.goto('/login')
+    const usernameInput = page.getByPlaceholder('请输入用户名')
+    if (await usernameInput.isVisible({ timeout: 2000 }).catch(() => false)) {
+      await usernameInput.fill('visual-clean')
+      await usernameInput.clear()
+      await usernameInput.evaluate((element) => {
+        if (element instanceof HTMLElement) element.blur()
+      })
+    }
     
     await expect(page.getByRole('button', { name: /登录/i })).toBeVisible()
     await expect(page).toHaveScreenshot('login-mobile.png', {
