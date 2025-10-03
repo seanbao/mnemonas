@@ -160,9 +160,39 @@ format_host_port_endpoint() {
     printf '%s:%s\n' "$host" "$port"
 }
 
+config_path_has_symlink_component() {
+    local path="$1"
+    local current="/"
+    local part
+    local -a parts
+
+    IFS='/' read -r -a parts <<< "${path#/}"
+    for part in "${parts[@]}"; do
+        [[ -n "$part" ]] || continue
+
+        if [[ "$current" == "/" ]]; then
+            current="/$part"
+        else
+            current="$current/$part"
+        fi
+
+        if [[ -L "$current" ]]; then
+            return 0
+        fi
+        if [[ ! -e "$current" ]]; then
+            return 1
+        fi
+    done
+
+    return 1
+}
+
 require_safe_config_path() {
     [[ "$CONFIG_PATH" == /* ]] || fail "--config 必须是绝对路径: $CONFIG_PATH"
     [[ "$CONFIG_PATH" != *[[:space:]]* ]] || fail "--config 不能包含空白字符: $CONFIG_PATH"
+    if config_path_has_symlink_component "$CONFIG_PATH"; then
+        fail "--config 不能包含符号链接: $CONFIG_PATH"
+    fi
 }
 
 require_safe_port() {

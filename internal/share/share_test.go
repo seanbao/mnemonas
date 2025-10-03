@@ -1737,6 +1737,48 @@ func TestShareStore_Update(t *testing.T) {
 	}
 }
 
+func TestShareStore_UpdateRejectsIDMutation(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("NewShareStore() error: %v", err)
+	}
+
+	share, err := store.Create(CreateShareOptions{
+		Path:      "/test/file.txt",
+		Type:      ShareTypeFile,
+		CreatedBy: "user1",
+	})
+	if err != nil {
+		t.Fatalf("Create() error: %v", err)
+	}
+
+	updateErr := store.Update(share.ID, func(s *Share) error {
+		s.ID = "replacement"
+		s.Path = "/test/other.txt"
+		return nil
+	})
+	if !errors.Is(updateErr, errShareIDImmutable) {
+		t.Fatalf("Update() error = %v, want %v", updateErr, errShareIDImmutable)
+	}
+
+	loaded, err := store.Get(share.ID)
+	if err != nil {
+		t.Fatalf("Get(original) error: %v", err)
+	}
+	if loaded.ID != share.ID || loaded.Path != "/test/file.txt" {
+		t.Fatalf("expected original share to remain unchanged, got %+v", loaded)
+	}
+	if _, err := store.Get("replacement"); !errors.Is(err, ErrShareNotFound) {
+		t.Fatalf("Get(replacement) error = %v, want %v", err, ErrShareNotFound)
+	}
+	if shares := store.GetByPath("/test/other.txt"); len(shares) != 0 {
+		t.Fatalf("expected rejected ID mutation not to create path index entry, got %+v", shares)
+	}
+}
+
 func TestShareStore_GetByPath(t *testing.T) {
 	tempDir := t.TempDir()
 	storePath := filepath.Join(tempDir, "shares.json")
