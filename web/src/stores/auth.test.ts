@@ -111,6 +111,60 @@ describe('authStore', () => {
     expect(acknowledgeSetupMock).toHaveBeenCalledTimes(1)
   })
 
+  it('cancels stale admin setup sync after logout', async () => {
+    let resolveSetup: ((value: {
+      success: boolean
+      is_first_run: boolean
+      auth_enabled: boolean
+      share_enabled?: boolean
+      webdav_enabled: boolean
+      webdav_auth_type: string
+    }) => void) | null = null
+    let setupSignal: AbortSignal | undefined
+
+    loginMock.mockResolvedValue({
+      user: {
+        id: 'admin-1',
+        username: 'admin',
+        role: 'admin',
+        email: '',
+        homeDir: '/',
+      },
+      warning: false,
+      message: undefined,
+    })
+    getSetupStatusMock.mockImplementation((options?: { signal?: AbortSignal }) => {
+      setupSignal = options?.signal
+      return new Promise((resolve) => {
+        resolveSetup = resolve
+      })
+    })
+
+    await expect(useAuthStore.getState().login('admin', 'password')).resolves.toMatchObject({ warning: false })
+
+    expect(setupSignal).toBeInstanceOf(AbortSignal)
+    expect(setupSignal?.aborted).toBe(false)
+
+    await expect(useAuthStore.getState().logout()).resolves.toMatchObject({ warning: false })
+
+    expect(setupSignal?.aborted).toBe(true)
+
+    resolveSetup?.({
+      success: true,
+      is_first_run: true,
+      auth_enabled: true,
+      share_enabled: false,
+      webdav_enabled: true,
+      webdav_auth_type: 'basic',
+    })
+    await Promise.resolve()
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(useAuthStore.getState().shareEnabled).toBeNull()
+    expect(acknowledgeSetupMock).not.toHaveBeenCalled()
+  })
+
   it('preserves authenticated state when logout fails', async () => {
     useAuthStore.setState({
       user: {
@@ -249,6 +303,19 @@ describe('authStore', () => {
     expect(useAuthStore.getState().shareEnabled).toBe(false)
   })
 
+  it('clears stale share availability when setup status cannot be loaded', async () => {
+    useAuthStore.setState({ shareEnabled: false })
+    getSetupStatusMock.mockRejectedValue(new Error('setup unavailable'))
+
+    await expect(useAuthStore.getState().initialize()).resolves.toBeUndefined()
+
+    const state = useAuthStore.getState()
+    expect(state.authEnabled).toBe(true)
+    expect(state.shareEnabled).toBeNull()
+    expect(state.isAuthenticated).toBe(false)
+    expect(state.isLoading).toBe(false)
+  })
+
   it('restores secure authEnabled state when initialize runs after guest mode and auth is enabled again', async () => {
     useAuthStore.setState({
       user: {
@@ -357,6 +424,41 @@ describe('authStore', () => {
     expect(state.isLoading).toBe(false)
   })
 
+  it('passes abort signals to initialize checks and aborts a pending initialize before login', async () => {
+    let setupSignal: AbortSignal | undefined
+
+    getSetupStatusMock.mockImplementation((options?: { signal?: AbortSignal }) => {
+      setupSignal = options?.signal
+      return new Promise((_resolve, reject) => {
+        options?.signal?.addEventListener('abort', () => {
+          reject(new DOMException('initialize aborted', 'AbortError'))
+        }, { once: true })
+      })
+    })
+    loginMock.mockResolvedValue({
+      user: {
+        id: 'user-1',
+        username: 'user',
+        role: 'user',
+        email: '',
+        homeDir: '/',
+      },
+      warning: false,
+      message: undefined,
+    })
+
+    const initializePromise = useAuthStore.getState().initialize()
+
+    expect(setupSignal).toBeInstanceOf(AbortSignal)
+    expect(setupSignal?.aborted).toBe(false)
+
+    await expect(useAuthStore.getState().login('user', 'password')).resolves.toMatchObject({ warning: false })
+
+    expect(setupSignal?.aborted).toBe(true)
+    await expect(initializePromise).resolves.toBeUndefined()
+    expect(getCurrentUserMock).not.toHaveBeenCalled()
+  })
+
   it('initializes guest access when server auth is disabled', async () => {
     getSetupStatusMock.mockResolvedValue({
       success: true,
@@ -395,6 +497,13 @@ describe('authStore', () => {
     getCurrentUserMock.mockResolvedValue(user)
 
     await expect(useAuthStore.getState().initialize()).resolves.toBeUndefined()
+
+    expect(getSetupStatusMock.mock.calls[0]?.[0]).toEqual({
+      signal: expect.any(AbortSignal),
+    })
+    expect(getCurrentUserMock.mock.calls[0]?.[0]).toEqual({
+      signal: expect.any(AbortSignal),
+    })
 
     const state = useAuthStore.getState()
     expect(state.user).toEqual(user)
@@ -440,6 +549,50 @@ describe('authStore', () => {
     const state = useAuthStore.getState()
     expect(state.isLoading).toBe(false)
     expect(state.error).toBe('登录失败')
+  })
+
+  it('does not expose arbitrary Error messages from failed login attempts', async () => {
+    loginMock.mockRejectedValueOnce(new Error('database connection refused'))
+
+    await expect(useAuthStore.getState().login('admin', 'wrong')).rejects.toThrow('database connection refused')
+
+    const state = useAuthStore.getState()
+    expect(state.isLoading).toBe(false)
+    expect(state.error).toBe('登录失败')
+  })
+
+  it('preserves explicit AuthError login messages from the auth API', async () => {
+    const authError = Object.assign(new Error('用户名或密码错误'), { name: 'AuthError' })
+    loginMock.mockRejectedValueOnce(authError)
+
+    await expect(useAuthStore.getState().login('admin', 'wrong')).rejects.toThrow('用户名或密码错误')
+
+    const state = useAuthStore.getState()
+    expect(state.isLoading).toBe(false)
+    expect(state.error).toBe('用户名或密码错误')
+  })
+
+  it('does not expose arbitrary Error messages from failed logout attempts', async () => {
+    useAuthStore.setState({
+      user: {
+        id: 'admin-1',
+        username: 'admin',
+        role: 'admin',
+        email: '',
+        homeDir: '/',
+      },
+      isAuthenticated: true,
+      isLoading: false,
+      error: null,
+      authEnabled: true,
+    })
+    logoutMock.mockRejectedValueOnce(new Error('socket hang up'))
+
+    await expect(useAuthStore.getState().logout()).rejects.toThrow('socket hang up')
+
+    expect(useAuthStore.getState().isAuthenticated).toBe(true)
+    expect(useAuthStore.getState().isLoading).toBe(false)
+    expect(useAuthStore.getState().error).toBe('退出登录失败')
   })
 
   it('clears errors and updates authEnabled through lightweight actions', () => {

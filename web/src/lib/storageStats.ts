@@ -29,6 +29,15 @@ export interface DiskSpaceStatus {
   label: string
 }
 
+export type FilesystemIntegrityStatusLevel = 'supported' | 'unknown' | 'volatile' | 'remote' | 'limited'
+
+export interface FilesystemIntegrityStatus {
+  level: FilesystemIntegrityStatusLevel
+  title: string
+  description: string
+  label: string
+}
+
 const DEFAULT_WARNING_USAGE_RATIO = 0.9
 const DEFAULT_CRITICAL_USAGE_RATIO = 0.95
 const DEFAULT_WARNING_MIN_AVAILABLE_BYTES = 10 * 1024 * 1024 * 1024
@@ -96,6 +105,55 @@ export function formatFilesystemType(value: string | undefined): string {
     return lower.toUpperCase()
   }
   return normalized
+}
+
+export function getFilesystemIntegrityStatus(
+  fsType: string | undefined,
+  nativeDataChecksumSupport: boolean | undefined,
+): FilesystemIntegrityStatus {
+  const normalized = fsType?.trim().toLowerCase()
+  if (nativeDataChecksumSupport === true) {
+    return {
+      level: 'supported',
+      title: '原生数据校验支持',
+      description: `${formatFilesystemType(fsType)} 具备底层校验与 scrub 能力，仍需保留独立备份。`,
+      label: '已支持',
+    }
+  }
+
+  if (!normalized || normalized === 'unknown') {
+    return {
+      level: 'unknown',
+      title: '文件系统未知',
+      description: '无法识别底层文件系统，建议在部署机上运行 mnemonas-doctor 核对磁盘布局。',
+      label: '未知',
+    }
+  }
+
+  if (normalized === 'tmpfs') {
+    return {
+      level: 'volatile',
+      title: '临时文件系统',
+      description: '当前存储看起来是 tmpfs，重启可能丢失数据。请迁移到持久磁盘。',
+      label: '临时存储',
+    }
+  }
+
+  if (['nfs', 'cifs', 'smb', 'smb2', 'fuse'].some((prefix) => normalized.startsWith(prefix))) {
+    return {
+      level: 'remote',
+      title: '网络或 FUSE 存储',
+      description: '请确认一致性、断线恢复和独立备份策略。',
+      label: '需确认',
+    }
+  }
+
+  return {
+    level: 'limited',
+    title: '建议使用 ZFS/Btrfs',
+    description: '当前未检测到底层数据校验与 scrub 能力，请依赖 MnemoNAS scrub 和独立备份。',
+    label: '未检测到',
+  }
 }
 
 export function getDiskSpaceStatus(stats: DiskStorageStatsLike | undefined): DiskSpaceStatus {

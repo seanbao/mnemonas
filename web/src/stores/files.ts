@@ -7,6 +7,13 @@ export interface FileItem {
   size: number
   modTime: string
   etag?: string
+  capabilities?: FileCapabilities
+}
+
+export interface FileCapabilities {
+  read: boolean
+  concreteRead: boolean
+  write: boolean
 }
 
 export type ViewMode = 'list' | 'grid' | 'album'

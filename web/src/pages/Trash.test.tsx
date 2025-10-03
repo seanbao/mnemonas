@@ -37,7 +37,7 @@ let mockBatchResult = {
 }
 vi.mock('@/lib/useBatchOperation', () => ({
   useBatchOperation: (options: {
-    operation: (item: string) => Promise<unknown>
+    operation: (item: string, context: { signal?: AbortSignal }) => Promise<unknown>
     messages: {
       success: string
       failure: string
@@ -46,9 +46,9 @@ vi.mock('@/lib/useBatchOperation', () => ({
     getToast?: (result: typeof mockBatchResult) => { title: string; description?: string; color: 'success' | 'warning' | 'danger' } | null | undefined
     onComplete?: (result: typeof mockBatchResult) => void
   }) => ({
-    execute: vi.fn(async (items: string[]) => {
+    execute: vi.fn(async (items: string[], executeOptions: { signal?: AbortSignal } = {}) => {
       if (mockUseRealBatchOperation) {
-        const results = await Promise.allSettled(items.map((item) => options.operation(item)))
+        const results = await Promise.allSettled(items.map((item) => options.operation(item, { signal: executeOptions.signal })))
         const warningMessages = results
           .filter((result): result is PromiseFulfilledResult<unknown> => result.status === 'fulfilled')
           .map((result) => result.value)
@@ -68,10 +68,16 @@ vi.mock('@/lib/useBatchOperation', () => ({
           warningMessages,
         }
         mockBatchExecute(items)
+        if (executeOptions.signal?.aborted) {
+          return result
+        }
+        const hasWarnings = result.warningCount > 0 || result.warningMessages.length > 0
         const toast = options.getToast?.(result) ?? (result.failed === 0
           ? {
-            title: result.warningMessages[0] ?? options.messages.success.replace('{count}', String(result.succeeded)),
-            color: result.warningMessages.length > 0 ? 'warning' as const : 'success' as const,
+            title: hasWarnings
+              ? `${options.messages.success.replace('{count}', String(result.succeeded))}，但存在警告`
+              : options.messages.success.replace('{count}', String(result.succeeded)),
+            color: hasWarnings ? 'warning' as const : 'success' as const,
           }
           : result.succeeded === 0
             ? {
@@ -99,10 +105,16 @@ vi.mock('@/lib/useBatchOperation', () => ({
         total: items.length,
       }
       mockBatchExecute(items)
+      if (executeOptions.signal?.aborted) {
+        return result
+      }
+      const hasWarnings = result.warningCount > 0 || result.warningMessages.length > 0
       const toast = options.getToast?.(result) ?? (result.failed === 0
         ? {
-          title: result.warningMessages[0] ?? options.messages.success.replace('{count}', String(result.succeeded)),
-          color: result.warningMessages.length > 0 ? 'warning' as const : 'success' as const,
+          title: hasWarnings
+            ? `${options.messages.success.replace('{count}', String(result.succeeded))}，但存在警告`
+            : options.messages.success.replace('{count}', String(result.succeeded)),
+          color: hasWarnings ? 'warning' as const : 'success' as const,
         }
         : result.succeeded === 0
           ? {
@@ -140,6 +152,19 @@ const mockListTrash = vi.mocked(listTrash)
 const mockRestoreFromTrash = vi.mocked(restoreFromTrash)
 const mockDeleteFromTrash = vi.mocked(deleteFromTrash)
 const mockEmptyTrash = vi.mocked(emptyTrash)
+
+function expectCalledWithOnlyAbortSignal(mockFn: ReturnType<typeof vi.fn>) {
+  const call = mockFn.mock.calls.find(([options]) => {
+    return (options as { signal?: AbortSignal } | undefined)?.signal instanceof AbortSignal
+  })
+  expect(call).toBeTruthy()
+  expect(Object.keys((call?.[0] ?? {}) as Record<string, unknown>).sort()).toEqual(['signal'])
+}
+
+function expectAbortSignal(signal: AbortSignal | undefined): asserts signal is AbortSignal {
+  expect(signal).toBeDefined()
+  expect(typeof signal?.aborted).toBe('boolean')
+}
 
 function createDeferred<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void
@@ -196,6 +221,14 @@ describe('TrashPage', () => {
       ],
       count: 2,
       totalSize: 1024,
+    })
+  })
+
+  it('passes abort signals to the trash query', async () => {
+    render(<TrashPage />)
+
+    await waitFor(() => {
+      expectCalledWithOnlyAbortSignal(mockListTrash)
     })
   })
 
@@ -370,7 +403,7 @@ describe('TrashPage', () => {
 
       await waitFor(() => {
         expect(screen.getByText('加载回收站失败')).toBeTruthy()
-        expect(screen.getByText('Network error')).toBeTruthy()
+        expect(screen.getByText('数据加载失败，请检查网络或稍后重试。')).toBeTruthy()
         expect(screen.getByRole('button', { name: '重新加载' })).toBeTruthy()
       })
     })
@@ -464,7 +497,30 @@ describe('TrashPage', () => {
       await waitFor(() => {
         expect(mockAddToast).toHaveBeenCalledWith({
           title: '刷新失败',
-          description: '请稍后重试',
+          description: '操作未完成，请稍后重试。',
+          color: 'danger',
+        })
+      })
+    })
+
+    it('shows generic failure toast when trash reload fails with an Error object', async () => {
+      const user = userEvent.setup()
+      mockListTrash
+        .mockRejectedValueOnce(new Error('Network error'))
+        .mockRejectedValueOnce(new Error('reload failed'))
+
+      render(<TrashPage />)
+
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: '重新加载' })).toBeTruthy()
+      })
+
+      await user.click(screen.getByRole('button', { name: '重新加载' }))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '刷新失败',
+          description: '操作未完成，请稍后重试。',
           color: 'danger',
         })
       })
@@ -705,7 +761,7 @@ describe('TrashPage', () => {
       await user.click(restoreButtons[0])
 
       await waitFor(() => {
-        expect(mockRestoreFromTrash).toHaveBeenCalledWith('item1')
+        expect(mockRestoreFromTrash).toHaveBeenCalledWith('item1', undefined, expect.objectContaining({ signal: expect.any(AbortSignal) }))
       })
     })
 
@@ -750,7 +806,7 @@ describe('TrashPage', () => {
       await waitFor(() => {
         expect(mockAddToast).toHaveBeenCalledWith({
           title: '恢复失败',
-          description: '请稍后重试',
+          description: '操作未完成，请稍后重试。',
           color: 'danger',
         })
       })
@@ -820,9 +876,9 @@ describe('TrashPage', () => {
 
     await user.click(screen.getByRole('button', { name: '恢复 deleted-file.txt' }))
 
-    await waitFor(() => {
-      expect(mockAddToast).toHaveBeenCalledWith({
-        title: 'file restored with metadata warning',
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+        title: '恢复完成，但存在警告',
         color: 'warning',
       })
     })
@@ -874,7 +930,7 @@ describe('TrashPage', () => {
       await user.click(screen.getByRole('button', { name: '恢复 deleted-file.txt' }))
 
       await waitFor(() => {
-        expect(mockRestoreFromTrash).toHaveBeenCalledWith('item1')
+        expect(mockRestoreFromTrash).toHaveBeenCalledWith('item1', undefined, expect.objectContaining({ signal: expect.any(AbortSignal) }))
       })
 
       await waitFor(() => {
@@ -939,7 +995,7 @@ describe('TrashPage', () => {
       await user.click(screen.getByRole('button', { name: '永久删除' }))
 
       await waitFor(() => {
-        expect(mockDeleteFromTrash).toHaveBeenCalledWith('item1')
+        expect(mockDeleteFromTrash).toHaveBeenCalledWith('item1', expect.objectContaining({ signal: expect.any(AbortSignal) }))
       })
     })
 
@@ -1054,7 +1110,7 @@ describe('TrashPage', () => {
 
     await waitFor(() => {
       expect(mockAddToast).toHaveBeenCalledWith({
-        title: 'item permanently deleted with cleanup warning',
+        title: '已永久删除，但存在警告',
         color: 'warning',
       })
     })
@@ -1080,7 +1136,7 @@ describe('TrashPage', () => {
       await user.click(screen.getByRole('button', { name: '永久删除' }))
 
       await waitFor(() => {
-        expect(mockDeleteFromTrash).toHaveBeenCalledWith('item1')
+        expect(mockDeleteFromTrash).toHaveBeenCalledWith('item1', expect.objectContaining({ signal: expect.any(AbortSignal) }))
       })
 
       await user.click(screen.getByRole('button', { name: '取消' }))
@@ -1128,7 +1184,7 @@ describe('TrashPage', () => {
       await user.click(screen.getByRole('button', { name: '永久删除' }))
 
       await waitFor(() => {
-        expect(mockDeleteFromTrash).toHaveBeenCalledWith('item1')
+        expect(mockDeleteFromTrash).toHaveBeenCalledWith('item1', expect.objectContaining({ signal: expect.any(AbortSignal) }))
       })
 
       await user.click(screen.getByRole('button', { name: '取消' }))
@@ -1290,7 +1346,7 @@ describe('TrashPage', () => {
       })
 
       await waitFor(() => {
-        expect(mockAddToast).toHaveBeenCalledWith({ title: 'trash emptied with cleanup warning', color: 'warning' })
+        expect(mockAddToast).toHaveBeenCalledWith({ title: '已清空回收站，删除 2 项，但存在警告', color: 'warning' })
       })
     })
 
@@ -1377,6 +1433,178 @@ describe('TrashPage', () => {
       })
 
       expect(screen.getByText('确定要清空回收站吗？')).toBeTruthy()
+    })
+  })
+
+  describe('request cancellation', () => {
+    it('aborts a pending restore request when the page unmounts', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      const pendingRestore = createDeferred<Awaited<ReturnType<typeof restoreFromTrash>>>()
+      let signal: AbortSignal | undefined
+      mockRestoreFromTrash.mockImplementationOnce((_id, _newPath, options) => {
+        signal = options?.signal
+        return pendingRestore.promise
+      })
+
+      const { unmount } = render(<TrashPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('deleted-file.txt')).toBeTruthy()
+      })
+
+      await user.click(screen.getByRole('button', { name: '恢复 deleted-file.txt' }))
+
+      await waitFor(() => {
+        expectAbortSignal(signal)
+      })
+      expect(signal.aborted).toBe(false)
+
+      unmount()
+
+      expect(signal.aborted).toBe(true)
+    })
+
+    it('aborts a pending permanent delete request when the page unmounts', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      const pendingDelete = createDeferred<Awaited<ReturnType<typeof deleteFromTrash>>>()
+      let signal: AbortSignal | undefined
+      mockDeleteFromTrash.mockImplementationOnce((_id, options) => {
+        signal = options?.signal
+        return pendingDelete.promise
+      })
+
+      const { unmount } = render(<TrashPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('deleted-file.txt')).toBeTruthy()
+      })
+
+      await user.click(screen.getByRole('button', { name: '永久删除 deleted-file.txt' }))
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: '永久删除' })).toBeTruthy()
+      })
+      await user.click(screen.getByRole('button', { name: '永久删除' }))
+
+      await waitFor(() => {
+        expectAbortSignal(signal)
+      })
+      expect(signal.aborted).toBe(false)
+
+      unmount()
+
+      expect(signal.aborted).toBe(true)
+    })
+
+    it('aborts a pending empty trash request when the page unmounts', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      const pendingEmpty = createDeferred<Awaited<ReturnType<typeof emptyTrash>>>()
+      let signal: AbortSignal | undefined
+      mockEmptyTrash.mockImplementationOnce((options) => {
+        signal = options?.signal
+        return pendingEmpty.promise
+      })
+
+      const { unmount } = render(<TrashPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('清空回收站')).toBeTruthy()
+      })
+
+      await user.click(screen.getByText('清空回收站'))
+      await waitFor(() => {
+        expect(screen.getByText('确定要清空回收站吗？')).toBeTruthy()
+      })
+      const confirmButtons = screen.getAllByText('清空回收站')
+      const confirmButton = confirmButtons.find(btn => btn.closest('[class*="ModalFooter"], footer')) ?? confirmButtons[confirmButtons.length - 1]
+      await user.click(confirmButton)
+
+      await waitFor(() => {
+        expectAbortSignal(signal)
+      })
+      expect(signal.aborted).toBe(false)
+
+      unmount()
+
+      expect(signal.aborted).toBe(true)
+    })
+
+    it('aborts pending batch restore requests when the page unmounts', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockUseRealBatchOperation = true
+      const pendingRestore = createDeferred<Awaited<ReturnType<typeof restoreFromTrash>>>()
+      let signal: AbortSignal | undefined
+      mockRestoreFromTrash.mockImplementation((_id, _newPath, options) => {
+        signal = options?.signal
+        return pendingRestore.promise
+      })
+
+      const { unmount } = render(<TrashPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('deleted-file.txt')).toBeTruthy()
+      })
+
+      const checkboxes = document.querySelectorAll('[class*="Checkbox"], input[type="checkbox"]')
+      if (checkboxes.length > 0) {
+        await user.click(checkboxes[0] as Element)
+      }
+
+      await waitFor(() => {
+        expect(screen.getByText(/已选择 2 项/)).toBeTruthy()
+      })
+
+      await user.click(screen.getByText('恢复'))
+
+      await waitFor(() => {
+        expectAbortSignal(signal)
+      })
+      expect(signal.aborted).toBe(false)
+
+      unmount()
+
+      expect(signal.aborted).toBe(true)
+    })
+
+    it('aborts pending batch permanent delete requests when the page unmounts', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockUseRealBatchOperation = true
+      const pendingDelete = createDeferred<Awaited<ReturnType<typeof deleteFromTrash>>>()
+      let signal: AbortSignal | undefined
+      mockDeleteFromTrash.mockImplementation((_id, options) => {
+        signal = options?.signal
+        return pendingDelete.promise
+      })
+
+      const { unmount } = render(<TrashPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('deleted-file.txt')).toBeTruthy()
+      })
+
+      const checkboxes = document.querySelectorAll('[class*="Checkbox"], input[type="checkbox"]')
+      if (checkboxes.length > 1) {
+        await user.click(checkboxes[1] as Element)
+      }
+
+      await waitFor(() => {
+        expect(screen.getByText(/已选择 1 项/)).toBeTruthy()
+      })
+
+      await user.click(screen.getByText('永久删除'))
+      await waitFor(() => {
+        expect(screen.getByText('确认批量永久删除')).toBeTruthy()
+      })
+      const confirmButtons = screen.getAllByRole('button', { name: '永久删除' })
+      await user.click(confirmButtons[confirmButtons.length - 1])
+
+      await waitFor(() => {
+        expectAbortSignal(signal)
+      })
+      expect(signal.aborted).toBe(false)
+
+      unmount()
+
+      expect(signal.aborted).toBe(true)
     })
   })
 
@@ -1546,7 +1774,7 @@ describe('TrashPage', () => {
       await user.click(screen.getByRole('button', { name: '恢复 deleted-file.txt' }))
 
       await waitFor(() => {
-        expect(mockRestoreFromTrash).toHaveBeenCalledWith('item1')
+        expect(mockRestoreFromTrash).toHaveBeenCalledWith('item1', undefined, expect.objectContaining({ signal: expect.any(AbortSignal) }))
       })
 
       await waitFor(() => {
@@ -1621,7 +1849,47 @@ describe('TrashPage', () => {
 
       await waitFor(() => {
         expect(mockAddToast).toHaveBeenCalledWith({
-          title: 'restore completed with warnings',
+          title: '已恢复 2 项，但存在警告',
+          color: 'warning',
+        })
+      })
+    })
+
+    it('shows operation-specific warning toast for successful batch permanent delete with warnings', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockUseRealBatchOperation = true
+      mockDeleteFromTrash.mockResolvedValue({
+        warning: true,
+        message: 'delete completed with cleanup warning',
+      })
+
+      render(<TrashPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('deleted-file.txt')).toBeTruthy()
+      })
+
+      const checkboxes = document.querySelectorAll('[class*="Checkbox"], input[type="checkbox"]')
+      if (checkboxes.length > 1) {
+        await user.click(checkboxes[1] as Element)
+      }
+
+      await waitFor(() => {
+        expect(screen.getByText(/已选择 1 项/)).toBeTruthy()
+      })
+
+      await user.click(screen.getByText('永久删除'))
+
+      await waitFor(() => {
+        expect(screen.getByText('确认批量永久删除')).toBeTruthy()
+      })
+
+      const confirmButtons = screen.getAllByRole('button', { name: '永久删除' })
+      await user.click(confirmButtons[confirmButtons.length - 1])
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '已永久删除 1 项，但存在警告',
           color: 'warning',
         })
       })

@@ -9,6 +9,7 @@ import (
 
 	"github.com/seanbao/mnemonas/internal/auth"
 	"github.com/seanbao/mnemonas/internal/config"
+	"github.com/seanbao/mnemonas/internal/storage"
 )
 
 type pathAccessMode string
@@ -43,6 +44,10 @@ func (s *Server) authorizeUserReadPath(ctx context.Context, targetPath string) e
 	return s.authorizeUserPathFor(ctx, targetPath, pathAccessRead)
 }
 
+func (s *Server) authorizeUserConcreteReadPath(ctx context.Context, targetPath string) error {
+	return s.authorizeUserPathForOptions(ctx, targetPath, pathAccessRead, false)
+}
+
 func (s *Server) authorizeUserWritePath(ctx context.Context, targetPath string) error {
 	return s.authorizeUserPathFor(ctx, targetPath, pathAccessWrite)
 }
@@ -52,6 +57,10 @@ func (s *Server) authorizeUserPath(ctx context.Context, targetPath string) error
 }
 
 func (s *Server) authorizeUserPathFor(ctx context.Context, targetPath string, mode pathAccessMode) error {
+	return s.authorizeUserPathForOptions(ctx, targetPath, mode, true)
+}
+
+func (s *Server) authorizeUserPathForOptions(ctx context.Context, targetPath string, mode pathAccessMode, allowReadableDescendant bool) error {
 	if !s.authEnabled || auth.IsAdmin(ctx) {
 		return nil
 	}
@@ -66,6 +75,15 @@ func (s *Server) authorizeUserPathFor(ctx context.Context, targetPath string, mo
 			return nil
 		}
 		return errPathAccessDenied
+	}
+	if allowReadableDescendant && mode == pathAccessRead {
+		ok, err := s.hasExistingReadableDirectoryAccessDescendantRule(ctx, user, targetPath)
+		if err != nil {
+			return err
+		}
+		if ok {
+			return nil
+		}
 	}
 
 	homeDir, scoped, err := s.currentUserHomeDir(ctx)
@@ -114,6 +132,68 @@ func matchDirectoryAccessRuleIn(rules []config.DirectoryAccessRuleConfig, target
 		return config.DirectoryAccessRuleConfig{}, false
 	}
 	return rules[bestIndex], true
+}
+
+func (s *Server) hasExistingReadableDirectoryAccessDescendantRule(ctx context.Context, user *auth.User, targetPath string) (bool, error) {
+	if s.fs == nil {
+		return false, nil
+	}
+	cfg := s.currentConfig()
+	if cfg == nil || len(cfg.Storage.DirectoryAccessRules) == 0 {
+		return false, nil
+	}
+
+	for _, rule := range readableDirectoryAccessDescendantRules(cfg.Storage.DirectoryAccessRules, user, targetPath) {
+		ok, err := s.directoryExistsForAccessRule(ctx, rule.Path)
+		if err != nil {
+			return false, err
+		}
+		if ok {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func readableDirectoryAccessDescendantRules(rules []config.DirectoryAccessRuleConfig, user *auth.User, targetPath string) []config.DirectoryAccessRuleConfig {
+	if len(rules) == 0 || user == nil {
+		return nil
+	}
+	targetPath = path.Clean(targetPath)
+	if targetPath == "/" {
+		return nil
+	}
+
+	matched := make([]config.DirectoryAccessRuleConfig, 0)
+	for _, rule := range rules {
+		if strings.TrimSpace(rule.Path) == "" {
+			continue
+		}
+		rulePath := path.Clean(rule.Path)
+		if rulePath == "/" || rulePath == targetPath {
+			continue
+		}
+		if !pathWithinBase(targetPath, rulePath) {
+			continue
+		}
+		if !directoryAccessRuleAllowsUser(rule, user, pathAccessRead) {
+			continue
+		}
+		rule.Path = rulePath
+		matched = append(matched, rule)
+	}
+	return matched
+}
+
+func (s *Server) directoryExistsForAccessRule(ctx context.Context, targetPath string) (bool, error) {
+	info, err := s.fs.Stat(ctx, targetPath)
+	if err != nil {
+		if isStorageNotFound(err) || errors.Is(err, storage.ErrNotDir) {
+			return false, nil
+		}
+		return false, err
+	}
+	return info != nil && info.IsDir, nil
 }
 
 func directoryAccessRuleAllowsUser(rule config.DirectoryAccessRuleConfig, user *auth.User, mode pathAccessMode) bool {
@@ -238,6 +318,18 @@ func (s *Server) evaluateUserPathAccessModeWithRules(user *auth.User, targetPath
 			Source:      "directory_access_rule",
 			Message:     message,
 			MatchedRule: &matchedRule,
+		}
+	}
+	if mode == pathAccessRead {
+		if descendantRules := readableDirectoryAccessDescendantRules(rules, user, targetPath); len(descendantRules) > 0 {
+			matchedRule := descendantRules[0]
+			return pathAccessEvaluation{
+				Mode:        mode,
+				Allowed:     true,
+				Source:      "directory_access_rule",
+				Message:     "directory access rule grants read through a descendant",
+				MatchedRule: &matchedRule,
+			}
 		}
 	}
 

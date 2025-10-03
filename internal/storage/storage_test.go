@@ -795,6 +795,9 @@ func TestFileSystem_RootMutationsAreRejected(t *testing.T) {
 	if err := fs.Delete(ctx, "/"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("Delete(/) error = %v, want ErrNotFound", err)
 	}
+	if err := fs.WriteFile(ctx, "/", bytes.NewReader([]byte("root content"))); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("WriteFile(/) error = %v, want ErrNotFound", err)
+	}
 	if err := fs.PermanentDelete(ctx, "/"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("PermanentDelete(/) error = %v, want ErrNotFound", err)
 	}
@@ -806,6 +809,28 @@ func TestFileSystem_RootMutationsAreRejected(t *testing.T) {
 	}
 	if err := fs.Copy(ctx, "/source.txt", "/"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("Copy(/source.txt, /) error = %v, want ErrNotFound", err)
+	}
+	if err := fs.WriteFile(ctx, "/restore-root-target.txt", bytes.NewReader([]byte("restore content"))); err != nil {
+		t.Fatalf("WriteFile(restore-root-target.txt) error: %v", err)
+	}
+	if err := fs.Delete(ctx, "/restore-root-target.txt"); err != nil {
+		t.Fatalf("Delete(restore-root-target.txt) error: %v", err)
+	}
+	items, err := fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash() error: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected one trash item, got %d", len(items))
+	}
+	if err := fs.RestoreFromTrashTo(ctx, items[0].ID, "/"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("RestoreFromTrashTo(id, /) error = %v, want ErrNotFound", err)
+	}
+	if err := fs.RestoreVersion(ctx, "/", "missing-version"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("RestoreVersion(/) error = %v, want ErrNotFound", err)
+	}
+	if err := fs.SetVersioning(ctx, "/", true); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("SetVersioning(/) error = %v, want ErrNotFound", err)
 	}
 	if _, err := fs.Stat(ctx, "/source.txt"); err != nil {
 		t.Fatalf("expected source file to remain after rejected root mutations, got %v", err)
@@ -1503,6 +1528,75 @@ func TestFileSystem_ReadDir(t *testing.T) {
 	}
 }
 
+func TestStorageReadDirChildPathRejectsNonDirectChildren(t *testing.T) {
+	tests := []struct {
+		name      string
+		parent    string
+		child     *workspace.FileInfo
+		wantPath  string
+		wantName  string
+		wantError bool
+	}{
+		{
+			name:     "direct child",
+			parent:   "/docs",
+			child:    &workspace.FileInfo{Path: "/docs/report.txt", Name: "report.txt"},
+			wantPath: "/docs/report.txt",
+			wantName: "report.txt",
+		},
+		{
+			name:     "root direct child",
+			parent:   "/",
+			child:    &workspace.FileInfo{Path: "/report.txt", Name: "report.txt"},
+			wantPath: "/report.txt",
+			wantName: "report.txt",
+		},
+		{
+			name:     "fallback from blank path",
+			parent:   "/docs",
+			child:    &workspace.FileInfo{Name: "report.txt"},
+			wantPath: "/docs/report.txt",
+			wantName: "report.txt",
+		},
+		{
+			name:      "similar prefix sibling",
+			parent:    "/docs",
+			child:     &workspace.FileInfo{Path: "/docs-archive/secret.txt", Name: "secret.txt"},
+			wantError: true,
+		},
+		{
+			name:      "nested descendant",
+			parent:    "/docs",
+			child:     &workspace.FileInfo{Path: "/docs/nested/secret.txt", Name: "secret.txt"},
+			wantError: true,
+		},
+		{
+			name:      "same path",
+			parent:    "/docs",
+			child:     &workspace.FileInfo{Path: "/docs", Name: "docs"},
+			wantError: true,
+		},
+		{
+			name:      "nil child",
+			parent:    "/docs",
+			child:     nil,
+			wantError: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotPath, gotName, err := storageReadDirChildPath(tt.parent, tt.child)
+			if (err != nil) != tt.wantError {
+				t.Fatalf("storageReadDirChildPath() error = %v, wantError %v", err, tt.wantError)
+			}
+			if gotPath != tt.wantPath || gotName != tt.wantName {
+				t.Fatalf("storageReadDirChildPath() = (%q, %q), want (%q, %q)", gotPath, gotName, tt.wantPath, tt.wantName)
+			}
+		})
+	}
+}
+
 func TestFileSystem_ReadDir_ReturnsErrNotDirWhenPathIsFile(t *testing.T) {
 	fs := setupFileSystem(t)
 	ctx := context.Background()
@@ -1596,6 +1690,48 @@ func TestFileSystem_Delete_RejectsSymlinkedTrashRootWithoutCreatingOutsideDir(t 
 
 	if _, statErr := fs.Stat(ctx, "/symlinked-trash-root.txt"); statErr != nil {
 		t.Fatalf("expected file to remain in workspace after failed delete, got %v", statErr)
+	}
+}
+
+func TestFileSystem_DeleteDirectoryWithSymlinkChildDoesNotLeaveTrashContent(t *testing.T) {
+	fs := setupStandaloneFileSystem(t)
+	ctx := context.Background()
+
+	srcDir := filepath.Join(fs.workspace.Root(), "symlink-tree")
+	if err := os.MkdirAll(srcDir, 0755); err != nil {
+		t.Fatalf("MkdirAll(symlink-tree) error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "regular.txt"), []byte("content"), 0644); err != nil {
+		t.Fatalf("WriteFile(regular) error: %v", err)
+	}
+	if err := os.Symlink("regular.txt", filepath.Join(srcDir, "linked.txt")); err != nil {
+		t.Fatalf("Symlink(linked) error: %v", err)
+	}
+
+	err := fs.Delete(ctx, "/symlink-tree")
+	if !errors.Is(err, errStoragePathSymlink) {
+		t.Fatalf("Delete() error = %v, want errStoragePathSymlink", err)
+	}
+	if _, statErr := fs.Stat(ctx, "/symlink-tree"); statErr != nil {
+		t.Fatalf("expected source directory to remain after rejected delete, got %v", statErr)
+	}
+	items, err := fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash() error: %v", err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("expected no trash metadata after rejected delete, got %+v", items)
+	}
+	entries, err := os.ReadDir(fs.trashRoot)
+	if err != nil {
+		t.Fatalf("ReadDir(trash root) error: %v", err)
+	}
+	if len(entries) != 0 {
+		names := make([]string, 0, len(entries))
+		for _, entry := range entries {
+			names = append(names, entry.Name())
+		}
+		t.Fatalf("expected no orphan trash content after rejected delete, got %v", names)
 	}
 }
 
@@ -1763,6 +1899,64 @@ func TestFileSystem_Delete_EvictsExistingTrashBeforeKeepingOversizedNewestItem(t
 	}
 }
 
+func TestFileSystem_Delete_EvictsVersionMetadataWhenTrashCapacityRemovesOldItem(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+	fs.config.MaxTrashSize = 10
+
+	if err := fs.WriteFile(ctx, "/old-versioned.md", bytes.NewReader([]byte("old-v1"))); err != nil {
+		t.Fatalf("WriteFile(old v1) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/old-versioned.md", bytes.NewReader([]byte("old-v2"))); err != nil {
+		t.Fatalf("WriteFile(old v2) error: %v", err)
+	}
+	oldVersions, err := fs.versions.GetVersions(ctx, "/old-versioned.md")
+	if err != nil {
+		t.Fatalf("GetVersions(old before delete) error: %v", err)
+	}
+	if len(oldVersions) == 0 {
+		t.Fatal("expected old file to have version history")
+	}
+	if err := fs.Delete(ctx, "/old-versioned.md"); err != nil {
+		t.Fatalf("Delete(old) error: %v", err)
+	}
+
+	time.Sleep(1100 * time.Millisecond)
+
+	deletedHashes := make(map[string]int)
+	fs.deleteVersionObject = func(ctx context.Context, hash string) error {
+		deletedHashes[hash]++
+		return nil
+	}
+
+	if err := fs.WriteFile(ctx, "/new-capacity.txt", bytes.NewReader([]byte("1234567"))); err != nil {
+		t.Fatalf("WriteFile(new) error: %v", err)
+	}
+	if err := fs.Delete(ctx, "/new-capacity.txt"); err != nil {
+		t.Fatalf("Delete(new) error: %v", err)
+	}
+
+	items, err := fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash() error: %v", err)
+	}
+	if len(items) != 1 || items[0].OriginalPath != "/new-capacity.txt" {
+		t.Fatalf("expected only new trash item to remain, got %+v", items)
+	}
+	remainingVersions, err := fs.versions.GetVersions(ctx, "/old-versioned.md")
+	if err != nil {
+		t.Fatalf("GetVersions(old after capacity eviction) error: %v", err)
+	}
+	if len(remainingVersions) != 0 {
+		t.Fatalf("expected evicted trash item version metadata to be removed, got %d entries", len(remainingVersions))
+	}
+	for _, version := range oldVersions {
+		if deletedHashes[version.Hash] != 1 {
+			t.Fatalf("expected evicted version object %s to be deleted once, got %d", version.Hash, deletedHashes[version.Hash])
+		}
+	}
+}
+
 func TestFileSystem_Delete_DoesNotEvictExistingTrashWhenLaterDeleteStepFails(t *testing.T) {
 	fs := setupFileSystem(t)
 	ctx := context.Background()
@@ -1872,6 +2066,44 @@ func TestFileSystem_Delete_ReturnsWarningWhenTrashCapacityCleanupFailsAfterVisib
 	}
 	if _, statErr := fs.Stat(ctx, "/new-evict.txt"); statErr != ErrNotFound {
 		t.Fatalf("expected new file to stay deleted after cleanup warning, got %v", statErr)
+	}
+}
+
+func TestFileSystem_Delete_ReturnsWarningWhenSourceDirectorySyncFailsAfterMoveToTrash(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/delete-source-sync.txt", bytes.NewReader([]byte("content"))); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+
+	originalSyncManagedStorageDir := syncManagedStorageDir
+	syncManagedStorageDir = func(root *os.Root, relName, absPath string) error {
+		if root == fs.filesRootHandle && relName == "." && absPath == fs.workspace.Root() {
+			return errors.New("sync source dir failed")
+		}
+		return originalSyncManagedStorageDir(root, relName, absPath)
+	}
+	t.Cleanup(func() {
+		syncManagedStorageDir = originalSyncManagedStorageDir
+	})
+
+	err := fs.Delete(ctx, "/delete-source-sync.txt")
+	if !isVisibleMutationWarning(err) {
+		t.Fatalf("Delete() error = %v, want visible mutation warning", err)
+	}
+	if _, statErr := fs.Stat(ctx, "/delete-source-sync.txt"); statErr != ErrNotFound {
+		t.Fatalf("expected deleted file to remain absent after warning, got %v", statErr)
+	}
+	items, listErr := fs.ListTrash(ctx)
+	if listErr != nil {
+		t.Fatalf("ListTrash() error: %v", listErr)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected one trash item after warned delete, got %d", len(items))
+	}
+	if _, _, _, indexErr := fs.versions.GetFileIndex(ctx, "/delete-source-sync.txt"); !errors.Is(indexErr, versionstore.ErrNotFound) {
+		t.Fatalf("expected deleted file index to be absent after warning, got %v", indexErr)
 	}
 }
 
@@ -2769,6 +3001,41 @@ func TestFileSystem_Rename_AlreadyExists(t *testing.T) {
 	}
 }
 
+func TestFileSystem_Rename_RejectsTargetVersionMetadataBeforeWorkspaceMove(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/rename-raw-source.md", bytes.NewReader([]byte("source v1"))); err != nil {
+		t.Fatalf("WriteFile(source v1) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/rename-raw-source.md", bytes.NewReader([]byte("source v2"))); err != nil {
+		t.Fatalf("WriteFile(source v2) error: %v", err)
+	}
+	if err := fs.versions.AddVersion(ctx, "/rename-raw-target.md", "rename-raw-target-hash", 1, ""); err != nil {
+		t.Fatalf("AddVersion(target) error: %v", err)
+	}
+
+	workspaceRenameCalled := false
+	fs.renameWorkspacePath = func(ctx context.Context, oldName, newName string) error {
+		workspaceRenameCalled = true
+		return fs.workspace.Rename(ctx, oldName, newName)
+	}
+
+	err := fs.Rename(ctx, "/rename-raw-source.md", "/rename-raw-target.md")
+	if !errors.Is(err, ErrAlreadyExists) {
+		t.Fatalf("Rename() error = %v, want %v", err, ErrAlreadyExists)
+	}
+	if workspaceRenameCalled {
+		t.Fatal("expected raw target metadata conflict to be rejected before workspace rename")
+	}
+	if _, statErr := fs.Stat(ctx, "/rename-raw-source.md"); statErr != nil {
+		t.Fatalf("expected source to remain after rejected rename, got %v", statErr)
+	}
+	if _, statErr := fs.Stat(ctx, "/rename-raw-target.md"); statErr != ErrNotFound {
+		t.Fatalf("expected target path to remain absent, got %v", statErr)
+	}
+}
+
 func TestFileSystem_Rename_ReturnsErrNotDirWhenDestinationParentIsFile(t *testing.T) {
 	fs := setupFileSystem(t)
 	ctx := context.Background()
@@ -2867,6 +3134,51 @@ func TestFileSystem_Copy_RollsBackDestinationWhenIndexUpdateFails(t *testing.T) 
 	}
 }
 
+func TestFileSystem_Copy_IndexesVisibleWorkspaceCopyWarning(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/copy-source.txt", bytes.NewReader([]byte("source"))); err != nil {
+		t.Fatalf("WriteFile(source) error: %v", err)
+	}
+
+	originalCopyWorkspacePath := fs.copyWorkspacePath
+	fs.copyWorkspacePath = func(ctx context.Context, srcName, dstName string) error {
+		if err := fs.workspace.Copy(ctx, srcName, dstName); err != nil {
+			return err
+		}
+		return workspace.WrapVisibleMutationWarning(errors.New("workspace copy cleanup warning"))
+	}
+	t.Cleanup(func() {
+		fs.copyWorkspacePath = originalCopyWorkspacePath
+	})
+
+	err := fs.Copy(ctx, "/copy-source.txt", "/copy-dest.txt")
+	if !isVisibleMutationWarning(err) {
+		t.Fatalf("Copy() error = %v, want visible mutation warning", err)
+	}
+
+	reader, readErr := fs.OpenFile(ctx, "/copy-dest.txt")
+	if readErr != nil {
+		t.Fatalf("OpenFile(dest) error: %v", readErr)
+	}
+	defer reader.Close()
+	data, readErr := io.ReadAll(reader)
+	if readErr != nil {
+		t.Fatalf("ReadAll(dest) error: %v", readErr)
+	}
+	if string(data) != "source" {
+		t.Fatalf("destination content = %q, want %q", string(data), "source")
+	}
+	_, _, hash, indexErr := fs.versions.GetFileIndex(ctx, "/copy-dest.txt")
+	if indexErr != nil {
+		t.Fatalf("GetFileIndex(copy-dest) error: %v", indexErr)
+	}
+	if hash != computeHash([]byte("source")) {
+		t.Fatalf("copy-dest index hash = %q, want source hash", hash)
+	}
+}
+
 func TestFileSystem_Rename_PreservesVersions(t *testing.T) {
 	fs := setupFileSystem(t)
 	ctx := context.Background()
@@ -2909,6 +3221,58 @@ func TestFileSystem_Rename_RollsBackWhenMetadataRenameFails(t *testing.T) {
 	}
 	if _, statErr := fs.Stat(ctx, "/rename-fail-new.txt"); statErr != ErrNotFound {
 		t.Fatalf("Expected new path to be absent after rollback, got %v", statErr)
+	}
+}
+
+func TestFileSystem_Rename_MovesMetadataAfterVisibleWorkspaceRenameWarning(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/rename-warning.md", bytes.NewReader([]byte("v1"))); err != nil {
+		t.Fatalf("WriteFile(v1) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/rename-warning.md", bytes.NewReader([]byte("v2"))); err != nil {
+		t.Fatalf("WriteFile(v2) error: %v", err)
+	}
+
+	originalRenameWorkspacePath := fs.renameWorkspacePath
+	fs.renameWorkspacePath = func(ctx context.Context, oldName, newName string) error {
+		if err := fs.workspace.Rename(ctx, oldName, newName); err != nil {
+			return err
+		}
+		return workspace.WrapVisibleMutationWarning(errors.New("workspace rename sync warning"))
+	}
+	t.Cleanup(func() {
+		fs.renameWorkspacePath = originalRenameWorkspacePath
+	})
+
+	err := fs.Rename(ctx, "/rename-warning.md", "/rename-warning-new.md")
+	if !isVisibleMutationWarning(err) {
+		t.Fatalf("Rename() error = %v, want visible mutation warning", err)
+	}
+	if _, statErr := fs.Stat(ctx, "/rename-warning.md"); statErr != ErrNotFound {
+		t.Fatalf("expected original path to be absent after warned rename, got %v", statErr)
+	}
+	if _, statErr := fs.Stat(ctx, "/rename-warning-new.md"); statErr != nil {
+		t.Fatalf("expected renamed path to remain visible after warned rename, got %v", statErr)
+	}
+
+	newVersions, versionErr := fs.versions.GetVersions(ctx, "/rename-warning-new.md")
+	if versionErr != nil {
+		t.Fatalf("GetVersions(new path) error: %v", versionErr)
+	}
+	if len(newVersions) == 0 {
+		t.Fatal("expected historical versions to move to new path")
+	}
+	oldVersions, versionErr := fs.versions.GetVersions(ctx, "/rename-warning.md")
+	if versionErr != nil {
+		t.Fatalf("GetVersions(old path) error: %v", versionErr)
+	}
+	if len(oldVersions) != 0 {
+		t.Fatalf("expected original path historical metadata to be absent, got %d versions", len(oldVersions))
+	}
+	if _, _, _, indexErr := fs.versions.GetFileIndex(ctx, "/rename-warning.md"); !errors.Is(indexErr, versionstore.ErrNotFound) {
+		t.Fatalf("expected original path file index to be absent, got %v", indexErr)
 	}
 }
 
@@ -3141,6 +3505,120 @@ func TestFileSystem_RestoreFromTrash_RejectsSymlinkParentWithoutCreatingOutsideD
 	}
 }
 
+func TestFileSystem_RestoreFromTrashRejectsFileTargetCreatedAfterPrecheck(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/restore-race.txt", bytes.NewReader([]byte("trash content"))); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+	if err := fs.Delete(ctx, "/restore-race.txt"); err != nil {
+		t.Fatalf("Delete() error: %v", err)
+	}
+	items, err := fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash() error: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected one trash item, got %d", len(items))
+	}
+
+	livePath := filepath.Join(fs.workspace.Root(), "restore-race.txt")
+	originalAfterValidateStoragePaths := afterValidateStoragePaths
+	inserted := false
+	afterValidateStoragePaths = func() error {
+		if inserted {
+			return nil
+		}
+		inserted = true
+		return os.WriteFile(livePath, []byte("live content"), 0644)
+	}
+	t.Cleanup(func() {
+		afterValidateStoragePaths = originalAfterValidateStoragePaths
+	})
+
+	err = fs.RestoreFromTrash(ctx, items[0].ID)
+	if !errors.Is(err, ErrAlreadyExists) {
+		t.Fatalf("RestoreFromTrash() error = %v, want ErrAlreadyExists", err)
+	}
+	data, readErr := os.ReadFile(livePath)
+	if readErr != nil {
+		t.Fatalf("ReadFile(live target) error: %v", readErr)
+	}
+	if string(data) != "live content" {
+		t.Fatalf("live target content = %q, want live content", data)
+	}
+	remaining, listErr := fs.ListTrash(ctx)
+	if listErr != nil {
+		t.Fatalf("ListTrash() after failed restore error: %v", listErr)
+	}
+	if len(remaining) != 1 || remaining[0].ID != items[0].ID {
+		t.Fatalf("expected trash item to remain after failed restore, got %#v", remaining)
+	}
+}
+
+func TestFileSystem_RestoreFromTrashRejectsDirectoryTargetCreatedAfterPrecheck(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/restore-dir-race"); err != nil {
+		t.Fatalf("Mkdir() error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/restore-dir-race/trash.txt", bytes.NewReader([]byte("trash content"))); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+	if err := fs.Delete(ctx, "/restore-dir-race"); err != nil {
+		t.Fatalf("Delete() error: %v", err)
+	}
+	items, err := fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash() error: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected one trash item, got %d", len(items))
+	}
+
+	liveDir := filepath.Join(fs.workspace.Root(), "restore-dir-race")
+	liveFile := filepath.Join(liveDir, "live.txt")
+	originalAfterValidateStoragePaths := afterValidateStoragePaths
+	inserted := false
+	afterValidateStoragePaths = func() error {
+		if inserted {
+			return nil
+		}
+		inserted = true
+		if err := os.Mkdir(liveDir, 0755); err != nil {
+			return err
+		}
+		return os.WriteFile(liveFile, []byte("live content"), 0644)
+	}
+	t.Cleanup(func() {
+		afterValidateStoragePaths = originalAfterValidateStoragePaths
+	})
+
+	err = fs.RestoreFromTrash(ctx, items[0].ID)
+	if !errors.Is(err, ErrAlreadyExists) {
+		t.Fatalf("RestoreFromTrash() error = %v, want ErrAlreadyExists", err)
+	}
+	data, readErr := os.ReadFile(liveFile)
+	if readErr != nil {
+		t.Fatalf("ReadFile(live file) error: %v", readErr)
+	}
+	if string(data) != "live content" {
+		t.Fatalf("live file content = %q, want live content", data)
+	}
+	if _, statErr := os.Stat(filepath.Join(liveDir, "trash.txt")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("trash content stat error = %v, want not exist", statErr)
+	}
+	remaining, listErr := fs.ListTrash(ctx)
+	if listErr != nil {
+		t.Fatalf("ListTrash() after failed restore error: %v", listErr)
+	}
+	if len(remaining) != 1 || remaining[0].ID != items[0].ID {
+		t.Fatalf("expected trash item to remain after failed restore, got %#v", remaining)
+	}
+}
+
 func TestFileSystem_RestoreFromTrash_DoesNotRemoveOutsideTrashItemDirAfterTrashRootSwap(t *testing.T) {
 	fs := setupFileSystem(t)
 	ctx := context.Background()
@@ -3264,7 +3742,7 @@ func TestFileSystem_WalkTrashItemRestorePaths_UsesAnchoredTrashRootAfterTrashRoo
 	})
 
 	seen := make(map[string]bool)
-	err = fs.WalkTrashItemRestorePaths(ctx, items[0].ID, func(restoredPath string, _ bool) error {
+	err = fs.WalkTrashItemRestorePaths(ctx, items[0].ID, func(restoredPath string, _ bool, _ int64) error {
 		seen[restoredPath] = true
 		return nil
 	})
@@ -3307,7 +3785,7 @@ func TestFileSystem_WalkTrashItemRestorePaths_RejectsSymlinkInsideTrashContent(t
 		t.Fatalf("Symlink(trash content) error: %v", err)
 	}
 
-	err = fs.WalkTrashItemRestorePaths(ctx, items[0].ID, func(string, bool) error {
+	err = fs.WalkTrashItemRestorePaths(ctx, items[0].ID, func(string, bool, int64) error {
 		return nil
 	})
 	if !errors.Is(err, errStoragePathSymlink) {
@@ -3356,6 +3834,58 @@ func TestFileSystem_RestoreFromTrash_RollsBackWhenIndexUpdateFails(t *testing.T)
 	}
 	if _, statErr := os.Stat(filepath.Join(fs.trashRoot, items[0].ID, "content")); statErr != nil {
 		t.Fatalf("Expected trash content to remain after rollback, got %v", statErr)
+	}
+}
+
+func TestFileSystem_RestoreFromTrash_ReturnsWarningWhenTrashSourceDirectorySyncFailsAfterRestore(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/restore-source-sync.txt", bytes.NewReader([]byte("restore me"))); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+	if err := fs.Delete(ctx, "/restore-source-sync.txt"); err != nil {
+		t.Fatalf("Delete() error: %v", err)
+	}
+
+	items, err := fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash() error: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected one trash item, got %d", len(items))
+	}
+	trashItemDir := filepath.Join(fs.trashRoot, items[0].ID)
+
+	originalSyncManagedStorageDir := syncManagedStorageDir
+	syncManagedStorageDir = func(root *os.Root, relName, absPath string) error {
+		if root == fs.trashRootHandle && relName == items[0].ID && absPath == trashItemDir {
+			return errors.New("sync trash source dir failed")
+		}
+		return originalSyncManagedStorageDir(root, relName, absPath)
+	}
+	t.Cleanup(func() {
+		syncManagedStorageDir = originalSyncManagedStorageDir
+	})
+
+	err = fs.RestoreFromTrash(ctx, items[0].ID)
+	if !isVisibleMutationWarning(err) {
+		t.Fatalf("RestoreFromTrash() error = %v, want visible mutation warning", err)
+	}
+	if _, statErr := fs.Stat(ctx, "/restore-source-sync.txt"); statErr != nil {
+		t.Fatalf("expected restored file to remain visible after warning, got %v", statErr)
+	}
+	remaining, listErr := fs.ListTrash(ctx)
+	if listErr != nil {
+		t.Fatalf("ListTrash() after warned restore error: %v", listErr)
+	}
+	if len(remaining) != 0 {
+		t.Fatalf("expected trash metadata to be removed after warned restore, got %d items", len(remaining))
+	}
+	if _, _, hash, indexErr := fs.versions.GetFileIndex(ctx, "/restore-source-sync.txt"); indexErr != nil {
+		t.Fatalf("GetFileIndex(restored) error: %v", indexErr)
+	} else if hash != computeHash([]byte("restore me")) {
+		t.Fatalf("restored index hash = %q, want restored content hash", hash)
 	}
 }
 
@@ -3542,6 +4072,263 @@ func TestFileSystem_RestoreFromTrashTo_RejectsCustomPathWhenAnotherTrashItemShar
 	}
 }
 
+func TestFileSystem_RestoreFromTrashTo_RejectsDirectoryCustomPathWhenDescendantTrashItemHasVersionMetadata(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/restore-dir-shared"); err != nil {
+		t.Fatalf("Mkdir(/restore-dir-shared) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/restore-dir-shared/nested"); err != nil {
+		t.Fatalf("Mkdir(/restore-dir-shared/nested) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/restored"); err != nil {
+		t.Fatalf("Mkdir(/restored) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/restore-dir-shared/nested/report.txt", bytes.NewReader([]byte("v1"))); err != nil {
+		t.Fatalf("WriteFile(v1) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/restore-dir-shared/nested/report.txt", bytes.NewReader([]byte("v2"))); err != nil {
+		t.Fatalf("WriteFile(v2) error: %v", err)
+	}
+	versionsBefore, err := fs.versions.GetVersions(ctx, "/restore-dir-shared/nested/report.txt")
+	if err != nil {
+		t.Fatalf("GetVersions(report before delete) error: %v", err)
+	}
+	if len(versionsBefore) == 0 {
+		t.Fatal("expected descendant file to have version metadata")
+	}
+
+	if err := fs.Delete(ctx, "/restore-dir-shared/nested/report.txt"); err != nil {
+		t.Fatalf("Delete(report) error: %v", err)
+	}
+	items, err := fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash(after child delete) error: %v", err)
+	}
+	if len(items) != 1 || !items[0].HadVersions {
+		t.Fatalf("expected one versioned child trash item, got %+v", items)
+	}
+	childTrashID := items[0].ID
+
+	if err := fs.Delete(ctx, "/restore-dir-shared"); err != nil {
+		t.Fatalf("Delete(directory) error: %v", err)
+	}
+	items, err = fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash(after directory delete) error: %v", err)
+	}
+	dirTrashID := ""
+	for _, item := range items {
+		if item.OriginalPath == "/restore-dir-shared" {
+			dirTrashID = item.ID
+			if !item.HadVersions {
+				t.Fatalf("expected directory trash item to record descendant version metadata, got %+v", item)
+			}
+		}
+	}
+	if dirTrashID == "" {
+		t.Fatalf("expected directory trash item, got %+v", items)
+	}
+
+	err = fs.RestoreFromTrashTo(ctx, dirTrashID, "/restored/restore-dir-shared")
+	if !errors.Is(err, ErrAlreadyExists) {
+		t.Fatalf("RestoreFromTrashTo(directory) error = %v, want %v", err, ErrAlreadyExists)
+	}
+	if _, statErr := fs.Stat(ctx, "/restored/restore-dir-shared"); statErr != ErrNotFound {
+		t.Fatalf("expected custom directory restore target to remain absent, got %v", statErr)
+	}
+	remaining, err := fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash(after rejected restore) error: %v", err)
+	}
+	if len(remaining) != 2 {
+		t.Fatalf("expected both trash items to remain after rejected restore, got %+v", remaining)
+	}
+	foundChild := false
+	for _, item := range remaining {
+		if item.ID == childTrashID {
+			foundChild = true
+		}
+	}
+	if !foundChild {
+		t.Fatalf("expected child trash item to remain, got %+v", remaining)
+	}
+	versionsAfter, err := fs.versions.GetVersions(ctx, "/restore-dir-shared/nested/report.txt")
+	if err != nil {
+		t.Fatalf("GetVersions(report after rejected restore) error: %v", err)
+	}
+	if len(versionsAfter) != len(versionsBefore) {
+		t.Fatalf("expected descendant version metadata count to remain %d, got %d", len(versionsBefore), len(versionsAfter))
+	}
+	movedVersions, err := fs.versions.GetVersions(ctx, "/restored/restore-dir-shared/nested/report.txt")
+	if err != nil {
+		t.Fatalf("GetVersions(restored descendant) error: %v", err)
+	}
+	if len(movedVersions) != 0 {
+		t.Fatalf("expected rejected restore not to move descendant version metadata, got %d versions", len(movedVersions))
+	}
+}
+
+func TestFileSystem_RestoreFromTrashTo_RejectsCustomPathWhenTargetTrashItemHasVersionMetadata(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/restore-target-history.md", bytes.NewReader([]byte("target v1"))); err != nil {
+		t.Fatalf("WriteFile(target v1) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/restore-target-history.md", bytes.NewReader([]byte("target v2"))); err != nil {
+		t.Fatalf("WriteFile(target v2) error: %v", err)
+	}
+	if err := fs.Delete(ctx, "/restore-target-history.md"); err != nil {
+		t.Fatalf("Delete(target) error: %v", err)
+	}
+	items, err := fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash(after target delete) error: %v", err)
+	}
+	if len(items) != 1 || !items[0].HadVersions {
+		t.Fatalf("expected one versioned target trash item, got %+v", items)
+	}
+	targetTrashID := items[0].ID
+
+	if err := fs.WriteFile(ctx, "/restore-source-history.md", bytes.NewReader([]byte("source v1"))); err != nil {
+		t.Fatalf("WriteFile(source v1) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/restore-source-history.md", bytes.NewReader([]byte("source v2"))); err != nil {
+		t.Fatalf("WriteFile(source v2) error: %v", err)
+	}
+	sourceVersionsBefore, err := fs.versions.GetVersions(ctx, "/restore-source-history.md")
+	if err != nil {
+		t.Fatalf("GetVersions(source before delete) error: %v", err)
+	}
+	if len(sourceVersionsBefore) == 0 {
+		t.Fatal("expected source file to have version metadata")
+	}
+	if err := fs.Delete(ctx, "/restore-source-history.md"); err != nil {
+		t.Fatalf("Delete(source) error: %v", err)
+	}
+	items, err = fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash(after source delete) error: %v", err)
+	}
+	sourceTrashID := ""
+	for _, item := range items {
+		if item.OriginalPath == "/restore-source-history.md" {
+			sourceTrashID = item.ID
+		}
+	}
+	if sourceTrashID == "" {
+		t.Fatalf("expected source trash item, got %+v", items)
+	}
+
+	err = fs.RestoreFromTrashTo(ctx, sourceTrashID, "/restore-target-history.md")
+	if !errors.Is(err, ErrAlreadyExists) {
+		t.Fatalf("RestoreFromTrashTo() error = %v, want %v", err, ErrAlreadyExists)
+	}
+	if _, statErr := fs.Stat(ctx, "/restore-target-history.md"); statErr != ErrNotFound {
+		t.Fatalf("expected target path to remain absent, got %v", statErr)
+	}
+	remaining, err := fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash(after rejected restore) error: %v", err)
+	}
+	if len(remaining) != 2 {
+		t.Fatalf("expected both trash items to remain, got %+v", remaining)
+	}
+	foundTarget, foundSource := false, false
+	for _, item := range remaining {
+		if item.ID == targetTrashID {
+			foundTarget = true
+		}
+		if item.ID == sourceTrashID {
+			foundSource = true
+		}
+	}
+	if !foundTarget || !foundSource {
+		t.Fatalf("expected target and source trash items to remain, got %+v", remaining)
+	}
+	sourceVersionsAfter, err := fs.versions.GetVersions(ctx, "/restore-source-history.md")
+	if err != nil {
+		t.Fatalf("GetVersions(source after rejected restore) error: %v", err)
+	}
+	if len(sourceVersionsAfter) != len(sourceVersionsBefore) {
+		t.Fatalf("expected source version metadata count to remain %d, got %d", len(sourceVersionsBefore), len(sourceVersionsAfter))
+	}
+}
+
+func TestFileSystem_RestoreFromTrashTo_AllowsCustomPathWhenSameOriginalTrashItemHasNoVersions(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/restore-mixed-history.txt", bytes.NewReader([]byte("plain"))); err != nil {
+		t.Fatalf("WriteFile(plain) error: %v", err)
+	}
+	if err := fs.Delete(ctx, "/restore-mixed-history.txt"); err != nil {
+		t.Fatalf("Delete(plain) error: %v", err)
+	}
+	items, err := fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash(after plain delete) error: %v", err)
+	}
+	if len(items) != 1 || items[0].HadVersions {
+		t.Fatalf("expected one non-versioned trash item, got %+v", items)
+	}
+	plainTrashID := items[0].ID
+
+	if err := fs.WriteFile(ctx, "/restore-mixed-history.txt", bytes.NewReader([]byte("v1"))); err != nil {
+		t.Fatalf("WriteFile(v1) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/restore-mixed-history.txt", bytes.NewReader([]byte("v2"))); err != nil {
+		t.Fatalf("WriteFile(v2) error: %v", err)
+	}
+	if err := fs.Delete(ctx, "/restore-mixed-history.txt"); err != nil {
+		t.Fatalf("Delete(versioned) error: %v", err)
+	}
+	items, err = fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash(after versioned delete) error: %v", err)
+	}
+	versionedTrashID := ""
+	for _, item := range items {
+		if item.OriginalPath == "/restore-mixed-history.txt" && item.HadVersions {
+			versionedTrashID = item.ID
+		}
+	}
+	if versionedTrashID == "" {
+		t.Fatalf("expected versioned trash item, got %+v", items)
+	}
+
+	if err := fs.RestoreFromTrashTo(ctx, versionedTrashID, "/restored/restore-mixed-history.txt"); err != nil {
+		t.Fatalf("RestoreFromTrashTo() error: %v", err)
+	}
+
+	remaining, err := fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash(after custom restore) error: %v", err)
+	}
+	if len(remaining) != 1 || remaining[0].ID != plainTrashID {
+		t.Fatalf("expected only non-versioned trash item to remain, got %+v", remaining)
+	}
+	if _, statErr := fs.Stat(ctx, "/restored/restore-mixed-history.txt"); statErr != nil {
+		t.Fatalf("expected custom restore target to exist, got %v", statErr)
+	}
+	restoredVersions, err := fs.versions.GetVersions(ctx, "/restored/restore-mixed-history.txt")
+	if err != nil {
+		t.Fatalf("GetVersions(restored) error: %v", err)
+	}
+	if len(restoredVersions) == 0 {
+		t.Fatal("expected version metadata to move to the custom restore path")
+	}
+	originalVersions, err := fs.versions.GetVersions(ctx, "/restore-mixed-history.txt")
+	if err != nil {
+		t.Fatalf("GetVersions(original) error: %v", err)
+	}
+	if len(originalVersions) != 0 {
+		t.Fatalf("expected original path version metadata to be moved, got %d versions", len(originalVersions))
+	}
+}
+
 func TestFileSystem_DeleteFromTrash_KeepsSharedVersionMetadataUntilLastTrashItem(t *testing.T) {
 	fs := setupFileSystem(t)
 	ctx := context.Background()
@@ -3619,6 +4406,86 @@ func TestFileSystem_DeleteFromTrash_KeepsSharedVersionMetadataUntilLastTrashItem
 	}
 }
 
+func TestFileSystem_DeleteFromTrash_CleansVersionMetadataWhenSameOriginalTrashItemHasNoVersions(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/delete-mixed-history.txt", bytes.NewReader([]byte("plain"))); err != nil {
+		t.Fatalf("WriteFile(plain) error: %v", err)
+	}
+	if err := fs.Delete(ctx, "/delete-mixed-history.txt"); err != nil {
+		t.Fatalf("Delete(plain) error: %v", err)
+	}
+	items, err := fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash(after plain delete) error: %v", err)
+	}
+	if len(items) != 1 || items[0].HadVersions {
+		t.Fatalf("expected one non-versioned trash item, got %+v", items)
+	}
+	plainTrashID := items[0].ID
+
+	if err := fs.WriteFile(ctx, "/delete-mixed-history.txt", bytes.NewReader([]byte("v1"))); err != nil {
+		t.Fatalf("WriteFile(v1) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/delete-mixed-history.txt", bytes.NewReader([]byte("v2"))); err != nil {
+		t.Fatalf("WriteFile(v2) error: %v", err)
+	}
+	versionsBefore, err := fs.versions.GetVersions(ctx, "/delete-mixed-history.txt")
+	if err != nil {
+		t.Fatalf("GetVersions(before delete) error: %v", err)
+	}
+	if len(versionsBefore) == 0 {
+		t.Fatal("expected recreated file to have version metadata")
+	}
+	if err := fs.Delete(ctx, "/delete-mixed-history.txt"); err != nil {
+		t.Fatalf("Delete(versioned) error: %v", err)
+	}
+	items, err = fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash(after versioned delete) error: %v", err)
+	}
+	versionedTrashID := ""
+	for _, item := range items {
+		if item.OriginalPath == "/delete-mixed-history.txt" && item.HadVersions {
+			versionedTrashID = item.ID
+		}
+	}
+	if versionedTrashID == "" {
+		t.Fatalf("expected versioned trash item, got %+v", items)
+	}
+
+	deletedHashes := make(map[string]int)
+	fs.deleteVersionObject = func(ctx context.Context, hash string) error {
+		deletedHashes[hash]++
+		return nil
+	}
+
+	if err := fs.DeleteFromTrash(ctx, versionedTrashID); err != nil {
+		t.Fatalf("DeleteFromTrash(versioned) error: %v", err)
+	}
+
+	remaining, err := fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash(after versioned trash delete) error: %v", err)
+	}
+	if len(remaining) != 1 || remaining[0].ID != plainTrashID {
+		t.Fatalf("expected only non-versioned trash item to remain, got %+v", remaining)
+	}
+	remainingVersions, err := fs.versions.GetVersions(ctx, "/delete-mixed-history.txt")
+	if err != nil {
+		t.Fatalf("GetVersions(after delete) error: %v", err)
+	}
+	if len(remainingVersions) != 0 {
+		t.Fatalf("expected version metadata to be removed, got %d versions", len(remainingVersions))
+	}
+	for _, version := range versionsBefore {
+		if deletedHashes[version.Hash] != 1 {
+			t.Fatalf("expected version object %s to be deleted once, got %d", version.Hash, deletedHashes[version.Hash])
+		}
+	}
+}
+
 func TestFileSystem_DeleteFromTrash_KeepsVersionMetadataWhenOriginalPathExists(t *testing.T) {
 	fs := setupFileSystem(t)
 	ctx := context.Background()
@@ -3662,6 +4529,62 @@ func TestFileSystem_DeleteFromTrash_KeepsVersionMetadataWhenOriginalPathExists(t
 	}
 	if len(versionsAfter) != len(versionsBefore) {
 		t.Fatalf("expected live file version count to remain %d after deleting unrelated trash item, got %d", len(versionsBefore), len(versionsAfter))
+	}
+}
+
+func TestFileSystem_RestoreFromTrashTo_RejectsCustomPathWhenOriginalPathExistsWithVersionMetadata(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/restore-live-history.txt", bytes.NewReader([]byte("v1"))); err != nil {
+		t.Fatalf("WriteFile(v1) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/restore-live-history.txt", bytes.NewReader([]byte("v2"))); err != nil {
+		t.Fatalf("WriteFile(v2) error: %v", err)
+	}
+	if err := fs.Delete(ctx, "/restore-live-history.txt"); err != nil {
+		t.Fatalf("Delete() error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/restore-live-history.txt", bytes.NewReader([]byte("v3"))); err != nil {
+		t.Fatalf("WriteFile(recreated) error: %v", err)
+	}
+
+	items, err := fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash() error: %v", err)
+	}
+	if len(items) != 1 || !items[0].HadVersions {
+		t.Fatalf("expected one versioned trash item, got %+v", items)
+	}
+	versionsBefore, err := fs.ListVersions(ctx, "/restore-live-history.txt")
+	if err != nil {
+		t.Fatalf("ListVersions(live before restore) error: %v", err)
+	}
+	if len(versionsBefore) < 2 {
+		t.Fatalf("expected recreated live file to retain historical versions before custom restore, got %d entries", len(versionsBefore))
+	}
+
+	err = fs.RestoreFromTrashTo(ctx, items[0].ID, "/restored/restore-live-history.txt")
+	if !errors.Is(err, ErrAlreadyExists) {
+		t.Fatalf("RestoreFromTrashTo() error = %v, want %v", err, ErrAlreadyExists)
+	}
+
+	if _, statErr := fs.Stat(ctx, "/restored/restore-live-history.txt"); statErr != ErrNotFound {
+		t.Fatalf("expected rejected custom restore target to remain absent, got %v", statErr)
+	}
+	versionsAfter, err := fs.ListVersions(ctx, "/restore-live-history.txt")
+	if err != nil {
+		t.Fatalf("ListVersions(live after restore) error: %v", err)
+	}
+	if len(versionsAfter) != len(versionsBefore) {
+		t.Fatalf("expected live original path to keep %d version entries, got %d", len(versionsBefore), len(versionsAfter))
+	}
+	newVersions, err := fs.versions.GetVersions(ctx, "/restored/restore-live-history.txt")
+	if err != nil {
+		t.Fatalf("GetVersions(custom path) error: %v", err)
+	}
+	if len(newVersions) != 0 {
+		t.Fatalf("expected rejected custom restore not to move version metadata, got %d versions", len(newVersions))
 	}
 }
 
@@ -3718,6 +4641,59 @@ func TestFileSystem_RestoreFromTrashTo_RollsBackWhenIndexUpdateFails(t *testing.
 	}
 	if len(versions) != 1 {
 		t.Fatalf("Expected original historical version metadata to remain after rollback, got %d versions", len(versions))
+	}
+}
+
+func TestFileSystem_RestoreFromTrashTo_ReturnsWarningWhenTrashSourceDirectorySyncFailsAfterRestore(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+	newPath := "/restored/custom-source-sync.txt"
+
+	if err := fs.WriteFile(ctx, "/custom-source-sync.txt", bytes.NewReader([]byte("restore custom"))); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+	if err := fs.Delete(ctx, "/custom-source-sync.txt"); err != nil {
+		t.Fatalf("Delete() error: %v", err)
+	}
+
+	items, err := fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash() error: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected one trash item, got %d", len(items))
+	}
+	trashItemDir := filepath.Join(fs.trashRoot, items[0].ID)
+
+	originalSyncManagedStorageDir := syncManagedStorageDir
+	syncManagedStorageDir = func(root *os.Root, relName, absPath string) error {
+		if root == fs.trashRootHandle && relName == items[0].ID && absPath == trashItemDir {
+			return errors.New("sync trash source dir failed")
+		}
+		return originalSyncManagedStorageDir(root, relName, absPath)
+	}
+	t.Cleanup(func() {
+		syncManagedStorageDir = originalSyncManagedStorageDir
+	})
+
+	err = fs.RestoreFromTrashTo(ctx, items[0].ID, newPath)
+	if !isVisibleMutationWarning(err) {
+		t.Fatalf("RestoreFromTrashTo() error = %v, want visible mutation warning", err)
+	}
+	if _, statErr := fs.Stat(ctx, newPath); statErr != nil {
+		t.Fatalf("expected custom restored file to remain visible after warning, got %v", statErr)
+	}
+	remaining, listErr := fs.ListTrash(ctx)
+	if listErr != nil {
+		t.Fatalf("ListTrash() after warned restore error: %v", listErr)
+	}
+	if len(remaining) != 0 {
+		t.Fatalf("expected trash metadata to be removed after warned restore, got %d items", len(remaining))
+	}
+	if _, _, hash, indexErr := fs.versions.GetFileIndex(ctx, newPath); indexErr != nil {
+		t.Fatalf("GetFileIndex(custom restored) error: %v", indexErr)
+	} else if hash != computeHash([]byte("restore custom")) {
+		t.Fatalf("custom restored index hash = %q, want restored content hash", hash)
 	}
 }
 
@@ -3802,6 +4778,72 @@ func TestFileSystem_RestoreFromTrashTo_RollsBackOnMetadataConflict(t *testing.T)
 	}
 	if len(versions) != 1 {
 		t.Fatalf("Expected original historical version metadata to remain after rollback, got %d versions", len(versions))
+	}
+}
+
+func TestFileSystem_RestoreFromTrashTo_RejectsCustomPathWhenTargetHasRawVersionMetadataBeforeMovingContent(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/restore-raw-conflict.md", bytes.NewReader([]byte("v1"))); err != nil {
+		t.Fatalf("WriteFile(v1) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/restore-raw-conflict.md", bytes.NewReader([]byte("v2"))); err != nil {
+		t.Fatalf("WriteFile(v2) error: %v", err)
+	}
+	versionsBefore, err := fs.versions.GetVersions(ctx, "/restore-raw-conflict.md")
+	if err != nil {
+		t.Fatalf("GetVersions(source before delete) error: %v", err)
+	}
+	if len(versionsBefore) == 0 {
+		t.Fatal("expected source file to have version metadata")
+	}
+	if err := fs.Delete(ctx, "/restore-raw-conflict.md"); err != nil {
+		t.Fatalf("Delete(source) error: %v", err)
+	}
+	items, err := fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash() error: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected one source trash item, got %+v", items)
+	}
+
+	targetPath := "/restored/raw-conflict.md"
+	if err := fs.versions.AddVersion(ctx, targetPath, "raw-conflict-hash", 1, ""); err != nil {
+		t.Fatalf("AddVersion(target) error: %v", err)
+	}
+
+	originalRemoveTrashMetadata := fs.removeTrashMetadata
+	metadataRemovalCalled := false
+	fs.removeTrashMetadata = func(ctx context.Context, id string) error {
+		metadataRemovalCalled = true
+		return originalRemoveTrashMetadata(ctx, id)
+	}
+
+	err = fs.RestoreFromTrashTo(ctx, items[0].ID, targetPath)
+	if !errors.Is(err, ErrAlreadyExists) {
+		t.Fatalf("RestoreFromTrashTo() error = %v, want %v", err, ErrAlreadyExists)
+	}
+	if metadataRemovalCalled {
+		t.Fatal("expected target metadata conflict to be rejected before trash metadata removal")
+	}
+	if _, statErr := fs.Stat(ctx, targetPath); statErr != ErrNotFound {
+		t.Fatalf("expected custom restore target to remain absent, got %v", statErr)
+	}
+	remaining, err := fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash(after rejected restore) error: %v", err)
+	}
+	if len(remaining) != 1 || remaining[0].ID != items[0].ID {
+		t.Fatalf("expected source trash item to remain, got %+v", remaining)
+	}
+	versionsAfter, err := fs.versions.GetVersions(ctx, "/restore-raw-conflict.md")
+	if err != nil {
+		t.Fatalf("GetVersions(source after rejected restore) error: %v", err)
+	}
+	if len(versionsAfter) != len(versionsBefore) {
+		t.Fatalf("expected source version metadata count to remain %d, got %d", len(versionsBefore), len(versionsAfter))
 	}
 }
 
@@ -4239,6 +5281,85 @@ func TestFileSystem_DeleteFromTrash_RemovesDirectoryChildVersionMetadata(t *test
 	}
 	if len(remainingVersions) != 0 {
 		t.Fatalf("expected nested version metadata to be removed, got %d entries", len(remainingVersions))
+	}
+}
+
+func TestFileSystem_DeleteFromTrash_KeepsDirectoryChildVersionMetadataReferencedByTrashItem(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/docs"); err != nil {
+		t.Fatalf("Mkdir(/docs) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/docs/nested"); err != nil {
+		t.Fatalf("Mkdir(/docs/nested) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/docs/nested/report.txt", bytes.NewReader([]byte("report v1"))); err != nil {
+		t.Fatalf("WriteFile(report v1) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/docs/nested/report.txt", bytes.NewReader([]byte("report v2"))); err != nil {
+		t.Fatalf("WriteFile(report v2) error: %v", err)
+	}
+	versionsBefore, err := fs.versions.GetVersions(ctx, "/docs/nested/report.txt")
+	if err != nil {
+		t.Fatalf("GetVersions(report before delete) error: %v", err)
+	}
+	if len(versionsBefore) == 0 {
+		t.Fatal("expected nested file to have version history before delete")
+	}
+
+	if err := fs.Delete(ctx, "/docs/nested/report.txt"); err != nil {
+		t.Fatalf("Delete(report) error: %v", err)
+	}
+	items, err := fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash(after child delete) error: %v", err)
+	}
+	if len(items) != 1 || items[0].OriginalPath != "/docs/nested/report.txt" {
+		t.Fatalf("expected child trash item, got %+v", items)
+	}
+	childTrashID := items[0].ID
+
+	if err := fs.Delete(ctx, "/docs"); err != nil {
+		t.Fatalf("Delete(/docs) error: %v", err)
+	}
+	items, err = fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash(after dir delete) error: %v", err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("expected directory and child trash items, got %+v", items)
+	}
+	dirTrashID := ""
+	for _, item := range items {
+		if item.OriginalPath == "/docs" {
+			dirTrashID = item.ID
+			if !item.HadVersions {
+				t.Fatalf("expected directory trash item to record nested version metadata, got %+v", item)
+			}
+		}
+	}
+	if dirTrashID == "" {
+		t.Fatalf("expected directory trash item, got %+v", items)
+	}
+
+	if err := fs.DeleteFromTrash(ctx, dirTrashID); err != nil {
+		t.Fatalf("DeleteFromTrash(directory) error: %v", err)
+	}
+
+	remaining, err := fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash(after directory trash delete) error: %v", err)
+	}
+	if len(remaining) != 1 || remaining[0].ID != childTrashID {
+		t.Fatalf("expected child trash item to remain, got %+v", remaining)
+	}
+	versionsAfter, err := fs.versions.GetVersions(ctx, "/docs/nested/report.txt")
+	if err != nil {
+		t.Fatalf("GetVersions(report after directory trash delete) error: %v", err)
+	}
+	if len(versionsAfter) != len(versionsBefore) {
+		t.Fatalf("expected child trash item to retain %d version entries, got %d", len(versionsBefore), len(versionsAfter))
 	}
 }
 
@@ -6409,6 +7530,48 @@ func TestMovePath_RollsBackRenameWhenDirectorySyncFails(t *testing.T) {
 	}
 }
 
+func TestMovePath_DoesNotOverwriteTargetCreatedAfterPrecheck(t *testing.T) {
+	fs := setupManagedPathHelperFileSystem(t)
+	src := filepath.Join(fs.workspace.Root(), "src.txt")
+	dst := filepath.Join(fs.workspace.Root(), "dst.txt")
+	if err := os.WriteFile(src, []byte("source"), 0644); err != nil {
+		t.Fatalf("WriteFile(src) error: %v", err)
+	}
+
+	originalAfterValidateStoragePaths := afterValidateStoragePaths
+	inserted := false
+	afterValidateStoragePaths = func() error {
+		if inserted {
+			return nil
+		}
+		inserted = true
+		return os.WriteFile(dst, []byte("live target"), 0644)
+	}
+	t.Cleanup(func() {
+		afterValidateStoragePaths = originalAfterValidateStoragePaths
+	})
+
+	err := fs.movePath(src, dst)
+	if !errors.Is(err, ErrAlreadyExists) {
+		t.Fatalf("movePath() error = %v, want ErrAlreadyExists", err)
+	}
+
+	sourceData, readErr := os.ReadFile(src)
+	if readErr != nil {
+		t.Fatalf("ReadFile(src) after rejected move error: %v", readErr)
+	}
+	if string(sourceData) != "source" {
+		t.Fatalf("source content = %q, want source", sourceData)
+	}
+	targetData, readErr := os.ReadFile(dst)
+	if readErr != nil {
+		t.Fatalf("ReadFile(dst) after rejected move error: %v", readErr)
+	}
+	if string(targetData) != "live target" {
+		t.Fatalf("target content = %q, want live target", targetData)
+	}
+}
+
 func TestMovePath_PreservesCopiedDirectoryWhenSourceCleanupFails(t *testing.T) {
 	fs := setupManagedPathHelperFileSystem(t)
 	src := filepath.Join(fs.workspace.Root(), "src")
@@ -6630,6 +7793,33 @@ func TestCopyDir_ReturnsErrorWhenDirectorySyncFails(t *testing.T) {
 	}
 	if _, statErr := os.Stat(filepath.Join(src, "nested", "file.txt")); statErr != nil {
 		t.Fatalf("expected source tree to remain intact, got %v", statErr)
+	}
+}
+
+func TestCopyDir_CleansDestinationWhenSourceTreeContainsSymlink(t *testing.T) {
+	fs := setupManagedPathHelperFileSystem(t)
+	src := filepath.Join(fs.workspace.Root(), "src")
+	dst := filepath.Join(fs.workspace.Root(), "dst")
+
+	if err := os.MkdirAll(src, 0755); err != nil {
+		t.Fatalf("MkdirAll(src) error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(src, "regular.txt"), []byte("content"), 0644); err != nil {
+		t.Fatalf("WriteFile(regular) error: %v", err)
+	}
+	if err := os.Symlink("regular.txt", filepath.Join(src, "linked.txt")); err != nil {
+		t.Fatalf("Symlink(linked) error: %v", err)
+	}
+
+	err := fs.copyDir(src, dst)
+	if !errors.Is(err, errStoragePathSymlink) {
+		t.Fatalf("copyDir() error = %v, want errStoragePathSymlink", err)
+	}
+	if _, statErr := os.Stat(dst); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("expected failed copy destination to be removed, got %v", statErr)
+	}
+	if _, statErr := os.Lstat(filepath.Join(src, "linked.txt")); statErr != nil {
+		t.Fatalf("expected source symlink to remain for operator recovery, got %v", statErr)
 	}
 }
 
@@ -6869,6 +8059,37 @@ func TestFileSystem_SearchWithinBase_RespectsLimitWithinRoot(t *testing.T) {
 	}
 }
 
+func TestFileSystem_SearchFiltered_AppliesFilterBeforeLimit(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/aaa"); err != nil {
+		t.Fatalf("Mkdir(/aaa) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/team"); err != nil {
+		t.Fatalf("Mkdir(/team) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/aaa/report.txt", bytes.NewReader([]byte("outside"))); err != nil {
+		t.Fatalf("WriteFile(/aaa/report.txt) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/team/report.txt", bytes.NewReader([]byte("visible"))); err != nil {
+		t.Fatalf("WriteFile(/team/report.txt) error: %v", err)
+	}
+
+	results, err := fs.SearchFiltered(ctx, "report", 1, func(result *SearchResult) (bool, error) {
+		return result.Path == "/team/report.txt", nil
+	})
+	if err != nil {
+		t.Fatalf("SearchFiltered() error: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("SearchFiltered() returned %d results, want 1", len(results))
+	}
+	if results[0].Path != "/team/report.txt" {
+		t.Fatalf("SearchFiltered() first result path = %q, want %q", results[0].Path, "/team/report.txt")
+	}
+}
+
 func TestFileSystem_SearchWithinBase_RejectsTraversalRoot(t *testing.T) {
 	tmpDir := t.TempDir()
 	fs, err := New(&Config{
@@ -6900,6 +8121,19 @@ func TestFileSystem_SearchWithinBase_RejectsTraversalRoot(t *testing.T) {
 	}
 	if results != nil {
 		t.Fatalf("expected no results when root escapes workspace, got %d", len(results))
+	}
+}
+
+func TestFileSystem_SearchWithinBase_MissingRootReturnsErrNotFound(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	results, err := fs.SearchWithinBase(ctx, "/missing-home", "report", 10)
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("SearchWithinBase() error = %v, want %v", err, ErrNotFound)
+	}
+	if results != nil {
+		t.Fatalf("expected no results for missing search root, got %d", len(results))
 	}
 }
 

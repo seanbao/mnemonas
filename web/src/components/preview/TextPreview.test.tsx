@@ -125,8 +125,86 @@ describe('TextPreview', () => {
     render(<TextPreview path="/test.txt" filename="test.txt" />)
 
     await waitFor(() => {
-      expect(screen.getByText(/加载失败/)).toBeInTheDocument()
+      expect(screen.getByText('数据加载失败，请检查网络或稍后重试。')).toBeInTheDocument()
     })
+    expect(screen.queryByText('加载失败: Not Found')).not.toBeInTheDocument()
+  })
+
+  it('renders successful JSON files even when they resemble API error envelopes', async () => {
+    const content = '{\n  "success": false,\n  "error": {\n    "message": "draft import failed"\n  }\n}'
+    const json = vi.fn(() => Promise.resolve({
+      success: false,
+      error: {
+        code: 'DRAFT_IMPORT_FAILED',
+        message: 'draft import failed',
+      },
+    }))
+    const text = vi.fn(() => Promise.resolve(content))
+
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      headers: new Headers({ 'Content-Type': 'application/json' }),
+      clone: () => ({ json }),
+      text,
+    } as unknown as Response)
+
+    render(<TextPreview path="/unavailable.json" filename="unavailable.json" />)
+
+    await waitFor(() => {
+      expect(screen.getByText('"success"')).toBeInTheDocument()
+      expect(screen.getByText('"error"')).toBeInTheDocument()
+      expect(screen.getByText('"message"')).toBeInTheDocument()
+      expect(screen.getByText('"draft import failed"')).toBeInTheDocument()
+    })
+    expect(json).not.toHaveBeenCalled()
+    expect(text).toHaveBeenCalled()
+  })
+
+  it('renders ordinary JSON files that contain success false without error details', async () => {
+    const content = '{\n  "success": false\n}'
+    const json = vi.fn(() => Promise.resolve({ success: false }))
+    const text = vi.fn(() => Promise.resolve(content))
+
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      headers: new Headers({ 'Content-Type': 'application/json' }),
+      clone: () => ({ json }),
+      text,
+    } as unknown as Response)
+
+    render(<TextPreview path="/payload.json" filename="payload.json" />)
+
+    await waitFor(() => {
+      expect(screen.getByText('"success"')).toBeInTheDocument()
+      expect(screen.getByText('false')).toBeInTheDocument()
+    })
+    expect(json).not.toHaveBeenCalled()
+    expect(text).toHaveBeenCalled()
+  })
+
+  it('uses a stable message for structured JSON errors from non-OK preview responses', async () => {
+    const json = vi.fn(() => Promise.resolve({
+      success: false,
+      error: {
+        code: 'FILESYSTEM_UNAVAILABLE',
+        message: 'preview storage unavailable',
+      },
+    }))
+
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: false,
+      statusText: 'Service Unavailable',
+      headers: new Headers({ 'Content-Type': 'application/json' }),
+      clone: () => ({ json }),
+    } as unknown as Response)
+
+    render(<TextPreview path="/unavailable.txt" filename="unavailable.txt" />)
+
+    await waitFor(() => {
+      expect(screen.getByText('数据加载失败，请检查网络或稍后重试。')).toBeInTheDocument()
+    })
+    expect(json).toHaveBeenCalled()
+    expect(screen.queryByText('preview storage unavailable')).not.toBeInTheDocument()
   })
 
   it('shows error for large files', async () => {
@@ -167,8 +245,26 @@ describe('TextPreview', () => {
     render(<TextPreview path="/documents/file.txt" filename="file.txt" />)
 
     await waitFor(() => {
-      expect(mockAuthFetch).toHaveBeenCalledWith('/api/v1/download/documents/file.txt')
+      expect(mockAuthFetch).toHaveBeenCalledWith('/api/v1/download/documents/file.txt', expect.anything())
     })
+  })
+
+  it('passes an abort signal and cancels the pending text request when unmounted', async () => {
+    let signal: AbortSignal | undefined
+    mockAuthFetch.mockImplementationOnce((_url, options) => {
+      signal = options?.signal
+      return new Promise<Response>(() => {})
+    })
+
+    const { unmount } = render(<TextPreview path="/test.txt" filename="test.txt" />)
+
+    await waitFor(() => {
+      expect(signal).toBeInstanceOf(AbortSignal)
+    })
+
+    unmount()
+
+    expect(signal?.aborted).toBe(true)
   })
 
   it('shows line numbers', async () => {
@@ -233,7 +329,7 @@ describe('TextPreview', () => {
     })
   })
 
-  it('surfaces unauthorized preview failures after auth retry is exhausted', async () => {
+  it('uses a stable message after auth retry is exhausted', async () => {
     mockAuthFetch.mockResolvedValueOnce({
       ok: false,
       status: 401,
@@ -243,8 +339,20 @@ describe('TextPreview', () => {
     render(<TextPreview path="/private.txt" filename="private.txt" />)
 
     await waitFor(() => {
-      expect(screen.getByText('加载失败: Unauthorized')).toBeInTheDocument()
+      expect(screen.getByText('数据加载失败，请检查网络或稍后重试。')).toBeInTheDocument()
     })
+    expect(screen.queryByText('加载失败: Unauthorized')).not.toBeInTheDocument()
+  })
+
+  it('uses a stable message when the text preview request rejects', async () => {
+    mockAuthFetch.mockRejectedValueOnce(new Error('preview request failed'))
+
+    render(<TextPreview path="/private.txt" filename="private.txt" />)
+
+    await waitFor(() => {
+      expect(screen.getByText('数据加载失败，请检查网络或稍后重试。')).toBeInTheDocument()
+    })
+    expect(screen.queryByText('preview request failed')).not.toBeInTheDocument()
   })
 
   it('ignores stale content when the preview path changes during loading', async () => {

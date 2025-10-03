@@ -26,6 +26,48 @@ toml_value() {
     return 0
   fi
 
+  if command -v python3 >/dev/null 2>&1; then
+    local value
+    if value=$(python3 - "$file" "$section" "$key" <<'PY'
+import sys
+
+try:
+    import tomllib
+except Exception:
+    sys.exit(2)
+
+path, section, key = sys.argv[1], sys.argv[2], sys.argv[3]
+try:
+    with open(path, "rb") as handle:
+        data = tomllib.load(handle)
+except Exception:
+    sys.exit(2)
+
+current = data
+for part in section.split("."):
+    if not isinstance(current, dict):
+        sys.exit(0)
+    current = current.get(part)
+    if current is None:
+        sys.exit(0)
+
+if not isinstance(current, dict) or key not in current:
+    sys.exit(0)
+
+value = current[key]
+if isinstance(value, bool):
+    sys.stdout.write("true" if value else "false")
+elif isinstance(value, (str, int, float)):
+    sys.stdout.write(str(value))
+elif hasattr(value, "isoformat"):
+    sys.stdout.write(value.isoformat())
+PY
+    ); then
+      printf '%s' "$value"
+      return 0
+    fi
+  fi
+
   awk -v section="[$section]" -v key="$key" '
     function strip_comment(text,    i, c, quote, escaped, out) {
       quote = ""
@@ -148,6 +190,21 @@ path_has_parent_segment() {
   return 1
 }
 
+require_no_line_breaks() {
+  local path="$1"
+  local label="$2"
+
+  [[ "$path" != *$'\n'* && "$path" != *$'\r'* ]] || fail "$label cannot contain newline characters: $path"
+}
+
+require_no_control_characters() {
+  local path="$1"
+  local label="$2"
+
+  require_no_line_breaks "$path" "$label"
+  [[ "$path" != *[[:cntrl:]]* ]] || fail "$label cannot contain control characters: $path"
+}
+
 require_no_symlink_components() {
   local path="$1"
   local label="$2"
@@ -187,6 +244,7 @@ require_safe_tree_path() {
   local normalized
 
   [[ -n "$path" ]] || fail "$label cannot be empty"
+  require_no_control_characters "$path" "$label"
   [[ "$path" == /* ]] || fail "$label must be an absolute path: $path"
   ! path_has_parent_segment "$path" || fail "$label cannot contain parent directory segments: $path"
   require_no_symlink_components "$path" "$label"
@@ -330,6 +388,7 @@ validate_cdc_chunk_sizes() {
   ! decimal_uint_gt "$max_chunk_size" "$MAX_CDC_CHUNK_SIZE" || fail "max_chunk_size must be at most $MAX_CDC_CHUNK_SIZE bytes"
 }
 
+require_no_control_characters "$CONFIG_PATH" "CONFIG_PATH"
 [[ "$CONFIG_PATH" == /* ]] || fail "CONFIG_PATH must be an absolute path: $CONFIG_PATH"
 ! path_has_parent_segment "$CONFIG_PATH" || fail "CONFIG_PATH cannot contain parent directory segments: $CONFIG_PATH"
 require_no_symlink_components "$CONFIG_PATH" "CONFIG_PATH"

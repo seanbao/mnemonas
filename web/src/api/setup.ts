@@ -4,8 +4,12 @@
  */
 
 import { authFetch } from './auth'
+import { INVALID_API_RESPONSE_MESSAGE as INVALID_SETUP_RESPONSE_MESSAGE } from '@/lib/apiMessages'
+import { readStructuredJsonErrorDetails } from '@/lib/jsonErrorResponse'
 
 const API_BASE = '/api/v1/setup'
+const SETUP_STATUS_FAILED_MESSAGE = '获取初始化状态失败'
+const ACKNOWLEDGE_SETUP_FAILED_MESSAGE = '确认初始化完成失败'
 
 interface SetupErrorResponse {
   success?: boolean
@@ -26,6 +30,10 @@ export interface SetupStatusResponse {
   webdav_auth_type: string
 }
 
+export interface SetupRequestOptions {
+  signal?: AbortSignal
+}
+
 async function parseSetupSuccess<T extends SetupSuccessResponse>(response: Response, invalidMessage: string): Promise<T> {
   let body: unknown
   try {
@@ -41,34 +49,39 @@ async function parseSetupSuccess<T extends SetupSuccessResponse>(response: Respo
   return body as T
 }
 
+async function readSetupErrorMessage(response: Response, fallback: string): Promise<string> {
+  const structuredError = await readStructuredJsonErrorDetails(response, fallback)
+  if (structuredError) {
+    return structuredError.message
+  }
+
+  try {
+    const error = await response.json() as SetupErrorResponse
+    return typeof error.error === 'string'
+      ? error.error
+      : error.error?.message || error.message || fallback
+  } catch {
+    return fallback
+  }
+}
+
 /**
  * Get setup status for first run.
  */
-export async function getSetupStatus(): Promise<SetupStatusResponse> {
-  const response = await fetch(`${API_BASE}/`)
+export async function getSetupStatus(options: SetupRequestOptions = {}): Promise<SetupStatusResponse> {
+  const response = await fetch(`${API_BASE}/`, options)
   
   if (!response.ok) {
-    try {
-      const error = await response.json() as SetupErrorResponse
-      const message = typeof error.error === 'string'
-        ? error.error
-        : error.error?.message || error.message || 'Failed to get setup status'
-      throw new Error(message)
-    } catch (error) {
-      if (error instanceof Error) {
-        throw error
-      }
-      throw new Error('Failed to get setup status')
-    }
+    throw new Error(await readSetupErrorMessage(response, SETUP_STATUS_FAILED_MESSAGE))
   }
   
-  const body = await parseSetupSuccess<Partial<SetupStatusResponse> & SetupSuccessResponse>(response, 'Invalid setup status response')
+  const body = await parseSetupSuccess<Partial<SetupStatusResponse> & SetupSuccessResponse>(response, INVALID_SETUP_RESPONSE_MESSAGE)
   if (typeof body.is_first_run !== 'boolean'
     || typeof body.auth_enabled !== 'boolean'
     || (body.share_enabled !== undefined && typeof body.share_enabled !== 'boolean')
     || typeof body.webdav_enabled !== 'boolean'
     || typeof body.webdav_auth_type !== 'string') {
-    throw new Error('Invalid setup status response')
+    throw new Error(INVALID_SETUP_RESPONSE_MESSAGE)
   }
 
   return body as SetupStatusResponse
@@ -77,27 +90,17 @@ export async function getSetupStatus(): Promise<SetupStatusResponse> {
 /**
  * Acknowledge setup after an authenticated admin signs in.
  */
-export async function acknowledgeSetup(): Promise<{ success: boolean; message: string }> {
+export async function acknowledgeSetup(options: SetupRequestOptions = {}): Promise<{ success: boolean; message: string }> {
   const response = await authFetch(`${API_BASE}/acknowledge`, {
     method: 'POST',
+    ...(options.signal ? { signal: options.signal } : {}),
   })
   
   if (!response.ok) {
-    try {
-      const error = await response.json() as SetupErrorResponse
-      const message = typeof error.error === 'string'
-        ? error.error
-        : error.error?.message || error.message || 'Failed to acknowledge setup'
-      throw new Error(message)
-    } catch (error) {
-      if (error instanceof Error) {
-        throw error
-      }
-      throw new Error('Failed to acknowledge setup')
-    }
+    throw new Error(await readSetupErrorMessage(response, ACKNOWLEDGE_SETUP_FAILED_MESSAGE))
   }
   
-  const body = await parseSetupSuccess<SetupSuccessResponse & { message?: string }>(response, 'Invalid acknowledge setup response')
+  const body = await parseSetupSuccess<SetupSuccessResponse & { message?: string }>(response, INVALID_SETUP_RESPONSE_MESSAGE)
   return {
     success: true,
     message: body.message ?? '',

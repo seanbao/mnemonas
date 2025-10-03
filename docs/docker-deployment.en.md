@@ -38,7 +38,7 @@ sudo apt install -y docker-compose-plugin docker-buildx-plugin
 
 Do not install the old Python `docker-compose` v1 package for this repository.
 
-If `apt update` fails because an extra foreign architecture is enabled for a repository that does not provide it, you can temporarily install for the host architecture:
+When `apt update` fails because an extra foreign architecture is enabled for a repository that does not provide it, a host-architecture-only install can be used temporarily:
 
 ```bash
 sudo apt-get -o APT::Architectures=amd64 update
@@ -111,11 +111,13 @@ Docker config should usually keep:
 root = "/data"
 ```
 
-Do not set `root = "/"`. If you set another container path such as `/data-root`, mount that path explicitly in Compose or the data will land in the container's writable layer.
+Do not set `root = "/"`. When another container path such as `/data-root` is used, mount that path explicitly in Compose or the data will land in the container's writable layer.
 
-Docker quickstart, the container start entrypoint, and the preflight script require an absolute data directory and reject `..` segments, protected system directories, and symlink path components so config and object data cannot be written through a replaced or overly broad directory. Container `CONFIG_PATH` must be absolute and stay under `STORAGE_ROOT`; the default is `/data/config.toml`. When customizing host storage, mount a real directory rather than a symlink.
+Docker quickstart, the container start entrypoint, and the preflight script require an absolute data directory and reject control characters, `..` segments, protected system directories, and symlink path components so config and object data cannot be written through a replaced or overly broad directory. The bundled Compose file uses long bind-mount syntax for `/data`, preventing `:` in a host path from being parsed as the volume target or mode; custom Compose snippets should use long bind-mount syntax as well. Before creating directories or changing permissions, the container start entrypoint also checks `STORAGE_ROOT/files` and `STORAGE_ROOT/.mnemonas/objects`; those managed subdirectories must not point elsewhere through symlinks. Container `CONFIG_PATH` must be absolute, stay under `STORAGE_ROOT`, and not contain control characters, parent-directory segments, or symlink path components; the default is `/data/config.toml`. Docker containers use `[dataplane].grpc_address` in `config.toml` as the only source of truth for the internal gRPC address; startup rejects a divergent `DATAPLANE_GRPC_ADDR` environment value so the control plane and dataplane cannot use different endpoints. When customizing host storage, mount a real directory rather than a symlink.
 
-If your host user is not UID/GID `1000`, use the quickstart script or pass the IDs directly:
+Custom `--env` paths must point to a file in an existing directory. The script does not implicitly create the `.env` parent directory, so invalid input fails before creating the data directory.
+
+When the host user is not UID/GID `1000`, use the quickstart script or pass the IDs directly:
 
 ```bash
 MNEMONAS_UID="$(id -u)" MNEMONAS_GID="$(id -g)" docker compose up -d --build
@@ -147,7 +149,9 @@ docker build \
   --build-arg VERSION=local \
   --build-arg BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   -t mnemonas:local .
-docker run --rm --user "$(id -u):$(id -g)" -p 8080:8080 -v "$HOME/.mnemonas:/data" mnemonas:local
+docker run --rm --user "$(id -u):$(id -g)" -p 8080:8080 \
+  --mount type=bind,source="$HOME/.mnemonas",target=/data \
+  mnemonas:local
 ```
 
 Only `8080` needs to be published.
@@ -157,7 +161,7 @@ Build base images can be overridden for private caches or regional mirrors:
 ```bash
 docker build -t mnemonas:local \
   --build-arg NODE_IMAGE=node:22-bookworm-slim \
-  --build-arg GO_IMAGE=golang:1.25.9-alpine \
+  --build-arg GO_IMAGE=golang:1.25.10-alpine \
   --build-arg RUST_IMAGE=rust:1.92 \
   --build-arg RUNTIME_IMAGE=debian:bookworm-slim \
   --build-arg VERSION=local \
@@ -196,7 +200,11 @@ services:
     ports:
       - "${MNEMONAS_HTTP_PORT:-8080}:8080"
     volumes:
-      - ${HOME}/.mnemonas:/data
+      - type: bind
+        source: ${HOME}/.mnemonas
+        target: /data
+        bind:
+          create_host_path: true
     environment:
       - TZ=Asia/Shanghai
     restart: unless-stopped
@@ -226,7 +234,7 @@ enabled = true
 prefix = "/dav"
 auth_type = "basic"
 username = "webdav"
-password = "your-secure-password"
+password = "" # leave empty to use generated credentials; use a password-manager value for custom credentials
 
 [log]
 level = "info"
@@ -245,11 +253,15 @@ services:
     ports:
       - "127.0.0.1:${MNEMONAS_HTTP_PORT:-8080}:8080"
     volumes:
-      - ${HOME}/.mnemonas:/data
+      - type: bind
+        source: ${HOME}/.mnemonas
+        target: /data
+        bind:
+          create_host_path: true
     restart: unless-stopped
 ```
 
-Do not use `server.host = "127.0.0.1"` inside the container to limit host access; that binds to the container's loopback. Restrict host exposure in the Compose port mapping instead. If you also disable WebDAV authentication for a loopback-only developer container, keep `server.host = "0.0.0.0"` inside the container and set `security.allow_unsafe_no_auth = true` to explicitly confirm that the host port mapping is the access boundary.
+Do not use `server.host = "127.0.0.1"` inside the container to limit host access; that binds to the container's loopback. Restrict host exposure in the Compose port mapping instead. When WebDAV authentication is also disabled for a loopback-only developer container, keep `server.host = "0.0.0.0"` inside the container and set `security.allow_unsafe_no_auth = true` to explicitly confirm that the host port mapping is the access boundary.
 
 ## Multi-User NAS Example
 
@@ -264,7 +276,11 @@ services:
     ports:
       - "${MNEMONAS_HTTP_PORT:-8080}:8080"
     volumes:
-      - ${HOME}/.mnemonas:/data
+      - type: bind
+        source: ${HOME}/.mnemonas
+        target: /data
+        bind:
+          create_host_path: true
     environment:
       - TZ=Asia/Shanghai
     restart: always
@@ -287,7 +303,11 @@ services:
     expose:
       - "8080"
     volumes:
-      - ${HOME}/.mnemonas:/data
+      - type: bind
+        source: ${HOME}/.mnemonas
+        target: /data
+        bind:
+          create_host_path: true
     restart: unless-stopped
     networks:
       - internal
@@ -323,7 +343,13 @@ proxy_pass_request_headers on;
 proxy_set_header Destination $http_destination;
 ```
 
-Set `server.trusted_proxy_hops = 1` in MnemoNAS config when Nginx is the only trusted proxy in front of the app.
+Set `server.trusted_proxy_hops = 1` in MnemoNAS config when Nginx is the only trusted proxy in front of the app. Because a Docker bridge proxy usually reaches MnemoNAS from a non-loopback address, also trust the Docker network source. Inspect the actual subnet with `docker network inspect <compose-project>_internal`, then configure:
+
+```toml
+[server]
+trusted_proxy_hops = 1
+trusted_proxy_cidrs = ["172.18.0.0/16"] # replace with the actual Docker network subnet or nginx container IP
+```
 
 ## Traefik Example
 
@@ -339,7 +365,11 @@ services:
       - "traefik.http.routers.mnemonas.tls.certresolver=letsencrypt"
       - "traefik.http.services.mnemonas.loadbalancer.server.port=8080"
     volumes:
-      - ${HOME}/.mnemonas:/data
+      - type: bind
+        source: ${HOME}/.mnemonas
+        target: /data
+        bind:
+          create_host_path: true
     networks:
       - traefik-network
 ```
@@ -398,6 +428,7 @@ docker compose down
 DEFAULT_DATA_DIR="$HOME/.mnemonas"
 DATA_DIR="${MNEMONAS_DATA_DIR:-$DEFAULT_DATA_DIR}"
 [ "$DATA_DIR" = "$DEFAULT_DATA_DIR" ] || { echo "refusing non-default DATA_DIR; inspect and delete manually: $DATA_DIR"; exit 1; }
+case "$DATA_DIR" in *$'\n'*|*$'\r'*|*"/../"*|*"/.."|"../"*|"..") echo "refusing unsafe DATA_DIR: $DATA_DIR"; exit 1 ;; esac
 [ ! -L "$DATA_DIR" ] || { echo "refusing symlink DATA_DIR: $DATA_DIR"; exit 1; }
 rm -rf -- "$DATA_DIR"
 tar xzf mnemonas-backup-YYYYMMDD.tar.gz -C ~
@@ -414,7 +445,7 @@ Container does not start:
 docker compose logs mnemonas
 docker run --rm --entrypoint /app/nasd \
   --user "$(id -u):$(id -g)" \
-  -v "$HOME/.mnemonas:/data" \
+  --mount type=bind,source="$HOME/.mnemonas",target=/data \
   "${MNEMONAS_IMAGE:-mnemonas:local}" --check-config --config /data/config.toml
 ```
 

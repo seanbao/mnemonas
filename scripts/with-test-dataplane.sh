@@ -42,6 +42,45 @@ is_valid_tcp_host() {
     return 0
 }
 
+is_ipv4_loopback_host() {
+    local host="$1"
+    local octet
+    local -a octets
+
+    [[ "$host" =~ ^127\.([0-9]{1,3}\.){2}[0-9]{1,3}$ ]] || return 1
+    IFS='.' read -r -a octets <<< "$host"
+    for octet in "${octets[@]}"; do
+        [[ ${#octet} -le 3 ]] || return 1
+        (( 10#$octet >= 0 && 10#$octet <= 255 )) || return 1
+    done
+    return 0
+}
+
+is_loopback_host() {
+    local host="$1"
+
+    case "$host" in
+        localhost|ip6-localhost|::1)
+            return 0
+            ;;
+    esac
+    is_ipv4_loopback_host "$host"
+}
+
+tcp_addr_host() {
+    local value="$1"
+
+    if [[ "$value" =~ ^\[([^][]+)\]:([0-9]+)$ ]]; then
+        printf '%s\n' "${BASH_REMATCH[1]}"
+        return 0
+    fi
+    if [[ "$value" =~ ^([^:]+):([0-9]+)$ ]]; then
+        printf '%s\n' "${BASH_REMATCH[1]}"
+        return 0
+    fi
+    return 1
+}
+
 require_safe_tcp_addr() {
     local value="$1"
     local label="$2"
@@ -50,6 +89,7 @@ require_safe_tcp_addr() {
 
     [[ -n "$value" ]] || fail "$label cannot be empty"
     [[ "$value" != *[[:space:]]* ]] || fail "$label cannot contain whitespace: $value"
+    [[ "$value" != *[[:cntrl:]]* ]] || fail "$label cannot contain control characters: $value"
 
     if [[ "$value" =~ ^\[([^][]+)\]:([0-9]+)$ ]]; then
         host="${BASH_REMATCH[1]}"
@@ -65,8 +105,19 @@ require_safe_tcp_addr() {
     (( 10#$port >= 1 && 10#$port <= 65535 )) || fail "$label port must be between 1 and 65535: $value"
 }
 
+require_loopback_tcp_addr() {
+    local value="$1"
+    local label="$2"
+    local host
+
+    host="$(tcp_addr_host "$value")" || fail "$label must be a host:port address: $value"
+    is_loopback_host "$host" || fail "$label must be loopback-only for test dataplane: $value"
+}
+
 require_safe_tcp_addr "$GRPC_ADDR" "MNEMONAS_TEST_DATAPLANE_ADDR"
+require_loopback_tcp_addr "$GRPC_ADDR" "MNEMONAS_TEST_DATAPLANE_ADDR"
 require_safe_tcp_addr "$HTTP_ADDR" "MNEMONAS_TEST_DATAPLANE_HTTP_ADDR"
+require_loopback_tcp_addr "$HTTP_ADDR" "MNEMONAS_TEST_DATAPLANE_HTTP_ADDR"
 
 HEALTH_URL="http://$HTTP_ADDR/health"
 DATA_DIR=$(mktemp -d "${TMPDIR:-/tmp}/mnemonas-test-dataplane.XXXXXX")

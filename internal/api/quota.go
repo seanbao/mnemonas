@@ -129,6 +129,52 @@ func directoryQuotaRulesForTarget(rules []config.DirectoryQuotaConfig, targetPat
 	return matched
 }
 
+func hasDirectoryQuotaRules(rules []config.DirectoryQuotaConfig) bool {
+	for _, rule := range rules {
+		if strings.TrimSpace(rule.Path) != "" && rule.QuotaBytes > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func mappedTreePathForQuota(treeRoot, mappedRoot, quotaPath string) (string, bool) {
+	treeRoot = cleanQuotaPath(treeRoot)
+	mappedRoot = cleanQuotaPath(mappedRoot)
+	quotaPath = cleanQuotaPath(quotaPath)
+
+	if pathWithinBase(quotaPath, mappedRoot) {
+		return treeRoot, true
+	}
+	if !pathWithinBase(mappedRoot, quotaPath) {
+		return "", false
+	}
+
+	relativePath := ""
+	if mappedRoot == "/" {
+		relativePath = strings.TrimPrefix(quotaPath, "/")
+	} else {
+		relativePath = strings.TrimPrefix(quotaPath, mappedRoot)
+		relativePath = strings.TrimPrefix(relativePath, "/")
+	}
+	if relativePath == "" {
+		return treeRoot, true
+	}
+	return path.Clean(path.Join(treeRoot, relativePath)), true
+}
+
+func cleanQuotaPath(targetPath string) string {
+	targetPath = strings.TrimSpace(strings.ReplaceAll(targetPath, "\\", "/"))
+	if targetPath == "" {
+		return ""
+	}
+	cleanPath := path.Clean(targetPath)
+	if !path.IsAbs(cleanPath) {
+		cleanPath = "/" + cleanPath
+	}
+	return cleanPath
+}
+
 func ensureQuotaCheckAvailable(check quotaCheck) error {
 	if check.RequiredBytes <= 0 {
 		return nil
@@ -229,7 +275,7 @@ func (s *Server) resolveUserUsedBytes(ctx context.Context, user *auth.User) (int
 
 func (s *Server) pathLogicalSizeIfExists(ctx context.Context, targetPath string) (int64, error) {
 	size, err := s.pathLogicalSize(ctx, targetPath)
-	if isStorageNotFound(err) {
+	if isStorageNotFound(err) || errors.Is(err, storage.ErrNotDir) {
 		return 0, nil
 	}
 	return size, err
@@ -244,7 +290,7 @@ func (s *Server) pathLogicalSize(ctx context.Context, targetPath string) (int64,
 }
 
 func (s *Server) authorizedPathLogicalSize(ctx context.Context, targetPath string) (int64, error) {
-	if err := s.authorizeUserPath(ctx, targetPath); err != nil {
+	if err := s.authorizeUserConcreteReadPath(ctx, targetPath); err != nil {
 		return 0, err
 	}
 	info, err := s.fs.Stat(ctx, targetPath)
@@ -254,11 +300,19 @@ func (s *Server) authorizedPathLogicalSize(ctx context.Context, targetPath strin
 	return s.authorizedFileInfoLogicalSize(ctx, info)
 }
 
+func (s *Server) authorizedPathLogicalSizeIfExists(ctx context.Context, targetPath string) (int64, error) {
+	size, err := s.authorizedPathLogicalSize(ctx, targetPath)
+	if isStorageNotFound(err) || errors.Is(err, storage.ErrNotDir) {
+		return 0, nil
+	}
+	return size, err
+}
+
 func (s *Server) authorizedFileInfoLogicalSize(ctx context.Context, info *storage.FileInfo) (int64, error) {
 	if info == nil {
 		return 0, nil
 	}
-	if err := s.authorizeUserPath(ctx, info.Path); err != nil {
+	if err := s.authorizeUserConcreteReadPath(ctx, info.Path); err != nil {
 		return 0, err
 	}
 	if !info.IsDir {
@@ -272,7 +326,13 @@ func (s *Server) authorizedFileInfoLogicalSize(ctx context.Context, info *storag
 
 	var total int64
 	for _, child := range children {
-		size, err := s.authorizedFileInfoLogicalSize(ctx, child)
+		childPath, _, err := apiReadDirChildPath(info.Path, child)
+		if err != nil {
+			return 0, err
+		}
+		childInfo := *child
+		childInfo.Path = childPath
+		size, err := s.authorizedFileInfoLogicalSize(ctx, &childInfo)
 		if err != nil {
 			return 0, err
 		}
@@ -299,7 +359,13 @@ func (s *Server) fileInfoLogicalSize(ctx context.Context, info *storage.FileInfo
 
 	var total int64
 	for _, child := range children {
-		size, err := s.fileInfoLogicalSize(ctx, child)
+		childPath, _, err := apiReadDirChildPath(info.Path, child)
+		if err != nil {
+			return 0, err
+		}
+		childInfo := *child
+		childInfo.Path = childPath
+		size, err := s.fileInfoLogicalSize(ctx, &childInfo)
 		if err != nil {
 			return 0, err
 		}
@@ -429,19 +495,20 @@ func (s *Server) copyResourceWithQuota(ctx context.Context, srcPath, dstPath str
 		return err
 	}
 	userQuotaApplies := quotaScoped && quotaBytes > 0 && pathWithinBase(homeDir, dstPath)
-	directoryRules := directoryQuotaRulesForTarget(s.directoryQuotaRules(), dstPath)
-	if !userQuotaApplies && len(directoryRules) == 0 {
+	directoryRules := s.directoryQuotaRules()
+	hasDirectoryQuotas := hasDirectoryQuotaRules(directoryRules)
+	if !userQuotaApplies && !hasDirectoryQuotas {
 		return s.copyResource(ctx, srcPath, dstPath)
 	}
 
 	s.quotaMu.Lock()
 	defer s.quotaMu.Unlock()
 
-	requiredBytes, err := s.authorizedPathLogicalSize(ctx, srcPath)
-	if err != nil {
-		return err
-	}
 	if userQuotaApplies {
+		requiredBytes, err := s.authorizedPathLogicalSize(ctx, srcPath)
+		if err != nil {
+			return err
+		}
 		usedBytes, err := s.pathLogicalSizeIfExists(ctx, homeDir)
 		if err != nil {
 			return err
@@ -456,17 +523,59 @@ func (s *Server) copyResourceWithQuota(ctx context.Context, srcPath, dstPath str
 			return err
 		}
 	}
-	checks, err := s.directoryQuotaChecksForRequiredBytes(ctx, dstPath, requiredBytes)
-	if err != nil {
-		return err
-	}
-	for _, check := range checks {
-		if err := ensureQuotaCheckAvailable(check); err != nil {
+	if hasDirectoryQuotas {
+		checks, err := s.copyDirectoryQuotaChecks(ctx, srcPath, dstPath, directoryRules)
+		if err != nil {
 			return err
+		}
+		for _, check := range checks {
+			if err := ensureQuotaCheckAvailable(check); err != nil {
+				return err
+			}
 		}
 	}
 
 	return s.copyResource(ctx, srcPath, dstPath)
+}
+
+func (s *Server) copyDirectoryQuotaChecks(ctx context.Context, srcPath, dstPath string, rules []config.DirectoryQuotaConfig) ([]quotaCheck, error) {
+	checks := make([]quotaCheck, 0, len(rules))
+	for _, rule := range rules {
+		rule.Path = cleanQuotaPath(rule.Path)
+		if rule.Path == "" || rule.QuotaBytes <= 0 {
+			continue
+		}
+		requiredBytes, err := s.copyDirectoryQuotaRequiredBytes(ctx, srcPath, dstPath, rule.Path)
+		if err != nil {
+			return nil, err
+		}
+		if requiredBytes <= 0 {
+			continue
+		}
+		usedBytes, err := s.pathLogicalSizeIfExists(ctx, rule.Path)
+		if err != nil {
+			return nil, err
+		}
+		checks = append(checks, quotaCheck{
+			QuotaType:     quotaTypeDirectory,
+			QuotaPath:     rule.Path,
+			UsedBytes:     usedBytes,
+			QuotaBytes:    rule.QuotaBytes,
+			RequiredBytes: requiredBytes,
+		})
+	}
+	return checks, nil
+}
+
+func (s *Server) copyDirectoryQuotaRequiredBytes(ctx context.Context, srcPath, dstPath, quotaPath string) (int64, error) {
+	if pathWithinBase(quotaPath, dstPath) {
+		return s.authorizedPathLogicalSize(ctx, srcPath)
+	}
+	mappedSourcePath, ok := mappedTreePathForQuota(srcPath, dstPath, quotaPath)
+	if !ok {
+		return 0, nil
+	}
+	return s.authorizedPathLogicalSizeIfExists(ctx, mappedSourcePath)
 }
 
 func (s *Server) restoreFromTrashWithQuota(ctx context.Context, item *storage.TrashItem, targetPath string, restore func() error) error {
@@ -478,8 +587,9 @@ func (s *Server) restoreFromTrashWithQuota(ctx context.Context, item *storage.Tr
 		targetPath = item.OriginalPath
 	}
 	userQuotaApplies := quotaScoped && quotaBytes > 0 && pathWithinBase(homeDir, targetPath)
-	directoryRules := directoryQuotaRulesForTarget(s.directoryQuotaRules(), targetPath)
-	if !userQuotaApplies && len(directoryRules) == 0 {
+	directoryRules := s.directoryQuotaRules()
+	hasDirectoryQuotas := hasDirectoryQuotaRules(directoryRules)
+	if !userQuotaApplies && !hasDirectoryQuotas {
 		return restore()
 	}
 
@@ -505,17 +615,90 @@ func (s *Server) restoreFromTrashWithQuota(ctx context.Context, item *storage.Tr
 			return err
 		}
 	}
-	checks, err := s.directoryQuotaChecksForRequiredBytes(ctx, targetPath, requiredBytes)
-	if err != nil {
-		return err
-	}
-	for _, check := range checks {
-		if err := ensureQuotaCheckAvailable(check); err != nil {
+	if hasDirectoryQuotas {
+		checks, err := s.trashRestoreDirectoryQuotaChecks(ctx, item, targetPath, directoryRules)
+		if err != nil {
 			return err
+		}
+		for _, check := range checks {
+			if err := ensureQuotaCheckAvailable(check); err != nil {
+				return err
+			}
 		}
 	}
 
 	return restore()
+}
+
+func (s *Server) trashRestoreDirectoryQuotaChecks(ctx context.Context, item *storage.TrashItem, targetPath string, rules []config.DirectoryQuotaConfig) ([]quotaCheck, error) {
+	if item == nil || s.fs == nil {
+		return nil, nil
+	}
+
+	requiredByRule := make(map[string]int64, len(rules))
+	rulesByPath := make(map[string]config.DirectoryQuotaConfig, len(rules))
+	for _, rule := range rules {
+		rule.Path = cleanQuotaPath(rule.Path)
+		if rule.Path == "" || rule.QuotaBytes <= 0 {
+			continue
+		}
+		requiredByRule[rule.Path] = 0
+		rulesByPath[rule.Path] = rule
+	}
+	if len(rulesByPath) == 0 {
+		return nil, nil
+	}
+
+	sourceRoot := cleanQuotaPath(item.OriginalPath)
+	targetRoot := cleanQuotaPath(targetPath)
+	if targetRoot == "" {
+		targetRoot = sourceRoot
+	}
+	if sourceRoot == "" {
+		return nil, nil
+	}
+
+	if err := s.fs.WalkTrashItemRestorePaths(ctx, item.ID, func(restoredPath string, isDir bool, size int64) error {
+		if isDir {
+			return nil
+		}
+		mappedPath, ok := mapDescendantPath(sourceRoot, targetRoot, cleanQuotaPath(restoredPath))
+		if !ok {
+			return errPathAccessDenied
+		}
+		for quotaPath := range rulesByPath {
+			if pathWithinBase(quotaPath, mappedPath) {
+				total, err := addQuotaSize(requiredByRule[quotaPath], nonNegativeSize(size))
+				if err != nil {
+					return err
+				}
+				requiredByRule[quotaPath] = total
+			}
+		}
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+
+	checks := make([]quotaCheck, 0, len(rulesByPath))
+	for quotaPath, requiredBytes := range requiredByRule {
+		if requiredBytes <= 0 {
+			continue
+		}
+		rule := rulesByPath[quotaPath]
+		usedBytes, err := s.pathLogicalSizeIfExists(ctx, quotaPath)
+		if err != nil {
+			return nil, err
+		}
+		checks = append(checks, quotaCheck{
+			QuotaType:     quotaTypeDirectory,
+			QuotaPath:     quotaPath,
+			UsedBytes:     usedBytes,
+			QuotaBytes:    rule.QuotaBytes,
+			RequiredBytes: requiredBytes,
+		})
+	}
+	return checks, nil
 }
 
 func (s *Server) moveResourceWithQuota(ctx context.Context, srcPath, dstPath string) error {
@@ -524,19 +707,20 @@ func (s *Server) moveResourceWithQuota(ctx context.Context, srcPath, dstPath str
 		return err
 	}
 	userQuotaApplies := quotaScoped && quotaBytes > 0 && pathWithinBase(homeDir, dstPath) && !pathWithinBase(homeDir, srcPath)
-	directoryRules := directoryQuotaRulesForTarget(s.directoryQuotaRules(), dstPath)
-	if !userQuotaApplies && len(directoryRules) == 0 {
+	directoryRules := s.directoryQuotaRules()
+	hasDirectoryQuotas := hasDirectoryQuotaRules(directoryRules)
+	if !userQuotaApplies && !hasDirectoryQuotas {
 		return s.fs.Rename(ctx, srcPath, dstPath)
 	}
 
 	s.quotaMu.Lock()
 	defer s.quotaMu.Unlock()
 
-	requiredBytes, err := s.pathLogicalSize(ctx, srcPath)
-	if err != nil {
-		return err
-	}
 	if userQuotaApplies {
+		requiredBytes, err := s.pathLogicalSize(ctx, srcPath)
+		if err != nil {
+			return err
+		}
 		usedBytes, err := s.pathLogicalSizeIfExists(ctx, homeDir)
 		if err != nil {
 			return err
@@ -551,26 +735,62 @@ func (s *Server) moveResourceWithQuota(ctx context.Context, srcPath, dstPath str
 			return err
 		}
 	}
-	for _, rule := range directoryRules {
-		if pathWithinBase(rule.Path, srcPath) {
+	if hasDirectoryQuotas {
+		checks, err := s.moveDirectoryQuotaChecks(ctx, srcPath, dstPath, directoryRules)
+		if err != nil {
+			return err
+		}
+		for _, check := range checks {
+			if err := ensureQuotaCheckAvailable(check); err != nil {
+				return err
+			}
+		}
+	}
+
+	return s.fs.Rename(ctx, srcPath, dstPath)
+}
+
+func (s *Server) moveDirectoryQuotaChecks(ctx context.Context, srcPath, dstPath string, rules []config.DirectoryQuotaConfig) ([]quotaCheck, error) {
+	checks := make([]quotaCheck, 0, len(rules))
+	for _, rule := range rules {
+		rule.Path = cleanQuotaPath(rule.Path)
+		if rule.Path == "" || rule.QuotaBytes <= 0 {
+			continue
+		}
+
+		destinationBytes, err := s.mappedTreeLogicalSizeIfExists(ctx, srcPath, dstPath, rule.Path)
+		if err != nil {
+			return nil, err
+		}
+		sourceBytes, err := s.mappedTreeLogicalSizeIfExists(ctx, srcPath, srcPath, rule.Path)
+		if err != nil {
+			return nil, err
+		}
+		requiredBytes := destinationBytes - sourceBytes
+		if requiredBytes <= 0 {
 			continue
 		}
 		usedBytes, err := s.pathLogicalSizeIfExists(ctx, rule.Path)
 		if err != nil {
-			return err
+			return nil, err
 		}
-		if err := ensureQuotaCheckAvailable(quotaCheck{
+		checks = append(checks, quotaCheck{
 			QuotaType:     quotaTypeDirectory,
 			QuotaPath:     rule.Path,
 			UsedBytes:     usedBytes,
 			QuotaBytes:    rule.QuotaBytes,
 			RequiredBytes: requiredBytes,
-		}); err != nil {
-			return err
-		}
+		})
 	}
+	return checks, nil
+}
 
-	return s.fs.Rename(ctx, srcPath, dstPath)
+func (s *Server) mappedTreeLogicalSizeIfExists(ctx context.Context, treeRoot, mappedRoot, quotaPath string) (int64, error) {
+	sourcePath, ok := mappedTreePathForQuota(treeRoot, mappedRoot, quotaPath)
+	if !ok {
+		return 0, nil
+	}
+	return s.pathLogicalSizeIfExists(ctx, sourcePath)
 }
 
 func (s *Server) restoreVersionWithQuota(ctx context.Context, filePath, hash string) error {
@@ -753,7 +973,7 @@ func (s *Server) sendQuotaExceededAlertEvent(ctx context.Context, operation, tar
 	event := alerts.EventPayload{
 		Type:      quotaExceededAlertType,
 		Level:     alerts.AlertLevelWarning,
-		Message:   "user quota exceeded",
+		Message:   quotaExceededMessage(quotaErr),
 		Timestamp: time.Now().UTC(),
 		Details: map[string]any{
 			"operation":       operation,

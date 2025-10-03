@@ -35,6 +35,7 @@ import {
   type SharePolicy,
   type SharePolicyRule,
 } from '@/api/share'
+import { getUserFacingErrorDescription } from '@/lib/apiMessages'
 
 interface ShareDialogProps {
   isOpen: boolean
@@ -60,10 +61,12 @@ const PERMISSION_OPTIONS = [
 ]
 
 const maxSharePasswordBytes = 72
+const shareCreateWarningTitle = '分享链接已创建，但存在警告'
+const shareCreateWarningMessage = '分享链接已创建，但后台记录可能存在延迟，请稍后确认分享列表。'
 
 function formatPolicyDuration(value: string): string {
   const trimmed = value.trim()
-  if (!trimmed || trimmed === '0') {
+  if (isUnlimitedPolicyDuration(trimmed)) {
     return '不过期'
   }
   const hoursMatch = /^(\d+)h(?:0m)?(?:0s)?$/.exec(trimmed)
@@ -79,6 +82,11 @@ function formatPolicyDuration(value: string): string {
     return `${Number(minutesMatch[1])} 分钟`
   }
   return formatDuration(trimmed)
+}
+
+function isUnlimitedPolicyDuration(value: string): boolean {
+  const trimmed = value.trim()
+  return !trimmed || trimmed === '0'
 }
 
 function getSharePathDepth(rawPath: string): number {
@@ -127,6 +135,22 @@ function utf8ByteLength(value: string): number {
   return new TextEncoder().encode(value).length
 }
 
+function parseShareMaxAccessInput(value: string): { maxAccess?: number; error?: string } {
+  const trimmed = value.trim()
+  if (!trimmed) {
+    return {}
+  }
+  if (!/^\d+$/.test(trimmed)) {
+    return { error: '访问次数必须是 0 或正整数' }
+  }
+
+  const parsed = Number(trimmed)
+  if (!Number.isSafeInteger(parsed)) {
+    return { error: '访问次数过大' }
+  }
+  return { maxAccess: parsed }
+}
+
 function getShareDialogActionErrorToast(error: unknown): {
   title: string
   description?: string
@@ -167,9 +191,25 @@ function getShareDialogActionErrorToast(error: unknown): {
 
   return {
     title: '创建分享失败',
-    description: error instanceof Error ? error.message : '请稍后重试',
+    description: getUserFacingErrorDescription(error),
     color: 'danger',
   }
+}
+
+function getShareCreateSuccessToast(share: { warning: boolean }): {
+  title: string
+  color: 'success' | 'warning'
+} {
+  return share.warning
+    ? { title: shareCreateWarningTitle, color: 'warning' }
+    : { title: '分享链接已创建', color: 'success' }
+}
+
+function isAbortError(error: unknown): boolean {
+  return typeof error === 'object'
+    && error !== null
+    && 'name' in error
+    && (error as { name?: unknown }).name === 'AbortError'
 }
 
 export function ShareDialog({ 
@@ -189,6 +229,7 @@ export function ShareDialog({
   const createSessionRef = useRef(0)
   const currentFilePathRef = useRef(filePath)
   const currentOpenRef = useRef(isOpen)
+  const createAbortControllerRef = useRef<AbortController | null>(null)
   
   // Form state
   const [usePassword, setUsePassword] = useState(false)
@@ -212,6 +253,8 @@ export function ShareDialog({
     : passwordTooLong
       ? '分享密码最多 72 字节'
       : undefined
+  const parsedMaxAccess = useMemo(() => parseShareMaxAccessInput(maxAccess), [maxAccess])
+  const maxAccessInvalid = Boolean(parsedMaxAccess.error)
 
   const shareUrl = useMemo(() => {
     if (!createdShare) return ''
@@ -231,6 +274,11 @@ export function ShareDialog({
     setIsPolicyLoading(false)
   }, [])
 
+  useEffect(() => () => {
+    createAbortControllerRef.current?.abort()
+    createAbortControllerRef.current = null
+  }, [])
+
   const handleClose = useCallback(() => {
     if (isLoading) {
       return
@@ -245,6 +293,8 @@ export function ShareDialog({
 
     currentOpenRef.current = isOpen
     if (!isOpen) {
+      createAbortControllerRef.current?.abort()
+      createAbortControllerRef.current = null
       return
     }
 
@@ -254,6 +304,8 @@ export function ShareDialog({
     }
 
     createSessionRef.current += 1
+    createAbortControllerRef.current?.abort()
+    createAbortControllerRef.current = null
     let cancelled = false
     queueMicrotask(() => {
       if (cancelled) return
@@ -272,13 +324,14 @@ export function ShareDialog({
     }
 
     const sessionId = createSessionRef.current
+    const controller = new AbortController()
     let cancelled = false
     queueMicrotask(() => {
       if (!cancelled && currentOpenRef.current && createSessionRef.current === sessionId) {
         setIsPolicyLoading(true)
       }
     })
-    getSharePolicy()
+    getSharePolicy({ signal: controller.signal })
       .then((policy) => {
         if (!cancelled && currentOpenRef.current && createSessionRef.current === sessionId) {
           setSharePolicy(policy)
@@ -297,6 +350,7 @@ export function ShareDialog({
 
     return () => {
       cancelled = true
+      controller.abort()
     }
   }, [featureDisabled, featureEnabled, filePath, isOpen])
 
@@ -320,10 +374,12 @@ export function ShareDialog({
     if (!passwordRequired) {
       warnings.push('未设置密码，拿到链接的人都能访问。')
     }
-    if (expiresIn === '' && sharePolicy && !sharePolicy.default_expires_in) {
+    if (expiresIn === '' && sharePolicy && isUnlimitedPolicyDuration(sharePolicy.default_expires_in)) {
       warnings.push('系统默认不设置过期时间。')
     }
-    if (maxAccess === '' && sharePolicy && sharePolicy.default_max_access === 0) {
+    if (maxAccess.trim() === '0') {
+      warnings.push('已选择不限制访问次数。')
+    } else if (maxAccess === '' && sharePolicy && sharePolicy.default_max_access === 0) {
       warnings.push('系统默认不限制访问次数。')
     }
     if (isFolder && getSharePathDepth(filePath) <= 1) {
@@ -367,9 +423,25 @@ export function ShareDialog({
       })
       return
     }
+    if (parsedMaxAccess.error) {
+      addToast({
+        title: '访问次数格式无效',
+        description: parsedMaxAccess.error,
+        color: 'warning',
+      })
+      return
+    }
 
     const sessionId = createSessionRef.current
     const requestPath = filePath
+    const isCurrentCreateRequest = () => (
+      createSessionRef.current === sessionId
+      && currentOpenRef.current
+      && currentFilePathRef.current === requestPath
+    )
+    createAbortControllerRef.current?.abort()
+    const controller = new AbortController()
+    createAbortControllerRef.current = controller
 
     setIsLoading(true)
     try {
@@ -385,46 +457,37 @@ export function ShareDialog({
       if (expiresIn) {
         req.expires_in = expiresIn
       }
-      if (maxAccess) {
-        const num = parseInt(maxAccess)
-        if (num > 0) req.max_access = num
+      if (parsedMaxAccess.maxAccess !== undefined) {
+        req.max_access = parsedMaxAccess.maxAccess
       }
       if (description.trim()) {
         req.description = description.trim()
       }
 
-      const share = await createShare(req)
-      if (
-        createSessionRef.current === sessionId
-        && currentOpenRef.current
-        && currentFilePathRef.current === requestPath
-      ) {
-        setCreatedShare(share)
+      const share = await createShare(req, { signal: controller.signal })
+      if (controller.signal.aborted || !isCurrentCreateRequest()) {
+        return
       }
+      setCreatedShare(share)
       onShareCreated?.(share)
-      addToast(share.warning
-        ? { title: share.message ?? '分享链接已创建，但存在警告', color: 'warning' }
-        : { title: '分享链接已创建', color: 'success' })
+      addToast(getShareCreateSuccessToast(share))
     } catch (err) {
+      if (controller.signal.aborted || isAbortError(err) || !isCurrentCreateRequest()) {
+        return
+      }
+
       if (err instanceof ShareError && err.isFeatureDisabled) {
-        if (
-          createSessionRef.current === sessionId
-          && currentOpenRef.current
-          && currentFilePathRef.current === requestPath
-        ) {
-          setFeatureDisabled(true)
-        }
+        setFeatureDisabled(true)
         onFeatureDisabled?.()
         addToast(getShareDialogActionErrorToast(err))
         return
       }
       addToast(getShareDialogActionErrorToast(err))
     } finally {
-      if (
-        createSessionRef.current === sessionId
-        && currentOpenRef.current
-        && currentFilePathRef.current === requestPath
-      ) {
+      if (createAbortControllerRef.current === controller) {
+        createAbortControllerRef.current = null
+      }
+      if (isCurrentCreateRequest()) {
         setIsLoading(false)
       }
     }
@@ -472,12 +535,12 @@ export function ShareDialog({
             <div className="space-y-4">
               <div className={`flex items-center gap-2 ${createdShare.warning ? 'text-warning' : 'text-success'}`}>
                 <CheckCircle size={20} />
-                <span className="font-medium">{createdShare.warning ? '分享链接已创建，但存在警告' : '分享链接已创建'}</span>
+                <span className="font-medium">{createdShare.warning ? shareCreateWarningTitle : '分享链接已创建'}</span>
               </div>
 
-              {createdShare.warning && createdShare.message && (
+              {createdShare.warning && (
                 <div className="rounded-lg border border-warning/30 bg-warning/10 p-3 text-sm text-warning">
-                  {createdShare.message}
+                  {shareCreateWarningMessage}
                 </div>
               )}
               
@@ -620,17 +683,20 @@ export function ShareDialog({
                   <span className="text-sm font-medium">访问次数限制</span>
                 </div>
                 <Input
-                  type="number"
+                  type="text"
                   placeholder="使用系统默认"
-                  min="1"
+                  inputMode="numeric"
+                  pattern="[0-9]*"
                   value={maxAccess}
                   onValueChange={setMaxAccess}
+                  isInvalid={maxAccessInvalid}
+                  errorMessage={parsedMaxAccess.error}
                   classNames={{
                     inputWrapper: "bg-content2 border-divider",
                   }}
                 />
                 <p className="text-xs text-default-500">
-                  系统默认：{effectivePolicyText.maxAccess}
+                  系统默认：{effectivePolicyText.maxAccess}；0 表示不限制
                 </p>
               </div>
 
@@ -677,7 +743,7 @@ export function ShareDialog({
               <Button 
                 color="primary" 
                 onPress={handleCreate}
-                isDisabled={passwordRequiredButEmpty || passwordTooLong}
+                isDisabled={passwordRequiredButEmpty || passwordTooLong || maxAccessInvalid}
                 isLoading={isLoading}
                 startContent={!isLoading && <Link2 size={16} />}
                 className="rounded-lg"

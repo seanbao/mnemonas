@@ -109,6 +109,36 @@ func TestCheckerReportsTemperatureWarning(t *testing.T) {
 	}
 }
 
+func TestCheckerWarningsHideUnnamedDevicePath(t *testing.T) {
+	devicePath := filepath.Join(t.TempDir(), "ata-Samsung_SECRET123")
+	if err := os.WriteFile(devicePath, []byte("device"), 0600); err != nil {
+		t.Fatalf("failed to create fake device: %v", err)
+	}
+	checker := NewChecker(Config{
+		Enabled: true,
+		Devices: []DeviceConfig{{
+			Path: devicePath,
+		}},
+	}, testLogger(), WithRunner(func(context.Context, string, ...string) (CommandResult, error) {
+		return CommandResult{Stdout: smartJSON(false, 40, "SER123")}, nil
+	}))
+
+	report, err := checker.Check(context.Background())
+	if err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+	if report.Status != StatusCritical {
+		t.Fatalf("status = %q, want %q", report.Status, StatusCritical)
+	}
+	warnings := strings.Join(report.Warnings, "\n")
+	if strings.Contains(warnings, devicePath) || strings.Contains(warnings, "SECRET123") {
+		t.Fatalf("warnings leaked unnamed device path: %q", warnings)
+	}
+	if !strings.Contains(warnings, "device 1") {
+		t.Fatalf("warnings = %q, want generic device label", warnings)
+	}
+}
+
 func TestCheckerReportsCriticalForNVMeMediaWear(t *testing.T) {
 	devicePath := testDevicePath(t)
 	checker := NewChecker(Config{
@@ -274,6 +304,36 @@ func TestMonitorSendsAlertOnCriticalAndRespectsCooldown(t *testing.T) {
 	}
 	if sender.events[0].Level != alerts.AlertLevelCritical {
 		t.Fatalf("event level = %q, want critical", sender.events[0].Level)
+	}
+}
+
+func TestMonitorAlertWarningsHideUnnamedDevicePath(t *testing.T) {
+	devicePath := filepath.Join(t.TempDir(), "nvme-Backup_SECRET999")
+	if err := os.WriteFile(devicePath, []byte("device"), 0600); err != nil {
+		t.Fatalf("failed to create fake device: %v", err)
+	}
+	sender := &fakeAlertSender{}
+	monitor := NewMonitor(Config{
+		Enabled:        true,
+		CheckInterval:  time.Hour,
+		CooldownPeriod: time.Hour,
+		Devices:        []DeviceConfig{{Path: devicePath}},
+	}, sender, testLogger(), WithRunner(func(context.Context, string, ...string) (CommandResult, error) {
+		return CommandResult{Stdout: smartJSON(false, 40, "SER123")}, nil
+	}))
+
+	monitor.checkAndAlert(context.Background())
+
+	if len(sender.events) != 1 {
+		t.Fatalf("events = %d, want 1", len(sender.events))
+	}
+	warnings, ok := sender.events[0].Details["warnings"].([]string)
+	if !ok {
+		t.Fatalf("warnings detail = %#v, want []string", sender.events[0].Details["warnings"])
+	}
+	joined := strings.Join(warnings, "\n")
+	if strings.Contains(joined, devicePath) || strings.Contains(joined, "SECRET999") {
+		t.Fatalf("alert warnings leaked unnamed device path: %q", joined)
 	}
 }
 

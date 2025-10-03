@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	pathpkg "path"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -19,6 +20,11 @@ import (
 )
 
 var errActivityLogSymlink = errors.New("activity log path must not be a symlink")
+var errUnknownActivityAction = errors.New("unknown activity action")
+var errDuplicateActivityID = errors.New("duplicate activity ID")
+var errZeroActivityTimestamp = errors.New("activity timestamp must not be zero")
+var errEmptyActivityID = errors.New("activity ID must not be empty")
+var errNoncanonicalActivityID = errors.New("activity ID must not contain surrounding whitespace")
 
 type activityLogFormatError struct {
 	err error
@@ -41,6 +47,48 @@ func wrapActivityLogFormatError(err error) error {
 		return err
 	}
 	return &activityLogFormatError{err: err}
+}
+
+func validateActivityAction(action ActionType) error {
+	if IsKnownAction(action) {
+		return nil
+	}
+	return fmt.Errorf("%w: %q", errUnknownActivityAction, action)
+}
+
+func validateActivityTimestamp(timestamp time.Time) error {
+	if timestamp.IsZero() {
+		return errZeroActivityTimestamp
+	}
+	return nil
+}
+
+func validateActivityID(id string) error {
+	trimmed := strings.TrimSpace(id)
+	if trimmed == "" {
+		return errEmptyActivityID
+	}
+	if id != trimmed {
+		return errNoncanonicalActivityID
+	}
+	return nil
+}
+
+func validateDecodedActivityEntry(entry Entry, seenIDs map[string]struct{}) error {
+	if err := validateActivityAction(entry.Action); err != nil {
+		return err
+	}
+	if err := validateActivityTimestamp(entry.Timestamp); err != nil {
+		return err
+	}
+	if err := validateActivityID(entry.ID); err != nil {
+		return err
+	}
+	if _, ok := seenIDs[entry.ID]; ok {
+		return fmt.Errorf("%w: %q", errDuplicateActivityID, entry.ID)
+	}
+	seenIDs[entry.ID] = struct{}{}
+	return nil
 }
 
 var syncActivityLogRootDir = syncActivityRootDir
@@ -79,6 +127,59 @@ const (
 	ActionScrub        ActionType = "scrub"
 )
 
+// IsKnownAction reports whether action is part of MnemoNAS' public activity vocabulary.
+func IsKnownAction(action ActionType) bool {
+	switch action {
+	case ActionUpload,
+		ActionDownload,
+		ActionDelete,
+		ActionRename,
+		ActionMove,
+		ActionCopy,
+		ActionCreate,
+		ActionRestore,
+		ActionShare,
+		ActionUnshare,
+		ActionFavorite,
+		ActionUnfavorite,
+		ActionFavoriteNote,
+		ActionLogin,
+		ActionLogout,
+		ActionTrashRestore,
+		ActionTrashDelete,
+		ActionTrashEmpty,
+		ActionDiskHealth,
+		ActionScrub:
+		return true
+	default:
+		return false
+	}
+}
+
+// ActionGroup groups related activity actions for review workflows.
+type ActionGroup string
+
+const (
+	ActionGroupShare ActionGroup = "share"
+	ActionGroupRisk  ActionGroup = "risk"
+)
+
+var actionGroupActions = map[ActionGroup][]ActionType{
+	ActionGroupShare: {
+		ActionShare,
+		ActionUnshare,
+	},
+	ActionGroupRisk: {
+		ActionDelete,
+		ActionRename,
+		ActionMove,
+		ActionShare,
+		ActionUnshare,
+		ActionTrashDelete,
+		ActionTrashEmpty,
+	},
+}
+
 // Entry represents a single activity log entry
 type Entry struct {
 	ID        string            `json:"id"`
@@ -88,6 +189,16 @@ type Entry struct {
 	User      string            `json:"user,omitempty"`
 	IP        string            `json:"ip,omitempty"`
 	Details   map[string]string `json:"details,omitempty"`
+}
+
+// ListFilter limits activity queries by metadata and timestamp.
+type ListFilter struct {
+	Action  ActionType
+	Actions []ActionType
+	User    string
+	Path    string
+	Since   *time.Time
+	Until   *time.Time
 }
 
 // Store manages activity log storage
@@ -120,6 +231,27 @@ func copyEntry(entry Entry) Entry {
 	clone := entry
 	clone.Details = copyDetails(entry.Details)
 	return clone
+}
+
+// DetailKeyMayContainPath reports whether an activity detail key conventionally stores a MnemoNAS path.
+func DetailKeyMayContainPath(key string) bool {
+	switch strings.ToLower(strings.TrimSpace(key)) {
+	case "path", "from", "to", "source_path", "target_path", "destination_path", "original_path", "restore_path", "quota_path":
+		return true
+	default:
+		return false
+	}
+}
+
+// ActionsForGroup returns the actions included in a named activity group.
+func ActionsForGroup(group ActionGroup) ([]ActionType, bool) {
+	actions, ok := actionGroupActions[group]
+	if !ok {
+		return nil, false
+	}
+	clone := make([]ActionType, len(actions))
+	copy(clone, actions)
+	return clone, true
 }
 
 // NewStore creates a new activity store
@@ -186,10 +318,14 @@ func decodeActivityEntries(reader io.Reader, maxSize int) ([]Entry, error) {
 	}
 
 	entries := make([]Entry, 0)
+	seenIDs := make(map[string]struct{})
 	for decoder.More() {
 		var entry Entry
 		if err := decoder.Decode(&entry); err != nil {
 			return nil, err
+		}
+		if err := validateDecodedActivityEntry(entry, seenIDs); err != nil {
+			return nil, wrapActivityLogFormatError(err)
 		}
 		if maxSize <= 0 || len(entries) < maxSize {
 			entries = append(entries, entry)
@@ -721,21 +857,36 @@ func generateUniqueActivityID(entries []Entry) (string, error) {
 		existing[entry.ID] = struct{}{}
 	}
 
+	var invalidIDErr error
 	for attempt := 0; attempt < maxActivityIDAttempts; attempt++ {
 		id, err := activityIDGenerator()
 		if err != nil {
 			return "", fmt.Errorf("generate activity ID: %w", err)
+		}
+		if err := validateActivityID(id); err != nil {
+			invalidIDErr = err
+			continue
 		}
 		if _, ok := existing[id]; !ok {
 			return id, nil
 		}
 	}
 
+	if invalidIDErr != nil {
+		return "", invalidIDErr
+	}
 	return "", errors.New("generate unique activity ID: collision limit exceeded")
 }
 
 // Log records a new activity entry
 func (s *Store) Log(action ActionType, path, user, ip string, details map[string]string) error {
+	if err := validateActivityAction(action); err != nil {
+		return err
+	}
+	timestamp := activityTimeNow()
+	if err := validateActivityTimestamp(timestamp); err != nil {
+		return err
+	}
 	return s.updateEntries(func(entries []Entry) ([]Entry, error) {
 		id, err := generateUniqueActivityID(entries)
 		if err != nil {
@@ -743,7 +894,7 @@ func (s *Store) Log(action ActionType, path, user, ip string, details map[string
 		}
 		entry := Entry{
 			ID:        id,
-			Timestamp: activityTimeNow(),
+			Timestamp: timestamp,
 			Action:    action,
 			Path:      path,
 			User:      user,
@@ -763,19 +914,40 @@ func (s *Store) Log(action ActionType, path, user, ip string, details map[string
 
 // List returns recent activity entries
 func (s *Store) List(limit, offset int, actionFilter ActionType, userFilter string) ([]Entry, int) {
+	return s.ListFiltered(limit, offset, ListFilter{
+		Action: actionFilter,
+		User:   userFilter,
+	})
+}
+
+// ListFiltered returns recent activity entries matching all provided filters.
+func (s *Store) ListFiltered(limit, offset int, filter ListFilter) ([]Entry, int) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if offset < 0 {
 		offset = 0
 	}
+	filterPath := normalizeActivityFilterPath(filter.Path)
 
 	// Filter entries
 	var filtered []Entry
 	for _, e := range s.entries {
-		if actionFilter != "" && e.Action != actionFilter {
+		if filter.Action != "" && e.Action != filter.Action {
 			continue
 		}
-		if userFilter != "" && e.User != userFilter {
+		if len(filter.Actions) > 0 && !activityActionInList(e.Action, filter.Actions) {
+			continue
+		}
+		if filter.User != "" && e.User != filter.User {
+			continue
+		}
+		if filter.Path != "" && !entryMatchesActivityPathFilter(e, filterPath) {
+			continue
+		}
+		if filter.Since != nil && e.Timestamp.Before(*filter.Since) {
+			continue
+		}
+		if filter.Until != nil && e.Timestamp.After(*filter.Until) {
 			continue
 		}
 		filtered = append(filtered, copyEntry(e))
@@ -797,6 +969,49 @@ func (s *Store) List(limit, offset int, actionFilter ActionType, userFilter stri
 	}
 
 	return filtered[offset:end], total
+}
+
+func activityActionInList(action ActionType, actions []ActionType) bool {
+	for _, candidate := range actions {
+		if action == candidate {
+			return true
+		}
+	}
+	return false
+}
+
+func entryMatchesActivityPathFilter(entry Entry, filterPath string) bool {
+	if filterPath == "" {
+		return false
+	}
+	if activityPathMatchesFilter(filterPath, entry.Path) {
+		return true
+	}
+	for key, value := range entry.Details {
+		if DetailKeyMayContainPath(key) && activityPathMatchesFilter(filterPath, value) {
+			return true
+		}
+	}
+	return false
+}
+
+func activityPathMatchesFilter(filterPath, candidate string) bool {
+	cleanCandidate := normalizeActivityFilterPath(candidate)
+	if cleanCandidate == "" {
+		return false
+	}
+	if filterPath == "/" {
+		return strings.HasPrefix(cleanCandidate, "/")
+	}
+	return cleanCandidate == filterPath || strings.HasPrefix(cleanCandidate, filterPath+"/")
+}
+
+func normalizeActivityFilterPath(value string) string {
+	normalized := strings.ReplaceAll(strings.TrimSpace(value), "\\", "/")
+	if normalized == "" || !strings.HasPrefix(normalized, "/") {
+		return ""
+	}
+	return pathpkg.Clean(normalized)
 }
 
 // Count returns the total number of entries

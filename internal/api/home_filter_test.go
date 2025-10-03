@@ -68,8 +68,8 @@ func TestAPIStreamResponseErrorWrapsAndTracksStartedState(t *testing.T) {
 	if !errors.Is(err, baseErr) {
 		t.Fatalf("streamAPIResponse(failure) error = %v, want %v", err, baseErr)
 	}
-	if !apiStreamResponseStarted(err) {
-		t.Fatal("failed API stream write should be treated as response-started")
+	if apiStreamResponseStarted(err) {
+		t.Fatal("failed API stream write with no bytes written should not be treated as response-started")
 	}
 }
 

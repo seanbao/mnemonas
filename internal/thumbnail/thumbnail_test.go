@@ -1462,6 +1462,37 @@ func TestCleanCache_DoesNotFollowCacheRootSymlinkInsertedAfterValidation(t *test
 	}
 }
 
+func TestCleanCache_ReturnsRemovalErrors(t *testing.T) {
+	tmpDir := t.TempDir()
+	svc, err := NewService(tmpDir)
+	if err != nil {
+		t.Fatalf("NewService failed: %v", err)
+	}
+
+	originalWalkThumbnailCache := walkThumbnailCache
+	walkThumbnailCache = func(root string, cacheRoot *os.Root, walkFn thumbnailWalkFunc) error {
+		return walkFn("../outside-thumb.jpg", thumbnailTestFileInfo{
+			name:    "outside-thumb.jpg",
+			modTime: time.Now().Add(-2 * time.Hour),
+			size:    int64(len("thumb")),
+		})
+	}
+	t.Cleanup(func() {
+		walkThumbnailCache = originalWalkThumbnailCache
+	})
+
+	cleaned, err := svc.CleanCache(context.Background(), time.Hour)
+	if err == nil {
+		t.Fatal("expected CleanCache to report cache removal failures")
+	}
+	if cleaned != 0 {
+		t.Fatalf("CleanCache cleaned = %d, want 0", cleaned)
+	}
+	if !strings.Contains(err.Error(), "outside-thumb.jpg") {
+		t.Fatalf("expected removal error to mention cache entry, got %v", err)
+	}
+}
+
 func TestCacheStats_DoesNotFollowCacheRootSymlinkInsertedAfterValidation(t *testing.T) {
 	tmpDir := t.TempDir()
 	svc, err := NewService(tmpDir)
@@ -1620,6 +1651,38 @@ func TestInvalidateCache_ReturnsRemovalErrors(t *testing.T) {
 	if !strings.Contains(err.Error(), cachePath) {
 		t.Fatalf("expected cache removal error to mention %q, got %v", cachePath, err)
 	}
+}
+
+type thumbnailTestFileInfo struct {
+	name    string
+	size    int64
+	mode    os.FileMode
+	modTime time.Time
+	isDir   bool
+}
+
+func (i thumbnailTestFileInfo) Name() string {
+	return i.name
+}
+
+func (i thumbnailTestFileInfo) Size() int64 {
+	return i.size
+}
+
+func (i thumbnailTestFileInfo) Mode() os.FileMode {
+	return i.mode
+}
+
+func (i thumbnailTestFileInfo) ModTime() time.Time {
+	return i.modTime
+}
+
+func (i thumbnailTestFileInfo) IsDir() bool {
+	return i.isDir
+}
+
+func (i thumbnailTestFileInfo) Sys() any {
+	return nil
 }
 
 func TestCacheKey(t *testing.T) {

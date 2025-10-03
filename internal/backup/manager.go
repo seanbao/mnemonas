@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -41,10 +42,12 @@ const (
 	NotificationLevelWarning  = "warning"
 	NotificationLevelCritical = "critical"
 
-	NotificationTypeBackupRun    = "backup_run"
-	NotificationTypeRestoreDrill = "backup_restore_drill"
-	NotificationTypeRetention    = "backup_retention_check"
-	NotificationTriggerReminder  = "restore_drill_reminder"
+	NotificationTypeBackupRun     = "backup_run"
+	NotificationTypeRestoreDrill  = "backup_restore_drill"
+	NotificationTypeRetention     = "backup_retention_check"
+	NotificationTypeRestore       = "backup_restore"
+	NotificationTypeRestoreVerify = "backup_restore_verify"
+	NotificationTriggerReminder   = "restore_drill_reminder"
 
 	FailureCategoryNoSnapshot         = "no_snapshot"
 	FailureCategoryUnsupportedJobType = "unsupported_job_type"
@@ -58,16 +61,22 @@ const (
 	stateFileName                 = "status.json"
 	manifestFileName              = "manifest.json"
 	manifestVersion               = 1
+	runIDTimeLayout               = "20060102T150405.000000000Z"
 	restoreHistoryLimit           = 20
 	restoreDrillHistoryLimit      = 20
 	restorePreviewLimit           = 10
 	restoreVerifyWarningLimit     = 8
 	defaultRestoreDrillStaleAfter = 30 * 24 * time.Hour
 	restoreDrillReminderCooldown  = 24 * time.Hour
+	interruptedStatusMessage      = "任务在服务重启或进程退出前中断"
 
 	defaultSchedulerPollInterval = time.Minute
 	externalCommandStderrLimit   = 4096
 	externalCommandStdoutLimit   = 4 * 1024 * 1024
+
+	redactedBackupSecretValue        = "<redacted>"
+	backupSensitiveNamePattern       = `(?:[A-Za-z0-9_.-]*(?:password|passwd|secret|token|credential|access[_-]?key|secret[_-]?key|api[_-]?key|authorization|signature)[A-Za-z0-9_.-]*|pass|auth|sig|user|username)`
+	backupSensitiveHeaderNamePattern = `(?:[A-Za-z0-9_.-]*(?:password|passwd|secret|token|credential|access[_-]?key|secret[_-]?key|api[_-]?key|signature)[A-Za-z0-9_.-]*|pass|sig|user|username)`
 )
 
 var restoreAvailableBytesFunc = restoreAvailableBytes
@@ -82,10 +91,63 @@ var (
 	ErrNoSnapshots           = errors.New("backup job has no completed snapshots")
 	ErrUnsupportedJobType    = errors.New("unsupported backup job type")
 	ErrUnsafePath            = errors.New("unsafe backup path")
+	ErrInvalidRestoreRequest = errors.New("invalid restore request")
 	ErrRestoreTargetExists   = errors.New("restore target already exists")
 	ErrSourceContainsSymlink = errors.New("backup source contains a symlink")
 	ErrUnsupportedFileType   = errors.New("backup source contains an unsupported file type")
+
+	backupURLUserinfoPattern                     = regexp.MustCompile(`([A-Za-z][A-Za-z0-9+.-]*://)([^\s/?#]*@)`)
+	backupSensitivePathDoubleQuotedAssignPattern = regexp.MustCompile(`(?i)([/\\])(-{0,2}` + backupSensitiveNamePattern + `=)"([^"/\\]*)"`)
+	backupSensitivePathSingleQuotedAssignPattern = regexp.MustCompile(`(?i)([/\\])(-{0,2}` + backupSensitiveNamePattern + `=)'([^'/\\]*)'`)
+	backupSensitivePathAssignmentPattern         = regexp.MustCompile(`(?i)([/\\])(-{0,2}` + backupSensitiveNamePattern + `=)([^/\\\s?&;,:\"']+)`)
+	backupSensitiveDoubleQuotedAssignPattern     = regexp.MustCompile(`(?i)(^|[\s?&;,:])(-{0,2}` + backupSensitiveNamePattern + `=)"([^"]*)"`)
+	backupSensitiveSingleQuotedAssignPattern     = regexp.MustCompile(`(?i)(^|[\s?&;,:])(-{0,2}` + backupSensitiveNamePattern + `=)'([^']*)'`)
+	backupSensitiveAssignmentPattern             = regexp.MustCompile(`(?i)(^|[\s?&;,:])(-{0,2}` + backupSensitiveNamePattern + `=)([^\s?&;,:\"']+)`)
+	backupSensitiveDoubleQuotedKVPattern         = regexp.MustCompile(`(?i)(^|[{\s,;])("` + backupSensitiveNamePattern + `"\s*:\s*)"([^"]*)"`)
+	backupSensitiveSingleQuotedKVPattern         = regexp.MustCompile(`(?i)(^|[{\s,;])('` + backupSensitiveNamePattern + `'\s*:\s*)'([^']*)'`)
+	backupSensitiveDoubleQuotedAuthPattern       = regexp.MustCompile(`(?i)(^|[\s,;])((?:proxy-)?authorization\s*:\s*(?:bearer|basic|token)\s+)"([^"]*)"`)
+	backupSensitiveSingleQuotedAuthPattern       = regexp.MustCompile(`(?i)(^|[\s,;])((?:proxy-)?authorization\s*:\s*(?:bearer|basic|token)\s+)'([^']*)'`)
+	backupSensitiveAuthorizationPattern          = regexp.MustCompile(`(?i)(^|[\s,;])((?:proxy-)?authorization\s*:\s*(?:bearer|basic|token)\s+)([^\s,;\"']+)`)
+	backupSensitiveDoubleQuotedHeaderPattern     = regexp.MustCompile(`(?i)(^|[\s,;])(` + backupSensitiveHeaderNamePattern + `\s*:\s*)"([^"]*)"`)
+	backupSensitiveSingleQuotedHeaderPattern     = regexp.MustCompile(`(?i)(^|[\s,;])(` + backupSensitiveHeaderNamePattern + `\s*:\s*)'([^']*)'`)
+	backupSensitiveHeaderPattern                 = regexp.MustCompile(`(?i)(^|[\s,;])(` + backupSensitiveHeaderNamePattern + `\s*:\s*)([^\s,;\"']+)`)
+	backupSensitiveDoubleQuotedFlagPattern       = regexp.MustCompile(`(?i)(^|[\s,;:])(-{1,2}` + backupSensitiveNamePattern + `)(\s+)"([^"]*)"`)
+	backupSensitiveSingleQuotedFlagPattern       = regexp.MustCompile(`(?i)(^|[\s,;:])(-{1,2}` + backupSensitiveNamePattern + `)(\s+)'([^']*)'`)
+	backupSensitiveFlagPattern                   = regexp.MustCompile(`(?i)(^|[\s,;:])(-{1,2}` + backupSensitiveNamePattern + `)(\s+)([^\s,;:\"']+)`)
 )
+
+type invalidRestoreRequestError struct {
+	err error
+}
+
+func (e invalidRestoreRequestError) Error() string {
+	if e.err == nil {
+		return ErrInvalidRestoreRequest.Error()
+	}
+	return e.err.Error()
+}
+
+func (e invalidRestoreRequestError) Unwrap() error {
+	return e.err
+}
+
+func (e invalidRestoreRequestError) Is(target error) bool {
+	return target == ErrInvalidRestoreRequest
+}
+
+func markInvalidRestoreRequest(err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, ErrInvalidRestoreRequest) {
+		return err
+	}
+	return invalidRestoreRequestError{err: err}
+}
+
+func invalidRestoreRequestErrorf(format string, args ...any) error {
+	return markInvalidRestoreRequest(fmt.Errorf(format, args...))
+}
 
 var execCommandContext = exec.CommandContext
 
@@ -185,24 +247,27 @@ type JobView struct {
 	RestoreDrillHistory        []*RestoreDrillResult `json:"restore_drill_history,omitempty"`
 	LastRestore                *RestoreResult        `json:"last_restore,omitempty"`
 	LastRestoreVerify          *RestoreVerifyResult  `json:"last_restore_verify,omitempty"`
+	LastMatchingRestoreVerify  *RestoreVerifyResult  `json:"last_matching_restore_verify,omitempty"`
+	RestoreReportFindings      []string              `json:"restore_report_findings,omitempty"`
 	RestoreHistory             []*RestoreResult      `json:"restore_history,omitempty"`
 	LastRetentionCheck         *RetentionCheckResult `json:"last_retention_check,omitempty"`
 }
 
 // RestoreReport is an exportable audit summary for one backup job.
 type RestoreReport struct {
-	GeneratedAt         time.Time             `json:"generated_at"`
-	Job                 JobView               `json:"job"`
-	LastRun             *RunResult            `json:"last_run,omitempty"`
-	LastSuccessfulRun   *RunResult            `json:"last_successful_run,omitempty"`
-	LastRetentionCheck  *RetentionCheckResult `json:"last_retention_check,omitempty"`
-	LastRestoreDrill    *RestoreDrillResult   `json:"last_restore_drill,omitempty"`
-	RestoreDrillHistory []*RestoreDrillResult `json:"restore_drill_history,omitempty"`
-	RestoreDrillStats   *RestoreDrillStats    `json:"restore_drill_stats,omitempty"`
-	LastRestore         *RestoreResult        `json:"last_restore,omitempty"`
-	LastRestoreVerify   *RestoreVerifyResult  `json:"last_restore_verify,omitempty"`
-	RestoreHistory      []*RestoreResult      `json:"restore_history,omitempty"`
-	Findings            []string              `json:"findings,omitempty"`
+	GeneratedAt               time.Time             `json:"generated_at"`
+	Job                       JobView               `json:"job"`
+	LastRun                   *RunResult            `json:"last_run,omitempty"`
+	LastSuccessfulRun         *RunResult            `json:"last_successful_run,omitempty"`
+	LastRetentionCheck        *RetentionCheckResult `json:"last_retention_check,omitempty"`
+	LastRestoreDrill          *RestoreDrillResult   `json:"last_restore_drill,omitempty"`
+	RestoreDrillHistory       []*RestoreDrillResult `json:"restore_drill_history,omitempty"`
+	RestoreDrillStats         *RestoreDrillStats    `json:"restore_drill_stats,omitempty"`
+	LastRestore               *RestoreResult        `json:"last_restore,omitempty"`
+	LastRestoreVerify         *RestoreVerifyResult  `json:"last_restore_verify,omitempty"`
+	LastMatchingRestoreVerify *RestoreVerifyResult  `json:"last_matching_restore_verify,omitempty"`
+	RestoreHistory            []*RestoreResult      `json:"restore_history,omitempty"`
+	Findings                  []string              `json:"findings,omitempty"`
 }
 
 // RestoreDrillStats summarizes recent restore drill reliability.
@@ -242,6 +307,7 @@ type NotificationEvent struct {
 	FinishedAt          *time.Time `json:"finished_at,omitempty"`
 	Source              string     `json:"source,omitempty"`
 	Destination         string     `json:"destination,omitempty"`
+	TargetPath          string     `json:"target_path,omitempty"`
 	SnapshotPath        string     `json:"snapshot_path,omitempty"`
 	ManifestPath        string     `json:"manifest_path,omitempty"`
 	FileCount           int64      `json:"file_count,omitempty"`
@@ -384,6 +450,8 @@ type RestoreVerifyResult struct {
 	DurationMs           int64      `json:"duration_ms"`
 	Source               string     `json:"source"`
 	Destination          string     `json:"destination"`
+	SnapshotPath         string     `json:"snapshot_path,omitempty"`
+	ManifestPath         string     `json:"manifest_path,omitempty"`
 	TargetPath           string     `json:"target_path"`
 	FileCount            int64      `json:"file_count"`
 	VerifiedBytes        int64      `json:"verified_bytes"`
@@ -476,11 +544,20 @@ func NewManager(cfg ManagerConfig) (*Manager, error) {
 	if m.schedulerPoll <= 0 {
 		m.schedulerPoll = defaultSchedulerPollInterval
 	}
+	seenJobIDs := make(map[string]struct{}, len(cfg.Jobs))
 	for _, job := range cfg.Jobs {
 		normalized := normalizeJob(job, cfg.StorageRoot)
 		if normalized.ID == "" {
 			continue
 		}
+		if !isSafeManagerJobID(normalized.ID) {
+			return nil, fmt.Errorf("%w: backup job id is unsafe: %q", ErrUnsafePath, normalized.ID)
+		}
+		jobIDKey := strings.ToLower(normalized.ID)
+		if _, ok := seenJobIDs[jobIDKey]; ok {
+			return nil, fmt.Errorf("%w: duplicate backup job id: %q", ErrUnsafePath, normalized.ID)
+		}
+		seenJobIDs[jobIDKey] = struct{}{}
 		m.jobs[normalized.ID] = normalized
 	}
 	if err := m.loadState(); err != nil {
@@ -489,9 +566,29 @@ func NewManager(cfg ManagerConfig) (*Manager, error) {
 	return m, nil
 }
 
+func isSafeManagerJobID(id string) bool {
+	if id == "" || len(id) > 64 || id == "." || id == ".." {
+		return false
+	}
+	for _, r := range id {
+		switch {
+		case r >= 'a' && r <= 'z':
+		case r >= 'A' && r <= 'Z':
+		case r >= '0' && r <= '9':
+		case r == '-', r == '_', r == '.':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 func ensureBackupStateRoot(root string) error {
-	if filepath.Clean(root) == string(filepath.Separator) {
+	if isBackupFilesystemRoot(root) {
 		return fmt.Errorf("%w: backup state root must not be filesystem root", ErrUnsafePath)
+	}
+	if isProtectedBackupSystemDirectory(root) {
+		return fmt.Errorf("%w: backup state root must not be protected system directory", ErrUnsafePath)
 	}
 	if _, err := rootio.MkdirAllPathNoFollowTracked(root, 0700); err != nil {
 		if rootio.IsSymlinkError(err) {
@@ -691,6 +788,7 @@ func (m *Manager) RunRestoreVerify(ctx context.Context, id string, opts RestoreV
 		Destination: backupTarget(job),
 		TargetPath:  strings.TrimSpace(opts.TargetPath),
 	}
+	_ = m.updateLastRestoreVerify(result)
 
 	err = m.runRestoreVerify(ctx, job, opts, result)
 	finishedAt := m.now().UTC()
@@ -708,6 +806,7 @@ func (m *Manager) RunRestoreVerify(ctx context.Context, id string, opts RestoreV
 		}
 		return cloneRestoreVerifyResult(result), saveErr
 	}
+	m.notifyRestoreVerify(ctx, job, result)
 	return cloneRestoreVerifyResult(result), err
 }
 
@@ -756,6 +855,7 @@ func (m *Manager) RunRestore(ctx context.Context, id string, opts RestoreOptions
 		if saveErr := m.updateLastRestore(result, true); saveErr != nil {
 			return cloneRestoreResult(result), errors.Join(preflightErr, saveErr)
 		}
+		m.notifyRestore(ctx, job, result)
 		return cloneRestoreResult(result), preflightErr
 	}
 
@@ -775,6 +875,7 @@ func (m *Manager) RunRestore(ctx context.Context, id string, opts RestoreOptions
 		}
 		return cloneRestoreResult(result), saveErr
 	}
+	m.notifyRestore(ctx, job, result)
 	return cloneRestoreResult(result), err
 }
 
@@ -805,15 +906,15 @@ func (m *Manager) notifyRun(ctx context.Context, job config.BackupJobConfig, res
 		Status:          result.Status,
 		StartedAt:       result.StartedAt,
 		FinishedAt:      result.FinishedAt,
-		Source:          result.Source,
-		Destination:     result.Destination,
-		SnapshotPath:    result.SnapshotPath,
-		ManifestPath:    result.ManifestPath,
+		Source:          sanitizeBackupTargetForAPI(result.Source),
+		Destination:     sanitizeBackupTargetForAPI(result.Destination),
+		SnapshotPath:    sanitizeBackupTargetForAPI(result.SnapshotPath),
+		ManifestPath:    sanitizeBackupTargetForAPI(result.ManifestPath),
 		FileCount:       result.FileCount,
 		TotalBytes:      result.TotalBytes,
 		PrunedSnapshots: result.PrunedSnapshots,
-		Warnings:        append([]string(nil), result.Warnings...),
-		ErrorMessage:    result.ErrorMessage,
+		Warnings:        sanitizeBackupMessagesForAPI(result.Warnings),
+		ErrorMessage:    sanitizeBackupMessageForAPI(result.ErrorMessage),
 		Timestamp:       time.Now().UTC(),
 	})
 }
@@ -834,13 +935,91 @@ func (m *Manager) notifyRestoreDrill(ctx context.Context, job config.BackupJobCo
 		Status:          result.Status,
 		StartedAt:       result.StartedAt,
 		FinishedAt:      result.FinishedAt,
-		SnapshotPath:    result.SnapshotPath,
-		ManifestPath:    result.ManifestPath,
+		SnapshotPath:    sanitizeBackupTargetForAPI(result.SnapshotPath),
+		ManifestPath:    sanitizeBackupTargetForAPI(result.ManifestPath),
 		FileCount:       result.FileCount,
 		VerifiedBytes:   result.VerifiedBytes,
-		ErrorMessage:    result.ErrorMessage,
+		ErrorMessage:    sanitizeBackupMessageForAPI(result.ErrorMessage),
 		FailureCategory: result.FailureCategory,
 		Timestamp:       time.Now().UTC(),
+	})
+}
+
+func (m *Manager) notifyRestore(ctx context.Context, job config.BackupJobConfig, result *RestoreResult) {
+	if m.notifier == nil || result == nil {
+		return
+	}
+	if result.Status != StatusFailed && len(result.Warnings) == 0 {
+		return
+	}
+
+	level := NotificationLevelWarning
+	message := fmt.Sprintf("备份任务 %s 恢复完成但存在警告", job.Name)
+	if result.Status == StatusFailed {
+		level = NotificationLevelCritical
+		message = fmt.Sprintf("备份任务 %s 恢复失败", job.Name)
+	}
+
+	_ = m.notifier.NotifyBackupEvent(context.WithoutCancel(ctx), NotificationEvent{
+		Type:          NotificationTypeRestore,
+		Level:         level,
+		Message:       message,
+		JobID:         job.ID,
+		JobName:       job.Name,
+		JobType:       job.Type,
+		RunID:         result.ID,
+		Status:        result.Status,
+		StartedAt:     result.StartedAt,
+		FinishedAt:    result.FinishedAt,
+		Source:        sanitizeBackupTargetForAPI(effectiveSource(job, m.storageRoot)),
+		Destination:   backupTargetForAPI(job),
+		TargetPath:    sanitizeBackupTargetForAPI(result.TargetPath),
+		SnapshotPath:  sanitizeBackupTargetForAPI(result.SnapshotPath),
+		ManifestPath:  sanitizeBackupTargetForAPI(result.ManifestPath),
+		FileCount:     result.FileCount,
+		VerifiedBytes: result.VerifiedBytes,
+		Warnings:      sanitizeBackupMessagesForAPI(result.Warnings),
+		ErrorMessage:  sanitizeBackupMessageForAPI(result.ErrorMessage),
+		Timestamp:     time.Now().UTC(),
+	})
+}
+
+func (m *Manager) notifyRestoreVerify(ctx context.Context, job config.BackupJobConfig, result *RestoreVerifyResult) {
+	if m.notifier == nil || result == nil {
+		return
+	}
+	if result.Status != StatusFailed && len(result.Warnings) == 0 {
+		return
+	}
+
+	level := NotificationLevelWarning
+	message := fmt.Sprintf("备份任务 %s 恢复校验存在警告", job.Name)
+	if result.Status == StatusFailed {
+		level = NotificationLevelCritical
+		message = fmt.Sprintf("备份任务 %s 恢复校验失败", job.Name)
+	}
+
+	_ = m.notifier.NotifyBackupEvent(context.WithoutCancel(ctx), NotificationEvent{
+		Type:          NotificationTypeRestoreVerify,
+		Level:         level,
+		Message:       message,
+		JobID:         job.ID,
+		JobName:       job.Name,
+		JobType:       job.Type,
+		RunID:         result.ID,
+		Status:        result.Status,
+		StartedAt:     result.StartedAt,
+		FinishedAt:    result.FinishedAt,
+		Source:        sanitizeBackupTargetForAPI(effectiveSource(job, m.storageRoot)),
+		Destination:   backupTargetForAPI(job),
+		TargetPath:    sanitizeBackupTargetForAPI(result.TargetPath),
+		SnapshotPath:  sanitizeBackupTargetForAPI(result.SnapshotPath),
+		ManifestPath:  sanitizeBackupTargetForAPI(result.ManifestPath),
+		FileCount:     result.FileCount,
+		VerifiedBytes: result.VerifiedBytes,
+		Warnings:      sanitizeBackupMessagesForAPI(result.Warnings),
+		ErrorMessage:  sanitizeBackupMessageForAPI(result.ErrorMessage),
+		Timestamp:     time.Now().UTC(),
 	})
 }
 
@@ -870,12 +1049,12 @@ func (m *Manager) notifyRetentionCheck(ctx context.Context, job config.BackupJob
 		Status:        result.Status,
 		StartedAt:     result.StartedAt,
 		FinishedAt:    result.FinishedAt,
-		Destination:   result.Target,
+		Destination:   sanitizeBackupTargetForAPI(result.Target),
 		SnapshotCount: result.SnapshotCount,
 		FileCount:     result.FileCount,
 		TotalBytes:    result.TotalBytes,
-		Warnings:      append([]string(nil), result.Warnings...),
-		ErrorMessage:  result.ErrorMessage,
+		Warnings:      sanitizeBackupMessagesForAPI(result.Warnings),
+		ErrorMessage:  sanitizeBackupMessageForAPI(result.ErrorMessage),
 		Timestamp:     time.Now().UTC(),
 	})
 }
@@ -946,8 +1125,8 @@ func (m *Manager) restoreDrillReminderEventLocked(job config.BackupJobConfig, st
 		JobName:             job.Name,
 		JobType:             job.Type,
 		Trigger:             NotificationTriggerReminder,
-		Source:              effectiveSource(job, m.storageRoot),
-		Destination:         backupTarget(job),
+		Source:              sanitizeBackupTargetForAPI(effectiveSource(job, m.storageRoot)),
+		Destination:         backupTargetForAPI(job),
 		LastSuccessfulRunAt: &lastSuccessfulRunAtPtr,
 		StaleAfter:          formatDurationForAPI(staleAfter),
 		ReminderCooldown:    formatDurationForAPI(restoreDrillReminderCooldown),
@@ -978,8 +1157,8 @@ func (m *Manager) restoreDrillReminderEventLocked(job config.BackupJobConfig, st
 	base.Status = "stale"
 	base.StartedAt = state.LastRestoreDrill.StartedAt
 	base.FinishedAt = cloneTime(state.LastRestoreDrill.FinishedAt)
-	base.SnapshotPath = state.LastRestoreDrill.SnapshotPath
-	base.ManifestPath = state.LastRestoreDrill.ManifestPath
+	base.SnapshotPath = sanitizeBackupTargetForAPI(state.LastRestoreDrill.SnapshotPath)
+	base.ManifestPath = sanitizeBackupTargetForAPI(state.LastRestoreDrill.ManifestPath)
 	base.FileCount = state.LastRestoreDrill.FileCount
 	base.VerifiedBytes = state.LastRestoreDrill.VerifiedBytes
 	base.LastRestoreDrillAt = &lastRestoreDrillAtPtr
@@ -1019,14 +1198,14 @@ func (m *Manager) jobViewLocked(id string, job config.BackupJobConfig) JobView {
 	retentionStatus, retentionMessage := retentionHealth(job, state)
 	restoreDrillHistory := restoreDrillHistoryForView(state)
 	restoreDrillStats := buildRestoreDrillStats(restoreDrillHistory)
-	return JobView{
+	view := JobView{
 		ID:                         job.ID,
 		Name:                       job.Name,
 		Type:                       job.Type,
-		Source:                     effectiveSource(job, m.storageRoot),
-		Destination:                backupTarget(job),
-		Repository:                 job.Repository,
-		Remote:                     job.Remote,
+		Source:                     sanitizeBackupTargetForAPI(effectiveSource(job, m.storageRoot)),
+		Destination:                backupTargetForAPI(job),
+		Repository:                 sanitizeBackupTargetForAPI(job.Repository),
+		Remote:                     sanitizeBackupTargetForAPI(job.Remote),
 		Command:                    backupViewCommand(job),
 		Disabled:                   job.Disabled,
 		ScheduleInterval:           formatDurationForAPI(job.ScheduleInterval),
@@ -1059,6 +1238,10 @@ func (m *Manager) jobViewLocked(id string, job config.BackupJobConfig) JobView {
 		RestoreHistory:             cloneRestoreResults(state.RestoreHistory),
 		LastRetentionCheck:         cloneRetentionCheckResult(state.LastRetentionCheck),
 	}
+	matchingRestoreVerify := cloneRestoreVerifyResult(matchingRestoreVerifyForRestore(state.LastRestore, state.LastRestoreVerify))
+	view.LastMatchingRestoreVerify = matchingRestoreVerify
+	view.RestoreReportFindings = restoreReportFindingsWithMatchingVerify(view, matchingRestoreVerify)
+	return view
 }
 
 func (m *Manager) runBackup(ctx context.Context, job config.BackupJobConfig, result *RunResult) error {
@@ -1093,6 +1276,12 @@ func (m *Manager) runLocalBackup(ctx context.Context, job config.BackupJobConfig
 	if err := rootio.MkdirPathNoFollow(partialPath, 0700); err != nil {
 		return fmt.Errorf("create partial snapshot: %w", mapBackupNoFollowError(err, "destination"))
 	}
+	cleanupPartial := true
+	defer func() {
+		if cleanupPartial {
+			_ = removeAllBackupPath(partialPath, "partial snapshot")
+		}
+	}()
 
 	dataPath := filepath.Join(partialPath, "data")
 	entries, totalBytes, err := copySourceTree(ctx, source, dataPath, job.Exclude)
@@ -1104,8 +1293,12 @@ func (m *Manager) runLocalBackup(ctx context.Context, job config.BackupJobConfig
 		if err != nil {
 			return err
 		}
+		nextTotalBytes, err := addManifestEntrySize(totalBytes, entry.Size)
+		if err != nil {
+			return err
+		}
 		entries = append(entries, *entry)
-		totalBytes += entry.Size
+		totalBytes = nextTotalBytes
 		result.ConfigIncluded = true
 	}
 	sort.Slice(entries, func(i, j int) bool {
@@ -1136,6 +1329,7 @@ func (m *Manager) runLocalBackup(ctx context.Context, job config.BackupJobConfig
 	if err := rootio.ReplaceEmptyDirPathNoFollow(partialPath, finalPath); err != nil {
 		return fmt.Errorf("finalize backup snapshot: %w", mapBackupNoFollowError(err, "destination"))
 	}
+	cleanupPartial = false
 
 	result.SnapshotPath = finalPath
 	result.ManifestPath = filepath.Join(finalPath, manifestFileName)
@@ -1154,6 +1348,9 @@ func (m *Manager) runResticBackup(ctx context.Context, job config.BackupJobConfi
 	}
 	if strings.TrimSpace(job.PasswordFile) == "" {
 		return fmt.Errorf("%w: restic password_file is empty", ErrUnsafePath)
+	}
+	if err := validateRemoteCredentialFiles(job, source, m.storageRoot); err != nil {
+		return err
 	}
 	if err := validateSourceTreeNoSymlinks(ctx, source); err != nil {
 		return err
@@ -1183,6 +1380,9 @@ func (m *Manager) runRcloneBackup(ctx context.Context, job config.BackupJobConfi
 	}
 	if strings.TrimSpace(job.Remote) == "" {
 		return fmt.Errorf("%w: rclone remote is empty", ErrUnsafePath)
+	}
+	if err := validateRemoteCredentialFiles(job, source, m.storageRoot); err != nil {
+		return err
 	}
 	if err := validateSourceTreeNoSymlinks(ctx, source); err != nil {
 		return err
@@ -1228,6 +1428,10 @@ func (m *Manager) runRestoreDrill(ctx context.Context, job config.BackupJobConfi
 		return err
 	}
 
+	if _, _, err := verifyManifestFiles(ctx, snapshotPath, manifest); err != nil {
+		return fmt.Errorf("verify backup snapshot: %w", err)
+	}
+
 	drillRoot := filepath.Join(job.Destination, job.ID, "restore-drills", result.ID)
 	restoredPath := filepath.Join(drillRoot, "restored")
 	if err := rootio.MkdirAllPathNoFollow(restoredPath, 0700); err != nil {
@@ -1236,27 +1440,36 @@ func (m *Manager) runRestoreDrill(ctx context.Context, job config.BackupJobConfi
 	cleanupDrill := !opts.KeepArtifact
 	defer func() {
 		if cleanupDrill {
-			if err := validatePathComponentsNoSymlink(drillRoot, "restore drill"); err == nil {
-				_ = os.RemoveAll(drillRoot)
-			}
+			_ = removeAllBackupPath(drillRoot, "restore drill")
 		}
 	}()
 
+	directoryModes, err := restoreSnapshotDirectories(ctx, snapshotPath, "data", filepath.Join(restoredPath, "data"))
+	if err != nil {
+		return err
+	}
 	for _, entry := range manifest.Entries {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		sourcePath, err := safeJoin(snapshotPath, entry.ArchivePath)
+		archivePath := filepath.ToSlash(entry.ArchivePath)
+		if err := validateRestoreManifestFileEntry(archivePath, entry.Size); err != nil {
+			return err
+		}
+		sourcePath, err := safeJoin(snapshotPath, archivePath)
 		if err != nil {
 			return err
 		}
-		destinationPath, err := safeJoin(restoredPath, entry.ArchivePath)
+		destinationPath, err := safeJoin(restoredPath, archivePath)
 		if err != nil {
 			return err
 		}
-		if _, err := copyHostFileWithHash(ctx, sourcePath, destinationPath, entry.ArchivePath, entry.SourcePath); err != nil {
-			return fmt.Errorf("restore %s: %w", entry.ArchivePath, err)
+		if _, err := copyHostFileWithHash(ctx, sourcePath, destinationPath, archivePath, entry.SourcePath); err != nil {
+			return fmt.Errorf("restore %s: %w", archivePath, err)
 		}
+	}
+	if err := applyDirectoryModesNoFollow(filepath.Join(restoredPath, "data"), directoryModes, "restore target"); err != nil {
+		return err
 	}
 
 	fileCount, verifiedBytes, err := verifyManifestFiles(ctx, restoredPath, manifest)
@@ -1296,6 +1509,9 @@ func (m *Manager) runLocalRestorePreview(ctx context.Context, job config.BackupJ
 	if err != nil {
 		return err
 	}
+	if err := verifyManifestTreeContents(ctx, snapshotPath, manifest); err != nil {
+		return err
+	}
 	fileCount, totalBytes, configAvailable, configIncluded, samples, err := summarizeManifestRestorePreview(ctx, manifest, opts.IncludeConfig)
 	if err != nil {
 		return err
@@ -1314,10 +1530,14 @@ func (m *Manager) runLocalRestorePreview(ctx context.Context, job config.BackupJ
 }
 
 func (m *Manager) runRcloneRestorePreview(ctx context.Context, job config.BackupJobConfig, opts RestorePreviewOptions, result *RestorePreviewResult) error {
+	source := effectiveSource(job, m.storageRoot)
 	if strings.TrimSpace(job.Remote) == "" {
 		return fmt.Errorf("%w: rclone remote is empty", ErrUnsafePath)
 	}
-	targetPath, err := validateRestoreTarget(effectiveSource(job, m.storageRoot), backupTarget(job), m.storageRoot, opts.TargetPath)
+	if err := validateRemoteCredentialFiles(job, source, m.storageRoot); err != nil {
+		return err
+	}
+	targetPath, err := validateRestoreTarget(source, backupTarget(job), m.storageRoot, opts.TargetPath)
 	if err != nil {
 		return err
 	}
@@ -1354,6 +1574,9 @@ func (m *Manager) runResticRestorePreview(ctx context.Context, job config.Backup
 	}
 	if strings.TrimSpace(job.PasswordFile) == "" {
 		return fmt.Errorf("%w: restic password_file is empty", ErrUnsafePath)
+	}
+	if err := validateRemoteCredentialFiles(job, source, m.storageRoot); err != nil {
+		return err
 	}
 	targetPath, err := validateRestoreTarget(source, backupTarget(job), m.storageRoot, opts.TargetPath)
 	if err != nil {
@@ -1405,7 +1628,7 @@ func (m *Manager) runRestoreVerify(ctx context.Context, job config.BackupJobConf
 	}
 
 	configPath := filepath.Join(targetPath, ".mnemonas-restore", "config.toml")
-	configFound, err := regularFileExistsNoFollow(configPath)
+	configFound, err := regularFileExistsStrictNoFollow(configPath)
 	if err != nil {
 		warnings = appendRestoreVerificationWarning(warnings, fmt.Sprintf("检查配置文件失败: %v", err))
 	}
@@ -1426,6 +1649,13 @@ func (m *Manager) runRestoreVerify(ctx context.Context, job config.BackupJobConf
 		warnings = appendRestoreVerificationWarning(warnings, fmt.Sprintf("检查对象目录失败: %v", err))
 	}
 
+	if job.Type == JobTypeLocal {
+		var compareErr error
+		warnings, compareErr = m.appendLocalRestoreSnapshotWarnings(ctx, job, targetPath, result, warnings)
+		if compareErr != nil {
+			return compareErr
+		}
+	}
 	if fileCount == 0 {
 		warnings = appendRestoreVerificationWarning(warnings, "目标目录未发现常规文件")
 	}
@@ -1485,7 +1715,7 @@ func (m *Manager) runLocalRestore(ctx context.Context, job config.BackupJobConfi
 	cleanupPartial := true
 	defer func() {
 		if cleanupPartial {
-			_ = os.RemoveAll(partialPath)
+			_ = removeAllBackupPath(partialPath, "restore staging target")
 		}
 	}()
 
@@ -1509,10 +1739,14 @@ func (m *Manager) runLocalRestore(ctx context.Context, job config.BackupJobConfi
 }
 
 func (m *Manager) runRcloneRestore(ctx context.Context, job config.BackupJobConfig, opts RestoreOptions, result *RestoreResult) error {
+	source := effectiveSource(job, m.storageRoot)
 	if strings.TrimSpace(job.Remote) == "" {
 		return fmt.Errorf("%w: rclone remote is empty", ErrUnsafePath)
 	}
-	targetPath, err := validateRestoreTarget(effectiveSource(job, m.storageRoot), backupTarget(job), m.storageRoot, opts.TargetPath)
+	if err := validateRemoteCredentialFiles(job, source, m.storageRoot); err != nil {
+		return err
+	}
+	targetPath, err := validateRestoreTarget(source, backupTarget(job), m.storageRoot, opts.TargetPath)
 	if err != nil {
 		return err
 	}
@@ -1523,7 +1757,7 @@ func (m *Manager) runRcloneRestore(ctx context.Context, job config.BackupJobConf
 	cleanupPartial := true
 	defer func() {
 		if cleanupPartial {
-			_ = os.RemoveAll(partialPath)
+			_ = removeAllBackupPath(partialPath, "restore staging target")
 		}
 	}()
 
@@ -1567,6 +1801,9 @@ func (m *Manager) runResticRestore(ctx context.Context, job config.BackupJobConf
 	if strings.TrimSpace(job.PasswordFile) == "" {
 		return fmt.Errorf("%w: restic password_file is empty", ErrUnsafePath)
 	}
+	if err := validateRemoteCredentialFiles(job, source, m.storageRoot); err != nil {
+		return err
+	}
 	targetPath, err := validateRestoreTarget(source, backupTarget(job), m.storageRoot, opts.TargetPath)
 	if err != nil {
 		return err
@@ -1577,17 +1814,17 @@ func (m *Manager) runResticRestore(ctx context.Context, job config.BackupJobConf
 	}
 	rawPath, err := createNamedRestoreTarget(targetPath, ".restic-"+result.ID)
 	if err != nil {
-		_ = os.RemoveAll(partialPath)
+		_ = removeAllBackupPath(partialPath, "restore staging target")
 		return err
 	}
 	cleanupPartial := true
 	cleanupRaw := true
 	defer func() {
 		if cleanupRaw {
-			_ = os.RemoveAll(rawPath)
+			_ = removeAllBackupPath(rawPath, "restic restore staging target")
 		}
 		if cleanupPartial {
-			_ = os.RemoveAll(partialPath)
+			_ = removeAllBackupPath(partialPath, "restore staging target")
 		}
 	}()
 
@@ -1611,7 +1848,7 @@ func (m *Manager) runResticRestore(ctx context.Context, job config.BackupJobConf
 	if err != nil {
 		return err
 	}
-	if err := os.RemoveAll(rawPath); err != nil {
+	if err := removeAllBackupPath(rawPath, "restic restore staging target"); err != nil {
 		return fmt.Errorf("cleanup restic restore staging: %w", err)
 	}
 	cleanupRaw = false
@@ -1629,11 +1866,15 @@ func (m *Manager) runResticRestore(ctx context.Context, job config.BackupJobConf
 }
 
 func (m *Manager) runResticRestoreDrill(ctx context.Context, job config.BackupJobConfig, result *RestoreDrillResult) error {
+	source := effectiveSource(job, m.storageRoot)
 	if strings.TrimSpace(job.Repository) == "" {
 		return fmt.Errorf("%w: restic repository is empty", ErrUnsafePath)
 	}
 	if strings.TrimSpace(job.PasswordFile) == "" {
 		return fmt.Errorf("%w: restic password_file is empty", ErrUnsafePath)
+	}
+	if err := validateRemoteCredentialFiles(job, source, m.storageRoot); err != nil {
+		return err
 	}
 	if err := runExternalCommand(ctx, backupCommand(job, JobTypeRestic), "-r", job.Repository, "--password-file", job.PasswordFile, "check"); err != nil {
 		return err
@@ -1649,6 +1890,9 @@ func (m *Manager) runRcloneRestoreDrill(ctx context.Context, job config.BackupJo
 	}
 	if strings.TrimSpace(job.Remote) == "" {
 		return fmt.Errorf("%w: rclone remote is empty", ErrUnsafePath)
+	}
+	if err := validateRemoteCredentialFiles(job, source, m.storageRoot); err != nil {
+		return err
 	}
 	if err := validateSourceTreeNoSymlinks(ctx, source); err != nil {
 		return err
@@ -1722,7 +1966,7 @@ func (m *Manager) runLocalRetentionCheck(ctx context.Context, job config.BackupJ
 	if err := validateDestination(effectiveSource(job, m.storageRoot), job.Destination, m.storageRoot); err != nil {
 		return err
 	}
-	snapshots, err := listLocalSnapshots(job)
+	snapshots, err := listLocalSnapshots(ctx, job)
 	if err != nil {
 		return err
 	}
@@ -1747,11 +1991,15 @@ func (m *Manager) runLocalRetentionCheck(ctx context.Context, job config.BackupJ
 }
 
 func (m *Manager) runResticRetentionCheck(ctx context.Context, job config.BackupJobConfig, result *RetentionCheckResult) error {
+	source := effectiveSource(job, m.storageRoot)
 	if strings.TrimSpace(job.Repository) == "" {
 		return fmt.Errorf("%w: restic repository is empty", ErrUnsafePath)
 	}
 	if strings.TrimSpace(job.PasswordFile) == "" {
 		return fmt.Errorf("%w: restic password_file is empty", ErrUnsafePath)
+	}
+	if err := validateRemoteCredentialFiles(job, source, m.storageRoot); err != nil {
+		return err
 	}
 	args := []string{
 		"-r", job.Repository,
@@ -1786,8 +2034,12 @@ func (m *Manager) runResticRetentionCheck(ctx context.Context, job config.Backup
 }
 
 func (m *Manager) runRcloneRetentionCheck(ctx context.Context, job config.BackupJobConfig, result *RetentionCheckResult) error {
+	source := effectiveSource(job, m.storageRoot)
 	if strings.TrimSpace(job.Remote) == "" {
 		return fmt.Errorf("%w: rclone remote is empty", ErrUnsafePath)
+	}
+	if err := validateRemoteCredentialFiles(job, source, m.storageRoot); err != nil {
+		return err
 	}
 	args := append(rcloneBaseArgs(job), "lsjson", job.Remote, "--recursive", "--files-only")
 	for _, pattern := range job.Exclude {
@@ -1820,20 +2072,6 @@ func (m *Manager) latestManifest(job config.BackupJobConfig) (string, string, Ma
 	if err := validateDestination(effectiveSource(job, m.storageRoot), job.Destination, m.storageRoot); err != nil {
 		return "", "", Manifest{}, err
 	}
-
-	m.mu.Lock()
-	state := m.state.Jobs[job.ID]
-	lastRun := cloneRunResult(state.LastRun)
-	m.mu.Unlock()
-
-	if lastRun != nil && lastRun.Status == StatusCompleted && lastRun.ManifestPath != "" && fileExists(lastRun.ManifestPath) {
-		manifest, err := readManifest(lastRun.ManifestPath)
-		if err != nil {
-			return "", "", Manifest{}, err
-		}
-		return lastRun.SnapshotPath, lastRun.ManifestPath, manifest, nil
-	}
-
 	snapshotsPath := filepath.Join(job.Destination, job.ID, "snapshots")
 	snapshotDir, err := rootio.OpenDirPathNoFollow(snapshotsPath)
 	if err != nil {
@@ -1850,26 +2088,75 @@ func (m *Manager) latestManifest(job config.BackupJobConfig) (string, string, Ma
 	if closeErr != nil {
 		return "", "", Manifest{}, fmt.Errorf("close backup snapshots: %w", closeErr)
 	}
-	names := make([]string, 0, len(entries))
-	for _, entry := range entries {
-		if entry.IsDir() && !strings.HasSuffix(entry.Name(), ".partial") {
-			names = append(names, entry.Name())
-		}
+	names, err := localSnapshotDirectoryNames(entries)
+	if err != nil {
+		return "", "", Manifest{}, err
 	}
+
+	m.mu.Lock()
+	state := m.state.Jobs[job.ID]
+	lastRun := cloneRunResultRaw(state.LastRun)
+	m.mu.Unlock()
+
+	if lastRun != nil && lastRun.Status == StatusCompleted && lastRun.ManifestPath != "" {
+		if err := validateSnapshotManifestLocation(job, lastRun.ID, lastRun.SnapshotPath, lastRun.ManifestPath); err != nil {
+			return "", "", Manifest{}, err
+		}
+		exists, err := backupManifestFileExistsNoFollow(lastRun.ManifestPath)
+		if err != nil {
+			return "", "", Manifest{}, err
+		}
+		if !exists {
+			return "", "", Manifest{}, fmt.Errorf("%w: latest backup snapshot %q is missing manifest", ErrUnsafePath, cleanPreviewSamplePath(lastRun.ID))
+		}
+		manifest, err := readManifest(lastRun.ManifestPath)
+		if err != nil {
+			return "", "", Manifest{}, err
+		}
+		if err := validateSnapshotManifestIdentity(job.ID, lastRun.ID, manifest); err != nil {
+			return "", "", Manifest{}, err
+		}
+		return lastRun.SnapshotPath, lastRun.ManifestPath, manifest, nil
+	}
+
 	sort.Sort(sort.Reverse(sort.StringSlice(names)))
 	for _, name := range names {
 		snapshotPath := filepath.Join(snapshotsPath, name)
 		manifestPath := filepath.Join(snapshotPath, manifestFileName)
-		if !fileExists(manifestPath) {
-			continue
+		exists, err := backupManifestFileExistsNoFollow(manifestPath)
+		if err != nil {
+			return "", "", Manifest{}, err
+		}
+		if !exists {
+			return "", "", Manifest{}, fmt.Errorf("%w: backup snapshot %q is missing manifest", ErrUnsafePath, cleanPreviewSamplePath(name))
 		}
 		manifest, err := readManifest(manifestPath)
 		if err != nil {
 			return "", "", Manifest{}, err
 		}
+		if err := validateSnapshotManifestIdentity(job.ID, name, manifest); err != nil {
+			return "", "", Manifest{}, err
+		}
 		return snapshotPath, manifestPath, manifest, nil
 	}
 	return "", "", Manifest{}, ErrNoSnapshots
+}
+
+func localSnapshotDirectoryNames(entries []fs.DirEntry) ([]string, error) {
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() && strings.HasSuffix(entry.Name(), ".partial") {
+			continue
+		}
+		if !entry.IsDir() {
+			return nil, fmt.Errorf("%w: backup snapshots directory contains non-snapshot entry %q", ErrUnsafePath, cleanPreviewSamplePath(entry.Name()))
+		}
+		if _, err := parseRunID(entry.Name()); err != nil {
+			return nil, fmt.Errorf("%w: backup snapshots directory contains non-snapshot directory %q", ErrUnsafePath, cleanPreviewSamplePath(entry.Name()))
+		}
+		names = append(names, entry.Name())
+	}
+	return names, nil
 }
 
 func (m *Manager) healthLocked(job config.BackupJobConfig, state JobState, running bool, now time.Time) (string, string) {
@@ -2059,7 +2346,7 @@ func (m *Manager) applyRetention(ctx context.Context, job config.BackupJobConfig
 	if job.MaxSnapshots <= 0 && job.MaxAge <= 0 {
 		return 0, nil
 	}
-	snapshots, err := listLocalSnapshots(job)
+	snapshots, err := listLocalSnapshots(ctx, job)
 	if err != nil {
 		return 0, []string{fmt.Sprintf("apply retention: %v", err)}
 	}
@@ -2101,7 +2388,7 @@ func (m *Manager) applyRetention(ctx context.Context, job config.BackupJobConfig
 			warnings = append(warnings, fmt.Sprintf("skip unsafe snapshot path %s", snapshot.Path))
 			continue
 		}
-		if err := os.RemoveAll(snapshot.Path); err != nil {
+		if err := removeAllBackupPath(snapshot.Path, "backup snapshot"); err != nil {
 			warnings = append(warnings, fmt.Sprintf("remove snapshot %s: %v", snapshot.Name, err))
 			continue
 		}
@@ -2116,7 +2403,7 @@ type snapshotInfo struct {
 	CreatedAt time.Time
 }
 
-func listLocalSnapshots(job config.BackupJobConfig) ([]snapshotInfo, error) {
+func listLocalSnapshots(ctx context.Context, job config.BackupJobConfig) ([]snapshotInfo, error) {
 	snapshotRoot := filepath.Join(job.Destination, job.ID, "snapshots")
 	snapshotDir, err := rootio.OpenDirPathNoFollow(snapshotRoot)
 	if err != nil {
@@ -2134,19 +2421,33 @@ func listLocalSnapshots(job config.BackupJobConfig) ([]snapshotInfo, error) {
 		return nil, fmt.Errorf("close snapshots: %w", closeErr)
 	}
 
-	snapshots := make([]snapshotInfo, 0, len(entries))
-	for _, entry := range entries {
-		if !entry.IsDir() || strings.HasSuffix(entry.Name(), ".partial") {
-			continue
+	names, err := localSnapshotDirectoryNames(entries)
+	if err != nil {
+		return nil, err
+	}
+
+	snapshots := make([]snapshotInfo, 0, len(names))
+	for _, name := range names {
+		if err := ctx.Err(); err != nil {
+			return nil, err
 		}
-		snapshotPath := filepath.Join(snapshotRoot, entry.Name())
-		createdAt := parseSnapshotTime(entry.Name())
+		snapshotPath := filepath.Join(snapshotRoot, name)
+		createdAt := parseSnapshotTime(name)
 		manifest, err := readManifest(filepath.Join(snapshotPath, manifestFileName))
-		if err == nil && !manifest.CreatedAt.IsZero() {
+		if err != nil {
+			return nil, fmt.Errorf("read snapshot manifest %s: %w", name, err)
+		}
+		if err := validateSnapshotManifestIdentity(job.ID, name, manifest); err != nil {
+			return nil, fmt.Errorf("read snapshot manifest %s: %w", name, err)
+		}
+		if err := verifyManifestTreeContents(ctx, snapshotPath, manifest); err != nil {
+			return nil, fmt.Errorf("read snapshot manifest %s: %w", name, err)
+		}
+		if !manifest.CreatedAt.IsZero() {
 			createdAt = manifest.CreatedAt
 		}
 		snapshots = append(snapshots, snapshotInfo{
-			Name:      entry.Name(),
+			Name:      name,
 			Path:      snapshotPath,
 			CreatedAt: createdAt.UTC(),
 		})
@@ -2184,11 +2485,11 @@ func fillRetentionSnapshotRange(result *RetentionCheckResult, times []time.Time)
 }
 
 func parseSnapshotTime(name string) time.Time {
-	parsed, err := time.Parse("20060102T150405.000000000Z", name)
+	parsed, err := parseRunID(name)
 	if err != nil {
 		return time.Time{}
 	}
-	return parsed.UTC()
+	return parsed
 }
 
 func copySourceTree(ctx context.Context, source, destination string, excludes []string) ([]ManifestEntry, int64, error) {
@@ -2200,7 +2501,11 @@ func copySourceTree(ctx context.Context, source, destination string, excludes []
 
 	var entries []ManifestEntry
 	var totalBytes int64
-	if err := copySourceTreeEntry(ctx, root, ".", destination, excludes, &entries, &totalBytes); err != nil {
+	var directoryModes []directoryMode
+	if err := copySourceTreeEntry(ctx, root, ".", destination, excludes, &entries, &totalBytes, &directoryModes); err != nil {
+		return nil, 0, err
+	}
+	if err := applyDirectoryModesNoFollow(destination, directoryModes, "destination"); err != nil {
 		return nil, 0, err
 	}
 	return entries, totalBytes, nil
@@ -2252,7 +2557,7 @@ func validateSourceTreeEntryNoSymlinks(ctx context.Context, root *os.Root, relPa
 	return nil
 }
 
-func copySourceTreeEntry(ctx context.Context, root *os.Root, relPath, destination string, excludes []string, entries *[]ManifestEntry, totalBytes *int64) error {
+func copySourceTreeEntry(ctx context.Context, root *os.Root, relPath, destination string, excludes []string, entries *[]ManifestEntry, totalBytes *int64, directoryModes *[]directoryMode) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -2277,11 +2582,16 @@ func copySourceTreeEntry(ctx context.Context, root *os.Root, relPath, destinatio
 
 	if info.IsDir() {
 		if relPath != "." {
-			if err := rootio.MkdirAllPathNoFollow(filepath.Join(destination, relPath), info.Mode().Perm()); err != nil {
+			destinationPath := filepath.Join(destination, relPath)
+			if err := rootio.MkdirAllPathNoFollow(destinationPath, writableDirectoryMode(info.Mode().Perm())); err != nil {
 				return fmt.Errorf("create backup directory %s: %w", relPath, mapBackupNoFollowError(err, "destination"))
 			}
-		} else if err := rootio.MkdirAllPathNoFollow(destination, 0700); err != nil {
-			return fmt.Errorf("create backup data directory: %w", mapBackupNoFollowError(err, "destination"))
+			*directoryModes = append(*directoryModes, directoryMode{RelPath: relPath, Mode: info.Mode().Perm()})
+		} else {
+			if err := rootio.MkdirAllPathNoFollow(destination, writableDirectoryMode(info.Mode().Perm())); err != nil {
+				return fmt.Errorf("create backup data directory: %w", mapBackupNoFollowError(err, "destination"))
+			}
+			*directoryModes = append(*directoryModes, directoryMode{RelPath: relPath, Mode: info.Mode().Perm()})
 		}
 
 		dir, err := rootio.OpenDirNoFollow(root, relPath)
@@ -2300,7 +2610,7 @@ func copySourceTreeEntry(ctx context.Context, root *os.Root, relPath, destinatio
 			return children[i].Name() < children[j].Name()
 		})
 		for _, child := range children {
-			if err := copySourceTreeEntry(ctx, root, childRelPath(relPath, child.Name()), destination, excludes, entries, totalBytes); err != nil {
+			if err := copySourceTreeEntry(ctx, root, childRelPath(relPath, child.Name()), destination, excludes, entries, totalBytes, directoryModes); err != nil {
 				return err
 			}
 		}
@@ -2322,8 +2632,12 @@ func copySourceTreeEntry(ctx context.Context, root *os.Root, relPath, destinatio
 	if err != nil {
 		return err
 	}
+	nextTotalBytes, err := addManifestEntrySize(*totalBytes, entry.Size)
+	if err != nil {
+		return err
+	}
 	*entries = append(*entries, *entry)
-	*totalBytes += entry.Size
+	*totalBytes = nextTotalBytes
 	return nil
 }
 
@@ -2390,9 +2704,12 @@ func copyOpenFileWithHash(ctx context.Context, source *os.File, sourceInfo os.Fi
 	defer func() {
 		_ = destination.Close()
 		if cleanup {
-			_ = os.Remove(destinationPath)
+			_ = rootio.RemoveAllPathNoFollow(destinationPath)
 		}
 	}()
+	if err := destination.Chmod(sourceInfo.Mode().Perm()); err != nil {
+		return nil, fmt.Errorf("set backup file mode %s: %w", archivePath, err)
+	}
 
 	hasher := sha256.New()
 	written, err := io.Copy(io.MultiWriter(destination, hasher), contextReader{ctx: ctx, reader: source})
@@ -2452,45 +2769,166 @@ func mapBackupNoFollowError(err error, label string) error {
 }
 
 func verifyManifestFiles(ctx context.Context, root string, manifest Manifest) (int64, int64, error) {
+	if err := validateManifestEntries(manifest); err != nil {
+		return 0, 0, err
+	}
+	if err := verifyManifestTreeContents(ctx, root, manifest); err != nil {
+		return 0, 0, err
+	}
+
 	var fileCount int64
 	var totalBytes int64
 	for _, entry := range manifest.Entries {
 		if err := ctx.Err(); err != nil {
 			return fileCount, totalBytes, err
 		}
-		filePath, err := safeJoin(root, entry.ArchivePath)
+		archivePath := filepath.ToSlash(entry.ArchivePath)
+		if err := validateRestoreManifestFileEntry(archivePath, entry.Size); err != nil {
+			return fileCount, totalBytes, err
+		}
+		filePath, err := safeJoin(root, archivePath)
 		if err != nil {
 			return fileCount, totalBytes, err
 		}
-		size, digest, err := hashFile(ctx, filePath)
+		size, digest, mode, err := hashFile(ctx, filePath)
 		if err != nil {
-			return fileCount, totalBytes, fmt.Errorf("hash %s: %w", entry.ArchivePath, err)
+			return fileCount, totalBytes, fmt.Errorf("hash %s: %w", archivePath, err)
 		}
 		if size != entry.Size {
-			return fileCount, totalBytes, fmt.Errorf("size mismatch for %s: got %d, want %d", entry.ArchivePath, size, entry.Size)
+			return fileCount, totalBytes, fmt.Errorf("size mismatch for %s: got %d, want %d", archivePath, size, entry.Size)
 		}
 		if digest != entry.SHA256 {
-			return fileCount, totalBytes, fmt.Errorf("checksum mismatch for %s", entry.ArchivePath)
+			return fileCount, totalBytes, fmt.Errorf("checksum mismatch for %s", archivePath)
+		}
+		if mode != manifestEntryMode(entry) {
+			return fileCount, totalBytes, fmt.Errorf("mode mismatch for %s: got %04o, want %04o", archivePath, mode, manifestEntryMode(entry))
+		}
+		nextTotalBytes, err := addManifestEntrySize(totalBytes, size)
+		if err != nil {
+			return fileCount, totalBytes, err
 		}
 		fileCount++
-		totalBytes += size
+		totalBytes = nextTotalBytes
 	}
 	return fileCount, totalBytes, nil
 }
 
-func hashFile(ctx context.Context, filePath string) (int64, string, error) {
-	file, _, err := openRegularFileNoFollow(filePath, filePath)
+func verifyManifestTreeContents(ctx context.Context, root string, manifest Manifest) error {
+	state := manifestTreeVerification{
+		expectedFiles: make(map[string]struct{}, len(manifest.Entries)+1),
+		seenFiles:     make(map[string]struct{}, len(manifest.Entries)),
+	}
+	state.expectedFiles[manifestFileName] = struct{}{}
+	for _, entry := range manifest.Entries {
+		archivePath := filepath.ToSlash(entry.ArchivePath)
+		state.expectedFiles[archivePath] = struct{}{}
+		if strings.HasPrefix(archivePath, "config/") {
+			state.allowConfigDir = true
+		}
+	}
+
+	if err := verifyManifestTreeEntry(ctx, root, ".", &state); err != nil {
+		return fmt.Errorf("verify backup snapshot tree: %w", err)
+	}
+	if !state.seenDataRoot {
+		return fmt.Errorf("%w: backup snapshot is missing data directory", ErrUnsafePath)
+	}
+	for _, entry := range manifest.Entries {
+		archivePath := filepath.ToSlash(entry.ArchivePath)
+		if _, ok := state.seenFiles[archivePath]; !ok {
+			return fmt.Errorf("%w: backup snapshot is missing manifest file %q", ErrUnsafePath, cleanPreviewSamplePath(archivePath))
+		}
+	}
+	return nil
+}
+
+type manifestTreeVerification struct {
+	expectedFiles  map[string]struct{}
+	seenFiles      map[string]struct{}
+	allowConfigDir bool
+	seenDataRoot   bool
+}
+
+func verifyManifestTreeEntry(ctx context.Context, root string, relPath string, state *manifestTreeVerification) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	entryPath := root
+	if relPath != "." {
+		entryPath = filepath.Join(root, relPath)
+	}
+	relSlash := filepath.ToSlash(relPath)
+	info, err := os.Lstat(entryPath)
 	if err != nil {
-		return 0, "", err
+		return fmt.Errorf("stat backup snapshot entry %s: %w", relSlash, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("%w: backup snapshot contains a symlink: %s", ErrUnsafePath, relSlash)
+	}
+	if info.IsDir() {
+		if relPath != "." {
+			if relSlash == "data" {
+				state.seenDataRoot = true
+			}
+			if !isAllowedManifestSnapshotDirectory(relSlash, state.allowConfigDir) {
+				return fmt.Errorf("%w: backup snapshot contains unmanifested directory %q", ErrUnsafePath, cleanPreviewSamplePath(relSlash))
+			}
+		}
+		dir, err := rootio.OpenDirPathNoFollow(entryPath)
+		if err != nil {
+			return fmt.Errorf("open backup snapshot directory %s: %w", relSlash, mapBackupNoFollowError(err, "backup snapshot"))
+		}
+		children, readErr := dir.ReadDir(-1)
+		closeErr := dir.Close()
+		if readErr != nil {
+			return fmt.Errorf("read backup snapshot directory %s: %w", relSlash, readErr)
+		}
+		if closeErr != nil {
+			return fmt.Errorf("close backup snapshot directory %s: %w", relSlash, closeErr)
+		}
+		sort.Slice(children, func(i, j int) bool {
+			return children[i].Name() < children[j].Name()
+		})
+		for _, child := range children {
+			if err := verifyManifestTreeEntry(ctx, root, childRelPath(relPath, child.Name()), state); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if relPath == "." {
+		return fmt.Errorf("%w: backup snapshot root is not a directory", ErrUnsafePath)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("%w: backup snapshot contains unsupported file type: %s", ErrUnsupportedFileType, relSlash)
+	}
+	if _, ok := state.expectedFiles[relSlash]; !ok {
+		return fmt.Errorf("%w: backup snapshot contains unmanifested file %q", ErrUnsafePath, cleanPreviewSamplePath(relSlash))
+	}
+	if relSlash != manifestFileName {
+		state.seenFiles[relSlash] = struct{}{}
+	}
+	return nil
+}
+
+func isAllowedManifestSnapshotDirectory(relPath string, allowConfigDir bool) bool {
+	return relPath == "data" || strings.HasPrefix(relPath, "data/") || (allowConfigDir && relPath == "config")
+}
+
+func hashFile(ctx context.Context, filePath string) (int64, string, os.FileMode, error) {
+	file, info, err := openRegularFileNoFollow(filePath, filePath)
+	if err != nil {
+		return 0, "", 0, err
 	}
 	defer file.Close()
 
 	hasher := sha256.New()
 	size, err := io.Copy(hasher, contextReader{ctx: ctx, reader: file})
 	if err != nil {
-		return 0, "", err
+		return 0, "", 0, err
 	}
-	return size, hex.EncodeToString(hasher.Sum(nil)), nil
+	return size, hex.EncodeToString(hasher.Sum(nil)), info.Mode().Perm(), nil
 }
 
 type contextReader struct {
@@ -2510,9 +2948,9 @@ func (m *Manager) updateLastRun(result *RunResult) error {
 	defer m.mu.Unlock()
 
 	state := m.state.Jobs[result.JobID]
-	state.LastRun = cloneRunResult(result)
+	state.LastRun = cloneRunResultRaw(result)
 	if result.Status == StatusCompleted {
-		state.LastSuccessfulRun = cloneRunResult(result)
+		state.LastSuccessfulRun = cloneRunResultRaw(result)
 	}
 	m.state.Jobs[result.JobID] = state
 	return m.saveStateLocked()
@@ -2523,7 +2961,7 @@ func (m *Manager) updateLastRestoreDrill(result *RestoreDrillResult, appendHisto
 	defer m.mu.Unlock()
 
 	state := m.state.Jobs[result.JobID]
-	state.LastRestoreDrill = cloneRestoreDrillResult(result)
+	state.LastRestoreDrill = cloneRestoreDrillResultRaw(result)
 	if appendHistory {
 		state.RestoreDrillHistory = prependRestoreDrillHistory(state.RestoreDrillHistory, result)
 	}
@@ -2536,7 +2974,7 @@ func (m *Manager) updateLastRestore(result *RestoreResult, appendHistory bool) e
 	defer m.mu.Unlock()
 
 	state := m.state.Jobs[result.JobID]
-	state.LastRestore = cloneRestoreResult(result)
+	state.LastRestore = cloneRestoreResultRaw(result)
 	if appendHistory {
 		state.RestoreHistory = prependRestoreHistory(state.RestoreHistory, result)
 	}
@@ -2549,7 +2987,7 @@ func (m *Manager) updateLastRestoreVerify(result *RestoreVerifyResult) error {
 	defer m.mu.Unlock()
 
 	state := m.state.Jobs[result.JobID]
-	state.LastRestoreVerify = cloneRestoreVerifyResult(result)
+	state.LastRestoreVerify = cloneRestoreVerifyResultRaw(result)
 	m.state.Jobs[result.JobID] = state
 	return m.saveStateLocked()
 }
@@ -2559,7 +2997,7 @@ func (m *Manager) updateLastRetentionCheck(result *RetentionCheckResult) error {
 	defer m.mu.Unlock()
 
 	state := m.state.Jobs[result.JobID]
-	state.LastRetentionCheck = cloneRetentionCheckResult(result)
+	state.LastRetentionCheck = cloneRetentionCheckResultRaw(result)
 	m.state.Jobs[result.JobID] = state
 	return m.saveStateLocked()
 }
@@ -2588,7 +3026,99 @@ func (m *Manager) loadState() error {
 		state.Jobs = map[string]JobState{}
 	}
 	m.state = state
+	if m.recoverInterruptedJobStates(m.now().UTC()) {
+		return m.saveStateLocked()
+	}
 	return nil
+}
+
+func (m *Manager) recoverInterruptedJobStates(finishedAt time.Time) bool {
+	changed := false
+	for jobID, state := range m.state.Jobs {
+		if recoverInterruptedRunResult(state.LastRun, finishedAt) {
+			changed = true
+		}
+		if recoverInterruptedRestoreDrillResult(state.LastRestoreDrill, finishedAt) {
+			state.RestoreDrillHistory = prependRestoreDrillHistory(state.RestoreDrillHistory, state.LastRestoreDrill)
+			changed = true
+		}
+		if recoverInterruptedRestoreResult(state.LastRestore, finishedAt) {
+			state.RestoreHistory = prependRestoreHistory(state.RestoreHistory, state.LastRestore)
+			changed = true
+		}
+		if recoverInterruptedRestoreVerifyResult(state.LastRestoreVerify, finishedAt) {
+			changed = true
+		}
+		if recoverInterruptedRetentionCheckResult(state.LastRetentionCheck, finishedAt) {
+			changed = true
+		}
+		m.state.Jobs[jobID] = state
+	}
+	return changed
+}
+
+func recoverInterruptedRunResult(result *RunResult, finishedAt time.Time) bool {
+	if result == nil || result.Status != StatusRunning {
+		return false
+	}
+	result.Status = StatusFailed
+	result.ErrorMessage = interruptedStatusMessage
+	finishInterruptedTask(&result.FinishedAt, &result.DurationMs, result.StartedAt, finishedAt)
+	return true
+}
+
+func recoverInterruptedRestoreDrillResult(result *RestoreDrillResult, finishedAt time.Time) bool {
+	if result == nil || result.Status != StatusRunning {
+		return false
+	}
+	result.Status = StatusFailed
+	result.ErrorMessage = interruptedStatusMessage
+	result.FailureCategory = FailureCategoryCancelled
+	finishInterruptedTask(&result.FinishedAt, &result.DurationMs, result.StartedAt, finishedAt)
+	return true
+}
+
+func recoverInterruptedRestoreResult(result *RestoreResult, finishedAt time.Time) bool {
+	if result == nil || result.Status != StatusRunning {
+		return false
+	}
+	result.Status = StatusFailed
+	result.ErrorMessage = interruptedStatusMessage
+	finishInterruptedTask(&result.FinishedAt, &result.DurationMs, result.StartedAt, finishedAt)
+	return true
+}
+
+func recoverInterruptedRestoreVerifyResult(result *RestoreVerifyResult, finishedAt time.Time) bool {
+	if result == nil || result.Status != StatusRunning {
+		return false
+	}
+	result.Status = StatusFailed
+	result.ErrorMessage = interruptedStatusMessage
+	finishInterruptedTask(&result.FinishedAt, &result.DurationMs, result.StartedAt, finishedAt)
+	return true
+}
+
+func recoverInterruptedRetentionCheckResult(result *RetentionCheckResult, finishedAt time.Time) bool {
+	if result == nil || result.Status != StatusRunning {
+		return false
+	}
+	result.Status = StatusFailed
+	result.ErrorMessage = interruptedStatusMessage
+	finishInterruptedTask(&result.FinishedAt, &result.DurationMs, result.StartedAt, finishedAt)
+	return true
+}
+
+func finishInterruptedTask(finishedAt **time.Time, durationMs *int64, startedAt time.Time, fallbackFinishedAt time.Time) {
+	if *finishedAt == nil {
+		finished := fallbackFinishedAt
+		*finishedAt = &finished
+	}
+	if *durationMs <= 0 && !startedAt.IsZero() {
+		*durationMs = (*finishedAt).Sub(startedAt).Milliseconds()
+		if *durationMs < 0 {
+			*durationMs = 0
+		}
+	}
 }
 
 func (m *Manager) saveStateLocked() error {
@@ -2618,7 +3148,7 @@ func writeJSONFile(filePath string, value any, perm os.FileMode) error {
 	cleanup := true
 	defer func() {
 		if cleanup {
-			_ = os.Remove(tmpPath)
+			_ = rootio.RemoveAllPathNoFollow(tmpPath)
 		}
 	}()
 	if err := tmpFile.Chmod(perm); err != nil {
@@ -2644,11 +3174,26 @@ func writeJSONFile(filePath string, value any, perm os.FileMode) error {
 }
 
 func readManifest(filePath string) (Manifest, error) {
+	exists, err := backupManifestFileExistsNoFollow(filePath)
+	if err != nil {
+		return Manifest{}, err
+	}
+	if !exists {
+		return Manifest{}, fmt.Errorf("read backup manifest: %w", os.ErrNotExist)
+	}
+
 	file, err := rootio.OpenFilePathNoFollow(filePath, os.O_RDONLY, 0)
 	if err != nil {
 		return Manifest{}, fmt.Errorf("read backup manifest: %w", mapBackupNoFollowError(err, "backup manifest"))
 	}
 	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return Manifest{}, fmt.Errorf("stat backup manifest: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return Manifest{}, fmt.Errorf("%w: backup manifest must be a regular file", ErrUnsafePath)
+	}
 	data, err := io.ReadAll(file)
 	if err != nil {
 		return Manifest{}, fmt.Errorf("read backup manifest: %w", err)
@@ -2660,7 +3205,116 @@ func readManifest(filePath string) (Manifest, error) {
 	if manifest.Version != manifestVersion {
 		return Manifest{}, fmt.Errorf("unsupported backup manifest version: %d", manifest.Version)
 	}
+	if err := validateManifestEntries(manifest); err != nil {
+		return Manifest{}, err
+	}
 	return manifest, nil
+}
+
+func validateSnapshotManifestIdentity(jobID string, snapshotName string, manifest Manifest) error {
+	snapshotTime, err := parseRunID(snapshotName)
+	if err != nil {
+		return fmt.Errorf("%w: backup snapshot run id is invalid: %q", ErrUnsafePath, snapshotName)
+	}
+	if manifest.JobID != jobID {
+		return fmt.Errorf("%w: backup manifest job id mismatch: got %q, want %q", ErrUnsafePath, manifest.JobID, jobID)
+	}
+	if manifest.RunID != snapshotName {
+		return fmt.Errorf("%w: backup manifest run id mismatch: got %q, want %q", ErrUnsafePath, manifest.RunID, snapshotName)
+	}
+	if !manifest.CreatedAt.IsZero() && !manifest.CreatedAt.UTC().Equal(snapshotTime) {
+		return fmt.Errorf("%w: backup manifest created_at mismatch for run id %q", ErrUnsafePath, snapshotName)
+	}
+	return nil
+}
+
+func validateSnapshotManifestLocation(job config.BackupJobConfig, snapshotName string, snapshotPath string, manifestPath string) error {
+	if _, err := parseRunID(snapshotName); err != nil {
+		return fmt.Errorf("%w: backup snapshot run id is invalid: %q", ErrUnsafePath, snapshotName)
+	}
+	expectedSnapshotPath := filepath.Join(job.Destination, job.ID, "snapshots", snapshotName)
+	if filepath.Clean(snapshotPath) != filepath.Clean(expectedSnapshotPath) {
+		return fmt.Errorf("%w: backup state snapshot path does not match configured destination", ErrUnsafePath)
+	}
+	expectedManifestPath := filepath.Join(expectedSnapshotPath, manifestFileName)
+	if filepath.Clean(manifestPath) != filepath.Clean(expectedManifestPath) {
+		return fmt.Errorf("%w: backup state manifest path does not match configured destination", ErrUnsafePath)
+	}
+	return nil
+}
+
+func validateManifestEntries(manifest Manifest) error {
+	if manifest.FileCount < 0 {
+		return fmt.Errorf("%w: backup manifest has negative file count", ErrUnsafePath)
+	}
+	if manifest.TotalBytes < 0 {
+		return fmt.Errorf("%w: backup manifest has negative total bytes", ErrUnsafePath)
+	}
+	seenArchivePaths := make(map[string]struct{}, len(manifest.Entries))
+	var totalBytes int64
+	for _, entry := range manifest.Entries {
+		archivePath := filepath.ToSlash(entry.ArchivePath)
+		if err := validateRestoreManifestFileEntry(archivePath, entry.Size); err != nil {
+			return err
+		}
+		if err := validateRestoreManifestMode(archivePath, entry.Mode); err != nil {
+			return err
+		}
+		if err := validateRestoreManifestDigest(archivePath, entry.SHA256); err != nil {
+			return err
+		}
+		if _, ok := seenArchivePaths[archivePath]; ok {
+			return fmt.Errorf("%w: backup manifest has duplicate archive path %q", ErrUnsafePath, cleanPreviewSamplePath(archivePath))
+		}
+		seenArchivePaths[archivePath] = struct{}{}
+		nextTotalBytes, err := addManifestEntrySize(totalBytes, entry.Size)
+		if err != nil {
+			return err
+		}
+		totalBytes = nextTotalBytes
+	}
+	fileCount := int64(len(manifest.Entries))
+	if manifest.FileCount != fileCount {
+		return fmt.Errorf("%w: backup manifest file count mismatch: got %d, want %d", ErrUnsafePath, manifest.FileCount, fileCount)
+	}
+	if manifest.TotalBytes != totalBytes {
+		return fmt.Errorf("%w: backup manifest total bytes mismatch: got %d, want %d", ErrUnsafePath, manifest.TotalBytes, totalBytes)
+	}
+	return nil
+}
+
+func addManifestEntrySize(total int64, size int64) (int64, error) {
+	if size > 0 && total > (1<<63-1)-size {
+		return 0, fmt.Errorf("%w: backup manifest total size overflows int64", ErrUnsafePath)
+	}
+	return total + size, nil
+}
+
+func manifestEntryMode(entry ManifestEntry) os.FileMode {
+	return os.FileMode(entry.Mode) & os.ModePerm
+}
+
+func validateRestoreManifestMode(archivePath string, mode uint32) error {
+	if mode&^uint32(os.ModePerm) != 0 {
+		return fmt.Errorf("%w: backup manifest has invalid file mode for %q", ErrUnsafePath, cleanPreviewSamplePath(archivePath))
+	}
+	return nil
+}
+
+func validateRestoreManifestDigest(archivePath string, digest string) error {
+	if len(digest) != sha256.Size*2 {
+		return fmt.Errorf("%w: backup manifest has invalid sha256 for %q", ErrUnsafePath, cleanPreviewSamplePath(archivePath))
+	}
+	for _, r := range digest {
+		switch {
+		case r >= '0' && r <= '9':
+		case r >= 'a' && r <= 'f':
+		case r >= 'A' && r <= 'F':
+		default:
+			return fmt.Errorf("%w: backup manifest has invalid sha256 for %q", ErrUnsafePath, cleanPreviewSamplePath(archivePath))
+		}
+	}
+	return nil
 }
 
 func normalizeJob(job config.BackupJobConfig, storageRoot string) config.BackupJobConfig {
@@ -2733,6 +3387,14 @@ func cloneStringSlice(values []string) []string {
 }
 
 func cloneRunResult(result *RunResult) *RunResult {
+	return cloneRunResultWithMode(result, true)
+}
+
+func cloneRunResultRaw(result *RunResult) *RunResult {
+	return cloneRunResultWithMode(result, false)
+}
+
+func cloneRunResultWithMode(result *RunResult, sanitize bool) *RunResult {
 	if result == nil {
 		return nil
 	}
@@ -2742,7 +3404,18 @@ func cloneRunResult(result *RunResult) *RunResult {
 		clone.FinishedAt = &finishedAt
 	}
 	if len(result.Warnings) > 0 {
-		clone.Warnings = append([]string(nil), result.Warnings...)
+		if sanitize {
+			clone.Warnings = sanitizeBackupMessagesForAPI(result.Warnings)
+		} else {
+			clone.Warnings = cloneStringSlice(result.Warnings)
+		}
+	}
+	if sanitize {
+		clone.Source = sanitizeBackupTargetForAPI(clone.Source)
+		clone.Destination = sanitizeBackupTargetForAPI(clone.Destination)
+		clone.SnapshotPath = sanitizeBackupTargetForAPI(clone.SnapshotPath)
+		clone.ManifestPath = sanitizeBackupTargetForAPI(clone.ManifestPath)
+		clone.ErrorMessage = sanitizeBackupMessageForAPI(clone.ErrorMessage)
 	}
 	return &clone
 }
@@ -2762,10 +3435,19 @@ func cloneRestoreDrillStats(stats *RestoreDrillStats) *RestoreDrillStats {
 	clone := *stats
 	clone.LatestSuccessAt = cloneTime(stats.LatestSuccessAt)
 	clone.LatestFailureAt = cloneTime(stats.LatestFailureAt)
+	clone.LastFailureMessage = sanitizeBackupMessageForAPI(clone.LastFailureMessage)
 	return &clone
 }
 
 func cloneRestoreDrillResult(result *RestoreDrillResult) *RestoreDrillResult {
+	return cloneRestoreDrillResultWithMode(result, true)
+}
+
+func cloneRestoreDrillResultRaw(result *RestoreDrillResult) *RestoreDrillResult {
+	return cloneRestoreDrillResultWithMode(result, false)
+}
+
+func cloneRestoreDrillResultWithMode(result *RestoreDrillResult, sanitize bool) *RestoreDrillResult {
 	if result == nil {
 		return nil
 	}
@@ -2774,16 +3456,30 @@ func cloneRestoreDrillResult(result *RestoreDrillResult) *RestoreDrillResult {
 		finishedAt := *result.FinishedAt
 		clone.FinishedAt = &finishedAt
 	}
+	if sanitize {
+		clone.SnapshotPath = sanitizeBackupTargetForAPI(clone.SnapshotPath)
+		clone.ManifestPath = sanitizeBackupTargetForAPI(clone.ManifestPath)
+		clone.RestoredPath = sanitizeBackupTargetForAPI(clone.RestoredPath)
+		clone.ErrorMessage = sanitizeBackupMessageForAPI(clone.ErrorMessage)
+	}
 	return &clone
 }
 
 func cloneRestoreDrillResults(results []*RestoreDrillResult) []*RestoreDrillResult {
+	return cloneRestoreDrillResultsWithMode(results, true)
+}
+
+func cloneRestoreDrillResultsRaw(results []*RestoreDrillResult) []*RestoreDrillResult {
+	return cloneRestoreDrillResultsWithMode(results, false)
+}
+
+func cloneRestoreDrillResultsWithMode(results []*RestoreDrillResult, sanitize bool) []*RestoreDrillResult {
 	if len(results) == 0 {
 		return nil
 	}
 	clones := make([]*RestoreDrillResult, 0, len(results))
 	for _, result := range results {
-		if clone := cloneRestoreDrillResult(result); clone != nil {
+		if clone := cloneRestoreDrillResultWithMode(result, sanitize); clone != nil {
 			clones = append(clones, clone)
 		}
 	}
@@ -2802,9 +3498,9 @@ func cloneRestorePreviewResult(result *RestorePreviewResult) *RestorePreviewResu
 	if len(result.SamplePaths) > 0 {
 		clone.SamplePaths = append([]string(nil), result.SamplePaths...)
 	}
-	clone.PreflightChecks = cloneRestorePreflightChecks(result.PreflightChecks)
+	clone.PreflightChecks = cloneRestorePreflightChecksForAPI(result.PreflightChecks)
 	if len(result.Warnings) > 0 {
-		clone.Warnings = append([]string(nil), result.Warnings...)
+		clone.Warnings = sanitizeBackupMessagesForAPI(result.Warnings)
 	}
 	if len(result.CutoverChecklist) > 0 {
 		clone.CutoverChecklist = append([]string(nil), result.CutoverChecklist...)
@@ -2812,10 +3508,24 @@ func cloneRestorePreviewResult(result *RestorePreviewResult) *RestorePreviewResu
 	if len(result.RollbackChecklist) > 0 {
 		clone.RollbackChecklist = append([]string(nil), result.RollbackChecklist...)
 	}
+	clone.Destination = sanitizeBackupTargetForAPI(clone.Destination)
+	clone.Source = sanitizeBackupTargetForAPI(clone.Source)
+	clone.TargetPath = sanitizeBackupTargetForAPI(clone.TargetPath)
+	clone.SnapshotPath = sanitizeBackupTargetForAPI(clone.SnapshotPath)
+	clone.ManifestPath = sanitizeBackupTargetForAPI(clone.ManifestPath)
+	clone.ErrorMessage = sanitizeBackupMessageForAPI(clone.ErrorMessage)
 	return &clone
 }
 
 func cloneRestoreVerifyResult(result *RestoreVerifyResult) *RestoreVerifyResult {
+	return cloneRestoreVerifyResultWithMode(result, true)
+}
+
+func cloneRestoreVerifyResultRaw(result *RestoreVerifyResult) *RestoreVerifyResult {
+	return cloneRestoreVerifyResultWithMode(result, false)
+}
+
+func cloneRestoreVerifyResultWithMode(result *RestoreVerifyResult, sanitize bool) *RestoreVerifyResult {
 	if result == nil {
 		return nil
 	}
@@ -2825,12 +3535,33 @@ func cloneRestoreVerifyResult(result *RestoreVerifyResult) *RestoreVerifyResult 
 		clone.FinishedAt = &finishedAt
 	}
 	if len(result.Warnings) > 0 {
-		clone.Warnings = append([]string(nil), result.Warnings...)
+		if sanitize {
+			clone.Warnings = sanitizeBackupMessagesForAPI(result.Warnings)
+		} else {
+			clone.Warnings = cloneStringSlice(result.Warnings)
+		}
+	}
+	if sanitize {
+		clone.Source = sanitizeBackupTargetForAPI(clone.Source)
+		clone.Destination = sanitizeBackupTargetForAPI(clone.Destination)
+		clone.TargetPath = sanitizeBackupTargetForAPI(clone.TargetPath)
+		clone.SnapshotPath = sanitizeBackupTargetForAPI(clone.SnapshotPath)
+		clone.ManifestPath = sanitizeBackupTargetForAPI(clone.ManifestPath)
+		clone.ConfigPath = sanitizeBackupTargetForAPI(clone.ConfigPath)
+		clone.ErrorMessage = sanitizeBackupMessageForAPI(clone.ErrorMessage)
 	}
 	return &clone
 }
 
 func cloneRestoreResult(result *RestoreResult) *RestoreResult {
+	return cloneRestoreResultWithMode(result, true)
+}
+
+func cloneRestoreResultRaw(result *RestoreResult) *RestoreResult {
+	return cloneRestoreResultWithMode(result, false)
+}
+
+func cloneRestoreResultWithMode(result *RestoreResult, sanitize bool) *RestoreResult {
 	if result == nil {
 		return nil
 	}
@@ -2839,15 +3570,30 @@ func cloneRestoreResult(result *RestoreResult) *RestoreResult {
 		finishedAt := *result.FinishedAt
 		clone.FinishedAt = &finishedAt
 	}
-	clone.PreflightChecks = cloneRestorePreflightChecks(result.PreflightChecks)
+	if sanitize {
+		clone.PreflightChecks = cloneRestorePreflightChecksForAPI(result.PreflightChecks)
+	} else {
+		clone.PreflightChecks = cloneRestorePreflightChecks(result.PreflightChecks)
+	}
 	if len(result.Warnings) > 0 {
-		clone.Warnings = append([]string(nil), result.Warnings...)
+		if sanitize {
+			clone.Warnings = sanitizeBackupMessagesForAPI(result.Warnings)
+		} else {
+			clone.Warnings = cloneStringSlice(result.Warnings)
+		}
 	}
 	if len(result.CutoverChecklist) > 0 {
 		clone.CutoverChecklist = append([]string(nil), result.CutoverChecklist...)
 	}
 	if len(result.RollbackChecklist) > 0 {
 		clone.RollbackChecklist = append([]string(nil), result.RollbackChecklist...)
+	}
+	if sanitize {
+		clone.TargetPath = sanitizeBackupTargetForAPI(clone.TargetPath)
+		clone.SnapshotPath = sanitizeBackupTargetForAPI(clone.SnapshotPath)
+		clone.ManifestPath = sanitizeBackupTargetForAPI(clone.ManifestPath)
+		clone.ConfigPath = sanitizeBackupTargetForAPI(clone.ConfigPath)
+		clone.ErrorMessage = sanitizeBackupMessageForAPI(clone.ErrorMessage)
 	}
 	return &clone
 }
@@ -2859,7 +3605,23 @@ func cloneRestorePreflightChecks(checks []RestorePreflightCheck) []RestorePrefli
 	return append([]RestorePreflightCheck(nil), checks...)
 }
 
+func cloneRestorePreflightChecksForAPI(checks []RestorePreflightCheck) []RestorePreflightCheck {
+	clones := cloneRestorePreflightChecks(checks)
+	for i := range clones {
+		clones[i].Detail = sanitizeBackupMessageForAPI(clones[i].Detail)
+	}
+	return clones
+}
+
 func cloneRetentionCheckResult(result *RetentionCheckResult) *RetentionCheckResult {
+	return cloneRetentionCheckResultWithMode(result, true)
+}
+
+func cloneRetentionCheckResultRaw(result *RetentionCheckResult) *RetentionCheckResult {
+	return cloneRetentionCheckResultWithMode(result, false)
+}
+
+func cloneRetentionCheckResultWithMode(result *RetentionCheckResult, sanitize bool) *RetentionCheckResult {
 	if result == nil {
 		return nil
 	}
@@ -2877,18 +3639,34 @@ func cloneRetentionCheckResult(result *RetentionCheckResult) *RetentionCheckResu
 		clone.LatestSnapshotAt = &latest
 	}
 	if len(result.Warnings) > 0 {
-		clone.Warnings = append([]string(nil), result.Warnings...)
+		if sanitize {
+			clone.Warnings = sanitizeBackupMessagesForAPI(result.Warnings)
+		} else {
+			clone.Warnings = cloneStringSlice(result.Warnings)
+		}
+	}
+	if sanitize {
+		clone.Target = sanitizeBackupTargetForAPI(clone.Target)
+		clone.ErrorMessage = sanitizeBackupMessageForAPI(clone.ErrorMessage)
 	}
 	return &clone
 }
 
 func cloneRestoreResults(results []*RestoreResult) []*RestoreResult {
+	return cloneRestoreResultsWithMode(results, true)
+}
+
+func cloneRestoreResultsRaw(results []*RestoreResult) []*RestoreResult {
+	return cloneRestoreResultsWithMode(results, false)
+}
+
+func cloneRestoreResultsWithMode(results []*RestoreResult, sanitize bool) []*RestoreResult {
 	if len(results) == 0 {
 		return nil
 	}
 	clones := make([]*RestoreResult, 0, len(results))
 	for _, result := range results {
-		if clone := cloneRestoreResult(result); clone != nil {
+		if clone := cloneRestoreResultWithMode(result, sanitize); clone != nil {
 			clones = append(clones, clone)
 		}
 	}
@@ -2897,14 +3675,14 @@ func cloneRestoreResults(results []*RestoreResult) []*RestoreResult {
 
 func prependRestoreHistory(history []*RestoreResult, result *RestoreResult) []*RestoreResult {
 	if result == nil {
-		return cloneRestoreResults(history)
+		return cloneRestoreResultsRaw(history)
 	}
-	next := []*RestoreResult{cloneRestoreResult(result)}
+	next := []*RestoreResult{cloneRestoreResultRaw(result)}
 	for _, entry := range history {
 		if entry == nil || entry.ID == result.ID {
 			continue
 		}
-		next = append(next, cloneRestoreResult(entry))
+		next = append(next, cloneRestoreResultRaw(entry))
 		if len(next) >= restoreHistoryLimit {
 			break
 		}
@@ -2914,14 +3692,14 @@ func prependRestoreHistory(history []*RestoreResult, result *RestoreResult) []*R
 
 func prependRestoreDrillHistory(history []*RestoreDrillResult, result *RestoreDrillResult) []*RestoreDrillResult {
 	if result == nil {
-		return cloneRestoreDrillResults(history)
+		return cloneRestoreDrillResultsRaw(history)
 	}
-	next := []*RestoreDrillResult{cloneRestoreDrillResult(result)}
+	next := []*RestoreDrillResult{cloneRestoreDrillResultRaw(result)}
 	for _, entry := range history {
 		if entry == nil || entry.ID == result.ID {
 			continue
 		}
-		next = append(next, cloneRestoreDrillResult(entry))
+		next = append(next, cloneRestoreDrillResultRaw(entry))
 		if len(next) >= restoreDrillHistoryLimit {
 			break
 		}
@@ -3008,6 +3786,56 @@ func backupTarget(job config.BackupJobConfig) string {
 	}
 }
 
+func backupTargetForAPI(job config.BackupJobConfig) string {
+	return sanitizeBackupTargetForAPI(backupTarget(job))
+}
+
+// SanitizeNotificationText redacts credentials and secret-like values before
+// backup notification data leaves the process boundary.
+func SanitizeNotificationText(value string) string {
+	return sanitizeBackupTargetForAPI(value)
+}
+
+func sanitizeBackupTargetForAPI(target string) string {
+	if strings.TrimSpace(target) == "" {
+		return target
+	}
+	redacted := backupURLUserinfoPattern.ReplaceAllString(target, "${1}"+redactedBackupSecretValue+"@")
+	redacted = backupSensitivePathDoubleQuotedAssignPattern.ReplaceAllString(redacted, "${1}${2}\""+redactedBackupSecretValue+"\"")
+	redacted = backupSensitivePathSingleQuotedAssignPattern.ReplaceAllString(redacted, "${1}${2}'"+redactedBackupSecretValue+"'")
+	redacted = backupSensitivePathAssignmentPattern.ReplaceAllString(redacted, "${1}${2}"+redactedBackupSecretValue)
+	redacted = backupSensitiveDoubleQuotedAssignPattern.ReplaceAllString(redacted, "${1}${2}\""+redactedBackupSecretValue+"\"")
+	redacted = backupSensitiveSingleQuotedAssignPattern.ReplaceAllString(redacted, "${1}${2}'"+redactedBackupSecretValue+"'")
+	redacted = backupSensitiveAssignmentPattern.ReplaceAllString(redacted, "${1}${2}"+redactedBackupSecretValue)
+	redacted = backupSensitiveDoubleQuotedKVPattern.ReplaceAllString(redacted, "${1}${2}\""+redactedBackupSecretValue+"\"")
+	redacted = backupSensitiveSingleQuotedKVPattern.ReplaceAllString(redacted, "${1}${2}'"+redactedBackupSecretValue+"'")
+	redacted = backupSensitiveDoubleQuotedAuthPattern.ReplaceAllString(redacted, "${1}${2}\""+redactedBackupSecretValue+"\"")
+	redacted = backupSensitiveSingleQuotedAuthPattern.ReplaceAllString(redacted, "${1}${2}'"+redactedBackupSecretValue+"'")
+	redacted = backupSensitiveAuthorizationPattern.ReplaceAllString(redacted, "${1}${2}"+redactedBackupSecretValue)
+	redacted = backupSensitiveDoubleQuotedHeaderPattern.ReplaceAllString(redacted, "${1}${2}\""+redactedBackupSecretValue+"\"")
+	redacted = backupSensitiveSingleQuotedHeaderPattern.ReplaceAllString(redacted, "${1}${2}'"+redactedBackupSecretValue+"'")
+	redacted = backupSensitiveHeaderPattern.ReplaceAllString(redacted, "${1}${2}"+redactedBackupSecretValue)
+	redacted = backupSensitiveDoubleQuotedFlagPattern.ReplaceAllString(redacted, "${1}${2}${3}\""+redactedBackupSecretValue+"\"")
+	redacted = backupSensitiveSingleQuotedFlagPattern.ReplaceAllString(redacted, "${1}${2}${3}'"+redactedBackupSecretValue+"'")
+	redacted = backupSensitiveFlagPattern.ReplaceAllString(redacted, "${1}${2}${3}"+redactedBackupSecretValue)
+	return redacted
+}
+
+func sanitizeBackupMessageForAPI(message string) string {
+	return sanitizeBackupTargetForAPI(message)
+}
+
+func sanitizeBackupMessagesForAPI(messages []string) []string {
+	if len(messages) == 0 {
+		return nil
+	}
+	sanitized := make([]string, len(messages))
+	for i, message := range messages {
+		sanitized[i] = sanitizeBackupMessageForAPI(message)
+	}
+	return sanitized
+}
+
 func backupCommand(job config.BackupJobConfig, fallback string) string {
 	if strings.TrimSpace(job.Command) != "" {
 		return job.Command
@@ -3038,7 +3866,7 @@ func runExternalCommand(ctx context.Context, command string, args ...string) err
 	cmd.Stdout = io.Discard
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		detail := strings.TrimSpace(stderr.String())
+		detail := sanitizeExternalCommandDetail(&stderr)
 		if detail != "" {
 			return fmt.Errorf("run %s: %w: %s", filepath.Base(command), err, detail)
 		}
@@ -3057,7 +3885,7 @@ func runExternalCommandOutput(ctx context.Context, command string, args ...strin
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		detail := strings.TrimSpace(stderr.String())
+		detail := sanitizeExternalCommandDetail(&stderr)
 		if detail != "" {
 			return nil, fmt.Errorf("run %s: %w: %s", filepath.Base(command), err, detail)
 		}
@@ -3105,14 +3933,18 @@ func runExternalCommandReader(ctx context.Context, command string, readStdout fu
 }
 
 func externalCommandError(command string, err error, stderr *limitedBuffer) error {
-	detail := ""
-	if stderr != nil {
-		detail = strings.TrimSpace(stderr.String())
-	}
+	detail := sanitizeExternalCommandDetail(stderr)
 	if detail != "" {
 		return fmt.Errorf("run %s: %w: %s", filepath.Base(command), err, detail)
 	}
 	return fmt.Errorf("run %s: %w", filepath.Base(command), err)
+}
+
+func sanitizeExternalCommandDetail(stderr *limitedBuffer) string {
+	if stderr != nil {
+		return sanitizeBackupMessageForAPI(strings.TrimSpace(stderr.String()))
+	}
+	return ""
 }
 
 type limitedBuffer struct {
@@ -3160,6 +3992,10 @@ func includedConfigPath(include bool, configPath string) string {
 }
 
 func summarizeManifestRestorePreview(ctx context.Context, manifest Manifest, includeConfig bool) (int64, int64, bool, bool, []string, error) {
+	if err := validateManifestEntries(manifest); err != nil {
+		return 0, 0, false, false, nil, err
+	}
+
 	var fileCount int64
 	var totalBytes int64
 	var configAvailable bool
@@ -3173,12 +4009,25 @@ func summarizeManifestRestorePreview(ctx context.Context, manifest Manifest, inc
 		}
 		archivePath := filepath.ToSlash(entry.ArchivePath)
 		if relPath, ok := strings.CutPrefix(archivePath, "data/"); ok {
+			if err := validateRestoreManifestPath(archivePath); err != nil {
+				return fileCount, totalBytes, configAvailable, configIncluded, samples, err
+			}
+			if err := validateRestoreManifestPath(relPath); err != nil {
+				return fileCount, totalBytes, configAvailable, configIncluded, samples, err
+			}
+			nextTotal, err := addListedFileSize(totalBytes, entry.Size, relPath)
+			if err != nil {
+				return fileCount, totalBytes, configAvailable, configIncluded, samples, err
+			}
 			fileCount++
-			totalBytes += entry.Size
+			totalBytes = nextTotal
 			samples = appendPreviewSample(samples, relPath)
 			continue
 		}
 		if archivePath == "config/config.toml" {
+			if err := validateRestoreManifestPath(archivePath); err != nil {
+				return fileCount, totalBytes, configAvailable, configIncluded, samples, err
+			}
 			configAvailable = true
 			entryCopy := entry
 			configEntry = &entryCopy
@@ -3189,13 +4038,46 @@ func summarizeManifestRestorePreview(ctx context.Context, manifest Manifest, inc
 		if err := ctx.Err(); err != nil {
 			return fileCount, totalBytes, configAvailable, configIncluded, samples, err
 		}
+		nextTotal, err := addListedFileSize(totalBytes, configEntry.Size, ".mnemonas-restore/config.toml")
+		if err != nil {
+			return fileCount, totalBytes, configAvailable, configIncluded, samples, err
+		}
 		configIncluded = true
 		fileCount++
-		totalBytes += configEntry.Size
+		totalBytes = nextTotal
 		samples = appendPreviewSample(samples, ".mnemonas-restore/config.toml")
 	}
 
 	return fileCount, totalBytes, configAvailable, configIncluded, samples, nil
+}
+
+func validateRestoreManifestPath(archivePath string) error {
+	_, err := safeJoin(".", archivePath)
+	return err
+}
+
+func validateRestoreManifestFileEntry(archivePath string, size int64) error {
+	if err := validateRestoreManifestPath(archivePath); err != nil {
+		return err
+	}
+	if !isSupportedRestoreManifestArchivePath(archivePath) {
+		return fmt.Errorf("%w: backup manifest has unsupported archive path %q", ErrUnsafePath, cleanPreviewSamplePath(archivePath))
+	}
+	if size < 0 {
+		return fmt.Errorf("%w: backup manifest has negative file size for %q", ErrUnsafePath, cleanPreviewSamplePath(archivePath))
+	}
+	return nil
+}
+
+func isSupportedRestoreManifestArchivePath(archivePath string) bool {
+	if archivePath == "config/config.toml" {
+		return true
+	}
+	relPath, ok := strings.CutPrefix(archivePath, "data/")
+	if !ok {
+		return false
+	}
+	return validateRestoreManifestPath(relPath) == nil
 }
 
 type resticLSJSONEntry struct {
@@ -3264,9 +4146,17 @@ func parseResticLSJSONReader(reader io.Reader, source string) (int64, int64, []s
 		if entryPath == "" {
 			entryPath = entry.Name
 		}
+		samplePath, err := relativeResticPreviewPath(source, entryPath)
+		if err != nil {
+			return 0, 0, nil, err
+		}
+		nextTotal, err := addListedFileSize(totalBytes, entry.Size, samplePath)
+		if err != nil {
+			return 0, 0, nil, err
+		}
 		fileCount++
-		totalBytes += entry.Size
-		samples = appendPreviewSample(samples, relativeResticPreviewPath(source, entryPath))
+		totalBytes = nextTotal
+		samples = appendPreviewSample(samples, samplePath)
 	}
 	if err := scanner.Err(); err != nil {
 		return 0, 0, nil, fmt.Errorf("read restic preview output: %w", err)
@@ -3307,13 +4197,21 @@ func parseRcloneLSJSONReader(reader io.Reader) (int64, int64, []string, error) {
 		if entry.IsDir {
 			continue
 		}
-		fileCount++
-		totalBytes += entry.Size
 		entryPath := entry.Path
 		if entryPath == "" {
 			entryPath = entry.Name
 		}
-		samples = appendPreviewSample(samples, entryPath)
+		samplePath, err := validateRemoteRelativeListingPath(entryPath)
+		if err != nil {
+			return 0, 0, nil, err
+		}
+		nextTotal, err := addListedFileSize(totalBytes, entry.Size, samplePath)
+		if err != nil {
+			return 0, 0, nil, err
+		}
+		fileCount++
+		totalBytes = nextTotal
+		samples = appendPreviewSample(samples, samplePath)
 	}
 	token, err = decoder.Token()
 	if err != nil {
@@ -3341,8 +4239,20 @@ func parseRcloneRetentionLSJSONReader(reader io.Reader) (int64, int64, *time.Tim
 		if entry.IsDir {
 			continue
 		}
+		entryPath := entry.Path
+		if entryPath == "" {
+			entryPath = entry.Name
+		}
+		samplePath, err := validateRemoteRelativeListingPath(entryPath)
+		if err != nil {
+			return 0, 0, nil, err
+		}
+		nextTotal, err := addListedFileSize(totalBytes, entry.Size, samplePath)
+		if err != nil {
+			return 0, 0, nil, err
+		}
 		fileCount++
-		totalBytes += entry.Size
+		totalBytes = nextTotal
 		if strings.TrimSpace(entry.ModTime) == "" {
 			continue
 		}
@@ -3357,6 +4267,16 @@ func parseRcloneRetentionLSJSONReader(reader io.Reader) (int64, int64, *time.Tim
 		}
 	}
 	return fileCount, totalBytes, latest, nil
+}
+
+func addListedFileSize(total int64, size int64, entryPath string) (int64, error) {
+	if size < 0 {
+		return 0, fmt.Errorf("%w: backup listing has negative file size for %q", ErrUnsafePath, cleanPreviewSamplePath(entryPath))
+	}
+	if size > 0 && total > (1<<63-1)-size {
+		return 0, fmt.Errorf("%w: backup listing total size overflows int64", ErrUnsafePath)
+	}
+	return total + size, nil
 }
 
 func decodeRcloneLSJSONEntries(reader io.Reader) ([]rcloneLSJSONEntry, error) {
@@ -3386,19 +4306,66 @@ func decodeRcloneLSJSONEntries(reader io.Reader) ([]rcloneLSJSONEntry, error) {
 	return entries, nil
 }
 
-func relativeResticPreviewPath(source, entryPath string) string {
-	cleaned := filepath.ToSlash(filepath.Clean(entryPath))
-	sourceClean := filepath.ToSlash(filepath.Clean(source))
-	if strings.HasPrefix(cleaned, sourceClean+"/") {
-		return cleanPreviewSamplePath(strings.TrimPrefix(cleaned, sourceClean+"/"))
+func relativeResticPreviewPath(source, entryPath string) (string, error) {
+	if err := validateRemoteListingPathSegments(entryPath); err != nil {
+		return "", err
+	}
+	cleaned := filepath.Clean(entryPath)
+	if cleaned == "" || cleaned == "." {
+		return "", unsafeBackupListingPathError(entryPath)
 	}
 
-	cleanedNoRoot := strings.TrimPrefix(cleaned, "/")
-	sourceNoRoot := strings.TrimPrefix(sourceClean, "/")
-	if strings.HasPrefix(cleanedNoRoot, sourceNoRoot+"/") {
-		return cleanPreviewSamplePath(strings.TrimPrefix(cleanedNoRoot, sourceNoRoot+"/"))
+	if filepath.IsAbs(cleaned) {
+		sourceClean := filepath.Clean(source)
+		if !pathContainsOrEquals(sourceClean, cleaned) {
+			return "", unsafeBackupListingPathError(entryPath)
+		}
+		rel, err := filepath.Rel(sourceClean, cleaned)
+		if err != nil {
+			return "", fmt.Errorf("parse restic preview output: %w", err)
+		}
+		return validateRemoteRelativeListingPath(rel)
 	}
-	return cleanPreviewSamplePath(cleanedNoRoot)
+
+	return validateRemoteRelativeListingPath(cleaned)
+}
+
+func validateRemoteListingPathSegments(entryPath string) error {
+	slashPath := filepath.ToSlash(entryPath)
+	volume := filepath.ToSlash(filepath.VolumeName(entryPath))
+	if volume != "" {
+		slashPath = strings.TrimPrefix(slashPath, volume)
+	}
+	for strings.HasPrefix(slashPath, "/") {
+		slashPath = strings.TrimPrefix(slashPath, "/")
+	}
+	if slashPath == "" {
+		return unsafeBackupListingPathError(entryPath)
+	}
+	for _, segment := range strings.Split(slashPath, "/") {
+		if segment == "" || segment == "." || segment == ".." {
+			return unsafeBackupListingPathError(entryPath)
+		}
+	}
+	return nil
+}
+
+func validateRemoteRelativeListingPath(entryPath string) (string, error) {
+	if entryPath == "" {
+		return "", unsafeBackupListingPathError(entryPath)
+	}
+	if _, err := safeJoin(".", entryPath); err != nil {
+		return "", unsafeBackupListingPathError(entryPath)
+	}
+	return cleanPreviewSamplePath(entryPath), nil
+}
+
+func unsafeBackupListingPathError(entryPath string) error {
+	entryPath = strings.TrimSpace(entryPath)
+	if entryPath == "" {
+		return fmt.Errorf("%w: backup listing has empty file path", ErrUnsafePath)
+	}
+	return fmt.Errorf("%w: backup listing contains unsafe file path %q", ErrUnsafePath, entryPath)
 }
 
 func appendPreviewSample(samples []string, value string) []string {
@@ -3413,7 +4380,7 @@ func appendPreviewSample(samples []string, value string) []string {
 }
 
 func cleanPreviewSamplePath(value string) string {
-	cleaned := path.Clean("/" + filepath.ToSlash(strings.TrimSpace(value)))
+	cleaned := path.Clean("/" + filepath.ToSlash(value))
 	cleaned = strings.TrimPrefix(cleaned, "/")
 	if cleaned == "." {
 		return ""
@@ -3450,6 +4417,12 @@ func validateDestination(source, destination string, storageRoot string) error {
 	}
 	sourceClean := filepath.Clean(source)
 	destinationClean := filepath.Clean(destination)
+	if isBackupFilesystemRoot(destinationClean) {
+		return fmt.Errorf("%w: destination must not be filesystem root", ErrUnsafePath)
+	}
+	if isProtectedBackupSystemDirectory(destinationClean) {
+		return fmt.Errorf("%w: destination must not be protected system directory", ErrUnsafePath)
+	}
 	if sourceClean == destinationClean {
 		return fmt.Errorf("%w: destination must not equal source", ErrUnsafePath)
 	}
@@ -3465,6 +4438,92 @@ func validateDestination(source, destination string, storageRoot string) error {
 		}
 	}
 	return nil
+}
+
+func validateRemoteCredentialFiles(job config.BackupJobConfig, source, storageRoot string) error {
+	switch job.Type {
+	case JobTypeRestic:
+		return validateRemoteCredentialFile(job.PasswordFile, "password_file", source, storageRoot)
+	case JobTypeRclone:
+		return validateRemoteCredentialFile(job.ConfigFile, "config_file", source, storageRoot)
+	default:
+		return nil
+	}
+}
+
+func validateRemoteCredentialFile(filePath, field, source, storageRoot string) error {
+	filePath = strings.TrimSpace(filePath)
+	if filePath == "" {
+		return nil
+	}
+	if !filepath.IsAbs(filePath) {
+		return fmt.Errorf("%w: %s must be absolute", ErrUnsafePath, field)
+	}
+	if strings.IndexFunc(filePath, func(r rune) bool {
+		return r < 0x20 || r == 0x7f
+	}) >= 0 {
+		return fmt.Errorf("%w: %s contains invalid control characters", ErrUnsafePath, field)
+	}
+	if err := validatePathComponentsNoSymlink(filePath, field); err != nil {
+		return err
+	}
+	for label, protected := range map[string]string{
+		"backup source": source,
+		"storage.root":  storageRoot,
+	} {
+		if protected == "" {
+			continue
+		}
+		if !filepath.IsAbs(protected) {
+			absProtected, err := filepath.Abs(protected)
+			if err != nil {
+				continue
+			}
+			protected = absProtected
+		}
+		if pathContainsOrEquals(protected, filePath) {
+			return fmt.Errorf("%w: %s must not be inside %s", ErrUnsafePath, field, label)
+		}
+	}
+	info, err := os.Lstat(filePath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("%w: %s does not exist", ErrUnsafePath, field)
+		}
+		return fmt.Errorf("stat %s: %w", field, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("%w: %s must not be a symlink", ErrUnsafePath, field)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("%w: %s must be a regular file", ErrUnsafePath, field)
+	}
+	return nil
+}
+
+func isBackupFilesystemRoot(path string) bool {
+	cleanPath := filepath.Clean(path)
+	volume := filepath.VolumeName(cleanPath)
+	if volume != "" {
+		return cleanPath == volume+string(filepath.Separator)
+	}
+	return cleanPath == string(filepath.Separator)
+}
+
+func isProtectedBackupSystemDirectory(path string) bool {
+	if isBackupFilesystemRoot(path) {
+		return true
+	}
+
+	cleanPath := filepath.ToSlash(filepath.Clean(path))
+	switch cleanPath {
+	case "/bin", "/boot", "/dev", "/etc", "/home", "/lib", "/lib64", "/media", "/mnt",
+		"/opt", "/proc", "/root", "/run", "/sbin", "/srv", "/sys", "/tmp", "/usr",
+		"/usr/local", "/usr/local/bin", "/usr/local/share", "/var":
+		return true
+	default:
+		return false
+	}
 }
 
 func validatePathComponentsNoSymlink(targetPath, label string) error {
@@ -3505,17 +4564,17 @@ func validateRestoreTarget(source, destination, storageRoot, targetPath string) 
 		if errors.Is(err, os.ErrNotExist) {
 			return target, nil
 		}
-		return "", fmt.Errorf("stat restore target: %w", err)
+		return "", markInvalidRestoreRequest(fmt.Errorf("stat restore target: %w", err))
 	}
 	if info.Mode()&os.ModeSymlink != 0 {
-		return "", fmt.Errorf("%w: restore target must not be a symlink", ErrUnsafePath)
+		return "", invalidRestoreRequestErrorf("%w: restore target must not be a symlink", ErrUnsafePath)
 	}
 	if !info.IsDir() {
-		return "", fmt.Errorf("%w: restore target must be a directory", ErrUnsafePath)
+		return "", invalidRestoreRequestErrorf("%w: restore target must be a directory", ErrUnsafePath)
 	}
 	entries, err := os.ReadDir(target)
 	if err != nil {
-		return "", fmt.Errorf("read restore target: %w", err)
+		return "", markInvalidRestoreRequest(fmt.Errorf("read restore target: %w", err))
 	}
 	if len(entries) > 0 {
 		return "", ErrRestoreTargetExists
@@ -3531,33 +4590,41 @@ func validateRestoreVerificationTarget(source, destination, storageRoot, targetP
 	info, err := os.Lstat(target)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return "", fmt.Errorf("%w: restore verification target does not exist", ErrUnsafePath)
+			return "", invalidRestoreRequestErrorf("%w: restore verification target does not exist", ErrUnsafePath)
 		}
-		return "", fmt.Errorf("stat restore verification target: %w", err)
+		return "", markInvalidRestoreRequest(fmt.Errorf("stat restore verification target: %w", err))
 	}
 	if info.Mode()&os.ModeSymlink != 0 {
-		return "", fmt.Errorf("%w: restore verification target must not be a symlink", ErrUnsafePath)
+		return "", invalidRestoreRequestErrorf("%w: restore verification target must not be a symlink", ErrUnsafePath)
 	}
 	if !info.IsDir() {
-		return "", fmt.Errorf("%w: restore verification target must be a directory", ErrUnsafePath)
+		return "", invalidRestoreRequestErrorf("%w: restore verification target must be a directory", ErrUnsafePath)
 	}
 	return target, nil
 }
 
 func validateRestoreTargetPath(source, destination, storageRoot, targetPath string) (string, error) {
+	if strings.IndexFunc(targetPath, func(r rune) bool {
+		return r < 0x20 || r == 0x7f
+	}) >= 0 {
+		return "", invalidRestoreRequestErrorf("%w: restore target contains invalid control characters", ErrUnsafePath)
+	}
 	target := strings.TrimSpace(targetPath)
 	if target == "" {
-		return "", fmt.Errorf("%w: restore target is empty", ErrUnsafePath)
+		return "", invalidRestoreRequestErrorf("%w: restore target is empty", ErrUnsafePath)
 	}
 	if !filepath.IsAbs(target) {
-		return "", fmt.Errorf("%w: restore target must be absolute", ErrUnsafePath)
+		return "", invalidRestoreRequestErrorf("%w: restore target must be absolute", ErrUnsafePath)
 	}
 	target = filepath.Clean(target)
-	if target == string(filepath.Separator) {
-		return "", fmt.Errorf("%w: restore target must not be filesystem root", ErrUnsafePath)
+	if isBackupFilesystemRoot(target) {
+		return "", invalidRestoreRequestErrorf("%w: restore target must not be filesystem root", ErrUnsafePath)
+	}
+	if isProtectedBackupSystemDirectory(target) {
+		return "", invalidRestoreRequestErrorf("%w: restore target must not be protected system directory", ErrUnsafePath)
 	}
 	if err := validatePathComponentsNoSymlink(target, "restore target"); err != nil {
-		return "", err
+		return "", markInvalidRestoreRequest(err)
 	}
 	for label, protected := range map[string]string{
 		"source":       source,
@@ -3568,19 +4635,19 @@ func validateRestoreTargetPath(source, destination, storageRoot, targetPath stri
 			continue
 		}
 		if pathContainsOrEquals(protected, target) || pathContainsOrEquals(target, protected) {
-			return "", fmt.Errorf("%w: restore target must be outside %s", ErrUnsafePath, label)
+			return "", invalidRestoreRequestErrorf("%w: restore target must be outside %s", ErrUnsafePath, label)
 		}
 	}
 	parent := filepath.Dir(target)
 	parentInfo, err := os.Lstat(parent)
 	if err != nil {
-		return "", fmt.Errorf("stat restore target parent: %w", err)
+		return "", markInvalidRestoreRequest(fmt.Errorf("stat restore target parent: %w", err))
 	}
 	if parentInfo.Mode()&os.ModeSymlink != 0 {
-		return "", fmt.Errorf("%w: restore target parent must not be a symlink", ErrUnsafePath)
+		return "", invalidRestoreRequestErrorf("%w: restore target parent must not be a symlink", ErrUnsafePath)
 	}
 	if !parentInfo.IsDir() {
-		return "", fmt.Errorf("%w: restore target parent is not a directory", ErrUnsafePath)
+		return "", invalidRestoreRequestErrorf("%w: restore target parent is not a directory", ErrUnsafePath)
 	}
 	return target, nil
 }
@@ -3625,14 +4692,11 @@ func moveResticRestoredSource(ctx context.Context, rawPath, partialPath, source 
 			return 0, 0, err
 		}
 		sourceEntry := filepath.Join(restoredSourcePath, entry.Name())
-		targetEntry := filepath.Join(partialPath, entry.Name())
-		if _, err := os.Lstat(targetEntry); err == nil {
-			return 0, 0, ErrRestoreTargetExists
-		} else if !errors.Is(err, os.ErrNotExist) {
-			return 0, 0, fmt.Errorf("stat restored target entry: %w", err)
-		}
-		if err := os.Rename(sourceEntry, targetEntry); err != nil {
-			return 0, 0, fmt.Errorf("move restored entry %s: %w", entry.Name(), err)
+		if err := rootio.RenamePathIntoDirNoFollow(sourceEntry, partialPath, entry.Name()); err != nil {
+			if errors.Is(err, os.ErrExist) {
+				return 0, 0, ErrRestoreTargetExists
+			}
+			return 0, 0, fmt.Errorf("move restored entry %s: %w", entry.Name(), mapRestorePathError(err, "restore staging target path must not contain symlink"))
 		}
 	}
 
@@ -3685,8 +4749,12 @@ func summarizeRestoredTree(ctx context.Context, root string) (int64, int64, erro
 			return nil
 		}
 		if info.Mode().IsRegular() {
+			nextTotal, err := addListedFileSize(totalBytes, info.Size(), relPath)
+			if err != nil {
+				return err
+			}
 			fileCount++
-			totalBytes += info.Size()
+			totalBytes = nextTotal
 			return nil
 		}
 		return fmt.Errorf("%w: restored entry has unsupported file type: %s", ErrUnsafePath, relPath)
@@ -3729,8 +4797,12 @@ func summarizeRestoreVerificationTree(ctx context.Context, root string) (int64, 
 			return nil
 		}
 		if info.Mode().IsRegular() {
+			nextTotal, err := addListedFileSize(totalBytes, info.Size(), relPath)
+			if err != nil {
+				return err
+			}
 			fileCount++
-			totalBytes += info.Size()
+			totalBytes = nextTotal
 			return nil
 		}
 		warnings = appendRestoreVerificationWarning(warnings, "发现非常规文件，切换前请确认服务是否需要该条目: "+relPath)
@@ -3740,6 +4812,300 @@ func summarizeRestoreVerificationTree(ctx context.Context, root string) (int64, 
 		return 0, 0, nil, fmt.Errorf("summarize restored tree: %w", err)
 	}
 	return fileCount, totalBytes, warnings, nil
+}
+
+func (m *Manager) appendLocalRestoreSnapshotWarnings(ctx context.Context, job config.BackupJobConfig, targetPath string, result *RestoreVerifyResult, warnings []string) ([]string, error) {
+	if restore := m.latestCompletedRestoreForTarget(job.ID, targetPath); restore != nil {
+		snapshotPath, manifestPath, manifest, err := localRestoreSnapshotManifest(job, restore)
+		if err != nil {
+			return appendRestoreVerificationWarning(warnings, fmt.Sprintf("无法对照恢复时使用的本地备份快照: %v", err)), nil
+		}
+		if _, _, err := verifyManifestFiles(ctx, snapshotPath, manifest); err != nil {
+			return appendRestoreVerificationWarning(warnings, fmt.Sprintf("无法校验恢复时使用的本地备份快照: %v", err)), nil
+		}
+		setRestoreVerifySnapshotReference(result, snapshotPath, manifestPath)
+		return appendLocalRestoreSnapshotComparisonWarnings(ctx, snapshotPath, targetPath, manifest, warnings)
+	}
+
+	snapshotPath, manifestPath, manifest, err := m.latestManifest(job)
+	if err != nil {
+		return appendRestoreVerificationWarning(warnings, fmt.Sprintf("无法对照最新本地备份 manifest: %v", err)), nil
+	}
+	if _, _, err := verifyManifestFiles(ctx, snapshotPath, manifest); err != nil {
+		return appendRestoreVerificationWarning(warnings, fmt.Sprintf("无法校验最新本地备份快照: %v", err)), nil
+	}
+	setRestoreVerifySnapshotReference(result, snapshotPath, manifestPath)
+	return appendLocalRestoreSnapshotComparisonWarnings(ctx, snapshotPath, targetPath, manifest, warnings)
+}
+
+func setRestoreVerifySnapshotReference(result *RestoreVerifyResult, snapshotPath string, manifestPath string) {
+	if result == nil {
+		return
+	}
+	result.SnapshotPath = snapshotPath
+	result.ManifestPath = manifestPath
+}
+
+func appendLocalRestoreSnapshotComparisonWarnings(ctx context.Context, snapshotPath string, targetPath string, manifest Manifest, warnings []string) ([]string, error) {
+	var compareErr error
+	warnings, compareErr = appendRestoreDirectoryComparisonWarnings(ctx, snapshotPath, targetPath, warnings)
+	if compareErr != nil {
+		return warnings, compareErr
+	}
+	return appendRestoreFileComparisonWarnings(ctx, targetPath, manifest, warnings)
+}
+
+func (m *Manager) latestCompletedRestoreForTarget(jobID string, targetPath string) *RestoreResult {
+	cleanTargetPath := filepath.Clean(targetPath)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	state := m.state.Jobs[jobID]
+	for _, restore := range state.RestoreHistory {
+		if restoreMatchesTargetSnapshot(restore, cleanTargetPath) {
+			return cloneRestoreResultRaw(restore)
+		}
+	}
+	if restoreMatchesTargetSnapshot(state.LastRestore, cleanTargetPath) {
+		return cloneRestoreResultRaw(state.LastRestore)
+	}
+	return nil
+}
+
+func restoreMatchesTargetSnapshot(restore *RestoreResult, cleanTargetPath string) bool {
+	if restore == nil || restore.Status != StatusCompleted {
+		return false
+	}
+	if strings.TrimSpace(restore.SnapshotPath) == "" {
+		return false
+	}
+	return filepath.Clean(restore.TargetPath) == cleanTargetPath
+}
+
+func localRestoreSnapshotManifest(job config.BackupJobConfig, restore *RestoreResult) (string, string, Manifest, error) {
+	snapshotPath := filepath.Clean(strings.TrimSpace(restore.SnapshotPath))
+	if snapshotPath == "." || snapshotPath == "" {
+		return "", "", Manifest{}, fmt.Errorf("%w: restore record is missing snapshot path", ErrUnsafePath)
+	}
+	snapshotName := filepath.Base(snapshotPath)
+	manifestPath := filepath.Join(snapshotPath, manifestFileName)
+	if err := validateSnapshotManifestLocation(job, snapshotName, snapshotPath, manifestPath); err != nil {
+		return "", "", Manifest{}, err
+	}
+	exists, err := backupManifestFileExistsNoFollow(manifestPath)
+	if err != nil {
+		return "", "", Manifest{}, err
+	}
+	if !exists {
+		return "", "", Manifest{}, fmt.Errorf("%w: restored backup snapshot %q is missing manifest", ErrUnsafePath, cleanPreviewSamplePath(snapshotName))
+	}
+	manifest, err := readManifest(manifestPath)
+	if err != nil {
+		return "", "", Manifest{}, err
+	}
+	if err := validateSnapshotManifestIdentity(job.ID, snapshotName, manifest); err != nil {
+		return "", "", Manifest{}, err
+	}
+	return snapshotPath, manifestPath, manifest, nil
+}
+
+func appendRestoreDirectoryComparisonWarnings(ctx context.Context, snapshotPath string, targetPath string, warnings []string) ([]string, error) {
+	sourceRootPath, err := safeJoin(snapshotPath, "data")
+	if err != nil {
+		return warnings, err
+	}
+	sourceRootInfo, err := os.Lstat(sourceRootPath)
+	if err != nil {
+		return warnings, fmt.Errorf("stat backup snapshot data root: %w", err)
+	}
+	if sourceRootInfo.Mode()&os.ModeSymlink != 0 || !sourceRootInfo.IsDir() {
+		return warnings, fmt.Errorf("%w: backup snapshot data root must be a directory", ErrUnsafePath)
+	}
+	targetRootInfo, err := os.Lstat(targetPath)
+	if err != nil {
+		return warnings, fmt.Errorf("stat restore target root: %w", err)
+	}
+	if targetRootInfo.Mode()&os.ModeSymlink != 0 || !targetRootInfo.IsDir() {
+		warnings = appendRestoreVerificationWarning(warnings, "恢复目标根目录类型不匹配")
+	} else if targetRootInfo.Mode().Perm() != sourceRootInfo.Mode().Perm() {
+		warnings = appendRestoreVerificationWarning(warnings, "恢复目标根目录权限不匹配")
+	}
+	expectedDirs := make(map[string]struct{})
+	err = filepath.WalkDir(sourceRootPath, func(sourcePath string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if sourcePath == sourceRootPath || !entry.IsDir() {
+			return nil
+		}
+		info, err := os.Lstat(sourcePath)
+		if err != nil {
+			return fmt.Errorf("stat backup snapshot directory: %w", err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return nil
+		}
+		relPath, err := filepath.Rel(sourceRootPath, sourcePath)
+		if err != nil {
+			return err
+		}
+		relPath = filepath.ToSlash(relPath)
+		expectedDirs[relPath] = struct{}{}
+		targetDirPath, err := safeJoin(targetPath, relPath)
+		if err != nil {
+			return err
+		}
+		targetInfo, err := os.Lstat(targetDirPath)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				warnings = appendRestoreVerificationWarning(warnings, "恢复目标缺少对照备份目录: "+relPath)
+				return nil
+			}
+			return fmt.Errorf("stat restore target directory: %w", err)
+		}
+		if targetInfo.Mode()&os.ModeSymlink != 0 || !targetInfo.IsDir() {
+			warnings = appendRestoreVerificationWarning(warnings, "恢复目标目录类型不匹配: "+relPath)
+			return nil
+		}
+		if targetInfo.Mode().Perm() != info.Mode().Perm() {
+			warnings = appendRestoreVerificationWarning(warnings, fmt.Sprintf("恢复目标目录权限不匹配: %s", relPath))
+		}
+		return nil
+	})
+	if err != nil {
+		return warnings, fmt.Errorf("compare restored directories: %w", err)
+	}
+	err = filepath.WalkDir(targetPath, func(targetDirPath string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if targetDirPath == targetPath || !entry.IsDir() {
+			return nil
+		}
+		relPath, err := filepath.Rel(targetPath, targetDirPath)
+		if err != nil {
+			return err
+		}
+		relPath = filepath.ToSlash(relPath)
+		if relPath == ".mnemonas-restore" || strings.HasPrefix(relPath, ".mnemonas-restore/") {
+			return filepath.SkipDir
+		}
+		if _, ok := expectedDirs[relPath]; !ok {
+			warnings = appendRestoreVerificationWarning(warnings, "恢复目标包含对照备份未登记的目录: "+relPath)
+			return filepath.SkipDir
+		}
+		return nil
+	})
+	if err != nil {
+		return warnings, fmt.Errorf("compare restored directories: %w", err)
+	}
+	return warnings, nil
+}
+
+func appendRestoreFileComparisonWarnings(ctx context.Context, targetPath string, manifest Manifest, warnings []string) ([]string, error) {
+	expectedFiles := make(map[string]ManifestEntry, len(manifest.Entries))
+	var configEntry *ManifestEntry
+	for _, entry := range manifest.Entries {
+		archivePath := filepath.ToSlash(entry.ArchivePath)
+		if relPath, ok := strings.CutPrefix(archivePath, "data/"); ok {
+			expectedFiles[relPath] = entry
+			continue
+		}
+		if archivePath == "config/config.toml" {
+			entryCopy := entry
+			configEntry = &entryCopy
+		}
+	}
+	for relPath, entry := range expectedFiles {
+		if err := ctx.Err(); err != nil {
+			return warnings, err
+		}
+		targetFilePath, err := safeJoin(targetPath, relPath)
+		if err != nil {
+			return warnings, err
+		}
+		size, digest, mode, err := hashFile(ctx, targetFilePath)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				warnings = appendRestoreVerificationWarning(warnings, "恢复目标缺少对照备份文件: "+relPath)
+				continue
+			}
+			warnings = appendRestoreVerificationWarning(warnings, fmt.Sprintf("恢复目标文件校验失败: %s", relPath))
+			continue
+		}
+		if size != entry.Size || digest != entry.SHA256 || mode != manifestEntryMode(entry) {
+			warnings = appendRestoreVerificationWarning(warnings, fmt.Sprintf("恢复目标文件校验失败: %s", relPath))
+		}
+	}
+	warnings = appendRestoreConfigComparisonWarnings(ctx, targetPath, configEntry, warnings)
+
+	err := filepath.WalkDir(targetPath, func(filePath string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if filePath == targetPath || entry.IsDir() {
+			return nil
+		}
+		info, err := os.Lstat(filePath)
+		if err != nil {
+			return fmt.Errorf("stat restore target entry: %w", err)
+		}
+		relPath, err := filepath.Rel(targetPath, filePath)
+		if err != nil {
+			return err
+		}
+		relPath = filepath.ToSlash(relPath)
+		if relPath == ".mnemonas-restore/config.toml" {
+			return nil
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			warnings = appendRestoreVerificationWarning(warnings, "恢复目标包含符号链接: "+relPath)
+			return nil
+		}
+		if !info.Mode().IsRegular() {
+			warnings = appendRestoreVerificationWarning(warnings, "恢复目标包含不支持的文件类型: "+relPath)
+			return nil
+		}
+		if _, ok := expectedFiles[relPath]; !ok {
+			warnings = appendRestoreVerificationWarning(warnings, "恢复目标包含对照备份未登记的文件: "+relPath)
+		}
+		return nil
+	})
+	if err != nil {
+		return warnings, fmt.Errorf("compare restored files: %w", err)
+	}
+	return warnings, nil
+}
+
+func appendRestoreConfigComparisonWarnings(ctx context.Context, targetPath string, configEntry *ManifestEntry, warnings []string) []string {
+	configPath := filepath.Join(targetPath, ".mnemonas-restore", "config.toml")
+	exists, err := regularFileExistsNoFollow(configPath)
+	if err != nil {
+		return appendRestoreVerificationWarning(warnings, fmt.Sprintf("恢复目标配置文件校验失败: %v", err))
+	}
+	if !exists {
+		return warnings
+	}
+	if configEntry == nil {
+		return appendRestoreVerificationWarning(warnings, "恢复目标包含对照备份未登记的配置文件: .mnemonas-restore/config.toml")
+	}
+	size, digest, mode, err := hashFile(ctx, configPath)
+	if err != nil {
+		return appendRestoreVerificationWarning(warnings, "恢复目标配置文件校验失败: .mnemonas-restore/config.toml")
+	}
+	if size != configEntry.Size || digest != configEntry.SHA256 || mode != manifestEntryMode(*configEntry) {
+		return appendRestoreVerificationWarning(warnings, "恢复目标配置文件校验失败: .mnemonas-restore/config.toml")
+	}
+	return warnings
 }
 
 func appendRestoreVerificationWarning(warnings []string, warning string) []string {
@@ -3753,6 +5119,9 @@ func appendRestoreVerificationWarning(warnings []string, warning string) []strin
 }
 
 func regularFileExistsNoFollow(path string) (bool, error) {
+	if err := validatePathComponentsNoSymlink(filepath.Dir(path), "restore verification"); err != nil {
+		return false, err
+	}
 	info, err := os.Lstat(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -3766,7 +5135,30 @@ func regularFileExistsNoFollow(path string) (bool, error) {
 	return info.Mode().IsRegular(), nil
 }
 
+func regularFileExistsStrictNoFollow(path string) (bool, error) {
+	if err := validatePathComponentsNoSymlink(filepath.Dir(path), "restore verification"); err != nil {
+		return false, err
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return false, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return false, fmt.Errorf("%s is a symlink", path)
+	}
+	if !info.Mode().IsRegular() {
+		return false, fmt.Errorf("%s is not a regular file", path)
+	}
+	return true, nil
+}
+
 func dirExistsNoFollow(path string) (bool, error) {
+	if err := validatePathComponentsNoSymlink(filepath.Dir(path), "restore verification"); err != nil {
+		return false, err
+	}
 	info, err := os.Lstat(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -3810,6 +5202,19 @@ func installRestoreTarget(partialPath, targetPath string) error {
 	return nil
 }
 
+func removeAllBackupPath(targetPath, label string) error {
+	if err := validatePathComponentsNoSymlink(targetPath, label); err != nil {
+		return err
+	}
+	if err := rootio.RemoveAllPathNoFollow(targetPath); err != nil {
+		if rootio.IsSymlinkError(err) {
+			return fmt.Errorf("%w: %s path must not contain symlink", ErrUnsafePath, label)
+		}
+		return err
+	}
+	return nil
+}
+
 func mapRestorePathError(err error, message string) error {
 	if rootio.IsSymlinkError(err) {
 		return fmt.Errorf("%w: %s", ErrUnsafePath, message)
@@ -3818,10 +5223,18 @@ func mapRestorePathError(err error, message string) error {
 }
 
 func restoreManifestToTarget(ctx context.Context, snapshotPath, targetPath string, manifest Manifest, includeConfig bool) (int64, int64, bool, string, error) {
+	if _, _, err := verifyManifestFiles(ctx, snapshotPath, manifest); err != nil {
+		return 0, 0, false, "", fmt.Errorf("verify backup snapshot: %w", err)
+	}
+
 	var fileCount int64
 	var verifiedBytes int64
 	var configRestored bool
 	var configPath string
+	directoryModes, err := restoreSnapshotDirectories(ctx, snapshotPath, "data", targetPath)
+	if err != nil {
+		return fileCount, verifiedBytes, configRestored, configPath, err
+	}
 	for _, entry := range manifest.Entries {
 		if err := ctx.Err(); err != nil {
 			return fileCount, verifiedBytes, configRestored, configPath, err
@@ -3835,6 +5248,9 @@ func restoreManifestToTarget(ctx context.Context, snapshotPath, targetPath strin
 				continue
 			}
 		}
+		if err := validateRestoreManifestFileEntry(archivePath, entry.Size); err != nil {
+			return fileCount, verifiedBytes, configRestored, configPath, err
+		}
 		sourcePath, err := safeJoin(snapshotPath, archivePath)
 		if err != nil {
 			return fileCount, verifiedBytes, configRestored, configPath, err
@@ -3846,7 +5262,7 @@ func restoreManifestToTarget(ctx context.Context, snapshotPath, targetPath strin
 		if _, err := copyHostFileWithHash(ctx, sourcePath, destinationPath, archivePath, entry.SourcePath); err != nil {
 			return fileCount, verifiedBytes, configRestored, configPath, fmt.Errorf("restore %s: %w", archivePath, err)
 		}
-		size, digest, err := hashFile(ctx, destinationPath)
+		size, digest, mode, err := hashFile(ctx, destinationPath)
 		if err != nil {
 			return fileCount, verifiedBytes, configRestored, configPath, fmt.Errorf("verify restored %s: %w", archivePath, err)
 		}
@@ -3856,14 +5272,156 @@ func restoreManifestToTarget(ctx context.Context, snapshotPath, targetPath strin
 		if digest != entry.SHA256 {
 			return fileCount, verifiedBytes, configRestored, configPath, fmt.Errorf("checksum mismatch for restored %s", archivePath)
 		}
+		if mode != manifestEntryMode(entry) {
+			return fileCount, verifiedBytes, configRestored, configPath, fmt.Errorf("mode mismatch for restored %s: got %04o, want %04o", archivePath, mode, manifestEntryMode(entry))
+		}
+		nextVerifiedBytes, err := addManifestEntrySize(verifiedBytes, size)
+		if err != nil {
+			return fileCount, verifiedBytes, configRestored, configPath, err
+		}
 		fileCount++
-		verifiedBytes += size
+		verifiedBytes = nextVerifiedBytes
 		if !isData {
 			configRestored = true
 			configPath = destinationPath
 		}
 	}
+	if err := applyDirectoryModesNoFollow(targetPath, directoryModes, "restore target"); err != nil {
+		return fileCount, verifiedBytes, configRestored, configPath, err
+	}
 	return fileCount, verifiedBytes, configRestored, configPath, nil
+}
+
+func restoreSnapshotDirectories(ctx context.Context, snapshotPath string, archiveRoot string, targetRoot string) ([]directoryMode, error) {
+	sourceRootPath, err := safeJoin(snapshotPath, archiveRoot)
+	if err != nil {
+		return nil, err
+	}
+	sourceRootInfo, err := os.Lstat(sourceRootPath)
+	if err != nil {
+		return nil, fmt.Errorf("stat backup snapshot directory root: %w", mapBackupNoFollowError(err, "backup snapshot"))
+	}
+	if sourceRootInfo.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("%w: snapshot directory root changed to a symlink: %s", ErrUnsafePath, archiveRoot)
+	}
+	if !sourceRootInfo.IsDir() {
+		return nil, fmt.Errorf("%w: snapshot directory root is not a directory: %s", ErrUnsafePath, archiveRoot)
+	}
+	if err := rootio.MkdirAllPathNoFollow(targetRoot, writableDirectoryMode(sourceRootInfo.Mode().Perm())); err != nil {
+		return nil, fmt.Errorf("create restore directory root: %w", mapRestorePathError(err, "restore target path must not contain symlink"))
+	}
+	directoryModes := []directoryMode{{RelPath: ".", Mode: sourceRootInfo.Mode().Perm()}}
+	if err := restoreSnapshotDirectoryEntry(ctx, sourceRootPath, ".", targetRoot, &directoryModes); err != nil {
+		return nil, err
+	}
+	return directoryModes, nil
+}
+
+func restoreSnapshotDirectoryEntry(ctx context.Context, sourceRootPath string, relPath string, targetRoot string, directoryModes *[]directoryMode) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	sourcePath := sourceRootPath
+	if relPath != "." {
+		sourcePath = filepath.Join(sourceRootPath, relPath)
+	}
+	info, err := os.Lstat(sourcePath)
+	if err != nil {
+		return fmt.Errorf("stat backup snapshot directory %s: %w", relPath, mapBackupNoFollowError(err, "backup snapshot"))
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("%w: snapshot directory changed to a symlink: %s", ErrUnsafePath, relPath)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("%w: snapshot directory root is not a directory: %s", ErrUnsafePath, relPath)
+	}
+
+	dir, err := rootio.OpenDirPathNoFollow(sourcePath)
+	if err != nil {
+		return fmt.Errorf("open backup snapshot directory %s: %w", relPath, mapBackupNoFollowError(err, "backup snapshot"))
+	}
+	children, readErr := dir.ReadDir(-1)
+	closeErr := dir.Close()
+	if readErr != nil {
+		return fmt.Errorf("read backup snapshot directory %s: %w", relPath, readErr)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("close backup snapshot directory %s: %w", relPath, closeErr)
+	}
+	sort.Slice(children, func(i, j int) bool {
+		return children[i].Name() < children[j].Name()
+	})
+	for _, child := range children {
+		childPath := childRelPath(relPath, child.Name())
+		childSourcePath := filepath.Join(sourceRootPath, childPath)
+		childInfo, err := os.Lstat(childSourcePath)
+		if err != nil {
+			return fmt.Errorf("stat backup snapshot entry %s: %w", childPath, mapBackupNoFollowError(err, "backup snapshot"))
+		}
+		if childInfo.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("%w: snapshot directory entry changed to a symlink: %s", ErrUnsafePath, childPath)
+		}
+		if childInfo.IsDir() {
+			destinationPath := filepath.Join(targetRoot, childPath)
+			if err := rootio.MkdirAllPathNoFollow(destinationPath, writableDirectoryMode(childInfo.Mode().Perm())); err != nil {
+				return fmt.Errorf("create restored directory %s: %w", childPath, mapRestorePathError(err, "restore target path must not contain symlink"))
+			}
+			*directoryModes = append(*directoryModes, directoryMode{RelPath: childPath, Mode: childInfo.Mode().Perm()})
+			if err := restoreSnapshotDirectoryEntry(ctx, sourceRootPath, childPath, targetRoot, directoryModes); err != nil {
+				return err
+			}
+			continue
+		}
+		if childInfo.Mode().IsRegular() {
+			continue
+		}
+		return fmt.Errorf("%w: snapshot directory entry has unsupported file type: %s", ErrUnsupportedFileType, childPath)
+	}
+	return nil
+}
+
+type directoryMode struct {
+	RelPath string
+	Mode    os.FileMode
+}
+
+func writableDirectoryMode(mode os.FileMode) os.FileMode {
+	return mode.Perm() | 0700
+}
+
+func applyDirectoryModesNoFollow(root string, directoryModes []directoryMode, label string) error {
+	sort.SliceStable(directoryModes, func(i, j int) bool {
+		leftDepth := directoryModeDepth(directoryModes[i].RelPath)
+		rightDepth := directoryModeDepth(directoryModes[j].RelPath)
+		return leftDepth > rightDepth
+	})
+	for _, directoryMode := range directoryModes {
+		dirPath := filepath.Join(root, directoryMode.RelPath)
+		if err := chmodDirectoryPathNoFollow(dirPath, directoryMode.Mode, label); err != nil {
+			return fmt.Errorf("set directory mode %s: %w", directoryMode.RelPath, err)
+		}
+	}
+	return nil
+}
+
+func directoryModeDepth(relPath string) int {
+	cleaned := filepath.ToSlash(filepath.Clean(relPath))
+	if cleaned == "." || cleaned == "" {
+		return 0
+	}
+	return strings.Count(cleaned, "/") + 1
+}
+
+func chmodDirectoryPathNoFollow(dirPath string, mode os.FileMode, label string) error {
+	dir, err := rootio.OpenDirPathNoFollow(dirPath)
+	if err != nil {
+		return mapBackupNoFollowError(err, label)
+	}
+	if err := dir.Chmod(mode.Perm()); err != nil {
+		_ = dir.Close()
+		return err
+	}
+	return dir.Close()
 }
 
 func pathContainsOrEquals(parent, child string) bool {
@@ -3930,11 +5488,37 @@ func safeJoin(root, archivePath string) (string, error) {
 	return filepath.Join(root, filepath.FromSlash(rel)), nil
 }
 
-func fileExists(path string) bool {
-	_, err := os.Stat(path)
-	return err == nil
+func backupManifestFileExistsNoFollow(filePath string) (bool, error) {
+	if err := validatePathComponentsNoSymlink(filePath, "backup manifest"); err != nil {
+		return false, err
+	}
+	info, err := os.Lstat(filePath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return false, fmt.Errorf("stat backup manifest: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return false, fmt.Errorf("%w: backup manifest path must not contain symlink", ErrUnsafePath)
+	}
+	if !info.Mode().IsRegular() {
+		return false, fmt.Errorf("%w: backup manifest must be a regular file", ErrUnsafePath)
+	}
+	return true, nil
+}
+
+func parseRunID(runID string) (time.Time, error) {
+	parsed, err := time.Parse(runIDTimeLayout, runID)
+	if err != nil {
+		return time.Time{}, err
+	}
+	if formatRunID(parsed) != runID {
+		return time.Time{}, fmt.Errorf("non-canonical run id")
+	}
+	return parsed.UTC(), nil
 }
 
 func formatRunID(t time.Time) string {
-	return t.UTC().Format("20060102T150405.000000000Z")
+	return t.UTC().Format(runIDTimeLayout)
 }

@@ -25,10 +25,8 @@ func splitRelativeName(name string) ([]string, error) {
 		return nil, errEscape
 	}
 
-	for _, part := range strings.Split(name, string(filepath.Separator)) {
-		if part == ".." {
-			return nil, errEscape
-		}
+	if hasParentSegment(name) {
+		return nil, errEscape
 	}
 
 	cleanName := filepath.Clean(name)
@@ -39,6 +37,37 @@ func splitRelativeName(name string) ([]string, error) {
 		}
 	}
 	return parts, nil
+}
+
+func splitRelativeParent(name string) (string, string, error) {
+	parts, err := splitRelativeName(name)
+	if err != nil {
+		return "", "", err
+	}
+	base := parts[len(parts)-1]
+	if base == "." || base == ".." {
+		return "", "", errEscape
+	}
+	if len(parts) == 1 {
+		return "", base, nil
+	}
+	return filepath.Join(parts[:len(parts)-1]...), base, nil
+}
+
+func hasParentSegment(path string) bool {
+	for _, part := range strings.FieldsFunc(path, isPathSeparator) {
+		if part == ".." {
+			return true
+		}
+	}
+	return false
+}
+
+func isPathSeparator(r rune) bool {
+	if r == filepath.Separator {
+		return true
+	}
+	return filepath.Separator == '\\' && r == '/'
 }
 
 func symlinkPathError(op, name string) error {
@@ -160,6 +189,69 @@ func ReplaceFilePathNoFollow(oldPath, newPath string) error {
 	return replaceFilePathNoFollow(rootPath, relParent, oldName, newName, oldClean, newClean)
 }
 
+// RenamePathIntoDirNoFollow renames sourcePath to targetName inside targetDir
+// without following symlinks in either parent path or at the source/target leaf.
+func RenamePathIntoDirNoFollow(sourcePath, targetDir, targetName string) error {
+	if sourcePath == "" || targetDir == "" || targetName == "" ||
+		hasParentSegment(sourcePath) || hasParentSegment(targetDir) || hasParentSegment(targetName) ||
+		filepath.IsAbs(targetName) || strings.IndexFunc(targetName, isPathSeparator) >= 0 {
+		return rootPathError("rename", filepath.Join(targetDir, targetName), errEscape)
+	}
+
+	sourceClean := filepath.Clean(sourcePath)
+	targetDirClean := filepath.Clean(targetDir)
+	targetName = filepath.Clean(targetName)
+	if targetName == "." || targetName == ".." {
+		return rootPathError("rename", filepath.Join(targetDirClean, targetName), errEscape)
+	}
+
+	sourceName := filepath.Base(sourceClean)
+	if sourceName == "." || sourceName == ".." {
+		return rootPathError("rename", sourcePath, errEscape)
+	}
+
+	sourceRootPath, sourceRelParent, err := splitHostPath(filepath.Dir(sourceClean))
+	if err != nil {
+		return err
+	}
+	targetRootPath, targetRelDir, err := splitHostPath(targetDirClean)
+	if err != nil {
+		return err
+	}
+	targetDisplay := filepath.Join(targetDirClean, targetName)
+	return renamePathIntoDirNoFollow(
+		sourceRootPath,
+		sourceRelParent,
+		sourceName,
+		targetRootPath,
+		targetRelDir,
+		targetName,
+		sourceClean,
+		targetDisplay,
+	)
+}
+
+// RemoveAllPathNoFollow removes path and all children without following
+// symlinks in any parent path component. Symlink entries inside the tree are
+// removed as links.
+func RemoveAllPathNoFollow(path string) error {
+	rootPath, relPath, err := splitHostPath(path)
+	if err != nil {
+		return err
+	}
+	if relPath == "" {
+		return rootPathError("removeall", path, errEscape)
+	}
+
+	root, err := os.OpenRoot(rootPath)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+
+	return RemoveAllNoFollow(root, relPath)
+}
+
 // MkdirAllNoFollowTracked creates name and missing parents relative to root
 // without following symlinks in any path component. It returns only directories
 // created by this call, deepest first for rollback.
@@ -239,6 +331,10 @@ func OpenDirPathNoFollow(path string) (*os.File, error) {
 }
 
 func splitHostPath(path string) (string, string, error) {
+	if path == "" || hasParentSegment(path) {
+		return "", "", rootPathError("path", path, errEscape)
+	}
+
 	cleanPath := filepath.Clean(path)
 	if !filepath.IsAbs(cleanPath) {
 		absPath, err := filepath.Abs(cleanPath)

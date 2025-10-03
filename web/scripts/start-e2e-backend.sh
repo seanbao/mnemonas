@@ -38,7 +38,63 @@ cleanup() {
 extract_json_field() {
   local json="$1"
   local field="$2"
-  printf '%s' "$json" | sed -n "s/.*\"${field}\":\"\([^\"]*\)\".*/\1/p"
+
+  if command -v python3 >/dev/null 2>&1; then
+    printf '%s' "$json" | python3 -c '
+import json
+import sys
+
+field = sys.argv[1]
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+
+def find_value(value):
+    if isinstance(value, dict):
+        if field in value:
+            return value[field]
+        for child in value.values():
+            found = find_value(child)
+            if found is not None:
+                return found
+    elif isinstance(value, list):
+        for child in value:
+            found = find_value(child)
+            if found is not None:
+                return found
+    return None
+
+found = find_value(data)
+if isinstance(found, str):
+    sys.stdout.write(found)
+' "$field" 2>/dev/null
+    return 0
+  fi
+
+  printf '%s' "$json" | sed -n "s/.*\"${field}\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p"
+}
+
+json_escape_string() {
+  local value=$1
+
+  if command -v python3 >/dev/null 2>&1; then
+    python3 -c 'import json, sys; sys.stdout.write(json.dumps(sys.argv[1]))' "$value"
+    return 0
+  fi
+
+  value=${value//\\/\\\\}
+  value=${value//\"/\\\"}
+  value=${value//$'\n'/\\n}
+  value=${value//$'\r'/\\r}
+  printf '"%s"' "$value"
+}
+
+json_login_payload() {
+  local username=$1
+  local password=$2
+
+  printf '{"username":%s,"password":%s}' "$(json_escape_string "$username")" "$(json_escape_string "$password")"
 }
 
 http_host_for_url() {
@@ -68,7 +124,7 @@ seed_e2e_fixtures() {
 
   login_response=$(curl -sf -X POST "$NASD_BASE_URL/api/v1/auth/login" \
     -H 'Content-Type: application/json' \
-    -d "{\"username\":\"admin\",\"password\":\"${password}\"}")
+    -d "$(json_login_payload "admin" "$password")")
   token=$(extract_json_field "$login_response" 'access_token')
   if [[ -z "$token" ]]; then
     echo "failed to retrieve E2E auth token" >&2
@@ -116,7 +172,7 @@ seed_e2e_fixtures() {
   share_response=$(curl -sf -X POST "$NASD_BASE_URL/api/v1/shares" \
     -H "Authorization: Bearer $token" \
     -H 'Content-Type: application/json' \
-    -d "{\"path\":\"/e2e-protected-share-fixture.txt\",\"type\":\"file\",\"permission\":\"read\",\"password\":\"${protected_share_password}\",\"description\":\"playwright protected public share fixture\"}")
+    -d "{\"path\":\"/e2e-protected-share-fixture.txt\",\"type\":\"file\",\"permission\":\"read\",\"password\":$(json_escape_string "$protected_share_password"),\"description\":\"playwright protected public share fixture\"}")
   protected_share_id=$(extract_json_field "$share_response" 'id')
   if [[ -z "$protected_share_id" ]]; then
     echo "failed to create protected public share fixture" >&2
@@ -168,6 +224,20 @@ wait_for_url() {
   done
 
   return 1
+}
+
+require_no_control_characters() {
+  local value="$1"
+  local label="$2"
+
+  if [[ "$value" == *$'\n'* || "$value" == *$'\r'* ]]; then
+    echo "$label cannot contain newline characters: $value" >&2
+    exit 1
+  fi
+  if [[ "$value" == *[[:cntrl:]]* ]]; then
+    echo "$label cannot contain control characters: $value" >&2
+    exit 1
+  fi
 }
 
 path_has_parent_segment() {
@@ -236,12 +306,52 @@ is_valid_tcp_host() {
   return 0
 }
 
+is_ipv4_loopback_host() {
+  local host="$1"
+  local octet
+  local -a octets
+
+  [[ "$host" =~ ^127\.([0-9]{1,3}\.){2}[0-9]{1,3}$ ]] || return 1
+  IFS='.' read -r -a octets <<< "$host"
+  for octet in "${octets[@]}"; do
+    [[ ${#octet} -le 3 ]] || return 1
+    (( 10#$octet >= 0 && 10#$octet <= 255 )) || return 1
+  done
+  return 0
+}
+
+is_loopback_host() {
+  local host="$1"
+
+  case "$host" in
+    localhost|ip6-localhost|::1)
+      return 0
+      ;;
+  esac
+  is_ipv4_loopback_host "$host"
+}
+
+tcp_addr_host() {
+  local value="$1"
+
+  if [[ "$value" =~ ^\[([^][]+)\]:([0-9]+)$ ]]; then
+    printf '%s\n' "${BASH_REMATCH[1]}"
+    return 0
+  fi
+  if [[ "$value" =~ ^([^:]+):([0-9]+)$ ]]; then
+    printf '%s\n' "${BASH_REMATCH[1]}"
+    return 0
+  fi
+  return 1
+}
+
 require_safe_tcp_port() {
   local value="$1"
   local label="$2"
 
   [[ -n "$value" ]] || { echo "$label cannot be empty" >&2; exit 1; }
   [[ "$value" != *[[:space:]]* ]] || { echo "$label cannot contain whitespace: $value" >&2; exit 1; }
+  [[ "$value" != *[[:cntrl:]]* ]] || { echo "$label cannot contain control characters: $value" >&2; exit 1; }
   [[ "$value" =~ ^[0-9]+$ ]] || { echo "$label must be numeric: $value" >&2; exit 1; }
   (( 10#$value >= 1 && 10#$value <= 65535 )) || { echo "$label must be between 1 and 65535: $value" >&2; exit 1; }
 }
@@ -254,6 +364,7 @@ require_safe_tcp_addr() {
 
   [[ -n "$value" ]] || { echo "$label cannot be empty" >&2; exit 1; }
   [[ "$value" != *[[:space:]]* ]] || { echo "$label cannot contain whitespace: $value" >&2; exit 1; }
+  [[ "$value" != *[[:cntrl:]]* ]] || { echo "$label cannot contain control characters: $value" >&2; exit 1; }
 
   if [[ "$value" =~ ^\[([^][]+)\]:([0-9]+)$ ]]; then
     host="${BASH_REMATCH[1]}"
@@ -270,7 +381,25 @@ require_safe_tcp_addr() {
   require_safe_tcp_port "$port" "$label port"
 }
 
+require_loopback_host() {
+  local value="$1"
+  local label="$2"
+
+  is_loopback_host "$value" || { echo "$label must be loopback-only for isolated test backends: $value" >&2; exit 1; }
+}
+
+require_loopback_tcp_addr() {
+  local value="$1"
+  local label="$2"
+  local host
+
+  host="$(tcp_addr_host "$value")" || { echo "$label must be a host:port address: $value" >&2; exit 1; }
+  is_loopback_host "$host" || { echo "$label must be loopback-only for isolated test backends: $value" >&2; exit 1; }
+}
+
 require_safe_e2e_root() {
+  require_no_control_characters "$E2E_ROOT" "MNEMONAS_E2E_ROOT"
+
   if path_has_parent_segment "$E2E_ROOT"; then
     echo "MNEMONAS_E2E_ROOT must not contain '..' path segments: $E2E_ROOT" >&2
     exit 1
@@ -289,11 +418,15 @@ require_safe_e2e_root() {
 trap cleanup EXIT INT TERM
 
 require_safe_e2e_root
-is_valid_tcp_host "$NASD_HOST" || { echo "MNEMONAS_E2E_NASD_HOST host is invalid: $NASD_HOST" >&2; exit 1; }
 [[ "$NASD_HOST" != *[[:space:]]* ]] || { echo "MNEMONAS_E2E_NASD_HOST cannot contain whitespace: $NASD_HOST" >&2; exit 1; }
+[[ "$NASD_HOST" != *[[:cntrl:]]* ]] || { echo "MNEMONAS_E2E_NASD_HOST cannot contain control characters: $NASD_HOST" >&2; exit 1; }
+is_valid_tcp_host "$NASD_HOST" || { echo "MNEMONAS_E2E_NASD_HOST host is invalid: $NASD_HOST" >&2; exit 1; }
+require_loopback_host "$NASD_HOST" "MNEMONAS_E2E_NASD_HOST"
 require_safe_tcp_port "$NASD_PORT" "MNEMONAS_E2E_NASD_PORT"
 require_safe_tcp_addr "$DATAPLANE_HTTP" "MNEMONAS_E2E_DATAPLANE_HTTP"
+require_loopback_tcp_addr "$DATAPLANE_HTTP" "MNEMONAS_E2E_DATAPLANE_HTTP"
 require_safe_tcp_addr "$DATAPLANE_GRPC" "MNEMONAS_E2E_DATAPLANE_GRPC"
+require_loopback_tcp_addr "$DATAPLANE_GRPC" "MNEMONAS_E2E_DATAPLANE_GRPC"
 NASD_BASE_URL="http://$(http_host_for_url "$NASD_HOST"):${NASD_PORT}"
 rm -rf "$BACKEND_ROOT"
 mkdir -p "$STORAGE_ROOT" "$LOG_DIR"
@@ -350,7 +483,7 @@ password = ""
 [auth]
 enabled = true
 jwt_secret = ""
-access_token_ttl = "15m"
+access_token_ttl = "2h"
 refresh_token_ttl = "168h"
 users_file = ""
 

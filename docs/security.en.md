@@ -6,7 +6,7 @@ This guide describes recommended MnemoNAS security settings for LAN and public d
 
 ## Web UI Authentication
 
-Web UI authentication is enabled by default. On first startup with no user data, MnemoNAS creates an administrator account and writes the initial password to:
+Web UI authentication is enabled by default. On first startup with no user data, MnemoNAS creates an administrator account and writes the initial password to `initial-password.txt` next to `auth.users_file`. The default path is:
 
 ```text
 <storage.root>/.mnemonas/initial-password.txt
@@ -54,7 +54,7 @@ username = "admin"
 password = ""
 ```
 
-When `password` is empty and Basic Auth is enabled, MnemoNAS generates a random WebDAV password on first startup and stores it in:
+When `password` is empty and Basic Auth is enabled, MnemoNAS generates a 16-character human-readable WebDAV password on first startup. It includes lowercase letters, uppercase letters, and digits, and the generated character set excludes ambiguous characters. The password is stored in:
 
 ```text
 <storage.root>/secrets.json
@@ -66,7 +66,7 @@ Custom password:
 
 ```toml
 [webdav]
-password = "your-strong-password"
+password = "" # leave empty to use generated credentials; use a password-manager value for custom credentials
 ```
 
 Use at least 16 characters with mixed letters, numbers, and symbols. A password manager is strongly recommended.
@@ -117,7 +117,7 @@ sudo ufw deny 9090/tcp comment "MnemoNAS dataplane gRPC"
 sudo ufw deny 9091/tcp comment "MnemoNAS dataplane HTTP"
 ```
 
-If you changed the Web backend port or dataplane ports, replace `8080/9090/9091` with the actual ports, and keep dataplane ports closed to public and untrusted networks.
+When custom Web backend or dataplane ports are used, replace `8080/9090/9091` with the actual ports, and keep dataplane ports closed to public and untrusted networks.
 
 ### Public Access
 
@@ -163,6 +163,7 @@ server {
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_pass_request_headers on;
+        proxy_set_header Destination $http_destination;
     }
 }
 ```
@@ -217,12 +218,12 @@ cloudflared tunnel run mnemonas
 
 - [ ] First login completed using server-side `initial-password.txt`.
 - [ ] Administrator password changed.
-- [ ] WebDAV uses `auth_type = "users"`, or global Basic Auth credentials are recorded and changed to a strong password.
+- [ ] WebDAV uses `auth_type = "users"`, or global Basic Auth credentials are recorded and changed to a strong custom or generated password, without placeholder values.
 - [ ] `webdav.auth_type` is not `none` unless the server is loopback-only.
 - [ ] Public deployments use `server.host = "127.0.0.1"` and are reachable only through the HTTPS reverse proxy.
 - [ ] Dataplane gRPC/HTTP ports are loopback-only or private.
 - [ ] The Web UI security self-check has no `block` items; public deployments should resolve all `warning` items before exposure, especially `allow_unsafe_no_auth`, reverse-proxy headers, dataplane ports, and spare-administrator warnings.
-- [ ] `sudo mnemonas-doctor --public-domain <domain>` reports HTTP-to-HTTPS redirect behavior, a matching HTTPS certificate with at least 30 days remaining, verified renewal guidance, and no direct backend exposure, dataplane exposure, or UFW allow warnings.
+- [ ] `sudo mnemonas-doctor --public-domain <domain>` reports HTTP redirects to HTTPS on the same public domain, a matching HTTPS certificate with at least 30 days remaining, verified renewal guidance, rejected anonymous WebDAV `PROPFIND`, and no direct backend exposure, dataplane exposure, or UFW allow warnings.
 - [ ] The [Public cloud firewall checklist](cloud-firewall-checklist.en.md) has been applied: cloud security groups or public firewall rules expose only `80/443`; management ports, the Web backend port, and dataplane ports are not publicly reachable.
 - [ ] Public deployments use HTTPS.
 
@@ -230,7 +231,7 @@ Runtime checks:
 
 ```bash
 sudo mnemonas-doctor --public-domain <domain>
-# Checks HTTPS health, HTTP-to-HTTPS redirect behavior, certificate hostname, 30-day certificate validity, renewal guidance, direct backend exposure, and dataplane exposure.
+# Checks HTTPS health, HTTP redirects to HTTPS on the same public domain, certificate hostname, 30-day certificate validity, renewal guidance, anonymous WebDAV PROPFIND, direct backend exposure, and dataplane exposure.
 
 ss -tlnp | grep 8080
 ss -tlnp | grep -E '9090|9091'
@@ -238,8 +239,8 @@ ss -tlnp | grep -E '9090|9091'
 curl -I https://<domain>/health
 
 curl --connect-timeout 3 http://<domain>:8080/health
-# expected: failed connection or timeout
-# If you use custom backend ports, check that those ports also fail or time out.
+# expected: failed connection or timeout, with no HTTP status response
+# For custom backend ports, check that those ports also fail or time out without an HTTP status response.
 
 curl https://<domain>/dav/
 # expected: 401 Unauthorized when WebDAV authentication is enabled
@@ -280,7 +281,7 @@ location /api/ {
 
 ### Preview and Download Auth
 
-File downloads, version previews, media previews, thumbnails, and external-open flows use a short-lived `HttpOnly` download-session cookie. Long-lived access tokens are not passed through URL query parameters.
+File downloads, version previews, media previews, thumbnails, and external-open flows use a short-lived `HttpOnly`, `SameSite=Strict` download-session cookie. Long-lived access tokens are not passed through URL query parameters.
 
 The `Secure` cookie flag is enabled when the request is actually HTTPS, or when `trusted_proxy_hops > 0` and the direct peer is loopback or a proxy address listed in `trusted_proxy_cidrs` forwarding `X-Forwarded-Proto=https`.
 
@@ -303,7 +304,9 @@ Signing out, changing a user's password, deleting the user, disabling the user, 
 
 ### Public Share Passwords
 
-Password-protected public shares issue an `HttpOnly` cookie after successful password validation. The cookie is scoped to the matching `/s/<id>` and `/api/v1/public/shares/<id>` paths. Folder browsing and downloads use that cookie instead of passing passwords in URLs.
+Password-protected public shares issue an `HttpOnly`, `SameSite=Strict` cookie after successful password validation. The cookie is scoped to the matching `/s/<id>` and `/api/v1/public/shares/<id>` paths. Folder browsing and downloads use that cookie instead of passing passwords in URLs.
+
+Public share metadata, password-validation responses, and folder-listing responses include `Cache-Control: private, no-cache`, `Vary: Cookie`, `X-Content-Type-Options: nosniff`, and `Referrer-Policy: no-referrer` so cookie-dependent share metadata is not reused by browser or intermediary caches.
 
 After clearing site data, switching browser, or changing the share password, the password must be entered again.
 

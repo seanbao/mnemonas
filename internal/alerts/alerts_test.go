@@ -705,6 +705,44 @@ func TestSendEvent_PostsGenericWebhookPayload(t *testing.T) {
 	}
 }
 
+func TestSendEvent_DefaultsTimestampToUTC(t *testing.T) {
+	reqCh := make(chan string, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("ReadAll(request body) error: %v", err)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		reqCh <- string(body)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	monitor := NewMonitor(Config{
+		Enabled:       true,
+		WebhookURL:    server.URL,
+		WebhookMethod: http.MethodPost,
+	}, t.TempDir(), zerolog.Nop())
+
+	if err := monitor.SendEvent(context.Background(), EventPayload{Type: "backup_run"}); err != nil {
+		t.Fatalf("SendEvent() error: %v", err)
+	}
+
+	select {
+	case body := <-reqCh:
+		var payload EventPayload
+		if err := json.Unmarshal([]byte(body), &payload); err != nil {
+			t.Fatalf("decode event payload: %v; body=%s", err, body)
+		}
+		if payload.Timestamp.IsZero() || payload.Timestamp.Location() != time.UTC {
+			t.Fatalf("payload timestamp = %v (%v), want non-zero UTC", payload.Timestamp, payload.Timestamp.Location())
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for event webhook request")
+	}
+}
+
 func TestSendEventSendsEmailWhenWebhookIsNotConfigured(t *testing.T) {
 	originalSendSMTPMail := sendSMTPMail
 	defer func() { sendSMTPMail = originalSendSMTPMail }()

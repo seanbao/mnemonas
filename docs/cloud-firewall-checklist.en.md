@@ -15,7 +15,7 @@ Use this checklist before exposing MnemoNAS through a public domain. Cloud provi
 | `9090` | TCP | No public source | Internal dataplane gRPC | Not public |
 | `9091` | TCP | No public source | Internal dataplane HTTP | Not public |
 
-If you changed the MnemoNAS direct port or dataplane ports, treat those custom ports as not public too. If you use Cloudflare Tunnel, Tailscale, Headscale, or another tunnel/VPN and do not need direct public ingress, `80/443` may also stay closed. Still keep `8080/9090/9091` and custom backend ports private.
+When the MnemoNAS direct port or dataplane ports are changed, treat those custom ports as not public too. With Cloudflare Tunnel, Tailscale, Headscale, or another tunnel/VPN that does not need direct public ingress, `80/443` may also stay closed. Still keep `8080/9090/9091` and custom backend ports private.
 
 ## Provider Mapping
 
@@ -36,7 +36,7 @@ Run on the server:
 sudo mnemonas-doctor --public-domain nas.example.com
 ```
 
-This checks HTTPS health, HTTP-to-HTTPS redirect behavior, certificate hostname, 30-day certificate validity, direct backend exposure, dataplane exposure, and local listener scope. It cannot read cloud-console firewall rules, so the cloud security group still needs manual review.
+This checks HTTPS health, HTTP redirects to HTTPS on the same public domain, certificate hostname, 30-day certificate validity, direct backend exposure, dataplane exposure, and local listener scope. It cannot read cloud-console firewall rules, so the cloud security group still needs manual review.
 
 Run from an external network:
 
@@ -50,10 +50,10 @@ curl --connect-timeout 3 http://nas.example.com:9091/health
 Expected result:
 
 - `https://nas.example.com/health` is reachable.
-- `http://nas.example.com:8080/health` fails or times out.
-- `http://nas.example.com:9090/` fails or times out.
-- `http://nas.example.com:9091/health` fails or times out.
-- Any custom backend ports also fail or time out.
+- `http://nas.example.com:8080/health` fails to connect or times out, with no HTTP status response.
+- `http://nas.example.com:9090/` fails to connect or times out, with no HTTP status response.
+- `http://nas.example.com:9091/health` fails to connect or times out, with no HTTP status response.
+- Any custom backend ports also fail to connect or time out, with no HTTP status response.
 
 ## Common Mistakes
 

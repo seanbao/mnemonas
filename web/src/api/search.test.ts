@@ -69,15 +69,36 @@ describe('Search API', () => {
     expect(mockAuthFetch).toHaveBeenCalledWith('/api/v1/search?q=report&limit=25')
   })
 
+  it('forwards abort signals to the authenticated fetch request', async () => {
+    const controller = new AbortController()
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        success: true,
+        data: {
+          query: 'report',
+          count: 0,
+          results: [],
+        },
+      }),
+    })
+
+    await searchFiles('report', { signal: controller.signal })
+
+    expect(mockAuthFetch).toHaveBeenCalledWith('/api/v1/search?q=report', {
+      signal: controller.signal,
+    })
+  })
+
   it('rejects blank search queries without calling the API', async () => {
-    await expect(searchFiles('   ')).rejects.toThrow('Search query is required')
+    await expect(searchFiles('   ')).rejects.toThrow('请输入搜索关键词')
     expect(mockAuthFetch).not.toHaveBeenCalled()
   })
 
   it('rejects invalid limits without calling the API', async () => {
-    await expect(searchFiles('report', 0)).rejects.toThrow('Search limit must be between 1 and 100')
-    await expect(searchFiles('report', 101)).rejects.toThrow('Search limit must be between 1 and 100')
-    await expect(searchFiles('report', 1.5)).rejects.toThrow('Search limit must be between 1 and 100')
+    await expect(searchFiles('report', 0)).rejects.toThrow('搜索结果数量必须在 1 到 100 之间')
+    await expect(searchFiles('report', 101)).rejects.toThrow('搜索结果数量必须在 1 到 100 之间')
+    await expect(searchFiles('report', 1.5)).rejects.toThrow('搜索结果数量必须在 1 到 100 之间')
     expect(mockAuthFetch).not.toHaveBeenCalled()
   })
 
@@ -137,6 +158,29 @@ describe('Search API', () => {
     }
   })
 
+  it('surfaces problem-json search errors', async () => {
+    const body = {
+      title: 'Service unavailable',
+      detail: 'search index unavailable',
+      status: 503,
+    }
+
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 503,
+      statusText: 'Service Unavailable',
+      headers: new Headers({ 'Content-Type': 'application/problem+json' }),
+      clone: () => ({ json: () => Promise.resolve(body) }),
+      json: () => Promise.resolve(body),
+    })
+
+    await expect(searchFiles('report')).rejects.toMatchObject({
+      message: 'search index unavailable',
+      status: 503,
+      isUnavailable: true,
+    })
+  })
+
   it('falls back to a generic error when the error body is invalid', async () => {
     mockAuthFetch.mockResolvedValueOnce({
       ok: false,
@@ -144,7 +188,7 @@ describe('Search API', () => {
       json: () => Promise.reject(new SyntaxError('Unexpected token < in JSON')),
     })
 
-    await expect(searchFiles('report')).rejects.toThrow('Search failed')
+    await expect(searchFiles('report')).rejects.toThrow('搜索失败')
   })
 
   it('rejects invalid JSON in successful search responses', async () => {
@@ -179,6 +223,29 @@ describe('Search API', () => {
           query: 'report',
           count: 1,
           results: [{ name: 'report.pdf', path: '/docs/report.pdf', size: 100, modTime: '2026-03-14T00:00:00Z' }],
+        },
+      }),
+    })
+
+    await expect(searchFiles('report')).rejects.toThrow('服务器返回了无效的数据')
+  })
+
+  it.each([
+    ['negative count', { count: -1, results: [] }],
+    ['fractional count', { count: 1.5, results: [] }],
+    ['unsafe count', { count: 9007199254740992, results: [] }],
+    ['count smaller than results', { count: 0, results: [{ name: 'report.pdf', path: '/docs/report.pdf', isDir: false, size: 100, modTime: '2026-03-14T00:00:00Z' }] }],
+    ['negative result size', { count: 1, results: [{ name: 'report.pdf', path: '/docs/report.pdf', isDir: false, size: -1, modTime: '2026-03-14T00:00:00Z' }] }],
+    ['fractional result size', { count: 1, results: [{ name: 'report.pdf', path: '/docs/report.pdf', isDir: false, size: 1.5, modTime: '2026-03-14T00:00:00Z' }] }],
+    ['unsafe result size', { count: 1, results: [{ name: 'report.pdf', path: '/docs/report.pdf', isDir: false, size: 9007199254740992, modTime: '2026-03-14T00:00:00Z' }] }],
+  ])('rejects successful search responses with %s', async (_label, overrides) => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        success: true,
+        data: {
+          query: 'report',
+          ...overrides,
         },
       }),
     })

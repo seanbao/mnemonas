@@ -95,6 +95,42 @@ describe('LoginPage', () => {
   }
 
   describe('rendering', () => {
+    it('passes abort signals to login page bootstrap probes', async () => {
+      renderLogin()
+
+      await waitFor(() => {
+        expect(mockGetSetupStatus.mock.calls[0]?.[0]).toEqual({
+          signal: expect.any(AbortSignal),
+        })
+        expect(mockGetHealth.mock.calls[0]?.[0]).toEqual({
+          signal: expect.any(AbortSignal),
+        })
+      })
+    })
+
+    it('aborts login page bootstrap probes on unmount', async () => {
+      mockGetSetupStatus.mockReturnValue(new Promise(() => {}))
+      mockGetHealth.mockReturnValue(new Promise(() => {}))
+
+      const { unmount } = renderLogin()
+
+      await waitFor(() => {
+        expect(mockGetSetupStatus).toHaveBeenCalled()
+        expect(mockGetHealth).toHaveBeenCalled()
+      })
+      const setupSignal = mockGetSetupStatus.mock.calls[0]?.[0]?.signal
+      const healthSignal = mockGetHealth.mock.calls[0]?.[0]?.signal
+      expect(setupSignal).toBeInstanceOf(AbortSignal)
+      expect(healthSignal).toBeInstanceOf(AbortSignal)
+      expect(setupSignal?.aborted).toBe(false)
+      expect(healthSignal?.aborted).toBe(false)
+
+      unmount()
+
+      expect(setupSignal?.aborted).toBe(true)
+      expect(healthSignal?.aborted).toBe(true)
+    })
+
     it('renders login form', async () => {
       renderLogin()
       await waitForSetupStatusLoad()
@@ -355,7 +391,7 @@ describe('LoginPage', () => {
     })
 
     it('shows a warning toast when login succeeds with backend warning metadata', async () => {
-      mockLogin.mockResolvedValue({ warning: true, message: undefined })
+      mockLogin.mockResolvedValue({ warning: true, message: 'login audit write failed' })
       const user = userEvent.setup()
       renderLogin()
 

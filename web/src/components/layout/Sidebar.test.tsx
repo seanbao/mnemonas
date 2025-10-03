@@ -28,6 +28,14 @@ vi.mock('@/api/files', () => ({
 
 import { ApiError } from '@/api/files'
 
+function expectCalledWithAbortSignal(mockFn: ReturnType<typeof vi.fn>) {
+  const call = mockFn.mock.calls.find(([options]) => {
+    return (options as { signal?: AbortSignal } | undefined)?.signal instanceof AbortSignal
+  })
+  expect(call).toBeTruthy()
+  expect(Object.keys((call?.[0] ?? {}) as Record<string, unknown>).sort()).toEqual(['signal'])
+}
+
 vi.mock('@/stores/auth', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/stores/auth')>()
   return {
@@ -59,6 +67,14 @@ describe('Sidebar', () => {
   })
 
   describe('rendering', () => {
+    it('passes abort signals to sidebar queries', async () => {
+      render(<Sidebar />)
+
+      await screen.findByText('MnemoNAS test-version')
+      expectCalledWithAbortSignal(mockGetStorageStats)
+      expectCalledWithAbortSignal(mockGetAppVersion)
+    })
+
     it('renders logo', () => {
       render(<Sidebar />)
       expect(screen.getAllByText('MnemoNAS').length).toBeGreaterThan(0)
@@ -223,7 +239,7 @@ describe('Sidebar', () => {
       render(<Sidebar />)
 
       expect(await screen.findByText('统计加载失败')).toBeTruthy()
-      expect(screen.getByText('stats unavailable')).toBeTruthy()
+      expect(screen.getByText('数据加载失败，请检查网络或稍后重试。')).toBeTruthy()
 
       await user.click(screen.getByRole('button', { name: '重新加载' }))
 
@@ -247,6 +263,25 @@ describe('Sidebar', () => {
         title: '统计暂不可用',
         description: '存储统计服务当前不可用。',
         color: 'warning',
+      })
+    })
+
+    it('shows generic toast description when storage stats retry fails with an Error object', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockGetStorageStats
+        .mockRejectedValueOnce(new Error('stats unavailable'))
+        .mockRejectedValueOnce(new Error('stats retry failed'))
+
+      render(<Sidebar />)
+
+      expect(await screen.findByText('统计加载失败')).toBeTruthy()
+
+      await user.click(screen.getByRole('button', { name: '重新加载' }))
+
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '统计加载失败',
+        description: '数据加载失败，请检查网络或稍后重试。',
+        color: 'danger',
       })
     })
 

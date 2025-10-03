@@ -36,6 +36,7 @@ func TestLoadOrCreateSecrets(t *testing.T) {
 		if len(secrets.WebDAVPassword) != 16 {
 			t.Errorf("WebDAVPassword length incorrect: got %d, want 16", len(secrets.WebDAVPassword))
 		}
+		assertReadablePasswordFormat(t, secrets.WebDAVPassword)
 
 		// Verify file was created with correct permissions
 		secretsPath := filepath.Join(tmpDir, SecretsFile)
@@ -127,6 +128,7 @@ func TestLoadOrCreateSecrets(t *testing.T) {
 		if strings.TrimSpace(secrets.WebDAVPassword) == "" {
 			t.Fatal("expected missing WebDAV password to be repaired")
 		}
+		assertReadablePasswordFormat(t, secrets.WebDAVPassword)
 		if !secrets.SetupShown {
 			t.Fatal("expected unrelated secrets fields to be preserved")
 		}
@@ -195,6 +197,7 @@ func TestLoadOrCreateSecrets(t *testing.T) {
 		if secrets.WebDAVPassword == "" {
 			t.Fatal("expected regenerated WebDAV password to be non-empty")
 		}
+		assertReadablePasswordFormat(t, secrets.WebDAVPassword)
 
 		entries, readDirErr := os.ReadDir(tmpDir)
 		if readDirErr != nil {
@@ -720,16 +723,30 @@ func TestGenerateReadablePassword(t *testing.T) {
 		if len(pwd) != 16 {
 			t.Errorf("password length incorrect: got %d, want 16", len(pwd))
 		}
+		assertReadablePasswordFormat(t, pwd)
 		if passwords[pwd] {
 			t.Error("duplicate password generated")
 		}
 		passwords[pwd] = true
+	}
+}
 
-		// Verify no ambiguous characters
-		for _, c := range pwd {
-			if c == '0' || c == 'O' || c == 'l' || c == '1' || c == 'I' {
-				t.Errorf("password contains ambiguous character: %c", c)
-			}
+func assertReadablePasswordFormat(t *testing.T, password string) {
+	t.Helper()
+	var hasLower, hasUpper, hasDigit bool
+	for _, c := range password {
+		switch {
+		case strings.ContainsRune(readablePasswordLowerChars, c):
+			hasLower = true
+		case strings.ContainsRune(readablePasswordUpperChars, c):
+			hasUpper = true
+		case strings.ContainsRune(readablePasswordDigitChars, c):
+			hasDigit = true
+		default:
+			t.Fatalf("password contains unsupported or ambiguous character: %c", c)
 		}
+	}
+	if !hasLower || !hasUpper || !hasDigit {
+		t.Fatalf("password should contain lowercase, uppercase, and digits; got %q", password)
 	}
 }

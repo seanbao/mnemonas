@@ -282,7 +282,7 @@ func (m *Monitor) SendEvent(ctx context.Context, event EventPayload) error {
 		event.Level = AlertLevelWarning
 	}
 	if event.Timestamp.IsZero() {
-		event.Timestamp = time.Now()
+		event.Timestamp = time.Now().UTC()
 	}
 	if strings.TrimSpace(event.Hostname) == "" {
 		hostname, _ := os.Hostname()
@@ -427,7 +427,7 @@ func (m *Monitor) sendAlert(ctx context.Context, stats *StorageStats, cfg Config
 			Level:     stats.Level,
 			Message:   message,
 			Stats:     *stats,
-			Timestamp: time.Now(),
+			Timestamp: time.Now().UTC(),
 			Hostname:  hostname,
 		}
 

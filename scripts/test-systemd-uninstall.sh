@@ -227,6 +227,36 @@ run_refuse_parent_segment_remove_path_test() {
   assert_exists "$install_dir/systemd/mnemonas.service"
 }
 
+run_refuse_control_character_remove_path_test() {
+  local case_dir="$TMP_ROOT/refuse-control-character"
+  local fake_path="$case_dir/fake-bin"
+  local install_dir="$case_dir/install"
+  local systemctl_log="$case_dir/systemctl.log"
+  local storage_root
+  local status
+  make_fake_admin_path "$fake_path"
+  make_install_tree "$install_dir"
+
+  storage_root="$install_dir/storage"$'\a'"root"
+  set +e
+  PATH="$fake_path:$PATH" \
+    SYSTEMCTL_LOG="$systemctl_log" \
+    BIN_DIR="$install_dir/bin" \
+    SHARE_DIR="$install_dir/share/mnemonas" \
+    CONFIG_DIR="$install_dir/etc/mnemonas" \
+    SYSTEMD_DIR="$install_dir/systemd" \
+    STORAGE_ROOT="$storage_root" \
+    REMOVE_DATA=1 \
+    CONFIRM_REMOVE_DATA="$storage_root" \
+    "$REPO_ROOT/scripts/uninstall-systemd.sh" > "$case_dir/uninstall.log" 2>&1
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "uninstaller accepted control character in STORAGE_ROOT"
+  assert_file_contains "$case_dir/uninstall.log" "STORAGE_ROOT cannot contain control characters"
+  assert_exists "$install_dir/share/mnemonas/web/index.html"
+}
+
 run_refuse_overlapping_remove_paths_test() {
   local case_dir="$TMP_ROOT/refuse-overlap"
   local fake_path="$case_dir/fake-bin"
@@ -361,6 +391,7 @@ run_preserve_data_test
 run_refuse_unconfirmed_data_removal_test
 run_refuse_protected_tree_removal_test
 run_refuse_parent_segment_remove_path_test
+run_refuse_control_character_remove_path_test
 run_refuse_overlapping_remove_paths_test
 run_refuse_root_service_account_test
 run_refuse_symlink_component_remove_path_test

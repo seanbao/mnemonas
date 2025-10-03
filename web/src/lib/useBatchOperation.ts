@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { addToast } from '@heroui/react'
 
 /**
@@ -11,8 +11,8 @@ export interface BatchOperationResult {
   succeededItems: unknown[]
   failedItems: unknown[]
   failedErrors: unknown[]
-	warningCount: number
-	warningMessages: string[]
+  warningCount: number
+  warningMessages: string[]
 }
 
 export interface BatchOperationToast {
@@ -21,13 +21,34 @@ export interface BatchOperationToast {
   color: 'success' | 'warning' | 'danger'
 }
 
+export interface BatchOperationMessages {
+  /** Message when all succeed. Use {count} placeholder for count */
+  success: string
+  /** Message when all fail. Use {count} placeholder for count */
+  failure: string
+  /** Message when partial success. Use {succeeded} and {failed} placeholders */
+  partial: string
+}
+
 interface WarningAwareActionResult {
-	warning?: boolean
-	message?: string
+  warning?: boolean
+  message?: string
 }
 
 function isWarningAwareActionResult(value: unknown): value is WarningAwareActionResult {
-	return !!value && typeof value === 'object' && !Array.isArray(value)
+  return !!value && typeof value === 'object' && !Array.isArray(value)
+}
+
+function getDefaultWarningSuccessTitle(messages: BatchOperationMessages, succeeded: number): string {
+  return `${messages.success.replace('{count}', String(succeeded))}，但存在警告`
+}
+
+export interface BatchOperationContext {
+  signal?: AbortSignal
+}
+
+export interface BatchOperationExecuteOptions {
+  signal?: AbortSignal
 }
 
 /**
@@ -35,16 +56,9 @@ function isWarningAwareActionResult(value: unknown): value is WarningAwareAction
  */
 export interface UseBatchOperationOptions<T, R = void> {
   /** The async operation to perform on each item */
-  operation: (item: T) => Promise<R>
+  operation: (item: T, context: BatchOperationContext) => Promise<R>
   /** Message templates for toast notifications */
-  messages: {
-    /** Message when all succeed. Use {count} placeholder for count */
-    success: string
-    /** Message when all fail. Use {count} placeholder for count */
-    failure: string
-    /** Message when partial success. Use {succeeded} and {failed} placeholders */
-    partial: string
-  }
+  messages: BatchOperationMessages
   /** Optional custom toast builder for batch results */
   getToast?: (result: BatchOperationResult) => BatchOperationToast | null | undefined
   /** Optional callback when operation completes */
@@ -76,9 +90,14 @@ export function useBatchOperation<T, R = void>(
 ) {
   const { operation, messages, getToast, onComplete } = options
   const [isLoading, setIsLoading] = useState(false)
+  const mountedRef = useRef(true)
+
+  useEffect(() => () => {
+    mountedRef.current = false
+  }, [])
 
   const execute = useCallback(
-    async (items: T[]): Promise<BatchOperationResult> => {
+    async (items: T[], executeOptions: BatchOperationExecuteOptions = {}): Promise<BatchOperationResult> => {
       if (items.length === 0) {
         return {
           succeeded: 0,
@@ -87,16 +106,17 @@ export function useBatchOperation<T, R = void>(
           succeededItems: [],
           failedItems: [],
           failedErrors: [],
-			warningCount: 0,
-			warningMessages: [],
+          warningCount: 0,
+          warningMessages: [],
         }
       }
 
       setIsLoading(true)
+      const { signal } = executeOptions
 
       try {
         const results = await Promise.allSettled(
-          items.map((item) => operation(item))
+          items.map((item) => operation(item, { signal }))
         )
 
         const succeeded = results.filter((r) => r.status === 'fulfilled').length
@@ -118,28 +138,32 @@ export function useBatchOperation<T, R = void>(
           return typeof value.message === 'string' && value.message ? [value.message] : []
         })
 
-    const result = {
-      succeeded,
-      failed,
-      total,
-      succeededItems,
-      failedItems,
-      failedErrors,
-      warningCount: warningMessages.length,
-      warningMessages,
-    }
+        const result = {
+          succeeded,
+          failed,
+          total,
+          succeededItems,
+          failedItems,
+          failedErrors,
+          warningCount: warningMessages.length,
+          warningMessages,
+        }
+
+        if (signal?.aborted) {
+          return result
+        }
 
         // Show appropriate toast
         const toast = getToast?.(result) ?? (failed === 0
-      ? warningMessages.length > 0
-      ? {
-        title: warningMessages[0] ?? messages.success.replace('{count}', String(succeeded)),
-        color: 'warning' as const,
-        }
-      : {
-        title: messages.success.replace('{count}', String(succeeded)),
-        color: 'success' as const,
-        }
+          ? warningMessages.length > 0
+            ? {
+              title: getDefaultWarningSuccessTitle(messages, succeeded),
+              color: 'warning' as const,
+            }
+            : {
+              title: messages.success.replace('{count}', String(succeeded)),
+              color: 'success' as const,
+            }
           : succeeded === 0
             ? {
                 title: messages.failure.replace('{count}', String(failed)),
@@ -159,7 +183,9 @@ export function useBatchOperation<T, R = void>(
         onComplete?.(result)
         return result
       } finally {
-        setIsLoading(false)
+        if (mountedRef.current) {
+          setIsLoading(false)
+        }
       }
     },
     [operation, messages, getToast, onComplete]

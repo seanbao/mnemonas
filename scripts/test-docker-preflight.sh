@@ -7,6 +7,9 @@ PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP_ROOT="$(mktemp -d)"
 trap 'rm -rf -- "$TMP_ROOT"' EXIT
 
+# Keep warning-count assertions independent from the runner's free space.
+export MIN_FREE_BYTES=1
+
 fail() {
 	printf '[docker-preflight-test] ERROR: %s\n' "$*" >&2
 	exit 1
@@ -227,6 +230,31 @@ run_data_dir_traversal_test() {
 	assert_file_contains "$out" "Data directory cannot contain parent directory segments"
 }
 
+run_data_dir_control_character_test() {
+	local case_dir="$TMP_ROOT/data-control"
+	local fake_bin="$case_dir/bin"
+	local out="$case_dir/out.log"
+	local data_dir
+	local status
+	make_case "$case_dir"
+	make_fake_bin "$fake_bin"
+	data_dir="$case_dir/home/data"$'\a'"escape"
+	mkdir -p "$data_dir"
+	chmod 750 "$data_dir"
+
+	set +e
+	PATH="$fake_bin:$PATH" \
+		REPO_ROOT="$case_dir/repo" \
+		HOME="$case_dir/home" \
+		DATA_DIR="$data_dir" \
+		bash "$PROJECT_ROOT/scripts/mnemonas-docker-preflight.sh" > "$out"
+	status=$?
+	set -e
+
+	[[ "$status" -ne 0 ]] || fail "preflight accepted a data directory with a control character"
+	assert_file_contains "$out" "Data directory cannot contain control characters"
+}
+
 run_symlink_data_dir_test() {
 	local case_dir="$TMP_ROOT/symlink-data"
 	local fake_bin="$case_dir/bin"
@@ -292,6 +320,32 @@ run_custom_host_port_test() {
 	assert_file_contains "$out" "Summary: 0 failure(s)"
 }
 
+run_mnemonas_data_dir_env_override_test() {
+	local case_dir="$TMP_ROOT/mnemonas-data-dir-env"
+	local fake_bin="$case_dir/bin"
+	local out="$case_dir/out.log"
+	local env_file_data="$case_dir/env-file-data"
+	local override_data="$case_dir/override-data"
+	make_case "$case_dir"
+	make_fake_bin "$fake_bin"
+	mkdir -p "$env_file_data" "$override_data"
+	chmod 750 "$env_file_data" "$override_data"
+	cat >> "$case_dir/repo/.env" <<ENV
+MNEMONAS_DATA_DIR=$env_file_data
+ENV
+
+	PATH="$fake_bin:$PATH" \
+		REPO_ROOT="$case_dir/repo" \
+		HOME="$case_dir/home" \
+		MNEMONAS_DATA_DIR="$override_data" \
+		bash "$PROJECT_ROOT/scripts/mnemonas-docker-preflight.sh" > "$out"
+
+	assert_file_contains "$out" "Data dir:   $override_data"
+	assert_file_contains "$out" "Data directory exists: $override_data"
+	assert_file_not_contains "$out" "Data directory exists: $env_file_data"
+	assert_file_contains "$out" "Summary: 0 failure(s)"
+}
+
 run_invalid_existing_config_test() {
 	local case_dir="$TMP_ROOT/invalid-config"
 	local fake_bin="$case_dir/bin"
@@ -324,7 +378,7 @@ run_custom_storage_root_warning_test() {
 	make_fake_bin "$fake_bin"
 	cat > "$case_dir/home/.mnemonas/config.toml" <<'TOML'
 [storage]
-root = "/data#root" # keep hashes inside quoted values
+root = "/data\u0023root" # TOML escapes may encode characters in quoted values
 TOML
 
 	PATH="$fake_bin:$PATH" \
@@ -384,9 +438,11 @@ run_missing_data_dir_test
 run_relative_data_dir_test
 run_protected_data_dir_test
 run_data_dir_traversal_test
+run_data_dir_control_character_test
 run_symlink_data_dir_test
 run_busy_port_test
 run_custom_host_port_test
+run_mnemonas_data_dir_env_override_test
 run_invalid_existing_config_test
 run_custom_storage_root_warning_test
 run_release_image_without_buildx_test

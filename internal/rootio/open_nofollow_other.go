@@ -28,6 +28,28 @@ func OpenDirNoFollow(root *os.Root, name string) (*os.File, error) {
 	return root.Open(name)
 }
 
+// RenameNoFollow renames sourceName to targetName relative to root without
+// following symlinks observed during the precheck and without intentionally
+// replacing an existing target. Platforms without openat support retain a
+// best-effort fallback.
+func RenameNoFollow(root *os.Root, sourceName, targetName string) error {
+	if _, _, err := splitRelativeParent(sourceName); err != nil {
+		return rootPathError("rename", sourceName, err)
+	}
+	if _, _, err := splitRelativeParent(targetName); err != nil {
+		return rootPathError("rename", targetName, err)
+	}
+	if err := checkPathNoFollow(root, sourceName, false, false); err != nil {
+		return err
+	}
+	if err := checkPathNoFollow(root, targetName, false, false); err == nil {
+		return rootPathError("rename", targetName, os.ErrExist)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return root.Rename(sourceName, targetName)
+}
+
 // MkdirNoFollow creates a single directory relative to root. Platforms without
 // openat support retain a best-effort fallback.
 func MkdirNoFollow(root *os.Root, name string, perm os.FileMode) error {
@@ -130,6 +152,80 @@ func MkdirAllNoFollow(root *os.Root, name string, perm os.FileMode) error {
 			return err
 		}
 		if err := root.Mkdir(current, perm); err != nil && !os.IsExist(err) {
+			return err
+		}
+	}
+	return nil
+}
+
+// RemoveAllNoFollow removes name and all children relative to root. Platforms
+// without openat support retain a best-effort no-follow fallback.
+func RemoveAllNoFollow(root *os.Root, name string) error {
+	parts, err := splitRelativeName(name)
+	if err != nil {
+		return rootPathError("remove", name, err)
+	}
+	if len(parts) == 1 && parts[0] == "." {
+		return rootPathError("remove", name, errEscape)
+	}
+
+	current := "."
+	for _, part := range parts[:len(parts)-1] {
+		current = filepath.Join(current, part)
+		info, err := root.Lstat(current)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return nil
+			}
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return symlinkPathError("remove", name)
+		}
+		if !info.IsDir() {
+			return rootPathError("remove", name, syscall.ENOTDIR)
+		}
+	}
+	target := filepath.Join(parts...)
+	chmodErr := chmodTreeWritableNoFollow(root, target)
+	if err := root.RemoveAll(target); err != nil {
+		if chmodErr != nil {
+			return errors.Join(chmodErr, err)
+		}
+		return err
+	}
+	return nil
+}
+
+func chmodTreeWritableNoFollow(root *os.Root, name string) error {
+	info, err := root.Lstat(name)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return nil
+	}
+
+	if err := root.Chmod(name, info.Mode().Perm()|0700); err != nil {
+		return err
+	}
+	dir, err := OpenDirNoFollow(root, name)
+	if err != nil {
+		return err
+	}
+	children, readErr := dir.ReadDir(-1)
+	closeErr := dir.Close()
+	if readErr != nil {
+		return readErr
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	for _, child := range children {
+		if err := chmodTreeWritableNoFollow(root, filepath.Join(name, child.Name())); err != nil {
 			return err
 		}
 	}
@@ -241,4 +337,60 @@ func replaceFilePathNoFollow(rootPath, relParent, oldName, newName, oldDisplay, 
 	}
 
 	return os.Rename(oldDisplay, newDisplay)
+}
+
+func renamePathIntoDirNoFollow(sourceRootPath, sourceRelParent, sourceName, targetRootPath, targetRelDir, targetName, sourceDisplay, targetDisplay string) error {
+	if err := validateHostDirPathNoFollow(sourceRootPath, sourceRelParent, sourceDisplay); err != nil {
+		return err
+	}
+	if err := validateHostDirPathNoFollow(targetRootPath, targetRelDir, targetDisplay); err != nil {
+		return err
+	}
+
+	sourceInfo, err := os.Lstat(sourceDisplay)
+	if err != nil {
+		return err
+	}
+	if sourceInfo.Mode()&os.ModeSymlink != 0 {
+		return symlinkPathError("rename", sourceDisplay)
+	}
+
+	if info, err := os.Lstat(targetDisplay); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 {
+			return symlinkPathError("rename", targetDisplay)
+		}
+		return rootPathError("rename", targetDisplay, os.ErrExist)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+
+	return os.Rename(filepath.Join(sourceRootPath, sourceRelParent, sourceName), filepath.Join(targetRootPath, targetRelDir, targetName))
+}
+
+func validateHostDirPathNoFollow(rootPath, relPath, display string) error {
+	if relPath == "" {
+		return nil
+	}
+	parts, err := splitRelativeName(relPath)
+	if err != nil {
+		return rootPathError("open", display, err)
+	}
+	current := rootPath
+	for _, part := range parts {
+		if part == "." {
+			continue
+		}
+		current = filepath.Join(current, part)
+		info, err := os.Lstat(current)
+		if err != nil {
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return symlinkPathError("open", display)
+		}
+		if !info.IsDir() {
+			return rootPathError("open", display, syscall.ENOTDIR)
+		}
+	}
+	return nil
 }

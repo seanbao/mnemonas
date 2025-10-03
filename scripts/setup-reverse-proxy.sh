@@ -25,6 +25,9 @@ UPSTREAM_ENDPOINT=""
 SYSTEMD_DIR="${MNEMONAS_SYSTEMD_DIR:-/etc/systemd/system}"
 DATAPLANE_GRPC_PORT="${MNEMONAS_DATAPLANE_GRPC_PORT:-}"
 DATAPLANE_HTTP_PORT="${MNEMONAS_DATAPLANE_HTTP_PORT:-}"
+WEBDAV_PREFIX=""
+MNEMONAS_CONFIG_STATUS="pending"
+FIREWALL_STATUS="pending"
 
 log_info() { echo -e "${GREEN}[INFO]${NC} $1"; }
 log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
@@ -63,6 +66,17 @@ require_command() {
     command -v "$1" >/dev/null 2>&1 || fail "缺少必要命令: $1"
 }
 
+run_apt_get() {
+    local description="$1"
+    shift
+
+    if apt-get -o DPkg::Lock::Timeout=120 "$@"; then
+        return 0
+    fi
+
+    fail "$description 失败；apt/dpkg 可能被其他进程占用，或软件源暂时不可用"
+}
+
 domain_is_safe() {
     local domain="$1"
     local -a labels
@@ -83,6 +97,17 @@ domain_is_safe() {
     done
 
     return 0
+}
+
+normalize_domain() {
+    local domain="${1,,}"
+
+    [[ -n "$domain" ]] || return 0
+    if [[ "$domain" == *. ]]; then
+        domain="${domain%.}"
+        [[ "$domain" != *. ]] || return 1
+    fi
+    printf '%s\n' "$domain"
 }
 
 email_is_safe() {
@@ -107,6 +132,7 @@ require_safe_plain_value() {
 
     [[ -n "$value" ]] || fail "$label 不能为空"
     [[ "$value" != *[[:space:]]* ]] || fail "$label 不能包含空白字符: $value"
+    [[ "$value" != *[[:cntrl:]]* ]] || fail "$label 不能包含控制字符: $value"
     [[ "$value" != *\"* && "$value" != *\\* ]] || fail "$label 不能包含引号或反斜杠: $value"
 }
 
@@ -161,6 +187,18 @@ format_host_port_endpoint() {
     printf '%s:%s\n' "$host" "$port"
 }
 
+path_has_parent_segment() {
+    local path="$1"
+    local part
+    local -a parts
+
+    IFS='/' read -r -a parts <<< "$path"
+    for part in "${parts[@]}"; do
+        [[ "$part" != ".." ]] || return 0
+    done
+    return 1
+}
+
 config_path_has_symlink_component() {
     local path="$1"
     local current="/"
@@ -191,6 +229,10 @@ config_path_has_symlink_component() {
 require_safe_config_path() {
     [[ "$CONFIG_PATH" == /* ]] || fail "--config 必须是绝对路径: $CONFIG_PATH"
     [[ "$CONFIG_PATH" != *[[:space:]]* ]] || fail "--config 不能包含空白字符: $CONFIG_PATH"
+    [[ "$CONFIG_PATH" != *[[:cntrl:]]* ]] || fail "--config 不能包含控制字符: $CONFIG_PATH"
+    if path_has_parent_segment "$CONFIG_PATH"; then
+        fail "--config 不能包含父目录段: $CONFIG_PATH"
+    fi
     if config_path_has_symlink_component "$CONFIG_PATH"; then
         fail "--config 不能包含符号链接: $CONFIG_PATH"
     fi
@@ -210,10 +252,140 @@ normalize_port() {
     printf '%s\n' "$((10#$value))"
 }
 
+trim_ascii_whitespace() {
+    local value="$1"
+
+    value="${value#"${value%%[![:space:]]*}"}"
+    value="${value%"${value##*[![:space:]]}"}"
+    printf '%s\n' "$value"
+}
+
+clean_url_path_prefix() {
+    local value="$1"
+    local segment
+    local last_index
+    local -a input_segments=()
+    local -a output_segments=()
+
+    [[ "$value" == /* ]] || value="/$value"
+    IFS='/' read -r -a input_segments <<< "$value"
+    for segment in "${input_segments[@]}"; do
+        case "$segment" in
+            ""|.)
+                ;;
+            ..)
+                if [[ "${#output_segments[@]}" -gt 0 ]]; then
+                    last_index=$(( ${#output_segments[@]} - 1 ))
+                    output_segments=("${output_segments[@]:0:$last_index}")
+                fi
+                ;;
+            *)
+                output_segments+=("$segment")
+                ;;
+        esac
+    done
+
+    if [[ "${#output_segments[@]}" -eq 0 ]]; then
+        printf '/\n'
+        return
+    fi
+    printf '/%s' "${output_segments[@]}"
+    printf '\n'
+}
+
+normalize_webdav_prefix() {
+    local raw_value="$1"
+    local value
+
+    if [[ -z "$raw_value" ]]; then
+        value="/dav"
+    else
+        value="$(trim_ascii_whitespace "$raw_value")"
+    fi
+    [[ "$value" != *[[:cntrl:]]* ]] || fail "webdav.prefix 不能包含控制字符: $value"
+    [[ "$value" != *\\* && "$value" != *\?* && "$value" != *#* ]] || fail "webdav.prefix 不能包含反斜杠、? 或 #: $value"
+    [[ "$value" == /* ]] || value="/$value"
+    value="$(clean_url_path_prefix "$value")"
+    printf '%s\n' "$value"
+}
+
+webdav_prefix_overlaps_reserved_route() {
+    case "$1" in
+        /api|/api/*|/s|/s/*|/health|/health/*)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+normalize_configured_webdav_prefix() {
+    local raw_value="$1"
+    local value
+
+    value="$(trim_ascii_whitespace "$raw_value")"
+    if [[ -z "$value" ]]; then
+        value="/"
+    fi
+    [[ "$value" != *[[:cntrl:]]* ]] || fail "webdav.prefix 不能包含控制字符: $value"
+    [[ "$value" != *\\* && "$value" != *\?* && "$value" != *#* ]] || fail "webdav.prefix 不能包含反斜杠、? 或 #: $value"
+    [[ "$value" == /* ]] || value="/$value"
+    value="$(clean_url_path_prefix "$value")"
+    [[ "$value" != "/" ]] || fail "webdav.prefix 不能是根路径"
+    ! webdav_prefix_overlaps_reserved_route "$value" || fail "webdav.prefix 不能覆盖 /api、/s 或 /health 保留路由: $value"
+    printf '%s\n' "$value"
+}
+
 toml_value() {
     local section="$1"
     local key="$2"
     local file="$3"
+
+    [[ -f "$file" ]] || return 0
+
+    if command -v python3 >/dev/null 2>&1; then
+        local value
+        if value=$(python3 - "$file" "$section" "$key" <<'PY'
+import sys
+
+try:
+    import tomllib
+except Exception:
+    sys.exit(2)
+
+path, section, key = sys.argv[1], sys.argv[2], sys.argv[3]
+try:
+    with open(path, "rb") as handle:
+        data = tomllib.load(handle)
+except Exception:
+    sys.exit(2)
+
+current = data
+for part in section.split("."):
+    if not isinstance(current, dict):
+        sys.exit(0)
+    current = current.get(part)
+    if current is None:
+        sys.exit(0)
+
+if not isinstance(current, dict) or key not in current:
+    sys.exit(0)
+
+value = current[key]
+if isinstance(value, bool):
+    sys.stdout.write("true" if value else "false")
+elif isinstance(value, (str, int, float)):
+    sys.stdout.write(str(value))
+elif hasattr(value, "isoformat"):
+    sys.stdout.write(value.isoformat())
+PY
+        ); then
+            printf '%s' "$value"
+            return 0
+        fi
+    fi
+
     awk -v section="[$section]" -v key="$key" '
         function strip_comment(text,    i, c, quote, escaped, out) {
             quote = ""
@@ -279,6 +451,116 @@ toml_value() {
             gsub("^\047|\047$", "", line)
             print line
             exit
+        }
+    ' "$file"
+}
+
+toml_key_exists() {
+    local section="$1"
+    local key="$2"
+    local file="$3"
+
+    [[ -f "$file" ]] || return 1
+
+    if command -v python3 >/dev/null 2>&1; then
+        if python3 - "$file" "$section" "$key" <<'PY'
+import sys
+
+try:
+    import tomllib
+except Exception:
+    sys.exit(2)
+
+path, section, key = sys.argv[1], sys.argv[2], sys.argv[3]
+try:
+    with open(path, "rb") as handle:
+        data = tomllib.load(handle)
+except Exception:
+    sys.exit(2)
+
+current = data
+for part in section.split("."):
+    if not isinstance(current, dict):
+        sys.exit(1)
+    current = current.get(part)
+    if current is None:
+        sys.exit(1)
+
+sys.exit(0 if isinstance(current, dict) and key in current else 1)
+PY
+        then
+            return 0
+        else
+            case "$?" in
+                1) return 1 ;;
+            esac
+        fi
+    fi
+
+    awk -v section="[$section]" -v key="$key" '
+        function strip_comment(text,    i, c, quote, escaped, out) {
+            quote = ""
+            escaped = 0
+            out = ""
+            for (i = 1; i <= length(text); i++) {
+                c = substr(text, i, 1)
+                if (quote == "\"") {
+                    out = out c
+                    if (escaped) {
+                        escaped = 0
+                        continue
+                    }
+                    if (c == "\\") {
+                        escaped = 1
+                        continue
+                    }
+                    if (c == quote) {
+                        quote = ""
+                    }
+                    continue
+                }
+                if (quote == "\047") {
+                    out = out c
+                    if (c == quote) {
+                        quote = ""
+                    }
+                    continue
+                }
+                if (c == "\"" || c == "\047") {
+                    quote = c
+                    out = out c
+                    continue
+                }
+                if (c == "#") {
+                    break
+                }
+                out = out c
+            }
+            return out
+        }
+        {
+            line = strip_comment($0)
+            gsub("^[[:space:]]+|[[:space:]]+$", "", line)
+            section_line = line
+            if (section_line ~ "^\\[") {
+                sub("^\\[[[:space:]]*", "[", section_line)
+                sub("[[:space:]]*\\]$", "]", section_line)
+                gsub("[[:space:]]*\\.[[:space:]]*", ".", section_line)
+            }
+        }
+        section_line == section {
+            in_section = 1
+            next
+        }
+        section_line ~ "^\\[" {
+            in_section = 0
+        }
+        in_section && line ~ "^[[:space:]]*" key "[[:space:]]*=" {
+            found = 1
+            exit
+        }
+        END {
+            exit found ? 0 : 1
         }
     ' "$file"
 }
@@ -409,6 +691,7 @@ validate_inputs_before_root() {
         exit 1
     fi
 
+    DOMAIN="$(normalize_domain "$DOMAIN")" || fail "域名格式不安全: $DOMAIN"
     domain_is_safe "$DOMAIN" || fail "域名格式不安全: $DOMAIN"
 
     if [[ -z "$EMAIL" ]]; then
@@ -465,6 +748,23 @@ resolve_dataplane_ports() {
     require_safe_port "$DATAPLANE_HTTP_PORT" "MNEMONAS_DATAPLANE_HTTP_PORT"
     DATAPLANE_GRPC_PORT="$(normalize_port "$DATAPLANE_GRPC_PORT")"
     DATAPLANE_HTTP_PORT="$(normalize_port "$DATAPLANE_HTTP_PORT")"
+}
+
+resolve_webdav_prefix() {
+    local configured_prefix=""
+    local configured_prefix_set=0
+
+    if [[ -f "$CONFIG_PATH" ]]; then
+        if toml_key_exists webdav prefix "$CONFIG_PATH"; then
+            configured_prefix_set=1
+            configured_prefix="$(toml_value webdav prefix "$CONFIG_PATH" || true)"
+        fi
+    fi
+    if [[ "$configured_prefix_set" == "1" ]]; then
+        WEBDAV_PREFIX="$(normalize_configured_webdav_prefix "$configured_prefix")"
+    else
+        WEBDAV_PREFIX="$(normalize_webdav_prefix "")"
+    fi
 }
 
 validate_public_setup_ports() {
@@ -615,11 +915,13 @@ configure_mnemonas() {
     local nasd_bin=""
 
     if [[ "$CONFIGURE_MNEMONAS" != "1" ]]; then
+        MNEMONAS_CONFIG_STATUS="skipped"
         log_warn "已跳过 MnemoNAS 配置修改；请手动设置 server.host 和 trusted_proxy_hops"
         return
     fi
 
     if [[ ! -f "$CONFIG_PATH" ]]; then
+        MNEMONAS_CONFIG_STATUS="missing"
         log_warn "未找到 MnemoNAS 配置: $CONFIG_PATH"
         log_warn "请手动加入: [server] host = \"$UPSTREAM_HOST\", trusted_proxy_hops = $TRUSTED_PROXY_HOPS"
         return
@@ -630,6 +932,7 @@ configure_mnemonas() {
     log_info "已备份 MnemoNAS 配置: $backup"
 
     update_mnemonas_server_config "$CONFIG_PATH" "$UPSTREAM_HOST" "$TRUSTED_PROXY_HOPS"
+    MNEMONAS_CONFIG_STATUS="updated"
     log_info "已设置 MnemoNAS 后端监听: $UPSTREAM_ENDPOINT"
     log_info "已设置 server.trusted_proxy_hops = $TRUSTED_PROXY_HOPS"
 
@@ -655,7 +958,7 @@ configure_mnemonas() {
     fi
 
     if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files mnemonas.service >/dev/null 2>&1; then
-        systemctl restart mnemonas.service
+        restart_systemd_service mnemonas.service
         log_info "已重启 mnemonas.service"
     else
         log_warn "未检测到 mnemonas.service；如果不是 systemd 部署，请手动重启 MnemoNAS"
@@ -671,47 +974,80 @@ install_cron_line_once() {
     if grep -Fqx "$line" "$current_cron"; then
         log_info "证书续期 cron 已存在，跳过重复写入"
     else
-        { cat "$current_cron"; echo "$line"; } | crontab -
-        log_info "已写入证书续期 cron"
+        if { cat "$current_cron"; echo "$line"; } | crontab -; then
+            log_info "已写入证书续期 cron"
+        else
+            rm -f -- "$current_cron"
+            return 1
+        fi
     fi
     rm -f -- "$current_cron"
 }
 
 configure_certbot_renewal() {
+    local renew_line="0 3 * * * certbot renew --quiet --post-hook 'systemctl reload nginx'"
+
     if systemctl list-unit-files certbot.timer >/dev/null 2>&1; then
-        systemctl enable --now certbot.timer >/dev/null
-        log_info "已启用 certbot.timer 自动续期"
-        return 0
+        if systemctl enable --now certbot.timer >/dev/null; then
+            log_info "已启用 certbot.timer 自动续期"
+            return 0
+        fi
+        log_warn "certbot.timer 启用失败，尝试写入 cron 续期任务"
     fi
 
     if command -v crontab >/dev/null 2>&1; then
-        install_cron_line_once "0 3 * * * certbot renew --quiet --post-hook 'systemctl reload nginx'"
+        if install_cron_line_once "$renew_line"; then
+            return 0
+        fi
+        log_warn "写入证书续期 cron 失败；请手动配置 certbot renew 自动续期"
         return 0
     fi
 
     log_warn "未检测到 certbot.timer 或 crontab；请手动配置 certbot renew 自动续期"
 }
 
-install_caddy() {
-    log_info "安装 Caddy..."
+restart_systemd_service() {
+    local service="$1"
 
-    apt-get update
-    apt-get install -y debian-keyring debian-archive-keyring apt-transport-https curl gnupg
-
-    curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | \
-        gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
-    curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | \
-        tee /etc/apt/sources.list.d/caddy-stable.list
-
-    apt-get update
-    apt-get install -y caddy
-
-    log_info "配置 Caddyfile..."
-    if [[ -f /etc/caddy/Caddyfile ]]; then
-        cp /etc/caddy/Caddyfile "/etc/caddy/Caddyfile.bak.$(date +%Y%m%d%H%M%S)"
+    if systemctl restart "$service"; then
+        return 0
     fi
 
-    cat > /etc/caddy/Caddyfile << EOF
+    log_error "重启 $service 失败；请运行: systemctl status $service --no-pager；journalctl -u $service -n 100 --no-pager"
+    return 1
+}
+
+reload_systemd_service() {
+    local service="$1"
+
+    if systemctl reload "$service"; then
+        return 0
+    fi
+
+    log_error "重新加载 $service 失败；请运行: systemctl status $service --no-pager；journalctl -u $service -n 100 --no-pager"
+    return 1
+}
+
+enable_systemd_service() {
+    local service="$1"
+
+    if systemctl enable "$service"; then
+        return 0
+    fi
+
+    log_error "启用 $service 失败；请运行: systemctl status $service --no-pager；journalctl -u $service -n 100 --no-pager"
+    return 1
+}
+
+write_caddy_config_file() {
+    local target="$1"
+    local target_dir tmp backup
+
+    target_dir="$(dirname "$target")"
+    mkdir -p "$target_dir"
+    tmp="$(mktemp "$target_dir/.Caddyfile.new.XXXXXXXX")"
+
+    cat > "$tmp" << EOF
 # MnemoNAS public HTTPS reverse proxy
 # Generated at: $(date)
 
@@ -739,28 +1075,61 @@ $DOMAIN {
 }
 EOF
 
-    mkdir -p /var/log/caddy
-    chown caddy:caddy /var/log/caddy
+    if ! caddy validate --config "$tmp"; then
+        rm -f -- "$tmp"
+        return 1
+    fi
 
-    log_info "验证 Caddy 配置..."
-    caddy validate --config /etc/caddy/Caddyfile
+    if [[ -f "$target" ]]; then
+        backup="${target}.bak.$(date +%Y%m%d%H%M%S)"
+        cp "$target" "$backup"
+        log_info "已备份 Caddyfile: $backup"
+    fi
 
-    systemctl enable caddy
-    systemctl restart caddy
-
-    log_info "Caddy 配置完成"
+    mv -- "$tmp" "$target"
 }
 
-install_nginx() {
+activate_caddy_config_file() {
+    local target="$1"
+    local target_dir target_backup
+    local had_target=0
+
+    target_dir="$(dirname "$target")"
+    mkdir -p "$target_dir"
+    target_backup="$(mktemp "$target_dir/.Caddyfile.activate.old.XXXXXXXX")"
+
+    if [[ -f "$target" ]]; then
+        cp -p "$target" "$target_backup"
+        had_target=1
+    fi
+
+    if ! write_caddy_config_file "$target"; then
+        rm -f -- "$target_backup"
+        return 1
+    fi
+
+    if ! enable_systemd_service caddy; then
+        restore_optional_file "$target" "$target_backup" "$had_target"
+        rm -f -- "$target_backup"
+        log_warn "Caddy 启用失败，已恢复先前配置"
+        return 1
+    fi
+
+    if ! restart_systemd_service caddy; then
+        restore_optional_file "$target" "$target_backup" "$had_target"
+        rm -f -- "$target_backup"
+        log_warn "Caddy 启动失败，已恢复先前配置"
+        return 1
+    fi
+
+    rm -f -- "$target_backup"
+}
+
+render_nginx_config_file() {
+    local target="$1"
     local domain_escaped upstream_escaped generated_escaped
 
-    log_info "安装 Nginx 和 Certbot..."
-    apt-get update
-    apt-get install -y nginx certbot python3-certbot-nginx
-
-    log_info "配置 Nginx..."
-
-    cat > "/etc/nginx/sites-available/$DOMAIN" << 'EOF'
+    cat > "$target" << 'EOF'
 # MnemoNAS public HTTPS reverse proxy
 # Generated at: GENERATED_TIME
 
@@ -821,15 +1190,38 @@ EOF
     domain_escaped="$(sed_replacement_escape "$DOMAIN")"
     upstream_escaped="$(sed_replacement_escape "$UPSTREAM_ENDPOINT")"
     generated_escaped="$(sed_replacement_escape "$(date)")"
-    sed -i "s/DOMAIN_PLACEHOLDER/$domain_escaped/g" "/etc/nginx/sites-available/$DOMAIN"
-    sed -i "s/UPSTREAM_PLACEHOLDER/$upstream_escaped/g" "/etc/nginx/sites-available/$DOMAIN"
-    sed -i "s/GENERATED_TIME/$generated_escaped/g" "/etc/nginx/sites-available/$DOMAIN"
+    sed -i "s/DOMAIN_PLACEHOLDER/$domain_escaped/g" "$target"
+    sed -i "s/UPSTREAM_PLACEHOLDER/$upstream_escaped/g" "$target"
+    sed -i "s/GENERATED_TIME/$generated_escaped/g" "$target"
+}
 
-    mkdir -p /var/www/certbot
-    ln -sf "/etc/nginx/sites-available/$DOMAIN" /etc/nginx/sites-enabled/
-    rm -f -- /etc/nginx/sites-enabled/default
+restore_nginx_config_file() {
+    local target="$1"
+    local target_backup="$2"
+    local had_target="$3"
+    local enabled_link="$4"
+    local old_link_target="$5"
+    local had_link="$6"
 
-    cat > "/etc/nginx/sites-available/$DOMAIN.temp" << EOF
+    if [[ "$had_target" == "1" ]]; then
+        cp "$target_backup" "$target"
+    else
+        rm -f -- "$target"
+    fi
+
+    if [[ -n "$enabled_link" ]]; then
+        if [[ "$had_link" == "1" ]]; then
+            ln -sf "$old_link_target" "$enabled_link"
+        else
+            rm -f -- "$enabled_link"
+        fi
+    fi
+}
+
+render_nginx_challenge_config_file() {
+    local target="$1"
+
+    cat > "$target" << EOF
 server {
     listen 80;
     server_name $DOMAIN;
@@ -844,24 +1236,266 @@ server {
     }
 }
 EOF
+}
 
-    ln -sf "/etc/nginx/sites-available/$DOMAIN.temp" "/etc/nginx/sites-enabled/$DOMAIN"
-    nginx -t
-    systemctl enable nginx
-    systemctl restart nginx
+cleanup_nginx_backup_file() {
+    local backup="$1"
 
-    log_info "申请 Let's Encrypt 证书..."
-    certbot certonly --webroot -w /var/www/certbot \
+    [[ -z "$backup" ]] || rm -f -- "$backup"
+}
+
+write_nginx_config_file() {
+    local target="$1"
+    local enabled_link="${2:-}"
+    local target_dir target_backup old_link_target
+    local had_target=0
+    local had_link=0
+
+    target_dir="$(dirname "$target")"
+    mkdir -p "$target_dir"
+
+    if [[ -f "$target" ]]; then
+        target_backup="$(mktemp "$target_dir/.nginx-site.old.XXXXXXXX")"
+        cp "$target" "$target_backup"
+        had_target=1
+    fi
+
+    if [[ -n "$enabled_link" && -L "$enabled_link" ]]; then
+        old_link_target="$(readlink "$enabled_link")"
+        had_link=1
+    fi
+
+    render_nginx_config_file "$target"
+
+    if [[ -n "$enabled_link" ]]; then
+        ln -sf "$target" "$enabled_link"
+    fi
+
+    if ! nginx -t; then
+        restore_nginx_config_file "$target" "${target_backup:-}" "$had_target" "$enabled_link" "${old_link_target:-}" "$had_link"
+        cleanup_nginx_backup_file "${target_backup:-}"
+        log_warn "Nginx 配置校验失败，已恢复先前配置"
+        return 1
+    fi
+
+    cleanup_nginx_backup_file "${target_backup:-}"
+}
+
+activate_nginx_challenge_config_file() {
+    local target="$1"
+    local enabled_link="$2"
+    local target_dir target_backup old_link_target
+    local had_target=0
+    local had_link=0
+
+    target_dir="$(dirname "$target")"
+    mkdir -p "$target_dir"
+
+    if [[ -f "$target" ]]; then
+        target_backup="$(mktemp "$target_dir/.nginx-challenge.old.XXXXXXXX")"
+        cp "$target" "$target_backup"
+        had_target=1
+    fi
+
+    if [[ -L "$enabled_link" ]]; then
+        old_link_target="$(readlink "$enabled_link")"
+        had_link=1
+    fi
+
+    render_nginx_challenge_config_file "$target"
+    ln -sf "$target" "$enabled_link"
+
+    if ! nginx -t; then
+        restore_nginx_config_file "$target" "${target_backup:-}" "$had_target" "$enabled_link" "${old_link_target:-}" "$had_link"
+        cleanup_nginx_backup_file "${target_backup:-}"
+        log_warn "Nginx 临时配置校验失败，已恢复先前配置"
+        return 1
+    fi
+
+    if ! enable_systemd_service nginx; then
+        restore_nginx_config_file "$target" "${target_backup:-}" "$had_target" "$enabled_link" "${old_link_target:-}" "$had_link"
+        cleanup_nginx_backup_file "${target_backup:-}"
+        log_warn "Nginx 临时配置启用失败，已恢复先前配置"
+        return 1
+    fi
+
+    if ! restart_systemd_service nginx; then
+        restore_nginx_config_file "$target" "${target_backup:-}" "$had_target" "$enabled_link" "${old_link_target:-}" "$had_link"
+        cleanup_nginx_backup_file "${target_backup:-}"
+        log_warn "Nginx 临时配置启动失败，已恢复先前配置"
+        return 1
+    fi
+
+    cleanup_nginx_backup_file "${target_backup:-}"
+}
+
+request_nginx_certificate() {
+    local temp_config="$1"
+    local enabled_link="$2"
+    local temp_backup="$3"
+    local had_temp="$4"
+    local old_link_target="$5"
+    local had_link="$6"
+
+    if certbot certonly --webroot -w /var/www/certbot \
         -d "$DOMAIN" \
         --email "$EMAIL" \
         --agree-tos \
-        --non-interactive
+        --non-interactive; then
+        cleanup_nginx_backup_file "$temp_backup"
+        return 0
+    fi
 
-    ln -sf "/etc/nginx/sites-available/$DOMAIN" "/etc/nginx/sites-enabled/$DOMAIN"
-    rm -f -- "/etc/nginx/sites-available/$DOMAIN.temp"
+    restore_nginx_config_file "$temp_config" "$temp_backup" "$had_temp" "$enabled_link" "$old_link_target" "$had_link"
+    cleanup_nginx_backup_file "$temp_backup"
+    log_warn "Let's Encrypt 证书申请失败，已恢复先前 Nginx 配置"
+    return 1
+}
 
-    nginx -t
-    systemctl reload nginx
+restore_optional_file() {
+    local target="$1"
+    local backup="$2"
+    local had_target="$3"
+
+    if [[ "$had_target" == "1" ]]; then
+        cp -p "$backup" "$target"
+    else
+        rm -f -- "$target"
+    fi
+}
+
+install_caddy_repo_files() {
+    local key_path="${1:-/usr/share/keyrings/caddy-stable-archive-keyring.gpg}"
+    local list_path="${2:-/etc/apt/sources.list.d/caddy-stable.list}"
+    local key_dir list_dir key_stage_dir list_stage_dir
+    local key_tmp list_tmp key_backup list_backup
+    local key_had=0
+    local list_had=0
+
+    key_dir="$(dirname "$key_path")"
+    list_dir="$(dirname "$list_path")"
+    mkdir -p "$key_dir" "$list_dir"
+    key_stage_dir="$(mktemp -d "$key_dir/.caddy-key.XXXXXXXX")"
+    list_stage_dir="$(mktemp -d "$list_dir/.caddy-list.XXXXXXXX")"
+    key_tmp="$key_stage_dir/key.gpg"
+    list_tmp="$list_stage_dir/caddy.list"
+    key_backup="$key_stage_dir/key.backup"
+    list_backup="$list_stage_dir/list.backup"
+
+    if ! curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor -o "$key_tmp"; then
+        rm -rf -- "$key_stage_dir" "$list_stage_dir"
+        return 1
+    fi
+
+    if ! curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' > "$list_tmp"; then
+        rm -rf -- "$key_stage_dir" "$list_stage_dir"
+        return 1
+    fi
+
+    if [[ -f "$key_path" ]]; then
+        cp -p "$key_path" "$key_backup"
+        key_had=1
+    fi
+    if [[ -f "$list_path" ]]; then
+        cp -p "$list_path" "$list_backup"
+        list_had=1
+    fi
+
+    if ! mv -- "$key_tmp" "$key_path"; then
+        rm -rf -- "$key_stage_dir" "$list_stage_dir"
+        return 1
+    fi
+
+    if ! mv -- "$list_tmp" "$list_path"; then
+        restore_optional_file "$key_path" "$key_backup" "$key_had"
+        restore_optional_file "$list_path" "$list_backup" "$list_had"
+        rm -rf -- "$key_stage_dir" "$list_stage_dir"
+        return 1
+    fi
+
+    rm -rf -- "$key_stage_dir" "$list_stage_dir"
+}
+
+deny_ufw_port() {
+    local port="$1"
+    local comment="$2"
+
+    ufw --force delete allow "$port/tcp" >/dev/null 2>&1 || true
+    run_ufw "限制 $comment" deny "$port/tcp" comment "$comment"
+}
+
+run_ufw() {
+    local description="$1"
+    shift
+
+    if ufw "$@"; then
+        return 0
+    fi
+
+    fail "$description 失败；请手动检查 UFW 或云安全组规则"
+}
+
+install_caddy() {
+    log_info "安装 Caddy..."
+
+    run_apt_get "更新 apt 索引" update
+    run_apt_get "安装 Caddy 仓库依赖" install -y debian-keyring debian-archive-keyring apt-transport-https curl gnupg
+
+    install_caddy_repo_files
+
+    run_apt_get "更新 Caddy apt 索引" update
+    run_apt_get "安装 Caddy" install -y caddy
+
+    mkdir -p /var/log/caddy
+    chown caddy:caddy /var/log/caddy
+
+    log_info "配置并验证 Caddyfile..."
+    activate_caddy_config_file /etc/caddy/Caddyfile
+
+    log_info "Caddy 配置完成"
+}
+
+install_nginx() {
+    local nginx_config nginx_temp_config nginx_enabled
+    local rollback_temp_backup rollback_old_link_target
+    local rollback_had_temp=0
+    local rollback_had_link=0
+
+    log_info "安装 Nginx 和 Certbot..."
+    run_apt_get "更新 apt 索引" update
+    run_apt_get "安装 Nginx 和 Certbot" install -y nginx certbot python3-certbot-nginx
+
+    log_info "配置 Nginx..."
+
+    nginx_config="/etc/nginx/sites-available/$DOMAIN"
+    nginx_temp_config="/etc/nginx/sites-available/$DOMAIN.temp"
+    nginx_enabled="/etc/nginx/sites-enabled/$DOMAIN"
+
+    mkdir -p /var/www/certbot
+    rm -f -- /etc/nginx/sites-enabled/default
+
+    if [[ -f "$nginx_temp_config" ]]; then
+        rollback_temp_backup="$(mktemp "$(dirname "$nginx_temp_config")/.nginx-challenge.pre-cert.old.XXXXXXXX")"
+        cp "$nginx_temp_config" "$rollback_temp_backup"
+        rollback_had_temp=1
+    fi
+
+    if [[ -L "$nginx_enabled" ]]; then
+        rollback_old_link_target="$(readlink "$nginx_enabled")"
+        rollback_had_link=1
+    fi
+
+    if ! activate_nginx_challenge_config_file "$nginx_temp_config" "$nginx_enabled"; then
+        cleanup_nginx_backup_file "${rollback_temp_backup:-}"
+        return 1
+    fi
+
+    log_info "申请 Let's Encrypt 证书..."
+    request_nginx_certificate "$nginx_temp_config" "$nginx_enabled" "${rollback_temp_backup:-}" "$rollback_had_temp" "${rollback_old_link_target:-}" "$rollback_had_link"
+
+    write_nginx_config_file "$nginx_config" "$nginx_enabled"
+    rm -f -- "$nginx_temp_config"
+    reload_systemd_service nginx
 
     log_info "配置证书自动续期..."
     configure_certbot_renewal
@@ -871,21 +1505,24 @@ EOF
 
 configure_firewall() {
     if [[ "$CONFIGURE_FIREWALL" != "1" ]]; then
+        FIREWALL_STATUS="skipped"
         log_warn "已跳过防火墙配置；请确认公网安全组只开放 80/443"
         return
     fi
 
     log_info "配置本机 UFW 防火墙规则..."
     if command -v ufw >/dev/null 2>&1; then
-        ufw allow 80/tcp
-        ufw allow 443/tcp
+        run_ufw "允许 HTTP 入口" allow 80/tcp
+        run_ufw "允许 HTTPS 入口" allow 443/tcp
         if [[ "$UPSTREAM_PORT" != "80" && "$UPSTREAM_PORT" != "443" ]]; then
-            ufw deny "$UPSTREAM_PORT/tcp" comment "MnemoNAS direct HTTP"
+            deny_ufw_port "$UPSTREAM_PORT" "MnemoNAS direct HTTP"
         fi
-        ufw deny "$DATAPLANE_GRPC_PORT/tcp" comment "MnemoNAS dataplane gRPC"
-        ufw deny "$DATAPLANE_HTTP_PORT/tcp" comment "MnemoNAS dataplane HTTP"
+        deny_ufw_port "$DATAPLANE_GRPC_PORT" "MnemoNAS dataplane gRPC"
+        deny_ufw_port "$DATAPLANE_HTTP_PORT" "MnemoNAS dataplane HTTP"
+        FIREWALL_STATUS="updated"
         log_info "已允许 80/443，并限制 $UPSTREAM_PORT/$DATAPLANE_GRPC_PORT/$DATAPLANE_HTTP_PORT"
     else
+        FIREWALL_STATUS="unavailable"
         log_warn "未检测到 ufw；请在云安全组或系统防火墙中只开放 80/443"
     fi
 
@@ -910,16 +1547,29 @@ host_from_ss_local_address() {
     printf '%s\n' "$host"
 }
 
+is_ipv4_loopback_host() {
+    local host="$1"
+    local octet
+    local -a octets
+
+    [[ "$host" =~ ^127\.([0-9]{1,3}\.){2}[0-9]{1,3}$ ]] || return 1
+    IFS='.' read -r -a octets <<< "$host"
+    for octet in "${octets[@]}"; do
+        [[ ${#octet} -le 3 ]] || return 1
+        (( 10#$octet >= 0 && 10#$octet <= 255 )) || return 1
+    done
+    return 0
+}
+
 is_loopback_host() {
     local host="$1"
+
     case "$host" in
-        localhost|ip6-localhost|127.*|::1)
+        localhost|ip6-localhost|::1)
             return 0
             ;;
-        *)
-            return 1
-            ;;
     esac
+    is_ipv4_loopback_host "$host"
 }
 
 check_loopback_only_port() {
@@ -964,7 +1614,7 @@ run_post_setup_checks() {
     fi
 
     if command -v mnemonas-doctor >/dev/null 2>&1; then
-        if SERVER_URL="http://$UPSTREAM_ENDPOINT" DATAPLANE_GRPC_PORT="$DATAPLANE_GRPC_PORT" DATAPLANE_HTTP_PORT="$DATAPLANE_HTTP_PORT" mnemonas-doctor --public-domain "$DOMAIN"; then
+        if CONFIG_PATH="$CONFIG_PATH" SYSTEMD_DIR="$SYSTEMD_DIR" SERVER_PORT="$UPSTREAM_PORT" SERVER_URL="http://$UPSTREAM_ENDPOINT" DATAPLANE_GRPC_PORT="$DATAPLANE_GRPC_PORT" DATAPLANE_HTTP_PORT="$DATAPLANE_HTTP_PORT" mnemonas-doctor --public-domain "$DOMAIN"; then
             log_info "mnemonas-doctor 检查通过"
         else
             log_warn "mnemonas-doctor 存在失败或警告，请按输出处理后再开放给真实用户"
@@ -975,19 +1625,55 @@ run_post_setup_checks() {
 }
 
 print_summary() {
+    local webdav_url webdav_probe_url
+
+    webdav_url="https://$DOMAIN$WEBDAV_PREFIX"
+    if [[ "$WEBDAV_PREFIX" == "/" ]]; then
+        webdav_url="https://$DOMAIN/"
+        webdav_probe_url="$webdav_url"
+    else
+        webdav_probe_url="$webdav_url/"
+    fi
+
     echo ""
     log_info "=========================================="
     log_info "公网 HTTPS 入口配置完成"
     log_info "=========================================="
     echo ""
     echo "访问地址: https://$DOMAIN"
-    echo "WebDAV:   https://$DOMAIN/dav"
+    echo "WebDAV:   $webdav_url"
     echo "后端入口: http://$UPSTREAM_ENDPOINT"
     echo ""
-    echo "已处理:"
+    echo "配置状态:"
     echo "  - 反向代理: $PROXY_TYPE"
-    echo "  - MnemoNAS 配置: server.host = \"$UPSTREAM_HOST\", trusted_proxy_hops = $TRUSTED_PROXY_HOPS"
-    echo "  - 本机防火墙: 允许 80/443，限制直接访问 $UPSTREAM_PORT/$DATAPLANE_GRPC_PORT/$DATAPLANE_HTTP_PORT"
+    case "$MNEMONAS_CONFIG_STATUS" in
+        updated)
+            echo "  - MnemoNAS 配置: 已设置 server.host = \"$UPSTREAM_HOST\", trusted_proxy_hops = $TRUSTED_PROXY_HOPS"
+            ;;
+        skipped)
+            echo "  - MnemoNAS 配置: 已跳过；请手动设置 server.host = \"$UPSTREAM_HOST\", trusted_proxy_hops = $TRUSTED_PROXY_HOPS"
+            ;;
+        missing)
+            echo "  - MnemoNAS 配置: 未找到 $CONFIG_PATH；请手动设置 server.host = \"$UPSTREAM_HOST\", trusted_proxy_hops = $TRUSTED_PROXY_HOPS"
+            ;;
+        *)
+            echo "  - MnemoNAS 配置: 未确认；请检查 server.host = \"$UPSTREAM_HOST\", trusted_proxy_hops = $TRUSTED_PROXY_HOPS"
+            ;;
+    esac
+    case "$FIREWALL_STATUS" in
+        updated)
+            echo "  - 本机防火墙: 已允许 80/443，并限制直接访问 $UPSTREAM_PORT/$DATAPLANE_GRPC_PORT/$DATAPLANE_HTTP_PORT"
+            ;;
+        skipped)
+            echo "  - 本机防火墙: 已跳过；请确认公网安全组或本机防火墙只开放 80/443"
+            ;;
+        unavailable)
+            echo "  - 本机防火墙: 未检测到 ufw；请确认公网安全组或系统防火墙只开放 80/443，并限制 $UPSTREAM_PORT/$DATAPLANE_GRPC_PORT/$DATAPLANE_HTTP_PORT"
+            ;;
+        *)
+            echo "  - 本机防火墙: 未确认；请确认只开放 80/443，并限制 $UPSTREAM_PORT/$DATAPLANE_GRPC_PORT/$DATAPLANE_HTTP_PORT"
+            ;;
+    esac
     echo ""
     echo "仍需人工确认:"
     echo "  - 云厂商安全组只开放 80/443；SSH 限制到可信 IP 或私有网络"
@@ -999,7 +1685,7 @@ print_summary() {
     echo "  curl --connect-timeout 3 http://$DOMAIN:$UPSTREAM_PORT/health  # 应失败或超时"
     echo "  WEBDAV_USER=<webdav-username>"
     echo "  WEBDAV_PASS=<webdav-password>"
-    echo "  curl -u \"\$WEBDAV_USER:\$WEBDAV_PASS\" -X PROPFIND https://$DOMAIN/dav/ -H 'Depth: 0'"
+    echo "  curl -u \"\$WEBDAV_USER:\$WEBDAV_PASS\" -X PROPFIND $webdav_probe_url -H 'Depth: 0'"
     echo ""
 
     if [[ "$PROXY_TYPE" == "caddy" ]]; then
@@ -1018,7 +1704,7 @@ print_summary() {
 }
 
 run_self_test() {
-    local tmp config
+    local tmp config list_config old_path fake_bin fake_ufw_log status enabled_link old_enabled_target
     tmp="$(mktemp -d)"
     trap 'rm -rf -- "$tmp"' RETURN
 
@@ -1059,6 +1745,521 @@ EOF
     grep -Fq '[server]' "$config" || fail "self-test failed: server section was not appended"
     grep -Fq 'host = "127.0.0.1"' "$config" || fail "self-test failed: appended host missing"
 
+    [[ "$(normalize_webdav_prefix '')" == "/dav" ]] || fail "self-test failed: default WebDAV prefix formatting"
+    [[ "$(normalize_webdav_prefix 'files')" == "/files" ]] || fail "self-test failed: relative WebDAV prefix formatting"
+    [[ "$(normalize_webdav_prefix '/files/')" == "/files" ]] || fail "self-test failed: trailing slash WebDAV prefix formatting"
+    [[ "$(normalize_webdav_prefix ' /files/ ')" == "/files" ]] || fail "self-test failed: spaced WebDAV prefix formatting"
+    [[ "$(normalize_webdav_prefix '/files/../dav//team/./')" == "/dav/team" ]] || fail "self-test failed: clean WebDAV prefix formatting"
+    [[ "$(normalize_webdav_prefix '/files/team/../../dav/')" == "/dav" ]] || fail "self-test failed: repeated WebDAV prefix parent cleanup"
+    [[ "$(normalize_configured_webdav_prefix '/files/../dav//team/./')" == "/dav/team" ]] || fail "self-test failed: configured WebDAV prefix formatting"
+    if (normalize_configured_webdav_prefix '' >/dev/null 2>&1); then
+        fail "self-test failed: configured empty WebDAV prefix was accepted"
+    fi
+    if (normalize_configured_webdav_prefix '/' >/dev/null 2>&1); then
+        fail "self-test failed: configured root WebDAV prefix was accepted"
+    fi
+    if (normalize_configured_webdav_prefix '/api/v1' >/dev/null 2>&1); then
+        fail "self-test failed: configured reserved WebDAV prefix was accepted"
+    fi
+    [[ "$(normalize_domain 'NAS.EXAMPLE.COM.')" == "nas.example.com" ]] || fail "self-test failed: FQDN domain normalization"
+
+    config="$tmp/custom-webdav-prefix.toml"
+    cat > "$config" <<'EOF'
+[webdav]
+prefix = "/files\u002f..\u002fdav\u002f"
+EOF
+    CONFIG_PATH="$config"
+    WEBDAV_PREFIX=""
+    resolve_webdav_prefix
+    [[ "$WEBDAV_PREFIX" == "/dav" ]] || fail "self-test failed: configured WebDAV prefix was not resolved"
+
+    config="$tmp/empty-webdav-prefix.toml"
+    cat > "$config" <<'EOF'
+[webdav]
+prefix = ""
+EOF
+    if (CONFIG_PATH="$config"; resolve_webdav_prefix >/dev/null 2>&1); then
+        fail "self-test failed: configured empty WebDAV prefix was resolved"
+    fi
+
+    DOMAIN="nas.example.com"
+    PROXY_TYPE="caddy"
+    UPSTREAM_HOST="127.0.0.1"
+    UPSTREAM_PORT="8080"
+    UPSTREAM_ENDPOINT="127.0.0.1:8080"
+    DATAPLANE_GRPC_PORT="9090"
+    DATAPLANE_HTTP_PORT="9091"
+    WEBDAV_PREFIX="/files"
+    CONFIGURE_MNEMONAS=0
+    CONFIGURE_FIREWALL=0
+    MNEMONAS_CONFIG_STATUS="skipped"
+    FIREWALL_STATUS="skipped"
+    print_summary > "$tmp/summary-skipped.log"
+    grep -Fq 'WebDAV:   https://nas.example.com/files' "$tmp/summary-skipped.log" || fail "self-test failed: summary WebDAV prefix missing"
+    grep -Fq 'MnemoNAS 配置: 已跳过' "$tmp/summary-skipped.log" || fail "self-test failed: skipped MnemoNAS config summary missing"
+    grep -Fq '本机防火墙: 已跳过' "$tmp/summary-skipped.log" || fail "self-test failed: skipped firewall summary missing"
+    ! grep -Fq 'MnemoNAS 配置: server.host =' "$tmp/summary-skipped.log" || fail "self-test failed: skipped summary claimed MnemoNAS config was changed"
+
+    fake_bin="$tmp/fake-bin"
+    fake_ufw_log="$tmp/ufw.log"
+    mkdir -p "$fake_bin"
+
+    cat > "$fake_bin/ss" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+    cat > "$fake_bin/curl" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+    cat > "$fake_bin/mnemonas-doctor" <<'EOF'
+#!/usr/bin/env bash
+{
+    printf 'CONFIG_PATH=%s\n' "${CONFIG_PATH:-}"
+    printf 'SYSTEMD_DIR=%s\n' "${SYSTEMD_DIR:-}"
+    printf 'SERVER_PORT=%s\n' "${SERVER_PORT:-}"
+    printf 'SERVER_URL=%s\n' "${SERVER_URL:-}"
+    printf 'DATAPLANE_GRPC_PORT=%s\n' "${DATAPLANE_GRPC_PORT:-}"
+    printf 'DATAPLANE_HTTP_PORT=%s\n' "${DATAPLANE_HTTP_PORT:-}"
+    printf 'args=%s\n' "$*"
+} > "$MNEMONAS_FAKE_DOCTOR_LOG"
+exit 0
+EOF
+    chmod +x "$fake_bin/ss" "$fake_bin/curl" "$fake_bin/mnemonas-doctor"
+    CONFIG_PATH="$tmp/custom-doctor-config.toml"
+    SYSTEMD_DIR="$tmp/custom-systemd"
+    UPSTREAM_PORT="18080"
+    UPSTREAM_ENDPOINT="127.0.0.1:18080"
+    DATAPLANE_GRPC_PORT="19090"
+    DATAPLANE_HTTP_PORT="19091"
+    # shellcheck disable=SC2030,SC2031 # The fake PATH is intentionally scoped to this subshell.
+    (PATH="$fake_bin:$PATH"; MNEMONAS_FAKE_DOCTOR_LOG="$tmp/doctor-env.log" run_post_setup_checks) > "$tmp/post-setup-checks.log"
+    grep -Fq "CONFIG_PATH=$tmp/custom-doctor-config.toml" "$tmp/doctor-env.log" || fail "self-test failed: doctor did not receive CONFIG_PATH"
+    grep -Fq "SYSTEMD_DIR=$tmp/custom-systemd" "$tmp/doctor-env.log" || fail "self-test failed: doctor did not receive SYSTEMD_DIR"
+    grep -Fq 'SERVER_PORT=18080' "$tmp/doctor-env.log" || fail "self-test failed: doctor did not receive SERVER_PORT"
+    grep -Fq 'SERVER_URL=http://127.0.0.1:18080' "$tmp/doctor-env.log" || fail "self-test failed: doctor did not receive SERVER_URL"
+    grep -Fq 'DATAPLANE_GRPC_PORT=19090' "$tmp/doctor-env.log" || fail "self-test failed: doctor did not receive DATAPLANE_GRPC_PORT"
+    grep -Fq 'DATAPLANE_HTTP_PORT=19091' "$tmp/doctor-env.log" || fail "self-test failed: doctor did not receive DATAPLANE_HTTP_PORT"
+    grep -Fq 'args=--public-domain nas.example.com' "$tmp/doctor-env.log" || fail "self-test failed: doctor was not invoked with public domain"
+
+    cat > "$fake_bin/ufw" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$MNEMONAS_FAKE_UFW_LOG"
+if [[ "${1:-}" == "allow" && "${2:-}" == "443/tcp" ]]; then
+    printf 'simulated ufw allow failure\n' >&2
+    exit 22
+fi
+exit 0
+EOF
+    chmod +x "$fake_bin/ufw"
+    CONFIGURE_FIREWALL=1
+    UPSTREAM_PORT="18080"
+    DATAPLANE_GRPC_PORT="19090"
+    DATAPLANE_HTTP_PORT="19091"
+    FIREWALL_STATUS="pending"
+    set +e
+    # shellcheck disable=SC2030,SC2031 # The fake PATH is intentionally scoped to this subshell.
+    (PATH="$fake_bin:$PATH"; MNEMONAS_FAKE_UFW_LOG="$fake_ufw_log" configure_firewall) > "$tmp/firewall-failure.log" 2>&1
+    status=$?
+    set -e
+    [[ "$status" -ne 0 ]] || fail "self-test failed: firewall setup accepted a failed UFW command"
+    grep -Fq 'simulated ufw allow failure' "$tmp/firewall-failure.log" || fail "self-test failed: firewall setup hid UFW output"
+    grep -Fq '允许 HTTPS 入口 失败' "$tmp/firewall-failure.log" || fail "self-test failed: firewall setup omitted failed phase"
+
+    : > "$fake_ufw_log"
+    cat > "$fake_bin/ufw" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$MNEMONAS_FAKE_UFW_LOG"
+EOF
+    chmod +x "$fake_bin/ufw"
+    CONFIGURE_FIREWALL=1
+    UPSTREAM_PORT="18080"
+    DATAPLANE_GRPC_PORT="19090"
+    DATAPLANE_HTTP_PORT="19091"
+    FIREWALL_STATUS="pending"
+    # shellcheck disable=SC2030,SC2031 # The fake PATH is intentionally scoped to this subshell.
+    (PATH="$fake_bin:$PATH"; MNEMONAS_FAKE_UFW_LOG="$fake_ufw_log" configure_firewall) > "$tmp/firewall.log"
+    grep -Fxq -- 'allow 80/tcp' "$fake_ufw_log" || fail "self-test failed: firewall did not allow HTTP"
+    grep -Fxq -- 'allow 443/tcp' "$fake_ufw_log" || fail "self-test failed: firewall did not allow HTTPS"
+    grep -Fxq -- '--force delete allow 18080/tcp' "$fake_ufw_log" || fail "self-test failed: firewall did not remove broad direct backend allow"
+    grep -Fxq -- '--force delete allow 19090/tcp' "$fake_ufw_log" || fail "self-test failed: firewall did not remove broad dataplane gRPC allow"
+    grep -Fxq -- '--force delete allow 19091/tcp' "$fake_ufw_log" || fail "self-test failed: firewall did not remove broad dataplane HTTP allow"
+    grep -Fxq -- 'deny 18080/tcp comment MnemoNAS direct HTTP' "$fake_ufw_log" || fail "self-test failed: firewall did not deny direct backend"
+    grep -Fxq -- 'deny 19090/tcp comment MnemoNAS dataplane gRPC' "$fake_ufw_log" || fail "self-test failed: firewall did not deny dataplane gRPC"
+    grep -Fxq -- 'deny 19091/tcp comment MnemoNAS dataplane HTTP' "$fake_ufw_log" || fail "self-test failed: firewall did not deny dataplane HTTP"
+
+    cat > "$fake_bin/systemctl" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "restart" ]]; then
+    printf 'simulated restart failure\n' >&2
+    exit 7
+fi
+exit 0
+EOF
+    chmod +x "$fake_bin/systemctl"
+    set +e
+    # shellcheck disable=SC2030,SC2031 # The fake PATH is intentionally scoped to this subshell.
+    (PATH="$fake_bin:$PATH"; restart_systemd_service mnemonas.service) > "$tmp/restart-failure.log" 2>&1
+    status=$?
+    set -e
+    [[ "$status" -ne 0 ]] || fail "self-test failed: restart helper accepted a failed service restart"
+    grep -Fq 'simulated restart failure' "$tmp/restart-failure.log" || fail "self-test failed: restart helper hid systemctl output"
+    grep -Fq '重启 mnemonas.service 失败' "$tmp/restart-failure.log" || fail "self-test failed: restart helper did not name the failed service"
+    grep -Fq 'systemctl status mnemonas.service --no-pager' "$tmp/restart-failure.log" || fail "self-test failed: restart helper omitted status command"
+    grep -Fq 'journalctl -u mnemonas.service -n 100 --no-pager' "$tmp/restart-failure.log" || fail "self-test failed: restart helper omitted journal command"
+
+    cat > "$fake_bin/systemctl" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "enable" ]]; then
+    printf 'simulated enable failure\n' >&2
+    exit 17
+fi
+exit 0
+EOF
+    chmod +x "$fake_bin/systemctl"
+    set +e
+    # shellcheck disable=SC2030,SC2031 # The fake PATH is intentionally scoped to this subshell.
+    (PATH="$fake_bin:$PATH"; enable_systemd_service caddy) > "$tmp/enable-failure.log" 2>&1
+    status=$?
+    set -e
+    [[ "$status" -ne 0 ]] || fail "self-test failed: enable helper accepted a failed service enable"
+    grep -Fq 'simulated enable failure' "$tmp/enable-failure.log" || fail "self-test failed: enable helper hid systemctl output"
+    grep -Fq '启用 caddy 失败' "$tmp/enable-failure.log" || fail "self-test failed: enable helper did not name the failed service"
+    grep -Fq 'systemctl status caddy --no-pager' "$tmp/enable-failure.log" || fail "self-test failed: enable helper omitted status command"
+    grep -Fq 'journalctl -u caddy -n 100 --no-pager' "$tmp/enable-failure.log" || fail "self-test failed: enable helper omitted journal command"
+
+    cat > "$fake_bin/caddy" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "validate" ]]; then
+    printf 'simulated caddy validation failure\n' >&2
+    exit 8
+fi
+exit 0
+EOF
+    chmod +x "$fake_bin/caddy"
+    config="$tmp/Caddyfile"
+    printf 'old caddyfile\n' > "$config"
+    set +e
+    # shellcheck disable=SC2030,SC2031 # The fake PATH is intentionally scoped to this subshell.
+    (PATH="$fake_bin:$PATH"; write_caddy_config_file "$config") > "$tmp/caddy-validation-failure.log" 2>&1
+    status=$?
+    set -e
+    [[ "$status" -ne 0 ]] || fail "self-test failed: Caddyfile writer accepted invalid generated config"
+    grep -Fq 'simulated caddy validation failure' "$tmp/caddy-validation-failure.log" || fail "self-test failed: Caddyfile writer hid validation output"
+    grep -Fq 'old caddyfile' "$config" || fail "self-test failed: Caddyfile writer did not preserve old config on validation failure"
+
+    cat > "$fake_bin/caddy" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+    cat > "$fake_bin/systemctl" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "enable" ]]; then
+    printf 'simulated caddy enable failure\n' >&2
+    exit 17
+fi
+exit 0
+EOF
+    chmod +x "$fake_bin/caddy" "$fake_bin/systemctl"
+    config="$tmp/Caddyfile"
+    printf 'old caddyfile\n' > "$config"
+    set +e
+    # shellcheck disable=SC2030,SC2031 # The fake PATH is intentionally scoped to this subshell.
+    (PATH="$fake_bin:$PATH"; activate_caddy_config_file "$config") > "$tmp/caddy-enable-failure.log" 2>&1
+    status=$?
+    set -e
+    [[ "$status" -ne 0 ]] || fail "self-test failed: Caddy config activation accepted a failed service enable"
+    grep -Fq 'simulated caddy enable failure' "$tmp/caddy-enable-failure.log" || fail "self-test failed: Caddy config activation hid enable output"
+    grep -Fq '启用 caddy 失败' "$tmp/caddy-enable-failure.log" || fail "self-test failed: Caddy config activation omitted enable diagnostic"
+    grep -Fq 'Caddy 启用失败，已恢复先前配置' "$tmp/caddy-enable-failure.log" || fail "self-test failed: Caddy config activation omitted enable rollback warning"
+    grep -Fxq 'old caddyfile' "$config" || fail "self-test failed: Caddy config activation did not restore old config on enable failure"
+
+    cat > "$fake_bin/caddy" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+    cat > "$fake_bin/systemctl" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "restart" ]]; then
+    printf 'simulated caddy restart failure\n' >&2
+    exit 18
+fi
+exit 0
+EOF
+    chmod +x "$fake_bin/caddy" "$fake_bin/systemctl"
+    config="$tmp/Caddyfile"
+    printf 'old caddyfile\n' > "$config"
+    set +e
+    # shellcheck disable=SC2030,SC2031 # The fake PATH is intentionally scoped to this subshell.
+    (PATH="$fake_bin:$PATH"; activate_caddy_config_file "$config") > "$tmp/caddy-restart-failure.log" 2>&1
+    status=$?
+    set -e
+    [[ "$status" -ne 0 ]] || fail "self-test failed: Caddy config activation accepted a failed service restart"
+    grep -Fq 'simulated caddy restart failure' "$tmp/caddy-restart-failure.log" || fail "self-test failed: Caddy config activation hid restart output"
+    grep -Fq '重启 caddy 失败' "$tmp/caddy-restart-failure.log" || fail "self-test failed: Caddy config activation omitted restart diagnostic"
+    grep -Fq 'Caddy 启动失败，已恢复先前配置' "$tmp/caddy-restart-failure.log" || fail "self-test failed: Caddy config activation omitted rollback warning"
+    grep -Fxq 'old caddyfile' "$config" || fail "self-test failed: Caddy config activation did not restore old config on restart failure"
+
+    cat > "$fake_bin/nginx" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "-t" ]]; then
+    printf 'simulated nginx validation failure\n' >&2
+    exit 9
+fi
+exit 0
+EOF
+    chmod +x "$fake_bin/nginx"
+    config="$tmp/nginx-site.conf"
+    enabled_link="$tmp/nginx-enabled"
+    old_enabled_target="$tmp/nginx-old-enabled.conf"
+    printf 'old nginx config\n' > "$config"
+    printf 'old enabled config\n' > "$old_enabled_target"
+    ln -s "$old_enabled_target" "$enabled_link"
+    set +e
+    # shellcheck disable=SC2030,SC2031 # The fake PATH is intentionally scoped to this subshell.
+    (PATH="$fake_bin:$PATH"; write_nginx_config_file "$config" "$enabled_link") > "$tmp/nginx-validation-failure.log" 2>&1
+    status=$?
+    set -e
+    [[ "$status" -ne 0 ]] || fail "self-test failed: Nginx writer accepted invalid generated config"
+    grep -Fq 'simulated nginx validation failure' "$tmp/nginx-validation-failure.log" || fail "self-test failed: Nginx writer hid validation output"
+    grep -Fq 'old nginx config' "$config" || fail "self-test failed: Nginx writer did not preserve old config on validation failure"
+    [[ "$(readlink "$enabled_link")" == "$old_enabled_target" ]] || fail "self-test failed: Nginx writer did not restore the enabled site link on validation failure"
+
+    config="$tmp/nginx-challenge.conf"
+    enabled_link="$tmp/nginx-challenge-enabled"
+    old_enabled_target="$tmp/nginx-challenge-old-enabled.conf"
+    printf 'old challenge enabled config\n' > "$old_enabled_target"
+    ln -sf "$old_enabled_target" "$enabled_link"
+    set +e
+    # shellcheck disable=SC2030,SC2031 # The fake PATH is intentionally scoped to this subshell.
+    (PATH="$fake_bin:$PATH"; activate_nginx_challenge_config_file "$config" "$enabled_link") > "$tmp/nginx-challenge-validation-failure.log" 2>&1
+    status=$?
+    set -e
+    [[ "$status" -ne 0 ]] || fail "self-test failed: Nginx challenge config accepted invalid generated config"
+    grep -Fq 'simulated nginx validation failure' "$tmp/nginx-challenge-validation-failure.log" || fail "self-test failed: Nginx challenge config hid validation output"
+    [[ "$(readlink "$enabled_link")" == "$old_enabled_target" ]] || fail "self-test failed: Nginx challenge config did not restore the enabled site link on validation failure"
+
+    cat > "$fake_bin/nginx" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+    chmod +x "$fake_bin/nginx"
+    cat > "$fake_bin/systemctl" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "restart" ]]; then
+    printf 'simulated restart failure\n' >&2
+    exit 7
+fi
+exit 0
+EOF
+    chmod +x "$fake_bin/systemctl"
+    config="$tmp/nginx-challenge-restart.conf"
+    enabled_link="$tmp/nginx-challenge-restart-enabled"
+    old_enabled_target="$tmp/nginx-challenge-restart-old-enabled.conf"
+    printf 'old challenge restart enabled config\n' > "$old_enabled_target"
+    ln -sf "$old_enabled_target" "$enabled_link"
+    set +e
+    # shellcheck disable=SC2030,SC2031 # The fake PATH is intentionally scoped to this subshell.
+    (PATH="$fake_bin:$PATH"; activate_nginx_challenge_config_file "$config" "$enabled_link") > "$tmp/nginx-challenge-restart-failure.log" 2>&1
+    status=$?
+    set -e
+    [[ "$status" -ne 0 ]] || fail "self-test failed: Nginx challenge config accepted a failed service restart"
+    grep -Fq 'simulated restart failure' "$tmp/nginx-challenge-restart-failure.log" || fail "self-test failed: Nginx challenge config hid restart output"
+    grep -Fq '重启 nginx 失败' "$tmp/nginx-challenge-restart-failure.log" || fail "self-test failed: Nginx challenge config omitted restart diagnostic"
+    [[ "$(readlink "$enabled_link")" == "$old_enabled_target" ]] || fail "self-test failed: Nginx challenge config did not restore the enabled site link on restart failure"
+
+    cat > "$fake_bin/certbot" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "certonly" ]]; then
+    printf 'simulated certbot failure\n' >&2
+    exit 10
+fi
+exit 0
+EOF
+    chmod +x "$fake_bin/certbot"
+    config="$tmp/nginx-certbot-temp.conf"
+    enabled_link="$tmp/nginx-certbot-enabled"
+    old_enabled_target="$tmp/nginx-certbot-old-enabled.conf"
+    printf 'challenge config\n' > "$config"
+    printf 'old certbot enabled config\n' > "$old_enabled_target"
+    ln -sf "$config" "$enabled_link"
+    set +e
+    # shellcheck disable=SC2030,SC2031 # The fake PATH is intentionally scoped to this subshell.
+    (PATH="$fake_bin:$PATH"; request_nginx_certificate "$config" "$enabled_link" "" "0" "$old_enabled_target" "1") > "$tmp/nginx-certbot-failure.log" 2>&1
+    status=$?
+    set -e
+    [[ "$status" -ne 0 ]] || fail "self-test failed: Nginx certificate request accepted a failed certbot run"
+    grep -Fq 'simulated certbot failure' "$tmp/nginx-certbot-failure.log" || fail "self-test failed: Nginx certificate request hid certbot output"
+    [[ "$(readlink "$enabled_link")" == "$old_enabled_target" ]] || fail "self-test failed: Nginx certificate request did not restore the enabled site link on certbot failure"
+    [[ ! -e "$config" ]] || fail "self-test failed: Nginx certificate request did not remove the temporary challenge config on certbot failure"
+
+    cat > "$fake_bin/systemctl" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "reload" ]]; then
+    printf 'simulated reload failure\n' >&2
+    exit 11
+fi
+exit 0
+EOF
+    chmod +x "$fake_bin/systemctl"
+    set +e
+    # shellcheck disable=SC2030,SC2031 # The fake PATH is intentionally scoped to this subshell.
+    (PATH="$fake_bin:$PATH"; reload_systemd_service nginx) > "$tmp/reload-failure.log" 2>&1
+    status=$?
+    set -e
+    [[ "$status" -ne 0 ]] || fail "self-test failed: reload helper accepted a failed service reload"
+    grep -Fq 'simulated reload failure' "$tmp/reload-failure.log" || fail "self-test failed: reload helper hid systemctl output"
+    grep -Fq '重新加载 nginx 失败' "$tmp/reload-failure.log" || fail "self-test failed: reload helper did not name the failed service"
+    grep -Fq 'systemctl status nginx --no-pager' "$tmp/reload-failure.log" || fail "self-test failed: reload helper omitted status command"
+    grep -Fq 'journalctl -u nginx -n 100 --no-pager' "$tmp/reload-failure.log" || fail "self-test failed: reload helper omitted journal command"
+
+    cat > "$fake_bin/systemctl" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "list-unit-files" && "${2:-}" == "certbot.timer" ]]; then
+    exit 0
+fi
+if [[ "${1:-}" == "enable" && "${2:-}" == "--now" && "${3:-}" == "certbot.timer" ]]; then
+    printf 'simulated timer enable failure\n' >&2
+    exit 12
+fi
+exit 0
+EOF
+    cat > "$fake_bin/crontab" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "-l" ]]; then
+    exit 1
+fi
+cat > "$MNEMONAS_FAKE_CRONTAB"
+EOF
+    chmod +x "$fake_bin/systemctl" "$fake_bin/crontab"
+    set +e
+    # shellcheck disable=SC2030,SC2031 # The fake PATH is intentionally scoped to this subshell.
+    (PATH="$fake_bin:$PATH"; MNEMONAS_FAKE_CRONTAB="$tmp/crontab.out" configure_certbot_renewal) > "$tmp/renewal-timer-fallback.log" 2>&1
+    status=$?
+    set -e
+    [[ "$status" -eq 0 ]] || fail "self-test failed: renewal setup failed instead of falling back from certbot.timer to cron"
+    grep -Fq 'simulated timer enable failure' "$tmp/renewal-timer-fallback.log" || fail "self-test failed: renewal setup hid certbot.timer failure"
+    grep -Fq '已写入证书续期 cron' "$tmp/renewal-timer-fallback.log" || fail "self-test failed: renewal setup did not report cron fallback"
+    grep -Fq "certbot renew --quiet --post-hook 'systemctl reload nginx'" "$tmp/crontab.out" || fail "self-test failed: renewal setup did not write cron fallback"
+
+    cat > "$fake_bin/systemctl" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "list-unit-files" && "${2:-}" == "certbot.timer" ]]; then
+    exit 0
+fi
+if [[ "${1:-}" == "enable" && "${2:-}" == "--now" && "${3:-}" == "certbot.timer" ]]; then
+    printf 'simulated timer enable failure\n' >&2
+    exit 12
+fi
+exit 0
+EOF
+    cat > "$fake_bin/crontab" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "-l" ]]; then
+    exit 1
+fi
+printf 'simulated crontab write failure\n' >&2
+exit 13
+EOF
+    chmod +x "$fake_bin/systemctl" "$fake_bin/crontab"
+    set +e
+    # shellcheck disable=SC2030,SC2031 # The fake PATH is intentionally scoped to this subshell.
+    (PATH="$fake_bin:$PATH"; configure_certbot_renewal) > "$tmp/renewal-no-fallback.log" 2>&1
+    status=$?
+    set -e
+    [[ "$status" -eq 0 ]] || fail "self-test failed: renewal setup failed without a fallback scheduler"
+    grep -Fq 'simulated timer enable failure' "$tmp/renewal-no-fallback.log" || fail "self-test failed: renewal setup hid certbot.timer failure without fallback"
+    grep -Fq '请手动配置 certbot renew 自动续期' "$tmp/renewal-no-fallback.log" || fail "self-test failed: renewal setup did not give manual renewal guidance"
+
+    cat > "$fake_bin/curl" <<'EOF'
+#!/usr/bin/env bash
+printf 'fake caddy repo payload\n'
+EOF
+    cat > "$fake_bin/gpg" <<'EOF'
+#!/usr/bin/env bash
+out=""
+while [[ "$#" -gt 0 ]]; do
+    if [[ "$1" == "-o" ]]; then
+        shift
+        out="${1:-}"
+    fi
+    shift || true
+done
+cat >/dev/null
+printf 'partial key\n' > "$out"
+printf 'simulated gpg failure\n' >&2
+exit 14
+EOF
+    chmod +x "$fake_bin/curl" "$fake_bin/gpg"
+    config="$tmp/caddy-stable-archive-keyring.gpg"
+    list_config="$tmp/caddy-stable.list"
+    printf 'old key\n' > "$config"
+    printf 'old list\n' > "$list_config"
+    set +e
+    # shellcheck disable=SC2030,SC2031 # The fake PATH is intentionally scoped to this subshell.
+    (PATH="$fake_bin:$PATH"; install_caddy_repo_files "$config" "$list_config") > "$tmp/caddy-repo-gpg-failure.log" 2>&1
+    status=$?
+    set -e
+    [[ "$status" -ne 0 ]] || fail "self-test failed: Caddy repo setup accepted a failed key conversion"
+    grep -Fq 'simulated gpg failure' "$tmp/caddy-repo-gpg-failure.log" || fail "self-test failed: Caddy repo setup hid gpg failure output"
+    grep -Fxq 'old key' "$config" || fail "self-test failed: Caddy repo setup did not preserve old key on gpg failure"
+    grep -Fxq 'old list' "$list_config" || fail "self-test failed: Caddy repo setup changed source list on gpg failure"
+
+    cat > "$fake_bin/curl" <<'EOF'
+#!/usr/bin/env bash
+case "${*: -1}" in
+    *debian.deb.txt)
+        printf 'simulated source list download failure\n' >&2
+        exit 15
+        ;;
+    *)
+        printf 'fake caddy repo payload\n'
+        ;;
+esac
+EOF
+    cat > "$fake_bin/gpg" <<'EOF'
+#!/usr/bin/env bash
+out=""
+while [[ "$#" -gt 0 ]]; do
+    if [[ "$1" == "-o" ]]; then
+        shift
+        out="${1:-}"
+    fi
+    shift || true
+done
+cat >/dev/null
+printf 'new key\n' > "$out"
+EOF
+    chmod +x "$fake_bin/curl" "$fake_bin/gpg"
+    printf 'old key\n' > "$config"
+    printf 'old list\n' > "$list_config"
+    set +e
+    # shellcheck disable=SC2030,SC2031 # The fake PATH is intentionally scoped to this subshell.
+    (PATH="$fake_bin:$PATH"; install_caddy_repo_files "$config" "$list_config") > "$tmp/caddy-repo-source-failure.log" 2>&1
+    status=$?
+    set -e
+    [[ "$status" -ne 0 ]] || fail "self-test failed: Caddy repo setup accepted a failed source list download"
+    grep -Fq 'simulated source list download failure' "$tmp/caddy-repo-source-failure.log" || fail "self-test failed: Caddy repo setup hid source list failure output"
+    grep -Fxq 'old key' "$config" || fail "self-test failed: Caddy repo setup did not preserve old key on source list failure"
+    grep -Fxq 'old list' "$list_config" || fail "self-test failed: Caddy repo setup did not preserve old source list on source list failure"
+
+    cat > "$fake_bin/apt-get" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" > "$MNEMONAS_FAKE_APT_LOG"
+printf 'simulated apt failure\n' >&2
+exit 16
+EOF
+    chmod +x "$fake_bin/apt-get"
+    set +e
+    # shellcheck disable=SC2030,SC2031 # The fake PATH is intentionally scoped to this subshell.
+    (PATH="$fake_bin:$PATH"; MNEMONAS_FAKE_APT_LOG="$tmp/apt.log" run_apt_get "安装测试包" install -y caddy) > "$tmp/apt-failure.log" 2>&1
+    status=$?
+    set -e
+    [[ "$status" -ne 0 ]] || fail "self-test failed: apt helper accepted a failed apt-get command"
+    grep -Fq 'simulated apt failure' "$tmp/apt-failure.log" || fail "self-test failed: apt helper hid apt-get output"
+    grep -Fq '安装测试包 失败' "$tmp/apt-failure.log" || fail "self-test failed: apt helper omitted failure context"
+    grep -Fq 'DPkg::Lock::Timeout=120' "$tmp/apt.log" || fail "self-test failed: apt helper did not configure dpkg lock timeout"
+
     [[ "$(tcp_addr_port '127.0.0.1:19090')" == "19090" ]] || fail "self-test failed: IPv4 port parsing"
     [[ "$(tcp_addr_port '[::1]:19091')" == "19091" ]] || fail "self-test failed: IPv6 port parsing"
     [[ "$(normalize_port '0443')" == "443" ]] || fail "self-test failed: port normalization"
@@ -1075,6 +2276,7 @@ EOF
 
     if [[ -x "$SCRIPT_DIR/../nasd" ]]; then
         local old_path
+        # shellcheck disable=SC2031 # The previous PATH assignment was intentionally subshell-local.
         old_path="$PATH"
         # This intentionally hides PATH so the self-test proves adjacent release binary discovery.
         # shellcheck disable=SC2123
@@ -1103,6 +2305,7 @@ main() {
     validate_inputs_before_root
     resolve_upstream_port
     resolve_dataplane_ports
+    resolve_webdav_prefix
     validate_public_setup_ports
     require_root
     require_command apt-get

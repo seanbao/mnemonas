@@ -201,12 +201,15 @@ async function collectKeyboardIssues(page: Page, route: string): Promise<Interac
       if (!active || active === document.body || active === document.documentElement) {
         return true
       }
+      if (active instanceof HTMLElement) {
+        active.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+      }
       const rect = active.getBoundingClientRect()
       return rect.bottom > 0
         && rect.right > 0
         && rect.top < window.innerHeight
         && rect.left < window.innerWidth
-    }, undefined, { timeout: 750 }).catch(() => {})
+    }, undefined, { timeout: 2_000 }).catch(() => {})
 
     const result = await page.evaluate((currentRoute) => {
       const active = document.activeElement

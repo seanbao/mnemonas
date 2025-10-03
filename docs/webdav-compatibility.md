@@ -10,7 +10,7 @@
 
 补充：部分写请求在变更已经提交、但后续持久化或清理步骤失败时，会保持成功状态码并附带 HTTP `Warning` 响应头，而不是改写成整体失败。当前已覆盖的 warning 文案包括 `199 MnemoNAS "workspace mutation persistence incomplete"`、`199 MnemoNAS "delete cleanup incomplete"`、`199 MnemoNAS "trash delete cleanup incomplete"`。
 
-认证：`auth_type = "users"` 使用 MnemoNAS 用户账号登录，普通用户挂载根目录映射到自己的 `home_dir`，共享路径按命中的目录授权放行，guest 只读，并对写入 `home_dir` 的 PUT/COPY/MOVE 执行用户配额限制；共享路径容量由目录配额限制。`auth_type = "basic"` 保留为全局服务凭据兼容模式。
+认证：`auth_type = "users"` 使用 MnemoNAS 用户账号登录，普通用户挂载根目录映射到自己的 `home_dir`，并在挂载根目录列出可导航到已授权共享目录的顶层入口；嵌套授权产生的祖先入口仅用于只读导航，写操作仍需命中写授权；共享路径按命中的目录授权放行，guest 只读，并对写入 `home_dir` 的 PUT/COPY/MOVE 执行用户配额限制；共享路径容量由目录配额限制。`auth_type = "basic"` 保留为全局服务凭据兼容模式。
 
 ## 协议实现状态
 
@@ -24,7 +24,7 @@
 | `HEAD` | ✅ 核心支持 | 返回文件元信息 |
 | `PUT` | ✅ 核心支持 | 支持 `If-Match`、`If-Unmodified-Since` 条件写入；仅接受完整覆盖写入，`Content-Range` partial PUT 返回 `400 Bad Request` |
 | `DELETE` | ✅ 核心支持 | 删除进入回收站（软删除）；集合资源仅接受 `Depth: infinity`（省略时按 `infinity` 处理） |
-| `MKCOL` | ✅ 核心支持 | 创建目录 |
+| `MKCOL` | ✅ 核心支持 | 创建目录；直接父目录不存在时返回 `409 Conflict`，不会隐式创建中间目录 |
 | `MOVE` | ✅ 核心支持 | 移动/重命名，支持 `Overwrite: T/F`；集合资源仅接受 `Depth: infinity`（省略时按 `infinity` 处理）；覆盖目标已提交后若 backup cleanup 失败，返回 `204 + Warning` |
 | `COPY` | ✅ 核心支持 | 复制文件/目录，支持 `Overwrite: T/F`；集合资源支持 `Depth: 0` 和 `Depth: infinity`；递归目录复制在目标目录已创建、仅持久化失败时返回成功并附带 `Warning` |
 | `PROPPATCH` | ⚠️ 简化 | 解析请求并显式拒绝属性修改；返回 `207 Multi-Status`，属性状态为 `403 Forbidden`，不持久化 dead properties |
@@ -159,7 +159,7 @@ pass = <obscured-webdav-password>
 
 ```bash
 # /etc/davfs2/secrets
-http://localhost:8080/dav admin <your-webdav-password>
+http://localhost:8080/dav <webdav-username> <webdav-password>
 
 # 挂载命令
 sudo mount -t davfs http://localhost:8080/dav /mnt/nas

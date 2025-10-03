@@ -15,9 +15,19 @@ import { moveFile, copyFile, ApiError } from '@/api/files'
 import { FileIcon } from '@/components/ui/FileIcon'
 import { useUser } from '@/stores/auth'
 import { getFileQueryScopeKey, getFilesQueryKey } from '@/lib/fileQueryKey'
+import { getSharedPathConflictErrorToast, getSharedQuotaExceededErrorToast } from '@/lib/fileActionErrors'
+
+const missingMoveSourceWarningTitle = '文件或文件夹已不存在，已同步更新'
 
 function isMissingFileError(error: unknown): boolean {
   return error instanceof ApiError && error.status === 404
+}
+
+function isAbortError(error: unknown): boolean {
+  return typeof error === 'object'
+    && error !== null
+    && 'name' in error
+    && (error as { name?: unknown }).name === 'AbortError'
 }
 
 function getMoveDialogSuccessToast(
@@ -31,8 +41,9 @@ function getMoveDialogSuccessToast(
   const actionText = mode === 'move' ? '移动' : '复制'
 
   if (warningMessages.length > 0) {
+    const synchronizedWarning = warningMessages.find(message => message === missingMoveSourceWarningTitle)
     return {
-      title: warningMessages[0] || `成功${actionText} ${successCount} 个项目，但存在警告`,
+      title: synchronizedWarning ?? `成功${actionText} ${successCount} 个项目，但存在警告`,
       color: 'warning',
     }
   }
@@ -61,6 +72,16 @@ function getMoveDialogFailureToast(
       description: '文件系统当前不可用，请检查设备状态或稍后重试。',
       color: 'warning',
     }
+  }
+
+  const pathConflictToast = getSharedPathConflictErrorToast(errors)
+  if (pathConflictToast) {
+    return pathConflictToast
+  }
+
+  const quotaExceededToast = getSharedQuotaExceededErrorToast(errors)
+  if (quotaExceededToast) {
+    return quotaExceededToast
   }
 
   return {
@@ -92,6 +113,7 @@ function MoveDialogContent({
   const [isProcessing, setIsProcessing] = useState(false)
   const [pendingFiles, setPendingFiles] = useState(files)
   const isActiveRef = useRef(true)
+  const operationAbortControllerRef = useRef<AbortController | null>(null)
 
   const title = mode === 'move' ? '移动到' : '复制到'
   const actionText = mode === 'move' ? '移动' : '复制'
@@ -100,11 +122,17 @@ function MoveDialogContent({
   // Exclude paths that cannot be moved into (self and descendants)
   const excludePaths = pendingFiles.map(f => f.path)
 
+  const abortActiveOperation = useCallback(() => {
+    operationAbortControllerRef.current?.abort()
+    operationAbortControllerRef.current = null
+  }, [])
+
   useEffect(() => {
     return () => {
       isActiveRef.current = false
+      abortActiveOperation()
     }
-  }, [])
+  }, [abortActiveOperation])
 
   const handleSelectTarget = useCallback((path: string) => {
     setTargetPath(path)
@@ -112,11 +140,15 @@ function MoveDialogContent({
   }, [])
 
   const handleConfirm = useCallback(async () => {
-    if (!targetPath) return
+    if (!targetPath || isProcessing) return
 
     const filesToProcess = pendingFiles
     const sourcePath = currentPath
     const destinationPath = targetPath
+    const operationController = new AbortController()
+    operationAbortControllerRef.current?.abort()
+    operationAbortControllerRef.current = operationController
+    const { signal } = operationController
 
     setIsProcessing(true)
     let successCount = 0
@@ -125,64 +157,88 @@ function MoveDialogContent({
     const failedErrors: unknown[] = []
     const warningMessages: string[] = []
 
-    for (const file of filesToProcess) {
-      const fileName = file.path.split('/').pop() || ''
-      const destPath = destinationPath === '/' ? `/${fileName}` : `${destinationPath}/${fileName}`
-
-      try {
-        if (mode === 'move') {
-          const result = await moveFile(file.path, destPath)
-          if (result.warning) {
-            warningMessages.push(result.message ?? '')
-          }
-        } else {
-          const result = await copyFile(file.path, destPath)
-          if (result.warning) {
-            warningMessages.push(result.message ?? '')
-          }
+    try {
+      for (const file of filesToProcess) {
+        if (signal.aborted || !isActiveRef.current) {
+          return
         }
-        successCount++
-      } catch (error) {
-        if (isMissingFileError(error)) {
+
+        const fileName = file.path.split('/').pop() || ''
+        const destPath = destinationPath === '/' ? `/${fileName}` : `${destinationPath}/${fileName}`
+
+        try {
+          if (mode === 'move') {
+            const result = await moveFile(file.path, destPath, { signal })
+            if (signal.aborted || !isActiveRef.current) {
+              return
+            }
+            if (result.warning) {
+              warningMessages.push(result.message ?? '')
+            }
+          } else {
+            const result = await copyFile(file.path, destPath, { signal })
+            if (signal.aborted || !isActiveRef.current) {
+              return
+            }
+            if (result.warning) {
+              warningMessages.push(result.message ?? '')
+            }
+          }
           successCount++
-          warningMessages.push('文件或文件夹已不存在，已同步更新')
-          continue
+        } catch (error) {
+          if (signal.aborted || isAbortError(error) || !isActiveRef.current) {
+            return
+          }
+
+          if (isMissingFileError(error)) {
+            successCount++
+            warningMessages.push(missingMoveSourceWarningTitle)
+            continue
+          }
+
+          errorCount++
+          failedFiles.push(file)
+          failedErrors.push(error)
         }
-
-        errorCount++
-        failedFiles.push(file)
-        failedErrors.push(error)
       }
-    }
 
-    // Invalidate queries
-    queryClient.invalidateQueries({ queryKey: getFilesQueryKey(fileScopeKey, sourcePath) })
-    queryClient.invalidateQueries({ queryKey: getFilesQueryKey(fileScopeKey, destinationPath) })
+      if (signal.aborted || !isActiveRef.current) {
+        return
+      }
 
-    // Show result
-    if (errorCount === 0) {
+      // Invalidate queries
+      queryClient.invalidateQueries({ queryKey: getFilesQueryKey(fileScopeKey, sourcePath) })
+      queryClient.invalidateQueries({ queryKey: getFilesQueryKey(fileScopeKey, destinationPath) })
+
+      // Show result
+      if (errorCount === 0) {
+        if (isActiveRef.current) {
+          onClose()
+        }
+        addToast(getMoveDialogSuccessToast(mode, successCount, warningMessages))
+        return
+      }
+
       if (isActiveRef.current) {
-        onClose()
+        setPendingFiles(failedFiles)
+        setIsProcessing(false)
       }
-      addToast(getMoveDialogSuccessToast(mode, successCount, warningMessages))
-      return
-    }
 
-    if (isActiveRef.current) {
-      setPendingFiles(failedFiles)
-      setIsProcessing(false)
+      if (successCount > 0) {
+        addToast({
+          title: `批量${actionText}部分完成`,
+          description: `成功 ${successCount} 个，失败 ${errorCount} 个`,
+          color: 'warning',
+        })
+      } else {
+        addToast(getMoveDialogFailureToast(mode, successCount, errorCount, failedErrors))
+      }
+    } finally {
+      if (operationAbortControllerRef.current === operationController) {
+        operationAbortControllerRef.current = null
+      }
     }
-
-    if (successCount > 0) {
-      addToast({
-        title: `批量${actionText}部分完成`,
-        description: `成功 ${successCount} 个，失败 ${errorCount} 个`,
-        color: 'warning',
-      })
-    } else {
-      addToast(getMoveDialogFailureToast(mode, successCount, errorCount, failedErrors))
-    }
-  }, [targetPath, pendingFiles, mode, currentPath, fileScopeKey, queryClient, onClose, actionText])
+  }, [targetPath, isProcessing, pendingFiles, mode, currentPath, fileScopeKey, queryClient, onClose, actionText])
 
   const handleClose = useCallback(() => {
     if (isProcessing) {

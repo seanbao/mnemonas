@@ -78,8 +78,26 @@ require_safe_http_url() {
         echo -e "${RED}ERROR:${NC} $label must not contain whitespace: $value" >&2
         exit 1
     fi
+    if [[ "$value" == *[[:cntrl:]]* ]]; then
+        echo -e "${RED}ERROR:${NC} $label must not contain control characters: $value" >&2
+        exit 1
+    fi
     if [[ ! "$value" =~ ^https?://[^[:space:]]+$ ]]; then
         echo -e "${RED}ERROR:${NC} $label must be an http(s) URL: $value" >&2
+        exit 1
+    fi
+}
+
+require_no_control_characters() {
+    local value="$1"
+    local label="$2"
+
+    if [[ "$value" == *$'\n'* || "$value" == *$'\r'* ]]; then
+        echo -e "${RED}ERROR:${NC} $label cannot contain newline characters: $value" >&2
+        exit 1
+    fi
+    if [[ "$value" == *[[:cntrl:]]* ]]; then
+        echo -e "${RED}ERROR:${NC} $label cannot contain control characters: $value" >&2
         exit 1
     fi
 }
@@ -105,6 +123,7 @@ require_explicit_e2e_target() {
         echo -e "${RED}ERROR:${NC} STORAGE_ROOT must not be empty" >&2
         exit 1
     fi
+    require_no_control_characters "$STORAGE_ROOT" "STORAGE_ROOT"
     if path_has_parent_segment "$STORAGE_ROOT"; then
         echo -e "${RED}ERROR:${NC} STORAGE_ROOT must not contain '..' path segments: $STORAGE_ROOT" >&2
         exit 1
@@ -209,6 +228,48 @@ read_config_value() {
         return 0
     fi
 
+    if command -v python3 >/dev/null 2>&1; then
+        local value
+        if value=$(python3 - "$CONFIG_FILE" "$section" "$key" <<'PY'
+import sys
+
+try:
+    import tomllib
+except Exception:
+    sys.exit(2)
+
+path, section, key = sys.argv[1], sys.argv[2], sys.argv[3]
+try:
+    with open(path, "rb") as handle:
+        data = tomllib.load(handle)
+except Exception:
+    sys.exit(2)
+
+current = data
+for part in section.split("."):
+    if not isinstance(current, dict):
+        sys.exit(0)
+    current = current.get(part)
+    if current is None:
+        sys.exit(0)
+
+if not isinstance(current, dict) or key not in current:
+    sys.exit(0)
+
+value = current[key]
+if isinstance(value, bool):
+    sys.stdout.write("true" if value else "false")
+elif isinstance(value, (str, int, float)):
+    sys.stdout.write(str(value))
+elif hasattr(value, "isoformat"):
+    sys.stdout.write(value.isoformat())
+PY
+        ); then
+            printf '%s' "$value"
+            return 0
+        fi
+    fi
+
     awk -v section="[$section]" -v key="$key" '
         function strip_comment(text,    i, c, quote, escaped, out) {
             quote = ""
@@ -282,7 +343,94 @@ read_secret_value() {
         return 0
     fi
 
+    if command -v python3 >/dev/null 2>&1; then
+        python3 - "$SECRETS_FILE" "$key" <<'PY'
+import json
+import sys
+
+path, key = sys.argv[1], sys.argv[2]
+try:
+    with open(path, "r", encoding="utf-8") as handle:
+        data = json.load(handle)
+    value = data.get(key, "") if isinstance(data, dict) else ""
+except Exception:
+    value = ""
+
+if isinstance(value, str):
+    sys.stdout.write(value)
+PY
+        return 0
+    fi
+
     grep -o '"'"$key"'"[[:space:]]*:[[:space:]]*"[^"]*"' "$SECRETS_FILE" | sed 's/.*: *"//' | sed 's/"$//' || true
+}
+
+json_escape_string() {
+    local value=$1
+
+    if command -v python3 >/dev/null 2>&1; then
+        python3 -c 'import json, sys; sys.stdout.write(json.dumps(sys.argv[1]))' "$value"
+        return 0
+    fi
+
+    value=${value//\\/\\\\}
+    value=${value//\"/\\\"}
+    value=${value//$'\n'/\\n}
+    value=${value//$'\r'/\\r}
+    printf '"%s"' "$value"
+}
+
+json_login_payload() {
+    local username=$1
+    local password=$2
+
+    printf '{"username":%s,"password":%s}' "$(json_escape_string "$username")" "$(json_escape_string "$password")"
+}
+
+json_refresh_payload() {
+    local refresh_token=$1
+
+    printf '{"refresh_token":%s}' "$(json_escape_string "$refresh_token")"
+}
+
+read_json_field() {
+    local json=$1
+    local field=$2
+
+    if command -v python3 >/dev/null 2>&1; then
+        printf '%s' "$json" | python3 -c '
+import json
+import sys
+
+field = sys.argv[1]
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+
+def find_value(value):
+    if isinstance(value, dict):
+        if field in value:
+            return value[field]
+        for child in value.values():
+            found = find_value(child)
+            if found is not None:
+                return found
+    elif isinstance(value, list):
+        for child in value:
+            found = find_value(child)
+            if found is not None:
+                return found
+    return None
+
+found = find_value(data)
+if isinstance(found, str):
+    sys.stdout.write(found)
+' "$field" 2>/dev/null
+        return 0
+    fi
+
+    printf '%s' "$json" | sed -n "s/.*\"${field}\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p"
 }
 
 configure_webdav_auth() {
@@ -322,7 +470,7 @@ load_initial_admin_password() {
         return 1
     fi
 
-    grep '^Password:' "$INITIAL_PASSWORD_FILE" | awk '{print $2}' || true
+    sed -n 's/^Password:[[:space:]]*//p' "$INITIAL_PASSWORD_FILE" | head -n1
 }
 
 authenticated_api_curl() {
@@ -859,11 +1007,11 @@ test_auth_login_success() {
     
     local resp=$(curl -sf -X POST "$API_URL/auth/login" \
         -H "Content-Type: application/json" \
-        -d "{\"username\":\"admin\",\"password\":\"$password\"}" 2>/dev/null || echo "error")
+        -d "$(json_login_payload "admin" "$password")" 2>/dev/null || echo "error")
     
-    if echo "$resp" | grep -q '"success":true'; then
-        ADMIN_ACCESS_TOKEN=$(echo "$resp" | grep -o '"access_token":"[^"]*"' | cut -d'"' -f4)
-        ADMIN_REFRESH_TOKEN=$(echo "$resp" | grep -o '"refresh_token":"[^"]*"' | cut -d'"' -f4)
+    ADMIN_ACCESS_TOKEN=$(read_json_field "$resp" access_token)
+    ADMIN_REFRESH_TOKEN=$(read_json_field "$resp" refresh_token)
+    if [[ -n "$ADMIN_ACCESS_TOKEN" ]]; then
         log_ok "Auth login with initial password successful"
     else
         log_fail "Auth login failed: $resp"
@@ -949,10 +1097,10 @@ test_auth_token_refresh() {
 
         local login_resp=$(curl -sf -X POST "$API_URL/auth/login" \
             -H "Content-Type: application/json" \
-            -d "{\"username\":\"admin\",\"password\":\"$password\"}" 2>/dev/null)
+            -d "$(json_login_payload "admin" "$password")" 2>/dev/null)
 
-        ADMIN_ACCESS_TOKEN=$(echo "$login_resp" | grep -o '"access_token":"[^"]*"' | cut -d'"' -f4)
-        ADMIN_REFRESH_TOKEN=$(echo "$login_resp" | grep -o '"refresh_token":"[^"]*"' | cut -d'"' -f4)
+        ADMIN_ACCESS_TOKEN=$(read_json_field "$login_resp" access_token)
+        ADMIN_REFRESH_TOKEN=$(read_json_field "$login_resp" refresh_token)
         refresh_token="$ADMIN_REFRESH_TOKEN"
     fi
     
@@ -963,9 +1111,9 @@ test_auth_token_refresh() {
     
     local refresh_resp=$(curl -sf -X POST "$API_URL/auth/refresh" \
         -H "Content-Type: application/json" \
-        -d "{\"refresh_token\":\"$refresh_token\"}" 2>/dev/null || echo "error")
+        -d "$(json_refresh_payload "$refresh_token")" 2>/dev/null || echo "error")
     
-    if echo "$refresh_resp" | grep -q '"access_token"'; then
+    if [[ -n "$(read_json_field "$refresh_resp" access_token)" ]]; then
         log_ok "Token refresh successful"
     else
         log_fail "Token refresh failed: $refresh_resp"

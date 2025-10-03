@@ -89,7 +89,7 @@ func (m *Manager) RunDueJobs(ctx context.Context) []ScheduledRunResult {
 		m.recordScheduledRun(job.ID, now)
 		runResult, err := m.runJobWithTrigger(ctx, job.ID, "scheduled")
 		if err != nil {
-			result.Error = err.Error()
+			result.Error = sanitizeBackupMessageForAPI(err.Error())
 			result.Result = runResult
 		} else {
 			result.Result = runResult

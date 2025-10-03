@@ -6,6 +6,7 @@ import {
   Activity, 
   Trash2, 
   RefreshCw,
+  Copy,
   CheckCircle2,
   Clock,
   Database,
@@ -14,12 +15,16 @@ import {
   AlertCircle,
   ShieldCheck,
 } from 'lucide-react'
-import { ApiError, getStorageStats, type DirectoryQuotaUsage } from '@/api/files'
+import { ApiError, getStorageStats, type DirectoryQuotaUsage, type StorageStats } from '@/api/files'
 import { formatBytes } from '@/lib/utils'
-import { areDiskStatsAvailable, areStorageStatsAvailable, clampUsagePercent, formatFilesystemType, formatUsagePercent, getDiskSpaceStatus } from '@/lib/storageStats'
+import { areDiskStatsAvailable, areStorageStatsAvailable, clampUsagePercent, formatFilesystemType, formatUsagePercent, getDiskSpaceStatus, getFilesystemIntegrityStatus, type FilesystemIntegrityStatus, type FilesystemIntegrityStatusLevel } from '@/lib/storageStats'
+import { GENERIC_ACTION_ERROR_DESCRIPTION, getUserFacingErrorDescription } from '@/lib/apiMessages'
 import { PageHeader } from '@/components/ui/PageHeader'
 import { EmptyState } from '@/components/ui/EmptyState'
 import { useIsAdmin, useUser } from '@/stores/auth'
+
+const storageStatsLoadErrorDescription = '存储统计加载失败，请检查网络或稍后重试。'
+const clipboardWriteFailureDescription = '请检查浏览器剪贴板权限。'
 
 function formatStorageSize(value: number | undefined): string {
   return value === undefined ? '--' : formatBytes(value)
@@ -29,7 +34,10 @@ function formatCount(value: number | undefined): string {
   return value === undefined ? '--' : value.toLocaleString()
 }
 
-function getStorageErrorPresentation(error: unknown): { title: string; description: string } {
+function getStorageErrorPresentation(
+  error: unknown,
+  fallbackDescription = storageStatsLoadErrorDescription,
+): { title: string; description: string } {
   if (error instanceof ApiError && error.isUnavailable) {
     return {
       title: '存储统计暂不可用',
@@ -39,12 +47,12 @@ function getStorageErrorPresentation(error: unknown): { title: string; descripti
 
   return {
     title: '加载存储统计失败',
-    description: (error as Error).message || '请稍后重试',
+    description: getUserFacingErrorDescription(error, fallbackDescription),
   }
 }
 
 function getStorageRefreshErrorToast(error: unknown): { title: string; description: string; color: 'warning' | 'danger' } {
-  const presentation = getStorageErrorPresentation(error)
+  const presentation = getStorageErrorPresentation(error, GENERIC_ACTION_ERROR_DESCRIPTION)
   if (error instanceof ApiError && error.isUnavailable) {
     return {
       ...presentation,
@@ -72,6 +80,34 @@ function getDiskSpacePanelClass(level: 'unknown' | 'normal' | 'warning' | 'criti
   return level === 'critical'
     ? 'border-danger/25 bg-danger/5 text-danger'
     : 'border-warning/25 bg-warning/5 text-warning'
+}
+
+function getFilesystemIntegrityPanelClass(level: FilesystemIntegrityStatusLevel): string {
+  if (level === 'supported') {
+    return 'border-success/25 bg-success/5'
+  }
+  if (level === 'volatile') {
+    return 'border-danger/25 bg-danger/5'
+  }
+  if (level === 'unknown') {
+    return 'border-default-200 bg-content2/40'
+  }
+  return 'border-warning/25 bg-warning/5'
+}
+
+function formatStorageBackingSummary(stats: StorageStats, filesystemIntegrityStatus: FilesystemIntegrityStatus | undefined): string {
+  const rows = [
+    ['文件系统', formatFilesystemType(stats.diskFilesystemType)],
+    ['数据校验能力', filesystemIntegrityStatus?.title ?? '--'],
+    ['挂载点', stats.diskMountPoint ?? '--'],
+    ['存储源', stats.diskMountSource ?? '--'],
+    ['挂载选项', stats.diskMountOptions ?? '--'],
+    ['磁盘容量', formatStorageSize(stats.diskTotal)],
+    ['已用空间', formatStorageSize(stats.diskUsed)],
+    ['可用空间', formatStorageSize(stats.diskAvailable)],
+    ['磁盘占用', formatUsagePercent(stats.diskUsageRatio)],
+  ]
+  return rows.map(([label, value]) => `${label}: ${value}`).join('\n')
 }
 
 function getDirectoryQuotaStatusLabel(quota: DirectoryQuotaUsage): string {
@@ -179,7 +215,7 @@ export function StoragePage() {
   const isAdmin = useIsAdmin()
   const { data: stats, isLoading, error, refetch } = useQuery({
     queryKey: ['stats', user?.id ?? 'anonymous', isAdmin],
-    queryFn: getStorageStats,
+    queryFn: ({ signal }) => getStorageStats({ signal }),
     refetchInterval: 30000,
   })
   const storageErrorPresentation = error ? getStorageErrorPresentation(error) : null
@@ -259,9 +295,19 @@ export function StoragePage() {
   const diskAvailableBytes = diskStatsAvailable ? stats?.diskAvailable : undefined
   const diskUsagePercent = diskStatsAvailable ? clampUsagePercent(stats?.diskUsageRatio) : undefined
   const diskSpaceStatus = getDiskSpaceStatus(stats)
+  const filesystemIntegrityStatus = diskStatsAvailable
+    ? getFilesystemIntegrityStatus(stats?.diskFilesystemType, stats?.diskNativeDataChecksumSupport)
+    : undefined
   const shouldShowDiskSpaceAlert = diskSpaceStatus.level === 'warning' || diskSpaceStatus.level === 'critical'
   const overviewUsedBytes = diskStatsAvailable ? diskUsedBytes : casBytes
   const hasUsage = overviewUsedBytes !== undefined && overviewUsedBytes > 0
+  const hasStorageBackingDetails = isAdmin && diskStatsAvailable && (
+    stats?.diskMountPoint
+    || stats?.diskMountSource
+    || stats?.diskMountOptions
+    || filesystemIntegrityStatus
+  )
+  const storageBackingSummary = stats ? formatStorageBackingSummary(stats, filesystemIntegrityStatus) : ''
   const uniqueBytes = storageStatsAvailable ? stats?.uniqueSize ?? 0 : 0
   const savedBytes = storageStatsAvailable && casBytes !== undefined && stats?.uniqueSize !== undefined
     ? Math.max(0, casBytes - uniqueBytes)
@@ -315,6 +361,28 @@ export function StoragePage() {
       icon: TrendingUp,
     },
   ]
+
+  const handleCopyStorageBackingSummary = async () => {
+    if (!navigator.clipboard?.writeText) {
+      addToast({
+        title: '无法复制存储摘要',
+        description: '当前浏览器不支持剪贴板写入。',
+        color: 'warning',
+      })
+      return
+    }
+
+    try {
+      await navigator.clipboard.writeText(storageBackingSummary)
+      addToast({ title: '存储摘要已复制', color: 'success' })
+    } catch {
+      addToast({
+        title: '无法复制存储摘要',
+        description: clipboardWriteFailureDescription,
+        color: 'danger',
+      })
+    }
+  }
 
   return (
     <div className="p-4 space-y-6 sm:p-6 lg:p-8">
@@ -371,16 +439,55 @@ export function StoragePage() {
                 </div>
               </div>
             )}
-            {diskStatsAvailable && (stats?.diskMountPoint || stats?.diskMountSource) && (
+            {hasStorageBackingDetails && (
               <div className="mt-4 grid gap-3 rounded-lg border border-divider bg-content1 p-3 text-sm sm:grid-cols-2">
-                <div className="min-w-0">
-                  <p className="text-xs text-default-500">挂载点</p>
-                  <p className="mt-1 truncate font-medium text-foreground">{stats.diskMountPoint ?? '--'}</p>
+                <div className="flex min-w-0 flex-col gap-2 sm:col-span-2 sm:flex-row sm:items-center sm:justify-between">
+                  <div className="min-w-0">
+                    <p className="font-medium text-foreground">存储承载详情</p>
+                    <p className="mt-1 text-xs text-default-500">用于核对实际挂载点、设备来源和底层校验能力。</p>
+                  </div>
+                  <Button
+                    size="sm"
+                    variant="flat"
+                    startContent={<Copy size={14} />}
+                    onPress={handleCopyStorageBackingSummary}
+                    className="w-fit rounded-lg"
+                  >
+                    复制存储摘要
+                  </Button>
                 </div>
-                <div className="min-w-0">
-                  <p className="text-xs text-default-500">存储源</p>
-                  <p className="mt-1 truncate font-medium text-foreground">{stats.diskMountSource ?? '--'}</p>
-                </div>
+                {stats?.diskMountPoint && (
+                  <div className="min-w-0">
+                    <p className="text-xs text-default-500">挂载点</p>
+                    <p className="mt-1 truncate font-medium text-foreground" title={stats.diskMountPoint}>{stats.diskMountPoint}</p>
+                  </div>
+                )}
+                {stats?.diskMountSource && (
+                  <div className="min-w-0">
+                    <p className="text-xs text-default-500">存储源</p>
+                    <p className="mt-1 truncate font-medium text-foreground" title={stats.diskMountSource}>{stats.diskMountSource}</p>
+                  </div>
+                )}
+                {filesystemIntegrityStatus && (
+                  <div className={`min-w-0 rounded-lg border p-3 ${getFilesystemIntegrityPanelClass(filesystemIntegrityStatus.level)}`}>
+                    <p className="text-xs text-default-500">数据校验能力</p>
+                    <div className="mt-1 flex min-w-0 items-center gap-2">
+                      {filesystemIntegrityStatus.level === 'supported' ? (
+                        <ShieldCheck size={15} className="shrink-0 text-success" />
+                      ) : (
+                        <AlertCircle size={15} className="shrink-0 text-warning" />
+                      )}
+                      <p className="truncate font-medium text-foreground">{filesystemIntegrityStatus.title}</p>
+                    </div>
+                    <p className="mt-1 text-xs leading-5 text-default-600">{filesystemIntegrityStatus.description}</p>
+                  </div>
+                )}
+                {isAdmin && stats?.diskMountOptions && (
+                  <div className="min-w-0 sm:col-span-2">
+                    <p className="text-xs text-default-500">挂载选项</p>
+                    <p className="mt-1 truncate font-mono text-xs text-default-600" title={stats.diskMountOptions}>{stats.diskMountOptions}</p>
+                  </div>
+                )}
               </div>
             )}
           </div>

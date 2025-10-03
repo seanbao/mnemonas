@@ -18,6 +18,7 @@ vi.mock('./auth', () => ({
 import { authFetch } from './auth'
 
 const mockAuthFetch = authFetch as Mock
+const invalidResponseMessage = '服务器返回了无效的数据'
 
 describe('Favorites API', () => {
   beforeEach(() => {
@@ -39,7 +40,21 @@ describe('Favorites API', () => {
       const result = await listFavorites()
 
       expect(result).toEqual(mockFavorites)
-      expect(mockAuthFetch).toHaveBeenCalledWith('/api/v1/favorites')
+      expect(mockAuthFetch).toHaveBeenCalledWith('/api/v1/favorites', {})
+    })
+
+    it('forwards abort signal when listing favorites', async () => {
+      const controller = new AbortController()
+      mockAuthFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ success: true, data: { favorites: [], count: 0 } }),
+      })
+
+      await listFavorites({ signal: controller.signal })
+
+      expect(mockAuthFetch).toHaveBeenCalledWith('/api/v1/favorites', {
+        signal: controller.signal,
+      })
     })
 
     it('returns empty array when no favorites', async () => {
@@ -77,6 +92,27 @@ describe('Favorites API', () => {
     })
   })
 
+    it('surfaces problem-json details from favorites failures', async () => {
+      const body = {
+        title: 'Service unavailable',
+        detail: 'favorites storage unavailable',
+        status: 503,
+      }
+
+      mockAuthFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 503,
+        headers: new Headers({ 'Content-Type': 'application/problem+json' }),
+        clone: () => ({ json: () => Promise.resolve(body) }),
+        json: () => Promise.resolve(body),
+      })
+
+      await expect(listFavorites()).rejects.toMatchObject({
+        message: 'favorites storage unavailable',
+        status: 503,
+      })
+    })
+
     it('reads legacy string error responses', async () => {
       mockAuthFetch.mockResolvedValueOnce({
         ok: false,
@@ -90,17 +126,57 @@ describe('Favorites API', () => {
     })
 
     it('rejects malformed successful favorite list responses', async () => {
-	  mockAuthFetch.mockResolvedValueOnce({
-	    ok: true,
-	    status: 200,
-	    json: () => Promise.resolve({ success: true, data: { favorites: [{ path: '/file1.txt' }], count: 1 } }),
-	  })
+      mockAuthFetch.mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({ success: true, data: { favorites: [{ path: '/file1.txt' }], count: 1 } }),
+      })
 
-	  await expect(listFavorites()).rejects.toMatchObject({
-	    message: '获取收藏列表响应无效',
-	    status: 200,
-	  })
-	})
+      await expect(listFavorites()).rejects.toMatchObject({
+        message: invalidResponseMessage,
+        status: 200,
+      })
+    })
+
+    it.each([
+      ['null data', null],
+      ['missing count', { favorites: [] }],
+      ['non-number count', { favorites: [], count: '0' }],
+      ['negative count', { favorites: [], count: -1 }],
+      ['fractional count', { favorites: [], count: 1.5 }],
+      ['unsafe count', { favorites: [], count: 9007199254740992 }],
+      [
+        'count smaller than returned favorites',
+        {
+          favorites: [{ path: '/file1.txt', user_id: 'user1', created_at: '2024-01-01' }],
+          count: 0,
+        },
+      ],
+    ])('rejects favorite list responses with %s', async (_name, data) => {
+      mockAuthFetch.mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({ success: true, data }),
+      })
+
+      await expect(listFavorites()).rejects.toMatchObject({
+        message: invalidResponseMessage,
+        status: 200,
+      })
+    })
+
+    it('rejects unreadable successful favorite list responses', async () => {
+      mockAuthFetch.mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: () => Promise.reject(new SyntaxError('Unexpected token < in JSON')),
+      })
+
+      await expect(listFavorites()).rejects.toMatchObject({
+        message: invalidResponseMessage,
+        status: 200,
+      })
+    })
 
     it('uses default message when error parsing fails', async () => {
       mockAuthFetch.mockResolvedValueOnce({
@@ -122,7 +198,7 @@ describe('Favorites API', () => {
       })
 
       await expect(listFavorites()).rejects.toMatchObject({
-        message: '获取收藏列表响应无效',
+        message: invalidResponseMessage,
         status: 200,
       })
     })
@@ -194,6 +270,29 @@ describe('Favorites API', () => {
       })
     })
 
+    it('forwards abort signal when adding a favorite', async () => {
+      const controller = new AbortController()
+      const mockFavorite = {
+        path: '/file.txt',
+        user_id: 'user1',
+        created_at: '2024-01-01',
+      }
+
+      mockAuthFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ success: true, data: mockFavorite }),
+      })
+
+      await expect(addFavorite('/file.txt', '', { signal: controller.signal })).resolves.toEqual(mockFavorite)
+
+      expect(mockAuthFetch).toHaveBeenCalledWith('/api/v1/favorites', {
+        signal: controller.signal,
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: '/file.txt', note: '' }),
+      })
+    })
+
     it('throws error with conflict message on 409', async () => {
       mockAuthFetch.mockResolvedValueOnce({
         ok: false,
@@ -225,7 +324,7 @@ describe('Favorites API', () => {
       })
 
       await expect(addFavorite('/file.txt')).rejects.toMatchObject({
-        message: '添加收藏响应无效',
+        message: invalidResponseMessage,
         status: 200,
       })
     })
@@ -261,6 +360,22 @@ describe('Favorites API', () => {
       )
     })
 
+    it('forwards abort signal when removing a favorite', async () => {
+      const controller = new AbortController()
+      mockAuthFetch.mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({ success: true, data: null, message: 'favorite removed successfully' }),
+      })
+
+      await expect(removeFavorite('/file.txt', { signal: controller.signal })).resolves.toEqual({ message: 'favorite removed successfully' })
+
+      expect(mockAuthFetch).toHaveBeenCalledWith('/api/v1/favorites/file.txt', {
+        signal: controller.signal,
+        method: 'DELETE',
+      })
+    })
+
     it('throws FavoritesError on failure', async () => {
       mockAuthFetch.mockResolvedValueOnce({
         ok: false,
@@ -291,7 +406,7 @@ describe('Favorites API', () => {
       })
 
       await expect(removeFavorite('/file.txt')).rejects.toMatchObject({
-        message: '移除收藏响应无效',
+        message: invalidResponseMessage,
         status: 200,
       })
     })
@@ -304,7 +419,7 @@ describe('Favorites API', () => {
       })
 
       await expect(removeFavorite('/file.txt')).rejects.toMatchObject({
-        message: '移除收藏响应无效',
+        message: invalidResponseMessage,
         status: 200,
       })
     })
@@ -336,6 +451,20 @@ describe('Favorites API', () => {
       expect(result).toBe(false)
     })
 
+    it('forwards abort signal when checking a single path', async () => {
+      const controller = new AbortController()
+      mockAuthFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ success: true, data: { is_favorite: true } }),
+      })
+
+      await expect(checkFavorite('/file.txt', { signal: controller.signal })).resolves.toBe(true)
+
+      expect(mockAuthFetch).toHaveBeenCalledWith('/api/v1/favorites/check?path=%2Ffile.txt', {
+        signal: controller.signal,
+      })
+    })
+
     it('throws FavoritesError on error', async () => {
       mockAuthFetch.mockResolvedValueOnce({
         ok: false,
@@ -357,7 +486,7 @@ describe('Favorites API', () => {
       })
 
       await expect(checkFavorite('/file.txt')).rejects.toMatchObject({
-        message: '获取收藏状态响应无效',
+        message: invalidResponseMessage,
         status: 200,
       })
     })
@@ -370,7 +499,7 @@ describe('Favorites API', () => {
       })
 
       await expect(checkFavorite('/file.txt')).rejects.toMatchObject({
-        message: '获取收藏状态响应无效',
+        message: invalidResponseMessage,
         status: 200,
       })
     })
@@ -405,6 +534,33 @@ describe('Favorites API', () => {
       })
     })
 
+    it('forwards abort signal when checking multiple paths', async () => {
+      const controller = new AbortController()
+      mockAuthFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            success: true,
+            data: {
+              favorites: {
+                '/file1.txt': true,
+              },
+            },
+          }),
+      })
+
+      await expect(checkFavorites(['/file1.txt'], { signal: controller.signal })).resolves.toEqual({
+        '/file1.txt': true,
+      })
+
+      expect(mockAuthFetch).toHaveBeenCalledWith('/api/v1/favorites/check-batch', {
+        signal: controller.signal,
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ paths: ['/file1.txt'] }),
+      })
+    })
+
     it('throws FavoritesError on non-404 errors', async () => {
       mockAuthFetch.mockResolvedValueOnce({
         ok: false,
@@ -426,7 +582,7 @@ describe('Favorites API', () => {
       })
 
       await expect(checkFavorites(['/file1.txt', '/file2.txt'])).rejects.toMatchObject({
-        message: '获取收藏状态响应无效',
+        message: invalidResponseMessage,
         status: 200,
       })
     })
@@ -439,7 +595,7 @@ describe('Favorites API', () => {
       })
 
       await expect(checkFavorites(['/file1.txt'])).rejects.toMatchObject({
-        message: '获取收藏状态响应无效',
+        message: invalidResponseMessage,
         status: 200,
       })
     })
@@ -484,6 +640,24 @@ describe('Favorites API', () => {
       })
     })
 
+    it('forwards abort signal when updating a favorite note', async () => {
+      const controller = new AbortController()
+      mockAuthFetch.mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({ success: true, data: null, message: 'favorite note updated successfully' }),
+      })
+
+      await expect(updateFavoriteNote('/file.txt', '新备注', { signal: controller.signal })).resolves.toEqual({ message: 'favorite note updated successfully' })
+
+      expect(mockAuthFetch).toHaveBeenCalledWith('/api/v1/favorites/file.txt', {
+        signal: controller.signal,
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ note: '新备注' }),
+      })
+    })
+
     it('throws FavoritesError on failure', async () => {
       mockAuthFetch.mockResolvedValueOnce({
         ok: false,
@@ -504,7 +678,7 @@ describe('Favorites API', () => {
       })
 
       await expect(updateFavoriteNote('/file.txt', 'note')).rejects.toMatchObject({
-        message: '更新备注响应无效',
+        message: invalidResponseMessage,
         status: 200,
       })
     })
@@ -517,7 +691,7 @@ describe('Favorites API', () => {
       })
 
       await expect(updateFavoriteNote('/file.txt', 'note')).rejects.toMatchObject({
-        message: '更新备注响应无效',
+        message: invalidResponseMessage,
         status: 200,
       })
     })
@@ -555,6 +729,42 @@ describe('Favorites API', () => {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ path: '/file.txt', note: '' }),
+      })
+    })
+
+    it('forwards abort signal through add toggle operations', async () => {
+      const controller = new AbortController()
+      mockAuthFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          success: true,
+          data: { path: '/file.txt', user_id: 'user1', created_at: '2024-01-01' },
+        }),
+      })
+
+      await expect(toggleFavorite('/file.txt', false, { signal: controller.signal })).resolves.toBe(true)
+
+      expect(mockAuthFetch).toHaveBeenCalledWith('/api/v1/favorites', {
+        signal: controller.signal,
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: '/file.txt', note: '' }),
+      })
+    })
+
+    it('forwards abort signal through remove toggle operations', async () => {
+      const controller = new AbortController()
+      mockAuthFetch.mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({ success: true, data: null }),
+      })
+
+      await expect(toggleFavorite('/file.txt', true, { signal: controller.signal })).resolves.toBe(false)
+
+      expect(mockAuthFetch).toHaveBeenCalledWith('/api/v1/favorites/file.txt', {
+        signal: controller.signal,
+        method: 'DELETE',
       })
     })
   })

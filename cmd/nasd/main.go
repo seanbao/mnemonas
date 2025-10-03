@@ -324,8 +324,14 @@ func buildWebDAVHandler(fs *storage.FileSystem, cfg api.WebDAVRuntimeConfig) (st
 		return "", nil
 	}
 
+	authType := config.NormalizeWebDAVAuthType(cfg.AuthType)
+	username := cfg.Username
+	if authType == "basic" && strings.TrimSpace(username) == "" {
+		username = "admin"
+	}
+
 	var userAuthenticator webdav.UserAuthenticator
-	if strings.EqualFold(cfg.AuthType, "users") && cfg.UserStore != nil {
+	if authType == "users" && cfg.UserStore != nil {
 		userAuthenticator = func(ctx context.Context, username, password string) (*webdav.UserIdentity, error) {
 			user, err := cfg.UserStore.VerifyCredentials(username, password)
 			if err != nil {
@@ -366,8 +372,8 @@ func buildWebDAVHandler(fs *storage.FileSystem, cfg api.WebDAVRuntimeConfig) (st
 		FileSystem:        fs,
 		Prefix:            prefix,
 		ReadOnly:          cfg.ReadOnly,
-		AuthType:          cfg.AuthType,
-		Username:          cfg.Username,
+		AuthType:          authType,
+		Username:          username,
 		Password:          cfg.Password,
 		UserAuthenticator: userAuthenticator,
 		DirectoryQuotas:   directoryQuotas,
@@ -475,16 +481,7 @@ func main() {
 		cfg.Auth.JWTSecret = secrets.JWTSecret
 	}
 
-	// Auto-generate WebDAV password if basic auth enabled but password not set
-	webdavPasswordGenerated := false
-	if cfg.WebDAV.Enabled && cfg.WebDAV.AuthType == "basic" && cfg.WebDAV.Password == "" {
-		cfg.WebDAV.Password = secrets.WebDAVPassword
-		webdavPasswordGenerated = true
-		// Also set default username if not configured
-		if cfg.WebDAV.Username == "" {
-			cfg.WebDAV.Username = "admin"
-		}
-	}
+	webdavPasswordGenerated := applyStartupWebDAVCredentials(cfg, secrets)
 
 	log.Info().
 		Str("version", version).
@@ -787,6 +784,19 @@ func logWebDAVCredentialStatus(dataRoot, username string, passwordGenerated, new
 	}
 
 	log.Info().Str("secrets_file", secretsPath).Msg("🔐 WebDAV using auto-generated password from secrets file")
+}
+
+func applyStartupWebDAVCredentials(cfg *config.Config, secrets *config.Secrets) bool {
+	webdavAuthType := config.NormalizeWebDAVAuthType(cfg.WebDAV.AuthType)
+	if cfg.WebDAV.Enabled && webdavAuthType == "basic" && strings.TrimSpace(cfg.WebDAV.Username) == "" {
+		cfg.WebDAV.Username = "admin"
+	}
+
+	if cfg.WebDAV.Enabled && webdavAuthType == "basic" && strings.TrimSpace(cfg.WebDAV.Password) == "" {
+		cfg.WebDAV.Password = secrets.WebDAVPassword
+		return true
+	}
+	return false
 }
 
 func initLogger() {

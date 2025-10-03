@@ -15,7 +15,7 @@
 | `9090` | TCP | 无公网来源 | dataplane gRPC 内部端口 | 不开放 |
 | `9091` | TCP | 无公网来源 | dataplane HTTP 内部端口 | 不开放 |
 
-如果你修改了 MnemoNAS 直连端口或 dataplane 端口，把自定义端口也按上表的“不开放”处理。使用 Cloudflare Tunnel、Tailscale、Headscale 或其他隧道/VPN，并且不需要公网直接入站时，可以不开放 `80/443`；但仍不要开放 `8080/9090/9091` 或自定义后端端口。
+如果修改了 MnemoNAS 直连端口或 dataplane 端口，自定义端口也应按上表的“不开放”处理。使用 Cloudflare Tunnel、Tailscale、Headscale 或其他隧道/VPN，并且不需要公网直接入站时，可以不开放 `80/443`；但仍不要开放 `8080/9090/9091` 或自定义后端端口。
 
 ## 云厂商对照
 
@@ -36,7 +36,7 @@
 sudo mnemonas-doctor --public-domain nas.example.com
 ```
 
-这个命令会检查 HTTPS health、HTTP 到 HTTPS 跳转、证书 hostname、证书 30 天有效期、后端直连端口、dataplane 端口和本机监听范围。它不能直接读取云控制台规则，因此云安全组仍需人工确认。
+这个命令会检查 HTTPS health、HTTP 是否跳转到同一域名的 HTTPS、证书 hostname、证书 30 天有效期、后端直连端口、dataplane 端口和本机监听范围。它不能直接读取云控制台规则，因此云安全组仍需人工确认。
 
 从外部网络执行：
 
@@ -50,10 +50,10 @@ curl --connect-timeout 3 http://nas.example.com:9091/health
 预期结果：
 
 - `https://nas.example.com/health` 可访问。
-- `http://nas.example.com:8080/health` 失败或超时。
-- `http://nas.example.com:9090/` 失败或超时。
-- `http://nas.example.com:9091/health` 失败或超时。
-- 如果使用自定义后端端口，对应端口也应失败或超时。
+- `http://nas.example.com:8080/health` 连接失败或超时，不应返回任何 HTTP 状态码。
+- `http://nas.example.com:9090/` 连接失败或超时，不应返回任何 HTTP 状态码。
+- `http://nas.example.com:9091/health` 连接失败或超时，不应返回任何 HTTP 状态码。
+- 如果使用自定义后端端口，对应端口也应连接失败或超时，不应返回任何 HTTP 状态码。
 
 ## 常见错误
 

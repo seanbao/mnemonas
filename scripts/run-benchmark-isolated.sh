@@ -22,7 +22,23 @@ DATAPLANE_GRPC="${MNEMONAS_BENCH_DATAPLANE_GRPC:-127.0.0.1:19192}"
 BASE_URL=""
 READY_ATTEMPTS="${MNEMONAS_BENCH_READY_ATTEMPTS:-180}"
 
+require_no_control_characters() {
+  local value="$1"
+  local label="$2"
+
+  if [[ "$value" == *$'\n'* || "$value" == *$'\r'* ]]; then
+    echo "$label cannot contain newline characters: $value" >&2
+    exit 1
+  fi
+  if [[ "$value" == *[[:cntrl:]]* ]]; then
+    echo "$label cannot contain control characters: $value" >&2
+    exit 1
+  fi
+}
+
 require_safe_bench_root() {
+  require_no_control_characters "$BENCH_ROOT" "MNEMONAS_BENCH_ROOT"
+
   if path_has_parent_segment "$BENCH_ROOT"; then
     echo "MNEMONAS_BENCH_ROOT must not contain '..' path segments: $BENCH_ROOT" >&2
     exit 1
@@ -104,6 +120,45 @@ is_valid_tcp_host() {
   return 0
 }
 
+is_ipv4_loopback_host() {
+  local host="$1"
+  local octet
+  local -a octets
+
+  [[ "$host" =~ ^127\.([0-9]{1,3}\.){2}[0-9]{1,3}$ ]] || return 1
+  IFS='.' read -r -a octets <<< "$host"
+  for octet in "${octets[@]}"; do
+    [[ ${#octet} -le 3 ]] || return 1
+    (( 10#$octet >= 0 && 10#$octet <= 255 )) || return 1
+  done
+  return 0
+}
+
+is_loopback_host() {
+  local host="$1"
+
+  case "$host" in
+    localhost|ip6-localhost|::1)
+      return 0
+      ;;
+  esac
+  is_ipv4_loopback_host "$host"
+}
+
+tcp_addr_host() {
+  local value="$1"
+
+  if [[ "$value" =~ ^\[([^][]+)\]:([0-9]+)$ ]]; then
+    printf '%s\n' "${BASH_REMATCH[1]}"
+    return 0
+  fi
+  if [[ "$value" =~ ^([^:]+):([0-9]+)$ ]]; then
+    printf '%s\n' "${BASH_REMATCH[1]}"
+    return 0
+  fi
+  return 1
+}
+
 http_host_for_url() {
   local host="$1"
   if [[ "$host" == *:* && "$host" != \[*\] ]]; then
@@ -119,7 +174,15 @@ require_safe_tcp_host() {
 
   [[ -n "$value" ]] || { echo "$label cannot be empty" >&2; exit 1; }
   [[ "$value" != *[[:space:]]* ]] || { echo "$label cannot contain whitespace: $value" >&2; exit 1; }
+  [[ "$value" != *[[:cntrl:]]* ]] || { echo "$label cannot contain control characters: $value" >&2; exit 1; }
   is_valid_tcp_host "$value" || { echo "$label host is invalid: $value" >&2; exit 1; }
+}
+
+require_loopback_host() {
+  local value="$1"
+  local label="$2"
+
+  is_loopback_host "$value" || { echo "$label must be loopback-only for isolated test backends: $value" >&2; exit 1; }
 }
 
 require_safe_tcp_port() {
@@ -128,6 +191,7 @@ require_safe_tcp_port() {
 
   [[ -n "$value" ]] || { echo "$label cannot be empty" >&2; exit 1; }
   [[ "$value" != *[[:space:]]* ]] || { echo "$label cannot contain whitespace: $value" >&2; exit 1; }
+  [[ "$value" != *[[:cntrl:]]* ]] || { echo "$label cannot contain control characters: $value" >&2; exit 1; }
   [[ "$value" =~ ^[0-9]+$ ]] || { echo "$label must be numeric: $value" >&2; exit 1; }
   (( 10#$value >= 1 && 10#$value <= 65535 )) || { echo "$label must be between 1 and 65535: $value" >&2; exit 1; }
 }
@@ -140,6 +204,7 @@ require_safe_tcp_addr() {
 
   [[ -n "$value" ]] || { echo "$label cannot be empty" >&2; exit 1; }
   [[ "$value" != *[[:space:]]* ]] || { echo "$label cannot contain whitespace: $value" >&2; exit 1; }
+  [[ "$value" != *[[:cntrl:]]* ]] || { echo "$label cannot contain control characters: $value" >&2; exit 1; }
 
   if [[ "$value" =~ ^\[([^][]+)\]:([0-9]+)$ ]]; then
     host="${BASH_REMATCH[1]}"
@@ -154,6 +219,15 @@ require_safe_tcp_addr() {
 
   is_valid_tcp_host "$host" || { echo "$label host is invalid: $value" >&2; exit 1; }
   require_safe_tcp_port "$port" "$label port"
+}
+
+require_loopback_tcp_addr() {
+  local value="$1"
+  local label="$2"
+  local host
+
+  host="$(tcp_addr_host "$value")" || { echo "$label must be a host:port address: $value" >&2; exit 1; }
+  is_loopback_host "$host" || { echo "$label must be loopback-only for isolated test backends: $value" >&2; exit 1; }
 }
 
 require_positive_integer() {
@@ -207,9 +281,12 @@ cleanup() {
 
 require_safe_bench_root
 require_safe_tcp_host "$NASD_HOST" "MNEMONAS_BENCH_NASD_HOST"
+require_loopback_host "$NASD_HOST" "MNEMONAS_BENCH_NASD_HOST"
 require_safe_tcp_port "$NASD_PORT" "MNEMONAS_BENCH_NASD_PORT"
 require_safe_tcp_addr "$DATAPLANE_HTTP" "MNEMONAS_BENCH_DATAPLANE_HTTP"
+require_loopback_tcp_addr "$DATAPLANE_HTTP" "MNEMONAS_BENCH_DATAPLANE_HTTP"
 require_safe_tcp_addr "$DATAPLANE_GRPC" "MNEMONAS_BENCH_DATAPLANE_GRPC"
+require_loopback_tcp_addr "$DATAPLANE_GRPC" "MNEMONAS_BENCH_DATAPLANE_GRPC"
 require_positive_integer "$READY_ATTEMPTS" "MNEMONAS_BENCH_READY_ATTEMPTS"
 BASE_URL="http://$(http_host_for_url "$NASD_HOST"):${NASD_PORT}"
 

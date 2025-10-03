@@ -2,7 +2,7 @@
 
 English | [简体中文](reverse-proxy-setup.md)
 
-This guide explains how to expose MnemoNAS through HTTPS with a reverse proxy. Public access should go through HTTPS on `80/443`, not by exposing the raw `8080` service directly. If you are starting from a public server, follow the [Public server quickstart](public-server-quickstart.en.md) first; this guide keeps the detailed Caddy, Nginx, and Traefik examples.
+This guide explains how to expose MnemoNAS through HTTPS with a reverse proxy. Public access should go through HTTPS on `80/443`, not by exposing the raw `8080` service directly. For a new public-server deployment, follow the [Public server quickstart](public-server-quickstart.en.md) first; this guide keeps the detailed Caddy, Nginx, and Traefik examples.
 
 ## Prerequisites
 
@@ -18,9 +18,15 @@ After systemd deployment, use the helper to create the public HTTPS entry and re
 sudo mnemonas-public-setup --proxy caddy nas.example.com admin@example.com
 ```
 
-The systemd installer installs `scripts/setup-reverse-proxy.sh` as `mnemonas-public-setup`. The script sets `server.host = "127.0.0.1"`, `trusted_proxy_hops = 1`, configures Caddy or Nginx, adjusts local UFW rules, and runs basic checks. Cloud-provider security groups still need manual confirmation: expose only `80/443`, not `8080/9090/9091` or any custom backend ports.
+The systemd installer installs `scripts/setup-reverse-proxy.sh` as `mnemonas-public-setup`. The script sets `server.host = "127.0.0.1"`, `trusted_proxy_hops = 1`, configures Caddy or Nginx, adjusts local UFW rules, and runs basic checks. When adjusting UFW, it removes broad allow rules for `8080/9090/9091` or custom backend ports before writing deny rules. Cloud-provider security groups still need manual confirmation: expose only `80/443`, not `8080/9090/9091` or any custom backend ports.
 
-The helper rejects config paths where the existing file or parent directory is a symlink, matching the `nasd` config-file safety checks.
+The script lowercases the domain and removes a single FQDN trailing dot. The normalized value is used in the Caddy/Nginx configuration, certificate request, WebDAV URL, and verification commands.
+
+The helper requires `--config` to be an absolute path without whitespace, control characters, parent-directory segments, or symlink components, matching the `nasd` config-file safety checks. Configuration updates, the follow-up `mnemonas-doctor --public-domain` diagnostics, and WebDAV URL resolution use the same configuration path.
+
+The completion summary reads `webdav.prefix` from the configuration and prints the matching public WebDAV URL. If no prefix is configured, it uses the default `/dav`. An explicitly empty prefix, root prefix, or prefix under the reserved `/api`, `/s`, or `/health` route namespaces is invalid because it overlaps the Web UI/API routes. The prefix is normalized with the same URL-path rules as the server, including trimming surrounding whitespace, folding repeated slashes, and resolving `.` and `..` path segments. When a deployment uses a custom WebDAV prefix, replace `/dav` in the verification commands with that prefix.
+
+When `--skip-mnemonas-config` or `--no-firewall` is used, the completion summary marks the corresponding item as skipped and lists the manual settings to verify.
 
 When overriding the default backend host with `MNEMONAS_UPSTREAM_HOST`, use only a hostname, IPv4 address, or IPv6 literal. Do not include a scheme, path, or port. IPv6 may be written as `::1` or `[::1]`.
 
@@ -29,7 +35,7 @@ For Traefik or Cloudflare Tunnel, start from the repository templates instead of
 - `deploy/public-access/traefik/`: Traefik on a Linux host, while MnemoNAS still runs under systemd on `127.0.0.1:8080`.
 - `deploy/public-access/cloudflare-tunnel/config.yml`: Cloudflare Tunnel ingress for deployments without a directly reachable public IP.
 
-After copying a template, replace at least `nas.example.com`, the ACME email or tunnel ID, and run `sudo mnemonas-doctor --public-domain <domain>`.
+See [Public access templates](../deploy/public-access/README.en.md) for the template notes. After copying a template, replace at least `nas.example.com`, the ACME email or tunnel ID, and run `sudo mnemonas-doctor --public-domain <domain>`.
 
 ## MnemoNAS Configuration
 
@@ -44,7 +50,7 @@ Use `1` for a single Caddy, Nginx, or Traefik proxy. For multiple hops, set the 
 
 Without this setting, MnemoNAS still works behind a proxy, but Secure-cookie detection and client-IP-based rate limiting use the direct peer address instead of the real client address.
 
-Only expose `80/443` publicly. `8080` is the default direct Web/API/WebDAV port. If the reverse proxy and MnemoNAS run on the same host, prefer `[server].host = "127.0.0.1"` or firewall the direct backend port to trusted sources. Dataplane `9090/9091`, or your custom dataplane ports, must not be exposed.
+Only expose `80/443` publicly. `8080` is the default direct Web/API/WebDAV port. When the reverse proxy and MnemoNAS run on the same host, prefer `[server].host = "127.0.0.1"` or firewall the direct backend port to trusted sources. Dataplane `9090/9091`, or custom dataplane ports, must not be exposed.
 
 ## Option 1: Caddy
 
@@ -95,8 +101,8 @@ Verify:
 ```bash
 curl -I https://nas.example.com/health
 
-WEBDAV_USER="admin" # use a MnemoNAS username when auth_type=users
-WEBDAV_PASS="your-mnemonas-password"
+WEBDAV_USER="admin" # MnemoNAS username when auth_type=users
+WEBDAV_PASS="<actual WebDAV password>" # Basic Auth generated passwords use the webdav_password field in /srv/mnemonas/secrets.json
 curl -u "$WEBDAV_USER:$WEBDAV_PASS" -X PROPFIND https://nas.example.com/dav/ -H "Depth: 0"
 ```
 
@@ -146,6 +152,8 @@ server {
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_pass_request_headers on;
+        proxy_set_header Destination $http_destination;
         proxy_method $request_method;
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
@@ -196,7 +204,7 @@ services:
       - "--entrypoints.websecure.address=:443"
       - "--certificatesresolvers.letsencrypt.acme.httpchallenge=true"
       - "--certificatesresolvers.letsencrypt.acme.httpchallenge.entrypoint=web"
-      - "--certificatesresolvers.letsencrypt.acme.email=your-email@example.com"
+      - "--certificatesresolvers.letsencrypt.acme.email=admin@example.com"
       - "--certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json"
     ports:
       - "80:80"
@@ -210,7 +218,11 @@ services:
     image: ${MNEMONAS_IMAGE:-mnemonas:local}
     user: "${MNEMONAS_UID:-1000}:${MNEMONAS_GID:-1000}"
     volumes:
-      - ${HOME}/.mnemonas:/data
+      - type: bind
+        source: ${HOME}/.mnemonas
+        target: /data
+        bind:
+          create_host_path: true
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.nas.rule=Host(`nas.example.com`)"
@@ -230,7 +242,7 @@ Mounting `/var/run/docker.sock` read-only still gives Traefik broad Docker API v
 
 ## Option 4: Cloudflare Tunnel Template
 
-Use Cloudflare Tunnel if the server has no public IP or you do not want to expose inbound `80/443` directly:
+Use Cloudflare Tunnel when the server has no public IP or inbound `80/443` should not be exposed directly:
 
 ```bash
 cp deploy/public-access/cloudflare-tunnel/config.yml ./cloudflared-config.yml
@@ -238,7 +250,7 @@ cp deploy/public-access/cloudflare-tunnel/config.yml ./cloudflared-config.yml
 cloudflared tunnel run --config ./cloudflared-config.yml
 ```
 
-The tunnel template forwards the public HTTPS hostname to local `http://127.0.0.1:8080` and ends with `http_status:404` for unmatched hosts. Even with a tunnel, keep dataplane `9090/9091`, or your custom dataplane ports, loopback-only or private-network-only.
+The tunnel template forwards the public HTTPS hostname to local `http://127.0.0.1:8080` and ends with `http_status:404` for unmatched hosts. Even with a tunnel, keep dataplane `9090/9091`, or custom dataplane ports, loopback-only or private-network-only.
 
 ## Hardening
 
@@ -302,7 +314,7 @@ bantime = 3600
 
 ## Troubleshooting
 
-Certificate checks:
+Certificate, anonymous WebDAV PROPFIND, and exposure checks:
 
 ```bash
 sudo certbot certificates
@@ -323,8 +335,8 @@ ss -tlnp | grep -E '80|443|8080'
 WebDAV:
 
 ```bash
-WEBDAV_USER="admin" # use a MnemoNAS username when auth_type=users
-WEBDAV_PASS="your-mnemonas-password"
+WEBDAV_USER="admin" # MnemoNAS username when auth_type=users
+WEBDAV_PASS="<actual WebDAV password>" # Basic Auth generated passwords use the webdav_password field in /srv/mnemonas/secrets.json
 curl -u "$WEBDAV_USER:$WEBDAV_PASS" -X PROPFIND https://nas.example.com/dav/ \
   -H "Depth: 1" \
   -v

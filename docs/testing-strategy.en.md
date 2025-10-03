@@ -104,7 +104,7 @@ Quick isolated run:
 ./scripts/run-e2e-isolated.sh --quick
 ```
 
-The isolated runner starts a temporary backend, temporary storage, and non-default ports before invoking `scripts/e2e-test.sh`. The isolated root must be under `/tmp` or the current checkout and must not contain `..` or symlink path components.
+The isolated runner starts a temporary backend, temporary storage, and non-default ports before invoking `scripts/e2e-test.sh`. The isolated root must be under `/tmp` or the current checkout and must not contain control characters, `..`, or symlink path components. Playwright's isolated backend uses a 2-hour access-token lifetime and a 168-hour refresh-token lifetime to reduce shared storageState expiration risk during long parallel runs.
 
 Manual tests against an existing service must provide explicit targets:
 
@@ -117,7 +117,61 @@ INITIAL_PASSWORD_FILE=/tmp/mnemonas-e2e-initial-password.txt \
 ./scripts/e2e-test.sh
 ```
 
-Manual `STORAGE_ROOT` values must be absolute paths, must not contain `..` or symlink path components, and are limited to `/tmp` or the current checkout by default.
+Manual `STORAGE_ROOT` values must be absolute paths, must not contain control characters, `..`, or symlink path components, and are limited to `/tmp` or the current checkout by default.
+
+When a manual check needs the initial administrator password, parse the full value after the `Password:` prefix, for example:
+
+```bash
+password=$(sed -n 's/^Password:[[:space:]]*//p' "$INITIAL_PASSWORD_FILE" | head -n1)
+```
+
+Manual login payloads should be produced with a JSON encoder rather than string interpolation, for example:
+
+```bash
+login_payload=$(PASSWORD="$password" python3 - <<'PY'
+import json
+import os
+
+print(json.dumps({"username": "admin", "password": os.environ["PASSWORD"]}))
+PY
+)
+```
+
+Example first-start scenario:
+
+```bash
+test_fresh_install_auth_enabled() {
+    TEST_HOME="$(mktemp -d)"
+    trap 'rm -rf -- "$TEST_HOME"' EXIT
+    export HOME="$TEST_HOME"
+
+    mkdir -p ~/.mnemonas
+    cat > ~/.mnemonas/config.toml <<'TOML'
+[auth]
+enabled = true
+TOML
+    ./bin/nasd &
+    sleep 2
+
+    [ -f ~/.mnemonas/.mnemonas/initial-password.txt ] || fail "Password file not created"
+
+    password=$(sed -n 's/^Password:[[:space:]]*//p' ~/.mnemonas/.mnemonas/initial-password.txt | head -n1)
+    login_payload=$(PASSWORD="$password" python3 - <<'PY'
+import json
+import os
+
+print(json.dumps({"username": "admin", "password": os.environ["PASSWORD"]}))
+PY
+)
+    response=$(curl -s -X POST http://localhost:8080/api/v1/auth/login \
+        -H "Content-Type: application/json" \
+        -d "$login_payload")
+
+    echo "$response" | grep -q '"success":true' || fail "Login failed"
+
+    [ ! -f ~/.mnemonas/.mnemonas/initial-password.txt ] || fail "Password file not deleted after login"
+}
+```
 
 E2E groups:
 
@@ -242,10 +296,11 @@ Safety gates:
 
 - `BASE_URL`, `STORAGE_ROOT`, and `NASD_BIN` must be explicit.
 - Default allowed storage roots are `/tmp` or the current checkout.
-- `STORAGE_ROOT` must be absolute and must not contain `..` or symlink path components.
+- `STORAGE_ROOT` must be absolute and must not contain control characters, `..`, or symlink path components.
 - `$HOME/.mnemonas` is rejected by default.
 - Non-interactive runs require `FAULT_INJECTION_ASSUME_YES=1`.
 - Real storage paths require `ALLOW_REAL_STORAGE=1`, must still be absolute, and must not point at protected system directories such as `/`, `/tmp`, or `/var`.
+- `OBJECTS_DIR` and `INDEX_DB`, which may be read or modified by the destructive checks, must be under `STORAGE_ROOT`.
 
 These gates are tested by `scripts/test-fault-injection-safety.sh` and included in `make scripts-check`.
 
@@ -324,6 +379,14 @@ For bug fixes:
 - Regression test fails before the fix.
 - Related edge cases checked.
 - E2E or integration coverage added if user-facing.
+
+Before committing:
+
+- Unit tests pass.
+- E2E tests pass when the workflow is user-visible.
+- Visual regression has no unexpected changes.
+- TypeScript and ESLint checks pass for frontend changes.
+- `make docs-check` passes so local documentation links, heading anchors, Chinese/English pairs for entry documents and `docs/`, and documentation-index entries remain valid.
 
 ## References
 

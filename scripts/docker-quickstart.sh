@@ -115,14 +115,15 @@ value_has_line_break() {
 	[[ "$value" == *$'\n'* || "$value" == *$'\r'* ]]
 }
 
-require_no_line_breaks() {
+require_no_control_characters() {
 	local value="$1"
 	local label="$2"
 	! value_has_line_break "$value" || fail "$label cannot contain newline characters"
+	[[ "$value" != *[[:cntrl:]]* ]] || fail "$label cannot contain control characters"
 }
 
 require_absolute_data_dir() {
-	require_no_line_breaks "$DATA_DIR" "--data-dir"
+	require_no_control_characters "$DATA_DIR" "--data-dir"
 	case "$DATA_DIR" in
 		/*) ;;
 		*) fail "--data-dir must be an absolute path because Docker Compose does not expand relative volume roots: $DATA_DIR" ;;
@@ -143,12 +144,21 @@ require_safe_data_dir() {
 }
 
 require_safe_env_path() {
+	local env_parent
+
 	[[ -n "$ENV_PATH" ]] || fail "--env cannot be empty"
-	require_no_line_breaks "$ENV_PATH" "--env"
+	require_no_control_characters "$ENV_PATH" "--env"
 	! path_has_parent_segment "$ENV_PATH" || fail "--env cannot contain parent directory segments: $ENV_PATH"
 	[[ ! -d "$ENV_PATH" ]] || fail "--env must point at a file, not a directory: $ENV_PATH"
 	[[ ! -L "$ENV_PATH" ]] || fail "--env must not be a symlink: $ENV_PATH"
 	require_no_symlink_components "$ENV_PATH" "--env"
+	env_parent="${ENV_PATH%/*}"
+	if [[ "$env_parent" == "$ENV_PATH" ]]; then
+		env_parent="."
+	elif [[ -z "$env_parent" ]]; then
+		env_parent="/"
+	fi
+	[[ -d "$env_parent" ]] || fail "--env parent directory does not exist: $env_parent"
 
 	if [[ "$ENV_PATH" == /* ]]; then
 		local env_path
@@ -249,7 +259,7 @@ write_env_value() {
 	local file="$3"
 	local tmp
 
-	require_no_line_breaks "$2" "$key"
+	require_no_control_characters "$2" "$key"
 	value="$(env_assignment_value "$2")"
 	tmp="$(mktemp -t mnemonas-env.XXXXXX)"
 	awk -v key="$key" -v value="$value" '

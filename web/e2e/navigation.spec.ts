@@ -2,18 +2,20 @@ import { test, expect, type Page } from '@playwright/test'
 import { ensureAuthenticatedAt } from './helpers/auth-check'
 
 async function openSidebarIfNeeded(page: Page): Promise<void> {
+  const sidebar = page.getByTestId('app-sidebar-shell')
   const menuButton = page.getByRole('button', { name: '打开导航菜单' })
   if (await menuButton.isVisible({ timeout: 1000 }).catch(() => false)) {
     await menuButton.click()
-    await page.waitForTimeout(300)
+    await expect(sidebar).toHaveClass(/(^|\s)translate-x-0(\s|$)/, { timeout: 5000 })
   }
+  await expect(sidebar).toBeVisible({ timeout: 5000 })
 }
 
 async function navigateToSearchFromSidebar(page: Page): Promise<void> {
   await openSidebarIfNeeded(page)
   const searchLink = page.getByTestId('app-sidebar-shell').getByRole('link', { name: /搜索|Search/i })
-  await expect(searchLink).toBeVisible({ timeout: 2000 })
-  await searchLink.dispatchEvent('click')
+  await expect(searchLink).toBeVisible({ timeout: 5000 })
+  await searchLink.click()
   await expect(page).toHaveURL(/\/search/)
 }
 

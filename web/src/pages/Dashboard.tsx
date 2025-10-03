@@ -28,9 +28,9 @@ import {
 import { useNavigate } from 'react-router-dom'
 import { ApiError as FilesApiError, getAppVersion, getHealth, getStorageStats, listBackupJobs, type BackupJob } from '@/api/files'
 import { ApiError as ActivityApiError, listActivity, getActionLabel, getActionColor, type ActionType, type ActivityEntry } from '@/api/activity'
-import { formatBytes, cn, formatRelativeTime } from '@/lib/utils'
+import { formatBytes, cn, formatRelativeTime, formatUptimeSeconds } from '@/lib/utils'
 import { areDiskStatsAvailable, clampUsagePercent, formatUsagePercent, getDiskSpaceStatus } from '@/lib/storageStats'
-import { resolveUserHomeScope } from '@/lib/userScope'
+import { getInvalidHomeDirDescription, invalidHomeDirTitle, resolveUserHomeScope } from '@/lib/userScope'
 import { PageHeader } from '@/components/ui/PageHeader'
 import { useIsAdmin, useUser } from '@/stores/auth'
 
@@ -275,30 +275,32 @@ export function DashboardPage() {
   
   const { data: health, isLoading: healthLoading, error: healthError, refetch: refetchHealth } = useQuery({
     queryKey: ['health'],
-    queryFn: getHealth,
+    queryFn: ({ signal }) => getHealth({ signal }),
     refetchInterval: 30000,
   })
 
   const { data: stats, isLoading: statsLoading, error: statsError, refetch: refetchStats } = useQuery({
     queryKey: ['stats', authScopeKey, isAdmin, homeScopeKey],
-    queryFn: getStorageStats,
+    queryFn: ({ signal }) => getStorageStats({ signal }),
+    enabled: !hasInvalidHomeDir,
     refetchInterval: 30000,
   })
 
   const { data: appVersion, isLoading: versionLoading, error: versionError, refetch: refetchVersion } = useQuery({
     queryKey: ['app-version'],
-    queryFn: getAppVersion,
+    queryFn: ({ signal }) => getAppVersion({ signal }),
     staleTime: 5 * 60 * 1000,
   })
 
   const { data: recentActivity, error: recentActivityError, refetch: refetchRecentActivity } = useQuery({
     queryKey: ['recent-activity', authScopeKey, isAdmin, homeScopeKey],
-    queryFn: () => listActivity({ limit: 5 }),
+    queryFn: ({ signal }) => listActivity({ limit: 5, signal }),
+    enabled: !hasInvalidHomeDir,
     refetchInterval: 30000,
   })
   const { data: backupJobs, isLoading: backupLoading, error: backupError, refetch: refetchBackupJobs } = useQuery({
     queryKey: ['dashboard-backup-jobs', authScopeKey],
-    queryFn: listBackupJobs,
+    queryFn: ({ signal }) => listBackupJobs({ signal }),
     enabled: isAdmin,
     refetchInterval: 60000,
   })
@@ -407,7 +409,7 @@ export function DashboardPage() {
     },
     {
       title: '运行时间',
-      value: health?.uptime ?? '--',
+      value: health?.uptimeSecs !== undefined ? formatUptimeSeconds(health.uptimeSecs) : health?.uptime ?? '--',
       icon: Clock,
       trend: health ? '稳定运行' : '状态未知',
     },
@@ -474,6 +476,18 @@ export function DashboardPage() {
             >
               重新加载
             </Button>
+          </CardBody>
+        </Card>
+      )}
+
+      {hasInvalidHomeDir && (
+        <Card className="border-warning/30 bg-warning/5 shadow-none">
+          <CardBody className="flex items-start gap-3">
+            <AlertCircle size={18} className="mt-0.5 shrink-0 text-warning" />
+            <div>
+              <p className="text-sm font-medium text-foreground">{invalidHomeDirTitle}</p>
+              <p className="text-xs text-default-600">{getInvalidHomeDirDescription('查看空间和最近操作')}</p>
+            </div>
           </CardBody>
         </Card>
       )}

@@ -7,6 +7,7 @@ import {
   openUrlInNewTab,
   formatDate, 
   formatDuration,
+  formatUptimeSeconds,
   formatRelativeTime,
   sanitizeFilename,
   normalizePath,
@@ -14,6 +15,7 @@ import {
   isValidWebDAVPrefix,
   webDAVPrefixOverlapsReservedRoute,
   formatWebDAVUrl,
+  ensureZipExtension,
   getFilenameFromContentDisposition,
   encodePathForUrl,
   decodePathFromUrl,
@@ -196,6 +198,25 @@ describe('formatDuration', () => {
   })
 })
 
+describe('formatUptimeSeconds', () => {
+  it('formats second and minute level uptime', () => {
+    expect(formatUptimeSeconds(0)).toBe('0 秒')
+    expect(formatUptimeSeconds(59.9)).toBe('59 秒')
+    expect(formatUptimeSeconds(90)).toBe('1 分 30 秒')
+  })
+
+  it('formats hour and day level uptime', () => {
+    expect(formatUptimeSeconds(5400)).toBe('1 小时 30 分钟')
+    expect(formatUptimeSeconds(86400)).toBe('1 天')
+    expect(formatUptimeSeconds(90000)).toBe('1 天 1 小时')
+  })
+
+  it('falls back for unknown uptime values', () => {
+    expect(formatUptimeSeconds(undefined)).toBe('--')
+    expect(formatUptimeSeconds(Number.NaN)).toBe('--')
+  })
+})
+
 describe('formatRelativeTime', () => {
   it('formats recent and older timestamps relative to now', () => {
     vi.useFakeTimers()
@@ -268,6 +289,25 @@ describe('getFilenameFromContentDisposition', () => {
   })
 })
 
+describe('ensureZipExtension', () => {
+  it('adds a zip extension only when it is missing', () => {
+    expect(ensureZipExtension('docs')).toBe('docs.zip')
+    expect(ensureZipExtension('backups.zip')).toBe('backups.zip')
+    expect(ensureZipExtension('BACKUPS.ZIP')).toBe('BACKUPS.ZIP')
+  })
+
+  it('normalizes surrounding whitespace and trailing dots before adding the zip extension', () => {
+    expect(ensureZipExtension(' family photos ')).toBe('family photos.zip')
+    expect(ensureZipExtension('family photos.zip ')).toBe('family photos.zip')
+    expect(ensureZipExtension('export.')).toBe('export.zip')
+  })
+
+  it('uses a stable archive fallback for blank filenames', () => {
+    expect(ensureZipExtension('')).toBe('download.zip')
+    expect(ensureZipExtension('   ')).toBe('download.zip')
+  })
+})
+
 describe('normalizePath', () => {
   it('ensures path starts with /', () => {
     expect(normalizePath('path/to/file')).toBe('/path/to/file')
@@ -288,10 +328,16 @@ describe('normalizePath', () => {
 
   it('throws on path traversal attempts', () => {
     expect(() => normalizePath('/../etc/passwd')).toThrow('非法路径')
+    expect(() => normalizePath('//../etc/passwd')).toThrow('非法路径')
+    expect(() => normalizePath('/safe\\..\\secret.txt')).toThrow('非法路径')
   })
 
   it('throws on null byte paths instead of silently rewriting them', () => {
     expect(() => normalizePath('/docs/report\0.pdf')).toThrow('非法路径')
+  })
+
+  it('normalizes backslashes as path separators', () => {
+    expect(normalizePath('docs\\report.txt')).toBe('/docs/report.txt')
   })
 })
 

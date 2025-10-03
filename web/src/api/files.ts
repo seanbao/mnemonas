@@ -1,5 +1,8 @@
 import type { FileItem } from '@/stores/files'
-import { sanitizeFilename, normalizePath, encodePathForUrl, getFilenameFromContentDisposition } from '@/lib/utils'
+import { readDownloadJsonErrorDetails, triggerBrowserDownload } from '@/lib/downloadResponse'
+import { INVALID_API_RESPONSE_MESSAGE } from '@/lib/apiMessages'
+import { readStructuredJsonErrorDetails } from '@/lib/jsonErrorResponse'
+import { ensureZipExtension, sanitizeFilename, normalizePath, encodePathForUrl, getFilenameFromContentDisposition } from '@/lib/utils'
 import { authFetch, refreshAuthSession } from './auth'
 
 export type { FileItem }
@@ -12,6 +15,19 @@ export const MAX_UPLOAD_FILE_SIZE_LABEL = '10 GB'
 export interface FileListResponse {
   files: FileItem[]
   path: string
+  capabilities?: FileItem['capabilities']
+}
+
+export interface ListFilesOptions {
+  signal?: AbortSignal
+}
+
+export interface RequestOptions {
+  signal?: AbortSignal
+}
+
+export interface UploadFileOptions {
+  signal?: AbortSignal
 }
 
 export interface VersionInfo {
@@ -68,6 +84,7 @@ export interface DirectoryQuotaUsage {
 export interface HealthStatus {
   status: string
   uptime: string
+  uptimeSecs?: number
   timestamp?: string
   version?: string
   storage?: {
@@ -294,7 +311,7 @@ async function handleResponse<T>(response: Response, errorPrefix: string): Promi
   try {
     return await response.json()
   } catch {
-    throw new Error('服务器返回了无效的数据')
+    throw new Error(INVALID_API_RESPONSE_MESSAGE)
   }
 }
 
@@ -306,7 +323,7 @@ async function handleWrappedResponse<T>(response: Response, errorPrefix: string)
     body.success !== true ||
     !('data' in body)
   ) {
-    throw new Error('服务器返回了无效的数据')
+    throw new Error(INVALID_API_RESPONSE_MESSAGE)
   }
   return body.data
 }
@@ -323,12 +340,12 @@ async function expectWrappedActionResponse<T>(
     body.success !== true ||
     !('data' in body)
   ) {
-    throw new Error('服务器返回了无效的数据')
+    throw new Error(INVALID_API_RESPONSE_MESSAGE)
   }
 
   const data = body.data
   if (!isValid(data)) {
-    throw new Error('服务器返回了无效的数据')
+    throw new Error(INVALID_API_RESPONSE_MESSAGE)
   }
 
   return {
@@ -341,6 +358,11 @@ async function expectWrappedActionResponse<T>(
 async function throwApiErrorFromResponse(response: Response, fallback: string): Promise<never> {
   let message = fallback
   let code: string | undefined
+  const structuredDetails = await readStructuredJsonErrorDetails(response, fallback)
+  if (structuredDetails) {
+    throw new ApiError(structuredDetails.message, response.status, response.statusText, structuredDetails.code)
+  }
+
   try {
     const details = extractApiErrorDetails(await response.json(), fallback)
     message = details.message
@@ -350,6 +372,15 @@ async function throwApiErrorFromResponse(response: Response, fallback: string): 
   }
 
   throw new ApiError(message, response.status, response.statusText, code)
+}
+
+async function throwDownloadApiErrorFromJsonResponse(response: Response): Promise<void> {
+  const details = await readDownloadJsonErrorDetails(response, '下载文件失败')
+  if (!details) {
+    return
+  }
+
+  throw new ApiError(details.message, response.status, response.statusText, details.code)
 }
 
 function extractApiErrorDetails(body: unknown, fallback: string): {
@@ -405,6 +436,15 @@ function createApiErrorFromXhr(xhr: XMLHttpRequest, fallback: string): ApiError 
   }
 
   return new ApiError(message, xhr.status, xhr.statusText, code)
+}
+
+function createAbortError(): Error {
+  if (typeof DOMException !== 'undefined') {
+    return new DOMException('Upload aborted', 'AbortError')
+  }
+  const error = new Error('Upload aborted')
+  error.name = 'AbortError'
+  return error
 }
 
 function getActionResultFromXhr(xhr: XMLHttpRequest): ActionResult {
@@ -472,6 +512,14 @@ function normalizeAppVersion(value: BackendAppVersionInfo): AppVersionInfo {
   }
 }
 
+function isNonNegativeSafeInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
+}
+
+function isPositiveSafeInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0
+}
+
 function isPathActionShape(value: unknown): value is { path: string } {
   return isRecord(value) && typeof value.path === 'string'
 }
@@ -481,9 +529,17 @@ function isFileItemShape(value: unknown): value is FileItem {
     && typeof value.name === 'string'
     && typeof value.path === 'string'
     && typeof value.isDir === 'boolean'
-    && typeof value.size === 'number'
+    && isNonNegativeSafeInteger(value.size)
     && typeof value.modTime === 'string'
     && isStringOrUndefined(value.etag)
+    && (value.capabilities === undefined || isFileCapabilitiesShape(value.capabilities))
+}
+
+function isFileCapabilitiesShape(value: unknown): value is NonNullable<FileItem['capabilities']> {
+  return isRecord(value)
+    && typeof value.read === 'boolean'
+    && typeof value.concreteRead === 'boolean'
+    && typeof value.write === 'boolean'
 }
 
 function isFileListResponseShape(value: unknown): value is FileListResponse {
@@ -491,13 +547,14 @@ function isFileListResponseShape(value: unknown): value is FileListResponse {
     && typeof value.path === 'string'
     && Array.isArray(value.files)
     && value.files.every(isFileItemShape)
+    && (value.capabilities === undefined || isFileCapabilitiesShape(value.capabilities))
 }
 
 function isVersionInfoShape(value: unknown): value is VersionInfo {
   return isRecord(value)
-    && typeof value.version === 'number'
+    && isPositiveSafeInteger(value.version)
     && typeof value.hash === 'string'
-    && typeof value.size === 'number'
+    && isNonNegativeSafeInteger(value.size)
     && typeof value.timestamp === 'string'
 }
 
@@ -506,6 +563,41 @@ function isVersionsResponseShape(value: unknown): value is { path: string, versi
     && typeof value.path === 'string'
     && Array.isArray(value.versions)
     && value.versions.every(isVersionInfoShape)
+}
+
+function isNonNegativeSafeIntegerOrUndefined(value: unknown): value is number | undefined {
+  return value === undefined || isNonNegativeSafeInteger(value)
+}
+
+function isNonNegativeFiniteNumber(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0
+}
+
+function isFiniteNumberOrUndefined(value: unknown): value is number | undefined {
+  return value === undefined || (typeof value === 'number' && Number.isFinite(value))
+}
+
+function getUploadProgressPercent(event: ProgressEvent): number | null {
+  if (!event.lengthComputable || !Number.isFinite(event.loaded) || !Number.isFinite(event.total) || event.total <= 0) {
+    return null
+  }
+  return Math.min(100, Math.max(0, (event.loaded / event.total) * 100))
+}
+
+function isNonNegativeFiniteNumberOrUndefined(value: unknown): value is number | undefined {
+  return value === undefined || isNonNegativeFiniteNumber(value)
+}
+
+function isPercentageOrUndefined(value: unknown): value is number | undefined {
+  return value === undefined || (isNonNegativeFiniteNumber(value) && value <= 100)
+}
+
+function isRatioOrUndefined(value: unknown): value is number | undefined {
+  return value === undefined || (isNonNegativeFiniteNumber(value) && value <= 1)
+}
+
+function isFiniteRatio(value: unknown): value is number {
+  return isNonNegativeFiniteNumber(value) && value <= 1
 }
 
 function isStorageStatsShape(value: unknown): value is {
@@ -539,20 +631,20 @@ function isStorageStatsShape(value: unknown): value is {
   }[]
 } {
   return isRecord(value)
-    && isNumberOrUndefined(value.total_files)
+    && isNonNegativeSafeIntegerOrUndefined(value.total_files)
     && isBooleanOrUndefined(value.total_files_available)
     && isBooleanOrUndefined(value.storage_stats_available)
     && isBooleanOrUndefined(value.disk_stats_available)
     && isBooleanOrUndefined(value.directory_quota_stats_available)
-    && isNumberOrUndefined(value.total_size)
-    && isNumberOrUndefined(value.total_chunks)
-    && isNumberOrUndefined(value.unique_size)
-    && isNumberOrUndefined(value.dedup_ratio)
-    && isNumberOrUndefined(value.disk_total)
-    && isNumberOrUndefined(value.disk_free)
-    && isNumberOrUndefined(value.disk_available)
-    && isNumberOrUndefined(value.disk_used)
-    && isNumberOrUndefined(value.disk_usage_ratio)
+    && isNonNegativeSafeIntegerOrUndefined(value.total_size)
+    && isNonNegativeSafeIntegerOrUndefined(value.total_chunks)
+    && isNonNegativeSafeIntegerOrUndefined(value.unique_size)
+    && isNonNegativeFiniteNumberOrUndefined(value.dedup_ratio)
+    && isNonNegativeSafeIntegerOrUndefined(value.disk_total)
+    && isNonNegativeSafeIntegerOrUndefined(value.disk_free)
+    && isNonNegativeSafeIntegerOrUndefined(value.disk_available)
+    && isNonNegativeSafeIntegerOrUndefined(value.disk_used)
+    && isRatioOrUndefined(value.disk_usage_ratio)
     && isStringOrUndefined(value.disk_filesystem_type)
     && isStringOrUndefined(value.disk_mount_point)
     && isStringOrUndefined(value.disk_mount_source)
@@ -572,10 +664,10 @@ function isDirectoryQuotaUsageShape(value: unknown): value is {
 } {
   return isRecord(value)
     && typeof value.path === 'string'
-    && typeof value.quota_bytes === 'number'
-    && typeof value.used_bytes === 'number'
-    && typeof value.available_bytes === 'number'
-    && typeof value.usage_ratio === 'number'
+    && isNonNegativeSafeInteger(value.quota_bytes)
+    && isNonNegativeSafeInteger(value.used_bytes)
+    && isNonNegativeSafeInteger(value.available_bytes)
+    && isNonNegativeFiniteNumber(value.usage_ratio)
     && typeof value.exists === 'boolean'
     && isDirectoryQuotaUsageStatus(value.status)
 }
@@ -619,7 +711,7 @@ function isTrashItemShape(value: unknown): value is {
     && typeof value.deletedAt === 'string'
     && typeof value.name === 'string'
     && typeof value.isDir === 'boolean'
-    && typeof value.size === 'number'
+    && isNonNegativeSafeInteger(value.size)
     && isStringOrUndefined(value.hash)
     && isBooleanOrUndefined(value.hadVersions)
 }
@@ -644,26 +736,27 @@ function isTrashListResponseShape(value: unknown): value is {
   return isRecord(value)
     && Array.isArray(value.items)
     && value.items.every(isTrashItemShape)
-    && isNumberOrUndefined(value.count)
-    && isNumberOrUndefined(value.totalSize)
-    && isNumberOrUndefined(value.retentionDays)
+    && isNonNegativeSafeIntegerOrUndefined(value.count)
+    && (value.count === undefined || value.count >= value.items.length)
+    && isNonNegativeSafeIntegerOrUndefined(value.totalSize)
+    && isNonNegativeSafeIntegerOrUndefined(value.retentionDays)
     && isBooleanOrUndefined(value.retentionEnabled)
-    && isNumberOrUndefined(value.retentionMaxSize)
+    && isNonNegativeSafeIntegerOrUndefined(value.retentionMaxSize)
 }
 
 function isEmptyTrashResultShape(value: unknown): value is { deleted_count: number; partial?: boolean; warning?: boolean } {
   return isRecord(value)
-    && typeof value.deleted_count === 'number'
+    && isNonNegativeSafeInteger(value.deleted_count)
     && isBooleanOrUndefined(value.partial)
     && isBooleanOrUndefined(value.warning)
 }
 
-function isHealthShape(value: unknown): value is HealthStatus {
+function isHealthShape(value: unknown): value is HealthStatus & { uptime_secs?: number } {
   if (!isRecord(value) || typeof value.status !== 'string' || typeof value.uptime !== 'string') {
     return false
   }
 
-  if (!isStringOrUndefined(value.timestamp) || !isStringOrUndefined(value.version)) {
+  if (!isNonNegativeSafeIntegerOrUndefined(value.uptime_secs) || !isStringOrUndefined(value.timestamp) || !isStringOrUndefined(value.version)) {
     return false
   }
 
@@ -679,7 +772,7 @@ function isHealthShape(value: unknown): value is HealthStatus {
     if (!isRecord(value.dataplane)
       || !isBooleanOrUndefined(value.dataplane.healthy)
       || !isStringOrUndefined(value.dataplane.version)
-      || !isNumberOrUndefined(value.dataplane.uptime)) {
+      || !isNonNegativeSafeIntegerOrUndefined(value.dataplane.uptime)) {
       return false
     }
   }
@@ -719,17 +812,17 @@ function isDiskHealthDeviceShape(value: unknown): value is {
     && typeof value.present === 'boolean'
     && typeof value.smart_available === 'boolean'
     && isBooleanOrUndefined(value.smart_passed)
-    && isNumberOrUndefined(value.temperature_c)
-    && isNumberOrUndefined(value.power_on_hours)
-    && isNumberOrUndefined(value.wear_percent_used)
-    && isNumberOrUndefined(value.available_spare_percent)
-    && isNumberOrUndefined(value.available_spare_threshold_percent)
-    && isNumberOrUndefined(value.media_errors)
-    && isNumberOrUndefined(value.nvme_critical_warning)
+    && isFiniteNumberOrUndefined(value.temperature_c)
+    && isNonNegativeSafeIntegerOrUndefined(value.power_on_hours)
+    && isNonNegativeFiniteNumberOrUndefined(value.wear_percent_used)
+    && isPercentageOrUndefined(value.available_spare_percent)
+    && isPercentageOrUndefined(value.available_spare_threshold_percent)
+    && isNonNegativeSafeIntegerOrUndefined(value.media_errors)
+    && isNonNegativeSafeIntegerOrUndefined(value.nvme_critical_warning)
     && typeof value.status === 'string'
     && isStringOrUndefined(value.message)
-    && isNumberOrUndefined(value.temperature_warning_c)
-    && isNumberOrUndefined(value.temperature_critical_c)
+    && isFiniteNumberOrUndefined(value.temperature_warning_c)
+    && isFiniteNumberOrUndefined(value.temperature_critical_c)
 }
 
 function isDiskHealthReportShape(value: unknown): value is {
@@ -773,10 +866,6 @@ function isDiskHealthReportShape(value: unknown): value is {
 
 function isBooleanOrUndefined(value: unknown): value is boolean | undefined {
   return value === undefined || typeof value === 'boolean'
-}
-
-function isNumberOrUndefined(value: unknown): value is number | undefined {
-  return value === undefined || typeof value === 'number'
 }
 
 function isStringOrUndefined(value: unknown): value is string | undefined {
@@ -896,7 +985,7 @@ function isDiagnosticsShape(value: unknown): value is {
     return false
   }
 
-  if (!isNumberOrUndefined(value.uptime_secs) || !isNumberOrUndefined(value.goroutines)) {
+  if (!isNonNegativeSafeIntegerOrUndefined(value.uptime_secs) || !isNonNegativeSafeIntegerOrUndefined(value.goroutines)) {
     return false
   }
 
@@ -916,10 +1005,10 @@ function isDiagnosticsShape(value: unknown): value is {
 
   if (value.memory !== undefined) {
     if (!isRecord(value.memory)
-      || !isNumberOrUndefined(value.memory.alloc_mb)
-      || !isNumberOrUndefined(value.memory.total_alloc_mb)
-      || !isNumberOrUndefined(value.memory.sys_mb)
-      || !isNumberOrUndefined(value.memory.num_gc)) {
+      || !isNonNegativeSafeIntegerOrUndefined(value.memory.alloc_mb)
+      || !isNonNegativeSafeIntegerOrUndefined(value.memory.total_alloc_mb)
+      || !isNonNegativeSafeIntegerOrUndefined(value.memory.sys_mb)
+      || !isNonNegativeSafeIntegerOrUndefined(value.memory.num_gc)) {
       return false
     }
   }
@@ -927,14 +1016,14 @@ function isDiagnosticsShape(value: unknown): value is {
   if (value.filesystem !== undefined) {
     if (!isRecord(value.filesystem)
       || !isBooleanOrUndefined(value.filesystem.trash_stats_available)
-      || !isNumberOrUndefined(value.filesystem.trash_items)
-      || !isNumberOrUndefined(value.filesystem.trash_size)
+      || !isNonNegativeSafeIntegerOrUndefined(value.filesystem.trash_items)
+      || !isNonNegativeSafeIntegerOrUndefined(value.filesystem.trash_size)
       || !isBooleanOrUndefined(value.filesystem.disk_stats_available)
-      || !isNumberOrUndefined(value.filesystem.disk_total)
-      || !isNumberOrUndefined(value.filesystem.disk_free)
-      || !isNumberOrUndefined(value.filesystem.disk_available)
-      || !isNumberOrUndefined(value.filesystem.disk_used)
-      || !isNumberOrUndefined(value.filesystem.disk_usage_ratio)
+      || !isNonNegativeSafeIntegerOrUndefined(value.filesystem.disk_total)
+      || !isNonNegativeSafeIntegerOrUndefined(value.filesystem.disk_free)
+      || !isNonNegativeSafeIntegerOrUndefined(value.filesystem.disk_available)
+      || !isNonNegativeSafeIntegerOrUndefined(value.filesystem.disk_used)
+      || !isRatioOrUndefined(value.filesystem.disk_usage_ratio)
       || !isStringOrUndefined(value.filesystem.disk_filesystem_type)
       || !isStringOrUndefined(value.filesystem.disk_mount_point)
       || !isStringOrUndefined(value.filesystem.disk_mount_source)
@@ -949,9 +1038,9 @@ function isDiagnosticsShape(value: unknown): value is {
       || !isBooleanOrUndefined(value.alerts.enabled)
       || !isBooleanOrUndefined(value.alerts.runtime_available)
       || !isStringOrUndefined(value.alerts.check_interval)
-      || !isNumberOrUndefined(value.alerts.threshold_pct)
-      || !isNumberOrUndefined(value.alerts.critical_pct)
-      || !isNumberOrUndefined(value.alerts.min_free_bytes)
+      || !isPercentageOrUndefined(value.alerts.threshold_pct)
+      || !isPercentageOrUndefined(value.alerts.critical_pct)
+      || !isNonNegativeSafeIntegerOrUndefined(value.alerts.min_free_bytes)
       || !isStringOrUndefined(value.alerts.cooldown_period)
       || !isBooleanOrUndefined(value.alerts.webhook_configured)
       || !isBooleanOrUndefined(value.alerts.telegram_configured)
@@ -959,8 +1048,8 @@ function isDiagnosticsShape(value: unknown): value is {
       || !isStringOrUndefined(value.alerts.webhook_method)
       || !isStringOrUndefined(value.alerts.last_level)
       || !isStringOrUndefined(value.alerts.last_checked_at)
-      || !isNumberOrUndefined(value.alerts.last_used_pct)
-      || !isNumberOrUndefined(value.alerts.last_free_bytes)) {
+      || !isPercentageOrUndefined(value.alerts.last_used_pct)
+      || !isNonNegativeSafeIntegerOrUndefined(value.alerts.last_free_bytes)) {
       return false
     }
   }
@@ -971,10 +1060,10 @@ function isDiagnosticsShape(value: unknown): value is {
       || !isBooleanOrUndefined(value.maintenance.scrub_schedule_enabled)
       || !isStringOrUndefined(value.maintenance.scrub_schedule_interval)
       || !isStringOrUndefined(value.maintenance.scrub_retry_interval)
-      || !isNumberOrUndefined(value.maintenance.scrub_max_retries)
+      || !isNonNegativeSafeIntegerOrUndefined(value.maintenance.scrub_max_retries)
       || !isStringOrUndefined(value.maintenance.last_scrub_status)
       || !isStringOrUndefined(value.maintenance.last_scrub_at)
-      || !isNumberOrUndefined(value.maintenance.scrub_failure_retries)) {
+      || !isNonNegativeSafeIntegerOrUndefined(value.maintenance.scrub_failure_retries)) {
       return false
     }
   }
@@ -986,18 +1075,18 @@ function isDiagnosticsShape(value: unknown): value is {
       || !isStringOrUndefined(value.disk_health.check_interval)
       || !isStringOrUndefined(value.disk_health.probe_timeout)
       || !isStringOrUndefined(value.disk_health.cooldown_period)
-      || !isNumberOrUndefined(value.disk_health.temperature_warning_c)
-      || !isNumberOrUndefined(value.disk_health.temperature_critical_c)
-      || !isNumberOrUndefined(value.disk_health.media_wear_warning_percent)
-      || !isNumberOrUndefined(value.disk_health.media_wear_critical_percent)
-      || !isNumberOrUndefined(value.disk_health.device_count)
+      || !isFiniteNumberOrUndefined(value.disk_health.temperature_warning_c)
+      || !isFiniteNumberOrUndefined(value.disk_health.temperature_critical_c)
+      || !isPercentageOrUndefined(value.disk_health.media_wear_warning_percent)
+      || !isPercentageOrUndefined(value.disk_health.media_wear_critical_percent)
+      || !isNonNegativeSafeIntegerOrUndefined(value.disk_health.device_count)
       || !isStringOrUndefined(value.disk_health.last_status)
       || !isStringOrUndefined(value.disk_health.last_checked_at)
-      || !isNumberOrUndefined(value.disk_health.last_warning_count)
-      || !isNumberOrUndefined(value.disk_health.last_device_count)
-      || !isNumberOrUndefined(value.disk_health.last_critical_devices)
-      || !isNumberOrUndefined(value.disk_health.last_warning_devices)
-      || !isNumberOrUndefined(value.disk_health.last_unavailable_devices)) {
+      || !isNonNegativeSafeIntegerOrUndefined(value.disk_health.last_warning_count)
+      || !isNonNegativeSafeIntegerOrUndefined(value.disk_health.last_device_count)
+      || !isNonNegativeSafeIntegerOrUndefined(value.disk_health.last_critical_devices)
+      || !isNonNegativeSafeIntegerOrUndefined(value.disk_health.last_warning_devices)
+      || !isNonNegativeSafeIntegerOrUndefined(value.disk_health.last_unavailable_devices)) {
       return false
     }
   }
@@ -1011,7 +1100,7 @@ function isDiagnosticsShape(value: unknown): value is {
       || !isStringOrUndefined(value.smb.server_name)
       || !isBooleanOrUndefined(value.smb.signing_required)
       || !isBooleanOrUndefined(value.smb.encryption_required)
-      || !isNumberOrUndefined(value.smb.share_count)
+      || !isNonNegativeSafeIntegerOrUndefined(value.smb.share_count)
       || !isBooleanOrUndefined(value.smb.credentials_ready)
       || !isBooleanOrUndefined(value.smb.gateway_configured)
       || !isStringOrUndefined(value.smb.message)) {
@@ -1021,10 +1110,10 @@ function isDiagnosticsShape(value: unknown): value is {
 
   if (value.storage !== undefined) {
     if (!isRecord(value.storage)
-      || !isNumberOrUndefined(value.storage.total_chunks)
-      || !isNumberOrUndefined(value.storage.total_size)
-      || !isNumberOrUndefined(value.storage.unique_size)
-      || !isNumberOrUndefined(value.storage.dedup_ratio)) {
+      || !isNonNegativeSafeIntegerOrUndefined(value.storage.total_chunks)
+      || !isNonNegativeSafeIntegerOrUndefined(value.storage.total_size)
+      || !isNonNegativeSafeIntegerOrUndefined(value.storage.unique_size)
+      || !isNonNegativeFiniteNumberOrUndefined(value.storage.dedup_ratio)) {
       return false
     }
   }
@@ -1033,7 +1122,7 @@ function isDiagnosticsShape(value: unknown): value is {
     if (!isRecord(value.dataplane)
       || !isBooleanOrUndefined(value.dataplane.healthy)
       || !isStringOrUndefined(value.dataplane.version)
-      || !isNumberOrUndefined(value.dataplane.uptime_sec)) {
+      || !isNonNegativeSafeIntegerOrUndefined(value.dataplane.uptime_sec)) {
       return false
     }
   }
@@ -1078,7 +1167,7 @@ function isScrubResultShape(value: unknown): value is ScrubResult {
     'duration_ms',
   ] as const
   for (const key of numericKeys) {
-    if (value[key] !== undefined && typeof value[key] !== 'number') {
+    if (value[key] !== undefined && !isNonNegativeSafeInteger(value[key])) {
       return false
     }
   }
@@ -1221,6 +1310,8 @@ export interface BackupRestoreVerifyResult {
   duration_ms: number
   source: string
   destination: string
+  snapshot_path?: string
+  manifest_path?: string
   target_path: string
   file_count: number
   verified_bytes: number
@@ -1347,6 +1438,8 @@ export interface BackupJob {
   restore_drill_history?: BackupRestoreDrillResult[]
   last_restore?: BackupRestoreResult
   last_restore_verify?: BackupRestoreVerifyResult
+  last_matching_restore_verify?: BackupRestoreVerifyResult
+  restore_report_findings?: string[]
   restore_history?: BackupRestoreResult[]
   last_retention_check?: BackupRetentionCheckResult
 }
@@ -1382,18 +1475,18 @@ function isBackupRunResultShape(value: unknown): value is BackupRunResult {
     && isBackupStatus(value.status)
     && typeof value.started_at === 'string'
     && isStringOrUndefined(value.finished_at)
-    && typeof value.duration_ms === 'number'
+    && isNonNegativeSafeInteger(value.duration_ms)
     && typeof value.source === 'string'
     && typeof value.destination === 'string'
     && isStringOrUndefined(value.snapshot_path)
     && isStringOrUndefined(value.manifest_path)
-    && typeof value.file_count === 'number'
-    && typeof value.total_bytes === 'number'
+    && isNonNegativeSafeInteger(value.file_count)
+    && isNonNegativeSafeInteger(value.total_bytes)
     && typeof value.config_included === 'boolean'
     && isStringOrUndefined(value.trigger)
     && isBooleanOrUndefined(value.warning)
     && (value.warnings === undefined || (Array.isArray(value.warnings) && value.warnings.every((entry) => typeof entry === 'string')))
-    && isNumberOrUndefined(value.pruned_snapshots)
+    && isNonNegativeSafeIntegerOrUndefined(value.pruned_snapshots)
     && isStringOrUndefined(value.error_message)
 }
 
@@ -1404,25 +1497,25 @@ function isBackupRestoreDrillResultShape(value: unknown): value is BackupRestore
     && isBackupStatus(value.status)
     && typeof value.started_at === 'string'
     && isStringOrUndefined(value.finished_at)
-    && typeof value.duration_ms === 'number'
+    && isNonNegativeSafeInteger(value.duration_ms)
     && isStringOrUndefined(value.snapshot_path)
     && isStringOrUndefined(value.manifest_path)
     && isStringOrUndefined(value.restored_path)
     && typeof value.artifact_kept === 'boolean'
-    && typeof value.file_count === 'number'
-    && typeof value.verified_bytes === 'number'
+    && isNonNegativeSafeInteger(value.file_count)
+    && isNonNegativeSafeInteger(value.verified_bytes)
     && isStringOrUndefined(value.error_message)
     && isStringOrUndefined(value.failure_category)
 }
 
 function isBackupRestoreDrillStatsShape(value: unknown): value is BackupRestoreDrillStats {
   return isRecord(value)
-    && typeof value.total_runs === 'number'
-    && typeof value.successful_runs === 'number'
-    && typeof value.failed_runs === 'number'
-    && typeof value.success_rate === 'number'
-    && isNumberOrUndefined(value.consecutive_successes)
-    && isNumberOrUndefined(value.consecutive_failures)
+    && isNonNegativeSafeInteger(value.total_runs)
+    && isNonNegativeSafeInteger(value.successful_runs)
+    && isNonNegativeSafeInteger(value.failed_runs)
+    && isFiniteRatio(value.success_rate)
+    && isNonNegativeSafeIntegerOrUndefined(value.consecutive_successes)
+    && isNonNegativeSafeIntegerOrUndefined(value.consecutive_failures)
     && isStringOrUndefined(value.latest_success_at)
     && isStringOrUndefined(value.latest_failure_at)
     && isStringOrUndefined(value.last_failure_message)
@@ -1436,14 +1529,14 @@ function isBackupRestoreResultShape(value: unknown): value is BackupRestoreResul
     && isBackupStatus(value.status)
     && typeof value.started_at === 'string'
     && isStringOrUndefined(value.finished_at)
-    && typeof value.duration_ms === 'number'
+    && isNonNegativeSafeInteger(value.duration_ms)
     && isStringOrUndefined(value.snapshot_path)
     && isStringOrUndefined(value.manifest_path)
     && typeof value.target_path === 'string'
     && typeof value.config_restored === 'boolean'
     && isStringOrUndefined(value.config_path)
-    && typeof value.file_count === 'number'
-    && typeof value.verified_bytes === 'number'
+    && isNonNegativeSafeInteger(value.file_count)
+    && isNonNegativeSafeInteger(value.verified_bytes)
     && isBackupRestorePreflightChecksOrUndefined(value.preflight_checks)
     && isStringArrayOrUndefined(value.warnings)
     && isStringArrayOrUndefined(value.cutover_checklist)
@@ -1458,14 +1551,14 @@ function isBackupRestorePreviewResultShape(value: unknown): value is BackupResto
     && isBackupStatus(value.status)
     && typeof value.started_at === 'string'
     && isStringOrUndefined(value.finished_at)
-    && typeof value.duration_ms === 'number'
+    && isNonNegativeSafeInteger(value.duration_ms)
     && typeof value.source === 'string'
     && typeof value.destination === 'string'
     && isStringOrUndefined(value.snapshot_path)
     && isStringOrUndefined(value.manifest_path)
     && typeof value.target_path === 'string'
-    && typeof value.file_count === 'number'
-    && typeof value.total_bytes === 'number'
+    && isNonNegativeSafeInteger(value.file_count)
+    && isNonNegativeSafeInteger(value.total_bytes)
     && typeof value.config_available === 'boolean'
     && typeof value.config_included === 'boolean'
     && (value.sample_paths === undefined || (Array.isArray(value.sample_paths) && value.sample_paths.every((entry) => typeof entry === 'string')))
@@ -1483,12 +1576,14 @@ function isBackupRestoreVerifyResultShape(value: unknown): value is BackupRestor
     && isBackupStatus(value.status)
     && typeof value.started_at === 'string'
     && isStringOrUndefined(value.finished_at)
-    && typeof value.duration_ms === 'number'
+    && isNonNegativeSafeInteger(value.duration_ms)
     && typeof value.source === 'string'
     && typeof value.destination === 'string'
+    && isStringOrUndefined(value.snapshot_path)
+    && isStringOrUndefined(value.manifest_path)
     && typeof value.target_path === 'string'
-    && typeof value.file_count === 'number'
-    && typeof value.verified_bytes === 'number'
+    && isNonNegativeSafeInteger(value.file_count)
+    && isNonNegativeSafeInteger(value.verified_bytes)
     && isStringOrUndefined(value.config_path)
     && typeof value.config_found === 'boolean'
     && typeof value.files_dir_found === 'boolean'
@@ -1507,12 +1602,12 @@ function isBackupRetentionCheckResultShape(value: unknown): value is BackupReten
     && isBackupStatus(value.status)
     && typeof value.started_at === 'string'
     && isStringOrUndefined(value.finished_at)
-    && typeof value.duration_ms === 'number'
+    && isNonNegativeSafeInteger(value.duration_ms)
     && typeof value.target === 'string'
     && isStringOrUndefined(value.policy)
-    && isNumberOrUndefined(value.snapshot_count)
-    && isNumberOrUndefined(value.file_count)
-    && isNumberOrUndefined(value.total_bytes)
+    && isNonNegativeSafeIntegerOrUndefined(value.snapshot_count)
+    && isNonNegativeSafeIntegerOrUndefined(value.file_count)
+    && isNonNegativeSafeIntegerOrUndefined(value.total_bytes)
     && isStringOrUndefined(value.oldest_snapshot_at)
     && isStringOrUndefined(value.latest_snapshot_at)
     && isBooleanOrUndefined(value.warning)
@@ -1522,7 +1617,7 @@ function isBackupRetentionCheckResultShape(value: unknown): value is BackupReten
 
 function isBackupBatchRestorePreviewItemResultShape(value: unknown): value is BackupBatchRestorePreviewItemResult {
   return isRecord(value)
-    && typeof value.index === 'number'
+    && isNonNegativeSafeInteger(value.index)
     && typeof value.job_id === 'string'
     && typeof value.target_path === 'string'
     && typeof value.include_config === 'boolean'
@@ -1537,11 +1632,11 @@ function isBackupBatchRestorePreviewResultShape(value: unknown): value is Backup
     && isBackupStatus(value.status)
     && typeof value.started_at === 'string'
     && isStringOrUndefined(value.finished_at)
-    && typeof value.duration_ms === 'number'
+    && isNonNegativeSafeInteger(value.duration_ms)
     && Array.isArray(value.items)
     && value.items.every(isBackupBatchRestorePreviewItemResultShape)
-    && typeof value.total_files === 'number'
-    && typeof value.total_bytes === 'number'
+    && isNonNegativeSafeInteger(value.total_files)
+    && isNonNegativeSafeInteger(value.total_bytes)
     && isBooleanOrUndefined(value.warning)
     && isStringArrayOrUndefined(value.warnings)
     && isStringOrUndefined(value.error_message)
@@ -1549,7 +1644,7 @@ function isBackupBatchRestorePreviewResultShape(value: unknown): value is Backup
 
 function isBackupBatchRestoreItemResultShape(value: unknown): value is BackupBatchRestoreItemResult {
   return isRecord(value)
-    && typeof value.index === 'number'
+    && isNonNegativeSafeInteger(value.index)
     && typeof value.job_id === 'string'
     && typeof value.target_path === 'string'
     && typeof value.include_config === 'boolean'
@@ -1566,11 +1661,11 @@ function isBackupBatchRestoreResultShape(value: unknown): value is BackupBatchRe
     && isBackupStatus(value.status)
     && typeof value.started_at === 'string'
     && isStringOrUndefined(value.finished_at)
-    && typeof value.duration_ms === 'number'
+    && isNonNegativeSafeInteger(value.duration_ms)
     && Array.isArray(value.items)
     && value.items.every(isBackupBatchRestoreItemResultShape)
-    && typeof value.total_files === 'number'
-    && typeof value.verified_bytes === 'number'
+    && isNonNegativeSafeInteger(value.total_files)
+    && isNonNegativeSafeInteger(value.verified_bytes)
     && isBooleanOrUndefined(value.warning)
     && isStringArrayOrUndefined(value.warnings)
     && isStringOrUndefined(value.error_message)
@@ -1593,7 +1688,7 @@ function isBackupJobShape(value: unknown): value is BackupJob {
     && isStringOrUndefined(value.next_run_at)
     && isStringOrUndefined(value.stale_after)
     && isStringOrUndefined(value.restore_drill_stale_after)
-    && isNumberOrUndefined(value.max_snapshots)
+    && isNonNegativeSafeIntegerOrUndefined(value.max_snapshots)
     && isStringOrUndefined(value.max_age)
     && isStringOrUndefined(value.retention_policy)
     && typeof value.retention_status === 'string'
@@ -1615,30 +1710,32 @@ function isBackupJobShape(value: unknown): value is BackupJob {
     && (value.restore_drill_history === undefined || (Array.isArray(value.restore_drill_history) && value.restore_drill_history.every(isBackupRestoreDrillResultShape)))
     && (value.last_restore === undefined || isBackupRestoreResultShape(value.last_restore))
     && (value.last_restore_verify === undefined || isBackupRestoreVerifyResultShape(value.last_restore_verify))
+    && (value.last_matching_restore_verify === undefined || isBackupRestoreVerifyResultShape(value.last_matching_restore_verify))
+    && isStringArrayOrUndefined(value.restore_report_findings)
     && (value.restore_history === undefined || (Array.isArray(value.restore_history) && value.restore_history.every(isBackupRestoreResultShape)))
     && (value.last_retention_check === undefined || isBackupRetentionCheckResultShape(value.last_retention_check))
 }
 
 // List files in a directory
-export async function listFiles(path: string): Promise<FileListResponse> {
+export async function listFiles(path: string, options: ListFilesOptions = {}): Promise<FileListResponse> {
   const normalizedPath = normalizePath(path)
   const encodedPath = encodePathForUrl(normalizedPath)
-  const response = await authFetch(`${API_BASE}/files${encodedPath}`)
+  const response = await authFetch(`${API_BASE}/files${encodedPath}`, options)
   const data = await handleWrappedResponse<unknown>(response, '获取文件列表失败')
   if (!isFileListResponseShape(data)) {
-    throw new Error('服务器返回了无效的数据')
+    throw new Error(INVALID_API_RESPONSE_MESSAGE)
   }
   return data
 }
 
 // Get file versions
-export async function getVersions(path: string): Promise<VersionInfo[]> {
+export async function getVersions(path: string, options: { signal?: AbortSignal } = {}): Promise<VersionInfo[]> {
   const normalizedPath = normalizePath(path)
   const encodedPath = encodePathForUrl(normalizedPath)
-  const response = await authFetch(`${API_BASE}/versions${encodedPath}`)
+  const response = await authFetch(`${API_BASE}/versions${encodedPath}`, options)
   const data = await handleWrappedResponse<unknown>(response, '获取版本历史失败')
   if (!isVersionsResponseShape(data)) {
-    throw new Error('服务器返回了无效的数据')
+    throw new Error(INVALID_API_RESPONSE_MESSAGE)
   }
   return data.versions
 }
@@ -1655,11 +1752,11 @@ export async function deleteFile(path: string, options: RequestInit = {}): Promi
 }
 
 // Get storage stats (direct response, not wrapped)
-export async function getStorageStats(): Promise<StorageStats> {
-  const response = await authFetch(`${API_BASE}/stats`)
+export async function getStorageStats(options: RequestOptions = {}): Promise<StorageStats> {
+  const response = await authFetch(`${API_BASE}/stats`, options)
   const data = await handleWrappedResponse<unknown>(response, '获取存储统计失败')
   if (!isStorageStatsShape(data)) {
-    throw new Error('服务器返回了无效的数据')
+    throw new Error(INVALID_API_RESPONSE_MESSAGE)
   }
   return {
     fileCount: data.total_files,
@@ -1708,24 +1805,32 @@ export async function getStorageStats(): Promise<StorageStats> {
 }
 
 // Get health status (direct response, not wrapped)
-export async function getHealth(): Promise<HealthStatus> {
-  const response = await fetch('/health')
+export async function getHealth(options: RequestOptions = {}): Promise<HealthStatus> {
+  const response = await fetch('/health', options)
   if (!response.ok) {
-    throw new ApiError('获取健康状态失败', response.status, response.statusText)
+    await throwApiErrorFromResponse(response, '获取健康状态失败')
   }
 
   let body: unknown
   try {
     body = await response.json()
   } catch {
-    throw new Error('服务器返回了无效的数据')
+    throw new Error(INVALID_API_RESPONSE_MESSAGE)
   }
 
   if (!isHealthShape(body)) {
-    throw new Error('服务器返回了无效的数据')
+    throw new Error(INVALID_API_RESPONSE_MESSAGE)
   }
 
-  return body
+  return {
+    status: body.status,
+    uptime: body.uptime,
+    uptimeSecs: body.uptime_secs,
+    timestamp: body.timestamp,
+    version: body.version,
+    storage: body.storage,
+    dataplane: body.dataplane,
+  }
 }
 
 function normalizeDiskHealthReport(data: {
@@ -1788,30 +1893,32 @@ function normalizeDiskHealthReport(data: {
   }
 }
 
-export async function getDiskHealth(): Promise<DiskHealthReport> {
-  const response = await authFetch(`${API_BASE}/maintenance/disk-health`)
+export async function getDiskHealth(options?: { signal?: AbortSignal }): Promise<DiskHealthReport> {
+  const response = await authFetch(`${API_BASE}/maintenance/disk-health`, {
+    signal: options?.signal,
+  })
   const data = await handleWrappedResponse<unknown>(response, '获取磁盘健康失败')
   if (!isDiskHealthReportShape(data)) {
-    throw new Error('服务器返回了无效的数据')
+    throw new Error(INVALID_API_RESPONSE_MESSAGE)
   }
   return normalizeDiskHealthReport(data)
 }
 
-export async function getAppVersion(): Promise<AppVersionInfo> {
-  const response = await authFetch(`${API_BASE}/version`)
+export async function getAppVersion(options: RequestOptions = {}): Promise<AppVersionInfo> {
+  const response = await authFetch(`${API_BASE}/version`, options)
   const data = await handleWrappedResponse<unknown>(response, '获取版本信息失败')
   if (!isDiagnosticsVersionShape(data)) {
-    throw new Error('服务器返回了无效的数据')
+    throw new Error(INVALID_API_RESPONSE_MESSAGE)
   }
   return normalizeAppVersion(data)
 }
 
 // Get diagnostics info (direct response, not wrapped)
-export async function getDiagnostics(): Promise<DiagnosticsInfo> {
-  const response = await authFetch(`${API_BASE}/diagnostics`)
+export async function getDiagnostics(options: RequestOptions = {}): Promise<DiagnosticsInfo> {
+  const response = await authFetch(`${API_BASE}/diagnostics`, options)
   const data = await handleWrappedResponse<unknown>(response, '获取诊断信息失败')
   if (!isDiagnosticsShape(data)) {
-    throw new Error('服务器返回了无效的数据')
+    throw new Error(INVALID_API_RESPONSE_MESSAGE)
   }
   return {
     timestamp: data.timestamp,
@@ -1925,10 +2032,11 @@ export async function getDiagnostics(): Promise<DiagnosticsInfo> {
 }
 
 // Create directory
-export async function createDirectory(path: string): Promise<ActionResult> {
+export async function createDirectory(path: string, options: RequestOptions = {}): Promise<ActionResult> {
   const normalizedPath = normalizePath(path)
   const encodedPath = encodePathForUrl(normalizedPath)
   const response = await authFetch(`${API_BASE}/directories${encodedPath}`, {
+    ...options,
     method: 'POST',
   })
   return expectWrappedActionResponse(response, '创建文件夹失败', isPathActionShape)
@@ -1938,7 +2046,8 @@ export async function createDirectory(path: string): Promise<ActionResult> {
 export async function uploadFile(
   path: string,
   file: File,
-  onProgress?: (progress: number) => void
+  onProgress?: (progress: number) => void,
+  options: UploadFileOptions = {}
 ): Promise<ActionResult> {
   // Sanitize filename to prevent path traversal
   const safeFilename = sanitizeFilename(file.name)
@@ -1950,47 +2059,104 @@ export async function uploadFile(
   const url = `${uploadBase}/${encodedFilename}`
 
   const sendUpload = (retryCount: number): Promise<ActionResult> => new Promise((resolve, reject) => {
+    if (options.signal?.aborted) {
+      reject(createAbortError())
+      return
+    }
+
     const xhr = new XMLHttpRequest()
+    let settled = false
+
+    const cleanup = () => {
+      options.signal?.removeEventListener('abort', abortUpload)
+    }
+
+    function resolveOnce(result: ActionResult) {
+      if (settled) {
+        return
+      }
+      settled = true
+      cleanup()
+      resolve(result)
+    }
+
+    function rejectOnce(error: unknown) {
+      if (settled) {
+        return
+      }
+      settled = true
+      cleanup()
+      reject(error)
+    }
+
+    function abortUpload() {
+      xhr.abort()
+      rejectOnce(createAbortError())
+    }
+
+    options.signal?.addEventListener('abort', abortUpload, { once: true })
 
     xhr.upload.addEventListener('progress', (e) => {
-      if (e.lengthComputable && onProgress) {
-        onProgress((e.loaded / e.total) * 100)
+      if (onProgress) {
+        const progress = getUploadProgressPercent(e)
+        if (progress !== null) {
+          onProgress(progress)
+        }
       }
     })
 
     xhr.addEventListener('load', async () => {
+      if (options.signal?.aborted) {
+        rejectOnce(createAbortError())
+        return
+      }
+
       if (xhr.status >= 200 && xhr.status < 300) {
-        resolve(getActionResultFromXhr(xhr))
+        resolveOnce(getActionResultFromXhr(xhr))
         return
       }
 
       if (xhr.status === 401 && retryCount === 0) {
-        const refreshed = await refreshAuthSession()
+        let refreshed = false
+        try {
+          refreshed = await refreshAuthSession()
+        } catch (error) {
+          rejectOnce(error)
+          return
+        }
+        if (options.signal?.aborted) {
+          rejectOnce(createAbortError())
+          return
+        }
         if (refreshed) {
           try {
             const retryResult = await sendUpload(retryCount + 1)
-            resolve(retryResult)
+            resolveOnce(retryResult)
           } catch (error) {
-            reject(error)
+            rejectOnce(error)
           }
           return
         }
       }
 
       if (xhr.status === 413) {
-        reject(createApiErrorFromXhr(xhr, `文件超过 ${MAX_UPLOAD_FILE_SIZE_LABEL} 上传限制`))
+        rejectOnce(createApiErrorFromXhr(xhr, `文件超过 ${MAX_UPLOAD_FILE_SIZE_LABEL} 上传限制`))
         return
       }
 
-      reject(createApiErrorFromXhr(xhr, '上传失败'))
+      rejectOnce(createApiErrorFromXhr(xhr, '上传失败'))
     })
 
     xhr.addEventListener('error', () => {
-      reject(new Error('网络错误，上传失败'))
+      rejectOnce(new Error('网络错误，上传失败'))
     })
 
     xhr.addEventListener('timeout', () => {
-      reject(new Error('上传超时'))
+      rejectOnce(new Error('上传超时'))
+    })
+
+    xhr.addEventListener('abort', () => {
+      rejectOnce(createAbortError())
     })
 
     // Use REST API instead of WebDAV to avoid Basic Auth popup
@@ -2007,24 +2173,9 @@ export function getDownloadUrl(path?: string): string {
   return buildDownloadUrl(path)
 }
 
-function triggerBrowserDownload(blob: Blob, filename: string): void {
-  const url = URL.createObjectURL(blob)
-  const link = document.createElement('a')
-  link.href = url
-  try {
-    link.download = sanitizeFilename(filename)
-  } catch {
-    link.download = 'download'
-  }
-  document.body.appendChild(link)
-  link.click()
-  document.body.removeChild(link)
-  URL.revokeObjectURL(url)
-}
-
 export function buildDownloadUrl(
   path?: string,
-  options?: { version?: string; download?: boolean }
+  options?: { version?: string; download?: boolean; archive?: 'zip' }
 ): string {
   if (!path) return ''
   const normalizedPath = normalizePath(path)
@@ -2036,13 +2187,16 @@ export function buildDownloadUrl(
   if (options?.download) {
     params.set('download', 'true')
   }
+  if (options?.archive) {
+    params.set('archive', options.archive)
+  }
   const query = params.toString()
   return query ? `${API_BASE}/download${encodedPath}?${query}` : `${API_BASE}/download${encodedPath}`
 }
 
 export async function downloadFile(
   path: string,
-  options?: { version?: string; download?: boolean; filename?: string }
+  options?: { version?: string; download?: boolean; filename?: string; archive?: 'zip'; signal?: AbortSignal }
 ): Promise<void> {
   const normalizedPath = normalizePath(path)
   const encodedPath = encodePathForUrl(normalizedPath)
@@ -2053,17 +2207,24 @@ export async function downloadFile(
   if (options?.download !== false) {
     params.set('download', 'true')
   }
+  if (options?.archive) {
+    params.set('archive', options.archive)
+  }
 
   const query = params.toString()
   const url = query ? `${API_BASE}/download${encodedPath}?${query}` : `${API_BASE}/download${encodedPath}`
-  const response = await authFetch(url)
+  const response = await authFetch(url, options?.signal ? { signal: options.signal } : {})
 
   if (!response.ok) {
     await throwApiErrorFromResponse(response, '下载文件失败')
   }
 
-  const fallbackFilename = options?.filename ?? normalizedPath.split('/').filter(Boolean).pop() ?? 'download'
-  const filename = getFilenameFromContentDisposition(response.headers.get('Content-Disposition'), fallbackFilename)
+  const pathFilename = normalizedPath.split('/').filter(Boolean).pop() ?? 'download'
+  const baseFilename = options?.filename ?? pathFilename
+  const fallbackFilename = options?.archive === 'zip' ? ensureZipExtension(baseFilename) : baseFilename
+  const contentDisposition = response.headers.get('Content-Disposition')
+  await throwDownloadApiErrorFromJsonResponse(response)
+  const filename = getFilenameFromContentDisposition(contentDisposition, fallbackFilename)
   const blob = await response.blob()
   triggerBrowserDownload(blob, filename)
 }
@@ -2079,11 +2240,12 @@ export function getThumbnailUrl(path?: string, size: ThumbnailSize = 'medium'): 
 }
 
 // Rename/Move file
-export async function moveFile(fromPath: string, toPath: string): Promise<ActionResult> {
+export async function moveFile(fromPath: string, toPath: string, options: RequestOptions = {}): Promise<ActionResult> {
   const normalizedFrom = normalizePath(fromPath)
   const normalizedTo = normalizePath(toPath)
   
   const response = await authFetch(`${API_BASE}/files-move`, {
+    ...options,
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -2097,11 +2259,12 @@ export async function moveFile(fromPath: string, toPath: string): Promise<Action
 }
 
 // Copy file
-export async function copyFile(fromPath: string, toPath: string): Promise<ActionResult> {
+export async function copyFile(fromPath: string, toPath: string, options: RequestOptions = {}): Promise<ActionResult> {
   const normalizedFrom = normalizePath(fromPath)
   const normalizedTo = normalizePath(toPath)
   
   const response = await authFetch(`${API_BASE}/files-copy`, {
+    ...options,
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -2115,10 +2278,11 @@ export async function copyFile(fromPath: string, toPath: string): Promise<Action
 }
 
 // Restore file to a specific version
-export async function restoreVersion(path: string, hash: string): Promise<ActionResult> {
+export async function restoreVersion(path: string, hash: string, options: RequestOptions = {}): Promise<ActionResult> {
   const normalizedPath = normalizePath(path)
   const encodedPath = encodeURIComponent(normalizedPath)
   const response = await authFetch(`${API_BASE}/versions/${hash}/restore?path=${encodedPath}`, {
+    ...options,
     method: 'POST',
   })
   return expectWrappedActionResponse(response, '恢复版本失败', isRestoreVersionActionShape)
@@ -2154,11 +2318,11 @@ export interface TrashListResponse {
 }
 
 // List trash items
-export async function listTrash(): Promise<TrashListResponse> {
-  const response = await authFetch(`${API_BASE}/trash/`)
+export async function listTrash(options: RequestOptions = {}): Promise<TrashListResponse> {
+  const response = await authFetch(`${API_BASE}/trash/`, options)
   const data = await handleWrappedResponse<unknown>(response, '获取回收站列表失败')
   if (!isTrashListResponseShape(data)) {
-    throw new Error('服务器返回了无效的数据')
+    throw new Error(INVALID_API_RESPONSE_MESSAGE)
   }
 
   const items = data.items.map(item => ({
@@ -2183,28 +2347,31 @@ export async function listTrash(): Promise<TrashListResponse> {
 }
 
 // Restore item from trash
-export async function restoreFromTrash(id: string, newPath?: string): Promise<ActionResult> {
+export async function restoreFromTrash(id: string, newPath?: string, options: RequestOptions = {}): Promise<ActionResult> {
   const url = newPath 
     ? `${API_BASE}/trash/${id}/restore?path=${encodeURIComponent(newPath)}`
     : `${API_BASE}/trash/${id}/restore`
   
   const response = await authFetch(url, {
+    ...options,
     method: 'POST',
   })
   return expectWrappedActionResponse(response, '恢复文件失败', isRestoreTrashActionShape)
 }
 
 // Permanently delete item from trash
-export async function deleteFromTrash(id: string): Promise<ActionResult> {
+export async function deleteFromTrash(id: string, options: RequestOptions = {}): Promise<ActionResult> {
   const response = await authFetch(`${API_BASE}/trash/${id}`, {
+    ...options,
     method: 'DELETE',
   })
   return expectWrappedActionResponse(response, '永久删除失败', isDeleteTrashActionShape)
 }
 
 // Empty trash (delete all items permanently)
-export async function emptyTrash(): Promise<EmptyTrashResult> {
+export async function emptyTrash(options: RequestOptions = {}): Promise<EmptyTrashResult> {
   const response = await authFetch(`${API_BASE}/trash/`, {
+    ...options,
     method: 'DELETE',
   })
   const body = await handleResponse<ApiResponseWrapper<unknown>>(response, '清空回收站失败')
@@ -2214,12 +2381,12 @@ export async function emptyTrash(): Promise<EmptyTrashResult> {
     || body.success !== true
     || !('data' in body)
   ) {
-    throw new Error('服务器返回了无效的数据')
+    throw new Error(INVALID_API_RESPONSE_MESSAGE)
   }
 
   const data = body.data
   if (!isEmptyTrashResultShape(data)) {
-    throw new Error('服务器返回了无效的数据')
+    throw new Error(INVALID_API_RESPONSE_MESSAGE)
   }
   return {
     deletedCount: data.deleted_count,
@@ -2257,21 +2424,22 @@ export interface ScrubResult {
 }
 
 // Get last scrub result
-export async function getScrubResult(): Promise<ScrubResult> {
-  const response = await authFetch(`${API_BASE}/maintenance/scrub`)
+export async function getScrubResult(options: RequestOptions = {}): Promise<ScrubResult> {
+  const response = await authFetch(`${API_BASE}/maintenance/scrub`, options)
   const data = await handleWrappedResponse<unknown>(response, '获取校验结果失败')
   if (!isScrubResultShape(data)) {
-    throw new Error('服务器返回了无效的数据')
+    throw new Error(INVALID_API_RESPONSE_MESSAGE)
   }
   return data
 }
 
 // Run scrub operation
-export async function runScrub(hashes?: string[]): Promise<ScrubResult> {
+export async function runScrub(hashes?: string[], options: RequestOptions = {}): Promise<ScrubResult> {
   const response = await authFetch(`${API_BASE}/maintenance/scrub`, {
     method: 'POST',
     headers: hashes?.length ? { 'Content-Type': 'application/json' } : {},
     body: hashes?.length ? JSON.stringify({ hashes }) : undefined,
+    signal: options.signal,
   })
   const body = await handleResponse<ApiResponseWrapper<unknown>>(response, '执行数据校验失败')
   if (
@@ -2280,12 +2448,12 @@ export async function runScrub(hashes?: string[]): Promise<ScrubResult> {
     || body.success !== true
     || !('data' in body)
   ) {
-    throw new Error('服务器返回了无效的数据')
+    throw new Error(INVALID_API_RESPONSE_MESSAGE)
   }
 
   const data = body.data
   if (!isRunScrubResponseShape(data)) {
-    throw new Error('服务器返回了无效的数据')
+    throw new Error(INVALID_API_RESPONSE_MESSAGE)
   }
 
   const result: ScrubResult = {
@@ -2302,150 +2470,165 @@ export async function runScrub(hashes?: string[]): Promise<ScrubResult> {
 }
 
 // List configured backup jobs
-export async function listBackupJobs(): Promise<BackupJob[]> {
-  const response = await authFetch(`${API_BASE}/maintenance/backups`)
+export async function listBackupJobs(options: RequestOptions = {}): Promise<BackupJob[]> {
+  const response = await authFetch(`${API_BASE}/maintenance/backups`, options)
   const data = await handleWrappedResponse<unknown>(response, '获取备份任务失败')
   if (!Array.isArray(data) || !data.every(isBackupJobShape)) {
-    throw new Error('服务器返回了无效的数据')
+    throw new Error(INVALID_API_RESPONSE_MESSAGE)
   }
   return data
 }
 
 // Run a backup job immediately
-export async function runBackupJob(id: string): Promise<BackupRunResult> {
+export async function runBackupJob(id: string, options: RequestOptions = {}): Promise<BackupRunResult> {
   const response = await authFetch(`${API_BASE}/maintenance/backups/${encodeURIComponent(id)}/run`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: '{}',
+    signal: options.signal,
   })
   const data = await handleWrappedResponse<unknown>(response, '执行备份任务失败')
   if (!isBackupRunResultShape(data)) {
-    throw new Error('服务器返回了无效的数据')
+    throw new Error(INVALID_API_RESPONSE_MESSAGE)
   }
   return data
 }
 
 // Run a restore drill against the latest completed backup snapshot
-export async function runBackupRestoreDrill(id: string, keepArtifact = false): Promise<BackupRestoreDrillResult> {
+export async function runBackupRestoreDrill(id: string, keepArtifact = false, options: RequestOptions = {}): Promise<BackupRestoreDrillResult> {
   const response = await authFetch(`${API_BASE}/maintenance/backups/${encodeURIComponent(id)}/restore-drill`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ keep_artifact: keepArtifact }),
+    signal: options.signal,
   })
   const data = await handleWrappedResponse<unknown>(response, '执行恢复演练失败')
   if (!isBackupRestoreDrillResultShape(data)) {
-    throw new Error('服务器返回了无效的数据')
+    throw new Error(INVALID_API_RESPONSE_MESSAGE)
   }
   return data
 }
 
 // Check backup retention policy and remote/local snapshot visibility
-export async function checkBackupRetentionJob(id: string): Promise<BackupRetentionCheckResult> {
+export async function checkBackupRetentionJob(id: string, options: RequestOptions = {}): Promise<BackupRetentionCheckResult> {
   const response = await authFetch(`${API_BASE}/maintenance/backups/${encodeURIComponent(id)}/retention-check`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: '{}',
+    signal: options.signal,
   })
   const data = await handleWrappedResponse<unknown>(response, '检查备份保留策略失败')
   if (!isBackupRetentionCheckResultShape(data)) {
-    throw new Error('服务器返回了无效的数据')
+    throw new Error(INVALID_API_RESPONSE_MESSAGE)
   }
   return data
 }
 
 // Preview a supported backup restore without writing target data
-export async function previewBackupRestoreJob(id: string, targetPath: string, includeConfig = false): Promise<BackupRestorePreviewResult> {
+export async function previewBackupRestoreJob(id: string, targetPath: string, includeConfig = false, options: RequestOptions = {}): Promise<BackupRestorePreviewResult> {
   const response = await authFetch(`${API_BASE}/maintenance/backups/${encodeURIComponent(id)}/restore-preview`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ target_path: targetPath, include_config: includeConfig }),
+    signal: options.signal,
   })
   const data = await handleWrappedResponse<unknown>(response, '生成恢复预览失败')
   if (!isBackupRestorePreviewResultShape(data)) {
-    throw new Error('服务器返回了无效的数据')
+    throw new Error(INVALID_API_RESPONSE_MESSAGE)
   }
   return data
 }
 
 // Preview multiple backup restores without writing target data
-export async function previewBatchBackupRestore(items: BackupBatchRestoreItemRequest[]): Promise<BackupBatchRestorePreviewResult> {
+export async function previewBatchBackupRestore(items: BackupBatchRestoreItemRequest[], options: RequestOptions = {}): Promise<BackupBatchRestorePreviewResult> {
   const response = await authFetch(`${API_BASE}/maintenance/backups/batch-restore-preview`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ items }),
+    signal: options.signal,
   })
   const data = await handleWrappedResponse<unknown>(response, '生成批量恢复预览失败')
   if (!isBackupBatchRestorePreviewResultShape(data)) {
-    throw new Error('服务器返回了无效的数据')
+    throw new Error(INVALID_API_RESPONSE_MESSAGE)
   }
   return data
 }
 
 // Restore a supported backup job to a safe target directory
-export async function restoreBackupJob(id: string, targetPath: string, includeConfig = false): Promise<BackupRestoreResult> {
+export async function restoreBackupJob(id: string, targetPath: string, includeConfig = false, options: RequestOptions = {}): Promise<BackupRestoreResult> {
   const response = await authFetch(`${API_BASE}/maintenance/backups/${encodeURIComponent(id)}/restore`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ target_path: targetPath, include_config: includeConfig }),
+    signal: options.signal,
   })
   const data = await handleWrappedResponse<unknown>(response, '恢复备份失败')
   if (!isBackupRestoreResultShape(data)) {
-    throw new Error('服务器返回了无效的数据')
+    throw new Error(INVALID_API_RESPONSE_MESSAGE)
   }
   return data
 }
 
 // Restore multiple backup jobs sequentially to safe target directories
-export async function runBatchBackupRestore(items: BackupBatchRestoreItemRequest[]): Promise<BackupBatchRestoreResult> {
+export async function runBatchBackupRestore(items: BackupBatchRestoreItemRequest[], options: RequestOptions = {}): Promise<BackupBatchRestoreResult> {
   const response = await authFetch(`${API_BASE}/maintenance/backups/batch-restore`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ items }),
+    signal: options.signal,
   })
   const data = await handleWrappedResponse<unknown>(response, '执行批量恢复失败')
   if (!isBackupBatchRestoreResultShape(data)) {
-    throw new Error('服务器返回了无效的数据')
+    throw new Error(INVALID_API_RESPONSE_MESSAGE)
   }
   return data
 }
 
 // Verify a restored backup target without modifying it
-export async function verifyBackupRestoreJob(id: string, targetPath: string): Promise<BackupRestoreVerifyResult> {
+export async function verifyBackupRestoreJob(id: string, targetPath: string, options: RequestOptions = {}): Promise<BackupRestoreVerifyResult> {
   const response = await authFetch(`${API_BASE}/maintenance/backups/${encodeURIComponent(id)}/restore-verify`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ target_path: targetPath }),
+    signal: options.signal,
   })
   const data = await handleWrappedResponse<unknown>(response, '校验恢复目录失败')
   if (!isBackupRestoreVerifyResultShape(data)) {
-    throw new Error('服务器返回了无效的数据')
+    throw new Error(INVALID_API_RESPONSE_MESSAGE)
   }
   return data
 }
 
 // Download a restore summary for one backup job restore state.
-export async function downloadBackupRestoreReport(id: string): Promise<void> {
-  const response = await authFetch(`${API_BASE}/maintenance/backups/${encodeURIComponent(id)}/restore-report`)
+export async function downloadBackupRestoreReport(id: string, options?: { signal?: AbortSignal }): Promise<void> {
+  const response = await authFetch(
+    `${API_BASE}/maintenance/backups/${encodeURIComponent(id)}/restore-report`,
+    options?.signal ? { signal: options.signal } : {},
+  )
   if (!response.ok) {
     await throwApiErrorFromResponse(response, '导出恢复摘要失败')
   }
 
   const fallbackFilename = `mnemonas-restore-summary-${id}-${new Date().toISOString().slice(0, 10)}.json`
-  const filename = getFilenameFromContentDisposition(response.headers.get('Content-Disposition'), fallbackFilename)
+  const contentDisposition = response.headers.get('Content-Disposition')
+  await throwDownloadApiErrorFromJsonResponse(response)
+  const filename = getFilenameFromContentDisposition(contentDisposition, fallbackFilename)
 
   const blob = await response.blob()
   triggerBrowserDownload(blob, filename)
 }
 
 // Download diagnostics export
-export async function downloadDiagnosticsExport(): Promise<void> {
-  const response = await authFetch(`${API_BASE}/diagnostics-export`)
+export async function downloadDiagnosticsExport(options?: { signal?: AbortSignal }): Promise<void> {
+  const response = await authFetch(`${API_BASE}/diagnostics-export`, options?.signal ? { signal: options.signal } : {})
   if (!response.ok) {
     await throwApiErrorFromResponse(response, '导出诊断信息失败')
   }
 
   const fallbackFilename = `mnemonas-diagnostics-${new Date().toISOString().slice(0, 10)}.json`
-  const filename = getFilenameFromContentDisposition(response.headers.get('Content-Disposition'), fallbackFilename)
+  const contentDisposition = response.headers.get('Content-Disposition')
+  await throwDownloadApiErrorFromJsonResponse(response)
+  const filename = getFilenameFromContentDisposition(contentDisposition, fallbackFilename)
 
   const blob = await response.blob()
   triggerBrowserDownload(blob, filename)

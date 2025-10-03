@@ -65,6 +65,7 @@ require_safe_http_url() {
 
     [[ -n "$value" ]] || die "$label must not be empty"
     [[ "$value" != *[[:space:]]* ]] || die "$label must not contain whitespace: $value"
+    [[ "$value" != *[[:cntrl:]]* ]] || die "$label must not contain control characters: $value"
     [[ "$value" =~ ^https?://[^[:space:]]+$ ]] || die "$label must be an http(s) URL: $value"
 }
 
@@ -75,6 +76,18 @@ require_safe_pid() {
     [[ -n "$value" ]] || return 0
     [[ "$value" =~ ^[0-9]+$ ]] || die "$label must be a numeric PID: $value"
     (( 10#$value > 0 )) || die "$label must be a positive PID: $value"
+}
+
+require_no_control_characters() {
+    local value="$1"
+    local label="$2"
+
+    if [[ "$value" == *$'\n'* || "$value" == *$'\r'* ]]; then
+        die "$label cannot contain newline characters: $value"
+    fi
+    if [[ "$value" == *[[:cntrl:]]* ]]; then
+        die "$label cannot contain control characters: $value"
+    fi
 }
 
 require_live_fault_target() {
@@ -96,6 +109,7 @@ require_live_fault_target() {
     if [[ -z "$STORAGE_ROOT" ]]; then
         die "STORAGE_ROOT must not be empty"
     fi
+    require_no_control_characters "$STORAGE_ROOT" "STORAGE_ROOT"
     if path_has_parent_segment "$STORAGE_ROOT"; then
         die "STORAGE_ROOT must not contain '..' path segments: $STORAGE_ROOT"
     fi
@@ -120,6 +134,8 @@ require_live_fault_target() {
     if [[ "$STORAGE_ROOT" == "$HOME/.mnemonas" && "$ALLOW_REAL_STORAGE" != "1" ]]; then
         die "refusing to run against default personal storage root without ALLOW_REAL_STORAGE=1"
     fi
+    require_destructive_storage_path "$OBJECTS_DIR" "OBJECTS_DIR"
+    require_destructive_storage_path "$INDEX_DB" "INDEX_DB"
     if [[ ! -x "$NASD_BIN" ]]; then
         die "NASD_BIN is not executable: $NASD_BIN"
     fi
@@ -189,6 +205,33 @@ is_protected_storage_root() {
     esac
 }
 
+path_is_beneath_root() {
+    local root
+    local value
+
+    root="$(normalize_absolute_path "$1")"
+    value="$(normalize_absolute_path "$2")"
+    [[ "$value" == "$root"/* ]]
+}
+
+require_destructive_storage_path() {
+    local value="$1"
+    local label="$2"
+
+    [[ -n "$value" ]] || die "$label must not be empty"
+    require_no_control_characters "$value" "$label"
+    if path_has_parent_segment "$value"; then
+        die "$label must not contain '..' path segments: $value"
+    fi
+    if [[ "$value" != /* ]]; then
+        die "$label must be an absolute path: $value"
+    fi
+    require_no_symlink_components "$value" "$label"
+    if ! path_is_beneath_root "$STORAGE_ROOT" "$value"; then
+        die "$label must be under STORAGE_ROOT: $value"
+    fi
+}
+
 confirm_live_fault_target() {
     echo -e "${YELLOW}WARNING: These tests will corrupt test data and kill/restart the target nasd process.${NC}"
     echo -e "${YELLOW}Target:${NC} BASE_URL=$BASE_URL STORAGE_ROOT=$STORAGE_ROOT NASD_BIN=$NASD_BIN"
@@ -249,6 +292,48 @@ read_config_value() {
 
     if [[ ! -f "$CONFIG_FILE" ]]; then
         return 0
+    fi
+
+    if command -v python3 >/dev/null 2>&1; then
+        local value
+        if value=$(python3 - "$CONFIG_FILE" "$section" "$key" <<'PY'
+import sys
+
+try:
+    import tomllib
+except Exception:
+    sys.exit(2)
+
+path, section, key = sys.argv[1], sys.argv[2], sys.argv[3]
+try:
+    with open(path, "rb") as handle:
+        data = tomllib.load(handle)
+except Exception:
+    sys.exit(2)
+
+current = data
+for part in section.split("."):
+    if not isinstance(current, dict):
+        sys.exit(0)
+    current = current.get(part)
+    if current is None:
+        sys.exit(0)
+
+if not isinstance(current, dict) or key not in current:
+    sys.exit(0)
+
+value = current[key]
+if isinstance(value, bool):
+    sys.stdout.write("true" if value else "false")
+elif isinstance(value, (str, int, float)):
+    sys.stdout.write(str(value))
+elif hasattr(value, "isoformat"):
+    sys.stdout.write(value.isoformat())
+PY
+        ); then
+            printf '%s' "$value"
+            return 0
+        fi
     fi
 
     awk -v section="[$section]" -v key="$key" '
@@ -324,7 +409,88 @@ read_secret_value() {
         return 0
     fi
 
+    if command -v python3 >/dev/null 2>&1; then
+        python3 - "$SECRETS_FILE" "$key" <<'PY'
+import json
+import sys
+
+path, key = sys.argv[1], sys.argv[2]
+try:
+    with open(path, "r", encoding="utf-8") as handle:
+        data = json.load(handle)
+    value = data.get(key, "") if isinstance(data, dict) else ""
+except Exception:
+    value = ""
+
+if isinstance(value, str):
+    sys.stdout.write(value)
+PY
+        return 0
+    fi
+
     grep -o '"'"$key"'"[[:space:]]*:[[:space:]]*"[^"]*"' "$SECRETS_FILE" | sed 's/.*: *"//' | sed 's/"$//' || true
+}
+
+json_escape_string() {
+    local value=$1
+
+    if command -v python3 >/dev/null 2>&1; then
+        python3 -c 'import json, sys; sys.stdout.write(json.dumps(sys.argv[1]))' "$value"
+        return 0
+    fi
+
+    value=${value//\\/\\\\}
+    value=${value//\"/\\\"}
+    value=${value//$'\n'/\\n}
+    value=${value//$'\r'/\\r}
+    printf '"%s"' "$value"
+}
+
+json_login_payload() {
+    local username=$1
+    local password=$2
+
+    printf '{"username":%s,"password":%s}' "$(json_escape_string "$username")" "$(json_escape_string "$password")"
+}
+
+read_json_field() {
+    local json=$1
+    local field=$2
+
+    if command -v python3 >/dev/null 2>&1; then
+        printf '%s' "$json" | python3 -c '
+import json
+import sys
+
+field = sys.argv[1]
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+
+def find_value(value):
+    if isinstance(value, dict):
+        if field in value:
+            return value[field]
+        for child in value.values():
+            found = find_value(child)
+            if found is not None:
+                return found
+    elif isinstance(value, list):
+        for child in value:
+            found = find_value(child)
+            if found is not None:
+                return found
+    return None
+
+found = find_value(data)
+if isinstance(found, str):
+    sys.stdout.write(found)
+' "$field" 2>/dev/null
+        return 0
+    fi
+
+    printf '%s' "$json" | sed -n "s/.*\"${field}\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p"
 }
 
 configure_webdav_auth() {
@@ -364,7 +530,7 @@ load_initial_admin_password() {
         return 1
     fi
 
-    grep '^Password:' "$INITIAL_PASSWORD_FILE" | awk '{print $2}' || true
+    sed -n 's/^Password:[[:space:]]*//p' "$INITIAL_PASSWORD_FILE" | head -n1
 }
 
 configure_admin_auth() {
@@ -380,10 +546,10 @@ configure_admin_auth() {
 
     local resp=$(command curl -sf -X POST "$BASE_URL/api/v1/auth/login" \
         -H "Content-Type: application/json" \
-        -d "{\"username\":\"admin\",\"password\":\"$password\"}" 2>/dev/null || echo "")
+        -d "$(json_login_payload "admin" "$password")" 2>/dev/null || echo "")
 
-    if echo "$resp" | grep -q '"success":true'; then
-        ADMIN_ACCESS_TOKEN=$(echo "$resp" | grep -o '"access_token":"[^"]*"' | cut -d'"' -f4)
+    ADMIN_ACCESS_TOKEN=$(read_json_field "$resp" access_token)
+    if [[ -n "$ADMIN_ACCESS_TOKEN" ]]; then
         log_info "Using bootstrap admin token for protected API checks"
         return 0
     fi
