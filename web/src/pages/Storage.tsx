@@ -14,6 +14,7 @@ import {
   TrendingUp,
   AlertCircle,
   ShieldCheck,
+  Settings2,
 } from 'lucide-react'
 import { ApiError, getStorageStats, type DirectoryQuotaUsage, type StorageStats } from '@/api/files'
 import { formatBytes } from '@/lib/utils'
@@ -25,6 +26,19 @@ import { useIsAdmin, useUser } from '@/stores/auth'
 
 const storageStatsLoadErrorDescription = '存储统计加载失败，请检查网络或稍后重试。'
 const clipboardWriteFailureDescription = '请检查浏览器剪贴板权限。'
+const directoryQuotaExample = `/team 2 GB
+/media 512 MB`
+
+type DirectoryQuotaSummary = {
+  totalCount: number
+  normalCount: number
+  warningCount: number
+  exceededCount: number
+  missingCount: number
+  usedBytes: number
+  quotaBytes: number
+  usageRatio: number | undefined
+}
 
 function formatStorageSize(value: number | undefined): string {
   return value === undefined ? '--' : formatBytes(value)
@@ -147,6 +161,81 @@ function getDirectoryQuotaBarClass(status: DirectoryQuotaUsage['status']): strin
     return 'bg-default-300'
   }
   return 'bg-success/70'
+}
+
+function summarizeDirectoryQuotas(quotas: DirectoryQuotaUsage[]): DirectoryQuotaSummary {
+  const summary = quotas.reduce<Omit<DirectoryQuotaSummary, 'usageRatio'>>((acc, quota) => {
+    acc.totalCount += 1
+    acc.usedBytes += quota.usedBytes
+    acc.quotaBytes += quota.quotaBytes
+
+    if (quota.status === 'exceeded') {
+      acc.exceededCount += 1
+    } else if (quota.status === 'warning') {
+      acc.warningCount += 1
+    } else if (quota.status === 'missing') {
+      acc.missingCount += 1
+    } else {
+      acc.normalCount += 1
+    }
+
+    return acc
+  }, {
+    totalCount: 0,
+    normalCount: 0,
+    warningCount: 0,
+    exceededCount: 0,
+    missingCount: 0,
+    usedBytes: 0,
+    quotaBytes: 0,
+  })
+
+  return {
+    ...summary,
+    usageRatio: summary.quotaBytes > 0 ? summary.usedBytes / summary.quotaBytes : undefined,
+  }
+}
+
+function getDirectoryQuotaAttentionPriority(status: DirectoryQuotaUsage['status']): number {
+  if (status === 'exceeded') {
+    return 0
+  }
+  if (status === 'missing') {
+    return 1
+  }
+  if (status === 'warning') {
+    return 2
+  }
+  return 3
+}
+
+function getDirectoryQuotaAttentionItems(quotas: DirectoryQuotaUsage[]): DirectoryQuotaUsage[] {
+  return quotas
+    .filter((quota) => quota.status !== 'normal')
+    .sort((left, right) => {
+      const priorityDiff = getDirectoryQuotaAttentionPriority(left.status) - getDirectoryQuotaAttentionPriority(right.status)
+      if (priorityDiff !== 0) {
+        return priorityDiff
+      }
+      if (right.usageRatio !== left.usageRatio) {
+        return right.usageRatio - left.usageRatio
+      }
+      return left.path.localeCompare(right.path)
+    })
+    .slice(0, 5)
+}
+
+function getDirectoryQuotaActionText(quota: DirectoryQuotaUsage): string {
+  if (quota.status === 'exceeded') {
+    return '清理目录内容、提高配额，或迁移部分数据。'
+  }
+  if (quota.status === 'missing') {
+    return '创建目标目录，或删除不再使用的配额配置。'
+  }
+  if (quota.status === 'warning') {
+    return '复核近期增长，并确认是否需要扩容或归档。'
+  }
+  return '保持当前配置。'
 }
 
 // Action card for maintenance operations
@@ -318,6 +407,9 @@ export function StoragePage() {
       ? `${formatBytes(casBytes)} CAS 数据 · 磁盘容量不可用`
       : '统计不可用'
   const directoryQuotas = stats?.directoryQuotas ?? []
+  const directoryQuotaSummary = summarizeDirectoryQuotas(directoryQuotas)
+  const directoryQuotaAttentionCount = directoryQuotaSummary.exceededCount + directoryQuotaSummary.missingCount
+  const directoryQuotaAttentionItems = getDirectoryQuotaAttentionItems(directoryQuotas)
 
   const statsCards = [
     {
@@ -534,11 +626,104 @@ export function StoragePage() {
                 目录配额统计暂不可用，请稍后刷新或检查存储状态。
               </div>
             ) : directoryQuotas.length === 0 ? (
-              <div className="rounded-lg border border-divider bg-content1 p-4 text-sm text-default-500">
-                未配置目录配额。可在设置的版本保留页添加目录容量限制。
+              <div className="grid gap-4 rounded-lg border border-divider bg-content1 p-4 text-sm md:grid-cols-[minmax(0,1fr)_minmax(16rem,0.9fr)]">
+                <div className="min-w-0">
+                  <p className="font-medium text-foreground">未配置目录配额</p>
+                  <p className="mt-2 leading-6 text-default-500">
+                    可为家庭共享、团队资料或归档目录设置容量上限，避免单个目录持续占满存储空间。
+                  </p>
+                  <Button
+                    className="mt-4 w-fit rounded-lg"
+                    color="primary"
+                    variant="flat"
+                    startContent={<Settings2 size={16} />}
+                    onPress={() => navigate('/settings?tab=retention')}
+                  >
+                    配置目录配额
+                  </Button>
+                </div>
+                <div className="min-w-0">
+                  <p className="mb-2 text-xs font-medium text-default-500">配置示例</p>
+                  <pre className="overflow-auto rounded-lg bg-content2 p-3 text-left text-xs leading-5 text-default-700">
+                    <code>{directoryQuotaExample}</code>
+                  </pre>
+                </div>
               </div>
             ) : (
-              <div className="space-y-3">
+              <div className="space-y-4">
+                <div
+                  aria-label="目录配额汇总"
+                  className="grid gap-3 rounded-lg border border-divider bg-content1 p-3 text-sm sm:grid-cols-2 xl:grid-cols-4"
+                >
+                  <div className="min-w-0 rounded-lg border border-default-200 bg-content2/40 p-3">
+                    <p className="text-xs text-default-500">配额目录</p>
+                    <p className="mt-1 text-lg font-semibold text-foreground">{directoryQuotaSummary.totalCount} 个</p>
+                    <p className="mt-1 text-xs text-default-500">正常 {directoryQuotaSummary.normalCount} 个</p>
+                  </div>
+                  <div className="min-w-0 rounded-lg border border-default-200 bg-content2/40 p-3">
+                    <p className="text-xs text-default-500">总用量</p>
+                    <p className="mt-1 text-lg font-semibold text-foreground">
+                      {formatBytes(directoryQuotaSummary.usedBytes)}
+                    </p>
+                    <p className="mt-1 text-xs text-default-500">
+                      / {formatBytes(directoryQuotaSummary.quotaBytes)} · {formatUsagePercent(directoryQuotaSummary.usageRatio)}
+                    </p>
+                  </div>
+                  <div className="min-w-0 rounded-lg border border-warning/25 bg-warning/5 p-3">
+                    <p className="text-xs text-default-500">接近上限</p>
+                    <p className="mt-1 text-lg font-semibold text-warning">{directoryQuotaSummary.warningCount} 个</p>
+                    <p className="mt-1 text-xs text-default-500">建议复核增长较快目录</p>
+                  </div>
+                  <div className={`min-w-0 rounded-lg border p-3 ${directoryQuotaAttentionCount > 0 ? 'border-danger/25 bg-danger/5' : 'border-success/25 bg-success/5'}`}>
+                    <p className="text-xs text-default-500">需处理</p>
+                    <p className={`mt-1 text-lg font-semibold ${directoryQuotaAttentionCount > 0 ? 'text-danger' : 'text-success'}`}>
+                      {directoryQuotaAttentionCount} 个
+                    </p>
+                    <p className="mt-1 text-xs text-default-500">
+                      已超限 {directoryQuotaSummary.exceededCount} 个 · 路径不存在 {directoryQuotaSummary.missingCount} 个
+                    </p>
+                  </div>
+                </div>
+                {directoryQuotaAttentionItems.length > 0 && (
+                  <div aria-label="目录配额关注清单" className="rounded-lg border border-warning/25 bg-warning/5 p-4">
+                    <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-2 text-sm font-medium text-warning">
+                          <AlertCircle size={16} />
+                          <span>目录配额关注清单</span>
+                        </div>
+                        <p className="mt-1 text-xs text-warning/80">优先处理超限、不存在和接近上限目录</p>
+                      </div>
+                      <p className="text-xs text-warning/80">
+                        {directoryQuotaAttentionItems.length} / {directoryQuotaSummary.totalCount} 个需复核
+                      </p>
+                    </div>
+                    <div className="mt-3 divide-y divide-warning/20">
+                      {directoryQuotaAttentionItems.map((quota) => (
+                        <div key={quota.path} className="grid gap-2 py-2 first:pt-0 last:pb-0 md:grid-cols-[minmax(0,1fr)_minmax(12rem,0.45fr)]">
+                          <div className="min-w-0">
+                            <div className="flex min-w-0 flex-wrap items-center gap-2">
+                              <span className={`rounded-full border px-2 py-0.5 text-xs font-medium ${getDirectoryQuotaBadgeClass(quota.status)}`}>
+                                {getDirectoryQuotaStatusLabel(quota)}
+                              </span>
+                              <span className="min-w-0 truncate text-sm font-medium text-foreground" title={quota.path}>
+                                {quota.path}
+                              </span>
+                            </div>
+                            <p className="mt-1 text-xs text-default-500">
+                              {formatBytes(quota.usedBytes)} / {formatBytes(quota.quotaBytes)}
+                              <span className="mx-2 text-default-300">·</span>
+                              {formatUsagePercent(quota.usageRatio)}
+                            </p>
+                          </div>
+                          <p className="text-xs leading-5 text-default-600 md:text-right">
+                            {getDirectoryQuotaActionText(quota)}
+                          </p>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
                 {directoryQuotas.map((quota) => {
                   const usagePercent = clampUsagePercent(quota.usageRatio) ?? 0
                   return (

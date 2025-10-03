@@ -1523,6 +1523,18 @@ func TestShare_IsExpired(t *testing.T) {
 	}
 }
 
+func TestShare_IsExpiredAtTreatsExactExpirationAsExpired(t *testing.T) {
+	now := time.Date(2026, 5, 19, 12, 0, 0, 0, time.UTC)
+	share := &Share{ExpiresAt: &now}
+
+	if !share.isExpiredAt(now) {
+		t.Fatal("share should be expired at its exact expiration instant")
+	}
+	if share.isExpiredAt(now.Add(-time.Nanosecond)) {
+		t.Fatal("share should remain active before its expiration instant")
+	}
+}
+
 func TestShare_CanAccess(t *testing.T) {
 	share := &Share{Enabled: true}
 
@@ -1547,6 +1559,22 @@ func TestShare_CanAccess(t *testing.T) {
 	share.AccessCount = 1
 	if err := share.CanAccess(); err != ErrShareAccessLimit {
 		t.Errorf("access limited share should return ErrShareAccessLimit: %v", err)
+	}
+}
+
+func TestShare_RiskIgnoresShareAtExactExpiration(t *testing.T) {
+	now := time.Date(2026, 5, 19, 12, 0, 0, 0, time.UTC)
+	share := &Share{
+		Path:      "/docs",
+		Type:      ShareTypeFolder,
+		CreatedAt: now.Add(-31 * 24 * time.Hour),
+		ExpiresAt: &now,
+		Enabled:   true,
+	}
+
+	risk := share.Risk(now)
+	if risk.Level != ShareRiskLevelNone || len(risk.Reasons) != 0 {
+		t.Fatalf("expected no risk for exactly expired share, got %+v", risk)
 	}
 }
 

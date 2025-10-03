@@ -246,6 +246,62 @@ function validateShareMaxAccessRequest(maxAccess: unknown): void {
   }
 }
 
+function normalizeShareLogicalPath(path: string): string {
+  try {
+    return normalizePath(path)
+  } catch {
+    throw new ShareError('分享路径无效', 0, 'INVALID_SHARE_PATH')
+  }
+}
+
+function isLogicalPathString(value: unknown): value is string {
+  if (typeof value !== 'string' || value.length === 0) {
+    return false
+  }
+
+  try {
+    return normalizePath(value) === value
+  } catch {
+    return false
+  }
+}
+
+function isCanonicalPublicShareRelativePathString(value: unknown, options: { allowEmpty?: boolean } = {}): value is string {
+  if (typeof value !== 'string' || (!options.allowEmpty && value.length === 0)) {
+    return false
+  }
+
+  try {
+    return normalizePublicShareRelativePath(value) === value
+  } catch {
+    return false
+  }
+}
+
+function isSafePublicShareName(value: unknown): value is string {
+  if (typeof value !== 'string') {
+    return false
+  }
+
+  const trimmed = value.trim()
+  if (trimmed.length === 0 || trimmed === '.' || trimmed === '..') {
+    return false
+  }
+
+  if (value.includes('/') || value.includes('\\')) {
+    return false
+  }
+
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index)
+    if (code < 0x20 || code === 0x7f) {
+      return false
+    }
+  }
+
+  return true
+}
+
 function isSharePolicy(value: unknown): value is SharePolicy {
   if (!value || typeof value !== 'object') {
     return false
@@ -261,7 +317,7 @@ function isSharePolicyRule(value: unknown): value is SharePolicyRule {
     return false
   }
   const rule = value as Partial<SharePolicyRule>
-  return typeof rule.path === 'string'
+  return isLogicalPathString(rule.path)
     && (rule.require_password === undefined || typeof rule.require_password === 'boolean')
     && (rule.max_expires_in === undefined || typeof rule.max_expires_in === 'string')
     && (rule.max_access === undefined || isNonNegativeSafeInteger(rule.max_access))
@@ -275,7 +331,7 @@ function isValidShare(value: unknown): value is Share {
   const share = value as Partial<Share>
   return (
     typeof share.id === 'string' &&
-    typeof share.path === 'string' &&
+    isLogicalPathString(share.path) &&
     isShareType(share.type) &&
     typeof share.created_by === 'string' &&
     typeof share.created_at === 'string' &&
@@ -304,7 +360,7 @@ function isValidPublicShareInfo(value: unknown): value is PublicShareInfo {
     typeof share.has_password === 'boolean' &&
     isPermission(share.permission) &&
     (share.description === undefined || typeof share.description === 'string') &&
-    (share.file_name === undefined || typeof share.file_name === 'string') &&
+    (share.file_name === undefined || isSafePublicShareName(share.file_name)) &&
     (share.file_size === undefined || isNonNegativeSafeInteger(share.file_size)) &&
     (share.folder_items === undefined || isNonNegativeSafeInteger(share.folder_items))
   )
@@ -317,8 +373,8 @@ function isValidPublicShareItem(value: unknown): value is PublicShareItem {
 
   const item = value as Partial<PublicShareItem>
   return (
-    typeof item.name === 'string' &&
-    typeof item.path === 'string' &&
+    isSafePublicShareName(item.name) &&
+    isCanonicalPublicShareRelativePathString(item.path) &&
     typeof item.is_dir === 'boolean' &&
     isNonNegativeSafeInteger(item.size) &&
     typeof item.mod_time === 'string'
@@ -426,6 +482,18 @@ function normalizePublicShareRelativePath(filePath: string): string {
   return normalizePath(filePath).split('/').filter(Boolean).join('/')
 }
 
+function encodeShareIdForUrl(id: string): string {
+  return encodeURIComponent(id)
+}
+
+function authenticatedShareUrl(id: string): string {
+  return `${API_BASE}/shares/${encodeShareIdForUrl(id)}`
+}
+
+function publicShareUrl(id: string): string {
+  return `${PUBLIC_SHARE_API_BASE}/${encodeShareIdForUrl(id)}`
+}
+
 export function formatShareUrl(shareUrl: string, origin = window.location.origin): string {
   const trimmed = shareUrl.trim()
   try {
@@ -525,12 +593,16 @@ export async function getSharePolicy(options: ShareRequestOptions = {}): Promise
  */
 export async function createShare(req: CreateShareRequest, options: ShareRequestOptions = {}): Promise<ShareCreateResult> {
   validateShareMaxAccessRequest(req.max_access)
+  const request = {
+    ...req,
+    path: normalizeShareLogicalPath(req.path),
+  }
 
   const response = await authFetch(`${API_BASE}/shares`, {
     ...options,
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(req),
+    body: JSON.stringify(request),
   })
   
   if (!response.ok) {
@@ -551,7 +623,7 @@ export async function createShare(req: CreateShareRequest, options: ShareRequest
  * Get share details
  */
 export async function getShare(id: string, options: ShareRequestOptions = {}): Promise<Share> {
-  const response = await authFetch(`${API_BASE}/shares/${id}`, options)
+  const response = await authFetch(authenticatedShareUrl(id), options)
   
   if (!response.ok) {
     throw await readShareApiError(response, '获取分享详情失败')
@@ -570,7 +642,7 @@ export async function getShare(id: string, options: ShareRequestOptions = {}): P
 export async function updateShare(id: string, req: UpdateShareRequest, options: ShareRequestOptions = {}): Promise<Share> {
   validateShareMaxAccessRequest(req.max_access)
 
-  const response = await authFetch(`${API_BASE}/shares/${id}`, {
+  const response = await authFetch(authenticatedShareUrl(id), {
     ...options,
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
@@ -592,7 +664,7 @@ export async function updateShare(id: string, req: UpdateShareRequest, options: 
  * Delete share
  */
 export async function deleteShare(id: string, options: ShareRequestOptions = {}): Promise<ShareActionResult> {
-  const response = await authFetch(`${API_BASE}/shares/${id}`, {
+  const response = await authFetch(authenticatedShareUrl(id), {
     ...options,
     method: 'DELETE',
   })
@@ -611,7 +683,7 @@ export async function deleteShare(id: string, options: ShareRequestOptions = {})
  * Get public share info (no auth required)
  */
 export async function getPublicShare(id: string, options: PublicShareRequestOptions = {}): Promise<PublicShareInfo> {
-  const response = await fetch(`${PUBLIC_SHARE_API_BASE}/${id}`, getPublicShareFetchOptions(options.signal))
+  const response = await fetch(publicShareUrl(id), getPublicShareFetchOptions(options.signal))
   
   if (!response.ok) {
     let message = '分享不存在或已失效'
@@ -643,7 +715,8 @@ export async function getPublicShareItems(
     }
   }
   const query = params.toString()
-  const url = query ? `${PUBLIC_SHARE_API_BASE}/${id}/items?${query}` : `${PUBLIC_SHARE_API_BASE}/${id}/items`
+  const baseURL = `${publicShareUrl(id)}/items`
+  const url = query ? `${baseURL}?${query}` : baseURL
   const response = await fetch(url, getPublicShareFetchOptions(options.signal))
 
   if (!response.ok) {
@@ -659,7 +732,7 @@ export async function getPublicShareItems(
   }
 
   const body = await parsePublicShareSuccess<PublicShareItemsResponse>(response, INVALID_API_RESPONSE_MESSAGE)
-  if (typeof body.path !== 'string' || !Array.isArray(body.items) || !body.items.every(isValidPublicShareItem)) {
+  if (!isCanonicalPublicShareRelativePathString(body.path, { allowEmpty: true }) || !Array.isArray(body.items) || !body.items.every(isValidPublicShareItem)) {
     throw new ShareError(INVALID_API_RESPONSE_MESSAGE, response.status)
   }
   return body
@@ -673,7 +746,7 @@ export async function accessShareWithPassword(
   password: string,
   options: PublicShareRequestOptions = {},
 ): Promise<PublicShareInfo> {
-  const response = await fetch(`${PUBLIC_SHARE_API_BASE}/${id}/access`, {
+  const response = await fetch(`${publicShareUrl(id)}/access`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ password }),
@@ -703,7 +776,7 @@ export async function accessShareWithPassword(
  * Get download URL for shared file
  */
 export function getShareDownloadUrl(id: string, options?: { archive?: 'zip' }): string {
-  return withShareDownloadArchiveParam(`${PUBLIC_SHARE_API_BASE}/${id}/download`, options?.archive)
+  return withShareDownloadArchiveParam(`${publicShareUrl(id)}/download`, options?.archive)
 }
 
 /**
@@ -713,7 +786,7 @@ export function getShareFileDownloadUrl(id: string, filePath: string, options?: 
   const normalizedPath = normalizePath(filePath)
   const encodedPath = encodePathForUrl(normalizedPath)
   const trimmedPath = encodedPath.startsWith('/') ? encodedPath.slice(1) : encodedPath
-  return withShareDownloadArchiveParam(`${PUBLIC_SHARE_API_BASE}/${id}/download/${trimmedPath}`, options?.archive)
+  return withShareDownloadArchiveParam(`${publicShareUrl(id)}/download/${trimmedPath}`, options?.archive)
 }
 
 function withShareDownloadArchiveParam(url: string, archive?: 'zip'): string {
@@ -774,7 +847,7 @@ export function formatExpiration(expiresAt?: string | null): string {
   const now = new Date()
   const diff = expires.getTime() - now.getTime()
   
-  if (diff < 0) return '已过期'
+  if (diff <= 0) return '已过期'
   
   const days = Math.floor(diff / (1000 * 60 * 60 * 24))
   const hours = Math.floor((diff % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60))

@@ -1841,6 +1841,7 @@ export function FilesPage() {
     if (trimmedRenameValue === actionFile.name) return
     const parentPath = actionFile.path.substring(0, actionFile.path.lastIndexOf('/')) || '/'
     const newPath = joinPathSegment(parentPath, trimmedRenameValue)
+
     const controller = new AbortController()
     renameAbortControllerRef.current?.abort()
     renameAbortControllerRef.current = controller

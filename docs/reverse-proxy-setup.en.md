@@ -329,8 +329,10 @@ Connectivity:
 
 ```bash
 sudo ufw status
-ss -tlnp | grep -E '80|443|8080'
+ss -tlnp | grep -E '80|443|8080|9090|9091'
 ```
+
+`8080/9090/9091`, or custom backend and dataplane ports, should not listen on public addresses.
 
 WebDAV:
 

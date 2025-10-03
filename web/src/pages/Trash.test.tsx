@@ -181,6 +181,7 @@ describe('TrashPage', () => {
 
   beforeEach(() => {
     vi.clearAllMocks()
+    window.history.pushState({}, '', '/')
     useCanWriteMock.mockReturnValue(true)
     mockUser.id = 'u1'
     mockUser.username = 'admin'
@@ -293,6 +294,27 @@ describe('TrashPage', () => {
       
       await waitFor(() => {
         expect(screen.getByText('/deleted-file.txt')).toBeTruthy()
+        expect(screen.getByText('/deleted-folder')).toBeTruthy()
+      })
+    })
+
+    it('filters trash items from the path query', async () => {
+      const user = userEvent.setup()
+      window.history.pushState({}, '', '/trash?path=%2Fdeleted-file.txt')
+
+      render(<TrashPage />)
+
+      await waitFor(() => {
+        expect(screen.getByLabelText('回收站路径筛选')).toBeTruthy()
+        expect(screen.getByText('路径：/deleted-file.txt')).toBeTruthy()
+        expect(screen.getByText('/deleted-file.txt')).toBeTruthy()
+        expect(screen.queryByText('/deleted-folder')).toBeNull()
+      })
+
+      await user.click(screen.getByRole('button', { name: '清除路径筛选' }))
+
+      await waitFor(() => {
+        expect(window.location.search).toBe('')
         expect(screen.getByText('/deleted-folder')).toBeTruthy()
       })
     })

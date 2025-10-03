@@ -63,6 +63,22 @@ const PERMISSION_OPTIONS = [
 const maxSharePasswordBytes = 72
 const shareCreateWarningTitle = '分享链接已创建，但存在警告'
 const shareCreateWarningMessage = '分享链接已创建，但后台记录可能存在延迟，请稍后确认分享列表。'
+const shareDurationUnitMs: Record<string, number> = {
+  ns: 1 / 1_000_000,
+  us: 1 / 1_000,
+  'µs': 1 / 1_000,
+  ms: 1,
+  s: 1_000,
+  m: 60_000,
+  h: 3_600_000,
+  d: 86_400_000,
+}
+
+type ShareCreateReviewItem = {
+  label: string
+  value: string
+  tone?: 'default' | 'warning'
+}
 
 function formatPolicyDuration(value: string): string {
   const trimmed = value.trim()
@@ -87,6 +103,104 @@ function formatPolicyDuration(value: string): string {
 function isUnlimitedPolicyDuration(value: string): boolean {
   const trimmed = value.trim()
   return !trimmed || trimmed === '0'
+}
+
+function parseShareDurationMillis(value: string): number | null {
+  const trimmed = value.trim()
+  if (!trimmed || trimmed === '0') {
+    return null
+  }
+
+  let total = 0
+  let matched = ''
+  const durationPattern = /(\d+(?:\.\d+)?)(ns|us|µs|ms|s|m|h|d)/g
+  for (const match of trimmed.matchAll(durationPattern)) {
+    const unit = match[2]
+    const multiplier = shareDurationUnitMs[unit]
+    const amount = Number(match[1])
+    if (!Number.isFinite(amount) || multiplier === undefined) {
+      return null
+    }
+    total += amount * multiplier
+    matched += match[0]
+  }
+
+  return matched === trimmed && total > 0 ? total : null
+}
+
+function getShareDurationReviewValue(
+  explicitDuration: string,
+  defaultDuration: string | undefined,
+  maxDuration: string | undefined,
+): { value: string; capped: boolean } {
+  const requestedRaw = explicitDuration || defaultDuration
+  if (requestedRaw === undefined) {
+    return { value: '系统默认', capped: false }
+  }
+
+  const maxMillis = maxDuration ? parseShareDurationMillis(maxDuration) : null
+  const requestedMillis = isUnlimitedPolicyDuration(requestedRaw) ? null : parseShareDurationMillis(requestedRaw)
+  if (maxDuration && maxMillis !== null && (requestedMillis === null || requestedMillis > maxMillis)) {
+    return {
+      value: `${formatPolicyDuration(maxDuration)}（路径策略上限）`,
+      capped: true,
+    }
+  }
+
+  return { value: formatPolicyDuration(requestedRaw), capped: false }
+}
+
+function getShareAccessReviewValue(
+  explicitMaxAccess: string,
+  parsedMaxAccess: { maxAccess?: number; error?: string },
+  defaultMaxAccess: number | undefined,
+  policyMaxAccess: number | undefined,
+): { value: string; capped: boolean } {
+  if (parsedMaxAccess.error) {
+    return { value: '格式待修正', capped: false }
+  }
+
+  const hasExplicitMaxAccess = explicitMaxAccess.trim() !== ''
+  const requestedMaxAccess = hasExplicitMaxAccess ? (parsedMaxAccess.maxAccess ?? 0) : defaultMaxAccess
+  if (requestedMaxAccess === undefined) {
+    return { value: '系统默认', capped: false }
+  }
+
+  if (policyMaxAccess && policyMaxAccess > 0 && (requestedMaxAccess === 0 || requestedMaxAccess > policyMaxAccess)) {
+    return {
+      value: `${policyMaxAccess} 次（路径策略上限）`,
+      capped: true,
+    }
+  }
+
+  return {
+    value: requestedMaxAccess > 0 ? `${requestedMaxAccess} 次` : '不限制',
+    capped: false,
+  }
+}
+
+function getSharePasswordReviewValue(
+  usePassword: boolean,
+  policyRequiresPassword: boolean,
+  password: string,
+): ShareCreateReviewItem {
+  if (policyRequiresPassword) {
+    return {
+      label: '密码',
+      value: password.trim() ? '已设置，满足路径策略' : '必须设置密码',
+      tone: password.trim() ? 'default' : 'warning',
+    }
+  }
+
+  if (usePassword) {
+    return {
+      label: '密码',
+      value: password.trim() ? '已设置' : '待输入',
+      tone: password.trim() ? 'default' : 'warning',
+    }
+  }
+
+  return { label: '密码', value: '不设置密码', tone: 'warning' }
 }
 
 function getSharePathDepth(rawPath: string): number {
@@ -404,6 +518,46 @@ export function ShareDialog({
     }
     return descriptions
   }, [matchedPolicyRule])
+  const createReviewItems = useMemo<ShareCreateReviewItem[]>(() => {
+    const durationReview = getShareDurationReviewValue(
+      expiresIn,
+      sharePolicy?.default_expires_in,
+      matchedPolicyRule?.max_expires_in,
+    )
+    const accessReview = getShareAccessReviewValue(
+      maxAccess,
+      parsedMaxAccess,
+      sharePolicy?.default_max_access,
+      matchedPolicyRule?.max_access,
+    )
+
+    return [
+      {
+        label: '策略来源',
+        value: matchedPolicyRule ? `路径策略 ${matchedPolicyRule.path}` : '系统默认',
+      },
+      getSharePasswordReviewValue(usePassword, policyRequiresPassword, password),
+      {
+        label: '有效期',
+        value: durationReview.value,
+        tone: durationReview.capped ? 'warning' : 'default',
+      },
+      {
+        label: '访问次数',
+        value: accessReview.value,
+        tone: accessReview.capped ? 'warning' : 'default',
+      },
+    ]
+  }, [
+    expiresIn,
+    matchedPolicyRule,
+    maxAccess,
+    parsedMaxAccess,
+    password,
+    policyRequiresPassword,
+    sharePolicy,
+    usePassword,
+  ])
 
   const handleCreate = async () => {
     if (featureDisabled || !featureEnabled) return
@@ -713,6 +867,23 @@ export function ShareDialog({
                   </ul>
                 </div>
               )}
+
+              <div className="rounded-lg border border-divider bg-content2/60 p-3" aria-label="分享创建前复核">
+                <div className="mb-2 flex items-center gap-2 text-sm font-medium text-foreground">
+                  <CheckCircle size={16} className="text-accent-primary" />
+                  <span>创建前复核</span>
+                </div>
+                <div className="grid gap-2 sm:grid-cols-2">
+                  {createReviewItems.map((item) => (
+                    <div key={item.label} className="rounded-lg border border-divider bg-content1 px-3 py-2">
+                      <div className="text-xs text-default-500">{item.label}</div>
+                      <div className={item.tone === 'warning' ? 'mt-1 text-sm font-medium text-warning' : 'mt-1 text-sm font-medium text-foreground'}>
+                        {item.value}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
 
               {/* Description */}
               <div className="space-y-3">

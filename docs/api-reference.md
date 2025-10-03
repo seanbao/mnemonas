@@ -816,6 +816,7 @@ GET /api/v1/diagnostics
 - `filesystem.disk_stats_available` 表示磁盘容量统计是否可用；不可用时 `filesystem.disk_*` 字段会被省略。可用时会同时包含 `filesystem.disk_filesystem_type`、`filesystem.disk_mount_point`、`filesystem.disk_mount_source`、脱敏后的 `filesystem.disk_mount_options` 和 `filesystem.disk_native_data_checksum_support`，用于确认实际承载 MnemoNAS 的挂载点、设备/数据集和文件系统校验能力。
 - `alerts.runtime_available` 表示当前进程是否挂载了提醒监控；`alerts.webhook_configured` 只表示是否配置了 Webhook，不会暴露 `webhook_url` 或 `webhook_headers`。
 - `alerts.telegram_configured` 只表示 Telegram 通知是否具备可用配置，不会暴露 `telegram_bot_token`。
+- `alerts.wecom_configured` 只表示企业微信通知是否具备可用配置，不会暴露 `wecom_webhook_url`。
 - `alerts.email_configured` 只表示 SMTP 邮件通知是否具备可用配置，包括启用邮件通知、SMTP 主机、端口、发件人和至少一个非空收件人；不会暴露 `smtp_host`、`smtp_username`、`smtp_password`、`smtp_from` 或 `smtp_to`。
 - `alerts.last_*` 来自上一次提醒检查；尚未完成首次检查时会被省略。
 - `maintenance` 是维护任务脱敏摘要；其中 `scrub_schedule_*` 反映 `[maintenance.scrub]` 周期计划，`last_scrub_*` 来自最近一次 Scrub 历史，`scrub_failure_retries` 只在最近一次 Scrub 失败时出现。
@@ -1066,9 +1067,9 @@ GET /api/v1/download/{path}
 **需要认证**: 是
 
 **查询参数**:
-- `download`: 设置为 `true` 时强制下载（设置 `Content-Disposition`）
-- `version`: 指定版本哈希（64 位 BLAKE3）下载历史版本
-- `archive`: 设置为 `zip` 时将目标路径打包为 ZIP；可用于目录或单个文件，不能与 `version` 同时使用。目录归档要求调用者对目标目录及其中每个条目具备具体读取权限，只读导航祖先不能被打包下载。归档响应最多包含 10000 个条目和 20 GiB 文件内容。
+- `download`: 最多指定一次；设置为 `true` 时强制下载（设置 `Content-Disposition`）
+- `version`: 最多指定一次；指定版本哈希（64 位 BLAKE3）下载历史版本
+- `archive`: 最多指定一次，且设置为 `zip` 时将目标路径打包为 ZIP；可用于目录或单个文件，不能与 `version` 同时使用。目录归档要求调用者对目标目录及其中每个条目具备具体读取权限，只读导航祖先不能被打包下载。归档响应最多包含 10000 个条目和 20 GiB 文件内容。ZIP 附件名使用目标路径末段；根路径使用 `mnemonas-files.zip`，已以 `.zip` 结尾的名称不会重复追加后缀。
 
 **鉴权说明**:
 - API 客户端可使用现有认证会话或 `Authorization` 请求头
@@ -1114,7 +1115,7 @@ GET /api/v1/thumbnails/{path}
 **需要认证**: 是
 
 **查询参数**:
-- `size`: 缩略图尺寸，可选值: `small` / `s` (150px), `medium` / `m` (300px), `large` / `l` (600px)
+- `size`: 缩略图尺寸，至多出现一次；可选值: `small` / `s` (150px), `medium` / `m` (300px), `large` / `l` (600px)，省略时默认为 `medium`
 - 传入未列出的 `size` 值时返回 `400 Bad Request`
 - 源文件超过 100 MiB，或图片尺寸超过 10000x10000 / 5000 万像素时返回 `400 Bad Request`
 
@@ -1181,7 +1182,7 @@ POST /api/v1/versions/{hash}/restore
 ```
 
 **请求参数**:
-- `path`: 文件路径（必填）
+- `path`: 文件路径（必填，最多指定一次）
 
 说明：`path` 必须指向非根文件路径。根路径或根等价值会返回 `400 Bad Request` 和 `invalid path`。
 
@@ -1248,7 +1249,7 @@ GET /api/v1/trash/{id}
 
 ### 从回收站恢复
 
-将文件从回收站恢复到原位置。可通过 `path` 查询参数指定自定义恢复目标路径。
+将文件从回收站恢复到原位置。可通过至多出现一次的 `path` 查询参数指定自定义恢复目标路径。
 
 ```
 POST /api/v1/trash/{id}/restore
@@ -1304,8 +1305,8 @@ GET /api/v1/search?q={query}
 ```
 
 **查询参数**:
-- `q`: 搜索关键词（必填，最长 100 字符）
-- `limit`: 返回数量限制（默认 50，最大 100）
+- `q`: 搜索关键词（必填，最长 100 字符，必须且只能出现一次）
+- `limit`: 返回数量限制（默认 50，最大 100，至多出现一次）
 
 **响应示例**:
 ```json
@@ -1388,6 +1389,7 @@ POST /api/v1/shares
 - 响应中的 `url` 为动态生成字段：当 `share.base_url` 已配置时返回 `<base_url>/s/{id}`；未配置时返回相对路径 `/s/{id}`
 - `share.base_url` 为空时返回相对路径；非空时必须是完整的 `http` 或 `https` URL，不能包含 userinfo、查询参数或片段，且主机名必须有效
 - 认证后的分享响应包含 `risk.level` 和可选 `risk.reasons`，用于标记无密码、不过期、无限访问、覆盖范围过大、长期未访问或即将到期的分享。启用分享创建 30 天后仍未访问会标记为 `unused_enabled`；最近一次访问距今 90 天以上会标记为 `stale_enabled`。
+- 当 `[alerts] enabled = true` 且至少配置一个可用提醒通道时，服务端会按小时扫描启用且 72 小时内到期的分享，并发送聚合 `share_expiring_soon` warning 事件；同一进程内同一分享到期时间只提醒一次。事件 `details` 包含 `source = "share"`、分享数量、扫描窗口、最早到期时间和最多 10 个路径样本，不包含分享 URL、访问密码或分享 ID。
 
 **响应示例**:
 ```json
@@ -1422,7 +1424,7 @@ GET /api/v1/shares
 ```
 
 **查询参数**:
-- `all=true`: 管理员查看所有用户的分享
+- `all=true`: 管理员查看所有用户的分享，至多出现一次
 
 **响应示例**:
 ```json
@@ -1571,16 +1573,18 @@ POST /api/v1/public/shares/{share_id}/access
 **说明**:
 - 需要密码且尚未通过验证的分享只返回 `id`、`type`、`has_password` 和 `permission`；不会返回 `description` 或文件/文件夹元数据
 - 当分享不需要密码，或已通过密码验证后，会返回 `description` 以及适用的 `file_name` / `file_size` / `folder_items`
+- 根目录文件夹分享的 `file_name` 使用稳定显示名 `mnemonas-share`，不会返回 `/` 作为文件名
 - 零字节文件会返回 `file_size: 0`；空文件夹会返回 `folder_items: 0`
 - 当 `max_access > 0` 且 `access_count` 达到上限时，返回 `410 Gone`，错误码为 `SHARE_ACCESS_LIMIT_REACHED`
-- 当分享已过期时，返回 `410 Gone`，错误码为 `SHARE_EXPIRED`
+- 当当前时间达到或超过 `expires_at` 时，分享视为已过期，返回 `410 Gone`，错误码为 `SHARE_EXPIRED`
 - 当分享本身被停用时，返回 `410 Gone`，错误码为 `SHARE_DISABLED`
 - 当创建该分享的用户被禁用或删除后，公开访问、下载和文件夹列表都会返回 `404 Not Found`，错误码为 `SHARE_NOT_FOUND`
 - `access_count` 在下载与文件夹列表请求时递增；`POST /api/v1/public/shares/{share_id}/access` 与兼容路径 `POST /s/{share_id}` 的密码验证不会计数
-- `items?path=` 和 `download/{path}` 中的子路径相对于分享文件夹根目录；空字符和独立的 `.` / `..` 路径段无效，合法文件名中的连续点号（如 `foo..txt`）不受影响。非法子路径不会递增 `access_count`
+- `items?path=` 和 `download/{path}` 中的子路径相对于分享文件夹根目录；文件夹列表的 `path` 查询参数至多出现一次。空字符和独立的 `.` / `..` 路径段无效，合法文件名中的连续点号（如 `foo..txt`）不受影响。非法子路径不会递增 `access_count`
+- 文件夹列表响应中的 `path` 与 `items[].path` 均为相对于分享文件夹根目录的规范路径，不以 `/` 开头；根目录响应的 `path` 为空字符串。响应只包含当前目录下对分享 owner 仍可见的直接子项。
 - 一旦下载或文件夹列表响应已经开始向客户端写出字节，即使后续流式传输中断，该次访问仍计入 `access_count`
 - 底层文件读取器支持 seek 时，公开分享下载会处理 HTTP Range 请求；MnemoNAS 本地存储支持该路径，可用于断点续传和浏览器媒体播放
-- 公开下载端点设置 `archive=zip` 时，可将分享文件夹根目录、子文件夹或单个文件打包为 ZIP；归档响应返回 `application/zip`，不保证支持 Range，会跳过分享 owner 已不可见的条目，最多包含 10000 个条目和 20 GiB 文件内容
+- 公开下载端点最多指定一次 `archive`，且设置为 `archive=zip` 时，可将分享文件夹根目录、子文件夹或单个文件打包为 ZIP；归档响应返回 `application/zip`，不保证支持 Range，会跳过分享 owner 已不可见的条目，最多包含 10000 个条目和 20 GiB 文件内容。ZIP 附件名使用打包目标名称；分享根目录为 `/` 时使用 `mnemonas-share.zip`，已以 `.zip` 结尾的名称不会重复追加后缀
 - 返回 `416 Requested Range Not Satisfiable` 的不可满足 Range 请求不会递增 `access_count`
 - 密码验证成功后，服务端通过 `HttpOnly`、`SameSite=Strict` cookie 记录访问状态；后续下载和文件夹列表请求不使用 `password` 查询参数
 - 公开分享信息、密码验证响应、文件夹列表响应和公开下载 JSON 错误响应会返回 `Cache-Control: private, no-cache` 和 `Vary: Cookie`，并附带 `X-Content-Type-Options: nosniff` 与 `Referrer-Policy: no-referrer`
@@ -1629,7 +1633,7 @@ GET /api/v1/public/shares/{share_id}/download/{path}
 
 ## 收藏夹
 
-收藏路径必须规范化为非根绝对路径。空值或根路径会以 `400 Bad Request` 和 `MISSING_PATH` 拒绝；包含独立 `.` / `..` 路径段的值会以 `400 Bad Request` 和 `INVALID_PATH` 拒绝。该校验先于非管理员 `home_dir` 授权执行。
+收藏路径必须规范化为非根绝对路径。空值或根路径会以 `400 Bad Request` 和 `MISSING_PATH` 拒绝；包含独立 `.` / `..` 路径段的值会以 `400 Bad Request` 和 `INVALID_PATH` 拒绝。单路径检查接口的 `path` 查询参数至多出现一次。该校验先于非管理员 `home_dir` 授权执行。
 
 ### 列出收藏
 
@@ -1772,7 +1776,7 @@ PATCH /api/v1/favorites/{path}
 **说明**:
 - 启用认证时，管理员可查看全量最近操作记录；普通用户仅返回当前账号自己的活动记录，`user` 查询参数不会越权查看其他账号
 - 系统级事件也会进入最近操作记录，例如磁盘健康周期检查产生的 `disk_health`
-- 手动和周期数据校验会写入 `scrub` 活动；当 Scrub 失败、发现对象问题或结果持久化不完整时，会通过已配置的 Webhook/Telegram/SMTP 提醒通道发送 `scrub_run` 事件。
+- 手动和周期数据校验会写入 `scrub` 活动；当 Scrub 失败、发现对象问题或结果持久化不完整时，会通过已配置的 Webhook/Telegram/企业微信/SMTP 提醒通道发送 `scrub_run` 事件。
 - `share` 和 `unshare` 活动的 `details` 会记录分享类型、权限、是否需要密码、过期时间和访问次数上限等复核摘要；不会写入分享密码、公开 URL 或分享 ID。
 - 未配置最近操作记录时，接口返回空列表
 - 若最近操作记录已配置但初始化失败或当前不可用，接口返回 `503 Service Unavailable`
@@ -1782,6 +1786,8 @@ GET /api/v1/activity
 ```
 
 **查询参数**:
+下列查询参数均至多出现一次。
+
 - `limit`: 返回数量（默认 50，最大 500）
 - `offset`: 分页偏移
 - `action`: 按操作类型过滤；当前支持 `upload`、`download`、`delete`、`rename`、`move`、`copy`、`create`、`restore`、`share`、`unshare`、`favorite`、`unfavorite`、`favorite_note_update`、`login`、`logout`、`trash_restore`、`trash_delete`、`trash_empty`、`disk_health`、`scrub`
@@ -1835,6 +1841,8 @@ GET /api/v1/activity/stats
 ```
 
 **查询参数**:
+下列查询参数均至多出现一次。
+
 - `action`: 按操作类型过滤；取值同列表接口的 `action`
 - `action_group`: 按审计分组过滤；当前支持 `share` 和 `risk`
 - `path`: 按路径或目录过滤；匹配该路径本身、其子路径，以及 `from`、`to` 等活动详情中的路径字段
@@ -1842,7 +1850,7 @@ GET /api/v1/activity/stats
 - `since`: 仅统计该时间点之后或等于该时间点的记录，格式为 RFC3339 时间戳
 - `until`: 仅统计该时间点之前或等于该时间点的记录，格式为 RFC3339 时间戳
 
-`action`、`action_group`、`path`、`since` 和 `until` 的错误处理与列表接口一致。
+`action`、`action_group`、`path`、`user`、`since` 和 `until` 的错误处理与列表接口一致。
 
 普通用户使用 `/` 作为 `path` 过滤条件时，统计结果限定在当前账号可见范围内；使用不可见路径作为 `path` 过滤条件时，统计结果返回零值，不会通过活动详情中的路径字段计入隐藏记录。
 
@@ -1871,6 +1879,120 @@ GET /api/v1/activity/stats
   "timestamp": "2024-01-15T10:00:00Z"
 }
 ```
+
+### 列出活动复核记录（管理员）
+
+获取已持久化的活动复核处置记录。
+
+```
+GET /api/v1/activity/reviews
+```
+
+**查询参数**:
+
+- `limit`: 返回数量（默认 20，最大 100）
+- `offset`: 分页偏移
+- `reviewer`: 按复核人过滤
+- `activity_entry_id`: 仅返回关联指定最近操作记录 ID 的复核记录
+- `disposition_status`: 按处置状态过滤，允许值为 `documented`、`confirmed`、`restored`、`disabled`、`needs_follow_up`
+- `since`: 仅返回该时间点之后或等于该时间点的复核记录，格式为 RFC3339 时间戳
+- `until`: 仅返回该时间点之前或等于该时间点的复核记录，格式为 RFC3339 时间戳
+
+`since` 晚于 `until`、时间格式无效、`activity_entry_id` 非规范值或 `disposition_status` 非允许值时，接口返回 `400 Bad Request`。
+
+**响应示例**:
+```json
+{
+  "success": true,
+  "data": {
+    "items": [
+      {
+        "id": "review-123",
+        "reviewed_at": "2024-01-15T10:05:00Z",
+        "reviewer": "admin",
+        "note": "已确认误删文件已从回收站恢复",
+        "scope_label": "集中窗口",
+        "filter_summary": "分组 高风险变更",
+        "disposition_status": "restored",
+        "action_counts": {
+          "delete": 2,
+          "move": 1
+        },
+        "review_count": 3,
+        "total_count": 5,
+        "path_count": 2,
+        "user_count": 1,
+        "path_samples": ["/docs/deleted.txt", "/docs/moved.txt"],
+        "user_samples": ["admin"],
+        "activity_entry_ids": ["act-delete-1", "act-move-1"]
+      }
+    ],
+    "total": 1,
+    "limit": 20,
+    "offset": 0
+  },
+  "timestamp": "2024-01-15T10:05:00Z"
+}
+```
+
+### 创建活动复核记录（管理员）
+
+记录一次活动复核处置结论。服务端会使用当前认证账号作为 `reviewer`，并写入 `reviewed_at`。
+
+```
+POST /api/v1/activity/reviews
+```
+
+**请求体**:
+```json
+{
+  "note": "已确认误删文件已从回收站恢复",
+  "scope_label": "当前页",
+  "filter_summary": "分组 高风险变更",
+  "disposition_status": "restored",
+  "action_counts": {
+    "delete": 2,
+    "move": 1
+  },
+  "review_count": 3,
+  "total_count": 5,
+  "path_count": 2,
+  "user_count": 1,
+  "path_samples": ["/docs/deleted.txt", "/docs/moved.txt"],
+  "user_samples": ["admin"],
+  "activity_entry_ids": ["act-delete-1", "act-move-1"]
+}
+```
+
+**说明**:
+- `note`、`scope_label` 和 `activity_entry_ids` 必填；`review_count` 必须大于 0，且 `total_count` 不能小于 `review_count`
+- `disposition_status` 可选，缺省为 `documented`；允许值为 `documented`、`confirmed`、`restored`、`disabled`、`needs_follow_up`
+- `action_counts` 可选；键必须是已知最近操作类型，值必须为正整数，且计数总和必须等于 `review_count`
+- `path_samples` 和 `user_samples` 可选，最多各 10 个；路径会按最近操作路径规则规范化，重复样例会被拒绝
+- 若最近操作记录未配置、初始化失败或当前不可用，接口返回 `503 Service Unavailable`
+
+### 更新活动复核记录处置状态（管理员）
+
+更新一条已持久化活动复核记录的当前处置状态，并可同步更新处置备注。服务端会使用当前认证账号覆盖 `reviewer`，并将 `reviewed_at` 更新为本次状态回写时间；未传 `note` 时保留原备注，样例、计数和关联活动记录保持不变。
+
+```
+PATCH /api/v1/activity/reviews/{id}
+```
+
+**请求体**:
+```json
+{
+  "disposition_status": "disabled",
+  "note": "分享链接已关闭，访问入口已核对"
+}
+```
+
+**说明**:
+- `disposition_status` 必填；允许值为 `documented`、`confirmed`、`restored`、`disabled`、`needs_follow_up`
+- `note` 可选；传入时必须为非空文本，服务端会按活动复核备注规则去除首尾空白并校验长度
+- `{id}` 非规范或 `disposition_status` 非允许值时返回 `400 Bad Request`
+- 复核记录不存在时返回 `404 Not Found`
+- 若最近操作记录未配置、初始化失败或当前不可用，接口返回 `503 Service Unavailable`
 
 ### 清空最近操作记录（管理员）
 
@@ -1993,7 +2115,10 @@ GET /api/v1/settings
       "webhook_headers_configured": false,
       "telegram_enabled": false,
       "telegram_bot_token_configured": false,
-      "telegram_chat_id": ""
+      "telegram_chat_id": "",
+      "wecom_enabled": false,
+      "wecom_webhook_url": "",
+      "wecom_webhook_url_configured": false
     },
     "maintenance": {
       "scrub": {
@@ -2360,6 +2485,8 @@ PUT /api/v1/settings
     "telegram_enabled": true,
     "telegram_bot_token": "123456:ABC...",
     "telegram_chat_id": "-1001234567890",
+    "wecom_enabled": true,
+    "wecom_webhook_url": "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=...",
     "email_enabled": true,
     "smtp_host": "smtp.example.com",
     "smtp_port": 587,
@@ -2420,6 +2547,8 @@ PUT /api/v1/settings
 }
 ```
 
+设置请求中的 `storage.directory_quotas[].path`、`storage.directory_access_rules[].path` 和 `share.policy_rules[].path` 使用同一套 MnemoNAS 逻辑路径规则：路径必须以 `/` 开头，不能包含 Windows/UNC 语法、反斜杠、查询或片段字符、控制字符，或独立的 `.` / `..` 路径段。设置 API 会规范化首尾空白、重复斜杠与末尾斜杠；包含 `.` 或 `..` 的路径不会被折叠，会被拒绝。
+
 **失败行为**:
 - 成功响应的 `message` 在仅包含热更新字段、或请求中携带但值未变化的重启类字段时为 `settings updated`；当 `server.host`、`server.port`、`server.read_timeout`、`server.write_timeout`、`server.idle_timeout`、`server.tls.*` 或 `cdc.*` 的值实际变化时为 `settings updated, some changes may require restart`
 - `trash` 支持更新 `enabled`、`retention_days`、`max_size`；保存后会立即影响运行中的回收站策略
@@ -2428,10 +2557,12 @@ PUT /api/v1/settings
 - `server.tls` 支持更新 `enabled`、`cert_file`、`key_file`、`auto_generate`、`cert_dir`；保存后需重启服务才能切换 HTTPS 监听
 - `cdc` 支持更新 `min_chunk_size`、`avg_chunk_size`、`max_chunk_size`；必须满足 `65536 <= min < avg < max <= 67108864`。Docker 和 systemd 启动入口会在 dataplane 重启时读取这些字节值，新对象写入才会使用新分块参数
 - `versioning` 支持更新 `auto_versioned_extensions`、`auto_versioned_filenames`、`max_versioned_size`；保存后会立即更新运行中的自动版本策略
-- `share` 支持更新 `enabled`、`base_url`、`default_expires_in`、`default_max_access`、`policy_rules`；`enabled` 会立即影响公开分享访问和新分享创建，`base_url` 会立即影响后续新生成的分享链接，非空时必须是完整的 `http` 或 `https` URL，不能包含 userinfo、查询参数或片段，且主机名必须有效；默认有效期和默认访问次数只影响之后创建的分享；`policy_rules` 每项必须使用干净的 MnemoNAS 绝对路径，并至少设置 `require_password`、`max_expires_in` 或 `max_access` 中的一项
+- `share` 支持更新 `enabled`、`base_url`、`default_expires_in`、`default_max_access`、`policy_rules`；`enabled` 会立即影响公开分享访问和新分享创建，`base_url` 会立即影响后续新生成的分享链接，非空时必须是完整的 `http` 或 `https` URL，不能包含 userinfo、查询参数或片段，且主机名必须有效；默认有效期和默认访问次数只影响之后创建的分享；`policy_rules` 每项 `path` 遵循上述逻辑路径规则，并至少设置 `require_password`、`max_expires_in` 或 `max_access` 中的一项
 - `favorites` 支持更新 `enabled`；保存后会立即影响收藏接口的可用性
-- `storage.directory_access_rules` 每项必须使用干净的 MnemoNAS 绝对路径，并至少包含一个 `read_users`、`write_users`、`read_groups`、`write_groups`、`read_roles` 或 `write_roles` 授权；角色只能是 `admin`、`user`、`guest`
-- `alerts` 支持更新 `enabled`、`check_interval`、`threshold_pct`、`critical_pct`、`min_free_bytes`、`cooldown_period`、`webhook_url`、`webhook_method`、`webhook_headers`、`telegram_enabled`、`telegram_bot_token`、`telegram_chat_id`、`email_enabled`、`smtp_host`、`smtp_port`、`smtp_username`、`smtp_password`、`smtp_from`、`smtp_to`；保存后会立即更新运行中的提醒监控
+- `storage.directory_quotas` 每项 `path` 遵循上述逻辑路径规则，`quota_bytes` 必须是正整数
+- `storage.directory_access_rules` 每项 `path` 遵循上述逻辑路径规则，并至少包含一个 `read_users`、`write_users`、`read_groups`、`write_groups`、`read_roles` 或 `write_roles` 授权；角色只能是 `admin`、`user`、`guest`
+- 保存成功后，如果 `storage.directory_access_rules` 或分享策略字段 `share.enabled`、`share.default_expires_in`、`share.default_max_access`、`share.policy_rules` 发生实际变化，服务端会向提醒运行态提交 `settings_policy_changed` warning 事件；事件 `details` 包含 `source = "settings"`、`changed_sections`、目录授权和分享策略的变更布尔值、规则数量与规范化路径列表，不包含 `share.base_url`、提醒通道密钥或用户成员明细；规范化后等价的提交不会产生该事件；事件发送失败只写入服务端日志，不会导致设置保存失败
+- `alerts` 支持更新 `enabled`、`check_interval`、`threshold_pct`、`critical_pct`、`min_free_bytes`、`cooldown_period`、`webhook_url`、`webhook_method`、`webhook_headers`、`telegram_enabled`、`telegram_bot_token`、`telegram_chat_id`、`wecom_enabled`、`wecom_webhook_url`、`email_enabled`、`smtp_host`、`smtp_port`、`smtp_username`、`smtp_password`、`smtp_from`、`smtp_to`；保存后会立即更新运行中的提醒监控
 - `disk_health` 支持更新 `enabled`、`check_interval`、`probe_timeout`、`cooldown_period`、`command`、温度阈值、介质磨损阈值和 `devices`；保存后会立即更新运行中的磁盘健康监控
 - `maintenance.scrub` 支持更新 `enabled`、`schedule_interval`、`retry_interval`、`max_retries`；保存后会立即更新运行中的周期 Scrub 调度，关闭时会取消后台调度
 - `dataplane` 支持更新 `grpc_address`、`timeout`、`max_retries`；保存后会立即替换运行中的数据面 client，并用于后续按需重连和连接重试策略
@@ -2449,6 +2580,7 @@ PUT /api/v1/settings
 - `GET /api/v1/settings` 不返回 Webhook URL 或 Header 值；响应中的 `alerts.webhook_url` 和 `alerts.webhook_headers` 使用 `<redacted>` 占位符表示已配置值，`alerts.webhook_url_configured` 与 `alerts.webhook_headers_configured` 表示是否存在对应配置。`PUT /api/v1/settings` 可提交真实 Webhook URL/Header 值来更新配置；如果提交原样的 `<redacted>` 占位值，服务端会保留对应的既有值。
 - 省略 `alerts.telegram_bot_token` 或 `alerts.smtp_password` 会保留既有密钥；提交空字符串会清除对应密钥。`alerts.telegram_enabled = true` 时清除 `telegram_bot_token` 会因缺少必需 Token 被拒绝。
 - `alerts.telegram_enabled = true` 时必须提供 `telegram_bot_token` 和 `telegram_chat_id`；`telegram_bot_token` 不能包含空白、`/`、`?` 或 `#`，诊断和设置读取响应不会明文返回该 Token
+- `alerts.wecom_enabled = true` 时必须提供 `wecom_webhook_url`；非空 `wecom_webhook_url` 必须是完整的 `http` 或 `https` URL。`GET /api/v1/settings` 使用 `<redacted>` 和 `wecom_webhook_url_configured` 表示已保存的企业微信 Webhook，`PUT /api/v1/settings` 提交同样的 `<redacted>` 占位值会保留既有 URL。
 - `alerts.email_enabled = true` 时必须提供 `smtp_host`、`smtp_from` 和至少一个 `smtp_to`，`smtp_port` 必须在 1-65535 范围内，发件人和收件人必须是合法邮件地址
 - 请求中的 `disk_health.check_interval`、`disk_health.probe_timeout`、`disk_health.cooldown_period` 必须是正的 `time.ParseDuration` 字符串；`disk_health.command` 必须是单个可执行文件名或绝对路径；`disk_health.media_wear_critical_percent` 不能低于 `disk_health.media_wear_warning_percent`；每个 `devices[].path` 必须是绝对路径，推荐 `/dev/disk/by-id/...`
 - 请求中的 `maintenance.scrub.schedule_interval`、`maintenance.scrub.retry_interval` 必须是正的 `time.ParseDuration` 字符串；`maintenance.scrub.max_retries` 必须是 `0` 或正整数
@@ -2464,7 +2596,7 @@ POST /api/v1/settings/alerts/test
 
 **需要管理员权限**
 
-该接口会通过当前已保存的提醒通道发送一次 `alert_test` warning 事件，用于验证 Webhook、Telegram 或 SMTP 邮件链路。它要求 `[alerts] enabled = true`、至少存在一个已配置的通知通道，并且当前进程已挂载提醒运行态；SMTP 邮件通道只有在启用邮件通知、SMTP 主机、端口、发件人和至少一个非空收件人均存在时才计入通道列表。测试事件的 `details` 只包含 `trigger = "manual_test"`、`source = "settings"` 和通道名称列表，不包含 Webhook、Telegram 或 SMTP 密钥。
+该接口会通过当前已保存的提醒通道发送一次 `alert_test` warning 事件，用于验证 Webhook、Telegram、企业微信或 SMTP 邮件链路。它要求 `[alerts] enabled = true`、至少存在一个已配置的通知通道，并且当前进程已挂载提醒运行态；企业微信通道只有在启用企业微信通知且 Webhook URL 非空时才计入通道列表，SMTP 邮件通道只有在启用邮件通知、SMTP 主机、端口、发件人和至少一个非空收件人均存在时才计入通道列表。测试事件的 `details` 只包含 `trigger = "manual_test"`、`source = "settings"` 和通道名称列表，不包含 Webhook、Telegram、企业微信或 SMTP 密钥。
 
 **响应示例**:
 ```json
@@ -2566,7 +2698,7 @@ GET /api/v1/maintenance/disk-health
 - NVMe critical warning、可用备用容量低于阈值、介质寿命已用百分比达到阈值或介质错误计数非零会影响设备状态。
 - `smartctl` 不可用、无 JSON 输出或 JSON 无法解析会返回 `unavailable`。
 - 后台周期检查发现 `warning`、`critical` 或 `unavailable` 时，会写入 `disk_health` 最近操作记录，路径为 `/system/disk-health`，用户为 `system`。
-- 当 `[alerts] enabled = true` 且配置了 Webhook、Telegram 或 SMTP 邮件时，后台周期检查会对 `warning`、`critical` 和 `unavailable` 发送 `disk_health` 提醒事件。最近操作记录和提醒事件中的设备摘要使用配置的 `name`；未配置名称时使用通用未命名设备标签，不包含完整设备路径或序列号。完整设备路径和 SMART 明细仅通过管理员维护接口返回。
+- 当 `[alerts] enabled = true` 且配置了 Webhook、Telegram、企业微信或 SMTP 邮件时，后台周期检查会对 `warning`、`critical` 和 `unavailable` 发送 `disk_health` 提醒事件。最近操作记录和提醒事件中的设备摘要使用配置的 `name`；未配置名称时使用通用未命名设备标签，不包含完整设备路径或序列号。完整设备路径和 SMART 明细仅通过管理员维护接口返回。
 
 ### 获取数据校验结果
 
@@ -2660,8 +2792,8 @@ GET /api/v1/maintenance/objects
 ```
 
 **查询参数**:
-- `limit`: 返回数量限制（默认 1000）
-- `cursor`: 游标（从上一次返回的 `next_cursor` 开始，必须是 64 位十六进制对象 hash）
+- `limit`: 返回数量限制（默认 1000，最大 1000，至多出现一次）
+- `cursor`: 游标（从上一次返回的 `next_cursor` 开始，必须是 64 位十六进制对象 hash，至多出现一次）
 
 **说明**:
 - 当前响应仅返回 `hash` 和 `size`
@@ -2694,8 +2826,8 @@ POST /api/v1/maintenance/gc
 ```
 
 **查询参数**:
-- `dry_run`: 是否仅计算不删除（默认 `true`，只有显式传入 `false` 才会执行删除）
-- `grace_period_hours`: 跳过最近创建对象的小时数（默认 24）
+- `dry_run`: 是否仅计算不删除，至多出现一次（默认 `true`，只有显式传入 `false` 才会执行删除）
+- `grace_period_hours`: 跳过最近创建对象的小时数，至多出现一次（默认 24）
 
 **说明**:
 - GC 会跳过 grace period 内的新对象，避免删除正在上传或刚写入的数据块
@@ -2873,7 +3005,7 @@ POST /api/v1/maintenance/backups/{id}/run
 
 备份、恢复、恢复演练、只读校验和保留检测开始执行时会先写入 `running` 状态。服务启动时，状态文件中遗留的 `running` 记录会被标记为失败并写回状态文件，避免重启后长期显示并未实际运行的任务。
 
-当 `[alerts] enabled = true` 且配置了 Webhook、Telegram 或 SMTP 邮件时，备份失败、显式恢复失败或带警告、恢复后只读校验失败或带警告、恢复演练失败、恢复演练缺失/过期提醒、保留策略检测失败或备份完成但带警告会发送提醒事件。事件 `type` 为 `backup_run`、`backup_restore`、`backup_restore_verify`、`backup_restore_drill` 或 `backup_retention_check`，`level` 为 `warning` 或 `critical`，`details` 只包含有值的字段，可包括任务 ID、运行 ID、状态、恢复目标路径、脱敏后的错误信息、脱敏后的备份目标/manifest 路径、快照路径和文件/字节统计。
+当 `[alerts] enabled = true` 且配置了 Webhook、Telegram、企业微信或 SMTP 邮件时，备份失败、显式恢复失败或带警告、恢复后只读校验失败或带警告、恢复演练失败、恢复演练缺失/过期提醒、保留策略检测失败或备份完成但带警告会发送提醒事件。事件 `type` 为 `backup_run`、`backup_restore`、`backup_restore_verify`、`backup_restore_drill` 或 `backup_retention_check`，`level` 为 `warning` 或 `critical`，`details` 只包含有值的字段，可包括任务 ID、运行 ID、状态、恢复目标路径、脱敏后的错误信息、脱敏后的备份目标/manifest 路径、快照路径和文件/字节统计。
 
 手动检查快照保留策略和远端可见内容：
 
@@ -3120,7 +3252,7 @@ POST /api/v1/maintenance/backups/{id}/restore
 }
 ```
 
-当前显式恢复支持 `type = "local"`、`type = "restic"` 和 `type = "rclone"`。`target_path` 必须是服务器上的绝对路径，不能包含控制字符，并且必须位于 `storage.root`、备份来源和本地备份目标/仓库之外；父目录必须已存在，目标目录不存在或为空，且已存在的路径组件不能是符号链接。该接口不会覆盖当前在线数据目录。服务端会在真正写入前重新执行同一套恢复预检；存在失败预检时恢复会被拒绝，失败结果仍写入恢复历史，便于之后排查。
+当前显式恢复支持 `type = "local"`、`type = "restic"` 和 `type = "rclone"`。`target_path` 必须是服务器上的 POSIX 绝对路径（以 `/` 开头），不能包含控制字符、反斜杠、`.` 或 `..` 路径段，不能是文件系统根目录或受保护系统目录，并且必须位于 `storage.root`、备份来源和本地备份目标/仓库之外；Windows 或 UNC 路径不是有效的服务器恢复目标。父目录必须已存在，目标目录不存在或为空，且已存在的路径组件不能是符号链接。该接口不会覆盖当前在线数据目录。服务端会在真正写入前重新执行同一套恢复预检；存在失败预检时恢复会被拒绝，失败结果仍写入恢复历史，便于之后排查。
 
 - `local`：把最近一次成功快照中的 `data/` 内容复制到 `target_path` 根目录并校验大小和 SHA-256；`include_config = true` 时，备份中的配置文件会恢复到 `target_path/.mnemonas-restore/config.toml`。
 - `restic`：执行 `restic restore latest --target <临时目录> --tag mnemonas --tag job:<id> --path <source>`，再把 restic 恢复出的来源目录内容安装到 `target_path` 根目录。安装目标前会拒绝恢复出的符号链接和非常规文件。`include_config` 对 restic 任务无特殊处理。
@@ -3176,7 +3308,7 @@ POST /api/v1/maintenance/backups/{id}/restore-verify
 }
 ```
 
-`restore-verify` 要求目标目录已存在，目标路径不能包含控制字符，并且仍位于 `storage.root`、备份来源和本地备份目标/仓库之外；目标路径中已存在的路径组件不能是符号链接。它会统计恢复目录中的常规文件和字节数，检查 `.mnemonas-restore/config.toml`、`files/`、`.mnemonas/`、`.mnemonas/index.db` 与 `.mnemonas/objects` 是否存在，并对符号链接、非常规文件或不像完整 `storage.root` 的目录给出警告。`local` 任务会优先对照同一目标最近一次成功恢复所用的快照，找不到匹配恢复记录时再对照最新本地快照；响应中的 `snapshot_path` 和 `manifest_path` 表示实际对照对象。维护页在恢复成功后会自动调用该接口，并展示恢复后切换检查清单。
+`restore-verify` 要求目标目录已存在，目标路径必须是服务器上的 POSIX 绝对路径（以 `/` 开头），不能包含控制字符、反斜杠、`.` 或 `..` 路径段，不能是文件系统根目录或受保护系统目录，并且仍位于 `storage.root`、备份来源和本地备份目标/仓库之外；Windows 或 UNC 路径不是有效的服务器恢复目标，目标路径中已存在的路径组件也不能是符号链接。它会统计恢复目录中的常规文件和字节数，检查 `.mnemonas-restore/config.toml`、`files/`、`.mnemonas/`、`.mnemonas/index.db` 与 `.mnemonas/objects` 是否存在，并对符号链接、非常规文件或不像完整 `storage.root` 的目录给出警告。`local` 任务会优先对照同一目标最近一次成功恢复所用的快照，找不到匹配恢复记录时再对照最新本地快照；响应中的 `snapshot_path` 和 `manifest_path` 表示实际对照对象。维护页在恢复成功后会自动调用该接口，并展示恢复后切换检查清单。
 
 任务视图和恢复报告中的最近恢复摘要只会把目标路径一致、校验时间不早于最近恢复完成时间，且最近恢复已成功完成的 `last_restore_verify` 关联到 `last_restore`。任务视图会返回 `last_matching_restore_verify` 和 `restore_report_findings`，用于展示与恢复报告 `last_matching_restore_verify` 和 `findings` 相同的匹配校验与待处理发现项。任务视图和恢复报告会把匹配结果复制到 `last_matching_restore_verify`；不匹配时，该字段省略，并输出最近恢复尚未完成匹配只读校验的发现项。最近恢复仍在运行时，恢复报告会输出恢复未完成的发现项，并避免把旧校验结果关联到本次恢复。
 
@@ -3202,7 +3334,7 @@ GET /api/v1/diagnostics-export
 
 **响应**: 返回 JSON 文件下载；响应包含 `Content-Disposition: attachment`，并通过 `Cache-Control: no-store` 禁止缓存。
 
-导出的 JSON 根对象包含 `schema_version = 1`，用于标识诊断包结构版本。内容会包含脱敏后的 `alerts`、`disk_health` 和 `smb` 运行态信息，例如 `enabled`、`runtime_available`、通知通道配置状态、阈值、最近一次检查级别和 SMB 预览运行态；不会包含 Webhook URL、自定义 Header、Telegram Bot Token、`smtp_host`、`smtp_username`、`smtp_password`、`smtp_from`、`smtp_to` 或 SMB 凭据内容。
+导出的 JSON 根对象包含 `schema_version = 1`，用于标识诊断包结构版本。内容会包含脱敏后的 `alerts`、`disk_health` 和 `smb` 运行态信息，例如 `enabled`、`runtime_available`、通知通道配置状态、阈值、最近一次检查级别和 SMB 预览运行态；不会包含 Webhook URL、自定义 Header、Telegram Bot Token、企业微信 Webhook URL、`smtp_host`、`smtp_username`、`smtp_password`、`smtp_from`、`smtp_to` 或 SMB 凭据内容。
 
 ---
 
@@ -3219,10 +3351,12 @@ MnemoNAS 实现 WebDAV RFC 4918 核心读写方法，可用于文件管理器挂
 - `GET` - 下载文件
 - `PUT` - 上传文件  
 - `DELETE` - 删除文件
-- `MKCOL` - 创建目录；直接父目录不存在时返回 `409 Conflict`
+- `MKCOL` - 创建目录；直接父目录不存在时返回 `409 Conflict`，目标已存在时返回带 `Allow` 的 `405 Method Not Allowed`
 - `COPY` - 复制文件
 - `MOVE` - 移动/重命名文件
 - `LOCK/UNLOCK` - 文件锁定（虚拟实现）
+
+不支持的 WebDAV 方法会返回 `405 Method Not Allowed`，并通过 `Allow` 响应头列出当前支持的方法。
 
 WebDAV `MOVE` 的目标路径不存在但仍保留历史版本元数据时会返回 `409 Conflict`；目录移动会同时检查目标路径下的后代版本元数据。该目标冲突会先于用户配额和目录配额检查返回。
 

@@ -1191,6 +1191,7 @@ run_doctor_public_domain_test() {
   local web_dir="$case_dir/web"
   local storage_dir="$case_dir/storage"
   local backup_dir="$case_dir/backup"
+  local fake_admin_hash='$2a$10$ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0'
   local status
   mkdir -p "$fake_path" "$bin_dir" "$web_dir" "$storage_dir/files" "$storage_dir/.mnemonas" "$backup_dir"
   chmod 0750 "$storage_dir" "$storage_dir/files"
@@ -1202,10 +1203,10 @@ run_doctor_public_domain_test() {
     'exit 0'
   write_executable "$bin_dir/dataplane" '#!/usr/bin/env bash' 'exit 0'
   printf '<div id="root"></div>\n' > "$web_dir/index.html"
-  cat > "$storage_dir/.mnemonas/users.json" <<'EOF'
+  cat > "$storage_dir/.mnemonas/users.json" <<EOF
 [
-  {"id":"admin-1","username":"admin","role":"admin","disabled":false},
-  {"id":"admin-2","username":"backup-admin","role":"admin","disabled":false},
+  {"id":"admin-1","username":"admin","password_hash":"$fake_admin_hash","role":"admin","disabled":false},
+  {"id":"admin-2","username":"backup-admin","password_hash":"$fake_admin_hash","role":"admin","disabled":false},
   {"id":"disabled-admin","username":"disabled-admin","role":"admin","disabled":true}
 ]
 EOF
@@ -1243,6 +1244,7 @@ EOF
   write_executable "$fake_path/timeout" \
     '#!/usr/bin/env bash' \
     'if [[ "${2:-}" == "openssl" ]]; then shift; exec "$@"; fi' \
+    'if [[ "${MNEMONAS_FAKE_PUBLIC_CONTROL_TCP_OPEN:-0}" == "1" && "$*" == *"/dev/tcp/nas.example.com/18080"* ]]; then exit 0; fi' \
     'exit 1'
   write_executable "$fake_path/ss" \
     '#!/usr/bin/env bash' \
@@ -1295,6 +1297,7 @@ EOF
   assert_file_contains "$case_dir/doctor-public.log" "public administrator redundancy verified: 2 enabled administrators"
   assert_file_contains "$case_dir/doctor-public.log" "public WebDAV anonymous PROPFIND is rejected: https://nas.example.com/dav/ (HTTP 401)"
   assert_file_contains "$case_dir/doctor-public.log" "public direct control plane is not publicly reachable: http://nas.example.com:18080/health"
+  assert_file_contains "$case_dir/doctor-public.log" "public direct control plane TCP port 18080 is not publicly reachable on nas.example.com"
   assert_file_contains "$case_dir/doctor-public.log" "public dataplane gRPC port 19090 is not publicly reachable on nas.example.com"
   assert_file_contains "$case_dir/doctor-public.log" "control plane port 18080 is loopback-only"
   assert_file_contains "$case_dir/doctor-public.log" "manual cloud firewall check: expose only 80/443 publicly; keep 18080/19090/19091 closed to the public internet"
@@ -1347,6 +1350,41 @@ EOF
   [[ "$status" -ne 0 ]] || fail "public doctor accepted custom auth initial password file"
   assert_file_contains "$case_dir/doctor-public-custom-auth-initial-password.log" "initial admin password file still exists"
   assert_file_contains "$case_dir/doctor-public-custom-auth-initial-password.log" "$custom_auth_dir/initial-password.txt"
+
+  local symlink_auth_dir="$case_dir/symlink-auth"
+  mkdir -p "$symlink_auth_dir"
+  cp "$storage_dir/.mnemonas/users.json" "$symlink_auth_dir/users.json"
+  ln -s "$case_dir/missing-initial-password.txt" "$symlink_auth_dir/initial-password.txt"
+  cat > "$case_dir/config-symlink-auth-initial-password.toml" <<EOF
+[server]
+host = "127.0.0.1"
+port = 18080
+trusted_proxy_hops = 1
+
+[storage]
+root = "$storage_dir"
+
+[dataplane]
+grpc_address = "127.0.0.1:19090"
+
+[auth]
+users_file = "$symlink_auth_dir/users.json"
+EOF
+
+  set +e
+  PATH="$fake_path:$PATH" \
+    BIN_DIR="$bin_dir" \
+    WEB_DIR="$web_dir" \
+    CONFIG_PATH="$case_dir/config-symlink-auth-initial-password.toml" \
+    DATAPLANE_HTTP_PORT=19091 \
+    BACKUP_ROOT="$backup_dir" \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain nas.example.com > "$case_dir/doctor-public-symlink-auth-initial-password.log"
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "public doctor accepted custom auth initial password symlink"
+  assert_file_contains "$case_dir/doctor-public-symlink-auth-initial-password.log" "initial admin password path is a symlink"
+  assert_file_contains "$case_dir/doctor-public-symlink-auth-initial-password.log" "$symlink_auth_dir/initial-password.txt"
 
   cat > "$case_dir/config-share-trimmed.toml" <<EOF
 [server]
@@ -1585,6 +1623,34 @@ EOF
 
   [[ "$status" -ne 0 ]] || fail "public doctor accepted direct control plane HTTP 404 exposure"
   assert_file_contains "$case_dir/doctor-public-direct-404.log" "public direct control plane is publicly reachable"
+
+  write_executable "$fake_path/curl" \
+    '#!/usr/bin/env bash' \
+    'url="${@: -1}"' \
+    'if [[ "$*" == *" -X PROPFIND "* && "$url" == "https://nas.example.com/dav/" ]]; then printf "401"; exit 0; fi' \
+    'if [[ "$*" == *" -w "* && "$url" == "http://nas.example.com/health" ]]; then printf "301 https://nas.example.com/health"; exit 0; fi' \
+    'case "$url" in' \
+    '  https://nas.example.com/health) printf "ok\n";;' \
+    '  http://nas.example.com:18080/health) exit 7;;' \
+    '  */) printf "<div id=\"root\"></div>\n";;' \
+    '  *) printf "ok\n";;' \
+    'esac'
+
+  set +e
+  PATH="$fake_path:$PATH" \
+    BIN_DIR="$bin_dir" \
+    WEB_DIR="$web_dir" \
+    CONFIG_PATH="$case_dir/config.toml" \
+    DATAPLANE_HTTP_PORT=19091 \
+    BACKUP_ROOT="$backup_dir" \
+    MNEMONAS_FAKE_PUBLIC_CONTROL_TCP_OPEN=1 \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain nas.example.com > "$case_dir/doctor-public-direct-tcp-open.log"
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "public doctor accepted direct control plane TCP exposure"
+  assert_file_contains "$case_dir/doctor-public-direct-tcp-open.log" "public direct control plane is not publicly reachable: http://nas.example.com:18080/health"
+  assert_file_contains "$case_dir/doctor-public-direct-tcp-open.log" "public direct control plane TCP port 18080 is publicly reachable on nas.example.com"
 
   write_executable "$fake_path/curl" \
     '#!/usr/bin/env bash' \
@@ -2019,6 +2085,80 @@ EOF
   assert_file_contains "$case_dir/doctor-public-invalid-users.log" "public users file could not be parsed; cannot verify administrator redundancy"
   assert_file_contains "$case_dir/doctor-public-invalid-users.log" "users.json parse error"
 
+  cat > "$case_dir/malformed-users.json" <<EOF
+[
+  {"id":"admin-1","username":"admin","password_hash":"$fake_admin_hash","role":"admin","disabled":false},
+  {"id":"admin-1","username":"backup-admin","password_hash":"$fake_admin_hash","role":"admin","disabled":false}
+]
+EOF
+  cat > "$case_dir/config-malformed-users.toml" <<EOF
+[server]
+host = "127.0.0.1"
+port = 18080
+trusted_proxy_hops = 1
+
+[storage]
+root = "$storage_dir"
+
+[dataplane]
+grpc_address = "127.0.0.1:19090"
+
+[auth]
+users_file = "$case_dir/malformed-users.json"
+EOF
+
+  set +e
+  PATH="$fake_path:$PATH" \
+    BIN_DIR="$bin_dir" \
+    WEB_DIR="$web_dir" \
+    CONFIG_PATH="$case_dir/config-malformed-users.toml" \
+    DATAPLANE_HTTP_PORT=19091 \
+    BACKUP_ROOT="$backup_dir" \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain nas.example.com > "$case_dir/doctor-public-malformed-users.log"
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "public doctor accepted a malformed users file"
+  assert_file_contains "$case_dir/doctor-public-malformed-users.log" "public users file could not be parsed; cannot verify administrator redundancy"
+  assert_file_contains "$case_dir/doctor-public-malformed-users.log" "duplicate user id"
+
+  cat > "$case_dir/unusable-admin-users.json" <<EOF
+[
+  {"id":"admin-1","username":"admin","role":"admin","disabled":false},
+  {"id":"admin-2","username":"backup-admin","password_hash":"not-bcrypt","role":"admin","disabled":false}
+]
+EOF
+  cat > "$case_dir/config-unusable-admin-users.toml" <<EOF
+[server]
+host = "127.0.0.1"
+port = 18080
+trusted_proxy_hops = 1
+
+[storage]
+root = "$storage_dir"
+
+[dataplane]
+grpc_address = "127.0.0.1:19090"
+
+[auth]
+users_file = "$case_dir/unusable-admin-users.json"
+EOF
+
+  set +e
+  PATH="$fake_path:$PATH" \
+    BIN_DIR="$bin_dir" \
+    WEB_DIR="$web_dir" \
+    CONFIG_PATH="$case_dir/config-unusable-admin-users.toml" \
+    DATAPLANE_HTTP_PORT=19091 \
+    BACKUP_ROOT="$backup_dir" \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain nas.example.com > "$case_dir/doctor-public-unusable-admin-users.log"
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "public doctor accepted enabled administrators without usable password hashes"
+  assert_file_contains "$case_dir/doctor-public-unusable-admin-users.log" "public users file could not be parsed; cannot verify administrator redundancy"
+  assert_file_contains "$case_dir/doctor-public-unusable-admin-users.log" "invalid password_hash for enabled administrator"
+
   cat > "$case_dir/zero-admin-users.json" <<'EOF'
 [
   {"id":"disabled-admin","username":"disabled-admin","role":"admin","disabled":true},
@@ -2055,9 +2195,9 @@ EOF
   [[ "$status" -ne 0 ]] || fail "public doctor accepted zero enabled administrators"
   assert_file_contains "$case_dir/doctor-public-zero-admin.log" "public users file has no enabled administrators"
 
-  cat > "$case_dir/single-admin-users.json" <<'EOF'
+  cat > "$case_dir/single-admin-users.json" <<EOF
 [
-  {"id":"admin-1","username":"admin","role":"admin","disabled":false},
+  {"id":"admin-1","username":"admin","password_hash":"$fake_admin_hash","role":"admin","disabled":false},
   {"id":"disabled-admin","username":"disabled-admin","role":"admin","disabled":true},
   {"id":"user-1","username":"user","role":"user","disabled":false}
 ]

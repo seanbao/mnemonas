@@ -163,6 +163,8 @@ webhook_headers = []
 telegram_enabled = false
 telegram_bot_token = ""
 telegram_chat_id = ""
+wecom_enabled = false
+wecom_webhook_url = ""
 email_enabled = false
 smtp_host = ""
 smtp_port = 587
@@ -276,8 +278,9 @@ auto_generate = true
 - 内部数据目录结构固定在 `root/.mnemonas` 下。
 - 启动时会将 `root` 和 `root/files` 权限收紧为 `0750`，内部目录为 `0700`。
 - systemd 安装的 `mnemonas-dataplane-start` helper 会在启动 dataplane 前拒绝包含换行字符、父目录段、符号链接路径组件或受保护系统目录的 `storage.root` 与 `DATAPLANE_DATA_DIR`。
-- `directory_quotas` 使用 MnemoNAS 逻辑路径，例如 `/team`。上传、复制、移动、回收站恢复、版本恢复和 WebDAV PUT/COPY/MOVE 会在写入前检查当前目录逻辑大小。根目录 `/` 可用于设置全局硬限制。管理员可在存储页查看每个目录配额的当前用量、剩余额度和状态。
-- `directory_access_rules` 使用干净的 MnemoNAS 绝对路径，例如 `/team`。每条规则可设置 `read_users`、`write_users`、`read_groups`、`write_groups`、`read_roles`、`write_roles`。匹配时采用最具体路径规则；写权限同时包含读权限，写操作必须显式命中写授权。非管理员 Web/API、WebDAV `users` 模式、搜索、分享、收藏、回收站和最近操作使用同一套权限判定。未命中规则的路径继续按用户 `home_dir` 边界处理。Web/API 根目录列表只返回用户 `home_dir` 和可读共享目录的顶层入口。若仅授权嵌套目录，Web/API 与 WebDAV 可将已存在的祖先目录作为只读导航入口，直接子项仍按各自规则过滤，祖先目录下的写入仍需显式写授权。
+- `directory_quotas`、`directory_access_rules` 和分享路径策略中的 `path` 字段均使用 MnemoNAS 逻辑路径。路径必须以 `/` 开头，不能包含 Windows/UNC 语法、反斜杠、查询或片段字符、控制字符，或 `.`/`..` 路径段。配置加载和设置 API 会规范化重复斜杠与末尾斜杠；包含 `.` 或 `..` 的路径不会被折叠，会被拒绝。
+- `directory_quotas` 使用 MnemoNAS 逻辑路径，例如 `/team`。上传、复制、移动、回收站恢复、版本恢复和 WebDAV PUT/COPY/MOVE 会在写入前检查当前目录逻辑大小。根目录 `/` 可用于设置全局硬限制。管理员可在存储页查看目录配额总用量、接近上限、已超限、路径不存在数量、优先复核的目录配额关注清单，以及每个目录配额的当前用量、剩余额度和状态；Web 设置页会在保存前按已保存配额和当前草稿显示新增、修改和删除的目录配额摘要。
+- `directory_access_rules` 使用干净的 MnemoNAS 绝对路径，例如 `/team`。每条规则可设置 `read_users`、`write_users`、`read_groups`、`write_groups`、`read_roles`、`write_roles`。匹配时采用最具体路径规则；写权限同时包含读权限，写操作必须显式命中写授权。非管理员 Web/API、WebDAV `users` 模式、搜索、分享、收藏、回收站和最近操作使用同一套权限判定。未命中规则的路径继续按用户 `home_dir` 边界处理。Web/API 根目录列表只返回用户 `home_dir` 和可读共享目录的顶层入口。若仅授权嵌套目录，Web/API 与 WebDAV 可将已存在的祖先目录作为只读导航入口，直接子项仍按各自规则过滤，祖先目录下的写入仍需显式写授权。Web 设置页会在保存前按已保存规则和当前草稿显示新增、修改和删除的目录权限规则摘要，并基于当前草稿展示规则数量、可读/可写主体、写权限路径和根路径或宽角色授权等覆盖关注项。
 
 **示例：**
 
@@ -551,7 +554,7 @@ max_expires_in = "24h"
 max_access = 20
 ```
 
-`base_url` 只影响接口返回给调用方的分享链接展示值，不改变分享 `id` 本身。配置为空时，后端返回相对路径 `/s/{id}`；非空时必须是完整的 `http` 或 `https` URL，不能包含用户名、密码或其他 userinfo，也不能包含查询参数或片段。主机名必须是有效域名或 IP，不能包含空标签、下划线或多余尾点。默认有效期和默认访问次数只影响之后创建的分享；创建请求体显式传入 `expires_in` 或 `max_access` 时以请求体为准。路径策略可以设置 `require_password`、`max_expires_in` 和 `max_access`。命中策略时，未设置密码的创建请求，以及会使既有分享保持或变为无密码的更新请求会被拒绝；超过策略上限、显式清空上限字段，或既有分享缺少对应限制或超过策略上限时，有效期和访问次数会自动压到上限。
+`base_url` 只影响接口返回给调用方的分享链接展示值，不改变分享 `id` 本身。配置为空时，后端返回相对路径 `/s/{id}`；非空时必须是完整的 `http` 或 `https` URL，不能包含用户名、密码或其他 userinfo，也不能包含查询参数或片段。主机名必须是有效域名或 IP，不能包含空标签、下划线或多余尾点。默认有效期和默认访问次数只影响之后创建的分享；创建请求体显式传入 `expires_in` 或 `max_access` 时以请求体为准。路径策略的 `path` 使用与目录配额和目录访问规则相同的 MnemoNAS 逻辑路径规则。路径策略可以设置 `require_password`、`max_expires_in` 和 `max_access`。命中策略时，未设置密码的创建请求，以及会使既有分享保持或变为无密码的更新请求会被拒绝；超过策略上限、显式清空上限字段，或既有分享缺少对应限制或超过策略上限时，有效期和访问次数会自动压到上限。Web 分享创建弹窗会在提交前展示策略来源、密码要求、有效期和访问次数的实际复核摘要，并标出路径策略上限收紧的项目。Web 设置页会在保存前展示分享功能、基础 URL、默认有效期、默认访问次数和路径策略相对已保存配置的变更摘要；分享列表会汇总需复核、无密码、覆盖较大、即将到期和长期未访问链接，并提供对应筛选与需处理分享的停用入口。
 
 ---
 
@@ -590,6 +593,8 @@ max_access = 20
 | `telegram_enabled` | bool | `false` | 是否启用 Telegram 机器人通知 |
 | `telegram_bot_token` | string | `""` | Telegram Bot Token；不会在诊断或设置响应中明文返回 |
 | `telegram_chat_id` | string | `""` | Telegram Chat ID 或 `@channel` 用户名 |
+| `wecom_enabled` | bool | `false` | 是否启用企业微信/WeCom 群机器人通知 |
+| `wecom_webhook_url` | string | `""` | 企业微信群机器人 Webhook URL；启用企业微信通知时必填，非空时必须是完整的 `http` 或 `https` URL，诊断和设置响应不会明文返回 |
 | `email_enabled` | bool | `false` | 是否启用 SMTP 邮件通知 |
 | `smtp_host` | string | `""` | SMTP 主机名，不包含端口 |
 | `smtp_port` | int | `587` | SMTP 端口 |
@@ -598,7 +603,7 @@ max_access = 20
 | `smtp_from` | string | `""` | 发件人地址，例如 `MnemoNAS <alerts@example.com>` |
 | `smtp_to` | string[] | `[]` | 收件人地址列表 |
 
-设备状态页和诊断导出会显示提醒是否启用、运行态是否可用、最近一次检查级别，以及是否配置了 Webhook、Telegram 或邮件；邮件通道只有在启用且 SMTP 主机、端口、发件人和至少一个非空收件人均存在时才会标记为已配置。诊断响应不会暴露 `webhook_url`、`webhook_headers`、`telegram_bot_token`、SMTP 主机、SMTP 用户名、`smtp_password`、发件人或收件人地址。同一通知通道也用于备份失败、备份完成但带警告、显式恢复失败或带警告、恢复后只读校验失败或带警告、恢复演练失败、恢复演练缺失/过期提醒、保留策略检测失败或带警告、磁盘健康异常、Scrub 异常和登录限流事件；备份相关事件类型包括 `backup_run`、`backup_restore`、`backup_restore_verify`、`backup_restore_drill` 和 `backup_retention_check`。保存提醒配置后，管理员可以在 Web 设置页或通过 `POST /api/v1/settings/alerts/test` 发送 `alert_test` 测试事件。Webhook 发送成功和失败日志只记录 URL 的 scheme 与 host，不记录路径、查询参数、凭据或 GET payload；Telegram 发送错误不会包含 Bot Token。
+设备状态页和诊断导出会显示提醒是否启用、运行态是否可用、最近一次检查级别，以及是否配置了 Webhook、Telegram、企业微信或邮件；邮件通道只有在启用且 SMTP 主机、端口、发件人和至少一个非空收件人均存在时才会标记为已配置。诊断响应不会暴露 `webhook_url`、`webhook_headers`、`telegram_bot_token`、`wecom_webhook_url`、SMTP 主机、SMTP 用户名、`smtp_password`、发件人或收件人地址。同一通知通道也用于备份失败、备份完成但带警告、显式恢复失败或带警告、恢复后只读校验失败或带警告、恢复演练失败、恢复演练缺失/过期提醒、保留策略检测失败或带警告、磁盘健康异常、Scrub 异常、登录限流、目录授权/分享策略变更，以及启用分享在 72 小时内到期的聚合提醒；备份相关事件类型包括 `backup_run`、`backup_restore`、`backup_restore_verify`、`backup_restore_drill` 和 `backup_retention_check`，分享相关事件类型包括 `share_expiring_soon`。保存提醒配置后，管理员可以在 Web 设置页或通过 `POST /api/v1/settings/alerts/test` 发送 `alert_test` 测试事件。Webhook 和企业微信发送成功或失败日志只记录 URL 的 scheme 与 host，不记录路径、查询参数、凭据或 GET payload；Telegram 发送错误不会包含 Bot Token。
 
 **示例：**
 
@@ -614,6 +619,8 @@ webhook_url = "https://hooks.example.com/alert"
 telegram_enabled = true
 telegram_bot_token = "123456:ABC..."
 telegram_chat_id = "-1001234567890"
+wecom_enabled = true
+wecom_webhook_url = "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=..."
 email_enabled = true
 smtp_host = "smtp.example.com"
 smtp_port = 587
@@ -659,7 +666,7 @@ smtp_to = ["admin@example.com"]
 - 诊断页和诊断导出只包含脱敏摘要，不包含设备序列号等细节。
 - 后台周期检查发现 `warning`、`critical` 或 `unavailable` 时，会以系统用户写入 `disk_health` 最近操作，并按 `cooldown_period` 控制重复记录。
 - NVMe `percentage_used`、`available_spare`、`critical_warning`、`media_errors` 以及常见 ATA 寿命属性会参与状态判断。
-- 当 `[alerts] enabled = true` 且配置了 Webhook、Telegram 或 SMTP 邮件时，磁盘缺失、SMART 失败、温度过高、序列号不匹配或 SMART 不可用会发送 `disk_health` 事件。
+- 当 `[alerts] enabled = true` 且配置了 Webhook、Telegram、企业微信或 SMTP 邮件时，磁盘缺失、SMART 失败、温度过高、序列号不匹配或 SMART 不可用会发送 `disk_health` 事件。
 - 设备路径不存在会标记为 `critical`；`smartctl` 不可用或返回无效 JSON 会标记为 `unavailable`。
 
 **示例：**

@@ -4604,24 +4604,9 @@ func validateRestoreVerificationTarget(source, destination, storageRoot, targetP
 }
 
 func validateRestoreTargetPath(source, destination, storageRoot, targetPath string) (string, error) {
-	if strings.IndexFunc(targetPath, func(r rune) bool {
-		return r < 0x20 || r == 0x7f
-	}) >= 0 {
-		return "", invalidRestoreRequestErrorf("%w: restore target contains invalid control characters", ErrUnsafePath)
-	}
-	target := strings.TrimSpace(targetPath)
-	if target == "" {
-		return "", invalidRestoreRequestErrorf("%w: restore target is empty", ErrUnsafePath)
-	}
-	if !filepath.IsAbs(target) {
-		return "", invalidRestoreRequestErrorf("%w: restore target must be absolute", ErrUnsafePath)
-	}
-	target = filepath.Clean(target)
-	if isBackupFilesystemRoot(target) {
-		return "", invalidRestoreRequestErrorf("%w: restore target must not be filesystem root", ErrUnsafePath)
-	}
-	if isProtectedBackupSystemDirectory(target) {
-		return "", invalidRestoreRequestErrorf("%w: restore target must not be protected system directory", ErrUnsafePath)
+	target, err := normalizeRestoreTargetPathSyntax(targetPath)
+	if err != nil {
+		return "", err
 	}
 	if err := validatePathComponentsNoSymlink(target, "restore target"); err != nil {
 		return "", markInvalidRestoreRequest(err)
@@ -4650,6 +4635,44 @@ func validateRestoreTargetPath(source, destination, storageRoot, targetPath stri
 		return "", invalidRestoreRequestErrorf("%w: restore target parent is not a directory", ErrUnsafePath)
 	}
 	return target, nil
+}
+
+func normalizeRestoreTargetPathSyntax(targetPath string) (string, error) {
+	if strings.IndexFunc(targetPath, func(r rune) bool {
+		return r < 0x20 || r == 0x7f
+	}) >= 0 {
+		return "", invalidRestoreRequestErrorf("%w: restore target contains invalid control characters", ErrUnsafePath)
+	}
+	target := strings.TrimSpace(targetPath)
+	if target == "" {
+		return "", invalidRestoreRequestErrorf("%w: restore target is empty", ErrUnsafePath)
+	}
+	if strings.Contains(target, "\\") {
+		return "", invalidRestoreRequestErrorf("%w: restore target must not contain backslashes", ErrUnsafePath)
+	}
+	if !strings.HasPrefix(target, "/") {
+		return "", invalidRestoreRequestErrorf("%w: restore target must be absolute", ErrUnsafePath)
+	}
+	if restoreTargetHasDotSegment(target) {
+		return "", invalidRestoreRequestErrorf("%w: restore target must not contain dot path segments", ErrUnsafePath)
+	}
+	target = filepath.Clean(target)
+	if isBackupFilesystemRoot(target) {
+		return "", invalidRestoreRequestErrorf("%w: restore target must not be filesystem root", ErrUnsafePath)
+	}
+	if isProtectedBackupSystemDirectory(target) {
+		return "", invalidRestoreRequestErrorf("%w: restore target must not be protected system directory", ErrUnsafePath)
+	}
+	return target, nil
+}
+
+func restoreTargetHasDotSegment(targetPath string) bool {
+	for _, segment := range strings.Split(filepath.ToSlash(targetPath), "/") {
+		if segment == "." || segment == ".." {
+			return true
+		}
+	}
+	return false
 }
 
 func createPartialRestoreTarget(targetPath, runID string) (string, error) {
@@ -4856,30 +4879,30 @@ func appendLocalRestoreSnapshotComparisonWarnings(ctx context.Context, snapshotP
 }
 
 func (m *Manager) latestCompletedRestoreForTarget(jobID string, targetPath string) *RestoreResult {
-	cleanTargetPath := filepath.Clean(targetPath)
+	targetPath = strings.TrimSpace(targetPath)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	state := m.state.Jobs[jobID]
 	for _, restore := range state.RestoreHistory {
-		if restoreMatchesTargetSnapshot(restore, cleanTargetPath) {
+		if restoreMatchesTargetSnapshot(restore, targetPath) {
 			return cloneRestoreResultRaw(restore)
 		}
 	}
-	if restoreMatchesTargetSnapshot(state.LastRestore, cleanTargetPath) {
+	if restoreMatchesTargetSnapshot(state.LastRestore, targetPath) {
 		return cloneRestoreResultRaw(state.LastRestore)
 	}
 	return nil
 }
 
-func restoreMatchesTargetSnapshot(restore *RestoreResult, cleanTargetPath string) bool {
+func restoreMatchesTargetSnapshot(restore *RestoreResult, targetPath string) bool {
 	if restore == nil || restore.Status != StatusCompleted {
 		return false
 	}
 	if strings.TrimSpace(restore.SnapshotPath) == "" {
 		return false
 	}
-	return filepath.Clean(restore.TargetPath) == cleanTargetPath
+	return strings.TrimSpace(restore.TargetPath) == targetPath
 }
 
 func localRestoreSnapshotManifest(job config.BackupJobConfig, restore *RestoreResult) (string, string, Manifest, error) {

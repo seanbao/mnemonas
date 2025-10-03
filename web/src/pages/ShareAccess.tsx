@@ -26,7 +26,7 @@ import {
 } from '@/api/share'
 import { EmptyState } from '@/components/ui/EmptyState'
 import { FileIcon } from '@/components/ui/FileIcon'
-import { formatBytes, formatDate } from '@/lib/utils'
+import { ensureZipExtension, formatBytes, formatDate } from '@/lib/utils'
 import { GENERIC_LOAD_ERROR_DESCRIPTION, getUserFacingErrorDescription } from '@/lib/apiMessages'
 import { getFolderPathAfterShareAuth } from './shareAccessUtils'
 
@@ -35,7 +35,7 @@ function hasAuthorizedShareContent(info: PublicShareInfo): boolean {
 }
 
 function getShareArchiveFilename(name: string | undefined): string {
-  return `${name || 'share'}.zip`
+  return ensureZipExtension(name || 'share')
 }
 
 function getGoneSharePresentation(error: ShareError): { title: string; description: string } | null {
@@ -351,9 +351,13 @@ export function ShareAccessPage() {
 
     try {
       if (shareInfo?.type === 'folder') {
+        const currentFolderName = folderPath
+          ? folderPath.split('/').filter(Boolean).pop()
+          : shareInfo.file_name
         await downloadShare(id, {
+          filePath: folderPath || undefined,
           archive: 'zip',
-          filename: getShareArchiveFilename(shareInfo.file_name),
+          filename: getShareArchiveFilename(currentFolderName),
           signal: controller.signal,
         })
       } else {

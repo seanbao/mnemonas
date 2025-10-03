@@ -644,9 +644,31 @@ describe('API: files', () => {
     })
 
     it.each([
+      ['unsafe', '/docs/./reports'],
+      ['relative', 'docs/reports'],
+      ['trailing-slash', '/docs/reports/'],
+    ])('rejects file list payloads with %s response paths', async (_label, path) => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          success: true,
+          data: {
+            path,
+            files: [],
+          },
+        }),
+      })
+
+      await expect(listFiles('/docs')).rejects.toThrow('服务器返回了无效的数据')
+    })
+
+    it.each([
       ['negative file size', { name: 'test.txt', path: '/test.txt', isDir: false, size: -1, modTime: '2024-01-01' }],
       ['fractional file size', { name: 'test.txt', path: '/test.txt', isDir: false, size: 1.5, modTime: '2024-01-01' }],
       ['unsafe file size', { name: 'test.txt', path: '/test.txt', isDir: false, size: 9007199254740992, modTime: '2024-01-01' }],
+      ['unsafe file path', { name: 'test.txt', path: '/docs/./test.txt', isDir: false, size: 100, modTime: '2024-01-01' }],
+      ['relative file path', { name: 'test.txt', path: 'docs/test.txt', isDir: false, size: 100, modTime: '2024-01-01' }],
+      ['trailing-slash file path', { name: 'test.txt', path: '/docs/test.txt/', isDir: false, size: 100, modTime: '2024-01-01' }],
     ])('rejects file list payloads with %s', async (_label, file) => {
       mockFetch.mockResolvedValueOnce({
         ok: true,
@@ -730,6 +752,25 @@ describe('API: files', () => {
           data: {
             path: '/test.txt',
             versions: { invalid: true },
+          },
+        }),
+      })
+
+      await expect(getVersions('/test.txt')).rejects.toThrow('服务器返回了无效的数据')
+    })
+
+    it.each([
+      ['unsafe', '/docs/./test.txt'],
+      ['relative', 'docs/test.txt'],
+      ['trailing-slash', '/docs/test.txt/'],
+    ])('rejects version history payloads with %s response paths', async (_label, path) => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          success: true,
+          data: {
+            path,
+            versions: [],
           },
         }),
       })
@@ -1055,6 +1096,9 @@ describe('API: files', () => {
       ['fractional directory used bytes', { directory_quotas: [{ path: '/team', quota_bytes: 1024, used_bytes: 1.5, available_bytes: 1024, usage_ratio: 0.5, exists: true, status: 'normal' }] }],
       ['unsafe directory available bytes', { directory_quotas: [{ path: '/team', quota_bytes: 1024, used_bytes: 0, available_bytes: 9007199254740992, usage_ratio: 0.5, exists: true, status: 'normal' }] }],
       ['negative directory usage ratio', { directory_quotas: [{ path: '/team', quota_bytes: 1024, used_bytes: 0, available_bytes: 1024, usage_ratio: -0.1, exists: true, status: 'normal' }] }],
+      ['unsafe directory quota path', { directory_quotas: [{ path: '/team/./private', quota_bytes: 1024, used_bytes: 0, available_bytes: 1024, usage_ratio: 0.5, exists: true, status: 'normal' }] }],
+      ['relative directory quota path', { directory_quotas: [{ path: 'team', quota_bytes: 1024, used_bytes: 0, available_bytes: 1024, usage_ratio: 0.5, exists: true, status: 'normal' }] }],
+      ['trailing-slash directory quota path', { directory_quotas: [{ path: '/team/', quota_bytes: 1024, used_bytes: 0, available_bytes: 1024, usage_ratio: 0.5, exists: true, status: 'normal' }] }],
     ])('rejects storage stats payloads with %s', async (_label, data) => {
       mockFetch.mockResolvedValueOnce({
         ok: true,
@@ -1675,6 +1719,26 @@ describe('API: files', () => {
       })
     })
 
+    it('encodes version hashes as path segments when restoring versions', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          success: true,
+          data: {
+            path: '/test.txt',
+            restored: 'hash?with space%',
+          },
+          timestamp: '2024-01-01',
+        }),
+      })
+
+      await expect(restoreVersion('/test.txt', 'hash?with space%')).resolves.toEqual({ warning: false, message: undefined })
+      expectFetchCall(1, '/api/v1/versions/hash%3Fwith%20space%25/restore?path=%2Ftest.txt', {
+        method: 'POST',
+        headers: {},
+      })
+    })
+
     it('returns warning details for successful restore-version responses with warnings', async () => {
       mockFetch.mockResolvedValueOnce({
         ok: true,
@@ -1922,6 +1986,47 @@ describe('API: files', () => {
         await restoreFromTrash('item1', '/new-location/file.txt')
         expectFetchCall(1, '/api/v1/trash/item1/restore?path=%2Fnew-location%2Ffile.txt', {
           method: 'POST',
+          headers: {},
+        })
+      })
+
+      it('encodes trash item IDs as path segments for restore and delete actions', async () => {
+        const trashId = 'trash?with space%'
+        const encodedTrashId = 'trash%3Fwith%20space%25'
+
+        mockFetch
+          .mockResolvedValueOnce({
+            ok: true,
+            json: () => Promise.resolve({
+              success: true,
+              data: {
+                id: trashId,
+                restored: true,
+              },
+              timestamp: '2024-01-01',
+            }),
+          })
+          .mockResolvedValueOnce({
+            ok: true,
+            json: () => Promise.resolve({
+              success: true,
+              data: {
+                id: trashId,
+                deleted: true,
+              },
+              timestamp: '2024-01-01',
+            }),
+          })
+
+        await restoreFromTrash(trashId, '/new-location/file.txt')
+        await deleteFromTrash(trashId)
+
+        expectFetchCall(1, `/api/v1/trash/${encodedTrashId}/restore?path=%2Fnew-location%2Ffile.txt`, {
+          method: 'POST',
+          headers: {},
+        })
+        expectFetchCall(2, `/api/v1/trash/${encodedTrashId}`, {
+          method: 'DELETE',
           headers: {},
         })
       })
@@ -2679,6 +2784,12 @@ describe('API: files', () => {
         expect(getThumbnailUrl('/photo.jpg', 'large')).toBe('/api/v1/thumbnails/photo.jpg?size=large')
       })
 
+      it('encodes thumbnail size as a query parameter value', () => {
+        const unsafeSize = 'small&download=true' as Parameters<typeof getThumbnailUrl>[1]
+
+        expect(getThumbnailUrl('/photo.jpg', unsafeSize)).toBe('/api/v1/thumbnails/photo.jpg?size=small%26download%3Dtrue')
+      })
+
       it('does not add auth query when token exists', () => {
         localStorage.setItem('mnemonas_token', 'test-token')
       expect(getThumbnailUrl('/photo.jpg')).toBe('/api/v1/thumbnails/photo.jpg?size=medium')
@@ -2884,6 +2995,7 @@ describe('API: files', () => {
             cooldown_period: '2h',
             webhook_configured: true,
             telegram_configured: true,
+            wecom_configured: true,
             email_configured: true,
             webhook_method: 'POST',
             last_level: 'warning',
@@ -2968,6 +3080,7 @@ describe('API: files', () => {
       expect(result.alerts?.runtimeAvailable).toBe(true)
       expect(result.alerts?.webhookConfigured).toBe(true)
       expect(result.alerts?.telegramConfigured).toBe(true)
+      expect(result.alerts?.wecomConfigured).toBe(true)
       expect(result.alerts?.emailConfigured).toBe(true)
       expect(result.alerts?.lastLevel).toBe('warning')
       expect(result.alerts?.lastUsedPct).toBe(87.5)
@@ -3797,6 +3910,82 @@ describe('API: files', () => {
       })
     })
 
+    it('normalizes backup restore target paths before sending requests', async () => {
+      const previewResult = {
+        id: '20260509T035900.000000000Z',
+        job_id: 'external-disk',
+        status: 'completed',
+        started_at: '2026-05-09T03:59:00Z',
+        finished_at: '2026-05-09T03:59:01Z',
+        duration_ms: 1000,
+        source: '/srv/mnemonas',
+        destination: '/mnt/backup-drive/mnemonas',
+        target_path: '/restore/mnemonas',
+        file_count: 12,
+        total_bytes: 4096,
+        config_available: true,
+        config_included: true,
+      }
+      const batchPreview = {
+        id: '20260509T035901.000000000Z',
+        status: 'completed',
+        started_at: '2026-05-09T03:59:01Z',
+        finished_at: '2026-05-09T03:59:02Z',
+        duration_ms: 1000,
+        items: [{
+          index: 0,
+          job_id: 'external-disk',
+          target_path: '/restore/a',
+          include_config: true,
+          status: 'completed',
+          preview: {
+            ...previewResult,
+            target_path: '/restore/a',
+          },
+        }],
+        total_files: 12,
+        total_bytes: 4096,
+      }
+
+      mockFetch
+        .mockResolvedValueOnce({
+          ok: true,
+          json: () => Promise.resolve({ success: true, data: previewResult, timestamp: '2026-05-09' }),
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          json: () => Promise.resolve({ success: true, data: batchPreview, timestamp: '2026-05-09' }),
+        })
+
+      await previewBackupRestoreJob('external-disk', ' /restore/mnemonas/ ', true)
+      await previewBatchBackupRestore([{ job_id: ' external-disk ', target_path: '/restore/a/', include_config: true }])
+
+      expectFetchCall(1, '/api/v1/maintenance/backups/external-disk/restore-preview', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ target_path: '/restore/mnemonas', include_config: true }),
+      })
+      expectFetchCall(2, '/api/v1/maintenance/backups/batch-restore-preview', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ items: [{ job_id: 'external-disk', target_path: '/restore/a', include_config: true }] }),
+      })
+    })
+
+    it.each([
+      ['preview relative path', () => previewBackupRestoreJob('external-disk', 'restore/mnemonas')],
+      ['preview root path', () => previewBackupRestoreJob('external-disk', '/')],
+      ['preview backslash path', () => previewBackupRestoreJob('external-disk', '/restore\\mnemonas')],
+      ['restore dot segment path', () => restoreBackupJob('external-disk', '/restore/../mnemonas')],
+      ['verify control character path', () => verifyBackupRestoreJob('external-disk', '/restore\nmnemonas')],
+      ['batch preview relative path', () => previewBatchBackupRestore([{ job_id: 'external-disk', target_path: 'restore/a', include_config: true }])],
+      ['batch preview backslash path', () => previewBatchBackupRestore([{ job_id: 'external-disk', target_path: '/restore\\a', include_config: true }])],
+      ['batch restore root path', () => runBatchBackupRestore([{ job_id: 'external-disk', target_path: '/', include_config: true }])],
+    ])('rejects invalid backup restore target paths before sending requests: %s', async (_name, call) => {
+      await expect(call()).rejects.toThrow('非法路径')
+      expect(mockFetch).not.toHaveBeenCalled()
+    })
+
     it('runs a backup restore drill', async () => {
       mockFetch.mockResolvedValueOnce({
         ok: true,
@@ -3890,6 +4079,9 @@ describe('API: files', () => {
       ['fractional duration', { duration_ms: 1.5 }],
       ['negative file_count', { file_count: -1 }],
       ['unsafe total_bytes', { total_bytes: 9007199254740992 }],
+      ['relative target_path', { target_path: 'restore/mnemonas' }],
+      ['backslash target_path', { target_path: '/restore\\mnemonas' }],
+      ['trailing-slash target_path', { target_path: '/restore/mnemonas/' }],
     ])('rejects backup restore preview responses with %s', async (_name, override) => {
       mockFetch.mockResolvedValueOnce({
         ok: true,
@@ -3987,6 +4179,26 @@ describe('API: files', () => {
         resultOverride: {},
         previewOverride: { file_count: 9007199254740992 },
       }],
+      ['relative item target_path', {
+        itemOverride: { target_path: 'restore/a' },
+        resultOverride: {},
+        previewOverride: {},
+      }],
+      ['backslash item target_path', {
+        itemOverride: { target_path: '/restore\\a' },
+        resultOverride: {},
+        previewOverride: {},
+      }],
+      ['relative nested preview target_path', {
+        itemOverride: {},
+        resultOverride: {},
+        previewOverride: { target_path: 'restore/a' },
+      }],
+      ['backslash nested preview target_path', {
+        itemOverride: {},
+        resultOverride: {},
+        previewOverride: { target_path: '/restore\\a' },
+      }],
     ])('rejects batch backup restore preview responses with %s', async (_name, overrides) => {
       const preview = {
         id: '20260509T035900.000000000Z',
@@ -4080,6 +4292,36 @@ describe('API: files', () => {
       })
     })
 
+    it.each([
+      ['trailing slash target_path', { target_path: '/restore/mnemonas/' }],
+      ['backslash target_path', { target_path: '/restore\\mnemonas' }],
+      ['backslash config_path', { config_path: '/restore\\mnemonas\\.mnemonas-restore\\config.toml' }],
+    ])('rejects backup restore responses with %s', async (_name, override) => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          success: true,
+          data: {
+            id: '20260509T040000.000000000Z',
+            job_id: 'external-disk',
+            status: 'completed',
+            started_at: '2026-05-09T04:00:00Z',
+            finished_at: '2026-05-09T04:00:01Z',
+            duration_ms: 1000,
+            target_path: '/restore/mnemonas',
+            config_restored: true,
+            config_path: '/restore/mnemonas/.mnemonas-restore/config.toml',
+            file_count: 12,
+            verified_bytes: 4096,
+            ...override,
+          },
+          timestamp: '2026-05-09',
+        }),
+      })
+
+      await expect(restoreBackupJob('external-disk', '/restore/mnemonas', true)).rejects.toThrow('服务器返回了无效的数据')
+    })
+
     it('runs a batch backup restore request', async () => {
       const batchRestore = {
         id: '20260509T040001.000000000Z',
@@ -4170,6 +4412,26 @@ describe('API: files', () => {
         itemOverride: {},
         resultOverride: {},
         verifyOverride: { file_count: 9007199254740992 },
+      }],
+      ['relative item target_path', {
+        itemOverride: { target_path: 'restore/a' },
+        resultOverride: {},
+        verifyOverride: {},
+      }],
+      ['backslash item target_path', {
+        itemOverride: { target_path: '/restore\\a' },
+        resultOverride: {},
+        verifyOverride: {},
+      }],
+      ['relative nested verify target_path', {
+        itemOverride: {},
+        resultOverride: {},
+        verifyOverride: { target_path: 'restore/a' },
+      }],
+      ['backslash nested verify target_path', {
+        itemOverride: {},
+        resultOverride: {},
+        verifyOverride: { target_path: '/restore\\a' },
       }],
     ])('rejects batch backup restore responses with %s', async (_name, overrides) => {
       const verify = {

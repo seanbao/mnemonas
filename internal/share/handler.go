@@ -274,6 +274,17 @@ func normalizeShareRelativePath(rawPath string) (string, error) {
 	return cleaned, nil
 }
 
+func shareListPathFromRequest(r *http.Request) (string, error) {
+	values, ok := r.URL.Query()["path"]
+	if !ok {
+		return "", nil
+	}
+	if len(values) != 1 {
+		return "", errors.New("ambiguous path parameter")
+	}
+	return normalizeShareRelativePath(values[0])
+}
+
 func shareDownloadPathFromRequest(r *http.Request, id string) (string, error) {
 	prefixes := []string{
 		"/s/" + url.PathEscape(id) + "/download",
@@ -459,9 +470,14 @@ func (h *Handler) CreateShare(w http.ResponseWriter, r *http.Request) {
 // ListShares lists shares for the current user
 func (h *Handler) ListShares(w http.ResponseWriter, r *http.Request) {
 	isAdmin := getIsAdminFromContext(r.Context())
+	listAll, err := shareListAllFromRequest(r)
+	if err != nil {
+		writeShareError(w, http.StatusBadRequest, "invalid request", "INVALID_REQUEST")
+		return
+	}
 
 	var shares []*Share
-	if isAdmin && r.URL.Query().Get("all") == "true" {
+	if isAdmin && listAll {
 		shares = h.store.ListAll()
 	} else {
 		shares = h.store.ListByUser(getShareOwnerIdentifiersFromContext(r.Context())...)
@@ -474,6 +490,17 @@ func (h *Handler) ListShares(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeShareSuccess(w, http.StatusOK, infos, "")
+}
+
+func shareListAllFromRequest(r *http.Request) (bool, error) {
+	values, ok := r.URL.Query()["all"]
+	if !ok {
+		return false, nil
+	}
+	if len(values) != 1 {
+		return false, errors.New("ambiguous all parameter")
+	}
+	return values[0] == "true", nil
 }
 
 // GetShare gets a share by ID
@@ -1105,7 +1132,14 @@ func (h *Handler) serveAuthorizedShareDownload(w http.ResponseWriter, r *http.Re
 }
 
 func shareArchiveFormatFromRequest(r *http.Request) (string, error) {
-	archiveFormat := strings.TrimSpace(r.URL.Query().Get("archive"))
+	values, ok := r.URL.Query()["archive"]
+	if !ok {
+		return "", nil
+	}
+	if len(values) != 1 {
+		return "", errUnsupportedShareArchive
+	}
+	archiveFormat := strings.TrimSpace(values[0])
 	if archiveFormat == "" {
 		return "", nil
 	}
@@ -1549,7 +1583,11 @@ func shareArchiveRootName(rootPath string) string {
 }
 
 func shareArchiveFilename(rootPath string) string {
-	return shareArchiveRootName(rootPath) + ".zip"
+	rootName := shareArchiveRootName(rootPath)
+	if strings.HasSuffix(strings.ToLower(rootName), ".zip") {
+		return rootName
+	}
+	return rootName + ".zip"
 }
 
 func setUntrustedDownloadHeaders(w http.ResponseWriter) {
@@ -1658,9 +1696,7 @@ func (w *responseStartTrackingWriter) Write(p []byte) (int, error) {
 func (h *Handler) ListShareItems(w http.ResponseWriter, r *http.Request) {
 	setPublicShareJSONHeaders(w)
 	id := chi.URLParam(r, "id")
-	relPath := r.URL.Query().Get("path")
-	var err error
-	relPath, err = normalizeShareRelativePath(relPath)
+	relPath, err := shareListPathFromRequest(r)
 	if err != nil {
 		writeShareError(w, http.StatusBadRequest, "invalid path", "INVALID_PATH")
 		return
@@ -1715,11 +1751,17 @@ func (h *Handler) ListShareItems(w http.ResponseWriter, r *http.Request) {
 	for _, entry := range entries {
 		entryPath, entryName, err := shareReadDirChildPath(fullPath, entry)
 		if err != nil {
+			if errors.Is(err, ErrShareNotFound) {
+				continue
+			}
 			writeShareError(w, http.StatusInternalServerError, "internal server error", "LIST_SHARE_ITEMS_FAILED")
 			return
 		}
 		relItemPath, relErr := shareRelativePath(share.Path, entryPath)
 		if relErr != nil {
+			if errors.Is(relErr, ErrShareNotFound) {
+				continue
+			}
 			writeShareError(w, http.StatusInternalServerError, "internal server error", "LIST_SHARE_ITEMS_FAILED")
 			return
 		}
@@ -1777,7 +1819,7 @@ func (h *Handler) ListShareItems(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) enrichPublicShareInfo(ctx context.Context, info *PublicShareInfo, share *Share) error {
-	info.FileName = path.Base(share.Path)
+	info.FileName = shareArchiveRootName(share.Path)
 
 	statProvider, ok := h.fs.(FileStatProvider)
 	if !ok {
@@ -1866,9 +1908,17 @@ func shareReadDirChildPath(parentPath string, child *storage.FileInfo) (string, 
 	cleanParent := path.Clean(parentPath)
 	childPath := child.Path
 	if strings.TrimSpace(childPath) == "" {
-		childPath = path.Join(cleanParent, child.Name)
+		childName := strings.ReplaceAll(child.Name, "\\", "/")
+		if strings.ContainsRune(childName, '\x00') || hasShareDotSegment(childName) {
+			return "", "", ErrShareNotFound
+		}
+		childPath = path.Join(cleanParent, childName)
 	}
-	cleanChild := path.Clean(childPath)
+	normalizedChildPath := strings.ReplaceAll(childPath, "\\", "/")
+	if strings.ContainsRune(normalizedChildPath, '\x00') || hasShareDotSegment(normalizedChildPath) {
+		return "", "", ErrShareNotFound
+	}
+	cleanChild := path.Clean(normalizedChildPath)
 	if cleanChild == cleanParent || path.Dir(cleanChild) != cleanParent {
 		return "", "", ErrShareNotFound
 	}
@@ -2046,7 +2096,7 @@ func requestIsHTTPS(r *http.Request) bool {
 	return strings.EqualFold(strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")), "https")
 }
 
-func marshalShareJSON(data any) ([]byte, error) {
+var marshalShareJSON = func(data any) ([]byte, error) {
 	return json.Marshal(data)
 }
 
@@ -2059,7 +2109,7 @@ func writeShareJSONPayload(w http.ResponseWriter, status int, payload []byte) {
 func writeShareJSON(w http.ResponseWriter, status int, data any) bool {
 	payload, err := marshalShareJSON(data)
 	if err != nil {
-		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		writeShareJSONPayload(w, http.StatusInternalServerError, []byte(`{"success":false,"error":{"code":"INTERNAL_ERROR","message":"internal server error"}}`))
 		return false
 	}
 
@@ -2133,7 +2183,7 @@ func shareRelativePath(basePath, entryPath string) (string, error) {
 	}
 
 	if !strings.HasPrefix(cleanEntry, prefix) {
-		return "", errors.New("entry outside share path")
+		return "", ErrShareNotFound
 	}
 
 	return strings.TrimPrefix(cleanEntry, prefix), nil

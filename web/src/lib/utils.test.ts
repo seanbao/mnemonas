@@ -287,6 +287,15 @@ describe('getFilenameFromContentDisposition', () => {
     expect(getFilenameFromContentDisposition('attachment', 'download')).toBe('download')
     expect(getFilenameFromContentDisposition(null, 'download')).toBe('download')
   })
+
+  it('sanitizes filenames from headers and fallbacks', () => {
+    expect(getFilenameFromContentDisposition(
+      'attachment; filename="../secret.txt"',
+      'download'
+    )).toBe('__secret.txt')
+
+    expect(getFilenameFromContentDisposition(null, '../download.json')).toBe('__download.json')
+  })
 })
 
 describe('ensureZipExtension', () => {

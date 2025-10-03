@@ -134,10 +134,14 @@ type Share struct {
 
 // IsExpired checks if the share has expired
 func (s *Share) IsExpired() bool {
+	return s.isExpiredAt(time.Now())
+}
+
+func (s *Share) isExpiredAt(now time.Time) bool {
 	if s.ExpiresAt == nil {
 		return false
 	}
-	return time.Now().After(*s.ExpiresAt)
+	return !now.Before(*s.ExpiresAt)
 }
 
 // HasPassword checks if the share requires a password
@@ -180,7 +184,7 @@ func (s *Share) IsActive(now time.Time) bool {
 	if s == nil || !s.Enabled {
 		return false
 	}
-	if s.ExpiresAt != nil && now.After(*s.ExpiresAt) {
+	if s.isExpiredAt(now) {
 		return false
 	}
 	if s.MaxAccess > 0 && s.AccessCount >= s.MaxAccess {

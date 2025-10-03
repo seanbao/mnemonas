@@ -670,6 +670,27 @@ describe('HealthPage', () => {
       })
     })
 
+    it('lists WeCom as a configured alert notification channel', async () => {
+      mockGetDiagnostics.mockResolvedValue({
+        ...mockDiagnostics,
+        alerts: {
+          enabled: true,
+          runtimeAvailable: true,
+          webhookConfigured: false,
+          telegramConfigured: false,
+          wecomConfigured: true,
+          emailConfigured: false,
+        },
+      })
+
+      render(<HealthPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('空间提醒已启用')).toBeTruthy()
+        expect(screen.getByText(/通知通道已配置：企业微信/)).toBeTruthy()
+      })
+    })
+
     it('lists Webhook and email as configured alert notification channels', async () => {
       mockGetDiagnostics.mockResolvedValue({
         ...mockDiagnostics,

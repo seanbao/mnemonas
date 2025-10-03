@@ -23,6 +23,7 @@ var maxDownloadArchiveBytes = int64(20 * 1024 * 1024 * 1024)
 var (
 	errDownloadArchiveTooManyEntries = errors.New("archive contains too many entries")
 	errDownloadArchiveTooLarge       = errors.New("archive content is too large")
+	errUnsupportedDownloadArchive    = errors.New("unsupported archive format")
 )
 
 var downloadArchiveWriter = func(s *Server, ctx context.Context, zipWriter *zip.Writer, entries []downloadArchiveEntry) error {
@@ -33,6 +34,21 @@ type downloadArchiveEntry struct {
 	sourcePath string
 	zipName    string
 	info       *storage.FileInfo
+}
+
+func downloadArchiveFormatFromRequest(r *http.Request) (string, error) {
+	value, err := singleQueryValue(r.URL.Query(), "archive")
+	if err != nil {
+		return "", errUnsupportedDownloadArchive
+	}
+	archiveFormat := strings.TrimSpace(value)
+	if archiveFormat == "" {
+		return "", nil
+	}
+	if archiveFormat != "zip" {
+		return "", errUnsupportedDownloadArchive
+	}
+	return archiveFormat, nil
 }
 
 func (s *Server) handleDownloadArchive(w http.ResponseWriter, r *http.Request, rootPath string) {
@@ -319,5 +335,9 @@ func downloadArchiveRootName(rootPath string) string {
 }
 
 func downloadArchiveFilename(rootPath string) string {
-	return downloadArchiveRootName(rootPath) + ".zip"
+	rootName := downloadArchiveRootName(rootPath)
+	if strings.HasSuffix(strings.ToLower(rootName), ".zip") {
+		return rootName
+	}
+	return rootName + ".zip"
 }

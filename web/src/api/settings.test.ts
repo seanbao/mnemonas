@@ -245,6 +245,9 @@ describe('Settings API', () => {
         telegram_enabled: true,
         telegram_bot_token_configured: true,
         telegram_chat_id: '-1001234567890',
+        wecom_enabled: true,
+        wecom_webhook_url: '<redacted>',
+        wecom_webhook_url_configured: true,
       },
       disk_health: {
         enabled: true,
@@ -289,6 +292,9 @@ describe('Settings API', () => {
     expect(result.data.alerts?.webhook_headers_configured).toBe(true)
     expect(result.data.alerts?.telegram_bot_token_configured).toBe(true)
     expect(result.data.alerts?.telegram_chat_id).toBe('-1001234567890')
+    expect(result.data.alerts?.wecom_enabled).toBe(true)
+    expect(result.data.alerts?.wecom_webhook_url).toBe('<redacted>')
+    expect(result.data.alerts?.wecom_webhook_url_configured).toBe(true)
     expect(result.data.disk_health?.devices[0]?.path).toBe('/dev/disk/by-id/test')
     expect(result.data.maintenance?.scrub?.schedule_interval).toBe('168h')
   })
@@ -324,6 +330,9 @@ describe('Settings API', () => {
   it.each([
     ['unsafe default max access', { default_max_access: 9007199254740992 }],
     ['fractional policy max access', { policy_rules: [{ path: '/team', max_access: 1.5 }] }],
+    ['unsafe policy path', { policy_rules: [{ path: '/team/./private' }] }],
+    ['relative policy path', { policy_rules: [{ path: 'team' }] }],
+    ['trailing-slash policy path', { policy_rules: [{ path: '/team/' }] }],
   ])('rejects settings responses with %s', async (_name, sharePatch) => {
     mockAuthFetch.mockResolvedValueOnce({
       ok: true,
@@ -343,6 +352,12 @@ describe('Settings API', () => {
 
   it.each([
     ['unsafe directory quota bytes', { storage: { root: '~/.mnemonas', directory_quotas: [{ path: '/team', quota_bytes: 9007199254740992 }] } }],
+    ['unsafe directory quota path', { storage: { root: '~/.mnemonas', directory_quotas: [{ path: '/team/./private', quota_bytes: 1048576 }] } }],
+    ['relative directory quota path', { storage: { root: '~/.mnemonas', directory_quotas: [{ path: 'team', quota_bytes: 1048576 }] } }],
+    ['trailing-slash directory quota path', { storage: { root: '~/.mnemonas', directory_quotas: [{ path: '/team/', quota_bytes: 1048576 }] } }],
+    ['unsafe directory access rule path', { storage: { root: '~/.mnemonas', directory_access_rules: [{ path: '/team/../private', read_groups: ['family'] }] } }],
+    ['relative directory access rule path', { storage: { root: '~/.mnemonas', directory_access_rules: [{ path: 'team', read_groups: ['family'] }] } }],
+    ['trailing-slash directory access rule path', { storage: { root: '~/.mnemonas', directory_access_rules: [{ path: '/team/', read_groups: ['family'] }] } }],
     ['unsafe retention min free space', { retention: { ...createSettings().retention, min_free_space: 9007199254740992 } }],
     ['unsafe trash max size', { trash: { enabled: true, retention_days: 30, max_size: 9007199254740992 } }],
     ['unsafe versioning max size', { versioning: { auto_versioned_extensions: ['.txt'], auto_versioned_filenames: [], max_versioned_size: 9007199254740992 } }],
@@ -556,6 +571,36 @@ describe('Settings API', () => {
     }))
   })
 
+  it('normalizes scoped logical paths before updating settings', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ success: true, data: null, message: 'settings updated' }),
+    })
+
+    await updateSettings({
+      storage: {
+        directory_quotas: [{ path: ' /team// ', quota_bytes: 1048576 }],
+        directory_access_rules: [{ path: '/team//public/', read_groups: ['family'] }],
+      },
+      share: {
+        policy_rules: [{ path: '/share//media/', require_password: true }],
+      },
+    })
+
+    expect(mockAuthFetch).toHaveBeenCalledWith('/api/v1/settings/', expect.objectContaining({
+      method: 'PUT',
+      body: JSON.stringify({
+        storage: {
+          directory_quotas: [{ path: '/team', quota_bytes: 1048576 }],
+          directory_access_rules: [{ path: '/team/public', read_groups: ['family'] }],
+        },
+        share: {
+          policy_rules: [{ path: '/share/media', require_password: true }],
+        },
+      }),
+    }))
+  })
+
   it.each([
     ['negative default max access', { share: { default_max_access: -1 } }, 'INVALID_SHARE_DEFAULT_MAX_ACCESS'],
     ['fractional default max access', { share: { default_max_access: 1.5 } }, 'INVALID_SHARE_DEFAULT_MAX_ACCESS'],
@@ -586,6 +631,21 @@ describe('Settings API', () => {
     ['fractional alerts min free bytes', { alerts: { min_free_bytes: 1.5 } }, 'INVALID_ALERTS_MIN_FREE_BYTES'],
     ['unsafe alerts min free bytes', { alerts: { min_free_bytes: 9007199254740992 } }, 'INVALID_ALERTS_MIN_FREE_BYTES'],
   ])('rejects %s before updating settings', async (_label, request, code) => {
+    await expect(updateSettings(request)).rejects.toMatchObject({
+      status: 0,
+      code,
+    })
+    expect(mockAuthFetch).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['directory quota path', { storage: { directory_quotas: [{ path: '/team/./private', quota_bytes: 1048576 }] } }, 'INVALID_DIRECTORY_QUOTA_PATH'],
+    ['directory access rule path', { storage: { directory_access_rules: [{ path: '/team/../private', read_groups: ['family'] }] } }, 'INVALID_DIRECTORY_ACCESS_RULE_PATH'],
+    ['share policy path', { share: { policy_rules: [{ path: '/team/./private' }] } }, 'INVALID_SHARE_POLICY_PATH'],
+    ['relative directory quota path', { storage: { directory_quotas: [{ path: 'team', quota_bytes: 1048576 }] } }, 'INVALID_DIRECTORY_QUOTA_PATH'],
+    ['backslash directory access rule path', { storage: { directory_access_rules: [{ path: '/team\\private', read_groups: ['family'] }] } }, 'INVALID_DIRECTORY_ACCESS_RULE_PATH'],
+    ['query share policy path', { share: { policy_rules: [{ path: '/team?private' }] } }, 'INVALID_SHARE_POLICY_PATH'],
+  ])('rejects invalid %s before updating settings', async (_label, request, code) => {
     await expect(updateSettings(request)).rejects.toMatchObject({
       status: 0,
       code,
@@ -843,6 +903,50 @@ describe('Settings API', () => {
     await expect(checkDirectoryAccess({ username: 'alice', path: '/team/readme.txt' })).rejects.toThrow(invalidResponseMessage)
   })
 
+  it.each([
+    ['unsafe home directory', '/users/./alice'],
+    ['relative home directory', 'users/alice'],
+    ['trimmed home directory', ' /users/alice '],
+  ])('rejects directory access check responses with %s', async (_label, homeDir) => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        success: true,
+        data: {
+          username: 'alice',
+          user_id: 'u1',
+          role: 'user',
+          home_dir: homeDir,
+          path: '/team/readme.txt',
+          read: { mode: 'read', allowed: true, source: 'home_dir' },
+          write: { mode: 'write', allowed: true, source: 'home_dir' },
+        },
+      }),
+    })
+
+    await expect(checkDirectoryAccess({ username: 'alice', path: '/team/readme.txt' })).rejects.toThrow(invalidResponseMessage)
+  })
+
+  it('rejects directory access check responses with non-canonical response paths', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        success: true,
+        data: {
+          username: 'alice',
+          user_id: 'u1',
+          role: 'user',
+          home_dir: '/users/alice',
+          path: 'team/readme.txt',
+          read: { mode: 'read', allowed: true, source: 'home_dir' },
+          write: { mode: 'write', allowed: true, source: 'home_dir' },
+        },
+      }),
+    })
+
+    await expect(checkDirectoryAccess({ username: 'alice', path: '/team/readme.txt' })).rejects.toThrow(invalidResponseMessage)
+  })
+
   it('uses structured api error message when directory access check fails', async () => {
     mockAuthFetch.mockResolvedValueOnce({
       ok: false,
@@ -855,6 +959,14 @@ describe('Settings API', () => {
       status: 404,
       code: 'NOT_FOUND',
     })
+  })
+
+  it('rejects invalid directory access check paths before sending requests', async () => {
+    await expect(checkDirectoryAccess({ username: 'alice', path: '/team/./readme.txt' })).rejects.toMatchObject({
+      status: 0,
+      code: 'INVALID_DIRECTORY_ACCESS_PATH',
+    })
+    expect(mockAuthFetch).not.toHaveBeenCalled()
   })
 
   it('reports directory access for all users', async () => {
@@ -943,6 +1055,66 @@ describe('Settings API', () => {
     })
 
     await expect(reportDirectoryAccess({ path: '/team/readme.txt' })).rejects.toThrow(invalidResponseMessage)
+  })
+
+  it.each([
+    ['unsafe user home directories', '/users/./alice'],
+    ['relative user home directories', 'users/alice'],
+    ['trimmed user home directories', ' /users/alice '],
+  ])('rejects directory access report responses with %s', async (_label, homeDir) => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        success: true,
+        data: {
+          path: '/team/readme.txt',
+          summary: { users: 1, read_allowed: 1, read_denied: 0, write_allowed: 1, write_denied: 0, related_shares: 0, active_related_shares: 0, password_protected_shares: 0 },
+          users: [{
+            username: 'alice',
+            user_id: 'u1',
+            role: 'user',
+            home_dir: homeDir,
+            path: '/team/readme.txt',
+            read: { mode: 'read', allowed: true, source: 'home_dir' },
+            write: { mode: 'write', allowed: true, source: 'home_dir' },
+          }],
+        },
+      }),
+    })
+
+    await expect(reportDirectoryAccess({ path: '/team/readme.txt' })).rejects.toThrow(invalidResponseMessage)
+  })
+
+  it('rejects directory access report responses with non-canonical report paths', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        success: true,
+        data: {
+          path: 'team/readme.txt',
+          summary: { users: 1, read_allowed: 1, read_denied: 0, write_allowed: 1, write_denied: 0, related_shares: 0, active_related_shares: 0, password_protected_shares: 0 },
+          users: [{
+            username: 'alice',
+            user_id: 'u1',
+            role: 'user',
+            home_dir: '/users/alice',
+            path: '/team/readme.txt',
+            read: { mode: 'read', allowed: true, source: 'home_dir' },
+            write: { mode: 'write', allowed: true, source: 'home_dir' },
+          }],
+        },
+      }),
+    })
+
+    await expect(reportDirectoryAccess({ path: '/team/readme.txt' })).rejects.toThrow(invalidResponseMessage)
+  })
+
+  it('rejects invalid directory access report paths before sending requests', async () => {
+    await expect(reportDirectoryAccess({ path: '/team/./readme.txt' })).rejects.toMatchObject({
+      status: 0,
+      code: 'INVALID_DIRECTORY_ACCESS_PATH',
+    })
+    expect(mockAuthFetch).not.toHaveBeenCalled()
   })
 
   it.each([
@@ -1063,6 +1235,28 @@ describe('Settings API', () => {
     }))
   })
 
+  it('rejects invalid directory access preview paths before sending requests', async () => {
+    await expect(previewDirectoryAccess({
+      path: '/team/./readme.txt',
+      directory_access_rules: [],
+    })).rejects.toMatchObject({
+      status: 0,
+      code: 'INVALID_DIRECTORY_ACCESS_PATH',
+    })
+    expect(mockAuthFetch).not.toHaveBeenCalled()
+  })
+
+  it('rejects invalid directory access preview rule paths before sending requests', async () => {
+    await expect(previewDirectoryAccess({
+      path: '/team/readme.txt',
+      directory_access_rules: [{ path: '/team/../private', read_groups: ['family'] }],
+    })).rejects.toMatchObject({
+      status: 0,
+      code: 'INVALID_DIRECTORY_ACCESS_RULE_PATH',
+    })
+    expect(mockAuthFetch).not.toHaveBeenCalled()
+  })
+
   it('uses structured api error message when update settings fails', async () => {
     mockAuthFetch.mockResolvedValueOnce({
       ok: false,
@@ -1101,6 +1295,7 @@ describe('Settings API', () => {
     ['versioning', { versioning: { auto_versioned_extensions: ['.txt'], auto_versioned_filenames: [123], max_versioned_size: 1024 } }],
     ['favorites', { favorites: { enabled: true, runtime_available: 'yes' } }],
     ['alerts', { alerts: { enabled: true, check_interval: '1m', threshold_pct: 80, critical_pct: 90, min_free_bytes: 1024, cooldown_period: '10m', webhook_url: 'https://hooks.example.com', webhook_method: 'POST', webhook_headers: [], telegram_enabled: true, telegram_bot_token_configured: 'yes' } }],
+    ['alerts wecom', { alerts: { ...validAlertsSettings, wecom_enabled: true, wecom_webhook_url: 123 } }],
     ['disk_health', { disk_health: { enabled: true, check_interval: '1h', probe_timeout: '15s', cooldown_period: '4h', command: 'smartctl', temperature_warning_c: 45, temperature_critical_c: 55, media_wear_warning_percent: 80, media_wear_critical_percent: 95, devices: [{ path: 12 }] } }],
     ['maintenance', { maintenance: { scrub: { enabled: true, schedule_interval: '168h', retry_interval: '1h', max_retries: '1' } } }],
   ])('rejects malformed optional %s settings sections', async (_name, override) => {

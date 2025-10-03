@@ -572,6 +572,8 @@ func main() {
 		TelegramEnabled:  cfg.Alerts.TelegramEnabled,
 		TelegramBotToken: cfg.Alerts.TelegramBotToken,
 		TelegramChatID:   cfg.Alerts.TelegramChatID,
+		WeComEnabled:     cfg.Alerts.WeComEnabled,
+		WeComWebhookURL:  cfg.Alerts.WeComWebhookURL,
 		EmailEnabled:     cfg.Alerts.EmailEnabled,
 		SMTPHost:         cfg.Alerts.SMTPHost,
 		SMTPPort:         cfg.Alerts.SMTPPort,

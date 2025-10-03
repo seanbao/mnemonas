@@ -410,9 +410,11 @@ sudo mnemonas-doctor --public-domain nas.example.com
 sudo ufw status
 sudo firewall-cmd --list-all
 
-# 检查端口监听
-ss -tlnp | grep -E '80|443|8080'
+# 检查公网代理、后端和 dataplane 端口监听
+ss -tlnp | grep -E '80|443|8080|9090|9091'
 ```
+
+`8080/9090/9091` 或改过的后端和 dataplane 端口不应监听在公网地址上。
 
 ### WebDAV 问题
 

@@ -10,6 +10,8 @@ REST API resource copying is available at `/api/v1/files-copy`, but the WebDAV `
 
 Some write requests may return a successful status after the visible mutation is committed while a later persistence or cleanup step fails. In that case, MnemoNAS sends an HTTP `Warning` header rather than rewriting the committed mutation as a full failure. Covered warning values include `199 MnemoNAS "workspace mutation persistence incomplete"`, `199 MnemoNAS "delete cleanup incomplete"`, and `199 MnemoNAS "trash delete cleanup incomplete"`.
 
+Same-origin URI handling: `Destination` headers on `COPY` / `MOVE` and tagged URIs in lock-related `If` headers must point to the current WebDAV host. Default ports (HTTP 80 and HTTPS 443) may be omitted or written explicitly. Scheme-relative URIs such as `//host/dav/path` are accepted only when the host matches and both sides omit the port, or when both sides use the same explicit port. A single FQDN trailing dot on the host name is treated as the same host, while repeated trailing dots are rejected. URI paths are decoded once; `.` and `..` path segments are rejected, and backslashes are normalized as path separators before prefix and permission-boundary checks.
+
 Authentication: `auth_type = "users"` accepts MnemoNAS user credentials, maps regular users' mount root to their `home_dir`, lists top-level navigation entries for granted shared directories at the mount root, applies matching directory access rules for shared paths, makes guest accounts read-only, and enforces user quotas for PUT/COPY/MOVE writes into `home_dir`. Ancestor entries synthesized for nested grants are read-only navigation; writes still require a matching write grant. Shared-path capacity limits are handled by directory quotas. `auth_type = "basic"` remains the global service-credential compatibility mode.
 
 ## Protocol Status
@@ -18,13 +20,13 @@ Authentication: `auth_type = "users"` accepts MnemoNAS user credentials, maps re
 
 | Method | Status | Notes |
 | --- | --- | --- |
-| `OPTIONS` | Supported | Returns `DAV: 1, 2` |
+| `OPTIONS` | Supported | Returns `DAV: 1, 2`, `MS-Author-Via: DAV`, and the `Allow` method list |
 | `PROPFIND` | Supported | Supports `Depth: 0`, `1`, and `infinity` |
 | `GET` | Supported | Supports Range, ETag, and conditional requests |
 | `HEAD` | Supported | Returns file metadata |
 | `PUT` | Supported | Full overwrite writes; conditional `If-Match` and `If-Unmodified-Since`; partial `Content-Range` PUT returns `400` |
 | `DELETE` | Supported | Soft-deletes to trash; collections require or imply `Depth: infinity` |
-| `MKCOL` | Supported | Creates directories; returns `409 Conflict` when the direct parent directory is absent and does not create intermediate directories |
+| `MKCOL` | Supported | Creates directories; returns `409 Conflict` when the direct parent directory is absent, returns `405 Method Not Allowed` with `Allow` when the target already exists, and does not create intermediate directories |
 | `MOVE` | Supported | Move/rename with `Overwrite: T/F`; collections require or imply `Depth: infinity`; after an overwrite is committed, backup cleanup failures return `204` with `Warning` |
 | `COPY` | Supported | File and directory copy; `Overwrite: T/F`; collections support `Depth: 0` and `Depth: infinity`; recursive directory copies return success with `Warning` when only post-create persistence fails |
 | `PROPPATCH` | Simplified | Parses the request and returns `207 Multi-Status` with `403 Forbidden` for property changes |
@@ -32,6 +34,8 @@ Authentication: `auth_type = "users"` accepts MnemoNAS user credentials, maps re
 | `UNLOCK` | Simplified | Requires matching `Lock-Token`; expired locks are cleaned automatically |
 
 ### Not Implemented
+
+Unsupported methods return `405 Method Not Allowed` with an `Allow` response header that lists the currently supported methods.
 
 | Method | Status | Notes |
 | --- | --- | --- |

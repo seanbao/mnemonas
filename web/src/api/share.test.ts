@@ -52,6 +52,13 @@ describe('Share API', () => {
         .toBe('/api/v1/public/shares/abc123/download/folder?archive=zip')
     })
 
+    it('encodes share IDs as path segments in download URLs', () => {
+      expect(getShareDownloadUrl('share/with space%'))
+        .toBe('/api/v1/public/shares/share%2Fwith%20space%25/download')
+      expect(getShareFileDownloadUrl('share/with space%', '/folder/report.txt'))
+        .toBe('/api/v1/public/shares/share%2Fwith%20space%25/download/folder/report.txt')
+    })
+
     it('keeps absolute http and https share URLs', () => {
       expect(formatShareUrl('https://nas.example.com/s/share-1', 'https://local.example'))
         .toBe('https://nas.example.com/s/share-1')
@@ -387,6 +394,28 @@ describe('Share API', () => {
       expect(global.fetch).toHaveBeenCalledWith('/api/v1/public/shares/share-1/items?path=docs', { credentials: 'same-origin' })
     })
 
+    it('encodes share IDs as path segments when requesting folder items', async () => {
+      ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ path: 'docs', items: [] }),
+      })
+
+      await getPublicShareItems('share/with space%', { path: 'docs' })
+
+      expect(global.fetch).toHaveBeenCalledWith('/api/v1/public/shares/share%2Fwith%20space%25/items?path=docs', { credentials: 'same-origin' })
+    })
+
+    it('encodes share IDs as path segments when requesting root folder items', async () => {
+      ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ path: '', items: [] }),
+      })
+
+      await getPublicShareItems('share/with space%')
+
+      expect(global.fetch).toHaveBeenCalledWith('/api/v1/public/shares/share%2Fwith%20space%25/items', { credentials: 'same-origin' })
+    })
+
     it('normalizes folder item paths before requesting items', async () => {
       ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
         ok: true,
@@ -523,12 +552,33 @@ describe('Share API', () => {
     })
 
     it.each([
+      ['dot segment', 'docs/./private'],
+      ['absolute path', '/docs/private'],
+      ['trailing slash', 'docs/private/'],
+    ])('rejects folder item responses with %s response paths', async (_label, path) => {
+      ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({ path, items: [] }),
+      })
+
+      await expect(getPublicShareItems('share-1')).rejects.toMatchObject({
+        message: '服务器返回了无效的数据',
+        status: 200,
+      })
+    })
+
+    it.each([
       ['non-object item', null],
+      ['unsafe name', { name: '../secret.txt', path: 'file.txt', is_dir: false, size: 1, mod_time: '2026-03-13T00:00:00Z' }],
       ['invalid is_dir', { name: 'file.txt', path: '/file.txt', is_dir: 'false', size: 1, mod_time: '2026-03-13T00:00:00Z' }],
       ['invalid size', { name: 'file.txt', path: '/file.txt', is_dir: false, size: '1', mod_time: '2026-03-13T00:00:00Z' }],
       ['negative size', { name: 'file.txt', path: '/file.txt', is_dir: false, size: -1, mod_time: '2026-03-13T00:00:00Z' }],
       ['fractional size', { name: 'file.txt', path: '/file.txt', is_dir: false, size: 1.5, mod_time: '2026-03-13T00:00:00Z' }],
       ['unsafe size', { name: 'file.txt', path: '/file.txt', is_dir: false, size: 9007199254740992, mod_time: '2026-03-13T00:00:00Z' }],
+      ['unsafe path', { name: 'file.txt', path: 'docs/./file.txt', is_dir: false, size: 1, mod_time: '2026-03-13T00:00:00Z' }],
+      ['absolute path', { name: 'file.txt', path: '/docs/file.txt', is_dir: false, size: 1, mod_time: '2026-03-13T00:00:00Z' }],
+      ['trailing-slash path', { name: 'file.txt', path: 'docs/file.txt/', is_dir: false, size: 1, mod_time: '2026-03-13T00:00:00Z' }],
       ['invalid mod_time', { name: 'file.txt', path: '/file.txt', is_dir: false, size: 1, mod_time: 123 }],
     ])('rejects folder item responses with %s', async (_label, item) => {
       ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
@@ -555,6 +605,38 @@ describe('Share API', () => {
       await getPublicShare('share-1')
 
       expect(global.fetch).toHaveBeenCalledWith('/api/v1/public/shares/share-1', { credentials: 'same-origin' })
+    })
+
+    it('encodes share IDs as path segments when requesting public share info', async () => {
+      ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({ id: 'share/with space%', type: 'file', has_password: false, permission: 'read' }),
+      })
+
+      await getPublicShare('share/with space%')
+
+      expect(global.fetch).toHaveBeenCalledWith('/api/v1/public/shares/share%2Fwith%20space%25', { credentials: 'same-origin' })
+    })
+
+    it('accepts root folder share display names from the backend', async () => {
+      ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({
+          id: 'root-share',
+          type: 'folder',
+          has_password: false,
+          permission: 'read',
+          file_name: 'mnemonas-share',
+          folder_items: 2,
+        }),
+      })
+
+      await expect(getPublicShare('root-share')).resolves.toMatchObject({
+        file_name: 'mnemonas-share',
+        folder_items: 2,
+      })
     })
 
     it('forwards abort signal when requesting public share info', async () => {
@@ -679,6 +761,7 @@ describe('Share API', () => {
     it.each([
       ['description', { description: 42 }],
       ['file_name', { file_name: 42 }],
+      ['unsafe file_name', { file_name: '../secret.txt' }],
       ['file_size', { file_size: '42' }],
       ['negative file_size', { file_size: -1 }],
       ['fractional file_size', { file_size: 42.5 }],
@@ -825,6 +908,9 @@ describe('Share API', () => {
     it.each([
       ['unsafe default max access', { default_expires_in: '168h', default_max_access: 9007199254740992 }],
       ['fractional policy max access', { default_expires_in: '168h', default_max_access: 25, policy_rules: [{ path: '/team', max_access: 1.5 }] }],
+      ['unsafe policy path', { default_expires_in: '168h', default_max_access: 25, policy_rules: [{ path: '/team/./private' }] }],
+      ['relative policy path', { default_expires_in: '168h', default_max_access: 25, policy_rules: [{ path: 'team' }] }],
+      ['trailing-slash policy path', { default_expires_in: '168h', default_max_access: 25, policy_rules: [{ path: '/team/' }] }],
     ])('rejects share default policy responses with %s', async (_label, policy) => {
       ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
         ok: true,
@@ -875,6 +961,23 @@ describe('Share API', () => {
       await expect(getShare('share-detail')).resolves.toMatchObject({
         id: 'share-detail',
       })
+    })
+
+    it('encodes share IDs as path segments for authenticated detail routes', async () => {
+      ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({
+          success: true,
+          data: createValidShare({ id: 'share/with space%' }),
+        }),
+      })
+
+      await expect(getShare('share/with space%')).resolves.toMatchObject({
+        id: 'share/with space%',
+      })
+
+      expect(global.fetch).toHaveBeenCalledWith('/api/v1/shares/share%2Fwith%20space%25', expect.anything())
     })
 
     it('forwards abort signal when loading share details', async () => {
@@ -1004,6 +1107,25 @@ describe('Share API', () => {
       }))
     })
 
+    it('encodes share IDs as path segments when updating shares', async () => {
+      ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({
+          success: true,
+          data: createValidShare({ id: 'share/with space%', enabled: false }),
+        }),
+      })
+
+      await expect(updateShare('share/with space%', { enabled: false })).resolves.toMatchObject({
+        enabled: false,
+      })
+
+      expect(global.fetch).toHaveBeenCalledWith('/api/v1/shares/share%2Fwith%20space%25', expect.objectContaining({
+        method: 'PUT',
+      }))
+    })
+
     it('forwards abort signal when updating a share', async () => {
       const controller = new AbortController()
       ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
@@ -1128,6 +1250,9 @@ describe('Share API', () => {
       ['invalid access_count', createValidShare({ access_count: 1.5 })],
       ['invalid max_access', createValidShare({ max_access: '5' as unknown as number })],
       ['unsafe max_access', createValidShare({ max_access: 9007199254740992 })],
+      ['unsafe path', createValidShare({ path: '/docs/./a.txt' })],
+      ['relative path', createValidShare({ path: 'docs/a.txt' })],
+      ['trailing-slash path', createValidShare({ path: '/docs/a.txt/' })],
       ['invalid description', createValidShare({ description: 42 as unknown as string })],
     ])('rejects share list responses with %s', async (_label, share) => {
       ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
@@ -1137,6 +1262,22 @@ describe('Share API', () => {
       })
 
       await expect(listShares()).rejects.toMatchObject({
+        message: '服务器返回了无效的数据',
+        status: 200,
+      })
+    })
+
+    it('rejects share detail responses with non-canonical paths', async () => {
+      ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({
+          success: true,
+          data: createValidShare({ path: 'docs/a.txt' }),
+        }),
+      })
+
+      await expect(getShare('share-1')).rejects.toMatchObject({
         message: '服务器返回了无效的数据',
         status: 200,
       })
@@ -1192,6 +1333,15 @@ describe('Share API', () => {
         message: '访问次数必须是 0 或不超过安全范围的正整数',
         status: 0,
         code: 'INVALID_MAX_ACCESS',
+      })
+      expect(global.fetch).not.toHaveBeenCalled()
+    })
+
+    it('rejects unsafe create share paths before sending a request', async () => {
+      await expect(createShare({ path: '/docs/./b.txt' })).rejects.toMatchObject({
+        message: '分享路径无效',
+        status: 0,
+        code: 'INVALID_SHARE_PATH',
       })
       expect(global.fetch).not.toHaveBeenCalled()
     })
@@ -1303,6 +1453,26 @@ describe('Share API', () => {
       }))
     })
 
+    it('encodes share IDs as path segments when deleting shares', async () => {
+      ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({
+          success: true,
+          data: null,
+        }),
+      })
+
+      await expect(deleteShare('share/with space%')).resolves.toEqual({
+        warning: false,
+        message: undefined,
+      })
+
+      expect(global.fetch).toHaveBeenCalledWith('/api/v1/shares/share%2Fwith%20space%25', expect.objectContaining({
+        method: 'DELETE',
+      }))
+    })
+
     it('rejects malformed successful delete share responses', async () => {
       ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
         ok: true,
@@ -1380,6 +1550,19 @@ describe('Share API', () => {
       expect(global.fetch).toHaveBeenCalledWith('/api/v1/public/shares/share-1/access', expect.objectContaining({
         method: 'POST',
         credentials: 'same-origin',
+      }))
+    })
+
+    it('encodes share IDs as path segments when accessing password-protected shares', async () => {
+      ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ id: 'share/with space%', type: 'file', has_password: true, permission: 'read' }),
+      })
+
+      await accessShareWithPassword('share/with space%', 'secret')
+
+      expect(global.fetch).toHaveBeenCalledWith('/api/v1/public/shares/share%2Fwith%20space%25/access', expect.objectContaining({
+        method: 'POST',
       }))
     })
 
@@ -1529,6 +1712,7 @@ describe('Share API', () => {
         expect(formatExpiration('2026-05-06T02:00:00Z')).toBe('2 天后过期')
         expect(formatExpiration('2026-05-04T03:00:00Z')).toBe('3 小时后过期')
         expect(formatExpiration('2026-05-04T00:30:00Z')).toBe('即将过期')
+        expect(formatExpiration('2026-05-04T00:00:00Z')).toBe('已过期')
         expect(formatExpiration('2026-05-03T23:59:00Z')).toBe('已过期')
         expect(formatExpiration('not-a-date')).toBe('过期时间无效')
       } finally {

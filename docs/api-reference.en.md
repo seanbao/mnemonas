@@ -502,7 +502,7 @@ For non-admin callers, directory listing applies the same `home_dir` and most-sp
 
 List responses include `capabilities` for the current directory and for each returned item. `read` means the path can be listed or opened for navigation, `concreteRead` means exact-resource read actions such as download, copy source, share, or favorite are allowed, and `write` means mutation actions are allowed for that path or container. For example, root may report `write: true` when upload or create operations are allowed under root while still reporting `concreteRead: false` because root itself is not a downloadable or copyable resource.
 
-`GET /api/v1/download/{path}` returns file bytes by default. Set `download=true` to force an attachment filename. Set `archive=zip` to download the target path as a ZIP archive; this works for directories and individual files, cannot be combined with `version`, requires concrete read access for the target and every included entry, and does not allow read-only navigation ancestors to be archived. ZIP archives are capped at 10000 entries and 20 GiB of file content. Current-file and historical-version downloads support Range requests; ZIP archive downloads do not guarantee Range support.
+`GET /api/v1/download/{path}` returns file bytes by default. Set `download=true` at most once to force an attachment filename. Set `version=<hash>` at most once to download a historical version. Set `archive=zip` at most once to download the target path as a ZIP archive; this works for directories and individual files, cannot be combined with `version`, requires concrete read access for the target and every included entry, and does not allow read-only navigation ancestors to be archived. ZIP archives are capped at 10000 entries and 20 GiB of file content. Archive attachment filenames use the target path basename; the root path uses `mnemonas-files.zip`, and names that already end with `.zip` do not receive a duplicate suffix. Current-file and historical-version downloads support Range requests; ZIP archive downloads do not guarantee Range support.
 
 `POST /api/v1/files/{path}` requires `{path}` to identify a non-root file path. Root or root-equivalent upload targets return `400 Bad Request` with `invalid path`.
 
@@ -544,6 +544,8 @@ Other file mutations may return success with a `Warning` header if the file oper
 
 Download-session cookies are used for preview and thumbnail flows where browser media elements cannot attach Authorization headers. `POST /api/v1/auth/download-session` can be authenticated by the Web UI session cookie or by `Authorization: Bearer <access-token>` and sets `mnemonas_download_access` as an `HttpOnly`, `SameSite=Strict` cookie scoped to `/api/v1`. Thumbnail responses are generated images and include `nosniff` plus a sandbox CSP.
 
+`GET /api/v1/thumbnails/{path}` accepts an optional `size` query parameter at most once. Supported values are `small` or `s` for 150 px, `medium` or `m` for 300 px, and `large` or `l` for 600 px. Omitted `size` defaults to `medium`.
+
 Thumbnail generation rejects sources larger than 100 MiB, image dimensions above 10000x10000, or images above 50 million pixels.
 
 ## Version History
@@ -566,7 +568,7 @@ POST /api/v1/versions/{hash}/restore
 ```
 
 **Query parameters**:
-- `path`: file path (required)
+- `path`: file path (required, at most once)
 
 The `path` value must identify a non-root file path. Root or root-equivalent values return `400 Bad Request` with `invalid path`.
 
@@ -606,7 +608,7 @@ Example response:
 
 Trash visibility follows the current user's configured `home_dir` boundary.
 
-`POST /api/v1/trash/{id}/restore` restores the item to its original path by default. A `path` query parameter restores the item to a custom target path. The custom target must be writable, must be a non-root path, its direct parent directory must already exist, and the target itself must not already exist. Root or root-equivalent custom targets return `400 Bad Request` with `invalid path`. If the direct parent directory is absent, the endpoint returns `409 Conflict` and does not create intermediate directories. If the trash item has historical versions and the original path is occupied by a live file, or another trash item still references an overlapping source or target version metadata path, including a descendant path for directory restores, the endpoint returns `409 Conflict` before quota checks and does not emit a quota alert.
+`POST /api/v1/trash/{id}/restore` restores the item to its original path by default. A `path` query parameter, when specified at most once, restores the item to a custom target path. The custom target must be writable, must be a non-root path, its direct parent directory must already exist, and the target itself must not already exist. Root or root-equivalent custom targets return `400 Bad Request` with `invalid path`. If the direct parent directory is absent, the endpoint returns `409 Conflict` and does not create intermediate directories. If the trash item has historical versions and the original path is occupied by a live file, or another trash item still references an overlapping source or target version metadata path, including a descendant path for directory restores, the endpoint returns `409 Conflict` before quota checks and does not emit a quota alert.
 
 ## Search
 
@@ -618,8 +620,8 @@ Search results are scoped by configured `home_dir`.
 
 Query parameters:
 
-- `q`: Required search term, up to 100 characters.
-- `limit`: Maximum result count. The default is 50 and the maximum is 100.
+- `q`: Required search term, up to 100 characters. It must appear exactly once.
+- `limit`: Maximum result count. The default is 50 and the maximum is 100. It may appear at most once.
 
 Search response:
 
@@ -669,9 +671,13 @@ Create request:
 }
 ```
 
+`GET /api/v1/shares` lists shares for the current requester. Admin callers may set `all=true` at most once to list all users' shares.
+
 `GET /api/v1/shares/policy` returns `default_expires_in`, `default_max_access`, and `policy_rules` entries with `path`, `require_password`, `max_expires_in`, and `max_access`.
 
 `type` is `file` or `folder`; an omitted value defaults to `file`. `permission` currently accepts `read` or an omitted value. `password` is optional; non-empty share passwords are limited to 72 bytes. If `expires_in` or `max_access` is omitted, the server applies `share.default_expires_in` and `share.default_max_access`. If the path matches `share.policy_rules`, the most specific path rule wins: `require_password` rejects passwordless requests, while `max_expires_in` and `max_access` cap values above the rule limit. Authenticated share responses include `risk.level` (`none`, `low`, `medium`, `high`) plus optional reason objects so admins can find passwordless, long-lived, broad-folder, unlimited, stale, or soon-expiring links. An enabled share that has never been accessed after 30 days is reported as `unused_enabled`; an enabled share whose last access is more than 90 days old is reported as `stale_enabled`.
+
+When `[alerts] enabled = true` and at least one alert channel is configured, the server scans hourly for enabled shares that expire within 72 hours and sends an aggregate `share_expiring_soon` warning event. Within one process lifetime, the same share expiry timestamp is reminded once. Event `details` include `source = "share"`, share count, scan window, soonest expiry time, and up to 10 path samples. They do not include share URLs, access passwords, or share IDs.
 
 Update request:
 
@@ -704,16 +710,18 @@ Public share behavior:
 
 - Password-protected shares without a valid access cookie return only `id`, `type`, `has_password`, and `permission`; they do not return `description` or file/folder metadata.
 - Public shares, and password-protected shares with a valid access cookie, return `description` and `file_name`, `file_size`, or `folder_items` metadata where applicable.
+- Root-folder public shares report `file_name` as the stable display name `mnemonas-share` instead of `/`.
 - Authorized zero-byte files return `file_size: 0`; authorized empty folders return `folder_items: 0`.
 - When `max_access > 0` and `access_count` has reached the limit, public access returns `410 Gone` with `SHARE_ACCESS_LIMIT_REACHED`.
-- Expired shares return `410 Gone` with `SHARE_EXPIRED`.
+- Shares are expired once the current time reaches or passes `expires_at`; expired shares return `410 Gone` with `SHARE_EXPIRED`.
 - Disabled shares return `410 Gone` with `SHARE_DISABLED`.
 - Shares created by a disabled or deleted owner return `404 Not Found` with `SHARE_NOT_FOUND` for public metadata, downloads, and folder listings.
 - `access_count` increments on downloads and folder-listing requests. Password validation through `POST /api/v1/public/shares/{share_id}/access` and the compatibility path `POST /s/{share_id}` does not increment it.
-- Subpaths in `items?path=` and `download/{path}` are relative to the shared folder root. NUL bytes and standalone `.` or `..` path segments are invalid, while legal names containing repeated dots, such as `foo..txt`, remain valid. Invalid subpaths do not increment `access_count`.
+- Subpaths in `items?path=` and `download/{path}` are relative to the shared folder root. The folder-listing `path` query parameter may be specified at most once. NUL bytes and standalone `.` or `..` path segments are invalid, while legal names containing repeated dots, such as `foo..txt`, remain valid. Invalid subpaths do not increment `access_count`.
+- Folder-listing response `path` and `items[].path` values are canonical paths relative to the shared folder root and do not start with `/`; the root-folder response uses an empty `path`. Responses include only direct children of the current directory that remain visible to the share owner.
 - Once a download or folder-listing response has started writing to the client, that request remains counted even if the later stream fails.
 - Public share downloads honor HTTP Range requests when the backing file reader supports seeking. Local MnemoNAS storage supports this path for resumable downloads and browser media playback.
-- Set `archive=zip` on public download endpoints to download a shared folder root, subfolder, or file as a ZIP archive. Public ZIP archives return `application/zip`, do not guarantee Range support, skip entries no longer visible to the share owner, and are capped at 10000 entries and 20 GiB of file content.
+- Set `archive=zip` at most once on public download endpoints to download a shared folder root, subfolder, or file as a ZIP archive. Public ZIP archives return `application/zip`, do not guarantee Range support, skip entries no longer visible to the share owner, and are capped at 10000 entries and 20 GiB of file content. Archive attachment filenames use the archived target name; a shared root path of `/` uses `mnemonas-share.zip`, and names that already end with `.zip` do not receive a duplicate suffix.
 - Unsatisfiable Range requests that return `416 Requested Range Not Satisfiable` do not increment `access_count`.
 - Successful password validation sets an `HttpOnly`, `SameSite=Strict` access cookie; later downloads and folder-listing requests use the cookie rather than a password query parameter.
 - Public share metadata, password-validation responses, folder-listing responses, and public-download JSON error responses include `Cache-Control: private, no-cache`, `Vary: Cookie`, `X-Content-Type-Options: nosniff`, and `Referrer-Policy: no-referrer`.
@@ -724,7 +732,7 @@ Public share behavior:
 
 ## Favorites
 
-Favorite paths must normalize to a non-root absolute path. Empty values and the root path are rejected with `400 Bad Request` and `MISSING_PATH`; values containing standalone `.` or `..` path segments are rejected with `400 Bad Request` and `INVALID_PATH`. This validation runs before non-admin `home_dir` authorization.
+Favorite paths must normalize to a non-root absolute path. Empty values and the root path are rejected with `400 Bad Request` and `MISSING_PATH`; values containing standalone `.` or `..` path segments are rejected with `400 Bad Request` and `INVALID_PATH`. The single-path check endpoint accepts the `path` query parameter at most once. This validation runs before non-admin `home_dir` authorization.
 
 | Method | Path | Description |
 | --- | --- | --- |
@@ -843,7 +851,7 @@ Notes:
 
 - When authentication is enabled, admins can view the full activity log. Non-admin users receive only entries visible to the current account, and the `user` query parameter cannot bypass that scope.
 - System events are also written to the activity log, including periodic `disk_health` checks.
-- Manual and scheduled Scrub runs write `scrub` activity entries; Scrub failures, object verification problems, and incomplete result persistence send `scrub_run` events through configured Webhook, Telegram, or SMTP alert channels.
+- Manual and scheduled Scrub runs write `scrub` activity entries; Scrub failures, object verification problems, and incomplete result persistence send `scrub_run` events through configured Webhook, Telegram, WeCom, or SMTP alert channels.
 - `share` and `unshare` activity `details` include review metadata such as share type, permission, password requirement, expiry, and access limit; they do not include share passwords, public URLs, or share IDs.
 - When the activity log is not configured, the API returns an empty list.
 - When the activity log is configured but failed to initialize or is currently unavailable, the API returns `503 Service Unavailable`.
@@ -853,6 +861,8 @@ GET /api/v1/activity
 ```
 
 Query parameters:
+
+Each listed query parameter may appear at most once.
 
 - `limit`: Result count. The default is 50 and the maximum is 500.
 - `offset`: Pagination offset.
@@ -910,6 +920,8 @@ GET /api/v1/activity/stats
 
 Query parameters:
 
+Each listed query parameter may appear at most once.
+
 - `action`: Filter by action type. Uses the same values as the list endpoint.
 - `action_group`: Filter by review group. Current values are `share` and `risk`.
 - `path`: Filter by path or directory. The filter matches the path itself, descendants, and path-like activity details such as `from` and `to`.
@@ -917,7 +929,7 @@ Query parameters:
 - `since`: Count entries at or after this RFC3339 timestamp.
 - `until`: Count entries at or before this RFC3339 timestamp.
 
-`action`, `action_group`, `path`, `since`, and `until` use the same error handling as the list endpoint.
+`action`, `action_group`, `path`, `user`, `since`, and `until` use the same error handling as the list endpoint.
 
 For non-admin users, `path=/` counts only records in the current account's visible scope. An inaccessible `path` filter returns zero statistics and does not count records matched only by hidden activity detail paths.
 
@@ -947,6 +959,125 @@ Response example:
   "timestamp": "2024-01-15T10:00:00Z"
 }
 ```
+
+### List Activity Review Records (Admin)
+
+Return persisted activity review disposition records.
+
+```
+GET /api/v1/activity/reviews
+```
+
+Query parameters:
+
+- `limit`: Result count. The default is 20 and the maximum is 100.
+- `offset`: Pagination offset.
+- `reviewer`: Filter by reviewer.
+- `activity_entry_id`: Return only review records linked to the given activity entry ID.
+- `disposition_status`: Filter by disposition status. Allowed values are `documented`, `confirmed`, `restored`, `disabled`, and `needs_follow_up`.
+- `since`: Return review records at or after this RFC3339 timestamp.
+- `until`: Return review records at or before this RFC3339 timestamp.
+
+Invalid time formats, a `since` value later than `until`, a non-canonical `activity_entry_id`, or an unsupported `disposition_status` return `400 Bad Request`.
+
+Response example:
+
+```json
+{
+  "success": true,
+  "data": {
+    "items": [
+      {
+        "id": "review-123",
+        "reviewed_at": "2024-01-15T10:05:00Z",
+        "reviewer": "admin",
+        "note": "Deleted files were confirmed restored from trash",
+        "scope_label": "concentrated window",
+        "filter_summary": "group risk changes",
+        "disposition_status": "restored",
+        "action_counts": {
+          "delete": 2,
+          "move": 1
+        },
+        "review_count": 3,
+        "total_count": 5,
+        "path_count": 2,
+        "user_count": 1,
+        "path_samples": ["/docs/deleted.txt", "/docs/moved.txt"],
+        "user_samples": ["admin"],
+        "activity_entry_ids": ["act-delete-1", "act-move-1"]
+      }
+    ],
+    "total": 1,
+    "limit": 20,
+    "offset": 0
+  },
+  "timestamp": "2024-01-15T10:05:00Z"
+}
+```
+
+### Create Activity Review Record (Admin)
+
+Record an activity review disposition. The server uses the current authenticated account as `reviewer` and sets `reviewed_at`.
+
+```
+POST /api/v1/activity/reviews
+```
+
+Request body:
+
+```json
+{
+  "note": "Deleted files were confirmed restored from trash",
+  "scope_label": "current page",
+  "filter_summary": "group risk changes",
+  "disposition_status": "restored",
+  "action_counts": {
+    "delete": 2,
+    "move": 1
+  },
+  "review_count": 3,
+  "total_count": 5,
+  "path_count": 2,
+  "user_count": 1,
+  "path_samples": ["/docs/deleted.txt", "/docs/moved.txt"],
+  "user_samples": ["admin"],
+  "activity_entry_ids": ["act-delete-1", "act-move-1"]
+}
+```
+
+Notes:
+
+- `note`, `scope_label`, and `activity_entry_ids` are required. `review_count` must be greater than zero, and `total_count` must not be lower than `review_count`.
+- `disposition_status` is optional and defaults to `documented`. Allowed values are `documented`, `confirmed`, `restored`, `disabled`, and `needs_follow_up`.
+- `action_counts` is optional. Keys must be known activity action types, values must be positive integers, and the sum must equal `review_count`.
+- `path_samples` and `user_samples` are optional and accept at most 10 entries each. Paths are normalized with the same logical path rules as activity entries, and duplicate samples are rejected.
+- When the activity log is not configured, failed to initialize, or is currently unavailable, the API returns `503 Service Unavailable`.
+
+### Update Activity Review Record Disposition (Admin)
+
+Update the current disposition status of a persisted activity review record, optionally replacing its disposition note. The server replaces `reviewer` with the current authenticated account and updates `reviewed_at` to the status write-back time; when `note` is omitted, the previous note is preserved. Samples, counts, and linked activity entries remain unchanged.
+
+```
+PATCH /api/v1/activity/reviews/{id}
+```
+
+Request body:
+
+```json
+{
+  "disposition_status": "disabled",
+  "note": "The share link was disabled and the access entry point was verified"
+}
+```
+
+Notes:
+
+- `disposition_status` is required. Allowed values are `documented`, `confirmed`, `restored`, `disabled`, and `needs_follow_up`.
+- `note` is optional. When provided, it must be non-empty text; the server trims surrounding whitespace and applies the activity review note length limit.
+- A non-canonical `{id}` or unsupported `disposition_status` returns `400 Bad Request`.
+- A missing review record returns `404 Not Found`.
+- When the activity log is not configured, failed to initialize, or is currently unavailable, the API returns `503 Service Unavailable`.
 
 ### Clear Activity Log (Admin)
 
@@ -983,9 +1114,13 @@ Notes:
 | `PUT` | `/api/v1/settings` | Update settings |
 | `GET` | `/api/v1/settings/webdav-credentials` | Get current WebDAV credential status |
 
-Settings updates can change directory quotas, directory access rules, WebDAV prefix, read-only mode, auth mode, share configuration, favorite configuration, alert configuration, disk-health monitoring, scheduled Scrub maintenance, dataplane connection settings, and retention/versioning policies at runtime. Alert updates include Webhook, Telegram, and SMTP email notification settings; disk-health updates include temperature and media-wear thresholds. Scheduled Scrub updates immediately replace the running background scheduler. Directory quota and access-rule updates are hot-applied to the Web/API and WebDAV runtime. Server listener/TLS changes and CDC chunk-size changes are saved but require restarting the affected service before they take effect.
+Settings updates can change directory quotas, directory access rules, WebDAV prefix, read-only mode, auth mode, share configuration, favorite configuration, alert configuration, disk-health monitoring, scheduled Scrub maintenance, dataplane connection settings, and retention/versioning policies at runtime. Alert updates include Webhook, Telegram, WeCom, and SMTP email notification settings; disk-health updates include temperature and media-wear thresholds. Scheduled Scrub updates immediately replace the running background scheduler. Directory quota and access-rule updates are hot-applied to the Web/API and WebDAV runtime. Server listener/TLS changes and CDC chunk-size changes are saved but require restarting the affected service before they take effect.
 
-`server.host` must be empty, `*`, a valid hostname, IPv4, or IPv6 literal, without a port, whitespace, or control characters; set the port through `server.port`. `server.trusted_proxy_hops` controls whether forwarded headers from trusted reverse proxies are honored when evaluating HTTPS request semantics, and `server.trusted_proxy_cidrs` lists non-loopback proxy IPs or CIDRs allowed to supply those headers. `storage.root` remains read-only through the settings API, but `storage.directory_quotas` accepts entries with a clean absolute MnemoNAS path and positive `quota_bytes`. `storage.directory_access_rules` accepts clean absolute MnemoNAS paths plus read/write grants for `*_users`, `*_groups`, and `*_roles`; the most specific matching rule wins, and write grants also allow reads. `webdav.auth_type` supports `users`, `basic`, and `none`; blank values are normalized to `basic`, and `users` requires app auth to remain enabled. `webdav.prefix` is normalized to a `/`-prefixed URL path, must not contain backslash, `?`, `#`, or control characters, and when enabled must not overlap `/`, `/api`, `/s`, or `/health`. Omitting `webdav.password` preserves the existing WebDAV password, while submitting an empty string switches Basic Auth back to the generated password from `secrets.json`. Non-empty `share.base_url` and `alerts.webhook_url` values must be absolute `http` or `https` URLs; `share.base_url` must not contain userinfo, query strings, or fragments, and must use a valid host name or IP address. `share.default_expires_in` must be empty, `0`, or a non-negative Go duration string; `share.default_max_access` must be zero or greater. `share.policy_rules` entries must use clean absolute MnemoNAS paths and set at least one of `require_password`, `max_expires_in`, or `max_access`. Alert `webhook_method` supports `GET` and `POST`; custom webhook headers use `"Key: Value"` strings with valid HTTP token names, case-insensitively unique names, and values without newlines or control characters. `GET /api/v1/settings` does not return Webhook URL or header values; `alerts.webhook_url` and `alerts.webhook_headers` use `<redacted>` placeholders for configured values, and `alerts.webhook_url_configured` plus `alerts.webhook_headers_configured` indicate whether those values exist. `PUT /api/v1/settings` can submit real Webhook URL/header values to update the configuration; submitting the same `<redacted>` placeholder preserves the corresponding existing value. Omitting `alerts.telegram_bot_token` or `alerts.smtp_password` preserves the stored secret; submitting an empty string clears the corresponding stored secret. Clearing `alerts.telegram_bot_token` is invalid while `alerts.telegram_enabled` remains true. When `alerts.telegram_enabled` is true, `telegram_bot_token` and `telegram_chat_id` are required; the bot token cannot contain whitespace, `/`, `?`, or `#` and is never returned by settings or diagnostics responses. When `alerts.email_enabled` is true, `smtp_host`, `smtp_from`, and at least one `smtp_to` recipient are required; `smtp_port` must be 1-65535, and sender/recipient values must be valid email addresses. `disk_health.command` must be a single executable name or absolute path, `disk_health.media_wear_critical_percent` must not be lower than `disk_health.media_wear_warning_percent`, and each `disk_health.devices[].path` must be absolute. `maintenance.scrub.schedule_interval` and `maintenance.scrub.retry_interval` must be positive duration strings, and `maintenance.scrub.max_retries` must be zero or greater. `dataplane.grpc_address` must be a valid `host:port` address with port 1-65535 and no whitespace or control characters. CDC chunk sizes must satisfy `65536 <= min_chunk_size < avg_chunk_size < max_chunk_size <= 67108864`. Invalid settings return `400 Bad Request` without mutating the running config.
+`path` fields in `storage.directory_quotas`, `storage.directory_access_rules`, and `share.policy_rules` use the same MnemoNAS logical-path rules. Paths must start with `/` and must not contain Windows or UNC syntax, backslashes, query or fragment characters, control characters, or `.`/`..` path segments. The Settings API trims surrounding whitespace and normalizes duplicate and trailing slashes; paths containing `.` or `..` are not folded and are rejected.
+
+After a successful settings save, actual changes to `storage.directory_access_rules` or share policy fields (`share.enabled`, `share.default_expires_in`, `share.default_max_access`, or `share.policy_rules`) submit a `settings_policy_changed` warning event to the alert runtime. Event `details` include `source = "settings"`, `changed_sections`, booleans for the changed directory-access and share-policy fields, rule counts, and normalized rule paths. They do not include `share.base_url`, alert-channel secrets, or user/member details. Normalized no-op submissions do not emit this event. Alert delivery failures are logged and do not fail the settings save.
+
+`server.host` must be empty, `*`, a valid hostname, IPv4, or IPv6 literal, without a port, whitespace, or control characters; set the port through `server.port`. `server.trusted_proxy_hops` controls whether forwarded headers from trusted reverse proxies are honored when evaluating HTTPS request semantics, and `server.trusted_proxy_cidrs` lists non-loopback proxy IPs or CIDRs allowed to supply those headers. `storage.root` remains read-only through the settings API, but `storage.directory_quotas` accepts entries with a MnemoNAS logical path and positive `quota_bytes`. `storage.directory_access_rules` accepts MnemoNAS logical paths plus read/write grants for `*_users`, `*_groups`, and `*_roles`; the most specific matching rule wins, and write grants also allow reads. `webdav.auth_type` supports `users`, `basic`, and `none`; blank values are normalized to `basic`, and `users` requires app auth to remain enabled. `webdav.prefix` is normalized to a `/`-prefixed URL path, must not contain backslash, `?`, `#`, or control characters, and when enabled must not overlap `/`, `/api`, `/s`, or `/health`. Omitting `webdav.password` preserves the existing WebDAV password, while submitting an empty string switches Basic Auth back to the generated password from `secrets.json`. Non-empty `share.base_url`, `alerts.webhook_url`, and `alerts.wecom_webhook_url` values must be absolute `http` or `https` URLs; `share.base_url` must not contain userinfo, query strings, or fragments, and must use a valid host name or IP address. `share.default_expires_in` must be empty, `0`, or a non-negative Go duration string; `share.default_max_access` must be zero or greater. `share.policy_rules` entries must use MnemoNAS logical paths and set at least one of `require_password`, `max_expires_in`, or `max_access`. Alert `webhook_method` supports `GET` and `POST`; custom webhook headers use `"Key: Value"` strings with valid HTTP token names, case-insensitively unique names, and values without newlines or control characters. `GET /api/v1/settings` does not return Webhook URL/header values or WeCom webhook URLs; `alerts.webhook_url`, `alerts.webhook_headers`, and `alerts.wecom_webhook_url` use `<redacted>` placeholders for configured values, and `*_configured` booleans indicate whether those values exist. `PUT /api/v1/settings` can submit real Webhook URL/header values and WeCom webhook URLs to update the configuration; submitting the same `<redacted>` placeholder preserves the corresponding existing value. Omitting `alerts.telegram_bot_token` or `alerts.smtp_password` preserves the stored secret; submitting an empty string clears the corresponding stored secret. Clearing `alerts.telegram_bot_token` is invalid while `alerts.telegram_enabled` remains true. When `alerts.telegram_enabled` is true, `telegram_bot_token` and `telegram_chat_id` are required; the bot token cannot contain whitespace, `/`, `?`, or `#` and is never returned by settings or diagnostics responses. When `alerts.wecom_enabled` is true, `wecom_webhook_url` is required and is never returned by settings or diagnostics responses. When `alerts.email_enabled` is true, `smtp_host`, `smtp_from`, and at least one `smtp_to` recipient are required; `smtp_port` must be 1-65535, and sender/recipient values must be valid email addresses. `disk_health.command` must be a single executable name or absolute path, `disk_health.media_wear_critical_percent` must not be lower than `disk_health.media_wear_warning_percent`, and each `disk_health.devices[].path` must be absolute. `maintenance.scrub.schedule_interval` and `maintenance.scrub.retry_interval` must be positive duration strings, and `maintenance.scrub.max_retries` must be zero or greater. `dataplane.grpc_address` must be a valid `host:port` address with port 1-65535 and no whitespace or control characters. CDC chunk sizes must satisfy `65536 <= min_chunk_size < avg_chunk_size < max_chunk_size <= 67108864`. Invalid settings return `400 Bad Request` without mutating the running config.
 
 ### Send Test Alert
 
@@ -995,7 +1130,7 @@ POST /api/v1/settings/alerts/test
 
 **Requires administrator access**
 
-The endpoint sends one `alert_test` warning event through the currently saved alert channels. It requires `[alerts] enabled = true`, at least one configured Webhook, Telegram, or SMTP email channel, and an available alert runtime. The SMTP email channel counts as configured only when email alerts are enabled and SMTP host, port, sender, and at least one non-empty recipient are present. Test event details contain only `trigger = "manual_test"`, `source = "settings"`, and the channel list; Webhook, Telegram, and SMTP secrets are not included.
+The endpoint sends one `alert_test` warning event through the currently saved alert channels. It requires `[alerts] enabled = true`, at least one configured Webhook, Telegram, WeCom, or SMTP email channel, and an available alert runtime. The WeCom channel counts as configured only when WeCom alerts are enabled and the webhook URL is non-empty. The SMTP email channel counts as configured only when email alerts are enabled and SMTP host, port, sender, and at least one non-empty recipient are present. Test event details contain only `trigger = "manual_test"`, `source = "settings"`, and the channel list; Webhook, Telegram, WeCom, and SMTP secrets are not included.
 
 Example response:
 ```json
@@ -1226,6 +1361,13 @@ The `password` field is present only when the running WebDAV service uses an aut
 | `POST` | `/api/v1/maintenance/backups/{id}/restore-verify` | Verify a restored target directory without modifying it |
 | `GET` | `/api/v1/diagnostics-export` | Export diagnostic bundle |
 
+`POST /api/v1/maintenance/gc` starts garbage collection for unreferenced data chunks. Query parameters:
+
+- `dry_run`: optional boolean, at most once. The default is `true`; deletion only runs when this value is explicitly `false`.
+- `grace_period_hours`: optional non-negative integer, at most once. The default is `24`; objects created inside the grace period are skipped.
+
+When `dry_run=false` and some deletions fail, the response includes `failed_count` and `delete_failures`.
+
 Restore preview request:
 ```json
 {
@@ -1398,14 +1540,16 @@ Batch restore response:
 
 Maintenance endpoints are admin-oriented and may be long-running. The Web UI exposes the same operations from maintenance pages.
 Scrub object errors return stable public `errors[].message` values; lower-level IO, path, and verification details are kept in server logs.
-Manual scrub runs write `scrub` activity-log entries. When `[maintenance.scrub] enabled = true`, the server runs full Scrub jobs in the background as the system user according to `schedule_interval`; failed runs retry after `retry_interval` up to `max_retries`. Scheduled runs use the same maintenance history, activity-log details, result shape, and alert events as manual runs. Scrub failures, object verification problems, and incomplete result persistence send `scrub_run` events through configured Webhook/Telegram/SMTP alert channels.
-`GET /api/v1/maintenance/disk-health` uses `[disk_health]` and `smartctl --json --all` to report `disabled`, `ok`, `warning`, `critical`, or `unavailable`. Missing devices, SMART failures, serial mismatches, critical temperatures, NVMe critical warnings, exhausted spare capacity, media-wear thresholds, and media errors affect device status. Periodic checks that find warning, critical, or unavailable status write a `disk_health` activity-log entry at `/system/disk-health` for the `system` user. When `[alerts]` has Webhook, Telegram, or SMTP email configured, periodic disk-health checks send `disk_health` events for warning, critical, and unavailable states. Activity entries and alert events use the configured device `name` in summaries; unnamed devices use a generic label and do not include full device paths or serial numbers. Full device paths and SMART details are returned only by the administrator maintenance endpoint.
+Manual scrub runs write `scrub` activity-log entries. When `[maintenance.scrub] enabled = true`, the server runs full Scrub jobs in the background as the system user according to `schedule_interval`; failed runs retry after `retry_interval` up to `max_retries`. Scheduled runs use the same maintenance history, activity-log details, result shape, and alert events as manual runs. Scrub failures, object verification problems, and incomplete result persistence send `scrub_run` events through configured Webhook/Telegram/WeCom/SMTP alert channels.
+`GET /api/v1/maintenance/disk-health` uses `[disk_health]` and `smartctl --json --all` to report `disabled`, `ok`, `warning`, `critical`, or `unavailable`. Missing devices, SMART failures, serial mismatches, critical temperatures, NVMe critical warnings, exhausted spare capacity, media-wear thresholds, and media errors affect device status. Periodic checks that find warning, critical, or unavailable status write a `disk_health` activity-log entry at `/system/disk-health` for the `system` user. When `[alerts]` has Webhook, Telegram, WeCom, or SMTP email configured, periodic disk-health checks send `disk_health` events for warning, critical, and unavailable states. Activity entries and alert events use the configured device `name` in summaries; unnamed devices use a generic label and do not include full device paths or serial numbers. Full device paths and SMART details are returned only by the administrator maintenance endpoint.
 `GET /api/v1/diagnostics` and `/diagnostics-export` include sanitized filesystem stats. When `filesystem.disk_stats_available=true`, `filesystem.disk_*` can include capacity values, `disk_filesystem_type`, Linux mountinfo metadata (`disk_mount_point`, `disk_mount_source`, and redacted `disk_mount_options`), and `disk_native_data_checksum_support`. Both endpoints set `Cache-Control: no-store` because diagnostics can contain operational state. `/diagnostics-export` returns an attachment and sets root `schema_version = 1`.
-`GET /api/v1/diagnostics` and `/diagnostics-export` expose only alert-channel booleans for Webhook, Telegram, and SMTP email. The SMTP email boolean is true only when email alerts are enabled and SMTP host, port, sender, and at least one non-empty recipient are present. Diagnostics never include Webhook URL/header values, Telegram bot tokens, SMTP host, SMTP username, SMTP password, sender address, or recipient addresses.
+`GET /api/v1/diagnostics` and `/diagnostics-export` expose only alert-channel booleans for Webhook, Telegram, WeCom, and SMTP email. The SMTP email boolean is true only when email alerts are enabled and SMTP host, port, sender, and at least one non-empty recipient are present. Diagnostics never include Webhook URL/header values, Telegram bot tokens, WeCom webhook URLs, SMTP host, SMTP username, SMTP password, sender address, or recipient addresses.
 `GET /api/v1/diagnostics` and `/diagnostics-export` include a sanitized `maintenance` summary with `history_ready`, `[maintenance.scrub]` schedule settings, the latest Scrub status/time, and the retry count for the latest failed Scrub.
 `GET /api/v1/diagnostics` and `/diagnostics-export` include sanitized `smb` preview state. Current builds do not start an SMB/Samba listener, so `runtime_available=false` means the configured SMB shares are not mountable; diagnostics expose share counts and runtime state but never SMB credential contents.
-`GET /api/v1/maintenance/objects` accepts an optional `cursor` query parameter from the previous `next_cursor`; non-empty cursors must be 64-character hexadecimal object hashes.
-Backup endpoints operate on jobs configured under `[[backup.jobs]]`. Supported job types are `local`, `restic`, and `rclone`. Local jobs copy into `destination/<job-id>/snapshots/<run-id>/` and can prune old snapshots by `max_snapshots` and `max_age`. Restic jobs invoke `restic -r <repository> --password-file <password_file> backup <source>` and optionally `restic check`; rclone jobs invoke `rclone sync <source> <remote>` and optionally `rclone check --one-way`. External commands are executed without a shell; `command` must be a bare executable name or absolute path, and `extra_args` are appended to backup commands as argv entries. Restore commands do not reuse backup-specific extra args. Backup runs reject symlinks in the `source` tree; `rclone` restore drills apply the same check before remote verification. `password_file` and `config_file` must be regular files outside `source` and `storage.root`. API job views, run results, restore or preview results, restore reports, batch restore results, and backup alert events redact userinfo, tokens, passwords, secrets, and key parameters embedded in display fields such as `repository`, `remote`, `destination`, `target_path`, `snapshot_path`, `manifest_path`, and `config_path`; the same patterns are redacted from API-visible backup `error_message`, `warnings`, preflight details, and alert-event error details. Restic/rclone commands still receive the original configured values. Clients that chain `restore-preview`, `restore`, and `restore-verify` should retain and reuse the original request `target_path`; a redacted response `target_path` is intended only for display. Jobs may define `disabled`, `schedule_interval`, `schedule_window_start`, `schedule_window_end`, `stale_after`, `restore_drill_stale_after`, `max_snapshots`, `max_age`, and `retention_policy`; a positive `schedule_interval` enables the in-process scheduler. If both schedule-window fields are set, automatic runs only start inside that server-local `HH:MM` window, while manual run-now operations are unaffected. Job views include backup `health_status` (`ok`, `manual`, `running`, `due`, `stale`, `failed`, or `disabled`), `retention_status`, and `restore_drill_status` plus optional messages. Successful backups now run a retention check automatically, and `POST /retention-check` can run it manually. Local checks count the local snapshot range, restic checks run `restic snapshots --json --tag mnemonas --tag job:<id>`, and rclone checks run `rclone lsjson <remote> --recursive --files-only`; results persist as `last_retention_check` and feed `retention_status`/`retention_message`. `retention_policy` marks restic/rclone remote retention as externally confirmed; otherwise remote jobs report a retention warning. `restore_drill_stale_after` defaults to 30 days when empty or omitted and drives restore-drill reminder status; when alert channels are configured, stale or missing restore drills send rate-limited `backup_restore_drill` warning events with `trigger=restore_drill_reminder` and persist `last_restore_drill_reminder_at`. Restore-drill history is capped to the latest 20 entries and records status, file/byte counts, artifact paths, failure messages, and stable `failure_category` values for failed drills. Current categories are `no_snapshot`, `unsupported_job_type`, `unsafe_path`, `integrity_check`, `external_command`, `cancelled`, `io`, and `unknown`, and they are forwarded to alert event details. Job views also return `restore_drill_stats`, which summarizes total runs, successes, failures, success rate, consecutive successes or failures, latest success/failure time, latest failure message, and latest failure category across that retained window. Restore history is also capped to the latest 20 entries and records target path, status, file/byte counts, preflight checks, warnings, rollback/cutover checklists, and failure messages; `last_restore_verify` persists the latest read-only post-restore verification result after page refresh. Job views return `last_matching_restore_verify` when the latest restore has a matching read-only verification, and `restore_report_findings` with the same pending findings used by restore reports. `GET /restore-report` downloads an `application/json` attachment with the job view, latest backup, retention check, restore drill, restore-drill history and stats, latest restore, latest restore verification, `last_matching_restore_verify` for the latest restore when available, restore history, and findings for handoff or incident records. When `[alerts] enabled = true` and Webhook, Telegram, or SMTP email is configured, backup failures, explicit restore failures or warnings, post-restore read-only verification failures or warnings, restore-drill failures, stale/missing restore-drill reminders, retention-check failures/warnings, and backup-warning runs send events with type `backup_run`, `backup_restore`, `backup_restore_verify`, `backup_restore_drill`, or `backup_retention_check`, level `warning` or `critical`, and task/run/error details with empty or zero-value fields omitted, including `target_path` when relevant, redacted error text, backup target values, and manifest path values. `POST /run` accepts an empty body or `{}`. `POST /retention-check` accepts an empty body or `{}` and returns `snapshot_count`, `file_count`, `total_bytes`, snapshot time range, `warning`, and `warnings`; failures return `500` with the failed check in `details`. `POST /restore-drill` accepts optional `{"keep_artifact": true}`; local jobs temporarily restore and verify the latest snapshot, restic jobs run `restic check`, and rclone jobs run `rclone check --one-way`. `POST /restore-preview` validates the same target rules as restore but does not create target data or write restore history; it returns `preflight_checks`, `warnings`, `cutover_checklist`, and `rollback_checklist` for target isolation, target state, backup content, target filesystem capacity, and config handling. Local jobs summarize the latest manifest, restic jobs run `restic ls latest --json --tag mnemonas --tag job:<id> --path <source>`, and rclone jobs run `rclone lsjson <remote> --recursive --files-only`. `POST /batch-restore-preview` accepts `{"items":[{"job_id":"external-disk","target_path":"/absolute/restore/a","include_config":true}]}` with at most 20 items, rejects duplicate or nested target paths in the same batch, and returns per-item preview status, `error_message`, and warnings without writing target data or restore history. `POST /batch-restore` uses the same request shape, executes items sequentially, runs read-only `restore-verify` after every successful restore, and returns per-item `restore`, `verify`, `warnings`, and `error_message` fields. Top-level `total_files` and `verified_bytes` aggregate completed items' read-only verification results. Batch restore error and warning text uses the same remote-target credential redaction. Partial failures return overall `status="completed"` with `warning=true`; all item failures return `status="failed"`, so clients must inspect `items[]`. `POST /restore` supports local, restic, and rclone jobs and requires `{"target_path": "/absolute/restore/path", "include_config": true}`. The target must not contain control characters and must be outside `storage.root`, the backup source, and any local backup destination or repository. Its parent must exist, and the target must not exist or must be empty. The server reruns the same restore preflight before writing; failed preflight checks reject the restore and are persisted with the failed restore result. Local restore copies snapshot `data/` contents into the target root, verifies size and SHA-256, and restores config to `.mnemonas-restore/config.toml` when requested. Restic restore runs `restic restore latest --target <staging> --tag mnemonas --tag job:<id> --path <source>`, then installs the restored source directory contents into the target root after rejecting restored symlinks and special files. Rclone restore runs `rclone copy <remote> <staging>` and then `rclone check <remote> <staging> --one-way`; restored symlinks and special files are rejected before the server installs the staging directory into the target path. `include_config` has no special handling for restic or rclone jobs. Restore start and completion are persisted, and failed restore attempts are also recorded for later troubleshooting. `POST /restore-verify` requires an existing target directory, applies the same protected-path boundaries and control-character rejection, does not modify data, persists the latest verification report as `last_restore_verify`, and reports file/byte counts plus whether `.mnemonas-restore/config.toml`, `files/`, `.mnemonas/`, `.mnemonas/index.db`, and `.mnemonas/objects` were found; warnings call out symlinks, special files, or targets that do not look like a complete `storage.root`. For local jobs it compares against the latest successful restore snapshot for the same target when available, otherwise the latest local snapshot, and returns the comparison `snapshot_path` and `manifest_path`. Invalid restore `target_path` values and invalid batch restore request entries return `400`; backup task execution failures caused by configured paths, backup source contents, or external commands return `500` with the failed run, drill, or restore result in `details`; unknown jobs return `404`; disabled jobs, concurrent operations, local restore/restore-drill operations without any completed snapshot, and non-empty restore targets return `409`.
+`GET /api/v1/maintenance/objects` accepts optional `limit` and `cursor` query parameters. `limit` defaults to 1000 and may not exceed 1000. `cursor` comes from the previous `next_cursor`; non-empty cursors must be 64-character hexadecimal object hashes. `limit` and `cursor` may each appear at most once.
+Backup endpoints operate on jobs configured under `[[backup.jobs]]`. Supported job types are `local`, `restic`, and `rclone`. Local jobs copy into `destination/<job-id>/snapshots/<run-id>/` and can prune old snapshots by `max_snapshots` and `max_age`. Restic jobs invoke `restic -r <repository> --password-file <password_file> backup <source>` and optionally `restic check`; rclone jobs invoke `rclone sync <source> <remote>` and optionally `rclone check --one-way`. External commands are executed without a shell; `command` must be a bare executable name or absolute path, and `extra_args` are appended to backup commands as argv entries. Restore commands do not reuse backup-specific extra args. Backup runs reject symlinks in the `source` tree; `rclone` restore drills apply the same check before remote verification. `password_file` and `config_file` must be regular files outside `source` and `storage.root`. API job views, run results, restore or preview results, restore reports, batch restore results, and backup alert events redact userinfo, tokens, passwords, secrets, and key parameters embedded in display fields such as `repository`, `remote`, `destination`, `target_path`, `snapshot_path`, `manifest_path`, and `config_path`; the same patterns are redacted from API-visible backup `error_message`, `warnings`, preflight details, and alert-event error details. Restic/rclone commands still receive the original configured values. Clients that chain `restore-preview`, `restore`, and `restore-verify` should retain and reuse the original request `target_path`; a redacted response `target_path` is intended only for display. Jobs may define `disabled`, `schedule_interval`, `schedule_window_start`, `schedule_window_end`, `stale_after`, `restore_drill_stale_after`, `max_snapshots`, `max_age`, and `retention_policy`; a positive `schedule_interval` enables the in-process scheduler. If both schedule-window fields are set, automatic runs only start inside that server-local `HH:MM` window, while manual run-now operations are unaffected. Job views include backup `health_status` (`ok`, `manual`, `running`, `due`, `stale`, `failed`, or `disabled`), `retention_status`, and `restore_drill_status` plus optional messages. Successful backups now run a retention check automatically, and `POST /retention-check` can run it manually. Local checks count the local snapshot range, restic checks run `restic snapshots --json --tag mnemonas --tag job:<id>`, and rclone checks run `rclone lsjson <remote> --recursive --files-only`; results persist as `last_retention_check` and feed `retention_status`/`retention_message`. `retention_policy` marks restic/rclone remote retention as externally confirmed; otherwise remote jobs report a retention warning. `restore_drill_stale_after` defaults to 30 days when empty or omitted and drives restore-drill reminder status; when alert channels are configured, stale or missing restore drills send rate-limited `backup_restore_drill` warning events with `trigger=restore_drill_reminder` and persist `last_restore_drill_reminder_at`. Restore-drill history is capped to the latest 20 entries and records status, file/byte counts, artifact paths, failure messages, and stable `failure_category` values for failed drills. Current categories are `no_snapshot`, `unsupported_job_type`, `unsafe_path`, `integrity_check`, `external_command`, `cancelled`, `io`, and `unknown`, and they are forwarded to alert event details. Job views also return `restore_drill_stats`, which summarizes total runs, successes, failures, success rate, consecutive successes or failures, latest success/failure time, latest failure message, and latest failure category across that retained window. Restore history is also capped to the latest 20 entries and records target path, status, file/byte counts, preflight checks, warnings, rollback/cutover checklists, and failure messages; `last_restore_verify` persists the latest read-only post-restore verification result after page refresh. Job views return `last_matching_restore_verify` when the latest restore has a matching read-only verification, and `restore_report_findings` with the same pending findings used by restore reports. `GET /restore-report` downloads an `application/json` attachment with the job view, latest backup, retention check, restore drill, restore-drill history and stats, latest restore, latest restore verification, `last_matching_restore_verify` for the latest restore when available, restore history, and findings for handoff or incident records. When `[alerts] enabled = true` and Webhook, Telegram, WeCom, or SMTP email is configured, backup failures, explicit restore failures or warnings, post-restore read-only verification failures or warnings, restore-drill failures, stale/missing restore-drill reminders, retention-check failures/warnings, and backup-warning runs send events with type `backup_run`, `backup_restore`, `backup_restore_verify`, `backup_restore_drill`, or `backup_retention_check`, level `warning` or `critical`, and task/run/error details with empty or zero-value fields omitted, including `target_path` when relevant, redacted error text, backup target values, and manifest path values. `POST /run` accepts an empty body or `{}`. `POST /retention-check` accepts an empty body or `{}` and returns `snapshot_count`, `file_count`, `total_bytes`, snapshot time range, `warning`, and `warnings`; failures return `500` with the failed check in `details`. `POST /restore-drill` accepts optional `{"keep_artifact": true}`; local jobs temporarily restore and verify the latest snapshot, restic jobs run `restic check`, and rclone jobs run `rclone check --one-way`. `POST /restore-preview` validates the same target rules as restore but does not create target data or write restore history; it returns `preflight_checks`, `warnings`, `cutover_checklist`, and `rollback_checklist` for target isolation, target state, backup content, target filesystem capacity, and config handling. Local jobs summarize the latest manifest, restic jobs run `restic ls latest --json --tag mnemonas --tag job:<id> --path <source>`, and rclone jobs run `rclone lsjson <remote> --recursive --files-only`. `POST /batch-restore-preview` accepts `{"items":[{"job_id":"external-disk","target_path":"/absolute/restore/a","include_config":true}]}` with at most 20 items, rejects duplicate or nested target paths in the same batch, and returns per-item preview status, `error_message`, and warnings without writing target data or restore history. `POST /batch-restore` uses the same request shape, executes items sequentially, runs read-only `restore-verify` after every successful restore, and returns per-item `restore`, `verify`, `warnings`, and `error_message` fields. Top-level `total_files` and `verified_bytes` aggregate completed items' read-only verification results. Batch restore error and warning text uses the same remote-target credential redaction. Partial failures return overall `status="completed"` with `warning=true`; all item failures return `status="failed"`, so clients must inspect `items[]`. `POST /restore` supports local, restic, and rclone jobs and requires `{"target_path": "/absolute/restore/path", "include_config": true}`. The target must be an absolute server-side POSIX path that starts with `/`, must not contain control characters or `.`/`..` path segments, must not be the filesystem root or a protected system directory, and must be outside `storage.root`, the backup source, and any local backup destination or repository. Windows and UNC paths are not valid server restore targets. Its parent must exist, and the target must not exist or must be empty. The server reruns the same restore preflight before writing; failed preflight checks reject the restore and are persisted with the failed restore result. Local restore copies snapshot `data/` contents into the target root, verifies size and SHA-256, and restores config to `.mnemonas-restore/config.toml` when requested. Restic restore runs `restic restore latest --target <staging> --tag mnemonas --tag job:<id> --path <source>`, then installs the restored source directory contents into the target root after rejecting restored symlinks and special files. Rclone restore runs `rclone copy <remote> <staging>` and then `rclone check <remote> <staging> --one-way`; restored symlinks and special files are rejected before the server installs the staging directory into the target path. `include_config` has no special handling for restic or rclone jobs. Restore start and completion are persisted, and failed restore attempts are also recorded for later troubleshooting. `POST /restore-verify` requires an existing target directory, applies the same server-side POSIX path rule, protected-path boundaries, and control-character or dot-segment rejection, does not modify data, persists the latest verification report as `last_restore_verify`, and reports file/byte counts plus whether `.mnemonas-restore/config.toml`, `files/`, `.mnemonas/`, `.mnemonas/index.db`, and `.mnemonas/objects` were found; warnings call out symlinks, special files, or targets that do not look like a complete `storage.root`. For local jobs it compares against the latest successful restore snapshot for the same target when available, otherwise the latest local snapshot, and returns the comparison `snapshot_path` and `manifest_path`. Invalid restore `target_path` values and invalid batch restore request entries return `400`; backup task execution failures caused by configured paths, backup source contents, or external commands return `500` with the failed run, drill, or restore result in `details`; unknown jobs return `404`; disabled jobs, concurrent operations, local restore/restore-drill operations without any completed snapshot, and non-empty restore targets return `409`.
+Restore target paths containing backslashes are rejected as invalid Windows or UNC-style syntax for `restore-preview`, `restore`, and `restore-verify`.
+
 Backup, restore, restore-drill, read-only verification, and retention-check operations persist a `running` record before execution. During service startup, `running` records left by a previous process exit are marked failed and written back to the state file.
 Job views and restore reports associate `last_restore_verify` with `last_restore` only when the latest restore completed successfully, the target path matches, and the verification timestamp is not earlier than the latest restore completion time. Job views expose `last_matching_restore_verify` and `restore_report_findings` for the same matched verification and pending findings as restore report `last_matching_restore_verify` and `findings`. Job views and restore reports copy the matched result into `last_matching_restore_verify`; otherwise the field is omitted and findings state that the latest restore still needs a matching read-only verification. When the latest restore is still running, restore report findings state that the restore has not completed and avoid attaching older verification results to that restore.
 For the batch preview response, per-item preview warnings are reported under `items[].preview.warnings`; aggregate messages are reported under top-level `warnings`.
@@ -1422,7 +1566,9 @@ http://localhost:8080/dav
 
 By default it uses the legacy global Basic Auth credentials from `[webdav]` or generated credentials in `secrets.json`. Set `webdav.auth_type = "users"` to mount with MnemoNAS user accounts and per-user `home_dir` boundaries; top-level navigation entries for granted shared directories are also listed at the WebDAV root for regular users. Ancestor entries synthesized for nested grants are read-only navigation; writes still require a matching write grant.
 
-Supported core methods include `OPTIONS`, `PROPFIND`, `GET`, `HEAD`, `PUT`, `DELETE`, `MKCOL`, `MOVE`, `COPY`, simplified `PROPPATCH`, simplified `LOCK`, and simplified `UNLOCK`. `MKCOL` returns `409 Conflict` when the direct parent directory does not exist.
+Supported core methods include `OPTIONS`, `PROPFIND`, `GET`, `HEAD`, `PUT`, `DELETE`, `MKCOL`, `MOVE`, `COPY`, simplified `PROPPATCH`, simplified `LOCK`, and simplified `UNLOCK`. `MKCOL` returns `409 Conflict` when the direct parent directory does not exist, and returns `405 Method Not Allowed` with `Allow` when the target already exists.
+
+Unsupported WebDAV methods return `405 Method Not Allowed` with an `Allow` response header listing the currently supported methods.
 
 For WebDAV `MOVE`, a destination path that does not exist but retains historical version metadata returns `409 Conflict`; directory moves also check descendant version metadata under the destination path. This target conflict is returned before user-quota or directory-quota checks.
 

@@ -900,6 +900,532 @@ func TestLogAndList(t *testing.T) {
 	}
 }
 
+func TestRecordReviewPersistsAndReloads(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := NewStore(tmpDir)
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+
+	fixedNow := time.Date(2026, time.May, 1, 10, 10, 0, 0, time.UTC)
+	originalNow := activityTimeNow
+	activityTimeNow = func() time.Time { return fixedNow }
+	defer func() {
+		activityTimeNow = originalNow
+	}()
+
+	record, err := store.RecordReview(ReviewRecordInput{
+		Reviewer:          " admin ",
+		Note:              " 已确认误删文件已恢复 ",
+		ScopeLabel:        "集中窗口",
+		FilterSummary:     "分组 高风险变更",
+		DispositionStatus: ReviewDispositionRestored,
+		ActionCounts: map[ActionType]int{
+			ActionDelete: 1,
+			ActionMove:   1,
+		},
+		ReviewCount:      2,
+		TotalCount:       3,
+		PathCount:        2,
+		UserCount:        1,
+		PathSamples:      []string{" docs/deleted.txt ", "/docs/moved.txt"},
+		UserSamples:      []string{" user1 "},
+		ActivityEntryIDs: []string{"delete-1", "move-1"},
+	})
+	if err != nil {
+		t.Fatalf("RecordReview() error: %v", err)
+	}
+	if record.Reviewer != "admin" || record.Note != "已确认误删文件已恢复" {
+		t.Fatalf("record was not normalized: %+v", record)
+	}
+	if !record.ReviewedAt.Equal(fixedNow) {
+		t.Fatalf("ReviewedAt = %s, want %s", record.ReviewedAt, fixedNow)
+	}
+	if record.DispositionStatus != ReviewDispositionRestored {
+		t.Fatalf("DispositionStatus = %q, want %q", record.DispositionStatus, ReviewDispositionRestored)
+	}
+	if record.ActionCounts[ActionDelete] != 1 || record.ActionCounts[ActionMove] != 1 {
+		t.Fatalf("ActionCounts were not persisted: %+v", record.ActionCounts)
+	}
+	if got, want := record.PathSamples, []string{"/docs/deleted.txt", "/docs/moved.txt"}; fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("PathSamples = %v, want %v", got, want)
+	}
+	if got, want := record.UserSamples, []string{"user1"}; fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("UserSamples = %v, want %v", got, want)
+	}
+
+	records, total := store.ListReviewRecords(10, 0)
+	if total != 1 || len(records) != 1 {
+		t.Fatalf("expected one review record, got total=%d records=%+v", total, records)
+	}
+	records[0].ActionCounts[ActionDelete] = 99
+	records[0].PathSamples[0] = "/mutated"
+	records[0].UserSamples[0] = "mutated"
+	records[0].ActivityEntryIDs[0] = "mutated"
+	records, _ = store.ListReviewRecords(10, 0)
+	if records[0].ActionCounts[ActionDelete] != 1 {
+		t.Fatalf("ListReviewRecords returned mutable action count map: %+v", records[0].ActionCounts)
+	}
+	if records[0].PathSamples[0] != "/docs/deleted.txt" {
+		t.Fatalf("ListReviewRecords returned mutable path samples: %+v", records[0].PathSamples)
+	}
+	if records[0].UserSamples[0] != "user1" {
+		t.Fatalf("ListReviewRecords returned mutable user samples: %+v", records[0].UserSamples)
+	}
+	if records[0].ActivityEntryIDs[0] != "delete-1" {
+		t.Fatalf("ListReviewRecords returned mutable internal slice: %+v", records[0].ActivityEntryIDs)
+	}
+
+	reloaded, err := NewStore(tmpDir)
+	if err != nil {
+		t.Fatalf("NewStore() reload error: %v", err)
+	}
+	reloadedRecords, reloadedTotal := reloaded.ListReviewRecords(10, 0)
+	if reloadedTotal != 1 || len(reloadedRecords) != 1 || reloadedRecords[0].ID != record.ID {
+		t.Fatalf("expected reloaded review record %q, got total=%d records=%+v", record.ID, reloadedTotal, reloadedRecords)
+	}
+	if reloadedRecords[0].DispositionStatus != ReviewDispositionRestored || reloadedRecords[0].ActionCounts[ActionDelete] != 1 {
+		t.Fatalf("reloaded review lost structured disposition fields: %+v", reloadedRecords[0])
+	}
+}
+
+func TestRecordReviewRejectsInvalidInput(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := NewStore(tmpDir)
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+
+	_, err = store.RecordReview(ReviewRecordInput{
+		Reviewer:         "admin",
+		Note:             "",
+		ScopeLabel:       "当前页",
+		ReviewCount:      0,
+		TotalCount:       0,
+		PathCount:        0,
+		UserCount:        0,
+		ActivityEntryIDs: []string{},
+	})
+	if !errors.Is(err, ErrInvalidReviewRecord) {
+		t.Fatalf("RecordReview() error = %v, want %v", err, ErrInvalidReviewRecord)
+	}
+	records, total := store.ListReviewRecords(10, 0)
+	if total != 0 || len(records) != 0 {
+		t.Fatalf("invalid review should not persist, got total=%d records=%+v", total, records)
+	}
+
+	_, err = store.RecordReview(ReviewRecordInput{
+		Reviewer:          "admin",
+		Note:              "已处理",
+		ScopeLabel:        "当前页",
+		DispositionStatus: "unknown",
+		ReviewCount:       1,
+		TotalCount:        1,
+		PathCount:         1,
+		UserCount:         1,
+		ActivityEntryIDs:  []string{"delete-1"},
+	})
+	if !errors.Is(err, ErrInvalidReviewRecord) {
+		t.Fatalf("RecordReview(invalid disposition) error = %v, want %v", err, ErrInvalidReviewRecord)
+	}
+
+	_, err = store.RecordReview(ReviewRecordInput{
+		Reviewer:          "admin",
+		Note:              "已处理",
+		ScopeLabel:        "当前页",
+		DispositionStatus: ReviewDispositionDocumented,
+		ActionCounts: map[ActionType]int{
+			ActionDelete: 2,
+		},
+		ReviewCount:      1,
+		TotalCount:       1,
+		PathCount:        1,
+		UserCount:        1,
+		ActivityEntryIDs: []string{"delete-1"},
+	})
+	if !errors.Is(err, ErrInvalidReviewRecord) {
+		t.Fatalf("RecordReview(invalid action counts) error = %v, want %v", err, ErrInvalidReviewRecord)
+	}
+}
+
+func TestUpdateReviewRecordDispositionPersistsAndReloads(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := NewStore(tmpDir)
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+
+	originalNow := activityTimeNow
+	defer func() {
+		activityTimeNow = originalNow
+	}()
+	createdAt := time.Date(2026, time.May, 1, 10, 0, 0, 0, time.UTC)
+	updatedAt := time.Date(2026, time.May, 1, 11, 0, 0, 0, time.UTC)
+	activityTimeNow = func() time.Time { return createdAt }
+	record, err := store.RecordReview(ReviewRecordInput{
+		Reviewer:          "admin",
+		Note:              "分享需要跟进",
+		ScopeLabel:        "当前页",
+		DispositionStatus: ReviewDispositionNeedsFollowUp,
+		ReviewCount:       1,
+		TotalCount:        1,
+		PathCount:         1,
+		UserCount:         1,
+		PathSamples:       []string{"/docs/report.pdf"},
+		ActivityEntryIDs:  []string{"share-1"},
+	})
+	if err != nil {
+		t.Fatalf("RecordReview() error: %v", err)
+	}
+
+	activityTimeNow = func() time.Time { return updatedAt }
+	nextNote := "分享链接已关闭，访问入口已核对"
+	updated, err := store.UpdateReviewRecordDisposition(record.ID, " owner ", ReviewDispositionDisabled, &nextNote)
+	if err != nil {
+		t.Fatalf("UpdateReviewRecordDisposition() error: %v", err)
+	}
+	if updated.DispositionStatus != ReviewDispositionDisabled {
+		t.Fatalf("DispositionStatus = %q, want %q", updated.DispositionStatus, ReviewDispositionDisabled)
+	}
+	if updated.Reviewer != "owner" {
+		t.Fatalf("Reviewer = %q, want owner", updated.Reviewer)
+	}
+	if !updated.ReviewedAt.Equal(updatedAt) {
+		t.Fatalf("ReviewedAt = %s, want %s", updated.ReviewedAt, updatedAt)
+	}
+	if updated.Note != nextNote || updated.ActivityEntryIDs[0] != "share-1" || updated.PathSamples[0] != "/docs/report.pdf" {
+		t.Fatalf("update should preserve review record context: %+v", updated)
+	}
+
+	filtered, total := store.ListReviewRecordsFiltered(10, 0, ReviewRecordFilter{DispositionStatus: ReviewDispositionNeedsFollowUp})
+	if total != 0 || len(filtered) != 0 {
+		t.Fatalf("updated review should leave needs-follow-up filter, got total=%d records=%+v", total, filtered)
+	}
+	filtered, total = store.ListReviewRecordsFiltered(10, 0, ReviewRecordFilter{DispositionStatus: ReviewDispositionDisabled})
+	if total != 1 || len(filtered) != 1 || filtered[0].ID != record.ID {
+		t.Fatalf("updated review should match disabled filter, got total=%d records=%+v", total, filtered)
+	}
+
+	reloaded, err := NewStore(tmpDir)
+	if err != nil {
+		t.Fatalf("NewStore() reload error: %v", err)
+	}
+	reloadedRecords, reloadedTotal := reloaded.ListReviewRecordsFiltered(10, 0, ReviewRecordFilter{DispositionStatus: ReviewDispositionDisabled})
+	if reloadedTotal != 1 || len(reloadedRecords) != 1 || reloadedRecords[0].ID != record.ID {
+		t.Fatalf("expected reloaded disabled review, got total=%d records=%+v", reloadedTotal, reloadedRecords)
+	}
+}
+
+func TestUpdateReviewRecordDispositionRejectsInvalidInput(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := NewStore(tmpDir)
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+	record, err := store.RecordReview(ReviewRecordInput{
+		Reviewer:         "admin",
+		Note:             "待跟进",
+		ScopeLabel:       "当前页",
+		ReviewCount:      1,
+		TotalCount:       1,
+		PathCount:        1,
+		UserCount:        1,
+		ActivityEntryIDs: []string{"delete-1"},
+	})
+	if err != nil {
+		t.Fatalf("RecordReview() error: %v", err)
+	}
+
+	if _, err := store.UpdateReviewRecordDisposition(record.ID, "admin", "unknown", nil); !errors.Is(err, ErrInvalidReviewRecord) {
+		t.Fatalf("UpdateReviewRecordDisposition(invalid status) error = %v, want %v", err, ErrInvalidReviewRecord)
+	}
+	if _, err := store.UpdateReviewRecordDisposition(" missing ", "admin", ReviewDispositionRestored, nil); !errors.Is(err, ErrInvalidReviewRecord) {
+		t.Fatalf("UpdateReviewRecordDisposition(invalid id) error = %v, want %v", err, ErrInvalidReviewRecord)
+	}
+	if _, err := store.UpdateReviewRecordDisposition("missing", "admin", ReviewDispositionRestored, nil); !errors.Is(err, ErrReviewRecordNotFound) {
+		t.Fatalf("UpdateReviewRecordDisposition(missing) error = %v, want %v", err, ErrReviewRecordNotFound)
+	}
+	emptyNote := " "
+	if _, err := store.UpdateReviewRecordDisposition(record.ID, "admin", ReviewDispositionRestored, &emptyNote); !errors.Is(err, ErrInvalidReviewRecord) {
+		t.Fatalf("UpdateReviewRecordDisposition(empty note) error = %v, want %v", err, ErrInvalidReviewRecord)
+	}
+
+	records, total := store.ListReviewRecords(10, 0)
+	if total != 1 || len(records) != 1 || records[0].DispositionStatus != ReviewDispositionDocumented {
+		t.Fatalf("invalid update should not mutate records, got total=%d records=%+v", total, records)
+	}
+}
+
+func TestLoadLegacyReviewRecordsDefaultsDisposition(t *testing.T) {
+	tmpDir := t.TempDir()
+	if _, err := NewStore(tmpDir); err != nil {
+		t.Fatalf("NewStore() setup error: %v", err)
+	}
+	legacy := `[{
+		"id": "legacy-review",
+		"reviewed_at": "2026-05-01T10:10:00Z",
+		"reviewer": "admin",
+		"note": "legacy note",
+		"scope_label": "当前页",
+		"filter_summary": "未筛选",
+		"review_count": 1,
+		"total_count": 1,
+		"path_count": 1,
+		"user_count": 1,
+		"activity_entry_ids": ["delete-1"]
+	}]`
+	if err := os.WriteFile(filepath.Join(tmpDir, "activity_reviews.json"), []byte(legacy), 0640); err != nil {
+		t.Fatalf("failed to write legacy review record fixture: %v", err)
+	}
+
+	store, err := NewStore(tmpDir)
+	if err != nil {
+		t.Fatalf("NewStore() reload error: %v", err)
+	}
+	records, total := store.ListReviewRecords(10, 0)
+	if total != 1 || len(records) != 1 {
+		t.Fatalf("expected one legacy review record, got total=%d records=%+v", total, records)
+	}
+	if records[0].DispositionStatus != ReviewDispositionDocumented {
+		t.Fatalf("DispositionStatus = %q, want %q", records[0].DispositionStatus, ReviewDispositionDocumented)
+	}
+}
+
+func TestListReviewRecordsFiltered(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := NewStore(tmpDir)
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+
+	first := time.Date(2026, time.May, 1, 10, 0, 0, 0, time.UTC)
+	second := time.Date(2026, time.May, 2, 10, 0, 0, 0, time.UTC)
+	originalNow := activityTimeNow
+	defer func() {
+		activityTimeNow = originalNow
+	}()
+
+	activityTimeNow = func() time.Time { return first }
+	if _, err := store.RecordReview(ReviewRecordInput{
+		Reviewer:         "admin",
+		Note:             "older review",
+		ScopeLabel:       "当前页",
+		ReviewCount:      1,
+		TotalCount:       1,
+		PathCount:        1,
+		UserCount:        1,
+		ActivityEntryIDs: []string{"delete-1"},
+	}); err != nil {
+		t.Fatalf("RecordReview(first) error: %v", err)
+	}
+
+	activityTimeNow = func() time.Time { return second }
+	if _, err := store.RecordReview(ReviewRecordInput{
+		Reviewer:          "owner",
+		Note:              "newer review",
+		ScopeLabel:        "集中窗口",
+		DispositionStatus: ReviewDispositionNeedsFollowUp,
+		ReviewCount:       2,
+		TotalCount:        3,
+		PathCount:         2,
+		UserCount:         1,
+		ActivityEntryIDs:  []string{"delete-2", "share-1"},
+	}); err != nil {
+		t.Fatalf("RecordReview(second) error: %v", err)
+	}
+
+	records, total := store.ListReviewRecordsFiltered(10, 0, ReviewRecordFilter{
+		Reviewer:          "owner",
+		ActivityEntryID:   "share-1",
+		DispositionStatus: ReviewDispositionNeedsFollowUp,
+		Since:             &second,
+	})
+	if total != 1 || len(records) != 1 {
+		t.Fatalf("expected one filtered review, got total=%d records=%+v", total, records)
+	}
+	if records[0].Reviewer != "owner" || records[0].Note != "newer review" {
+		t.Fatalf("unexpected filtered review: %+v", records[0])
+	}
+
+	records, total = store.ListReviewRecordsFiltered(10, 0, ReviewRecordFilter{ActivityEntryID: "missing"})
+	if total != 0 || len(records) != 0 {
+		t.Fatalf("expected no missing-entry reviews, got total=%d records=%+v", total, records)
+	}
+
+	records, total = store.ListReviewRecordsFiltered(10, 0, ReviewRecordFilter{DispositionStatus: ReviewDispositionDocumented})
+	if total != 1 || len(records) != 1 || records[0].Reviewer != "admin" {
+		t.Fatalf("expected one default documented review, got total=%d records=%+v", total, records)
+	}
+
+	records, total = store.ListReviewRecordsFiltered(10, 0, ReviewRecordFilter{DispositionStatus: ReviewDispositionDisabled})
+	if total != 0 || len(records) != 0 {
+		t.Fatalf("expected no disabled reviews, got total=%d records=%+v", total, records)
+	}
+}
+
+func TestLogNormalizesActivityPath(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := NewStore(tmpDir)
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+
+	if err := store.Log(ActionUpload, " docs\\report.txt/ ", "user1", "192.168.1.1", nil); err != nil {
+		t.Fatalf("Log() error: %v", err)
+	}
+
+	entries, total := store.List(10, 0, "", "")
+	if total != 1 || len(entries) != 1 {
+		t.Fatalf("expected one activity entry, got total=%d entries=%+v", total, entries)
+	}
+	if entries[0].Path != "/docs/report.txt" {
+		t.Fatalf("activity path = %q, want /docs/report.txt", entries[0].Path)
+	}
+
+	reloaded, err := NewStore(tmpDir)
+	if err != nil {
+		t.Fatalf("NewStore() reload error: %v", err)
+	}
+	reloadedEntries, _ := reloaded.List(10, 0, "", "")
+	if len(reloadedEntries) != 1 || reloadedEntries[0].Path != "/docs/report.txt" {
+		t.Fatalf("reloaded activity path = %+v, want /docs/report.txt", reloadedEntries)
+	}
+}
+
+func TestLogRejectsUnsafeActivityPath(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := NewStore(tmpDir)
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+
+	if err := store.Log(ActionUpload, "/docs/./report.txt", "user1", "192.168.1.1", nil); !errors.Is(err, errInvalidActivityPath) {
+		t.Fatalf("Log() error = %v, want %v", err, errInvalidActivityPath)
+	}
+	if store.Count() != 0 {
+		t.Fatalf("expected rejected activity path not to be stored, got %d entries", store.Count())
+	}
+}
+
+func TestLogNormalizesActivityDetailPaths(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := NewStore(tmpDir)
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+
+	if err := store.Log(ActionMove, "/docs/source.txt", "user1", "192.168.1.1", map[string]string{
+		"to":         " docs\\target.txt/ ",
+		"from":       "/docs/./unsafe.txt",
+		"quota_path": "/quota/..\x00/secret",
+		"note":       "keep ../text",
+	}); err != nil {
+		t.Fatalf("Log() error: %v", err)
+	}
+
+	entries, total := store.List(10, 0, "", "")
+	if total != 1 || len(entries) != 1 {
+		t.Fatalf("expected one activity entry, got total=%d entries=%+v", total, entries)
+	}
+	details := entries[0].Details
+	if details["to"] != "/docs/target.txt" {
+		t.Fatalf("to detail = %q, want /docs/target.txt", details["to"])
+	}
+	if details["from"] != "" {
+		t.Fatalf("unsafe from detail = %q, want hidden empty path", details["from"])
+	}
+	if details["quota_path"] != "" {
+		t.Fatalf("unsafe quota_path detail = %q, want hidden empty path", details["quota_path"])
+	}
+	if details["note"] != "keep ../text" {
+		t.Fatalf("non-path detail changed to %q", details["note"])
+	}
+}
+
+func TestNewStoreNormalizesLegacyActivityPath(t *testing.T) {
+	tmpDir := t.TempDir()
+	writeActivityFixture(t, filepath.Join(tmpDir, "activity.json"), []Entry{{
+		ID:        "legacy-relative-path",
+		Timestamp: time.Now(),
+		Action:    ActionUpload,
+		Path:      "legacy\\report.txt/",
+		User:      "admin",
+	}})
+
+	store, err := NewStore(tmpDir)
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+
+	entries, total := store.List(10, 0, "", "")
+	if total != 1 || len(entries) != 1 {
+		t.Fatalf("expected one legacy activity entry, got total=%d entries=%+v", total, entries)
+	}
+	if entries[0].Path != "/legacy/report.txt" {
+		t.Fatalf("legacy activity path = %q, want /legacy/report.txt", entries[0].Path)
+	}
+}
+
+func TestNewStoreHidesUnsafeLegacyActivityPath(t *testing.T) {
+	tmpDir := t.TempDir()
+	writeActivityFixture(t, filepath.Join(tmpDir, "activity.json"), []Entry{{
+		ID:        "legacy-unsafe-path",
+		Timestamp: time.Now(),
+		Action:    ActionUpload,
+		Path:      "/legacy/../secret.txt",
+		User:      "admin",
+	}})
+
+	store, err := NewStore(tmpDir)
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+
+	entries, total := store.List(10, 0, "", "")
+	if total != 1 || len(entries) != 1 {
+		t.Fatalf("expected one legacy activity entry, got total=%d entries=%+v", total, entries)
+	}
+	if entries[0].Path != "" {
+		t.Fatalf("unsafe legacy activity path = %q, want hidden empty path", entries[0].Path)
+	}
+}
+
+func TestNewStoreNormalizesLegacyActivityDetailPaths(t *testing.T) {
+	tmpDir := t.TempDir()
+	writeActivityFixture(t, filepath.Join(tmpDir, "activity.json"), []Entry{{
+		ID:        "legacy-detail-paths",
+		Timestamp: time.Now(),
+		Action:    ActionMove,
+		Path:      "/legacy/source.txt",
+		User:      "admin",
+		Details: map[string]string{
+			"to":   "legacy\\target.txt/",
+			"from": "/legacy/./unsafe.txt",
+			"type": "file",
+		},
+	}})
+
+	store, err := NewStore(tmpDir)
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+
+	entries, total := store.List(10, 0, "", "")
+	if total != 1 || len(entries) != 1 {
+		t.Fatalf("expected one legacy activity entry, got total=%d entries=%+v", total, entries)
+	}
+	details := entries[0].Details
+	if details["to"] != "/legacy/target.txt" {
+		t.Fatalf("legacy to detail = %q, want /legacy/target.txt", details["to"])
+	}
+	if details["from"] != "" {
+		t.Fatalf("unsafe legacy from detail = %q, want hidden empty path", details["from"])
+	}
+	if details["type"] != "file" {
+		t.Fatalf("legacy non-path detail changed to %q", details["type"])
+	}
+}
+
 func TestLogRejectsUnknownAction(t *testing.T) {
 	tmpDir := t.TempDir()
 	store, err := NewStore(tmpDir)

@@ -68,11 +68,12 @@ describe('authStore', () => {
     await useAuthStore.getState().logout()
   })
 
-  it('completes admin login without waiting for setup acknowledgement', async () => {
+  it('completes admin login without waiting for setup status sync', async () => {
     let resolveSetup: ((value: {
       success: boolean
       is_first_run: boolean
       auth_enabled: boolean
+      share_enabled?: boolean
       webdav_enabled: boolean
       webdav_auth_type: string
     }) => void) | null = null
@@ -102,13 +103,15 @@ describe('authStore', () => {
       success: true,
       is_first_run: true,
       auth_enabled: true,
+      share_enabled: false,
       webdav_enabled: true,
       webdav_auth_type: 'basic',
     })
     await Promise.resolve()
     await Promise.resolve()
 
-    expect(acknowledgeSetupMock).toHaveBeenCalledTimes(1)
+    expect(useAuthStore.getState().shareEnabled).toBe(false)
+    expect(acknowledgeSetupMock).not.toHaveBeenCalled()
   })
 
   it('cancels stale admin setup sync after logout', async () => {
