@@ -1081,7 +1081,7 @@ func (m *Monitor) sendEmail(ctx context.Context, cfg Config, subject, body strin
 	}
 
 	addr := net.JoinHostPort(strings.TrimSpace(cfg.SMTPHost), strconv.Itoa(cfg.SMTPPort))
-	from := strings.TrimSpace(cfg.SMTPFrom)
+	from := sanitizeEmailHeaderValue(cfg.SMTPFrom)
 	var auth smtp.Auth
 	if strings.TrimSpace(cfg.SMTPUsername) != "" {
 		auth = smtp.PlainAuth("", strings.TrimSpace(cfg.SMTPUsername), cfg.SMTPPassword, strings.TrimSpace(cfg.SMTPHost))
@@ -1100,7 +1100,7 @@ func (m *Monitor) sendEmail(ctx context.Context, cfg Config, subject, body strin
 func cleanedSMTPRecipients(values []string) []string {
 	recipients := make([]string, 0, len(values))
 	for _, value := range values {
-		if trimmed := strings.TrimSpace(value); trimmed != "" {
+		if trimmed := sanitizeEmailHeaderValue(value); trimmed != "" {
 			recipients = append(recipients, trimmed)
 		}
 	}
@@ -1108,10 +1108,16 @@ func cleanedSMTPRecipients(values []string) []string {
 }
 
 func buildEmailMessage(from string, to []string, subject, body string) []byte {
-	encodedSubject := mime.QEncoding.Encode("UTF-8", strings.NewReplacer("\r", " ", "\n", " ").Replace(subject))
+	safeTo := make([]string, 0, len(to))
+	for _, recipient := range to {
+		if sanitized := sanitizeEmailHeaderValue(recipient); sanitized != "" {
+			safeTo = append(safeTo, sanitized)
+		}
+	}
+	encodedSubject := mime.QEncoding.Encode("UTF-8", sanitizeEmailHeaderValue(subject))
 	headers := []string{
-		"From: " + strings.TrimSpace(from),
-		"To: " + strings.Join(to, ", "),
+		"From: " + sanitizeEmailHeaderValue(from),
+		"To: " + strings.Join(safeTo, ", "),
 		"Subject: " + encodedSubject,
 		"Date: " + time.Now().UTC().Format(time.RFC1123Z),
 		"MIME-Version: 1.0",
@@ -1119,6 +1125,24 @@ func buildEmailMessage(from string, to []string, subject, body string) []byte {
 		"Content-Transfer-Encoding: 8bit",
 	}
 	return []byte(strings.Join(headers, "\r\n") + "\r\n\r\n" + body + "\r\n")
+}
+
+func sanitizeEmailHeaderValue(value string) string {
+	var builder strings.Builder
+	builder.Grow(len(value))
+	lastWasSpace := false
+	for _, r := range value {
+		if unicode.IsControl(r) {
+			if !lastWasSpace {
+				builder.WriteByte(' ')
+				lastWasSpace = true
+			}
+			continue
+		}
+		builder.WriteRune(r)
+		lastWasSpace = unicode.IsSpace(r)
+	}
+	return strings.TrimSpace(builder.String())
 }
 
 func setCommonWebhookQuery(query url.Values, eventType string, level AlertLevel, message string, hostname string, timestamp time.Time) {
