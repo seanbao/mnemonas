@@ -2052,6 +2052,15 @@ describe('MaintenancePage', () => {
         }))
       })
 
+      const cutoverChecklist = within(screen.getByLabelText('切换步骤确认进度'))
+      expect(cutoverChecklist.getByText('已确认 0 / 1 项')).toBeTruthy()
+      fireEvent.click(cutoverChecklist.getByLabelText('校验恢复目录'))
+      expect(cutoverChecklist.getByText('已确认 1 / 1 项')).toBeTruthy()
+
+      const rollbackChecklist = within(screen.getByLabelText('回滚清单确认进度'))
+      expect(rollbackChecklist.getByText('已确认 0 / 1 项')).toBeTruthy()
+      expect(rollbackChecklist.getByLabelText('指回原 storage.root')).toBeTruthy()
+
       mockVerifyBackupRestoreJob.mockClear()
       fireEvent.click(screen.getByRole('button', { name: /重新检查/ }))
 

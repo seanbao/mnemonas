@@ -987,17 +987,47 @@ function RestoreChecklistBlock({
   title: string
   items?: string[]
 }) {
+  const [checkedItems, setCheckedItems] = useState<Set<string>>(new Set())
+
   if (!items || items.length === 0) {
     return null
   }
+
+  const toggleItem = (itemKey: string, selected: boolean) => {
+    setCheckedItems((current) => {
+      const next = new Set(current)
+      if (selected) {
+        next.add(itemKey)
+      } else {
+        next.delete(itemKey)
+      }
+      return next
+    })
+  }
+
   return (
-    <div className="rounded-lg border border-divider bg-content2/60 p-3 text-sm">
-      <div className="font-medium text-default-800">{title}</div>
-      <ol className="mt-2 list-decimal space-y-1 pl-5 text-default-600">
-        {items.map((item) => (
-          <li key={item}>{item}</li>
-        ))}
-      </ol>
+    <div aria-label={`${title}确认进度`} className="rounded-lg border border-divider bg-content2/60 p-3 text-sm">
+      <div className="flex items-center justify-between gap-3">
+        <div className="font-medium text-default-800">{title}</div>
+        <Chip size="sm" variant="flat" color={checkedItems.size === items.length ? 'success' : 'default'}>
+          已确认 {checkedItems.size} / {items.length} 项
+        </Chip>
+      </div>
+      <div className="mt-2 space-y-2">
+        {items.map((item, index) => {
+          const itemKey = `${index}:${item}`
+          return (
+            <Checkbox
+              key={itemKey}
+              size="sm"
+              isSelected={checkedItems.has(itemKey)}
+              onValueChange={(selected) => toggleItem(itemKey, selected)}
+            >
+              <span className="text-default-600">{item}</span>
+            </Checkbox>
+          )
+        })}
+      </div>
     </div>
   )
 }
@@ -1114,8 +1144,8 @@ function RestoreCutoverChecklist({
         </div>
       )}
 
-      {!restoreFailed && <RestoreChecklistBlock title="切换步骤" items={result.cutover_checklist} />}
-      {!restoreFailed && <RestoreChecklistBlock title="回滚清单" items={result.rollback_checklist} />}
+      {!restoreFailed && <RestoreChecklistBlock key={`${result.id}:cutover`} title="切换步骤" items={result.cutover_checklist} />}
+      {!restoreFailed && <RestoreChecklistBlock key={`${result.id}:rollback`} title="回滚清单" items={result.rollback_checklist} />}
     </div>
   )
 }
