@@ -1,4 +1,45 @@
-import { test, expect } from '@playwright/test'
+import { test, expect, type Page } from '@playwright/test'
+import { ensureAuthenticatedAt } from './helpers/auth-check'
+
+async function routeDashboardBackupRisk(page: Page) {
+  await page.route('**/api/v1/maintenance/backups', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        success: true,
+        data: [{
+          id: 'external-disk',
+          name: '外置硬盘备份',
+          type: 'local',
+          source: '/srv/mnemonas',
+          destination: '/mnt/backup-drive/mnemonas',
+          disabled: false,
+          retention_status: 'ok',
+          health_status: 'ok',
+          restore_drill_status: 'ok',
+          include_config: true,
+          verify_after_backup: true,
+          exclude: [],
+          running: false,
+          last_restore: {
+            id: 'restore-20260509T040000Z',
+            job_id: 'external-disk',
+            status: 'completed',
+            started_at: '2026-05-09T04:00:00Z',
+            finished_at: '2026-05-09T04:00:01Z',
+            duration_ms: 1000,
+            target_path: '/restore/mnemonas',
+            config_restored: true,
+            file_count: 12,
+            verified_bytes: 4096,
+            warnings: [],
+          },
+        }],
+      }),
+    })
+  })
+}
 
 test.describe('主页（认证禁用时）', () => {
   test('应显示主页内容或登录页', async ({ page }) => {
@@ -35,6 +76,20 @@ test.describe('主页（认证禁用时）', () => {
       // 认证启用，检查登录表单
       await expect(page.getByRole('button', { name: /登录/i })).toBeVisible()
     }
+  })
+})
+
+test.describe('首页备份风险提示', () => {
+  test.beforeEach(async ({ page }) => {
+    await routeDashboardBackupRisk(page)
+    await ensureAuthenticatedAt(page, '/')
+  })
+
+  test('应提示恢复后缺少匹配校验的备份任务', async ({ page }) => {
+    await expect(page.getByText('备份需要查看')).toBeVisible()
+    await expect(page.getByText('1 项待处理')).toBeVisible()
+    await expect(page.getByText('检查失败、过期、缺少演练或恢复校验的任务').first()).toBeVisible()
+    await expect(page.getByRole('button', { name: '打开备份' })).toBeVisible()
   })
 })
 

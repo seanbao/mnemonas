@@ -239,6 +239,24 @@ func TestServer_BackupEndpoints_ErrorMapping(t *testing.T) {
 	runBackupAPIRequest[json.RawMessage](t, server, http.MethodPost, "/api/v1/maintenance/backups/batch-restore", batchDotSegmentBody, http.StatusBadRequest)
 	missingParentTarget := filepath.Join(tmpDir, "missing-parent", "restore")
 	runBackupAPIRequest[json.RawMessage](t, server, http.MethodPost, "/api/v1/maintenance/backups/home/restore-preview", []byte(`{"target_path":`+strconv.Quote(missingParentTarget)+`}`), http.StatusBadRequest)
+	secretMissingParentTarget := filepath.Join(tmpDir, "token=restore-secret", "missing-parent", "restore")
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/maintenance/backups/home/restore-preview", strings.NewReader(`{"target_path":`+strconv.Quote(secretMissingParentTarget)+`}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	server.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("secret restore target status = %d, want %d; body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "restore-secret") || strings.Contains(rec.Body.String(), "token=restore-secret") {
+		t.Fatalf("bad request leaked restore target secret: %s", rec.Body.String())
+	}
+	var secretPathError APIError
+	if err := json.Unmarshal(rec.Body.Bytes(), &secretPathError); err != nil {
+		t.Fatalf("decode secret restore target error: %v; body=%s", err, rec.Body.String())
+	}
+	if !strings.Contains(secretPathError.Message, "token=<redacted>") {
+		t.Fatalf("bad request message = %q, want redacted restore target token", secretPathError.Message)
+	}
 	runBackupAPIRequest[json.RawMessage](t, server, http.MethodPost, "/api/v1/maintenance/backups/home/restore-verify", []byte(`{"target_path":"relative"}`), http.StatusBadRequest)
 	runBackupAPIRequest[json.RawMessage](t, server, http.MethodPost, "/api/v1/maintenance/backups/home/restore", []byte(`{"target_path":"relative"}`), http.StatusBadRequest)
 
@@ -429,12 +447,20 @@ func TestBackupAlertNotifier_MapsRestoreDrillReminderMetadata(t *testing.T) {
 	if len(recorder.events) != 1 {
 		t.Fatalf("alert event count = %d, want 1", len(recorder.events))
 	}
+	if recorder.events[0].Message != "backup restore drill is stale" {
+		t.Fatalf("alert message = %q, want backup restore drill is stale", recorder.events[0].Message)
+	}
 	details := recorder.events[0].Details
 	if details["trigger"] != backup.NotificationTriggerReminder || details["status"] != "stale" {
 		t.Fatalf("unexpected reminder details: %+v", details)
 	}
-	if details["target_path"] != "/restore/mnemonas" {
-		t.Fatalf("target_path detail = %#v, want /restore/mnemonas", details["target_path"])
+	for _, key := range []string{"job_name", "source", "destination", "target_path", "snapshot_path", "manifest_path", "warnings", "error_message"} {
+		if _, ok := details[key]; ok {
+			t.Fatalf("reminder details included sensitive field %q: %+v", key, details)
+		}
+	}
+	if details["location_details_omitted"] != true {
+		t.Fatalf("location_details_omitted = %#v, want true", details["location_details_omitted"])
 	}
 	if details["stale_after"] != "720h0m0s" || details["reminder_cooldown"] != "24h0m0s" {
 		t.Fatalf("missing reminder timing details: %+v", details)
@@ -451,12 +477,12 @@ func TestBackupAlertNotifier_MapsRestoreDrillReminderMetadata(t *testing.T) {
 	if _, ok := details["snapshot_count"]; ok {
 		t.Fatalf("reminder details included zero snapshot_count: %+v", details)
 	}
-	if _, ok := details["error_message"]; ok {
-		t.Fatalf("reminder details included empty error_message: %+v", details)
+	if _, ok := details["error_message_present"]; ok {
+		t.Fatalf("reminder details included empty error marker: %+v", details)
 	}
 }
 
-func TestBackupAlertNotifier_RedactsSensitiveText(t *testing.T) {
+func TestBackupAlertNotifier_OmitsSensitiveLocationAndMessageText(t *testing.T) {
 	recorder := &backupEventRecorder{}
 	notifier := newBackupAlertNotifier(recorder, zerolog.Nop())
 	if notifier == nil {
@@ -490,23 +516,27 @@ func TestBackupAlertNotifier_RedactsSensitiveText(t *testing.T) {
 	}
 
 	event := recorder.events[0]
+	if event.Message != "backup restore failed" {
+		t.Fatalf("alert message = %q, want backup restore failed", event.Message)
+	}
 	assertBackupAlertStringNoSecrets(t, event.Message)
-	for _, key := range []string{"source", "destination", "target_path", "manifest_path", "error_message"} {
-		value, ok := event.Details[key].(string)
-		if !ok {
-			t.Fatalf("%s detail = %#v, want string", key, event.Details[key])
+	for _, key := range []string{"job_name", "source", "destination", "target_path", "snapshot_path", "manifest_path", "warnings", "error_message"} {
+		if _, ok := event.Details[key]; ok {
+			t.Fatalf("backup alert details included sensitive field %q: %+v", key, event.Details)
 		}
-		assertBackupAlertStringNoSecrets(t, value)
 	}
-	warnings, ok := event.Details["warnings"].([]string)
-	if !ok {
-		t.Fatalf("warnings detail = %#v, want []string", event.Details["warnings"])
+	if event.Details["warning_count"] != 2 || event.Details["error_message_present"] != true || event.Details["location_details_omitted"] != true {
+		t.Fatalf("unexpected backup alert summary details: %+v", event.Details)
 	}
-	for _, warning := range warnings {
-		assertBackupAlertStringNoSecrets(t, warning)
+	detailsJSON, err := json.Marshal(event.Details)
+	if err != nil {
+		t.Fatalf("marshal backup alert details: %v", err)
 	}
-	if got, ok := event.Details["target_path"].(string); !ok || !strings.Contains(got, "token=<redacted>") {
-		t.Fatalf("target_path detail = %#v, want redacted token", event.Details["target_path"])
+	assertBackupAlertStringNoSecrets(t, string(detailsJSON))
+	for _, leaked := range []string{"/srv/source", "backup.example", "/restore", "/state/", "restore warning", "restic failed"} {
+		if strings.Contains(string(detailsJSON), leaked) {
+			t.Fatalf("backup alert details leaked location or message text %q: %s", leaked, detailsJSON)
+		}
 	}
 }
 

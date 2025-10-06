@@ -1840,6 +1840,12 @@ func TestListFilteredByActionGroup(t *testing.T) {
 	if err := store.Log(ActionUpload, "/team/report.pdf", "admin", "127.0.0.1", nil); err != nil {
 		t.Fatalf("Log(upload) error: %v", err)
 	}
+	if err := store.Log(ActionRestore, "/team/report.pdf", "admin", "127.0.0.1", nil); err != nil {
+		t.Fatalf("Log(restore) error: %v", err)
+	}
+	if err := store.Log(ActionTrashRestore, "/team/report.pdf", "admin", "127.0.0.1", nil); err != nil {
+		t.Fatalf("Log(trash_restore) error: %v", err)
+	}
 
 	shareActions, ok := ActionsForGroup(ActionGroupShare)
 	if !ok {
@@ -1861,6 +1867,27 @@ func TestListFilteredByActionGroup(t *testing.T) {
 	})
 	if total != 0 || len(entries) != 0 {
 		t.Fatalf("expected action and action group filters to intersect, got total=%d entries=%+v", total, entries)
+	}
+
+	riskActions, ok := ActionsForGroup(ActionGroupRisk)
+	if !ok {
+		t.Fatal("expected risk action group to exist")
+	}
+	entries, total = store.ListFiltered(10, 0, ListFilter{Actions: riskActions})
+	if total != 4 || len(entries) != 4 {
+		t.Fatalf("expected four risk-group entries, got total=%d entries=%+v", total, entries)
+	}
+	seenRisk := map[ActionType]bool{}
+	for _, entry := range entries {
+		seenRisk[entry.Action] = true
+		if entry.Action == ActionUpload {
+			t.Fatalf("risk action group included upload: %+v", entries)
+		}
+	}
+	for _, action := range []ActionType{ActionShare, ActionUnshare, ActionRestore, ActionTrashRestore} {
+		if !seenRisk[action] {
+			t.Fatalf("risk action group did not include %q: %+v", action, entries)
+		}
 	}
 }
 

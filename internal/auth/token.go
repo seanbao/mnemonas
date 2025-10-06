@@ -91,6 +91,15 @@ func NewTokenManager(secretKey string, accessExpiry, refreshExpiry time.Duration
 	}
 }
 
+// UpdateExpiries updates token lifetimes used for newly issued tokens.
+func (tm *TokenManager) UpdateExpiries(accessExpiry, refreshExpiry time.Duration) {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+
+	tm.accessExpiry = accessExpiry
+	tm.refreshExpiry = refreshExpiry
+}
+
 // EnablePersistence configures a file-backed revocation store so token
 // revocations survive process restarts.
 func (tm *TokenManager) EnablePersistence(filePath string) error {
@@ -256,9 +265,16 @@ func (tm *TokenManager) persistCleanupRevocationsLocked(snapshot *revokedTokenCl
 func (tm *TokenManager) GenerateTokenPair(user *User) (*TokenPair, error) {
 	tm.CleanupRevokedTokens()
 
+	tm.mu.RLock()
+	accessDuration := tm.accessExpiry
+	refreshDuration := tm.refreshExpiry
+	issuer := tm.issuer
+	secretKey := tm.secretKey
+	tm.mu.RUnlock()
+
 	now := jwtTimestamp(time.Now())
-	accessExpiry := now.Add(tm.accessExpiry)
-	refreshExpiry := now.Add(tm.refreshExpiry)
+	accessExpiry := now.Add(accessDuration)
+	refreshExpiry := now.Add(refreshDuration)
 
 	// Generate unique token ID
 	tokenID, err := generateTokenID()
@@ -269,7 +285,7 @@ func (tm *TokenManager) GenerateTokenPair(user *User) (*TokenPair, error) {
 	// Access token claims
 	accessClaims := TokenClaims{
 		RegisteredClaims: jwt.RegisteredClaims{
-			Issuer:    tm.issuer,
+			Issuer:    issuer,
 			Subject:   user.ID,
 			ExpiresAt: jwt.NewNumericDate(accessExpiry),
 			IssuedAt:  jwt.NewNumericDate(now),
@@ -283,14 +299,14 @@ func (tm *TokenManager) GenerateTokenPair(user *User) (*TokenPair, error) {
 	}
 
 	accessToken := jwt.NewWithClaims(jwt.SigningMethodHS256, accessClaims)
-	accessTokenString, err := accessToken.SignedString(tm.secretKey)
+	accessTokenString, err := accessToken.SignedString(secretKey)
 	if err != nil {
 		return nil, err
 	}
 
 	// Refresh token claims (longer expiry, less info)
 	refreshClaims := jwt.RegisteredClaims{
-		Issuer:    tm.issuer,
+		Issuer:    issuer,
 		Subject:   user.ID,
 		ExpiresAt: jwt.NewNumericDate(refreshExpiry),
 		IssuedAt:  jwt.NewNumericDate(now),
@@ -299,7 +315,7 @@ func (tm *TokenManager) GenerateTokenPair(user *User) (*TokenPair, error) {
 	}
 
 	refreshToken := jwt.NewWithClaims(jwt.SigningMethodHS256, refreshClaims)
-	refreshTokenString, err := refreshToken.SignedString(tm.secretKey)
+	refreshTokenString, err := refreshToken.SignedString(secretKey)
 	if err != nil {
 		return nil, err
 	}

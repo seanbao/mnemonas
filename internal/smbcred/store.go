@@ -16,8 +16,9 @@ import (
 	"time"
 	"unicode/utf16"
 
-	"github.com/seanbao/mnemonas/internal/rootio"
 	"golang.org/x/crypto/md4"
+
+	"github.com/seanbao/mnemonas/internal/rootio"
 )
 
 const credentialFileMode os.FileMode = 0600

@@ -431,7 +431,7 @@ on:
     branches: [main, master]
 
 env:
-  GO_VERSION: '1.25.10'
+  GO_VERSION: '1.25.11'
   RUST_VERSION: '1.92'
   NODE_VERSION: '22'
   GOLANGCI_LINT_VERSION: 'v2.11.4'

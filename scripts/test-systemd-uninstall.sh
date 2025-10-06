@@ -362,6 +362,130 @@ run_refuse_symlink_component_remove_path_test() {
   assert_exists "$install_dir/systemd/mnemonas.service"
 }
 
+run_refuse_symlink_storage_root_remove_data_test() {
+  local case_dir="$TMP_ROOT/refuse-symlink-storage-root"
+  local fake_path="$case_dir/fake-bin"
+  local install_dir="$case_dir/install"
+  local systemctl_log="$case_dir/systemctl.log"
+  local real_data="$case_dir/real-data"
+  local storage_link="$install_dir/storage-link"
+  local status
+  make_fake_admin_path "$fake_path"
+  make_install_tree "$install_dir"
+  mkdir -p "$real_data/files"
+  touch "$real_data/files/keep-real-data.txt"
+  ln -s "$real_data" "$storage_link"
+
+  set +e
+  PATH="$fake_path:$PATH" \
+    SYSTEMCTL_LOG="$systemctl_log" \
+    BIN_DIR="$install_dir/bin" \
+    SHARE_DIR="$install_dir/share/mnemonas" \
+    CONFIG_DIR="$install_dir/etc/mnemonas" \
+    SYSTEMD_DIR="$install_dir/systemd" \
+    STORAGE_ROOT="$storage_link" \
+    REMOVE_DATA=1 \
+    CONFIRM_REMOVE_DATA="$storage_link" \
+    "$REPO_ROOT/scripts/uninstall-systemd.sh" > "$case_dir/uninstall.log" 2>&1
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "uninstaller accepted STORAGE_ROOT symlink with REMOVE_DATA=1"
+  assert_file_contains "$case_dir/uninstall.log" "STORAGE_ROOT must not contain symlink path components"
+  assert_exists "$real_data/files/keep-real-data.txt"
+  assert_exists "$storage_link"
+  assert_exists "$install_dir/systemd/mnemonas.service"
+}
+
+run_refuse_symlink_config_dir_remove_config_test() {
+  local case_dir="$TMP_ROOT/refuse-symlink-config-dir"
+  local fake_path="$case_dir/fake-bin"
+  local install_dir="$case_dir/install"
+  local systemctl_log="$case_dir/systemctl.log"
+  local real_config="$case_dir/real-config"
+  local config_link="$install_dir/config-link"
+  local status
+  make_fake_admin_path "$fake_path"
+  make_install_tree "$install_dir"
+  mkdir -p "$real_config"
+  touch "$real_config/config.toml"
+  ln -s "$real_config" "$config_link"
+
+  set +e
+  PATH="$fake_path:$PATH" \
+    SYSTEMCTL_LOG="$systemctl_log" \
+    BIN_DIR="$install_dir/bin" \
+    SHARE_DIR="$install_dir/share/mnemonas" \
+    CONFIG_DIR="$config_link" \
+    SYSTEMD_DIR="$install_dir/systemd" \
+    STORAGE_ROOT="$install_dir/storage" \
+    REMOVE_CONFIG=1 \
+    "$REPO_ROOT/scripts/uninstall-systemd.sh" > "$case_dir/uninstall.log" 2>&1
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "uninstaller accepted CONFIG_DIR symlink with REMOVE_CONFIG=1"
+  assert_file_contains "$case_dir/uninstall.log" "CONFIG_DIR must not contain symlink path components"
+  assert_exists "$real_config/config.toml"
+  assert_exists "$config_link"
+  assert_exists "$install_dir/systemd/mnemonas.service"
+}
+
+run_refuse_symlink_binary_and_systemd_paths_test() {
+  local case_dir="$TMP_ROOT/refuse-symlink-runtime-paths"
+  local fake_path="$case_dir/fake-bin"
+  local install_dir="$case_dir/install"
+  local systemctl_log="$case_dir/systemctl.log"
+  local real_bin="$case_dir/real-bin"
+  local bin_link="$install_dir/bin-link"
+  local real_systemd="$case_dir/real-systemd"
+  local systemd_link="$install_dir/systemd-link"
+  local status
+  make_fake_admin_path "$fake_path"
+  make_install_tree "$install_dir"
+  mkdir -p "$real_bin" "$real_systemd"
+  touch "$real_bin/nasd"
+  touch "$real_systemd/mnemonas.service"
+  ln -s "$real_bin" "$bin_link"
+  ln -s "$real_systemd" "$systemd_link"
+
+  set +e
+  PATH="$fake_path:$PATH" \
+    SYSTEMCTL_LOG="$systemctl_log" \
+    BIN_DIR="$bin_link" \
+    SHARE_DIR="$install_dir/share/mnemonas" \
+    CONFIG_DIR="$install_dir/etc/mnemonas" \
+    SYSTEMD_DIR="$install_dir/systemd" \
+    STORAGE_ROOT="$install_dir/storage" \
+    "$REPO_ROOT/scripts/uninstall-systemd.sh" > "$case_dir/bin.log" 2>&1
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "uninstaller accepted BIN_DIR symlink"
+  assert_file_contains "$case_dir/bin.log" "BIN_DIR must not contain symlink path components"
+  assert_exists "$real_bin/nasd"
+  assert_exists "$bin_link"
+  assert_exists "$install_dir/systemd/mnemonas.service"
+
+  set +e
+  PATH="$fake_path:$PATH" \
+    SYSTEMCTL_LOG="$systemctl_log" \
+    BIN_DIR="$install_dir/bin" \
+    SHARE_DIR="$install_dir/share/mnemonas" \
+    CONFIG_DIR="$install_dir/etc/mnemonas" \
+    SYSTEMD_DIR="$systemd_link" \
+    STORAGE_ROOT="$install_dir/storage" \
+    "$REPO_ROOT/scripts/uninstall-systemd.sh" > "$case_dir/systemd.log" 2>&1
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "uninstaller accepted SYSTEMD_DIR symlink"
+  assert_file_contains "$case_dir/systemd.log" "SYSTEMD_DIR must not contain symlink path components"
+  assert_exists "$real_systemd/mnemonas.service"
+  assert_exists "$systemd_link"
+  assert_exists "$install_dir/bin/nasd"
+}
+
 run_remove_config_and_data_test() {
   local case_dir="$TMP_ROOT/remove-all"
   local fake_path="$case_dir/fake-bin"
@@ -395,6 +519,9 @@ run_refuse_control_character_remove_path_test
 run_refuse_overlapping_remove_paths_test
 run_refuse_root_service_account_test
 run_refuse_symlink_component_remove_path_test
+run_refuse_symlink_storage_root_remove_data_test
+run_refuse_symlink_config_dir_remove_config_test
+run_refuse_symlink_binary_and_systemd_paths_test
 run_remove_config_and_data_test
 
 printf '[systemd-uninstall-test] all checks passed\n'

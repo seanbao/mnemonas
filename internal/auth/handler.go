@@ -29,6 +29,13 @@ type Handler struct {
 
 type UserUsageResolver func(context.Context, *User) (int64, error)
 
+type LoginRateLimitPolicy struct {
+	Enabled       bool
+	FailureLimit  int
+	FailureWindow time.Duration
+	LockDuration  time.Duration
+}
+
 type loginAttemptTracker struct {
 	mu       sync.Mutex
 	attempts map[string]loginAttemptState
@@ -133,6 +140,22 @@ func NewHandler(us *UserStore, tm *TokenManager) *Handler {
 
 func (h *Handler) SetUserUsageResolver(resolver UserUsageResolver) {
 	h.usageResolver = resolver
+}
+
+func (h *Handler) LoginRateLimitPolicy() LoginRateLimitPolicy {
+	if h == nil {
+		return LoginRateLimitPolicy{}
+	}
+	policy := LoginRateLimitPolicy{
+		FailureLimit:  h.loginFailureLimit,
+		FailureWindow: h.loginFailureWindow,
+		LockDuration:  h.loginLockDuration,
+	}
+	policy.Enabled = h.loginAttempts != nil &&
+		policy.FailureLimit > 0 &&
+		policy.FailureWindow > 0 &&
+		policy.LockDuration > 0
+	return policy
 }
 
 func decodeJSONBodyStrict(r *http.Request, dst any) error {
@@ -616,16 +639,7 @@ func clearDownloadSessionCookie(w http.ResponseWriter, r *http.Request) {
 }
 
 func requestIsHTTPS(r *http.Request) bool {
-	if r.TLS != nil {
-		return true
-	}
-	if !requestip.IsTrustedForwardedSource(requestip.RemoteIP(r.RemoteAddr)) {
-		return false
-	}
-	if requestip.TrustedProxyHops() <= 0 {
-		return false
-	}
-	return strings.EqualFold(strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")), "https")
+	return requestip.RequestIsHTTPS(r)
 }
 
 // HandleMe handles GET /api/v1/auth/me

@@ -149,19 +149,20 @@ docker build \
   --build-arg VERSION=local \
   --build-arg BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   -t mnemonas:local .
+mkdir -p "$HOME/.mnemonas"
 docker run --rm --user "$(id -u):$(id -g)" -p 8080:8080 \
   --mount type=bind,source="$HOME/.mnemonas",target=/data \
   mnemonas:local
 ```
 
-Only `8080` needs to be published.
+The host data directory must exist before the bind mount is used. If the directory is absent, Docker can create it as root, which prevents the non-root container user from writing `/data/config.toml` on first startup. Only `8080` needs to be published.
 
 Build base images can be overridden for private caches or regional mirrors:
 
 ```bash
 docker build -t mnemonas:local \
   --build-arg NODE_IMAGE=node:22-bookworm-slim \
-  --build-arg GO_IMAGE=golang:1.25.10-alpine \
+  --build-arg GO_IMAGE=golang:1.25.11-alpine \
   --build-arg RUST_IMAGE=rust:1.92 \
   --build-arg RUNTIME_IMAGE=debian:bookworm-slim \
   --build-arg VERSION=local \

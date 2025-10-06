@@ -1,6 +1,7 @@
 package requestip
 
 import (
+	"crypto/tls"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -196,5 +197,98 @@ func TestClientIP_TrustedProxyHopsZeroDisablesForwardedHeaders(t *testing.T) {
 func TestSetTrustedProxyCIDRsRejectsInvalidCIDR(t *testing.T) {
 	if err := SetTrustedProxyCIDRs([]string{"not-a-cidr"}); err == nil {
 		t.Fatal("expected invalid trusted proxy CIDR error")
+	}
+}
+
+func TestRequestIsHTTPS_UsesTrustedProxyBoundary(t *testing.T) {
+	tests := []struct {
+		name       string
+		setup      func(t *testing.T, req *http.Request)
+		wantHTTPS  bool
+		wantScheme string
+	}{
+		{
+			name: "direct TLS",
+			setup: func(t *testing.T, req *http.Request) {
+				req.TLS = &tls.ConnectionState{}
+			},
+			wantHTTPS:  true,
+			wantScheme: "https",
+		},
+		{
+			name: "trusted loopback forwarded HTTPS",
+			setup: func(t *testing.T, req *http.Request) {
+				setTrustedProxyHopsForTest(t, 1)
+				req.RemoteAddr = "127.0.0.1:8080"
+				req.Header.Set("X-Forwarded-Proto", "https")
+			},
+			wantHTTPS:  true,
+			wantScheme: "https",
+		},
+		{
+			name: "configured trusted CIDR forwarded HTTPS",
+			setup: func(t *testing.T, req *http.Request) {
+				setTrustedProxyHopsForTest(t, 1)
+				setTrustedProxyCIDRsForTest(t, []string{"10.0.0.0/8"})
+				req.RemoteAddr = "10.0.0.2:8080"
+				req.Header.Set("X-Forwarded-Proto", "https")
+			},
+			wantHTTPS:  true,
+			wantScheme: "https",
+		},
+		{
+			name: "untrusted source spoofed forwarded HTTPS",
+			setup: func(t *testing.T, req *http.Request) {
+				setTrustedProxyHopsForTest(t, 1)
+				req.RemoteAddr = "203.0.113.5:8080"
+				req.Header.Set("X-Forwarded-Proto", "https")
+			},
+			wantHTTPS:  false,
+			wantScheme: "http",
+		},
+		{
+			name: "trusted source with hops disabled",
+			setup: func(t *testing.T, req *http.Request) {
+				setTrustedProxyHopsForTest(t, 0)
+				req.RemoteAddr = "127.0.0.1:8080"
+				req.Header.Set("X-Forwarded-Proto", "https")
+			},
+			wantHTTPS:  false,
+			wantScheme: "http",
+		},
+		{
+			name: "trusted source forwarded HTTP",
+			setup: func(t *testing.T, req *http.Request) {
+				setTrustedProxyHopsForTest(t, 1)
+				req.RemoteAddr = "127.0.0.1:8080"
+				req.Header.Set("X-Forwarded-Proto", "http")
+			},
+			wantHTTPS:  false,
+			wantScheme: "http",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/", nil)
+			req.RemoteAddr = "203.0.113.10:8080"
+			tt.setup(t, req)
+
+			if got := RequestIsHTTPS(req); got != tt.wantHTTPS {
+				t.Fatalf("RequestIsHTTPS() = %v, want %v", got, tt.wantHTTPS)
+			}
+			if got := RequestScheme(req); got != tt.wantScheme {
+				t.Fatalf("RequestScheme() = %q, want %q", got, tt.wantScheme)
+			}
+		})
+	}
+}
+
+func TestRequestIsHTTPS_NilRequestIsHTTP(t *testing.T) {
+	if RequestIsHTTPS(nil) {
+		t.Fatal("RequestIsHTTPS(nil) = true, want false")
+	}
+	if got := RequestScheme(nil); got != "http" {
+		t.Fatalf("RequestScheme(nil) = %q, want http", got)
 	}
 }

@@ -46,6 +46,7 @@ function createSettings(overrides: Partial<SettingsData> = {}): SettingsData {
   return {
     server: { host: '0.0.0.0', port: 8080, read_timeout: '30s', write_timeout: '30s', idle_timeout: '60s', trusted_proxy_hops: 2, trusted_proxy_cidrs: [] },
     storage: { root: '~/.mnemonas' },
+    auth: { enabled: true, access_token_ttl: '15m0s', refresh_token_ttl: '168h0m0s' },
     retention: { max_versions: 10, max_age: '24h', min_free_space: 1024, gc_interval: '1h' },
     webdav: { enabled: true, prefix: '/dav', read_only: false, auth_type: 'basic', username: 'admin' },
     share: { enabled: true, base_url: 'http://localhost:8080' },
@@ -68,6 +69,7 @@ describe('Settings API', () => {
         data: {
           server: { host: '0.0.0.0', port: 8080, read_timeout: '30s', write_timeout: '30s', idle_timeout: '60s', trusted_proxy_hops: 2, trusted_proxy_cidrs: ['10.0.0.0/8'] },
           storage: { root: '~/.mnemonas' },
+          auth: { enabled: true, access_token_ttl: '15m0s', refresh_token_ttl: '168h0m0s' },
           retention: { max_versions: 10, max_age: '24h', min_free_space: 1024, gc_interval: '1h' },
           webdav: { enabled: true, prefix: '/dav', read_only: false, auth_type: 'basic', username: 'admin' },
           share: { enabled: true, base_url: 'http://localhost:8080' },
@@ -82,6 +84,8 @@ describe('Settings API', () => {
     expect(result.data.server.port).toBe(8080)
     expect(result.data.server.trusted_proxy_hops).toBe(2)
     expect(result.data.server.trusted_proxy_cidrs).toEqual(['10.0.0.0/8'])
+    expect(result.data.auth.access_token_ttl).toBe('15m0s')
+    expect(result.data.auth.refresh_token_ttl).toBe('168h0m0s')
   })
 
   it('forwards abort signal when fetching settings', async () => {
@@ -174,6 +178,7 @@ describe('Settings API', () => {
         data: {
           server: { host: '0.0.0.0', port: 8080, read_timeout: '30s', write_timeout: '30s', idle_timeout: '60s', trusted_proxy_hops: 2 },
           storage: { root: '~/.mnemonas' },
+          auth: { enabled: true, access_token_ttl: '15m0s', refresh_token_ttl: '168h0m0s' },
           retention: { max_versions: 10, max_age: '24h', min_free_space: 1024, gc_interval: '1h' },
           webdav: { enabled: true, prefix: '/dav', read_only: false, auth_type: 'basic', username: 'admin' },
           share: { enabled: true, base_url: 'http://localhost:8080' },
@@ -197,6 +202,7 @@ describe('Settings API', () => {
         data: {
           server: { host: '0.0.0.0', port: 8080, read_timeout: '30s', write_timeout: '30s', idle_timeout: '60s', trusted_proxy_hops: 2 },
           storage: { root: '~/.mnemonas' },
+          auth: { enabled: true, access_token_ttl: '15m0s', refresh_token_ttl: '168h0m0s' },
           retention: { max_versions: 10, max_age: '24h', min_free_space: 1024, gc_interval: '1h' },
           webdav: { enabled: true, runtime_enabled: false, prefix: '/dav', read_only: false, auth_type: 'basic', username: 'admin' },
           share: { enabled: true, base_url: 'http://localhost:8080' },
@@ -362,6 +368,7 @@ describe('Settings API', () => {
     ['unsafe trash max size', { trash: { enabled: true, retention_days: 30, max_size: 9007199254740992 } }],
     ['unsafe versioning max size', { versioning: { auto_versioned_extensions: ['.txt'], auto_versioned_filenames: [], max_versioned_size: 9007199254740992 } }],
     ['unsafe alerts min free bytes', { alerts: { enabled: true, check_interval: '1m', threshold_pct: 80, critical_pct: 90, min_free_bytes: 9007199254740992, cooldown_period: '10m', webhook_url: '', webhook_method: 'POST', webhook_headers: [] } }],
+    ['malformed auth access token TTL', { auth: { enabled: true, access_token_ttl: 900, refresh_token_ttl: '168h0m0s' } }],
     ['out-of-range alerts threshold', { alerts: { ...validAlertsSettings, threshold_pct: 101 } }],
     ['fractional alerts critical threshold', { alerts: { ...validAlertsSettings, critical_pct: 90.5 } }],
     ['inverted alerts thresholds', { alerts: { ...validAlertsSettings, threshold_pct: 95, critical_pct: 90 } }],

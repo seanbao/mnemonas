@@ -53,6 +53,11 @@ export interface SettingsData {
     directory_quotas?: DirectoryQuota[]
     directory_access_rules?: DirectoryAccessRule[]
   }
+  auth: {
+    enabled: boolean
+    access_token_ttl: string
+    refresh_token_ttl: string
+  }
   trash?: {
     enabled: boolean
     retention_days: number
@@ -332,6 +337,10 @@ export interface UpdateSettingsRequest {
   storage?: {
     directory_quotas?: DirectoryQuota[]
     directory_access_rules?: DirectoryAccessRule[]
+  }
+  auth?: {
+    access_token_ttl?: string
+    refresh_token_ttl?: string
   }
   trash?: {
     enabled?: boolean
@@ -875,6 +884,10 @@ function isValidSettingsData(value: unknown): value is SettingsData {
     || (value.server.trusted_proxy_cidrs !== undefined && !isStringArray(value.server.trusted_proxy_cidrs))
     || !isRecord(value.storage)
     || typeof value.storage.root !== 'string'
+    || !isRecord(value.auth)
+    || typeof value.auth.enabled !== 'boolean'
+    || typeof value.auth.access_token_ttl !== 'string'
+    || typeof value.auth.refresh_token_ttl !== 'string'
     || !isRecord(value.retention)
     || !isNonNegativeSafeInteger(value.retention.max_versions)
     || typeof value.retention.max_age !== 'string'

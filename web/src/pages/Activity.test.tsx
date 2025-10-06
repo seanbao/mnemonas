@@ -192,7 +192,10 @@ vi.mock('@/api/activity', () => ({
       delete: '删除文件',
       move: '移动文件',
       share: '创建分享',
+      restore: '恢复版本',
       login: '登录',
+      trash_restore: '从回收站恢复',
+      trash_delete: '永久删除回收站项目',
       trash_empty: '清空回收站',
       scrub: '数据校验',
     }
@@ -921,7 +924,7 @@ describe('ActivityPage', () => {
       })
     })
 
-    it('filters persisted review records by reviewer, review time, and disposition status', async () => {
+    it('filters persisted review records by reviewer, linked activity, review time, and disposition status', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
 
       render(<ActivityPage />)
@@ -933,6 +936,7 @@ describe('ActivityPage', () => {
       mockListActivityReviewRecords.mockClear()
       const reviewFilters = within(screen.getByLabelText('复核历史筛选'))
       await user.type(reviewFilters.getByLabelText('按复核人筛选'), 'owner')
+      await user.type(reviewFilters.getByLabelText('按关联活动筛选'), 'delete-1')
       await user.click(reviewFilters.getByText('筛选复核近 7 天'))
       await user.click(reviewFilters.getByText('筛选复核需跟进'))
 
@@ -940,6 +944,7 @@ describe('ActivityPage', () => {
         expect(mockListActivityReviewRecords.mock.calls.some(([options]) => (
           options?.limit === 5
           && options?.reviewer === 'owner'
+          && options?.activityEntryId === 'delete-1'
           && options?.dispositionStatus === 'needs_follow_up'
           && typeof options?.since === 'string'
           && options.since.endsWith('Z')
@@ -965,6 +970,7 @@ describe('ActivityPage', () => {
           options?.limit === 5
           && options?.dispositionStatus === 'needs_follow_up'
           && options?.reviewer === undefined
+          && options?.activityEntryId === undefined
           && options?.since === undefined
         ))).toBe(true)
         expect(reviewFilters.getByRole('button', { name: '只看需跟进' })).toBeDisabled()
@@ -1214,6 +1220,15 @@ describe('ActivityPage', () => {
         expect(screen.getByLabelText('复核历史筛选')).toBeTruthy()
       })
 
+      const reviewFilters = within(screen.getByLabelText('复核历史筛选'))
+      await user.type(reviewFilters.getByLabelText('按关联活动筛选'), 'share-1')
+
+      await waitFor(() => {
+        expect(mockListActivityReviewRecords.mock.calls.some(([options]) => (
+          options?.activityEntryId === 'share-1'
+        ))).toBe(true)
+      })
+
       mockListActivityReviewRecords.mockClear()
       mockListActivityReviewRecords.mockResolvedValueOnce({
         items: [
@@ -1250,6 +1265,7 @@ describe('ActivityPage', () => {
           limit: 100,
           offset: 0,
           reviewer: undefined,
+          activityEntryId: 'share-1',
           dispositionStatus: undefined,
           since: undefined,
         }))
@@ -1618,6 +1634,53 @@ describe('ActivityPage', () => {
       expect(screen.queryByText('cleanup_warning: true')).toBeNull()
       expect(screen.queryByText('trash_cleanup_warning: true')).toBeNull()
       expect(screen.queryByText(/abcdef1234567890abcdef/)).toBeNull()
+    })
+
+    it('opens recovery and share disposition destinations from activity rows', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockListActivity.mockResolvedValue({
+        items: [
+          {
+            id: 'delete-row',
+            timestamp: new Date(Date.now() - 1000 * 60).toISOString(),
+            action: 'delete',
+            path: '/documents/old.txt',
+            user: 'admin',
+          },
+          {
+            id: 'share-row',
+            timestamp: new Date(Date.now() - 1000 * 120).toISOString(),
+            action: 'share',
+            path: '/team/report.pdf',
+            user: 'admin',
+          },
+        ],
+        total: 2,
+        limit: 20,
+        offset: 0,
+      })
+
+      render(<ActivityPage />)
+
+      await waitFor(() => {
+        expect(screen.getByLabelText('活动记录 删除文件 /documents/old.txt')).toBeTruthy()
+        expect(screen.getByLabelText('活动记录 创建分享 /team/report.pdf')).toBeTruthy()
+      })
+
+      const deleteRow = within(screen.getByLabelText('活动记录 删除文件 /documents/old.txt'))
+      await user.click(deleteRow.getByRole('button', { name: '查看版本' }))
+      expect(window.location.pathname).toBe('/versions')
+      expect(new URLSearchParams(window.location.search).get('path')).toBe('/documents/old.txt')
+
+      await user.click(deleteRow.getByRole('button', { name: '查回收站' }))
+      expect(window.location.pathname).toBe('/trash')
+      expect(new URLSearchParams(window.location.search).get('path')).toBe('/documents/old.txt')
+
+      await user.click(within(screen.getByLabelText('活动记录 创建分享 /team/report.pdf')).getByRole('button', { name: '处理分享' }))
+      expect(window.location.pathname).toBe('/settings')
+      const params = new URLSearchParams(window.location.search)
+      expect(params.get('tab')).toBe('shares')
+      expect(params.get('share_path')).toBe('/team/report.pdf')
     })
 
     it('maps archive download activity details before rendering them', async () => {

@@ -63,6 +63,7 @@ data/
 # Test artifacts
 *.prof
 *.out
+coverage/
 coverage.txt
 output/
 

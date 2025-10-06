@@ -1210,6 +1210,11 @@ run_doctor_public_domain_test() {
   {"id":"disabled-admin","username":"disabled-admin","role":"admin","disabled":true}
 ]
 EOF
+  chmod 0600 "$storage_dir/.mnemonas/users.json"
+  cat > "$storage_dir/secrets.json" <<'EOF'
+{"jwt_secret":"test-jwt-secret-value-with-enough-length","webdav_password":"GeneratedPass123"}
+EOF
+  chmod 0600 "$storage_dir/secrets.json"
 
   write_executable "$fake_path/id" '#!/usr/bin/env bash' 'exit 0'
   write_executable "$fake_path/getent" '#!/usr/bin/env bash' 'exit 1'
@@ -1220,7 +1225,18 @@ EOF
   write_executable "$fake_path/curl" \
     '#!/usr/bin/env bash' \
     'url="${@: -1}"' \
+    'headers_file=""' \
+    'previous=""' \
+    'for arg in "$@"; do' \
+    '  if [[ "$previous" == "-D" ]]; then headers_file="$arg"; fi' \
+    '  previous="$arg"' \
+    'done' \
+    'write_share_probe_headers() {' \
+    '  [[ -n "$headers_file" && "$headers_file" != "-" ]] || return 0' \
+    '  printf "HTTP/2 404\r\nCache-Control: private, no-cache\r\nVary: Cookie\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\n\r\n" > "$headers_file"' \
+    '}' \
     'if [[ "$*" == *" -X PROPFIND "* && "$url" == "https://nas.example.com/dav/" ]]; then printf "401"; exit 0; fi' \
+    'if [[ "$url" == "https://nas.example.com/api/v1/public/shares/mnemonas-doctor-probe" ]]; then write_share_probe_headers; printf "404"; exit 0; fi' \
     'if [[ "$*" == *" -w "* && "$url" == "http://nas.example.com/health" ]]; then printf "301 https://nas.example.com/health"; exit 0; fi' \
     'case "$url" in' \
     '  https://nas.example.com/health) printf "ok\n";;' \
@@ -1294,7 +1310,13 @@ EOF
   assert_file_contains "$case_dir/doctor-public.log" "public HTTPS certificate matches nas.example.com"
   assert_file_contains "$case_dir/doctor-public.log" "public HTTPS certificate is valid for at least 30 days"
   assert_file_contains "$case_dir/doctor-public.log" "certificate automation detected: Caddy"
+  assert_file_contains "$case_dir/doctor-public.log" "public auth.access_token_ttl is within 1h: 15m"
+  assert_file_contains "$case_dir/doctor-public.log" "public auth.refresh_token_ttl is within 720h: 168h"
+  assert_file_contains "$case_dir/doctor-public.log" "public users file directory is private to its owner: $storage_dir/.mnemonas"
+  assert_file_contains "$case_dir/doctor-public.log" "public users file is private to its owner: $storage_dir/.mnemonas/users.json"
   assert_file_contains "$case_dir/doctor-public.log" "public administrator redundancy verified: 2 enabled administrators"
+  assert_file_contains "$case_dir/doctor-public.log" "public WebDAV generated password file is private to its owner: $storage_dir/secrets.json"
+  assert_file_contains "$case_dir/doctor-public.log" "public WebDAV generated Basic Auth password is available"
   assert_file_contains "$case_dir/doctor-public.log" "public WebDAV anonymous PROPFIND is rejected: https://nas.example.com/dav/ (HTTP 401)"
   assert_file_contains "$case_dir/doctor-public.log" "public direct control plane is not publicly reachable: http://nas.example.com:18080/health"
   assert_file_contains "$case_dir/doctor-public.log" "public direct control plane TCP port 18080 is not publicly reachable on nas.example.com"
@@ -1315,6 +1337,137 @@ EOF
   assert_file_contains "$case_dir/doctor-public-normalized-domain.log" "public HTTPS health reachable: https://nas.example.com/health"
   assert_file_contains "$case_dir/doctor-public-normalized-domain.log" "public HTTP redirects to HTTPS: http://nas.example.com/health -> https://nas.example.com/health"
   assert_file_contains "$case_dir/doctor-public-normalized-domain.log" "Summary: 0 failure(s)"
+
+  cat > "$case_dir/config-long-auth-ttl.toml" <<EOF
+[server]
+host = "127.0.0.1"
+port = 18080
+trusted_proxy_hops = 1
+
+[storage]
+root = "$storage_dir"
+
+[dataplane]
+grpc_address = "127.0.0.1:19090"
+
+[auth]
+access_token_ttl = "2h"
+refresh_token_ttl = "1080h"
+EOF
+
+  PATH="$fake_path:$PATH" \
+    BIN_DIR="$bin_dir" \
+    WEB_DIR="$web_dir" \
+    CONFIG_PATH="$case_dir/config-long-auth-ttl.toml" \
+    DATAPLANE_HTTP_PORT=19091 \
+    BACKUP_ROOT="$backup_dir" \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain nas.example.com > "$case_dir/doctor-public-long-auth-ttl.log"
+
+  assert_file_contains "$case_dir/doctor-public-long-auth-ttl.log" "public auth.access_token_ttl is longer than 1h: 2h"
+  assert_file_contains "$case_dir/doctor-public-long-auth-ttl.log" "public auth.refresh_token_ttl is longer than 720h: 1080h"
+  assert_file_contains "$case_dir/doctor-public-long-auth-ttl.log" "Summary: 0 failure(s)"
+
+  local open_auth_dir="$case_dir/open-auth"
+  mkdir -p "$open_auth_dir"
+  cp "$storage_dir/.mnemonas/users.json" "$open_auth_dir/users.json"
+  chmod 0755 "$open_auth_dir"
+  chmod 0644 "$open_auth_dir/users.json"
+  cat > "$case_dir/config-open-auth-users.toml" <<EOF
+[server]
+host = "127.0.0.1"
+port = 18080
+trusted_proxy_hops = 1
+
+[storage]
+root = "$storage_dir"
+
+[dataplane]
+grpc_address = "127.0.0.1:19090"
+
+[auth]
+users_file = "$open_auth_dir/users.json"
+EOF
+
+  PATH="$fake_path:$PATH" \
+    BIN_DIR="$bin_dir" \
+    WEB_DIR="$web_dir" \
+    CONFIG_PATH="$case_dir/config-open-auth-users.toml" \
+    DATAPLANE_HTTP_PORT=19091 \
+    BACKUP_ROOT="$backup_dir" \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain nas.example.com > "$case_dir/doctor-public-open-auth-users.log"
+
+  assert_file_contains "$case_dir/doctor-public-open-auth-users.log" "public users file directory is not private"
+  assert_file_contains "$case_dir/doctor-public-open-auth-users.log" "public users file is not private"
+  assert_file_contains "$case_dir/doctor-public-open-auth-users.log" "Summary: 0 failure(s)"
+
+  local linked_users_file="$case_dir/linked-users.json"
+  ln -s "$storage_dir/.mnemonas/users.json" "$linked_users_file"
+  cat > "$case_dir/config-symlink-users.toml" <<EOF
+[server]
+host = "127.0.0.1"
+port = 18080
+trusted_proxy_hops = 1
+
+[storage]
+root = "$storage_dir"
+
+[dataplane]
+grpc_address = "127.0.0.1:19090"
+
+[auth]
+users_file = "$linked_users_file"
+EOF
+
+  set +e
+  PATH="$fake_path:$PATH" \
+    BIN_DIR="$bin_dir" \
+    WEB_DIR="$web_dir" \
+    CONFIG_PATH="$case_dir/config-symlink-users.toml" \
+    DATAPLANE_HTTP_PORT=19091 \
+    BACKUP_ROOT="$backup_dir" \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain nas.example.com > "$case_dir/doctor-public-symlink-users.log"
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "public doctor accepted a symlink users file"
+  assert_file_contains "$case_dir/doctor-public-symlink-users.log" "public users file path is a symlink; use a regular private file"
+
+  local real_auth_dir="$case_dir/real-auth"
+  local linked_auth_dir="$case_dir/linked-auth"
+  mkdir -p "$real_auth_dir"
+  cp "$storage_dir/.mnemonas/users.json" "$real_auth_dir/users.json"
+  chmod 0700 "$real_auth_dir"
+  chmod 0600 "$real_auth_dir/users.json"
+  ln -s "$real_auth_dir" "$linked_auth_dir"
+  cat > "$case_dir/config-symlink-auth-dir.toml" <<EOF
+[server]
+host = "127.0.0.1"
+port = 18080
+trusted_proxy_hops = 1
+
+[storage]
+root = "$storage_dir"
+
+[dataplane]
+grpc_address = "127.0.0.1:19090"
+
+[auth]
+users_file = "$linked_auth_dir/users.json"
+EOF
+
+  set +e
+  PATH="$fake_path:$PATH" \
+    BIN_DIR="$bin_dir" \
+    WEB_DIR="$web_dir" \
+    CONFIG_PATH="$case_dir/config-symlink-auth-dir.toml" \
+    DATAPLANE_HTTP_PORT=19091 \
+    BACKUP_ROOT="$backup_dir" \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain nas.example.com > "$case_dir/doctor-public-symlink-auth-dir.log"
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "public doctor accepted a symlink users file directory"
+  assert_file_contains "$case_dir/doctor-public-symlink-auth-dir.log" "public users file directory path is a symlink; use a regular private directory"
 
   local custom_auth_dir="$case_dir/custom-auth"
   mkdir -p "$custom_auth_dir"
@@ -1401,6 +1554,7 @@ grpc_address = "127.0.0.1:19090"
 [share]
 enabled = true
 base_url = " https://NAS.EXAMPLE.COM./shares "
+default_max_access = 20
 EOF
 
   PATH="$fake_path:$PATH" \
@@ -1413,6 +1567,9 @@ EOF
 
   assert_file_contains "$case_dir/doctor-public-share-trimmed.log" "public backend host is loopback-only: LOCALHOST"
   assert_file_contains "$case_dir/doctor-public-share-trimmed.log" "public share.base_url uses HTTPS on nas.example.com"
+  assert_file_contains "$case_dir/doctor-public-share-trimmed.log" "public share.default_expires_in is within 720h: 168h"
+  assert_file_contains "$case_dir/doctor-public-share-trimmed.log" "public share.default_max_access limits new share link accesses: 20"
+  assert_file_contains "$case_dir/doctor-public-share-trimmed.log" "public share JSON responses use private cache and Cookie Vary boundaries"
   assert_file_contains "$case_dir/doctor-public-share-trimmed.log" "Summary: 0 failure(s)"
 
   cat > "$case_dir/config-share-route-prefix.toml" <<EOF
@@ -1443,6 +1600,132 @@ EOF
   assert_file_contains "$case_dir/doctor-public-share-route-prefix.log" "public share.base_url should be the site origin or base path before /s; current value will generate nested /s/s share links"
   assert_file_contains "$case_dir/doctor-public-share-route-prefix.log" "Summary: 0 failure(s)"
 
+  cat > "$case_dir/config-share-no-expiry.toml" <<EOF
+[server]
+host = "127.0.0.1"
+port = 18080
+trusted_proxy_hops = 1
+
+[storage]
+root = "$storage_dir"
+
+[dataplane]
+grpc_address = "127.0.0.1:19090"
+
+[share]
+enabled = true
+base_url = "https://nas.example.com"
+default_expires_in = "0h"
+EOF
+
+  PATH="$fake_path:$PATH" \
+    BIN_DIR="$bin_dir" \
+    WEB_DIR="$web_dir" \
+    CONFIG_PATH="$case_dir/config-share-no-expiry.toml" \
+    DATAPLANE_HTTP_PORT=19091 \
+    BACKUP_ROOT="$backup_dir" \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain nas.example.com > "$case_dir/doctor-public-share-no-expiry.log"
+
+  assert_file_contains "$case_dir/doctor-public-share-no-expiry.log" "public share.default_expires_in leaves new share links without an expiry"
+  assert_file_contains "$case_dir/doctor-public-share-no-expiry.log" "Summary: 0 failure(s)"
+
+  cat > "$case_dir/config-share-long-expiry.toml" <<EOF
+[server]
+host = "127.0.0.1"
+port = 18080
+trusted_proxy_hops = 1
+
+[storage]
+root = "$storage_dir"
+
+[dataplane]
+grpc_address = "127.0.0.1:19090"
+
+[share]
+enabled = true
+base_url = "https://nas.example.com"
+default_expires_in = "1080h"
+EOF
+
+  PATH="$fake_path:$PATH" \
+    BIN_DIR="$bin_dir" \
+    WEB_DIR="$web_dir" \
+    CONFIG_PATH="$case_dir/config-share-long-expiry.toml" \
+    DATAPLANE_HTTP_PORT=19091 \
+    BACKUP_ROOT="$backup_dir" \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain nas.example.com > "$case_dir/doctor-public-share-long-expiry.log"
+
+  assert_file_contains "$case_dir/doctor-public-share-long-expiry.log" "public share.default_expires_in is longer than 720h: 1080h"
+  assert_file_contains "$case_dir/doctor-public-share-long-expiry.log" "Summary: 0 failure(s)"
+
+  cat > "$case_dir/config-share-unlimited-max-access.toml" <<EOF
+[server]
+host = "127.0.0.1"
+port = 18080
+trusted_proxy_hops = 1
+
+[storage]
+root = "$storage_dir"
+
+[dataplane]
+grpc_address = "127.0.0.1:19090"
+
+[share]
+enabled = true
+base_url = "https://nas.example.com"
+default_expires_in = "168h"
+default_max_access = 0
+EOF
+
+  PATH="$fake_path:$PATH" \
+    BIN_DIR="$bin_dir" \
+    WEB_DIR="$web_dir" \
+    CONFIG_PATH="$case_dir/config-share-unlimited-max-access.toml" \
+    DATAPLANE_HTTP_PORT=19091 \
+    BACKUP_ROOT="$backup_dir" \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain nas.example.com > "$case_dir/doctor-public-share-unlimited-max-access.log"
+
+  assert_file_contains "$case_dir/doctor-public-share-unlimited-max-access.log" "public share.default_max_access leaves new share links without an access limit"
+  assert_file_contains "$case_dir/doctor-public-share-unlimited-max-access.log" "Summary: 0 failure(s)"
+
+  write_executable "$fake_path/curl" \
+    '#!/usr/bin/env bash' \
+    'url="${@: -1}"' \
+    'headers_file=""' \
+    'previous=""' \
+    'for arg in "$@"; do' \
+    '  if [[ "$previous" == "-D" ]]; then headers_file="$arg"; fi' \
+    '  previous="$arg"' \
+    'done' \
+    'write_share_probe_headers() {' \
+    '  [[ -n "$headers_file" && "$headers_file" != "-" ]] || return 0' \
+    '  printf "HTTP/2 404\r\nCache-Control: private, no-cache\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\n\r\n" > "$headers_file"' \
+    '}' \
+    'if [[ "$*" == *" -X PROPFIND "* && "$url" == "https://nas.example.com/dav/" ]]; then printf "401"; exit 0; fi' \
+    'if [[ "$url" == "https://nas.example.com/api/v1/public/shares/mnemonas-doctor-probe" ]]; then write_share_probe_headers; printf "404"; exit 0; fi' \
+    'if [[ "$*" == *" -w "* && "$url" == "http://nas.example.com/health" ]]; then printf "301 https://nas.example.com/health"; exit 0; fi' \
+    'case "$url" in' \
+    '  https://nas.example.com/health) printf "ok\n";;' \
+    '  http://nas.example.com:18080/health) exit 7;;' \
+    '  */) printf "<div id=\"root\"></div>\n";;' \
+    '  *) printf "ok\n";;' \
+    'esac'
+
+  set +e
+  PATH="$fake_path:$PATH" \
+    BIN_DIR="$bin_dir" \
+    WEB_DIR="$web_dir" \
+    CONFIG_PATH="$case_dir/config-share-trimmed.toml" \
+    DATAPLANE_HTTP_PORT=19091 \
+    BACKUP_ROOT="$backup_dir" \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain nas.example.com > "$case_dir/doctor-public-share-missing-vary.log"
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "public doctor accepted public share JSON without Vary: Cookie"
+  assert_file_contains "$case_dir/doctor-public-share-missing-vary.log" "public share API probe reached MnemoNAS"
+  assert_file_contains "$case_dir/doctor-public-share-missing-vary.log" "public share JSON response is missing cache/security headers (Vary=Cookie)"
+
   cat > "$case_dir/config-webdav-placeholder-password.toml" <<EOF
 [server]
 host = "127.0.0.1"
@@ -1472,6 +1755,71 @@ EOF
   assert_file_contains "$case_dir/doctor-public-webdav-placeholder-password.log" "public WebDAV Basic Auth password should be changed before public access (risk: placeholder)"
   assert_file_not_contains "$case_dir/doctor-public-webdav-placeholder-password.log" "change-this-webdav-password"
   assert_file_contains "$case_dir/doctor-public-webdav-placeholder-password.log" "Summary: 0 failure(s)"
+
+  mv "$storage_dir/secrets.json" "$storage_dir/secrets.json.saved"
+  set +e
+  PATH="$fake_path:$PATH" \
+    BIN_DIR="$bin_dir" \
+    WEB_DIR="$web_dir" \
+    CONFIG_PATH="$case_dir/config.toml" \
+    DATAPLANE_HTTP_PORT=19091 \
+    BACKUP_ROOT="$backup_dir" \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain nas.example.com > "$case_dir/doctor-public-missing-webdav-secrets.log"
+  status=$?
+  set -e
+  mv "$storage_dir/secrets.json.saved" "$storage_dir/secrets.json"
+
+  [[ "$status" -ne 0 ]] || fail "public doctor accepted missing generated WebDAV password file"
+  assert_file_contains "$case_dir/doctor-public-missing-webdav-secrets.log" "public WebDAV generated password file is missing"
+
+  mv "$storage_dir/secrets.json" "$storage_dir/secrets.json.real"
+  ln -s "$storage_dir/secrets.json.real" "$storage_dir/secrets.json"
+  set +e
+  PATH="$fake_path:$PATH" \
+    BIN_DIR="$bin_dir" \
+    WEB_DIR="$web_dir" \
+    CONFIG_PATH="$case_dir/config.toml" \
+    DATAPLANE_HTTP_PORT=19091 \
+    BACKUP_ROOT="$backup_dir" \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain nas.example.com > "$case_dir/doctor-public-symlink-webdav-secrets.log"
+  status=$?
+  set -e
+  rm -f "$storage_dir/secrets.json"
+  mv "$storage_dir/secrets.json.real" "$storage_dir/secrets.json"
+
+  [[ "$status" -ne 0 ]] || fail "public doctor accepted symlink generated WebDAV password file"
+  assert_file_contains "$case_dir/doctor-public-symlink-webdav-secrets.log" "public WebDAV generated password file is a symlink"
+
+  chmod 0644 "$storage_dir/secrets.json"
+  PATH="$fake_path:$PATH" \
+    BIN_DIR="$bin_dir" \
+    WEB_DIR="$web_dir" \
+    CONFIG_PATH="$case_dir/config.toml" \
+    DATAPLANE_HTTP_PORT=19091 \
+    BACKUP_ROOT="$backup_dir" \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain nas.example.com > "$case_dir/doctor-public-open-webdav-secrets.log"
+  chmod 0600 "$storage_dir/secrets.json"
+
+  assert_file_contains "$case_dir/doctor-public-open-webdav-secrets.log" "public WebDAV generated password file is not private"
+  assert_file_contains "$case_dir/doctor-public-open-webdav-secrets.log" "Summary: 0 failure(s)"
+
+  cp "$storage_dir/secrets.json" "$storage_dir/secrets.json.saved"
+  cat > "$storage_dir/secrets.json" <<'EOF'
+{"jwt_secret":"test-jwt-secret-value-with-enough-length","webdav_password":"password123"}
+EOF
+  chmod 0600 "$storage_dir/secrets.json"
+  PATH="$fake_path:$PATH" \
+    BIN_DIR="$bin_dir" \
+    WEB_DIR="$web_dir" \
+    CONFIG_PATH="$case_dir/config.toml" \
+    DATAPLANE_HTTP_PORT=19091 \
+    BACKUP_ROOT="$backup_dir" \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain nas.example.com > "$case_dir/doctor-public-weak-generated-webdav-password.log"
+  mv "$storage_dir/secrets.json.saved" "$storage_dir/secrets.json"
+
+  assert_file_contains "$case_dir/doctor-public-weak-generated-webdav-password.log" "public WebDAV generated Basic Auth password should be changed before public access (risk: placeholder)"
+  assert_file_not_contains "$case_dir/doctor-public-weak-generated-webdav-password.log" "password123"
+  assert_file_contains "$case_dir/doctor-public-weak-generated-webdav-password.log" "Summary: 0 failure(s)"
 
   cat > "$case_dir/config-webdav-empty-prefix.toml" <<EOF
 [server]
@@ -1774,6 +2122,130 @@ EOF
 
   [[ "$status" -ne 0 ]] || fail "public doctor accepted whitespace-padded WebDAV auth_type=none"
   assert_file_contains "$case_dir/doctor-public-webdav-spaced-none.log" "public WebDAV must not use auth_type=none"
+
+  cat > "$case_dir/config-zero-auth-access-ttl.toml" <<EOF
+[server]
+host = "127.0.0.1"
+port = 18080
+trusted_proxy_hops = 1
+
+[storage]
+root = "$storage_dir"
+
+[dataplane]
+grpc_address = "127.0.0.1:19090"
+
+[auth]
+access_token_ttl = "0"
+EOF
+
+  set +e
+  PATH="$fake_path:$PATH" \
+    BIN_DIR="$bin_dir" \
+    WEB_DIR="$web_dir" \
+    CONFIG_PATH="$case_dir/config-zero-auth-access-ttl.toml" \
+    DATAPLANE_HTTP_PORT=19091 \
+    BACKUP_ROOT="$backup_dir" \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain nas.example.com > "$case_dir/doctor-public-zero-auth-access-ttl.log"
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "public doctor accepted zero auth access token TTL"
+  assert_file_contains "$case_dir/doctor-public-zero-auth-access-ttl.log" "public auth.access_token_ttl must be a positive duration"
+
+  cat > "$case_dir/config-negative-auth-refresh-ttl.toml" <<EOF
+[server]
+host = "127.0.0.1"
+port = 18080
+trusted_proxy_hops = 1
+
+[storage]
+root = "$storage_dir"
+
+[dataplane]
+grpc_address = "127.0.0.1:19090"
+
+[auth]
+refresh_token_ttl = "-1h"
+EOF
+
+  set +e
+  PATH="$fake_path:$PATH" \
+    BIN_DIR="$bin_dir" \
+    WEB_DIR="$web_dir" \
+    CONFIG_PATH="$case_dir/config-negative-auth-refresh-ttl.toml" \
+    DATAPLANE_HTTP_PORT=19091 \
+    BACKUP_ROOT="$backup_dir" \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain nas.example.com > "$case_dir/doctor-public-negative-auth-refresh-ttl.log"
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "public doctor accepted negative auth refresh token TTL"
+  assert_file_contains "$case_dir/doctor-public-negative-auth-refresh-ttl.log" "public auth.refresh_token_ttl must be a positive duration"
+
+  cat > "$case_dir/config-share-negative-expiry.toml" <<EOF
+[server]
+host = "127.0.0.1"
+port = 18080
+trusted_proxy_hops = 1
+
+[storage]
+root = "$storage_dir"
+
+[dataplane]
+grpc_address = "127.0.0.1:19090"
+
+[share]
+enabled = true
+base_url = "https://nas.example.com"
+default_expires_in = "-1h"
+EOF
+
+  set +e
+  PATH="$fake_path:$PATH" \
+    BIN_DIR="$bin_dir" \
+    WEB_DIR="$web_dir" \
+    CONFIG_PATH="$case_dir/config-share-negative-expiry.toml" \
+    DATAPLANE_HTTP_PORT=19091 \
+    BACKUP_ROOT="$backup_dir" \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain nas.example.com > "$case_dir/doctor-public-share-negative-expiry.log"
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "public doctor accepted negative share default expiry"
+  assert_file_contains "$case_dir/doctor-public-share-negative-expiry.log" "public share.default_expires_in must be empty, 0, or a non-negative duration"
+
+  cat > "$case_dir/config-share-negative-max-access.toml" <<EOF
+[server]
+host = "127.0.0.1"
+port = 18080
+trusted_proxy_hops = 1
+
+[storage]
+root = "$storage_dir"
+
+[dataplane]
+grpc_address = "127.0.0.1:19090"
+
+[share]
+enabled = true
+base_url = "https://nas.example.com"
+default_max_access = -1
+EOF
+
+  set +e
+  PATH="$fake_path:$PATH" \
+    BIN_DIR="$bin_dir" \
+    WEB_DIR="$web_dir" \
+    CONFIG_PATH="$case_dir/config-share-negative-max-access.toml" \
+    DATAPLANE_HTTP_PORT=19091 \
+    BACKUP_ROOT="$backup_dir" \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain nas.example.com > "$case_dir/doctor-public-share-negative-max-access.log"
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "public doctor accepted negative share default max access"
+  assert_file_contains "$case_dir/doctor-public-share-negative-max-access.log" "public share.default_max_access must be zero or greater"
 
   cat > "$case_dir/config-share-http.toml" <<EOF
 [server]

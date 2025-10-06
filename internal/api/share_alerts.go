@@ -10,11 +10,10 @@ import (
 )
 
 const (
-	shareExpiringSoonAlertType           = "share_expiring_soon"
-	shareExpiryReminderWindow            = 72 * time.Hour
-	shareExpiryReminderPollInterval      = time.Hour
-	shareExpiryReminderSentRetention     = 7 * 24 * time.Hour
-	shareExpiryReminderMaxPathSampleSize = 10
+	shareExpiringSoonAlertType       = "share_expiring_soon"
+	shareExpiryReminderWindow        = 72 * time.Hour
+	shareExpiryReminderPollInterval  = time.Hour
+	shareExpiryReminderSentRetention = 7 * 24 * time.Hour
 )
 
 func (s *Server) startShareExpiryReminderScheduler(ctx context.Context) bool {
@@ -145,6 +144,7 @@ func shareExpiryReminderKey(shareInfo *share.Share) string {
 
 func shareExpiringSoonAlertEvent(shares []*share.Share, now time.Time) alerts.EventPayload {
 	sortShareExpiryReminderShares(shares)
+	summary := shareExpiryReminderSummary(shares)
 
 	soonestExpiresAt := time.Time{}
 	if len(shares) > 0 && shares[0].ExpiresAt != nil {
@@ -152,17 +152,17 @@ func shareExpiringSoonAlertEvent(shares []*share.Share, now time.Time) alerts.Ev
 	}
 
 	details := map[string]any{
-		"source":         "share",
-		"share_count":    len(shares),
-		"window_hours":   int(shareExpiryReminderWindow / time.Hour),
-		"expires_before": now.Add(shareExpiryReminderWindow).UTC().Format(time.RFC3339),
-		"share_paths":    shareExpiryReminderPathSamples(shares),
+		"source":                       "share",
+		"share_count":                  len(shares),
+		"window_hours":                 int(shareExpiryReminderWindow / time.Hour),
+		"expires_before":               now.Add(shareExpiryReminderWindow).UTC().Format(time.RFC3339),
+		"file_share_count":             summary.fileShareCount,
+		"folder_share_count":           summary.folderShareCount,
+		"passwordless_share_count":     summary.passwordlessShareCount,
+		"unlimited_access_share_count": summary.unlimitedAccessShareCount,
 	}
 	if !soonestExpiresAt.IsZero() {
 		details["soonest_expires_at"] = soonestExpiresAt.Format(time.RFC3339)
-	}
-	if extraCount := len(uniqueShareExpiryReminderPaths(shares)) - shareExpiryReminderMaxPathSampleSize; extraCount > 0 {
-		details["additional_path_count"] = extraCount
 	}
 
 	message := "share links are expiring soon"
@@ -178,29 +178,33 @@ func shareExpiringSoonAlertEvent(shares []*share.Share, now time.Time) alerts.Ev
 	}
 }
 
-func shareExpiryReminderPathSamples(shares []*share.Share) []string {
-	paths := uniqueShareExpiryReminderPaths(shares)
-	if len(paths) > shareExpiryReminderMaxPathSampleSize {
-		paths = paths[:shareExpiryReminderMaxPathSampleSize]
-	}
-	return paths
+type shareExpiryReminderAggregate struct {
+	fileShareCount            int
+	folderShareCount          int
+	passwordlessShareCount    int
+	unlimitedAccessShareCount int
 }
 
-func uniqueShareExpiryReminderPaths(shares []*share.Share) []string {
-	seen := make(map[string]struct{}, len(shares))
-	paths := make([]string, 0, len(shares))
+func shareExpiryReminderSummary(shares []*share.Share) shareExpiryReminderAggregate {
+	var summary shareExpiryReminderAggregate
 	for _, shareInfo := range shares {
-		if shareInfo == nil || shareInfo.Path == "" {
+		if shareInfo == nil {
 			continue
 		}
-		if _, exists := seen[shareInfo.Path]; exists {
-			continue
+		switch shareInfo.Type {
+		case share.ShareTypeFolder:
+			summary.folderShareCount++
+		default:
+			summary.fileShareCount++
 		}
-		seen[shareInfo.Path] = struct{}{}
-		paths = append(paths, shareInfo.Path)
+		if !shareInfo.HasPassword() {
+			summary.passwordlessShareCount++
+		}
+		if shareInfo.MaxAccess == 0 {
+			summary.unlimitedAccessShareCount++
+		}
 	}
-	sort.Strings(paths)
-	return paths
+	return summary
 }
 
 func sortShareExpiryReminderShares(shares []*share.Share) {

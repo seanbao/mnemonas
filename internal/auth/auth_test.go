@@ -1572,6 +1572,30 @@ func TestTokenManager(t *testing.T) {
 		}
 	})
 
+	t.Run("updated expiries affect new token pairs", func(t *testing.T) {
+		tm := NewTokenManager(secret, 15*time.Minute, 24*time.Hour)
+		tm.UpdateExpiries(45*time.Minute, 36*time.Hour)
+
+		user := &User{
+			ID:       "user-updated-expiry",
+			Username: "updated-expiry",
+			Role:     RoleUser,
+		}
+
+		issuedAt := time.Now()
+		tokenPair, err := tm.GenerateTokenPair(user)
+		if err != nil {
+			t.Fatalf("failed to generate token pair: %v", err)
+		}
+
+		if tokenPair.ExpiresAt.Before(issuedAt.Add(44*time.Minute)) || tokenPair.ExpiresAt.After(issuedAt.Add(46*time.Minute)) {
+			t.Fatalf("access expiry = %s, want about 45m after %s", tokenPair.ExpiresAt, issuedAt)
+		}
+		if tokenPair.RefreshExpiresAt.Before(issuedAt.Add(35*time.Hour)) || tokenPair.RefreshExpiresAt.After(issuedAt.Add(37*time.Hour)) {
+			t.Fatalf("refresh expiry = %s, want about 36h after %s", tokenPair.RefreshExpiresAt, issuedAt)
+		}
+	})
+
 	t.Run("access token rejected as refresh token", func(t *testing.T) {
 		tm := NewTokenManager(secret, 15*time.Minute, 24*time.Hour)
 
@@ -3370,10 +3394,59 @@ func TestAuthHandler(t *testing.T) {
 			if cookie.Value == "" {
 				t.Fatalf("cookie %s has empty value", cookie.Name)
 			}
+			if cookie.SameSite != http.SameSiteLaxMode {
+				t.Fatalf("cookie %s SameSite = %v, want Lax", cookie.Name, cookie.SameSite)
+			}
 			delete(wantPaths, cookie.Name)
 		}
 		if len(wantPaths) != 0 {
 			t.Fatalf("missing cookies: %+v", wantPaths)
+		}
+	})
+
+	t.Run("cookie session login ignores spoofed forwarded proto from untrusted source", func(t *testing.T) {
+		originalHops := requestip.TrustedProxyHops()
+		requestip.SetTrustedProxyHops(1)
+		defer requestip.SetTrustedProxyHops(originalHops)
+
+		body := `{"username":"handleruser","password":"password123"}`
+		req := httptest.NewRequest("POST", "/api/v1/auth/login", bytes.NewBufferString(body))
+		req.RemoteAddr = "203.0.113.5:1234"
+		req.Header.Set(sessionModeHeader, sessionModeCookie)
+		req.Header.Set("X-Forwarded-Proto", "https")
+		rec := httptest.NewRecorder()
+		h.HandleLogin(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+		}
+		for _, cookie := range rec.Result().Cookies() {
+			if cookie.Secure {
+				t.Fatalf("cookie %s unexpectedly used Secure for untrusted forwarded proto", cookie.Name)
+			}
+		}
+	})
+
+	t.Run("cookie session login trusts forwarded proto from loopback proxy", func(t *testing.T) {
+		originalHops := requestip.TrustedProxyHops()
+		requestip.SetTrustedProxyHops(1)
+		defer requestip.SetTrustedProxyHops(originalHops)
+
+		body := `{"username":"handleruser","password":"password123"}`
+		req := httptest.NewRequest("POST", "/api/v1/auth/login", bytes.NewBufferString(body))
+		req.RemoteAddr = "127.0.0.1:1234"
+		req.Header.Set(sessionModeHeader, sessionModeCookie)
+		req.Header.Set("X-Forwarded-Proto", "https")
+		rec := httptest.NewRecorder()
+		h.HandleLogin(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+		}
+		for _, cookie := range rec.Result().Cookies() {
+			if !cookie.Secure {
+				t.Fatalf("cookie %s did not use Secure for trusted forwarded proto", cookie.Name)
+			}
 		}
 	})
 

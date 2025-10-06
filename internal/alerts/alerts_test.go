@@ -3,6 +3,7 @@ package alerts
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -645,14 +646,77 @@ func TestSendWebhook_GETEncodesPayloadInQueryWithoutBody(t *testing.T) {
 		if req.query["message"] != payload.Message {
 			t.Fatalf("message query = %q, want %q", req.query["message"], payload.Message)
 		}
-		if req.query["path"] != payload.Stats.Path {
-			t.Fatalf("path query = %q, want %q", req.query["path"], payload.Stats.Path)
+		if req.query["path"] != storageAlertPathOmitted {
+			t.Fatalf("path query = %q, want %q", req.query["path"], storageAlertPathOmitted)
+		}
+		if req.query["path_scope"] != storageAlertPathScopeConfiguredRoot {
+			t.Fatalf("path_scope query = %q, want %q", req.query["path_scope"], storageAlertPathScopeConfiguredRoot)
+		}
+		if strings.Contains(req.query["path"], "/srv/mnemonas") {
+			t.Fatalf("GET webhook path query leaked storage path: %q", req.query["path"])
 		}
 		if req.query["used_pct"] != "90" {
 			t.Fatalf("used_pct query = %q, want %q", req.query["used_pct"], "90")
 		}
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for GET webhook request")
+	}
+}
+
+func TestSendWebhook_PostOmitsStoragePath(t *testing.T) {
+	reqCh := make(chan AlertPayload, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload AlertPayload
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Errorf("Decode(webhook request) error: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		reqCh <- payload
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	monitor := NewMonitor(Config{}, t.TempDir(), zerolog.Nop())
+	err := monitor.sendWebhook(context.Background(), AlertPayload{
+		Type:      "storage_alert",
+		Level:     AlertLevelCritical,
+		Message:   "disk almost full",
+		Timestamp: time.Unix(1710000000, 123).UTC(),
+		Hostname:  "mnemonas-host",
+		Stats: StorageStats{
+			Path:       "/srv/mnemonas/private-project",
+			TotalBytes: 100,
+			FreeBytes:  10,
+			UsedBytes:  90,
+			UsedPct:    90,
+			CheckedAt:  time.Unix(1710000001, 456).UTC(),
+		},
+	}, Config{
+		WebhookURL:    server.URL,
+		WebhookMethod: http.MethodPost,
+	})
+	if err != nil {
+		t.Fatalf("sendWebhook() error: %v", err)
+	}
+
+	select {
+	case payload := <-reqCh:
+		if payload.Stats.Path != storageAlertPathOmitted {
+			t.Fatalf("webhook payload path = %q, want %q", payload.Stats.Path, storageAlertPathOmitted)
+		}
+		if payload.Stats.PathScope != storageAlertPathScopeConfiguredRoot {
+			t.Fatalf("webhook payload path_scope = %q, want %q", payload.Stats.PathScope, storageAlertPathScopeConfiguredRoot)
+		}
+		payloadJSON, err := json.Marshal(payload)
+		if err != nil {
+			t.Fatalf("marshal webhook payload: %v", err)
+		}
+		if strings.Contains(string(payloadJSON), "/srv/mnemonas") || strings.Contains(string(payloadJSON), "private-project") {
+			t.Fatalf("webhook payload leaked storage path: %s", payloadJSON)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for webhook request")
 	}
 }
 
@@ -811,6 +875,46 @@ func TestSendEventSendsEmailWhenWebhookIsNotConfigured(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for email alert")
+	}
+}
+
+func TestEmailErrorDoesNotExposeSMTPSettings(t *testing.T) {
+	originalSendSMTPMail := sendSMTPMail
+	defer func() { sendSMTPMail = originalSendSMTPMail }()
+
+	sendSMTPMail = func(string, smtp.Auth, string, []string, []byte) error {
+		return errors.New("smtp.example.com rejected alerts@example.com with smtp-password for admin@example.com")
+	}
+
+	monitor := NewMonitor(Config{
+		Enabled:      true,
+		EmailEnabled: true,
+		SMTPHost:     "smtp.example.com",
+		SMTPPort:     587,
+		SMTPUsername: "alerts@example.com",
+		SMTPPassword: "smtp-password",
+		SMTPFrom:     "MnemoNAS <alerts@example.com>",
+		SMTPTo:       []string{"admin@example.com"},
+	}, t.TempDir(), zerolog.Nop())
+
+	err := monitor.SendEvent(context.Background(), EventPayload{Type: "backup_run"})
+	if err == nil {
+		t.Fatal("expected email send error")
+	}
+	text := err.Error()
+	for _, leaked := range []string{
+		"smtp.example.com",
+		"alerts@example.com",
+		"smtp-password",
+		"admin@example.com",
+		"rejected",
+	} {
+		if strings.Contains(text, leaked) {
+			t.Fatalf("email error leaked %q: %s", leaked, text)
+		}
+	}
+	if !strings.Contains(text, "send email alert failed") {
+		t.Fatalf("email error should retain generic failure summary, got %s", text)
 	}
 }
 
@@ -999,10 +1103,13 @@ func TestSendStorageWeComPostsTextPayload(t *testing.T) {
 		if payload.MsgType != "text" {
 			t.Fatalf("wecom msgtype = %q, want text", payload.MsgType)
 		}
-		for _, expected := range []string{"storage warning", "mnemonas-host", "/srv/mnemonas", "90.0%"} {
+		for _, expected := range []string{"storage warning", "mnemonas-host", "Path scope: configured_storage_root", "90.0%"} {
 			if !strings.Contains(payload.Text.Content, expected) {
 				t.Fatalf("wecom storage text missing %q:\n%s", expected, payload.Text.Content)
 			}
+		}
+		if strings.Contains(payload.Text.Content, "/srv/mnemonas") {
+			t.Fatalf("wecom storage text leaked storage path:\n%s", payload.Text.Content)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for WeCom storage alert")

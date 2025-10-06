@@ -20,8 +20,9 @@ import (
 	"unicode/utf8"
 
 	"github.com/mattn/go-isatty"
-	"github.com/seanbao/mnemonas/internal/rootio"
 	"golang.org/x/crypto/bcrypt"
+
+	"github.com/seanbao/mnemonas/internal/rootio"
 )
 
 // Role defines user permission level
@@ -448,7 +449,7 @@ func ensureAuthDirRootWithState(path string, symlinkErr error, label string, cre
 	createdDirs := []string(nil)
 	if create {
 		var err error
-		createdDirs, err = ensureAuthDir(dir, 0755, symlinkErr, label)
+		createdDirs, err = ensureAuthDir(dir, 0700, symlinkErr, label)
 		if err != nil {
 			return "", nil, createdDirs, fmt.Errorf("failed to create directory: %w", err)
 		}

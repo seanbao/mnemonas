@@ -171,7 +171,7 @@ test.describe('最近操作统计概览', () => {
     await pathFilter.fill('../secret')
 
     await expect(page.getByRole('heading', { name: '路径筛选无效' })).toBeVisible({ timeout: 5_000 })
-    await expect(page.getByText('路径不能包含 .. 或控制字符').first()).toBeVisible({ timeout: 5_000 })
+    await expect(page.getByText('路径不能包含 .、.. 或控制字符').first()).toBeVisible({ timeout: 5_000 })
     expect(activityRequests.some((url) => url.includes('..'))).toBe(false)
     await expect(page.getByText('路径：/../secret')).toHaveCount(0)
 

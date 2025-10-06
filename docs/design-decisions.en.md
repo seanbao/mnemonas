@@ -23,7 +23,7 @@ Why MnemoNAS:
 
 | Component | Choice | Reason |
 | --- | --- | --- |
-| Control plane | Go 1.25.10+ | Simple deployment, mature HTTP ecosystem, strong concurrency support |
+| Control plane | Go 1.25.11+ | Simple deployment, mature HTTP ecosystem, strong concurrency support |
 | Data plane | Rust 1.92+ | High performance and memory safety for storage-heavy logic |
 | HTTP router | chi | Lightweight, standard-library friendly, predictable |
 | WebDAV | `golang.org/x/net/webdav` plus local behavior | Mature base implementation with project-specific compatibility work |
