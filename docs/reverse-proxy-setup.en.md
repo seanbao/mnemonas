@@ -18,7 +18,7 @@ After systemd deployment, use the helper to create the public HTTPS entry and re
 sudo mnemonas-public-setup --proxy caddy nas.example.com admin@example.com
 ```
 
-The systemd installer installs `scripts/setup-reverse-proxy.sh` as `mnemonas-public-setup`. The script sets `server.host = "127.0.0.1"`, `trusted_proxy_hops = 1`, configures Caddy or Nginx, adjusts local UFW rules, and runs basic checks. When adjusting UFW, it removes broad allow rules for `8080/9090/9091` or custom backend ports before writing deny rules. Cloud-provider security groups still need manual confirmation: expose only `80/443`, not `8080/9090/9091` or any custom backend ports.
+The systemd installer installs `scripts/setup-reverse-proxy.sh` as `mnemonas-public-setup`. The script sets `server.host = "127.0.0.1"`, `trusted_proxy_hops = 1`, configures Caddy or Nginx, adjusts local UFW rules, and runs basic checks. The basic checks read local listening addresses with `ss` first; when `ss` is unavailable, they fall back to `/proc/net/tcp` and `/proc/net/tcp6`, and report that port exposure cannot be confirmed when neither source is readable. When adjusting UFW, it removes broad allow rules for `8080/9090/9091` or custom backend ports before writing deny rules. Cloud-provider security groups still need manual confirmation: expose only `80/443`, not `8080/9090/9091` or any custom backend ports.
 
 The script lowercases the domain and removes a single FQDN trailing dot. The normalized value is used in the Caddy/Nginx configuration, certificate request, WebDAV URL, and verification commands.
 

@@ -117,6 +117,7 @@ run_fresh_install_test() {
   assert_file_contains "$case_dir/install.log" "Next steps:"
   assert_file_contains "$case_dir/install.log" "Read initial password: sudo cat $storage_dir/.mnemonas/initial-password.txt"
   assert_file_contains "$case_dir/install.log" "Configure public HTTPS: sudo $install_dir/bin/mnemonas-public-setup --proxy caddy <domain> <email>"
+  assert_file_contains "$case_dir/install.log" "Keep this release directory; rerun its installer to return to this version after a failed upgrade"
   assert_file_contains "$case_dir/install.log" "Uninstall: sudo $install_dir/bin/mnemonas-uninstall-systemd"
   assert_mode "$storage_dir" "750"
   assert_mode "$storage_dir/files" "750"
@@ -352,6 +353,75 @@ run_install_reports_service_restart_failure_test() {
   assert_file_contains "$case_dir/install.log" "systemctl status mnemonas.service --no-pager"
   assert_file_contains "$case_dir/install.log" "journalctl -u mnemonas.service -n 100 --no-pager"
   [[ ! -f "$case_dir/install.log" ]] || ! grep -Fq -- "installed successfully" "$case_dir/install.log" || fail "installer reported success after restart failure"
+}
+
+run_install_reports_daemon_reload_failure_test() {
+  local case_dir="$TMP_ROOT/daemon-reload-failure"
+  local fake_path="$case_dir/fake-bin"
+  local release_dir="$case_dir/release"
+  local install_dir="$case_dir/install"
+  local storage_dir="$install_dir/storage"
+  make_fake_admin_path "$fake_path"
+  make_release_tree "$release_dir"
+  write_executable "$fake_path/systemctl" \
+    '#!/usr/bin/env bash' \
+    'if [[ "${1:-}" == "daemon-reload" ]]; then printf "simulated daemon reload failure\n" >&2; exit 9; fi' \
+    'exit 0'
+
+  set +e
+  PATH="$fake_path:$PATH" \
+    RELEASE_DIR="$release_dir" \
+    BIN_DIR="$install_dir/bin" \
+    SHARE_DIR="$install_dir/share/mnemonas" \
+    CONFIG_DIR="$install_dir/etc/mnemonas" \
+    CONFIG_PATH="$install_dir/etc/mnemonas/config.toml" \
+    SYSTEMD_DIR="$install_dir/systemd" \
+    STORAGE_ROOT="$storage_dir" \
+    "$REPO_ROOT/scripts/install-systemd.sh" > "$case_dir/install.log" 2>&1
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "installer succeeded after systemd daemon-reload failed"
+  assert_file_contains "$case_dir/install.log" "simulated daemon reload failure"
+  assert_file_contains "$case_dir/install.log" "failed to reload systemd units"
+  assert_file_contains "$case_dir/install.log" "systemctl cat mnemonas.service mnemonas-dataplane.service"
+  assert_file_contains "$case_dir/install.log" "systemctl status mnemonas.service --no-pager"
+  [[ ! -f "$case_dir/install.log" ]] || ! grep -Fq -- "installed successfully" "$case_dir/install.log" || fail "installer reported success after daemon-reload failure"
+}
+
+run_install_reports_service_enable_failure_test() {
+  local case_dir="$TMP_ROOT/enable-failure"
+  local fake_path="$case_dir/fake-bin"
+  local release_dir="$case_dir/release"
+  local install_dir="$case_dir/install"
+  local storage_dir="$install_dir/storage"
+  make_fake_admin_path "$fake_path"
+  make_release_tree "$release_dir"
+  write_executable "$fake_path/systemctl" \
+    '#!/usr/bin/env bash' \
+    'if [[ "${1:-}" == "enable" ]]; then printf "simulated enable failure\n" >&2; exit 8; fi' \
+    'exit 0'
+
+  set +e
+  PATH="$fake_path:$PATH" \
+    RELEASE_DIR="$release_dir" \
+    BIN_DIR="$install_dir/bin" \
+    SHARE_DIR="$install_dir/share/mnemonas" \
+    CONFIG_DIR="$install_dir/etc/mnemonas" \
+    CONFIG_PATH="$install_dir/etc/mnemonas/config.toml" \
+    SYSTEMD_DIR="$install_dir/systemd" \
+    STORAGE_ROOT="$storage_dir" \
+    "$REPO_ROOT/scripts/install-systemd.sh" > "$case_dir/install.log" 2>&1
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "installer succeeded after systemd enable failed"
+  assert_file_contains "$case_dir/install.log" "simulated enable failure"
+  assert_file_contains "$case_dir/install.log" "failed to enable systemd units"
+  assert_file_contains "$case_dir/install.log" "systemctl status mnemonas.service --no-pager"
+  assert_file_contains "$case_dir/install.log" "systemctl status mnemonas-dataplane.service --no-pager"
+  assert_file_contains "$case_dir/install.log" "journalctl -u mnemonas.service -u mnemonas-dataplane.service -n 100 --no-pager"
+  [[ ! -f "$case_dir/install.log" ]] || ! grep -Fq -- "installed successfully" "$case_dir/install.log" || fail "installer reported success after enable failure"
 }
 
 run_source_checkout_stale_binary_test() {
@@ -1070,6 +1140,14 @@ run_doctor_config_test() {
   mkdir -p "$fake_path" "$bin_dir" "$web_dir" "$storage_dir/.mnemonas" "$backup_dir" "$systemd_dir"
   chmod 0750 "$storage_dir"
   chmod 0700 "$storage_dir/.mnemonas"
+  cat > "$storage_dir/.mnemonas/users.json" <<'JSON'
+[]
+JSON
+  chmod 0600 "$storage_dir/.mnemonas/users.json"
+  cat > "$storage_dir/secrets.json" <<'JSON'
+{"jwt_secret":"test-jwt-secret-value","webdav_password":"GeneratedPass123"}
+JSON
+  chmod 0600 "$storage_dir/secrets.json"
 
   write_executable "$bin_dir/nasd" \
     '#!/usr/bin/env bash' \
@@ -1079,6 +1157,7 @@ run_doctor_config_test() {
   printf '<div id="root"></div>\n' > "$web_dir/index.html"
 
   write_executable "$fake_path/id" '#!/usr/bin/env bash' 'exit 0'
+  write_executable "$fake_path/getent" '#!/usr/bin/env bash' 'exit 1'
   write_executable "$fake_path/runuser" '#!/usr/bin/env bash' 'shift 3; "$@"'
   write_executable "$fake_path/systemctl" \
     '#!/usr/bin/env bash' \
@@ -1095,7 +1174,15 @@ run_doctor_config_test() {
     'printf "LISTEN 0 4096 127.0.0.1:19091 0.0.0.0:*\n"'
   write_executable "$fake_path/findmnt" \
     '#!/usr/bin/env bash' \
-    'printf "tank/data zfs %s\n" "${@: -1}"'
+    'path="${@: -1}"' \
+    'case "$path" in' \
+    "  $backup_dir|$case_dir/non-writable-backup)" \
+    '    printf "tank/backup zfs %s\n" "$path"' \
+    '    ;;' \
+    '  *)' \
+    '    printf "tank/data zfs %s\n" "$path"' \
+    '    ;;' \
+    'esac'
   write_executable "$fake_path/df" \
     '#!/usr/bin/env bash' \
     'printf "Filesystem 1024-blocks Used Available Capacity Mounted on\n"' \
@@ -1119,6 +1206,7 @@ root = "$case_dir/storage\u002droot"
 [dataplane]
 grpc_address = "127.0.0.1:19090"
 EOF
+  chmod 0600 "$case_dir/config.toml"
 
   cat > "$systemd_dir/mnemonas-dataplane.service" <<EOF
 [Service]
@@ -1138,9 +1226,71 @@ EOF
   assert_file_contains "$case_dir/doctor.log" "dataplane gRPC port 19090 is listening"
   assert_file_contains "$case_dir/doctor.log" "dataplane gRPC port 19090 is loopback-only"
   assert_file_contains "$case_dir/doctor.log" "dataplane HTTP port 19091 is loopback-only"
+  assert_file_contains "$case_dir/doctor.log" "config file is private to its owner: $case_dir/config.toml"
   assert_file_contains "$case_dir/doctor.log" "storage disk space: 15.0 GiB available / 20.0 GiB total (25% used)"
+  assert_file_contains "$case_dir/doctor.log" "users file directory is private to its owner: $storage_dir/.mnemonas"
+  assert_file_contains "$case_dir/doctor.log" "users file is private to its owner: $storage_dir/.mnemonas/users.json"
+  assert_file_contains "$case_dir/doctor.log" "generated secrets file is private to its owner: $storage_dir/secrets.json"
+  assert_file_contains "$case_dir/doctor.log" "backup root is outside storage root: $backup_dir"
+  assert_file_contains "$case_dir/doctor.log" "backup root is writable by current user: $backup_dir"
+  assert_file_contains "$case_dir/doctor.log" "backup root is on a separate filesystem source: tank/backup"
   assert_file_contains "$case_dir/doctor.log" "ufw is active"
   assert_file_contains "$case_dir/doctor.log" "Summary: 0 failure(s)"
+
+  chmod 0644 "$storage_dir/.mnemonas/users.json" "$storage_dir/secrets.json"
+  PATH="$fake_path:$PATH" \
+    BIN_DIR="$bin_dir" \
+    WEB_DIR="$web_dir" \
+    CONFIG_PATH="$case_dir/config.toml" \
+    SYSTEMD_DIR="$systemd_dir" \
+    BACKUP_ROOT="$backup_dir" \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" > "$case_dir/doctor-open-sensitive-files.log"
+  chmod 0600 "$storage_dir/.mnemonas/users.json" "$storage_dir/secrets.json"
+
+  assert_file_contains "$case_dir/doctor-open-sensitive-files.log" "users file is not private"
+  assert_file_contains "$case_dir/doctor-open-sensitive-files.log" "generated secrets file is not private"
+  assert_file_contains "$case_dir/doctor-open-sensitive-files.log" "Summary: 0 failure(s), 2 warning(s)"
+
+  chmod 0644 "$case_dir/config.toml"
+  PATH="$fake_path:$PATH" \
+    BIN_DIR="$bin_dir" \
+    WEB_DIR="$web_dir" \
+    CONFIG_PATH="$case_dir/config.toml" \
+    SYSTEMD_DIR="$systemd_dir" \
+    BACKUP_ROOT="$backup_dir" \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" > "$case_dir/doctor-open-config.log"
+  chmod 0600 "$case_dir/config.toml"
+
+  assert_file_contains "$case_dir/doctor-open-config.log" "config file is not private"
+  assert_file_contains "$case_dir/doctor-open-config.log" "Summary: 0 failure(s), 1 warning(s)"
+
+  local non_writable_backup_dir="$case_dir/non-writable-backup"
+  mkdir -p "$non_writable_backup_dir"
+  chmod 0550 "$non_writable_backup_dir"
+  PATH="$fake_path:$PATH" \
+    BIN_DIR="$bin_dir" \
+    WEB_DIR="$web_dir" \
+    CONFIG_PATH="$case_dir/config.toml" \
+    SYSTEMD_DIR="$systemd_dir" \
+    BACKUP_ROOT="$non_writable_backup_dir" \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" > "$case_dir/doctor-backup-not-writable.log"
+  chmod 0750 "$non_writable_backup_dir"
+
+  assert_file_contains "$case_dir/doctor-backup-not-writable.log" "backup root is not writable by current user and runuser is unavailable: $non_writable_backup_dir"
+  assert_file_contains "$case_dir/doctor-backup-not-writable.log" "Summary: 0 failure(s), 1 warning(s)"
+
+  local same_source_backup_dir="$case_dir/same-source-backup"
+  mkdir -p "$same_source_backup_dir"
+  PATH="$fake_path:$PATH" \
+    BIN_DIR="$bin_dir" \
+    WEB_DIR="$web_dir" \
+    CONFIG_PATH="$case_dir/config.toml" \
+    SYSTEMD_DIR="$systemd_dir" \
+    BACKUP_ROOT="$same_source_backup_dir" \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" > "$case_dir/doctor-backup-same-source.log"
+
+  assert_file_contains "$case_dir/doctor-backup-same-source.log" "backup root shares filesystem source with storage root (tank/data)"
+  assert_file_contains "$case_dir/doctor-backup-same-source.log" "Summary: 0 failure(s), 1 warning(s)"
 
   write_executable "$fake_path/ss" \
     '#!/usr/bin/env bash' \
@@ -1167,6 +1317,51 @@ EOF
   assert_file_contains "$case_dir/doctor-unsafe.log" "ufw appears to allow dataplane gRPC port 19090"
   assert_file_contains "$case_dir/doctor-unsafe.log" "ufw appears to allow dataplane HTTP port 19091"
   assert_file_contains "$case_dir/doctor-unsafe.log" "Summary: 0 failure(s), 4 warning(s)"
+
+  cat > "$case_dir/proc-net-tcp" <<'EOF'
+  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
+   0: 0100007F:46A0 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 1
+   1: 00000000:4A92 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 2
+EOF
+  cat > "$case_dir/proc-net-tcp6" <<'EOF'
+  sl  local_address                         remote_address                        st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
+   0: 00000000000000000000000000000000:4A93 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 3
+EOF
+  write_executable "$fake_path/ufw" \
+    '#!/usr/bin/env bash' \
+    'printf "Status: active\n\n"' \
+    'printf "To                         Action      From\n"'
+
+  PATH="$fake_path:$PATH" \
+    MNEMONAS_DOCTOR_DISABLE_SS=1 \
+    MNEMONAS_PROC_NET_TCP_PATH="$case_dir/proc-net-tcp" \
+    MNEMONAS_PROC_NET_TCP6_PATH="$case_dir/proc-net-tcp6" \
+    BIN_DIR="$bin_dir" \
+    WEB_DIR="$web_dir" \
+    CONFIG_PATH="$case_dir/config.toml" \
+    SYSTEMD_DIR="$systemd_dir" \
+    BACKUP_ROOT="$backup_dir" \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" > "$case_dir/doctor-proc-net.log"
+
+  assert_file_contains "$case_dir/doctor-proc-net.log" "control plane port 18080 is listening"
+  assert_file_contains "$case_dir/doctor-proc-net.log" "dataplane gRPC port 19090 is listening beyond loopback (0.0.0.0:19090)"
+  assert_file_contains "$case_dir/doctor-proc-net.log" "dataplane HTTP port 19091 is listening beyond loopback ([::]:19091)"
+
+  mkdir -p "$storage_dir/backups"
+  set +e
+  PATH="$fake_path:$PATH" \
+    BIN_DIR="$bin_dir" \
+    WEB_DIR="$web_dir" \
+    CONFIG_PATH="$case_dir/config.toml" \
+    SYSTEMD_DIR="$systemd_dir" \
+    BACKUP_ROOT="$storage_dir/backups" \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" > "$case_dir/doctor-backup-inside-storage.log" 2>&1
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "doctor accepted a backup root inside storage root"
+  assert_file_contains "$case_dir/doctor-backup-inside-storage.log" "backup root must not be inside storage root: $storage_dir/backups"
+  assert_file_contains "$case_dir/doctor-backup-inside-storage.log" "Use a separate disk, dataset, or remote target."
 
   chmod 0644 "$bin_dir/dataplane"
   set +e
@@ -1725,6 +1920,31 @@ EOF
   [[ "$status" -ne 0 ]] || fail "public doctor accepted public share JSON without Vary: Cookie"
   assert_file_contains "$case_dir/doctor-public-share-missing-vary.log" "public share API probe reached MnemoNAS"
   assert_file_contains "$case_dir/doctor-public-share-missing-vary.log" "public share JSON response is missing cache/security headers (Vary=Cookie)"
+
+  write_executable "$fake_path/curl" \
+    '#!/usr/bin/env bash' \
+    'url="${@: -1}"' \
+    'if [[ "$*" == *" -X PROPFIND "* && "$url" == "https://nas.example.com/dav/" ]]; then printf "401"; exit 0; fi' \
+    'if [[ "$url" == "https://nas.example.com/api/v1/public/shares/mnemonas-doctor-probe" ]]; then printf "403"; exit 0; fi' \
+    'if [[ "$*" == *" -w "* && "$url" == "http://nas.example.com/health" ]]; then printf "301 https://nas.example.com/health"; exit 0; fi' \
+    'case "$url" in' \
+    '  https://nas.example.com/health) printf "ok\n";;' \
+    '  http://nas.example.com:18080/health) exit 7;;' \
+    '  */) printf "<div id=\"root\"></div>\n";;' \
+    '  *) printf "ok\n";;' \
+    'esac'
+
+  PATH="$fake_path:$PATH" \
+    BIN_DIR="$bin_dir" \
+    WEB_DIR="$web_dir" \
+    CONFIG_PATH="$case_dir/config-share-trimmed.toml" \
+    DATAPLANE_HTTP_PORT=19091 \
+    BACKUP_ROOT="$backup_dir" \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain nas.example.com > "$case_dir/doctor-public-share-proxy-blocked.log"
+
+  assert_file_contains "$case_dir/doctor-public-share-proxy-blocked.log" "public share API probe was blocked before MnemoNAS share lookup: https://nas.example.com/api/v1/public/shares/mnemonas-doctor-probe (HTTP 403)"
+  assert_file_not_contains "$case_dir/doctor-public-share-proxy-blocked.log" "public share JSON response is missing cache/security headers"
+  assert_file_contains "$case_dir/doctor-public-share-proxy-blocked.log" "Summary: 0 failure(s)"
 
   cat > "$case_dir/config-webdav-placeholder-password.toml" <<EOF
 [server]
@@ -2775,6 +2995,8 @@ run_install_preserves_existing_runtime_on_config_check_failure_test
 run_install_removes_new_config_on_config_check_failure_test
 run_install_preserves_existing_runtime_on_binary_install_failure_test
 run_install_reports_service_restart_failure_test
+run_install_reports_daemon_reload_failure_test
+run_install_reports_service_enable_failure_test
 run_source_checkout_stale_binary_test
 run_existing_config_test
 run_invalid_input_test

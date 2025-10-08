@@ -421,6 +421,35 @@ check_env() {
 	fi
 }
 
+image_tag_part() {
+	local image_no_digest="${1%@*}"
+	local last_component="${image_no_digest##*/}"
+
+	if [[ "$last_component" == *:* ]]; then
+		printf '%s\n' "${last_component##*:}"
+	fi
+}
+
+check_image_reference() {
+	local image tag
+	image="$(env_value MNEMONAS_IMAGE "$ENV_PATH")"
+
+	[[ -n "$image" && "$image" != "mnemonas:local" ]] || return
+	if [[ "$image" == *@sha256:* ]]; then
+		ok "Release image is pinned by digest: $image"
+		return
+	fi
+
+	tag="$(image_tag_part "$image")"
+	if [[ -z "$tag" ]]; then
+		warn "MNEMONAS_IMAGE has no explicit tag or digest: $image. Use a version tag or digest before upgrading so rollback can return to a known image."
+	elif [[ "$tag" == "latest" ]]; then
+		warn "MNEMONAS_IMAGE uses the moving 'latest' tag. Use a version tag or digest for upgrade and rollback."
+	else
+		ok "Release image tag is pinned: $image"
+	fi
+}
+
 check_numeric_config() {
 	if [[ ! "$MIN_FREE_BYTES" =~ ^[0-9]+$ ]] || (( 10#$MIN_FREE_BYTES <= 0 )); then
 		fail "MIN_FREE_BYTES must be a positive integer, got: ${MIN_FREE_BYTES:-<empty>}"
@@ -470,6 +499,123 @@ check_data_dir_writable_by_configured_user() {
 	else
 		warn "Data directory allows other-user access (mode $mode). Consider: chmod o-rwx '$path'"
 	fi
+}
+
+check_private_existing_dir() {
+	local path="$1"
+	local label="$2"
+
+	[[ -e "$path" || -L "$path" ]] || return
+	if [[ -L "$path" ]]; then
+		fail "$label must not be a symlink: $path"
+		return
+	fi
+	if [[ ! -d "$path" ]]; then
+		fail "$label must be a directory: $path"
+		return
+	fi
+	if ! have stat; then
+		warn "Cannot inspect $label permissions because stat is unavailable: $path"
+		return
+	fi
+
+	local mode mode_tail group_perm other_perm
+	mode="$(stat -c '%a' "$path" 2>/dev/null || true)"
+	[[ -n "$mode" ]] || return
+	mode_tail="${mode: -3}"
+	group_perm="${mode_tail:1:1}"
+	other_perm="${mode_tail:2:1}"
+	if [[ "$group_perm" == "0" && "$other_perm" == "0" ]]; then
+		ok "$label is private to its owner: $path"
+	else
+		warn "$label allows group or other access (mode $mode). Consider: chmod 700 '$path'"
+	fi
+}
+
+check_private_existing_file() {
+	local path="$1"
+	local label="$2"
+
+	[[ -e "$path" || -L "$path" ]] || return
+	if [[ -L "$path" ]]; then
+		fail "$label must not be a symlink: $path"
+		return
+	fi
+	if [[ ! -f "$path" ]]; then
+		fail "$label must be a regular file: $path"
+		return
+	fi
+	if ! have stat; then
+		warn "Cannot inspect $label permissions because stat is unavailable: $path"
+		return
+	fi
+
+	local mode mode_tail group_perm other_perm
+	mode="$(stat -c '%a' "$path" 2>/dev/null || true)"
+	[[ -n "$mode" ]] || return
+	mode_tail="${mode: -3}"
+	group_perm="${mode_tail:1:1}"
+	other_perm="${mode_tail:2:1}"
+	if [[ "$group_perm" == "0" && "$other_perm" == "0" ]]; then
+		ok "$label is private to its owner: $path"
+	else
+		warn "$label allows group or other access (mode $mode). Consider: chmod 600 '$path'"
+	fi
+}
+
+check_toml_parse() {
+	local path="$1"
+	local label="$2"
+	local parse_out status
+
+	[[ -f "$path" ]] || return 0
+	if ! have python3; then
+		warn "Cannot parse $label as TOML because python3 is unavailable: $path"
+		return 0
+	fi
+
+	parse_out="$(mktemp -t mnemonas-toml-parse.XXXXXX)"
+	python3 - "$path" >"$parse_out" 2>&1 <<'PY'
+import sys
+
+try:
+    import tomllib
+except Exception:
+    sys.exit(2)
+
+path = sys.argv[1]
+try:
+    with open(path, "rb") as handle:
+        tomllib.load(handle)
+except Exception as exc:
+    sys.stderr.write(f"{type(exc).__name__}: {exc}\n")
+    sys.exit(1)
+PY
+	status=$?
+	if [[ "$status" -eq 0 ]]; then
+		ok "$label parses as TOML: $path"
+		rm -f -- "$parse_out"
+		return 0
+	fi
+	if [[ "$status" -eq 2 ]]; then
+		warn "Cannot parse $label as TOML because python3 does not provide tomllib: $path"
+		rm -f -- "$parse_out"
+		return 0
+	fi
+
+	fail "$label is not valid TOML: $(tr '\n' ' ' < "$parse_out")"
+	rm -f -- "$parse_out"
+	return 1
+}
+
+check_sensitive_files() {
+	[[ -d "$DATA_DIR" ]] || return
+
+	check_private_existing_dir "$DATA_DIR/.mnemonas" "Internal metadata directory"
+	check_private_existing_file "$DATA_DIR/.mnemonas/users.json" "Users file"
+	check_private_existing_file "$DATA_DIR/.mnemonas/initial-password.txt" "Initial admin password file"
+	check_private_existing_file "$DATA_DIR/secrets.json" "Generated secrets file"
+	check_private_existing_file "$DATA_DIR/config.toml" "Docker config file"
 }
 
 validate_data_dir_path() {
@@ -523,6 +669,7 @@ check_data_dir() {
 	fi
 
 	check_data_dir_writable_by_configured_user "$DATA_DIR" "${MNEMONAS_UID_VALUE:-}" "${MNEMONAS_GID_VALUE:-}"
+	check_sensitive_files
 
 	df_target="$(existing_path_for_df "$DATA_DIR")"
 	if available_kb="$(df -Pk "$df_target" 2>/dev/null | awk 'NR == 2 { print $4 }')" && [[ -n "$available_kb" ]]; then
@@ -535,14 +682,22 @@ check_data_dir() {
 	fi
 
 	config_path="$DATA_DIR/config.toml"
-	if [[ ! -f "$config_path" ]]; then
+	if [[ ! -e "$config_path" && ! -L "$config_path" ]]; then
 		ok "No existing Docker config found; first container start will create $config_path"
+		return
+	fi
+	if [[ -L "$config_path" || ! -f "$config_path" ]]; then
+		return
+	fi
+	if ! check_toml_parse "$config_path" "Docker config file"; then
 		return
 	fi
 
 	configured_root="$(toml_value storage root "$config_path")"
 	if [[ -z "$configured_root" ]]; then
 		fail "$config_path exists but does not set [storage].root. For the default Compose file set: root = \"/data\""
+	elif [[ "$configured_root" != /* ]]; then
+		fail "$config_path sets a relative [storage].root: $configured_root. Docker deployments must use an absolute container path; for the default Compose file set: root = \"/data\""
 	elif [[ "$configured_root" == "/data" ]]; then
 		ok "Existing Docker config uses [storage].root = /data"
 	else
@@ -617,6 +772,7 @@ check_numeric_config
 check_file "$COMPOSE_FILE" "Compose file"
 check_docker
 check_env
+check_image_reference
 check_data_dir
 check_port
 check_compose_config

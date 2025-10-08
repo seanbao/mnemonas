@@ -116,6 +116,8 @@ func TestPathLock_ConcurrentReaders(t *testing.T) {
 	var wg sync.WaitGroup
 
 	numReaders := 100
+	entered := make(chan struct{}, numReaders)
+	release := make(chan struct{})
 
 	for i := 0; i < numReaders; i++ {
 		wg.Add(1)
@@ -123,12 +125,26 @@ func TestPathLock_ConcurrentReaders(t *testing.T) {
 			defer wg.Done()
 			pl.RLock("/shared")
 			atomic.AddInt32(&counter, 1)
-			time.Sleep(time.Millisecond)
+			entered <- struct{}{}
+			<-release
 			atomic.AddInt32(&counter, -1)
 			pl.RUnlock("/shared")
 		}()
 	}
 
+	for i := 0; i < numReaders; i++ {
+		select {
+		case <-entered:
+		case <-time.After(time.Second):
+			close(release)
+			t.Fatalf("timed out waiting for reader %d to enter", i+1)
+		}
+	}
+	if got := atomic.LoadInt32(&counter); got != int32(numReaders) {
+		close(release)
+		t.Fatalf("concurrent readers = %d, want %d", got, numReaders)
+	}
+	close(release)
 	wg.Wait()
 
 	if pl.Size() != 0 {
@@ -146,9 +162,11 @@ func TestPathLock_WriterBlocksReaders(t *testing.T) {
 	pl.Lock("/test")
 
 	// Start reader goroutine (will be blocked)
+	readerReady := make(chan struct{})
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		close(readerReady)
 		pl.RLock("/test")
 		mu.Lock()
 		order = append(order, "reader")
@@ -156,8 +174,7 @@ func TestPathLock_WriterBlocksReaders(t *testing.T) {
 		pl.RUnlock("/test")
 	}()
 
-	// Give reader time to start waiting
-	time.Sleep(10 * time.Millisecond)
+	<-readerReady
 
 	mu.Lock()
 	order = append(order, "writer")
@@ -210,6 +227,8 @@ func TestPathLock_ConcurrentWriters(t *testing.T) {
 	var wg sync.WaitGroup
 
 	numWriters := 50
+	entered := make(chan struct{}, numWriters)
+	release := make(chan struct{})
 
 	for i := 0; i < numWriters; i++ {
 		wg.Add(1)
@@ -222,13 +241,27 @@ func TestPathLock_ConcurrentWriters(t *testing.T) {
 				atomic.StoreInt32(&maxConcurrent, current)
 			}
 
-			time.Sleep(time.Microsecond * 100)
+			entered <- struct{}{}
+			<-release
 			atomic.AddInt32(&counter, -1)
 
 			pl.Unlock("/shared")
 		}()
 	}
 
+	for i := 0; i < numWriters; i++ {
+		select {
+		case <-entered:
+			if got := atomic.LoadInt32(&counter); got != 1 {
+				close(release)
+				t.Fatalf("concurrent writers while writer %d held lock = %d, want 1", i+1, got)
+			}
+			release <- struct{}{}
+		case <-time.After(time.Second):
+			close(release)
+			t.Fatalf("timed out waiting for writer %d to enter", i+1)
+		}
+	}
 	wg.Wait()
 
 	// Only one writer should have held the lock at any time

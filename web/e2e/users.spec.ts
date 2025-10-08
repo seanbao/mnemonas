@@ -27,7 +27,7 @@ const usersFixture = [
     created_at: '2026-01-03T00:00:00Z',
     updated_at: '2026-01-03T00:00:00Z',
     quota_bytes: 1073741824,
-    used_bytes: 524288,
+    used_bytes: 1006632960,
   },
   {
     id: 'e2e-reviewer',
@@ -70,10 +70,22 @@ test.describe('用户管理页面', () => {
     await expect(page).not.toHaveURL(/\/login/)
     await expect(page.getByRole('heading', { name: '用户管理' })).toBeVisible({ timeout: 5000 })
     await expect(page.getByRole('heading', { name: '用户列表' })).toBeVisible()
+    await expect(page.getByRole('button', { name: '配额关注', exact: true })).toBeVisible()
+    await expect(page.getByText('1 个用户接近或超过上限')).toBeVisible()
     await expect(page.getByText('alice', { exact: true })).toBeVisible()
-    await expect(page.getByText('/users/alice')).toBeVisible()
+    await expect(page.getByText('/users/alice', { exact: true })).toBeVisible()
+    await expect(page.getByText('接近上限', { exact: true })).toBeVisible()
+    await expect(page.getByLabel('alice 配额使用率')).toBeVisible()
     await expect(page.getByText('reviewer', { exact: true })).toBeVisible()
-    await expect(page.getByText('/shared/review')).toBeVisible()
+    await expect(page.getByText('/shared/review', { exact: true })).toBeVisible()
+
+    await page.getByRole('button', { name: '查看配额关注用户' }).click()
+    await expect(page.getByText('alice', { exact: true })).toBeVisible()
+    await expect(page.getByText('admin', { exact: true })).toBeHidden()
+    await expect(page.getByText('reviewer', { exact: true })).toBeHidden()
+
+    await page.getByRole('button', { name: '查看全部用户' }).click()
+    await expect(page.getByText('reviewer', { exact: true })).toBeVisible()
   })
 
   test('创建用户时应可一次设置主目录和配额', async ({ page }) => {

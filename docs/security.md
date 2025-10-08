@@ -21,6 +21,7 @@
 - 默认不会把初始密码明文打印到终端；只提示 `initial-password.txt` 路径。仅本地受控调试时，可在首次启动前设置 `MNEMONAS_PRINT_INITIAL_PASSWORD=1` 临时打印
 - 首次成功登录对应管理员账号后，`initial-password.txt` 会自动删除
 - 登录后应立即修改管理员密码
+- 管理员首页的首次部署检查会展示 Web UI/API 认证、分享和 WebDAV 状态；认证关闭或 WebDAV 匿名访问时，会提示仅适合受控内网或外层访问控制。该提示不替代部署前安全自检和 `mnemonas-doctor`
 
 systemd 部署默认路径：
 
@@ -62,6 +63,8 @@ password = ""  # 留空则首次启动时自动生成
 - 该密码用于 WebDAV 客户端，不是 Web UI 管理员密码
 - 密码会保存到 `<storage.root>/secrets.json`，启动日志只提示文件路径，不输出明文密码
 - 后续启动会自动使用保存的密码
+- `mnemonas-doctor` 会提示 `config.toml` 是否为符号链接、非普通文件或权限过宽；长期部署的配置文件应保持为私有普通文件
+- `mnemonas-doctor` 会提示启用认证时 `users.json` 是否缺失，并提示 `users.json`、`secrets.json` 或相关目录是否为符号链接、非普通文件或权限过宽；长期部署应保持这些文件为私有普通文件
 
 **手动设置密码**（如需自定义）：
 
@@ -239,6 +242,7 @@ cloudflared tunnel run mnemonas
 - [ ] WebDAV 使用 `auth_type = "users"`，或已记录全局 Basic Auth 凭据并设置自定义强密码或自动生成密码，未保留示例密码
 - [ ] `auth_type` 不是 `none`（除非仅本地访问）
 - [ ] 公网部署时 `server.host = "127.0.0.1"`，只通过 HTTPS 反向代理访问
+- [ ] 管理员首页的首次部署检查没有认证关闭或 WebDAV 匿名访问提示；如存在提示，应先处理对应配置或确认外层访问控制
 - [ ] dataplane gRPC/HTTP 端口保持在 `127.0.0.1` 或受信私有网络内，没有直接暴露到公网
 - [ ] Web UI “安全自检”没有 `block` 项；公网部署前应处理所有 `warning`，尤其是 `allow_unsafe_no_auth`、会话有效期、登录限速、浏览器会话 cookie 边界、公开分享 cookie/cache 边界、用户文件权限、反向代理 header、dataplane 端口、分享默认策略和备用管理员提醒
 - [ ] systemd 部署已运行 `sudo mnemonas-doctor --public-domain <domain>`，并确认 HTTP 会跳转到同一域名的 HTTPS、HTTPS 证书 hostname 匹配、30 天内不过期，续期路径已验证，管理员账号冗余可用，会话有效期符合公网建议，用户文件及其目录不是符号链接且权限为私有，自动 WebDAV 凭据文件不是符号链接且权限私有，`initial-password.txt` 路径不存在且不是符号链接或非普通文件，公开分享默认策略和公开分享 JSON 响应边界已处理，匿名 WebDAV `PROPFIND` 被拒绝，且没有 Web 后端直连、dataplane 端口暴露或 UFW 放行警告
@@ -333,6 +337,7 @@ location /api/ {
 - 家庭公网分享建议让新分享默认 7 天过期，并设置明确的默认访问次数；安全自检会提示默认不过期、超过 `720h`（30 天）或默认访问次数不限制的配置。
 - 文件夹浏览与文件下载依赖该 cookie，不再通过 URL 查询参数传递分享密码
 - 公开分享信息、密码验证响应与文件夹列表响应会返回 `Cache-Control: private, no-cache`、`Vary: Cookie`、`X-Content-Type-Options: nosniff` 和 `Referrer-Policy: no-referrer`，避免浏览器或中间缓存复用依赖 cookie 的分享元数据
+- 安全自检会优先阻断公开分享 cookie、失败限速或缓存边界异常；只有这些边界正常但当前请求未被识别为 HTTPS 时，才会降级为 `Secure` cookie 标记告警
 - 清除浏览器站点数据、切换浏览器或密码变更后，需要重新输入分享密码
 - 同一 share 与客户端地址组合连续 5 次口令失败后，会锁定 5 分钟并返回 `429 Too Many Requests`
 - 客户端地址默认不信任转发头，始终使用直连来源；只有显式设置 `server.trusted_proxy_hops > 0` 且请求直接来自 loopback 或 `server.trusted_proxy_cidrs` 中的代理地址时，才按 `X-Forwarded-For` 从右侧回溯客户端地址。多跳代理部署需要设置为代理总层数

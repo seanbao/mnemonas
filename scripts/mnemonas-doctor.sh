@@ -11,6 +11,8 @@ BACKUP_ROOT="${BACKUP_ROOT:-/backup/mnemonas}"
 MIN_FREE_BYTES="${MIN_FREE_BYTES:-10737418240}"
 PUBLIC_DOMAIN="${MNEMONAS_PUBLIC_DOMAIN:-}"
 PUBLIC_CERT_FAILURE=0
+PROC_NET_TCP_PATH="${MNEMONAS_PROC_NET_TCP_PATH:-/proc/net/tcp}"
+PROC_NET_TCP6_PATH="${MNEMONAS_PROC_NET_TCP6_PATH:-/proc/net/tcp6}"
 
 FAILURES=0
 WARNINGS=0
@@ -324,12 +326,93 @@ systemd_env_value() {
 
 port_listening() {
   local port="$1"
-  ss_local_addresses_for_port "$port" | grep -q .
+  local_addresses_for_port "$port" | grep -q .
 }
 
-ss_local_addresses_for_port() {
+local_addresses_for_port() {
   local port="$1"
-  ss -lntH | awk -v suffix=":$port" '$4 ~ suffix "$" { print $4 }'
+
+  if ss_available; then
+    ss -lntH | awk -v suffix=":$port" '$4 ~ suffix "$" { print $4 }'
+    return
+  fi
+
+  proc_net_local_addresses_for_port "$port"
+}
+
+ss_available() {
+  [[ "${MNEMONAS_DOCTOR_DISABLE_SS:-0}" != "1" ]] && have ss
+}
+
+can_inspect_local_ports() {
+  ss_available || [[ -r "$PROC_NET_TCP_PATH" || -r "$PROC_NET_TCP6_PATH" ]]
+}
+
+port_inspection_source() {
+  if ss_available; then
+    printf 'ss output\n'
+  else
+    printf 'local port table\n'
+  fi
+}
+
+proc_net_local_addresses_for_port() {
+  local port="$1"
+  proc_net_tcp4_addresses_for_port "$port"
+  proc_net_tcp6_addresses_for_port "$port"
+}
+
+proc_net_tcp4_addresses_for_port() {
+  local port="$1"
+  local want_port local_addr state hex_addr hex_port b1 b2 b3 b4
+
+  [[ -r "$PROC_NET_TCP_PATH" ]] || return 0
+  printf -v want_port '%04X' "$((10#$port))"
+
+  while read -r _ local_addr _ state _; do
+    [[ "$local_addr" == "local_address" ]] && continue
+    [[ "$state" == "0A" ]] || continue
+    hex_addr="${local_addr%%:*}"
+    hex_port="${local_addr##*:}"
+    [[ "${hex_port^^}" == "$want_port" ]] || continue
+    [[ "$hex_addr" =~ ^[0-9A-Fa-f]{8}$ ]] || continue
+
+    b1="${hex_addr:6:2}"
+    b2="${hex_addr:4:2}"
+    b3="${hex_addr:2:2}"
+    b4="${hex_addr:0:2}"
+    printf '%d.%d.%d.%d:%d\n' "$((16#$b1))" "$((16#$b2))" "$((16#$b3))" "$((16#$b4))" "$((16#$hex_port))"
+  done < "$PROC_NET_TCP_PATH"
+}
+
+proc_net_tcp6_addresses_for_port() {
+  local port="$1"
+  local want_port local_addr state hex_addr hex_port host
+
+  [[ -r "$PROC_NET_TCP6_PATH" ]] || return 0
+  printf -v want_port '%04X' "$((10#$port))"
+
+  while read -r _ local_addr _ state _; do
+    [[ "$local_addr" == "local_address" ]] && continue
+    [[ "$state" == "0A" ]] || continue
+    hex_addr="${local_addr%%:*}"
+    hex_port="${local_addr##*:}"
+    [[ "${hex_port^^}" == "$want_port" ]] || continue
+    [[ "$hex_addr" =~ ^[0-9A-Fa-f]{32}$ ]] || continue
+
+    case "${hex_addr^^}" in
+      00000000000000000000000000000000)
+        host="::"
+        ;;
+      00000000000000000000000001000000)
+        host="::1"
+        ;;
+      *)
+        host="${hex_addr^^}"
+        ;;
+    esac
+    printf '[%s]:%d\n' "$host" "$((16#$hex_port))"
+  done < "$PROC_NET_TCP6_PATH"
 }
 
 host_from_ss_local_address() {
@@ -376,13 +459,18 @@ check_loopback_only_port() {
   local address host
   local -a unsafe_addresses=()
 
+  if ! can_inspect_local_ports; then
+    warn "$label port $port cannot be inspected; install iproute2/ss or make /proc/net/tcp readable"
+    return
+  fi
+
   while IFS= read -r address; do
     [[ -n "$address" ]] || continue
     host="$(host_from_ss_local_address "$address" "$port")"
     if ! is_loopback_host "$host"; then
       unsafe_addresses+=("$address")
     fi
-  done < <(ss_local_addresses_for_port "$port")
+  done < <(local_addresses_for_port "$port")
 
   if [[ "${#unsafe_addresses[@]}" -eq 0 ]]; then
     ok "$label port $port is loopback-only"
@@ -397,13 +485,18 @@ check_loopback_only_port_strict() {
   local address host
   local -a unsafe_addresses=()
 
+  if ! can_inspect_local_ports; then
+    fail "$label port $port cannot be inspected; install iproute2/ss or make /proc/net/tcp readable before public exposure"
+    return
+  fi
+
   while IFS= read -r address; do
     [[ -n "$address" ]] || continue
     host="$(host_from_ss_local_address "$address" "$port")"
     if ! is_loopback_host "$host"; then
       unsafe_addresses+=("$address")
     fi
-  done < <(ss_local_addresses_for_port "$port")
+  done < <(local_addresses_for_port "$port")
 
   if [[ "${#unsafe_addresses[@]}" -eq 0 ]]; then
     ok "$label port $port is loopback-only"
@@ -796,6 +889,53 @@ check_private_file_mode() {
     ok "$label is private to its owner: $path"
   else
     warn "$label is not private (mode $mode); consider chmod 600 $path"
+  fi
+}
+
+check_sensitive_dir_path() {
+  local path="$1"
+  local label="$2"
+
+  if [[ -L "$path" ]]; then
+    warn "$label path is a symlink; use a regular private directory: $path"
+  elif [[ ! -e "$path" ]]; then
+    warn "$label missing: $path"
+  elif [[ ! -d "$path" ]]; then
+    warn "$label is not a directory: $path"
+  else
+    check_private_dir_mode "$path" "$label"
+  fi
+}
+
+check_sensitive_file_path() {
+  local path="$1"
+  local label="$2"
+  local missing_message="${3:-}"
+
+  if [[ -L "$path" ]]; then
+    warn "$label path is a symlink; use a regular private file: $path"
+  elif [[ ! -e "$path" ]]; then
+    if [[ -n "$missing_message" ]]; then
+      warn "$missing_message: $path"
+    fi
+  elif [[ ! -f "$path" ]]; then
+    warn "$label is not a regular file: $path"
+  else
+    check_private_file_mode "$path" "$label"
+  fi
+}
+
+check_config_file() {
+  local path="$1"
+
+  if [[ -L "$path" ]]; then
+    warn "config file path is a symlink; use a regular private file: $path"
+  elif [[ ! -e "$path" ]]; then
+    fail "config missing: $path"
+  elif [[ ! -f "$path" ]]; then
+    fail "config is not a regular file: $path"
+  else
+    check_private_file_mode "$path" "config file"
   fi
 }
 
@@ -1280,6 +1420,7 @@ check_public_share_response_boundary() {
   local url="https://$domain/api/v1/public/shares/$probe_id"
   local headers_file
   local curl_result status http_code
+  local enforce_json_headers=0
   local missing=()
 
   if ! have curl; then
@@ -1304,12 +1445,15 @@ check_public_share_response_boundary() {
   case "$http_code" in
     404)
       ok "public share API probe reached MnemoNAS: $url (HTTP $http_code)"
+      enforce_json_headers=1
       ;;
     410)
       fail "public share API reports sharing disabled despite share.enabled=true: $url (HTTP $http_code)"
+      enforce_json_headers=1
       ;;
     2??)
       fail "public share API probe unexpectedly returned success for a reserved probe id: $url (HTTP $http_code)"
+      enforce_json_headers=1
       ;;
     401|403)
       warn "public share API probe was blocked before MnemoNAS share lookup: $url (HTTP $http_code); verify public share routing if share links should be accessible"
@@ -1321,6 +1465,11 @@ check_public_share_response_boundary() {
       warn "public share API probe returned HTTP $http_code at $url; verify share routing before public use"
       ;;
   esac
+
+  if (( enforce_json_headers == 0 )); then
+    rm -f "$headers_file"
+    return
+  fi
 
   response_header_has_token "$headers_file" "Cache-Control" "private" || missing+=("Cache-Control=private")
   response_header_has_token "$headers_file" "Cache-Control" "no-cache" || missing+=("Cache-Control=no-cache")
@@ -1747,6 +1896,23 @@ initial_password_file() {
   printf '%s\n' "$(dirname "$users_file")/initial-password.txt"
 }
 
+check_runtime_sensitive_files() {
+  local users_file users_dir secrets_file
+
+  users_file="$(effective_auth_users_file)"
+  users_dir="$(dirname "$users_file")"
+  secrets_file="$(effective_secrets_file)"
+
+  if is_false_value "${configured_auth_enabled:-true}"; then
+    note "auth.enabled=false; skipping users file availability check"
+  else
+    check_sensitive_dir_path "$users_dir" "users file directory"
+    check_sensitive_file_path "$users_file" "users file" "users file is missing while auth.enabled=true"
+  fi
+
+  check_sensitive_file_path "$secrets_file" "generated secrets file"
+}
+
 report_initial_password_issue() {
   local severity="$1"
   local message="$2"
@@ -1813,6 +1979,69 @@ check_disk_space() {
   min_free_kib=$((MIN_FREE_BYTES / 1024))
   if (( available_kib < min_free_kib )); then
     warn "storage free space is below $(format_kib "$min_free_kib"); clean old data or expand the disk"
+  fi
+}
+
+real_path() {
+  local path="$1"
+
+  have python3 || return 127
+  python3 - "$path" <<'PY'
+import os
+import sys
+
+print(os.path.realpath(sys.argv[1]))
+PY
+}
+
+path_contains_or_equals() {
+  local parent="$1"
+  local child="$2"
+
+  [[ "$child" == "$parent" || "$child" == "$parent"/* ]]
+}
+
+check_backup_root() {
+  local storage_real backup_real storage_source backup_source
+
+  if [[ -z "$BACKUP_ROOT" ]]; then
+    warn "backup root is empty; configure an independent backup target"
+    return
+  fi
+  if [[ "$BACKUP_ROOT" != /* ]]; then
+    warn "backup root is not absolute: $BACKUP_ROOT"
+    return
+  fi
+
+  if have python3; then
+    storage_real="$(real_path "$STORAGE_ROOT")"
+    backup_real="$(real_path "$BACKUP_ROOT")"
+    if path_contains_or_equals "$storage_real" "$backup_real"; then
+      fail "backup root must not be inside storage root: $BACKUP_ROOT (storage: $STORAGE_ROOT). Use a separate disk, dataset, or remote target."
+    else
+      ok "backup root is outside storage root: $BACKUP_ROOT"
+    fi
+  else
+    warn "python3 not available; skipping backup root containment check"
+  fi
+
+  if [[ ! -d "$BACKUP_ROOT" ]]; then
+    warn "backup root not found: $BACKUP_ROOT"
+    return
+  fi
+
+  ok "backup root exists: $BACKUP_ROOT"
+  check_service_user_writable_dir "$BACKUP_ROOT" "backup root"
+  if have findmnt; then
+    storage_source="$(findmnt -no SOURCE "$STORAGE_ROOT" 2>/dev/null | awk 'NR == 1 { print $1 }')"
+    backup_source="$(findmnt -no SOURCE "$BACKUP_ROOT" 2>/dev/null | awk 'NR == 1 { print $1 }')"
+    if [[ -z "$storage_source" || -z "$backup_source" ]]; then
+      warn "could not compare storage and backup filesystem sources"
+    elif [[ "$storage_source" == "$backup_source" ]]; then
+      warn "backup root shares filesystem source with storage root ($storage_source); use a separate disk, dataset, or remote target for failure isolation"
+    else
+      ok "backup root is on a separate filesystem source: $backup_source"
+    fi
   fi
 }
 
@@ -2018,7 +2247,7 @@ printf '\n'
 
 check_executable_file "$BIN_DIR/nasd" "nasd binary"
 check_executable_file "$BIN_DIR/dataplane" "dataplane binary"
-check_file "$CONFIG_PATH" "config"
+check_config_file "$CONFIG_PATH"
 check_file "$WEB_DIR/index.html" "Web UI index"
 check_dir "$STORAGE_ROOT" "storage root"
 check_dir "$STORAGE_ROOT/.mnemonas" "internal metadata root"
@@ -2058,24 +2287,27 @@ else
   fail "Web UI root route did not return the app shell"
 fi
 
-if have ss; then
+if can_inspect_local_ports; then
+  port_source="$(port_inspection_source)"
   if port_listening "$SERVER_PORT"; then
     ok "control plane port $SERVER_PORT is listening"
   else
-    warn "control plane port $SERVER_PORT is not visible in ss output"
+    warn "control plane port $SERVER_PORT is not visible in $port_source"
   fi
   if port_listening "$DATAPLANE_GRPC_PORT"; then
     ok "dataplane gRPC port $DATAPLANE_GRPC_PORT is listening"
     check_loopback_only_port "$DATAPLANE_GRPC_PORT" "dataplane gRPC"
   else
-    warn "dataplane gRPC port $DATAPLANE_GRPC_PORT is not visible in ss output"
+    warn "dataplane gRPC port $DATAPLANE_GRPC_PORT is not visible in $port_source"
   fi
   if port_listening "$DATAPLANE_HTTP_PORT"; then
     ok "dataplane HTTP port $DATAPLANE_HTTP_PORT is listening"
     check_loopback_only_port "$DATAPLANE_HTTP_PORT" "dataplane HTTP"
   else
-    warn "dataplane HTTP port $DATAPLANE_HTTP_PORT is not visible in ss output"
+    warn "dataplane HTTP port $DATAPLANE_HTTP_PORT is not visible in $port_source"
   fi
+else
+  warn "local port table cannot be inspected; install iproute2/ss or make /proc/net/tcp readable"
 fi
 
 if have findmnt; then
@@ -2097,14 +2329,12 @@ fi
 
 check_disk_space "$STORAGE_ROOT"
 
+check_runtime_sensitive_files
+
 password_file="$(initial_password_file)"
 check_initial_password_file_absent "$password_file" warn "log in once and change the password"
 
-if [[ -d "$BACKUP_ROOT" ]]; then
-  ok "backup root exists: $BACKUP_ROOT"
-else
-  warn "backup root not found: $BACKUP_ROOT"
-fi
+check_backup_root
 
 if have zpool; then
   zpool_out="$(mktemp -t mnemonas-doctor-zpool.XXXXXX)"

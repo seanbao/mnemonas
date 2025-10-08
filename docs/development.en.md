@@ -272,7 +272,7 @@ make docs-check
 
 `make verify-changed` selects workflow, script, Go/Rust, frontend, E2E, Docker, and documentation checks from the changed files in the worktree, staged area, or a configured base ref. Documentation-only changes run `make docs-check`, which validates local Markdown links against files and heading anchors in the repository and confirms that README, CHANGELOG, SUPPORT, SECURITY, the Web README, and documents under `docs/` keep Chinese and English pairs; documents under `docs/` must also appear in both documentation indexes.
 
-`make lint` and `make check` require `golangci-lint` unless `SKIP_GOLANGCI_LINT=1` is explicitly set for local troubleshooting.
+`make lint` and `make check` require `golangci-lint` unless `SKIP_GOLANGCI_LINT=1` is explicitly set for local troubleshooting. Go linting inherits `GO_LINT_ENV` from `GO_CMD_ENV` by default, so local checks use `GOTOOLCHAIN=local`; override `GO_LINT_ENV` only when automatic toolchain download is required.
 
 ### Go
 
@@ -288,7 +288,7 @@ bash ./scripts/with-test-dataplane.sh go test -coverprofile=coverage.out $GO_PAC
 go tool cover -html=coverage.out
 ```
 
-The temporary dataplane started by `with-test-dataplane.sh` accepts only loopback gRPC/HTTP addresses: `localhost`, `ip6-localhost`, `::1`, or dotted-quad numeric `127.0.0.0/8` addresses. Overrides through `MNEMONAS_TEST_DATAPLANE_ADDR` or `MNEMONAS_TEST_DATAPLANE_HTTP_ADDR` must remain loopback and must not contain whitespace or control characters, so the test service is not exposed on public or untrusted LAN interfaces.
+The temporary dataplane started by `with-test-dataplane.sh` auto-selects free `127.0.0.1` gRPC and HTTP ports by default. When unset, `MNEMONAS_TEST_DATAPLANE_ADDR` and `MNEMONAS_TEST_DATAPLANE_HTTP_ADDR` are exported to the wrapped command with the selected addresses. Overrides must remain loopback (`localhost`, `ip6-localhost`, `::1`, or dotted-quad numeric `127.0.0.0/8`), must use different ports, and must not contain whitespace or control characters, so the test service is not exposed on public or untrusted LAN interfaces.
 
 After installing frontend dependencies, do not use `go test ./...` or `go list ./...` as the repository package set; Go will traverse third-party packages under `web/node_modules`. Use `make --no-print-directory go-packages` for repository-wide Go checks.
 
@@ -354,7 +354,14 @@ The isolated E2E runner and Playwright backend accept only loopback Web and data
 
 ### Fault Injection
 
-Fault injection kills and restarts `nasd` and can corrupt test objects. It is disabled by default and must target an isolated instance:
+Fault injection kills and restarts `nasd` and can corrupt test objects. The default project entry point starts an isolated backend under `/tmp` and passes the explicit target information to the destructive runner:
+
+```bash
+make fault-injection
+./scripts/run-fault-injection-isolated.sh
+```
+
+The low-level runner remains available when an already running isolated target must be tested:
 
 ```bash
 MNEMONAS_LIVE_FAULTS=1 \
@@ -366,7 +373,7 @@ RUN_CORRUPTION_TESTS=0 \
 ./scripts/fault-injection-test.sh
 ```
 
-Safety checks are covered by `scripts/test-fault-injection-safety.sh` and `make scripts-check`. `BASE_URL`, `STORAGE_ROOT`, and `NASD_BIN` must be explicit. Real storage paths require `ALLOW_REAL_STORAGE=1`, must still be absolute, must not contain control characters, `..`, or symlink path components, and must not point at protected system directories such as `/`, `/tmp`, or `/var`. `OBJECTS_DIR` and `INDEX_DB`, which may be read or modified by the destructive checks, must be under `STORAGE_ROOT`.
+Safety checks are covered by `scripts/test-fault-injection-safety.sh` and `make scripts-check`. The isolated runner accepts only `/tmp` or checkout-local roots and loopback Web and dataplane addresses. The low-level runner requires explicit `BASE_URL`, `STORAGE_ROOT`, and `NASD_BIN`. Real storage paths require `ALLOW_REAL_STORAGE=1`, must still be absolute, must not contain control characters, `..`, or symlink path components, and must not point at protected system directories such as `/`, `/tmp`, or `/var`. `OBJECTS_DIR`, `INDEX_DB`, and optional `NASD_PID_FILE` paths that may be read or modified by the destructive checks must be under `STORAGE_ROOT`.
 
 ### Benchmarks
 

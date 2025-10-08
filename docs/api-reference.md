@@ -751,6 +751,7 @@ GET /api/v1/diagnostics
       "cooldown_period": "2h0m0s",
       "webhook_configured": true,
       "telegram_configured": true,
+      "dingtalk_configured": true,
       "email_configured": true,
       "webhook_method": "POST",
       "last_level": "warning",
@@ -823,6 +824,7 @@ GET /api/v1/diagnostics
 - `alerts.runtime_available` 表示当前进程是否挂载了提醒监控；`alerts.webhook_configured` 只表示是否配置了 Webhook，不会暴露 `webhook_url` 或 `webhook_headers`。
 - `alerts.telegram_configured` 只表示 Telegram 通知是否具备可用配置，不会暴露 `telegram_bot_token`。
 - `alerts.wecom_configured` 只表示企业微信通知是否具备可用配置，不会暴露 `wecom_webhook_url`。
+- `alerts.dingtalk_configured` 只表示钉钉通知是否具备可用配置，不会暴露 `dingtalk_webhook_url`。
 - `alerts.email_configured` 只表示 SMTP 邮件通知是否具备可用配置，包括启用邮件通知、SMTP 主机、端口、发件人和至少一个非空收件人；不会暴露 `smtp_host`、`smtp_username`、`smtp_password`、`smtp_from` 或 `smtp_to`。
 - `alerts.last_*` 来自上一次提醒检查；尚未完成首次检查时会被省略。
 - `maintenance` 是维护任务脱敏摘要；其中 `scrub_schedule_*` 反映 `[maintenance.scrub]` 周期计划，`last_scrub_*` 来自最近一次 Scrub 历史，`scrub_failure_retries` 只在最近一次 Scrub 失败时出现。
@@ -1784,7 +1786,7 @@ PATCH /api/v1/favorites/{path}
 **说明**:
 - 启用认证时，管理员可查看全量最近操作记录；普通用户仅返回当前账号自己的活动记录，`user` 查询参数不会越权查看其他账号
 - 系统级事件也会进入最近操作记录，例如磁盘健康周期检查产生的 `disk_health`
-- 手动和周期数据校验会写入 `scrub` 活动；当 Scrub 失败、发现对象问题或结果持久化不完整时，会通过已配置的 Webhook/Telegram/企业微信/SMTP 提醒通道发送 `scrub_run` 事件。提醒详情只包含计数、状态、公开错误类型和公开文案，不包含对象 hash 或底层错误文本。
+- 手动和周期数据校验会写入 `scrub` 活动；当 Scrub 失败、发现对象问题或结果持久化不完整时，会通过已配置的 Webhook/Telegram/企业微信/钉钉/SMTP 提醒通道发送 `scrub_run` 事件。提醒详情只包含计数、状态、公开错误类型和公开文案，不包含对象 hash 或底层错误文本。
 - `share` 和 `unshare` 活动的 `details` 会记录分享类型、权限、是否需要密码、过期时间和访问次数上限等复核摘要；不会写入分享密码、公开 URL 或分享 ID。
 - 版本恢复会写入 `restore` 活动，`details.restore_source="version"` 表示来源为版本历史，`details.hash` 记录恢复的版本哈希。
 - 未配置最近操作记录时，接口返回空列表
@@ -2127,7 +2129,10 @@ GET /api/v1/settings
       "telegram_chat_id": "",
       "wecom_enabled": false,
       "wecom_webhook_url": "",
-      "wecom_webhook_url_configured": false
+      "wecom_webhook_url_configured": false,
+      "dingtalk_enabled": false,
+      "dingtalk_webhook_url": "",
+      "dingtalk_webhook_url_configured": false
     },
     "maintenance": {
       "scrub": {
@@ -2409,7 +2414,7 @@ GET /api/v1/settings/security-check
 - `session_token_ttl` 检查 Web UI 访问令牌和刷新令牌有效期；公网部署建议 `auth.access_token_ttl <= 1h`、`auth.refresh_token_ttl <= 720h`，超过建议值会标记为 `warning`，响应只返回 TTL 文本、秒数和是否过长，不返回任何令牌内容
 - `login_rate_limit` 检查 Web UI 连续失败登录限速；启用认证后，默认按用户名和客户端 IP 统计失败次数，达到阈值后短期锁定并发送 `login_rate_limited` 提醒事件；响应返回阈值、统计窗口、锁定时长、提醒冷却时间和 key 范围，不返回用户名、密码或 token
 - `browser_session_boundary` 检查当前浏览器访问路径是否会让 Web UI 会话 cookie 和下载 cookie 带 `Secure` 标记，并确认浏览器写请求同源元数据校验处于启用状态；未启用 Web 登录认证或当前请求未被识别为 HTTPS 时会标记为 `warning`，响应只返回 cookie 属性、请求 scheme、代理信任和同源校验布尔值，不返回任何 token 或 cookie 内容
-- `public_share_boundary` 在分享功能启用时检查公开分享访问 cookie 与公开分享 JSON 响应缓存边界；当前请求未被识别为 HTTPS 时会将受密码保护分享 cookie 缺少 `Secure` 标记为 `warning`；响应只返回 cookie 属性、公开分享 JSON 缓存、`Vary: Cookie`、`nosniff`、`Referrer-Policy` 状态和口令失败限速参数，不返回分享口令、cookie 值或分享 ID
+- `public_share_boundary` 在分享功能启用时检查公开分享访问 cookie、口令失败限速与公开分享 JSON 响应缓存边界；如果 HttpOnly、SameSite、cookie 路径范围、失败限速、`Cache-Control: private`、`Cache-Control: no-cache`、`Vary: Cookie`、`nosniff` 或 `Referrer-Policy: no-referrer` 边界异常，会标记为 `block`；只有这些边界满足要求但当前请求未被识别为 HTTPS 时，才会将受密码保护分享 cookie 缺少 `Secure` 标记为 `warning`；响应只返回 cookie 属性和路径范围状态、公开分享 JSON 缓存与 referrer 边界状态、`Vary: Cookie`、`nosniff` 和口令失败限速参数，不返回分享口令、cookie 值或分享 ID
 - `users_file_access` 检查当前运行时使用的用户文件；路径缺失、目录不可读、目录是符号链接、文件不可读、文件是符号链接或非普通文件会标记为 `block`，目录或文件仍允许组或其他用户访问会标记为 `warning`；响应会在 `details.path`、`details.dir`、`details.file_mode`、`details.dir_mode`、`details.file_kind`、`details.dir_kind`、`details.file_group_or_other_access` 和 `details.dir_group_or_other_access` 中返回可观测的路径、权限和类型信息
 - `initial_password_file` 检查 `auth.users_file` 同目录的 `initial-password.txt`；如果无法确定检查路径，或发现普通文件残留、符号链接、非普通文件，均为 `block`，响应会在 `details.path` 返回检查路径；路径为空时表示无法从用户文件路径推导初始密码文件位置；可观测时会通过 `details.mode` 和 `details.path_kind` 返回权限和路径类型，其中符号链接和非普通文件会在 `details.path_kind` 中分别返回 `symlink` 或 `not_regular`
 - `webdav_prefix` 在 WebDAV 启用时检查 WebDAV URL 前缀；空前缀、站点根路径、包含无效路径字符，或位于 `/api`、`/s`、`/health` 保留路由下的前缀会标记为 `block`，并返回 `details.prefix_risk` 和 `details.normalized_prefix`
@@ -2511,6 +2516,8 @@ PUT /api/v1/settings
     "telegram_chat_id": "-1001234567890",
     "wecom_enabled": true,
     "wecom_webhook_url": "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=...",
+    "dingtalk_enabled": true,
+    "dingtalk_webhook_url": "https://oapi.dingtalk.com/robot/send?access_token=...",
     "email_enabled": true,
     "smtp_host": "smtp.example.com",
     "smtp_port": 587,
@@ -2583,11 +2590,12 @@ PUT /api/v1/settings
 - `cdc` 支持更新 `min_chunk_size`、`avg_chunk_size`、`max_chunk_size`；必须满足 `65536 <= min < avg < max <= 67108864`。Docker 和 systemd 启动入口会在 dataplane 重启时读取这些字节值，新对象写入才会使用新分块参数
 - `versioning` 支持更新 `auto_versioned_extensions`、`auto_versioned_filenames`、`max_versioned_size`；保存后会立即更新运行中的自动版本策略
 - `share` 支持更新 `enabled`、`base_url`、`default_expires_in`、`default_max_access`、`policy_rules`；`enabled` 会立即影响公开分享访问和新分享创建，`base_url` 会立即影响后续新生成的分享链接，非空时必须是完整的 `http` 或 `https` URL，不能包含 userinfo、查询参数或片段，且主机名必须有效；默认有效期和默认访问次数只影响之后创建的分享；`policy_rules` 每项 `path` 遵循上述逻辑路径规则，并至少设置 `require_password`、`max_expires_in` 或 `max_access` 中的一项
+- Web 设置页会基于当前编辑内容显示分享策略覆盖摘要，集中展示默认有效期、默认访问次数、路径策略数量、强制密码路径和宽松策略关注项；该摘要仅用于保存前复核，实际限制仍以设置 API 保存后的服务端策略为准
 - `favorites` 支持更新 `enabled`；保存后会立即影响收藏接口的可用性
 - `storage.directory_quotas` 每项 `path` 遵循上述逻辑路径规则，`quota_bytes` 必须是正整数
 - `storage.directory_access_rules` 每项 `path` 遵循上述逻辑路径规则，并至少包含一个 `read_users`、`write_users`、`read_groups`、`write_groups`、`read_roles` 或 `write_roles` 授权；角色只能是 `admin`、`user`、`guest`
 - 保存成功后，如果 `storage.directory_access_rules` 或分享策略字段 `share.enabled`、`share.default_expires_in`、`share.default_max_access`、`share.policy_rules` 发生实际变化，服务端会向提醒运行态提交 `settings_policy_changed` warning 事件；事件 `details` 包含 `source = "settings"`、`changed_sections`、目录授权和分享策略的变更布尔值及规则数量，不包含规则路径、`share.base_url`、提醒通道密钥或用户成员明细；规范化后等价的提交不会产生该事件；事件发送失败只写入服务端日志，不会导致设置保存失败
-- `alerts` 支持更新 `enabled`、`check_interval`、`threshold_pct`、`critical_pct`、`min_free_bytes`、`cooldown_period`、`webhook_url`、`webhook_method`、`webhook_headers`、`telegram_enabled`、`telegram_bot_token`、`telegram_chat_id`、`wecom_enabled`、`wecom_webhook_url`、`email_enabled`、`smtp_host`、`smtp_port`、`smtp_username`、`smtp_password`、`smtp_from`、`smtp_to`；保存后会立即更新运行中的提醒监控
+- `alerts` 支持更新 `enabled`、`check_interval`、`threshold_pct`、`critical_pct`、`min_free_bytes`、`cooldown_period`、`webhook_url`、`webhook_method`、`webhook_headers`、`telegram_enabled`、`telegram_bot_token`、`telegram_chat_id`、`wecom_enabled`、`wecom_webhook_url`、`dingtalk_enabled`、`dingtalk_webhook_url`、`email_enabled`、`smtp_host`、`smtp_port`、`smtp_username`、`smtp_password`、`smtp_from`、`smtp_to`；保存后会立即更新运行中的提醒监控
 - `disk_health` 支持更新 `enabled`、`check_interval`、`probe_timeout`、`cooldown_period`、`command`、温度阈值、介质磨损阈值和 `devices`；保存后会立即更新运行中的磁盘健康监控
 - `maintenance.scrub` 支持更新 `enabled`、`schedule_interval`、`retry_interval`、`max_retries`；保存后会立即更新运行中的周期 Scrub 调度，关闭时会取消后台调度
 - `dataplane` 支持更新 `grpc_address`、`timeout`、`max_retries`；保存后会立即替换运行中的数据面 client，并用于后续按需重连和连接重试策略
@@ -2607,6 +2615,7 @@ PUT /api/v1/settings
 - 省略 `alerts.telegram_bot_token` 或 `alerts.smtp_password` 会保留既有密钥；提交空字符串会清除对应密钥。`alerts.telegram_enabled = true` 时清除 `telegram_bot_token` 会因缺少必需 Token 被拒绝。
 - `alerts.telegram_enabled = true` 时必须提供 `telegram_bot_token` 和 `telegram_chat_id`；`telegram_bot_token` 不能包含空白、`/`、`?` 或 `#`，诊断和设置读取响应不会明文返回该 Token
 - `alerts.wecom_enabled = true` 时必须提供 `wecom_webhook_url`；非空 `wecom_webhook_url` 必须是完整的 `http` 或 `https` URL。`GET /api/v1/settings` 使用 `<redacted>` 和 `wecom_webhook_url_configured` 表示已保存的企业微信 Webhook，`PUT /api/v1/settings` 提交同样的 `<redacted>` 占位值会保留既有 URL。
+- `alerts.dingtalk_enabled = true` 时必须提供 `dingtalk_webhook_url`；非空 `dingtalk_webhook_url` 必须是完整的 `http` 或 `https` URL。`GET /api/v1/settings` 使用 `<redacted>` 和 `dingtalk_webhook_url_configured` 表示已保存的钉钉 Webhook，`PUT /api/v1/settings` 提交同样的 `<redacted>` 占位值会保留既有 URL。
 - `alerts.email_enabled = true` 时必须提供 `smtp_host`、`smtp_from` 和至少一个 `smtp_to`，`smtp_port` 必须在 1-65535 范围内，发件人和收件人必须是合法邮件地址
 - 请求中的 `disk_health.check_interval`、`disk_health.probe_timeout`、`disk_health.cooldown_period` 必须是正的 `time.ParseDuration` 字符串；`disk_health.command` 必须是单个可执行文件名或绝对路径；`disk_health.media_wear_critical_percent` 不能低于 `disk_health.media_wear_warning_percent`；每个 `devices[].path` 必须是绝对路径，推荐 `/dev/disk/by-id/...`
 - 请求中的 `maintenance.scrub.schedule_interval`、`maintenance.scrub.retry_interval` 必须是正的 `time.ParseDuration` 字符串；`maintenance.scrub.max_retries` 必须是 `0` 或正整数
@@ -2622,7 +2631,7 @@ POST /api/v1/settings/alerts/test
 
 **需要管理员权限**
 
-该接口会通过当前已保存的提醒通道发送一次 `alert_test` warning 事件，用于验证 Webhook、Telegram、企业微信或 SMTP 邮件链路。它要求 `[alerts] enabled = true`、至少存在一个已配置的通知通道，并且当前进程已挂载提醒运行态；企业微信通道只有在启用企业微信通知且 Webhook URL 非空时才计入通道列表，SMTP 邮件通道只有在启用邮件通知、SMTP 主机、端口、发件人和至少一个非空收件人均存在时才计入通道列表。测试事件的 `details` 只包含 `trigger = "manual_test"`、`source = "settings"` 和通道名称列表，不包含 Webhook、Telegram、企业微信或 SMTP 密钥。
+该接口会通过当前已保存的提醒通道发送一次 `alert_test` warning 事件，用于验证 Webhook、Telegram、企业微信、钉钉或 SMTP 邮件链路。它要求 `[alerts] enabled = true`、至少存在一个已配置的通知通道，并且当前进程已挂载提醒运行态；企业微信和钉钉通道只有在启用对应通知且 Webhook URL 非空时才计入通道列表，SMTP 邮件通道只有在启用邮件通知、SMTP 主机、端口、发件人和至少一个非空收件人均存在时才计入通道列表。测试事件的 `details` 只包含 `trigger = "manual_test"`、`source = "settings"` 和通道名称列表，不包含 Webhook、Telegram、企业微信、钉钉或 SMTP 密钥。
 
 **响应示例**:
 ```json
@@ -2724,7 +2733,7 @@ GET /api/v1/maintenance/disk-health
 - NVMe critical warning、可用备用容量低于阈值、介质寿命已用百分比达到阈值或介质错误计数非零会影响设备状态。
 - `smartctl` 不可用、无 JSON 输出或 JSON 无法解析会返回 `unavailable`。
 - 后台周期检查发现 `warning`、`critical` 或 `unavailable` 时，会写入 `disk_health` 最近操作记录，路径为 `/system/disk-health`，用户为 `system`。
-- 当 `[alerts] enabled = true` 且配置了 Webhook、Telegram、企业微信或 SMTP 邮件时，后台周期检查会对 `warning`、`critical` 和 `unavailable` 发送 `disk_health` 提醒事件。最近操作记录中的设备摘要使用配置的 `name`；提醒事件详情只包含聚合计数，不包含设备名、完整设备路径、序列号或 warning 文本。完整设备路径和 SMART 明细仅通过管理员维护接口返回。
+- 当 `[alerts] enabled = true` 且配置了 Webhook、Telegram、企业微信、钉钉或 SMTP 邮件时，后台周期检查会对 `warning`、`critical` 和 `unavailable` 发送 `disk_health` 提醒事件。最近操作记录中的设备摘要使用配置的 `name`；提醒事件详情只包含聚合计数，不包含设备名、完整设备路径、序列号或 warning 文本。完整设备路径和 SMART 明细仅通过管理员维护接口返回。
 
 ### 获取数据校验结果
 
@@ -3031,7 +3040,7 @@ POST /api/v1/maintenance/backups/{id}/run
 
 备份、恢复、恢复演练、只读校验和保留检测开始执行时会先写入 `running` 状态。服务启动时，状态文件中遗留的 `running` 记录会被标记为失败并写回状态文件，避免重启后长期显示并未实际运行的任务。
 
-当 `[alerts] enabled = true` 且配置了 Webhook、Telegram、企业微信或 SMTP 邮件时，备份失败、显式恢复失败或带警告、恢复后只读校验失败或带警告、恢复演练失败、恢复演练缺失/过期提醒、保留策略检测失败或备份完成但带警告会发送提醒事件。事件 `type` 为 `backup_run`、`backup_restore`、`backup_restore_verify`、`backup_restore_drill` 或 `backup_retention_check`，`level` 为 `warning` 或 `critical`；`message` 使用固定公共摘要，不包含任务名称、路径或原始错误文本。`details` 只包含有值的摘要字段，可包括任务 ID、运行 ID、任务类型、触发原因、状态、时间、文件/字节/快照计数、警告数量、错误信息是否存在、失败分类，以及是否省略位置详情；不包含任务名称、来源、备份目标、恢复目标路径、快照路径、manifest 路径、原始 warning 或原始错误文本。
+当 `[alerts] enabled = true` 且配置了 Webhook、Telegram、企业微信、钉钉或 SMTP 邮件时，备份失败、显式恢复失败或带警告、恢复后只读校验失败或带警告、恢复演练失败、恢复演练缺失/过期提醒、保留策略检测失败或备份完成但带警告会发送提醒事件。事件 `type` 为 `backup_run`、`backup_restore`、`backup_restore_verify`、`backup_restore_drill` 或 `backup_retention_check`，`level` 为 `warning` 或 `critical`；`message` 使用固定公共摘要，不包含任务名称、路径或原始错误文本。`details` 只包含有值的摘要字段，可包括任务 ID、运行 ID、任务类型、触发原因、状态、时间、文件/字节/快照计数、警告数量、错误信息是否存在、失败分类，以及是否省略位置详情；不包含任务名称、来源、备份目标、恢复目标路径、快照路径、manifest 路径、原始 warning 或原始错误文本。
 
 手动检查快照保留策略和远端可见内容：
 
@@ -3360,7 +3369,7 @@ GET /api/v1/diagnostics-export
 
 **响应**: 返回 JSON 文件下载；响应包含 `Content-Disposition: attachment`，并通过 `Cache-Control: no-store` 禁止缓存。
 
-导出的 JSON 根对象包含 `schema_version = 1`，用于标识诊断包结构版本。内容会包含脱敏后的 `alerts`、`disk_health` 和 `smb` 运行态信息，例如 `enabled`、`runtime_available`、通知通道配置状态、阈值、最近一次检查级别和 SMB 预览运行态；不会包含 Webhook URL、自定义 Header、Telegram Bot Token、企业微信 Webhook URL、`smtp_host`、`smtp_username`、`smtp_password`、`smtp_from`、`smtp_to` 或 SMB 凭据内容。
+导出的 JSON 根对象包含 `schema_version = 1`，用于标识诊断包结构版本。内容会包含脱敏后的 `alerts`、`disk_health` 和 `smb` 运行态信息，例如 `enabled`、`runtime_available`、通知通道配置状态、阈值、最近一次检查级别和 SMB 预览运行态；不会包含 Webhook URL、自定义 Header、Telegram Bot Token、企业微信 Webhook URL、钉钉 Webhook URL、`smtp_host`、`smtp_username`、`smtp_password`、`smtp_from`、`smtp_to` 或 SMB 凭据内容。
 
 ---
 

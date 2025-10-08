@@ -10,7 +10,10 @@ interface StatCardProps {
   subtitle?: string
   icon?: ElementType
   tone?: StatTone
+  density?: 'default' | 'compact'
   action?: ReactNode
+  onPress?: () => void
+  ariaLabel?: string
   className?: string
 }
 
@@ -20,7 +23,10 @@ export function StatCard({
   subtitle,
   icon: Icon,
   tone = 'default',
+  density = 'default',
   action,
+  onPress,
+  ariaLabel,
   className,
 }: StatCardProps) {
   const toneClasses: Record<StatTone, string> = {
@@ -32,20 +38,53 @@ export function StatCard({
     danger: 'bg-danger/10 text-danger',
   }
 
-  return (
-    <Card className={cn("card-meridian min-w-0", className)}>
-      <CardBody className="flex items-center gap-3 p-4">
-        {Icon && (
-          <div className={cn("flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border border-divider", toneClasses[tone])}>
-            <Icon size={20} className="text-current" />
-          </div>
-        )}
-        <div className="flex-1 min-w-0">
-          <p className="text-xs uppercase text-default-500">{title}</p>
-          <p className="break-anywhere text-2xl font-semibold leading-tight text-foreground">{value}</p>
-          {subtitle && <p className="break-anywhere text-xs text-default-500">{subtitle}</p>}
+  const content = (
+    <>
+      {Icon && (
+        <div className={cn(
+          "flex shrink-0 items-center justify-center rounded-lg border border-divider",
+          density === 'compact' ? 'h-8 w-8' : 'h-10 w-10',
+          toneClasses[tone],
+        )}>
+          <Icon size={density === 'compact' ? 18 : 20} className="text-current" />
         </div>
-        {action && <div className="shrink-0">{action}</div>}
+      )}
+      <div className="flex-1 min-w-0">
+        <p className={cn("uppercase text-default-500", density === 'compact' ? 'text-[11px] leading-4' : 'text-xs')}>{title}</p>
+        <p className={cn(
+          "break-anywhere font-semibold leading-tight text-foreground",
+          density === 'compact' ? 'text-xl' : 'text-2xl',
+        )}>{value}</p>
+        {subtitle && (
+          <p className={cn("break-anywhere text-default-500", density === 'compact' ? 'text-[11px] leading-4' : 'text-xs')}>
+            {subtitle}
+          </p>
+        )}
+      </div>
+      {action && <div className="shrink-0">{action}</div>}
+    </>
+  )
+
+  return (
+    <Card className={cn("card-meridian min-w-0", onPress && "transition-colors hover:border-primary/40", className)}>
+      <CardBody className={cn(
+        "p-0",
+        !onPress && "flex items-center gap-3",
+        !onPress && (density === 'compact' ? 'p-3' : 'p-4'),
+      )}>
+        {onPress ? (
+          <button
+            type="button"
+            aria-label={ariaLabel ?? title}
+            className={cn(
+              "flex w-full items-center gap-3 text-left outline-none transition-colors focus-visible:ring-2 focus-visible:ring-primary/40",
+              density === 'compact' ? 'p-3' : 'p-4',
+            )}
+            onClick={onPress}
+          >
+            {content}
+          </button>
+        ) : content}
       </CardBody>
     </Card>
   )

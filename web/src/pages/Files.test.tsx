@@ -1408,6 +1408,7 @@ describe('FilesPage', () => {
       await waitFor(() => {
         expect(screen.getByText('100%')).toBeTruthy()
       })
+      expect(screen.getByRole('progressbar', { name: 'report.txt 上传进度' })).toHaveAttribute('aria-valuetext', '100% 已上传')
       expect(screen.queryByText('150%')).toBeNull()
 
       deferred.resolve(successActionResult)

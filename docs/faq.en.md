@@ -40,6 +40,16 @@ docker compose pull
 docker compose up -d --no-build
 ```
 
+Before upgrading a Docker release image, record the current `MNEMONAS_IMAGE` tag in `.env`. If the upgraded container does not start, a core workflow regresses, or health checks fail, set `MNEMONAS_IMAGE` back to the previous tag and run:
+
+```bash
+docker compose pull
+docker compose up -d --no-build
+docker compose logs --tail 100 mnemonas
+```
+
+Docker rollback changes only the image and keeps using the same host data directory. If the newer release performed an irreversible data migration, follow that release note or restore from backup first.
+
 Ubuntu/systemd:
 
 ```bash
@@ -50,6 +60,16 @@ sudo ./scripts/install-systemd.sh
 sudo mnemonas-doctor
 ```
 
+For systemd upgrades, back up first and keep the extracted previous release directory. If the upgraded service does not start, a core workflow regresses, or `mnemonas-doctor` fails, rerun the installer from the previous release directory to roll binaries and Web UI assets back:
+
+```bash
+cd mnemonas-<previous-version>-linux-amd64
+sudo ./scripts/install-systemd.sh
+sudo mnemonas-doctor
+```
+
+Rollback continues to use the existing `/etc/mnemonas/config.toml` and `/srv/mnemonas` data directory. If the newer release performed an irreversible data migration, follow that release note or restore from backup before starting the older version.
+
 Manual binaries:
 
 ```bash
@@ -59,7 +79,7 @@ pkill dataplane
 ./nasd --config ~/.mnemonas/config.toml
 ```
 
-Back up before major upgrades.
+Back up before major upgrades on every deployment path.
 
 ### Where is data stored?
 

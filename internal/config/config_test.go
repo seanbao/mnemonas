@@ -167,6 +167,9 @@ func TestDefault(t *testing.T) {
 	if cfg.Alerts.TelegramBotToken != "" || cfg.Alerts.TelegramChatID != "" {
 		t.Errorf("Default Telegram alert credentials should be empty, got token=%q chat=%q", cfg.Alerts.TelegramBotToken, cfg.Alerts.TelegramChatID)
 	}
+	if cfg.Alerts.DingTalkEnabled || cfg.Alerts.DingTalkWebhookURL != "" {
+		t.Errorf("Default DingTalk alerts should be disabled with an empty webhook URL, got enabled=%v url=%q", cfg.Alerts.DingTalkEnabled, cfg.Alerts.DingTalkWebhookURL)
+	}
 	if cfg.Backup.Jobs == nil {
 		t.Error("Default backup jobs should be initialized to an empty slice")
 	}
@@ -861,6 +864,28 @@ func TestConfig_Validate(t *testing.T) {
 			modify: func(c *Config) {
 				c.Alerts.WeComEnabled = true
 				c.Alerts.WeComWebhookURL = "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=secret-key"
+			},
+			wantErr: false,
+		},
+		{
+			name: "Invalid alerts DingTalk URL scheme",
+			modify: func(c *Config) {
+				c.Alerts.DingTalkWebhookURL = "file:///tmp/dingtalk"
+			},
+			wantErr: true,
+		},
+		{
+			name: "Invalid alerts DingTalk enabled without URL",
+			modify: func(c *Config) {
+				c.Alerts.DingTalkEnabled = true
+			},
+			wantErr: true,
+		},
+		{
+			name: "Valid alerts DingTalk URL",
+			modify: func(c *Config) {
+				c.Alerts.DingTalkEnabled = true
+				c.Alerts.DingTalkWebhookURL = "https://oapi.dingtalk.com/robot/send?access_token=secret-token"
 			},
 			wantErr: false,
 		},
@@ -1903,6 +1928,7 @@ base_url = " https://nas.example.com/base/ "
 webhook_url = " https://hooks.example.com/storage "
 webhook_method = "post"
 wecom_webhook_url = " https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=secret-key "
+dingtalk_webhook_url = " https://oapi.dingtalk.com/robot/send?access_token=secret-token "
 smtp_host = " smtp.example.com "
 smtp_username = " alerts "
 smtp_from = " MnemoNAS <alerts@example.com> "
@@ -1927,6 +1953,9 @@ smtp_to = [" admin@example.com ", " ops@example.com "]
 	}
 	if cfg.Alerts.WeComWebhookURL != "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=secret-key" {
 		t.Fatalf("alerts WeCom webhook URL = %q, want trimmed URL with query", cfg.Alerts.WeComWebhookURL)
+	}
+	if cfg.Alerts.DingTalkWebhookURL != "https://oapi.dingtalk.com/robot/send?access_token=secret-token" {
+		t.Fatalf("alerts DingTalk webhook URL = %q, want trimmed URL with query", cfg.Alerts.DingTalkWebhookURL)
 	}
 	if cfg.Alerts.SMTPHost != "smtp.example.com" || cfg.Alerts.SMTPUsername != "alerts" {
 		t.Fatalf("alerts SMTP fields were not normalized: %+v", cfg.Alerts)

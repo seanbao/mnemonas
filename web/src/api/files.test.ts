@@ -2996,6 +2996,7 @@ describe('API: files', () => {
             webhook_configured: true,
             telegram_configured: true,
             wecom_configured: true,
+            dingtalk_configured: true,
             email_configured: true,
             webhook_method: 'POST',
             last_level: 'warning',
@@ -3081,6 +3082,7 @@ describe('API: files', () => {
       expect(result.alerts?.webhookConfigured).toBe(true)
       expect(result.alerts?.telegramConfigured).toBe(true)
       expect(result.alerts?.wecomConfigured).toBe(true)
+      expect(result.alerts?.dingTalkConfigured).toBe(true)
       expect(result.alerts?.emailConfigured).toBe(true)
       expect(result.alerts?.lastLevel).toBe('warning')
       expect(result.alerts?.lastUsedPct).toBe(87.5)

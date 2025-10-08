@@ -40,6 +40,8 @@
 
 项目根目录 `.go-version` 和 `.nvmrc` 分别提示 Go 与 Node.js 开发版本，Rust 版本要求写在 `dataplane/Cargo.toml` 的 `rust-version` 字段中。前端相关命令默认通过 `nvm use` 进入 `.nvmrc` 指定版本执行，并由 `web/package.json` 与 `web/scripts/check-node.cjs` 校验实际 Node.js engine 范围。
 
+`make lint` 和 `make check` 的 Go 静态检查默认通过 `GO_LINT_ENV` 继承 `GO_CMD_ENV`，因此本地检查使用 `GOTOOLCHAIN=local`；只有需要自动下载 Go toolchain 时才应覆盖 `GO_LINT_ENV`。
+
 ---
 
 ## 依赖安装
@@ -488,7 +490,7 @@ bash ./scripts/with-test-dataplane.sh go test -coverprofile=coverage.out $GO_PAC
 go tool cover -html=coverage.out
 ```
 
-`with-test-dataplane.sh` 启动的临时 dataplane 只接受 `localhost`、`ip6-localhost`、`::1` 或四段数字形式的 `127.0.0.0/8` 地址；如需覆盖 `MNEMONAS_TEST_DATAPLANE_ADDR` 或 `MNEMONAS_TEST_DATAPLANE_HTTP_ADDR`，仍必须保持 loopback，且不能包含空白字符或控制字符，避免测试服务暴露到公网或不可信局域网。
+`with-test-dataplane.sh` 默认会自动选择空闲的 `127.0.0.1` gRPC 和 HTTP 端口。未显式设置 `MNEMONAS_TEST_DATAPLANE_ADDR` 或 `MNEMONAS_TEST_DATAPLANE_HTTP_ADDR` 时，包装脚本会把选中的地址导出给被包装命令；如需覆盖，仍必须保持 loopback（`localhost`、`ip6-localhost`、`::1` 或四段数字形式的 `127.0.0.0/8`），两个地址必须使用不同端口，且不能包含空白字符或控制字符，避免测试服务暴露到公网或不可信局域网。
 
 不要在安装前端依赖后直接用 `go test ./...` 或 `go list ./...` 作为全仓库包集合；Go 会进入 `web/node_modules` 中第三方包。仓库级 Go 检查应先用 `make --no-print-directory go-packages` 解析包列表。
 
@@ -598,7 +600,14 @@ make e2e
 
 ### 故障注入测试
 
-`scripts/fault-injection-test.sh` 会杀死并重启 `nasd`、写入测试文件，并可直接损坏对象和元数据文件。它默认关闭，不能直接对真实数据目录运行；必须显式指定隔离测试实例：
+故障注入会杀死并重启 `nasd`、写入测试文件，并可直接损坏对象和元数据文件。项目默认入口会在 `/tmp` 下启动隔离后端，并把显式目标信息传给底层破坏性 runner：
+
+```bash
+make fault-injection
+./scripts/run-fault-injection-isolated.sh
+```
+
+已有隔离目标需要单独验证时，可以直接调用底层 runner：
 
 ```bash
 MNEMONAS_LIVE_FAULTS=1 \
@@ -610,7 +619,7 @@ RUN_CORRUPTION_TESTS=0 \
 ./scripts/fault-injection-test.sh
 ```
 
-安全门禁由 `scripts/test-fault-injection-safety.sh` 覆盖，并纳入 `make scripts-check`。脚本要求 `BASE_URL`、`STORAGE_ROOT`、`NASD_BIN` 都来自显式环境变量；默认只允许 `/tmp` 或当前 checkout 下的 `STORAGE_ROOT`。真实存储路径必须额外设置 `ALLOW_REAL_STORAGE=1`，且仍必须是绝对路径，不能包含控制字符、`..` 或符号链接路径组件，不能指向 `/`、`/tmp`、`/var` 等受保护系统目录。会被读取或改写的 `OBJECTS_DIR` 和 `INDEX_DB` 必须位于 `STORAGE_ROOT` 下。
+安全门禁由 `scripts/test-fault-injection-safety.sh` 覆盖，并纳入 `make scripts-check`。隔离 runner 只接受 `/tmp` 或当前 checkout 下的根目录，并且 Web 与 dataplane 地址必须是 loopback。底层 runner 要求 `BASE_URL`、`STORAGE_ROOT`、`NASD_BIN` 都来自显式环境变量。真实存储路径必须额外设置 `ALLOW_REAL_STORAGE=1`，且仍必须是绝对路径，不能包含控制字符、`..` 或符号链接路径组件，不能指向 `/`、`/tmp`、`/var` 等受保护系统目录。会被读取或改写的 `OBJECTS_DIR`、`INDEX_DB` 和可选 `NASD_PID_FILE` 必须位于 `STORAGE_ROOT` 下。
 
 ### 性能基准测试
 

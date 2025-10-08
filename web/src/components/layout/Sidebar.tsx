@@ -21,7 +21,7 @@ import {
   RefreshCw,
 } from 'lucide-react'
 import { cn, formatBytes } from '@/lib/utils'
-import { areDiskStatsAvailable, clampUsagePercent } from '@/lib/storageStats'
+import { areDiskStatsAvailable, clampUsagePercent, formatUsagePercent, getDiskSpaceStatus, type DiskSpaceStatusLevel } from '@/lib/storageStats'
 import { GENERIC_LOAD_ERROR_DESCRIPTION, getUserFacingErrorDescription } from '@/lib/apiMessages'
 import { ApiError, getAppVersion, getStorageStats } from '@/api/files'
 
@@ -103,6 +103,36 @@ function getSidebarStorageRetryErrorToast(error: unknown): { title: string; desc
   }
 }
 
+function getSidebarStoragePanelClass(level: DiskSpaceStatusLevel): string {
+  if (level === 'critical') {
+    return 'border-danger/30 bg-danger/10'
+  }
+  if (level === 'warning') {
+    return 'border-warning/30 bg-warning/10'
+  }
+  return 'border-divider bg-content2/55'
+}
+
+function getSidebarStorageBarClass(level: DiskSpaceStatusLevel): string {
+  if (level === 'critical') {
+    return 'bg-danger/70'
+  }
+  if (level === 'warning') {
+    return 'bg-warning/70'
+  }
+  return 'bg-accent-primary'
+}
+
+function getSidebarStorageLabelClass(level: DiskSpaceStatusLevel): string {
+  if (level === 'critical') {
+    return 'border-danger/25 bg-danger/15 text-danger'
+  }
+  if (level === 'warning') {
+    return 'border-warning/25 bg-warning/15 text-warning'
+  }
+  return 'border-success/25 bg-success/10 text-success'
+}
+
 export function Sidebar({ collapsed = false, onClose }: SidebarProps) {
   const location = useLocation()
   const isAdmin = useIsAdmin()
@@ -133,6 +163,10 @@ export function Sidebar({ collapsed = false, onClose }: SidebarProps) {
   const usagePercent = diskStatsKnown ? clampUsagePercent(storageStats?.diskUsageRatio) : undefined
   const hasUsage = usedBytes !== undefined && usedBytes > 0
   const storageStatsKnown = diskStatsKnown || casStatsKnown
+  const diskSpaceStatus = getDiskSpaceStatus(storageStats)
+  const storageUsageValueText = diskStatsKnown
+    ? `${formatUsagePercent(storageStats?.diskUsageRatio)} 已用`
+    : storageStatsKnown ? '磁盘容量统计不可用' : '统计不可用'
   const storageErrorPresentation = storageStatsError ? getSidebarStorageErrorPresentation(storageStatsError) : null
   const versionLabel = appVersion?.version ? `MnemoNAS ${appVersion.version}` : 'MnemoNAS'
 
@@ -165,8 +199,8 @@ export function Sidebar({ collapsed = false, onClose }: SidebarProps) {
               <div className="text-base font-semibold text-foreground">
                 MnemoNAS
               </div>
-              <div className="mt-0.5 text-[10px] uppercase text-default-500">
-                Private Storage
+              <div className="mt-0.5 text-[10px] text-default-500">
+                私有存储
               </div>
             </div>
           )}
@@ -250,10 +284,17 @@ export function Sidebar({ collapsed = false, onClose }: SidebarProps) {
       {!collapsed && (
         <div className="relative z-10 border-t border-divider p-4">
           {isAdmin && (
-            <div className="rounded-lg border border-divider bg-content2/55 p-4">
-              <div className="mb-2 flex items-center gap-2">
-                <HardDrive size={16} className="text-accent-primary" />
-                <span className="text-sm font-medium">存储空间</span>
+            <div className={cn("rounded-lg border p-4", getSidebarStoragePanelClass(diskSpaceStatus.level))}>
+              <div className="mb-2 flex items-center justify-between gap-2">
+                <div className="flex min-w-0 items-center gap-2">
+                  <HardDrive size={16} className="shrink-0 text-accent-primary" />
+                  <span className="truncate text-sm font-medium">存储空间</span>
+                </div>
+                {diskStatsKnown && (
+                  <span className={cn("shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-medium", getSidebarStorageLabelClass(diskSpaceStatus.level))}>
+                    {diskSpaceStatus.label}
+                  </span>
+                )}
               </div>
               {storageStatsError ? (
                 <div className="space-y-3 text-xs">
@@ -283,10 +324,19 @@ export function Sidebar({ collapsed = false, onClose }: SidebarProps) {
                       {usedBytes !== undefined ? formatBytes(usedBytes) : '--'}
                     </span>
                   </div>
-                  <div className="h-1.5 bg-content1 rounded-full overflow-hidden">
+                  <div
+                    role="progressbar"
+                    aria-label="侧边栏存储使用率"
+                    aria-valuemin={0}
+                    aria-valuemax={100}
+                    aria-valuenow={usagePercent !== undefined ? Math.round(usagePercent) : undefined}
+                    aria-valuetext={storageUsageValueText}
+                    className="h-1.5 bg-content1 rounded-full overflow-hidden"
+                  >
                     <div
                       className={cn(
-                        "h-full bg-accent-primary rounded-full transition-all duration-500",
+                        "h-full rounded-full transition-all duration-500",
+                        getSidebarStorageBarClass(diskSpaceStatus.level),
                         hasUsage ? "flow-line opacity-60" : "opacity-20"
                       )}
                       style={{ width: usagePercent !== undefined ? `${usagePercent}%` : hasUsage ? '100%' : '0%' }}
@@ -294,7 +344,7 @@ export function Sidebar({ collapsed = false, onClose }: SidebarProps) {
                   </div>
                   <div className="text-[11px] text-default-400">
                     {diskStatsKnown
-                      ? `${availableBytes !== undefined ? formatBytes(availableBytes) : '--'} 可用 / ${totalBytes !== undefined ? formatBytes(totalBytes) : '--'} 总容量`
+                      ? `${formatUsagePercent(storageStats?.diskUsageRatio)} 已用 · ${availableBytes !== undefined ? formatBytes(availableBytes) : '--'} 可用 / ${totalBytes !== undefined ? formatBytes(totalBytes) : '--'} 总容量`
                       : storageStatsKnown ? '磁盘容量统计不可用' : '统计不可用'}
                   </div>
                   {casStatsKnown && storageStats?.dedupRatio !== undefined && storageStats.dedupRatio > 0 && (

@@ -3,7 +3,7 @@
 #
 # This target is intentionally heavier than normal unit tests. It combines race
 # detection, active fuzzing, frontend property tests, and browser runtime scans.
-# Live fault injection is opt-in because it can stop a running nasd process.
+# Isolated fault injection is opt-in because it kills and restarts nasd.
 
 set -euo pipefail
 
@@ -71,9 +71,9 @@ else
 fi
 
 if [[ "$RUN_LIVE_FAULTS" == "1" ]]; then
-    run env MNEMONAS_LIVE_FAULTS=1 bash ./scripts/fault-injection-test.sh
+    run bash ./scripts/run-fault-injection-isolated.sh
 else
-    printf '\n==> skipping live fault injection; set RUN_LIVE_FAULTS=1 to enable\n'
+    printf '\n==> skipping isolated fault injection; set RUN_LIVE_FAULTS=1 to enable\n'
 fi
 
 printf '\nTorture test matrix completed.\n'

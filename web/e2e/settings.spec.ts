@@ -102,6 +102,27 @@ test.describe('设置选项卡切换', () => {
       await expect(cdcHeading).toBeVisible({ timeout: 5000 })
     }
   })
+
+  test('高级选项卡应显示钉钉提醒通道设置', async ({ page }) => {
+    const advancedTab = page.getByRole('tab', { name: /高级/i })
+    if (await advancedTab.isVisible({ timeout: 2000 }).catch(() => false)) {
+      await advancedTab.click()
+      const dingTalkSwitch = page.getByRole('switch', { name: '启用钉钉通知' })
+      await dingTalkSwitch.scrollIntoViewIfNeeded()
+      await expect(dingTalkSwitch).toBeVisible({ timeout: 5000 })
+      await expect(page.getByLabel('钉钉 Webhook URL')).toBeVisible()
+    }
+  })
+
+  test('点击分享选项卡应显示分享策略覆盖摘要', async ({ page }) => {
+    const sharesTab = page.getByRole('tab', { name: /分享/i })
+    if (await sharesTab.isVisible({ timeout: 2000 }).catch(() => false)) {
+      await sharesTab.click()
+      const coverage = page.getByLabel('分享策略覆盖摘要')
+      await expect(coverage.getByText('分享策略覆盖摘要')).toBeVisible({ timeout: 5000 })
+      await expect(coverage.getByText('策略关注项')).toBeVisible()
+    }
+  })
 })
 
 test.describe('设置表单交互', () => {
@@ -381,6 +402,7 @@ test.describe('公网访问向导', () => {
         default_max_access: 20,
       },
     })
+    await page.unrouteAll({ behavior: 'ignoreErrors' })
   })
 })
 
@@ -417,6 +439,45 @@ test.describe('安全自检修复动作', () => {
     await page.getByRole('button', { name: '改为本机监听' }).click()
 
     await expect(page.getByPlaceholder('0.0.0.0')).toHaveValue('127.0.0.1')
+  })
+
+  test('公开分享边界异常不应显示代理修复按钮', async ({ page }) => {
+    await page.route('**/api/v1/settings/security-check', async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          success: true,
+          data: {
+            status: 'block',
+            generated_at: '2026-05-08T00:00:00Z',
+            checks: [
+              {
+                id: 'public_share_boundary',
+                status: 'block',
+                title: '公开分享浏览器边界异常',
+                message: 'backend raw public share boundary block detail',
+                details: {
+                  share_enabled: true,
+                  password_cookie_secure: true,
+                  password_cookie_same_site: 'Strict',
+                  metadata_vary_cookie: false,
+                },
+              },
+            ],
+            request: { scheme: 'https' },
+            config: { auth_enabled: true, trusted_proxy_hops: 1 },
+          },
+        }),
+      })
+    })
+
+    await ensureAuthenticatedAt(page, '/settings')
+    await expect(page.getByText('加载设置...')).toHaveCount(0, { timeout: 15000 })
+    await expect(page.getByText('公开分享浏览器边界异常')).toBeVisible({ timeout: 5000 })
+    await expect(page.getByText('公开分享访问 cookie、失败限速或缓存边界未满足公网安全要求。')).toBeVisible()
+    await expect(page.getByText('backend raw public share boundary block detail')).toHaveCount(0)
+    await expect(page.getByRole('button', { name: '应用代理推荐' })).toHaveCount(0)
   })
 })
 

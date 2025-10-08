@@ -119,11 +119,30 @@ run_non_loopback_http_address_test() {
   assert_not_exists "$case_dir/cargo.log"
 }
 
+run_conflicting_explicit_ports_test() {
+  local out="$TMP_ROOT/conflicting-explicit-ports.log"
+
+  run_expect_failure "$out" env \
+    MNEMONAS_TEST_DATAPLANE_ADDR="127.0.0.1:19090" \
+    MNEMONAS_TEST_DATAPLANE_HTTP_ADDR="127.0.0.1:19090" \
+    bash "$REPO_ROOT/scripts/with-test-dataplane.sh" true
+
+  assert_file_contains "$out" "MNEMONAS_TEST_DATAPLANE_ADDR and MNEMONAS_TEST_DATAPLANE_HTTP_ADDR must use different ports"
+}
+
+run_auto_port_docs_test() {
+  assert_file_contains "$REPO_ROOT/scripts/with-test-dataplane.sh" "pick_loopback_port"
+  assert_file_contains "$REPO_ROOT/docs/development.md" "未显式设置"
+  assert_file_contains "$REPO_ROOT/docs/development.en.md" "When unset"
+}
+
 run_invalid_grpc_address_test
 run_invalid_http_address_test
 run_control_character_http_address_test
 run_non_loopback_grpc_address_test
 run_loopback_name_spoof_grpc_address_test
 run_non_loopback_http_address_test
+run_conflicting_explicit_ports_test
+run_auto_port_docs_test
 
 printf '[with-test-dataplane-safety-test] all checks passed\n'

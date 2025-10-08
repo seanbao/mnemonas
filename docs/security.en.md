@@ -19,6 +19,7 @@ Notes:
 - The password is not printed in clear text by default. For controlled local debugging only, set `MNEMONAS_PRINT_INITIAL_PASSWORD=1` before first startup.
 - After the first successful login for the administrator, `initial-password.txt` is removed.
 - Change the administrator password after first login.
+- The administrator Dashboard first-run checklist shows Web UI/API authentication, sharing, and WebDAV status. If authentication is disabled or WebDAV anonymous access is enabled, it indicates that the configuration is suitable only for a controlled LAN or an outer access-control layer. This notice does not replace the pre-deployment security self-check or `mnemonas-doctor`.
 
 Systemd default path:
 
@@ -61,6 +62,8 @@ When `password` is empty and Basic Auth is enabled, MnemoNAS generates a 16-char
 ```
 
 This WebDAV password is separate from the Web UI administrator password. Startup logs show where to find the credentials but do not print the password.
+
+`mnemonas-doctor` reports whether `config.toml` is a symlink, unexpected file type, or broadly readable. It also reports a missing `users.json` when authentication is enabled, and reports whether `users.json`, `secrets.json`, or their relevant parent directories are symlinks, unexpected file types, or broadly readable. Long-running deployments should keep these paths as private regular files and directories.
 
 Custom password:
 
@@ -221,6 +224,7 @@ cloudflared tunnel run mnemonas
 - [ ] WebDAV uses `auth_type = "users"`, or global Basic Auth credentials are recorded and changed to a strong custom or generated password, without placeholder values.
 - [ ] `webdav.auth_type` is not `none` unless the server is loopback-only.
 - [ ] Public deployments use `server.host = "127.0.0.1"` and are reachable only through the HTTPS reverse proxy.
+- [ ] The administrator Dashboard first-run checklist has no authentication-disabled or anonymous-WebDAV warning. If a warning is present, the corresponding configuration or outer access-control layer has been handled.
 - [ ] Dataplane gRPC/HTTP ports are loopback-only or private.
 - [ ] The Web UI security self-check has no `block` items; public deployments should resolve all `warning` items before exposure, especially `allow_unsafe_no_auth`, session-token lifetimes, login throttling, browser session-cookie boundaries, public-share cookie/cache boundaries, users-file permissions, reverse-proxy headers, dataplane ports, share default policy, and spare-administrator warnings.
 - [ ] `sudo mnemonas-doctor --public-domain <domain>` reports HTTP redirects to HTTPS on the same public domain, a matching HTTPS certificate with at least 30 days remaining, verified renewal guidance, usable administrator-account redundancy, public-safe session-token lifetimes, a non-symlink users file and users-file directory with private permissions, a non-symlink generated WebDAV credentials file with private permissions, an absent `initial-password.txt` path with no symlink or non-regular file left behind, reviewed public-share default policy and public-share JSON response boundaries, rejected anonymous WebDAV `PROPFIND`, and no direct backend exposure, dataplane exposure, or UFW allow warnings.
@@ -309,6 +313,8 @@ Signing out, changing a user's password, deleting the user, disabling the user, 
 Password-protected public shares issue an `HttpOnly`, `SameSite=Strict` cookie after successful password validation. The cookie is scoped to the matching `/s/<id>` and `/api/v1/public/shares/<id>` paths. Folder browsing and downloads use that cookie instead of passing passwords in URLs.
 
 Public share metadata, password-validation responses, and folder-listing responses include `Cache-Control: private, no-cache`, `Vary: Cookie`, `X-Content-Type-Options: nosniff`, and `Referrer-Policy: no-referrer` so cookie-dependent share metadata is not reused by browser or intermediary caches.
+
+The security self-check blocks invalid public-share cookie, failure-throttling, or cache boundaries before reporting HTTPS-only `Secure` cookie warnings.
 
 After clearing site data, switching browser, or changing the share password, the password must be entered again.
 
