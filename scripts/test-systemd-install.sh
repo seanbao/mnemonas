@@ -698,6 +698,113 @@ EOF
   assert_file_contains "$install_dir/systemd/mnemonas.service" "ReadWritePaths=$storage_dir $install_dir/etc/mnemonas"
 }
 
+run_systemd_release_rollback_preserves_config_and_data_test() {
+  local case_dir="$TMP_ROOT/release-rollback"
+  local fake_path="$case_dir/fake-bin"
+  local previous_release_dir="$case_dir/release-previous"
+  local upgraded_release_dir="$case_dir/release-upgraded"
+  local install_dir="$case_dir/install"
+  local storage_dir="$case_dir/rollback-storage"
+  local config_path="$install_dir/etc/mnemonas/config.toml"
+  local expected_config="$case_dir/expected-config.toml"
+  local web_dir="$install_dir/share/mnemonas/web"
+  mkdir -p "$install_dir/etc/mnemonas" "$storage_dir/files/projects" "$storage_dir/.mnemonas"
+  make_fake_admin_path "$fake_path"
+  make_release_tree "$previous_release_dir"
+  make_release_tree "$upgraded_release_dir"
+
+  write_executable "$previous_release_dir/nasd" \
+    '#!/usr/bin/env bash' \
+    'if [[ "${1:-}" == "--check-config" ]]; then exit 0; fi' \
+    'printf "previous nasd\n"'
+  write_executable "$previous_release_dir/dataplane" '#!/usr/bin/env bash' 'printf "previous dataplane\n"'
+  write_executable "$previous_release_dir/scripts/mnemonas-dataplane-start.sh" '#!/usr/bin/env bash' 'printf "previous helper\n"'
+  write_executable "$previous_release_dir/scripts/mnemonas-doctor.sh" '#!/usr/bin/env bash' 'printf "previous doctor\n"'
+  write_executable "$previous_release_dir/scripts/setup-reverse-proxy.sh" '#!/usr/bin/env bash' 'printf "previous public setup\n"'
+  write_executable "$previous_release_dir/scripts/uninstall-systemd.sh" '#!/usr/bin/env bash' 'printf "previous uninstaller\n"'
+  printf 'previous web\n' > "$previous_release_dir/web/index.html"
+  printf 'previous asset\n' > "$previous_release_dir/web/assets/previous.js"
+
+  write_executable "$upgraded_release_dir/nasd" \
+    '#!/usr/bin/env bash' \
+    'if [[ "${1:-}" == "--check-config" ]]; then exit 0; fi' \
+    'printf "upgraded nasd\n"'
+  write_executable "$upgraded_release_dir/dataplane" '#!/usr/bin/env bash' 'printf "upgraded dataplane\n"'
+  write_executable "$upgraded_release_dir/scripts/mnemonas-dataplane-start.sh" '#!/usr/bin/env bash' 'printf "upgraded helper\n"'
+  write_executable "$upgraded_release_dir/scripts/mnemonas-doctor.sh" '#!/usr/bin/env bash' 'printf "upgraded doctor\n"'
+  write_executable "$upgraded_release_dir/scripts/setup-reverse-proxy.sh" '#!/usr/bin/env bash' 'printf "upgraded public setup\n"'
+  write_executable "$upgraded_release_dir/scripts/uninstall-systemd.sh" '#!/usr/bin/env bash' 'printf "upgraded uninstaller\n"'
+  printf 'upgraded web\n' > "$upgraded_release_dir/web/index.html"
+  printf 'upgraded asset\n' > "$upgraded_release_dir/web/assets/upgraded.js"
+
+  cat > "$expected_config" <<EOF
+[server]
+host = "127.0.0.1"
+port = 18182
+
+[storage]
+root = "$storage_dir"
+
+[dataplane]
+grpc_address = "127.0.0.1:19190"
+EOF
+  cp "$expected_config" "$config_path"
+  printf 'existing rollback user data\n' > "$storage_dir/files/projects/report.txt"
+  printf '{"users":[{"username":"admin"}]}\n' > "$storage_dir/.mnemonas/users.json"
+
+  PATH="$fake_path:$PATH" \
+    RELEASE_DIR="$upgraded_release_dir" \
+    BIN_DIR="$install_dir/bin" \
+    SHARE_DIR="$install_dir/share/mnemonas" \
+    WEB_DIR="$web_dir" \
+    CONFIG_DIR="$install_dir/etc/mnemonas" \
+    CONFIG_PATH="$config_path" \
+    SYSTEMD_DIR="$install_dir/systemd" \
+    ENABLE_NOW=0 \
+    "$REPO_ROOT/scripts/install-systemd.sh" > "$case_dir/upgrade.log"
+
+  assert_file_contains "$install_dir/bin/nasd" "upgraded nasd"
+  assert_file_contains "$install_dir/bin/dataplane" "upgraded dataplane"
+  assert_file_contains "$install_dir/bin/mnemonas-dataplane-start" "upgraded helper"
+  assert_file_contains "$install_dir/bin/mnemonas-doctor" "upgraded doctor"
+  assert_file_contains "$install_dir/bin/mnemonas-public-setup" "upgraded public setup"
+  assert_file_contains "$install_dir/bin/mnemonas-uninstall-systemd" "upgraded uninstaller"
+  assert_file_contains "$web_dir/index.html" "upgraded web"
+  assert_file_contains "$web_dir/assets/upgraded.js" "upgraded asset"
+  cmp -s "$expected_config" "$config_path" || fail "upgrade rewrote existing config.toml before rollback"
+
+  PATH="$fake_path:$PATH" \
+    RELEASE_DIR="$previous_release_dir" \
+    BIN_DIR="$install_dir/bin" \
+    SHARE_DIR="$install_dir/share/mnemonas" \
+    WEB_DIR="$web_dir" \
+    CONFIG_DIR="$install_dir/etc/mnemonas" \
+    CONFIG_PATH="$config_path" \
+    SYSTEMD_DIR="$install_dir/systemd" \
+    ENABLE_NOW=0 \
+    "$REPO_ROOT/scripts/install-systemd.sh" > "$case_dir/rollback.log"
+
+  cmp -s "$expected_config" "$config_path" || fail "rollback rewrote existing config.toml"
+  assert_file_contains "$case_dir/rollback.log" "keeping existing config: $config_path"
+  assert_file_contains "$case_dir/rollback.log" "Open Web UI: http://127.0.0.1:18182"
+  assert_file_contains "$case_dir/rollback.log" "installed successfully"
+  assert_file_contains "$storage_dir/files/projects/report.txt" "existing rollback user data"
+  assert_file_contains "$storage_dir/.mnemonas/users.json" '"username":"admin"'
+  assert_file_contains "$install_dir/bin/nasd" "previous nasd"
+  assert_file_contains "$install_dir/bin/dataplane" "previous dataplane"
+  assert_file_contains "$install_dir/bin/mnemonas-dataplane-start" "previous helper"
+  assert_file_contains "$install_dir/bin/mnemonas-doctor" "previous doctor"
+  assert_file_contains "$install_dir/bin/mnemonas-public-setup" "previous public setup"
+  assert_file_contains "$install_dir/bin/mnemonas-uninstall-systemd" "previous uninstaller"
+  assert_file_contains "$web_dir/index.html" "previous web"
+  assert_file_contains "$web_dir/assets/previous.js" "previous asset"
+  [[ ! -f "$web_dir/assets/upgraded.js" ]] || fail "rollback left upgraded-only Web UI assets behind"
+  assert_file_contains "$install_dir/systemd/mnemonas-dataplane.service" "Environment=DATAPLANE_GRPC_ADDR=127.0.0.1:19190"
+  assert_file_contains "$install_dir/systemd/mnemonas-dataplane.service" "Environment=DATAPLANE_DATA_DIR=$storage_dir/.mnemonas/objects"
+  assert_file_contains "$install_dir/systemd/mnemonas.service" "Environment=MNEMONAS_WEB_DIR=$web_dir"
+  assert_file_contains "$install_dir/systemd/mnemonas.service" "ReadWritePaths=$storage_dir $install_dir/etc/mnemonas"
+}
+
 run_source_checkout_stale_binary_test() {
   local case_dir="$TMP_ROOT/stale-source-binary"
   local fake_path="$case_dir/fake-bin"
@@ -4355,6 +4462,7 @@ run_install_reports_service_restart_failure_test
 run_install_reports_daemon_reload_failure_test
 run_install_reports_service_enable_failure_test
 run_successful_upgrade_preserves_config_and_data_test
+run_systemd_release_rollback_preserves_config_and_data_test
 run_source_checkout_stale_binary_test
 run_existing_config_test
 run_invalid_input_test
