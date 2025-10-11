@@ -892,12 +892,64 @@ check_private_file_mode() {
   fi
 }
 
+first_symlink_path_component() {
+  local path="$1"
+  local include_leaf="${2:-0}"
+  local current
+  local remaining
+  local part
+  local -a parts
+  local last_index
+  local i
+
+  [[ -n "$path" ]] || return 1
+  while [[ "$path" != "/" && "$path" == */ ]]; do
+    path="${path%/}"
+  done
+
+  if [[ "$path" == /* ]]; then
+    current="/"
+    remaining="${path#/}"
+  else
+    current="."
+    remaining="$path"
+  fi
+
+  IFS='/' read -r -a parts <<< "$remaining"
+  last_index=$((${#parts[@]} - 1))
+  if [[ "$include_leaf" != "1" ]]; then
+    last_index=$((last_index - 1))
+  fi
+  (( last_index >= 0 )) || return 1
+
+  for ((i = 0; i <= last_index; i++)); do
+    part="${parts[$i]}"
+    [[ -n "$part" && "$part" != "." ]] || continue
+    if [[ "$current" == "/" ]]; then
+      current="/$part"
+    elif [[ "$current" == "." ]]; then
+      current="$part"
+    else
+      current="$current/$part"
+    fi
+    if [[ -L "$current" ]]; then
+      printf '%s\n' "$current"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
 check_sensitive_dir_path() {
   local path="$1"
   local label="$2"
+  local symlink_component
 
   if [[ -L "$path" ]]; then
     warn "$label path is a symlink; use a regular private directory: $path"
+  elif symlink_component="$(first_symlink_path_component "$path")"; then
+    warn "$label path contains a symlink component; use a regular private directory path: $symlink_component in $path"
   elif [[ ! -e "$path" ]]; then
     warn "$label missing: $path"
   elif [[ ! -d "$path" ]]; then
@@ -911,9 +963,12 @@ check_sensitive_file_path() {
   local path="$1"
   local label="$2"
   local missing_message="${3:-}"
+  local symlink_component
 
   if [[ -L "$path" ]]; then
     warn "$label path is a symlink; use a regular private file: $path"
+  elif symlink_component="$(first_symlink_path_component "$path")"; then
+    warn "$label path contains a symlink component; use a regular private file path: $symlink_component in $path"
   elif [[ ! -e "$path" ]]; then
     if [[ -n "$missing_message" ]]; then
       warn "$missing_message: $path"
@@ -927,9 +982,12 @@ check_sensitive_file_path() {
 
 check_config_file() {
   local path="$1"
+  local symlink_component
 
   if [[ -L "$path" ]]; then
     warn "config file path is a symlink; use a regular private file: $path"
+  elif symlink_component="$(first_symlink_path_component "$path")"; then
+    warn "config file path contains a symlink component; use a regular private config path: $symlink_component in $path"
   elif [[ ! -e "$path" ]]; then
     fail "config missing: $path"
   elif [[ ! -f "$path" ]]; then
@@ -1495,10 +1553,15 @@ check_public_webdav_generated_password() {
   local password
   local password_risk
   local parse_status
+  local symlink_component
 
   secrets_file="$(effective_secrets_file)"
   if [[ -L "$secrets_file" ]]; then
     fail "public WebDAV generated password file is a symlink; use a regular private file: $secrets_file"
+    return
+  fi
+  if symlink_component="$(first_symlink_path_component "$secrets_file")"; then
+    fail "public WebDAV generated password file path contains a symlink component; use a regular private file path: $symlink_component in $secrets_file"
     return
   fi
   if [[ ! -e "$secrets_file" ]]; then
@@ -1538,6 +1601,20 @@ check_public_webdav_generated_password() {
   else
     ok "public WebDAV generated Basic Auth password is available"
   fi
+}
+
+check_public_config_file_path() {
+  local symlink_component
+
+  if [[ -L "$CONFIG_PATH" ]]; then
+    fail "public config file path is a symlink; use a regular private config file: $CONFIG_PATH"
+    return
+  fi
+  if symlink_component="$(first_symlink_path_component "$CONFIG_PATH")"; then
+    fail "public config file path contains a symlink component; use a regular private config path: $symlink_component in $CONFIG_PATH"
+    return
+  fi
+  ok "public config file path has no symlink components"
 }
 
 check_public_session_token_ttl() {
@@ -1827,6 +1904,7 @@ check_public_admin_redundancy() {
   local users_dir
   local active_admins
   local parse_error
+  local symlink_component
 
   users_file="$(effective_auth_users_file)"
   users_dir="$(dirname "$users_file")"
@@ -1838,8 +1916,16 @@ check_public_admin_redundancy() {
     fail "public users file directory path is a symlink; use a regular private directory: $users_dir"
     return
   fi
+  if symlink_component="$(first_symlink_path_component "$users_dir")"; then
+    fail "public users file directory path contains a symlink component; use a regular private directory path: $symlink_component in $users_dir"
+    return
+  fi
   if [[ -L "$users_file" ]]; then
     fail "public users file path is a symlink; use a regular private file: $users_file"
+    return
+  fi
+  if symlink_component="$(first_symlink_path_component "$users_file")"; then
+    fail "public users file path contains a symlink component; use a regular private file path: $symlink_component in $users_file"
     return
   fi
   if [[ ! -f "$users_file" ]]; then
@@ -1913,6 +1999,73 @@ check_runtime_sensitive_files() {
   check_sensitive_file_path "$secrets_file" "generated secrets file"
 }
 
+check_admin_availability() {
+  local users_file
+  local active_admins
+  local parse_error
+
+  if is_false_value "${configured_auth_enabled:-true}"; then
+    note "auth.enabled=false; skipping administrator availability check"
+    return
+  fi
+
+  users_file="$(effective_auth_users_file)"
+  if [[ -L "$users_file" || ! -f "$users_file" ]]; then
+    return
+  fi
+  if ! have python3; then
+    warn "python3 not available; skipping administrator availability check"
+    return
+  fi
+
+  parse_error="$(mktemp -t mnemonas-doctor-users.XXXXXX)"
+  if active_admins="$(count_enabled_admins "$users_file" 2>"$parse_error")"; then
+    rm -f -- "$parse_error"
+  else
+    warn "users file could not be parsed; administrator availability cannot be verified: $users_file"
+    if [[ -s "$parse_error" ]]; then
+      sed 's/^/[INFO] users.json parse error: /' "$parse_error"
+    fi
+    rm -f -- "$parse_error"
+    return
+  fi
+
+  case "$active_admins" in
+    ''|*[!0-9]*)
+      warn "users file returned an invalid administrator count: ${active_admins:-<empty>}"
+      ;;
+    0)
+      warn "users file has no enabled administrators; MnemoNAS will create a recovery administrator on next startup if auth is enabled"
+      ;;
+    *)
+      ok "administrator availability verified: $active_admins enabled administrator(s)"
+      ;;
+  esac
+}
+
+check_auth_posture() {
+  local webdav_auth_type
+
+  if is_false_value "${configured_auth_enabled:-true}"; then
+    warn "auth.enabled=false; Web UI/API access relies on a controlled network, VPN, or outer access-control layer"
+  else
+    ok "Web UI/API authentication is enabled"
+  fi
+
+  webdav_auth_type="$(normalize_webdav_auth_type_for_public_check "$configured_webdav_auth_type")"
+  if is_false_value "${configured_webdav_enabled:-true}"; then
+    ok "WebDAV is disabled"
+  elif [[ "$webdav_auth_type" == "none" ]]; then
+    warn "WebDAV auth_type=none; restrict access with loopback binding, VPN, firewall, or another trusted boundary"
+  else
+    ok "WebDAV authentication is configured: $webdav_auth_type"
+  fi
+
+  if is_true_value "${configured_allow_unsafe_no_auth:-false}"; then
+    warn "security.allow_unsafe_no_auth=true; verify that an outer boundary deliberately restricts unauthenticated access"
+  fi
+}
+
 report_initial_password_issue() {
   local severity="$1"
   local message="$2"
@@ -1928,9 +2081,12 @@ check_initial_password_file_absent() {
   local path="$1"
   local severity="$2"
   local remediation="$3"
+  local symlink_component
 
   if [[ -L "$path" ]]; then
     report_initial_password_issue "$severity" "initial admin password path is a symlink at $path; remove it before public or shared use"
+  elif symlink_component="$(first_symlink_path_component "$path")"; then
+    report_initial_password_issue "$severity" "initial admin password path contains a symlink component at $symlink_component in $path; use a regular private auth directory before public or shared use"
   elif [[ -f "$path" ]]; then
     report_initial_password_issue "$severity" "initial admin password file still exists at $path; $remediation"
   elif [[ -e "$path" ]]; then
@@ -2025,8 +2181,15 @@ check_backup_root() {
     warn "python3 not available; skipping backup root containment check"
   fi
 
-  if [[ ! -d "$BACKUP_ROOT" ]]; then
+  if [[ -L "$BACKUP_ROOT" ]]; then
+    warn "backup root path is a symlink; use a real directory, dataset, mount point, or remote target: $BACKUP_ROOT"
+  fi
+  if [[ ! -e "$BACKUP_ROOT" ]]; then
     warn "backup root not found: $BACKUP_ROOT"
+    return
+  fi
+  if [[ ! -d "$BACKUP_ROOT" ]]; then
+    warn "backup root is not a directory: $BACKUP_ROOT"
     return
   fi
 
@@ -2112,6 +2275,8 @@ check_public_domain() {
   [[ -n "$domain" ]] || return
 
   printf '\nPublic access checks for %s\n' "$domain"
+
+  check_public_config_file_path
 
   public_backend_host="$(normalize_public_backend_host_for_loopback_check "$configured_server_host")"
   if is_loopback_host "$public_backend_host"; then
@@ -2329,7 +2494,9 @@ fi
 
 check_disk_space "$STORAGE_ROOT"
 
+check_auth_posture
 check_runtime_sensitive_files
+check_admin_availability
 
 password_file="$(initial_password_file)"
 check_initial_password_file_absent "$password_file" warn "log in once and change the password"

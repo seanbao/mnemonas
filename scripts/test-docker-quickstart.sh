@@ -91,6 +91,7 @@ run_prepare_test() {
 	assert_file_contains "$capture_dir/preflight.log" "data=$data_dir port=18080"
 	assert_file_contains "$case_dir/out.log" "Web UI:              http://localhost:18080"
 	assert_file_contains "$case_dir/out.log" "Initial password:    $data_dir/.mnemonas/initial-password.txt"
+	assert_file_contains "$case_dir/out.log" "Read password:       cat $data_dir/.mnemonas/initial-password.txt"
 	assert_mode "$data_dir" "750"
 }
 
@@ -129,6 +130,114 @@ EOF
 	assert_mode "$data_dir" "750"
 }
 
+run_next_steps_quote_paths_test() {
+	local case_dir="$TMP_ROOT/next steps quote"
+	local repo_dir="$case_dir/repo path"
+	local data_dir="$case_dir/data path"
+	local capture_dir="$case_dir/capture"
+	local quickstart="$REPO_ROOT/scripts/docker-quickstart.sh"
+	local quoted_repo
+	local quoted_env
+	local quoted_password
+	mkdir -p "$capture_dir"
+	make_repo_case "$repo_dir"
+	quoted_repo="$(printf '%q' "$repo_dir/docker-compose.yml")"
+	quoted_env="$(printf '%q' "$repo_dir/.env")"
+	quoted_password="$(printf '%q' "$data_dir/.mnemonas/initial-password.txt")"
+
+	CAPTURE_DIR="$capture_dir" \
+		REPO_ROOT="$repo_dir" \
+		bash "$quickstart" \
+			--port 18085 \
+			--data-dir "$data_dir" > "$case_dir/out.log"
+
+	assert_file_contains "$case_dir/out.log" "Read password:       cat $quoted_password"
+	assert_file_contains "$case_dir/out.log" "Status:              docker compose -f $quoted_repo --env-file $quoted_env ps"
+	assert_file_contains "$case_dir/out.log" "Logs:                docker compose -f $quoted_repo --env-file $quoted_env logs -f"
+}
+
+run_custom_initial_password_path_test() {
+	local case_dir="$TMP_ROOT/custom-initial-password"
+	local repo_dir="$case_dir/repo"
+	local data_dir="$case_dir/data"
+	local capture_dir="$case_dir/capture"
+	local quickstart="$REPO_ROOT/scripts/docker-quickstart.sh"
+	mkdir -p "$capture_dir" "$data_dir"
+	make_repo_case "$repo_dir"
+	cat > "$data_dir/config.toml" <<'TOML'
+[storage]
+root = "/data"
+
+[auth]
+users_file = "/data/custom-auth/users.json"
+TOML
+
+	CAPTURE_DIR="$capture_dir" \
+		REPO_ROOT="$repo_dir" \
+		bash "$quickstart" \
+			--port 18087 \
+			--data-dir "$data_dir" > "$case_dir/out.log"
+
+	assert_file_contains "$case_dir/out.log" "Initial password:    $data_dir/custom-auth/initial-password.txt"
+	assert_file_contains "$case_dir/out.log" "Read password:       cat $data_dir/custom-auth/initial-password.txt"
+}
+
+run_home_initial_password_path_test() {
+	local case_dir="$TMP_ROOT/home-initial-password"
+	local repo_dir="$case_dir/repo"
+	local data_dir="$case_dir/data"
+	local capture_dir="$case_dir/capture"
+	local quickstart="$REPO_ROOT/scripts/docker-quickstart.sh"
+	mkdir -p "$capture_dir" "$data_dir"
+	make_repo_case "$repo_dir"
+	cat > "$data_dir/config.toml" <<'TOML'
+[storage]
+root = "/data"
+
+[auth]
+users_file = "~/auth/users.json"
+TOML
+
+	CAPTURE_DIR="$capture_dir" \
+		REPO_ROOT="$repo_dir" \
+		bash "$quickstart" \
+			--port 18090 \
+			--data-dir "$data_dir" > "$case_dir/out.log"
+
+	assert_file_contains "$case_dir/out.log" "Initial password:    $data_dir/auth/initial-password.txt"
+	assert_file_contains "$case_dir/out.log" "Read password:       cat $data_dir/auth/initial-password.txt"
+}
+
+run_unmapped_initial_password_path_test() {
+	local case_dir="$TMP_ROOT/unmapped-initial-password"
+	local repo_dir="$case_dir/repo"
+	local data_dir="$case_dir/data"
+	local capture_dir="$case_dir/capture"
+	local quickstart="$REPO_ROOT/scripts/docker-quickstart.sh"
+	local quoted_repo quoted_env quoted_password
+	mkdir -p "$capture_dir" "$data_dir"
+	make_repo_case "$repo_dir"
+	cat > "$data_dir/config.toml" <<'TOML'
+[storage]
+root = "/data"
+
+[auth]
+users_file = "/run/mnemonas/users.json"
+TOML
+	quoted_repo="$(printf '%q' "$repo_dir/docker-compose.yml")"
+	quoted_env="$(printf '%q' "$repo_dir/.env")"
+	quoted_password="$(printf '%q' "/run/mnemonas/initial-password.txt")"
+
+	CAPTURE_DIR="$capture_dir" \
+		REPO_ROOT="$repo_dir" \
+		bash "$quickstart" \
+			--port 18088 \
+			--data-dir "$data_dir" > "$case_dir/out.log"
+
+	assert_file_contains "$case_dir/out.log" "Initial password:    /run/mnemonas/initial-password.txt (container path; not under /data)"
+	assert_file_contains "$case_dir/out.log" "Read password:       docker compose -f $quoted_repo --env-file $quoted_env exec mnemonas cat $quoted_password"
+}
+
 run_start_test() {
 	local case_dir="$TMP_ROOT/start"
 	local repo_dir="$case_dir/repo"
@@ -161,6 +270,42 @@ run_start_test() {
 	assert_file_contains "$capture_dir/curl.args" "http://127.0.0.1:18081/health"
 	assert_file_contains "$case_dir/out.log" "health check passed"
 	assert_file_contains "$case_dir/out.log" "initial password file is available: $data_dir/.mnemonas/initial-password.txt"
+}
+
+run_start_custom_initial_password_path_test() {
+	local case_dir="$TMP_ROOT/start-custom-initial-password"
+	local repo_dir="$case_dir/repo"
+	local data_dir="$case_dir/data"
+	local capture_dir="$case_dir/capture"
+	local fake_bin="$case_dir/bin"
+	local quickstart="$REPO_ROOT/scripts/docker-quickstart.sh"
+	mkdir -p "$capture_dir" "$fake_bin" "$data_dir/custom-auth"
+	make_repo_case "$repo_dir"
+	cat > "$data_dir/config.toml" <<'TOML'
+[storage]
+root = "/data"
+
+[auth]
+users_file = "/data/custom-auth/users.json"
+TOML
+	printf 'Password: test-password\n' > "$data_dir/custom-auth/initial-password.txt"
+	write_executable "$fake_bin/docker" \
+		'#!/usr/bin/env bash' \
+		'set -euo pipefail' \
+		'printf "%s\n" "$*" > "$CAPTURE_DIR/docker.args"'
+	make_success_curl "$fake_bin"
+
+	CAPTURE_DIR="$capture_dir" \
+		REPO_ROOT="$repo_dir" \
+		PATH="$fake_bin:$PATH" \
+		bash "$quickstart" \
+			--start \
+			--no-build \
+			--port 18089 \
+			--data-dir "$data_dir" > "$case_dir/out.log"
+
+	assert_file_contains "$capture_dir/docker.args" "compose -f $repo_dir/docker-compose.yml --env-file $repo_dir/.env up -d"
+	assert_file_contains "$case_dir/out.log" "initial password file is available: $data_dir/custom-auth/initial-password.txt"
 }
 
 run_start_release_image_test() {
@@ -586,7 +731,12 @@ run_compose_data_volume_contract_test() {
 
 run_prepare_test
 run_existing_env_test
+run_next_steps_quote_paths_test
+run_custom_initial_password_path_test
+run_home_initial_password_path_test
+run_unmapped_initial_password_path_test
 run_start_test
+run_start_custom_initial_password_path_test
 run_start_release_image_test
 run_start_release_template_test
 run_start_compose_failure_test

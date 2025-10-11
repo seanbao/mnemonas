@@ -22,6 +22,16 @@ const fileSet = new Set(files)
 const errors = []
 const anchorsByFile = new Map()
 const documentationIndexFiles = new Set(['docs/README.md', 'docs/README.en.md'])
+const decorativeHeadingEmoji = /[\u2600-\u27BF\u{1F300}-\u{1FAFF}]/u
+const bannedMarketingPhrases = [
+  'Your files. Your control.',
+  'Fast deployment',
+  '快速部署',
+  '开箱即用',
+  '轻松上手',
+  '业界最佳',
+  '极致性能',
+]
 const requiredDocumentPairs = [
   ['README.md', 'README.en.md', 'English', 'Chinese'],
   ['CHANGELOG.md', 'CHANGELOG.en.md', 'English', 'Chinese'],
@@ -220,9 +230,38 @@ checkDocumentationIndexCoverage()
 for (const file of files) {
   const text = fs.readFileSync(path.join(repoRoot, file), 'utf8')
 
+  checkDocumentationStyle(file, text)
   checkJsonCodeFences(file, text)
   for (const target of extractMarkdownLinkTargets(text)) {
     checkTarget(file, target)
+  }
+}
+
+function checkDocumentationStyle(sourceFile, markdown) {
+  const lines = markdown.split('\n')
+  let inFence = false
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index]
+    const lineNumber = index + 1
+    if (/^\s{0,3}(```|~~~)/.test(line)) {
+      inFence = !inFence
+      continue
+    }
+    if (inFence) {
+      continue
+    }
+
+    for (const phrase of bannedMarketingPhrases) {
+      if (line.includes(phrase)) {
+        errors.push(`${sourceFile}:${lineNumber}: avoid promotional wording in project documentation: ${phrase}`)
+      }
+    }
+
+    const heading = /^\s{0,3}#{1,6}\s+(.+?)\s*$/.exec(line)?.[1]?.replace(/\s+#+\s*$/, '') ?? ''
+    if (heading && decorativeHeadingEmoji.test(heading)) {
+      errors.push(`${sourceFile}:${lineNumber}: avoid decorative emoji in markdown headings`)
+    }
   }
 }
 
@@ -301,9 +340,14 @@ package main
 
 import (
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"os/exec"
 	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 
 	toml "github.com/pelletier/go-toml/v2"
@@ -407,9 +451,10 @@ func main() {
 			content = append(content, line)
 		}
 	}
+	checkSecurityCheckDocumentationCoverage(files, &errors)
 
 	if len(errors) > 0 {
-		fmt.Fprintln(os.Stderr, "Documentation TOML example check failed:")
+		fmt.Fprintln(os.Stderr, "Documentation structured checks failed:")
 		for _, err := range errors {
 			fmt.Fprintf(os.Stderr, "  - %s\n", err)
 		}
@@ -417,6 +462,232 @@ func main() {
 	}
 
 	fmt.Printf("[docs-toml-check] checked %d TOML code fences\n", tomlFenceCount)
+}
+
+func checkSecurityCheckDocumentationCoverage(files []string, errors *[]string) {
+	if _, err := os.Stat("internal/api/server.go"); err != nil {
+		if os.IsNotExist(err) {
+			return
+		}
+		*errors = append(*errors, fmt.Sprintf("internal/api/server.go: failed to stat server file: %v", err))
+		return
+	}
+
+	serverIDs, err := securityCheckIDsFromServer("internal/api/server.go")
+	if err != nil {
+		*errors = append(*errors, fmt.Sprintf("internal/api/server.go: failed to extract security-check IDs: %v", err))
+		return
+	}
+	if len(serverIDs) == 0 {
+		return
+	}
+
+	fileSet := map[string]bool{}
+	for _, file := range files {
+		fileSet[file] = true
+	}
+
+	for _, docFile := range []string{"docs/api-reference.md", "docs/api-reference.en.md"} {
+		if !fileSet[docFile] {
+			*errors = append(*errors, fmt.Sprintf("%s: missing security-check API documentation", docFile))
+			continue
+		}
+
+		data, err := os.ReadFile(docFile)
+		if err != nil {
+			*errors = append(*errors, fmt.Sprintf("%s: failed to read security-check API documentation: %v", docFile, err))
+			continue
+		}
+		docIDs := securityCheckIDsFromDoc(string(data))
+		docIDSet := map[string]bool{}
+		for _, id := range docIDs {
+			docIDSet[id] = true
+		}
+		for _, id := range serverIDs {
+			if !docIDSet[id] {
+				*errors = append(*errors, fmt.Sprintf("%s: security-check documentation is missing ID: %s", docFile, id))
+			}
+		}
+
+		serverIDSet := map[string]bool{}
+		for _, id := range serverIDs {
+			serverIDSet[id] = true
+		}
+		for _, id := range docIDs {
+			if !serverIDSet[id] {
+				*errors = append(*errors, fmt.Sprintf("%s: security-check documentation lists unknown ID: %s", docFile, id))
+			}
+		}
+	}
+}
+
+func securityCheckIDsFromServer(path string) ([]string, error) {
+	fset := token.NewFileSet()
+	parsed, err := parser.ParseFile(fset, path, nil, 0)
+	if err != nil {
+		return nil, err
+	}
+
+	ids := map[string]bool{}
+	for _, decl := range parsed.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Body == nil {
+			continue
+		}
+		if fn.Name.Name != "handleGetSecurityCheck" && !strings.HasPrefix(fn.Name.Name, "security") {
+			continue
+		}
+
+		constants := map[string]string{}
+		ast.Inspect(fn.Body, func(node ast.Node) bool {
+			decl, ok := node.(*ast.GenDecl)
+			if !ok || decl.Tok != token.CONST {
+				return true
+			}
+			for _, spec := range decl.Specs {
+				valueSpec, ok := spec.(*ast.ValueSpec)
+				if !ok {
+					continue
+				}
+				for index, name := range valueSpec.Names {
+					if name.Name != "checkID" || index >= len(valueSpec.Values) {
+						continue
+					}
+					if id, ok := stringLiteralValue(valueSpec.Values[index]); ok {
+						constants[name.Name] = id
+					}
+				}
+			}
+			return false
+		})
+
+		ast.Inspect(fn.Body, func(node ast.Node) bool {
+			composite, ok := node.(*ast.CompositeLit)
+			if !ok {
+				return true
+			}
+			collectSecurityCheckItemIDs(composite, constants, ids)
+			return true
+		})
+	}
+
+	out := make([]string, 0, len(ids))
+	for id := range ids {
+		out = append(out, id)
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+func collectSecurityCheckItemIDs(composite *ast.CompositeLit, constants map[string]string, ids map[string]bool) {
+	switch typ := composite.Type.(type) {
+	case *ast.Ident:
+		if typ.Name == "securityCheckItem" {
+			collectSecurityCheckItemIDFields(composite.Elts, constants, ids)
+		}
+	case *ast.ArrayType:
+		if ident, ok := typ.Elt.(*ast.Ident); ok {
+			if ident.Name != "securityCheckItem" {
+				return
+			}
+			for _, element := range composite.Elts {
+				if child, ok := element.(*ast.CompositeLit); ok {
+					collectSecurityCheckItemIDFields(child.Elts, constants, ids)
+				}
+			}
+		}
+	}
+}
+
+func collectSecurityCheckItemIDFields(elements []ast.Expr, constants map[string]string, ids map[string]bool) {
+	for _, element := range elements {
+		pair, ok := element.(*ast.KeyValueExpr)
+		if !ok {
+			continue
+		}
+		key, ok := pair.Key.(*ast.Ident)
+		if !ok || key.Name != "ID" {
+			continue
+		}
+		if id, ok := stringLiteralValue(pair.Value); ok {
+			ids[id] = true
+			continue
+		}
+		if ident, ok := pair.Value.(*ast.Ident); ok {
+			if id, ok := constants[ident.Name]; ok {
+				ids[id] = true
+			}
+		}
+	}
+}
+
+func stringLiteralValue(expr ast.Expr) (string, bool) {
+	lit, ok := expr.(*ast.BasicLit)
+	if !ok || lit.Kind != token.STRING {
+		return "", false
+	}
+	value, err := strconv.Unquote(lit.Value)
+	if err != nil {
+		return "", false
+	}
+	return value, true
+}
+
+func securityCheckIDsFromDoc(markdown string) []string {
+	ids := map[string]bool{}
+	codeSpan := regexp.MustCompile("`([a-z][a-z0-9_]+)`")
+	for _, source := range securityCheckIDDocSources(markdown) {
+		for _, match := range codeSpan.FindAllStringSubmatch(source, -1) {
+			ids[match[1]] = true
+		}
+	}
+
+	out := make([]string, 0, len(ids))
+	for id := range ids {
+		out = append(out, id)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func securityCheckIDDocSources(markdown string) []string {
+	lines := strings.Split(markdown, "\n")
+	sources := []string{}
+	for index := 0; index < len(lines); index++ {
+		line := lines[index]
+		switch {
+		case strings.Contains(line, "checks[].id"):
+			block := []string{line}
+			for next := index + 1; next < len(lines); next++ {
+				nextLine := strings.TrimSpace(lines[next])
+				if nextLine == "" || strings.HasPrefix(nextLine, "- ") {
+					break
+				}
+				block = append(block, lines[next])
+				index = next
+			}
+			sources = append(sources, strings.Join(block, " "))
+		case strings.Contains(line, "Current check IDs include"):
+			block := []string{line[strings.Index(line, "Current check IDs include"):]}
+			for next := index + 1; next < len(lines); next++ {
+				nextLine := strings.TrimSpace(lines[next])
+				if nextLine == "" {
+					break
+				}
+				block = append(block, lines[next])
+				index = next
+				if strings.Contains(lines[next], ".") {
+					break
+				}
+			}
+			source := strings.Join(block, " ")
+			if dot := strings.Index(source, "."); dot >= 0 {
+				source = source[:dot]
+			}
+			sources = append(sources, source)
+		}
+	}
+	return sources
 }
 GO
 GOTOOLCHAIN=local go run "$toml_check_program"

@@ -1055,6 +1055,170 @@ describe('SettingsPage', () => {
       }))
     })
 
+    it('shows config file symlink component guidance without exposing raw backend text', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockGetSecurityCheck.mockResolvedValueOnce({
+        success: true,
+        data: {
+          status: 'block',
+          generated_at: '2026-05-08T00:00:00Z',
+          checks: [
+            {
+              id: 'config_file_access',
+              status: 'block',
+              title: '配置文件路径包含符号链接',
+              message: 'backend raw config file symlink component detail',
+              details: {
+                path: '/srv/mnemonas/config/config.toml',
+                path_kind: 'symlink_component',
+                symlink_component: '/srv/mnemonas/config',
+              },
+            },
+          ],
+          request: { scheme: 'https' },
+          config: { auth_enabled: true },
+        },
+      })
+
+      render(<SettingsPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('配置文件路径包含符号链接')).toBeTruthy()
+        expect(screen.getByText('配置文件路径经过符号链接组件；请改为服务账号可读取的普通私有路径。')).toBeTruthy()
+      })
+      expect(screen.queryByText('backend raw config file symlink component detail')).toBeNull()
+
+      await user.click(screen.getByRole('button', { name: '查看配置路径' }))
+
+      expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({
+        title: '需要检查配置文件路径',
+        description: expect.stringContaining('/srv/mnemonas/config/config.toml 是普通文件、路径组件不经过符号链接'),
+      }))
+    })
+
+    it('shows generated WebDAV secrets symlink component guidance without exposing raw backend text', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockGetSecurityCheck.mockResolvedValueOnce({
+        success: true,
+        data: {
+          status: 'block',
+          generated_at: '2026-05-08T00:00:00Z',
+          checks: [
+            {
+              id: 'secrets_file_access',
+              status: 'block',
+              title: '自动 WebDAV 凭据路径包含符号链接',
+              message: 'backend raw secrets file symlink component detail',
+              details: {
+                path: '/srv/mnemonas/data/secrets.json',
+                path_kind: 'symlink_component',
+                symlink_component: '/srv/mnemonas/data',
+                generated_webdav_password_required: true,
+              },
+            },
+          ],
+          request: { scheme: 'https' },
+          config: { auth_enabled: true, webdav_enabled: true, webdav_auth_type: 'basic' },
+        },
+      })
+
+      render(<SettingsPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('自动 WebDAV 凭据路径包含符号链接')).toBeTruthy()
+        expect(screen.getByText('自动 WebDAV 凭据路径经过符号链接组件；请改为服务账号可读取的普通私有路径。')).toBeTruthy()
+      })
+      expect(screen.queryByText('backend raw secrets file symlink component detail')).toBeNull()
+
+      await user.click(screen.getByRole('button', { name: '查看凭据路径' }))
+
+      expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({
+        title: '需要检查自动 WebDAV 凭据',
+        description: expect.stringContaining('/srv/mnemonas/data/secrets.json 是普通文件、路径组件不经过符号链接'),
+      }))
+    })
+
+    it('shows local backup destination guidance without exposing raw backend text', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockGetSecurityCheck.mockResolvedValueOnce({
+        success: true,
+        data: {
+          status: 'block',
+          generated_at: '2026-05-08T00:00:00Z',
+          checks: [
+            {
+              id: 'backup_local_destinations',
+              status: 'block',
+              title: '本地备份目标位于主存储内',
+              message: 'backend raw backup destination detail',
+              details: {
+                job_id: 'external-disk',
+                destination: '/srv/mnemonas/data/backups',
+                source: '/srv/mnemonas/data',
+                storage_root: '/srv/mnemonas/data',
+                destination_kind: 'inside_storage_root',
+              },
+            },
+          ],
+          request: { scheme: 'https' },
+          config: { auth_enabled: true },
+        },
+      })
+
+      render(<SettingsPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('本地备份目标位于主存储内')).toBeTruthy()
+        expect(screen.getByText('本地备份目标位于 storage.root 内部；请改用独立磁盘、独立数据集或远端备份目标。')).toBeTruthy()
+      })
+      expect(screen.queryByText('backend raw backup destination detail')).toBeNull()
+
+      await user.click(screen.getByRole('button', { name: '查看备份目标' }))
+
+      expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({
+        title: '需要检查本地备份目标',
+        description: expect.stringContaining('备份作业 external-disk 的目标目录 /srv/mnemonas/data/backups'),
+      }))
+      await waitFor(() => {
+        expect(window.location.pathname).toBe('/maintenance')
+        expect(new URLSearchParams(window.location.search).get('backupJob')).toBe('external-disk')
+      })
+    })
+
+    it('shows users file symlink component guidance without exposing raw backend text', async () => {
+      mockGetSecurityCheck.mockResolvedValueOnce({
+        success: true,
+        data: {
+          status: 'block',
+          generated_at: '2026-05-08T00:00:00Z',
+          checks: [
+            {
+              id: 'users_file_access',
+              status: 'block',
+              title: '用户文件目录路径包含符号链接',
+              message: 'backend raw users file symlink component detail',
+              details: {
+                dir: '/srv/mnemonas/.mnemonas',
+                path: '/srv/mnemonas/.mnemonas/users.json',
+                dir_kind: 'symlink_component',
+                symlink_component: '/srv/mnemonas',
+              },
+            },
+          ],
+          request: { scheme: 'https' },
+          config: { auth_enabled: true },
+        },
+      })
+
+      render(<SettingsPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('用户文件目录路径包含符号链接')).toBeTruthy()
+        expect(screen.getByText('用户文件路径经过符号链接组件；请改为服务账号可读取的普通私有目录路径。')).toBeTruthy()
+      })
+      expect(screen.queryByText('backend raw users file symlink component detail')).toBeNull()
+    })
+
     it('shows initial password symlink guidance without exposing raw backend text', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
       mockGetSecurityCheck.mockResolvedValueOnce({
@@ -1093,6 +1257,39 @@ describe('SettingsPage', () => {
         title: '需要移除初始密码路径',
         description: expect.stringContaining('/srv/mnemonas/.mnemonas/initial-password.txt'),
       }))
+    })
+
+    it('shows initial password symlink component guidance without exposing raw backend text', async () => {
+      mockGetSecurityCheck.mockResolvedValueOnce({
+        success: true,
+        data: {
+          status: 'block',
+          generated_at: '2026-05-08T00:00:00Z',
+          checks: [
+            {
+              id: 'initial_password_file',
+              status: 'block',
+              title: '初始管理员密码路径包含符号链接',
+              message: 'backend raw initial password symlink component detail',
+              details: {
+                path: '/srv/mnemonas/.mnemonas/initial-password.txt',
+                path_kind: 'symlink_component',
+                symlink_component: '/srv/mnemonas',
+              },
+            },
+          ],
+          request: { scheme: 'https' },
+          config: { auth_enabled: true },
+        },
+      })
+
+      render(<SettingsPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('初始管理员密码路径包含符号链接')).toBeTruthy()
+        expect(screen.getByText('初始管理员密码路径经过符号链接组件；公网访问前请改为普通私有目录并确认该文件不存在。')).toBeTruthy()
+      })
+      expect(screen.queryByText('backend raw initial password symlink component detail')).toBeNull()
     })
 
     it('repairs session token TTL findings without exposing raw backend text', async () => {
@@ -2262,7 +2459,7 @@ describe('SettingsPage', () => {
               id: 'admin_accounts',
               status: 'warning',
               title: '只有一个启用中的管理员',
-              message: '建议创建一个备用管理员账号。',
+              message: 'backend raw admin account detail',
             },
           ],
           request: { scheme: 'https' },
@@ -2273,7 +2470,9 @@ describe('SettingsPage', () => {
 
       await waitFor(() => {
         expect(screen.getByText('只有一个启用中的管理员')).toBeTruthy()
+        expect(screen.getByText('建议至少保留两个启用中的管理员账号，避免主账号失效后无法管理。')).toBeTruthy()
       })
+      expect(screen.queryByText('backend raw admin account detail')).toBeNull()
 
       await user.click(screen.getByRole('button', { name: '管理用户' }))
 

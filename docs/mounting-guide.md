@@ -4,7 +4,7 @@
 
 MnemoNAS 通过 WebDAV 协议提供文件访问。本文档介绍如何在各平台挂载 WebDAV 共享。
 
-## 📍 连接信息
+## 连接信息
 
 | 项目 | 值 |
 | --- | --- |
@@ -17,7 +17,7 @@ MnemoNAS 通过 WebDAV 协议提供文件访问。本文档介绍如何在各平
 
 ---
 
-## 🍎 macOS
+## macOS
 
 ### Finder（原生）
 
@@ -47,7 +47,7 @@ MnemoNAS 通过 WebDAV 协议提供文件访问。本文档介绍如何在各平
 
 ---
 
-## 🪟 Windows
+## Windows
 
 ### 资源管理器（原生）
 
@@ -84,7 +84,7 @@ Restart-Service WebClient
 
 ---
 
-## 🐧 Linux
+## Linux
 
 ### GNOME Files (Nautilus)
 
@@ -151,7 +151,7 @@ rclone mount mnemonas: /mnt/nas --daemon --vfs-cache-mode full
 
 ---
 
-## 📱 iOS
+## iOS
 
 ### 文件 App（原生）
 
@@ -168,7 +168,7 @@ rclone mount mnemonas: /mnt/nas --daemon --vfs-cache-mode full
 
 ---
 
-## 🤖 Android
+## Android
 
 ### Cx 文件管理器
 
@@ -188,7 +188,7 @@ rclone mount mnemonas: /mnt/nas --daemon --vfs-cache-mode full
 
 ---
 
-## 🔧 故障排除
+## 故障排除
 
 ### 连接被拒绝
 
@@ -238,7 +238,7 @@ MnemoNAS 使用虚拟锁实现（简化设计）。如遇锁定问题：
 
 ---
 
-## 📖 更多资源
+## 更多资源
 
 - [WebDAV 客户端兼容性](webdav-compatibility.md)
 - [配置示例](../mnemonas.example.toml)

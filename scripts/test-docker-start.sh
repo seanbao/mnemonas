@@ -680,6 +680,10 @@ run_manual_docker_run_docs_prepare_data_dir_test() {
 	done
 }
 
+run_dockerfile_default_config_permission_test() {
+	assert_file_contains "$REPO_ROOT/Dockerfile" "COPY --chmod=0644 mnemonas.example.toml /app/mnemonas.example.toml"
+}
+
 run_default_config_test
 run_mismatched_storage_root_warning_test
 run_toml_escaped_storage_root_test
@@ -700,5 +704,6 @@ run_dataplane_grpc_env_mismatch_test
 run_invalid_cdc_range_test
 run_dataplane_exposure_warning_test
 run_manual_docker_run_docs_prepare_data_dir_test
+run_dockerfile_default_config_permission_test
 
 printf '[docker-start-test] all checks passed\n'

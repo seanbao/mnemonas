@@ -4,7 +4,7 @@
 
 欢迎使用 MnemoNAS 文档。本目录包含详细的使用指南、部署说明和参考文档。
 
-## 📚 文档索引
+## 文档索引
 
 ### 快速入门
 
@@ -55,13 +55,13 @@
 | [mnemonas.example.toml](../mnemonas.example.toml) | [mnemonas.example.toml](../mnemonas.example.toml) | 配置文件示例 |
 | [CHANGELOG](../CHANGELOG.md) | [CHANGELOG](../CHANGELOG.en.md) | 版本更新记录 |
 
-## 🔗 相关链接
+## 相关链接
 
 - [GitHub 仓库](https://github.com/seanbao/mnemonas)
 - [问题反馈](https://github.com/seanbao/mnemonas/issues)
 - [支持说明](../SUPPORT.md)
 
-## 📖 阅读建议
+## 阅读建议
 
 **首次使用**：
 1. 阅读 [README](../README.md) 了解项目

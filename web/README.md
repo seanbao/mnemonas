@@ -139,6 +139,7 @@ React、Vite、HeroUI、Tailwind、TypeScript、Vitest 或 Playwright 的 major 
 - 空状态统一使用 EmptyState，文件类型图标统一使用 FileIcon。
 - 颜色与背景使用 HeroUI 语义 token（如 bg-content1、bg-content2、text-foreground、text-default-500）。
 - 工具函数优先复用 `src/lib/utils.ts`（如 formatBytes、formatRelativeTime）。
+- 生产代码中的原生 `<button>` 必须显式声明 `type`，避免被放入表单后触发隐式提交。
 - 视觉风格以“现代、克制、可长期使用”为目标：保留品牌色和轻量层级，避免大面积玻璃、漂浮光球、强发光和过度紫蓝渐变。
 - operational 页面优先信息扫描效率，使用 8px 以内圆角、细边框、稳定尺寸和明确状态色；不要用营销式大 hero、装饰卡片堆叠或卡片嵌套卡片。
 - 移动端必须是独立可用体验：常用路径应能通过底部主导航或明确按钮到达，内容不能被 header、抽屉或底部导航遮挡。

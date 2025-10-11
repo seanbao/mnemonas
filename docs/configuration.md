@@ -525,7 +525,7 @@ access_token_ttl = "15m"
 refresh_token_ttl = "168h"
 ```
 
-首次启动且 `users_file` 不存在时，MnemoNAS 会创建默认管理员账号，并把初始密码写入 `users_file` 同目录的 `initial-password.txt`。默认位置是 `<storage.root>/.mnemonas/initial-password.txt`；该文件会在对应管理员首次成功登录后自动删除。
+首次启动且 `users_file` 不存在，或其中没有启用中的管理员时，MnemoNAS 会创建默认或恢复管理员账号，并把初始密码写入 `users_file` 同目录的 `initial-password.txt`。默认位置是 `<storage.root>/.mnemonas/initial-password.txt`；该文件会在对应管理员首次成功登录后自动删除。`mnemonas-doctor` 会在启用认证时解析该用户文件，并提示是否存在可用管理员。
 
 ---
 
@@ -566,7 +566,7 @@ max_access = 20
 | ---- | ---- | ------ | ---- |
 | `allow_unsafe_no_auth` | bool | `false` | 允许在非 loopback 监听地址上关闭 Web UI/API 认证或 WebDAV 认证 |
 
-默认情况下，`server.host` 监听非 loopback 地址时，`auth.enabled = false` 或启用 WebDAV 且 `webdav.auth_type = "none"` 会导致配置校验失败。只有在外层网络边界能确认限制访问范围时，才应把该值显式设为 `true`；设置后仍会输出安全警告。
+默认情况下，`server.host` 监听非 loopback 地址时，`auth.enabled = false` 或启用 WebDAV 且 `webdav.auth_type = "none"` 会导致配置校验失败。只有在外层网络边界能确认限制访问范围时，才应把该值显式设为 `true`；设置后仍会输出安全警告。`mnemonas-doctor` 在普通部署诊断中也会报告这些无认证姿态，便于安装后复核外层网络边界是否符合预期。
 
 ---
 

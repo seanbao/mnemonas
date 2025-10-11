@@ -679,6 +679,30 @@ describe('DashboardPage', () => {
         })
       })
     })
+
+    it('does not retry scoped queries when the user home directory is invalid', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      useIsAdminMock.mockReturnValue(false)
+      useUserMock.mockReturnValue({ id: 'scoped-user', username: 'member', role: 'user', homeDir: '' })
+      mockGetHealth.mockRejectedValueOnce(new FilesApiError('health unavailable', 503, 'SERVICE_UNAVAILABLE'))
+
+      render(<DashboardPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('主目录配置无效')).toBeTruthy()
+        expect(screen.getByRole('button', { name: '重新加载' })).toBeTruthy()
+      })
+
+      await user.click(screen.getByRole('button', { name: '重新加载' }))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({ title: '首页已刷新', color: 'success' })
+      })
+      expect(mockGetHealth).toHaveBeenCalledTimes(2)
+      expect(mockGetAppVersion).toHaveBeenCalledTimes(2)
+      expect(mockGetStorageStats).not.toHaveBeenCalled()
+      expect(mockListActivity).not.toHaveBeenCalled()
+    })
   })
 
   describe('quick actions', () => {

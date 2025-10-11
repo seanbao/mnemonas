@@ -562,6 +562,7 @@ function Breadcrumbs({
   return (
     <nav className="mb-4 flex items-center gap-1 overflow-x-auto whitespace-nowrap px-1 pb-1 text-sm custom-scrollbar">
       <button
+        type="button"
         onClick={() => onNavigate('/')}
         className={cn(
           "flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg transition-all max-w-[180px] truncate border border-transparent",
@@ -582,6 +583,7 @@ function Breadcrumbs({
           <div key={segmentPath} className="flex items-center gap-1">
             <ChevronRight size={14} className="text-default-500" />
             <button
+              type="button"
               onClick={() => onNavigate(segmentPath)}
               className={cn(
                 "px-2.5 py-1.5 rounded-lg transition-all max-w-[180px] truncate border border-transparent",
@@ -596,6 +598,51 @@ function Breadcrumbs({
         )
       })}
     </nav>
+  )
+}
+
+function SelectionCheckboxButton({
+  isSelected,
+  isPartialSelected = false,
+  label,
+  onClick,
+  className,
+  visualClassName,
+}: {
+  isSelected: boolean
+  isPartialSelected?: boolean
+  label: string
+  onClick: (e: React.MouseEvent) => void
+  className?: string
+  visualClassName?: string
+}) {
+  const isActive = isSelected || isPartialSelected
+
+  return (
+    <button
+      type="button"
+      role="checkbox"
+      aria-checked={isPartialSelected ? 'mixed' : isSelected}
+      aria-label={label}
+      className={cn(
+        "group/selection flex h-9 w-9 cursor-pointer items-center justify-center rounded-lg transition-colors hover:bg-content2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-primary/30",
+        className
+      )}
+      onClick={onClick}
+    >
+      <span
+        className={cn(
+          "flex h-5 w-5 items-center justify-center rounded-lg border-2 transition-all duration-150",
+          isActive
+            ? "border-accent-primary bg-accent-primary"
+            : "border-default-400",
+          visualClassName
+        )}
+      >
+        {isSelected && <span className="text-xs font-bold text-white">✓</span>}
+        {isPartialSelected && <span className="text-xs font-bold text-white">-</span>}
+      </span>
+    </button>
   )
 }
 
@@ -683,24 +730,15 @@ function FileRow({
         onDoubleClick={(e) => e.stopPropagation()}
         onContextMenu={(e) => e.stopPropagation()}
       >
-        <button
-          type="button"
-          role="checkbox"
-          aria-checked={isSelected}
-          aria-label={`选择 ${file.name}`}
-          className={cn(
-            "w-5 h-5 border-2 rounded-lg flex items-center justify-center transition-all duration-150 cursor-pointer",
-            isSelected 
-              ? "bg-accent-primary border-accent-primary" 
-              : "border-default-400 group-hover:border-accent-primary"
-          )}
+        <SelectionCheckboxButton
+          isSelected={isSelected}
+          label={`选择 ${file.name}`}
           onClick={(e) => {
             e.stopPropagation()
             onSelect(e)
           }}
-        >
-          {isSelected && <span className="text-white text-xs font-bold">✓</span>}
-        </button>
+          visualClassName={!isSelected ? "group-hover:border-accent-primary" : undefined}
+        />
       </div>
       
       <div className="flex items-center gap-3.5 min-w-0">
@@ -734,7 +772,11 @@ function FileRow({
         {!isMultiSelection && (
           <Dropdown placement="bottom-end">
             <DropdownTrigger>
-              <button aria-label={`${file.name} 操作菜单`} className="rounded-md p-1.5 opacity-100 transition-opacity hover:bg-content2 sm:opacity-0 sm:group-hover:opacity-100">
+              <button
+                type="button"
+                aria-label={`${file.name} 操作菜单`}
+                className="flex h-9 w-9 items-center justify-center rounded-lg opacity-100 transition-colors hover:bg-content2 sm:opacity-0 sm:group-hover:opacity-100"
+              >
                 <MoreVertical size={16} className="text-default-500" />
               </button>
             </DropdownTrigger>
@@ -964,24 +1006,16 @@ function FileCard({
         onDoubleClick={(e) => e.stopPropagation()}
         onContextMenu={(e) => e.stopPropagation()}
       >
-        <button
-          type="button"
-          role="checkbox"
-          aria-checked={isSelected}
-          aria-label={`选择 ${file.name}`}
-          className={cn(
-            "w-5 h-5 border-2 rounded-lg flex items-center justify-center transition-all duration-150 bg-content1/80 backdrop-blur-sm cursor-pointer",
-            isSelected
-              ? "bg-accent-primary border-accent-primary"
-              : "border-default-400 opacity-0 group-hover:opacity-100"
-          )}
+        <SelectionCheckboxButton
+          isSelected={isSelected}
+          label={`选择 ${file.name}`}
+          className={!isSelected ? "opacity-100 sm:opacity-0 sm:group-hover:opacity-100" : undefined}
+          visualClassName={isSelected ? "backdrop-blur-sm" : "bg-content1/80 backdrop-blur-sm"}
           onClick={(e) => {
             e.stopPropagation()
             onSelect(e)
           }}
-        >
-          {isSelected && <span className="text-white text-xs font-bold">✓</span>}
-        </button>
+        />
       </div>
 
       <div 
@@ -993,7 +1027,11 @@ function FileCard({
         {!isMultiSelection && (
           <Dropdown placement="bottom-end">
             <DropdownTrigger>
-              <button aria-label={`${file.name} 操作菜单`} className="rounded-md bg-content1/80 p-1.5 opacity-100 backdrop-blur-sm transition-opacity hover:bg-content2 sm:opacity-0 sm:group-hover:opacity-100">
+              <button
+                type="button"
+                aria-label={`${file.name} 操作菜单`}
+                className="flex h-9 w-9 items-center justify-center rounded-lg bg-content1/80 opacity-100 backdrop-blur-sm transition-colors hover:bg-content2 sm:opacity-0 sm:group-hover:opacity-100"
+              >
                 <MoreVertical size={14} className="text-default-500" />
               </button>
             </DropdownTrigger>
@@ -2998,6 +3036,7 @@ export function FilesPage() {
             <div className="flex items-center gap-1">
               {isUploading && (
                 <button
+                  type="button"
                   onClick={handleCancelUpload}
                   className="flex items-center gap-1 rounded px-2 py-1 text-xs text-default-500 transition-colors hover:bg-content3 hover:text-default-700"
                   aria-label="取消上传"
@@ -3007,7 +3046,8 @@ export function FilesPage() {
                 </button>
               )}
               {!isUploading && (
-                <button 
+                <button
+                  type="button"
                   onClick={() => setUploadQueue([])}
                   className="px-2 py-1 text-xs text-default-500 hover:text-default-700 hover:bg-content3 rounded transition-colors"
                   aria-label="清空上传记录"
@@ -3016,6 +3056,7 @@ export function FilesPage() {
                 </button>
               )}
               <button
+                type="button"
                 onClick={() => setShowUploadPanel(false)}
                 className="p-1.5 hover:bg-content3 rounded transition-colors"
                 aria-label="隐藏上传记录"
@@ -3162,7 +3203,7 @@ export function FilesPage() {
                   )}
                   <Dropdown>
                     <DropdownTrigger>
-                      <button className="h-9 rounded-lg px-2.5 text-sm text-default-500 transition-colors hover:bg-content2 hover:text-foreground">
+                      <button type="button" className="h-9 rounded-lg px-2.5 text-sm text-default-500 transition-colors hover:bg-content2 hover:text-foreground">
                         选择工具
                       </button>
                     </DropdownTrigger>
@@ -3257,7 +3298,7 @@ export function FilesPage() {
                 </Dropdown>
                 <button
                   type="button"
-                  className="flex h-9 min-w-9 items-center justify-center rounded-lg px-2 text-xs font-semibold text-default-600 transition-colors hover:bg-content2 hover:text-foreground"
+                  className="flex h-9 w-9 items-center justify-center rounded-lg text-xs font-semibold text-default-600 transition-colors hover:bg-content2 hover:text-foreground"
                   onClick={toggleSortOrder}
                   aria-label={sortOrder === 'asc' ? '切换为降序' : '切换为升序'}
                   title={sortOrder === 'asc' ? '升序' : '降序'}
@@ -3268,14 +3309,16 @@ export function FilesPage() {
 
               <div className="flex bg-content1 border border-divider rounded-lg p-0.5 shadow-[var(--shadow-soft)]">
                 <button
-                  className={cn("p-2 rounded-lg transition-all", viewMode === 'list' ? "bg-accent-primary text-white shadow-sm" : "text-default-500 hover:text-default-600")}
+                  type="button"
+                  className={cn("flex h-9 w-9 items-center justify-center rounded-lg transition-all", viewMode === 'list' ? "bg-accent-primary text-white shadow-sm" : "text-default-500 hover:text-default-600")}
                   onClick={() => setViewMode('list')}
                   aria-label="列表视图"
                 >
                   <List size={16} />
                 </button>
                 <button
-                  className={cn("p-2 rounded-lg transition-all", viewMode === 'grid' ? "bg-accent-primary text-white shadow-sm" : "text-default-500 hover:text-default-600")}
+                  type="button"
+                  className={cn("flex h-9 w-9 items-center justify-center rounded-lg transition-all", viewMode === 'grid' ? "bg-accent-primary text-white shadow-sm" : "text-default-500 hover:text-default-600")}
                   onClick={() => setViewMode('grid')}
                   aria-label="网格视图"
                 >
@@ -3284,7 +3327,8 @@ export function FilesPage() {
               </div>
           
               {uploadQueue.length > 0 && (
-                <button 
+                <button
+                  type="button"
                   onClick={() => setShowUploadPanel(!showUploadPanel)}
                   className={cn(
                     "relative p-2.5 rounded-lg border transition-all",
@@ -3345,20 +3389,13 @@ export function FilesPage() {
             {/* Header */}
             <div className="grid grid-cols-[36px_minmax(0,1fr)_36px] gap-3 px-3 py-3 table-head text-[11px] font-semibold sm:grid-cols-[44px_minmax(0,1fr)_88px_118px_40px] sm:gap-4 sm:px-5 md:grid-cols-[44px_minmax(0,1fr)_100px_150px_120px_40px]">
               <div className="flex items-center justify-center">
-                <button
-                  type="button"
-                  role="checkbox"
-                  aria-checked={isAllSelected ? true : isPartialSelected ? 'mixed' : false}
-                  aria-label={isAllSelected ? '取消全选' : '全选当前目录'}
-                  className={cn(
-                    "flex h-5 w-5 cursor-pointer items-center justify-center rounded-lg border-2 transition-colors",
-                    isAllSelected || isPartialSelected ? "bg-accent-primary border-accent-primary" : "border-default-400 hover:border-accent-primary"
-                  )}
+                <SelectionCheckboxButton
+                  isSelected={isAllSelected}
+                  isPartialSelected={isPartialSelected && !isAllSelected}
+                  label={isAllSelected ? '取消全选' : '全选当前目录'}
                   onClick={handleSelectAll}
-                >
-                  {isAllSelected && <span className="text-white text-xs font-bold">✓</span>}
-                  {isPartialSelected && <span className="text-white text-xs font-bold">-</span>}
-                </button>
+                  visualClassName={!isAllSelected && !isPartialSelected ? "group-hover/selection:border-accent-primary" : undefined}
+                />
               </div>
               <div>名称</div>
               <div className="hidden sm:block">大小</div>
