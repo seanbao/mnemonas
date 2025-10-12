@@ -204,7 +204,7 @@ curl -X POST -b cookies.txt \
   -d '{"keep_artifact":false}'
 ```
 
-`local` 恢复演练会先确认快照中没有 manifest 未登记的额外文件，再把最近一次快照复制到临时目录，然后按 manifest 校验每个文件的大小、权限位和 SHA-256。`keep_artifact = true` 会保留临时恢复目录，便于人工抽查。`restic` 恢复演练当前执行 `restic check`；`rclone` 恢复演练当前执行 `rclone check --one-way`，用于验证仓库或远端一致性。
+`local` 恢复演练会先确认快照中没有 manifest 未登记的额外文件，再把最近一次快照复制到临时目录，然后按 manifest 校验每个文件的大小、权限位和 SHA-256。`keep_artifact = true` 会保留临时恢复目录，便于人工抽查。默认不保留产物时，如果校验完成但临时恢复目录清理失败，演练结果保持 completed，同时返回 `warning=true`、`warnings[]`、`artifact_kept=true` 和 `restored_path`，便于在维护页继续处理残留产物。`restic` 恢复演练当前执行 `restic check`；`rclone` 恢复演练当前执行 `rclone check --one-way`，用于验证仓库或远端一致性。
 
 真正取回数据时，`local`、`restic` 和 `rclone` 任务应恢复到指定的独立目录：
 
@@ -529,7 +529,7 @@ restic 默认加密备份。rclone 可使用 `crypt` remote 包装实际存储 r
 
 ## 备份失败提醒
 
-内置 `[[backup.jobs]]` 会复用 `[alerts]` 通知通道。备份失败、显式恢复失败、显式恢复完成但带警告、恢复后只读校验失败或带警告、恢复演练失败、恢复演练超过 `restore_drill_stale_after` 后仍缺失或过期、成功备份带有保留策略检测警告，或手动保留策略检测失败/提醒时，会发送 `backup_run`、`backup_restore`、`backup_restore_verify`、`backup_restore_drill` 或 `backup_retention_check` 事件。
+内置 `[[backup.jobs]]` 会复用 `[alerts]` 通知通道。备份失败、显式恢复失败、显式恢复完成但带警告、恢复后只读校验失败或带警告、恢复演练失败或带警告、恢复演练超过 `restore_drill_stale_after` 后仍缺失或过期、成功备份带有保留策略检测警告，或手动保留策略检测失败/提醒时，会发送 `backup_run`、`backup_restore`、`backup_restore_verify`、`backup_restore_drill` 或 `backup_retention_check` 事件。
 
 事件 `message` 使用固定公共摘要，不包含任务名称、路径或原始错误文本。事件详情只包含任务 ID、运行 ID、任务类型、触发原因、状态、时间、文件/字节/快照计数、警告数量、错误信息是否存在、失败分类，以及是否省略位置详情；不包含任务名称、来源、备份目标、恢复目标路径、快照路径、manifest 路径、原始 warning 或原始错误文本。
 

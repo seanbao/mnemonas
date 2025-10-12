@@ -1916,7 +1916,7 @@ Restore drills and restore reports:
 Backup alert events:
 
 - When `[alerts] enabled = true` and alert channels are configured, backup failures, explicit restore failures or warnings, and post-restore read-only verification failures or warnings send events.
-  Restore-drill failures, stale/missing restore-drill reminders, retention-check failures/warnings, and backup-warning runs also send events.
+  Restore-drill failures or warnings, stale/missing restore-drill reminders, retention-check failures/warnings, and backup-warning runs also send events.
 - Event types are `backup_run`, `backup_restore`, `backup_restore_verify`, `backup_restore_drill`, or `backup_retention_check`, with level `warning` or `critical`.
 - The `message` is a fixed public summary and does not include job names, paths, or raw error text.
 - Non-empty `details` summary fields can include job ID, run ID, job type, trigger, status, timestamps, file/byte/snapshot counts, warning count, error-message presence, failure category, and whether location details were omitted.
@@ -1928,6 +1928,7 @@ Backup operation semantics:
 - `POST /retention-check` accepts an empty body or `{}` and returns `snapshot_count`, `file_count`, `total_bytes`, snapshot time range, `warning`, and `warnings`; failures return `500` with the failed check in `details`.
 - `POST /restore-drill` accepts optional `{"keep_artifact": true}`.
   Local jobs temporarily restore and verify the latest snapshot, restic jobs run `restic check`, and rclone jobs run `rclone check --one-way`.
+  For local jobs with the default non-retained artifact behavior, if snapshot verification completes but temporary restore-directory cleanup fails, the response remains `status="completed"` and sets `warning=true`, populates `warnings[]`, and returns `artifact_kept=true` with `restored_path` for the Maintenance page. Warning text does not include raw paths or lower-level error text.
 - `POST /restore-preview` validates the same target rules as restore but does not create target data or write restore history.
   It returns `preflight_checks`, `warnings`, `cutover_checklist`, and `rollback_checklist` for target isolation, target state, backup content, target filesystem capacity, and config handling.
 - Local jobs summarize the latest manifest, restic jobs run `restic ls latest --json --tag mnemonas --tag job:<id> --path <source>`, and rclone jobs run `rclone lsjson <remote> --recursive --files-only`.

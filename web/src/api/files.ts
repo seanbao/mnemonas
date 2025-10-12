@@ -1332,6 +1332,8 @@ export interface BackupRestoreDrillResult {
   artifact_kept: boolean
   file_count: number
   verified_bytes: number
+  warning?: boolean
+  warnings?: string[]
   error_message?: string
   failure_category?: string
 }
@@ -1606,6 +1608,8 @@ function isBackupRestoreDrillResultShape(value: unknown): value is BackupRestore
     && typeof value.artifact_kept === 'boolean'
     && isNonNegativeSafeInteger(value.file_count)
     && isNonNegativeSafeInteger(value.verified_bytes)
+    && isBooleanOrUndefined(value.warning)
+    && (value.warnings === undefined || (Array.isArray(value.warnings) && value.warnings.every((entry) => typeof entry === 'string')))
     && isStringOrUndefined(value.error_message)
     && isStringOrUndefined(value.failure_category)
 }

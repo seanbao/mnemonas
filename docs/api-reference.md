@@ -1927,7 +1927,7 @@ WebDAV 凭据响应：
 
 备份提醒事件：
 
-- 启用 `[alerts] enabled = true` 且配置提醒通道时，备份失败、显式恢复失败或 warning、恢复后只读校验失败或 warning、恢复演练失败、恢复演练过期/缺失提醒、保留检查失败/warning 和备份 warning 运行会发送事件。
+- 启用 `[alerts] enabled = true` 且配置提醒通道时，备份失败、显式恢复失败或 warning、恢复后只读校验失败或 warning、恢复演练失败或 warning、恢复演练过期/缺失提醒、保留检查失败/warning 和备份 warning 运行会发送事件。
 - 事件类型为 `backup_run`、`backup_restore`、`backup_restore_verify`、`backup_restore_drill` 或 `backup_retention_check`，级别为 `warning` 或 `critical`。
 - `message` 是固定公开摘要，不包含任务名、路径或原始错误文本。
 - 非空 `details` 摘要字段可包含 job ID、run ID、任务类型、trigger、status、时间戳、文件/字节/快照数量、warning 数量、错误消息是否存在、failure category，以及位置详情是否省略。
@@ -1939,6 +1939,7 @@ WebDAV 凭据响应：
 - `POST /retention-check` 接受空 body 或 `{}`，并返回 `snapshot_count`、`file_count`、`total_bytes`、snapshot 时间范围、`warning` 和 `warnings`；失败返回 `500`，并在 `details` 中包含失败检查。
 - `POST /restore-drill` 接受可选 `{"keep_artifact": true}`。
   local 任务临时恢复并校验最近快照，restic 任务运行 `restic check`，rclone 任务运行 `rclone check --one-way`。
+  local 任务在默认不保留演练产物时，如果快照校验完成但临时恢复目录清理失败，响应会保持 `status="completed"`，同时设置 `warning=true`、填充 `warnings[]`，并将 `artifact_kept=true` 与 `restored_path` 返回给维护页；warning 文本不包含原始路径或底层错误文本。
 - `POST /restore-preview` 使用与 restore 相同的目标规则，但不创建目标数据或写入恢复历史。
   它返回目标隔离、目标状态、备份内容、目标文件系统容量和配置处理对应的 `preflight_checks`、`warnings`、`cutover_checklist` 和 `rollback_checklist`。
 - Local 任务汇总最新 manifest，restic 任务运行 `restic ls latest --json --tag mnemonas --tag job:<id> --path <source>`，rclone 任务运行 `rclone lsjson <remote> --recursive --files-only`。
