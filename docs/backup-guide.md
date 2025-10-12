@@ -306,7 +306,7 @@ curl -X POST -b cookies.txt \
 
 顶层 `total_files` 与 `verified_bytes` 汇总已完成条目的只读校验结果。预检通过后的执行期故障仍可能导致部分失败并让总结果带 `warning`，因此应逐项检查 `items[]` 的状态、错误和只读校验结果。
 
-维护页会在任务摘要中展示恢复摘要发现项，并可通过“导出摘要”下载当前备份任务的恢复 JSON。该 JSON 包括最近备份、保留检测、恢复演练、恢复演练历史、显式恢复、只读校验、恢复历史和待处理发现项。下载响应使用 `Cache-Control: no-store`、`Pragma: no-cache`、`X-Content-Type-Options: nosniff` 和 `Referrer-Policy: no-referrer`。建议在切换 `storage.root` 前下载一份，恢复失败时也可连同诊断包一起保存。
+维护页会在任务摘要中展示恢复摘要发现项，并可通过任务行或恢复完成弹窗中的“导出摘要”下载当前备份任务的恢复 JSON。该 JSON 包括最近备份、保留检测、恢复演练、恢复演练历史、显式恢复、只读校验、恢复历史和待处理发现项。下载响应使用 `Cache-Control: no-store`、`Pragma: no-cache`、`X-Content-Type-Options: nosniff` 和 `Referrer-Policy: no-referrer`。建议在切换 `storage.root` 前下载一份，恢复失败时也可连同诊断包一起保存。
 
 切换建议：
 
