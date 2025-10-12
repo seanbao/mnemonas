@@ -38,7 +38,7 @@ Release workflow 预期生成以下产物：
 
 当前硬化分支已有以下验证证据；最终发布前应以最新 tag、Release workflow 结果和必要的环境验证为准：
 
-最近本地完整验证快照：验证目标 `04785b77765a`，`GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master` 通过，覆盖 `make check`、依赖安全扫描、示例配置、public-access 模板、公网 go-live 有效 DNS label、重复尾点、完整域名、同域 HTTPS 重定向变体、doctor public-domain DNS label 边界与 go-live/doctor `localhost`/IPv4 字面量拒绝校验、proto 再生成稳定性、Rust fmt/test/clippy、前端 lint/typecheck/unit/build、Playwright 369 个 E2E 用例、systemd 升级/回退 installer 回归、WebDAV COPY/MOVE 后内容一致性和 MOVE 源路径清理 smoke、Docker build 和 Docker smoke。Docker smoke 使用 Docker 自动分配的 loopback 端口 `http://127.0.0.1:32812`。
+最近本地完整验证快照：验证目标 `ec8c844d1d3b`，`GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master` 通过，覆盖 `make check`、依赖安全扫描、示例配置、public-access 模板、公网 go-live 有效 DNS label、重复尾点、完整域名、同域 HTTPS 重定向变体、doctor public-domain DNS label 边界与 go-live/doctor `localhost`/IPv4 字面量拒绝校验、proto 再生成稳定性、Rust fmt/test/clippy、前端 lint/typecheck/unit/build、Playwright 369 个 E2E 用例、systemd 升级/回退 installer 回归、WebDAV COPY/MOVE 后内容一致性和 MOVE 源路径清理 smoke、恢复演练清理失败警告路径、Docker build 和 Docker smoke。Docker smoke 使用 Docker 自动分配的 loopback 端口 `http://127.0.0.1:32814`。
 
 - `GOTOOLCHAIN=local ./scripts/verify-changed.sh`
 - `GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master`
@@ -50,7 +50,7 @@ Release workflow 预期生成以下产物：
 - WebDAV curl smoke safety test：`scripts/test-webdav-client-smoke.sh`
 - Release workflow 增量验证：`make workflows-check`、`make scripts-check`、`./scripts/check-secret-leaks.sh`、`make toolchains-check`、`git diff --check`
 - Playwright E2E：`369 passed`
-- 前端单测：`3054 passed`
+- 前端单测：`3057 passed`
 - Docker build 和 `scripts/docker-smoke.sh`
 
 最终发布前如代码、脚本、配置、文档或 workflow 再次变更，应重跑对应验证。
