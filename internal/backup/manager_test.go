@@ -1208,6 +1208,84 @@ func TestManager_RunJobAndRestoreDrill(t *testing.T) {
 	}
 }
 
+func TestManager_RunRestoreDrillWarnsWhenArtifactCleanupFails(t *testing.T) {
+	tmpDir := t.TempDir()
+	source := filepath.Join(tmpDir, "source")
+	destination := filepath.Join(tmpDir, "backups")
+	mustWriteFile(t, filepath.Join(source, "docs", "note.txt"), "restore drill cleanup")
+	notifier := &recordingNotifier{}
+
+	manager, err := NewManager(ManagerConfig{
+		Root:        filepath.Join(tmpDir, "state"),
+		StorageRoot: source,
+		Jobs: []config.BackupJobConfig{{
+			ID:          "home",
+			Name:        "Home backup",
+			Type:        JobTypeLocal,
+			Source:      source,
+			Destination: destination,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("NewManager() error: %v", err)
+	}
+	if _, err := manager.RunJob(context.Background(), "home"); err != nil {
+		t.Fatalf("RunJob() error: %v", err)
+	}
+	manager.notifier = notifier
+
+	previousRemove := removeRestoreDrillArtifact
+	var cleanupPath string
+	removeRestoreDrillArtifact = func(targetPath, label string) error {
+		if label == "restore drill" {
+			cleanupPath = targetPath
+			return errors.New("cleanup failed with token=restore-secret")
+		}
+		return previousRemove(targetPath, label)
+	}
+	t.Cleanup(func() {
+		removeRestoreDrillArtifact = previousRemove
+	})
+
+	drill, err := manager.RunRestoreDrill(context.Background(), "home", RestoreDrillOptions{})
+	if err != nil {
+		t.Fatalf("RunRestoreDrill() error: %v", err)
+	}
+	if drill.Status != StatusCompleted || !drill.Warning || !drill.ArtifactKept || drill.RestoredPath == "" {
+		t.Fatalf("RunRestoreDrill result = %+v, want completed warning with retained artifact", drill)
+	}
+	assertWarningsContain(t, drill.Warnings, "临时恢复目录清理失败")
+	assertNoBackupTargetSecrets(t, strings.Join(drill.Warnings, "\n"))
+	if cleanupPath == "" {
+		t.Fatal("restore drill cleanup path was not attempted")
+	}
+	assertFileContent(t, filepath.Join(drill.RestoredPath, "data", "docs", "note.txt"), "restore drill cleanup")
+
+	jobs := manager.ListJobs()
+	if len(jobs) != 1 || jobs[0].LastRestoreDrill == nil || !jobs[0].LastRestoreDrill.Warning || len(jobs[0].RestoreDrillHistory) != 1 || !jobs[0].RestoreDrillHistory[0].Warning {
+		t.Fatalf("persisted restore drill warning missing: %+v", jobs)
+	}
+	assertWarningsContain(t, jobs[0].RestoreReportFindings, "恢复演练警告")
+	report, err := manager.BuildRestoreReport("home")
+	if err != nil {
+		t.Fatalf("BuildRestoreReport() error: %v", err)
+	}
+	assertWarningsContain(t, report.Findings, "恢复演练警告")
+
+	events := notifier.Events()
+	if len(events) != 1 {
+		t.Fatalf("notification count = %d, want 1", len(events))
+	}
+	event := events[0]
+	if event.Type != NotificationTypeRestoreDrill || event.Level != NotificationLevelWarning || event.Message != "backup restore drill completed with warnings" {
+		t.Fatalf("unexpected notification event: %+v", event)
+	}
+	if event.Status != StatusCompleted || event.WarningCount != 1 || event.ErrorMessagePresent || !event.LocationOmitted {
+		t.Fatalf("notification summary markers = %+v, want completed warning without raw error", event)
+	}
+	assertBackupNotificationEventOmitsLocationAndMessageText(t, event)
+}
+
 func TestRestoreReportFindingsIgnoreStaleRestoreVerify(t *testing.T) {
 	restoreStarted := time.Date(2026, 5, 9, 5, 0, 0, 0, time.UTC)
 	restoreFinished := restoreStarted.Add(time.Second)

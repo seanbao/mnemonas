@@ -1221,13 +1221,14 @@ function BackupDrillHistoryList({ history }: { history?: BackupRestoreDrillResul
   }
   const visibleHistory = history.slice(0, 3)
   const failedCount = history.filter((entry) => entry.status === 'failed').length
+  const warningCount = history.filter((entry) => entry.warning || (entry.warnings?.length ?? 0) > 0).length
   return (
     <div className="mt-2 rounded-lg bg-default-50 p-2 text-xs text-default-500">
       <div className="mb-1 font-medium text-default-600">最近演练记录</div>
       <div className="space-y-1">
         {visibleHistory.map((entry) => (
           <div key={entry.id} className="flex items-center justify-between gap-2">
-            <span className={entry.status === 'failed' ? 'text-danger' : entry.status === 'running' ? 'text-warning' : 'text-default-500'}>
+            <span className={entry.status === 'failed' ? 'text-danger' : entry.status === 'running' || entry.warning || (entry.warnings?.length ?? 0) > 0 ? 'text-warning' : 'text-default-500'}>
               {getBackupTaskStatusLabel(entry.status)}
             </span>
             <span className="truncate text-default-400">{formatDateTime(entry.finished_at ?? entry.started_at)}</span>
@@ -1236,6 +1237,9 @@ function BackupDrillHistoryList({ history }: { history?: BackupRestoreDrillResul
       </div>
       {failedCount > 0 && (
         <div className="mt-1 text-warning">近 {history.length} 次包含 {failedCount} 次失败</div>
+      )}
+      {warningCount > 0 && (
+        <div className="mt-1 text-warning">近 {history.length} 次包含 {warningCount} 次警告</div>
       )}
     </div>
   )
@@ -1279,7 +1283,7 @@ function BackupDrillSummary({ job }: { job: BackupJob }) {
   return (
     <div className="space-y-1 text-sm">
       <div className="flex items-center gap-2">
-        <BackupStatusChip status={result.status} />
+        <BackupStatusChip status={result.status} warning={result.warning || (result.warnings?.length ?? 0) > 0} />
         <BackupPolicyChip status={job.restore_drill_status} staleLabel="演练过期" />
         <span className="text-default-500">{formatDateTime(result.finished_at ?? result.started_at)}</span>
       </div>
@@ -1304,6 +1308,9 @@ function BackupDrillSummary({ job }: { job: BackupJob }) {
       )}
       {latestFailureCategory && (
         <div className="text-warning">失败类型：{latestFailureCategory}</div>
+      )}
+      {result.warnings && result.warnings.length > 0 && (
+        <div className="text-warning">{getBackupDiagnosticDisplayMessage(result.warnings[0])}</div>
       )}
       {result.error_message && <div className="text-danger">{getBackupDiagnosticDisplayMessage(result.error_message)}</div>}
       <BackupDrillHistoryList history={job.restore_drill_history} />
@@ -2391,7 +2398,7 @@ export default function Maintenance() {
       void queryClient.invalidateQueries({ queryKey: backupJobsQueryKey })
       const toastColor = getMaintenanceTaskToastColor(result)
       addToast({
-        title: result.status === 'failed' ? '恢复演练失败' : result.status === 'running' ? '恢复演练已启动' : '恢复演练已完成',
+        title: result.status === 'failed' ? '恢复演练失败' : result.status === 'running' ? '恢复演练已启动' : hasMaintenanceTaskWarning(result) ? '恢复演练完成，有警告' : '恢复演练已完成',
         description: getMaintenanceTaskDescription(result, getBackupRestoreDrillMetricText(result).replace(' · ', '，')),
         color: toastColor,
       })
