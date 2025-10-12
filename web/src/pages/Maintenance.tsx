@@ -3375,6 +3375,19 @@ export default function Maintenance() {
                   关闭
                 </Button>
                 <Button
+                  variant="bordered"
+                  className="rounded-lg"
+                  startContent={exportingRestoreReportJobId === restoreJob?.id ? <RefreshCw size={16} className="animate-spin" /> : <Download size={16} />}
+                  isLoading={exportingRestoreReportJobId === restoreJob?.id}
+                  isDisabled={!restoreJob || exportingRestoreReportJobId === restoreJob.id}
+                  onPress={() => {
+                    if (!restoreJob) return
+                    void handleDownloadRestoreReport(restoreJob)
+                  }}
+                >
+                  导出摘要
+                </Button>
+                <Button
                   color="primary"
                   className="rounded-lg"
                   isLoading={restoreVerifyMutation.isPending}
