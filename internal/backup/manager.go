@@ -21,6 +21,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/seanbao/mnemonas/internal/config"
 	"github.com/seanbao/mnemonas/internal/rootio"
@@ -321,6 +322,9 @@ type NotificationEvent struct {
 	PrunedSnapshots     int        `json:"pruned_snapshots,omitempty"`
 	Warnings            []string   `json:"warnings,omitempty"`
 	ErrorMessage        string     `json:"error_message,omitempty"`
+	WarningCount        int        `json:"warning_count,omitempty"`
+	ErrorMessagePresent bool       `json:"error_message_present,omitempty"`
+	LocationOmitted     bool       `json:"location_details_omitted,omitempty"`
 	FailureCategory     string     `json:"failure_category,omitempty"`
 	Timestamp           time.Time  `json:"timestamp"`
 }
@@ -779,6 +783,10 @@ func (m *Manager) RunRestoreVerify(ctx context.Context, id string, opts RestoreV
 	defer m.endJob(id)
 
 	startedAt := m.now().UTC()
+	targetPath, err := normalizeRestoreTargetPathSyntax(opts.TargetPath)
+	if err != nil {
+		return nil, err
+	}
 	result := &RestoreVerifyResult{
 		ID:          formatRunID(startedAt),
 		JobID:       job.ID,
@@ -786,7 +794,7 @@ func (m *Manager) RunRestoreVerify(ctx context.Context, id string, opts RestoreV
 		StartedAt:   startedAt,
 		Source:      effectiveSource(job, m.storageRoot),
 		Destination: backupTarget(job),
-		TargetPath:  strings.TrimSpace(opts.TargetPath),
+		TargetPath:  targetPath,
 	}
 	_ = m.updateLastRestoreVerify(result)
 
@@ -832,7 +840,10 @@ func (m *Manager) RunRestore(ctx context.Context, id string, opts RestoreOptions
 	defer m.endJob(id)
 
 	startedAt := m.now().UTC()
-	targetPath := strings.TrimSpace(opts.TargetPath)
+	targetPath, err := normalizeRestoreTargetPathSyntax(opts.TargetPath)
+	if err != nil {
+		return nil, err
+	}
 	result := &RestoreResult{
 		ID:         formatRunID(startedAt),
 		JobID:      job.ID,
@@ -888,34 +899,30 @@ func (m *Manager) notifyRun(ctx context.Context, job config.BackupJobConfig, res
 	}
 
 	level := NotificationLevelWarning
-	message := fmt.Sprintf("备份任务 %s 完成但存在警告", job.Name)
+	message := "backup run completed with warnings"
 	if result.Status == StatusFailed {
 		level = NotificationLevelCritical
-		message = fmt.Sprintf("备份任务 %s 执行失败", job.Name)
+		message = "backup run failed"
 	}
 
 	_ = m.notifier.NotifyBackupEvent(context.WithoutCancel(ctx), NotificationEvent{
-		Type:            NotificationTypeBackupRun,
-		Level:           level,
-		Message:         message,
-		JobID:           job.ID,
-		JobName:         job.Name,
-		JobType:         job.Type,
-		RunID:           result.ID,
-		Trigger:         result.Trigger,
-		Status:          result.Status,
-		StartedAt:       result.StartedAt,
-		FinishedAt:      result.FinishedAt,
-		Source:          sanitizeBackupTargetForAPI(result.Source),
-		Destination:     sanitizeBackupTargetForAPI(result.Destination),
-		SnapshotPath:    sanitizeBackupTargetForAPI(result.SnapshotPath),
-		ManifestPath:    sanitizeBackupTargetForAPI(result.ManifestPath),
-		FileCount:       result.FileCount,
-		TotalBytes:      result.TotalBytes,
-		PrunedSnapshots: result.PrunedSnapshots,
-		Warnings:        sanitizeBackupMessagesForAPI(result.Warnings),
-		ErrorMessage:    sanitizeBackupMessageForAPI(result.ErrorMessage),
-		Timestamp:       time.Now().UTC(),
+		Type:                NotificationTypeBackupRun,
+		Level:               level,
+		Message:             message,
+		JobID:               job.ID,
+		JobType:             job.Type,
+		RunID:               result.ID,
+		Trigger:             result.Trigger,
+		Status:              result.Status,
+		StartedAt:           result.StartedAt,
+		FinishedAt:          result.FinishedAt,
+		FileCount:           result.FileCount,
+		TotalBytes:          result.TotalBytes,
+		PrunedSnapshots:     result.PrunedSnapshots,
+		WarningCount:        len(result.Warnings),
+		ErrorMessagePresent: strings.TrimSpace(result.ErrorMessage) != "",
+		LocationOmitted:     notificationLocationDetailsOmitted(result.Source, result.Destination, result.SnapshotPath, result.ManifestPath),
+		Timestamp:           m.now().UTC(),
 	})
 }
 
@@ -925,23 +932,21 @@ func (m *Manager) notifyRestoreDrill(ctx context.Context, job config.BackupJobCo
 	}
 
 	_ = m.notifier.NotifyBackupEvent(context.WithoutCancel(ctx), NotificationEvent{
-		Type:            NotificationTypeRestoreDrill,
-		Level:           NotificationLevelCritical,
-		Message:         fmt.Sprintf("备份任务 %s 恢复演练失败", job.Name),
-		JobID:           job.ID,
-		JobName:         job.Name,
-		JobType:         job.Type,
-		RunID:           result.ID,
-		Status:          result.Status,
-		StartedAt:       result.StartedAt,
-		FinishedAt:      result.FinishedAt,
-		SnapshotPath:    sanitizeBackupTargetForAPI(result.SnapshotPath),
-		ManifestPath:    sanitizeBackupTargetForAPI(result.ManifestPath),
-		FileCount:       result.FileCount,
-		VerifiedBytes:   result.VerifiedBytes,
-		ErrorMessage:    sanitizeBackupMessageForAPI(result.ErrorMessage),
-		FailureCategory: result.FailureCategory,
-		Timestamp:       time.Now().UTC(),
+		Type:                NotificationTypeRestoreDrill,
+		Level:               NotificationLevelCritical,
+		Message:             "backup restore drill failed",
+		JobID:               job.ID,
+		JobType:             job.Type,
+		RunID:               result.ID,
+		Status:              result.Status,
+		StartedAt:           result.StartedAt,
+		FinishedAt:          result.FinishedAt,
+		FileCount:           result.FileCount,
+		VerifiedBytes:       result.VerifiedBytes,
+		ErrorMessagePresent: strings.TrimSpace(result.ErrorMessage) != "",
+		LocationOmitted:     notificationLocationDetailsOmitted(result.SnapshotPath, result.ManifestPath),
+		FailureCategory:     result.FailureCategory,
+		Timestamp:           m.now().UTC(),
 	})
 }
 
@@ -954,33 +959,28 @@ func (m *Manager) notifyRestore(ctx context.Context, job config.BackupJobConfig,
 	}
 
 	level := NotificationLevelWarning
-	message := fmt.Sprintf("备份任务 %s 恢复完成但存在警告", job.Name)
+	message := "backup restore completed with warnings"
 	if result.Status == StatusFailed {
 		level = NotificationLevelCritical
-		message = fmt.Sprintf("备份任务 %s 恢复失败", job.Name)
+		message = "backup restore failed"
 	}
 
 	_ = m.notifier.NotifyBackupEvent(context.WithoutCancel(ctx), NotificationEvent{
-		Type:          NotificationTypeRestore,
-		Level:         level,
-		Message:       message,
-		JobID:         job.ID,
-		JobName:       job.Name,
-		JobType:       job.Type,
-		RunID:         result.ID,
-		Status:        result.Status,
-		StartedAt:     result.StartedAt,
-		FinishedAt:    result.FinishedAt,
-		Source:        sanitizeBackupTargetForAPI(effectiveSource(job, m.storageRoot)),
-		Destination:   backupTargetForAPI(job),
-		TargetPath:    sanitizeBackupTargetForAPI(result.TargetPath),
-		SnapshotPath:  sanitizeBackupTargetForAPI(result.SnapshotPath),
-		ManifestPath:  sanitizeBackupTargetForAPI(result.ManifestPath),
-		FileCount:     result.FileCount,
-		VerifiedBytes: result.VerifiedBytes,
-		Warnings:      sanitizeBackupMessagesForAPI(result.Warnings),
-		ErrorMessage:  sanitizeBackupMessageForAPI(result.ErrorMessage),
-		Timestamp:     time.Now().UTC(),
+		Type:                NotificationTypeRestore,
+		Level:               level,
+		Message:             message,
+		JobID:               job.ID,
+		JobType:             job.Type,
+		RunID:               result.ID,
+		Status:              result.Status,
+		StartedAt:           result.StartedAt,
+		FinishedAt:          result.FinishedAt,
+		FileCount:           result.FileCount,
+		VerifiedBytes:       result.VerifiedBytes,
+		WarningCount:        len(result.Warnings),
+		ErrorMessagePresent: strings.TrimSpace(result.ErrorMessage) != "",
+		LocationOmitted:     notificationLocationDetailsOmitted(effectiveSource(job, m.storageRoot), backupTarget(job), result.TargetPath, result.SnapshotPath, result.ManifestPath),
+		Timestamp:           m.now().UTC(),
 	})
 }
 
@@ -993,33 +993,28 @@ func (m *Manager) notifyRestoreVerify(ctx context.Context, job config.BackupJobC
 	}
 
 	level := NotificationLevelWarning
-	message := fmt.Sprintf("备份任务 %s 恢复校验存在警告", job.Name)
+	message := "backup restore verification completed with warnings"
 	if result.Status == StatusFailed {
 		level = NotificationLevelCritical
-		message = fmt.Sprintf("备份任务 %s 恢复校验失败", job.Name)
+		message = "backup restore verification failed"
 	}
 
 	_ = m.notifier.NotifyBackupEvent(context.WithoutCancel(ctx), NotificationEvent{
-		Type:          NotificationTypeRestoreVerify,
-		Level:         level,
-		Message:       message,
-		JobID:         job.ID,
-		JobName:       job.Name,
-		JobType:       job.Type,
-		RunID:         result.ID,
-		Status:        result.Status,
-		StartedAt:     result.StartedAt,
-		FinishedAt:    result.FinishedAt,
-		Source:        sanitizeBackupTargetForAPI(effectiveSource(job, m.storageRoot)),
-		Destination:   backupTargetForAPI(job),
-		TargetPath:    sanitizeBackupTargetForAPI(result.TargetPath),
-		SnapshotPath:  sanitizeBackupTargetForAPI(result.SnapshotPath),
-		ManifestPath:  sanitizeBackupTargetForAPI(result.ManifestPath),
-		FileCount:     result.FileCount,
-		VerifiedBytes: result.VerifiedBytes,
-		Warnings:      sanitizeBackupMessagesForAPI(result.Warnings),
-		ErrorMessage:  sanitizeBackupMessageForAPI(result.ErrorMessage),
-		Timestamp:     time.Now().UTC(),
+		Type:                NotificationTypeRestoreVerify,
+		Level:               level,
+		Message:             message,
+		JobID:               job.ID,
+		JobType:             job.Type,
+		RunID:               result.ID,
+		Status:              result.Status,
+		StartedAt:           result.StartedAt,
+		FinishedAt:          result.FinishedAt,
+		FileCount:           result.FileCount,
+		VerifiedBytes:       result.VerifiedBytes,
+		WarningCount:        len(result.Warnings),
+		ErrorMessagePresent: strings.TrimSpace(result.ErrorMessage) != "",
+		LocationOmitted:     notificationLocationDetailsOmitted(effectiveSource(job, m.storageRoot), backupTarget(job), result.TargetPath, result.SnapshotPath, result.ManifestPath),
+		Timestamp:           m.now().UTC(),
 	})
 }
 
@@ -1032,31 +1027,39 @@ func (m *Manager) notifyRetentionCheck(ctx context.Context, job config.BackupJob
 	}
 
 	level := NotificationLevelWarning
-	message := fmt.Sprintf("备份任务 %s 保留策略需要关注", job.Name)
+	message := "backup retention check completed with warnings"
 	if result.Status == StatusFailed {
 		level = NotificationLevelCritical
-		message = fmt.Sprintf("备份任务 %s 保留策略检测失败", job.Name)
+		message = "backup retention check failed"
 	}
 
 	_ = m.notifier.NotifyBackupEvent(context.WithoutCancel(ctx), NotificationEvent{
-		Type:          NotificationTypeRetention,
-		Level:         level,
-		Message:       message,
-		JobID:         job.ID,
-		JobName:       job.Name,
-		JobType:       job.Type,
-		RunID:         result.ID,
-		Status:        result.Status,
-		StartedAt:     result.StartedAt,
-		FinishedAt:    result.FinishedAt,
-		Destination:   sanitizeBackupTargetForAPI(result.Target),
-		SnapshotCount: result.SnapshotCount,
-		FileCount:     result.FileCount,
-		TotalBytes:    result.TotalBytes,
-		Warnings:      sanitizeBackupMessagesForAPI(result.Warnings),
-		ErrorMessage:  sanitizeBackupMessageForAPI(result.ErrorMessage),
-		Timestamp:     time.Now().UTC(),
+		Type:                NotificationTypeRetention,
+		Level:               level,
+		Message:             message,
+		JobID:               job.ID,
+		JobType:             job.Type,
+		RunID:               result.ID,
+		Status:              result.Status,
+		StartedAt:           result.StartedAt,
+		FinishedAt:          result.FinishedAt,
+		SnapshotCount:       result.SnapshotCount,
+		FileCount:           result.FileCount,
+		TotalBytes:          result.TotalBytes,
+		WarningCount:        len(result.Warnings),
+		ErrorMessagePresent: strings.TrimSpace(result.ErrorMessage) != "",
+		LocationOmitted:     notificationLocationDetailsOmitted(result.Target),
+		Timestamp:           m.now().UTC(),
 	})
+}
+
+func notificationLocationDetailsOmitted(values ...string) bool {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // SendRestoreDrillReminders emits warning notifications for jobs whose restore
@@ -1122,14 +1125,12 @@ func (m *Manager) restoreDrillReminderEventLocked(job config.BackupJobConfig, st
 		Type:                NotificationTypeRestoreDrill,
 		Level:               NotificationLevelWarning,
 		JobID:               job.ID,
-		JobName:             job.Name,
 		JobType:             job.Type,
 		Trigger:             NotificationTriggerReminder,
-		Source:              sanitizeBackupTargetForAPI(effectiveSource(job, m.storageRoot)),
-		Destination:         backupTargetForAPI(job),
 		LastSuccessfulRunAt: &lastSuccessfulRunAtPtr,
 		StaleAfter:          formatDurationForAPI(staleAfter),
 		ReminderCooldown:    formatDurationForAPI(restoreDrillReminderCooldown),
+		LocationOmitted:     notificationLocationDetailsOmitted(effectiveSource(job, m.storageRoot), backupTarget(job)),
 		Timestamp:           now.UTC(),
 	}
 
@@ -1137,7 +1138,7 @@ func (m *Manager) restoreDrillReminderEventLocked(job config.BackupJobConfig, st
 		if now.Sub(lastSuccessfulRunAt) <= staleAfter {
 			return NotificationEvent{}, false
 		}
-		base.Message = fmt.Sprintf("备份任务 %s 尚未完成恢复演练", job.Name)
+		base.Message = "backup restore drill is due"
 		base.Status = "due"
 		base.StartedAt = lastSuccessfulRunAt
 		return base, true
@@ -1152,16 +1153,15 @@ func (m *Manager) restoreDrillReminderEventLocked(job config.BackupJobConfig, st
 		return NotificationEvent{}, false
 	}
 	lastRestoreDrillAtPtr := lastRestoreDrillAt
-	base.Message = fmt.Sprintf("备份任务 %s 恢复演练已过期", job.Name)
+	base.Message = "backup restore drill is stale"
 	base.RunID = state.LastRestoreDrill.ID
 	base.Status = "stale"
 	base.StartedAt = state.LastRestoreDrill.StartedAt
 	base.FinishedAt = cloneTime(state.LastRestoreDrill.FinishedAt)
-	base.SnapshotPath = sanitizeBackupTargetForAPI(state.LastRestoreDrill.SnapshotPath)
-	base.ManifestPath = sanitizeBackupTargetForAPI(state.LastRestoreDrill.ManifestPath)
 	base.FileCount = state.LastRestoreDrill.FileCount
 	base.VerifiedBytes = state.LastRestoreDrill.VerifiedBytes
 	base.LastRestoreDrillAt = &lastRestoreDrillAtPtr
+	base.LocationOmitted = notificationLocationDetailsOmitted(effectiveSource(job, m.storageRoot), backupTarget(job), state.LastRestoreDrill.SnapshotPath, state.LastRestoreDrill.ManifestPath)
 	return base, true
 }
 
@@ -2550,7 +2550,11 @@ func validateSourceTreeEntryNoSymlinks(ctx context.Context, root *os.Root, relPa
 		return fmt.Errorf("close backup source directory %s: %w", relPath, closeErr)
 	}
 	for _, child := range children {
-		if err := validateSourceTreeEntryNoSymlinks(ctx, root, childRelPath(relPath, child.Name())); err != nil {
+		childPath, err := childRelPath(relPath, child.Name())
+		if err != nil {
+			return fmt.Errorf("%w: backup source contains unsafe entry name %q", err, cleanPreviewSamplePath(child.Name()))
+		}
+		if err := validateSourceTreeEntryNoSymlinks(ctx, root, childPath); err != nil {
 			return err
 		}
 	}
@@ -2610,7 +2614,11 @@ func copySourceTreeEntry(ctx context.Context, root *os.Root, relPath, destinatio
 			return children[i].Name() < children[j].Name()
 		})
 		for _, child := range children {
-			if err := copySourceTreeEntry(ctx, root, childRelPath(relPath, child.Name()), destination, excludes, entries, totalBytes, directoryModes); err != nil {
+			childPath, err := childRelPath(relPath, child.Name())
+			if err != nil {
+				return fmt.Errorf("%w: backup source contains unsafe entry name %q", err, cleanPreviewSamplePath(child.Name()))
+			}
+			if err := copySourceTreeEntry(ctx, root, childPath, destination, excludes, entries, totalBytes, directoryModes); err != nil {
 				return err
 			}
 		}
@@ -2891,7 +2899,11 @@ func verifyManifestTreeEntry(ctx context.Context, root string, relPath string, s
 			return children[i].Name() < children[j].Name()
 		})
 		for _, child := range children {
-			if err := verifyManifestTreeEntry(ctx, root, childRelPath(relPath, child.Name()), state); err != nil {
+			childPath, err := childRelPath(relPath, child.Name())
+			if err != nil {
+				return fmt.Errorf("%w: backup snapshot contains unsafe entry name %q", err, cleanPreviewSamplePath(child.Name()))
+			}
+			if err := verifyManifestTreeEntry(ctx, root, childPath, state); err != nil {
 				return err
 			}
 		}
@@ -4305,6 +4317,9 @@ func relativeResticPreviewPath(source, entryPath string) (string, error) {
 }
 
 func validateRemoteListingPathSegments(entryPath string) error {
+	if strings.Contains(entryPath, "\\") {
+		return unsafeBackupListingPathError(entryPath)
+	}
 	slashPath := filepath.ToSlash(entryPath)
 	volume := filepath.ToSlash(filepath.VolumeName(entryPath))
 	if volume != "" {
@@ -4327,6 +4342,9 @@ func validateRemoteListingPathSegments(entryPath string) error {
 func validateRemoteRelativeListingPath(entryPath string) (string, error) {
 	if entryPath == "" {
 		return "", unsafeBackupListingPathError(entryPath)
+	}
+	if err := validateRemoteListingPathSegments(entryPath); err != nil {
+		return "", err
 	}
 	if _, err := safeJoin(".", entryPath); err != nil {
 		return "", unsafeBackupListingPathError(entryPath)
@@ -4433,9 +4451,7 @@ func validateRemoteCredentialFile(filePath, field, source, storageRoot string) e
 	if !filepath.IsAbs(filePath) {
 		return fmt.Errorf("%w: %s must be absolute", ErrUnsafePath, field)
 	}
-	if strings.IndexFunc(filePath, func(r rune) bool {
-		return r < 0x20 || r == 0x7f
-	}) >= 0 {
+	if strings.IndexFunc(filePath, unicode.IsControl) >= 0 {
 		return fmt.Errorf("%w: %s contains invalid control characters", ErrUnsafePath, field)
 	}
 	if err := validatePathComponentsNoSymlink(filePath, field); err != nil {
@@ -4612,9 +4628,7 @@ func validateRestoreTargetPath(source, destination, storageRoot, targetPath stri
 }
 
 func normalizeRestoreTargetPathSyntax(targetPath string) (string, error) {
-	if strings.IndexFunc(targetPath, func(r rune) bool {
-		return r < 0x20 || r == 0x7f
-	}) >= 0 {
+	if strings.IndexFunc(targetPath, unicode.IsControl) >= 0 {
 		return "", invalidRestoreRequestErrorf("%w: restore target contains invalid control characters", ErrUnsafePath)
 	}
 	target := strings.TrimSpace(targetPath)
@@ -4688,12 +4702,16 @@ func moveResticRestoredSource(ctx context.Context, rawPath, partialPath, source 
 		if err := ctx.Err(); err != nil {
 			return 0, 0, err
 		}
-		sourceEntry := filepath.Join(restoredSourcePath, entry.Name())
-		if err := rootio.RenamePathIntoDirNoFollow(sourceEntry, partialPath, entry.Name()); err != nil {
+		entryName, err := childRelPath(".", entry.Name())
+		if err != nil {
+			return 0, 0, fmt.Errorf("%w: restic restored source contains unsafe entry name %q", err, cleanPreviewSamplePath(entry.Name()))
+		}
+		sourceEntry := filepath.Join(restoredSourcePath, entryName)
+		if err := rootio.RenamePathIntoDirNoFollow(sourceEntry, partialPath, entryName); err != nil {
 			if errors.Is(err, os.ErrExist) {
 				return 0, 0, ErrRestoreTargetExists
 			}
-			return 0, 0, fmt.Errorf("move restored entry %s: %w", entry.Name(), mapRestorePathError(err, "restore staging target path must not contain symlink"))
+			return 0, 0, fmt.Errorf("move restored entry %s: %w", cleanPreviewSamplePath(entryName), mapRestorePathError(err, "restore staging target path must not contain symlink"))
 		}
 	}
 
@@ -4717,6 +4735,18 @@ func resticRestoredSourcePath(rawPath, source string) (string, error) {
 	return safeJoin(rawPath, source)
 }
 
+func restoreWalkRelativePath(root, filePath, label string) (string, error) {
+	relPath, err := filepath.Rel(root, filePath)
+	if err != nil {
+		return "", fmt.Errorf("%w: %s contains entry outside root", ErrUnsafePath, label)
+	}
+	relPath = filepath.ToSlash(relPath)
+	if _, err := safeJoin(root, relPath); err != nil {
+		return "", fmt.Errorf("%w: %s contains unsafe entry path %q", err, label, cleanPreviewSamplePath(relPath))
+	}
+	return relPath, nil
+}
+
 func summarizeRestoredTree(ctx context.Context, root string) (int64, int64, error) {
 	var fileCount int64
 	var totalBytes int64
@@ -4730,11 +4760,10 @@ func summarizeRestoredTree(ctx context.Context, root string) (int64, int64, erro
 		if filePath == root {
 			return nil
 		}
-		relPath, err := filepath.Rel(root, filePath)
+		relPath, err := restoreWalkRelativePath(root, filePath, "restored tree")
 		if err != nil {
-			relPath = filePath
+			return err
 		}
-		relPath = filepath.ToSlash(relPath)
 		info, err := entry.Info()
 		if err != nil {
 			return fmt.Errorf("stat restored entry: %w", err)
@@ -4781,11 +4810,10 @@ func summarizeRestoreVerificationTree(ctx context.Context, root string) (int64, 
 		if err != nil {
 			return fmt.Errorf("stat restored entry: %w", err)
 		}
-		relPath, err := filepath.Rel(root, filePath)
+		relPath, err := restoreWalkRelativePath(root, filePath, "restore verification tree")
 		if err != nil {
-			relPath = filePath
+			return err
 		}
-		relPath = filepath.ToSlash(relPath)
 		if info.Mode()&os.ModeSymlink != 0 {
 			warnings = appendRestoreVerificationWarning(warnings, "发现符号链接，切换前请确认不会指向当前生产目录: "+relPath)
 			return nil
@@ -4945,11 +4973,10 @@ func appendRestoreDirectoryComparisonWarnings(ctx context.Context, snapshotPath 
 		if info.Mode()&os.ModeSymlink != 0 {
 			return nil
 		}
-		relPath, err := filepath.Rel(sourceRootPath, sourcePath)
+		relPath, err := restoreWalkRelativePath(sourceRootPath, sourcePath, "backup snapshot data tree")
 		if err != nil {
 			return err
 		}
-		relPath = filepath.ToSlash(relPath)
 		expectedDirs[relPath] = struct{}{}
 		targetDirPath, err := safeJoin(targetPath, relPath)
 		if err != nil {
@@ -4985,11 +5012,10 @@ func appendRestoreDirectoryComparisonWarnings(ctx context.Context, snapshotPath 
 		if targetDirPath == targetPath || !entry.IsDir() {
 			return nil
 		}
-		relPath, err := filepath.Rel(targetPath, targetDirPath)
+		relPath, err := restoreWalkRelativePath(targetPath, targetDirPath, "restore target directory tree")
 		if err != nil {
 			return err
 		}
-		relPath = filepath.ToSlash(relPath)
 		if relPath == ".mnemonas-restore" || strings.HasPrefix(relPath, ".mnemonas-restore/") {
 			return filepath.SkipDir
 		}
@@ -5056,11 +5082,10 @@ func appendRestoreFileComparisonWarnings(ctx context.Context, targetPath string,
 		if err != nil {
 			return fmt.Errorf("stat restore target entry: %w", err)
 		}
-		relPath, err := filepath.Rel(targetPath, filePath)
+		relPath, err := restoreWalkRelativePath(targetPath, filePath, "restore target file tree")
 		if err != nil {
 			return err
 		}
-		relPath = filepath.ToSlash(relPath)
 		if relPath == ".mnemonas-restore/config.toml" {
 			return nil
 		}
@@ -5349,7 +5374,10 @@ func restoreSnapshotDirectoryEntry(ctx context.Context, sourceRootPath string, r
 		return children[i].Name() < children[j].Name()
 	})
 	for _, child := range children {
-		childPath := childRelPath(relPath, child.Name())
+		childPath, err := childRelPath(relPath, child.Name())
+		if err != nil {
+			return fmt.Errorf("%w: backup snapshot contains unsafe entry name %q", err, cleanPreviewSamplePath(child.Name()))
+		}
 		childSourcePath := filepath.Join(sourceRootPath, childPath)
 		childInfo, err := os.Lstat(childSourcePath)
 		if err != nil {
@@ -5444,11 +5472,20 @@ func mapSourceRootError(err error) error {
 	return err
 }
 
-func childRelPath(parent, name string) string {
-	if parent == "." {
-		return name
+func childRelPath(parent, name string) (string, error) {
+	normalized := strings.ReplaceAll(name, "\\", "/")
+	if name == "" || strings.Contains(normalized, "/") || strings.IndexFunc(normalized, unicode.IsControl) >= 0 {
+		return "", ErrUnsafePath
 	}
-	return filepath.Join(parent, name)
+	for _, segment := range strings.Split(normalized, "/") {
+		if segment == "." || segment == ".." {
+			return "", ErrUnsafePath
+		}
+	}
+	if parent == "." {
+		return name, nil
+	}
+	return filepath.Join(parent, name), nil
 }
 
 func shouldExclude(relSlash string, excludes []string) bool {
@@ -5469,7 +5506,7 @@ func shouldExclude(relSlash string, excludes []string) bool {
 }
 
 func safeJoin(root, archivePath string) (string, error) {
-	if archivePath == "" || filepath.IsAbs(archivePath) || strings.Contains(archivePath, "\x00") {
+	if archivePath == "" || filepath.IsAbs(archivePath) || strings.Contains(archivePath, "\\") || strings.IndexFunc(archivePath, unicode.IsControl) >= 0 {
 		return "", ErrUnsafePath
 	}
 	slashPath := filepath.ToSlash(archivePath)

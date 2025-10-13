@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 	"unicode/utf16"
 
 	"golang.org/x/crypto/md4"
@@ -394,7 +395,7 @@ func usernameKey(username string) string {
 }
 
 func isInvalidNameRune(r rune) bool {
-	return r <= 0x20 || r == 0x7f
+	return unicode.IsSpace(r) || unicode.IsControl(r)
 }
 
 // NTHashHex derives the NT hash used by NTLM from an SMB password.

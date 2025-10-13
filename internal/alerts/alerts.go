@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/bits"
 	"mime"
 	"net"
 	"net/http"
@@ -18,6 +19,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/rs/zerolog"
 )
@@ -103,6 +105,55 @@ func cloneConfig(cfg Config) Config {
 	return clone
 }
 
+var (
+	errStorageStatsInvalidBlockSize = errors.New("filesystem reported invalid block size")
+	errStorageStatsCapacityOverflow = errors.New("filesystem capacity exceeds uint64")
+)
+
+func storageStatsFromStatfsBlocks(path string, blocks, availableBlocks uint64, blockSize int64, checkedAt time.Time) (StorageStats, error) {
+	if blockSize <= 0 {
+		return StorageStats{}, errStorageStatsInvalidBlockSize
+	}
+
+	totalBytes, err := statfsBytes(blocks, uint64(blockSize))
+	if err != nil {
+		return StorageStats{}, err
+	}
+	freeBytes, err := statfsBytes(availableBlocks, uint64(blockSize))
+	if err != nil {
+		return StorageStats{}, err
+	}
+
+	return storageStatsFromUsage(path, totalBytes, freeBytes, checkedAt), nil
+}
+
+func statfsBytes(blocks, blockSize uint64) (uint64, error) {
+	hi, lo := bits.Mul64(blocks, blockSize)
+	if hi != 0 {
+		return 0, errStorageStatsCapacityOverflow
+	}
+	return lo, nil
+}
+
+func storageStatsFromUsage(path string, totalBytes, freeBytes uint64, checkedAt time.Time) StorageStats {
+	if freeBytes > totalBytes {
+		freeBytes = totalBytes
+	}
+	usedBytes := totalBytes - freeBytes
+	usedPct := 0.0
+	if totalBytes > 0 {
+		usedPct = float64(usedBytes) / float64(totalBytes) * 100
+	}
+	return StorageStats{
+		Path:       path,
+		TotalBytes: totalBytes,
+		FreeBytes:  freeBytes,
+		UsedBytes:  usedBytes,
+		UsedPct:    usedPct,
+		CheckedAt:  checkedAt.UTC(),
+	}
+}
+
 var sendSMTPMail = smtp.SendMail
 var telegramAPIBaseURL = "https://api.telegram.org"
 
@@ -142,6 +193,7 @@ type Monitor struct {
 	lastLevel      AlertLevel
 	lastAlertLevel AlertLevel
 	lastStats      *StorageStats
+	now            func() time.Time
 
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
@@ -158,6 +210,7 @@ func NewMonitor(cfg Config, dataDir string, logger zerolog.Logger) *Monitor {
 		dataDir:        dataDir,
 		lastLevel:      AlertLevelNone,
 		lastAlertLevel: AlertLevelNone,
+		now:            time.Now,
 	}
 }
 
@@ -291,7 +344,7 @@ func (m *Monitor) SendEvent(ctx context.Context, event EventPayload) error {
 		event.Level = AlertLevelWarning
 	}
 	if event.Timestamp.IsZero() {
-		event.Timestamp = time.Now().UTC()
+		event.Timestamp = m.currentTime().UTC()
 	}
 	if strings.TrimSpace(event.Hostname) == "" {
 		hostname, _ := os.Hostname()
@@ -343,6 +396,7 @@ func (m *Monitor) check(ctx context.Context) {
 	onAlertMonitorCheckComplete(ctx, cloneStorageStats(stats))
 
 	level := stats.Level
+	checkedAt := m.statsCheckedAt(stats)
 
 	if level == AlertLevelNone {
 		m.mu.Lock()
@@ -355,7 +409,7 @@ func (m *Monitor) check(ctx context.Context) {
 
 	// Check cooldown
 	m.mu.Lock()
-	shouldAlert := m.shouldSendAlert(level, cfg)
+	shouldAlert := m.shouldSendAlert(level, cfg, checkedAt)
 	m.mu.Unlock()
 
 	if shouldAlert {
@@ -368,7 +422,7 @@ func (m *Monitor) check(ctx context.Context) {
 		}
 
 		m.mu.Lock()
-		m.lastAlert = time.Now()
+		m.lastAlert = checkedAt
 		m.lastLevel = level
 		m.lastAlertLevel = level
 		m.mu.Unlock()
@@ -400,7 +454,7 @@ func (m *Monitor) determineLevel(stats *StorageStats, cfg Config) AlertLevel {
 	return AlertLevelNone
 }
 
-func (m *Monitor) shouldSendAlert(level AlertLevel, cfg Config) bool {
+func (m *Monitor) shouldSendAlert(level AlertLevel, cfg Config, now time.Time) bool {
 	if m.lastLevel == AlertLevelNone {
 		return true
 	}
@@ -411,11 +465,25 @@ func (m *Monitor) shouldSendAlert(level AlertLevel, cfg Config) bool {
 	}
 
 	// Check cooldown for repeated alerts
-	if time.Since(m.lastAlert) < cfg.CooldownPeriod {
+	if cfg.CooldownPeriod > 0 && !m.lastAlert.IsZero() && now.Sub(m.lastAlert) < cfg.CooldownPeriod {
 		return false
 	}
 
 	return true
+}
+
+func (m *Monitor) currentTime() time.Time {
+	if m.now != nil {
+		return m.now()
+	}
+	return time.Now()
+}
+
+func (m *Monitor) statsCheckedAt(stats *StorageStats) time.Time {
+	if stats != nil && !stats.CheckedAt.IsZero() {
+		return stats.CheckedAt.UTC()
+	}
+	return m.currentTime().UTC()
 }
 
 func (m *Monitor) sendAlert(ctx context.Context, stats *StorageStats, cfg Config) error {
@@ -443,7 +511,7 @@ func (m *Monitor) sendAlert(ctx context.Context, stats *StorageStats, cfg Config
 			Level:     stats.Level,
 			Message:   message,
 			Stats:     *stats,
-			Timestamp: time.Now().UTC(),
+			Timestamp: m.statsCheckedAt(stats),
 			Hostname:  hostname,
 		}
 
@@ -657,7 +725,7 @@ func (m *Monitor) sendTelegram(ctx context.Context, cfg Config, text string) err
 		return errors.New("telegram alert missing bot token or chat id")
 	}
 	if strings.ContainsAny(token, "/?#") || strings.IndexFunc(token, func(r rune) bool {
-		return r <= 0x20 || r == 0x7f
+		return unicode.IsSpace(r) || unicode.IsControl(r)
 	}) >= 0 {
 		return errors.New("telegram alert bot token contains invalid characters")
 	}

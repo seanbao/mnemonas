@@ -69,6 +69,214 @@ func createOversizedPNGConfigOnly(width, height int) []byte {
 	return buf.Bytes()
 }
 
+func TestRequestShareOwnerIdentifiersUseUserContextWhenClaimsAreMissing(t *testing.T) {
+	ctx := context.WithValue(context.Background(), auth.ContextKeyUser, &auth.User{
+		ID:       "user-ctx",
+		Username: "alice",
+	})
+
+	got := getShareOwnerIdentifiersFromRequest(ctx)
+	if !slices.Equal(got, []string{"user-ctx", "alice"}) {
+		t.Fatalf("share owner identifiers = %#v, want [user-ctx alice]", got)
+	}
+}
+
+func TestAuthorizeShareOwnerPathRejectsDirtyStoredSharePath(t *testing.T) {
+	usersFile := filepath.Join(t.TempDir(), "users.json")
+	userStore, _, err := auth.NewUserStore(usersFile)
+	if err != nil {
+		t.Fatalf("NewUserStore() error: %v", err)
+	}
+	admin, err := userStore.Create("share-admin", "password123", "", auth.RoleAdmin)
+	if err != nil {
+		t.Fatalf("Create(admin) error: %v", err)
+	}
+
+	server := &Server{
+		authEnabled: true,
+		userStore:   userStore,
+	}
+
+	dirtyShare := &share.Share{
+		ID:        "legacy-dirty-share",
+		Path:      "/private/../public/report.txt",
+		Type:      share.ShareTypeFile,
+		CreatedBy: admin.ID,
+	}
+	if err := server.authorizeShareOwnerPath(context.Background(), dirtyShare, "/public/report.txt"); !errors.Is(err, share.ErrShareNotFound) {
+		t.Fatalf("authorizeShareOwnerPath(dirty stored path) error = %v, want %v", err, share.ErrShareNotFound)
+	}
+
+	cleanShare := &share.Share{
+		ID:        "legacy-clean-share",
+		Path:      "/public/report.txt",
+		Type:      share.ShareTypeFile,
+		CreatedBy: admin.ID,
+	}
+	if err := server.authorizeShareOwnerPath(context.Background(), cleanShare, "/public/report.txt"); err != nil {
+		t.Fatalf("authorizeShareOwnerPath(clean stored path) error = %v, want nil", err)
+	}
+}
+
+func TestRequestShareOwnerIdentifiersIgnoreDisabledUserContextWhenClaimsAreMissing(t *testing.T) {
+	ctx := context.WithValue(context.Background(), auth.ContextKeyUser, &auth.User{
+		ID:       "disabled-user",
+		Username: "alice",
+		Disabled: true,
+	})
+
+	if got := getShareOwnerIdentifiersFromRequest(ctx); len(got) != 0 {
+		t.Fatalf("share owner identifiers = %#v, want empty", got)
+	}
+}
+
+func TestRequestShareOwnerIdentifiersIgnoreDisabledUserContextEvenWithClaims(t *testing.T) {
+	ctx := context.WithValue(context.Background(), auth.ContextKeyUser, &auth.User{
+		ID:       "disabled-user",
+		Username: "alice",
+		Disabled: true,
+	})
+	ctx = auth.WithClaimsContext(ctx, &auth.TokenClaims{
+		UserID:   "disabled-user",
+		Username: "alice",
+	})
+
+	if got := getShareOwnerIdentifiersFromRequest(ctx); len(got) != 0 {
+		t.Fatalf("share owner identifiers = %#v, want empty", got)
+	}
+}
+
+func TestRequestFavoriteUserIdentifiersUseUserContextWhenClaimsAreMissing(t *testing.T) {
+	ctx := context.WithValue(context.Background(), auth.ContextKeyUser, &auth.User{
+		ID:       "user-ctx",
+		Username: "alice",
+	})
+
+	primary, legacy := getFavoriteUserIdentifiersFromRequest(ctx)
+	if primary != "user-ctx" {
+		t.Fatalf("favorite primary identifier = %q, want user-ctx", primary)
+	}
+	if !slices.Equal(legacy, []string{"alice"}) {
+		t.Fatalf("favorite legacy identifiers = %#v, want [alice]", legacy)
+	}
+}
+
+func TestRequestFavoriteUserIdentifiersIgnoreDisabledUserContextWhenClaimsAreMissing(t *testing.T) {
+	ctx := context.WithValue(context.Background(), auth.ContextKeyUser, &auth.User{
+		ID:       "disabled-user",
+		Username: "alice",
+		Disabled: true,
+	})
+
+	primary, legacy := getFavoriteUserIdentifiersFromRequest(ctx)
+	if primary != "anonymous" {
+		t.Fatalf("favorite primary identifier = %q, want anonymous", primary)
+	}
+	if len(legacy) != 0 {
+		t.Fatalf("favorite legacy identifiers = %#v, want empty", legacy)
+	}
+}
+
+func TestRequestFavoriteUserIdentifiersIgnoreDisabledUserContextEvenWithClaims(t *testing.T) {
+	ctx := context.WithValue(context.Background(), auth.ContextKeyUser, &auth.User{
+		ID:       "disabled-user",
+		Username: "alice",
+		Disabled: true,
+	})
+	ctx = auth.WithClaimsContext(ctx, &auth.TokenClaims{
+		UserID:   "disabled-user",
+		Username: "alice",
+	})
+
+	primary, legacy := getFavoriteUserIdentifiersFromRequest(ctx)
+	if primary != "anonymous" {
+		t.Fatalf("favorite primary identifier = %q, want anonymous", primary)
+	}
+	if len(legacy) != 0 {
+		t.Fatalf("favorite legacy identifiers = %#v, want empty", legacy)
+	}
+}
+
+func TestServer_LogActivityUsesUserContextWhenClaimsAreMissing(t *testing.T) {
+	server := newActivityOnlyAuthServer(t)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/files/upload", nil)
+	req = req.WithContext(context.WithValue(req.Context(), auth.ContextKeyUser, &auth.User{
+		ID:       "user-ctx",
+		Username: "alice",
+	}))
+
+	server.LogActivity(req, activity.ActionUpload, "/alice/report.txt", nil)
+
+	entries, total := server.activity.List(10, 0, activity.ActionUpload, "")
+	if total != 1 || len(entries) != 1 {
+		t.Fatalf("activity entries total=%d len=%d, want one", total, len(entries))
+	}
+	if entries[0].User != "alice" {
+		t.Fatalf("activity user = %q, want alice", entries[0].User)
+	}
+}
+
+func TestServer_LogActivityIgnoresDisabledUserContextWhenClaimsAreMissing(t *testing.T) {
+	server := newActivityOnlyAuthServer(t)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/files/upload", nil)
+	req = req.WithContext(context.WithValue(req.Context(), auth.ContextKeyUser, &auth.User{
+		ID:       "disabled-user",
+		Username: "alice",
+		Disabled: true,
+	}))
+
+	server.LogActivity(req, activity.ActionUpload, "/alice/report.txt", nil)
+
+	entries, total := server.activity.List(10, 0, activity.ActionUpload, "")
+	if total != 1 || len(entries) != 1 {
+		t.Fatalf("activity entries total=%d len=%d, want one", total, len(entries))
+	}
+	if entries[0].User != "anonymous" {
+		t.Fatalf("activity user = %q, want anonymous", entries[0].User)
+	}
+}
+
+func TestCurrentRequestUsernameIgnoresDisabledUserContextEvenWithClaims(t *testing.T) {
+	ctx := context.WithValue(context.Background(), auth.ContextKeyUser, &auth.User{
+		ID:       "disabled-user",
+		Username: "alice",
+		Disabled: true,
+	})
+	ctx = auth.WithClaimsContext(ctx, &auth.TokenClaims{
+		UserID:   "disabled-user",
+		Username: "alice",
+	})
+
+	if username, ok := currentRequestUsernameFromContext(ctx); ok {
+		t.Fatalf("current request username = %q, want no username", username)
+	}
+}
+
+func TestActivityReviewReviewerUsesUserContextWhenClaimsAreMissing(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/activity/reviews", nil)
+	req = req.WithContext(context.WithValue(req.Context(), auth.ContextKeyUser, &auth.User{
+		ID:       "reviewer-id",
+		Username: "reviewer",
+	}))
+
+	if got := currentActivityReviewReviewer(req); got != "reviewer" {
+		t.Fatalf("reviewer = %q, want reviewer", got)
+	}
+}
+
+func TestActivityReviewReviewerIgnoresDisabledUserContextWhenClaimsAreMissing(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/activity/reviews", nil)
+	req = req.WithContext(context.WithValue(req.Context(), auth.ContextKeyUser, &auth.User{
+		ID:       "disabled-reviewer",
+		Username: "reviewer",
+		Disabled: true,
+	}))
+
+	if got := currentActivityReviewReviewer(req); got != "admin" {
+		t.Fatalf("reviewer = %q, want admin", got)
+	}
+}
+
 func createGIFThumbnailSource(width, height int) []byte {
 	img := image.NewPaletted(image.Rect(0, 0, width, height), color.Palette{
 		color.RGBA{0, 0, 0, 255},
@@ -220,6 +428,49 @@ func requireQuotaAlertHidesPaths(t *testing.T, event alerts.EventPayload, forbid
 		}
 		if strings.Contains(string(data), fragment) {
 			t.Fatalf("quota alert details leaked %q: %s", fragment, data)
+		}
+	}
+}
+
+func TestServer_SendQuotaExceededAlertEventIgnoresDisabledUserContext(t *testing.T) {
+	monitor := &fakeAlertMonitor{}
+	server := &Server{alertMonitor: monitor, logger: zerolog.Nop()}
+	ctx := context.WithValue(context.Background(), auth.ContextKeyUser, &auth.User{
+		ID:       "disabled-user",
+		Username: "disabled-user",
+		Disabled: true,
+	})
+
+	server.sendQuotaExceededAlertEvent(ctx, "upload", newQuotaExceededErrorFor(quotaTypeUser, "/disabled-user", 5, 4, 2, 0))
+
+	if len(monitor.events) != 1 {
+		t.Fatalf("quota alert event count = %d, want 1", len(monitor.events))
+	}
+	if got := monitor.events[0].Details["actor_scope"]; got != "unknown" {
+		t.Fatalf("actor_scope = %q, want unknown", got)
+	}
+}
+
+func requireQuotaResponsePath(t *testing.T, body, wantPath string, forbiddenFragments ...string) {
+	t.Helper()
+	var payload struct {
+		Details struct {
+			QuotaType string `json:"quota_type"`
+			QuotaPath string `json:"quota_path"`
+		} `json:"details"`
+	}
+	if err := json.Unmarshal([]byte(body), &payload); err != nil {
+		t.Fatalf("decode quota response: %v; body=%s", err, body)
+	}
+	if payload.Details.QuotaType != quotaTypeDirectory || payload.Details.QuotaPath != wantPath {
+		t.Fatalf("expected directory quota details with path %q, got %+v; body=%s", wantPath, payload.Details, body)
+	}
+	for _, fragment := range forbiddenFragments {
+		if fragment == "" {
+			continue
+		}
+		if strings.Contains(body, fragment) {
+			t.Fatalf("quota response leaked %q: %s", fragment, body)
 		}
 	}
 }
@@ -783,6 +1034,43 @@ func setupAuthSettingsServer(t *testing.T) (*Server, string) {
 	}
 
 	return server, tmpDir
+}
+
+func TestNewServer_AcceptsAuthUserStorePersistenceWarning(t *testing.T) {
+	tmpDir := t.TempDir()
+	usersFile := path.Join(tmpDir, "users.json")
+	userStore, _, err := auth.NewUserStore(usersFile)
+	if err != nil {
+		t.Fatalf("NewUserStore() error: %v", err)
+	}
+
+	originalNewAuthUserStore := newAuthUserStore
+	newAuthUserStore = func(path string) (*auth.UserStore, string, error) {
+		if path != usersFile {
+			t.Fatalf("newAuthUserStore path = %q, want %q", path, usersFile)
+		}
+		return userStore, "", auth.WrapPersistenceWarning(errors.New("directory fsync failed"))
+	}
+	t.Cleanup(func() {
+		newAuthUserStore = originalNewAuthUserStore
+	})
+
+	server, err := NewServer(zerolog.Nop(), &ServerConfig{
+		AuthEnabled:    true,
+		AuthUsersFile:  usersFile,
+		AuthJWTSecret:  "test-secret",
+		AuthAccessTTL:  15 * time.Minute,
+		AuthRefreshTTL: 24 * time.Hour,
+	})
+	if err != nil {
+		t.Fatalf("NewServer() error: %v", err)
+	}
+	if server.userStore != userStore {
+		t.Fatal("expected server to keep the user store returned with a persistence warning")
+	}
+	if server.tokenManager == nil {
+		t.Fatal("expected token manager to be initialized after auth persistence warning")
+	}
 }
 
 func setupAuthServerWithFeatures(t *testing.T, shareEnabled, favoritesEnabled bool) (*Server, *storage.FileSystem, string, string, string) {
@@ -2129,9 +2417,7 @@ func TestServer_UploadFile_EnforcesDirectoryQuota(t *testing.T) {
 	if w.Code != http.StatusInsufficientStorage {
 		t.Fatalf("directory quota upload status = %d, want %d; body=%s", w.Code, http.StatusInsufficientStorage, w.Body.String())
 	}
-	if !strings.Contains(w.Body.String(), `"quota_type":"directory"`) || !strings.Contains(w.Body.String(), `"quota_path":"/team/token=quota-secret"`) {
-		t.Fatalf("expected directory quota details, got %s", w.Body.String())
-	}
+	requireQuotaResponsePath(t, w.Body.String(), "/team/token=<redacted>", "quota-secret")
 	if _, err := fs.Stat(ctx, "/team/token=quota-secret/new.txt"); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("expected rejected upload to leave no file, got %v", err)
 	}
@@ -2143,6 +2429,38 @@ func TestServer_UploadFile_EnforcesDirectoryQuota(t *testing.T) {
 		t.Fatalf("alert quota_type = %v, want %s", got, quotaTypeDirectory)
 	}
 	requireQuotaAlertHidesPaths(t, event, "quota-secret", "/team")
+}
+
+func TestServer_UploadFile_IgnoresDirtyRuntimeDirectoryQuotaPath(t *testing.T) {
+	server, fs, _ := setupTestServer(t)
+	ctx := context.Background()
+	cfg := server.currentConfig()
+	cfg.Storage.DirectoryQuotas = []config.DirectoryQuotaConfig{{Path: "/team/../private", QuotaBytes: 1}}
+	server.storeConfig(cfg)
+
+	if err := fs.Mkdir(ctx, "/private"); err != nil {
+		t.Fatalf("Mkdir(/private) error: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/files/private/new.txt", strings.NewReader("ok"))
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("dirty runtime directory quota upload status = %d, want %d; body=%s", w.Code, http.StatusCreated, w.Body.String())
+	}
+	reader, err := fs.OpenFile(ctx, "/private/new.txt")
+	if err != nil {
+		t.Fatalf("expected upload with ignored dirty quota path to create file: %v", err)
+	}
+	defer reader.Close()
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("ReadAll(new file) error: %v", err)
+	}
+	if string(data) != "ok" {
+		t.Fatalf("created file content = %q, want ok", data)
+	}
 }
 
 func TestServer_UploadFile_AllowsReplacingWithinUserQuota(t *testing.T) {
@@ -3184,6 +3502,12 @@ func TestDownloadArchiveChildPathRejectsEntriesOutsideSource(t *testing.T) {
 			wantName:   "report.txt",
 		},
 		{
+			name:       "whitespace child path",
+			sourcePath: "/docs",
+			child:      &storage.FileInfo{Path: "   ", Name: "report.txt"},
+			wantErr:    true,
+		},
+		{
 			name:       "similar prefix sibling",
 			sourcePath: "/docs",
 			child:      &storage.FileInfo{Path: "/docs-archive/secret.txt", Name: "secret.txt"},
@@ -3219,6 +3543,42 @@ func TestDownloadArchiveChildPathRejectsEntriesOutsideSource(t *testing.T) {
 			child:      &storage.FileInfo{Name: "./report.txt"},
 			wantErr:    true,
 		},
+		{
+			name:       "leading slash fallback name",
+			sourcePath: "/docs",
+			child:      &storage.FileInfo{Name: "/report.txt"},
+			wantErr:    true,
+		},
+		{
+			name:       "trailing slash fallback name",
+			sourcePath: "/docs",
+			child:      &storage.FileInfo{Name: "report.txt/"},
+			wantErr:    true,
+		},
+		{
+			name:       "backslash fallback name",
+			sourcePath: "/docs",
+			child:      &storage.FileInfo{Name: "nested\\report.txt"},
+			wantErr:    true,
+		},
+		{
+			name:       "control character child path",
+			sourcePath: "/docs",
+			child:      &storage.FileInfo{Path: "/docs/report\n2026.txt", Name: "report\n2026.txt"},
+			wantErr:    true,
+		},
+		{
+			name:       "backslash child path",
+			sourcePath: "/docs",
+			child:      &storage.FileInfo{Path: "/docs\\report.txt", Name: "report.txt"},
+			wantErr:    true,
+		},
+		{
+			name:       "control character fallback name",
+			sourcePath: "/docs",
+			child:      &storage.FileInfo{Name: "report\x7f.txt"},
+			wantErr:    true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -3242,6 +3602,12 @@ func TestSafeDownloadArchiveEntryNameRejectsDotSegments(t *testing.T) {
 		"docs/./report.txt",
 		"docs/../report.txt",
 		"./docs/report.txt",
+		"C:/windows/system32/config",
+		"c:relative-drive-path.txt",
+		"docs/C:windows/system32/config",
+		"docs/report.txt:stream",
+		"docs/report\n2026.txt",
+		"docs/report\x7f.txt",
 	} {
 		if got, err := safeDownloadArchiveEntryName(name); err == nil {
 			t.Fatalf("safeDownloadArchiveEntryName(%q) = %q, want error", name, got)
@@ -3254,6 +3620,261 @@ func TestSafeDownloadArchiveEntryNameRejectsDotSegments(t *testing.T) {
 	}
 	if got != "docs/foo..txt" {
 		t.Fatalf("safeDownloadArchiveEntryName(foo..txt) = %q, want docs/foo..txt", got)
+	}
+}
+
+func TestServer_WriteDownloadArchiveRejectsUnsafeHeaderNames(t *testing.T) {
+	server, fs, _ := setupTestServer(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/safe.txt", bytes.NewReader([]byte("safe"))); err != nil {
+		t.Fatalf("WriteFile(/safe.txt) error: %v", err)
+	}
+
+	now := time.Unix(1700000000, 0)
+	tests := []struct {
+		name  string
+		entry downloadArchiveEntry
+	}{
+		{
+			name: "directory traversal",
+			entry: downloadArchiveEntry{
+				sourcePath: "/safe-dir",
+				zipName:    "../evil/",
+				info: &storage.FileInfo{
+					Path:    "/safe-dir",
+					Name:    "safe-dir",
+					IsDir:   true,
+					ModTime: now,
+				},
+			},
+		},
+		{
+			name: "file absolute path",
+			entry: downloadArchiveEntry{
+				sourcePath: "/safe.txt",
+				zipName:    "/evil.txt",
+				info: &storage.FileInfo{
+					Path:    "/safe.txt",
+					Name:    "safe.txt",
+					Size:    4,
+					ModTime: now,
+				},
+			},
+		},
+		{
+			name: "file parent segment",
+			entry: downloadArchiveEntry{
+				sourcePath: "/safe.txt",
+				zipName:    "docs/../evil.txt",
+				info: &storage.FileInfo{
+					Path:    "/safe.txt",
+					Name:    "safe.txt",
+					Size:    4,
+					ModTime: now,
+				},
+			},
+		},
+		{
+			name: "file backslash separator",
+			entry: downloadArchiveEntry{
+				sourcePath: "/safe.txt",
+				zipName:    `docs\evil.txt`,
+				info: &storage.FileInfo{
+					Path:    "/safe.txt",
+					Name:    "safe.txt",
+					Size:    4,
+					ModTime: now,
+				},
+			},
+		},
+		{
+			name: "file Windows drive path",
+			entry: downloadArchiveEntry{
+				sourcePath: "/safe.txt",
+				zipName:    "C:/windows/system32/config",
+				info: &storage.FileInfo{
+					Path:    "/safe.txt",
+					Name:    "safe.txt",
+					Size:    4,
+					ModTime: now,
+				},
+			},
+		},
+		{
+			name: "file colon stream path",
+			entry: downloadArchiveEntry{
+				sourcePath: "/safe.txt",
+				zipName:    "docs/report.txt:stream",
+				info: &storage.FileInfo{
+					Path:    "/safe.txt",
+					Name:    "safe.txt",
+					Size:    4,
+					ModTime: now,
+				},
+			},
+		},
+		{
+			name: "file trailing slash",
+			entry: downloadArchiveEntry{
+				sourcePath: "/safe.txt",
+				zipName:    "safe.txt/",
+				info: &storage.FileInfo{
+					Path:    "/safe.txt",
+					Name:    "safe.txt",
+					Size:    4,
+					ModTime: now,
+				},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var archive bytes.Buffer
+			zipWriter := zip.NewWriter(&archive)
+
+			err := server.writeDownloadArchive(ctx, zipWriter, []downloadArchiveEntry{tt.entry})
+			if !errors.Is(err, errInvalidPath) {
+				t.Fatalf("writeDownloadArchive() error = %v, want errInvalidPath", err)
+			}
+			if closeErr := zipWriter.Close(); closeErr != nil {
+				t.Fatalf("zipWriter.Close() error: %v", closeErr)
+			}
+		})
+	}
+}
+
+func TestServer_WriteDownloadArchiveRejectsDuplicateHeaderNames(t *testing.T) {
+	server, fs, _ := setupTestServer(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/first.txt", bytes.NewReader([]byte("first"))); err != nil {
+		t.Fatalf("WriteFile(/first.txt) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/second.txt", bytes.NewReader([]byte("second"))); err != nil {
+		t.Fatalf("WriteFile(/second.txt) error: %v", err)
+	}
+
+	now := time.Unix(1700000000, 0)
+	var archive bytes.Buffer
+	zipWriter := zip.NewWriter(&archive)
+	err := server.writeDownloadArchive(ctx, zipWriter, []downloadArchiveEntry{
+		{
+			sourcePath: "/first.txt",
+			zipName:    "duplicate.txt",
+			info: &storage.FileInfo{
+				Path:    "/first.txt",
+				Name:    "first.txt",
+				Size:    5,
+				ModTime: now,
+			},
+		},
+		{
+			sourcePath: "/second.txt",
+			zipName:    "duplicate.txt",
+			info: &storage.FileInfo{
+				Path:    "/second.txt",
+				Name:    "second.txt",
+				Size:    6,
+				ModTime: now,
+			},
+		},
+	})
+	if !errors.Is(err, errDownloadArchiveDuplicateEntry) {
+		t.Fatalf("writeDownloadArchive() error = %v, want errDownloadArchiveDuplicateEntry", err)
+	}
+	if closeErr := zipWriter.Close(); closeErr != nil {
+		t.Fatalf("zipWriter.Close() error: %v", closeErr)
+	}
+}
+
+func TestValidateDownloadArchiveEntriesRejectsDuplicateHeaderNamesBeforeStreaming(t *testing.T) {
+	now := time.Unix(1700000000, 0)
+
+	err := validateDownloadArchiveEntries([]downloadArchiveEntry{
+		{
+			sourcePath: "/first.txt",
+			zipName:    "duplicate.txt",
+			info: &storage.FileInfo{
+				Path:    "/first.txt",
+				Name:    "first.txt",
+				Size:    5,
+				ModTime: now,
+			},
+		},
+		{
+			sourcePath: "/second.txt",
+			zipName:    "duplicate.txt",
+			info: &storage.FileInfo{
+				Path:    "/second.txt",
+				Name:    "second.txt",
+				Size:    6,
+				ModTime: now,
+			},
+		},
+	})
+
+	if !errors.Is(err, errDownloadArchiveDuplicateEntry) {
+		t.Fatalf("validateDownloadArchiveEntries() error = %v, want errDownloadArchiveDuplicateEntry", err)
+	}
+}
+
+func TestValidateDownloadArchiveEntriesMissingMetadataDoesNotExposeSourcePath(t *testing.T) {
+	const secretPath = "/private/token=archive-secret/report.txt"
+
+	err := validateDownloadArchiveEntries([]downloadArchiveEntry{
+		{
+			sourcePath: secretPath,
+			zipName:    "report.txt",
+		},
+	})
+
+	if !errors.Is(err, errDownloadArchiveMissingMetadata) {
+		t.Fatalf("validateDownloadArchiveEntries() error = %v, want errDownloadArchiveMissingMetadata", err)
+	}
+	for _, sensitive := range []string{secretPath, "token=archive-secret", "/private"} {
+		if strings.Contains(err.Error(), sensitive) {
+			t.Fatalf("archive validation error exposed %q: %v", sensitive, err)
+		}
+	}
+}
+
+func TestServer_WriteDownloadArchiveMissingMetadataDoesNotExposeSourcePath(t *testing.T) {
+	server, _, _ := setupTestServer(t)
+	const secretPath = "/private/token=archive-secret/report.txt"
+
+	var archive bytes.Buffer
+	zipWriter := zip.NewWriter(&archive)
+	err := server.writeDownloadArchive(context.Background(), zipWriter, []downloadArchiveEntry{
+		{
+			sourcePath: secretPath,
+			zipName:    "report.txt",
+		},
+	})
+
+	if !errors.Is(err, errDownloadArchiveMissingMetadata) {
+		t.Fatalf("writeDownloadArchive() error = %v, want errDownloadArchiveMissingMetadata", err)
+	}
+	for _, sensitive := range []string{secretPath, "token=archive-secret", "/private"} {
+		if strings.Contains(err.Error(), sensitive) {
+			t.Fatalf("archive write error exposed %q: %v", sensitive, err)
+		}
+	}
+	if closeErr := zipWriter.Close(); closeErr != nil {
+		t.Fatalf("zipWriter.Close() error: %v", closeErr)
+	}
+}
+
+func TestDownloadArchiveInternalErrorTextDoesNotExposeWrappedError(t *testing.T) {
+	baseErr := errors.New("disk write failed at /tmp/token=archive-secret")
+	err := newDownloadArchiveInternalError("write archive file", baseErr)
+
+	if !errors.Is(err, baseErr) {
+		t.Fatalf("newDownloadArchiveInternalError() error = %v, want wrapped base error", err)
+	}
+	if strings.Contains(err.Error(), "token=archive-secret") {
+		t.Fatalf("archive internal error exposed wrapped detail: %v", err)
 	}
 }
 
@@ -3541,6 +4162,51 @@ func TestServer_DownloadDirectoryArchiveReturnsStructuredErrorBeforeStreaming(t 
 	if !strings.Contains(w.Body.String(), "archive content is too large") {
 		t.Fatalf("expected structured archive-too-large response, got %s", w.Body.String())
 	}
+	_, total := server.activity.List(10, 0, activity.ActionDownload, "")
+	if total != 0 {
+		t.Fatalf("expected failed archive response not to log download activity, got %d", total)
+	}
+}
+
+func TestServer_DownloadArchiveSnapshotChangeReturnsConflictBeforeStreaming(t *testing.T) {
+	server, fs, _ := setupTestServer(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/docs"); err != nil {
+		t.Fatalf("Mkdir(/docs) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/docs/readme.txt", bytes.NewReader([]byte("readme"))); err != nil {
+		t.Fatalf("WriteFile(/docs/readme.txt) error: %v", err)
+	}
+
+	previousWriter := downloadArchiveWriter
+	downloadArchiveWriter = func(_ *Server, _ context.Context, _ *zip.Writer, _ []downloadArchiveEntry) error {
+		return newDownloadArchiveInternalError("open archive file", errDownloadArchiveSnapshotChanged)
+	}
+	t.Cleanup(func() {
+		downloadArchiveWriter = previousWriter
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/download/docs?archive=zip", nil)
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("directory archive snapshot change status = %d, want %d; body=%s", w.Code, http.StatusConflict, w.Body.String())
+	}
+	if contentType := w.Header().Get("Content-Type"); contentType != "application/json" {
+		t.Fatalf("directory archive snapshot change Content-Type = %q, want application/json", contentType)
+	}
+	if contentDisposition := w.Header().Get("Content-Disposition"); contentDisposition != "" {
+		t.Fatalf("directory archive snapshot change must not keep attachment header, got %q", contentDisposition)
+	}
+	if !strings.Contains(w.Body.String(), "archive entry changed during download") {
+		t.Fatalf("expected snapshot-change conflict response, got %s", w.Body.String())
+	}
+	_, total := server.activity.List(10, 0, activity.ActionDownload, "")
+	if total != 0 {
+		t.Fatalf("expected failed archive response not to log download activity, got %d", total)
+	}
 }
 
 func readZipEntries(t *testing.T, data []byte) map[string][]byte {
@@ -3631,6 +4297,10 @@ func TestServer_DownloadFile_UsesPrivateRevalidationCacheHeaders(t *testing.T) {
 	if etag == "" {
 		t.Fatal("expected download response to include ETag")
 	}
+	_, total := server.activity.List(10, 0, activity.ActionDownload, "")
+	if total != 1 {
+		t.Fatalf("expected initial download to log one activity entry, got %d", total)
+	}
 
 	req = httptest.NewRequest(http.MethodGet, "/api/v1/download/cache.txt", nil)
 	req.Header.Set("If-None-Match", etag)
@@ -3639,6 +4309,10 @@ func TestServer_DownloadFile_UsesPrivateRevalidationCacheHeaders(t *testing.T) {
 
 	if w.Code != http.StatusNotModified {
 		t.Fatalf("download If-None-Match status = %d, want %d", w.Code, http.StatusNotModified)
+	}
+	_, total = server.activity.List(10, 0, activity.ActionDownload, "")
+	if total != 1 {
+		t.Fatalf("expected 304 revalidation to keep one activity entry, got %d", total)
 	}
 }
 
@@ -3708,6 +4382,45 @@ func TestServer_DownloadFile_ErrorProbeDoesNotLogDownloadActivity(t *testing.T) 
 	_, total := server.activity.List(10, 0, activity.ActionDownload, "")
 	if total != 0 {
 		t.Fatalf("expected no download activity for probe request, got %d", total)
+	}
+}
+
+func TestServer_DownloadFile_ZeroLengthRangeDoesNotLogDownloadActivity(t *testing.T) {
+	server, fs, _ := setupTestServer(t)
+	ctx := context.Background()
+
+	if server.activity == nil {
+		t.Fatal("expected activity store to be initialized")
+	}
+	if err := fs.WriteFile(ctx, "/download-empty-range.txt", bytes.NewReader([]byte("content"))); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/download/download-empty-range.txt", nil)
+	req.Header.Set("Range", "bytes=-0")
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusPartialContent {
+		t.Fatalf("download zero-length range status = %d, want %d", w.Code, http.StatusPartialContent)
+	}
+	if body := w.Body.String(); body != "" {
+		t.Fatalf("download zero-length range body = %q, want empty", body)
+	}
+
+	_, total := server.activity.List(10, 0, activity.ActionDownload, "")
+	if total != 0 {
+		t.Fatalf("expected no download activity for zero-length range request, got %d", total)
+	}
+}
+
+func TestDownloadResponseShouldLogActivity_HeadDoesNotLogDownloadActivity(t *testing.T) {
+	req := httptest.NewRequest(http.MethodHead, "/api/v1/download/file.txt", nil)
+	writer := &apiDownloadResponseWriter{statusCode: http.StatusOK}
+
+	if downloadResponseShouldLogActivity(req, writer) {
+		t.Fatal("expected HEAD download response to skip activity logging")
 	}
 }
 
@@ -4074,6 +4787,53 @@ func TestServer_Logout_ClearsCookiesWithoutValidAuth(t *testing.T) {
 	}
 }
 
+func TestServer_LogoutActivityUsesUserContextWhenClaimsAreMissing(t *testing.T) {
+	server, _, _, username, _ := setupAuthServer(t)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/logout", nil)
+	req = req.WithContext(context.WithValue(req.Context(), auth.ContextKeyUser, &auth.User{
+		ID:       "user-ctx",
+		Username: username,
+	}))
+	rec := httptest.NewRecorder()
+
+	server.handleLogoutWithActivity(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("logout status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	entries, total := server.activity.List(10, 0, activity.ActionLogout, "")
+	if total != 1 || len(entries) != 1 {
+		t.Fatalf("logout activity entries total=%d len=%d, want one", total, len(entries))
+	}
+	if entries[0].User != username {
+		t.Fatalf("logout activity user = %q, want %q", entries[0].User, username)
+	}
+}
+
+func TestServer_LogoutActivityIgnoresDisabledUserContextWhenClaimsAreMissing(t *testing.T) {
+	server, _, _, _, _ := setupAuthServer(t)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/logout", nil)
+	req = req.WithContext(context.WithValue(req.Context(), auth.ContextKeyUser, &auth.User{
+		ID:       "disabled-user",
+		Username: "disabled",
+		Disabled: true,
+	}))
+	rec := httptest.NewRecorder()
+
+	server.handleLogoutWithActivity(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("logout status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	entries, total := server.activity.List(10, 0, activity.ActionLogout, "")
+	if total != 1 || len(entries) != 1 {
+		t.Fatalf("logout activity entries total=%d len=%d, want one", total, len(entries))
+	}
+	if entries[0].User != "unknown" {
+		t.Fatalf("logout activity user = %q, want unknown", entries[0].User)
+	}
+}
+
 func TestServer_RejectsCrossOriginUnsafeBrowserRequests(t *testing.T) {
 	server, _, _, username, password := setupAuthServer(t)
 	loginBody := fmt.Sprintf(`{"username":"%s","password":"%s"}`, username, password)
@@ -4174,6 +4934,18 @@ func TestServer_RejectsCrossOriginUnsafeBrowserRequests(t *testing.T) {
 
 	if apiClientRec.Code != http.StatusOK {
 		t.Fatalf("authorization client status = %d, want %d; body=%s", apiClientRec.Code, http.StatusOK, apiClientRec.Body.String())
+	}
+
+	malformedBearerReq := httptest.NewRequest(http.MethodPost, "/api/v1/auth/download-session", nil)
+	malformedBearerReq.Host = "nas.example.test"
+	malformedBearerReq.Header.Set("Authorization", "Bearer "+token+" extra")
+	malformedBearerReq.Header.Set("Origin", "https://evil.example.test")
+	malformedBearerRec := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(malformedBearerRec, malformedBearerReq)
+
+	if malformedBearerRec.Code != http.StatusForbidden {
+		t.Fatalf("malformed bearer cross-origin status = %d, want %d; body=%s", malformedBearerRec.Code, http.StatusForbidden, malformedBearerRec.Body.String())
 	}
 
 	basicAuthReq := httptest.NewRequest(http.MethodPost, "/api/v1/auth/download-session", nil)
@@ -4550,30 +5322,236 @@ func TestServer_PublicShareDownloadFile_SupportsRangeRequests(t *testing.T) {
 }
 
 func TestServer_PublicShareDownloadFile_UnsatisfiableRangeDoesNotConsumeAccess(t *testing.T) {
-	server, shareID := setupShareServer(t)
+	tests := []struct {
+		rangeHeader      string
+		content          []byte
+		wantStatus       int
+		wantContentRange string
+		assertBody       bool
+		wantBody         string
+	}{
+		{rangeHeader: "bytes=99-100", content: []byte("abcdef"), wantStatus: http.StatusRequestedRangeNotSatisfiable, wantContentRange: "bytes */6"},
+		{rangeHeader: "bytes=-0", content: []byte("abcdef"), wantStatus: http.StatusPartialContent, assertBody: true},
+		{rangeHeader: "bytes=-1", content: nil, wantStatus: http.StatusPartialContent, assertBody: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.rangeHeader, func(t *testing.T) {
+			server, shareID := setupShareServer(t)
 
-	if err := server.fs.WriteFile(context.Background(), "/docs/range-video.mp4", bytes.NewReader([]byte("abcdef"))); err != nil {
-		t.Fatalf("WriteFile() error: %v", err)
+			if err := server.fs.WriteFile(context.Background(), "/docs/range-video.mp4", bytes.NewReader(tt.content)); err != nil {
+				t.Fatalf("WriteFile() error: %v", err)
+			}
+
+			req := httptest.NewRequest(http.MethodGet, "/s/"+shareID+"/download/range-video.mp4", nil)
+			req.Header.Set("Range", tt.rangeHeader)
+			w := httptest.NewRecorder()
+
+			server.Router().ServeHTTP(w, req)
+
+			if w.Code != tt.wantStatus {
+				t.Fatalf("share download range status = %d, want %d; body=%s", w.Code, tt.wantStatus, w.Body.String())
+			}
+			if tt.wantContentRange != "" {
+				if contentRange := w.Header().Get("Content-Range"); contentRange != tt.wantContentRange {
+					t.Fatalf("share download range Content-Range = %q, want %q", contentRange, tt.wantContentRange)
+				}
+			}
+			if tt.assertBody {
+				if body := w.Body.String(); body != tt.wantBody {
+					t.Fatalf("share download range body = %q, want %q", body, tt.wantBody)
+				}
+			}
+			currentShare, err := server.shareStore.Get(shareID)
+			if err != nil {
+				t.Fatalf("Get(share) error: %v", err)
+			}
+			if currentShare.AccessCount != 0 {
+				t.Fatalf("share access count = %d, want 0", currentShare.AccessCount)
+			}
+		})
+	}
+}
+
+func TestServer_PublicShareReadHeadDoesNotConsumeAccess(t *testing.T) {
+	tests := []struct {
+		name      string
+		path      func(string) string
+		wantAllow string
+	}{
+		{
+			name:      "short items route",
+			wantAllow: http.MethodGet,
+			path: func(shareID string) string {
+				return "/s/" + shareID + "/items"
+			},
+		},
+		{
+			name:      "api items route",
+			wantAllow: http.MethodGet,
+			path: func(shareID string) string {
+				return "/api/v1/public/shares/" + shareID + "/items"
+			},
+		},
+		{
+			name:      "short download file route",
+			wantAllow: http.MethodGet,
+			path: func(shareID string) string {
+				return "/s/" + shareID + "/download/a.txt"
+			},
+		},
+		{
+			name:      "api download file route",
+			wantAllow: http.MethodGet,
+			path: func(shareID string) string {
+				return "/api/v1/public/shares/" + shareID + "/download/a.txt"
+			},
+		},
 	}
 
-	req := httptest.NewRequest(http.MethodGet, "/s/"+shareID+"/download/range-video.mp4", nil)
-	req.Header.Set("Range", "bytes=99-100")
-	w := httptest.NewRecorder()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server, shareID := setupShareServer(t)
 
-	server.Router().ServeHTTP(w, req)
+			req := httptest.NewRequest(http.MethodHead, tt.path(shareID), nil)
+			w := httptest.NewRecorder()
+			server.Router().ServeHTTP(w, req)
 
-	if w.Code != http.StatusRequestedRangeNotSatisfiable {
-		t.Fatalf("share download unsatisfiable range status = %d, want %d; body=%s", w.Code, http.StatusRequestedRangeNotSatisfiable, w.Body.String())
+			if w.Code != http.StatusMethodNotAllowed {
+				t.Fatalf("HEAD public share route status = %d, want %d", w.Code, http.StatusMethodNotAllowed)
+			}
+			if allow := w.Header().Get("Allow"); allow != tt.wantAllow {
+				t.Fatalf("HEAD public share route Allow = %q, want %q", allow, tt.wantAllow)
+			}
+			if w.Body.Len() != 0 {
+				t.Fatalf("HEAD public share route body length = %d, want 0", w.Body.Len())
+			}
+			currentShare, err := server.shareStore.Get(shareID)
+			if err != nil {
+				t.Fatalf("Get(share) error: %v", err)
+			}
+			if currentShare.AccessCount != 0 {
+				t.Fatalf("HEAD public share route access count = %d, want 0", currentShare.AccessCount)
+			}
+		})
 	}
-	if contentRange := w.Header().Get("Content-Range"); contentRange != "bytes */6" {
-		t.Fatalf("share download unsatisfiable range Content-Range = %q, want bytes */6", contentRange)
+}
+
+func TestServer_PublicShareRootHeadDoesNotExposeInfo(t *testing.T) {
+	tests := []struct {
+		name      string
+		path      func(string) string
+		wantAllow string
+	}{
+		{
+			name:      "short share route",
+			wantAllow: "GET, POST",
+			path: func(shareID string) string {
+				return "/s/" + shareID
+			},
+		},
+		{
+			name:      "api share route",
+			wantAllow: http.MethodGet,
+			path: func(shareID string) string {
+				return "/api/v1/public/shares/" + shareID
+			},
+		},
 	}
-	currentShare, err := server.shareStore.Get(shareID)
-	if err != nil {
-		t.Fatalf("Get(share) error: %v", err)
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server, shareID := setupShareServer(t)
+
+			req := httptest.NewRequest(http.MethodHead, tt.path(shareID), nil)
+			w := httptest.NewRecorder()
+			server.Router().ServeHTTP(w, req)
+
+			if w.Code != http.StatusMethodNotAllowed {
+				t.Fatalf("HEAD public share root status = %d, want %d; body=%s", w.Code, http.StatusMethodNotAllowed, w.Body.String())
+			}
+			if allow := w.Header().Get("Allow"); allow != tt.wantAllow {
+				t.Fatalf("HEAD public share root Allow = %q, want %q", allow, tt.wantAllow)
+			}
+			if w.Body.Len() != 0 {
+				t.Fatalf("HEAD public share root body length = %d, want 0", w.Body.Len())
+			}
+			body := w.Body.String()
+			if strings.Contains(body, "a.txt") || strings.Contains(body, `"items"`) || strings.Contains(body, `"data"`) {
+				t.Fatalf("HEAD public share root exposed share info: %s", body)
+			}
+		})
 	}
-	if currentShare.AccessCount != 0 {
-		t.Fatalf("share access count = %d, want 0", currentShare.AccessCount)
+}
+
+func TestServer_PublicSharePasswordNonPostDoesNotRecordFailure(t *testing.T) {
+	tests := []struct {
+		name      string
+		path      func(string) string
+		wantAllow string
+	}{
+		{
+			name:      "short share route",
+			wantAllow: "GET, POST",
+			path: func(shareID string) string {
+				return "/s/" + shareID
+			},
+		},
+		{
+			name:      "api share route",
+			wantAllow: http.MethodPost,
+			path: func(shareID string) string {
+				return "/api/v1/public/shares/" + shareID + "/access"
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server, _ := setupShareServer(t)
+			passwordShare, err := server.shareStore.Create(share.CreateShareOptions{
+				Path:      "/docs",
+				Type:      share.ShareTypeFolder,
+				CreatedBy: "tester",
+				Password:  "secret",
+			})
+			if err != nil {
+				t.Fatalf("create password share error: %v", err)
+			}
+
+			for attempt := 0; attempt < 5; attempt++ {
+				req := httptest.NewRequest(http.MethodPut, tt.path(passwordShare.ID), strings.NewReader(`{"password":"wrong"}`))
+				req.Header.Set("Content-Type", "application/json")
+				w := httptest.NewRecorder()
+				server.Router().ServeHTTP(w, req)
+
+				if w.Code != http.StatusMethodNotAllowed {
+					t.Fatalf("PUT password access attempt %d status = %d, want %d; body=%s", attempt+1, w.Code, http.StatusMethodNotAllowed, w.Body.String())
+				}
+				if allow := w.Header().Get("Allow"); allow != tt.wantAllow {
+					t.Fatalf("PUT password access attempt %d Allow = %q, want %q", attempt+1, allow, tt.wantAllow)
+				}
+				var payload struct {
+					Error *struct {
+						Code string `json:"code"`
+					} `json:"error"`
+				}
+				if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+					t.Fatalf("PUT password access attempt %d decode error response: %v", attempt+1, err)
+				}
+				if payload.Error == nil || payload.Error.Code != "METHOD_NOT_ALLOWED" {
+					t.Fatalf("PUT password access attempt %d error = %+v, want METHOD_NOT_ALLOWED", attempt+1, payload.Error)
+				}
+			}
+
+			successReq := httptest.NewRequest(http.MethodPost, tt.path(passwordShare.ID), strings.NewReader(`{"password":"secret"}`))
+			successReq.Header.Set("Content-Type", "application/json")
+			successRecorder := httptest.NewRecorder()
+			server.Router().ServeHTTP(successRecorder, successReq)
+
+			if successRecorder.Code != http.StatusOK {
+				t.Fatalf("POST after non-POST attempts status = %d, want %d; body=%s", successRecorder.Code, http.StatusOK, successRecorder.Body.String())
+			}
+		})
 	}
 }
 
@@ -5328,6 +6306,48 @@ func TestServer_CreateShare_UsesMostSpecificPathSharePolicyRule(t *testing.T) {
 	}
 }
 
+func TestServer_CreateShare_IgnoresDirtyRuntimeSharePolicyPath(t *testing.T) {
+	server, _ := setupShareServer(t)
+	ctx := context.Background()
+	if err := server.fs.Mkdir(ctx, "/private"); err != nil {
+		t.Fatalf("Mkdir(/private) error: %v", err)
+	}
+	if err := server.fs.WriteFile(ctx, "/private/a.txt", bytes.NewReader([]byte("private"))); err != nil {
+		t.Fatalf("WriteFile(/private/a.txt) error: %v", err)
+	}
+
+	cfg := server.currentConfig()
+	cfg.Share.PolicyRules = []config.SharePolicyRuleConfig{{
+		Path:            "/docs/../private",
+		RequirePassword: true,
+		MaxAccess:       1,
+	}}
+	server.storeConfig(cfg)
+
+	createReq := httptest.NewRequest(http.MethodPost, "/api/v1/shares", strings.NewReader(`{"path":"/private/a.txt","type":"file"}`))
+	createReq.Header.Set("Content-Type", "application/json")
+	createRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(createRec, createReq)
+
+	if createRec.Code != http.StatusCreated {
+		t.Fatalf("create share with dirty runtime policy status = %d, want %d; body=%s", createRec.Code, http.StatusCreated, createRec.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(createRec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to parse create response: %v", err)
+	}
+	data, ok := payload["data"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected create response data")
+	}
+	if data["has_password"] != false {
+		t.Fatalf("expected dirty policy not to require password, got has_password=%#v", data["has_password"])
+	}
+	if data["max_access"] != float64(0) {
+		t.Fatalf("expected dirty policy not to cap max_access, got %#v", data["max_access"])
+	}
+}
+
 func TestServer_UpdateSettings_UpdatesShareDefaultPolicy(t *testing.T) {
 	server, _ := setupShareServer(t)
 
@@ -5525,6 +6545,25 @@ func TestServer_UpdateSettings_DisablesPublicShareAccessWithoutRestart(t *testin
 	assertPublicShareResponseHeaders(t, publicRec.Header())
 	if !strings.Contains(publicRec.Body.String(), "SHARE_FEATURE_DISABLED") {
 		t.Fatalf("expected SHARE_FEATURE_DISABLED response, got %s", publicRec.Body.String())
+	}
+}
+
+func TestServer_PublicShareMissingProbeDoesNotSetCookie(t *testing.T) {
+	server, _ := setupShareServer(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/public/shares/mnemonas-doctor-probe", nil)
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("missing public share probe status = %d, want %d; body=%s", w.Code, http.StatusNotFound, w.Body.String())
+	}
+	assertPublicShareResponseHeaders(t, w.Header())
+	if cookies := w.Result().Cookies(); len(cookies) != 0 {
+		t.Fatalf("missing public share probe set %d cookie(s): %+v", len(cookies), cookies)
+	}
+	if !strings.Contains(w.Body.String(), "SHARE_NOT_FOUND") {
+		t.Fatalf("expected SHARE_NOT_FOUND response, got %s", w.Body.String())
 	}
 }
 
@@ -5903,6 +6942,10 @@ func TestServer_DownloadVersion_UsesPrivateRevalidationCacheHeaders(t *testing.T
 	if etag != fmt.Sprintf(`"%s"`, historicalHash) {
 		t.Fatalf("version download ETag = %q, want %q", etag, fmt.Sprintf(`"%s"`, historicalHash))
 	}
+	_, total := server.activity.List(10, 0, activity.ActionDownload, "")
+	if total != 1 {
+		t.Fatalf("expected initial version download to log one activity entry, got %d", total)
+	}
 
 	req = httptest.NewRequest(http.MethodGet, "/api/v1/download/versions/cache.txt?version="+historicalHash, nil)
 	req.Header.Set("If-None-Match", etag)
@@ -5914,6 +6957,10 @@ func TestServer_DownloadVersion_UsesPrivateRevalidationCacheHeaders(t *testing.T
 	}
 	if w.Body.Len() != 0 {
 		t.Fatalf("expected 304 response body to be empty, got %q", w.Body.String())
+	}
+	_, total = server.activity.List(10, 0, activity.ActionDownload, "")
+	if total != 1 {
+		t.Fatalf("expected 304 version revalidation to keep one activity entry, got %d", total)
 	}
 }
 
@@ -6062,6 +7109,55 @@ func TestServer_DownloadVersion_ErrorProbeDoesNotLogDownloadActivity(t *testing.
 	_, total := server.activity.List(10, 0, activity.ActionDownload, "")
 	if total != 0 {
 		t.Fatalf("expected no version download activity for probe request, got %d", total)
+	}
+}
+
+func TestServer_DownloadVersion_ZeroLengthRangeDoesNotLogDownloadActivity(t *testing.T) {
+	server, fs, _ := setupTestServer(t)
+	ctx := context.Background()
+
+	if server.activity == nil {
+		t.Fatal("expected activity store to be initialized")
+	}
+	if err := fs.WriteFile(ctx, "/versions/empty-range.txt", bytes.NewReader([]byte("v1"))); err != nil {
+		t.Fatalf("WriteFile(v1) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/versions/empty-range.txt", bytes.NewReader([]byte("v2"))); err != nil {
+		t.Fatalf("WriteFile(v2) error: %v", err)
+	}
+
+	versions, err := fs.ListVersions(ctx, "/versions/empty-range.txt")
+	if err != nil {
+		t.Fatalf("ListVersions() error: %v", err)
+	}
+
+	var historicalHash string
+	for _, version := range versions {
+		if version.Comment != "(current)" {
+			historicalHash = version.Hash
+			break
+		}
+	}
+	if historicalHash == "" {
+		t.Fatal("expected historical version hash")
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/download/versions/empty-range.txt?version="+historicalHash, nil)
+	req.Header.Set("Range", "bytes=-0")
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusPartialContent {
+		t.Fatalf("version zero-length range status = %d, want %d", w.Code, http.StatusPartialContent)
+	}
+	if body := w.Body.String(); body != "" {
+		t.Fatalf("version zero-length range body = %q, want empty", body)
+	}
+
+	_, total := server.activity.List(10, 0, activity.ActionDownload, "")
+	if total != 0 {
+		t.Fatalf("expected no version download activity for zero-length range request, got %d", total)
 	}
 }
 
@@ -6745,6 +7841,78 @@ func TestServer_Stats_IncludesDiskStats(t *testing.T) {
 	}
 }
 
+func TestAddDiskStatsToMapNormalizesInvalidUsage(t *testing.T) {
+	tests := []struct {
+		name               string
+		stats              storage.DiskStats
+		wantTotal          uint64
+		wantFree           uint64
+		wantAvailable      uint64
+		wantUsed           uint64
+		wantUsageRatio     float64
+		wantNativeChecksum bool
+	}{
+		{
+			name: "free and available exceed total",
+			stats: storage.DiskStats{
+				TotalBytes:                100,
+				FreeBytes:                 120,
+				AvailableBytes:            130,
+				UsedBytes:                 999,
+				UsageRatio:                9,
+				NativeDataChecksumSupport: true,
+			},
+			wantTotal:          100,
+			wantFree:           100,
+			wantAvailable:      100,
+			wantUsed:           0,
+			wantUsageRatio:     0,
+			wantNativeChecksum: true,
+		},
+		{
+			name: "zero total resets derived fields",
+			stats: storage.DiskStats{
+				FreeBytes:      1,
+				AvailableBytes: 2,
+				UsedBytes:      3,
+				UsageRatio:     4,
+			},
+			wantTotal:      0,
+			wantFree:       0,
+			wantAvailable:  0,
+			wantUsed:       0,
+			wantUsageRatio: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			target := map[string]any{}
+			addDiskStatsToMap(target, &tt.stats)
+
+			for key, want := range map[string]uint64{
+				"disk_total":     tt.wantTotal,
+				"disk_free":      tt.wantFree,
+				"disk_available": tt.wantAvailable,
+				"disk_used":      tt.wantUsed,
+			} {
+				got, ok := target[key].(uint64)
+				if !ok || got != want {
+					t.Fatalf("%s = %v, want %v", key, target[key], want)
+				}
+			}
+			gotRatio, ok := target["disk_usage_ratio"].(float64)
+			if !ok || gotRatio != tt.wantUsageRatio {
+				t.Fatalf("disk_usage_ratio = %v, want %v", target["disk_usage_ratio"], tt.wantUsageRatio)
+			}
+			gotNativeChecksum, ok := target["disk_native_data_checksum_support"].(bool)
+			if !ok || gotNativeChecksum != tt.wantNativeChecksum {
+				t.Fatalf("disk_native_data_checksum_support = %v, want %v", target["disk_native_data_checksum_support"], tt.wantNativeChecksum)
+			}
+		})
+	}
+}
+
 func TestServer_Stats_RedactsSensitiveMountMetadata(t *testing.T) {
 	server, _, _ := setupTestServer(t)
 	originalGetDiskStats := getDiskStats
@@ -7050,6 +8218,9 @@ func TestServer_Diagnostics(t *testing.T) {
 	}
 	if nosniff := w.Header().Get("X-Content-Type-Options"); nosniff != "nosniff" {
 		t.Fatalf("diagnostics X-Content-Type-Options = %q, want nosniff", nosniff)
+	}
+	if referrerPolicy := w.Header().Get("Referrer-Policy"); referrerPolicy != "no-referrer" {
+		t.Fatalf("diagnostics Referrer-Policy = %q, want no-referrer", referrerPolicy)
 	}
 
 	var payload struct {
@@ -7629,8 +8800,8 @@ func TestServer_Diagnostics_IncludesSMBPreviewSummary(t *testing.T) {
 	if got, ok := payload.Data.SMB["server_name"].(string); !ok || got != "mnemonas" {
 		t.Fatalf("smb.server_name = %v, want mnemonas", payload.Data.SMB["server_name"])
 	}
-	if got, ok := payload.Data.SMB["message"].(string); !ok || !strings.Contains(got, "not implemented") {
-		t.Fatalf("smb.message = %v, want implementation warning", payload.Data.SMB["message"])
+	if got, ok := payload.Data.SMB["message"].(string); !ok || !strings.Contains(got, "not bundled") {
+		t.Fatalf("smb.message = %v, want runtime availability warning", payload.Data.SMB["message"])
 	}
 }
 
@@ -8001,10 +9172,11 @@ func TestServer_ListFilesRootShowsHomeAndSharedRootsForNonAdmin(t *testing.T) {
 	setDirectoryAccessRulesForTest(t, server, []config.DirectoryAccessRuleConfig{
 		{Path: "/team/projects", ReadUsers: []string{username}},
 		{Path: "/team/private", ReadUsers: []string{"other"}},
+		{Path: "/archive/../private", ReadUsers: []string{username}},
 	})
 
 	ctx := context.Background()
-	for _, dir := range []string{"/tester", "/team", "/team/projects", "/team/private", "/other"} {
+	for _, dir := range []string{"/tester", "/team", "/team/projects", "/team/private", "/private", "/other"} {
 		if err := fs.Mkdir(ctx, dir); err != nil {
 			t.Fatalf("Mkdir(%s) error: %v", dir, err)
 		}
@@ -8045,7 +9217,7 @@ func TestServer_ListFilesRootShowsHomeAndSharedRootsForNonAdmin(t *testing.T) {
 	seen := map[string]filePathCapabilities{}
 	for _, item := range payload.Data.Files {
 		seen[item.Path] = item.Capabilities
-		if item.Path == "/other" || item.Path == "/team/private" || item.Path == "/team/projects" {
+		if item.Path == "/other" || item.Path == "/private" || item.Path == "/team/private" || item.Path == "/team/projects" {
 			t.Fatalf("root list leaked non-root or denied path %q in %s", item.Path, rec.Body.String())
 		}
 	}
@@ -8366,7 +9538,12 @@ func TestServer_MoveDirectoryRejectsDeniedDestinationDescendantAccessRule(t *tes
 }
 
 func TestServer_CheckPathAccess_ExplainsEffectivePermissions(t *testing.T) {
-	server, session := newRouteSmokeServer(t)
+	server, fs, _, _, _ := setupAuthServer(t)
+	adminPassword := "password123"
+	if _, err := server.userStore.Create("access-admin", adminPassword, "", auth.RoleAdmin); err != nil {
+		t.Fatalf("Create(access-admin) error: %v", err)
+	}
+	adminToken := loginAndGetAccessToken(t, server, "access-admin", adminPassword)
 	targetUser, err := server.userStore.CreateWithGroups("alice", "password123", "", auth.RoleUser, []string{"family"})
 	if err != nil {
 		t.Fatalf("CreateWithGroups(alice) error: %v", err)
@@ -8380,12 +9557,19 @@ func TestServer_CheckPathAccess_ExplainsEffectivePermissions(t *testing.T) {
 		{Path: "/team/uploads", WriteGroups: []string{"family"}},
 		{Path: "/archive/projects", ReadUsers: []string{"alice"}},
 	})
+	ctx := context.Background()
+	if err := fs.Mkdir(ctx, "/archive"); err != nil {
+		t.Fatalf("Mkdir(/archive) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/archive/projects"); err != nil {
+		t.Fatalf("Mkdir(/archive/projects) error: %v", err)
+	}
 
 	postAccessCheck := func(targetPath string) pathAccessCheckResult {
 		t.Helper()
 		body := fmt.Sprintf(`{"username":"alice","path":%q}`, targetPath)
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/settings/access-check", strings.NewReader(body))
-		req.Header.Set("Authorization", "Bearer "+session.accessToken)
+		req.Header.Set("Authorization", "Bearer "+adminToken)
 		rec := httptest.NewRecorder()
 		server.Router().ServeHTTP(rec, req)
 		if rec.Code != http.StatusOK {
@@ -8417,6 +9601,9 @@ func TestServer_CheckPathAccess_ExplainsEffectivePermissions(t *testing.T) {
 	if !nestedAncestor.Read.Allowed || nestedAncestor.Read.Source != "directory_access_rule" || nestedAncestor.Read.MatchedRule == nil || nestedAncestor.Read.MatchedRule.Path != "/archive/projects" {
 		t.Fatalf("nested ancestor read decision = %+v, want descendant rule allow", nestedAncestor.Read)
 	}
+	if nestedAncestor.Read.Message != "directory access rule grants read through an existing descendant" {
+		t.Fatalf("nested ancestor read message = %q, want existing descendant message", nestedAncestor.Read.Message)
+	}
 	if nestedAncestor.Write.Allowed {
 		t.Fatalf("nested ancestor write decision = %+v, want denied write", nestedAncestor.Write)
 	}
@@ -8429,6 +9616,47 @@ func TestServer_CheckPathAccess_ExplainsEffectivePermissions(t *testing.T) {
 	outside := postAccessCheck("/other/secret.txt")
 	if outside.Read.Allowed || outside.Write.Allowed || outside.Read.Source != "home_dir" || outside.Write.Source != "home_dir" {
 		t.Fatalf("outside decisions = read %+v write %+v, want home_dir deny", outside.Read, outside.Write)
+	}
+}
+
+func TestServer_CheckPathAccess_DoesNotAllowMissingDescendantNavigation(t *testing.T) {
+	server, _, _, _, _ := setupAuthServer(t)
+	adminPassword := "password123"
+	if _, err := server.userStore.Create("access-admin", adminPassword, "", auth.RoleAdmin); err != nil {
+		t.Fatalf("Create(access-admin) error: %v", err)
+	}
+	adminToken := loginAndGetAccessToken(t, server, "access-admin", adminPassword)
+	targetUser, err := server.userStore.CreateWithGroups("alice", "password123", "", auth.RoleUser, []string{"family"})
+	if err != nil {
+		t.Fatalf("CreateWithGroups(alice) error: %v", err)
+	}
+	targetUser.HomeDir = "/users/alice"
+	if err := server.userStore.Update(targetUser); err != nil {
+		t.Fatalf("Update(alice home_dir) error: %v", err)
+	}
+	setDirectoryAccessRulesForTest(t, server, []config.DirectoryAccessRuleConfig{
+		{Path: "/archive/projects", ReadUsers: []string{"alice"}},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/settings/access-check", strings.NewReader(`{"username":"alice","path":"/archive"}`))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	rec := httptest.NewRecorder()
+	server.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("access-check status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	var payload struct {
+		Data pathAccessCheckResult `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode access-check response: %v", err)
+	}
+	if payload.Data.Read.Allowed || payload.Data.Read.Source != "home_dir" || payload.Data.Read.MatchedRule != nil {
+		t.Fatalf("missing descendant read decision = %+v, want home_dir denial without matched rule", payload.Data.Read)
+	}
+	if payload.Data.Write.Allowed || payload.Data.Write.Source != "home_dir" || payload.Data.Write.MatchedRule != nil {
+		t.Fatalf("missing descendant write decision = %+v, want home_dir denial without matched rule", payload.Data.Write)
 	}
 }
 
@@ -8541,6 +9769,41 @@ func TestServer_ReportPathAccess_SummarizesAllUsers(t *testing.T) {
 	}
 	if byRelation["exact"].Path != "/team/uploads/file.txt" || !byRelation["exact"].HasPassword {
 		t.Fatalf("exact share impact = %+v", byRelation["exact"])
+	}
+}
+
+func TestPathAccessShareRelationRejectsDirtyPaths(t *testing.T) {
+	for name, tt := range map[string]struct {
+		targetPath string
+		sharePath  string
+	}{
+		"dirty target path": {
+			targetPath: "/docs/../private/report.txt",
+			sharePath:  "/private",
+		},
+		"dirty share path": {
+			targetPath: "/private/report.txt",
+			sharePath:  "/docs/../private",
+		},
+		"control character share path": {
+			targetPath: "/private/report.txt",
+			sharePath:  "/private\x00",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if relation := pathAccessShareRelation(tt.targetPath, tt.sharePath); relation != "" {
+				t.Fatalf("pathAccessShareRelation(%q, %q) = %q, want empty", tt.targetPath, tt.sharePath, relation)
+			}
+		})
+	}
+}
+
+func TestPathAccessShareRelationPreservesLegalWhitespacePaths(t *testing.T) {
+	if relation := pathAccessShareRelation("/docs/ report .txt", "/docs/ report .txt"); relation != "exact" {
+		t.Fatalf("pathAccessShareRelation() = %q, want exact", relation)
+	}
+	if relation := pathAccessShareRelation("/docs/ report .txt", "/docs"); relation != "covers_path" {
+		t.Fatalf("pathAccessShareRelation() = %q, want covers_path", relation)
 	}
 }
 
@@ -9275,6 +10538,8 @@ func TestValidatePath(t *testing.T) {
 		{"foo..txt", "/foo..txt", false},
 		{"/nested/foo..txt", "/nested/foo..txt", false},
 		{"/nul\x00byte", "", true},
+		{"/report\n2026.txt", "", true},
+		{"/report\x7f2026.txt", "", true},
 		{"../etc/passwd", "", true},
 		{"/foo/../bar", "", true},
 		{"..\\etc\\passwd", "", true},
@@ -9314,6 +10579,14 @@ func TestMapDescendantPathRejectsNonDescendants(t *testing.T) {
 			wantOK:          true,
 		},
 		{
+			name:            "same source root",
+			sourceRoot:      "/docs",
+			destinationRoot: "/archive",
+			currentPath:     "/docs",
+			wantPath:        "/archive",
+			wantOK:          true,
+		},
+		{
 			name:            "root child",
 			sourceRoot:      "/",
 			destinationRoot: "/archive",
@@ -9333,6 +10606,48 @@ func TestMapDescendantPathRejectsNonDescendants(t *testing.T) {
 			sourceRoot:      "/docs",
 			destinationRoot: "/archive",
 			currentPath:     "/",
+			wantOK:          false,
+		},
+		{
+			name:            "root source does not map root itself",
+			sourceRoot:      "/",
+			destinationRoot: "/archive",
+			currentPath:     "/",
+			wantOK:          false,
+		},
+		{
+			name:            "dirty source root",
+			sourceRoot:      "/docs/.",
+			destinationRoot: "/archive",
+			currentPath:     "/docs/report.txt",
+			wantOK:          false,
+		},
+		{
+			name:            "relative destination root",
+			sourceRoot:      "/docs",
+			destinationRoot: "archive",
+			currentPath:     "/docs/report.txt",
+			wantOK:          false,
+		},
+		{
+			name:            "dirty destination root",
+			sourceRoot:      "/docs",
+			destinationRoot: "/archive/../public",
+			currentPath:     "/docs/report.txt",
+			wantOK:          false,
+		},
+		{
+			name:            "dirty current path",
+			sourceRoot:      "/docs",
+			destinationRoot: "/archive",
+			currentPath:     "/docs/./report.txt",
+			wantOK:          false,
+		},
+		{
+			name:            "current path with query",
+			sourceRoot:      "/docs",
+			destinationRoot: "/archive",
+			currentPath:     "/docs/report.txt?download",
 			wantOK:          false,
 		},
 	}
@@ -9376,6 +10691,60 @@ func TestAPIReadDirChildPathRejectsNonDirectChildren(t *testing.T) {
 			child:    &storage.FileInfo{Name: "report.txt"},
 			wantPath: "/docs/report.txt",
 			wantName: "report.txt",
+		},
+		{
+			name:      "dot segment child path",
+			parent:    "/docs",
+			child:     &storage.FileInfo{Path: "/docs/./report.txt", Name: "report.txt"},
+			wantError: true,
+		},
+		{
+			name:      "parent segment child path",
+			parent:    "/docs",
+			child:     &storage.FileInfo{Path: "/docs/../report.txt", Name: "report.txt"},
+			wantError: true,
+		},
+		{
+			name:      "dot segment fallback name",
+			parent:    "/docs",
+			child:     &storage.FileInfo{Name: "./report.txt"},
+			wantError: true,
+		},
+		{
+			name:      "leading slash fallback name",
+			parent:    "/docs",
+			child:     &storage.FileInfo{Name: "/report.txt"},
+			wantError: true,
+		},
+		{
+			name:      "trailing slash fallback name",
+			parent:    "/docs",
+			child:     &storage.FileInfo{Name: "report.txt/"},
+			wantError: true,
+		},
+		{
+			name:      "backslash fallback name",
+			parent:    "/docs",
+			child:     &storage.FileInfo{Name: "nested\\report.txt"},
+			wantError: true,
+		},
+		{
+			name:      "control character child path",
+			parent:    "/docs",
+			child:     &storage.FileInfo{Path: "/docs/report\n2026.txt", Name: "report\n2026.txt"},
+			wantError: true,
+		},
+		{
+			name:      "backslash child path",
+			parent:    "/docs",
+			child:     &storage.FileInfo{Path: "/docs\\report.txt", Name: "report.txt"},
+			wantError: true,
+		},
+		{
+			name:      "control character fallback name",
+			parent:    "/docs",
+			child:     &storage.FileInfo{Name: "report\x7f.txt"},
+			wantError: true,
 		},
 		{
 			name:      "similar prefix sibling",
@@ -12006,9 +13375,7 @@ func TestServer_RestoreFromTrash_CustomPathEnforcesDirectoryQuotaAtDestination(t
 	if w.Code != http.StatusInsufficientStorage {
 		t.Fatalf("custom trash restore directory quota status = %d, want %d; body=%s", w.Code, http.StatusInsufficientStorage, w.Body.String())
 	}
-	if !strings.Contains(w.Body.String(), `"quota_type":"directory"`) || !strings.Contains(w.Body.String(), `"quota_path":"/team/token=quota-secret"`) {
-		t.Fatalf("expected directory quota details for destination, got %s", w.Body.String())
-	}
+	requireQuotaResponsePath(t, w.Body.String(), "/team/token=<redacted>", "quota-secret")
 	if _, err := fs.Stat(ctx, "/team/token=quota-secret/restored.txt"); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("expected rejected custom restore to leave destination absent, got %v", err)
 	}
@@ -12055,9 +13422,7 @@ func TestServer_RestoreFromTrash_CustomPathEnforcesDescendantDirectoryQuota(t *t
 	if w.Code != http.StatusInsufficientStorage {
 		t.Fatalf("custom trash restore descendant quota status = %d, want %d; body=%s", w.Code, http.StatusInsufficientStorage, w.Body.String())
 	}
-	if !strings.Contains(w.Body.String(), `"quota_type":"directory"`) || !strings.Contains(w.Body.String(), `"quota_path":"/archive/private/token=quota-secret"`) {
-		t.Fatalf("expected descendant directory quota details, got %s", w.Body.String())
-	}
+	requireQuotaResponsePath(t, w.Body.String(), "/archive/private/token=<redacted>", "quota-secret")
 	if _, err := fs.Stat(ctx, "/archive"); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("expected quota-rejected restore to leave destination absent, got %v", err)
 	}
@@ -12111,9 +13476,7 @@ func TestServer_RestoreVersion_EnforcesDirectoryQuota(t *testing.T) {
 	if w.Code != http.StatusInsufficientStorage {
 		t.Fatalf("restore version directory quota status = %d, want %d; body=%s", w.Code, http.StatusInsufficientStorage, w.Body.String())
 	}
-	if !strings.Contains(w.Body.String(), `"quota_type":"directory"`) || !strings.Contains(w.Body.String(), `"quota_path":"/team/token=quota-secret"`) {
-		t.Fatalf("expected directory quota details, got %s", w.Body.String())
-	}
+	requireQuotaResponsePath(t, w.Body.String(), "/team/token=<redacted>", "quota-secret")
 	reader, err := fs.OpenFile(ctx, "/team/token=quota-secret/doc.md")
 	if err != nil {
 		t.Fatalf("OpenFile(current) error: %v", err)
@@ -15023,6 +16386,12 @@ func TestServer_Thumbnail_RejectsOversizedSourceBeforeHashing(t *testing.T) {
 
 func TestServer_DiagnosticsExport(t *testing.T) {
 	server, _, _ := setupTestServer(t)
+	fixedNow := time.Date(2026, 6, 16, 5, 30, 45, 0, time.FixedZone("CST", 8*60*60))
+	originalNow := apiTimeNow
+	apiTimeNow = func() time.Time { return fixedNow }
+	t.Cleanup(func() {
+		apiTimeNow = originalNow
+	})
 
 	req := httptest.NewRequest("GET", "/api/v1/diagnostics-export", nil)
 	w := httptest.NewRecorder()
@@ -15038,7 +16407,7 @@ func TestServer_DiagnosticsExport(t *testing.T) {
 		if err != nil {
 			t.Fatalf("diagnostics export Content-Disposition is invalid: %v", err)
 		}
-		if mediaType != "attachment" || !strings.HasPrefix(params["filename"], "mnemonas-diagnostics-") || !strings.HasSuffix(params["filename"], ".json") {
+		if mediaType != "attachment" || params["filename"] != "mnemonas-diagnostics-20260615-213045.json" {
 			t.Fatalf("unexpected diagnostics export Content-Disposition: media=%q params=%v", mediaType, params)
 		}
 		if cacheControl := w.Header().Get("Cache-Control"); cacheControl != "no-store" {
@@ -15050,15 +16419,22 @@ func TestServer_DiagnosticsExport(t *testing.T) {
 		if nosniff := w.Header().Get("X-Content-Type-Options"); nosniff != "nosniff" {
 			t.Fatalf("diagnostics export X-Content-Type-Options = %q, want nosniff", nosniff)
 		}
+		if referrerPolicy := w.Header().Get("Referrer-Policy"); referrerPolicy != "no-referrer" {
+			t.Fatalf("diagnostics export Referrer-Policy = %q, want no-referrer", referrerPolicy)
+		}
 
 		var payload struct {
-			SchemaVersion int `json:"schema_version"`
+			SchemaVersion int    `json:"schema_version"`
+			ExportTime    string `json:"export_time"`
 		}
 		if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
 			t.Fatalf("failed to parse diagnostics export response: %v", err)
 		}
 		if payload.SchemaVersion != 1 {
 			t.Fatalf("diagnostics export schema_version = %d, want 1", payload.SchemaVersion)
+		}
+		if payload.ExportTime != "2026-06-15T21:30:45Z" {
+			t.Fatalf("diagnostics export export_time = %q, want UTC fixed time", payload.ExportTime)
 		}
 	}
 }
@@ -17962,6 +19338,10 @@ func TestServer_UpdateSettings_RejectsInvalidShareBaseURL(t *testing.T) {
 			baseURL: "javascript:alert(1)",
 		},
 		{
+			name:    "relative URL",
+			baseURL: "/s/base",
+		},
+		{
 			name:    "userinfo",
 			baseURL: "https://operator@nas.example.com",
 		},
@@ -17992,6 +19372,42 @@ func TestServer_UpdateSettings_RejectsInvalidShareBaseURL(t *testing.T) {
 		{
 			name:    "invalid host character",
 			baseURL: "https://nas_example.com",
+		},
+		{
+			name:    "unbracketed IPv6 host",
+			baseURL: "https://2001:db8::1",
+		},
+		{
+			name:    "invalid bracketed IPv6 host",
+			baseURL: "https://[::::]",
+		},
+		{
+			name:    "duplicate path slash",
+			baseURL: "https://nas.example.com/shares//team",
+		},
+		{
+			name:    "escaped duplicate path slash",
+			baseURL: "https://nas.example.com/shares%2F%2Fteam",
+		},
+		{
+			name:    "dot segment path",
+			baseURL: "https://nas.example.com/shares/./team",
+		},
+		{
+			name:    "escaped dot segment path",
+			baseURL: "https://nas.example.com/shares/%2e%2e/team",
+		},
+		{
+			name:    "backslash path",
+			baseURL: `https://nas.example.com/shares\team`,
+		},
+		{
+			name:    "host-relative backslash path",
+			baseURL: `https://nas.example.com\shares`,
+		},
+		{
+			name:    "escaped backslash path",
+			baseURL: "https://nas.example.com/shares%5Cteam",
 		},
 	}
 
@@ -19206,6 +20622,38 @@ func TestServer_UpdateSettings_InvalidAlertsWebhookURLDoesNotUpdateAlertMonitor(
 	}
 	if server.config.Alerts.WebhookURL != "https://hooks.example.com/old" {
 		t.Fatalf("expected invalid webhook URL update to leave config unchanged, got %q", server.config.Alerts.WebhookURL)
+	}
+	if monitor.updateCount != 0 {
+		t.Fatalf("expected invalid configuration not to update alert monitor, got %d updates", monitor.updateCount)
+	}
+}
+
+func TestServer_UpdateSettings_InvalidAlertsWebhookURLHostDoesNotUpdateAlertMonitor(t *testing.T) {
+	server, _, tmpDir := setupTestServer(t)
+	server.configPath = path.Join(tmpDir, "config.toml")
+	server.config.Alerts.WebhookURL = "https://hooks.example.com/old"
+	server.storeConfig(server.config)
+	monitor := &fakeAlertMonitor{}
+	server.alertMonitor = monitor
+
+	body := `{"alerts":{"webhook_url":"https://hooks..example.com/storage?token=secret-token"}}`
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/settings", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("update settings invalid alerts webhook URL host status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+	if !strings.Contains(w.Body.String(), "invalid configuration") {
+		t.Fatalf("expected invalid configuration message, got %s", w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), "secret-token") || strings.Contains(w.Body.String(), "token=secret-token") {
+		t.Fatalf("invalid webhook URL host response leaked secret token: %s", w.Body.String())
+	}
+	if server.config.Alerts.WebhookURL != "https://hooks.example.com/old" {
+		t.Fatalf("expected invalid webhook URL host update to leave config unchanged, got %q", server.config.Alerts.WebhookURL)
 	}
 	if monitor.updateCount != 0 {
 		t.Fatalf("expected invalid configuration not to update alert monitor, got %d updates", monitor.updateCount)
@@ -21370,6 +22818,22 @@ func TestServer_ActivityReviewRecords_RejectsInvalidRecord(t *testing.T) {
 		t.Fatalf("invalid activity review status = %d, want %d: %s", w.Code, http.StatusBadRequest, w.Body.String())
 	}
 
+	controlTextReq := httptest.NewRequest(http.MethodPost, "/api/v1/activity/reviews", strings.NewReader(`{
+		"note": "已处理\n仍需跟进",
+		"scope_label": "当前页",
+		"review_count": 1,
+		"total_count": 1,
+		"path_count": 1,
+		"user_count": 1,
+		"activity_entry_ids": ["delete-1"]
+	}`))
+	controlTextReq.Header.Set("Authorization", "Bearer "+issueAccessTokenWithoutActivity(t, server, "admin"))
+	controlTextRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(controlTextRec, controlTextReq)
+	if controlTextRec.Code != http.StatusBadRequest {
+		t.Fatalf("control-text activity review status = %d, want %d: %s", controlTextRec.Code, http.StatusBadRequest, controlTextRec.Body.String())
+	}
+
 	listReq := httptest.NewRequest(http.MethodGet, "/api/v1/activity/reviews", nil)
 	listReq.Header.Set("Authorization", "Bearer "+issueAccessTokenWithoutActivity(t, server, "admin"))
 	listRec := httptest.NewRecorder()
@@ -21444,6 +22908,109 @@ func TestServer_ListActivity_RecreatedUsernameDoesNotSeeLegacyEntries(t *testing
 	}
 	if payload.Data.Total != 0 || len(payload.Data.Items) != 0 {
 		t.Fatalf("expected recreated user to see no legacy activity entries, got %s", w.Body.String())
+	}
+}
+
+func TestServer_ListActivity_UsesUserContextWhenClaimsAreMissing(t *testing.T) {
+	server := newActivityOnlyAuthServer(t)
+	username := "tester"
+
+	if server.activity == nil {
+		t.Fatal("expected activity store to be initialized")
+	}
+	if err := server.activity.Log(activity.ActionUpload, "/tester/own.txt", username, "127.0.0.1", nil); err != nil {
+		t.Fatalf("log own activity error: %v", err)
+	}
+	if err := server.activity.Log(activity.ActionUpload, "/tester/other.txt", "other", "127.0.0.2", nil); err != nil {
+		t.Fatalf("log other user activity error: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/activity/", nil)
+	req = req.WithContext(context.WithValue(req.Context(), auth.ContextKeyUser, &auth.User{
+		ID:       "u1",
+		Username: username,
+		Role:     auth.RoleUser,
+		HomeDir:  "/tester",
+	}))
+	w := httptest.NewRecorder()
+	server.handleListActivity(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("list activity without claims status = %d, want %d; body=%s", w.Code, http.StatusOK, w.Body.String())
+	}
+
+	var payload struct {
+		Data struct {
+			Items []activity.Entry `json:"items"`
+			Total int              `json:"total"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to parse activity response: %v", err)
+	}
+	if payload.Data.Total != 1 || len(payload.Data.Items) != 1 {
+		t.Fatalf("expected user-context activity filter to return one entry, got %s", w.Body.String())
+	}
+	if payload.Data.Items[0].User != username {
+		t.Fatalf("activity user = %q, want %q", payload.Data.Items[0].User, username)
+	}
+}
+
+func TestServer_ListActivityRejectsMissingUserAndClaimsContext(t *testing.T) {
+	server := newActivityOnlyAuthServer(t)
+	if err := server.activity.Log(activity.ActionUpload, "/tester/own.txt", "tester", "127.0.0.1", nil); err != nil {
+		t.Fatalf("log activity error: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/activity/", nil)
+	w := httptest.NewRecorder()
+	server.handleListActivity(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("list activity without user context status = %d, want %d; body=%s", w.Code, http.StatusForbidden, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "path access denied by directory access rule") {
+		t.Fatalf("expected access denied response, got %s", w.Body.String())
+	}
+}
+
+func TestServer_ListActivityRejectsDisabledUserContextEvenWithClaims(t *testing.T) {
+	server := newActivityOnlyAuthServer(t)
+
+	req := newAuthenticatedActivityRequest(http.MethodGet, "/api/v1/activity/", &auth.User{
+		ID:       "u1",
+		Username: "tester",
+		Role:     auth.RoleUser,
+		HomeDir:  "/tester",
+		Disabled: true,
+	})
+	w := httptest.NewRecorder()
+	server.handleListActivity(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("list activity with disabled user context status = %d, want %d; body=%s", w.Code, http.StatusForbidden, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "path access denied by directory access rule") {
+		t.Fatalf("expected access denied response, got %s", w.Body.String())
+	}
+}
+
+func TestServer_CurrentActivityUserFilterRejectsDisabledUserContextEvenWithClaims(t *testing.T) {
+	server := newActivityOnlyAuthServer(t)
+	req := newAuthenticatedActivityRequest(http.MethodGet, "/api/v1/activity/", &auth.User{
+		ID:       "u1",
+		Username: "tester",
+		Role:     auth.RoleUser,
+		HomeDir:  "/tester",
+		Disabled: true,
+	})
+
+	userFilter, err := server.currentActivityUserFilter(req)
+	if !errors.Is(err, errPathAccessDenied) {
+		t.Fatalf("current activity user filter error = %v, want %v", err, errPathAccessDenied)
+	}
+	if userFilter != "" {
+		t.Fatalf("current activity user filter = %q, want empty", userFilter)
 	}
 }
 
@@ -21545,7 +23112,13 @@ func TestServer_ListActivity_NonAdminHidesOutsideHomeDetailPaths(t *testing.T) {
 	if server.activity == nil {
 		t.Fatal("expected activity store to be initialized")
 	}
-	if err := server.activity.Log(activity.ActionMove, "/tester/own.txt", username, "127.0.0.1", map[string]string{"to": "/other/secret.txt"}); err != nil {
+	if err := server.activity.Log(activity.ActionMove, "/tester/own.txt", username, "127.0.0.1", map[string]string{
+		"to":            "/other/secret.txt",
+		"config_path":   "/etc/mnemonas/config.toml",
+		"manifest_path": "/other/manifest.json",
+		"snapshot_path": "/other/snapshot",
+		"status":        "failed",
+	}); err != nil {
 		t.Fatalf("log move activity error: %v", err)
 	}
 
@@ -21575,6 +23148,14 @@ func TestServer_ListActivity_NonAdminHidesOutsideHomeDetailPaths(t *testing.T) {
 	}
 	if payload.Data.Items[0].Details["to"] != "" {
 		t.Fatalf("expected outside-home detail path to be hidden, got %+v", payload.Data.Items[0].Details)
+	}
+	for _, key := range []string{"config_path", "manifest_path", "snapshot_path"} {
+		if payload.Data.Items[0].Details[key] != "" {
+			t.Fatalf("expected outside-home %s detail path to be hidden, got %+v", key, payload.Data.Items[0].Details)
+		}
+	}
+	if payload.Data.Items[0].Details["status"] != "failed" {
+		t.Fatalf("expected non-path detail to remain, got %+v", payload.Data.Items[0].Details)
 	}
 }
 
@@ -21873,6 +23454,94 @@ func TestServer_ActivityStats_NonAdminOnlySeesOwnEntriesWhenAuthEnabled(t *testi
 	}
 	if payload.Data.ByAction[string(activity.ActionDelete)] != 0 {
 		t.Fatalf("expected admin delete count to be hidden, got %d", payload.Data.ByAction[string(activity.ActionDelete)])
+	}
+}
+
+func TestServer_ActivityStats_UsesUserContextWhenClaimsAreMissing(t *testing.T) {
+	server := newActivityOnlyAuthServer(t)
+	username := "tester"
+
+	if server.activity == nil {
+		t.Fatal("expected activity store to be initialized")
+	}
+	if err := server.activity.Log(activity.ActionUpload, "/tester/own.txt", username, "127.0.0.1", nil); err != nil {
+		t.Fatalf("log own activity error: %v", err)
+	}
+	if err := server.activity.Log(activity.ActionDelete, "/tester/other.txt", "other", "127.0.0.2", nil); err != nil {
+		t.Fatalf("log other user activity error: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/activity/stats", nil)
+	req = req.WithContext(context.WithValue(req.Context(), auth.ContextKeyUser, &auth.User{
+		ID:       "u1",
+		Username: username,
+		Role:     auth.RoleUser,
+		HomeDir:  "/tester",
+	}))
+	w := httptest.NewRecorder()
+	server.handleActivityStats(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("activity stats without claims status = %d, want %d; body=%s", w.Code, http.StatusOK, w.Body.String())
+	}
+
+	var payload struct {
+		Data struct {
+			Total    int            `json:"total"`
+			ByUser   map[string]int `json:"by_user"`
+			ByAction map[string]int `json:"by_action"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to parse activity stats response: %v", err)
+	}
+	if payload.Data.Total != 1 {
+		t.Fatalf("activity stats total = %d, want 1; body=%s", payload.Data.Total, w.Body.String())
+	}
+	if payload.Data.ByUser[username] != 1 || payload.Data.ByUser["other"] != 0 {
+		t.Fatalf("expected only user-context actor in stats, got %s", w.Body.String())
+	}
+	if payload.Data.ByAction[string(activity.ActionUpload)] != 1 || payload.Data.ByAction[string(activity.ActionDelete)] != 0 {
+		t.Fatalf("expected only user-context action in stats, got %s", w.Body.String())
+	}
+}
+
+func TestServer_ActivityStatsRejectsMissingUserAndClaimsContext(t *testing.T) {
+	server := newActivityOnlyAuthServer(t)
+	if err := server.activity.Log(activity.ActionUpload, "/tester/own.txt", "tester", "127.0.0.1", nil); err != nil {
+		t.Fatalf("log activity error: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/activity/stats", nil)
+	w := httptest.NewRecorder()
+	server.handleActivityStats(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("activity stats without user context status = %d, want %d; body=%s", w.Code, http.StatusForbidden, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "path access denied by directory access rule") {
+		t.Fatalf("expected access denied response, got %s", w.Body.String())
+	}
+}
+
+func TestServer_ActivityStatsRejectsDisabledUserContextEvenWithClaims(t *testing.T) {
+	server := newActivityOnlyAuthServer(t)
+
+	req := newAuthenticatedActivityRequest(http.MethodGet, "/api/v1/activity/stats", &auth.User{
+		ID:       "u1",
+		Username: "tester",
+		Role:     auth.RoleUser,
+		HomeDir:  "/tester",
+		Disabled: true,
+	})
+	w := httptest.NewRecorder()
+	server.handleActivityStats(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("activity stats with disabled user context status = %d, want %d; body=%s", w.Code, http.StatusForbidden, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "path access denied by directory access rule") {
+		t.Fatalf("expected access denied response, got %s", w.Body.String())
 	}
 }
 
@@ -22342,9 +24011,17 @@ func TestServer_JSON_InvalidPayloadReturnsInternalServerError(t *testing.T) {
 	if w.Code != http.StatusInternalServerError {
 		t.Fatalf("json helper status = %d, want %d", w.Code, http.StatusInternalServerError)
 	}
-	if w.Body.String() != "Internal Server Error\n" {
-		t.Fatalf("expected internal server error body, got %q", w.Body.String())
-	}
+	assertInternalJSONError(t, w)
+}
+
+func TestWriteRawJSON_InvalidPayloadReturnsStructuredInternalError(t *testing.T) {
+	w := httptest.NewRecorder()
+
+	writeRawJSON(w, http.StatusOK, map[string]any{
+		"bad": make(chan int),
+	})
+
+	assertInternalJSONError(t, w)
 }
 
 func TestServer_UpdateSettings_SaveFailureHidden(t *testing.T) {

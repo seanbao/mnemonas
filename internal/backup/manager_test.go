@@ -42,6 +42,29 @@ func assertNoBackupTargetSecrets(t *testing.T, value string) {
 	}
 }
 
+func assertBackupNotificationEventOmitsLocationAndMessageText(t *testing.T, event NotificationEvent) {
+	t.Helper()
+	if event.JobName != "" {
+		t.Fatalf("notification event included job name: %+v", event)
+	}
+	for field, value := range map[string]string{
+		"source":        event.Source,
+		"destination":   event.Destination,
+		"target_path":   event.TargetPath,
+		"snapshot_path": event.SnapshotPath,
+		"manifest_path": event.ManifestPath,
+		"error_message": event.ErrorMessage,
+	} {
+		if strings.TrimSpace(value) != "" {
+			t.Fatalf("notification event included %s: %+v", field, event)
+		}
+	}
+	if len(event.Warnings) > 0 {
+		t.Fatalf("notification event included warning text: %+v", event)
+	}
+	assertNoBackupTargetSecrets(t, event.Message)
+}
+
 func TestSanitizeBackupTargetForAPIRedactsURLUserinfoWithAtSign(t *testing.T) {
 	raw := "rest:https://user:leak@secret@backup.example/repo?token=remote-token"
 
@@ -315,6 +338,30 @@ func TestReadManifestRejectsUnsafeEntries(t *testing.T) {
 			name: "unsafe archive path",
 			entry: ManifestEntry{
 				ArchivePath: "data/../escape.txt",
+				Size:        1,
+				SHA256:      validDigest,
+			},
+		},
+		{
+			name: "control character archive path",
+			entry: ManifestEntry{
+				ArchivePath: "data/report\n2026.txt",
+				Size:        1,
+				SHA256:      validDigest,
+			},
+		},
+		{
+			name: "backslash archive path",
+			entry: ManifestEntry{
+				ArchivePath: `data\report.txt`,
+				Size:        1,
+				SHA256:      validDigest,
+			},
+		},
+		{
+			name: "unicode control character archive path",
+			entry: ManifestEntry{
+				ArchivePath: "data/report\u00812026.txt",
 				Size:        1,
 				SHA256:      validDigest,
 			},
@@ -1233,6 +1280,121 @@ func TestRestoreReportFindingsIgnoreStaleRestoreVerify(t *testing.T) {
 	}
 }
 
+func TestRestoreReportFindingsIgnoreOverlappingRestoreVerify(t *testing.T) {
+	restoreStarted := time.Date(2026, 5, 9, 5, 0, 0, 0, time.UTC)
+	restoreFinished := restoreStarted.Add(time.Second)
+	verifyStarted := restoreFinished.Add(-500 * time.Millisecond)
+	verifyFinished := restoreFinished.Add(time.Second)
+
+	restore := &RestoreResult{
+		Status:     StatusCompleted,
+		StartedAt:  restoreStarted,
+		FinishedAt: &restoreFinished,
+		TargetPath: "/restore/current",
+	}
+	verify := &RestoreVerifyResult{
+		Status:     StatusCompleted,
+		StartedAt:  verifyStarted,
+		FinishedAt: &verifyFinished,
+		TargetPath: "/restore/current",
+		Warnings:   []string{"overlapping verify warning"},
+	}
+
+	if matching := matchingRestoreVerifyForRestore(restore, verify); matching != nil {
+		t.Fatalf("matchingRestoreVerifyForRestore() = %+v, want nil for verify started before restore finished", matching)
+	}
+
+	findings := restoreReportFindings(JobView{
+		LastSuccessfulRun: &RunResult{
+			Status: StatusCompleted,
+		},
+		RetentionStatus:    "ok",
+		RestoreDrillStatus: "ok",
+		LastRestore:        restore,
+		LastRestoreVerify:  verify,
+	})
+
+	assertWarningsContain(t, findings, "最近一次显式恢复尚未完成匹配的只读校验")
+	assertWarningsNotContain(t, findings, "overlapping verify warning")
+}
+
+func TestRestoreReportFindingsAttachRunningRestoreVerify(t *testing.T) {
+	restoreStarted := time.Date(2026, 5, 9, 5, 0, 0, 0, time.UTC)
+	restoreFinished := restoreStarted.Add(time.Second)
+	verifyStarted := restoreFinished.Add(time.Minute)
+
+	restore := &RestoreResult{
+		Status:     StatusCompleted,
+		StartedAt:  restoreStarted,
+		FinishedAt: &restoreFinished,
+		TargetPath: "/restore/current",
+	}
+	verify := &RestoreVerifyResult{
+		Status:     StatusRunning,
+		StartedAt:  verifyStarted,
+		TargetPath: "/restore/current",
+	}
+
+	matching := matchingRestoreVerifyForRestore(restore, verify)
+	if matching == nil || matching.Status != StatusRunning {
+		t.Fatalf("matchingRestoreVerifyForRestore() = %+v, want running verify", matching)
+	}
+
+	findings := restoreReportFindings(JobView{
+		LastSuccessfulRun: &RunResult{
+			Status: StatusCompleted,
+		},
+		RetentionStatus:    "ok",
+		RestoreDrillStatus: "ok",
+		LastRestore:        restore,
+		LastRestoreVerify:  verify,
+	})
+
+	assertWarningsContain(t, findings, "最近一次恢复目录校验仍在运行")
+	assertWarningsNotContain(t, findings, "最近一次显式恢复尚未完成匹配的只读校验")
+}
+
+func TestRestoreReportFindingsRedactsSensitiveMessages(t *testing.T) {
+	restoreStarted := time.Date(2026, 5, 9, 5, 0, 0, 0, time.UTC)
+	restoreFinished := restoreStarted.Add(time.Second)
+	verifyStarted := restoreFinished.Add(time.Minute)
+	verifyFinished := verifyStarted.Add(time.Second)
+	targetPath := "/restore/token=restore-secret"
+	matchingVerify := &RestoreVerifyResult{
+		Status:       StatusFailed,
+		StartedAt:    verifyStarted,
+		FinishedAt:   &verifyFinished,
+		TargetPath:   targetPath,
+		ErrorMessage: "verify failed for secret_access_key=secret-access-key",
+		Warnings:     []string{"restore warning for token=restore-secret"},
+	}
+
+	findings := restoreReportFindingsWithMatchingVerify(JobView{
+		LastSuccessfulRun: &RunResult{
+			Status: StatusCompleted,
+		},
+		RetentionStatus:     "failed",
+		RetentionMessage:    "retention failed at /backups/token=destination-secret",
+		RestoreDrillStatus:  "failed",
+		RestoreDrillMessage: "restore drill failed: --password repo-pass",
+		LastRestore: &RestoreResult{
+			Status:     StatusCompleted,
+			StartedAt:  restoreStarted,
+			FinishedAt: &restoreFinished,
+			TargetPath: targetPath,
+		},
+		LastRestoreVerify: matchingVerify,
+	}, matchingVerify)
+
+	joined := strings.Join(findings, "\n")
+	assertNoBackupTargetSecrets(t, joined)
+	for _, want := range []string{"token=" + redactedBackupSecretValue, "--password " + redactedBackupSecretValue, "secret_access_key=" + redactedBackupSecretValue} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("restore report findings = %q, want %q", joined, want)
+		}
+	}
+}
+
 func TestRestoreReportMatchingUsesRawTargetsBeforeRedaction(t *testing.T) {
 	tmpDir := t.TempDir()
 	source := filepath.Join(tmpDir, "source")
@@ -1636,6 +1798,27 @@ func TestManager_RunRestoreRejectsUnsafeTarget(t *testing.T) {
 	}
 	if job.LastRestoreVerify == nil || job.LastRestoreVerify.Status != StatusFailed || job.LastRestoreVerify.TargetPath != missingTarget {
 		t.Fatalf("failed restore verify was not persisted separately: %+v", job.LastRestoreVerify)
+	}
+
+	previousRestoreID := job.LastRestore.ID
+	previousRestoreVerifyID := job.LastRestoreVerify.ID
+	_, err = manager.RunRestore(context.Background(), "home", RestoreOptions{TargetPath: "relative"})
+	if !errors.Is(err, ErrUnsafePath) {
+		t.Fatalf("RunRestore() relative target error = %v, want ErrUnsafePath", err)
+	}
+	_, err = manager.RunRestoreVerify(context.Background(), "home", RestoreVerifyOptions{TargetPath: `C:\restore`})
+	if !errors.Is(err, ErrUnsafePath) {
+		t.Fatalf("RunRestoreVerify() backslash target error = %v, want ErrUnsafePath", err)
+	}
+	job, err = manager.GetJob("home")
+	if err != nil {
+		t.Fatalf("GetJob() after invalid syntax errors: %v", err)
+	}
+	if len(job.RestoreHistory) != 2 || job.LastRestore == nil || job.LastRestore.ID != previousRestoreID {
+		t.Fatalf("invalid restore syntax should not overwrite restore history/status: history=%+v last=%+v", job.RestoreHistory, job.LastRestore)
+	}
+	if job.LastRestoreVerify == nil || job.LastRestoreVerify.ID != previousRestoreVerifyID {
+		t.Fatalf("invalid restore verify syntax should not overwrite last restore verify: %+v", job.LastRestoreVerify)
 	}
 }
 
@@ -2784,10 +2967,27 @@ func TestValidateRestoreTargetPathRejectsControlCharacters(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	target := filepath.Join(tmpDir, "restore\nsecret")
-	_, err := validateRestoreTargetPath(source, destination, storageRoot, target)
-	if !errors.Is(err, ErrUnsafePath) {
-		t.Fatalf("validateRestoreTargetPath() error = %v, want ErrUnsafePath", err)
+	tests := []struct {
+		name   string
+		target string
+	}{
+		{
+			name:   "ascii control character",
+			target: filepath.Join(tmpDir, "restore\nsecret"),
+		},
+		{
+			name:   "unicode control character",
+			target: filepath.Join(tmpDir, "restore\u0081secret"),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := validateRestoreTargetPath(source, destination, storageRoot, tt.target)
+			if !errors.Is(err, ErrUnsafePath) {
+				t.Fatalf("validateRestoreTargetPath() error = %v, want ErrUnsafePath", err)
+			}
+		})
 	}
 }
 
@@ -3002,6 +3202,53 @@ func TestMoveResticRestoredSourceRejectsRestoredSymlinkBeforeMove(t *testing.T) 
 	}
 	if _, statErr := os.Lstat(linkPath); statErr != nil {
 		t.Fatalf("restic restored source symlink was moved on failure: %v", statErr)
+	}
+}
+
+func TestMoveResticRestoredSourceRejectsUnsafeEntryNames(t *testing.T) {
+	tests := []struct {
+		name      string
+		entryName string
+	}{
+		{name: "backslash", entryName: "nested\\report.txt"},
+		{name: "newline", entryName: "report\n2026.txt"},
+		{name: "delete-control", entryName: "report\x7f.txt"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			source := filepath.Join(tmpDir, "source")
+			rawPath := filepath.Join(tmpDir, "raw")
+			restoredSourcePath, err := resticRestoredSourcePath(rawPath, source)
+			if err != nil {
+				t.Fatalf("resticRestoredSourcePath() error: %v", err)
+			}
+			if err := os.MkdirAll(restoredSourcePath, 0700); err != nil {
+				t.Fatal(err)
+			}
+			unsafePath := filepath.Join(restoredSourcePath, tt.entryName)
+			if err := os.WriteFile(unsafePath, []byte("restored"), 0600); err != nil {
+				t.Skipf("platform does not support unsafe filename %q: %v", tt.entryName, err)
+			}
+			partialPath := filepath.Join(tmpDir, "restore-target.partial-test")
+			if err := os.Mkdir(partialPath, 0700); err != nil {
+				t.Fatal(err)
+			}
+
+			_, _, err = moveResticRestoredSource(context.Background(), rawPath, partialPath, source)
+			if !errors.Is(err, ErrUnsafePath) {
+				t.Fatalf("moveResticRestoredSource() error = %v, want ErrUnsafePath", err)
+			}
+			if _, statErr := os.Stat(unsafePath); statErr != nil {
+				t.Fatalf("unsafe restored source entry was moved on failure: %v", statErr)
+			}
+			if entries, readErr := os.ReadDir(partialPath); readErr != nil {
+				t.Fatalf("ReadDir(partialPath) error: %v", readErr)
+			} else if len(entries) != 0 {
+				t.Fatalf("expected empty partial target after unsafe entry failure, got %d entries", len(entries))
+			}
+		})
 	}
 }
 
@@ -3491,6 +3738,19 @@ func TestFinishBatchRestoreAggregatesPostRestoreVerifyTotals(t *testing.T) {
 	}
 }
 
+func TestBatchRestoreResultFromFailedPreflightUsesProvidedClock(t *testing.T) {
+	now := time.Date(2026, 5, 13, 8, 0, 0, 0, time.UTC)
+
+	result := batchRestoreResultFromFailedPreflight(nil, now)
+
+	if result.ID != formatRunID(now) || !result.StartedAt.Equal(now) {
+		t.Fatalf("failed preflight result time = id %q started %s, want %q/%s", result.ID, result.StartedAt, formatRunID(now), now)
+	}
+	if result.FinishedAt == nil || !result.FinishedAt.Equal(now) {
+		t.Fatalf("failed preflight finished_at = %v, want %s", result.FinishedAt, now)
+	}
+}
+
 func TestFinishBatchRestoreRejectsOverflowingSummaryTotals(t *testing.T) {
 	startedAt := time.Date(2026, 5, 9, 4, 0, 0, 0, time.UTC)
 	finishedAt := startedAt.Add(2 * time.Second)
@@ -3911,6 +4171,36 @@ func TestCopySourceTreeRejectsDestinationSymlink(t *testing.T) {
 	}
 	if _, statErr := os.Stat(filepath.Join(outside, "empty-dir")); !errors.Is(statErr, os.ErrNotExist) {
 		t.Fatalf("outside directory stat error = %v, want not exist", statErr)
+	}
+}
+
+func TestCopySourceTreeRejectsUnsafeSourceEntryNames(t *testing.T) {
+	tests := []struct {
+		name      string
+		entryName string
+	}{
+		{name: "backslash", entryName: "nested\\report.txt"},
+		{name: "newline", entryName: "report\n2026.txt"},
+		{name: "delete-control", entryName: "report\x7f.txt"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			source := filepath.Join(tmpDir, "source")
+			destination := filepath.Join(tmpDir, "data")
+			if err := os.MkdirAll(source, 0700); err != nil {
+				t.Fatalf("MkdirAll(source) error: %v", err)
+			}
+			if err := os.WriteFile(filepath.Join(source, tt.entryName), []byte("backup"), 0600); err != nil {
+				t.Skipf("platform does not support unsafe filename %q: %v", tt.entryName, err)
+			}
+
+			_, _, err := copySourceTree(context.Background(), source, destination, nil)
+			if !errors.Is(err, ErrUnsafePath) {
+				t.Fatalf("copySourceTree() error = %v, want ErrUnsafePath", err)
+			}
+		})
 	}
 }
 
@@ -4962,11 +5252,10 @@ func TestManager_RemoteRunResultAndNotificationRedactTargetSecrets(t *testing.T)
 	if len(events) != 1 {
 		t.Fatalf("notification event count = %d, want 1", len(events))
 	}
-	assertNoBackupTargetSecrets(t, events[0].Destination)
-	assertNoBackupTargetSecrets(t, events[0].ErrorMessage)
-	if !strings.Contains(events[0].Destination, redactedBackupSecretValue) {
-		t.Fatalf("notification destination = %q, want redacted marker", events[0].Destination)
+	if events[0].Message != "backup run failed" || !events[0].ErrorMessagePresent || !events[0].LocationOmitted {
+		t.Fatalf("unexpected backup failure notification summary: %+v", events[0])
 	}
+	assertBackupNotificationEventOmitsLocationAndMessageText(t, events[0])
 	job, err := manager.GetJob("restic-remote")
 	if err != nil {
 		t.Fatalf("GetJob() error: %v", err)
@@ -5003,6 +5292,8 @@ func TestManager_RunRetentionCheckResticParsesSnapshotsAndWarnsMissingPolicy(t *
 	if err != nil {
 		t.Fatalf("NewManager() error: %v", err)
 	}
+	now := time.Date(2026, 5, 13, 7, 0, 0, 0, time.UTC)
+	manager.now = func() time.Time { return now }
 
 	check, err := manager.RunRetentionCheck(context.Background(), "restic-remote")
 	if err != nil {
@@ -5018,6 +5309,13 @@ func TestManager_RunRetentionCheckResticParsesSnapshotsAndWarnsMissingPolicy(t *
 	if len(events) != 1 || events[0].Type != NotificationTypeRetention || events[0].Level != NotificationLevelWarning {
 		t.Fatalf("retention notification = %+v", events)
 	}
+	if events[0].Message != "backup retention check completed with warnings" || events[0].WarningCount == 0 || events[0].ErrorMessagePresent || !events[0].LocationOmitted {
+		t.Fatalf("unexpected retention notification summary: %+v", events[0])
+	}
+	if !events[0].Timestamp.Equal(now) {
+		t.Fatalf("retention notification timestamp = %s, want %s", events[0].Timestamp, now)
+	}
+	assertBackupNotificationEventOmitsLocationAndMessageText(t, events[0])
 }
 
 func TestManager_RunRetentionCheckRcloneParsesRemoteFiles(t *testing.T) {
@@ -5408,6 +5706,8 @@ func TestManager_RunJobFailureNotifies(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewManager() error: %v", err)
 	}
+	now := time.Date(2026, 5, 13, 3, 0, 0, 0, time.UTC)
+	manager.now = func() time.Time { return now }
 
 	_, err = manager.RunJob(context.Background(), "home")
 	if !errors.Is(err, ErrSourceContainsSymlink) {
@@ -5422,12 +5722,16 @@ func TestManager_RunJobFailureNotifies(t *testing.T) {
 	if event.Type != NotificationTypeBackupRun || event.Level != NotificationLevelCritical {
 		t.Fatalf("notification type/level = %s/%s, want backup_run/critical", event.Type, event.Level)
 	}
-	if event.JobID != "home" || event.Status != StatusFailed || event.ErrorMessage == "" {
+	if event.JobID != "home" || event.Status != StatusFailed || event.Message != "backup run failed" {
 		t.Fatalf("unexpected notification event: %+v", event)
 	}
-	if strings.Contains(event.Source, "source-secret") || !strings.Contains(event.Source, "token="+redactedBackupSecretValue) {
-		t.Fatalf("notification source = %q, want redacted source token", event.Source)
+	if !event.Timestamp.Equal(now) {
+		t.Fatalf("notification timestamp = %s, want %s", event.Timestamp, now)
 	}
+	if !event.ErrorMessagePresent || !event.LocationOmitted {
+		t.Fatalf("notification summary markers = error:%v location:%v, want both true", event.ErrorMessagePresent, event.LocationOmitted)
+	}
+	assertBackupNotificationEventOmitsLocationAndMessageText(t, event)
 }
 
 func TestValidateRemoteCredentialFilesRejectsSymlinkParent(t *testing.T) {
@@ -5458,6 +5762,27 @@ func TestValidateRemoteCredentialFilesRejectsSymlinkParent(t *testing.T) {
 	}
 }
 
+func TestValidateRemoteCredentialFileRejectsUnicodeControlCharacters(t *testing.T) {
+	tmpDir := t.TempDir()
+	source := filepath.Join(tmpDir, "source")
+	storageRoot := filepath.Join(tmpDir, "storage")
+	credentialPath := filepath.Join(tmpDir, "restic\u0081.pass")
+	if err := os.MkdirAll(source, 0700); err != nil {
+		t.Fatalf("MkdirAll(source) error: %v", err)
+	}
+	if err := os.MkdirAll(storageRoot, 0700); err != nil {
+		t.Fatalf("MkdirAll(storageRoot) error: %v", err)
+	}
+	if err := os.WriteFile(credentialPath, []byte("secret"), 0600); err != nil {
+		t.Fatalf("WriteFile(credentialPath) error: %v", err)
+	}
+
+	err := validateRemoteCredentialFile(credentialPath, "password_file", source, storageRoot)
+	if !errors.Is(err, ErrUnsafePath) {
+		t.Fatalf("validateRemoteCredentialFile() error = %v, want %v", err, ErrUnsafePath)
+	}
+}
+
 func TestManager_RestoreDrillFailureNotifies(t *testing.T) {
 	tmpDir := t.TempDir()
 	source := filepath.Join(tmpDir, "source")
@@ -5480,6 +5805,8 @@ func TestManager_RestoreDrillFailureNotifies(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewManager() error: %v", err)
 	}
+	now := time.Date(2026, 5, 13, 4, 0, 0, 0, time.UTC)
+	manager.now = func() time.Time { return now }
 
 	_, err = manager.RunRestoreDrill(context.Background(), "home", RestoreDrillOptions{})
 	if !errors.Is(err, ErrNoSnapshots) {
@@ -5494,9 +5821,16 @@ func TestManager_RestoreDrillFailureNotifies(t *testing.T) {
 	if event.Type != NotificationTypeRestoreDrill || event.Level != NotificationLevelCritical {
 		t.Fatalf("notification type/level = %s/%s, want backup_restore_drill/critical", event.Type, event.Level)
 	}
-	if event.JobID != "home" || event.Status != StatusFailed || event.ErrorMessage == "" || event.FailureCategory != FailureCategoryNoSnapshot {
+	if event.JobID != "home" || event.Status != StatusFailed || event.Message != "backup restore drill failed" || event.FailureCategory != FailureCategoryNoSnapshot {
 		t.Fatalf("unexpected notification event: %+v", event)
 	}
+	if !event.Timestamp.Equal(now) {
+		t.Fatalf("notification timestamp = %s, want %s", event.Timestamp, now)
+	}
+	if !event.ErrorMessagePresent || event.LocationOmitted {
+		t.Fatalf("notification summary markers = error:%v location:%v, want error only", event.ErrorMessagePresent, event.LocationOmitted)
+	}
+	assertBackupNotificationEventOmitsLocationAndMessageText(t, event)
 }
 
 func TestManager_RestoreFailureNotifies(t *testing.T) {
@@ -5526,6 +5860,8 @@ func TestManager_RestoreFailureNotifies(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewManager() error: %v", err)
 	}
+	now := time.Date(2026, 5, 13, 5, 0, 0, 0, time.UTC)
+	manager.now = func() time.Time { return now }
 
 	_, err = manager.RunRestore(context.Background(), "home", RestoreOptions{TargetPath: restoreTarget})
 	if !errors.Is(err, ErrNoSnapshots) {
@@ -5540,12 +5876,16 @@ func TestManager_RestoreFailureNotifies(t *testing.T) {
 	if event.Type != NotificationTypeRestore || event.Level != NotificationLevelCritical {
 		t.Fatalf("notification type/level = %s/%s, want backup_restore/critical", event.Type, event.Level)
 	}
-	if event.JobID != "home" || event.Status != StatusFailed || event.ErrorMessage == "" {
+	if event.JobID != "home" || event.Status != StatusFailed || event.Message != "backup restore failed" {
 		t.Fatalf("unexpected notification event: %+v", event)
 	}
-	if strings.Contains(event.TargetPath, "restore-secret") || !strings.Contains(event.TargetPath, "token="+redactedBackupSecretValue) {
-		t.Fatalf("notification target path = %q, want redacted restore token", event.TargetPath)
+	if !event.Timestamp.Equal(now) {
+		t.Fatalf("notification timestamp = %s, want %s", event.Timestamp, now)
 	}
+	if !event.ErrorMessagePresent || !event.LocationOmitted {
+		t.Fatalf("notification summary markers = error:%v location:%v, want both true", event.ErrorMessagePresent, event.LocationOmitted)
+	}
+	assertBackupNotificationEventOmitsLocationAndMessageText(t, event)
 }
 
 func TestManager_RestoreVerifyWarningsNotify(t *testing.T) {
@@ -5577,14 +5917,18 @@ func TestManager_RestoreVerifyWarningsNotify(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewManager() error: %v", err)
 	}
+	now := time.Date(2026, 5, 13, 6, 0, 0, 0, time.UTC)
+	manager.now = func() time.Time { return now }
 	if _, err := manager.RunJob(context.Background(), "home"); err != nil {
 		t.Fatalf("RunJob() error: %v", err)
 	}
+	now = now.Add(time.Minute)
 	if _, err := manager.RunRestore(context.Background(), "home", RestoreOptions{TargetPath: restoreTarget}); err != nil {
 		t.Fatalf("RunRestore() error: %v", err)
 	}
 	mustWriteFile(t, filepath.Join(restoreTarget, "unexpected.txt"), "unexpected")
 
+	now = now.Add(time.Minute)
 	verify, err := manager.RunRestoreVerify(context.Background(), "home", RestoreVerifyOptions{TargetPath: restoreTarget})
 	if err != nil {
 		t.Fatalf("RunRestoreVerify() error: %v", err)
@@ -5605,19 +5949,16 @@ func TestManager_RestoreVerifyWarningsNotify(t *testing.T) {
 	if event.Type != NotificationTypeRestoreVerify || event.Level != NotificationLevelWarning {
 		t.Fatalf("notification type/level = %s/%s, want backup_restore_verify/warning", event.Type, event.Level)
 	}
-	if event.JobID != "home" || event.Status != StatusCompleted || len(event.Warnings) == 0 {
+	if event.JobID != "home" || event.Status != StatusCompleted || event.Message != "backup restore verification completed with warnings" || event.WarningCount == 0 {
 		t.Fatalf("unexpected notification event: %+v", event)
 	}
-	if strings.Contains(event.TargetPath, "restore-secret") || !strings.Contains(event.TargetPath, "token="+redactedBackupSecretValue) {
-		t.Fatalf("notification target path = %q, want redacted restore token", event.TargetPath)
+	if !event.Timestamp.Equal(now) {
+		t.Fatalf("notification timestamp = %s, want %s", event.Timestamp, now)
 	}
-	if strings.Contains(event.SnapshotPath, "destination-secret") || !strings.Contains(event.SnapshotPath, "token="+redactedBackupSecretValue) {
-		t.Fatalf("notification snapshot path = %q, want redacted destination token", event.SnapshotPath)
+	if event.ErrorMessagePresent || !event.LocationOmitted {
+		t.Fatalf("notification summary markers = error:%v location:%v, want location only", event.ErrorMessagePresent, event.LocationOmitted)
 	}
-	if strings.Contains(event.ManifestPath, "destination-secret") || !strings.Contains(event.ManifestPath, "token="+redactedBackupSecretValue) {
-		t.Fatalf("notification manifest path = %q, want redacted destination token", event.ManifestPath)
-	}
-	assertWarningsContain(t, event.Warnings, "恢复目标包含对照备份未登记的文件")
+	assertBackupNotificationEventOmitsLocationAndMessageText(t, event)
 }
 
 func TestManager_RestoreDrillReminderNotifiesWhenDueAndStale(t *testing.T) {
@@ -5662,9 +6003,13 @@ func TestManager_RestoreDrillReminderNotifiesWhenDueAndStale(t *testing.T) {
 	if events[0].Type != NotificationTypeRestoreDrill || events[0].Level != NotificationLevelWarning || events[0].Status != "due" {
 		t.Fatalf("due reminder event = %+v", events[0])
 	}
-	if events[0].Trigger != NotificationTriggerReminder || events[0].LastSuccessfulRunAt == nil || events[0].StaleAfter == "" {
+	if events[0].Trigger != NotificationTriggerReminder || events[0].LastSuccessfulRunAt == nil || events[0].StaleAfter == "" || events[0].Message != "backup restore drill is due" {
 		t.Fatalf("due reminder missing metadata: %+v", events[0])
 	}
+	if !events[0].LocationOmitted {
+		t.Fatalf("due reminder location marker = false, want true: %+v", events[0])
+	}
+	assertBackupNotificationEventOmitsLocationAndMessageText(t, events[0])
 	if len(notifier.Events()) != 1 {
 		t.Fatalf("notifier event count after due reminder = %d, want 1", len(notifier.Events()))
 	}
@@ -5692,19 +6037,17 @@ func TestManager_RestoreDrillReminderNotifiesWhenDueAndStale(t *testing.T) {
 	if len(events) != 1 {
 		t.Fatalf("SendRestoreDrillReminders() stale event count = %d, want 1", len(events))
 	}
-	if events[0].Status != "stale" || events[0].RunID == "" || events[0].LastRestoreDrillAt == nil {
+	if events[0].Status != "stale" || events[0].RunID == "" || events[0].LastRestoreDrillAt == nil || events[0].Message != "backup restore drill is stale" {
 		t.Fatalf("stale reminder event = %+v", events[0])
 	}
-	if strings.Contains(events[0].SnapshotPath, "destination-secret") || !strings.Contains(events[0].SnapshotPath, "token="+redactedBackupSecretValue) {
-		t.Fatalf("stale reminder snapshot path = %q, want redacted destination token", events[0].SnapshotPath)
+	if !events[0].LocationOmitted {
+		t.Fatalf("stale reminder location marker = false, want true: %+v", events[0])
 	}
-	if strings.Contains(events[0].ManifestPath, "destination-secret") || !strings.Contains(events[0].ManifestPath, "token="+redactedBackupSecretValue) {
-		t.Fatalf("stale reminder manifest path = %q, want redacted destination token", events[0].ManifestPath)
-	}
+	assertBackupNotificationEventOmitsLocationAndMessageText(t, events[0])
 }
 
 func TestSafeJoinRejectsTraversalManifestPaths(t *testing.T) {
-	for _, archivePath := range []string{"../secret", "data/../secret", "data//secret", "./data/secret"} {
+	for _, archivePath := range []string{"../secret", "data/../secret", "data//secret", "./data/secret", `data\secret`, `data/report\2026.txt`, "data/report\n2026.txt", "data/report\x7f.txt"} {
 		if _, err := safeJoin(t.TempDir(), archivePath); !errors.Is(err, ErrUnsafePath) {
 			t.Fatalf("safeJoin(%q) error = %v, want ErrUnsafePath", archivePath, err)
 		}
@@ -5721,6 +6064,65 @@ func TestSummarizeRestoredTreeRejectsSymlink(t *testing.T) {
 	_, _, err := summarizeRestoredTree(context.Background(), root)
 	if !errors.Is(err, ErrUnsafePath) {
 		t.Fatalf("summarizeRestoredTree() error = %v, want ErrUnsafePath", err)
+	}
+}
+
+func TestSummarizeRestoredTreeRejectsUnsafeEntryName(t *testing.T) {
+	if os.PathSeparator == '\\' {
+		t.Skip("backslash is a path separator on this platform")
+	}
+	root := t.TempDir()
+	mustWriteFile(t, filepath.Join(root, `docs\secret.txt`), "restored")
+
+	_, _, err := summarizeRestoredTree(context.Background(), root)
+	if !errors.Is(err, ErrUnsafePath) {
+		t.Fatalf("summarizeRestoredTree() error = %v, want ErrUnsafePath", err)
+	}
+}
+
+func TestSummarizeRestoreVerificationTreeRejectsUnsafeEntryName(t *testing.T) {
+	if os.PathSeparator == '\\' {
+		t.Skip("backslash is a path separator on this platform")
+	}
+	root := t.TempDir()
+	mustWriteFile(t, filepath.Join(root, `docs\secret.txt`), "restored")
+
+	_, _, _, err := summarizeRestoreVerificationTree(context.Background(), root)
+	if !errors.Is(err, ErrUnsafePath) {
+		t.Fatalf("summarizeRestoreVerificationTree() error = %v, want ErrUnsafePath", err)
+	}
+}
+
+func TestAppendRestoreDirectoryComparisonWarningsRejectsUnsafeTargetEntryName(t *testing.T) {
+	if os.PathSeparator == '\\' {
+		t.Skip("backslash is a path separator on this platform")
+	}
+	root := t.TempDir()
+	snapshotPath := filepath.Join(root, "snapshot")
+	targetPath := filepath.Join(root, "target")
+	if err := os.MkdirAll(filepath.Join(snapshotPath, "data"), 0700); err != nil {
+		t.Fatalf("MkdirAll(snapshot data) error: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(targetPath, `docs\secret`), 0700); err != nil {
+		t.Fatalf("MkdirAll(target unsafe dir) error: %v", err)
+	}
+
+	_, err := appendRestoreDirectoryComparisonWarnings(context.Background(), snapshotPath, targetPath, nil)
+	if !errors.Is(err, ErrUnsafePath) {
+		t.Fatalf("appendRestoreDirectoryComparisonWarnings() error = %v, want ErrUnsafePath", err)
+	}
+}
+
+func TestAppendRestoreFileComparisonWarningsRejectsUnsafeTargetEntryName(t *testing.T) {
+	if os.PathSeparator == '\\' {
+		t.Skip("backslash is a path separator on this platform")
+	}
+	targetPath := t.TempDir()
+	mustWriteFile(t, filepath.Join(targetPath, `docs\secret.txt`), "restored")
+
+	_, err := appendRestoreFileComparisonWarnings(context.Background(), targetPath, Manifest{}, nil)
+	if !errors.Is(err, ErrUnsafePath) {
+		t.Fatalf("appendRestoreFileComparisonWarnings() error = %v, want ErrUnsafePath", err)
 	}
 }
 
@@ -5794,6 +6196,27 @@ func TestRemoteRestorePreviewRejectsUnsafeListingPaths(t *testing.T) {
 
 	t.Run("rclone retention", func(t *testing.T) {
 		_, _, _, err := parseRcloneRetentionLSJSON([]byte(`[{"Path":"/secret.txt","Size":1,"IsDir":false}]`))
+		if !errors.Is(err, ErrUnsafePath) {
+			t.Fatalf("parseRcloneRetentionLSJSON() error = %v, want ErrUnsafePath", err)
+		}
+	})
+
+	t.Run("restic backslash path", func(t *testing.T) {
+		_, _, _, err := parseResticLSJSON([]byte(`{"type":"file","path":"/srv/source/docs\\secret.txt","size":1}`+"\n"), "/srv/source")
+		if !errors.Is(err, ErrUnsafePath) {
+			t.Fatalf("parseResticLSJSON() error = %v, want ErrUnsafePath", err)
+		}
+	})
+
+	t.Run("rclone preview windows drive path", func(t *testing.T) {
+		_, _, _, err := parseRcloneLSJSON([]byte(`[{"Path":"C:\\restore\\secret.txt","Size":1,"IsDir":false}]`))
+		if !errors.Is(err, ErrUnsafePath) {
+			t.Fatalf("parseRcloneLSJSON() error = %v, want ErrUnsafePath", err)
+		}
+	})
+
+	t.Run("rclone retention unc path", func(t *testing.T) {
+		_, _, _, err := parseRcloneRetentionLSJSON([]byte(`[{"Path":"\\\\server\\share\\secret.txt","Size":1,"IsDir":false}]`))
 		if !errors.Is(err, ErrUnsafePath) {
 			t.Fatalf("parseRcloneRetentionLSJSON() error = %v, want ErrUnsafePath", err)
 		}

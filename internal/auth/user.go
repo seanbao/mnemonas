@@ -81,28 +81,44 @@ var afterValidateAuthFilePath = func() {}
 var authDirRootsMu sync.RWMutex
 var authDirRoots = make(map[string]*os.Root)
 
-type authPersistenceWarningError struct {
+// PersistenceWarningError reports that the auth mutation is already visible on
+// disk, but the final directory fsync did not complete.
+type PersistenceWarningError struct {
 	err error
 }
 
-func (e *authPersistenceWarningError) Error() string {
+func (e *PersistenceWarningError) Error() string {
 	return e.err.Error()
 }
 
-func (e *authPersistenceWarningError) Unwrap() error {
+func (e *PersistenceWarningError) Unwrap() error {
 	return e.err
 }
 
-func wrapAuthPersistenceWarning(err error) error {
+func WrapPersistenceWarning(err error) error {
 	if err == nil {
 		return nil
 	}
-	return &authPersistenceWarningError{err: err}
+	var warning *PersistenceWarningError
+	if errors.As(err, &warning) {
+		return err
+	}
+	return &PersistenceWarningError{err: err}
+}
+
+func wrapAuthPersistenceWarning(err error) error {
+	return WrapPersistenceWarning(err)
 }
 
 func isAuthPersistenceWarning(err error) bool {
-	var warning *authPersistenceWarningError
+	var warning *PersistenceWarningError
 	return errors.As(err, &warning)
+}
+
+// IsPersistenceWarning reports whether err means the auth state was written but
+// a durability sync step could not be confirmed.
+func IsPersistenceWarning(err error) bool {
+	return isAuthPersistenceWarning(err)
 }
 
 type userStoreSnapshot struct {
@@ -145,8 +161,10 @@ var (
 
 const authRootEscapeError = "path escapes from parent"
 
-// NewUserStore creates a new user store
-// Returns the store, the initial admin password (if newly created), and any error
+// NewUserStore creates a new user store.
+// It returns the initial admin password when a bootstrap admin is created. If
+// the returned error is a persistence warning, the returned store and password
+// remain usable but the caller should surface the durability warning.
 func NewUserStore(filePath string) (*UserStore, string, error) {
 	normalizedPath, err := ensureAuthDirRoot(filePath, errUserStoreSymlink, "users")
 	if err != nil {
@@ -171,6 +189,9 @@ func NewUserStore(filePath string) (*UserStore, string, error) {
 	if !store.hasEnabledAdmin() {
 		password, err := store.createDefaultAdmin()
 		if err != nil {
+			if isAuthPersistenceWarning(err) {
+				return store, password, err
+			}
 			return nil, "", fmt.Errorf("failed to create default admin: %w", err)
 		}
 		return store, password, nil
@@ -872,14 +893,22 @@ Please change this password after first login!
 This file will be automatically deleted after you login.
 `, username, password)
 
+	var persistenceWarning error
 	if err := writeRegisteredAuthFileAtomically(passwordFile, []byte(passwordContent), errPasswordFileSymlink, ".initial-password-*.tmp", "initial password"); err != nil {
-		return "", fmt.Errorf("failed to write initial password file: %w", err)
+		if isAuthPersistenceWarning(err) {
+			persistenceWarning = fmt.Errorf("initial password persistence warning: %w", err)
+		} else {
+			return "", fmt.Errorf("failed to write initial password file: %w", err)
+		}
 	}
 
 	s.users[admin.ID] = admin
 	s.byName[normalizeUsername(admin.Username)] = admin
 
 	if err := s.save(); err != nil {
+		if isAuthPersistenceWarning(err) {
+			return password, errors.Join(persistenceWarning, fmt.Errorf("default admin persistence warning: %w", err))
+		}
 		delete(s.users, admin.ID)
 		delete(s.byName, normalizeUsername(admin.Username))
 		if removeErr := removeRegisteredAuthFile(passwordFile, errPasswordFileSymlink); removeErr != nil {
@@ -906,7 +935,7 @@ This file will be automatically deleted after you login.
 		}
 	}
 
-	return password, nil
+	return password, persistenceWarning
 }
 
 func shouldPrintInitialPasswordToTerminal() bool {

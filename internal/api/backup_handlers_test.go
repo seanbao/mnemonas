@@ -156,6 +156,16 @@ func TestServer_BackupEndpoints_RunAndRestoreDrill(t *testing.T) {
 		t.Fatalf("backup job restore report findings are empty: %+v", jobView)
 	}
 
+	runBackupAPIRequest[json.RawMessage](t, server, http.MethodPost, "/api/v1/maintenance/backups/home/restore-verify", []byte(`{"target_path":"relative"}`), http.StatusBadRequest)
+	runBackupAPIRequest[json.RawMessage](t, server, http.MethodPost, "/api/v1/maintenance/backups/home/restore", []byte(`{"target_path":"relative"}`), http.StatusBadRequest)
+	jobViewAfterBadRequest := runBackupAPIRequest[backup.JobView](t, server, http.MethodGet, "/api/v1/maintenance/backups/home", nil, http.StatusOK)
+	if jobViewAfterBadRequest.LastRestore == nil || jobViewAfterBadRequest.LastRestore.ID != restoreResult.ID || jobViewAfterBadRequest.LastRestore.TargetPath != restoreTarget {
+		t.Fatalf("invalid restore request overwrote latest restore record: %+v", jobViewAfterBadRequest.LastRestore)
+	}
+	if jobViewAfterBadRequest.LastRestoreVerify == nil || jobViewAfterBadRequest.LastRestoreVerify.ID != verifyResult.ID || jobViewAfterBadRequest.LastRestoreVerify.TargetPath != restoreTarget {
+		t.Fatalf("invalid restore verify request overwrote latest restore verify report: %+v", jobViewAfterBadRequest.LastRestoreVerify)
+	}
+
 	reportReq := httptest.NewRequest(http.MethodGet, "/api/v1/maintenance/backups/home/restore-report", nil)
 	reportResp := httptest.NewRecorder()
 	server.Router().ServeHTTP(reportResp, reportReq)
@@ -164,6 +174,18 @@ func TestServer_BackupEndpoints_RunAndRestoreDrill(t *testing.T) {
 	}
 	if contentDisposition := reportResp.Header().Get("Content-Disposition"); !strings.Contains(contentDisposition, "mnemonas-restore-summary-home-") {
 		t.Fatalf("restore report Content-Disposition = %q", contentDisposition)
+	}
+	if cacheControl := reportResp.Header().Get("Cache-Control"); cacheControl != "no-store" {
+		t.Fatalf("restore report Cache-Control = %q, want no-store", cacheControl)
+	}
+	if pragma := reportResp.Header().Get("Pragma"); pragma != "no-cache" {
+		t.Fatalf("restore report Pragma = %q, want no-cache", pragma)
+	}
+	if nosniff := reportResp.Header().Get("X-Content-Type-Options"); nosniff != "nosniff" {
+		t.Fatalf("restore report X-Content-Type-Options = %q, want nosniff", nosniff)
+	}
+	if referrerPolicy := reportResp.Header().Get("Referrer-Policy"); referrerPolicy != "no-referrer" {
+		t.Fatalf("restore report Referrer-Policy = %q, want no-referrer", referrerPolicy)
 	}
 	var report backup.RestoreReport
 	if err := json.NewDecoder(reportResp.Body).Decode(&report); err != nil {

@@ -225,6 +225,11 @@ func TestConfig_Validate(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name:    "Invalid server host unicode control character",
+			modify:  func(c *Config) { c.Server.Host = "127.0.0.1\u0081bad" },
+			wantErr: true,
+		},
+		{
 			name:    "Invalid server host with port",
 			modify:  func(c *Config) { c.Server.Host = "[::1]:8080" },
 			wantErr: true,
@@ -415,6 +420,11 @@ func TestConfig_Validate(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name:    "Invalid WebDAV prefix with unicode control character",
+			modify:  func(c *Config) { c.WebDAV.Prefix = "/dav\u0081files" },
+			wantErr: true,
+		},
+		{
 			name: "Disabled WebDAV may keep a reserved inactive prefix",
 			modify: func(c *Config) {
 				c.WebDAV.Enabled = false
@@ -430,6 +440,11 @@ func TestConfig_Validate(t *testing.T) {
 		{
 			name:    "Invalid SMB server name",
 			modify:  func(c *Config) { c.SMB.ServerName = "bad/name" },
+			wantErr: true,
+		},
+		{
+			name:    "Invalid SMB server name unicode control character",
+			modify:  func(c *Config) { c.SMB.ServerName = "mnemonas\u0081nas" },
 			wantErr: true,
 		},
 		{
@@ -466,6 +481,39 @@ func TestConfig_Validate(t *testing.T) {
 					Name:         "bad",
 					Path:         "/home/../secret",
 					AllowedRoles: []string{"admin"},
+				}}
+			},
+			wantErr: true,
+		},
+		{
+			name: "Invalid SMB share name unicode control character",
+			modify: func(c *Config) {
+				c.SMB.Shares = []SMBShareConfig{{
+					Name:         "docs\u0081private",
+					Path:         "/docs",
+					AllowedRoles: []string{"admin"},
+				}}
+			},
+			wantErr: true,
+		},
+		{
+			name: "Invalid SMB share path unicode control character",
+			modify: func(c *Config) {
+				c.SMB.Shares = []SMBShareConfig{{
+					Name:         "docs",
+					Path:         "/docs\u0081private",
+					AllowedRoles: []string{"admin"},
+				}}
+			},
+			wantErr: true,
+		},
+		{
+			name: "Invalid SMB share user unicode control character",
+			modify: func(c *Config) {
+				c.SMB.Shares = []SMBShareConfig{{
+					Name:         "docs",
+					Path:         "/docs",
+					AllowedUsers: []string{"alice\u0081hidden"},
 				}}
 			},
 			wantErr: true,
@@ -549,6 +597,51 @@ func TestConfig_Validate(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name:    "Invalid share base URL unbracketed IPv6 host",
+			modify:  func(c *Config) { c.Share.BaseURL = "https://2001:db8::1" },
+			wantErr: true,
+		},
+		{
+			name:    "Invalid share base URL bracketed IPv6 host",
+			modify:  func(c *Config) { c.Share.BaseURL = "https://[::::]" },
+			wantErr: true,
+		},
+		{
+			name:    "Invalid share base URL duplicate path slash",
+			modify:  func(c *Config) { c.Share.BaseURL = "https://nas.example.com/shares//team" },
+			wantErr: true,
+		},
+		{
+			name:    "Invalid share base URL escaped duplicate path slash",
+			modify:  func(c *Config) { c.Share.BaseURL = "https://nas.example.com/shares%2F%2Fteam" },
+			wantErr: true,
+		},
+		{
+			name:    "Invalid share base URL dot segment path",
+			modify:  func(c *Config) { c.Share.BaseURL = "https://nas.example.com/shares/./team" },
+			wantErr: true,
+		},
+		{
+			name:    "Invalid share base URL escaped dot segment path",
+			modify:  func(c *Config) { c.Share.BaseURL = "https://nas.example.com/shares/%2e%2e/team" },
+			wantErr: true,
+		},
+		{
+			name:    "Invalid share base URL backslash path",
+			modify:  func(c *Config) { c.Share.BaseURL = `https://nas.example.com/shares\team` },
+			wantErr: true,
+		},
+		{
+			name:    "Invalid share base URL host-relative backslash path",
+			modify:  func(c *Config) { c.Share.BaseURL = `https://nas.example.com\shares` },
+			wantErr: true,
+		},
+		{
+			name:    "Invalid share base URL escaped backslash path",
+			modify:  func(c *Config) { c.Share.BaseURL = "https://nas.example.com/shares%5Cteam" },
+			wantErr: true,
+		},
+		{
 			name:    "Invalid negative share default expiry",
 			modify:  func(c *Config) { c.Share.DefaultExpiresIn = -time.Hour },
 			wantErr: true,
@@ -574,6 +667,41 @@ func TestConfig_Validate(t *testing.T) {
 			name: "Invalid share policy relative path",
 			modify: func(c *Config) {
 				c.Share.PolicyRules = []SharePolicyRuleConfig{{Path: "Family", RequirePassword: true}}
+			},
+			wantErr: true,
+		},
+		{
+			name: "Invalid share policy backslash path",
+			modify: func(c *Config) {
+				c.Share.PolicyRules = []SharePolicyRuleConfig{{Path: `\Family`, RequirePassword: true}}
+			},
+			wantErr: true,
+		},
+		{
+			name: "Invalid share policy query path",
+			modify: func(c *Config) {
+				c.Share.PolicyRules = []SharePolicyRuleConfig{{Path: "/Family?token=secret", RequirePassword: true}}
+			},
+			wantErr: true,
+		},
+		{
+			name: "Invalid share policy fragment path",
+			modify: func(c *Config) {
+				c.Share.PolicyRules = []SharePolicyRuleConfig{{Path: "/Family#secret", RequirePassword: true}}
+			},
+			wantErr: true,
+		},
+		{
+			name: "Invalid share policy control character path",
+			modify: func(c *Config) {
+				c.Share.PolicyRules = []SharePolicyRuleConfig{{Path: "/Family\nPrivate", RequirePassword: true}}
+			},
+			wantErr: true,
+		},
+		{
+			name: "Invalid share policy unicode control character path",
+			modify: func(c *Config) {
+				c.Share.PolicyRules = []SharePolicyRuleConfig{{Path: "/Family\u0081Private", RequirePassword: true}}
 			},
 			wantErr: true,
 		},
@@ -647,6 +775,11 @@ func TestConfig_Validate(t *testing.T) {
 		{
 			name:    "Valid share base URL trailing dot",
 			modify:  func(c *Config) { c.Share.BaseURL = "https://NAS.EXAMPLE.COM." },
+			wantErr: false,
+		},
+		{
+			name:    "Valid share base URL bracketed IPv6 host",
+			modify:  func(c *Config) { c.Share.BaseURL = "https://[2001:db8::1]" },
 			wantErr: false,
 		},
 		{
@@ -832,6 +965,20 @@ func TestConfig_Validate(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name: "Invalid alerts webhook URL empty host label",
+			modify: func(c *Config) {
+				c.Alerts.WebhookURL = "https://hooks..example.com/storage"
+			},
+			wantErr: true,
+		},
+		{
+			name: "Invalid alerts webhook URL port",
+			modify: func(c *Config) {
+				c.Alerts.WebhookURL = "https://hooks.example.com:port/storage"
+			},
+			wantErr: true,
+		},
+		{
 			name: "Invalid alerts webhook URL whitespace",
 			modify: func(c *Config) {
 				c.Alerts.WebhookURL = "https://hooks.example.com/alert\n"
@@ -849,6 +996,13 @@ func TestConfig_Validate(t *testing.T) {
 			name: "Invalid alerts WeCom URL scheme",
 			modify: func(c *Config) {
 				c.Alerts.WeComWebhookURL = "file:///tmp/wecom"
+			},
+			wantErr: true,
+		},
+		{
+			name: "Invalid alerts WeCom URL host",
+			modify: func(c *Config) {
+				c.Alerts.WeComWebhookURL = "https://qyapi..weixin.qq.com/cgi-bin/webhook/send?key=secret-key"
 			},
 			wantErr: true,
 		},
@@ -871,6 +1025,13 @@ func TestConfig_Validate(t *testing.T) {
 			name: "Invalid alerts DingTalk URL scheme",
 			modify: func(c *Config) {
 				c.Alerts.DingTalkWebhookURL = "file:///tmp/dingtalk"
+			},
+			wantErr: true,
+		},
+		{
+			name: "Invalid alerts DingTalk URL host",
+			modify: func(c *Config) {
+				c.Alerts.DingTalkWebhookURL = "https://oapi..dingtalk.com/robot/send?access_token=secret-token"
 			},
 			wantErr: true,
 		},
@@ -907,6 +1068,13 @@ func TestConfig_Validate(t *testing.T) {
 			name: "Invalid alerts webhook header value control character",
 			modify: func(c *Config) {
 				c.Alerts.WebhookHeaders = []string{"X-MnemoNAS: ok\r\nX-Evil: injected"}
+			},
+			wantErr: true,
+		},
+		{
+			name: "Invalid alerts webhook header value unicode control character",
+			modify: func(c *Config) {
+				c.Alerts.WebhookHeaders = []string{"X-MnemoNAS: ok\u0081hidden"}
 			},
 			wantErr: true,
 		},
@@ -1235,6 +1403,50 @@ func TestConfig_ValidateBackupJobs(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name: "extra args reject unicode control characters",
+			modify: func(c *Config) {
+				c.Backup.Jobs = []BackupJobConfig{{
+					ID:           "restic-remote",
+					Name:         "Restic remote",
+					Type:         "restic",
+					Source:       source,
+					Repository:   "rest:http://backup.example/repo",
+					PasswordFile: resticPasswordFile,
+					ExtraArgs:    []string{"--tag=nightly\u0081hidden"},
+				}}
+			},
+			wantErr: true,
+		},
+		{
+			name: "retention policy rejects control characters",
+			modify: func(c *Config) {
+				c.Backup.Jobs = []BackupJobConfig{{
+					ID:              "restic-remote",
+					Name:            "Restic remote",
+					Type:            "restic",
+					Source:          source,
+					Repository:      "rest:http://backup.example/repo",
+					PasswordFile:    resticPasswordFile,
+					RetentionPolicy: "external: restic forget\n--prune",
+				}}
+			},
+			wantErr: true,
+		},
+		{
+			name: "exclude pattern rejects control characters",
+			modify: func(c *Config) {
+				c.Backup.Jobs = []BackupJobConfig{{
+					ID:          "home",
+					Name:        "Home backup",
+					Type:        "local",
+					Source:      source,
+					Destination: destination,
+					Exclude:     []string{"cache\x7fsecret"},
+				}}
+			},
+			wantErr: true,
+		},
+		{
 			name: "credential file cannot be inside source",
 			modify: func(c *Config) {
 				c.Backup.Jobs = []BackupJobConfig{{
@@ -1382,6 +1594,11 @@ func TestConfig_DirectoryQuotas(t *testing.T) {
 	}{
 		{name: "relative path", quota: DirectoryQuotaConfig{Path: "team", QuotaBytes: 1024}, errSub: "must be absolute"},
 		{name: "dirty path", quota: DirectoryQuotaConfig{Path: "/team/../other", QuotaBytes: 1024}, errSub: "must be clean"},
+		{name: "backslash path", quota: DirectoryQuotaConfig{Path: `/team\private`, QuotaBytes: 1024}, errSub: "must be a clean MnemoNAS path"},
+		{name: "query path", quota: DirectoryQuotaConfig{Path: "/team?token=secret", QuotaBytes: 1024}, errSub: "must be a clean MnemoNAS path"},
+		{name: "fragment path", quota: DirectoryQuotaConfig{Path: "/team#secret", QuotaBytes: 1024}, errSub: "must be a clean MnemoNAS path"},
+		{name: "control character path", quota: DirectoryQuotaConfig{Path: "/team\nprivate", QuotaBytes: 1024}, errSub: "must not contain control characters"},
+		{name: "unicode control character path", quota: DirectoryQuotaConfig{Path: "/team\u0081private", QuotaBytes: 1024}, errSub: "must not contain control characters"},
 		{name: "negative bytes", quota: DirectoryQuotaConfig{Path: "/team", QuotaBytes: -1}, errSub: "quota_bytes must be positive"},
 	}
 	for _, tt := range tests {
@@ -1462,6 +1679,11 @@ func TestConfig_DirectoryAccessRules(t *testing.T) {
 	}{
 		{name: "relative path", rule: DirectoryAccessRuleConfig{Path: "team", ReadUsers: []string{"alice"}}, errSub: "must be absolute"},
 		{name: "dirty path", rule: DirectoryAccessRuleConfig{Path: "/team/../other", ReadUsers: []string{"alice"}}, errSub: "must be clean"},
+		{name: "backslash path", rule: DirectoryAccessRuleConfig{Path: `/team\private`, ReadUsers: []string{"alice"}}, errSub: "must be a clean MnemoNAS path"},
+		{name: "query path", rule: DirectoryAccessRuleConfig{Path: "/team?token=secret", ReadUsers: []string{"alice"}}, errSub: "must be a clean MnemoNAS path"},
+		{name: "fragment path", rule: DirectoryAccessRuleConfig{Path: "/team#secret", ReadUsers: []string{"alice"}}, errSub: "must be a clean MnemoNAS path"},
+		{name: "control character path", rule: DirectoryAccessRuleConfig{Path: "/team\nprivate", ReadUsers: []string{"alice"}}, errSub: "must not contain control characters"},
+		{name: "unicode control character path", rule: DirectoryAccessRuleConfig{Path: "/team\u0081private", ReadUsers: []string{"alice"}}, errSub: "must not contain control characters"},
 		{name: "missing principals", rule: DirectoryAccessRuleConfig{Path: "/team"}, errSub: "must grant at least one"},
 		{name: "invalid principal", rule: DirectoryAccessRuleConfig{Path: "/team", ReadGroups: []string{"family/team"}}, errSub: "contains invalid characters"},
 		{name: "invalid role", rule: DirectoryAccessRuleConfig{Path: "/team", ReadRoles: []string{"owner"}}, errSub: "must be one of"},
@@ -1730,6 +1952,10 @@ func TestNormalizeWebDAVPrefix(t *testing.T) {
 		{name: "cleans after trimming path segment whitespace", input: "00/ /", expected: "/00"},
 		{name: "iterates until stable after clean", input: "0 / /", expected: "/0"},
 		{name: "collapses repeated slashes", input: "//dav//files///", expected: "/dav/files"},
+		{name: "preserves non-edge spaces inside path segments", input: "/team name /dav", expected: "/team name /dav"},
+		{name: "trims only path edge spaces after clean", input: "/team /sub ", expected: "/team /sub"},
+		{name: "preserves non-edge leading spaces inside path segments", input: "/ team/sub", expected: "/ team/sub"},
+		{name: "preserves non-empty padded middle segment", input: "/team/ spaced /file", expected: "/team/ spaced /file"},
 	}
 
 	for _, tt := range tests {
@@ -2210,27 +2436,7 @@ func TestLoad_ExampleConfig(t *testing.T) {
 		t.Fatalf("Load() error: %v", err)
 	}
 
-	if cfg.Server.ReadTimeout != 30*time.Second {
-		t.Fatalf("expected read timeout 30s, got %s", cfg.Server.ReadTimeout)
-	}
-	if cfg.Storage.Retention.MaxAge != 2160*time.Hour {
-		t.Fatalf("expected max age 2160h, got %s", cfg.Storage.Retention.MaxAge)
-	}
-	if cfg.Auth.AccessTokenTTL != 15*time.Minute {
-		t.Fatalf("expected access token ttl 15m, got %s", cfg.Auth.AccessTokenTTL)
-	}
-	if cfg.Alerts.CheckInterval != time.Hour {
-		t.Fatalf("expected alerts check interval 1h, got %s", cfg.Alerts.CheckInterval)
-	}
-	if cfg.Share.DefaultExpiresIn != 168*time.Hour {
-		t.Fatalf("expected share default expiry 168h, got %s", cfg.Share.DefaultExpiresIn)
-	}
-	if cfg.Alerts.SMTPPort != 587 {
-		t.Fatalf("expected SMTP port 587, got %d", cfg.Alerts.SMTPPort)
-	}
-	if cfg.Maintenance.Scrub.ScheduleInterval != 168*time.Hour {
-		t.Fatalf("expected scrub schedule interval 168h, got %s", cfg.Maintenance.Scrub.ScheduleInterval)
-	}
+	assertExampleConfigMatchesDefaults(t, cfg)
 	assertStorageRootDerivedInternalPaths(t, cfg)
 	assertDefaultVersioningPolicy(t, cfg)
 }
@@ -2254,15 +2460,46 @@ func TestLoad_DocumentationConfigExamples(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Load() error: %v", err)
 			}
-			if cfg.Share.DefaultExpiresIn != 168*time.Hour {
-				t.Fatalf("share default expiry = %s, want 168h", cfg.Share.DefaultExpiresIn)
-			}
-			if cfg.Maintenance.Scrub.ScheduleInterval != 168*time.Hour {
-				t.Fatalf("scrub schedule interval = %s, want 168h", cfg.Maintenance.Scrub.ScheduleInterval)
-			}
+			assertExampleConfigMatchesDefaults(t, cfg)
 			assertStorageRootDerivedInternalPaths(t, cfg)
 			assertDefaultVersioningPolicy(t, cfg)
 		})
+	}
+}
+
+func assertExampleConfigMatchesDefaults(t *testing.T, cfg *Config) {
+	t.Helper()
+
+	want := Default()
+	// The example pins the runtime Basic Auth username default explicitly so the
+	// config remains copyable for WebDAV clients.
+	want.WebDAV.Username = "admin"
+
+	checks := []struct {
+		name string
+		got  interface{}
+		want interface{}
+	}{
+		{name: "server", got: cfg.Server, want: want.Server},
+		{name: "storage", got: cfg.Storage, want: want.Storage},
+		{name: "dataplane", got: cfg.DataPlane, want: want.DataPlane},
+		{name: "webdav", got: cfg.WebDAV, want: want.WebDAV},
+		{name: "smb", got: cfg.SMB, want: want.SMB},
+		{name: "backup", got: cfg.Backup, want: want.Backup},
+		{name: "auth", got: cfg.Auth, want: want.Auth},
+		{name: "share", got: cfg.Share, want: want.Share},
+		{name: "favorites", got: cfg.Favorites, want: want.Favorites},
+		{name: "alerts", got: cfg.Alerts, want: want.Alerts},
+		{name: "disk_health", got: cfg.DiskHealth, want: want.DiskHealth},
+		{name: "maintenance", got: cfg.Maintenance, want: want.Maintenance},
+		{name: "security", got: cfg.Security, want: want.Security},
+		{name: "log", got: cfg.Log, want: want.Log},
+	}
+
+	for _, check := range checks {
+		if !reflect.DeepEqual(check.got, check.want) {
+			t.Fatalf("example %s config = %#v, want default %#v", check.name, check.got, check.want)
+		}
 	}
 }
 
@@ -2305,6 +2542,42 @@ func TestDocumentationEnvironmentOverridesAreMarkedUnsupported(t *testing.T) {
 			for _, forbidden := range doc.forbiddenText {
 				if strings.Contains(text, forbidden) {
 					t.Errorf("configuration documentation still contains unsupported environment override example %q", forbidden)
+				}
+			}
+		})
+	}
+}
+
+func TestDocumentationBackupJobFieldsCoverConfigTags(t *testing.T) {
+	expectedFields := []string{"`[[backup.jobs]]`"}
+	backupJobType := reflect.TypeOf(BackupJobConfig{})
+	for i := 0; i < backupJobType.NumField(); i++ {
+		field := backupJobType.Field(i)
+		name := strings.Split(field.Tag.Get("toml"), ",")[0]
+		if name == "" || name == "-" {
+			continue
+		}
+		expectedFields = append(expectedFields, "`"+name+"`")
+	}
+
+	for _, docPath := range []string{
+		filepath.Join("..", "..", "docs", "configuration.md"),
+		filepath.Join("..", "..", "docs", "configuration.en.md"),
+	} {
+		t.Run(filepath.Base(docPath), func(t *testing.T) {
+			data, err := os.ReadFile(docPath)
+			if err != nil {
+				t.Fatalf("failed to read configuration documentation: %v", err)
+			}
+			section := documentationSectionBetween(t, string(data), "## `[backup]`", "## `[auth]`")
+			for _, expected := range expectedFields {
+				if !strings.Contains(section, expected) {
+					t.Errorf("backup configuration section does not document %s", expected)
+				}
+			}
+			for _, jobType := range []string{"`local`", "`restic`", "`rclone`"} {
+				if !strings.Contains(section, jobType) {
+					t.Errorf("backup configuration section does not document job type %s", jobType)
 				}
 			}
 		})

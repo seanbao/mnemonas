@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/seanbao/mnemonas/internal/dataplane"
 	"github.com/seanbao/mnemonas/internal/rootio"
@@ -401,7 +402,7 @@ func syncVersionStoreDirectory(dir string) error {
 
 func normalizeVersionStorePath(rawPath string) (string, error) {
 	normalized := strings.ReplaceAll(rawPath, "\\", "/")
-	if strings.ContainsRune(normalized, '\x00') {
+	if strings.IndexFunc(normalized, unicode.IsControl) >= 0 {
 		return "", errInvalidStorePath
 	}
 	if normalized == "" {

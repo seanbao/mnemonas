@@ -11,6 +11,7 @@ import (
 
 	"github.com/seanbao/mnemonas/internal/alerts"
 	"github.com/seanbao/mnemonas/internal/auth"
+	"github.com/seanbao/mnemonas/internal/backup"
 	"github.com/seanbao/mnemonas/internal/config"
 	"github.com/seanbao/mnemonas/internal/storage"
 )
@@ -44,7 +45,10 @@ func (s *Server) currentUserHomeDir(ctx context.Context) (string, bool, error) {
 
 	user := auth.GetUserFromContext(ctx)
 	if user == nil {
-		return "", false, nil
+		return "", true, errPathAccessDenied
+	}
+	if user.Disabled {
+		return "", true, errPathAccessDenied
 	}
 	if strings.TrimSpace(user.HomeDir) == "" {
 		return "", true, errPathOutsideHomeDir
@@ -110,16 +114,29 @@ func (s *Server) directoryQuotaRules() []config.DirectoryQuotaConfig {
 	if cfg == nil || len(cfg.Storage.DirectoryQuotas) == 0 {
 		return nil
 	}
-	return append([]config.DirectoryQuotaConfig(nil), cfg.Storage.DirectoryQuotas...)
+	rules := make([]config.DirectoryQuotaConfig, 0, len(cfg.Storage.DirectoryQuotas))
+	for _, rule := range cfg.Storage.DirectoryQuotas {
+		rule.Path = cleanRuntimePathRulePath(rule.Path)
+		if rule.Path == "" {
+			continue
+		}
+		rules = append(rules, rule)
+	}
+	return rules
 }
 
 func directoryQuotaRulesForTarget(rules []config.DirectoryQuotaConfig, targetPath string) []config.DirectoryQuotaConfig {
 	if len(rules) == 0 {
 		return nil
 	}
+	targetPath = cleanRuntimePathRulePath(targetPath)
+	if targetPath == "" {
+		return nil
+	}
 	matched := make([]config.DirectoryQuotaConfig, 0, len(rules))
 	for _, rule := range rules {
-		if rule.QuotaBytes <= 0 {
+		rule.Path = cleanRuntimePathRulePath(rule.Path)
+		if rule.Path == "" || rule.QuotaBytes <= 0 {
 			continue
 		}
 		if pathWithinBase(rule.Path, targetPath) {
@@ -131,7 +148,7 @@ func directoryQuotaRulesForTarget(rules []config.DirectoryQuotaConfig, targetPat
 
 func hasDirectoryQuotaRules(rules []config.DirectoryQuotaConfig) bool {
 	for _, rule := range rules {
-		if strings.TrimSpace(rule.Path) != "" && rule.QuotaBytes > 0 {
+		if cleanRuntimePathRulePath(rule.Path) != "" && rule.QuotaBytes > 0 {
 			return true
 		}
 	}
@@ -142,6 +159,9 @@ func mappedTreePathForQuota(treeRoot, mappedRoot, quotaPath string) (string, boo
 	treeRoot = cleanQuotaPath(treeRoot)
 	mappedRoot = cleanQuotaPath(mappedRoot)
 	quotaPath = cleanQuotaPath(quotaPath)
+	if treeRoot == "" || mappedRoot == "" || quotaPath == "" {
+		return "", false
+	}
 
 	if pathWithinBase(quotaPath, mappedRoot) {
 		return treeRoot, true
@@ -164,15 +184,7 @@ func mappedTreePathForQuota(treeRoot, mappedRoot, quotaPath string) (string, boo
 }
 
 func cleanQuotaPath(targetPath string) string {
-	targetPath = strings.TrimSpace(strings.ReplaceAll(targetPath, "\\", "/"))
-	if targetPath == "" {
-		return ""
-	}
-	cleanPath := path.Clean(targetPath)
-	if !path.IsAbs(cleanPath) {
-		cleanPath = "/" + cleanPath
-	}
-	return cleanPath
+	return cleanRuntimePathRulePath(targetPath)
 }
 
 func ensureQuotaCheckAvailable(check quotaCheck) error {
@@ -518,7 +530,7 @@ func (s *Server) copyResourceWithQuota(ctx context.Context, srcPath, dstPath str
 func (s *Server) copyDirectoryQuotaChecks(ctx context.Context, srcPath, dstPath string, rules []config.DirectoryQuotaConfig) ([]quotaCheck, error) {
 	checks := make([]quotaCheck, 0, len(rules))
 	for _, rule := range rules {
-		rule.Path = cleanQuotaPath(rule.Path)
+		rule.Path = cleanRuntimePathRulePath(rule.Path)
 		if rule.Path == "" || rule.QuotaBytes <= 0 {
 			continue
 		}
@@ -615,7 +627,7 @@ func (s *Server) trashRestoreDirectoryQuotaChecks(ctx context.Context, item *sto
 	requiredByRule := make(map[string]int64, len(rules))
 	rulesByPath := make(map[string]config.DirectoryQuotaConfig, len(rules))
 	for _, rule := range rules {
-		rule.Path = cleanQuotaPath(rule.Path)
+		rule.Path = cleanRuntimePathRulePath(rule.Path)
 		if rule.Path == "" || rule.QuotaBytes <= 0 {
 			continue
 		}
@@ -730,7 +742,7 @@ func (s *Server) moveResourceWithQuota(ctx context.Context, srcPath, dstPath str
 func (s *Server) moveDirectoryQuotaChecks(ctx context.Context, srcPath, dstPath string, rules []config.DirectoryQuotaConfig) ([]quotaCheck, error) {
 	checks := make([]quotaCheck, 0, len(rules))
 	for _, rule := range rules {
-		rule.Path = cleanQuotaPath(rule.Path)
+		rule.Path = cleanRuntimePathRulePath(rule.Path)
 		if rule.Path == "" || rule.QuotaBytes <= 0 {
 			continue
 		}
@@ -859,6 +871,9 @@ type quotaLimitedReader struct {
 }
 
 func (r *quotaLimitedReader) Read(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
 	if r.remaining <= 0 {
 		var probe [1]byte
 		n, err := r.reader.Read(probe[:])
@@ -868,7 +883,7 @@ func (r *quotaLimitedReader) Read(p []byte) (int, error) {
 		if err != nil {
 			return 0, err
 		}
-		return 0, nil
+		return 0, io.ErrNoProgress
 	}
 
 	if int64(len(p)) > r.remaining {
@@ -899,13 +914,22 @@ func respondQuotaExceeded(w http.ResponseWriter, err error) {
 	details := any(nil)
 	var quotaErr *quotaExceededError
 	if errors.As(err, &quotaErr) {
-		details = quotaErr
+		details = quotaExceededDetailsForAPI(quotaErr)
 	}
 	apiErr := NewAPIError(ErrCodeQuotaExceeded, quotaExceededMessage(quotaErr))
 	if details != nil {
 		apiErr = apiErr.WithDetails(details)
 	}
 	apiErr.Write(w, http.StatusInsufficientStorage)
+}
+
+func quotaExceededDetailsForAPI(err *quotaExceededError) *quotaExceededError {
+	if err == nil {
+		return nil
+	}
+	clone := *err
+	clone.QuotaPath = backup.SanitizeNotificationText(clone.QuotaPath)
+	return &clone
 }
 
 func quotaExceededMessage(err *quotaExceededError) string {
@@ -926,7 +950,7 @@ func (s *Server) sendQuotaExceededAlertEvent(ctx context.Context, operation stri
 	}
 
 	actorScope := "unknown"
-	if user := auth.GetUserFromContext(ctx); user != nil {
+	if user := auth.GetUserFromContext(ctx); user != nil && !user.Disabled {
 		actorScope = "authenticated_user"
 	}
 	details := map[string]any{

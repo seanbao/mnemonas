@@ -15,6 +15,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode"
 
 	"github.com/seanbao/mnemonas/internal/rootio"
 )
@@ -120,7 +121,7 @@ func normalizeActivityEntryPath(rawPath string) (string, error) {
 	if normalized == "" {
 		return "", nil
 	}
-	if strings.ContainsRune(normalized, '\x00') {
+	if containsActivityPathControlCharacter(normalized) {
 		return "", errInvalidActivityPath
 	}
 	for _, segment := range strings.Split(normalized, "/") {
@@ -129,6 +130,10 @@ func normalizeActivityEntryPath(rawPath string) (string, error) {
 		}
 	}
 	return pathpkg.Clean("/" + strings.TrimPrefix(normalized, "/")), nil
+}
+
+func containsActivityPathControlCharacter(filePath string) bool {
+	return strings.IndexFunc(filePath, unicode.IsControl) >= 0
 }
 
 func validateDecodedActivityEntry(entry *Entry, seenIDs map[string]struct{}) error {
@@ -382,7 +387,7 @@ func copyReviewRecord(record ReviewRecord) ReviewRecord {
 // DetailKeyMayContainPath reports whether an activity detail key conventionally stores a MnemoNAS path.
 func DetailKeyMayContainPath(key string) bool {
 	switch strings.ToLower(strings.TrimSpace(key)) {
-	case "path", "from", "to", "source_path", "target_path", "destination_path", "original_path", "restore_path", "quota_path":
+	case "path", "from", "to", "source_path", "target_path", "destination_path", "original_path", "restore_path", "quota_path", "snapshot_path", "manifest_path", "config_path":
 		return true
 	default:
 		return false
@@ -1250,8 +1255,8 @@ func normalizeActivityReviewText(value string, maxBytes int, field string) (stri
 	if normalized == "" {
 		return "", fmt.Errorf("%w: %s is required", ErrInvalidReviewRecord, field)
 	}
-	if strings.ContainsRune(normalized, '\x00') {
-		return "", fmt.Errorf("%w: %s contains a NUL byte", ErrInvalidReviewRecord, field)
+	if strings.IndexFunc(normalized, unicode.IsControl) >= 0 {
+		return "", fmt.Errorf("%w: %s contains control characters", ErrInvalidReviewRecord, field)
 	}
 	if len(normalized) > maxBytes {
 		return "", fmt.Errorf("%w: %s is too long", ErrInvalidReviewRecord, field)
@@ -1264,8 +1269,8 @@ func normalizeOptionalActivityReviewText(value string, maxBytes int, field strin
 	if normalized == "" {
 		return "", nil
 	}
-	if strings.ContainsRune(normalized, '\x00') {
-		return "", fmt.Errorf("%w: %s contains a NUL byte", ErrInvalidReviewRecord, field)
+	if strings.IndexFunc(normalized, unicode.IsControl) >= 0 {
+		return "", fmt.Errorf("%w: %s contains control characters", ErrInvalidReviewRecord, field)
 	}
 	if len(normalized) > maxBytes {
 		return "", fmt.Errorf("%w: %s is too long", ErrInvalidReviewRecord, field)

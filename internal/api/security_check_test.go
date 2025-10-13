@@ -28,6 +28,30 @@ func securityCheckByID(t *testing.T, checks []securityCheckItem, id string) secu
 	return securityCheckItem{}
 }
 
+func TestSecurityCheckErrorDetailRedactsSensitiveValues(t *testing.T) {
+	err := &os.PathError{
+		Op:   "open",
+		Path: "/srv/mnemonas/token=restore-secret/secret_access_key=object-secret/config.toml",
+		Err:  os.ErrPermission,
+	}
+
+	detail := securityCheckErrorDetail(err)
+
+	for _, leaked := range []string{"restore-secret", "object-secret"} {
+		if strings.Contains(detail, leaked) {
+			t.Fatalf("securityCheckErrorDetail() = %q, leaked %q", detail, leaked)
+		}
+	}
+	for _, want := range []string{"token=<redacted>", "secret_access_key=<redacted>"} {
+		if !strings.Contains(detail, want) {
+			t.Fatalf("securityCheckErrorDetail() = %q, want %q", detail, want)
+		}
+	}
+	if got := securityCheckErrorDetail(nil); got != "" {
+		t.Fatalf("securityCheckErrorDetail(nil) = %q, want empty", got)
+	}
+}
+
 func saveSecurityCheckGeneratedWebDAVSecret(t *testing.T, dataRoot string) {
 	t.Helper()
 	if err := config.SaveSecrets(dataRoot, &config.Secrets{
@@ -269,6 +293,63 @@ func TestServer_GetSettingsSecurityCheck_ReportsPublicDeploymentRisks(t *testing
 	}
 }
 
+func TestServer_GetSettingsSecurityCheck_WarnsForLoopbackUnsafeNoAuthOverride(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfg := config.Default()
+	cfg.Storage.Root = tmpDir
+	cfg.Auth.Enabled = false
+	cfg.Auth.UsersFile = filepath.Join(tmpDir, ".mnemonas", "users.json")
+	cfg.Server.Host = "127.0.0.1"
+	cfg.Server.TrustedProxyHops = 1
+	cfg.Security.AllowUnsafeNoAuth = true
+	cfg.DataPlane.GRPCAddress = "127.0.0.1:9090"
+	cfg.WebDAV.Enabled = true
+	cfg.WebDAV.AuthType = "none"
+	cfg.Share.Enabled = false
+	t.Setenv("DATAPLANE_HTTP_ADDR", "127.0.0.1:9091")
+
+	server, err := NewServer(zerolog.Nop(), &ServerConfig{Config: cfg})
+	if err != nil {
+		t.Fatalf("NewServer() error: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/settings/security-check", nil)
+	req.RemoteAddr = "127.0.0.1:1234"
+	req.Header.Set("X-Forwarded-Proto", "https")
+	rec := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("security check status = %d, want %d: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var payload struct {
+		Success bool                  `json:"success"`
+		Data    securityCheckResponse `json:"data"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode security check response: %v", err)
+	}
+
+	check := securityCheckByID(t, payload.Data.Checks, "unsafe_no_auth_override")
+	if check.Status != securityCheckWarning {
+		t.Fatalf("unsafe_no_auth_override status = %q, want %q; check=%#v", check.Status, securityCheckWarning, check)
+	}
+	if strings.Contains(check.Message, "非本机地址") {
+		t.Fatalf("unsafe_no_auth_override warning message = %q, should not imply non-loopback exposure", check.Message)
+	}
+	if !strings.Contains(check.Message, "公网访问前请关闭该例外") {
+		t.Fatalf("unsafe_no_auth_override warning message = %q, want public-access guidance", check.Message)
+	}
+	if got := check.Details["auth_enabled"]; got != false {
+		t.Fatalf("auth_enabled detail = %#v, want false", got)
+	}
+	if got := check.Details["webdav_auth_type"]; got != "none" {
+		t.Fatalf("webdav_auth_type detail = %#v, want none", got)
+	}
+}
+
 func TestSecurityConfigFileAccessCheck_ClassifiesPathKinds(t *testing.T) {
 	tmpDir := t.TempDir()
 
@@ -391,6 +472,23 @@ func TestSecurityConfigFileAccessCheck_ClassifiesPathKinds(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestSecurityConfigFileAccessCheckRedactsErrorDetail(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "token=config-secret", "config.toml") + "\x00"
+
+	check := securityConfigFileAccessCheck(configPath)
+
+	detail, ok := check.Details["error"].(string)
+	if !ok || detail == "" {
+		t.Fatalf("error detail = %#v, want non-empty string; check=%#v", check.Details["error"], check)
+	}
+	if strings.Contains(detail, "config-secret") {
+		t.Fatalf("error detail = %q, leaked config token", detail)
+	}
+	if !strings.Contains(detail, "token=<redacted>") {
+		t.Fatalf("error detail = %q, want redacted token path segment", detail)
 	}
 }
 
@@ -828,6 +926,26 @@ func TestServer_GetSettingsSecurityCheck_BlocksUnsafeShareBaseURL(t *testing.T) 
 			baseURL: "https://nas.example.test#",
 		},
 		{
+			name:    "duplicate path slashes",
+			baseURL: "https://nas.example.test/shares//team",
+		},
+		{
+			name:    "dot segment path",
+			baseURL: "https://nas.example.test/shares/./team",
+		},
+		{
+			name:    "escaped dot segment path",
+			baseURL: "https://nas.example.test/shares/%2e%2e/team",
+		},
+		{
+			name:    "backslash path",
+			baseURL: `https://nas.example.test/shares\team`,
+		},
+		{
+			name:    "escaped backslash path",
+			baseURL: "https://nas.example.test/shares%5Cteam",
+		},
+		{
 			name:    "empty host label",
 			baseURL: "https://nas..example.test",
 		},
@@ -886,6 +1004,162 @@ func TestServer_GetSettingsSecurityCheck_BlocksUnsafeShareBaseURL(t *testing.T) 
 				t.Fatalf("share_base_url status = %q, want %q; check=%#v", check.Status, securityCheckBlock, check)
 			}
 		})
+	}
+}
+
+func TestServer_GetSettingsSecurityCheck_BlocksShareBaseURLDuplicatePathSlashes(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfg := config.Default()
+	cfg.Storage.Root = tmpDir
+	cfg.Auth.UsersFile = filepath.Join(tmpDir, ".mnemonas", "users.json")
+	cfg.Server.Host = "127.0.0.1"
+	cfg.Server.TrustedProxyHops = 1
+	cfg.DataPlane.GRPCAddress = "127.0.0.1:9090"
+	cfg.WebDAV.Enabled = true
+	cfg.WebDAV.AuthType = "basic"
+	cfg.Share.Enabled = true
+	cfg.Share.BaseURL = "https://nas.example.test/shares%2F%2Fteam"
+	t.Setenv("DATAPLANE_HTTP_ADDR", "127.0.0.1:9091")
+	saveSecurityCheckGeneratedWebDAVSecret(t, tmpDir)
+
+	server, err := NewServer(zerolog.Nop(), &ServerConfig{Config: cfg})
+	if err != nil {
+		t.Fatalf("NewServer() error: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/settings/security-check", nil)
+	req.Host = "nas.example.test"
+	req.RemoteAddr = "127.0.0.1:1234"
+	req.Header.Set("X-Forwarded-Proto", "https")
+	rec := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("security check status = %d, want %d: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var payload struct {
+		Success bool                  `json:"success"`
+		Data    securityCheckResponse `json:"data"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode security check response: %v", err)
+	}
+
+	check := securityCheckByID(t, payload.Data.Checks, "share_base_url")
+	if check.Status != securityCheckBlock {
+		t.Fatalf("share_base_url status = %q, want %q; check=%#v", check.Status, securityCheckBlock, check)
+	}
+	if check.Title != "分享基础 URL 路径包含重复斜杠" {
+		t.Fatalf("share_base_url title = %q, want duplicate slash warning", check.Title)
+	}
+	if got := check.Details["base_url_path"]; got != "/shares//team" {
+		t.Fatalf("base_url_path = %#v, want /shares//team", got)
+	}
+}
+
+func TestServer_GetSettingsSecurityCheck_BlocksShareBaseURLHostRelativeBackslashPath(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfg := config.Default()
+	cfg.Storage.Root = tmpDir
+	cfg.Auth.UsersFile = filepath.Join(tmpDir, ".mnemonas", "users.json")
+	cfg.Server.Host = "127.0.0.1"
+	cfg.Server.TrustedProxyHops = 1
+	cfg.DataPlane.GRPCAddress = "127.0.0.1:9090"
+	cfg.WebDAV.Enabled = true
+	cfg.WebDAV.AuthType = "basic"
+	cfg.Share.Enabled = true
+	cfg.Share.BaseURL = `https://nas.example.test\shares`
+	t.Setenv("DATAPLANE_HTTP_ADDR", "127.0.0.1:9091")
+	saveSecurityCheckGeneratedWebDAVSecret(t, tmpDir)
+
+	server, err := NewServer(zerolog.Nop(), &ServerConfig{Config: cfg})
+	if err != nil {
+		t.Fatalf("NewServer() error: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/settings/security-check", nil)
+	req.Host = "nas.example.test"
+	req.RemoteAddr = "127.0.0.1:1234"
+	req.Header.Set("X-Forwarded-Proto", "https")
+	rec := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("security check status = %d, want %d: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var payload struct {
+		Success bool                  `json:"success"`
+		Data    securityCheckResponse `json:"data"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode security check response: %v", err)
+	}
+
+	check := securityCheckByID(t, payload.Data.Checks, "share_base_url")
+	if check.Status != securityCheckBlock {
+		t.Fatalf("share_base_url status = %q, want %q; check=%#v", check.Status, securityCheckBlock, check)
+	}
+	if check.Title != "分享基础 URL 路径包含反斜杠" {
+		t.Fatalf("share_base_url title = %q, want backslash warning", check.Title)
+	}
+	if got := check.Details["base_url_path"]; got != `\shares` {
+		t.Fatalf("base_url_path = %#v, want \\shares", got)
+	}
+}
+
+func TestServer_GetSettingsSecurityCheck_BlocksShareBaseURLDotSegments(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfg := config.Default()
+	cfg.Storage.Root = tmpDir
+	cfg.Auth.UsersFile = filepath.Join(tmpDir, ".mnemonas", "users.json")
+	cfg.Server.Host = "127.0.0.1"
+	cfg.Server.TrustedProxyHops = 1
+	cfg.DataPlane.GRPCAddress = "127.0.0.1:9090"
+	cfg.WebDAV.Enabled = true
+	cfg.WebDAV.AuthType = "basic"
+	cfg.Share.Enabled = true
+	cfg.Share.BaseURL = "https://nas.example.test/shares/%2e%2e/team"
+	t.Setenv("DATAPLANE_HTTP_ADDR", "127.0.0.1:9091")
+	saveSecurityCheckGeneratedWebDAVSecret(t, tmpDir)
+
+	server, err := NewServer(zerolog.Nop(), &ServerConfig{Config: cfg})
+	if err != nil {
+		t.Fatalf("NewServer() error: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/settings/security-check", nil)
+	req.Host = "nas.example.test"
+	req.RemoteAddr = "127.0.0.1:1234"
+	req.Header.Set("X-Forwarded-Proto", "https")
+	rec := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("security check status = %d, want %d: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var payload struct {
+		Success bool                  `json:"success"`
+		Data    securityCheckResponse `json:"data"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode security check response: %v", err)
+	}
+
+	check := securityCheckByID(t, payload.Data.Checks, "share_base_url")
+	if check.Status != securityCheckBlock {
+		t.Fatalf("share_base_url status = %q, want %q; check=%#v", check.Status, securityCheckBlock, check)
+	}
+	if check.Title != "分享基础 URL 路径包含点段" {
+		t.Fatalf("share_base_url title = %q, want dot segment warning", check.Title)
+	}
+	if got := check.Details["base_url_path"]; got != "/shares/../team" {
+		t.Fatalf("base_url_path = %#v, want /shares/../team", got)
 	}
 }
 
@@ -950,6 +1224,11 @@ func TestServer_GetSettingsSecurityCheck_WarnsWhenShareBaseURLEndsWithShareRoute
 			name:    "base path share route",
 			baseURL: "https://nas.example.test/base/s",
 			path:    "/base/s",
+		},
+		{
+			name:    "escaped base path share route",
+			baseURL: "https://nas.example.test/base%2Fs/",
+			path:    "/base/s/",
 		},
 	}
 
@@ -1121,6 +1400,12 @@ func TestSecurityWebDAVPrefixRisk_ClassifiesPublicPrefixRisks(t *testing.T) {
 			name:           "invalid characters",
 			prefix:         "/dav?token",
 			wantNormalized: "/dav?token",
+			wantRisk:       "invalid_characters",
+		},
+		{
+			name:           "unicode control character",
+			prefix:         "/dav\u0081files",
+			wantNormalized: "/dav\u0081files",
 			wantRisk:       "invalid_characters",
 		},
 		{

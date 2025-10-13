@@ -17,6 +17,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode"
 
 	"github.com/pelletier/go-toml/v2"
 
@@ -1966,9 +1967,7 @@ func validateSMBServerName(name string) error {
 	if trimmed != name || len(trimmed) > 63 || strings.ContainsAny(trimmed, "\\/:*?\"<>|") {
 		return fmt.Errorf("invalid smb.server_name: %q", name)
 	}
-	if strings.IndexFunc(trimmed, func(r rune) bool {
-		return r <= 0x20 || r == 0x7f
-	}) >= 0 {
+	if hasWhitespaceOrControl(trimmed) {
 		return errors.New("smb.server_name must not contain whitespace or control characters")
 	}
 	return nil
@@ -1982,9 +1981,7 @@ func validateAbsoluteFilePath(path, field string) error {
 	if trimmed != path {
 		return fmt.Errorf("%s must not contain leading or trailing whitespace", field)
 	}
-	if strings.IndexFunc(trimmed, func(r rune) bool {
-		return r < 0x20 || r == 0x7f
-	}) >= 0 {
+	if hasControlChar(trimmed) {
 		return fmt.Errorf("%s must not contain control characters", field)
 	}
 	if !filepath.IsAbs(trimmed) {
@@ -2006,7 +2003,7 @@ func validateSMBShare(share SMBShareConfig, seen map[string]struct{}) error {
 		errs = append(errs, errors.New("smb share name IPC$ is reserved"))
 	case strings.ContainsAny(name, "\\/:*?\"<>|"):
 		errs = append(errs, fmt.Errorf("invalid smb share name: %q", share.Name))
-	case strings.IndexFunc(name, func(r rune) bool { return r <= 0x20 || r == 0x7f }) >= 0:
+	case hasWhitespaceOrControl(name):
 		errs = append(errs, fmt.Errorf("smb share name %q must not contain whitespace or control characters", share.Name))
 	default:
 		key := strings.ToLower(name)
@@ -2030,9 +2027,7 @@ func validateSMBShare(share SMBShareConfig, seen map[string]struct{}) error {
 		}
 	}
 	for _, user := range share.AllowedUsers {
-		if strings.TrimSpace(user) == "" || strings.IndexFunc(user, func(r rune) bool {
-			return r <= 0x20 || r == 0x7f
-		}) >= 0 {
+		if strings.TrimSpace(user) == "" || hasWhitespaceOrControl(user) {
 			errs = append(errs, fmt.Errorf("invalid smb share user %q for share %q", user, share.Name))
 		}
 	}
@@ -2054,7 +2049,7 @@ func validateSMBSharePath(path string) error {
 	if strings.ContainsAny(trimmed, "\\?#") {
 		return fmt.Errorf("smb share path %q must be a clean MnemoNAS path", path)
 	}
-	if strings.IndexFunc(trimmed, func(r rune) bool { return r < 0x20 || r == 0x7f }) >= 0 {
+	if hasControlChar(trimmed) {
 		return errors.New("smb share path must not contain control characters")
 	}
 	if urlpath.Clean(trimmed) != trimmed {
@@ -2216,7 +2211,7 @@ func validateDirectoryQuotaPath(value, field string) error {
 	if strings.ContainsAny(trimmed, "\\?#") {
 		return fmt.Errorf("%s must be a clean MnemoNAS path", field)
 	}
-	if strings.IndexFunc(trimmed, func(r rune) bool { return r < 0x20 || r == 0x7f }) >= 0 {
+	if strings.IndexFunc(trimmed, unicode.IsControl) >= 0 {
 		return fmt.Errorf("%s must not contain control characters", field)
 	}
 	if urlpath.Clean(trimmed) != trimmed {
@@ -2267,20 +2262,20 @@ func validateDiskHealthConfig(cfg DiskHealthConfig) error {
 
 	for i, device := range cfg.Devices {
 		label := fmt.Sprintf("disk_health.devices[%d]", i)
-		if strings.Contains(device.Name, "\x00") || hasControlChar(device.Name) {
+		if hasControlChar(device.Name) {
 			errs = append(errs, fmt.Errorf("%s.name contains invalid control characters", label))
 		}
-		if strings.Contains(device.Type, "\x00") || hasControlChar(device.Type) {
+		if hasControlChar(device.Type) {
 			errs = append(errs, fmt.Errorf("%s.type contains invalid control characters", label))
 		}
-		if strings.Contains(device.Serial, "\x00") || hasControlChar(device.Serial) {
+		if hasControlChar(device.Serial) {
 			errs = append(errs, fmt.Errorf("%s.serial contains invalid control characters", label))
 		}
 		if strings.TrimSpace(device.Path) == "" {
 			errs = append(errs, fmt.Errorf("%s.path cannot be empty", label))
 		} else if !filepath.IsAbs(device.Path) {
 			errs = append(errs, fmt.Errorf("%s.path must be absolute", label))
-		} else if strings.Contains(device.Path, "\x00") || hasControlChar(device.Path) {
+		} else if hasControlChar(device.Path) {
 			errs = append(errs, fmt.Errorf("%s.path contains invalid control characters", label))
 		}
 		warnC, criticalC := cfg.TemperatureWarningC, cfg.TemperatureCriticalC
@@ -2373,8 +2368,8 @@ func validateBackupJob(job BackupJobConfig, storageRoot string, seen map[string]
 	if job.RestoreDrillStaleAfter < 0 {
 		errs = append(errs, fmt.Errorf("backup job %q restore_drill_stale_after cannot be negative", job.ID))
 	}
-	if strings.ContainsRune(job.RetentionPolicy, '\x00') {
-		errs = append(errs, fmt.Errorf("backup job %q retention_policy cannot contain NUL bytes", job.ID))
+	if hasControlChar(job.RetentionPolicy) {
+		errs = append(errs, fmt.Errorf("backup job %q retention_policy cannot contain control characters", job.ID))
 	}
 	if job.MaxSnapshots < 0 {
 		errs = append(errs, fmt.Errorf("backup job %q max_snapshots cannot be negative", job.ID))
@@ -2407,7 +2402,7 @@ func validateBackupJob(job BackupJobConfig, storageRoot string, seen map[string]
 		if job.Repository == "" {
 			errs = append(errs, fmt.Errorf("backup job %q repository cannot be empty", job.ID))
 		}
-		if strings.Contains(job.Repository, "\x00") || hasControlChar(job.Repository) {
+		if hasControlChar(job.Repository) {
 			errs = append(errs, fmt.Errorf("backup job %q repository contains invalid control characters", job.ID))
 		}
 		if job.PasswordFile == "" {
@@ -2417,7 +2412,7 @@ func validateBackupJob(job BackupJobConfig, storageRoot string, seen map[string]
 		if job.Remote == "" {
 			errs = append(errs, fmt.Errorf("backup job %q remote cannot be empty", job.ID))
 		}
-		if strings.Contains(job.Remote, "\x00") || hasControlChar(job.Remote) {
+		if hasControlChar(job.Remote) {
 			errs = append(errs, fmt.Errorf("backup job %q remote contains invalid control characters", job.ID))
 		}
 	}
@@ -2443,8 +2438,8 @@ func validateBackupJob(job BackupJobConfig, storageRoot string, seen map[string]
 			errs = append(errs, fmt.Errorf("backup job %q exclude patterns cannot contain empty entries", job.ID))
 			continue
 		}
-		if strings.Contains(pattern, "\x00") {
-			errs = append(errs, fmt.Errorf("backup job %q exclude pattern must not contain NUL", job.ID))
+		if hasControlChar(pattern) {
+			errs = append(errs, fmt.Errorf("backup job %q exclude pattern must not contain control characters", job.ID))
 		}
 	}
 
@@ -2455,7 +2450,7 @@ func validateBackupCommand(command string, label string) error {
 	if command == "" {
 		return nil
 	}
-	if strings.Contains(command, "\x00") || hasControlChar(command) || strings.ContainsAny(command, " \t\r\n") {
+	if hasControlChar(command) || strings.ContainsAny(command, " \t\r\n") {
 		return fmt.Errorf("%s must be a single executable path without whitespace or control characters", label)
 	}
 	if filepath.IsAbs(command) {
@@ -2510,14 +2505,12 @@ func parseBackupWindowClock(value string, label string) (int, error) {
 }
 
 func hasControlChar(value string) bool {
-	return strings.IndexFunc(value, func(r rune) bool {
-		return r < 0x20 || r == 0x7f
-	}) >= 0
+	return strings.IndexFunc(value, unicode.IsControl) >= 0
 }
 
 func hasWhitespaceOrControl(value string) bool {
 	return strings.IndexFunc(value, func(r rune) bool {
-		return r <= 0x20 || r == 0x7f
+		return unicode.IsSpace(r) || unicode.IsControl(r)
 	}) >= 0
 }
 
@@ -2525,7 +2518,7 @@ func validateBackupCommandArg(arg string, label string) error {
 	if arg == "" {
 		return fmt.Errorf("%s cannot contain empty entries", label)
 	}
-	if strings.Contains(arg, "\x00") || hasControlChar(arg) {
+	if hasControlChar(arg) {
 		return fmt.Errorf("%s contains invalid control characters", label)
 	}
 	return nil
@@ -2538,7 +2531,7 @@ func validateBackupCredentialFile(filePath string, field string, jobID string, s
 	if !filepath.IsAbs(filePath) {
 		return fmt.Errorf("backup job %q %s must be an absolute path", jobID, field)
 	}
-	if strings.Contains(filePath, "\x00") || hasControlChar(filePath) {
+	if hasControlChar(filePath) {
 		return fmt.Errorf("backup job %q %s contains invalid control characters", jobID, field)
 	}
 	if err := validateBackupCredentialPathNoSymlink(filePath, field, jobID); err != nil {
@@ -2601,9 +2594,7 @@ func validateBackupAbsoluteDirectory(value, field string) error {
 	if trimmed != value {
 		return fmt.Errorf("%s must not contain leading or trailing whitespace", field)
 	}
-	if strings.IndexFunc(trimmed, func(r rune) bool {
-		return r < 0x20 || r == 0x7f
-	}) >= 0 {
+	if hasControlChar(trimmed) {
 		return fmt.Errorf("%s must not contain control characters", field)
 	}
 	if !filepath.IsAbs(trimmed) {
@@ -2659,8 +2650,8 @@ func isHTTPTokenChar(b byte) bool {
 }
 
 func hasInvalidHTTPHeaderValueControl(value string) bool {
-	for i := 0; i < len(value); i++ {
-		if value[i] == 0x7f || (value[i] < 0x20 && value[i] != '\t') {
+	for _, r := range value {
+		if r != '\t' && unicode.IsControl(r) {
 			return true
 		}
 	}
@@ -2672,15 +2663,16 @@ func validateOptionalHTTPURL(rawURL, field string) error {
 	if trimmed == "" {
 		return nil
 	}
-	if trimmed != rawURL || strings.IndexFunc(trimmed, func(r rune) bool {
-		return r <= 0x20 || r == 0x7f
-	}) >= 0 {
+	if trimmed != rawURL || hasWhitespaceOrControl(trimmed) {
 		return fmt.Errorf("%s must not contain whitespace or control characters", field)
 	}
 
 	parsed, err := neturl.Parse(trimmed)
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
 		return fmt.Errorf("%s must be an absolute http or https URL", field)
+	}
+	if !isValidTCPHost(parsed.Hostname()) {
+		return fmt.Errorf("%s host is invalid", field)
 	}
 
 	switch strings.ToLower(parsed.Scheme) {
@@ -2715,7 +2707,33 @@ func validateShareBaseURL(rawURL string) error {
 	if !isValidTCPHost(parsed.Hostname()) {
 		return fmt.Errorf("%s host is invalid", field)
 	}
+	if shareBaseURLPathHasBackslashes(parsed.Path) {
+		return fmt.Errorf("%s path must not contain backslashes", field)
+	}
+	if shareBaseURLPathHasDuplicateSlashes(parsed.Path) {
+		return fmt.Errorf("%s path must not contain duplicate slashes", field)
+	}
+	if shareBaseURLPathHasDotSegments(parsed.Path) {
+		return fmt.Errorf("%s path must not contain . or .. segments", field)
+	}
 	return nil
+}
+
+func shareBaseURLPathHasBackslashes(path string) bool {
+	return strings.Contains(path, "\\")
+}
+
+func shareBaseURLPathHasDuplicateSlashes(path string) bool {
+	return strings.Contains(path, "//")
+}
+
+func shareBaseURLPathHasDotSegments(urlPath string) bool {
+	for _, segment := range strings.Split(urlPath, "/") {
+		if segment == "." || segment == ".." {
+			return true
+		}
+	}
+	return false
 }
 
 func validateTCPAddress(address, field string) error {
@@ -2726,9 +2744,7 @@ func validateTCPAddress(address, field string) error {
 	if trimmed != address || strings.ContainsAny(trimmed, "\r\n\t ") {
 		return fmt.Errorf("%s must not contain whitespace", field)
 	}
-	if strings.IndexFunc(trimmed, func(r rune) bool {
-		return r < 0x20 || r == 0x7f
-	}) >= 0 {
+	if hasControlChar(trimmed) {
 		return fmt.Errorf("%s must not contain control characters", field)
 	}
 
@@ -2789,7 +2805,7 @@ func normalizeListenHost(host string) string {
 
 func validateListenHost(host string) error {
 	if strings.TrimSpace(host) != host || strings.IndexFunc(host, func(r rune) bool {
-		return r <= 0x20 || r == 0x7f
+		return unicode.IsSpace(r) || unicode.IsControl(r)
 	}) >= 0 {
 		return errors.New("server.host must not contain whitespace or control characters")
 	}
@@ -2868,7 +2884,7 @@ func webDAVPrefixOverlapsReservedRoute(prefix string) bool {
 func validateWebDAVPrefix(prefix string) error {
 	normalized := NormalizeWebDAVPrefix(prefix)
 	for _, r := range normalized {
-		if r < 0x20 || r == 0x7f {
+		if unicode.IsControl(r) {
 			return errors.New("webdav.prefix cannot contain control characters")
 		}
 	}
