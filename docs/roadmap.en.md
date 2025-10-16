@@ -88,7 +88,7 @@ Current notification coverage:
 Current user-quota coverage:
 
 - Quota model: user-level quotas, directory quotas, dynamic usage, and directory-quota usage/status summaries.
-- User management: account-attention count breakdown, filtering, reason filtering, attention-first ordering, user-list search, sorting, role/status filters, stat-card quick focus, result summaries, and filter clearing.
+- User management: account-attention count breakdown, filtering, reason filtering, attention-first ordering, user-list search, sorting, role/status filters, stat-card quick focus, limited-user aggregate quota/headroom overview, result summaries, and filter clearing.
 - Review output: copyable account-review summaries, contact-, permission-, login-, and balance-aware summary copy, card states, user-card access-scope and review hints, copyable user-access review summaries, review-hint stats and filtering, and context-rich current-list export.
 - Directory quotas: directory-quota attention list, filtering, attention-first summary copy with remaining capacity, and pre-save directory-quota change review.
 - Enforcement: Web/API upload/copy/move/trash-restore user-quota enforcement for writes into `home_dir`, WebDAV PUT/COPY/MOVE user-quota enforcement for writes into `home_dir`, directory-quota enforcement for version restores, and Web/API quota-denial alerts.
