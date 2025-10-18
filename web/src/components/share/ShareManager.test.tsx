@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { render, screen, waitFor, within, userEvent } from '@/test/utils'
 import { ShareManager } from './ShareManager'
 import * as shareApi from '@/api/share'
@@ -6,6 +6,7 @@ import { ShareError, type Share } from '@/api/share'
 
 const mockAddToast = vi.fn()
 const successActionResult = { warning: false, message: undefined } as const
+const originalClipboardDescriptor = Object.getOwnPropertyDescriptor(navigator, 'clipboard')
 
 vi.mock('@heroui/react', async () => {
   const actual = await vi.importActual<typeof import('@heroui/react')>('@heroui/react')
@@ -95,6 +96,14 @@ describe('ShareManager', () => {
     vi.clearAllMocks()
     window.history.pushState({}, '', '/')
     vi.mocked(shareApi.listShares).mockResolvedValue(mockShares)
+  })
+
+  afterEach(() => {
+    if (originalClipboardDescriptor) {
+      Object.defineProperty(navigator, 'clipboard', originalClipboardDescriptor)
+    } else {
+      Reflect.deleteProperty(navigator, 'clipboard')
+    }
   })
 
   it('shows a retryable error state when the share list fails to load', async () => {
@@ -438,6 +447,79 @@ describe('ShareManager', () => {
       expect(screen.queryByText('soon.pdf')).not.toBeInTheDocument()
       expect(screen.queryByText('safe.pdf')).not.toBeInTheDocument()
     })
+  })
+
+  it('copies a path-scoped share review summary for administrator review', async () => {
+    const user = userEvent.setup()
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    })
+    vi.mocked(shareApi.listShares).mockResolvedValueOnce([
+      {
+        ...mockShares[0],
+        id: 'share-open',
+        path: '/docs/open.pdf',
+        has_password: false,
+        access_count: 5,
+        max_access: 0,
+        risk: {
+          level: 'high',
+          reasons: [
+            { code: 'no_password', level: 'high', message: '未设置密码，拿到链接的人都能访问' },
+          ],
+        },
+      },
+      {
+        ...mockShares[0],
+        id: 'share-safe',
+        path: '/docs/safe.pdf',
+        has_password: true,
+        access_count: 1,
+        max_access: 10,
+        risk: { level: 'none' },
+      },
+      {
+        ...mockShares[0],
+        id: 'share-media',
+        path: '/media/movie.mp4',
+        has_password: false,
+        risk: {
+          level: 'high',
+          reasons: [
+            { code: 'no_password', level: 'high', message: '未设置密码' },
+          ],
+        },
+      },
+    ])
+
+    render(<ShareManager pathFilter="/docs" />)
+
+    await waitFor(() => {
+      expect(screen.getByText('我的分享 (2 / 3)')).toBeInTheDocument()
+      expect(screen.getByText('open.pdf')).toBeInTheDocument()
+      expect(screen.getByText('safe.pdf')).toBeInTheDocument()
+      expect(screen.queryByText('movie.mp4')).not.toBeInTheDocument()
+    })
+
+    await user.click(screen.getByRole('button', { name: '复制摘要' }))
+
+    await waitFor(() => {
+      expect(writeText).toHaveBeenCalledTimes(1)
+    })
+    const report = writeText.mock.calls[0]?.[0] as string
+    expect(report).toContain('分享复核摘要')
+    expect(report).toContain('分享总数：2 个')
+    expect(report).toContain('启用分享：2 个')
+    expect(report).toContain('需复核：1 个')
+    expect(report).toContain('需处理：1 个')
+    expect(report).toContain('路径筛选：/docs')
+    expect(report).toContain('路径 | 类型 | 状态 | 风险等级 | 访问限制 | 访问次数 | 过期时间 | 风险原因 | 建议处理')
+    expect(report).toContain('/docs/open.pdf | 文件 | 启用 | 高风险 | 无密码 | 5 / 不限 | 永不过期 | 未设置密码，拿到链接的人都能访问 | 停用或补齐密码、有效期和访问次数限制。')
+    expect(report).toContain('/docs/safe.pdf | 文件 | 启用 | 无 | 密码保护 | 1 / 10 | 永不过期 | 无 | 无需处理。')
+    expect(report).not.toContain('/media/movie.mp4')
+    expect(mockAddToast).toHaveBeenCalledWith({ title: '分享复核摘要已复制', color: 'success' })
   })
 
   it('filters the share list to risky shares only', async () => {
