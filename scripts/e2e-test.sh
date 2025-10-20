@@ -886,6 +886,10 @@ test_rclone_webdav_smoke() {
         log_fail "rclone WebDAV list did not include moved object"
         return
     fi
+    if ! command rclone deletefile "${remote}e2e-test/rclone-smoke-moved.txt" "${rclone_args[@]}" > "$log_file" 2>&1; then
+        log_fail "rclone WebDAV cleanup failed: $(tail -n 1 "$log_file")"
+        return
+    fi
 
     log_ok "rclone WebDAV smoke succeeded"
 }

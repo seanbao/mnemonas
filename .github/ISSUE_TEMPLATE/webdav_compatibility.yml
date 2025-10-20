@@ -1,0 +1,170 @@
+name: WebDAV compatibility report / WebDAV 兼容性报告
+description: Report WebDAV client behavior, compatibility results, or client-specific failures. 提交 WebDAV 客户端行为、兼容性结果或特定客户端失败。
+title: "webdav: "
+labels:
+  - question
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this form for WebDAV client compatibility reports, including successful validation, client-specific failures, and behavior that differs between clients. Remove passwords, tokens, cookies, private URLs, internal addresses, and private file names before posting logs or screenshots.
+
+        本表单用于提交 WebDAV 客户端兼容性报告，包括验证通过、特定客户端失败，以及不同客户端之间行为不一致的问题。粘贴日志或截图前，应移除密码、Token、Cookie、私密 URL、内网地址和私有文件名。
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary / 摘要
+      description: Concise compatibility result or failure summary. 简要说明兼容性结果或失败现象。
+      placeholder: Finder can browse and download files, but rename fails with ...
+    validations:
+      required: true
+  - type: dropdown
+    id: client
+    attributes:
+      label: WebDAV client / WebDAV 客户端
+      options:
+        - macOS Finder
+        - Windows File Explorer
+        - Nautilus / GNOME Files
+        - Dolphin
+        - davfs2
+        - rclone
+        - Cyberduck
+        - Transmit
+        - WinSCP
+        - Solid Explorer
+        - Total Commander + WebDAV plugin
+        - FolderSync
+        - iOS / iPadOS Files
+        - Documents by Readdle
+        - FileBrowser
+        - Infuse
+        - nPlayer
+        - VLC
+        - Kodi
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: client_version
+    attributes:
+      label: Client version / 客户端版本
+      description: Include the application version and operating-system version when available. 尽量同时提供应用版本和操作系统版本。
+      placeholder: Finder on macOS 14.5, rclone 1.66.0, Windows 11 23H2
+    validations:
+      required: true
+  - type: input
+    id: mnemonas_version
+    attributes:
+      label: MnemoNAS version or commit / MnemoNAS 版本或提交
+      description: Release version, container tag, or Git commit. Release 版本、容器标签或 Git commit。
+      placeholder: v0.1.0 or c037056c
+    validations:
+      required: true
+  - type: dropdown
+    id: deployment
+    attributes:
+      label: Deployment path / 部署方式
+      options:
+        - Docker Compose
+        - Linux/systemd
+        - Manual binary
+        - Development environment
+        - Other
+    validations:
+      required: true
+  - type: dropdown
+    id: auth_type
+    attributes:
+      label: WebDAV authentication / WebDAV 认证方式
+      description: Select the configured `webdav.auth_type`. 选择当前配置的 `webdav.auth_type`。
+      options:
+        - users
+        - basic
+        - none
+        - unknown
+    validations:
+      required: true
+  - type: dropdown
+    id: access_path
+    attributes:
+      label: Access path / 访问路径
+      options:
+        - Local loopback
+        - LAN
+        - VPN or tailnet
+        - Public HTTPS through reverse proxy
+        - Public HTTP
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: server_context
+    attributes:
+      label: Server and network context / 服务端和网络背景
+      description: WebDAV URL path, reverse proxy, TLS, firewall, DNS, and relevant timeout or upload-size settings. WebDAV URL 路径、反向代理、TLS、防火墙、DNS，以及相关超时或上传大小设置。
+      placeholder: |
+        WebDAV URL path:
+        Reverse proxy:
+        TLS:
+        Firewall / DNS:
+        Timeout or upload-size settings:
+  - type: checkboxes
+    id: operations
+    attributes:
+      label: Operations tested / 已测试操作
+      options:
+        - label: Connect and authenticate / 连接和认证
+        - label: Browse directories / 浏览目录
+        - label: Upload file / 上传文件
+        - label: Download file / 下载文件
+        - label: Rename or move file / 重命名或移动文件
+        - label: Delete file or folder / 删除文件或目录
+        - label: Create folder / 创建目录
+        - label: Large file transfer / 大文件传输
+        - label: Range request, media seeking, or resume / Range 请求、媒体拖动或断点续传
+        - label: Lock, Office-style editing, or concurrent editing / 锁、Office 类编辑或并发编辑
+        - label: Offline sync or mount behavior / 离线同步或挂载行为
+  - type: textarea
+    id: steps
+    attributes:
+      label: Reproduction or validation steps / 复现或验证步骤
+      description: Ordered steps, including the client actions and expected path names. 按顺序列出步骤，包括客户端操作和预期路径名。
+      placeholder: |
+        1. Connect to ...
+        2. Create folder ...
+        3. Upload ...
+        4. Rename ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior / 期望行为
+      description: Expected client and server behavior. 期望的客户端和服务端行为。
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior / 实际行为
+      description: Actual client behavior, error messages, HTTP status codes, or partial-success behavior. 实际客户端行为、错误信息、HTTP 状态码或部分成功行为。
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics / 诊断信息
+      description: Sanitized `mnemonas-doctor`, client logs, server logs, request IDs, screenshots, or diagnostic bundle notes. 已脱敏的 `mnemonas-doctor`、客户端日志、服务端日志、请求 ID、截图或诊断包说明。
+      render: text
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Submission checklist / 提交检查
+      options:
+        - label: WebDAV compatibility and mounting documentation were checked. 已检查 WebDAV 兼容性和挂载文档。
+          required: true
+        - label: Logs and screenshots are sanitized. 日志和截图已脱敏。
+          required: true
+        - label: Security-sensitive exploit details are not posted publicly. 未公开提交安全漏洞利用细节。
+          required: true
