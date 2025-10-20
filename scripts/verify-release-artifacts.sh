@@ -170,12 +170,27 @@ validate_manifest_paths() {
 	local top=""
 	local path
 	local root
+	declare -A seen_paths=()
 
 	while IFS= read -r path; do
 		[[ -n "$path" ]] || continue
+		if [[ -n "${seen_paths[$path]+x}" ]]; then
+			fail "archive contains duplicate entry: $path"
+		fi
+		seen_paths["$path"]=1
 		case "$path" in
 			/*|../*|*/../*|*/..|..)
 				fail "archive entry has an unsafe path: $path"
+				;;
+		esac
+		case "$path" in
+			*\\*)
+				fail "archive entry contains a backslash: $path"
+				;;
+		esac
+		case "$path" in
+			*//*|./*|*/./*|*/.|.)
+				fail "archive entry has an unsafe path segment: $path"
 				;;
 		esac
 		root="${path%%/*}"

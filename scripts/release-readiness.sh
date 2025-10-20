@@ -127,6 +127,20 @@ is_validation_evidence_path() {
 	esac
 }
 
+is_release_documentation_path() {
+	case "$1" in
+		CHANGELOG.md|\
+		CHANGELOG.en.md|\
+		docs/release-notes.md|\
+		docs/release-notes.en.md)
+			return 0
+			;;
+		*)
+			is_validation_evidence_path "$1"
+			;;
+	esac
+}
+
 check_validation_evidence() {
 	local path
 	local path_target
@@ -178,6 +192,7 @@ check_validation_evidence() {
 	local files_since
 	local since_shortstat
 	local evidence_only=1
+	local release_docs_only=1
 	commits_since="$(git rev-list --count "$target_full..HEAD")"
 	files_since="$(git diff --name-only "$target_full..HEAD" | wc -l | tr -d '[:space:]')"
 	since_shortstat="$(git diff --shortstat "$target_full..HEAD")"
@@ -186,12 +201,16 @@ check_validation_evidence() {
 		[[ -n "$path" ]] || continue
 		if ! is_validation_evidence_path "$path"; then
 			evidence_only=0
-			break
+		fi
+		if ! is_release_documentation_path "$path"; then
+			release_docs_only=0
 		fi
 	done < <(git diff --name-only "$target_full..HEAD")
 
 	if [[ "$files_since" != "0" && "$evidence_only" -eq 1 ]]; then
 		print_kv "validation" "full gate evidence at $target_short; only validation evidence docs changed since target ($commits_since commits, $files_since files)"
+	elif [[ "$files_since" != "0" && "$release_docs_only" -eq 1 ]]; then
+		print_kv "validation" "full gate evidence at $target_short; only release documentation changed since target ($commits_since commits, $files_since files)"
 	else
 		print_kv "validation" "full gate evidence at $target_short; $commits_since commits and $files_since files changed since target"
 	fi
