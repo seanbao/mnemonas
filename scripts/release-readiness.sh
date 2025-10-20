@@ -4,18 +4,20 @@ set -euo pipefail
 
 BASE_REF="master"
 ALLOW_DIRTY=0
+ALLOW_POST_VALIDATION_CHANGES=0
 CHECK_CHECKLIST=1
 
 usage() {
 	cat <<'EOF'
-Usage: scripts/release-readiness.sh [--base REF] [--allow-dirty] [--skip-checklist]
+Usage: scripts/release-readiness.sh [--base REF] [--allow-dirty] [--allow-post-validation-changes] [--skip-checklist]
 
 Print a read-only release readiness summary for the current branch.
 
 Options:
-  --base REF        Compare the current branch against REF. Defaults to master.
-  --allow-dirty    Print a draft summary even when the worktree is dirty.
-  --skip-checklist  Skip release checklist and release-note command assertions.
+  --base REF                      Compare the current branch against REF. Defaults to master.
+  --allow-dirty                   Print a draft summary even when the worktree is dirty.
+  --allow-post-validation-changes  Allow non-release-documentation changes after the recorded validation target.
+  --skip-checklist                Skip release checklist and release-note command assertions.
   -h, --help        Show this help.
 EOF
 }
@@ -32,6 +34,10 @@ while [[ $# -gt 0 ]]; do
 			;;
 		--allow-dirty)
 			ALLOW_DIRTY=1
+			shift
+			;;
+		--allow-post-validation-changes)
+			ALLOW_POST_VALIDATION_CHANGES=1
 			shift
 			;;
 		--skip-checklist)
@@ -215,6 +221,10 @@ check_validation_evidence() {
 		print_kv "validation" "full gate evidence at $target_short; $commits_since commits and $files_since files changed since target"
 	fi
 	print_kv "validation-diff" "$since_shortstat"
+
+	if [[ "$files_since" != "0" && "$release_docs_only" -eq 0 && "$ALLOW_POST_VALIDATION_CHANGES" -eq 0 ]]; then
+		fail "non-release-documentation changes exist after validation target $target_short; rerun full branch validation or pass --allow-post-validation-changes for a draft summary"
+	fi
 }
 
 check_release_notes() {

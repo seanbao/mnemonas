@@ -103,11 +103,13 @@ Quick isolated run:
 ```bash
 ./scripts/run-e2e-isolated.sh --quick
 RUN_RCLONE_WEBDAV=1 ./scripts/run-e2e-isolated.sh --quick
+WEBDAV_URL=http://localhost:8080/dav ./scripts/webdav-client-smoke.sh
 ```
 
 The isolated runner starts a temporary backend, temporary storage, and non-default ports before invoking `scripts/e2e-test.sh`.
 The isolated root must be under `/tmp` or the current checkout and must not contain control characters, `..`, or symlink path components.
 When `RUN_RCLONE_WEBDAV=1` is set, the isolated runner passes it to the low-level E2E script so an installed `rclone` runs the WebDAV client smoke.
+`scripts/webdav-client-smoke.sh` targets an already running service and provides an independent curl protocol smoke. Pass `MNEMONAS_WEBDAV_USERNAME` and `MNEMONAS_WEBDAV_PASSWORD` when authentication is required.
 The default backend port is `18180` and default frontend port is `14173` for Playwright.
 Playwright's isolated backend uses a 2-hour access-token lifetime and a 168-hour refresh-token lifetime.
 This reduces shared storageState expiration risk during long parallel runs.
@@ -196,6 +198,7 @@ E2E groups:
 | WebDAV locks | LOCK/UNLOCK virtual lock-token round trip | quick |
 | Versions | Version history API | quick |
 | Concurrency | Concurrent reads/writes | quick |
+| Standalone WebDAV smoke | curl `OPTIONS`, `MKCOL`, `PUT`, `PROPFIND`, `GET`, `HEAD`, `COPY`, `MOVE`, `DELETE` | manual running service |
 | WebDAV client smoke | Optional rclone upload, download, move/rename, and list operations | `RUN_RCLONE_WEBDAV=1` |
 | Large files | 100MB path | full |
 | Crash recovery | interrupted write/restart behavior | full |
