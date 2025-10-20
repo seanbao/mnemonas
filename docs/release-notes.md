@@ -13,7 +13,7 @@
 - 加强路径、归档下载、WebDAV、公开分享、工作区、CAS 和备份恢复相关边界检查，覆盖符号链接、路径穿越、百分号编码点段、控制字符和回滚错误情况。
 - 完善认证、用户、主目录、目录配额、目录访问规则、分享策略和会话安全默认值的后端与前端覆盖。
 - 提升 Web 可见质量，核心页面、公开入口、移动端布局、基础可访问性、运行时错误、失败请求和破碎可见文本已纳入 Playwright 扫描。
-- 加固 systemd、Docker、反向代理、公网访问模板、doctor、release package 和 release artifact 验证路径；Release workflow 会在创建 GitHub Release 前校验归档、checksums、必需目标集合、归档条目类型、重复条目、控制字符路径、反斜杠路径和歧义路径。
+- 加固 systemd、Docker、反向代理、公网访问模板、doctor、release package 和 release artifact 验证路径；Release workflow 会在创建 GitHub Release 前校验归档、checksums、必需目标集合、归档条目类型、重复条目、控制字符路径、空白字符路径、反斜杠路径和歧义路径。
 - 新增可复跑的 WebDAV curl 协议 smoke，可对已运行服务验证基础读写、复制、移动和删除操作，并通过脚本门禁覆盖。
 - 收紧发布就绪摘要：记录的完整验证目标之后如出现非发布文档变更，`release-readiness` 默认失败，并要求刷新完整验证或显式草稿放行。
 - 精简并同步中英文文档，补齐部署、配置、FAQ、路线图、安全、硬化进度和发布前审查入口。
@@ -80,5 +80,6 @@ gh release download v0.1.0 \
 - 确认本草稿已按最终 tag、验证结果和产物名称更新。
 - 确认 `git status --short --branch` 干净。
 - 确认 `./scripts/plan-hardening-commits.sh --fail-on-manual` 没有待分组路径。
+- 运行 `./scripts/release-readiness.sh`，确认提交标题、临时 `fixup!` / `squash!` 提交、验证证据、发布文档命令和 community health 文件均通过检查。
 - 创建并推送 tag 后，确认 Release workflow 成功。
 - 发布后运行 release artifact verifier 并记录结果。

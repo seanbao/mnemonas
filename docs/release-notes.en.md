@@ -13,7 +13,7 @@ This release candidate focuses on improving MnemoNAS stability, public-access sa
 - Strengthened path, archive-download, WebDAV, public-share, workspace, CAS, and backup-restore boundaries, covering symlinks, traversal, percent-encoded dot segments, control characters, and rollback error paths.
 - Expanded backend and frontend coverage for authentication, users, home directories, directory quotas, directory access rules, share policies, and secure session defaults.
 - Improved visible Web quality. Core pages, public entry points, mobile layouts, baseline accessibility, runtime errors, failed requests, and broken visible text are covered by Playwright scans.
-- Hardened systemd, Docker, reverse proxy, public-access templates, doctor, release package, and release artifact verification paths. The Release workflow checks archives, checksums, the required target set, archive entry types, duplicate entries, control-character paths, backslash paths, and ambiguous paths before creating the GitHub Release.
+- Hardened systemd, Docker, reverse proxy, public-access templates, doctor, release package, and release artifact verification paths. The Release workflow checks archives, checksums, the required target set, archive entry types, duplicate entries, control-character paths, whitespace paths, backslash paths, and ambiguous paths before creating the GitHub Release.
 - Added rerunnable WebDAV curl protocol smoke checks for validating basic read/write, copy, move, and delete operations against a running service, covered by the script gate.
 - Tightened the release readiness summary: after the recorded full-validation target, `release-readiness` fails by default on non-release-documentation changes and requires refreshed full validation or an explicit draft override.
 - Streamlined and synchronized Chinese and English documentation, including deployment, configuration, FAQ, roadmap, security, hardening progress, and pre-release review entry points.
@@ -80,5 +80,6 @@ Then complete at least one archive-install smoke test, one Docker release-image 
 - Confirm this draft is updated with the final tag, validation results, and artifact names.
 - Confirm `git status --short --branch` is clean.
 - Confirm `./scripts/plan-hardening-commits.sh --fail-on-manual` reports no paths left to group.
+- Run `./scripts/release-readiness.sh` and confirm commit subjects, temporary `fixup!` / `squash!` commits, validation evidence, release-documentation commands, and community health files pass.
 - After creating and pushing the tag, confirm the Release workflow succeeds.
 - After publication, run the release artifact verifier and record the result.
