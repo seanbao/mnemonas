@@ -34,6 +34,6 @@ Public deployments should still run:
 sudo mnemonas-doctor --public-domain nas.example.com
 ```
 
-Public diagnostics depend on local listener inspection. Install `iproute2` for `ss`; when `ss` is unavailable, both `/proc/net/tcp` and `/proc/net/tcp6` must be readable so `mnemonas-doctor --public-domain` covers IPv4 and IPv6 listeners. The host running diagnostics must also have `curl`, `python3`, and `openssl` installed for public HTTP(S) entry, duration, administrator-redundancy, generated WebDAV credential, and HTTPS certificate checks.
+Public diagnostics depend on local listener inspection. Install `iproute2` for `ss`; when `ss` is unavailable, both `/proc/net/tcp` and `/proc/net/tcp6` must be readable so `mnemonas-doctor --public-domain` covers IPv4 and IPv6 listeners. The host running diagnostics must also have `curl`, `python3`, `getent`, and `openssl` installed for public HTTP(S) entry, duration, DNS resolution, administrator-redundancy, generated WebDAV credential, and HTTPS certificate checks.
 
 Cloud firewalls or security groups must expose only `80/443` publicly. MnemoNAS backend `8080`, dataplane `9090/9091`, and any custom backend or dataplane ports must not be exposed to the public internet. Use the [Public cloud firewall checklist](../../docs/cloud-firewall-checklist.en.md) for the review items.

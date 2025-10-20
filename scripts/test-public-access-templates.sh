@@ -138,7 +138,7 @@ test_public_access_readmes() {
     assert_file_contains "$PUBLIC_ACCESS_README" "重复路径斜杠、\`.\`/\`..\` 路径段和无效主机名判为失败"
     assert_file_contains "$PUBLIC_ACCESS_README" "公网诊断依赖本机监听端口检查"
     assert_file_contains "$PUBLIC_ACCESS_README" "/proc/net/tcp6"
-    assert_file_contains "$PUBLIC_ACCESS_README" "运行诊断的主机还必须安装 \`curl\`、\`python3\` 和 \`openssl\`"
+    assert_file_contains "$PUBLIC_ACCESS_README" "运行诊断的主机还必须安装 \`curl\`、\`python3\`、\`getent\` 和 \`openssl\`"
     assert_file_contains "$PUBLIC_ACCESS_README" "[公网云防火墙复核清单](../../docs/cloud-firewall-checklist.md)"
 
     assert_file_contains "$PUBLIC_ACCESS_README_EN" "Public Access Templates"
@@ -155,7 +155,7 @@ test_public_access_readmes() {
     assert_file_contains "$PUBLIC_ACCESS_README_EN" "duplicated path slashes, \`.\`/\`..\` path segments, and invalid hostnames"
     assert_file_contains "$PUBLIC_ACCESS_README_EN" "Public diagnostics depend on local listener inspection"
     assert_file_contains "$PUBLIC_ACCESS_README_EN" "/proc/net/tcp6"
-    assert_file_contains "$PUBLIC_ACCESS_README_EN" "must also have \`curl\`, \`python3\`, and \`openssl\` installed"
+    assert_file_contains "$PUBLIC_ACCESS_README_EN" "must also have \`curl\`, \`python3\`, \`getent\`, and \`openssl\` installed"
     assert_file_contains "$PUBLIC_ACCESS_README_EN" "[Public cloud firewall checklist](../../docs/cloud-firewall-checklist.en.md)"
 }
 
@@ -204,8 +204,8 @@ test_docs_avoid_webdav_placeholder_passwords() {
     assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.en.md" "share.default_max_access\` is greater than \`0\`"
     assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.md" "运行 \`mnemonas-doctor --public-domain\` 的主机可使用 \`ss\`"
     assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.en.md" "The host running \`mnemonas-doctor --public-domain\` can use \`ss\`"
-    assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.md" "运行 \`mnemonas-doctor --public-domain\` 的主机已安装 \`curl\`、\`python3\` 和 \`openssl\`"
-    assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.en.md" "The host running \`mnemonas-doctor --public-domain\` has \`curl\`, \`python3\`, and \`openssl\` installed"
+    assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.md" "运行 \`mnemonas-doctor --public-domain\` 的主机已安装 \`curl\`、\`python3\`、\`getent\` 和 \`openssl\`"
+    assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.en.md" "The host running \`mnemonas-doctor --public-domain\` has \`curl\`, \`python3\`, \`getent\`, and \`openssl\` installed"
     assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.md" "公网 HTTP 必须返回到同一域名的 HTTPS 跳转"
     assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.en.md" "Public HTTP must redirect to HTTPS on the same domain"
     assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.md" "启用公开分享时，公开分享 API 探测必须到达 MnemoNAS"

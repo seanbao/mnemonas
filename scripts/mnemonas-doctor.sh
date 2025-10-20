@@ -1659,11 +1659,37 @@ check_public_python_available() {
   fi
 }
 
+check_public_getent_available() {
+  if have getent; then
+    ok "getent is available for public DNS diagnostics"
+  else
+    fail "getent is required for public diagnostics; install getent/libc-bin so public DNS A/AAAA resolution can be verified before public exposure"
+  fi
+}
+
 check_public_curl_available() {
   if have curl; then
     ok "curl is available for public diagnostics"
   else
     fail "curl is required for public diagnostics; install curl so public HTTPS health, redirects, WebDAV/share probes, and direct exposure checks can be verified before public exposure"
+  fi
+}
+
+check_public_dns_resolution() {
+  local domain="$1"
+  local resolved first_address
+
+  have getent || return
+
+  if resolved="$(getent ahosts "$domain" 2>/dev/null)" && [[ -n "$resolved" ]]; then
+    first_address="$(printf '%s\n' "$resolved" | awk 'NF { print $1; exit }')"
+    if [[ -n "$first_address" ]]; then
+      ok "public domain resolves locally: $domain ($first_address)"
+    else
+      ok "public domain resolves locally: $domain"
+    fi
+  else
+    fail "public domain does not resolve locally: $domain; fix DNS A/AAAA records before public exposure"
   fi
 }
 
@@ -2595,6 +2621,8 @@ check_public_domain() {
   check_public_config_file_path
   check_public_curl_available
   check_public_python_available
+  check_public_getent_available
+  check_public_dns_resolution "$domain"
 
   public_backend_host="$(normalize_public_backend_host_for_loopback_check "$configured_server_host")"
   if is_loopback_host "$public_backend_host"; then

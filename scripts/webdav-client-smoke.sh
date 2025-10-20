@@ -8,6 +8,8 @@ WEBDAV_USERNAME="${WEBDAV_USERNAME:-${MNEMONAS_WEBDAV_USERNAME:-}}"
 WEBDAV_PASSWORD="${WEBDAV_PASSWORD:-${MNEMONAS_WEBDAV_PASSWORD:-}}"
 WEBDAV_TEST_ROOT="${WEBDAV_TEST_ROOT:-mnemonas-smoke-$(date +%s)-$$}"
 CURL_INSECURE="${CURL_INSECURE:-0}"
+CURL_CONNECT_TIMEOUT="${CURL_CONNECT_TIMEOUT:-10}"
+CURL_MAX_TIME="${CURL_MAX_TIME:-30}"
 
 tmp_dir=""
 root_url=""
@@ -42,6 +44,8 @@ Environment:
   WEBDAV_TEST_ROOT        Optional one-segment temporary collection name.
   CURL_BIN                Optional curl binary path.
   CURL_INSECURE=1         Pass --insecure to curl for local TLS smoke tests.
+  CURL_CONNECT_TIMEOUT    Optional curl connection timeout in seconds; default 10.
+  CURL_MAX_TIME           Optional curl per-request timeout in seconds; default 30.
 EOF
 }
 
@@ -57,6 +61,14 @@ cleanup() {
 require_command() {
     if ! command -v "$CURL_BIN" >/dev/null 2>&1; then
         fail "curl is required; set CURL_BIN to a compatible curl binary"
+    fi
+}
+
+validate_positive_seconds() {
+    local name="$1"
+    local value="$2"
+    if [[ ! "$value" =~ ^[1-9][0-9]*$ ]]; then
+        fail "$name must be a positive integer number of seconds"
     fi
 }
 
@@ -81,6 +93,9 @@ validate_inputs() {
         [[ -n "$WEBDAV_USERNAME" && -n "$WEBDAV_PASSWORD" ]] || fail "both WebDAV username and password are required when authentication is used"
         [[ "$WEBDAV_USERNAME" != *[[:cntrl:]]* && "$WEBDAV_PASSWORD" != *[[:cntrl:]]* ]] || fail "WebDAV credentials must not contain control characters"
     fi
+
+    validate_positive_seconds "CURL_CONNECT_TIMEOUT" "$CURL_CONNECT_TIMEOUT"
+    validate_positive_seconds "CURL_MAX_TIME" "$CURL_MAX_TIME"
 }
 
 escape_curl_config_value() {
@@ -146,18 +161,23 @@ expect_status() {
 }
 
 run_smoke() {
-    local base_url file_url copied_url moved_url
-    local upload_file download_file status
+    local base_url file_url spaced_file_url copied_url moved_url
+    local upload_file download_file spaced_upload_file spaced_download_file status
 
     base_url="${WEBDAV_URL%/}"
     root_url="$base_url/$WEBDAV_TEST_ROOT"
     file_url="$root_url/hello.txt"
+    spaced_file_url="$root_url/space%20name.txt"
     copied_url="$root_url/copied.txt"
     moved_url="$root_url/moved.txt"
 
     if [[ "$CURL_INSECURE" == "1" ]]; then
         curl_common_args+=(--insecure)
     fi
+    curl_common_args+=(
+        "--connect-timeout=$CURL_CONNECT_TIMEOUT"
+        "--max-time=$CURL_MAX_TIME"
+    )
 
     tmp_dir="$(mktemp -d)"
     trap cleanup EXIT
@@ -165,7 +185,10 @@ run_smoke() {
 
     upload_file="$tmp_dir/upload.txt"
     download_file="$tmp_dir/download.txt"
+    spaced_upload_file="$tmp_dir/spaced-upload.txt"
+    spaced_download_file="$tmp_dir/spaced-download.txt"
     printf 'mnemonas webdav smoke\n' > "$upload_file"
+    printf 'mnemonas webdav smoke spaced path\n' > "$spaced_upload_file"
 
     log_info "probing $base_url"
     status="$(curl_request "OPTIONS" OPTIONS "$base_url/" "$tmp_dir/options.out")"
@@ -191,6 +214,16 @@ run_smoke() {
     status="$(curl_head_status "HEAD" "$file_url" "$tmp_dir/head.out")"
     expect_status "HEAD" "$status" 200
 
+    status="$(curl_request "PUT URL-encoded space path" PUT "$spaced_file_url" "$tmp_dir/put-spaced.out" -T "$spaced_upload_file")"
+    expect_status "PUT URL-encoded space path" "$status" 200 201 204
+
+    status="$(curl_request "GET URL-encoded space path" GET "$spaced_file_url" "$spaced_download_file")"
+    expect_status "GET URL-encoded space path" "$status" 200
+    if ! cmp -s "$spaced_upload_file" "$spaced_download_file"; then
+        fail "URL-encoded space path download content did not match uploaded content"
+    fi
+    log_ok "URL-encoded space path content matches uploaded content"
+
     status="$(curl_request "COPY" COPY "$file_url" "$tmp_dir/copy.out" -H "Destination: $copied_url")"
     expect_status "COPY" "$status" 201 204
 
@@ -202,6 +235,9 @@ run_smoke() {
 
     status="$(curl_request "DELETE moved file" DELETE "$moved_url" "$tmp_dir/delete-moved.out")"
     expect_status "DELETE moved file" "$status" 200 204
+
+    status="$(curl_request "DELETE URL-encoded space path" DELETE "$spaced_file_url" "$tmp_dir/delete-spaced.out")"
+    expect_status "DELETE URL-encoded space path" "$status" 200 204
 
     status="$(curl_request "DELETE collection" DELETE "$root_url/" "$tmp_dir/delete-root.out")"
     expect_status "DELETE collection" "$status" 200 204
