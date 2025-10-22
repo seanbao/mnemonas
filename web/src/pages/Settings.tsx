@@ -2129,6 +2129,50 @@ function directoryAccessShareRelationLabel(relation: string): string {
   }
 }
 
+function formatDirectoryAccessDecisionForReport(decision: DirectoryAccessDecision): string {
+  const status = decision.allowed ? '允许' : '拒绝'
+  const source = directoryAccessSourceLabel(decision.source)
+  const rulePath = decision.matched_rule?.path ? ` · 规则 ${decision.matched_rule.path}` : ''
+  return `${status} · ${source}${rulePath}`
+}
+
+function formatDirectoryAccessShareForReport(entry: NonNullable<DirectoryAccessReportData['shares']>[number]): string {
+  const typeLabel = entry.type === 'folder' ? '文件夹' : '文件'
+  const status = entry.active ? '可访问' : '不可访问'
+  const password = entry.has_password ? '密码保护' : '无密码'
+  const maxAccess = entry.max_access > 0 ? String(entry.max_access) : '不限'
+  return `- ${entry.path} (${typeLabel} · ${directoryAccessShareRelationLabel(entry.relation)}): ${status} · ${password} · 访问 ${entry.access_count}/${maxAccess} · 创建者 ${entry.created_by}`
+}
+
+function formatDirectoryAccessReportForClipboard(report: DirectoryAccessReportData, title: string): string {
+  const lines = [
+    '目录权限复核记录',
+    `类型: ${report.preview ? '未保存变更预览' : title}`,
+    `路径: ${report.path}`,
+    `用户: ${report.summary.users}`,
+    `读取: 允许 ${report.summary.read_allowed} / 拒绝 ${report.summary.read_denied}`,
+    `写入: 允许 ${report.summary.write_allowed} / 拒绝 ${report.summary.write_denied}`,
+    `相关分享: ${report.summary.related_shares} (活跃 ${report.summary.active_related_shares}, 密码 ${report.summary.password_protected_shares})`,
+    '',
+    '用户明细:',
+    ...report.users.map((entry) => {
+      const groups = entry.groups?.length ? ` · 组 ${entry.groups.join(', ')}` : ''
+      return `- ${entry.username} (${entry.role}${groups}, home ${entry.home_dir}): 读 ${formatDirectoryAccessDecisionForReport(entry.read)}; 写 ${formatDirectoryAccessDecisionForReport(entry.write)}`
+    }),
+    '',
+    '分享影响:',
+  ]
+
+  const shares = report.shares ?? []
+  if (shares.length === 0) {
+    lines.push('- 无相关分享')
+  } else {
+    lines.push(...shares.map(formatDirectoryAccessShareForReport))
+  }
+
+  return lines.join('\n')
+}
+
 function DirectoryAccessReportResult({
   report,
   title = '用户矩阵',
@@ -2139,10 +2183,33 @@ function DirectoryAccessReportResult({
   ariaLabel?: string
 }) {
   const shares = report.shares ?? []
+  const handleCopyDirectoryAccessReport = async () => {
+    try {
+      await copyTextToClipboard(formatDirectoryAccessReportForClipboard(report, title))
+      addToast({ title: '目录权限复核记录已复制', color: 'success' })
+    } catch {
+      addToast({
+        title: '复制目录权限复核记录失败',
+        description: '请检查浏览器剪贴板权限。',
+        color: 'danger',
+      })
+    }
+  }
 
   return (
     <div className="rounded-lg border border-divider bg-content2/40 p-3" aria-label={ariaLabel}>
-      <div className="mb-2 text-sm font-semibold text-foreground">{title}</div>
+      <div className="mb-2 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+        <div className="text-sm font-semibold text-foreground">{title}</div>
+        <Button
+          size="sm"
+          variant="flat"
+          className="self-start rounded-lg sm:self-auto"
+          startContent={<Copy size={14} />}
+          onPress={handleCopyDirectoryAccessReport}
+        >
+          复制复核记录
+        </Button>
+      </div>
       <div className="mb-3 flex flex-wrap items-center gap-2 text-xs text-default-500">
         <span className="rounded-full bg-content1 px-2 py-1 font-mono text-foreground">{report.path}</span>
         <span className="rounded-full bg-content1 px-2 py-1">用户 {report.summary.users}</span>
