@@ -121,6 +121,14 @@ Public HTTPS should work:
 curl -I https://nas.example.com/health
 ```
 
+Run the public smoke from an external network:
+
+```bash
+./scripts/public-go-live-smoke.sh nas.example.com
+```
+
+This script checks public HTTPS health, same-domain HTTP-to-HTTPS redirects, and confirms that `8080/9090/9091` do not return any HTTP status from the public internet. If the repository script is not available, run the equivalent commands below manually.
+
 Direct backend ports should fail to connect or time out. Any HTTP status response, including `401`, `403`, or `404`, means the port is still publicly reachable:
 
 ```bash
@@ -240,6 +248,7 @@ sudo systemctl restart mnemonas
 
 ## 5. Go-Live Checklist
 
+- [ ] `./scripts/public-go-live-smoke.sh nas.example.com` has passed from an external network, or equivalent HTTPS health, HTTP redirect, and backend-port-unreachable checks have been completed manually.
 - [ ] The initial administrator password has been changed.
   The `initial-password.txt` path is absent with no symlink, symlink component, or non-regular file left behind.
 - [ ] At least two enabled administrator accounts exist, so one lost password does not lock out maintenance.

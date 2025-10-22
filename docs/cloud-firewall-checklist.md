@@ -41,6 +41,12 @@ sudo mnemonas-doctor --public-domain nas.example.com
 从外部网络执行：
 
 ```bash
+./scripts/public-go-live-smoke.sh nas.example.com
+```
+
+该脚本会把公网 HTTPS health、同域 HTTP 到 HTTPS 跳转，以及 `8080/9090/9091` 后端端口不可达检查合并为一次 smoke。无法运行仓库脚本时，可从外部网络手动执行：
+
+```bash
 curl -I https://nas.example.com/health
 curl --connect-timeout 3 http://nas.example.com:8080/health
 curl --connect-timeout 3 http://nas.example.com:9090/
