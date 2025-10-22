@@ -9,10 +9,12 @@
 | 问题类型 | 推荐渠道 | 说明 |
 | --- | --- | --- |
 | 可复现 Bug | [GitHub Issues](https://github.com/seanbao/mnemonas/issues) | 附复现步骤和诊断信息 |
+| WebDAV 客户端兼容性 | [WebDAV 兼容性报告表单](https://github.com/seanbao/mnemonas/issues/new?template=webdav_compatibility.yml) | 提交客户端验证结果、挂载差异或客户端特定失败 |
 | 新功能或产品建议 | [GitHub Issues](https://github.com/seanbao/mnemonas/issues) | 说明具体用法和预期收益 |
 | 安全漏洞 | GitHub Private Vulnerability Reporting | 不要公开提交漏洞细节，详见 [SECURITY.md](SECURITY.md) |
 
 使用问题也可以先通过 Issues 记录，但标题和内容应说明这是使用问题而不是已确认 Bug。
+WebDAV 客户端兼容性结果、挂载差异或客户端特定失败，应优先使用 WebDAV 兼容性报告表单。
 
 ## 提交问题前
 
@@ -23,6 +25,7 @@
 - [Docker 部署指南](docs/docker-deployment.md) 或 [Linux/systemd 部署指南](docs/linux-systemd-deployment.md)
 - [WebDAV 兼容性](docs/webdav-compatibility.md)
 - 现有 Issues 是否已有相同问题
+- WebDAV 客户端问题是否更适合使用 [WebDAV 兼容性报告表单](https://github.com/seanbao/mnemonas/issues/new?template=webdav_compatibility.yml)
 
 ## 提交 Bug 时应包含
 

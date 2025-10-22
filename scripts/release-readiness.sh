@@ -90,6 +90,42 @@ require_community_file() {
 	[[ -f "$path" ]] || fail "missing required community file: $path"
 }
 
+check_support_routes() {
+	local webdav_report_url="https://github.com/seanbao/mnemonas/issues/new?template=webdav_compatibility.yml"
+
+	require_file_contains "SUPPORT.md" "$webdav_report_url"
+	require_file_contains "SUPPORT.en.md" "$webdav_report_url"
+}
+
+check_issue_template_config() {
+	require_file_contains ".github/ISSUE_TEMPLATE/config.yml" "https://github.com/seanbao/mnemonas/security/policy"
+	require_file_contains ".github/ISSUE_TEMPLATE/config.yml" "https://github.com/seanbao/mnemonas/blob/master/SUPPORT.md"
+}
+
+check_pull_request_template() {
+	local path=".github/pull_request_template.md"
+	local expected_sections=(
+		"## Scope / 范围"
+		"## User-Visible Behavior / 用户可见行为"
+		"## Data, Security, And Deployment Impact / 数据、安全与部署影响"
+		"## Validation / 验证"
+		"## Residual Risk / 残余风险"
+	)
+	local expected_commands=(
+		"make verify-changed"
+		"make docs-check"
+		"make scripts-check"
+	)
+	local expected
+
+	for expected in "${expected_sections[@]}"; do
+		require_file_contains "$path" "$expected"
+	done
+	for expected in "${expected_commands[@]}"; do
+		require_file_contains "$path" "$expected"
+	done
+}
+
 check_community_files() {
 	local path
 	local required_files=(
@@ -118,7 +154,11 @@ check_community_files() {
 		require_community_file "$path"
 	done
 
-	print_kv "community" "required community health files present"
+	check_support_routes
+	check_issue_template_config
+	check_pull_request_template
+
+	print_kv "community" "required community health files and collaboration routes present"
 }
 
 extract_validation_target() {
