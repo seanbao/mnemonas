@@ -212,8 +212,7 @@ describe('DashboardPage', () => {
       mockGetStorageStats.mockImplementation(() => new Promise(() => {}))
       
       render(<DashboardPage />)
-      // Should show skeleton loaders (HeroUI Skeleton component)
-      expect(document.querySelector('.rounded-lg, .rounded-lg')).toBeTruthy()
+      expect(screen.getByRole('status', { name: '加载首页' })).toBeInTheDocument()
     })
 
     it('shows skeleton placeholders while loading', () => {
@@ -221,8 +220,8 @@ describe('DashboardPage', () => {
       mockGetStorageStats.mockImplementation(() => new Promise(() => {}))
       
       render(<DashboardPage />)
-      const skeletons = document.querySelectorAll('.rounded-lg, .rounded-lg, [class*="animate"]')
-      expect(skeletons.length).toBeGreaterThan(0)
+      expect(screen.getByRole('status', { name: '加载首页' })).toBeInTheDocument()
+      expect(screen.queryByRole('heading', { name: '首页' })).not.toBeInTheDocument()
     })
   })
 
@@ -345,7 +344,7 @@ describe('DashboardPage', () => {
 
       await waitFor(() => {
         expect(screen.getByText('备份需要查看')).toBeTruthy()
-        expect(screen.getByText('建议: 运行立即备份并查看最近备份结果')).toBeTruthy()
+        expect(screen.getByText('建议：运行立即备份并查看最近备份结果')).toBeTruthy()
         expect(screen.getByRole('button', { name: '打开备份' })).toBeTruthy()
       })
 
@@ -377,7 +376,7 @@ describe('DashboardPage', () => {
         expect(screen.getByText('备份需要查看')).toBeTruthy()
         expect(screen.getByText('1 项待处理')).toBeTruthy()
         expect(screen.getAllByText('恢复待校验').length).toBeGreaterThan(0)
-        expect(screen.getByText('建议: 运行检查恢复完成只读校验')).toBeTruthy()
+        expect(screen.getByText('建议：运行检查恢复完成只读校验')).toBeTruthy()
       })
     })
 
@@ -413,7 +412,7 @@ describe('DashboardPage', () => {
         expect(screen.getByText('备份需要查看')).toBeTruthy()
         expect(screen.getByText('1 项待处理')).toBeTruthy()
         expect(screen.getAllByText('最近备份有警告、最近恢复有警告').length).toBeGreaterThan(0)
-        expect(screen.getByText('建议: 运行立即备份并查看最近备份结果、导出恢复摘要并复核恢复警告')).toBeTruthy()
+        expect(screen.getByText('建议：运行立即备份并查看最近备份结果、导出恢复摘要并复核恢复警告')).toBeTruthy()
       })
     })
 
@@ -516,10 +515,14 @@ describe('DashboardPage', () => {
 
       expect(await screen.findByText('首次部署检查')).toBeTruthy()
       expect(screen.getByText('初始登录凭据已处理')).toBeTruthy()
-      expect(screen.getByText(/initial-password.txt/)).toBeTruthy()
-      expect(screen.getByText(/认证:\s*已启用/)).toBeTruthy()
-      expect(screen.getByText(/分享:\s*可用/)).toBeTruthy()
-      expect(screen.getByText(/WebDAV:\s*basic/)).toBeTruthy()
+      expect(screen.getByText(/initial-password.txt/)).toHaveClass('hidden')
+      expect(screen.getByText('4 项待确认')).toBeTruthy()
+      expect(screen.getByRole('checkbox', {
+        name: '初始登录凭据已处理。确认已完成首次登录，并已修改密码或妥善处理 initial-password.txt。',
+      })).toBeTruthy()
+      expect(screen.getByText(/认证：\s*已启用/)).toBeTruthy()
+      expect(screen.getByText(/分享：\s*可用/)).toBeTruthy()
+      expect(screen.getByText(/WebDAV：\s*Basic Auth/)).toBeTruthy()
       expect(screen.getByText('还需确认 4 项后才能关闭首次运行提示。')).toBeTruthy()
       const confirmButton = screen.getByRole('button', { name: '还需确认 4 项' })
 
@@ -537,19 +540,67 @@ describe('DashboardPage', () => {
       }
 
       expect(screen.getByText('首次部署检查已完成，可以关闭首次运行提示。')).toBeTruthy()
+      expect(screen.getByText('可关闭提示')).toBeTruthy()
       expect(confirmButton).not.toBeDisabled()
       await user.click(confirmButton)
 
       await waitFor(() => {
         expect(mockAcknowledgeSetup).toHaveBeenCalledTimes(1)
-        expect(mockAddToast).toHaveBeenCalledWith({ title: '首次部署检查已确认', color: 'success' })
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '首次部署检查已确认',
+          description: undefined,
+          color: 'success',
+        })
       })
       await waitFor(() => {
         expect(screen.queryByText('首次部署检查')).toBeNull()
       })
     })
 
-    it('keeps first-run checklist visible when acknowledgement fails', async () => {
+    it('shows a warning toast when setup acknowledgement succeeds with warnings', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockGetSetupStatus.mockResolvedValue({
+        success: true,
+        is_first_run: true,
+        auth_enabled: true,
+        share_enabled: false,
+        webdav_enabled: false,
+        webdav_auth_type: 'none',
+      })
+      mockAcknowledgeSetup.mockResolvedValueOnce({
+        success: true,
+        warning: true,
+        message: 'setup acknowledgement persisted with warning token=setup-secret',
+      })
+
+      render(<DashboardPage />)
+
+      expect(await screen.findByText('首次部署检查')).toBeTruthy()
+
+      for (const item of [
+        '初始登录凭据已处理',
+        '至少保留一个可用管理员',
+        '备份位置与恢复演练已规划',
+        '公网访问仅通过 HTTPS 反向代理',
+      ]) {
+        await user.click(screen.getByRole('checkbox', { name: new RegExp(item) }))
+      }
+
+      await user.click(screen.getByRole('button', { name: '已确认' }))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '首次部署检查已确认，但存在警告',
+          description: 'setup acknowledgement persisted with warning token=<redacted>',
+          color: 'warning',
+        })
+      })
+      expect(mockAddToast).not.toHaveBeenCalledWith(expect.objectContaining({
+        description: expect.stringContaining('setup-secret'),
+      }))
+    })
+
+    it('keeps first-run checklist visible with a generic acknowledgement failure message', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
       mockGetSetupStatus.mockResolvedValue({
         success: true,
@@ -564,8 +615,8 @@ describe('DashboardPage', () => {
       render(<DashboardPage />)
 
       expect(await screen.findByText('首次部署检查')).toBeTruthy()
-      expect(screen.getByText(/分享:\s*未启用/)).toBeTruthy()
-      expect(screen.getByText(/WebDAV:\s*未启用/)).toBeTruthy()
+      expect(screen.getByText(/分享：\s*未启用/)).toBeTruthy()
+      expect(screen.getByText(/WebDAV：\s*未启用/)).toBeTruthy()
 
       for (const item of [
         '初始登录凭据已处理',
@@ -581,11 +632,44 @@ describe('DashboardPage', () => {
       await waitFor(() => {
         expect(mockAddToast).toHaveBeenCalledWith({
           title: '确认初始化失败',
-          description: 'setup acknowledge unavailable',
+          description: '操作未完成，请稍后重试。',
           color: 'danger',
         })
       })
       expect(screen.getByText('首次部署检查')).toBeTruthy()
+    })
+
+    it('shows WebDAV user authentication as a user-facing label', async () => {
+      mockGetSetupStatus.mockResolvedValueOnce({
+        success: true,
+        is_first_run: true,
+        auth_enabled: true,
+        share_enabled: true,
+        webdav_enabled: true,
+        webdav_auth_type: 'users',
+      })
+
+      render(<DashboardPage />)
+
+      expect(await screen.findByText('首次部署检查')).toBeTruthy()
+      expect(screen.getByText(/WebDAV：\s*用户认证/)).toBeTruthy()
+    })
+
+    it('does not expose raw unknown WebDAV auth types in first-run safety highlights', async () => {
+      mockGetSetupStatus.mockResolvedValueOnce({
+        success: true,
+        is_first_run: true,
+        auth_enabled: true,
+        share_enabled: true,
+        webdav_enabled: true,
+        webdav_auth_type: 'backend_raw_auth_type',
+      })
+
+      render(<DashboardPage />)
+
+      expect(await screen.findByText('首次部署检查')).toBeTruthy()
+      expect(screen.getByText(/WebDAV：\s*未知认证方式/)).toBeTruthy()
+      expect(screen.queryByText(/backend_raw_auth_type/)).toBeNull()
     })
 
     it('shows first-run public exposure warning when setup security status is unsafe', async () => {
@@ -601,9 +685,9 @@ describe('DashboardPage', () => {
       render(<DashboardPage />)
 
       expect(await screen.findByText('首次部署检查')).toBeTruthy()
-      expect(screen.getByText(/认证:\s*需启用/)).toBeTruthy()
-      expect(screen.getByText(/分享:\s*可用/)).toBeTruthy()
-      expect(screen.getByText(/WebDAV:\s*匿名/)).toBeTruthy()
+      expect(screen.getByText(/认证：\s*需启用/)).toBeTruthy()
+      expect(screen.getByText(/分享：\s*可用/)).toBeTruthy()
+      expect(screen.getByText(/WebDAV：\s*匿名/)).toBeTruthy()
       expect(screen.getByText(/Web UI\/API 认证未启用/)).toBeTruthy()
       expect(screen.getByText(/WebDAV 匿名访问已启用/)).toBeTruthy()
       expect(screen.getByText(/公网部署前应先处理/)).toBeTruthy()
@@ -981,7 +1065,6 @@ describe('DashboardPage', () => {
         expect(screen.getByText('数据校验')).toBeTruthy()
         expect(screen.getByText('/system/scrub')).toBeTruthy()
       })
-      expect(document.querySelector('.text-amber-500')).toBeTruthy()
     })
 
     it('navigates to the activity page from the recent activity header', async () => {

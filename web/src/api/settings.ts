@@ -5,8 +5,8 @@
 
 import { authFetch } from './auth'
 import { INVALID_API_RESPONSE_MESSAGE as INVALID_SETTINGS_RESPONSE_MESSAGE } from '@/lib/apiMessages'
-import { readStructuredJsonErrorDetails } from '@/lib/jsonErrorResponse'
-import { normalizePath } from '@/lib/utils'
+import { getNonBlankJsonString, readStructuredJsonErrorDetails } from '@/lib/jsonErrorResponse'
+import { hasControlCharacter, normalizePath } from '@/lib/utils'
 
 const API_BASE = '/api/v1/settings'
 const MIN_CDC_CHUNK_SIZE = 64 * 1024
@@ -301,7 +301,19 @@ interface SettingsApiResponse<T> {
   success: boolean
   data?: T
   message?: string
+  warning?: boolean
+  code?: string
   error?: SettingsApiError
+}
+
+export interface SettingsActionResult {
+  success: boolean
+  message: string
+  warning?: boolean
+}
+
+export interface TestAlertActionResult extends SettingsActionResult {
+  data: TestAlertResult
 }
 
 export class SettingsError extends Error {
@@ -444,7 +456,9 @@ async function parseSettingsError(response: Response, fallback: string): Promise
 
   try {
     const body = await response.json() as SettingsApiResponse<never>
-    return new SettingsError(body.error?.message || body.message || fallback, response.status, body.error?.code)
+    const message = getNonBlankJsonString(body.error?.message) ?? getNonBlankJsonString(body.message) ?? fallback
+    const code = getNonBlankJsonString(body.error?.code) ?? getNonBlankJsonString(body.code)
+    return new SettingsError(message, response.status, code)
   } catch {
     return new SettingsError(fallback, response.status)
   }
@@ -469,18 +483,14 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value)
 }
 
-function isStringArray(value: unknown): value is string[] {
-  return Array.isArray(value) && value.every((entry) => typeof entry === 'string')
+function hasSettingsWarning<T>(response: Response, body: SettingsApiResponse<T>): boolean {
+  return response.headers?.get?.('Warning') != null
+    || body.warning === true
+    || (isRecord(body.data) && body.data.warning === true)
 }
 
-function hasControlCharacter(value: string): boolean {
-  for (const char of value) {
-    const code = char.charCodeAt(0)
-    if (code < 0x20 || code === 0x7f) {
-      return true
-    }
-  }
-  return false
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((entry) => typeof entry === 'string')
 }
 
 function normalizeSettingsLogicalPath(value: string, message: string, code: string): string {
@@ -1085,7 +1095,7 @@ export async function getSecurityCheck(options: SettingsRequestOptions = {}): Pr
 export async function updateSettings(
   data: UpdateSettingsRequest,
   options: SettingsRequestOptions = {},
-): Promise<{ success: boolean; message: string }> {
+): Promise<SettingsActionResult> {
   const normalizedData = normalizeLogicalPathSettingsUpdateRequest(data)
   validateSmallIntegerSettingsUpdateRequest(normalizedData)
   validateCapacitySettingsUpdateRequest(normalizedData)
@@ -1110,13 +1120,14 @@ export async function updateSettings(
   }
   return {
     success: true,
-    message: body.message || '',
+    warning: hasSettingsWarning(response, body),
+    message: getNonBlankJsonString(body.message) ?? '',
   }
 }
 
 export async function sendTestAlert(
   options: SettingsRequestOptions = {},
-): Promise<{ success: boolean; message: string; data: TestAlertResult }> {
+): Promise<TestAlertActionResult> {
   const response = await authFetch(`${API_BASE}/alerts/test`, {
     ...options,
     method: 'POST',
@@ -1132,7 +1143,8 @@ export async function sendTestAlert(
   }
   return {
     success: true,
-    message: body.message || '',
+    warning: hasSettingsWarning(response, body),
+    message: getNonBlankJsonString(body.message) ?? '',
     data: body.data,
   }
 }

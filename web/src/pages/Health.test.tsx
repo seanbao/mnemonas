@@ -437,6 +437,27 @@ describe('HealthPage', () => {
       })
     })
 
+    it('does not expose raw unknown scheduled scrub intervals', async () => {
+      mockGetDiagnostics.mockResolvedValue({
+        ...mockDiagnostics,
+        maintenance: {
+          ...mockDiagnostics.maintenance,
+          scrubScheduleInterval: 'backend_raw_schedule_interval',
+          scrubRetryInterval: 'backend_raw_retry_interval',
+        },
+      })
+
+      render(<HealthPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('周期 Scrub 已启用')).toBeTruthy()
+        expect(screen.getByText(/每 未知间隔 自动巡检/)).toBeTruthy()
+        expect(screen.getByText(/失败后每 未知间隔 重试/)).toBeTruthy()
+      })
+      expect(screen.queryByText(/backend_raw_schedule_interval/)).toBeNull()
+      expect(screen.queryByText(/backend_raw_retry_interval/)).toBeNull()
+    })
+
     it('warns when scheduled scrub recently failed', async () => {
       mockGetDiagnostics.mockResolvedValue({
         ...mockDiagnostics,
@@ -502,7 +523,7 @@ describe('HealthPage', () => {
           shareCount: 2,
           credentialsReady: true,
           gatewayConfigured: true,
-          message: 'SMB sidecar is not implemented.',
+          message: 'SMB runtime is not bundled in this build.',
         },
       })
 
@@ -512,6 +533,7 @@ describe('HealthPage', () => {
         expect(screen.getByText('SMB 运行态')).toBeTruthy()
         expect(screen.getByText('SMB 当前不可挂载')).toBeTruthy()
         expect(screen.getByText(/已配置 2 个共享/)).toBeTruthy()
+        expect(screen.getByText(/当前构建未包含 SMB\/Samba 运行组件/)).toBeTruthy()
       })
     })
 

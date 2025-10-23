@@ -26,7 +26,7 @@ export function getDiskHealthStatusLabel(status: string): string {
     disabled: '未启用',
     unknown: '未知',
   }
-  return labels[normalized] ?? status
+  return labels[normalized] ?? '未知'
 }
 
 export function getDiskHealthGenericMessage(status: string): string {

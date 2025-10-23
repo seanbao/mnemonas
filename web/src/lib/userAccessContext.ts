@@ -245,7 +245,7 @@ export function formatUserAccessReviewReport(
 
   return [
     '用户权限复核摘要',
-    ...headerRows.map(([label, value]) => `${label}: ${value}`),
+    ...headerRows.map(([label, value]) => `${label}：${value}`),
     '',
     '用户明细',
     '用户名 | 邮箱 | 角色 | 状态 | 用户组 | 主目录 | 权限范围 | 权限说明 | 复核提示 | 最后登录',

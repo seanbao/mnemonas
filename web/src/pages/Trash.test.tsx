@@ -43,18 +43,21 @@ vi.mock('@/lib/useBatchOperation', () => ({
       failure: string
       partial: string
     }
+    getWarningMessage?: (result: unknown) => string | undefined
     getToast?: (result: typeof mockBatchResult) => { title: string; description?: string; color: 'success' | 'warning' | 'danger' } | null | undefined
     onComplete?: (result: typeof mockBatchResult) => void
   }) => ({
     execute: vi.fn(async (items: string[], executeOptions: { signal?: AbortSignal } = {}) => {
       if (mockUseRealBatchOperation) {
         const results = await Promise.allSettled(items.map((item) => options.operation(item, { signal: executeOptions.signal })))
-        const warningMessages = results
+        const warningResults = results
           .filter((result): result is PromiseFulfilledResult<unknown> => result.status === 'fulfilled')
           .map((result) => result.value)
           .filter((value): value is { warning?: boolean; message?: string } => !!value && typeof value === 'object')
-          .map((value) => value.warning ? value.message : undefined)
-          .filter((message): message is string => typeof message === 'string')
+          .filter((value) => value.warning === true)
+        const warningMessages = warningResults
+          .map((value) => options.getWarningMessage?.(value))
+          .filter((message): message is string => typeof message === 'string' && message.trim().length > 0)
         const result = {
           succeeded: results.filter((result) => result.status === 'fulfilled').length,
           failed: results.filter((result) => result.status === 'rejected').length,
@@ -64,7 +67,7 @@ vi.mock('@/lib/useBatchOperation', () => ({
           failedErrors: results
             .filter((result): result is PromiseRejectedResult => result.status === 'rejected')
             .map((result) => result.reason),
-          warningCount: warningMessages.length,
+          warningCount: warningResults.length,
           warningMessages,
         }
         mockBatchExecute(items)
@@ -176,6 +179,25 @@ function createDeferred<T>() {
   return { promise, resolve, reject }
 }
 
+async function selectTrashItem(user: ReturnType<typeof userEvent.setup>, name: string) {
+  await user.click(screen.getByRole('checkbox', { name: `选择 ${name}` }))
+}
+
+async function toggleAllTrashItems(user: ReturnType<typeof userEvent.setup>) {
+  await user.click(screen.getByRole('checkbox', { name: /^(全选|取消全选)回收站项目$/ }))
+}
+
+function getEmptyTrashConfirmButton() {
+  return screen.getByRole('button', { name: '确认清空回收站' })
+}
+
+async function clickEmptyTrashConfirm(user: ReturnType<typeof userEvent.setup>) {
+  await waitFor(() => {
+    expect(getEmptyTrashConfirmButton()).toBeTruthy()
+  })
+  await user.click(getEmptyTrashConfirmButton())
+}
+
 describe('TrashPage', () => {
   const pendingTrashRefetch = () => new Promise<Awaited<ReturnType<typeof listTrash>>>(() => {})
 
@@ -238,9 +260,8 @@ describe('TrashPage', () => {
       mockListTrash.mockImplementation(() => new Promise(() => {}))
       render(<TrashPage />)
       
-      // Should show skeleton loaders
-      const skeletons = document.querySelectorAll('[class*="skeleton"], [class*="animate"]')
-      expect(skeletons.length).toBeGreaterThan(0)
+      expect(screen.getByRole('status', { name: '加载回收站' })).toBeInTheDocument()
+      expect(screen.getByText('加载回收站...')).toBeInTheDocument()
     })
 
     it('shows an invalid-home error instead of loading trash for non-admin users without a home directory', async () => {
@@ -771,7 +792,7 @@ describe('TrashPage', () => {
 
     it('restores item on restore button click', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
-		mockRestoreFromTrash.mockResolvedValue({ warning: false })
+      mockRestoreFromTrash.mockResolvedValue({ warning: false })
       
       render(<TrashPage />)
       
@@ -779,8 +800,7 @@ describe('TrashPage', () => {
         expect(screen.getByText('deleted-file.txt')).toBeTruthy()
       })
 
-      const restoreButtons = screen.getAllByTitle('恢复')
-      await user.click(restoreButtons[0])
+      await user.click(screen.getByRole('button', { name: '恢复 deleted-file.txt' }))
 
       await waitFor(() => {
         expect(mockRestoreFromTrash).toHaveBeenCalledWith('item1', undefined, expect.objectContaining({ signal: expect.any(AbortSignal) }))
@@ -834,6 +854,27 @@ describe('TrashPage', () => {
       })
     })
 
+    it('shows quota guidance when restore fails because quota is exceeded', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockRestoreFromTrash.mockRejectedValue(new ApiError('directory quota exceeded', 507, 'Insufficient Storage', 'QUOTA_EXCEEDED'))
+
+      render(<TrashPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('deleted-file.txt')).toBeTruthy()
+      })
+
+      await user.click(screen.getByRole('button', { name: '恢复 deleted-file.txt' }))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '容量配额不足',
+          description: '目标目录的容量配额不足，请清理空间或调整目录配额后重试。',
+          color: 'warning',
+        })
+      })
+    })
+
     it('removes a stale trash item and shows a warning when restore hits not found', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
       mockRestoreFromTrash.mockRejectedValue(new ApiError('trash item not found', 404, 'Not Found', 'TRASH_NOT_FOUND'))
@@ -883,32 +924,32 @@ describe('TrashPage', () => {
       })
     })
 
-  it('shows warning toast when restore succeeds with a warning', async () => {
-    const user = userEvent.setup({ writeToClipboard: false })
-    mockRestoreFromTrash.mockResolvedValue({
-      warning: true,
-      message: 'file restored with metadata warning',
-    })
+    it('shows warning toast when restore succeeds with a warning', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockRestoreFromTrash.mockResolvedValue({
+        warning: true,
+        message: 'file restored with metadata warning',
+      })
 
-    render(<TrashPage />)
+      render(<TrashPage />)
 
-    await waitFor(() => {
-      expect(screen.getByText('deleted-file.txt')).toBeTruthy()
-    })
+      await waitFor(() => {
+        expect(screen.getByText('deleted-file.txt')).toBeTruthy()
+      })
 
-    await user.click(screen.getByRole('button', { name: '恢复 deleted-file.txt' }))
+      await user.click(screen.getByRole('button', { name: '恢复 deleted-file.txt' }))
 
       await waitFor(() => {
         expect(mockAddToast).toHaveBeenCalledWith({
-        title: '恢复完成，但存在警告',
-        color: 'warning',
+          title: '恢复完成，但存在警告',
+          color: 'warning',
+        })
       })
     })
-  })
 
     it('optimistically removes a restored selected item before trash refetch completes', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
-		mockRestoreFromTrash.mockResolvedValue({ warning: false })
+      mockRestoreFromTrash.mockResolvedValue({ warning: false })
       mockListTrash.mockReset()
       mockListTrash.mockResolvedValueOnce({
         items: [
@@ -940,10 +981,7 @@ describe('TrashPage', () => {
         expect(screen.getByText('deleted-file.txt')).toBeTruthy()
       })
 
-      const checkboxes = document.querySelectorAll('[class*="Checkbox"], input[type="checkbox"]')
-      if (checkboxes.length > 1) {
-        await user.click(checkboxes[1] as Element)
-      }
+      await selectTrashItem(user, 'deleted-file.txt')
 
       await waitFor(() => {
         expect(screen.getByText(/已选择 1 项/)).toBeTruthy()
@@ -972,7 +1010,7 @@ describe('TrashPage', () => {
         expect(screen.getByText('deleted-file.txt')).toBeTruthy()
       })
 
-      const deleteButtons = screen.getAllByTitle('永久删除')
+      const deleteButtons = screen.getAllByRole('button', { name: /^永久删除 / })
       expect(deleteButtons.length).toBeGreaterThan(0)
     })
 
@@ -1000,7 +1038,7 @@ describe('TrashPage', () => {
 
     it('deletes item on confirm', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
-		mockDeleteFromTrash.mockResolvedValue({ warning: false })
+      mockDeleteFromTrash.mockResolvedValue({ warning: false })
       
       render(<TrashPage />)
       
@@ -1109,38 +1147,38 @@ describe('TrashPage', () => {
       })
     })
 
-  it('shows warning toast when permanent delete succeeds with a warning', async () => {
-    const user = userEvent.setup({ writeToClipboard: false })
-    mockDeleteFromTrash.mockResolvedValue({
-      warning: true,
-      message: 'item permanently deleted with cleanup warning',
-    })
+    it('shows warning toast when permanent delete succeeds with a warning', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockDeleteFromTrash.mockResolvedValue({
+        warning: true,
+        message: 'item permanently deleted with cleanup warning',
+      })
 
-    render(<TrashPage />)
+      render(<TrashPage />)
 
-    await waitFor(() => {
-      expect(screen.getByText('deleted-file.txt')).toBeTruthy()
-    })
+      await waitFor(() => {
+        expect(screen.getByText('deleted-file.txt')).toBeTruthy()
+      })
 
-    await user.click(screen.getByRole('button', { name: '永久删除 deleted-file.txt' }))
+      await user.click(screen.getByRole('button', { name: '永久删除 deleted-file.txt' }))
 
-    await waitFor(() => {
-      expect(screen.getByRole('button', { name: '永久删除' })).toBeTruthy()
-    })
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: '永久删除' })).toBeTruthy()
+      })
 
-    await user.click(screen.getByRole('button', { name: '永久删除' }))
+      await user.click(screen.getByRole('button', { name: '永久删除' }))
 
-    await waitFor(() => {
-      expect(mockAddToast).toHaveBeenCalledWith({
-        title: '已永久删除，但存在警告',
-        color: 'warning',
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '已永久删除，但存在警告',
+          color: 'warning',
+        })
       })
     })
-  })
 
     it('keeps the delete modal open when a pending permanent delete later fails', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
-		const pendingDelete = createDeferred<{ warning: boolean }>()
+      const pendingDelete = createDeferred<{ warning: boolean }>()
       mockDeleteFromTrash.mockImplementationOnce(() => pendingDelete.promise)
 
       render(<TrashPage />)
@@ -1187,7 +1225,7 @@ describe('TrashPage', () => {
 
     it('keeps a newer delete modal open when an older delete request resolves', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
-		const pendingDelete = createDeferred<{ warning: boolean }>()
+      const pendingDelete = createDeferred<{ warning: boolean }>()
       mockDeleteFromTrash.mockImplementationOnce(() => pendingDelete.promise)
 
       render(<TrashPage />)
@@ -1218,7 +1256,7 @@ describe('TrashPage', () => {
       })
 
       await act(async () => {
-  		pendingDelete.resolve({ warning: false })
+        pendingDelete.resolve({ warning: false })
       })
 
       await waitFor(() => {
@@ -1287,16 +1325,7 @@ describe('TrashPage', () => {
 
       await user.click(screen.getByText('清空回收站'))
 
-      await waitFor(() => {
-        // Find the button in modal footer
-        const buttons = screen.getAllByText('清空回收站')
-        const confirmBtn = buttons.find(btn => btn.closest('[class*="ModalFooter"], footer'))
-        if (confirmBtn) {
-          return user.click(confirmBtn)
-        }
-        // Click the last one (modal button)
-        return user.click(buttons[buttons.length - 1])
-      })
+      await clickEmptyTrashConfirm(user)
 
       await waitFor(() => {
         expect(mockEmptyTrash).toHaveBeenCalled()
@@ -1319,14 +1348,7 @@ describe('TrashPage', () => {
 
       await user.click(screen.getByText('清空回收站'))
 
-      await waitFor(() => {
-        const buttons = screen.getAllByText('清空回收站')
-        const confirmBtn = buttons.find(btn => btn.closest('[class*="ModalFooter"], footer'))
-        if (confirmBtn) {
-          return user.click(confirmBtn)
-        }
-        return user.click(buttons[buttons.length - 1])
-      })
+      await clickEmptyTrashConfirm(user)
 
       await waitFor(() => {
         expect(mockEmptyTrash).toHaveBeenCalled()
@@ -1354,14 +1376,7 @@ describe('TrashPage', () => {
 
       await user.click(screen.getByText('清空回收站'))
 
-      await waitFor(() => {
-        const buttons = screen.getAllByText('清空回收站')
-        const confirmBtn = buttons.find(btn => btn.closest('[class*="ModalFooter"], footer'))
-        if (confirmBtn) {
-          return user.click(confirmBtn)
-        }
-        return user.click(buttons[buttons.length - 1])
-      })
+      await clickEmptyTrashConfirm(user)
 
       await waitFor(() => {
         expect(mockEmptyTrash).toHaveBeenCalled()
@@ -1389,14 +1404,7 @@ describe('TrashPage', () => {
 
       await user.click(screen.getByText('清空回收站'))
 
-      await waitFor(() => {
-        const buttons = screen.getAllByText('清空回收站')
-        const confirmBtn = buttons.find(btn => btn.closest('[class*="ModalFooter"], footer'))
-        if (confirmBtn) {
-          return user.click(confirmBtn)
-        }
-        return user.click(buttons[buttons.length - 1])
-      })
+      await clickEmptyTrashConfirm(user)
 
       await waitFor(() => {
         expect(mockAddToast).toHaveBeenCalledWith({
@@ -1424,10 +1432,7 @@ describe('TrashPage', () => {
         expect(screen.getByText('确定要清空回收站吗？')).toBeTruthy()
       })
 
-      const confirmButtons = screen.getAllByText('清空回收站')
-      const confirmButton = confirmButtons.find(btn => btn.closest('[class*="ModalFooter"], footer')) ?? confirmButtons[confirmButtons.length - 1]
-
-      await user.click(confirmButton)
+      await clickEmptyTrashConfirm(user)
 
       await waitFor(() => {
         expect(mockEmptyTrash).toHaveBeenCalled()
@@ -1536,9 +1541,7 @@ describe('TrashPage', () => {
       await waitFor(() => {
         expect(screen.getByText('确定要清空回收站吗？')).toBeTruthy()
       })
-      const confirmButtons = screen.getAllByText('清空回收站')
-      const confirmButton = confirmButtons.find(btn => btn.closest('[class*="ModalFooter"], footer')) ?? confirmButtons[confirmButtons.length - 1]
-      await user.click(confirmButton)
+      await clickEmptyTrashConfirm(user)
 
       await waitFor(() => {
         expectAbortSignal(signal)
@@ -1566,10 +1569,7 @@ describe('TrashPage', () => {
         expect(screen.getByText('deleted-file.txt')).toBeTruthy()
       })
 
-      const checkboxes = document.querySelectorAll('[class*="Checkbox"], input[type="checkbox"]')
-      if (checkboxes.length > 0) {
-        await user.click(checkboxes[0] as Element)
-      }
+      await toggleAllTrashItems(user)
 
       await waitFor(() => {
         expect(screen.getByText(/已选择 2 项/)).toBeTruthy()
@@ -1603,10 +1603,7 @@ describe('TrashPage', () => {
         expect(screen.getByText('deleted-file.txt')).toBeTruthy()
       })
 
-      const checkboxes = document.querySelectorAll('[class*="Checkbox"], input[type="checkbox"]')
-      if (checkboxes.length > 1) {
-        await user.click(checkboxes[1] as Element)
-      }
+      await selectTrashItem(user, 'deleted-file.txt')
 
       await waitFor(() => {
         expect(screen.getByText(/已选择 1 项/)).toBeTruthy()
@@ -1640,11 +1637,7 @@ describe('TrashPage', () => {
         expect(screen.getByText('deleted-file.txt')).toBeTruthy()
       })
 
-      // Click checkbox to select item
-      const checkboxes = document.querySelectorAll('[class*="Checkbox"], input[type="checkbox"]')
-      if (checkboxes.length > 1) {
-        await user.click(checkboxes[1] as Element) // First item checkbox (skip header)
-      }
+      await selectTrashItem(user, 'deleted-file.txt')
 
       await waitFor(() => {
         // Selection bar should appear
@@ -1661,11 +1654,7 @@ describe('TrashPage', () => {
         expect(screen.getByText('deleted-file.txt')).toBeTruthy()
       })
 
-      // Click header checkbox to select all
-      const checkboxes = document.querySelectorAll('[class*="Checkbox"], input[type="checkbox"]')
-      if (checkboxes.length > 0) {
-        await user.click(checkboxes[0] as Element)
-      }
+      await toggleAllTrashItems(user)
 
       await waitFor(() => {
         expect(screen.getByText(/已选择 2 项/)).toBeTruthy()
@@ -1681,18 +1670,13 @@ describe('TrashPage', () => {
         expect(screen.getByText('deleted-file.txt')).toBeTruthy()
       })
 
-      const checkboxes = document.querySelectorAll('[class*="Checkbox"], input[type="checkbox"]')
-      if (checkboxes.length > 0) {
-        await user.click(checkboxes[0] as Element)
-      }
+      await toggleAllTrashItems(user)
 
       await waitFor(() => {
         expect(screen.getByText(/已选择 2 项/)).toBeTruthy()
       })
 
-      if (checkboxes.length > 0) {
-        await user.click(checkboxes[0] as Element)
-      }
+      await toggleAllTrashItems(user)
 
       await waitFor(() => {
         expect(screen.queryByText(/已选择.*项/)).toBeNull()
@@ -1708,10 +1692,7 @@ describe('TrashPage', () => {
         expect(screen.getByText('deleted-file.txt')).toBeTruthy()
       })
 
-      const checkboxes = document.querySelectorAll('[class*="Checkbox"], input[type="checkbox"]')
-      if (checkboxes.length > 1) {
-        await user.click(checkboxes[1] as Element)
-      }
+      await selectTrashItem(user, 'deleted-file.txt')
 
       await waitFor(() => {
         expect(screen.getByText(/已选择 1 项/)).toBeTruthy()
@@ -1731,19 +1712,13 @@ describe('TrashPage', () => {
         expect(screen.getByText('deleted-file.txt')).toBeTruthy()
       })
 
-      const firstCheckboxes = document.querySelectorAll('[class*="Checkbox"], input[type="checkbox"]')
-      if (firstCheckboxes.length > 1) {
-        await user.click(firstCheckboxes[1] as Element)
-      }
+      await selectTrashItem(user, 'deleted-file.txt')
 
       await waitFor(() => {
         expect(screen.getByText(/已选择 1 项/)).toBeTruthy()
       })
 
-      const secondCheckboxes = document.querySelectorAll('[class*="Checkbox"], input[type="checkbox"]')
-      if (secondCheckboxes.length > 1) {
-        await user.click(secondCheckboxes[1] as Element)
-      }
+      await selectTrashItem(user, 'deleted-file.txt')
 
       await waitFor(() => {
         expect(screen.queryByText(/已选择.*项/)).toBeNull()
@@ -1784,10 +1759,7 @@ describe('TrashPage', () => {
         expect(screen.getByText('deleted-file.txt')).toBeTruthy()
       })
 
-      const checkboxes = document.querySelectorAll('[class*="Checkbox"], input[type="checkbox"]')
-      if (checkboxes.length > 0) {
-        await user.click(checkboxes[0] as Element)
-      }
+      await toggleAllTrashItems(user)
 
       await waitFor(() => {
         expect(screen.getByText(/已选择 2 项/)).toBeTruthy()
@@ -1825,10 +1797,7 @@ describe('TrashPage', () => {
         expect(screen.getByText('deleted-file.txt')).toBeTruthy()
       })
 
-      const checkboxes = document.querySelectorAll('[class*="Checkbox"], input[type="checkbox"]')
-      if (checkboxes.length > 1) {
-        await user.click(checkboxes[1] as Element)
-      }
+      await selectTrashItem(user, 'deleted-file.txt')
 
       await waitFor(() => {
         expect(screen.getByText(/已选择 1 项/)).toBeTruthy()
@@ -1858,10 +1827,7 @@ describe('TrashPage', () => {
         expect(screen.getByText('deleted-file.txt')).toBeTruthy()
       })
 
-      const checkboxes = document.querySelectorAll('[class*="Checkbox"], input[type="checkbox"]')
-      if (checkboxes.length > 0) {
-        await user.click(checkboxes[0] as Element)
-      }
+      await toggleAllTrashItems(user)
 
       await waitFor(() => {
         expect(screen.getByText(/已选择 2 项/)).toBeTruthy()
@@ -1891,10 +1857,7 @@ describe('TrashPage', () => {
         expect(screen.getByText('deleted-file.txt')).toBeTruthy()
       })
 
-      const checkboxes = document.querySelectorAll('[class*="Checkbox"], input[type="checkbox"]')
-      if (checkboxes.length > 1) {
-        await user.click(checkboxes[1] as Element)
-      }
+      await selectTrashItem(user, 'deleted-file.txt')
 
       await waitFor(() => {
         expect(screen.getByText(/已选择 1 项/)).toBeTruthy()
@@ -1933,10 +1896,7 @@ describe('TrashPage', () => {
         expect(screen.getByText('deleted-file.txt')).toBeTruthy()
       })
 
-      const checkboxes = document.querySelectorAll('[class*="Checkbox"], input[type="checkbox"]')
-      if (checkboxes.length > 0) {
-        await user.click(checkboxes[0] as Element)
-      }
+      await toggleAllTrashItems(user)
 
       await waitFor(() => {
         expect(screen.getByText(/已选择 2 项/)).toBeTruthy()
@@ -1964,10 +1924,7 @@ describe('TrashPage', () => {
         expect(screen.getByText('deleted-file.txt')).toBeTruthy()
       })
 
-      const checkboxes = document.querySelectorAll('[class*="Checkbox"], input[type="checkbox"]')
-      if (checkboxes.length > 0) {
-        await user.click(checkboxes[0] as Element)
-      }
+      await toggleAllTrashItems(user)
 
       await waitFor(() => {
         expect(screen.getByText(/已选择 2 项/)).toBeTruthy()
@@ -1979,6 +1936,34 @@ describe('TrashPage', () => {
         expect(mockAddToast).toHaveBeenCalledWith({
           title: '2 项恢复失败',
           color: 'danger',
+        })
+      })
+    })
+
+    it('shows quota guidance when all batch restore items exceed quota', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockUseRealBatchOperation = true
+      mockRestoreFromTrash.mockRejectedValue(new ApiError('user quota exceeded', 507, 'Insufficient Storage', 'QUOTA_EXCEEDED'))
+
+      render(<TrashPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('deleted-file.txt')).toBeTruthy()
+      })
+
+      await toggleAllTrashItems(user)
+
+      await waitFor(() => {
+        expect(screen.getByText(/已选择 2 项/)).toBeTruthy()
+      })
+
+      await user.click(screen.getByText('恢复'))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '容量配额不足',
+          description: '当前用户的容量配额不足，请清理空间或调整用户配额后重试。',
+          color: 'warning',
         })
       })
     })
@@ -1999,10 +1984,7 @@ describe('TrashPage', () => {
         expect(screen.getByText('deleted-file.txt')).toBeTruthy()
       })
 
-      const checkboxes = document.querySelectorAll('[class*="Checkbox"], input[type="checkbox"]')
-      if (checkboxes.length > 1) {
-        await user.click(checkboxes[1] as Element)
-      }
+      await selectTrashItem(user, 'deleted-file.txt')
 
       await waitFor(() => {
         expect(screen.getByText(/已选择 1 项/)).toBeTruthy()
@@ -2035,10 +2017,7 @@ describe('TrashPage', () => {
         expect(screen.getByText('deleted-file.txt')).toBeTruthy()
       })
 
-      const checkboxes = document.querySelectorAll('[class*="Checkbox"], input[type="checkbox"]')
-      if (checkboxes.length > 1) {
-        await user.click(checkboxes[1] as Element)
-      }
+      await selectTrashItem(user, 'deleted-file.txt')
 
       await waitFor(() => {
         expect(screen.getByText(/已选择 1 项/)).toBeTruthy()
@@ -2070,10 +2049,7 @@ describe('TrashPage', () => {
         expect(screen.getByText('deleted-file.txt')).toBeTruthy()
       })
 
-      const checkboxes = document.querySelectorAll('[class*="Checkbox"], input[type="checkbox"]')
-      if (checkboxes.length > 1) {
-        await user.click(checkboxes[1] as Element)
-      }
+      await selectTrashItem(user, 'deleted-file.txt')
 
       await waitFor(() => {
         expect(screen.getByText(/已选择 1 项/)).toBeTruthy()
@@ -2110,10 +2086,7 @@ describe('TrashPage', () => {
         expect(screen.getByText('deleted-file.txt')).toBeTruthy()
       })
 
-      const checkboxes = document.querySelectorAll('[class*="Checkbox"], input[type="checkbox"]')
-      if (checkboxes.length > 0) {
-        await user.click(checkboxes[0] as Element)
-      }
+      await toggleAllTrashItems(user)
 
       await waitFor(() => {
         expect(screen.getByText(/已选择 2 项/)).toBeTruthy()
@@ -2123,6 +2096,46 @@ describe('TrashPage', () => {
 
       await waitFor(() => {
         expect(mockBatchExecute).toHaveBeenCalledWith(['item1', 'item2'])
+      })
+
+      await waitFor(() => {
+        expect(screen.getByText(/已选择 1 项/)).toBeTruthy()
+      })
+    })
+
+    it('includes conflict guidance after partial batch restore conflict', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockBatchResult = {
+        succeeded: 1,
+        failed: 1,
+        total: 2,
+        succeededItems: ['item1'],
+        failedItems: ['item2'],
+        failedErrors: [new ApiError('resource already exists', 409, 'Conflict')],
+        warningCount: 0,
+        warningMessages: [],
+      }
+
+      render(<TrashPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('deleted-file.txt')).toBeTruthy()
+      })
+
+      await toggleAllTrashItems(user)
+
+      await waitFor(() => {
+        expect(screen.getByText(/已选择 2 项/)).toBeTruthy()
+      })
+
+      await user.click(screen.getByText('恢复'))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '1 项恢复成功，1 项失败',
+          description: '当前目录中已存在同名文件或文件夹，请使用其他名称。',
+          color: 'warning',
+        })
       })
 
       await waitFor(() => {
@@ -2149,10 +2162,7 @@ describe('TrashPage', () => {
         expect(screen.getByText('deleted-file.txt')).toBeTruthy()
       })
 
-      const checkboxes = document.querySelectorAll('[class*="Checkbox"], input[type="checkbox"]')
-      if (checkboxes.length > 1) {
-        await user.click(checkboxes[1] as Element)
-      }
+      await selectTrashItem(user, 'deleted-file.txt')
 
       await waitFor(() => {
         expect(screen.getByText(/已选择 1 项/)).toBeTruthy()
@@ -2219,10 +2229,7 @@ describe('TrashPage', () => {
         expect(screen.getByText('deleted-file.txt')).toBeTruthy()
       })
 
-      const checkboxes = document.querySelectorAll('[class*="Checkbox"], input[type="checkbox"]')
-      if (checkboxes.length > 0) {
-        await user.click(checkboxes[0] as Element)
-      }
+      await toggleAllTrashItems(user)
 
       await waitFor(() => {
         expect(screen.getByText(/已选择 2 项/)).toBeTruthy()
@@ -2290,10 +2297,7 @@ describe('TrashPage', () => {
         expect(screen.getByText('deleted-file.txt')).toBeTruthy()
       })
 
-      const checkboxes = document.querySelectorAll('[class*="Checkbox"], input[type="checkbox"]')
-      if (checkboxes.length > 0) {
-        await user.click(checkboxes[0] as Element)
-      }
+      await toggleAllTrashItems(user)
 
       await waitFor(() => {
         expect(screen.getByText(/已选择 2 项/)).toBeTruthy()

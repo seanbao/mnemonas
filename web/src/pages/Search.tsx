@@ -174,6 +174,7 @@ export function SearchPage() {
       {/* Search Input */}
       <div className="mb-6">
         <Input
+          aria-label="搜索文件名"
           placeholder="输入文件名搜索..."
           value={query}
           onValueChange={handleQueryChange}
@@ -192,7 +193,7 @@ export function SearchPage() {
       </div>
 
       {/* Results */}
-      <Card className="card-meridian min-h-0 flex-1 overflow-hidden">
+      <Card className="card-mnemonas min-h-0 flex-1 overflow-hidden">
         <CardHeader className="border-b border-divider bg-content2/30">
           <div className="flex w-full min-w-0 flex-wrap items-center justify-between gap-2">
             <h2 className="font-semibold text-foreground">搜索结果</h2>

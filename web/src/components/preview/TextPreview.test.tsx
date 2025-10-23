@@ -10,7 +10,7 @@ vi.mock('@/api/auth', () => ({
 // Mock HeroUI Spinner
 vi.mock('@heroui/react', () => ({
   Spinner: ({ size }: { size: string }) => (
-    <div data-testid="spinner" data-size={size}>Loading...</div>
+    <div role="status" aria-label={`加载中 ${size}`}>Loading...</div>
   ),
 }))
 
@@ -36,7 +36,7 @@ describe('TextPreview', () => {
 
     render(<TextPreview path="/test.txt" filename="test.txt" />)
 
-    expect(screen.getByTestId('spinner')).toBeInTheDocument()
+    expect(screen.getByRole('status', { name: '加载文本预览' })).toBeInTheDocument()
     expect(screen.getByText('加载文件内容...')).toBeInTheDocument()
   })
 
@@ -108,12 +108,12 @@ describe('TextPreview', () => {
       text: () => Promise.resolve(mockContent),
     } as Response)
 
-    const { container } = render(<TextPreview path="/unsafe.ts" filename="unsafe.ts" />)
+    render(<TextPreview path="/unsafe.ts" filename="unsafe.ts" />)
 
     await waitFor(() => {
-      expect(container.textContent).toContain('<img src=x onerror=alert(1)>')
+      expect(screen.getByRole('region', { name: 'unsafe.ts 文本预览' })).toHaveTextContent('<img src=x onerror=alert(1)>')
     })
-    expect(container.querySelector('img')).toBeNull()
+    expect(screen.queryByRole('img')).toBeNull()
   })
 
   it('shows error when fetch fails', async () => {
@@ -127,7 +127,26 @@ describe('TextPreview', () => {
     await waitFor(() => {
       expect(screen.getByText('数据加载失败，请检查网络或稍后重试。')).toBeInTheDocument()
     })
-    expect(screen.queryByText('加载失败: Not Found')).not.toBeInTheDocument()
+    expect(screen.queryByText('加载失败：Not Found')).not.toBeInTheDocument()
+  })
+
+  it('shows missing-file guidance when the preview target no longer exists', async () => {
+    mockAuthFetch.mockResolvedValueOnce(new Response(JSON.stringify({
+      success: false,
+      error: {
+        code: 'FILE_NOT_FOUND',
+        message: 'file not found',
+      },
+    }), {
+      status: 404,
+      headers: { 'Content-Type': 'application/json' },
+    }))
+
+    render(<TextPreview path="/missing.txt" filename="missing.txt" />)
+
+    await waitFor(() => {
+      expect(screen.getByText('该文件可能已被移动或删除，请刷新列表后重试。')).toBeInTheDocument()
+    })
   })
 
   it('renders successful JSON files even when they resemble API error envelopes', async () => {
@@ -320,12 +339,12 @@ describe('TextPreview', () => {
       text: () => Promise.resolve('content'),
     } as Response)
 
-    const { container } = render(
+    render(
       <TextPreview path="/test.txt" filename="test.txt" className="custom-class" />
     )
 
     await waitFor(() => {
-      expect(container.querySelector('.custom-class')).toBeInTheDocument()
+      expect(screen.getByRole('region', { name: 'test.txt 文本预览' })).toHaveClass('custom-class')
     })
   })
 
@@ -341,7 +360,7 @@ describe('TextPreview', () => {
     await waitFor(() => {
       expect(screen.getByText('数据加载失败，请检查网络或稍后重试。')).toBeInTheDocument()
     })
-    expect(screen.queryByText('加载失败: Unauthorized')).not.toBeInTheDocument()
+    expect(screen.queryByText('加载失败：Unauthorized')).not.toBeInTheDocument()
   })
 
   it('uses a stable message when the text preview request rejects', async () => {

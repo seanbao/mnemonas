@@ -36,6 +36,7 @@ import {
   type SharePolicyRule,
 } from '@/api/share'
 import { getUserFacingErrorDescription } from '@/lib/apiMessages'
+import { hasControlCharacter } from '@/lib/utils'
 
 interface ShareDialogProps {
   isOpen: boolean
@@ -217,11 +218,39 @@ function normalizeSharePolicyPath(value: string): string {
     return '/'
   }
   const withLeadingSlash = trimmed.startsWith('/') ? trimmed : `/${trimmed}`
-  return withLeadingSlash === '/' ? '/' : withLeadingSlash.replace(/\/+$/, '')
+  const parts: string[] = []
+  for (const segment of withLeadingSlash.split('/')) {
+    if (!segment || segment === '.') {
+      continue
+    }
+    if (segment === '..') {
+      parts.pop()
+      continue
+    }
+    parts.push(segment)
+  }
+  return parts.length === 0 ? '/' : `/${parts.join('/')}`
+}
+
+function cleanSharePolicyRulePath(value: string): string | null {
+  const trimmed = value.trim()
+  if (!trimmed || !trimmed.startsWith('/')) {
+    return null
+  }
+  if (/[\\?#]/.test(trimmed) || hasControlCharacter(trimmed)) {
+    return null
+  }
+  if (trimmed.split('/').some((segment) => segment === '.' || segment === '..')) {
+    return null
+  }
+  return normalizeSharePolicyPath(trimmed)
 }
 
 function sharePathWithinBase(basePath: string, targetPath: string): boolean {
-  const normalizedBase = normalizeSharePolicyPath(basePath)
+  const normalizedBase = cleanSharePolicyRulePath(basePath)
+  if (!normalizedBase) {
+    return false
+  }
   const normalizedTarget = normalizeSharePolicyPath(targetPath)
   if (normalizedBase === '/') {
     return normalizedTarget.startsWith('/')
@@ -234,12 +263,15 @@ function matchSharePolicyRule(rules: SharePolicyRule[] | undefined, targetPath: 
     return null
   }
   let matched: SharePolicyRule | null = null
+  let matchedPathLength = -1
   for (const rule of rules) {
-    if (!rule.path || !sharePathWithinBase(rule.path, targetPath)) {
+    const rulePath = cleanSharePolicyRulePath(rule.path)
+    if (!rulePath || !sharePathWithinBase(rulePath, targetPath)) {
       continue
     }
-    if (!matched || normalizeSharePolicyPath(rule.path).length > normalizeSharePolicyPath(matched.path).length) {
-      matched = rule
+    if (rulePath.length > matchedPathLength) {
+      matched = { ...rule, path: rulePath }
+      matchedPathLength = rulePath.length
     }
   }
   return matched
@@ -763,6 +795,7 @@ export function ShareDialog({
                     <span className="text-sm font-medium">密码保护</span>
                   </div>
                   <Switch
+                    aria-label="启用密码保护"
                     isSelected={usePassword || policyRequiresPassword}
                     isDisabled={policyRequiresPassword}
                     onValueChange={setUsePassword}
@@ -772,6 +805,7 @@ export function ShareDialog({
                 {(usePassword || policyRequiresPassword) && (
                   <div className="space-y-2">
                     <Input
+                      aria-label="分享访问密码"
                       type="password"
                       placeholder="设置访问密码（最多 72 字节）"
                       value={password}
@@ -794,6 +828,7 @@ export function ShareDialog({
                   <span className="text-sm font-medium">有效期</span>
                 </div>
                 <Select
+                  aria-label="分享有效期"
                   selectedKeys={[expiresIn]}
                   onSelectionChange={(keys) => setExpiresIn([...keys][0] as string || '')}
                   classNames={{
@@ -816,6 +851,7 @@ export function ShareDialog({
                   <span className="text-sm font-medium">权限</span>
                 </div>
                 <Select
+                  aria-label="分享权限"
                   selectedKeys={[permission]}
                   onSelectionChange={(keys) => setPermission([...keys][0] as 'read' || 'read')}
                   classNames={{
@@ -837,6 +873,7 @@ export function ShareDialog({
                   <span className="text-sm font-medium">访问次数限制</span>
                 </div>
                 <Input
+                  aria-label="分享访问次数限制"
                   type="text"
                   placeholder="使用系统默认"
                   inputMode="numeric"
@@ -889,6 +926,7 @@ export function ShareDialog({
               <div className="space-y-3">
                 <span className="text-sm font-medium text-default-600">备注（可选）</span>
                 <Input
+                  aria-label="分享备注"
                   placeholder="添加备注信息"
                   value={description}
                   onValueChange={setDescription}

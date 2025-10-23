@@ -24,7 +24,7 @@ import { listFiles, createDirectory, ApiError, type FileItem } from '@/api/files
 import { EmptyState } from '@/components/ui/EmptyState'
 import { useUser } from '@/stores/auth'
 import { getFileQueryScopeKey, getFilesQueryKey } from '@/lib/fileQueryKey'
-import { getPathConflictErrorToast } from '@/lib/fileActionErrors'
+import { getPathConflictErrorToast, getQuotaExceededErrorToast } from '@/lib/fileActionErrors'
 import { GENERIC_LOAD_ERROR_DESCRIPTION, getUserFacingErrorDescription } from '@/lib/apiMessages'
 import { cn, normalizePath, pathWithinBase } from '@/lib/utils'
 import { getInvalidHomeDirDescription, invalidHomeDirTitle, resolveUserHomeScope } from '@/lib/userScope'
@@ -127,6 +127,11 @@ function getDirectoryPickerCreateErrorToast(error: unknown): {
     return pathConflictToast
   }
 
+  const quotaExceededToast = getQuotaExceededErrorToast(error)
+  if (quotaExceededToast) {
+    return quotaExceededToast
+  }
+
   return getDirectoryPickerErrorPresentation(error, {
     unavailable: '创建目录暂不可用',
     failure: '创建文件夹失败',
@@ -197,6 +202,9 @@ function TreeNode({
       >
         <button
           type="button"
+          aria-label={`${node.isExpanded ? '折叠' : '展开'} ${node.name}`}
+          aria-expanded={node.isExpanded}
+          aria-disabled={isExcluded}
           className="w-5 h-5 flex items-center justify-center rounded hover:bg-content2/50"
           onClick={(e) => {
             e.stopPropagation()
@@ -420,12 +428,12 @@ export function DirectoryPicker({
   }, [isOpen, rootData, effectiveRootPath])
 
   const handleRetryRoot = useCallback(async () => {
-  const result = await refetchRoot()
-  if (result.error) {
-    addToast(getDirectoryPickerRetryErrorToast(result.error))
-    return
-  }
-  addToast({ title: '目录已刷新', color: 'success' })
+    const result = await refetchRoot()
+    if (result.error) {
+      addToast(getDirectoryPickerRetryErrorToast(result.error))
+      return
+    }
+    addToast({ title: '目录已刷新', color: 'success' })
   }, [refetchRoot])
 
   // Load expanded directories
@@ -676,9 +684,12 @@ export function DirectoryPicker({
             ) : (
               <>
                 {/* Root selector */}
-                <div
+                <button
+                  type="button"
+                  aria-label={`选择${rootLabel}`}
+                  disabled={isRootExcluded}
                   className={cn(
-                    "flex items-center gap-2 px-2 py-1.5 rounded-lg cursor-pointer transition-colors",
+                    "flex w-full items-center gap-2 px-2 py-1.5 rounded-lg text-left transition-colors",
                     selectedPath === effectiveRootPath && "bg-accent-primary/10 text-accent-primary",
                     selectedPath !== effectiveRootPath && !isRootExcluded && "hover:bg-content2",
                     isRootExcluded && "opacity-50 cursor-not-allowed"
@@ -692,7 +703,7 @@ export function DirectoryPicker({
                   <div className="w-5 h-5" />
                   <Home size={18} className={selectedPath === effectiveRootPath ? "text-accent-primary" : "text-default-500"} />
                   <span className="text-sm">{rootLabel}</span>
-                </div>
+                </button>
                 
                 {/* Folder tree */}
                 {rootFolders.map(node => (
@@ -722,6 +733,7 @@ export function DirectoryPicker({
               {isCreatingFolder ? (
                 <div className="flex items-center gap-2">
                   <Input
+                    aria-label="新文件夹名称"
                     placeholder="新文件夹名称"
                     value={newFolderName}
                     onValueChange={setNewFolderName}
@@ -753,6 +765,7 @@ export function DirectoryPicker({
                   <Button
                     size="sm"
                     variant="flat"
+                    aria-label="取消新建文件夹"
                     onPress={handleCancelCreateFolder}
                     isDisabled={isCreating}
                     className="rounded-lg"

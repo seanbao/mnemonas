@@ -8,6 +8,7 @@ export interface ContextMenuProps {
   onClose: () => void
   children: React.ReactNode
   className?: string
+  label?: string
 }
 
 /**
@@ -24,7 +25,7 @@ export interface ContextMenuProps {
  * </ContextMenu>
  * ```
  */
-export function ContextMenu({ isOpen, position, children, className }: ContextMenuProps) {
+export function ContextMenu({ isOpen, position, children, className, label = '上下文菜单' }: ContextMenuProps) {
   const menuRef = useRef<HTMLDivElement>(null)
 
   // Adjust position if menu would overflow viewport
@@ -56,6 +57,8 @@ export function ContextMenu({ isOpen, position, children, className }: ContextMe
     <div
       ref={menuRef}
       data-context-menu
+      role="menu"
+      aria-label={label}
       className={cn(
         "fixed z-[100] min-w-[180px] rounded-lg py-1",
         "bg-content1 border border-divider shadow-lg",
@@ -112,6 +115,7 @@ export function ContextMenuItem({
   return (
     <button
       type="button"
+      role="menuitem"
       className={cn(
         "w-full flex items-center gap-2.5 px-3 py-2 text-sm text-left transition-colors",
         "hover:bg-content2 focus:bg-content2 focus:outline-none",

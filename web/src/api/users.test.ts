@@ -522,6 +522,36 @@ describe('Users API', () => {
     await expect(deleteUser('u1')).rejects.toThrow('cannot delete current user')
   })
 
+  it('preserves top-level user management error codes', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 503,
+      json: () => Promise.resolve({ success: false, code: 'SERVICE_UNAVAILABLE', message: 'configuration not available' }),
+    })
+
+    await expect(listUsers()).rejects.toMatchObject({
+      message: 'configuration not available',
+      status: 503,
+      code: 'SERVICE_UNAVAILABLE',
+      isUnavailable: true,
+    })
+  })
+
+  it('ignores blank legacy error messages and codes', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 503,
+      json: () => Promise.resolve({ success: false, error: { message: '   ', code: '   ' }, message: '  ' }),
+    })
+
+    await expect(listUsers()).rejects.toMatchObject({
+      message: '获取用户列表失败',
+      status: 503,
+      code: undefined,
+      isUnavailable: true,
+    })
+  })
+
   it('falls back to generic error when error body is invalid', async () => {
     mockAuthFetch.mockResolvedValueOnce({
       ok: false,
@@ -553,6 +583,21 @@ describe('Users API', () => {
     await expect(revokeUserSessions('u1')).resolves.toEqual({ success: true, warning: false, message: 'user sessions revoked successfully' })
     await expect(toggleUserStatus('u1', true)).resolves.toEqual({ success: true, warning: false, message: 'user status updated successfully' })
     expect(mockAuthFetch).toHaveBeenNthCalledWith(3, '/api/v1/admin/users/u1/revoke-sessions', { method: 'POST' })
+  })
+
+  it('ignores blank wrapped success messages for user management actions', async () => {
+    mockAuthFetch
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ success: true, data: { user: validUser }, message: '   ' }),
+      })
+      .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({ success: true, data: null, message: '  ' }) })
+
+    const created = await createUser({ username: 'admin', password: 'password123' })
+    const deleted = await deleteUser('u1')
+
+    expect(created.message).toBeUndefined()
+    expect(deleted).toEqual({ success: true, warning: false, message: undefined })
   })
 
   it('preserves warning metadata for wrapped user management success responses', async () => {
@@ -613,6 +658,25 @@ describe('Users API', () => {
       success: true,
       warning: true,
       message: 'user status updated with persistence warning',
+    })
+  })
+
+  it('preserves top-level warning metadata for wrapped user management success responses', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      headers: { get: () => null },
+      json: () => Promise.resolve({
+        success: true,
+        warning: true,
+        data: null,
+        message: 'user deleted with persistence warning',
+      }),
+    })
+
+    await expect(deleteUser('u1')).resolves.toEqual({
+      success: true,
+      warning: true,
+      message: 'user deleted with persistence warning',
     })
   })
 

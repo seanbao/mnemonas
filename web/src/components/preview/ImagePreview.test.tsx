@@ -10,10 +10,10 @@ vi.mock('@/api/auth', () => ({
 // Mock HeroUI components
 vi.mock('@heroui/react', () => ({
   Spinner: ({ size }: { size: string }) => (
-    <div data-testid="spinner" data-size={size}>Loading...</div>
+    <div role="status" aria-label={`加载中 ${size}`}>Loading...</div>
   ),
-  Button: ({ children, onPress, title }: { children: React.ReactNode; onPress?: () => void; title?: string }) => (
-    <button onClick={onPress} title={title}>{children}</button>
+  Button: ({ children, onPress, title, 'aria-label': ariaLabel }: { children: React.ReactNode; onPress?: () => void; title?: string; 'aria-label'?: string }) => (
+    <button onClick={onPress} title={title} aria-label={ariaLabel}>{children}</button>
   ),
 }))
 
@@ -52,7 +52,7 @@ describe('ImagePreview', () => {
   it('renders with loading state', async () => {
     await renderImage('/image.png', 'image.png')
 
-    expect(screen.getByTestId('spinner')).toBeInTheDocument()
+    expect(screen.getByRole('status', { name: '加载图片预览' })).toBeInTheDocument()
   })
 
   it('displays filename in toolbar', async () => {
@@ -64,10 +64,10 @@ describe('ImagePreview', () => {
   it('shows zoom controls', async () => {
     await renderImage('/image.png', 'image.png')
 
-    expect(screen.getByTitle('缩小')).toBeInTheDocument()
-    expect(screen.getByTitle('放大')).toBeInTheDocument()
-    expect(screen.getByTitle('旋转')).toBeInTheDocument()
-    expect(screen.getByTitle('重置')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '缩小' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '放大' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '旋转' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '重置' })).toBeInTheDocument()
   })
 
   it('displays initial zoom level as 100%', async () => {
@@ -177,6 +177,32 @@ describe('ImagePreview', () => {
     expect(URL.createObjectURL).not.toHaveBeenCalled()
   })
 
+  it('shows missing-file guidance for structured not-found preview responses', async () => {
+    const json = vi.fn(() => Promise.resolve({
+      success: false,
+      error: {
+        code: 'FILE_NOT_FOUND',
+        message: 'file not found',
+      },
+    }))
+
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 404,
+      headers: new Headers({ 'Content-Type': 'application/json' }),
+      clone: () => ({ json }),
+    } as unknown as Response)
+
+    await renderImage('/missing.png', 'missing.png')
+
+    await waitFor(() => {
+      expect(screen.getByText('该文件可能已被移动或删除，请刷新列表后重试。')).toBeInTheDocument()
+    })
+    expect(json).toHaveBeenCalled()
+    expect(screen.queryByText('file not found')).not.toBeInTheDocument()
+    expect(URL.createObjectURL).not.toHaveBeenCalled()
+  })
+
   it('does not expose raw request errors when image loading rejects', async () => {
     mockAuthFetch.mockRejectedValueOnce(new Error('preview storage unavailable'))
 
@@ -213,7 +239,7 @@ describe('ImagePreview', () => {
   it('increases zoom on zoom in button click', async () => {
     await renderImage('/image.png', 'image.png')
 
-    const zoomIn = screen.getByTitle('放大')
+    const zoomIn = screen.getByRole('button', { name: '放大' })
     fireEvent.click(zoomIn)
 
     expect(screen.getByText('125%')).toBeInTheDocument()
@@ -222,10 +248,10 @@ describe('ImagePreview', () => {
   it('decreases zoom on zoom out button click', async () => {
     await renderImage('/image.png', 'image.png')
 
-    const zoomIn = screen.getByTitle('放大')
+    const zoomIn = screen.getByRole('button', { name: '放大' })
     fireEvent.click(zoomIn) // 125%
     
-    const zoomOut = screen.getByTitle('缩小')
+    const zoomOut = screen.getByRole('button', { name: '缩小' })
     fireEvent.click(zoomOut) // Back to 100%
 
     expect(screen.getByText('100%')).toBeInTheDocument()
@@ -235,16 +261,16 @@ describe('ImagePreview', () => {
     await renderImage('/image.png', 'image.png')
 
     // Zoom in
-    const zoomIn = screen.getByTitle('放大')
+    const zoomIn = screen.getByRole('button', { name: '放大' })
     fireEvent.click(zoomIn)
     fireEvent.click(zoomIn)
     
     // Rotate
-    const rotate = screen.getByTitle('旋转')
+    const rotate = screen.getByRole('button', { name: '旋转' })
     fireEvent.click(rotate)
     
     // Reset
-    const reset = screen.getByTitle('重置')
+    const reset = screen.getByRole('button', { name: '重置' })
     fireEvent.click(reset)
 
     expect(screen.getByText('100%')).toBeInTheDocument()
@@ -255,7 +281,7 @@ describe('ImagePreview', () => {
   it('rotates image by 90 degrees on rotate button click', async () => {
     await renderImage('/image.png', 'image.png')
 
-    const rotate = screen.getByTitle('旋转')
+    const rotate = screen.getByRole('button', { name: '旋转' })
     fireEvent.click(rotate)
 
     const img = await screen.findByRole('img')
@@ -265,7 +291,7 @@ describe('ImagePreview', () => {
   it('wraps rotation after 360 degrees', async () => {
     await renderImage('/image.png', 'image.png')
 
-    const rotate = screen.getByTitle('旋转')
+    const rotate = screen.getByRole('button', { name: '旋转' })
     fireEvent.click(rotate) // 90
     fireEvent.click(rotate) // 180
     fireEvent.click(rotate) // 270
@@ -278,7 +304,7 @@ describe('ImagePreview', () => {
   it('limits zoom to maximum 5x', async () => {
     await renderImage('/image.png', 'image.png')
 
-    const zoomIn = screen.getByTitle('放大')
+    const zoomIn = screen.getByRole('button', { name: '放大' })
     // Click many times
     for (let i = 0; i < 20; i++) {
       fireEvent.click(zoomIn)
@@ -290,7 +316,7 @@ describe('ImagePreview', () => {
   it('limits zoom to minimum 10%', async () => {
     await renderImage('/image.png', 'image.png')
 
-    const zoomOut = screen.getByTitle('缩小')
+    const zoomOut = screen.getByRole('button', { name: '缩小' })
     // Click many times  
     for (let i = 0; i < 20; i++) {
       fireEvent.click(zoomOut)
@@ -302,26 +328,26 @@ describe('ImagePreview', () => {
   it('supports wheel zoom in both directions', async () => {
     await renderImage('/image.png', 'image.png')
 
-    const img = await screen.findByRole('img')
-    const container = img.parentElement as HTMLElement
+    await screen.findByRole('img')
+    const surface = screen.getByRole('region', { name: 'image.png 图片预览画布' })
 
-    fireEvent.wheel(container, { deltaY: -100 })
+    fireEvent.wheel(surface, { deltaY: -100 })
     expect(screen.getByText('110%')).toBeInTheDocument()
 
-    fireEvent.wheel(container, { deltaY: 100 })
+    fireEvent.wheel(surface, { deltaY: 100 })
     expect(screen.getByText('100%')).toBeInTheDocument()
   })
 
   it('drags the image when zoomed in', async () => {
     await renderImage('/image.png', 'image.png')
 
-    fireEvent.click(screen.getByTitle('放大'))
+    fireEvent.click(screen.getByRole('button', { name: '放大' }))
     const img = await screen.findByRole('img')
-    const container = img.parentElement as HTMLElement
+    const surface = screen.getByRole('region', { name: 'image.png 图片预览画布' })
 
-    fireEvent.mouseDown(container, { clientX: 10, clientY: 20 })
-    fireEvent.mouseMove(container, { clientX: 30, clientY: 55 })
-    fireEvent.mouseUp(container)
+    fireEvent.mouseDown(surface, { clientX: 10, clientY: 20 })
+    fireEvent.mouseMove(surface, { clientX: 30, clientY: 55 })
+    fireEvent.mouseUp(surface)
 
     expect(img.style.transform).toContain('translate(20px, 35px)')
   })
@@ -330,11 +356,11 @@ describe('ImagePreview', () => {
     await renderImage('/image.png', 'image.png')
 
     const img = await screen.findByRole('img')
-    const container = img.parentElement as HTMLElement
+    const surface = screen.getByRole('region', { name: 'image.png 图片预览画布' })
 
-    fireEvent.mouseDown(container, { clientX: 10, clientY: 20 })
-    fireEvent.mouseMove(container, { clientX: 30, clientY: 55 })
-    fireEvent.mouseUp(container)
+    fireEvent.mouseDown(surface, { clientX: 10, clientY: 20 })
+    fireEvent.mouseMove(surface, { clientX: 30, clientY: 55 })
+    fireEvent.mouseUp(surface)
 
     expect(img.style.transform).toContain('translate(0px, 0px)')
   })
@@ -348,7 +374,34 @@ describe('ImagePreview', () => {
 
     view?.unmount()
 
+    expect(URL.revokeObjectURL).toHaveBeenCalledTimes(1)
     expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:mock-image')
+  })
+
+  it('revokes the previous blob URL once when the path changes', async () => {
+    vi.mocked(URL.createObjectURL)
+      .mockReturnValueOnce('blob:first-image')
+      .mockReturnValueOnce('blob:second-image')
+
+    const view = await renderImage('/image1.png', 'image1.png')
+    const { rerender } = view!
+
+    await waitFor(() => {
+      expect(URL.createObjectURL).toHaveBeenCalledTimes(1)
+    })
+
+    await act(async () => {
+      rerender(<ImagePreview path="/image2.png" filename="image2.png" />)
+      await Promise.resolve()
+    })
+
+    await waitFor(() => {
+      expect(URL.createObjectURL).toHaveBeenCalledTimes(2)
+    })
+
+    expect(URL.revokeObjectURL).toHaveBeenCalledTimes(1)
+    expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:first-image')
+    expect(await screen.findByRole('img')).toHaveAttribute('src', 'blob:second-image')
   })
 
   it('resets state when path changes', async () => {
@@ -356,7 +409,7 @@ describe('ImagePreview', () => {
     const { rerender } = view!
 
     // Zoom in
-    const zoomIn = screen.getByTitle('放大')
+    const zoomIn = screen.getByRole('button', { name: '放大' })
     fireEvent.click(zoomIn)
     expect(screen.getByText('125%')).toBeInTheDocument()
 
@@ -370,9 +423,9 @@ describe('ImagePreview', () => {
   })
 
   it('applies custom className', async () => {
-    const view = await renderImage('/image.png', 'image.png', 'custom-class')
+    await renderImage('/image.png', 'image.png', 'custom-class')
 
-    expect(view?.container.querySelector('.custom-class')).toBeInTheDocument()
+    expect(screen.getByRole('region', { name: 'image.png 图片预览' })).toHaveClass('custom-class')
   })
 
   it('sets image as non-draggable', async () => {

@@ -125,6 +125,34 @@ describe('Favorites API', () => {
       })
     })
 
+    it('preserves top-level favorites error codes', async () => {
+      mockAuthFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 503,
+        json: () => Promise.resolve({ success: false, code: 'FAVORITES_UNAVAILABLE', message: 'favorites storage unavailable' }),
+      })
+
+      await expect(listFavorites()).rejects.toMatchObject({
+        message: 'favorites storage unavailable',
+        code: 'FAVORITES_UNAVAILABLE',
+        isUnavailable: true,
+      })
+    })
+
+    it('ignores blank legacy error messages and codes', async () => {
+      mockAuthFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 503,
+        json: () => Promise.resolve({ success: false, error: { code: '   ', message: '   ' }, message: '  ' }),
+      })
+
+      await expect(listFavorites()).rejects.toMatchObject({
+        message: '获取收藏列表失败',
+        code: undefined,
+        isUnavailable: true,
+      })
+    })
+
     it('rejects malformed successful favorite list responses', async () => {
       mockAuthFetch.mockResolvedValueOnce({
         ok: true,
@@ -242,7 +270,7 @@ describe('Favorites API', () => {
 
       const result = await addFavorite('/file.txt')
 
-      expect(result).toEqual(mockFavorite)
+      expect(result).toEqual({ ...mockFavorite, warning: false, message: undefined })
       expect(mockAuthFetch).toHaveBeenCalledWith('/api/v1/favorites', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -263,7 +291,7 @@ describe('Favorites API', () => {
         json: () => Promise.resolve({ success: true, data: mockFavorite }),
       })
 
-      await expect(addFavorite('/file.txt', '重要文件')).resolves.toEqual(mockFavorite)
+      await expect(addFavorite('/file.txt', '重要文件')).resolves.toEqual({ ...mockFavorite, warning: false, message: undefined })
 
       expect(mockAuthFetch).toHaveBeenCalledWith('/api/v1/favorites', {
         method: 'POST',
@@ -284,7 +312,7 @@ describe('Favorites API', () => {
         json: () => Promise.resolve({ success: true, data: mockFavorite }),
       })
 
-      await expect(addFavorite('file.txt')).resolves.toEqual(mockFavorite)
+      await expect(addFavorite('file.txt')).resolves.toEqual({ ...mockFavorite, warning: false, message: undefined })
 
       expect(mockAuthFetch).toHaveBeenCalledWith('/api/v1/favorites', {
         method: 'POST',
@@ -306,7 +334,7 @@ describe('Favorites API', () => {
         json: () => Promise.resolve({ success: true, data: mockFavorite }),
       })
 
-      await expect(addFavorite('/file.txt', '', { signal: controller.signal })).resolves.toEqual(mockFavorite)
+      await expect(addFavorite('/file.txt', '', { signal: controller.signal })).resolves.toEqual({ ...mockFavorite, warning: false, message: undefined })
 
       expect(mockAuthFetch).toHaveBeenCalledWith('/api/v1/favorites', {
         signal: controller.signal,
@@ -337,6 +365,60 @@ describe('Favorites API', () => {
       })
 
       await expect(addFavorite('/file.txt')).rejects.toThrow(FavoritesError)
+    })
+
+    it('preserves warning metadata from successful add responses', async () => {
+      const mockFavorite = {
+        path: '/file.txt',
+        user_id: 'user1',
+        created_at: '2024-01-01',
+      }
+
+      mockAuthFetch.mockResolvedValueOnce({
+        ok: true,
+        status: 201,
+        headers: { get: () => '199 MnemoNAS "favorites persistence incomplete"' },
+        json: () => Promise.resolve({
+          success: true,
+          warning: true,
+          data: mockFavorite,
+          message: 'favorite added with persistence warning',
+        }),
+      })
+
+      await expect(addFavorite('/file.txt')).resolves.toEqual({
+        ...mockFavorite,
+        warning: true,
+        message: 'favorite added with persistence warning',
+      })
+    })
+
+    it('preserves data warning metadata from successful add responses', async () => {
+      const mockFavorite = {
+        path: '/file.txt',
+        user_id: 'user1',
+        created_at: '2024-01-01',
+      }
+
+      mockAuthFetch.mockResolvedValueOnce({
+        ok: true,
+        status: 201,
+        headers: { get: () => null },
+        json: () => Promise.resolve({
+          success: true,
+          data: {
+            ...mockFavorite,
+            warning: true,
+          },
+          message: 'favorite added with persistence warning',
+        }),
+      })
+
+      await expect(addFavorite('/file.txt')).resolves.toEqual({
+        ...mockFavorite,
+        warning: true,
+        message: 'favorite added with persistence warning',
+      })
     })
 
     it('rejects malformed successful add favorite responses', async () => {
@@ -385,10 +467,39 @@ describe('Favorites API', () => {
         json: () => Promise.resolve({ success: true, data: null, message: 'favorite removed successfully' }),
       })
 
-      await expect(removeFavorite('/file.txt')).resolves.toEqual({ message: 'favorite removed successfully' })
+      await expect(removeFavorite('/file.txt')).resolves.toEqual({ warning: false, message: 'favorite removed successfully' })
 
       expect(mockAuthFetch).toHaveBeenCalledWith('/api/v1/favorites/file.txt', {
         method: 'DELETE',
+      })
+    })
+
+    it('ignores blank action messages from successful remove responses', async () => {
+      mockAuthFetch.mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({ success: true, data: null, message: '   ' }),
+      })
+
+      await expect(removeFavorite('/file.txt')).resolves.toEqual({ warning: false, message: undefined })
+    })
+
+    it('preserves warning metadata from successful remove responses', async () => {
+      mockAuthFetch.mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        headers: { get: () => '199 MnemoNAS "favorites persistence incomplete"' },
+        json: () => Promise.resolve({
+          success: true,
+          warning: true,
+          data: null,
+          message: 'favorite removed with persistence warning',
+        }),
+      })
+
+      await expect(removeFavorite('/file.txt')).resolves.toEqual({
+        warning: true,
+        message: 'favorite removed with persistence warning',
       })
     })
 
@@ -399,7 +510,7 @@ describe('Favorites API', () => {
         json: () => Promise.resolve({ success: true, data: null, message: 'favorite removed successfully' }),
       })
 
-      await expect(removeFavorite('/documents/my file.txt')).resolves.toEqual({ message: 'favorite removed successfully' })
+      await expect(removeFavorite('/documents/my file.txt')).resolves.toEqual({ warning: false, message: 'favorite removed successfully' })
 
       expect(mockAuthFetch).toHaveBeenCalledWith(
         '/api/v1/favorites/documents/my%20file.txt',
@@ -415,7 +526,7 @@ describe('Favorites API', () => {
         json: () => Promise.resolve({ success: true, data: null, message: 'favorite removed successfully' }),
       })
 
-      await expect(removeFavorite('/file.txt', { signal: controller.signal })).resolves.toEqual({ message: 'favorite removed successfully' })
+      await expect(removeFavorite('/file.txt', { signal: controller.signal })).resolves.toEqual({ warning: false, message: 'favorite removed successfully' })
 
       expect(mockAuthFetch).toHaveBeenCalledWith('/api/v1/favorites/file.txt', {
         signal: controller.signal,
@@ -647,6 +758,47 @@ describe('Favorites API', () => {
       })
     })
 
+    it('rejects successful batch favorite responses with unknown or unsafe paths', async () => {
+      mockAuthFetch.mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({
+          success: true,
+          data: {
+            favorites: {
+              '/file1.txt': true,
+              'docs/../secret.txt': false,
+            },
+          },
+        }),
+      })
+
+      await expect(checkFavorites(['/file1.txt'])).rejects.toMatchObject({
+        message: invalidResponseMessage,
+        status: 200,
+      })
+    })
+
+    it('maps duplicate normalized favorite paths back to each original input', async () => {
+      mockAuthFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            success: true,
+            data: {
+              favorites: {
+                '/file1.txt': true,
+              },
+            },
+          }),
+      })
+
+      await expect(checkFavorites(['file1.txt', '/file1.txt'])).resolves.toEqual({
+        'file1.txt': true,
+        '/file1.txt': true,
+      })
+    })
+
     it('falls back to all false when batch check is unsupported', async () => {
       mockAuthFetch.mockResolvedValueOnce({
         ok: false,
@@ -678,7 +830,7 @@ describe('Favorites API', () => {
         json: () => Promise.resolve({ success: true, data: null, message: 'favorite note updated successfully' }),
       })
 
-      await expect(updateFavoriteNote('/file.txt', '新备注')).resolves.toEqual({ message: 'favorite note updated successfully' })
+      await expect(updateFavoriteNote('/file.txt', '新备注')).resolves.toEqual({ warning: false, message: 'favorite note updated successfully' })
 
       expect(mockAuthFetch).toHaveBeenCalledWith('/api/v1/favorites/file.txt', {
         method: 'PATCH',
@@ -695,13 +847,32 @@ describe('Favorites API', () => {
         json: () => Promise.resolve({ success: true, data: null, message: 'favorite note updated successfully' }),
       })
 
-      await expect(updateFavoriteNote('/file.txt', '新备注', { signal: controller.signal })).resolves.toEqual({ message: 'favorite note updated successfully' })
+      await expect(updateFavoriteNote('/file.txt', '新备注', { signal: controller.signal })).resolves.toEqual({ warning: false, message: 'favorite note updated successfully' })
 
       expect(mockAuthFetch).toHaveBeenCalledWith('/api/v1/favorites/file.txt', {
         signal: controller.signal,
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ note: '新备注' }),
+      })
+    })
+
+    it('preserves warning metadata from successful note update responses', async () => {
+      mockAuthFetch.mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        headers: { get: () => '199 MnemoNAS "favorites persistence incomplete"' },
+        json: () => Promise.resolve({
+          success: true,
+          warning: true,
+          data: null,
+          message: 'favorite note updated with persistence warning',
+        }),
+      })
+
+      await expect(updateFavoriteNote('/file.txt', '新备注')).resolves.toEqual({
+        warning: true,
+        message: 'favorite note updated with persistence warning',
       })
     })
 
@@ -754,7 +925,7 @@ describe('Favorites API', () => {
 
       const result = await toggleFavorite('/file.txt', true)
 
-      expect(result).toBe(false)
+      expect(result).toEqual({ isFavorited: false, warning: false, message: undefined })
       expect(mockAuthFetch).toHaveBeenCalledWith('/api/v1/favorites/file.txt', {
         method: 'DELETE',
       })
@@ -771,11 +942,51 @@ describe('Favorites API', () => {
 
       const result = await toggleFavorite('/file.txt', false)
 
-      expect(result).toBe(true)
+      expect(result).toEqual({ isFavorited: true, warning: false, message: undefined })
       expect(mockAuthFetch).toHaveBeenCalledWith('/api/v1/favorites', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ path: '/file.txt', note: '' }),
+      })
+    })
+
+    it('returns warning metadata from add toggle operations', async () => {
+      mockAuthFetch.mockResolvedValueOnce({
+        ok: true,
+        status: 201,
+        headers: { get: () => '199 MnemoNAS "favorites persistence incomplete"' },
+        json: () => Promise.resolve({
+          success: true,
+          warning: true,
+          data: { path: '/file.txt', user_id: 'user1', created_at: '2024-01-01' },
+          message: 'favorite added with persistence warning',
+        }),
+      })
+
+      await expect(toggleFavorite('/file.txt', false)).resolves.toEqual({
+        isFavorited: true,
+        warning: true,
+        message: 'favorite added with persistence warning',
+      })
+    })
+
+    it('returns warning metadata from remove toggle operations', async () => {
+      mockAuthFetch.mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        headers: { get: () => '199 MnemoNAS "favorites persistence incomplete"' },
+        json: () => Promise.resolve({
+          success: true,
+          warning: true,
+          data: null,
+          message: 'favorite removed with persistence warning',
+        }),
+      })
+
+      await expect(toggleFavorite('/file.txt', true)).resolves.toEqual({
+        isFavorited: false,
+        warning: true,
+        message: 'favorite removed with persistence warning',
       })
     })
 
@@ -789,7 +1000,11 @@ describe('Favorites API', () => {
         }),
       })
 
-      await expect(toggleFavorite('/file.txt', false, { signal: controller.signal })).resolves.toBe(true)
+      await expect(toggleFavorite('/file.txt', false, { signal: controller.signal })).resolves.toEqual({
+        isFavorited: true,
+        warning: false,
+        message: undefined,
+      })
 
       expect(mockAuthFetch).toHaveBeenCalledWith('/api/v1/favorites', {
         signal: controller.signal,
@@ -807,7 +1022,11 @@ describe('Favorites API', () => {
         json: () => Promise.resolve({ success: true, data: null }),
       })
 
-      await expect(toggleFavorite('/file.txt', true, { signal: controller.signal })).resolves.toBe(false)
+      await expect(toggleFavorite('/file.txt', true, { signal: controller.signal })).resolves.toEqual({
+        isFavorited: false,
+        warning: false,
+        message: undefined,
+      })
 
       expect(mockAuthFetch).toHaveBeenCalledWith('/api/v1/favorites/file.txt', {
         signal: controller.signal,

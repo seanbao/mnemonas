@@ -1,5 +1,7 @@
 import { test, expect, type Page } from '@playwright/test'
 import { ensureAuthenticatedAt } from './helpers/auth-check'
+import { publicEntryRoutes } from './helpers/public-share-fixtures'
+import { waitForRouteSettled } from './helpers/route-ready'
 
 const routes = [
   '/',
@@ -15,6 +17,7 @@ const routes = [
   '/maintenance',
   '/users',
   '/settings',
+  '/nonexistent-page-xyz123',
 ]
 
 type RuntimeIssue = {
@@ -25,11 +28,12 @@ type RuntimeIssue = {
 
 const ignoredConsoleErrorPatterns = [
   /Failed to load resource: the server responded with a status of 40[134]/i,
+  /Failed to load resource: the server responded with a status of 410 \(Gone\).*\/api\/v1\/public\/shares\//i,
   /favicon\.ico/i,
 ]
 
-function shouldIgnoreConsoleError(text: string) {
-  return ignoredConsoleErrorPatterns.some((pattern) => pattern.test(text))
+function shouldIgnoreConsoleError(text: string, url = '') {
+  return ignoredConsoleErrorPatterns.some((pattern) => pattern.test(`${text} ${url}`))
 }
 
 function shouldIgnoreRequestFailure(resourceType: string, failureText: string) {
@@ -42,13 +46,80 @@ function shouldIgnoreRequestFailure(resourceType: string, failureText: string) {
 
 async function prepareRoute(page: Page, route: string) {
   await ensureAuthenticatedAt(page, route)
-  await expect(page.locator('body')).toBeVisible()
-  await page.getByText('加载中...').waitFor({ state: 'hidden', timeout: 10_000 }).catch(() => {})
-  if (route === '/users') {
-    await page.getByText('加载用户列表...').waitFor({ state: 'hidden', timeout: 20_000 }).catch(() => {})
+  await waitForRouteSettled(page, route, { waitForNetworkIdle: true })
+}
+
+function startRuntimeIssueCollection(page: Page, issues: RuntimeIssue[]) {
+  let currentRoute = '<startup>'
+
+  page.on('pageerror', (error) => {
+    issues.push({
+      route: currentRoute,
+      rule: 'pageerror',
+      message: error.stack || error.message,
+    })
+  })
+
+  page.on('console', (message) => {
+    if (message.type() !== 'error') {
+      return
+    }
+
+    const text = message.text()
+    const location = message.location()
+    if (shouldIgnoreConsoleError(text, location.url)) {
+      return
+    }
+    const locationLabel = location.url ? ` (${location.url})` : ''
+
+    issues.push({
+      route: currentRoute,
+      rule: 'console-error',
+      message: `${text}${locationLabel}`,
+    })
+  })
+
+  page.on('requestfailed', (request) => {
+    const resourceType = request.resourceType()
+    if (resourceType === 'websocket' || resourceType === 'eventsource') {
+      return
+    }
+    const failureText = request.failure()?.errorText ?? 'unknown error'
+    if (shouldIgnoreRequestFailure(resourceType, failureText)) {
+      return
+    }
+
+    issues.push({
+      route: currentRoute,
+      rule: 'request-failed',
+      message: `${request.method()} ${request.url()} failed: ${failureText}`,
+    })
+  })
+
+  page.on('response', (response) => {
+    const request = response.request()
+    const resourceType = request.resourceType()
+    const status = response.status()
+    const url = response.url()
+    const criticalAssetFailed = ['document', 'script', 'stylesheet'].includes(resourceType) && status >= 400
+    const serverError = status >= 500
+
+    if (!criticalAssetFailed && !serverError) {
+      return
+    }
+
+    issues.push({
+      route: currentRoute,
+      rule: 'bad-response',
+      message: `${request.method()} ${url} returned ${status}`,
+    })
+  })
+
+  return {
+    setRoute(route: string) {
+      currentRoute = route
+    },
   }
-  await page.waitForLoadState('networkidle', { timeout: 5_000 }).catch(() => {})
-  await page.waitForTimeout(300)
 }
 
 async function collectVisibleRuntimeErrors(page: Page, route: string): Promise<RuntimeIssue[]> {
@@ -110,75 +181,36 @@ test.describe('前端运行时完整性扫描', () => {
   test('核心页面不应出现浏览器运行时错误或关键资源加载失败', async ({ page }, testInfo) => {
     testInfo.setTimeout(120_000)
 
-    let currentRoute = '<startup>'
     const issues: RuntimeIssue[] = []
-
-    page.on('pageerror', (error) => {
-      issues.push({
-        route: currentRoute,
-        rule: 'pageerror',
-        message: error.stack || error.message,
-      })
-    })
-
-    page.on('console', (message) => {
-      if (message.type() !== 'error') {
-        return
-      }
-
-      const text = message.text()
-      if (shouldIgnoreConsoleError(text)) {
-        return
-      }
-      const location = message.location()
-      const locationLabel = location.url ? ` (${location.url})` : ''
-
-      issues.push({
-        route: currentRoute,
-        rule: 'console-error',
-        message: `${text}${locationLabel}`,
-      })
-    })
-
-    page.on('requestfailed', (request) => {
-      const resourceType = request.resourceType()
-      if (resourceType === 'websocket' || resourceType === 'eventsource') {
-        return
-      }
-      const failureText = request.failure()?.errorText ?? 'unknown error'
-      if (shouldIgnoreRequestFailure(resourceType, failureText)) {
-        return
-      }
-
-      issues.push({
-        route: currentRoute,
-        rule: 'request-failed',
-        message: `${request.method()} ${request.url()} failed: ${failureText}`,
-      })
-    })
-
-    page.on('response', (response) => {
-      const request = response.request()
-      const resourceType = request.resourceType()
-      const status = response.status()
-      const url = response.url()
-      const criticalAssetFailed = ['document', 'script', 'stylesheet'].includes(resourceType) && status >= 400
-      const serverError = status >= 500
-
-      if (!criticalAssetFailed && !serverError) {
-        return
-      }
-
-      issues.push({
-        route: currentRoute,
-        rule: 'bad-response',
-        message: `${request.method()} ${url} returned ${status}`,
-      })
-    })
+    const diagnostics = startRuntimeIssueCollection(page, issues)
 
     for (const route of routes) {
-      currentRoute = route
+      diagnostics.setRoute(route)
       await prepareRoute(page, route)
+      issues.push(...await collectVisibleRuntimeErrors(page, route))
+    }
+
+    expect(
+      issues.map((issue) => `[${issue.rule}] ${issue.route}: ${issue.message}`),
+    ).toEqual([])
+  })
+})
+
+test.describe('公开入口运行时完整性扫描', () => {
+  test.use({
+    storageState: { cookies: [], origins: [] },
+  })
+
+  test('登录页和公开分享页不应出现浏览器运行时错误或关键资源加载失败', async ({ page }, testInfo) => {
+    testInfo.setTimeout(60_000)
+
+    const issues: RuntimeIssue[] = []
+    const diagnostics = startRuntimeIssueCollection(page, issues)
+
+    for (const route of publicEntryRoutes()) {
+      diagnostics.setRoute(route)
+      await page.goto(route, { waitUntil: 'domcontentloaded' })
+      await waitForRouteSettled(page, route, { waitForNetworkIdle: true })
       issues.push(...await collectVisibleRuntimeErrors(page, route))
     }
 

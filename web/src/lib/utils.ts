@@ -5,22 +5,28 @@ export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs))
 }
 
+const controlCharacterPattern = /\p{Cc}/u
+const controlCharacterGlobalPattern = /\p{Cc}/gu
+const filenameFormatCharacterGlobalPattern = /\p{Cf}/gu
+
+export function hasControlCharacter(value: string): boolean {
+  return controlCharacterPattern.test(value)
+}
+
 /**
  * Sanitize a filename to prevent path traversal and other security issues.
  * Removes path separators, null bytes, and other dangerous characters.
  */
 export function sanitizeFilename(filename: string): string {
-  // Remove null bytes
-  let sanitized = filename.replace(/\0/g, '')
+  // Remove invisible characters before applying filesystem naming rules.
+  let sanitized = filename
+    .replace(controlCharacterGlobalPattern, '')
+    .replace(filenameFormatCharacterGlobalPattern, '')
   
   // Remove path separators and parent directory references
   sanitized = sanitized.replace(/[/\\]/g, '_')
   sanitized = sanitized.replace(/\.\./g, '_')
-  
-  // Remove control characters (0x00-0x1F and 0x7F)
-  // eslint-disable-next-line no-control-regex
-  sanitized = sanitized.replace(/[\x00-\x1F\x7F]/g, '')
-  
+
   // Trim leading/trailing dots and spaces (Windows compatibility)
   sanitized = sanitized.replace(/^[\s.]+|[\s.]+$/g, '')
 
@@ -173,7 +179,7 @@ export function ensureZipExtension(filename: string): string {
  * Ensures the path starts with / and doesn't contain dangerous sequences.
  */
 export function normalizePath(path: string): string {
-  if (path.includes('\0')) {
+  if (hasControlCharacter(path)) {
     throw new Error('非法路径')
   }
 
@@ -243,15 +249,14 @@ export function normalizeWebDAVPrefix(prefix: string): string {
 function cleanURLPathPrefix(prefix: string): string {
   const parts: string[] = []
   for (const rawSegment of prefix.split('/')) {
-    const segment = rawSegment.trim()
-    if (!segment || segment === '.') {
+    if (!rawSegment || rawSegment === '.') {
       continue
     }
-    if (segment === '..') {
+    if (rawSegment === '..') {
       parts.pop()
       continue
     }
-    parts.push(segment)
+    parts.push(rawSegment)
   }
 
   return parts.length === 0 ? '/' : `/${parts.join('/')}`
@@ -262,11 +267,8 @@ export function isValidWebDAVPrefix(prefix: string): boolean {
   if (/[\\?#]/.test(normalized)) {
     return false
   }
-  for (let index = 0; index < normalized.length; index += 1) {
-    const code = normalized.charCodeAt(index)
-    if (code <= 0x1f || code === 0x7f) {
-      return false
-    }
+  if (hasControlCharacter(normalized)) {
+    return false
   }
   return true
 }
@@ -352,7 +354,13 @@ export function openUrlInNewTab(url: string): boolean {
 function isSafeNewTabUrl(url: string): boolean {
   try {
     const parsed = new URL(url, window.location.origin)
-    return parsed.protocol === 'http:' || parsed.protocol === 'https:' || parsed.protocol === 'blob:'
+    if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+      return true
+    }
+    if (parsed.protocol === 'blob:') {
+      return parsed.origin === window.location.origin
+    }
+    return false
   } catch {
     return false
   }

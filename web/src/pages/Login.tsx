@@ -196,14 +196,14 @@ export function LoginPage() {
         <div className="w-full max-w-md">
           {/* Mobile logo */}
           <div className="mb-8 text-center lg:hidden">
-            <div className="gradient-meridian mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-lg">
+            <div className="gradient-mnemonas mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-lg">
               <HardDrive className="h-8 w-8 text-white" />
             </div>
             <h1 className="text-2xl font-bold">MnemoNAS</h1>
-            <p className="text-default-500">您的私有云存储空间</p>
+            <p className="text-default-500">自托管私有云存储</p>
           </div>
 
-          <Card className="card-meridian">
+          <Card className="card-mnemonas">
             <CardBody className="p-6 sm:p-8">
               <div className="mb-8 text-center">
                 <h2 className="text-2xl font-bold">欢迎回来</h2>
@@ -221,6 +221,7 @@ export function LoginPage() {
                   <label htmlFor={usernameInputId} className="text-sm font-medium text-default-600 mb-1.5 block">用户名</label>
                   <Input
                     id={usernameInputId}
+                    aria-label="用户名"
                     placeholder="请输入用户名"
                     value={username}
                     onValueChange={handleUsernameChange}
@@ -240,6 +241,7 @@ export function LoginPage() {
                   <label htmlFor={passwordInputId} className="text-sm font-medium text-default-600 mb-1.5 block">密码</label>
                   <Input
                     id={passwordInputId}
+                    aria-label="密码"
                     type={showPassword ? 'text' : 'password'}
                     placeholder="请输入密码"
                     value={password}

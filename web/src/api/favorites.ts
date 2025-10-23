@@ -1,6 +1,6 @@
 import { authFetch } from './auth'
 import { INVALID_API_RESPONSE_MESSAGE } from '@/lib/apiMessages'
-import { readStructuredJsonErrorDetails } from '@/lib/jsonErrorResponse'
+import { getNonBlankJsonString, readStructuredJsonErrorDetails } from '@/lib/jsonErrorResponse'
 import { encodePathForUrl, normalizePath } from '@/lib/utils'
 
 const API_BASE = '/api/v1'
@@ -27,7 +27,14 @@ export interface CheckPathsResponse {
 }
 
 export interface FavoritesActionResult {
+  warning: boolean
   message?: string
+}
+
+export type FavoriteCreateResult = Favorite & FavoritesActionResult
+
+export interface FavoriteToggleResult extends FavoritesActionResult {
+  isFavorited: boolean
 }
 
 export class FavoritesError extends Error {
@@ -84,8 +91,14 @@ interface FavoritesApiError {
 interface FavoritesApiResponse<T> {
   success: boolean
   data?: T
+  warning?: boolean
   message?: string
+  code?: string
   error?: FavoritesApiError | string
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object'
 }
 
 function isValidFavorite(value: unknown): value is Favorite {
@@ -125,23 +138,31 @@ function isValidFavoritesResponse(value: unknown): value is FavoritesResponse {
 }
 
 function getFavoritesErrorMessage(body: FavoritesApiResponse<never>, fallback: string): string {
-  if (typeof body.error === 'string' && body.error) {
-    return body.error
+  const stringError = getNonBlankJsonString(body.error)
+  if (stringError !== undefined) {
+    return stringError
   }
-  if (body.error && typeof body.error === 'object' && body.error.message) {
-    return body.error.message
+  if (body.error && typeof body.error === 'object') {
+    const errorMessage = getNonBlankJsonString(body.error.message)
+    if (errorMessage !== undefined) {
+      return errorMessage
+    }
   }
-  if (body.message) {
-    return body.message
+  const message = getNonBlankJsonString(body.message)
+  if (message !== undefined) {
+    return message
   }
   return fallback
 }
 
 function getFavoritesErrorCode(body: FavoritesApiResponse<never>): string | undefined {
-  if (body.error && typeof body.error === 'object' && body.error.code) {
-    return body.error.code
+  if (body.error && typeof body.error === 'object') {
+    const errorCode = getNonBlankJsonString(body.error.code)
+    if (errorCode !== undefined) {
+      return errorCode
+    }
   }
-  return undefined
+  return getNonBlankJsonString(body.code)
 }
 
 async function readFavoritesSuccess<T>(response: Response, invalidMessage: string): Promise<FavoritesApiResponse<T>> {
@@ -163,10 +184,17 @@ async function readFavoritesSuccessData<T>(response: Response, invalidMessage: s
   return body.data as T
 }
 
+function hasFavoritesWarning(response: Response, body: FavoritesApiResponse<unknown>): boolean {
+  return response.headers?.get?.('Warning') != null ||
+    body.warning === true ||
+    (isRecord(body.data) && body.data.warning === true)
+}
+
 async function readFavoritesActionSuccess(response: Response, invalidMessage: string): Promise<FavoritesActionResult> {
   const body = await readFavoritesSuccess<null>(response, invalidMessage)
   return {
-    message: body.message,
+    warning: hasFavoritesWarning(response, body),
+    message: getNonBlankJsonString(body.message),
   }
 }
 
@@ -190,7 +218,7 @@ export async function listFavorites(options: FavoritesRequestOptions = {}): Prom
 /**
  * Add path to favorites
  */
-export async function addFavorite(path: string, note = '', options: FavoritesRequestOptions = {}): Promise<Favorite> {
+export async function addFavorite(path: string, note = '', options: FavoritesRequestOptions = {}): Promise<FavoriteCreateResult> {
   const normalizedPath = normalizePath(path)
   const response = await authFetch(`${API_BASE}/favorites`, {
     ...options,
@@ -204,11 +232,16 @@ export async function addFavorite(path: string, note = '', options: FavoritesReq
     throw await createFavoritesError(response, fallback)
   }
 
-  const data = await readFavoritesSuccessData<unknown>(response, INVALID_API_RESPONSE_MESSAGE)
+  const body = await readFavoritesSuccess<unknown>(response, INVALID_API_RESPONSE_MESSAGE)
+  const data = body.data
   if (!isValidFavorite(data)) {
     throw new FavoritesError(INVALID_API_RESPONSE_MESSAGE, response.status)
   }
-  return data
+  return {
+    ...data,
+    warning: hasFavoritesWarning(response, body),
+    message: getNonBlankJsonString(body.message),
+  }
 }
 
 /**
@@ -255,10 +288,12 @@ export async function checkFavorites(paths: string[], options: FavoritesRequestO
   if (batchCheckSupported === false) {
     return Object.fromEntries(paths.map(p => [p, false]))
   }
-  const normalizedMap = new Map<string, string>()
+  const normalizedMap = new Map<string, string[]>()
   const normalizedPaths = paths.map((path) => {
     const normalized = normalizePath(path)
-    normalizedMap.set(normalized, path)
+    const originals = normalizedMap.get(normalized) ?? []
+    originals.push(path)
+    normalizedMap.set(normalized, originals)
     return normalized
   })
   const response = await authFetch(`${API_BASE}/favorites/check-batch`, {
@@ -286,11 +321,11 @@ export async function checkFavorites(paths: string[], options: FavoritesRequestO
   }
   const mapped: Record<string, boolean> = {}
   for (const [normalized, isFavorite] of Object.entries(data.favorites)) {
-    if (typeof isFavorite !== 'boolean') {
+    const originals = normalizedMap.get(normalized)
+    if (!isLogicalPathString(normalized) || !originals || typeof isFavorite !== 'boolean') {
       throw new FavoritesError(INVALID_API_RESPONSE_MESSAGE, response.status)
     }
-    const original = normalizedMap.get(normalized)
-    if (original) {
+    for (const original of originals) {
       mapped[original] = isFavorite
     }
   }
@@ -320,12 +355,20 @@ export async function updateFavoriteNote(path: string, note: string, options: Fa
 /**
  * Toggle favorite status
  */
-export async function toggleFavorite(path: string, isFavorited: boolean, options: FavoritesRequestOptions = {}): Promise<boolean> {
+export async function toggleFavorite(path: string, isFavorited: boolean, options: FavoritesRequestOptions = {}): Promise<FavoriteToggleResult> {
   if (isFavorited) {
-    await removeFavorite(path, options)
-    return false
+    const result = await removeFavorite(path, options)
+    return {
+      isFavorited: false,
+      warning: result.warning,
+      message: result.message,
+    }
   } else {
-    await addFavorite(path, '', options)
-    return true
+    const result = await addFavorite(path, '', options)
+    return {
+      isFavorited: true,
+      warning: result.warning,
+      message: result.message,
+    }
   }
 }

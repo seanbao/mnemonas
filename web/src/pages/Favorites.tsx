@@ -28,6 +28,7 @@ import {
   removeFavorite,
   updateFavoriteNote,
   FavoritesError,
+  type FavoritesActionResult,
   type Favorite,
 } from '@/api/favorites'
 import { FileIcon } from '@/components/ui/FileIcon'
@@ -88,20 +89,23 @@ function getFavoritesActionErrorPresentation(error: unknown): {
   }
 }
 
-function getFavoritesActionSuccessTitle(action: 'remove' | 'update-note', message?: string): string {
+function getFavoritesActionSuccessToast(action: 'remove' | 'update-note', result: FavoritesActionResult): {
+  title: string
+  color: 'success' | 'warning'
+} {
   if (action === 'remove') {
-    if (message === 'favorite removed successfully') {
-      return '已取消收藏'
+    if (result.warning) {
+      return { title: '已取消收藏，但存在警告', color: 'warning' }
     }
 
-    return '已取消收藏'
+    return { title: '已取消收藏', color: 'success' }
   }
 
-  if (message === 'favorite note updated successfully') {
-    return '备注已更新'
+  if (result.warning) {
+    return { title: '备注已更新，但存在警告', color: 'warning' }
   }
 
-  return '备注已更新'
+  return { title: '备注已更新', color: 'success' }
 }
 
 function getFavoritesRefreshErrorPresentation(error: unknown): {
@@ -215,6 +219,7 @@ function FavoriteRow({
     >
       {canWrite ? (
         <Checkbox
+          aria-label={`选择收藏 ${item.path}`}
           isSelected={isSelected}
           onValueChange={onSelect}
         />
@@ -413,7 +418,7 @@ export function FavoritesPage() {
       removeFavoritesFromCache([variables.path])
       removeSelectedPaths([variables.path])
       queryClient.invalidateQueries({ queryKey: favoritesQueryKey })
-      addToast({ title: getFavoritesActionSuccessTitle('remove', result.message), color: 'success' })
+      addToast(getFavoritesActionSuccessToast('remove', result))
     },
     onError: (error, variables) => {
       if (variables.signal.aborted || isAbortError(error)) {
@@ -446,7 +451,7 @@ export function FavoritesPage() {
       }
 
       queryClient.invalidateQueries({ queryKey: favoritesQueryKey })
-      addToast({ title: getFavoritesActionSuccessTitle('update-note', result.message), color: 'success' })
+      addToast(getFavoritesActionSuccessToast('update-note', result))
       if (
         editSessionRef.current === variables.editSession
         && editingItemRef.current?.path === variables.path
@@ -499,7 +504,7 @@ export function FavoritesPage() {
 
   const batchRemoveFavorite = useCallback(async (path: string, options?: { signal?: AbortSignal }) => {
     try {
-      await removeFavorite(path, options?.signal ? { signal: options.signal } : undefined)
+      return await removeFavorite(path, options?.signal ? { signal: options.signal } : undefined)
     } catch (error) {
       if (error instanceof FavoritesError && error.isNotFound) {
         return {
@@ -734,6 +739,7 @@ export function FavoritesPage() {
         <div className="hidden items-center gap-4 rounded-lg border border-divider bg-content2/50 px-4 py-2.5 text-sm font-medium text-default-400 sm:flex">
           {canWrite ? (
             <Checkbox
+              aria-label="选择全部收藏"
               isSelected={visibleSelectedItems.size === favoriteItems.length && favoriteItems.length > 0}
               isIndeterminate={visibleSelectedItems.size > 0 && visibleSelectedItems.size < favoriteItems.length}
               onValueChange={handleSelectAll}
@@ -753,7 +759,7 @@ export function FavoritesPage() {
       )}
 
       {/* Item list */}
-      <div className="card-meridian min-h-0 flex-1 overflow-auto rounded-lg">
+      <div className="card-mnemonas min-h-0 flex-1 overflow-auto rounded-lg">
         {favoriteItems.length > 0 ? (
           favoriteItems.map(item => (
             <FavoriteRow

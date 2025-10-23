@@ -38,7 +38,9 @@ export function getBackupAttentionReasons(job: BackupJob): string[] {
     reasons.push('恢复待校验')
   }
 
-  if (latestVerify?.status === 'failed') {
+  if (latestVerify?.status === 'running') {
+    reasons.push('恢复检查中')
+  } else if (latestVerify?.status === 'failed') {
     reasons.push('恢复检查失败')
   } else if ((latestVerify?.warnings?.length ?? 0) > 0) {
     reasons.push('恢复检查有警告')
@@ -87,7 +89,9 @@ export function getBackupAttentionNextSteps(job: BackupJob): string[] {
     addUniqueStep(steps, '运行检查恢复完成只读校验')
   }
 
-  if (latestVerify?.status === 'failed') {
+  if (latestVerify?.status === 'running') {
+    addUniqueStep(steps, '等待恢复检查完成')
+  } else if (latestVerify?.status === 'failed') {
     addUniqueStep(steps, '重新运行检查恢复并处理校验失败项')
   } else if ((latestVerify?.warnings?.length ?? 0) > 0) {
     addUniqueStep(steps, '导出恢复摘要并复核恢复检查警告')

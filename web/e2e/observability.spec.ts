@@ -1,5 +1,6 @@
 import { test, expect, type Page } from '@playwright/test'
 import { ensureAuthenticatedAt } from './helpers/auth-check'
+import { waitForRouteSettled } from './helpers/route-ready'
 
 const coreRouteGroups = [
   {
@@ -37,6 +38,9 @@ const brokenVisibleTextPatterns = [
   /\bNaN\b/,
   /\bInvalid Date\b/i,
   /\[object Object\]/,
+  /占位符|占位图|功能占位|敬请期待|待实现|未实现|未内置|开发中|施工中|临时页面/,
+  /coming soon|under construction|not implemented|work in progress|placeholder page|lorem ipsum|\bTBD\b|\bWIP\b/i,
+  /\bTODO\b|\bFIXME\b/,
 ]
 
 type RuntimeIssue = {
@@ -123,19 +127,30 @@ async function expectNoBrokenVisibleText(page: Page, route: string) {
   const bodyText = await page.locator('body').innerText({ timeout: 10_000 })
 
   for (const pattern of brokenVisibleTextPatterns) {
-    expect(bodyText, `${route} should not expose broken placeholder text matching ${pattern}`).not.toMatch(pattern)
-  }
-}
-
-async function waitForRouteContent(page: Page, route: string) {
-  await page.getByText('加载中...').waitFor({ state: 'hidden', timeout: 10_000 }).catch(() => {})
-
-  if (route === '/users') {
-    await page.getByText('加载用户列表...').waitFor({ state: 'hidden', timeout: 20_000 }).catch(() => {})
+    expect(bodyText, `${route} should not expose broken visible text matching ${pattern}`).not.toMatch(pattern)
   }
 }
 
 test.describe('运行时诊断', () => {
+  test('破碎可见文本规则覆盖常见占位文案', () => {
+    const samples = [
+      '功能占位',
+      '开发中',
+      '施工中',
+      'temporary placeholder page',
+      'Work in progress',
+      'Lorem ipsum',
+      'WIP',
+    ]
+
+    for (const sample of samples) {
+      expect(
+        brokenVisibleTextPatterns.some((pattern) => pattern.test(sample)),
+        `placeholder sample should be blocked: ${sample}`,
+      ).toBe(true)
+    }
+  })
+
   for (const group of coreRouteGroups) {
     test(`${group.name}不应产生运行时错误、失败请求或破碎可见文本`, async ({ page }, testInfo) => {
       testInfo.setTimeout(60_000)
@@ -145,9 +160,7 @@ test.describe('运行时诊断', () => {
       for (const route of group.routes) {
         diagnostics.setRoute(route)
         await ensureAuthenticatedAt(page, route)
-        await expect(page.locator('body')).toBeVisible()
-        await waitForRouteContent(page, route)
-        await page.waitForTimeout(500)
+        await waitForRouteSettled(page, route)
         await expectNoBrokenVisibleText(page, route)
       }
 

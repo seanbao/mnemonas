@@ -1,83 +1,94 @@
-import { test as setup } from '@playwright/test'
+import { test as setup, type Page } from '@playwright/test'
 import { resolveE2ECredentials } from './helpers/credentials'
+import {
+  isAuthSkipAllowed,
+  LOGIN_BUTTON_PATTERN,
+  PASSWORD_INPUT_PATTERN,
+  USERNAME_INPUT_PATTERN,
+  waitForAuthSurface,
+} from './helpers/auth-check'
 
 const STORAGE_STATE_PATH = './e2e/.auth/user.json'
 
+async function saveEmptyAuthStateOrFail(page: Page, message: string): Promise<void> {
+  if (!isAuthSkipAllowed()) {
+    throw new Error(`${message}. Set MNEMONAS_E2E_ALLOW_AUTH_SKIP=1 only when intentionally reusing an environment where protected-page checks may be skipped.`)
+  }
+  console.log(`${message}, saving empty auth state`)
+  await page.context().storageState({ path: STORAGE_STATE_PATH })
+}
+
 /**
- * Playwright 认证设置
- * 在所有测试运行前执行登录，保存认证状态供后续测试使用
- * 
- * 使用环境变量配置测试账号：
- * - E2E_USERNAME: 测试用户名（默认 admin）
- * - E2E_PASSWORD: 测试密码（默认 changeme）
- * 
- * 认证处理策略：
- * 1. 先尝试直接访问 /files，如果不被重定向到 /login，说明认证已禁用
- * 2. 如果被重定向到 /login，尝试使用测试账号登录
- * 3. 如果登录失败（后端未运行或账号错误），保存空状态让测试继续运行
+ * Playwright authentication setup.
+ * Runs before browser projects and stores the authentication state for reuse.
+ *
+ * Test account configuration:
+ * - E2E_USERNAME: test username, defaults to admin.
+ * - E2E_PASSWORD: explicit test password.
+ * - E2E_PASSWORD_FILE: initial-password file used when E2E_PASSWORD is unset.
+ *
+ * Authentication strategy:
+ * 1. Visit /files first. If it does not redirect to /login, auth is disabled or already valid.
+ * 2. If redirected to /login, sign in with the test account.
+ * 3. If login fails, fail by default; allow empty-state fallback only when auth skipping is explicitly enabled.
  */
 setup('authenticate', async ({ page }) => {
   const credentials = resolveE2ECredentials()
   const { username, password, passwordSource } = credentials
 
-  // 先尝试直接访问受保护页面
   await page.goto('/files', { waitUntil: 'domcontentloaded' })
   await page.locator('body').waitFor({ state: 'visible' })
-  await page.waitForTimeout(500)
+  const initialSurface = await waitForAuthSurface(page).catch(() => page.url().includes('/login') ? 'login' : 'unknown')
 
-  // 检查是否被重定向到登录页
-  if (!page.url().includes('/login')) {
+  if (initialSurface !== 'login' && !page.url().includes('/login')) {
+    if (initialSurface === 'unknown') {
+      await saveEmptyAuthStateOrFail(page, 'Authentication surface did not settle')
+      return
+    }
     console.log('Authentication disabled or already logged in, skipping login')
     await page.context().storageState({ path: STORAGE_STATE_PATH })
     return
   }
 
   if (!password) {
-    console.log('No E2E password configured or discoverable, saving empty auth state')
-    await page.context().storageState({ path: STORAGE_STATE_PATH })
+    await saveEmptyAuthStateOrFail(page, 'No E2E password configured or discoverable')
     return
   }
 
   console.log(`Authentication required, attempting login with ${passwordSource} password...`)
 
-  // 检查登录表单是否存在
-  const loginButton = page.getByRole('button', { name: /登录|sign in|login/i })
+  const loginButton = page.getByRole('button', { name: LOGIN_BUTTON_PATTERN })
   const isLoginPage = await loginButton.isVisible({ timeout: 3000 }).catch(() => false)
-  
+
   if (!isLoginPage) {
-    console.log('No login form found, saving empty auth state')
-    await page.context().storageState({ path: STORAGE_STATE_PATH })
+    await saveEmptyAuthStateOrFail(page, 'No login form found')
     return
   }
 
-  // 填写登录表单
-  const usernameInput = page.getByPlaceholder(/用户名|请输入用户名/i)
-  const passwordInput = page.getByPlaceholder(/密码|请输入密码/i)
+  const usernameInput = page.getByLabel(USERNAME_INPUT_PATTERN)
+  const passwordInput = page.getByLabel(PASSWORD_INPUT_PATTERN)
 
   await usernameInput.fill(username)
   await passwordInput.fill(password)
 
-  // 点击登录按钮
   await loginButton.click()
 
-  // 等待登录结果（重定向或错误提示）
   try {
     await page.waitForURL(url => !url.pathname.includes('/login'), {
       timeout: 10000,
     })
     console.log(`Authenticated as ${username}`)
   } catch {
-    // 登录失败（可能是后端未运行或账号错误）
-    const errorToast = page.locator('[class*="toast"], [class*="alert"], [role="alert"]')
-    const hasError = await errorToast.isVisible({ timeout: 1000 }).catch(() => false)
-    
+    const errorAlert = page.getByRole('alert')
+    const hasError = await errorAlert.isVisible({ timeout: 1000 }).catch(() => false)
+
     if (hasError) {
-      console.log('Login failed (invalid credentials, rate limit, or backend error), tests will run in unauthenticated mode')
-    } else {
-      console.log('Login timeout (backend may not be running), tests will run in unauthenticated mode')
+      await saveEmptyAuthStateOrFail(page, 'Login failed (invalid credentials, rate limit, or backend error)')
+      return
     }
+    await saveEmptyAuthStateOrFail(page, 'Login timeout (backend may not be running)')
+    return
   }
 
-  // 保存认证状态（无论成功与否）
   await page.context().storageState({ path: STORAGE_STATE_PATH })
 })

@@ -314,6 +314,41 @@ describe('API: files', () => {
       }
     })
 
+    it('ignores blank legacy upload error messages and codes from XHR responses', async () => {
+      MockXMLHttpRequest.queuedResults.push({
+        type: 'load',
+        status: 503,
+        statusText: 'Service Unavailable',
+        responseText: JSON.stringify({
+          error: { code: '   ', message: '   ' },
+          message: '  ',
+          code: '   ',
+        }),
+      })
+
+      await expect(uploadFile('/docs', new File(['content'], 'report.txt'))).rejects.toMatchObject({
+        message: '上传失败',
+        status: 503,
+        code: undefined,
+        isUnavailable: true,
+      })
+    })
+
+    it('keeps the fallback upload error when XHR error bodies are not JSON', async () => {
+      MockXMLHttpRequest.queuedResults.push({
+        type: 'load',
+        status: 502,
+        statusText: 'Bad Gateway',
+        responseText: '<html>proxy error</html>',
+      })
+
+      await expect(uploadFile('/docs', new File(['content'], 'report.txt'))).rejects.toMatchObject({
+        message: '上传失败',
+        status: 502,
+        statusText: 'Bad Gateway',
+      })
+    })
+
     it('returns warning details for successful uploads with warning headers', async () => {
       MockXMLHttpRequest.queuedResults.push({
         type: 'load',
@@ -335,6 +370,62 @@ describe('API: files', () => {
       await expect(uploadFile('/docs', new File(['content'], 'report.txt'))).resolves.toEqual({
         warning: true,
         message: 'file uploaded with persistence warning',
+      })
+    })
+
+    it('returns warning details for successful uploads with body warning flags', async () => {
+      MockXMLHttpRequest.queuedResults.push({
+        type: 'load',
+        status: 201,
+        statusText: 'Created',
+        responseText: JSON.stringify({
+          success: true,
+          warning: true,
+          data: {
+            path: '/docs/report.txt',
+          },
+          message: 'file uploaded with persistence warning',
+          timestamp: '2024-01-01',
+        }),
+      })
+
+      await expect(uploadFile('/docs', new File(['content'], 'report.txt'))).resolves.toEqual({
+        warning: true,
+        message: 'file uploaded with persistence warning',
+      })
+    })
+
+    it('ignores blank success messages from XHR upload responses', async () => {
+      MockXMLHttpRequest.queuedResults.push({
+        type: 'load',
+        status: 201,
+        statusText: 'Created',
+        responseText: JSON.stringify({
+          success: true,
+          data: {
+            path: '/docs/report.txt',
+          },
+          message: '   ',
+        }),
+      })
+
+      await expect(uploadFile('/docs', new File(['content'], 'report.txt'))).resolves.toEqual({
+        warning: false,
+        message: undefined,
+      })
+    })
+
+    it('ignores malformed successful XHR bodies while preserving upload completion', async () => {
+      MockXMLHttpRequest.queuedResults.push({
+        type: 'load',
+        status: 201,
+        statusText: 'Created',
+        responseText: '{invalid-json',
+      })
+
+      await expect(uploadFile('/docs', new File(['content'], 'report.txt'))).resolves.toEqual({
+        warning: false,
+        message: undefined,
       })
     })
 
@@ -827,6 +918,27 @@ describe('API: files', () => {
         headers: { get: (name: string) => name === 'Warning' ? '199 MnemoNAS "workspace mutation persistence incomplete"' : null },
         json: () => Promise.resolve({
           success: true,
+          data: {
+            path: '/test.txt',
+          },
+          message: 'file deleted with persistence warning',
+          timestamp: '2024-01-01',
+        }),
+      })
+
+      await expect(deleteFile('/test.txt')).resolves.toEqual({
+        warning: true,
+        message: 'file deleted with persistence warning',
+      })
+    })
+
+    it('returns warning details for successful delete responses with body warning flags', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        headers: { get: () => null },
+        json: () => Promise.resolve({
+          success: true,
+          warning: true,
           data: {
             path: '/test.txt',
           },
@@ -1369,6 +1481,24 @@ describe('API: files', () => {
       })
     })
 
+    it('ignores blank action messages from successful create-directory responses', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          success: true,
+          data: {
+            path: '/new-folder',
+          },
+          message: '   ',
+        }),
+      })
+
+      await expect(createDirectory('/new-folder')).resolves.toEqual({
+        warning: false,
+        message: undefined,
+      })
+    })
+
     it('rejects malformed successful create directory responses', async () => {
       mockFetch.mockResolvedValueOnce({
         ok: true,
@@ -1468,6 +1598,26 @@ describe('API: files', () => {
         message: '创建文件夹失败',
         status: 503,
         code: 'SERVICE_UNAVAILABLE',
+      })
+    })
+
+    it('ignores blank legacy action error messages and codes', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 503,
+        statusText: 'Service Unavailable',
+        json: () => Promise.resolve({
+          error: { code: '   ', message: '   ' },
+          message: '  ',
+          code: '   ',
+        }),
+      })
+
+      await expect(createDirectory('/new-folder')).rejects.toMatchObject({
+        message: '创建文件夹失败',
+        status: 503,
+        code: undefined,
+        isUnavailable: true,
       })
     })
   })
@@ -2239,11 +2389,52 @@ describe('API: files', () => {
         })
 
         const result = await emptyTrash()
+      expect(result).toEqual({
+        deletedCount: 3,
+        partial: false,
+        warning: true,
+        message: 'trash emptied with cleanup warning',
+      })
+    })
+
+      it('returns warning details for successful empty trash responses with body warning flags', async () => {
+        mockFetch.mockResolvedValueOnce({
+          ok: true,
+          headers: { get: () => null },
+          json: () => Promise.resolve({
+            success: true,
+            warning: true,
+            data: { deleted_count: 3, partial: false },
+            message: 'trash emptied with cleanup warning',
+            timestamp: '2024-01-01',
+          }),
+        })
+
+        const result = await emptyTrash()
         expect(result).toEqual({
           deletedCount: 3,
           partial: false,
           warning: true,
           message: 'trash emptied with cleanup warning',
+        })
+      })
+
+      it('ignores blank messages from successful empty trash responses', async () => {
+        mockFetch.mockResolvedValueOnce({
+          ok: true,
+          json: () => Promise.resolve({
+            success: true,
+            data: { deleted_count: 3, partial: false },
+            message: '   ',
+          }),
+        })
+
+        const result = await emptyTrash()
+        expect(result).toEqual({
+          deletedCount: 3,
+          partial: false,
+          warning: false,
+          message: undefined,
         })
       })
 
@@ -2621,6 +2812,32 @@ describe('API: files', () => {
         expect(json).toHaveBeenCalled()
       })
 
+      it('localizes archive snapshot-change failures before streaming starts', async () => {
+        const json = vi.fn(() => Promise.resolve({
+          code: 'CONFLICT',
+          message: 'archive entry changed during download',
+        }))
+
+        mockFetch.mockResolvedValueOnce({
+          ok: false,
+          status: 409,
+          statusText: 'Conflict',
+          headers: new Headers({ 'Content-Type': 'application/json' }),
+          clone: () => ({ json }),
+          json: () => Promise.resolve({
+            code: 'CONFLICT',
+            message: 'archive entry changed during download',
+          }),
+        })
+
+        await expect(downloadFile('/docs', { archive: 'zip' })).rejects.toMatchObject({
+          message: '文件内容已变更，请刷新后重试',
+          status: 409,
+          code: 'CONFLICT',
+        })
+        expect(json).toHaveBeenCalled()
+      })
+
       it('treats successful structured JSON without an attachment header as a download error', async () => {
         const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
         const createObjectURLSpy = vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:test')
@@ -2640,7 +2857,7 @@ describe('API: files', () => {
         })
 
         await expect(downloadFile('/docs', { archive: 'zip' })).rejects.toMatchObject({
-          message: 'archive content is too large',
+          message: '归档内容过大',
           status: 200,
           code: 'PAYLOAD_TOO_LARGE',
         })
@@ -2873,6 +3090,33 @@ describe('API: files', () => {
       )
     })
 
+    it('ignores blank disk health report and device messages', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          success: true,
+          data: {
+            enabled: true,
+            status: 'warning',
+            checked_at: '2026-05-13T08:30:00Z',
+            message: '   ',
+            devices: [{
+              path: '/dev/disk/by-id/test',
+              present: true,
+              smart_available: true,
+              status: 'warning',
+              message: '  ',
+            }],
+          },
+        }),
+      })
+
+      const result = await getDiskHealth()
+
+      expect(result.message).toBeUndefined()
+      expect(result.devices[0].message).toBeUndefined()
+    })
+
     it('rejects malformed disk health data', async () => {
       mockFetch.mockResolvedValueOnce({
         ok: true,
@@ -3103,6 +3347,30 @@ describe('API: files', () => {
       expect(result.smb?.shareCount).toBe(1)
       expect(result.storage?.dedupRatio).toBe(1.25)
       expect(result.dataplane?.healthy).toBe(true)
+    })
+
+    it('ignores blank diagnostics SMB messages', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          success: true,
+          data: {
+            timestamp: '2024-01-15T10:00:00Z',
+            uptime: '1h30m',
+            version: { name: 'MnemoNAS', version: '0.1.0', go: '1.21' },
+            smb: {
+              enabled: true,
+              runtime_available: false,
+              share_count: 1,
+              message: '   ',
+            },
+          },
+        }),
+      })
+
+      const result = await getDiagnostics()
+
+      expect(result.smb?.message).toBeUndefined()
     })
 
     it('handles missing optional fields', async () => {
@@ -3426,6 +3694,63 @@ describe('API: files', () => {
         warning: true,
         message: 'scrub completed with persistence warning',
       })
+    })
+
+    it('returns warning details for successful scrub responses with body warning flags', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        headers: { get: () => null },
+        json: () => Promise.resolve({
+          success: true,
+          warning: true,
+          data: {
+            total_objects: 100,
+            valid_objects: 100,
+            corrupted_objects: 0,
+            missing_objects: 0,
+            total_size: 2048,
+            duration_ms: 500,
+            errors: [],
+          },
+          message: 'scrub completed with persistence warning',
+          timestamp: '2024-01-01',
+        }),
+      })
+
+      const result = await runScrub()
+      expect(result).toMatchObject({
+        has_result: true,
+        status: 'completed',
+        warning: true,
+        message: 'scrub completed with persistence warning',
+      })
+    })
+
+    it('ignores blank messages from successful scrub responses', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          success: true,
+          data: {
+            total_objects: 100,
+            valid_objects: 100,
+            corrupted_objects: 0,
+            missing_objects: 0,
+            total_size: 2048,
+            duration_ms: 500,
+            errors: [],
+          },
+          message: '   ',
+        }),
+      })
+
+      const result = await runScrub()
+      expect(result).toMatchObject({
+        has_result: true,
+        status: 'completed',
+        warning: false,
+      })
+      expect(result.message).toBeUndefined()
     })
 
     it('runs scrub for specific hashes', async () => {
@@ -3978,10 +4303,12 @@ describe('API: files', () => {
       ['preview relative path', () => previewBackupRestoreJob('external-disk', 'restore/mnemonas')],
       ['preview root path', () => previewBackupRestoreJob('external-disk', '/')],
       ['preview backslash path', () => previewBackupRestoreJob('external-disk', '/restore\\mnemonas')],
+      ['preview unicode control path', () => previewBackupRestoreJob('external-disk', '/restore\u0081mnemonas')],
       ['restore dot segment path', () => restoreBackupJob('external-disk', '/restore/../mnemonas')],
       ['verify control character path', () => verifyBackupRestoreJob('external-disk', '/restore\nmnemonas')],
       ['batch preview relative path', () => previewBatchBackupRestore([{ job_id: 'external-disk', target_path: 'restore/a', include_config: true }])],
       ['batch preview backslash path', () => previewBatchBackupRestore([{ job_id: 'external-disk', target_path: '/restore\\a', include_config: true }])],
+      ['batch preview unicode control path', () => previewBatchBackupRestore([{ job_id: 'external-disk', target_path: '/restore\u0081a', include_config: true }])],
       ['batch restore root path', () => runBatchBackupRestore([{ job_id: 'external-disk', target_path: '/', include_config: true }])],
     ])('rejects invalid backup restore target paths before sending requests: %s', async (_name, call) => {
       await expect(call()).rejects.toThrow('非法路径')

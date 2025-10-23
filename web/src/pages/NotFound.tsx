@@ -11,7 +11,7 @@ export function NotFoundPage() {
         <h1 className="text-8xl font-bold text-primary/55 sm:text-9xl">404</h1>
         <h2 className="text-2xl font-semibold mt-4 text-foreground">页面不存在</h2>
         <p className="text-default-500 mt-2 max-w-md">
-          您访问的页面可能已被移动或删除，请检查 URL 是否正确。
+          该页面可能已被移动或删除，请检查 URL 是否正确。
         </p>
         <div className="flex items-center justify-center gap-4 mt-8">
           <Button

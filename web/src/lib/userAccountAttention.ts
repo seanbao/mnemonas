@@ -130,7 +130,7 @@ export function formatUserAccountAttentionReport(
 
   return [
     '用户账号复核摘要',
-    ...headerRows.map(([label, value]) => `${label}: ${value}`),
+    ...headerRows.map(([label, value]) => `${label}：${value}`),
     '',
     '用户明细',
     '用户名 | 邮箱 | 角色 | 状态 | 用户组 | 主目录 | 最后登录 | 账号关注 | 建议处理',

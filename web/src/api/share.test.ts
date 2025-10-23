@@ -52,6 +52,15 @@ describe('Share API', () => {
         .toBe('/api/v1/public/shares/abc123/download/folder?archive=zip')
     })
 
+    it.each([
+      ['empty path', ''],
+      ['root path', '/'],
+      ['backslash separator', String.raw`folder\secret.txt`],
+      ['control character', 'folder/secret\u0007.txt'],
+    ])('rejects %s for shared folder download paths', (_label, filePath) => {
+      expect(() => getShareFileDownloadUrl('abc123', filePath)).toThrow('非法路径')
+    })
+
     it('encodes share IDs as path segments in download URLs', () => {
       expect(getShareDownloadUrl('share/with space%'))
         .toBe('/api/v1/public/shares/share%2Fwith%20space%25/download')
@@ -80,6 +89,11 @@ describe('Share API', () => {
         .toBe('https://local.example/httpx://evil.example/s/share-1')
       expect(formatShareUrl('javascript:alert(1)', 'https://local.example'))
         .toBe('https://local.example/javascript:alert(1)')
+    })
+
+    it('does not keep credentials from absolute share URLs', () => {
+      expect(formatShareUrl('https://user:pass@nas.example.com/s/share-1', 'https://local.example'))
+        .toBe('https://nas.example.com/s/share-1')
     })
   })
 
@@ -295,6 +309,37 @@ describe('Share API', () => {
       expect(json).toHaveBeenCalled()
     })
 
+    it('localizes public share archive snapshot-change failures', async () => {
+      const json = vi.fn(() => Promise.resolve({
+        success: false,
+        error: {
+          code: 'ARCHIVE_ENTRY_CHANGED',
+          message: 'archive entry changed during download',
+        },
+      }))
+
+      ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        ok: false,
+        status: 409,
+        headers: new Headers({ 'Content-Type': 'application/json' }),
+        clone: () => ({ json }),
+        json: () => Promise.resolve({
+          success: false,
+          error: {
+            code: 'ARCHIVE_ENTRY_CHANGED',
+            message: 'archive entry changed during download',
+          },
+        }),
+      })
+
+      await expect(downloadShare('share-1', { archive: 'zip' })).rejects.toMatchObject({
+        message: '分享内容已变更，请刷新后重试',
+        status: 409,
+        code: 'ARCHIVE_ENTRY_CHANGED',
+      })
+      expect(json).toHaveBeenCalled()
+    })
+
     it.each([
       [410, '分享已过期、已禁用或访问次数已达上限'],
       [429, '尝试次数过多，请稍后再试'],
@@ -332,7 +377,7 @@ describe('Share API', () => {
       })
 
       await expect(downloadShare('share-1', { archive: 'zip' })).rejects.toMatchObject({
-        message: 'archive content is too large',
+        message: '归档内容过大',
         status: 200,
         code: 'ARCHIVE_TOO_LARGE',
       })
@@ -429,6 +474,15 @@ describe('Share API', () => {
 
     it('rejects unsafe folder item paths before requesting items', async () => {
       await expect(getPublicShareItems('share-1', { path: 'docs/./report' })).rejects.toThrow('非法路径')
+
+      expect(global.fetch).not.toHaveBeenCalled()
+    })
+
+    it.each([
+      ['backslash separator', String.raw`docs\private`],
+      ['control character', 'docs/private\u0007'],
+    ])('rejects folder item request paths with %s before requesting items', async (_label, path) => {
+      await expect(getPublicShareItems('share-1', { path })).rejects.toThrow('非法路径')
 
       expect(global.fetch).not.toHaveBeenCalled()
     })
@@ -698,6 +752,20 @@ describe('Share API', () => {
       })
     })
 
+    it('ignores blank legacy public share error messages and codes', async () => {
+      ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        ok: false,
+        status: 404,
+        json: () => Promise.resolve({ success: false, error: { code: '   ', message: '   ' }, message: '  ', code: '   ' }),
+      })
+
+      await expect(getPublicShare('missing')).rejects.toMatchObject({
+        message: '分享不存在或已失效',
+        status: 404,
+        code: undefined,
+      })
+    })
+
     it('surfaces problem-json details when public share info fails', async () => {
       const body = {
         title: 'Service unavailable',
@@ -762,6 +830,7 @@ describe('Share API', () => {
       ['description', { description: 42 }],
       ['file_name', { file_name: 42 }],
       ['unsafe file_name', { file_name: '../secret.txt' }],
+      ['unicode control file_name', { file_name: 'report\u0081.txt' }],
       ['file_size', { file_size: '42' }],
       ['negative file_size', { file_size: -1 }],
       ['fractional file_size', { file_size: 42.5 }],
@@ -1148,6 +1217,25 @@ describe('Share API', () => {
       }))
     })
 
+    it('returns warning details for successful update share responses with warnings', async () => {
+      ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({
+          success: true,
+          warning: true,
+          data: createValidShare({ enabled: false }),
+          message: 'share updated with persistence warning',
+        }),
+      })
+
+      await expect(updateShare('share-1', { enabled: false })).resolves.toMatchObject({
+        enabled: false,
+        warning: true,
+        message: 'share updated with persistence warning',
+      })
+    })
+
     it('returns warning details for successful create share responses with warnings', async () => {
       ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
         ok: true,
@@ -1165,6 +1253,23 @@ describe('Share API', () => {
         warning: true,
         message: 'share created with audit warning',
       })
+    })
+
+    it('ignores blank action messages from successful share responses', async () => {
+      ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        ok: true,
+        status: 201,
+        json: () => Promise.resolve({
+          success: true,
+          data: { id: 'share-2', path: '/docs/b.txt', type: 'file', created_by: 'u1', created_at: '2026-03-13T00:00:00Z', has_password: false, permission: 'read', enabled: true, access_count: 0, url: '/s/share-2' },
+          message: '   ',
+        }),
+      })
+
+      const result = await createShare({ path: '/docs/b.txt' })
+
+      expect(result.warning).toBe(false)
+      expect(result.message).toBeUndefined()
     })
 
     it('reads structured share errors', async () => {
@@ -1227,6 +1332,26 @@ describe('Share API', () => {
         status: 503,
         code: 'SHARE_FEATURE_DISABLED',
         isFeatureDisabled: true,
+      })
+    })
+
+    it('ignores blank legacy authenticated share error messages and codes', async () => {
+      ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        ok: false,
+        status: 503,
+        json: () => Promise.resolve({
+          success: false,
+          error: { code: '   ', message: '   ' },
+          message: '  ',
+          code: '   ',
+        }),
+      })
+
+      await expect(listShares()).rejects.toMatchObject({
+        message: '获取分享列表失败',
+        status: 503,
+        code: undefined,
+        isUnavailable: true,
       })
     })
 

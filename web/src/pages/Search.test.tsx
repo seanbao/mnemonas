@@ -132,7 +132,7 @@ describe('SearchPage', () => {
 
     it('renders search input', () => {
       renderSearchPage()
-      expect(screen.getByPlaceholderText('输入文件名搜索...')).toBeInTheDocument()
+      expect(screen.getByLabelText('搜索文件名')).toBeInTheDocument()
     })
 
     it('renders back button', () => {
@@ -151,7 +151,7 @@ describe('SearchPage', () => {
       const user = userEvent.setup()
       renderSearchPage()
       
-      const input = screen.getByPlaceholderText('输入文件名搜索...')
+      const input = screen.getByLabelText('搜索文件名')
       await user.type(input, 'test')
       
       await waitFor(() => {
@@ -163,7 +163,7 @@ describe('SearchPage', () => {
       const user = userEvent.setup()
       renderSearchPage()
       
-      const input = screen.getByPlaceholderText('输入文件名搜索...')
+      const input = screen.getByLabelText('搜索文件名')
       await user.type(input, 'test')
       
       await waitFor(() => {
@@ -177,7 +177,7 @@ describe('SearchPage', () => {
       const user = userEvent.setup()
       renderSearchPage()
       
-      const input = screen.getByPlaceholderText('输入文件名搜索...')
+      const input = screen.getByLabelText('搜索文件名')
       await user.type(input, 'test')
       
       await waitFor(() => {
@@ -195,7 +195,7 @@ describe('SearchPage', () => {
       const user = userEvent.setup()
       renderSearchPage()
       
-      const input = screen.getByPlaceholderText('输入文件名搜索...')
+      const input = screen.getByLabelText('搜索文件名')
       await user.type(input, 'notfound')
       
       await waitFor(() => {
@@ -207,7 +207,7 @@ describe('SearchPage', () => {
       renderSearchPage('report')
 
       await waitFor(() => {
-        expect(screen.getByDisplayValue('report')).toBeInTheDocument()
+        expect(screen.getByLabelText('搜索文件名')).toHaveValue('report')
       })
 
       act(() => {
@@ -216,55 +216,55 @@ describe('SearchPage', () => {
       })
 
       await waitFor(() => {
-        expect(screen.getByDisplayValue('archive')).toBeInTheDocument()
+        expect(screen.getByLabelText('搜索文件名')).toHaveValue('archive')
       })
     })
 
     it('does not reuse cached search results from another user session', async () => {
-    useIsAdminMock.mockReturnValue(false)
-    mockUser.id = 'u2'
-    mockUser.username = 'member'
-    mockUser.role = 'user'
-    mockUser.homeDir = '/member'
-    vi.mocked(searchApi.searchFiles).mockImplementation(() => new Promise(() => {}))
+      useIsAdminMock.mockReturnValue(false)
+      mockUser.id = 'u2'
+      mockUser.username = 'member'
+      mockUser.role = 'user'
+      mockUser.homeDir = '/member'
+      vi.mocked(searchApi.searchFiles).mockImplementation(() => new Promise(() => {}))
 
-    const queryClient = createTestQueryClient()
-    queryClient.setQueryData(['search', 'report'], {
-      query: 'report',
-      results: [
-        {
-          name: 'secret.txt',
-          path: '/admin/secret.txt',
-          isDir: false,
-          size: 128,
-          modTime: '2024-01-15T10:00:00Z',
-        },
-      ],
-      count: 1,
+      const queryClient = createTestQueryClient()
+      queryClient.setQueryData(['search', 'report'], {
+        query: 'report',
+        results: [
+          {
+            name: 'secret.txt',
+            path: '/admin/secret.txt',
+            isDir: false,
+            size: 128,
+            modTime: '2024-01-15T10:00:00Z',
+          },
+        ],
+        count: 1,
+      })
+
+      window.history.pushState({}, '', '/search?q=report')
+      render(
+        <QueryClientProvider client={queryClient}>
+          <BrowserRouter>
+            <SearchPage />
+          </BrowserRouter>
+        </QueryClientProvider>
+      )
+
+      await waitFor(() => {
+        expectSearchFilesCalledWithQuery('report')
+      })
+
+      expect(screen.queryByText('/admin/secret.txt')).toBeNull()
+      expect(screen.queryByText('secret.txt')).toBeNull()
     })
-
-    window.history.pushState({}, '', '/search?q=report')
-    render(
-      <QueryClientProvider client={queryClient}>
-        <BrowserRouter>
-          <SearchPage />
-        </BrowserRouter>
-      </QueryClientProvider>
-    )
-
-    await waitFor(() => {
-      expectSearchFilesCalledWithQuery('report')
-    })
-
-    expect(screen.queryByText('/admin/secret.txt')).toBeNull()
-    expect(screen.queryByText('secret.txt')).toBeNull()
-  })
 
     it('does not trigger search for whitespace-only queries', async () => {
       const user = userEvent.setup()
       renderSearchPage()
 
-      const input = screen.getByPlaceholderText('输入文件名搜索...')
+      const input = screen.getByLabelText('搜索文件名')
       await user.type(input, '   ')
 
       await waitFor(() => {
@@ -277,7 +277,8 @@ describe('SearchPage', () => {
       const user = userEvent.setup()
       renderSearchPage('report')
 
-      const input = await screen.findByDisplayValue('report')
+      const input = await screen.findByLabelText('搜索文件名')
+      expect(input).toHaveValue('report')
       await user.clear(input)
       await user.keyboard('{Enter}')
 
@@ -289,7 +290,7 @@ describe('SearchPage', () => {
       renderSearchPage()
 
       const initialHistoryLength = window.history.length
-      const input = screen.getByPlaceholderText('输入文件名搜索...')
+      const input = screen.getByLabelText('搜索文件名')
 
       await user.type(input, 'test')
       await user.keyboard('{Enter}')
@@ -332,7 +333,7 @@ describe('SearchPage', () => {
         expect(screen.getByText('当前账户未配置有效的主目录，无法搜索文件。请联系管理员修复账户 home_dir。')).toBeInTheDocument()
       })
 
-      expect(screen.getByPlaceholderText('输入文件名搜索...')).toBeDisabled()
+      expect(screen.getByLabelText('搜索文件名')).toBeDisabled()
       expect(searchApi.searchFiles).not.toHaveBeenCalled()
     })
 
@@ -432,7 +433,7 @@ describe('SearchPage', () => {
       const user = userEvent.setup()
       renderSearchPage()
       
-      const input = screen.getByPlaceholderText('输入文件名搜索...')
+      const input = screen.getByLabelText('搜索文件名')
       await user.type(input, 'test')
       
       await waitFor(() => {
@@ -463,7 +464,7 @@ describe('SearchPage', () => {
       })
       renderSearchPage()
 
-      await user.type(screen.getByPlaceholderText('输入文件名搜索...'), 'special')
+      await user.type(screen.getByLabelText('搜索文件名'), 'special')
 
       await waitFor(() => {
         expect(screen.getByText('report?.pdf')).toBeInTheDocument()
@@ -480,7 +481,7 @@ describe('SearchPage', () => {
       const user = userEvent.setup()
       renderSearchPage()
       
-      const input = screen.getByPlaceholderText('输入文件名搜索...')
+      const input = screen.getByLabelText('搜索文件名')
       await user.type(input, 'test')
       
       await waitFor(() => {
@@ -496,7 +497,7 @@ describe('SearchPage', () => {
       const user = userEvent.setup()
       renderSearchPage()
 
-      const input = screen.getByPlaceholderText('输入文件名搜索...')
+      const input = screen.getByLabelText('搜索文件名')
       await user.type(input, 'test')
 
       await waitFor(() => {
@@ -520,7 +521,7 @@ describe('SearchPage', () => {
       const user = userEvent.setup()
       renderSearchPage()
       
-      const input = screen.getByPlaceholderText('输入文件名搜索...')
+      const input = screen.getByLabelText('搜索文件名')
       await user.type(input, 'test')
       
       await waitFor(() => {
@@ -542,7 +543,7 @@ describe('SearchPage', () => {
       const user = userEvent.setup()
       renderSearchPage()
       
-      const input = screen.getByPlaceholderText('输入文件名搜索...')
+      const input = screen.getByLabelText('搜索文件名')
       await user.type(input, 'test')
       
       // Spinner should appear during loading

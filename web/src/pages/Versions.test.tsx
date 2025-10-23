@@ -113,7 +113,7 @@ describe('VersionsPage', () => {
 
     it('renders search input', () => {
       render(<VersionsPage />)
-      expect(screen.getByPlaceholderText(/输入文件路径/)).toBeTruthy()
+      expect(screen.getByLabelText('版本文件路径')).toBeTruthy()
     })
 
     it('renders search button', () => {
@@ -142,7 +142,7 @@ describe('VersionsPage', () => {
       const user = userEvent.setup({ writeToClipboard: false })
       render(<VersionsPage />)
 
-      const input = screen.getByPlaceholderText(/输入文件路径/)
+      const input = screen.getByLabelText('版本文件路径')
       await user.type(input, '/test.txt')
 
       const searchBtn = screen.getByText('查询')
@@ -157,7 +157,7 @@ describe('VersionsPage', () => {
       const user = userEvent.setup({ writeToClipboard: false })
       render(<VersionsPage />)
 
-      const input = screen.getByPlaceholderText(/输入文件路径/)
+      const input = screen.getByLabelText('版本文件路径')
       await user.type(input, '/test.txt{enter}')
 
       await waitFor(() => {
@@ -169,7 +169,7 @@ describe('VersionsPage', () => {
       const user = userEvent.setup({ writeToClipboard: false })
       render(<VersionsPage />)
 
-      const input = screen.getByPlaceholderText(/输入文件路径/)
+      const input = screen.getByLabelText('版本文件路径')
       await user.type(input, 'test.txt{enter}')
 
       await waitFor(() => {
@@ -181,7 +181,7 @@ describe('VersionsPage', () => {
       const user = userEvent.setup({ writeToClipboard: false })
       render(<VersionsPage />)
 
-      const input = screen.getByPlaceholderText(/输入文件路径/)
+      const input = screen.getByLabelText('版本文件路径')
       await user.type(input, '  /test.txt  {enter}')
 
       await waitFor(() => {
@@ -193,14 +193,14 @@ describe('VersionsPage', () => {
       const user = userEvent.setup({ writeToClipboard: false })
       render(<VersionsPage />)
 
-      const input = screen.getByPlaceholderText(/输入文件路径/)
+      const input = screen.getByLabelText('版本文件路径')
       await user.type(input, '/test.txt{enter}')
 
       await waitFor(() => {
         expect(screen.getByText('/test.txt')).toBeTruthy()
       })
 
-      await user.clear(screen.getByPlaceholderText(/输入文件路径/))
+      await user.clear(screen.getByLabelText('版本文件路径'))
       await user.click(screen.getByText('查询'))
 
       await waitFor(() => {
@@ -220,7 +220,7 @@ describe('VersionsPage', () => {
         expectGetVersionsCalledWithPath('/T145iNXfXqXXb1upjX.avif')
       })
 
-      expect(screen.getByPlaceholderText(/输入文件路径/)).toHaveValue('/T145iNXfXqXXb1upjX.avif')
+      expect(screen.getByLabelText('版本文件路径')).toHaveValue('/T145iNXfXqXXb1upjX.avif')
       expect(screen.getByText('/T145iNXfXqXXb1upjX.avif')).toBeTruthy()
       expect(await screen.findByText('未找到版本记录')).toBeTruthy()
     })
@@ -232,7 +232,7 @@ describe('VersionsPage', () => {
       const user = userEvent.setup({ writeToClipboard: false })
       render(<VersionsPage />)
 
-      const input = screen.getByPlaceholderText(/输入文件路径/)
+      const input = screen.getByLabelText('版本文件路径')
       await user.type(input, '/team/report.txt{enter}')
 
       await waitFor(() => {
@@ -278,7 +278,7 @@ describe('VersionsPage', () => {
         expectGetVersionsCalledWithPath('/second.txt')
       })
 
-      expect(screen.getByPlaceholderText(/输入文件路径/)).toHaveValue('/second.txt')
+      expect(screen.getByLabelText('版本文件路径')).toHaveValue('/second.txt')
       expect(screen.getByText('/second.txt')).toBeTruthy()
     })
 
@@ -321,7 +321,7 @@ describe('VersionsPage', () => {
       const user = userEvent.setup({ writeToClipboard: false })
       render(<VersionsPage />)
 
-      const input = screen.getByPlaceholderText(/输入文件路径/)
+      const input = screen.getByLabelText('版本文件路径')
       await user.type(input, '/test.txt{enter}')
 
       await waitFor(() => {
@@ -340,7 +340,7 @@ describe('VersionsPage', () => {
       const user = userEvent.setup({ writeToClipboard: false })
       render(<VersionsPage />)
 
-      const input = screen.getByPlaceholderText(/输入文件路径/)
+      const input = screen.getByLabelText('版本文件路径')
       await user.type(input, '/multi.txt{enter}')
 
       await waitFor(() => {
@@ -352,7 +352,7 @@ describe('VersionsPage', () => {
       const user = userEvent.setup({ writeToClipboard: false })
       render(<VersionsPage />)
 
-      const input = screen.getByPlaceholderText(/输入文件路径/)
+      const input = screen.getByLabelText('版本文件路径')
       await user.type(input, '/test.txt{enter}')
 
       await waitFor(() => {
@@ -364,7 +364,7 @@ describe('VersionsPage', () => {
       const user = userEvent.setup({ writeToClipboard: false })
       render(<VersionsPage />)
 
-      const input = screen.getByPlaceholderText(/输入文件路径/)
+      const input = screen.getByLabelText('版本文件路径')
       await user.type(input, '/documents/report.pdf{enter}')
 
       await waitFor(() => {
@@ -388,11 +388,11 @@ describe('VersionsPage', () => {
       const user = userEvent.setup({ writeToClipboard: false })
       render(<VersionsPage />)
 
-      const input = screen.getByPlaceholderText(/输入文件路径/)
+      const input = screen.getByLabelText('版本文件路径')
       await user.type(input, '/test.txt{enter}')
 
       await waitFor(() => {
-        const restoreButtons = screen.queryAllByRole('button', { name: '恢复到此版本' })
+        const restoreButtons = screen.queryAllByRole('button', { name: /^恢复到版本 / })
         expect(restoreButtons.length).toBeGreaterThan(0)
       })
     })
@@ -402,29 +402,28 @@ describe('VersionsPage', () => {
       const user = userEvent.setup({ writeToClipboard: false })
       render(<VersionsPage />)
 
-      const input = screen.getByPlaceholderText(/输入文件路径/)
+      const input = screen.getByLabelText('版本文件路径')
       await user.type(input, '/test.txt{enter}')
 
       await waitFor(() => {
         expectGetVersionsCalledWithPath('/test.txt')
       })
 
-      expect(screen.queryAllByTitle('恢复到此版本')).toHaveLength(0)
+      expect(screen.queryAllByRole('button', { name: /^恢复到版本 / })).toHaveLength(0)
     })
 
     it('opens restore modal when clicking restore button', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
       render(<VersionsPage />)
 
-      const input = screen.getByPlaceholderText(/输入文件路径/)
+      const input = screen.getByLabelText('版本文件路径')
       await user.type(input, '/test.txt{enter}')
 
       await waitFor(() => {
-        expect(screen.queryAllByTitle('恢复到此版本').length).toBeGreaterThan(0)
+        expect(screen.queryAllByRole('button', { name: /^恢复到版本 / }).length).toBeGreaterThan(0)
       })
 
-      const restoreButtons = screen.getAllByTitle('恢复到此版本')
-      await user.click(restoreButtons[0])
+      await user.click(screen.getByRole('button', { name: '恢复到版本 2' }))
 
       await waitFor(() => {
         expect(screen.getByText('确认恢复版本')).toBeTruthy()
@@ -443,14 +442,14 @@ describe('VersionsPage', () => {
       const user = userEvent.setup({ writeToClipboard: false })
       render(<VersionsPage />)
 
-      const input = screen.getByPlaceholderText(/输入文件路径/)
+      const input = screen.getByLabelText('版本文件路径')
       await user.type(input, '/test.txt{enter}')
 
       await waitFor(() => {
-        expect(screen.queryAllByTitle('恢复到此版本').length).toBeGreaterThan(0)
+        expect(screen.queryAllByRole('button', { name: /^恢复到版本 / }).length).toBeGreaterThan(0)
       })
 
-      await user.click(screen.getAllByTitle('恢复到此版本')[0])
+      await user.click(screen.getByRole('button', { name: '恢复到版本 2' }))
 
       await waitFor(() => {
         expect(screen.getByText('确认恢复版本')).toBeTruthy()
@@ -468,14 +467,14 @@ describe('VersionsPage', () => {
       const user = userEvent.setup({ writeToClipboard: false })
       render(<VersionsPage />)
 
-      const input = screen.getByPlaceholderText(/输入文件路径/)
+      const input = screen.getByLabelText('版本文件路径')
       await user.type(input, '/test.txt{enter}')
 
       await waitFor(() => {
-        expect(screen.queryAllByTitle('恢复到此版本').length).toBeGreaterThan(0)
+        expect(screen.queryAllByRole('button', { name: /^恢复到版本 / }).length).toBeGreaterThan(0)
       })
 
-      await user.click(screen.getAllByTitle('恢复到此版本')[0])
+      await user.click(screen.getByRole('button', { name: '恢复到版本 2' }))
 
       await waitFor(() => {
         expect(screen.getByText('确认恢复')).toBeTruthy()
@@ -493,14 +492,14 @@ describe('VersionsPage', () => {
       const user = userEvent.setup({ writeToClipboard: false })
       render(<VersionsPage />)
 
-      const input = screen.getByPlaceholderText(/输入文件路径/)
+      const input = screen.getByLabelText('版本文件路径')
       await user.type(input, '/test.txt{enter}')
 
       await waitFor(() => {
-        expect(screen.queryAllByTitle('恢复到此版本').length).toBeGreaterThan(0)
+        expect(screen.queryAllByRole('button', { name: /^恢复到版本 / }).length).toBeGreaterThan(0)
       })
 
-      await user.click(screen.getAllByTitle('恢复到此版本')[0])
+      await user.click(screen.getByRole('button', { name: '恢复到版本 2' }))
 
       await waitFor(() => {
         expect(screen.getByText('确认恢复')).toBeTruthy()
@@ -521,14 +520,14 @@ describe('VersionsPage', () => {
       const user = userEvent.setup({ writeToClipboard: false })
       render(<VersionsPage />)
 
-      const input = screen.getByPlaceholderText(/输入文件路径/)
+      const input = screen.getByLabelText('版本文件路径')
       await user.type(input, '/test.txt{enter}')
 
       await waitFor(() => {
-        expect(screen.queryAllByTitle('恢复到此版本').length).toBeGreaterThan(0)
+        expect(screen.queryAllByRole('button', { name: /^恢复到版本 / }).length).toBeGreaterThan(0)
       })
 
-      await user.click(screen.getAllByTitle('恢复到此版本')[0])
+      await user.click(screen.getByRole('button', { name: '恢复到版本 2' }))
 
       await waitFor(() => {
         expect(screen.getByText('确认恢复')).toBeTruthy()
@@ -550,14 +549,14 @@ describe('VersionsPage', () => {
       const user = userEvent.setup({ writeToClipboard: false })
       render(<VersionsPage />)
 
-      const input = screen.getByPlaceholderText(/输入文件路径/)
+      const input = screen.getByLabelText('版本文件路径')
       await user.type(input, '/test.txt{enter}')
 
       await waitFor(() => {
-        expect(screen.queryAllByTitle('恢复到此版本').length).toBeGreaterThan(0)
+        expect(screen.queryAllByRole('button', { name: /^恢复到版本 / }).length).toBeGreaterThan(0)
       })
 
-      await user.click(screen.getAllByTitle('恢复到此版本')[0])
+      await user.click(screen.getByRole('button', { name: '恢复到版本 2' }))
       await user.click(await screen.findByText('确认恢复'))
 
       await waitFor(() => {
@@ -580,14 +579,14 @@ describe('VersionsPage', () => {
 
       render(<VersionsPage />)
 
-      const input = screen.getByPlaceholderText(/输入文件路径/)
+      const input = screen.getByLabelText('版本文件路径')
       await user.type(input, '/test.txt{enter}')
 
       await waitFor(() => {
-        expect(screen.queryAllByTitle('恢复到此版本').length).toBeGreaterThan(0)
+        expect(screen.queryAllByRole('button', { name: /^恢复到版本 / }).length).toBeGreaterThan(0)
       })
 
-      await user.click(screen.getAllByTitle('恢复到此版本')[0])
+      await user.click(screen.getByRole('button', { name: '恢复到版本 2' }))
       await user.click(await screen.findByText('确认恢复'))
 
       await waitFor(() => {
@@ -618,14 +617,14 @@ describe('VersionsPage', () => {
 
       const { unmount } = render(<VersionsPage />)
 
-      const input = screen.getByPlaceholderText(/输入文件路径/)
+      const input = screen.getByLabelText('版本文件路径')
       await user.type(input, '/test.txt{enter}')
 
       await waitFor(() => {
-        expect(screen.queryAllByTitle('恢复到此版本').length).toBeGreaterThan(0)
+        expect(screen.queryAllByRole('button', { name: /^恢复到版本 / }).length).toBeGreaterThan(0)
       })
 
-      await user.click(screen.getAllByTitle('恢复到此版本')[0])
+      await user.click(screen.getByRole('button', { name: '恢复到版本 2' }))
       await user.click(await screen.findByText('确认恢复'))
 
       await waitFor(() => {
@@ -654,14 +653,14 @@ describe('VersionsPage', () => {
 
       render(<VersionsPage />)
 
-      const input = screen.getByPlaceholderText(/输入文件路径/)
+      const input = screen.getByLabelText('版本文件路径')
       await user.type(input, '/test.txt{enter}')
 
       await waitFor(() => {
-        expect(screen.queryAllByTitle('恢复到此版本').length).toBeGreaterThan(0)
+        expect(screen.queryAllByRole('button', { name: /^恢复到版本 / }).length).toBeGreaterThan(0)
       })
 
-      await user.click(screen.getAllByTitle('恢复到此版本')[0])
+      await user.click(screen.getByRole('button', { name: '恢复到版本 2' }))
       await user.click(await screen.findByText('确认恢复'))
 
       await waitFor(() => {
@@ -697,11 +696,11 @@ describe('VersionsPage', () => {
       const user = userEvent.setup({ writeToClipboard: false })
       render(<VersionsPage />)
 
-      const input = screen.getByPlaceholderText(/输入文件路径/)
+      const input = screen.getByLabelText('版本文件路径')
       await user.type(input, '/test.txt{enter}')
 
       await waitFor(() => {
-        const downloadButtons = screen.queryAllByTitle('下载此版本')
+        const downloadButtons = screen.queryAllByRole('button', { name: /^下载版本 / })
         expect(downloadButtons.length).toBeGreaterThan(0)
       })
     })
@@ -711,14 +710,14 @@ describe('VersionsPage', () => {
       const user = userEvent.setup({ writeToClipboard: false })
       render(<VersionsPage />)
 
-      const input = screen.getByPlaceholderText(/输入文件路径/)
+      const input = screen.getByLabelText('版本文件路径')
       await user.type(input, '/test.txt{enter}')
 
       await waitFor(() => {
-        expect(screen.queryAllByTitle('下载此版本').length).toBeGreaterThan(0)
+        expect(screen.queryAllByRole('button', { name: /^下载版本 / }).length).toBeGreaterThan(0)
       })
 
-      await user.click(screen.getAllByTitle('下载此版本')[0])
+      await user.click(screen.getByRole('button', { name: '下载版本 3' }))
 
       await waitFor(() => {
         expect(mockDownloadFile).toHaveBeenCalledWith('/test.txt', expect.objectContaining({
@@ -741,14 +740,14 @@ describe('VersionsPage', () => {
       const user = userEvent.setup({ writeToClipboard: false })
       render(<VersionsPage />)
 
-      const input = screen.getByPlaceholderText(/输入文件路径/)
+      const input = screen.getByLabelText('版本文件路径')
       await user.type(input, '/test.txt{enter}')
 
       await waitFor(() => {
-        expect(screen.queryAllByTitle('下载此版本').length).toBeGreaterThan(0)
+        expect(screen.queryAllByRole('button', { name: /^下载版本 / }).length).toBeGreaterThan(0)
       })
 
-      await user.click(screen.getAllByTitle('下载此版本')[0])
+      await user.click(screen.getByRole('button', { name: '下载版本 3' }))
 
       await waitFor(() => {
         expect(mockDownloadFile).toHaveBeenCalledWith('/test.txt', expect.objectContaining({
@@ -776,20 +775,20 @@ describe('VersionsPage', () => {
       const user = userEvent.setup({ writeToClipboard: false })
       render(<VersionsPage />)
 
-      const input = screen.getByPlaceholderText(/输入文件路径/)
+      const input = screen.getByLabelText('版本文件路径')
       await user.type(input, '/test.txt{enter}')
 
       await waitFor(() => {
-        expect(screen.queryAllByTitle('下载此版本').length).toBeGreaterThan(0)
+        expect(screen.queryAllByRole('button', { name: /^下载版本 / }).length).toBeGreaterThan(0)
       })
 
-      await user.click(screen.getAllByTitle('下载此版本')[0])
+      await user.click(screen.getByRole('button', { name: '下载版本 3' }))
 
       await waitFor(() => {
         expect(signal).toBeInstanceOf(AbortSignal)
       })
 
-      const nextInput = screen.getByPlaceholderText(/输入文件路径/)
+      const nextInput = screen.getByLabelText('版本文件路径')
       await user.clear(nextInput)
       await user.type(nextInput, '/other.txt{enter}')
 
@@ -806,14 +805,14 @@ describe('VersionsPage', () => {
       vi.spyOn(window, 'open').mockReturnValue(null)
       render(<VersionsPage />)
 
-      const input = screen.getByPlaceholderText(/输入文件路径/)
+      const input = screen.getByLabelText('版本文件路径')
       await user.type(input, '/test.txt{enter}')
 
       await waitFor(() => {
-        expect(screen.queryAllByTitle('预览').length).toBeGreaterThan(0)
+        expect(screen.queryAllByRole('button', { name: /^预览版本 / }).length).toBeGreaterThan(0)
       })
 
-      await user.click(screen.getAllByTitle('预览')[0])
+      await user.click(screen.getByRole('button', { name: '预览版本 3' }))
 
       await waitFor(() => {
         expect(mockEnsureDownloadSession).toHaveBeenCalledTimes(1)
@@ -829,14 +828,14 @@ describe('VersionsPage', () => {
       const user = userEvent.setup({ writeToClipboard: false })
       render(<VersionsPage />)
 
-      const input = screen.getByPlaceholderText(/输入文件路径/)
+      const input = screen.getByLabelText('版本文件路径')
       await user.type(input, '/test.txt{enter}')
 
       await waitFor(() => {
-        expect(screen.queryAllByTitle('预览').length).toBeGreaterThan(0)
+        expect(screen.queryAllByRole('button', { name: /^预览版本 / }).length).toBeGreaterThan(0)
       })
 
-      await user.click(screen.getAllByTitle('预览')[0])
+      await user.click(screen.getByRole('button', { name: '预览版本 3' }))
 
       await waitFor(() => {
         expect(mockEnsureDownloadSession).toHaveBeenCalledTimes(1)
@@ -850,14 +849,14 @@ describe('VersionsPage', () => {
       const user = userEvent.setup({ writeToClipboard: false })
       render(<VersionsPage />)
 
-      const input = screen.getByPlaceholderText(/输入文件路径/)
+      const input = screen.getByLabelText('版本文件路径')
       await user.type(input, '/test.txt{enter}')
 
       await waitFor(() => {
-        expect(screen.queryAllByTitle('预览').length).toBeGreaterThan(0)
+        expect(screen.queryAllByRole('button', { name: /^预览版本 / }).length).toBeGreaterThan(0)
       })
 
-      await user.click(screen.getAllByTitle('预览')[0])
+      await user.click(screen.getByRole('button', { name: '预览版本 3' }))
 
       await waitFor(() => {
         expect(openSpy).not.toHaveBeenCalled()
@@ -883,14 +882,14 @@ describe('VersionsPage', () => {
       const user = userEvent.setup({ writeToClipboard: false })
       render(<VersionsPage />)
 
-      const input = screen.getByPlaceholderText(/输入文件路径/)
+      const input = screen.getByLabelText('版本文件路径')
       await user.type(input, '/test.txt{enter}')
 
       await waitFor(() => {
-        expect(screen.queryAllByTitle('预览').length).toBeGreaterThan(0)
+        expect(screen.queryAllByRole('button', { name: /^预览版本 / }).length).toBeGreaterThan(0)
       })
 
-      await user.click(screen.getAllByTitle('预览')[0])
+      await user.click(screen.getByRole('button', { name: '预览版本 3' }))
 
       await waitFor(() => {
         expect(mockAuthFetch).toHaveBeenCalledWith('/api/v1/download/test.txt?version=hash3', {
@@ -907,6 +906,40 @@ describe('VersionsPage', () => {
         })
       })
     })
+
+    it('shows missing-file guidance when version preview target no longer exists', async () => {
+      mockAuthFetch.mockResolvedValueOnce(new Response(JSON.stringify({
+        success: false,
+        error: {
+          code: 'FILE_NOT_FOUND',
+          message: 'file not found',
+        },
+      }), {
+        status: 404,
+        headers: { 'Content-Type': 'application/json' },
+      }))
+      const openSpy = vi.spyOn(window, 'open').mockReturnValue(null)
+      const user = userEvent.setup({ writeToClipboard: false })
+      render(<VersionsPage />)
+
+      const input = screen.getByLabelText('版本文件路径')
+      await user.type(input, '/test.txt{enter}')
+
+      await waitFor(() => {
+        expect(screen.queryAllByRole('button', { name: /^预览版本 / }).length).toBeGreaterThan(0)
+      })
+
+      await user.click(screen.getByRole('button', { name: '预览版本 3' }))
+
+      await waitFor(() => {
+        expect(openSpy).not.toHaveBeenCalled()
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '预览版本暂不可用',
+          description: '该文件可能已被移动或删除，请刷新列表后重试。',
+          color: 'warning',
+        })
+      })
+    })
   })
 
   describe('error handling', () => {
@@ -915,7 +948,7 @@ describe('VersionsPage', () => {
       mockGetVersions.mockRejectedValue(new ApiError('version storage unavailable', 503, 'SERVICE_UNAVAILABLE'))
       render(<VersionsPage />)
 
-      const input = screen.getByPlaceholderText(/输入文件路径/)
+      const input = screen.getByLabelText('版本文件路径')
       await user.type(input, '/unavailable.txt{enter}')
 
       await waitFor(() => {
@@ -930,7 +963,7 @@ describe('VersionsPage', () => {
       mockGetVersions.mockRejectedValue(new Error('文件不存在'))
       render(<VersionsPage />)
 
-      const input = screen.getByPlaceholderText(/输入文件路径/)
+      const input = screen.getByLabelText('版本文件路径')
       await user.type(input, '/nonexistent.txt{enter}')
 
       await waitFor(() => {
@@ -953,7 +986,7 @@ describe('VersionsPage', () => {
       })
       render(<VersionsPage />)
 
-      const input = screen.getByPlaceholderText(/输入文件路径/)
+      const input = screen.getByLabelText('版本文件路径')
       await user.type(input, '/retry.txt{enter}')
 
       await waitFor(() => {
@@ -981,7 +1014,7 @@ describe('VersionsPage', () => {
       })
       render(<VersionsPage />)
 
-      const input = screen.getByPlaceholderText(/输入文件路径/)
+      const input = screen.getByLabelText('版本文件路径')
       await user.type(input, '/retry-unavailable.txt{enter}')
 
       await waitFor(() => {
@@ -1007,7 +1040,7 @@ describe('VersionsPage', () => {
       mockGetVersions.mockResolvedValue([])
       render(<VersionsPage />)
 
-      const input = screen.getByPlaceholderText(/输入文件路径/)
+      const input = screen.getByLabelText('版本文件路径')
       await user.type(input, '/new-file.txt{enter}')
 
       await waitFor(() => {

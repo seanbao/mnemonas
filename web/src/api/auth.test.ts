@@ -74,6 +74,26 @@ describe('auth API', () => {
     window.removeEventListener(AUTH_CLEARED_EVENT, authCleared)
   })
 
+  it('keeps auth helpers usable when localStorage reads are unavailable', async () => {
+    const storageError = new DOMException('localStorage is blocked', 'SecurityError')
+    const getItemSpy = vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => {
+      throw storageError
+    })
+    const removeItemSpy = vi.spyOn(Storage.prototype, 'removeItem').mockImplementation(() => {
+      throw storageError
+    })
+
+    try {
+      expect(getStoredUser()).toBeNull()
+      expect(getAuthHeaders()).toEqual({})
+      await expect(ensureDownloadSession()).resolves.toEqual({ ok: true })
+      expect(fetchMock).not.toHaveBeenCalled()
+    } finally {
+      getItemSpy.mockRestore()
+      removeItemSpy.mockRestore()
+    }
+  })
+
   it('does not refresh missing sessions when no auth state is stored', async () => {
     fetchMock.mockResolvedValueOnce({
       ok: false,
@@ -168,6 +188,29 @@ describe('auth API', () => {
     }))
     expect(localStorage.getItem('mnemonas_refresh_token')).toBeNull()
     expect(localStorage.getItem('mnemonas_user')).toBeNull()
+  })
+
+  it('logs out when localStorage removal is unavailable', async () => {
+    const storageError = new DOMException('localStorage is blocked', 'SecurityError')
+    const removeItemSpy = vi.spyOn(Storage.prototype, 'removeItem').mockImplementation(() => {
+      throw storageError
+    })
+
+    try {
+      fetchMock.mockResolvedValueOnce({
+        ok: true,
+        headers: { get: () => null },
+        json: () => Promise.resolve({ success: true, data: null }),
+      })
+
+      await expect(logout()).resolves.toEqual({ warning: false, message: undefined })
+      expect(fetchMock).toHaveBeenCalledWith('/api/v1/auth/logout', expect.objectContaining({
+        method: 'POST',
+        credentials: 'same-origin',
+      }))
+    } finally {
+      removeItemSpy.mockRestore()
+    }
   })
 
   it('clears legacy bearer tokens without syncing a download session', async () => {
@@ -265,6 +308,51 @@ describe('auth API', () => {
     }))
   })
 
+  it('syncs download session after login when localStorage writes are unavailable', async () => {
+    const storageError = new DOMException('localStorage is blocked', 'SecurityError')
+    const getItemSpy = vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => {
+      throw storageError
+    })
+    const setItemSpy = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+      throw storageError
+    })
+    const removeItemSpy = vi.spyOn(Storage.prototype, 'removeItem').mockImplementation(() => {
+      throw storageError
+    })
+
+    try {
+      fetchMock
+        .mockResolvedValueOnce({
+          ok: true,
+          json: () => Promise.resolve({
+            success: true,
+            data: {
+              access_token: 'access-1',
+              refresh_token: 'refresh-1',
+              expires_at: '2026-03-13T00:00:00Z',
+              token_type: 'Bearer',
+              user: { id: 'u1', username: 'admin', role: 'admin', home_dir: '/' },
+            },
+          }),
+        })
+        .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({ success: true }) })
+
+      await expect(login('admin', 'password')).resolves.toMatchObject({
+        user: { username: 'admin', homeDir: '/' },
+        warning: false,
+      })
+
+      expect(fetchMock).toHaveBeenNthCalledWith(2, '/api/v1/auth/download-session', expect.objectContaining({
+        method: 'POST',
+        credentials: 'same-origin',
+      }))
+    } finally {
+      getItemSpy.mockRestore()
+      setItemSpy.mockRestore()
+      removeItemSpy.mockRestore()
+    }
+  })
+
   it('fails login cleanly when the browser did not establish the cookie session', async () => {
     const authCleared = vi.fn()
     window.addEventListener(AUTH_CLEARED_EVENT, authCleared)
@@ -330,6 +418,34 @@ describe('auth API', () => {
       user: { username: 'admin' },
       warning: true,
       message: undefined,
+    })
+  })
+
+  it('returns warning metadata for successful login responses with data warning flags', async () => {
+    fetchMock
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        headers: { get: () => null },
+        json: () => Promise.resolve({
+          success: true,
+          data: {
+            access_token: 'access-1',
+            refresh_token: 'refresh-1',
+            expires_at: '2026-03-13T00:00:00Z',
+            token_type: 'Bearer',
+            warning: true,
+            user: { id: 'u1', username: 'admin', role: 'admin', home_dir: '/' },
+          },
+          message: 'login succeeded with persistence warning',
+        }),
+      })
+      .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({ success: true }) })
+
+    await expect(login('admin', 'password')).resolves.toMatchObject({
+      user: { username: 'admin' },
+      warning: true,
+      message: 'login succeeded with persistence warning',
     })
   })
 
@@ -421,6 +537,39 @@ describe('auth API', () => {
     expect(localStorage.getItem('mnemonas_token')).toBeNull()
     expect(localStorage.getItem('mnemonas_refresh_token')).toBeNull()
     expect(localStorage.getItem('mnemonas_user')).not.toBeNull()
+  })
+
+  it('uses the fallback warning when download session sync messages are blank after login', async () => {
+    fetchMock
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        headers: { get: () => null },
+        json: () => Promise.resolve({
+          success: true,
+          data: {
+            access_token: 'access-1',
+            refresh_token: 'refresh-1',
+            expires_at: '2026-03-13T00:00:00Z',
+            token_type: 'Bearer',
+            user: { id: 'u1', username: 'admin', role: 'admin', home_dir: '/' },
+          },
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 503,
+        json: () => Promise.resolve({
+          success: false,
+          error: { message: '   ', code: '   ' },
+        }),
+      })
+
+    await expect(login('admin', 'password')).resolves.toMatchObject({
+      user: { username: 'admin' },
+      warning: true,
+      message: '原始预览和下载会话同步失败，请稍后重试',
+    })
   })
 
   it('returns a warning when download session sync throws after login', async () => {
@@ -709,6 +858,38 @@ describe('auth API', () => {
     expect(localStorage.getItem('mnemonas_token')).toBeNull()
   })
 
+  it('returns warning metadata for successful logout responses with body warning flags', async () => {
+    localStorage.setItem('mnemonas_token', 'access-1')
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      headers: { get: () => null },
+      json: () => Promise.resolve({
+        success: true,
+        data: null,
+        warning: true,
+        message: 'logged out with persistence warning',
+      }),
+    })
+
+    await expect(logout()).resolves.toEqual({
+      warning: true,
+      message: 'logged out with persistence warning',
+    })
+    expect(localStorage.getItem('mnemonas_token')).toBeNull()
+  })
+
+  it('ignores blank logout success messages', async () => {
+    localStorage.setItem('mnemonas_token', 'access-1')
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      headers: { get: () => null },
+      json: () => Promise.resolve({ success: true, data: null, message: '   ' }),
+    })
+
+    await expect(logout()).resolves.toEqual({ warning: false, message: undefined })
+    expect(localStorage.getItem('mnemonas_token')).toBeNull()
+  })
+
   it('returns a default logout result when the success body is unreadable', async () => {
     localStorage.setItem('mnemonas_token', 'access-1')
     fetchMock.mockResolvedValueOnce({
@@ -762,6 +943,71 @@ describe('auth API', () => {
     expect(localStorage.getItem('mnemonas_token')).toBeNull()
     expect(localStorage.getItem('mnemonas_refresh_token')).toBeNull()
     expect(JSON.parse(localStorage.getItem('mnemonas_user') ?? '{}')).toMatchObject({ username: 'admin' })
+  })
+
+  it('falls back when logout error messages and codes are blank', async () => {
+    localStorage.setItem('mnemonas_token', 'access-1')
+    localStorage.setItem('mnemonas_user', JSON.stringify({
+      id: 'u1',
+      username: 'admin',
+      role: 'admin',
+      home_dir: '/',
+    }))
+
+    fetchMock.mockResolvedValueOnce({
+      ok: false,
+      status: 503,
+      json: () => Promise.resolve({
+        success: false,
+        error: {
+          code: '   ',
+          message: '   ',
+        },
+      }),
+    })
+
+    await expect(logout()).rejects.toMatchObject({
+      message: '退出登录失败',
+      status: 503,
+      code: undefined,
+    })
+    expect(localStorage.getItem('mnemonas_user')).not.toBeNull()
+  })
+
+  it('preserves legacy top-level auth error messages and codes', async () => {
+    fetchMock.mockResolvedValueOnce({
+      ok: false,
+      status: 503,
+      json: () => Promise.resolve({
+        success: false,
+        code: 'SERVICE_UNAVAILABLE',
+        message: 'auth service unavailable',
+      }),
+    })
+
+    await expect(login('admin', 'password')).rejects.toMatchObject({
+      message: 'auth service unavailable',
+      status: 503,
+      code: 'SERVICE_UNAVAILABLE',
+    })
+  })
+
+  it('ignores blank legacy top-level auth error messages and codes', async () => {
+    fetchMock.mockResolvedValueOnce({
+      ok: false,
+      status: 503,
+      json: () => Promise.resolve({
+        success: false,
+        code: '   ',
+        message: '   ',
+      }),
+    })
+
+    await expect(login('admin', 'password')).rejects.toMatchObject({
+      message: '登录失败',
+      status: 503,
+      code: undefined,
+    })
   })
 
   it('preserves local auth state when current user lookup is temporarily unavailable', async () => {

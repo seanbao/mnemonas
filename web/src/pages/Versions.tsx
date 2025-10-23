@@ -33,6 +33,7 @@ import { authFetch, ensureDownloadSession } from '@/api/auth'
 import { ApiError, getVersions, buildDownloadUrl, downloadFile, restoreVersion, type ActionResult, type VersionInfo } from '@/api/files'
 import { readRangedDownloadJsonErrorDetails } from '@/lib/downloadResponse'
 import { GENERIC_ACTION_ERROR_DESCRIPTION, GENERIC_LOAD_ERROR_DESCRIPTION, getUserFacingErrorDescription } from '@/lib/apiMessages'
+import { getFileLoadErrorDescription } from '@/lib/fileActionErrors'
 import { useIsAdmin, useUser } from '@/stores/auth'
 import { formatBytes, formatDate, normalizePath, openUrlInNewTab } from '@/lib/utils'
 import { getInvalidHomeDirDescription, invalidHomeDirTitle, resolveUserHomeScope } from '@/lib/userScope'
@@ -202,7 +203,7 @@ function VersionRow({ version, index, isLatest, canRestore, onPreview, onRestore
           <Button
             size="sm"
             variant="bordered"
-            aria-label="预览此版本"
+            aria-label={`预览版本 ${version.version}`}
             onPress={onPreview}
             title="预览"
             className="btn-secondary btn-sm rounded-lg"
@@ -213,7 +214,7 @@ function VersionRow({ version, index, isLatest, canRestore, onPreview, onRestore
           <Button
             size="sm"
             variant="bordered"
-            aria-label="下载此版本"
+            aria-label={`下载版本 ${version.version}`}
             onPress={onDownload}
             title="下载此版本"
             className="btn-secondary btn-sm rounded-lg"
@@ -226,7 +227,7 @@ function VersionRow({ version, index, isLatest, canRestore, onPreview, onRestore
               size="sm"
               variant="flat"
               color="warning"
-              aria-label="恢复到此版本"
+              aria-label={`恢复到版本 ${version.version}`}
               onPress={onRestore}
               title="恢复到此版本"
               className="rounded-lg"
@@ -484,7 +485,7 @@ function VersionsPageContent({ authScopeKey, initialPath, isAdmin, hasInvalidHom
     if (previewError) {
       addToast({
         title: '预览版本暂不可用',
-        description: getUserFacingErrorDescription(new Error(previewError.message), GENERIC_LOAD_ERROR_DESCRIPTION),
+        description: getFileLoadErrorDescription(previewError, GENERIC_LOAD_ERROR_DESCRIPTION),
         color: 'warning',
       })
       return
@@ -518,7 +519,8 @@ function VersionsPageContent({ authScopeKey, initialPath, isAdmin, hasInvalidHom
       <div className="rounded-lg border border-divider bg-content1 p-4 shadow-[var(--shadow-soft)]">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:gap-4">
           <Input
-            placeholder="输入文件路径，例如: /documents/report.pdf"
+            aria-label="版本文件路径"
+            placeholder="输入文件路径，例如：/documents/report.pdf"
             value={searchPath}
             onValueChange={setSearchPath}
             onKeyDown={(e) => e.key === 'Enter' && handleSearch()}

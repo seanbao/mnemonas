@@ -31,7 +31,7 @@ describe('NotFoundPage', () => {
 
     it('displays helpful description', () => {
       render(<NotFoundPage />)
-      expect(screen.getByText(/您访问的页面可能已被移动或删除/)).toBeTruthy()
+      expect(screen.getByText(/该页面可能已被移动或删除/)).toBeTruthy()
     })
 
     it('renders go back button', () => {

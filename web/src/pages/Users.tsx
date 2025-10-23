@@ -462,7 +462,7 @@ function UserCard({
     : `${quota.percent}% 已用，${quota.detail}`
 
   return (
-    <Card className="card-meridian">
+    <Card className="card-mnemonas">
       <CardBody className="p-4">
         <div className="flex items-start justify-between gap-3">
           <div className="flex min-w-0 items-center gap-3">
@@ -1275,7 +1275,7 @@ export function UsersPage() {
   }
 
   return (
-    <div className="flex h-full min-h-0 flex-col p-4 sm:p-6">
+    <div className="flex min-h-full flex-col px-4 pb-28 pt-4 sm:px-6 sm:pt-6 lg:h-full lg:min-h-0 lg:pb-6">
       {/* Header */}
       <PageHeader
         title="用户管理"
@@ -1370,7 +1370,7 @@ export function UsersPage() {
       </div>
 
       {/* User List */}
-      <Card className="card-meridian min-h-0 flex-1 overflow-hidden">
+      <Card className="card-mnemonas flex-none overflow-visible lg:min-h-0 lg:flex-1 lg:overflow-hidden">
         <CardHeader className="flex flex-col items-start gap-3 border-b border-divider sm:flex-row sm:items-center sm:justify-between">
           <div>
             <h2 className="font-semibold text-foreground">用户列表</h2>
@@ -1559,7 +1559,7 @@ export function UsersPage() {
             </div>
           </div>
         </CardHeader>
-        <CardBody className="overflow-auto custom-scrollbar">
+        <CardBody className="overflow-visible custom-scrollbar lg:overflow-auto">
           {isLoading ? (
             <div className="flex items-center justify-center h-40">
               <div className="text-center">
@@ -1592,7 +1592,12 @@ export function UsersPage() {
                 description={getUserListEmptyDescription(userListFilter, isUserSearchActive)}
                 action={userListView.hasActiveControls
                   ? (
-                    <Button variant="bordered" className="rounded-lg" onPress={handleClearUserListView}>
+                    <Button
+                      variant="bordered"
+                      aria-label="清除空状态用户筛选"
+                      className="rounded-lg"
+                      onPress={handleClearUserListView}
+                    >
                       清除筛选
                     </Button>
                   )
