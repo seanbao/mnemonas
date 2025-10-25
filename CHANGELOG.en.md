@@ -21,7 +21,7 @@ This project follows [Semantic Versioning 2.0.0](https://semver.org/).
 - Storage page shows filesystem type, mount point, and backing device/dataset source.
 - User management with create/edit/delete, home directory and quota editing, password reset, and enable/disable flows.
 - Share management with link creation, password protection, expiration, access statistics, public share access, risk filtering, soon-expiry reminders, policy presets, and direct disable actions for high-risk links.
-- Settings for server, storage, retention, WebDAV, CDC parameters, scheduled Scrub, data-plane connection status, and copyable directory-access review records from saved matrices or unsaved-rule previews.
+- Settings for server, storage, retention, WebDAV, CDC parameters, scheduled Scrub, data-plane connection status, and copyable directory-access review records with current-browser recent history from saved matrices or unsaved-rule previews.
 - Public access wizard and security self-check entry point for HTTPS reverse proxy, trusted proxy hops, and share-domain configuration.
 - Desktop and mobile E2E coverage for the public access wizard.
 - Health and maintenance views for uptime, storage health, disk SMART/temperature/media-wear/missing-device status, scheduled Scrub status/retries, SMB preview runtime state, scrub, GC, object browsing, backup job health/schedules/retention/restore drills, and diagnostic bundle export.
@@ -31,7 +31,7 @@ This project follows [Semantic Versioning 2.0.0](https://semver.org/).
 - User management APIs, including user-level quotas. Non-admin Web/API uploads, copies, and trash restores return `QUOTA_EXCEEDED` when they exceed the configured quota and can emit `quota_exceeded` Webhook/Telegram/WeCom/DingTalk/SMTP alert events.
 - `storage.directory_quotas` directory hard limits and storage-page directory quota usage summaries. Web/API uploads, copies, moves, trash restores, version restores, and WebDAV PUT/COPY/MOVE operations check matching directory quotas before writing.
 - User groups and `storage.directory_access_rules` for shared-directory read/write grants by user, group, or role. Web/API, WebDAV users mode, search, shares, favorites, trash, and activity filtering use the same path authorization decision.
-- Effective access checks, unsaved-rule previews, per-path user matrix views, related-share impact checks, and copyable directory-access review records in the Settings API and Web settings page so admins can inspect why users can read or write a path and retain the review result.
+- Effective access checks, unsaved-rule previews, per-path user matrix views, related-share impact checks, copyable directory-access review records, and current-browser recent review history in the Settings API and Web settings page so admins can inspect why users can read or write a path and retain the review result.
 - WebDAV supports `auth_type = "users"` so clients can mount with MnemoNAS user accounts; non-admin mounts are rooted at the user's `home_dir`, guest accounts are read-only, and PUT/COPY writes honor user quotas.
 - Share-link APIs including public access, password checks, default expiry/access-limit policy, and share risk markers.
 - Activity log APIs, including scrub system events.
