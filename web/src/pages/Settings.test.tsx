@@ -7,6 +7,7 @@ import * as HeroUI from '@heroui/react'
 
 const mockAddToast = vi.fn()
 const originalClipboardDescriptor = Object.getOwnPropertyDescriptor(navigator, 'clipboard')
+const directoryAccessReviewHistoryStorageKey = 'mnemonas_directory_access_review_history:u1'
 
 const { mockUser } = vi.hoisted(() => ({
   mockUser: { id: 'u1', username: 'admin', role: 'admin' as const, email: 'admin@local', homeDir: '/' },
@@ -300,6 +301,7 @@ describe('SettingsPage', () => {
     mockUser.email = 'admin@local'
     mockUser.homeDir = '/'
     window.history.pushState({}, '', '/settings')
+    localStorage.removeItem(directoryAccessReviewHistoryStorageKey)
     mockGetSettings.mockResolvedValue(defaultSettingsResponse)
     mockGetSecurityCheck.mockResolvedValue(defaultSecurityCheckResponse)
     mockSendTestAlert.mockResolvedValue({
@@ -431,6 +433,7 @@ describe('SettingsPage', () => {
   })
 
   afterEach(() => {
+    localStorage.removeItem(directoryAccessReviewHistoryStorageKey)
     if (originalClipboardDescriptor) {
       Object.defineProperty(navigator, 'clipboard', originalClipboardDescriptor)
     } else {
@@ -5570,7 +5573,66 @@ describe('SettingsPage', () => {
       expect(copiedReport).toContain('写入: 允许 1 / 拒绝 1')
       expect(copiedReport).toContain('- alice (user · 组 family, home /users/alice): 读 允许 · 目录规则 · 规则 /team; 写 允许 · 目录规则 · 规则 /team')
       expect(copiedReport).toContain('- /team (文件夹 · 父级覆盖): 可访问 · 密码保护 · 访问 0/不限 · 创建者 u1')
-      expect(mockAddToast).toHaveBeenCalledWith({ title: '目录权限复核记录已复制', color: 'success' })
+      expect(mockAddToast).toHaveBeenCalledWith({ title: '目录权限复核记录已复制并保存', color: 'success' })
+
+      const historyRegion = within(screen.getByLabelText('目录权限近期复核历史'))
+      expect(historyRegion.getByText('/team/readme.txt')).toBeTruthy()
+      expect(historyRegion.getByText('用户矩阵')).toBeTruthy()
+      expect(historyRegion.getByText('用户 2')).toBeTruthy()
+      expect(historyRegion.getByText('可读 1')).toBeTruthy()
+      expect(historyRegion.getByText('可写 1')).toBeTruthy()
+
+      const storedHistory = JSON.parse(localStorage.getItem(directoryAccessReviewHistoryStorageKey) ?? '[]')
+      expect(storedHistory).toHaveLength(1)
+      expect(storedHistory[0]).toMatchObject({
+        title: '用户矩阵',
+        path: '/team/readme.txt',
+        preview: false,
+        users: 2,
+        readAllowed: 1,
+        writeAllowed: 1,
+        relatedShares: 1,
+      })
+
+      await user.click(historyRegion.getByRole('button', { name: '复制记录' }))
+
+      await waitFor(() => {
+        expect(writeText).toHaveBeenCalledTimes(2)
+      })
+      expect(writeText.mock.calls[1]?.[0]).toBe(copiedReport)
+      expect(mockAddToast).toHaveBeenCalledWith({ title: '目录权限历史记录已复制', color: 'success' })
+    })
+
+    it('loads and clears recent directory access review history', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      localStorage.setItem(directoryAccessReviewHistoryStorageKey, JSON.stringify([{
+        id: 'history-1',
+        recordedAt: '2026-06-20T08:30:00Z',
+        title: '用户矩阵',
+        path: '/team/readme.txt',
+        preview: false,
+        users: 2,
+        readAllowed: 1,
+        writeAllowed: 1,
+        relatedShares: 1,
+        reportText: '目录权限复核记录\n路径: /team/readme.txt',
+      }]))
+
+      render(<SettingsPage />)
+
+      await openTab(user, '版本保留')
+
+      const historyRegion = within(await screen.findByLabelText('目录权限近期复核历史'))
+      expect(historyRegion.getByText('/team/readme.txt')).toBeTruthy()
+      expect(historyRegion.getByText('用户矩阵')).toBeTruthy()
+
+      await user.click(historyRegion.getByRole('button', { name: '清空近期记录' }))
+
+      await waitFor(() => {
+        expect(localStorage.getItem(directoryAccessReviewHistoryStorageKey)).toBeNull()
+      })
+      expect(screen.getByText('暂无近期目录权限复核记录。')).toBeTruthy()
+      expect(mockAddToast).toHaveBeenCalledWith({ title: '目录权限近期复核历史已清空', color: 'success' })
     })
 
     it('rejects malformed directory access matrix paths before reporting', async () => {
