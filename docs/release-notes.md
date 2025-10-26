@@ -51,7 +51,7 @@ Release workflow 预期生成以下产物：
 - `./scripts/test-release-artifacts.sh`
 - WebDAV curl smoke safety test：`scripts/test-webdav-client-smoke.sh`
 - Release workflow 增量验证：`make workflows-check`、`make scripts-check`、`./scripts/check-secret-leaks.sh`、`make toolchains-check`、`git diff --check`
-- Playwright E2E：`369 passed`
+- Playwright E2E：`371 passed`
 - 前端单测：`3066 passed`
 - Docker build 和 `scripts/docker-smoke.sh`
 
