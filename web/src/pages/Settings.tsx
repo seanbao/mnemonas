@@ -49,9 +49,12 @@ import { useAuthStore, useUser } from '@/stores/auth'
 import {
   SettingsError,
   checkDirectoryAccess,
+  clearDirectoryAccessReviewRecords,
+  createDirectoryAccessReviewRecord,
   getSecurityCheck,
   getSettings,
   getWebDAVCredentials,
+  listDirectoryAccessReviewRecords,
   previewDirectoryAccess,
   reportDirectoryAccess,
   sendTestAlert,
@@ -61,6 +64,8 @@ import {
   type DirectoryAccessDecision,
   type DirectoryAccessReportData,
   type DirectoryAccessReportRequest,
+  type DirectoryAccessReviewRecord,
+  type DirectoryAccessReviewRecordCreateRequest,
   type DirectoryAccessPreviewRequest,
   type DirectoryAccessRule,
   type DirectoryAccessRole,
@@ -156,6 +161,8 @@ const PUBLIC_ACCESS_MAX_SHARE_DEFAULT_EXPIRES_MS = 720 * 60 * 60 * 1000
 const PUBLIC_ACCESS_SNIPPET_COPY_BUTTON_CLASS = 'h-8 w-8 min-w-8 shrink-0'
 const DIRECTORY_ACCESS_REVIEW_HISTORY_LIMIT = 5
 const DIRECTORY_ACCESS_REVIEW_HISTORY_STORAGE_PREFIX = 'mnemonas_directory_access_review_history'
+
+type DirectoryAccessReviewSaveResult = 'saved' | 'local' | 'failed'
 
 type SharePolicyRuleDraft = SharePolicyRule & {
   max_access_input?: string
@@ -2178,6 +2185,7 @@ function formatDirectoryAccessReportForClipboard(report: DirectoryAccessReportDa
 type DirectoryAccessReviewHistoryEntry = {
   id: string
   recordedAt: string
+  reviewer?: string
   title: string
   path: string
   preview: boolean
@@ -2199,6 +2207,7 @@ function isDirectoryAccessReviewHistoryEntry(value: unknown): value is Directory
   const entry = value as DirectoryAccessReviewHistoryEntry
   return typeof entry.id === 'string' && entry.id.trim() !== ''
     && typeof entry.recordedAt === 'string' && entry.recordedAt.trim() !== ''
+    && (entry.reviewer === undefined || typeof entry.reviewer === 'string')
     && typeof entry.title === 'string' && entry.title.trim() !== ''
     && typeof entry.path === 'string' && entry.path.trim() !== ''
     && typeof entry.preview === 'boolean'
@@ -2262,6 +2271,67 @@ function createDirectoryAccessReviewHistoryEntry(
   }
 }
 
+function createDirectoryAccessReviewRecordRequest(
+  report: DirectoryAccessReportData,
+  title: string,
+  reportText: string,
+): DirectoryAccessReviewRecordCreateRequest {
+  return {
+    title,
+    path: report.path,
+    preview: report.preview === true,
+    users: report.summary.users,
+    read_allowed: report.summary.read_allowed,
+    read_denied: report.summary.read_denied,
+    write_allowed: report.summary.write_allowed,
+    write_denied: report.summary.write_denied,
+    related_shares: report.summary.related_shares,
+    active_related_shares: report.summary.active_related_shares,
+    password_protected_shares: report.summary.password_protected_shares,
+    report_text: reportText,
+  }
+}
+
+function directoryAccessReviewRecordToHistoryEntry(record: DirectoryAccessReviewRecord): DirectoryAccessReviewHistoryEntry {
+  return {
+    id: record.id,
+    recordedAt: record.reviewed_at,
+    reviewer: record.reviewer,
+    title: record.title,
+    path: record.path,
+    preview: record.preview,
+    users: record.users,
+    readAllowed: record.read_allowed,
+    writeAllowed: record.write_allowed,
+    relatedShares: record.related_shares,
+    reportText: record.report_text,
+  }
+}
+
+function directoryAccessReviewHistoryKey(entry: DirectoryAccessReviewHistoryEntry): string {
+  return `${entry.path}\u0000${entry.title}\u0000${entry.preview ? 'preview' : 'saved'}`
+}
+
+function mergeDirectoryAccessReviewHistory(
+  primary: DirectoryAccessReviewHistoryEntry[],
+  fallback: DirectoryAccessReviewHistoryEntry[],
+): DirectoryAccessReviewHistoryEntry[] {
+  const seen = new Set<string>()
+  const merged: DirectoryAccessReviewHistoryEntry[] = []
+  for (const entry of [...primary, ...fallback]) {
+    const key = directoryAccessReviewHistoryKey(entry)
+    if (seen.has(key)) {
+      continue
+    }
+    seen.add(key)
+    merged.push(entry)
+    if (merged.length >= DIRECTORY_ACCESS_REVIEW_HISTORY_LIMIT) {
+      break
+    }
+  }
+  return merged
+}
+
 function formatDirectoryAccessReviewHistoryTime(value: string): string {
   const timestamp = Date.parse(value)
   if (Number.isNaN(timestamp)) {
@@ -2289,7 +2359,7 @@ function DirectoryAccessReviewHistory({
       <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <div className="text-sm font-semibold text-foreground">近期复核历史</div>
-          <div className="mt-1 text-xs text-default-500">保留当前浏览器最近 {DIRECTORY_ACCESS_REVIEW_HISTORY_LIMIT} 条目录权限矩阵或变更预览记录。</div>
+          <div className="mt-1 text-xs text-default-500">保留最近 {DIRECTORY_ACCESS_REVIEW_HISTORY_LIMIT} 条目录权限矩阵或变更预览记录；服务端不可用时使用当前浏览器记录。</div>
         </div>
         <Button
           size="sm"
@@ -2316,6 +2386,7 @@ function DirectoryAccessReviewHistory({
                 </div>
                 <div className="mt-1 flex flex-wrap gap-2 text-xs text-default-500">
                   <span>{formatDirectoryAccessReviewHistoryTime(entry.recordedAt)}</span>
+                  {entry.reviewer ? <span>复核人 {entry.reviewer}</span> : null}
                   <span>用户 {entry.users}</span>
                   <span>可读 {entry.readAllowed}</span>
                   <span>可写 {entry.writeAllowed}</span>
@@ -2348,18 +2419,26 @@ function DirectoryAccessReportResult({
   report: DirectoryAccessReportData
   title?: string
   ariaLabel?: string
-  onSaveReviewHistory?: (report: DirectoryAccessReportData, title: string, reportText: string) => boolean
+  onSaveReviewHistory?: (report: DirectoryAccessReportData, title: string, reportText: string) => DirectoryAccessReviewSaveResult | Promise<DirectoryAccessReviewSaveResult>
 }) {
   const shares = report.shares ?? []
   const handleCopyDirectoryAccessReport = async () => {
     try {
       const reportText = formatDirectoryAccessReportForClipboard(report, title)
       await copyTextToClipboard(reportText)
-      const saved = onSaveReviewHistory?.(report, title, reportText)
-      if (saved === false) {
+      const saved = await onSaveReviewHistory?.(report, title, reportText)
+      if (saved === 'failed') {
         addToast({
           title: '目录权限复核记录已复制',
           description: '近期历史写入失败，报告内容已复制到剪贴板。',
+          color: 'warning',
+        })
+        return
+      }
+      if (saved === 'local') {
+        addToast({
+          title: '目录权限复核记录已复制',
+          description: '服务端历史暂不可用，记录已保存在当前浏览器。',
           color: 'warning',
         })
         return
@@ -4219,6 +4298,21 @@ export function SettingsPage() {
     () => getDirectoryAccessReviewHistoryStorageKey(user?.id),
     [user?.id],
   )
+  const {
+    data: directoryAccessReviewRecordsData,
+    refetch: refetchDirectoryAccessReviewRecords,
+  } = useQuery({
+    queryKey: ['directory-access-review-records', user?.id ?? 'anonymous'],
+    queryFn: ({ signal }) => listDirectoryAccessReviewRecords({
+      limit: DIRECTORY_ACCESS_REVIEW_HISTORY_LIMIT,
+      signal,
+    }),
+    enabled: selectedTab === 'retention',
+    retry: false,
+  })
+  const serverDirectoryAccessReviewHistory = useMemo(() => (
+    directoryAccessReviewRecordsData?.items.map(directoryAccessReviewRecordToHistoryEntry) ?? []
+  ), [directoryAccessReviewRecordsData?.items])
   const [directoryAccessReviewHistory, setDirectoryAccessReviewHistory] = useState<DirectoryAccessReviewHistoryEntry[]>(() => (
     loadDirectoryAccessReviewHistory(getDirectoryAccessReviewHistoryStorageKey(user?.id))
   ))
@@ -4229,7 +4323,10 @@ export function SettingsPage() {
   const accessPreviewAbortControllerRef = useRef<AbortController | null>(null)
   const testAlertAbortControllerRef = useRef<AbortController | null>(null)
   useEffect(() => {
-    const entries = loadDirectoryAccessReviewHistory(directoryAccessReviewHistoryStorageKey)
+    const entries = mergeDirectoryAccessReviewHistory(
+      serverDirectoryAccessReviewHistory,
+      loadDirectoryAccessReviewHistory(directoryAccessReviewHistoryStorageKey),
+    )
     directoryAccessReviewHistoryRef.current = entries
     let cancelled = false
     queueMicrotask(() => {
@@ -4240,7 +4337,7 @@ export function SettingsPage() {
     return () => {
       cancelled = true
     }
-  }, [directoryAccessReviewHistoryStorageKey])
+  }, [directoryAccessReviewHistoryStorageKey, serverDirectoryAccessReviewHistory])
   useEffect(() => {
     directoryAccessReviewHistoryRef.current = directoryAccessReviewHistory
   }, [directoryAccessReviewHistory])
@@ -4473,7 +4570,7 @@ export function SettingsPage() {
     }
   }
 
-  const handleSaveDirectoryAccessReviewHistory = useCallback((report: DirectoryAccessReportData, title: string, reportText: string): boolean => {
+  const handleSaveDirectoryAccessReviewHistory = useCallback(async (report: DirectoryAccessReportData, title: string, reportText: string): Promise<DirectoryAccessReviewSaveResult> => {
     const entry = createDirectoryAccessReviewHistoryEntry(report, title, reportText)
     const nextEntries = [
       entry,
@@ -4483,12 +4580,28 @@ export function SettingsPage() {
     ].slice(0, DIRECTORY_ACCESS_REVIEW_HISTORY_LIMIT)
 
     if (!saveDirectoryAccessReviewHistory(directoryAccessReviewHistoryStorageKey, nextEntries)) {
-      return false
+      return 'failed'
     }
     directoryAccessReviewHistoryRef.current = nextEntries
     setDirectoryAccessReviewHistory(nextEntries)
-    return true
-  }, [directoryAccessReviewHistoryStorageKey])
+
+    try {
+      const record = await createDirectoryAccessReviewRecord(
+        createDirectoryAccessReviewRecordRequest(report, title, reportText),
+      )
+      const merged = mergeDirectoryAccessReviewHistory(
+        [directoryAccessReviewRecordToHistoryEntry(record)],
+        nextEntries,
+      )
+      saveDirectoryAccessReviewHistory(directoryAccessReviewHistoryStorageKey, merged)
+      directoryAccessReviewHistoryRef.current = merged
+      setDirectoryAccessReviewHistory(merged)
+      void refetchDirectoryAccessReviewRecords()
+      return 'saved'
+    } catch {
+      return 'local'
+    }
+  }, [directoryAccessReviewHistoryStorageKey, refetchDirectoryAccessReviewRecords])
 
   const handleCopyDirectoryAccessReviewHistory = useCallback(async (entry: DirectoryAccessReviewHistoryEntry) => {
     try {
@@ -4503,7 +4616,7 @@ export function SettingsPage() {
     }
   }, [])
 
-  const handleClearDirectoryAccessReviewHistory = useCallback(() => {
+  const handleClearDirectoryAccessReviewHistory = useCallback(async () => {
     try {
       window.localStorage.removeItem(directoryAccessReviewHistoryStorageKey)
     } catch {
@@ -4514,10 +4627,28 @@ export function SettingsPage() {
       })
       return
     }
-    directoryAccessReviewHistoryRef.current = []
-    setDirectoryAccessReviewHistory([])
-    addToast({ title: '目录权限近期复核历史已清空', color: 'success' })
-  }, [directoryAccessReviewHistoryStorageKey])
+    try {
+      await clearDirectoryAccessReviewRecords()
+      directoryAccessReviewHistoryRef.current = []
+      setDirectoryAccessReviewHistory([])
+      void refetchDirectoryAccessReviewRecords()
+      addToast({ title: '目录权限近期复核历史已清空', color: 'success' })
+    } catch {
+      if (serverDirectoryAccessReviewHistory.length > 0) {
+        directoryAccessReviewHistoryRef.current = serverDirectoryAccessReviewHistory
+        setDirectoryAccessReviewHistory(serverDirectoryAccessReviewHistory)
+        addToast({
+          title: '本机目录权限历史已清空',
+          description: '服务端历史清空失败，仍保留已持久化记录。',
+          color: 'warning',
+        })
+        return
+      }
+      directoryAccessReviewHistoryRef.current = []
+      setDirectoryAccessReviewHistory([])
+      addToast({ title: '目录权限近期复核历史已清空', color: 'success' })
+    }
+  }, [directoryAccessReviewHistoryStorageKey, refetchDirectoryAccessReviewRecords, serverDirectoryAccessReviewHistory])
 
   const [draftSettings, setDraftSettings] = useState(defaultSettings)
   const [isDirty, setIsDirty] = useState(false)

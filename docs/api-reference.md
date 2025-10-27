@@ -1245,6 +1245,9 @@ DELETE /api/v1/activity
 | `POST` | `/api/v1/settings/access-check` | 检查用户和路径的有效读写权限 |
 | `POST` | `/api/v1/settings/access-preview` | 使用未保存目录规则预览读写权限矩阵 |
 | `POST` | `/api/v1/settings/access-report` | 为一个路径生成所有用户的读写权限矩阵 |
+| `GET` | `/api/v1/settings/access-reviews` | 列出最近目录权限复核记录 |
+| `POST` | `/api/v1/settings/access-reviews` | 持久化一条目录权限复核记录 |
+| `DELETE` | `/api/v1/settings/access-reviews` | 清空目录权限复核记录 |
 | `POST` | `/api/v1/settings/alerts/test` | 通过已保存提醒通道发送测试提醒 |
 | `GET` | `/api/v1/settings/security-check` | 运行公网访问安全自检 |
 | `PUT` | `/api/v1/settings` | 更新设置 |
@@ -1492,6 +1495,65 @@ Access-preview 响应：
         "write": { "mode": "write", "allowed": false, "source": "directory_access_rule" }
       }
     ]
+  }
+}
+```
+
+### 目录权限复核历史
+
+`GET /api/v1/settings/access-reviews` 返回最近目录权限复核记录，支持 `limit` 和 `offset` 查询参数。`limit` 范围为 1-100，默认 20。
+
+`POST /api/v1/settings/access-reviews` 接受 Settings 页面生成的目录权限矩阵或未保存规则预览摘要。服务端使用当前认证账户作为 `reviewer`，设置 `reviewed_at`，并持久化最多最近 100 条记录。相同复核人、路径、标题和预览标记的记录会由新记录替换旧记录。
+
+`DELETE /api/v1/settings/access-reviews` 清空已持久化的目录权限复核记录。
+
+创建请求示例：
+
+```json
+{
+  "title": "用户矩阵",
+  "path": "/team/report.pdf",
+  "preview": false,
+  "users": 2,
+  "read_allowed": 1,
+  "read_denied": 1,
+  "write_allowed": 1,
+  "write_denied": 1,
+  "related_shares": 1,
+  "active_related_shares": 1,
+  "password_protected_shares": 1,
+  "report_text": "目录权限复核记录\n路径: /team/report.pdf"
+}
+```
+
+列表响应示例：
+
+```json
+{
+  "success": true,
+  "data": {
+    "items": [
+      {
+        "id": "review-id",
+        "reviewed_at": "2026-06-20T08:30:00Z",
+        "reviewer": "admin",
+        "title": "用户矩阵",
+        "path": "/team/report.pdf",
+        "preview": false,
+        "users": 2,
+        "read_allowed": 1,
+        "read_denied": 1,
+        "write_allowed": 1,
+        "write_denied": 1,
+        "related_shares": 1,
+        "active_related_shares": 1,
+        "password_protected_shares": 1,
+        "report_text": "目录权限复核记录\n路径: /team/report.pdf"
+      }
+    ],
+    "total": 1,
+    "limit": 20,
+    "offset": 0
   }
 }
 ```

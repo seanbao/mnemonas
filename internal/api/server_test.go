@@ -22867,6 +22867,176 @@ func TestServer_ActivityReviewRecords_RejectsInvalidRecord(t *testing.T) {
 	}
 }
 
+func TestServer_DirectoryAccessReviewRecords_AdminCanCreateListAndClear(t *testing.T) {
+	server, _, _, _, _ := setupAuthServer(t)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/settings/access-reviews", strings.NewReader(`{
+		"title": "用户矩阵",
+		"path": "/team/readme.txt",
+		"preview": false,
+		"users": 2,
+		"read_allowed": 1,
+		"read_denied": 1,
+		"write_allowed": 1,
+		"write_denied": 1,
+		"related_shares": 1,
+		"active_related_shares": 1,
+		"password_protected_shares": 1,
+		"report_text": "目录权限复核记录\n路径: /team/readme.txt"
+	}`))
+	req.Header.Set("Authorization", "Bearer "+issueAccessTokenWithoutActivity(t, server, "admin"))
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create directory access review status = %d, want %d: %s", w.Code, http.StatusCreated, w.Body.String())
+	}
+	var created struct {
+		Data activity.DirectoryAccessReviewRecord `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &created); err != nil {
+		t.Fatalf("failed to parse created directory access review response: %v", err)
+	}
+	if created.Data.Reviewer != "admin" {
+		t.Fatalf("reviewer = %q, want admin", created.Data.Reviewer)
+	}
+	if created.Data.Path != "/team/readme.txt" || created.Data.Title != "用户矩阵" {
+		t.Fatalf("unexpected directory access review context: %+v", created.Data)
+	}
+	if created.Data.ReadAllowed != 1 || created.Data.WriteDenied != 1 || created.Data.PasswordProtectedShares != 1 {
+		t.Fatalf("directory access review lost summary fields: %+v", created.Data)
+	}
+
+	listReq := httptest.NewRequest(http.MethodGet, "/api/v1/settings/access-reviews?limit=5", nil)
+	listReq.Header.Set("Authorization", "Bearer "+issueAccessTokenWithoutActivity(t, server, "admin"))
+	listRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(listRec, listReq)
+
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("list directory access reviews status = %d, want %d: %s", listRec.Code, http.StatusOK, listRec.Body.String())
+	}
+	var listed struct {
+		Data struct {
+			Items []activity.DirectoryAccessReviewRecord `json:"items"`
+			Total int                                    `json:"total"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(listRec.Body.Bytes(), &listed); err != nil {
+		t.Fatalf("failed to parse directory access review list response: %v", err)
+	}
+	if listed.Data.Total != 1 || len(listed.Data.Items) != 1 || listed.Data.Items[0].ID != created.Data.ID {
+		t.Fatalf("expected one listed directory access review, got %s", listRec.Body.String())
+	}
+
+	clearReq := httptest.NewRequest(http.MethodDelete, "/api/v1/settings/access-reviews", nil)
+	clearReq.Header.Set("Authorization", "Bearer "+issueAccessTokenWithoutActivity(t, server, "admin"))
+	clearRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(clearRec, clearReq)
+	if clearRec.Code != http.StatusOK {
+		t.Fatalf("clear directory access reviews status = %d, want %d: %s", clearRec.Code, http.StatusOK, clearRec.Body.String())
+	}
+
+	listAfterClearReq := httptest.NewRequest(http.MethodGet, "/api/v1/settings/access-reviews", nil)
+	listAfterClearReq.Header.Set("Authorization", "Bearer "+issueAccessTokenWithoutActivity(t, server, "admin"))
+	listAfterClearRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(listAfterClearRec, listAfterClearReq)
+	if listAfterClearRec.Code != http.StatusOK {
+		t.Fatalf("list directory access reviews after clear status = %d, want %d: %s", listAfterClearRec.Code, http.StatusOK, listAfterClearRec.Body.String())
+	}
+	var cleared struct {
+		Data struct {
+			Items []activity.DirectoryAccessReviewRecord `json:"items"`
+			Total int                                    `json:"total"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(listAfterClearRec.Body.Bytes(), &cleared); err != nil {
+		t.Fatalf("failed to parse cleared directory access review list response: %v", err)
+	}
+	if cleared.Data.Total != 0 || len(cleared.Data.Items) != 0 {
+		t.Fatalf("expected cleared directory access reviews, got %s", listAfterClearRec.Body.String())
+	}
+}
+
+func TestServer_DirectoryAccessReviewRecords_RejectsInvalidRecord(t *testing.T) {
+	server, _, _, _, _ := setupAuthServer(t)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/settings/access-reviews", strings.NewReader(`{
+		"title": "用户矩阵",
+		"path": "/team/../private",
+		"users": 1,
+		"read_allowed": 1,
+		"read_denied": 0,
+		"write_allowed": 1,
+		"write_denied": 0,
+		"report_text": "目录权限复核记录"
+	}`))
+	req.Header.Set("Authorization", "Bearer "+issueAccessTokenWithoutActivity(t, server, "admin"))
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("invalid directory access review status = %d, want %d: %s", w.Code, http.StatusBadRequest, w.Body.String())
+	}
+
+	mismatchReq := httptest.NewRequest(http.MethodPost, "/api/v1/settings/access-reviews", strings.NewReader(`{
+		"title": "用户矩阵",
+		"path": "/team/readme.txt",
+		"users": 2,
+		"read_allowed": 1,
+		"read_denied": 0,
+		"write_allowed": 1,
+		"write_denied": 1,
+		"report_text": "目录权限复核记录"
+	}`))
+	mismatchReq.Header.Set("Authorization", "Bearer "+issueAccessTokenWithoutActivity(t, server, "admin"))
+	mismatchRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(mismatchRec, mismatchReq)
+	if mismatchRec.Code != http.StatusBadRequest {
+		t.Fatalf("mismatched directory access review status = %d, want %d: %s", mismatchRec.Code, http.StatusBadRequest, mismatchRec.Body.String())
+	}
+}
+
+func TestServer_DirectoryAccessReviewRecords_RejectsNonAdmin(t *testing.T) {
+	server, _, _, username, _ := setupAuthServer(t)
+
+	for _, tc := range []struct {
+		method string
+		path   string
+		body   string
+	}{
+		{
+			method: http.MethodGet,
+			path:   "/api/v1/settings/access-reviews",
+		},
+		{
+			method: http.MethodPost,
+			path:   "/api/v1/settings/access-reviews",
+			body: `{
+				"title": "用户矩阵",
+				"path": "/team/readme.txt",
+				"users": 1,
+				"read_allowed": 1,
+				"read_denied": 0,
+				"write_allowed": 1,
+				"write_denied": 0,
+				"report_text": "目录权限复核记录"
+			}`,
+		},
+		{
+			method: http.MethodDelete,
+			path:   "/api/v1/settings/access-reviews",
+		},
+	} {
+		req := httptest.NewRequest(tc.method, tc.path, strings.NewReader(tc.body))
+		req.Header.Set("Authorization", "Bearer "+issueAccessTokenWithoutActivity(t, server, username))
+		w := httptest.NewRecorder()
+		server.Router().ServeHTTP(w, req)
+		if w.Code != http.StatusForbidden {
+			t.Fatalf("%s %s as non-admin status = %d, want %d: %s", tc.method, tc.path, w.Code, http.StatusForbidden, w.Body.String())
+		}
+	}
+}
+
 func TestServer_ListActivity_RecreatedUsernameDoesNotSeeLegacyEntries(t *testing.T) {
 	server := newActivityOnlyAuthServer(t)
 	username := "tester"
