@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi, type Mock } from 'vitest'
-import { checkDirectoryAccess, getSecurityCheck, getSettings, getWebDAVCredentials, previewDirectoryAccess, reportDirectoryAccess, sendTestAlert, SettingsError, updateSettings, type SettingsData } from './settings'
+import { checkDirectoryAccess, clearDirectoryAccessReviewRecords, createDirectoryAccessReviewRecord, getSecurityCheck, getSettings, getWebDAVCredentials, listDirectoryAccessReviewRecords, previewDirectoryAccess, reportDirectoryAccess, sendTestAlert, SettingsError, updateSettings, type SettingsData } from './settings'
 
 vi.mock('./auth', () => ({
   authFetch: vi.fn(),
@@ -1178,6 +1178,158 @@ describe('Settings API', () => {
     })
 
     await expect(reportDirectoryAccess({ path: '/team/readme.txt' })).rejects.toThrow(invalidResponseMessage)
+  })
+
+  it('lists persisted directory access review records', async () => {
+    const controller = new AbortController()
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        success: true,
+        data: {
+          items: [{
+            id: 'review-1',
+            reviewed_at: '2026-06-20T08:30:00Z',
+            reviewer: 'admin',
+            title: '用户矩阵',
+            path: '/team/readme.txt',
+            preview: false,
+            users: 2,
+            read_allowed: 1,
+            read_denied: 1,
+            write_allowed: 1,
+            write_denied: 1,
+            related_shares: 1,
+            active_related_shares: 1,
+            password_protected_shares: 1,
+            report_text: '目录权限复核记录\n路径: /team/readme.txt',
+          }],
+          total: 1,
+          limit: 5,
+          offset: 0,
+        },
+      }),
+    })
+
+    const result = await listDirectoryAccessReviewRecords({ limit: 5, signal: controller.signal })
+
+    expect(result.total).toBe(1)
+    expect(result.items[0]?.reviewer).toBe('admin')
+    expect(result.items[0]?.read_allowed).toBe(1)
+    expect(mockAuthFetch).toHaveBeenCalledWith('/api/v1/settings/access-reviews?limit=5&offset=0', {
+      signal: controller.signal,
+    })
+  })
+
+  it('creates persisted directory access review records', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        success: true,
+        data: {
+          id: 'review-1',
+          reviewed_at: '2026-06-20T08:30:00Z',
+          reviewer: 'admin',
+          title: '用户矩阵',
+          path: '/team/readme.txt',
+          preview: false,
+          users: 2,
+          read_allowed: 1,
+          read_denied: 1,
+          write_allowed: 1,
+          write_denied: 1,
+          related_shares: 1,
+          active_related_shares: 1,
+          password_protected_shares: 1,
+          report_text: '目录权限复核记录\n路径: /team/readme.txt',
+        },
+      }),
+    })
+
+    const result = await createDirectoryAccessReviewRecord({
+      title: '用户矩阵',
+      path: '/team/readme.txt',
+      preview: false,
+      users: 2,
+      read_allowed: 1,
+      read_denied: 1,
+      write_allowed: 1,
+      write_denied: 1,
+      related_shares: 1,
+      active_related_shares: 1,
+      password_protected_shares: 1,
+      report_text: '目录权限复核记录\n路径: /team/readme.txt',
+    })
+
+    expect(result.id).toBe('review-1')
+    expect(mockAuthFetch).toHaveBeenCalledWith('/api/v1/settings/access-reviews', expect.objectContaining({
+      method: 'POST',
+      body: JSON.stringify({
+        title: '用户矩阵',
+        path: '/team/readme.txt',
+        preview: false,
+        users: 2,
+        read_allowed: 1,
+        read_denied: 1,
+        write_allowed: 1,
+        write_denied: 1,
+        related_shares: 1,
+        active_related_shares: 1,
+        password_protected_shares: 1,
+        report_text: '目录权限复核记录\n路径: /team/readme.txt',
+      }),
+    }))
+  })
+
+  it('clears persisted directory access review records', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        success: true,
+        message: 'directory access review records cleared',
+      }),
+    })
+
+    const result = await clearDirectoryAccessReviewRecords()
+
+    expect(result.success).toBe(true)
+    expect(result.message).toBe('directory access review records cleared')
+    expect(mockAuthFetch).toHaveBeenCalledWith('/api/v1/settings/access-reviews', {
+      method: 'DELETE',
+    })
+  })
+
+  it('rejects malformed directory access review record responses', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        success: true,
+        data: {
+          items: [{
+            id: 'review-1',
+            reviewed_at: '2026-06-20T08:30:00Z',
+            reviewer: 'admin',
+            title: '用户矩阵',
+            path: '/team/readme.txt',
+            preview: false,
+            users: 2,
+            read_allowed: 1,
+            read_denied: 0,
+            write_allowed: 1,
+            write_denied: 1,
+            related_shares: 0,
+            active_related_shares: 0,
+            password_protected_shares: 0,
+            report_text: '目录权限复核记录',
+          }],
+          total: 1,
+          limit: 5,
+          offset: 0,
+        },
+      }),
+    })
+
+    await expect(listDirectoryAccessReviewRecords({ limit: 5 })).rejects.toThrow(invalidResponseMessage)
   })
 
   it.each([
