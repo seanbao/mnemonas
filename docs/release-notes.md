@@ -40,7 +40,7 @@ Release workflow 预期生成以下产物：
 
 当前硬化分支已有以下验证证据；最终发布前应以最新 tag、Release workflow 结果和必要的环境验证为准：
 
-最近本地完整验证快照：验证目标 `1e0df1f5bbf1`，`GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master` 通过，覆盖 `make check`、依赖安全扫描、示例配置、public-access 模板、公网 go-live 有效 DNS label、重复尾点、完整域名、同域 HTTPS 重定向变体、doctor public-domain DNS label 边界与 go-live/doctor `localhost`/IPv4 字面量拒绝校验、proto 再生成稳定性、Rust fmt/test/clippy、前端 lint/typecheck/unit/build、Playwright 371 个 E2E 用例、systemd 升级/回退 installer 回归、WebDAV COPY/MOVE 后内容一致性和 MOVE 源路径清理 smoke、恢复演练清理失败警告路径、恢复完成弹窗导出摘要路径、恢复切换记录复制路径、用户配额总览路径、分享复核摘要复制路径、目录权限复核记录复制与近期历史路径、当前范围复核历史入口和布局完整性验证、Docker build 和 Docker smoke。Docker smoke 使用 Docker 自动分配的 loopback 端口 `http://127.0.0.1:32823`。
+最近本地完整验证快照：验证目标 `83eb526318cc`，`GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master` 通过，覆盖 `make check`、依赖安全扫描、示例配置、public-access 模板、公网 go-live 有效 DNS label、重复尾点、完整域名、同域 HTTPS 重定向变体、doctor public-domain DNS label 边界与 go-live/doctor `localhost`/IPv4 字面量拒绝校验、proto 再生成稳定性、Rust fmt/test/clippy、前端 lint/typecheck/unit/build、Playwright 371 个 E2E 用例、systemd 升级/回退 installer 回归、WebDAV COPY/MOVE 后内容一致性和 MOVE 源路径清理 smoke、恢复演练清理失败警告路径、恢复完成弹窗导出摘要路径、恢复切换记录复制路径、用户配额总览路径、分享复核摘要复制路径、目录权限复核记录复制、后端持久化近期历史 API 与本地回退路径、当前范围复核历史入口和布局完整性验证、Docker build 和 Docker smoke。Docker smoke 使用 Docker 自动分配的 loopback 端口 `http://127.0.0.1:32824`。
 
 - `GOTOOLCHAIN=local ./scripts/verify-changed.sh`
 - `GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master`
@@ -52,7 +52,7 @@ Release workflow 预期生成以下产物：
 - WebDAV curl smoke safety test：`scripts/test-webdav-client-smoke.sh`
 - Release workflow 增量验证：`make workflows-check`、`make scripts-check`、`./scripts/check-secret-leaks.sh`、`make toolchains-check`、`git diff --check`
 - Playwright E2E：`371 passed`
-- 前端单测：`3066 passed`
+- 前端单测：`3071 passed`
 - Docker build 和 `scripts/docker-smoke.sh`
 
 最终发布前如代码、脚本、配置、文档或 workflow 再次变更，应重跑对应验证。
