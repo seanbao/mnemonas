@@ -6,14 +6,14 @@
 
 ## 摘要
 
-本轮发布候选重点强化 MnemoNAS 作为自托管 NAS 的稳定性、公开访问安全边界、部署可验证性和文档可维护性。当前硬化分支按风险面拆分为可审阅提交，并已通过分支范围验证。
+本轮发布候选重点强化 MnemoNAS 作为自托管 NAS 的稳定性、公开访问安全边界、部署可验证性和文档可维护性。当前硬化分支按风险面拆分为可审阅提交，并已通过完整分支范围验证。
 
 ## 主要变化
 
 - 加强路径、归档下载、WebDAV、公开分享、工作区、CAS 和备份恢复相关边界检查，覆盖符号链接、路径穿越、百分号编码点段、控制字符和回滚错误场景。
 - 完善认证、用户、主目录、目录配额、目录访问规则、分享策略和会话安全默认值的后端与前端覆盖。
 - 提升 Web 可见质量，核心页面、公开入口、移动端布局、基础可访问性、运行时错误、失败请求和破碎可见文本已纳入 Playwright 扫描。
-- 加固 systemd、Docker、反向代理、公网访问模板、doctor、release package 和 release artifact 验证路径。
+- 加固 systemd、Docker、反向代理、公网访问模板、doctor、release package 和 release artifact 验证路径；Release workflow 会在创建 GitHub Release 前校验归档、checksums 和必需目标集合。
 - 精简并同步中英文文档，补齐部署、配置、FAQ、路线图、安全、硬化进度和发布前审查入口。
 
 ## 发布产物
@@ -29,14 +29,15 @@ Release workflow 预期生成以下产物：
 
 ## 发布前验证
 
-当前硬化分支已通过以下验证：
+当前硬化分支已有以下验证证据；最终发布前应以最新 tag、Release workflow 结果和必要的环境验证为准：
 
 - `GOTOOLCHAIN=local ./scripts/verify-changed.sh`
-- `GOTOOLCHAIN=local timeout 45m ./scripts/verify-changed.sh --base master`
+- `GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master`
 - `make scripts-check`
 - `make docs-check`
 - `./scripts/test-release-package.sh`
 - `./scripts/test-release-artifacts.sh`
+- Release workflow 增量验证：`make workflows-check`、`make scripts-check`、`./scripts/check-secret-leaks.sh`、`make toolchains-check`、`git diff --check`
 - Playwright E2E：`369 passed`
 - 前端单测：`3054 passed`
 - Docker build 和 `scripts/docker-smoke.sh`
