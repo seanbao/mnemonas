@@ -162,7 +162,7 @@ classify_file() {
 	local file="$1"
 
 	case "$file" in
-		README.md|README.en.md|CHANGELOG.md|CHANGELOG.en.md|SECURITY.md|SECURITY.zh-CN.md|SUPPORT.md|SUPPORT.en.md|.github/copilot-instructions.md|docs/*|web/README.md|web/README.en.md|deploy/public-access/README.md|deploy/public-access/README.en.md)
+		README.md|README.en.md|CHANGELOG.md|CHANGELOG.en.md|CONTRIBUTING.md|CONTRIBUTING.en.md|SECURITY.md|SECURITY.zh-CN.md|SUPPORT.md|SUPPORT.en.md|.github/copilot-instructions.md|docs/*|web/README.md|web/README.en.md|deploy/public-access/README.md|deploy/public-access/README.en.md)
 			append_to_group "docs" "$file"
 			return 0
 			;;
@@ -182,7 +182,7 @@ classify_file() {
 			append_to_group "feat-core" "$file"
 			return 0
 			;;
-		Dockerfile|.dockerignore|docker-compose.yml|docker-compose.yaml|mnemonas.example.toml|deploy/public-access/*|scripts/install-systemd.sh|scripts/uninstall-systemd.sh|scripts/mnemonas-doctor.sh|scripts/mnemonas-docker-preflight.sh|scripts/docker-quickstart.sh|scripts/docker-smoke.sh|scripts/docker-start.sh|scripts/setup-reverse-proxy.sh|scripts/mnemonas-dataplane-start.sh|scripts/verify-release-artifacts.sh|scripts/dev.sh|scripts/benchmark.sh|scripts/test-systemd-*.sh|scripts/test-docker-*.sh|scripts/test-dataplane-start.sh|scripts/test-dev-safety.sh|scripts/test-reverse-proxy-safety.sh|scripts/test-public-access-templates.sh|scripts/test-release-package.sh|scripts/test-release-artifacts.sh|scripts/test-benchmark-safety.sh)
+		Dockerfile|.dockerignore|docker-compose.yml|docker-compose.yaml|mnemonas.example.toml|deploy/public-access/*|scripts/install-systemd.sh|scripts/uninstall-systemd.sh|scripts/mnemonas-doctor.sh|scripts/mnemonas-docker-preflight.sh|scripts/docker-quickstart.sh|scripts/docker-smoke.sh|scripts/docker-start.sh|scripts/setup-reverse-proxy.sh|scripts/mnemonas-dataplane-start.sh|scripts/verify-release-artifacts.sh|scripts/release-readiness.sh|scripts/dev.sh|scripts/benchmark.sh|scripts/test-systemd-*.sh|scripts/test-docker-*.sh|scripts/test-dataplane-start.sh|scripts/test-dev-safety.sh|scripts/test-reverse-proxy-safety.sh|scripts/test-public-access-templates.sh|scripts/test-release-package.sh|scripts/test-release-artifacts.sh|scripts/test-release-readiness.sh|scripts/test-benchmark-safety.sh)
 			append_to_group "build-docker-deploy" "$file"
 			return 0
 			;;
