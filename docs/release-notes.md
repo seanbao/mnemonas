@@ -10,10 +10,10 @@
 
 ## 主要变化
 
-- 加强路径、归档下载、WebDAV、公开分享、工作区、CAS 和备份恢复相关边界检查，覆盖符号链接、路径穿越、百分号编码点段、控制字符和回滚错误场景。
+- 加强路径、归档下载、WebDAV、公开分享、工作区、CAS 和备份恢复相关边界检查，覆盖符号链接、路径穿越、百分号编码点段、控制字符和回滚错误情况。
 - 完善认证、用户、主目录、目录配额、目录访问规则、分享策略和会话安全默认值的后端与前端覆盖。
 - 提升 Web 可见质量，核心页面、公开入口、移动端布局、基础可访问性、运行时错误、失败请求和破碎可见文本已纳入 Playwright 扫描。
-- 加固 systemd、Docker、反向代理、公网访问模板、doctor、release package 和 release artifact 验证路径；Release workflow 会在创建 GitHub Release 前校验归档、checksums 和必需目标集合。
+- 加固 systemd、Docker、反向代理、公网访问模板、doctor、release package 和 release artifact 验证路径；Release workflow 会在创建 GitHub Release 前校验归档、checksums、必需目标集合、归档条目类型、重复条目和歧义路径。
 - 精简并同步中英文文档，补齐部署、配置、FAQ、路线图、安全、硬化进度和发布前审查入口。
 
 ## 发布产物

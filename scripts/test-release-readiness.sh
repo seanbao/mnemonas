@@ -172,6 +172,20 @@ assert_file_contains "$output_dir/evidence-only.out" "only validation evidence d
 assert_file_contains "$output_dir/evidence-only.out" "[release-readiness] validation-diff:"
 assert_file_contains "$output_dir/evidence-only.out" "release readiness summary completed"
 
+git checkout -q -b release-docs
+printf '\n- Release artifact verifier coverage updated.\n' >>CHANGELOG.en.md
+printf '\n- Release artifact verifier coverage updated.\n' >>docs/release-notes.en.md
+printf '\n- Release artifact verifier coverage updated.\n' >>CHANGELOG.md
+printf '\n- Release artifact verifier coverage updated.\n' >>docs/release-notes.md
+git add CHANGELOG.en.md CHANGELOG.md docs/release-notes.en.md docs/release-notes.md
+git commit -q -m "docs: update release documentation"
+
+./scripts/release-readiness.sh --base "$validation_target" >"$output_dir/release-docs-only.out" 2>"$output_dir/release-docs-only.err"
+assert_file_contains "$output_dir/release-docs-only.out" "[release-readiness] validation:"
+assert_file_contains "$output_dir/release-docs-only.out" "only release documentation changed since target"
+assert_file_contains "$output_dir/release-docs-only.out" "[release-readiness] validation-diff:"
+
+git checkout -q master
 git checkout -q -b release-readiness
 printf '# docs\n' >README.md
 git add README.md
