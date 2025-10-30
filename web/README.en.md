@@ -7,7 +7,7 @@ MnemoNAS frontend application built with React 19, TypeScript, and Vite.
 ## Technology Stack
 
 - **Framework**: React 19 + TypeScript
-- **Build tool**: Vite 7
+- **Build tool**: Vite 8
 - **UI components**: HeroUI
 - **Styling**: Tailwind CSS v4
 - **State**: Zustand + TanStack Query
@@ -57,6 +57,8 @@ export MNEMONAS_E2E_BACKEND_URL=http://127.0.0.1:8080
 export MNEMONAS_E2E_FRONTEND_URL=http://127.0.0.1:5173
 export E2E_USERNAME=admin
 export E2E_PASSWORD_FILE="$HOME/.mnemonas/.mnemonas/initial-password.txt"
+# If auth.users_file is stored at the storage.root top level, use:
+# export E2E_PASSWORD_FILE="$HOME/.mnemonas/initial-password.txt"
 # If the admin password was changed and no password file is used:
 # export E2E_PASSWORD="<admin-password>"
 
@@ -70,12 +72,13 @@ Notes:
 
 - Protected-page tests prefer `E2E_PASSWORD` and also support `E2E_PASSWORD_FILE`.
 - The default configuration starts an isolated test backend, builds the frontend, serves it through Vite preview, generates an initial password, and writes it under `MNEMONAS_E2E_ROOT`.
+- The default isolated test environment treats authentication setup failures as test failures, so protected-page regressions are not hidden as skipped tests.
 - The isolated backend uses a 2-hour access-token lifetime and a 168-hour refresh-token lifetime to reduce shared storageState expiration risk during long parallel test runs.
 - `MNEMONAS_E2E_ROOT` must be under `/tmp` or the current checkout and must not contain `..` or symlink path components.
 - The default isolated ports are backend `18180` and frontend `14173`; `MNEMONAS_E2E_BACKEND_URL` and `MNEMONAS_E2E_FRONTEND_URL` can adjust isolated test server ports. `MNEMONAS_E2E_REUSE_EXISTING=1` is required to skip automatic startup.
 - Local Playwright runs use 4 workers by default; set `MNEMONAS_E2E_WORKERS` to a positive integer to override it. CI always uses 1 worker.
-- Without `E2E_PASSWORD_FILE`, Playwright tries the default initial-password path `~/.mnemonas/.mnemonas/initial-password.txt`.
-- Protected-page tests skip automatically when no admin password is available.
+- Without `E2E_PASSWORD_FILE`, Playwright tries `~/.mnemonas/.mnemonas/initial-password.txt` and then `~/.mnemonas/initial-password.txt`. The first path matches the default `auth.users_file` layout; the second supports layouts that store the users file at the `storage.root` top level. When `E2E_PASSWORD_FILE` is set explicitly, that file is authoritative; missing or empty files do not fall back to the defaults.
+- When reusing an existing service, protected-page tests may skip automatically if no admin password is available. Set `MNEMONAS_E2E_ALLOW_AUTH_SKIP=0` to force the same failure behavior in reused environments. Set `MNEMONAS_E2E_ALLOW_AUTH_SKIP=1` only when skipped protected-page checks are intentional.
 
 Screenshot regression coverage uses Playwright `toHaveScreenshot`; update baselines with `npm run test:e2e:update`.
 
@@ -99,8 +102,9 @@ e2e/                  # Playwright E2E tests
 
 ## Code Quality
 
-- ESLint: `npm run lint`
-- Pre-commit checks through husky and lint-staged
+- ESLint: `npm run lint`. The command first checks Node tool script syntax under `web/scripts/` and verifies that the production native `<button>` rule still rejects buttons without an explicit `type`.
+- TypeScript typecheck: `npm run typecheck`, covering app code, Playwright config, and E2E helpers.
+- In a Git checkout, the `npm ci` prepare phase installs the `web/.husky` pre-commit hook. The hook enters `web/` and uses `lint-staged` to run ESLint fixes and the full `npm run typecheck` for staged TypeScript files. Non-Git environments, production dependency installs such as `NODE_ENV=production`, and disabled Git hooks skip hook installation; run the checks manually in those cases.
 
 ## Dependency Maintenance
 
@@ -109,6 +113,7 @@ The frontend stack uses React 19, Vite, Tailwind CSS v4, HeroUI, TanStack Query,
 ```bash
 npm outdated --long
 npm run lint
+npm run typecheck
 npm run test:run
 npm run build
 npm run test:e2e

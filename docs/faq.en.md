@@ -233,7 +233,7 @@ curl -X POST \
 
 MnemoNAS uses streaming paths. Practical limits come from disk space, clients, reverse proxy settings, and the underlying filesystem.
 
-For large files, test upload, download, and restore with the expected workload. Public deployments must configure reverse proxy settings such as Nginx `client_max_body_size`, `proxy_request_buffering`, and timeouts.
+Large-file paths should be tested with the expected upload, download, and restore workload. Public deployments must configure reverse proxy settings such as Nginx `client_max_body_size`, `proxy_request_buffering`, and timeouts.
 
 ## Performance and Maintenance
 

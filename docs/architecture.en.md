@@ -166,7 +166,7 @@ The UI is organized around repeated file-management workflows:
 - Albums and thumbnails.
 - Shares, favorites, activity, settings, and maintenance views.
 
-The frontend talks to `/api/v1/*` and uses the same origin as `nasd` in production. During development, Vite serves the frontend on `5173` and proxies API calls to `8080`.
+The frontend talks to `/api/v1/*` and uses the same origin as `nasd` in production. In production, `nasd` serves the built static Web UI, keeps API, WebDAV, health, and direct share API routes ahead of the SPA fallback, and sends `Cache-Control: no-cache` for `index.html` so browser upgrades revalidate the application entry. During development, Vite serves the frontend on `5173` and proxies API calls to `8080`.
 
 ## Related Documents
 

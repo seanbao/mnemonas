@@ -20,7 +20,7 @@ This project follows [Semantic Versioning 2.0.0](https://semver.org/).
 - Activity log with filters, details, statistics, and disk-health system events.
 - Storage page shows filesystem type, mount point, and backing device/dataset source.
 - User management with create/edit/delete, home directory and quota editing, password reset, and enable/disable flows.
-- Share management with link creation, password protection, expiration, access statistics, public share access, risk filtering, soon-expiry reminders, policy presets, and one-click disable for high-risk links.
+- Share management with link creation, password protection, expiration, access statistics, public share access, risk filtering, soon-expiry reminders, policy presets, and direct disable actions for high-risk links.
 - Settings for server, storage, retention, WebDAV, CDC parameters, scheduled Scrub, and data-plane connection status.
 - Public access wizard and security self-check entry point for HTTPS reverse proxy, trusted proxy hops, and share-domain configuration.
 - Desktop and mobile E2E coverage for the public access wizard.
@@ -47,12 +47,16 @@ This project follows [Semantic Versioning 2.0.0](https://semver.org/).
 - Release workflow for multi-platform binaries and container images.
 - Linux/systemd install and uninstall scripts.
 - `mnemonas-doctor` deployment diagnostics, including public HTTPS certificate checks, HTTP-to-HTTPS redirect checks, and manual cloud-firewall review guidance.
+- `mnemonas-doctor --public-domain` detects broad UFW allow rules for backend control-plane and dataplane ports, and consistently expands `~` in storage and WebDAV user-file paths.
 - `mnemonas-public-setup` public HTTPS reverse-proxy setup helper.
 - Traefik and Cloudflare Tunnel public-access templates with script checks that prevent backend and dataplane port exposure.
 - Docker Compose preflight checks for Compose v2, Buildx, ports, permissions, disk space, and existing config.
 - Container healthcheck binary so runtime images do not depend on `curl`.
 - `tools/proto-gen` Rust protobuf generator so normal dataplane and Docker builds do not require system `protoc`.
 - Script simulation tests and CI script checks.
+- Script simulation fixtures cover changed-file selection, WebDAV auth modes, public reverse-proxy exposure checks, benchmark paths, and Web Husky hooks.
+- WebDAV COPY/MOVE destination regression coverage for absolute path-reference destinations and rejection of bare relative destinations, including `dav/path`.
+- `npm run typecheck` covers the frontend application, Playwright specs, and shared E2E helpers.
 - Toolchain hints through `.go-version`, `.nvmrc`, Go `toolchain`, and Rust `rust-version`.
 - `.gitattributes`, security policy, support policy, pre-commit config, golangci-lint config, and tightened `.gitignore`.
 
@@ -77,9 +81,19 @@ This project follows [Semantic Versioning 2.0.0](https://semver.org/).
 - Added a public cloud firewall checklist covering common cloud security groups, VPC firewalls, IPv6, and port-forwarding mistakes.
 - Backup docs describe consistency windows and snapshot recommendations for live data.
 - Replaced the raw directory access rules textarea in Settings with a structured rule editor, per-path user matrix, related-share impact, and unsaved-rule preview entry point for user, group, and role grants.
+- `make verify-changed` treats Web Husky hooks as script changes and runs frontend type checking for Web changes, including untracked E2E helper and config files.
+- Root example config comments are standardized in English, and `make verify-changed` runs `nasd --check-config` when `mnemonas.example.toml` changes.
+- `make verify-changed` runs Docker template script fixtures when `.env.example` or Compose templates change.
+- `make verify-changed` runs the Docker build when `.dockerignore` changes so build-context rules do not drift silently.
+- `make verify-changed` always runs `git diff --check` against the matching worktree, staged, or base range, and selects the relevant toolchain checks when `.go-version`, `.nvmrc`, or `.golangci.yml`/`.golangci.yaml` changes.
+- `make verify-changed` runs the public-access template safety fixture when `deploy/public-access/` templates change.
+- `make verify-changed` validates YAML syntax when `.github/dependabot.yml`, `.github/dependabot.yaml`, `codecov.yml`, or `codecov.yaml` changes.
+- WebDAV setup scripts and development helpers report Basic, users, and no-auth modes explicitly so generated credentials and user-account mounts are not confused.
 
 ### Fixed
 - Fixed `server.trusted_proxy_hops` updates through the settings API not immediately updating runtime client-IP and HTTPS forwarded-header interpretation.
+- Fixed the Web Husky pre-commit hook so it resolves the repository root, runs from `web/`, and uses the frontend lint-staged configuration.
+- Fixed frontend authentication setup so reused-server E2E runs can opt into auth-state skips, while isolated E2E runs fail instead of silently saving an empty auth state.
 - Prevented systemd installation and static-file discovery from treating Vite source directories as built Web UI output.
 - Fixed broad `.gitignore` / `.dockerignore` rules for `nasd`.
 - Removed runtime `apt-get` dependency from Docker health checks.
@@ -107,6 +121,11 @@ First public release target.
 - Basic Auth.
 - Compatibility matrix for common clients, with real-client regression to be expanded around releases.
 
+#### Performance Optimization
+- PROPFIND response cache with a 30-second TTL.
+- Request metrics collection and statistics.
+- Streaming file transfers; practical file size limits are determined mainly by disk, client, and reverse-proxy constraints.
+
 #### Operations
 - Health endpoint.
 - Scrub data integrity checks.
@@ -125,7 +144,7 @@ First public release target.
 - Direct public exposure without HTTPS reverse proxy or VPN is not recommended.
 
 ### Compatibility
-- Go: 1.25.9+
+- Go: 1.25.11+
 - Rust: 1.92+
 - Node.js: `^20.19.0` or `>=22.12.0`
 - Docker: 20.10+ with Compose v2 plugin
@@ -135,14 +154,17 @@ First public release target.
 
 ## Release Checklist
 
-- [ ] `make quick-check`
-- [ ] `make scripts-check`
-- [ ] `make test`
-- [ ] `make security-check`
-- [ ] Update `CHANGELOG.md` and `CHANGELOG.en.md`
-- [ ] Update README version references when present
+- [ ] Record the baseline and keep the worktree clean: `git status --short --branch`
+- [ ] Run full change-aware validation: `GOTOOLCHAIN=local timeout 45m ./scripts/verify-changed.sh --base master`
+- [ ] Run documentation checks: `make docs-check`
+- [ ] Run script checks: `make scripts-check`
+- [ ] Run dependency security checks: `make security-check NPM_AUDIT=1`
+- [ ] Run Docker build and smoke checks: `make docker-check`
+- [ ] Confirm `./scripts/plan-hardening-commits.sh --fail-on-manual` reports no unclassified paths
+- [ ] Update `CHANGELOG.md`, `CHANGELOG.en.md`, README version references, and [release notes draft](docs/release-notes.en.md)
 - [ ] Create and push a Git tag
-- [ ] Verify GitHub Release artifacts, checksums, release notes, and container image tags
+- [ ] Run `./scripts/verify-release-artifacts.sh --require-targets --check-image` after publication to verify release artifacts, checksums, and container image tags
+- [ ] After publication, verify release archive installation, Docker release image startup, and public documentation links
 
 ---
 
@@ -152,7 +174,7 @@ First public release target.
 - MINOR (`0.X.0`): backward-compatible feature additions
 - PATCH (`0.0.X`): backward-compatible fixes
 
-Pre-release examples:
+### Pre-release Versions
 
 - `0.1.0-alpha.1`: alpha, incomplete feature set
 - `0.1.0-beta.1`: beta, feature-complete but may contain bugs

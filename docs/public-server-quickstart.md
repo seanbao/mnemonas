@@ -2,7 +2,7 @@
 
 [English](public-server-quickstart.en.md) | 简体中文
 
-本文档面向“已有一台公网 Linux 服务器，希望先本地部署 MnemoNAS，再通过域名安全访问”的场景。推荐路径是：
+本文档面向“已有一台公网 Linux 服务器，希望先本地部署 MnemoNAS，再通过域名安全访问”的情况。推荐路径是：
 
 ```text
 公网 80/443 -> Caddy/Nginx -> 127.0.0.1:8080 -> MnemoNAS
@@ -18,7 +18,7 @@
 - 云安全组或防火墙允许 TCP `80/443`
 - SSH 只允许可信 IP、VPN、Tailscale/Headscale 或其他私有网络访问
 
-如果域名还没有解析成功，先不要运行证书申请步骤：
+如果域名还没有解析成功，应先暂停证书申请步骤：
 
 ```bash
 dig +short nas.example.com
@@ -67,6 +67,8 @@ http://localhost:18080
 - 允许本机 `80/443`，移除 `8080/9090/9091` 或自定义后端端口上的宽泛 UFW 放行规则，并限制直接访问；
 - 运行基础公网入口检查。
 
+如果基础检查确认后端 control plane、dataplane 端口仍监听在非 loopback 地址，或 HTTPS health、`mnemonas-doctor --public-domain` 检查失败，脚本会停止并要求修复后重新运行，不会输出完成摘要。
+
 ```bash
 sudo mnemonas-public-setup --proxy caddy nas.example.com admin@example.com
 ```
@@ -79,7 +81,12 @@ sudo mnemonas-public-setup --proxy nginx nas.example.com admin@example.com
 
 `mnemonas-public-setup` 会先将域名统一为小写，并移除单个 FQDN 尾点，再写入反向代理配置、证书命令和完成摘要。
 
-如需 Traefik 或 Cloudflare Tunnel，请从 `deploy/public-access/traefik/` 或 `deploy/public-access/cloudflare-tunnel/config.yml` 模板开始；模板说明见 [公网访问模板](../deploy/public-access/README.md)，详细配置见 [反向代理配置](reverse-proxy-setup.md)。
+Traefik 或 Cloudflare Tunnel 部署应从仓库模板开始：
+
+- `deploy/public-access/traefik/`
+- `deploy/public-access/cloudflare-tunnel/config.yml`
+
+模板说明见 [公网访问模板](../deploy/public-access/README.md)，详细配置见 [反向代理配置](reverse-proxy-setup.md)。
 
 如果已经登录 Web UI，也可以打开 `设置 -> 常规 -> 公网访问向导`：
 
@@ -125,17 +132,60 @@ sudo mnemonas-doctor --public-domain nas.example.com
 ss -tlnp | grep -E '80|443|8080|9090|9091'
 ```
 
-带 `--public-domain` 的检查会先将域名统一为小写，并移除单个 FQDN 尾点，再验证公网 HTTPS health、HTTP 是否跳转到同一域名的 HTTPS、证书 hostname、证书剩余有效期、公开部署认证配置、管理员账号冗余、分享链接基础 URL、公开分享 API 响应缓存边界、后端直连端口和 dataplane 端口暴露情况，并提示云安全组人工复核项；证书检查需要服务器上有 `openssl`。公开部署认证检查要求 `auth.enabled = true`、`security.allow_unsafe_no_auth = false`，且启用 WebDAV 时不能使用 `auth_type = "none"`；如果保留全局 Basic Auth，显式配置的常见占位密码或少于 16 字符的密码会产生告警；如果使用自动生成密码，`secrets.json` 必须存在、不能是符号链接、路径组件不能包含符号链接、必须是普通文件且权限应保持私有。管理员冗余检查会读取 `auth.users_file`，未配置时读取 `$STORAGE_ROOT/.mnemonas/users.json`；用户文件必须是有效列表，每个用户需要非空且唯一的 `id` 和 `username`、有效的 `role` 和 `disabled` 字段，启用中的管理员还必须有 bcrypt 格式的 `password_hash`。用户文件及其目录不能是符号链接，路径组件也不能包含符号链接；公开检查会提示用户文件及其目录是否仍允许组或其他用户访问。文件缺失、JSON 或结构校验失败、管理员密码哈希不可用，或没有启用中的管理员会失败；只有一个可用的启用管理员会产生告警，两个及以上可用的启用管理员为通过。初始密码文件检查使用同一个用户数据目录中的 `initial-password.txt`，因此自定义 `auth.users_file` 时会检查该文件所在目录；公开部署下该路径存在符号链接、路径组件包含符号链接或该路径是非普通文件也会失败。启用分享功能时，`share.base_url` 应使用 HTTPS 默认端口，不能包含 userinfo、查询参数或片段，且主机名必须有效；使用 HTTP、非 443 端口、userinfo、查询参数、片段或无效主机名会失败，留空、使用其他域名，或路径已经以 `/s` 结尾时会给出人工复核提示。`share.base_url` 应填写站点 origin 或 `/s` 之前的基础路径，否则生成的分享链接会包含重复的 `/s/s` 路由。公开分享 API 响应检查使用保留探测 ID，只验证已到达 MnemoNAS 的缺失分享 JSON 响应是否包含 `Cache-Control: private, no-cache`、`Vary: Cookie`、`X-Content-Type-Options: nosniff` 和 `Referrer-Policy: no-referrer`，不会读取真实分享 ID、口令或 cookie 值；如果探测在反向代理或访问控制层返回 `401`、`403` 或重定向，检查会给出路由告警并跳过 JSON 响应头判断，计划对外开放分享时应确保 `/api/v1/public/shares/` 路由能够到达 MnemoNAS。它也会提示本机可检测到的续期路径：Nginx/certbot 部署应先执行 `sudo certbot renew --dry-run`，Caddy 部署应检查 `sudo journalctl -u caddy --since '24 hours ago'` 是否没有 ACME 错误。
+带 `--public-domain` 的检查会先将域名统一为小写，并移除单个 FQDN 尾点，然后验证：
+
+- 公网 HTTPS health、同域 HTTP 到 HTTPS 跳转、证书 hostname 和证书剩余有效期；
+- 公开部署认证配置、管理员账号冗余和初始密码文件清理状态；
+- 分享链接基础 URL 形态和公开分享 API 响应缓存边界；
+- 后端直连端口、dataplane 端口暴露情况，以及本机 UFW 是否仍宽泛放行后端 control plane 或 dataplane 端口。
+
+证书检查需要服务器上有 `openssl`；缺少 `openssl` 时，`mnemonas-doctor --public-domain` 会失败。云安全组或上游防火墙仍需按清单单独复核。
+公网 HTTP 必须返回到同一域名的 HTTPS 跳转；HTTP 不可达、非重定向响应或跳转到其他域名都会导致 `mnemonas-doctor --public-domain` 失败。
+
+公开部署认证检查要求 `auth.enabled = true`、`security.allow_unsafe_no_auth = false`，且启用 WebDAV 时不能使用 `auth_type = "none"`。
+如果保留全局 Basic Auth，显式配置的常见占位密码或少于 16 字符的密码会产生告警。
+使用自动生成 Basic Auth 密码时，`secrets.json` 必须存在，且必须是私有普通文件；该文件不能是符号链接，路径组件也不能包含符号链接。
+
+管理员冗余检查会读取 `auth.users_file`，未配置时读取 `$STORAGE_ROOT/.mnemonas/users.json`。
+自定义 `auth.users_file` 时会检查该文件所在目录。
+用户文件及其目录不能是符号链接，路径组件也不能包含符号链接。
+用户文件必须是有效列表，并满足：
+
+- 每个用户都有非空且唯一的 `id` 和 `username`；
+- 每个用户都有有效的 `role` 和 `disabled` 字段；
+- 启用中的管理员有 bcrypt 格式的 `password_hash`。
+
+文件缺失、JSON 或结构校验失败、管理员密码哈希不可用，或没有启用中的管理员会失败。
+只有一个可用的启用管理员会产生告警，两个及以上可用的启用管理员为通过。
+
+初始密码文件检查使用用户文件同目录中的 `initial-password.txt`。
+公开部署下，符号链接、路径组件包含符号链接或该路径是非普通文件都会失败。
+
+启用分享功能时，`share.base_url` 应使用 HTTPS 默认端口，不能包含 userinfo、查询参数、片段、反斜杠、重复的路径斜杠或 `.`/`..` 路径段，且主机名必须有效。
+使用 HTTP、非 443 端口、userinfo、查询参数、片段、反斜杠、重复路径斜杠、`.`/`..` 路径段或无效主机名会失败。
+留空、使用其他域名，或路径已经以 `/s` 结尾时会给出人工复核提示，因为生成的分享链接可能包含重复的 `/s/s` 路由。
+
+公开分享 API 响应检查使用保留探测 ID。
+它只验证已到达 MnemoNAS 的缺失分享 JSON 响应是否包含 `Cache-Control: private, no-cache`、`Vary: Cookie`、`X-Content-Type-Options: nosniff` 和 `Referrer-Policy: no-referrer`，并且不返回 `Set-Cookie`。
+它不会读取真实分享 ID、口令或 cookie 值。
+启用公开分享时，公开分享 API 探测必须到达 MnemoNAS。若反向代理或访问控制层返回 `401`、`403`、重定向或其他无法确认到达 MnemoNAS 的响应，`mnemonas-doctor --public-domain` 会失败；只有探测返回 MnemoNAS 的缺失分享 JSON 响应后，才会继续检查缓存和安全响应头。
+
+检查报告还会提示本机可检测到的续期路径：Nginx/certbot 部署应先执行 `sudo certbot renew --dry-run`，Caddy 部署应检查 `sudo journalctl -u caddy --since '24 hours ago'` 是否没有 ACME 错误。
 
 公网部署时，`mnemonas-doctor --public-domain` 会检查 `auth.access_token_ttl` 和 `auth.refresh_token_ttl`。访问令牌长于 `1h` 或刷新令牌长于 `720h`（30 天）会产生告警；空值、`0` 或负值会失败。
 
-启用分享功能时，`mnemonas-doctor --public-domain` 还会检查 `share.default_expires_in` 和 `share.default_max_access`。默认不过期、长于 `720h`（30 天），或默认访问次数为 `0` 会产生告警；负值有效期或负值默认访问次数会失败。家庭公网分享建议保持默认 `168h`（7 天）或其他不超过 30 天的明确有效期，并设置明确的默认访问次数，例如 `20`。
+启用分享功能时，`mnemonas-doctor --public-domain` 还会检查 `share.default_expires_in` 和 `share.default_max_access`。
+默认不过期、长于 `720h`（30 天），或默认访问次数为 `0` 会产生告警。
+负值有效期或负值默认访问次数会失败。
+家庭公网分享建议保持默认 `168h`（7 天）或其他不超过 30 天的明确有效期，并设置明确的默认访问次数，例如 `20`。
 
 期望状态：
 
 - Caddy/Nginx 监听 `0.0.0.0:80` 和 `0.0.0.0:443`；
 - MnemoNAS Web/API/WebDAV 只监听 `127.0.0.1:8080`；
 - dataplane `9090/9091` 或自定义端口只监听 `127.0.0.1`。
+- 本机端口检查覆盖 IPv4 和 IPv6；推荐安装 `iproute2` 以提供 `ss`，没有 `ss` 时 `/proc/net/tcp` 和 `/proc/net/tcp6` 必须都可读。
+- 运行 `mnemonas-doctor --public-domain` 的主机已安装 `curl`、`python3` 和 `openssl`，用于校验公网 HTTP(S) 入口、duration 配置、`users.json` 管理员冗余、自动生成的 WebDAV 凭据和 HTTPS 证书。
 
 ## 4. WebDAV 地址
 
@@ -173,15 +223,20 @@ sudo systemctl restart mnemonas
 - [ ] 至少保留两个启用中的管理员账号，避免唯一管理员丢失密码后无法维护。
 - [ ] Web UI “安全自检”没有 `block` 项；`warning` 项已逐条处理或确认。
 - [ ] `https://nas.example.com/health` 正常返回。
+- [ ] `http://nas.example.com/health` 跳转到同一域名的 HTTPS 地址。
 - [ ] 公网 `8080/9090/9091` 或自定义后端端口不可访问。
-- [ ] `/etc/mnemonas/config.toml` 是普通私有文件，路径组件不包含符号链接。
+- [ ] 运行 `mnemonas-doctor --public-domain` 的主机可使用 `ss`，或可同时读取 `/proc/net/tcp` 和 `/proc/net/tcp6`。
+- [ ] 运行 `mnemonas-doctor --public-domain` 的主机已安装 `curl`、`python3` 和 `openssl`。
+- [ ] 本机 UFW 没有宽泛放行 `8080/9090/9091` 或自定义后端端口。
+- [ ] `/etc/mnemonas/config.toml` 是普通私有文件，路径组件不包含符号链接，且 TOML 语法有效。
 - [ ] `/etc/mnemonas/config.toml` 中 `server.host = "127.0.0.1"`。
 - [ ] `/etc/mnemonas/config.toml` 中 `trusted_proxy_hops = 1`。
 - [ ] `/etc/mnemonas/config.toml` 中 `security.allow_unsafe_no_auth = false`。
 - [ ] `/etc/mnemonas/config.toml` 中 `auth.access_token_ttl <= 1h`，`auth.refresh_token_ttl <= 720h`。
-- [ ] 如果 WebDAV 保留全局 Basic Auth 且使用自动生成密码，`<storage.root>/secrets.json` 存在、不是符号链接、路径组件不包含符号链接、是普通文件且权限私有。
-- [ ] 如果启用公开分享，`share.default_expires_in` 不是空值或 `0`，且不超过 `720h`；`share.default_max_access` 大于 `0`；`mnemonas-doctor --public-domain` 的公开分享探测能到达 MnemoNAS，并且 JSON 响应边界检查通过。
+- [ ] 如果 WebDAV 保留全局 Basic Auth 且使用自动生成密码，`<storage.root>/secrets.json` 存在。
+  该文件不是符号链接，路径组件不包含符号链接，且是权限私有的普通文件。
+- [ ] 如果启用公开分享，`share.base_url` 使用 HTTPS 默认端口、有效主机名，且不包含 userinfo、查询参数、片段、反斜杠、重复路径斜杠或 `.`/`..` 路径段；`share.default_expires_in` 不是空值或 `0`，且不超过 `720h`；`share.default_max_access` 大于 `0`；`mnemonas-doctor --public-domain` 的公开分享探测能到达 MnemoNAS，并且 JSON 响应边界检查通过（私有缓存、`Vary: Cookie`、无探测 cookie）。
 - [ ] 云安全组只开放 `80/443`，SSH 只允许可信来源。
 - [ ] 已配置外部备份，不把这台公网服务器当作唯一数据副本。
 
-更多反向代理细节见 [反向代理配置](reverse-proxy-setup.md)，更多安全说明见 [安全指南](security.md)。
+更多反向代理细节见 [反向代理配置](reverse-proxy-setup.md)，更多安全说明见 [安全加固指南](security.md)。

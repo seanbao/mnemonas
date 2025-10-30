@@ -207,7 +207,7 @@ allow_unsafe_no_auth = false
 level = "info"
 format = "console"
 output = "stdout"
-time_format = "RFC3339"
+time_format = "2006-01-02T15:04:05Z07:00"
 ```
 
 ## `[server]`
@@ -269,8 +269,13 @@ Rules:
 - Move the full storage root when migrating data.
 - The systemd-installed `mnemonas-dataplane-start` helper rejects `storage.root` and `DATAPLANE_DATA_DIR` values with line breaks, parent-directory segments, symlink path components, or protected system directories before starting the dataplane.
 - `path` fields in `directory_quotas`, `directory_access_rules`, and share policy rules use MnemoNAS logical paths. Paths must start with `/` and must not contain Windows or UNC syntax, backslashes, query or fragment characters, control characters, or `.`/`..` path segments. Configuration loading and the Settings API normalize duplicate and trailing slashes; paths containing `.` or `..` are not folded and are rejected.
-- `directory_quotas` use MnemoNAS logical paths such as `/team`. Uploads, copies, moves, trash restores, version restores, and WebDAV PUT/COPY/MOVE operations check current logical bytes before writing. Use `/` for a global hard limit. Admins can view aggregate directory-quota usage, warning, exceeded, and missing-path counts, a prioritized directory-quota attention list, and current usage, remaining bytes, and status for each directory quota on the storage page; the storage-health summary combines capacity, native-checksum, and directory-quota risks with a suggested next-step summary. Before saving, the Web settings page summarizes added, changed, and removed directory quotas by comparing the saved quotas with the current draft.
-- `directory_access_rules` use clean absolute MnemoNAS paths such as `/team`. Each rule can grant `read_users`, `write_users`, `read_groups`, `write_groups`, `read_roles`, and `write_roles`. The most specific matching rule wins. Write grants also allow reads; write operations require an explicit write grant. Non-admin Web/API, WebDAV `users` mode, search, shares, favorites, trash, and activity views use the same decision path. Paths without a matching rule fall back to the user's `home_dir` boundary. Web/API root listings return only the user's `home_dir` and top-level entries for readable shared directories. When only a nested directory is granted, Web/API and WebDAV may expose existing ancestor directories as read-only navigation entries; direct children remain filtered by their own rules, and writes under those ancestors still require explicit write grants. Before saving, the Web settings page summarizes added, changed, and removed directory access rules by comparing the saved rules with the current draft, and shows a draft coverage summary for rule count, read/write principals, write-enabled paths, and attention items such as root-path or broad role grants.
+- `directory_quotas` use MnemoNAS logical paths such as `/team`. Uploads, copies, moves, trash restores, version restores, and WebDAV PUT/COPY/MOVE operations check current logical bytes before writing. Use `/` for a global hard limit.
+- The storage page shows aggregate directory-quota usage, warning, exceeded, and missing-path counts, a prioritized directory-quota attention list, and current usage, remaining bytes, and status for each directory quota. The storage-health summary combines capacity, native-checksum, and directory-quota risks with a suggested next-step summary.
+- Before saving, the Web settings page summarizes added, changed, and removed directory quotas by comparing the saved quotas with the current draft. In line-based inputs, paths containing spaces or double quotes are wrapped in double quotes; literal double quotes inside the path are escaped as `\"`, for example `"/Family Photos" 500 GB`.
+- `directory_access_rules` use clean absolute MnemoNAS paths such as `/team`. Each rule can grant `read_users`, `write_users`, `read_groups`, `write_groups`, `read_roles`, and `write_roles`.
+- The most specific matching rule wins. Write grants also allow reads; write operations require an explicit write grant. Non-admin Web/API, WebDAV `users` mode, search, shares, favorites, trash, and activity views use the same decision path. Paths without a matching rule fall back to the user's `home_dir` boundary.
+- Web/API root listings return only the user's `home_dir` and top-level entries for readable shared directories. When only a nested directory is granted, Web/API and WebDAV may expose existing ancestor directories as read-only navigation entries; direct children remain filtered by their own rules, and writes under those ancestors still require explicit write grants.
+- Before saving, the Web settings page summarizes added, changed, and removed directory access rules by comparing the saved rules with the current draft, and shows a draft coverage summary for rule count, read/write principals, write-enabled paths, and attention items such as root-path or broad role grants. The page uses a structured rule editor; enter MnemoNAS logical paths directly in the path field, including spaces or literal double quotes, without manual line quoting.
 
 Example:
 
@@ -431,6 +436,72 @@ The current release does not start an SMB/Samba listener. This section is a prev
 
 Share paths must be absolute MnemoNAS virtual paths such as `/` or `/team/docs`. The intended sidecar path is to keep file access behind MnemoNAS authorization, `home_dir`, and gateway APIs instead of sharing `files/` directly through Samba and bypassing version history, trash, and activity history.
 
+## `[backup]`
+
+Backup jobs are not configured by default. `[[backup.jobs]]` supports `local`, `restic`, and `rclone` jobs triggered from the Maintenance page, API, or background scheduler.
+
+| Option | Type | Default | Description |
+| --- | --- | --- | --- |
+| `[[backup.jobs]]` | array | `[]` | Backup job list |
+
+`[[backup.jobs]]` fields:
+
+| Option | Type | Default | Description |
+| --- | --- | --- | --- |
+| `id` | string | required | Job identifier; only ASCII letters, digits, `-`, `_`, and `.` are allowed, with a maximum of 64 characters, and it must not be `.` or `..` |
+| `name` | string | required | Display name on the Maintenance page |
+| `type` | string | `"local"` | `local`, `restic`, or `rclone`; blank values are normalized to `local` |
+| `source` | string | `storage.root` | Backup source directory; must be absolute. Blank values use `storage.root` |
+| `destination` | string | `""` | Local destination for `local` jobs; must be absolute and must not be inside the source or `storage.root` |
+| `repository` | string | `""` | Restic repository; required for `restic` jobs |
+| `remote` | string | `""` | Rclone remote path; required for `rclone` jobs |
+| `command` | string | job type | `restic` or `rclone` executable; blank values use the job type name. Non-blank values must be a bare executable name or absolute path without whitespace or control characters |
+| `password_file` | string | `""` | Restic password file; required for `restic` jobs, must be an existing non-symlink regular file, and must be outside the source and `storage.root` |
+| `config_file` | string | `""` | Rclone config file; optional, must be an existing non-symlink regular file, and must be outside the source and `storage.root` |
+| `extra_args` | string[] | `[]` | Additional argv entries appended to backup commands; empty entries and control characters are rejected. Restore commands do not reuse these arguments |
+| `disabled` | bool | `false` | Disable the job; disabled jobs are not scheduled and cannot be run manually |
+| `schedule_interval` | duration | `"0"` | Automatic schedule interval; `0` or blank means manual only |
+| `schedule_window_start` | string | `""` | Automatic schedule window start, using `HH:MM` |
+| `schedule_window_end` | string | `""` | Automatic schedule window end, using `HH:MM`; windows may cross midnight |
+| `stale_after` | duration | `schedule_interval * 2` | Backup-success freshness threshold; explicit values apply only when greater than `0`. When omitted and automatic scheduling is enabled, the runtime uses twice the schedule interval |
+| `restore_drill_stale_after` | duration | `"720h"` | Restore-drill reminder threshold; blank or omitted values use 30 days |
+| `retention_policy` | string | `""` | External retention-policy note; missing values on `restic` and `rclone` jobs produce retention-check warnings |
+| `max_snapshots` | int | `0` | Maximum local snapshots to retain for `local` jobs; `0` disables count-based cleanup |
+| `max_age` | duration | `"0"` | Maximum local snapshot age for `local` jobs; `0` disables age-based cleanup |
+| `include_config` | bool | `false` | Whether `local` backups copy the current config file |
+| `verify_after_backup` | bool | `false` | Whether to verify after backup; `local` checks snapshot file hashes, `restic` runs `restic check`, and `rclone` runs `rclone check --one-way` |
+| `exclude` | string[] | `[]` | Exclude patterns; empty entries and control characters are rejected |
+
+Runtime behavior:
+
+- `local` jobs create snapshots under `destination/<job-id>/snapshots/<run-id>/`. The destination must be outside `storage.root` and the backup source, and path components must not cross boundaries through symlinks.
+- `restic` and `rclone` jobs invoke external commands as argv without shell command construction. `command`, credential files, `extra_args`, `exclude`, and remote locations are handled according to config validation rules.
+- `schedule_window_start` and `schedule_window_end` constrain only automatic scheduling. Manual runs from the Maintenance page or API are not constrained by the window. The window uses server local time.
+- `restore_drill_stale_after` controls missing or stale restore-drill reminders. Blank, `"0"`, or omitted values are treated as 30 days at runtime.
+- Local retention cleanup always keeps the current snapshot. Actual retention for `restic` and `rclone` is managed by the external tool or cloud lifecycle rules, and `retention_policy` records that the deployment-side policy has been confirmed.
+- Backup, restore, restore-drill, restore-verify, and retention-check alerts reuse `[alerts]` channels. External notifications do not expose job names, source paths, target paths, snapshot paths, raw warnings, or low-level error text.
+
+```toml
+[backup]
+
+[[backup.jobs]]
+id = "external-disk"
+name = "External disk backup"
+type = "local"
+source = ""
+destination = "/mnt/backup-drive/mnemonas"
+schedule_interval = "24h"
+schedule_window_start = "02:00"
+schedule_window_end = "05:00"
+stale_after = "72h"
+restore_drill_stale_after = "720h"
+max_snapshots = 7
+max_age = "720h"
+include_config = true
+verify_after_backup = true
+exclude = [".mnemonas/thumbnails"]
+```
+
 ## `[auth]`
 
 | Option | Type | Default | Description |
@@ -449,7 +520,7 @@ On first startup without a `users_file`, or when the file has no enabled adminis
 | --- | --- | --- | --- |
 | `enabled` | bool | `false` | Enable share links |
 | `store_file` | string | `<storage.root>/.mnemonas/shares.json` | Share metadata file |
-| `base_url` | string | `""` | Base URL used when returning share URLs; non-empty values must be absolute `http` or `https` URLs without userinfo, query strings, or fragments, and with a valid host name |
+| `base_url` | string | `""` | Base URL used when returning share URLs; non-empty values must be absolute `http` or `https` URLs without userinfo, query strings, fragments, backslashes, duplicate path slashes, or `.`/`..` path segments, and with a valid host name |
 | `default_expires_in` | duration | `168h` | Default expiration for newly-created shares; `0` or empty means no default expiration. Public deployments should keep an explicit default expiry at or below `720h` (30 days) |
 | `default_max_access` | int | `0` | Default access-count limit for newly-created shares; `0` means unlimited |
 | `[[share.policy_rules]]` | array | `[]` | Stricter share constraints for a MnemoNAS path; the most specific matching path wins |
@@ -470,7 +541,24 @@ max_expires_in = "24h"
 max_access = 20
 ```
 
-`base_url` affects the URL returned by the API. It does not change the share ID itself. Empty values return relative `/s/{id}` URLs. Non-empty values must be absolute `http` or `https` URLs without usernames, passwords, other userinfo, query strings, or fragments. The host must be a valid domain name or IP address without empty labels or underscores; a single FQDN trailing dot is treated as the same host, while repeated trailing dots are rejected. Default expiration and access-count limits affect only future shares; explicit `expires_in` or `max_access` values in a create request take precedence. The `path` field in each policy rule follows the same MnemoNAS logical-path rules as directory quotas and directory access rules. Policy rules can set `require_password`, `max_expires_in`, and `max_access`. When a rule matches, passwordless create requests and updates that would leave an existing share passwordless are rejected if required. Expiration or access-count values above the configured limits, explicit update requests that clear those limits, and updates to existing matching shares whose stored expiry or access-count constraints are missing or above the rule limit are capped. The Web share-create dialog shows a pre-submit summary of policy source, password requirement, effective expiration, and effective access limit, including path-policy caps. The Web settings page shows a pre-save change summary for share enablement, base URL, default expiration, default access limit, and path policy rules compared with the saved configuration. The Web share list summarizes shares requiring review, passwordless links, broad-scope links, soon-expiring links, and stale links, with matching filters and a disable action for high-risk links.
+`base_url` affects the URL returned by the API. It does not change the share ID itself. Empty values return relative `/s/{id}` URLs.
+
+Non-empty `base_url` values must satisfy these rules:
+
+- Use an absolute `http` or `https` URL.
+- Do not include usernames, passwords, or other userinfo.
+- Do not include query strings, fragments, backslashes, duplicate path slashes, or `.`/`..` path segments.
+- Use a valid domain name or IP address without empty labels or underscores.
+
+A single FQDN trailing dot is treated as the same host, while repeated trailing dots are rejected. Backslashes, duplicate path slashes, and dot segments are rejected because proxies or browsers may normalize the generated share address differently.
+
+Public deployments that use a reverse-proxy application base path should set that base path itself, such as `https://nas.example.com/mnemonas`, and should not include the `/s` share route in `base_url`. Paths ending in `/s` produce a manual-review warning in the security self-check and public diagnostics.
+
+Default expiration and access-count limits affect only future shares; explicit `expires_in` or `max_access` values in a create request take precedence.
+
+The `path` field in each policy rule follows the same MnemoNAS logical-path rules as directory quotas and directory access rules. Policy rules can set `require_password`, `max_expires_in`, and `max_access`. When a rule matches, passwordless create requests and updates that would leave an existing share passwordless are rejected if required. Expiration or access-count values above the configured limits, explicit update requests that clear those limits, and updates to existing matching shares whose stored expiry or access-count constraints are missing or above the rule limit are capped.
+
+The Web share-create dialog shows a pre-submit summary of policy source, password requirement, effective expiration, and effective access limit, including path-policy caps. The Web settings page shows a pre-save change summary for share enablement, base URL, default expiration, default access limit, and path policy rules compared with the saved configuration. The Web share list summarizes shares requiring review, passwordless links, broad-scope links, soon-expiring links, and stale links, with matching filters and a disable action for high-risk links.
 
 ## `[security]`
 
@@ -497,16 +585,16 @@ By default, `auth.enabled = false` or enabled WebDAV with `webdav.auth_type = "n
 | `critical_pct` | float | `95.0` | Critical threshold |
 | `min_free_bytes` | uint64 | `10737418240` | Minimum free bytes |
 | `cooldown_period` | duration | `"4h"` | Alert cooldown |
-| `webhook_url` | string | `""` | Alert webhook URL; non-empty values must be absolute `http` or `https` URLs |
+| `webhook_url` | string | `""` | Alert webhook URL; non-empty values must be absolute `http` or `https` URLs with a valid host name or IP address |
 | `webhook_method` | string | `"POST"` | `POST` sends JSON; `GET` encodes fields into query |
 | `webhook_headers` | string[] | `[]` | Additional headers, `"Key: Value"`; names must be valid HTTP tokens, cannot repeat case-insensitively, and values cannot contain newlines or control characters |
 | `telegram_enabled` | bool | `false` | Enable Telegram bot notifications |
 | `telegram_bot_token` | string | `""` | Telegram bot token; never returned in diagnostics or settings responses |
 | `telegram_chat_id` | string | `""` | Telegram chat ID or `@channel` username |
 | `wecom_enabled` | bool | `false` | Enable WeCom group robot notifications |
-| `wecom_webhook_url` | string | `""` | WeCom group robot webhook URL; required when WeCom notifications are enabled, non-empty values must be absolute `http` or `https` URLs, and the value is never returned in diagnostics or settings responses |
+| `wecom_webhook_url` | string | `""` | WeCom group robot webhook URL; required when WeCom notifications are enabled, non-empty values must be absolute `http` or `https` URLs with a valid host name or IP address, and the value is never returned in diagnostics or settings responses |
 | `dingtalk_enabled` | bool | `false` | Enable DingTalk group robot notifications |
-| `dingtalk_webhook_url` | string | `""` | DingTalk group robot webhook URL; required when DingTalk notifications are enabled, non-empty values must be absolute `http` or `https` URLs, and the value is never returned in diagnostics or settings responses |
+| `dingtalk_webhook_url` | string | `""` | DingTalk group robot webhook URL; required when DingTalk notifications are enabled, non-empty values must be absolute `http` or `https` URLs with a valid host name or IP address, and the value is never returned in diagnostics or settings responses |
 | `email_enabled` | bool | `false` | Enable SMTP email notifications |
 | `smtp_host` | string | `""` | SMTP host without port |
 | `smtp_port` | int | `587` | SMTP port |
@@ -515,7 +603,23 @@ By default, `auth.enabled = false` or enabled WebDAV with `webdav.auth_type = "n
 | `smtp_from` | string | `""` | Sender address, such as `MnemoNAS <alerts@example.com>` |
 | `smtp_to` | string[] | `[]` | Recipient addresses |
 
-Health pages and diagnostics show alert state and whether Webhook, Telegram, WeCom, DingTalk, or email notifications are configured. The email channel is marked configured only when email alerts are enabled and SMTP host, port, sender, and at least one non-empty recipient are present. Diagnostics do not expose webhook URL, webhook headers, `telegram_bot_token`, `wecom_webhook_url`, `dingtalk_webhook_url`, SMTP host, SMTP username, `smtp_password`, sender address, or recipient addresses. The same notification channels are used for backup failures, backup-warning runs, explicit restore failures or warnings, post-restore read-only verification failures or warnings, restore-drill failures, stale or missing restore-drill reminders, retention-check failures or warnings, disk-health anomalies, scrub anomalies, login rate-limit events, directory access or share policy changes, and aggregate reminders for enabled shares that expire within 72 hours. Storage-capacity events use `storage_alert`; external payloads keep capacity metrics and `path_scope = "configured_storage_root"`, but set `path` to `<omitted>`, and text channels do not include the raw storage root path. Backup-related event types include `backup_run`, `backup_restore`, `backup_restore_verify`, `backup_restore_drill`, and `backup_retention_check`; `scrub_run` details omit object hashes and lower-level error text; `login_rate_limited` details include only username status and client-address scope, not raw usernames or client addresses; share-related event types include `share_expiring_soon`, whose details use aggregate counts and do not include share paths, URLs, passwords, or IDs. Administrators can send an `alert_test` event from the Web settings page or `POST /api/v1/settings/alerts/test` after saving the alert configuration. Successful and failed webhook, WeCom, and DingTalk logs record only the URL scheme and host, not paths, query strings, credentials, or GET payload fields. Telegram send errors do not include the bot token. SMTP success logs do not record SMTP hosts or addresses, and SMTP failure errors do not echo SMTP hosts, usernames, passwords, senders, recipients, or raw server error text.
+Health pages and diagnostics show alert state and whether Webhook, Telegram, WeCom, DingTalk, or email notifications are configured. The email channel is marked configured only when email alerts are enabled and SMTP host, port, sender, and at least one non-empty recipient are present.
+
+Diagnostics do not expose webhook URL, webhook headers, `telegram_bot_token`, `wecom_webhook_url`, `dingtalk_webhook_url`, SMTP host, SMTP username, `smtp_password`, sender address, or recipient addresses.
+
+The same notification channels are used for these events:
+
+- Backup failures, backup-warning runs, explicit restore failures or warnings, post-restore read-only verification failures or warnings, restore-drill failures, stale or missing restore-drill reminders, and retention-check failures or warnings.
+- Disk-health anomalies, scrub anomalies, login rate-limit events, and directory access or share policy changes.
+- Aggregate reminders for enabled shares that expire within 72 hours.
+
+Storage-capacity events use `storage_alert`. External payloads keep capacity metrics and `path_scope = "configured_storage_root"`, but set `path` to `<omitted>`, and text channels do not include the raw storage root path.
+
+Backup-related event types include `backup_run`, `backup_restore`, `backup_restore_verify`, `backup_restore_drill`, and `backup_retention_check`. `scrub_run` details omit object hashes and lower-level error text; `login_rate_limited` details include only username status and client-address scope, not raw usernames or client addresses; share-related event types include `share_expiring_soon`, whose details use aggregate counts and do not include share paths, URLs, passwords, or IDs.
+
+Administrators can send an `alert_test` event from the Web settings page or `POST /api/v1/settings/alerts/test` after saving the alert configuration.
+
+Successful and failed webhook, WeCom, and DingTalk logs record only the URL scheme and host, not paths, query strings, credentials, or GET payload fields. Telegram send errors do not include the bot token. SMTP success logs do not record SMTP hosts or addresses, and SMTP failure errors do not echo SMTP hosts, usernames, passwords, senders, recipients, or raw server error text.
 
 ## `[disk_health]`
 
@@ -527,7 +631,7 @@ Disk health uses `smartctl --json --all` to collect SMART self-assessment, tempe
 | `check_interval` | duration | `"1h"` | Background check interval |
 | `probe_timeout` | duration | `"15s"` | Timeout for each single-device `smartctl` probe |
 | `cooldown_period` | duration | `"4h"` | Minimum repeat interval for the same alert status |
-| `command` | string | `"smartctl"` | Bare executable name or absolute path; whitespace and shell arguments are rejected |
+| `command` | string | `"smartctl"` | Bare executable name or absolute path; whitespace, control characters, and shell arguments are rejected |
 | `temperature_warning_c` | int | `50` | Default warning temperature threshold in Celsius |
 | `temperature_critical_c` | int | `60` | Default critical temperature threshold in Celsius |
 | `media_wear_warning_percent` | int | `80` | Warning threshold for media lifetime used percentage; `0` uses the default |
@@ -580,7 +684,7 @@ max_retries = 1
 | `level` | string | `"info"` | `debug`, `info`, `warn`, `error` |
 | `format` | string | `"console"` | `console` or `json` |
 | `output` | string | `"stdout"` | `stdout`, `stderr`, or file path |
-| `time_format` | string | `"RFC3339"` | Timestamp format |
+| `time_format` | string | `"2006-01-02T15:04:05Z07:00"` | Timestamp format. Supports `RFC3339`, `RFC3339Nano`, `Unix`, `UnixMs`, `UnixMicro`, `UnixNano`, or a Go time layout |
 
 Example:
 
@@ -589,8 +693,10 @@ Example:
 level = "debug"
 format = "json"
 output = "/var/log/mnemonas/server.log"
-time_format = "RFC3339"
+time_format = "2006-01-02T15:04:05Z07:00"
 ```
+
+Both `console` and `json` logs recognize these named formats. `Unix*` formats write numeric timestamps in `json` output; in `console` output they preserve the raw numeric timestamp so log collectors see the configured representation. Custom values are interpreted as Go `time.Format` layouts, for example `2006-01-02T15:04:05Z07:00`.
 
 ## Duration Format
 
@@ -634,7 +740,7 @@ enabled = false
 level = "debug"
 ```
 
-Disable auth only for local development.
+Disable auth only for local development. Setting only `webdav.auth_type = "none"` does not disable Web UI/API login; local deployments that intentionally run without authentication must also set `auth.enabled = false`.
 
 ### Production-Like
 
@@ -651,19 +757,21 @@ root = "/srv/mnemonas"
 [storage.retention]
 max_versions = 50
 max_age = "2160h"
-min_free_space = 107374182400
+min_free_space = 107374182400  # 100GB
 
 [webdav]
 enabled = true
 auth_type = "basic"
 username = "admin"
-password = ""
+password = ""  # leave empty for generated credentials on first start; a password-manager value may also be set explicitly
 
 [log]
 level = "info"
 format = "json"
 output = "/var/log/mnemonas/server.log"
 ```
+
+Configuration files do not expand environment variables. Do not write `${...}` in TOML and expect runtime substitution.
 
 ### Read-Only Archive
 

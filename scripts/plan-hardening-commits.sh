@@ -97,7 +97,7 @@ declare -A GROUP_VALIDATION=(
 	["feat-api"]="Go race tests from make verify-changed; path, archive, WebDAV, share, and access-rule tests"
 	["feat-core"]="Go race tests from make verify-changed; backup restore, quota, workspace, and storage-boundary tests"
 	["feat-web"]="Frontend lint, typecheck, unit tests, build, and Playwright E2E"
-	["build-docker-deploy"]="Docker build and smoke; public-access, reverse-proxy, systemd, and release-package regressions"
+	["build-docker-deploy"]="Docker build and smoke; public-access, reverse-proxy, systemd, release-package, and release-artifact regressions"
 	["build-dataplane"]="Rust fmt, test, and clippy; proto generator tests and clippy"
 	["review-manual"]="Inspect manually, assign to a group, then rerun this planner"
 )
@@ -182,7 +182,7 @@ classify_file() {
 			append_to_group "feat-core" "$file"
 			return 0
 			;;
-		Dockerfile|.dockerignore|docker-compose.yml|docker-compose.yaml|mnemonas.example.toml|deploy/public-access/*|scripts/install-systemd.sh|scripts/uninstall-systemd.sh|scripts/mnemonas-doctor.sh|scripts/mnemonas-docker-preflight.sh|scripts/docker-quickstart.sh|scripts/docker-smoke.sh|scripts/docker-start.sh|scripts/setup-reverse-proxy.sh|scripts/mnemonas-dataplane-start.sh|scripts/dev.sh|scripts/benchmark.sh|scripts/test-systemd-*.sh|scripts/test-docker-*.sh|scripts/test-dataplane-start.sh|scripts/test-dev-safety.sh|scripts/test-reverse-proxy-safety.sh|scripts/test-public-access-templates.sh|scripts/test-release-package.sh|scripts/test-benchmark-safety.sh)
+		Dockerfile|.dockerignore|docker-compose.yml|docker-compose.yaml|mnemonas.example.toml|deploy/public-access/*|scripts/install-systemd.sh|scripts/uninstall-systemd.sh|scripts/mnemonas-doctor.sh|scripts/mnemonas-docker-preflight.sh|scripts/docker-quickstart.sh|scripts/docker-smoke.sh|scripts/docker-start.sh|scripts/setup-reverse-proxy.sh|scripts/mnemonas-dataplane-start.sh|scripts/verify-release-artifacts.sh|scripts/dev.sh|scripts/benchmark.sh|scripts/test-systemd-*.sh|scripts/test-docker-*.sh|scripts/test-dataplane-start.sh|scripts/test-dev-safety.sh|scripts/test-reverse-proxy-safety.sh|scripts/test-public-access-templates.sh|scripts/test-release-package.sh|scripts/test-release-artifacts.sh|scripts/test-benchmark-safety.sh)
 			append_to_group "build-docker-deploy" "$file"
 			return 0
 			;;

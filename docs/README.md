@@ -2,7 +2,7 @@
 
 [English](README.en.md) | 简体中文
 
-欢迎使用 MnemoNAS 文档。本目录包含详细的使用指南、部署说明和参考文档。
+本目录包含 MnemoNAS 的使用指南、部署说明和参考文档。
 
 ## 文档索引
 
@@ -23,10 +23,10 @@
 | 中文 | English | 说明 |
 |------|---------|------|
 | [FAQ](faq.md) | [FAQ](faq.en.md) | 常见问题与故障排除 |
-| [存储原理与最佳实践](storage-internals.md) | [Storage internals](storage-internals.en.md) | CAS 存储原理、文件系统推荐、性能调优 |
+| [存储原理与运维建议](storage-internals.md) | [Storage internals and operations guidance](storage-internals.en.md) | CAS 存储原理、文件系统推荐、性能调优 |
 | [备份指南](backup-guide.md) | [Backup guide](backup-guide.en.md) | 3-2-1 备份策略与恢复流程 |
 | [WebDAV 兼容性](webdav-compatibility.md) | [WebDAV compatibility](webdav-compatibility.en.md) | 客户端兼容性与协议支持 |
-| [安全指南](security.md) | [Security guide](security.en.md) | 认证、HTTPS、网络安全配置 |
+| [安全加固指南](security.md) | [Security hardening guide](security.en.md) | 认证、HTTPS、网络安全配置 |
 
 ### 开发文档
 
@@ -36,7 +36,10 @@
 | [设计决策](design-decisions.md) | [Design decisions](design-decisions.en.md) | 技术选型理由与竞争力目标 |
 | [路线图](roadmap.md) | [Roadmap](roadmap.en.md) | 从私有文件云盘到家庭/小团队 NAS 的功能优先级 |
 | [开发指南](development.md) | [Development guide](development.en.md) | 本地开发环境搭建 |
-| [测试策略](testing-strategy.md) | [Testing strategy](testing-strategy.en.md) | 多层测试方案：单元/集成/E2E/测死矩阵 |
+| [测试策略](testing-strategy.md) | [Testing strategy](testing-strategy.en.md) | 多层测试方案：单元、集成、E2E、torture 与前端测试 |
+| [硬化进度台账](hardening-progress.md) | [Hardening progress ledger](hardening-progress.en.md) | 已完成硬化区域、验证证据和剩余工作分流 |
+| [硬化审查摘要](hardening-review-summary.md) | [Hardening review summary](hardening-review-summary.en.md) | 当前硬化工作树的审查分组、残余风险和发布前检查 |
+| [发布说明草稿](release-notes.md) | [Release notes draft](release-notes.en.md) | 下一次公开发布的说明草稿、验证证据和发布后核验入口 |
 | [API 参考](api-reference.md) | [API reference](api-reference.en.md) | REST API 端点与请求/响应格式 |
 | [扩展点设计](extension-points.md) | [Extension points](extension-points.en.md) | 未来接口草案（S3/插件/Runner） |
 
@@ -44,7 +47,7 @@
 
 | 中文 | English | 说明 |
 |------|---------|------|
-| [支持说明](../SUPPORT.md) | [Support](../SUPPORT.en.md) | 支持渠道、问题分流和维护边界 |
+| [支持说明](../SUPPORT.md) | [Support](../SUPPORT.en.md) | 支持渠道、问题分流和支持边界 |
 | [安全策略](../SECURITY.zh-CN.md) | [Security policy](../SECURITY.md) | 安全漏洞报告方式和部署安全提醒 |
 
 ### 配置参考
