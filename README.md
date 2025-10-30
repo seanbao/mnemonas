@@ -359,6 +359,7 @@ Docker 和 systemd 部署默认只对外提供 `8080`；`9090/9091` 是内部 da
 | [安全加固指南](docs/security.md) | 认证与网络安全配置 |
 | [支持说明](SUPPORT.md) | 支持渠道、问题分流和支持边界 |
 | [贡献指南](CONTRIBUTING.md) | 贡献流程、质量门禁和安全边界 |
+| [行为准则](CODE_OF_CONDUCT.zh-CN.md) | 社区空间行为预期和执行范围 |
 
 ## 脚本工具
 

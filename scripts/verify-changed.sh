@@ -200,7 +200,7 @@ for file in "${FILES[@]}"; do
 	esac
 
 	case "$file" in
-		.github/dependabot.yml|.github/dependabot.yaml|codecov.yml|codecov.yaml)
+		.github/dependabot.yml|.github/dependabot.yaml|.github/ISSUE_TEMPLATE/*.yml|.github/ISSUE_TEMPLATE/*.yaml|codecov.yml|codecov.yaml)
 			yaml_config_changed=1
 			;;
 	esac
@@ -337,7 +337,7 @@ if [[ "$lint_config_changed" == "1" ]]; then
 fi
 
 if [[ "$yaml_config_changed" == "1" ]]; then
-	add_command "Validate YAML config" "./scripts/check-yaml-configs.sh .github/dependabot.yml .github/dependabot.yaml codecov.yml codecov.yaml"
+	add_command "Validate YAML config" "./scripts/check-yaml-configs.sh .github/dependabot.yml .github/dependabot.yaml .github/ISSUE_TEMPLATE/*.yml .github/ISSUE_TEMPLATE/*.yaml codecov.yml codecov.yaml"
 fi
 
 if [[ "$makefile_changed" == "1" ]]; then

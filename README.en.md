@@ -351,6 +351,7 @@ Docker and systemd deployments expose only `8080` by default. Data plane ports `
 | [Security Hardening Guide](docs/security.en.md) | Auth and network security |
 | [Support](SUPPORT.en.md) | Support channels and support boundary |
 | [Contributing Guide](CONTRIBUTING.en.md) | Contribution flow, quality gates, and safety boundaries |
+| [Code of Conduct](CODE_OF_CONDUCT.md) | Community conduct expectations and enforcement scope |
 
 ## Script Tools
 
