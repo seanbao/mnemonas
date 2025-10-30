@@ -222,6 +222,54 @@ run_archive_symlink_fails_before_checksum() {
 	assert_file_contains "$out" "$archive"
 }
 
+run_archive_entry_symlink_fails() {
+	local case_dir="$TMP_ROOT/archive-entry-symlink"
+	local dist_dir="$case_dir/dist"
+	local package_name="mnemonas-v1.2.3-linux-amd64"
+	local out="$case_dir/out.log"
+	local status
+
+	mkdir -p "$dist_dir" "$case_dir/extract"
+	make_release_archive "$dist_dir" "v1.2.3" "linux-amd64" "seanbao/mnemonas"
+	tar -xzf "$dist_dir/$package_name.tar.gz" -C "$case_dir/extract"
+	ln -s README.md "$case_dir/extract/$package_name/README.link"
+	rm -f -- "$dist_dir/$package_name.tar.gz"
+	tar -czf "$dist_dir/$package_name.tar.gz" -C "$case_dir/extract" "$package_name"
+	write_checksums "$dist_dir"
+
+	set +e
+	bash "$REPO_ROOT/scripts/verify-release-artifacts.sh" "$dist_dir" >"$out" 2>&1
+	status=$?
+	set -e
+
+	[[ "$status" -ne 0 ]] || fail "release artifact verifier accepted a symlink entry"
+	assert_file_contains "$out" "archive contains unsupported entry type 'l'"
+}
+
+run_archive_entry_hardlink_fails() {
+	local case_dir="$TMP_ROOT/archive-entry-hardlink"
+	local dist_dir="$case_dir/dist"
+	local package_name="mnemonas-v1.2.3-linux-amd64"
+	local out="$case_dir/out.log"
+	local status
+
+	mkdir -p "$dist_dir" "$case_dir/extract"
+	make_release_archive "$dist_dir" "v1.2.3" "linux-amd64" "seanbao/mnemonas"
+	tar -xzf "$dist_dir/$package_name.tar.gz" -C "$case_dir/extract"
+	ln "$case_dir/extract/$package_name/README.md" "$case_dir/extract/$package_name/README.hardlink"
+	rm -f -- "$dist_dir/$package_name.tar.gz"
+	tar -czf "$dist_dir/$package_name.tar.gz" -C "$case_dir/extract" "$package_name"
+	write_checksums "$dist_dir"
+
+	set +e
+	bash "$REPO_ROOT/scripts/verify-release-artifacts.sh" "$dist_dir" >"$out" 2>&1
+	status=$?
+	set -e
+
+	[[ "$status" -ne 0 ]] || fail "release artifact verifier accepted a hardlink entry"
+	assert_file_contains "$out" "archive contains unsupported entry type 'h'"
+}
+
 run_wrong_env_image_fails() {
 	local case_dir="$TMP_ROOT/wrong-image"
 	local dist_dir="$case_dir/dist"
@@ -305,6 +353,8 @@ run_missing_target_fails_in_strict_mode
 run_checksum_mismatch_fails
 run_checksum_path_escape_fails_before_checksum
 run_archive_symlink_fails_before_checksum
+run_archive_entry_symlink_fails
+run_archive_entry_hardlink_fails
 run_wrong_env_image_fails
 run_remote_image_check_uses_docker_manifest
 run_remote_image_check_failure_fails

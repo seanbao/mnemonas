@@ -15,7 +15,7 @@ Print a read-only release readiness summary for the current branch.
 Options:
   --base REF        Compare the current branch against REF. Defaults to master.
   --allow-dirty    Print a draft summary even when the worktree is dirty.
-  --skip-checklist  Skip release checklist command assertions.
+  --skip-checklist  Skip release checklist and release-note command assertions.
   -h, --help        Show this help.
 EOF
 }
@@ -69,6 +69,164 @@ require_file_contains() {
 	}
 }
 
+require_community_file() {
+	local path="$1"
+
+	[[ -f "$path" ]] || fail "missing required community file: $path"
+}
+
+check_community_files() {
+	local path
+	local required_files=(
+		"README.md"
+		"README.en.md"
+		"LICENSE"
+		"CHANGELOG.md"
+		"CHANGELOG.en.md"
+		"CONTRIBUTING.md"
+		"CONTRIBUTING.en.md"
+		"CODE_OF_CONDUCT.md"
+		"CODE_OF_CONDUCT.zh-CN.md"
+		"SUPPORT.md"
+		"SUPPORT.en.md"
+		"SECURITY.md"
+		"SECURITY.zh-CN.md"
+		".github/ISSUE_TEMPLATE/config.yml"
+		".github/ISSUE_TEMPLATE/bug_report.yml"
+		".github/ISSUE_TEMPLATE/feature_request.yml"
+		".github/ISSUE_TEMPLATE/question.yml"
+		".github/pull_request_template.md"
+	)
+
+	for path in "${required_files[@]}"; do
+		require_community_file "$path"
+	done
+
+	print_kv "community" "required community health files present"
+}
+
+extract_validation_target() {
+	local path="$1"
+
+	sed -nE 's/.*(validation target|验证目标)[^0-9a-fA-F]+([0-9a-fA-F]{7,40}).*/\2/p' "$path" \
+		| head -n 1 \
+		| tr '[:upper:]' '[:lower:]'
+}
+
+is_validation_evidence_path() {
+	case "$1" in
+		docs/hardening-progress.md|\
+		docs/hardening-progress.en.md|\
+		docs/hardening-review-summary.md|\
+		docs/hardening-review-summary.en.md)
+			return 0
+			;;
+		*)
+			return 1
+			;;
+	esac
+}
+
+check_validation_evidence() {
+	local path
+	local path_target
+	local target=""
+	local evidence_files=(
+		"docs/hardening-progress.md"
+		"docs/hardening-progress.en.md"
+		"docs/hardening-review-summary.md"
+		"docs/hardening-review-summary.en.md"
+	)
+
+	for path in "${evidence_files[@]}"; do
+		[[ -f "$path" ]] || continue
+		path_target="$(extract_validation_target "$path")"
+		[[ -n "$path_target" ]] || continue
+		if [[ -z "$target" ]]; then
+			target="$path_target"
+			continue
+		fi
+		[[ "$path_target" == "$target" ]] || fail "validation evidence target mismatch: $path records $path_target, expected $target"
+	done
+
+	if [[ -z "$target" ]]; then
+		print_kv "validation" "full gate evidence target not recorded"
+		return
+	fi
+
+	if ! git rev-parse --verify --quiet "$target^{commit}" >/dev/null; then
+		fail "validation evidence target does not resolve: $target"
+	fi
+
+	local target_full
+	local target_short
+	local head_full
+	target_full="$(git rev-parse "$target^{commit}")"
+	target_short="$(git rev-parse --short=12 "$target_full")"
+	head_full="$(git rev-parse HEAD)"
+
+	if ! git merge-base --is-ancestor "$target_full" HEAD; then
+		fail "validation evidence target is not an ancestor of HEAD: $target_short"
+	fi
+
+	if [[ "$target_full" == "$head_full" ]]; then
+		print_kv "validation" "full gate evidence matches HEAD ($target_short)"
+		return
+	fi
+
+	local commits_since
+	local files_since
+	local since_shortstat
+	local evidence_only=1
+	commits_since="$(git rev-list --count "$target_full..HEAD")"
+	files_since="$(git diff --name-only "$target_full..HEAD" | wc -l | tr -d '[:space:]')"
+	since_shortstat="$(git diff --shortstat "$target_full..HEAD")"
+	[[ -n "$since_shortstat" ]] || since_shortstat="no file changes"
+	while IFS= read -r path; do
+		[[ -n "$path" ]] || continue
+		if ! is_validation_evidence_path "$path"; then
+			evidence_only=0
+			break
+		fi
+	done < <(git diff --name-only "$target_full..HEAD")
+
+	if [[ "$files_since" != "0" && "$evidence_only" -eq 1 ]]; then
+		print_kv "validation" "full gate evidence at $target_short; only validation evidence docs changed since target ($commits_since commits, $files_since files)"
+	else
+		print_kv "validation" "full gate evidence at $target_short; $commits_since commits and $files_since files changed since target"
+	fi
+	print_kv "validation-diff" "$since_shortstat"
+}
+
+check_release_notes() {
+	local path
+	local expected
+	local release_note_files=(
+		"docs/release-notes.md"
+		"docs/release-notes.en.md"
+	)
+	local required_texts=(
+		"GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master"
+		"make docs-check"
+		"make scripts-check"
+		"./scripts/test-release-package.sh"
+		"./scripts/test-release-artifacts.sh"
+		"gh release download"
+		"./scripts/verify-release-artifacts.sh"
+		"--require-targets"
+		"--check-image"
+	)
+
+	for path in "${release_note_files[@]}"; do
+		[[ -f "$path" ]] || fail "missing required release-notes file: $path"
+		for expected in "${required_texts[@]}"; do
+			require_file_contains "$path" "$expected"
+		done
+	done
+
+	print_kv "release-notes" "release-note verification commands present"
+}
+
 if ! git rev-parse --show-toplevel >/dev/null 2>&1; then
 	fail "must run inside a git repository"
 fi
@@ -118,6 +276,9 @@ while IFS= read -r line; do
 	printf '[release-readiness] planner          %s\n' "$line"
 done <<<"$planner_output"
 
+check_community_files
+check_validation_evidence
+
 if [[ "$CHECK_CHECKLIST" -eq 1 ]]; then
 	verify_changed_cmd="GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master"
 	artifact_verify_cmd="./scripts/verify-release-artifacts.sh --version <tag> --repository seanbao/mnemonas --require-targets --check-image <artifact-dir>"
@@ -132,6 +293,7 @@ if [[ "$CHECK_CHECKLIST" -eq 1 ]]; then
 	require_file_contains "CHANGELOG.en.md" "./scripts/plan-hardening-commits.sh --fail-on-manual"
 	require_file_contains "CHANGELOG.md" "$artifact_verify_cmd"
 	require_file_contains "CHANGELOG.en.md" "$artifact_verify_cmd"
+	check_release_notes
 	print_kv "checklist" "release commands present in CHANGELOG.md and CHANGELOG.en.md"
 fi
 
