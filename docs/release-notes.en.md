@@ -13,7 +13,9 @@ This release candidate focuses on improving MnemoNAS stability, public-access sa
 - Strengthened path, archive-download, WebDAV, public-share, workspace, CAS, and backup-restore boundaries, covering symlinks, traversal, percent-encoded dot segments, control characters, and rollback error paths.
 - Expanded backend and frontend coverage for authentication, users, home directories, directory quotas, directory access rules, share policies, and secure session defaults.
 - Improved visible Web quality. Core pages, public entry points, mobile layouts, baseline accessibility, runtime errors, failed requests, and broken visible text are covered by Playwright scans.
-- Hardened systemd, Docker, reverse proxy, public-access templates, doctor, release package, and release artifact verification paths. The Release workflow checks archives, checksums, the required target set, archive entry types, duplicate entries, and ambiguous paths before creating the GitHub Release.
+- Hardened systemd, Docker, reverse proxy, public-access templates, doctor, release package, and release artifact verification paths. The Release workflow checks archives, checksums, the required target set, archive entry types, duplicate entries, control-character paths, backslash paths, and ambiguous paths before creating the GitHub Release.
+- Added rerunnable WebDAV curl protocol smoke checks for validating basic read/write, copy, move, and delete operations against a running service, covered by the script gate.
+- Tightened the release readiness summary: after the recorded full-validation target, `release-readiness` fails by default on non-release-documentation changes and requires refreshed full validation or an explicit draft override.
 - Streamlined and synchronized Chinese and English documentation, including deployment, configuration, FAQ, roadmap, security, hardening progress, and pre-release review entry points.
 
 ## Release Artifacts
@@ -37,6 +39,7 @@ The current hardening branch has the following validation evidence. Final public
 - `make docs-check`
 - `./scripts/test-release-package.sh`
 - `./scripts/test-release-artifacts.sh`
+- WebDAV curl smoke safety test: `scripts/test-webdav-client-smoke.sh`
 - Release workflow incremental validation: `make workflows-check`, `make scripts-check`, `./scripts/check-secret-leaks.sh`, `make toolchains-check`, `git diff --check`
 - Playwright E2E: `369 passed`
 - Frontend unit tests: `3054 passed`

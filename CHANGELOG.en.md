@@ -55,6 +55,8 @@ This project follows [Semantic Versioning 2.0.0](https://semver.org/).
 - `tools/proto-gen` Rust protobuf generator so normal dataplane and Docker builds do not require system `protoc`.
 - Script simulation tests and CI script checks.
 - Script simulation fixtures cover changed-file selection, WebDAV auth modes, public reverse-proxy exposure checks, benchmark paths, and Web Husky hooks.
+- `scripts/webdav-client-smoke.sh` runs curl protocol smoke checks against a running service, covering basic WebDAV read/write, copy, move, and delete operations, with a dedicated safety test in `make scripts-check`.
+- `scripts/release-readiness.sh` fails by default when non-release-documentation changes exist after the recorded full-validation target; draft summaries can opt in with `--allow-post-validation-changes`.
 - WebDAV COPY/MOVE destination regression coverage for absolute path-reference destinations and rejection of bare relative destinations, including `dav/path`.
 - `npm run typecheck` covers the frontend application, Playwright specs, and shared E2E helpers.
 - Toolchain hints through `.go-version`, `.nvmrc`, Go `toolchain`, and Rust `rust-version`.
@@ -77,7 +79,7 @@ This project follows [Semantic Versioning 2.0.0](https://semver.org/).
 - README, development docs, and testing docs use the Node.js engine range from `web/package.json`.
 - CI and release workflows use narrower permissions, concurrency controls, and job timeouts.
 - Release workflow verifies downloaded archives, checksums, and the required target set before creating the GitHub Release.
-- Release artifact verifier rejects unsafe checksum paths, symlinked archives, special archive entries, duplicate entries, backslash paths, and ambiguous path segments before running checksum validation.
+- Release artifact verifier rejects unsafe checksum paths, control-character paths, symlinked archives, special archive entries, duplicate entries, backslash paths, and ambiguous path segments before running checksum validation.
 - Security docs distinguish the Web UI initial admin password from generated WebDAV Basic Auth credentials.
 - Security docs and doctor checks warn that dataplane ports `9090/9091` should not be exposed to untrusted networks.
 - Added a public cloud firewall checklist covering common cloud security groups, VPC firewalls, IPv6, and port-forwarding mistakes.

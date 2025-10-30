@@ -76,9 +76,10 @@ Current automation covers:
 - `OPTIONS`, `MKCOL`, `PUT`, `PROPFIND`, `COPY`, and `MOVE`;
 - conditional requests, Range/ETag, and LOCK/UNLOCK behavior;
 - same-origin `Destination` parsing and lock `If` URI parsing;
+- `scripts/webdav-client-smoke.sh` can run an independent curl protocol smoke against a running service, covering `OPTIONS`, `MKCOL`, `PUT`, `PROPFIND`, `GET`, `HEAD`, `COPY`, `MOVE`, and `DELETE`;
 - With `RUN_RCLONE_WEBDAV=1`, the low-level E2E runner also executes a WebDAV client smoke for upload, download, move/rename, and list operations when `rclone` is installed.
 
-The matrix below tracks the remaining real-client validation work.
+The matrix below still tracks remaining real-client validation work for desktop, mobile, and media clients.
 
 ### Linux
 
@@ -191,6 +192,17 @@ Generate `pass` with:
 ```bash
 rclone obscure <mnemonas-or-webdav-password>
 ```
+
+### curl Protocol Smoke
+
+```bash
+WEBDAV_URL=http://localhost:8080/dav \
+MNEMONAS_WEBDAV_USERNAME="<mnemonas-or-webdav-username>" \
+MNEMONAS_WEBDAV_PASSWORD="<mnemonas-or-webdav-password>" \
+./scripts/webdav-client-smoke.sh
+```
+
+The script creates a temporary collection, verifies basic read, write, copy, move, and delete operations, and removes the temporary data. It is a protocol-level regression check and does not replace real-client validation for Finder, Windows File Explorer, mobile file managers, or media players.
 
 ### davfs2 Example
 

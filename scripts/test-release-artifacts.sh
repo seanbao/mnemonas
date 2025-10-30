@@ -199,6 +199,26 @@ run_checksum_path_escape_fails_before_checksum() {
 	assert_file_contains "$out" "checksums.txt contains an unsafe file path"
 }
 
+run_checksum_control_character_path_fails_before_checksum() {
+	local case_dir="$TMP_ROOT/checksum-control-character-path"
+	local dist_dir="$case_dir/dist"
+	local out="$case_dir/out.log"
+	local archive_name=$'mnemonas-v1.2.3-linux-amd64\t.tar.gz'
+	local status
+
+	mkdir -p "$dist_dir"
+	printf 'unsafe\n' >"$dist_dir/$archive_name"
+	printf '%064d  %s\n' 0 "$archive_name" >"$dist_dir/checksums.txt"
+
+	set +e
+	bash "$REPO_ROOT/scripts/verify-release-artifacts.sh" "$dist_dir" >"$out" 2>&1
+	status=$?
+	set -e
+
+	[[ "$status" -ne 0 ]] || fail "release artifact verifier accepted a checksum path with a control character"
+	assert_file_contains "$out" "checksums.txt contains a control character in file path"
+}
+
 run_archive_symlink_fails_before_checksum() {
 	local case_dir="$TMP_ROOT/archive-symlink"
 	local source_dir="$case_dir/source"
@@ -345,6 +365,31 @@ run_archive_backslash_entry_fails() {
 	assert_file_contains "$out" "archive entry contains a backslash: $package_name/README"
 }
 
+run_archive_control_character_entry_fails() {
+	local case_dir="$TMP_ROOT/archive-control-character-entry"
+	local dist_dir="$case_dir/dist"
+	local package_name="mnemonas-v1.2.3-linux-amd64"
+	local out="$case_dir/out.log"
+	local entry_name=$'README\tbad.md'
+	local status
+
+	mkdir -p "$dist_dir" "$case_dir/extract"
+	make_release_archive "$dist_dir" "v1.2.3" "linux-amd64" "seanbao/mnemonas"
+	tar -xzf "$dist_dir/$package_name.tar.gz" -C "$case_dir/extract"
+	printf 'unsafe\n' >"$case_dir/extract/$package_name/$entry_name"
+	rm -f -- "$dist_dir/$package_name.tar.gz"
+	tar -czf "$dist_dir/$package_name.tar.gz" -C "$case_dir/extract" "$package_name"
+	write_checksums "$dist_dir"
+
+	set +e
+	bash "$REPO_ROOT/scripts/verify-release-artifacts.sh" "$dist_dir" >"$out" 2>&1
+	status=$?
+	set -e
+
+	[[ "$status" -ne 0 ]] || fail "release artifact verifier accepted an archive entry with a control character"
+	assert_file_contains "$out" "archive entry contains a control character"
+}
+
 run_wrong_env_image_fails() {
 	local case_dir="$TMP_ROOT/wrong-image"
 	local dist_dir="$case_dir/dist"
@@ -427,12 +472,14 @@ run_binary_checksum_marker_passes
 run_missing_target_fails_in_strict_mode
 run_checksum_mismatch_fails
 run_checksum_path_escape_fails_before_checksum
+run_checksum_control_character_path_fails_before_checksum
 run_archive_symlink_fails_before_checksum
 run_archive_entry_symlink_fails
 run_archive_entry_hardlink_fails
 run_archive_duplicate_entry_fails
 run_archive_dot_segment_entry_fails
 run_archive_backslash_entry_fails
+run_archive_control_character_entry_fails
 run_wrong_env_image_fails
 run_remote_image_check_uses_docker_manifest
 run_remote_image_check_failure_fails
