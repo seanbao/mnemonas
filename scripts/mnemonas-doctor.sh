@@ -16,6 +16,7 @@ PROC_NET_TCP6_PATH="${MNEMONAS_PROC_NET_TCP6_PATH:-/proc/net/tcp6}"
 
 FAILURES=0
 WARNINGS=0
+CONFIG_TOML_SYNTAX_VALID=unknown
 
 ok() {
   printf '[OK] %s\n' "$*"
@@ -122,7 +123,35 @@ PY
     fi
   fi
 
-  awk -v section="[$section]" -v key="$key" '
+  awk -v section="[$section]" -v key="$key" -v dotted_key="$section.$key" '
+    function trim(text) {
+      gsub("^[[:space:]]+|[[:space:]]+$", "", text)
+      return text
+    }
+    function normalize_key_name(text) {
+      text = trim(text)
+      gsub("[[:space:]]*\\.[[:space:]]*", ".", text)
+      return text
+    }
+    function unquote_value(text) {
+      text = trim(text)
+      gsub("^\"|\"$", "", text)
+      gsub("^\047|\047$", "", text)
+      return text
+    }
+    function print_assignment_value(text, expected_key,    pos, lhs, value) {
+      pos = index(text, "=")
+      if (!pos) {
+        return 0
+      }
+      lhs = normalize_key_name(substr(text, 1, pos - 1))
+      if (lhs != expected_key) {
+        return 0
+      }
+      value = unquote_value(substr(text, pos + 1))
+      print value
+      return 1
+    }
     function strip_comment(text,    i, c, quote, escaped, out) {
       quote = ""
       escaped = 0
@@ -165,7 +194,7 @@ PY
     }
     {
       line = strip_comment($0)
-      gsub("^[[:space:]]+|[[:space:]]+$", "", line)
+      line = trim(line)
       section_line = line
       if (section_line ~ "^\\[") {
         sub("^\\[[[:space:]]*", "[", section_line)
@@ -180,12 +209,10 @@ PY
     section_line ~ "^\\[" {
       in_section = 0
     }
-    in_section && line ~ "^[[:space:]]*" key "[[:space:]]*=" {
-      sub("^[[:space:]]*" key "[[:space:]]*=[[:space:]]*", "", line)
-      gsub("^[[:space:]]+|[[:space:]]+$", "", line)
-      gsub("^\"|\"$", "", line)
-      gsub("^\047|\047$", "", line)
-      print line
+    !in_section && print_assignment_value(line, dotted_key) {
+      exit
+    }
+    in_section && print_assignment_value(line, key) {
       exit
     }
   ' "$file"
@@ -233,7 +260,24 @@ PY
     fi
   fi
 
-  awk -v section="[$section]" -v key="$key" '
+  awk -v section="[$section]" -v key="$key" -v dotted_key="$section.$key" '
+    function trim(text) {
+      gsub("^[[:space:]]+|[[:space:]]+$", "", text)
+      return text
+    }
+    function normalize_key_name(text) {
+      text = trim(text)
+      gsub("[[:space:]]*\\.[[:space:]]*", ".", text)
+      return text
+    }
+    function assignment_matches(text, expected_key,    pos, lhs) {
+      pos = index(text, "=")
+      if (!pos) {
+        return 0
+      }
+      lhs = normalize_key_name(substr(text, 1, pos - 1))
+      return lhs == expected_key
+    }
     function strip_comment(text,    i, c, quote, escaped, out) {
       quote = ""
       escaped = 0
@@ -276,7 +320,7 @@ PY
     }
     {
       line = strip_comment($0)
-      gsub("^[[:space:]]+|[[:space:]]+$", "", line)
+      line = trim(line)
       section_line = line
       if (section_line ~ "^\\[") {
         sub("^\\[[[:space:]]*", "[", section_line)
@@ -291,7 +335,11 @@ PY
     section_line ~ "^\\[" {
       in_section = 0
     }
-    in_section && line ~ "^[[:space:]]*" key "[[:space:]]*=" {
+    !in_section && assignment_matches(line, dotted_key) {
+      found = 1
+      exit
+    }
+    in_section && assignment_matches(line, key) {
       found = 1
       exit
     }
@@ -299,6 +347,33 @@ PY
       exit found ? 0 : 1
     }
   ' "$file"
+}
+
+expand_user_path() {
+  local path="$1"
+
+  case "$path" in
+    "")
+      printf '%s\n' ""
+      ;;
+    \~)
+      if [[ -n "${HOME:-}" ]]; then
+        printf '%s\n' "$HOME"
+      else
+        printf '%s\n' "$path"
+      fi
+      ;;
+    \~/*)
+      if [[ -n "${HOME:-}" ]]; then
+        printf '%s/%s\n' "$HOME" "${path#\~/}"
+      else
+        printf '%s\n' "$path"
+      fi
+      ;;
+    *)
+      printf '%s\n' "$path"
+      ;;
+  esac
 }
 
 systemd_env_value() {
@@ -346,6 +421,10 @@ ss_available() {
 
 can_inspect_local_ports() {
   ss_available || [[ -r "$PROC_NET_TCP_PATH" || -r "$PROC_NET_TCP6_PATH" ]]
+}
+
+can_strictly_inspect_local_ports() {
+  ss_available || [[ -r "$PROC_NET_TCP_PATH" && -r "$PROC_NET_TCP6_PATH" ]]
 }
 
 port_inspection_source() {
@@ -485,8 +564,8 @@ check_loopback_only_port_strict() {
   local address host
   local -a unsafe_addresses=()
 
-  if ! can_inspect_local_ports; then
-    fail "$label port $port cannot be inspected; install iproute2/ss or make /proc/net/tcp readable before public exposure"
+  if ! can_strictly_inspect_local_ports; then
+    fail "$label port $port cannot be fully inspected; install iproute2/ss or make both $PROC_NET_TCP_PATH and $PROC_NET_TCP6_PATH readable before public exposure"
     return
   fi
 
@@ -515,6 +594,20 @@ is_valid_tcp_host() {
   [[ "$host" != *"["* && "$host" != *"]"* ]] || return 1
 
   if [[ "$host" == *:* ]]; then
+    if have python3; then
+      python3 - "$host" <<'PY'
+import ipaddress
+import sys
+
+try:
+    address = ipaddress.ip_address(sys.argv[1])
+except ValueError:
+    sys.exit(1)
+
+sys.exit(0 if address.version == 6 else 1)
+PY
+      return
+    fi
     [[ "$host" =~ ^[0-9A-Fa-f:.]+$ ]]
     return
   fi
@@ -749,6 +842,8 @@ fi
 configured_http_address="$(systemd_env_value DATAPLANE_HTTP_ADDR "$SYSTEMD_DIR/mnemonas-dataplane.service")"
 
 STORAGE_ROOT="${STORAGE_ROOT:-${configured_storage_root:-/srv/mnemonas}}"
+STORAGE_ROOT="$(expand_user_path "$STORAGE_ROOT")"
+configured_auth_users_file="$(expand_user_path "$configured_auth_users_file")"
 SERVER_PORT="${SERVER_PORT:-${configured_server_port:-8080}}"
 DATAPLANE_GRPC_ADDR="${DATAPLANE_GRPC_ADDR:-${configured_grpc_address:-127.0.0.1:9090}}"
 DATAPLANE_HTTP_ADDR="${DATAPLANE_HTTP_ADDR:-${configured_http_address:-127.0.0.1:9091}}"
@@ -997,6 +1092,55 @@ check_config_file() {
   fi
 }
 
+check_config_toml_syntax() {
+  local path="$1"
+  local parse_out
+  local status
+
+  [[ -f "$path" ]] || return
+
+  if ! have python3; then
+    warn "python3 not available; skipping config TOML syntax check"
+    return
+  fi
+
+  parse_out="$(mktemp -t mnemonas-doctor-config-toml.XXXXXX)"
+  if python3 - "$path" >"$parse_out" 2>&1 <<'PY'
+import sys
+
+try:
+    import tomllib
+except Exception:
+    print("python tomllib is unavailable", file=sys.stderr)
+    sys.exit(3)
+
+path = sys.argv[1]
+try:
+    with open(path, "rb") as handle:
+        tomllib.load(handle)
+except Exception as exc:
+    print(str(exc), file=sys.stderr)
+    sys.exit(2)
+PY
+  then
+    CONFIG_TOML_SYNTAX_VALID=1
+    ok "config TOML syntax is valid"
+    rm -f -- "$parse_out"
+    return
+  fi
+
+  status=$?
+  if [[ "$status" -eq 3 ]]; then
+    CONFIG_TOML_SYNTAX_VALID=unknown
+    warn "python tomllib is unavailable; skipping config TOML syntax check"
+  else
+    CONFIG_TOML_SYNTAX_VALID=0
+    fail "config TOML syntax is invalid: $path"
+    sed 's/^/[INFO] TOML parse error: /' "$parse_out"
+  fi
+  rm -f -- "$parse_out"
+}
+
 check_http() {
   local url="$1"
   local label="$2"
@@ -1049,14 +1193,14 @@ check_http_redirects_to_https() {
   local curl_result status http_code redirect_url
 
   if ! have curl; then
-    warn "curl not available; skipping public HTTP-to-HTTPS redirect check"
+    fail "curl is required for public HTTP-to-HTTPS redirect checks"
     return
   fi
 
   curl_result="$(curl -sS -I --connect-timeout 3 --max-time 5 -o /dev/null -w '%{http_code} %{redirect_url}' "$url" 2>/dev/null)"
   status=$?
   if [[ "$status" -ne 0 ]]; then
-    warn "public HTTP redirect check was not reachable: $url"
+    fail "public HTTP redirect check was not reachable: $url"
     return
   fi
 
@@ -1065,7 +1209,7 @@ check_http_redirects_to_https() {
   if [[ "$http_code" =~ ^30(1|2|3|7|8)$ ]] && https_redirect_targets_domain "$domain" "$redirect_url"; then
     ok "public HTTP redirects to HTTPS: $url -> $redirect_url"
   else
-    warn "public HTTP does not clearly redirect to HTTPS: $url returned ${http_code:-unknown}"
+    fail "public HTTP does not clearly redirect to HTTPS: $url returned ${http_code:-unknown}"
   fi
 }
 
@@ -1134,12 +1278,35 @@ response_header_equals() {
   ' "$headers_file"
 }
 
+response_header_exists() {
+  local headers_file="$1"
+  local header_lc="${2,,}"
+
+  awk -v header="$header_lc" '
+    {
+      sub(/\r$/, "", $0)
+      idx = index($0, ":")
+      if (idx < 1) {
+        next
+      }
+      name = tolower(substr($0, 1, idx - 1))
+      if (name == header) {
+        found = 1
+      }
+    }
+    END {
+      exit found ? 0 : 1
+    }
+  ' "$headers_file"
+}
+
 check_https_certificate() {
   local domain="$1"
   local cert_out cert_err status enddate
 
   if ! have openssl; then
-    warn "openssl not available; skipping public HTTPS certificate check"
+    PUBLIC_CERT_FAILURE=1
+    fail "openssl is required for public HTTPS certificate checks; install openssl so certificate hostname and expiry can be verified before public exposure"
     return
   fi
 
@@ -1264,6 +1431,7 @@ http_url_authority() {
 
   without_scheme="${value#*://}"
   authority="${without_scheme%%/*}"
+  authority="${authority%%\\*}"
   authority="${authority%%\?*}"
   authority="${authority%%#*}"
   printf '%s\n' "$authority"
@@ -1315,17 +1483,45 @@ http_url_port() {
   fi
 }
 
+http_url_authority_has_invalid_host_port_syntax() {
+  local authority host_port
+
+  authority="$(http_url_authority "$1")"
+  host_port="${authority##*@}"
+
+  if [[ "$host_port" == \[* ]]; then
+    [[ "$host_port" =~ ^\[[^][]+\](:[0-9]+)?$ ]] || return 0
+    return 1
+  fi
+
+  if [[ "$host_port" == *:* ]]; then
+    [[ "$host_port" =~ ^[^:]+:[0-9]+$ ]] || return 0
+  fi
+  return 1
+}
+
 http_url_path() {
   local value="$1"
-  local without_scheme remainder path_part
+  local without_scheme path_part path_start
+  local char i
 
   without_scheme="${value#*://}"
-  if [[ "$without_scheme" != */* ]]; then
+  path_start=""
+  for ((i = 0; i < ${#without_scheme}; i++)); do
+    char="${without_scheme:i:1}"
+    if [[ "$char" == "/" || "$char" == "\\" ]]; then
+      path_start="${without_scheme:i}"
+      break
+    fi
+    if [[ "$char" == "?" || "$char" == "#" ]]; then
+      break
+    fi
+  done
+  if [[ -z "$path_start" ]]; then
     printf '/\n'
     return
   fi
-  remainder="/${without_scheme#*/}"
-  path_part="${remainder%%\?*}"
+  path_part="${path_start%%\?*}"
   path_part="${path_part%%#*}"
   [[ -n "$path_part" ]] || path_part="/"
   printf '%s\n' "$path_part"
@@ -1334,10 +1530,56 @@ http_url_path() {
 http_url_path_ends_with_share_route() {
   local path="$1"
 
+  path="$(http_url_path_decode_slashes "$path")"
   while [[ "$path" != "/" && "$path" == */ ]]; do
     path="${path%/}"
   done
   [[ "$path" == "/s" || "$path" == */s ]]
+}
+
+http_url_path_has_duplicate_slashes() {
+	local path="$1"
+
+	path="$(http_url_path_decode_slashes "$path")"
+	[[ "$path" == *"//"* ]]
+}
+
+http_url_path_has_dot_segments() {
+  local path="$1"
+  local segment
+  local -a segments
+
+  path="$(http_url_path_decode_slashes_and_dots "$path")"
+  IFS='/' read -r -a segments <<< "$path"
+  for segment in "${segments[@]}"; do
+    [[ "$segment" == "." || "$segment" == ".." ]] && return 0
+  done
+  return 1
+}
+
+http_url_path_has_backslashes() {
+	local path="$1"
+	local path_lower
+
+	path_lower="${path,,}"
+	[[ "$path" == *\\* || "$path_lower" == *"%5c"* ]]
+}
+
+http_url_path_decode_slashes() {
+  local path="$1"
+
+  path="${path//%2F//}"
+	path="${path//%2f//}"
+	printf '%s\n' "$path"
+}
+
+http_url_path_decode_slashes_and_dots() {
+  local path
+
+  path="$(http_url_path_decode_slashes "$1")"
+  path="${path//%2E/.}"
+  path="${path//%2e/.}"
+  printf '%s\n' "$path"
 }
 
 http_url_host_is_valid() {
@@ -1407,6 +1649,22 @@ if not matched or total < 0:
     sys.exit(2)
 print(int(total))
 PY
+}
+
+check_public_python_available() {
+  if have python3; then
+    ok "python3 is available for public diagnostics"
+  else
+    fail "python3 is required for public diagnostics; install python3 so duration, users.json, and generated WebDAV credential checks can be verified before public exposure"
+  fi
+}
+
+check_public_curl_available() {
+  if have curl; then
+    ok "curl is available for public diagnostics"
+  else
+    fail "curl is required for public diagnostics; install curl so public HTTPS health, redirects, WebDAV/share probes, and direct exposure checks can be verified before public exposure"
+  fi
 }
 
 check_public_share_default_policy() {
@@ -1495,7 +1753,7 @@ check_public_share_response_boundary() {
   status=$?
   http_code="${curl_result//$'\n'/}"
   if [[ "$status" -ne 0 || ! "$http_code" =~ ^[0-9][0-9][0-9]$ || "$http_code" == "000" ]]; then
-    warn "public share API probe was not readable: $url"
+    fail "public share API probe was not readable: $url"
     rm -f "$headers_file"
     return
   fi
@@ -1514,13 +1772,13 @@ check_public_share_response_boundary() {
       enforce_json_headers=1
       ;;
     401|403)
-      warn "public share API probe was blocked before MnemoNAS share lookup: $url (HTTP $http_code); verify public share routing if share links should be accessible"
+      fail "public share API probe was blocked before MnemoNAS share lookup: $url (HTTP $http_code); route public share lookups to MnemoNAS before enabling public shares"
       ;;
     3??)
-      warn "public share API probe redirected before MnemoNAS share lookup: $url (HTTP $http_code); verify reverse-proxy share routing"
+      fail "public share API probe redirected before MnemoNAS share lookup: $url (HTTP $http_code); route public share lookups to MnemoNAS before enabling public shares"
       ;;
     *)
-      warn "public share API probe returned HTTP $http_code at $url; verify share routing before public use"
+      fail "public share API probe returned HTTP $http_code at $url; verify share routing before public use"
       ;;
   esac
 
@@ -1534,6 +1792,7 @@ check_public_share_response_boundary() {
   response_header_has_token "$headers_file" "Vary" "Cookie" || missing+=("Vary=Cookie")
   response_header_equals "$headers_file" "X-Content-Type-Options" "nosniff" || missing+=("X-Content-Type-Options=nosniff")
   response_header_equals "$headers_file" "Referrer-Policy" "no-referrer" || missing+=("Referrer-Policy=no-referrer")
+  response_header_exists "$headers_file" "Set-Cookie" && missing+=("Set-Cookie must be absent on missing-share probes")
 
   if (( ${#missing[@]} > 0 )); then
     fail "public share JSON response is missing cache/security headers (${missing[*]}): $url (HTTP $http_code)"
@@ -1725,6 +1984,30 @@ clean_url_path_prefix() {
   printf '\n'
 }
 
+url_path_escape() {
+  local value="$1"
+  local LC_ALL=C
+  local escaped=""
+  local char
+  local encoded
+  local i
+
+  for ((i = 0; i < ${#value}; i++)); do
+    char="${value:i:1}"
+    case "$char" in
+      [-._~/a-zA-Z0-9])
+        escaped+="$char"
+        ;;
+      *)
+        printf -v encoded '%%%02X' "'$char"
+        escaped+="$encoded"
+        ;;
+    esac
+  done
+
+  printf '%s\n' "$escaped"
+}
+
 normalize_webdav_prefix_for_probe() {
   local trimmed
   local value
@@ -1804,13 +2087,17 @@ configured_webdav_prefix_display() {
 check_public_webdav_anonymous_rejected() {
   local domain="$1"
   local prefix="$2"
-  local url="https://$domain$prefix/"
+  local escaped_prefix
+  local url
   local curl_result status http_code
 
   if ! have curl; then
     warn "curl not available; skipping public WebDAV anonymous access check"
     return
   fi
+
+  escaped_prefix="$(url_path_escape "$prefix")"
+  url="https://$domain$escaped_prefix/"
 
   curl_result="$(curl -sS --connect-timeout 3 --max-time 5 -o /dev/null -w '%{http_code}' -X PROPFIND -H 'Depth: 0' "$url" 2>/dev/null)"
   status=$?
@@ -2234,6 +2521,36 @@ ufw_allows_port() {
   ' <<< "$status"
 }
 
+ufw_broadly_allows_port() {
+  local status="$1"
+  local port="$2"
+  awk -v port="$port" '
+    BEGIN { found = 0 }
+    tolower($0) ~ /allow/ &&
+      $0 ~ "(^|[^0-9])" port "(/tcp)?([^0-9]|$)" &&
+      tolower($0) ~ /(anywhere|0\.0\.0\.0\/0|::\/0)/ {
+      found = 1
+    }
+    END { exit found ? 0 : 1 }
+  ' <<< "$status"
+}
+
+check_ufw_backend_port_policy() {
+  local status="$1"
+  local port="$2"
+  local label="$3"
+
+  if ! ufw_allows_port "$status" "$port"; then
+    return
+  fi
+
+  if [[ -n "$PUBLIC_DOMAIN" ]] && ufw_broadly_allows_port "$status" "$port"; then
+    fail "ufw appears to broadly allow public $label port $port; remove allow rules for this backend port before public access"
+  else
+    warn "ufw appears to allow $label port $port; remove public allow rules for this port"
+  fi
+}
+
 check_ufw() {
   if ! have ufw; then
     return
@@ -2249,12 +2566,11 @@ check_ufw() {
     warn "could not read ufw status"
   fi
 
-  if ufw_allows_port "$status" "$DATAPLANE_GRPC_PORT"; then
-    warn "ufw appears to allow dataplane gRPC port $DATAPLANE_GRPC_PORT; remove public allow rules for this port"
+  if [[ -n "$PUBLIC_DOMAIN" ]]; then
+    check_ufw_backend_port_policy "$status" "$SERVER_PORT" "control plane"
   fi
-  if ufw_allows_port "$status" "$DATAPLANE_HTTP_PORT"; then
-    warn "ufw appears to allow dataplane HTTP port $DATAPLANE_HTTP_PORT; remove public allow rules for this port"
-  fi
+  check_ufw_backend_port_policy "$status" "$DATAPLANE_GRPC_PORT" "dataplane gRPC"
+  check_ufw_backend_port_policy "$status" "$DATAPLANE_HTTP_PORT" "dataplane HTTP"
 }
 
 check_public_domain() {
@@ -2277,6 +2593,8 @@ check_public_domain() {
   printf '\nPublic access checks for %s\n' "$domain"
 
   check_public_config_file_path
+  check_public_curl_available
+  check_public_python_available
 
   public_backend_host="$(normalize_public_backend_host_for_loopback_check "$configured_server_host")"
   if is_loopback_host "$public_backend_host"; then
@@ -2346,6 +2664,8 @@ check_public_domain() {
       fail "public share.base_url must not include userinfo: $public_share_base_url"
     elif http_url_has_query_or_fragment "$public_share_base_url"; then
       fail "public share.base_url must not include query or fragment: $public_share_base_url"
+    elif http_url_authority_has_invalid_host_port_syntax "$public_share_base_url"; then
+      fail "public share.base_url host is invalid: $public_share_base_url"
     else
       public_share_port="$(http_url_port "$public_share_base_url")"
       if [[ -n "$public_share_port" && "$public_share_port" != "443" ]]; then
@@ -2362,7 +2682,15 @@ check_public_domain() {
           else
             warn "public share.base_url host does not match $domain: $public_share_base_url"
           fi
-          if http_url_path_ends_with_share_route "$(http_url_path "$public_share_base_url")"; then
+          local public_share_path
+          public_share_path="$(http_url_path "$public_share_base_url")"
+          if http_url_path_has_backslashes "$public_share_path"; then
+            fail "public share.base_url path must not contain backslashes: $public_share_base_url"
+          elif http_url_path_has_duplicate_slashes "$public_share_path"; then
+            fail "public share.base_url path must not contain duplicate slashes: $public_share_base_url"
+          elif http_url_path_has_dot_segments "$public_share_path"; then
+            fail "public share.base_url path must not contain . or .. segments: $public_share_base_url"
+          elif http_url_path_ends_with_share_route "$public_share_path"; then
             warn "public share.base_url should be the site origin or base path before /s; current value will generate nested /s/s share links: $public_share_base_url"
           fi
         fi
@@ -2392,11 +2720,9 @@ check_public_domain() {
   check_tcp_unreachable "$domain" "$DATAPLANE_GRPC_PORT" "public dataplane gRPC"
   check_tcp_unreachable "$domain" "$DATAPLANE_HTTP_PORT" "public dataplane HTTP"
 
-  if have ss; then
-    check_loopback_only_port_strict "$SERVER_PORT" "control plane"
-    check_loopback_only_port_strict "$DATAPLANE_GRPC_PORT" "dataplane gRPC"
-    check_loopback_only_port_strict "$DATAPLANE_HTTP_PORT" "dataplane HTTP"
-  fi
+  check_loopback_only_port_strict "$SERVER_PORT" "control plane"
+  check_loopback_only_port_strict "$DATAPLANE_GRPC_PORT" "dataplane gRPC"
+  check_loopback_only_port_strict "$DATAPLANE_HTTP_PORT" "dataplane HTTP"
 
   local password_file
   password_file="$(initial_password_file)"
@@ -2413,6 +2739,7 @@ printf '\n'
 check_executable_file "$BIN_DIR/nasd" "nasd binary"
 check_executable_file "$BIN_DIR/dataplane" "dataplane binary"
 check_config_file "$CONFIG_PATH"
+check_config_toml_syntax "$CONFIG_PATH"
 check_file "$WEB_DIR/index.html" "Web UI index"
 check_dir "$STORAGE_ROOT" "storage root"
 check_dir "$STORAGE_ROOT/.mnemonas" "internal metadata root"
@@ -2424,14 +2751,18 @@ check_no_other_access "$STORAGE_ROOT/files" "files directory"
 check_private_dir_mode "$STORAGE_ROOT/.mnemonas" "internal metadata root"
 
 if [[ -x "$BIN_DIR/nasd" && -f "$CONFIG_PATH" ]]; then
-  config_check_out="$(mktemp -t mnemonas-doctor-check-config.XXXXXX)"
-  if "$BIN_DIR/nasd" --check-config --config "$CONFIG_PATH" >"$config_check_out" 2>&1; then
-    ok "config validates"
+  if [[ "$CONFIG_TOML_SYNTAX_VALID" == "0" ]]; then
+    note "skipping nasd --check-config because config TOML syntax is invalid"
   else
-    fail "config validation failed"
-    cat "$config_check_out"
+    config_check_out="$(mktemp -t mnemonas-doctor-check-config.XXXXXX)"
+    if "$BIN_DIR/nasd" --check-config --config "$CONFIG_PATH" >"$config_check_out" 2>&1; then
+      ok "config validates"
+    else
+      fail "config validation failed"
+      cat "$config_check_out"
+    fi
+    rm -f -- "$config_check_out"
   fi
-  rm -f -- "$config_check_out"
 fi
 
 if id -u "$SERVICE_USER" >/dev/null 2>&1; then

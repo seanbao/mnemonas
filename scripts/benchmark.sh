@@ -385,28 +385,55 @@ if isinstance(found, str):
     printf '%s' "$json" | sed -n "s/.*\"${field}\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p"
 }
 
+normalize_webdav_auth_type() {
+    local value="$1"
+
+    value="${value#"${value%%[![:space:]]*}"}"
+    value="${value%"${value##*[![:space:]]}"}"
+    value="${value,,}"
+    if [[ -z "$value" ]]; then
+        value="basic"
+    fi
+    printf '%s' "$value"
+}
+
 configure_webdav_auth() {
     local auth_type="${MNEMONAS_WEBDAV_AUTH_TYPE:-$(read_config_value webdav auth_type)}"
-    local username="${MNEMONAS_WEBDAV_USERNAME:-$(read_config_value webdav username)}"
-    local password="${MNEMONAS_WEBDAV_PASSWORD:-$(read_config_value webdav password)}"
+    auth_type="$(normalize_webdav_auth_type "$auth_type")"
 
-    if [[ -z "$auth_type" ]] && [[ -n "$username$password" ]]; then
-        auth_type="basic"
-    fi
-    if [[ "$auth_type" != "basic" ]]; then
-        return 0
-    fi
-
-    if [[ -z "$username" ]]; then
-        username="admin"
-    fi
-    if [[ -z "$password" ]]; then
-        password=$(read_secret_value webdav_password)
-    fi
-    if [[ -z "$password" ]]; then
-        echo "WebDAV basic auth is enabled but no password was found; set MNEMONAS_WEBDAV_PASSWORD or update $CONFIG_FILE" >&2
-        return 0
-    fi
+    local username=""
+    local password=""
+    case "$auth_type" in
+        basic)
+            username="${MNEMONAS_WEBDAV_USERNAME:-$(read_config_value webdav username)}"
+            password="${MNEMONAS_WEBDAV_PASSWORD:-$(read_config_value webdav password)}"
+            if [[ -z "$username" ]]; then
+                username="admin"
+            fi
+            if [[ -z "$password" ]]; then
+                password=$(read_secret_value webdav_password)
+            fi
+            if [[ -z "$password" ]]; then
+                echo "WebDAV basic auth is enabled but no password was found; set MNEMONAS_WEBDAV_PASSWORD or update $CONFIG_FILE" >&2
+                return 0
+            fi
+            ;;
+        users)
+            username="${MNEMONAS_WEBDAV_USERNAME:-}"
+            password="${MNEMONAS_WEBDAV_PASSWORD:-}"
+            if [[ -z "$username" || -z "$password" ]]; then
+                echo "ERROR: WebDAV users auth requires MNEMONAS_WEBDAV_USERNAME and MNEMONAS_WEBDAV_PASSWORD" >&2
+                exit 1
+            fi
+            ;;
+        none)
+            return 0
+            ;;
+        *)
+            echo "Unrecognized WebDAV auth_type '$auth_type'; continuing without WebDAV credentials" >&2
+            return 0
+            ;;
+    esac
 
     WEBDAV_AUTH_ARGS=(-u "$username:$password")
 }

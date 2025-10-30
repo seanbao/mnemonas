@@ -92,6 +92,7 @@ run_preserve_data_test() {
   assert_file_contains "$systemctl_log" "daemon-reload"
   assert_file_contains "$case_dir/uninstall.log" "preserving config"
   assert_file_contains "$case_dir/uninstall.log" "preserving data"
+  assert_file_contains "$case_dir/uninstall.log" "leaving service account unchanged; set REMOVE_SERVICE_USER=1 to remove it"
 }
 
 run_refuse_unconfirmed_data_removal_test() {
@@ -511,6 +512,47 @@ run_remove_config_and_data_test() {
   assert_file_contains "$case_dir/uninstall.log" "uninstalled systemd services"
 }
 
+run_remove_service_account_explicit_test() {
+  local case_dir="$TMP_ROOT/remove-service-account"
+  local fake_path="$case_dir/fake-bin"
+  local install_dir="$case_dir/install"
+  local systemctl_log="$case_dir/systemctl.log"
+  local account_log="$case_dir/account.log"
+  make_fake_admin_path "$fake_path"
+  make_install_tree "$install_dir"
+  write_executable "$fake_path/id" \
+    '#!/usr/bin/env bash' \
+    'if [[ "$1" == "-u" && "$#" -eq 1 ]]; then printf "0\n"; exit 0; fi' \
+    'if [[ "$1" == "-u" && "${2:-}" == "mnemonas" ]]; then exit 0; fi' \
+    'exit 1'
+  write_executable "$fake_path/getent" \
+    '#!/usr/bin/env bash' \
+    'if [[ "${1:-}" == "group" && "${2:-}" == "mnemonas" ]]; then exit 0; fi' \
+    'exit 1'
+  write_executable "$fake_path/userdel" \
+    '#!/usr/bin/env bash' \
+    'printf "userdel %s\n" "$*" >> "$ACCOUNT_LOG"'
+  write_executable "$fake_path/groupdel" \
+    '#!/usr/bin/env bash' \
+    'printf "groupdel %s\n" "$*" >> "$ACCOUNT_LOG"'
+
+  PATH="$fake_path:$PATH" \
+    SYSTEMCTL_LOG="$systemctl_log" \
+    ACCOUNT_LOG="$account_log" \
+    BIN_DIR="$install_dir/bin" \
+    SHARE_DIR="$install_dir/share/mnemonas" \
+    CONFIG_DIR="$install_dir/etc/mnemonas" \
+    SYSTEMD_DIR="$install_dir/systemd" \
+    STORAGE_ROOT="$install_dir/storage" \
+    REMOVE_SERVICE_USER=1 \
+    "$REPO_ROOT/scripts/uninstall-systemd.sh" > "$case_dir/uninstall.log"
+
+  assert_file_contains "$case_dir/uninstall.log" "removing service user mnemonas"
+  assert_file_contains "$case_dir/uninstall.log" "removing service group mnemonas"
+  assert_file_contains "$account_log" "userdel mnemonas"
+  assert_file_contains "$account_log" "groupdel mnemonas"
+}
+
 run_preserve_data_test
 run_refuse_unconfirmed_data_removal_test
 run_refuse_protected_tree_removal_test
@@ -523,5 +565,6 @@ run_refuse_symlink_storage_root_remove_data_test
 run_refuse_symlink_config_dir_remove_config_test
 run_refuse_symlink_binary_and_systemd_paths_test
 run_remove_config_and_data_test
+run_remove_service_account_explicit_test
 
 printf '[systemd-uninstall-test] all checks passed\n'

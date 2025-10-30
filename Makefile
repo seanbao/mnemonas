@@ -1,6 +1,6 @@
-.PHONY: all build web-build test test-torture fault-injection fault-injection-live clean deps dev proto proto-go proto-rust go-packages fmt lint workflows-check scripts-check docs-check security-check install-audit-tools docker e2e bench coverage check verify-changed help
+.PHONY: all build web-build test test-torture fault-injection fault-injection-live clean deps dev proto proto-go proto-rust go-packages fmt lint workflows-check scripts-check toolchains-check docs-check security-check install-audit-tools docker docker-smoke docker-check e2e bench coverage rust-coverage check verify-changed quick-check run help
 
-# 版本信息
+# Version metadata
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 BUILD_TIME ?= $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
 LDFLAGS := -s -w -X main.version=$(VERSION) -X main.buildTime=$(BUILD_TIME)
@@ -28,10 +28,11 @@ GO_FUZZTIME ?= 10s
 GO_FUZZ_TARGETS ?= ./internal/api:FuzzValidatePath ./internal/api:FuzzPathWithinBase ./internal/config:FuzzNormalizeWebDAVPrefix
 GO_TORTURE_PACKAGES ?= ./internal/api ./internal/auth ./internal/share ./internal/storage ./internal/versionstore ./internal/dataplane ./internal/workspace
 WEB_TORTURE_SPECS ?= files.spec.ts interaction-integrity.spec.ts layout-integrity.spec.ts runtime-integrity.spec.ts
-DEPLOYMENT_SCRIPTS := scripts/install-systemd.sh scripts/uninstall-systemd.sh scripts/mnemonas-doctor.sh scripts/mnemonas-docker-preflight.sh scripts/docker-quickstart.sh scripts/mnemonas-dataplane-start.sh scripts/test-systemd-install.sh scripts/test-systemd-uninstall.sh scripts/test-docker-start.sh scripts/test-docker-preflight.sh scripts/test-docker-quickstart.sh scripts/test-fault-injection-safety.sh scripts/test-e2e-safety.sh scripts/test-benchmark-safety.sh scripts/test-dataplane-start.sh scripts/test-dev-safety.sh scripts/test-reverse-proxy-safety.sh scripts/test-public-access-templates.sh scripts/test-release-package.sh scripts/test-with-test-dataplane-safety.sh scripts/docker-start.sh scripts/setup-reverse-proxy.sh scripts/dev.sh scripts/benchmark.sh
+DEPLOYMENT_SCRIPTS := scripts/install-systemd.sh scripts/uninstall-systemd.sh scripts/mnemonas-doctor.sh scripts/mnemonas-docker-preflight.sh scripts/docker-quickstart.sh scripts/docker-smoke.sh scripts/mnemonas-dataplane-start.sh scripts/test-systemd-install.sh scripts/test-systemd-uninstall.sh scripts/test-docker-start.sh scripts/test-docker-preflight.sh scripts/test-docker-quickstart.sh scripts/test-docker-smoke.sh scripts/test-fault-injection-safety.sh scripts/test-e2e-safety.sh scripts/test-benchmark-safety.sh scripts/test-dataplane-start.sh scripts/test-dev-safety.sh scripts/test-reverse-proxy-safety.sh scripts/test-public-access-templates.sh scripts/test-release-package.sh scripts/test-with-test-dataplane-safety.sh scripts/docker-start.sh scripts/setup-reverse-proxy.sh scripts/dev.sh scripts/benchmark.sh
 ACCEPTANCE_SCRIPTS := scripts/e2e-test.sh scripts/fault-injection-test.sh scripts/torture-test.sh scripts/run-e2e-isolated.sh scripts/run-benchmark-isolated.sh scripts/run-fault-injection-isolated.sh scripts/with-test-dataplane.sh
-DEV_SCRIPTS := scripts/verify-changed.sh scripts/check-commit-message.sh scripts/check-doc-links.sh scripts/test-commit-message.sh scripts/test-doc-links.sh
+DEV_SCRIPTS := scripts/verify-changed.sh scripts/check-commit-message.sh scripts/check-doc-links.sh scripts/check-yaml-configs.sh scripts/check-untracked-whitespace.sh scripts/check-toolchain-versions.sh scripts/check-secret-leaks.sh scripts/plan-hardening-commits.sh scripts/test-commit-message.sh scripts/test-doc-links.sh scripts/test-hardening-commit-plan.sh scripts/test-secret-leaks.sh scripts/test-web-husky-safety.sh scripts/test-verify-changed-safety.sh
 WEB_SCRIPTS := web/scripts/start-e2e-backend.sh
+HUSKY_SCRIPTS := web/.husky/pre-commit
 
 export GO_FUZZTIME
 export GO_FUZZ_TARGETS
@@ -50,10 +51,10 @@ if [ -z "$$packages" ]; then \
 fi
 endef
 
-# 默认目标
+# Default target
 all: build
 
-# 显示帮助
+# Show help
 help:
 	@echo "MnemoNAS Makefile"
 	@echo ""
@@ -66,8 +67,10 @@ help:
 	@echo "  test-torture - Run race/fuzz/property/browser torture tests"
 	@echo "  coverage   - Run tests with coverage report"
 	@echo "  verify-changed - Run checks selected from changed files"
+	@echo "  quick-check - Run fast local Go/Rust checks"
 	@echo "  lint       - Run linters (Go + Rust)"
-	@echo "  scripts-check - Validate deployment shell scripts"
+	@echo "  scripts-check - Validate deployment shell scripts and Web tool scripts"
+	@echo "  toolchains-check - Validate pinned toolchain versions"
 	@echo "  docs-check - Validate local documentation links and structured examples"
 	@echo "  security-check - Run dependency vulnerability checks"
 	@echo "  install-audit-tools - Install pinned security scan tools"
@@ -77,14 +80,17 @@ help:
 	@echo "  e2e        - Run isolated E2E acceptance tests"
 	@echo "  fault-injection - Run destructive fault-injection tests in an isolated backend"
 	@echo "  bench      - Run isolated performance benchmarks"
+	@echo "  run        - Build and run the control plane"
 	@echo "  proto      - Generate protobuf code"
 	@echo "  go-packages - Print resolved Go package list"
 	@echo "  docker     - Build Docker image"
+	@echo "  docker-smoke - Smoke test a built Docker image"
+	@echo "  docker-check - Build and smoke test Docker image"
 	@echo "  clean      - Remove build artifacts"
 	@echo "  deps       - Download dependencies"
 	@echo "  help       - Show this help"
 
-# 安装依赖
+# Install dependencies
 deps:
 	@echo "📦 Installing dependencies..."
 	cd dataplane && cargo fetch --locked
@@ -92,7 +98,7 @@ deps:
 	$(GO_CMD_ENV) go mod download
 	cd web && npm ci
 
-# 生成 protobuf 代码。Rust 生成代码会提交到仓库，避免普通 dataplane/Docker 构建依赖 protoc。
+# Generate protobuf code. Rust generated code is committed so normal dataplane/Docker builds do not require protoc.
 proto: proto-go proto-rust
 
 proto-go:
@@ -109,7 +115,7 @@ go-packages:
 	@$(RESOLVE_GO_PACKAGES); \
 	printf '%s\n' $$packages
 
-# 构建
+# Build
 build: proto web-build
 	@echo "🏗️  Building Go control plane..."
 	@mkdir -p bin
@@ -123,7 +129,7 @@ web-build:
 	@echo "🌐 Building Web UI..."
 	cd web && npm run build
 
-# 开发模式构建
+# Development build
 dev:
 	@echo "🔨 Development build..."
 	@mkdir -p bin
@@ -132,7 +138,7 @@ dev:
 	cp dataplane/target/debug/dataplane bin/dataplane-debug
 	@echo "✅ Dev build complete"
 
-# 运行测试
+# Run tests
 test:
 	@echo "🧪 Running Go tests..."
 	@$(RESOLVE_GO_PACKAGES); \
@@ -143,14 +149,14 @@ test:
 	@echo "🌐 Running frontend tests..."
 	cd web && npm run test:run
 
-# 测死矩阵：race、fuzz、property、浏览器运行时完整性扫描。
-# 隔离故障注入默认跳过；显式传 RUN_LIVE_FAULTS=1 才执行。
+# Torture matrix: race, fuzz, property, and browser runtime integrity scans.
+# Isolated fault injection is skipped by default; pass RUN_LIVE_FAULTS=1 explicitly to run it.
 test-torture:
 	@echo "🔥 Running torture test matrix..."
 	@chmod +x scripts/torture-test.sh
 	./scripts/torture-test.sh
 
-# 测试覆盖率
+# Test coverage
 coverage:
 	@echo "📊 Generating coverage reports..."
 	@mkdir -p coverage
@@ -177,7 +183,7 @@ rust-coverage:
 	fi
 	cd dataplane && cargo llvm-cov --all-features --locked --summary-only --fail-under-lines $(RUST_COVERAGE_MIN)
 
-# E2E 测试
+# E2E tests
 e2e:
 	@echo "🔗 Running isolated E2E tests..."
 	@chmod +x scripts/e2e-test.sh scripts/run-e2e-isolated.sh
@@ -193,26 +199,27 @@ fault-injection-live:
 	@chmod +x scripts/fault-injection-test.sh
 	./scripts/fault-injection-test.sh
 
-# 性能基准测试
+# Performance benchmarks
 bench:
 	@echo "⏱️  Running isolated benchmarks..."
 	@chmod +x scripts/benchmark.sh scripts/run-benchmark-isolated.sh
 	./scripts/run-benchmark-isolated.sh
 
-# 运行
+# Run
 run: build
 	./bin/nasd
 
-# 清理
+# Clean
 clean:
 	@echo "🧹 Cleaning..."
 	rm -rf bin/ coverage/
 	cd dataplane && cargo clean
-	cd web && rm -rf dist coverage
+	cargo clean --manifest-path tools/proto-gen/Cargo.toml
+	cd web && rm -rf dist dist-ssr coverage test-results playwright-report .vite .vitest
 	$(GO_CMD_ENV) go clean
 	@echo "✅ Clean complete"
 
-# 格式化代码
+# Format code
 fmt:
 	@echo "✨ Formatting code..."
 	@$(RESOLVE_GO_PACKAGES); \
@@ -221,7 +228,7 @@ fmt:
 	cargo fmt --manifest-path tools/proto-gen/Cargo.toml
 	cd web && npm run lint -- --fix 2>/dev/null || true
 
-# 代码检查
+# Lint
 lint:
 	@echo "🔍 Linting Go..."
 	@lint_packages="$(GO_LINT_PACKAGES)"; \
@@ -242,21 +249,24 @@ lint:
 	@echo "🔍 Linting frontend..."
 	cd web && npm run lint
 
-# GitHub Actions 工作流检查
+# GitHub Actions workflow checks
 workflows-check:
 	@echo "🔍 Checking GitHub Actions workflows..."
+	./scripts/check-yaml-configs.sh .github/workflows/*.yml .github/workflows/*.yaml
 	@if command -v "$(ACTIONLINT_CMD)" >/dev/null 2>&1; then \
 		"$(ACTIONLINT_CMD)"; \
 	else \
 		$(ACTIONLINT_ENV) go run github.com/rhysd/actionlint/cmd/actionlint@$(ACTIONLINT_VERSION); \
 	fi
 
-# 部署脚本检查
+# Deployment and tool script checks
 scripts-check:
 	@echo "🔍 Checking deployment scripts..."
-	bash -n $(DEPLOYMENT_SCRIPTS) $(ACCEPTANCE_SCRIPTS) $(DEV_SCRIPTS) $(WEB_SCRIPTS)
+	bash -n $(DEPLOYMENT_SCRIPTS) $(ACCEPTANCE_SCRIPTS) $(DEV_SCRIPTS) $(WEB_SCRIPTS) $(HUSKY_SCRIPTS)
+	cd web && npm run check:scripts
+	./scripts/check-secret-leaks.sh
 	@if command -v shellcheck >/dev/null 2>&1; then \
-		shellcheck $(DEPLOYMENT_SCRIPTS) $(DEV_SCRIPTS) $(WEB_SCRIPTS); \
+		shellcheck $(DEPLOYMENT_SCRIPTS) $(DEV_SCRIPTS) $(WEB_SCRIPTS) $(HUSKY_SCRIPTS); \
 		shellcheck -e SC2155 -e SC2317 $(ACCEPTANCE_SCRIPTS); \
 	else \
 		echo "⚠️  shellcheck not installed, skipping"; \
@@ -266,6 +276,7 @@ scripts-check:
 	./scripts/test-docker-start.sh
 	./scripts/test-docker-preflight.sh
 	./scripts/test-docker-quickstart.sh
+	./scripts/test-docker-smoke.sh
 	./scripts/test-benchmark-safety.sh
 	./scripts/test-dataplane-start.sh
 	./scripts/test-dev-safety.sh
@@ -277,12 +288,20 @@ scripts-check:
 	./scripts/test-fault-injection-safety.sh
 	./scripts/test-commit-message.sh
 	./scripts/test-doc-links.sh
+	./scripts/test-hardening-commit-plan.sh
+	./scripts/test-secret-leaks.sh
+	./scripts/test-web-husky-safety.sh
+	./scripts/test-verify-changed-safety.sh
+
+toolchains-check:
+	@echo "🔧 Checking toolchain version consistency..."
+	./scripts/check-toolchain-versions.sh
 
 docs-check:
 	@echo "📚 Checking documentation links and structured examples..."
 	./scripts/check-doc-links.sh
 
-# 安全依赖检查
+# Dependency vulnerability checks
 security-check:
 	@echo "🔐 Scanning Go dependencies..."
 	@GO_LIST_ENV="$(GO_SECURITY_ENV)"; \
@@ -312,20 +331,26 @@ install-audit-tools:
 	$(GO_SECURITY_ENV) go install golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION)
 	CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse cargo install cargo-audit --version $(CARGO_AUDIT_VERSION) --locked
 
-# Docker构建
+# Docker build
 docker:
 	@echo "🐳 Building Docker image..."
 	DOCKER_BUILDKIT=1 docker build --build-arg VERSION=$(VERSION) --build-arg BUILD_TIME=$(BUILD_TIME) -t mnemonas:$(VERSION) -t mnemonas:latest .
 	@echo "✅ Docker image: mnemonas:$(VERSION)"
 
-# 运行所有检查 (CI 使用)
-check: workflows-check scripts-check docs-check lint test
+docker-smoke:
+	@echo "🚦 Smoke testing Docker image..."
+	./scripts/docker-smoke.sh "$${MNEMONAS_DOCKER_SMOKE_IMAGE:-mnemonas:latest}"
+
+docker-check: docker docker-smoke
+
+# Run all checks (used by CI)
+check: workflows-check scripts-check toolchains-check docs-check lint test
 	@echo "✅ All checks passed"
 
 verify-changed:
 	./scripts/verify-changed.sh
 
-# 快速检查 (commit 前)
+# Fast checks (before commit)
 quick-check:
 	@echo "🚀 Quick check..."
 	@$(RESOLVE_GO_PACKAGES); \

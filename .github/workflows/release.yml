@@ -96,6 +96,8 @@ jobs:
 
       - name: Build frontend
         working-directory: web
+        env:
+          HUSKY: '0'
         run: |
           npm ci
           npm run build
@@ -197,6 +199,23 @@ jobs:
       - name: Set build metadata
         id: build_meta
         run: echo "build_time=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> "$GITHUB_OUTPUT"
+
+      - name: Build image for smoke test
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          platforms: linux/amd64
+          push: false
+          load: true
+          tags: mnemonas:release-smoke
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ github.ref_name }}
+            BUILD_TIME=${{ steps.build_meta.outputs.build_time }}
+          cache-from: type=gha
+
+      - name: Smoke test release image
+        run: ./scripts/docker-smoke.sh mnemonas:release-smoke
 
       - name: Build and push
         uses: docker/build-push-action@v5

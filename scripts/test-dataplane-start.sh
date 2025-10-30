@@ -79,7 +79,7 @@ run_invalid_chunk_value_test() {
 root = "$case_dir/storage"
 
 [dataplane.cdc]
-min_chunk_size = 65__536
+min_chunk_size = "65__536"
 EOF
 
 	write_executable "$dataplane_bin" \
@@ -96,6 +96,39 @@ EOF
 
 	[[ "$status" -ne 0 ]] || fail "invalid chunk size was accepted"
 	assert_file_contains "$case_dir/out.log" "invalid [dataplane.cdc].min_chunk_size value"
+	assert_not_exists "$capture_path"
+}
+
+run_invalid_toml_syntax_test() {
+	local case_dir="$TMP_ROOT/invalid-toml"
+	local config_path="$case_dir/config.toml"
+	local capture_path="$case_dir/dataplane.args"
+	local dataplane_bin="$case_dir/capture-dataplane"
+	local status
+	mkdir -p "$case_dir"
+
+	cat > "$config_path" <<EOF
+[storage]
+root = "$case_dir/storage"
+
+[broken
+EOF
+
+	write_executable "$dataplane_bin" \
+		'#!/usr/bin/env bash' \
+		'printf "%s\n" "$*" > "$CAPTURE_PATH"'
+
+	set +e
+	CAPTURE_PATH="$capture_path" \
+		CONFIG_PATH="$config_path" \
+		DATAPLANE_BIN="$dataplane_bin" \
+		bash "$REPO_ROOT/scripts/mnemonas-dataplane-start.sh" > "$case_dir/out.log" 2>&1
+	status=$?
+	set -e
+
+	[[ "$status" -ne 0 ]] || fail "invalid TOML config was accepted"
+	assert_file_contains "$case_dir/out.log" "CONFIG_PATH TOML syntax is invalid: $config_path"
+	assert_file_contains "$case_dir/out.log" "TOML parse error:"
 	assert_not_exists "$capture_path"
 }
 
@@ -583,6 +616,7 @@ EOF
 
 run_underscore_chunk_values_test
 run_invalid_chunk_value_test
+run_invalid_toml_syntax_test
 run_min_chunk_floor_test
 run_defaulted_chunk_order_test
 run_invalid_grpc_address_test

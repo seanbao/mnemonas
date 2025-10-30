@@ -1,33 +1,33 @@
 #!/bin/bash
-# MnemoNAS 开发启动脚本
-# 用法: ./scripts/dev.sh [选项]
-#   无参数: 启动所有组件
-#   -b, --backend: 仅启动后端 (nasd + dataplane)
-#   -f, --frontend: 仅启动前端
-#   -k, --kill: 停止所有组件
-#   -c, --creds: 显示 Web UI 初始密码文件和 WebDAV 登录凭据状态
+# MnemoNAS development startup script
+# Usage: ./scripts/dev.sh [options]
+#   no arguments: start all components
+#   -b, --backend: start only the backend (nasd + dataplane)
+#   -f, --frontend: start only the frontend
+#   -k, --kill: stop all components
+#   -c, --creds: show Web UI initial password file and WebDAV credential status
 
 set -eo pipefail
 
-# 颜色定义
+# Color definitions
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
-# 项目根目录
+# Project root
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 PROJECT_ROOT_REAL="$(cd "$PROJECT_ROOT" && pwd -P)"
 WEB_ROOT_REAL="$PROJECT_ROOT_REAL/web"
 FRONTEND_NODE_VERSION_FILE="$PROJECT_ROOT/.nvmrc"
 
-# 日志目录
+# Log directory
 LOG_DIR="${MNEMONAS_DEV_LOG_DIR:-$PROJECT_ROOT/logs}"
 mkdir -p "$LOG_DIR"
 
-# PID 文件目录
+# PID file directory
 PID_DIR="${MNEMONAS_DEV_PID_DIR:-$PROJECT_ROOT/.pids}"
 mkdir -p "$PID_DIR"
 
@@ -102,17 +102,17 @@ require_frontend_node() {
     return 0
 }
 
-# 检查端口是否被占用
+# Check whether a TCP port is in use.
 check_port() {
     local port=$1
     if lsof -i :"$port" >/dev/null 2>&1; then
-        return 0  # 端口被占用
+        return 0  # Port is in use.
     else
-        return 1  # 端口空闲
+        return 1  # Port is free.
     fi
 }
 
-# 等待服务启动
+# Wait for a service health endpoint to become reachable.
 wait_for_service() {
     local name=$1
     local url=$2
@@ -165,7 +165,7 @@ process_args_matches_kind() {
             [[ "$args" == *"/dataplane"* || "$args" == *"bin/dataplane"* || "$args" == "./bin/dataplane"* ]]
             ;;
         frontend)
-            [[ "$args" == *"npm run dev"* || "$args" == *"vite"* || "$args" == *"node "* ]]
+            [[ "$args" == *"npm run dev"* || "$args" == *"vite"* ]]
             ;;
         *)
             return 1
@@ -225,21 +225,21 @@ stop_pid_file() {
     rm -f -- "$pid_file"
 }
 
-# 停止所有组件
+# Stop all components.
 kill_all() {
     log_section "停止所有组件"
     
-    # 停止 nasd
+    # Stop nasd.
     stop_pid_file "nasd" "$PID_DIR/nasd.pid" "$PROJECT_ROOT_REAL" "nasd"
     
-    # 停止 dataplane
+    # Stop dataplane.
     stop_pid_file "dataplane" "$PID_DIR/dataplane.pid" "$PROJECT_ROOT_REAL" "dataplane"
     
-    # 停止前端开发服务器
+    # Stop the frontend dev server.
     stop_pid_file "前端开发服务器" "$PID_DIR/frontend.pid" "$WEB_ROOT_REAL" "frontend"
     
     if [ "${MNEMONAS_DEV_KILL_PORTS:-0}" = "1" ]; then
-        # 兜底: 按端口杀进程 (9090=gRPC, 9091=HTTP)。默认关闭，避免误杀用户自己的服务。
+        # Fallback cleanup by port (9090=gRPC, 9091=HTTP). Disabled by default to avoid killing unrelated user services.
         for port in 8080 9090 9091 5173; do
             if check_port "$port"; then
                 local pids=()
@@ -260,18 +260,18 @@ kill_all() {
     log_info "所有组件已停止"
 }
 
-# 构建项目
+# Build project binaries.
 build_project() {
     log_section "构建项目"
     
     cd "$PROJECT_ROOT"
     mkdir -p bin
     
-    # 构建 Go 控制面
+    # Build the Go control plane.
     log_info "构建 nasd..."
     CGO_ENABLED=0 go build -o bin/nasd ./cmd/nasd
     
-    # 构建 Rust 数据面
+    # Build the Rust data plane.
     log_info "构建 dataplane..."
     cd dataplane && cargo build --release
     cp target/release/dataplane ../bin/dataplane
@@ -280,7 +280,7 @@ build_project() {
     log_info "构建完成"
 }
 
-# 启动 Rust 数据面
+# Start the Rust data plane.
 start_dataplane() {
     log_section "启动 Rust 数据面"
     
@@ -299,7 +299,7 @@ start_dataplane() {
     local storage_root
     storage_root=$(storage_root_from_config)
 
-    # 启动 dataplane
+    # Start dataplane.
     CONFIG_PATH="$HOME/.mnemonas/config.toml" \
         DATAPLANE_BIN="$PROJECT_ROOT/bin/dataplane" \
         DATAPLANE_DATA_DIR="$storage_root/.mnemonas/objects" \
@@ -309,7 +309,7 @@ start_dataplane() {
     local pid=$!
     echo $pid > "$PID_DIR/dataplane.pid"
     
-    # 等待服务就绪 (HTTP 端口 9091, gRPC 端口 9090)
+    # Wait for service readiness (HTTP port 9091, gRPC port 9090).
     if wait_for_service "dataplane" "http://127.0.0.1:9091/health"; then
         log_info "dataplane 已启动 (PID: $pid, HTTP: 9091, gRPC: 9090)"
         log_info "  健康检查: curl http://127.0.0.1:9091/health"
@@ -320,7 +320,7 @@ start_dataplane() {
     fi
 }
 
-# 启动 Go 控制面
+# Start the Go control plane.
 start_nasd() {
     log_section "启动 Go 控制面"
     
@@ -336,12 +336,12 @@ start_nasd() {
         return 1
     fi
     
-    # 启动 nasd
+    # Start nasd.
     ./bin/nasd > "$LOG_DIR/nasd.log" 2>&1 &
     local pid=$!
     echo $pid > "$PID_DIR/nasd.pid"
     
-    # 等待服务就绪
+    # Wait for service readiness.
     if wait_for_service "nasd" "http://127.0.0.1:8080/health"; then
         log_info "nasd 已启动 (PID: $pid, 端口: 8080)"
         log_info "  健康检查: curl http://127.0.0.1:8080/health"
@@ -349,7 +349,7 @@ start_nasd() {
         log_info "  凭据:     ./scripts/dev.sh --creds"
         log_info "  API:      http://127.0.0.1:8080/api/v1/"
         
-        # 开发脚本可显式读取本机 secrets；生产日志不输出明文 WebDAV 密码。
+        # The development script may explicitly read local secrets; production logs do not print WebDAV passwords.
         if grep -q "WebDAV credentials were auto-generated" "$LOG_DIR/nasd.log"; then
             show_credentials
         fi
@@ -359,7 +359,7 @@ start_nasd() {
     fi
 }
 
-# 启动前端开发服务器
+# Start the frontend dev server.
 start_frontend() {
     log_section "启动前端开发服务器"
     
@@ -374,7 +374,7 @@ start_frontend() {
         return 1
     fi
     
-    # 检查依赖
+    # Check dependencies.
     if [ ! -d "node_modules" ]; then
         log_info "安装前端依赖..."
         if [ -f "package-lock.json" ]; then
@@ -384,12 +384,12 @@ start_frontend() {
         fi
     fi
     
-    # 启动开发服务器
+    # Start the dev server.
     npm run dev > "$LOG_DIR/frontend.log" 2>&1 &
     local pid=$!
     echo $pid > "$PID_DIR/frontend.pid"
     
-    # 等待服务就绪
+    # Wait for service readiness.
     sleep 2
     if wait_for_service "frontend" "http://127.0.0.1:5173"; then
         log_info "前端开发服务器已启动 (PID: $pid, 端口: 5173)"
@@ -578,17 +578,55 @@ storage_root_from_config() {
     echo "$storage_root"
 }
 
-# 显示 Web UI 初始密码文件和 WebDAV 凭据状态
+auth_users_file_from_config() {
+    local storage_root="$1"
+    local config_file="$HOME/.mnemonas/config.toml"
+    local users_file
+    local default_users_file="$HOME/.mnemonas/.mnemonas/users.json"
+
+    users_file=$(read_config_value "$config_file" auth users_file)
+    if [ -n "$users_file" ]; then
+        users_file=$(expand_path "$users_file")
+    fi
+    if [ -z "$users_file" ] || [ "$users_file" = "$default_users_file" ]; then
+        users_file="$storage_root/.mnemonas/users.json"
+    fi
+
+    echo "$users_file"
+}
+
+initial_password_file_from_config() {
+    local storage_root="$1"
+    local users_file
+
+    users_file=$(auth_users_file_from_config "$storage_root")
+    echo "$(dirname "$users_file")/initial-password.txt"
+}
+
+normalize_webdav_auth_type() {
+    local value="$1"
+
+    value="${value#"${value%%[![:space:]]*}"}"
+    value="${value%"${value##*[![:space:]]}"}"
+    value="${value,,}"
+    if [ -z "$value" ]; then
+        value="basic"
+    fi
+    printf '%s' "$value"
+}
+
+# Show Web UI initial password file and WebDAV credential status.
 show_credentials() {
     local config_file="$HOME/.mnemonas/config.toml"
     local storage_root
     local secrets_file
     local initial_password_file
+    local auth_type="basic"
 
     storage_root=$(storage_root_from_config)
 
     secrets_file="$storage_root/secrets.json"
-    initial_password_file="$storage_root/.mnemonas/initial-password.txt"
+    initial_password_file=$(initial_password_file_from_config "$storage_root")
 
     echo ""
     echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
@@ -599,6 +637,44 @@ show_credentials() {
     else
         echo "   未找到初始密码文件；可能已经完成首次登录，或认证未启用。"
     fi
+
+    if [ -f "$config_file" ]; then
+        local configured_auth_type
+        configured_auth_type=$(read_config_value "$config_file" webdav auth_type)
+        if [ -n "$configured_auth_type" ]; then
+            auth_type="$configured_auth_type"
+        fi
+    fi
+    auth_type="$(normalize_webdav_auth_type "$auth_type")"
+
+    echo ""
+    echo -e "${YELLOW}🔐 WebDAV 凭据:${NC}"
+    case "$auth_type" in
+        users)
+            echo "   认证模式: users"
+            echo "   WebDAV 使用 MnemoNAS 用户名和密码；管理员可访问全局目录，普通用户受 home_dir 和目录授权限制。"
+            echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+            echo ""
+            return 0
+            ;;
+        none)
+            echo "   认证模式: none"
+            echo "   WebDAV 认证已关闭；仅适合受控本机开发环境。"
+            echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+            echo ""
+            return 0
+            ;;
+        basic|"")
+            auth_type="basic"
+            ;;
+        *)
+            echo "   认证模式: $auth_type"
+            echo "   未识别 WebDAV 认证模式；请检查 $config_file"
+            echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+            echo ""
+            return 0
+            ;;
+    esac
 
     local username="admin"
     local configured_password=""
@@ -626,10 +702,9 @@ show_credentials() {
         fi
     fi
 
-    echo ""
-    echo -e "${YELLOW}🔐 WebDAV 凭据:${NC}"
+    echo "   认证模式: basic"
     if [ -z "$password" ]; then
-        echo "   未找到 WebDAV 密码；请检查 $config_file 或 $secrets_file"
+        echo "   未找到 WebDAV Basic Auth 密码；请检查 $config_file 或 $secrets_file"
         echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
         echo ""
         return 0
@@ -646,7 +721,7 @@ show_credentials() {
     echo ""
 }
 
-# 显示状态
+# Show component status.
 show_status() {
     log_section "服务状态"
     
@@ -655,21 +730,21 @@ show_status() {
     echo "│ 组件        │ 状态   │ 地址                             │"
     echo "├─────────────┼────────┼──────────────────────────────────┤"
     
-    # dataplane 状态 (HTTP: 9091, gRPC: 9090)
+    # Dataplane status (HTTP: 9091, gRPC: 9090).
     if check_port 9091; then
         echo "│ dataplane   │ ✅ 运行 │ HTTP:9091 gRPC:9090              │"
     else
         echo "│ dataplane   │ ❌ 停止 │ -                                │"
     fi
     
-    # nasd 状态
+    # nasd status.
     if check_port 8080; then
         echo "│ nasd        │ ✅ 运行 │ http://127.0.0.1:8080            │"
     else
         echo "│ nasd        │ ❌ 停止 │ -                                │"
     fi
     
-    # 前端状态
+    # Frontend status.
     if check_port 5173; then
         echo "│ frontend    │ ✅ 运行 │ http://127.0.0.1:5173            │"
     else
@@ -681,7 +756,7 @@ show_status() {
     echo "日志目录: $LOG_DIR"
 }
 
-# 主函数
+# Main function.
 main() {
     case "${1:-all}" in
         -k|--kill|kill|stop)
