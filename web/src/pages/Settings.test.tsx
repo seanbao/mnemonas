@@ -3549,6 +3549,8 @@ describe('SettingsPage', () => {
       expect(initialCoverage.getByText('1 条路径策略未限制最长有效期。')).toBeTruthy()
       expect(initialCoverage.getByText('1 条路径策略未限制访问次数。')).toBeTruthy()
       expect(initialCoverage.getByText('2 条路径策略未限制允许创建者范围。')).toBeTruthy()
+      expect(initialCoverage.getByText((_content, element) => element?.textContent === '整理项 0')).toBeTruthy()
+      expect(initialCoverage.getByText('当前路径策略没有明显覆盖整理项。')).toBeTruthy()
 
       fireEvent.change(screen.getByLabelText('分享基础 URL'), {
         target: { value: 'https://new.example.com' },
@@ -3583,6 +3585,55 @@ describe('SettingsPage', () => {
       expect(updatedCoverage.getAllByText('2 条').length).toBeGreaterThanOrEqual(1)
       expect(updatedCoverage.getByText('完整限制路径')).toBeTruthy()
       expect(updatedCoverage.getAllByText('0 条').length).toBeGreaterThanOrEqual(1)
+      expect(updatedCoverage.getByText((_content, element) => element?.textContent === '整理项 0')).toBeTruthy()
+    })
+
+    it('highlights share path policy cleanup suggestions', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockGetSettings.mockResolvedValueOnce({
+        ...defaultSettingsResponse,
+        data: {
+          ...defaultSettingsResponse.data,
+          share: {
+            ...defaultSettingsResponse.data.share,
+            enabled: true,
+            base_url: 'https://share.example.com',
+            default_expires_in: '168h',
+            default_max_access: 10,
+            policy_rules: [
+              {
+                path: '/Family',
+                require_password: true,
+                max_expires_in: '24h',
+                max_access: 20,
+                allowed_groups: ['family'],
+              },
+              {
+                path: '/Family/Public',
+                max_access: 20,
+              },
+              {
+                path: '/Archive',
+                require_password: true,
+                max_expires_in: '24h',
+                max_access: 20,
+                allowed_groups: ['family'],
+              },
+            ],
+          },
+        },
+      })
+      render(<SettingsPage />)
+
+      await openTab(user, '分享')
+
+      const coverage = within(await screen.findByLabelText('分享策略覆盖摘要'))
+      expect(coverage.getByText((_content, element) => element?.textContent === '整理项 4')).toBeTruthy()
+      expect(coverage.getByText('策略整理建议')).toBeTruthy()
+      expect(coverage.getByText('/Family/Public 未继承上级 /Family 的强制密码约束。')).toBeTruthy()
+      expect(coverage.getByText('/Family/Public 未继承上级 /Family 的最长有效期约束。')).toBeTruthy()
+      expect(coverage.getByText('/Family/Public 未继承上级 /Family 的允许创建者范围。')).toBeTruthy()
+      expect(coverage.getByText('/Archive 与 /Family 的约束完全相同，可复核是否改为共同上级策略或保留路径差异。')).toBeTruthy()
     })
 
     it('rejects invalid share default policy values before saving', async () => {
