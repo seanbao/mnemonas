@@ -41,7 +41,7 @@ Archives should include a top-level directory, `nasd`, `dataplane`, Web UI stati
 
 The current hardening branch has the following validation evidence. Final publication should use the latest tag, Release workflow result, and required environment validation as the source of truth:
 
-Latest local full-validation snapshot: validation target `83eb526318cc`; `GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master` passed, covering `make check`, dependency security scans, example config validation, public-access templates, public go-live valid DNS-label, repeated trailing-dot, fully qualified hostname, same-domain HTTPS redirect variants, doctor public-domain DNS-label boundary validation, and go-live/doctor `localhost`/IPv4-literal rejection validation, protobuf regeneration stability, Rust fmt/test/clippy, frontend lint/typecheck/unit/build, 371 Playwright E2E cases, systemd upgrade/rollback installer regressions, WebDAV post-COPY/MOVE content-consistency and MOVE source-cleanup smoke, restore-drill cleanup-failure warning coverage, completed-restore dialog summary export coverage, restore cutover record copy path, user quota aggregate overview coverage, share review summary copy coverage, directory-access review-record copy, backend-persisted recent-history API, and local fallback path, current-scope share review-history handoff coverage, layout-integrity validation, Docker build, and Docker smoke. The Docker smoke used the Docker-assigned loopback port `http://127.0.0.1:32824`.
+Latest local full-validation snapshot: validation target `77a8089962dc`; `GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master` passed, covering `make check`, dependency security scans, example config validation, public-access templates, public go-live valid DNS-label, repeated trailing-dot, fully qualified hostname, same-domain HTTPS redirect variants, doctor public-domain DNS-label boundary validation, and go-live/doctor `localhost`/IPv4-literal rejection validation, protobuf regeneration stability, Rust fmt/test/clippy, frontend lint/typecheck/unit/build, 371 Playwright E2E cases, systemd upgrade/rollback installer regressions, WebDAV post-COPY/MOVE content-consistency and MOVE source-cleanup smoke, restore-drill cleanup-failure warning coverage, completed-restore dialog summary export coverage, restore cutover record copy path, user quota aggregate overview coverage, share review summary copy coverage, directory-access review-record copy, backend-persisted recent-history API, and local fallback path, current-scope share review-history handoff coverage, layout-integrity validation, Docker build, and Docker smoke. The Docker smoke used the Docker-assigned loopback port `http://127.0.0.1:32825`.
 
 - `GOTOOLCHAIN=local ./scripts/verify-changed.sh`
 - `GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master`
@@ -53,7 +53,7 @@ Latest local full-validation snapshot: validation target `83eb526318cc`; `GOTOOL
 - WebDAV curl smoke safety test: `scripts/test-webdav-client-smoke.sh`
 - Release workflow incremental validation: `make workflows-check`, `make scripts-check`, `./scripts/check-secret-leaks.sh`, `make toolchains-check`, `git diff --check`
 - Playwright E2E: `371 passed`
-- Frontend unit tests: `3071 passed`
+- Frontend unit tests: `3075 passed`
 - Docker build and `scripts/docker-smoke.sh`
 
 If code, scripts, configuration, documentation, or workflow files change again before release, rerun the matching validation.
