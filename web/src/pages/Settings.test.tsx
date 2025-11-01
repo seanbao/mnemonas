@@ -3443,6 +3443,9 @@ describe('SettingsPage', () => {
       await user.type(screen.getByLabelText('分享策略路径 1'), '/Family')
       await user.type(screen.getByLabelText('分享策略最长有效期 1'), '24h')
       await user.type(screen.getByLabelText('分享策略最多访问次数 1'), '20')
+      await user.type(screen.getByLabelText('分享策略允许用户 1'), 'Alice, bob')
+      await user.type(screen.getByLabelText('分享策略允许组 1'), 'Family')
+      await user.type(screen.getByLabelText('分享策略允许角色 1'), 'User')
       await user.click(screen.getByText('保存设置'))
 
       await waitFor(() => {
@@ -3453,6 +3456,9 @@ describe('SettingsPage', () => {
               require_password: true,
               max_expires_in: '24h',
               max_access: 20,
+              allowed_users: ['alice', 'bob'],
+              allowed_groups: ['family'],
+              allowed_roles: ['user'],
             }],
           }),
         }))
@@ -3535,13 +3541,14 @@ describe('SettingsPage', () => {
       expect(within(review).getByText('分享策略与已保存配置一致。')).toBeTruthy()
       const initialCoverage = within(screen.getByLabelText('分享策略覆盖摘要'))
       expect(initialCoverage.getByText('分享策略覆盖摘要')).toBeTruthy()
-      expect(initialCoverage.getByText('关注项 3')).toBeTruthy()
+      expect(initialCoverage.getByText((_content, element) => element?.textContent === '关注项 4')).toBeTruthy()
       expect(initialCoverage.getByText('默认访问次数')).toBeTruthy()
       expect(initialCoverage.getByText('不限制')).toBeTruthy()
       expect(initialCoverage.getByText('路径策略')).toBeTruthy()
       expect(initialCoverage.getAllByText('2 条').length).toBeGreaterThanOrEqual(1)
       expect(initialCoverage.getByText('1 条路径策略未限制最长有效期。')).toBeTruthy()
       expect(initialCoverage.getByText('1 条路径策略未限制访问次数。')).toBeTruthy()
+      expect(initialCoverage.getByText('2 条路径策略未限制允许创建者范围。')).toBeTruthy()
 
       fireEvent.change(screen.getByLabelText('分享基础 URL'), {
         target: { value: 'https://new.example.com' },
@@ -3568,13 +3575,14 @@ describe('SettingsPage', () => {
       expect(within(updatedReview).getByText('必须设置密码 · 最多访问：5')).toBeTruthy()
       expect(within(updatedReview).getByText('必须设置密码 · 最多访问：10')).toBeTruthy()
       const updatedCoverage = within(screen.getByLabelText('分享策略覆盖摘要'))
-      expect(updatedCoverage.getByText('关注项 2')).toBeTruthy()
+      expect(updatedCoverage.getByText((_content, element) => element?.textContent === '关注项 3')).toBeTruthy()
       expect(updatedCoverage.getByText('默认访问次数')).toBeTruthy()
       expect(updatedCoverage.getByText('30')).toBeTruthy()
       expect(updatedCoverage.getByText('强制密码路径')).toBeTruthy()
+      expect(updatedCoverage.getByText('成员范围路径')).toBeTruthy()
       expect(updatedCoverage.getAllByText('2 条').length).toBeGreaterThanOrEqual(1)
       expect(updatedCoverage.getByText('完整限制路径')).toBeTruthy()
-      expect(updatedCoverage.getByText('0 条')).toBeTruthy()
+      expect(updatedCoverage.getAllByText('0 条').length).toBeGreaterThanOrEqual(1)
     })
 
     it('rejects invalid share default policy values before saving', async () => {

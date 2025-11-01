@@ -166,6 +166,9 @@ type DirectoryAccessReviewSaveResult = 'saved' | 'local' | 'failed'
 
 type SharePolicyRuleDraft = SharePolicyRule & {
   max_access_input?: string
+  allowed_users_input?: string
+  allowed_groups_input?: string
+  allowed_roles_input?: string
 }
 
 // Settings section component
@@ -1652,7 +1655,33 @@ function normalizeSharePolicyRulesForSave(inputRules: SharePolicyRuleDraft[]): {
     }
     const maxAccess = parsedMaxAccess.value
 
-    if (!inputRule.require_password && !hasMaxExpiresInConstraint && maxAccess === 0) {
+    const allowedUsers = parseOptionalSharePolicyPrincipalList(
+      inputRule.allowed_users_input ?? (inputRule.allowed_users ?? []).join(', '),
+      lineNumber,
+      'allowed_users',
+    )
+    if (allowedUsers.error) {
+      return { rules: [], error: allowedUsers.error }
+    }
+    const allowedGroups = parseOptionalSharePolicyPrincipalList(
+      inputRule.allowed_groups_input ?? (inputRule.allowed_groups ?? []).join(', '),
+      lineNumber,
+      'allowed_groups',
+    )
+    if (allowedGroups.error) {
+      return { rules: [], error: allowedGroups.error }
+    }
+    const allowedRoles = parseOptionalSharePolicyPrincipalList(
+      inputRule.allowed_roles_input ?? (inputRule.allowed_roles ?? []).join(', '),
+      lineNumber,
+      'allowed_roles',
+    )
+    if (allowedRoles.error) {
+      return { rules: [], error: allowedRoles.error }
+    }
+
+    if (!inputRule.require_password && !hasMaxExpiresInConstraint && maxAccess === 0 &&
+      allowedUsers.values.length === 0 && allowedGroups.values.length === 0 && allowedRoles.values.length === 0) {
       return { rules: [], error: `第 ${lineNumber} 行至少需要一个约束` }
     }
 
@@ -1662,10 +1691,25 @@ function normalizeSharePolicyRulesForSave(inputRules: SharePolicyRuleDraft[]): {
       require_password: inputRule.require_password || undefined,
       max_expires_in: hasMaxExpiresInConstraint ? maxExpiresIn : undefined,
       max_access: maxAccess > 0 ? maxAccess : undefined,
+      allowed_users: allowedUsers.values.length > 0 ? allowedUsers.values : undefined,
+      allowed_groups: allowedGroups.values.length > 0 ? allowedGroups.values : undefined,
+      allowed_roles: allowedRoles.values.length > 0 ? allowedRoles.values as DirectoryAccessRole[] : undefined,
     })
   }
 
   return { rules }
+}
+
+function parseOptionalSharePolicyPrincipalList(
+  value: string,
+  lineNumber: number,
+  field: 'allowed_users' | 'allowed_groups' | 'allowed_roles',
+): { values: string[]; error?: string } {
+  const trimmed = value.trim()
+  if (!trimmed) {
+    return { values: [] }
+  }
+  return parseAccessRuleValues(trimmed, lineNumber, field)
 }
 
 type SharePolicyReviewInput = {
@@ -1699,6 +1743,9 @@ const sharePolicyRuleReviewFields: Array<{
   { key: 'require_password', label: '必须设置密码' },
   { key: 'max_expires_in', label: '最长有效期' },
   { key: 'max_access', label: '最多访问次数' },
+  { key: 'allowed_users', label: '允许用户' },
+  { key: 'allowed_groups', label: '允许组' },
+  { key: 'allowed_roles', label: '允许角色' },
 ]
 
 function normalizeSharePolicyDurationForReview(value: string | undefined): string {
@@ -1769,8 +1816,20 @@ function buildSharePolicyDefaultReview(
 
 function getSharePolicyRuleChangedFields(before: SharePolicyRule, after: SharePolicyRule): string[] {
   return sharePolicyRuleReviewFields
-    .filter(({ key }) => before[key] !== after[key])
+    .filter(({ key }) => !sharePolicyRuleFieldEquals(before[key], after[key]))
     .map(({ label }) => label)
+}
+
+function sharePolicyRuleFieldEquals(
+  before: SharePolicyRule[keyof Omit<SharePolicyRule, 'path'>],
+  after: SharePolicyRule[keyof Omit<SharePolicyRule, 'path'>],
+): boolean {
+  if (Array.isArray(before) || Array.isArray(after)) {
+    const beforeItems = Array.isArray(before) ? before : []
+    const afterItems = Array.isArray(after) ? after : []
+    return beforeItems.length === afterItems.length && beforeItems.every((item, index) => item === afterItems[index])
+  }
+  return before === after
 }
 
 function buildSharePolicyRuleReview(
@@ -1849,6 +1908,9 @@ function sharePolicyRuleSummary(rule: SharePolicyRule): string {
     rule.require_password ? '必须设置密码' : '',
     rule.max_expires_in ? `最长有效期：${rule.max_expires_in}` : '',
     rule.max_access && rule.max_access > 0 ? `最多访问：${rule.max_access}` : '',
+    rule.allowed_users?.length ? `允许用户：${rule.allowed_users.join(', ')}` : '',
+    rule.allowed_groups?.length ? `允许组：${rule.allowed_groups.join(', ')}` : '',
+    rule.allowed_roles?.length ? `允许角色：${rule.allowed_roles.join(', ')}` : '',
   ].filter(Boolean)
 
   return parts.length > 0 ? parts.join(' · ') : '未配置约束'
@@ -1956,6 +2018,11 @@ function SharePolicyCoverageSummary({ draft }: { draft: SharePolicyReviewInput }
   const passwordRuleCount = rules.filter((rule) => rule.require_password).length
   const expiresRuleCount = rules.filter((rule) => Boolean(rule.max_expires_in)).length
   const accessRuleCount = rules.filter((rule) => Boolean(rule.max_access && rule.max_access > 0)).length
+  const principalRuleCount = rules.filter((rule) => (
+    Boolean(rule.allowed_users?.length) ||
+    Boolean(rule.allowed_groups?.length) ||
+    Boolean(rule.allowed_roles?.length)
+  )).length
   const attentionItems = draft.enabled
     ? [
       draft.baseURL.trim() === '' ? '分享基础 URL 未固定，跨域名或反向代理切换后需复核已生成链接。' : '',
@@ -1965,6 +2032,7 @@ function SharePolicyCoverageSummary({ draft }: { draft: SharePolicyReviewInput }
       rules.length > passwordRuleCount ? `${rules.length - passwordRuleCount} 条路径策略未强制密码。` : '',
       rules.length > expiresRuleCount ? `${rules.length - expiresRuleCount} 条路径策略未限制最长有效期。` : '',
       rules.length > accessRuleCount ? `${rules.length - accessRuleCount} 条路径策略未限制访问次数。` : '',
+      rules.length > principalRuleCount ? `${rules.length - principalRuleCount} 条路径策略未限制允许创建者范围。` : '',
     ].filter(Boolean)
     : ['分享功能当前停用；重新启用前应复核默认有效期、访问次数和路径策略。']
 
@@ -1974,7 +2042,14 @@ function SharePolicyCoverageSummary({ draft }: { draft: SharePolicyReviewInput }
     { label: '默认访问次数', value: sharePolicyLimitValueLabel(defaultMaxAccess), tone: draft.enabled && defaultMaxAccess === '' ? 'warning' : 'success' },
     { label: '路径策略', value: `${rules.length} 条`, tone: draft.enabled && rules.length === 0 ? 'warning' : 'success' },
     { label: '强制密码路径', value: `${passwordRuleCount} 条`, tone: draft.enabled && rules.length > passwordRuleCount ? 'warning' : 'success' },
-    { label: '完整限制路径', value: `${rules.filter((rule) => rule.require_password && rule.max_expires_in && rule.max_access && rule.max_access > 0).length} 条`, tone: 'default' },
+    { label: '成员范围路径', value: `${principalRuleCount} 条`, tone: draft.enabled && rules.length > principalRuleCount ? 'warning' : 'success' },
+    { label: '完整限制路径', value: `${rules.filter((rule) => (
+      rule.require_password &&
+      rule.max_expires_in &&
+      rule.max_access &&
+      rule.max_access > 0 &&
+      (rule.allowed_users?.length || rule.allowed_groups?.length || rule.allowed_roles?.length)
+    )).length} 条`, tone: 'default' },
   ]
 
   return (
@@ -3189,7 +3264,14 @@ function SettingRow({
 
 function sharePolicyRuleHasConstraint(rule: SharePolicyRuleDraft): boolean {
   const maxExpiresIn = rule.max_expires_in?.trim()
-  return Boolean(rule.require_password || (maxExpiresIn && !isZeroDurationString(maxExpiresIn)) || (rule.max_access && rule.max_access > 0))
+  return Boolean(
+    rule.require_password ||
+    (maxExpiresIn && !isZeroDurationString(maxExpiresIn)) ||
+    (rule.max_access && rule.max_access > 0) ||
+    (rule.allowed_users_input?.trim() || rule.allowed_users?.length) ||
+    (rule.allowed_groups_input?.trim() || rule.allowed_groups?.length) ||
+    (rule.allowed_roles_input?.trim() || rule.allowed_roles?.length),
+  )
 }
 
 function SharePolicyRuleEditor({
@@ -3309,6 +3391,44 @@ function SharePolicyRuleEditor({
                   >
                     <Trash2 size={16} />
                   </Button>
+                </div>
+                <div className="mt-3 grid gap-3 md:grid-cols-3">
+                  <Input
+                    aria-label={`分享策略允许用户 ${index + 1}`}
+                    label="允许用户"
+                    labelPlacement="outside"
+                    value={rule.allowed_users_input ?? (rule.allowed_users ?? []).join(', ')}
+                    onValueChange={(nextValue) => updateRule(index, { allowed_users_input: nextValue })}
+                    placeholder="alice,bob"
+                    isDisabled={isDisabled}
+                    classNames={{
+                      inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
+                    }}
+                  />
+                  <Input
+                    aria-label={`分享策略允许组 ${index + 1}`}
+                    label="允许组"
+                    labelPlacement="outside"
+                    value={rule.allowed_groups_input ?? (rule.allowed_groups ?? []).join(', ')}
+                    onValueChange={(nextValue) => updateRule(index, { allowed_groups_input: nextValue })}
+                    placeholder="family"
+                    isDisabled={isDisabled}
+                    classNames={{
+                      inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
+                    }}
+                  />
+                  <Input
+                    aria-label={`分享策略允许角色 ${index + 1}`}
+                    label="允许角色"
+                    labelPlacement="outside"
+                    value={rule.allowed_roles_input ?? (rule.allowed_roles ?? []).join(', ')}
+                    onValueChange={(nextValue) => updateRule(index, { allowed_roles_input: nextValue })}
+                    placeholder="user,admin"
+                    isDisabled={isDisabled}
+                    classNames={{
+                      inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
+                    }}
+                  />
                 </div>
                 {!hasConstraint && (
                   <div className="mt-2 text-xs text-warning">
@@ -8361,7 +8481,7 @@ export function SettingsPage() {
                   <Divider className="bg-divider" />
                   <SettingRow
                     label="路径分享策略"
-                    description="为指定目录设置更严格的分享约束；更深的路径优先生效"
+                    description="为指定目录设置更严格的分享约束和允许创建者范围；更深的路径优先生效"
                   >
                     <div>
                       <SharePolicyRuleEditor
