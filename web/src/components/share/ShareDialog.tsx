@@ -326,6 +326,14 @@ function getShareDialogActionErrorToast(error: unknown): {
       }
     }
 
+    if (error.isPolicyPrincipalForbidden) {
+      return {
+        title: '当前账号不能分享该路径',
+        description: '该路径的分享策略限制了允许创建或维护分享链接的用户、组或角色。',
+        color: 'warning',
+      }
+    }
+
     if (error.isUnavailable) {
       return {
         title: '创建分享暂不可用',

@@ -963,6 +963,13 @@ describe('Share API', () => {
           data: {
             default_expires_in: '168h',
             default_max_access: 25,
+            policy_rules: [{
+              path: '/team',
+              require_password: true,
+              allowed_users: ['alice'],
+              allowed_groups: ['family'],
+              allowed_roles: ['user'],
+            }],
           },
         }),
       })
@@ -970,6 +977,13 @@ describe('Share API', () => {
       await expect(getSharePolicy()).resolves.toEqual({
         default_expires_in: '168h',
         default_max_access: 25,
+        policy_rules: [{
+          path: '/team',
+          require_password: true,
+          allowed_users: ['alice'],
+          allowed_groups: ['family'],
+          allowed_roles: ['user'],
+        }],
       })
       expect(global.fetch).toHaveBeenCalledWith('/api/v1/shares/policy', expect.anything())
     })
@@ -977,6 +991,7 @@ describe('Share API', () => {
     it.each([
       ['unsafe default max access', { default_expires_in: '168h', default_max_access: 9007199254740992 }],
       ['fractional policy max access', { default_expires_in: '168h', default_max_access: 25, policy_rules: [{ path: '/team', max_access: 1.5 }] }],
+      ['invalid policy allowed role', { default_expires_in: '168h', default_max_access: 25, policy_rules: [{ path: '/team', allowed_roles: ['owner'] }] }],
       ['unsafe policy path', { default_expires_in: '168h', default_max_access: 25, policy_rules: [{ path: '/team/./private' }] }],
       ['relative policy path', { default_expires_in: '168h', default_max_access: 25, policy_rules: [{ path: 'team' }] }],
       ['trailing-slash policy path', { default_expires_in: '168h', default_max_access: 25, policy_rules: [{ path: '/team/' }] }],
@@ -1818,6 +1833,7 @@ describe('Share API', () => {
       expect(new ShareError('missing', 404).isNotFound).toBe(true)
       expect(new ShareError('disabled', 403, 'SHARE_DISABLED').isDisabled).toBe(true)
       expect(new ShareError('limit', 403, 'SHARE_ACCESS_LIMIT_REACHED').isAccessLimitReached).toBe(true)
+      expect(new ShareError('policy scope', 403, 'SHARE_POLICY_PRINCIPAL_FORBIDDEN').isPolicyPrincipalForbidden).toBe(true)
       expect(new ShareError('expired', 410, 'SHARE_EXPIRED').isExpired).toBe(true)
       expect(new ShareError('gone', 410).isExpired).toBe(true)
       expect(new ShareError('password', 401).isUnauthorized).toBe(true)

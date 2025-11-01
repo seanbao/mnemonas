@@ -147,6 +147,9 @@ default_max_access = 0
 # require_password = true
 # max_expires_in = "24h"
 # max_access = 20
+# allowed_users = ["alice"]
+# allowed_groups = ["family"]
+# allowed_roles = ["user"]
 
 [favorites]
 enabled = true
@@ -520,7 +523,7 @@ exclude = [".mnemonas/thumbnails"]
 | `base_url` | string | `""` | 分享链接基础 URL；用于生成分享响应中的 `url` 字段，留空时返回相对路径 `/s/{id}`；非空时必须是完整 `http` 或 `https` URL，不能包含 userinfo、查询参数、片段、反斜杠、重复路径斜杠或 `.`/`..` 路径段，且主机名必须有效 |
 | `default_expires_in` | duration | `168h` | 新创建分享的默认有效期；设为 `0` 或留空表示默认不过期。公网部署建议保留明确默认有效期，且不超过 `720h`（30 天） |
 | `default_max_access` | int | `0` | 新创建分享的默认访问次数上限；`0` 表示不限制 |
-| `[[share.policy_rules]]` | array | `[]` | 按 MnemoNAS 路径设置更严格的分享约束；最具体路径规则优先生效 |
+| `[[share.policy_rules]]` | array | `[]` | 按 MnemoNAS 路径设置更严格的分享约束和允许创建/维护者范围；最具体路径规则优先生效 |
 
 **示例：**
 
@@ -536,6 +539,9 @@ path = "/Family"
 require_password = true
 max_expires_in = "24h"
 max_access = 20
+allowed_users = ["alice"]
+allowed_groups = ["family"]
+allowed_roles = ["user"]
 ```
 
 `base_url` 只影响接口返回给调用方的分享链接展示值，不改变分享 `id` 本身。配置为空时，后端返回相对路径 `/s/{id}`。
@@ -553,7 +559,9 @@ max_access = 20
 
 默认有效期和默认访问次数只影响之后创建的分享；创建请求体显式传入 `expires_in` 或 `max_access` 时以请求体为准。
 
-路径策略的 `path` 使用与目录配额和目录访问规则相同的 MnemoNAS 逻辑路径规则。路径策略可以设置 `require_password`、`max_expires_in` 和 `max_access`。命中策略时，未设置密码的创建请求，以及会使既有分享保持或变为无密码的更新请求会被拒绝。超过策略上限、显式清空上限字段，或既有分享缺少对应限制或超过策略上限时，有效期和访问次数会自动压到上限。
+路径策略的 `path` 使用与目录配额和目录访问规则相同的 MnemoNAS 逻辑路径规则。路径策略可以设置 `require_password`、`max_expires_in`、`max_access`、`allowed_users`、`allowed_groups` 和 `allowed_roles`。命中策略时，未设置密码的创建请求，以及会使既有分享保持或变为无密码的更新请求会被拒绝。超过策略上限、显式清空上限字段，或既有分享缺少对应限制或超过策略上限时，有效期和访问次数会自动压到上限。
+
+`allowed_users`、`allowed_groups` 和 `allowed_roles` 用于限制可在该路径创建或维护分享链接的认证调用方；用户值匹配用户 ID 或用户名，组值匹配用户组，角色值支持 `admin`、`user` 和 `guest`。管理员可绕过该范围限制以便处理既有分享；关闭应用认证时不会执行创建者范围限制。该限制只影响认证 API 中分享链接的创建和维护，不改变已经生成的公开分享访问边界。
 
 Web 分享创建弹窗会在提交前展示策略来源、密码要求、有效期和访问次数的实际复核摘要，并标出路径策略上限收紧的项目。Web 设置页会在保存前展示分享功能、基础 URL、默认有效期、默认访问次数和路径策略相对已保存配置的变更摘要。分享列表会汇总需复核、无密码、覆盖较大、即将到期和长期未访问链接，并提供对应筛选与需处理分享的停用入口。
 
