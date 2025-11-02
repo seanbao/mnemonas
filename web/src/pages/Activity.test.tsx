@@ -113,6 +113,18 @@ vi.mock('@heroui/react', async () => {
         )
       }
 
+      if (placeholder === '复核类型') {
+        return (
+          <div>
+            <span>{placeholder}</span>
+            <button onClick={() => onSelectionChange?.(new Set(['share']))}>筛选分享复核</button>
+            <button onClick={() => onSelectionChange?.(new Set(['risk']))}>筛选风险复核</button>
+            <button onClick={() => onSelectionChange?.(new Set(['all']))}>筛选全部复核类型</button>
+            <div>{children}</div>
+          </div>
+        )
+      }
+
       if (placeholder === '审计分组') {
         return (
           <div>
@@ -332,6 +344,26 @@ function expectGetActivityStatsCalledWithSignal(options: {
     && matchesOptionalString((calledOptions as { until?: string } | undefined)?.until, options.until)
   ))
   expect(call).toBeTruthy()
+}
+
+function expectListActivityReviewRecordsCalledWith(options: {
+  limit?: number
+  offset?: number
+  reviewer?: string
+  activityEntryId?: string
+  dispositionStatus?: string
+  actionGroup?: string
+  since?: string | RegExp
+}) {
+  expect(mockListActivityReviewRecords.mock.calls.some(([calledOptions]) => (
+    (calledOptions as { limit?: number } | undefined)?.limit === options.limit
+    && (calledOptions as { offset?: number } | undefined)?.offset === options.offset
+    && (calledOptions as { reviewer?: string } | undefined)?.reviewer === options.reviewer
+    && (calledOptions as { activityEntryId?: string } | undefined)?.activityEntryId === options.activityEntryId
+    && (calledOptions as { dispositionStatus?: string } | undefined)?.dispositionStatus === options.dispositionStatus
+    && (calledOptions as { actionGroup?: string } | undefined)?.actionGroup === options.actionGroup
+    && matchesOptionalString((calledOptions as { since?: string } | undefined)?.since, options.since)
+  ))).toBe(true)
 }
 
 function getClearActivitySignal(): AbortSignal {
@@ -948,7 +980,7 @@ describe('ActivityPage', () => {
       })
     })
 
-    it('filters persisted review records by reviewer, linked activity, review time, and disposition status', async () => {
+    it('filters persisted review records by reviewer, linked activity, review type, review time, and disposition status', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
 
       render(<ActivityPage />)
@@ -961,18 +993,19 @@ describe('ActivityPage', () => {
       const reviewFilters = within(screen.getByLabelText('复核历史筛选'))
       await user.type(reviewFilters.getByLabelText('按复核人筛选'), 'owner')
       await user.type(reviewFilters.getByLabelText('按关联活动筛选'), 'delete-1')
+      await user.click(reviewFilters.getByText('筛选分享复核'))
       await user.click(reviewFilters.getByText('筛选复核近 7 天'))
       await user.click(reviewFilters.getByText('筛选复核需跟进'))
 
       await waitFor(() => {
-        expect(mockListActivityReviewRecords.mock.calls.some(([options]) => (
-          options?.limit === 5
-          && options?.reviewer === 'owner'
-          && options?.activityEntryId === 'delete-1'
-          && options?.dispositionStatus === 'needs_follow_up'
-          && typeof options?.since === 'string'
-          && options.since.endsWith('Z')
-        ))).toBe(true)
+        expectListActivityReviewRecordsCalledWith({
+          limit: 5,
+          reviewer: 'owner',
+          activityEntryId: 'delete-1',
+          dispositionStatus: 'needs_follow_up',
+          actionGroup: 'share',
+          since: /Z$/,
+        })
       })
     })
 
@@ -990,14 +1023,41 @@ describe('ActivityPage', () => {
       await user.click(reviewFilters.getByRole('button', { name: '只看需跟进' }))
 
       await waitFor(() => {
-        expect(mockListActivityReviewRecords.mock.calls.some(([options]) => (
-          options?.limit === 5
-          && options?.dispositionStatus === 'needs_follow_up'
-          && options?.reviewer === undefined
-          && options?.activityEntryId === undefined
-          && options?.since === undefined
-        ))).toBe(true)
+        expectListActivityReviewRecordsCalledWith({
+          limit: 5,
+          dispositionStatus: 'needs_follow_up',
+          reviewer: undefined,
+          activityEntryId: undefined,
+          actionGroup: undefined,
+          since: undefined,
+        })
         expect(reviewFilters.getByRole('button', { name: '只看需跟进' })).toBeDisabled()
+      })
+    })
+
+    it('quickly focuses review history on share review records', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+
+      render(<ActivityPage />)
+
+      await waitFor(() => {
+        expect(screen.getByLabelText('复核历史筛选')).toBeTruthy()
+      })
+
+      mockListActivityReviewRecords.mockClear()
+      const reviewFilters = within(screen.getByLabelText('复核历史筛选'))
+      await user.click(reviewFilters.getByRole('button', { name: '只看分享复核' }))
+
+      await waitFor(() => {
+        expectListActivityReviewRecordsCalledWith({
+          limit: 5,
+          reviewer: undefined,
+          activityEntryId: undefined,
+          dispositionStatus: undefined,
+          actionGroup: 'share',
+          since: undefined,
+        })
+        expect(reviewFilters.getByRole('button', { name: '只看分享复核' })).toBeDisabled()
       })
     })
 
@@ -1087,12 +1147,13 @@ describe('ActivityPage', () => {
       await user.click(within(screen.getByLabelText('需跟进复核批量视图')).getByRole('button', { name: '查看需跟进' }))
 
       await waitFor(() => {
-        expect(mockListActivityReviewRecords.mock.calls.some(([options]) => (
-          options?.limit === 5
-          && options?.dispositionStatus === 'needs_follow_up'
-          && options?.reviewer === undefined
-          && options?.since === undefined
-        ))).toBe(true)
+        expectListActivityReviewRecordsCalledWith({
+          limit: 5,
+          dispositionStatus: 'needs_follow_up',
+          reviewer: undefined,
+          actionGroup: undefined,
+          since: undefined,
+        })
       })
     })
 
@@ -1246,11 +1307,14 @@ describe('ActivityPage', () => {
 
       const reviewFilters = within(screen.getByLabelText('复核历史筛选'))
       await user.type(reviewFilters.getByLabelText('按关联活动筛选'), 'share-1')
+      await user.click(reviewFilters.getByText('筛选分享复核'))
 
       await waitFor(() => {
-        expect(mockListActivityReviewRecords.mock.calls.some(([options]) => (
-          options?.activityEntryId === 'share-1'
-        ))).toBe(true)
+        expectListActivityReviewRecordsCalledWith({
+          limit: 5,
+          activityEntryId: 'share-1',
+          actionGroup: 'share',
+        })
       })
 
       mockListActivityReviewRecords.mockClear()
@@ -1291,6 +1355,7 @@ describe('ActivityPage', () => {
           reviewer: undefined,
           activityEntryId: 'share-1',
           dispositionStatus: undefined,
+          actionGroup: 'share',
           since: undefined,
         }))
         expect(mockTriggerBrowserDownload).toHaveBeenCalledTimes(1)

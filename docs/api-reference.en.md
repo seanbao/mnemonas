@@ -1118,10 +1118,11 @@ Query parameters:
 - `reviewer`: Filter by reviewer.
 - `activity_entry_id`: Return only review records linked to the given activity entry ID.
 - `disposition_status`: Filter by disposition status. Allowed values are `documented`, `confirmed`, `restored`, `disabled`, and `needs_follow_up`.
+- `action_group`: Filter by the action group present in the review record action counts. Allowed values are `share` and `risk`.
 - `since`: Return review records at or after this RFC3339 timestamp.
 - `until`: Return review records at or before this RFC3339 timestamp.
 
-Invalid time formats, a `since` value later than `until`, a non-canonical `activity_entry_id`, or an unsupported `disposition_status` return `400 Bad Request`.
+Invalid time formats, a `since` value later than `until`, a non-canonical `activity_entry_id`, an unsupported `disposition_status`, or an unsupported `action_group` return `400 Bad Request`.
 
 Response example:
 

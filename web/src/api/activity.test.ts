@@ -779,11 +779,12 @@ describe('Activity API', () => {
       reviewer: 'admin',
       activityEntryId: 'delete-1',
       dispositionStatus: 'restored',
+      actionGroup: 'risk',
       since: '2026-05-01T00:00:00Z',
       until: '2026-05-02T00:00:00Z',
     })
 
-    expect(mockAuthFetch).toHaveBeenCalledWith('/api/v1/activity/reviews?limit=5&reviewer=admin&activity_entry_id=delete-1&disposition_status=restored&since=2026-05-01T00%3A00%3A00Z&until=2026-05-02T00%3A00%3A00Z')
+    expect(mockAuthFetch).toHaveBeenCalledWith('/api/v1/activity/reviews?limit=5&reviewer=admin&activity_entry_id=delete-1&disposition_status=restored&action_group=risk&since=2026-05-01T00%3A00%3A00Z&until=2026-05-02T00%3A00%3A00Z')
     expect(result.items[0].note).toBe('已确认误删文件已恢复')
     expect(result.items[0].disposition_status).toBe('restored')
     expect(result.items[0].action_counts?.delete).toBe(1)
