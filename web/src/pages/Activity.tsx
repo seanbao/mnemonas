@@ -100,10 +100,16 @@ const ACTIVITY_REVIEW_DISPOSITION_OPTIONS: Array<{ key: ActivityReviewDispositio
 ]
 
 type ActivityReviewDispositionFilterKey = 'all' | ActivityReviewDispositionStatus
+type ActivityReviewActionGroupFilterKey = 'all' | ActivityActionGroup
 
 const ACTIVITY_REVIEW_DISPOSITION_FILTER_OPTIONS: Array<{ key: ActivityReviewDispositionFilterKey; label: string }> = [
   { key: 'all', label: '全部处置' },
   ...ACTIVITY_REVIEW_DISPOSITION_OPTIONS,
+]
+
+const ACTIVITY_REVIEW_ACTION_GROUP_FILTER_OPTIONS: Array<{ key: ActivityReviewActionGroupFilterKey; label: string }> = [
+  { key: 'all', label: '全部类型' },
+  ...ACTIVITY_ACTION_GROUP_OPTIONS,
 ]
 
 const ACTIVITY_REVIEW_ACTIONS = new Set<ActionType>([
@@ -166,6 +172,10 @@ function isActivityReviewDispositionStatus(value: string | undefined): value is 
 
 function isActivityReviewDispositionFilterKey(value: string | undefined): value is ActivityReviewDispositionFilterKey {
   return value === 'all' || isActivityReviewDispositionStatus(value)
+}
+
+function isActivityReviewActionGroupFilterKey(value: string | undefined): value is ActivityReviewActionGroupFilterKey {
+  return value === 'all' || isActivityActionGroup(value)
 }
 
 function getActivityTimeRangeLabel(key: ActivityTimeRangeKey): string {
@@ -302,6 +312,7 @@ function activityReviewRecordMatchesFilters(
   record: ActivityReviewRecord,
   reviewerFilter: string,
   activityEntryIDFilter: string,
+  actionGroupFilter?: ActivityActionGroup,
   sinceFilter?: string,
   dispositionStatusFilter?: ActivityReviewDispositionStatus,
 ): boolean {
@@ -314,10 +325,18 @@ function activityReviewRecordMatchesFilters(
   if (dispositionStatusFilter && (record.disposition_status ?? 'documented') !== dispositionStatusFilter) {
     return false
   }
+  if (actionGroupFilter && !activityReviewRecordMatchesActionGroup(record, actionGroupFilter)) {
+    return false
+  }
   if (sinceFilter && Date.parse(record.reviewed_at) < Date.parse(sinceFilter)) {
     return false
   }
   return true
+}
+
+function activityReviewRecordMatchesActionGroup(record: ActivityReviewRecord, actionGroup: ActivityActionGroup): boolean {
+  const matchingActions = actionGroup === 'share' ? ACTIVITY_SHARE_ACTIONS : ACTIVITY_REVIEW_ACTIONS
+  return activityReviewRecordHasAction(record, matchingActions)
 }
 
 function prependActivityReviewRecord(
@@ -883,6 +902,7 @@ function ActivityReviewDispositionRecorder({
   reviewActivityEntryIDFilter,
   reviewTimeRangeFilter,
   reviewDispositionStatusFilter,
+  reviewActionGroupFilter,
   reviewDispositionStatus,
   note,
   onNoteChange,
@@ -890,10 +910,12 @@ function ActivityReviewDispositionRecorder({
   onReviewActivityEntryIDFilterChange,
   onReviewTimeRangeFilterChange,
   onReviewDispositionStatusFilterChange,
+  onReviewActionGroupFilterChange,
   onReviewDispositionStatusChange,
   onClearReviewRecordFilters,
   onExportReviewRecords,
   onShowFollowUpRecords,
+  onShowShareReviewRecords,
   onTraceReviewRecord,
   onOpenReviewRecordVersions,
   onOpenReviewRecordTrash,
@@ -918,6 +940,7 @@ function ActivityReviewDispositionRecorder({
   reviewActivityEntryIDFilter: string
   reviewTimeRangeFilter: ActivityTimeRangeKey
   reviewDispositionStatusFilter: ActivityReviewDispositionFilterKey
+  reviewActionGroupFilter: ActivityReviewActionGroupFilterKey
   reviewDispositionStatus: ActivityReviewDispositionStatus
   note: string
   onNoteChange: (value: string) => void
@@ -925,10 +948,12 @@ function ActivityReviewDispositionRecorder({
   onReviewActivityEntryIDFilterChange: (value: string) => void
   onReviewTimeRangeFilterChange: (value: string | undefined) => void
   onReviewDispositionStatusFilterChange: (value: string | undefined) => void
+  onReviewActionGroupFilterChange: (value: string | undefined) => void
   onReviewDispositionStatusChange: (value: string | undefined) => void
   onClearReviewRecordFilters: () => void
   onExportReviewRecords: () => void
   onShowFollowUpRecords: () => void
+  onShowShareReviewRecords: () => void
   onTraceReviewRecord: (record: ActivityReviewRecord) => void
   onOpenReviewRecordVersions: (record: ActivityReviewRecord) => void
   onOpenReviewRecordTrash: (record: ActivityReviewRecord) => void
@@ -950,7 +975,7 @@ function ActivityReviewDispositionRecorder({
   const users = getUniqueActivityReviewValues(reviewEntries, (entry) => entry.user)
   const scopeLabel = getActivityReviewScopeLabel(isFiltered, reviewWindow)
   const trimmedNote = note.trim()
-  const hasRecordFilters = Boolean(reviewReviewerFilter.trim() || reviewActivityEntryIDFilter.trim() || reviewTimeRangeFilter !== 'all' || reviewDispositionStatusFilter !== 'all')
+  const hasRecordFilters = Boolean(reviewReviewerFilter.trim() || reviewActivityEntryIDFilter.trim() || reviewTimeRangeFilter !== 'all' || reviewDispositionStatusFilter !== 'all' || reviewActionGroupFilter !== 'all')
   const hasFollowUpRecords = followUpTotal > 0 || followUpRecords.length > 0
   const hiddenFollowUpRecords = Math.max(followUpTotal - followUpRecords.length, 0)
   const getReviewRecordDispositionNote = (record: ActivityReviewRecord): string => reviewRecordDispositionNotes[record.id] ?? ''
@@ -1234,6 +1259,23 @@ function ActivityReviewDispositionRecorder({
             startContent={<Search size={14} />}
           />
           <Select
+            placeholder="复核类型"
+            size="sm"
+            className="w-full sm:w-36"
+            aria-label="筛选复核类型"
+            selectedKeys={[reviewActionGroupFilter]}
+            onSelectionChange={(keys) => {
+              onReviewActionGroupFilterChange(Array.from(keys)[0]?.toString())
+            }}
+            startContent={<Filter size={14} />}
+          >
+            {ACTIVITY_REVIEW_ACTION_GROUP_FILTER_OPTIONS.map((option) => (
+              <SelectItem key={option.key}>
+                {option.label}
+              </SelectItem>
+            ))}
+          </Select>
+          <Select
             placeholder="复核时间"
             size="sm"
             className="w-full sm:w-36"
@@ -1269,6 +1311,16 @@ function ActivityReviewDispositionRecorder({
           </Select>
         </div>
         <div className="flex flex-col gap-2 sm:flex-row sm:justify-end">
+          <Button
+            size="sm"
+            variant="flat"
+            className="h-8 rounded-lg px-2"
+            startContent={<Share2 size={14} />}
+            isDisabled={reviewActionGroupFilter === 'share'}
+            onPress={onShowShareReviewRecords}
+          >
+            只看分享复核
+          </Button>
           <Button
             size="sm"
             variant="flat"
@@ -1495,6 +1547,7 @@ export function ActivityPage() {
   const [reviewRecordActivityEntryIDFilter, setReviewRecordActivityEntryIDFilter] = useState('')
   const [reviewRecordTimeRangeFilter, setReviewRecordTimeRangeFilter] = useState<ActivityTimeRangeKey>('all')
   const [reviewRecordDispositionStatusFilter, setReviewRecordDispositionStatusFilter] = useState<ActivityReviewDispositionFilterKey>('all')
+  const [reviewRecordActionGroupFilter, setReviewRecordActionGroupFilter] = useState<ActivityReviewActionGroupFilterKey>('all')
   const [isRecordingFilteredReview, setIsRecordingFilteredReview] = useState(false)
   const [isExportingReviewRecords, setIsExportingReviewRecords] = useState(false)
   const pageSize = 20
@@ -1511,14 +1564,17 @@ export function ActivityPage() {
   const normalizedReviewRecordDispositionStatusFilter = isAdmin && reviewRecordDispositionStatusFilter !== 'all'
     ? reviewRecordDispositionStatusFilter
     : undefined
+  const normalizedReviewRecordActionGroupFilter = isAdmin && reviewRecordActionGroupFilter !== 'all'
+    ? reviewRecordActionGroupFilter
+    : undefined
   const pathFilterState = useMemo(() => parseActivityPathFilter(pathFilter), [pathFilter])
   const normalizedPathFilter = pathFilterState.normalizedPath
   const pathFilterErrorMessage = pathFilterState.errorMessage
   const timeRangeSinceFilter = useMemo(() => getActivityTimeRangeSince(timeRangeFilter), [timeRangeFilter])
   const reviewRecordSinceFilter = useMemo(() => getActivityTimeRangeSince(reviewRecordTimeRangeFilter), [reviewRecordTimeRangeFilter])
   const activityReviewRecordsQueryKey = useMemo(
-    () => ['activity-review-records', authScopeKey, normalizedReviewRecordReviewerFilter, normalizedReviewRecordActivityEntryIDFilter, normalizedReviewRecordDispositionStatusFilter, reviewRecordSinceFilter] as const,
-    [authScopeKey, normalizedReviewRecordReviewerFilter, normalizedReviewRecordActivityEntryIDFilter, normalizedReviewRecordDispositionStatusFilter, reviewRecordSinceFilter],
+    () => ['activity-review-records', authScopeKey, normalizedReviewRecordReviewerFilter, normalizedReviewRecordActivityEntryIDFilter, normalizedReviewRecordDispositionStatusFilter, normalizedReviewRecordActionGroupFilter, reviewRecordSinceFilter] as const,
+    [authScopeKey, normalizedReviewRecordReviewerFilter, normalizedReviewRecordActivityEntryIDFilter, normalizedReviewRecordDispositionStatusFilter, normalizedReviewRecordActionGroupFilter, reviewRecordSinceFilter],
   )
   const activityReviewFollowUpRecordsQueryKey = useMemo(
     () => ['activity-review-follow-up-records', authScopeKey] as const,
@@ -1565,6 +1621,7 @@ export function ActivityPage() {
       reviewer: normalizedReviewRecordReviewerFilter || undefined,
       activityEntryId: normalizedReviewRecordActivityEntryIDFilter || undefined,
       dispositionStatus: normalizedReviewRecordDispositionStatusFilter,
+      actionGroup: normalizedReviewRecordActionGroupFilter,
       since: reviewRecordSinceFilter,
       signal,
     }),
@@ -1631,7 +1688,7 @@ export function ActivityPage() {
     mutationFn: ({ input }: { input: ActivityReviewRecordCreateInput; successTitle: string }) => createActivityReviewRecord(input),
     retry: false,
     onSuccess: (record, variables) => {
-      if (activityReviewRecordMatchesFilters(record, normalizedReviewRecordReviewerFilter, normalizedReviewRecordActivityEntryIDFilter, reviewRecordSinceFilter, normalizedReviewRecordDispositionStatusFilter)) {
+      if (activityReviewRecordMatchesFilters(record, normalizedReviewRecordReviewerFilter, normalizedReviewRecordActivityEntryIDFilter, normalizedReviewRecordActionGroupFilter, reviewRecordSinceFilter, normalizedReviewRecordDispositionStatusFilter)) {
         queryClient.setQueryData<ActivityReviewRecordListResponse>(activityReviewRecordsQueryKey, (current) => {
           return prependActivityReviewRecord(current, record, 5)
         })
@@ -1671,6 +1728,7 @@ export function ActivityPage() {
             candidate,
             normalizedReviewRecordReviewerFilter,
             normalizedReviewRecordActivityEntryIDFilter,
+            normalizedReviewRecordActionGroupFilter,
             reviewRecordSinceFilter,
             normalizedReviewRecordDispositionStatusFilter,
           ),
@@ -1767,6 +1825,10 @@ export function ActivityPage() {
     setReviewRecordDispositionStatusFilter(isActivityReviewDispositionFilterKey(nextValue) ? nextValue : 'all')
   }
 
+  const handleReviewRecordActionGroupFilterChange = (nextValue: string | undefined) => {
+    setReviewRecordActionGroupFilter(isActivityReviewActionGroupFilterKey(nextValue) ? nextValue : 'all')
+  }
+
   const handleReviewDispositionStatusChange = (nextValue: string | undefined) => {
     if (isActivityReviewDispositionStatus(nextValue)) {
       setReviewDispositionStatus(nextValue)
@@ -1778,6 +1840,7 @@ export function ActivityPage() {
     setReviewRecordActivityEntryIDFilter('')
     setReviewRecordTimeRangeFilter('all')
     setReviewRecordDispositionStatusFilter('all')
+    setReviewRecordActionGroupFilter('all')
   }
 
   const handleShowFollowUpReviewRecords = () => {
@@ -1785,6 +1848,15 @@ export function ActivityPage() {
     setReviewRecordActivityEntryIDFilter('')
     setReviewRecordTimeRangeFilter('all')
     setReviewRecordDispositionStatusFilter('needs_follow_up')
+    setReviewRecordActionGroupFilter('all')
+  }
+
+  const handleShowShareReviewRecords = () => {
+    setReviewRecordReviewerFilter('')
+    setReviewRecordActivityEntryIDFilter('')
+    setReviewRecordTimeRangeFilter('all')
+    setReviewRecordDispositionStatusFilter('all')
+    setReviewRecordActionGroupFilter('share')
   }
 
   const handleTraceReviewRecordActivity = (record: ActivityReviewRecord) => {
@@ -1894,6 +1966,7 @@ export function ActivityPage() {
         reviewer: normalizedReviewRecordReviewerFilter || undefined,
         activityEntryId: normalizedReviewRecordActivityEntryIDFilter || undefined,
         dispositionStatus: normalizedReviewRecordDispositionStatusFilter,
+        actionGroup: normalizedReviewRecordActionGroupFilter,
         since: reviewRecordSinceFilter,
       })
       if (result.items.length === 0) {
@@ -2345,6 +2418,7 @@ export function ActivityPage() {
           reviewActivityEntryIDFilter={reviewRecordActivityEntryIDFilter}
           reviewTimeRangeFilter={reviewRecordTimeRangeFilter}
           reviewDispositionStatusFilter={reviewRecordDispositionStatusFilter}
+          reviewActionGroupFilter={reviewRecordActionGroupFilter}
           reviewDispositionStatus={reviewDispositionStatus}
           note={reviewDispositionNote}
           onNoteChange={setReviewDispositionNote}
@@ -2352,10 +2426,12 @@ export function ActivityPage() {
           onReviewActivityEntryIDFilterChange={setReviewRecordActivityEntryIDFilter}
           onReviewTimeRangeFilterChange={handleReviewRecordTimeRangeChange}
           onReviewDispositionStatusFilterChange={handleReviewRecordDispositionStatusFilterChange}
+          onReviewActionGroupFilterChange={handleReviewRecordActionGroupFilterChange}
           onReviewDispositionStatusChange={handleReviewDispositionStatusChange}
           onClearReviewRecordFilters={handleClearReviewRecordFilters}
           onExportReviewRecords={handleExportReviewRecords}
           onShowFollowUpRecords={handleShowFollowUpReviewRecords}
+          onShowShareReviewRecords={handleShowShareReviewRecords}
           onTraceReviewRecord={handleTraceReviewRecordActivity}
           onOpenReviewRecordVersions={handleOpenReviewRecordVersions}
           onOpenReviewRecordTrash={handleOpenReviewRecordTrash}

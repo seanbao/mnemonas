@@ -1110,10 +1110,11 @@ GET /api/v1/activity/reviews
 - `reviewer`：按复核人筛选。
 - `activity_entry_id`：仅返回关联到指定活动条目 ID 的复核记录。
 - `disposition_status`：按处置状态筛选。允许值为 `documented`、`confirmed`、`restored`、`disabled` 和 `needs_follow_up`。
+- `action_group`：按复核记录包含的操作分组筛选。允许值为 `share` 和 `risk`。
 - `since`：返回此 RFC3339 时间戳或之后的复核记录。
 - `until`：返回此 RFC3339 时间戳或之前的复核记录。
 
-无效时间格式、`since` 晚于 `until`、非规范 `activity_entry_id` 或不支持的 `disposition_status` 返回 `400 Bad Request`。
+无效时间格式、`since` 晚于 `until`、非规范 `activity_entry_id`、不支持的 `disposition_status` 或不支持的 `action_group` 返回 `400 Bad Request`。
 
 响应示例：
 
