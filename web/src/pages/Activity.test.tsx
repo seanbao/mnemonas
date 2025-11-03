@@ -980,6 +980,85 @@ describe('ActivityPage', () => {
       })
     })
 
+    it('expands persisted share review records with full detail clues', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockListActivity.mockResolvedValue({
+        items: [
+          {
+            id: 'upload-1',
+            timestamp: new Date(Date.now() - 1000 * 60).toISOString(),
+            action: 'upload',
+            path: '/documents/report.pdf',
+            user: 'admin',
+          },
+        ],
+        total: 1,
+        limit: 20,
+        offset: 0,
+      })
+      mockListActivityReviewRecords.mockImplementation(async (options) => {
+        if (options?.limit === 5) {
+          return {
+            items: [
+              {
+                id: 'review-share-history-1',
+                reviewed_at: '2026-06-03T10:30:00Z',
+                reviewer: 'owner',
+                note: '分享链接仍需处理',
+                scope_label: '全部记录',
+                filter_summary: '分组 分享相关',
+                disposition_status: 'needs_follow_up',
+                action_counts: {
+                  share: 1,
+                  unshare: 1,
+                },
+                review_count: 2,
+                total_count: 4,
+                path_count: 2,
+                user_count: 2,
+                path_samples: ['/docs/report.pdf', '/team/public'],
+                user_samples: ['owner', 'member'],
+                activity_entry_ids: ['share-1', 'unshare-1'],
+              },
+            ],
+            total: 1,
+            limit: 5,
+            offset: 0,
+          }
+        }
+
+        return {
+          items: [],
+          total: 0,
+          limit: options?.limit ?? 5,
+          offset: 0,
+        }
+      })
+
+      render(<ActivityPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('分享链接仍需处理')).toBeTruthy()
+      })
+
+      await user.click(screen.getByRole('button', { name: '查看详情' }))
+
+      await waitFor(() => {
+        const detail = within(screen.getByLabelText('复核记录详情 review-share-history-1'))
+        expect(detail.getByText('分享处置线索')).toBeTruthy()
+        expect(detail.getByText('主要路径：/docs/report.pdf')).toBeTruthy()
+        expect(detail.getByText('核对项：密码、有效期、访问次数、是否仍需要公开访问')).toBeTruthy()
+        expect(detail.getByText('share-1, unshare-1')).toBeTruthy()
+        expect(detail.getByText('/docs/report.pdf, /team/public')).toBeTruthy()
+        expect(detail.getByText('owner, member')).toBeTruthy()
+      })
+
+      await user.click(screen.getByRole('button', { name: '收起详情' }))
+      await waitFor(() => {
+        expect(screen.queryByLabelText('复核记录详情 review-share-history-1')).toBeNull()
+      })
+    })
+
     it('filters persisted review records by reviewer, linked activity, review type, review time, and disposition status', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
 
