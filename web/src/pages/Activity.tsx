@@ -966,6 +966,7 @@ function ActivityReviewDispositionRecorder({
   updatingReviewRecordID: string | null
 }) {
   const [reviewRecordDispositionNotes, setReviewRecordDispositionNotes] = useState<Record<string, string>>({})
+  const [expandedReviewRecordID, setExpandedReviewRecordID] = useState<string | null>(null)
   const reviewEntries = entries.filter(shouldReviewActivityEntry)
   if (reviewEntries.length === 0 && records.length === 0 && !recordsError && totalEntries <= entries.length) {
     return null
@@ -988,6 +989,81 @@ function ActivityReviewDispositionRecorder({
       ...current,
       [record.id]: value,
     }))
+  }
+  const renderReviewRecordDetailPanel = (record: ActivityReviewRecord) => {
+    const actionSummary = formatActivityReviewActionCounts(record.action_counts) || '未记录'
+    const pathSamples = record.path_samples ?? []
+    const userSamples = record.user_samples ?? []
+    const primaryPath = getActivityReviewRecordPrimaryPath(record)
+    const isShareReview = activityReviewRecordHasAction(record, ACTIVITY_SHARE_ACTIONS)
+
+    return (
+      <div aria-label={`复核记录详情 ${record.id}`} className="mt-2 rounded-lg border border-divider bg-content2/60 px-3 py-2 text-xs text-default-600 sm:col-span-2">
+        <div className="grid gap-2 md:grid-cols-2">
+          <div className="min-w-0">
+            <div className="flex items-center gap-2 font-medium text-foreground">
+              <ClipboardCheck size={14} />
+              <span>复核详情</span>
+            </div>
+            <dl className="mt-2 grid gap-1">
+              <div className="min-w-0">
+                <dt className="text-default-400">处置状态</dt>
+                <dd className="truncate text-foreground">{getActivityReviewDispositionStatusLabel(record.disposition_status)}</dd>
+              </div>
+              <div className="min-w-0">
+                <dt className="text-default-400">操作类型</dt>
+                <dd className="truncate text-foreground" title={actionSummary}>{actionSummary}</dd>
+              </div>
+              <div className="min-w-0">
+                <dt className="text-default-400">复核时间</dt>
+                <dd className="truncate text-foreground">{formatDate(record.reviewed_at)}</dd>
+              </div>
+              <div className="min-w-0">
+                <dt className="text-default-400">筛选条件</dt>
+                <dd className="truncate text-foreground" title={record.filter_summary || '未筛选'}>{record.filter_summary || '未筛选'}</dd>
+              </div>
+            </dl>
+          </div>
+
+          <div className="min-w-0">
+            <div className="flex items-center gap-2 font-medium text-foreground">
+              <ListChecks size={14} />
+              <span>复核线索</span>
+            </div>
+            <dl className="mt-2 grid gap-1">
+              <div className="min-w-0">
+                <dt className="text-default-400">关联活动</dt>
+                <dd className="truncate text-foreground" title={record.activity_entry_ids.join(', ')}>{record.activity_entry_ids.join(', ')}</dd>
+              </div>
+              {pathSamples.length > 0 && (
+                <div className="min-w-0">
+                  <dt className="text-default-400">完整路径样例</dt>
+                  <dd className="truncate text-foreground" title={pathSamples.join(', ')}>{pathSamples.join(', ')}</dd>
+                </div>
+              )}
+              {userSamples.length > 0 && (
+                <div className="min-w-0">
+                  <dt className="text-default-400">涉及用户</dt>
+                  <dd className="truncate text-foreground" title={userSamples.join(', ')}>{userSamples.join(', ')}</dd>
+                </div>
+              )}
+              {isShareReview && (
+                <div className="min-w-0 rounded-lg border border-primary/15 bg-primary/5 px-2 py-1">
+                  <dt className="flex items-center gap-1 text-primary">
+                    <Share2 size={13} />
+                    <span>分享处置线索</span>
+                  </dt>
+                  <dd className="mt-1 space-y-1 text-foreground">
+                    {primaryPath && <div className="truncate" title={primaryPath}>主要路径：{primaryPath}</div>}
+                    <div>核对项：密码、有效期、访问次数、是否仍需要公开访问</div>
+                  </dd>
+                </div>
+              )}
+            </dl>
+          </div>
+        </div>
+      </div>
+    )
   }
   const renderReviewRecordActions = (record: ActivityReviewRecord) => {
     const isUpdating = updatingReviewRecordID === record.id
@@ -1358,46 +1434,59 @@ function ActivityReviewDispositionRecorder({
 
       {records.length > 0 && (
         <div className="mt-3 divide-y divide-divider rounded-lg border border-divider">
-          {records.map((record) => (
-            <div key={record.id} className="grid gap-2 px-3 py-2 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-start">
-              <div className="min-w-0">
-                <div className="flex min-w-0 flex-wrap items-center gap-2">
-                  <span className="min-w-0 font-medium text-foreground">{record.note}</span>
-                  <Chip size="sm" variant="flat" color={record.disposition_status === 'needs_follow_up' ? 'warning' : 'primary'}>
-                    {getActivityReviewDispositionStatusLabel(record.disposition_status)}
-                  </Chip>
-                </div>
-                <div className="mt-1 text-xs text-default-500">
-                  {record.scope_label}：{record.review_count} 条待处置 / {record.total_count} 条总记录 · {record.path_count} 个路径 · {record.user_count} 个用户
-                </div>
-                {record.action_counts && (
-                  <div className="mt-1 truncate text-xs text-default-500" title={formatActivityReviewActionCounts(record.action_counts)}>
-                    类型：{formatActivityReviewActionCounts(record.action_counts)}
+          {records.map((record) => {
+            const isExpanded = expandedReviewRecordID === record.id
+            return (
+              <div key={record.id} className="grid gap-2 px-3 py-2 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-start">
+                <div className="min-w-0">
+                  <div className="flex min-w-0 flex-wrap items-center gap-2">
+                    <span className="min-w-0 font-medium text-foreground">{record.note}</span>
+                    <Chip size="sm" variant="flat" color={record.disposition_status === 'needs_follow_up' ? 'warning' : 'primary'}>
+                      {getActivityReviewDispositionStatusLabel(record.disposition_status)}
+                    </Chip>
                   </div>
-                )}
-                {record.path_samples && record.path_samples.length > 0 && (
-                  <div className="mt-1 truncate text-xs text-default-500" title={record.path_samples.join(', ')}>
-                    路径样例：{record.path_samples.join(', ')}
+                  <div className="mt-1 text-xs text-default-500">
+                    {record.scope_label}：{record.review_count} 条待处置 / {record.total_count} 条总记录 · {record.path_count} 个路径 · {record.user_count} 个用户
                   </div>
-                )}
-                {record.user_samples && record.user_samples.length > 0 && (
-                  <div className="mt-1 truncate text-xs text-default-500" title={record.user_samples.join(', ')}>
-                    用户样例：{record.user_samples.join(', ')}
+                  {record.action_counts && (
+                    <div className="mt-1 truncate text-xs text-default-500" title={formatActivityReviewActionCounts(record.action_counts)}>
+                      类型：{formatActivityReviewActionCounts(record.action_counts)}
+                    </div>
+                  )}
+                  {record.path_samples && record.path_samples.length > 0 && (
+                    <div className="mt-1 truncate text-xs text-default-500" title={record.path_samples.join(', ')}>
+                      路径样例：{record.path_samples.join(', ')}
+                    </div>
+                  )}
+                  {record.user_samples && record.user_samples.length > 0 && (
+                    <div className="mt-1 truncate text-xs text-default-500" title={record.user_samples.join(', ')}>
+                      用户样例：{record.user_samples.join(', ')}
+                    </div>
+                  )}
+                  <div className="mt-1 truncate text-xs text-default-500" title={record.filter_summary || '未筛选'}>
+                    条件：{record.filter_summary || '未筛选'}
                   </div>
-                )}
-                <div className="mt-1 truncate text-xs text-default-500" title={record.filter_summary || '未筛选'}>
-                  条件：{record.filter_summary || '未筛选'}
                 </div>
+                <div className="text-xs text-default-500 sm:text-right">
+                  <div>{record.reviewer}</div>
+                  <div>{formatRelativeTime(record.reviewed_at)}</div>
+                  <div className="mt-2 flex flex-wrap gap-1 sm:justify-end">
+                    <Button
+                      size="sm"
+                      variant="light"
+                      className="h-8 rounded-lg px-2.5"
+                      startContent={<ClipboardCheck size={13} />}
+                      onPress={() => setExpandedReviewRecordID(isExpanded ? null : record.id)}
+                    >
+                      {isExpanded ? '收起详情' : '查看详情'}
+                    </Button>
+                    {renderReviewRecordActions(record)}
+                  </div>
+                </div>
+                {isExpanded && renderReviewRecordDetailPanel(record)}
               </div>
-              <div className="text-xs text-default-500 sm:text-right">
-                <div>{record.reviewer}</div>
-                <div>{formatRelativeTime(record.reviewed_at)}</div>
-                <div className="mt-2 flex flex-wrap gap-1 sm:justify-end">
-                  {renderReviewRecordActions(record)}
-                </div>
-              </div>
-            </div>
-          ))}
+            )
+          })}
         </div>
       )}
     </div>
