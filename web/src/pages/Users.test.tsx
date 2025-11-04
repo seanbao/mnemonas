@@ -139,6 +139,7 @@ async function clickUserActionMenuItem(
 describe('UsersPage', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    window.localStorage.clear()
     vi.mocked(authApi.getStoredUser).mockReturnValue({
       id: 'user-1',
       username: 'admin',
@@ -159,6 +160,7 @@ describe('UsersPage', () => {
     } else {
       Reflect.deleteProperty(navigator, 'clipboard')
     }
+    window.localStorage.clear()
   })
 
   describe('rendering', () => {
@@ -1267,6 +1269,44 @@ describe('UsersPage', () => {
         'aria-valuetext',
         '100% 已用，受限用户合计剩余 0 B。',
       )
+    })
+
+    it('shows recent quota trend snapshots for the current browser', async () => {
+      window.localStorage.setItem('mnemonas:user-quota-trend:user-1', JSON.stringify([
+        {
+          capturedAt: '2024-01-01T00:00:00Z',
+          totalCount: 3,
+          activeCount: 2,
+          limitedCount: 2,
+          warningCount: 0,
+          exceededCount: 0,
+          attentionCount: 0,
+          usedBytes: 512,
+          limitedUsedBytes: 512,
+          quotaBytes: 2048,
+        },
+      ]))
+      vi.mocked(usersApi.listUsers).mockResolvedValue({
+        success: true,
+        users: [
+          { ...mockUsers[0], quota_bytes: 1024, used_bytes: 1024 },
+          { ...mockUsers[1], quota_bytes: 1024, used_bytes: 512 },
+          { ...mockUsers[2], quota_bytes: 0, used_bytes: 2048 },
+        ],
+        total: 3,
+      })
+
+      renderUsersPage()
+
+      const trend = await screen.findByLabelText('用户配额趋势')
+      await waitFor(() => {
+        expect(within(trend).getByText('受限用量增加')).toBeInTheDocument()
+        expect(within(trend).getByText('较上一快照 +1 KB；复核用户 +1 个。')).toBeInTheDocument()
+        expect(within(trend).getByText('2 次')).toBeInTheDocument()
+        expect(within(trend).getByText('1.5 KB / 2 KB')).toBeInTheDocument()
+        expect(within(trend).getByText('+1 KB')).toBeInTheDocument()
+      })
+      expect(JSON.parse(window.localStorage.getItem('mnemonas:user-quota-trend:user-1') ?? '[]')).toHaveLength(2)
     })
 
     it('shows review hint count breakdown', async () => {
