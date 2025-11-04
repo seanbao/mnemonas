@@ -44,9 +44,49 @@ export type UserQuotaAggregateStatus = {
   quotaBytes: number
 }
 
+export type UserQuotaTrendPoint = {
+  capturedAt: string
+  totalCount: number
+  activeCount: number
+  limitedCount: number
+  warningCount: number
+  exceededCount: number
+  attentionCount: number
+  usedBytes: number
+  limitedUsedBytes: number
+  quotaBytes: number
+}
+
+export type UserQuotaTrendSummary = {
+  latest: UserQuotaTrendPoint | null
+  previous: UserQuotaTrendPoint | null
+  sampleCount: number
+  limitedUsedDeltaBytes: number
+  quotaDeltaBytes: number
+  attentionDelta: number
+  peakLimitedUsedBytes: number
+  peakAttentionCount: number
+  label: string
+  detail: string
+  tone: QuotaTone
+}
+
 type UserQuotaReportUser = Pick<User, 'username' | 'role' | 'disabled' | 'quota_bytes' | 'used_bytes'>
   & Partial<Pick<User, 'email' | 'groups' | 'home_dir' | 'last_login_at'>>
 type UserQuotaAttentionUser = Pick<User, 'username' | 'quota_bytes' | 'used_bytes'>
+type UserQuotaTrendUser = Pick<User, 'id' | 'username' | 'disabled' | 'quota_bytes' | 'used_bytes'>
+
+const userQuotaTrendNumberKeys = [
+  'totalCount',
+  'activeCount',
+  'limitedCount',
+  'warningCount',
+  'exceededCount',
+  'attentionCount',
+  'usedBytes',
+  'limitedUsedBytes',
+  'quotaBytes',
+] as const
 
 export function quotaBytesToFormValue(bytes: number): { value: string; unit: QuotaUnit } {
   if (!Number.isFinite(bytes) || bytes <= 0) {
@@ -264,6 +304,204 @@ export function getUserQuotaAggregateStatus(summary: UserQuotaSummary): UserQuot
     percent,
     usedBytes: summary.limitedUsedBytes,
     quotaBytes: summary.quotaBytes,
+  }
+}
+
+function isNonNegativeSafeInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
+}
+
+export function isUserQuotaTrendPoint(value: unknown): value is UserQuotaTrendPoint {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return false
+  }
+
+  const point = value as Partial<UserQuotaTrendPoint>
+  return typeof point.capturedAt === 'string'
+    && point.capturedAt.trim() !== ''
+    && !Number.isNaN(new Date(point.capturedAt).getTime())
+    && userQuotaTrendNumberKeys.every((key) => isNonNegativeSafeInteger(point[key]))
+}
+
+export function createUserQuotaTrendPoint(
+  users: UserQuotaReportUser[],
+  capturedAt = new Date().toISOString(),
+): UserQuotaTrendPoint {
+  const summary = summarizeUserQuotas(users)
+  return {
+    capturedAt,
+    totalCount: summary.totalCount,
+    activeCount: summary.activeCount,
+    limitedCount: summary.limitedCount,
+    warningCount: summary.warningCount,
+    exceededCount: summary.exceededCount,
+    attentionCount: summary.attentionCount,
+    usedBytes: summary.usedBytes,
+    limitedUsedBytes: summary.limitedUsedBytes,
+    quotaBytes: summary.quotaBytes,
+  }
+}
+
+export function getUserQuotaTrendSignature(users: UserQuotaTrendUser[]): string {
+  return [...users]
+    .sort((left, right) => left.id.localeCompare(right.id) || left.username.localeCompare(right.username))
+    .map((user) => [
+      user.id,
+      user.username,
+      user.disabled ? '1' : '0',
+      user.quota_bytes,
+      user.used_bytes,
+    ].join(':'))
+    .join('|')
+}
+
+function compareUserQuotaTrendPointsByTime(left: UserQuotaTrendPoint, right: UserQuotaTrendPoint): number {
+  return new Date(right.capturedAt).getTime() - new Date(left.capturedAt).getTime()
+}
+
+export function normalizeUserQuotaTrendHistory(
+  value: unknown,
+  limit = 8,
+): UserQuotaTrendPoint[] {
+  if (!Array.isArray(value) || limit <= 0) {
+    return []
+  }
+
+  return value
+    .filter(isUserQuotaTrendPoint)
+    .sort(compareUserQuotaTrendPointsByTime)
+    .slice(0, limit)
+}
+
+function userQuotaTrendValuesEqual(left: UserQuotaTrendPoint, right: UserQuotaTrendPoint): boolean {
+  return userQuotaTrendNumberKeys.every((key) => left[key] === right[key])
+}
+
+export function mergeUserQuotaTrendHistory(
+  current: UserQuotaTrendPoint[],
+  nextPoint: UserQuotaTrendPoint,
+  limit = 8,
+): UserQuotaTrendPoint[] {
+  if (!isUserQuotaTrendPoint(nextPoint) || limit <= 0) {
+    return normalizeUserQuotaTrendHistory(current, limit)
+  }
+
+  const history = normalizeUserQuotaTrendHistory(current, limit)
+  const latest = history[0]
+  if (latest && userQuotaTrendValuesEqual(latest, nextPoint)) {
+    return history
+  }
+
+  return normalizeUserQuotaTrendHistory([nextPoint, ...history], limit)
+}
+
+function formatSignedBytesDelta(bytes: number): string {
+  if (bytes > 0) {
+    return `+${formatBytes(bytes)}`
+  }
+  if (bytes < 0) {
+    return `-${formatBytes(Math.abs(bytes))}`
+  }
+  return '0 B'
+}
+
+function formatSignedCountDelta(count: number): string {
+  if (count > 0) {
+    return `+${count} 个`
+  }
+  if (count < 0) {
+    return `${count} 个`
+  }
+  return '0 个'
+}
+
+export function summarizeUserQuotaTrendHistory(history: UserQuotaTrendPoint[]): UserQuotaTrendSummary {
+  const points = normalizeUserQuotaTrendHistory(history)
+  const latest = points[0] ?? null
+  const previous = points[1] ?? null
+  const peakLimitedUsedBytes = points.reduce((peak, point) => Math.max(peak, point.limitedUsedBytes), 0)
+  const peakAttentionCount = points.reduce((peak, point) => Math.max(peak, point.attentionCount), 0)
+
+  if (!latest) {
+    return {
+      latest,
+      previous,
+      sampleCount: 0,
+      limitedUsedDeltaBytes: 0,
+      quotaDeltaBytes: 0,
+      attentionDelta: 0,
+      peakLimitedUsedBytes,
+      peakAttentionCount,
+      label: '暂无趋势快照',
+      detail: '刷新用户列表后会记录当前浏览器的配额快照。',
+      tone: 'default',
+    }
+  }
+
+  if (!previous) {
+    return {
+      latest,
+      previous,
+      sampleCount: points.length,
+      limitedUsedDeltaBytes: 0,
+      quotaDeltaBytes: 0,
+      attentionDelta: 0,
+      peakLimitedUsedBytes,
+      peakAttentionCount,
+      label: '已记录首个快照',
+      detail: `当前受限用量 ${formatBytes(latest.limitedUsedBytes)}。`,
+      tone: latest.attentionCount > 0 ? 'warning' : 'success',
+    }
+  }
+
+  const limitedUsedDeltaBytes = latest.limitedUsedBytes - previous.limitedUsedBytes
+  const quotaDeltaBytes = latest.quotaBytes - previous.quotaBytes
+  const attentionDelta = latest.attentionCount - previous.attentionCount
+
+  if (limitedUsedDeltaBytes > 0) {
+    return {
+      latest,
+      previous,
+      sampleCount: points.length,
+      limitedUsedDeltaBytes,
+      quotaDeltaBytes,
+      attentionDelta,
+      peakLimitedUsedBytes,
+      peakAttentionCount,
+      label: '受限用量增加',
+      detail: `较上一快照 ${formatSignedBytesDelta(limitedUsedDeltaBytes)}；复核用户 ${formatSignedCountDelta(attentionDelta)}。`,
+      tone: latest.attentionCount > 0 ? 'warning' : 'default',
+    }
+  }
+
+  if (limitedUsedDeltaBytes < 0) {
+    return {
+      latest,
+      previous,
+      sampleCount: points.length,
+      limitedUsedDeltaBytes,
+      quotaDeltaBytes,
+      attentionDelta,
+      peakLimitedUsedBytes,
+      peakAttentionCount,
+      label: '受限用量下降',
+      detail: `较上一快照 ${formatSignedBytesDelta(limitedUsedDeltaBytes)}；复核用户 ${formatSignedCountDelta(attentionDelta)}。`,
+      tone: latest.attentionCount > 0 ? 'warning' : 'success',
+    }
+  }
+
+  return {
+    latest,
+    previous,
+    sampleCount: points.length,
+    limitedUsedDeltaBytes,
+    quotaDeltaBytes,
+    attentionDelta,
+    peakLimitedUsedBytes,
+    peakAttentionCount,
+    label: '受限用量持平',
+    detail: `受限配额变化 ${formatSignedBytesDelta(quotaDeltaBytes)}；复核用户 ${formatSignedCountDelta(attentionDelta)}。`,
+    tone: latest.attentionCount > 0 ? 'warning' : 'success',
   }
 }
 
