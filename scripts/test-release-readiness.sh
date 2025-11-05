@@ -211,6 +211,8 @@ write_community_files
 git add .
 git commit -q -m "docs: initial checklist"
 validation_target="$(git rev-parse --short=12 HEAD)"
+validation_target_full="$(git rev-parse "$validation_target^{commit}")"
+validation_target_short="$(git rev-parse --short=7 "$validation_target")"
 write_validation_docs "$validation_target"
 git add docs
 git commit -q -m "docs: record validation evidence"
@@ -221,6 +223,18 @@ assert_file_contains "$output_dir/evidence-only.out" "[release-readiness] commit
 assert_file_contains "$output_dir/evidence-only.out" "only validation evidence docs changed since target"
 assert_file_contains "$output_dir/evidence-only.out" "[release-readiness] validation-diff:"
 assert_file_contains "$output_dir/evidence-only.out" "release readiness summary completed"
+
+git checkout -q master
+git checkout -q -b mixed-validation-target-lengths
+sed -i.bak "s/${validation_target}/${validation_target_short}/" docs/hardening-progress.md
+rm -f docs/hardening-progress.md.bak
+sed -i.bak "s/${validation_target}/${validation_target_full}/" docs/hardening-review-summary.en.md
+rm -f docs/hardening-review-summary.en.md.bak
+git add docs/hardening-progress.md docs/hardening-review-summary.en.md
+git commit -q -m "docs: mix validation target lengths"
+./scripts/release-readiness.sh --base "$validation_target" >"$output_dir/mixed-validation-target-lengths.out" 2>"$output_dir/mixed-validation-target-lengths.err"
+assert_file_contains "$output_dir/mixed-validation-target-lengths.out" "[release-readiness] validation:"
+assert_file_contains "$output_dir/mixed-validation-target-lengths.out" "only validation evidence docs changed since target"
 
 git checkout -q master
 git checkout -q -b missing-validation-evidence-file
