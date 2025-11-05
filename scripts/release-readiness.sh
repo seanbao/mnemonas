@@ -209,9 +209,9 @@ check_validation_evidence() {
 	)
 
 	for path in "${evidence_files[@]}"; do
-		[[ -f "$path" ]] || continue
+		[[ -f "$path" ]] || fail "missing validation evidence file: $path"
 		path_target="$(extract_validation_target "$path")"
-		[[ -n "$path_target" ]] || continue
+		[[ -n "$path_target" ]] || fail "validation evidence target not recorded in: $path"
 		if [[ -z "$target" ]]; then
 			target="$path_target"
 			continue
