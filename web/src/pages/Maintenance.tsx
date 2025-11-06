@@ -763,6 +763,211 @@ function RestoreCheckRow({
   )
 }
 
+type RestoreFlowStepState = 'complete' | 'active' | 'pending' | 'blocked' | 'warning'
+
+type RestoreFlowStep = {
+  id: string
+  title: string
+  description: string
+  state: RestoreFlowStepState
+}
+
+function getRestoreFlowStepLabel(state: RestoreFlowStepState): string {
+  switch (state) {
+    case 'complete':
+      return '已完成'
+    case 'active':
+      return '当前'
+    case 'blocked':
+      return '需处理'
+    case 'warning':
+      return '需复核'
+    default:
+      return '待处理'
+  }
+}
+
+function getRestoreFlowStepColor(state: RestoreFlowStepState): 'success' | 'warning' | 'danger' | 'default' {
+  switch (state) {
+    case 'complete':
+      return 'success'
+    case 'active':
+    case 'warning':
+      return 'warning'
+    case 'blocked':
+      return 'danger'
+    default:
+      return 'default'
+  }
+}
+
+function getRestoreFlowStepClass(state: RestoreFlowStepState): string {
+  switch (state) {
+    case 'complete':
+      return 'border-success/20 bg-success/5'
+    case 'active':
+    case 'warning':
+      return 'border-warning/20 bg-warning/10'
+    case 'blocked':
+      return 'border-danger/20 bg-danger/10'
+    default:
+      return 'border-divider bg-content1'
+  }
+}
+
+function RestoreFlowStepIcon({ state }: { state: RestoreFlowStepState }) {
+  if (state === 'complete') {
+    return <CheckCircle size={16} className="text-success" />
+  }
+  if (state === 'blocked') {
+    return <XCircle size={16} className="text-danger" />
+  }
+  if (state === 'warning') {
+    return <FileWarning size={16} className="text-warning" />
+  }
+  if (state === 'active') {
+    return <Clock size={16} className="text-warning" />
+  }
+  return <Clock size={16} className="text-default-400" />
+}
+
+function RestoreFlowGuide({
+  targetPath,
+  targetReady,
+  targetError,
+  preview,
+  previewMatches,
+  isPreviewing,
+  isRestoring,
+  result,
+  verifyResult,
+  isVerifying,
+}: {
+  targetPath: string
+  targetReady: boolean
+  targetError: string | null
+  preview: BackupRestorePreviewResult | null
+  previewMatches: boolean
+  isPreviewing: boolean
+  isRestoring: boolean
+  result: BackupRestoreResult | null
+  verifyResult: BackupRestoreVerifyResult | null
+  isVerifying: boolean
+}) {
+  const previewFailed = Boolean(preview && previewMatches && (preview.status === 'failed' || hasFailedRestorePreflight(preview)))
+  const previewComplete = Boolean(result) || Boolean(preview && previewMatches && !previewFailed)
+  const restoreFailed = result?.status === 'failed'
+  const restoreComplete = Boolean(result && !restoreFailed)
+  const verifyWarnings = verifyResult?.warnings ?? []
+  const verifyFailed = verifyResult?.status === 'failed'
+
+  const steps: RestoreFlowStep[] = [{
+    id: 'target',
+    title: '目标目录',
+    description: targetError
+      ? '目标目录格式需要处理'
+      : targetReady
+        ? `目标已填写：${targetPath.trim()}`
+        : '填写独立恢复目录',
+    state: targetError ? 'blocked' : targetReady ? 'complete' : 'active',
+  }, {
+    id: 'preview',
+    title: '恢复预览',
+    description: result
+      ? '已完成预览和预检'
+      : isPreviewing
+        ? '正在生成预览和预检'
+        : previewFailed
+          ? '预检未通过，处理失败项后重新生成预览'
+          : preview && !previewMatches
+            ? '目标目录或配置选项已变更，需要重新生成预览'
+            : previewComplete
+              ? '预览已确认，可复核执行'
+              : targetReady
+                ? '生成预览以确认文件、配置和预检'
+                : '目标目录确认后生成预览',
+    state: result || previewComplete
+      ? 'complete'
+      : previewFailed
+        ? 'blocked'
+        : targetReady || isPreviewing || Boolean(preview)
+          ? 'active'
+          : 'pending',
+  }, {
+    id: 'restore',
+    title: '执行恢复',
+    description: restoreFailed
+      ? '恢复失败，查看错误后重新执行'
+      : restoreComplete
+        ? '恢复已写入独立目录'
+        : isRestoring
+          ? '正在写入恢复目录'
+          : previewComplete
+            ? '预览通过，可开始恢复'
+            : '预览通过后执行恢复',
+    state: restoreFailed
+      ? 'blocked'
+      : restoreComplete
+        ? 'complete'
+        : isRestoring || previewComplete
+          ? 'active'
+          : 'pending',
+  }, {
+    id: 'verify',
+    title: '只读校验与切换',
+    description: !result
+      ? '恢复完成后自动检查'
+      : restoreFailed
+        ? '恢复失败时不应切换'
+        : isVerifying
+          ? '正在执行只读校验'
+          : !verifyResult
+            ? '等待只读校验结果'
+            : verifyFailed
+              ? '只读校验失败，切换前处理'
+              : verifyWarnings.length > 0 || !verifyResult.looks_like_storage_root
+                ? '校验完成但仍需复核结构和警告'
+                : '只读校验完成，可按清单人工切换',
+    state: !result
+      ? 'pending'
+      : restoreFailed || verifyFailed
+        ? 'blocked'
+        : isVerifying || !verifyResult
+          ? 'active'
+          : verifyWarnings.length > 0 || !verifyResult.looks_like_storage_root
+            ? 'warning'
+            : 'complete',
+  }]
+
+  return (
+    <div aria-label="恢复流程进度" className="rounded-lg border border-divider bg-content2/50 p-3 text-sm">
+      <div className="flex items-center gap-2 font-medium text-default-800">
+        <ListChecks size={16} />
+        <span>恢复流程</span>
+      </div>
+      <ol className="mt-3 grid gap-2 sm:grid-cols-2">
+        {steps.map((step, index) => (
+          <li key={step.id} className={`min-w-0 rounded-lg border p-3 ${getRestoreFlowStepClass(step.state)}`}>
+            <div className="flex items-start gap-2">
+              <RestoreFlowStepIcon state={step.state} />
+              <div className="min-w-0 flex-1">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-xs text-default-500">阶段 {index + 1}</span>
+                  <Chip size="sm" color={getRestoreFlowStepColor(step.state)} variant="flat">
+                    {getRestoreFlowStepLabel(step.state)}
+                  </Chip>
+                </div>
+                <div className="mt-1 font-medium text-default-800">{step.title}</div>
+                <div className="mt-1 break-words text-xs text-default-500">{step.description}</div>
+              </div>
+            </div>
+          </li>
+        ))}
+      </ol>
+    </div>
+  )
+}
+
 function getRestorePreflightTone(status: BackupRestorePreflightCheck['status']): 'success' | 'warning' | 'danger' | 'default' {
   if (status === 'passed') {
     return 'success'
@@ -3366,99 +3571,113 @@ export default function Maintenance() {
             </div>
           </ModalHeader>
           <ModalBody>
-            {restoreResult ? (
-              <RestoreCutoverChecklist
+            <div className="space-y-4">
+              <RestoreFlowGuide
+                targetPath={restoreTargetPath}
+                targetReady={restoreTargetReady}
+                targetError={restoreTargetInputError}
+                preview={restorePreview}
+                previewMatches={restorePreviewMatches}
+                isPreviewing={restorePreviewMutation.isPending}
+                isRestoring={restoreMutation.isPending}
                 result={restoreResult}
                 verifyResult={restoreVerifyResult}
                 isVerifying={restoreVerifyMutation.isPending}
               />
-            ) : (
-              <div className="space-y-4">
-                {restoreJob && (
-                  <div className="rounded-lg border border-divider bg-content2/50 p-4 text-sm">
-                    <div className="font-medium">{restoreJob.name}</div>
-                    <div className="mt-1 text-default-500">{restoreJob.id} · {restoreJob.type}</div>
-                    <div className="mt-1 truncate text-default-400" title={restoreJob.destination}>
-                      备份目标：{restoreJob.destination}
-                    </div>
-                  </div>
-                )}
-                <Input
-                  label="目标目录"
-                  placeholder="/mnt/restore/mnemonas"
-                  value={restoreTargetPath}
-                  onValueChange={handleRestoreTargetPathChange}
-                  isDisabled={restoreActionPending}
-                  description={getRestoreTargetDescription(restoreJob)}
-                  isInvalid={Boolean(restoreTargetInputError)}
-                  errorMessage={restoreTargetInputError ?? undefined}
+              {restoreResult ? (
+                <RestoreCutoverChecklist
+                  result={restoreResult}
+                  verifyResult={restoreVerifyResult}
+                  isVerifying={restoreVerifyMutation.isPending}
                 />
-                {restoreJob && restoreTargetPath === getSuggestedRestoreTargetPath(restoreJob) && (
-                  <div className="rounded-lg border border-primary/20 bg-primary/5 p-3 text-xs leading-5 text-default-500">
-                    已填入建议目录，可按实际挂载点修改；执行前仍需生成预览并通过恢复预检。
-                  </div>
-                )}
-                {restoreJob?.type === 'local' && (
-                  <Checkbox
-                    isSelected={restoreIncludeConfig}
-                    onValueChange={handleRestoreIncludeConfigChange}
+              ) : (
+                <>
+                  {restoreJob && (
+                    <div className="rounded-lg border border-divider bg-content2/50 p-4 text-sm">
+                      <div className="font-medium">{restoreJob.name}</div>
+                      <div className="mt-1 text-default-500">{restoreJob.id} · {restoreJob.type}</div>
+                      <div className="mt-1 truncate text-default-400" title={restoreJob.destination}>
+                        备份目标：{restoreJob.destination}
+                      </div>
+                    </div>
+                  )}
+                  <Input
+                    label="目标目录"
+                    placeholder="/mnt/restore/mnemonas"
+                    value={restoreTargetPath}
+                    onValueChange={handleRestoreTargetPathChange}
                     isDisabled={restoreActionPending}
-                  >
-                    同时恢复备份中的配置文件
-                  </Checkbox>
-                )}
-                <div className="flex items-start gap-2 rounded-lg border border-warning/20 bg-warning/10 p-3 text-sm text-warning">
-                  <AlertCircle size={16} className="mt-0.5 shrink-0" />
-                  <span>恢复不会覆盖当前数据目录。请先恢复到独立目录，人工确认后再切换服务配置或迁移数据。</span>
-                </div>
-                {restorePreview && (
-                  <div className={getRestorePreviewPanelClass(restorePreview, restorePreviewMatches)}>
-                    <div className="flex items-center justify-between gap-3">
-                      <div className="font-medium">{getRestorePreviewTitle(restorePreview, restorePreviewMatches)}</div>
-                      <BackupStatusChip
-                        status={hasFailedRestorePreflight(restorePreview) ? 'failed' : restorePreview.status}
-                        warning={hasWarningRestorePreflight(restorePreview)}
-                      />
+                    description={getRestoreTargetDescription(restoreJob)}
+                    isInvalid={Boolean(restoreTargetInputError)}
+                    errorMessage={restoreTargetInputError ?? undefined}
+                  />
+                  {restoreJob && restoreTargetPath === getSuggestedRestoreTargetPath(restoreJob) && (
+                    <div className="rounded-lg border border-primary/20 bg-primary/5 p-3 text-xs leading-5 text-default-500">
+                      已填入建议目录，可按实际挂载点修改；执行前仍需生成预览并通过恢复预检。
                     </div>
-                    <div className="mt-2 text-default-600">{getBackupRestorePreviewMetricText(restorePreview)}</div>
-                    <div className="mt-1 truncate text-default-500" title={restorePreview.target_path}>
-                      目标：{restorePreview.target_path}
-                    </div>
-                    {restorePreview.config_available && (
-                      <div className="mt-1 text-default-500">
-                        配置文件：{restorePreview.config_included ? '将恢复到 .mnemonas-restore/config.toml' : '本次不恢复'}
-                      </div>
-                    )}
-                    <RestoreImpactSummary result={restorePreview} matches={restorePreviewMatches} />
-                    <RestoreExecutionReview result={restorePreview} matches={restorePreviewMatches} />
-                    <RestorePreflightList checks={restorePreview.preflight_checks} />
-                    {restorePreview.warnings && restorePreview.warnings.length > 0 && (
-                      <div className="mt-3 rounded-lg border border-warning/20 bg-warning/10 p-3 text-xs text-warning">
-                        {getBackupDiagnosticDisplayMessage(restorePreview.warnings[0])}
-                      </div>
-                    )}
-                    {restorePreview.sample_paths && restorePreview.sample_paths.length > 0 && (
-                      <div className="mt-3 space-y-1">
-                        <div className="text-xs font-medium text-default-500">样例文件</div>
-                        <div className="space-y-1">
-                          {restorePreview.sample_paths.slice(0, 5).map((sample) => (
-                            <div key={sample} className="truncate rounded-md bg-content1 px-2 py-1 font-mono text-xs text-default-600" title={sample}>
-                              {sample}
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    )}
-                    {!restorePreviewMatches && (
-                      <div className="mt-3 text-xs text-warning">目标目录或配置选项已变更，请重新生成预览。</div>
-                    )}
-                    {restorePreviewMatches && restorePreviewHasFailedPreflight && (
-                      <div className="mt-3 text-xs text-danger">预检未通过，需处理失败项后重新生成预览。</div>
-                    )}
+                  )}
+                  {restoreJob?.type === 'local' && (
+                    <Checkbox
+                      isSelected={restoreIncludeConfig}
+                      onValueChange={handleRestoreIncludeConfigChange}
+                      isDisabled={restoreActionPending}
+                    >
+                      同时恢复备份中的配置文件
+                    </Checkbox>
+                  )}
+                  <div className="flex items-start gap-2 rounded-lg border border-warning/20 bg-warning/10 p-3 text-sm text-warning">
+                    <AlertCircle size={16} className="mt-0.5 shrink-0" />
+                    <span>恢复不会覆盖当前数据目录。请先恢复到独立目录，人工确认后再切换服务配置或迁移数据。</span>
                   </div>
-                )}
-              </div>
-            )}
+                  {restorePreview && (
+                    <div className={getRestorePreviewPanelClass(restorePreview, restorePreviewMatches)}>
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="font-medium">{getRestorePreviewTitle(restorePreview, restorePreviewMatches)}</div>
+                        <BackupStatusChip
+                          status={hasFailedRestorePreflight(restorePreview) ? 'failed' : restorePreview.status}
+                          warning={hasWarningRestorePreflight(restorePreview)}
+                        />
+                      </div>
+                      <div className="mt-2 text-default-600">{getBackupRestorePreviewMetricText(restorePreview)}</div>
+                      <div className="mt-1 truncate text-default-500" title={restorePreview.target_path}>
+                        目标：{restorePreview.target_path}
+                      </div>
+                      {restorePreview.config_available && (
+                        <div className="mt-1 text-default-500">
+                          配置文件：{restorePreview.config_included ? '将恢复到 .mnemonas-restore/config.toml' : '本次不恢复'}
+                        </div>
+                      )}
+                      <RestoreImpactSummary result={restorePreview} matches={restorePreviewMatches} />
+                      <RestoreExecutionReview result={restorePreview} matches={restorePreviewMatches} />
+                      <RestorePreflightList checks={restorePreview.preflight_checks} />
+                      {restorePreview.warnings && restorePreview.warnings.length > 0 && (
+                        <div className="mt-3 rounded-lg border border-warning/20 bg-warning/10 p-3 text-xs text-warning">
+                          {getBackupDiagnosticDisplayMessage(restorePreview.warnings[0])}
+                        </div>
+                      )}
+                      {restorePreview.sample_paths && restorePreview.sample_paths.length > 0 && (
+                        <div className="mt-3 space-y-1">
+                          <div className="text-xs font-medium text-default-500">样例文件</div>
+                          <div className="space-y-1">
+                            {restorePreview.sample_paths.slice(0, 5).map((sample) => (
+                              <div key={sample} className="truncate rounded-md bg-content1 px-2 py-1 font-mono text-xs text-default-600" title={sample}>
+                                {sample}
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                      {!restorePreviewMatches && (
+                        <div className="mt-3 text-xs text-warning">目标目录或配置选项已变更，请重新生成预览。</div>
+                      )}
+                      {restorePreviewMatches && restorePreviewHasFailedPreflight && (
+                        <div className="mt-3 text-xs text-danger">预检未通过，需处理失败项后重新生成预览。</div>
+                      )}
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
           </ModalBody>
           <ModalFooter>
             {restoreResult ? (

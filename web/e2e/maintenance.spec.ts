@@ -25,6 +25,21 @@ test.describe('备份与维护页面', () => {
     await expect(page.getByRole('row').filter({ hasText: '待复核恢复备份' }).getByRole('button', { name: '检查恢复' })).toBeEnabled()
   })
 
+  test('恢复弹窗应显示引导式阶段进度', async ({ page }) => {
+    await page.getByRole('row').filter({ hasText: '外置硬盘备份' }).getByRole('button', { name: '恢复', exact: true }).click()
+
+    const guide = page.getByLabel('恢复流程进度')
+    await expect(guide.getByText('恢复流程', { exact: true })).toBeVisible()
+    await expect(guide.getByText('目标目录', { exact: true })).toBeVisible()
+    await expect(guide.getByText('恢复预览', { exact: true })).toBeVisible()
+    await expect(guide.getByText('执行恢复', { exact: true })).toBeVisible()
+    await expect(guide.getByText('只读校验与切换', { exact: true })).toBeVisible()
+    await expect(guide.getByText('目标已填写：/mnt/restore/external-disk', { exact: true })).toBeVisible()
+    await expect(guide.getByText('生成预览以确认文件、配置和预检', { exact: true })).toBeVisible()
+    await expect(guide.getByText('预览通过后执行恢复', { exact: true })).toBeVisible()
+    await expect(guide.getByText('恢复完成后自动检查', { exact: true })).toBeVisible()
+  })
+
   test('批量恢复弹窗应显示准备度摘要', async ({ page }) => {
     await page.getByRole('button', { name: '批量恢复' }).click()
     const readiness = page.getByLabel('批量恢复准备度摘要')
