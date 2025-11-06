@@ -41,6 +41,12 @@ This checks HTTPS health, HTTP redirects to HTTPS on the same public domain, cer
 Run from an external network:
 
 ```bash
+./scripts/public-go-live-smoke.sh nas.example.com
+```
+
+This script combines public HTTPS health, same-domain HTTP-to-HTTPS redirect, and `8080/9090/9091` backend-port-unreachable checks into one smoke. If the repository script is not available, run the equivalent commands manually from an external network:
+
+```bash
 curl -I https://nas.example.com/health
 curl --connect-timeout 3 http://nas.example.com:8080/health
 curl --connect-timeout 3 http://nas.example.com:9090/
