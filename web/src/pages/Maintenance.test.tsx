@@ -3527,11 +3527,54 @@ describe('MaintenancePage', () => {
 
       await waitFor(() => {
         expect(screen.getByText('预检未通过，需处理失败项后重新生成预览。')).toBeTruthy()
+        expect(within(screen.getByLabelText('恢复流程进度')).getByText('预检未通过，处理失败项后重新生成预览')).toBeTruthy()
         expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({ title: '恢复预检未通过' }))
       })
 
       expect((screen.getByRole('button', { name: /开始恢复/ }) as HTMLButtonElement).disabled).toBe(true)
       expect(mockRestoreBackupJob).not.toHaveBeenCalled()
+    })
+
+    it('shows guided restore steps from target selection through verification', async () => {
+      const user = userEvent.setup()
+      mockListBackupJobs.mockResolvedValue(mockBackupJobs)
+
+      render(<Maintenance />)
+
+      await waitFor(() => {
+        expect(screen.getByText('外置硬盘备份')).toBeTruthy()
+      })
+
+      await user.click(screen.getByRole('button', { name: /^恢复$/ }))
+
+      let guide = within(screen.getByLabelText('恢复流程进度'))
+      expect(guide.getByText('恢复流程')).toBeTruthy()
+      expect(guide.getByText('目标目录')).toBeTruthy()
+      expect(guide.getByText('恢复预览')).toBeTruthy()
+      expect(guide.getByText('执行恢复')).toBeTruthy()
+      expect(guide.getByText('只读校验与切换')).toBeTruthy()
+      expect(guide.getByText('目标已填写：/mnt/restore/external-disk')).toBeTruthy()
+      expect(guide.getByText('生成预览以确认文件、配置和预检')).toBeTruthy()
+      expect(guide.getByText('预览通过后执行恢复')).toBeTruthy()
+      expect(guide.getByText('恢复完成后自动检查')).toBeTruthy()
+
+      fireEvent.change(screen.getByLabelText('目标目录'), { target: { value: '/restore/mnemonas' } })
+      await user.click(screen.getByRole('button', { name: /生成预览/ }))
+
+      await waitFor(() => {
+        guide = within(screen.getByLabelText('恢复流程进度'))
+        expect(guide.getByText('预览已确认，可复核执行')).toBeTruthy()
+        expect(guide.getByText('预览通过，可开始恢复')).toBeTruthy()
+      })
+
+      await user.click(screen.getByRole('button', { name: /开始恢复/ }))
+
+      await waitFor(() => {
+        guide = within(screen.getByLabelText('恢复流程进度'))
+        expect(guide.getByText('已完成预览和预检')).toBeTruthy()
+        expect(guide.getByText('恢复已写入独立目录')).toBeTruthy()
+        expect(guide.getByText('只读校验完成，可按清单人工切换')).toBeTruthy()
+      })
     })
 
     it('shows a pre-submit restore execution review after preview succeeds', async () => {
