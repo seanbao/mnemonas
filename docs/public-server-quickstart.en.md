@@ -144,7 +144,7 @@ The `--public-domain` check lowercases the domain, removes a single FQDN trailin
 - share-link base URL shape and public-share API response cache boundaries;
 - direct backend exposure, dataplane port exposure, and local UFW rules for backend control-plane or dataplane ports.
 
-Certificate inspection requires `openssl` on the server; without `openssl`, `mnemonas-doctor --public-domain` fails. Cloud security groups or upstream firewalls still need a separate checklist review.
+DNS inspection requires `getent` on the server; without `getent`, or when `getent ahosts <domain>` returns no address, `mnemonas-doctor --public-domain` fails. Certificate inspection requires `openssl` on the server; without `openssl`, `mnemonas-doctor --public-domain` fails. Cloud security groups or upstream firewalls still need a separate checklist review.
 Public HTTP must redirect to HTTPS on the same domain; unreachable HTTP, non-redirect responses, or redirects to another domain make `mnemonas-doctor --public-domain` fail.
 
 Public authentication checks require `auth.enabled = true`, `security.allow_unsafe_no_auth = false`, and authenticated WebDAV when WebDAV is enabled.
@@ -202,7 +202,7 @@ Expected state:
 - MnemoNAS Web/API/WebDAV listens only on `127.0.0.1:8080`;
 - dataplane `9090/9091`, or custom dataplane ports, listen only on `127.0.0.1`.
 - Local port inspection covers IPv4 and IPv6; `iproute2` should be installed for `ss`, or both `/proc/net/tcp` and `/proc/net/tcp6` must be readable when `ss` is unavailable.
-- The host running `mnemonas-doctor --public-domain` has `curl`, `python3`, and `openssl` installed for public HTTP(S) entry checks, duration parsing, `users.json` administrator-redundancy checks, generated WebDAV credential checks, and HTTPS certificate checks.
+- The host running `mnemonas-doctor --public-domain` has `curl`, `python3`, `getent`, and `openssl` installed for public HTTP(S) entry checks, duration parsing, DNS resolution, `users.json` administrator-redundancy checks, generated WebDAV credential checks, and HTTPS certificate checks.
 
 ## 4. WebDAV URL
 
@@ -248,7 +248,7 @@ sudo systemctl restart mnemonas
 - [ ] `http://nas.example.com/health` redirects to an HTTPS URL on the same domain.
 - [ ] Public `8080/9090/9091`, or custom backend ports, are unreachable.
 - [ ] The host running `mnemonas-doctor --public-domain` can use `ss`, or can read both `/proc/net/tcp` and `/proc/net/tcp6`.
-- [ ] The host running `mnemonas-doctor --public-domain` has `curl`, `python3`, and `openssl` installed.
+- [ ] The host running `mnemonas-doctor --public-domain` has `curl`, `python3`, `getent`, and `openssl` installed.
 - [ ] Local UFW has no broad allow rule for `8080/9090/9091` or custom backend ports.
 - [ ] `/etc/mnemonas/config.toml` is a private regular file, does not pass through symlink components, and parses as valid TOML.
 - [ ] `/etc/mnemonas/config.toml` has `server.host = "127.0.0.1"`.

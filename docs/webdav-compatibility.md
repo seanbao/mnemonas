@@ -76,7 +76,7 @@ REST API 资源复制接口位于 `/api/v1/files-copy`；WebDAV `Overwrite: T/F`
 - `OPTIONS`、`MKCOL`、`PUT`、`PROPFIND`、`COPY` 和 `MOVE`；
 - 条件请求、Range/ETag 和 LOCK/UNLOCK 行为；
 - 同源 `Destination` 解析和锁 `If` URI 解析；
-- `scripts/webdav-client-smoke.sh` 可对已运行服务执行独立 curl 协议 smoke，覆盖 `OPTIONS`、`MKCOL`、`PUT`、`PROPFIND`、`GET`、`HEAD`、`COPY`、`MOVE` 和 `DELETE`；
+- `scripts/webdav-client-smoke.sh` 可对已运行服务执行独立 curl 协议 smoke，覆盖 `OPTIONS`、`MKCOL`、`PUT`、`PROPFIND`、`GET`、`HEAD`、`COPY`、`MOVE` 和 `DELETE`，并验证 URL 编码空格路径的读写删除；
 - 设置 `RUN_RCLONE_WEBDAV=1` 后，低层 E2E 会在已安装 `rclone` 的环境中执行 WebDAV 客户端上传、下载、移动/重命名和列表 smoke。
 
 下表仍用于跟踪桌面、移动和媒体客户端的剩余真实客户端验证工作。
@@ -202,7 +202,7 @@ MNEMONAS_WEBDAV_PASSWORD="<mnemonas-or-webdav-password>" \
 ./scripts/webdav-client-smoke.sh
 ```
 
-该脚本会创建临时集合，验证基础读写、复制、移动和删除操作，然后清理临时数据。它用于协议级回归检查，不替代 Finder、Windows File Explorer、移动端文件管理器或媒体播放器的真实客户端验证。
+该脚本会创建临时集合，验证基础读写、URL 编码空格路径、复制、移动和删除操作，然后清理临时数据。每次 curl 请求默认使用 `CURL_CONNECT_TIMEOUT=10` 和 `CURL_MAX_TIME=30`，高延迟网络可通过环境变量调大。它用于协议级回归检查，不替代 Finder、Windows File Explorer、移动端文件管理器或媒体播放器的真实客户端验证。
 
 ### davfs2 示例
 

@@ -79,6 +79,21 @@ make_doctor_path_without_openssl() {
   done
 }
 
+make_doctor_path_without_getent() {
+  local fake_path="$1"
+  local target_path="$2"
+  local cmd resolved
+
+  mkdir -p "$target_path"
+  for cmd in bash awk cat dirname grep mktemp python3 rm sed stat tail; do
+    resolved="$(command -v "$cmd")" || fail "required test command is missing: $cmd"
+    ln -sf "$resolved" "$target_path/$cmd"
+  done
+  for cmd in curl df findmnt id openssl ss systemctl timeout ufw; do
+    cp "$fake_path/$cmd" "$target_path/$cmd"
+  done
+}
+
 make_fake_admin_path() {
   local dir="$1"
   mkdir -p "$dir"
@@ -432,6 +447,72 @@ run_install_preserves_existing_runtime_on_binary_install_failure_test() {
   assert_file_contains "$case_dir/install.log" "simulated dataplane install failure"
   assert_file_contains "$install_dir/bin/nasd" "old nasd"
   assert_file_contains "$install_dir/bin/dataplane" "old dataplane"
+  assert_file_contains "$web_dir/index.html" "old web"
+}
+
+run_install_rolls_back_late_binary_move_failure_test() {
+  local case_dir="$TMP_ROOT/late-binary-move-failure"
+  local fake_path="$case_dir/fake-bin"
+  local release_dir="$case_dir/release"
+  local install_dir="$case_dir/install"
+  local storage_dir="$install_dir/storage"
+  local web_dir="$install_dir/share/mnemonas/web"
+  local real_mv
+  real_mv="$(command -v mv)"
+  mkdir -p "$install_dir/bin" "$web_dir"
+  write_executable "$install_dir/bin/nasd" '#!/usr/bin/env bash' 'printf "old nasd\n"'
+  write_executable "$install_dir/bin/dataplane" '#!/usr/bin/env bash' 'printf "old dataplane\n"'
+  write_executable "$install_dir/bin/mnemonas-dataplane-start" '#!/usr/bin/env bash' 'printf "old helper\n"'
+  write_executable "$install_dir/bin/mnemonas-doctor" '#!/usr/bin/env bash' 'printf "old doctor\n"'
+  write_executable "$install_dir/bin/mnemonas-public-setup" '#!/usr/bin/env bash' 'printf "old public setup\n"'
+  write_executable "$install_dir/bin/mnemonas-uninstall-systemd" '#!/usr/bin/env bash' 'printf "old uninstaller\n"'
+  printf 'old web\n' > "$web_dir/index.html"
+  make_fake_admin_path "$fake_path"
+  make_release_tree "$release_dir"
+  write_executable "$release_dir/nasd" \
+    '#!/usr/bin/env bash' \
+    'if [[ "${1:-}" == "--check-config" ]]; then exit 0; fi' \
+    'printf "new nasd\n"'
+  write_executable "$release_dir/dataplane" '#!/usr/bin/env bash' 'printf "new dataplane\n"'
+  write_executable "$release_dir/scripts/mnemonas-dataplane-start.sh" '#!/usr/bin/env bash' 'printf "new helper\n"'
+  write_executable "$release_dir/scripts/mnemonas-doctor.sh" '#!/usr/bin/env bash' 'printf "new doctor\n"'
+  write_executable "$release_dir/scripts/setup-reverse-proxy.sh" '#!/usr/bin/env bash' 'printf "new public setup\n"'
+  write_executable "$release_dir/scripts/uninstall-systemd.sh" '#!/usr/bin/env bash' 'printf "new uninstaller\n"'
+  write_executable "$fake_path/mv" \
+    '#!/usr/bin/env bash' \
+    'args=("$@")' \
+    'if [[ "${args[0]:-}" == "--" ]]; then args=("${args[@]:1}"); fi' \
+    'src="${args[0]:-}"' \
+    'dest="${args[1]:-}"' \
+    'if [[ "$src" == */.mnemonas-bin.new.*/* && "$dest" == */mnemonas-doctor ]]; then' \
+    '  printf "simulated late doctor install failure\n" >&2' \
+    '  exit 42' \
+    'fi' \
+    "exec \"$real_mv\" \"\$@\""
+
+  set +e
+  PATH="$fake_path:$PATH" \
+    RELEASE_DIR="$release_dir" \
+    BIN_DIR="$install_dir/bin" \
+    SHARE_DIR="$install_dir/share/mnemonas" \
+    WEB_DIR="$web_dir" \
+    CONFIG_DIR="$install_dir/etc/mnemonas" \
+    CONFIG_PATH="$install_dir/etc/mnemonas/config.toml" \
+    SYSTEMD_DIR="$install_dir/systemd" \
+    STORAGE_ROOT="$storage_dir" \
+    ENABLE_NOW=0 \
+    "$REPO_ROOT/scripts/install-systemd.sh" > "$case_dir/install.log" 2>&1
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "installer succeeded after a late binary move failure"
+  assert_file_contains "$case_dir/install.log" "simulated late doctor install failure"
+  assert_file_contains "$install_dir/bin/nasd" "old nasd"
+  assert_file_contains "$install_dir/bin/dataplane" "old dataplane"
+  assert_file_contains "$install_dir/bin/mnemonas-dataplane-start" "old helper"
+  assert_file_contains "$install_dir/bin/mnemonas-doctor" "old doctor"
+  assert_file_contains "$install_dir/bin/mnemonas-public-setup" "old public setup"
+  assert_file_contains "$install_dir/bin/mnemonas-uninstall-systemd" "old uninstaller"
   assert_file_contains "$web_dir/index.html" "old web"
 }
 
@@ -1284,7 +1365,10 @@ JSON
   printf '<div id="root"></div>\n' > "$web_dir/index.html"
 
   write_executable "$fake_path/id" '#!/usr/bin/env bash' 'exit 0'
-  write_executable "$fake_path/getent" '#!/usr/bin/env bash' 'exit 1'
+  write_executable "$fake_path/getent" \
+    '#!/usr/bin/env bash' \
+    'if [[ "${1:-}" == "ahosts" && "${2:-}" == "nas.example.com" ]]; then printf "203.0.113.10 STREAM nas.example.com\n"; exit 0; fi' \
+    'exit 1'
   write_executable "$fake_path/runuser" '#!/usr/bin/env bash' 'shift 3; "$@"'
   write_executable "$fake_path/systemctl" \
     '#!/usr/bin/env bash' \
@@ -1661,7 +1745,10 @@ EOF
   chmod 0600 "$storage_dir/secrets.json"
 
   write_executable "$fake_path/id" '#!/usr/bin/env bash' 'exit 0'
-  write_executable "$fake_path/getent" '#!/usr/bin/env bash' 'exit 1'
+  write_executable "$fake_path/getent" \
+    '#!/usr/bin/env bash' \
+    'if [[ "${1:-}" == "ahosts" && "${2:-}" == "nas.example.com" ]]; then printf "203.0.113.10 STREAM nas.example.com\n"; exit 0; fi' \
+    'exit 1'
   write_executable "$fake_path/systemctl" \
     '#!/usr/bin/env bash' \
     'if [[ "${1:-}" == "is-active" ]]; then exit 0; fi' \
@@ -1749,6 +1836,8 @@ EOF
     "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain nas.example.com > "$case_dir/doctor-public.log"
 
   assert_file_contains "$case_dir/doctor-public.log" "Public access checks for nas.example.com"
+  assert_file_contains "$case_dir/doctor-public.log" "getent is available for public DNS diagnostics"
+  assert_file_contains "$case_dir/doctor-public.log" "public domain resolves locally: nas.example.com (203.0.113.10)"
   assert_file_contains "$case_dir/doctor-public.log" "public backend host is loopback-only: 127.0.0.1"
   assert_file_contains "$case_dir/doctor-public.log" "trusted proxy hops configured: 1"
   assert_file_contains "$case_dir/doctor-public.log" "public HTTPS health reachable: https://nas.example.com/health"
@@ -1784,6 +1873,7 @@ EOF
     "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain NAS.EXAMPLE.COM. > "$case_dir/doctor-public-normalized-domain.log"
 
   assert_file_contains "$case_dir/doctor-public-normalized-domain.log" "Public access checks for nas.example.com"
+  assert_file_contains "$case_dir/doctor-public-normalized-domain.log" "public domain resolves locally: nas.example.com (203.0.113.10)"
   assert_file_contains "$case_dir/doctor-public-normalized-domain.log" "public HTTPS health reachable: https://nas.example.com/health"
   assert_file_contains "$case_dir/doctor-public-normalized-domain.log" "public HTTP redirects to HTTPS: http://nas.example.com/health -> https://nas.example.com/health"
   assert_file_contains "$case_dir/doctor-public-normalized-domain.log" "Summary: 0 failure(s)"
@@ -3195,6 +3285,44 @@ EOF
   [[ "$status" -ne 0 ]] || fail "public doctor accepted missing openssl"
   assert_file_contains "$case_dir/doctor-public-no-openssl.log" "openssl is required for public HTTPS certificate checks"
 
+  local no_getent_path="$case_dir/no-getent-bin"
+  make_doctor_path_without_getent "$fake_path" "$no_getent_path"
+
+  set +e
+  PATH="$no_getent_path" \
+    BIN_DIR="$bin_dir" \
+    WEB_DIR="$web_dir" \
+    CONFIG_PATH="$case_dir/config.toml" \
+    DATAPLANE_HTTP_PORT=19091 \
+    BACKUP_ROOT="$backup_dir" \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain nas.example.com > "$case_dir/doctor-public-no-getent.log"
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "public doctor accepted missing getent"
+  assert_file_contains "$case_dir/doctor-public-no-getent.log" "getent is required for public diagnostics"
+
+  write_executable "$fake_path/getent" '#!/usr/bin/env bash' 'exit 1'
+
+  set +e
+  PATH="$fake_path:$PATH" \
+    BIN_DIR="$bin_dir" \
+    WEB_DIR="$web_dir" \
+    CONFIG_PATH="$case_dir/config.toml" \
+    DATAPLANE_HTTP_PORT=19091 \
+    BACKUP_ROOT="$backup_dir" \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain nas.example.com > "$case_dir/doctor-public-dns-missing.log"
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "public doctor accepted a public domain without local DNS resolution"
+  assert_file_contains "$case_dir/doctor-public-dns-missing.log" "public domain does not resolve locally: nas.example.com"
+
+  write_executable "$fake_path/getent" \
+    '#!/usr/bin/env bash' \
+    'if [[ "${1:-}" == "ahosts" && "${2:-}" == "nas.example.com" ]]; then printf "203.0.113.10 STREAM nas.example.com\n"; exit 0; fi' \
+    'exit 1'
+
   cat > "$case_dir/config-dotted-no-auth.toml" <<EOF
 auth.enabled = false
 webdav.enabled = true
@@ -4133,6 +4261,7 @@ run_web_install_preserves_existing_assets_on_copy_failure_test
 run_install_preserves_existing_runtime_on_config_check_failure_test
 run_install_removes_new_config_on_config_check_failure_test
 run_install_preserves_existing_runtime_on_binary_install_failure_test
+run_install_rolls_back_late_binary_move_failure_test
 run_install_reports_service_restart_failure_test
 run_install_reports_daemon_reload_failure_test
 run_install_reports_service_enable_failure_test

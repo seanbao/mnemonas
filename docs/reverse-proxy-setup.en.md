@@ -34,7 +34,7 @@ When `ss` is unavailable, they fall back to `/proc/net/tcp` and `/proc/net/tcp6`
 For non-public basic checks, the report says port exposure cannot be confirmed when neither source is readable.
 If the basic checks confirm that the Web/API/WebDAV backend or dataplane ports listen on non-loopback addresses, `mnemonas-public-setup` fails and asks for remediation before a rerun.
 Public strict checks must cover both IPv4 and IPv6 listeners; without `ss`, both `/proc/net/tcp` and `/proc/net/tcp6` must be readable, otherwise `mnemonas-doctor --public-domain` fails to avoid missing IPv6 `[::]` exposure.
-Public strict checks also require `curl`, `python3`, and `openssl` for public HTTP(S) entry checks, duration parsing, `users.json` administrator-redundancy checks, generated WebDAV credential checks, and HTTPS certificate checks; without any of these tools, `mnemonas-doctor --public-domain` fails.
+Public strict checks also require `curl`, `python3`, `getent`, and `openssl` for public HTTP(S) entry checks, duration parsing, DNS resolution, `users.json` administrator-redundancy checks, generated WebDAV credential checks, and HTTPS certificate checks; without any of these tools, `mnemonas-doctor --public-domain` fails.
 
 When adjusting UFW, the script removes broad allow rules for `8080/9090/9091` or custom backend ports before writing deny rules.
 A follow-up `mnemonas-doctor --public-domain` treats remaining broad local UFW allow rules for backend control-plane or dataplane ports as public-deployment failures.

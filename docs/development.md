@@ -397,7 +397,7 @@ curl http://localhost:9091/health
 curl http://localhost:9091/stats
 ```
 
-`scripts/webdav-client-smoke.sh` 覆盖 `OPTIONS`、`MKCOL`、`PUT`、`PROPFIND`、`GET`、`HEAD`、`COPY`、`MOVE` 和 `DELETE`。如果启用 `webdav.auth_type = "basic"`，可用 `./scripts/dev.sh --creds` 查看凭据位置；如果启用 `webdav.auth_type = "users"`，则使用 MnemoNAS 用户名和密码。
+`scripts/webdav-client-smoke.sh` 覆盖 `OPTIONS`、`MKCOL`、`PUT`、`PROPFIND`、`GET`、`HEAD`、`COPY`、`MOVE`、`DELETE` 和 URL 编码空格路径读写。如果启用 `webdav.auth_type = "basic"`，可用 `./scripts/dev.sh --creds` 查看凭据位置；如果启用 `webdav.auth_type = "users"`，则使用 MnemoNAS 用户名和密码。每次 curl 请求默认使用 `CURL_CONNECT_TIMEOUT=10` 和 `CURL_MAX_TIME=30`，高延迟网络可通过环境变量调大。
 脚本通过临时 curl 配置传递认证信息，避免在命令参数中输出明文密码。
 
 `9091` 应保持本地或私有网络可见。
