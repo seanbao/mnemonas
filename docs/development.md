@@ -422,7 +422,7 @@ RUN_RCLONE_WEBDAV=1 ./scripts/run-e2e-isolated.sh --quick
 `STORAGE_ROOT` 不能包含控制字符、`..` 或符号链接路径组件。
 WebDAV `auth_type = "basic"` 时，脚本可以从配置或 `secrets.json` 读取 Basic Auth 凭据。
 WebDAV `auth_type = "users"` 时，应显式设置 `MNEMONAS_WEBDAV_USERNAME` 和 `MNEMONAS_WEBDAV_PASSWORD`。
-设置 `RUN_RCLONE_WEBDAV=1` 时，隔离 runner 和 `scripts/e2e-test.sh` 会在已安装 `rclone` 的环境中额外运行 WebDAV 客户端 smoke，覆盖上传、下载、移动/重命名和列表。
+设置 `RUN_RCLONE_WEBDAV=1` 时，隔离 runner 和 `scripts/e2e-test.sh` 会在已安装 `rclone` 的环境中额外运行 WebDAV 客户端 smoke，覆盖上传、下载、移动/重命名、列出和清理。
 
 隔离 E2E runner 和 Playwright 后端只接受 loopback Web 与 dataplane 地址：`localhost`、`ip6-localhost`、`::1` 或四段数字形式的 `127.0.0.0/8` 地址。
 这可避免测试后端意外监听公网或不可信局域网接口。

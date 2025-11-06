@@ -77,7 +77,7 @@ REST API 资源复制接口位于 `/api/v1/files-copy`；WebDAV `Overwrite: T/F`
 - 条件请求、Range/ETag 和 LOCK/UNLOCK 行为；
 - 同源 `Destination` 解析和锁 `If` URI 解析；
 - `scripts/webdav-client-smoke.sh` 可对已运行服务执行独立 curl 协议 smoke，覆盖 `OPTIONS`、`MKCOL`、`PUT`、`PROPFIND`、`GET`、`HEAD`、`COPY`、`MOVE` 和 `DELETE`，并验证 URL 编码空格路径的读写删除；
-- 设置 `RUN_RCLONE_WEBDAV=1` 后，低层 E2E 会在已安装 `rclone` 的环境中执行 WebDAV 客户端上传、下载、移动/重命名和列表 smoke。
+- 设置 `RUN_RCLONE_WEBDAV=1` 后，低层 E2E 会在已安装 `rclone` 的环境中执行 WebDAV 客户端上传、下载、移动/重命名、列出和清理 smoke。
 
 下表仍用于跟踪桌面、移动和媒体客户端的剩余真实客户端验证工作。
 
@@ -88,7 +88,7 @@ REST API 资源复制接口位于 `/api/v1/files-copy`；WebDAV `Overwrite: T/F`
 | Nautilus / GNOME Files | 45+ | 预期可用 | 使用 GVfs DAV 支持 |
 | Dolphin | 23+ | 预期可用 | 内置 WebDAV 支持 |
 | davfs2 | 1.6+ | 预期可用 | 挂载为本地目录 |
-| rclone | 1.60+ | 已验证 | 可选 `RUN_RCLONE_WEBDAV=1` E2E 覆盖上传、下载、移动/重命名和列表 |
+| rclone | 1.60+ | 已验证 | 可选 `RUN_RCLONE_WEBDAV=1` E2E 覆盖上传、下载、移动/重命名、列出和清理 |
 
 ### macOS
 
@@ -217,9 +217,11 @@ sudo mount -t davfs http://localhost:8080/dav /mnt/nas
 
 ## 报告兼容性问题
 
-客户端兼容性报告应包含：
+使用 [WebDAV 兼容性报告表单](../.github/ISSUE_TEMPLATE/webdav_compatibility.yml) 提交客户端兼容性结果。报告应包含：
 
 - 客户端名称和版本。
 - 操作系统和版本。
+- WebDAV 认证方式、访问路径、反向代理和 TLS 背景。
+- 已测试的操作，例如连接、浏览、上传、下载、重命名、删除、大文件传输、媒体拖动或离线同步。
 - 复现步骤。
 - 可行时附上从 Web UI 导出的诊断包。

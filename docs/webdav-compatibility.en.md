@@ -77,7 +77,7 @@ Current automation covers:
 - conditional requests, Range/ETag, and LOCK/UNLOCK behavior;
 - same-origin `Destination` parsing and lock `If` URI parsing;
 - `scripts/webdav-client-smoke.sh` can run an independent curl protocol smoke against a running service, covering `OPTIONS`, `MKCOL`, `PUT`, `PROPFIND`, `GET`, `HEAD`, `COPY`, `MOVE`, and `DELETE`, including read, write, and delete checks for URL-encoded space paths;
-- With `RUN_RCLONE_WEBDAV=1`, the low-level E2E runner also executes a WebDAV client smoke for upload, download, move/rename, and list operations when `rclone` is installed.
+- With `RUN_RCLONE_WEBDAV=1`, the low-level E2E runner also executes a WebDAV client smoke for upload, download, move/rename, list, and cleanup operations when `rclone` is installed.
 
 The matrix below still tracks remaining real-client validation work for desktop, mobile, and media clients.
 
@@ -88,7 +88,7 @@ The matrix below still tracks remaining real-client validation work for desktop,
 | Nautilus / GNOME Files | 45+ | Expected | Uses GVfs DAV support |
 | Dolphin | 23+ | Expected | Built-in WebDAV support |
 | davfs2 | 1.6+ | Expected | Mounts as local directory |
-| rclone | 1.60+ | Verified | Optional `RUN_RCLONE_WEBDAV=1` E2E coverage for upload, download, move/rename, and list operations |
+| rclone | 1.60+ | Verified | Optional `RUN_RCLONE_WEBDAV=1` E2E coverage for upload, download, move/rename, list, and cleanup operations |
 
 ### macOS
 
@@ -217,9 +217,11 @@ sudo mount -t davfs http://localhost:8080/dav /mnt/nas
 
 ## Reporting Compatibility Problems
 
-Client compatibility reports should include:
+Use the [WebDAV compatibility report form](../.github/ISSUE_TEMPLATE/webdav_compatibility.yml) to submit client compatibility results. Reports should include:
 
 - Client name and version.
 - Operating system and version.
+- WebDAV authentication mode, access path, reverse proxy, and TLS context.
+- Tested operations, such as connect, browse, upload, download, rename, delete, large-file transfer, media seeking, or offline sync.
 - Reproduction steps.
 - Diagnostic bundle exported from the Web UI when possible.

@@ -164,6 +164,10 @@ case "${1:-}" in
     printf '%s\n' "$*" >> "$RCLONE_INVOKED_LOG"
     exit 0
     ;;
+  deletefile)
+    printf '%s\n' "$*" >> "$RCLONE_INVOKED_LOG"
+    exit 0
+    ;;
   lsf)
     printf '%s\n' "$*" >> "$RCLONE_INVOKED_LOG"
     printf 'rclone-smoke-moved.txt\n'
@@ -926,6 +930,8 @@ run_rclone_webdav_docs_contract_test() {
 	assert_file_contains "$REPO_ROOT/docs/testing-strategy.en.md" 'RUN_RCLONE_WEBDAV=1 ./scripts/run-e2e-isolated.sh --quick'
 	assert_file_contains "$REPO_ROOT/docs/testing-strategy.md" 'WebDAV client smoke'
 	assert_file_contains "$REPO_ROOT/docs/testing-strategy.en.md" 'WebDAV client smoke'
+	assert_file_contains "$REPO_ROOT/docs/testing-strategy.md" '上传、下载、移动/重命名、列出和清理'
+	assert_file_contains "$REPO_ROOT/docs/testing-strategy.en.md" 'upload, download, move/rename, list, and cleanup'
 	# shellcheck disable=SC2016 # Match literal Markdown code spans.
 	assert_file_contains "$REPO_ROOT/docs/webdav-compatibility.md" '可选 `RUN_RCLONE_WEBDAV=1` E2E'
 	# shellcheck disable=SC2016 # Match literal Markdown code spans.
@@ -1246,6 +1252,7 @@ run_rclone_webdav_opt_in_uses_webdav_credentials_test() {
 	assert_file_contains "$rclone_log" "copyto"
 	assert_file_contains "$rclone_log" ":webdav:e2e-test/rclone-smoke.txt"
 	assert_file_contains "$rclone_log" ":webdav:e2e-test/rclone-smoke-moved.txt"
+	assert_file_contains "$rclone_log" "deletefile :webdav:e2e-test/rclone-smoke-moved.txt"
 	assert_file_contains "$rclone_log" "--webdav-url http://127.0.0.1:18080/dav"
 	assert_file_contains "$rclone_log" "--webdav-user family-user"
 	assert_file_contains "$rclone_log" "--webdav-pass obscured-password"
