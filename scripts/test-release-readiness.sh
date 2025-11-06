@@ -5,6 +5,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 READINESS="$REPO_ROOT/scripts/release-readiness.sh"
 PLANNER="$REPO_ROOT/scripts/plan-hardening-commits.sh"
+COMMIT_MESSAGE_CHECK="$REPO_ROOT/scripts/check-commit-message.sh"
 
 tmp="$(mktemp -d)"
 output_dir="$(mktemp -d)"
@@ -149,7 +150,8 @@ EOF
 mkdir -p "$tmp/scripts"
 cp "$READINESS" "$tmp/scripts/release-readiness.sh"
 cp "$PLANNER" "$tmp/scripts/plan-hardening-commits.sh"
-chmod +x "$tmp/scripts/release-readiness.sh" "$tmp/scripts/plan-hardening-commits.sh"
+cp "$COMMIT_MESSAGE_CHECK" "$tmp/scripts/check-commit-message.sh"
+chmod +x "$tmp/scripts/release-readiness.sh" "$tmp/scripts/plan-hardening-commits.sh" "$tmp/scripts/check-commit-message.sh"
 
 cd "$tmp"
 git init -q -b master
@@ -168,6 +170,7 @@ git commit -q -m "docs: record validation evidence"
 
 ./scripts/release-readiness.sh --base "$validation_target" >"$output_dir/evidence-only.out" 2>"$output_dir/evidence-only.err"
 assert_file_contains "$output_dir/evidence-only.out" "[release-readiness] validation:"
+assert_file_contains "$output_dir/evidence-only.out" "[release-readiness] commit-messages:"
 assert_file_contains "$output_dir/evidence-only.out" "only validation evidence docs changed since target"
 assert_file_contains "$output_dir/evidence-only.out" "[release-readiness] validation-diff:"
 assert_file_contains "$output_dir/evidence-only.out" "release readiness summary completed"
@@ -205,6 +208,7 @@ assert_file_contains "$output_dir/pass.out" "[release-readiness] commits:"
 assert_file_contains "$output_dir/pass.out" "[release-readiness] diff:"
 assert_file_contains "$output_dir/pass.out" "[release-readiness] worktree:          clean"
 assert_file_contains "$output_dir/pass.out" "[release-readiness] planner          [hardening-commit-plan] no changed files detected"
+assert_file_contains "$output_dir/pass.out" "[release-readiness] commit-messages:"
 assert_file_contains "$output_dir/pass.out" "[release-readiness] community:"
 assert_file_contains "$output_dir/pass.out" "[release-readiness] validation:"
 assert_file_contains "$output_dir/pass.out" "full gate evidence at"
@@ -215,6 +219,28 @@ assert_file_contains "$output_dir/pass.out" "[release-readiness] checklist:"
 assert_file_contains "$output_dir/pass.out" "[release-readiness] status:"
 assert_file_contains "$output_dir/pass.out" "release readiness summary completed"
 
+git checkout -q master
+git checkout -q -b bad-commit-message
+printf '# docs\n' >README.md
+git add README.md
+git commit -q -m "Bad release docs"
+if ./scripts/release-readiness.sh --allow-post-validation-changes >"$output_dir/bad-commit-message.out" 2>"$output_dir/bad-commit-message.err"; then
+	fail "release readiness accepted a non-conventional branch commit"
+fi
+assert_file_contains "$output_dir/bad-commit-message.err" "commit message does not follow project convention"
+assert_file_contains "$output_dir/bad-commit-message.err" "subject must use Conventional Commits"
+
+git checkout -q master
+git checkout -q -b autosquash-commit-message
+printf '# docs\n' >README.md
+git add README.md
+git commit -q -m "fixup! docs: update release docs"
+if ./scripts/release-readiness.sh --allow-post-validation-changes >"$output_dir/autosquash-commit-message.out" 2>"$output_dir/autosquash-commit-message.err"; then
+	fail "release readiness accepted a temporary autosquash branch commit"
+fi
+assert_file_contains "$output_dir/autosquash-commit-message.err" "temporary autosquash commit remains on release branch"
+
+git checkout -q release-readiness
 printf '# dirty docs\n' >>README.md
 if ./scripts/release-readiness.sh >"$output_dir/dirty.out" 2>"$output_dir/dirty.err"; then
 	fail "release readiness accepted a dirty worktree by default"

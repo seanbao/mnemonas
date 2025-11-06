@@ -75,6 +75,12 @@ contains_control_character() {
 	LC_ALL=C printf '%s' "$value" | LC_ALL=C grep -q '[[:cntrl:]]'
 }
 
+contains_whitespace_character() {
+	local value="$1"
+
+	[[ "$value" == *[[:space:]]* ]]
+}
+
 tar_is_gnu() {
 	tar --version 2>/dev/null | grep -qi 'gnu tar'
 }
@@ -161,6 +167,9 @@ validate_checksums_manifest() {
 		[[ -n "$filename" ]] || fail "checksums.txt line $line_number has an empty filename"
 		if contains_control_character "$filename"; then
 			fail "checksums.txt contains a control character in file path: $filename"
+		fi
+		if contains_whitespace_character "$filename"; then
+			fail "checksums.txt contains whitespace in file path: $filename"
 		fi
 		normalized="${filename#./}"
 		case "$normalized" in
@@ -391,6 +400,13 @@ shopt -u nullglob
 
 for archive in "${archives[@]}"; do
 	assert_regular_file "$archive"
+	base="$(basename "$archive")"
+	if contains_control_character "$base"; then
+		fail "release archive filename contains a control character: $base"
+	fi
+	if contains_whitespace_character "$base"; then
+		fail "release archive filename contains whitespace: $base"
+	fi
 done
 
 if ! (cd "$ARTIFACT_DIR" && sha256sum -c checksums.txt); then
