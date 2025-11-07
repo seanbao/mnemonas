@@ -831,6 +831,44 @@ function RestoreFlowStepIcon({ state }: { state: RestoreFlowStepState }) {
   return <Clock size={16} className="text-default-400" />
 }
 
+function RestoreFlowStepsPanel({
+  ariaLabel,
+  title,
+  steps,
+}: {
+  ariaLabel: string
+  title: string
+  steps: RestoreFlowStep[]
+}) {
+  return (
+    <div aria-label={ariaLabel} className="rounded-lg border border-divider bg-content2/50 p-3 text-sm">
+      <div className="flex items-center gap-2 font-medium text-default-800">
+        <ListChecks size={16} />
+        <span>{title}</span>
+      </div>
+      <ol className="mt-3 grid gap-2 sm:grid-cols-2">
+        {steps.map((step, index) => (
+          <li key={step.id} className={`min-w-0 rounded-lg border p-3 ${getRestoreFlowStepClass(step.state)}`}>
+            <div className="flex items-start gap-2">
+              <RestoreFlowStepIcon state={step.state} />
+              <div className="min-w-0 flex-1">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-xs text-default-500">阶段 {index + 1}</span>
+                  <Chip size="sm" color={getRestoreFlowStepColor(step.state)} variant="flat">
+                    {getRestoreFlowStepLabel(step.state)}
+                  </Chip>
+                </div>
+                <div className="mt-1 font-medium text-default-800">{step.title}</div>
+                <div className="mt-1 break-words text-xs text-default-500">{step.description}</div>
+              </div>
+            </div>
+          </li>
+        ))}
+      </ol>
+    </div>
+  )
+}
+
 function RestoreFlowGuide({
   targetPath,
   targetReady,
@@ -939,33 +977,7 @@ function RestoreFlowGuide({
             : 'complete',
   }]
 
-  return (
-    <div aria-label="恢复流程进度" className="rounded-lg border border-divider bg-content2/50 p-3 text-sm">
-      <div className="flex items-center gap-2 font-medium text-default-800">
-        <ListChecks size={16} />
-        <span>恢复流程</span>
-      </div>
-      <ol className="mt-3 grid gap-2 sm:grid-cols-2">
-        {steps.map((step, index) => (
-          <li key={step.id} className={`min-w-0 rounded-lg border p-3 ${getRestoreFlowStepClass(step.state)}`}>
-            <div className="flex items-start gap-2">
-              <RestoreFlowStepIcon state={step.state} />
-              <div className="min-w-0 flex-1">
-                <div className="flex flex-wrap items-center gap-2">
-                  <span className="text-xs text-default-500">阶段 {index + 1}</span>
-                  <Chip size="sm" color={getRestoreFlowStepColor(step.state)} variant="flat">
-                    {getRestoreFlowStepLabel(step.state)}
-                  </Chip>
-                </div>
-                <div className="mt-1 font-medium text-default-800">{step.title}</div>
-                <div className="mt-1 break-words text-xs text-default-500">{step.description}</div>
-              </div>
-            </div>
-          </li>
-        ))}
-      </ol>
-    </div>
-  )
+  return <RestoreFlowStepsPanel ariaLabel="恢复流程进度" title="恢复流程" steps={steps} />
 }
 
 function getRestorePreflightTone(status: BackupRestorePreflightCheck['status']): 'success' | 'warning' | 'danger' | 'default' {
@@ -2260,6 +2272,132 @@ function BatchRestoreReadinessSummary({
       </div>
     </div>
   )
+}
+
+function BatchRestoreFlowGuide({
+  items,
+  withinLimit,
+  targetInputError,
+  targetConflict,
+  targetsReady,
+  preview,
+  previewMatches,
+  previewHasFailed,
+  isPreviewing,
+  isRestoring,
+  result,
+}: {
+  items: BackupBatchRestoreItemRequest[]
+  withinLimit: boolean
+  targetInputError: string | null
+  targetConflict: string | null
+  targetsReady: boolean
+  preview: BackupBatchRestorePreviewResult | null
+  previewMatches: boolean
+  previewHasFailed: boolean
+  isPreviewing: boolean
+  isRestoring: boolean
+  result: BackupBatchRestoreResult | null
+}) {
+  const selectedCount = items.length
+  const targetBlocked = !withinLimit || Boolean(targetInputError || targetConflict)
+  const previewFailed = Boolean(preview && previewMatches && previewHasFailed)
+  const previewComplete = Boolean(result) || Boolean(preview && previewMatches && !previewFailed)
+  const failedResultItems = result?.items.filter((item) => item.status === 'failed').length ?? 0
+  const allResultItemsFailed = Boolean(result && result.items.length > 0 && failedResultItems === result.items.length)
+  const resultHasReviewItems = Boolean(result && (
+    result.warning
+    || (result.warnings?.length ?? 0) > 0
+    || failedResultItems > 0
+    || result.items.some((item) => (
+      (item.warnings?.length ?? 0) > 0
+      || item.restore?.status === 'failed'
+      || item.verify?.status === 'failed'
+      || (item.verify?.warnings?.length ?? 0) > 0
+      || (item.verify ? !item.verify.looks_like_storage_root : false)
+    ))
+  ))
+  const resultFailed = result?.status === 'failed' || allResultItemsFailed
+
+  const steps: RestoreFlowStep[] = [{
+    id: 'select',
+    title: '选择任务',
+    description: selectedCount === 0
+      ? '选择要恢复的备份任务'
+      : !withinLimit
+        ? `一次最多恢复 ${batchRestoreItemLimit} 项`
+        : `已选择 ${selectedCount} 项`,
+    state: selectedCount === 0 ? 'active' : withinLimit ? 'complete' : 'blocked',
+  }, {
+    id: 'target',
+    title: '目标目录',
+    description: selectedCount === 0
+      ? '选择任务后填写独立目标目录'
+      : targetConflict
+        ? '目标目录重复或存在父子嵌套'
+        : targetInputError
+          ? '目标目录格式需要处理'
+          : !withinLimit
+            ? `一次最多恢复 ${batchRestoreItemLimit} 项`
+            : targetsReady
+              ? `${selectedCount} 个目标目录已确认`
+              : '为每个任务填写独立目标目录',
+    state: selectedCount === 0
+      ? 'pending'
+      : targetBlocked
+        ? 'blocked'
+        : targetsReady
+          ? 'complete'
+          : 'active',
+  }, {
+    id: 'preview',
+    title: '批量预览',
+    description: result
+      ? '已完成批量预览和预检'
+      : isPreviewing
+        ? '正在生成批量预览和预检'
+        : previewFailed
+          ? '存在失败预检，处理后重新生成预览'
+          : preview && !previewMatches
+            ? '选择、目标或配置已变更，需要重新生成预览'
+            : previewComplete
+              ? '批量预览可用于执行'
+              : targetsReady
+                ? '生成批量预览以确认预检'
+                : '目标目录确认后生成预览',
+    state: result || previewComplete
+      ? 'complete'
+      : previewFailed
+        ? 'blocked'
+        : targetsReady || isPreviewing || Boolean(preview)
+          ? 'active'
+          : 'pending',
+  }, {
+    id: 'execute',
+    title: '执行与只读校验',
+    description: resultFailed
+      ? '批量恢复失败，未完成的项目需处理'
+      : resultHasReviewItems
+        ? '批量恢复完成但存在需复核项目'
+        : result
+          ? '批量恢复和只读校验已完成'
+          : isRestoring
+            ? '正在按顺序写入目标目录'
+            : previewComplete
+              ? '预览通过，可开始批量恢复'
+              : '预览通过后执行批量恢复',
+    state: resultFailed
+      ? 'blocked'
+      : resultHasReviewItems
+        ? 'warning'
+        : result
+          ? 'complete'
+          : isRestoring || previewComplete
+            ? 'active'
+            : 'pending',
+  }]
+
+  return <RestoreFlowStepsPanel ariaLabel="批量恢复流程进度" title="批量恢复流程" steps={steps} />
 }
 
 function BatchRestoreResultSummary({ result }: { result: BackupBatchRestoreResult }) {
@@ -3761,10 +3899,24 @@ export default function Maintenance() {
             </div>
           </ModalHeader>
           <ModalBody>
-            {batchRestoreResult ? (
-              <BatchRestoreResultSummary result={batchRestoreResult} />
-            ) : (
-              <div className="space-y-4">
+            <div className="space-y-4">
+              <BatchRestoreFlowGuide
+                items={batchRestoreItems}
+                withinLimit={batchRestoreWithinLimit}
+                targetInputError={batchRestoreTargetInputError}
+                targetConflict={batchRestoreTargetConflict}
+                targetsReady={batchRestoreTargetsReady}
+                preview={batchRestorePreview}
+                previewMatches={batchRestorePreviewMatches}
+                previewHasFailed={batchRestorePreviewHasFailed}
+                isPreviewing={batchRestorePreviewMutation.isPending}
+                isRestoring={batchRestoreMutation.isPending}
+                result={batchRestoreResult}
+              />
+              {batchRestoreResult ? (
+                <BatchRestoreResultSummary result={batchRestoreResult} />
+              ) : (
+                <>
                 <div className="flex items-start gap-2 rounded-lg border border-warning/20 bg-warning/10 p-3 text-sm text-warning">
                   <AlertCircle size={16} className="mt-0.5 shrink-0" />
                   <span>批量恢复会按顺序写入多个独立目录，不会覆盖当前数据目录。请先生成预览并检查每个目标目录。</span>
@@ -3905,8 +4057,9 @@ export default function Maintenance() {
                     )}
                   </>
                 )}
-              </div>
-            )}
+                </>
+              )}
+            </div>
           </ModalBody>
           <ModalFooter>
             {batchRestoreResult ? (
