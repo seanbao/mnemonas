@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { act, render, screen, waitFor } from '@/test/utils'
+import { act, render, screen, waitFor, within } from '@/test/utils'
 import userEvent from '@testing-library/user-event'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { TrashPage } from './Trash'
@@ -196,6 +196,19 @@ async function clickEmptyTrashConfirm(user: ReturnType<typeof userEvent.setup>) 
     expect(getEmptyTrashConfirmButton()).toBeTruthy()
   })
   await user.click(getEmptyTrashConfirmButton())
+}
+
+async function openBatchRestoreReview(user: ReturnType<typeof userEvent.setup>) {
+  await user.click(screen.getByRole('button', { name: '恢复' }))
+  await waitFor(() => {
+    expect(screen.getByText('确认批量恢复')).toBeTruthy()
+    expect(screen.getByLabelText('跨目录恢复执行前复核')).toBeTruthy()
+  })
+}
+
+async function clickBatchRestoreConfirm(user: ReturnType<typeof userEvent.setup>) {
+  await openBatchRestoreReview(user)
+  await user.click(screen.getByRole('button', { name: '确认恢复' }))
 }
 
 describe('TrashPage', () => {
@@ -1575,7 +1588,7 @@ describe('TrashPage', () => {
         expect(screen.getByText(/已选择 2 项/)).toBeTruthy()
       })
 
-      await user.click(screen.getByText('恢复'))
+      await clickBatchRestoreConfirm(user)
 
       await waitFor(() => {
         expectAbortSignal(signal)
@@ -1803,7 +1816,7 @@ describe('TrashPage', () => {
         expect(screen.getByText(/已选择 1 项/)).toBeTruthy()
       })
 
-      await user.click(screen.getByText('恢复'))
+      await clickBatchRestoreConfirm(user)
 
       await waitFor(() => {
         expect(mockAddToast).toHaveBeenCalledWith({
@@ -1833,7 +1846,7 @@ describe('TrashPage', () => {
         expect(screen.getByText(/已选择 2 项/)).toBeTruthy()
       })
 
-      await user.click(screen.getByText('恢复'))
+      await clickBatchRestoreConfirm(user)
 
       await waitFor(() => {
         expect(mockAddToast).toHaveBeenCalledWith({
@@ -1902,7 +1915,7 @@ describe('TrashPage', () => {
         expect(screen.getByText(/已选择 2 项/)).toBeTruthy()
       })
 
-      await user.click(screen.getByText('恢复'))
+      await clickBatchRestoreConfirm(user)
 
       await waitFor(() => {
         expect(mockAddToast).toHaveBeenCalledWith({
@@ -1930,7 +1943,7 @@ describe('TrashPage', () => {
         expect(screen.getByText(/已选择 2 项/)).toBeTruthy()
       })
 
-      await user.click(screen.getByText('恢复'))
+      await clickBatchRestoreConfirm(user)
 
       await waitFor(() => {
         expect(mockAddToast).toHaveBeenCalledWith({
@@ -1957,7 +1970,7 @@ describe('TrashPage', () => {
         expect(screen.getByText(/已选择 2 项/)).toBeTruthy()
       })
 
-      await user.click(screen.getByText('恢复'))
+      await clickBatchRestoreConfirm(user)
 
       await waitFor(() => {
         expect(mockAddToast).toHaveBeenCalledWith({
@@ -2006,6 +2019,40 @@ describe('TrashPage', () => {
           color: 'warning',
         })
       })
+    })
+
+    it('confirms before batch restore and shows cross-directory review', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+
+      render(<TrashPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('deleted-file.txt')).toBeTruthy()
+      })
+
+      await toggleAllTrashItems(user)
+
+      await waitFor(() => {
+        expect(screen.getByText(/已选择 2 项/)).toBeTruthy()
+      })
+
+      await openBatchRestoreReview(user)
+
+      const review = within(screen.getByLabelText('跨目录恢复执行前复核'))
+      expect(review.getByText('跨目录恢复复核')).toBeTruthy()
+      expect(review.getByText('2 项 · 1 个目录 · 1 个文件')).toBeTruthy()
+      expect(review.getByText('1 个目标目录')).toBeTruthy()
+      expect(review.getByText('1 KB')).toBeTruthy()
+      expect(review.getByText('自动清理设置未知')).toBeTruthy()
+      expect(review.getByText('若原路径已存在同名文件、父目录不可写或配额不足，服务端会拒绝对应项目并保留在回收站。')).toBeTruthy()
+      expect(review.getByText('成功项目会从回收站移除；失败项目会保持选中，便于继续处理。')).toBeTruthy()
+      expect(review.getByText('/')).toBeTruthy()
+      expect(mockBatchExecute).not.toHaveBeenCalled()
+
+      await user.click(screen.getByRole('button', { name: '取消' }))
+
+      expect(screen.queryByText('确认批量恢复')).toBeNull()
+      expect(mockBatchExecute).not.toHaveBeenCalled()
     })
 
     it('confirms before batch permanent delete', async () => {
@@ -2092,7 +2139,7 @@ describe('TrashPage', () => {
         expect(screen.getByText(/已选择 2 项/)).toBeTruthy()
       })
 
-      await user.click(screen.getByText('恢复'))
+      await clickBatchRestoreConfirm(user)
 
       await waitFor(() => {
         expect(mockBatchExecute).toHaveBeenCalledWith(['item1', 'item2'])
@@ -2128,7 +2175,7 @@ describe('TrashPage', () => {
         expect(screen.getByText(/已选择 2 项/)).toBeTruthy()
       })
 
-      await user.click(screen.getByText('恢复'))
+      await clickBatchRestoreConfirm(user)
 
       await waitFor(() => {
         expect(mockAddToast).toHaveBeenCalledWith({
@@ -2303,7 +2350,7 @@ describe('TrashPage', () => {
         expect(screen.getByText(/已选择 2 项/)).toBeTruthy()
       })
 
-      await user.click(screen.getByText('恢复'))
+      await clickBatchRestoreConfirm(user)
 
       await waitFor(() => {
         expect(mockBatchExecute).toHaveBeenCalledWith(['item1', 'item2'])

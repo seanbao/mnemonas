@@ -126,6 +126,14 @@ test.describe('回收站批量操作', () => {
     await expect(page.getByText('已选择 1 项')).toBeVisible()
     await expect(page.getByRole('button', { name: /^恢复$/ })).toBeVisible()
     await expect(page.getByRole('button', { name: /^永久删除$/ })).toBeVisible()
+
+    await page.getByRole('button', { name: /^恢复$/ }).click()
+    const review = page.getByLabel('跨目录恢复执行前复核')
+    await expect(page.getByText('确认批量恢复')).toBeVisible()
+    await expect(review.getByText('跨目录恢复复核')).toBeVisible()
+    await expect(review.getByText('1 项 · 0 个目录 · 1 个文件')).toBeVisible()
+    await expect(review.getByText('冲突处理')).toBeVisible()
+    await expect(review.getByText('成功项目会从回收站移除；失败项目会保持选中，便于继续处理。')).toBeVisible()
   })
 })
 
