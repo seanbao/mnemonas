@@ -1309,6 +1309,42 @@ describe('UsersPage', () => {
       expect(JSON.parse(window.localStorage.getItem('mnemonas:user-quota-trend:user-1') ?? '[]')).toHaveLength(2)
     })
 
+    it('shows quota and permission context in one review view', async () => {
+      vi.mocked(usersApi.listUsers).mockResolvedValue({
+        success: true,
+        users: [
+          { ...mockUsers[0], quota_bytes: 0, used_bytes: 2048 },
+          { ...mockUsers[1], username: 'alice', groups: ['family'], quota_bytes: 1000, used_bytes: 950 },
+          { ...mockUsers[2], username: 'archived', disabled: true, quota_bytes: 1000, used_bytes: 512 },
+        ],
+        total: 3,
+      })
+
+      const user = userEvent.setup()
+      renderUsersPage()
+
+      const review = await screen.findByLabelText('用户配额权限复核')
+      expect(within(review).getByText('配额与权限联合复核')).toBeInTheDocument()
+      expect(within(review).getByText('需要联合复核')).toBeInTheDocument()
+      expect(review).toHaveTextContent('3 个用户需要结合配额、主目录和授权范围复核。')
+      expect(review).toHaveTextContent(/配额关注\s*1 个/)
+      expect(review).toHaveTextContent(/共享\/全局范围\s*1 个/)
+      expect(review).toHaveTextContent(/不限额特权\s*1 个/)
+      expect(review).toHaveTextContent(/停用占用\s*1 个/)
+      expect(within(review).getByText('用户 alice')).toBeInTheDocument()
+      expect(within(review).getByText('范围：主目录 + 用户组范围')).toBeInTheDocument()
+      expect(within(review).getByText('配额接近上限且具备共享或全局访问范围')).toBeInTheDocument()
+      expect(within(review).getByText('复核近期增长是否来自共享路径，再决定扩容或归档。')).toBeInTheDocument()
+      expect(within(review).getByText('用户 admin')).toBeInTheDocument()
+      expect(within(review).getByText('范围：管理员全局范围')).toBeInTheDocument()
+      expect(within(review).getByText('管理员未设置容量上限')).toBeInTheDocument()
+      expect(within(review).getByText('用户 archived')).toBeInTheDocument()
+      expect(within(review).getByText('停用账号仍占用容量')).toBeInTheDocument()
+
+      await user.click(within(review).getByRole('button', { name: '查看配额关注' }))
+      expect(screen.getByText('配额关注 1 / 3 个用户')).toBeInTheDocument()
+    })
+
     it('shows review hint count breakdown', async () => {
       vi.mocked(usersApi.listUsers).mockResolvedValue({
         success: true,
