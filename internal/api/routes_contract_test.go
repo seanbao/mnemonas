@@ -317,7 +317,10 @@ func TestServer_RouteContract_AdminUserResponseFieldsAreDocumented(t *testing.T)
 	fields := []string{
 		"id", "username", "email", "role", "groups", "disabled", "home_dir",
 		"created_at", "updated_at", "last_login_at", "quota_bytes", "used_bytes",
-		"user", "users", "total", "revoked", "data",
+		"user", "users", "total", "quota_history_available", "quota_history",
+		"captured_at", "total_count", "active_count", "limited_count",
+		"warning_count", "exceeded_count", "attention_count", "limited_used_bytes",
+		"revoked", "data",
 	}
 
 	for _, doc := range docs {
