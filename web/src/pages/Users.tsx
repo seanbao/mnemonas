@@ -85,7 +85,8 @@ const usersLoadErrorDescription = '用户列表加载失败，请检查网络或
 const clipboardWriteFailureDescription = '请检查浏览器剪贴板权限。'
 const maxPasswordBytes = 72
 const groupNamePattern = /^[A-Za-z0-9._-]+$/
-const userQuotaTrendHistoryLimit = 8
+const userQuotaBrowserTrendHistoryLimit = 8
+const userQuotaServerTrendDisplayLimit = 64
 const userQuotaTrendHistoryStoragePrefix = 'mnemonas:user-quota-trend'
 
 type UsersPageListUsersResponse = ListUsersResponse & {
@@ -455,7 +456,7 @@ function loadUserQuotaTrendHistory(storageKey: string): UserQuotaTrendPoint[] {
     if (!raw) {
       return []
     }
-    return normalizeUserQuotaTrendHistory(JSON.parse(raw), userQuotaTrendHistoryLimit)
+    return normalizeUserQuotaTrendHistory(JSON.parse(raw), userQuotaBrowserTrendHistoryLimit)
   } catch {
     return []
   }
@@ -468,7 +469,7 @@ function saveUserQuotaTrendHistory(storageKey: string, history: UserQuotaTrendPo
   try {
     window.localStorage.setItem(
       storageKey,
-      JSON.stringify(normalizeUserQuotaTrendHistory(history, userQuotaTrendHistoryLimit)),
+      JSON.stringify(normalizeUserQuotaTrendHistory(history, userQuotaBrowserTrendHistoryLimit)),
     )
     return true
   } catch {
@@ -485,7 +486,7 @@ function updateUserQuotaTrendHistoryForUsers(storageKey: string, users: User[]):
   const next = mergeUserQuotaTrendHistory(
     current,
     createUserQuotaTrendPoint(users),
-    userQuotaTrendHistoryLimit,
+    userQuotaBrowserTrendHistoryLimit,
   )
   saveUserQuotaTrendHistory(storageKey, next)
   return next
@@ -994,7 +995,7 @@ export function UsersPage() {
     queryKey: usersQueryKey,
     queryFn: async ({ signal }) => {
       const result = await listUsers({ signal })
-      const serverQuotaTrendHistory = normalizeUserQuotaTrendHistory(result.quota_history ?? [], userQuotaTrendHistoryLimit)
+      const serverQuotaTrendHistory = normalizeUserQuotaTrendHistory(result.quota_history ?? [], userQuotaServerTrendDisplayLimit)
       if (result.quota_history_available === true && serverQuotaTrendHistory.length > 0) {
         return {
           ...result,
