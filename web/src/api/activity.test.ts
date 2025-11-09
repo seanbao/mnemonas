@@ -814,6 +814,16 @@ describe('Activity API', () => {
           user_count: 1,
           path_samples: ['/docs/report.pdf'],
           user_samples: ['admin'],
+          share_disposition_details: [{
+            path: '/docs/report.pdf',
+            type: 'file',
+            enabled: true,
+            risk_level: 'high',
+            reason_summary: '未设置密码，持有链接的人可直接访问。',
+            suggested_action: '停用或补齐密码、有效期和访问次数限制。',
+            access_summary: '无密码 · 访问 3/不限',
+            expires_at: '永不过期',
+          }],
           activity_entry_ids: ['share-1'],
         },
       }),
@@ -833,6 +843,16 @@ describe('Activity API', () => {
       user_count: 1,
       path_samples: ['/docs/report.pdf'],
       user_samples: ['admin'],
+      share_disposition_details: [{
+        path: '/docs/report.pdf',
+        type: 'file' as const,
+        enabled: true,
+        risk_level: 'high' as const,
+        reason_summary: '未设置密码，持有链接的人可直接访问。',
+        suggested_action: '停用或补齐密码、有效期和访问次数限制。',
+        access_summary: '无密码 · 访问 3/不限',
+        expires_at: '永不过期',
+      }],
       activity_entry_ids: ['share-1'],
     }
 
@@ -844,6 +864,7 @@ describe('Activity API', () => {
       body: JSON.stringify(input),
     })
     expect(result.id).toBe('review-created')
+    expect(result.share_disposition_details?.[0]?.path).toBe('/docs/report.pdf')
   })
 
   it('updates persisted activity review disposition status', async () => {
@@ -903,6 +924,41 @@ describe('Activity API', () => {
             path_count: 0,
             user_count: 0,
             activity_entry_ids: [],
+          }],
+          total: 1,
+          limit: 5,
+          offset: 0,
+        },
+      }),
+    })
+
+    await expect(listActivityReviewRecords({ limit: 5 })).rejects.toThrow('服务器返回了无效的数据')
+  })
+
+  it('rejects activity review records with malformed share disposition details', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        success: true,
+        data: {
+          items: [{
+            id: 'review-1',
+            reviewed_at: '2026-05-01T10:10:00Z',
+            reviewer: 'admin',
+            note: '分享链接需要跟进',
+            scope_label: '分享管理',
+            disposition_status: 'needs_follow_up',
+            review_count: 1,
+            total_count: 1,
+            path_count: 1,
+            user_count: 1,
+            share_disposition_details: [{
+              path: '/docs/report.pdf',
+              type: 'external',
+              enabled: true,
+              risk_level: 'high',
+            }],
+            activity_entry_ids: ['share-1'],
           }],
           total: 1,
           limit: 5,
