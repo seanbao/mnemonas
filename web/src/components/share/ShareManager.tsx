@@ -48,6 +48,7 @@ import {
   type ActivityActionCountMap,
   type ActivityEntry,
   type ActivityReviewRecordCreateInput,
+  type ActivityReviewShareDispositionDetail,
 } from '@/api/activity'
 import { EmptyState } from '@/components/ui/EmptyState'
 import { FileIcon } from '@/components/ui/FileIcon'
@@ -200,6 +201,7 @@ interface ShareReviewSummaryMetric {
 }
 
 const SHARE_REVIEW_ACTIVITY_LIMIT = 100
+const SHARE_REVIEW_DISPOSITION_DETAIL_LIMIT = 10
 
 const shareRiskReasonMessages: Record<string, string> = {
   root_folder: '根目录分享会公开整个文件空间。',
@@ -328,6 +330,60 @@ function getShareReviewActivityActionCounts(entries: ActivityEntry[]): ActivityA
   }, {})
 }
 
+function formatShareReviewAccessSummary(share: Share): string {
+  const passwordLabel = share.has_password ? '密码保护' : '无密码'
+  const maxAccess = share.max_access && share.max_access > 0 ? `${share.max_access}` : '不限'
+  return `${passwordLabel} · 访问 ${share.access_count}/${maxAccess}`
+}
+
+function getShareReviewReasonSummary(share: Share): string {
+  const reasons = share.risk?.reasons
+    ?.filter(reason => !reason.resolved)
+    .map(reason => reason.message.trim() || getShareRiskReasonMessage(reason))
+    .filter(Boolean) ?? []
+  return reasons.length > 0 ? reasons.join('；') : '无'
+}
+
+function getShareReviewSuggestedAction(share: Share): string {
+  if (!share.enabled) {
+    return '确认是否仍需保留；不再使用时可删除。'
+  }
+  if (share.risk?.level === 'high') {
+    return '停用或补齐密码、有效期和访问次数限制。'
+  }
+  if (shareHasRiskCode(share, 'expiring_soon')) {
+    return '确认延期或关闭。'
+  }
+  if (shareHasRiskCode(share, 'unused_enabled') || shareHasRiskCode(share, 'stale_enabled')) {
+    return '确认是否仍需保留；不再使用时停用。'
+  }
+  if (isRiskyShare(share)) {
+    return '复核分享范围和访问限制。'
+  }
+  return '无需处理。'
+}
+
+function getShareReviewDispositionDetails(shares: Share[]): ActivityReviewShareDispositionDetail[] {
+  return [...shares]
+    .filter(isRiskyShare)
+    .sort((left, right) => {
+      const leftPriority = left.risk?.level === 'high' ? 0 : left.risk?.level === 'medium' ? 1 : 2
+      const rightPriority = right.risk?.level === 'high' ? 0 : right.risk?.level === 'medium' ? 1 : 2
+      return leftPriority - rightPriority || left.path.localeCompare(right.path)
+    })
+    .slice(0, SHARE_REVIEW_DISPOSITION_DETAIL_LIMIT)
+    .map((share) => ({
+      path: normalizePath(share.path),
+      type: share.type,
+      enabled: share.enabled,
+      risk_level: share.risk?.level ?? 'none',
+      reason_summary: getShareReviewReasonSummary(share),
+      suggested_action: getShareReviewSuggestedAction(share),
+      access_summary: formatShareReviewAccessSummary(share),
+      expires_at: formatExpiration(share.expires_at),
+    }))
+}
+
 function getShareReviewRecordNote(summary: ShareReviewSummary): string {
   return [
     `分享复核摘要：需复核 ${summary.reviewCount} 个`,
@@ -355,6 +411,7 @@ function buildShareReviewRecordInput({
   visibleShareCount,
   totalShareCount,
   pathFilter,
+  shares,
 }: {
   entries: ActivityEntry[]
   totalEntries: number
@@ -362,6 +419,7 @@ function buildShareReviewRecordInput({
   visibleShareCount: number
   totalShareCount: number
   pathFilter: string
+  shares: Share[]
 }): ActivityReviewRecordCreateInput {
   const paths = getUniqueShareReviewValues(entries.map((entry) => entry.path))
   const users = getUniqueShareReviewValues(entries.map((entry) => entry.user))
@@ -377,6 +435,7 @@ function buildShareReviewRecordInput({
     user_count: users.length,
     path_samples: paths.slice(0, 10),
     user_samples: users.slice(0, 10),
+    share_disposition_details: getShareReviewDispositionDetails(shares),
     activity_entry_ids: entries.map((entry) => entry.id),
   }
 }
@@ -644,6 +703,7 @@ export function ShareManager({
         visibleShareCount: pathFilteredShares.length,
         totalShareCount: shares.length,
         pathFilter: normalizedPathFilter,
+        shares: pathFilteredShares,
       }), { signal: controller.signal })
       if (controller.signal.aborted) {
         return

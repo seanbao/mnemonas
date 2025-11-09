@@ -6379,18 +6379,19 @@ func (s *Server) handleActivityStats(w http.ResponseWriter, r *http.Request) {
 }
 
 type createActivityReviewRecordRequest struct {
-	Note              string                           `json:"note"`
-	ScopeLabel        string                           `json:"scope_label"`
-	FilterSummary     string                           `json:"filter_summary"`
-	DispositionStatus activity.ReviewDispositionStatus `json:"disposition_status"`
-	ActionCounts      map[activity.ActionType]int      `json:"action_counts"`
-	ReviewCount       int                              `json:"review_count"`
-	TotalCount        int                              `json:"total_count"`
-	PathCount         int                              `json:"path_count"`
-	UserCount         int                              `json:"user_count"`
-	PathSamples       []string                         `json:"path_samples"`
-	UserSamples       []string                         `json:"user_samples"`
-	ActivityEntryIDs  []string                         `json:"activity_entry_ids"`
+	Note                    string                                  `json:"note"`
+	ScopeLabel              string                                  `json:"scope_label"`
+	FilterSummary           string                                  `json:"filter_summary"`
+	DispositionStatus       activity.ReviewDispositionStatus        `json:"disposition_status"`
+	ActionCounts            map[activity.ActionType]int             `json:"action_counts"`
+	ReviewCount             int                                     `json:"review_count"`
+	TotalCount              int                                     `json:"total_count"`
+	PathCount               int                                     `json:"path_count"`
+	UserCount               int                                     `json:"user_count"`
+	PathSamples             []string                                `json:"path_samples"`
+	UserSamples             []string                                `json:"user_samples"`
+	ShareDispositionDetails []activity.ReviewShareDispositionDetail `json:"share_disposition_details"`
+	ActivityEntryIDs        []string                                `json:"activity_entry_ids"`
 }
 
 type updateActivityReviewRecordRequest struct {
@@ -6523,19 +6524,20 @@ func (s *Server) handleCreateActivityReviewRecord(w http.ResponseWriter, r *http
 	}
 
 	record, err := s.activity.RecordReview(activity.ReviewRecordInput{
-		Reviewer:          currentActivityReviewReviewer(r),
-		Note:              req.Note,
-		ScopeLabel:        req.ScopeLabel,
-		FilterSummary:     req.FilterSummary,
-		DispositionStatus: req.DispositionStatus,
-		ActionCounts:      req.ActionCounts,
-		ReviewCount:       req.ReviewCount,
-		TotalCount:        req.TotalCount,
-		PathCount:         req.PathCount,
-		UserCount:         req.UserCount,
-		PathSamples:       req.PathSamples,
-		UserSamples:       req.UserSamples,
-		ActivityEntryIDs:  req.ActivityEntryIDs,
+		Reviewer:                currentActivityReviewReviewer(r),
+		Note:                    req.Note,
+		ScopeLabel:              req.ScopeLabel,
+		FilterSummary:           req.FilterSummary,
+		DispositionStatus:       req.DispositionStatus,
+		ActionCounts:            req.ActionCounts,
+		ReviewCount:             req.ReviewCount,
+		TotalCount:              req.TotalCount,
+		PathCount:               req.PathCount,
+		UserCount:               req.UserCount,
+		PathSamples:             req.PathSamples,
+		UserSamples:             req.UserSamples,
+		ShareDispositionDetails: req.ShareDispositionDetails,
+		ActivityEntryIDs:        req.ActivityEntryIDs,
 	})
 	if err != nil {
 		if errors.Is(err, activity.ErrInvalidReviewRecord) {

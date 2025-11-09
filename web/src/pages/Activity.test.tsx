@@ -1018,6 +1018,16 @@ describe('ActivityPage', () => {
                 user_count: 2,
                 path_samples: ['/docs/report.pdf', '/team/public'],
                 user_samples: ['owner', 'member'],
+                share_disposition_details: [{
+                  path: '/docs/report.pdf',
+                  type: 'file',
+                  enabled: true,
+                  risk_level: 'high',
+                  reason_summary: '未设置密码，持有链接的人可直接访问。',
+                  suggested_action: '停用或补齐密码、有效期和访问次数限制。',
+                  access_summary: '无密码 · 访问 5/不限',
+                  expires_at: '永不过期',
+                }],
                 activity_entry_ids: ['share-1', 'unshare-1'],
               },
             ],
@@ -1046,8 +1056,9 @@ describe('ActivityPage', () => {
       await waitFor(() => {
         const detail = within(screen.getByLabelText('复核记录详情 review-share-history-1'))
         expect(detail.getByText('分享处置线索')).toBeTruthy()
-        expect(detail.getByText('主要路径：/docs/report.pdf')).toBeTruthy()
-        expect(detail.getByText('核对项：密码、有效期、访问次数、是否仍需要公开访问')).toBeTruthy()
+        expect(detail.getByText('文件：/docs/report.pdf')).toBeTruthy()
+        expect(detail.getByText('启用 · 高风险 · 无密码 · 访问 5/不限 · 永不过期')).toBeTruthy()
+        expect(detail.getByText('建议：停用或补齐密码、有效期和访问次数限制。')).toBeTruthy()
         expect(detail.getByText('share-1, unshare-1')).toBeTruthy()
         expect(detail.getByText('/docs/report.pdf, /team/public')).toBeTruthy()
         expect(detail.getByText('owner, member')).toBeTruthy()
@@ -1417,6 +1428,16 @@ describe('ActivityPage', () => {
             user_count: 2,
             path_samples: ['/documents/old.pdf', '/team/report.pdf'],
             user_samples: ['owner', 'member'],
+            share_disposition_details: [{
+              path: '/team/report.pdf',
+              type: 'file',
+              enabled: true,
+              risk_level: 'high',
+              reason_summary: '未设置密码，持有链接的人可直接访问。',
+              suggested_action: '停用或补齐密码、有效期和访问次数限制。',
+              access_summary: '无密码 · 访问 1/不限',
+              expires_at: '永不过期',
+            }],
             activity_entry_ids: ['delete-1', 'share-1'],
           },
         ],
@@ -1452,6 +1473,7 @@ describe('ActivityPage', () => {
       expect(csv).toContain('需跟进')
       expect(csv).toContain('删除文件 1; 创建分享 1')
       expect(csv).toContain('/documents/old.pdf; /team/report.pdf')
+      expect(csv).toContain('/team/report.pdf | 高风险 | 未设置密码，持有链接的人可直接访问。 | 停用或补齐密码、有效期和访问次数限制。')
     })
 
     it('does not download an empty persisted review export', async () => {

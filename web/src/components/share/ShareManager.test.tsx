@@ -684,6 +684,16 @@ describe('ShareManager', () => {
       user_count: 2,
       path_samples: ['/docs/open.pdf', '/docs/old.pdf'],
       user_samples: ['alice', 'bob'],
+      share_disposition_details: [{
+        path: '/docs/open.pdf',
+        type: 'file',
+        enabled: true,
+        risk_level: 'high',
+        reason_summary: '未设置密码，拿到链接的人都能访问',
+        suggested_action: '停用或补齐密码、有效期和访问次数限制。',
+        access_summary: '无密码 · 访问 3/不限',
+        expires_at: '永不过期',
+      }],
       activity_entry_ids: ['act-share-1', 'act-unshare-1'],
     }), expect.objectContaining({
       signal: expect.any(AbortSignal),
