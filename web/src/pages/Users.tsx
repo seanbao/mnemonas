@@ -90,6 +90,7 @@ const userQuotaTrendHistoryStoragePrefix = 'mnemonas:user-quota-trend'
 
 type UsersPageListUsersResponse = ListUsersResponse & {
   quotaTrendHistory: UserQuotaTrendPoint[]
+  quotaTrendHistorySource: 'server' | 'browser'
 }
 
 function utf8ByteLength(value: string): number {
@@ -993,9 +994,18 @@ export function UsersPage() {
     queryKey: usersQueryKey,
     queryFn: async ({ signal }) => {
       const result = await listUsers({ signal })
+      const serverQuotaTrendHistory = normalizeUserQuotaTrendHistory(result.quota_history ?? [], userQuotaTrendHistoryLimit)
+      if (result.quota_history_available === true && serverQuotaTrendHistory.length > 0) {
+        return {
+          ...result,
+          quotaTrendHistory: serverQuotaTrendHistory,
+          quotaTrendHistorySource: 'server',
+        }
+      }
       return {
         ...result,
         quotaTrendHistory: updateUserQuotaTrendHistoryForUsers(quotaTrendHistoryStorageKey, result.users),
+        quotaTrendHistorySource: 'browser',
       }
     },
   })
@@ -1456,6 +1466,7 @@ export function UsersPage() {
   const userAccessReviewReport = users.length > 0 ? formatUserAccessReviewReport(users) : ''
   const usersLoadError = error ? getUsersLoadErrorPresentation(error) : null
   const quotaTrendHistory = data?.quotaTrendHistory ?? []
+  const quotaTrendHistorySource = data?.quotaTrendHistorySource ?? 'browser'
   const quotaTrendSummary = summarizeUserQuotaTrendHistory(quotaTrendHistory)
   const quotaTrendRecentPoints = normalizeUserQuotaTrendHistory(quotaTrendHistory, 4)
   const quotaPermissionReview = getQuotaPermissionReviewSummary(users)
@@ -1711,6 +1722,9 @@ export function UsersPage() {
                 <h2 className="text-sm font-semibold text-foreground">用户配额趋势</h2>
                 <Chip size="sm" variant="flat" color={quotaTrendSummary.tone}>
                   {quotaTrendSummary.label}
+                </Chip>
+                <Chip size="sm" variant="flat" color={quotaTrendHistorySource === 'server' ? 'primary' : 'default'}>
+                  {quotaTrendHistorySource === 'server' ? '服务端历史' : '当前浏览器'}
                 </Chip>
               </div>
               <p className="mt-1 text-xs text-default-500">{quotaTrendSummary.detail}</p>

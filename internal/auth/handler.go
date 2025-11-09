@@ -795,15 +795,43 @@ func (h *Handler) HandleListUsers(w http.ResponseWriter, r *http.Request) {
 
 	users := h.userStore.List()
 	userInfos := make([]map[string]interface{}, 0, len(users))
+	quotaSnapshotUsers := make([]*User, 0, len(users))
 
 	for _, u := range users {
-		userInfos = append(userInfos, h.fullUserResponse(r.Context(), u))
+		userInfo := h.fullUserResponse(r.Context(), u)
+		userInfos = append(userInfos, userInfo)
+		quotaSnapshotUsers = append(quotaSnapshotUsers, userForQuotaTrendSnapshot(u, userInfo))
 	}
+	quotaHistory, quotaHistoryAvailable := h.recordUserQuotaTrendHistory(quotaSnapshotUsers)
 
 	writeSuccess(w, http.StatusOK, map[string]interface{}{
-		"users": userInfos,
-		"total": len(userInfos),
+		"users":                   userInfos,
+		"total":                   len(userInfos),
+		"quota_history":           quotaHistory,
+		"quota_history_available": quotaHistoryAvailable,
 	}, "")
+}
+
+func userForQuotaTrendSnapshot(user *User, userInfo map[string]interface{}) *User {
+	snapshotUser := cloneUser(user)
+	if snapshotUser == nil {
+		return nil
+	}
+	if usedBytes, ok := userInfo["used_bytes"].(int64); ok {
+		snapshotUser.UsedBytes = usedBytes
+	}
+	return snapshotUser
+}
+
+func (h *Handler) recordUserQuotaTrendHistory(users []*User) ([]UserQuotaTrendPoint, bool) {
+	if h == nil || h.userStore == nil {
+		return []UserQuotaTrendPoint{}, false
+	}
+	history, err := h.userStore.RecordUserQuotaTrendSnapshot(newUserQuotaTrendPoint(users, time.Now().UTC()))
+	if err != nil {
+		return []UserQuotaTrendPoint{}, false
+	}
+	return history, true
 }
 
 // HandleCreateUser handles POST /api/v1/admin/users

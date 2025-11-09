@@ -1309,6 +1309,64 @@ describe('UsersPage', () => {
       expect(JSON.parse(window.localStorage.getItem('mnemonas:user-quota-trend:user-1') ?? '[]')).toHaveLength(2)
     })
 
+    it('prefers server-side quota trend history when available', async () => {
+      window.localStorage.setItem('mnemonas:user-quota-trend:user-1', JSON.stringify([
+        {
+          capturedAt: '2024-01-01T00:00:00Z',
+          totalCount: 3,
+          activeCount: 2,
+          limitedCount: 1,
+          warningCount: 0,
+          exceededCount: 0,
+          attentionCount: 0,
+          usedBytes: 1024,
+          limitedUsedBytes: 1024,
+          quotaBytes: 4096,
+        },
+      ]))
+      vi.mocked(usersApi.listUsers).mockResolvedValue({
+        success: true,
+        users: mockUsers,
+        total: mockUsers.length,
+        quota_history_available: true,
+        quota_history: [
+          {
+            capturedAt: '2024-01-03T00:00:00Z',
+            totalCount: 3,
+            activeCount: 2,
+            limitedCount: 2,
+            warningCount: 0,
+            exceededCount: 0,
+            attentionCount: 0,
+            usedBytes: 6144,
+            limitedUsedBytes: 4096,
+            quotaBytes: 8192,
+          },
+          {
+            capturedAt: '2024-01-02T00:00:00Z',
+            totalCount: 3,
+            activeCount: 2,
+            limitedCount: 2,
+            warningCount: 0,
+            exceededCount: 0,
+            attentionCount: 0,
+            usedBytes: 4096,
+            limitedUsedBytes: 2048,
+            quotaBytes: 8192,
+          },
+        ],
+      })
+
+      renderUsersPage()
+
+      const trend = await screen.findByLabelText('用户配额趋势')
+      expect(within(trend).getByText('服务端历史')).toBeInTheDocument()
+      expect(within(trend).getByText('受限用量增加')).toBeInTheDocument()
+      expect(within(trend).getByText('4 KB / 8 KB')).toBeInTheDocument()
+      expect(within(trend).getByText('+2 KB')).toBeInTheDocument()
+      expect(JSON.parse(window.localStorage.getItem('mnemonas:user-quota-trend:user-1') ?? '[]')).toHaveLength(1)
+    })
+
     it('shows quota and permission context in one review view', async () => {
       vi.mocked(usersApi.listUsers).mockResolvedValue({
         success: true,

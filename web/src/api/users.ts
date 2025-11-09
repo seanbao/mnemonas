@@ -7,6 +7,7 @@ import { authFetch } from './auth'
 import { INVALID_API_RESPONSE_MESSAGE as INVALID_USERS_RESPONSE_MESSAGE } from '@/lib/apiMessages'
 import { getNonBlankJsonString, readStructuredJsonErrorDetails } from '@/lib/jsonErrorResponse'
 import { normalizeUserHomeDir } from '@/lib/utils'
+import type { UserQuotaTrendPoint } from '@/lib/userQuota'
 
 export interface User {
   id: string
@@ -49,6 +50,8 @@ export interface ListUsersResponse {
   success: boolean
   users: User[]
   total: number
+  quota_history?: UserQuotaTrendPoint[]
+  quota_history_available?: boolean
 }
 
 interface UsersActionResult {
@@ -70,6 +73,26 @@ export interface UserResponse {
 
 type ApiUser = Omit<User, 'groups'> & {
   groups?: string[] | null
+}
+
+type ApiUserQuotaTrendPoint = {
+  captured_at: string
+  total_count: number
+  active_count: number
+  limited_count: number
+  warning_count: number
+  exceeded_count: number
+  attention_count: number
+  used_bytes: number
+  limited_used_bytes: number
+  quota_bytes: number
+}
+
+type ListUsersApiData = {
+  users?: User[]
+  total?: number
+  quota_history?: unknown
+  quota_history_available?: unknown
 }
 
 interface UsersApiError {
@@ -130,6 +153,51 @@ function isValidUser(value: unknown): value is ApiUser {
     isNonNegativeSafeInteger(user.quota_bytes) &&
     isNonNegativeSafeInteger(user.used_bytes)
   )
+}
+
+function isValidApiUserQuotaTrendPoint(value: unknown): value is ApiUserQuotaTrendPoint {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return false
+  }
+
+  const point = value as Partial<ApiUserQuotaTrendPoint>
+  return typeof point.captured_at === 'string'
+    && point.captured_at.trim() !== ''
+    && !Number.isNaN(new Date(point.captured_at).getTime())
+    && isNonNegativeSafeInteger(point.total_count)
+    && isNonNegativeSafeInteger(point.active_count)
+    && isNonNegativeSafeInteger(point.limited_count)
+    && isNonNegativeSafeInteger(point.warning_count)
+    && isNonNegativeSafeInteger(point.exceeded_count)
+    && isNonNegativeSafeInteger(point.attention_count)
+    && isNonNegativeSafeInteger(point.used_bytes)
+    && isNonNegativeSafeInteger(point.limited_used_bytes)
+    && isNonNegativeSafeInteger(point.quota_bytes)
+}
+
+function normalizeApiUserQuotaTrendPoint(point: ApiUserQuotaTrendPoint): UserQuotaTrendPoint {
+  return {
+    capturedAt: point.captured_at,
+    totalCount: point.total_count,
+    activeCount: point.active_count,
+    limitedCount: point.limited_count,
+    warningCount: point.warning_count,
+    exceededCount: point.exceeded_count,
+    attentionCount: point.attention_count,
+    usedBytes: point.used_bytes,
+    limitedUsedBytes: point.limited_used_bytes,
+    quotaBytes: point.quota_bytes,
+  }
+}
+
+function normalizeApiUserQuotaTrendHistory(value: unknown): UserQuotaTrendPoint[] | null {
+  if (value === undefined) {
+    return []
+  }
+  if (!Array.isArray(value) || value.some((point) => !isValidApiUserQuotaTrendPoint(point))) {
+    return null
+  }
+  return value.map(normalizeApiUserQuotaTrendPoint)
 }
 
 function normalizeUser(user: ApiUser): User {
@@ -255,13 +323,16 @@ export async function listUsers(options: UsersRequestOptions = {}): Promise<List
     throw await parseUsersError(response, USERS_ERROR_MESSAGES.list)
   }
 
-  const body = await parseUsersSuccess<{ users?: User[]; total?: number }>(response, INVALID_USERS_RESPONSE_MESSAGE)
+  const body = await parseUsersSuccess<ListUsersApiData>(response, INVALID_USERS_RESPONSE_MESSAGE)
+  const quotaHistory = normalizeApiUserQuotaTrendHistory(body.data?.quota_history)
   if (
     !body.data ||
     !Array.isArray(body.data.users) ||
     body.data.users.some((user) => !isValidUser(user)) ||
     (body.data.total !== undefined && !isNonNegativeSafeInteger(body.data.total)) ||
-    (body.data.total !== undefined && body.data.total < body.data.users.length)
+    (body.data.total !== undefined && body.data.total < body.data.users.length) ||
+    quotaHistory === null ||
+    (body.data.quota_history_available !== undefined && typeof body.data.quota_history_available !== 'boolean')
   ) {
     throw new Error(INVALID_USERS_RESPONSE_MESSAGE)
   }
@@ -272,6 +343,8 @@ export async function listUsers(options: UsersRequestOptions = {}): Promise<List
     success: body.success,
     users,
     total: body.data.total ?? users.length,
+    quota_history: quotaHistory,
+    quota_history_available: body.data.quota_history_available === true,
   }
 }
 

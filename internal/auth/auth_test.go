@@ -4133,6 +4133,95 @@ func TestAuthHandler(t *testing.T) {
 		}
 	})
 
+	t.Run("admin list users persists quota trend history when values change", func(t *testing.T) {
+		quotaDir := t.TempDir()
+		quotaStore, _, err := NewUserStore(filepath.Join(quotaDir, "users.json"))
+		if err != nil {
+			t.Fatalf("NewUserStore(quota) error: %v", err)
+		}
+		quotaBytes := int64(100)
+		quotaUser, err := quotaStore.CreateWithOptions("quotauser", "password123", "quota@test.com", RoleUser, CreateUserOptions{
+			QuotaBytes: quotaBytes,
+		})
+		if err != nil {
+			t.Fatalf("CreateWithOptions(quotauser) error: %v", err)
+		}
+		quotaHandler := NewHandler(quotaStore, NewTokenManager("quota-history-secret", 15*time.Minute, 24*time.Hour))
+		usedBytes := int64(50)
+		quotaHandler.SetUserUsageResolver(func(_ context.Context, user *User) (int64, error) {
+			if user.ID == quotaUser.ID {
+				return usedBytes, nil
+			}
+			return user.UsedBytes, nil
+		})
+		admin, err := quotaStore.GetByUsername("admin")
+		if err != nil {
+			t.Fatalf("GetByUsername(admin) error: %v", err)
+		}
+
+		listUsers := func(t *testing.T) struct {
+			Users                 []map[string]interface{} `json:"users"`
+			Total                 int                      `json:"total"`
+			QuotaHistory          []UserQuotaTrendPoint    `json:"quota_history"`
+			QuotaHistoryAvailable bool                     `json:"quota_history_available"`
+		} {
+			t.Helper()
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/users", nil)
+			req = req.WithContext(context.WithValue(req.Context(), ContextKeyUser, admin))
+			rec := httptest.NewRecorder()
+			quotaHandler.HandleListUsers(rec, req)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("HandleListUsers status = %d, want 200: %s", rec.Code, rec.Body.String())
+			}
+			var envelope authEnvelope
+			if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
+				t.Fatalf("unmarshal quota history envelope error: %v", err)
+			}
+			var payload struct {
+				Users                 []map[string]interface{} `json:"users"`
+				Total                 int                      `json:"total"`
+				QuotaHistory          []UserQuotaTrendPoint    `json:"quota_history"`
+				QuotaHistoryAvailable bool                     `json:"quota_history_available"`
+			}
+			if err := json.Unmarshal(envelope.Data, &payload); err != nil {
+				t.Fatalf("unmarshal quota history payload error: %v; data=%s", err, string(envelope.Data))
+			}
+			return payload
+		}
+
+		first := listUsers(t)
+		if !first.QuotaHistoryAvailable {
+			t.Fatal("expected quota history to be available")
+		}
+		if len(first.Users) != 2 || first.Total != 2 {
+			t.Fatalf("expected two users in quota history fixture, got total=%d users=%d", first.Total, len(first.Users))
+		}
+		if len(first.QuotaHistory) != 1 {
+			t.Fatalf("first quota history length = %d, want 1", len(first.QuotaHistory))
+		}
+		if point := first.QuotaHistory[0]; point.TotalCount != 2 || point.ActiveCount != 2 || point.LimitedCount != 1 || point.LimitedUsedBytes != usedBytes || point.QuotaBytes != quotaBytes {
+			t.Fatalf("unexpected first quota history point: %+v", point)
+		}
+
+		second := listUsers(t)
+		if len(second.QuotaHistory) != 1 {
+			t.Fatalf("unchanged quota history length = %d, want 1", len(second.QuotaHistory))
+		}
+
+		usedBytes = 95
+		third := listUsers(t)
+		if len(third.QuotaHistory) != 2 {
+			t.Fatalf("changed quota history length = %d, want 2", len(third.QuotaHistory))
+		}
+		latest := third.QuotaHistory[0]
+		if latest.LimitedUsedBytes != usedBytes || latest.WarningCount != 1 || latest.ExceededCount != 0 || latest.AttentionCount != 1 {
+			t.Fatalf("unexpected changed quota history point: %+v", latest)
+		}
+		if third.QuotaHistory[1].LimitedUsedBytes != 50 {
+			t.Fatalf("expected previous quota history point to retain 50 used bytes, got %+v", third.QuotaHistory[1])
+		}
+	})
+
 	t.Run("admin create user", func(t *testing.T) {
 		body := `{"username":"newuser","password":"newpass123","email":"new@test.com","role":"user"}`
 		req := httptest.NewRequest("POST", "/api/v1/admin/users", bytes.NewBufferString(body))
