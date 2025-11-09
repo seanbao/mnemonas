@@ -5387,6 +5387,60 @@ func TestLoginAttemptTracker_PrunesStaleEntriesOnNewFailure(t *testing.T) {
 	}
 }
 
+func TestUserQuotaTrendHistoryRetentionPolicy(t *testing.T) {
+	now := time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)
+	point := func(capturedAt time.Time, usedBytes int64) UserQuotaTrendPoint {
+		return UserQuotaTrendPoint{
+			CapturedAt:       capturedAt,
+			TotalCount:       1,
+			ActiveCount:      1,
+			LimitedCount:     1,
+			WarningCount:     0,
+			ExceededCount:    0,
+			AttentionCount:   0,
+			UsedBytes:        usedBytes,
+			LimitedUsedBytes: usedBytes,
+			QuotaBytes:       10_000,
+		}
+	}
+
+	history := []UserQuotaTrendPoint{
+		point(time.Date(2022, 1, 1, 12, 0, 0, 0, time.UTC), 601),
+		point(time.Date(2025, 1, 5, 12, 0, 0, 0, time.UTC), 402),
+		point(time.Date(2026, 5, 11, 8, 0, 0, 0, time.UTC), 202),
+		point(now.Add(-2*time.Hour), 102),
+		point(time.Date(2024, 12, 10, 12, 0, 0, 0, time.UTC), 501),
+		point(time.Date(2026, 5, 10, 12, 0, 0, 0, time.UTC), 301),
+		point(now.Add(-time.Hour), 101),
+		point(time.Date(2026, 5, 11, 10, 0, 0, 0, time.UTC), 201),
+		point(time.Date(2025, 1, 20, 12, 0, 0, 0, time.UTC), 401),
+	}
+
+	retained := applyUserQuotaTrendRetention(history, now, maxUserQuotaTrendHistory)
+	gotUsedBytes := make([]int64, 0, len(retained))
+	for _, retainedPoint := range retained {
+		gotUsedBytes = append(gotUsedBytes, retainedPoint.UsedBytes)
+	}
+	wantUsedBytes := []int64{101, 102, 201, 301, 401, 501}
+	if fmt.Sprint(gotUsedBytes) != fmt.Sprint(wantUsedBytes) {
+		t.Fatalf("retained quota trend used bytes = %v, want %v", gotUsedBytes, wantUsedBytes)
+	}
+
+	capFixture := make([]UserQuotaTrendPoint, 0, 6)
+	for i := 0; i < 6; i++ {
+		capFixture = append(capFixture, point(now.Add(-time.Duration(i)*time.Minute), int64(i+1)))
+	}
+	capped := applyUserQuotaTrendRetention(capFixture, now, 3)
+	if len(capped) != 3 {
+		t.Fatalf("capped retention length = %d, want 3", len(capped))
+	}
+	gotCappedUsedBytes := []int64{capped[0].UsedBytes, capped[1].UsedBytes, capped[2].UsedBytes}
+	wantCappedUsedBytes := []int64{1, 2, 3}
+	if fmt.Sprint(gotCappedUsedBytes) != fmt.Sprint(wantCappedUsedBytes) {
+		t.Fatalf("capped quota trend used bytes = %v, want %v", gotCappedUsedBytes, wantCappedUsedBytes)
+	}
+}
+
 func TestDefaultAdminCreation(t *testing.T) {
 	dir := t.TempDir()
 	usersFile := filepath.Join(dir, "new_users.json")
