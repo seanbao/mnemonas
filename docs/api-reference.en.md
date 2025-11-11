@@ -1422,6 +1422,8 @@ Access-check response:
 
 The response includes a `summary` with user count, read allows/denials, write allows/denials, and related share counts.
 
+The optional `rule_effects` list summarizes the read/write allow and denial counts for directory-access rules that actually affected this check. `index` is the zero-based position in the saved or submitted `directory_access_rules` array, and `user_samples` contains representative users for impact review.
+
 The optional `shares` list reports shares that exactly match the path, parent folder shares that cover it, and child shares under the checked directory. It is intended for administrator permission checks before changing shared-directory or share rules.
 
 Access-report response:
@@ -1451,6 +1453,17 @@ Access-report response:
         "path": "/team/report.pdf",
         "read": { "mode": "read", "allowed": true, "source": "directory_access_rule" },
         "write": { "mode": "write", "allowed": true, "source": "directory_access_rule" }
+      }
+    ],
+    "rule_effects": [
+      {
+        "path": "/team",
+        "index": 0,
+        "read_allowed": 1,
+        "read_denied": 1,
+        "write_allowed": 1,
+        "write_denied": 1,
+        "user_samples": ["alice", "bob"]
       }
     ],
     "shares": [
@@ -1504,6 +1517,17 @@ Access-preview response:
         "path": "/team/report.pdf",
         "read": { "mode": "read", "allowed": true, "source": "directory_access_rule" },
         "write": { "mode": "write", "allowed": false, "source": "directory_access_rule" }
+      }
+    ],
+    "rule_effects": [
+      {
+        "path": "/team",
+        "index": 0,
+        "read_allowed": 1,
+        "read_denied": 0,
+        "write_allowed": 0,
+        "write_denied": 1,
+        "user_samples": ["alice"]
       }
     ]
   }

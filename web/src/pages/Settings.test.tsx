@@ -404,6 +404,15 @@ describe('SettingsPage', () => {
           write: { mode: 'write', allowed: false, source: 'home_dir' },
         },
       ],
+      rule_effects: [{
+        path: '/team',
+        index: 0,
+        read_allowed: 1,
+        read_denied: 0,
+        write_allowed: 1,
+        write_denied: 0,
+        user_samples: ['alice'],
+      }],
       shares: [{
         id: 'share-1',
         path: '/team',
@@ -443,6 +452,15 @@ describe('SettingsPage', () => {
           write: { mode: 'write', allowed: false, source: 'directory_access_rule', matched_rule: { path: '/team', read_roles: ['user'] } },
         },
       ],
+      rule_effects: [{
+        path: '/team',
+        index: 0,
+        read_allowed: 2,
+        read_denied: 0,
+        write_allowed: 1,
+        write_denied: 1,
+        user_samples: ['alice', 'bob'],
+      }],
       shares: [{
         id: 'share-1',
         path: '/team',
@@ -5668,8 +5686,14 @@ describe('SettingsPage', () => {
       expect(screen.getByText('相关分享 1')).toBeTruthy()
       expect(screen.getByText('活跃分享 1')).toBeTruthy()
       expect(screen.getByText('密码分享 1')).toBeTruthy()
+      expect(screen.getByText('命中规则 1')).toBeTruthy()
       expect(screen.getByText('alice')).toBeTruthy()
       expect(screen.getByText('bob')).toBeTruthy()
+      const ruleEffectsRegion = within(screen.getByLabelText('用户矩阵规则生效明细'))
+      expect(ruleEffectsRegion.getByText('规则 1 · /team')).toBeTruthy()
+      expect(ruleEffectsRegion.getByText('用户 alice')).toBeTruthy()
+      expect(ruleEffectsRegion.getByText('读允许 1')).toBeTruthy()
+      expect(ruleEffectsRegion.getByText('写允许 1')).toBeTruthy()
       expect(screen.getByText('/team')).toBeTruthy()
       expect(screen.getByText('可访问')).toBeTruthy()
 
@@ -5685,6 +5709,8 @@ describe('SettingsPage', () => {
       expect(copiedReport).toContain('读取: 允许 1 / 拒绝 1')
       expect(copiedReport).toContain('写入: 允许 1 / 拒绝 1')
       expect(copiedReport).toContain('- alice (user · 组 family, home /users/alice): 读 允许 · 目录规则 · 规则 /team; 写 允许 · 目录规则 · 规则 /team')
+      expect(copiedReport).toContain('规则生效明细:')
+      expect(copiedReport).toContain('- 规则 1 /team: 读允许 1 / 读拒绝 0; 写允许 1 / 写拒绝 0 · 用户 alice')
       expect(copiedReport).toContain('- /team (文件夹 · 父级覆盖): 可访问 · 密码保护 · 访问 0/不限 · 创建者 u1')
       expect(mockAddToast).toHaveBeenCalledWith({ title: '目录权限复核记录已复制并保存', color: 'success' })
       await waitFor(() => {
@@ -5843,6 +5869,11 @@ describe('SettingsPage', () => {
       expect(await screen.findByLabelText('目录权限变更预览')).toBeTruthy()
       expect(screen.getByText('变更预览')).toBeTruthy()
       expect(screen.getByText('可读 2')).toBeTruthy()
+      expect(screen.getByText('命中规则 1')).toBeTruthy()
+      const ruleEffectsRegion = within(screen.getByLabelText('变更预览规则生效明细'))
+      expect(ruleEffectsRegion.getByText('规则 1 · /team')).toBeTruthy()
+      expect(ruleEffectsRegion.getByText('读允许 2')).toBeTruthy()
+      expect(ruleEffectsRegion.getByText('写拒绝 1')).toBeTruthy()
     })
 
     it('rejects malformed directory access preview paths before previewing', async () => {
