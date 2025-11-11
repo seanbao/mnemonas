@@ -1430,6 +1430,8 @@ Access-check 响应：
 
 响应包含 `summary`，其中包括用户数量、允许/拒绝读取数量、允许/拒绝写入数量和相关分享数量。
 
+可选 `rule_effects` 列表按目录授权规则汇总本次检查中实际命中的读写允许/拒绝数量。`index` 是已保存或提交的 `directory_access_rules` 数组中的零基序号，`user_samples` 包含用于定位影响范围的用户样例。
+
 可选 `shares` 列表报告与路径精确匹配、覆盖该路径的父文件夹分享，以及被检查目录下的子分享。该端点用于管理员在修改共享目录或分享规则前检查权限影响。
 
 Access-report 响应：
@@ -1459,6 +1461,17 @@ Access-report 响应：
         "path": "/team/report.pdf",
         "read": { "mode": "read", "allowed": true, "source": "directory_access_rule" },
         "write": { "mode": "write", "allowed": true, "source": "directory_access_rule" }
+      }
+    ],
+    "rule_effects": [
+      {
+        "path": "/team",
+        "index": 0,
+        "read_allowed": 1,
+        "read_denied": 1,
+        "write_allowed": 1,
+        "write_denied": 1,
+        "user_samples": ["alice", "bob"]
       }
     ],
     "shares": [
@@ -1512,6 +1525,17 @@ Access-preview 响应：
         "path": "/team/report.pdf",
         "read": { "mode": "read", "allowed": true, "source": "directory_access_rule" },
         "write": { "mode": "write", "allowed": false, "source": "directory_access_rule" }
+      }
+    ],
+    "rule_effects": [
+      {
+        "path": "/team",
+        "index": 0,
+        "read_allowed": 1,
+        "read_denied": 0,
+        "write_allowed": 0,
+        "write_denied": 1,
+        "user_samples": ["alice"]
       }
     ]
   }

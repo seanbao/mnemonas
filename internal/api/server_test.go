@@ -9896,6 +9896,20 @@ func TestServer_ReportPathAccess_SummarizesAllUsers(t *testing.T) {
 		t.Fatalf("bob report = %+v", byUser["bob"])
 	}
 
+	if len(payload.Data.RuleEffects) != 1 {
+		t.Fatalf("rule effects = %+v, want one matched rule", payload.Data.RuleEffects)
+	}
+	effect := payload.Data.RuleEffects[0]
+	if effect.Path != "/team/uploads" || effect.Index != 1 {
+		t.Fatalf("rule effect identity = %+v", effect)
+	}
+	if effect.ReadAllowed != 1 || effect.ReadDenied != 1 || effect.WriteAllowed != 1 || effect.WriteDenied != 1 {
+		t.Fatalf("rule effect counters = %+v", effect)
+	}
+	if !slices.Contains(effect.UserSamples, "alice") || !slices.Contains(effect.UserSamples, "bob") {
+		t.Fatalf("rule effect user samples = %+v", effect.UserSamples)
+	}
+
 	byRelation := make(map[string]pathAccessShareImpact, len(payload.Data.Shares))
 	for _, item := range payload.Data.Shares {
 		byRelation[item.Relation] = item
@@ -10001,6 +10015,13 @@ func TestServer_PreviewPathAccess_UsesProvidedRulesWithoutSaving(t *testing.T) {
 	}
 	if !alicePreview.Read.Allowed || !alicePreview.Write.Allowed || alicePreview.Read.Source != "directory_access_rule" {
 		t.Fatalf("alice preview = %+v", alicePreview)
+	}
+	if len(previewPayload.Data.RuleEffects) != 1 {
+		t.Fatalf("preview rule effects = %+v, want one matched rule", previewPayload.Data.RuleEffects)
+	}
+	previewEffect := previewPayload.Data.RuleEffects[0]
+	if previewEffect.Path != "/team" || previewEffect.Index != 0 || previewEffect.ReadAllowed != 1 || previewEffect.WriteAllowed != 1 {
+		t.Fatalf("preview rule effect = %+v", previewEffect)
 	}
 
 	reportReq := httptest.NewRequest(http.MethodPost, "/api/v1/settings/access-report", strings.NewReader(`{"path":"/team/readme.txt"}`))

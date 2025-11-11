@@ -9793,11 +9793,22 @@ type pathAccessReportSummary struct {
 }
 
 type pathAccessReportResult struct {
-	Path    string                  `json:"path"`
-	Preview bool                    `json:"preview,omitempty"`
-	Summary pathAccessReportSummary `json:"summary"`
-	Users   []pathAccessCheckResult `json:"users"`
-	Shares  []pathAccessShareImpact `json:"shares,omitempty"`
+	Path        string                  `json:"path"`
+	Preview     bool                    `json:"preview,omitempty"`
+	Summary     pathAccessReportSummary `json:"summary"`
+	Users       []pathAccessCheckResult `json:"users"`
+	RuleEffects []pathAccessRuleEffect  `json:"rule_effects,omitempty"`
+	Shares      []pathAccessShareImpact `json:"shares,omitempty"`
+}
+
+type pathAccessRuleEffect struct {
+	Path         string   `json:"path"`
+	Index        int      `json:"index"`
+	ReadAllowed  int      `json:"read_allowed"`
+	ReadDenied   int      `json:"read_denied"`
+	WriteAllowed int      `json:"write_allowed"`
+	WriteDenied  int      `json:"write_denied"`
+	UserSamples  []string `json:"user_samples,omitempty"`
 }
 
 type pathAccessShareImpact struct {
@@ -10060,6 +10071,7 @@ func (s *Server) buildPathAccessReport(ctx context.Context, targetPath string, r
 			report.Summary.WriteDenied++
 		}
 	}
+	report.RuleEffects = buildPathAccessRuleEffects(report.Users, rules)
 	report.Shares = s.pathAccessShareImpacts(targetPath)
 	for _, shareImpact := range report.Shares {
 		report.Summary.RelatedShares++
@@ -10071,6 +10083,94 @@ func (s *Server) buildPathAccessReport(ctx context.Context, targetPath string, r
 		}
 	}
 	return report, nil
+}
+
+func buildPathAccessRuleEffects(results []pathAccessCheckResult, rules []config.DirectoryAccessRuleConfig) []pathAccessRuleEffect {
+	if len(results) == 0 || len(rules) == 0 {
+		return nil
+	}
+
+	ruleIndexes := make(map[string]int, len(rules))
+	effects := make([]pathAccessRuleEffect, 0, len(rules))
+	for index, rule := range rules {
+		rulePath := cleanRuntimePathRulePath(rule.Path)
+		if rulePath == "" {
+			continue
+		}
+		if _, exists := ruleIndexes[rulePath]; exists {
+			continue
+		}
+		ruleIndexes[rulePath] = len(effects)
+		effects = append(effects, pathAccessRuleEffect{
+			Path:  rulePath,
+			Index: index,
+		})
+	}
+	if len(effects) == 0 {
+		return nil
+	}
+
+	for _, result := range results {
+		addPathAccessRuleEffectDecision(effects, ruleIndexes, result.Read, result.Username)
+		addPathAccessRuleEffectDecision(effects, ruleIndexes, result.Write, result.Username)
+	}
+
+	impacted := effects[:0]
+	for _, effect := range effects {
+		if effect.ReadAllowed == 0 && effect.ReadDenied == 0 && effect.WriteAllowed == 0 && effect.WriteDenied == 0 {
+			continue
+		}
+		impacted = append(impacted, effect)
+	}
+	if len(impacted) == 0 {
+		return nil
+	}
+	return impacted
+}
+
+func addPathAccessRuleEffectDecision(effects []pathAccessRuleEffect, ruleIndexes map[string]int, decision pathAccessEvaluation, username string) {
+	if decision.Source != "directory_access_rule" || decision.MatchedRule == nil {
+		return
+	}
+	rulePath := cleanRuntimePathRulePath(decision.MatchedRule.Path)
+	effectIndex, ok := ruleIndexes[rulePath]
+	if !ok {
+		return
+	}
+	effect := &effects[effectIndex]
+	switch decision.Mode {
+	case pathAccessRead:
+		if decision.Allowed {
+			effect.ReadAllowed++
+		} else {
+			effect.ReadDenied++
+		}
+	case pathAccessWrite:
+		if decision.Allowed {
+			effect.WriteAllowed++
+		} else {
+			effect.WriteDenied++
+		}
+	default:
+		return
+	}
+	effect.UserSamples = appendPathAccessRuleEffectUserSample(effect.UserSamples, username)
+}
+
+func appendPathAccessRuleEffectUserSample(samples []string, username string) []string {
+	username = strings.TrimSpace(username)
+	if username == "" {
+		return samples
+	}
+	for _, sample := range samples {
+		if sample == username {
+			return samples
+		}
+	}
+	if len(samples) >= 5 {
+		return samples
+	}
+	return append(samples, username)
 }
 
 func (s *Server) pathAccessShareImpacts(targetPath string) []pathAccessShareImpact {

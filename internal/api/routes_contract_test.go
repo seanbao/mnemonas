@@ -397,6 +397,7 @@ func TestServer_RouteContract_SettingsAccessResponseFieldsAreDocumented(t *testi
 		"read", "write", "mode", "allowed", "source", "message", "matched_rule",
 		"summary", "users", "read_allowed", "read_denied", "write_allowed", "write_denied",
 		"related_shares", "active_related_shares", "password_protected_shares",
+		"rule_effects", "index", "user_samples",
 		"shares", "id", "type", "created_by", "relation", "enabled", "active",
 		"has_password", "access_count", "max_access", "url", "preview", "directory_access_rules",
 	}
