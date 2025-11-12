@@ -440,6 +440,63 @@ function buildShareReviewRecordInput({
   }
 }
 
+function shareActivityMatchesAnyPath(entry: ActivityEntry, paths: Set<string>): boolean {
+  const path = entry.path?.trim()
+  if (!path) {
+    return false
+  }
+  try {
+    return paths.has(normalizePath(path))
+  } catch {
+    return false
+  }
+}
+
+function getShareDisableExecutionDispositionDetails(shares: Share[]): ActivityReviewShareDispositionDetail[] {
+  return shares
+    .slice(0, SHARE_REVIEW_DISPOSITION_DETAIL_LIMIT)
+    .map((share) => ({
+      path: normalizePath(share.path),
+      type: share.type,
+      enabled: false,
+      risk_level: share.risk?.level ?? 'high',
+      reason_summary: getShareReviewReasonSummary(share),
+      suggested_action: '已停用高风险分享；继续复核外部引用和访问入口。',
+      access_summary: formatShareReviewAccessSummary(share),
+      expires_at: formatExpiration(share.expires_at),
+    }))
+}
+
+function buildShareDisableExecutionRecordInput({
+  entries,
+  totalEntries,
+  disabledShares,
+  pathFilter,
+}: {
+  entries: ActivityEntry[]
+  totalEntries: number
+  disabledShares: Share[]
+  pathFilter: string
+}): ActivityReviewRecordCreateInput {
+  const paths = getUniqueShareReviewValues(disabledShares.map((share) => share.path))
+  const users = getUniqueShareReviewValues(entries.map((entry) => entry.user))
+  return {
+    note: `分享执行结果：已停用 ${disabledShares.length} 个需处理分享；已关联 ${entries.length} 条分享活动。`,
+    scope_label: pathFilter ? `分享路径 ${pathFilter}` : '分享管理',
+    filter_summary: `${getShareReviewRecordFilterSummary(pathFilter, disabledShares.length, disabledShares.length)} · 执行结果 停用需处理分享`,
+    disposition_status: 'disabled',
+    action_counts: getShareReviewActivityActionCounts(entries),
+    review_count: entries.length,
+    total_count: Math.max(totalEntries, entries.length),
+    path_count: paths.length,
+    user_count: users.length,
+    path_samples: paths.slice(0, 10),
+    user_samples: users.slice(0, 10),
+    share_disposition_details: getShareDisableExecutionDispositionDetails(disabledShares),
+    activity_entry_ids: entries.map((entry) => entry.id),
+  }
+}
+
 export function ShareManager({
   showAllShares = false,
   featureEnabled = true,
@@ -807,6 +864,7 @@ export function ShareManager({
       })
 
       if (disabledIds.size > 0) {
+        const disabledTargets = targets.filter(target => disabledIds.has(target.id))
         setShares(prev => prev.map(s => (
           disabledIds.has(s.id)
             ? { ...s, enabled: false, risk: { level: 'none' } }
@@ -818,6 +876,41 @@ export function ShareManager({
             : `已停用 ${disabledIds.size} 个需处理分享`,
           color: warningCount > 0 ? 'warning' : 'success',
         })
+        try {
+          const disabledPaths = new Set(disabledTargets.map(target => normalizePath(target.path)))
+          const activityResult = await listActivity({
+            actionGroup: 'share',
+            path: normalizedPathFilter || undefined,
+            limit: SHARE_REVIEW_ACTIVITY_LIMIT,
+            offset: 0,
+            signal: controller.signal,
+          })
+          if (controller.signal.aborted) {
+            return
+          }
+          const executionEntries = activityResult.items.filter((entry) => (
+            entry.action === 'unshare' && shareActivityMatchesAnyPath(entry, disabledPaths)
+          ))
+          if (executionEntries.length > 0) {
+            await createActivityReviewRecord(buildShareDisableExecutionRecordInput({
+              entries: executionEntries,
+              totalEntries: activityResult.total,
+              disabledShares: disabledTargets,
+              pathFilter: normalizedPathFilter,
+            }), { signal: controller.signal })
+            if (!controller.signal.aborted) {
+              addToast({ title: '分享停用结果已记录', color: 'success' })
+            }
+          }
+        } catch (err) {
+          if (!controller.signal.aborted && !isAbortError(err)) {
+            addToast({
+              title: '分享已停用，复核记录写入失败',
+              description: getUserFacingErrorDescription(err),
+              color: 'warning',
+            })
+          }
+        }
       }
 
       if (firstFailure !== null) {

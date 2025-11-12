@@ -11871,6 +11871,18 @@ func (s *Server) handleUpdateShare(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if shareInfo == nil && s.shareStore != nil {
+		var err error
+		shareInfo, err = s.shareStore.Get(id)
+		if err != nil {
+			if errors.Is(err, share.ErrShareNotFound) {
+				writeShareErrorResponse(w, http.StatusNotFound, "share not found", "SHARE_NOT_FOUND")
+				return
+			}
+			s.respondInternalError(w, "load share for update", err)
+			return
+		}
+	}
 	if err := s.prepareUpdateShareRequest(r, id, shareInfo); err != nil {
 		if errors.Is(err, share.ErrShareNotFound) {
 			writeShareErrorResponse(w, http.StatusNotFound, "share not found", "SHARE_NOT_FOUND")
@@ -11894,7 +11906,18 @@ func (s *Server) handleUpdateShare(w http.ResponseWriter, r *http.Request) {
 	if !s.authEnabled {
 		r = withNoAuthShareManagementContext(r)
 	}
-	s.shareHandler.UpdateShare(w, r)
+	rec := newBufferedResponseRecorder()
+	s.shareHandler.UpdateShare(rec, r)
+	if rec.statusCode >= http.StatusOK && rec.statusCode < http.StatusMultipleChoices && shareInfo != nil {
+		if updatedShareInfo, ok := shareInfoFromAPIResponse(rec); ok && updatedShareInfo.Enabled != shareInfo.Enabled {
+			action := activity.ActionShare
+			if !updatedShareInfo.Enabled {
+				action = activity.ActionUnshare
+			}
+			s.LogActivityWithWarning(rec, r, action, updatedShareInfo.Path, shareUpdateActivityDetails(shareInfo, updatedShareInfo))
+		}
+	}
+	rec.FlushTo(w)
 }
 
 func (s *Server) handleListFavorites(w http.ResponseWriter, r *http.Request) {
@@ -12166,17 +12189,25 @@ func (s *Server) handleDeleteShareWithActivity(w http.ResponseWriter, r *http.Re
 }
 
 func shareActivityDetailsFromCreateResponse(rec *bufferedResponseRecorder) map[string]string {
+	shareInfo, ok := shareInfoFromAPIResponse(rec)
+	if !ok {
+		return nil
+	}
+	return shareActivityDetailsFromInfo(shareInfo)
+}
+
+func shareInfoFromAPIResponse(rec *bufferedResponseRecorder) (share.ShareInfo, bool) {
 	var payload struct {
 		Success bool            `json:"success"`
 		Data    share.ShareInfo `json:"data"`
 	}
 	if err := json.Unmarshal(rec.body.Bytes(), &payload); err != nil || !payload.Success {
-		return nil
+		return share.ShareInfo{}, false
 	}
 	if strings.TrimSpace(payload.Data.Path) == "" {
-		return nil
+		return share.ShareInfo{}, false
 	}
-	return shareActivityDetailsFromInfo(payload.Data)
+	return payload.Data, true
 }
 
 func shareActivityDetailsFromShare(shareInfo *share.Share) map[string]string {
@@ -12188,6 +12219,18 @@ func shareActivityDetailsFromShare(shareInfo *share.Share) map[string]string {
 		return nil
 	}
 	return shareActivityDetailsFromInfo(*info)
+}
+
+func shareUpdateActivityDetails(previous *share.Share, updated share.ShareInfo) map[string]string {
+	details := shareActivityDetailsFromInfo(updated)
+	if details == nil {
+		details = make(map[string]string)
+	}
+	if previous != nil {
+		details["previous_enabled"] = strconv.FormatBool(previous.Enabled)
+	}
+	details["enabled"] = strconv.FormatBool(updated.Enabled)
+	return details
 }
 
 func shareActivityDetailsFromInfo(shareInfo share.ShareInfo) map[string]string {
