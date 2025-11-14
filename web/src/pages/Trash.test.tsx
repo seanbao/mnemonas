@@ -22,6 +22,15 @@ vi.mock('@/api/files', async (importOriginal) => {
   }
 })
 
+vi.mock('@/api/activity', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/api/activity')>()
+  return {
+    ...actual,
+    listActivity: vi.fn(),
+    createActivityReviewRecord: vi.fn(),
+  }
+})
+
 // Mock useBatchOperation hook
 const mockBatchExecute = vi.fn()
 let mockUseRealBatchOperation = false
@@ -150,11 +159,14 @@ vi.mock('@/stores/auth', async (importOriginal) => {
 })
 
 import { ApiError, listTrash, restoreFromTrash, deleteFromTrash, emptyTrash } from '@/api/files'
+import { createActivityReviewRecord, listActivity } from '@/api/activity'
 
 const mockListTrash = vi.mocked(listTrash)
 const mockRestoreFromTrash = vi.mocked(restoreFromTrash)
 const mockDeleteFromTrash = vi.mocked(deleteFromTrash)
 const mockEmptyTrash = vi.mocked(emptyTrash)
+const mockListActivity = vi.mocked(listActivity)
+const mockCreateActivityReviewRecord = vi.mocked(createActivityReviewRecord)
 
 function expectCalledWithOnlyAbortSignal(mockFn: ReturnType<typeof vi.fn>) {
   const call = mockFn.mock.calls.find(([options]) => {
@@ -236,6 +248,29 @@ describe('TrashPage', () => {
       warningCount: 0,
       warningMessages: [],
     }
+    mockListActivity.mockResolvedValue({
+      items: [],
+      total: 0,
+      limit: 100,
+      offset: 0,
+    })
+    mockCreateActivityReviewRecord.mockImplementation(async (input) => ({
+      id: 'trash-review-record-1',
+      reviewed_at: '2026-04-12T00:00:00Z',
+      reviewer: 'admin',
+      note: input.note,
+      scope_label: input.scope_label,
+      filter_summary: input.filter_summary,
+      disposition_status: input.disposition_status,
+      action_counts: input.action_counts,
+      review_count: input.review_count,
+      total_count: input.total_count,
+      path_count: input.path_count,
+      user_count: input.user_count,
+      path_samples: input.path_samples,
+      user_samples: input.user_samples,
+      activity_entry_ids: input.activity_entry_ids,
+    }))
     mockListTrash.mockResolvedValue({
       items: [
         {
@@ -818,6 +853,59 @@ describe('TrashPage', () => {
       await waitFor(() => {
         expect(mockRestoreFromTrash).toHaveBeenCalledWith('item1', undefined, expect.objectContaining({ signal: expect.any(AbortSignal) }))
       })
+    })
+
+    it('records single restore execution results into activity review history', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockRestoreFromTrash.mockResolvedValue({ warning: false })
+      mockListActivity.mockResolvedValueOnce({
+        items: [{
+          id: 'trash-restore-activity-1',
+          timestamp: '2026-04-12T01:00:00Z',
+          action: 'trash_restore',
+          path: '/deleted-file.txt',
+          user: 'admin',
+        }],
+        total: 1,
+        limit: 100,
+        offset: 0,
+      })
+
+      render(<TrashPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('deleted-file.txt')).toBeTruthy()
+      })
+
+      await user.click(screen.getByRole('button', { name: '恢复 deleted-file.txt' }))
+
+      await waitFor(() => {
+        expect(mockCreateActivityReviewRecord).toHaveBeenCalledTimes(1)
+      })
+      expect(mockListActivity).toHaveBeenCalledWith(expect.objectContaining({
+        action: 'trash_restore',
+        actionGroup: 'risk',
+        limit: 100,
+        offset: 0,
+        signal: expect.any(AbortSignal),
+      }))
+      expect(mockCreateActivityReviewRecord).toHaveBeenCalledWith(expect.objectContaining({
+        note: '回收站恢复执行结果：已恢复 1 项（0 个目录，1 个文件）；已关联 1 条恢复活动。',
+        scope_label: '回收站',
+        filter_summary: '审计分组 风险操作 · 执行结果 回收站恢复',
+        disposition_status: 'restored',
+        action_counts: { trash_restore: 1 },
+        review_count: 1,
+        total_count: 1,
+        path_count: 1,
+        user_count: 1,
+        path_samples: ['/deleted-file.txt'],
+        user_samples: ['admin'],
+        activity_entry_ids: ['trash-restore-activity-1'],
+      }), expect.objectContaining({
+        signal: expect.any(AbortSignal),
+      }))
+      expect(mockAddToast).toHaveBeenCalledWith({ title: '恢复结果已记录', color: 'success' })
     })
 
     it('shows unavailable toast when restore is unavailable', async () => {
@@ -2053,6 +2141,84 @@ describe('TrashPage', () => {
 
       expect(screen.queryByText('确认批量恢复')).toBeNull()
       expect(mockBatchExecute).not.toHaveBeenCalled()
+    })
+
+    it('records batch restore execution results into activity review history', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockBatchResult = {
+        succeeded: 2,
+        failed: 0,
+        total: 2,
+        succeededItems: ['item1', 'item2'],
+        failedItems: [],
+        failedErrors: [],
+        warningCount: 0,
+        warningMessages: [],
+      }
+      mockListActivity.mockResolvedValueOnce({
+        items: [
+          {
+            id: 'trash-restore-activity-1',
+            timestamp: '2026-04-12T01:00:00Z',
+            action: 'trash_restore',
+            path: '/deleted-file.txt',
+            user: 'admin',
+          },
+          {
+            id: 'trash-restore-activity-2',
+            timestamp: '2026-04-12T01:01:00Z',
+            action: 'trash_restore',
+            path: '/deleted-folder',
+            user: 'admin',
+          },
+        ],
+        total: 2,
+        limit: 100,
+        offset: 0,
+      })
+
+      render(<TrashPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('deleted-file.txt')).toBeTruthy()
+      })
+
+      await toggleAllTrashItems(user)
+
+      await waitFor(() => {
+        expect(screen.getByText(/已选择 2 项/)).toBeTruthy()
+      })
+
+      await clickBatchRestoreConfirm(user)
+
+      await waitFor(() => {
+        expect(mockCreateActivityReviewRecord).toHaveBeenCalledTimes(1)
+      })
+      expect(mockBatchExecute).toHaveBeenCalledWith(['item1', 'item2'])
+      expect(mockListActivity).toHaveBeenCalledWith(expect.objectContaining({
+        action: 'trash_restore',
+        actionGroup: 'risk',
+        limit: 100,
+        offset: 0,
+        signal: expect.any(AbortSignal),
+      }))
+      expect(mockCreateActivityReviewRecord).toHaveBeenCalledWith(expect.objectContaining({
+        note: '回收站恢复执行结果：已恢复 2 项（1 个目录，1 个文件）；已关联 2 条恢复活动。',
+        scope_label: '回收站',
+        filter_summary: '审计分组 风险操作 · 执行结果 回收站恢复',
+        disposition_status: 'restored',
+        action_counts: { trash_restore: 2 },
+        review_count: 2,
+        total_count: 2,
+        path_count: 2,
+        user_count: 1,
+        path_samples: ['/deleted-file.txt', '/deleted-folder'],
+        user_samples: ['admin'],
+        activity_entry_ids: ['trash-restore-activity-1', 'trash-restore-activity-2'],
+      }), expect.objectContaining({
+        signal: expect.any(AbortSignal),
+      }))
+      expect(mockAddToast).toHaveBeenCalledWith({ title: '恢复结果已记录', color: 'success' })
     })
 
     it('confirms before batch permanent delete', async () => {

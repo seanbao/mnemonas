@@ -1112,7 +1112,7 @@ GET /api/v1/activity/stats
 
 ### 列出活动复核记录（管理员）
 
-返回已持久化的活动复核处置记录。分享复核记录可包含 `share_disposition_details`，用于保存脱敏的分享处置线索。
+返回已持久化的活动复核处置记录。回收站恢复页面会把匹配的 `trash_restore` 活动写入 `restored` 处置记录；分享复核记录可包含 `share_disposition_details`，用于保存脱敏的分享处置线索。
 
 ```text
 GET /api/v1/activity/reviews
