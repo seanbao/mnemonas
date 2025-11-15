@@ -31,6 +31,12 @@ import {
 } from 'lucide-react'
 import { authFetch, ensureDownloadSession } from '@/api/auth'
 import { ApiError, getVersions, buildDownloadUrl, downloadFile, restoreVersion, type ActionResult, type VersionInfo } from '@/api/files'
+import {
+  createActivityReviewRecord,
+  listActivity,
+  type ActivityEntry,
+  type ActivityReviewRecordCreateInput,
+} from '@/api/activity'
 import { readRangedDownloadJsonErrorDetails } from '@/lib/downloadResponse'
 import { GENERIC_ACTION_ERROR_DESCRIPTION, GENERIC_LOAD_ERROR_DESCRIPTION, getUserFacingErrorDescription } from '@/lib/apiMessages'
 import { getFileLoadErrorDescription } from '@/lib/fileActionErrors'
@@ -41,6 +47,7 @@ import { PageHeader } from '@/components/ui/PageHeader'
 import { EmptyState } from '@/components/ui/EmptyState'
 
 const previewSessionSyncWarningTitle = '原始预览和下载会话同步失败，请稍后重试'
+const VERSION_RESTORE_ACTIVITY_LIMIT = 100
 
 function getVersionQueryState(path: string): {
   searchPath: string
@@ -133,6 +140,65 @@ function getVersionsActionSuccessToast(result: ActionResult): {
   return {
     title: '恢复版本成功',
     color: 'success',
+  }
+}
+
+function getUniqueVersionReviewValues(values: Array<string | undefined>): string[] {
+  const seen = new Set<string>()
+  const result: string[] = []
+  for (const value of values) {
+    const trimmed = value?.trim() ?? ''
+    if (!trimmed || seen.has(trimmed)) {
+      continue
+    }
+    seen.add(trimmed)
+    result.push(trimmed)
+  }
+  return result
+}
+
+function versionRestoreActivityMatches(entry: ActivityEntry, path: string, hash: string): boolean {
+  if (entry.action !== 'restore' || entry.details?.hash !== hash) {
+    return false
+  }
+  const entryPath = entry.path?.trim()
+  if (!entryPath) {
+    return false
+  }
+  try {
+    return normalizePath(entryPath) === path
+  } catch {
+    return false
+  }
+}
+
+function buildVersionRestoreReviewRecordInput({
+  entries,
+  totalEntries,
+  path,
+  version,
+}: {
+  entries: ActivityEntry[]
+  totalEntries: number
+  path: string
+  version: VersionInfo
+}): ActivityReviewRecordCreateInput {
+  const users = getUniqueVersionReviewValues(entries.map((entry) => entry.user))
+  const pathSamples = getUniqueVersionReviewValues([path])
+  const versionLabel = version.hash.length > 12 ? `${version.hash.slice(0, 12)}...` : version.hash
+  return {
+    note: `版本恢复执行结果：已将 ${path} 恢复到版本 ${version.version}（${versionLabel}）；已关联 ${entries.length} 条恢复活动。`,
+    scope_label: `版本历史 ${path}`,
+    filter_summary: `审计分组 风险操作 · 路径 ${path} · 执行结果 版本恢复`,
+    disposition_status: 'restored',
+    action_counts: { restore: entries.length },
+    review_count: entries.length,
+    total_count: Math.max(totalEntries, entries.length),
+    path_count: pathSamples.length,
+    user_count: users.length,
+    path_samples: pathSamples,
+    user_samples: users.slice(0, 10),
+    activity_entry_ids: entries.map((entry) => entry.id),
   }
 }
 
@@ -274,6 +340,7 @@ interface VersionsPageContentProps {
 interface RestoreVersionVariables {
   path: string
   hash: string
+  version: VersionInfo
   sessionId: number
   signal: AbortSignal
 }
@@ -337,12 +404,54 @@ function VersionsPageContent({ authScopeKey, initialPath, isAdmin, hasInvalidHom
     addToast({ title: '版本历史已刷新', color: 'success' })
   }
 
+  const recordVersionRestoreReview = useCallback(async (path: string, version: VersionInfo, signal: AbortSignal) => {
+    try {
+      const normalizedPath = normalizePath(path)
+      const activityResult = await listActivity({
+        action: 'restore',
+        actionGroup: 'risk',
+        path: normalizedPath,
+        limit: VERSION_RESTORE_ACTIVITY_LIMIT,
+        offset: 0,
+        signal,
+      })
+      if (signal.aborted) {
+        return
+      }
+
+      const executionEntries = activityResult.items.filter((entry) => (
+        versionRestoreActivityMatches(entry, normalizedPath, version.hash)
+      ))
+      if (executionEntries.length === 0) {
+        return
+      }
+
+      await createActivityReviewRecord(buildVersionRestoreReviewRecordInput({
+        entries: executionEntries,
+        totalEntries: activityResult.total,
+        path: normalizedPath,
+        version,
+      }), { signal })
+      if (!signal.aborted) {
+        addToast({ title: '版本恢复结果已记录', color: 'success' })
+      }
+    } catch (error) {
+      if (!signal.aborted && !isAbortError(error)) {
+        addToast({
+          title: '版本已恢复，复核记录写入失败',
+          description: getUserFacingErrorDescription(error),
+          color: 'warning',
+        })
+      }
+    }
+  }, [])
+
   const restoreMutation = useMutation({
     mutationFn: async ({ path, hash, signal }: RestoreVersionVariables) => {
       return restoreVersion(path, hash, { signal })
     },
     retry: false,
-    onSuccess: (result, variables) => {
+    onSuccess: async (result, variables) => {
       if (variables.signal.aborted) {
         return
       }
@@ -357,6 +466,7 @@ function VersionsPageContent({ authScopeKey, initialPath, isAdmin, hasInvalidHom
       ) {
         onClose()
       }
+      await recordVersionRestoreReview(variables.path, variables.version, variables.signal)
     },
     onError: (error: unknown, variables) => {
       if (variables.signal.aborted || isAbortError(error)) {
@@ -426,6 +536,7 @@ function VersionsPageContent({ authScopeKey, initialPath, isAdmin, hasInvalidHom
       restoreMutation.mutate({
         path: selectedPath,
         hash: selectedVersion.hash,
+        version: selectedVersion,
         sessionId: restoreSessionRef.current,
         signal: controller.signal,
       })
