@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, render, screen, waitFor, within } from '@/test/utils'
 import userEvent from '@testing-library/user-event'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
@@ -8,6 +8,7 @@ import * as HeroUI from '@heroui/react'
 const mockAddToast = vi.fn()
 const useCanWriteMock = vi.fn(() => true)
 const mockUser = { id: 'u1', username: 'admin', role: 'admin' as const, email: 'admin@local', homeDir: '/' }
+const originalClipboardDescriptor = Object.getOwnPropertyDescriptor(navigator, 'clipboard')
 
 // Mock API functions
 vi.mock('@/api/files', async (importOriginal) => {
@@ -293,6 +294,14 @@ describe('TrashPage', () => {
       count: 2,
       totalSize: 1024,
     })
+  })
+
+  afterEach(() => {
+    if (originalClipboardDescriptor) {
+      Object.defineProperty(navigator, 'clipboard', originalClipboardDescriptor)
+    } else {
+      Reflect.deleteProperty(navigator, 'clipboard')
+    }
   })
 
   it('passes abort signals to the trash query', async () => {
@@ -2140,6 +2149,45 @@ describe('TrashPage', () => {
       await user.click(screen.getByRole('button', { name: '取消' }))
 
       expect(screen.queryByText('确认批量恢复')).toBeNull()
+      expect(mockBatchExecute).not.toHaveBeenCalled()
+    })
+
+    it('copies the batch restore cross-directory review record', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      const writeText = vi.fn().mockResolvedValue(undefined)
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: { writeText },
+      })
+
+      render(<TrashPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('deleted-file.txt')).toBeTruthy()
+      })
+
+      await toggleAllTrashItems(user)
+
+      await waitFor(() => {
+        expect(screen.getByText(/已选择 2 项/)).toBeTruthy()
+      })
+
+      await openBatchRestoreReview(user)
+      await user.click(screen.getByRole('button', { name: '复制复核记录' }))
+
+      await waitFor(() => {
+        expect(writeText).toHaveBeenCalledTimes(1)
+      })
+      const report = String(writeText.mock.calls[0]?.[0] ?? '')
+      expect(report).toContain('回收站批量恢复复核')
+      expect(report).toContain('恢复项目：2 项（1 个目录，1 个文件）')
+      expect(report).toContain('原始目录：1 个目标目录')
+      expect(report).toContain('可见数据量：1 KB')
+      expect(report).toContain('自动清理：自动清理设置未知')
+      expect(report).toContain('冲突处理：若原路径已存在同名文件、父目录不可写或配额不足，服务端会拒绝对应项目并保留在回收站。')
+      expect(report).toContain('执行结果：成功项目会从回收站移除；失败项目会保持选中，便于继续处理。')
+      expect(report).toContain('- /')
+      expect(mockAddToast).toHaveBeenCalledWith({ title: '批量恢复复核记录已复制', color: 'success' })
       expect(mockBatchExecute).not.toHaveBeenCalled()
     })
 

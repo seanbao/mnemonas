@@ -322,7 +322,7 @@ Priority:
 
 When new trash content would exceed `max_size`, older trash items are removed first. If the newest item is larger than the limit, it is still kept and total trash size may temporarily exceed the limit.
 
-The Web Trash page shows a cross-directory restore review before batch restore, covering affected directories, the auto-cleanup window, conflict handling, and execution results. After single-item or batch restore succeeds, the page associates matching `trash_restore` activity entries with an activity review record in the `restored` disposition state; unavailable activity logging or missing matching restore activity does not block the restore itself.
+The Web Trash page shows a cross-directory restore review before batch restore, covering affected directories, the auto-cleanup window, conflict handling, and execution results, with a copyable review record for pre-restore confirmation. After single-item or batch restore succeeds, the page associates matching `trash_restore` activity entries with an activity review record in the `restored` disposition state; unavailable activity logging or missing matching restore activity does not block the restore itself.
 
 ## `[storage.versioning]`
 
