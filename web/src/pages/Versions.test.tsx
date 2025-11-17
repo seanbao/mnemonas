@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, render, screen, waitFor, within } from '@/test/utils'
 import userEvent from '@testing-library/user-event'
 import * as HeroUI from '@heroui/react'
@@ -6,6 +6,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { authFetch, ensureDownloadSession } from '@/api/auth'
 
 const mockAddToast = vi.fn()
+const originalClipboardDescriptor = Object.getOwnPropertyDescriptor(navigator, 'clipboard')
 
 const mockUseIsAdmin = vi.fn(() => true)
 const mockUseUser = vi.fn(() => ({ id: 'admin', username: 'admin', role: 'admin', email: '', homeDir: '/' }))
@@ -133,6 +134,14 @@ describe('VersionsPage', () => {
       { version: 2, hash: 'hash2', size: 2000, timestamp: '2024-01-02T00:00:00Z' },
       { version: 1, hash: 'hash1', size: 1000, timestamp: '2024-01-01T00:00:00Z' },
     ])
+  })
+
+  afterEach(() => {
+    if (originalClipboardDescriptor) {
+      Object.defineProperty(navigator, 'clipboard', originalClipboardDescriptor)
+    } else {
+      Reflect.deleteProperty(navigator, 'clipboard')
+    }
   })
 
   describe('rendering', () => {
@@ -578,6 +587,43 @@ describe('VersionsPage', () => {
         signal: expect.any(AbortSignal),
       }))
       expect(mockAddToast).toHaveBeenCalledWith({ title: '版本恢复结果已记录', color: 'success' })
+    })
+
+    it('copies the version restore pre-submit review record', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      const writeText = vi.fn().mockResolvedValue(undefined)
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: { writeText },
+      })
+
+      render(<VersionsPage />)
+
+      const input = screen.getByLabelText('版本文件路径')
+      await user.type(input, '/test.txt{enter}')
+
+      await waitFor(() => {
+        expect(screen.queryAllByRole('button', { name: /^恢复到版本 / }).length).toBeGreaterThan(0)
+      })
+
+      await user.click(screen.getByRole('button', { name: '恢复到版本 2' }))
+      await user.click(await screen.findByRole('button', { name: '复制复核记录' }))
+
+      await waitFor(() => {
+        expect(writeText).toHaveBeenCalledTimes(1)
+      })
+      const report = String(writeText.mock.calls[0]?.[0] ?? '')
+      expect(report).toContain('版本恢复执行前复核')
+      expect(report).toContain('目标文件：/test.txt')
+      expect(report).toContain('目标版本：2')
+      expect(report).toContain('版本大小：1.95 KB')
+      expect(report).toContain('版本 Hash：hash2')
+      expect(report).toContain('覆盖影响：当前可见文件会被所选历史版本覆盖。')
+      expect(report).toContain('安全保留：恢复前的当前内容会保存为新的历史版本。')
+      expect(report).toContain('执行校验：服务端会重新校验管理员权限、目录配额和目标父目录状态。')
+      expect(report).toContain('冲突处理：版本不匹配、父目录冲突或版本存储不可用时会拒绝恢复并保留现状。')
+      expect(mockAddToast).toHaveBeenCalledWith({ title: '版本恢复复核记录已复制', color: 'success' })
+      expect(mockRestoreVersion).not.toHaveBeenCalled()
     })
 
     it('shows warning toast when restore succeeds with a persistence warning', async () => {
