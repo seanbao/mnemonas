@@ -21,6 +21,7 @@ import {
   RotateCcw,
   Download,
   Eye,
+  Copy,
   Clock,
   FileText,
   ChevronRight,
@@ -41,12 +42,13 @@ import { readRangedDownloadJsonErrorDetails } from '@/lib/downloadResponse'
 import { GENERIC_ACTION_ERROR_DESCRIPTION, GENERIC_LOAD_ERROR_DESCRIPTION, getUserFacingErrorDescription } from '@/lib/apiMessages'
 import { getFileLoadErrorDescription } from '@/lib/fileActionErrors'
 import { useIsAdmin, useUser } from '@/stores/auth'
-import { formatBytes, formatDate, normalizePath, openUrlInNewTab } from '@/lib/utils'
+import { copyTextToClipboard, formatBytes, formatDate, normalizePath, openUrlInNewTab } from '@/lib/utils'
 import { getInvalidHomeDirDescription, invalidHomeDirTitle, resolveUserHomeScope } from '@/lib/userScope'
 import { PageHeader } from '@/components/ui/PageHeader'
 import { EmptyState } from '@/components/ui/EmptyState'
 
 const previewSessionSyncWarningTitle = '原始预览和下载会话同步失败，请稍后重试'
+const clipboardWriteFailureDescription = '请检查浏览器剪贴板权限。'
 const VERSION_RESTORE_ACTIVITY_LIMIT = 100
 
 function getVersionQueryState(path: string): {
@@ -200,6 +202,21 @@ function buildVersionRestoreReviewRecordInput({
     user_samples: users.slice(0, 10),
     activity_entry_ids: entries.map((entry) => entry.id),
   }
+}
+
+function formatVersionRestoreReviewReport(path: string, version: VersionInfo): string {
+  return [
+    '版本恢复执行前复核',
+    `目标文件：${path}`,
+    `目标版本：${version.version}`,
+    `版本保存时间：${formatDate(version.timestamp)}`,
+    `版本大小：${formatBytes(version.size)}`,
+    `版本 Hash：${version.hash}`,
+    '覆盖影响：当前可见文件会被所选历史版本覆盖。',
+    '安全保留：恢复前的当前内容会保存为新的历史版本。',
+    '执行校验：服务端会重新校验管理员权限、目录配额和目标父目录状态。',
+    '冲突处理：版本不匹配、父目录冲突或版本存储不可用时会拒绝恢复并保留现状。',
+  ].join('\n')
 }
 
 interface VersionRowProps {
@@ -543,6 +560,23 @@ function VersionsPageContent({ authScopeKey, initialPath, isAdmin, hasInvalidHom
     }
   }
 
+  const handleCopyRestoreReviewReport = async () => {
+    if (!selectedPath || !selectedVersion) {
+      return
+    }
+
+    try {
+      await copyTextToClipboard(formatVersionRestoreReviewReport(selectedPath, selectedVersion))
+      addToast({ title: '版本恢复复核记录已复制', color: 'success' })
+    } catch {
+      addToast({
+        title: '复制版本恢复复核记录失败',
+        description: clipboardWriteFailureDescription,
+        color: 'danger',
+      })
+    }
+  }
+
   const handleCloseRestoreModal = useCallback(() => {
     if (restoreMutation.isPending) {
       return
@@ -783,9 +817,14 @@ function VersionsPageContent({ authScopeKey, initialPath, isAdmin, hasInvalidHom
               )}
               {selectedPath && selectedVersion && (
                 <div aria-label="版本恢复执行前复核" className="rounded-lg border border-warning/20 bg-warning/10 p-3 text-sm">
-                  <div className="flex items-center gap-2 font-medium text-warning">
-                    <AlertCircle size={16} />
-                    <span>恢复影响复核</span>
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex items-center gap-2 font-medium text-warning">
+                      <AlertCircle size={16} />
+                      <span>恢复影响复核</span>
+                    </div>
+                    <Button size="sm" variant="flat" className="rounded-lg" startContent={<Copy size={14} />} onPress={handleCopyRestoreReviewReport}>
+                      复制复核记录
+                    </Button>
                   </div>
                   <dl className="mt-3 space-y-2 text-default-600">
                     <div className="grid gap-1 sm:grid-cols-[6rem_minmax(0,1fr)]">

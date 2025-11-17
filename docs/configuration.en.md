@@ -332,7 +332,7 @@ The Web Trash page shows a cross-directory restore review before batch restore, 
 | `auto_versioned_filenames` | string[] | common config filenames | Filenames eligible for automatic versioning |
 | `max_versioned_size` | int64 | `104857600` | Maximum automatically versioned file size |
 
-The Web version-history page shows a pre-submit review for the target file, overwrite impact, safety retention, execution checks, and conflict handling before version restore. After version restore succeeds, the page associates matching `restore` activity entries by path and version hash with an activity review record in the `restored` disposition state; unavailable activity logging or missing matching restore activity does not block the version restore itself.
+The Web version-history page shows a pre-submit review for the target file, overwrite impact, safety retention, execution checks, and conflict handling before version restore, with a copyable review record for pre-restore confirmation. After version restore succeeds, the page associates matching `restore` activity entries by path and version hash with an activity review record in the `restored` disposition state; unavailable activity logging or missing matching restore activity does not block the version restore itself.
 
 Example:
 
