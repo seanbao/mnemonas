@@ -307,6 +307,7 @@ print_check_block() {
 	case "$group" in
 		docs)
 			printf 'make docs-check\n'
+			printf './scripts/check-yaml-configs.sh .github/ISSUE_TEMPLATE/*.yml .github/ISSUE_TEMPLATE/*.yaml\n'
 			print_group_diff_check "$group"
 			;;
 		build-ci)

@@ -198,7 +198,7 @@ E2E groups:
 | WebDAV locks | LOCK/UNLOCK virtual lock-token round trip | quick |
 | Versions | Version history API | quick |
 | Concurrency | Concurrent reads/writes | quick |
-| Standalone WebDAV smoke | curl `OPTIONS`, `MKCOL`, `PUT`, `PROPFIND`, `GET`, `HEAD`, `COPY`, `MOVE`, `DELETE`, URL-encoded space paths, and request timeout settings | manual running service |
+| Standalone WebDAV smoke | curl `OPTIONS`, `MKCOL`, `PUT`, `PROPFIND`, `GET`, `HEAD`, `COPY`, `MOVE`, `DELETE`, content validation after COPY/MOVE, URL-encoded space paths, and request timeout settings | manual running service |
 | WebDAV client smoke | Optional rclone upload, download, move/rename, list, and cleanup operations | `RUN_RCLONE_WEBDAV=1` |
 | Large files | 100MB path | full |
 | Crash recovery | interrupted write/restart behavior | full |
