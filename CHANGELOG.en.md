@@ -60,6 +60,7 @@ This project follows [Semantic Versioning 2.0.0](https://semver.org/).
 - `scripts/check-release-tag.sh` validates release tags as `vMAJOR.MINOR.PATCH` or SemVer prerelease tags before release artifacts are built.
 - `scripts/release-readiness.sh` fails by default when non-release-documentation changes exist after the recorded full-validation target; draft summaries can opt in with `--allow-post-validation-changes`.
 - `scripts/release-readiness.sh` requires all four hardening evidence documents to exist and record the same full-validation target, preventing missing evidence from being skipped before release.
+- `scripts/release-readiness.sh` checks that both release-notes drafts record the current full-validation target, preventing stale validation snapshots in release notes.
 - `scripts/release-readiness.sh` checks that local commit subjects on the current release branch follow Conventional Commits and rejects leftover `fixup!` / `squash!` temporary commits.
 - WebDAV COPY/MOVE destination regression coverage for absolute path-reference destinations and rejection of bare relative destinations, including `dav/path`.
 - `npm run typecheck` covers the frontend application, Playwright specs, and shared E2E helpers.
@@ -103,6 +104,7 @@ This project follows [Semantic Versioning 2.0.0](https://semver.org/).
 - Fixed `server.trusted_proxy_hops` updates through the settings API not immediately updating runtime client-IP and HTTPS forwarded-header interpretation.
 - Fixed the Web Husky pre-commit hook so it resolves the repository root, runs from `web/`, and uses the frontend lint-staged configuration.
 - Fixed frontend authentication setup so reused-server E2E runs can opt into auth-state skips, while isolated E2E runs fail instead of silently saving an empty auth state.
+- Fixed long backup-configuration example paths being clipped in the Maintenance page on mobile layouts.
 - Prevented systemd installation and static-file discovery from treating Vite source directories as built Web UI output.
 - Fixed broad `.gitignore` / `.dockerignore` rules for `nasd`.
 - Removed runtime `apt-get` dependency from Docker health checks.
