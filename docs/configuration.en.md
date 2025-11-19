@@ -486,6 +486,7 @@ Runtime behavior:
 - `schedule_window_start` and `schedule_window_end` constrain only automatic scheduling. Manual runs from the Maintenance page or API are not constrained by the window. The window uses server local time.
 - `restore_drill_stale_after` controls missing or stale restore-drill reminders. Blank, `"0"`, or omitted values are treated as 30 days at runtime.
 - Local retention cleanup always keeps the current snapshot. Actual retention for `restic` and `rclone` is managed by the external tool or cloud lifecycle rules, and `retention_policy` records that the deployment-side policy has been confirmed.
+- The Maintenance page generates a single-job pre-submit restore review covering the target directory, restore contents, config-file handling, preflight result, write boundary, and post-restore checks, with a copyable review record for pre-restore confirmation.
 - Backup, restore, restore-drill, restore-verify, and retention-check alerts reuse `[alerts]` channels. External notifications do not expose job names, source paths, target paths, snapshot paths, raw warnings, or low-level error text.
 
 ```toml

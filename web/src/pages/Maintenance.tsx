@@ -1182,9 +1182,27 @@ function RestoreExecutionReview({
     { label: '恢复后检查', value: '恢复完成后自动执行只读校验，并显示切换步骤和回滚清单。' },
   ]
 
+  const handleCopyReviewReport = async () => {
+    try {
+      await copyTextToClipboard(formatRestoreExecutionReviewReport(result, matches))
+      addToast({ title: '恢复执行前复核记录已复制', color: 'success' })
+    } catch {
+      addToast({
+        title: '复制恢复执行前复核记录失败',
+        description: clipboardWriteFailureDescription,
+        color: 'danger',
+      })
+    }
+  }
+
   return (
     <div aria-label="恢复执行前复核" className={`mt-3 rounded-lg border p-3 text-sm ${toneClass}`}>
-      <div className="font-medium text-default-800">恢复执行前复核</div>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="font-medium text-default-800">恢复执行前复核</div>
+        <Button size="sm" variant="flat" className="rounded-lg" startContent={<Copy size={14} />} onPress={handleCopyReviewReport}>
+          复制复核记录
+        </Button>
+      </div>
       <div className="mt-3 grid gap-3 sm:grid-cols-2">
         {reviewItems.map((item) => (
           <div key={item.label} className="min-w-0">
@@ -1198,6 +1216,33 @@ function RestoreExecutionReview({
       )}
     </div>
   )
+}
+
+function formatRestoreExecutionReviewReport(
+  result: BackupRestorePreviewResult,
+  matches: boolean,
+): string {
+  const { passed: passedCount, warning: warningCount, failed: failedCount } = getRestorePreflightCounts(result.preflight_checks)
+  const sections = [
+    '恢复执行前复核',
+    `任务 ID：${result.job_id}`,
+    `恢复目标：${result.target_path}`,
+    `恢复内容：${getBackupRestorePreviewMetricText(result)}`,
+    `配置文件：${result.config_available ? (result.config_included ? '将恢复到 .mnemonas-restore/config.toml' : '本次不恢复配置文件') : '备份未提供可恢复配置文件'}`,
+    `预检结果：${passedCount} 项通过 · ${warningCount} 项提醒 · ${failedCount} 项失败`,
+    `预览状态：${matches ? '当前目标目录和配置选项与预览一致' : '目标目录或配置选项已变更，当前复核不可用于执行恢复'}`,
+    '写入边界：恢复只写入独立目录，不覆盖当前 storage.root。',
+    '恢复后检查：恢复完成后自动执行只读校验，并显示切换步骤和回滚清单。',
+  ]
+
+  if (result.sample_paths && result.sample_paths.length > 0) {
+    sections.push(`路径样例：${result.sample_paths.slice(0, 5).join('；')}`)
+  }
+  if (result.warnings && result.warnings.length > 0) {
+    sections.push(`恢复提醒：${result.warnings.map(getBackupDiagnosticDisplayMessage).join('；')}`)
+  }
+
+  return sections.join('\n')
 }
 
 function RestoreChecklistBlock({
