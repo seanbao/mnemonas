@@ -47,6 +47,7 @@ import {
   listActivity,
   type ActivityActionCountMap,
   type ActivityEntry,
+  type ActivityReviewDispositionStatus,
   type ActivityReviewRecordCreateInput,
   type ActivityReviewShareDispositionDetail,
 } from '@/api/activity'
@@ -452,22 +453,24 @@ function shareActivityMatchesAnyPath(entry: ActivityEntry, paths: Set<string>): 
   }
 }
 
-function getShareAccessClosedExecutionDispositionDetails(
+function getShareAccessExecutionDispositionDetails(
   shares: Share[],
   {
-    fallbackRiskLevel = 'high',
-    suggestedAction = '已停用高风险分享；继续复核外部引用和访问入口。',
+    enabled,
+    fallbackRiskLevel,
+    suggestedAction,
   }: {
-    fallbackRiskLevel?: ActivityReviewShareDispositionDetail['risk_level']
-    suggestedAction?: string
-  } = {}
+    enabled: boolean
+    fallbackRiskLevel: ActivityReviewShareDispositionDetail['risk_level']
+    suggestedAction: string
+  }
 ): ActivityReviewShareDispositionDetail[] {
   return shares
     .slice(0, SHARE_REVIEW_DISPOSITION_DETAIL_LIMIT)
     .map((share) => ({
       path: normalizePath(share.path),
       type: share.type,
-      enabled: false,
+      enabled,
       risk_level: share.risk?.level ?? fallbackRiskLevel,
       reason_summary: getShareReviewReasonSummary(share),
       suggested_action: suggestedAction,
@@ -476,36 +479,40 @@ function getShareAccessClosedExecutionDispositionDetails(
     }))
 }
 
-function buildShareAccessClosedExecutionRecordInput({
+function buildShareAccessExecutionRecordInput({
   entries,
   totalEntries,
-  closedShares,
+  targetShares,
   pathFilter,
   scopeLabel,
-  closedShareLabel = '需处理分享',
+  targetShareLabel = '需处理分享',
   actionVerb = '停用',
   filterExecutionLabel = '停用需处理分享',
+  dispositionStatus = 'disabled',
+  detailEnabled = false,
   fallbackRiskLevel = 'high',
-  suggestedAction,
+  suggestedAction = '已停用高风险分享；继续复核外部引用和访问入口。',
 }: {
   entries: ActivityEntry[]
   totalEntries: number
-  closedShares: Share[]
+  targetShares: Share[]
   pathFilter: string
   scopeLabel?: string
-  closedShareLabel?: string
+  targetShareLabel?: string
   actionVerb?: string
   filterExecutionLabel?: string
+  dispositionStatus?: ActivityReviewDispositionStatus
+  detailEnabled?: boolean
   fallbackRiskLevel?: ActivityReviewShareDispositionDetail['risk_level']
   suggestedAction?: string
 }): ActivityReviewRecordCreateInput {
-  const paths = getUniqueShareReviewValues(closedShares.map((share) => share.path))
+  const paths = getUniqueShareReviewValues(targetShares.map((share) => share.path))
   const users = getUniqueShareReviewValues(entries.map((entry) => entry.user))
   return {
-    note: `分享执行结果：已${actionVerb} ${closedShares.length} 个${closedShareLabel}；已关联 ${entries.length} 条分享活动。`,
+    note: `分享执行结果：已${actionVerb} ${targetShares.length} 个${targetShareLabel}；已关联 ${entries.length} 条分享活动。`,
     scope_label: scopeLabel ?? (pathFilter ? `分享路径 ${pathFilter}` : '分享管理'),
-    filter_summary: `${getShareReviewRecordFilterSummary(pathFilter, closedShares.length, closedShares.length)} · 执行结果 ${filterExecutionLabel}`,
-    disposition_status: 'disabled',
+    filter_summary: `${getShareReviewRecordFilterSummary(pathFilter, targetShares.length, targetShares.length)} · 执行结果 ${filterExecutionLabel}`,
+    disposition_status: dispositionStatus,
     action_counts: getShareReviewActivityActionCounts(entries),
     review_count: entries.length,
     total_count: Math.max(totalEntries, entries.length),
@@ -513,7 +520,8 @@ function buildShareAccessClosedExecutionRecordInput({
     user_count: users.length,
     path_samples: paths.slice(0, 10),
     user_samples: users.slice(0, 10),
-    share_disposition_details: getShareAccessClosedExecutionDispositionDetails(closedShares, {
+    share_disposition_details: getShareAccessExecutionDispositionDetails(targetShares, {
+      enabled: detailEnabled,
       fallbackRiskLevel,
       suggestedAction,
     }),
@@ -851,13 +859,13 @@ export function ShareManager({
       return
     }
 
-    await createActivityReviewRecord(buildShareAccessClosedExecutionRecordInput({
+    await createActivityReviewRecord(buildShareAccessExecutionRecordInput({
       entries: executionEntries,
       totalEntries: activityResult.total,
-      closedShares: [share],
+      targetShares: [share],
       pathFilter: normalizedSharePath,
       scopeLabel: `分享 ${normalizedSharePath}`,
-      closedShareLabel: '分享',
+      targetShareLabel: '分享',
       actionVerb,
       filterExecutionLabel,
       fallbackRiskLevel: 'none',
@@ -865,6 +873,49 @@ export function ShareManager({
     }), { signal })
     if (!signal.aborted) {
       addToast({ title: successToastTitle, color: 'success' })
+    }
+  }
+
+  const recordSingleShareAccessOpenedExecution = async (
+    share: Share,
+    signal: AbortSignal
+  ) => {
+    const normalizedSharePath = normalizePath(share.path)
+    const activityResult = await listActivity({
+      actionGroup: 'share',
+      path: normalizedSharePath,
+      limit: SHARE_REVIEW_ACTIVITY_LIMIT,
+      offset: 0,
+      signal,
+    })
+    if (signal.aborted) {
+      return
+    }
+
+    const sharePaths = new Set([normalizedSharePath])
+    const executionEntries = activityResult.items.filter((entry) => (
+      entry.action === 'share' && shareActivityMatchesAnyPath(entry, sharePaths)
+    ))
+    if (executionEntries.length === 0) {
+      return
+    }
+
+    await createActivityReviewRecord(buildShareAccessExecutionRecordInput({
+      entries: executionEntries,
+      totalEntries: activityResult.total,
+      targetShares: [share],
+      pathFilter: normalizedSharePath,
+      scopeLabel: `分享 ${normalizedSharePath}`,
+      targetShareLabel: '分享',
+      actionVerb: '启用',
+      filterExecutionLabel: '启用分享',
+      dispositionStatus: 'confirmed',
+      detailEnabled: true,
+      fallbackRiskLevel: 'none',
+      suggestedAction: '已重新启用该分享；继续复核有效期、密码、访问次数和外部引用。',
+    }), { signal })
+    if (!signal.aborted) {
+      addToast({ title: '分享启用结果已记录', color: 'success' })
     }
   }
 
@@ -894,6 +945,18 @@ export function ShareManager({
           if (!controller.signal.aborted && !isAbortError(err)) {
             addToast({
               title: '分享已禁用，复核记录写入失败',
+              description: getUserFacingErrorDescription(err),
+              color: 'warning',
+            })
+          }
+        }
+      } else if (!share.enabled && result.enabled) {
+        try {
+          await recordSingleShareAccessOpenedExecution(result, controller.signal)
+        } catch (err) {
+          if (!controller.signal.aborted && !isAbortError(err)) {
+            addToast({
+              title: '分享已启用，复核记录写入失败',
               description: getUserFacingErrorDescription(err),
               color: 'warning',
             })
@@ -986,10 +1049,10 @@ export function ShareManager({
             entry.action === 'unshare' && shareActivityMatchesAnyPath(entry, disabledPaths)
           ))
           if (executionEntries.length > 0) {
-            await createActivityReviewRecord(buildShareAccessClosedExecutionRecordInput({
+            await createActivityReviewRecord(buildShareAccessExecutionRecordInput({
               entries: executionEntries,
               totalEntries: activityResult.total,
-              closedShares: disabledTargets,
+              targetShares: disabledTargets,
               pathFilter: normalizedPathFilter,
             }), { signal: controller.signal })
             if (!controller.signal.aborted) {
