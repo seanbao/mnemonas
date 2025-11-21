@@ -1409,6 +1409,85 @@ describe('ShareManager', () => {
     })
   })
 
+  it('records single share enable execution results into activity review history', async () => {
+    const user = userEvent.setup()
+    const disabledShare = { ...mockShares[0], enabled: false, risk: { level: 'none' as const } }
+    vi.mocked(shareApi.listShares).mockResolvedValueOnce([disabledShare])
+    vi.mocked(shareApi.updateShare).mockResolvedValueOnce({
+      ...disabledShare,
+      enabled: true,
+      risk: {
+        level: 'medium',
+        reasons: [
+          { code: 'no_expiration', level: 'medium', message: '未设置过期时间，链接会长期有效' },
+        ],
+      },
+      warning: false,
+      message: undefined,
+    })
+    vi.mocked(activityApi.listActivity).mockResolvedValueOnce({
+      items: [{
+        id: 'act-share-enable-1',
+        timestamp: '2026-03-27T01:00:00Z',
+        action: 'share',
+        path: '/docs/report.pdf',
+        user: 'admin',
+      }],
+      total: 1,
+      limit: 100,
+      offset: 0,
+    })
+
+    render(<ShareManager />)
+
+    await waitFor(() => {
+      expect(screen.getByText('已禁用')).toBeInTheDocument()
+    })
+
+    await user.click(screen.getByLabelText('report.pdf 分享操作'))
+    await user.click(await screen.findByText('启用分享'))
+
+    await waitFor(() => {
+      expect(activityApi.createActivityReviewRecord).toHaveBeenCalledTimes(1)
+    })
+    expect(activityApi.listActivity).toHaveBeenCalledWith(expect.objectContaining({
+      actionGroup: 'share',
+      path: '/docs/report.pdf',
+      limit: 100,
+      offset: 0,
+      signal: expect.any(AbortSignal),
+    }))
+    expect(activityApi.createActivityReviewRecord).toHaveBeenCalledWith(expect.objectContaining({
+      note: '分享执行结果：已启用 1 个分享；已关联 1 条分享活动。',
+      scope_label: '分享 /docs/report.pdf',
+      filter_summary: '审计分组 分享相关 · 路径 /docs/report.pdf · 当前分享 1/1 · 执行结果 启用分享',
+      disposition_status: 'confirmed',
+      action_counts: { share: 1 },
+      review_count: 1,
+      total_count: 1,
+      path_count: 1,
+      user_count: 1,
+      path_samples: ['/docs/report.pdf'],
+      user_samples: ['admin'],
+      share_disposition_details: [{
+        path: '/docs/report.pdf',
+        type: 'file',
+        enabled: true,
+        risk_level: 'medium',
+        reason_summary: '未设置过期时间，链接会长期有效',
+        suggested_action: '已重新启用该分享；继续复核有效期、密码、访问次数和外部引用。',
+        access_summary: '无密码 · 访问 3/不限',
+        expires_at: '永不过期',
+      }],
+      activity_entry_ids: ['act-share-enable-1'],
+    }), expect.objectContaining({
+      signal: expect.any(AbortSignal),
+    }))
+    expect(mockAddToast).toHaveBeenCalledWith({ title: '分享已启用', color: 'success' })
+    expect(mockAddToast).toHaveBeenCalledWith({ title: '分享启用结果已记录', color: 'success' })
+    expect(screen.queryByText('已禁用')).not.toBeInTheDocument()
+  })
+
   it('shows a warning toast when enabling a share succeeds with persistence warnings', async () => {
     const user = userEvent.setup()
     const disabledShare = { ...mockShares[0], enabled: false }
