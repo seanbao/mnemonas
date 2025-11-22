@@ -153,6 +153,9 @@ run_invalid_domain_test() {
     run_expect_failure "$case_dir/ip-address.log" bash "$REPO_ROOT/scripts/public-go-live-smoke.sh" "127.0.0.1"
     assert_file_contains "$case_dir/ip-address.log" "public domain must be a hostname, not an IP address"
 
+    run_expect_failure "$case_dir/ipv4-like-overrange.log" bash "$REPO_ROOT/scripts/public-go-live-smoke.sh" "999.999.999.999"
+    assert_file_contains "$case_dir/ipv4-like-overrange.log" "public domain must be a hostname, not an IP address"
+
     run_expect_failure "$case_dir/leading-label-hyphen.log" bash "$REPO_ROOT/scripts/public-go-live-smoke.sh" "nas.-example.com"
     assert_file_contains "$case_dir/leading-label-hyphen.log" "public domain must be a valid ASCII hostname"
 
@@ -253,6 +256,10 @@ run_docs_contract_test() {
     assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.en.md" 'external network'
     assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.md" "公网检查需要公网完整域名，不接受 \`localhost\` 或 IP 地址"
     assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.en.md" "Public checks require a fully qualified public hostname, not \`localhost\` or an IP address"
+    assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.md" "curl --connect-timeout 3 --max-time 10 http://nas.example.com:8080/health"
+    assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.en.md" "curl --connect-timeout 3 --max-time 10 http://nas.example.com:8080/health"
+    assert_file_contains "$REPO_ROOT/docs/cloud-firewall-checklist.md" "curl --connect-timeout 3 --max-time 10 http://nas.example.com:8080/health"
+    assert_file_contains "$REPO_ROOT/docs/cloud-firewall-checklist.en.md" "curl --connect-timeout 3 --max-time 10 http://nas.example.com:8080/health"
 }
 
 trap cleanup EXIT
