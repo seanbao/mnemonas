@@ -55,7 +55,7 @@ validate_positive_seconds() {
     fi
 }
 
-is_ipv4_literal_host() {
+is_ipv4_like_host() {
     local host="$1"
     local octet
     local -a octets
@@ -63,8 +63,7 @@ is_ipv4_literal_host() {
     IFS='.' read -r -a octets <<< "$host"
     [[ "${#octets[@]}" -eq 4 ]] || return 1
     for octet in "${octets[@]}"; do
-        [[ "$octet" =~ ^[0-9]{1,3}$ ]] || return 1
-        (( 10#$octet >= 0 && 10#$octet <= 255 )) || return 1
+        [[ "$octet" =~ ^[0-9]+$ ]] || return 1
     done
     return 0
 }
@@ -104,7 +103,7 @@ validate_domain() {
     is_valid_dns_hostname "$value" || fail "public domain must be a valid ASCII hostname"
     [[ "$value" == *.* ]] || fail "public domain must be a fully qualified hostname"
     [[ "$value" != "localhost" && "$value" != *.localhost ]] || fail "public domain must not be localhost"
-    ! is_ipv4_literal_host "$value" || fail "public domain must be a hostname, not an IP address"
+    ! is_ipv4_like_host "$value" || fail "public domain must be a hostname, not an IP address"
 }
 
 validate_backend_targets() {

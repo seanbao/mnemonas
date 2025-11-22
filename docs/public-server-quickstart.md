@@ -127,9 +127,9 @@ curl -I https://nas.example.com/health
 直连后端端口应连接失败或超时；如果返回任何 HTTP 状态码（包括 `401`、`403`、`404`），都表示端口仍可从公网访问：
 
 ```bash
-curl --connect-timeout 3 http://nas.example.com:8080/health
-curl --connect-timeout 3 http://nas.example.com:9090/
-curl --connect-timeout 3 http://nas.example.com:9091/health
+curl --connect-timeout 3 --max-time 10 http://nas.example.com:8080/health
+curl --connect-timeout 3 --max-time 10 http://nas.example.com:9090/
+curl --connect-timeout 3 --max-time 10 http://nas.example.com:9091/health
 ```
 
 服务器本机上可以运行：
