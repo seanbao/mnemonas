@@ -146,6 +146,12 @@ run_invalid_domain_test() {
 
     run_expect_failure "$case_dir/out.log" bash "$REPO_ROOT/scripts/public-go-live-smoke.sh" "https://nas.example.com"
     assert_file_contains "$case_dir/out.log" "public domain must not include a URL scheme"
+
+    run_expect_failure "$case_dir/localhost.log" bash "$REPO_ROOT/scripts/public-go-live-smoke.sh" "localhost"
+    assert_file_contains "$case_dir/localhost.log" "public domain must be a fully qualified hostname"
+
+    run_expect_failure "$case_dir/ip-address.log" bash "$REPO_ROOT/scripts/public-go-live-smoke.sh" "127.0.0.1"
+    assert_file_contains "$case_dir/ip-address.log" "public domain must be a hostname, not an IP address"
 }
 
 run_invalid_timeout_test() {
@@ -197,6 +203,8 @@ run_docs_contract_test() {
     assert_file_contains "$REPO_ROOT/docs/cloud-firewall-checklist.en.md" './scripts/public-go-live-smoke.sh'
     assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.md" '外部网络'
     assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.en.md" 'external network'
+    assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.md" "公网检查需要公网完整域名，不接受 \`localhost\` 或 IP 地址"
+    assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.en.md" "Public checks require a fully qualified public hostname, not \`localhost\` or an IP address"
 }
 
 trap cleanup EXIT

@@ -147,6 +147,8 @@ ss -tlnp | grep -E '80|443|8080|9090|9091'
 
 The `--public-domain` check lowercases the domain, removes a single FQDN trailing dot, and then verifies:
 
+Public checks require a fully qualified public hostname, not `localhost` or an IP address. Localhost or IP literals cannot prove public DNS, certificate hostname, and external-network access paths.
+
 - public HTTPS health, same-domain HTTP-to-HTTPS redirects, certificate hostname, and remaining certificate validity;
 - public-deployment authentication settings, administrator-account redundancy, and initial-password cleanup;
 - share-link base URL shape and public-share API response cache boundaries;

@@ -622,6 +622,20 @@ PY
   return 0
 }
 
+is_ipv4_literal_host() {
+  local host="$1"
+  local octet
+  local -a octets
+
+  IFS='.' read -r -a octets <<< "$host"
+  [[ "${#octets[@]}" -eq 4 ]] || return 1
+  for octet in "${octets[@]}"; do
+    [[ "$octet" =~ ^[0-9]{1,3}$ ]] || return 1
+    (( 10#$octet >= 0 && 10#$octet <= 255 )) || return 1
+  done
+  return 0
+}
+
 require_safe_tcp_port() {
   local value="$1"
   local label="$2"
@@ -689,12 +703,18 @@ require_safe_http_url() {
 
 require_safe_public_domain() {
   local value="$1"
+  local normalized
 
   [[ -z "$value" ]] && return 0
   [[ "$value" != *[[:space:]]* ]] || die "PUBLIC_DOMAIN cannot contain whitespace: $value"
   [[ "$value" != *[[:cntrl:]]* ]] || die "PUBLIC_DOMAIN cannot contain control characters: $value"
   [[ "$value" != *"/"* && "$value" != *":"* ]] || die "PUBLIC_DOMAIN must be a hostname without scheme or port: $value"
   is_valid_tcp_host "$value" || die "PUBLIC_DOMAIN is invalid: $value"
+  normalized="${value%.}"
+  normalized="${normalized,,}"
+  [[ "$normalized" == *.* ]] || die "PUBLIC_DOMAIN must be a fully qualified hostname: $value"
+  [[ "$normalized" != "localhost" && "$normalized" != *.localhost ]] || die "PUBLIC_DOMAIN must not be localhost: $value"
+  ! is_ipv4_literal_host "$normalized" || die "PUBLIC_DOMAIN must be a hostname, not an IP address: $value"
 }
 
 normalize_public_domain() {
