@@ -206,6 +206,25 @@ checksum_manifest_has_archive() {
 	return 1
 }
 
+format_seen_targets() {
+	local seen="$1"
+	local target
+	local formatted=""
+
+	for target in "${EXPECTED_TARGETS[@]}"; do
+		case " $seen " in
+			*" $target "*)
+				if [[ -n "$formatted" ]]; then
+					formatted+=" "
+				fi
+				formatted+="$target"
+				;;
+		esac
+	done
+
+	printf '%s\n' "$formatted"
+}
+
 validate_manifest_paths() {
 	local manifest="$1"
 	local expected_top="$2"
@@ -453,4 +472,5 @@ if [[ "$CHECK_IMAGE" == "1" ]]; then
 	check_remote_image "$VERSION" "$REPOSITORY"
 fi
 
+printf '[release-artifact-verify] verified targets: %s\n' "$(format_seen_targets "$seen_targets")"
 printf '[release-artifact-verify] verified %d archive(s) for %s\n' "${#archives[@]}" "$VERSION"
