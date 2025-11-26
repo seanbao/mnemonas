@@ -120,6 +120,7 @@ run_complete_release_passes() {
 		--require-targets \
 		"$dist_dir" >"$out"
 
+	assert_file_contains "$out" "verified targets: linux-amd64 linux-arm64 darwin-amd64 darwin-arm64"
 	assert_file_contains "$out" "verified 4 archive(s) for v1.2.3"
 }
 
