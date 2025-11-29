@@ -284,6 +284,24 @@ run_archive_symlink_fails_before_checksum() {
 	assert_file_contains "$out" "$archive"
 }
 
+run_unexpected_artifact_entry_fails_before_checksum() {
+	local case_dir="$TMP_ROOT/unexpected-artifact-entry"
+	local dist_dir="$case_dir/dist"
+	local out="$case_dir/out.log"
+	local status
+
+	make_complete_release "$dist_dir" "v1.2.3" "seanbao/mnemonas"
+	printf 'unexpected\n' >"$dist_dir/release-notes.txt"
+
+	set +e
+	bash "$REPO_ROOT/scripts/verify-release-artifacts.sh" "$dist_dir" >"$out" 2>&1
+	status=$?
+	set -e
+
+	[[ "$status" -ne 0 ]] || fail "release artifact verifier accepted an unexpected artifact directory entry"
+	assert_file_contains "$out" "artifact directory contains an unsupported entry: release-notes.txt"
+}
+
 run_archive_entry_symlink_fails() {
 	local case_dir="$TMP_ROOT/archive-entry-symlink"
 	local dist_dir="$case_dir/dist"
@@ -518,6 +536,7 @@ run_checksum_control_character_path_fails_before_checksum
 run_checksum_whitespace_path_fails_before_checksum
 run_archive_whitespace_filename_fails_before_checksum
 run_archive_symlink_fails_before_checksum
+run_unexpected_artifact_entry_fails_before_checksum
 run_archive_entry_symlink_fails
 run_archive_entry_hardlink_fails
 run_archive_duplicate_entry_fails

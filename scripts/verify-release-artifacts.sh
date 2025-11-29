@@ -206,6 +206,24 @@ checksum_manifest_has_archive() {
 	return 1
 }
 
+validate_artifact_directory_entries() {
+	local entry
+	local base
+
+	shopt -s nullglob dotglob
+	for entry in "$ARTIFACT_DIR"/*; do
+		base="$(basename "$entry")"
+		case "$base" in
+			checksums.txt|mnemonas-*.tar.gz)
+				;;
+			*)
+				fail "artifact directory contains an unsupported entry: $base"
+				;;
+		esac
+	done
+	shopt -u nullglob dotglob
+}
+
 format_seen_targets() {
 	local seen="$1"
 	local target
@@ -410,6 +428,7 @@ need_tool tar
 CHECKSUMS="$ARTIFACT_DIR/checksums.txt"
 [[ -e "$CHECKSUMS" ]] || fail "missing checksums file: $CHECKSUMS"
 assert_regular_file "$CHECKSUMS"
+validate_artifact_directory_entries
 validate_checksums_manifest "$CHECKSUMS"
 
 shopt -s nullglob
