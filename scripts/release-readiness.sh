@@ -361,6 +361,12 @@ if ! git rev-parse --verify "$BASE_REF^{commit}" >/dev/null 2>&1; then
 	fail "base ref does not exist: $BASE_REF"
 fi
 
+base_full="$(git rev-parse "$BASE_REF^{commit}")"
+base_short="$(git rev-parse --short=12 "$base_full")"
+if ! git merge-base --is-ancestor "$base_full" HEAD; then
+	fail "base ref is not an ancestor of HEAD: $BASE_REF ($base_short)"
+fi
+
 branch="$(git branch --show-current)"
 [[ -n "$branch" ]] || branch="(detached)"
 head_sha="$(git rev-parse --short=12 HEAD)"

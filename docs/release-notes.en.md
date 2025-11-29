@@ -25,6 +25,7 @@ This release candidate focuses on improving MnemoNAS stability, public-access sa
 - Tightened the release readiness summary: after the recorded full-validation target, `release-readiness` fails by default on non-release-documentation changes and requires refreshed full validation or an explicit draft override.
 - `release-readiness` now requires all four hardening evidence documents to exist and record the same full-validation target, preventing missing evidence from being skipped before release.
 - `release-readiness` also checks that both release-notes drafts record the current full-validation target, so stale validation snapshots fail before release.
+- `release-readiness` rejects a base ref that is not an ancestor of the current HEAD, preventing misleading release-readiness summaries from sibling branch ranges.
 - Streamlined and synchronized Chinese and English documentation, including deployment, configuration, FAQ, roadmap, security, hardening progress, and pre-release review entry points.
 
 ## Release Artifacts
