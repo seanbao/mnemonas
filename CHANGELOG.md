@@ -185,6 +185,7 @@
 - `scripts/release-readiness.sh` 在记录的完整验证目标之后发现非发布文档变更时默认失败；草稿摘要可显式使用 `--allow-post-validation-changes` 放行
 - `scripts/release-readiness.sh` 要求四份 hardening 证据文档存在且记录一致的完整验证目标，避免发布前证据缺失被静默跳过
 - `scripts/release-readiness.sh` 会检查双语 release notes 草稿记录当前完整验证目标，避免发布说明中的验证快照滞后
+- `scripts/release-readiness.sh` 会拒绝不是当前 HEAD 祖先的 base ref，避免用旁支范围生成误导性的发布就绪摘要
 - `scripts/release-readiness.sh` 会检查当前发布分支的本地提交标题是否符合 Conventional Commits，并拒绝遗留的 `fixup!` / `squash!` 临时提交
 - WebDAV COPY/MOVE 目标路径回归覆盖，验证绝对 path-reference 目标，并拒绝包括 `dav/path` 在内的裸相对目标
 - `npm run typecheck` 覆盖前端应用、Playwright 规格和共享 E2E helper
