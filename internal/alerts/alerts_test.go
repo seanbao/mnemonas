@@ -1067,6 +1067,84 @@ func TestEmailErrorDoesNotExposeSMTPSettings(t *testing.T) {
 	}
 }
 
+func TestBuildEmailMessageSanitizesHeaderValues(t *testing.T) {
+	msg := string(buildEmailMessage(
+		"MnemoNAS <alerts@example.com>\r\nBcc: leaked@example.com",
+		[]string{"admin@example.com\nCc: leaked@example.com"},
+		"backup failed\r\nX-Injected: yes",
+		"body",
+	))
+
+	headerBlock, _, ok := strings.Cut(msg, "\r\n\r\n")
+	if !ok {
+		t.Fatalf("email message is missing header/body separator:\n%s", msg)
+	}
+	for _, line := range strings.Split(headerBlock, "\r\n") {
+		if strings.HasPrefix(line, "Bcc:") || strings.HasPrefix(line, "Cc:") || strings.HasPrefix(line, "X-Injected:") {
+			t.Fatalf("email header injection was not sanitized: %q in\n%s", line, headerBlock)
+		}
+	}
+	if strings.Contains(headerBlock, "\nBcc:") || strings.Contains(headerBlock, "\nCc:") || strings.Contains(headerBlock, "\nX-Injected:") {
+		t.Fatalf("email header block contains injected header:\n%s", headerBlock)
+	}
+}
+
+func TestSendEmailSanitizesEnvelopeAndMessageHeaders(t *testing.T) {
+	originalSendSMTPMail := sendSMTPMail
+	defer func() { sendSMTPMail = originalSendSMTPMail }()
+
+	type smtpRequest struct {
+		from string
+		to   []string
+		msg  string
+	}
+	reqCh := make(chan smtpRequest, 1)
+	sendSMTPMail = func(_ string, _ smtp.Auth, from string, to []string, msg []byte) error {
+		reqCh <- smtpRequest{
+			from: from,
+			to:   append([]string(nil), to...),
+			msg:  string(msg),
+		}
+		return nil
+	}
+
+	monitor := NewMonitor(Config{
+		Enabled:      true,
+		EmailEnabled: true,
+		SMTPHost:     "smtp.example.com",
+		SMTPPort:     587,
+		SMTPFrom:     "MnemoNAS <alerts@example.com>\r\nBcc: leaked@example.com",
+		SMTPTo:       []string{"admin@example.com\r\nCc: leaked@example.com"},
+	}, t.TempDir(), zerolog.Nop())
+
+	if err := monitor.SendEvent(context.Background(), EventPayload{
+		Type:    "backup_run",
+		Message: "backup failed\r\nX-Injected: yes",
+	}); err != nil {
+		t.Fatalf("SendEvent() error: %v", err)
+	}
+
+	select {
+	case req := <-reqCh:
+		for _, value := range append([]string{req.from}, req.to...) {
+			if strings.ContainsAny(value, "\r\n") {
+				t.Fatalf("SMTP envelope value contains CR/LF: %q", value)
+			}
+		}
+		headerBlock, _, ok := strings.Cut(req.msg, "\r\n\r\n")
+		if !ok {
+			t.Fatalf("email message is missing header/body separator:\n%s", req.msg)
+		}
+		for _, line := range strings.Split(headerBlock, "\r\n") {
+			if strings.HasPrefix(line, "Bcc:") || strings.HasPrefix(line, "Cc:") || strings.HasPrefix(line, "X-Injected:") {
+				t.Fatalf("email header injection was not sanitized: %q in\n%s", line, headerBlock)
+			}
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for email alert")
+	}
+}
+
 func TestSendEventSendsTelegramWhenConfigured(t *testing.T) {
 	originalTelegramAPIBaseURL := telegramAPIBaseURL
 	defer func() { telegramAPIBaseURL = originalTelegramAPIBaseURL }()
