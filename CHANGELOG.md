@@ -245,7 +245,7 @@
 
 ### Fixed
 - 修复设置 API 修改 `server.trusted_proxy_hops` 后，运行态请求来源和 HTTPS 转发语义识别未立即同步的问题
-- 修复公网 go-live smoke 会把全数字四段但超出 IPv4 范围的输入当作 DNS 主机名接受的问题；手动公网端口复核示例也补充总请求超时，避免半开放连接长时间阻塞。
+- 修复公网 go-live smoke 和 `mnemonas-doctor --public-domain` 会把全数字四段但超出 IPv4 范围的输入当作 DNS 主机名接受的问题；手动公网端口复核示例也补充总请求超时，避免半开放连接长时间阻塞。
 - 修复 Web Husky pre-commit hook，使其解析仓库根目录、切换到 `web/`，并使用前端 lint-staged 配置
 - 修复前端认证初始化：复用已有服务的 E2E 可显式跳过认证状态写入，隔离 E2E 默认失败而不是静默保存空认证状态
 - 修复维护页移动端备份配置示例中长路径被代码块截断的问题

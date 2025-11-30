@@ -622,7 +622,7 @@ PY
   return 0
 }
 
-is_ipv4_literal_host() {
+is_ipv4_like_host() {
   local host="$1"
   local octet
   local -a octets
@@ -630,8 +630,7 @@ is_ipv4_literal_host() {
   IFS='.' read -r -a octets <<< "$host"
   [[ "${#octets[@]}" -eq 4 ]] || return 1
   for octet in "${octets[@]}"; do
-    [[ "$octet" =~ ^[0-9]{1,3}$ ]] || return 1
-    (( 10#$octet >= 0 && 10#$octet <= 255 )) || return 1
+    [[ "$octet" =~ ^[0-9]+$ ]] || return 1
   done
   return 0
 }
@@ -714,7 +713,7 @@ require_safe_public_domain() {
   normalized="${normalized,,}"
   [[ "$normalized" == *.* ]] || die "PUBLIC_DOMAIN must be a fully qualified hostname: $value"
   [[ "$normalized" != "localhost" && "$normalized" != *.localhost ]] || die "PUBLIC_DOMAIN must not be localhost: $value"
-  ! is_ipv4_literal_host "$normalized" || die "PUBLIC_DOMAIN must be a hostname, not an IP address: $value"
+  ! is_ipv4_like_host "$normalized" || die "PUBLIC_DOMAIN must be a hostname, not an IP address: $value"
 }
 
 normalize_public_domain() {
