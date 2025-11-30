@@ -4377,6 +4377,7 @@ run_doctor_input_validation_test() {
   expect_doctor_public_domain_failure "public-domain-control" "nas.example.com"$'\a' "PUBLIC_DOMAIN cannot contain control characters"
   expect_doctor_public_domain_failure "public-domain-localhost" "localhost" "PUBLIC_DOMAIN must be a fully qualified hostname"
   expect_doctor_public_domain_failure "public-domain-ip" "127.0.0.1" "PUBLIC_DOMAIN must be a hostname, not an IP address"
+  expect_doctor_public_domain_failure "public-domain-ipv4-like-overrange" "999.999.999.999" "PUBLIC_DOMAIN must be a hostname, not an IP address"
   expect_doctor_public_domain_failure "public-domain-leading-label-hyphen" "nas.-example.com" "PUBLIC_DOMAIN is invalid"
   expect_doctor_public_domain_failure "public-domain-trailing-label-hyphen" "nas.example-.com" "PUBLIC_DOMAIN is invalid"
   expect_doctor_public_domain_failure "public-domain-long-label" "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.example.com" "PUBLIC_DOMAIN is invalid"

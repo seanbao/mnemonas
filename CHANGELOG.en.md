@@ -104,7 +104,7 @@ This project follows [Semantic Versioning 2.0.0](https://semver.org/).
 
 ### Fixed
 - Fixed `server.trusted_proxy_hops` updates through the settings API not immediately updating runtime client-IP and HTTPS forwarded-header interpretation.
-- Fixed the public go-live smoke accepting four-part numeric inputs outside the IPv4 range as DNS hostnames. Manual public-port checks now include total request timeouts so half-open connections cannot stall the review.
+- Fixed the public go-live smoke and `mnemonas-doctor --public-domain` accepting four-part numeric inputs outside the IPv4 range as DNS hostnames. Manual public-port checks now include total request timeouts so half-open connections cannot stall the review.
 - Fixed the Web Husky pre-commit hook so it resolves the repository root, runs from `web/`, and uses the frontend lint-staged configuration.
 - Fixed frontend authentication setup so reused-server E2E runs can opt into auth-state skips, while isolated E2E runs fail instead of silently saving an empty auth state.
 - Fixed long backup-configuration example paths being clipped in the Maintenance page on mobile layouts.
