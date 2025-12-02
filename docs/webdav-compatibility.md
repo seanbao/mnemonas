@@ -214,7 +214,7 @@ MNEMONAS_WEBDAV_PASSWORD="<mnemonas-or-webdav-password>" \
 ./scripts/webdav-client-smoke.sh
 ```
 
-该脚本会创建临时集合，验证基础读写、URL 编码空格路径、复制、移动、移动后内容一致性和删除操作，然后清理临时数据。每次 curl 请求默认使用 `CURL_CONNECT_TIMEOUT=10` 和 `CURL_MAX_TIME=30`，高延迟网络可通过环境变量调大。它用于协议级回归检查，不替代 Finder、Windows File Explorer、移动端文件管理器或媒体播放器的真实客户端验证。
+该脚本会创建临时集合，验证基础读写、URL 编码空格路径、复制、移动、移动后内容一致性和删除操作，然后清理临时数据。`WEBDAV_URL` 必须是不包含空白、query、fragment 或内嵌凭据的 HTTP(S) WebDAV 根 URL；凭据应通过环境变量传入。每次 curl 请求默认使用 `CURL_CONNECT_TIMEOUT=10` 和 `CURL_MAX_TIME=30`，高延迟网络可通过环境变量调大。它用于协议级回归检查，不替代 Finder、Windows File Explorer、移动端文件管理器或媒体播放器的真实客户端验证。
 
 ### davfs2 示例
 
