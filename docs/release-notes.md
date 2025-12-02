@@ -16,7 +16,7 @@
 - 提升 Web 可见质量，核心页面、公开入口、移动端布局、基础可访问性、运行时错误、失败请求和破碎可见文本已纳入 Playwright 扫描。
 - 加固 systemd、Docker、反向代理、公网访问模板、doctor、公网域名就绪校验、release package 和 release artifact 验证路径；公网 go-live smoke 和 doctor 会拒绝 `localhost`、IP 地址和全数字四段主机名，并给手动端口复核命令设置连接和总耗时上限；Release workflow 会在创建 GitHub Release 前校验归档、checksums、必需目标集合、下载目录未知条目、归档条目类型、重复条目、控制字符路径、空白字符路径、反斜杠路径和歧义路径。
 - Release tag 会在产物构建前校验，必须使用 `vMAJOR.MINOR.PATCH` 或 `v1.2.3-rc.1` 这类语义化预发布形式。
-- 新增可复跑的 WebDAV curl 协议 smoke，可对已运行服务验证基础读写、URL 编码空格路径、复制、移动和删除操作，并通过脚本门禁覆盖。
+- 新增可复跑的 WebDAV curl 协议 smoke，可对已运行服务验证基础读写、URL 编码空格路径、复制、移动和删除操作；脚本会提前拒绝含空白、query、fragment、内嵌凭据的 `WEBDAV_URL` 和非 `0/1` 的 `CURL_INSECURE`，并通过脚本门禁覆盖。
 - 新增 WebDAV 兼容性报告表单，用于收集 Finder、Windows File Explorer、移动端文件管理器、媒体播放器和命令行客户端的验证结果或客户端特定失败。
 - 维护页恢复完成后可复制恢复切换记录，内容包含恢复目标、只读校验、切换步骤和回滚清单，便于记录到工单或值班流程。
 - 设置页目录权限用户矩阵和未保存规则预览可复制权限复核记录，内容包含路径、用户读写判定、命中规则和相关分享影响，并会保留后端持久化近期复核历史；服务端历史不可用时回退当前浏览器记录。
