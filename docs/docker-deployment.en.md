@@ -222,7 +222,7 @@ For a local source build followed by a loopback container smoke test, run:
 make docker-check
 ```
 
-This target builds `mnemonas:latest`, then runs `scripts/docker-smoke.sh` with a temporary `127.0.0.1` port and checks `/health` plus the frontend root page.
+This target builds `mnemonas:latest`, then runs `scripts/docker-smoke.sh` with a temporary `127.0.0.1` port and checks `/health` plus the frontend root page. When `MNEMONAS_DOCKER_SMOKE_HOST` overrides the published host, it only accepts dotted-quad `127.0.0.0/8` loopback IPv4 addresses.
 
 Build base images can be overridden for private caches or regional mirrors:
 
