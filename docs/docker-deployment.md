@@ -221,7 +221,7 @@ docker run --rm --user "$(id -u):$(id -g)" -p 8080:8080 \
 make docker-check
 ```
 
-该目标构建 `mnemonas:latest`，然后通过 `scripts/docker-smoke.sh` 仅在 `127.0.0.1` 发布临时端口，检查 `/health` 和前端根页面。
+该目标构建 `mnemonas:latest`，然后通过 `scripts/docker-smoke.sh` 仅在 `127.0.0.1` 发布临时端口，检查 `/health` 和前端根页面。通过 `MNEMONAS_DOCKER_SMOKE_HOST` 覆盖发布主机时，只接受四段数字形式的 `127.0.0.0/8` loopback IPv4 地址。
 
 可覆盖构建基础镜像，以便使用私有缓存或区域镜像源：
 

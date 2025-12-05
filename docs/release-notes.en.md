@@ -52,6 +52,7 @@ Latest local full-validation snapshot: validation target `5a3e463d02f7`; `GOTOOL
 - `./scripts/test-release-tag.sh`
 - `./scripts/test-release-package.sh`
 - `./scripts/test-release-artifacts.sh`
+- Docker smoke safety test: `scripts/test-docker-smoke.sh`
 - WebDAV curl smoke safety test: `scripts/test-webdav-client-smoke.sh`
 - Release workflow incremental validation: `make workflows-check`, `make scripts-check`, `./scripts/check-secret-leaks.sh`, `make toolchains-check`, `git diff --check`
 - Playwright E2E: `375 passed`
