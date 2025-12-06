@@ -31,7 +31,7 @@ Environment:
   CURL_BIN                       Optional curl binary path.
   CURL_CONNECT_TIMEOUT           Optional curl connection timeout in seconds; default 3.
   CURL_MAX_TIME                  Optional curl per-request timeout in seconds; default 10.
-  PUBLIC_SMOKE_BACKEND_TARGETS   Optional space-separated port:path checks; default "8080:/health 9090:/ 9091:/health".
+  PUBLIC_SMOKE_BACKEND_TARGETS   Optional space-separated port:path checks; must not be blank; default "8080:/health 9090:/ 9091:/health".
 EOF
 }
 
@@ -108,6 +108,8 @@ validate_domain() {
 
 validate_backend_targets() {
     local target port request_path
+    [[ -n "${PUBLIC_SMOKE_BACKEND_TARGETS//[[:space:]]/}" ]] || fail "PUBLIC_SMOKE_BACKEND_TARGETS must include at least one port:path check"
+
     for target in $PUBLIC_SMOKE_BACKEND_TARGETS; do
         [[ "$target" == *:* ]] || fail "PUBLIC_SMOKE_BACKEND_TARGETS entries must use port:path: $target"
         port="${target%%:*}"
