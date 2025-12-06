@@ -183,6 +183,20 @@ run_invalid_timeout_test() {
     assert_file_contains "$case_dir/out.log" "CURL_CONNECT_TIMEOUT must be a positive integer number of seconds"
 }
 
+run_invalid_backend_targets_test() {
+    local case_dir="$TMP_ROOT/invalid-backend-targets"
+    local fake_bin="$case_dir/bin"
+    mkdir -p "$case_dir"
+    make_fake_curl "$fake_bin"
+
+    run_expect_failure "$case_dir/whitespace.log" env \
+        PATH="$fake_bin:$PATH" \
+        PUBLIC_SMOKE_CURL_LOG="$case_dir/whitespace-curl.log" \
+        PUBLIC_SMOKE_BACKEND_TARGETS=$' \t ' \
+        bash "$REPO_ROOT/scripts/public-go-live-smoke.sh" "nas.example.com"
+    assert_file_contains "$case_dir/whitespace.log" "PUBLIC_SMOKE_BACKEND_TARGETS must include at least one port:path check"
+}
+
 run_redirect_variant_test() {
     local case_dir="$TMP_ROOT/redirect-variants"
     local fake_bin="$case_dir/bin"
@@ -268,6 +282,7 @@ mkdir -p "$TMP_ROOT"
 run_success_test
 run_invalid_domain_test
 run_invalid_timeout_test
+run_invalid_backend_targets_test
 run_redirect_variant_test
 run_bad_redirect_test
 run_open_backend_test
