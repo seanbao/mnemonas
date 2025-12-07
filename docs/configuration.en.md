@@ -609,7 +609,7 @@ Diagnostics do not expose webhook URL, webhook headers, `telegram_bot_token`, `w
 
 The same notification channels are used for these events:
 
-- Backup failures, backup-warning runs, explicit restore failures or warnings, post-restore read-only verification failures or warnings, restore-drill failures, stale or missing restore-drill reminders, and retention-check failures or warnings.
+- Backup failures, backup-warning runs, explicit restore failures or warnings, post-restore read-only verification failures or warnings, restore-drill failures or warnings, stale or missing restore-drill reminders, and retention-check failures or warnings.
 - Disk-health anomalies, scrub anomalies, login rate-limit events, and directory access or share policy changes.
 - Aggregate reminders for enabled shares that expire within 72 hours.
 

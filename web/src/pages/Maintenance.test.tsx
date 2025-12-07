@@ -247,6 +247,8 @@ describe('MaintenancePage', () => {
       artifact_kept: false,
       file_count: 12,
       verified_bytes: 4096,
+      warning: false,
+      warnings: [],
     },
     restore_drill_history: [{
       id: '20260509T030000.000000000Z',
@@ -260,6 +262,8 @@ describe('MaintenancePage', () => {
       artifact_kept: false,
       file_count: 12,
       verified_bytes: 4096,
+      warning: false,
+      warnings: [],
     }, {
       id: '20260508T030000.000000000Z',
       job_id: 'external-disk',
@@ -270,6 +274,8 @@ describe('MaintenancePage', () => {
       artifact_kept: false,
       file_count: 0,
       verified_bytes: 0,
+      warning: false,
+      warnings: [],
       error_message: 'manifest missing',
       failure_category: 'integrity_check',
     }],
@@ -1328,6 +1334,34 @@ describe('MaintenancePage', () => {
       expect(screen.queryByText('backend_raw_drill_category')).toBeNull()
     })
 
+    it('shows latest restore drill warnings in the backup summary', async () => {
+      const drillWarning = '恢复演练已完成，但临时恢复目录清理失败；请检查备份目标中的 restore-drills 目录。'
+      mockListBackupJobs.mockResolvedValue([{
+        ...mockBackupJobs[0],
+        last_restore_drill: {
+          ...mockBackupJobs[0].last_restore_drill,
+          warning: true,
+          warnings: [drillWarning],
+        },
+        restore_drill_history: [
+          {
+            ...mockBackupJobs[0].restore_drill_history![0],
+            warning: true,
+            warnings: [drillWarning],
+          },
+          mockBackupJobs[0].restore_drill_history![1],
+        ],
+      }])
+
+      render(<Maintenance />)
+
+      await waitFor(() => {
+        expect(screen.getByText('完成（有警告）')).toBeTruthy()
+        expect(screen.getByText(drillWarning)).toBeTruthy()
+        expect(screen.getByText('近 2 次包含 1 次警告')).toBeTruthy()
+      })
+    })
+
     it('shows restore history details when multiple restores exist', async () => {
       mockListBackupJobs.mockResolvedValue([{
         ...mockBackupJobs[0],
@@ -1663,6 +1697,33 @@ describe('MaintenancePage', () => {
           signal: expect.any(AbortSignal),
         }))
         expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({ title: '恢复演练已完成' }))
+      })
+    })
+
+    it('shows warning toast when restore drill leaves cleanup warnings', async () => {
+      const user = userEvent.setup()
+      const drillWarning = '恢复演练已完成，但临时恢复目录清理失败；请检查备份目标中的 restore-drills 目录。'
+      mockListBackupJobs.mockResolvedValue(mockBackupJobs)
+      mockRunBackupRestoreDrill.mockResolvedValueOnce({
+        ...mockBackupJobs[0].last_restore_drill!,
+        warning: true,
+        warnings: [drillWarning],
+      })
+
+      render(<Maintenance />)
+
+      await waitFor(() => {
+        expect(screen.getByText('外置硬盘备份')).toBeTruthy()
+      })
+
+      await user.click(screen.getByRole('button', { name: /恢复演练/ }))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '恢复演练完成，有警告',
+          description: drillWarning,
+          color: 'warning',
+        })
       })
     })
 

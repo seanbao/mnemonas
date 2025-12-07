@@ -206,7 +206,7 @@ curl -X POST -b cookies.txt \
   -d '{"keep_artifact":false}'
 ```
 
-For `local`, the restore drill first confirms that the snapshot does not contain files missing from the manifest, then copies the latest snapshot into a temporary directory and verifies every file size, permission mode, and SHA-256 from the manifest. Set `keep_artifact = true` to retain the restored directory for manual inspection. For `restic`, the drill currently runs `restic check`; for `rclone`, it runs `rclone check --one-way` to verify remote consistency.
+For `local`, the restore drill first confirms that the snapshot does not contain files missing from the manifest, then copies the latest snapshot into a temporary directory and verifies every file size, permission mode, and SHA-256 from the manifest. Set `keep_artifact = true` to retain the restored directory for manual inspection. With the default non-retained artifact behavior, if verification completes but temporary restore-directory cleanup fails, the drill remains completed and returns `warning=true`, `warnings[]`, `artifact_kept=true`, and `restored_path` so the Maintenance page can surface the retained artifact. For `restic`, the drill currently runs `restic check`; for `rclone`, it runs `rclone check --one-way` to verify remote consistency.
 
 To retrieve data from a `local`, `restic`, or `rclone` job, restore into an explicit independent directory:
 
@@ -521,7 +521,7 @@ Store repository passwords and cloud credentials in a password manager or secret
 
 ## Backup Failure Alerts
 
-Built-in `[[backup.jobs]]` reuse `[alerts]` notification channels. MnemoNAS sends `backup_run`, `backup_restore`, `backup_restore_verify`, `backup_restore_drill`, or `backup_retention_check` events when a backup fails, an explicit restore fails, an explicit restore completes with warnings, a post-restore read-only verification fails or reports warnings, a restore drill fails, a restore drill is missing or stale beyond `restore_drill_stale_after`, a successful backup has retention-check warnings, or a manual retention check fails or reports warnings.
+Built-in `[[backup.jobs]]` reuse `[alerts]` notification channels. MnemoNAS sends `backup_run`, `backup_restore`, `backup_restore_verify`, `backup_restore_drill`, or `backup_retention_check` events when a backup fails, an explicit restore fails, an explicit restore completes with warnings, a post-restore read-only verification fails or reports warnings, a restore drill fails or completes with warnings, a restore drill is missing or stale beyond `restore_drill_stale_after`, a successful backup has retention-check warnings, or a manual retention check fails or reports warnings.
 
 The event `message` is a fixed public summary and does not include job names, paths, or raw error text. Event details contain only job ID, run ID, job type, trigger, status, timestamps, file/byte/snapshot counts, warning count, error-message presence, failure category, and whether location details were omitted. They do not include job names, sources, backup targets, restore target paths, snapshot paths, manifest paths, raw warnings, or raw error text.
 
