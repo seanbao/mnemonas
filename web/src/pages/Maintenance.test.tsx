@@ -1966,8 +1966,9 @@ describe('MaintenancePage', () => {
       expect(mockPreviewBackupRestoreJob).not.toHaveBeenCalled()
     })
 
-    it('keeps the original restore target for preview matching and follow-up verification', async () => {
+    it('keeps the normalized original restore target for preview matching and follow-up verification', async () => {
       mockListBackupJobs.mockResolvedValue(mockBackupJobs)
+      const rawTarget = '/restore//token=restore-secret/'
       const originalTarget = '/restore/token=restore-secret'
       const redactedTarget = '/restore/token=<redacted>'
       mockPreviewBackupRestoreJob.mockResolvedValueOnce({
@@ -2028,7 +2029,7 @@ describe('MaintenancePage', () => {
       })
 
       fireEvent.click(screen.getByRole('button', { name: /^恢复$/ }))
-      fireEvent.change(screen.getByLabelText('目标目录'), { target: { value: originalTarget } })
+      fireEvent.change(screen.getByLabelText('目标目录'), { target: { value: rawTarget } })
       fireEvent.click(screen.getByRole('button', { name: /生成预览/ }))
 
       await waitFor(() => {
