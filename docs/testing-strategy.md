@@ -109,7 +109,7 @@ WEBDAV_URL=http://localhost:8080/dav ./scripts/webdav-client-smoke.sh
 隔离 runner 会先启动临时后端、临时存储和非默认端口，再调用 `scripts/e2e-test.sh`。
 隔离根目录必须位于 `/tmp` 或当前 checkout 下，且不能包含控制字符、`..` 或符号链接路径组件。
 设置 `RUN_RCLONE_WEBDAV=1` 时，隔离 runner 会把该开关传给底层 E2E，用已安装的 `rclone` 执行 WebDAV 客户端 smoke，覆盖上传、下载、移动/重命名、列出和清理。
-`scripts/webdav-client-smoke.sh` 用于已经运行的服务，提供独立 curl 协议 smoke，并覆盖 URL 编码空格路径读写；`WEBDAV_URL` 必须是不包含空白、query、fragment 或内嵌凭据的 HTTP(S) WebDAV 根 URL，需要认证时通过 `MNEMONAS_WEBDAV_USERNAME` 和 `MNEMONAS_WEBDAV_PASSWORD` 传入凭据。每次 curl 请求默认使用 `CURL_CONNECT_TIMEOUT=10` 和 `CURL_MAX_TIME=30`，高延迟网络可通过环境变量调大。
+`scripts/webdav-client-smoke.sh` 用于已经运行的服务，提供独立 curl 协议 smoke，并覆盖 URL 编码空格路径读写；`WEBDAV_URL` 必须是不包含空白、query、fragment、内嵌凭据、反斜杠、编码斜杠或编码反斜杠，也不包含 `.`/`..` 路径段的 HTTP(S) WebDAV 根 URL，需要认证时通过 `MNEMONAS_WEBDAV_USERNAME` 和 `MNEMONAS_WEBDAV_PASSWORD` 传入凭据。每次 curl 请求默认使用 `CURL_CONNECT_TIMEOUT=10` 和 `CURL_MAX_TIME=30`，高延迟网络可通过环境变量调大。
 Playwright 默认后端端口为 `18180`，默认前端端口为 `14173`。
 Playwright 隔离后端使用 2 小时 access token 生命周期和 168 小时 refresh token 生命周期，降低长时间并行运行时共享 storageState 过期的风险。
 隔离后端还会创建公开文件分享、密码分享、停用分享和文件夹分享 fixture，并写入 `MNEMONAS_E2E_ROOT/backend/*-share-id.txt`，供公开分享、公开入口布局和运行时完整性用例使用；默认隔离运行缺少这些 fixture 时应失败，而不是静默跳过覆盖。
