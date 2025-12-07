@@ -45,7 +45,8 @@ import {
 import { EmptyState } from '@/components/ui/EmptyState'
 import { FileIcon } from '@/components/ui/FileIcon'
 import { GENERIC_LOAD_ERROR_DESCRIPTION, getUserFacingErrorDescription } from '@/lib/apiMessages'
-import { normalizePath } from '@/lib/utils'
+import { formatShareReviewReport } from '@/lib/shareReview'
+import { copyTextToClipboard, normalizePath } from '@/lib/utils'
 import { normalizeShareReviewFilter, type ShareReviewFilter } from './reviewFilters'
 
 function getShareFeatureState(error: unknown): 'disabled' | 'unavailable' | null {
@@ -498,6 +499,21 @@ export function ShareManager({
     }
   }
 
+  const handleCopyReviewReport = async () => {
+    try {
+      await copyTextToClipboard(formatShareReviewReport(pathFilteredShares, undefined, {
+        pathFilter: normalizedPathFilter || undefined,
+      }))
+      addToast({ title: '分享复核摘要已复制', color: 'success' })
+    } catch {
+      addToast({
+        title: '复制分享复核摘要失败',
+        description: '请检查浏览器剪贴板权限。',
+        color: 'danger',
+      })
+    }
+  }
+
   const handleToggle = async (share: Share) => {
     toggleAbortControllersRef.current.get(share.id)?.abort()
     const controller = new AbortController()
@@ -843,18 +859,29 @@ export function ShareManager({
               </div>
             </div>
           </div>
-          {highRiskShares.length > 0 && (
+          <div className="flex flex-wrap gap-2 self-start lg:self-center">
             <Button
-              color="danger"
               variant="flat"
               size="sm"
-              isLoading={isDisablingHighRisk}
-              onPress={handleDisableHighRisk}
-              className="self-start rounded-lg lg:self-center"
+              startContent={<Copy size={16} />}
+              onPress={handleCopyReviewReport}
+              className="rounded-lg"
             >
-              停用需处理 ({highRiskShares.length})
+              复制摘要
             </Button>
-          )}
+            {highRiskShares.length > 0 && (
+              <Button
+                color="danger"
+                variant="flat"
+                size="sm"
+                isLoading={isDisablingHighRisk}
+                onPress={handleDisableHighRisk}
+                className="rounded-lg"
+              >
+                停用需处理 ({highRiskShares.length})
+              </Button>
+            )}
+          </div>
         </div>
 
         <div className="mt-4 grid gap-2 sm:grid-cols-2 xl:grid-cols-5">
