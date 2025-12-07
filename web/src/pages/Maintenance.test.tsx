@@ -1829,6 +1829,43 @@ describe('MaintenancePage', () => {
       })
     })
 
+    it('downloads a restore summary from the completed restore dialog', async () => {
+      const user = userEvent.setup()
+      mockListBackupJobs.mockResolvedValue(mockBackupJobs)
+
+      render(<Maintenance />)
+
+      await waitFor(() => {
+        expect(screen.getByText('外置硬盘备份')).toBeTruthy()
+      })
+
+      await user.click(screen.getByRole('button', { name: /^恢复$/ }))
+      fireEvent.change(screen.getByLabelText('目标目录'), { target: { value: '/restore/mnemonas' } })
+      await user.click(screen.getByRole('button', { name: /生成预览/ }))
+
+      await waitFor(() => {
+        expect(screen.getByText('预览已确认')).toBeTruthy()
+      })
+
+      await user.click(screen.getByRole('button', { name: /开始恢复/ }))
+
+      await waitFor(() => {
+        expect(screen.getByText('恢复已完成')).toBeTruthy()
+      })
+
+      mockDownloadBackupRestoreReport.mockClear()
+      mockAddToast.mockClear()
+      const exportButtons = screen.getAllByRole('button', { name: /导出摘要/ })
+      await user.click(exportButtons[exportButtons.length - 1])
+
+      await waitFor(() => {
+        expect(mockDownloadBackupRestoreReport).toHaveBeenCalledWith('external-disk', expect.objectContaining({
+          signal: expect.any(AbortSignal),
+        }))
+        expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({ title: '恢复摘要导出已开始' }))
+      })
+    })
+
     it('aborts pending restore summary export when the page unmounts and ignores abort feedback', async () => {
       const user = userEvent.setup()
       const exportRequest = createDeferred<void>()

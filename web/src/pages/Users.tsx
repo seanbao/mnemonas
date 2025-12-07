@@ -52,7 +52,18 @@ import { listUsers, createUser, deleteUser, resetUserPassword, revokeUserSession
 import { getStoredUser } from '@/api/auth'
 import { formatBytes, formatDate, cn, normalizeUserHomeDir } from '@/lib/utils'
 import { formatUserAccessReviewReport, getUserAccessContext, summarizeUserAccessReview } from '@/lib/userAccessContext'
-import { formatUserQuotaSummaryReport, getQuotaStatus, quotaBytesToFormValue, quotaFormValueToBytes, quotaUnits, userNeedsQuotaAttention, type QuotaUnit } from '@/lib/userQuota'
+import {
+  formatUserQuotaSummaryReport,
+  getQuotaStatus,
+  getUserQuotaAggregateStatus,
+  quotaBytesToFormValue,
+  quotaFormValueToBytes,
+  quotaUnits,
+  summarizeUserQuotas,
+  userNeedsQuotaAttention,
+  type QuotaUnit,
+  type UserQuotaAggregateStatus,
+} from '@/lib/userQuota'
 import { formatUserAccountAttentionReport, summarizeUserAccountAttention } from '@/lib/userAccountAttention'
 import { buildUserListViewCsv, getUserListView, userListExportFilename, type UserListFilter, type UserListSort } from '@/lib/userListView'
 import { triggerBrowserDownload } from '@/lib/downloadResponse'
@@ -414,6 +425,19 @@ function getUsersActionSuccessToast(
       }
       return { title: options?.disabled ? '用户已禁用' : '用户已启用', color: 'success' }
   }
+}
+
+function getQuotaAggregateBarClass(tone: UserQuotaAggregateStatus['tone']): string {
+  if (tone === 'danger') {
+    return 'bg-danger/70'
+  }
+  if (tone === 'warning') {
+    return 'bg-warning/70'
+  }
+  if (tone === 'success') {
+    return 'bg-success/70'
+  }
+  return 'bg-default-300'
 }
 
 // Role badge component
@@ -1177,6 +1201,12 @@ export function UsersPage() {
   const activeUserCount = users.filter((user) => !user.disabled).length
   const accountAttentionSummary = summarizeUserAccountAttention(users)
   const accountAttentionCount = accountAttentionSummary.attentionCount
+  const quotaSummary = summarizeUserQuotas(users)
+  const quotaAggregate = getUserQuotaAggregateStatus(quotaSummary)
+  const quotaAggregateProgressValue = quotaAggregate.percent === null ? 0 : Math.min(100, Math.max(0, quotaAggregate.percent))
+  const quotaAggregateProgressText = quotaAggregate.percent === null
+    ? `未设置总配额，用户总用量 ${formatBytes(quotaSummary.usedBytes)}`
+    : `${quotaAggregate.percent}% 已用，${quotaAggregate.detail}`
   const quotaAttentionCount = users.filter(userNeedsQuotaAttention).length
   const accessReviewSummary = summarizeUserAccessReview(users)
   const accessReviewCount = accessReviewSummary.reviewCount
@@ -1368,6 +1398,63 @@ export function UsersPage() {
           ariaLabel="查看复核提示用户"
         />
       </div>
+
+      {users.length > 0 && (
+        <section
+          className="mb-4 rounded-lg border border-divider bg-content1/70 px-4 py-3"
+          aria-label="用户配额总览"
+        >
+          <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+            <div className="min-w-0">
+              <div className="flex min-w-0 flex-wrap items-center gap-2">
+                <HardDrive size={16} className="shrink-0 text-default-500" />
+                <h2 className="text-sm font-semibold text-foreground">用户配额总览</h2>
+                <Chip size="sm" variant="flat" color={quotaAggregate.tone}>
+                  {quotaAggregate.label}
+                </Chip>
+              </div>
+              <p className="mt-1 text-xs text-default-500">{quotaAggregate.detail}</p>
+            </div>
+            <div className="grid grid-cols-2 gap-3 text-xs sm:grid-cols-4 lg:min-w-[28rem]">
+              <div>
+                <div className="text-default-500">已设配额</div>
+                <div className="mt-1 font-semibold text-foreground">{quotaSummary.limitedCount} 个</div>
+              </div>
+              <div>
+                <div className="text-default-500">未设配额</div>
+                <div className="mt-1 font-semibold text-foreground">{quotaSummary.unlimitedCount} 个</div>
+              </div>
+              <div>
+                <div className="text-default-500">受限用量</div>
+                <div className="mt-1 font-semibold text-foreground">
+                  {formatBytes(quotaSummary.limitedUsedBytes)}
+                  {quotaSummary.quotaBytes > 0 && ` / ${formatBytes(quotaSummary.quotaBytes)}`}
+                </div>
+              </div>
+              <div>
+                <div className="text-default-500">需复核</div>
+                <div className="mt-1 font-semibold text-foreground">
+                  {quotaSummary.attentionCount} 个
+                </div>
+              </div>
+            </div>
+          </div>
+          <div
+            role="progressbar"
+            aria-label="用户总配额使用率"
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-valuenow={quotaAggregate.percent === null ? undefined : quotaAggregateProgressValue}
+            aria-valuetext={quotaAggregateProgressText}
+            className={cn('mt-3 h-2 overflow-hidden rounded-full bg-content2', quotaAggregate.percent === null && 'opacity-60')}
+          >
+            <div
+              className={cn('h-full rounded-full transition-all duration-500', getQuotaAggregateBarClass(quotaAggregate.tone))}
+              style={{ width: quotaAggregate.percent === null ? '0%' : `${quotaAggregateProgressValue}%` }}
+            />
+          </div>
+        </section>
+      )}
 
       {/* User List */}
       <Card className="card-mnemonas flex-none overflow-visible lg:min-h-0 lg:flex-1 lg:overflow-hidden">
