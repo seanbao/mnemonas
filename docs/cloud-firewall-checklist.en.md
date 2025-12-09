@@ -46,6 +46,8 @@ Run from an external network:
 
 This script combines public HTTPS health, same-domain HTTP-to-HTTPS redirect, and `8080/9090/9091` backend-port-unreachable checks into one smoke. If the repository script is not available, run the equivalent commands manually from an external network:
 
+To check custom backend ports, set `PUBLIC_SMOKE_BACKEND_TARGETS='18080:/health 19090:/'`. Each entry uses `port:path`, where path must be an unambiguous absolute path without query strings, fragments, userinfo, backslashes, encoded slashes, encoded backslashes, empty path segments, or `.`/`..` path segments.
+
 ```bash
 curl -I https://nas.example.com/health
 curl --connect-timeout 3 --max-time 10 http://nas.example.com:8080/health
