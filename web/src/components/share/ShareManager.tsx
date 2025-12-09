@@ -220,11 +220,11 @@ function getShareRiskReasonMessage(reason: ShareRiskReason): string {
   return shareRiskReasonMessages[reason.code] ?? getShareRiskFallbackReasonMessage(reason.level)
 }
 
-function getShareActivityReviewRoute(path: string): string {
-  const params = new URLSearchParams({
-    action_group: 'share',
-    path,
-  })
+function getShareActivityReviewRoute(path?: string): string {
+  const params = new URLSearchParams({ action_group: 'share' })
+  if (path) {
+    params.set('path', path)
+  }
   return `/activity?${params.toString()}`
 }
 
@@ -668,6 +668,10 @@ export function ShareManager({
     navigate(getShareActivityReviewRoute(share.path))
   }
 
+  const handleReviewHistory = () => {
+    navigate(getShareActivityReviewRoute(normalizedPathFilter || undefined))
+  }
+
   if (isLoading) {
     return (
       <div className="flex items-center justify-center py-12">
@@ -860,6 +864,15 @@ export function ShareManager({
             </div>
           </div>
           <div className="flex flex-wrap gap-2 self-start lg:self-center">
+            <Button
+              variant="flat"
+              size="sm"
+              startContent={<Activity size={16} />}
+              onPress={handleReviewHistory}
+              className="rounded-lg"
+            >
+              查看复核历史
+            </Button>
             <Button
               variant="flat"
               size="sm"

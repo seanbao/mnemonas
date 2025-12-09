@@ -18,6 +18,7 @@
 - Release tag 会在产物构建前校验，必须使用 `vMAJOR.MINOR.PATCH` 或 `v1.2.3-rc.1` 这类语义化预发布形式。
 - 新增可复跑的 WebDAV curl 协议 smoke，可对已运行服务验证基础读写、URL 编码空格路径、复制、移动和删除操作，并通过脚本门禁覆盖。
 - 新增 WebDAV 兼容性报告表单，用于收集 Finder、Windows File Explorer、移动端文件管理器、媒体播放器和命令行客户端的验证结果或客户端特定失败。
+- 维护页恢复完成后可复制恢复切换记录，内容包含恢复目标、只读校验、切换步骤和回滚清单，便于记录到工单或值班流程。
 - 收紧发布就绪摘要：记录的完整验证目标之后如出现非发布文档变更，`release-readiness` 默认失败，并要求刷新完整验证或显式草稿放行。
 - `release-readiness` 现在要求四份 hardening 证据文档都存在，并且都记录同一个完整验证目标，避免发布前证据缺失被静默跳过。
 - `release-readiness` 还会检查双语 release notes 草稿记录当前完整验证目标，避免发布说明中的验证快照滞后。
@@ -38,7 +39,7 @@ Release workflow 预期生成以下产物：
 
 当前硬化分支已有以下验证证据；最终发布前应以最新 tag、Release workflow 结果和必要的环境验证为准：
 
-最近本地完整验证快照：验证目标 `a854d50b612a`，`GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master` 通过，覆盖 `make check`、依赖安全扫描、示例配置、public-access 模板、公网 go-live 有效 DNS label、重复尾点、完整域名、同域 HTTPS 重定向变体、doctor public-domain DNS label 边界与 go-live/doctor `localhost`/IPv4 字面量拒绝校验、proto 再生成稳定性、Rust fmt/test/clippy、前端 lint/typecheck/unit/build、Playwright 369 个 E2E 用例、systemd 升级/回退 installer 回归、WebDAV COPY/MOVE 后内容一致性和 MOVE 源路径清理 smoke、恢复演练清理失败警告路径、恢复完成弹窗导出摘要路径、用户配额总览路径和布局完整性验证、Docker build 和 Docker smoke。Docker smoke 使用 Docker 自动分配的 loopback 端口 `http://127.0.0.1:32816`。
+最近本地完整验证快照：验证目标 `52a7adf82ae4`，`GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master` 通过，覆盖 `make check`、依赖安全扫描、示例配置、public-access 模板、公网 go-live 有效 DNS label、重复尾点、完整域名、同域 HTTPS 重定向变体、doctor public-domain DNS label 边界与 go-live/doctor `localhost`/IPv4 字面量拒绝校验、proto 再生成稳定性、Rust fmt/test/clippy、前端 lint/typecheck/unit/build、Playwright 369 个 E2E 用例、systemd 升级/回退 installer 回归、WebDAV COPY/MOVE 后内容一致性和 MOVE 源路径清理 smoke、恢复演练清理失败警告路径、恢复完成弹窗导出摘要路径、用户配额总览路径、分享复核摘要复制路径、当前范围复核历史入口和布局完整性验证、Docker build 和 Docker smoke。Docker smoke 使用 Docker 自动分配的 loopback 端口 `http://127.0.0.1:32818`。
 
 - `GOTOOLCHAIN=local ./scripts/verify-changed.sh`
 - `GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master`
@@ -50,7 +51,7 @@ Release workflow 预期生成以下产物：
 - WebDAV curl smoke safety test：`scripts/test-webdav-client-smoke.sh`
 - Release workflow 增量验证：`make workflows-check`、`make scripts-check`、`./scripts/check-secret-leaks.sh`、`make toolchains-check`、`git diff --check`
 - Playwright E2E：`369 passed`
-- 前端单测：`3060 passed`
+- 前端单测：`3065 passed`
 - Docker build 和 `scripts/docker-smoke.sh`
 
 最终发布前如代码、脚本、配置、文档或 workflow 再次变更，应重跑对应验证。

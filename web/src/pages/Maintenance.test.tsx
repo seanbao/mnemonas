@@ -1,10 +1,11 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { act, fireEvent } from '@testing-library/react'
 import { render, screen, waitFor, within } from '@/test/utils'
 import userEvent from '@testing-library/user-event'
 import Maintenance from './Maintenance'
 
 const mockAddToast = vi.fn()
+const originalClipboardDescriptor = Object.getOwnPropertyDescriptor(navigator, 'clipboard')
 
 const { mockUser } = vi.hoisted(() => ({
   mockUser: { id: 'u1', username: 'admin', role: 'admin' as const, email: 'admin@local', homeDir: '/' },
@@ -553,6 +554,14 @@ describe('MaintenancePage', () => {
       looks_like_storage_root: true,
       warnings: [],
     })
+  })
+
+  afterEach(() => {
+    if (originalClipboardDescriptor) {
+      Object.defineProperty(navigator, 'clipboard', originalClipboardDescriptor)
+    } else {
+      Reflect.deleteProperty(navigator, 'clipboard')
+    }
   })
 
   it('passes abort signals to maintenance queries', async () => {
@@ -1917,6 +1926,11 @@ describe('MaintenancePage', () => {
     })
 
     it('restores a local backup from the task list', async () => {
+      const writeText = vi.fn().mockResolvedValue(undefined)
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: { writeText },
+      })
       mockListBackupJobs.mockResolvedValue(mockBackupJobs)
 
       render(<Maintenance />)
@@ -1962,6 +1976,20 @@ describe('MaintenancePage', () => {
         expect(screen.getByText('恢复已完成')).toBeTruthy()
         expect(screen.getByText('切换准备')).toBeTruthy()
       })
+
+      fireEvent.click(screen.getByRole('button', { name: /复制切换记录/ }))
+
+      await waitFor(() => {
+        expect(writeText).toHaveBeenCalledTimes(1)
+      })
+      const report = writeText.mock.calls[0]?.[0] as string
+      expect(report).toContain('恢复切换记录')
+      expect(report).toContain('任务 ID：external-disk')
+      expect(report).toContain('恢复目标：/restore/mnemonas')
+      expect(report).toContain('只读校验：检查完成；检查 12 个文件 · 4 KB')
+      expect(report).toContain('切换步骤\n1. 校验恢复目录')
+      expect(report).toContain('回滚清单\n1. 指回原 storage.root')
+      expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({ title: '恢复切换记录已复制' }))
     })
 
     it('blocks restore preview when the target path is relative', async () => {

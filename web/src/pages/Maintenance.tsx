@@ -17,6 +17,7 @@ import {
   FileWarning,
   RotateCcw,
   ListChecks,
+  Copy,
 } from 'lucide-react'
 import { PageHeader } from '@/components/ui/PageHeader'
 import { StatCard } from '@/components/ui/StatCard'
@@ -50,7 +51,7 @@ import {
   type ScrubResult,
   type ScrubError,
 } from '@/api/files'
-import { cn, formatBytes, formatDuration, hasControlCharacter } from '@/lib/utils'
+import { cn, copyTextToClipboard, formatBytes, formatDuration, hasControlCharacter } from '@/lib/utils'
 import { GENERIC_ACTION_ERROR_DESCRIPTION, GENERIC_LOAD_ERROR_DESCRIPTION, getUserFacingErrorDescription } from '@/lib/apiMessages'
 import { backupJobNeedsAttention, getBackupAttentionNextSteps, getBackupAttentionReasons } from '@/lib/backupAttention'
 import { redactDiagnosticSecretFragments } from '@/lib/diagnosticMessages'
@@ -64,6 +65,7 @@ type RestoreMutationRequest = RestorePreviewMutationRequest
 type RestoreVerifyMutationRequest = { jobId: string; targetPath: string; signal: AbortSignal }
 type BatchRestoreMutationRequest = { items: BackupBatchRestoreItemRequest[]; signal: AbortSignal }
 type RestorePreviewRequestSnapshot = Omit<RestorePreviewMutationRequest, 'signal'>
+const clipboardWriteFailureDescription = '请检查浏览器剪贴板权限。'
 
 function createActionAbortController(ref: AbortControllerRef): AbortController {
   ref.current?.abort()
@@ -1032,6 +1034,71 @@ function RestoreChecklistBlock({
   )
 }
 
+function getRestoreVerificationReportText(
+  verifyResult: BackupRestoreVerifyResult | null,
+  isVerifying: boolean,
+): string {
+  if (isVerifying) {
+    return '检查中'
+  }
+  if (!verifyResult) {
+    return '尚未完成恢复目录检查'
+  }
+  const warnings = verifyResult.warnings ?? []
+  const statusText = verifyResult.status === 'failed'
+    ? '检查失败'
+    : warnings.length > 0
+      ? '检查完成，有警告'
+      : '检查完成'
+  return `${statusText}；${getBackupRestoreVerifyMetricText(verifyResult)}`
+}
+
+function formatRestoreChecklistItems(items: string[] | undefined): string[] {
+  if (!items || items.length === 0) {
+    return ['无']
+  }
+  return items.map((item, index) => `${index + 1}. ${item}`)
+}
+
+function formatRestoreCutoverReport(
+  result: BackupRestoreResult,
+  verifyResult: BackupRestoreVerifyResult | null,
+  isVerifying: boolean,
+): string {
+  const restoreWarnings = result.warnings ?? []
+  const verifyWarnings = verifyResult?.warnings ?? []
+  const sections = [
+    '恢复切换记录',
+    `任务 ID：${result.job_id}`,
+    `恢复状态：${getBackupTaskStatusLabel(result.status)}`,
+    `恢复目标：${result.target_path}`,
+    `恢复内容：${getBackupRestoreMetricText(result)}`,
+    `配置文件：${result.config_restored ? (result.config_path ?? '已恢复配置文件') : '未恢复配置文件'}`,
+    `只读校验：${getRestoreVerificationReportText(verifyResult, isVerifying)}`,
+    `存储结构：${verifyResult?.looks_like_storage_root ? '可作为完整 storage.root 候选目录' : '未确认完整 storage.root 结构'}`,
+  ]
+
+  if (result.error_message) {
+    sections.push(`恢复错误：${getBackupDiagnosticDisplayMessage(result.error_message)}`)
+  }
+  if (restoreWarnings.length > 0) {
+    sections.push(`恢复警告：${restoreWarnings.map(getBackupDiagnosticDisplayMessage).join('；')}`)
+  }
+  if (verifyWarnings.length > 0) {
+    sections.push(`校验警告：${verifyWarnings.map(getBackupDiagnosticDisplayMessage).join('；')}`)
+  }
+
+  return [
+    ...sections,
+    '',
+    '切换步骤',
+    ...formatRestoreChecklistItems(result.cutover_checklist),
+    '',
+    '回滚清单',
+    ...formatRestoreChecklistItems(result.rollback_checklist),
+  ].join('\n')
+}
+
 function RestoreCutoverChecklist({
   result,
   verifyResult,
@@ -1054,6 +1121,18 @@ function RestoreCutoverChecklist({
     ? 'border-warning/20 bg-warning/10'
     : 'border-success/20 bg-success/10'
   const completionTitleClass = restoreFailed ? 'text-danger' : hasRestoreWarnings ? 'text-warning' : 'text-success'
+  const handleCopyRestoreCutoverReport = async () => {
+    try {
+      await copyTextToClipboard(formatRestoreCutoverReport(result, verifyResult, isVerifying))
+      addToast({ title: '恢复切换记录已复制', color: 'success' })
+    } catch {
+      addToast({
+        title: '复制恢复切换记录失败',
+        description: clipboardWriteFailureDescription,
+        color: 'danger',
+      })
+    }
+  }
 
   return (
     <div className="space-y-4">
@@ -1064,6 +1143,19 @@ function RestoreCutoverChecklist({
           </div>
           <BackupStatusChip status={result.status} warning={hasRestoreWarnings} />
         </div>
+        {!restoreFailed && (
+          <div className="mt-3">
+            <Button
+              size="sm"
+              variant="flat"
+              className="rounded-lg"
+              startContent={<Copy size={14} />}
+              onPress={handleCopyRestoreCutoverReport}
+            >
+              复制切换记录
+            </Button>
+          </div>
+        )}
         <div className="mt-2 text-default-600">{getBackupRestoreMetricText(result)}</div>
         <div className="mt-1 truncate font-mono text-xs text-default-500" title={result.target_path}>
           {result.target_path}
