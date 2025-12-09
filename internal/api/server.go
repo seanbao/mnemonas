@@ -2012,6 +2012,9 @@ func (s *Server) setupRoutes() {
 			r.Post("/access-check", s.handleCheckPathAccess)
 			r.Post("/access-preview", s.handlePreviewPathAccess)
 			r.Post("/access-report", s.handleReportPathAccess)
+			r.Get("/access-reviews", s.handleListDirectoryAccessReviewRecords)
+			r.Post("/access-reviews", s.handleCreateDirectoryAccessReviewRecord)
+			r.Delete("/access-reviews", s.handleClearDirectoryAccessReviewRecords)
 			r.Post("/alerts/test", s.handleSendTestAlert)
 			r.Get("/security-check", s.handleGetSecurityCheck)
 			r.Get("/webdav-credentials", s.handleGetWebDAVCredentials)
@@ -9740,6 +9743,21 @@ type pathAccessPreviewRequest struct {
 	DirectoryAccessRules []config.DirectoryAccessRuleConfig `json:"directory_access_rules"`
 }
 
+type createDirectoryAccessReviewRecordRequest struct {
+	Title                   string `json:"title"`
+	Path                    string `json:"path"`
+	Preview                 bool   `json:"preview"`
+	Users                   int    `json:"users"`
+	ReadAllowed             int    `json:"read_allowed"`
+	ReadDenied              int    `json:"read_denied"`
+	WriteAllowed            int    `json:"write_allowed"`
+	WriteDenied             int    `json:"write_denied"`
+	RelatedShares           int    `json:"related_shares"`
+	ActiveRelatedShares     int    `json:"active_related_shares"`
+	PasswordProtectedShares int    `json:"password_protected_shares"`
+	ReportText              string `json:"report_text"`
+}
+
 type pathAccessReportSummary struct {
 	Users                   int `json:"users"`
 	ReadAllowed             int `json:"read_allowed"`
@@ -9878,6 +9896,116 @@ func (s *Server) handlePreviewPathAccess(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	NewAPIResponse(report).Write(w, http.StatusOK)
+}
+
+func (s *Server) handleListDirectoryAccessReviewRecords(w http.ResponseWriter, r *http.Request) {
+	if s.activityConfiguredButUnavailable() {
+		ServiceUnavailable(w, "activity log unavailable")
+		return
+	}
+	if s.activity == nil {
+		ServiceUnavailable(w, "activity log not configured")
+		return
+	}
+
+	query := r.URL.Query()
+	limitStr, ok := singleActivityQueryParam(w, query, "limit")
+	if !ok {
+		return
+	}
+	offsetStr, ok := singleActivityQueryParam(w, query, "offset")
+	if !ok {
+		return
+	}
+	limit := 20
+	if limitStr != "" {
+		l, err := strconv.Atoi(limitStr)
+		if err != nil || l <= 0 || l > 100 {
+			BadRequest(w, "limit parameter must be between 1 and 100")
+			return
+		}
+		limit = l
+	}
+	offset := 0
+	if offsetStr != "" {
+		o, err := strconv.Atoi(offsetStr)
+		if err != nil || o < 0 {
+			BadRequest(w, "offset parameter must be a non-negative integer")
+			return
+		}
+		offset = o
+	}
+
+	records, total := s.activity.ListDirectoryAccessReviewRecords(limit, offset)
+	NewAPIResponse(map[string]any{
+		"items":  records,
+		"total":  total,
+		"limit":  limit,
+		"offset": offset,
+	}).Write(w, http.StatusOK)
+}
+
+func (s *Server) handleCreateDirectoryAccessReviewRecord(w http.ResponseWriter, r *http.Request) {
+	if s.activityConfiguredButUnavailable() {
+		ServiceUnavailable(w, "activity log unavailable")
+		return
+	}
+	if s.activity == nil {
+		ServiceUnavailable(w, "activity log not configured")
+		return
+	}
+
+	var req createDirectoryAccessReviewRecordRequest
+	if err := decodeJSONBody(r, &req); err != nil {
+		writeLimitedJSONBodyError(w, err, DefaultJSONRequestBodyLimit)
+		return
+	}
+	targetPath, err := validatePath(req.Path)
+	if err != nil {
+		BadRequest(w, "invalid path")
+		return
+	}
+
+	record, err := s.activity.RecordDirectoryAccessReview(activity.DirectoryAccessReviewRecordInput{
+		Reviewer:                currentActivityReviewReviewer(r),
+		Title:                   req.Title,
+		Path:                    targetPath,
+		Preview:                 req.Preview,
+		Users:                   req.Users,
+		ReadAllowed:             req.ReadAllowed,
+		ReadDenied:              req.ReadDenied,
+		WriteAllowed:            req.WriteAllowed,
+		WriteDenied:             req.WriteDenied,
+		RelatedShares:           req.RelatedShares,
+		ActiveRelatedShares:     req.ActiveRelatedShares,
+		PasswordProtectedShares: req.PasswordProtectedShares,
+		ReportText:              req.ReportText,
+	})
+	if err != nil {
+		if errors.Is(err, activity.ErrInvalidReviewRecord) {
+			BadRequest(w, err.Error())
+			return
+		}
+		s.respondInternalError(w, "record directory access review", err)
+		return
+	}
+	NewAPIResponse(record).Write(w, http.StatusCreated)
+}
+
+func (s *Server) handleClearDirectoryAccessReviewRecords(w http.ResponseWriter, r *http.Request) {
+	if s.activityConfiguredButUnavailable() {
+		ServiceUnavailable(w, "activity log unavailable")
+		return
+	}
+	if s.activity == nil {
+		ServiceUnavailable(w, "activity log not configured")
+		return
+	}
+	if err := s.activity.ClearDirectoryAccessReviewRecords(); err != nil {
+		s.respondInternalError(w, "clear directory access reviews", err)
+		return
+	}
+	NewAPIResponse(map[string]any{"message": "directory access review records cleared"}).Write(w, http.StatusOK)
 }
 
 func (s *Server) buildPathAccessReport(ctx context.Context, targetPath string, rules []config.DirectoryAccessRuleConfig, preview bool) (pathAccessReportResult, error) {

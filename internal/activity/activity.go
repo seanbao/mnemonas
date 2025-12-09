@@ -35,12 +35,14 @@ var ErrInvalidReviewRecord = errors.New("invalid activity review record")
 var ErrReviewRecordNotFound = errors.New("activity review record not found")
 
 const maxActivityReviewRecords = 1000
+const maxDirectoryAccessReviewRecords = 100
 const maxActivityReviewNoteLength = 1000
 const maxActivityReviewScopeLength = 80
 const maxActivityReviewFilterSummaryLength = 512
 const maxActivityReviewReviewerLength = 128
 const maxActivityReviewEntryIDs = 500
 const maxActivityReviewSamples = 10
+const maxDirectoryAccessReviewTextLength = 64 * 1024
 
 // ReviewDispositionStatus classifies the operational outcome recorded for reviewed activity entries.
 type ReviewDispositionStatus string
@@ -316,15 +318,53 @@ type ReviewRecordFilter struct {
 	Until             *time.Time
 }
 
+// DirectoryAccessReviewRecord represents a persisted directory-access review snapshot.
+type DirectoryAccessReviewRecord struct {
+	ID                      string    `json:"id"`
+	ReviewedAt              time.Time `json:"reviewed_at"`
+	Reviewer                string    `json:"reviewer"`
+	Title                   string    `json:"title"`
+	Path                    string    `json:"path"`
+	Preview                 bool      `json:"preview"`
+	Users                   int       `json:"users"`
+	ReadAllowed             int       `json:"read_allowed"`
+	ReadDenied              int       `json:"read_denied"`
+	WriteAllowed            int       `json:"write_allowed"`
+	WriteDenied             int       `json:"write_denied"`
+	RelatedShares           int       `json:"related_shares"`
+	ActiveRelatedShares     int       `json:"active_related_shares"`
+	PasswordProtectedShares int       `json:"password_protected_shares"`
+	ReportText              string    `json:"report_text"`
+}
+
+// DirectoryAccessReviewRecordInput contains a directory-access review snapshot before persistence.
+type DirectoryAccessReviewRecordInput struct {
+	Reviewer                string
+	Title                   string
+	Path                    string
+	Preview                 bool
+	Users                   int
+	ReadAllowed             int
+	ReadDenied              int
+	WriteAllowed            int
+	WriteDenied             int
+	RelatedShares           int
+	ActiveRelatedShares     int
+	PasswordProtectedShares int
+	ReportText              string
+}
+
 // Store manages activity log storage
 type Store struct {
-	root          string
-	entries       []Entry
-	reviewRecords []ReviewRecord
-	mu            sync.RWMutex
-	writeMu       sync.Mutex
-	maxSize       int // Maximum number of entries to keep in memory
-	reviewMaxSize int // Maximum number of review records to keep in memory
+	root                         string
+	entries                      []Entry
+	reviewRecords                []ReviewRecord
+	directoryAccessReviewRecords []DirectoryAccessReviewRecord
+	mu                           sync.RWMutex
+	writeMu                      sync.Mutex
+	maxSize                      int // Maximum number of entries to keep in memory
+	reviewMaxSize                int // Maximum number of review records to keep in memory
+	directoryAccessReviewMaxSize int // Maximum number of directory-access review records to keep in memory
 }
 
 var activityLogWriter = writeActivityLogFile
@@ -384,6 +424,10 @@ func copyReviewRecord(record ReviewRecord) ReviewRecord {
 	return clone
 }
 
+func copyDirectoryAccessReviewRecord(record DirectoryAccessReviewRecord) DirectoryAccessReviewRecord {
+	return record
+}
+
 // DetailKeyMayContainPath reports whether an activity detail key conventionally stores a MnemoNAS path.
 func DetailKeyMayContainPath(key string) bool {
 	switch strings.ToLower(strings.TrimSpace(key)) {
@@ -413,11 +457,13 @@ func NewStore(root string) (*Store, error) {
 	}
 
 	s := &Store{
-		root:          filepath.Dir(normalizedLogPath),
-		entries:       make([]Entry, 0),
-		reviewRecords: make([]ReviewRecord, 0),
-		maxSize:       10000, // Keep last 10000 entries in memory
-		reviewMaxSize: maxActivityReviewRecords,
+		root:                         filepath.Dir(normalizedLogPath),
+		entries:                      make([]Entry, 0),
+		reviewRecords:                make([]ReviewRecord, 0),
+		directoryAccessReviewRecords: make([]DirectoryAccessReviewRecord, 0),
+		maxSize:                      10000, // Keep last 10000 entries in memory
+		reviewMaxSize:                maxActivityReviewRecords,
+		directoryAccessReviewMaxSize: maxDirectoryAccessReviewRecords,
 	}
 
 	// Load existing entries
@@ -437,6 +483,14 @@ func NewStore(root string) (*Store, error) {
 			)
 		}
 	}
+	if err := s.loadDirectoryAccessReviewRecords(); err != nil {
+		if recoverErr := s.recoverCorruptDirectoryAccessReviewRecords(err); recoverErr != nil {
+			return nil, errors.Join(
+				fmt.Errorf("load directory access review records: %w", err),
+				fmt.Errorf("recover corrupt directory access review records: %w", recoverErr),
+			)
+		}
+	}
 
 	return s, nil
 }
@@ -448,6 +502,10 @@ func (s *Store) logFilePath() string {
 
 func (s *Store) reviewRecordsFilePath() string {
 	return filepath.Join(s.root, "activity_reviews.json")
+}
+
+func (s *Store) directoryAccessReviewRecordsFilePath() string {
+	return filepath.Join(s.root, "directory_access_reviews.json")
 }
 
 // load reads entries from disk

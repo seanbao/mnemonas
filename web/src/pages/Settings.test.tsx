@@ -21,6 +21,9 @@ import { getSecurityCheck } from '@/api/settings'
 import { checkDirectoryAccess } from '@/api/settings'
 import { previewDirectoryAccess } from '@/api/settings'
 import { reportDirectoryAccess } from '@/api/settings'
+import { listDirectoryAccessReviewRecords } from '@/api/settings'
+import { createDirectoryAccessReviewRecord } from '@/api/settings'
+import { clearDirectoryAccessReviewRecords } from '@/api/settings'
 import { sendTestAlert } from '@/api/settings'
 
 const mockGetSettings = vi.mocked(getSettings)
@@ -30,6 +33,9 @@ const mockGetSecurityCheck = vi.mocked(getSecurityCheck)
 const mockCheckDirectoryAccess = vi.mocked(checkDirectoryAccess)
 const mockPreviewDirectoryAccess = vi.mocked(previewDirectoryAccess)
 const mockReportDirectoryAccess = vi.mocked(reportDirectoryAccess)
+const mockListDirectoryAccessReviewRecords = vi.mocked(listDirectoryAccessReviewRecords)
+const mockCreateDirectoryAccessReviewRecord = vi.mocked(createDirectoryAccessReviewRecord)
+const mockClearDirectoryAccessReviewRecords = vi.mocked(clearDirectoryAccessReviewRecords)
 const mockSendTestAlert = vi.mocked(sendTestAlert)
 
 function expectCalledWithOnlyAbortSignal(mockFn: ReturnType<typeof vi.fn>) {
@@ -282,6 +288,30 @@ vi.mock('@/api/settings', () => ({
       url: '/s/share-1',
     }],
   }),
+  listDirectoryAccessReviewRecords: vi.fn().mockResolvedValue({
+    items: [],
+    total: 0,
+    limit: 5,
+    offset: 0,
+  }),
+  createDirectoryAccessReviewRecord: vi.fn().mockResolvedValue({
+    id: 'access-review-1',
+    reviewed_at: '2026-06-20T08:30:00Z',
+    reviewer: 'admin',
+    title: '用户矩阵',
+    path: '/team/readme.txt',
+    preview: false,
+    users: 2,
+    read_allowed: 1,
+    read_denied: 1,
+    write_allowed: 1,
+    write_denied: 1,
+    related_shares: 1,
+    active_related_shares: 1,
+    password_protected_shares: 1,
+    report_text: '目录权限复核记录\n路径: /team/readme.txt',
+  }),
+  clearDirectoryAccessReviewRecords: vi.fn().mockResolvedValue({ success: true }),
   getWebDAVCredentials: vi.fn().mockResolvedValue({
     success: true,
     enabled: true,
@@ -304,6 +334,30 @@ describe('SettingsPage', () => {
     localStorage.removeItem(directoryAccessReviewHistoryStorageKey)
     mockGetSettings.mockResolvedValue(defaultSettingsResponse)
     mockGetSecurityCheck.mockResolvedValue(defaultSecurityCheckResponse)
+    mockListDirectoryAccessReviewRecords.mockResolvedValue({
+      items: [],
+      total: 0,
+      limit: 5,
+      offset: 0,
+    })
+    mockCreateDirectoryAccessReviewRecord.mockImplementation(async (request) => ({
+      id: 'access-review-1',
+      reviewed_at: '2026-06-20T08:30:00Z',
+      reviewer: 'admin',
+      title: request.title,
+      path: request.path,
+      preview: request.preview,
+      users: request.users,
+      read_allowed: request.read_allowed,
+      read_denied: request.read_denied,
+      write_allowed: request.write_allowed,
+      write_denied: request.write_denied,
+      related_shares: request.related_shares,
+      active_related_shares: request.active_related_shares,
+      password_protected_shares: request.password_protected_shares,
+      report_text: request.report_text,
+    }))
+    mockClearDirectoryAccessReviewRecords.mockResolvedValue({ success: true })
     mockSendTestAlert.mockResolvedValue({
       success: true,
       message: 'test alert sent',
@@ -5574,10 +5628,23 @@ describe('SettingsPage', () => {
       expect(copiedReport).toContain('- alice (user · 组 family, home /users/alice): 读 允许 · 目录规则 · 规则 /team; 写 允许 · 目录规则 · 规则 /team')
       expect(copiedReport).toContain('- /team (文件夹 · 父级覆盖): 可访问 · 密码保护 · 访问 0/不限 · 创建者 u1')
       expect(mockAddToast).toHaveBeenCalledWith({ title: '目录权限复核记录已复制并保存', color: 'success' })
+      await waitFor(() => {
+        expect(mockCreateDirectoryAccessReviewRecord).toHaveBeenCalledWith(expect.objectContaining({
+          title: '用户矩阵',
+          path: '/team/readme.txt',
+          preview: false,
+          users: 2,
+          read_allowed: 1,
+          write_allowed: 1,
+          related_shares: 1,
+          report_text: copiedReport,
+        }))
+      })
 
       const historyRegion = within(screen.getByLabelText('目录权限近期复核历史'))
       expect(historyRegion.getByText('/team/readme.txt')).toBeTruthy()
       expect(historyRegion.getByText('用户矩阵')).toBeTruthy()
+      expect(historyRegion.getByText('复核人 admin')).toBeTruthy()
       expect(historyRegion.getByText('用户 2')).toBeTruthy()
       expect(historyRegion.getByText('可读 1')).toBeTruthy()
       expect(historyRegion.getByText('可写 1')).toBeTruthy()
@@ -5588,6 +5655,7 @@ describe('SettingsPage', () => {
         title: '用户矩阵',
         path: '/team/readme.txt',
         preview: false,
+        reviewer: 'admin',
         users: 2,
         readAllowed: 1,
         writeAllowed: 1,
@@ -5633,6 +5701,43 @@ describe('SettingsPage', () => {
       })
       expect(screen.getByText('暂无近期目录权限复核记录。')).toBeTruthy()
       expect(mockAddToast).toHaveBeenCalledWith({ title: '目录权限近期复核历史已清空', color: 'success' })
+      expect(mockClearDirectoryAccessReviewRecords).toHaveBeenCalled()
+    })
+
+    it('loads persisted directory access review history from the server', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockListDirectoryAccessReviewRecords.mockResolvedValue({
+        items: [{
+          id: 'server-review-1',
+          reviewed_at: '2026-06-20T08:30:00Z',
+          reviewer: 'admin',
+          title: '用户矩阵',
+          path: '/team/server.txt',
+          preview: false,
+          users: 3,
+          read_allowed: 2,
+          read_denied: 1,
+          write_allowed: 1,
+          write_denied: 2,
+          related_shares: 2,
+          active_related_shares: 1,
+          password_protected_shares: 1,
+          report_text: '目录权限复核记录\n路径: /team/server.txt',
+        }],
+        total: 1,
+        limit: 5,
+        offset: 0,
+      })
+
+      render(<SettingsPage />)
+
+      await openTab(user, '版本保留')
+
+      const historyRegion = within(await screen.findByLabelText('目录权限近期复核历史'))
+      expect(await historyRegion.findByText('/team/server.txt')).toBeTruthy()
+      expect(historyRegion.getByText('复核人 admin')).toBeTruthy()
+      expect(historyRegion.getByText('用户 3')).toBeTruthy()
+      expect(historyRegion.getByText('相关分享 2')).toBeTruthy()
     })
 
     it('rejects malformed directory access matrix paths before reporting', async () => {
