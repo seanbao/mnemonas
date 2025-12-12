@@ -81,6 +81,38 @@ contains_whitespace_character() {
 	[[ "$value" == *[[:space:]]* ]]
 }
 
+validate_repository_owner() {
+	local value="$1"
+
+	[[ -n "$value" ]] || fail "repository owner must not be empty"
+	[[ "$value" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]] || fail "repository owner must use lowercase letters, digits, or hyphens, and must start and end with a letter or digit"
+}
+
+validate_repository_name() {
+	local value="$1"
+
+	[[ -n "$value" ]] || fail "repository name must not be empty"
+	[[ "$value" =~ ^[a-z0-9]([a-z0-9._-]*[a-z0-9])?$ ]] || fail "repository name must use lowercase letters, digits, dots, underscores, or hyphens, and must start and end with a letter or digit"
+}
+
+validate_repository() {
+	local value="$1"
+	local owner
+	local repo
+
+	[[ -n "$value" ]] || fail "repository must be in OWNER/REPO form"
+	if contains_control_character "$value" || contains_whitespace_character "$value"; then
+		fail "repository must not contain whitespace or control characters"
+	fi
+	[[ "$value" == "${value,,}" ]] || fail "repository must be lowercase OWNER/REPO for GHCR image tags"
+	[[ "$value" == */* && "$value" != */*/* ]] || fail "repository must be in OWNER/REPO form"
+
+	owner="${value%%/*}"
+	repo="${value#*/}"
+	validate_repository_owner "$owner"
+	validate_repository_name "$repo"
+}
+
 tar_is_gnu() {
 	tar --version 2>/dev/null | grep -qi 'gnu tar'
 }
@@ -420,7 +452,7 @@ done
 
 [[ -n "$ARTIFACT_DIR" ]] || { usage >&2; exit 2; }
 [[ -d "$ARTIFACT_DIR" ]] || fail "artifact directory does not exist: $ARTIFACT_DIR"
-[[ "$REPOSITORY" == */* ]] || fail "repository must be in OWNER/REPO form"
+validate_repository "$REPOSITORY"
 
 need_tool sha256sum
 need_tool tar
