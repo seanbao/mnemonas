@@ -314,6 +314,7 @@ type ReviewRecordFilter struct {
 	Reviewer          string
 	ActivityEntryID   string
 	DispositionStatus ReviewDispositionStatus
+	Actions           []ActionType
 	Since             *time.Time
 	Until             *time.Time
 }
@@ -1670,6 +1671,9 @@ func (s *Store) ListReviewRecordsFiltered(limit, offset int, filter ReviewRecord
 		if filter.DispositionStatus != "" && record.DispositionStatus != filter.DispositionStatus {
 			continue
 		}
+		if len(filter.Actions) > 0 && !reviewRecordMatchesAnyAction(record, filter.Actions) {
+			continue
+		}
 		if filter.Since != nil && record.ReviewedAt.Before(*filter.Since) {
 			continue
 		}
@@ -1700,6 +1704,18 @@ func (s *Store) ListReviewRecordsFiltered(limit, offset int, filter ReviewRecord
 func reviewRecordContainsActivityEntryID(record ReviewRecord, entryID string) bool {
 	for _, candidate := range record.ActivityEntryIDs {
 		if candidate == entryID {
+			return true
+		}
+	}
+	return false
+}
+
+func reviewRecordMatchesAnyAction(record ReviewRecord, actions []ActionType) bool {
+	for _, action := range actions {
+		if action == "" {
+			continue
+		}
+		if record.ActionCounts[action] > 0 {
 			return true
 		}
 	}

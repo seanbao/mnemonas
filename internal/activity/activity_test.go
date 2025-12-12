@@ -1440,6 +1440,7 @@ func TestListReviewRecordsFiltered(t *testing.T) {
 		Reviewer:         "admin",
 		Note:             "older review",
 		ScopeLabel:       "当前页",
+		ActionCounts:     map[ActionType]int{ActionDelete: 1},
 		ReviewCount:      1,
 		TotalCount:       1,
 		PathCount:        1,
@@ -1455,11 +1456,15 @@ func TestListReviewRecordsFiltered(t *testing.T) {
 		Note:              "newer review",
 		ScopeLabel:        "集中窗口",
 		DispositionStatus: ReviewDispositionNeedsFollowUp,
-		ReviewCount:       2,
-		TotalCount:        3,
-		PathCount:         2,
-		UserCount:         1,
-		ActivityEntryIDs:  []string{"delete-2", "share-1"},
+		ActionCounts: map[ActionType]int{
+			ActionDelete: 1,
+			ActionShare:  1,
+		},
+		ReviewCount:      2,
+		TotalCount:       3,
+		PathCount:        2,
+		UserCount:        1,
+		ActivityEntryIDs: []string{"delete-2", "share-1"},
 	}); err != nil {
 		t.Fatalf("RecordReview(second) error: %v", err)
 	}
@@ -1475,6 +1480,15 @@ func TestListReviewRecordsFiltered(t *testing.T) {
 	}
 	if records[0].Reviewer != "owner" || records[0].Note != "newer review" {
 		t.Fatalf("unexpected filtered review: %+v", records[0])
+	}
+
+	shareActions, ok := ActionsForGroup(ActionGroupShare)
+	if !ok {
+		t.Fatalf("share action group is not registered")
+	}
+	records, total = store.ListReviewRecordsFiltered(10, 0, ReviewRecordFilter{Actions: shareActions})
+	if total != 1 || len(records) != 1 || records[0].Reviewer != "owner" {
+		t.Fatalf("expected one share-action review, got total=%d records=%+v", total, records)
 	}
 
 	records, total = store.ListReviewRecordsFiltered(10, 0, ReviewRecordFilter{ActivityEntryID: "missing"})

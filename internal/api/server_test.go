@@ -22846,6 +22846,7 @@ func TestServer_ActivityReviewRecords_HonorsQueryFilters(t *testing.T) {
 		Reviewer:         "admin",
 		Note:             "older review",
 		ScopeLabel:       "当前页",
+		ActionCounts:     map[activity.ActionType]int{activity.ActionDelete: 1},
 		ReviewCount:      1,
 		TotalCount:       1,
 		PathCount:        1,
@@ -22859,17 +22860,21 @@ func TestServer_ActivityReviewRecords_HonorsQueryFilters(t *testing.T) {
 		Note:              "newer review",
 		ScopeLabel:        "集中窗口",
 		DispositionStatus: activity.ReviewDispositionNeedsFollowUp,
-		ReviewCount:       2,
-		TotalCount:        3,
-		PathCount:         2,
-		UserCount:         1,
-		ActivityEntryIDs:  []string{"delete-2", "share-1"},
+		ActionCounts: map[activity.ActionType]int{
+			activity.ActionDelete: 1,
+			activity.ActionShare:  1,
+		},
+		ReviewCount:      2,
+		TotalCount:       3,
+		PathCount:        2,
+		UserCount:        1,
+		ActivityEntryIDs: []string{"delete-2", "share-1"},
 	}); err != nil {
 		t.Fatalf("RecordReview(second) error: %v", err)
 	}
 
 	since := time.Now().Add(-time.Minute).Format(time.RFC3339)
-	target := "/api/v1/activity/reviews?reviewer=owner&activity_entry_id=share-1&disposition_status=needs_follow_up&since=" + url.QueryEscape(since)
+	target := "/api/v1/activity/reviews?reviewer=owner&activity_entry_id=share-1&disposition_status=needs_follow_up&action_group=share&since=" + url.QueryEscape(since)
 	req := httptest.NewRequest(http.MethodGet, target, nil)
 	req.Header.Set("Authorization", "Bearer "+issueAccessTokenWithoutActivity(t, server, "admin"))
 	w := httptest.NewRecorder()
@@ -22892,6 +22897,14 @@ func TestServer_ActivityReviewRecords_HonorsQueryFilters(t *testing.T) {
 	}
 	if payload.Data.Items[0].Reviewer != "owner" || payload.Data.Items[0].Note != "newer review" {
 		t.Fatalf("unexpected filtered review: %+v", payload.Data.Items[0])
+	}
+
+	invalidGroupReq := httptest.NewRequest(http.MethodGet, "/api/v1/activity/reviews?action_group=unknown", nil)
+	invalidGroupReq.Header.Set("Authorization", "Bearer "+issueAccessTokenWithoutActivity(t, server, "admin"))
+	invalidGroupRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(invalidGroupRec, invalidGroupReq)
+	if invalidGroupRec.Code != http.StatusBadRequest {
+		t.Fatalf("invalid action_group response status = %d, want %d: %s", invalidGroupRec.Code, http.StatusBadRequest, invalidGroupRec.Body.String())
 	}
 
 	invalidReq := httptest.NewRequest(http.MethodGet, "/api/v1/activity/reviews?disposition_status=unknown", nil)
