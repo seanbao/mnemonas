@@ -1,12 +1,17 @@
 import { describe, expect, it } from 'vitest'
 import {
+  createUserQuotaTrendPoint,
   formatUserQuotaSummaryReport,
   getUserQuotaAggregateStatus,
   getQuotaStatus,
   getQuotaUsagePercent,
   getUserQuotaAttentionListItems,
+  getUserQuotaTrendSignature,
+  mergeUserQuotaTrendHistory,
+  normalizeUserQuotaTrendHistory,
   quotaBytesToFormValue,
   quotaFormValueToBytes,
+  summarizeUserQuotaTrendHistory,
   summarizeUserQuotas,
   userNeedsQuotaAttention,
 } from './userQuota'
@@ -208,5 +213,82 @@ describe('userQuota', () => {
       'admin | admin@example.com | 管理员 | 启用 | admins | /home/admin | 从未登录 | 配额正常 | 100 B / 1000 B | 剩余 900 B | 10% | 保持当前配额。',
       'media | 未设置 | 普通用户 | 启用 | 未分组 | 未设置 | 从未登录 | 未设配额 | 2 KB / 不限额 | 不限额 | 不限额 | 如需限制长期占用，可设置用户配额。',
     ].join('\n'))
+  })
+
+  it('creates stable user quota trend points from quota summaries', () => {
+    const users = [
+      { username: 'alice', role: 'user' as const, disabled: false, quota_bytes: 1000, used_bytes: 900 },
+      { username: 'bob', role: 'guest' as const, disabled: true, quota_bytes: 1000, used_bytes: 1200 },
+      { username: 'media', role: 'user' as const, disabled: false, quota_bytes: 0, used_bytes: 2048 },
+    ]
+
+    expect(createUserQuotaTrendPoint(users, '2024-01-02T00:00:00Z')).toEqual({
+      capturedAt: '2024-01-02T00:00:00Z',
+      totalCount: 3,
+      activeCount: 2,
+      limitedCount: 2,
+      warningCount: 1,
+      exceededCount: 1,
+      attentionCount: 2,
+      usedBytes: 4148,
+      limitedUsedBytes: 2100,
+      quotaBytes: 2000,
+    })
+  })
+
+  it('derives quota trend signatures independent of response order', () => {
+    const left = [
+      { id: 'b', username: 'bob', disabled: false, quota_bytes: 1000, used_bytes: 200 },
+      { id: 'a', username: 'alice', disabled: true, quota_bytes: 0, used_bytes: 100 },
+    ]
+    const right = [...left].reverse()
+
+    expect(getUserQuotaTrendSignature(left)).toBe(getUserQuotaTrendSignature(right))
+    expect(getUserQuotaTrendSignature([{ ...left[0], used_bytes: 201 }, left[1]])).not.toBe(getUserQuotaTrendSignature(left))
+  })
+
+  it('normalizes and merges quota trend history defensively', () => {
+    const oldPoint = createUserQuotaTrendPoint([
+      { username: 'alice', role: 'user' as const, disabled: false, quota_bytes: 1000, used_bytes: 100 },
+    ], '2024-01-01T00:00:00Z')
+    const newPoint = createUserQuotaTrendPoint([
+      { username: 'alice', role: 'user' as const, disabled: false, quota_bytes: 1000, used_bytes: 500 },
+    ], '2024-01-02T00:00:00Z')
+
+    expect(normalizeUserQuotaTrendHistory([
+      oldPoint,
+      { capturedAt: 'invalid', limitedUsedBytes: 1 },
+      newPoint,
+    ])).toEqual([newPoint, oldPoint])
+    expect(mergeUserQuotaTrendHistory([oldPoint], newPoint, 2)).toEqual([newPoint, oldPoint])
+    expect(mergeUserQuotaTrendHistory([newPoint], { ...newPoint, capturedAt: '2024-01-03T00:00:00Z' }, 2)).toEqual([newPoint])
+  })
+
+  it('summarizes quota trend deltas for the administrator view', () => {
+    const oldPoint = createUserQuotaTrendPoint([
+      { username: 'alice', role: 'user' as const, disabled: false, quota_bytes: 1000, used_bytes: 100 },
+    ], '2024-01-01T00:00:00Z')
+    const newPoint = createUserQuotaTrendPoint([
+      { username: 'alice', role: 'user' as const, disabled: false, quota_bytes: 1000, used_bytes: 950 },
+    ], '2024-01-02T00:00:00Z')
+
+    expect(summarizeUserQuotaTrendHistory([oldPoint])).toMatchObject({
+      sampleCount: 1,
+      label: '已记录首个快照',
+      detail: '当前受限用量 100 B。',
+      tone: 'success',
+    })
+    expect(summarizeUserQuotaTrendHistory([oldPoint, newPoint])).toMatchObject({
+      latest: newPoint,
+      previous: oldPoint,
+      sampleCount: 2,
+      limitedUsedDeltaBytes: 850,
+      attentionDelta: 1,
+      peakLimitedUsedBytes: 950,
+      peakAttentionCount: 1,
+      label: '受限用量增加',
+      detail: '较上一快照 +850 B；复核用户 +1 个。',
+      tone: 'warning',
+    })
   })
 })
