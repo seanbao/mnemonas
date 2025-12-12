@@ -1736,6 +1736,12 @@ type SharePolicyRuleReviewItem = {
   changedFields: string[]
 }
 
+type SharePolicyCleanupInsight = {
+  key: string
+  message: string
+  tone: 'warning' | 'default'
+}
+
 const sharePolicyRuleReviewFields: Array<{
   key: keyof Omit<SharePolicyRule, 'path'>
   label: string
@@ -1916,6 +1922,121 @@ function sharePolicyRuleSummary(rule: SharePolicyRule): string {
   return parts.length > 0 ? parts.join(' · ') : '未配置约束'
 }
 
+function sharePolicyRuleHasPasswordConstraint(rule: SharePolicyRule): boolean {
+  return Boolean(rule.require_password)
+}
+
+function sharePolicyRuleHasExpiresConstraint(rule: SharePolicyRule): boolean {
+  return Boolean(rule.max_expires_in)
+}
+
+function sharePolicyRuleHasAccessConstraint(rule: SharePolicyRule): boolean {
+  return Boolean(rule.max_access && rule.max_access > 0)
+}
+
+function sharePolicyRuleHasPrincipalConstraint(rule: SharePolicyRule): boolean {
+  return Boolean(
+    rule.allowed_users?.length ||
+    rule.allowed_groups?.length ||
+    rule.allowed_roles?.length,
+  )
+}
+
+const sharePolicyCleanupConstraintChecks: Array<{
+  key: string
+  label: string
+  hasConstraint: (rule: SharePolicyRule) => boolean
+}> = [
+  { key: 'password', label: '强制密码约束', hasConstraint: sharePolicyRuleHasPasswordConstraint },
+  { key: 'expires', label: '最长有效期约束', hasConstraint: sharePolicyRuleHasExpiresConstraint },
+  { key: 'access', label: '访问次数约束', hasConstraint: sharePolicyRuleHasAccessConstraint },
+  { key: 'principal', label: '允许创建者范围', hasConstraint: sharePolicyRuleHasPrincipalConstraint },
+]
+
+function sharePolicyRuleConstraintSignature(rule: SharePolicyRule): string {
+  return JSON.stringify({
+    require_password: Boolean(rule.require_password),
+    max_expires_in: rule.max_expires_in ?? '',
+    max_access: rule.max_access && rule.max_access > 0 ? rule.max_access : 0,
+    allowed_users: [...(rule.allowed_users ?? [])].sort(),
+    allowed_groups: [...(rule.allowed_groups ?? [])].sort(),
+    allowed_roles: [...(rule.allowed_roles ?? [])].sort(),
+  })
+}
+
+function sharePolicyRuleCoversPath(parentPath: string, childPath: string): boolean {
+  if (parentPath === childPath) {
+    return false
+  }
+  if (parentPath === '/') {
+    return childPath.startsWith('/')
+  }
+  return childPath.startsWith(`${parentPath}/`)
+}
+
+function buildSharePolicyCleanupInsights(rules: SharePolicyRule[]): SharePolicyCleanupInsight[] {
+  const insights: SharePolicyCleanupInsight[] = []
+  const rootRule = rules.find((rule) => rule.path === '/')
+  if (rootRule) {
+    insights.push({
+      key: 'root-wide',
+      message: '根路径分享策略会覆盖所有路径；建议确认是否需要为敏感目录设置更具体规则。',
+      tone: 'default',
+    })
+  }
+
+  const ancestorCandidatesByPath = new Map<string, SharePolicyRule[]>()
+  for (const rule of rules) {
+    const ancestors = rules
+      .filter((candidate) => sharePolicyRuleCoversPath(candidate.path, rule.path))
+      .sort((left, right) => right.path.length - left.path.length)
+    ancestorCandidatesByPath.set(rule.path, ancestors)
+  }
+
+  for (const rule of rules) {
+    const ancestors = ancestorCandidatesByPath.get(rule.path) ?? []
+    if (ancestors.length === 0) {
+      continue
+    }
+
+    for (const check of sharePolicyCleanupConstraintChecks) {
+      if (check.hasConstraint(rule)) {
+        continue
+      }
+      const constrainedAncestor = ancestors.find((ancestor) => check.hasConstraint(ancestor))
+      if (constrainedAncestor) {
+        insights.push({
+          key: `inherit:${rule.path}:${check.key}:${constrainedAncestor.path}`,
+          message: `${rule.path} 未继承上级 ${constrainedAncestor.path} 的${check.label}。`,
+          tone: 'warning',
+        })
+      }
+    }
+  }
+
+  const pathsBySignature = new Map<string, string[]>()
+  for (const rule of rules) {
+    const signature = sharePolicyRuleConstraintSignature(rule)
+    pathsBySignature.set(signature, [...(pathsBySignature.get(signature) ?? []), rule.path])
+  }
+  for (const paths of pathsBySignature.values()) {
+    if (paths.length < 2) {
+      continue
+    }
+    const sortedPaths = [...paths].sort()
+    const pathLabel = sortedPaths.length === 2
+      ? `${sortedPaths[0]} 与 ${sortedPaths[1]}`
+      : `${sortedPaths.slice(0, 3).join('、')} 等 ${sortedPaths.length} 条路径`
+    insights.push({
+      key: `duplicate:${sortedPaths.join('|')}`,
+      message: `${pathLabel} 的约束完全相同，可复核是否改为共同上级策略或保留路径差异。`,
+      tone: 'default',
+    })
+  }
+
+  return insights
+}
+
 function SharePolicyChangeReview({
   saved,
   draft,
@@ -2023,6 +2144,7 @@ function SharePolicyCoverageSummary({ draft }: { draft: SharePolicyReviewInput }
     Boolean(rule.allowed_groups?.length) ||
     Boolean(rule.allowed_roles?.length)
   )).length
+  const cleanupInsights = buildSharePolicyCleanupInsights(rules)
   const attentionItems = draft.enabled
     ? [
       draft.baseURL.trim() === '' ? '分享基础 URL 未固定，跨域名或反向代理切换后需复核已生成链接。' : '',
@@ -2059,12 +2181,20 @@ function SharePolicyCoverageSummary({ draft }: { draft: SharePolicyReviewInput }
           <div className="text-sm font-semibold text-foreground">分享策略覆盖摘要</div>
           <div className="mt-1 text-xs text-default-500">基于当前编辑内容估算默认分享限制和路径规则覆盖。</div>
         </div>
-        <span className={cn(
-          'w-fit rounded-full px-2 py-1 text-xs font-medium',
-          attentionItems.length > 0 ? 'bg-warning/10 text-warning' : 'bg-success/10 text-success',
-        )}>
-          关注项 {attentionItems.length}
-        </span>
+        <div className="flex flex-wrap gap-2">
+          <span className={cn(
+            'w-fit rounded-full px-2 py-1 text-xs font-medium',
+            attentionItems.length > 0 ? 'bg-warning/10 text-warning' : 'bg-success/10 text-success',
+          )}>
+            关注项 {attentionItems.length}
+          </span>
+          <span className={cn(
+            'w-fit rounded-full px-2 py-1 text-xs font-medium',
+            cleanupInsights.length > 0 ? 'bg-warning/10 text-warning' : 'bg-success/10 text-success',
+          )}>
+            整理项 {cleanupInsights.length}
+          </span>
+        </div>
       </div>
       <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
         {summaryItems.map((item) => (
@@ -2091,6 +2221,21 @@ function SharePolicyCoverageSummary({ draft }: { draft: SharePolicyReviewInput }
             <li>未发现默认策略或路径策略的明显宽松项。</li>
           ) : attentionItems.map((item) => (
             <li key={item}>{item}</li>
+          ))}
+        </ul>
+      </div>
+      <div className="mt-3 rounded-lg border border-divider bg-content2/40 px-3 py-2">
+        <div className="text-xs font-medium text-default-500">策略整理建议</div>
+        <ul className="mt-2 list-disc space-y-1 pl-4 text-xs leading-5 text-default-600">
+          {cleanupInsights.length === 0 ? (
+            <li>当前路径策略没有明显覆盖整理项。</li>
+          ) : cleanupInsights.map((item) => (
+            <li
+              key={item.key}
+              className={cn(item.tone === 'warning' ? 'text-warning' : 'text-default-600')}
+            >
+              {item.message}
+            </li>
           ))}
         </ul>
       </div>

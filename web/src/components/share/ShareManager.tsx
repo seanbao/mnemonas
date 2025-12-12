@@ -42,10 +42,17 @@ import {
   type Share,
   type ShareRiskReason,
 } from '@/api/share'
+import {
+  createActivityReviewRecord,
+  listActivity,
+  type ActivityActionCountMap,
+  type ActivityEntry,
+  type ActivityReviewRecordCreateInput,
+} from '@/api/activity'
 import { EmptyState } from '@/components/ui/EmptyState'
 import { FileIcon } from '@/components/ui/FileIcon'
 import { GENERIC_LOAD_ERROR_DESCRIPTION, getUserFacingErrorDescription } from '@/lib/apiMessages'
-import { formatShareReviewReport } from '@/lib/shareReview'
+import { formatShareReviewReport, summarizeShareReview, type ShareReviewSummary } from '@/lib/shareReview'
 import { copyTextToClipboard, normalizePath } from '@/lib/utils'
 import { normalizeShareReviewFilter, type ShareReviewFilter } from './reviewFilters'
 
@@ -192,6 +199,8 @@ interface ShareReviewSummaryMetric {
   color: 'default' | 'warning' | 'danger' | 'primary'
 }
 
+const SHARE_REVIEW_ACTIVITY_LIMIT = 100
+
 const shareRiskReasonMessages: Record<string, string> = {
   root_folder: '根目录分享会公开整个文件空间。',
   broad_folder: '顶层文件夹分享可能覆盖较多内容。',
@@ -296,6 +305,82 @@ function getShareReviewStatus(metrics: ShareReviewSummaryMetric[]): {
   }
 }
 
+function getUniqueShareReviewValues(values: Array<string | undefined>): string[] {
+  const seen = new Set<string>()
+  const result: string[] = []
+  for (const value of values) {
+    const trimmed = value?.trim() ?? ''
+    if (!trimmed || seen.has(trimmed)) {
+      continue
+    }
+    seen.add(trimmed)
+    result.push(trimmed)
+  }
+  return result
+}
+
+function getShareReviewActivityActionCounts(entries: ActivityEntry[]): ActivityActionCountMap {
+  return entries.reduce<ActivityActionCountMap>((counts, entry) => {
+    if (entry.action === 'share' || entry.action === 'unshare') {
+      counts[entry.action] = (counts[entry.action] ?? 0) + 1
+    }
+    return counts
+  }, {})
+}
+
+function getShareReviewRecordNote(summary: ShareReviewSummary): string {
+  return [
+    `分享复核摘要：需复核 ${summary.reviewCount} 个`,
+    `需处理 ${summary.highRiskCount} 个`,
+    `无密码 ${summary.passwordlessCount} 个`,
+    `覆盖较大 ${summary.broadCount} 个`,
+    `即将到期 ${summary.expiringSoonCount} 个`,
+    `长期未访问 ${summary.staleCount} 个。`,
+  ].join('，')
+}
+
+function getShareReviewRecordFilterSummary(pathFilter: string, visibleShareCount: number, totalShareCount: number): string {
+  const filters = ['审计分组 分享相关']
+  if (pathFilter) {
+    filters.push(`路径 ${pathFilter}`)
+  }
+  filters.push(`当前分享 ${visibleShareCount}/${totalShareCount}`)
+  return filters.join(' · ')
+}
+
+function buildShareReviewRecordInput({
+  entries,
+  totalEntries,
+  summary,
+  visibleShareCount,
+  totalShareCount,
+  pathFilter,
+}: {
+  entries: ActivityEntry[]
+  totalEntries: number
+  summary: ShareReviewSummary
+  visibleShareCount: number
+  totalShareCount: number
+  pathFilter: string
+}): ActivityReviewRecordCreateInput {
+  const paths = getUniqueShareReviewValues(entries.map((entry) => entry.path))
+  const users = getUniqueShareReviewValues(entries.map((entry) => entry.user))
+  return {
+    note: getShareReviewRecordNote(summary),
+    scope_label: pathFilter ? `分享路径 ${pathFilter}` : '分享管理',
+    filter_summary: getShareReviewRecordFilterSummary(pathFilter, visibleShareCount, totalShareCount),
+    disposition_status: summary.reviewCount > 0 ? 'needs_follow_up' : 'documented',
+    action_counts: getShareReviewActivityActionCounts(entries),
+    review_count: entries.length,
+    total_count: totalEntries,
+    path_count: paths.length,
+    user_count: users.length,
+    path_samples: paths.slice(0, 10),
+    user_samples: users.slice(0, 10),
+    activity_entry_ids: entries.map((entry) => entry.id),
+  }
+}
+
 export function ShareManager({
   showAllShares = false,
   featureEnabled = true,
@@ -311,12 +396,14 @@ export function ShareManager({
   const [isDeleting, setIsDeleting] = useState(false)
   const [reviewFilter, setReviewFilter] = useState<ShareReviewFilter>(() => normalizeShareReviewFilter(initialReviewFilter))
   const [isDisablingHighRisk, setIsDisablingHighRisk] = useState(false)
+  const [isRecordingShareReview, setIsRecordingShareReview] = useState(false)
   const sharesRef = useRef<Share[]>([])
   const loadRequestRef = useRef(0)
   const loadAbortControllerRef = useRef<AbortController | null>(null)
   const toggleAbortControllersRef = useRef(new Map<string, AbortController>())
   const disableHighRiskAbortControllerRef = useRef<AbortController | null>(null)
   const deleteAbortControllerRef = useRef<AbortController | null>(null)
+  const recordReviewAbortControllerRef = useRef<AbortController | null>(null)
 
   useEffect(() => () => {
     loadRequestRef.current += 1
@@ -328,6 +415,8 @@ export function ShareManager({
     disableHighRiskAbortControllerRef.current = null
     deleteAbortControllerRef.current?.abort()
     deleteAbortControllerRef.current = null
+    recordReviewAbortControllerRef.current?.abort()
+    recordReviewAbortControllerRef.current = null
   }, [])
 
   useEffect(() => {
@@ -392,6 +481,8 @@ export function ShareManager({
       disableHighRiskAbortControllerRef.current = null
       deleteAbortControllerRef.current?.abort()
       deleteAbortControllerRef.current = null
+      recordReviewAbortControllerRef.current?.abort()
+      recordReviewAbortControllerRef.current = null
       let cancelled = false
       queueMicrotask(() => {
         if (cancelled) return
@@ -476,6 +567,7 @@ export function ShareManager({
     },
   ]), [broadFolderShares.length, expiringSoonShares.length, passwordlessShares.length, riskyShares.length, staleShares.length])
   const reviewStatus = useMemo(() => getShareReviewStatus(reviewSummaryMetrics), [reviewSummaryMetrics])
+  const reviewSummary = useMemo(() => summarizeShareReview(pathFilteredShares), [pathFilteredShares])
 
   if (!featureEnabled) {
     return (
@@ -501,7 +593,7 @@ export function ShareManager({
 
   const handleCopyReviewReport = async () => {
     try {
-      await copyTextToClipboard(formatShareReviewReport(pathFilteredShares, undefined, {
+      await copyTextToClipboard(formatShareReviewReport(pathFilteredShares, reviewSummary, {
         pathFilter: normalizedPathFilter || undefined,
       }))
       addToast({ title: '分享复核摘要已复制', color: 'success' })
@@ -511,6 +603,75 @@ export function ShareManager({
         description: '请检查浏览器剪贴板权限。',
         color: 'danger',
       })
+    }
+  }
+
+  const handleRecordShareReview = async () => {
+    if (isRecordingShareReview) {
+      return
+    }
+
+    recordReviewAbortControllerRef.current?.abort()
+    const controller = new AbortController()
+    recordReviewAbortControllerRef.current = controller
+    setIsRecordingShareReview(true)
+    try {
+      const result = await listActivity({
+        actionGroup: 'share',
+        path: normalizedPathFilter || undefined,
+        limit: SHARE_REVIEW_ACTIVITY_LIMIT,
+        offset: 0,
+        signal: controller.signal,
+      })
+      if (controller.signal.aborted) {
+        return
+      }
+
+      const reviewEntries = result.items.filter((entry) => entry.action === 'share' || entry.action === 'unshare')
+      if (reviewEntries.length === 0) {
+        addToast({
+          title: '没有可关联的分享活动',
+          description: '活动日志中没有找到当前范围的分享或取消分享记录。',
+          color: 'warning',
+        })
+        return
+      }
+
+      await createActivityReviewRecord(buildShareReviewRecordInput({
+        entries: reviewEntries,
+        totalEntries: result.total,
+        summary: reviewSummary,
+        visibleShareCount: pathFilteredShares.length,
+        totalShareCount: shares.length,
+        pathFilter: normalizedPathFilter,
+      }), { signal: controller.signal })
+      if (controller.signal.aborted) {
+        return
+      }
+
+      addToast({
+        title: '分享复核已记录',
+        description: result.total > reviewEntries.length
+          ? `已关联最近 ${reviewEntries.length} 条分享活动；当前筛选共有 ${result.total} 条分享活动。`
+          : `已关联 ${reviewEntries.length} 条分享活动。`,
+        color: 'success',
+      })
+    } catch (err) {
+      if (controller.signal.aborted || isAbortError(err)) {
+        return
+      }
+      addToast({
+        title: '记录分享复核失败',
+        description: getUserFacingErrorDescription(err),
+        color: 'danger',
+      })
+    } finally {
+      if (recordReviewAbortControllerRef.current === controller) {
+        recordReviewAbortControllerRef.current = null
+      }
+      if (!controller.signal.aborted) {
+        setIsRecordingShareReview(false)
+      }
     }
   }
 
@@ -881,6 +1042,16 @@ export function ShareManager({
               className="rounded-lg"
             >
               复制摘要
+            </Button>
+            <Button
+              variant="flat"
+              size="sm"
+              startContent={<ShieldAlert size={16} />}
+              onPress={handleRecordShareReview}
+              isLoading={isRecordingShareReview}
+              className="rounded-lg"
+            >
+              记录复核
             </Button>
             {highRiskShares.length > 0 && (
               <Button

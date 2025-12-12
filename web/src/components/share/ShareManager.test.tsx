@@ -3,6 +3,7 @@ import { render, screen, waitFor, within, userEvent } from '@/test/utils'
 import { ShareManager } from './ShareManager'
 import * as shareApi from '@/api/share'
 import { ShareError, type Share } from '@/api/share'
+import * as activityApi from '@/api/activity'
 
 const mockAddToast = vi.fn()
 const successActionResult = { warning: false, message: undefined } as const
@@ -24,6 +25,15 @@ vi.mock('@/api/share', async () => {
     deleteShare: vi.fn(),
     updateShare: vi.fn(),
     copyShareUrl: vi.fn(),
+  }
+})
+
+vi.mock('@/api/activity', async () => {
+  const actual = await vi.importActual<typeof import('@/api/activity')>('@/api/activity')
+  return {
+    ...actual,
+    listActivity: vi.fn(),
+    createActivityReviewRecord: vi.fn(),
   }
 })
 
@@ -96,6 +106,29 @@ describe('ShareManager', () => {
     vi.clearAllMocks()
     window.history.pushState({}, '', '/')
     vi.mocked(shareApi.listShares).mockResolvedValue(mockShares)
+    vi.mocked(activityApi.listActivity).mockResolvedValue({
+      items: [],
+      total: 0,
+      limit: 100,
+      offset: 0,
+    })
+    vi.mocked(activityApi.createActivityReviewRecord).mockImplementation(async (input) => ({
+      id: 'share-review-record-1',
+      reviewed_at: '2026-03-27T00:00:00Z',
+      reviewer: 'admin',
+      note: input.note,
+      scope_label: input.scope_label,
+      filter_summary: input.filter_summary,
+      disposition_status: input.disposition_status,
+      action_counts: input.action_counts,
+      review_count: input.review_count,
+      total_count: input.total_count,
+      path_count: input.path_count,
+      user_count: input.user_count,
+      path_samples: input.path_samples,
+      user_samples: input.user_samples,
+      activity_entry_ids: input.activity_entry_ids,
+    }))
   })
 
   afterEach(() => {
@@ -557,6 +590,137 @@ describe('ShareManager', () => {
     expect(report).toContain('/docs/safe.pdf | 文件 | 启用 | 无 | 密码保护 | 1 / 10 | 永不过期 | 无 | 无需处理。')
     expect(report).not.toContain('/media/movie.mp4')
     expect(mockAddToast).toHaveBeenCalledWith({ title: '分享复核摘要已复制', color: 'success' })
+  })
+
+  it('records a path-scoped share review into activity review history', async () => {
+    const user = userEvent.setup()
+    vi.mocked(shareApi.listShares).mockResolvedValueOnce([
+      {
+        ...mockShares[0],
+        id: 'share-open',
+        path: '/docs/open.pdf',
+        has_password: false,
+        risk: {
+          level: 'high',
+          reasons: [
+            { code: 'no_password', level: 'high', message: '未设置密码，拿到链接的人都能访问' },
+          ],
+        },
+      },
+      {
+        ...mockShares[0],
+        id: 'share-safe',
+        path: '/docs/safe.pdf',
+        has_password: true,
+        risk: { level: 'none' },
+      },
+      {
+        ...mockShares[0],
+        id: 'share-media',
+        path: '/media/movie.mp4',
+        has_password: false,
+        risk: {
+          level: 'high',
+          reasons: [
+            { code: 'no_password', level: 'high', message: '未设置密码' },
+          ],
+        },
+      },
+    ])
+    vi.mocked(activityApi.listActivity).mockResolvedValueOnce({
+      items: [
+        {
+          id: 'act-share-1',
+          timestamp: '2026-03-27T00:00:00Z',
+          action: 'share',
+          path: '/docs/open.pdf',
+          user: 'alice',
+        },
+        {
+          id: 'act-unshare-1',
+          timestamp: '2026-03-27T01:00:00Z',
+          action: 'unshare',
+          path: '/docs/old.pdf',
+          user: 'bob',
+        },
+      ],
+      total: 3,
+      limit: 100,
+      offset: 0,
+    })
+
+    render(<ShareManager pathFilter="/docs" />)
+
+    await waitFor(() => {
+      expect(screen.getByText('我的分享 (2 / 3)')).toBeInTheDocument()
+      expect(screen.getByText('open.pdf')).toBeInTheDocument()
+      expect(screen.getByText('safe.pdf')).toBeInTheDocument()
+    })
+
+    await user.click(screen.getByRole('button', { name: '记录复核' }))
+
+    await waitFor(() => {
+      expect(activityApi.createActivityReviewRecord).toHaveBeenCalledTimes(1)
+    })
+    expect(activityApi.listActivity).toHaveBeenCalledWith(expect.objectContaining({
+      actionGroup: 'share',
+      path: '/docs',
+      limit: 100,
+      offset: 0,
+      signal: expect.any(AbortSignal),
+    }))
+    expect(activityApi.createActivityReviewRecord).toHaveBeenCalledWith(expect.objectContaining({
+      note: '分享复核摘要：需复核 1 个，需处理 1 个，无密码 1 个，覆盖较大 0 个，即将到期 0 个，长期未访问 0 个。',
+      scope_label: '分享路径 /docs',
+      filter_summary: '审计分组 分享相关 · 路径 /docs · 当前分享 2/3',
+      disposition_status: 'needs_follow_up',
+      action_counts: {
+        share: 1,
+        unshare: 1,
+      },
+      review_count: 2,
+      total_count: 3,
+      path_count: 2,
+      user_count: 2,
+      path_samples: ['/docs/open.pdf', '/docs/old.pdf'],
+      user_samples: ['alice', 'bob'],
+      activity_entry_ids: ['act-share-1', 'act-unshare-1'],
+    }), expect.objectContaining({
+      signal: expect.any(AbortSignal),
+    }))
+    expect(mockAddToast).toHaveBeenCalledWith({
+      title: '分享复核已记录',
+      description: '已关联最近 2 条分享活动；当前筛选共有 3 条分享活动。',
+      color: 'success',
+    })
+  })
+
+  it('does not record share review history without matching share activity', async () => {
+    const user = userEvent.setup()
+    vi.mocked(shareApi.listShares).mockResolvedValueOnce(mockShares)
+    vi.mocked(activityApi.listActivity).mockResolvedValueOnce({
+      items: [],
+      total: 0,
+      limit: 100,
+      offset: 0,
+    })
+
+    render(<ShareManager />)
+
+    await waitFor(() => {
+      expect(screen.getByText('我的分享 (1)')).toBeInTheDocument()
+    })
+
+    await user.click(screen.getByRole('button', { name: '记录复核' }))
+
+    await waitFor(() => {
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '没有可关联的分享活动',
+        description: '活动日志中没有找到当前范围的分享或取消分享记录。',
+        color: 'warning',
+      })
+    })
+    expect(activityApi.createActivityReviewRecord).not.toHaveBeenCalled()
   })
 
   it('filters the share list to risky shares only', async () => {
