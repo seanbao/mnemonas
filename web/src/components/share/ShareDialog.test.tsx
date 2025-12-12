@@ -648,6 +648,27 @@ describe('ShareDialog', () => {
     })
   })
 
+  it('shows a policy-scope warning when the account cannot share the path', async () => {
+    const user = userEvent.setup()
+    vi.mocked(createShare).mockRejectedValue(new ShareError('policy scope', 403, 'SHARE_POLICY_PRINCIPAL_FORBIDDEN'))
+
+    render(
+      <ShareDialog
+        isOpen={true}
+        onClose={() => {}}
+        filePath="/test/file.txt"
+      />
+    )
+
+    await user.click(screen.getByText('创建分享链接'))
+
+    expect(mockAddToast).toHaveBeenCalledWith({
+      title: '当前账号不能分享该路径',
+      description: '该路径的分享策略限制了允许创建或维护分享链接的用户、组或角色。',
+      color: 'warning',
+    })
+  })
+
   it('blocks creating a protected share when password is empty', async () => {
     const user = userEvent.setup()
 

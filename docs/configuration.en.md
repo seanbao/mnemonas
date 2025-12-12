@@ -147,6 +147,9 @@ default_max_access = 0
 # require_password = true
 # max_expires_in = "24h"
 # max_access = 20
+# allowed_users = ["alice"]
+# allowed_groups = ["family"]
+# allowed_roles = ["user"]
 
 [favorites]
 enabled = true
@@ -523,7 +526,7 @@ On first startup without a `users_file`, or when the file has no enabled adminis
 | `base_url` | string | `""` | Base URL used when returning share URLs; non-empty values must be absolute `http` or `https` URLs without userinfo, query strings, fragments, backslashes, duplicate path slashes, or `.`/`..` path segments, and with a valid host name |
 | `default_expires_in` | duration | `168h` | Default expiration for newly-created shares; `0` or empty means no default expiration. Public deployments should keep an explicit default expiry at or below `720h` (30 days) |
 | `default_max_access` | int | `0` | Default access-count limit for newly-created shares; `0` means unlimited |
-| `[[share.policy_rules]]` | array | `[]` | Stricter share constraints for a MnemoNAS path; the most specific matching path wins |
+| `[[share.policy_rules]]` | array | `[]` | Stricter share constraints and allowed creator/maintainer scope for a MnemoNAS path; the most specific matching path wins |
 
 Example:
 
@@ -539,6 +542,9 @@ path = "/Family"
 require_password = true
 max_expires_in = "24h"
 max_access = 20
+allowed_users = ["alice"]
+allowed_groups = ["family"]
+allowed_roles = ["user"]
 ```
 
 `base_url` affects the URL returned by the API. It does not change the share ID itself. Empty values return relative `/s/{id}` URLs.
@@ -556,7 +562,9 @@ Public deployments that use a reverse-proxy application base path should set tha
 
 Default expiration and access-count limits affect only future shares; explicit `expires_in` or `max_access` values in a create request take precedence.
 
-The `path` field in each policy rule follows the same MnemoNAS logical-path rules as directory quotas and directory access rules. Policy rules can set `require_password`, `max_expires_in`, and `max_access`. When a rule matches, passwordless create requests and updates that would leave an existing share passwordless are rejected if required. Expiration or access-count values above the configured limits, explicit update requests that clear those limits, and updates to existing matching shares whose stored expiry or access-count constraints are missing or above the rule limit are capped.
+The `path` field in each policy rule follows the same MnemoNAS logical-path rules as directory quotas and directory access rules. Policy rules can set `require_password`, `max_expires_in`, `max_access`, `allowed_users`, `allowed_groups`, and `allowed_roles`. When a rule matches, passwordless create requests and updates that would leave an existing share passwordless are rejected if required. Expiration or access-count values above the configured limits, explicit update requests that clear those limits, and updates to existing matching shares whose stored expiry or access-count constraints are missing or above the rule limit are capped.
+
+`allowed_users`, `allowed_groups`, and `allowed_roles` restrict which authenticated caller may create or maintain share links under the path. User values match either user IDs or usernames, group values match user groups, and role values support `admin`, `user`, and `guest`. Administrators bypass this scope restriction so they can repair existing shares. Creator-scope enforcement is skipped when application authentication is disabled. This restriction affects authenticated share creation and maintenance only; it does not change public access boundaries for already-created share links.
 
 The Web share-create dialog shows a pre-submit summary of policy source, password requirement, effective expiration, and effective access limit, including path-policy caps. The Web settings page shows a pre-save change summary for share enablement, base URL, default expiration, default access limit, and path policy rules compared with the saved configuration. The Web share list summarizes shares requiring review, passwordless links, broad-scope links, soon-expiring links, and stale links, with matching filters and a disable action for high-risk links.
 

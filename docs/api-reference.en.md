@@ -769,7 +769,7 @@ Create request:
 
 `GET /api/v1/shares` lists shares for the current requester. Admin callers may set `all=true` at most once to list all users' shares.
 
-`GET /api/v1/shares/policy` returns `default_expires_in`, `default_max_access`, and `policy_rules` entries with `path`, `require_password`, `max_expires_in`, and `max_access`.
+`GET /api/v1/shares/policy` returns `default_expires_in`, `default_max_access`, and `policy_rules` entries with `path`, `require_password`, `max_expires_in`, `max_access`, `allowed_users`, `allowed_groups`, and `allowed_roles`.
 
 Create-share field rules:
 
@@ -779,6 +779,7 @@ Create-share field rules:
 - If `expires_in` or `max_access` is omitted, the server applies `share.default_expires_in` and `share.default_max_access`.
 - If the path matches `share.policy_rules`, the most specific path rule wins.
 - `require_password` rejects passwordless requests, while `max_expires_in` and `max_access` cap values above the rule limit.
+- If `allowed_users`, `allowed_groups`, or `allowed_roles` is non-empty, non-admin callers must match one configured user, group, or role. Non-matching callers receive `403 Forbidden` with `SHARE_POLICY_PRINCIPAL_FORBIDDEN`.
 
 Authenticated share responses include `risk.level` (`none`, `low`, `medium`, `high`) plus optional reason objects.
 
@@ -813,6 +814,7 @@ Share update rules:
 - `require_password` rejects updates that would leave a matching share passwordless.
 - `max_expires_in` and `max_access` cap explicit values that clear or exceed the configured limit.
 - They also cap omitted fields when the stored share currently has no corresponding limit or exceeds the path rule.
+- If `allowed_users`, `allowed_groups`, or `allowed_roles` is non-empty, non-admin callers must match one configured user, group, or role. Non-matching callers receive `403 Forbidden` with `SHARE_POLICY_PRINCIPAL_FORBIDDEN`.
 
 Public endpoints:
 
@@ -1280,7 +1282,7 @@ Path field rules:
 - The Web settings page wraps paths containing spaces or double quotes in double quotes in directory-quota line-based inputs; literal double quotes inside the path are escaped as `\"`, for example `"/Family Photos" 500 GB`.
 - Directory access rules and share path policies use structured path inputs, so paths containing spaces or literal double quotes are entered directly without manual line quoting.
 
-The Web settings page derives a share-policy coverage summary from the current draft before save. It shows default expiry, default access limits, path-policy count, password-required path count, and attention items for loose defaults or path policies.
+The Web settings page derives a share-policy coverage summary from the current draft before save. It shows default expiry, default access limits, path-policy count, password-required path count, creator/maintainer-scope path count, and attention items for loose defaults or path policies.
 
 This summary is for pre-save review only; enforced behavior still comes from the server policy after the Settings API save succeeds.
 
@@ -1307,7 +1309,7 @@ Normalized no-op submissions do not emit this event. Alert delivery failures are
 - URL fields: non-empty `share.base_url`, `alerts.webhook_url`, `alerts.wecom_webhook_url`, and `alerts.dingtalk_webhook_url` values must be absolute `http` or `https` URLs with a valid host name or IP address.
   `share.base_url` also must not contain userinfo, query strings, fragments, backslashes, duplicate path slashes, or `.`/`..` path segments.
 - Share policy: `share.default_expires_in` must be empty, `0`, or a non-negative Go duration string; `share.default_max_access` must be zero or greater.
-  `share.policy_rules` entries must use MnemoNAS logical paths and set at least one of `require_password`, `max_expires_in`, or `max_access`.
+  `share.policy_rules` entries must use MnemoNAS logical paths and set at least one of `require_password`, `max_expires_in`, `max_access`, `allowed_users`, `allowed_groups`, or `allowed_roles`. Allowed-scope fields are trimmed, deduplicated, and normalized to lowercase; roles accept only `admin`, `user`, or `guest`.
 - Alert Webhook: `webhook_method` supports `GET` and `POST`. Custom webhook headers use `"Key: Value"` strings with valid HTTP token names, case-insensitively unique names, and values without newlines or control characters.
 - Storage alerts: `storage_alert` deliveries keep capacity metrics and `path_scope = "configured_storage_root"` but set `path` to `<omitted>`, and text channels do not include the raw storage root path.
 - Secret responses: `GET /api/v1/settings` does not return Webhook URL/header values, WeCom webhook URLs, or DingTalk webhook URLs.

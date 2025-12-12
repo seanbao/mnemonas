@@ -299,6 +299,9 @@ type SharePolicyRuleConfig struct {
 	RequirePassword bool          `toml:"require_password" json:"require_password,omitempty"`
 	MaxExpiresIn    time.Duration `toml:"max_expires_in" json:"max_expires_in,omitempty"`
 	MaxAccess       int64         `toml:"max_access" json:"max_access,omitempty"`
+	AllowedUsers    []string      `toml:"allowed_users" json:"allowed_users,omitempty"`
+	AllowedGroups   []string      `toml:"allowed_groups" json:"allowed_groups,omitempty"`
+	AllowedRoles    []string      `toml:"allowed_roles" json:"allowed_roles,omitempty"`
 }
 
 // FavoritesConfig holds favorites configuration
@@ -857,6 +860,9 @@ func NormalizeSharePolicyRules(rules []SharePolicyRuleConfig) []SharePolicyRuleC
 	for _, rule := range rules {
 		copied := rule
 		copied.Path = normalizeScopedConfigPath(copied.Path)
+		copied.AllowedUsers = normalizeAccessRulePrincipalList(copied.AllowedUsers)
+		copied.AllowedGroups = normalizeAccessRulePrincipalList(copied.AllowedGroups)
+		copied.AllowedRoles = normalizeAccessRuleRoleList(copied.AllowedRoles)
 		normalized = append(normalized, copied)
 	}
 	return normalized
@@ -2132,7 +2138,11 @@ func validateSharePolicyRules(rules []SharePolicyRuleConfig) error {
 		if rule.MaxAccess < 0 {
 			errs = append(errs, fmt.Errorf("%s.max_access cannot be negative", fieldPrefix))
 		}
-		if !rule.RequirePassword && rule.MaxExpiresIn == 0 && rule.MaxAccess == 0 {
+		errs = append(errs, validateAccessRulePrincipals(rule.AllowedUsers, fieldPrefix+".allowed_users")...)
+		errs = append(errs, validateAccessRulePrincipals(rule.AllowedGroups, fieldPrefix+".allowed_groups")...)
+		errs = append(errs, validateAccessRuleRoles(rule.AllowedRoles, fieldPrefix+".allowed_roles")...)
+		if !rule.RequirePassword && rule.MaxExpiresIn == 0 && rule.MaxAccess == 0 &&
+			len(rule.AllowedUsers) == 0 && len(rule.AllowedGroups) == 0 && len(rule.AllowedRoles) == 0 {
 			errs = append(errs, fmt.Errorf("%s must set at least one constraint", fieldPrefix))
 		}
 	}

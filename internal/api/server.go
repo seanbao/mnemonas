@@ -188,6 +188,11 @@ func cloneConfigSnapshot(cfg *config.Config) *config.Config {
 	cloned.Storage.DirectoryQuotas = append([]config.DirectoryQuotaConfig(nil), cfg.Storage.DirectoryQuotas...)
 	cloned.Storage.DirectoryAccessRules = cloneDirectoryAccessRules(cfg.Storage.DirectoryAccessRules)
 	cloned.Share.PolicyRules = append([]config.SharePolicyRuleConfig(nil), cfg.Share.PolicyRules...)
+	for i := range cloned.Share.PolicyRules {
+		cloned.Share.PolicyRules[i].AllowedUsers = append([]string(nil), cfg.Share.PolicyRules[i].AllowedUsers...)
+		cloned.Share.PolicyRules[i].AllowedGroups = append([]string(nil), cfg.Share.PolicyRules[i].AllowedGroups...)
+		cloned.Share.PolicyRules[i].AllowedRoles = append([]string(nil), cfg.Share.PolicyRules[i].AllowedRoles...)
+	}
 	cloned.Storage.Versioning.AutoVersionedExtensions = append([]string(nil), cfg.Storage.Versioning.AutoVersionedExtensions...)
 	cloned.Storage.Versioning.AutoVersionedFilenames = append([]string(nil), cfg.Storage.Versioning.AutoVersionedFilenames...)
 	cloned.Alerts.WebhookHeaders = append([]string(nil), cfg.Alerts.WebhookHeaders...)
@@ -1112,10 +1117,13 @@ func formatOptionalSettingsDuration(d time.Duration) string {
 }
 
 type sharePolicyRuleSettingsResponse struct {
-	Path            string `json:"path"`
-	RequirePassword bool   `json:"require_password,omitempty"`
-	MaxExpiresIn    string `json:"max_expires_in,omitempty"`
-	MaxAccess       int64  `json:"max_access,omitempty"`
+	Path            string   `json:"path"`
+	RequirePassword bool     `json:"require_password,omitempty"`
+	MaxExpiresIn    string   `json:"max_expires_in,omitempty"`
+	MaxAccess       int64    `json:"max_access,omitempty"`
+	AllowedUsers    []string `json:"allowed_users,omitempty"`
+	AllowedGroups   []string `json:"allowed_groups,omitempty"`
+	AllowedRoles    []string `json:"allowed_roles,omitempty"`
 }
 
 func formatSharePolicyRulesForSettings(rules []config.SharePolicyRuleConfig) []sharePolicyRuleSettingsResponse {
@@ -1129,6 +1137,9 @@ func formatSharePolicyRulesForSettings(rules []config.SharePolicyRuleConfig) []s
 			RequirePassword: rule.RequirePassword,
 			MaxExpiresIn:    formatOptionalSettingsDuration(rule.MaxExpiresIn),
 			MaxAccess:       rule.MaxAccess,
+			AllowedUsers:    append([]string(nil), rule.AllowedUsers...),
+			AllowedGroups:   append([]string(nil), rule.AllowedGroups...),
+			AllowedRoles:    append([]string(nil), rule.AllowedRoles...),
 		})
 	}
 	return formatted
@@ -2121,6 +2132,7 @@ var errWebDAVUsernameMatchesNonAdmin = errors.New("webdav.username must not matc
 var errInvalidPath = errors.New("invalid path")
 var errSharePolicyPasswordRequired = errors.New("share policy requires password")
 var errSharePolicyInvalidExpiresIn = errors.New("invalid share expires_in")
+var errSharePolicyPrincipalForbidden = errors.New("share policy principal forbidden")
 var errFavoriteMissingPath = errors.New("favorite path missing")
 
 func (s *Server) filterSearchResultsByHomeDir(ctx context.Context, results []*storage.SearchResult) ([]*storage.SearchResult, error) {
@@ -10205,10 +10217,13 @@ type ShareSettingsUpdate struct {
 }
 
 type SharePolicyRuleSettingsUpdate struct {
-	Path            string `json:"path"`
-	RequirePassword bool   `json:"require_password,omitempty"`
-	MaxExpiresIn    string `json:"max_expires_in,omitempty"`
-	MaxAccess       int64  `json:"max_access,omitempty"`
+	Path            string   `json:"path"`
+	RequirePassword bool     `json:"require_password,omitempty"`
+	MaxExpiresIn    string   `json:"max_expires_in,omitempty"`
+	MaxAccess       int64    `json:"max_access,omitempty"`
+	AllowedUsers    []string `json:"allowed_users,omitempty"`
+	AllowedGroups   []string `json:"allowed_groups,omitempty"`
+	AllowedRoles    []string `json:"allowed_roles,omitempty"`
 }
 
 func parseSharePolicyRuleSettingsUpdates(rules []SharePolicyRuleSettingsUpdate) ([]config.SharePolicyRuleConfig, error) {
@@ -10226,6 +10241,9 @@ func parseSharePolicyRuleSettingsUpdates(rules []SharePolicyRuleSettingsUpdate) 
 			RequirePassword: rule.RequirePassword,
 			MaxExpiresIn:    maxExpiresIn,
 			MaxAccess:       rule.MaxAccess,
+			AllowedUsers:    append([]string(nil), rule.AllowedUsers...),
+			AllowedGroups:   append([]string(nil), rule.AllowedGroups...),
+			AllowedRoles:    append([]string(nil), rule.AllowedRoles...),
 		})
 	}
 	return config.NormalizeSharePolicyRules(parsed), nil
@@ -11755,6 +11773,10 @@ func (s *Server) handleUpdateShare(w http.ResponseWriter, r *http.Request) {
 			writeShareErrorResponse(w, http.StatusBadRequest, "invalid expires_in format", "INVALID_EXPIRES_IN")
 			return
 		}
+		if errors.Is(err, errSharePolicyPrincipalForbidden) {
+			writeShareErrorResponse(w, http.StatusForbidden, "share policy does not allow this user", "SHARE_POLICY_PRINCIPAL_FORBIDDEN")
+			return
+		}
 		writeLimitedJSONBodyError(w, err, DefaultJSONRequestBodyLimit)
 		return
 	}
@@ -11959,6 +11981,10 @@ func (s *Server) handleCreateShareWithActivity(w http.ResponseWriter, r *http.Re
 			writeShareErrorResponse(w, http.StatusBadRequest, "invalid expires_in format", "INVALID_EXPIRES_IN")
 			return
 		}
+		if errors.Is(err, errSharePolicyPrincipalForbidden) {
+			writeShareErrorResponse(w, http.StatusForbidden, "share policy does not allow this user", "SHARE_POLICY_PRINCIPAL_FORBIDDEN")
+			return
+		}
 		writeLimitedJSONBodyError(w, err, DefaultJSONRequestBodyLimit)
 		return
 	}
@@ -12105,6 +12131,11 @@ func (s *Server) prepareCreateShareRequest(r *http.Request) (string, error) {
 			defaultMaxAccess := cfg.Share.DefaultMaxAccess
 			req.MaxAccess = &defaultMaxAccess
 		}
+		if rule, ok := matchSharePolicyRule(cfg.Share.PolicyRules, cleanPath); ok {
+			if err := s.authorizeSharePolicyPrincipal(r.Context(), rule); err != nil {
+				return "", err
+			}
+		}
 		if err := applySharePolicyRuleToCreateRequest(&req, cleanPath, cfg.Share.PolicyRules); err != nil {
 			return "", err
 		}
@@ -12132,8 +12163,12 @@ func (s *Server) prepareUpdateShareRequest(r *http.Request, id string, currentSh
 			return err
 		}
 	}
-	if _, ok := matchSharePolicyRule(cfg.Share.PolicyRules, currentShare.Path); !ok {
+	rule, ok := matchSharePolicyRule(cfg.Share.PolicyRules, currentShare.Path)
+	if !ok {
 		return nil
+	}
+	if err := s.authorizeSharePolicyPrincipal(r.Context(), rule); err != nil {
+		return err
 	}
 
 	var req share.UpdateShareRequest
@@ -12144,6 +12179,86 @@ func (s *Server) prepareUpdateShareRequest(r *http.Request, id string, currentSh
 		return err
 	}
 	return resetJSONRequestBody(r, &req)
+}
+
+func (s *Server) authorizeSharePolicyPrincipal(ctx context.Context, rule config.SharePolicyRuleConfig) error {
+	if !sharePolicyRuleHasPrincipalConstraints(rule) || !s.authEnabled {
+		return nil
+	}
+
+	user := auth.GetUserFromContext(ctx)
+	claims := auth.GetClaimsFromContext(ctx)
+	if user != nil && user.Disabled {
+		return errSharePolicyPrincipalForbidden
+	}
+	if (user != nil && user.Role == auth.RoleAdmin) || (claims != nil && claims.Role == auth.RoleAdmin) {
+		return nil
+	}
+
+	identifiers := make([]string, 0, 4)
+	appendIdentifier := func(value string) {
+		trimmed := strings.TrimSpace(strings.ToLower(value))
+		if trimmed == "" {
+			return
+		}
+		for _, existing := range identifiers {
+			if existing == trimmed {
+				return
+			}
+		}
+		identifiers = append(identifiers, trimmed)
+	}
+	if user != nil {
+		appendIdentifier(user.ID)
+		appendIdentifier(user.Username)
+	}
+	if claims != nil {
+		appendIdentifier(claims.UserID)
+		appendIdentifier(claims.Username)
+	}
+
+	for _, allowedUser := range rule.AllowedUsers {
+		if stringSliceContains(identifiers, allowedUser) {
+			return nil
+		}
+	}
+
+	var role string
+	if user != nil && user.Role != "" {
+		role = string(user.Role)
+	} else if claims != nil {
+		role = string(claims.Role)
+	}
+	if role != "" && stringSliceContains(rule.AllowedRoles, role) {
+		return nil
+	}
+
+	if user != nil {
+		for _, group := range user.Groups {
+			if stringSliceContains(rule.AllowedGroups, strings.ToLower(strings.TrimSpace(group))) {
+				return nil
+			}
+		}
+	}
+
+	return errSharePolicyPrincipalForbidden
+}
+
+func sharePolicyRuleHasPrincipalConstraints(rule config.SharePolicyRuleConfig) bool {
+	return len(rule.AllowedUsers) > 0 || len(rule.AllowedGroups) > 0 || len(rule.AllowedRoles) > 0
+}
+
+func stringSliceContains(values []string, target string) bool {
+	target = strings.ToLower(strings.TrimSpace(target))
+	if target == "" {
+		return false
+	}
+	for _, value := range values {
+		if strings.ToLower(strings.TrimSpace(value)) == target {
+			return true
+		}
+	}
+	return false
 }
 
 func applySharePolicyRuleToCreateRequest(req *share.CreateShareRequest, cleanPath string, rules []config.SharePolicyRuleConfig) error {

@@ -6106,6 +6106,115 @@ func TestServer_CreateShare_AppliesPathSharePolicyRule(t *testing.T) {
 	}
 }
 
+func TestServer_CreateShare_EnforcesSharePolicyPrincipalScope(t *testing.T) {
+	server, _, _, username, password := setupAuthServerWithFeatures(t, true, false)
+	cfg := server.currentConfig()
+	cfg.Share.PolicyRules = []config.SharePolicyRuleConfig{{
+		Path:          "/docs",
+		AllowedGroups: []string{"family"},
+		AllowedRoles:  []string{"admin"},
+		MaxAccess:     5,
+	}}
+	server.storeConfig(cfg)
+	setDirectoryAccessRulesForTest(t, server, []config.DirectoryAccessRuleConfig{{
+		Path:       "/docs",
+		ReadGroups: []string{"family"},
+	}})
+
+	token := loginAndGetAccessToken(t, server, username, password)
+	deniedReq := httptest.NewRequest(http.MethodPost, "/api/v1/shares", strings.NewReader(`{"path":"/docs/a.txt","type":"file"}`))
+	deniedReq.Header.Set("Content-Type", "application/json")
+	deniedReq.Header.Set("Authorization", "Bearer "+token)
+	deniedRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(deniedRec, deniedReq)
+	if deniedRec.Code != http.StatusForbidden {
+		t.Fatalf("create share outside principal scope status = %d, want %d; body=%s", deniedRec.Code, http.StatusForbidden, deniedRec.Body.String())
+	}
+	if !strings.Contains(deniedRec.Body.String(), "SHARE_POLICY_PRINCIPAL_FORBIDDEN") {
+		t.Fatalf("expected principal policy error, got %s", deniedRec.Body.String())
+	}
+
+	setUserGroupsForTest(t, server, username, []string{"family"})
+	allowedReq := httptest.NewRequest(http.MethodPost, "/api/v1/shares", strings.NewReader(`{"path":"/docs/a.txt","type":"file"}`))
+	allowedReq.Header.Set("Content-Type", "application/json")
+	allowedReq.Header.Set("Authorization", "Bearer "+token)
+	allowedRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(allowedRec, allowedReq)
+	if allowedRec.Code != http.StatusCreated {
+		t.Fatalf("create share inside principal scope status = %d, want %d; body=%s", allowedRec.Code, http.StatusCreated, allowedRec.Body.String())
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal(allowedRec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to parse create response: %v", err)
+	}
+	data, ok := payload["data"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected create response data")
+	}
+	if data["max_access"] != float64(5) {
+		t.Fatalf("expected max_access capped by policy, got %#v", data["max_access"])
+	}
+}
+
+func TestServer_UpdateShare_AllowsAdminThroughSharePolicyPrincipalScope(t *testing.T) {
+	server, _, _, _, _ := setupAuthServerWithFeatures(t, true, false)
+	cfg := server.currentConfig()
+	cfg.Share.PolicyRules = []config.SharePolicyRuleConfig{{
+		Path:         "/docs",
+		AllowedUsers: []string{"alice"},
+		MaxAccess:    5,
+	}}
+	server.storeConfig(cfg)
+
+	adminPassword := "password123"
+	admin, err := server.userStore.Create("policy-admin", adminPassword, "", auth.RoleAdmin)
+	if err != nil {
+		t.Fatalf("Create(admin) error: %v", err)
+	}
+	token := loginAndGetAccessToken(t, server, admin.Username, adminPassword)
+	createdShare, err := server.shareStore.Create(share.CreateShareOptions{
+		Path:      "/docs/a.txt",
+		Type:      share.ShareTypeFile,
+		CreatedBy: "alice",
+	})
+	if err != nil {
+		t.Fatalf("Create(policy share) error: %v", err)
+	}
+
+	updateReq := httptest.NewRequest(http.MethodPut, "/api/v1/shares/"+createdShare.ID, strings.NewReader(`{"description":"admin policy repair"}`))
+	updateReq.Header.Set("Content-Type", "application/json")
+	updateReq.Header.Set("Authorization", "Bearer "+token)
+	updateRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(updateRec, updateReq)
+	if updateRec.Code != http.StatusOK {
+		t.Fatalf("admin update through principal policy status = %d, want %d; body=%s", updateRec.Code, http.StatusOK, updateRec.Body.String())
+	}
+}
+
+func TestServer_SharePolicyPrincipalScopeRejectsDisabledAdminContext(t *testing.T) {
+	server := &Server{authEnabled: true}
+	ctx := context.WithValue(context.Background(), auth.ContextKeyUser, &auth.User{
+		ID:       "disabled-admin",
+		Username: "disabled-admin",
+		Role:     auth.RoleAdmin,
+		Disabled: true,
+	})
+	ctx = auth.WithClaimsContext(ctx, &auth.TokenClaims{
+		UserID:   "disabled-admin",
+		Username: "disabled-admin",
+		Role:     auth.RoleAdmin,
+	})
+	rule := config.SharePolicyRuleConfig{
+		Path:         "/docs",
+		AllowedRoles: []string{"admin"},
+	}
+
+	if err := server.authorizeSharePolicyPrincipal(ctx, rule); !errors.Is(err, errSharePolicyPrincipalForbidden) {
+		t.Fatalf("authorizeSharePolicyPrincipal(disabled admin) error = %v, want %v", err, errSharePolicyPrincipalForbidden)
+	}
+}
+
 func TestServer_UpdateShare_AppliesPathSharePolicyRule(t *testing.T) {
 	server, _ := setupShareServer(t)
 	server.authEnabled = true
@@ -6403,7 +6512,7 @@ func TestServer_UpdateSettings_UpdatesShareDefaultPolicy(t *testing.T) {
 func TestServer_UpdateSettings_UpdatesSharePathPolicyRules(t *testing.T) {
 	server, _ := setupShareServer(t)
 
-	updateReq := httptest.NewRequest(http.MethodPut, "/api/v1/settings", strings.NewReader(`{"share":{"policy_rules":[{"path":"/docs/","require_password":true,"max_expires_in":"24h","max_access":5}]}}`))
+	updateReq := httptest.NewRequest(http.MethodPut, "/api/v1/settings", strings.NewReader(`{"share":{"policy_rules":[{"path":"/docs/","require_password":true,"max_expires_in":"24h","max_access":5,"allowed_users":["Alice"],"allowed_groups":["Family"],"allowed_roles":["User"]}]}}`))
 	updateReq.Header.Set("Content-Type", "application/json")
 	updateRec := httptest.NewRecorder()
 	server.Router().ServeHTTP(updateRec, updateReq)
@@ -6438,6 +6547,33 @@ func TestServer_UpdateSettings_UpdatesSharePathPolicyRules(t *testing.T) {
 	if rule["path"] != "/docs" || rule["require_password"] != true || rule["max_expires_in"] != "24h" || rule["max_access"] != float64(5) {
 		t.Fatalf("unexpected policy rule: %#v", rule)
 	}
+	if got, want := strings.Join(anyStringSliceForTest(t, rule["allowed_users"]), ","), "alice"; got != want {
+		t.Fatalf("policy rule allowed users = %q, want %q", got, want)
+	}
+	if got, want := strings.Join(anyStringSliceForTest(t, rule["allowed_groups"]), ","), "family"; got != want {
+		t.Fatalf("policy rule allowed groups = %q, want %q", got, want)
+	}
+	if got, want := strings.Join(anyStringSliceForTest(t, rule["allowed_roles"]), ","), "user"; got != want {
+		t.Fatalf("policy rule allowed roles = %q, want %q", got, want)
+	}
+}
+
+func anyStringSliceForTest(t *testing.T, value any) []string {
+	t.Helper()
+
+	values, ok := value.([]any)
+	if !ok {
+		t.Fatalf("expected JSON string array, got %#v", value)
+	}
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		text, ok := value.(string)
+		if !ok {
+			t.Fatalf("expected JSON string item, got %#v", value)
+		}
+		result = append(result, text)
+	}
+	return result
 }
 
 func TestServer_UpdateSettings_SaveFailureDoesNotUpdateRunningShareBaseURL(t *testing.T) {
