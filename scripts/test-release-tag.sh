@@ -46,6 +46,8 @@ assert_passes "v0.1.0"
 assert_passes "v1.2.3"
 assert_passes "v1.2.3-rc.1"
 assert_passes "v1.2.3-alpha.7"
+max_docker_prerelease="$(printf 'a%.0s' {1..122})"
+assert_passes "v1.2.3-$max_docker_prerelease"
 
 GITHUB_REF_NAME="v2.0.0-beta.1" bash "$CHECK" >"$TMP_ROOT/env.log"
 assert_file_contains "$TMP_ROOT/env.log" "valid release tag: v2.0.0-beta.1"
@@ -61,5 +63,7 @@ assert_fails "v1.2.03" "numeric components must not contain leading zeroes"
 assert_fails "v1.2.3-rc.01" "numeric prerelease identifiers must not contain leading zeroes"
 assert_fails "v1.2.3-rc..1" "release tag must match"
 assert_fails "v1.2.3-rc_1" "release tag must match"
+too_long_docker_prerelease="$(printf 'a%.0s' {1..123})"
+assert_fails "v1.2.3-$too_long_docker_prerelease" "without the v prefix must be at most 128 characters"
 
 printf '[release-tag-test] all checks passed\n'
