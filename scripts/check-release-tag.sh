@@ -36,6 +36,11 @@ if [[ ! "$tag" =~ $pattern ]]; then
 	fail "release tag must match vMAJOR.MINOR.PATCH or vMAJOR.MINOR.PATCH-PRERELEASE"
 fi
 
+docker_tag="${tag#v}"
+if ((${#docker_tag} > 128)); then
+	fail "release tag without the v prefix must be at most 128 characters for Docker image tags: $tag"
+fi
+
 prerelease="${BASH_REMATCH[5]:-}"
 for component in "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}"; do
 	if [[ "$component" =~ ^0[0-9]+$ ]]; then
