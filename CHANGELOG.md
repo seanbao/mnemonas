@@ -219,7 +219,7 @@
 - CI 和 release 工作流增加最小权限、job 级权限收缩、并发控制和 job 超时，减少权限面、重复运行和挂起风险
 - Release workflow 在创建 GitHub Release 前校验下载归档、checksums 和必需目标集合
 - Release workflow 在构建归档和容器镜像前拒绝非语义化版本 release tag
-- Release artifact verifier 在执行 checksum 前拒绝不安全的 checksum 路径、控制字符路径、空白字符路径、符号链接归档、下载目录中的未知条目、特殊归档条目、重复条目、反斜杠路径和歧义路径段
+- Release artifact verifier 在执行 checksum 前拒绝不安全的 checksum 路径、控制字符路径、空白字符路径、符号链接归档、下载目录中的未知条目、特殊归档条目、重复条目、归档成员控制字符路径、归档成员空白字符路径、反斜杠路径和歧义路径段
 - Release artifact verifier 成功时会输出已验证目标集合，便于发布后核对平台归档覆盖范围
 - Release archive 随包附带 `SUPPORT.md`
 - CI push/pull_request 触发分支覆盖 `main` 和 `master`，避免当前仓库默认分支未切换时漏跑检查
