@@ -302,6 +302,9 @@ validate_manifest_paths() {
 		if contains_control_character "$path"; then
 			fail "archive entry contains a control character: $path"
 		fi
+		if contains_whitespace_character "$path"; then
+			fail "archive entry contains whitespace: $path"
+		fi
 		case "$path" in
 			*//*|./*|*/./*|*/.|.)
 				fail "archive entry has an unsafe path segment: $path"
