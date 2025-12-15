@@ -582,6 +582,16 @@ func TestConfig_Validate(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name:    "Invalid share base URL escaped query marker path",
+			modify:  func(c *Config) { c.Share.BaseURL = "https://nas.example.com/shares%3Ftoken" },
+			wantErr: true,
+		},
+		{
+			name:    "Invalid share base URL escaped fragment marker path",
+			modify:  func(c *Config) { c.Share.BaseURL = "https://nas.example.com/shares%23section" },
+			wantErr: true,
+		},
+		{
 			name:    "Invalid share base URL empty host label",
 			modify:  func(c *Config) { c.Share.BaseURL = "https://nas..example.com" },
 			wantErr: true,

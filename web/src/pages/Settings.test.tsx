@@ -7512,6 +7512,8 @@ describe('SettingsPage', () => {
     ['empty query marker', 'https://nas.example.com?'],
     ['URL fragments', 'https://nas.example.com#share'],
     ['empty fragment marker', 'https://nas.example.com#'],
+    ['escaped query marker path', 'https://nas.example.com/shares%3Ftoken'],
+    ['escaped fragment marker path', 'https://nas.example.com/shares%23section'],
     ['invalid host labels', 'https://nas..example.com'],
     ['spaces', 'https://nas.example.com/base path'],
     ['host-relative backslash path', 'https://nas.example.com\\shares'],
@@ -7534,7 +7536,7 @@ describe('SettingsPage', () => {
     await waitFor(() => {
       expect(mockAddToast).toHaveBeenCalledWith({
         title: '分享基础 URL 无效',
-        description: '分享基础 URL 必须为空，或使用不含 userinfo、查询参数、片段、反斜杠、重复路径斜杠、. 或 .. 路径段且主机名有效的 http/https 地址',
+        description: '分享基础 URL 必须为空，或使用不含 userinfo、查询参数、片段、编码后的查询或片段标记、反斜杠、重复路径斜杠、. 或 .. 路径段且主机名有效的 http/https 地址',
         color: 'danger',
       })
     })
@@ -7566,6 +7568,16 @@ describe('SettingsPage', () => {
       'escaped backslash path',
       'https://nas.example.com/shares%5Cteam',
       '路径包含反斜杠；公网部署中代理或浏览器可能规范化为不同的分享地址。',
+    ],
+    [
+      'escaped query marker path',
+      'https://nas.example.com/shares%3Ftoken',
+      '路径包含编码后的查询或片段标记；公网部署中代理或浏览器可能规范化为不同的分享地址。',
+    ],
+    [
+      'escaped fragment marker path',
+      'https://nas.example.com/shares%23section',
+      '路径包含编码后的查询或片段标记；公网部署中代理或浏览器可能规范化为不同的分享地址。',
     ],
     [
       'duplicate path slashes',

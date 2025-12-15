@@ -332,7 +332,7 @@ Five failed password attempts for the same share and client address lock access 
 
 For family public sharing, keep newly created shares expiring by default, for example after 7 days, and set an explicit default access-count limit. The security self-check reports no default expiry, values above `720h` (30 days), or unlimited default access counts as warnings.
 
-When sharing is enabled, `share.base_url` should use HTTPS on the default port, have a valid host, and contain no userinfo, query string, fragment, backslash, duplicated path slash, or `.`/`..` path segments. It should be the site origin or application base path and should not include the `/s` share route. The security self-check and `mnemonas-doctor --public-domain` report base URLs that do not meet public-deployment requirements.
+When sharing is enabled, `share.base_url` should use HTTPS on the default port, have a valid host, and contain no userinfo, query string, fragment, encoded query or fragment marker, backslash, duplicated path slash, or `.`/`..` path segments. It should be the site origin or application base path and should not include the `/s` share route. The security self-check and `mnemonas-doctor --public-domain` report base URLs that do not meet public-deployment requirements.
 
 ## Security Capability Status
 

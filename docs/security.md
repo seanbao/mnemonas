@@ -319,7 +319,7 @@ location /api/ {
 
 - 受密码保护的公开分享在浏览器完成一次密码验证后，会下发 `HttpOnly`、`SameSite=Strict` cookie；cookie 只作用于对应的 `/s/<id>` 与 `/api/v1/public/shares/<id>` 路径
 - 家庭公网分享建议让新分享默认 7 天过期，并设置明确的默认访问次数；安全自检会提示默认不过期、超过 `720h`（30 天）或默认访问次数不限制的配置。
-- 启用分享功能时，`share.base_url` 应使用 HTTPS 默认端口，不能包含 userinfo、查询参数、片段、反斜杠、重复路径斜杠或 `.`/`..` 路径段，且主机名必须有效；该值应是站点 origin 或应用基础路径，不应包含 `/s` 分享路由。安全自检和 `mnemonas-doctor --public-domain` 会报告不符合公网部署要求的基础 URL。
+- 启用分享功能时，`share.base_url` 应使用 HTTPS 默认端口，不能包含 userinfo、查询参数、片段、编码后的查询或片段标记、反斜杠、重复路径斜杠或 `.`/`..` 路径段，且主机名必须有效；该值应是站点 origin 或应用基础路径，不应包含 `/s` 分享路由。安全自检和 `mnemonas-doctor --public-domain` 会报告不符合公网部署要求的基础 URL。
 - 文件夹浏览与文件下载依赖该 cookie，不再通过 URL 查询参数传递分享密码
 - 公开分享信息、密码验证响应与文件夹列表响应会返回 `Cache-Control: private, no-cache`、`Vary: Cookie`、`X-Content-Type-Options: nosniff` 和 `Referrer-Policy: no-referrer`，避免浏览器或中间缓存复用依赖 cookie 的分享元数据
 - 安全自检会优先阻断公开分享 cookie、失败限速或缓存边界异常；只有这些边界正常但当前请求未被识别为 HTTPS 时，才会降级为 `Secure` cookie 标记告警
