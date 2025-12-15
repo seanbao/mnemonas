@@ -19597,6 +19597,14 @@ func TestServer_UpdateSettings_RejectsInvalidShareBaseURL(t *testing.T) {
 			baseURL: "https://nas.example.com#",
 		},
 		{
+			name:    "escaped query marker path",
+			baseURL: "https://nas.example.com/shares%3Ftoken",
+		},
+		{
+			name:    "escaped fragment marker path",
+			baseURL: "https://nas.example.com/shares%23section",
+		},
+		{
 			name:    "empty host label",
 			baseURL: "https://nas..example.com",
 		},

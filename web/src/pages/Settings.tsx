@@ -519,7 +519,12 @@ function isValidShareBaseURL(value: string): boolean {
     if (parsed.username || parsed.password || trimmed.includes('?') || trimmed.includes('#') || parsed.search || parsed.hash) {
       return false
     }
-    if (pathHasBackslashes(rawPathname) || pathHasDuplicateSlashes(rawPathname) || pathHasDotSegments(rawPathname)) {
+    if (
+      pathHasBackslashes(rawPathname)
+      || pathHasEncodedQueryOrFragmentMarkers(rawPathname)
+      || pathHasDuplicateSlashes(rawPathname)
+      || pathHasDotSegments(rawPathname)
+    ) {
       return false
     }
     return isValidTCPHost(urlHostnameForTCPValidation(parsed.hostname))
@@ -808,6 +813,10 @@ function pathHasBackslashes(pathname: string): boolean {
   return /\\|%5c/iu.test(pathname)
 }
 
+function pathHasEncodedQueryOrFragmentMarkers(pathname: string): boolean {
+  return /%(?:3f|23)/iu.test(pathname)
+}
+
 function pathHasDuplicateSlashes(pathname: string): boolean {
   return /\/{2,}/u.test(decodeEscapedPathSlashes(pathname))
 }
@@ -820,6 +829,14 @@ function pathHasDotSegments(pathname: string): boolean {
 
 function collapseDuplicatePathSlashes(pathname: string): string {
   return decodeEscapedPathSlashes(pathname).replace(/\/{2,}/gu, '/')
+}
+
+function stripEncodedQueryFragmentMarkers(pathname: string): string {
+  const markerIndex = pathname.search(/%(?:3f|23)/iu)
+  if (markerIndex < 0) {
+    return pathname
+  }
+  return pathname.slice(0, markerIndex) || '/'
 }
 
 function decodeEscapedPathSlashes(pathname: string): string {
@@ -978,7 +995,11 @@ function httpsShareBaseURLFromSecurityCheck(check: SecurityCheckItem): string {
     if (requestHost && !/[\s/:]/.test(requestHost)) {
       parsed.hostname = requestHost
     }
-    parsed.pathname = stripShareRouteSuffix(collapseDuplicatePathSlashes(decodeEscapedPathSeparators(parsed.pathname)))
+    parsed.pathname = stripShareRouteSuffix(
+      collapseDuplicatePathSlashes(
+        decodeEscapedPathSeparators(stripEncodedQueryFragmentMarkers(parsed.pathname)),
+      ),
+    )
 
     if (parsed.pathname === '/' && parsed.search === '') {
       return parsed.origin
@@ -1006,6 +1027,9 @@ function shareBaseURLPublicReviewMessage(value: string): string | undefined {
     }
     if (pathHasBackslashes(rawPathname)) {
       return '路径包含反斜杠；公网部署中代理或浏览器可能规范化为不同的分享地址。'
+    }
+    if (pathHasEncodedQueryOrFragmentMarkers(rawPathname)) {
+      return '路径包含编码后的查询或片段标记；公网部署中代理或浏览器可能规范化为不同的分享地址。'
     }
     if (pathHasDuplicateSlashes(rawPathname)) {
       return '路径包含重复斜杠；公网部署中代理或浏览器可能规范化为不同的分享地址。'
@@ -6095,7 +6119,7 @@ export function SettingsPage() {
     if (!isValidShareBaseURL(trimmedShareBaseURL)) {
       addToast({
         title: '分享基础 URL 无效',
-        description: '分享基础 URL 必须为空，或使用不含 userinfo、查询参数、片段、反斜杠、重复路径斜杠、. 或 .. 路径段且主机名有效的 http/https 地址',
+        description: '分享基础 URL 必须为空，或使用不含 userinfo、查询参数、片段、编码后的查询或片段标记、反斜杠、重复路径斜杠、. 或 .. 路径段且主机名有效的 http/https 地址',
         color: 'danger',
       })
       return

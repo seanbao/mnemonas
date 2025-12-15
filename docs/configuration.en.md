@@ -528,7 +528,7 @@ On first startup without a `users_file`, or when the file has no enabled adminis
 | --- | --- | --- | --- |
 | `enabled` | bool | `false` | Enable share links |
 | `store_file` | string | `<storage.root>/.mnemonas/shares.json` | Share metadata file |
-| `base_url` | string | `""` | Base URL used when returning share URLs; non-empty values must be absolute `http` or `https` URLs without userinfo, query strings, fragments, backslashes, duplicate path slashes, or `.`/`..` path segments, and with a valid host name |
+| `base_url` | string | `""` | Base URL used when returning share URLs; non-empty values must be absolute `http` or `https` URLs without userinfo, query strings, fragments, encoded query or fragment markers, backslashes, duplicate path slashes, or `.`/`..` path segments, and with a valid host name |
 | `default_expires_in` | duration | `168h` | Default expiration for newly-created shares; `0` or empty means no default expiration. Public deployments should keep an explicit default expiry at or below `720h` (30 days) |
 | `default_max_access` | int | `0` | Default access-count limit for newly-created shares; `0` means unlimited |
 | `[[share.policy_rules]]` | array | `[]` | Stricter share constraints and allowed creator/maintainer scope for a MnemoNAS path; the most specific matching path wins |
@@ -558,10 +558,10 @@ Non-empty `base_url` values must satisfy these rules:
 
 - Use an absolute `http` or `https` URL.
 - Do not include usernames, passwords, or other userinfo.
-- Do not include query strings, fragments, backslashes, duplicate path slashes, or `.`/`..` path segments.
+- Do not include query strings, fragments, encoded query or fragment markers, backslashes, duplicate path slashes, or `.`/`..` path segments.
 - Use a valid domain name or IP address without empty labels or underscores.
 
-A single FQDN trailing dot is treated as the same host, while repeated trailing dots are rejected. Backslashes, duplicate path slashes, and dot segments are rejected because proxies or browsers may normalize the generated share address differently.
+A single FQDN trailing dot is treated as the same host, while repeated trailing dots are rejected. Encoded query or fragment markers, backslashes, duplicate path slashes, and dot segments are rejected because proxies or browsers may normalize the generated share address differently.
 
 Public deployments that use a reverse-proxy application base path should set that base path itself, such as `https://nas.example.com/mnemonas`, and should not include the `/s` share route in `base_url`. Paths ending in `/s` produce a manual-review warning in the security self-check and public diagnostics.
 

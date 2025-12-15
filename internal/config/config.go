@@ -2720,6 +2720,9 @@ func validateShareBaseURL(rawURL string) error {
 	if shareBaseURLPathHasBackslashes(parsed.Path) {
 		return fmt.Errorf("%s path must not contain backslashes", field)
 	}
+	if shareBaseURLPathHasQueryOrFragmentMarkers(parsed.Path) {
+		return fmt.Errorf("%s path must not contain encoded query or fragment markers", field)
+	}
 	if shareBaseURLPathHasDuplicateSlashes(parsed.Path) {
 		return fmt.Errorf("%s path must not contain duplicate slashes", field)
 	}
@@ -2731,6 +2734,10 @@ func validateShareBaseURL(rawURL string) error {
 
 func shareBaseURLPathHasBackslashes(path string) bool {
 	return strings.Contains(path, "\\")
+}
+
+func shareBaseURLPathHasQueryOrFragmentMarkers(path string) bool {
+	return strings.ContainsAny(path, "?#")
 }
 
 func shareBaseURLPathHasDuplicateSlashes(path string) bool {

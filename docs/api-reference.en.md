@@ -1324,7 +1324,7 @@ Normalized no-op submissions do not emit this event. Alert delivery failures are
 - WebDAV prefix: `webdav.prefix` is normalized to a `/`-prefixed URL path, must not contain backslash, `?`, `#`, or control characters, and when enabled must not overlap `/`, `/api`, `/s`, or `/health`.
 - WebDAV password: omitting `webdav.password` preserves the existing WebDAV password, while submitting an empty string switches Basic Auth back to the generated password from `secrets.json`.
 - URL fields: non-empty `share.base_url`, `alerts.webhook_url`, `alerts.wecom_webhook_url`, and `alerts.dingtalk_webhook_url` values must be absolute `http` or `https` URLs with a valid host name or IP address.
-  `share.base_url` also must not contain userinfo, query strings, fragments, backslashes, duplicate path slashes, or `.`/`..` path segments.
+  `share.base_url` also must not contain userinfo, query strings, fragments, encoded query or fragment markers, backslashes, duplicate path slashes, or `.`/`..` path segments.
 - Share policy: `share.default_expires_in` must be empty, `0`, or a non-negative Go duration string; `share.default_max_access` must be zero or greater.
   `share.policy_rules` entries must use MnemoNAS logical paths and set at least one of `require_password`, `max_expires_in`, `max_access`, `allowed_users`, `allowed_groups`, or `allowed_roles`. Allowed-scope fields are trimmed, deduplicated, and normalized to lowercase; roles accept only `admin`, `user`, or `guest`.
 - Alert Webhook: `webhook_method` supports `GET` and `POST`. Custom webhook headers use `"Key: Value"` strings with valid HTTP token names, case-insensitively unique names, and values without newlines or control characters.
@@ -1722,7 +1722,7 @@ Important check semantics:
 - `forwarded_proto_trust` checks `X-Forwarded-Proto` against trusted-proxy settings.
   The header without `trusted_proxy_hops` is a `warning`, the header from an untrusted direct peer is a `block`, and a trusted direct peer forwarding a value other than `https` is a `warning`.
 - `share_base_url` checks the public share-link base URL when sharing is enabled.
-  HTTP, a non-443 HTTPS port, URL userinfo, query strings, fragments, backslashes, duplicated path slashes, `.`/`..` path segments, or an invalid host name is reported as `block`.
+  HTTP, a non-443 HTTPS port, URL userinfo, query strings, fragments, encoded query or fragment markers, backslashes, duplicated path slashes, `.`/`..` path segments, or an invalid host name is reported as `block`.
   Empty values, a different host, or a base path ending in the `/s` sharing route remain manual-review warnings.
 - `share_default_policy` checks the default expiry and default access count for newly created shares.
   When sharing is enabled, no default expiry, values longer than `720h`, or unlimited default access counts are `warning`; negative defaults are `block`.

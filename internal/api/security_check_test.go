@@ -926,6 +926,14 @@ func TestServer_GetSettingsSecurityCheck_BlocksUnsafeShareBaseURL(t *testing.T) 
 			baseURL: "https://nas.example.test#",
 		},
 		{
+			name:    "escaped query marker path",
+			baseURL: "https://nas.example.test/shares%3Ftoken",
+		},
+		{
+			name:    "escaped fragment marker path",
+			baseURL: "https://nas.example.test/shares%23section",
+		},
+		{
 			name:    "duplicate path slashes",
 			baseURL: "https://nas.example.test/shares//team",
 		},
