@@ -42,15 +42,23 @@ vi.mock('@/api/auth', () => ({
   ensureDownloadSession: vi.fn(),
 }))
 
+vi.mock('@/api/activity', () => ({
+  listActivity: vi.fn(),
+  createActivityReviewRecord: vi.fn(),
+}))
+
 import { VersionsPage } from './Versions'
 
 import { ApiError, downloadFile, getVersions, restoreVersion } from '@/api/files'
+import { createActivityReviewRecord, listActivity } from '@/api/activity'
 
 const mockGetVersions = vi.mocked(getVersions)
 const mockDownloadFile = vi.mocked(downloadFile)
 const mockRestoreVersion = vi.mocked(restoreVersion)
 const mockAuthFetch = vi.mocked(authFetch)
 const mockEnsureDownloadSession = vi.mocked(ensureDownloadSession)
+const mockListActivity = vi.mocked(listActivity)
+const mockCreateActivityReviewRecord = vi.mocked(createActivityReviewRecord)
 const successActionResult = { warning: false, message: undefined } as const
 
 function expectGetVersionsCalledWithPath(path: string) {
@@ -97,6 +105,29 @@ describe('VersionsPage', () => {
     }))
     mockEnsureDownloadSession.mockResolvedValue({ ok: true })
     mockDownloadFile.mockResolvedValue(undefined)
+    mockListActivity.mockResolvedValue({
+      items: [],
+      total: 0,
+      limit: 100,
+      offset: 0,
+    })
+    mockCreateActivityReviewRecord.mockImplementation(async (input) => ({
+      id: 'version-review-record-1',
+      reviewed_at: '2026-04-13T00:00:00Z',
+      reviewer: 'admin',
+      note: input.note,
+      scope_label: input.scope_label,
+      filter_summary: input.filter_summary,
+      disposition_status: input.disposition_status,
+      action_counts: input.action_counts,
+      review_count: input.review_count,
+      total_count: input.total_count,
+      path_count: input.path_count,
+      user_count: input.user_count,
+      path_samples: input.path_samples,
+      user_samples: input.user_samples,
+      activity_entry_ids: input.activity_entry_ids,
+    }))
     mockGetVersions.mockResolvedValue([
       { version: 3, hash: 'hash3', size: 3000, timestamp: '2024-01-03T00:00:00Z' },
       { version: 2, hash: 'hash2', size: 2000, timestamp: '2024-01-02T00:00:00Z' },
@@ -485,6 +516,68 @@ describe('VersionsPage', () => {
       await waitFor(() => {
         expect(mockRestoreVersion).toHaveBeenCalled()
       })
+    })
+
+    it('records version restore execution results into activity review history', async () => {
+      mockRestoreVersion.mockResolvedValue(successActionResult)
+      mockListActivity.mockResolvedValueOnce({
+        items: [{
+          id: 'version-restore-activity-1',
+          timestamp: '2026-04-13T01:00:00Z',
+          action: 'restore',
+          path: '/test.txt',
+          user: 'admin',
+          details: {
+            restore_source: 'version',
+            hash: 'hash2',
+          },
+        }],
+        total: 1,
+        limit: 100,
+        offset: 0,
+      })
+      const user = userEvent.setup({ writeToClipboard: false })
+
+      render(<VersionsPage />)
+
+      const input = screen.getByLabelText('版本文件路径')
+      await user.type(input, '/test.txt{enter}')
+
+      await waitFor(() => {
+        expect(screen.queryAllByRole('button', { name: /^恢复到版本 / }).length).toBeGreaterThan(0)
+      })
+
+      await user.click(screen.getByRole('button', { name: '恢复到版本 2' }))
+      await user.click(await screen.findByText('确认恢复'))
+
+      await waitFor(() => {
+        expect(mockCreateActivityReviewRecord).toHaveBeenCalledTimes(1)
+      })
+      expect(mockListActivity).toHaveBeenCalledWith(expect.objectContaining({
+        action: 'restore',
+        actionGroup: 'risk',
+        path: '/test.txt',
+        limit: 100,
+        offset: 0,
+        signal: expect.any(AbortSignal),
+      }))
+      expect(mockCreateActivityReviewRecord).toHaveBeenCalledWith(expect.objectContaining({
+        note: '版本恢复执行结果：已将 /test.txt 恢复到版本 2（hash2）；已关联 1 条恢复活动。',
+        scope_label: '版本历史 /test.txt',
+        filter_summary: '审计分组 风险操作 · 路径 /test.txt · 执行结果 版本恢复',
+        disposition_status: 'restored',
+        action_counts: { restore: 1 },
+        review_count: 1,
+        total_count: 1,
+        path_count: 1,
+        user_count: 1,
+        path_samples: ['/test.txt'],
+        user_samples: ['admin'],
+        activity_entry_ids: ['version-restore-activity-1'],
+      }), expect.objectContaining({
+        signal: expect.any(AbortSignal),
+      }))
+      expect(mockAddToast).toHaveBeenCalledWith({ title: '版本恢复结果已记录', color: 'success' })
     })
 
     it('shows warning toast when restore succeeds with a persistence warning', async () => {

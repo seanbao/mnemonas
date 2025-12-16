@@ -1120,7 +1120,7 @@ Response example:
 
 ### List Activity Review Records (Admin)
 
-Return persisted activity review disposition records. Share-review records may include `share_disposition_details` with redacted share-disposition clues.
+Return persisted activity review disposition records. The version-history and Trash pages write matching `restore` or `trash_restore` activity entries into `restored` disposition records; share-review records may include `share_disposition_details` with redacted share-disposition clues.
 
 ```
 GET /api/v1/activity/reviews
