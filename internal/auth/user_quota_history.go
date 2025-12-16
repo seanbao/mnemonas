@@ -12,7 +12,12 @@ import (
 	"time"
 )
 
-const maxUserQuotaTrendHistory = 64
+const (
+	maxUserQuotaTrendHistory            = 512
+	userQuotaTrendRecentRetentionDays   = 30
+	userQuotaTrendDailyRetentionYears   = 1
+	userQuotaTrendMonthlyRetentionYears = 3
+)
 
 // UserQuotaTrendPoint captures an aggregate user-quota snapshot for admin review.
 type UserQuotaTrendPoint struct {
@@ -102,7 +107,7 @@ func (s *UserStore) RecordUserQuotaTrendSnapshot(snapshot UserQuotaTrendPoint) (
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 
-	history, err := loadUserQuotaTrendHistory(historyPath, maxUserQuotaTrendHistory)
+	history, err := loadUserQuotaTrendHistory(historyPath)
 	if err != nil {
 		if recoverErr := recoverCorruptUserQuotaTrendHistory(historyPath, err); recoverErr != nil {
 			return nil, errors.Join(
@@ -113,12 +118,12 @@ func (s *UserStore) RecordUserQuotaTrendSnapshot(snapshot UserQuotaTrendPoint) (
 		history = nil
 	}
 
-	history = normalizeUserQuotaTrendHistory(history, maxUserQuotaTrendHistory)
+	history = applyUserQuotaTrendRetention(history, snapshot.CapturedAt, maxUserQuotaTrendHistory)
 	if latest := latestUserQuotaTrendPoint(history); latest != nil && userQuotaTrendValuesEqual(*latest, snapshot) {
 		return cloneUserQuotaTrendHistory(history), nil
 	}
 
-	nextHistory := normalizeUserQuotaTrendHistory(append([]UserQuotaTrendPoint{snapshot}, history...), maxUserQuotaTrendHistory)
+	nextHistory := applyUserQuotaTrendRetention(append([]UserQuotaTrendPoint{snapshot}, history...), snapshot.CapturedAt, maxUserQuotaTrendHistory)
 	if err := saveUserQuotaTrendHistory(historyPath, nextHistory); err != nil {
 		return nil, err
 	}
@@ -132,7 +137,7 @@ func latestUserQuotaTrendPoint(history []UserQuotaTrendPoint) *UserQuotaTrendPoi
 	return &history[0]
 }
 
-func loadUserQuotaTrendHistory(filePath string, maxSize int) ([]UserQuotaTrendPoint, error) {
+func loadUserQuotaTrendHistory(filePath string) ([]UserQuotaTrendPoint, error) {
 	data, err := readRegisteredAuthFile(filePath, errUserQuotaHistorySymlink)
 	if err != nil {
 		return nil, err
@@ -156,7 +161,7 @@ func loadUserQuotaTrendHistory(filePath string, maxSize int) ([]UserQuotaTrendPo
 			return nil, fmt.Errorf("%w at index %d: %w", errInvalidUserQuotaHistory, index, err)
 		}
 	}
-	return normalizeUserQuotaTrendHistory(history, maxSize), nil
+	return normalizeUserQuotaTrendHistory(history, 0), nil
 }
 
 func saveUserQuotaTrendHistory(filePath string, history []UserQuotaTrendPoint) error {
@@ -266,6 +271,56 @@ func normalizeUserQuotaTrendHistory(history []UserQuotaTrendPoint, maxSize int) 
 		normalized = normalized[:maxSize]
 	}
 	return normalized
+}
+
+func applyUserQuotaTrendRetention(history []UserQuotaTrendPoint, now time.Time, maxSize int) []UserQuotaTrendPoint {
+	normalized := normalizeUserQuotaTrendHistory(history, 0)
+	if len(normalized) == 0 {
+		return normalized
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	} else {
+		now = now.UTC()
+	}
+
+	recentCutoff := now.AddDate(0, 0, -userQuotaTrendRecentRetentionDays)
+	dailyCutoff := now.AddDate(-userQuotaTrendDailyRetentionYears, 0, 0)
+	monthlyCutoff := now.AddDate(-userQuotaTrendMonthlyRetentionYears, 0, 0)
+	dailyBuckets := make(map[string]struct{})
+	monthlyBuckets := make(map[string]struct{})
+	retained := make([]UserQuotaTrendPoint, 0, len(normalized))
+
+	for _, point := range normalized {
+		capturedAt := point.CapturedAt.UTC()
+		point.CapturedAt = capturedAt
+
+		if !capturedAt.Before(recentCutoff) {
+			retained = append(retained, point)
+			continue
+		}
+		if !capturedAt.Before(dailyCutoff) {
+			bucket := capturedAt.Format("2006-01-02")
+			if _, ok := dailyBuckets[bucket]; ok {
+				continue
+			}
+			dailyBuckets[bucket] = struct{}{}
+			retained = append(retained, point)
+			continue
+		}
+		if !capturedAt.Before(monthlyCutoff) {
+			bucket := capturedAt.Format("2006-01")
+			if _, ok := monthlyBuckets[bucket]; ok {
+				continue
+			}
+			monthlyBuckets[bucket] = struct{}{}
+			retained = append(retained, point)
+		}
+	}
+	if maxSize > 0 && len(retained) > maxSize {
+		retained = retained[:maxSize]
+	}
+	return retained
 }
 
 func cloneUserQuotaTrendHistory(history []UserQuotaTrendPoint) []UserQuotaTrendPoint {
