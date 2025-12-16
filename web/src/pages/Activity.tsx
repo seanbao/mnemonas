@@ -194,6 +194,33 @@ function getActivityReviewDispositionStatusLabel(status?: ActivityReviewDisposit
   return ACTIVITY_REVIEW_DISPOSITION_OPTIONS.find((option) => option.key === (status ?? 'documented'))?.label ?? '已记录'
 }
 
+function getActivityShareReviewRiskLabel(level?: string): string {
+  switch (level) {
+  case 'high':
+    return '高风险'
+  case 'medium':
+    return '中风险'
+  case 'low':
+    return '低风险'
+  case 'none':
+    return '无风险'
+  default:
+    return '未记录风险'
+  }
+}
+
+function getActivityShareReviewTypeLabel(type?: string): string {
+  return type === 'folder' ? '文件夹' : type === 'file' ? '文件' : '分享'
+}
+
+function getActivityReviewShareDispositionSummary(record: ActivityReviewRecord): string {
+  const detail = record.share_disposition_details?.[0]
+  if (!detail) {
+    return ''
+  }
+  return `${detail.path}：${getActivityShareReviewRiskLabel(detail.risk_level)}${detail.reason_summary ? ` · ${detail.reason_summary}` : ''}`
+}
+
 function toRFC3339Seconds(date: Date): string {
   return date.toISOString().replace(/\.\d{3}Z$/, 'Z')
 }
@@ -706,6 +733,17 @@ function formatActivityReviewActionCountsForExport(actionCounts?: ActivityAction
     .join('; ')
 }
 
+function formatActivityReviewShareDispositionDetailsForExport(record: ActivityReviewRecord): string {
+  return record.share_disposition_details
+    ?.map((detail) => [
+      detail.path,
+      getActivityShareReviewRiskLabel(detail.risk_level),
+      detail.reason_summary,
+      detail.suggested_action,
+    ].filter(Boolean).join(' | '))
+    .join('; ') ?? ''
+}
+
 function csvCell(value: string | number | undefined): string {
   const text = String(value ?? '')
   return `"${text.replaceAll('"', '""')}"`
@@ -726,6 +764,7 @@ function buildActivityReviewRecordsCSV(records: ActivityReviewRecord[]): string 
     '操作统计',
     '路径样例',
     '用户样例',
+    '分享处置线索',
     '活动记录ID',
   ]
   const rows = records.map((record) => [
@@ -742,6 +781,7 @@ function buildActivityReviewRecordsCSV(records: ActivityReviewRecord[]): string 
     formatActivityReviewActionCountsForExport(record.action_counts),
     record.path_samples?.join('; ') ?? '',
     record.user_samples?.join('; ') ?? '',
+    formatActivityReviewShareDispositionDetailsForExport(record),
     record.activity_entry_ids.join('; '),
   ])
   return [
@@ -994,6 +1034,7 @@ function ActivityReviewDispositionRecorder({
     const actionSummary = formatActivityReviewActionCounts(record.action_counts) || '未记录'
     const pathSamples = record.path_samples ?? []
     const userSamples = record.user_samples ?? []
+    const shareDispositionDetails = record.share_disposition_details ?? []
     const primaryPath = getActivityReviewRecordPrimaryPath(record)
     const isShareReview = activityReviewRecordHasAction(record, ACTIVITY_SHARE_ACTIONS)
 
@@ -1054,8 +1095,26 @@ function ActivityReviewDispositionRecorder({
                     <span>分享处置线索</span>
                   </dt>
                   <dd className="mt-1 space-y-1 text-foreground">
-                    {primaryPath && <div className="truncate" title={primaryPath}>主要路径：{primaryPath}</div>}
-                    <div>核对项：密码、有效期、访问次数、是否仍需要公开访问</div>
+                    {shareDispositionDetails.length > 0 ? (
+                      shareDispositionDetails.map((detail) => (
+                        <div key={detail.path} className="rounded-md bg-content1/70 px-2 py-1">
+                          <div className="truncate font-medium" title={detail.path}>
+                            {getActivityShareReviewTypeLabel(detail.type)}：{detail.path}
+                          </div>
+                          <div className="mt-0.5 truncate text-default-500" title={detail.reason_summary || '无'}>
+                            {detail.enabled ? '启用' : '停用'} · {getActivityShareReviewRiskLabel(detail.risk_level)} · {detail.access_summary || '访问限制未记录'} · {detail.expires_at || '过期时间未记录'}
+                          </div>
+                          <div className="mt-0.5 truncate text-default-500" title={detail.suggested_action || '核对分享范围和访问限制'}>
+                            建议：{detail.suggested_action || '核对分享范围和访问限制'}
+                          </div>
+                        </div>
+                      ))
+                    ) : (
+                      <>
+                        {primaryPath && <div className="truncate" title={primaryPath}>主要路径：{primaryPath}</div>}
+                        <div>核对项：密码、有效期、访问次数、是否仍需要公开访问</div>
+                      </>
+                    )}
                   </dd>
                 </div>
               )}
@@ -1294,6 +1353,11 @@ function ActivityReviewDispositionRecorder({
                       路径样例：{record.path_samples.join(', ')}
                     </div>
                   )}
+                  {getActivityReviewShareDispositionSummary(record) && (
+                    <div className="mt-1 truncate text-xs text-warning" title={getActivityReviewShareDispositionSummary(record)}>
+                      分享线索：{getActivityReviewShareDispositionSummary(record)}
+                    </div>
+                  )}
                   <div className="mt-1 flex items-center justify-between gap-2 text-xs text-default-500">
                     <span className="truncate">{record.reviewer}</span>
                     <span>{formatRelativeTime(record.reviewed_at)}</span>
@@ -1461,6 +1525,11 @@ function ActivityReviewDispositionRecorder({
                   {record.user_samples && record.user_samples.length > 0 && (
                     <div className="mt-1 truncate text-xs text-default-500" title={record.user_samples.join(', ')}>
                       用户样例：{record.user_samples.join(', ')}
+                    </div>
+                  )}
+                  {getActivityReviewShareDispositionSummary(record) && (
+                    <div className="mt-1 truncate text-xs text-warning" title={getActivityReviewShareDispositionSummary(record)}>
+                      分享线索：{getActivityReviewShareDispositionSummary(record)}
                     </div>
                   )}
                   <div className="mt-1 truncate text-xs text-default-500" title={record.filter_summary || '未筛选'}>

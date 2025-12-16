@@ -157,6 +157,17 @@ test.describe('设置选项卡切换', () => {
                 },
               },
             ],
+            rule_effects: [
+              {
+                path: '/team',
+                index: 0,
+                read_allowed: 1,
+                read_denied: 0,
+                write_allowed: 1,
+                write_denied: 0,
+                user_samples: ['alice'],
+              },
+            ],
             shares: [
               {
                 id: 'share-1',
@@ -185,6 +196,10 @@ test.describe('设置选项卡切换', () => {
     await expect(matrix).toBeVisible({ timeout: 5000 })
     await expect(matrix.getByText('/team/readme.txt')).toBeVisible()
     await expect(matrix.getByText('用户 2')).toBeVisible()
+    const ruleEffects = matrix.getByLabel('用户矩阵规则生效明细')
+    await expect(ruleEffects.getByText('规则 1 · /team')).toBeVisible()
+    await expect(ruleEffects.getByText('读允许 1')).toBeVisible()
+    await expect(ruleEffects.getByText('写允许 1')).toBeVisible()
 
     await page.evaluate(() => {
       Object.defineProperty(navigator, 'clipboard', {

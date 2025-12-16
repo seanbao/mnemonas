@@ -249,11 +249,22 @@ export interface DirectoryAccessShareImpact {
   url?: string
 }
 
+export interface DirectoryAccessRuleEffect {
+  path: string
+  index: number
+  read_allowed: number
+  read_denied: number
+  write_allowed: number
+  write_denied: number
+  user_samples?: string[]
+}
+
 export interface DirectoryAccessReportData {
   path: string
   preview?: boolean
   summary: DirectoryAccessReportSummary
   users: DirectoryAccessCheckData[]
+  rule_effects?: DirectoryAccessRuleEffect[]
   shares?: DirectoryAccessShareImpact[]
 }
 
@@ -893,6 +904,17 @@ function isDirectoryAccessShareImpact(value: unknown): value is DirectoryAccessS
     && (value.url === undefined || typeof value.url === 'string')
 }
 
+function isDirectoryAccessRuleEffect(value: unknown): value is DirectoryAccessRuleEffect {
+  return isRecord(value)
+    && isLogicalPathString(value.path)
+    && isNonNegativeSafeInteger(value.index)
+    && isNonNegativeSafeInteger(value.read_allowed)
+    && isNonNegativeSafeInteger(value.read_denied)
+    && isNonNegativeSafeInteger(value.write_allowed)
+    && isNonNegativeSafeInteger(value.write_denied)
+    && (value.user_samples === undefined || isStringArray(value.user_samples))
+}
+
 function isDirectoryAccessReportData(value: unknown): value is DirectoryAccessReportData {
   return isRecord(value)
     && isLogicalPathString(value.path)
@@ -900,6 +922,7 @@ function isDirectoryAccessReportData(value: unknown): value is DirectoryAccessRe
     && isDirectoryAccessReportSummary(value.summary)
     && Array.isArray(value.users)
     && value.users.every(isDirectoryAccessCheckData)
+    && (value.rule_effects === undefined || (Array.isArray(value.rule_effects) && value.rule_effects.every(isDirectoryAccessRuleEffect)))
     && (value.shares === undefined || (Array.isArray(value.shares) && value.shares.every(isDirectoryAccessShareImpact)))
 }
 

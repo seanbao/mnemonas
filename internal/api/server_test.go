@@ -9896,6 +9896,20 @@ func TestServer_ReportPathAccess_SummarizesAllUsers(t *testing.T) {
 		t.Fatalf("bob report = %+v", byUser["bob"])
 	}
 
+	if len(payload.Data.RuleEffects) != 1 {
+		t.Fatalf("rule effects = %+v, want one matched rule", payload.Data.RuleEffects)
+	}
+	effect := payload.Data.RuleEffects[0]
+	if effect.Path != "/team/uploads" || effect.Index != 1 {
+		t.Fatalf("rule effect identity = %+v", effect)
+	}
+	if effect.ReadAllowed != 1 || effect.ReadDenied != 1 || effect.WriteAllowed != 1 || effect.WriteDenied != 1 {
+		t.Fatalf("rule effect counters = %+v", effect)
+	}
+	if !slices.Contains(effect.UserSamples, "alice") || !slices.Contains(effect.UserSamples, "bob") {
+		t.Fatalf("rule effect user samples = %+v", effect.UserSamples)
+	}
+
 	byRelation := make(map[string]pathAccessShareImpact, len(payload.Data.Shares))
 	for _, item := range payload.Data.Shares {
 		byRelation[item.Relation] = item
@@ -10001,6 +10015,13 @@ func TestServer_PreviewPathAccess_UsesProvidedRulesWithoutSaving(t *testing.T) {
 	}
 	if !alicePreview.Read.Allowed || !alicePreview.Write.Allowed || alicePreview.Read.Source != "directory_access_rule" {
 		t.Fatalf("alice preview = %+v", alicePreview)
+	}
+	if len(previewPayload.Data.RuleEffects) != 1 {
+		t.Fatalf("preview rule effects = %+v, want one matched rule", previewPayload.Data.RuleEffects)
+	}
+	previewEffect := previewPayload.Data.RuleEffects[0]
+	if previewEffect.Path != "/team" || previewEffect.Index != 0 || previewEffect.ReadAllowed != 1 || previewEffect.WriteAllowed != 1 {
+		t.Fatalf("preview rule effect = %+v", previewEffect)
 	}
 
 	reportReq := httptest.NewRequest(http.MethodPost, "/api/v1/settings/access-report", strings.NewReader(`{"path":"/team/readme.txt"}`))
@@ -22704,6 +22725,16 @@ func TestServer_ActivityReviewRecords_AdminCanCreateAndList(t *testing.T) {
 		"user_count": 1,
 		"path_samples": ["docs/deleted.txt", "/docs/moved.txt"],
 		"user_samples": [" user1 "],
+		"share_disposition_details": [{
+			"path": "docs/public.pdf",
+			"type": "file",
+			"enabled": true,
+			"risk_level": "high",
+			"reason_summary": "未设置密码，持有链接的人可直接访问。",
+			"suggested_action": "停用或补齐密码、有效期和访问次数限制。",
+			"access_summary": "无密码 · 访问 5/不限",
+			"expires_at": "永不过期"
+		}],
 		"activity_entry_ids": ["delete-1", "move-1"]
 	}`)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/activity/reviews", reqBody)
@@ -22741,6 +22772,9 @@ func TestServer_ActivityReviewRecords_AdminCanCreateAndList(t *testing.T) {
 	if got, want := fmt.Sprint(created.Data.UserSamples), "[user1]"; got != want {
 		t.Fatalf("user_samples = %s, want %s", got, want)
 	}
+	if len(created.Data.ShareDispositionDetails) != 1 || created.Data.ShareDispositionDetails[0].Path != "/docs/public.pdf" || created.Data.ShareDispositionDetails[0].RiskLevel != "high" {
+		t.Fatalf("share_disposition_details were not normalized: %+v", created.Data.ShareDispositionDetails)
+	}
 
 	listReq := httptest.NewRequest(http.MethodGet, "/api/v1/activity/reviews?limit=5", nil)
 	listReq.Header.Set("Authorization", "Bearer "+issueAccessTokenWithoutActivity(t, server, "admin"))
@@ -22765,7 +22799,7 @@ func TestServer_ActivityReviewRecords_AdminCanCreateAndList(t *testing.T) {
 	if listed.Data.Items[0].ID != created.Data.ID {
 		t.Fatalf("listed review ID = %q, want %q", listed.Data.Items[0].ID, created.Data.ID)
 	}
-	if listed.Data.Items[0].DispositionStatus != activity.ReviewDispositionRestored || listed.Data.Items[0].ActionCounts[activity.ActionMove] != 1 {
+	if listed.Data.Items[0].DispositionStatus != activity.ReviewDispositionRestored || listed.Data.Items[0].ActionCounts[activity.ActionMove] != 1 || len(listed.Data.Items[0].ShareDispositionDetails) != 1 {
 		t.Fatalf("listed review lost structured disposition fields: %+v", listed.Data.Items[0])
 	}
 }
@@ -22981,6 +23015,28 @@ func TestServer_ActivityReviewRecords_RejectsInvalidRecord(t *testing.T) {
 	server.Router().ServeHTTP(controlTextRec, controlTextReq)
 	if controlTextRec.Code != http.StatusBadRequest {
 		t.Fatalf("control-text activity review status = %d, want %d: %s", controlTextRec.Code, http.StatusBadRequest, controlTextRec.Body.String())
+	}
+
+	invalidShareDetailReq := httptest.NewRequest(http.MethodPost, "/api/v1/activity/reviews", strings.NewReader(`{
+		"note": "分享链接需要跟进",
+		"scope_label": "分享管理",
+		"review_count": 1,
+		"total_count": 1,
+		"path_count": 1,
+		"user_count": 1,
+		"share_disposition_details": [{
+			"path": "/docs/../secret.txt",
+			"type": "file",
+			"enabled": true,
+			"risk_level": "high"
+		}],
+		"activity_entry_ids": ["share-1"]
+	}`))
+	invalidShareDetailReq.Header.Set("Authorization", "Bearer "+issueAccessTokenWithoutActivity(t, server, "admin"))
+	invalidShareDetailRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(invalidShareDetailRec, invalidShareDetailReq)
+	if invalidShareDetailRec.Code != http.StatusBadRequest {
+		t.Fatalf("invalid share detail activity review status = %d, want %d: %s", invalidShareDetailRec.Code, http.StatusBadRequest, invalidShareDetailRec.Body.String())
 	}
 
 	listReq := httptest.NewRequest(http.MethodGet, "/api/v1/activity/reviews", nil)

@@ -1133,6 +1133,15 @@ describe('Settings API', () => {
               write: { mode: 'write', allowed: false, source: 'home_dir' },
             },
           ],
+          rule_effects: [{
+            path: '/team',
+            index: 0,
+            read_allowed: 1,
+            read_denied: 0,
+            write_allowed: 1,
+            write_denied: 0,
+            user_samples: ['alice'],
+          }],
           shares: [{
             id: 'share-1',
             path: '/team',
@@ -1157,6 +1166,7 @@ describe('Settings API', () => {
 
     expect(result.summary.read_allowed).toBe(1)
     expect(result.summary.related_shares).toBe(1)
+    expect(result.rule_effects?.[0]).toMatchObject({ path: '/team', index: 0, read_allowed: 1, write_allowed: 1 })
     expect(result.shares?.[0]?.relation).toBe('covers_path')
     expect(result.users.map((entry) => entry.username)).toEqual(['alice', 'bob'])
     expect(mockAuthFetch).toHaveBeenCalledWith('/api/v1/settings/access-report', expect.objectContaining({
@@ -1474,6 +1484,39 @@ describe('Settings API', () => {
     await expect(reportDirectoryAccess({ path: '/team/readme.txt' })).rejects.toThrow(invalidResponseMessage)
   })
 
+  it('rejects directory access report rule effects with unsafe counters', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        success: true,
+        data: {
+          path: '/team/readme.txt',
+          summary: { users: 1, read_allowed: 1, read_denied: 0, write_allowed: 1, write_denied: 0, related_shares: 0, active_related_shares: 0, password_protected_shares: 0 },
+          users: [{
+            username: 'alice',
+            user_id: 'u1',
+            role: 'user',
+            home_dir: '/users/alice',
+            path: '/team/readme.txt',
+            read: { mode: 'read', allowed: true, source: 'directory_access_rule', matched_rule: { path: '/team', read_users: ['alice'] } },
+            write: { mode: 'write', allowed: true, source: 'directory_access_rule', matched_rule: { path: '/team', write_users: ['alice'] } },
+          }],
+          rule_effects: [{
+            path: '/team',
+            index: 0,
+            read_allowed: 1,
+            read_denied: 0,
+            write_allowed: 9007199254740992,
+            write_denied: 0,
+            user_samples: ['alice'],
+          }],
+        },
+      }),
+    })
+
+    await expect(reportDirectoryAccess({ path: '/team/readme.txt' })).rejects.toThrow(invalidResponseMessage)
+  })
+
   it('previews directory access rules without saving settings', async () => {
     const controller = new AbortController()
     mockAuthFetch.mockResolvedValueOnce({
@@ -1493,6 +1536,15 @@ describe('Settings API', () => {
             read: { mode: 'read', allowed: true, source: 'directory_access_rule', matched_rule: { path: '/team', read_groups: ['family'] } },
             write: { mode: 'write', allowed: false, source: 'directory_access_rule', matched_rule: { path: '/team', read_groups: ['family'] } },
           }],
+          rule_effects: [{
+            path: '/team',
+            index: 0,
+            read_allowed: 1,
+            read_denied: 0,
+            write_allowed: 0,
+            write_denied: 1,
+            user_samples: ['alice'],
+          }],
         },
       }),
     })
@@ -1505,6 +1557,7 @@ describe('Settings API', () => {
 
     expect(result.preview).toBe(true)
     expect(result.users[0]?.read.allowed).toBe(true)
+    expect(result.rule_effects?.[0]?.write_denied).toBe(1)
     expect(mockAuthFetch).toHaveBeenCalledWith('/api/v1/settings/access-preview', expect.objectContaining({
       method: 'POST',
       signal: controller.signal,

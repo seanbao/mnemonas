@@ -1120,7 +1120,7 @@ Response example:
 
 ### List Activity Review Records (Admin)
 
-Return persisted activity review disposition records.
+Return persisted activity review disposition records. Share-review records may include `share_disposition_details` with redacted share-disposition clues.
 
 ```
 GET /api/v1/activity/reviews
@@ -1212,6 +1212,7 @@ Notes:
 - `disposition_status` is optional and defaults to `documented`. Allowed values are `documented`, `confirmed`, `restored`, `disabled`, and `needs_follow_up`.
 - `action_counts` is optional. Keys must be known activity action types, values must be positive integers, and the sum must equal `review_count`.
 - `path_samples` and `user_samples` are optional and accept at most 10 entries each. Paths are normalized with the same logical path rules as activity entries, and duplicate samples are rejected.
+- `share_disposition_details` is optional and accepts at most 10 entries. Each entry may include `path`, `type` (`file` or `folder`), `enabled`, `risk_level` (`none`, `low`, `medium`, `high`), `reason_summary`, `suggested_action`, `access_summary`, and `expires_at`; the field records redacted share risk and disposition guidance without share IDs, URLs, or passwords.
 - When the activity log is not configured, failed to initialize, or is currently unavailable, the API returns `503 Service Unavailable`.
 
 ### Update Activity Review Record Disposition (Admin)
@@ -1421,6 +1422,8 @@ Access-check response:
 
 The response includes a `summary` with user count, read allows/denials, write allows/denials, and related share counts.
 
+The optional `rule_effects` list summarizes the read/write allow and denial counts for directory-access rules that actually affected this check. `index` is the zero-based position in the saved or submitted `directory_access_rules` array, and `user_samples` contains representative users for impact review.
+
 The optional `shares` list reports shares that exactly match the path, parent folder shares that cover it, and child shares under the checked directory. It is intended for administrator permission checks before changing shared-directory or share rules.
 
 Access-report response:
@@ -1450,6 +1453,17 @@ Access-report response:
         "path": "/team/report.pdf",
         "read": { "mode": "read", "allowed": true, "source": "directory_access_rule" },
         "write": { "mode": "write", "allowed": true, "source": "directory_access_rule" }
+      }
+    ],
+    "rule_effects": [
+      {
+        "path": "/team",
+        "index": 0,
+        "read_allowed": 1,
+        "read_denied": 1,
+        "write_allowed": 1,
+        "write_denied": 1,
+        "user_samples": ["alice", "bob"]
       }
     ],
     "shares": [
@@ -1503,6 +1517,17 @@ Access-preview response:
         "path": "/team/report.pdf",
         "read": { "mode": "read", "allowed": true, "source": "directory_access_rule" },
         "write": { "mode": "write", "allowed": false, "source": "directory_access_rule" }
+      }
+    ],
+    "rule_effects": [
+      {
+        "path": "/team",
+        "index": 0,
+        "read_allowed": 1,
+        "read_denied": 0,
+        "write_allowed": 0,
+        "write_denied": 1,
+        "user_samples": ["alice"]
       }
     ]
   }
