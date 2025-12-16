@@ -1005,7 +1005,7 @@ Notes:
 - Manual and scheduled Scrub runs write `scrub` activity entries.
   Scrub failures, object verification problems, and incomplete result persistence send `scrub_run` events through configured Webhook, Telegram, WeCom, DingTalk, or SMTP alert channels.
   Alert details use counts, status, public error types, and public messages; they do not include object hashes or lower-level error text.
-- `share` and `unshare` activity `details` include review metadata such as share type, permission, password requirement, expiry, and access limit; they do not include share passwords, public URLs, or share IDs.
+- Share creation, deletion, and enabled-state updates write `share` or `unshare` activity entries. Their `details` include review metadata such as share type, permission, password requirement, expiry, and access limit; enabled-state updates also include `enabled` and `previous_enabled`. These details do not include share passwords, public URLs, or share IDs.
 - Version restores write `restore` activity with `details.restore_source="version"` for the version-history source and `details.hash` for the restored version hash.
 - When the activity log is not configured, the API returns an empty list.
 - When the activity log is configured but failed to initialize or is currently unavailable, the API returns `503 Service Unavailable`.

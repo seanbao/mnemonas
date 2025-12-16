@@ -1000,7 +1000,7 @@ curl -X POST \
 - 手动和定时 Scrub 运行会写入 `scrub` 活动条目。
   Scrub 失败、对象校验问题和结果持久化不完整会通过已配置的 Webhook、Telegram、WeCom、DingTalk 或 SMTP 提醒通道发送 `scrub_run` 事件。
   提醒详情使用计数、状态、公开错误类型和公开消息，不包含对象 hash 或底层错误文本。
-- `share` 和 `unshare` 活动的 `details` 包含分享类型、权限、密码要求、过期时间和访问上限等复核元数据，不包含分享密码、公开 URL 或分享 ID。
+- 创建、删除和启用状态更新会写入 `share` 或 `unshare` 活动。`details` 包含分享类型、权限、密码要求、过期时间和访问上限等复核元数据；启用状态更新还包含 `enabled` 和 `previous_enabled`。这些详情不包含分享密码、公开 URL 或分享 ID。
 - 版本恢复会写入 `restore` 活动，`details.restore_source="version"` 表示来源为版本历史，`details.hash` 为被恢复版本 hash。
 - 未配置活动日志时，API 返回空列表。
 - 活动日志已配置但初始化失败或当前不可用时，API 返回 `503 Service Unavailable`。
