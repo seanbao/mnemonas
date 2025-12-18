@@ -179,6 +179,9 @@ The bundled Compose file publishes only `8080`, which serves Web UI, REST API, a
 `./scripts/docker-quickstart.sh --start` waits for `http://127.0.0.1:<port>/health` by default.
 If Compose startup fails or the health check times out, the script prints the matching `docker compose ps` or `docker compose logs --tail 100 mnemonas` diagnostic command.
 
+The bundled `/app/mnemonas-healthcheck` command requests `http://127.0.0.1:8080/health` by default.
+When `MNEMONAS_HEALTHCHECK_URL` overrides the target, it must be an absolute `http` or `https` URL and must not contain whitespace, control characters, embedded credentials, or a fragment.
+
 For a remote Docker context, SSH tunnel, or another environment where the host cannot reach the published port locally, pass `--skip-health-check`.
 Then verify service state with `docker compose ps`, `docker compose logs --tail 100 mnemonas`, or the reachable `/health` endpoint.
 
