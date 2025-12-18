@@ -81,6 +81,12 @@ func validateHealthcheckURL(raw string) error {
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
 		return fmt.Errorf("must be an absolute http or https URL")
 	}
+	if parsed.User != nil {
+		return fmt.Errorf("must not contain embedded credentials")
+	}
+	if parsed.Fragment != "" {
+		return fmt.Errorf("must not contain a fragment")
+	}
 	switch strings.ToLower(parsed.Scheme) {
 	case "http", "https":
 		return nil
