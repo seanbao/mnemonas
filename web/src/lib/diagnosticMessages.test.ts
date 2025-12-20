@@ -22,6 +22,20 @@ describe('diagnosticMessages', () => {
     expect(redacted).not.toContain('repo-token')
   })
 
+  it('redacts percent-encoded secret-like diagnostic parameter names', () => {
+    const raw = 'rclone failed https://backup.example/repo?access%5Fkey=AKIASECRET&secret%2Dkey=secret-key&region=us secret%5Faccess%5Fkey=inline-secret'
+
+    const redacted = redactDiagnosticSecretFragments(raw)
+
+    for (const leaked of ['AKIASECRET', 'secret-key', 'inline-secret']) {
+      expect(redacted).not.toContain(leaked)
+    }
+    expect(redacted).toContain('access%5Fkey=<redacted>')
+    expect(redacted).toContain('secret%2Dkey=<redacted>')
+    expect(redacted).toContain('region=us')
+    expect(redacted).toContain('secret%5Faccess%5Fkey=<redacted>')
+  })
+
   it('redacts quoted flags, headers, assignments, and JSON values', () => {
     const raw = `restic failed: --password repo:pass/with/slash --secret-access-key=secret/value:with-colon --token remote-token --api-key "quoted token" secret='spaced secret' Authorization: Bearer "bearer secret" X-Auth-Token: header-token X-Api-Key: "header quoted token" {"access_key_id":"json-akia","secret_access_key":"json secret","authorization":"Bearer json bearer"}`
 
