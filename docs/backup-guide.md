@@ -84,7 +84,7 @@ MnemoNAS 提供内置备份任务入口，可在维护页或 API 中执行、查
 - 源目录中遇到符号链接会中止备份任务，避免备份逃逸到源目录之外；`rclone` 恢复演练也会在执行远端校验前拒绝当前源树中的符号链接。
 - `restic` 和 `rclone` 任务不会通过 shell 拼接命令；`command` 只能是可执行名或绝对路径，不能包含空白或控制字符；`extra_args`、`exclude` 和 `retention_policy` 不能包含控制字符。`extra_args` 会作为 argv 追加到备份命令，恢复命令不会复用备份专用参数。
 - `password_file`、`config_file` 必须是 `source` 与 `storage.root` 之外的普通文件，且已存在的路径组件不能是符号链接，避免把备份凭据重新纳入备份数据或通过符号链接别名访问凭据。
-- 任务视图、运行结果、恢复/预览结果、恢复报告和批量恢复结果中的目标路径与远端目标字段，以及 API 可见的备份错误、警告和恢复报告 findings 文本，会对内嵌 userinfo、token、密码、secret 和 key 参数做 `<redacted>` 脱敏。
+- 任务视图、运行结果、恢复/预览结果、恢复报告和批量恢复结果中的目标路径与远端目标字段，以及 API 可见的备份错误、警告和恢复报告 findings 文本，会对内嵌 userinfo、token、密码、secret 和 key 参数做 `<redacted>` 脱敏；参数名中的 `_`/`-` 分隔符即使以 `%5F`/`%2D` 编码也会识别。
 - 备份提醒事件不会外发来源、目标、恢复目录、快照/manifest 路径或原始错误/警告文本，只保留状态、触发原因、计数、时间、失败分类和是否省略位置/错误详情的摘要字段。
 - 实际 restic/rclone 命令仍使用配置中的原始 `repository` 或 `remote`。客户端在恢复后继续调用 `restore-verify` 时，应复用原请求中的 `target_path`，不要把响应中用于展示的脱敏 `target_path` 当作新的请求参数。
 - `schedule_interval` 是服务内置的轻量调度器，适合固定间隔任务；复杂窗口、限速、网络唤醒和多阶段恢复仍建议配合 systemd timer 或外部编排。
