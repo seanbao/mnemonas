@@ -271,6 +271,53 @@ run_smoke_rejects_host_with_whitespace_before_run() {
 	assert_file_not_exists "$state_dir/rm.args"
 }
 
+run_smoke_rejects_image_reference_that_starts_with_dash() {
+	local case_dir="$TMP_ROOT/dash-image"
+	local fake_bin="$case_dir/bin"
+	local state_dir="$case_dir/state"
+	local out="$case_dir/out.log"
+	local status
+	mkdir -p "$state_dir"
+	setup_fake_tools "$fake_bin"
+
+	set +e
+	PATH="$fake_bin:$PATH" \
+		FAKE_DOCKER_STATE="$state_dir" \
+		MNEMONAS_DOCKER_SMOKE_CONTAINER="mnemonas-dash-image-test" \
+		bash "$REPO_ROOT/scripts/docker-smoke.sh" --privileged > "$out" 2>&1
+	status=$?
+	set -e
+
+	[[ "$status" -ne 0 ]] || fail "docker smoke accepted an option-like image reference"
+	assert_file_contains "$out" "Docker image reference must not start with '-'"
+	assert_file_not_exists "$state_dir/run.args"
+	assert_file_not_exists "$state_dir/rm.args"
+}
+
+run_smoke_rejects_image_reference_with_whitespace() {
+	local case_dir="$TMP_ROOT/whitespace-image"
+	local fake_bin="$case_dir/bin"
+	local state_dir="$case_dir/state"
+	local out="$case_dir/out.log"
+	local status
+	mkdir -p "$state_dir"
+	setup_fake_tools "$fake_bin"
+
+	set +e
+	PATH="$fake_bin:$PATH" \
+		FAKE_DOCKER_STATE="$state_dir" \
+		MNEMONAS_DOCKER_SMOKE_CONTAINER="mnemonas-whitespace-image-test" \
+		MNEMONAS_DOCKER_SMOKE_IMAGE="mnemonas:test bad" \
+		bash "$REPO_ROOT/scripts/docker-smoke.sh" > "$out" 2>&1
+	status=$?
+	set -e
+
+	[[ "$status" -ne 0 ]] || fail "docker smoke accepted an image reference with whitespace"
+	assert_file_contains "$out" "Docker image reference must not contain whitespace or control characters"
+	assert_file_not_exists "$state_dir/run.args"
+	assert_file_not_exists "$state_dir/rm.args"
+}
+
 run_smoke_passes_and_cleans_container
 run_smoke_uses_dynamic_loopback_port_by_default
 run_smoke_rejects_version_mismatch_and_prints_logs
@@ -278,5 +325,7 @@ run_smoke_fails_when_container_exits_before_health
 run_smoke_does_not_remove_existing_container_when_run_fails
 run_smoke_rejects_invalid_loopback_host_before_run
 run_smoke_rejects_host_with_whitespace_before_run
+run_smoke_rejects_image_reference_that_starts_with_dash
+run_smoke_rejects_image_reference_with_whitespace
 
 printf '[docker-smoke-test] all checks passed\n'
