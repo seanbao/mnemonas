@@ -113,6 +113,55 @@ validate_repository() {
 	validate_repository_name "$repo"
 }
 
+validate_release_version() {
+	local value="$1"
+	local pattern
+	local major
+	local minor
+	local patch
+	local prerelease
+	local docker_tag
+	local component
+	local identifier
+
+	[[ -n "$value" ]] || fail "release version must not be empty"
+	if contains_control_character "$value" || contains_whitespace_character "$value"; then
+		fail "release version must not contain whitespace or control characters"
+	fi
+	if [[ "$value" == *+* ]]; then
+		fail "release version must not include build metadata because Docker tags do not support '+': $value"
+	fi
+
+	pattern='^v([0-9]+)\.([0-9]+)\.([0-9]+)(-([0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*))?$'
+	if [[ ! "$value" =~ $pattern ]]; then
+		fail "release version must match vMAJOR.MINOR.PATCH or vMAJOR.MINOR.PATCH-PRERELEASE: $value"
+	fi
+
+	major="${BASH_REMATCH[1]}"
+	minor="${BASH_REMATCH[2]}"
+	patch="${BASH_REMATCH[3]}"
+	prerelease="${BASH_REMATCH[5]:-}"
+	docker_tag="${value#v}"
+	if ((${#docker_tag} > 128)); then
+		fail "release version without the v prefix must be at most 128 characters for Docker image tags: $value"
+	fi
+
+	for component in "$major" "$minor" "$patch"; do
+		if [[ "$component" =~ ^0[0-9]+$ ]]; then
+			fail "release version numeric components must not contain leading zeroes: $value"
+		fi
+	done
+
+	if [[ -n "$prerelease" ]]; then
+		IFS='.' read -r -a identifiers <<<"$prerelease"
+		for identifier in "${identifiers[@]}"; do
+			if [[ "$identifier" =~ ^[0-9]+$ && "$identifier" =~ ^0[0-9]+$ ]]; then
+				fail "release version numeric prerelease identifiers must not contain leading zeroes: $value"
+			fi
+		done
+	fi
+}
+
 tar_is_gnu() {
 	tar --version 2>/dev/null | grep -qi 'gnu tar'
 }
@@ -454,6 +503,9 @@ while [[ "$#" -gt 0 ]]; do
 done
 
 [[ -n "$ARTIFACT_DIR" ]] || { usage >&2; exit 2; }
+if [[ -n "$VERSION" ]]; then
+	validate_release_version "$VERSION"
+fi
 [[ -d "$ARTIFACT_DIR" ]] || fail "artifact directory does not exist: $ARTIFACT_DIR"
 validate_repository "$REPOSITORY"
 
@@ -493,6 +545,7 @@ for archive in "${archives[@]}"; do
 	base="$(basename "$archive")"
 	target="$(archive_target "$archive")"
 	found_version="$(archive_version "$archive")"
+	validate_release_version "$found_version"
 
 	checksum_manifest_has_archive "$base" || fail "checksums.txt does not list $base"
 	if [[ -n "$VERSION" ]]; then

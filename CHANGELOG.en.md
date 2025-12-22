@@ -89,7 +89,7 @@ This project follows [Semantic Versioning 2.0.0](https://semver.org/).
 - CI and release workflows use narrower permissions, concurrency controls, and job timeouts.
 - Release workflow verifies downloaded archives, checksums, and the required target set before creating the GitHub Release.
 - Release workflow rejects non-SemVer release tags before building archives or container images.
-- Release artifact verifier rejects unsafe checksum paths, control-character paths, whitespace paths, symlinked archives, unexpected downloaded artifact entries, special archive entries, duplicate entries, archive-member control-character paths, archive-member whitespace paths, backslash paths, and ambiguous path segments before running checksum validation.
+- Release artifact verifier rejects unsafe checksum paths, control-character paths, whitespace paths, symlinked archives, unexpected downloaded artifact entries, special archive entries, duplicate entries, archive-member control-character paths, archive-member whitespace paths, backslash paths, and ambiguous path segments before running checksum validation, and validates explicit or archive-inferred release versions against Docker/GHCR image tag constraints.
 - Release artifact verifier reports the verified target set on success so post-publication checks can confirm platform archive coverage.
 - Security docs distinguish the Web UI initial admin password from generated WebDAV Basic Auth credentials.
 - Security docs and doctor checks warn that dataplane ports `9090/9091` should not be exposed to untrusted networks.
