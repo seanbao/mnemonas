@@ -69,6 +69,23 @@ is_ipv4_literal_host() {
     return 0
 }
 
+is_valid_dns_hostname() {
+    local host="$1"
+    local label
+    local -a labels
+
+    [[ -n "$host" && "${#host}" -le 253 ]] || return 1
+    [[ "$host" =~ ^[a-z0-9.-]+$ ]] || return 1
+    [[ "$host" != *".."* ]] || return 1
+
+    IFS='.' read -r -a labels <<< "$host"
+    for label in "${labels[@]}"; do
+        [[ -n "$label" && "${#label}" -le 63 ]] || return 1
+        [[ "$label" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]] || return 1
+    done
+    return 0
+}
+
 normalize_domain() {
     local value="$1"
     value="${value,,}"
@@ -83,8 +100,8 @@ validate_domain() {
     [[ "$value" != http://* && "$value" != https://* ]] || fail "public domain must not include a URL scheme"
     [[ "$value" != *"/"* && "$value" != *"?"* && "$value" != *"#"* && "$value" != *"@"* ]] || fail "public domain must not include a path, query, fragment, or userinfo"
     [[ "$value" != *":"* ]] || fail "public domain must not include a port"
-    [[ "$value" =~ ^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$ ]] || fail "public domain must be an ASCII hostname"
-    [[ "$value" != *".."* ]] || fail "public domain must not contain empty labels"
+    [[ "$value" != *. ]] || fail "public domain must be a valid ASCII hostname"
+    is_valid_dns_hostname "$value" || fail "public domain must be a valid ASCII hostname"
     [[ "$value" == *.* ]] || fail "public domain must be a fully qualified hostname"
     [[ "$value" != "localhost" && "$value" != *.localhost ]] || fail "public domain must not be localhost"
     ! is_ipv4_literal_host "$value" || fail "public domain must be a hostname, not an IP address"
@@ -131,6 +148,23 @@ curl_head_status_and_redirect() {
         "$url"
 }
 
+https_redirect_targets_domain() {
+    local domain="$1"
+    local redirect_url="$2"
+
+    case "$redirect_url" in
+        "https://$domain"|"https://$domain/"*|"https://$domain?"*|"https://$domain#"*)
+            return 0
+            ;;
+        "https://$domain:443"|"https://$domain:443/"*|"https://$domain:443?"*|"https://$domain:443#"*)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
 check_https_health() {
     local domain="$1"
     local status
@@ -157,14 +191,11 @@ check_http_redirect() {
         *) fail "HTTP health returned HTTP $status, expected a redirect to HTTPS on the same domain" ;;
     esac
 
-    case "$redirect" in
-        "https://$domain/"*|"https://$domain:443/"*)
-            log_ok "HTTP health redirects to HTTPS on the same domain"
-            ;;
-        *)
-            fail "HTTP health redirect target is not same-domain HTTPS: ${redirect:-<empty>}"
-            ;;
-    esac
+    if https_redirect_targets_domain "$domain" "$redirect"; then
+        log_ok "HTTP health redirects to HTTPS on the same domain"
+    else
+        fail "HTTP health redirect target is not same-domain HTTPS: ${redirect:-<empty>}"
+    fi
 }
 
 check_backend_target_private() {

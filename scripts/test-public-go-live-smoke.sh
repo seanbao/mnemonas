@@ -152,6 +152,18 @@ run_invalid_domain_test() {
 
     run_expect_failure "$case_dir/ip-address.log" bash "$REPO_ROOT/scripts/public-go-live-smoke.sh" "127.0.0.1"
     assert_file_contains "$case_dir/ip-address.log" "public domain must be a hostname, not an IP address"
+
+    run_expect_failure "$case_dir/leading-label-hyphen.log" bash "$REPO_ROOT/scripts/public-go-live-smoke.sh" "nas.-example.com"
+    assert_file_contains "$case_dir/leading-label-hyphen.log" "public domain must be a valid ASCII hostname"
+
+    run_expect_failure "$case_dir/trailing-label-hyphen.log" bash "$REPO_ROOT/scripts/public-go-live-smoke.sh" "nas.example-.com"
+    assert_file_contains "$case_dir/trailing-label-hyphen.log" "public domain must be a valid ASCII hostname"
+
+    run_expect_failure "$case_dir/long-label.log" bash "$REPO_ROOT/scripts/public-go-live-smoke.sh" "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.example.com"
+    assert_file_contains "$case_dir/long-label.log" "public domain must be a valid ASCII hostname"
+
+    run_expect_failure "$case_dir/repeated-trailing-dot.log" bash "$REPO_ROOT/scripts/public-go-live-smoke.sh" "nas.example.com.."
+    assert_file_contains "$case_dir/repeated-trailing-dot.log" "public domain must be a valid ASCII hostname"
 }
 
 run_invalid_timeout_test() {
@@ -168,6 +180,35 @@ run_invalid_timeout_test() {
     assert_file_contains "$case_dir/out.log" "CURL_CONNECT_TIMEOUT must be a positive integer number of seconds"
 }
 
+run_redirect_variant_test() {
+    local case_dir="$TMP_ROOT/redirect-variants"
+    local fake_bin="$case_dir/bin"
+    local case_name curl_log output redirect
+    mkdir -p "$case_dir"
+    make_fake_curl "$fake_bin"
+
+    for redirect in \
+        "https://nas.example.com" \
+        "https://nas.example.com?from=http" \
+        "https://nas.example.com#health" \
+        "https://nas.example.com:443" \
+        "https://nas.example.com:443?from=http"
+    do
+        case_name="${redirect//[^a-zA-Z0-9]/_}"
+        curl_log="$case_dir/curl-$case_name.log"
+        output="$case_dir/out-$case_name.log"
+
+        env \
+            PATH="$fake_bin:$PATH" \
+            PUBLIC_SMOKE_CURL_LOG="$curl_log" \
+            PUBLIC_SMOKE_REDIRECT_URL="$redirect" \
+            bash "$REPO_ROOT/scripts/public-go-live-smoke.sh" "nas.example.com" > "$output" 2>&1
+
+        assert_file_contains "$output" "HTTP health redirects to HTTPS on the same domain"
+        assert_file_contains "$output" "public go-live smoke passed for nas.example.com"
+    done
+}
+
 run_bad_redirect_test() {
     local case_dir="$TMP_ROOT/bad-redirect"
     local fake_bin="$case_dir/bin"
@@ -180,6 +221,13 @@ run_bad_redirect_test() {
         PUBLIC_SMOKE_REDIRECT_URL="https://other.example.com/health" \
         bash "$REPO_ROOT/scripts/public-go-live-smoke.sh" "nas.example.com"
     assert_file_contains "$case_dir/out.log" "HTTP health redirect target is not same-domain HTTPS"
+
+    run_expect_failure "$case_dir/suffix-domain.log" env \
+        PATH="$fake_bin:$PATH" \
+        PUBLIC_SMOKE_CURL_LOG="$case_dir/suffix-domain-curl.log" \
+        PUBLIC_SMOKE_REDIRECT_URL="https://nas.example.com.evil.example/health" \
+        bash "$REPO_ROOT/scripts/public-go-live-smoke.sh" "nas.example.com"
+    assert_file_contains "$case_dir/suffix-domain.log" "HTTP health redirect target is not same-domain HTTPS"
 }
 
 run_open_backend_test() {
@@ -213,6 +261,7 @@ mkdir -p "$TMP_ROOT"
 run_success_test
 run_invalid_domain_test
 run_invalid_timeout_test
+run_redirect_variant_test
 run_bad_redirect_test
 run_open_backend_test
 run_docs_contract_test
