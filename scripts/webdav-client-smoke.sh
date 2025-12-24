@@ -238,6 +238,10 @@ run_smoke() {
     fi
     log_ok "MOVE content matches uploaded content"
 
+    status="$(curl_head_status "HEAD moved source" "$copied_url" "$tmp_dir/head-moved-source.out")"
+    expect_status "HEAD moved source" "$status" 404 410
+    log_ok "MOVE source no longer exists"
+
     status="$(curl_request "DELETE original file" DELETE "$file_url" "$tmp_dir/delete-file.out")"
     expect_status "DELETE original file" "$status" 200 204
 

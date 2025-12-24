@@ -134,7 +134,11 @@ case "$method" in
         fi
         ;;
     HEAD)
-        status="200"
+        if [[ "$url" == */copied.txt ]]; then
+            status="404"
+        else
+            status="200"
+        fi
         ;;
     COPY|MOVE)
         status="201"
@@ -234,6 +238,8 @@ run_success_test() {
     assert_file_contains "$curl_log" "Destination: http://127.0.0.1:18080/dav/smoke-test/moved.txt"
     assert_file_contains "$curl_log" "GET http://127.0.0.1:18080/dav/smoke-test/moved.txt"
     assert_file_contains "$case_dir/out.log" "MOVE content matches uploaded content"
+    assert_file_contains "$curl_log" "HEAD http://127.0.0.1:18080/dav/smoke-test/copied.txt"
+    assert_file_contains "$case_dir/out.log" "MOVE source no longer exists"
     assert_file_contains "$curl_log" "DELETE http://127.0.0.1:18080/dav/smoke-test/space%20name.txt"
     assert_file_contains "$curl_log" "DELETE http://127.0.0.1:18080/dav/smoke-test/"
     assert_file_not_contains "$curl_log" "$secret"

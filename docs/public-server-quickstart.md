@@ -142,6 +142,8 @@ ss -tlnp | grep -E '80|443|8080|9090|9091'
 
 带 `--public-domain` 的检查会先将域名统一为小写，并移除单个 FQDN 尾点，然后验证：
 
+公网检查需要公网完整域名，不接受 `localhost` 或 IP 地址；本机或 IP 字面量无法证明公网 DNS、证书 hostname 和外部网络访问路径。
+
 - 公网 HTTPS health、同域 HTTP 到 HTTPS 跳转、证书 hostname 和证书剩余有效期；
 - 公开部署认证配置、管理员账号冗余和初始密码文件清理状态；
 - 分享链接基础 URL 形态和公开分享 API 响应缓存边界；
