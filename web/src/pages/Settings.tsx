@@ -154,6 +154,8 @@ const PUBLIC_ACCESS_MAX_ACCESS_TOKEN_TTL_MS = 60 * 60 * 1000
 const PUBLIC_ACCESS_MAX_REFRESH_TOKEN_TTL_MS = 720 * 60 * 60 * 1000
 const PUBLIC_ACCESS_MAX_SHARE_DEFAULT_EXPIRES_MS = 720 * 60 * 60 * 1000
 const PUBLIC_ACCESS_SNIPPET_COPY_BUTTON_CLASS = 'h-8 w-8 min-w-8 shrink-0'
+const DIRECTORY_ACCESS_REVIEW_HISTORY_LIMIT = 5
+const DIRECTORY_ACCESS_REVIEW_HISTORY_STORAGE_PREFIX = 'mnemonas_directory_access_review_history'
 
 type SharePolicyRuleDraft = SharePolicyRule & {
   max_access_input?: string
@@ -2129,20 +2131,263 @@ function directoryAccessShareRelationLabel(relation: string): string {
   }
 }
 
+function formatDirectoryAccessDecisionForReport(decision: DirectoryAccessDecision): string {
+  const status = decision.allowed ? '允许' : '拒绝'
+  const source = directoryAccessSourceLabel(decision.source)
+  const rulePath = decision.matched_rule?.path ? ` · 规则 ${decision.matched_rule.path}` : ''
+  return `${status} · ${source}${rulePath}`
+}
+
+function formatDirectoryAccessShareForReport(entry: NonNullable<DirectoryAccessReportData['shares']>[number]): string {
+  const typeLabel = entry.type === 'folder' ? '文件夹' : '文件'
+  const status = entry.active ? '可访问' : '不可访问'
+  const password = entry.has_password ? '密码保护' : '无密码'
+  const maxAccess = entry.max_access > 0 ? String(entry.max_access) : '不限'
+  return `- ${entry.path} (${typeLabel} · ${directoryAccessShareRelationLabel(entry.relation)}): ${status} · ${password} · 访问 ${entry.access_count}/${maxAccess} · 创建者 ${entry.created_by}`
+}
+
+function formatDirectoryAccessReportForClipboard(report: DirectoryAccessReportData, title: string): string {
+  const lines = [
+    '目录权限复核记录',
+    `类型: ${report.preview ? '未保存变更预览' : title}`,
+    `路径: ${report.path}`,
+    `用户: ${report.summary.users}`,
+    `读取: 允许 ${report.summary.read_allowed} / 拒绝 ${report.summary.read_denied}`,
+    `写入: 允许 ${report.summary.write_allowed} / 拒绝 ${report.summary.write_denied}`,
+    `相关分享: ${report.summary.related_shares} (活跃 ${report.summary.active_related_shares}, 密码 ${report.summary.password_protected_shares})`,
+    '',
+    '用户明细:',
+    ...report.users.map((entry) => {
+      const groups = entry.groups?.length ? ` · 组 ${entry.groups.join(', ')}` : ''
+      return `- ${entry.username} (${entry.role}${groups}, home ${entry.home_dir}): 读 ${formatDirectoryAccessDecisionForReport(entry.read)}; 写 ${formatDirectoryAccessDecisionForReport(entry.write)}`
+    }),
+    '',
+    '分享影响:',
+  ]
+
+  const shares = report.shares ?? []
+  if (shares.length === 0) {
+    lines.push('- 无相关分享')
+  } else {
+    lines.push(...shares.map(formatDirectoryAccessShareForReport))
+  }
+
+  return lines.join('\n')
+}
+
+type DirectoryAccessReviewHistoryEntry = {
+  id: string
+  recordedAt: string
+  title: string
+  path: string
+  preview: boolean
+  users: number
+  readAllowed: number
+  writeAllowed: number
+  relatedShares: number
+  reportText: string
+}
+
+function getDirectoryAccessReviewHistoryStorageKey(userID: string | undefined): string {
+  return `${DIRECTORY_ACCESS_REVIEW_HISTORY_STORAGE_PREFIX}:${userID?.trim() || 'anonymous'}`
+}
+
+function isDirectoryAccessReviewHistoryEntry(value: unknown): value is DirectoryAccessReviewHistoryEntry {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return false
+  }
+  const entry = value as DirectoryAccessReviewHistoryEntry
+  return typeof entry.id === 'string' && entry.id.trim() !== ''
+    && typeof entry.recordedAt === 'string' && entry.recordedAt.trim() !== ''
+    && typeof entry.title === 'string' && entry.title.trim() !== ''
+    && typeof entry.path === 'string' && entry.path.trim() !== ''
+    && typeof entry.preview === 'boolean'
+    && Number.isSafeInteger(entry.users) && entry.users >= 0
+    && Number.isSafeInteger(entry.readAllowed) && entry.readAllowed >= 0
+    && Number.isSafeInteger(entry.writeAllowed) && entry.writeAllowed >= 0
+    && Number.isSafeInteger(entry.relatedShares) && entry.relatedShares >= 0
+    && typeof entry.reportText === 'string' && entry.reportText.trim() !== ''
+}
+
+function loadDirectoryAccessReviewHistory(storageKey: string): DirectoryAccessReviewHistoryEntry[] {
+  if (typeof window === 'undefined') {
+    return []
+  }
+  try {
+    const raw = window.localStorage.getItem(storageKey)
+    if (!raw) {
+      return []
+    }
+    const parsed: unknown = JSON.parse(raw)
+    if (!Array.isArray(parsed)) {
+      return []
+    }
+    return parsed
+      .filter(isDirectoryAccessReviewHistoryEntry)
+      .slice(0, DIRECTORY_ACCESS_REVIEW_HISTORY_LIMIT)
+  } catch {
+    return []
+  }
+}
+
+function saveDirectoryAccessReviewHistory(storageKey: string, entries: DirectoryAccessReviewHistoryEntry[]): boolean {
+  if (typeof window === 'undefined') {
+    return false
+  }
+  try {
+    window.localStorage.setItem(storageKey, JSON.stringify(entries.slice(0, DIRECTORY_ACCESS_REVIEW_HISTORY_LIMIT)))
+    return true
+  } catch {
+    return false
+  }
+}
+
+function createDirectoryAccessReviewHistoryEntry(
+  report: DirectoryAccessReportData,
+  title: string,
+  reportText: string,
+): DirectoryAccessReviewHistoryEntry {
+  const fallbackID = `${Date.now()}-${Math.random().toString(36).slice(2)}`
+  return {
+    id: typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function' ? crypto.randomUUID() : fallbackID,
+    recordedAt: new Date().toISOString(),
+    title,
+    path: report.path,
+    preview: report.preview === true,
+    users: report.summary.users,
+    readAllowed: report.summary.read_allowed,
+    writeAllowed: report.summary.write_allowed,
+    relatedShares: report.summary.related_shares,
+    reportText,
+  }
+}
+
+function formatDirectoryAccessReviewHistoryTime(value: string): string {
+  const timestamp = Date.parse(value)
+  if (Number.isNaN(timestamp)) {
+    return value
+  }
+  return new Intl.DateTimeFormat('zh-CN', {
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  }).format(new Date(timestamp))
+}
+
+function DirectoryAccessReviewHistory({
+  entries,
+  onCopy,
+  onClear,
+}: {
+  entries: DirectoryAccessReviewHistoryEntry[]
+  onCopy: (entry: DirectoryAccessReviewHistoryEntry) => void
+  onClear: () => void
+}) {
+  return (
+    <div aria-label="目录权限近期复核历史" className="rounded-lg border border-divider bg-content1/60 p-3">
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <div className="text-sm font-semibold text-foreground">近期复核历史</div>
+          <div className="mt-1 text-xs text-default-500">保留当前浏览器最近 {DIRECTORY_ACCESS_REVIEW_HISTORY_LIMIT} 条目录权限矩阵或变更预览记录。</div>
+        </div>
+        <Button
+          size="sm"
+          variant="light"
+          className="self-start rounded-lg text-default-500 sm:self-center"
+          isDisabled={entries.length === 0}
+          onPress={onClear}
+        >
+          清空近期记录
+        </Button>
+      </div>
+      {entries.length === 0 ? (
+        <div className="mt-3 rounded-lg border border-dashed border-divider bg-content2/40 px-3 py-2 text-sm text-default-500">
+          暂无近期目录权限复核记录。
+        </div>
+      ) : (
+        <div className="mt-3 space-y-2">
+          {entries.map((entry) => (
+            <div key={entry.id} className="flex flex-col gap-2 rounded-lg border border-divider bg-content2/50 px-3 py-2 sm:flex-row sm:items-center sm:justify-between">
+              <div className="min-w-0">
+                <div className="flex min-w-0 flex-wrap items-center gap-2 text-sm font-medium text-foreground">
+                  <span className="truncate font-mono">{entry.path}</span>
+                  <span className="rounded-full bg-content1 px-2 py-0.5 text-xs text-default-600">{entry.preview ? '变更预览' : entry.title}</span>
+                </div>
+                <div className="mt-1 flex flex-wrap gap-2 text-xs text-default-500">
+                  <span>{formatDirectoryAccessReviewHistoryTime(entry.recordedAt)}</span>
+                  <span>用户 {entry.users}</span>
+                  <span>可读 {entry.readAllowed}</span>
+                  <span>可写 {entry.writeAllowed}</span>
+                  <span>相关分享 {entry.relatedShares}</span>
+                </div>
+              </div>
+              <Button
+                size="sm"
+                variant="flat"
+                className="self-start rounded-lg sm:self-center"
+                startContent={<Copy size={14} />}
+                onPress={() => onCopy(entry)}
+              >
+                复制记录
+              </Button>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function DirectoryAccessReportResult({
   report,
   title = '用户矩阵',
   ariaLabel = '目录权限用户矩阵',
+  onSaveReviewHistory,
 }: {
   report: DirectoryAccessReportData
   title?: string
   ariaLabel?: string
+  onSaveReviewHistory?: (report: DirectoryAccessReportData, title: string, reportText: string) => boolean
 }) {
   const shares = report.shares ?? []
+  const handleCopyDirectoryAccessReport = async () => {
+    try {
+      const reportText = formatDirectoryAccessReportForClipboard(report, title)
+      await copyTextToClipboard(reportText)
+      const saved = onSaveReviewHistory?.(report, title, reportText)
+      if (saved === false) {
+        addToast({
+          title: '目录权限复核记录已复制',
+          description: '近期历史写入失败，报告内容已复制到剪贴板。',
+          color: 'warning',
+        })
+        return
+      }
+      addToast({ title: '目录权限复核记录已复制并保存', color: 'success' })
+    } catch {
+      addToast({
+        title: '复制目录权限复核记录失败',
+        description: '请检查浏览器剪贴板权限。',
+        color: 'danger',
+      })
+    }
+  }
 
   return (
     <div className="rounded-lg border border-divider bg-content2/40 p-3" aria-label={ariaLabel}>
-      <div className="mb-2 text-sm font-semibold text-foreground">{title}</div>
+      <div className="mb-2 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+        <div className="text-sm font-semibold text-foreground">{title}</div>
+        <Button
+          size="sm"
+          variant="flat"
+          className="self-start rounded-lg sm:self-auto"
+          startContent={<Copy size={14} />}
+          onPress={handleCopyDirectoryAccessReport}
+        >
+          复制复核记录
+        </Button>
+      </div>
       <div className="mb-3 flex flex-wrap items-center gap-2 text-xs text-default-500">
         <span className="rounded-full bg-content1 px-2 py-1 font-mono text-foreground">{report.path}</span>
         <span className="rounded-full bg-content1 px-2 py-1">用户 {report.summary.users}</span>
@@ -3970,11 +4215,35 @@ export function SettingsPage() {
 
   const [accessCheckUsername, setAccessCheckUsername] = useState('')
   const [accessCheckPath, setAccessCheckPath] = useState('/')
+  const directoryAccessReviewHistoryStorageKey = useMemo(
+    () => getDirectoryAccessReviewHistoryStorageKey(user?.id),
+    [user?.id],
+  )
+  const [directoryAccessReviewHistory, setDirectoryAccessReviewHistory] = useState<DirectoryAccessReviewHistoryEntry[]>(() => (
+    loadDirectoryAccessReviewHistory(getDirectoryAccessReviewHistoryStorageKey(user?.id))
+  ))
+  const directoryAccessReviewHistoryRef = useRef<DirectoryAccessReviewHistoryEntry[]>(directoryAccessReviewHistory)
   const saveSettingsAbortControllerRef = useRef<AbortController | null>(null)
   const accessCheckAbortControllerRef = useRef<AbortController | null>(null)
   const accessReportAbortControllerRef = useRef<AbortController | null>(null)
   const accessPreviewAbortControllerRef = useRef<AbortController | null>(null)
   const testAlertAbortControllerRef = useRef<AbortController | null>(null)
+  useEffect(() => {
+    const entries = loadDirectoryAccessReviewHistory(directoryAccessReviewHistoryStorageKey)
+    directoryAccessReviewHistoryRef.current = entries
+    let cancelled = false
+    queueMicrotask(() => {
+      if (!cancelled) {
+        setDirectoryAccessReviewHistory(entries)
+      }
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [directoryAccessReviewHistoryStorageKey])
+  useEffect(() => {
+    directoryAccessReviewHistoryRef.current = directoryAccessReviewHistory
+  }, [directoryAccessReviewHistory])
   useEffect(() => {
     return () => {
       saveSettingsAbortControllerRef.current?.abort()
@@ -4203,6 +4472,52 @@ export function SettingsPage() {
       addToast({ title: '复制失败', color: 'danger' })
     }
   }
+
+  const handleSaveDirectoryAccessReviewHistory = useCallback((report: DirectoryAccessReportData, title: string, reportText: string): boolean => {
+    const entry = createDirectoryAccessReviewHistoryEntry(report, title, reportText)
+    const nextEntries = [
+      entry,
+      ...directoryAccessReviewHistoryRef.current.filter((current) => (
+        current.path !== entry.path || current.title !== entry.title || current.preview !== entry.preview
+      )),
+    ].slice(0, DIRECTORY_ACCESS_REVIEW_HISTORY_LIMIT)
+
+    if (!saveDirectoryAccessReviewHistory(directoryAccessReviewHistoryStorageKey, nextEntries)) {
+      return false
+    }
+    directoryAccessReviewHistoryRef.current = nextEntries
+    setDirectoryAccessReviewHistory(nextEntries)
+    return true
+  }, [directoryAccessReviewHistoryStorageKey])
+
+  const handleCopyDirectoryAccessReviewHistory = useCallback(async (entry: DirectoryAccessReviewHistoryEntry) => {
+    try {
+      await copyTextToClipboard(entry.reportText)
+      addToast({ title: '目录权限历史记录已复制', color: 'success' })
+    } catch {
+      addToast({
+        title: '复制目录权限历史记录失败',
+        description: '请检查浏览器剪贴板权限。',
+        color: 'danger',
+      })
+    }
+  }, [])
+
+  const handleClearDirectoryAccessReviewHistory = useCallback(() => {
+    try {
+      window.localStorage.removeItem(directoryAccessReviewHistoryStorageKey)
+    } catch {
+      addToast({
+        title: '清空目录权限历史失败',
+        description: '请检查浏览器本地存储权限。',
+        color: 'danger',
+      })
+      return
+    }
+    directoryAccessReviewHistoryRef.current = []
+    setDirectoryAccessReviewHistory([])
+    addToast({ title: '目录权限近期复核历史已清空', color: 'success' })
+  }, [directoryAccessReviewHistoryStorageKey])
 
   const [draftSettings, setDraftSettings] = useState(defaultSettings)
   const [isDirty, setIsDirty] = useState(false)
@@ -6497,15 +6812,24 @@ export function SettingsPage() {
                     <DirectoryAccessCheckResult result={accessCheckMutation.data} />
                   )}
                   {accessReportMutation.data && (
-                    <DirectoryAccessReportResult report={accessReportMutation.data} />
+                    <DirectoryAccessReportResult
+                      report={accessReportMutation.data}
+                      onSaveReviewHistory={handleSaveDirectoryAccessReviewHistory}
+                    />
                   )}
                   {accessPreviewMutation.data && (
                     <DirectoryAccessReportResult
                       report={accessPreviewMutation.data}
                       title="变更预览"
                       ariaLabel="目录权限变更预览"
+                      onSaveReviewHistory={handleSaveDirectoryAccessReviewHistory}
                     />
                   )}
+                  <DirectoryAccessReviewHistory
+                    entries={directoryAccessReviewHistory}
+                    onCopy={handleCopyDirectoryAccessReviewHistory}
+                    onClear={handleClearDirectoryAccessReviewHistory}
+                  />
                 </div>
               </SettingsSection>
 
