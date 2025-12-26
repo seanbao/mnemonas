@@ -70,6 +70,7 @@ const (
 	defaultRestoreDrillStaleAfter = 30 * 24 * time.Hour
 	restoreDrillReminderCooldown  = 24 * time.Hour
 	interruptedStatusMessage      = "任务在服务重启或进程退出前中断"
+	restoreDrillCleanupWarning    = "恢复演练已完成，但临时恢复目录清理失败；请检查备份目标中的 restore-drills 目录。"
 
 	defaultSchedulerPollInterval = time.Minute
 	externalCommandStderrLimit   = 4096
@@ -370,6 +371,8 @@ type RestoreDrillResult struct {
 	ArtifactKept    bool       `json:"artifact_kept"`
 	FileCount       int64      `json:"file_count"`
 	VerifiedBytes   int64      `json:"verified_bytes"`
+	Warning         bool       `json:"warning,omitempty"`
+	Warnings        []string   `json:"warnings,omitempty"`
 	ErrorMessage    string     `json:"error_message,omitempty"`
 	FailureCategory string     `json:"failure_category,omitempty"`
 }
@@ -927,14 +930,24 @@ func (m *Manager) notifyRun(ctx context.Context, job config.BackupJobConfig, res
 }
 
 func (m *Manager) notifyRestoreDrill(ctx context.Context, job config.BackupJobConfig, result *RestoreDrillResult) {
-	if m.notifier == nil || result == nil || result.Status != StatusFailed {
+	if m.notifier == nil || result == nil {
 		return
+	}
+	if result.Status != StatusFailed && !result.Warning {
+		return
+	}
+
+	level := NotificationLevelWarning
+	message := "backup restore drill completed with warnings"
+	if result.Status == StatusFailed {
+		level = NotificationLevelCritical
+		message = "backup restore drill failed"
 	}
 
 	_ = m.notifier.NotifyBackupEvent(context.WithoutCancel(ctx), NotificationEvent{
 		Type:                NotificationTypeRestoreDrill,
-		Level:               NotificationLevelCritical,
-		Message:             "backup restore drill failed",
+		Level:               level,
+		Message:             message,
 		JobID:               job.ID,
 		JobType:             job.Type,
 		RunID:               result.ID,
@@ -943,6 +956,7 @@ func (m *Manager) notifyRestoreDrill(ctx context.Context, job config.BackupJobCo
 		FinishedAt:          result.FinishedAt,
 		FileCount:           result.FileCount,
 		VerifiedBytes:       result.VerifiedBytes,
+		WarningCount:        len(result.Warnings),
 		ErrorMessagePresent: strings.TrimSpace(result.ErrorMessage) != "",
 		LocationOmitted:     notificationLocationDetailsOmitted(result.SnapshotPath, result.ManifestPath),
 		FailureCategory:     result.FailureCategory,
@@ -1409,6 +1423,8 @@ func (m *Manager) runRcloneBackup(ctx context.Context, job config.BackupJobConfi
 	return nil
 }
 
+var removeRestoreDrillArtifact = removeAllBackupPath
+
 func (m *Manager) runRestoreDrill(ctx context.Context, job config.BackupJobConfig, opts RestoreDrillOptions, result *RestoreDrillResult) error {
 	if job.Type == JobTypeRestic {
 		return m.runResticRestoreDrill(ctx, job, result)
@@ -1440,7 +1456,7 @@ func (m *Manager) runRestoreDrill(ctx context.Context, job config.BackupJobConfi
 	cleanupDrill := !opts.KeepArtifact
 	defer func() {
 		if cleanupDrill {
-			_ = removeAllBackupPath(drillRoot, "restore drill")
+			_ = removeRestoreDrillArtifact(drillRoot, "restore drill")
 		}
 	}()
 
@@ -1482,6 +1498,14 @@ func (m *Manager) runRestoreDrill(ctx context.Context, job config.BackupJobConfi
 	result.FileCount = fileCount
 	result.VerifiedBytes = verifiedBytes
 	if opts.KeepArtifact {
+		result.RestoredPath = restoredPath
+		return nil
+	}
+	cleanupDrill = false
+	if err := removeRestoreDrillArtifact(drillRoot, "restore drill"); err != nil {
+		result.Warning = true
+		result.Warnings = append(result.Warnings, restoreDrillCleanupWarning)
+		result.ArtifactKept = true
 		result.RestoredPath = restoredPath
 	}
 	return nil
@@ -3467,6 +3491,13 @@ func cloneRestoreDrillResultWithMode(result *RestoreDrillResult, sanitize bool) 
 	if result.FinishedAt != nil {
 		finishedAt := *result.FinishedAt
 		clone.FinishedAt = &finishedAt
+	}
+	if len(result.Warnings) > 0 {
+		if sanitize {
+			clone.Warnings = sanitizeBackupMessagesForAPI(result.Warnings)
+		} else {
+			clone.Warnings = cloneStringSlice(result.Warnings)
+		}
 	}
 	if sanitize {
 		clone.SnapshotPath = sanitizeBackupTargetForAPI(clone.SnapshotPath)

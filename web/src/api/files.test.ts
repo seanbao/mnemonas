@@ -3910,6 +3910,8 @@ describe('API: files', () => {
         artifact_kept: true,
         file_count: 12,
         verified_bytes: 4096,
+        warning: false,
+        warnings: [],
       },
       restore_drill_history: [{
         id: '20260509T030000.000000000Z',
@@ -3924,6 +3926,8 @@ describe('API: files', () => {
         artifact_kept: true,
         file_count: 12,
         verified_bytes: 4096,
+        warning: false,
+        warnings: [],
       }],
       last_restore: {
         id: '20260509T040000.000000000Z',
@@ -4332,6 +4336,31 @@ describe('API: files', () => {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ keep_artifact: true }),
+      })
+    })
+
+    it('returns backup restore drill warning details', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          success: true,
+          data: {
+            ...backupJob.last_restore_drill,
+            warning: true,
+            warnings: ['恢复演练已完成，但临时恢复目录清理失败；请检查备份目标中的 restore-drills 目录。'],
+          },
+          timestamp: '2026-05-09',
+        }),
+      })
+
+      const result = await runBackupRestoreDrill('external-disk')
+      expect(result.status).toBe('completed')
+      expect(result.warning).toBe(true)
+      expect(result.warnings).toEqual(['恢复演练已完成，但临时恢复目录清理失败；请检查备份目标中的 restore-drills 目录。'])
+      expectFetchCall(1, '/api/v1/maintenance/backups/external-disk/restore-drill', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ keep_artifact: false }),
       })
     })
 

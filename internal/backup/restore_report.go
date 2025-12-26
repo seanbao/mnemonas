@@ -58,6 +58,14 @@ func restoreReportFindingsWithMatchingVerify(view JobView, matchingRestoreVerify
 	if view.RestoreDrillStatus == "failed" || view.RestoreDrillStatus == "due" || view.RestoreDrillStatus == "stale" {
 		appendFinding("恢复演练需要处理", view.RestoreDrillMessage)
 	}
+	if view.LastRestoreDrill != nil {
+		if view.LastRestoreDrill.Warning && len(view.LastRestoreDrill.Warnings) == 0 {
+			findings = append(findings, "最近恢复演练完成但存在警告。")
+		}
+		for _, warning := range view.LastRestoreDrill.Warnings {
+			findings = append(findings, "恢复演练警告: "+sanitizeBackupMessageForAPI(warning))
+		}
+	}
 	if failedDrills := failedRestoreDrillHistoryCount(view.RestoreDrillHistory); failedDrills > 0 && view.RestoreDrillStatus != "failed" {
 		findings = append(findings, fmt.Sprintf("最近恢复演练历史中有 %d 次失败，建议复查失败原因和最近一次成功演练的覆盖范围。", failedDrills))
 	}
