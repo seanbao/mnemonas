@@ -449,6 +449,43 @@ describe('ShareManager', () => {
     })
   })
 
+  it('opens path-scoped share review history from the summary', async () => {
+    const user = userEvent.setup()
+    vi.mocked(shareApi.listShares).mockResolvedValueOnce([
+      {
+        ...mockShares[0],
+        id: 'share-open',
+        path: '/docs/open.pdf',
+        risk: {
+          level: 'high',
+          reasons: [
+            { code: 'no_password', level: 'high', message: '未设置密码，拿到链接的人都能访问' },
+          ],
+        },
+      },
+      {
+        ...mockShares[0],
+        id: 'share-media',
+        path: '/media/movie.mp4',
+      },
+    ])
+
+    render(<ShareManager pathFilter="/docs" />)
+
+    await waitFor(() => {
+      expect(screen.getByText('我的分享 (1 / 2)')).toBeInTheDocument()
+      expect(screen.getByText('open.pdf')).toBeInTheDocument()
+      expect(screen.queryByText('movie.mp4')).not.toBeInTheDocument()
+    })
+
+    await user.click(screen.getByRole('button', { name: '查看复核历史' }))
+
+    expect(window.location.pathname).toBe('/activity')
+    const params = new URLSearchParams(window.location.search)
+    expect(params.get('action_group')).toBe('share')
+    expect(params.get('path')).toBe('/docs')
+  })
+
   it('copies a path-scoped share review summary for administrator review', async () => {
     const user = userEvent.setup()
     const writeText = vi.fn().mockResolvedValue(undefined)
