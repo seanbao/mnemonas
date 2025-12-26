@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   formatUserQuotaSummaryReport,
+  getUserQuotaAggregateStatus,
   getQuotaStatus,
   getQuotaUsagePercent,
   getUserQuotaAttentionListItems,
@@ -105,6 +106,75 @@ describe('userQuota', () => {
       exceededCount: 1,
       attentionCount: 2,
       usedBytes: 4248,
+      limitedUsedBytes: 2200,
+      quotaBytes: 3000,
+    })
+  })
+
+  it('summarizes aggregate quota headroom for limited users', () => {
+    expect(getUserQuotaAggregateStatus({
+      totalCount: 2,
+      activeCount: 2,
+      disabledCount: 0,
+      limitedCount: 0,
+      unlimitedCount: 2,
+      normalCount: 0,
+      warningCount: 0,
+      exceededCount: 0,
+      attentionCount: 0,
+      usedBytes: 4096,
+      limitedUsedBytes: 0,
+      quotaBytes: 0,
+    })).toEqual({
+      label: '未设置总配额',
+      detail: '当前没有已设配额用户；用户总用量 4 KB。',
+      tone: 'default',
+      percent: null,
+      usedBytes: 0,
+      quotaBytes: 0,
+    })
+
+    expect(getUserQuotaAggregateStatus({
+      totalCount: 3,
+      activeCount: 3,
+      disabledCount: 0,
+      limitedCount: 3,
+      unlimitedCount: 0,
+      normalCount: 1,
+      warningCount: 2,
+      exceededCount: 0,
+      attentionCount: 2,
+      usedBytes: 2760,
+      limitedUsedBytes: 2760,
+      quotaBytes: 3000,
+    })).toEqual({
+      label: '总体接近上限',
+      detail: '受限用户合计剩余 240 B。',
+      tone: 'warning',
+      percent: 92,
+      usedBytes: 2760,
+      quotaBytes: 3000,
+    })
+
+    expect(getUserQuotaAggregateStatus({
+      totalCount: 2,
+      activeCount: 2,
+      disabledCount: 0,
+      limitedCount: 2,
+      unlimitedCount: 0,
+      normalCount: 0,
+      warningCount: 0,
+      exceededCount: 2,
+      attentionCount: 2,
+      usedBytes: 3400,
+      limitedUsedBytes: 3400,
+      quotaBytes: 3000,
+    })).toEqual({
+      label: '总体已超限',
+      detail: '受限用户合计超出 400 B。',
+      tone: 'danger',
+      percent: 113,
+      usedBytes: 3400,
       quotaBytes: 3000,
     })
   })
@@ -129,6 +199,7 @@ describe('userQuota', () => {
       '已超限：1 个',
       '需复核：2 个',
       '总用量：4.15 KB / 2.93 KB',
+      '受限用户用量：2.15 KB / 2.93 KB',
       '',
       '用户明细',
       '用户名 | 邮箱 | 角色 | 状态 | 用户组 | 主目录 | 最后登录 | 配额状态 | 用量 | 剩余/超出 | 占比 | 建议处理',

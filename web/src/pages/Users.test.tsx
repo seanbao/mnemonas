@@ -732,7 +732,7 @@ describe('UsersPage', () => {
 
       expect(screen.getByText('接近上限')).toBeInTheDocument()
       expect(screen.getByText('已超限')).toBeInTheDocument()
-      expect(screen.getByText('未设配额')).toBeInTheDocument()
+      expect(screen.getAllByText('未设配额').length).toBeGreaterThanOrEqual(1)
       expect(screen.getByRole('progressbar', { name: 'nearquota 配额使用率' })).toHaveAttribute('aria-valuetext', '95% 已用，剩余 50 B。')
       expect(screen.getByRole('progressbar', { name: 'overquota 配额使用率' })).toHaveAttribute('aria-valuetext', '120% 已用，已超出 200 B。')
       expect(screen.getByRole('progressbar', { name: 'unlimited 未设置用户容量限制' })).toHaveAttribute('aria-valuetext', '不限额，已用 2 KB')
@@ -1241,6 +1241,32 @@ describe('UsersPage', () => {
         expect(screen.getAllByText('配额关注').length).toBeGreaterThan(0)
         expect(screen.getByText('2 个用户接近或超过上限')).toBeInTheDocument()
       })
+    })
+
+    it('shows aggregate quota usage for limited users', async () => {
+      vi.mocked(usersApi.listUsers).mockResolvedValue({
+        success: true,
+        users: [
+          { ...mockUsers[0], quota_bytes: 1024, used_bytes: 1024 },
+          { ...mockUsers[1], quota_bytes: 1024, used_bytes: 1024 },
+          { ...mockUsers[2], quota_bytes: 0, used_bytes: 2048 },
+        ],
+        total: 3,
+      })
+
+      renderUsersPage()
+
+      const overview = await screen.findByLabelText('用户配额总览')
+      expect(within(overview).getByText('用户配额总览')).toBeInTheDocument()
+      expect(within(overview).getByText('总体接近上限')).toBeInTheDocument()
+      expect(within(overview).getByText('受限用户合计剩余 0 B。')).toBeInTheDocument()
+      expect(within(overview).getByText('2 KB / 2 KB')).toBeInTheDocument()
+      expect(within(overview).getAllByText('2 个').length).toBeGreaterThanOrEqual(2)
+      expect(within(overview).getByText('1 个')).toBeInTheDocument()
+      expect(within(overview).getByRole('progressbar', { name: '用户总配额使用率' })).toHaveAttribute(
+        'aria-valuetext',
+        '100% 已用，受限用户合计剩余 0 B。',
+      )
     })
 
     it('shows review hint count breakdown', async () => {

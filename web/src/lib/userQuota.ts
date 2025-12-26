@@ -31,6 +31,16 @@ export type UserQuotaSummary = {
   exceededCount: number
   attentionCount: number
   usedBytes: number
+  limitedUsedBytes: number
+  quotaBytes: number
+}
+
+export type UserQuotaAggregateStatus = {
+  label: string
+  detail: string
+  tone: QuotaTone
+  percent: number | null
+  usedBytes: number
   quotaBytes: number
 }
 
@@ -178,6 +188,7 @@ export function summarizeUserQuotas(users: UserQuotaReportUser[]): UserQuotaSumm
 
     if (user.quota_bytes > 0) {
       summary.limitedCount += 1
+      summary.limitedUsedBytes += user.used_bytes
       summary.quotaBytes += user.quota_bytes
     } else {
       summary.unlimitedCount += 1
@@ -205,8 +216,55 @@ export function summarizeUserQuotas(users: UserQuotaReportUser[]): UserQuotaSumm
     exceededCount: 0,
     attentionCount: 0,
     usedBytes: 0,
+    limitedUsedBytes: 0,
     quotaBytes: 0,
   })
+}
+
+export function getUserQuotaAggregateStatus(summary: UserQuotaSummary): UserQuotaAggregateStatus {
+  if (summary.quotaBytes <= 0) {
+    return {
+      label: '未设置总配额',
+      detail: `当前没有已设配额用户；用户总用量 ${formatBytes(summary.usedBytes)}。`,
+      tone: 'default',
+      percent: null,
+      usedBytes: summary.limitedUsedBytes,
+      quotaBytes: summary.quotaBytes,
+    }
+  }
+
+  const percent = Math.round((summary.limitedUsedBytes / summary.quotaBytes) * 100)
+  if (summary.limitedUsedBytes > summary.quotaBytes) {
+    return {
+      label: '总体已超限',
+      detail: `受限用户合计超出 ${formatBytes(summary.limitedUsedBytes - summary.quotaBytes)}。`,
+      tone: 'danger',
+      percent,
+      usedBytes: summary.limitedUsedBytes,
+      quotaBytes: summary.quotaBytes,
+    }
+  }
+
+  const remainingBytes = summary.quotaBytes - summary.limitedUsedBytes
+  if (percent >= 90) {
+    return {
+      label: '总体接近上限',
+      detail: `受限用户合计剩余 ${formatBytes(remainingBytes)}。`,
+      tone: 'warning',
+      percent,
+      usedBytes: summary.limitedUsedBytes,
+      quotaBytes: summary.quotaBytes,
+    }
+  }
+
+  return {
+    label: '总体配额正常',
+    detail: `受限用户合计剩余 ${formatBytes(remainingBytes)}。`,
+    tone: 'success',
+    percent,
+    usedBytes: summary.limitedUsedBytes,
+    quotaBytes: summary.quotaBytes,
+  }
 }
 
 function formatUserRole(role: User['role']): string {
@@ -273,6 +331,7 @@ export function formatUserQuotaSummaryReport(
     ['已超限', `${summary.exceededCount} 个`],
     ['需复核', `${summary.attentionCount} 个`],
     ['总用量', `${formatBytes(summary.usedBytes)} / ${summary.quotaBytes > 0 ? formatBytes(summary.quotaBytes) : '未设总配额'}`],
+    ['受限用户用量', `${formatBytes(summary.limitedUsedBytes)} / ${summary.quotaBytes > 0 ? formatBytes(summary.quotaBytes) : '未设总配额'}`],
   ]
   const userRows = getUserQuotaReportUsers(users).map((user) => {
     const quota = getQuotaStatus(user)
