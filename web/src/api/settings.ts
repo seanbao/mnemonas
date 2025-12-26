@@ -19,6 +19,9 @@ const SETTINGS_ERROR_MESSAGES = {
   accessCheck: '检查目录访问失败',
   accessReport: '生成目录访问报告失败',
   accessPreview: '预览目录访问变更失败',
+  accessReviews: '获取目录权限复核历史失败',
+  createAccessReview: '保存目录权限复核记录失败',
+  clearAccessReviews: '清空目录权限复核历史失败',
   webdavCredentials: '获取 WebDAV 凭据失败',
 } as const
 
@@ -249,6 +252,51 @@ export interface DirectoryAccessReportData {
   summary: DirectoryAccessReportSummary
   users: DirectoryAccessCheckData[]
   shares?: DirectoryAccessShareImpact[]
+}
+
+export interface DirectoryAccessReviewRecord {
+  id: string
+  reviewed_at: string
+  reviewer: string
+  title: string
+  path: string
+  preview: boolean
+  users: number
+  read_allowed: number
+  read_denied: number
+  write_allowed: number
+  write_denied: number
+  related_shares: number
+  active_related_shares: number
+  password_protected_shares: number
+  report_text: string
+}
+
+export interface DirectoryAccessReviewRecordCreateRequest {
+  title: string
+  path: string
+  preview: boolean
+  users: number
+  read_allowed: number
+  read_denied: number
+  write_allowed: number
+  write_denied: number
+  related_shares: number
+  active_related_shares: number
+  password_protected_shares: number
+  report_text: string
+}
+
+export interface DirectoryAccessReviewRecordListData {
+  items: DirectoryAccessReviewRecord[]
+  total: number
+  limit: number
+  offset: number
+}
+
+export interface DirectoryAccessReviewRecordListOptions extends SettingsRequestOptions {
+  limit?: number
+  offset?: number
 }
 
 export interface DirectoryAccessCheckRequest {
@@ -849,6 +897,43 @@ function isDirectoryAccessReportData(value: unknown): value is DirectoryAccessRe
     && (value.shares === undefined || (Array.isArray(value.shares) && value.shares.every(isDirectoryAccessShareImpact)))
 }
 
+function isDirectoryAccessReviewRecord(value: unknown): value is DirectoryAccessReviewRecord {
+  return isRecord(value)
+    && typeof value.id === 'string'
+    && value.id.trim() !== ''
+    && typeof value.reviewed_at === 'string'
+    && value.reviewed_at.trim() !== ''
+    && typeof value.reviewer === 'string'
+    && value.reviewer.trim() !== ''
+    && typeof value.title === 'string'
+    && value.title.trim() !== ''
+    && isLogicalPathString(value.path)
+    && typeof value.preview === 'boolean'
+    && isNonNegativeSafeInteger(value.users)
+    && isNonNegativeSafeInteger(value.read_allowed)
+    && isNonNegativeSafeInteger(value.read_denied)
+    && isNonNegativeSafeInteger(value.write_allowed)
+    && isNonNegativeSafeInteger(value.write_denied)
+    && isNonNegativeSafeInteger(value.related_shares)
+    && isNonNegativeSafeInteger(value.active_related_shares)
+    && isNonNegativeSafeInteger(value.password_protected_shares)
+    && typeof value.report_text === 'string'
+    && value.report_text.trim() !== ''
+    && value.read_allowed + value.read_denied === value.users
+    && value.write_allowed + value.write_denied === value.users
+    && value.active_related_shares <= value.related_shares
+    && value.password_protected_shares <= value.related_shares
+}
+
+function isDirectoryAccessReviewRecordListData(value: unknown): value is DirectoryAccessReviewRecordListData {
+  return isRecord(value)
+    && Array.isArray(value.items)
+    && value.items.every(isDirectoryAccessReviewRecord)
+    && isNonNegativeSafeInteger(value.total)
+    && isPositiveSafeInteger(value.limit)
+    && isNonNegativeSafeInteger(value.offset)
+}
+
 function isSecurityCheckStatus(value: unknown): value is SecurityCheckStatus {
   return value === 'pass' || value === 'warning' || value === 'block'
 }
@@ -1237,6 +1322,74 @@ export async function previewDirectoryAccess(
     throw new Error(INVALID_SETTINGS_RESPONSE_MESSAGE)
   }
   return body.data
+}
+
+export async function listDirectoryAccessReviewRecords(
+  options: DirectoryAccessReviewRecordListOptions = {},
+): Promise<DirectoryAccessReviewRecordListData> {
+  const { limit = 20, offset = 0, ...requestOptions } = options
+  const params = new URLSearchParams()
+  params.set('limit', String(limit))
+  params.set('offset', String(offset))
+  const response = await authFetch(`${API_BASE}/access-reviews?${params.toString()}`, requestOptions)
+
+  if (!response.ok) {
+    throw await parseSettingsError(response, SETTINGS_ERROR_MESSAGES.accessReviews)
+  }
+
+  const body = await parseSettingsSuccess<unknown>(response, INVALID_SETTINGS_RESPONSE_MESSAGE)
+  if (!isDirectoryAccessReviewRecordListData(body.data)) {
+    throw new Error(INVALID_SETTINGS_RESPONSE_MESSAGE)
+  }
+  return body.data
+}
+
+export async function createDirectoryAccessReviewRecord(
+  data: DirectoryAccessReviewRecordCreateRequest,
+  options: SettingsRequestOptions = {},
+): Promise<DirectoryAccessReviewRecord> {
+  const request = {
+    ...data,
+    path: requireLogicalPath(data.path, '目录权限复核路径无效', 'INVALID_DIRECTORY_ACCESS_PATH'),
+  }
+  const response = await authFetch(`${API_BASE}/access-reviews`, {
+    ...options,
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(request),
+  })
+
+  if (!response.ok) {
+    throw await parseSettingsError(response, SETTINGS_ERROR_MESSAGES.createAccessReview)
+  }
+
+  const body = await parseSettingsSuccess<unknown>(response, INVALID_SETTINGS_RESPONSE_MESSAGE)
+  if (!isDirectoryAccessReviewRecord(body.data)) {
+    throw new Error(INVALID_SETTINGS_RESPONSE_MESSAGE)
+  }
+  return body.data
+}
+
+export async function clearDirectoryAccessReviewRecords(
+  options: SettingsRequestOptions = {},
+): Promise<SettingsActionResult> {
+  const response = await authFetch(`${API_BASE}/access-reviews`, {
+    ...options,
+    method: 'DELETE',
+  })
+
+  if (!response.ok) {
+    throw await parseSettingsError(response, SETTINGS_ERROR_MESSAGES.clearAccessReviews)
+  }
+
+  const body = await parseSettingsSuccess<unknown>(response, INVALID_SETTINGS_RESPONSE_MESSAGE)
+  return {
+    success: true,
+    warning: hasSettingsWarning(response, body),
+    message: getNonBlankJsonString(body.message) ?? '',
+  }
 }
 
 /**

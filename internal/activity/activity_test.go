@@ -989,6 +989,158 @@ func TestRecordReviewPersistsAndReloads(t *testing.T) {
 	}
 }
 
+func TestRecordDirectoryAccessReviewPersistsReloadsAndDeduplicates(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := NewStore(tmpDir)
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+
+	fixedNow := time.Date(2026, time.June, 20, 9, 30, 0, 0, time.UTC)
+	originalNow := activityTimeNow
+	activityTimeNow = func() time.Time { return fixedNow }
+	defer func() {
+		activityTimeNow = originalNow
+	}()
+
+	record, err := store.RecordDirectoryAccessReview(DirectoryAccessReviewRecordInput{
+		Reviewer:                " admin ",
+		Title:                   " 用户矩阵 ",
+		Path:                    " team/readme.txt ",
+		Users:                   2,
+		ReadAllowed:             1,
+		ReadDenied:              1,
+		WriteAllowed:            1,
+		WriteDenied:             1,
+		RelatedShares:           1,
+		ActiveRelatedShares:     1,
+		PasswordProtectedShares: 1,
+		ReportText:              "目录权限复核记录\n路径: /team/readme.txt",
+	})
+	if err != nil {
+		t.Fatalf("RecordDirectoryAccessReview() error: %v", err)
+	}
+	if record.Reviewer != "admin" || record.Title != "用户矩阵" || record.Path != "/team/readme.txt" {
+		t.Fatalf("record was not normalized: %+v", record)
+	}
+	if !record.ReviewedAt.Equal(fixedNow) {
+		t.Fatalf("ReviewedAt = %s, want %s", record.ReviewedAt, fixedNow)
+	}
+	if record.ReportText != "目录权限复核记录\n路径: /team/readme.txt" {
+		t.Fatalf("ReportText was not preserved: %q", record.ReportText)
+	}
+
+	if _, err := store.RecordDirectoryAccessReview(DirectoryAccessReviewRecordInput{
+		Reviewer:                "admin",
+		Title:                   "用户矩阵",
+		Path:                    "/team/readme.txt",
+		Users:                   2,
+		ReadAllowed:             2,
+		ReadDenied:              0,
+		WriteAllowed:            1,
+		WriteDenied:             1,
+		RelatedShares:           2,
+		ActiveRelatedShares:     1,
+		PasswordProtectedShares: 1,
+		ReportText:              "目录权限复核记录\n路径: /team/readme.txt\n更新后",
+	}); err != nil {
+		t.Fatalf("RecordDirectoryAccessReview(second) error: %v", err)
+	}
+
+	records, total := store.ListDirectoryAccessReviewRecords(10, 0)
+	if total != 1 || len(records) != 1 {
+		t.Fatalf("expected one deduplicated directory access review, got total=%d records=%+v", total, records)
+	}
+	if records[0].ReadAllowed != 2 || !strings.Contains(records[0].ReportText, "更新后") {
+		t.Fatalf("latest directory access review was not retained: %+v", records[0])
+	}
+
+	reloaded, err := NewStore(tmpDir)
+	if err != nil {
+		t.Fatalf("NewStore() reload error: %v", err)
+	}
+	reloadedRecords, reloadedTotal := reloaded.ListDirectoryAccessReviewRecords(10, 0)
+	if reloadedTotal != 1 || len(reloadedRecords) != 1 || reloadedRecords[0].Path != "/team/readme.txt" {
+		t.Fatalf("expected reloaded directory access review, got total=%d records=%+v", reloadedTotal, reloadedRecords)
+	}
+
+	if err := reloaded.ClearDirectoryAccessReviewRecords(); err != nil {
+		t.Fatalf("ClearDirectoryAccessReviewRecords() error: %v", err)
+	}
+	cleared, clearedTotal := reloaded.ListDirectoryAccessReviewRecords(10, 0)
+	if clearedTotal != 0 || len(cleared) != 0 {
+		t.Fatalf("expected directory access reviews to be cleared, got total=%d records=%+v", clearedTotal, cleared)
+	}
+}
+
+func TestRecordDirectoryAccessReviewRejectsInvalidInput(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := NewStore(tmpDir)
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+
+	valid := DirectoryAccessReviewRecordInput{
+		Reviewer:                "admin",
+		Title:                   "用户矩阵",
+		Path:                    "/team/readme.txt",
+		Users:                   2,
+		ReadAllowed:             1,
+		ReadDenied:              1,
+		WriteAllowed:            1,
+		WriteDenied:             1,
+		RelatedShares:           1,
+		ActiveRelatedShares:     1,
+		PasswordProtectedShares: 1,
+		ReportText:              "目录权限复核记录\n路径: /team/readme.txt",
+	}
+
+	cases := []struct {
+		name   string
+		modify func(*DirectoryAccessReviewRecordInput)
+	}{
+		{
+			name: "invalid path",
+			modify: func(input *DirectoryAccessReviewRecordInput) {
+				input.Path = "/team/../private"
+			},
+		},
+		{
+			name: "read count mismatch",
+			modify: func(input *DirectoryAccessReviewRecordInput) {
+				input.ReadDenied = 0
+			},
+		},
+		{
+			name: "active shares overflow",
+			modify: func(input *DirectoryAccessReviewRecordInput) {
+				input.ActiveRelatedShares = 2
+			},
+		},
+		{
+			name: "control report text",
+			modify: func(input *DirectoryAccessReviewRecordInput) {
+				input.ReportText = "目录权限复核记录\a"
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			input := valid
+			tc.modify(&input)
+			if _, err := store.RecordDirectoryAccessReview(input); !errors.Is(err, ErrInvalidReviewRecord) {
+				t.Fatalf("RecordDirectoryAccessReview() error = %v, want %v", err, ErrInvalidReviewRecord)
+			}
+		})
+	}
+
+	records, total := store.ListDirectoryAccessReviewRecords(10, 0)
+	if total != 0 || len(records) != 0 {
+		t.Fatalf("invalid directory access reviews should not persist, got total=%d records=%+v", total, records)
+	}
+}
+
 func TestRecordReviewRejectsInvalidInput(t *testing.T) {
 	tmpDir := t.TempDir()
 	store, err := NewStore(tmpDir)

@@ -90,6 +90,139 @@ test.describe('设置选项卡切换', () => {
     await expect(page.getByText('路径直接填写 MnemoNAS 逻辑路径')).toBeVisible()
   })
 
+  test('目录权限矩阵复核记录应写入近期历史', async ({ page }) => {
+    await page.route('**/api/v1/settings/access-report', async (route) => {
+      expect(route.request().method()).toBe('POST')
+      expect(JSON.parse(route.request().postData() || '{}')).toMatchObject({ path: '/team/readme.txt' })
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          success: true,
+          data: {
+            path: '/team/readme.txt',
+            summary: {
+              users: 2,
+              read_allowed: 1,
+              read_denied: 1,
+              write_allowed: 1,
+              write_denied: 1,
+              related_shares: 1,
+              active_related_shares: 1,
+              password_protected_shares: 1,
+            },
+            users: [
+              {
+                username: 'alice',
+                user_id: 'u1',
+                role: 'user',
+                groups: ['family'],
+                home_dir: '/users/alice',
+                path: '/team/readme.txt',
+                read: {
+                  mode: 'read',
+                  allowed: true,
+                  source: 'directory_access_rule',
+                  matched_rule: {
+                    path: '/team',
+                    read_groups: ['family'],
+                  },
+                },
+                write: {
+                  mode: 'write',
+                  allowed: true,
+                  source: 'directory_access_rule',
+                  matched_rule: {
+                    path: '/team',
+                    write_groups: ['family'],
+                  },
+                },
+              },
+              {
+                username: 'bob',
+                user_id: 'u2',
+                role: 'user',
+                groups: [],
+                home_dir: '/users/bob',
+                path: '/team/readme.txt',
+                read: {
+                  mode: 'read',
+                  allowed: false,
+                  source: 'home_dir',
+                },
+                write: {
+                  mode: 'write',
+                  allowed: false,
+                  source: 'home_dir',
+                },
+              },
+            ],
+            shares: [
+              {
+                id: 'share-1',
+                path: '/team',
+                type: 'folder',
+                created_by: 'u1',
+                relation: 'covers_path',
+                enabled: true,
+                active: true,
+                has_password: true,
+                access_count: 0,
+                max_access: 0,
+                url: '/s/share-1',
+              },
+            ],
+          },
+        }),
+      })
+    })
+
+    await page.getByRole('tab', { name: /版本保留/i }).click()
+    await page.getByLabel('检查路径').fill('/team/readme.txt')
+    await page.getByRole('button', { name: '用户矩阵' }).click()
+
+    const matrix = page.getByLabel('目录权限用户矩阵')
+    await expect(matrix).toBeVisible({ timeout: 5000 })
+    await expect(matrix.getByText('/team/readme.txt')).toBeVisible()
+    await expect(matrix.getByText('用户 2')).toBeVisible()
+
+    await page.evaluate(() => {
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: { writeText: async () => undefined },
+      })
+    })
+    await page.getByRole('button', { name: '复制复核记录' }).click()
+
+    const history = page.getByLabel('目录权限近期复核历史')
+    await expect(history.getByText('/team/readme.txt')).toBeVisible({ timeout: 5000 })
+    await expect(history.getByText('用户矩阵')).toBeVisible()
+    await expect(history.getByText('用户 2')).toBeVisible()
+    await expect(history.getByText('可读 1')).toBeVisible()
+    await expect(history.getByText('可写 1')).toBeVisible()
+
+    const storedHistory = await page.evaluate(() => {
+      const storageKey = Object.keys(window.localStorage).find((key) => (
+        key.startsWith('mnemonas_directory_access_review_history:')
+      ))
+      return storageKey ? JSON.parse(window.localStorage.getItem(storageKey) || '[]') : []
+    })
+    expect(storedHistory).toEqual([
+      expect.objectContaining({
+        title: '用户矩阵',
+        path: '/team/readme.txt',
+        preview: false,
+        users: 2,
+        readAllowed: 1,
+        writeAllowed: 1,
+        relatedShares: 1,
+      }),
+    ])
+
+    await history.getByRole('button', { name: '清空近期记录' }).click()
+    await expect(history.getByText('暂无近期目录权限复核记录。')).toBeVisible({ timeout: 5000 })
+  })
+
   test('点击高级选项卡应显示 CDC 设置', async ({ page }) => {
     const advancedTab = page.getByRole('tab', { name: /高级/i })
     await expect(advancedTab).toBeVisible({ timeout: 5000 })
