@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -53,6 +54,53 @@ func TestRunRejectsInvalidURL(t *testing.T) {
 			}
 			if stderr.Len() == 0 {
 				t.Fatal("expected an error message")
+			}
+		})
+	}
+}
+
+func TestRunRejectsInvalidURLRedactsSensitiveURLParts(t *testing.T) {
+	tests := []struct {
+		name        string
+		rawURL      string
+		mustContain string
+		leaks       []string
+	}{
+		{
+			name:        "embedded credentials",
+			rawURL:      "http://user:super-secret@127.0.0.1:8080/health?token=also-secret#fragment-secret",
+			mustContain: `invalid MNEMONAS_HEALTHCHECK_URL "http://127.0.0.1:8080/health?redacted=true"`,
+			leaks:       []string{"user", "super-secret", "token=also-secret", "also-secret", "fragment-secret"},
+		},
+		{
+			name:        "fragment with query secret",
+			rawURL:      "http://127.0.0.1:8080/health?token=also-secret#fragment-secret",
+			mustContain: `invalid MNEMONAS_HEALTHCHECK_URL "http://127.0.0.1:8080/health?redacted=true"`,
+			leaks:       []string{"token=also-secret", "also-secret", "fragment-secret"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			getenv := func(key string) string {
+				if key == "MNEMONAS_HEALTHCHECK_URL" {
+					return tc.rawURL
+				}
+				return ""
+			}
+
+			var stderr bytes.Buffer
+			if code := run(getenv, &stderr); code != 2 {
+				t.Fatalf("run() = %d, want 2; stderr=%s", code, stderr.String())
+			}
+			got := stderr.String()
+			if !strings.Contains(got, tc.mustContain) {
+				t.Fatalf("stderr = %q, want to contain %q", got, tc.mustContain)
+			}
+			for _, leak := range tc.leaks {
+				if strings.Contains(got, leak) {
+					t.Fatalf("stderr leaked %q: %s", leak, got)
+				}
 			}
 		})
 	}

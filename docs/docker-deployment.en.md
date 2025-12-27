@@ -181,6 +181,7 @@ If Compose startup fails or the health check times out, the script prints the ma
 
 The bundled `/app/mnemonas-healthcheck` command requests `http://127.0.0.1:8080/health` by default.
 When `MNEMONAS_HEALTHCHECK_URL` overrides the target, it must be an absolute `http` or `https` URL and must not contain whitespace, control characters, embedded credentials, or a fragment.
+When validation fails, the healthcheck diagnostic only prints a redacted URL shape; embedded credentials, query strings, and fragments are not written to container logs.
 
 For a remote Docker context, SSH tunnel, or another environment where the host cannot reach the published port locally, pass `--skip-health-check`.
 Then verify service state with `docker compose ps`, `docker compose logs --tail 100 mnemonas`, or the reachable `/health` endpoint.
