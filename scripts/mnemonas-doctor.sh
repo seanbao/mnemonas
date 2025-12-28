@@ -1488,6 +1488,40 @@ http_url_host() {
   printf '%s\n' "$host_port"
 }
 
+redact_http_url_for_log() {
+  local value="$1"
+  local lower_value
+  local scheme
+  local authority
+  local host_port
+  local safe_authority
+  local suffix=""
+
+  value="$(trim_ascii_whitespace "$value")"
+  lower_value="${value,,}"
+  case "$lower_value" in
+    http://*|https://*)
+      ;;
+    *)
+      printf '<redacted-url>\n'
+      return
+      ;;
+  esac
+
+  scheme="${value%%://*}://"
+  authority="$(http_url_authority "$value")"
+  host_port="${authority##*@}"
+  if [[ "$authority" == *@* ]]; then
+    safe_authority="<redacted>@$host_port"
+  else
+    safe_authority="$host_port"
+  fi
+  [[ "$value" == *\?* ]] && suffix="${suffix}?<redacted>"
+  [[ "$value" == *#* ]] && suffix="${suffix}#<redacted>"
+
+  printf '%s%s%s\n' "$scheme" "$safe_authority" "$suffix"
+}
+
 http_url_port() {
   local authority host_port
 
@@ -2633,6 +2667,7 @@ check_public_domain() {
   local public_webdav_password_risk
   local public_webdav_prefix
   local public_share_base_url
+  local public_share_base_url_log
   local public_share_base_url_raw
   local public_share_base_url_lower
   local public_share_host
@@ -2709,45 +2744,46 @@ check_public_domain() {
   if is_true_value "${configured_share_enabled:-false}"; then
     public_share_base_url_raw="${configured_share_base_url:-}"
     public_share_base_url="$(trim_ascii_whitespace "$public_share_base_url_raw")"
+    public_share_base_url_log="$(redact_http_url_for_log "$public_share_base_url")"
     public_share_base_url_lower="${public_share_base_url,,}"
     if [[ -z "$public_share_base_url" ]]; then
       warn "public share.base_url is empty; generated share links may be relative instead of https://$domain"
     elif [[ "$public_share_base_url_lower" != https://* ]]; then
-      fail "public share.base_url must use https: $public_share_base_url"
+      fail "public share.base_url must use https: $public_share_base_url_log"
     elif http_url_has_userinfo "$public_share_base_url"; then
-      fail "public share.base_url must not include userinfo: $public_share_base_url"
+      fail "public share.base_url must not include userinfo: $public_share_base_url_log"
     elif http_url_has_query_or_fragment "$public_share_base_url"; then
-      fail "public share.base_url must not include query or fragment: $public_share_base_url"
+      fail "public share.base_url must not include query or fragment: $public_share_base_url_log"
     elif http_url_authority_has_invalid_host_port_syntax "$public_share_base_url"; then
-      fail "public share.base_url host is invalid: $public_share_base_url"
+      fail "public share.base_url host is invalid: $public_share_base_url_log"
     else
       public_share_port="$(http_url_port "$public_share_base_url")"
       if [[ -n "$public_share_port" && "$public_share_port" != "443" ]]; then
-        fail "public share.base_url must use the HTTPS default port 443: $public_share_base_url"
+        fail "public share.base_url must use the HTTPS default port 443: $public_share_base_url_log"
       else
         public_share_host="$(http_url_host "$public_share_base_url")"
         if ! http_url_host_is_valid "$public_share_host"; then
-          fail "public share.base_url host is invalid: $public_share_base_url"
+          fail "public share.base_url host is invalid: $public_share_base_url_log"
         else
           public_share_host_normalized="${public_share_host%.}"
           public_share_host_normalized="${public_share_host_normalized,,}"
           if [[ "$public_share_host_normalized" == "$domain_lower" ]]; then
             ok "public share.base_url uses HTTPS on $domain"
           else
-            warn "public share.base_url host does not match $domain: $public_share_base_url"
+            warn "public share.base_url host does not match $domain: $public_share_base_url_log"
           fi
           local public_share_path
           public_share_path="$(http_url_path "$public_share_base_url")"
           if http_url_path_has_backslashes "$public_share_path"; then
-            fail "public share.base_url path must not contain backslashes: $public_share_base_url"
+            fail "public share.base_url path must not contain backslashes: $public_share_base_url_log"
           elif http_url_path_has_query_or_fragment_markers "$public_share_path"; then
-            fail "public share.base_url must not include query or fragment: $public_share_base_url"
+            fail "public share.base_url must not include query or fragment: $public_share_base_url_log"
           elif http_url_path_has_duplicate_slashes "$public_share_path"; then
-            fail "public share.base_url path must not contain duplicate slashes: $public_share_base_url"
+            fail "public share.base_url path must not contain duplicate slashes: $public_share_base_url_log"
           elif http_url_path_has_dot_segments "$public_share_path"; then
-            fail "public share.base_url path must not contain . or .. segments: $public_share_base_url"
+            fail "public share.base_url path must not contain . or .. segments: $public_share_base_url_log"
           elif http_url_path_ends_with_share_route "$public_share_path"; then
-            warn "public share.base_url should be the site origin or base path before /s; current value will generate nested /s/s share links: $public_share_base_url"
+            warn "public share.base_url should be the site origin or base path before /s; current value will generate nested /s/s share links: $public_share_base_url_log"
           fi
         fi
       fi
