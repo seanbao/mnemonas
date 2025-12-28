@@ -134,9 +134,9 @@ require_safe_plain_value() {
     local label="$2"
 
     [[ -n "$value" ]] || fail "$label 不能为空"
-    [[ "$value" != *[[:space:]]* ]] || fail "$label 不能包含空白字符: $value"
-    [[ "$value" != *[[:cntrl:]]* ]] || fail "$label 不能包含控制字符: $value"
-    [[ "$value" != *\"* && "$value" != *\\* ]] || fail "$label 不能包含引号或反斜杠: $value"
+    [[ "$value" != *[[:space:]]* ]] || fail "$label 不能包含空白字符"
+    [[ "$value" != *[[:cntrl:]]* ]] || fail "$label 不能包含控制字符"
+    [[ "$value" != *\"* && "$value" != *\\* ]] || fail "$label 不能包含引号或反斜杠"
 }
 
 is_valid_tcp_host() {
@@ -172,7 +172,7 @@ require_safe_upstream_host() {
 
     require_safe_plain_value "$value" "MNEMONAS_UPSTREAM_HOST"
     [[ "$value" != "*" ]] || fail "MNEMONAS_UPSTREAM_HOST 不能是通配监听地址"
-    is_valid_tcp_host "$value" || fail "MNEMONAS_UPSTREAM_HOST 主机格式不安全: $value"
+    is_valid_tcp_host "$value" || fail "MNEMONAS_UPSTREAM_HOST 主机格式不安全；只允许主机名、IPv4 或 IPv6 字面量"
 }
 
 format_host_port_endpoint() {
