@@ -21,6 +21,7 @@
 - 维护页恢复完成后可复制恢复切换记录，内容包含恢复目标、只读校验、切换步骤和回滚清单，便于记录到工单或值班流程。
 - 设置页目录权限用户矩阵和未保存规则预览可复制权限复核记录，内容包含路径、用户读写判定、命中规则和相关分享影响，并会保留后端持久化近期复核历史；服务端历史不可用时回退当前浏览器记录。
 - 分享路径策略可按用户、用户组或角色限制允许创建和维护分享链接的认证调用方；管理员保留修复既有分享的管理权限。
+- 分享、版本历史、回收站和维护页的关键处置入口会写入活动复核记录，覆盖分享停用、删除、重新启用、版本恢复、回收站恢复和备份恢复执行结果，便于追踪误分享、误删和恢复处置闭环。
 - 收紧发布就绪摘要：记录的完整验证目标之后如出现非发布文档变更，`release-readiness` 默认失败，并要求刷新完整验证或显式草稿放行。
 - `release-readiness` 现在要求四份 hardening 证据文档都存在，并且都记录同一个完整验证目标，避免发布前证据缺失被静默跳过。
 - `release-readiness` 还会检查双语 release notes 草稿记录当前完整验证目标，避免发布说明中的验证快照滞后。
@@ -41,7 +42,7 @@ Release workflow 预期生成以下产物：
 
 当前硬化分支已有以下验证证据；最终发布前应以最新 tag、Release workflow 结果和必要的环境验证为准：
 
-最近本地完整验证快照：验证目标 `77a8089962dc`，`GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master` 通过，覆盖 `make check`、依赖安全扫描、示例配置、public-access 模板、公网 go-live 有效 DNS label、重复尾点、完整域名、同域 HTTPS 重定向变体、doctor public-domain DNS label 边界与 go-live/doctor `localhost`/IPv4 字面量拒绝校验、proto 再生成稳定性、Rust fmt/test/clippy、前端 lint/typecheck/unit/build、Playwright 371 个 E2E 用例、systemd 升级/回退 installer 回归、WebDAV COPY/MOVE 后内容一致性和 MOVE 源路径清理 smoke、恢复演练清理失败警告路径、恢复完成弹窗导出摘要路径、恢复切换记录复制路径、用户配额总览路径、分享复核摘要复制路径、目录权限复核记录复制、后端持久化近期历史 API 与本地回退路径、当前范围复核历史入口和布局完整性验证、Docker build 和 Docker smoke。Docker smoke 使用 Docker 自动分配的 loopback 端口 `http://127.0.0.1:32825`。
+最近本地完整验证快照：验证目标 `bd097dd91a70`，`GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master` 通过，覆盖 `make check`、依赖安全扫描、示例配置、public-access 模板、proto 再生成稳定性、Rust fmt/test/clippy、proto-gen fmt/test/clippy、前端 lint/typecheck/unit/build、Playwright 375 个 E2E 用例、Docker build 和 Docker smoke。Docker smoke 使用 Docker 自动分配的 loopback 端口 `http://127.0.0.1:32826`。
 
 - `GOTOOLCHAIN=local ./scripts/verify-changed.sh`
 - `GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master`
@@ -52,8 +53,8 @@ Release workflow 预期生成以下产物：
 - `./scripts/test-release-artifacts.sh`
 - WebDAV curl smoke safety test：`scripts/test-webdav-client-smoke.sh`
 - Release workflow 增量验证：`make workflows-check`、`make scripts-check`、`./scripts/check-secret-leaks.sh`、`make toolchains-check`、`git diff --check`
-- Playwright E2E：`371 passed`
-- 前端单测：`3075 passed`
+- Playwright E2E：`375 passed`
+- 前端单测：`3103 passed`
 - Docker build 和 `scripts/docker-smoke.sh`
 
 最终发布前如代码、脚本、配置、文档或 workflow 再次变更，应重跑对应验证。

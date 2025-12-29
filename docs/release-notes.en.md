@@ -21,6 +21,7 @@ This release candidate focuses on improving MnemoNAS stability, public-access sa
 - The Maintenance completed-restore dialog can copy a restore cutover record with the target path, read-only verification result, cutover steps, and rollback checklist for ticket or duty-log handoff.
 - The Settings directory-access user matrix and unsaved-rule preview can copy a review record with the path, user read/write decisions, matched rules, and related-share impact, and keep backend-persisted recent review history, falling back to current-browser records when server history is unavailable.
 - Share path policies can restrict which authenticated users, groups, or roles may create and maintain share links under a path, while administrators retain management access for repairing existing shares.
+- Key disposition entry points in Shares, version history, Trash, and Maintenance write activity review records for share disable, deletion, re-enable, version restore, Trash restore, and backup restore execution results, making accidental sharing, deletion, and restore follow-up traceable.
 - Tightened the release readiness summary: after the recorded full-validation target, `release-readiness` fails by default on non-release-documentation changes and requires refreshed full validation or an explicit draft override.
 - `release-readiness` now requires all four hardening evidence documents to exist and record the same full-validation target, preventing missing evidence from being skipped before release.
 - `release-readiness` also checks that both release-notes drafts record the current full-validation target, so stale validation snapshots fail before release.
@@ -41,7 +42,7 @@ Archives should include a top-level directory, `nasd`, `dataplane`, Web UI stati
 
 The current hardening branch has the following validation evidence. Final publication should use the latest tag, Release workflow result, and required environment validation as the source of truth:
 
-Latest local full-validation snapshot: validation target `77a8089962dc`; `GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master` passed, covering `make check`, dependency security scans, example config validation, public-access templates, public go-live valid DNS-label, repeated trailing-dot, fully qualified hostname, same-domain HTTPS redirect variants, doctor public-domain DNS-label boundary validation, and go-live/doctor `localhost`/IPv4-literal rejection validation, protobuf regeneration stability, Rust fmt/test/clippy, frontend lint/typecheck/unit/build, 371 Playwright E2E cases, systemd upgrade/rollback installer regressions, WebDAV post-COPY/MOVE content-consistency and MOVE source-cleanup smoke, restore-drill cleanup-failure warning coverage, completed-restore dialog summary export coverage, restore cutover record copy path, user quota aggregate overview coverage, share review summary copy coverage, directory-access review-record copy, backend-persisted recent-history API, and local fallback path, current-scope share review-history handoff coverage, layout-integrity validation, Docker build, and Docker smoke. The Docker smoke used the Docker-assigned loopback port `http://127.0.0.1:32825`.
+Latest local full-validation snapshot: validation target `bd097dd91a70`; `GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master` passed, covering `make check`, dependency security scans, example config validation, public-access templates, protobuf regeneration stability, Rust fmt/test/clippy, proto-gen fmt/test/clippy, frontend lint/typecheck/unit/build, 375 Playwright E2E cases, Docker build, and Docker smoke. The Docker smoke used the Docker-assigned loopback port `http://127.0.0.1:32826`.
 
 - `GOTOOLCHAIN=local ./scripts/verify-changed.sh`
 - `GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master`
@@ -52,8 +53,8 @@ Latest local full-validation snapshot: validation target `77a8089962dc`; `GOTOOL
 - `./scripts/test-release-artifacts.sh`
 - WebDAV curl smoke safety test: `scripts/test-webdav-client-smoke.sh`
 - Release workflow incremental validation: `make workflows-check`, `make scripts-check`, `./scripts/check-secret-leaks.sh`, `make toolchains-check`, `git diff --check`
-- Playwright E2E: `371 passed`
-- Frontend unit tests: `3075 passed`
+- Playwright E2E: `375 passed`
+- Frontend unit tests: `3103 passed`
 - Docker build and `scripts/docker-smoke.sh`
 
 If code, scripts, configuration, documentation, or workflow files change again before release, rerun the matching validation.
