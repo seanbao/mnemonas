@@ -236,6 +236,16 @@ assert_file_contains "$output_dir/evidence-only.out" "only release documentation
 assert_file_contains "$output_dir/evidence-only.out" "[release-readiness] validation-diff:"
 assert_file_contains "$output_dir/evidence-only.out" "release readiness summary completed"
 
+git checkout -q -b sibling-base "$validation_target"
+printf '# sibling base\n' >sibling.md
+git add sibling.md
+git commit -q -m "docs: create sibling base"
+git checkout -q master
+if ./scripts/release-readiness.sh --base sibling-base >"$output_dir/non-ancestor-base.out" 2>"$output_dir/non-ancestor-base.err"; then
+	fail "release readiness accepted a base ref that is not an ancestor of HEAD"
+fi
+assert_file_contains "$output_dir/non-ancestor-base.err" "base ref is not an ancestor of HEAD: sibling-base"
+
 git checkout -q master
 git checkout -q -b mixed-validation-target-lengths
 sed -i.bak "s/${validation_target}/${validation_target_short}/" docs/hardening-progress.md
