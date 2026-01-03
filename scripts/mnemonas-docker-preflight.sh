@@ -716,6 +716,14 @@ check_configured_auth_files() {
 
 	raw_users_file="$(toml_value auth users_file "$config_path")"
 	users_container="$(configured_auth_users_container_path "$config_path")"
+	if [[ "$users_container" == *$'\n'* || "$users_container" == *$'\r'* || "$users_container" == *[[:cntrl:]]* ]]; then
+		fail "Configured auth.users_file cannot contain control characters"
+		return
+	fi
+	if path_has_parent_segment "$users_container"; then
+		fail "Configured auth.users_file cannot contain parent directory segments"
+		return
+	fi
 	if users_host="$(map_container_data_path_to_host "$users_container")"; then
 		if [[ "$users_host" != "$default_users_host" ]]; then
 			check_private_existing_file "$users_host" "Configured users file"

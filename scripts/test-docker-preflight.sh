@@ -389,6 +389,35 @@ TOML
 	assert_file_contains "$out" "Summary: 0 failure(s), 1 warning(s)"
 }
 
+run_configured_auth_parent_segment_test() {
+	local case_dir="$TMP_ROOT/configured-auth-parent"
+	local fake_bin="$case_dir/bin"
+	local out="$case_dir/out.log"
+	local status
+	make_case "$case_dir"
+	make_fake_bin "$fake_bin"
+	cat > "$case_dir/home/.mnemonas/config.toml" <<'TOML'
+[storage]
+root = "/data"
+
+[auth]
+users_file = "/data/../outside/users.json"
+TOML
+	chmod 0600 "$case_dir/home/.mnemonas/config.toml"
+
+	set +e
+	PATH="$fake_bin:$PATH" \
+		REPO_ROOT="$case_dir/repo" \
+		HOME="$case_dir/home" \
+		bash "$PROJECT_ROOT/scripts/mnemonas-docker-preflight.sh" > "$out"
+	status=$?
+	set -e
+
+	[[ "$status" -ne 0 ]] || fail "preflight accepted auth.users_file with a parent directory segment"
+	assert_file_contains "$out" "Configured auth.users_file cannot contain parent directory segments"
+	assert_file_not_contains "$out" "$case_dir/home/.mnemonas/../outside"
+}
+
 run_config_file_permission_warning_test() {
 	local case_dir="$TMP_ROOT/config-permission"
 	local fake_bin="$case_dir/bin"
@@ -788,6 +817,7 @@ run_sensitive_files_private_test
 run_sensitive_file_permission_warning_test
 run_configured_auth_file_permission_warning_test
 run_unmapped_configured_auth_file_warning_test
+run_configured_auth_parent_segment_test
 run_config_file_permission_warning_test
 run_sensitive_file_symlink_test
 run_config_file_symlink_test
