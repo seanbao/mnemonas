@@ -81,6 +81,7 @@ validate_inputs() {
 
     [[ -n "$WEBDAV_URL" ]] || fail "WEBDAV_URL is required"
     [[ "$WEBDAV_URL" == http://* || "$WEBDAV_URL" == https://* ]] || fail "WEBDAV_URL must start with http:// or https://"
+    [[ "$WEBDAV_URL" != *[[:space:]]* ]] || fail "WEBDAV_URL must not contain whitespace"
     [[ "$WEBDAV_URL" != *[[:cntrl:]]* ]] || fail "WEBDAV_URL must not contain control characters"
     [[ "$WEBDAV_URL" != *\?* && "$WEBDAV_URL" != *#* ]] || fail "WEBDAV_URL must not contain query strings or fragments"
     [[ "$WEBDAV_URL" != *"@"* ]] || fail "WEBDAV_URL must not contain embedded credentials"
@@ -96,6 +97,7 @@ validate_inputs() {
 
     validate_positive_seconds "CURL_CONNECT_TIMEOUT" "$CURL_CONNECT_TIMEOUT"
     validate_positive_seconds "CURL_MAX_TIME" "$CURL_MAX_TIME"
+    [[ "$CURL_INSECURE" == "0" || "$CURL_INSECURE" == "1" ]] || fail "CURL_INSECURE must be 0 or 1"
 }
 
 escape_curl_config_value() {

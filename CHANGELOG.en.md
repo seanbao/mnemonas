@@ -55,7 +55,7 @@ This project follows [Semantic Versioning 2.0.0](https://semver.org/).
 - `tools/proto-gen` Rust protobuf generator so normal dataplane and Docker builds do not require system `protoc`.
 - Script simulation tests and CI script checks.
 - Script simulation fixtures cover changed-file selection, WebDAV auth modes, public reverse-proxy exposure checks, benchmark paths, and Web Husky hooks.
-- `scripts/webdav-client-smoke.sh` runs curl protocol smoke checks against a running service, covering basic WebDAV read/write, URL-encoded space paths, copy, move, and delete operations, with a dedicated safety test in `make scripts-check`.
+- `scripts/webdav-client-smoke.sh` runs curl protocol smoke checks against a running service, covering basic WebDAV read/write, URL-encoded space paths, copy, move, and delete operations, while rejecting `WEBDAV_URL` values with whitespace, query strings, fragments, embedded credentials, and non-`0/1` `CURL_INSECURE` values through a dedicated safety test in `make scripts-check`.
 - WebDAV compatibility report form for submitting validation results or client-specific failures from common desktop, mobile, media-player, and CLI clients.
 - `scripts/check-release-tag.sh` validates release tags as `vMAJOR.MINOR.PATCH` or SemVer prerelease tags before release artifacts are built.
 - `scripts/release-readiness.sh` fails by default when non-release-documentation changes exist after the recorded full-validation target; draft summaries can opt in with `--allow-post-validation-changes`.

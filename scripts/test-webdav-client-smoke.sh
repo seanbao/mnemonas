@@ -204,6 +204,37 @@ run_invalid_timeout_test() {
     assert_file_contains "$case_dir/out.log" "CURL_CONNECT_TIMEOUT must be a positive integer number of seconds"
 }
 
+run_invalid_url_test() {
+    local case_dir="$TMP_ROOT/invalid-url"
+    mkdir -p "$case_dir"
+
+    run_expect_failure "$case_dir/whitespace.log" env -u MNEMONAS_WEBDAV_USERNAME -u MNEMONAS_WEBDAV_PASSWORD \
+        WEBDAV_URL="http://127.0.0.1:18080/dav bad" \
+        bash "$REPO_ROOT/scripts/webdav-client-smoke.sh"
+    assert_file_contains "$case_dir/whitespace.log" "WEBDAV_URL must not contain whitespace"
+
+    run_expect_failure "$case_dir/query.log" env -u MNEMONAS_WEBDAV_USERNAME -u MNEMONAS_WEBDAV_PASSWORD \
+        WEBDAV_URL="http://127.0.0.1:18080/dav?token=abc" \
+        bash "$REPO_ROOT/scripts/webdav-client-smoke.sh"
+    assert_file_contains "$case_dir/query.log" "WEBDAV_URL must not contain query strings or fragments"
+
+    run_expect_failure "$case_dir/userinfo.log" env -u MNEMONAS_WEBDAV_USERNAME -u MNEMONAS_WEBDAV_PASSWORD \
+        WEBDAV_URL="http://user:pass@127.0.0.1:18080/dav" \
+        bash "$REPO_ROOT/scripts/webdav-client-smoke.sh"
+    assert_file_contains "$case_dir/userinfo.log" "WEBDAV_URL must not contain embedded credentials"
+}
+
+run_invalid_insecure_flag_test() {
+    local case_dir="$TMP_ROOT/invalid-insecure"
+    mkdir -p "$case_dir"
+
+    run_expect_failure "$case_dir/out.log" env -u MNEMONAS_WEBDAV_USERNAME -u MNEMONAS_WEBDAV_PASSWORD \
+        WEBDAV_URL="http://127.0.0.1:18080/dav" \
+        CURL_INSECURE="true" \
+        bash "$REPO_ROOT/scripts/webdav-client-smoke.sh"
+    assert_file_contains "$case_dir/out.log" "CURL_INSECURE must be 0 or 1"
+}
+
 run_success_test() {
     local case_dir="$TMP_ROOT/success"
     local fake_bin="$case_dir/bin"
@@ -252,6 +283,8 @@ run_docs_contract_test() {
     assert_file_contains "$REPO_ROOT/docs/testing-strategy.en.md" 'Standalone WebDAV smoke'
     assert_file_contains "$REPO_ROOT/docs/webdav-compatibility.md" 'curl 协议 smoke'
     assert_file_contains "$REPO_ROOT/docs/webdav-compatibility.en.md" 'curl protocol smoke'
+    assert_file_contains "$REPO_ROOT/docs/webdav-compatibility.md" '不包含空白、query、fragment 或内嵌凭据'
+    assert_file_contains "$REPO_ROOT/docs/webdav-compatibility.en.md" 'without whitespace, query strings, fragments, or embedded credentials'
     assert_file_contains "$REPO_ROOT/docs/webdav-compatibility.md" 'URL 编码空格路径'
     assert_file_contains "$REPO_ROOT/docs/webdav-compatibility.en.md" 'URL-encoded space paths'
     assert_file_contains "$REPO_ROOT/docs/webdav-compatibility.md" 'CURL_MAX_TIME'
@@ -264,6 +297,8 @@ mkdir -p "$TMP_ROOT"
 run_missing_url_test
 run_partial_credentials_test
 run_invalid_timeout_test
+run_invalid_url_test
+run_invalid_insecure_flag_test
 run_success_test
 run_docs_contract_test
 
