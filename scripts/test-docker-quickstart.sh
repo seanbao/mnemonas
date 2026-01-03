@@ -208,6 +208,37 @@ TOML
 	assert_file_contains "$case_dir/out.log" "Read password:       cat $data_dir/auth/initial-password.txt"
 }
 
+run_initial_password_parent_segment_test() {
+	local case_dir="$TMP_ROOT/initial-password-parent"
+	local repo_dir="$case_dir/repo"
+	local data_dir="$case_dir/data"
+	local capture_dir="$case_dir/capture"
+	local quickstart="$REPO_ROOT/scripts/docker-quickstart.sh"
+	local status
+	mkdir -p "$capture_dir" "$data_dir"
+	make_repo_case "$repo_dir"
+	cat > "$data_dir/config.toml" <<'TOML'
+[storage]
+root = "/data"
+
+[auth]
+users_file = "/data/../outside/users.json"
+TOML
+
+	set +e
+	CAPTURE_DIR="$capture_dir" \
+		REPO_ROOT="$repo_dir" \
+		bash "$quickstart" \
+			--port 18092 \
+			--data-dir "$data_dir" > "$case_dir/out.log" 2>&1
+	status=$?
+	set -e
+
+	[[ "$status" -ne 0 ]] || fail "quickstart accepted auth.users_file with a parent directory segment"
+	assert_file_contains "$case_dir/out.log" "auth.users_file cannot contain parent directory segments"
+	assert_file_not_contains "$case_dir/out.log" "$data_dir/../outside"
+}
+
 run_unmapped_initial_password_path_test() {
 	local case_dir="$TMP_ROOT/unmapped-initial-password"
 	local repo_dir="$case_dir/repo"
@@ -747,6 +778,7 @@ run_existing_env_test
 run_next_steps_quote_paths_test
 run_custom_initial_password_path_test
 run_home_initial_password_path_test
+run_initial_password_parent_segment_test
 run_unmapped_initial_password_path_test
 run_start_test
 run_start_custom_initial_password_path_test
