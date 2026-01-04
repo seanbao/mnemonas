@@ -124,6 +124,27 @@ run_complete_release_passes() {
 	assert_file_contains "$out" "verified 4 archive(s) for v1.2.3"
 }
 
+run_dash_prefixed_artifact_directory_passes() {
+	local case_dir="$TMP_ROOT/dash-prefixed-artifact-dir"
+	local dist_dir="$case_dir/-artifacts"
+	local out="$case_dir/out.log"
+
+	make_complete_release "$dist_dir" "v1.2.3" "seanbao/mnemonas"
+
+	(
+		cd "$case_dir"
+		bash "$REPO_ROOT/scripts/verify-release-artifacts.sh" \
+			--version v1.2.3 \
+			--repository seanbao/mnemonas \
+			--require-targets \
+			-- \
+			"-artifacts"
+	) >"$out"
+
+	assert_file_contains "$out" "verified targets: linux-amd64 linux-arm64 darwin-amd64 darwin-arm64"
+	assert_file_contains "$out" "verified 4 archive(s) for v1.2.3"
+}
+
 run_binary_checksum_marker_passes() {
 	local case_dir="$TMP_ROOT/binary-checksum-marker"
 	local dist_dir="$case_dir/dist"
@@ -653,6 +674,7 @@ run_remote_image_check_failure_fails() {
 }
 
 run_complete_release_passes
+run_dash_prefixed_artifact_directory_passes
 run_binary_checksum_marker_passes
 run_missing_target_fails_in_strict_mode
 run_invalid_repository_fails_before_artifact_checks
