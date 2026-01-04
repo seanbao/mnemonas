@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-SCRIPT_NAME="$(basename "$0")"
+SCRIPT_NAME="$(basename -- "$0")"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ARTIFACT_DIR=""
 VERSION=""
@@ -150,7 +150,7 @@ archive_target() {
 	local name
 	local target
 
-	name="$(basename "$archive")"
+	name="$(basename -- "$archive")"
 	name="${name%.tar.gz}"
 
 	for target in "${EXPECTED_TARGETS[@]}"; do
@@ -162,7 +162,7 @@ archive_target() {
 		esac
 	done
 
-	fail "archive name does not end with a supported target: $(basename "$archive")"
+	fail "archive name does not end with a supported target: $(basename -- "$archive")"
 }
 
 archive_version() {
@@ -171,7 +171,7 @@ archive_version() {
 	local target
 	local prefix
 
-	name="$(basename "$archive")"
+	name="$(basename -- "$archive")"
 	name="${name%.tar.gz}"
 	target="$(archive_target "$archive")"
 	prefix="${name%-"${target}"}"
@@ -252,7 +252,7 @@ validate_artifact_directory_entries() {
 
 	shopt -s nullglob dotglob
 	for entry in "$ARTIFACT_DIR"/*; do
-		base="$(basename "$entry")"
+		base="$(basename -- "$entry")"
 		case "$base" in
 			checksums.txt|mnemonas-*.tar.gz)
 				;;
@@ -359,7 +359,7 @@ validate_archive() {
 	local extracted
 	local expected_image
 
-	base="$(basename "$archive")"
+	base="$(basename -- "$archive")"
 	expected_top="${base%.tar.gz}"
 	manifest="$TMP_ROOT/${expected_top}.manifest"
 	type_listing="$TMP_ROOT/${expected_top}.types"
@@ -461,6 +461,13 @@ while [[ "$#" -gt 0 ]]; do
 	esac
 done
 
+if [[ "$#" -gt 0 ]]; then
+	[[ -z "$ARTIFACT_DIR" ]] || fail "unexpected argument: $1"
+	[[ "$#" -eq 1 ]] || fail "unexpected argument: $2"
+	ARTIFACT_DIR="$1"
+	shift
+fi
+
 [[ -n "$ARTIFACT_DIR" ]] || { usage >&2; exit 2; }
 if [[ -n "$VERSION" ]]; then
 	validate_release_version "$VERSION"
@@ -484,7 +491,7 @@ shopt -u nullglob
 
 for archive in "${archives[@]}"; do
 	assert_regular_file "$archive"
-	base="$(basename "$archive")"
+	base="$(basename -- "$archive")"
 	if contains_control_character "$base"; then
 		fail "release archive filename contains a control character: $base"
 	fi
@@ -493,7 +500,7 @@ for archive in "${archives[@]}"; do
 	fi
 done
 
-if ! (cd "$ARTIFACT_DIR" && sha256sum -c checksums.txt); then
+if ! (cd -- "$ARTIFACT_DIR" && sha256sum -c checksums.txt); then
 	fail "sha256 checksum verification failed"
 fi
 
@@ -501,7 +508,7 @@ TMP_ROOT="$(mktemp -d)"
 seen_targets=""
 
 for archive in "${archives[@]}"; do
-	base="$(basename "$archive")"
+	base="$(basename -- "$archive")"
 	target="$(archive_target "$archive")"
 	found_version="$(archive_version "$archive")"
 	validate_release_version "$found_version"
