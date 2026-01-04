@@ -554,6 +554,44 @@ EOF
 	[[ ! -f "$capture_dir/dataplane.args" ]] || fail "dataplane started despite invalid DATAPLANE_DATA_DIR"
 }
 
+run_auth_users_file_traversal_test() {
+	local case_dir="$TMP_ROOT/auth-users-file-traversal"
+	local app_dir="$case_dir/app"
+	local data_dir="$case_dir/data"
+	local capture_dir="$case_dir/capture"
+	local status
+	mkdir -p "$data_dir" "$capture_dir"
+	make_fake_app "$app_dir"
+	cat > "$data_dir/config.toml" <<EOF
+[server]
+host = "0.0.0.0"
+port = 8080
+
+[storage]
+root = "$data_dir"
+
+[auth]
+users_file = "/data/../outside/users.json"
+
+[dataplane]
+grpc_address = "127.0.0.1:9090"
+EOF
+
+	set +e
+	CAPTURE_DIR="$capture_dir" \
+		APP_DIR="$app_dir" \
+		STORAGE_ROOT="$data_dir" \
+		CONFIG_PATH="$data_dir/config.toml" \
+		bash "$REPO_ROOT/scripts/docker-start.sh" > "$case_dir/start.log" 2>&1
+	status=$?
+	set -e
+
+	[[ "$status" -ne 0 ]] || fail "docker-start accepted auth.users_file with parent directory segment"
+	assert_file_contains "$case_dir/start.log" "Refusing to prepare auth.users_file with parent directory segments"
+	[[ ! -f "$capture_dir/dataplane.args" ]] || fail "dataplane started despite invalid auth.users_file"
+	[[ ! -f "$capture_dir/nasd.args" ]] || fail "nasd started despite invalid auth.users_file"
+}
+
 run_dataplane_addr_validation_test() {
 	local case_dir="$TMP_ROOT/dataplane-addr-validation"
 	local app_dir="$case_dir/app"
@@ -745,6 +783,7 @@ run_config_path_scope_test
 run_config_path_directory_test
 run_tilde_paths_are_expanded_test
 run_dataplane_data_dir_traversal_test
+run_auth_users_file_traversal_test
 run_dataplane_addr_validation_test
 run_dataplane_grpc_env_mismatch_test
 run_invalid_cdc_range_test
