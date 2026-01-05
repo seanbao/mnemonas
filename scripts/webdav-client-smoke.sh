@@ -72,6 +72,31 @@ validate_positive_seconds() {
     fi
 }
 
+validate_webdav_url_path() {
+    local value="$1"
+    local after_authority path lower_path segment normalized_segment
+    local -a segments
+
+    [[ "$value" != *\\* ]] || fail "WEBDAV_URL must not contain backslashes"
+
+    after_authority="${value#*://}"
+    if [[ "$after_authority" == */* ]]; then
+        path="/${after_authority#*/}"
+    else
+        path="/"
+    fi
+
+    lower_path="${path,,}"
+    [[ "$lower_path" != *"%2f"* && "$lower_path" != *"%5c"* ]] || fail "WEBDAV_URL must not contain encoded slashes or backslashes"
+
+    IFS='/' read -r -a segments <<< "$lower_path"
+    for segment in "${segments[@]}"; do
+        [[ -n "$segment" ]] || continue
+        normalized_segment="${segment//%2e/.}"
+        [[ "$normalized_segment" != "." && "$normalized_segment" != ".." ]] || fail "WEBDAV_URL must not contain dot segments"
+    done
+}
+
 validate_inputs() {
     if [[ "$#" -gt 0 && ( "${1:-}" == "-h" || "${1:-}" == "--help" ) ]]; then
         usage
@@ -85,6 +110,7 @@ validate_inputs() {
     [[ "$WEBDAV_URL" != *[[:cntrl:]]* ]] || fail "WEBDAV_URL must not contain control characters"
     [[ "$WEBDAV_URL" != *\?* && "$WEBDAV_URL" != *#* ]] || fail "WEBDAV_URL must not contain query strings or fragments"
     [[ "$WEBDAV_URL" != *"@"* ]] || fail "WEBDAV_URL must not contain embedded credentials"
+    validate_webdav_url_path "$WEBDAV_URL"
 
     [[ "$WEBDAV_TEST_ROOT" != *[[:cntrl:]]* ]] || fail "WEBDAV_TEST_ROOT must not contain control characters"
     [[ "$WEBDAV_TEST_ROOT" =~ ^[A-Za-z0-9._-]+$ ]] || fail "WEBDAV_TEST_ROOT must be a single safe path segment"
