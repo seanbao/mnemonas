@@ -30,14 +30,24 @@ require_positive_integer() {
 	(( value > 0 )) || fail "$label must be a positive integer: $value"
 }
 
+is_ipv4_loopback_host() {
+	local host="$1"
+	local octet
+	local -a octets
+
+	[[ "$host" =~ ^127\.([0-9]{1,3}\.){2}[0-9]{1,3}$ ]] || return 1
+	IFS='.' read -r -a octets <<< "$host"
+	for octet in "${octets[@]}"; do
+		[[ ${#octet} -le 3 ]] || return 1
+		(( 10#$octet >= 0 && 10#$octet <= 255 )) || return 1
+	done
+	return 0
+}
+
 require_safe_loopback_host() {
 	local value="$1"
 
-	case "$value" in
-		127.*)
-			return 0
-			;;
-	esac
+	is_ipv4_loopback_host "$value" && return 0
 	fail "MNEMONAS_DOCKER_SMOKE_HOST must be a 127.0.0.0/8 loopback address: $value"
 }
 

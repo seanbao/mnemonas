@@ -223,10 +223,60 @@ run_smoke_does_not_remove_existing_container_when_run_fails() {
 	assert_file_not_exists "$state_dir/rm.args"
 }
 
+run_smoke_rejects_invalid_loopback_host_before_run() {
+	local case_dir="$TMP_ROOT/invalid-host"
+	local fake_bin="$case_dir/bin"
+	local state_dir="$case_dir/state"
+	local out="$case_dir/out.log"
+	local status
+	mkdir -p "$state_dir"
+	setup_fake_tools "$fake_bin"
+
+	set +e
+	PATH="$fake_bin:$PATH" \
+		FAKE_DOCKER_STATE="$state_dir" \
+		MNEMONAS_DOCKER_SMOKE_HOST="127.example.com" \
+		MNEMONAS_DOCKER_SMOKE_CONTAINER="mnemonas-invalid-host-test" \
+		bash "$REPO_ROOT/scripts/docker-smoke.sh" mnemonas:test > "$out" 2>&1
+	status=$?
+	set -e
+
+	[[ "$status" -ne 0 ]] || fail "docker smoke accepted non-numeric loopback host"
+	assert_file_contains "$out" "MNEMONAS_DOCKER_SMOKE_HOST must be a 127.0.0.0/8 loopback address"
+	assert_file_not_exists "$state_dir/run.args"
+	assert_file_not_exists "$state_dir/rm.args"
+}
+
+run_smoke_rejects_host_with_whitespace_before_run() {
+	local case_dir="$TMP_ROOT/whitespace-host"
+	local fake_bin="$case_dir/bin"
+	local state_dir="$case_dir/state"
+	local out="$case_dir/out.log"
+	local status
+	mkdir -p "$state_dir"
+	setup_fake_tools "$fake_bin"
+
+	set +e
+	PATH="$fake_bin:$PATH" \
+		FAKE_DOCKER_STATE="$state_dir" \
+		MNEMONAS_DOCKER_SMOKE_HOST="127.0.0.1 bad" \
+		MNEMONAS_DOCKER_SMOKE_CONTAINER="mnemonas-whitespace-host-test" \
+		bash "$REPO_ROOT/scripts/docker-smoke.sh" mnemonas:test > "$out" 2>&1
+	status=$?
+	set -e
+
+	[[ "$status" -ne 0 ]] || fail "docker smoke accepted loopback host with whitespace"
+	assert_file_contains "$out" "MNEMONAS_DOCKER_SMOKE_HOST must be a 127.0.0.0/8 loopback address"
+	assert_file_not_exists "$state_dir/run.args"
+	assert_file_not_exists "$state_dir/rm.args"
+}
+
 run_smoke_passes_and_cleans_container
 run_smoke_uses_dynamic_loopback_port_by_default
 run_smoke_rejects_version_mismatch_and_prints_logs
 run_smoke_fails_when_container_exits_before_health
 run_smoke_does_not_remove_existing_container_when_run_fails
+run_smoke_rejects_invalid_loopback_host_before_run
+run_smoke_rejects_host_with_whitespace_before_run
 
 printf '[docker-smoke-test] all checks passed\n'
