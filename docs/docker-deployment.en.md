@@ -277,6 +277,7 @@ gh release download v1.2.3 \
 
 `--check-image` uses Docker to check that `ghcr.io/seanbao/mnemonas:1.2.3` exists.
 Omit it when only the downloaded archives and checksums need offline verification.
+`--repository` must use a GHCR-compatible lowercase `owner/repo`; owner only allows lowercase letters, digits, and hyphens, while the repo name also allows dots and underscores, and both segments must start and end with a letter or digit.
 
 The examples below default to the source-built local image and can be switched to a verified release image with `MNEMONAS_IMAGE`.
 

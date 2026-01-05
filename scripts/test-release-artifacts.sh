@@ -164,6 +164,42 @@ run_missing_target_fails_in_strict_mode() {
 	assert_file_contains "$out" "missing required release archive target: linux-arm64"
 }
 
+run_invalid_repository_fails_before_artifact_checks() {
+	local case_dir="$TMP_ROOT/invalid-repository"
+	local dist_dir="$case_dir/dist"
+	local out
+	local status
+	local repository
+	local expected
+	local case_name
+
+	make_complete_release "$dist_dir" "v1.2.3" "seanbao/mnemonas"
+
+	while IFS='|' read -r case_name repository expected; do
+		[[ -n "$case_name" ]] || continue
+		out="$case_dir/$case_name.log"
+		set +e
+		bash "$REPO_ROOT/scripts/verify-release-artifacts.sh" \
+			--version v1.2.3 \
+			--repository "$repository" \
+			"$dist_dir" >"$out" 2>&1
+		status=$?
+		set -e
+
+		[[ "$status" -ne 0 ]] || fail "release artifact verifier accepted invalid repository: $repository"
+		assert_file_contains "$out" "$expected"
+	done <<'EOF'
+uppercase|SeanBao/mnemonas|repository must be lowercase OWNER/REPO for GHCR image tags
+extra-slash|seanbao/mnemonas/extra|repository must be in OWNER/REPO form
+missing-owner|/mnemonas|repository owner must not be empty
+missing-name|seanbao/|repository name must not be empty
+whitespace|seanbao/mnemonas test|repository must not contain whitespace or control characters
+control|seanbao/mnemonas	test|repository must not contain whitespace or control characters
+bad-owner|sean_bao/mnemonas|repository owner must use lowercase letters
+bad-name|seanbao/-mnemonas|repository name must use lowercase letters
+EOF
+}
+
 run_checksum_mismatch_fails() {
 	local case_dir="$TMP_ROOT/checksum-mismatch"
 	local dist_dir="$case_dir/dist"
@@ -530,6 +566,7 @@ run_remote_image_check_failure_fails() {
 run_complete_release_passes
 run_binary_checksum_marker_passes
 run_missing_target_fails_in_strict_mode
+run_invalid_repository_fails_before_artifact_checks
 run_checksum_mismatch_fails
 run_checksum_path_escape_fails_before_checksum
 run_checksum_control_character_path_fails_before_checksum
