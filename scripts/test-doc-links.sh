@@ -735,6 +735,32 @@ EOF
 	git -C "$repo" add README.md README.en.md scripts/helper.sh
 }
 
+write_encoded_restore_query_path_doc() {
+	local repo="$1"
+	write_root_readme_pair "$repo"
+	cat >> "$repo/README.md" <<'EOF'
+
+```bash
+curl -X POST \
+  "http://localhost:8080/api/v1/versions/abc123/restore?path=%2Fdocuments%2Freport.txt"
+```
+EOF
+	git -C "$repo" add README.md README.en.md
+}
+
+write_raw_restore_query_path_doc() {
+	local repo="$1"
+	write_root_readme_pair "$repo"
+	cat >> "$repo/README.md" <<'EOF'
+
+```bash
+curl -X POST \
+  "http://localhost:8080/api/v1/versions/abc123/restore?path=/documents/report.txt"
+```
+EOF
+	git -C "$repo" add README.md README.en.md
+}
+
 write_non_executable_script_reference_doc() {
 	local repo="$1"
 	write_root_readme_pair "$repo"
@@ -883,6 +909,7 @@ run_accepts "legacy-faq-marker-code-fence-allowed" write_legacy_faq_marker_code_
 run_accepts "security-check-doc-ids" write_security_check_docs_valid
 run_accepts "direct-executable-script-reference" write_direct_executable_script_reference_doc
 run_accepts "interpreter-script-reference" write_interpreter_script_reference_doc
+run_accepts "encoded-restore-query-path" write_encoded_restore_query_path_doc
 run_rejects "missing-file" "missing link target: docs/missing.md" write_missing_file_doc
 run_rejects "escaping-link" "link escapes repository: ../outside.md" write_escaping_link_doc
 run_rejects "missing-anchor" "missing heading anchor: #missing-section" write_missing_anchor_doc
@@ -915,6 +942,7 @@ run_rejects "english-json-fence-chinese-text" "avoid non-English text outside la
 run_rejects "remote-shell-pipe" "avoid piping remote install scripts directly to a shell" write_remote_shell_pipe_doc
 run_rejects "non-executable-script-reference" "script reference is not executable: ./scripts/helper.sh" write_non_executable_script_reference_doc
 run_rejects "non-executable-script-link" "linked script is not executable: scripts/helper.sh" write_non_executable_script_link_doc
+run_rejects "raw-restore-query-path" "URL-encode restore path query values in documentation examples; use path=%2F..." write_raw_restore_query_path_doc
 run_rejects "security-check-doc-missing-id" "docs/api-reference.en.md: security-check documentation is missing ID: config_file_access" write_security_check_docs_missing_english_id
 run_rejects "security-check-doc-missing-chinese-id" "docs/api-reference.md: security-check documentation is missing ID: config_file_access" write_security_check_docs_missing_chinese_id
 run_rejects "security-check-doc-unknown-english-id" "docs/api-reference.en.md: security-check documentation lists unknown ID: ghost_probe" write_security_check_docs_unknown_english_id
