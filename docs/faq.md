@@ -186,13 +186,15 @@ server {
 
 API 示例：
 
+`path` 查询值在可复制的 shell 或浏览器示例中应进行 URL 编码，例如 `/path/to/file` 对应 `%2Fpath%2Fto%2Ffile`。
+
 ```bash
 curl -H "Authorization: Bearer <access-token>" \
   http://localhost:8080/api/v1/versions/path/to/file
 
 curl -X POST \
   -H "Authorization: Bearer <access-token>" \
-  "http://localhost:8080/api/v1/versions/<hash>/restore?path=/path/to/file"
+  "http://localhost:8080/api/v1/versions/<hash>/restore?path=%2Fpath%2Fto%2Ffile"
 ```
 
 ### 去重如何工作？

@@ -665,7 +665,7 @@ POST /api/v1/versions/{hash}/restore
 
 - `path`：文件路径，必填，最多出现一次。
 
-`path` 必须指向非根文件路径。根路径或等价根路径返回 `400 Bad Request` 和 `invalid path`。
+`path` 必须指向非根文件路径。根路径或等价根路径返回 `400 Bad Request` 和 `invalid path`。可复制的 shell 或浏览器示例应对查询值进行 URL 编码，例如 `/documents/report.txt` 对应 `%2Fdocuments%2Freport.txt`。
 
 版本内容已经恢复但最终 workspace 元数据持久化失败时，API 仍返回 `200 OK`，附带 `Warning: 199 MnemoNAS "workspace mutation persistence incomplete"`，响应 `message` 为 `version restored with persistence warning`。
 
@@ -676,7 +676,7 @@ POST /api/v1/versions/{hash}/restore
 ```bash
 curl -X POST \
   -H "Authorization: Bearer <access-token>" \
-  "http://localhost:8080/api/v1/versions/<hash>/restore?path=/documents/report.txt"
+  "http://localhost:8080/api/v1/versions/<hash>/restore?path=%2Fdocuments%2Freport.txt"
 ```
 
 响应示例：

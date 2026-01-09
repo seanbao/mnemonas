@@ -668,7 +668,7 @@ POST /api/v1/versions/{hash}/restore
 **Query parameters**:
 - `path`: file path (required, at most once)
 
-The `path` value must identify a non-root file path. Root or root-equivalent values return `400 Bad Request` with `invalid path`.
+The `path` value must identify a non-root file path. Root or root-equivalent values return `400 Bad Request` with `invalid path`. Copyable shell or browser examples should URL-encode the query value. For example, `/documents/report.txt` is sent as `%2Fdocuments%2Freport.txt`.
 
 When the version content has already been restored but final workspace metadata persistence fails, the API still returns `200 OK` with `Warning: 199 MnemoNAS "workspace mutation persistence incomplete"` and the response `message` set to `version restored with persistence warning`.
 
@@ -679,7 +679,7 @@ Example request:
 ```bash
 curl -X POST \
   -H "Authorization: Bearer <access-token>" \
-  "http://localhost:8080/api/v1/versions/<hash>/restore?path=/documents/report.txt"
+  "http://localhost:8080/api/v1/versions/<hash>/restore?path=%2Fdocuments%2Freport.txt"
 ```
 
 Example response:
