@@ -883,13 +883,14 @@ Favorite paths must normalize to a non-root absolute path:
 - Empty values and the root path are rejected with `400 Bad Request` and `MISSING_PATH`.
 - Values containing standalone `.` or `..` path segments are rejected with `400 Bad Request` and `INVALID_PATH`.
 - The single-path check endpoint accepts the `path` query parameter at most once.
+- The `path` query value should be URL-encoded in copyable URLs. For example, `/documents/file.pdf` is sent as `%2Fdocuments%2Ffile.pdf`.
 - This validation runs before non-admin `home_dir` authorization.
 
 | Method | Path | Description |
 | --- | --- | --- |
 | `GET` | `/api/v1/favorites` | List favorites |
 | `POST` | `/api/v1/favorites` | Add favorite |
-| `GET` | `/api/v1/favorites/check?path=/documents/file.pdf` | Check one path |
+| `GET` | `/api/v1/favorites/check?path=%2Fdocuments%2Ffile.pdf` | Check one path |
 | `POST` | `/api/v1/favorites/check-batch` | Check multiple paths |
 | `DELETE` | `/api/v1/favorites/{path}` | Remove favorite |
 | `PATCH` | `/api/v1/favorites/{path}` | Update note |
