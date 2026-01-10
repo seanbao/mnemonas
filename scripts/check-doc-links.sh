@@ -71,7 +71,7 @@ const allowedEnglishDocChineseLinkLabels = new Set([
 const shellFenceLanguages = new Set(['bash', 'sh', 'shell', 'console', 'zsh'])
 const remoteShellPipePattern = /\b(?:curl|wget)\b[^|]*\|\s*(?:sudo\s+)?(?:sh|bash|zsh)\b/i
 const directScriptCommandPattern = /(^|[^\w./-])(\.\/scripts\/([A-Za-z0-9._-]+\.sh))\b/g
-const rawRestorePathQueryPattern = /\/api\/v1\/(?:versions|trash)\/[^"'\s)]+\/restore\?path=\//
+const rawAPIPathQueryPattern = /\/api\/v1\/[^"'\s)]*[?&]path=\//
 const requiredDocumentPairs = [
   ['README.md', 'README.en.md', 'English', 'Chinese'],
   ['CHANGELOG.md', 'CHANGELOG.en.md', 'English', 'Chinese'],
@@ -373,7 +373,7 @@ for (const file of files) {
   checkCredentialPlaceholderStyle(file, text)
   checkEnglishDocumentationLanguage(file, text)
   checkDocumentationStyle(file, text)
-  checkRestoreQueryPathEncoding(file, text)
+  checkAPIPathQueryEncoding(file, text)
   checkShellCodeFenceSafety(file, text)
   checkDocumentationScriptReferences(file, text)
   for (const target of extractMarkdownLinkTargets(text)) {
@@ -472,11 +472,11 @@ function checkDocumentationStyle(sourceFile, markdown) {
   }
 }
 
-function checkRestoreQueryPathEncoding(sourceFile, markdown) {
+function checkAPIPathQueryEncoding(sourceFile, markdown) {
   const lines = markdown.split('\n')
   for (let index = 0; index < lines.length; index += 1) {
-    if (rawRestorePathQueryPattern.test(lines[index])) {
-      errors.push(`${sourceFile}:${index + 1}: URL-encode restore path query values in documentation examples; use path=%2F...`)
+    if (rawAPIPathQueryPattern.test(lines[index])) {
+      errors.push(`${sourceFile}:${index + 1}: URL-encode API path query values in documentation examples; use path=%2F...`)
     }
   }
 }

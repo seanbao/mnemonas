@@ -878,13 +878,14 @@ curl -X POST \
 - 空值和根路径返回 `400 Bad Request` 和 `MISSING_PATH`。
 - 包含独立 `.` 或 `..` 路径段的值返回 `400 Bad Request` 和 `INVALID_PATH`。
 - 单路径检查端点的 `path` 查询参数最多出现一次。
+- `path` 查询值在可复制 URL 中应进行 URL 编码，例如 `/documents/file.pdf` 对应 `%2Fdocuments%2Ffile.pdf`。
 - 该校验先于非管理员 `home_dir` 授权。
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | `GET` | `/api/v1/favorites` | 列出收藏 |
 | `POST` | `/api/v1/favorites` | 添加收藏 |
-| `GET` | `/api/v1/favorites/check?path=/documents/file.pdf` | 检查单个路径 |
+| `GET` | `/api/v1/favorites/check?path=%2Fdocuments%2Ffile.pdf` | 检查单个路径 |
 | `POST` | `/api/v1/favorites/check-batch` | 检查多个路径 |
 | `DELETE` | `/api/v1/favorites/{path}` | 移除收藏 |
 | `PATCH` | `/api/v1/favorites/{path}` | 更新备注 |
