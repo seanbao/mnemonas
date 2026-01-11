@@ -1180,6 +1180,7 @@ function RestoreExecutionReview({
       value: `${passedCount} 项通过 · ${warningCount} 项提醒 · ${failedCount} 项失败`,
     },
     { label: '恢复后检查', value: '恢复完成后自动执行只读校验，并显示切换步骤和回滚清单。' },
+    { label: '切换前确认', value: '只在只读校验通过后切换；保留原 storage.root、原配置文件和回滚清单。' },
   ]
 
   const handleCopyReviewReport = async () => {
@@ -1233,6 +1234,7 @@ function formatRestoreExecutionReviewReport(
     `预览状态：${matches ? '当前目标目录和配置选项与预览一致' : '目标目录或配置选项已变更，当前复核不可用于执行恢复'}`,
     '写入边界：恢复只写入独立目录，不覆盖当前 storage.root。',
     '恢复后检查：恢复完成后自动执行只读校验，并显示切换步骤和回滚清单。',
+    '切换前确认：只在只读校验通过后切换；保留原 storage.root、原配置文件和回滚清单。',
   ]
 
   if (result.sample_paths && result.sample_paths.length > 0) {
@@ -2306,6 +2308,7 @@ function BatchRestoreExecutionReview({
     { label: '配置文件', value: configIncludedCount > 0 ? `${configIncludedCount} 项会恢复配置文件` : '本次不恢复配置文件' },
     { label: '预检结果', value: `${preflightCounts.passed} 项通过 · ${preflightCounts.warning} 项提醒 · ${preflightCounts.failed} 项失败` },
     { label: '恢复后检查', value: '每个成功项目都会自动执行只读校验；批量结果会汇总已校验文件数和字节数。' },
+    { label: '跨目录切换', value: '逐项只读校验通过后再切换；保留原目录和原配置作为回滚点。' },
   ]
 
   return (
