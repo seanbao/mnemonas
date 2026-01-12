@@ -1402,6 +1402,26 @@ function getBatchRestoreItemWarningText(item: BackupBatchRestoreItemResult): str
   return warnings.length > 0 ? warnings.join('；') : null
 }
 
+function getBatchRestoreCutoverCandidates(result: BackupBatchRestoreResult): BackupBatchRestoreItemResult[] {
+  return result.items.filter((item) => item.status === 'completed' && item.restore?.status === 'completed')
+}
+
+function getBatchRestoreCutoverCandidateReviewText(item: BackupBatchRestoreItemResult): string {
+  if (!item.verify) {
+    return '缺少只读校验结果，不能直接切换。'
+  }
+  if (item.verify.status === 'failed') {
+    return '只读校验失败，处理后重新校验再切换。'
+  }
+  if (!item.verify.looks_like_storage_root) {
+    return '未确认完整 storage.root 结构，切换前需人工复核目录内容。'
+  }
+  if ((item.verify.warnings?.length ?? 0) > 0) {
+    return '只读校验有警告，切换前需复核警告并保留原目录。'
+  }
+  return '只读校验通过，可作为 storage.root 候选目录；切换前保留原目录和原配置。'
+}
+
 function formatBatchRestoreResultReport(result: BackupBatchRestoreResult): string {
   const sections = [
     '批量恢复记录',
@@ -1441,11 +1461,19 @@ function formatBatchRestoreResultReport(result: BackupBatchRestoreResult): strin
     return lines
   })
 
+  const cutoverCandidateSections = getBatchRestoreCutoverCandidates(result).flatMap((item, index) => [
+    `${index + 1}. ${item.job_id}`,
+    `   候选目录：${item.target_path}`,
+    `   切换复核：${getBatchRestoreCutoverCandidateReviewText(item)}`,
+    `   配置文件：${getBatchRestoreItemConfigText(item)}`,
+  ])
+
   return [
     ...sections,
     '',
     '项目结果',
     ...itemSections,
+    ...(cutoverCandidateSections.length > 0 ? ['', '跨目录切换候选', ...cutoverCandidateSections] : []),
   ].join('\n')
 }
 
@@ -2535,6 +2563,7 @@ function BatchRestoreFlowGuide({
 }
 
 function BatchRestoreResultSummary({ result }: { result: BackupBatchRestoreResult }) {
+  const cutoverCandidates = getBatchRestoreCutoverCandidates(result)
   const handleCopyBatchRestoreReport = async () => {
     try {
       await copyTextToClipboard(formatBatchRestoreResultReport(result))
@@ -2570,6 +2599,27 @@ function BatchRestoreResultSummary({ result }: { result: BackupBatchRestoreResul
           </Button>
         </div>
       </div>
+      {cutoverCandidates.length > 0 && (
+        <div aria-label="批量恢复跨目录切换候选" className="rounded-lg border border-primary/20 bg-primary/5 p-3 text-sm">
+          <div className="flex items-center gap-2 font-medium text-default-800">
+            <ListChecks size={16} />
+            <span>跨目录切换候选</span>
+          </div>
+          <div className="mt-2 text-xs leading-5 text-default-500">
+            逐项只读校验通过后再切换；切换前保留原 storage.root、原配置文件和回滚清单。
+          </div>
+          <div className="mt-3 space-y-2">
+            {cutoverCandidates.map((item) => (
+              <div key={`${item.index}-${item.job_id}-cutover`} className="rounded-md bg-content1 p-2">
+                <div className="font-medium text-default-700">{item.job_id}</div>
+                <div className="mt-1 truncate font-mono text-xs text-default-500" title={item.target_path}>{item.target_path}</div>
+                <div className="mt-1 text-xs text-default-600">{getBatchRestoreCutoverCandidateReviewText(item)}</div>
+                <div className="mt-1 text-xs text-default-500">配置文件：{getBatchRestoreItemConfigText(item)}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
       <div className="space-y-2">
         {result.items.map((item) => (
           <div key={`${item.index}-${item.job_id}`} className="rounded-lg border border-divider bg-content2/60 p-3 text-sm">
