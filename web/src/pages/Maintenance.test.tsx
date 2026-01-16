@@ -2370,6 +2370,12 @@ describe('MaintenancePage', () => {
       fireEvent.click(screen.getByRole('button', { name: /批量恢复/ }))
 
       await waitFor(() => {
+        const flow = within(screen.getByLabelText('批量恢复流程进度'))
+        expect(flow.getByText('批量恢复流程')).toBeTruthy()
+        expect(flow.getByText('选择要恢复的备份任务')).toBeTruthy()
+        expect(flow.getByText('选择任务后填写独立目标目录')).toBeTruthy()
+        expect(flow.getByText('目标目录确认后生成预览')).toBeTruthy()
+        expect(flow.getByText('预览通过后执行批量恢复')).toBeTruthy()
         const readiness = within(screen.getByLabelText('批量恢复准备度摘要'))
         expect(readiness.getByText('尚未选择任务')).toBeTruthy()
         expect(readiness.getByText('尚未选择目标')).toBeTruthy()
@@ -2390,6 +2396,11 @@ describe('MaintenancePage', () => {
       expect(selectedTargetInput.value).toBe('/mnt/restore/external-disk')
       expect(selectedTargetInput.disabled).toBe(false)
       let readiness = within(screen.getByLabelText('批量恢复准备度摘要'))
+      let flow = within(screen.getByLabelText('批量恢复流程进度'))
+      expect(flow.getByText('已选择 1 项')).toBeTruthy()
+      expect(flow.getByText('1 个目标目录已确认')).toBeTruthy()
+      expect(flow.getByText('生成批量预览以确认预检')).toBeTruthy()
+      expect(flow.getByText('预览通过后执行批量恢复')).toBeTruthy()
       expect(readiness.getByText('1 / 20 项')).toBeTruthy()
       expect(readiness.getByText('1 / 1 已填写')).toBeTruthy()
       expect(readiness.getByText('需要生成批量预览')).toBeTruthy()
@@ -2401,6 +2412,9 @@ describe('MaintenancePage', () => {
       expect(selectedTargetInput.value).toBe('/mnt/restore/external-disk')
       expect(selectedTargetInput.disabled).toBe(true)
       readiness = within(screen.getByLabelText('批量恢复准备度摘要'))
+      flow = within(screen.getByLabelText('批量恢复流程进度'))
+      expect(flow.getByText('选择要恢复的备份任务')).toBeTruthy()
+      expect(flow.getByText('选择任务后填写独立目标目录')).toBeTruthy()
       expect(readiness.getByText('尚未选择任务')).toBeTruthy()
       expect(readiness.getByText('尚未选择目标')).toBeTruthy()
 
@@ -2410,6 +2424,9 @@ describe('MaintenancePage', () => {
       expect(selectedTargetInput.value).toBe('/mnt/restore/external-disk')
       expect(selectedTargetInput.disabled).toBe(false)
       readiness = within(screen.getByLabelText('批量恢复准备度摘要'))
+      flow = within(screen.getByLabelText('批量恢复流程进度'))
+      expect(flow.getByText('已选择 1 项')).toBeTruthy()
+      expect(flow.getByText('1 个目标目录已确认')).toBeTruthy()
       expect(readiness.getByText('1 / 20 项')).toBeTruthy()
       expect(readiness.getByText('1 / 1 已填写')).toBeTruthy()
       expect(readiness.getByText('需要生成批量预览')).toBeTruthy()
@@ -2464,6 +2481,9 @@ describe('MaintenancePage', () => {
       expect(warningTargetInput.disabled).toBe(false)
 
       const readiness = within(screen.getByLabelText('批量恢复准备度摘要'))
+      const flow = within(screen.getByLabelText('批量恢复流程进度'))
+      expect(flow.getByText('已选择 2 项')).toBeTruthy()
+      expect(flow.getByText('2 个目标目录已确认')).toBeTruthy()
       expect(readiness.getByText('2 / 20 项')).toBeTruthy()
       expect(readiness.getByText('2 / 2 已填写')).toBeTruthy()
       expect(readiness.getByText('需要生成批量预览')).toBeTruthy()
@@ -2599,6 +2619,9 @@ describe('MaintenancePage', () => {
           signal: expect.any(AbortSignal),
         }))
         expect(screen.getByText('批量预览结果')).toBeTruthy()
+        const flow = within(screen.getByLabelText('批量恢复流程进度'))
+        expect(flow.getByText('批量预览可用于执行')).toBeTruthy()
+        expect(flow.getByText('预览通过，可开始批量恢复')).toBeTruthy()
         const readiness = within(screen.getByLabelText('批量恢复准备度摘要'))
         expect(readiness.getByText('1 / 20 项')).toBeTruthy()
         expect(readiness.getByText('1 项会恢复配置文件')).toBeTruthy()
@@ -2635,6 +2658,9 @@ describe('MaintenancePage', () => {
           signal: expect.any(AbortSignal),
         }))
         expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({ title: '批量恢复已完成' }))
+        const flow = within(screen.getByLabelText('批量恢复流程进度'))
+        expect(flow.getByText('已完成批量预览和预检')).toBeTruthy()
+        expect(flow.getByText('批量恢复和只读校验已完成')).toBeTruthy()
         expect(screen.getByText('批量恢复已完成')).toBeTruthy()
         expect(screen.getByText('只读校验：检查 12 个文件 · 4 KB')).toBeTruthy()
         expect(screen.getAllByText('对照快照 20260509T020304.000000000Z').length).toBeGreaterThan(0)
@@ -3456,6 +3482,7 @@ describe('MaintenancePage', () => {
         expect(screen.getAllByText('批量恢复预检未通过，未写入任何目标数据').length).toBeGreaterThan(0)
         expect(screen.getByText('批量恢复预检未通过，该项目未开始写入')).toBeTruthy()
         expect(screen.getByText('所有批量恢复项目均失败')).toBeTruthy()
+        expect(within(screen.getByLabelText('批量恢复流程进度')).getByText('批量恢复失败，未完成的项目需处理')).toBeTruthy()
         expect(screen.queryByText(/0\/1 项完成/)).toBeNull()
       })
       expect(screen.queryByText('batch restore preflight failed before writes; no target data was written')).toBeNull()
@@ -3527,11 +3554,54 @@ describe('MaintenancePage', () => {
 
       await waitFor(() => {
         expect(screen.getByText('预检未通过，需处理失败项后重新生成预览。')).toBeTruthy()
+        expect(within(screen.getByLabelText('恢复流程进度')).getByText('预检未通过，处理失败项后重新生成预览')).toBeTruthy()
         expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({ title: '恢复预检未通过' }))
       })
 
       expect((screen.getByRole('button', { name: /开始恢复/ }) as HTMLButtonElement).disabled).toBe(true)
       expect(mockRestoreBackupJob).not.toHaveBeenCalled()
+    })
+
+    it('shows guided restore steps from target selection through verification', async () => {
+      const user = userEvent.setup()
+      mockListBackupJobs.mockResolvedValue(mockBackupJobs)
+
+      render(<Maintenance />)
+
+      await waitFor(() => {
+        expect(screen.getByText('外置硬盘备份')).toBeTruthy()
+      })
+
+      await user.click(screen.getByRole('button', { name: /^恢复$/ }))
+
+      let guide = within(screen.getByLabelText('恢复流程进度'))
+      expect(guide.getByText('恢复流程')).toBeTruthy()
+      expect(guide.getByText('目标目录')).toBeTruthy()
+      expect(guide.getByText('恢复预览')).toBeTruthy()
+      expect(guide.getByText('执行恢复')).toBeTruthy()
+      expect(guide.getByText('只读校验与切换')).toBeTruthy()
+      expect(guide.getByText('目标已填写：/mnt/restore/external-disk')).toBeTruthy()
+      expect(guide.getByText('生成预览以确认文件、配置和预检')).toBeTruthy()
+      expect(guide.getByText('预览通过后执行恢复')).toBeTruthy()
+      expect(guide.getByText('恢复完成后自动检查')).toBeTruthy()
+
+      fireEvent.change(screen.getByLabelText('目标目录'), { target: { value: '/restore/mnemonas' } })
+      await user.click(screen.getByRole('button', { name: /生成预览/ }))
+
+      await waitFor(() => {
+        guide = within(screen.getByLabelText('恢复流程进度'))
+        expect(guide.getByText('预览已确认，可复核执行')).toBeTruthy()
+        expect(guide.getByText('预览通过，可开始恢复')).toBeTruthy()
+      })
+
+      await user.click(screen.getByRole('button', { name: /开始恢复/ }))
+
+      await waitFor(() => {
+        guide = within(screen.getByLabelText('恢复流程进度'))
+        expect(guide.getByText('已完成预览和预检')).toBeTruthy()
+        expect(guide.getByText('恢复已写入独立目录')).toBeTruthy()
+        expect(guide.getByText('只读校验完成，可按清单人工切换')).toBeTruthy()
+      })
     })
 
     it('shows a pre-submit restore execution review after preview succeeds', async () => {

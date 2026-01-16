@@ -47,6 +47,7 @@ import {
   X,
   ArrowUpDown,
   Download,
+  TrendingUp,
 } from 'lucide-react'
 import { listUsers, createUser, deleteUser, resetUserPassword, revokeUserSessions, toggleUserStatus, updateUser, UsersError, type ListUsersResponse, type User } from '@/api/users'
 import { getStoredUser } from '@/api/auth'
@@ -54,15 +55,20 @@ import { formatBytes, formatDate, cn, normalizeUserHomeDir } from '@/lib/utils'
 import { formatUserAccessReviewReport, getUserAccessContext, summarizeUserAccessReview } from '@/lib/userAccessContext'
 import {
   formatUserQuotaSummaryReport,
+  createUserQuotaTrendPoint,
   getQuotaStatus,
   getUserQuotaAggregateStatus,
+  mergeUserQuotaTrendHistory,
+  normalizeUserQuotaTrendHistory,
   quotaBytesToFormValue,
   quotaFormValueToBytes,
   quotaUnits,
+  summarizeUserQuotaTrendHistory,
   summarizeUserQuotas,
   userNeedsQuotaAttention,
   type QuotaUnit,
-  type UserQuotaAggregateStatus,
+type UserQuotaAggregateStatus,
+  type UserQuotaTrendPoint,
 } from '@/lib/userQuota'
 import { formatUserAccountAttentionReport, summarizeUserAccountAttention } from '@/lib/userAccountAttention'
 import { buildUserListViewCsv, getUserListView, userListExportFilename, type UserListFilter, type UserListSort } from '@/lib/userListView'
@@ -77,6 +83,12 @@ const usersLoadErrorDescription = '用户列表加载失败，请检查网络或
 const clipboardWriteFailureDescription = '请检查浏览器剪贴板权限。'
 const maxPasswordBytes = 72
 const groupNamePattern = /^[A-Za-z0-9._-]+$/
+const userQuotaTrendHistoryLimit = 8
+const userQuotaTrendHistoryStoragePrefix = 'mnemonas:user-quota-trend'
+
+type UsersPageListUsersResponse = ListUsersResponse & {
+  quotaTrendHistory: UserQuotaTrendPoint[]
+}
 
 function utf8ByteLength(value: string): number {
   return new TextEncoder().encode(value).length
@@ -427,6 +439,82 @@ function getUsersActionSuccessToast(
   }
 }
 
+function getUserQuotaTrendHistoryStorageKey(userID: string | undefined): string {
+  return `${userQuotaTrendHistoryStoragePrefix}:${userID?.trim() || 'anonymous'}`
+}
+
+function loadUserQuotaTrendHistory(storageKey: string): UserQuotaTrendPoint[] {
+  if (typeof window === 'undefined') {
+    return []
+  }
+  try {
+    const raw = window.localStorage.getItem(storageKey)
+    if (!raw) {
+      return []
+    }
+    return normalizeUserQuotaTrendHistory(JSON.parse(raw), userQuotaTrendHistoryLimit)
+  } catch {
+    return []
+  }
+}
+
+function saveUserQuotaTrendHistory(storageKey: string, history: UserQuotaTrendPoint[]): boolean {
+  if (typeof window === 'undefined') {
+    return false
+  }
+  try {
+    window.localStorage.setItem(
+      storageKey,
+      JSON.stringify(normalizeUserQuotaTrendHistory(history, userQuotaTrendHistoryLimit)),
+    )
+    return true
+  } catch {
+    return false
+  }
+}
+
+function updateUserQuotaTrendHistoryForUsers(storageKey: string, users: User[]): UserQuotaTrendPoint[] {
+  const current = loadUserQuotaTrendHistory(storageKey)
+  if (users.length === 0) {
+    return current
+  }
+
+  const next = mergeUserQuotaTrendHistory(
+    current,
+    createUserQuotaTrendPoint(users),
+    userQuotaTrendHistoryLimit,
+  )
+  saveUserQuotaTrendHistory(storageKey, next)
+  return next
+}
+
+function formatUserQuotaTrendDeltaBytes(bytes: number): string {
+  if (bytes > 0) {
+    return `+${formatBytes(bytes)}`
+  }
+  if (bytes < 0) {
+    return `-${formatBytes(Math.abs(bytes))}`
+  }
+  return '0 B'
+}
+
+function formatUserQuotaTrendUsage(point: UserQuotaTrendPoint | null): string {
+  if (!point) {
+    return '--'
+  }
+  if (point.quotaBytes <= 0) {
+    return `${formatBytes(point.usedBytes)} / 未设总配额`
+  }
+  return `${formatBytes(point.limitedUsedBytes)} / ${formatBytes(point.quotaBytes)}`
+}
+
+function getUserQuotaTrendBarWidth(point: UserQuotaTrendPoint, peakLimitedUsedBytes: number): string {
+  if (peakLimitedUsedBytes <= 0 || point.limitedUsedBytes <= 0) {
+    return '0%'
+  }
+  return `${Math.max(6, Math.round((point.limitedUsedBytes / peakLimitedUsedBytes) * 100))}%`
+}
+
 function getQuotaAggregateBarClass(tone: UserQuotaAggregateStatus['tone']): string {
   if (tone === 'danger') {
     return 'bg-danger/70'
@@ -707,6 +795,7 @@ export function UsersPage() {
   const [userListSort, setUserListSort] = useState<UserListSort>('default')
   const currentUserId = getStoredUser()?.id ?? 'anonymous'
   const usersQueryKey = ['users', currentUserId] as const
+  const quotaTrendHistoryStorageKey = getUserQuotaTrendHistoryStorageKey(currentUserId)
   const createSessionRef = useRef(0)
   const createDraftRef = useRef({
     username: '',
@@ -757,9 +846,15 @@ export function UsersPage() {
     }
   }, [newEmail, newGroups, newHomeDir, newPassword, newQuotaUnit, newQuotaValue, newRole, newUsername])
 
-  const { data, isLoading, isRefetching, error, refetch } = useQuery({
+  const { data, isLoading, isRefetching, error, refetch } = useQuery<UsersPageListUsersResponse>({
     queryKey: usersQueryKey,
-    queryFn: ({ signal }) => listUsers({ signal }),
+    queryFn: async ({ signal }) => {
+      const result = await listUsers({ signal })
+      return {
+        ...result,
+        quotaTrendHistory: updateUserQuotaTrendHistoryForUsers(quotaTrendHistoryStorageKey, result.users),
+      }
+    },
   })
 
   const createMutation = useMutation({
@@ -1217,6 +1312,9 @@ export function UsersPage() {
   const userQuotaSummaryReport = users.length > 0 ? formatUserQuotaSummaryReport(users) : ''
   const userAccessReviewReport = users.length > 0 ? formatUserAccessReviewReport(users) : ''
   const usersLoadError = error ? getUsersLoadErrorPresentation(error) : null
+  const quotaTrendHistory = data?.quotaTrendHistory ?? []
+  const quotaTrendSummary = summarizeUserQuotaTrendHistory(quotaTrendHistory)
+  const quotaTrendRecentPoints = normalizeUserQuotaTrendHistory(quotaTrendHistory, 4)
 
   const handleCopyUserAccountAttention = async () => {
     if (!navigator.clipboard?.writeText) {
@@ -1453,6 +1551,80 @@ export function UsersPage() {
               style={{ width: quotaAggregate.percent === null ? '0%' : `${quotaAggregateProgressValue}%` }}
             />
           </div>
+        </section>
+      )}
+
+      {users.length > 0 && quotaTrendSummary.latest && (
+        <section
+          className="mb-4 rounded-lg border border-divider bg-content1/70 px-4 py-3"
+          aria-label="用户配额趋势"
+        >
+          <div className="flex flex-col gap-3 xl:flex-row xl:items-start xl:justify-between">
+            <div className="min-w-0">
+              <div className="flex min-w-0 flex-wrap items-center gap-2">
+                <TrendingUp size={16} className="shrink-0 text-default-500" />
+                <h2 className="text-sm font-semibold text-foreground">用户配额趋势</h2>
+                <Chip size="sm" variant="flat" color={quotaTrendSummary.tone}>
+                  {quotaTrendSummary.label}
+                </Chip>
+              </div>
+              <p className="mt-1 text-xs text-default-500">{quotaTrendSummary.detail}</p>
+            </div>
+            <div className="grid grid-cols-2 gap-3 text-xs sm:grid-cols-4 xl:min-w-[34rem]">
+              <div>
+                <div className="text-default-500">近期快照</div>
+                <div className="mt-1 font-semibold text-foreground">{quotaTrendSummary.sampleCount} 次</div>
+              </div>
+              <div>
+                <div className="text-default-500">当前受限用量</div>
+                <div className="mt-1 font-semibold text-foreground">
+                  {formatUserQuotaTrendUsage(quotaTrendSummary.latest)}
+                </div>
+              </div>
+              <div>
+                <div className="text-default-500">较上一快照</div>
+                <div className={cn(
+                  'mt-1 font-semibold',
+                  quotaTrendSummary.limitedUsedDeltaBytes > 0
+                    ? 'text-warning'
+                    : quotaTrendSummary.limitedUsedDeltaBytes < 0
+                      ? 'text-success'
+                      : 'text-foreground',
+                )}>
+                  {quotaTrendSummary.previous
+                    ? formatUserQuotaTrendDeltaBytes(quotaTrendSummary.limitedUsedDeltaBytes)
+                    : '等待下一快照'}
+                </div>
+              </div>
+              <div>
+                <div className="text-default-500">快照峰值</div>
+                <div className="mt-1 font-semibold text-foreground">
+                  {formatBytes(quotaTrendSummary.peakLimitedUsedBytes)}
+                </div>
+              </div>
+            </div>
+          </div>
+          {quotaTrendRecentPoints.length > 0 && (
+            <div className="mt-3 space-y-2" aria-label="用户配额趋势快照列表">
+              {quotaTrendRecentPoints.map((point) => (
+                <div key={point.capturedAt} className="grid gap-2 text-xs sm:grid-cols-[9rem_minmax(0,1fr)_8rem] sm:items-center">
+                  <div className="text-default-500">{formatDate(point.capturedAt)}</div>
+                  <div className="h-2 overflow-hidden rounded-full bg-content2">
+                    <div
+                      className="h-full rounded-full bg-accent-primary/70"
+                      style={{ width: getUserQuotaTrendBarWidth(point, quotaTrendSummary.peakLimitedUsedBytes) }}
+                    />
+                  </div>
+                  <div className="text-right font-medium text-foreground">
+                    {formatBytes(point.limitedUsedBytes)}
+                    {point.attentionCount > 0 && (
+                      <span className="ml-1 text-warning">· 复核 {point.attentionCount}</span>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
         </section>
       )}
 

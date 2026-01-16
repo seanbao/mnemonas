@@ -259,6 +259,109 @@ function getTrashBatchActionToast(
   return undefined
 }
 
+function getTrashItemParentPath(item: TrashItem): string {
+  let originalPath = item.originalPath
+  try {
+    originalPath = normalizePath(item.originalPath)
+  } catch {
+    originalPath = item.originalPath.trim() || '/'
+  }
+  const lastSlashIndex = originalPath.lastIndexOf('/')
+  if (lastSlashIndex <= 0) {
+    return '/'
+  }
+  return originalPath.slice(0, lastSlashIndex)
+}
+
+function getBatchRestoreAutoDeleteSummary(
+  items: TrashItem[],
+  retentionDays: number | undefined,
+  retentionEnabled: boolean | undefined,
+): string {
+  if (items.length === 0) {
+    return '尚未选择项目'
+  }
+  if (retentionEnabled === undefined || retentionDays === undefined) {
+    return '自动清理设置未知'
+  }
+  if (!retentionEnabled) {
+    return '自动清理未启用'
+  }
+
+  const expiredCount = items.filter((item) => getAutoDeleteBadgeLabel(item.deletedAt, retentionDays, retentionEnabled) === '已过期，等待清理').length
+  if (expiredCount > 0) {
+    return `${expiredCount} 项已过期，恢复前应尽快确认`
+  }
+
+  const soonCount = items.filter((item) => {
+    const label = getAutoDeleteBadgeLabel(item.deletedAt, retentionDays, retentionEnabled)
+    return Boolean(label && label !== '自动清理设置未知' && label !== '已过期，等待清理')
+  }).length
+  if (soonCount > 0) {
+    return `${soonCount} 项接近自动清理窗口`
+  }
+
+  return '所选项目不在近期自动清理窗口内'
+}
+
+function TrashRestoreReviewItem({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="min-w-0 rounded-lg border border-divider bg-content1 px-3 py-2">
+      <div className="text-xs text-default-500">{label}</div>
+      <div className="mt-1 break-words text-sm font-medium text-foreground">{value}</div>
+    </div>
+  )
+}
+
+function TrashBatchRestoreReview({
+  items,
+  retentionDays,
+  retentionEnabled,
+}: {
+  items: TrashItem[]
+  retentionDays: number | undefined
+  retentionEnabled: boolean | undefined
+}) {
+  const fileCount = items.filter((item) => !item.isDir).length
+  const directoryCount = items.filter((item) => item.isDir).length
+  const totalSize = items.reduce((sum, item) => sum + item.size, 0)
+  const targetDirectories = Array.from(new Set(items.map(getTrashItemParentPath))).sort()
+  const visibleTargets = targetDirectories.slice(0, 4)
+  const hiddenTargetCount = Math.max(0, targetDirectories.length - visibleTargets.length)
+
+  return (
+    <div aria-label="跨目录恢复执行前复核" className="rounded-lg border border-warning/20 bg-warning/10 p-3 text-sm">
+      <div className="flex items-center gap-2 font-medium text-default-800">
+        <AlertTriangle size={16} className="text-warning" />
+        <span>跨目录恢复复核</span>
+      </div>
+      <div className="mt-3 grid gap-2 sm:grid-cols-2">
+        <TrashRestoreReviewItem label="恢复项目" value={`${items.length} 项 · ${directoryCount} 个目录 · ${fileCount} 个文件`} />
+        <TrashRestoreReviewItem label="原始目录" value={`${targetDirectories.length} 个目标目录`} />
+        <TrashRestoreReviewItem label="可见数据量" value={formatBytes(totalSize)} />
+        <TrashRestoreReviewItem label="自动清理" value={getBatchRestoreAutoDeleteSummary(items, retentionDays, retentionEnabled)} />
+        <TrashRestoreReviewItem label="冲突处理" value="若原路径已存在同名文件、父目录不可写或配额不足，服务端会拒绝对应项目并保留在回收站。" />
+        <TrashRestoreReviewItem label="执行结果" value="成功项目会从回收站移除；失败项目会保持选中，便于继续处理。" />
+      </div>
+      {visibleTargets.length > 0 && (
+        <div className="mt-3 rounded-lg border border-divider bg-content1 px-3 py-2">
+          <div className="text-xs text-default-500">涉及目录</div>
+          <div className="mt-2 flex flex-wrap gap-2">
+            {visibleTargets.map((target) => (
+              <code key={target} className="break-anywhere rounded-md bg-content2 px-2 py-1 text-xs text-default-700">
+                {target}
+              </code>
+            ))}
+            {hiddenTargetCount > 0 && (
+              <span className="rounded-md bg-content2 px-2 py-1 text-xs text-default-500">另有 {hiddenTargetCount} 个目录</span>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
 // Trash item row
 function TrashRow({
   item,
@@ -404,6 +507,7 @@ export function TrashPage() {
 
   const { isOpen: isDeleteOpen, onOpen: onDeleteOpen, onClose: onDeleteClose } = useDisclosure()
   const { isOpen: isBatchDeleteOpen, onOpen: onBatchDeleteOpen, onClose: onBatchDeleteClose } = useDisclosure()
+  const { isOpen: isBatchRestoreOpen, onOpen: onBatchRestoreOpen, onClose: onBatchRestoreClose } = useDisclosure()
   const { isOpen: isEmptyOpen, onOpen: onEmptyOpen, onClose: onEmptyClose } = useDisclosure()
 
   const { data, isLoading, error, refetch } = useQuery({
@@ -436,6 +540,12 @@ export function TrashPage() {
 
     return changed ? next : selectedItems
   }, [selectedItems, visibleItems])
+  const selectedTrashItems = useMemo(() => {
+    if (visibleSelectedItems.size === 0) {
+      return []
+    }
+    return visibleItems.filter((item) => visibleSelectedItems.has(item.id))
+  }, [visibleItems, visibleSelectedItems])
 
   const removeSelectedIds = useCallback((ids: string[]) => {
     if (ids.length === 0) {
@@ -680,7 +790,20 @@ export function TrashPage() {
     },
   })
 
-  const handleBatchRestore = useCallback(async () => {
+  const handleCloseBatchRestoreModal = useCallback(() => {
+    if (isBatchRestoring) {
+      return
+    }
+    onBatchRestoreClose()
+  }, [isBatchRestoring, onBatchRestoreClose])
+
+  const handleBatchRestoreClick = useCallback(() => {
+    if (!canWrite) return
+    if (visibleSelectedItems.size === 0) return
+    onBatchRestoreOpen()
+  }, [canWrite, onBatchRestoreOpen, visibleSelectedItems.size])
+
+  const handleConfirmBatchRestore = useCallback(async () => {
     if (!canWrite) return
     const ids = Array.from(visibleSelectedItems)
     if (ids.length === 0) return
@@ -689,12 +812,15 @@ export function TrashPage() {
     batchRestoreAbortControllerRef.current = controller
     try {
       await executeBatchRestore(ids, { signal: controller.signal })
+      if (!controller.signal.aborted) {
+        onBatchRestoreClose()
+      }
     } finally {
       if (batchRestoreAbortControllerRef.current === controller) {
         batchRestoreAbortControllerRef.current = null
       }
     }
-  }, [canWrite, visibleSelectedItems, executeBatchRestore])
+  }, [canWrite, executeBatchRestore, onBatchRestoreClose, visibleSelectedItems])
 
   // Batch delete using custom hook
   const { execute: executeBatchDelete, isLoading: isBatchDeleting } = useBatchOperation<string, ActionResult>({
@@ -915,8 +1041,9 @@ export function TrashPage() {
             variant="flat"
             color="success"
             startContent={<RotateCcw size={14} />}
-            onPress={handleBatchRestore}
+            onPress={handleBatchRestoreClick}
             isLoading={isBatchRestoring}
+            isDisabled={isBatchRestoring}
             className="rounded-lg"
           >
             恢复
@@ -1042,6 +1169,63 @@ export function TrashPage() {
               className="rounded-lg"
             >
               永久删除
+            </Button>
+          </ModalFooter>
+        </ModalContent>
+      </Modal>
+
+      {/* Batch Restore Confirmation Modal */}
+      <Modal
+        isOpen={isBatchRestoreOpen}
+        onClose={handleCloseBatchRestoreModal}
+        placement="center"
+        size="2xl"
+        classNames={{
+          base: "bg-content1 border border-divider shadow-xl rounded-lg",
+          backdrop: "bg-black/60 backdrop-blur-md",
+          closeButton: "top-4 right-4 text-default-400 hover:text-foreground hover:bg-default-100 rounded-lg",
+        }}
+      >
+        <ModalContent>
+          <ModalHeader className="flex items-center gap-3 px-6 pt-6 pb-2">
+            <div className="w-10 h-10 rounded-lg bg-success/10 text-success flex items-center justify-center">
+              <RotateCcw size={20} />
+            </div>
+            <div>
+              <h3 className="text-lg font-semibold text-foreground">确认批量恢复</h3>
+              <p className="text-xs text-default-500 font-normal">恢复到各自原始路径</p>
+            </div>
+          </ModalHeader>
+          <ModalBody className="px-6 py-4">
+            <p className="text-foreground">确定要恢复已选择的 <strong>{selectedTrashItems.length}</strong> 项吗？</p>
+            <p className="text-xs text-default-500 mt-2">
+              所选项目可能分布在多个原始目录。恢复前请确认目标路径、父目录权限和配额风险。
+            </p>
+            <div className="mt-4">
+              <TrashBatchRestoreReview
+                items={selectedTrashItems}
+                retentionDays={retentionDays}
+                retentionEnabled={retentionEnabled}
+              />
+            </div>
+          </ModalBody>
+          <ModalFooter className="px-6 pb-6 pt-2 gap-2">
+            <Button
+              variant="flat"
+              onPress={handleCloseBatchRestoreModal}
+              isDisabled={isBatchRestoring}
+              className="text-default-600 rounded-lg"
+            >
+              取消
+            </Button>
+            <Button
+              color="success"
+              onPress={handleConfirmBatchRestore}
+              isLoading={isBatchRestoring}
+              isDisabled={selectedTrashItems.length === 0}
+              className="rounded-lg"
+            >
+              确认恢复
             </Button>
           </ModalFooter>
         </ModalContent>
