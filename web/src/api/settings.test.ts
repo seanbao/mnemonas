@@ -342,6 +342,8 @@ describe('Settings API', () => {
   it.each([
     ['unsafe default max access', { default_max_access: 9007199254740992 }],
     ['fractional policy max access', { policy_rules: [{ path: '/team', max_access: 1.5 }] }],
+    ['invalid policy allowed role', { policy_rules: [{ path: '/team', allowed_roles: ['owner'] }] }],
+    ['invalid policy allowed users', { policy_rules: [{ path: '/team', allowed_users: 'alice' }] }],
     ['unsafe policy path', { policy_rules: [{ path: '/team/./private' }] }],
     ['relative policy path', { policy_rules: [{ path: 'team' }] }],
     ['trailing-slash policy path', { policy_rules: [{ path: '/team/' }] }],
@@ -658,7 +660,7 @@ describe('Settings API', () => {
         directory_access_rules: [{ path: '/team//public/', read_groups: ['family'] }],
       },
       share: {
-        policy_rules: [{ path: '/share//media/', require_password: true }],
+        policy_rules: [{ path: '/share//media/', require_password: true, allowed_users: ['alice'], allowed_groups: ['family'], allowed_roles: ['user'] }],
       },
     })
 
@@ -670,7 +672,7 @@ describe('Settings API', () => {
           directory_access_rules: [{ path: '/team/public', read_groups: ['family'] }],
         },
         share: {
-          policy_rules: [{ path: '/share/media', require_password: true }],
+          policy_rules: [{ path: '/share/media', require_password: true, allowed_users: ['alice'], allowed_groups: ['family'], allowed_roles: ['user'] }],
         },
       }),
     }))

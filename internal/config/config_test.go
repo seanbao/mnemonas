@@ -659,6 +659,21 @@ func TestConfig_Validate(t *testing.T) {
 					RequirePassword: true,
 					MaxExpiresIn:    24 * time.Hour,
 					MaxAccess:       10,
+					AllowedUsers:    []string{"alice"},
+					AllowedGroups:   []string{"family"},
+					AllowedRoles:    []string{"user"},
+				}}
+			},
+			wantErr: false,
+		},
+		{
+			name: "Valid share policy principal-only rule",
+			modify: func(c *Config) {
+				c.Share.PolicyRules = []SharePolicyRuleConfig{{
+					Path:          "/Family",
+					AllowedUsers:  []string{"alice"},
+					AllowedGroups: []string{"family"},
+					AllowedRoles:  []string{"user"},
 				}}
 			},
 			wantErr: false,
@@ -733,6 +748,27 @@ func TestConfig_Validate(t *testing.T) {
 			name: "Invalid empty share policy constraint",
 			modify: func(c *Config) {
 				c.Share.PolicyRules = []SharePolicyRuleConfig{{Path: "/Family"}}
+			},
+			wantErr: true,
+		},
+		{
+			name: "Invalid share policy allowed user",
+			modify: func(c *Config) {
+				c.Share.PolicyRules = []SharePolicyRuleConfig{{Path: "/Family", AllowedUsers: []string{"Alice"}}}
+			},
+			wantErr: true,
+		},
+		{
+			name: "Invalid share policy allowed group",
+			modify: func(c *Config) {
+				c.Share.PolicyRules = []SharePolicyRuleConfig{{Path: "/Family", AllowedGroups: []string{"family/team"}}}
+			},
+			wantErr: true,
+		},
+		{
+			name: "Invalid share policy allowed role",
+			modify: func(c *Config) {
+				c.Share.PolicyRules = []SharePolicyRuleConfig{{Path: "/Family", AllowedRoles: []string{"owner"}}}
 			},
 			wantErr: true,
 		},
@@ -2206,6 +2242,9 @@ path = " /Family/Photos/ "
 require_password = true
 max_expires_in = "24h"
 max_access = 12
+allowed_users = ["Alice", "alice"]
+allowed_groups = ["Family"]
+allowed_roles = ["User"]
 `)
 	if err := os.WriteFile(configPath, content, 0644); err != nil {
 		t.Fatalf("failed to write config: %v", err)
@@ -2230,6 +2269,15 @@ max_access = 12
 	}
 	if rule.MaxAccess != 12 {
 		t.Fatalf("policy rule max access = %d, want 12", rule.MaxAccess)
+	}
+	if got, want := rule.AllowedUsers, []string{"alice"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("policy rule allowed users = %q, want %q", got, want)
+	}
+	if got, want := rule.AllowedGroups, []string{"family"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("policy rule allowed groups = %q, want %q", got, want)
+	}
+	if got, want := rule.AllowedRoles, []string{"user"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("policy rule allowed roles = %q, want %q", got, want)
 	}
 }
 

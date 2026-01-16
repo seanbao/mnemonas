@@ -179,6 +179,9 @@ export interface SharePolicyRule {
   require_password?: boolean
   max_expires_in?: string
   max_access?: number
+  allowed_users?: string[]
+  allowed_groups?: string[]
+  allowed_roles?: DirectoryAccessRole[]
 }
 
 export interface DiskHealthDeviceSettings {
@@ -823,6 +826,9 @@ function isSharePolicyRule(value: unknown): value is SharePolicyRule {
     && (value.require_password === undefined || typeof value.require_password === 'boolean')
     && (value.max_expires_in === undefined || typeof value.max_expires_in === 'string')
     && (value.max_access === undefined || isNonNegativeSafeInteger(value.max_access))
+    && (value.allowed_users === undefined || isStringArray(value.allowed_users))
+    && (value.allowed_groups === undefined || isStringArray(value.allowed_groups))
+    && (value.allowed_roles === undefined || (Array.isArray(value.allowed_roles) && value.allowed_roles.every(isDirectoryAccessRole)))
 }
 
 function isDiskHealthDeviceSettings(value: unknown): value is DiskHealthDeviceSettings {

@@ -54,6 +54,9 @@ export interface SharePolicyRule {
   require_password?: boolean
   max_expires_in?: string
   max_access?: number
+  allowed_users?: string[]
+  allowed_groups?: string[]
+  allowed_roles?: Array<'admin' | 'user' | 'guest'>
 }
 
 export interface CreateShareRequest {
@@ -168,6 +171,10 @@ export class ShareError extends Error {
     return this.code === 'SHARE_POLICY_PASSWORD_REQUIRED'
   }
 
+  get isPolicyPrincipalForbidden(): boolean {
+    return this.code === 'SHARE_POLICY_PRINCIPAL_FORBIDDEN'
+  }
+
   get isUnavailable(): boolean {
     return this.status === 503 && !this.isFeatureDisabled
   }
@@ -197,6 +204,7 @@ const localizedPublicShareErrorMessages: Record<string, string> = {
   INVALID_PASSWORD: '密码错误',
   SHARE_PASSWORD_RATE_LIMITED: '尝试次数过多，请稍后再试',
   SHARE_FEATURE_DISABLED: '分享功能已关闭',
+  SHARE_POLICY_PRINCIPAL_FORBIDDEN: '当前账号不允许为该路径创建或维护分享',
   SHARE_NOT_FOUND: '分享不存在或已失效',
   SHARE_DISABLED: '分享已停用',
   SHARE_ACCESS_LIMIT_REACHED: '分享访问次数已用尽',
@@ -326,6 +334,9 @@ function isSharePolicyRule(value: unknown): value is SharePolicyRule {
     && (rule.require_password === undefined || typeof rule.require_password === 'boolean')
     && (rule.max_expires_in === undefined || typeof rule.max_expires_in === 'string')
     && (rule.max_access === undefined || isNonNegativeSafeInteger(rule.max_access))
+    && (rule.allowed_users === undefined || (Array.isArray(rule.allowed_users) && rule.allowed_users.every((value) => typeof value === 'string')))
+    && (rule.allowed_groups === undefined || (Array.isArray(rule.allowed_groups) && rule.allowed_groups.every((value) => typeof value === 'string')))
+    && (rule.allowed_roles === undefined || (Array.isArray(rule.allowed_roles) && rule.allowed_roles.every((value) => value === 'admin' || value === 'user' || value === 'guest')))
 }
 
 function isValidShare(value: unknown): value is Share {
