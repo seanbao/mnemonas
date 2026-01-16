@@ -67,7 +67,8 @@ import {
   summarizeUserQuotas,
   userNeedsQuotaAttention,
   type QuotaUnit,
-type UserQuotaAggregateStatus,
+  type UserQuotaAggregateStatus,
+  type UserQuotaStatus,
   type UserQuotaTrendPoint,
 } from '@/lib/userQuota'
 import { formatUserAccountAttentionReport, summarizeUserAccountAttention } from '@/lib/userAccountAttention'
@@ -77,6 +78,7 @@ import { PageHeader } from '@/components/ui/PageHeader'
 import { EmptyState } from '@/components/ui/EmptyState'
 import { StatCard } from '@/components/ui/StatCard'
 import { getUserFacingErrorDescription } from '@/lib/apiMessages'
+import type { UserAccessContext } from '@/lib/userAccessContext'
 
 const usersUnavailableDescription = '用户配置当前不可用，请检查系统配置状态或稍后重试。'
 const usersLoadErrorDescription = '用户列表加载失败，请检查网络或稍后重试。'
@@ -88,6 +90,7 @@ const userQuotaTrendHistoryStoragePrefix = 'mnemonas:user-quota-trend'
 
 type UsersPageListUsersResponse = ListUsersResponse & {
   quotaTrendHistory: UserQuotaTrendPoint[]
+  quotaTrendHistorySource: 'server' | 'browser'
 }
 
 function utf8ByteLength(value: string): number {
@@ -528,6 +531,147 @@ function getQuotaAggregateBarClass(tone: UserQuotaAggregateStatus['tone']): stri
   return 'bg-default-300'
 }
 
+type QuotaPermissionReviewItem = {
+  user: User
+  quota: UserQuotaStatus
+  accessContext: UserAccessContext
+  reason: string
+  action: string
+  priority: number
+}
+
+type QuotaPermissionReviewSummary = {
+  label: string
+  detail: string
+  tone: 'success' | 'warning' | 'danger'
+  attentionCount: number
+  wideScopeAttentionCount: number
+  unlimitedPrivilegedCount: number
+  disabledWithUsageCount: number
+  items: QuotaPermissionReviewItem[]
+}
+
+function userHasWideAccessScope(user: Pick<User, 'role' | 'groups'>): boolean {
+  return user.role === 'admin' || (user.groups ?? []).length > 0
+}
+
+function getQuotaPermissionReviewPriority(
+  user: Pick<User, 'role' | 'disabled' | 'groups' | 'used_bytes'>,
+  quota: UserQuotaStatus,
+): number {
+  const hasWideScope = userHasWideAccessScope(user)
+  if (quota.status === 'exceeded') {
+    return hasWideScope ? 0 : 1
+  }
+  if (quota.status === 'warning') {
+    return hasWideScope ? 2 : 3
+  }
+  if (quota.status === 'unlimited' && !user.disabled && user.role === 'admin') {
+    return 4
+  }
+  if (quota.status === 'unlimited' && !user.disabled && hasWideScope) {
+    return 5
+  }
+  if (user.disabled && user.used_bytes > 0) {
+    return 6
+  }
+  return 7
+}
+
+function getQuotaPermissionReviewAction(
+  user: Pick<User, 'role' | 'disabled' | 'groups' | 'used_bytes'>,
+  quota: UserQuotaStatus,
+): string {
+  const hasWideScope = userHasWideAccessScope(user)
+  if (quota.status === 'exceeded' && hasWideScope) {
+    return '先处理超限数据，并复核该用户的共享或全局访问范围。'
+  }
+  if (quota.status === 'exceeded') {
+    return '先清理或扩容该用户主目录。'
+  }
+  if (quota.status === 'warning' && hasWideScope) {
+    return '复核近期增长是否来自共享路径，再决定扩容或归档。'
+  }
+  if (quota.status === 'warning') {
+    return '跟踪近期增长，必要时扩容或归档。'
+  }
+  if (user.disabled && user.used_bytes > 0) {
+    return '确认停用账号数据是否需要归档或删除。'
+  }
+  if (quota.status === 'unlimited' && !user.disabled && user.role === 'admin') {
+    return '确认管理员不限额是否仍符合长期运行策略。'
+  }
+  if (quota.status === 'unlimited' && !user.disabled && hasWideScope) {
+    return '确认共享路径访问用户是否需要容量上限。'
+  }
+  return '保持当前配额和授权范围。'
+}
+
+function getQuotaPermissionReviewReason(
+  user: Pick<User, 'role' | 'disabled' | 'groups' | 'used_bytes'>,
+  quota: UserQuotaStatus,
+): string {
+  const hasWideScope = userHasWideAccessScope(user)
+  if (quota.status === 'exceeded') {
+    return hasWideScope ? '配额超限且具备共享或全局访问范围' : '配额超限'
+  }
+  if (quota.status === 'warning') {
+    return hasWideScope ? '配额接近上限且具备共享或全局访问范围' : '配额接近上限'
+  }
+  if (user.disabled && user.used_bytes > 0) {
+    return '停用账号仍占用容量'
+  }
+  if (quota.status === 'unlimited' && !user.disabled && user.role === 'admin') {
+    return '管理员未设置容量上限'
+  }
+  if (quota.status === 'unlimited' && !user.disabled && hasWideScope) {
+    return '共享路径访问用户未设置容量上限'
+  }
+  return '暂无联合复核项'
+}
+
+function getQuotaPermissionReviewSummary(users: User[]): QuotaPermissionReviewSummary {
+  const items = users
+    .map((user): QuotaPermissionReviewItem | null => {
+      const quota = getQuotaStatus(user)
+      const accessContext = getUserAccessContext(user)
+      const priority = getQuotaPermissionReviewPriority(user, quota)
+      if (priority >= 7) {
+        return null
+      }
+      return {
+        user,
+        quota,
+        accessContext,
+        reason: getQuotaPermissionReviewReason(user, quota),
+        action: getQuotaPermissionReviewAction(user, quota),
+        priority,
+      }
+    })
+    .filter((item): item is QuotaPermissionReviewItem => item !== null)
+    .sort((left, right) => left.priority - right.priority || left.user.username.localeCompare(right.user.username))
+
+  const attentionCount = users.filter(userNeedsQuotaAttention).length
+  const wideScopeAttentionCount = users.filter((user) => userNeedsQuotaAttention(user) && userHasWideAccessScope(user)).length
+  const unlimitedPrivilegedCount = users.filter((user) => !user.disabled && getQuotaStatus(user).status === 'unlimited' && userHasWideAccessScope(user)).length
+  const disabledWithUsageCount = users.filter((user) => user.disabled && user.used_bytes > 0).length
+  const hasExceededQuota = items.some((item) => item.quota.status === 'exceeded')
+  const hasAnyReview = items.length > 0
+
+  return {
+    label: hasExceededQuota ? '存在超限访问' : hasAnyReview ? '需要联合复核' : '暂无联合风险',
+    detail: hasAnyReview
+      ? `${items.length} 个用户需要结合配额、主目录和授权范围复核。`
+      : '配额使用和权限范围暂无交叉复核项。',
+    tone: hasExceededQuota ? 'danger' : hasAnyReview ? 'warning' : 'success',
+    attentionCount,
+    wideScopeAttentionCount,
+    unlimitedPrivilegedCount,
+    disabledWithUsageCount,
+    items,
+  }
+}
+
 // Role badge component
 function RoleBadge({ role }: { role: string }) {
   const config = {
@@ -850,9 +994,18 @@ export function UsersPage() {
     queryKey: usersQueryKey,
     queryFn: async ({ signal }) => {
       const result = await listUsers({ signal })
+      const serverQuotaTrendHistory = normalizeUserQuotaTrendHistory(result.quota_history ?? [], userQuotaTrendHistoryLimit)
+      if (result.quota_history_available === true && serverQuotaTrendHistory.length > 0) {
+        return {
+          ...result,
+          quotaTrendHistory: serverQuotaTrendHistory,
+          quotaTrendHistorySource: 'server',
+        }
+      }
       return {
         ...result,
         quotaTrendHistory: updateUserQuotaTrendHistoryForUsers(quotaTrendHistoryStorageKey, result.users),
+        quotaTrendHistorySource: 'browser',
       }
     },
   })
@@ -1313,8 +1466,11 @@ export function UsersPage() {
   const userAccessReviewReport = users.length > 0 ? formatUserAccessReviewReport(users) : ''
   const usersLoadError = error ? getUsersLoadErrorPresentation(error) : null
   const quotaTrendHistory = data?.quotaTrendHistory ?? []
+  const quotaTrendHistorySource = data?.quotaTrendHistorySource ?? 'browser'
   const quotaTrendSummary = summarizeUserQuotaTrendHistory(quotaTrendHistory)
   const quotaTrendRecentPoints = normalizeUserQuotaTrendHistory(quotaTrendHistory, 4)
+  const quotaPermissionReview = getQuotaPermissionReviewSummary(users)
+  const quotaPermissionReviewItems = quotaPermissionReview.items.slice(0, 4)
 
   const handleCopyUserAccountAttention = async () => {
     if (!navigator.clipboard?.writeText) {
@@ -1567,6 +1723,9 @@ export function UsersPage() {
                 <Chip size="sm" variant="flat" color={quotaTrendSummary.tone}>
                   {quotaTrendSummary.label}
                 </Chip>
+                <Chip size="sm" variant="flat" color={quotaTrendHistorySource === 'server' ? 'primary' : 'default'}>
+                  {quotaTrendHistorySource === 'server' ? '服务端历史' : '当前浏览器'}
+                </Chip>
               </div>
               <p className="mt-1 text-xs text-default-500">{quotaTrendSummary.detail}</p>
             </div>
@@ -1625,6 +1784,101 @@ export function UsersPage() {
               ))}
             </div>
           )}
+        </section>
+      )}
+
+      {users.length > 0 && (
+        <section
+          className="mb-4 rounded-lg border border-divider bg-content1/70 px-4 py-3"
+          aria-label="用户配额权限复核"
+        >
+          <div className="flex flex-col gap-3 xl:flex-row xl:items-start xl:justify-between">
+            <div className="min-w-0">
+              <div className="flex min-w-0 flex-wrap items-center gap-2">
+                <ListChecks size={16} className="shrink-0 text-default-500" />
+                <h2 className="text-sm font-semibold text-foreground">配额与权限联合复核</h2>
+                <Chip size="sm" variant="flat" color={quotaPermissionReview.tone}>
+                  {quotaPermissionReview.label}
+                </Chip>
+              </div>
+              <p className="mt-1 text-xs text-default-500">{quotaPermissionReview.detail}</p>
+            </div>
+            <div className="grid grid-cols-2 gap-3 text-xs sm:grid-cols-4 xl:min-w-[34rem]">
+              <div>
+                <div className="text-default-500">配额关注</div>
+                <div className="mt-1 font-semibold text-foreground">{quotaPermissionReview.attentionCount} 个</div>
+              </div>
+              <div>
+                <div className="text-default-500">共享/全局范围</div>
+                <div className="mt-1 font-semibold text-foreground">{quotaPermissionReview.wideScopeAttentionCount} 个</div>
+              </div>
+              <div>
+                <div className="text-default-500">不限额特权</div>
+                <div className="mt-1 font-semibold text-foreground">{quotaPermissionReview.unlimitedPrivilegedCount} 个</div>
+              </div>
+              <div>
+                <div className="text-default-500">停用占用</div>
+                <div className="mt-1 font-semibold text-foreground">{quotaPermissionReview.disabledWithUsageCount} 个</div>
+              </div>
+            </div>
+          </div>
+          {quotaPermissionReviewItems.length > 0 ? (
+            <div className="mt-3 grid gap-2 lg:grid-cols-2">
+              {quotaPermissionReviewItems.map((item) => (
+                <div
+                  key={item.user.id}
+                  className="rounded-lg border border-divider bg-content2/50 px-3 py-2 text-xs"
+                >
+                  <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
+                    <div className="min-w-0">
+                      <div className="truncate font-semibold text-foreground">用户 {item.user.username}</div>
+                      <div className="mt-0.5 truncate font-mono text-default-500">主目录 {item.user.home_dir}</div>
+                    </div>
+                    <Chip size="sm" variant="flat" color={item.quota.tone}>
+                      配额：{item.quota.label}
+                    </Chip>
+                  </div>
+                  <div className="mt-2 grid gap-2 sm:grid-cols-2">
+                    <div>
+                      <div className="text-default-500">权限范围</div>
+                      <div className="mt-0.5 font-medium text-foreground">范围：{item.accessContext.scopeLabel}</div>
+                    </div>
+                    <div>
+                      <div className="text-default-500">复核原因</div>
+                      <div className="mt-0.5 font-medium text-foreground">{item.reason}</div>
+                    </div>
+                  </div>
+                  <div className="mt-2 rounded-md bg-content1 px-2 py-1.5 text-default-600">
+                    {item.action}
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="mt-3 rounded-lg border border-dashed border-divider bg-content2/40 px-3 py-2 text-xs text-default-500">
+              当前用户配额、主目录和授权范围没有需要联动处理的项目。
+            </div>
+          )}
+          <div className="mt-3 flex flex-wrap gap-2">
+            <Button
+              size="sm"
+              variant="flat"
+              className="rounded-lg"
+              startContent={<AlertCircle size={14} />}
+              onPress={() => handleFocusUserListFilter('quota-attention')}
+            >
+              查看配额关注
+            </Button>
+            <Button
+              size="sm"
+              variant="flat"
+              className="rounded-lg"
+              startContent={<Shield size={14} />}
+              onPress={() => handleFocusUserListFilter('access-review')}
+            >
+              查看复核提示
+            </Button>
+          </div>
         </section>
       )}
 

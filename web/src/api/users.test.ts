@@ -163,6 +163,48 @@ describe('Users API', () => {
     expect(result.total).toBe(1)
   })
 
+  it('normalizes server-side quota trend history in list users responses', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        success: true,
+        data: {
+          users: [validUser],
+          total: 1,
+          quota_history_available: true,
+          quota_history: [{
+            captured_at: '2024-01-02T00:00:00Z',
+            total_count: 1,
+            active_count: 1,
+            limited_count: 1,
+            warning_count: 0,
+            exceeded_count: 0,
+            attention_count: 0,
+            used_bytes: 512,
+            limited_used_bytes: 512,
+            quota_bytes: 1024,
+          }],
+        },
+      }),
+    })
+
+    const result = await listUsers()
+
+    expect(result.quota_history_available).toBe(true)
+    expect(result.quota_history).toEqual([{
+      capturedAt: '2024-01-02T00:00:00Z',
+      totalCount: 1,
+      activeCount: 1,
+      limitedCount: 1,
+      warningCount: 0,
+      exceededCount: 0,
+      attentionCount: 0,
+      usedBytes: 512,
+      limitedUsedBytes: 512,
+      quotaBytes: 1024,
+    }])
+  })
+
   it('unwraps wrapped create user responses', async () => {
     mockAuthFetch.mockResolvedValueOnce({
       ok: true,
@@ -365,6 +407,8 @@ describe('Users API', () => {
     ['relative home directory', { users: [{ ...validUser, home_dir: 'users/admin' }] }],
     ['trailing-slash home directory', { users: [{ ...validUser, home_dir: '/users/admin/' }] }],
     ['trimmed home directory', { users: [{ ...validUser, home_dir: ' /users/admin ' }] }],
+    ['malformed quota history', { users: [validUser], quota_history_available: true, quota_history: [{ captured_at: '2024-01-02T00:00:00Z', total_count: -1 }] }],
+    ['non-boolean quota history availability', { users: [validUser], quota_history_available: 'yes', quota_history: [] }],
     ['unsafe total', { users: [validUser], total: 9007199254740992 }],
     ['negative total', { users: [validUser], total: -1 }],
     ['total smaller than returned users', { users: [validUser, { ...validUser, id: 'u2', username: 'guest', role: 'guest' as const }], total: 1 }],

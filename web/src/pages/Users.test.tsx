@@ -1309,6 +1309,100 @@ describe('UsersPage', () => {
       expect(JSON.parse(window.localStorage.getItem('mnemonas:user-quota-trend:user-1') ?? '[]')).toHaveLength(2)
     })
 
+    it('prefers server-side quota trend history when available', async () => {
+      window.localStorage.setItem('mnemonas:user-quota-trend:user-1', JSON.stringify([
+        {
+          capturedAt: '2024-01-01T00:00:00Z',
+          totalCount: 3,
+          activeCount: 2,
+          limitedCount: 1,
+          warningCount: 0,
+          exceededCount: 0,
+          attentionCount: 0,
+          usedBytes: 1024,
+          limitedUsedBytes: 1024,
+          quotaBytes: 4096,
+        },
+      ]))
+      vi.mocked(usersApi.listUsers).mockResolvedValue({
+        success: true,
+        users: mockUsers,
+        total: mockUsers.length,
+        quota_history_available: true,
+        quota_history: [
+          {
+            capturedAt: '2024-01-03T00:00:00Z',
+            totalCount: 3,
+            activeCount: 2,
+            limitedCount: 2,
+            warningCount: 0,
+            exceededCount: 0,
+            attentionCount: 0,
+            usedBytes: 6144,
+            limitedUsedBytes: 4096,
+            quotaBytes: 8192,
+          },
+          {
+            capturedAt: '2024-01-02T00:00:00Z',
+            totalCount: 3,
+            activeCount: 2,
+            limitedCount: 2,
+            warningCount: 0,
+            exceededCount: 0,
+            attentionCount: 0,
+            usedBytes: 4096,
+            limitedUsedBytes: 2048,
+            quotaBytes: 8192,
+          },
+        ],
+      })
+
+      renderUsersPage()
+
+      const trend = await screen.findByLabelText('用户配额趋势')
+      expect(within(trend).getByText('服务端历史')).toBeInTheDocument()
+      expect(within(trend).getByText('受限用量增加')).toBeInTheDocument()
+      expect(within(trend).getByText('4 KB / 8 KB')).toBeInTheDocument()
+      expect(within(trend).getByText('+2 KB')).toBeInTheDocument()
+      expect(JSON.parse(window.localStorage.getItem('mnemonas:user-quota-trend:user-1') ?? '[]')).toHaveLength(1)
+    })
+
+    it('shows quota and permission context in one review view', async () => {
+      vi.mocked(usersApi.listUsers).mockResolvedValue({
+        success: true,
+        users: [
+          { ...mockUsers[0], quota_bytes: 0, used_bytes: 2048 },
+          { ...mockUsers[1], username: 'alice', groups: ['family'], quota_bytes: 1000, used_bytes: 950 },
+          { ...mockUsers[2], username: 'archived', disabled: true, quota_bytes: 1000, used_bytes: 512 },
+        ],
+        total: 3,
+      })
+
+      const user = userEvent.setup()
+      renderUsersPage()
+
+      const review = await screen.findByLabelText('用户配额权限复核')
+      expect(within(review).getByText('配额与权限联合复核')).toBeInTheDocument()
+      expect(within(review).getByText('需要联合复核')).toBeInTheDocument()
+      expect(review).toHaveTextContent('3 个用户需要结合配额、主目录和授权范围复核。')
+      expect(review).toHaveTextContent(/配额关注\s*1 个/)
+      expect(review).toHaveTextContent(/共享\/全局范围\s*1 个/)
+      expect(review).toHaveTextContent(/不限额特权\s*1 个/)
+      expect(review).toHaveTextContent(/停用占用\s*1 个/)
+      expect(within(review).getByText('用户 alice')).toBeInTheDocument()
+      expect(within(review).getByText('范围：主目录 + 用户组范围')).toBeInTheDocument()
+      expect(within(review).getByText('配额接近上限且具备共享或全局访问范围')).toBeInTheDocument()
+      expect(within(review).getByText('复核近期增长是否来自共享路径，再决定扩容或归档。')).toBeInTheDocument()
+      expect(within(review).getByText('用户 admin')).toBeInTheDocument()
+      expect(within(review).getByText('范围：管理员全局范围')).toBeInTheDocument()
+      expect(within(review).getByText('管理员未设置容量上限')).toBeInTheDocument()
+      expect(within(review).getByText('用户 archived')).toBeInTheDocument()
+      expect(within(review).getByText('停用账号仍占用容量')).toBeInTheDocument()
+
+      await user.click(within(review).getByRole('button', { name: '查看配额关注' }))
+      expect(screen.getByText('配额关注 1 / 3 个用户')).toBeInTheDocument()
+    })
+
     it('shows review hint count breakdown', async () => {
       vi.mocked(usersApi.listUsers).mockResolvedValue({
         success: true,
