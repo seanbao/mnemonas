@@ -6420,6 +6420,10 @@ func (s *Server) handleListActivityReviewRecords(w http.ResponseWriter, r *http.
 	if !ok {
 		return
 	}
+	actionGroupValue, ok := singleActivityQueryParam(w, query, "action_group")
+	if !ok {
+		return
+	}
 	sinceValue, ok := singleActivityQueryParam(w, query, "since")
 	if !ok {
 		return
@@ -6455,6 +6459,10 @@ func (s *Server) handleListActivityReviewRecords(w http.ResponseWriter, r *http.
 	if !ok {
 		return
 	}
+	groupActions, ok := parseActivityActionGroupQueryParam(w, actionGroupValue)
+	if !ok {
+		return
+	}
 	since, ok := parseActivityTimeQueryParam(w, sinceValue, "since")
 	if !ok {
 		return
@@ -6486,6 +6494,7 @@ func (s *Server) handleListActivityReviewRecords(w http.ResponseWriter, r *http.
 		Reviewer:          strings.TrimSpace(reviewer),
 		ActivityEntryID:   activityEntryID,
 		DispositionStatus: dispositionStatus,
+		Actions:           groupActions,
 		Since:             since,
 		Until:             until,
 	})

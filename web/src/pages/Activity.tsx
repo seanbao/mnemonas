@@ -100,10 +100,16 @@ const ACTIVITY_REVIEW_DISPOSITION_OPTIONS: Array<{ key: ActivityReviewDispositio
 ]
 
 type ActivityReviewDispositionFilterKey = 'all' | ActivityReviewDispositionStatus
+type ActivityReviewActionGroupFilterKey = 'all' | ActivityActionGroup
 
 const ACTIVITY_REVIEW_DISPOSITION_FILTER_OPTIONS: Array<{ key: ActivityReviewDispositionFilterKey; label: string }> = [
   { key: 'all', label: '全部处置' },
   ...ACTIVITY_REVIEW_DISPOSITION_OPTIONS,
+]
+
+const ACTIVITY_REVIEW_ACTION_GROUP_FILTER_OPTIONS: Array<{ key: ActivityReviewActionGroupFilterKey; label: string }> = [
+  { key: 'all', label: '全部类型' },
+  ...ACTIVITY_ACTION_GROUP_OPTIONS,
 ]
 
 const ACTIVITY_REVIEW_ACTIONS = new Set<ActionType>([
@@ -166,6 +172,10 @@ function isActivityReviewDispositionStatus(value: string | undefined): value is 
 
 function isActivityReviewDispositionFilterKey(value: string | undefined): value is ActivityReviewDispositionFilterKey {
   return value === 'all' || isActivityReviewDispositionStatus(value)
+}
+
+function isActivityReviewActionGroupFilterKey(value: string | undefined): value is ActivityReviewActionGroupFilterKey {
+  return value === 'all' || isActivityActionGroup(value)
 }
 
 function getActivityTimeRangeLabel(key: ActivityTimeRangeKey): string {
@@ -302,6 +312,7 @@ function activityReviewRecordMatchesFilters(
   record: ActivityReviewRecord,
   reviewerFilter: string,
   activityEntryIDFilter: string,
+  actionGroupFilter?: ActivityActionGroup,
   sinceFilter?: string,
   dispositionStatusFilter?: ActivityReviewDispositionStatus,
 ): boolean {
@@ -314,10 +325,18 @@ function activityReviewRecordMatchesFilters(
   if (dispositionStatusFilter && (record.disposition_status ?? 'documented') !== dispositionStatusFilter) {
     return false
   }
+  if (actionGroupFilter && !activityReviewRecordMatchesActionGroup(record, actionGroupFilter)) {
+    return false
+  }
   if (sinceFilter && Date.parse(record.reviewed_at) < Date.parse(sinceFilter)) {
     return false
   }
   return true
+}
+
+function activityReviewRecordMatchesActionGroup(record: ActivityReviewRecord, actionGroup: ActivityActionGroup): boolean {
+  const matchingActions = actionGroup === 'share' ? ACTIVITY_SHARE_ACTIONS : ACTIVITY_REVIEW_ACTIONS
+  return activityReviewRecordHasAction(record, matchingActions)
 }
 
 function prependActivityReviewRecord(
@@ -883,6 +902,7 @@ function ActivityReviewDispositionRecorder({
   reviewActivityEntryIDFilter,
   reviewTimeRangeFilter,
   reviewDispositionStatusFilter,
+  reviewActionGroupFilter,
   reviewDispositionStatus,
   note,
   onNoteChange,
@@ -890,10 +910,12 @@ function ActivityReviewDispositionRecorder({
   onReviewActivityEntryIDFilterChange,
   onReviewTimeRangeFilterChange,
   onReviewDispositionStatusFilterChange,
+  onReviewActionGroupFilterChange,
   onReviewDispositionStatusChange,
   onClearReviewRecordFilters,
   onExportReviewRecords,
   onShowFollowUpRecords,
+  onShowShareReviewRecords,
   onTraceReviewRecord,
   onOpenReviewRecordVersions,
   onOpenReviewRecordTrash,
@@ -918,6 +940,7 @@ function ActivityReviewDispositionRecorder({
   reviewActivityEntryIDFilter: string
   reviewTimeRangeFilter: ActivityTimeRangeKey
   reviewDispositionStatusFilter: ActivityReviewDispositionFilterKey
+  reviewActionGroupFilter: ActivityReviewActionGroupFilterKey
   reviewDispositionStatus: ActivityReviewDispositionStatus
   note: string
   onNoteChange: (value: string) => void
@@ -925,10 +948,12 @@ function ActivityReviewDispositionRecorder({
   onReviewActivityEntryIDFilterChange: (value: string) => void
   onReviewTimeRangeFilterChange: (value: string | undefined) => void
   onReviewDispositionStatusFilterChange: (value: string | undefined) => void
+  onReviewActionGroupFilterChange: (value: string | undefined) => void
   onReviewDispositionStatusChange: (value: string | undefined) => void
   onClearReviewRecordFilters: () => void
   onExportReviewRecords: () => void
   onShowFollowUpRecords: () => void
+  onShowShareReviewRecords: () => void
   onTraceReviewRecord: (record: ActivityReviewRecord) => void
   onOpenReviewRecordVersions: (record: ActivityReviewRecord) => void
   onOpenReviewRecordTrash: (record: ActivityReviewRecord) => void
@@ -941,6 +966,7 @@ function ActivityReviewDispositionRecorder({
   updatingReviewRecordID: string | null
 }) {
   const [reviewRecordDispositionNotes, setReviewRecordDispositionNotes] = useState<Record<string, string>>({})
+  const [expandedReviewRecordID, setExpandedReviewRecordID] = useState<string | null>(null)
   const reviewEntries = entries.filter(shouldReviewActivityEntry)
   if (reviewEntries.length === 0 && records.length === 0 && !recordsError && totalEntries <= entries.length) {
     return null
@@ -950,7 +976,7 @@ function ActivityReviewDispositionRecorder({
   const users = getUniqueActivityReviewValues(reviewEntries, (entry) => entry.user)
   const scopeLabel = getActivityReviewScopeLabel(isFiltered, reviewWindow)
   const trimmedNote = note.trim()
-  const hasRecordFilters = Boolean(reviewReviewerFilter.trim() || reviewActivityEntryIDFilter.trim() || reviewTimeRangeFilter !== 'all' || reviewDispositionStatusFilter !== 'all')
+  const hasRecordFilters = Boolean(reviewReviewerFilter.trim() || reviewActivityEntryIDFilter.trim() || reviewTimeRangeFilter !== 'all' || reviewDispositionStatusFilter !== 'all' || reviewActionGroupFilter !== 'all')
   const hasFollowUpRecords = followUpTotal > 0 || followUpRecords.length > 0
   const hiddenFollowUpRecords = Math.max(followUpTotal - followUpRecords.length, 0)
   const getReviewRecordDispositionNote = (record: ActivityReviewRecord): string => reviewRecordDispositionNotes[record.id] ?? ''
@@ -963,6 +989,81 @@ function ActivityReviewDispositionRecorder({
       ...current,
       [record.id]: value,
     }))
+  }
+  const renderReviewRecordDetailPanel = (record: ActivityReviewRecord) => {
+    const actionSummary = formatActivityReviewActionCounts(record.action_counts) || '未记录'
+    const pathSamples = record.path_samples ?? []
+    const userSamples = record.user_samples ?? []
+    const primaryPath = getActivityReviewRecordPrimaryPath(record)
+    const isShareReview = activityReviewRecordHasAction(record, ACTIVITY_SHARE_ACTIONS)
+
+    return (
+      <div aria-label={`复核记录详情 ${record.id}`} className="mt-2 rounded-lg border border-divider bg-content2/60 px-3 py-2 text-xs text-default-600 sm:col-span-2">
+        <div className="grid gap-2 md:grid-cols-2">
+          <div className="min-w-0">
+            <div className="flex items-center gap-2 font-medium text-foreground">
+              <ClipboardCheck size={14} />
+              <span>复核详情</span>
+            </div>
+            <dl className="mt-2 grid gap-1">
+              <div className="min-w-0">
+                <dt className="text-default-400">处置状态</dt>
+                <dd className="truncate text-foreground">{getActivityReviewDispositionStatusLabel(record.disposition_status)}</dd>
+              </div>
+              <div className="min-w-0">
+                <dt className="text-default-400">操作类型</dt>
+                <dd className="truncate text-foreground" title={actionSummary}>{actionSummary}</dd>
+              </div>
+              <div className="min-w-0">
+                <dt className="text-default-400">复核时间</dt>
+                <dd className="truncate text-foreground">{formatDate(record.reviewed_at)}</dd>
+              </div>
+              <div className="min-w-0">
+                <dt className="text-default-400">筛选条件</dt>
+                <dd className="truncate text-foreground" title={record.filter_summary || '未筛选'}>{record.filter_summary || '未筛选'}</dd>
+              </div>
+            </dl>
+          </div>
+
+          <div className="min-w-0">
+            <div className="flex items-center gap-2 font-medium text-foreground">
+              <ListChecks size={14} />
+              <span>复核线索</span>
+            </div>
+            <dl className="mt-2 grid gap-1">
+              <div className="min-w-0">
+                <dt className="text-default-400">关联活动</dt>
+                <dd className="truncate text-foreground" title={record.activity_entry_ids.join(', ')}>{record.activity_entry_ids.join(', ')}</dd>
+              </div>
+              {pathSamples.length > 0 && (
+                <div className="min-w-0">
+                  <dt className="text-default-400">完整路径样例</dt>
+                  <dd className="truncate text-foreground" title={pathSamples.join(', ')}>{pathSamples.join(', ')}</dd>
+                </div>
+              )}
+              {userSamples.length > 0 && (
+                <div className="min-w-0">
+                  <dt className="text-default-400">涉及用户</dt>
+                  <dd className="truncate text-foreground" title={userSamples.join(', ')}>{userSamples.join(', ')}</dd>
+                </div>
+              )}
+              {isShareReview && (
+                <div className="min-w-0 rounded-lg border border-primary/15 bg-primary/5 px-2 py-1">
+                  <dt className="flex items-center gap-1 text-primary">
+                    <Share2 size={13} />
+                    <span>分享处置线索</span>
+                  </dt>
+                  <dd className="mt-1 space-y-1 text-foreground">
+                    {primaryPath && <div className="truncate" title={primaryPath}>主要路径：{primaryPath}</div>}
+                    <div>核对项：密码、有效期、访问次数、是否仍需要公开访问</div>
+                  </dd>
+                </div>
+              )}
+            </dl>
+          </div>
+        </div>
+      </div>
+    )
   }
   const renderReviewRecordActions = (record: ActivityReviewRecord) => {
     const isUpdating = updatingReviewRecordID === record.id
@@ -1234,6 +1335,23 @@ function ActivityReviewDispositionRecorder({
             startContent={<Search size={14} />}
           />
           <Select
+            placeholder="复核类型"
+            size="sm"
+            className="w-full sm:w-36"
+            aria-label="筛选复核类型"
+            selectedKeys={[reviewActionGroupFilter]}
+            onSelectionChange={(keys) => {
+              onReviewActionGroupFilterChange(Array.from(keys)[0]?.toString())
+            }}
+            startContent={<Filter size={14} />}
+          >
+            {ACTIVITY_REVIEW_ACTION_GROUP_FILTER_OPTIONS.map((option) => (
+              <SelectItem key={option.key}>
+                {option.label}
+              </SelectItem>
+            ))}
+          </Select>
+          <Select
             placeholder="复核时间"
             size="sm"
             className="w-full sm:w-36"
@@ -1272,6 +1390,16 @@ function ActivityReviewDispositionRecorder({
           <Button
             size="sm"
             variant="flat"
+            className="h-8 rounded-lg px-2"
+            startContent={<Share2 size={14} />}
+            isDisabled={reviewActionGroupFilter === 'share'}
+            onPress={onShowShareReviewRecords}
+          >
+            只看分享复核
+          </Button>
+          <Button
+            size="sm"
+            variant="flat"
             color="warning"
             className="h-8 rounded-lg px-2"
             startContent={<ListChecks size={14} />}
@@ -1306,46 +1434,59 @@ function ActivityReviewDispositionRecorder({
 
       {records.length > 0 && (
         <div className="mt-3 divide-y divide-divider rounded-lg border border-divider">
-          {records.map((record) => (
-            <div key={record.id} className="grid gap-2 px-3 py-2 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-start">
-              <div className="min-w-0">
-                <div className="flex min-w-0 flex-wrap items-center gap-2">
-                  <span className="min-w-0 font-medium text-foreground">{record.note}</span>
-                  <Chip size="sm" variant="flat" color={record.disposition_status === 'needs_follow_up' ? 'warning' : 'primary'}>
-                    {getActivityReviewDispositionStatusLabel(record.disposition_status)}
-                  </Chip>
-                </div>
-                <div className="mt-1 text-xs text-default-500">
-                  {record.scope_label}：{record.review_count} 条待处置 / {record.total_count} 条总记录 · {record.path_count} 个路径 · {record.user_count} 个用户
-                </div>
-                {record.action_counts && (
-                  <div className="mt-1 truncate text-xs text-default-500" title={formatActivityReviewActionCounts(record.action_counts)}>
-                    类型：{formatActivityReviewActionCounts(record.action_counts)}
+          {records.map((record) => {
+            const isExpanded = expandedReviewRecordID === record.id
+            return (
+              <div key={record.id} className="grid gap-2 px-3 py-2 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-start">
+                <div className="min-w-0">
+                  <div className="flex min-w-0 flex-wrap items-center gap-2">
+                    <span className="min-w-0 font-medium text-foreground">{record.note}</span>
+                    <Chip size="sm" variant="flat" color={record.disposition_status === 'needs_follow_up' ? 'warning' : 'primary'}>
+                      {getActivityReviewDispositionStatusLabel(record.disposition_status)}
+                    </Chip>
                   </div>
-                )}
-                {record.path_samples && record.path_samples.length > 0 && (
-                  <div className="mt-1 truncate text-xs text-default-500" title={record.path_samples.join(', ')}>
-                    路径样例：{record.path_samples.join(', ')}
+                  <div className="mt-1 text-xs text-default-500">
+                    {record.scope_label}：{record.review_count} 条待处置 / {record.total_count} 条总记录 · {record.path_count} 个路径 · {record.user_count} 个用户
                   </div>
-                )}
-                {record.user_samples && record.user_samples.length > 0 && (
-                  <div className="mt-1 truncate text-xs text-default-500" title={record.user_samples.join(', ')}>
-                    用户样例：{record.user_samples.join(', ')}
+                  {record.action_counts && (
+                    <div className="mt-1 truncate text-xs text-default-500" title={formatActivityReviewActionCounts(record.action_counts)}>
+                      类型：{formatActivityReviewActionCounts(record.action_counts)}
+                    </div>
+                  )}
+                  {record.path_samples && record.path_samples.length > 0 && (
+                    <div className="mt-1 truncate text-xs text-default-500" title={record.path_samples.join(', ')}>
+                      路径样例：{record.path_samples.join(', ')}
+                    </div>
+                  )}
+                  {record.user_samples && record.user_samples.length > 0 && (
+                    <div className="mt-1 truncate text-xs text-default-500" title={record.user_samples.join(', ')}>
+                      用户样例：{record.user_samples.join(', ')}
+                    </div>
+                  )}
+                  <div className="mt-1 truncate text-xs text-default-500" title={record.filter_summary || '未筛选'}>
+                    条件：{record.filter_summary || '未筛选'}
                   </div>
-                )}
-                <div className="mt-1 truncate text-xs text-default-500" title={record.filter_summary || '未筛选'}>
-                  条件：{record.filter_summary || '未筛选'}
                 </div>
+                <div className="text-xs text-default-500 sm:text-right">
+                  <div>{record.reviewer}</div>
+                  <div>{formatRelativeTime(record.reviewed_at)}</div>
+                  <div className="mt-2 flex flex-wrap gap-1 sm:justify-end">
+                    <Button
+                      size="sm"
+                      variant="light"
+                      className="h-8 rounded-lg px-2.5"
+                      startContent={<ClipboardCheck size={13} />}
+                      onPress={() => setExpandedReviewRecordID(isExpanded ? null : record.id)}
+                    >
+                      {isExpanded ? '收起详情' : '查看详情'}
+                    </Button>
+                    {renderReviewRecordActions(record)}
+                  </div>
+                </div>
+                {isExpanded && renderReviewRecordDetailPanel(record)}
               </div>
-              <div className="text-xs text-default-500 sm:text-right">
-                <div>{record.reviewer}</div>
-                <div>{formatRelativeTime(record.reviewed_at)}</div>
-                <div className="mt-2 flex flex-wrap gap-1 sm:justify-end">
-                  {renderReviewRecordActions(record)}
-                </div>
-              </div>
-            </div>
-          ))}
+            )
+          })}
         </div>
       )}
     </div>
@@ -1495,6 +1636,7 @@ export function ActivityPage() {
   const [reviewRecordActivityEntryIDFilter, setReviewRecordActivityEntryIDFilter] = useState('')
   const [reviewRecordTimeRangeFilter, setReviewRecordTimeRangeFilter] = useState<ActivityTimeRangeKey>('all')
   const [reviewRecordDispositionStatusFilter, setReviewRecordDispositionStatusFilter] = useState<ActivityReviewDispositionFilterKey>('all')
+  const [reviewRecordActionGroupFilter, setReviewRecordActionGroupFilter] = useState<ActivityReviewActionGroupFilterKey>('all')
   const [isRecordingFilteredReview, setIsRecordingFilteredReview] = useState(false)
   const [isExportingReviewRecords, setIsExportingReviewRecords] = useState(false)
   const pageSize = 20
@@ -1511,14 +1653,17 @@ export function ActivityPage() {
   const normalizedReviewRecordDispositionStatusFilter = isAdmin && reviewRecordDispositionStatusFilter !== 'all'
     ? reviewRecordDispositionStatusFilter
     : undefined
+  const normalizedReviewRecordActionGroupFilter = isAdmin && reviewRecordActionGroupFilter !== 'all'
+    ? reviewRecordActionGroupFilter
+    : undefined
   const pathFilterState = useMemo(() => parseActivityPathFilter(pathFilter), [pathFilter])
   const normalizedPathFilter = pathFilterState.normalizedPath
   const pathFilterErrorMessage = pathFilterState.errorMessage
   const timeRangeSinceFilter = useMemo(() => getActivityTimeRangeSince(timeRangeFilter), [timeRangeFilter])
   const reviewRecordSinceFilter = useMemo(() => getActivityTimeRangeSince(reviewRecordTimeRangeFilter), [reviewRecordTimeRangeFilter])
   const activityReviewRecordsQueryKey = useMemo(
-    () => ['activity-review-records', authScopeKey, normalizedReviewRecordReviewerFilter, normalizedReviewRecordActivityEntryIDFilter, normalizedReviewRecordDispositionStatusFilter, reviewRecordSinceFilter] as const,
-    [authScopeKey, normalizedReviewRecordReviewerFilter, normalizedReviewRecordActivityEntryIDFilter, normalizedReviewRecordDispositionStatusFilter, reviewRecordSinceFilter],
+    () => ['activity-review-records', authScopeKey, normalizedReviewRecordReviewerFilter, normalizedReviewRecordActivityEntryIDFilter, normalizedReviewRecordDispositionStatusFilter, normalizedReviewRecordActionGroupFilter, reviewRecordSinceFilter] as const,
+    [authScopeKey, normalizedReviewRecordReviewerFilter, normalizedReviewRecordActivityEntryIDFilter, normalizedReviewRecordDispositionStatusFilter, normalizedReviewRecordActionGroupFilter, reviewRecordSinceFilter],
   )
   const activityReviewFollowUpRecordsQueryKey = useMemo(
     () => ['activity-review-follow-up-records', authScopeKey] as const,
@@ -1565,6 +1710,7 @@ export function ActivityPage() {
       reviewer: normalizedReviewRecordReviewerFilter || undefined,
       activityEntryId: normalizedReviewRecordActivityEntryIDFilter || undefined,
       dispositionStatus: normalizedReviewRecordDispositionStatusFilter,
+      actionGroup: normalizedReviewRecordActionGroupFilter,
       since: reviewRecordSinceFilter,
       signal,
     }),
@@ -1631,7 +1777,7 @@ export function ActivityPage() {
     mutationFn: ({ input }: { input: ActivityReviewRecordCreateInput; successTitle: string }) => createActivityReviewRecord(input),
     retry: false,
     onSuccess: (record, variables) => {
-      if (activityReviewRecordMatchesFilters(record, normalizedReviewRecordReviewerFilter, normalizedReviewRecordActivityEntryIDFilter, reviewRecordSinceFilter, normalizedReviewRecordDispositionStatusFilter)) {
+      if (activityReviewRecordMatchesFilters(record, normalizedReviewRecordReviewerFilter, normalizedReviewRecordActivityEntryIDFilter, normalizedReviewRecordActionGroupFilter, reviewRecordSinceFilter, normalizedReviewRecordDispositionStatusFilter)) {
         queryClient.setQueryData<ActivityReviewRecordListResponse>(activityReviewRecordsQueryKey, (current) => {
           return prependActivityReviewRecord(current, record, 5)
         })
@@ -1671,6 +1817,7 @@ export function ActivityPage() {
             candidate,
             normalizedReviewRecordReviewerFilter,
             normalizedReviewRecordActivityEntryIDFilter,
+            normalizedReviewRecordActionGroupFilter,
             reviewRecordSinceFilter,
             normalizedReviewRecordDispositionStatusFilter,
           ),
@@ -1767,6 +1914,10 @@ export function ActivityPage() {
     setReviewRecordDispositionStatusFilter(isActivityReviewDispositionFilterKey(nextValue) ? nextValue : 'all')
   }
 
+  const handleReviewRecordActionGroupFilterChange = (nextValue: string | undefined) => {
+    setReviewRecordActionGroupFilter(isActivityReviewActionGroupFilterKey(nextValue) ? nextValue : 'all')
+  }
+
   const handleReviewDispositionStatusChange = (nextValue: string | undefined) => {
     if (isActivityReviewDispositionStatus(nextValue)) {
       setReviewDispositionStatus(nextValue)
@@ -1778,6 +1929,7 @@ export function ActivityPage() {
     setReviewRecordActivityEntryIDFilter('')
     setReviewRecordTimeRangeFilter('all')
     setReviewRecordDispositionStatusFilter('all')
+    setReviewRecordActionGroupFilter('all')
   }
 
   const handleShowFollowUpReviewRecords = () => {
@@ -1785,6 +1937,15 @@ export function ActivityPage() {
     setReviewRecordActivityEntryIDFilter('')
     setReviewRecordTimeRangeFilter('all')
     setReviewRecordDispositionStatusFilter('needs_follow_up')
+    setReviewRecordActionGroupFilter('all')
+  }
+
+  const handleShowShareReviewRecords = () => {
+    setReviewRecordReviewerFilter('')
+    setReviewRecordActivityEntryIDFilter('')
+    setReviewRecordTimeRangeFilter('all')
+    setReviewRecordDispositionStatusFilter('all')
+    setReviewRecordActionGroupFilter('share')
   }
 
   const handleTraceReviewRecordActivity = (record: ActivityReviewRecord) => {
@@ -1894,6 +2055,7 @@ export function ActivityPage() {
         reviewer: normalizedReviewRecordReviewerFilter || undefined,
         activityEntryId: normalizedReviewRecordActivityEntryIDFilter || undefined,
         dispositionStatus: normalizedReviewRecordDispositionStatusFilter,
+        actionGroup: normalizedReviewRecordActionGroupFilter,
         since: reviewRecordSinceFilter,
       })
       if (result.items.length === 0) {
@@ -2345,6 +2507,7 @@ export function ActivityPage() {
           reviewActivityEntryIDFilter={reviewRecordActivityEntryIDFilter}
           reviewTimeRangeFilter={reviewRecordTimeRangeFilter}
           reviewDispositionStatusFilter={reviewRecordDispositionStatusFilter}
+          reviewActionGroupFilter={reviewRecordActionGroupFilter}
           reviewDispositionStatus={reviewDispositionStatus}
           note={reviewDispositionNote}
           onNoteChange={setReviewDispositionNote}
@@ -2352,10 +2515,12 @@ export function ActivityPage() {
           onReviewActivityEntryIDFilterChange={setReviewRecordActivityEntryIDFilter}
           onReviewTimeRangeFilterChange={handleReviewRecordTimeRangeChange}
           onReviewDispositionStatusFilterChange={handleReviewRecordDispositionStatusFilterChange}
+          onReviewActionGroupFilterChange={handleReviewRecordActionGroupFilterChange}
           onReviewDispositionStatusChange={handleReviewDispositionStatusChange}
           onClearReviewRecordFilters={handleClearReviewRecordFilters}
           onExportReviewRecords={handleExportReviewRecords}
           onShowFollowUpRecords={handleShowFollowUpReviewRecords}
+          onShowShareReviewRecords={handleShowShareReviewRecords}
           onTraceReviewRecord={handleTraceReviewRecordActivity}
           onOpenReviewRecordVersions={handleOpenReviewRecordVersions}
           onOpenReviewRecordTrash={handleOpenReviewRecordTrash}

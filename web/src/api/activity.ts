@@ -379,6 +379,7 @@ export interface ActivityReviewRecordListOptions extends ActivityRequestOptions 
   reviewer?: string
   activityEntryId?: string
   dispositionStatus?: ActivityReviewDispositionStatus
+  actionGroup?: ActivityActionGroup
   since?: string
   until?: string
 }
@@ -525,6 +526,7 @@ export async function listActivityReviewRecords(options?: ActivityReviewRecordLi
   if (options?.reviewer) params.set('reviewer', options.reviewer)
   if (options?.activityEntryId) params.set('activity_entry_id', options.activityEntryId)
   if (options?.dispositionStatus) params.set('disposition_status', options.dispositionStatus)
+  if (options?.actionGroup) params.set('action_group', options.actionGroup)
   if (options?.since) params.set('since', options.since)
   if (options?.until) params.set('until', options.until)
   const url = buildActivityUrl('/activity/reviews', params)
