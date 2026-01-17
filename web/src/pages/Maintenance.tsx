@@ -1422,6 +1422,49 @@ function getBatchRestoreCutoverCandidateReviewText(item: BackupBatchRestoreItemR
   return '只读校验通过，可作为 storage.root 候选目录；切换前保留原目录和原配置。'
 }
 
+function getBatchRestoreItemDispositionText(item: BackupBatchRestoreItemResult): string {
+  const normalizedError = item.error_message ? normalizeDiagnosticMessageKey(item.error_message) : ''
+  if (item.status === 'failed') {
+    if (normalizedError.includes('restore target already exists') || normalizedError.includes('restore target conflicts with batch item')) {
+      return '目标冲突未写入：保留现有目标目录，改为新的独立目录后重新生成批量预览。'
+    }
+    if (normalizedError.includes('batch restore preflight failed')) {
+      return '预检拦截未写入：处理失败预检项后重新生成批量预览。'
+    }
+    return '恢复失败：确认目标目录状态和错误原因后重新预览，未完成项不能进入切换。'
+  }
+  if (!item.restore || item.restore.status !== 'completed') {
+    return '恢复未完成：等待结果或重新执行后再判断冲突处置。'
+  }
+  if (!item.verify) {
+    return '等待只读校验：缺少校验结果前不能切换或覆盖原目录。'
+  }
+  if (item.verify.status === 'failed') {
+    return '阻止切换：只读校验失败，处理失败原因后重新校验。'
+  }
+  if (!item.verify.looks_like_storage_root) {
+    return '人工复核：未确认完整 storage.root 结构，按子目录迁移或重新恢复处理。'
+  }
+  if ((item.verify.warnings?.length ?? 0) > 0 || (item.warnings?.length ?? 0) > 0 || (item.restore.warnings?.length ?? 0) > 0) {
+    return '暂缓切换：恢复或只读校验存在警告，复核警告后再决定是否切换。'
+  }
+  return '可进入切换复核：只读校验通过，未发现覆盖当前 storage.root 的冲突。'
+}
+
+function getBatchRestoreItemDispositionTone(item: BackupBatchRestoreItemResult): RestoreImpactTone {
+  const disposition = getBatchRestoreItemDispositionText(item)
+  if (disposition.startsWith('可进入切换复核')) {
+    return 'success'
+  }
+  if (disposition.startsWith('恢复未完成') || disposition.startsWith('等待只读校验')) {
+    return 'default'
+  }
+  if (disposition.startsWith('阻止切换') || disposition.startsWith('目标冲突') || disposition.startsWith('预检拦截') || disposition.startsWith('恢复失败')) {
+    return 'danger'
+  }
+  return 'warning'
+}
+
 function formatBatchRestoreResultReport(result: BackupBatchRestoreResult): string {
   const sections = [
     '批量恢复记录',
@@ -1446,6 +1489,7 @@ function formatBatchRestoreResultReport(result: BackupBatchRestoreResult): strin
       `   恢复内容：${item.restore ? getBackupRestoreMetricText(item.restore) : '未完成恢复写入'}`,
       `   配置文件：${getBatchRestoreItemConfigText(item)}`,
       `   只读校验：${getBatchRestoreItemVerifyText(item)}`,
+      `   处置建议：${getBatchRestoreItemDispositionText(item)}`,
     ]
     const snapshotPath = item.verify?.snapshot_path ?? item.restore?.snapshot_path
     if (snapshotPath) {
@@ -1473,6 +1517,10 @@ function formatBatchRestoreResultReport(result: BackupBatchRestoreResult): strin
     '',
     '项目结果',
     ...itemSections,
+    '',
+    '冲突处置记录',
+    '覆盖边界：批量恢复只写入各自目标目录，不覆盖当前 storage.root；失败项和未通过校验项不能进入切换。',
+    ...result.items.map((item, index) => `${index + 1}. ${item.job_id}：${getBatchRestoreItemDispositionText(item)}`),
     ...(cutoverCandidateSections.length > 0 ? ['', '跨目录切换候选', ...cutoverCandidateSections] : []),
   ].join('\n')
 }
@@ -2620,6 +2668,27 @@ function BatchRestoreResultSummary({ result }: { result: BackupBatchRestoreResul
           </div>
         </div>
       )}
+      {result.items.length > 0 && (
+        <div aria-label="批量恢复冲突处置记录" className="rounded-lg border border-divider bg-content1 p-3 text-sm">
+          <div className="flex items-center gap-2 font-medium text-default-800">
+            <FileWarning size={16} />
+            <span>冲突处置记录</span>
+          </div>
+          <div className="mt-2 text-xs leading-5 text-default-500">
+            批量恢复只写入各自目标目录，不覆盖当前 storage.root；失败项和未通过校验项不能进入切换。
+          </div>
+          <div className="mt-3 grid gap-2">
+            {result.items.map((item) => (
+              <RestoreImpactItem
+                key={`${item.index}-${item.job_id}-disposition`}
+                label={item.job_id}
+                value={getBatchRestoreItemDispositionText(item)}
+                tone={getBatchRestoreItemDispositionTone(item)}
+              />
+            ))}
+          </div>
+        </div>
+      )}
       <div className="space-y-2">
         {result.items.map((item) => (
           <div key={`${item.index}-${item.job_id}`} className="rounded-lg border border-divider bg-content2/60 p-3 text-sm">
@@ -2643,6 +2712,7 @@ function BatchRestoreResultSummary({ result }: { result: BackupBatchRestoreResul
             )}
             {item.warnings && item.warnings.length > 0 && <div className="mt-1 text-warning">{getBackupDiagnosticDisplayMessage(item.warnings[0])}</div>}
             {item.error_message && <div className="mt-1 text-danger">{getBackupDiagnosticDisplayMessage(item.error_message)}</div>}
+            <div className="mt-2 text-default-500">处置建议：{getBatchRestoreItemDispositionText(item)}</div>
           </div>
         ))}
       </div>
