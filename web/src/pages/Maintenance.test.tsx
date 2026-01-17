@@ -3304,6 +3304,339 @@ describe('MaintenancePage', () => {
       expect(screen.queryByText('item 1: restore target already exists')).toBeNull()
     })
 
+    it('records mixed batch restore disposition examples for verification failures, partial roots, warnings, and preflight blocks', async () => {
+      const writeText = vi.fn().mockResolvedValue(undefined)
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: { writeText },
+      })
+      const verifyFailedJob = {
+        ...mockBackupJobs[0],
+        id: 'usb-nightly',
+        name: 'USB 夜间备份',
+        destination: '/mnt/usb-nightly/mnemonas',
+      }
+      const partialRootJob = {
+        ...mockBackupJobs[0],
+        id: 'photos-archive',
+        name: '照片归档备份',
+        destination: '/mnt/photos-archive/mnemonas',
+        include_config: false,
+      }
+      const warningJob = {
+        ...mockBackupJobs[0],
+        id: 'nas-lan',
+        name: '局域网 NAS 备份',
+        destination: '/mnt/nas-lan/mnemonas',
+      }
+      const preflightBlockedJob = {
+        ...mockBackupJobs[0],
+        id: 'cloud-coldline',
+        name: '冷归档备份',
+        type: 'rclone',
+        destination: 'coldline:mnemonas',
+      }
+
+      mockListBackupJobs.mockResolvedValue([verifyFailedJob, partialRootJob, warningJob, preflightBlockedJob])
+      mockPreviewBatchBackupRestore.mockResolvedValueOnce({
+        id: 'batch-preview-disposition-examples',
+        status: 'completed',
+        started_at: '2026-05-09T03:59:00Z',
+        finished_at: '2026-05-09T03:59:01Z',
+        duration_ms: 1000,
+        total_files: 33,
+        total_bytes: 12288,
+        items: [{
+          index: 0,
+          job_id: 'usb-nightly',
+          target_path: '/restore/usb-nightly',
+          include_config: true,
+          status: 'completed',
+          preview: {
+            id: 'preview-usb-nightly',
+            job_id: 'usb-nightly',
+            status: 'completed',
+            started_at: '2026-05-09T03:59:00Z',
+            finished_at: '2026-05-09T03:59:01Z',
+            duration_ms: 1000,
+            source: '/srv/mnemonas',
+            destination: '/mnt/usb-nightly/mnemonas',
+            target_path: '/restore/usb-nightly',
+            file_count: 12,
+            total_bytes: 4096,
+            config_available: true,
+            config_included: true,
+          },
+        }, {
+          index: 1,
+          job_id: 'photos-archive',
+          target_path: '/restore/photos-archive',
+          include_config: false,
+          status: 'completed',
+          preview: {
+            id: 'preview-photos-archive',
+            job_id: 'photos-archive',
+            status: 'completed',
+            started_at: '2026-05-09T03:59:00Z',
+            finished_at: '2026-05-09T03:59:01Z',
+            duration_ms: 1000,
+            source: '/srv/mnemonas',
+            destination: '/mnt/photos-archive/mnemonas',
+            target_path: '/restore/photos-archive',
+            file_count: 8,
+            total_bytes: 2048,
+            config_available: false,
+            config_included: false,
+          },
+        }, {
+          index: 2,
+          job_id: 'nas-lan',
+          target_path: '/restore/nas-lan',
+          include_config: true,
+          status: 'completed',
+          preview: {
+            id: 'preview-nas-lan',
+            job_id: 'nas-lan',
+            status: 'completed',
+            started_at: '2026-05-09T03:59:00Z',
+            finished_at: '2026-05-09T03:59:01Z',
+            duration_ms: 1000,
+            source: '/srv/mnemonas',
+            destination: '/mnt/nas-lan/mnemonas',
+            target_path: '/restore/nas-lan',
+            file_count: 9,
+            total_bytes: 4096,
+            config_available: true,
+            config_included: true,
+          },
+        }, {
+          index: 3,
+          job_id: 'cloud-coldline',
+          target_path: '/restore/cloud-coldline',
+          include_config: true,
+          status: 'completed',
+          preview: {
+            id: 'preview-cloud-coldline',
+            job_id: 'cloud-coldline',
+            status: 'completed',
+            started_at: '2026-05-09T03:59:00Z',
+            finished_at: '2026-05-09T03:59:01Z',
+            duration_ms: 1000,
+            source: '/srv/mnemonas',
+            destination: 'coldline:mnemonas',
+            target_path: '/restore/cloud-coldline',
+            file_count: 4,
+            total_bytes: 2048,
+            config_available: true,
+            config_included: true,
+          },
+        }],
+      })
+      mockRunBatchBackupRestore.mockResolvedValueOnce({
+        id: 'batch-restore-disposition-examples',
+        status: 'completed',
+        started_at: '2026-05-09T04:00:00Z',
+        finished_at: '2026-05-09T04:00:04Z',
+        duration_ms: 4000,
+        total_files: 29,
+        verified_bytes: 10240,
+        warning: true,
+        warnings: ['item 3: batch restore preflight failed before this item started'],
+        error_message: '1 of 4 batch restore items failed',
+        items: [{
+          index: 0,
+          job_id: 'usb-nightly',
+          target_path: '/restore/usb-nightly',
+          include_config: true,
+          status: 'completed',
+          restore: {
+            id: 'restore-usb-nightly',
+            job_id: 'usb-nightly',
+            status: 'completed',
+            started_at: '2026-05-09T04:00:00Z',
+            finished_at: '2026-05-09T04:00:01Z',
+            duration_ms: 1000,
+            target_path: '/restore/usb-nightly',
+            config_restored: true,
+            config_path: '/restore/usb-nightly/.mnemonas-restore/config.toml',
+            file_count: 12,
+            verified_bytes: 4096,
+            warnings: [],
+          },
+          verify: {
+            id: 'verify-usb-nightly',
+            job_id: 'usb-nightly',
+            status: 'failed',
+            started_at: '2026-05-09T04:00:01Z',
+            finished_at: '2026-05-09T04:00:02Z',
+            duration_ms: 1000,
+            source: '/srv/mnemonas',
+            destination: '/mnt/usb-nightly/mnemonas',
+            target_path: '/restore/usb-nightly',
+            file_count: 12,
+            verified_bytes: 4096,
+            config_found: true,
+            files_dir_found: true,
+            internal_dir_found: true,
+            index_found: true,
+            objects_dir_found: true,
+            looks_like_storage_root: true,
+            warnings: [],
+            error_message: 'manifest checksum mismatch',
+          },
+          warnings: [],
+        }, {
+          index: 1,
+          job_id: 'photos-archive',
+          target_path: '/restore/photos-archive',
+          include_config: false,
+          status: 'completed',
+          restore: {
+            id: 'restore-photos-archive',
+            job_id: 'photos-archive',
+            status: 'completed',
+            started_at: '2026-05-09T04:00:00Z',
+            finished_at: '2026-05-09T04:00:01Z',
+            duration_ms: 1000,
+            target_path: '/restore/photos-archive',
+            config_restored: false,
+            file_count: 8,
+            verified_bytes: 2048,
+            warnings: [],
+          },
+          verify: {
+            id: 'verify-photos-archive',
+            job_id: 'photos-archive',
+            status: 'completed',
+            started_at: '2026-05-09T04:00:01Z',
+            finished_at: '2026-05-09T04:00:02Z',
+            duration_ms: 1000,
+            source: '/srv/mnemonas',
+            destination: '/mnt/photos-archive/mnemonas',
+            target_path: '/restore/photos-archive',
+            file_count: 8,
+            verified_bytes: 2048,
+            config_found: false,
+            files_dir_found: true,
+            internal_dir_found: false,
+            index_found: false,
+            objects_dir_found: false,
+            looks_like_storage_root: false,
+            warnings: [],
+          },
+          warnings: [],
+        }, {
+          index: 2,
+          job_id: 'nas-lan',
+          target_path: '/restore/nas-lan',
+          include_config: true,
+          status: 'completed',
+          restore: {
+            id: 'restore-nas-lan',
+            job_id: 'nas-lan',
+            status: 'completed',
+            started_at: '2026-05-09T04:00:00Z',
+            finished_at: '2026-05-09T04:00:01Z',
+            duration_ms: 1000,
+            target_path: '/restore/nas-lan',
+            config_restored: true,
+            config_path: '/restore/nas-lan/.mnemonas-restore/config.toml',
+            file_count: 9,
+            verified_bytes: 4096,
+            warnings: ['目标文件系统剩余空间接近下限。'],
+          },
+          verify: {
+            id: 'verify-nas-lan',
+            job_id: 'nas-lan',
+            status: 'completed',
+            started_at: '2026-05-09T04:00:01Z',
+            finished_at: '2026-05-09T04:00:02Z',
+            duration_ms: 1000,
+            source: '/srv/mnemonas',
+            destination: '/mnt/nas-lan/mnemonas',
+            target_path: '/restore/nas-lan',
+            file_count: 9,
+            verified_bytes: 4096,
+            config_found: true,
+            files_dir_found: true,
+            internal_dir_found: true,
+            index_found: true,
+            objects_dir_found: true,
+            looks_like_storage_root: true,
+            warnings: [],
+          },
+          warnings: ['目标文件系统剩余空间接近下限。'],
+        }, {
+          index: 3,
+          job_id: 'cloud-coldline',
+          target_path: '/restore/cloud-coldline',
+          include_config: true,
+          status: 'failed',
+          error_message: 'batch restore preflight failed before this item started',
+        }],
+      })
+
+      render(<Maintenance />)
+
+      await waitFor(() => {
+        expect(screen.getByText('USB 夜间备份')).toBeTruthy()
+        expect(screen.getByText('照片归档备份')).toBeTruthy()
+        expect(screen.getByText('局域网 NAS 备份')).toBeTruthy()
+        expect(screen.getByText('冷归档备份')).toBeTruthy()
+      })
+
+      fireEvent.click(screen.getByRole('button', { name: /批量恢复/ }))
+      selectBatchRestoreJob('USB 夜间备份')
+      selectBatchRestoreJob('照片归档备份')
+      selectBatchRestoreJob('局域网 NAS 备份')
+      selectBatchRestoreJob('冷归档备份')
+      fireEvent.change(screen.getByLabelText('USB 夜间备份 目标目录'), { target: { value: '/restore/usb-nightly' } })
+      fireEvent.change(screen.getByLabelText('照片归档备份 目标目录'), { target: { value: '/restore/photos-archive' } })
+      fireEvent.change(screen.getByLabelText('局域网 NAS 备份 目标目录'), { target: { value: '/restore/nas-lan' } })
+      fireEvent.change(screen.getByLabelText('冷归档备份 目标目录'), { target: { value: '/restore/cloud-coldline' } })
+      fireEvent.click(screen.getByRole('button', { name: /生成批量预览/ }))
+
+      await waitFor(() => {
+        expect(screen.getByText('批量预览结果')).toBeTruthy()
+      })
+
+      fireEvent.click(screen.getByRole('button', { name: /开始批量恢复/ }))
+
+      await waitFor(() => {
+        expect(screen.getByText('1 / 4 个批量恢复项目失败')).toBeTruthy()
+        const dispositions = within(screen.getByLabelText('批量恢复冲突处置记录'))
+        expect(dispositions.getByText('阻止切换：只读校验失败，处理失败原因后重新校验。')).toBeTruthy()
+        expect(dispositions.getByText('人工复核：未确认完整 storage.root 结构，按子目录迁移或重新恢复处理。')).toBeTruthy()
+        expect(dispositions.getByText('暂缓切换：恢复或只读校验存在警告，复核警告后再决定是否切换。')).toBeTruthy()
+        expect(dispositions.getByText('预检拦截未写入：处理失败预检项后重新生成批量预览。')).toBeTruthy()
+        const cutoverCandidates = within(screen.getByLabelText('批量恢复跨目录切换候选'))
+        expect(cutoverCandidates.getByText('只读校验失败，处理后重新校验再切换。')).toBeTruthy()
+        expect(cutoverCandidates.getByText('未确认完整 storage.root 结构，切换前需人工复核目录内容。')).toBeTruthy()
+        expect(cutoverCandidates.getByText('只读校验通过，可作为 storage.root 候选目录；切换前保留原目录和原配置。')).toBeTruthy()
+        expect(screen.getByText('校验错误：manifest checksum mismatch')).toBeTruthy()
+      })
+
+      fireEvent.click(screen.getByRole('button', { name: /复制批量恢复记录/ }))
+
+      await waitFor(() => {
+        expect(writeText).toHaveBeenCalledTimes(1)
+      })
+      const report = String(writeText.mock.calls[0]?.[0] ?? '')
+      expect(report).toContain('冲突处置记录')
+      expect(report).toContain('1. usb-nightly：阻止切换：只读校验失败，处理失败原因后重新校验。')
+      expect(report).toContain('2. photos-archive：人工复核：未确认完整 storage.root 结构，按子目录迁移或重新恢复处理。')
+      expect(report).toContain('3. nas-lan：暂缓切换：恢复或只读校验存在警告，复核警告后再决定是否切换。')
+      expect(report).toContain('4. cloud-coldline：预检拦截未写入：处理失败预检项后重新生成批量预览。')
+      expect(report).toContain('只读校验：检查失败；恢复目录检查失败；可作为完整 storage.root 候选目录')
+      expect(report).toContain('校验错误：manifest checksum mismatch')
+      expect(report).toContain('只读校验：检查完成；检查 8 个文件 · 2 KB；未确认完整 storage.root 结构')
+      expect(report).toContain('警告：目标文件系统剩余空间接近下限。；目标文件系统剩余空间接近下限。')
+      expect(report).toContain('错误：批量恢复预检未通过，该项目未开始写入')
+      expect(report).toContain('切换复核：只读校验失败，处理后重新校验再切换。')
+      expect(report).toContain('切换复核：未确认完整 storage.root 结构，切换前需人工复核目录内容。')
+      expect(report).toContain('切换复核：只读校验通过，可作为 storage.root 候选目录；切换前保留原目录和原配置。')
+    })
+
     it('keeps unknown indexed batch restore warnings unchanged', async () => {
       const rawWarning = 'item 0: RCLONE Exit Status 1'
       mockListBackupJobs.mockResolvedValue(mockBackupJobs)
