@@ -1499,6 +1499,9 @@ function formatBatchRestoreResultReport(result: BackupBatchRestoreResult): strin
     if (warningText) {
       lines.push(`   警告：${warningText}`)
     }
+    if (item.verify?.error_message) {
+      lines.push(`   校验错误：${getBackupDiagnosticDisplayMessage(item.verify.error_message)}`)
+    }
     if (item.error_message) {
       lines.push(`   错误：${getBackupDiagnosticDisplayMessage(item.error_message)}`)
     }
@@ -2697,7 +2700,7 @@ function BatchRestoreResultSummary({ result }: { result: BackupBatchRestoreResul
                 <div className="font-medium">{item.job_id}</div>
                 <div className="truncate font-mono text-xs text-default-500" title={item.target_path}>{item.target_path}</div>
               </div>
-              <BackupStatusChip status={item.status} warning={(item.warnings?.length ?? 0) > 0 || (item.verify?.warnings?.length ?? 0) > 0} />
+              <BackupStatusChip status={item.status} warning={(item.warnings?.length ?? 0) > 0 || item.verify?.status === 'failed' || (item.verify?.warnings?.length ?? 0) > 0 || Boolean(item.verify?.error_message)} />
             </div>
             {item.restore && <div className="mt-2 text-default-500">{getBackupRestoreMetricText(item.restore)}</div>}
             {item.verify && (
@@ -2711,6 +2714,7 @@ function BatchRestoreResultSummary({ result }: { result: BackupBatchRestoreResul
               </div>
             )}
             {item.warnings && item.warnings.length > 0 && <div className="mt-1 text-warning">{getBackupDiagnosticDisplayMessage(item.warnings[0])}</div>}
+            {item.verify?.error_message && <div className="mt-1 text-danger">校验错误：{getBackupDiagnosticDisplayMessage(item.verify.error_message)}</div>}
             {item.error_message && <div className="mt-1 text-danger">{getBackupDiagnosticDisplayMessage(item.error_message)}</div>}
             <div className="mt-2 text-default-500">处置建议：{getBatchRestoreItemDispositionText(item)}</div>
           </div>
