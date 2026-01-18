@@ -388,6 +388,19 @@ function BackupPolicyChip({ status, staleLabel = '过期' }: { status: string; s
   )
 }
 
+function getBackupPolicyStatusLabel(status: string, staleLabel = '过期'): string {
+  const labels: Record<string, string> = {
+    ok: '已确认',
+    due: '待验证',
+    stale: staleLabel,
+    warning: '需确认',
+    failed: '失败',
+    running: '运行中',
+    disabled: '已停用',
+  }
+  return labels[status] ?? '未知状态'
+}
+
 function formatDateTime(value?: string): string {
   if (!value) {
     return '--'
@@ -1465,7 +1478,8 @@ function getBatchRestoreItemDispositionTone(item: BackupBatchRestoreItemResult):
   return 'warning'
 }
 
-function formatBatchRestoreResultReport(result: BackupBatchRestoreResult): string {
+function formatBatchRestoreResultReport(result: BackupBatchRestoreResult, jobs: BackupJob[] = []): string {
+  const jobsById = getBatchRestoreJobLookup(jobs)
   const sections = [
     '批量恢复记录',
     `批次 ID：${result.id}`,
@@ -1482,8 +1496,10 @@ function formatBatchRestoreResultReport(result: BackupBatchRestoreResult): strin
   }
 
   const itemSections = result.items.flatMap((item, index) => {
+    const job = jobsById.get(item.job_id)
     const lines = [
-      `${index + 1}. ${item.job_id}`,
+      `${index + 1}. ${getBatchRestoreItemJobLabel(item, job)}`,
+      ...getBatchRestoreJobContextReportLines(job).map((line) => `   ${line}`),
       `   状态：${getBackupTaskStatusLabel(item.status)}`,
       `   目标目录：${item.target_path}`,
       `   恢复内容：${item.restore ? getBackupRestoreMetricText(item.restore) : '未完成恢复写入'}`,
@@ -1509,7 +1525,7 @@ function formatBatchRestoreResultReport(result: BackupBatchRestoreResult): strin
   })
 
   const cutoverCandidateSections = getBatchRestoreCutoverCandidates(result).flatMap((item, index) => [
-    `${index + 1}. ${item.job_id}`,
+    `${index + 1}. ${getBatchRestoreItemJobLabel(item, jobsById.get(item.job_id))}`,
     `   候选目录：${item.target_path}`,
     `   切换复核：${getBatchRestoreCutoverCandidateReviewText(item)}`,
     `   配置文件：${getBatchRestoreItemConfigText(item)}`,
@@ -1523,7 +1539,7 @@ function formatBatchRestoreResultReport(result: BackupBatchRestoreResult): strin
     '',
     '冲突处置记录',
     '覆盖边界：批量恢复只写入各自目标目录，不覆盖当前 storage.root；失败项和未通过校验项不能进入切换。',
-    ...result.items.map((item, index) => `${index + 1}. ${item.job_id}：${getBatchRestoreItemDispositionText(item)}`),
+    ...result.items.map((item, index) => `${index + 1}. ${getBatchRestoreItemJobLabel(item, jobsById.get(item.job_id))}：${getBatchRestoreItemDispositionText(item)}`),
     ...(cutoverCandidateSections.length > 0 ? ['', '跨目录切换候选', ...cutoverCandidateSections] : []),
   ].join('\n')
 }
@@ -2212,6 +2228,37 @@ function getBatchRestoreMetricText(result: BackupBatchRestoreResult): string {
   return `${completedCount}/${result.items.length} 项完成 · ${result.total_files} 个文件 · ${formatBytes(result.verified_bytes)}`
 }
 
+function getBatchRestoreJobLookup(jobs: BackupJob[]): Map<string, BackupJob> {
+  return new Map(jobs.map((job) => [job.id, job]))
+}
+
+function getBatchRestoreItemJobLabel(item: BackupBatchRestoreItemResult, job: BackupJob | undefined): string {
+  return job ? `${job.name}（${item.job_id}）` : item.job_id
+}
+
+function getBatchRestoreJobContextReportLines(job: BackupJob | undefined): string[] {
+  if (!job) {
+    return []
+  }
+
+  const lines = [
+    `任务类型：${job.type}`,
+    `备份来源：${job.source}`,
+    `备份目标：${job.destination}`,
+  ]
+  if (job.repository) {
+    lines.push(`仓库：${job.repository}`)
+  }
+  if (job.remote) {
+    lines.push(`远端：${job.remote}`)
+  }
+  lines.push(`保留策略：${getBackupPolicyStatusLabel(job.retention_status)} · ${getBackupRetentionText(job)}`)
+  if (job.retention_policy) {
+    lines.push(`保留命令：${job.retention_policy}`)
+  }
+  return lines
+}
+
 function buildBatchRestoreItems(
   jobs: BackupJob[],
   selectedJobIds: string[],
@@ -2613,11 +2660,12 @@ function BatchRestoreFlowGuide({
   return <RestoreFlowStepsPanel ariaLabel="批量恢复流程进度" title="批量恢复流程" steps={steps} />
 }
 
-function BatchRestoreResultSummary({ result }: { result: BackupBatchRestoreResult }) {
+function BatchRestoreResultSummary({ result, jobs }: { result: BackupBatchRestoreResult; jobs: BackupJob[] }) {
   const cutoverCandidates = getBatchRestoreCutoverCandidates(result)
+  const jobsById = getBatchRestoreJobLookup(jobs)
   const handleCopyBatchRestoreReport = async () => {
     try {
-      await copyTextToClipboard(formatBatchRestoreResultReport(result))
+      await copyTextToClipboard(formatBatchRestoreResultReport(result, jobs))
       addToast({ title: '批量恢复记录已复制', color: 'success' })
     } catch {
       addToast({
@@ -2660,14 +2708,18 @@ function BatchRestoreResultSummary({ result }: { result: BackupBatchRestoreResul
             逐项只读校验通过后再切换；切换前保留原 storage.root、原配置文件和回滚清单。
           </div>
           <div className="mt-3 space-y-2">
-            {cutoverCandidates.map((item) => (
-              <div key={`${item.index}-${item.job_id}-cutover`} className="rounded-md bg-content1 p-2">
-                <div className="font-medium text-default-700">{item.job_id}</div>
-                <div className="mt-1 truncate font-mono text-xs text-default-500" title={item.target_path}>{item.target_path}</div>
-                <div className="mt-1 text-xs text-default-600">{getBatchRestoreCutoverCandidateReviewText(item)}</div>
-                <div className="mt-1 text-xs text-default-500">配置文件：{getBatchRestoreItemConfigText(item)}</div>
-              </div>
-            ))}
+            {cutoverCandidates.map((item) => {
+              const job = jobsById.get(item.job_id)
+              return (
+                <div key={`${item.index}-${item.job_id}-cutover`} className="rounded-md bg-content1 p-2">
+                  <div className="font-medium text-default-700">{getBatchRestoreItemJobLabel(item, job)}</div>
+                  <div className="mt-1 truncate font-mono text-xs text-default-500" title={item.target_path}>{item.target_path}</div>
+                  {job && <div className="mt-1 truncate text-xs text-default-400" title={job.destination}>备份目标：{job.destination}</div>}
+                  <div className="mt-1 text-xs text-default-600">{getBatchRestoreCutoverCandidateReviewText(item)}</div>
+                  <div className="mt-1 text-xs text-default-500">配置文件：{getBatchRestoreItemConfigText(item)}</div>
+                </div>
+              )
+            })}
           </div>
         </div>
       )}
@@ -2681,44 +2733,58 @@ function BatchRestoreResultSummary({ result }: { result: BackupBatchRestoreResul
             批量恢复只写入各自目标目录，不覆盖当前 storage.root；失败项和未通过校验项不能进入切换。
           </div>
           <div className="mt-3 grid gap-2">
-            {result.items.map((item) => (
-              <RestoreImpactItem
-                key={`${item.index}-${item.job_id}-disposition`}
-                label={item.job_id}
-                value={getBatchRestoreItemDispositionText(item)}
-                tone={getBatchRestoreItemDispositionTone(item)}
-              />
-            ))}
+            {result.items.map((item) => {
+              const job = jobsById.get(item.job_id)
+              return (
+                <RestoreImpactItem
+                  key={`${item.index}-${item.job_id}-disposition`}
+                  label={getBatchRestoreItemJobLabel(item, job)}
+                  value={getBatchRestoreItemDispositionText(item)}
+                  tone={getBatchRestoreItemDispositionTone(item)}
+                />
+              )
+            })}
           </div>
         </div>
       )}
       <div className="space-y-2">
-        {result.items.map((item) => (
-          <div key={`${item.index}-${item.job_id}`} className="rounded-lg border border-divider bg-content2/60 p-3 text-sm">
-            <div className="flex items-center justify-between gap-3">
-              <div className="min-w-0">
-                <div className="font-medium">{item.job_id}</div>
-                <div className="truncate font-mono text-xs text-default-500" title={item.target_path}>{item.target_path}</div>
+        {result.items.map((item) => {
+          const job = jobsById.get(item.job_id)
+          return (
+            <div key={`${item.index}-${item.job_id}`} className="rounded-lg border border-divider bg-content2/60 p-3 text-sm">
+              <div className="flex items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="font-medium">{getBatchRestoreItemJobLabel(item, job)}</div>
+                  <div className="truncate font-mono text-xs text-default-500" title={item.target_path}>{item.target_path}</div>
+                </div>
+                <BackupStatusChip status={item.status} warning={(item.warnings?.length ?? 0) > 0 || item.verify?.status === 'failed' || (item.verify?.warnings?.length ?? 0) > 0 || Boolean(item.verify?.error_message)} />
               </div>
-              <BackupStatusChip status={item.status} warning={(item.warnings?.length ?? 0) > 0 || item.verify?.status === 'failed' || (item.verify?.warnings?.length ?? 0) > 0 || Boolean(item.verify?.error_message)} />
+              {job && (
+                <div className="mt-2 grid gap-1 text-xs text-default-500 sm:grid-cols-2">
+                  <div className="truncate" title={job.destination}>备份目标：{job.destination}</div>
+                  <div className="truncate" title={getBackupRetentionText(job)}>
+                    保留策略：{getBackupPolicyStatusLabel(job.retention_status)} · {getBackupRetentionText(job)}
+                  </div>
+                </div>
+              )}
+              {item.restore && <div className="mt-2 text-default-500">{getBackupRestoreMetricText(item.restore)}</div>}
+              {item.verify && (
+                <div className={item.verify.warnings && item.verify.warnings.length > 0 ? 'mt-1 text-warning' : 'mt-1 text-default-500'}>
+                  只读校验：{getBackupRestoreVerifyMetricText(item.verify)}
+                </div>
+              )}
+              {item.verify?.snapshot_path && (
+                <div className="mt-1 truncate text-default-400" title={item.verify.snapshot_path}>
+                  {getBackupSnapshotReferenceText(item.verify.snapshot_path)}
+                </div>
+              )}
+              {item.warnings && item.warnings.length > 0 && <div className="mt-1 text-warning">{getBackupDiagnosticDisplayMessage(item.warnings[0])}</div>}
+              {item.verify?.error_message && <div className="mt-1 text-danger">校验错误：{getBackupDiagnosticDisplayMessage(item.verify.error_message)}</div>}
+              {item.error_message && <div className="mt-1 text-danger">{getBackupDiagnosticDisplayMessage(item.error_message)}</div>}
+              <div className="mt-2 text-default-500">处置建议：{getBatchRestoreItemDispositionText(item)}</div>
             </div>
-            {item.restore && <div className="mt-2 text-default-500">{getBackupRestoreMetricText(item.restore)}</div>}
-            {item.verify && (
-              <div className={item.verify.warnings && item.verify.warnings.length > 0 ? 'mt-1 text-warning' : 'mt-1 text-default-500'}>
-                只读校验：{getBackupRestoreVerifyMetricText(item.verify)}
-              </div>
-            )}
-            {item.verify?.snapshot_path && (
-              <div className="mt-1 truncate text-default-400" title={item.verify.snapshot_path}>
-                {getBackupSnapshotReferenceText(item.verify.snapshot_path)}
-              </div>
-            )}
-            {item.warnings && item.warnings.length > 0 && <div className="mt-1 text-warning">{getBackupDiagnosticDisplayMessage(item.warnings[0])}</div>}
-            {item.verify?.error_message && <div className="mt-1 text-danger">校验错误：{getBackupDiagnosticDisplayMessage(item.verify.error_message)}</div>}
-            {item.error_message && <div className="mt-1 text-danger">{getBackupDiagnosticDisplayMessage(item.error_message)}</div>}
-            <div className="mt-2 text-default-500">处置建议：{getBatchRestoreItemDispositionText(item)}</div>
-          </div>
-        ))}
+          )
+        })}
       </div>
     </div>
   )
@@ -4196,7 +4262,7 @@ export default function Maintenance() {
                 result={batchRestoreResult}
               />
               {batchRestoreResult ? (
-                <BatchRestoreResultSummary result={batchRestoreResult} />
+                <BatchRestoreResultSummary result={batchRestoreResult} jobs={backupJobs} />
               ) : (
                 <>
                 <div className="flex items-start gap-2 rounded-lg border border-warning/20 bg-warning/10 p-3 text-sm text-warning">
