@@ -2690,7 +2690,9 @@ describe('MaintenancePage', () => {
       expect(report).toContain('批量恢复记录')
       expect(report).toContain('批次 ID：20260509T040001.000000000Z')
       expect(report).toContain('恢复项目：1 项')
-      expect(report).toContain('1. external-disk')
+      expect(report).toContain('1. 外置硬盘备份（external-disk）')
+      expect(report).toContain('备份目标：/mnt/backup-drive/mnemonas')
+      expect(report).toContain('保留策略：已确认 · 最多 7 个快照 · 最长 30 天')
       expect(report).toContain('目标目录：/restore/token=<redacted>')
       expect(report).toContain('配置文件：/restore/token=<redacted>/.mnemonas-restore/config.toml')
       expect(report).toContain('只读校验：检查完成；检查 12 个文件 · 4 KB；可作为完整 storage.root 候选目录')
@@ -2698,7 +2700,7 @@ describe('MaintenancePage', () => {
       expect(report).toContain('快照：对照快照 20260509T020304.000000000Z')
       expect(report).toContain('冲突处置记录')
       expect(report).toContain('覆盖边界：批量恢复只写入各自目标目录，不覆盖当前 storage.root；失败项和未通过校验项不能进入切换。')
-      expect(report).toContain('1. external-disk：可进入切换复核：只读校验通过，未发现覆盖当前 storage.root 的冲突。')
+      expect(report).toContain('1. 外置硬盘备份（external-disk）：可进入切换复核：只读校验通过，未发现覆盖当前 storage.root 的冲突。')
       expect(report).toContain('跨目录切换候选')
       expect(report).toContain('候选目录：/restore/token=<redacted>')
       expect(report).toContain('切换复核：只读校验通过，可作为 storage.root 候选目录；切换前保留原目录和原配置。')
@@ -3315,6 +3317,10 @@ describe('MaintenancePage', () => {
         id: 'usb-nightly',
         name: 'USB 夜间备份',
         destination: '/mnt/usb-nightly/mnemonas',
+        max_snapshots: undefined,
+        max_age: undefined,
+        retention_status: 'warning',
+        retention_message: '外置盘轮换状态需人工确认',
       }
       const partialRootJob = {
         ...mockBackupJobs[0],
@@ -3335,6 +3341,11 @@ describe('MaintenancePage', () => {
         name: '冷归档备份',
         type: 'rclone',
         destination: 'coldline:mnemonas',
+        remote: 'coldline:mnemonas',
+        max_snapshots: undefined,
+        max_age: undefined,
+        retention_status: 'warning',
+        retention_message: '远端保留策略需要在外部工具中确认',
       }
 
       mockListBackupJobs.mockResolvedValue([verifyFailedJob, partialRootJob, warningJob, preflightBlockedJob])
@@ -3609,11 +3620,14 @@ describe('MaintenancePage', () => {
         expect(dispositions.getByText('人工复核：未确认完整 storage.root 结构，按子目录迁移或重新恢复处理。')).toBeTruthy()
         expect(dispositions.getByText('暂缓切换：恢复或只读校验存在警告，复核警告后再决定是否切换。')).toBeTruthy()
         expect(dispositions.getByText('预检拦截未写入：处理失败预检项后重新生成批量预览。')).toBeTruthy()
+        expect(dispositions.getByText('冷归档备份（cloud-coldline）')).toBeTruthy()
         const cutoverCandidates = within(screen.getByLabelText('批量恢复跨目录切换候选'))
         expect(cutoverCandidates.getByText('只读校验失败，处理后重新校验再切换。')).toBeTruthy()
         expect(cutoverCandidates.getByText('未确认完整 storage.root 结构，切换前需人工复核目录内容。')).toBeTruthy()
         expect(cutoverCandidates.getByText('只读校验通过，可作为 storage.root 候选目录；切换前保留原目录和原配置。')).toBeTruthy()
         expect(screen.getByText('校验错误：manifest checksum mismatch')).toBeTruthy()
+        expect(screen.getByText('备份目标：coldline:mnemonas')).toBeTruthy()
+        expect(screen.getByText('保留策略：需确认 · 远端保留策略需要在外部工具中确认')).toBeTruthy()
       })
 
       fireEvent.click(screen.getByRole('button', { name: /复制批量恢复记录/ }))
@@ -3623,10 +3637,16 @@ describe('MaintenancePage', () => {
       })
       const report = String(writeText.mock.calls[0]?.[0] ?? '')
       expect(report).toContain('冲突处置记录')
-      expect(report).toContain('1. usb-nightly：阻止切换：只读校验失败，处理失败原因后重新校验。')
-      expect(report).toContain('2. photos-archive：人工复核：未确认完整 storage.root 结构，按子目录迁移或重新恢复处理。')
-      expect(report).toContain('3. nas-lan：暂缓切换：恢复或只读校验存在警告，复核警告后再决定是否切换。')
-      expect(report).toContain('4. cloud-coldline：预检拦截未写入：处理失败预检项后重新生成批量预览。')
+      expect(report).toContain('1. USB 夜间备份（usb-nightly）')
+      expect(report).toContain('保留策略：需确认 · 外置盘轮换状态需人工确认')
+      expect(report).toContain('4. 冷归档备份（cloud-coldline）')
+      expect(report).toContain('备份目标：coldline:mnemonas')
+      expect(report).toContain('远端：coldline:mnemonas')
+      expect(report).toContain('保留策略：需确认 · 远端保留策略需要在外部工具中确认')
+      expect(report).toContain('1. USB 夜间备份（usb-nightly）：阻止切换：只读校验失败，处理失败原因后重新校验。')
+      expect(report).toContain('2. 照片归档备份（photos-archive）：人工复核：未确认完整 storage.root 结构，按子目录迁移或重新恢复处理。')
+      expect(report).toContain('3. 局域网 NAS 备份（nas-lan）：暂缓切换：恢复或只读校验存在警告，复核警告后再决定是否切换。')
+      expect(report).toContain('4. 冷归档备份（cloud-coldline）：预检拦截未写入：处理失败预检项后重新生成批量预览。')
       expect(report).toContain('只读校验：检查失败；恢复目录检查失败；可作为完整 storage.root 候选目录')
       expect(report).toContain('校验错误：manifest checksum mismatch')
       expect(report).toContain('只读校验：检查完成；检查 8 个文件 · 2 KB；未确认完整 storage.root 结构')
