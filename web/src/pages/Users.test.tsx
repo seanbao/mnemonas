@@ -1354,6 +1354,18 @@ describe('UsersPage', () => {
             limitedUsedBytes: 2048,
             quotaBytes: 8192,
           },
+          ...Array.from({ length: 8 }, (_, index) => ({
+            capturedAt: `2023-12-${String(24 - index).padStart(2, '0')}T00:00:00Z`,
+            totalCount: 3,
+            activeCount: 2,
+            limitedCount: 2,
+            warningCount: 0,
+            exceededCount: 0,
+            attentionCount: 0,
+            usedBytes: 3072,
+            limitedUsedBytes: 1024,
+            quotaBytes: 8192,
+          })),
         ],
       })
 
@@ -1364,6 +1376,7 @@ describe('UsersPage', () => {
       expect(within(trend).getByText('受限用量增加')).toBeInTheDocument()
       expect(within(trend).getByText('4 KB / 8 KB')).toBeInTheDocument()
       expect(within(trend).getByText('+2 KB')).toBeInTheDocument()
+      expect(within(trend).getByText('10 次')).toBeInTheDocument()
       expect(JSON.parse(window.localStorage.getItem('mnemonas:user-quota-trend:user-1') ?? '[]')).toHaveLength(1)
     })
 

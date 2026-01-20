@@ -241,7 +241,7 @@ Admin role required.
 
 User roles are `admin`, `user`, and `guest`. Non-admin users are scoped by `home_dir` and any matching directory access rules.
 
-User responses include `id`, `username`, `email`, `role`, `groups`, `disabled`, `home_dir`, `created_at`, `updated_at`, optional `last_login_at`, `quota_bytes`, and `used_bytes`. List responses also return `quota_history_available` and `quota_history`; the server keeps the latest 64 aggregate quota-change snapshots. If the history file cannot be written, the availability flag is `false` and the user list still returns.
+User responses include `id`, `username`, `email`, `role`, `groups`, `disabled`, `home_dir`, `created_at`, `updated_at`, optional `last_login_at`, `quota_bytes`, and `used_bytes`. List responses also return `quota_history_available` and `quota_history`; the server keeps aggregate quota-change snapshots with tiered retention: all changes from the latest 30 days, the latest daily snapshot within 1 year, the latest monthly snapshot within 3 years, and at most 512 retained entries. If the history file cannot be written, the availability flag is `false` and the user list still returns.
 
 List response example:
 

@@ -415,8 +415,11 @@ function formatSignedCountDelta(count: number): string {
   return '0 个'
 }
 
-export function summarizeUserQuotaTrendHistory(history: UserQuotaTrendPoint[]): UserQuotaTrendSummary {
-  const points = normalizeUserQuotaTrendHistory(history)
+export function summarizeUserQuotaTrendHistory(
+  history: UserQuotaTrendPoint[],
+  limit = history.length,
+): UserQuotaTrendSummary {
+  const points = normalizeUserQuotaTrendHistory(history, limit)
   const latest = points[0] ?? null
   const previous = points[1] ?? null
   const peakLimitedUsedBytes = points.reduce((peak, point) => Math.max(peak, point.limitedUsedBytes), 0)
