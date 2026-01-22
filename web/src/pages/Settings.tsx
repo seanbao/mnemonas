@@ -2373,6 +2373,11 @@ function formatDirectoryAccessShareForReport(entry: NonNullable<DirectoryAccessR
   return `- ${entry.path} (${typeLabel} · ${directoryAccessShareRelationLabel(entry.relation)}): ${status} · ${password} · 访问 ${entry.access_count}/${maxAccess} · 创建者 ${entry.created_by}`
 }
 
+function formatDirectoryAccessRuleEffectForReport(entry: NonNullable<DirectoryAccessReportData['rule_effects']>[number]): string {
+  const samples = entry.user_samples?.length ? ` · 用户 ${entry.user_samples.join(', ')}` : ''
+  return `- 规则 ${entry.index + 1} ${entry.path}: 读允许 ${entry.read_allowed} / 读拒绝 ${entry.read_denied}; 写允许 ${entry.write_allowed} / 写拒绝 ${entry.write_denied}${samples}`
+}
+
 function formatDirectoryAccessReportForClipboard(report: DirectoryAccessReportData, title: string): string {
   const lines = [
     '目录权限复核记录',
@@ -2389,8 +2394,20 @@ function formatDirectoryAccessReportForClipboard(report: DirectoryAccessReportDa
       return `- ${entry.username} (${entry.role}${groups}, home ${entry.home_dir}): 读 ${formatDirectoryAccessDecisionForReport(entry.read)}; 写 ${formatDirectoryAccessDecisionForReport(entry.write)}`
     }),
     '',
-    '分享影响:',
+    '规则生效明细:',
   ]
+
+  const ruleEffects = report.rule_effects ?? []
+  if (ruleEffects.length === 0) {
+    lines.push('- 未命中目录规则')
+  } else {
+    lines.push(...ruleEffects.map(formatDirectoryAccessRuleEffectForReport))
+  }
+
+  lines.push(
+    '',
+    '分享影响:',
+  )
 
   const shares = report.shares ?? []
   if (shares.length === 0) {
@@ -2642,6 +2659,7 @@ function DirectoryAccessReportResult({
   onSaveReviewHistory?: (report: DirectoryAccessReportData, title: string, reportText: string) => DirectoryAccessReviewSaveResult | Promise<DirectoryAccessReviewSaveResult>
 }) {
   const shares = report.shares ?? []
+  const ruleEffects = report.rule_effects ?? []
   const handleCopyDirectoryAccessReport = async () => {
     try {
       const reportText = formatDirectoryAccessReportForClipboard(report, title)
@@ -2697,6 +2715,7 @@ function DirectoryAccessReportResult({
         <span className="rounded-full bg-warning/10 px-2 py-1 text-warning">相关分享 {report.summary.related_shares}</span>
         <span className="rounded-full bg-warning/10 px-2 py-1 text-warning">活跃分享 {report.summary.active_related_shares}</span>
         <span className="rounded-full bg-content1 px-2 py-1">密码分享 {report.summary.password_protected_shares}</span>
+        <span className="rounded-full bg-content1 px-2 py-1">命中规则 {ruleEffects.length}</span>
       </div>
       <div className="max-h-72 overflow-auto rounded-lg border border-divider bg-content1">
         {report.users.map((entry) => (
@@ -2712,6 +2731,28 @@ function DirectoryAccessReportResult({
             <div className="flex items-center gap-2 text-sm">
               <span className={cn('h-2.5 w-2.5 shrink-0 rounded-full', entry.write.allowed ? 'bg-success' : 'bg-danger')} />
               <span className="min-w-0 truncate">写：{entry.write.allowed ? '允许' : '拒绝'} · {directoryAccessSourceLabel(entry.write.source)}</span>
+            </div>
+          </div>
+        ))}
+      </div>
+      <div className="mt-3 rounded-lg border border-divider bg-content1" aria-label={`${title}规则生效明细`}>
+        {ruleEffects.length === 0 ? (
+          <div className="px-3 py-2 text-sm text-default-500">未命中目录规则</div>
+        ) : ruleEffects.map((entry) => (
+          <div key={`${entry.index}:${entry.path}`} className="grid gap-3 border-b border-divider px-3 py-2 last:border-b-0 sm:grid-cols-[minmax(0,1.3fr)_minmax(0,1fr)_minmax(0,1fr)]">
+            <div className="min-w-0">
+              <div className="truncate text-sm font-semibold text-foreground">规则 {entry.index + 1} · {entry.path}</div>
+              {entry.user_samples?.length ? (
+                <div className="truncate text-xs text-default-500">用户 {entry.user_samples.join(', ')}</div>
+              ) : null}
+            </div>
+            <div className="flex flex-wrap items-center gap-1 text-xs">
+              <span className="rounded-full bg-success/10 px-2 py-0.5 text-success">读允许 {entry.read_allowed}</span>
+              <span className="rounded-full bg-danger/10 px-2 py-0.5 text-danger">读拒绝 {entry.read_denied}</span>
+            </div>
+            <div className="flex flex-wrap items-center gap-1 text-xs">
+              <span className="rounded-full bg-success/10 px-2 py-0.5 text-success">写允许 {entry.write_allowed}</span>
+              <span className="rounded-full bg-danger/10 px-2 py-0.5 text-danger">写拒绝 {entry.write_denied}</span>
             </div>
           </div>
         ))}

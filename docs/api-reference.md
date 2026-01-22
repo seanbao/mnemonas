@@ -1112,7 +1112,7 @@ GET /api/v1/activity/stats
 
 ### 列出活动复核记录（管理员）
 
-返回已持久化的活动复核处置记录。
+返回已持久化的活动复核处置记录。分享复核记录可包含 `share_disposition_details`，用于保存脱敏的分享处置线索。
 
 ```text
 GET /api/v1/activity/reviews
@@ -1204,6 +1204,7 @@ POST /api/v1/activity/reviews
 - `disposition_status` 可选，默认值为 `documented`。允许值为 `documented`、`confirmed`、`restored`、`disabled` 和 `needs_follow_up`。
 - `action_counts` 可选。键必须是已知活动动作类型，值必须是正整数，且总和必须等于 `review_count`。
 - `path_samples` 和 `user_samples` 可选，各最多 10 项。路径使用与活动条目相同的逻辑路径规则归一化，重复样本会被拒绝。
+- `share_disposition_details` 可选，最多 10 项。每项可包含 `path`、`type`（`file` 或 `folder`）、`enabled`、`risk_level`（`none`、`low`、`medium`、`high`）、`reason_summary`、`suggested_action`、`access_summary` 和 `expires_at`；该字段用于脱敏记录分享风险与处置建议，不包含分享 ID、URL 或密码。
 - 活动日志未配置、初始化失败或当前不可用时，API 返回 `503 Service Unavailable`。
 
 ### 更新活动复核记录处置状态（管理员）
@@ -1429,6 +1430,8 @@ Access-check 响应：
 
 响应包含 `summary`，其中包括用户数量、允许/拒绝读取数量、允许/拒绝写入数量和相关分享数量。
 
+可选 `rule_effects` 列表按目录授权规则汇总本次检查中实际命中的读写允许/拒绝数量。`index` 是已保存或提交的 `directory_access_rules` 数组中的零基序号，`user_samples` 包含用于定位影响范围的用户样例。
+
 可选 `shares` 列表报告与路径精确匹配、覆盖该路径的父文件夹分享，以及被检查目录下的子分享。该端点用于管理员在修改共享目录或分享规则前检查权限影响。
 
 Access-report 响应：
@@ -1458,6 +1461,17 @@ Access-report 响应：
         "path": "/team/report.pdf",
         "read": { "mode": "read", "allowed": true, "source": "directory_access_rule" },
         "write": { "mode": "write", "allowed": true, "source": "directory_access_rule" }
+      }
+    ],
+    "rule_effects": [
+      {
+        "path": "/team",
+        "index": 0,
+        "read_allowed": 1,
+        "read_denied": 1,
+        "write_allowed": 1,
+        "write_denied": 1,
+        "user_samples": ["alice", "bob"]
       }
     ],
     "shares": [
@@ -1511,6 +1525,17 @@ Access-preview 响应：
         "path": "/team/report.pdf",
         "read": { "mode": "read", "allowed": true, "source": "directory_access_rule" },
         "write": { "mode": "write", "allowed": false, "source": "directory_access_rule" }
+      }
+    ],
+    "rule_effects": [
+      {
+        "path": "/team",
+        "index": 0,
+        "read_allowed": 1,
+        "read_denied": 0,
+        "write_allowed": 0,
+        "write_denied": 1,
+        "user_samples": ["alice"]
       }
     ]
   }

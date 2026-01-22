@@ -44,6 +44,18 @@ const maxActivityReviewEntryIDs = 500
 const maxActivityReviewSamples = 10
 const maxDirectoryAccessReviewTextLength = 64 * 1024
 
+// ReviewShareDispositionDetail carries redacted share-specific follow-up clues for an activity review.
+type ReviewShareDispositionDetail struct {
+	Path            string `json:"path"`
+	Type            string `json:"type,omitempty"`
+	Enabled         bool   `json:"enabled"`
+	RiskLevel       string `json:"risk_level,omitempty"`
+	ReasonSummary   string `json:"reason_summary,omitempty"`
+	SuggestedAction string `json:"suggested_action,omitempty"`
+	AccessSummary   string `json:"access_summary,omitempty"`
+	ExpiresAt       string `json:"expires_at,omitempty"`
+}
+
 // ReviewDispositionStatus classifies the operational outcome recorded for reviewed activity entries.
 type ReviewDispositionStatus string
 
@@ -275,38 +287,40 @@ type ListFilter struct {
 
 // ReviewRecord represents a persisted review disposition for a set of activity entries.
 type ReviewRecord struct {
-	ID                string                  `json:"id"`
-	ReviewedAt        time.Time               `json:"reviewed_at"`
-	Reviewer          string                  `json:"reviewer"`
-	Note              string                  `json:"note"`
-	ScopeLabel        string                  `json:"scope_label"`
-	FilterSummary     string                  `json:"filter_summary"`
-	DispositionStatus ReviewDispositionStatus `json:"disposition_status"`
-	ActionCounts      map[ActionType]int      `json:"action_counts,omitempty"`
-	ReviewCount       int                     `json:"review_count"`
-	TotalCount        int                     `json:"total_count"`
-	PathCount         int                     `json:"path_count"`
-	UserCount         int                     `json:"user_count"`
-	PathSamples       []string                `json:"path_samples,omitempty"`
-	UserSamples       []string                `json:"user_samples,omitempty"`
-	ActivityEntryIDs  []string                `json:"activity_entry_ids"`
+	ID                      string                         `json:"id"`
+	ReviewedAt              time.Time                      `json:"reviewed_at"`
+	Reviewer                string                         `json:"reviewer"`
+	Note                    string                         `json:"note"`
+	ScopeLabel              string                         `json:"scope_label"`
+	FilterSummary           string                         `json:"filter_summary"`
+	DispositionStatus       ReviewDispositionStatus        `json:"disposition_status"`
+	ActionCounts            map[ActionType]int             `json:"action_counts,omitempty"`
+	ReviewCount             int                            `json:"review_count"`
+	TotalCount              int                            `json:"total_count"`
+	PathCount               int                            `json:"path_count"`
+	UserCount               int                            `json:"user_count"`
+	PathSamples             []string                       `json:"path_samples,omitempty"`
+	UserSamples             []string                       `json:"user_samples,omitempty"`
+	ShareDispositionDetails []ReviewShareDispositionDetail `json:"share_disposition_details,omitempty"`
+	ActivityEntryIDs        []string                       `json:"activity_entry_ids"`
 }
 
 // ReviewRecordInput contains user-visible review disposition data before persistence.
 type ReviewRecordInput struct {
-	Reviewer          string
-	Note              string
-	ScopeLabel        string
-	FilterSummary     string
-	DispositionStatus ReviewDispositionStatus
-	ActionCounts      map[ActionType]int
-	ReviewCount       int
-	TotalCount        int
-	PathCount         int
-	UserCount         int
-	PathSamples       []string
-	UserSamples       []string
-	ActivityEntryIDs  []string
+	Reviewer                string
+	Note                    string
+	ScopeLabel              string
+	FilterSummary           string
+	DispositionStatus       ReviewDispositionStatus
+	ActionCounts            map[ActionType]int
+	ReviewCount             int
+	TotalCount              int
+	PathCount               int
+	UserCount               int
+	PathSamples             []string
+	UserSamples             []string
+	ShareDispositionDetails []ReviewShareDispositionDetail
+	ActivityEntryIDs        []string
 }
 
 // ReviewRecordFilter limits activity review record queries.
@@ -421,6 +435,7 @@ func copyReviewRecord(record ReviewRecord) ReviewRecord {
 	}
 	clone.PathSamples = append([]string(nil), record.PathSamples...)
 	clone.UserSamples = append([]string(nil), record.UserSamples...)
+	clone.ShareDispositionDetails = append([]ReviewShareDispositionDetail(nil), record.ShareDispositionDetails...)
 	clone.ActivityEntryIDs = append([]string(nil), record.ActivityEntryIDs...)
 	return clone
 }
@@ -654,19 +669,20 @@ func validateDecodedActivityReviewRecord(record *ReviewRecord, seenIDs map[strin
 		return err
 	}
 	normalized, err := normalizeActivityReviewRecordInput(ReviewRecordInput{
-		Reviewer:          record.Reviewer,
-		Note:              record.Note,
-		ScopeLabel:        record.ScopeLabel,
-		FilterSummary:     record.FilterSummary,
-		DispositionStatus: record.DispositionStatus,
-		ActionCounts:      record.ActionCounts,
-		ReviewCount:       record.ReviewCount,
-		TotalCount:        record.TotalCount,
-		PathCount:         record.PathCount,
-		UserCount:         record.UserCount,
-		PathSamples:       record.PathSamples,
-		UserSamples:       record.UserSamples,
-		ActivityEntryIDs:  record.ActivityEntryIDs,
+		Reviewer:                record.Reviewer,
+		Note:                    record.Note,
+		ScopeLabel:              record.ScopeLabel,
+		FilterSummary:           record.FilterSummary,
+		DispositionStatus:       record.DispositionStatus,
+		ActionCounts:            record.ActionCounts,
+		ReviewCount:             record.ReviewCount,
+		TotalCount:              record.TotalCount,
+		PathCount:               record.PathCount,
+		UserCount:               record.UserCount,
+		PathSamples:             record.PathSamples,
+		UserSamples:             record.UserSamples,
+		ShareDispositionDetails: record.ShareDispositionDetails,
+		ActivityEntryIDs:        record.ActivityEntryIDs,
 	})
 	if err != nil {
 		return err
@@ -683,6 +699,7 @@ func validateDecodedActivityReviewRecord(record *ReviewRecord, seenIDs map[strin
 	record.UserCount = normalized.UserCount
 	record.PathSamples = normalized.PathSamples
 	record.UserSamples = normalized.UserSamples
+	record.ShareDispositionDetails = normalized.ShareDispositionDetails
 	record.ActivityEntryIDs = normalized.ActivityEntryIDs
 	return nil
 }
@@ -1431,6 +1448,90 @@ func normalizeActivityReviewUserSamples(values []string) ([]string, error) {
 	return normalized, nil
 }
 
+func normalizeActivityReviewShareDispositionDetails(values []ReviewShareDispositionDetail) ([]ReviewShareDispositionDetail, error) {
+	if len(values) == 0 {
+		return nil, nil
+	}
+	if len(values) > maxActivityReviewSamples {
+		return nil, fmt.Errorf("%w: too many share_disposition_details", ErrInvalidReviewRecord)
+	}
+	seen := make(map[string]struct{}, len(values))
+	normalized := make([]ReviewShareDispositionDetail, 0, len(values))
+	for _, value := range values {
+		pathValue, err := normalizeActivityEntryPath(value.Path)
+		if err != nil || pathValue == "" {
+			return nil, fmt.Errorf("%w: share_disposition_details contains an invalid path", ErrInvalidReviewRecord)
+		}
+		if _, ok := seen[pathValue]; ok {
+			return nil, fmt.Errorf("%w: duplicate share_disposition_details path", ErrInvalidReviewRecord)
+		}
+		seen[pathValue] = struct{}{}
+
+		shareType, err := normalizeActivityReviewShareType(value.Type)
+		if err != nil {
+			return nil, err
+		}
+		riskLevel, err := normalizeActivityReviewShareRiskLevel(value.RiskLevel)
+		if err != nil {
+			return nil, err
+		}
+		reasonSummary, err := normalizeOptionalActivityReviewText(value.ReasonSummary, maxActivityReviewFilterSummaryLength, "share_disposition_details.reason_summary")
+		if err != nil {
+			return nil, err
+		}
+		suggestedAction, err := normalizeOptionalActivityReviewText(value.SuggestedAction, maxActivityReviewFilterSummaryLength, "share_disposition_details.suggested_action")
+		if err != nil {
+			return nil, err
+		}
+		accessSummary, err := normalizeOptionalActivityReviewText(value.AccessSummary, maxActivityReviewScopeLength, "share_disposition_details.access_summary")
+		if err != nil {
+			return nil, err
+		}
+		expiresAt, err := normalizeOptionalActivityReviewText(value.ExpiresAt, maxActivityReviewScopeLength, "share_disposition_details.expires_at")
+		if err != nil {
+			return nil, err
+		}
+
+		normalized = append(normalized, ReviewShareDispositionDetail{
+			Path:            pathValue,
+			Type:            shareType,
+			Enabled:         value.Enabled,
+			RiskLevel:       riskLevel,
+			ReasonSummary:   reasonSummary,
+			SuggestedAction: suggestedAction,
+			AccessSummary:   accessSummary,
+			ExpiresAt:       expiresAt,
+		})
+	}
+	return normalized, nil
+}
+
+func normalizeActivityReviewShareType(value string) (string, error) {
+	normalized := strings.TrimSpace(value)
+	if normalized == "" {
+		return "", nil
+	}
+	switch normalized {
+	case "file", "folder":
+		return normalized, nil
+	default:
+		return "", fmt.Errorf("%w: share_disposition_details.type is invalid", ErrInvalidReviewRecord)
+	}
+}
+
+func normalizeActivityReviewShareRiskLevel(value string) (string, error) {
+	normalized := strings.TrimSpace(value)
+	if normalized == "" {
+		return "", nil
+	}
+	switch normalized {
+	case "none", "low", "medium", "high":
+		return normalized, nil
+	default:
+		return "", fmt.Errorf("%w: share_disposition_details.risk_level is invalid", ErrInvalidReviewRecord)
+	}
+}
+
 func normalizeActivityReviewRecordInput(input ReviewRecordInput) (ReviewRecordInput, error) {
 	reviewer, err := normalizeActivityReviewText(input.Reviewer, maxActivityReviewReviewerLength, "reviewer")
 	if err != nil {
@@ -1480,20 +1581,25 @@ func normalizeActivityReviewRecordInput(input ReviewRecordInput) (ReviewRecordIn
 	if err != nil {
 		return ReviewRecordInput{}, err
 	}
+	shareDispositionDetails, err := normalizeActivityReviewShareDispositionDetails(input.ShareDispositionDetails)
+	if err != nil {
+		return ReviewRecordInput{}, err
+	}
 	return ReviewRecordInput{
-		Reviewer:          reviewer,
-		Note:              note,
-		ScopeLabel:        scopeLabel,
-		FilterSummary:     filterSummary,
-		DispositionStatus: dispositionStatus,
-		ActionCounts:      actionCounts,
-		ReviewCount:       input.ReviewCount,
-		TotalCount:        input.TotalCount,
-		PathCount:         input.PathCount,
-		UserCount:         input.UserCount,
-		PathSamples:       pathSamples,
-		UserSamples:       userSamples,
-		ActivityEntryIDs:  entryIDs,
+		Reviewer:                reviewer,
+		Note:                    note,
+		ScopeLabel:              scopeLabel,
+		FilterSummary:           filterSummary,
+		DispositionStatus:       dispositionStatus,
+		ActionCounts:            actionCounts,
+		ReviewCount:             input.ReviewCount,
+		TotalCount:              input.TotalCount,
+		PathCount:               input.PathCount,
+		UserCount:               input.UserCount,
+		PathSamples:             pathSamples,
+		UserSamples:             userSamples,
+		ShareDispositionDetails: shareDispositionDetails,
+		ActivityEntryIDs:        entryIDs,
 	}, nil
 }
 
@@ -1553,21 +1659,22 @@ func (s *Store) RecordReview(input ReviewRecordInput) (ReviewRecord, error) {
 			return nil, err
 		}
 		created = ReviewRecord{
-			ID:                id,
-			ReviewedAt:        reviewedAt,
-			Reviewer:          normalized.Reviewer,
-			Note:              normalized.Note,
-			ScopeLabel:        normalized.ScopeLabel,
-			FilterSummary:     normalized.FilterSummary,
-			DispositionStatus: normalized.DispositionStatus,
-			ActionCounts:      normalized.ActionCounts,
-			ReviewCount:       normalized.ReviewCount,
-			TotalCount:        normalized.TotalCount,
-			PathCount:         normalized.PathCount,
-			UserCount:         normalized.UserCount,
-			PathSamples:       append([]string(nil), normalized.PathSamples...),
-			UserSamples:       append([]string(nil), normalized.UserSamples...),
-			ActivityEntryIDs:  append([]string(nil), normalized.ActivityEntryIDs...),
+			ID:                      id,
+			ReviewedAt:              reviewedAt,
+			Reviewer:                normalized.Reviewer,
+			Note:                    normalized.Note,
+			ScopeLabel:              normalized.ScopeLabel,
+			FilterSummary:           normalized.FilterSummary,
+			DispositionStatus:       normalized.DispositionStatus,
+			ActionCounts:            normalized.ActionCounts,
+			ReviewCount:             normalized.ReviewCount,
+			TotalCount:              normalized.TotalCount,
+			PathCount:               normalized.PathCount,
+			UserCount:               normalized.UserCount,
+			PathSamples:             append([]string(nil), normalized.PathSamples...),
+			UserSamples:             append([]string(nil), normalized.UserSamples...),
+			ShareDispositionDetails: append([]ReviewShareDispositionDetail(nil), normalized.ShareDispositionDetails...),
+			ActivityEntryIDs:        append([]string(nil), normalized.ActivityEntryIDs...),
 		}
 
 		nextRecords := make([]ReviewRecord, 0, len(records)+1)

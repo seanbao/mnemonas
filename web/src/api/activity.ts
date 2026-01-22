@@ -132,6 +132,22 @@ export const ACTIVITY_REVIEW_DISPOSITION_STATUSES = [
 
 export type ActivityReviewDispositionStatus = typeof ACTIVITY_REVIEW_DISPOSITION_STATUSES[number]
 
+export const ACTIVITY_REVIEW_SHARE_TYPES = [
+  'file',
+  'folder',
+] as const
+
+export type ActivityReviewShareType = typeof ACTIVITY_REVIEW_SHARE_TYPES[number]
+
+export const ACTIVITY_REVIEW_SHARE_RISK_LEVELS = [
+  'none',
+  'low',
+  'medium',
+  'high',
+] as const
+
+export type ActivityReviewShareRiskLevel = typeof ACTIVITY_REVIEW_SHARE_RISK_LEVELS[number]
+
 const activityActionSet = new Set<string>(ACTIVITY_ACTIONS)
 const activityDetailPathKeys = new Set([
   'path',
@@ -303,7 +319,19 @@ export interface ActivityReviewRecord {
   user_count: number
   path_samples?: string[]
   user_samples?: string[]
+  share_disposition_details?: ActivityReviewShareDispositionDetail[]
   activity_entry_ids: string[]
+}
+
+export interface ActivityReviewShareDispositionDetail {
+  path: string
+  type?: ActivityReviewShareType
+  enabled: boolean
+  risk_level?: ActivityReviewShareRiskLevel
+  reason_summary?: string
+  suggested_action?: string
+  access_summary?: string
+  expires_at?: string
 }
 
 export interface ActivityReviewRecordCreateInput {
@@ -318,6 +346,7 @@ export interface ActivityReviewRecordCreateInput {
   user_count: number
   path_samples?: string[]
   user_samples?: string[]
+  share_disposition_details?: ActivityReviewShareDispositionDetail[]
   activity_entry_ids: string[]
 }
 
@@ -404,10 +433,23 @@ function isValidActivityReviewRecord(value: unknown): value is ActivityReviewRec
     && isNonNegativeInteger(value.user_count)
     && (value.path_samples === undefined || (Array.isArray(value.path_samples) && value.path_samples.every(isLogicalPathString) && hasUniqueStrings(value.path_samples)))
     && (value.user_samples === undefined || (Array.isArray(value.user_samples) && value.user_samples.every((user) => isNonEmptyReviewText(user) && user === user.trim()) && hasUniqueStrings(value.user_samples)))
+    && (value.share_disposition_details === undefined || (Array.isArray(value.share_disposition_details) && value.share_disposition_details.every(isValidActivityReviewShareDispositionDetail) && hasUniqueStrings(value.share_disposition_details.map((detail) => detail.path))))
     && Array.isArray(value.activity_entry_ids)
     && value.activity_entry_ids.length > 0
     && value.activity_entry_ids.every((id) => typeof id === 'string' && id.trim() !== '' && id === id.trim())
     && hasUniqueStrings(value.activity_entry_ids)
+}
+
+function isValidActivityReviewShareDispositionDetail(value: unknown): value is ActivityReviewShareDispositionDetail {
+  return isRecord(value)
+    && isLogicalPathString(value.path)
+    && (value.type === undefined || ACTIVITY_REVIEW_SHARE_TYPES.includes(value.type as ActivityReviewShareType))
+    && typeof value.enabled === 'boolean'
+    && (value.risk_level === undefined || ACTIVITY_REVIEW_SHARE_RISK_LEVELS.includes(value.risk_level as ActivityReviewShareRiskLevel))
+    && isOptionalReviewText(value.reason_summary)
+    && isOptionalReviewText(value.suggested_action)
+    && isOptionalReviewText(value.access_summary)
+    && isOptionalReviewText(value.expires_at)
 }
 
 function isActivityReviewDispositionStatus(value: unknown): value is ActivityReviewDispositionStatus {
