@@ -5790,6 +5790,84 @@ func TestServer_DeleteShare_LogsUnshareActivity(t *testing.T) {
 	}
 }
 
+func TestServer_UpdateShareEnableState_LogsShareActivity(t *testing.T) {
+	server, shareID := setupShareServer(t)
+	if server.activity == nil {
+		t.Fatal("expected activity store to be initialized")
+	}
+	server.authEnabled = true
+
+	disableReq := httptest.NewRequest(http.MethodPut, "/api/v1/shares/"+shareID, strings.NewReader(`{"enabled":false}`))
+	disableReq.Header.Set("Content-Type", "application/json")
+	disableReq = disableReq.WithContext(auth.WithClaimsContext(disableReq.Context(), &auth.TokenClaims{
+		UserID:   "tester",
+		Username: "tester",
+		Role:     auth.RoleUser,
+	}))
+	disableRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(disableRec, disableReq)
+
+	if disableRec.Code != http.StatusOK {
+		t.Fatalf("disable share status = %d, want %d: %s", disableRec.Code, http.StatusOK, disableRec.Body.String())
+	}
+	unshareEntries, unshareTotal := server.activity.List(10, 0, activity.ActionUnshare, "")
+	if unshareTotal != 1 || len(unshareEntries) != 1 {
+		t.Fatalf("expected one unshare activity entry, got total=%d len=%d", unshareTotal, len(unshareEntries))
+	}
+	if unshareEntries[0].Path != "/docs" || unshareEntries[0].User != "tester" {
+		t.Fatalf("unexpected unshare entry: %+v", unshareEntries[0])
+	}
+	if unshareEntries[0].Details["enabled"] != "false" || unshareEntries[0].Details["previous_enabled"] != "true" {
+		t.Fatalf("unexpected unshare enabled details: %+v", unshareEntries[0].Details)
+	}
+	if _, ok := unshareEntries[0].Details["url"]; ok {
+		t.Fatalf("unshare activity details must not expose share URL: %+v", unshareEntries[0].Details)
+	}
+	if _, ok := unshareEntries[0].Details["share_id"]; ok {
+		t.Fatalf("unshare activity details must not expose share ID: %+v", unshareEntries[0].Details)
+	}
+
+	descriptionReq := httptest.NewRequest(http.MethodPut, "/api/v1/shares/"+shareID, strings.NewReader(`{"description":"documented"}`))
+	descriptionReq.Header.Set("Content-Type", "application/json")
+	descriptionReq = descriptionReq.WithContext(auth.WithClaimsContext(descriptionReq.Context(), &auth.TokenClaims{
+		UserID:   "tester",
+		Username: "tester",
+		Role:     auth.RoleUser,
+	}))
+	descriptionRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(descriptionRec, descriptionReq)
+	if descriptionRec.Code != http.StatusOK {
+		t.Fatalf("description update status = %d, want %d: %s", descriptionRec.Code, http.StatusOK, descriptionRec.Body.String())
+	}
+	_, unshareTotal = server.activity.List(10, 0, activity.ActionUnshare, "")
+	if unshareTotal != 1 {
+		t.Fatalf("description update should not log another unshare activity, got %d", unshareTotal)
+	}
+
+	enableReq := httptest.NewRequest(http.MethodPut, "/api/v1/shares/"+shareID, strings.NewReader(`{"enabled":true}`))
+	enableReq.Header.Set("Content-Type", "application/json")
+	enableReq = enableReq.WithContext(auth.WithClaimsContext(enableReq.Context(), &auth.TokenClaims{
+		UserID:   "tester",
+		Username: "tester",
+		Role:     auth.RoleUser,
+	}))
+	enableRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(enableRec, enableReq)
+	if enableRec.Code != http.StatusOK {
+		t.Fatalf("enable share status = %d, want %d: %s", enableRec.Code, http.StatusOK, enableRec.Body.String())
+	}
+	shareEntries, shareTotal := server.activity.List(10, 0, activity.ActionShare, "")
+	if shareTotal != 1 || len(shareEntries) != 1 {
+		t.Fatalf("expected one share activity entry, got total=%d len=%d", shareTotal, len(shareEntries))
+	}
+	if shareEntries[0].Path != "/docs" || shareEntries[0].User != "tester" {
+		t.Fatalf("unexpected share entry: %+v", shareEntries[0])
+	}
+	if shareEntries[0].Details["enabled"] != "true" || shareEntries[0].Details["previous_enabled"] != "false" {
+		t.Fatalf("unexpected share enabled details: %+v", shareEntries[0].Details)
+	}
+}
+
 func TestServer_AddFavorite_LogsFavoriteActivity(t *testing.T) {
 	server, _, _, username, password := setupAuthServerWithFeatures(t, false, true)
 	if server.activity == nil {

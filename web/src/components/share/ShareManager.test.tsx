@@ -932,6 +932,85 @@ describe('ShareManager', () => {
     })
   })
 
+  it('records high-risk share disable execution results into activity review history', async () => {
+    const user = userEvent.setup()
+    vi.mocked(shareApi.listShares).mockResolvedValueOnce([
+      {
+        ...mockShares[0],
+        risk: {
+          level: 'high',
+          reasons: [
+            { code: 'no_password', level: 'high', message: '未设置密码，拿到链接的人都能访问' },
+          ],
+        },
+      },
+    ])
+    vi.mocked(shareApi.updateShare).mockResolvedValueOnce({
+      ...mockShares[0],
+      enabled: false,
+      risk: { level: 'none' },
+      warning: false,
+      message: undefined,
+    })
+    vi.mocked(activityApi.listActivity).mockResolvedValueOnce({
+      items: [{
+        id: 'act-unshare-1',
+        timestamp: '2026-03-27T01:00:00Z',
+        action: 'unshare',
+        path: '/docs/report.pdf',
+        user: 'admin',
+      }],
+      total: 1,
+      limit: 100,
+      offset: 0,
+    })
+
+    render(<ShareManager />)
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: '停用需处理 (1)' })).toBeInTheDocument()
+    })
+
+    await user.click(screen.getByRole('button', { name: '停用需处理 (1)' }))
+
+    await waitFor(() => {
+      expect(activityApi.createActivityReviewRecord).toHaveBeenCalledTimes(1)
+    })
+    expect(activityApi.listActivity).toHaveBeenCalledWith(expect.objectContaining({
+      actionGroup: 'share',
+      limit: 100,
+      offset: 0,
+      signal: expect.any(AbortSignal),
+    }))
+    expect(activityApi.createActivityReviewRecord).toHaveBeenCalledWith(expect.objectContaining({
+      note: '分享执行结果：已停用 1 个需处理分享；已关联 1 条分享活动。',
+      scope_label: '分享管理',
+      filter_summary: '审计分组 分享相关 · 当前分享 1/1 · 执行结果 停用需处理分享',
+      disposition_status: 'disabled',
+      action_counts: { unshare: 1 },
+      review_count: 1,
+      total_count: 1,
+      path_count: 1,
+      user_count: 1,
+      path_samples: ['/docs/report.pdf'],
+      user_samples: ['admin'],
+      share_disposition_details: [{
+        path: '/docs/report.pdf',
+        type: 'file',
+        enabled: false,
+        risk_level: 'high',
+        reason_summary: '未设置密码，拿到链接的人都能访问',
+        suggested_action: '已停用高风险分享；继续复核外部引用和访问入口。',
+        access_summary: '无密码 · 访问 3/不限',
+        expires_at: '永不过期',
+      }],
+      activity_entry_ids: ['act-unshare-1'],
+    }), expect.objectContaining({
+      signal: expect.any(AbortSignal),
+    }))
+    expect(mockAddToast).toHaveBeenCalledWith({ title: '分享停用结果已记录', color: 'success' })
+  })
+
   it('shows a warning toast when high-risk shares are disabled with persistence warnings', async () => {
     const user = userEvent.setup()
     vi.mocked(shareApi.listShares).mockResolvedValueOnce([
