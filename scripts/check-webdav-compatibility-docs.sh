@@ -101,6 +101,39 @@ const docs = [
   },
 ]
 
+const readmeClientSummaries = [
+  {
+    file: process.env.WEBDAV_README || 'README.md',
+    sectionStart: '### 客户端连接',
+    sectionEnd: '## 项目结构',
+    requiredText: [
+      '[WebDAV 兼容性](docs/webdav-compatibility.md)',
+      '兼容状态',
+      '真实客户端 E2E 覆盖',
+      '仍按矩阵继续跟踪',
+      '| 平台 | 常见客户端 | 连接地址 |',
+    ],
+    forbiddenText: [
+      '| 平台 | 推荐客户端 | 连接地址 |',
+    ],
+  },
+  {
+    file: process.env.WEBDAV_README_EN || 'README.en.md',
+    sectionStart: '### WebDAV Clients',
+    sectionEnd: '## Repository Layout',
+    requiredText: [
+      '[WebDAV Compatibility](docs/webdav-compatibility.en.md)',
+      'compatibility status',
+      'real-client E2E coverage',
+      'remain tracked by the matrix',
+      '| Platform | Common Client | URL |',
+    ],
+    forbiddenText: [
+      '| Platform | Recommended Client | URL |',
+    ],
+  },
+]
+
 const errors = []
 
 function readDoc(file) {
@@ -154,6 +187,25 @@ function checkRequiredText(markdown, doc) {
   }
 }
 
+function checkReadmeClientSummary(readme) {
+  const markdown = readDoc(readme.file)
+  if (markdown === null) {
+    return
+  }
+
+  const section = extractSection(markdown, readme.sectionStart, readme.sectionEnd, readme.file)
+  for (const text of readme.requiredText) {
+    if (!section.includes(text)) {
+      errors.push(`${readme.file}: missing required README WebDAV client-summary text: ${text}`)
+    }
+  }
+  for (const text of readme.forbiddenText) {
+    if (section.includes(text)) {
+      errors.push(`${readme.file}: avoid overclaiming WebDAV client support in README: ${text}`)
+    }
+  }
+}
+
 function checkMatrixRows(matrixMarkdown, doc) {
   const rows = tableRows(matrixMarkdown)
   const clientRows = rows.filter((cells) => cells.length === 4 && cells[0] !== '客户端' && cells[0] !== 'Client')
@@ -182,6 +234,9 @@ for (const doc of docs) {
   const matrixMarkdown = extractSection(markdown, doc.matrixStart, doc.matrixEnd, doc.file)
   checkMatrixRows(matrixMarkdown, doc)
 }
+for (const readme of readmeClientSummaries) {
+  checkReadmeClientSummary(readme)
+}
 
 if (errors.length > 0) {
   for (const error of errors) {
@@ -190,5 +245,5 @@ if (errors.length > 0) {
   process.exit(1)
 }
 
-console.log('[webdav-compat-docs] checked WebDAV compatibility matrix and validation standard')
+console.log('[webdav-compat-docs] checked WebDAV compatibility matrix, validation standard, and README client summary')
 NODE
