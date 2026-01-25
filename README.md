@@ -171,9 +171,9 @@ cp mnemonas.example.toml ~/.mnemonas/config.toml
 
 ### 客户端连接
 
-MnemoNAS 通过 WebDAV 协议提供文件访问，面向常见桌面、移动端和命令行客户端：
+MnemoNAS 通过 WebDAV 协议提供文件访问。下表是常见桌面、移动端和命令行客户端的连接入口；兼容状态以 [WebDAV 兼容性](docs/webdav-compatibility.md) 矩阵为准。`rclone` 已有可选真实客户端 E2E 覆盖，Finder、Windows 文件资源管理器和移动端客户端仍按矩阵继续跟踪。
 
-| 平台 | 推荐客户端 | 连接地址 |
+| 平台 | 常见客户端 | 连接地址 |
 | --- | --- | --- |
 | macOS | Finder | `http://localhost:8080/dav` |
 | Windows | 文件资源管理器 | `http://localhost:8080/dav` |
@@ -190,7 +190,7 @@ MnemoNAS 通过 WebDAV 协议提供文件访问，面向常见桌面、移动端
 自定义 Basic 密码不会回显，应以配置文件或密码管理器记录为准。
 自动生成的 Basic Auth 密码也保存在 `<storage.root>/secrets.json`。
 
-详见 [挂载指南](docs/mounting-guide.md)。
+挂载步骤详见 [挂载指南](docs/mounting-guide.md)。
 
 ## 项目结构
 
