@@ -1,5 +1,11 @@
 import { type Page } from '@playwright/test'
 
+type BatchRestoreRequestItem = {
+  job_id: string
+  target_path: string
+  include_config?: boolean
+}
+
 function backupRun(jobId: string) {
   return {
     id: `${jobId}-run-20260509T020304Z`,
@@ -120,6 +126,98 @@ export async function routeBackupJobs(page: Page, jobs = defaultBackupJobs) {
       body: JSON.stringify({
         success: true,
         data: jobs,
+      }),
+    })
+  })
+}
+
+export async function routeBatchBackupRestore(page: Page) {
+  await page.route(/\/api\/v1\/maintenance\/backups\/batch-restore-preview$/, async (route) => {
+    const body = route.request().postDataJSON() as { items?: BatchRestoreRequestItem[] }
+    const items = body.items ?? []
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        success: true,
+        message: 'batch restore preview completed',
+        data: {
+          id: 'batch-restore-preview-20260509T035900Z',
+          status: 'completed',
+          started_at: '2026-05-09T03:59:00Z',
+          finished_at: '2026-05-09T03:59:01Z',
+          duration_ms: 1000,
+          total_files: items.length * 12,
+          total_bytes: items.length * 4096,
+          warning: false,
+          warnings: [],
+          items: items.map((item, index) => ({
+            index,
+            job_id: item.job_id,
+            target_path: item.target_path,
+            include_config: item.include_config ?? false,
+            status: 'completed',
+            preview: {
+              id: `${item.job_id}-restore-preview-20260509T035900Z`,
+              job_id: item.job_id,
+              status: 'completed',
+              started_at: '2026-05-09T03:59:00Z',
+              finished_at: '2026-05-09T03:59:01Z',
+              duration_ms: 1000,
+              source: '/srv/mnemonas',
+              destination: `/mnt/backup-drive/${item.job_id}`,
+              snapshot_path: `/mnt/backup-drive/${item.job_id}/snapshots/20260509T020304Z`,
+              manifest_path: `/mnt/backup-drive/${item.job_id}/snapshots/20260509T020304Z/manifest.json`,
+              target_path: item.target_path,
+              file_count: 12,
+              total_bytes: 4096,
+              config_available: true,
+              config_included: item.include_config ?? false,
+              sample_paths: ['docs/note.txt'],
+              preflight_checks: [{
+                id: 'target_scope',
+                status: 'passed',
+                title: '目标路径隔离',
+                detail: '目标目录位于受保护路径之外。',
+              }],
+              warnings: [],
+            },
+          })),
+        },
+      }),
+    })
+  })
+
+  await page.route(/\/api\/v1\/maintenance\/backups\/batch-restore$/, async (route) => {
+    const body = route.request().postDataJSON() as { items?: BatchRestoreRequestItem[] }
+    const items = body.items ?? []
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        success: true,
+        message: 'batch restore completed',
+        data: {
+          id: 'batch-restore-20260509T040000Z',
+          status: 'completed',
+          started_at: '2026-05-09T04:00:00Z',
+          finished_at: '2026-05-09T04:00:02Z',
+          duration_ms: 2000,
+          total_files: items.length * 12,
+          verified_bytes: items.length * 4096,
+          warning: false,
+          warnings: [],
+          items: items.map((item, index) => ({
+            index,
+            job_id: item.job_id,
+            target_path: item.target_path,
+            include_config: item.include_config ?? false,
+            status: 'completed',
+            restore: restoreResult(item.job_id, item.target_path),
+            verify: restoreVerifyResult(item.job_id, item.target_path),
+            warnings: [],
+          })),
+        },
       }),
     })
   })

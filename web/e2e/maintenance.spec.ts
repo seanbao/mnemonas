@@ -1,10 +1,11 @@
 import { test, expect } from '@playwright/test'
 import { ensureAuthenticatedAt } from './helpers/auth-check'
-import { routeBackupJobs } from './helpers/backups'
+import { routeBackupJobs, routeBatchBackupRestore } from './helpers/backups'
 
 test.describe('备份与维护页面', () => {
   test.beforeEach(async ({ page }) => {
     await routeBackupJobs(page)
+    await routeBatchBackupRestore(page)
     await ensureAuthenticatedAt(page, '/maintenance')
   })
 
@@ -84,5 +85,19 @@ test.describe('备份与维护页面', () => {
     await expect(readiness.getByText('1 / 20 项')).toBeVisible()
     await expect(readiness.getByText('1 / 1 已填写')).toBeVisible()
     await expect(readiness.getByText('需要生成批量预览')).toBeVisible()
+  })
+
+  test('批量恢复完成后应显示可复制恢复记录入口', async ({ page }) => {
+    await page.getByRole('button', { name: '批量恢复' }).click()
+    await page.getByLabel('选择 外置硬盘备份').click()
+
+    await page.getByRole('button', { name: '生成批量预览' }).click()
+    await expect(page.getByText('批量预览结果')).toBeVisible()
+    await expect(page.getByLabel('批量恢复流程进度').getByText('预览通过，可开始批量恢复', { exact: true })).toBeVisible()
+
+    await page.getByRole('button', { name: '开始批量恢复' }).click()
+    const dialog = page.getByRole('dialog')
+    await expect(dialog.getByText('批量恢复已完成', { exact: true })).toBeVisible()
+    await expect(dialog.getByRole('button', { name: '复制批量恢复记录' })).toBeVisible()
   })
 })

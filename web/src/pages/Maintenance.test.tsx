@@ -2490,6 +2490,11 @@ describe('MaintenancePage', () => {
     })
 
     it('previews and runs a batch restore from the backup card', async () => {
+      const writeText = vi.fn().mockResolvedValue(undefined)
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: { writeText },
+      })
       mockListBackupJobs.mockResolvedValue(mockBackupJobs)
       const batchTarget = '/restore/token=batch-secret'
       const redactedBatchTarget = '/restore/token=<redacted>'
@@ -2665,6 +2670,23 @@ describe('MaintenancePage', () => {
         expect(screen.getByText('只读校验：检查 12 个文件 · 4 KB')).toBeTruthy()
         expect(screen.getAllByText('对照快照 20260509T020304.000000000Z').length).toBeGreaterThan(0)
       })
+
+      fireEvent.click(screen.getByRole('button', { name: /复制批量恢复记录/ }))
+
+      await waitFor(() => {
+        expect(writeText).toHaveBeenCalledTimes(1)
+      })
+      const report = writeText.mock.calls[0]?.[0] as string
+      expect(report).toContain('批量恢复记录')
+      expect(report).toContain('批次 ID：20260509T040001.000000000Z')
+      expect(report).toContain('恢复项目：1 项')
+      expect(report).toContain('1. external-disk')
+      expect(report).toContain('目标目录：/restore/token=<redacted>')
+      expect(report).toContain('配置文件：/restore/token=<redacted>/.mnemonas-restore/config.toml')
+      expect(report).toContain('只读校验：检查完成；检查 12 个文件 · 4 KB；可作为完整 storage.root 候选目录')
+      expect(report).toContain('快照：对照快照 20260509T020304.000000000Z')
+      expect(report).not.toContain(batchTarget)
+      expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({ title: '批量恢复记录已复制' }))
     })
 
     it('blocks batch restore preview when selected targets overlap', async () => {

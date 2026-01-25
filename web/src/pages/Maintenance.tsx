@@ -37,6 +37,7 @@ import {
   runBatchBackupRestore,
   verifyBackupRestoreJob,
   downloadBackupRestoreReport,
+  type BackupBatchRestoreItemResult,
   type BackupBatchRestoreItemRequest,
   type BackupBatchRestorePreviewResult,
   type BackupBatchRestoreResult,
@@ -1316,6 +1317,91 @@ function formatRestoreCutoverReport(
   ].join('\n')
 }
 
+function getBatchRestoreItemConfigText(item: BackupBatchRestoreItemResult): string {
+  if (item.restore?.config_restored) {
+    return item.restore.config_path ?? '已恢复配置文件'
+  }
+  if (item.restore) {
+    return '未恢复配置文件'
+  }
+  if (item.include_config) {
+    return '已请求恢复配置文件，尚未确认写入'
+  }
+  return '未请求恢复配置文件'
+}
+
+function getBatchRestoreItemVerifyText(item: BackupBatchRestoreItemResult): string {
+  if (!item.verify) {
+    return item.status === 'failed' ? '未执行只读校验' : '尚未返回只读校验结果'
+  }
+  const warnings = item.verify.warnings ?? []
+  const statusText = item.verify.status === 'failed'
+    ? '检查失败'
+    : warnings.length > 0
+      ? '检查完成，有警告'
+      : '检查完成'
+  const storageText = item.verify.looks_like_storage_root
+    ? '可作为完整 storage.root 候选目录'
+    : '未确认完整 storage.root 结构'
+  return `${statusText}；${getBackupRestoreVerifyMetricText(item.verify)}；${storageText}`
+}
+
+function getBatchRestoreItemWarningText(item: BackupBatchRestoreItemResult): string | null {
+  const warnings = [
+    ...(item.warnings ?? []),
+    ...(item.restore?.warnings ?? []),
+    ...(item.verify?.warnings ?? []),
+  ].map(getBackupDiagnosticDisplayMessage)
+  return warnings.length > 0 ? warnings.join('；') : null
+}
+
+function formatBatchRestoreResultReport(result: BackupBatchRestoreResult): string {
+  const sections = [
+    '批量恢复记录',
+    `批次 ID：${result.id}`,
+    `批次状态：${getBackupTaskStatusLabel(result.status)}${result.warning ? '（有警告）' : ''}`,
+    `恢复内容：${getBatchRestoreMetricText(result)}`,
+    `恢复项目：${result.items.length} 项`,
+  ]
+
+  if (result.error_message) {
+    sections.push(`批次错误：${getBackupDiagnosticDisplayMessage(result.error_message)}`)
+  }
+  if (result.warnings && result.warnings.length > 0) {
+    sections.push(`批次警告：${result.warnings.map(getBackupDiagnosticDisplayMessage).join('；')}`)
+  }
+
+  const itemSections = result.items.flatMap((item, index) => {
+    const lines = [
+      `${index + 1}. ${item.job_id}`,
+      `   状态：${getBackupTaskStatusLabel(item.status)}`,
+      `   目标目录：${item.target_path}`,
+      `   恢复内容：${item.restore ? getBackupRestoreMetricText(item.restore) : '未完成恢复写入'}`,
+      `   配置文件：${getBatchRestoreItemConfigText(item)}`,
+      `   只读校验：${getBatchRestoreItemVerifyText(item)}`,
+    ]
+    const snapshotPath = item.verify?.snapshot_path ?? item.restore?.snapshot_path
+    if (snapshotPath) {
+      lines.push(`   快照：${getBackupSnapshotReferenceText(snapshotPath)}`)
+    }
+    const warningText = getBatchRestoreItemWarningText(item)
+    if (warningText) {
+      lines.push(`   警告：${warningText}`)
+    }
+    if (item.error_message) {
+      lines.push(`   错误：${getBackupDiagnosticDisplayMessage(item.error_message)}`)
+    }
+    return lines
+  })
+
+  return [
+    ...sections,
+    '',
+    '项目结果',
+    ...itemSections,
+  ].join('\n')
+}
+
 function RestoreCutoverChecklist({
   result,
   verifyResult,
@@ -2401,6 +2487,19 @@ function BatchRestoreFlowGuide({
 }
 
 function BatchRestoreResultSummary({ result }: { result: BackupBatchRestoreResult }) {
+  const handleCopyBatchRestoreReport = async () => {
+    try {
+      await copyTextToClipboard(formatBatchRestoreResultReport(result))
+      addToast({ title: '批量恢复记录已复制', color: 'success' })
+    } catch {
+      addToast({
+        title: '复制批量恢复记录失败',
+        description: clipboardWriteFailureDescription,
+        color: 'danger',
+      })
+    }
+  }
+
   return (
     <div className="space-y-4">
       <div className={result.warning || result.status === 'failed' ? 'rounded-lg border border-warning/20 bg-warning/10 p-4 text-sm' : 'rounded-lg border border-success/20 bg-success/10 p-4 text-sm'}>
@@ -2411,6 +2510,17 @@ function BatchRestoreResultSummary({ result }: { result: BackupBatchRestoreResul
         <div className="mt-2 text-default-600">{getBatchRestoreMetricText(result)}</div>
         {result.error_message && <div className="mt-2 text-danger">{getBackupDiagnosticDisplayMessage(result.error_message)}</div>}
         {result.warnings && result.warnings.length > 0 && <div className="mt-2 text-warning">{getBackupDiagnosticDisplayMessage(result.warnings[0])}</div>}
+        <div className="mt-3">
+          <Button
+            size="sm"
+            variant="flat"
+            className="rounded-lg"
+            startContent={<Copy size={14} />}
+            onPress={handleCopyBatchRestoreReport}
+          >
+            复制批量恢复记录
+          </Button>
+        </div>
       </div>
       <div className="space-y-2">
         {result.items.map((item) => (
