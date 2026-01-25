@@ -452,7 +452,7 @@ function shareActivityMatchesAnyPath(entry: ActivityEntry, paths: Set<string>): 
   }
 }
 
-function getShareDisableExecutionDispositionDetails(
+function getShareAccessClosedExecutionDispositionDetails(
   shares: Share[],
   {
     fallbackRiskLevel = 'high',
@@ -476,33 +476,35 @@ function getShareDisableExecutionDispositionDetails(
     }))
 }
 
-function buildShareDisableExecutionRecordInput({
+function buildShareAccessClosedExecutionRecordInput({
   entries,
   totalEntries,
-  disabledShares,
+  closedShares,
   pathFilter,
   scopeLabel,
-  disabledShareLabel = '需处理分享',
+  closedShareLabel = '需处理分享',
+  actionVerb = '停用',
   filterExecutionLabel = '停用需处理分享',
   fallbackRiskLevel = 'high',
   suggestedAction,
 }: {
   entries: ActivityEntry[]
   totalEntries: number
-  disabledShares: Share[]
+  closedShares: Share[]
   pathFilter: string
   scopeLabel?: string
-  disabledShareLabel?: string
+  closedShareLabel?: string
+  actionVerb?: string
   filterExecutionLabel?: string
   fallbackRiskLevel?: ActivityReviewShareDispositionDetail['risk_level']
   suggestedAction?: string
 }): ActivityReviewRecordCreateInput {
-  const paths = getUniqueShareReviewValues(disabledShares.map((share) => share.path))
+  const paths = getUniqueShareReviewValues(closedShares.map((share) => share.path))
   const users = getUniqueShareReviewValues(entries.map((entry) => entry.user))
   return {
-    note: `分享执行结果：已停用 ${disabledShares.length} 个${disabledShareLabel}；已关联 ${entries.length} 条分享活动。`,
+    note: `分享执行结果：已${actionVerb} ${closedShares.length} 个${closedShareLabel}；已关联 ${entries.length} 条分享活动。`,
     scope_label: scopeLabel ?? (pathFilter ? `分享路径 ${pathFilter}` : '分享管理'),
-    filter_summary: `${getShareReviewRecordFilterSummary(pathFilter, disabledShares.length, disabledShares.length)} · 执行结果 ${filterExecutionLabel}`,
+    filter_summary: `${getShareReviewRecordFilterSummary(pathFilter, closedShares.length, closedShares.length)} · 执行结果 ${filterExecutionLabel}`,
     disposition_status: 'disabled',
     action_counts: getShareReviewActivityActionCounts(entries),
     review_count: entries.length,
@@ -511,7 +513,7 @@ function buildShareDisableExecutionRecordInput({
     user_count: users.length,
     path_samples: paths.slice(0, 10),
     user_samples: users.slice(0, 10),
-    share_disposition_details: getShareDisableExecutionDispositionDetails(disabledShares, {
+    share_disposition_details: getShareAccessClosedExecutionDispositionDetails(closedShares, {
       fallbackRiskLevel,
       suggestedAction,
     }),
@@ -814,7 +816,21 @@ export function ShareManager({
     }
   }
 
-  const recordSingleShareDisableExecution = async (share: Share, signal: AbortSignal) => {
+  const recordSingleShareAccessClosedExecution = async (
+    share: Share,
+    signal: AbortSignal,
+    {
+      actionVerb,
+      filterExecutionLabel,
+      suggestedAction,
+      successToastTitle,
+    }: {
+      actionVerb: string
+      filterExecutionLabel: string
+      suggestedAction: string
+      successToastTitle: string
+    }
+  ) => {
     const normalizedSharePath = normalizePath(share.path)
     const activityResult = await listActivity({
       actionGroup: 'share',
@@ -835,19 +851,20 @@ export function ShareManager({
       return
     }
 
-    await createActivityReviewRecord(buildShareDisableExecutionRecordInput({
+    await createActivityReviewRecord(buildShareAccessClosedExecutionRecordInput({
       entries: executionEntries,
       totalEntries: activityResult.total,
-      disabledShares: [share],
+      closedShares: [share],
       pathFilter: normalizedSharePath,
       scopeLabel: `分享 ${normalizedSharePath}`,
-      disabledShareLabel: '分享',
-      filterExecutionLabel: '停用分享',
+      closedShareLabel: '分享',
+      actionVerb,
+      filterExecutionLabel,
       fallbackRiskLevel: 'none',
-      suggestedAction: '已停用该分享；继续复核外部引用和访问入口。',
+      suggestedAction,
     }), { signal })
     if (!signal.aborted) {
-      addToast({ title: '分享停用结果已记录', color: 'success' })
+      addToast({ title: successToastTitle, color: 'success' })
     }
   }
 
@@ -867,7 +884,12 @@ export function ShareManager({
       addToast(getShareToggleSuccessToast(result.enabled, result.warning))
       if (share.enabled && !result.enabled) {
         try {
-          await recordSingleShareDisableExecution(result, controller.signal)
+          await recordSingleShareAccessClosedExecution(result, controller.signal, {
+            actionVerb: '停用',
+            filterExecutionLabel: '停用分享',
+            suggestedAction: '已停用该分享；继续复核外部引用和访问入口。',
+            successToastTitle: '分享停用结果已记录',
+          })
         } catch (err) {
           if (!controller.signal.aborted && !isAbortError(err)) {
             addToast({
@@ -964,10 +986,10 @@ export function ShareManager({
             entry.action === 'unshare' && shareActivityMatchesAnyPath(entry, disabledPaths)
           ))
           if (executionEntries.length > 0) {
-            await createActivityReviewRecord(buildShareDisableExecutionRecordInput({
+            await createActivityReviewRecord(buildShareAccessClosedExecutionRecordInput({
               entries: executionEntries,
               totalEntries: activityResult.total,
-              disabledShares: disabledTargets,
+              closedShares: disabledTargets,
               pathFilter: normalizedPathFilter,
             }), { signal: controller.signal })
             if (!controller.signal.aborted) {
@@ -1017,6 +1039,22 @@ export function ShareManager({
       setShares(prev => prev.filter(s => s.id !== target.id))
       addToast(getShareDeleteSuccessToast(result))
       setDeleteTarget(current => (current?.id === target.id ? null : current))
+      try {
+        await recordSingleShareAccessClosedExecution(target, controller.signal, {
+          actionVerb: '删除',
+          filterExecutionLabel: '删除分享',
+          suggestedAction: '已删除该分享；继续复核外部引用和访问入口。',
+          successToastTitle: '分享删除结果已记录',
+        })
+      } catch (err) {
+        if (!controller.signal.aborted && !isAbortError(err)) {
+          addToast({
+            title: '分享已删除，复核记录写入失败',
+            description: getUserFacingErrorDescription(err),
+            color: 'warning',
+          })
+        }
+      }
     } catch (err) {
       if (controller.signal.aborted || isAbortError(err)) {
         return

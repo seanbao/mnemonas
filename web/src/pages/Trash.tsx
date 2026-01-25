@@ -20,6 +20,7 @@ import {
   AlertTriangle,
   Clock,
   AlertCircle,
+  Copy,
   X,
 } from 'lucide-react'
 import {
@@ -40,7 +41,7 @@ import {
 } from '@/api/activity'
 import { FileIcon } from '@/components/ui/FileIcon'
 import { EmptyState } from '@/components/ui/EmptyState'
-import { formatBytes, cn, formatRelativeTime, normalizePath } from '@/lib/utils'
+import { formatBytes, cn, copyTextToClipboard, formatRelativeTime, normalizePath } from '@/lib/utils'
 import { useBatchOperation, type BatchOperationResult } from '@/lib/useBatchOperation'
 import { GENERIC_ACTION_ERROR_DESCRIPTION, GENERIC_LOAD_ERROR_DESCRIPTION, getUserFacingErrorDescription } from '@/lib/apiMessages'
 import { PageHeader } from '@/components/ui/PageHeader'
@@ -92,6 +93,7 @@ function getAutoDeleteBadgeLabel(deletedAt: string, retentionDays: number | unde
 
 const trashUnavailableDescription = '文件系统当前不可用，请稍后重试'
 const missingTrashItemTitle = '回收站条目已不存在，已同步更新'
+const clipboardWriteFailureDescription = '请检查浏览器剪贴板权限。'
 const TRASH_RESTORE_ACTIVITY_LIMIT = 100
 
 function normalizeTrashPathFilter(value: string | null): string {
@@ -393,6 +395,29 @@ function getBatchRestoreAutoDeleteSummary(
   return '所选项目不在近期自动清理窗口内'
 }
 
+function formatTrashBatchRestoreReviewReport(
+  items: TrashItem[],
+  retentionDays: number | undefined,
+  retentionEnabled: boolean | undefined,
+): string {
+  const fileCount = items.filter((item) => !item.isDir).length
+  const directoryCount = items.filter((item) => item.isDir).length
+  const totalSize = items.reduce((sum, item) => sum + item.size, 0)
+  const targetDirectories = Array.from(new Set(items.map(getTrashItemParentPath))).sort()
+
+  return [
+    '回收站批量恢复复核',
+    `恢复项目：${items.length} 项（${directoryCount} 个目录，${fileCount} 个文件）`,
+    `原始目录：${targetDirectories.length} 个目标目录`,
+    `可见数据量：${formatBytes(totalSize)}`,
+    `自动清理：${getBatchRestoreAutoDeleteSummary(items, retentionDays, retentionEnabled)}`,
+    '冲突处理：若原路径已存在同名文件、父目录不可写或配额不足，服务端会拒绝对应项目并保留在回收站。',
+    '执行结果：成功项目会从回收站移除；失败项目会保持选中，便于继续处理。',
+    '涉及目录：',
+    ...targetDirectories.map((target) => `- ${target}`),
+  ].join('\n')
+}
+
 function TrashRestoreReviewItem({ label, value }: { label: string; value: string }) {
   return (
     <div className="min-w-0 rounded-lg border border-divider bg-content1 px-3 py-2">
@@ -417,12 +442,29 @@ function TrashBatchRestoreReview({
   const targetDirectories = Array.from(new Set(items.map(getTrashItemParentPath))).sort()
   const visibleTargets = targetDirectories.slice(0, 4)
   const hiddenTargetCount = Math.max(0, targetDirectories.length - visibleTargets.length)
+  const handleCopyReviewReport = async () => {
+    try {
+      await copyTextToClipboard(formatTrashBatchRestoreReviewReport(items, retentionDays, retentionEnabled))
+      addToast({ title: '批量恢复复核记录已复制', color: 'success' })
+    } catch {
+      addToast({
+        title: '复制批量恢复复核记录失败',
+        description: clipboardWriteFailureDescription,
+        color: 'danger',
+      })
+    }
+  }
 
   return (
     <div aria-label="跨目录恢复执行前复核" className="rounded-lg border border-warning/20 bg-warning/10 p-3 text-sm">
-      <div className="flex items-center gap-2 font-medium text-default-800">
-        <AlertTriangle size={16} className="text-warning" />
-        <span>跨目录恢复复核</span>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-center gap-2 font-medium text-default-800">
+          <AlertTriangle size={16} className="text-warning" />
+          <span>跨目录恢复复核</span>
+        </div>
+        <Button size="sm" variant="flat" className="rounded-lg" startContent={<Copy size={14} />} onPress={handleCopyReviewReport}>
+          复制复核记录
+        </Button>
       </div>
       <div className="mt-3 grid gap-2 sm:grid-cols-2">
         <TrashRestoreReviewItem label="恢复项目" value={`${items.length} 项 · ${directoryCount} 个目录 · ${fileCount} 个文件`} />

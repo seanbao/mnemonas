@@ -322,7 +322,7 @@ Priority:
 
 When new trash content would exceed `max_size`, older trash items are removed first. If the newest item is larger than the limit, it is still kept and total trash size may temporarily exceed the limit.
 
-The Web Trash page shows a cross-directory restore review before batch restore, covering affected directories, the auto-cleanup window, conflict handling, and execution results. After single-item or batch restore succeeds, the page associates matching `trash_restore` activity entries with an activity review record in the `restored` disposition state; unavailable activity logging or missing matching restore activity does not block the restore itself.
+The Web Trash page shows a cross-directory restore review before batch restore, covering affected directories, the auto-cleanup window, conflict handling, and execution results, with a copyable review record for pre-restore confirmation. After single-item or batch restore succeeds, the page associates matching `trash_restore` activity entries with an activity review record in the `restored` disposition state; unavailable activity logging or missing matching restore activity does not block the restore itself.
 
 ## `[storage.versioning]`
 
@@ -332,7 +332,7 @@ The Web Trash page shows a cross-directory restore review before batch restore, 
 | `auto_versioned_filenames` | string[] | common config filenames | Filenames eligible for automatic versioning |
 | `max_versioned_size` | int64 | `104857600` | Maximum automatically versioned file size |
 
-The Web version-history page shows a pre-submit review for the target file, overwrite impact, safety retention, execution checks, and conflict handling before version restore. After version restore succeeds, the page associates matching `restore` activity entries by path and version hash with an activity review record in the `restored` disposition state; unavailable activity logging or missing matching restore activity does not block the version restore itself.
+The Web version-history page shows a pre-submit review for the target file, overwrite impact, safety retention, execution checks, and conflict handling before version restore, with a copyable review record for pre-restore confirmation. After version restore succeeds, the page associates matching `restore` activity entries by path and version hash with an activity review record in the `restored` disposition state; unavailable activity logging or missing matching restore activity does not block the version restore itself.
 
 Example:
 
@@ -570,7 +570,7 @@ The `path` field in each policy rule follows the same MnemoNAS logical-path rule
 
 `allowed_users`, `allowed_groups`, and `allowed_roles` restrict which authenticated caller may create or maintain share links under the path. User values match either user IDs or usernames, group values match user groups, and role values support `admin`, `user`, and `guest`. Administrators bypass this scope restriction so they can repair existing shares. Creator-scope enforcement is skipped when application authentication is disabled. This restriction affects authenticated share creation and maintenance only; it does not change public access boundaries for already-created share links.
 
-The Web share-create dialog shows a pre-submit summary of policy source, password requirement, effective expiration, and effective access limit, including path-policy caps. The Web settings page shows a pre-save change summary for share enablement, base URL, default expiration, default access limit, and path policy rules compared with the saved configuration, and its coverage summary lists cleanup suggestions for root-wide rules, most-specific path rules that do not inherit ancestor limits, and duplicate-equivalent rules. The Web share list summarizes shares requiring review, passwordless links, broad-scope links, soon-expiring links, and stale links, with matching filters, current-scope review-record creation, share-type-filtered review-history handoff, expandable review details, high-risk disable actions, and single-share disable actions; after high-risk or single-share disable actions succeed, matching `unshare` activity entries are associated with a disable execution-result review record.
+The Web share-create dialog shows a pre-submit summary of policy source, password requirement, effective expiration, and effective access limit, including path-policy caps. The Web settings page shows a pre-save change summary for share enablement, base URL, default expiration, default access limit, and path policy rules compared with the saved configuration, and its coverage summary lists cleanup suggestions for root-wide rules, most-specific path rules that do not inherit ancestor limits, and duplicate-equivalent rules. The Web share list summarizes shares requiring review, passwordless links, broad-scope links, soon-expiring links, and stale links, with matching filters, current-scope review-record creation, share-type-filtered review-history handoff, expandable review details, high-risk disable actions, single-share disable actions, and deletion actions; after high-risk disable, single-share disable, or share deletion actions succeed, matching `unshare` activity entries are associated with an access-closure execution-result review record.
 
 ## `[security]`
 
