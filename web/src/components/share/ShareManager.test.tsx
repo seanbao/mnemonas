@@ -1265,6 +1265,76 @@ describe('ShareManager', () => {
     })
   })
 
+  it('records single share disable execution results into activity review history', async () => {
+    const user = userEvent.setup()
+    vi.mocked(shareApi.updateShare).mockResolvedValueOnce({
+      ...mockShares[0],
+      enabled: false,
+      warning: false,
+      message: undefined,
+    })
+    vi.mocked(activityApi.listActivity).mockResolvedValueOnce({
+      items: [{
+        id: 'act-unshare-single-1',
+        timestamp: '2026-03-27T01:00:00Z',
+        action: 'unshare',
+        path: '/docs/report.pdf',
+        user: 'admin',
+      }],
+      total: 1,
+      limit: 100,
+      offset: 0,
+    })
+
+    render(<ShareManager />)
+
+    await waitFor(() => {
+      expect(screen.getByText('report.pdf')).toBeInTheDocument()
+    })
+
+    await user.click(screen.getByLabelText('report.pdf 分享操作'))
+    await user.click(await screen.findByText('禁用分享'))
+
+    await waitFor(() => {
+      expect(activityApi.createActivityReviewRecord).toHaveBeenCalledTimes(1)
+    })
+    expect(activityApi.listActivity).toHaveBeenCalledWith(expect.objectContaining({
+      actionGroup: 'share',
+      path: '/docs/report.pdf',
+      limit: 100,
+      offset: 0,
+      signal: expect.any(AbortSignal),
+    }))
+    expect(activityApi.createActivityReviewRecord).toHaveBeenCalledWith(expect.objectContaining({
+      note: '分享执行结果：已停用 1 个分享；已关联 1 条分享活动。',
+      scope_label: '分享 /docs/report.pdf',
+      filter_summary: '审计分组 分享相关 · 路径 /docs/report.pdf · 当前分享 1/1 · 执行结果 停用分享',
+      disposition_status: 'disabled',
+      action_counts: { unshare: 1 },
+      review_count: 1,
+      total_count: 1,
+      path_count: 1,
+      user_count: 1,
+      path_samples: ['/docs/report.pdf'],
+      user_samples: ['admin'],
+      share_disposition_details: [{
+        path: '/docs/report.pdf',
+        type: 'file',
+        enabled: false,
+        risk_level: 'none',
+        reason_summary: '无',
+        suggested_action: '已停用该分享；继续复核外部引用和访问入口。',
+        access_summary: '无密码 · 访问 3/不限',
+        expires_at: '永不过期',
+      }],
+      activity_entry_ids: ['act-unshare-single-1'],
+    }), expect.objectContaining({
+      signal: expect.any(AbortSignal),
+    }))
+    expect(mockAddToast).toHaveBeenCalledWith({ title: '分享已禁用', color: 'success' })
+    expect(mockAddToast).toHaveBeenCalledWith({ title: '分享停用结果已记录', color: 'success' })
+  })
+
   it('shows a warning toast when disabling a share succeeds with persistence warnings', async () => {
     const user = userEvent.setup()
     vi.mocked(shareApi.updateShare).mockResolvedValueOnce({
