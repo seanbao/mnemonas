@@ -322,6 +322,8 @@ Priority:
 
 When new trash content would exceed `max_size`, older trash items are removed first. If the newest item is larger than the limit, it is still kept and total trash size may temporarily exceed the limit.
 
+The Web Trash page shows a cross-directory restore review before batch restore, covering affected directories, the auto-cleanup window, conflict handling, and execution results. After single-item or batch restore succeeds, the page associates matching `trash_restore` activity entries with an activity review record in the `restored` disposition state; unavailable activity logging or missing matching restore activity does not block the restore itself.
+
 ## `[storage.versioning]`
 
 | Option | Type | Default | Description |
@@ -329,6 +331,8 @@ When new trash content would exceed `max_size`, older trash items are removed fi
 | `auto_versioned_extensions` | string[] | common text/code extensions | Extensions eligible for automatic versioning |
 | `auto_versioned_filenames` | string[] | common config filenames | Filenames eligible for automatic versioning |
 | `max_versioned_size` | int64 | `104857600` | Maximum automatically versioned file size |
+
+The Web version-history page shows a pre-submit review for the target file, overwrite impact, safety retention, execution checks, and conflict handling before version restore. After version restore succeeds, the page associates matching `restore` activity entries by path and version hash with an activity review record in the `restored` disposition state; unavailable activity logging or missing matching restore activity does not block the version restore itself.
 
 Example:
 

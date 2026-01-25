@@ -32,6 +32,12 @@ import {
   type TrashItem,
   type TrashListResponse
 } from '@/api/files'
+import {
+  createActivityReviewRecord,
+  listActivity,
+  type ActivityEntry,
+  type ActivityReviewRecordCreateInput,
+} from '@/api/activity'
 import { FileIcon } from '@/components/ui/FileIcon'
 import { EmptyState } from '@/components/ui/EmptyState'
 import { formatBytes, cn, formatRelativeTime, normalizePath } from '@/lib/utils'
@@ -86,6 +92,7 @@ function getAutoDeleteBadgeLabel(deletedAt: string, retentionDays: number | unde
 
 const trashUnavailableDescription = '文件系统当前不可用，请稍后重试'
 const missingTrashItemTitle = '回收站条目已不存在，已同步更新'
+const TRASH_RESTORE_ACTIVITY_LIMIT = 100
 
 function normalizeTrashPathFilter(value: string | null): string {
   const trimmed = value?.trim() ?? ''
@@ -108,6 +115,88 @@ function trashItemMatchesPathFilter(item: TrashItem, pathFilter: string): boolea
   }
   const directoryPrefix = pathFilter.endsWith('/') ? pathFilter : `${pathFilter}/`
   return item.originalPath.startsWith(directoryPrefix)
+}
+
+function getUniqueTrashReviewValues(values: Array<string | undefined>): string[] {
+  const seen = new Set<string>()
+  const result: string[] = []
+  for (const value of values) {
+    const trimmed = value?.trim() ?? ''
+    if (!trimmed || seen.has(trimmed)) {
+      continue
+    }
+    seen.add(trimmed)
+    result.push(trimmed)
+  }
+  return result
+}
+
+function trashActivityMatchesAnyPath(entry: ActivityEntry, paths: Set<string>): boolean {
+  const path = entry.path?.trim()
+  if (!path) {
+    return false
+  }
+  try {
+    return paths.has(normalizePath(path))
+  } catch {
+    return false
+  }
+}
+
+function getTrashRestoreMatchedItems(items: TrashItem[], entries: ActivityEntry[]): TrashItem[] {
+  const entryPaths = new Set(entries.flatMap((entry) => {
+    if (!entry.path) {
+      return []
+    }
+    try {
+      return [normalizePath(entry.path)]
+    } catch {
+      return []
+    }
+  }))
+  return items.filter((item) => {
+    try {
+      return entryPaths.has(normalizePath(item.originalPath))
+    } catch {
+      return false
+    }
+  })
+}
+
+function buildTrashRestoreReviewRecordInput({
+  entries,
+  totalEntries,
+  restoredItems,
+  pathFilter,
+}: {
+  entries: ActivityEntry[]
+  totalEntries: number
+  restoredItems: TrashItem[]
+  pathFilter: string
+}): ActivityReviewRecordCreateInput {
+  const paths = getUniqueTrashReviewValues(entries.map((entry) => entry.path))
+  const users = getUniqueTrashReviewValues(entries.map((entry) => entry.user))
+  const fileCount = restoredItems.filter((item) => !item.isDir).length
+  const directoryCount = restoredItems.filter((item) => item.isDir).length
+  const scopeLabel = pathFilter ? `回收站路径 ${pathFilter}` : '回收站'
+  const filterSummary = pathFilter
+    ? `审计分组 风险操作 · 路径 ${pathFilter} · 执行结果 回收站恢复`
+    : '审计分组 风险操作 · 执行结果 回收站恢复'
+
+  return {
+    note: `回收站恢复执行结果：已恢复 ${restoredItems.length} 项（${directoryCount} 个目录，${fileCount} 个文件）；已关联 ${entries.length} 条恢复活动。`,
+    scope_label: scopeLabel,
+    filter_summary: filterSummary,
+    disposition_status: 'restored',
+    action_counts: { trash_restore: entries.length },
+    review_count: entries.length,
+    total_count: Math.max(totalEntries, entries.length),
+    path_count: paths.length,
+    user_count: users.length,
+    path_samples: paths.slice(0, 10),
+    user_samples: users.slice(0, 10),
+    activity_entry_ids: entries.map((entry) => entry.id),
+  }
 }
 
 function getMissingTrashItemResult(): ActionResult {
@@ -648,19 +737,70 @@ export function TrashPage() {
     }
   }, [])
 
+  const recordTrashRestoreReview = useCallback(async (restoredItems: TrashItem[], signal: AbortSignal) => {
+    if (restoredItems.length === 0) {
+      return
+    }
+
+    try {
+      const restoredPaths = new Set(restoredItems.map((item) => normalizePath(item.originalPath)))
+      const activityResult = await listActivity({
+        action: 'trash_restore',
+        actionGroup: 'risk',
+        path: pathFilter || undefined,
+        limit: TRASH_RESTORE_ACTIVITY_LIMIT,
+        offset: 0,
+        signal,
+      })
+      if (signal.aborted) {
+        return
+      }
+
+      const executionEntries = activityResult.items.filter((entry) => (
+        entry.action === 'trash_restore' && trashActivityMatchesAnyPath(entry, restoredPaths)
+      ))
+      if (executionEntries.length === 0) {
+        return
+      }
+
+      const matchedItems = getTrashRestoreMatchedItems(restoredItems, executionEntries)
+      await createActivityReviewRecord(buildTrashRestoreReviewRecordInput({
+        entries: executionEntries,
+        totalEntries: activityResult.total,
+        restoredItems: matchedItems.length > 0 ? matchedItems : restoredItems,
+        pathFilter,
+      }), { signal })
+      if (!signal.aborted) {
+        addToast({ title: '恢复结果已记录', color: 'success' })
+      }
+    } catch (error) {
+      if (!signal.aborted && !isAbortError(error)) {
+        addToast({
+          title: '恢复已完成，复核记录写入失败',
+          description: getUserFacingErrorDescription(error),
+          color: 'warning',
+        })
+      }
+    }
+  }, [pathFilter])
+
   // Mutations
   const restoreMutation = useMutation({
     mutationFn: ({ id, signal }: { id: string; signal: AbortSignal }) => restoreTrashItem(id, { signal }),
-    onSuccess: (result, variables) => {
+    onSuccess: async (result, variables) => {
       if (variables.signal.aborted) {
         return
       }
       const id = variables.id
+      const restoredItem = items.find((item) => item.id === id)
       removeTrashItemsFromCache([id])
       removeSelectedIds([id])
       queryClient.invalidateQueries({ queryKey: trashQueryKey })
       queryClient.invalidateQueries({ queryKey: ['files'] })
       addToast(getTrashRestoreSuccessToast(result))
+      if (restoredItem && result.message !== missingTrashItemTitle) {
+        await recordTrashRestoreReview([restoredItem], variables.signal)
+      }
     },
     onError: (error, variables) => {
       if (variables.signal.aborted || isAbortError(error)) {
@@ -807,11 +947,17 @@ export function TrashPage() {
     if (!canWrite) return
     const ids = Array.from(visibleSelectedItems)
     if (ids.length === 0) return
+    const restoreTargets = selectedTrashItems
     batchRestoreAbortControllerRef.current?.abort()
     const controller = new AbortController()
     batchRestoreAbortControllerRef.current = controller
     try {
-      await executeBatchRestore(ids, { signal: controller.signal })
+      const result = await executeBatchRestore(ids, { signal: controller.signal })
+      if (!controller.signal.aborted) {
+        const restoredIds = new Set(result.succeededItems as string[])
+        const restoredTargets = restoreTargets.filter((item) => restoredIds.has(item.id))
+        await recordTrashRestoreReview(restoredTargets, controller.signal)
+      }
       if (!controller.signal.aborted) {
         onBatchRestoreClose()
       }
@@ -820,7 +966,7 @@ export function TrashPage() {
         batchRestoreAbortControllerRef.current = null
       }
     }
-  }, [canWrite, executeBatchRestore, onBatchRestoreClose, visibleSelectedItems])
+  }, [canWrite, executeBatchRestore, onBatchRestoreClose, recordTrashRestoreReview, selectedTrashItems, visibleSelectedItems])
 
   // Batch delete using custom hook
   const { execute: executeBatchDelete, isLoading: isBatchDeleting } = useBatchOperation<string, ActionResult>({
