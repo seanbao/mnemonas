@@ -3628,6 +3628,11 @@ describe('MaintenancePage', () => {
 
     it('shows a pre-submit restore execution review after preview succeeds', async () => {
       const user = userEvent.setup()
+      const writeText = vi.fn().mockResolvedValue(undefined)
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: { writeText },
+      })
       mockListBackupJobs.mockResolvedValue(mockBackupJobs)
       mockPreviewBackupRestoreJob.mockResolvedValueOnce({
         id: '20260509T035900.000000000Z',
@@ -3643,6 +3648,7 @@ describe('MaintenancePage', () => {
         total_bytes: 4096,
         config_available: true,
         config_included: true,
+        sample_paths: ['docs/note.txt', '.mnemonas-restore/config.toml'],
         preflight_checks: [
           {
             id: 'target_isolated',
@@ -3687,6 +3693,23 @@ describe('MaintenancePage', () => {
       })
 
       expect((screen.getByRole('button', { name: /开始恢复/ }) as HTMLButtonElement).disabled).toBe(false)
+      await user.click(screen.getByRole('button', { name: '复制复核记录' }))
+
+      await waitFor(() => {
+        expect(writeText).toHaveBeenCalledTimes(1)
+      })
+      const report = String(writeText.mock.calls[0]?.[0] ?? '')
+      expect(report).toContain('恢复执行前复核')
+      expect(report).toContain('任务 ID：external-disk')
+      expect(report).toContain('恢复目标：/restore/mnemonas')
+      expect(report).toContain('恢复内容：预计 12 个文件 · 4 KB')
+      expect(report).toContain('配置文件：将恢复到 .mnemonas-restore/config.toml')
+      expect(report).toContain('预检结果：1 项通过 · 1 项提醒 · 0 项失败')
+      expect(report).toContain('预览状态：当前目标目录和配置选项与预览一致')
+      expect(report).toContain('写入边界：恢复只写入独立目录，不覆盖当前 storage.root。')
+      expect(report).toContain('路径样例：docs/note.txt；.mnemonas-restore/config.toml')
+      expect(report).toContain('恢复提醒：目标文件系统剩余空间接近下限。')
+      expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({ title: '恢复执行前复核记录已复制' }))
       expect(mockRestoreBackupJob).not.toHaveBeenCalled()
     })
 
