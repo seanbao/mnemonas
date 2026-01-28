@@ -3,6 +3,7 @@
 English | [简体中文](mounting-guide.md)
 
 MnemoNAS exposes files through WebDAV. The Web UI provides management operations, while WebDAV provides desktop, mobile, and command-line access to the same storage.
+The client steps below are connection references; actual compatibility status is tracked in [WebDAV compatibility](webdav-compatibility.en.md). `rclone` has optional real-client E2E coverage, while Finder, Windows File Explorer, mobile, and media clients remain tracked by the matrix.
 
 ## Connection Information
 
