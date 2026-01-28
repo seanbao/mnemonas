@@ -22,7 +22,7 @@ The name comes from Mnemosyne, the Greek goddess of memory and mother of the nin
 - **Web interface**: desktop and mobile views are designed for clear daily use instead of dense admin-only panels.
 - **Deployment paths**: Docker Compose and Linux/systemd deployment methods are provided.
 - **Maintenance and diagnostics**: health checks, scrub, GC, and diagnostic bundles help discover and investigate data issues.
-- **Web and WebDAV coverage**: browser-based management and common WebDAV clients are both supported.
+- **Web and WebDAV coverage**: browser-based management and WebDAV protocol access cover the main access paths, with client compatibility tracked in the matrix.
 
 ### Feature Matrix
 
