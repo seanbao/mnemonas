@@ -48,9 +48,9 @@ sudo mnemonas-doctor --public-domain nas.example.com
 
 ```bash
 curl -I https://nas.example.com/health
-curl --connect-timeout 3 http://nas.example.com:8080/health
-curl --connect-timeout 3 http://nas.example.com:9090/
-curl --connect-timeout 3 http://nas.example.com:9091/health
+curl --connect-timeout 3 --max-time 10 http://nas.example.com:8080/health
+curl --connect-timeout 3 --max-time 10 http://nas.example.com:9090/
+curl --connect-timeout 3 --max-time 10 http://nas.example.com:9091/health
 ```
 
 预期结果：

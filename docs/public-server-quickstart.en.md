@@ -132,9 +132,9 @@ This script checks public HTTPS health, same-domain HTTP-to-HTTPS redirects, and
 Direct backend ports should fail to connect or time out. Any HTTP status response, including `401`, `403`, or `404`, means the port is still publicly reachable:
 
 ```bash
-curl --connect-timeout 3 http://nas.example.com:8080/health
-curl --connect-timeout 3 http://nas.example.com:9090/
-curl --connect-timeout 3 http://nas.example.com:9091/health
+curl --connect-timeout 3 --max-time 10 http://nas.example.com:8080/health
+curl --connect-timeout 3 --max-time 10 http://nas.example.com:9090/
+curl --connect-timeout 3 --max-time 10 http://nas.example.com:9091/health
 ```
 
 On the server:
