@@ -206,6 +206,43 @@ checksum_manifest_has_archive() {
 	return 1
 }
 
+validate_artifact_directory_entries() {
+	local entry
+	local base
+
+	shopt -s nullglob dotglob
+	for entry in "$ARTIFACT_DIR"/*; do
+		base="$(basename "$entry")"
+		case "$base" in
+			checksums.txt|mnemonas-*.tar.gz)
+				;;
+			*)
+				fail "artifact directory contains an unsupported entry: $base"
+				;;
+		esac
+	done
+	shopt -u nullglob dotglob
+}
+
+format_seen_targets() {
+	local seen="$1"
+	local target
+	local formatted=""
+
+	for target in "${EXPECTED_TARGETS[@]}"; do
+		case " $seen " in
+			*" $target "*)
+				if [[ -n "$formatted" ]]; then
+					formatted+=" "
+				fi
+				formatted+="$target"
+				;;
+		esac
+	done
+
+	printf '%s\n' "$formatted"
+}
+
 validate_manifest_paths() {
 	local manifest="$1"
 	local expected_top="$2"
@@ -391,6 +428,7 @@ need_tool tar
 CHECKSUMS="$ARTIFACT_DIR/checksums.txt"
 [[ -e "$CHECKSUMS" ]] || fail "missing checksums file: $CHECKSUMS"
 assert_regular_file "$CHECKSUMS"
+validate_artifact_directory_entries
 validate_checksums_manifest "$CHECKSUMS"
 
 shopt -s nullglob
@@ -453,4 +491,5 @@ if [[ "$CHECK_IMAGE" == "1" ]]; then
 	check_remote_image "$VERSION" "$REPOSITORY"
 fi
 
+printf '[release-artifact-verify] verified targets: %s\n' "$(format_seen_targets "$seen_targets")"
 printf '[release-artifact-verify] verified %d archive(s) for %s\n' "${#archives[@]}" "$VERSION"
