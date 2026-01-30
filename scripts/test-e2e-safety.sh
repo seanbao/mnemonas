@@ -807,6 +807,25 @@ run_backup_restore_docs_contract_test() {
 	assert_file_contains "$REPO_ROOT/docs/backup-guide.en.md" 'API-visible backup error, warning, or restore-report findings text'
 }
 
+run_storage_stats_docs_contract_test() {
+	assert_file_contains "$REPO_ROOT/docs/api-reference.md" 'GET /api/v1/stats'
+	assert_file_contains "$REPO_ROOT/docs/api-reference.md" 'disk_mount_point'
+	assert_file_contains "$REPO_ROOT/docs/api-reference.md" 'disk_mount_source'
+	assert_file_contains "$REPO_ROOT/docs/api-reference.md" 'disk_mount_options'
+	assert_file_contains "$REPO_ROOT/docs/api-reference.md" '类似 secret 的路径片段会被脱敏'
+	assert_file_contains "$REPO_ROOT/docs/api-reference.md" 'URL userinfo 和类似 secret 的参数会被脱敏'
+	assert_file_contains "$REPO_ROOT/docs/api-reference.md" '敏感 mount option 值也会被脱敏'
+	assert_file_contains "$REPO_ROOT/docs/api-reference.md" 'home 范围非管理员用户不会收到全局磁盘、CAS、文件数量或目录配额统计'
+	assert_file_contains "$REPO_ROOT/docs/api-reference.en.md" 'GET /api/v1/stats'
+	assert_file_contains "$REPO_ROOT/docs/api-reference.en.md" 'disk_mount_point'
+	assert_file_contains "$REPO_ROOT/docs/api-reference.en.md" 'disk_mount_source'
+	assert_file_contains "$REPO_ROOT/docs/api-reference.en.md" 'disk_mount_options'
+	assert_file_contains "$REPO_ROOT/docs/api-reference.en.md" "Secret-like path segments in \`disk_mount_point\` are redacted"
+	assert_file_contains "$REPO_ROOT/docs/api-reference.en.md" "URL userinfo and secret-like parameters in \`disk_mount_source\` are redacted"
+	assert_file_contains "$REPO_ROOT/docs/api-reference.en.md" 'Sensitive mount option values such as credentials, usernames, passwords, keys, and tokens are redacted'
+	assert_file_contains "$REPO_ROOT/docs/api-reference.en.md" 'home-scoped non-admin users do not receive global disk, CAS, file-count, or directory-quota stats'
+}
+
 run_web_readmes_avoid_e2e_placeholder_password_test() {
 	assert_file_not_contains "$REPO_ROOT/web/README.md" "change-this-test-password"
 	assert_file_not_contains "$REPO_ROOT/web/README.en.md" "change-this-test-password"
@@ -1315,6 +1334,7 @@ run_configuration_default_paths_follow_storage_root_test
 run_docs_use_storage_root_config_placeholder_test
 run_configuration_common_scenarios_warn_about_auth_and_env_expansion_test
 run_backup_restore_docs_contract_test
+run_storage_stats_docs_contract_test
 run_web_readmes_avoid_e2e_placeholder_password_test
 run_refuse_default_personal_storage_test
 run_isolated_target_reaches_health_check_test
