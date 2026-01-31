@@ -27,6 +27,7 @@ This release candidate focuses on improving MnemoNAS stability, public-access sa
 - `release-readiness` also checks that both release-notes drafts record the current full-validation target, so stale validation snapshots fail before release.
 - `release-readiness` rejects a base ref that is not an ancestor of the current HEAD, preventing misleading release-readiness summaries from sibling branch ranges.
 - Documentation checks reject copyable raw `?path=/...` path queries in API examples, requiring restore and favorite-check `path` query examples to use `%2F...` encoding.
+- Storage documentation clarifies that the FastCDC API is a Rust dataplane capability, while current version history still uses whole-object CAS snapshots and does not reference-count CDC chunks; documentation checks reject overclaims that imply block-level version deduplication is enabled.
 - Streamlined and synchronized Chinese and English documentation, including deployment, configuration, FAQ, roadmap, security, hardening progress, and pre-release review entry points.
 
 ## Release Artifacts
@@ -44,7 +45,7 @@ Archives should include a top-level directory, `nasd`, `dataplane`, Web UI stati
 
 The current hardening branch has the following validation evidence. Final publication should use the latest tag, Release workflow result, and required environment validation as the source of truth:
 
-Latest local full-validation snapshot: validation target `16fefe99bb29`; `GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master` passed, covering the WebDAV README overview, README client summary, and mounting-guide compatibility-note alignment with the compatibility matrix, `make check`, dependency security scans, example config validation, public-access templates, protobuf regeneration stability, Rust fmt/test/clippy, proto-gen fmt/test/clippy, frontend lint/typecheck/unit/build, 375 Playwright E2E cases, Docker build, and Docker smoke. The Docker smoke used the Docker-assigned loopback port `http://127.0.0.1:32868`.
+Latest local full-validation snapshot: validation target `f063d36f288c`; `GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master` passed, covering the WebDAV README overview, README client summary, mounting-guide compatibility-note alignment with the compatibility matrix, storage/CDC documentation boundary contract, `make check`, dependency security scans, example config validation, public-access templates, protobuf regeneration stability, Rust fmt/test/clippy, proto-gen fmt/test/clippy, frontend lint/typecheck/unit/build, 375 Playwright E2E cases, Docker build, and Docker smoke. The Docker smoke used the Docker-assigned loopback port `http://127.0.0.1:32869`.
 
 - `GOTOOLCHAIN=local ./scripts/verify-changed.sh`
 - `GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master`
@@ -61,7 +62,7 @@ Latest local full-validation snapshot: validation target `16fefe99bb29`; `GOTOOL
 - WebDAV curl smoke safety test: `scripts/test-webdav-client-smoke.sh`
 - Release workflow incremental validation: `make workflows-check`, `make scripts-check`, `./scripts/check-secret-leaks.sh`, `make toolchains-check`, `git diff --check`
 - Playwright E2E: `375 passed`
-- Frontend unit tests: `3108 passed`
+- Frontend unit tests: `3110 passed`
 - Docker build and `scripts/docker-smoke.sh`
 
 If code, scripts, configuration, documentation, or workflow files change again before release, rerun the matching validation.
