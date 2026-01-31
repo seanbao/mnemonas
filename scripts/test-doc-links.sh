@@ -789,6 +789,74 @@ EOF
 	git -C "$repo" add README.md README.en.md
 }
 
+write_storage_cdc_contract_valid_docs() {
+	local repo="$1"
+	write_valid_docs "$repo"
+	cat >> "$repo/docs/README.md" <<'EOF'
+| [Storage](storage-internals.md) | [Storage](storage-internals.en.md) |
+EOF
+	cat >> "$repo/docs/README.en.md" <<'EOF'
+| [Storage](storage-internals.en.md) | Storage internals |
+EOF
+	cat > "$repo/docs/storage-internals.md" <<'EOF'
+# 存储原理与运维建议
+
+[English](storage-internals.en.md) | 简体中文
+
+| 范围 | MnemoNAS |
+| --- | --- |
+| 去重 | BLAKE3 整对象版本；dataplane 中提供 CDC file API，但当前版本历史不会按 CDC 分块引用计数 |
+
+当前版本历史使用整对象 CAS 快照；FastCDC API 属于数据面能力。
+EOF
+	cat > "$repo/docs/storage-internals.en.md" <<'EOF'
+# Storage Internals and Operations Guidance
+
+English | [简体中文](storage-internals.md)
+
+| Area | MnemoNAS |
+| --- | --- |
+| Deduplication | BLAKE3 whole-object versions; CDC file APIs are available in dataplane, but current version history does not reference-count CDC chunks |
+
+Current version history uses whole-object CAS snapshots; the FastCDC API is a dataplane capability.
+EOF
+	git -C "$repo" add docs/README.md docs/README.en.md docs/storage-internals.md docs/storage-internals.en.md
+}
+
+write_storage_cdc_contract_missing_boundary_doc() {
+	local repo="$1"
+	write_valid_docs "$repo"
+	cat >> "$repo/docs/README.md" <<'EOF'
+| [Storage](storage-internals.md) | [Storage](storage-internals.en.md) |
+EOF
+	cat >> "$repo/docs/README.en.md" <<'EOF'
+| [Storage](storage-internals.en.md) | Storage internals |
+EOF
+	cat > "$repo/docs/storage-internals.md" <<'EOF'
+# 存储原理与运维建议
+
+[English](storage-internals.en.md) | 简体中文
+
+| 范围 | MnemoNAS |
+| --- | --- |
+| 去重 | BLAKE3 整对象版本；dataplane 中提供 CDC file API，但当前版本历史不会按 CDC 分块引用计数 |
+
+当前版本历史使用整对象 CAS 快照；FastCDC API 属于数据面能力。
+EOF
+	cat > "$repo/docs/storage-internals.en.md" <<'EOF'
+# Storage Internals and Operations Guidance
+
+English | [简体中文](storage-internals.md)
+
+| Area | MnemoNAS |
+| --- | --- |
+| Deduplication | BLAKE3 whole-object versions; CDC file APIs are available in dataplane |
+
+Current version history uses whole-object CAS snapshots.
+EOF
+	git -C "$repo" add docs/README.md docs/README.en.md docs/storage-internals.md docs/storage-internals.en.md
+}
+
 write_non_executable_script_reference_doc() {
 	local repo="$1"
 	write_root_readme_pair "$repo"
@@ -939,6 +1007,7 @@ run_accepts "direct-executable-script-reference" write_direct_executable_script_
 run_accepts "interpreter-script-reference" write_interpreter_script_reference_doc
 run_accepts "encoded-restore-query-path" write_encoded_restore_query_path_doc
 run_accepts "encoded-api-path-query" write_encoded_api_path_query_doc
+run_accepts "storage-cdc-contract" write_storage_cdc_contract_valid_docs
 run_rejects "missing-file" "missing link target: docs/missing.md" write_missing_file_doc
 run_rejects "escaping-link" "link escapes repository: ../outside.md" write_escaping_link_doc
 run_rejects "missing-anchor" "missing heading anchor: #missing-section" write_missing_anchor_doc
@@ -973,6 +1042,7 @@ run_rejects "non-executable-script-reference" "script reference is not executabl
 run_rejects "non-executable-script-link" "linked script is not executable: scripts/helper.sh" write_non_executable_script_link_doc
 run_rejects "raw-restore-query-path" "URL-encode API path query values in documentation examples; use path=%2F..." write_raw_restore_query_path_doc
 run_rejects "raw-api-path-query" "URL-encode API path query values in documentation examples; use path=%2F..." write_raw_api_path_query_doc
+run_rejects "storage-cdc-contract-missing-boundary" "docs/storage-internals.en.md: missing storage CDC boundary text: current version history does not reference-count CDC chunks" write_storage_cdc_contract_missing_boundary_doc
 run_rejects "security-check-doc-missing-id" "docs/api-reference.en.md: security-check documentation is missing ID: config_file_access" write_security_check_docs_missing_english_id
 run_rejects "security-check-doc-missing-chinese-id" "docs/api-reference.md: security-check documentation is missing ID: config_file_access" write_security_check_docs_missing_chinese_id
 run_rejects "security-check-doc-unknown-english-id" "docs/api-reference.en.md: security-check documentation lists unknown ID: ghost_probe" write_security_check_docs_unknown_english_id

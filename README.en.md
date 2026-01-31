@@ -78,7 +78,7 @@ MnemoNAS uses a hybrid layout: current files are stored as native files under `f
 
 - **Readable current files**: the current version lives in a normal directory and can be migrated or backed up offline by users with OS-level access.
 - **Content-addressed versions**: historical content is addressed by BLAKE3 hashes.
-- **CDC capability**: the Rust data plane exposes FastCDC file APIs; the current Go version-history path stores whole-object CAS snapshots, so edited versions only share storage when the full file content is identical.
+- **CDC capability**: the Rust data plane exposes FastCDC file APIs; the FastCDC API is a dataplane capability, and current version history still stores whole-object CAS snapshots, so edited versions only share storage when the full file content is identical.
 - **Clear boundary**: reading files directly from `files/` is safe; writing around Web UI/WebDAV/API will not create versions or trash records.
 - **Filesystem-neutral**: ext4, XFS, Btrfs, and ZFS are supported; ZFS mirror is recommended for stronger storage hygiene.
 - **Migratable**: moving the full storage root keeps current files, history, trash, and metadata together.
