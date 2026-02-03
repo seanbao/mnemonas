@@ -173,8 +173,8 @@ DNS 检查需要服务器上有 `getent`；缺少 `getent`，或 `getent ahosts 
 初始密码文件检查使用用户文件同目录中的 `initial-password.txt`。
 公开部署下，符号链接、路径组件包含符号链接或该路径是非普通文件都会失败。
 
-启用分享功能时，`share.base_url` 应使用 HTTPS 默认端口，不能包含 userinfo、查询参数、片段、反斜杠、重复的路径斜杠或 `.`/`..` 路径段，且主机名必须有效。
-使用 HTTP、非 443 端口、userinfo、查询参数、片段、反斜杠、重复路径斜杠、`.`/`..` 路径段或无效主机名会失败。
+启用分享功能时，`share.base_url` 应使用 HTTPS 默认端口，不能包含 userinfo、查询参数、片段、编码后的查询或片段标记、反斜杠、重复的路径斜杠或 `.`/`..` 路径段，且主机名必须有效。
+使用 HTTP、非 443 端口、userinfo、查询参数、片段、编码后的查询或片段标记、反斜杠、重复路径斜杠、`.`/`..` 路径段或无效主机名会失败。
 留空、使用其他域名，或路径已经以 `/s` 结尾时会给出人工复核提示，因为生成的分享链接可能包含重复的 `/s/s` 路由。
 
 公开分享 API 响应检查使用保留探测 ID。
@@ -248,7 +248,7 @@ sudo systemctl restart mnemonas
 - [ ] `/etc/mnemonas/config.toml` 中 `auth.access_token_ttl <= 1h`，`auth.refresh_token_ttl <= 720h`。
 - [ ] 如果 WebDAV 保留全局 Basic Auth 且使用自动生成密码，`<storage.root>/secrets.json` 存在。
   该文件不是符号链接，路径组件不包含符号链接，且是权限私有的普通文件。
-- [ ] 如果启用公开分享，`share.base_url` 使用 HTTPS 默认端口、有效主机名，且不包含 userinfo、查询参数、片段、反斜杠、重复路径斜杠或 `.`/`..` 路径段；`share.default_expires_in` 不是空值或 `0`，且不超过 `720h`；`share.default_max_access` 大于 `0`；`mnemonas-doctor --public-domain` 的公开分享探测能到达 MnemoNAS，并且 JSON 响应边界检查通过（私有缓存、`Vary: Cookie`、无探测 cookie）。
+- [ ] 如果启用公开分享，`share.base_url` 使用 HTTPS 默认端口、有效主机名，且不包含 userinfo、查询参数、片段、编码后的查询或片段标记、反斜杠、重复路径斜杠或 `.`/`..` 路径段；`share.default_expires_in` 不是空值或 `0`，且不超过 `720h`；`share.default_max_access` 大于 `0`；`mnemonas-doctor --public-domain` 的公开分享探测能到达 MnemoNAS，并且 JSON 响应边界检查通过（私有缓存、`Vary: Cookie`、无探测 cookie）。
 - [ ] 云安全组只开放 `80/443`，SSH 只允许可信来源。
 - [ ] 已配置外部备份，不把这台公网服务器当作唯一数据副本。
 

@@ -8108,6 +8108,9 @@ func securityShareBaseURLPublicRisk(baseURL string) string {
 	if securityShareBaseURLPathHasBackslashes(parsed.Path) {
 		return "backslash_path"
 	}
+	if securityShareBaseURLPathHasQueryOrFragmentMarkers(parsed.Path) {
+		return "query_or_fragment"
+	}
 	if securityShareBaseURLPathHasDuplicateSlashes(parsed.Path) {
 		return "duplicate_slash_path"
 	}
@@ -8122,6 +8125,10 @@ func securityShareBaseURLPublicRisk(baseURL string) string {
 
 func securityShareBaseURLPathHasBackslashes(path string) bool {
 	return strings.Contains(path, "\\")
+}
+
+func securityShareBaseURLPathHasQueryOrFragmentMarkers(path string) bool {
+	return strings.ContainsAny(path, "?#")
 }
 
 func securityShareBaseURLPathHasDuplicateSlashes(path string) bool {

@@ -206,6 +206,7 @@
 - Docker 部署指南补充 Compose v2 安装、非 root UID/GID、可配置 `MNEMONAS_HTTP_PORT`、弱网构建策略和 dataplane 端口边界
 
 ### Changed
+- `share.base_url` 校验会拒绝路径中编码后的查询或片段标记，避免公开分享基础 URL 被代理或浏览器解码成歧义地址
 - Release archive 改为包含顶层目录，并随包附带 Web UI、安装/卸载脚本、诊断脚本、完整 docs 文档、公网访问 deploy 模板，以及预设匹配 release 镜像的 Docker Compose/env 模板
 - 默认 `docker-compose.yml` 从源码构建 `mnemonas:local`，公开 release 镜像可按文档改用明确版本标签
 - Docker Compose 宿主机 HTTP 端口改为通过 `.env` 中的 `MNEMONAS_HTTP_PORT` 配置
