@@ -486,6 +486,30 @@ run_archive_control_character_entry_fails() {
 	assert_file_contains "$out" "archive entry contains a control character"
 }
 
+run_archive_whitespace_entry_fails() {
+	local case_dir="$TMP_ROOT/archive-whitespace-entry"
+	local dist_dir="$case_dir/dist"
+	local package_name="mnemonas-v1.2.3-linux-amd64"
+	local out="$case_dir/out.log"
+	local status
+
+	mkdir -p "$dist_dir" "$case_dir/extract"
+	make_release_archive "$dist_dir" "v1.2.3" "linux-amd64" "seanbao/mnemonas"
+	tar -xzf "$dist_dir/$package_name.tar.gz" -C "$case_dir/extract"
+	printf 'unsafe\n' >"$case_dir/extract/$package_name/README bad.md"
+	rm -f -- "$dist_dir/$package_name.tar.gz"
+	tar -czf "$dist_dir/$package_name.tar.gz" -C "$case_dir/extract" "$package_name"
+	write_checksums "$dist_dir"
+
+	set +e
+	bash "$REPO_ROOT/scripts/verify-release-artifacts.sh" "$dist_dir" >"$out" 2>&1
+	status=$?
+	set -e
+
+	[[ "$status" -ne 0 ]] || fail "release artifact verifier accepted an archive entry with whitespace"
+	assert_file_contains "$out" "archive entry contains whitespace: $package_name/README bad.md"
+}
+
 run_wrong_env_image_fails() {
 	local case_dir="$TMP_ROOT/wrong-image"
 	local dist_dir="$case_dir/dist"
@@ -580,6 +604,7 @@ run_archive_duplicate_entry_fails
 run_archive_dot_segment_entry_fails
 run_archive_backslash_entry_fails
 run_archive_control_character_entry_fails
+run_archive_whitespace_entry_fails
 run_wrong_env_image_fails
 run_remote_image_check_uses_docker_manifest
 run_remote_image_check_failure_fails
