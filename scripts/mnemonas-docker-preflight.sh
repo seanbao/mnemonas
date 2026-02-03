@@ -430,11 +430,49 @@ image_tag_part() {
 	fi
 }
 
+validate_image_reference_shape() {
+	local image="$1"
+	local digest tag
+
+	if [[ "$image" == *$'\n'* || "$image" == *$'\r'* ]]; then
+		fail "MNEMONAS_IMAGE cannot contain newline characters."
+		return 1
+	fi
+	if [[ "$image" == *[[:space:]]* || "$image" == *[[:cntrl:]]* ]]; then
+		fail "MNEMONAS_IMAGE must not contain whitespace or control characters."
+		return 1
+	fi
+	if [[ "$image" == -* ]]; then
+		fail "MNEMONAS_IMAGE must not start with '-'."
+		return 1
+	fi
+	if [[ "$image" == *"://"* || "$image" == *"?"* || "$image" == *"#"* ]]; then
+		fail "MNEMONAS_IMAGE must be a Docker image reference, not a URL."
+		return 1
+	fi
+	if [[ "$image" == *@* ]]; then
+		digest="${image##*@}"
+		if [[ ! "$digest" =~ ^sha256:[A-Fa-f0-9]{64}$ ]]; then
+			fail "MNEMONAS_IMAGE digest must use sha256:<64 hex chars>."
+			return 1
+		fi
+	fi
+
+	tag="$(image_tag_part "$image")"
+	if [[ -n "$tag" && ! "$tag" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]]; then
+		fail "MNEMONAS_IMAGE tag is not Docker-compatible: $tag"
+		return 1
+	fi
+}
+
 check_image_reference() {
 	local image tag
 	image="$(env_value MNEMONAS_IMAGE "$ENV_PATH")"
 
 	[[ -n "$image" && "$image" != "mnemonas:local" ]] || return
+	if ! validate_image_reference_shape "$image"; then
+		return
+	fi
 	if [[ "$image" == *@sha256:* ]]; then
 		ok "Release image is pinned by digest: $image"
 		return
@@ -678,6 +716,14 @@ check_configured_auth_files() {
 
 	raw_users_file="$(toml_value auth users_file "$config_path")"
 	users_container="$(configured_auth_users_container_path "$config_path")"
+	if [[ "$users_container" == *$'\n'* || "$users_container" == *$'\r'* || "$users_container" == *[[:cntrl:]]* ]]; then
+		fail "Configured auth.users_file cannot contain control characters"
+		return
+	fi
+	if path_has_parent_segment "$users_container"; then
+		fail "Configured auth.users_file cannot contain parent directory segments"
+		return
+	fi
 	if users_host="$(map_container_data_path_to_host "$users_container")"; then
 		if [[ "$users_host" != "$default_users_host" ]]; then
 			check_private_existing_file "$users_host" "Configured users file"
