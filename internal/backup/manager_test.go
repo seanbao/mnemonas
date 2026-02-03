@@ -110,6 +110,27 @@ func TestSanitizeBackupTargetForAPIRedactsSensitivePathSegments(t *testing.T) {
 	}
 }
 
+func TestSanitizeBackupTargetForAPIRedactsPercentEncodedSensitiveNames(t *testing.T) {
+	raw := "rest:https://backup.example/repo?access%5Fkey=AKIASECRET&secret%2Dkey=secret-key&region=us secret%5Faccess%5Fkey=inline-secret"
+
+	sanitized := sanitizeBackupTargetForAPI(raw)
+	for _, secret := range []string{"AKIASECRET", "secret-key", "inline-secret"} {
+		if strings.Contains(sanitized, secret) {
+			t.Fatalf("sanitizeBackupTargetForAPI() = %q, leaked %q", sanitized, secret)
+		}
+	}
+	for _, want := range []string{
+		"access%5Fkey=" + redactedBackupSecretValue,
+		"secret%2Dkey=" + redactedBackupSecretValue,
+		"region=us",
+		"secret%5Faccess%5Fkey=" + redactedBackupSecretValue,
+	} {
+		if !strings.Contains(sanitized, want) {
+			t.Fatalf("sanitizeBackupTargetForAPI() = %q, want %q", sanitized, want)
+		}
+	}
+}
+
 func TestSanitizeBackupMessageForAPIRedactsSensitiveFlagValues(t *testing.T) {
 	raw := `restic failed: --password repo-pass --secret-access-key=secret-value --token remote-token --api-key "quoted token" secret='spaced secret' Authorization: Bearer "bearer secret" X-Auth-Token: header-token X-Api-Key: "header quoted token" {"access_key_id":"json-akia","secret_access_key":"json secret","authorization":"Bearer json bearer"}`
 
