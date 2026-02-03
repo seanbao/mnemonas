@@ -57,8 +57,17 @@ require_safe_container_name() {
 	[[ "$value" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || fail "invalid container name: $value"
 }
 
+require_safe_image_ref() {
+	local value="$1"
+
+	[[ -n "$value" ]] || fail "Docker image reference must not be empty"
+	[[ "$value" != -* ]] || fail "Docker image reference must not start with '-': $value"
+	[[ "$value" != *[[:cntrl:][:space:]]* ]] || fail "Docker image reference must not contain whitespace or control characters: $value"
+}
+
 require_command docker
 require_command curl
+require_safe_image_ref "$IMAGE"
 require_safe_loopback_host "$HOST"
 if [[ -n "$PORT" ]]; then
 	require_positive_integer "MNEMONAS_DOCKER_SMOKE_PORT" "$PORT"
