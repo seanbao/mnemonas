@@ -26,7 +26,7 @@ const ActivityPage = lazy(() => import('@/pages/Activity').then((mod) => ({ defa
 function RouteFallback() {
   return (
     <div className="flex min-h-screen items-center justify-center bg-content1 px-6 text-default-500">
-      <div className="rounded-lg border border-divider bg-content2/60 px-4 py-3 text-sm">加载中...</div>
+      <div className="rounded-lg border border-divider bg-content2/60 px-4 py-3 text-sm">加载中…</div>
     </div>
   )
 }

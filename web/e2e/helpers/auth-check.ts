@@ -56,7 +56,7 @@ export async function waitForAppReady(page: Page): Promise<void> {
   await page.waitForLoadState('domcontentloaded')
   await page.locator('body').waitFor({ state: 'visible' })
 
-  const routeFallback = page.getByText('加载中...')
+  const routeFallback = page.getByText('加载中…')
   await routeFallback.waitFor({ state: 'hidden', timeout: 10_000 }).catch(() => {})
 
   await waitForAuthSurface(page)

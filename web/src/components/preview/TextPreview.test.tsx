@@ -37,7 +37,7 @@ describe('TextPreview', () => {
     render(<TextPreview path="/test.txt" filename="test.txt" />)
 
     expect(screen.getByRole('status', { name: '加载文本预览' })).toBeInTheDocument()
-    expect(screen.getByText('加载文件内容...')).toBeInTheDocument()
+    expect(screen.getByText('加载文件内容…')).toBeInTheDocument()
   })
 
   it('displays text content after loading', async () => {
