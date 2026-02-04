@@ -709,7 +709,7 @@ export function AlbumPage() {
         <div className="space-y-6">
           <PageHeader
             title="相册"
-            subtitle="正在加载..."
+            subtitle="正在加载…"
             icon={ImageIcon}
           />
           <div className="columns-2 md:columns-3 lg:columns-4 xl:columns-5 gap-3 space-y-3">

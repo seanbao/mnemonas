@@ -318,7 +318,7 @@ describe('TrashPage', () => {
       render(<TrashPage />)
       
       expect(screen.getByRole('status', { name: '加载回收站' })).toBeInTheDocument()
-      expect(screen.getByText('加载回收站...')).toBeInTheDocument()
+      expect(screen.getByText('加载回收站…')).toBeInTheDocument()
     })
 
     it('shows an invalid-home error instead of loading trash for non-admin users without a home directory', async () => {

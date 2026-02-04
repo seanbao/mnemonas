@@ -311,7 +311,7 @@ describe('FilesPage', () => {
     it('shows loading state initially', () => {
       mockListFiles.mockImplementation(() => new Promise(() => {})) // Never resolves
       render(<FilesPage />)
-      expect(screen.getByText('加载记忆中...')).toBeTruthy()
+      expect(screen.getByText('加载记忆中…')).toBeTruthy()
     })
 
     it('calls listFiles API on mount', async () => {
@@ -1817,12 +1817,12 @@ describe('FilesPage', () => {
       await user.click(screen.getByRole('button', { name: '取消' }))
 
       menu = await openContextMenuFor('photo.jpg', { clientX: 150, clientY: 90 })
-      await user.click(within(menu).getByRole('menuitem', { name: '移动到...' }))
+      await user.click(within(menu).getByRole('menuitem', { name: '移动到…' }))
       expect(await screen.findByText('移动到')).toBeTruthy()
       await user.click(screen.getByRole('button', { name: '取消' }))
 
       menu = await openContextMenuFor('photo.jpg', { clientX: 160, clientY: 100 })
-      await user.click(within(menu).getByRole('menuitem', { name: '复制到...' }))
+      await user.click(within(menu).getByRole('menuitem', { name: '复制到…' }))
       expect(await screen.findByText('复制到')).toBeTruthy()
       await user.click(screen.getByRole('button', { name: '取消' }))
 
@@ -3610,7 +3610,7 @@ describe('FilesPage', () => {
       mockListFiles.mockImplementation(() => new Promise(() => {})) // Never resolves
       render(<FilesPage />)
       
-      expect(screen.getByText('加载记忆中...')).toBeTruthy()
+      expect(screen.getByText('加载记忆中…')).toBeTruthy()
     })
 
     it('shows retryable error state on API failure', async () => {

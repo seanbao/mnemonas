@@ -159,7 +159,7 @@ function StatusChip({ status, warning }: { status?: string; warning?: boolean })
   
   const configs: Record<string, { color: 'success' | 'warning' | 'danger' | 'default'; icon: React.ReactNode; label: string }> = {
     completed: { color: 'success', icon: <CheckCircle size={14} />, label: '校验完成' },
-    running: { color: 'warning', icon: <RefreshCw size={14} className="animate-spin" />, label: '校验中...' },
+    running: { color: 'warning', icon: <RefreshCw size={14} className="animate-spin" />, label: '校验中…' },
     failed: { color: 'danger', icon: <XCircle size={14} />, label: '校验失败' },
   }
   
@@ -3659,7 +3659,7 @@ export default function Maintenance() {
               isDisabled={isRunning}
               onPress={startScrub}
             >
-              {isRunning ? '校验中...' : '开始校验'}
+              {isRunning ? '校验中…' : '开始校验'}
             </Button>
           </div>
         </CardHeader>
@@ -3722,7 +3722,7 @@ export default function Maintenance() {
                     aria-valuetext={runningScrubProgressText}
                     className="max-w-full"
                   />
-                  <p className="text-sm text-default-500 mt-2">正在校验数据完整性，这可能需要一些时间...</p>
+                  <p className="text-sm text-default-500 mt-2">正在校验数据完整性，这可能需要一些时间…</p>
                 </div>
               )}
               

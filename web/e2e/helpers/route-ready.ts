@@ -5,13 +5,13 @@ type RouteSettledOptions = {
 }
 
 const routeLoadingText: Record<string, Array<{ text: string | RegExp; timeout: number }>> = {
-  '/activity': [{ text: '加载最近操作...', timeout: 15_000 }],
-  '/album': [{ text: '正在加载...', timeout: 15_000 }],
-  '/favorites': [{ text: '加载收藏列表...', timeout: 15_000 }],
-  '/files': [{ text: '加载记忆中...', timeout: 15_000 }],
-  '/settings': [{ text: '加载设置...', timeout: 15_000 }],
-  '/trash': [{ text: '加载回收站...', timeout: 15_000 }],
-  '/users': [{ text: '加载用户列表...', timeout: 20_000 }],
+  '/activity': [{ text: '加载最近操作…', timeout: 15_000 }],
+  '/album': [{ text: '正在加载…', timeout: 15_000 }],
+  '/favorites': [{ text: '加载收藏列表…', timeout: 15_000 }],
+  '/files': [{ text: '加载记忆中…', timeout: 15_000 }],
+  '/settings': [{ text: '加载设置…', timeout: 15_000 }],
+  '/trash': [{ text: '加载回收站…', timeout: 15_000 }],
+  '/users': [{ text: '加载用户列表…', timeout: 20_000 }],
 }
 
 export async function waitForAnimationFrames(page: Page, frameCount = 2): Promise<void> {
@@ -54,7 +54,7 @@ export async function waitForRouteSettled(
   const routePath = route.split(/[?#]/, 1)[0]
 
   await expect(page.locator('body')).toBeVisible()
-  await waitForOptionalLoadingTextHidden(page, '加载中...', 10_000)
+  await waitForOptionalLoadingTextHidden(page, '加载中…', 10_000)
 
   for (const loading of routeLoadingText[routePath] ?? []) {
     await waitForOptionalLoadingTextHidden(page, loading.text, loading.timeout)

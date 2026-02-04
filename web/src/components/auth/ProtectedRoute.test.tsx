@@ -36,7 +36,7 @@ describe('ProtectedRoute', () => {
       </MemoryRouter>
     )
 
-    expect(screen.getByText('加载中...')).toBeInTheDocument()
+    expect(screen.getByText('加载中…')).toBeInTheDocument()
     expect(screen.queryByText('private')).not.toBeInTheDocument()
   })
 
