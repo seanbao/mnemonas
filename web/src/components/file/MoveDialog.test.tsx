@@ -126,6 +126,19 @@ describe('MoveDialog', () => {
     expect(onClose).toHaveBeenCalledTimes(1)
   })
 
+  it('uses Chinese ellipsis for the remaining-file summary', () => {
+    const files = Array.from({ length: 6 }, (_, index) => ({
+      path: `/source/file-${index}.txt`,
+      name: `file-${index}.txt`,
+      isDir: false,
+    }))
+
+    renderDialog({ files })
+
+    expect(screen.getByText('…还有 1 个项目')).toBeTruthy()
+    expect(screen.queryByText('...还有 1 个项目')).toBeNull()
+  })
+
   it('normalizes the current directory before blocking same-folder submissions', async () => {
     const user = userEvent.setup({ writeToClipboard: false })
 

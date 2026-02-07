@@ -41,6 +41,7 @@ const brokenVisibleTextPatterns = [
   /占位符|占位图|功能占位|敬请期待|待实现|未实现|未内置|开发中|施工中|临时页面/,
   /coming soon|under construction|not implemented|work in progress|placeholder page|lorem ipsum|\bTBD\b|\bWIP\b/i,
   /\bTODO\b|\bFIXME\b/,
+  /[\u3400-\u9fff][^\n]{0,40}\.\.\.|\.{3}[^\n]{0,40}[\u3400-\u9fff]/,
 ]
 
 type RuntimeIssue = {
@@ -141,6 +142,8 @@ test.describe('运行时诊断', () => {
       'Work in progress',
       'Lorem ipsum',
       'WIP',
+      '加载中...',
+      '...还有 3 个项目',
     ]
 
     for (const sample of samples) {
