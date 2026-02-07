@@ -62,7 +62,7 @@ Latest local full-validation snapshot: validation target `c8c8bc106b03`; `GOTOOL
 - WebDAV curl smoke safety test: `scripts/test-webdav-client-smoke.sh`
 - Release workflow incremental validation: `make workflows-check`, `make scripts-check`, `./scripts/check-secret-leaks.sh`, `make toolchains-check`, `git diff --check`
 - Playwright E2E: `375 passed`
-- Frontend unit tests: `3110 passed`
+- Frontend unit tests: `3111 passed`
 - Docker build and `scripts/docker-smoke.sh`
 
 If code, scripts, configuration, documentation, or workflow files change again before release, rerun the matching validation.
