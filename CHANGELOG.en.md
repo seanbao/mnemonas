@@ -57,7 +57,7 @@ This project follows [Semantic Versioning 2.0.0](https://semver.org/).
 - Script simulation fixtures cover changed-file selection, WebDAV auth modes, public reverse-proxy exposure checks, benchmark paths, and Web Husky hooks.
 - `scripts/webdav-client-smoke.sh` runs curl protocol smoke checks against a running service, covering basic WebDAV read/write, URL-encoded space paths, copy, move, and delete operations, while rejecting `WEBDAV_URL` values with whitespace, query strings, fragments, embedded credentials, and non-`0/1` `CURL_INSECURE` values through a dedicated safety test in `make scripts-check`.
 - WebDAV compatibility report form for submitting validation results or client-specific failures from common desktop, mobile, media-player, and CLI clients.
-- `scripts/check-release-tag.sh` validates release tags as `vMAJOR.MINOR.PATCH` or SemVer prerelease tags before release artifacts are built.
+- `scripts/check-release-tag.sh` validates release tags as `vMAJOR.MINOR.PATCH` or SemVer prerelease tags before release artifacts are built, and caps the Docker image tag after the leading `v` at 128 characters.
 - `scripts/release-readiness.sh` fails by default when non-release-documentation changes exist after the recorded full-validation target; draft summaries can opt in with `--allow-post-validation-changes`.
 - `scripts/release-readiness.sh` requires all four hardening evidence documents to exist and record the same full-validation target, preventing missing evidence from being skipped before release.
 - `scripts/release-readiness.sh` checks that both release-notes drafts record the current full-validation target, preventing stale validation snapshots in release notes.
