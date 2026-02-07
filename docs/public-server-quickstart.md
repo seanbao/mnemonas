@@ -124,6 +124,8 @@ curl -I https://nas.example.com/health
 
 该脚本会检查公网 HTTPS health、HTTP 到同一域名 HTTPS 的跳转，并确认 `8080/9090/9091` 从公网不返回任何 HTTP 状态码。无法运行仓库脚本时，可手动执行后续等价命令。
 
+需要检查自定义后端端口时，可设置 `PUBLIC_SMOKE_BACKEND_TARGETS='18080:/health 19090:/'`。每个条目使用 `port:path`，其中 path 必须是不含 query、fragment、userinfo、反斜杠、编码斜杠、编码反斜杠、空路径段或 `.`/`..` 路径段的明确绝对路径。
+
 直连后端端口应连接失败或超时；如果返回任何 HTTP 状态码（包括 `401`、`403`、`404`），都表示端口仍可从公网访问：
 
 ```bash

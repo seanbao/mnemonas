@@ -276,6 +276,7 @@ gh release download v1.2.3 \
 
 `--check-image` 会调用 Docker 检查 `ghcr.io/seanbao/mnemonas:1.2.3` 是否存在。
 仅核验离线下载的归档和 checksums 时，可省略该参数。
+`--repository` 必须使用 GHCR 兼容的小写 `owner/repo`，owner 仅包含小写字母、数字和连字符，repo 名可包含小写字母、数字、点、下划线和连字符，并且两段都必须以字母或数字开头和结尾。
 
 下列示例默认使用源码构建的本地镜像，也可通过 `MNEMONAS_IMAGE` 切换到已验证的 release 镜像。
 

@@ -195,6 +195,69 @@ run_invalid_backend_targets_test() {
         PUBLIC_SMOKE_BACKEND_TARGETS=$' \t ' \
         bash "$REPO_ROOT/scripts/public-go-live-smoke.sh" "nas.example.com"
     assert_file_contains "$case_dir/whitespace.log" "PUBLIC_SMOKE_BACKEND_TARGETS must include at least one port:path check"
+
+    run_expect_failure "$case_dir/query.log" env \
+        PATH="$fake_bin:$PATH" \
+        PUBLIC_SMOKE_CURL_LOG="$case_dir/query-curl.log" \
+        PUBLIC_SMOKE_BACKEND_TARGETS='8080:/health?debug=1' \
+        bash "$REPO_ROOT/scripts/public-go-live-smoke.sh" "nas.example.com"
+    assert_file_contains "$case_dir/query.log" "backend target path must not contain query strings, fragments, or userinfo"
+
+    run_expect_failure "$case_dir/fragment.log" env \
+        PATH="$fake_bin:$PATH" \
+        PUBLIC_SMOKE_CURL_LOG="$case_dir/fragment-curl.log" \
+        PUBLIC_SMOKE_BACKEND_TARGETS='8080:/health#debug' \
+        bash "$REPO_ROOT/scripts/public-go-live-smoke.sh" "nas.example.com"
+    assert_file_contains "$case_dir/fragment.log" "backend target path must not contain query strings, fragments, or userinfo"
+
+    run_expect_failure "$case_dir/userinfo.log" env \
+        PATH="$fake_bin:$PATH" \
+        PUBLIC_SMOKE_CURL_LOG="$case_dir/userinfo-curl.log" \
+        PUBLIC_SMOKE_BACKEND_TARGETS='8080:/@admin' \
+        bash "$REPO_ROOT/scripts/public-go-live-smoke.sh" "nas.example.com"
+    assert_file_contains "$case_dir/userinfo.log" "backend target path must not contain query strings, fragments, or userinfo"
+
+    run_expect_failure "$case_dir/backslash.log" env \
+        PATH="$fake_bin:$PATH" \
+        PUBLIC_SMOKE_CURL_LOG="$case_dir/backslash-curl.log" \
+        PUBLIC_SMOKE_BACKEND_TARGETS='8080:/health\debug' \
+        bash "$REPO_ROOT/scripts/public-go-live-smoke.sh" "nas.example.com"
+    assert_file_contains "$case_dir/backslash.log" "backend target path must not contain backslashes"
+
+    run_expect_failure "$case_dir/encoded-slash.log" env \
+        PATH="$fake_bin:$PATH" \
+        PUBLIC_SMOKE_CURL_LOG="$case_dir/encoded-slash-curl.log" \
+        PUBLIC_SMOKE_BACKEND_TARGETS='8080:/api%2Fhealth' \
+        bash "$REPO_ROOT/scripts/public-go-live-smoke.sh" "nas.example.com"
+    assert_file_contains "$case_dir/encoded-slash.log" "backend target path must not contain encoded slashes or backslashes"
+
+    run_expect_failure "$case_dir/encoded-backslash.log" env \
+        PATH="$fake_bin:$PATH" \
+        PUBLIC_SMOKE_CURL_LOG="$case_dir/encoded-backslash-curl.log" \
+        PUBLIC_SMOKE_BACKEND_TARGETS='8080:/api%5Chealth' \
+        bash "$REPO_ROOT/scripts/public-go-live-smoke.sh" "nas.example.com"
+    assert_file_contains "$case_dir/encoded-backslash.log" "backend target path must not contain encoded slashes or backslashes"
+
+    run_expect_failure "$case_dir/dot-segment.log" env \
+        PATH="$fake_bin:$PATH" \
+        PUBLIC_SMOKE_CURL_LOG="$case_dir/dot-segment-curl.log" \
+        PUBLIC_SMOKE_BACKEND_TARGETS='8080:/../health' \
+        bash "$REPO_ROOT/scripts/public-go-live-smoke.sh" "nas.example.com"
+    assert_file_contains "$case_dir/dot-segment.log" "backend target path must not contain dot segments"
+
+    run_expect_failure "$case_dir/encoded-dot-segment.log" env \
+        PATH="$fake_bin:$PATH" \
+        PUBLIC_SMOKE_CURL_LOG="$case_dir/encoded-dot-segment-curl.log" \
+        PUBLIC_SMOKE_BACKEND_TARGETS='8080:/%2e%2e/health' \
+        bash "$REPO_ROOT/scripts/public-go-live-smoke.sh" "nas.example.com"
+    assert_file_contains "$case_dir/encoded-dot-segment.log" "backend target path must not contain dot segments"
+
+    run_expect_failure "$case_dir/empty-segment.log" env \
+        PATH="$fake_bin:$PATH" \
+        PUBLIC_SMOKE_CURL_LOG="$case_dir/empty-segment-curl.log" \
+        PUBLIC_SMOKE_BACKEND_TARGETS='8080:/api//health' \
+        bash "$REPO_ROOT/scripts/public-go-live-smoke.sh" "nas.example.com"
+    assert_file_contains "$case_dir/empty-segment.log" "backend target path must not contain empty path segments"
 }
 
 run_redirect_variant_test() {
@@ -270,6 +333,10 @@ run_docs_contract_test() {
     assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.en.md" 'external network'
     assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.md" "公网检查需要公网完整域名，不接受 \`localhost\` 或 IP 地址"
     assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.en.md" "Public checks require a fully qualified public hostname, not \`localhost\` or an IP address"
+    assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.md" "path 必须是不含 query、fragment、userinfo、反斜杠、编码斜杠、编码反斜杠、空路径段或 \`.\`/\`..\` 路径段的明确绝对路径"
+    assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.en.md" "path must be an unambiguous absolute path without query strings, fragments, userinfo, backslashes, encoded slashes, encoded backslashes, empty path segments, or \`.\`/\`..\` path segments"
+    assert_file_contains "$REPO_ROOT/docs/cloud-firewall-checklist.md" "path 必须是不含 query、fragment、userinfo、反斜杠、编码斜杠、编码反斜杠、空路径段或 \`.\`/\`..\` 路径段的明确绝对路径"
+    assert_file_contains "$REPO_ROOT/docs/cloud-firewall-checklist.en.md" "path must be an unambiguous absolute path without query strings, fragments, userinfo, backslashes, encoded slashes, encoded backslashes, empty path segments, or \`.\`/\`..\` path segments"
     assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.md" "curl --connect-timeout 3 --max-time 10 http://nas.example.com:8080/health"
     assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.en.md" "curl --connect-timeout 3 --max-time 10 http://nas.example.com:8080/health"
     assert_file_contains "$REPO_ROOT/docs/cloud-firewall-checklist.md" "curl --connect-timeout 3 --max-time 10 http://nas.example.com:8080/health"

@@ -31,7 +31,7 @@ Environment:
   CURL_BIN                       Optional curl binary path.
   CURL_CONNECT_TIMEOUT           Optional curl connection timeout in seconds; default 3.
   CURL_MAX_TIME                  Optional curl per-request timeout in seconds; default 10.
-  PUBLIC_SMOKE_BACKEND_TARGETS   Optional space-separated port:path checks; must not be blank; default "8080:/health 9090:/ 9091:/health".
+  PUBLIC_SMOKE_BACKEND_TARGETS   Optional space-separated port:path checks; paths must be unambiguous absolute paths; must not be blank; default "8080:/health 9090:/ 9091:/health".
 EOF
 }
 
@@ -106,6 +106,29 @@ validate_domain() {
     ! is_ipv4_like_host "$value" || fail "public domain must be a hostname, not an IP address"
 }
 
+validate_backend_target_path() {
+    local target="$1"
+    local request_path="$2"
+    local lower_path segment normalized_segment
+    local -a segments
+
+    [[ "$request_path" == /* ]] || fail "backend target path must start with /: $target"
+    [[ "$request_path" != *[[:cntrl:][:space:]]* ]] || fail "backend target path must not contain whitespace or control characters: $target"
+    [[ "$request_path" != *"?"* && "$request_path" != *"#"* && "$request_path" != *"@"* ]] || fail "backend target path must not contain query strings, fragments, or userinfo: $target"
+    [[ "$request_path" != *\\* ]] || fail "backend target path must not contain backslashes: $target"
+
+    lower_path="${request_path,,}"
+    [[ "$lower_path" != *"%2f"* && "$lower_path" != *"%5c"* ]] || fail "backend target path must not contain encoded slashes or backslashes: $target"
+    [[ "$request_path" != *"//"* ]] || fail "backend target path must not contain empty path segments: $target"
+
+    IFS='/' read -r -a segments <<< "$lower_path"
+    for segment in "${segments[@]}"; do
+        [[ -n "$segment" ]] || continue
+        normalized_segment="${segment//%2e/.}"
+        [[ "$normalized_segment" != "." && "$normalized_segment" != ".." ]] || fail "backend target path must not contain dot segments: $target"
+    done
+}
+
 validate_backend_targets() {
     local target port request_path
     [[ -n "${PUBLIC_SMOKE_BACKEND_TARGETS//[[:space:]]/}" ]] || fail "PUBLIC_SMOKE_BACKEND_TARGETS must include at least one port:path check"
@@ -116,8 +139,7 @@ validate_backend_targets() {
         request_path="${target#*:}"
         [[ "$port" =~ ^[1-9][0-9]{0,4}$ ]] || fail "backend target port must be numeric: $target"
         (( port <= 65535 )) || fail "backend target port is out of range: $target"
-        [[ "$request_path" == /* ]] || fail "backend target path must start with /: $target"
-        [[ "$request_path" != *[[:cntrl:][:space:]]* ]] || fail "backend target path must not contain whitespace or control characters: $target"
+        validate_backend_target_path "$target" "$request_path"
     done
 }
 
