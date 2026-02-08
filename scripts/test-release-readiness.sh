@@ -31,6 +31,7 @@ write_checklists() {
 # CHANGELOG
 
 - [ ] 变更感知完整验证通过：`GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master`
+- [ ] 文档检查通过：`make docs-check`
 - [ ] 脚本检查通过：`make scripts-check`
 - [ ] 发布前就绪摘要通过：`./scripts/release-readiness.sh`
 - [ ] `./scripts/plan-hardening-commits.sh --fail-on-manual` 确认没有未归类路径
@@ -41,6 +42,7 @@ EOF
 # CHANGELOG
 
 - [ ] Run full change-aware validation: `GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master`
+- [ ] Run documentation checks: `make docs-check`
 - [ ] Run script checks: `make scripts-check`
 - [ ] Run release readiness summary: `./scripts/release-readiness.sh`
 - [ ] Confirm `./scripts/plan-hardening-commits.sh --fail-on-manual` reports no unclassified paths
@@ -407,6 +409,15 @@ if ./scripts/release-readiness.sh --allow-dirty --allow-post-validation-changes 
 fi
 assert_file_contains "$output_dir/missing-release-notes.err" "docs/release-notes.en.md is missing required text"
 git checkout -q -- docs/release-notes.en.md
+
+sed -i.bak '/docs-check/d' CHANGELOG.en.md
+rm -f CHANGELOG.en.md.bak
+if ./scripts/release-readiness.sh --allow-dirty --allow-post-validation-changes >"$output_dir/missing-docs-checklist.out" 2>"$output_dir/missing-docs-checklist.err"; then
+	fail "release readiness accepted a missing documentation checklist command"
+fi
+assert_file_contains "$output_dir/missing-docs-checklist.err" "CHANGELOG.en.md is missing required text"
+assert_file_contains "$output_dir/missing-docs-checklist.err" "make docs-check"
+git checkout -q -- CHANGELOG.en.md
 
 sed -i.bak '/release-readiness/d' CHANGELOG.en.md
 rm -f CHANGELOG.en.md.bak
