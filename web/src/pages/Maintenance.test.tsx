@@ -2650,6 +2650,8 @@ describe('MaintenancePage', () => {
         expect(review.getByText('1 项通过 · 0 项提醒 · 0 项失败')).toBeTruthy()
         expect(review.getByText('恢复后检查')).toBeTruthy()
         expect(review.getByText('每个成功项目都会自动执行只读校验；批量结果会汇总已校验文件数和字节数。')).toBeTruthy()
+        expect(review.getByText('跨目录切换')).toBeTruthy()
+        expect(review.getByText('逐项只读校验通过后再切换；保留原目录和原配置作为回滚点。')).toBeTruthy()
       })
 
       fireEvent.click(screen.getByRole('button', { name: /开始批量恢复/ }))
@@ -3690,6 +3692,8 @@ describe('MaintenancePage', () => {
         expect(review.getByText('1 项通过 · 1 项提醒 · 0 项失败')).toBeTruthy()
         expect(review.getByText('恢复后检查')).toBeTruthy()
         expect(review.getByText('恢复完成后自动执行只读校验，并显示切换步骤和回滚清单。')).toBeTruthy()
+        expect(review.getByText('切换前确认')).toBeTruthy()
+        expect(review.getByText('只在只读校验通过后切换；保留原 storage.root、原配置文件和回滚清单。')).toBeTruthy()
       })
 
       expect((screen.getByRole('button', { name: /开始恢复/ }) as HTMLButtonElement).disabled).toBe(false)
@@ -3707,6 +3711,7 @@ describe('MaintenancePage', () => {
       expect(report).toContain('预检结果：1 项通过 · 1 项提醒 · 0 项失败')
       expect(report).toContain('预览状态：当前目标目录和配置选项与预览一致')
       expect(report).toContain('写入边界：恢复只写入独立目录，不覆盖当前 storage.root。')
+      expect(report).toContain('切换前确认：只在只读校验通过后切换；保留原 storage.root、原配置文件和回滚清单。')
       expect(report).toContain('路径样例：docs/note.txt；.mnemonas-restore/config.toml')
       expect(report).toContain('恢复提醒：目标文件系统剩余空间接近下限。')
       expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({ title: '恢复执行前复核记录已复制' }))
