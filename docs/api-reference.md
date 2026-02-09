@@ -665,7 +665,7 @@ POST /api/v1/versions/{hash}/restore
 
 - `path`：文件路径，必填，最多出现一次。
 
-`path` 必须指向非根文件路径。根路径或等价根路径返回 `400 Bad Request` 和 `invalid path`。
+`path` 必须指向非根文件路径。根路径或等价根路径返回 `400 Bad Request` 和 `invalid path`。可复制的 shell 或浏览器示例应对查询值进行 URL 编码，例如 `/documents/report.txt` 对应 `%2Fdocuments%2Freport.txt`。
 
 版本内容已经恢复但最终 workspace 元数据持久化失败时，API 仍返回 `200 OK`，附带 `Warning: 199 MnemoNAS "workspace mutation persistence incomplete"`，响应 `message` 为 `version restored with persistence warning`。
 
@@ -676,7 +676,7 @@ POST /api/v1/versions/{hash}/restore
 ```bash
 curl -X POST \
   -H "Authorization: Bearer <access-token>" \
-  "http://localhost:8080/api/v1/versions/<hash>/restore?path=/documents/report.txt"
+  "http://localhost:8080/api/v1/versions/<hash>/restore?path=%2Fdocuments%2Freport.txt"
 ```
 
 响应示例：
@@ -878,13 +878,14 @@ curl -X POST \
 - 空值和根路径返回 `400 Bad Request` 和 `MISSING_PATH`。
 - 包含独立 `.` 或 `..` 路径段的值返回 `400 Bad Request` 和 `INVALID_PATH`。
 - 单路径检查端点的 `path` 查询参数最多出现一次。
+- `path` 查询值在可复制 URL 中应进行 URL 编码，例如 `/documents/file.pdf` 对应 `%2Fdocuments%2Ffile.pdf`。
 - 该校验先于非管理员 `home_dir` 授权。
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | `GET` | `/api/v1/favorites` | 列出收藏 |
 | `POST` | `/api/v1/favorites` | 添加收藏 |
-| `GET` | `/api/v1/favorites/check?path=/documents/file.pdf` | 检查单个路径 |
+| `GET` | `/api/v1/favorites/check?path=%2Fdocuments%2Ffile.pdf` | 检查单个路径 |
 | `POST` | `/api/v1/favorites/check-batch` | 检查多个路径 |
 | `DELETE` | `/api/v1/favorites/{path}` | 移除收藏 |
 | `PATCH` | `/api/v1/favorites/{path}` | 更新备注 |

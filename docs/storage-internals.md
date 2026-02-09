@@ -135,13 +135,15 @@ max_age = "2160h"
 
 版本 API：
 
+恢复 URL 的 `path` 查询值应在可复制示例中编码，例如 `/documents/report.docx` 对应 `%2Fdocuments%2Freport.docx`。
+
 ```bash
 curl -H "Authorization: Bearer <access-token>" \
   http://localhost:8080/api/v1/versions/documents/report.docx
 
 curl -X POST \
   -H "Authorization: Bearer <access-token>" \
-  "http://localhost:8080/api/v1/versions/abc123.../restore?path=/documents/report.docx"
+  "http://localhost:8080/api/v1/versions/abc123.../restore?path=%2Fdocuments%2Freport.docx"
 ```
 
 ## 与传统 NAS 对比

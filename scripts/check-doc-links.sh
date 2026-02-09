@@ -71,6 +71,7 @@ const allowedEnglishDocChineseLinkLabels = new Set([
 const shellFenceLanguages = new Set(['bash', 'sh', 'shell', 'console', 'zsh'])
 const remoteShellPipePattern = /\b(?:curl|wget)\b[^|]*\|\s*(?:sudo\s+)?(?:sh|bash|zsh)\b/i
 const directScriptCommandPattern = /(^|[^\w./-])(\.\/scripts\/([A-Za-z0-9._-]+\.sh))\b/g
+const rawAPIPathQueryPattern = /\/api\/v1\/[^"'\s)]*[?&]path=\//
 const requiredDocumentPairs = [
   ['README.md', 'README.en.md', 'English', 'Chinese'],
   ['CHANGELOG.md', 'CHANGELOG.en.md', 'English', 'Chinese'],
@@ -372,6 +373,7 @@ for (const file of files) {
   checkCredentialPlaceholderStyle(file, text)
   checkEnglishDocumentationLanguage(file, text)
   checkDocumentationStyle(file, text)
+  checkAPIPathQueryEncoding(file, text)
   checkShellCodeFenceSafety(file, text)
   checkDocumentationScriptReferences(file, text)
   for (const target of extractMarkdownLinkTargets(text)) {
@@ -466,6 +468,15 @@ function checkDocumentationStyle(sourceFile, markdown) {
     const heading = /^\s{0,3}#{1,6}\s+(.+?)\s*$/.exec(line)?.[1]?.replace(/\s+#+\s*$/, '') ?? ''
     if (heading && decorativeHeadingEmoji.test(heading)) {
       errors.push(`${sourceFile}:${lineNumber}: avoid decorative emoji in markdown headings`)
+    }
+  }
+}
+
+function checkAPIPathQueryEncoding(sourceFile, markdown) {
+  const lines = markdown.split('\n')
+  for (let index = 0; index < lines.length; index += 1) {
+    if (rawAPIPathQueryPattern.test(lines[index])) {
+      errors.push(`${sourceFile}:${index + 1}: URL-encode API path query values in documentation examples; use path=%2F...`)
     }
   }
 }
