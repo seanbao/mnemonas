@@ -354,6 +354,24 @@ require_safe_storage_root() {
 	fi
 }
 
+require_safe_metadata_file_path() {
+	local path="$1"
+	local label="$2"
+
+	if [[ "$path" == *$'\n'* || "$path" == *$'\r'* ]]; then
+		echo "[ERROR] Refusing to prepare $label with newline characters" >&2
+		return 1
+	fi
+	if [[ "$path" == *[[:cntrl:]]* ]]; then
+		echo "[ERROR] Refusing to prepare $label with control characters" >&2
+		return 1
+	fi
+	if path_has_parent_segment "$path"; then
+		echo "[ERROR] Refusing to prepare $label with parent directory segments: $path" >&2
+		return 1
+	fi
+}
+
 require_safe_config_path() {
 	local config_path="$1"
 	local expected_storage_root="$2"
@@ -559,6 +577,7 @@ validate_cdc_chunk_sizes() {
 STORAGE_ROOT="$(expand_path "$STORAGE_ROOT")"
 CONFIG_PATH="$(expand_path "$CONFIG_PATH")"
 expected_storage_root="$STORAGE_ROOT"
+auth_users_file_config=""
 require_safe_storage_root "$expected_storage_root"
 require_safe_config_path "$CONFIG_PATH" "$expected_storage_root"
 ensure_config
@@ -567,6 +586,11 @@ storage_root_config="$(read_config_value storage root)"
 require_configured_storage_root "$storage_root_config"
 storage_root=$(expand_path "$storage_root_config")
 require_safe_storage_root "$storage_root"
+auth_users_file_config="$(read_config_value auth users_file)"
+if [[ -n "$auth_users_file_config" ]]; then
+	auth_users_file_config="$(expand_path "$auth_users_file_config")"
+	require_safe_metadata_file_path "$auth_users_file_config" "auth.users_file"
+fi
 configured_dataplane_grpc_addr="$(read_config_value dataplane grpc_address)"
 if [[ -z "$configured_dataplane_grpc_addr" ]]; then
 	configured_dataplane_grpc_addr="127.0.0.1:9090"
