@@ -51,8 +51,8 @@ root = "~/.mnemonas"
 endpoint = "s3.amazonaws.com"
 bucket = "mnemonas-data"
 prefix = "cas/"
-access_key = "..."
-secret_key = "..."
+access_key = "<access-key>"
+secret_key = "<secret-key>"
 region = "us-east-1"
 
 [storage.hybrid]
@@ -125,7 +125,7 @@ max_size = 1024
 [plugins.webhook]
 url = "https://example.com/webhook"
 events = ["file.created", "file.deleted"]
-secret = "..."
+secret = "<webhook-secret>"
 ```
 
 Reserved boundary:
