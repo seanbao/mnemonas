@@ -48,6 +48,7 @@ const bannedCredentialPlaceholders = [
   'changeme',
   'password123',
 ]
+const ellipsisSecretPlaceholderPattern = /(?:"(?:access_key|secret_key|api_key|password|secret|token)"\s*:\s*"\.\.\."|\b(?:access_key|secret_key|api_key|password|secret|token)\s*=\s*"\.\.\.")/
 const bannedChineseDocEnglishPhrases = [
   'preview scaffolding',
   'preview gateway',
@@ -533,6 +534,9 @@ function checkCredentialPlaceholderStyle(sourceFile, markdown) {
       if (line.includes(phrase)) {
         errors.push(`${sourceFile}:${lineNumber}: avoid copyable placeholder credentials in project documentation: ${phrase}`)
       }
+    }
+    if (ellipsisSecretPlaceholderPattern.test(line)) {
+      errors.push(`${sourceFile}:${lineNumber}: avoid ellipsis-only secret placeholders in project documentation; use explicit angle-bracket placeholders`)
     }
   }
 }
