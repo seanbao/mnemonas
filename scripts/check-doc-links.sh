@@ -48,7 +48,7 @@ const bannedCredentialPlaceholders = [
   'changeme',
   'password123',
 ]
-const ellipsisSecretPlaceholderPattern = /(?:"(?:access_key|secret_key|api_key|password|secret|token)"\s*:\s*"\.\.\."|\b(?:access_key|secret_key|api_key|password|secret|token)\s*=\s*"\.\.\.")/
+const ellipsisSecretPlaceholderPattern = /(?:"(?:access_key|secret_key|api_key|password|secret|token)"\s*:\s*"\.\.\."|\b(?:access_key|secret_key|api_key|password|secret|token)\s*=\s*"\.\.\."|\b(?:access_key|secret_key|api_key|password|secret|token)\s*:\s*(?:"\.\.\."|'\.\.\.'|\.\.\.))/
 const bannedChineseDocEnglishPhrases = [
   'preview scaffolding',
   'preview gateway',
