@@ -627,6 +627,35 @@ EOF
 	git -C "$repo" add README.md README.en.md
 }
 
+write_hyphenated_ellipsis_secret_placeholder_doc() {
+	local repo="$1"
+	write_root_readme_pair "$repo"
+	cat >> "$repo/README.en.md" <<'EOF'
+
+```yaml
+storage:
+  s3:
+    secret-key: "..."
+    access-token: ...
+```
+EOF
+	git -C "$repo" add README.md README.en.md
+}
+
+write_dot_ellipsis_secret_placeholder_doc() {
+	local repo="$1"
+	write_root_readme_pair "$repo"
+	cat >> "$repo/README.en.md" <<'EOF'
+
+```toml
+[alerts]
+api.key = "..."
+bot.token = "..."
+```
+EOF
+	git -C "$repo" add README.md README.en.md
+}
+
 write_truncated_non_secret_ellipsis_doc() {
 	local repo="$1"
 	write_root_readme_pair "$repo"
@@ -1224,6 +1253,8 @@ run_rejects "copyable-placeholder-credentials" "avoid copyable placeholder crede
 run_rejects "ellipsis-secret-placeholder" "avoid ellipsis-only secret placeholders in project documentation" write_ellipsis_secret_placeholder_doc
 run_rejects "json-ellipsis-secret-placeholder" "avoid ellipsis-only secret placeholders in project documentation" write_json_ellipsis_secret_placeholder_doc
 run_rejects "yaml-ellipsis-secret-placeholder" "avoid ellipsis-only secret placeholders in project documentation" write_yaml_ellipsis_secret_placeholder_doc
+run_rejects "hyphenated-ellipsis-secret-placeholder" "avoid ellipsis-only secret placeholders in project documentation" write_hyphenated_ellipsis_secret_placeholder_doc
+run_rejects "dot-ellipsis-secret-placeholder" "avoid ellipsis-only secret placeholders in project documentation" write_dot_ellipsis_secret_placeholder_doc
 run_rejects "chinese-doc-english-phrase" "avoid English phrasing in Chinese documentation: preview config" write_chinese_doc_english_phrase_doc
 run_rejects "english-doc-chinese-text" "avoid non-English text outside language-navigation links in English documentation" write_english_doc_chinese_text_doc
 run_rejects "english-json-fence-chinese-text" "avoid non-English text outside language-navigation links in English documentation" write_english_json_fence_chinese_text_doc
