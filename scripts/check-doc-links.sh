@@ -48,7 +48,8 @@ const bannedCredentialPlaceholders = [
   'changeme',
   'password123',
 ]
-const ellipsisSecretPlaceholderPattern = /(?:"(?:access_key|secret_key|api_key|password|secret|token)"\s*:\s*"\.\.\."|\b(?:access_key|secret_key|api_key|password|secret|token)\s*=\s*"\.\.\."|\b(?:access_key|secret_key|api_key|password|secret|token)\s*:\s*(?:"\.\.\."|'\.\.\.'|\.\.\.))/
+const secretPlaceholderFieldPattern = String.raw`(?:access[._-]?key|secret[._-]?key|api[._-]?key|access[._-]?token|refresh[._-]?token|bot[._-]?token|webhook[._-]?token|password|secret|token)`
+const ellipsisSecretPlaceholderPattern = new RegExp(String.raw`(?:"${secretPlaceholderFieldPattern}"\s*:\s*"\.\.\."|\b${secretPlaceholderFieldPattern}\s*=\s*"\.\.\."|\b${secretPlaceholderFieldPattern}\s*:\s*(?:"\.\.\."|'\.\.\.'|\.\.\.))`, 'i')
 const bannedChineseDocEnglishPhrases = [
   'preview scaffolding',
   'preview gateway',
