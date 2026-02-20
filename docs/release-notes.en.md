@@ -25,7 +25,7 @@ This release candidate focuses on improving MnemoNAS stability, public-access sa
 - Tightened the release readiness summary: after the recorded full-validation target, `release-readiness` fails by default on non-release-documentation changes and requires refreshed full validation or an explicit draft override.
 - `release-readiness` now requires all four hardening evidence documents to exist and record the same full-validation target, preventing missing evidence from being skipped before release.
 - `release-readiness` also checks that both release-notes drafts record the current full-validation target, so stale validation snapshots fail before release.
-- `release-readiness` requires the `CHANGELOG.md` and `CHANGELOG.en.md` release checklists to include `make docs-check`, preventing the final release verification from omitting documentation checks.
+- `release-readiness` requires the `CHANGELOG.md` and `CHANGELOG.en.md` release checklists to include documentation, dependency-security, and Docker build/smoke commands, preventing final release verification from omitting key local gates.
 - `release-readiness` rejects a base ref that is not an ancestor of the current HEAD, preventing misleading release-readiness summaries from sibling branch ranges.
 - Documentation checks reject copyable raw `?path=/...` path queries in API examples, requiring restore and favorite-check `path` query examples to use `%2F...` encoding.
 - Documentation checks require the security hardening guide's public-deployment checklist to retain the initial-password, WebDAV authentication, doctor, public firewall, anonymous WebDAV, direct-backend, and dataplane exposure review items.
@@ -53,6 +53,8 @@ Latest local full-validation snapshot: validation target `69d14f644f9c`; `GOTOOL
 - `GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master`
 - `make scripts-check`
 - `make docs-check`
+- `make security-check NPM_AUDIT=1`
+- `make docker-check`
 - `./scripts/test-release-tag.sh`
 - `./scripts/test-release-package.sh`
 - `./scripts/test-release-artifacts.sh`

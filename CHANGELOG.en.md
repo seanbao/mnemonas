@@ -61,7 +61,7 @@ This project follows [Semantic Versioning 2.0.0](https://semver.org/).
 - `scripts/release-readiness.sh` fails by default when non-release-documentation changes exist after the recorded full-validation target; draft summaries can opt in with `--allow-post-validation-changes`.
 - `scripts/release-readiness.sh` requires all four hardening evidence documents to exist and record the same full-validation target, preventing missing evidence from being skipped before release.
 - `scripts/release-readiness.sh` checks that both release-notes drafts record the current full-validation target, preventing stale validation snapshots in release notes.
-- `scripts/release-readiness.sh` requires the `CHANGELOG.md` and `CHANGELOG.en.md` release checklists to include `make docs-check`, preventing documentation gates from being omitted from final release verification.
+- `scripts/release-readiness.sh` requires the `CHANGELOG.md` and `CHANGELOG.en.md` release checklists to include documentation, dependency-security, and Docker build/smoke commands, preventing key local gates from being omitted from final release verification.
 - `scripts/release-readiness.sh` rejects a base ref that is not an ancestor of the current HEAD, preventing misleading release-readiness summaries from sibling branch ranges.
 - `scripts/release-readiness.sh` checks that local commit subjects on the current release branch follow Conventional Commits and rejects leftover `fixup!` / `squash!` temporary commits.
 - WebDAV COPY/MOVE destination regression coverage for absolute path-reference destinations and rejection of bare relative destinations, including `dav/path`.
