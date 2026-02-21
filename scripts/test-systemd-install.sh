@@ -3977,6 +3977,68 @@ EOF
   [[ "$status" -ne 0 ]] || fail "public doctor accepted share base URL with empty fragment marker"
   assert_file_contains "$case_dir/doctor-public-share-empty-fragment.log" "public share.base_url must not include query or fragment"
 
+  cat > "$case_dir/config-share-escaped-query-marker.toml" <<EOF
+[server]
+host = "127.0.0.1"
+port = 18080
+trusted_proxy_hops = 1
+
+[storage]
+root = "$storage_dir"
+
+[dataplane]
+grpc_address = "127.0.0.1:19090"
+
+[share]
+enabled = true
+base_url = "https://nas.example.com/shares%3Ftoken"
+EOF
+
+  set +e
+  PATH="$fake_path:$PATH" \
+    BIN_DIR="$bin_dir" \
+    WEB_DIR="$web_dir" \
+    CONFIG_PATH="$case_dir/config-share-escaped-query-marker.toml" \
+    DATAPLANE_HTTP_PORT=19091 \
+    BACKUP_ROOT="$backup_dir" \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain nas.example.com > "$case_dir/doctor-public-share-escaped-query-marker.log"
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "public doctor accepted share base URL with an escaped query marker path"
+  assert_file_contains "$case_dir/doctor-public-share-escaped-query-marker.log" "public share.base_url must not include query or fragment"
+
+  cat > "$case_dir/config-share-escaped-fragment-marker.toml" <<EOF
+[server]
+host = "127.0.0.1"
+port = 18080
+trusted_proxy_hops = 1
+
+[storage]
+root = "$storage_dir"
+
+[dataplane]
+grpc_address = "127.0.0.1:19090"
+
+[share]
+enabled = true
+base_url = "https://nas.example.com/shares%23section"
+EOF
+
+  set +e
+  PATH="$fake_path:$PATH" \
+    BIN_DIR="$bin_dir" \
+    WEB_DIR="$web_dir" \
+    CONFIG_PATH="$case_dir/config-share-escaped-fragment-marker.toml" \
+    DATAPLANE_HTTP_PORT=19091 \
+    BACKUP_ROOT="$backup_dir" \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain nas.example.com > "$case_dir/doctor-public-share-escaped-fragment-marker.log"
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "public doctor accepted share base URL with an escaped fragment marker path"
+  assert_file_contains "$case_dir/doctor-public-share-escaped-fragment-marker.log" "public share.base_url must not include query or fragment"
+
   cat > "$case_dir/config-share-invalid-host.toml" <<EOF
 [server]
 host = "127.0.0.1"

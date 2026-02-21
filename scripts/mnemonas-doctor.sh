@@ -1584,6 +1584,13 @@ http_url_path_has_backslashes() {
 	[[ "$path" == *\\* || "$path_lower" == *"%5c"* ]]
 }
 
+http_url_path_has_query_or_fragment_markers() {
+  local path_lower
+
+  path_lower="${1,,}"
+  [[ "$path_lower" == *"%3f"* || "$path_lower" == *"%23"* ]]
+}
+
 http_url_path_decode_slashes() {
   local path="$1"
 
@@ -2733,6 +2740,8 @@ check_public_domain() {
           public_share_path="$(http_url_path "$public_share_base_url")"
           if http_url_path_has_backslashes "$public_share_path"; then
             fail "public share.base_url path must not contain backslashes: $public_share_base_url"
+          elif http_url_path_has_query_or_fragment_markers "$public_share_path"; then
+            fail "public share.base_url must not include query or fragment: $public_share_base_url"
           elif http_url_path_has_duplicate_slashes "$public_share_path"; then
             fail "public share.base_url path must not contain duplicate slashes: $public_share_base_url"
           elif http_url_path_has_dot_segments "$public_share_path"; then

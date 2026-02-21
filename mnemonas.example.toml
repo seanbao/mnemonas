@@ -160,7 +160,7 @@ users_file = ""              # User data file path. Defaults to <storage.root>/.
 [share]
 enabled = false              # Enable file sharing.
 store_file = ""              # Share data file path. Defaults to <storage.root>/.mnemonas/shares.json.
-base_url = ""                # Share-link base URL. Non-empty values must not contain userinfo, query parameters, fragments, backslashes, duplicate path slashes, or . / .. path segments.
+base_url = ""                # Share-link base URL. Non-empty values must not contain userinfo, query parameters, fragments, encoded query or fragment markers, backslashes, duplicate path slashes, or . / .. path segments.
 # Public values should use the HTTPS origin or app base path before /s, with the default 443 port.
 default_expires_in = "168h"  # Default expiration for new shares. 0 means no default expiration.
 default_max_access = 0       # Default access-count limit for new shares. 0 means unlimited.

@@ -178,8 +178,8 @@ One usable administrator warns; two or more usable administrators pass.
 The initial password check uses `initial-password.txt` in the same user-data directory as the users file.
 A symlink, symlink component, or non-regular file at that path fails in public deployments.
 
-When sharing is enabled, `share.base_url` should use HTTPS on the default port, have a valid host, and contain no userinfo, query string, fragment, backslash, duplicated path slash, or `.`/`..` path segments.
-HTTP, non-443 ports, userinfo, query strings, fragments, backslashes, duplicated path slashes, `.`/`..` path segments, or invalid hosts fail.
+When sharing is enabled, `share.base_url` should use HTTPS on the default port, have a valid host, and contain no userinfo, query string, fragment, encoded query or fragment marker, backslash, duplicated path slash, or `.`/`..` path segments.
+HTTP, non-443 ports, userinfo, query strings, fragments, encoded query or fragment markers, backslashes, duplicated path slashes, `.`/`..` path segments, or invalid hosts fail.
 Empty values, a different host, or a path already ending in `/s` produce a manual review warning.
 Generated share URLs may otherwise contain a duplicated `/s/s` route.
 
@@ -270,7 +270,7 @@ sudo systemctl restart mnemonas
 - [ ] `/etc/mnemonas/config.toml` has `auth.access_token_ttl <= 1h` and `auth.refresh_token_ttl <= 720h`.
 - [ ] If WebDAV keeps global Basic Auth with a generated password, `<storage.root>/secrets.json` exists.
   It is not a symlink, does not pass through symlink components, is a regular file, and has private permissions.
-- [ ] If public sharing is enabled, `share.base_url` uses HTTPS on the default port with a valid host and no userinfo, query string, fragment, backslash, duplicated path slash, or `.`/`..` path segments; `share.default_expires_in` is not empty or `0`, is at most `720h`, and `share.default_max_access` is greater than `0`.
+- [ ] If public sharing is enabled, `share.base_url` uses HTTPS on the default port with a valid host and no userinfo, query string, fragment, encoded query or fragment marker, backslash, duplicated path slash, or `.`/`..` path segments; `share.default_expires_in` is not empty or `0`, is at most `720h`, and `share.default_max_access` is greater than `0`.
   The `mnemonas-doctor --public-domain` public-share probe reaches MnemoNAS with a passing JSON response boundary check: private cache, `Vary: Cookie`, and no probe cookie.
 - [ ] Cloud security group exposes only `80/443`, with SSH limited to trusted sources.
 - [ ] External backups exist; this public server is not the only copy of important data.
