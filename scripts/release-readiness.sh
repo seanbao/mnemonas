@@ -103,6 +103,23 @@ check_issue_template_config() {
 	require_file_contains ".github/ISSUE_TEMPLATE/config.yml" "https://github.com/seanbao/mnemonas/blob/master/SUPPORT.md"
 }
 
+check_issue_templates() {
+	require_file_contains ".github/ISSUE_TEMPLATE/bug_report.yml" "Sensitive values such as passwords, tokens, cookies, private URLs, and internal addresses must be removed before posting logs."
+	require_file_contains ".github/ISSUE_TEMPLATE/bug_report.yml" "Relevant sanitized logs, \`mnemonas-doctor\`, Docker preflight, browser console output, screenshots, or request IDs."
+	require_file_contains ".github/ISSUE_TEMPLATE/bug_report.yml" "Security-sensitive exploit details are not posted publicly."
+
+	require_file_contains ".github/ISSUE_TEMPLATE/feature_request.yml" "Security, data, deployment, and compatibility implications should be called out explicitly."
+	require_file_contains ".github/ISSUE_TEMPLATE/feature_request.yml" "Data migration, security, deployment, performance, or client-compatibility concerns."
+
+	require_file_contains ".github/ISSUE_TEMPLATE/question.yml" "Remove passwords, tokens, cookies, private URLs, internal addresses, and private file names before posting logs or configuration snippets."
+	require_file_contains ".github/ISSUE_TEMPLATE/question.yml" "Sanitized command output, logs, screenshots, or configuration excerpts."
+	require_file_contains ".github/ISSUE_TEMPLATE/question.yml" "Logs and configuration snippets are sanitized."
+
+	require_file_contains ".github/ISSUE_TEMPLATE/webdav_compatibility.yml" "Remove passwords, tokens, cookies, private URLs, internal addresses, and private file names before posting logs or screenshots."
+	require_file_contains ".github/ISSUE_TEMPLATE/webdav_compatibility.yml" "Sanitized \`mnemonas-doctor\`, client logs, server logs, request IDs, screenshots, or diagnostic bundle notes."
+	require_file_contains ".github/ISSUE_TEMPLATE/webdav_compatibility.yml" "Security-sensitive exploit details are not posted publicly."
+}
+
 check_pull_request_template() {
 	local path=".github/pull_request_template.md"
 	local expected_sections=(
@@ -157,9 +174,10 @@ check_community_files() {
 
 	check_support_routes
 	check_issue_template_config
+	check_issue_templates
 	check_pull_request_template
 
-	print_kv "community" "required community health files and collaboration routes present"
+	print_kv "community" "required community health files, collaboration routes, and issue template safety guidance present"
 }
 
 extract_validation_target() {
