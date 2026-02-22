@@ -137,6 +137,40 @@ contact_links:
     url: https://github.com/seanbao/mnemonas/blob/master/SUPPORT.md
     about: Review support channels and required diagnostics before filing operational questions. 提交运维问题前先查看支持渠道和诊断要求。
 EOF
+	cat >SECURITY.md <<'EOF'
+# Security Policy
+
+**DO NOT** open a public GitHub issue for security vulnerabilities.
+
+Use GitHub's **Private vulnerability reporting** feature for this repository when available.
+
+A dedicated security email should only be added here after the mailbox is configured and monitored.
+
+Dataplane gRPC/HTTP ports `9090/9091` should not be exposed to public or untrusted networks.
+
+```bash
+make security-check NPM_AUDIT=1
+```
+
+MnemoNAS is not designed for direct internet exposure without a hardened proxy/VPN layer.
+EOF
+	cat >SECURITY.zh-CN.md <<'EOF'
+# 安全策略
+
+**不要**为安全漏洞创建公开 GitHub Issue。
+
+优先使用本仓库的 GitHub **Private vulnerability reporting** 功能。
+
+只有在专用安全邮箱已经配置并持续监控后，才应把邮箱地址加入本文件。
+
+dataplane gRPC/HTTP 端口 `9090/9091` 不应暴露到公网或不可信网络。
+
+```bash
+make security-check NPM_AUDIT=1
+```
+
+不建议在没有加固代理/VPN 的情况下直接暴露到公网。
+EOF
 	cat >.github/ISSUE_TEMPLATE/bug_report.yml <<'EOF'
 name: Bug report / 缺陷报告
 body:
@@ -229,11 +263,15 @@ EOF
 # 支持
 
 WebDAV 兼容性报告表单：https://github.com/seanbao/mnemonas/issues/new?template=webdav_compatibility.yml
+
+| 安全漏洞 | GitHub Private Vulnerability Reporting | 不要公开提交漏洞细节，详见 [SECURITY.zh-CN.md](SECURITY.zh-CN.md) |
 EOF
 	cat >SUPPORT.en.md <<'EOF'
 # Support
 
 WebDAV compatibility report form: https://github.com/seanbao/mnemonas/issues/new?template=webdav_compatibility.yml
+
+| Security vulnerability | GitHub Private Vulnerability Reporting | Do not post exploit details publicly; see [SECURITY.md](SECURITY.md) |
 EOF
 }
 
@@ -451,6 +489,42 @@ if ./scripts/release-readiness.sh --allow-dirty --skip-checklist >"$output_dir/m
 fi
 assert_file_contains "$output_dir/missing-support-route.err" "SUPPORT.en.md is missing required text"
 git checkout -q -- SUPPORT.en.md
+
+sed -i.bak '/SECURITY.zh-CN.md/d' SUPPORT.md
+rm -f SUPPORT.md.bak
+if ./scripts/release-readiness.sh --allow-dirty --skip-checklist >"$output_dir/missing-support-security-link.out" 2>"$output_dir/missing-support-security-link.err"; then
+	fail "release readiness accepted a missing localized security support link"
+fi
+assert_file_contains "$output_dir/missing-support-security-link.err" "SUPPORT.md is missing required text"
+assert_file_contains "$output_dir/missing-support-security-link.err" "SECURITY.zh-CN.md"
+git checkout -q -- SUPPORT.md
+
+sed -i.bak 's/Do not post exploit details publicly/Public disclosure guidance missing/' SUPPORT.en.md
+rm -f SUPPORT.en.md.bak
+if ./scripts/release-readiness.sh --allow-dirty --skip-checklist >"$output_dir/missing-support-security-warning.out" 2>"$output_dir/missing-support-security-warning.err"; then
+	fail "release readiness accepted a support page without public-disclosure warning"
+fi
+assert_file_contains "$output_dir/missing-support-security-warning.err" "SUPPORT.en.md is missing required text"
+assert_file_contains "$output_dir/missing-support-security-warning.err" "Do not post exploit details publicly"
+git checkout -q -- SUPPORT.en.md
+
+sed -i.bak '/Private vulnerability reporting/d' SECURITY.md
+rm -f SECURITY.md.bak
+if ./scripts/release-readiness.sh --allow-dirty --skip-checklist >"$output_dir/missing-security-private-reporting.out" 2>"$output_dir/missing-security-private-reporting.err"; then
+	fail "release readiness accepted a security policy without private reporting guidance"
+fi
+assert_file_contains "$output_dir/missing-security-private-reporting.err" "SECURITY.md is missing required text"
+assert_file_contains "$output_dir/missing-security-private-reporting.err" "Private vulnerability reporting"
+git checkout -q -- SECURITY.md
+
+sed -i.bak '\#dataplane gRPC/HTTP#d' SECURITY.zh-CN.md
+rm -f SECURITY.zh-CN.md.bak
+if ./scripts/release-readiness.sh --allow-dirty --skip-checklist >"$output_dir/missing-security-dataplane-boundary.out" 2>"$output_dir/missing-security-dataplane-boundary.err"; then
+	fail "release readiness accepted a security policy without dataplane exposure guidance"
+fi
+assert_file_contains "$output_dir/missing-security-dataplane-boundary.err" "SECURITY.zh-CN.md is missing required text"
+assert_file_contains "$output_dir/missing-security-dataplane-boundary.err" "dataplane gRPC/HTTP"
+git checkout -q -- SECURITY.zh-CN.md
 
 sed -i.bak '\#security/policy#d' .github/ISSUE_TEMPLATE/config.yml
 rm -f .github/ISSUE_TEMPLATE/config.yml.bak
