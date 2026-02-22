@@ -18,6 +18,7 @@ if [[ -z "${GOCACHE:-}" ]]; then
 fi
 
 GO_TOOLCHAIN="${GOTOOLCHAIN:-local}"
+GO_TEST_TIMEOUT="${GO_TEST_TIMEOUT:-20m}"
 GO_FUZZTIME="${GO_FUZZTIME:-10s}"
 RUN_GO_RACE="${RUN_GO_RACE:-1}"
 RUN_GO_FUZZ="${RUN_GO_FUZZ:-1}"
@@ -39,7 +40,7 @@ run() {
 }
 
 if [[ "$RUN_GO_RACE" == "1" ]]; then
-    run env CGO_ENABLED=1 GOTOOLCHAIN="$GO_TOOLCHAIN" bash ./scripts/with-test-dataplane.sh go test -race "${race_packages[@]}"
+    run env CGO_ENABLED=1 GOTOOLCHAIN="$GO_TOOLCHAIN" bash ./scripts/with-test-dataplane.sh go test -timeout="$GO_TEST_TIMEOUT" -race "${race_packages[@]}"
 else
     printf '\n==> skipping Go race tests (RUN_GO_RACE=%s)\n' "$RUN_GO_RACE"
 fi
