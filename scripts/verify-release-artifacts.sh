@@ -3,6 +3,7 @@
 set -euo pipefail
 
 SCRIPT_NAME="$(basename "$0")"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ARTIFACT_DIR=""
 VERSION=""
 REPOSITORY="seanbao/mnemonas"
@@ -24,6 +25,9 @@ fail() {
 	printf '[release-artifact-verify] ERROR: %s\n' "$*" >&2
 	exit 1
 }
+
+# shellcheck source=scripts/release-version.sh
+. "$SCRIPT_DIR/release-version.sh"
 
 usage() {
 	cat <<EOF
@@ -111,6 +115,10 @@ validate_repository() {
 	repo="${value#*/}"
 	validate_repository_owner "$owner"
 	validate_repository_name "$repo"
+}
+
+validate_release_version() {
+	validate_docker_release_version "$1" "release version" "release version must not be empty" 1
 }
 
 tar_is_gnu() {
@@ -454,6 +462,9 @@ while [[ "$#" -gt 0 ]]; do
 done
 
 [[ -n "$ARTIFACT_DIR" ]] || { usage >&2; exit 2; }
+if [[ -n "$VERSION" ]]; then
+	validate_release_version "$VERSION"
+fi
 [[ -d "$ARTIFACT_DIR" ]] || fail "artifact directory does not exist: $ARTIFACT_DIR"
 validate_repository "$REPOSITORY"
 
@@ -493,6 +504,7 @@ for archive in "${archives[@]}"; do
 	base="$(basename "$archive")"
 	target="$(archive_target "$archive")"
 	found_version="$(archive_version "$archive")"
+	validate_release_version "$found_version"
 
 	checksum_manifest_has_archive "$base" || fail "checksums.txt does not list $base"
 	if [[ -n "$VERSION" ]]; then
