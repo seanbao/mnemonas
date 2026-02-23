@@ -246,6 +246,7 @@
 - 改进配置加载逻辑，支持配置路径传递
 
 ### Fixed
+- 修复备份与前端诊断脱敏未覆盖百分号编码敏感参数名的问题，避免 `access%5Fkey`、`secret%2Dkey` 等错误文本泄漏凭据值。
 - 修复设置 API 修改 `server.trusted_proxy_hops` 后，运行态请求来源和 HTTPS 转发语义识别未立即同步的问题
 - 修复公网 go-live smoke 和 `mnemonas-doctor --public-domain` 会把全数字四段但超出 IPv4 范围的输入当作 DNS 主机名接受的问题；手动公网端口复核示例也补充总请求超时，避免半开放连接长时间阻塞。
 - 修复 Web Husky pre-commit hook，使其解析仓库根目录、切换到 `web/`，并使用前端 lint-staged 配置

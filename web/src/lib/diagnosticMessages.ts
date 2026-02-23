@@ -1,6 +1,8 @@
 const REDACTED_DIAGNOSTIC_SECRET = '<redacted>'
-const sensitiveDiagnosticNamePattern = String.raw`(?:[A-Za-z0-9_.-]*(?:password|passwd|secret|token|credential|access[_-]?key|secret[_-]?key|api[_-]?key|authorization|signature)[A-Za-z0-9_.-]*|pass|auth|sig|user|username)`
-const sensitiveDiagnosticHeaderNamePattern = String.raw`(?:[A-Za-z0-9_.-]*(?:password|passwd|secret|token|credential|access[_-]?key|secret[_-]?key|api[_-]?key|signature)[A-Za-z0-9_.-]*|pass|sig|user|username)`
+const diagnosticNamePartPattern = String.raw`(?:[A-Za-z0-9_.-]|%[0-9A-Fa-f]{2})*`
+const diagnosticKeySeparatorPattern = String.raw`(?:[_-]|%5f|%2d)?`
+const sensitiveDiagnosticNamePattern = String.raw`(?:${diagnosticNamePartPattern}(?:password|passwd|secret|token|credential|access${diagnosticKeySeparatorPattern}key|secret${diagnosticKeySeparatorPattern}key|api${diagnosticKeySeparatorPattern}key|authorization|signature)${diagnosticNamePartPattern}|pass|auth|sig|user|username)`
+const sensitiveDiagnosticHeaderNamePattern = String.raw`(?:${diagnosticNamePartPattern}(?:password|passwd|secret|token|credential|access${diagnosticKeySeparatorPattern}key|secret${diagnosticKeySeparatorPattern}key|api${diagnosticKeySeparatorPattern}key|signature)${diagnosticNamePartPattern}|pass|sig|user|username)`
 
 const diagnosticURLUserinfoPattern = /\b([a-z][a-z0-9+.-]*:\/\/)([^/@\s]+)@/giu
 const diagnosticDoubleQuotedAssignmentPattern = new RegExp(String.raw`(^|[\s?&;,:/\\])(-{0,2}${sensitiveDiagnosticNamePattern}=)"([^"]*)"`, 'giu')

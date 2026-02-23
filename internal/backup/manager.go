@@ -77,8 +77,10 @@ const (
 	externalCommandStdoutLimit   = 4 * 1024 * 1024
 
 	redactedBackupSecretValue        = "<redacted>"
-	backupSensitiveNamePattern       = `(?:[A-Za-z0-9_.-]*(?:password|passwd|secret|token|credential|access[_-]?key|secret[_-]?key|api[_-]?key|authorization|signature)[A-Za-z0-9_.-]*|pass|auth|sig|user|username)`
-	backupSensitiveHeaderNamePattern = `(?:[A-Za-z0-9_.-]*(?:password|passwd|secret|token|credential|access[_-]?key|secret[_-]?key|api[_-]?key|signature)[A-Za-z0-9_.-]*|pass|sig|user|username)`
+	backupSensitiveNamePartPattern   = `(?:[A-Za-z0-9_.-]|%[0-9A-Fa-f]{2})*`
+	backupSensitiveKeySeparator      = `(?:[_-]|%5f|%2d)?`
+	backupSensitiveNamePattern       = `(?:` + backupSensitiveNamePartPattern + `(?:password|passwd|secret|token|credential|access` + backupSensitiveKeySeparator + `key|secret` + backupSensitiveKeySeparator + `key|api` + backupSensitiveKeySeparator + `key|authorization|signature)` + backupSensitiveNamePartPattern + `|pass|auth|sig|user|username)`
+	backupSensitiveHeaderNamePattern = `(?:` + backupSensitiveNamePartPattern + `(?:password|passwd|secret|token|credential|access` + backupSensitiveKeySeparator + `key|secret` + backupSensitiveKeySeparator + `key|api` + backupSensitiveKeySeparator + `key|signature)` + backupSensitiveNamePartPattern + `|pass|sig|user|username)`
 )
 
 var restoreAvailableBytesFunc = restoreAvailableBytes
