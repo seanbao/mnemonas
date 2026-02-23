@@ -33,6 +33,8 @@ func TestRunRejectsInvalidURL(t *testing.T) {
 		"http://127.0.0.1:8080/health\nX=1",
 		"http://127.0.0.1:8080/health\u0081",
 		"http://127.0.0.1:8080/health\u00a0",
+		"http://user:pass@127.0.0.1:8080/health",
+		"http://127.0.0.1:8080/health#ready",
 		"/health",
 	}
 
@@ -61,13 +63,16 @@ func TestRunAcceptsHealthyStatus(t *testing.T) {
 		if r.URL.Path != "/health" {
 			t.Fatalf("path = %q, want /health", r.URL.Path)
 		}
+		if r.URL.RawQuery != "probe=1" {
+			t.Fatalf("query = %q, want probe=1", r.URL.RawQuery)
+		}
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	defer server.Close()
 
 	getenv := func(key string) string {
 		if key == "MNEMONAS_HEALTHCHECK_URL" {
-			return server.URL + "/health"
+			return server.URL + "/health?probe=1"
 		}
 		return ""
 	}
