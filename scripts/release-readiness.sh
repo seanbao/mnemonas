@@ -119,6 +119,7 @@ check_security_policy() {
 }
 
 check_issue_template_config() {
+	require_file_contains ".github/ISSUE_TEMPLATE/config.yml" "blank_issues_enabled: false"
 	require_file_contains ".github/ISSUE_TEMPLATE/config.yml" "https://github.com/seanbao/mnemonas/security/policy"
 	require_file_contains ".github/ISSUE_TEMPLATE/config.yml" "https://github.com/seanbao/mnemonas/blob/master/SUPPORT.md"
 }

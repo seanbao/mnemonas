@@ -128,7 +128,7 @@ write_community_files() {
 		SECURITY.md \
 		SECURITY.zh-CN.md
 	cat >.github/ISSUE_TEMPLATE/config.yml <<'EOF'
-blank_issues_enabled: true
+blank_issues_enabled: false
 contact_links:
   - name: Security vulnerability / 安全漏洞
     url: https://github.com/seanbao/mnemonas/security/policy
@@ -532,6 +532,15 @@ if ./scripts/release-readiness.sh --allow-dirty --skip-checklist >"$output_dir/m
 	fail "release readiness accepted a missing Issue config contact link"
 fi
 assert_file_contains "$output_dir/missing-issue-config-link.err" ".github/ISSUE_TEMPLATE/config.yml is missing required text"
+git checkout -q -- .github/ISSUE_TEMPLATE/config.yml
+
+sed -i.bak 's/blank_issues_enabled: false/blank_issues_enabled: true/' .github/ISSUE_TEMPLATE/config.yml
+rm -f .github/ISSUE_TEMPLATE/config.yml.bak
+if ./scripts/release-readiness.sh --allow-dirty --skip-checklist >"$output_dir/blank-issues-enabled.out" 2>"$output_dir/blank-issues-enabled.err"; then
+	fail "release readiness accepted enabled blank Issues"
+fi
+assert_file_contains "$output_dir/blank-issues-enabled.err" ".github/ISSUE_TEMPLATE/config.yml is missing required text"
+assert_file_contains "$output_dir/blank-issues-enabled.err" "blank_issues_enabled: false"
 git checkout -q -- .github/ISSUE_TEMPLATE/config.yml
 
 sed -i.bak '/Sensitive values such as passwords/d' .github/ISSUE_TEMPLATE/bug_report.yml
