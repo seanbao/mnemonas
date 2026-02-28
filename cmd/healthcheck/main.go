@@ -26,7 +26,7 @@ func run(getenv func(string) string, stderr io.Writer) int {
 		url = defaultHealthURL
 	}
 	if err := validateHealthcheckURL(url); err != nil {
-		fmt.Fprintf(stderr, "invalid MNEMONAS_HEALTHCHECK_URL %q: %v\n", url, err)
+		fmt.Fprintf(stderr, "invalid MNEMONAS_HEALTHCHECK_URL %q: %v\n", healthcheckURLForLog(url), err)
 		return 2
 	}
 
@@ -93,4 +93,18 @@ func validateHealthcheckURL(raw string) error {
 	default:
 		return fmt.Errorf("must use http or https")
 	}
+}
+
+func healthcheckURLForLog(raw string) string {
+	parsed, err := url.Parse(raw)
+	if err == nil {
+		parsed.User = nil
+		if parsed.RawQuery != "" {
+			parsed.RawQuery = "redacted=true"
+		}
+		parsed.Fragment = ""
+		return parsed.String()
+	}
+
+	return raw
 }
