@@ -87,6 +87,13 @@ run_port_validation_tests() {
 run_upstream_host_validation_tests() {
     run_expect_failure_with_env "upstream-host-url" "nas.example.com" "" "MNEMONAS_UPSTREAM_HOST 主机格式不安全" \
         MNEMONAS_UPSTREAM_HOST=http://127.0.0.1
+    run_expect_failure_with_env "upstream-host-url-secrets-redacted" "nas.example.com" "" "MNEMONAS_UPSTREAM_HOST 主机格式不安全" \
+        'MNEMONAS_UPSTREAM_HOST=https://user:super-secret@example.com?token=also-secret#frag'
+    assert_file_not_contains "$TMP_ROOT/upstream-host-url-secrets-redacted/out.log" "https://user"
+    assert_file_not_contains "$TMP_ROOT/upstream-host-url-secrets-redacted/out.log" "super-secret"
+    assert_file_not_contains "$TMP_ROOT/upstream-host-url-secrets-redacted/out.log" "token=also-secret"
+    assert_file_not_contains "$TMP_ROOT/upstream-host-url-secrets-redacted/out.log" "also-secret"
+    assert_file_not_contains "$TMP_ROOT/upstream-host-url-secrets-redacted/out.log" "frag"
     run_expect_failure_with_env "upstream-host-command-separator" "nas.example.com" "" "MNEMONAS_UPSTREAM_HOST 主机格式不安全" \
         'MNEMONAS_UPSTREAM_HOST=127.0.0.1;bad'
     run_expect_failure_with_env "upstream-host-invalid-label" "nas.example.com" "" "MNEMONAS_UPSTREAM_HOST 主机格式不安全" \
