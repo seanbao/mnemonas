@@ -186,6 +186,7 @@
 - `scripts/release-readiness.sh` 要求四份 hardening 证据文档存在且记录一致的完整验证目标，避免发布前证据缺失被静默跳过
 - `scripts/release-readiness.sh` 会检查双语 release notes 草稿记录当前完整验证目标，避免发布说明中的验证快照滞后
 - `scripts/release-readiness.sh` 会要求 `CHANGELOG.md` 和 `CHANGELOG.en.md` 的发布清单包含文档检查、依赖安全检查和 Docker 构建烟测命令，避免关键本地门禁从最终发布核验中遗漏
+- `scripts/release-readiness.sh` 会要求 Dependabot 配置覆盖 Go、Rust 数据面、Rust proto 生成器、Web npm、GitHub Actions 和 Docker 依赖更新入口，避免发布分支丢失依赖维护基线
 - `scripts/release-readiness.sh` 会要求关闭空白 Issue，并检查缺陷报告、使用问题、功能建议和 WebDAV 兼容性 Issue 表单保留敏感信息脱敏、诊断信息和安全影响提示，避免公开协作入口绕过安全提示
 - `scripts/release-readiness.sh` 会检查安全策略和支持说明保留私密漏洞报告入口、禁止公开漏洞细节、dataplane 端口不外露、依赖安全检查和公网直连限制等关键提示
 - `scripts/release-readiness.sh` 会拒绝不是当前 HEAD 祖先的 base ref，避免用旁支范围生成误导性的发布就绪摘要

@@ -26,6 +26,7 @@
 - `release-readiness` 现在要求四份 hardening 证据文档都存在，并且都记录同一个完整验证目标，避免发布前证据缺失被静默跳过。
 - `release-readiness` 还会检查双语 release notes 草稿记录当前完整验证目标，避免发布说明中的验证快照滞后。
 - `release-readiness` 会要求 `CHANGELOG.md` 和 `CHANGELOG.en.md` 的发布清单包含文档检查、依赖安全检查和 Docker 构建烟测命令，避免最终发布核验遗漏关键本地门禁。
+- `release-readiness` 会要求 Dependabot 配置覆盖 Go、Rust 数据面、Rust proto 生成器、Web npm、GitHub Actions 和 Docker 依赖更新入口，避免发布分支丢失依赖维护基线。
 - `release-readiness` 会要求关闭空白 Issue，并检查缺陷报告、使用问题、功能建议和 WebDAV 兼容性 Issue 表单保留敏感信息脱敏、诊断信息和安全影响提示，避免公开协作入口绕过安全提示。
 - `release-readiness` 会检查安全策略和支持说明保留私密漏洞报告入口、禁止公开漏洞细节、dataplane 端口不外露、依赖安全检查和公网直连限制等关键提示。
 - `release-readiness` 会拒绝不是当前 HEAD 祖先的 base ref，避免用旁支范围生成误导性的发布就绪摘要。
@@ -107,6 +108,6 @@ gh release download v0.1.0 \
 - 确认本草稿已按最终 tag、验证结果和产物名称更新。
 - 确认 `git status --short --branch` 干净。
 - 确认 `./scripts/plan-hardening-commits.sh --fail-on-manual` 没有待分组路径。
-- 运行 `./scripts/release-readiness.sh`，确认提交标题、临时 `fixup!` / `squash!` 提交、hardening 验证证据、发布文档命令、安全策略、Issue 表单安全提示和 community health 文件均通过检查。
+- 运行 `./scripts/release-readiness.sh`，确认提交标题、临时 `fixup!` / `squash!` 提交、hardening 验证证据、发布文档命令、安全策略、Dependabot 基线、Issue 表单安全提示和 community health 文件均通过检查。
 - 创建并推送 tag 后，确认 Release workflow 成功。
 - 发布后运行 release artifact verifier 并记录结果。
