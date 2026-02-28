@@ -51,7 +51,7 @@ Release workflow 预期生成以下产物：
 
 当前硬化分支已有以下验证证据；最终发布前应以最新 tag、Release workflow 结果和必要的环境验证为准：
 
-最近本地完整验证快照：验证目标 `6247a40262ab`，`GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master` 通过，覆盖路线图与硬化进度台账职责边界文档收敛、WebDAV README 首页概述、客户端连接摘要、挂载指南兼容状态说明与兼容性矩阵同步增量、存储/配置 CDC 文档边界契约、中文界面加载态、上传态、移动/复制菜单和多文件摘要文案省略号一致性、提醒通道 token 占位不再使用 ASCII 省略号片段、扩展点 secret 示例占位改用明确尖括号占位，并由文档检查拒绝 JSON/TOML/YAML 纯省略号 secret 占位，包含短横线和点号字段名的 key/token 变体，以及观测 E2E 对中文可见文案 ASCII 省略号的回归拦截、release-readiness 对 CHANGELOG 文档检查、依赖安全检查、Docker 构建烟测命令、安全策略和支持说明安全提示的发布清单门禁、空白 Issue 关闭门禁、Issue 表单安全提示门禁、公网部署安全清单关键项文档契约、Go 包测试超时门禁稳定性、`make check`、依赖安全扫描、示例配置、public-access 模板、proto 再生成稳定性、Rust fmt/test/clippy、proto-gen fmt/test/clippy、前端 lint/typecheck/unit/build、Playwright 375 个 E2E 用例、Docker build 和 Docker smoke。Docker smoke 使用 Docker 自动分配的 loopback 端口 `http://127.0.0.1:32883`。
+最近本地完整验证快照：验证目标 `0cf44d5ba155`，`GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master` 通过，覆盖路线图与硬化进度台账职责边界文档收敛、WebDAV README 首页概述、客户端连接摘要、挂载指南兼容状态说明与兼容性矩阵同步增量、存储/配置 CDC 文档边界契约、中文界面加载态、上传态、移动/复制菜单和多文件摘要文案省略号一致性、提醒通道 token 占位不再使用 ASCII 省略号片段、扩展点 secret 示例占位改用明确尖括号占位，并由文档检查拒绝 JSON/TOML/YAML 纯省略号 secret 占位，包含短横线和点号字段名的 key/token 变体，以及观测 E2E 对中文可见文案 ASCII 省略号的回归拦截、release-readiness 对 CHANGELOG 文档检查、依赖安全检查、Docker 构建烟测命令、安全策略和支持说明安全提示的发布清单门禁、Dependabot 基线门禁、空白 Issue 关闭门禁、Issue 表单安全提示门禁、公网部署安全清单关键项文档契约、Go 包测试超时门禁稳定性、`make check`、依赖安全扫描、示例配置、public-access 模板、proto 再生成稳定性、Rust fmt/test/clippy、proto-gen fmt/test/clippy、前端 lint/typecheck/unit/build、Playwright 375 个 E2E 用例、Docker build 和 Docker smoke。Docker smoke 使用 Docker 自动分配的 loopback 端口 `http://127.0.0.1:32884`。
 
 - `GOTOOLCHAIN=local ./scripts/verify-changed.sh`
 - `GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master`
