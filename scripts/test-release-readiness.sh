@@ -114,7 +114,7 @@ EOF
 }
 
 write_community_files() {
-	mkdir -p .github/ISSUE_TEMPLATE
+	mkdir -p .github/ISSUE_TEMPLATE .github/workflows
 	touch \
 		README.md \
 		README.en.md \
@@ -199,6 +199,26 @@ updates:
     labels:
       - "dependencies"
       - "docker"
+EOF
+	cat >.github/workflows/torture.yml <<'EOF'
+name: Torture
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 18 * * *'
+
+permissions:
+  contents: read
+
+jobs:
+  safe-torture:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run non-destructive torture matrix
+        env:
+          RUN_LIVE_FAULTS: '0'
+        run: make test-torture
 EOF
 	cat >SECURITY.md <<'EOF'
 # Security Policy
@@ -613,6 +633,24 @@ if ./scripts/release-readiness.sh --allow-dirty --skip-checklist >"$output_dir/m
 fi
 assert_file_contains "$output_dir/missing-dependabot-proto.err" "missing required Dependabot update: cargo /tools/proto-gen"
 git checkout -q -- .github/dependabot.yml
+
+sed -i.bak '/workflow_dispatch:/d' .github/workflows/torture.yml
+rm -f .github/workflows/torture.yml.bak
+if ./scripts/release-readiness.sh --allow-dirty --skip-checklist >"$output_dir/missing-torture-dispatch.out" 2>"$output_dir/missing-torture-dispatch.err"; then
+	fail "release readiness accepted a torture workflow without manual dispatch"
+fi
+assert_file_contains "$output_dir/missing-torture-dispatch.err" ".github/workflows/torture.yml is missing required text"
+assert_file_contains "$output_dir/missing-torture-dispatch.err" "workflow_dispatch:"
+git checkout -q -- .github/workflows/torture.yml
+
+sed -i.bak "s/RUN_LIVE_FAULTS: '0'/RUN_LIVE_FAULTS: '1'/" .github/workflows/torture.yml
+rm -f .github/workflows/torture.yml.bak
+if ./scripts/release-readiness.sh --allow-dirty --skip-checklist >"$output_dir/missing-torture-safe-mode.out" 2>"$output_dir/missing-torture-safe-mode.err"; then
+	fail "release readiness accepted a torture workflow without the non-destructive live-faults guard"
+fi
+assert_file_contains "$output_dir/missing-torture-safe-mode.err" ".github/workflows/torture.yml is missing required text"
+assert_file_contains "$output_dir/missing-torture-safe-mode.err" "RUN_LIVE_FAULTS: '0'"
+git checkout -q -- .github/workflows/torture.yml
 
 sed -i.bak '/Sensitive values such as passwords/d' .github/ISSUE_TEMPLATE/bug_report.yml
 rm -f .github/ISSUE_TEMPLATE/bug_report.yml.bak

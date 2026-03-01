@@ -188,6 +188,18 @@ check_dependabot_config() {
 	require_dependabot_update "docker" "/"
 }
 
+check_torture_workflow() {
+	local path=".github/workflows/torture.yml"
+
+	require_file_contains "$path" "workflow_dispatch:"
+	require_file_contains "$path" "schedule:"
+	require_file_contains "$path" "cron:"
+	require_file_contains "$path" "permissions:"
+	require_file_contains "$path" "contents: read"
+	require_file_contains "$path" "RUN_LIVE_FAULTS: '0'"
+	require_file_contains "$path" "run: make test-torture"
+}
+
 check_issue_templates() {
 	require_file_contains ".github/ISSUE_TEMPLATE/bug_report.yml" "Sensitive values such as passwords, tokens, cookies, private URLs, and internal addresses must be removed before posting logs."
 	require_file_contains ".github/ISSUE_TEMPLATE/bug_report.yml" "Relevant sanitized logs, \`mnemonas-doctor\`, Docker preflight, browser console output, screenshots, or request IDs."
@@ -252,6 +264,7 @@ check_community_files() {
 		".github/ISSUE_TEMPLATE/question.yml"
 		".github/ISSUE_TEMPLATE/webdav_compatibility.yml"
 		".github/pull_request_template.md"
+		".github/workflows/torture.yml"
 	)
 
 	for path in "${required_files[@]}"; do
@@ -261,11 +274,12 @@ check_community_files() {
 	check_support_routes
 	check_security_policy
 	check_dependabot_config
+	check_torture_workflow
 	check_issue_template_config
 	check_issue_templates
 	check_pull_request_template
 
-	print_kv "community" "required community health files, dependency-update baseline, support/security routes, and issue template safety guidance present"
+	print_kv "community" "required community health files, dependency-update baseline, torture workflow baseline, support/security routes, and issue template safety guidance present"
 }
 
 extract_validation_target() {
