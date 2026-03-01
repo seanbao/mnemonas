@@ -200,6 +200,81 @@ updates:
       - "dependencies"
       - "docker"
 EOF
+	cat >.github/workflows/ci.yml <<'EOF'
+name: CI
+
+on:
+  pull_request:
+    branches: [main, master]
+
+permissions:
+  contents: read
+
+jobs:
+  workflows:
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - run: make workflows-check
+  scripts:
+    steps:
+      - run: make scripts-check
+  toolchains:
+    steps:
+      - run: make toolchains-check
+  docs:
+    steps:
+      - run: make docs-check
+  go:
+    steps:
+      - run: CGO_ENABLED=1 bash ./scripts/with-test-dataplane.sh go test -v -race -coverprofile=coverage.out ./...
+  frontend:
+    steps:
+      - run: npm audit --audit-level="${{ env.NPM_AUDIT_LEVEL }}"
+  e2e:
+    steps:
+      - run: npm run test:e2e
+  docker:
+    steps:
+      - run: ./scripts/docker-smoke.sh mnemonas:test
+EOF
+	cat >.github/workflows/release.yml <<'EOF'
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - run: ./scripts/check-release-tag.sh "$GITHUB_REF_NAME"
+  docker:
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - run: ./scripts/docker-smoke.sh mnemonas:release-smoke
+  release:
+    permissions:
+      contents: write
+    steps:
+      - run: |
+          ./scripts/verify-release-artifacts.sh \
+            --require-targets \
+            dist
+      - uses: softprops/action-gh-release@v2
+        with:
+          prerelease: ${{ contains(github.ref_name, '-') }}
+EOF
 	cat >.github/workflows/torture.yml <<'EOF'
 name: Torture
 
@@ -633,6 +708,24 @@ if ./scripts/release-readiness.sh --allow-dirty --skip-checklist >"$output_dir/m
 fi
 assert_file_contains "$output_dir/missing-dependabot-proto.err" "missing required Dependabot update: cargo /tools/proto-gen"
 git checkout -q -- .github/dependabot.yml
+
+sed -i.bak '/docker-smoke.sh mnemonas:test/d' .github/workflows/ci.yml
+rm -f .github/workflows/ci.yml.bak
+if ./scripts/release-readiness.sh --allow-dirty --skip-checklist >"$output_dir/missing-ci-docker-smoke.out" 2>"$output_dir/missing-ci-docker-smoke.err"; then
+	fail "release readiness accepted a CI workflow without Docker smoke coverage"
+fi
+assert_file_contains "$output_dir/missing-ci-docker-smoke.err" ".github/workflows/ci.yml is missing required text"
+assert_file_contains "$output_dir/missing-ci-docker-smoke.err" "run: ./scripts/docker-smoke.sh mnemonas:test"
+git checkout -q -- .github/workflows/ci.yml
+
+sed -i.bak '/verify-release-artifacts/d' .github/workflows/release.yml
+rm -f .github/workflows/release.yml.bak
+if ./scripts/release-readiness.sh --allow-dirty --skip-checklist >"$output_dir/missing-release-artifact-verifier.out" 2>"$output_dir/missing-release-artifact-verifier.err"; then
+	fail "release readiness accepted a Release workflow without artifact verification"
+fi
+assert_file_contains "$output_dir/missing-release-artifact-verifier.err" ".github/workflows/release.yml is missing required text"
+assert_file_contains "$output_dir/missing-release-artifact-verifier.err" "./scripts/verify-release-artifacts.sh"
+git checkout -q -- .github/workflows/release.yml
 
 sed -i.bak '/workflow_dispatch:/d' .github/workflows/torture.yml
 rm -f .github/workflows/torture.yml.bak

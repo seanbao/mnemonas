@@ -200,6 +200,40 @@ check_torture_workflow() {
 	require_file_contains "$path" "run: make test-torture"
 }
 
+check_ci_workflow() {
+	local path=".github/workflows/ci.yml"
+
+	require_file_contains "$path" "pull_request:"
+	require_file_contains "$path" "permissions:"
+	require_file_contains "$path" "contents: read"
+	require_file_contains "$path" "persist-credentials: false"
+	require_file_contains "$path" "run: make workflows-check"
+	require_file_contains "$path" "run: make scripts-check"
+	require_file_contains "$path" "run: make docs-check"
+	require_file_contains "$path" "run: make toolchains-check"
+	require_file_contains "$path" "go test -v -race -coverprofile=coverage.out"
+	require_file_contains "$path" "npm audit --audit-level=\"\${{ env.NPM_AUDIT_LEVEL }}\""
+	require_file_contains "$path" "run: npm run test:e2e"
+	require_file_contains "$path" "run: ./scripts/docker-smoke.sh mnemonas:test"
+}
+
+check_release_workflow() {
+	local path=".github/workflows/release.yml"
+
+	require_file_contains "$path" "- 'v*'"
+	require_file_contains "$path" "permissions:"
+	require_file_contains "$path" "contents: read"
+	require_file_contains "$path" "packages: write"
+	require_file_contains "$path" "contents: write"
+	require_file_contains "$path" "persist-credentials: false"
+	require_file_contains "$path" "run: ./scripts/check-release-tag.sh \"\$GITHUB_REF_NAME\""
+	require_file_contains "$path" "run: ./scripts/docker-smoke.sh mnemonas:release-smoke"
+	require_file_contains "$path" "./scripts/verify-release-artifacts.sh \\"
+	require_file_contains "$path" "--require-targets"
+	require_file_contains "$path" "uses: softprops/action-gh-release@v2"
+	require_file_contains "$path" "prerelease: \${{ contains(github.ref_name, '-') }}"
+}
+
 check_issue_templates() {
 	require_file_contains ".github/ISSUE_TEMPLATE/bug_report.yml" "Sensitive values such as passwords, tokens, cookies, private URLs, and internal addresses must be removed before posting logs."
 	require_file_contains ".github/ISSUE_TEMPLATE/bug_report.yml" "Relevant sanitized logs, \`mnemonas-doctor\`, Docker preflight, browser console output, screenshots, or request IDs."
@@ -264,6 +298,8 @@ check_community_files() {
 		".github/ISSUE_TEMPLATE/question.yml"
 		".github/ISSUE_TEMPLATE/webdav_compatibility.yml"
 		".github/pull_request_template.md"
+		".github/workflows/ci.yml"
+		".github/workflows/release.yml"
 		".github/workflows/torture.yml"
 	)
 
@@ -274,12 +310,14 @@ check_community_files() {
 	check_support_routes
 	check_security_policy
 	check_dependabot_config
+	check_ci_workflow
+	check_release_workflow
 	check_torture_workflow
 	check_issue_template_config
 	check_issue_templates
 	check_pull_request_template
 
-	print_kv "community" "required community health files, dependency-update baseline, torture workflow baseline, support/security routes, and issue template safety guidance present"
+	print_kv "community" "required community health files, dependency-update baseline, CI/release/torture workflow baselines, support/security routes, and issue template safety guidance present"
 }
 
 extract_validation_target() {
