@@ -234,6 +234,26 @@ check_release_workflow() {
 	require_file_contains "$path" "prerelease: \${{ contains(github.ref_name, '-') }}"
 }
 
+check_makefile_targets() {
+	local path="Makefile"
+
+	require_file_contains "$path" "GO_TEST_TIMEOUT ?= 20m"
+	require_file_contains "$path" "go-packages:"
+	require_file_contains "$path" "workflows-check:"
+	require_file_contains "$path" "scripts-check:"
+	require_file_contains "$path" "toolchains-check:"
+	require_file_contains "$path" "docs-check:"
+	require_file_contains "$path" "security-check:"
+	require_file_contains "$path" "test:"
+	require_file_contains "$path" "test-torture:"
+	require_file_contains "$path" "./scripts/torture-test.sh"
+	require_file_contains "$path" "docker-check: docker docker-smoke"
+	require_file_contains "$path" "check: workflows-check scripts-check toolchains-check docs-check lint test"
+	require_file_contains "$path" "verify-changed:"
+	require_file_contains "$path" "./scripts/verify-changed.sh"
+	require_file_contains "$path" "quick-check:"
+}
+
 check_issue_templates() {
 	require_file_contains ".github/ISSUE_TEMPLATE/bug_report.yml" "Sensitive values such as passwords, tokens, cookies, private URLs, and internal addresses must be removed before posting logs."
 	require_file_contains ".github/ISSUE_TEMPLATE/bug_report.yml" "Relevant sanitized logs, \`mnemonas-doctor\`, Docker preflight, browser console output, screenshots, or request IDs."
@@ -280,6 +300,7 @@ check_community_files() {
 	local required_files=(
 		"README.md"
 		"README.en.md"
+		"Makefile"
 		"LICENSE"
 		"CHANGELOG.md"
 		"CHANGELOG.en.md"
@@ -313,11 +334,12 @@ check_community_files() {
 	check_ci_workflow
 	check_release_workflow
 	check_torture_workflow
+	check_makefile_targets
 	check_issue_template_config
 	check_issue_templates
 	check_pull_request_template
 
-	print_kv "community" "required community health files, dependency-update baseline, CI/release/torture workflow baselines, support/security routes, and issue template safety guidance present"
+	print_kv "community" "required community health files, dependency-update baseline, CI/release/torture workflow and Makefile target baselines, support/security routes, and issue template safety guidance present"
 }
 
 extract_validation_target() {

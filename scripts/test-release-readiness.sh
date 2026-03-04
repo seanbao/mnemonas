@@ -127,6 +127,55 @@ write_community_files() {
 		SUPPORT.en.md \
 		SECURITY.md \
 		SECURITY.zh-CN.md
+	cat >Makefile <<'EOF'
+.PHONY: go-packages workflows-check scripts-check toolchains-check docs-check security-check test test-torture docker docker-smoke docker-check check verify-changed quick-check lint
+
+GO_TEST_TIMEOUT ?= 20m
+
+go-packages:
+	@true
+
+workflows-check:
+	@true
+
+scripts-check:
+	@true
+
+toolchains-check:
+	@true
+
+docs-check:
+	@true
+
+security-check:
+	@true
+
+test:
+	@true
+
+test-torture:
+	./scripts/torture-test.sh
+
+docker:
+	@true
+
+docker-smoke:
+	@true
+
+docker-check: docker docker-smoke
+
+lint:
+	@true
+
+check: workflows-check scripts-check toolchains-check docs-check lint test
+	@true
+
+verify-changed:
+	./scripts/verify-changed.sh
+
+quick-check:
+	@true
+EOF
 	cat >.github/ISSUE_TEMPLATE/config.yml <<'EOF'
 blank_issues_enabled: false
 contact_links:
@@ -744,6 +793,15 @@ fi
 assert_file_contains "$output_dir/missing-torture-safe-mode.err" ".github/workflows/torture.yml is missing required text"
 assert_file_contains "$output_dir/missing-torture-safe-mode.err" "RUN_LIVE_FAULTS: '0'"
 git checkout -q -- .github/workflows/torture.yml
+
+sed -i.bak '/^docker-check:/d' Makefile
+rm -f Makefile.bak
+if ./scripts/release-readiness.sh --allow-dirty --skip-checklist >"$output_dir/missing-makefile-docker-check.out" 2>"$output_dir/missing-makefile-docker-check.err"; then
+	fail "release readiness accepted a Makefile without the Docker check target baseline"
+fi
+assert_file_contains "$output_dir/missing-makefile-docker-check.err" "Makefile is missing required text"
+assert_file_contains "$output_dir/missing-makefile-docker-check.err" "docker-check: docker docker-smoke"
+git checkout -q -- Makefile
 
 sed -i.bak '/Sensitive values such as passwords/d' .github/ISSUE_TEMPLATE/bug_report.yml
 rm -f .github/ISSUE_TEMPLATE/bug_report.yml.bak
