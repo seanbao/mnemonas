@@ -389,6 +389,35 @@ TOML
 	assert_file_contains "$out" "Summary: 0 failure(s), 1 warning(s)"
 }
 
+run_configured_auth_parent_segment_test() {
+	local case_dir="$TMP_ROOT/configured-auth-parent"
+	local fake_bin="$case_dir/bin"
+	local out="$case_dir/out.log"
+	local status
+	make_case "$case_dir"
+	make_fake_bin "$fake_bin"
+	cat > "$case_dir/home/.mnemonas/config.toml" <<'TOML'
+[storage]
+root = "/data"
+
+[auth]
+users_file = "/data/../outside/users.json"
+TOML
+	chmod 0600 "$case_dir/home/.mnemonas/config.toml"
+
+	set +e
+	PATH="$fake_bin:$PATH" \
+		REPO_ROOT="$case_dir/repo" \
+		HOME="$case_dir/home" \
+		bash "$PROJECT_ROOT/scripts/mnemonas-docker-preflight.sh" > "$out"
+	status=$?
+	set -e
+
+	[[ "$status" -ne 0 ]] || fail "preflight accepted auth.users_file with a parent directory segment"
+	assert_file_contains "$out" "Configured auth.users_file cannot contain parent directory segments"
+	assert_file_not_contains "$out" "$case_dir/home/.mnemonas/../outside"
+}
+
 run_config_file_permission_warning_test() {
 	local case_dir="$TMP_ROOT/config-permission"
 	local fake_bin="$case_dir/bin"
@@ -701,6 +730,60 @@ ENV
 	assert_file_contains "$out" "Summary: 0 failure(s), 0 warning(s)"
 }
 
+run_invalid_release_image_test() {
+	local name="$1"
+	local image_assignment="$2"
+	local expected="$3"
+	local case_dir="$TMP_ROOT/invalid-release-image-$name"
+	local fake_bin="$case_dir/bin"
+	local out="$case_dir/out.log"
+	local status
+	make_case "$case_dir"
+	make_fake_bin "$fake_bin"
+	cat >> "$case_dir/repo/.env" <<ENV
+MNEMONAS_IMAGE=$image_assignment
+ENV
+
+	set +e
+	PATH="$fake_bin:$PATH" \
+		REPO_ROOT="$case_dir/repo" \
+		HOME="$case_dir/home" \
+		bash "$PROJECT_ROOT/scripts/mnemonas-docker-preflight.sh" > "$out"
+	status=$?
+	set -e
+
+	[[ "$status" -ne 0 ]] || fail "preflight accepted invalid MNEMONAS_IMAGE for $name"
+	assert_file_contains "$out" "$expected"
+}
+
+run_release_image_url_redaction_test() {
+	local case_dir="$TMP_ROOT/release-image-url-redaction"
+	local fake_bin="$case_dir/bin"
+	local out="$case_dir/out.log"
+	local status
+	make_case "$case_dir"
+	make_fake_bin "$fake_bin"
+	cat >> "$case_dir/repo/.env" <<'ENV'
+MNEMONAS_IMAGE="https://user:super-secret@example.com/mnemonas:tag?token=also-secret#frag"
+ENV
+
+	set +e
+	PATH="$fake_bin:$PATH" \
+		REPO_ROOT="$case_dir/repo" \
+		HOME="$case_dir/home" \
+		bash "$PROJECT_ROOT/scripts/mnemonas-docker-preflight.sh" > "$out"
+	status=$?
+	set -e
+
+	[[ "$status" -ne 0 ]] || fail "preflight accepted a URL-shaped MNEMONAS_IMAGE"
+	assert_file_contains "$out" "MNEMONAS_IMAGE must be a Docker image reference, not a URL"
+	assert_file_not_contains "$out" "user:super-secret"
+	assert_file_not_contains "$out" "super-secret"
+	assert_file_not_contains "$out" "token=also-secret"
+	assert_file_not_contains "$out" "also-secret"
+	assert_file_not_contains "$out" "frag"
+}
+
 run_invalid_min_free_bytes_test() {
 	local case_dir="$TMP_ROOT/invalid-min-free"
 	local fake_bin="$case_dir/bin"
@@ -734,6 +817,7 @@ run_sensitive_files_private_test
 run_sensitive_file_permission_warning_test
 run_configured_auth_file_permission_warning_test
 run_unmapped_configured_auth_file_warning_test
+run_configured_auth_parent_segment_test
 run_config_file_permission_warning_test
 run_sensitive_file_symlink_test
 run_config_file_symlink_test
@@ -748,6 +832,11 @@ run_release_image_without_buildx_test
 run_release_image_latest_warning_test
 run_release_image_missing_tag_warning_test
 run_release_image_digest_test
+run_invalid_release_image_test "dash" "-bad" "MNEMONAS_IMAGE must not start with '-'"
+run_invalid_release_image_test "whitespace" '"ghcr.io/seanbao/mnemonas:v1 bad"' "MNEMONAS_IMAGE must not contain whitespace or control characters"
+run_invalid_release_image_test "invalid-digest" "ghcr.io/seanbao/mnemonas@sha256:not-hex" "MNEMONAS_IMAGE digest must use sha256:<64 hex chars>"
+run_invalid_release_image_test "invalid-tag" "ghcr.io/seanbao/mnemonas:-badtag" "MNEMONAS_IMAGE tag is not Docker-compatible"
+run_release_image_url_redaction_test
 run_invalid_min_free_bytes_test
 
 printf '[docker-preflight-test] all checks passed\n'

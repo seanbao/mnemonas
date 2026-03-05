@@ -164,6 +164,14 @@ expand_container_home_path() {
 	esac
 }
 
+require_safe_container_metadata_path() {
+	local value="$1"
+	local label="$2"
+
+	require_no_control_characters "$value" "$label"
+	! path_has_parent_segment "$value" || fail "$label cannot contain parent directory segments"
+}
+
 initial_password_container_path() {
 	local storage_root users_file users_dir
 
@@ -173,12 +181,14 @@ initial_password_container_path() {
 	else
 		storage_root="/data"
 	fi
+	require_safe_container_metadata_path "$storage_root" "storage.root"
 	users_file="$(config_value auth users_file)"
 	if [[ -n "$users_file" ]]; then
 		users_file="$(expand_container_home_path "$users_file")"
 	else
 		users_file="$storage_root/.mnemonas/users.json"
 	fi
+	require_safe_container_metadata_path "$users_file" "auth.users_file"
 	users_dir="${users_file%/*}"
 	if [[ "$users_dir" == "$users_file" ]]; then
 		users_dir="."
