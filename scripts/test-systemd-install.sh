@@ -3836,7 +3836,7 @@ grpc_address = "127.0.0.1:19090"
 
 [share]
 enabled = true
-base_url = "https://operator@nas.example.com"
+base_url = "https://operator:super-secret@nas.example.com"
 EOF
 
   set +e
@@ -3852,6 +3852,8 @@ EOF
 
   [[ "$status" -ne 0 ]] || fail "public doctor accepted share base URL with userinfo"
   assert_file_contains "$case_dir/doctor-public-share-userinfo.log" "public share.base_url must not include userinfo"
+  assert_file_not_contains "$case_dir/doctor-public-share-userinfo.log" "operator:super-secret"
+  assert_file_not_contains "$case_dir/doctor-public-share-userinfo.log" "super-secret"
 
   cat > "$case_dir/config-share-query.toml" <<EOF
 [server]
@@ -3883,6 +3885,8 @@ EOF
 
   [[ "$status" -ne 0 ]] || fail "public doctor accepted share base URL with query"
   assert_file_contains "$case_dir/doctor-public-share-query.log" "public share.base_url must not include query or fragment"
+  assert_file_not_contains "$case_dir/doctor-public-share-query.log" "token=secret"
+  assert_file_not_contains "$case_dir/doctor-public-share-query.log" "https://nas.example.com?token=secret"
 
   cat > "$case_dir/config-share-empty-query.toml" <<EOF
 [server]
@@ -3929,7 +3933,7 @@ grpc_address = "127.0.0.1:19090"
 
 [share]
 enabled = true
-base_url = "https://nas.example.com#share"
+base_url = "https://nas.example.com#share-secret"
 EOF
 
   set +e
@@ -3945,6 +3949,7 @@ EOF
 
   [[ "$status" -ne 0 ]] || fail "public doctor accepted share base URL with fragment"
   assert_file_contains "$case_dir/doctor-public-share-fragment.log" "public share.base_url must not include query or fragment"
+  assert_file_not_contains "$case_dir/doctor-public-share-fragment.log" "share-secret"
 
   cat > "$case_dir/config-share-empty-fragment.toml" <<EOF
 [server]
