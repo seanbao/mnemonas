@@ -308,6 +308,8 @@ The batch restore API reruns preflight for the full batch before writing any tar
 
 Top-level `total_files` and `verified_bytes` aggregate the read-only verification results from completed items. Runtime failures after a passed preflight can still produce partial failures and set the overall `warning` flag, so clients should inspect each `items[]` entry for status, error, and verification output.
 
+The Maintenance page preserves job names, backup targets, remote or repository identifiers, retention-policy status, read-only verification conclusions, verification errors, and disposition guidance in batch-restore item cards and copyable records, so remote or removable-media restores can be archived with operational context.
+
 The Maintenance page shows restore-summary findings in the job summary, and the **Export summary** action in the job row or completed-restore dialog downloads the JSON restore summary for the backup job. The JSON includes latest backup, retention check, restore drill, restore-drill history, explicit restore, read-only verification, restore history, and findings. Download responses use `Cache-Control: no-store`, `Pragma: no-cache`, `X-Content-Type-Options: nosniff`, and `Referrer-Policy: no-referrer`. A restore summary should be retained before switching `storage.root` and kept with diagnostics after a failed restore.
 
 Cutover checklist:
