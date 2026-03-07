@@ -196,6 +196,7 @@
 - `scripts/release-readiness.sh` 会拒绝不是当前 HEAD 祖先的 base ref，避免用旁支范围生成误导性的发布就绪摘要
 - `scripts/release-readiness.sh` 会检查当前发布分支的本地提交标题是否符合 Conventional Commits，并拒绝遗留的 `fixup!` / `squash!` 临时提交
 - `make test`、`make quick-check`、`make coverage`、torture 测试和 hardening 分组规划命令会使用 20 分钟 Go 包级超时，避免重负载 race 包被 Go 默认 10 分钟超时中断
+- `scripts/check-doc-links.sh` 会要求备份指南保留恢复演练命令、30 天演练提醒、失败分类、保留演练产物、恢复摘要导出和“未恢复过不算验证”的说明，避免恢复可用性文档退化
 - WebDAV COPY/MOVE 目标路径回归覆盖，验证绝对 path-reference 目标，并拒绝包括 `dav/path` 在内的裸相对目标
 - `npm run typecheck` 覆盖前端应用、Playwright 规格和共享 E2E helper
 - `.go-version`、`.nvmrc`、Go `toolchain` 与 Rust `rust-version` 共同记录本地开发工具链要求

@@ -180,6 +180,36 @@ const securityChecklistContracts = [
     ],
   },
 ]
+const backupRestoreDrillContracts = [
+  {
+    file: 'docs/backup-guide.md',
+    required: [
+      'restore_drill_stale_after = "720h"',
+      '恢复演练历史与显式恢复历史默认都保留最近 20 条',
+      '失败演练还会记录稳定的 `failure_category`',
+      'http://localhost:8080/api/v1/maintenance/backups/external-disk/restore-drill',
+      '`keep_artifact = true`',
+      '`restic` 恢复演练当前执行 `restic check`',
+      '`rclone` 恢复演练当前执行 `rclone check --one-way`',
+      '导出摘要',
+      '从未恢复过的备份只是推测，不是已经验证过的恢复路径',
+    ],
+  },
+  {
+    file: 'docs/backup-guide.en.md',
+    required: [
+      'restore_drill_stale_after = "720h"',
+      'Restore-drill history and explicit restore history both keep the latest 20 entries',
+      'Failed drills also record a stable `failure_category`',
+      'http://localhost:8080/api/v1/maintenance/backups/external-disk/restore-drill',
+      'Set `keep_artifact = true`',
+      'For `restic`, the drill currently runs `restic check`',
+      'for `rclone`, it runs `rclone check --one-way`',
+      '**Export summary**',
+      'A backup that has never been restored is an assumption, not a proven recovery path',
+    ],
+  },
+]
 const requiredDocumentPairs = [
   ['README.md', 'README.en.md', 'English', 'Chinese'],
   ['CHANGELOG.md', 'CHANGELOG.en.md', 'English', 'Chinese'],
@@ -300,6 +330,21 @@ function checkSecurityChecklistContract() {
     for (const phrase of doc.required) {
       if (!text.includes(phrase)) {
         errors.push(`${doc.file}: missing public deployment security checklist text: ${phrase}`)
+      }
+    }
+  }
+}
+
+function checkBackupRestoreDrillContract() {
+  for (const doc of backupRestoreDrillContracts) {
+    const text = readOptionalFile(doc.file)
+    if (text === null) {
+      continue
+    }
+
+    for (const phrase of doc.required) {
+      if (!text.includes(phrase)) {
+        errors.push(`${doc.file}: missing backup restore drill guidance text: ${phrase}`)
       }
     }
   }
@@ -511,6 +556,7 @@ checkPairedHeadingLevelSequences()
 checkPairedLanguageLinks()
 checkStorageCDCContract()
 checkSecurityChecklistContract()
+checkBackupRestoreDrillContract()
 
 for (const file of files) {
   const text = fs.readFileSync(path.join(repoRoot, file), 'utf8')
