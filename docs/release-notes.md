@@ -32,6 +32,7 @@
 - `release-readiness` 会要求 `.github/workflows/torture.yml` 保留手动入口、定时入口、只读权限、`RUN_LIVE_FAULTS: '0'` 非破坏性开关和 `make test-torture` 执行入口，避免长期回归工作流在发布前失效。
 - `release-readiness` 会要求关闭空白 Issue，并检查缺陷报告、使用问题、功能建议和 WebDAV 兼容性 Issue 表单保留敏感信息脱敏、诊断信息和安全影响提示，避免公开协作入口绕过安全提示。
 - `release-readiness` 会检查安全策略和支持说明保留私密漏洞报告入口、禁止公开漏洞细节、dataplane 端口不外露、依赖安全检查和公网直连限制等关键提示。
+- `release-readiness` 会要求发布清单和双语 release notes 保留 `mnemonas-doctor --public-domain`、`scripts/public-go-live-smoke.sh` 和 `cloud-firewall-checklist` 入口，避免公网部署环境复核从最终发布流程中遗漏。
 - `release-readiness` 会拒绝不是当前 HEAD 祖先的 base ref，避免用旁支范围生成误导性的发布就绪摘要。
 - Go 测试入口现在保留 20 分钟包级超时，避免重负载 race 包在完整分支验证中被 Go 默认 10 分钟超时中断。
 - 文档检查会拒绝 API 示例中可复制的 `?path=/...` 裸路径查询，要求恢复和收藏检查等 `path` 查询示例使用 `%2F...` 编码形式。
@@ -62,6 +63,9 @@ Release workflow 预期生成以下产物：
 - `make docs-check`
 - `make security-check NPM_AUDIT=1`
 - `make docker-check`
+- `sudo mnemonas-doctor --public-domain <domain>`
+- `./scripts/public-go-live-smoke.sh <domain>`
+- `docs/cloud-firewall-checklist.md`
 - `./scripts/test-release-tag.sh`
 - `./scripts/test-release-package.sh`
 - `./scripts/test-release-artifacts.sh`
@@ -96,7 +100,7 @@ gh release download v0.1.0 \
   dist/release-check
 ```
 
-随后应完成至少一次归档安装 smoke、Docker release 镜像启动 smoke、公开文档链接检查，以及公网部署环境的 DNS、防火墙、TLS 和云安全组复核。
+随后应完成至少一次归档安装 smoke、Docker release 镜像启动 smoke、公开文档链接检查，以及公网部署环境的 `mnemonas-doctor --public-domain`、外部网络 `public-go-live-smoke.sh`、DNS、防火墙、TLS 和云安全组复核。
 
 ## 已知限制
 
@@ -111,6 +115,6 @@ gh release download v0.1.0 \
 - 确认本草稿已按最终 tag、验证结果和产物名称更新。
 - 确认 `git status --short --branch` 干净。
 - 确认 `./scripts/plan-hardening-commits.sh --fail-on-manual` 没有待分组路径。
-- 运行 `./scripts/release-readiness.sh`，确认提交标题、临时 `fixup!` / `squash!` 提交、hardening 验证证据、发布文档命令、安全策略、Dependabot 基线、CI/Release workflow 基线、Makefile 核心本地门禁目标基线、torture workflow 基线、Issue 表单安全提示和 community health 文件均通过检查。
+- 运行 `./scripts/release-readiness.sh`，确认提交标题、临时 `fixup!` / `squash!` 提交、hardening 验证证据、发布文档命令、公网部署复核命令、安全策略、Dependabot 基线、CI/Release workflow 基线、Makefile 核心本地门禁目标基线、torture workflow 基线、Issue 表单安全提示和 community health 文件均通过检查。
 - 创建并推送 tag 后，确认 Release workflow 成功。
 - 发布后运行 release artifact verifier 并记录结果。
