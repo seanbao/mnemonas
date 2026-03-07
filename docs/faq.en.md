@@ -186,13 +186,15 @@ Use the Web UI trash and version history:
 
 API example:
 
+The `path` query value should be URL-encoded in copyable shell or browser examples. For example, `/path/to/file` is sent as `%2Fpath%2Fto%2Ffile`.
+
 ```bash
 curl -H "Authorization: Bearer <access-token>" \
   http://localhost:8080/api/v1/versions/path/to/file
 
 curl -X POST \
   -H "Authorization: Bearer <access-token>" \
-  "http://localhost:8080/api/v1/versions/<hash>/restore?path=/path/to/file"
+  "http://localhost:8080/api/v1/versions/<hash>/restore?path=%2Fpath%2Fto%2Ffile"
 ```
 
 ### How does deduplication work?

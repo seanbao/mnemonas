@@ -668,7 +668,7 @@ POST /api/v1/versions/{hash}/restore
 **Query parameters**:
 - `path`: file path (required, at most once)
 
-The `path` value must identify a non-root file path. Root or root-equivalent values return `400 Bad Request` with `invalid path`.
+The `path` value must identify a non-root file path. Root or root-equivalent values return `400 Bad Request` with `invalid path`. Copyable shell or browser examples should URL-encode the query value. For example, `/documents/report.txt` is sent as `%2Fdocuments%2Freport.txt`.
 
 When the version content has already been restored but final workspace metadata persistence fails, the API still returns `200 OK` with `Warning: 199 MnemoNAS "workspace mutation persistence incomplete"` and the response `message` set to `version restored with persistence warning`.
 
@@ -679,7 +679,7 @@ Example request:
 ```bash
 curl -X POST \
   -H "Authorization: Bearer <access-token>" \
-  "http://localhost:8080/api/v1/versions/<hash>/restore?path=/documents/report.txt"
+  "http://localhost:8080/api/v1/versions/<hash>/restore?path=%2Fdocuments%2Freport.txt"
 ```
 
 Example response:
@@ -883,13 +883,14 @@ Favorite paths must normalize to a non-root absolute path:
 - Empty values and the root path are rejected with `400 Bad Request` and `MISSING_PATH`.
 - Values containing standalone `.` or `..` path segments are rejected with `400 Bad Request` and `INVALID_PATH`.
 - The single-path check endpoint accepts the `path` query parameter at most once.
+- The `path` query value should be URL-encoded in copyable URLs. For example, `/documents/file.pdf` is sent as `%2Fdocuments%2Ffile.pdf`.
 - This validation runs before non-admin `home_dir` authorization.
 
 | Method | Path | Description |
 | --- | --- | --- |
 | `GET` | `/api/v1/favorites` | List favorites |
 | `POST` | `/api/v1/favorites` | Add favorite |
-| `GET` | `/api/v1/favorites/check?path=/documents/file.pdf` | Check one path |
+| `GET` | `/api/v1/favorites/check?path=%2Fdocuments%2Ffile.pdf` | Check one path |
 | `POST` | `/api/v1/favorites/check-batch` | Check multiple paths |
 | `DELETE` | `/api/v1/favorites/{path}` | Remove favorite |
 | `PATCH` | `/api/v1/favorites/{path}` | Update note |

@@ -135,13 +135,15 @@ max_age = "2160h"
 
 Version APIs:
 
+The restore URL `path` query value should be encoded in copyable examples. For example, `/documents/report.docx` is sent as `%2Fdocuments%2Freport.docx`.
+
 ```bash
 curl -H "Authorization: Bearer <access-token>" \
   http://localhost:8080/api/v1/versions/documents/report.docx
 
 curl -X POST \
   -H "Authorization: Bearer <access-token>" \
-  "http://localhost:8080/api/v1/versions/abc123.../restore?path=/documents/report.docx"
+  "http://localhost:8080/api/v1/versions/abc123.../restore?path=%2Fdocuments%2Freport.docx"
 ```
 
 ## Comparison with Traditional NAS
