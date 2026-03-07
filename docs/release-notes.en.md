@@ -37,6 +37,7 @@ This release candidate focuses on improving MnemoNAS stability, public-access sa
 - Go test entry points now keep a 20-minute package timeout so heavy race packages are not interrupted by Go's default 10-minute timeout during full branch validation.
 - Documentation checks reject copyable raw `?path=/...` path queries in API examples, requiring restore and favorite-check `path` query examples to use `%2F...` encoding.
 - Documentation checks require the security hardening guide's public-deployment checklist to retain the initial-password, WebDAV authentication, doctor, public firewall, anonymous WebDAV, direct-backend, and dataplane exposure review items.
+- Documentation checks require the backup guide to retain restore-drill commands, 30-day drill reminders, failure categories, retained drill artifacts, restore-summary export, and the guidance that backups are not proven until restored, preventing recovery-usability documentation from regressing.
 - Storage and configuration documentation clarify that the FastCDC API is a Rust dataplane capability, while current version history still uses whole-object CAS snapshots and does not reference-count CDC chunks; documentation checks reject overclaims that imply block-level version deduplication is enabled.
 - Streamlined and synchronized Chinese and English documentation, including deployment, configuration, FAQ, roadmap, security, hardening progress, and pre-release review entry points.
 
