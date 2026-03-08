@@ -6,6 +6,10 @@ type BatchRestoreRequestItem = {
   include_config?: boolean
 }
 
+type BatchRestoreRouteOptions = {
+  restoreMode?: 'success' | 'preflight-failure'
+}
+
 function backupRun(jobId: string) {
   return {
     id: `${jobId}-run-20260509T020304Z`,
@@ -131,7 +135,7 @@ export async function routeBackupJobs(page: Page, jobs = defaultBackupJobs) {
   })
 }
 
-export async function routeBatchBackupRestore(page: Page) {
+export async function routeBatchBackupRestore(page: Page, options: BatchRestoreRouteOptions = {}) {
   await page.route(/\/api\/v1\/maintenance\/backups\/batch-restore-preview$/, async (route) => {
     const body = route.request().postDataJSON() as { items?: BatchRestoreRequestItem[] }
     const items = body.items ?? []
@@ -191,6 +195,39 @@ export async function routeBatchBackupRestore(page: Page) {
   await page.route(/\/api\/v1\/maintenance\/backups\/batch-restore$/, async (route) => {
     const body = route.request().postDataJSON() as { items?: BatchRestoreRequestItem[] }
     const items = body.items ?? []
+    if (options.restoreMode === 'preflight-failure') {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          success: true,
+          message: 'batch restore failed before writes',
+          data: {
+            id: 'batch-restore-20260509T040000Z',
+            status: 'failed',
+            started_at: '2026-05-09T04:00:00Z',
+            finished_at: '2026-05-09T04:00:01Z',
+            duration_ms: 1000,
+            total_files: 0,
+            verified_bytes: 0,
+            warning: true,
+            error_message: 'all batch restore items failed',
+            warnings: ['batch restore preflight failed before writes; no target data was written'],
+            items: items.map((item, index) => ({
+              index,
+              job_id: item.job_id,
+              target_path: item.target_path,
+              include_config: item.include_config ?? false,
+              status: 'failed',
+              error_message: 'batch restore preflight failed before this item started',
+              warnings: [],
+            })),
+          },
+        }),
+      })
+      return
+    }
+
     await route.fulfill({
       status: 200,
       contentType: 'application/json',
