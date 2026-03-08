@@ -5,7 +5,6 @@ import { routeBackupJobs, routeBatchBackupRestore } from './helpers/backups'
 test.describe('备份与维护页面', () => {
   test.beforeEach(async ({ page }) => {
     await routeBackupJobs(page)
-    await routeBatchBackupRestore(page)
     await ensureAuthenticatedAt(page, '/maintenance')
   })
 
@@ -88,6 +87,8 @@ test.describe('备份与维护页面', () => {
   })
 
   test('批量恢复完成后应显示可复制恢复记录入口', async ({ page }) => {
+    await routeBatchBackupRestore(page)
+
     await page.getByRole('button', { name: '批量恢复' }).click()
     await page.getByLabel('选择 外置硬盘备份').click()
 
@@ -98,6 +99,27 @@ test.describe('备份与维护页面', () => {
     await page.getByRole('button', { name: '开始批量恢复' }).click()
     const dialog = page.getByRole('dialog')
     await expect(dialog.getByText('批量恢复已完成', { exact: true })).toBeVisible()
+    await expect(dialog.getByRole('button', { name: '复制批量恢复记录' })).toBeVisible()
+  })
+
+  test('批量恢复预检失败后应显示未写入和处置建议', async ({ page }) => {
+    await routeBatchBackupRestore(page, { restoreMode: 'preflight-failure' })
+
+    await page.getByRole('button', { name: '批量恢复' }).click()
+    await page.getByLabel('选择 外置硬盘备份').click()
+
+    await page.getByRole('button', { name: '生成批量预览' }).click()
+    await expect(page.getByText('批量预览结果')).toBeVisible()
+    await expect(page.getByLabel('批量恢复流程进度').getByText('预览通过，可开始批量恢复', { exact: true })).toBeVisible()
+
+    await page.getByRole('button', { name: '开始批量恢复' }).click()
+    const dialog = page.getByRole('dialog')
+    await expect(dialog.getByText('批量恢复失败', { exact: true }).first()).toBeVisible()
+    await expect(dialog.getByLabel('批量恢复流程进度').getByText('批量恢复失败，未完成的项目需处理', { exact: true })).toBeVisible()
+    await expect(dialog.getByText('所有批量恢复项目均失败')).toBeVisible()
+    await expect(dialog.getByText('批量恢复预检未通过，未写入任何目标数据')).toBeVisible()
+    await expect(dialog.getByText('批量恢复预检未通过，该项目未开始写入')).toBeVisible()
+    await expect(dialog.getByText('预检拦截未写入：处理失败预检项后重新生成批量预览。', { exact: true })).toBeVisible()
     await expect(dialog.getByRole('button', { name: '复制批量恢复记录' })).toBeVisible()
   })
 })
