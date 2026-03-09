@@ -56,7 +56,7 @@ Release workflow 预期生成以下产物：
 
 当前硬化分支已有以下验证证据；最终发布前应以最新 tag、Release workflow 结果和必要的环境验证为准：
 
-最近本地完整验证快照：验证目标 `7186d66aa799`，`GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master` 通过，覆盖此前路线图、WebDAV 文档、CDC 文档边界、中文可见文案、release-readiness 基线、社区协作入口、文档契约、备份恢复演练指南文档契约和 Go 测试超时门禁增量，并覆盖 release-readiness 对发布清单和双语 release notes 保留 `mnemonas-doctor --public-domain`、外部网络 `public-go-live-smoke.sh` 和 `cloud-firewall-checklist` 的公网部署复核入口门禁；同时覆盖 `make check`、依赖安全扫描、示例配置、public-access 模板、proto 再生成稳定性、Rust fmt/test/clippy、proto-gen fmt/test/clippy、前端 lint/typecheck/unit/build、Playwright 375 个 E2E 用例、Docker build、Docker image `sha256:fa5f508ca6956a5a59579249d69b0a63480257481923a42618a259e2c893b2d0` 和 Docker smoke。Docker smoke 使用 Docker 自动分配的 loopback 端口 `http://127.0.0.1:32889`。
+最近本地完整验证快照：验证目标 `0f8880119223`，`GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master` 通过，覆盖此前路线图、WebDAV 文档、CDC 文档边界、中文可见文案、release-readiness 基线、社区协作入口、文档契约、备份恢复演练指南文档契约、Go 测试超时门禁和批量恢复预检失败处置 E2E 增量，并覆盖 release-readiness 对发布清单和双语 release notes 保留 `mnemonas-doctor --public-domain`、外部网络 `public-go-live-smoke.sh` 和 `cloud-firewall-checklist` 的公网部署复核入口门禁；同时覆盖 `make check`、依赖安全扫描、示例配置、public-access 模板、proto 再生成稳定性、Rust fmt/test/clippy、proto-gen fmt/test/clippy、前端 lint/typecheck/unit/build、Playwright 377 个 E2E 用例、Docker build、Docker image `sha256:2a684c38e3aa0f0defe47a8feeea2a31a141404c8b3ee23ed67aeff896a64c3d` 和 Docker smoke。Docker smoke 使用 Docker 自动分配的 loopback 端口 `http://127.0.0.1:32890`。
 
 - `GOTOOLCHAIN=local ./scripts/verify-changed.sh`
 - `GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master`
@@ -77,7 +77,7 @@ Release workflow 预期生成以下产物：
 - Docker smoke safety test：`scripts/test-docker-smoke.sh`
 - WebDAV curl smoke safety test：`scripts/test-webdav-client-smoke.sh`
 - Release workflow 增量验证：`make workflows-check`、`make scripts-check`、`./scripts/check-secret-leaks.sh`、`make toolchains-check`、`git diff --check`
-- Playwright E2E：`375 passed`
+- Playwright E2E：`377 passed`
 - 前端单测：`3111 passed`
 - Docker build 和 `scripts/docker-smoke.sh`
 
