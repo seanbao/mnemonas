@@ -494,6 +494,12 @@ check_release_notes() {
 			require_file_contains "$path" "$expected"
 		done
 	done
+	require_file_contains "docs/release-notes.md" "L1 私有文件云盘"
+	require_file_contains "docs/release-notes.md" "不应作为重要数据的唯一长期副本"
+	require_file_contains "docs/release-notes.md" "外部备份"
+	require_file_contains "docs/release-notes.en.md" "L1 private file cloud"
+	require_file_contains "docs/release-notes.en.md" "not as the only long-term copy of important data"
+	require_file_contains "docs/release-notes.en.md" "external backups"
 
 	print_kv "release-notes" "release-note validation target and verification commands present"
 }
