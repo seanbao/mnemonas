@@ -56,7 +56,7 @@ Release workflow 预期生成以下产物：
 
 当前硬化分支已有以下验证证据；最终发布前应以最新 tag、Release workflow 结果和必要的环境验证为准：
 
-最近本地完整验证快照：验证目标 `0cc51aac4f3c`，`GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master` 通过，覆盖此前路线图、WebDAV 文档、CDC 文档边界、中文可见文案、release-readiness 基线、社区协作入口、文档契约、备份恢复演练指南文档契约、Go 测试超时门禁、批量恢复预检失败处置 E2E 和 release notes 候选版本边界门禁增量，并覆盖 release-readiness 对发布清单和双语 release notes 保留 `mnemonas-doctor --public-domain`、外部网络 `public-go-live-smoke.sh`、`cloud-firewall-checklist`、L1/L1+ 候选定位、非唯一长期副本和外部备份提示的门禁；同时覆盖 `make check`、依赖安全扫描、示例配置、public-access 模板、proto 再生成稳定性、Rust fmt/test/clippy、proto-gen fmt/test/clippy、前端 lint/typecheck/unit/build、Playwright 377 个 E2E 用例、Docker build、Docker image `sha256:3156783a888170823db3883c4badcd45271d3be9232f6acb1d6375f368dc1def` 和 Docker smoke。Docker smoke 使用 Docker 自动分配的 loopback 端口 `http://127.0.0.1:32891`。
+最近本地完整验证快照：验证目标 `6618a03c1fc5`，`GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master` 通过，覆盖此前路线图、WebDAV 文档、CDC 文档边界、中文可见文案、release-readiness 基线、社区协作入口、文档契约、备份恢复演练指南文档契约、Go 测试超时门禁、批量恢复预检失败处置 E2E 和 release notes 候选版本边界门禁和公网 go-live 后端端口 TCP 可达性失败判定增量，并覆盖 release-readiness 对发布清单和双语 release notes 保留 `mnemonas-doctor --public-domain`、外部网络 `public-go-live-smoke.sh`、`cloud-firewall-checklist`、L1/L1+ 候选定位、非唯一长期副本和外部备份提示的门禁；同时覆盖 `make check`、依赖安全扫描、示例配置、public-access 模板、proto 再生成稳定性、Rust fmt/test/clippy、proto-gen fmt/test/clippy、前端 lint/typecheck/unit/build、Playwright 377 个 E2E 用例、Docker build、Docker image `sha256:765cd7875897114e802d5054176639c2aeb020629204c58a38f12c686197d77a` 和 Docker smoke。Docker smoke 使用 Docker 自动分配的 loopback 端口 `http://127.0.0.1:32892`。
 
 - `GOTOOLCHAIN=local ./scripts/verify-changed.sh`
 - `GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master`
