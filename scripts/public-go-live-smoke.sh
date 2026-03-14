@@ -3,6 +3,7 @@ set -euo pipefail
 
 SCRIPT_NAME="$(basename "$0")"
 CURL_BIN="${CURL_BIN:-curl}"
+TIMEOUT_BIN="${TIMEOUT_BIN:-timeout}"
 CURL_CONNECT_TIMEOUT="${CURL_CONNECT_TIMEOUT:-3}"
 CURL_MAX_TIME="${CURL_MAX_TIME:-10}"
 PUBLIC_SMOKE_BACKEND_TARGETS="${PUBLIC_SMOKE_BACKEND_TARGETS:-8080:/health 9090:/ 9091:/health}"
@@ -29,6 +30,7 @@ Usage:
 
 Environment:
   CURL_BIN                       Optional curl binary path.
+  TIMEOUT_BIN                    Optional timeout binary path for TCP reachability checks; default timeout.
   CURL_CONNECT_TIMEOUT           Optional curl connection timeout in seconds; default 3.
   CURL_MAX_TIME                  Optional curl per-request timeout in seconds; default 10.
   PUBLIC_SMOKE_BACKEND_TARGETS   Optional space-separated port:path checks; paths must be unambiguous absolute paths; must not be blank; default "8080:/health 9090:/ 9091:/health".
@@ -44,6 +46,9 @@ cleanup() {
 require_command() {
     if ! command -v "$CURL_BIN" >/dev/null 2>&1; then
         fail "curl is required; set CURL_BIN to a compatible curl binary"
+    fi
+    if ! command -v "$TIMEOUT_BIN" >/dev/null 2>&1; then
+        fail "timeout is required for backend TCP reachability checks; set TIMEOUT_BIN to a compatible timeout binary"
     fi
 }
 
@@ -171,6 +176,20 @@ curl_head_status_and_redirect() {
         "$url"
 }
 
+tcp_connect_succeeds() {
+    local domain="$1"
+    local port="$2"
+
+    # The inner Bash receives the domain and port as positional arguments.
+    # shellcheck disable=SC2016
+    "$TIMEOUT_BIN" "$CURL_CONNECT_TIMEOUT" bash -c '
+        set -euo pipefail
+        exec 3<>"/dev/tcp/$1/$2"
+        exec 3<&-
+        exec 3>&-
+    ' bash "$domain" "$port" >/dev/null 2>&1
+}
+
 https_redirect_targets_domain() {
     local domain="$1"
     local redirect_url="$2"
@@ -229,13 +248,17 @@ check_backend_target_private() {
     local url="http://$domain:$port$request_path"
     local status
 
+    if tcp_connect_succeeds "$domain" "$port"; then
+        fail "backend target $domain:$port accepted a TCP connection; it must fail to connect or time out from the public internet"
+    fi
+
     if status="$(curl_head_status "$url" "$tmp_dir/backend-$port.out")"; then
         if [[ "$status" =~ ^[1-9][0-9][0-9]$ ]]; then
             fail "backend target $url returned HTTP $status; it must fail to connect or time out from the public internet"
         fi
     fi
 
-    log_ok "backend target $url did not return an HTTP status"
+    log_ok "backend target $url was not reachable over TCP and did not return an HTTP status"
 }
 
 run_smoke() {
