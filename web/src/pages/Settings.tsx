@@ -1966,6 +1966,50 @@ function sharePolicyRuleHasPrincipalConstraint(rule: SharePolicyRule): boolean {
   )
 }
 
+function sharePolicyRuleMaxExpiresMilliseconds(rule: SharePolicyRule): number | null {
+  const value = rule.max_expires_in?.trim()
+  if (!value) {
+    return null
+  }
+  return durationStringToMilliseconds(value)
+}
+
+function sharePolicyRuleMaxAccessLimit(rule: SharePolicyRule): number | null {
+  return rule.max_access && rule.max_access > 0 ? rule.max_access : null
+}
+
+function normalizedSharePolicyPrincipalSet(values: string[] | undefined): Set<string> {
+  return new Set((values ?? [])
+    .map((value) => value.trim().toLowerCase())
+    .filter(Boolean))
+}
+
+function sharePolicyRulePrincipalScopeWithinAncestor(rule: SharePolicyRule, ancestor: SharePolicyRule): boolean {
+  const principalFields: Array<keyof Pick<SharePolicyRule, 'allowed_users' | 'allowed_groups' | 'allowed_roles'>> = [
+    'allowed_users',
+    'allowed_groups',
+    'allowed_roles',
+  ]
+
+  for (const field of principalFields) {
+    const ruleValues = normalizedSharePolicyPrincipalSet(rule[field])
+    if (ruleValues.size === 0) {
+      continue
+    }
+    const ancestorValues = normalizedSharePolicyPrincipalSet(ancestor[field])
+    if (ancestorValues.size === 0) {
+      return false
+    }
+    for (const value of ruleValues) {
+      if (!ancestorValues.has(value)) {
+        return false
+      }
+    }
+  }
+
+  return true
+}
+
 const sharePolicyCleanupConstraintChecks: Array<{
   key: string
   label: string
@@ -2035,6 +2079,55 @@ function buildSharePolicyCleanupInsights(rules: SharePolicyRule[]): SharePolicyC
           tone: 'warning',
         })
       }
+    }
+
+    const expiresAncestor = ancestors.find(sharePolicyRuleHasExpiresConstraint)
+    const ruleExpiresMilliseconds = sharePolicyRuleMaxExpiresMilliseconds(rule)
+    const ancestorExpiresMilliseconds = expiresAncestor
+      ? sharePolicyRuleMaxExpiresMilliseconds(expiresAncestor)
+      : null
+    if (
+      expiresAncestor &&
+      rule.max_expires_in &&
+      expiresAncestor.max_expires_in &&
+      ruleExpiresMilliseconds !== null &&
+      ancestorExpiresMilliseconds !== null &&
+      ruleExpiresMilliseconds > ancestorExpiresMilliseconds
+    ) {
+      insights.push({
+        key: `weaker-expires:${rule.path}:${expiresAncestor.path}`,
+        message: `${rule.path} 的最长有效期 ${rule.max_expires_in} 长于上级 ${expiresAncestor.path} 的 ${expiresAncestor.max_expires_in}。`,
+        tone: 'warning',
+      })
+    }
+
+    const accessAncestor = ancestors.find(sharePolicyRuleHasAccessConstraint)
+    const ruleMaxAccess = sharePolicyRuleMaxAccessLimit(rule)
+    const ancestorMaxAccess = accessAncestor ? sharePolicyRuleMaxAccessLimit(accessAncestor) : null
+    if (
+      accessAncestor &&
+      ruleMaxAccess !== null &&
+      ancestorMaxAccess !== null &&
+      ruleMaxAccess > ancestorMaxAccess
+    ) {
+      insights.push({
+        key: `weaker-access:${rule.path}:${accessAncestor.path}`,
+        message: `${rule.path} 的访问次数 ${ruleMaxAccess} 高于上级 ${accessAncestor.path} 的 ${ancestorMaxAccess}。`,
+        tone: 'warning',
+      })
+    }
+
+    const principalAncestor = ancestors.find(sharePolicyRuleHasPrincipalConstraint)
+    if (
+      principalAncestor &&
+      sharePolicyRuleHasPrincipalConstraint(rule) &&
+      !sharePolicyRulePrincipalScopeWithinAncestor(rule, principalAncestor)
+    ) {
+      insights.push({
+        key: `weaker-principal:${rule.path}:${principalAncestor.path}`,
+        message: `${rule.path} 的允许创建者范围不在上级 ${principalAncestor.path} 的范围内；请确认是否需要放宽共享创建范围。`,
+        tone: 'warning',
+      })
     }
   }
 

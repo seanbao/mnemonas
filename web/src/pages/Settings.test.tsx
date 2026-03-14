@@ -3654,6 +3654,48 @@ describe('SettingsPage', () => {
       expect(coverage.getByText('/Archive 与 /Family 的约束完全相同，可复核是否改为共同上级策略或保留路径差异。')).toBeTruthy()
     })
 
+    it('highlights descendant share policies that loosen ancestor limits', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockGetSettings.mockResolvedValueOnce({
+        ...defaultSettingsResponse,
+        data: {
+          ...defaultSettingsResponse.data,
+          share: {
+            ...defaultSettingsResponse.data.share,
+            enabled: true,
+            base_url: 'https://share.example.com',
+            default_expires_in: '168h',
+            default_max_access: 10,
+            policy_rules: [
+              {
+                path: '/Family',
+                require_password: true,
+                max_expires_in: '24h',
+                max_access: 10,
+                allowed_groups: ['family'],
+              },
+              {
+                path: '/Family/Public',
+                require_password: true,
+                max_expires_in: '72h',
+                max_access: 25,
+                allowed_groups: ['family', 'guests'],
+              },
+            ],
+          },
+        },
+      })
+      render(<SettingsPage />)
+
+      await openTab(user, '分享')
+
+      const coverage = within(await screen.findByLabelText('分享策略覆盖摘要'))
+      expect(coverage.getByText((_content, element) => element?.textContent === '整理项 3')).toBeTruthy()
+      expect(coverage.getByText('/Family/Public 的最长有效期 72h 长于上级 /Family 的 24h。')).toBeTruthy()
+      expect(coverage.getByText('/Family/Public 的访问次数 25 高于上级 /Family 的 10。')).toBeTruthy()
+      expect(coverage.getByText('/Family/Public 的允许创建者范围不在上级 /Family 的范围内；请确认是否需要放宽共享创建范围。')).toBeTruthy()
+    })
+
     it('rejects invalid share default policy values before saving', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
       render(<SettingsPage />)
