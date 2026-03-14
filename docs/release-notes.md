@@ -70,6 +70,7 @@ Release workflow 预期生成以下产物：
 - `./scripts/test-release-tag.sh`
 - `./scripts/test-release-package.sh`
 - `./scripts/test-release-artifacts.sh`
+- Public go-live TCP reachability test：`scripts/test-public-go-live-smoke.sh`
 - Release artifact dash-prefixed directory test：`scripts/test-release-artifacts.sh`
 - Docker quickstart safety test：`scripts/test-docker-quickstart.sh`
 - Docker preflight safety test：`scripts/test-docker-preflight.sh`

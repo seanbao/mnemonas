@@ -44,7 +44,7 @@ sudo mnemonas-doctor --public-domain nas.example.com
 ./scripts/public-go-live-smoke.sh nas.example.com
 ```
 
-该脚本会把公网 HTTPS health、同域 HTTP 到 HTTPS 跳转，以及 `8080/9090/9091` 后端端口不可达检查合并为一次 smoke。无法运行仓库脚本时，可从外部网络手动执行：
+该脚本会把公网 HTTPS health、同域 HTTP 到 HTTPS 跳转，以及 `8080/9090/9091` 后端端口 TCP 不可达且无 HTTP 状态响应检查合并为一次 smoke。无法运行仓库脚本时，可从外部网络手动执行：
 
 需要检查自定义后端端口时，可设置 `PUBLIC_SMOKE_BACKEND_TARGETS='18080:/health 19090:/'`。每个条目使用 `port:path`，其中 path 必须是不含 query、fragment、userinfo、反斜杠、编码斜杠、编码反斜杠、空路径段或 `.`/`..` 路径段的明确绝对路径。
 
@@ -58,10 +58,11 @@ curl --connect-timeout 3 --max-time 10 http://nas.example.com:9091/health
 预期结果：
 
 - `https://nas.example.com/health` 可访问。
-- `http://nas.example.com:8080/health` 连接失败或超时，不应返回任何 HTTP 状态码。
-- `http://nas.example.com:9090/` 连接失败或超时，不应返回任何 HTTP 状态码。
-- `http://nas.example.com:9091/health` 连接失败或超时，不应返回任何 HTTP 状态码。
-- 如果使用自定义后端端口，对应端口也应连接失败或超时，不应返回任何 HTTP 状态码。
+- `http://nas.example.com:8080/health` 连接失败或超时，不应建立 TCP 连接，也不应返回任何 HTTP 状态码。
+- `http://nas.example.com:9090/` 连接失败或超时，不应建立 TCP 连接，也不应返回任何 HTTP 状态码。
+- `http://nas.example.com:9091/health` 连接失败或超时，不应建立 TCP 连接，也不应返回任何 HTTP 状态码。
+- 如果使用自定义后端端口，对应端口也应连接失败或超时，不应建立 TCP 连接，也不应返回任何 HTTP 状态码。
+- 只要 TCP 可连接，即使没有 HTTP 状态码，也表示后端端口仍可从公网访问。
 
 ## 常见错误
 
