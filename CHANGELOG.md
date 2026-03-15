@@ -196,6 +196,7 @@
 - `scripts/release-readiness.sh` 会拒绝不是当前 HEAD 祖先的 base ref，避免用旁支范围生成误导性的发布就绪摘要
 - `scripts/release-readiness.sh` 会检查当前发布分支的本地提交标题是否符合 Conventional Commits，并拒绝遗留的 `fixup!` / `squash!` 临时提交
 - `scripts/public-go-live-smoke.sh` 会先检查后端端口 TCP 可达性；`8080/9090/9091` 或自定义后端端口即使不返回 HTTP 状态，只要从外部网络可建立 TCP 连接就会失败
+- `scripts/public-go-live-smoke.sh` 的 TCP 探测会按 `timeout`、`gtimeout` 顺序自动选择 GNU timeout 兼容命令，并支持通过 `TIMEOUT_BIN` 指定兼容替代命令
 - `make test`、`make quick-check`、`make coverage`、torture 测试和 hardening 分组规划命令会使用 20 分钟 Go 包级超时，避免重负载 race 包被 Go 默认 10 分钟超时中断
 - `scripts/check-doc-links.sh` 会要求备份指南保留恢复演练命令、30 天演练提醒、失败分类、保留演练产物、恢复摘要导出和“未恢复过不算验证”的说明，避免恢复可用性文档退化
 - WebDAV COPY/MOVE 目标路径回归覆盖，验证绝对 path-reference 目标，并拒绝包括 `dav/path` 在内的裸相对目标
