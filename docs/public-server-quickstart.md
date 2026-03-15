@@ -122,6 +122,8 @@ curl -I https://nas.example.com/health
 ./scripts/public-go-live-smoke.sh nas.example.com
 ```
 
+脚本的 TCP 探测需要 GNU `timeout` 兼容命令。Linux 通常提供 `timeout`；macOS 可使用 coreutils 提供的 `gtimeout`。脚本会按 `timeout`、`gtimeout` 顺序自动选择，也可通过 `TIMEOUT_BIN` 指定兼容命令。
+
 该脚本会检查公网 HTTPS health、HTTP 到同一域名 HTTPS 的跳转，并确认 `8080/9090/9091` 从公网无法建立 TCP 连接且不返回任何 HTTP 状态码。无法运行仓库脚本时，可手动执行后续等价命令。
 
 需要检查自定义后端端口时，可设置 `PUBLIC_SMOKE_BACKEND_TARGETS='18080:/health 19090:/'`。每个条目使用 `port:path`，其中 path 必须是不含 query、fragment、userinfo、反斜杠、编码斜杠、编码反斜杠、空路径段或 `.`/`..` 路径段的明确绝对路径。
