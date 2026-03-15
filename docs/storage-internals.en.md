@@ -153,11 +153,12 @@ curl -X POST \
 | Current files | Native files | Native files | CAS objects |
 | Version storage | CAS objects | Filesystem snapshots | CAS objects |
 | Current-file readability | Directly readable | Directly readable | Needs special software |
-| Deduplication | BLAKE3 whole-object versions; CDC file APIs available in dataplane | Filesystem dependent | Core feature |
+| Deduplication | BLAKE3 whole-object versions; CDC file APIs are available in dataplane, but current version history does not reference-count CDC chunks | Filesystem dependent | Core feature |
 | Metadata | SQLite | Filesystem and app metadata | JSON/DB |
 | Complexity | Medium | Low for simple file sharing | High |
 
 The hybrid approach trades some purity for recoverability and user inspection.
+Current version history uses whole-object CAS snapshots; the FastCDC API is a dataplane capability and does not mean chunk-level version deduplication is enabled.
 
 ## Filesystem Compatibility
 
