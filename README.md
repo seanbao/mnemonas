@@ -22,7 +22,7 @@ MnemoNAS 是一个开源的自托管 NAS 系统，面向日常文件管理。
 - **Web 界面**：桌面端和移动端均可使用，界面克制清晰，避免传统运维后台式堆砌
 - **部署路径**：提供 Docker Compose 和 Linux/systemd 部署方式
 - **维护与诊断**：健康检查、Scrub、GC 和诊断包用于发现并定位数据问题
-- **Web 与 WebDAV 覆盖**：浏览器管理界面和常见 WebDAV 客户端均可访问，不只是文件浏览器
+- **Web 与 WebDAV 覆盖**：浏览器管理界面和 WebDAV 协议入口覆盖主要访问路径，客户端兼容状态按矩阵持续跟踪
 
 ### 功能列表
 
@@ -171,9 +171,9 @@ cp mnemonas.example.toml ~/.mnemonas/config.toml
 
 ### 客户端连接
 
-MnemoNAS 通过 WebDAV 协议提供文件访问，面向常见桌面、移动端和命令行客户端：
+MnemoNAS 通过 WebDAV 协议提供文件访问。下表是常见桌面、移动端和命令行客户端的连接入口；兼容状态以 [WebDAV 兼容性](docs/webdav-compatibility.md) 矩阵为准。`rclone` 已有可选真实客户端 E2E 覆盖，Finder、Windows 文件资源管理器和移动端客户端仍按矩阵继续跟踪。
 
-| 平台 | 推荐客户端 | 连接地址 |
+| 平台 | 常见客户端 | 连接地址 |
 | --- | --- | --- |
 | macOS | Finder | `http://localhost:8080/dav` |
 | Windows | 文件资源管理器 | `http://localhost:8080/dav` |
@@ -190,7 +190,7 @@ MnemoNAS 通过 WebDAV 协议提供文件访问，面向常见桌面、移动端
 自定义 Basic 密码不会回显，应以配置文件或密码管理器记录为准。
 自动生成的 Basic Auth 密码也保存在 `<storage.root>/secrets.json`。
 
-详见 [挂载指南](docs/mounting-guide.md)。
+挂载步骤详见 [挂载指南](docs/mounting-guide.md)。
 
 ## 项目结构
 

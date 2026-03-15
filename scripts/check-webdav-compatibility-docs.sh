@@ -101,6 +101,76 @@ const docs = [
   },
 ]
 
+const readmeClientSummaries = [
+  {
+    file: process.env.WEBDAV_README || 'README.md',
+    topRequiredText: [
+      'WebDAV 协议入口覆盖主要访问路径',
+      '客户端兼容状态按矩阵持续跟踪',
+    ],
+    topForbiddenText: [
+      '常见 WebDAV 客户端均可访问',
+    ],
+    sectionStart: '### 客户端连接',
+    sectionEnd: '## 项目结构',
+    requiredText: [
+      '[WebDAV 兼容性](docs/webdav-compatibility.md)',
+      '兼容状态',
+      '真实客户端 E2E 覆盖',
+      '仍按矩阵继续跟踪',
+      '| 平台 | 常见客户端 | 连接地址 |',
+    ],
+    forbiddenText: [
+      '| 平台 | 推荐客户端 | 连接地址 |',
+    ],
+  },
+  {
+    file: process.env.WEBDAV_README_EN || 'README.en.md',
+    topRequiredText: [
+      'WebDAV protocol access cover the main access paths',
+      'client compatibility tracked in the matrix',
+    ],
+    topForbiddenText: [
+      'common WebDAV clients are both supported',
+    ],
+    sectionStart: '### WebDAV Clients',
+    sectionEnd: '## Repository Layout',
+    requiredText: [
+      '[WebDAV Compatibility](docs/webdav-compatibility.en.md)',
+      'compatibility status',
+      'real-client E2E coverage',
+      'remain tracked by the matrix',
+      '| Platform | Common Client | URL |',
+    ],
+    forbiddenText: [
+      '| Platform | Recommended Client | URL |',
+    ],
+  },
+]
+
+const mountingGuides = [
+  {
+    file: process.env.WEBDAV_MOUNTING_GUIDE || 'docs/mounting-guide.md',
+    sectionEnd: '## 连接信息',
+    requiredText: [
+      '[WebDAV 客户端兼容性](webdav-compatibility.md)',
+      '实际兼容状态',
+      '真实客户端 E2E 覆盖',
+      '仍按矩阵跟踪',
+    ],
+  },
+  {
+    file: process.env.WEBDAV_MOUNTING_GUIDE_EN || 'docs/mounting-guide.en.md',
+    sectionEnd: '## Connection Information',
+    requiredText: [
+      '[WebDAV compatibility](webdav-compatibility.en.md)',
+      'actual compatibility status',
+      'real-client E2E coverage',
+      'remain tracked by the matrix',
+    ],
+  },
+]
+
 const errors = []
 
 function readDoc(file) {
@@ -154,6 +224,54 @@ function checkRequiredText(markdown, doc) {
   }
 }
 
+function checkReadmeClientSummary(readme) {
+  const markdown = readDoc(readme.file)
+  if (markdown === null) {
+    return
+  }
+
+  for (const text of readme.topRequiredText ?? []) {
+    if (!markdown.includes(text)) {
+      errors.push(`${readme.file}: missing required README WebDAV overview text: ${text}`)
+    }
+  }
+  for (const text of readme.topForbiddenText ?? []) {
+    if (markdown.includes(text)) {
+      errors.push(`${readme.file}: avoid overclaiming WebDAV client support in README: ${text}`)
+    }
+  }
+  const section = extractSection(markdown, readme.sectionStart, readme.sectionEnd, readme.file)
+  for (const text of readme.requiredText) {
+    if (!section.includes(text)) {
+      errors.push(`${readme.file}: missing required README WebDAV client-summary text: ${text}`)
+    }
+  }
+  for (const text of readme.forbiddenText) {
+    if (section.includes(text)) {
+      errors.push(`${readme.file}: avoid overclaiming WebDAV client support in README: ${text}`)
+    }
+  }
+}
+
+function checkMountingGuideCompatibilityNote(guide) {
+  const markdown = readDoc(guide.file)
+  if (markdown === null) {
+    return
+  }
+
+  const sectionEnd = markdown.indexOf(guide.sectionEnd)
+  if (sectionEnd === -1) {
+    errors.push(`${guide.file}: missing section ${guide.sectionEnd}`)
+    return
+  }
+  const intro = markdown.slice(0, sectionEnd)
+  for (const text of guide.requiredText) {
+    if (!intro.includes(text)) {
+      errors.push(`${guide.file}: missing required WebDAV mounting-guide compatibility note: ${text}`)
+    }
+  }
+}
+
 function checkMatrixRows(matrixMarkdown, doc) {
   const rows = tableRows(matrixMarkdown)
   const clientRows = rows.filter((cells) => cells.length === 4 && cells[0] !== '客户端' && cells[0] !== 'Client')
@@ -182,6 +300,12 @@ for (const doc of docs) {
   const matrixMarkdown = extractSection(markdown, doc.matrixStart, doc.matrixEnd, doc.file)
   checkMatrixRows(matrixMarkdown, doc)
 }
+for (const readme of readmeClientSummaries) {
+  checkReadmeClientSummary(readme)
+}
+for (const guide of mountingGuides) {
+  checkMountingGuideCompatibilityNote(guide)
+}
 
 if (errors.length > 0) {
   for (const error of errors) {
@@ -190,5 +314,5 @@ if (errors.length > 0) {
   process.exit(1)
 }
 
-console.log('[webdav-compat-docs] checked WebDAV compatibility matrix and validation standard')
+console.log('[webdav-compat-docs] checked WebDAV compatibility matrix, validation standard, README client summary, and mounting guide note')
 NODE
