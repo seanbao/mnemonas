@@ -24,6 +24,26 @@ cleanup() {
     rm -rf "$TMP_ROOT"
 }
 
+make_fake_timeout() {
+    local bin_dir="$1"
+    local name="$2"
+    mkdir -p "$bin_dir"
+    cat > "$bin_dir/$name" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+printf '%s\n' "$*" >> "${PUBLIC_SMOKE_TCP_LOG:-/dev/null}"
+
+port="${@: -1}"
+case " ${PUBLIC_SMOKE_TCP_OPEN_PORTS:-} " in
+    *" $port "*) exit 0 ;;
+esac
+
+exit 124
+EOF
+    chmod +x "$bin_dir/$name"
+}
+
 make_fake_curl() {
     local bin_dir="$1"
     mkdir -p "$bin_dir"
@@ -107,20 +127,16 @@ esac
 EOF
     chmod +x "$bin_dir/curl"
 
-    cat > "$bin_dir/timeout" <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
+    make_fake_timeout "$bin_dir" "timeout"
+}
 
-printf '%s\n' "$*" >> "${PUBLIC_SMOKE_TCP_LOG:-/dev/null}"
+link_runtime_command() {
+    local bin_dir="$1"
+    local command_name="$2"
+    local command_path
 
-port="${@: -1}"
-case " ${PUBLIC_SMOKE_TCP_OPEN_PORTS:-} " in
-    *" $port "*) exit 0 ;;
-esac
-
-exit 124
-EOF
-    chmod +x "$bin_dir/timeout"
+    command_path="$(command -v "$command_name")" || fail "missing runtime command: $command_name"
+    ln -sf "$command_path" "$bin_dir/$command_name"
 }
 
 run_expect_failure() {
@@ -202,6 +218,65 @@ run_invalid_timeout_test() {
         CURL_CONNECT_TIMEOUT=0 \
         bash "$REPO_ROOT/scripts/public-go-live-smoke.sh" "nas.example.com"
     assert_file_contains "$case_dir/out.log" "CURL_CONNECT_TIMEOUT must be a positive integer number of seconds"
+}
+
+run_gtimeout_fallback_test() {
+    local case_dir="$TMP_ROOT/gtimeout-fallback"
+    local fake_bin="$case_dir/bin"
+    local curl_log="$case_dir/curl.log"
+    local tcp_log="$case_dir/tcp.log"
+    mkdir -p "$case_dir"
+    make_fake_curl "$fake_bin"
+    rm -f "$fake_bin/timeout"
+    make_fake_timeout "$fake_bin" "gtimeout"
+    link_runtime_command "$fake_bin" "bash"
+    link_runtime_command "$fake_bin" "basename"
+    link_runtime_command "$fake_bin" "mktemp"
+    link_runtime_command "$fake_bin" "rm"
+
+    env \
+        PATH="$fake_bin" \
+        PUBLIC_SMOKE_CURL_LOG="$curl_log" \
+        PUBLIC_SMOKE_TCP_LOG="$tcp_log" \
+        bash "$REPO_ROOT/scripts/public-go-live-smoke.sh" "nas.example.com" > "$case_dir/out.log" 2>&1
+
+    assert_file_contains "$case_dir/out.log" "public go-live smoke passed for nas.example.com"
+    assert_file_contains "$tcp_log" "nas.example.com 8080"
+    assert_file_contains "$tcp_log" "nas.example.com 9090"
+    assert_file_contains "$tcp_log" "nas.example.com 9091"
+}
+
+run_timeout_override_test() {
+    local case_dir="$TMP_ROOT/timeout-override"
+    local fake_bin="$case_dir/bin"
+    local tcp_log="$case_dir/tcp.log"
+    mkdir -p "$case_dir"
+    make_fake_curl "$fake_bin"
+    make_fake_timeout "$fake_bin" "gtimeout"
+
+    env \
+        PATH="$fake_bin:$PATH" \
+        PUBLIC_SMOKE_CURL_LOG="$case_dir/curl.log" \
+        PUBLIC_SMOKE_TCP_LOG="$tcp_log" \
+        TIMEOUT_BIN=gtimeout \
+        bash "$REPO_ROOT/scripts/public-go-live-smoke.sh" "nas.example.com" > "$case_dir/out.log" 2>&1
+
+    assert_file_contains "$case_dir/out.log" "public go-live smoke passed for nas.example.com"
+    assert_file_contains "$tcp_log" "nas.example.com 8080"
+}
+
+run_missing_timeout_tool_test() {
+    local case_dir="$TMP_ROOT/missing-timeout-tool"
+    local fake_bin="$case_dir/bin"
+    mkdir -p "$case_dir"
+    make_fake_curl "$fake_bin"
+
+    run_expect_failure "$case_dir/out.log" env \
+        PATH="$fake_bin:$PATH" \
+        PUBLIC_SMOKE_CURL_LOG="$case_dir/curl.log" \
+        TIMEOUT_BIN="$case_dir/missing-timeout" \
+        bash "$REPO_ROOT/scripts/public-go-live-smoke.sh" "nas.example.com"
+    assert_file_contains "$case_dir/out.log" "TIMEOUT_BIN must point to a timeout-compatible command"
 }
 
 run_invalid_backend_targets_test() {
@@ -378,6 +453,10 @@ run_docs_contract_test() {
     assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.en.md" "Any successful TCP connection means the backend port is still publicly reachable, even when no HTTP status is returned"
     assert_file_contains "$REPO_ROOT/docs/cloud-firewall-checklist.md" "只要 TCP 可连接，即使没有 HTTP 状态码，也表示后端端口仍可从公网访问"
     assert_file_contains "$REPO_ROOT/docs/cloud-firewall-checklist.en.md" "Any successful TCP connection means the backend port is still publicly reachable, even when no HTTP status is returned"
+    assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.md" "脚本会按 \`timeout\`、\`gtimeout\` 顺序自动选择"
+    assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.en.md" "The script auto-selects \`timeout\` then \`gtimeout\`"
+    assert_file_contains "$REPO_ROOT/docs/cloud-firewall-checklist.md" "脚本会按 \`timeout\`、\`gtimeout\` 顺序自动选择"
+    assert_file_contains "$REPO_ROOT/docs/cloud-firewall-checklist.en.md" "The script auto-selects \`timeout\` then \`gtimeout\`"
     assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.md" "curl --connect-timeout 3 --max-time 10 http://nas.example.com:8080/health"
     assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.en.md" "curl --connect-timeout 3 --max-time 10 http://nas.example.com:8080/health"
     assert_file_contains "$REPO_ROOT/docs/cloud-firewall-checklist.md" "curl --connect-timeout 3 --max-time 10 http://nas.example.com:8080/health"
@@ -390,6 +469,9 @@ mkdir -p "$TMP_ROOT"
 run_success_test
 run_invalid_domain_test
 run_invalid_timeout_test
+run_gtimeout_fallback_test
+run_timeout_override_test
+run_missing_timeout_tool_test
 run_invalid_backend_targets_test
 run_redirect_variant_test
 run_bad_redirect_test

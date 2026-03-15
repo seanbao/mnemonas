@@ -3,7 +3,7 @@ set -euo pipefail
 
 SCRIPT_NAME="$(basename "$0")"
 CURL_BIN="${CURL_BIN:-curl}"
-TIMEOUT_BIN="${TIMEOUT_BIN:-timeout}"
+TIMEOUT_BIN="${TIMEOUT_BIN:-}"
 CURL_CONNECT_TIMEOUT="${CURL_CONNECT_TIMEOUT:-3}"
 CURL_MAX_TIME="${CURL_MAX_TIME:-10}"
 PUBLIC_SMOKE_BACKEND_TARGETS="${PUBLIC_SMOKE_BACKEND_TARGETS:-8080:/health 9090:/ 9091:/health}"
@@ -30,7 +30,7 @@ Usage:
 
 Environment:
   CURL_BIN                       Optional curl binary path.
-  TIMEOUT_BIN                    Optional timeout binary path for TCP reachability checks; default timeout.
+  TIMEOUT_BIN                    Optional timeout wrapper for TCP reachability checks; defaults to timeout, then gtimeout.
   CURL_CONNECT_TIMEOUT           Optional curl connection timeout in seconds; default 3.
   CURL_MAX_TIME                  Optional curl per-request timeout in seconds; default 10.
   PUBLIC_SMOKE_BACKEND_TARGETS   Optional space-separated port:path checks; paths must be unambiguous absolute paths; must not be blank; default "8080:/health 9090:/ 9091:/health".
@@ -43,13 +43,33 @@ cleanup() {
     fi
 }
 
+resolve_timeout_bin() {
+    if [[ -n "$TIMEOUT_BIN" ]]; then
+        if ! command -v "$TIMEOUT_BIN" >/dev/null 2>&1; then
+            fail "TIMEOUT_BIN must point to a timeout-compatible command; set TIMEOUT_BIN to timeout or gtimeout"
+        fi
+        return
+    fi
+
+    if command -v timeout >/dev/null 2>&1; then
+        TIMEOUT_BIN="timeout"
+        return
+    fi
+
+    if command -v gtimeout >/dev/null 2>&1; then
+        TIMEOUT_BIN="gtimeout"
+        return
+    fi
+
+    fail "timeout or gtimeout is required for backend TCP reachability checks; install GNU coreutils or set TIMEOUT_BIN"
+}
+
 require_command() {
     if ! command -v "$CURL_BIN" >/dev/null 2>&1; then
         fail "curl is required; set CURL_BIN to a compatible curl binary"
     fi
-    if ! command -v "$TIMEOUT_BIN" >/dev/null 2>&1; then
-        fail "timeout is required for backend TCP reachability checks; set TIMEOUT_BIN to a compatible timeout binary"
-    fi
+
+    resolve_timeout_bin
 }
 
 validate_positive_seconds() {

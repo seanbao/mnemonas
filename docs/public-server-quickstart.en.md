@@ -127,6 +127,8 @@ Run the public smoke from an external network:
 ./scripts/public-go-live-smoke.sh nas.example.com
 ```
 
+The TCP probes require a GNU `timeout`-compatible command. Linux systems usually provide `timeout`; macOS systems can use `gtimeout` from coreutils. The script auto-selects `timeout` then `gtimeout`, and `TIMEOUT_BIN` can specify another compatible wrapper.
+
 This script checks public HTTPS health, same-domain HTTP-to-HTTPS redirects, and confirms that `8080/9090/9091` cannot establish TCP connections and do not return any HTTP status from the public internet. If the repository script is not available, run the equivalent commands below manually.
 
 To check custom backend ports, set `PUBLIC_SMOKE_BACKEND_TARGETS='18080:/health 19090:/'`. Each entry uses `port:path`, where path must be an unambiguous absolute path without query strings, fragments, userinfo, backslashes, encoded slashes, encoded backslashes, empty path segments, or `.`/`..` path segments.
