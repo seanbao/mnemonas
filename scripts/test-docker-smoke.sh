@@ -118,6 +118,8 @@ run_smoke_passes_and_cleans_container() {
 	assert_file_contains "$state_dir/run.args" "mnemonas-test"
 	assert_file_contains "$state_dir/port.args" "127.0.0.1:19080:8080"
 	assert_file_contains "$state_dir/image.args" "mnemonas:test"
+	assert_file_contains "$state_dir/curl.args" "--connect-timeout=3"
+	assert_file_contains "$state_dir/curl.args" "--max-time=10"
 	assert_file_contains "$state_dir/rm.args" "-f mnemonas-test"
 	assert_file_not_exists "$state_dir/running"
 }
@@ -144,6 +146,29 @@ run_smoke_uses_dynamic_loopback_port_by_default() {
 	assert_file_contains "$state_dir/curl.args" "http://127.0.0.1:19181/health"
 	assert_file_contains "$state_dir/rm.args" "-f mnemonas-dynamic-test"
 	assert_file_not_exists "$state_dir/running"
+}
+
+run_smoke_uses_curl_timeout_overrides() {
+	local case_dir="$TMP_ROOT/curl-timeout-overrides"
+	local fake_bin="$case_dir/bin"
+	local state_dir="$case_dir/state"
+	local out="$case_dir/out.log"
+	mkdir -p "$state_dir"
+	setup_fake_tools "$fake_bin"
+
+	PATH="$fake_bin:$PATH" \
+		FAKE_DOCKER_STATE="$state_dir" \
+		MNEMONAS_DOCKER_SMOKE_CONTAINER="mnemonas-timeout-test" \
+		MNEMONAS_DOCKER_SMOKE_RETRIES="1" \
+		MNEMONAS_DOCKER_SMOKE_SLEEP_SECONDS="1" \
+		CURL_CONNECT_TIMEOUT="7" \
+		CURL_MAX_TIME="13" \
+		bash "$REPO_ROOT/scripts/docker-smoke.sh" mnemonas:test > "$out"
+
+	assert_file_contains "$out" "[docker-smoke] mnemonas:test passed health and frontend checks"
+	assert_file_contains "$state_dir/curl.args" "--connect-timeout=7"
+	assert_file_contains "$state_dir/curl.args" "--max-time=13"
+	assert_file_contains "$state_dir/rm.args" "-f mnemonas-timeout-test"
 }
 
 run_smoke_rejects_version_mismatch_and_prints_logs() {
@@ -318,8 +343,33 @@ run_smoke_rejects_image_reference_with_whitespace() {
 	assert_file_not_exists "$state_dir/rm.args"
 }
 
+run_smoke_rejects_invalid_curl_timeout_before_run() {
+	local case_dir="$TMP_ROOT/invalid-curl-timeout"
+	local fake_bin="$case_dir/bin"
+	local state_dir="$case_dir/state"
+	local out="$case_dir/out.log"
+	local status
+	mkdir -p "$state_dir"
+	setup_fake_tools "$fake_bin"
+
+	set +e
+	PATH="$fake_bin:$PATH" \
+		FAKE_DOCKER_STATE="$state_dir" \
+		CURL_CONNECT_TIMEOUT="0" \
+		MNEMONAS_DOCKER_SMOKE_CONTAINER="mnemonas-invalid-timeout-test" \
+		bash "$REPO_ROOT/scripts/docker-smoke.sh" mnemonas:test > "$out" 2>&1
+	status=$?
+	set -e
+
+	[[ "$status" -ne 0 ]] || fail "docker smoke accepted invalid curl connect timeout"
+	assert_file_contains "$out" "CURL_CONNECT_TIMEOUT must be a positive integer"
+	assert_file_not_exists "$state_dir/run.args"
+	assert_file_not_exists "$state_dir/rm.args"
+}
+
 run_smoke_passes_and_cleans_container
 run_smoke_uses_dynamic_loopback_port_by_default
+run_smoke_uses_curl_timeout_overrides
 run_smoke_rejects_version_mismatch_and_prints_logs
 run_smoke_fails_when_container_exits_before_health
 run_smoke_does_not_remove_existing_container_when_run_fails
@@ -327,5 +377,6 @@ run_smoke_rejects_invalid_loopback_host_before_run
 run_smoke_rejects_host_with_whitespace_before_run
 run_smoke_rejects_image_reference_that_starts_with_dash
 run_smoke_rejects_image_reference_with_whitespace
+run_smoke_rejects_invalid_curl_timeout_before_run
 
 printf '[docker-smoke-test] all checks passed\n'

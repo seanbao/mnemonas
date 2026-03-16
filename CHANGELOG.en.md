@@ -88,7 +88,7 @@ This project follows [Semantic Versioning 2.0.0](https://semver.org/).
 
 ### Changed
 - `share.base_url` validation now rejects encoded query or fragment markers in the path, preventing public-share base URLs from becoming ambiguous after proxy or browser decoding.
-- `scripts/docker-smoke.sh` now rejects empty image references, option-like image references that start with `-`, and image references with whitespace or control characters before starting the container, preventing Docker smoke image names from being interpreted as Docker run options.
+- `scripts/docker-smoke.sh` now rejects empty image references, option-like image references that start with `-`, and image references with whitespace or control characters before starting the container, preventing Docker smoke image names from being interpreted as Docker run options. HTTP probes now use connection and total request timeouts so half-open connections cannot stall the container smoke.
 - Container healthcheck `MNEMONAS_HEALTHCHECK_URL` overrides now reject embedded credentials and fragments while preserving valid query parameters for probes.
 - Release archives include a top-level directory, Web UI assets, install/uninstall scripts, diagnostic scripts, docs, public-access deploy templates, and Docker Compose/env templates preset for the matching release image.
 - The default `docker-compose.yml` builds `mnemonas:local` from source; public release images can be selected with explicit version tags after they are available.
