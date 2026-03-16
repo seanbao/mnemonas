@@ -9,6 +9,8 @@ CONTAINER_NAME="${MNEMONAS_DOCKER_SMOKE_CONTAINER:-mnemonas-smoke-$$}"
 EXPECTED_VERSION="${MNEMONAS_DOCKER_SMOKE_EXPECT_VERSION:-}"
 RETRIES="${MNEMONAS_DOCKER_SMOKE_RETRIES:-40}"
 SLEEP_SECONDS="${MNEMONAS_DOCKER_SMOKE_SLEEP_SECONDS:-1}"
+CURL_CONNECT_TIMEOUT="${CURL_CONNECT_TIMEOUT:-3}"
+CURL_MAX_TIME="${CURL_MAX_TIME:-10}"
 CONTAINER_STARTED=0
 PUBLISH_ARG=""
 BASE_URL=""
@@ -78,6 +80,8 @@ else
 fi
 require_positive_integer "MNEMONAS_DOCKER_SMOKE_RETRIES" "$RETRIES"
 require_positive_integer "MNEMONAS_DOCKER_SMOKE_SLEEP_SECONDS" "$SLEEP_SECONDS"
+require_positive_integer "CURL_CONNECT_TIMEOUT" "$CURL_CONNECT_TIMEOUT"
+require_positive_integer "CURL_MAX_TIME" "$CURL_MAX_TIME"
 require_safe_container_name "$CONTAINER_NAME"
 
 resolve_base_url() {
@@ -124,12 +128,12 @@ CONTAINER_STARTED=1
 resolve_base_url
 
 for ((attempt = 1; attempt <= RETRIES; attempt++)); do
-	health_json="$(curl -fsS "${BASE_URL}/health" 2>/dev/null || true)"
+	health_json="$(curl -fsS --connect-timeout="$CURL_CONNECT_TIMEOUT" --max-time="$CURL_MAX_TIME" "${BASE_URL}/health" 2>/dev/null || true)"
 	if [[ -n "$health_json" ]]; then
 		if [[ -n "$EXPECTED_VERSION" && "$health_json" != *"\"version\":\"${EXPECTED_VERSION}\""* ]]; then
 			fail "health endpoint version did not match ${EXPECTED_VERSION}: ${health_json}"
 		fi
-		if ! curl -fsS -H 'Accept: text/html' "${BASE_URL}/" | grep -q 'id="root"'; then
+		if ! curl -fsS --connect-timeout="$CURL_CONNECT_TIMEOUT" --max-time="$CURL_MAX_TIME" -H 'Accept: text/html' "${BASE_URL}/" | grep -q 'id="root"'; then
 			fail "frontend root did not contain id=\"root\""
 		fi
 		printf '[docker-smoke] %s passed health and frontend checks at %s\n' "$IMAGE" "$BASE_URL"
