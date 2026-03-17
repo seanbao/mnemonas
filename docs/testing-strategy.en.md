@@ -410,6 +410,7 @@ npm run test:e2e:ui
 Playwright should cover desktop and mobile shells, navigation, file-page interactions, runtime console errors, and screenshot/layout checks for important views.
 
 The default Playwright configuration starts isolated backend and frontend test servers.
+The default per-test Playwright timeout is 60 seconds, and the default assertion timeout is 10 seconds; use `MNEMONAS_E2E_TEST_TIMEOUT_MS` and `MNEMONAS_E2E_EXPECT_TIMEOUT_MS` for long flows or slow local environments.
 In that isolated environment, authentication setup failures are test failures so protected-page regressions are not hidden as skipped tests.
 
 Reused environments are enabled only with `MNEMONAS_E2E_REUSE_EXISTING=1`.
