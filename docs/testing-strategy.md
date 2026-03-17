@@ -414,6 +414,7 @@ npm run test:e2e:ui
 Playwright 应覆盖桌面和移动端外壳、导航、文件页交互、运行时控制台错误，以及重要视图的截图和布局检查。
 
 默认 Playwright 配置会启动隔离后端和前端测试服务器。
+默认单个 Playwright 测试超时为 60 秒，断言等待超时为 10 秒；可用 `MNEMONAS_E2E_TEST_TIMEOUT_MS` 和 `MNEMONAS_E2E_EXPECT_TIMEOUT_MS` 调整长流程或慢速本地环境。
 在隔离环境中，认证初始化失败应被视为测试失败，避免受保护页面回归被隐藏成跳过的测试。
 
 复用已有环境仅在设置 `MNEMONAS_E2E_REUSE_EXISTING=1` 时启用。
