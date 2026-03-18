@@ -3022,7 +3022,7 @@ export function FilesPage() {
       <div className="p-6 lg:p-8 flex items-center justify-center h-full">
         <div className="text-center">
           <div className="w-12 h-12 border-3 border-accent-primary border-t-transparent rounded-full animate-spin mx-auto mb-4" />
-          <p className="text-default-500">加载记忆中...</p>
+          <p className="text-default-500">加载记忆中…</p>
         </div>
       </div>
     )
@@ -3307,7 +3307,7 @@ export function FilesPage() {
                         onPress={() => fileInputRef.current?.click()}
                         isLoading={isUploading}
                       >
-                        {isUploading ? '上传中...' : '上传文件'}
+                        {isUploading ? '上传中…' : '上传文件'}
                       </Button>
                       <Button
                         variant="bordered"
@@ -4020,7 +4020,7 @@ export function FilesPage() {
                         contextMenu.hide()
                       }}
                     >
-                      移动到...
+                      移动到…
                     </ContextMenuItem>
                   )}
                   {canUseFileSource(contextMenuFile) && (
@@ -4031,7 +4031,7 @@ export function FilesPage() {
                         contextMenu.hide()
                       }}
                     >
-                      复制到...
+                      复制到…
                     </ContextMenuItem>
                   )}
                   <ContextMenuItem

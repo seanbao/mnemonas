@@ -2319,7 +2319,7 @@ export function ActivityPage() {
       >
         <div className="text-center">
           <div className="w-12 h-12 border-3 border-accent-primary border-t-transparent rounded-full animate-spin mx-auto mb-4" />
-          <p className="text-default-500">加载最近操作...</p>
+          <p className="text-default-500">加载最近操作…</p>
         </div>
       </div>
     )

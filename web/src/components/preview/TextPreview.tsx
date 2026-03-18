@@ -221,7 +221,7 @@ export function TextPreview({ path, filename, className }: TextPreviewProps) {
       >
         <div className="text-center">
           <Spinner size="lg" />
-          <p className="text-default-500 mt-4">加载文件内容...</p>
+          <p className="text-default-500 mt-4">加载文件内容…</p>
         </div>
       </div>
     )

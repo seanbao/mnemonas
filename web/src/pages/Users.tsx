@@ -2078,7 +2078,7 @@ export function UsersPage() {
             <div className="flex items-center justify-center h-40">
               <div className="text-center">
                 <div className="w-10 h-10 border-3 border-accent-primary border-t-transparent rounded-full animate-spin mx-auto mb-3" />
-                <p className="text-default-500 text-sm">加载用户列表...</p>
+                <p className="text-default-500 text-sm">加载用户列表…</p>
               </div>
             </div>
           ) : error ? (

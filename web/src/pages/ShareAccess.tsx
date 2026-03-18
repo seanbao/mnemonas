@@ -542,7 +542,7 @@ export function ShareAccessPage() {
       <div className="app-shell flex min-h-[100svh] items-center justify-center bg-background px-4">
         <div className="text-center">
           <div className="w-12 h-12 border-3 border-accent-primary border-t-transparent rounded-full animate-spin mx-auto mb-4" />
-          <p className="text-default-500">加载分享信息...</p>
+          <p className="text-default-500">加载分享信息…</p>
         </div>
       </div>
     )
@@ -720,7 +720,7 @@ export function ShareAccessPage() {
                 </div>
 
                 {isListing && (
-                  <div className="rounded-lg border border-divider bg-content2/40 px-4 py-3 text-sm text-default-500">加载文件夹内容...</div>
+                  <div className="rounded-lg border border-divider bg-content2/40 px-4 py-3 text-sm text-default-500">加载文件夹内容…</div>
                 )}
                 {Boolean(listError) && (
                   <div className="rounded-lg border border-danger/30 bg-danger/10 p-4">

@@ -102,7 +102,7 @@ async function gotoAuthenticatedRouteForLayout(page: Page, route: string) {
     await ensureAuthenticatedAt(page, route)
   }
   await page.locator('body').waitFor({ state: 'visible' })
-  await page.getByText('加载中...').waitFor({ state: 'hidden', timeout: 3000 }).catch(() => {})
+  await page.getByText('加载中…').waitFor({ state: 'hidden', timeout: 3000 }).catch(() => {})
   await expectRouteSurface(page, route)
 }
 

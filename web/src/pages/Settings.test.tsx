@@ -586,7 +586,7 @@ describe('SettingsPage', () => {
       expect(screen.getByRole('heading', { name: '设置' })).toBeTruthy()
       expect(screen.getByRole('button', { name: '重置' })).toBeTruthy()
       expect(screen.getByRole('button', { name: '保存设置' })).toBeTruthy()
-      expect(screen.getByText('加载设置...')).toBeTruthy()
+      expect(screen.getByText('加载设置…')).toBeTruthy()
     })
 
     it('renders page header', async () => {
