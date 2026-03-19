@@ -87,7 +87,11 @@ setup_fake_tools() {
 		'url="${*: -1}"' \
 		'if [[ "$url" == */health ]]; then' \
 		'  [[ "${FAKE_CURL_HEALTH_FAIL:-0}" == "1" ]] && exit 7' \
-		'  printf "%s\n" "${FAKE_CURL_HEALTH:-{\"version\":\"ci\"}}"' \
+		'  if [[ -v FAKE_CURL_HEALTH ]]; then' \
+		'    printf "%s\n" "$FAKE_CURL_HEALTH"' \
+		'  else' \
+		'    printf "%s\n" "{\"version\":\"ci\"}"' \
+		'  fi' \
 		'elif [[ "$url" == */ ]]; then' \
 		'  [[ "${FAKE_CURL_ROOT_FAIL:-0}" == "1" ]] && exit 22' \
 		'  printf "%s\n" "${FAKE_CURL_ROOT:-<div id=\"root\"></div>}"' \
@@ -169,6 +173,56 @@ run_smoke_uses_curl_timeout_overrides() {
 	assert_file_contains "$state_dir/curl.args" "--connect-timeout=7"
 	assert_file_contains "$state_dir/curl.args" "--max-time=13"
 	assert_file_contains "$state_dir/rm.args" "-f mnemonas-timeout-test"
+}
+
+run_smoke_accepts_empty_health_body_without_expected_version() {
+	local case_dir="$TMP_ROOT/empty-health-no-version"
+	local fake_bin="$case_dir/bin"
+	local state_dir="$case_dir/state"
+	local out="$case_dir/out.log"
+	mkdir -p "$state_dir"
+	setup_fake_tools "$fake_bin"
+
+	PATH="$fake_bin:$PATH" \
+		FAKE_DOCKER_STATE="$state_dir" \
+		FAKE_CURL_HEALTH="" \
+		MNEMONAS_DOCKER_SMOKE_CONTAINER="mnemonas-empty-health-test" \
+		MNEMONAS_DOCKER_SMOKE_RETRIES="1" \
+		MNEMONAS_DOCKER_SMOKE_SLEEP_SECONDS="1" \
+		bash "$REPO_ROOT/scripts/docker-smoke.sh" mnemonas:test > "$out"
+
+	assert_file_contains "$out" "[docker-smoke] mnemonas:test passed health and frontend checks"
+	assert_file_contains "$state_dir/curl.args" "http://127.0.0.1:19181/health"
+	assert_file_contains "$state_dir/curl.args" "http://127.0.0.1:19181/"
+	assert_file_contains "$state_dir/rm.args" "-f mnemonas-empty-health-test"
+	assert_file_not_exists "$state_dir/running"
+}
+
+run_smoke_requires_health_body_for_expected_version() {
+	local case_dir="$TMP_ROOT/empty-health-with-version"
+	local fake_bin="$case_dir/bin"
+	local state_dir="$case_dir/state"
+	local out="$case_dir/out.log"
+	local status
+	mkdir -p "$state_dir"
+	setup_fake_tools "$fake_bin"
+
+	set +e
+	PATH="$fake_bin:$PATH" \
+		FAKE_DOCKER_STATE="$state_dir" \
+		FAKE_CURL_HEALTH="" \
+		MNEMONAS_DOCKER_SMOKE_CONTAINER="mnemonas-empty-version-test" \
+		MNEMONAS_DOCKER_SMOKE_EXPECT_VERSION="ci" \
+		MNEMONAS_DOCKER_SMOKE_RETRIES="1" \
+		bash "$REPO_ROOT/scripts/docker-smoke.sh" mnemonas:test > "$out" 2>&1
+	status=$?
+	set -e
+
+	[[ "$status" -ne 0 ]] || fail "docker smoke accepted empty health response with an expected version"
+	assert_file_contains "$out" "health endpoint returned empty response while expecting version ci"
+	assert_file_contains "$out" "fake container logs"
+	assert_file_contains "$state_dir/logs.args" "mnemonas-empty-version-test"
+	assert_file_contains "$state_dir/rm.args" "-f mnemonas-empty-version-test"
 }
 
 run_smoke_rejects_version_mismatch_and_prints_logs() {
@@ -370,6 +424,8 @@ run_smoke_rejects_invalid_curl_timeout_before_run() {
 run_smoke_passes_and_cleans_container
 run_smoke_uses_dynamic_loopback_port_by_default
 run_smoke_uses_curl_timeout_overrides
+run_smoke_accepts_empty_health_body_without_expected_version
+run_smoke_requires_health_body_for_expected_version
 run_smoke_rejects_version_mismatch_and_prints_logs
 run_smoke_fails_when_container_exits_before_health
 run_smoke_does_not_remove_existing_container_when_run_fails

@@ -128,8 +128,10 @@ CONTAINER_STARTED=1
 resolve_base_url
 
 for ((attempt = 1; attempt <= RETRIES; attempt++)); do
-	health_json="$(curl -fsS --connect-timeout="$CURL_CONNECT_TIMEOUT" --max-time="$CURL_MAX_TIME" "${BASE_URL}/health" 2>/dev/null || true)"
-	if [[ -n "$health_json" ]]; then
+	if health_json="$(curl -fsS --connect-timeout="$CURL_CONNECT_TIMEOUT" --max-time="$CURL_MAX_TIME" "${BASE_URL}/health" 2>/dev/null)"; then
+		if [[ -n "$EXPECTED_VERSION" && -z "$health_json" ]]; then
+			fail "health endpoint returned empty response while expecting version ${EXPECTED_VERSION}"
+		fi
 		if [[ -n "$EXPECTED_VERSION" && "$health_json" != *"\"version\":\"${EXPECTED_VERSION}\""* ]]; then
 			fail "health endpoint version did not match ${EXPECTED_VERSION}: ${health_json}"
 		fi
