@@ -84,6 +84,13 @@ setup_fake_tools() {
 		'#!/usr/bin/env bash' \
 		'set -euo pipefail' \
 		'printf "%s\n" "$*" >> "$FAKE_DOCKER_STATE/curl.args"' \
+		'for arg in "$@"; do' \
+		'  case "$arg" in' \
+		'    --connect-timeout=*|--max-time=*)' \
+		'      printf "fake curl rejected non-portable timeout syntax: %s\n" "$arg" >&2' \
+		'      exit 2 ;;' \
+		'  esac' \
+		'done' \
 		'url="${*: -1}"' \
 		'if [[ "$url" == */health ]]; then' \
 		'  [[ "${FAKE_CURL_HEALTH_FAIL:-0}" == "1" ]] && exit 7' \
@@ -122,8 +129,8 @@ run_smoke_passes_and_cleans_container() {
 	assert_file_contains "$state_dir/run.args" "mnemonas-test"
 	assert_file_contains "$state_dir/port.args" "127.0.0.1:19080:8080"
 	assert_file_contains "$state_dir/image.args" "mnemonas:test"
-	assert_file_contains "$state_dir/curl.args" "--connect-timeout=3"
-	assert_file_contains "$state_dir/curl.args" "--max-time=10"
+	assert_file_contains "$state_dir/curl.args" "--connect-timeout 3"
+	assert_file_contains "$state_dir/curl.args" "--max-time 10"
 	assert_file_contains "$state_dir/rm.args" "-f mnemonas-test"
 	assert_file_not_exists "$state_dir/running"
 }
@@ -170,8 +177,8 @@ run_smoke_uses_curl_timeout_overrides() {
 		bash "$REPO_ROOT/scripts/docker-smoke.sh" mnemonas:test > "$out"
 
 	assert_file_contains "$out" "[docker-smoke] mnemonas:test passed health and frontend checks"
-	assert_file_contains "$state_dir/curl.args" "--connect-timeout=7"
-	assert_file_contains "$state_dir/curl.args" "--max-time=13"
+	assert_file_contains "$state_dir/curl.args" "--connect-timeout 7"
+	assert_file_contains "$state_dir/curl.args" "--max-time 13"
 	assert_file_contains "$state_dir/rm.args" "-f mnemonas-timeout-test"
 }
 
