@@ -325,7 +325,7 @@ function MoveDialogContent({
                 ))}
                 {pendingFiles.length > 5 && (
                   <div className="text-xs text-default-500 py-1">
-                    ...还有 {pendingFiles.length - 5} 个项目
+                    …还有 {pendingFiles.length - 5} 个项目
                   </div>
                 )}
               </div>
