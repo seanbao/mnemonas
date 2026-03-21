@@ -411,6 +411,8 @@ if [[ "$CHECK_CHECKLIST" -eq 1 ]]; then
 
 	require_file_contains "CHANGELOG.md" "$verify_changed_cmd"
 	require_file_contains "CHANGELOG.en.md" "$verify_changed_cmd"
+	require_file_contains "CHANGELOG.md" "make docs-check"
+	require_file_contains "CHANGELOG.en.md" "make docs-check"
 	require_file_contains "CHANGELOG.md" "make scripts-check"
 	require_file_contains "CHANGELOG.en.md" "make scripts-check"
 	require_file_contains "CHANGELOG.md" "./scripts/release-readiness.sh"
