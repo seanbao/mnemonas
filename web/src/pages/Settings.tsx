@@ -8385,7 +8385,7 @@ export function SettingsPage() {
                       aria-label="企业微信 Webhook URL"
                       value={settings.alertsWeComWebhookURL}
                       onValueChange={(v) => updateDirtySettings(s => ({ ...s, alertsWeComWebhookURL: v }))}
-                      placeholder="https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=..."
+                      placeholder="https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=<key>"
                       isDisabled={!settings.alertsEnabled || !settings.alertsWeComEnabled}
                       classNames={{
                         inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
@@ -8423,7 +8423,7 @@ export function SettingsPage() {
                       aria-label="钉钉 Webhook URL"
                       value={settings.alertsDingTalkWebhookURL}
                       onValueChange={(v) => updateDirtySettings(s => ({ ...s, alertsDingTalkWebhookURL: v }))}
-                      placeholder="https://oapi.dingtalk.com/robot/send?access_token=..."
+                      placeholder="https://oapi.dingtalk.com/robot/send?access_token=<token>"
                       isDisabled={!settings.alertsEnabled || !settings.alertsDingTalkEnabled}
                       classNames={{
                         inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
@@ -8586,7 +8586,7 @@ export function SettingsPage() {
                           alertsTelegramBotToken: v,
                           alertsTelegramBotTokenClear: false,
                         }))}
-                        placeholder={settings.alertsTelegramBotTokenConfigured ? '已配置，留空不变' : '123456:ABC...'}
+                        placeholder={settings.alertsTelegramBotTokenConfigured ? '已配置，留空不变' : '123456:<token>'}
                         isDisabled={!settings.alertsEnabled || !settings.alertsTelegramEnabled || settings.alertsTelegramBotTokenClear}
                         classNames={{
                           inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
