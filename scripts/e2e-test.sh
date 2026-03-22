@@ -74,23 +74,80 @@ log_skip()  { echo -e "${YELLOW}[SKIP]${NC} $1"; ((SKIPPED+=1)); }
 require_safe_http_url() {
     local value="$1"
     local label="$2"
+    local authority_and_path authority path lower_path segment lower_segment normalized_segment
+    local -a base_url_segments=()
 
     if [[ -z "$value" ]]; then
         echo -e "${RED}ERROR:${NC} $label must not be empty" >&2
         exit 1
     fi
     if [[ "$value" == *[[:space:]]* ]]; then
-        echo -e "${RED}ERROR:${NC} $label must not contain whitespace: $value" >&2
+        echo -e "${RED}ERROR:${NC} $label must not contain whitespace" >&2
         exit 1
     fi
     if [[ "$value" == *[[:cntrl:]]* ]]; then
-        echo -e "${RED}ERROR:${NC} $label must not contain control characters: $value" >&2
+        echo -e "${RED}ERROR:${NC} $label must not contain control characters" >&2
         exit 1
     fi
     if [[ ! "$value" =~ ^https?://[^[:space:]]+$ ]]; then
-        echo -e "${RED}ERROR:${NC} $label must be an http(s) URL: $value" >&2
+        echo -e "${RED}ERROR:${NC} $label must be an http(s) URL" >&2
         exit 1
     fi
+
+    authority_and_path="${value#*://}"
+    authority="${authority_and_path%%/*}"
+    if [[ -z "$authority" ]]; then
+        echo -e "${RED}ERROR:${NC} $label must include a host" >&2
+        exit 1
+    fi
+    if [[ "$authority" == *"@"* ]]; then
+        echo -e "${RED}ERROR:${NC} $label must not contain embedded credentials" >&2
+        exit 1
+    fi
+    if [[ "$authority_and_path" == *"?"* || "$authority_and_path" == *"#"* ]]; then
+        echo -e "${RED}ERROR:${NC} $label must not contain query strings or fragments" >&2
+        exit 1
+    fi
+    if [[ "$authority_and_path" == *\\* ]]; then
+        echo -e "${RED}ERROR:${NC} $label must not contain backslashes" >&2
+        exit 1
+    fi
+
+    path=""
+    if [[ "$authority_and_path" == */* ]]; then
+        path="/${authority_and_path#*/}"
+    fi
+    lower_path="$(printf '%s' "$path" | tr '[:upper:]' '[:lower:]')"
+    if [[ "$lower_path" == *"%2f"* || "$lower_path" == *"%5c"* ]]; then
+        echo -e "${RED}ERROR:${NC} $label must not contain encoded slashes or backslashes" >&2
+        exit 1
+    fi
+    if [[ "$lower_path" == *"%3f"* || "$lower_path" == *"%23"* ]]; then
+        echo -e "${RED}ERROR:${NC} $label must not contain encoded query or fragment markers" >&2
+        exit 1
+    fi
+    if [[ "$path" == *"//"* ]]; then
+        echo -e "${RED}ERROR:${NC} $label path must not contain empty segments" >&2
+        exit 1
+    fi
+    IFS='/' read -r -a base_url_segments <<< "${path#/}"
+    for segment in "${base_url_segments[@]}"; do
+        [[ -n "$segment" ]] || continue
+        lower_segment="$(printf '%s' "$segment" | tr '[:upper:]' '[:lower:]')"
+        normalized_segment="${lower_segment//%2e/.}"
+        if [[ "$normalized_segment" == "." || "$normalized_segment" == ".." ]]; then
+            echo -e "${RED}ERROR:${NC} $label must not contain dot segments" >&2
+            exit 1
+        fi
+    done
+}
+
+normalize_base_url() {
+    local value="$1"
+    while [[ "$value" == */ ]]; do
+        value="${value%/}"
+    done
+    printf '%s\n' "$value"
 }
 
 require_no_control_characters() {
@@ -123,6 +180,9 @@ require_explicit_e2e_target() {
     fi
 
     require_safe_http_url "$BASE_URL" "BASE_URL"
+    BASE_URL="$(normalize_base_url "$BASE_URL")"
+    WEBDAV_URL="${BASE_URL}/dav"
+    API_URL="${BASE_URL}/api/v1"
 
     if [[ -z "$STORAGE_ROOT" ]]; then
         echo -e "${RED}ERROR:${NC} STORAGE_ROOT must not be empty" >&2

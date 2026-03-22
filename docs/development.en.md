@@ -422,6 +422,7 @@ The isolated runner avoids writing into a real user storage root.
 - `INITIAL_PASSWORD_FILE`.
 
 `STORAGE_ROOT` must not contain control characters, `..`, or symlink path components.
+`BASE_URL` must be an HTTP(S) URL with a host; it must not contain whitespace, control characters, embedded credentials, query strings, fragments, backslashes, encoded slashes or backslashes, encoded query or fragment markers, empty path segments, or `.`/`..` path segments. Trailing slashes are normalized after validation.
 For WebDAV `auth_type = "basic"`, the script can read Basic Auth credentials from config or `secrets.json`.
 For WebDAV `auth_type = "users"`, set `MNEMONAS_WEBDAV_USERNAME` and `MNEMONAS_WEBDAV_PASSWORD` explicitly.
 Set `RUN_RCLONE_WEBDAV=1` to make the isolated runner and `scripts/e2e-test.sh` run an additional WebDAV client smoke when `rclone` is installed. The smoke covers upload, download, move/rename, list, and cleanup operations.
@@ -453,6 +454,7 @@ Safety checks are covered by `scripts/test-fault-injection-safety.sh` and `make 
 The isolated runner accepts only `/tmp` or checkout-local roots and loopback Web and dataplane addresses.
 
 The low-level runner requires explicit `BASE_URL`, `STORAGE_ROOT`, and `NASD_BIN`.
+`BASE_URL` follows the same HTTP(S) URL safety rules as the E2E runner.
 When WebDAV uses `auth_type = "users"`, it also requires explicit `MNEMONAS_WEBDAV_USERNAME` and `MNEMONAS_WEBDAV_PASSWORD`.
 
 Real storage paths require `ALLOW_REAL_STORAGE=1`.
@@ -484,6 +486,7 @@ MNEMONAS_STORAGE_ROOT=/tmp/mnemonas-bench-target \
 ```
 
 Manual benchmark targets create and remove `storage.root/files/benchmark-test`.
+The benchmark target URL follows the same HTTP(S) URL safety rules as the E2E runner.
 Real storage paths require `ALLOW_REAL_STORAGE=1`.
 They must still be absolute, must not contain control characters, `..`, or symlink path components, and must not point at protected system directories.
 
