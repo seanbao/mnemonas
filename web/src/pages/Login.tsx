@@ -35,6 +35,11 @@ function getPostLoginRedirectPath(state: unknown): string {
     return '/'
   }
 
+  const pathname = from.split(/[?#]/, 1)[0]
+  if (pathname === '/login' || pathname === '/s' || pathname.startsWith('/s/')) {
+    return '/'
+  }
+
   return from
 }
 
