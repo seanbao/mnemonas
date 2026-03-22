@@ -145,6 +145,76 @@ run_refuse_invalid_base_url_test() {
 	assert_exists "$case_dir/storage/files/benchmark-test/sentinel.txt"
 }
 
+run_refuse_ambiguous_base_url_test() {
+	local case_dir="$TMP_ROOT/refuse-ambiguous-base-url"
+	local fake_bin="$case_dir/bin"
+	local invoked_log="$case_dir/curl.log"
+	mkdir -p "$case_dir/storage/files/benchmark-test"
+	printf 'keep\n' > "$case_dir/storage/files/benchmark-test/sentinel.txt"
+	make_fake_curl "$fake_bin" "$invoked_log"
+
+	run_expect_failure "$case_dir/userinfo.log" env \
+		HOME="$case_dir/home" \
+		PATH="$fake_bin:$PATH" \
+		CURL_INVOKED_LOG="$invoked_log" \
+		MNEMONAS_STORAGE_ROOT="$case_dir/storage" \
+		bash "$REPO_ROOT/scripts/benchmark.sh" "http://user:route-secret@127.0.0.1:9"
+	assert_file_contains "$case_dir/userinfo.log" "base URL must not contain embedded credentials"
+	assert_file_not_contains "$case_dir/userinfo.log" "route-secret"
+
+	run_expect_failure "$case_dir/query.log" env \
+		HOME="$case_dir/home" \
+		PATH="$fake_bin:$PATH" \
+		CURL_INVOKED_LOG="$invoked_log" \
+		MNEMONAS_STORAGE_ROOT="$case_dir/storage" \
+		bash "$REPO_ROOT/scripts/benchmark.sh" "http://127.0.0.1:9?token=route-secret"
+	assert_file_contains "$case_dir/query.log" "base URL must not contain query strings or fragments"
+	assert_file_not_contains "$case_dir/query.log" "route-secret"
+
+	run_expect_failure "$case_dir/fragment.log" env \
+		HOME="$case_dir/home" \
+		PATH="$fake_bin:$PATH" \
+		CURL_INVOKED_LOG="$invoked_log" \
+		MNEMONAS_STORAGE_ROOT="$case_dir/storage" \
+		bash "$REPO_ROOT/scripts/benchmark.sh" "http://127.0.0.1:9#route-secret"
+	assert_file_contains "$case_dir/fragment.log" "base URL must not contain query strings or fragments"
+	assert_file_not_contains "$case_dir/fragment.log" "route-secret"
+
+	run_expect_failure "$case_dir/backslash.log" env \
+		HOME="$case_dir/home" \
+		PATH="$fake_bin:$PATH" \
+		CURL_INVOKED_LOG="$invoked_log" \
+		MNEMONAS_STORAGE_ROOT="$case_dir/storage" \
+		bash "$REPO_ROOT/scripts/benchmark.sh" 'http://127.0.0.1:9\dav'
+	assert_file_contains "$case_dir/backslash.log" "base URL must not contain backslashes"
+
+	run_expect_failure "$case_dir/encoded-slash.log" env \
+		HOME="$case_dir/home" \
+		PATH="$fake_bin:$PATH" \
+		CURL_INVOKED_LOG="$invoked_log" \
+		MNEMONAS_STORAGE_ROOT="$case_dir/storage" \
+		bash "$REPO_ROOT/scripts/benchmark.sh" "http://127.0.0.1:9/dav%2Froot"
+	assert_file_contains "$case_dir/encoded-slash.log" "base URL must not contain encoded slashes or backslashes"
+
+	run_expect_failure "$case_dir/encoded-dot.log" env \
+		HOME="$case_dir/home" \
+		PATH="$fake_bin:$PATH" \
+		CURL_INVOKED_LOG="$invoked_log" \
+		MNEMONAS_STORAGE_ROOT="$case_dir/storage" \
+		bash "$REPO_ROOT/scripts/benchmark.sh" "http://127.0.0.1:9/%2e%2e/root"
+	assert_file_contains "$case_dir/encoded-dot.log" "base URL must not contain dot segments"
+
+	run_expect_failure "$case_dir/empty-host.log" env \
+		HOME="$case_dir/home" \
+		PATH="$fake_bin:$PATH" \
+		CURL_INVOKED_LOG="$invoked_log" \
+		MNEMONAS_STORAGE_ROOT="$case_dir/storage" \
+		bash "$REPO_ROOT/scripts/benchmark.sh" "http:///dav"
+	assert_file_contains "$case_dir/empty-host.log" "base URL must include a host"
+	assert_not_exists "$invoked_log"
+	assert_exists "$case_dir/storage/files/benchmark-test/sentinel.txt"
+}
+
 run_refuse_unisolated_storage_test() {
 	local case_dir="$TMP_ROOT/refuse-unisolated-storage"
 	mkdir -p "$case_dir"
@@ -322,7 +392,7 @@ run_webdav_users_env_credentials_test() {
 		MNEMONAS_WEBDAV_AUTH_TYPE=" Users " \
 		MNEMONAS_WEBDAV_USERNAME="family-user" \
 		MNEMONAS_WEBDAV_PASSWORD="$secret" \
-		bash "$REPO_ROOT/scripts/benchmark.sh" "http://127.0.0.1:9"
+		bash "$REPO_ROOT/scripts/benchmark.sh" "http://127.0.0.1:9/"
 
 	assert_file_contains "$invoked_log" "family-user:$secret"
 	assert_file_contains "$invoked_log" "-u family-user:$secret -sS -o /dev/null -w %{http_code} -X PROPFIND"
@@ -538,6 +608,7 @@ run_isolated_target_reaches_health_check_test() {
 run_missing_explicit_target_test
 run_missing_storage_root_test
 run_refuse_invalid_base_url_test
+run_refuse_ambiguous_base_url_test
 run_refuse_unisolated_storage_test
 run_refuse_traversal_storage_test
 run_refuse_newline_storage_test
