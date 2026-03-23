@@ -3,6 +3,7 @@
 [English](mounting-guide.en.md) | 简体中文
 
 MnemoNAS 通过 WebDAV 暴露文件。Web UI 提供管理操作，WebDAV 则为桌面端、移动端和命令行客户端提供同一存储空间的访问入口。
+下列客户端步骤用于连接配置参考；实际兼容状态以 [WebDAV 客户端兼容性](webdav-compatibility.md) 为准。`rclone` 有可选真实客户端 E2E 覆盖，Finder、Windows File Explorer、移动端和媒体客户端仍按矩阵跟踪。
 
 ## 连接信息
 

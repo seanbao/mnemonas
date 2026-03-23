@@ -22,7 +22,7 @@ The name comes from Mnemosyne, the Greek goddess of memory and mother of the nin
 - **Web interface**: desktop and mobile views are designed for clear daily use instead of dense admin-only panels.
 - **Deployment paths**: Docker Compose and Linux/systemd deployment methods are provided.
 - **Maintenance and diagnostics**: health checks, scrub, GC, and diagnostic bundles help discover and investigate data issues.
-- **Web and WebDAV coverage**: browser-based management and common WebDAV clients are both supported.
+- **Web and WebDAV coverage**: browser-based management and WebDAV protocol access cover the main access paths, with client compatibility tracked in the matrix.
 
 ### Feature Matrix
 
@@ -183,9 +183,9 @@ cp mnemonas.example.toml ~/.mnemonas/config.toml
 
 ### WebDAV Clients
 
-MnemoNAS exposes WebDAV for common desktop, mobile, and CLI clients:
+MnemoNAS exposes WebDAV for common desktop, mobile, and CLI clients. The table below is a connection-entry summary; compatibility status is tracked in the [WebDAV Compatibility](docs/webdav-compatibility.en.md) matrix. `rclone` has optional real-client E2E coverage, while Finder, Windows File Explorer, and mobile clients remain tracked by the matrix.
 
-| Platform | Recommended Client | URL |
+| Platform | Common Client | URL |
 | --- | --- | --- |
 | macOS | Finder | `http://localhost:8080/dav` |
 | Windows | File Explorer | `http://localhost:8080/dav` |
@@ -201,7 +201,7 @@ The running Web UI exposes the mount URL, Basic username, and readable generated
 Custom Basic passwords are not echoed back and should come from the config file or password manager.
 Generated Basic Auth passwords are also stored in `<storage.root>/secrets.json`.
 
-See [Mounting Guide](docs/mounting-guide.en.md).
+Mounting steps are documented in the [Mounting Guide](docs/mounting-guide.en.md).
 
 ## Repository Layout
 
