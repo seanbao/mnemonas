@@ -1300,7 +1300,7 @@ Path field rules:
 - The Web settings page wraps paths containing spaces or double quotes in double quotes in directory-quota line-based inputs; literal double quotes inside the path are escaped as `\"`, for example `"/Family Photos" 500 GB`.
 - Directory access rules and share path policies use structured path inputs, so paths containing spaces or literal double quotes are entered directly without manual line quoting.
 
-The Web settings page derives a share-policy coverage summary from the current draft before save. It shows default expiry, default access limits, path-policy count, password-required path count, creator/maintainer-scope path count, attention items for loose defaults or path policies, and cleanup suggestions for root-wide rules, most-specific path rules that do not inherit ancestor limits, and duplicate-equivalent rules.
+The Web settings page derives a share-policy coverage summary from the current draft before save. It shows default expiry, default access limits, path-policy count, password-required path count, creator/maintainer-scope path count, attention items for loose defaults or path policies, and cleanup suggestions for root-wide rules, most-specific path rules that do not inherit ancestor limits, descendant rules that loosen ancestor expiration, access-count, or creator-scope limits, and duplicate-equivalent rules.
 
 This summary is for pre-save review only; enforced behavior still comes from the server policy after the Settings API save succeeds.
 
