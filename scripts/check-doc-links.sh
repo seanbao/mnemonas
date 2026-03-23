@@ -86,6 +86,19 @@ const storageCDCContractDocs = [
     ],
   },
   {
+    file: 'docs/configuration.md',
+    required: [
+      'Rust 数据面 FastCDC 文件 API',
+      '当前 Go 版本历史路径仍使用整对象 CAS 快照',
+      '不表示当前版本历史已启用分块级去重',
+    ],
+    forbidden: [
+      '影响存储效率和去重率',
+      '版本历史按 CDC 分块去重',
+      '已启用 CDC 分块版本去重',
+    ],
+  },
+  {
     file: 'docs/storage-internals.en.md',
     required: [
       'BLAKE3 whole-object versions',
@@ -93,6 +106,19 @@ const storageCDCContractDocs = [
       'FastCDC API is a dataplane capability',
     ],
     forbidden: [
+      'version history deduplicates CDC chunks',
+      'CDC chunk version deduplication is enabled',
+    ],
+  },
+  {
+    file: 'docs/configuration.en.md',
+    required: [
+      'Rust dataplane FastCDC file API',
+      'Current Go version history still uses whole-object CAS snapshots',
+      'do not mean version history has block-level deduplication enabled',
+    ],
+    forbidden: [
+      'Content-defined chunking settings affect deduplication and metadata overhead',
       'version history deduplicates CDC chunks',
       'CDC chunk version deduplication is enabled',
     ],

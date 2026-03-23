@@ -361,7 +361,7 @@ max_versioned_size = 104857600
 
 ## `[dataplane.cdc]`
 
-配置 CDC（Content-Defined Chunking）算法参数，影响存储效率和去重率。
+配置 Rust 数据面 FastCDC 文件 API 的算法参数。当前 Go 版本历史路径仍使用整对象 CAS 快照，因此这些参数只影响接入该数据面文件 API 的新写入，不表示当前版本历史已启用分块级去重。
 
 | 选项 | 类型 | 默认值 | 说明 |
 | ---- | ---- | ------ | ---- |

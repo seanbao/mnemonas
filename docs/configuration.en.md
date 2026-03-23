@@ -364,7 +364,7 @@ max_retries = 5
 
 ## `[dataplane.cdc]`
 
-Content-defined chunking settings affect deduplication and metadata overhead.
+Configure algorithm parameters for the Rust dataplane FastCDC file API. Current Go version history still uses whole-object CAS snapshots, so these settings only affect new writes that use that dataplane file API and do not mean version history has block-level deduplication enabled.
 
 | Option | Type | Default | Description |
 | --- | --- | --- | --- |

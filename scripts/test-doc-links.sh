@@ -794,9 +794,11 @@ write_storage_cdc_contract_valid_docs() {
 	write_valid_docs "$repo"
 	cat >> "$repo/docs/README.md" <<'EOF'
 | [Storage](storage-internals.md) | [Storage](storage-internals.en.md) |
+| [Configuration](configuration.md) | [Configuration](configuration.en.md) |
 EOF
 	cat >> "$repo/docs/README.en.md" <<'EOF'
 | [Storage](storage-internals.en.md) | Storage internals |
+| [Configuration](configuration.en.md) | Configuration reference |
 EOF
 	cat > "$repo/docs/storage-internals.md" <<'EOF'
 # 存储原理与运维建议
@@ -820,7 +822,25 @@ English | [简体中文](storage-internals.md)
 
 Current version history uses whole-object CAS snapshots; the FastCDC API is a dataplane capability.
 EOF
-	git -C "$repo" add docs/README.md docs/README.en.md docs/storage-internals.md docs/storage-internals.en.md
+	cat > "$repo/docs/configuration.md" <<'EOF'
+# 配置参考
+
+[English](configuration.en.md) | 简体中文
+
+## `[dataplane.cdc]`
+
+配置 Rust 数据面 FastCDC 文件 API 的算法参数。当前 Go 版本历史路径仍使用整对象 CAS 快照，因此这些参数只影响接入该数据面文件 API 的新写入，不表示当前版本历史已启用分块级去重。
+EOF
+	cat > "$repo/docs/configuration.en.md" <<'EOF'
+# Configuration Reference
+
+English | [简体中文](configuration.md)
+
+## `[dataplane.cdc]`
+
+Configure algorithm parameters for the Rust dataplane FastCDC file API. Current Go version history still uses whole-object CAS snapshots, so these settings only affect new writes that use that dataplane file API and do not mean version history has block-level deduplication enabled.
+EOF
+	git -C "$repo" add docs/README.md docs/README.en.md docs/storage-internals.md docs/storage-internals.en.md docs/configuration.md docs/configuration.en.md
 }
 
 write_storage_cdc_contract_missing_boundary_doc() {
@@ -855,6 +875,30 @@ English | [简体中文](storage-internals.md)
 Current version history uses whole-object CAS snapshots.
 EOF
 	git -C "$repo" add docs/README.md docs/README.en.md docs/storage-internals.md docs/storage-internals.en.md
+}
+
+write_configuration_cdc_contract_missing_boundary_doc() {
+	local repo="$1"
+	write_storage_cdc_contract_valid_docs "$repo"
+	cat > "$repo/docs/configuration.md" <<'EOF'
+# 配置参考
+
+[English](configuration.en.md) | 简体中文
+
+## `[dataplane.cdc]`
+
+配置 Rust 数据面 FastCDC 文件 API 的算法参数。当前 Go 版本历史路径仍使用整对象 CAS 快照，因此这些参数只影响接入该数据面文件 API 的新写入，不表示当前版本历史已启用分块级去重。
+EOF
+	cat > "$repo/docs/configuration.en.md" <<'EOF'
+# Configuration Reference
+
+English | [简体中文](configuration.md)
+
+## `[dataplane.cdc]`
+
+Content-defined chunking settings affect deduplication and metadata overhead.
+EOF
+	git -C "$repo" add docs/configuration.md docs/configuration.en.md
 }
 
 write_non_executable_script_reference_doc() {
@@ -1043,6 +1087,7 @@ run_rejects "non-executable-script-link" "linked script is not executable: scrip
 run_rejects "raw-restore-query-path" "URL-encode API path query values in documentation examples; use path=%2F..." write_raw_restore_query_path_doc
 run_rejects "raw-api-path-query" "URL-encode API path query values in documentation examples; use path=%2F..." write_raw_api_path_query_doc
 run_rejects "storage-cdc-contract-missing-boundary" "docs/storage-internals.en.md: missing storage CDC boundary text: current version history does not reference-count CDC chunks" write_storage_cdc_contract_missing_boundary_doc
+run_rejects "configuration-cdc-contract-missing-boundary" "docs/configuration.en.md: missing storage CDC boundary text: Current Go version history still uses whole-object CAS snapshots" write_configuration_cdc_contract_missing_boundary_doc
 run_rejects "security-check-doc-missing-id" "docs/api-reference.en.md: security-check documentation is missing ID: config_file_access" write_security_check_docs_missing_english_id
 run_rejects "security-check-doc-missing-chinese-id" "docs/api-reference.md: security-check documentation is missing ID: config_file_access" write_security_check_docs_missing_chinese_id
 run_rejects "security-check-doc-unknown-english-id" "docs/api-reference.en.md: security-check documentation lists unknown ID: ghost_probe" write_security_check_docs_unknown_english_id
