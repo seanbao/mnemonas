@@ -72,6 +72,32 @@ const shellFenceLanguages = new Set(['bash', 'sh', 'shell', 'console', 'zsh'])
 const remoteShellPipePattern = /\b(?:curl|wget)\b[^|]*\|\s*(?:sudo\s+)?(?:sh|bash|zsh)\b/i
 const directScriptCommandPattern = /(^|[^\w./-])(\.\/scripts\/([A-Za-z0-9._-]+\.sh))\b/g
 const rawAPIPathQueryPattern = /\/api\/v1\/[^"'\s)]*[?&]path=\//
+const storageCDCContractDocs = [
+  {
+    file: 'docs/storage-internals.md',
+    required: [
+      'BLAKE3 整对象版本',
+      '当前版本历史不会按 CDC 分块引用计数',
+      'FastCDC API 属于数据面能力',
+    ],
+    forbidden: [
+      '版本历史按 CDC 分块去重',
+      '已启用 CDC 分块版本去重',
+    ],
+  },
+  {
+    file: 'docs/storage-internals.en.md',
+    required: [
+      'BLAKE3 whole-object versions',
+      'current version history does not reference-count CDC chunks',
+      'FastCDC API is a dataplane capability',
+    ],
+    forbidden: [
+      'version history deduplicates CDC chunks',
+      'CDC chunk version deduplication is enabled',
+    ],
+  },
+]
 const requiredDocumentPairs = [
   ['README.md', 'README.en.md', 'English', 'Chinese'],
   ['CHANGELOG.md', 'CHANGELOG.en.md', 'English', 'Chinese'],
@@ -158,6 +184,26 @@ function checkPairedLanguageLinks() {
     }
     if (!hasMarkdownLinkTo(englishFile, chineseFile)) {
       errors.push(`${englishFile}: missing language switch link to ${chineseFile}`)
+    }
+  }
+}
+
+function checkStorageCDCContract() {
+  for (const doc of storageCDCContractDocs) {
+    const text = readOptionalFile(doc.file)
+    if (text === null) {
+      continue
+    }
+
+    for (const phrase of doc.required) {
+      if (!text.includes(phrase)) {
+        errors.push(`${doc.file}: missing storage CDC boundary text: ${phrase}`)
+      }
+    }
+    for (const phrase of doc.forbidden) {
+      if (text.includes(phrase)) {
+        errors.push(`${doc.file}: avoid implying CDC chunk-level version deduplication: ${phrase}`)
+      }
     }
   }
 }
@@ -366,6 +412,7 @@ checkDocumentationPairs()
 checkDocumentationIndexCoverage()
 checkPairedHeadingLevelSequences()
 checkPairedLanguageLinks()
+checkStorageCDCContract()
 
 for (const file of files) {
   const text = fs.readFileSync(path.join(repoRoot, file), 'utf8')
