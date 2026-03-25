@@ -627,7 +627,7 @@ export function FavoritesPage() {
       <div className="flex h-full items-center justify-center p-6 lg:p-8">
         <div className="text-center">
           <div className="w-12 h-12 border-3 border-accent-primary border-t-transparent rounded-full animate-spin mx-auto mb-4" />
-          <p className="text-default-500">加载收藏列表...</p>
+          <p className="text-default-500">加载收藏列表…</p>
         </div>
       </div>
     )
@@ -823,7 +823,7 @@ export function FavoritesPage() {
           <ModalBody className="px-6 py-4">
             <Input
               label="备注"
-              placeholder="添加备注信息..."
+              placeholder="添加备注信息…"
               value={noteValue}
               onValueChange={setNoteValue}
               variant="bordered"

@@ -175,7 +175,7 @@ export function SearchPage() {
       <div className="mb-6">
         <Input
           aria-label="搜索文件名"
-          placeholder="输入文件名搜索..."
+          placeholder="输入文件名搜索…"
           value={query}
           onValueChange={handleQueryChange}
           onKeyDown={handleKeyDown}
@@ -217,7 +217,7 @@ export function SearchPage() {
             <div className="flex items-center justify-center h-40">
               <div className="text-center">
                 <div className="w-12 h-12 border-3 border-accent-primary border-t-transparent rounded-full animate-spin mx-auto mb-4" />
-                <p className="text-default-500">搜索中...</p>
+                <p className="text-default-500">搜索中…</p>
               </div>
             </div>
           ) : error ? (

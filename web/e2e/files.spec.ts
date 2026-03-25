@@ -15,7 +15,7 @@ const FILE_EMPTY_STATE_PATTERN = /这里空空如也|暂无文件|no files/i
  */
 
 async function waitForFileBrowser(page: Page) {
-  await page.getByText('加载中...').waitFor({ state: 'hidden', timeout: 15_000 }).catch(() => {})
+  await page.getByText('加载中…').waitFor({ state: 'hidden', timeout: 15_000 }).catch(() => {})
   await expect(page.getByRole('button', { name: '根目录' })).toBeVisible({ timeout: 15_000 })
 }
 
@@ -209,7 +209,7 @@ test.describe('文件浏览页面', () => {
     })
 
     await page.reload({ waitUntil: 'domcontentloaded' })
-    await page.getByText('加载中...').waitFor({ state: 'hidden', timeout: 15_000 }).catch(() => {})
+    await page.getByText('加载中…').waitFor({ state: 'hidden', timeout: 15_000 }).catch(() => {})
 
     await expect(page.getByRole('heading', { name: '当前目录暂不可用' })).toBeVisible({ timeout: 15_000 })
     await expect(page.getByText('文件系统当前不可用，请检查设备状态或稍后重试。')).toBeVisible()

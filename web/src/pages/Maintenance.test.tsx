@@ -4513,7 +4513,7 @@ describe('MaintenancePage', () => {
 
       await waitFor(() => {
         // The action button switches to the running validation label.
-        expect(screen.getAllByText('校验中...').length).toBeGreaterThan(0)
+        expect(screen.getAllByText('校验中…').length).toBeGreaterThan(0)
       })
     })
 
@@ -4534,7 +4534,7 @@ describe('MaintenancePage', () => {
       render(<Maintenance />)
 
       await waitFor(() => {
-        const buttons = screen.getAllByText('校验中...')
+        const buttons = screen.getAllByText('校验中…')
         expect(buttons.length).toBeGreaterThan(0)
       })
     })
@@ -4655,10 +4655,10 @@ describe('MaintenancePage', () => {
 
       await waitFor(() => {
         expect(mockRunScrub).toHaveBeenCalledTimes(1)
-        expect(screen.getByRole('button', { name: '校验中...' })).toBeDisabled()
+        expect(screen.getByRole('button', { name: '校验中…' })).toBeDisabled()
       })
 
-      await user.click(screen.getByRole('button', { name: '校验中...' }))
+      await user.click(screen.getByRole('button', { name: '校验中…' }))
       expect(mockRunScrub).toHaveBeenCalledTimes(1)
 
       await act(async () => {
@@ -4922,7 +4922,7 @@ describe('MaintenancePage', () => {
       })
 
       await waitFor(() => {
-        expect(screen.getAllByText('校验中...').length).toBeGreaterThan(0)
+        expect(screen.getAllByText('校验中…').length).toBeGreaterThan(0)
       })
     })
   })

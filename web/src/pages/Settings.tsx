@@ -4188,7 +4188,7 @@ function SecurityCheckCard({
         {isLoading && !data ? (
           <div className="flex items-center gap-3 rounded-lg border border-divider bg-content2/40 px-4 py-4 text-sm text-default-500">
             <div className="h-5 w-5 rounded-full border-2 border-accent-primary border-t-transparent animate-spin" />
-            正在检查安全配置...
+            正在检查安全配置…
           </div>
         ) : error && !data ? (
           <div className="flex items-start gap-3 rounded-lg border border-warning/30 bg-warning/5 px-4 py-3 text-sm text-foreground">
@@ -6791,7 +6791,7 @@ export function SettingsPage() {
             <CardBody className="py-16">
               <div className="text-center">
                 <div className="w-12 h-12 border-3 border-accent-primary border-t-transparent rounded-full animate-spin mx-auto mb-4" />
-                <p className="text-default-500">加载设置...</p>
+                <p className="text-default-500">加载设置…</p>
               </div>
             </CardBody>
           </Card>

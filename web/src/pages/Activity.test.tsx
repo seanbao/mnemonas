@@ -488,7 +488,7 @@ describe('ActivityPage', () => {
       render(<ActivityPage />)
       
       expect(screen.getByRole('status', { name: '加载最近操作' })).toBeInTheDocument()
-      expect(screen.getByText('加载最近操作...')).toBeInTheDocument()
+      expect(screen.getByText('加载最近操作…')).toBeInTheDocument()
     })
 
     it('shows an invalid-home error instead of loading activity for non-admin users without a home directory', async () => {

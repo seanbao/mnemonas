@@ -122,7 +122,7 @@ describe('ShareAccessPage', () => {
     renderWithRouter('abc123')
     
     // Component uses custom CSS spinner, check for loading text
-    expect(screen.getByText('加载分享信息...')).toBeInTheDocument()
+    expect(screen.getByText('加载分享信息…')).toBeInTheDocument()
   })
 
   it('passes an abort signal when loading share info', async () => {
@@ -566,7 +566,7 @@ describe('ShareAccessPage', () => {
     renderWithRouter('abc123')
 
     await waitFor(() => {
-      expect(screen.getByText('加载文件夹内容...')).toBeInTheDocument()
+      expect(screen.getByText('加载文件夹内容…')).toBeInTheDocument()
     })
   })
 
