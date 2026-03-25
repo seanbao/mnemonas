@@ -45,7 +45,7 @@ Release workflow 预期生成以下产物：
 
 当前硬化分支已有以下验证证据；最终发布前应以最新 tag、Release workflow 结果和必要的环境验证为准：
 
-最近本地完整验证快照：验证目标 `3e946ffedea0`，`GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master` 通过，覆盖路线图与硬化进度台账职责边界文档收敛、WebDAV README 首页概述、客户端连接摘要、挂载指南兼容状态说明与兼容性矩阵同步增量、存储/配置 CDC 文档边界契约、`make check`、依赖安全扫描、示例配置、public-access 模板、proto 再生成稳定性、Rust fmt/test/clippy、proto-gen fmt/test/clippy、前端 lint/typecheck/unit/build、Playwright 375 个 E2E 用例、Docker build 和 Docker smoke。Docker smoke 使用 Docker 自动分配的 loopback 端口 `http://127.0.0.1:32871`。
+最近本地完整验证快照：验证目标 `c8c8bc106b03`，`GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master` 通过，覆盖路线图与硬化进度台账职责边界文档收敛、WebDAV README 首页概述、客户端连接摘要、挂载指南兼容状态说明与兼容性矩阵同步增量、存储/配置 CDC 文档边界契约、中文界面加载态、上传态、移动/复制菜单和多文件摘要文案省略号一致性，以及观测 E2E 对中文可见文案 ASCII 省略号的回归拦截、`make check`、依赖安全扫描、示例配置、public-access 模板、proto 再生成稳定性、Rust fmt/test/clippy、proto-gen fmt/test/clippy、前端 lint/typecheck/unit/build、Playwright 375 个 E2E 用例、Docker build 和 Docker smoke。Docker smoke 使用 Docker 自动分配的 loopback 端口 `http://127.0.0.1:32873`。
 
 - `GOTOOLCHAIN=local ./scripts/verify-changed.sh`
 - `GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master`
@@ -62,7 +62,7 @@ Release workflow 预期生成以下产物：
 - WebDAV curl smoke safety test：`scripts/test-webdav-client-smoke.sh`
 - Release workflow 增量验证：`make workflows-check`、`make scripts-check`、`./scripts/check-secret-leaks.sh`、`make toolchains-check`、`git diff --check`
 - Playwright E2E：`375 passed`
-- 前端单测：`3110 passed`
+- 前端单测：`3111 passed`
 - Docker build 和 `scripts/docker-smoke.sh`
 
 最终发布前如代码、脚本、配置、文档或 workflow 再次变更，应重跑对应验证。

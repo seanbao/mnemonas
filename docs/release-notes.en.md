@@ -45,7 +45,7 @@ Archives should include a top-level directory, `nasd`, `dataplane`, Web UI stati
 
 The current hardening branch has the following validation evidence. Final publication should use the latest tag, Release workflow result, and required environment validation as the source of truth:
 
-Latest local full-validation snapshot: validation target `3e946ffedea0`; `GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master` passed, covering the roadmap and hardening-progress responsibility-boundary documentation update, the WebDAV README overview, README client summary, mounting-guide compatibility-note alignment with the compatibility matrix, storage/configuration CDC documentation boundary contract, `make check`, dependency security scans, example config validation, public-access templates, protobuf regeneration stability, Rust fmt/test/clippy, proto-gen fmt/test/clippy, frontend lint/typecheck/unit/build, 375 Playwright E2E cases, Docker build, and Docker smoke. The Docker smoke used the Docker-assigned loopback port `http://127.0.0.1:32871`.
+Latest local full-validation snapshot: validation target `c8c8bc106b03`; `GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master` passed, covering the roadmap and hardening-progress responsibility-boundary documentation update, the WebDAV README overview, README client summary, mounting-guide compatibility-note alignment with the compatibility matrix, storage/configuration CDC documentation boundary contract, Chinese loading, upload, move/copy menu, and multi-file summary ellipsis consistency, plus the observability E2E regression guard for ASCII ellipses in Chinese visible text, `make check`, dependency security scans, example config validation, public-access templates, protobuf regeneration stability, Rust fmt/test/clippy, proto-gen fmt/test/clippy, frontend lint/typecheck/unit/build, 375 Playwright E2E cases, Docker build, and Docker smoke. The Docker smoke used the Docker-assigned loopback port `http://127.0.0.1:32873`.
 
 - `GOTOOLCHAIN=local ./scripts/verify-changed.sh`
 - `GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master`
@@ -62,7 +62,7 @@ Latest local full-validation snapshot: validation target `3e946ffedea0`; `GOTOOL
 - WebDAV curl smoke safety test: `scripts/test-webdav-client-smoke.sh`
 - Release workflow incremental validation: `make workflows-check`, `make scripts-check`, `./scripts/check-secret-leaks.sh`, `make toolchains-check`, `git diff --check`
 - Playwright E2E: `375 passed`
-- Frontend unit tests: `3110 passed`
+- Frontend unit tests: `3111 passed`
 - Docker build and `scripts/docker-smoke.sh`
 
 If code, scripts, configuration, documentation, or workflow files change again before release, rerun the matching validation.
