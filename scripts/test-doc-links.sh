@@ -901,6 +901,91 @@ EOF
 	git -C "$repo" add docs/configuration.md docs/configuration.en.md
 }
 
+write_security_checklist_contract_valid_docs() {
+	local repo="$1"
+	write_valid_docs "$repo"
+	cat >> "$repo/docs/README.md" <<'EOF'
+| [Security](security.md) | [Security](security.en.md) |
+| [Cloud Firewall](cloud-firewall-checklist.md) | [Cloud Firewall](cloud-firewall-checklist.en.md) |
+EOF
+	cat >> "$repo/docs/README.en.md" <<'EOF'
+| [Security](security.en.md) | Security hardening guide |
+| [Cloud Firewall](cloud-firewall-checklist.en.md) | Public cloud firewall checklist |
+EOF
+	cat > "$repo/docs/security.md" <<'EOF'
+# 安全加固指南
+
+[English](security.en.md) | 简体中文
+
+## 部署检查清单
+
+- [ ] 已通过服务器端 `initial-password.txt` 完成首次 Web UI 登录，并已修改管理员密码。
+- [ ] WebDAV 使用 `auth_type = "users"`，或已设置全局 Basic Auth 强密码。
+- [ ] `auth_type` 不是 `none`。
+- [ ] 公网部署时 `server.host = "127.0.0.1"`。
+- [ ] 管理员首页的首次部署检查没有认证关闭或 WebDAV 匿名访问提示。
+- [ ] dataplane gRPC/HTTP 端口保持在私有网络内。
+- [ ] Web UI “安全自检”没有 `block` 项。
+- [ ] 安全自检已覆盖 `allow_unsafe_no_auth` 和分享边界。
+- [ ] 已运行 `sudo mnemonas-doctor --public-domain <domain>`。
+- [ ] 已确认 HTTP 会跳转到同一域名的 HTTPS。
+- [ ] 配置文件不是符号链接。
+- [ ] 管理员账号冗余可用。
+- [ ] `initial-password.txt` 路径不存在。
+- [ ] 公开分享 JSON 响应边界已处理。
+- [ ] 匿名 WebDAV `PROPFIND` 被拒绝。
+- [ ] 没有 Web 后端直连。
+- [ ] 没有 dataplane 端口暴露。
+- [ ] 已按 [公网云防火墙复核清单](cloud-firewall-checklist.md) 确认只开放 `80/443`。
+- [ ] 生产环境使用 HTTPS。
+EOF
+	cat > "$repo/docs/security.en.md" <<'EOF'
+# Security Hardening Guide
+
+English | [简体中文](security.md)
+
+## Deployment Checklist
+
+- [ ] First login completed using server-side `initial-password.txt`.
+- [ ] WebDAV uses `auth_type = "users"` or strong global Basic Auth credentials.
+- [ ] `webdav.auth_type` is not `none`.
+- [ ] Public deployments use `server.host = "127.0.0.1"`.
+- [ ] The administrator Dashboard first-run checklist has no authentication-disabled or anonymous-WebDAV warning.
+- [ ] Dataplane gRPC/HTTP ports are private.
+- [ ] The Web UI security self-check has no `block` items.
+- [ ] The security self-check covers `allow_unsafe_no_auth` and share boundaries.
+- [ ] Run `sudo mnemonas-doctor --public-domain <domain>`.
+- [ ] HTTP redirects to HTTPS on the same public domain.
+- [ ] The non-symlink config file path has been verified.
+- [ ] The administrator-account redundancy status is available.
+- [ ] The absent `initial-password.txt` path has been verified.
+- [ ] The public-share JSON response boundaries have been reviewed.
+- [ ] Anonymous access is disabled and anonymous WebDAV `PROPFIND` is rejected.
+- [ ] There is no direct backend exposure.
+- [ ] There is no dataplane exposure.
+- [ ] The [Public cloud firewall checklist](cloud-firewall-checklist.en.md) has been applied and public rules expose only `80/443`.
+- [ ] Public deployments use HTTPS.
+EOF
+	cat > "$repo/docs/cloud-firewall-checklist.md" <<'EOF'
+# 公网云防火墙复核清单
+
+[English](cloud-firewall-checklist.en.md) | 简体中文
+EOF
+	cat > "$repo/docs/cloud-firewall-checklist.en.md" <<'EOF'
+# Public Cloud Firewall Checklist
+
+English | [简体中文](cloud-firewall-checklist.md)
+EOF
+	git -C "$repo" add docs/README.md docs/README.en.md docs/security.md docs/security.en.md docs/cloud-firewall-checklist.md docs/cloud-firewall-checklist.en.md
+}
+
+write_security_checklist_contract_missing_firewall_doc() {
+	local repo="$1"
+	write_security_checklist_contract_valid_docs "$repo"
+	perl -0pi -e 's{- \[ \] The \[Public cloud firewall checklist\]\(cloud-firewall-checklist\.en\.md\) has been applied and public rules expose only `80/443`\.\n}{}' "$repo/docs/security.en.md"
+	git -C "$repo" add docs/security.en.md
+}
+
 write_non_executable_script_reference_doc() {
 	local repo="$1"
 	write_root_readme_pair "$repo"
@@ -1052,6 +1137,7 @@ run_accepts "interpreter-script-reference" write_interpreter_script_reference_do
 run_accepts "encoded-restore-query-path" write_encoded_restore_query_path_doc
 run_accepts "encoded-api-path-query" write_encoded_api_path_query_doc
 run_accepts "storage-cdc-contract" write_storage_cdc_contract_valid_docs
+run_accepts "security-checklist-contract" write_security_checklist_contract_valid_docs
 run_rejects "missing-file" "missing link target: docs/missing.md" write_missing_file_doc
 run_rejects "escaping-link" "link escapes repository: ../outside.md" write_escaping_link_doc
 run_rejects "missing-anchor" "missing heading anchor: #missing-section" write_missing_anchor_doc
@@ -1088,6 +1174,7 @@ run_rejects "raw-restore-query-path" "URL-encode API path query values in docume
 run_rejects "raw-api-path-query" "URL-encode API path query values in documentation examples; use path=%2F..." write_raw_api_path_query_doc
 run_rejects "storage-cdc-contract-missing-boundary" "docs/storage-internals.en.md: missing storage CDC boundary text: current version history does not reference-count CDC chunks" write_storage_cdc_contract_missing_boundary_doc
 run_rejects "configuration-cdc-contract-missing-boundary" "docs/configuration.en.md: missing storage CDC boundary text: Current Go version history still uses whole-object CAS snapshots" write_configuration_cdc_contract_missing_boundary_doc
+run_rejects "security-checklist-contract-missing-firewall" "docs/security.en.md: missing public deployment security checklist text: [Public cloud firewall checklist](cloud-firewall-checklist.en.md)" write_security_checklist_contract_missing_firewall_doc
 run_rejects "security-check-doc-missing-id" "docs/api-reference.en.md: security-check documentation is missing ID: config_file_access" write_security_check_docs_missing_english_id
 run_rejects "security-check-doc-missing-chinese-id" "docs/api-reference.md: security-check documentation is missing ID: config_file_access" write_security_check_docs_missing_chinese_id
 run_rejects "security-check-doc-unknown-english-id" "docs/api-reference.en.md: security-check documentation lists unknown ID: ghost_probe" write_security_check_docs_unknown_english_id

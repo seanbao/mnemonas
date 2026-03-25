@@ -124,6 +124,60 @@ const storageCDCContractDocs = [
     ],
   },
 ]
+const securityChecklistContracts = [
+  {
+    file: 'docs/security.md',
+    required: [
+      '## 部署检查清单',
+      '`initial-password.txt` 完成首次 Web UI 登录',
+      'WebDAV 使用 `auth_type = "users"`',
+      '`auth_type` 不是 `none`',
+      'server.host = "127.0.0.1"',
+      '管理员首页的首次部署检查',
+      'dataplane gRPC/HTTP 端口',
+      'Web UI “安全自检”没有 `block` 项',
+      '`allow_unsafe_no_auth`',
+      'sudo mnemonas-doctor --public-domain <domain>',
+      'HTTP 会跳转到同一域名的 HTTPS',
+      '配置文件不是符号链接',
+      '管理员账号冗余可用',
+      '`initial-password.txt` 路径不存在',
+      '公开分享 JSON 响应边界',
+      '匿名 WebDAV `PROPFIND` 被拒绝',
+      'Web 后端直连',
+      'dataplane 端口暴露',
+      '[公网云防火墙复核清单](cloud-firewall-checklist.md)',
+      '只开放 `80/443`',
+      '生产环境使用 HTTPS',
+    ],
+  },
+  {
+    file: 'docs/security.en.md',
+    required: [
+      '## Deployment Checklist',
+      'First login completed using server-side `initial-password.txt`',
+      'WebDAV uses `auth_type = "users"`',
+      '`webdav.auth_type` is not `none`',
+      'server.host = "127.0.0.1"',
+      'administrator Dashboard first-run checklist',
+      'Dataplane gRPC/HTTP ports',
+      'Web UI security self-check has no `block` items',
+      '`allow_unsafe_no_auth`',
+      'sudo mnemonas-doctor --public-domain <domain>',
+      'HTTP redirects to HTTPS on the same public domain',
+      'non-symlink config file path',
+      'administrator-account redundancy',
+      'absent `initial-password.txt` path',
+      'public-share JSON response boundaries',
+      'anonymous WebDAV `PROPFIND` is rejected',
+      'direct backend exposure',
+      'dataplane exposure',
+      '[Public cloud firewall checklist](cloud-firewall-checklist.en.md)',
+      'expose only `80/443`',
+      'Public deployments use HTTPS',
+    ],
+  },
+]
 const requiredDocumentPairs = [
   ['README.md', 'README.en.md', 'English', 'Chinese'],
   ['CHANGELOG.md', 'CHANGELOG.en.md', 'English', 'Chinese'],
@@ -229,6 +283,21 @@ function checkStorageCDCContract() {
     for (const phrase of doc.forbidden) {
       if (text.includes(phrase)) {
         errors.push(`${doc.file}: avoid implying CDC chunk-level version deduplication: ${phrase}`)
+      }
+    }
+  }
+}
+
+function checkSecurityChecklistContract() {
+  for (const doc of securityChecklistContracts) {
+    const text = readOptionalFile(doc.file)
+    if (text === null) {
+      continue
+    }
+
+    for (const phrase of doc.required) {
+      if (!text.includes(phrase)) {
+        errors.push(`${doc.file}: missing public deployment security checklist text: ${phrase}`)
       }
     }
   }
@@ -439,6 +508,7 @@ checkDocumentationIndexCoverage()
 checkPairedHeadingLevelSequences()
 checkPairedLanguageLinks()
 checkStorageCDCContract()
+checkSecurityChecklistContract()
 
 for (const file of files) {
   const text = fs.readFileSync(path.join(repoRoot, file), 'utf8')
