@@ -48,6 +48,25 @@ func TestDefaultConfig(t *testing.T) {
 	}
 }
 
+func newRedirectingAlertEndpoint(t *testing.T, statusCode int) (string, *atomic.Bool) {
+	t.Helper()
+
+	targetHit := &atomic.Bool{}
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		targetHit.Store(true)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(target.Close)
+
+	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Location", target.URL+"/sink")
+		w.WriteHeader(statusCode)
+	}))
+	t.Cleanup(source.Close)
+
+	return source.URL, targetHit
+}
+
 func TestFormatBytes(t *testing.T) {
 	for name, tt := range map[string]struct {
 		bytes uint64
@@ -812,6 +831,38 @@ func TestSendWebhook_GETEncodesPayloadInQueryWithoutBody(t *testing.T) {
 	}
 }
 
+func TestSendWebhookDoesNotFollowRedirect(t *testing.T) {
+	sourceURL, targetHit := newRedirectingAlertEndpoint(t, http.StatusTemporaryRedirect)
+
+	monitor := NewMonitor(Config{}, t.TempDir(), zerolog.Nop())
+	err := monitor.sendWebhook(context.Background(), AlertPayload{
+		Type:      "storage_alert",
+		Level:     AlertLevelCritical,
+		Message:   "disk almost full",
+		Timestamp: time.Unix(1710000000, 123).UTC(),
+		Hostname:  "mnemonas-host",
+	}, Config{
+		WebhookURL:    sourceURL + "/hook?token=secret-token",
+		WebhookMethod: http.MethodPost,
+		WebhookHeaders: []string{
+			"Authorization: Bearer secret-token",
+			"X-MnemoNAS: alerts",
+		},
+	})
+	if err == nil {
+		t.Fatal("expected redirect response to fail webhook delivery")
+	}
+	if !strings.Contains(err.Error(), "redirect status 307") {
+		t.Fatalf("expected redirect status error, got %v", err)
+	}
+	if strings.Contains(err.Error(), "secret-token") || strings.Contains(err.Error(), "/hook") {
+		t.Fatalf("redirect error leaked webhook secret or path: %v", err)
+	}
+	if targetHit.Load() {
+		t.Fatal("webhook redirect target was contacted")
+	}
+}
+
 func TestSendWebhook_PostOmitsStoragePath(t *testing.T) {
 	reqCh := make(chan AlertPayload, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1208,6 +1259,39 @@ func TestSendEventSendsTelegramWhenConfigured(t *testing.T) {
 	}
 }
 
+func TestSendTelegramDoesNotFollowRedirect(t *testing.T) {
+	originalTelegramAPIBaseURL := telegramAPIBaseURL
+	defer func() { telegramAPIBaseURL = originalTelegramAPIBaseURL }()
+
+	sourceURL, targetHit := newRedirectingAlertEndpoint(t, http.StatusTemporaryRedirect)
+	telegramAPIBaseURL = sourceURL
+
+	monitor := NewMonitor(Config{}, t.TempDir(), zerolog.Nop())
+	err := monitor.sendEventTelegram(context.Background(), EventPayload{
+		Type:      "backup_run",
+		Level:     AlertLevelCritical,
+		Message:   "backup failed",
+		Timestamp: time.Unix(1710000000, 0).UTC(),
+		Hostname:  "mnemonas-host",
+	}, Config{
+		TelegramEnabled:  true,
+		TelegramBotToken: "123456:secret-token",
+		TelegramChatID:   "-1001234567890",
+	})
+	if err == nil {
+		t.Fatal("expected redirect response to fail Telegram delivery")
+	}
+	if !strings.Contains(err.Error(), "redirect status 307") {
+		t.Fatalf("expected redirect status error, got %v", err)
+	}
+	if strings.Contains(err.Error(), "secret-token") {
+		t.Fatalf("redirect error leaked Telegram token: %v", err)
+	}
+	if targetHit.Load() {
+		t.Fatal("Telegram redirect target was contacted")
+	}
+}
+
 func TestTelegramErrorDoesNotExposeBotToken(t *testing.T) {
 	originalTelegramAPIBaseURL := telegramAPIBaseURL
 	defer func() { telegramAPIBaseURL = originalTelegramAPIBaseURL }()
@@ -1318,6 +1402,34 @@ func TestSendEventSendsWeComWhenConfigured(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for WeCom alert")
+	}
+}
+
+func TestSendWeComDoesNotFollowRedirect(t *testing.T) {
+	sourceURL, targetHit := newRedirectingAlertEndpoint(t, http.StatusTemporaryRedirect)
+
+	monitor := NewMonitor(Config{}, t.TempDir(), zerolog.Nop())
+	err := monitor.sendEventWeCom(context.Background(), EventPayload{
+		Type:      "backup_run",
+		Level:     AlertLevelCritical,
+		Message:   "backup failed",
+		Timestamp: time.Unix(1710000000, 0).UTC(),
+		Hostname:  "mnemonas-host",
+	}, Config{
+		WeComEnabled:    true,
+		WeComWebhookURL: sourceURL + "/cgi-bin/webhook/send?key=secret-key",
+	})
+	if err == nil {
+		t.Fatal("expected redirect response to fail WeCom delivery")
+	}
+	if !strings.Contains(err.Error(), "redirect status 307") {
+		t.Fatalf("expected redirect status error, got %v", err)
+	}
+	if strings.Contains(err.Error(), "secret-key") || strings.Contains(err.Error(), "/cgi-bin/webhook/send") {
+		t.Fatalf("redirect error leaked WeCom webhook secret or path: %v", err)
+	}
+	if targetHit.Load() {
+		t.Fatal("WeCom redirect target was contacted")
 	}
 }
 
@@ -1455,6 +1567,34 @@ func TestSendEventSendsDingTalkWhenConfigured(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for DingTalk alert")
+	}
+}
+
+func TestSendDingTalkDoesNotFollowRedirect(t *testing.T) {
+	sourceURL, targetHit := newRedirectingAlertEndpoint(t, http.StatusTemporaryRedirect)
+
+	monitor := NewMonitor(Config{}, t.TempDir(), zerolog.Nop())
+	err := monitor.sendEventDingTalk(context.Background(), EventPayload{
+		Type:      "backup_run",
+		Level:     AlertLevelCritical,
+		Message:   "backup failed",
+		Timestamp: time.Unix(1710000000, 0).UTC(),
+		Hostname:  "mnemonas-host",
+	}, Config{
+		DingTalkEnabled:    true,
+		DingTalkWebhookURL: sourceURL + "/robot/send?access_token=secret-token",
+	})
+	if err == nil {
+		t.Fatal("expected redirect response to fail DingTalk delivery")
+	}
+	if !strings.Contains(err.Error(), "redirect status 307") {
+		t.Fatalf("expected redirect status error, got %v", err)
+	}
+	if strings.Contains(err.Error(), "secret-token") || strings.Contains(err.Error(), "/robot/send") {
+		t.Fatalf("redirect error leaked DingTalk webhook secret or path: %v", err)
+	}
+	if targetHit.Load() {
+		t.Fatal("DingTalk redirect target was contacted")
 	}
 }
 
