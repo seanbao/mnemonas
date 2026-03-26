@@ -126,12 +126,7 @@ write_community_files() {
 		SUPPORT.md \
 		SUPPORT.en.md \
 		SECURITY.md \
-		SECURITY.zh-CN.md \
-		.github/ISSUE_TEMPLATE/config.yml \
-		.github/ISSUE_TEMPLATE/bug_report.yml \
-		.github/ISSUE_TEMPLATE/feature_request.yml \
-		.github/ISSUE_TEMPLATE/question.yml \
-		.github/ISSUE_TEMPLATE/webdav_compatibility.yml
+		SECURITY.zh-CN.md
 	cat >.github/ISSUE_TEMPLATE/config.yml <<'EOF'
 blank_issues_enabled: true
 contact_links:
@@ -141,6 +136,103 @@ contact_links:
   - name: Support boundary / 支持边界
     url: https://github.com/seanbao/mnemonas/blob/master/SUPPORT.md
     about: Review support channels and required diagnostics before filing operational questions. 提交运维问题前先查看支持渠道和诊断要求。
+EOF
+	cat >SECURITY.md <<'EOF'
+# Security Policy
+
+**DO NOT** open a public GitHub issue for security vulnerabilities.
+
+Use GitHub's **Private vulnerability reporting** feature for this repository when available.
+
+A dedicated security email should only be added here after the mailbox is configured and monitored.
+
+Dataplane gRPC/HTTP ports `9090/9091` should not be exposed to public or untrusted networks.
+
+```bash
+make security-check NPM_AUDIT=1
+```
+
+MnemoNAS is not designed for direct internet exposure without a hardened proxy/VPN layer.
+EOF
+	cat >SECURITY.zh-CN.md <<'EOF'
+# 安全策略
+
+**不要**为安全漏洞创建公开 GitHub Issue。
+
+优先使用本仓库的 GitHub **Private vulnerability reporting** 功能。
+
+只有在专用安全邮箱已经配置并持续监控后，才应把邮箱地址加入本文件。
+
+dataplane gRPC/HTTP 端口 `9090/9091` 不应暴露到公网或不可信网络。
+
+```bash
+make security-check NPM_AUDIT=1
+```
+
+不建议在没有加固代理/VPN 的情况下直接暴露到公网。
+EOF
+	cat >.github/ISSUE_TEMPLATE/bug_report.yml <<'EOF'
+name: Bug report / 缺陷报告
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Reports should include reproduction steps, deployment context, and diagnostics. Sensitive values such as passwords, tokens, cookies, private URLs, and internal addresses must be removed before posting logs.
+  - type: textarea
+    id: diagnostics
+    attributes:
+      description: Relevant sanitized logs, `mnemonas-doctor`, Docker preflight, browser console output, screenshots, or request IDs.
+  - type: checkboxes
+    id: safety
+    attributes:
+      options:
+        - label: Security-sensitive exploit details are not posted publicly.
+EOF
+	cat >.github/ISSUE_TEMPLATE/feature_request.yml <<'EOF'
+name: Feature request / 功能建议
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Feature requests should describe the workflow, user impact, and affected surfaces. Security, data, deployment, and compatibility implications should be called out explicitly.
+  - type: textarea
+    id: risks
+    attributes:
+      description: Data migration, security, deployment, performance, or client-compatibility concerns.
+EOF
+	cat >.github/ISSUE_TEMPLATE/question.yml <<'EOF'
+name: Usage question / 使用问题
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Usage questions should include deployment context and diagnostics. Remove passwords, tokens, cookies, private URLs, internal addresses, and private file names before posting logs or configuration snippets.
+  - type: textarea
+    id: diagnostics
+    attributes:
+      description: Sanitized command output, logs, screenshots, or configuration excerpts.
+  - type: checkboxes
+    id: checklist
+    attributes:
+      options:
+        - label: Logs and configuration snippets are sanitized.
+EOF
+	cat >.github/ISSUE_TEMPLATE/webdav_compatibility.yml <<'EOF'
+name: WebDAV compatibility report / WebDAV 兼容性报告
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this form for WebDAV client compatibility reports, including successful validation, client-specific failures, and behavior that differs between clients. Remove passwords, tokens, cookies, private URLs, internal addresses, and private file names before posting logs or screenshots.
+  - type: textarea
+    id: diagnostics
+    attributes:
+      description: Sanitized `mnemonas-doctor`, client logs, server logs, request IDs, screenshots, or diagnostic bundle notes.
+  - type: checkboxes
+    id: checklist
+    attributes:
+      options:
+        - label: Security-sensitive exploit details are not posted publicly.
 EOF
 	cat >.github/pull_request_template.md <<'EOF'
 # Pull Request / 变更说明
@@ -171,11 +263,15 @@ EOF
 # 支持
 
 WebDAV 兼容性报告表单：https://github.com/seanbao/mnemonas/issues/new?template=webdav_compatibility.yml
+
+| 安全漏洞 | GitHub Private Vulnerability Reporting | 不要公开提交漏洞细节，详见 [SECURITY.zh-CN.md](SECURITY.zh-CN.md) |
 EOF
 	cat >SUPPORT.en.md <<'EOF'
 # Support
 
 WebDAV compatibility report form: https://github.com/seanbao/mnemonas/issues/new?template=webdav_compatibility.yml
+
+| Security vulnerability | GitHub Private Vulnerability Reporting | Do not post exploit details publicly; see [SECURITY.md](SECURITY.md) |
 EOF
 }
 
@@ -394,6 +490,42 @@ fi
 assert_file_contains "$output_dir/missing-support-route.err" "SUPPORT.en.md is missing required text"
 git checkout -q -- SUPPORT.en.md
 
+sed -i.bak '/SECURITY.zh-CN.md/d' SUPPORT.md
+rm -f SUPPORT.md.bak
+if ./scripts/release-readiness.sh --allow-dirty --skip-checklist >"$output_dir/missing-support-security-link.out" 2>"$output_dir/missing-support-security-link.err"; then
+	fail "release readiness accepted a missing localized security support link"
+fi
+assert_file_contains "$output_dir/missing-support-security-link.err" "SUPPORT.md is missing required text"
+assert_file_contains "$output_dir/missing-support-security-link.err" "SECURITY.zh-CN.md"
+git checkout -q -- SUPPORT.md
+
+sed -i.bak 's/Do not post exploit details publicly/Public disclosure guidance missing/' SUPPORT.en.md
+rm -f SUPPORT.en.md.bak
+if ./scripts/release-readiness.sh --allow-dirty --skip-checklist >"$output_dir/missing-support-security-warning.out" 2>"$output_dir/missing-support-security-warning.err"; then
+	fail "release readiness accepted a support page without public-disclosure warning"
+fi
+assert_file_contains "$output_dir/missing-support-security-warning.err" "SUPPORT.en.md is missing required text"
+assert_file_contains "$output_dir/missing-support-security-warning.err" "Do not post exploit details publicly"
+git checkout -q -- SUPPORT.en.md
+
+sed -i.bak '/Private vulnerability reporting/d' SECURITY.md
+rm -f SECURITY.md.bak
+if ./scripts/release-readiness.sh --allow-dirty --skip-checklist >"$output_dir/missing-security-private-reporting.out" 2>"$output_dir/missing-security-private-reporting.err"; then
+	fail "release readiness accepted a security policy without private reporting guidance"
+fi
+assert_file_contains "$output_dir/missing-security-private-reporting.err" "SECURITY.md is missing required text"
+assert_file_contains "$output_dir/missing-security-private-reporting.err" "Private vulnerability reporting"
+git checkout -q -- SECURITY.md
+
+sed -i.bak '\#dataplane gRPC/HTTP#d' SECURITY.zh-CN.md
+rm -f SECURITY.zh-CN.md.bak
+if ./scripts/release-readiness.sh --allow-dirty --skip-checklist >"$output_dir/missing-security-dataplane-boundary.out" 2>"$output_dir/missing-security-dataplane-boundary.err"; then
+	fail "release readiness accepted a security policy without dataplane exposure guidance"
+fi
+assert_file_contains "$output_dir/missing-security-dataplane-boundary.err" "SECURITY.zh-CN.md is missing required text"
+assert_file_contains "$output_dir/missing-security-dataplane-boundary.err" "dataplane gRPC/HTTP"
+git checkout -q -- SECURITY.zh-CN.md
+
 sed -i.bak '\#security/policy#d' .github/ISSUE_TEMPLATE/config.yml
 rm -f .github/ISSUE_TEMPLATE/config.yml.bak
 if ./scripts/release-readiness.sh --allow-dirty --skip-checklist >"$output_dir/missing-issue-config-link.out" 2>"$output_dir/missing-issue-config-link.err"; then
@@ -401,6 +533,42 @@ if ./scripts/release-readiness.sh --allow-dirty --skip-checklist >"$output_dir/m
 fi
 assert_file_contains "$output_dir/missing-issue-config-link.err" ".github/ISSUE_TEMPLATE/config.yml is missing required text"
 git checkout -q -- .github/ISSUE_TEMPLATE/config.yml
+
+sed -i.bak '/Sensitive values such as passwords/d' .github/ISSUE_TEMPLATE/bug_report.yml
+rm -f .github/ISSUE_TEMPLATE/bug_report.yml.bak
+if ./scripts/release-readiness.sh --allow-dirty --skip-checklist >"$output_dir/missing-bug-report-safety.out" 2>"$output_dir/missing-bug-report-safety.err"; then
+	fail "release readiness accepted a bug report template without sensitive-value guidance"
+fi
+assert_file_contains "$output_dir/missing-bug-report-safety.err" ".github/ISSUE_TEMPLATE/bug_report.yml is missing required text"
+assert_file_contains "$output_dir/missing-bug-report-safety.err" "Sensitive values such as passwords"
+git checkout -q -- .github/ISSUE_TEMPLATE/bug_report.yml
+
+sed -i.bak '/Security, data, deployment, and compatibility implications/d' .github/ISSUE_TEMPLATE/feature_request.yml
+rm -f .github/ISSUE_TEMPLATE/feature_request.yml.bak
+if ./scripts/release-readiness.sh --allow-dirty --skip-checklist >"$output_dir/missing-feature-request-impact.out" 2>"$output_dir/missing-feature-request-impact.err"; then
+	fail "release readiness accepted a feature request template without impact guidance"
+fi
+assert_file_contains "$output_dir/missing-feature-request-impact.err" ".github/ISSUE_TEMPLATE/feature_request.yml is missing required text"
+assert_file_contains "$output_dir/missing-feature-request-impact.err" "Security, data, deployment, and compatibility implications"
+git checkout -q -- .github/ISSUE_TEMPLATE/feature_request.yml
+
+sed -i.bak '/Remove passwords, tokens, cookies/d' .github/ISSUE_TEMPLATE/question.yml
+rm -f .github/ISSUE_TEMPLATE/question.yml.bak
+if ./scripts/release-readiness.sh --allow-dirty --skip-checklist >"$output_dir/missing-question-safety.out" 2>"$output_dir/missing-question-safety.err"; then
+	fail "release readiness accepted a question template without sensitive-value guidance"
+fi
+assert_file_contains "$output_dir/missing-question-safety.err" ".github/ISSUE_TEMPLATE/question.yml is missing required text"
+assert_file_contains "$output_dir/missing-question-safety.err" "Remove passwords, tokens, cookies"
+git checkout -q -- .github/ISSUE_TEMPLATE/question.yml
+
+sed -i.bak '/Remove passwords, tokens, cookies/d' .github/ISSUE_TEMPLATE/webdav_compatibility.yml
+rm -f .github/ISSUE_TEMPLATE/webdav_compatibility.yml.bak
+if ./scripts/release-readiness.sh --allow-dirty --skip-checklist >"$output_dir/missing-webdav-safety.out" 2>"$output_dir/missing-webdav-safety.err"; then
+	fail "release readiness accepted a WebDAV template without sensitive-value guidance"
+fi
+assert_file_contains "$output_dir/missing-webdav-safety.err" ".github/ISSUE_TEMPLATE/webdav_compatibility.yml is missing required text"
+assert_file_contains "$output_dir/missing-webdav-safety.err" "Remove passwords, tokens, cookies"
+git checkout -q -- .github/ISSUE_TEMPLATE/webdav_compatibility.yml
 
 sed -i.bak '/Data, Security, And Deployment Impact/d' .github/pull_request_template.md
 rm -f .github/pull_request_template.md.bak

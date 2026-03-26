@@ -96,11 +96,48 @@ check_support_routes() {
 
 	require_file_contains "SUPPORT.md" "$webdav_report_url"
 	require_file_contains "SUPPORT.en.md" "$webdav_report_url"
+	require_file_contains "SUPPORT.md" "[SECURITY.zh-CN.md](SECURITY.zh-CN.md)"
+	require_file_contains "SUPPORT.en.md" "[SECURITY.md](SECURITY.md)"
+	require_file_contains "SUPPORT.md" "不要公开提交漏洞细节"
+	require_file_contains "SUPPORT.en.md" "Do not post exploit details publicly"
+}
+
+check_security_policy() {
+	require_file_contains "SECURITY.md" "**DO NOT** open a public GitHub issue for security vulnerabilities."
+	require_file_contains "SECURITY.md" "Use GitHub's **Private vulnerability reporting** feature"
+	require_file_contains "SECURITY.md" "A dedicated security email should only be added here after the mailbox is configured and monitored."
+	require_file_contains "SECURITY.md" "Dataplane gRPC/HTTP ports \`9090/9091\` should not be exposed to public or untrusted networks"
+	require_file_contains "SECURITY.md" "make security-check NPM_AUDIT=1"
+	require_file_contains "SECURITY.md" "MnemoNAS is not designed for direct internet exposure without a hardened proxy/VPN layer"
+
+	require_file_contains "SECURITY.zh-CN.md" "**不要**为安全漏洞创建公开 GitHub Issue。"
+	require_file_contains "SECURITY.zh-CN.md" "优先使用本仓库的 GitHub **Private vulnerability reporting** 功能。"
+	require_file_contains "SECURITY.zh-CN.md" "只有在专用安全邮箱已经配置并持续监控后，才应把邮箱地址加入本文件。"
+	require_file_contains "SECURITY.zh-CN.md" "dataplane gRPC/HTTP 端口 \`9090/9091\` 不应暴露到公网或不可信网络"
+	require_file_contains "SECURITY.zh-CN.md" "make security-check NPM_AUDIT=1"
+	require_file_contains "SECURITY.zh-CN.md" "不建议在没有加固代理/VPN 的情况下直接暴露到公网"
 }
 
 check_issue_template_config() {
 	require_file_contains ".github/ISSUE_TEMPLATE/config.yml" "https://github.com/seanbao/mnemonas/security/policy"
 	require_file_contains ".github/ISSUE_TEMPLATE/config.yml" "https://github.com/seanbao/mnemonas/blob/master/SUPPORT.md"
+}
+
+check_issue_templates() {
+	require_file_contains ".github/ISSUE_TEMPLATE/bug_report.yml" "Sensitive values such as passwords, tokens, cookies, private URLs, and internal addresses must be removed before posting logs."
+	require_file_contains ".github/ISSUE_TEMPLATE/bug_report.yml" "Relevant sanitized logs, \`mnemonas-doctor\`, Docker preflight, browser console output, screenshots, or request IDs."
+	require_file_contains ".github/ISSUE_TEMPLATE/bug_report.yml" "Security-sensitive exploit details are not posted publicly."
+
+	require_file_contains ".github/ISSUE_TEMPLATE/feature_request.yml" "Security, data, deployment, and compatibility implications should be called out explicitly."
+	require_file_contains ".github/ISSUE_TEMPLATE/feature_request.yml" "Data migration, security, deployment, performance, or client-compatibility concerns."
+
+	require_file_contains ".github/ISSUE_TEMPLATE/question.yml" "Remove passwords, tokens, cookies, private URLs, internal addresses, and private file names before posting logs or configuration snippets."
+	require_file_contains ".github/ISSUE_TEMPLATE/question.yml" "Sanitized command output, logs, screenshots, or configuration excerpts."
+	require_file_contains ".github/ISSUE_TEMPLATE/question.yml" "Logs and configuration snippets are sanitized."
+
+	require_file_contains ".github/ISSUE_TEMPLATE/webdav_compatibility.yml" "Remove passwords, tokens, cookies, private URLs, internal addresses, and private file names before posting logs or screenshots."
+	require_file_contains ".github/ISSUE_TEMPLATE/webdav_compatibility.yml" "Sanitized \`mnemonas-doctor\`, client logs, server logs, request IDs, screenshots, or diagnostic bundle notes."
+	require_file_contains ".github/ISSUE_TEMPLATE/webdav_compatibility.yml" "Security-sensitive exploit details are not posted publicly."
 }
 
 check_pull_request_template() {
@@ -156,10 +193,12 @@ check_community_files() {
 	done
 
 	check_support_routes
+	check_security_policy
 	check_issue_template_config
+	check_issue_templates
 	check_pull_request_template
 
-	print_kv "community" "required community health files and collaboration routes present"
+	print_kv "community" "required community health files, support/security routes, and issue template safety guidance present"
 }
 
 extract_validation_target() {
