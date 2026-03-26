@@ -124,6 +124,82 @@ check_issue_template_config() {
 	require_file_contains ".github/ISSUE_TEMPLATE/config.yml" "https://github.com/seanbao/mnemonas/blob/master/SUPPORT.md"
 }
 
+dependabot_has_update() {
+	local ecosystem="$1"
+	local directory="$2"
+	local path=".github/dependabot.yml"
+
+	awk -v expected_ecosystem="$ecosystem" -v expected_directory="$directory" '
+		function clean_scalar(line, value) {
+			value = line
+			sub(/^[^:]*:[[:space:]]*/, "", value)
+			sub(/[[:space:]]+#.*$/, "", value)
+			gsub(/"/, "", value)
+			gsub(/\047/, "", value)
+			sub(/^[[:space:]]+/, "", value)
+			sub(/[[:space:]]+$/, "", value)
+			return value
+		}
+
+		function flush_update() {
+			if (in_update && ecosystem == expected_ecosystem && directory == expected_directory) {
+				found = 1
+			}
+		}
+
+		/^[[:space:]]*-[[:space:]]*package-ecosystem:[[:space:]]*/ {
+			flush_update()
+			in_update = 1
+			ecosystem = clean_scalar($0)
+			directory = ""
+			next
+		}
+
+		in_update && /^[[:space:]]*directory:[[:space:]]*/ {
+			directory = clean_scalar($0)
+			next
+		}
+
+		END {
+			flush_update()
+			exit(found ? 0 : 1)
+		}
+	' "$path"
+}
+
+require_dependabot_update() {
+	local ecosystem="$1"
+	local directory="$2"
+
+	if ! dependabot_has_update "$ecosystem" "$directory"; then
+		fail "missing required Dependabot update: $ecosystem $directory"
+	fi
+}
+
+check_dependabot_config() {
+	require_file_contains ".github/dependabot.yml" "version: 2"
+	require_file_contains ".github/dependabot.yml" "updates:"
+
+	require_dependabot_update "gomod" "/"
+	require_dependabot_update "cargo" "/dataplane"
+	require_dependabot_update "cargo" "/tools/proto-gen"
+	require_dependabot_update "npm" "/web"
+	require_dependabot_update "github-actions" "/"
+	require_dependabot_update "docker" "/"
+}
+
+check_torture_workflow() {
+	local path=".github/workflows/torture.yml"
+
+	require_file_contains "$path" "workflow_dispatch:"
+	require_file_contains "$path" "schedule:"
+	require_file_contains "$path" "cron:"
+	require_file_contains "$path" "permissions:"
+	require_file_contains "$path" "contents: read"
+	require_file_contains "$path" "RUN_LIVE_FAULTS: '0'"
+	require_file_contains "$path" "run: make test-torture"
+}
+
 check_issue_templates() {
 	require_file_contains ".github/ISSUE_TEMPLATE/bug_report.yml" "Sensitive values such as passwords, tokens, cookies, private URLs, and internal addresses must be removed before posting logs."
 	require_file_contains ".github/ISSUE_TEMPLATE/bug_report.yml" "Relevant sanitized logs, \`mnemonas-doctor\`, Docker preflight, browser console output, screenshots, or request IDs."
@@ -181,12 +257,14 @@ check_community_files() {
 		"SUPPORT.en.md"
 		"SECURITY.md"
 		"SECURITY.zh-CN.md"
+		".github/dependabot.yml"
 		".github/ISSUE_TEMPLATE/config.yml"
 		".github/ISSUE_TEMPLATE/bug_report.yml"
 		".github/ISSUE_TEMPLATE/feature_request.yml"
 		".github/ISSUE_TEMPLATE/question.yml"
 		".github/ISSUE_TEMPLATE/webdav_compatibility.yml"
 		".github/pull_request_template.md"
+		".github/workflows/torture.yml"
 	)
 
 	for path in "${required_files[@]}"; do
@@ -195,11 +273,13 @@ check_community_files() {
 
 	check_support_routes
 	check_security_policy
+	check_dependabot_config
+	check_torture_workflow
 	check_issue_template_config
 	check_issue_templates
 	check_pull_request_template
 
-	print_kv "community" "required community health files, support/security routes, and issue template safety guidance present"
+	print_kv "community" "required community health files, dependency-update baseline, torture workflow baseline, support/security routes, and issue template safety guidance present"
 }
 
 extract_validation_target() {

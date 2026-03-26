@@ -114,7 +114,7 @@ EOF
 }
 
 write_community_files() {
-	mkdir -p .github/ISSUE_TEMPLATE
+	mkdir -p .github/ISSUE_TEMPLATE .github/workflows
 	touch \
 		README.md \
 		README.en.md \
@@ -136,6 +136,89 @@ contact_links:
   - name: Support boundary / 支持边界
     url: https://github.com/seanbao/mnemonas/blob/master/SUPPORT.md
     about: Review support channels and required diagnostics before filing operational questions. 提交运维问题前先查看支持渠道和诊断要求。
+EOF
+	cat >.github/dependabot.yml <<'EOF'
+version: 2
+updates:
+  - package-ecosystem: "gomod"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "go"
+
+  - package-ecosystem: "cargo"
+    directory: "/dataplane"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "rust"
+
+  - package-ecosystem: "cargo"
+    directory: "/tools/proto-gen"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 3
+    labels:
+      - "dependencies"
+      - "rust"
+      - "proto"
+
+  - package-ecosystem: "npm"
+    directory: "/web"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "frontend"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 3
+    labels:
+      - "dependencies"
+      - "ci"
+
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    labels:
+      - "dependencies"
+      - "docker"
+EOF
+	cat >.github/workflows/torture.yml <<'EOF'
+name: Torture
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 18 * * *'
+
+permissions:
+  contents: read
+
+jobs:
+  safe-torture:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run non-destructive torture matrix
+        env:
+          RUN_LIVE_FAULTS: '0'
+        run: make test-torture
 EOF
 	cat >SECURITY.md <<'EOF'
 # Security Policy
@@ -542,6 +625,32 @@ fi
 assert_file_contains "$output_dir/blank-issues-enabled.err" ".github/ISSUE_TEMPLATE/config.yml is missing required text"
 assert_file_contains "$output_dir/blank-issues-enabled.err" "blank_issues_enabled: false"
 git checkout -q -- .github/ISSUE_TEMPLATE/config.yml
+
+sed -i.bak 's#/tools/proto-gen#/tools/proto-gen-missing#' .github/dependabot.yml
+rm -f .github/dependabot.yml.bak
+if ./scripts/release-readiness.sh --allow-dirty --skip-checklist >"$output_dir/missing-dependabot-proto.out" 2>"$output_dir/missing-dependabot-proto.err"; then
+	fail "release readiness accepted a missing Dependabot proto generator update"
+fi
+assert_file_contains "$output_dir/missing-dependabot-proto.err" "missing required Dependabot update: cargo /tools/proto-gen"
+git checkout -q -- .github/dependabot.yml
+
+sed -i.bak '/workflow_dispatch:/d' .github/workflows/torture.yml
+rm -f .github/workflows/torture.yml.bak
+if ./scripts/release-readiness.sh --allow-dirty --skip-checklist >"$output_dir/missing-torture-dispatch.out" 2>"$output_dir/missing-torture-dispatch.err"; then
+	fail "release readiness accepted a torture workflow without manual dispatch"
+fi
+assert_file_contains "$output_dir/missing-torture-dispatch.err" ".github/workflows/torture.yml is missing required text"
+assert_file_contains "$output_dir/missing-torture-dispatch.err" "workflow_dispatch:"
+git checkout -q -- .github/workflows/torture.yml
+
+sed -i.bak "s/RUN_LIVE_FAULTS: '0'/RUN_LIVE_FAULTS: '1'/" .github/workflows/torture.yml
+rm -f .github/workflows/torture.yml.bak
+if ./scripts/release-readiness.sh --allow-dirty --skip-checklist >"$output_dir/missing-torture-safe-mode.out" 2>"$output_dir/missing-torture-safe-mode.err"; then
+	fail "release readiness accepted a torture workflow without the non-destructive live-faults guard"
+fi
+assert_file_contains "$output_dir/missing-torture-safe-mode.err" ".github/workflows/torture.yml is missing required text"
+assert_file_contains "$output_dir/missing-torture-safe-mode.err" "RUN_LIVE_FAULTS: '0'"
+git checkout -q -- .github/workflows/torture.yml
 
 sed -i.bak '/Sensitive values such as passwords/d' .github/ISSUE_TEMPLATE/bug_report.yml
 rm -f .github/ISSUE_TEMPLATE/bug_report.yml.bak
