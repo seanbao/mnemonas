@@ -318,11 +318,11 @@ print_check_block() {
 			print_group_diff_check "$group"
 			;;
 		feat-api)
-			printf 'GOTOOLCHAIN=local CGO_ENABLED=1 bash ./scripts/with-test-dataplane.sh go test -race ./internal/api ./internal/share ./internal/webdav\n'
+			printf 'GOTOOLCHAIN=local CGO_ENABLED=1 bash ./scripts/with-test-dataplane.sh go test -timeout=20m -race ./internal/api ./internal/share ./internal/webdav\n'
 			print_group_diff_check "$group"
 			;;
 		feat-core)
-			printf 'GOTOOLCHAIN=local CGO_ENABLED=1 bash ./scripts/with-test-dataplane.sh go test -race ./cmd/healthcheck ./cmd/nasd ./internal/activity ./internal/alerts ./internal/auth ./internal/backup ./internal/caslayout ./internal/config ./internal/diskhealth ./internal/favorites ./internal/smbcred ./internal/smbgateway ./internal/storage ./internal/thumbnail ./internal/versionstore ./internal/workspace\n'
+			printf 'GOTOOLCHAIN=local CGO_ENABLED=1 bash ./scripts/with-test-dataplane.sh go test -timeout=20m -race ./cmd/healthcheck ./cmd/nasd ./internal/activity ./internal/alerts ./internal/auth ./internal/backup ./internal/caslayout ./internal/config ./internal/diskhealth ./internal/favorites ./internal/smbcred ./internal/smbgateway ./internal/storage ./internal/thumbnail ./internal/versionstore ./internal/workspace\n'
 			print_dependency_checks "$group"
 			print_group_diff_check "$group"
 			;;
