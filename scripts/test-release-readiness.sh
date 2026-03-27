@@ -33,6 +33,8 @@ write_checklists() {
 - [ ] 变更感知完整验证通过：`GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master`
 - [ ] 文档检查通过：`make docs-check`
 - [ ] 脚本检查通过：`make scripts-check`
+- [ ] 依赖安全检查通过：`make security-check NPM_AUDIT=1`
+- [ ] Docker 构建和烟测通过：`make docker-check`
 - [ ] 发布前就绪摘要通过：`./scripts/release-readiness.sh`
 - [ ] `./scripts/plan-hardening-commits.sh --fail-on-manual` 确认没有未归类路径
 - [ ] 发布后下载 GitHub Release 产物，并运行 `./scripts/verify-release-artifacts.sh --version <tag> --repository seanbao/mnemonas --require-targets --check-image <artifact-dir>`，验证 release 产物。
@@ -44,6 +46,8 @@ EOF
 - [ ] Run full change-aware validation: `GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master`
 - [ ] Run documentation checks: `make docs-check`
 - [ ] Run script checks: `make scripts-check`
+- [ ] Run dependency security checks: `make security-check NPM_AUDIT=1`
+- [ ] Run Docker build and smoke checks: `make docker-check`
 - [ ] Run release readiness summary: `./scripts/release-readiness.sh`
 - [ ] Confirm `./scripts/plan-hardening-commits.sh --fail-on-manual` reports no unclassified paths
 - [ ] After publication, download the GitHub Release artifacts and run `./scripts/verify-release-artifacts.sh --version <tag> --repository seanbao/mnemonas --require-targets --check-image <artifact-dir>` to verify release artifacts.
@@ -67,6 +71,8 @@ EOF
 - `GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master`
 - `make docs-check`
 - `make scripts-check`
+- `make security-check NPM_AUDIT=1`
+- `make docker-check`
 - `./scripts/test-release-tag.sh`
 - `./scripts/test-release-package.sh`
 - `./scripts/test-release-artifacts.sh`
@@ -92,6 +98,8 @@ EOF
 - `GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master`
 - `make docs-check`
 - `make scripts-check`
+- `make security-check NPM_AUDIT=1`
+- `make docker-check`
 - `./scripts/test-release-tag.sh`
 - `./scripts/test-release-package.sh`
 - `./scripts/test-release-artifacts.sh`
@@ -418,6 +426,42 @@ fi
 assert_file_contains "$output_dir/missing-docs-checklist.err" "CHANGELOG.en.md is missing required text"
 assert_file_contains "$output_dir/missing-docs-checklist.err" "make docs-check"
 git checkout -q -- CHANGELOG.en.md
+
+sed -i.bak '/security-check/d' CHANGELOG.en.md
+rm -f CHANGELOG.en.md.bak
+if ./scripts/release-readiness.sh --allow-dirty --allow-post-validation-changes >"$output_dir/missing-security-checklist.out" 2>"$output_dir/missing-security-checklist.err"; then
+	fail "release readiness accepted a missing dependency security checklist command"
+fi
+assert_file_contains "$output_dir/missing-security-checklist.err" "CHANGELOG.en.md is missing required text"
+assert_file_contains "$output_dir/missing-security-checklist.err" "make security-check NPM_AUDIT=1"
+git checkout -q -- CHANGELOG.en.md
+
+sed -i.bak '/docker-check/d' CHANGELOG.en.md
+rm -f CHANGELOG.en.md.bak
+if ./scripts/release-readiness.sh --allow-dirty --allow-post-validation-changes >"$output_dir/missing-docker-checklist.out" 2>"$output_dir/missing-docker-checklist.err"; then
+	fail "release readiness accepted a missing Docker checklist command"
+fi
+assert_file_contains "$output_dir/missing-docker-checklist.err" "CHANGELOG.en.md is missing required text"
+assert_file_contains "$output_dir/missing-docker-checklist.err" "make docker-check"
+git checkout -q -- CHANGELOG.en.md
+
+sed -i.bak '/security-check/d' docs/release-notes.en.md
+rm -f docs/release-notes.en.md.bak
+if ./scripts/release-readiness.sh --allow-dirty --allow-post-validation-changes >"$output_dir/missing-release-notes-security.out" 2>"$output_dir/missing-release-notes-security.err"; then
+	fail "release readiness accepted release notes without the dependency security command"
+fi
+assert_file_contains "$output_dir/missing-release-notes-security.err" "docs/release-notes.en.md is missing required text"
+assert_file_contains "$output_dir/missing-release-notes-security.err" "make security-check NPM_AUDIT=1"
+git checkout -q -- docs/release-notes.en.md
+
+sed -i.bak '/docker-check/d' docs/release-notes.en.md
+rm -f docs/release-notes.en.md.bak
+if ./scripts/release-readiness.sh --allow-dirty --allow-post-validation-changes >"$output_dir/missing-release-notes-docker.out" 2>"$output_dir/missing-release-notes-docker.err"; then
+	fail "release readiness accepted release notes without the Docker command"
+fi
+assert_file_contains "$output_dir/missing-release-notes-docker.err" "docs/release-notes.en.md is missing required text"
+assert_file_contains "$output_dir/missing-release-notes-docker.err" "make docker-check"
+git checkout -q -- docs/release-notes.en.md
 
 sed -i.bak '/release-readiness/d' CHANGELOG.en.md
 rm -f CHANGELOG.en.md.bak

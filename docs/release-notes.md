@@ -25,7 +25,7 @@
 - 收紧发布就绪摘要：记录的完整验证目标之后如出现非发布文档变更，`release-readiness` 默认失败，并要求刷新完整验证或显式草稿放行。
 - `release-readiness` 现在要求四份 hardening 证据文档都存在，并且都记录同一个完整验证目标，避免发布前证据缺失被静默跳过。
 - `release-readiness` 还会检查双语 release notes 草稿记录当前完整验证目标，避免发布说明中的验证快照滞后。
-- `release-readiness` 会要求 `CHANGELOG.md` 和 `CHANGELOG.en.md` 的发布清单包含 `make docs-check`，避免最终发布核验遗漏文档检查。
+- `release-readiness` 会要求 `CHANGELOG.md` 和 `CHANGELOG.en.md` 的发布清单包含文档检查、依赖安全检查和 Docker 构建烟测命令，避免最终发布核验遗漏关键本地门禁。
 - `release-readiness` 会拒绝不是当前 HEAD 祖先的 base ref，避免用旁支范围生成误导性的发布就绪摘要。
 - 文档检查会拒绝 API 示例中可复制的 `?path=/...` 裸路径查询，要求恢复和收藏检查等 `path` 查询示例使用 `%2F...` 编码形式。
 - 文档检查会要求安全加固指南的公网部署清单保留初始密码、WebDAV 认证、doctor、公网防火墙、匿名 WebDAV、直连后端和 dataplane 暴露等关键复核项。
@@ -47,12 +47,14 @@ Release workflow 预期生成以下产物：
 
 当前硬化分支已有以下验证证据；最终发布前应以最新 tag、Release workflow 结果和必要的环境验证为准：
 
-最近本地完整验证快照：验证目标 `913f87a1f2dd`，`GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master` 通过，覆盖路线图与硬化进度台账职责边界文档收敛、WebDAV README 首页概述、客户端连接摘要、挂载指南兼容状态说明与兼容性矩阵同步增量、存储/配置 CDC 文档边界契约、中文界面加载态、上传态、移动/复制菜单和多文件摘要文案省略号一致性、提醒通道 token 占位不再使用 ASCII 省略号片段、扩展点 secret 示例占位改用明确尖括号占位，并由文档检查拒绝纯省略号 secret 占位，以及观测 E2E 对中文可见文案 ASCII 省略号的回归拦截、release-readiness 对 CHANGELOG 文档检查命令的发布清单门禁、公网部署安全清单关键项文档契约、`make check`、依赖安全扫描、示例配置、public-access 模板、proto 再生成稳定性、Rust fmt/test/clippy、proto-gen fmt/test/clippy、前端 lint/typecheck/unit/build、Playwright 375 个 E2E 用例、Docker build 和 Docker smoke。Docker smoke 使用 Docker 自动分配的 loopback 端口 `http://127.0.0.1:32877`。
+最近本地完整验证快照：验证目标 `69d14f644f9c`，`GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master` 通过，覆盖路线图与硬化进度台账职责边界文档收敛、WebDAV README 首页概述、客户端连接摘要、挂载指南兼容状态说明与兼容性矩阵同步增量、存储/配置 CDC 文档边界契约、中文界面加载态、上传态、移动/复制菜单和多文件摘要文案省略号一致性、提醒通道 token 占位不再使用 ASCII 省略号片段、扩展点 secret 示例占位改用明确尖括号占位，并由文档检查拒绝 JSON/TOML/YAML 纯省略号 secret 占位，包含短横线和点号字段名的 key/token 变体，以及观测 E2E 对中文可见文案 ASCII 省略号的回归拦截、release-readiness 对 CHANGELOG 文档检查命令的发布清单门禁、公网部署安全清单关键项文档契约、`make check`、依赖安全扫描、示例配置、public-access 模板、proto 再生成稳定性、Rust fmt/test/clippy、proto-gen fmt/test/clippy、前端 lint/typecheck/unit/build、Playwright 375 个 E2E 用例、Docker build 和 Docker smoke。Docker smoke 使用 Docker 自动分配的 loopback 端口 `http://127.0.0.1:32879`。
 
 - `GOTOOLCHAIN=local ./scripts/verify-changed.sh`
 - `GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master`
 - `make scripts-check`
 - `make docs-check`
+- `make security-check NPM_AUDIT=1`
+- `make docker-check`
 - `./scripts/test-release-tag.sh`
 - `./scripts/test-release-package.sh`
 - `./scripts/test-release-artifacts.sh`
