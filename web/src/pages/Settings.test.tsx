@@ -3080,9 +3080,13 @@ describe('SettingsPage', () => {
 
       const wecomWebhookInput = await screen.findByLabelText('企业微信 Webhook URL')
       expect(wecomWebhookInput).toHaveAttribute('type', 'url')
+      expect(wecomWebhookInput).toHaveAttribute('placeholder', 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=<key>')
 
       const dingTalkWebhookInput = await screen.findByLabelText('钉钉 Webhook URL')
       expect(dingTalkWebhookInput).toHaveAttribute('type', 'url')
+      expect(dingTalkWebhookInput).toHaveAttribute('placeholder', 'https://oapi.dingtalk.com/robot/send?access_token=<token>')
+
+      expect(screen.getByLabelText('Telegram Bot Token')).toHaveAttribute('placeholder', '123456:<token>')
 
       await openTab(user, '分享')
 
