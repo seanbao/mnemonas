@@ -7,9 +7,9 @@ body:
   - type: markdown
     attributes:
       value: |
-        Usage questions should include deployment context and diagnostics. For confirmed defects, use the bug report form instead.
+        Usage questions should include deployment context and diagnostics. Remove passwords, tokens, cookies, private URLs, internal addresses, and private file names before posting logs or configuration snippets. For confirmed defects, use the bug report form instead.
 
-        使用问题应包含部署背景和诊断信息。已确认缺陷应使用缺陷报告表单。
+        使用问题应包含部署背景和诊断信息。粘贴日志或配置片段前，应移除密码、Token、Cookie、私密 URL、内网地址和私有文件名。已确认缺陷应使用缺陷报告表单。
   - type: textarea
     id: question
     attributes:
