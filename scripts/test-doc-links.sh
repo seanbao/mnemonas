@@ -584,6 +584,62 @@ EOF
 	git -C "$repo" add README.md README.en.md
 }
 
+write_ellipsis_secret_placeholder_doc() {
+	local repo="$1"
+	write_root_readme_pair "$repo"
+	cat >> "$repo/README.en.md" <<'EOF'
+
+```toml
+[storage.s3]
+access_key = "..."
+secret_key = "..."
+```
+EOF
+	git -C "$repo" add README.md README.en.md
+}
+
+write_json_ellipsis_secret_placeholder_doc() {
+	local repo="$1"
+	write_root_readme_pair "$repo"
+	cat >> "$repo/README.en.md" <<'EOF'
+
+```json
+{
+  "secret": "..."
+}
+```
+EOF
+	git -C "$repo" add README.md README.en.md
+}
+
+write_yaml_ellipsis_secret_placeholder_doc() {
+	local repo="$1"
+	write_root_readme_pair "$repo"
+	cat >> "$repo/README.en.md" <<'EOF'
+
+```yaml
+storage:
+  s3:
+    access_key: "..."
+    secret_key: ...
+```
+EOF
+	git -C "$repo" add README.md README.en.md
+}
+
+write_truncated_non_secret_ellipsis_doc() {
+	local repo="$1"
+	write_root_readme_pair "$repo"
+	cat >> "$repo/README.en.md" <<'EOF'
+
+```text
+go test ./...
+https://github.com/example/project/compare/v0.1.0...HEAD
+```
+EOF
+	git -C "$repo" add README.md README.en.md
+}
+
 write_chinese_doc_english_phrase_doc() {
 	local repo="$1"
 	write_root_readme_pair "$repo"
@@ -1131,6 +1187,7 @@ run_accepts "english-doc-phrase-allowed" write_english_doc_phrase_allowed_doc
 run_accepts "chinese-code-fence-phrase-allowed" write_chinese_code_fence_phrase_allowed_doc
 run_accepts "status-emoji-code-fence-allowed" write_status_emoji_code_fence_allowed_doc
 run_accepts "legacy-faq-marker-code-fence-allowed" write_legacy_faq_marker_code_fence_allowed_doc
+run_accepts "truncated-non-secret-ellipsis" write_truncated_non_secret_ellipsis_doc
 run_accepts "security-check-doc-ids" write_security_check_docs_valid
 run_accepts "direct-executable-script-reference" write_direct_executable_script_reference_doc
 run_accepts "interpreter-script-reference" write_interpreter_script_reference_doc
@@ -1164,6 +1221,9 @@ run_rejects "promotional-wording" "avoid promotional wording in project document
 run_rejects "promotional-wording-case" "avoid promotional wording in project documentation: one-click" write_case_insensitive_promotional_wording_doc
 run_rejects "second-person-wording" "avoid second-person wording in project documentation" write_second_person_wording_doc
 run_rejects "copyable-placeholder-credentials" "avoid copyable placeholder credentials in project documentation: your-secure-password" write_copyable_placeholder_credentials_doc
+run_rejects "ellipsis-secret-placeholder" "avoid ellipsis-only secret placeholders in project documentation" write_ellipsis_secret_placeholder_doc
+run_rejects "json-ellipsis-secret-placeholder" "avoid ellipsis-only secret placeholders in project documentation" write_json_ellipsis_secret_placeholder_doc
+run_rejects "yaml-ellipsis-secret-placeholder" "avoid ellipsis-only secret placeholders in project documentation" write_yaml_ellipsis_secret_placeholder_doc
 run_rejects "chinese-doc-english-phrase" "avoid English phrasing in Chinese documentation: preview config" write_chinese_doc_english_phrase_doc
 run_rejects "english-doc-chinese-text" "avoid non-English text outside language-navigation links in English documentation" write_english_doc_chinese_text_doc
 run_rejects "english-json-fence-chinese-text" "avoid non-English text outside language-navigation links in English documentation" write_english_json_fence_chinese_text_doc
