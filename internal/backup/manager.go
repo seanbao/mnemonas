@@ -79,8 +79,9 @@ const (
 	redactedBackupSecretValue        = "<redacted>"
 	backupSensitiveNamePartPattern   = `(?:[A-Za-z0-9_.-]|%[0-9A-Fa-f]{2})*`
 	backupSensitiveKeySeparator      = `(?:[_-]|%5f|%2d)?`
-	backupSensitiveNamePattern       = `(?:` + backupSensitiveNamePartPattern + `(?:password|passwd|secret|token|credential|access` + backupSensitiveKeySeparator + `key|secret` + backupSensitiveKeySeparator + `key|api` + backupSensitiveKeySeparator + `key|authorization|signature)` + backupSensitiveNamePartPattern + `|pass|auth|sig|user|username)`
-	backupSensitiveHeaderNamePattern = `(?:` + backupSensitiveNamePartPattern + `(?:password|passwd|secret|token|credential|access` + backupSensitiveKeySeparator + `key|secret` + backupSensitiveKeySeparator + `key|api` + backupSensitiveKeySeparator + `key|signature)` + backupSensitiveNamePartPattern + `|pass|sig|user|username)`
+	backupSensitiveWordSeparator     = `(?:[_-]|%5f|%2d)`
+	backupSensitiveNamePattern       = `(?:` + backupSensitiveNamePartPattern + `(?:password|passwd|secret|token|credential|access` + backupSensitiveKeySeparator + `key|secret` + backupSensitiveKeySeparator + `key|account` + backupSensitiveKeySeparator + `key|api` + backupSensitiveKeySeparator + `key|authorization|signature|` + backupSensitiveWordSeparator + `pass)` + backupSensitiveNamePartPattern + `|pass|auth|sig|user|username)`
+	backupSensitiveHeaderNamePattern = `(?:` + backupSensitiveNamePartPattern + `(?:password|passwd|secret|token|credential|access` + backupSensitiveKeySeparator + `key|secret` + backupSensitiveKeySeparator + `key|account` + backupSensitiveKeySeparator + `key|api` + backupSensitiveKeySeparator + `key|signature|` + backupSensitiveWordSeparator + `pass)` + backupSensitiveNamePartPattern + `|pass|sig|user|username)`
 )
 
 var restoreAvailableBytesFunc = restoreAvailableBytes
