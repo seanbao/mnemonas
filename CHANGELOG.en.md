@@ -133,7 +133,7 @@ This project follows [Semantic Versioning 2.0.0](https://semver.org/).
 
 ---
 
-## [0.1.0] - Unreleased
+## 0.1.0 - Unreleased
 
 First public release target.
 
@@ -195,7 +195,7 @@ First public release target.
 - [ ] Confirm `./scripts/plan-hardening-commits.sh --fail-on-manual` reports no unclassified paths
 - [ ] Run release readiness summary: `./scripts/release-readiness.sh`
 - [ ] Update `CHANGELOG.md`, `CHANGELOG.en.md`, README version references, and [release notes draft](docs/release-notes.en.md)
-- [ ] Create and push a Git tag
+- [ ] Create and push a Git tag, for example `git tag -a <tag> -m "Release <tag>"` followed by `git push origin <tag>`
 - [ ] After publication, download the GitHub Release artifacts and run `./scripts/verify-release-artifacts.sh --version <tag> --repository seanbao/mnemonas --require-targets --check-image <artifact-dir>` to verify release artifacts, checksums, and container image tags
 - [ ] After publication, verify release archive installation, Docker release image startup, and public documentation links
 
@@ -213,5 +213,4 @@ First public release target.
 - `0.1.0-beta.1`: beta, feature-complete but may contain bugs
 - `0.1.0-rc.1`: release candidate
 
-[Unreleased]: https://github.com/seanbao/mnemonas/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/seanbao/mnemonas/releases/tag/v0.1.0
+[Unreleased]: https://github.com/seanbao/mnemonas/commits/HEAD
