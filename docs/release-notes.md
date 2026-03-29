@@ -26,6 +26,7 @@
 - 收紧发布就绪摘要：记录的完整验证目标之后如出现非发布文档变更，`release-readiness` 默认失败，并要求刷新完整验证或显式草稿放行。
 - `release-readiness` 现在要求四份 hardening 证据文档都存在，并且都记录同一个完整验证目标，避免发布前证据缺失被静默跳过。
 - `release-readiness` 还会检查双语 release notes 草稿记录当前完整验证目标，避免发布说明中的验证快照滞后。
+- `release-readiness` 会要求双语 release notes 的发布后下载和 artifact verifier 示例使用 `<tag>` 占位，避免首次发布前把固定版本号写入可复制命令。
 - `release-readiness` 会要求 `CHANGELOG.md` 和 `CHANGELOG.en.md` 的发布清单包含文档检查、依赖安全检查和 Docker 构建烟测命令，避免最终发布核验遗漏关键本地门禁。
 - `release-readiness` 会要求 Dependabot 配置覆盖 Go、Rust 数据面、Rust proto 生成器、Web npm、GitHub Actions 和 Docker 依赖更新入口，避免发布分支丢失依赖维护基线。
 - `release-readiness` 会要求 `.github/workflows/ci.yml` 和 `.github/workflows/release.yml` 保留关键 CI、E2E、Docker smoke、release tag 校验、release artifact 校验和发布权限基线，避免核心自动化路径在发布前失效。
@@ -57,7 +58,7 @@ Release workflow 预期生成以下产物：
 
 当前硬化分支已有以下验证证据；最终发布前应以最新 tag、Release workflow 结果和必要的环境验证为准：
 
-最近本地完整验证快照：验证目标 `dc14fbff0394`，`GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master` 通过，覆盖通知通道拒绝 HTTP 重定向、备份外部命令输出新增云存储 `account_key` 与 rclone `_pass`/`-pass` 类型字段脱敏，以及此前路线图、WebDAV 文档、CDC 文档边界、中文可见文案、release-readiness 基线、社区协作入口、文档契约、备份恢复演练指南文档契约、Go 测试超时门禁、批量恢复预检失败处置 E2E、release notes 候选版本边界门禁、公网 go-live 后端端口 TCP 可达性失败判定、timeout/gtimeout 兼容增量、Docker smoke curl 超时上限、`/health` 成功响应 readiness、配置期望版本时的响应体校验、portable curl timeout 参数形式、登录后重定向到 `/login` 或公开分享路由时回退首页的前端边界，以及 E2E/benchmark/故障注入脚本显式 `BASE_URL` 对凭据、query、fragment、编码边界字符和点段的拒绝与尾斜杠规范化增量；同时覆盖 `make check`、依赖安全扫描、示例配置、public-access 模板、proto 再生成稳定性、Rust fmt/test/clippy、proto-gen fmt/test/clippy、前端 lint/typecheck/unit/build、Playwright 377 个 E2E 用例、Docker build、Docker image `sha256:5b5ec2e8b0a3d3386992de32b928efdb1156774ad1f7763b1defd85d2603f528` 和 Docker smoke。Docker smoke 使用 Docker 自动分配的 loopback 端口 `http://127.0.0.1:32779`。
+最近本地完整验证快照：验证目标 `0097bbf8e138`，`GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master` 通过，覆盖 release notes 发布后核验命令 `<tag>` 占位门禁、通知通道拒绝 HTTP 重定向、备份外部命令输出新增云存储 `account_key` 与 rclone `_pass`/`-pass` 类型字段脱敏，以及此前路线图、WebDAV 文档、CDC 文档边界、中文可见文案、release-readiness 基线、社区协作入口、文档契约、备份恢复演练指南文档契约、Go 测试超时门禁、批量恢复预检失败处置 E2E、release notes 候选版本边界门禁、公网 go-live 后端端口 TCP 可达性失败判定、timeout/gtimeout 兼容增量、Docker smoke curl 超时上限、`/health` 成功响应 readiness、配置期望版本时的响应体校验、portable curl timeout 参数形式、登录后重定向到 `/login` 或公开分享路由时回退首页的前端边界，以及 E2E/benchmark/故障注入脚本显式 `BASE_URL` 对凭据、query、fragment、编码边界字符和点段的拒绝与尾斜杠规范化增量；同时覆盖 `make check`、依赖安全扫描、示例配置、public-access 模板、proto 再生成稳定性、Rust fmt/test/clippy、proto-gen fmt/test/clippy、前端 lint/typecheck/unit/build、Playwright 377 个 E2E 用例、Docker build、Docker image `sha256:223fd7ea49c809169490b8d2984e92c17aa2baa9b8e8bc06480b40c8a79bffd7` 和 Docker smoke。Docker smoke 使用 Docker 自动分配的 loopback 端口 `http://127.0.0.1:32780`。
 
 - `GOTOOLCHAIN=local ./scripts/verify-changed.sh`
 - `GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master`
