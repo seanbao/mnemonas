@@ -91,12 +91,12 @@ Release workflow 预期生成以下产物：
 
 ```bash
 mkdir -p dist/release-check
-gh release download v0.1.0 \
+gh release download <tag> \
   --repo seanbao/mnemonas \
   --dir dist/release-check
 
 ./scripts/verify-release-artifacts.sh \
-  --version v0.1.0 \
+  --version <tag> \
   --repository seanbao/mnemonas \
   --require-targets \
   --check-image \

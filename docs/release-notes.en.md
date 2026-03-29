@@ -91,12 +91,12 @@ After the release tag is published, download the GitHub Release artifacts and ru
 
 ```bash
 mkdir -p dist/release-check
-gh release download v0.1.0 \
+gh release download <tag> \
   --repo seanbao/mnemonas \
   --dir dist/release-check
 
 ./scripts/verify-release-artifacts.sh \
-  --version v0.1.0 \
+  --version <tag> \
   --repository seanbao/mnemonas \
   --require-targets \
   --check-image \
