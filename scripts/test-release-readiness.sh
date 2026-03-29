@@ -87,8 +87,8 @@ EOF
 ## 发布后核验
 
 ```bash
-gh release download v0.1.0 --repo seanbao/mnemonas --dir dist/release-check
-./scripts/verify-release-artifacts.sh --version v0.1.0 --repository seanbao/mnemonas --require-targets --check-image dist/release-check
+gh release download <tag> --repo seanbao/mnemonas --dir dist/release-check
+./scripts/verify-release-artifacts.sh --version <tag> --repository seanbao/mnemonas --require-targets --check-image dist/release-check
 ```
 
 ## 已知限制
@@ -121,8 +121,8 @@ EOF
 ## Post-Publish Verification
 
 ```bash
-gh release download v0.1.0 --repo seanbao/mnemonas --dir dist/release-check
-./scripts/verify-release-artifacts.sh --version v0.1.0 --repository seanbao/mnemonas --require-targets --check-image dist/release-check
+gh release download <tag> --repo seanbao/mnemonas --dir dist/release-check
+./scripts/verify-release-artifacts.sh --version <tag> --repository seanbao/mnemonas --require-targets --check-image dist/release-check
 ```
 
 ## Known Limitations
