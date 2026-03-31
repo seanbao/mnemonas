@@ -11,6 +11,9 @@ GO_CMD_ENV ?= GOTOOLCHAIN=local
 GO_LIST_ENV ?= $(GO_CMD_ENV)
 GO_LINT_ENV ?= $(GO_CMD_ENV)
 GO_LINT_PACKAGES ?=
+GO_TEST_TIMEOUT ?= 20m
+GO_TEST_FLAGS ?= -timeout=$(GO_TEST_TIMEOUT)
+GO_RACE_TEST_FLAGS ?= $(GO_TEST_FLAGS) -race
 GOLANGCI_LINT ?= golangci-lint
 SKIP_GOLANGCI_LINT ?= 0
 GOVULNCHECK_VERSION ?= v1.3.0
@@ -142,7 +145,7 @@ dev:
 test:
 	@echo "🧪 Running Go tests..."
 	@$(RESOLVE_GO_PACKAGES); \
-	$(GO_CMD_ENV) CGO_ENABLED=1 bash ./scripts/with-test-dataplane.sh go test -v -race $$packages
+	$(GO_CMD_ENV) CGO_ENABLED=1 bash ./scripts/with-test-dataplane.sh go test $(GO_RACE_TEST_FLAGS) -v $$packages
 	@echo "🦀 Running Rust tests..."
 	cd dataplane && cargo test --locked
 	cargo test --manifest-path tools/proto-gen/Cargo.toml --locked
@@ -162,7 +165,7 @@ coverage:
 	@mkdir -p coverage
 	@GO_LIST_ENV="$(GO_COVERAGE_ENV)"; \
 	$(RESOLVE_GO_PACKAGES); \
-	CGO_ENABLED=0 $(GO_COVERAGE_ENV) bash ./scripts/with-test-dataplane.sh go test -coverprofile=coverage/go.out $$packages
+	CGO_ENABLED=0 $(GO_COVERAGE_ENV) bash ./scripts/with-test-dataplane.sh go test $(GO_TEST_FLAGS) -coverprofile=coverage/go.out $$packages
 	@coverage="$$($(GO_COVERAGE_ENV) go tool cover -func=coverage/go.out | awk '/^total:/ { gsub("%", "", $$3); print $$3 }')"; \
 	awk -v coverage="$$coverage" -v min="$(GO_COVERAGE_MIN)" 'BEGIN { \
 		if ((coverage + 0) < (min + 0)) { \
@@ -361,7 +364,7 @@ quick-check:
 	@echo "🚀 Quick check..."
 	@$(RESOLVE_GO_PACKAGES); \
 	$(GO_CMD_ENV) CGO_ENABLED=0 go build $$packages; \
-	$(GO_CMD_ENV) CGO_ENABLED=0 bash ./scripts/with-test-dataplane.sh go test -short $$packages
+	$(GO_CMD_ENV) CGO_ENABLED=0 bash ./scripts/with-test-dataplane.sh go test $(GO_TEST_FLAGS) -short $$packages
 	cd dataplane && cargo check --locked
 	cargo check --manifest-path tools/proto-gen/Cargo.toml --locked
 	@echo "✅ Quick check passed"
