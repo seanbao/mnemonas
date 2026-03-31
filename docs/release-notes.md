@@ -27,9 +27,12 @@
 - `release-readiness` 还会检查双语 release notes 草稿记录当前完整验证目标，避免发布说明中的验证快照滞后。
 - `release-readiness` 会要求 `CHANGELOG.md` 和 `CHANGELOG.en.md` 的发布清单包含文档检查、依赖安全检查和 Docker 构建烟测命令，避免最终发布核验遗漏关键本地门禁。
 - `release-readiness` 会要求 Dependabot 配置覆盖 Go、Rust 数据面、Rust proto 生成器、Web npm、GitHub Actions 和 Docker 依赖更新入口，避免发布分支丢失依赖维护基线。
+- `release-readiness` 会要求 `.github/workflows/ci.yml` 和 `.github/workflows/release.yml` 保留关键 CI、E2E、Docker smoke、release tag 校验、release artifact 校验和发布权限基线，避免核心自动化路径在发布前失效。
+- `release-readiness` 会要求 `Makefile` 保留 `check`、`verify-changed`、`quick-check`、`security-check`、`docker-check` 和 `test-torture` 等核心本地门禁目标，避免 CI、发布清单和维护者文档引用的入口在发布前失效。
 - `release-readiness` 会要求 `.github/workflows/torture.yml` 保留手动入口、定时入口、只读权限、`RUN_LIVE_FAULTS: '0'` 非破坏性开关和 `make test-torture` 执行入口，避免长期回归工作流在发布前失效。
 - `release-readiness` 会要求关闭空白 Issue，并检查缺陷报告、使用问题、功能建议和 WebDAV 兼容性 Issue 表单保留敏感信息脱敏、诊断信息和安全影响提示，避免公开协作入口绕过安全提示。
 - `release-readiness` 会检查安全策略和支持说明保留私密漏洞报告入口、禁止公开漏洞细节、dataplane 端口不外露、依赖安全检查和公网直连限制等关键提示。
+- `release-readiness` 会要求发布清单和双语 release notes 保留 `mnemonas-doctor --public-domain`、`scripts/public-go-live-smoke.sh` 和 `cloud-firewall-checklist` 入口，避免公网部署环境复核从最终发布流程中遗漏。
 - `release-readiness` 会拒绝不是当前 HEAD 祖先的 base ref，避免用旁支范围生成误导性的发布就绪摘要。
 - Go 测试入口现在保留 20 分钟包级超时，避免重负载 race 包在完整分支验证中被 Go 默认 10 分钟超时中断。
 - 文档检查会拒绝 API 示例中可复制的 `?path=/...` 裸路径查询，要求恢复和收藏检查等 `path` 查询示例使用 `%2F...` 编码形式。
@@ -52,7 +55,7 @@ Release workflow 预期生成以下产物：
 
 当前硬化分支已有以下验证证据；最终发布前应以最新 tag、Release workflow 结果和必要的环境验证为准：
 
-最近本地完整验证快照：验证目标 `1c9ee8bd9fac`，`GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master` 通过，覆盖路线图与硬化进度台账职责边界文档收敛、WebDAV README 首页概述、客户端连接摘要、挂载指南兼容状态说明与兼容性矩阵同步增量、存储/配置 CDC 文档边界契约、中文界面加载态、上传态、移动/复制菜单和多文件摘要文案省略号一致性、提醒通道 token 占位不再使用 ASCII 省略号片段、扩展点 secret 示例占位改用明确尖括号占位，并由文档检查拒绝 JSON/TOML/YAML 纯省略号 secret 占位，包含短横线和点号字段名的 key/token 变体，以及观测 E2E 对中文可见文案 ASCII 省略号的回归拦截、release-readiness 对 CHANGELOG 文档检查、依赖安全检查、Docker 构建烟测命令、安全策略和支持说明安全提示的发布清单门禁、Dependabot 基线门禁、torture workflow 基线门禁、空白 Issue 关闭门禁、Issue 表单安全提示门禁、公网部署安全清单关键项文档契约、Go 包测试超时门禁稳定性、`make check`、依赖安全扫描、示例配置、public-access 模板、proto 再生成稳定性、Rust fmt/test/clippy、proto-gen fmt/test/clippy、前端 lint/typecheck/unit/build、Playwright 375 个 E2E 用例、Docker build 和 Docker smoke。Docker smoke 使用 Docker 自动分配的 loopback 端口 `http://127.0.0.1:32885`。
+最近本地完整验证快照：验证目标 `d87a3a4d2df2`，`GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master` 通过，覆盖路线图与硬化进度台账职责边界文档收敛、WebDAV README 首页概述、客户端连接摘要、挂载指南兼容状态说明与兼容性矩阵同步增量、存储/配置 CDC 文档边界契约、中文界面加载态、上传态、移动/复制菜单和多文件摘要文案省略号一致性、提醒通道 token 占位不再使用 ASCII 省略号片段、扩展点 secret 示例占位改用明确尖括号占位，并由文档检查拒绝 JSON/TOML/YAML 纯省略号 secret 占位，包含短横线和点号字段名的 key/token 变体，以及观测 E2E 对中文可见文案 ASCII 省略号的回归拦截、release-readiness 对 CHANGELOG 文档检查、依赖安全检查、Docker 构建烟测命令、安全策略和支持说明安全提示的发布清单门禁、Dependabot 基线门禁、CI/Release workflow 基线门禁、Makefile 核心本地门禁目标基线、torture workflow 基线门禁、空白 Issue 关闭门禁、Issue 表单安全提示门禁、公网部署安全清单关键项文档契约、Go 包测试超时门禁稳定性、`make check`、依赖安全扫描、示例配置、public-access 模板、proto 再生成稳定性、Rust fmt/test/clippy、proto-gen fmt/test/clippy、前端 lint/typecheck/unit/build、Playwright 375 个 E2E 用例、Docker build、Docker image `sha256:3400ac78c2d70342912f496deb1433249686065a82081e9205f85c3ce59cf1a6` 和 Docker smoke。Docker smoke 使用 Docker 自动分配的 loopback 端口 `http://127.0.0.1:32887`。
 
 - `GOTOOLCHAIN=local ./scripts/verify-changed.sh`
 - `GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master`
@@ -60,6 +63,9 @@ Release workflow 预期生成以下产物：
 - `make docs-check`
 - `make security-check NPM_AUDIT=1`
 - `make docker-check`
+- `sudo mnemonas-doctor --public-domain <domain>`
+- `./scripts/public-go-live-smoke.sh <domain>`
+- `docs/cloud-firewall-checklist.md`
 - `./scripts/test-release-tag.sh`
 - `./scripts/test-release-package.sh`
 - `./scripts/test-release-artifacts.sh`
@@ -94,7 +100,7 @@ gh release download v0.1.0 \
   dist/release-check
 ```
 
-随后应完成至少一次归档安装 smoke、Docker release 镜像启动 smoke、公开文档链接检查，以及公网部署环境的 DNS、防火墙、TLS 和云安全组复核。
+随后应完成至少一次归档安装 smoke、Docker release 镜像启动 smoke、公开文档链接检查，以及公网部署环境的 `mnemonas-doctor --public-domain`、外部网络 `public-go-live-smoke.sh`、DNS、防火墙、TLS 和云安全组复核。
 
 ## 已知限制
 
@@ -109,6 +115,6 @@ gh release download v0.1.0 \
 - 确认本草稿已按最终 tag、验证结果和产物名称更新。
 - 确认 `git status --short --branch` 干净。
 - 确认 `./scripts/plan-hardening-commits.sh --fail-on-manual` 没有待分组路径。
-- 运行 `./scripts/release-readiness.sh`，确认提交标题、临时 `fixup!` / `squash!` 提交、hardening 验证证据、发布文档命令、安全策略、Dependabot 基线、torture workflow 基线、Issue 表单安全提示和 community health 文件均通过检查。
+- 运行 `./scripts/release-readiness.sh`，确认提交标题、临时 `fixup!` / `squash!` 提交、hardening 验证证据、发布文档命令、公网部署复核命令、安全策略、Dependabot 基线、CI/Release workflow 基线、Makefile 核心本地门禁目标基线、torture workflow 基线、Issue 表单安全提示和 community health 文件均通过检查。
 - 创建并推送 tag 后，确认 Release workflow 成功。
 - 发布后运行 release artifact verifier 并记录结果。

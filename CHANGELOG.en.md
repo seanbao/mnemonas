@@ -63,9 +63,12 @@ This project follows [Semantic Versioning 2.0.0](https://semver.org/).
 - `scripts/release-readiness.sh` checks that both release-notes drafts record the current full-validation target, preventing stale validation snapshots in release notes.
 - `scripts/release-readiness.sh` requires the `CHANGELOG.md` and `CHANGELOG.en.md` release checklists to include documentation, dependency-security, and Docker build/smoke commands, preventing key local gates from being omitted from final release verification.
 - `scripts/release-readiness.sh` requires the Dependabot configuration to cover Go, Rust dataplane, Rust proto generator, Web npm, GitHub Actions, and Docker dependency update entry points, preventing the release branch from losing its dependency-maintenance baseline.
+- `scripts/release-readiness.sh` requires `.github/workflows/ci.yml` and `.github/workflows/release.yml` to retain key CI, E2E, Docker smoke, release-tag validation, release-artifact verification, and publication-permission baselines, preventing core automation paths from being lost before release.
+- `scripts/release-readiness.sh` requires `Makefile` to retain core local gate targets such as `check`, `verify-changed`, `quick-check`, `security-check`, `docker-check`, and `test-torture`, preventing CI, release-checklist, and maintainer-documentation entry points from being lost before release.
 - `scripts/release-readiness.sh` requires `.github/workflows/torture.yml` to retain manual and scheduled triggers, read-only permissions, the `RUN_LIVE_FAULTS: '0'` non-destructive guard, and the `make test-torture` entry point, preventing the long-running regression workflow from being lost before release.
 - `scripts/release-readiness.sh` requires blank Issues to stay disabled and checks that the bug report, usage question, feature request, and WebDAV compatibility Issue Forms retain sensitive-data redaction, diagnostic, and security-impact guidance, preventing public collaboration entry points from bypassing safety prompts.
 - `scripts/release-readiness.sh` checks that the security policy and support guide retain private vulnerability reporting, public-disclosure warnings, dataplane port exposure boundaries, dependency-security checks, and direct-public-exposure limitations.
+- `scripts/release-readiness.sh` requires the release checklist and bilingual release notes to retain the `mnemonas-doctor --public-domain`, `scripts/public-go-live-smoke.sh`, and `cloud-firewall-checklist` entry points, preventing public-deployment environment review from being omitted during final release preparation.
 - `scripts/release-readiness.sh` rejects a base ref that is not an ancestor of the current HEAD, preventing misleading release-readiness summaries from sibling branch ranges.
 - `scripts/release-readiness.sh` checks that local commit subjects on the current release branch follow Conventional Commits and rejects leftover `fixup!` / `squash!` temporary commits.
 - `make test`, `make quick-check`, `make coverage`, torture tests, and hardening group-planning commands use a 20-minute Go package timeout so heavy race packages are not interrupted by Go's default 10-minute timeout.
@@ -184,6 +187,8 @@ First public release target.
 - [ ] Run script checks: `make scripts-check`
 - [ ] Run dependency security checks: `make security-check NPM_AUDIT=1`
 - [ ] Run Docker build and smoke checks: `make docker-check`
+- [ ] If public access is planned, run on the server: `sudo mnemonas-doctor --public-domain <domain>`, and review the [Public cloud firewall checklist](docs/cloud-firewall-checklist.en.md) for DNS, firewall, TLS, and cloud security groups
+- [ ] If public access is planned, run from an external network: `./scripts/public-go-live-smoke.sh <domain>` to confirm HTTPS, same-domain redirects, and private backend ports
 - [ ] Confirm `./scripts/plan-hardening-commits.sh --fail-on-manual` reports no unclassified paths
 - [ ] Run release readiness summary: `./scripts/release-readiness.sh`
 - [ ] Update `CHANGELOG.md`, `CHANGELOG.en.md`, README version references, and [release notes draft](docs/release-notes.en.md)
