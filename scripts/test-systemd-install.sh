@@ -141,6 +141,14 @@ assert_file_not_contains() {
   fi
 }
 
+assert_file_not_contains_line() {
+  local path="$1"
+  local unexpected="$2"
+  if grep -Fxq -- "$unexpected" "$path"; then
+    fail "$path unexpectedly contains line: $unexpected"
+  fi
+}
+
 assert_mode() {
   local path="$1"
   local expected="$2"
@@ -1456,6 +1464,7 @@ run_systemd_newline_rejection_test() {
 
   [[ "$status" -ne 0 ]] || fail "newline in DATAPLANE_GRPC_ADDR was accepted"
   assert_file_contains "$case_dir/install.log" "DATAPLANE_GRPC_ADDR cannot contain newline characters"
+  assert_file_not_contains_line "$case_dir/install.log" "Environment=INJECTED=1"
   [[ ! -d "$install_dir/bin" ]] || fail "installer created files after rejecting systemd newline"
 }
 
@@ -1487,6 +1496,7 @@ run_systemd_control_character_rejection_test() {
 
   [[ "$status" -ne 0 ]] || fail "control character in STORAGE_ROOT was accepted"
   assert_file_contains "$case_dir/install.log" "STORAGE_ROOT cannot contain control characters"
+  assert_file_not_contains "$case_dir/install.log" "$storage_root"
   [[ ! -d "$install_dir/bin" ]] || fail "installer created files after rejecting control-character path"
 }
 

@@ -24,6 +24,15 @@ fail() {
   exit 1
 }
 
+format_log_value() {
+  local value="$1"
+  if [[ "$value" == *[[:cntrl:]]* ]]; then
+    printf '%q' "$value"
+  else
+    printf '%s' "$value"
+  fi
+}
+
 require_root() {
   [[ "$(id -u)" -eq 0 ]] || fail "run this uninstaller as root, for example: sudo $0"
 }
@@ -79,23 +88,23 @@ require_no_symlink_components() {
 require_absolute_path() {
   local value="$1"
   local label="$2"
-  [[ "$value" == /* ]] || fail "$label must be an absolute path: $value"
-  [[ "$value" != *[[:space:]]* ]] || fail "$label cannot contain whitespace: $value"
-  [[ "$value" != *[[:cntrl:]]* ]] || fail "$label cannot contain control characters: $value"
-  ! path_has_parent_segment "$value" || fail "$label cannot contain parent directory segments: $value"
+  [[ "$value" == /* ]] || fail "$label must be an absolute path: $(format_log_value "$value")"
+  [[ "$value" != *[[:space:]]* ]] || fail "$label cannot contain whitespace: $(format_log_value "$value")"
+  [[ "$value" != *[[:cntrl:]]* ]] || fail "$label cannot contain control characters: $(format_log_value "$value")"
+  ! path_has_parent_segment "$value" || fail "$label cannot contain parent directory segments: $(format_log_value "$value")"
 }
 
 require_safe_account_name() {
   local value="$1"
   local label="$2"
   [[ -n "$value" ]] || fail "$label cannot be empty"
-  [[ "$value" != *[[:space:]]* ]] || fail "$label cannot contain whitespace: $value"
-  [[ "$value" != *$'\n'* && "$value" != *$'\r'* ]] || fail "$label cannot contain newline characters: $value"
-  [[ "$value" != *[[:cntrl:]]* ]] || fail "$label cannot contain control characters: $value"
-  [[ "$value" != *%* ]] || fail "$label cannot contain systemd specifiers (%): $value"
-  [[ "$value" != *\"* && "$value" != *\\* ]] || fail "$label cannot contain quote or backslash characters: $value"
+  [[ "$value" != *[[:space:]]* ]] || fail "$label cannot contain whitespace: $(format_log_value "$value")"
+  [[ "$value" != *$'\n'* && "$value" != *$'\r'* ]] || fail "$label cannot contain newline characters: $(format_log_value "$value")"
+  [[ "$value" != *[[:cntrl:]]* ]] || fail "$label cannot contain control characters: $(format_log_value "$value")"
+  [[ "$value" != *%* ]] || fail "$label cannot contain systemd specifiers (%): $(format_log_value "$value")"
+  [[ "$value" != *\"* && "$value" != *\\* ]] || fail "$label cannot contain quote or backslash characters: $(format_log_value "$value")"
   [[ "$value" != "root" ]] || fail "$label must not be root"
-  [[ "$value" =~ ^[A-Za-z_][A-Za-z0-9_-]{0,63}\$?$ ]] || fail "$label must be a plain system account name: $value"
+  [[ "$value" =~ ^[A-Za-z_][A-Za-z0-9_-]{0,63}\$?$ ]] || fail "$label must be a plain system account name: $(format_log_value "$value")"
 }
 
 require_safe_remove_path() {
@@ -114,7 +123,7 @@ require_removable_tree_path() {
   normalized="$(normalize_absolute_path "$value")"
   case "$normalized" in
     /bin|/boot|/dev|/etc|/home|/lib|/lib64|/media|/mnt|/opt|/proc|/root|/run|/sbin|/srv|/sys|/tmp|/usr|/usr/local|/usr/local/bin|/usr/local/share|/var)
-      fail "$label points at a protected system directory and will not be removed: $value"
+      fail "$label points at a protected system directory and will not be removed: $(format_log_value "$value")"
       ;;
 	  esac
 }
@@ -140,7 +149,7 @@ require_no_path_overlap() {
   local other_path="${!other_label}"
 
   if paths_overlap "$path" "$other_path"; then
-    fail "$label must not overlap $other_label: $other_path"
+    fail "$label must not overlap $other_label: $(format_log_value "$other_path")"
   fi
 }
 

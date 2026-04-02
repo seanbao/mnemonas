@@ -39,6 +39,15 @@ shell_quote() {
   printf '%q' "$1"
 }
 
+format_log_value() {
+  local value="$1"
+  if [[ "$value" == *[[:cntrl:]]* ]]; then
+    printf '%q' "$value"
+  else
+    printf '%s' "$value"
+  fi
+}
+
 service_user_home() {
   local entry home
 
@@ -154,10 +163,10 @@ is_protected_system_directory() {
 require_absolute_path() {
   local value="$1"
   local label="$2"
-  [[ "$value" == /* ]] || fail "$label must be an absolute path for systemd deployment: $value"
-  [[ "$value" != *[[:space:]]* ]] || fail "$label cannot contain whitespace for systemd deployment: $value"
-  [[ "$value" != *[[:cntrl:]]* ]] || fail "$label cannot contain control characters: $value"
-  ! path_has_parent_segment "$value" || fail "$label cannot contain parent directory segments: $value"
+  [[ "$value" == /* ]] || fail "$label must be an absolute path for systemd deployment: $(format_log_value "$value")"
+  [[ "$value" != *[[:space:]]* ]] || fail "$label cannot contain whitespace for systemd deployment: $(format_log_value "$value")"
+  [[ "$value" != *[[:cntrl:]]* ]] || fail "$label cannot contain control characters: $(format_log_value "$value")"
+  ! path_has_parent_segment "$value" || fail "$label cannot contain parent directory segments: $(format_log_value "$value")"
 }
 
 require_safe_directory_path() {
@@ -172,14 +181,14 @@ require_mutable_tree_path() {
   local value="$1"
   local label="$2"
   require_safe_directory_path "$value" "$label"
-  ! is_protected_system_directory "$value" || fail "$label points at a protected system directory and will not be modified: $value"
+  ! is_protected_system_directory "$value" || fail "$label points at a protected system directory and will not be modified: $(format_log_value "$value")"
 }
 
 require_removable_tree_path() {
   local value="$1"
   local label="$2"
   require_safe_directory_path "$value" "$label"
-  ! is_protected_system_directory "$value" || fail "$label points at a protected system directory and will not be removed: $value"
+  ! is_protected_system_directory "$value" || fail "$label points at a protected system directory and will not be removed: $(format_log_value "$value")"
 }
 
 path_matches_or_contains() {
@@ -203,7 +212,7 @@ require_no_path_overlap() {
   local other_path="${!other_label}"
 
   if paths_overlap "$path" "$other_path"; then
-    fail "$label must not overlap $other_label: $other_path"
+    fail "$label must not overlap $other_label: $(format_log_value "$other_path")"
   fi
 }
 
@@ -254,16 +263,16 @@ require_no_whitespace() {
   local value="$1"
   local label="$2"
   [[ -n "$value" ]] || fail "$label cannot be empty"
-  [[ "$value" != *[[:space:]]* ]] || fail "$label cannot contain whitespace: $value"
+  [[ "$value" != *[[:space:]]* ]] || fail "$label cannot contain whitespace: $(format_log_value "$value")"
 }
 
 require_systemd_literal() {
   local value="$1"
   local label="$2"
-  [[ "$value" != *$'\n'* && "$value" != *$'\r'* ]] || fail "$label cannot contain newline characters: $value"
-  [[ "$value" != *[[:cntrl:]]* ]] || fail "$label cannot contain control characters: $value"
-  [[ "$value" != *%* ]] || fail "$label cannot contain systemd specifiers (%): $value"
-  [[ "$value" != *\"* && "$value" != *\\* ]] || fail "$label cannot contain quote or backslash characters for systemd deployment: $value"
+  [[ "$value" != *$'\n'* && "$value" != *$'\r'* ]] || fail "$label cannot contain newline characters: $(format_log_value "$value")"
+  [[ "$value" != *[[:cntrl:]]* ]] || fail "$label cannot contain control characters: $(format_log_value "$value")"
+  [[ "$value" != *%* ]] || fail "$label cannot contain systemd specifiers (%): $(format_log_value "$value")"
+  [[ "$value" != *\"* && "$value" != *\\* ]] || fail "$label cannot contain quote or backslash characters for systemd deployment: $(format_log_value "$value")"
 }
 
 require_safe_account_name() {
@@ -272,7 +281,7 @@ require_safe_account_name() {
   require_no_whitespace "$value" "$label"
   require_systemd_literal "$value" "$label"
   [[ "$value" != "root" ]] || fail "$label must not be root"
-  [[ "$value" =~ ^[A-Za-z_][A-Za-z0-9_-]{0,63}\$?$ ]] || fail "$label must be a plain system account name: $value"
+  [[ "$value" =~ ^[A-Za-z_][A-Za-z0-9_-]{0,63}\$?$ ]] || fail "$label must be a plain system account name: $(format_log_value "$value")"
 }
 
 endpoint_host() {
@@ -325,8 +334,8 @@ require_tcp_port() {
   local value="$1"
   local label="$2"
   require_no_whitespace "$value" "$label"
-  [[ "$value" =~ ^[0-9]+$ ]] || fail "$label must be a numeric TCP port: $value"
-  (( 10#$value >= 1 && 10#$value <= 65535 )) || fail "$label must be between 1 and 65535: $value"
+  [[ "$value" =~ ^[0-9]+$ ]] || fail "$label must be a numeric TCP port: $(format_log_value "$value")"
+  (( 10#$value >= 1 && 10#$value <= 65535 )) || fail "$label must be between 1 and 65535: $(format_log_value "$value")"
 }
 
 normalize_tcp_port() {
@@ -376,12 +385,12 @@ require_safe_listen_host() {
   local label="$2"
   local host
 
-  [[ "$value" != *[[:space:]]* ]] || fail "$label cannot contain whitespace: $value"
+  [[ "$value" != *[[:space:]]* ]] || fail "$label cannot contain whitespace: $(format_log_value "$value")"
   host="$(normalize_listen_host "$value")"
   if [[ -n "$host" && ( "$host" == *"["* || "$host" == *"]"* ) ]]; then
-    fail "$label must not include brackets unless it is a bracketed IPv6 literal: $value"
+    fail "$label must not include brackets unless it is a bracketed IPv6 literal: $(format_log_value "$value")"
   fi
-  [[ -z "$host" ]] || is_valid_tcp_host "$host" || fail "$label must be empty, *, a hostname, IPv4, or IPv6 literal without a port: $value"
+  [[ -z "$host" ]] || is_valid_tcp_host "$host" || fail "$label must be empty, *, a hostname, IPv4, or IPv6 literal without a port: $(format_log_value "$value")"
 }
 
 require_safe_tcp_addr() {
@@ -399,11 +408,11 @@ require_safe_tcp_addr() {
     host="${BASH_REMATCH[1]}"
     port="${BASH_REMATCH[2]}"
   else
-    fail "$label must be a host:port address: $value"
+    fail "$label must be a host:port address: $(format_log_value "$value")"
   fi
 
-  is_valid_tcp_host "$host" || fail "$label host is invalid: $value"
-  (( 10#$port >= 1 && 10#$port <= 65535 )) || fail "$label port must be between 1 and 65535: $value"
+  is_valid_tcp_host "$host" || fail "$label host is invalid: $(format_log_value "$value")"
+  (( 10#$port >= 1 && 10#$port <= 65535 )) || fail "$label port must be between 1 and 65535: $(format_log_value "$value")"
 }
 
 sed_replacement_escape() {
