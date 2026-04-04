@@ -11,6 +11,7 @@ This release candidate focuses on improving MnemoNAS stability, public-access sa
 ## Major Changes
 
 - Strengthened path, archive-download, WebDAV, public-share, workspace, CAS, and backup-restore boundaries, covering symlinks, traversal, percent-encoded dot segments, encoded query or fragment markers, percent-encoded sensitive parameter names, control characters, and rollback error paths.
+- Upgraded `golang.org/x/image` to `v0.43.0` to resolve TIFF/WebP dependency-security findings reachable from thumbnail decoding, with the indirect `golang.org/x/text` version refreshed as part of the Go module update.
 - Expanded backend and frontend coverage for authentication, users, home directories, directory quotas, directory access rules, share policies, and secure session defaults.
 - Hardened email alert egress. Message headers and the SMTP envelope sanitize control characters, reducing header-injection risk if an internal caller or later extension bypasses config validation.
 - Improved visible Web quality. Core pages, public entry points, mobile layouts, baseline accessibility, runtime errors, failed requests, and broken visible text are covered by Playwright scans.
