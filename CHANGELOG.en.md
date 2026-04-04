@@ -122,6 +122,7 @@ This project follows [Semantic Versioning 2.0.0](https://semver.org/).
 - WebDAV setup scripts and development helpers report Basic, users, and no-auth modes explicitly so generated credentials and user-account mounts are not confused.
 
 ### Fixed
+- Fixed `golang.org/x/image` TIFF/WebP dependency-security findings reachable from thumbnail decoding by upgrading `golang.org/x/image` to `v0.43.0` and refreshing the indirect `golang.org/x/text` version.
 - Fixed backup and frontend diagnostic redaction for percent-encoded sensitive parameter names such as `access%5Fkey` and `secret%2Dkey`, preventing credential values from leaking in error text.
 - Fixed `server.trusted_proxy_hops` updates through the settings API not immediately updating runtime client-IP and HTTPS forwarded-header interpretation.
 - Fixed the public go-live smoke and `mnemonas-doctor --public-domain` accepting four-part numeric inputs outside the IPv4 range as DNS hostnames. Manual public-port checks now include total request timeouts so half-open connections cannot stall the review.
