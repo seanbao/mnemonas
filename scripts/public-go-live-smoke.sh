@@ -23,6 +23,75 @@ fail() {
     exit 1
 }
 
+contains_control_character() {
+    local value="$1"
+
+    LC_ALL=C printf '%s' "$value" | LC_ALL=C grep -q '[[:cntrl:]]'
+}
+
+format_log_value() {
+    local value="$1"
+    local quoted
+
+    if contains_control_character "$value"; then
+        printf -v quoted '%q' "$value"
+        printf '%s' "$quoted"
+        return
+    fi
+    printf '%s' "$value"
+}
+
+format_backend_target_for_log() {
+    local target="$1"
+    local port request_path
+
+    if [[ "$target" != *:* ]]; then
+        if [[ "$target" == *[[:cntrl:]]* || "$target" == *"?"* || "$target" == *"#"* || "$target" == *"@"* ]]; then
+            printf '<redacted-target>'
+            return
+        fi
+        format_log_value "$target"
+        return
+    fi
+
+    port="${target%%:*}"
+    request_path="${target#*:}"
+    if [[ "$port" == *[[:cntrl:]]* || "$port" == *"?"* || "$port" == *"#"* || "$port" == *"@"* ]]; then
+        printf '<redacted-target>'
+        return
+    fi
+    if [[ "$request_path" == *[[:cntrl:]]* || "$request_path" == *"?"* || "$request_path" == *"#"* || "$request_path" == *"@"* ]]; then
+        printf '%s:<redacted-path>' "$(format_log_value "$port")"
+        return
+    fi
+    format_log_value "$target"
+}
+
+format_url_for_log() {
+    local value="$1"
+    local redacted="$value"
+    local scheme rest authority suffix
+
+    if [[ "$redacted" == *"://"* ]]; then
+        scheme="${redacted%%://*}://"
+        rest="${redacted#*://}"
+        authority="${rest%%/*}"
+        suffix="${rest#"$authority"}"
+        if [[ "$authority" == *"@"* ]]; then
+            authority="<redacted-userinfo>@${authority##*@}"
+            redacted="$scheme$authority$suffix"
+        fi
+    fi
+
+    if [[ "$redacted" == *"?"* ]]; then
+        redacted="${redacted%%\?*}?<redacted-query>"
+    elif [[ "$redacted" == *"#"* ]]; then
+        redacted="${redacted%%#*}#<redacted-fragment>"
+    fi
+
+    format_log_value "$redacted"
+}
+
 usage() {
     cat <<EOF
 Usage:
@@ -134,23 +203,25 @@ validate_domain() {
 validate_backend_target_path() {
     local target="$1"
     local request_path="$2"
+    local target_for_log
     local lower_path segment normalized_segment
     local -a segments
 
-    [[ "$request_path" == /* ]] || fail "backend target path must start with /: $target"
-    [[ "$request_path" != *[[:cntrl:][:space:]]* ]] || fail "backend target path must not contain whitespace or control characters: $target"
-    [[ "$request_path" != *"?"* && "$request_path" != *"#"* && "$request_path" != *"@"* ]] || fail "backend target path must not contain query strings, fragments, or userinfo: $target"
-    [[ "$request_path" != *\\* ]] || fail "backend target path must not contain backslashes: $target"
+    target_for_log="$(format_backend_target_for_log "$target")"
+    [[ "$request_path" == /* ]] || fail "backend target path must start with /: $target_for_log"
+    [[ "$request_path" != *[[:cntrl:][:space:]]* ]] || fail "backend target path must not contain whitespace or control characters: $target_for_log"
+    [[ "$request_path" != *"?"* && "$request_path" != *"#"* && "$request_path" != *"@"* ]] || fail "backend target path must not contain query strings, fragments, or userinfo: $target_for_log"
+    [[ "$request_path" != *\\* ]] || fail "backend target path must not contain backslashes: $target_for_log"
 
     lower_path="${request_path,,}"
-    [[ "$lower_path" != *"%2f"* && "$lower_path" != *"%5c"* ]] || fail "backend target path must not contain encoded slashes or backslashes: $target"
-    [[ "$request_path" != *"//"* ]] || fail "backend target path must not contain empty path segments: $target"
+    [[ "$lower_path" != *"%2f"* && "$lower_path" != *"%5c"* ]] || fail "backend target path must not contain encoded slashes or backslashes: $target_for_log"
+    [[ "$request_path" != *"//"* ]] || fail "backend target path must not contain empty path segments: $target_for_log"
 
     IFS='/' read -r -a segments <<< "$lower_path"
     for segment in "${segments[@]}"; do
         [[ -n "$segment" ]] || continue
         normalized_segment="${segment//%2e/.}"
-        [[ "$normalized_segment" != "." && "$normalized_segment" != ".." ]] || fail "backend target path must not contain dot segments: $target"
+        [[ "$normalized_segment" != "." && "$normalized_segment" != ".." ]] || fail "backend target path must not contain dot segments: $target_for_log"
     done
 }
 
@@ -159,11 +230,11 @@ validate_backend_targets() {
     [[ -n "${PUBLIC_SMOKE_BACKEND_TARGETS//[[:space:]]/}" ]] || fail "PUBLIC_SMOKE_BACKEND_TARGETS must include at least one port:path check"
 
     for target in $PUBLIC_SMOKE_BACKEND_TARGETS; do
-        [[ "$target" == *:* ]] || fail "PUBLIC_SMOKE_BACKEND_TARGETS entries must use port:path: $target"
+        [[ "$target" == *:* ]] || fail "PUBLIC_SMOKE_BACKEND_TARGETS entries must use port:path: $(format_backend_target_for_log "$target")"
         port="${target%%:*}"
         request_path="${target#*:}"
-        [[ "$port" =~ ^[1-9][0-9]{0,4}$ ]] || fail "backend target port must be numeric: $target"
-        (( port <= 65535 )) || fail "backend target port is out of range: $target"
+        [[ "$port" =~ ^[1-9][0-9]{0,4}$ ]] || fail "backend target port must be numeric: $(format_backend_target_for_log "$target")"
+        (( port <= 65535 )) || fail "backend target port is out of range: $(format_backend_target_for_log "$target")"
         validate_backend_target_path "$target" "$request_path"
     done
 }
@@ -256,7 +327,7 @@ check_http_redirect() {
     if https_redirect_targets_domain "$domain" "$redirect"; then
         log_ok "HTTP health redirects to HTTPS on the same domain"
     else
-        fail "HTTP health redirect target is not same-domain HTTPS: ${redirect:-<empty>}"
+        fail "HTTP health redirect target is not same-domain HTTPS: $(format_url_for_log "${redirect:-<empty>}")"
     fi
 }
 

@@ -48,7 +48,7 @@ sudo mnemonas-doctor --public-domain nas.example.com
 
 该脚本会把公网 HTTPS health、同域 HTTP 到 HTTPS 跳转，以及 `8080/9090/9091` 后端端口 TCP 不可达且无 HTTP 状态响应检查合并为一次 smoke。无法运行仓库脚本时，可从外部网络手动执行：
 
-需要检查自定义后端端口时，可设置 `PUBLIC_SMOKE_BACKEND_TARGETS='18080:/health 19090:/'`。每个条目使用 `port:path`，其中 path 必须是不含 query、fragment、userinfo、反斜杠、编码斜杠、编码反斜杠、空路径段或 `.`/`..` 路径段的明确绝对路径。
+需要检查自定义后端端口时，可设置 `PUBLIC_SMOKE_BACKEND_TARGETS='18080:/health 19090:/'`。每个条目使用 `port:path`，其中 path 必须是不含 query、fragment、userinfo、反斜杠、编码斜杠、编码反斜杠、空路径段或 `.`/`..` 路径段的明确绝对路径。无效自定义目标或错误跳转的诊断只保留目标形状，不回显 query、fragment、userinfo 或控制字符路径内容。
 
 ```bash
 curl -I https://nas.example.com/health

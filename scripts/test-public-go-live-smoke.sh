@@ -20,6 +20,17 @@ assert_file_contains() {
     fi
 }
 
+assert_file_not_contains() {
+    local file="$1"
+    local unexpected="$2"
+    if [[ -f "$file" ]] && grep -Fq -- "$unexpected" "$file"; then
+        echo "Unexpected text: $unexpected" >&2
+        echo "--- $file ---" >&2
+        cat "$file" >&2
+        fail "found unexpected text"
+    fi
+}
+
 cleanup() {
     rm -rf "$TMP_ROOT"
 }
@@ -292,26 +303,53 @@ run_invalid_backend_targets_test() {
         bash "$REPO_ROOT/scripts/public-go-live-smoke.sh" "nas.example.com"
     assert_file_contains "$case_dir/whitespace.log" "PUBLIC_SMOKE_BACKEND_TARGETS must include at least one port:path check"
 
+    run_expect_failure "$case_dir/missing-colon-secret.log" env \
+        PATH="$fake_bin:$PATH" \
+        PUBLIC_SMOKE_CURL_LOG="$case_dir/missing-colon-secret-curl.log" \
+        PUBLIC_SMOKE_BACKEND_TARGETS='8080/health?token=secret-token' \
+        bash "$REPO_ROOT/scripts/public-go-live-smoke.sh" "nas.example.com"
+    assert_file_contains "$case_dir/missing-colon-secret.log" "PUBLIC_SMOKE_BACKEND_TARGETS entries must use port:path: <redacted-target>"
+    assert_file_not_contains "$case_dir/missing-colon-secret.log" "secret-token"
+
+    run_expect_failure "$case_dir/bad-port-secret.log" env \
+        PATH="$fake_bin:$PATH" \
+        PUBLIC_SMOKE_CURL_LOG="$case_dir/bad-port-secret-curl.log" \
+        PUBLIC_SMOKE_BACKEND_TARGETS='admin@secret:/health' \
+        bash "$REPO_ROOT/scripts/public-go-live-smoke.sh" "nas.example.com"
+    assert_file_contains "$case_dir/bad-port-secret.log" "backend target port must be numeric: <redacted-target>"
+    assert_file_not_contains "$case_dir/bad-port-secret.log" "admin@secret"
+
     run_expect_failure "$case_dir/query.log" env \
         PATH="$fake_bin:$PATH" \
         PUBLIC_SMOKE_CURL_LOG="$case_dir/query-curl.log" \
-        PUBLIC_SMOKE_BACKEND_TARGETS='8080:/health?debug=1' \
+        PUBLIC_SMOKE_BACKEND_TARGETS='8080:/health?token=secret-token' \
         bash "$REPO_ROOT/scripts/public-go-live-smoke.sh" "nas.example.com"
-    assert_file_contains "$case_dir/query.log" "backend target path must not contain query strings, fragments, or userinfo"
+    assert_file_contains "$case_dir/query.log" "backend target path must not contain query strings, fragments, or userinfo: 8080:<redacted-path>"
+    assert_file_not_contains "$case_dir/query.log" "secret-token"
 
     run_expect_failure "$case_dir/fragment.log" env \
         PATH="$fake_bin:$PATH" \
         PUBLIC_SMOKE_CURL_LOG="$case_dir/fragment-curl.log" \
-        PUBLIC_SMOKE_BACKEND_TARGETS='8080:/health#debug' \
+        PUBLIC_SMOKE_BACKEND_TARGETS='8080:/health#secret-fragment' \
         bash "$REPO_ROOT/scripts/public-go-live-smoke.sh" "nas.example.com"
-    assert_file_contains "$case_dir/fragment.log" "backend target path must not contain query strings, fragments, or userinfo"
+    assert_file_contains "$case_dir/fragment.log" "backend target path must not contain query strings, fragments, or userinfo: 8080:<redacted-path>"
+    assert_file_not_contains "$case_dir/fragment.log" "secret-fragment"
 
     run_expect_failure "$case_dir/userinfo.log" env \
         PATH="$fake_bin:$PATH" \
         PUBLIC_SMOKE_CURL_LOG="$case_dir/userinfo-curl.log" \
-        PUBLIC_SMOKE_BACKEND_TARGETS='8080:/@admin' \
+        PUBLIC_SMOKE_BACKEND_TARGETS='8080:/@admin:secret' \
         bash "$REPO_ROOT/scripts/public-go-live-smoke.sh" "nas.example.com"
-    assert_file_contains "$case_dir/userinfo.log" "backend target path must not contain query strings, fragments, or userinfo"
+    assert_file_contains "$case_dir/userinfo.log" "backend target path must not contain query strings, fragments, or userinfo: 8080:<redacted-path>"
+    assert_file_not_contains "$case_dir/userinfo.log" "admin:secret"
+
+    run_expect_failure "$case_dir/control.log" env \
+        PATH="$fake_bin:$PATH" \
+        PUBLIC_SMOKE_CURL_LOG="$case_dir/control-curl.log" \
+        PUBLIC_SMOKE_BACKEND_TARGETS=$'8080:/health\rINJECTED=1' \
+        bash "$REPO_ROOT/scripts/public-go-live-smoke.sh" "nas.example.com"
+    assert_file_contains "$case_dir/control.log" "backend target path must not contain whitespace or control characters: 8080:<redacted-path>"
+    assert_file_not_contains "$case_dir/control.log" $'8080:/health\rINJECTED=1'
 
     run_expect_failure "$case_dir/backslash.log" env \
         PATH="$fake_bin:$PATH" \
@@ -404,6 +442,22 @@ run_bad_redirect_test() {
         PUBLIC_SMOKE_REDIRECT_URL="https://nas.example.com.evil.example/health" \
         bash "$REPO_ROOT/scripts/public-go-live-smoke.sh" "nas.example.com"
     assert_file_contains "$case_dir/suffix-domain.log" "HTTP health redirect target is not same-domain HTTPS"
+
+    run_expect_failure "$case_dir/query-secret.log" env \
+        PATH="$fake_bin:$PATH" \
+        PUBLIC_SMOKE_CURL_LOG="$case_dir/query-secret-curl.log" \
+        PUBLIC_SMOKE_REDIRECT_URL="https://other.example.com/health?token=secret-token#debug" \
+        bash "$REPO_ROOT/scripts/public-go-live-smoke.sh" "nas.example.com"
+    assert_file_contains "$case_dir/query-secret.log" "HTTP health redirect target is not same-domain HTTPS: https://other.example.com/health?<redacted-query>"
+    assert_file_not_contains "$case_dir/query-secret.log" "secret-token"
+
+    run_expect_failure "$case_dir/userinfo-secret.log" env \
+        PATH="$fake_bin:$PATH" \
+        PUBLIC_SMOKE_CURL_LOG="$case_dir/userinfo-secret-curl.log" \
+        PUBLIC_SMOKE_REDIRECT_URL="https://user:secret-pass@other.example.com/health" \
+        bash "$REPO_ROOT/scripts/public-go-live-smoke.sh" "nas.example.com"
+    assert_file_contains "$case_dir/userinfo-secret.log" "HTTP health redirect target is not same-domain HTTPS: https://<redacted-userinfo>@other.example.com/health"
+    assert_file_not_contains "$case_dir/userinfo-secret.log" "secret-pass"
 }
 
 run_open_backend_test() {
@@ -449,6 +503,10 @@ run_docs_contract_test() {
     assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.en.md" "path must be an unambiguous absolute path without query strings, fragments, userinfo, backslashes, encoded slashes, encoded backslashes, empty path segments, or \`.\`/\`..\` path segments"
     assert_file_contains "$REPO_ROOT/docs/cloud-firewall-checklist.md" "path 必须是不含 query、fragment、userinfo、反斜杠、编码斜杠、编码反斜杠、空路径段或 \`.\`/\`..\` 路径段的明确绝对路径"
     assert_file_contains "$REPO_ROOT/docs/cloud-firewall-checklist.en.md" "path must be an unambiguous absolute path without query strings, fragments, userinfo, backslashes, encoded slashes, encoded backslashes, empty path segments, or \`.\`/\`..\` path segments"
+    assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.md" "无效自定义目标或错误跳转的诊断只保留目标形状，不回显 query、fragment、userinfo 或控制字符路径内容"
+    assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.en.md" "Diagnostics for invalid custom targets or bad redirects keep only the target shape and do not echo query strings, fragments, userinfo, or control-character path content"
+    assert_file_contains "$REPO_ROOT/docs/cloud-firewall-checklist.md" "无效自定义目标或错误跳转的诊断只保留目标形状，不回显 query、fragment、userinfo 或控制字符路径内容"
+    assert_file_contains "$REPO_ROOT/docs/cloud-firewall-checklist.en.md" "Diagnostics for invalid custom targets or bad redirects keep only the target shape and do not echo query strings, fragments, userinfo, or control-character path content"
     assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.md" "只要 TCP 可连接，即使没有 HTTP 状态码，也表示后端端口仍可从公网访问"
     assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.en.md" "Any successful TCP connection means the backend port is still publicly reachable, even when no HTTP status is returned"
     assert_file_contains "$REPO_ROOT/docs/cloud-firewall-checklist.md" "只要 TCP 可连接，即使没有 HTTP 状态码，也表示后端端口仍可从公网访问"
