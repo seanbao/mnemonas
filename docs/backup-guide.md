@@ -204,6 +204,15 @@ curl -X POST -b cookies.txt \
   -d '{"keep_artifact":false}'
 ```
 
+同一维护路径也可以通过独立 smoke 脚本对已运行服务执行。脚本不会创建或删除备份任务，要求显式指定已配置的任务 ID；认证使用 curl cookie 文件。
+
+```bash
+MNEMONAS_API_URL=http://localhost:8080/api/v1 \
+MNEMONAS_BACKUP_JOB_ID=external-disk \
+MNEMONAS_COOKIE_FILE=cookies.txt \
+./scripts/backup-restore-drill-smoke.sh
+```
+
 `local` 恢复演练会先确认快照中没有 manifest 未登记的额外文件，再把最近一次快照复制到临时目录，然后按 manifest 校验每个文件的大小、权限位和 SHA-256。`keep_artifact = true` 会保留临时恢复目录，便于人工抽查。默认不保留产物时，如果校验完成但临时恢复目录清理失败，演练结果保持 completed，同时返回 `warning=true`、`warnings[]`、`artifact_kept=true` 和 `restored_path`，便于在维护页继续处理残留产物。`restic` 恢复演练当前执行 `restic check`；`rclone` 恢复演练当前执行 `rclone check --one-way`，用于验证仓库或远端一致性。
 
 真正取回数据时，`local`、`restic` 和 `rclone` 任务应恢复到指定的独立目录：
