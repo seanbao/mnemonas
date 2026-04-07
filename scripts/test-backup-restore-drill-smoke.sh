@@ -320,8 +320,16 @@ run_api_failure_test() {
 run_docs_contract_test() {
     assert_file_contains "$REPO_ROOT/docs/backup-guide.md" './scripts/backup-restore-drill-smoke.sh'
     assert_file_contains "$REPO_ROOT/docs/backup-guide.en.md" './scripts/backup-restore-drill-smoke.sh'
+    assert_file_contains "$REPO_ROOT/docs/development.md" './scripts/backup-restore-drill-smoke.sh'
+    assert_file_contains "$REPO_ROOT/docs/development.en.md" './scripts/backup-restore-drill-smoke.sh'
+    assert_file_contains "$REPO_ROOT/docs/testing-strategy.md" './scripts/backup-restore-drill-smoke.sh'
+    assert_file_contains "$REPO_ROOT/docs/testing-strategy.en.md" './scripts/backup-restore-drill-smoke.sh'
     assert_file_contains "$REPO_ROOT/docs/backup-guide.md" 'MNEMONAS_BACKUP_JOB_ID=external-disk'
     assert_file_contains "$REPO_ROOT/docs/backup-guide.en.md" 'MNEMONAS_BACKUP_JOB_ID=external-disk'
+    assert_file_contains "$REPO_ROOT/docs/development.md" 'MNEMONAS_BACKUP_JOB_ID=external-disk'
+    assert_file_contains "$REPO_ROOT/docs/development.en.md" 'MNEMONAS_BACKUP_JOB_ID=external-disk'
+    assert_file_contains "$REPO_ROOT/docs/testing-strategy.md" 'MNEMONAS_BACKUP_JOB_ID=external-disk'
+    assert_file_contains "$REPO_ROOT/docs/testing-strategy.en.md" 'MNEMONAS_BACKUP_JOB_ID=external-disk'
 }
 
 trap cleanup EXIT
