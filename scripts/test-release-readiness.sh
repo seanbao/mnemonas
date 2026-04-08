@@ -35,6 +35,8 @@ write_checklists() {
 - [ ] 脚本检查通过：`make scripts-check`
 - [ ] 依赖安全检查通过：`make security-check NPM_AUDIT=1`
 - [ ] Docker 构建和烟测通过：`make docker-check`
+- [ ] 公网发布前在服务器运行：`sudo mnemonas-doctor --public-domain <domain>`，并按 [公网云防火墙复核清单](docs/cloud-firewall-checklist.md) 复核环境
+- [ ] 公网发布前从外部网络运行：`./scripts/public-go-live-smoke.sh <domain>`
 - [ ] 发布前就绪摘要通过：`./scripts/release-readiness.sh`
 - [ ] `./scripts/plan-hardening-commits.sh --fail-on-manual` 确认没有未归类路径
 - [ ] 发布后下载 GitHub Release 产物，并运行 `./scripts/verify-release-artifacts.sh --version <tag> --repository seanbao/mnemonas --require-targets --check-image <artifact-dir>`，验证 release 产物。
@@ -48,6 +50,8 @@ EOF
 - [ ] Run script checks: `make scripts-check`
 - [ ] Run dependency security checks: `make security-check NPM_AUDIT=1`
 - [ ] Run Docker build and smoke checks: `make docker-check`
+- [ ] Before public release, run on the server: `sudo mnemonas-doctor --public-domain <domain>` and review the [Public cloud firewall checklist](docs/cloud-firewall-checklist.en.md)
+- [ ] Before public release, run from an external network: `./scripts/public-go-live-smoke.sh <domain>`
 - [ ] Run release readiness summary: `./scripts/release-readiness.sh`
 - [ ] Confirm `./scripts/plan-hardening-commits.sh --fail-on-manual` reports no unclassified paths
 - [ ] After publication, download the GitHub Release artifacts and run `./scripts/verify-release-artifacts.sh --version <tag> --repository seanbao/mnemonas --require-targets --check-image <artifact-dir>` to verify release artifacts.
@@ -73,6 +77,9 @@ EOF
 - `make scripts-check`
 - `make security-check NPM_AUDIT=1`
 - `make docker-check`
+- `sudo mnemonas-doctor --public-domain <domain>`
+- `./scripts/public-go-live-smoke.sh <domain>`
+- `docs/cloud-firewall-checklist.md`
 - `./scripts/test-release-tag.sh`
 - `./scripts/test-release-package.sh`
 - `./scripts/test-release-artifacts.sh`
@@ -100,6 +107,9 @@ EOF
 - `make scripts-check`
 - `make security-check NPM_AUDIT=1`
 - `make docker-check`
+- `sudo mnemonas-doctor --public-domain <domain>`
+- `./scripts/public-go-live-smoke.sh <domain>`
+- `docs/cloud-firewall-checklist.en.md`
 - `./scripts/test-release-tag.sh`
 - `./scripts/test-release-package.sh`
 - `./scripts/test-release-artifacts.sh`
@@ -127,6 +137,55 @@ write_community_files() {
 		SUPPORT.en.md \
 		SECURITY.md \
 		SECURITY.zh-CN.md
+	cat >Makefile <<'EOF'
+.PHONY: go-packages workflows-check scripts-check toolchains-check docs-check security-check test test-torture docker docker-smoke docker-check check verify-changed quick-check lint
+
+GO_TEST_TIMEOUT ?= 20m
+
+go-packages:
+	@true
+
+workflows-check:
+	@true
+
+scripts-check:
+	@true
+
+toolchains-check:
+	@true
+
+docs-check:
+	@true
+
+security-check:
+	@true
+
+test:
+	@true
+
+test-torture:
+	./scripts/torture-test.sh
+
+docker:
+	@true
+
+docker-smoke:
+	@true
+
+docker-check: docker docker-smoke
+
+lint:
+	@true
+
+check: workflows-check scripts-check toolchains-check docs-check lint test
+	@true
+
+verify-changed:
+	./scripts/verify-changed.sh
+
+quick-check:
+	@true
+EOF
 	cat >.github/ISSUE_TEMPLATE/config.yml <<'EOF'
 blank_issues_enabled: false
 contact_links:
@@ -199,6 +258,81 @@ updates:
     labels:
       - "dependencies"
       - "docker"
+EOF
+	cat >.github/workflows/ci.yml <<'EOF'
+name: CI
+
+on:
+  pull_request:
+    branches: [main, master]
+
+permissions:
+  contents: read
+
+jobs:
+  workflows:
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - run: make workflows-check
+  scripts:
+    steps:
+      - run: make scripts-check
+  toolchains:
+    steps:
+      - run: make toolchains-check
+  docs:
+    steps:
+      - run: make docs-check
+  go:
+    steps:
+      - run: CGO_ENABLED=1 bash ./scripts/with-test-dataplane.sh go test -v -race -coverprofile=coverage.out ./...
+  frontend:
+    steps:
+      - run: npm audit --audit-level="${{ env.NPM_AUDIT_LEVEL }}"
+  e2e:
+    steps:
+      - run: npm run test:e2e
+  docker:
+    steps:
+      - run: ./scripts/docker-smoke.sh mnemonas:test
+EOF
+	cat >.github/workflows/release.yml <<'EOF'
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - run: ./scripts/check-release-tag.sh "$GITHUB_REF_NAME"
+  docker:
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - run: ./scripts/docker-smoke.sh mnemonas:release-smoke
+  release:
+    permissions:
+      contents: write
+    steps:
+      - run: |
+          ./scripts/verify-release-artifacts.sh \
+            --require-targets \
+            dist
+      - uses: softprops/action-gh-release@v2
+        with:
+          prerelease: ${{ contains(github.ref_name, '-') }}
 EOF
 	cat >.github/workflows/torture.yml <<'EOF'
 name: Torture
@@ -634,6 +768,24 @@ fi
 assert_file_contains "$output_dir/missing-dependabot-proto.err" "missing required Dependabot update: cargo /tools/proto-gen"
 git checkout -q -- .github/dependabot.yml
 
+sed -i.bak '/docker-smoke.sh mnemonas:test/d' .github/workflows/ci.yml
+rm -f .github/workflows/ci.yml.bak
+if ./scripts/release-readiness.sh --allow-dirty --skip-checklist >"$output_dir/missing-ci-docker-smoke.out" 2>"$output_dir/missing-ci-docker-smoke.err"; then
+	fail "release readiness accepted a CI workflow without Docker smoke coverage"
+fi
+assert_file_contains "$output_dir/missing-ci-docker-smoke.err" ".github/workflows/ci.yml is missing required text"
+assert_file_contains "$output_dir/missing-ci-docker-smoke.err" "run: ./scripts/docker-smoke.sh mnemonas:test"
+git checkout -q -- .github/workflows/ci.yml
+
+sed -i.bak '/verify-release-artifacts/d' .github/workflows/release.yml
+rm -f .github/workflows/release.yml.bak
+if ./scripts/release-readiness.sh --allow-dirty --skip-checklist >"$output_dir/missing-release-artifact-verifier.out" 2>"$output_dir/missing-release-artifact-verifier.err"; then
+	fail "release readiness accepted a Release workflow without artifact verification"
+fi
+assert_file_contains "$output_dir/missing-release-artifact-verifier.err" ".github/workflows/release.yml is missing required text"
+assert_file_contains "$output_dir/missing-release-artifact-verifier.err" "./scripts/verify-release-artifacts.sh"
+git checkout -q -- .github/workflows/release.yml
+
 sed -i.bak '/workflow_dispatch:/d' .github/workflows/torture.yml
 rm -f .github/workflows/torture.yml.bak
 if ./scripts/release-readiness.sh --allow-dirty --skip-checklist >"$output_dir/missing-torture-dispatch.out" 2>"$output_dir/missing-torture-dispatch.err"; then
@@ -651,6 +803,15 @@ fi
 assert_file_contains "$output_dir/missing-torture-safe-mode.err" ".github/workflows/torture.yml is missing required text"
 assert_file_contains "$output_dir/missing-torture-safe-mode.err" "RUN_LIVE_FAULTS: '0'"
 git checkout -q -- .github/workflows/torture.yml
+
+sed -i.bak '/^docker-check:/d' Makefile
+rm -f Makefile.bak
+if ./scripts/release-readiness.sh --allow-dirty --skip-checklist >"$output_dir/missing-makefile-docker-check.out" 2>"$output_dir/missing-makefile-docker-check.err"; then
+	fail "release readiness accepted a Makefile without the Docker check target baseline"
+fi
+assert_file_contains "$output_dir/missing-makefile-docker-check.err" "Makefile is missing required text"
+assert_file_contains "$output_dir/missing-makefile-docker-check.err" "docker-check: docker docker-smoke"
+git checkout -q -- Makefile
 
 sed -i.bak '/Sensitive values such as passwords/d' .github/ISSUE_TEMPLATE/bug_report.yml
 rm -f .github/ISSUE_TEMPLATE/bug_report.yml.bak
@@ -731,6 +892,15 @@ assert_file_contains "$output_dir/missing-docker-checklist.err" "CHANGELOG.en.md
 assert_file_contains "$output_dir/missing-docker-checklist.err" "make docker-check"
 git checkout -q -- CHANGELOG.en.md
 
+sed -i.bak '/public-go-live-smoke/d' CHANGELOG.en.md
+rm -f CHANGELOG.en.md.bak
+if ./scripts/release-readiness.sh --allow-dirty --allow-post-validation-changes >"$output_dir/missing-public-smoke-checklist.out" 2>"$output_dir/missing-public-smoke-checklist.err"; then
+	fail "release readiness accepted a missing public go-live smoke checklist command"
+fi
+assert_file_contains "$output_dir/missing-public-smoke-checklist.err" "CHANGELOG.en.md is missing required text"
+assert_file_contains "$output_dir/missing-public-smoke-checklist.err" "./scripts/public-go-live-smoke.sh"
+git checkout -q -- CHANGELOG.en.md
+
 sed -i.bak '/security-check/d' docs/release-notes.en.md
 rm -f docs/release-notes.en.md.bak
 if ./scripts/release-readiness.sh --allow-dirty --allow-post-validation-changes >"$output_dir/missing-release-notes-security.out" 2>"$output_dir/missing-release-notes-security.err"; then
@@ -747,6 +917,24 @@ if ./scripts/release-readiness.sh --allow-dirty --allow-post-validation-changes 
 fi
 assert_file_contains "$output_dir/missing-release-notes-docker.err" "docs/release-notes.en.md is missing required text"
 assert_file_contains "$output_dir/missing-release-notes-docker.err" "make docker-check"
+git checkout -q -- docs/release-notes.en.md
+
+sed -i.bak '/mnemonas-doctor --public-domain/d' docs/release-notes.en.md
+rm -f docs/release-notes.en.md.bak
+if ./scripts/release-readiness.sh --allow-dirty --allow-post-validation-changes >"$output_dir/missing-release-notes-public-doctor.out" 2>"$output_dir/missing-release-notes-public-doctor.err"; then
+	fail "release readiness accepted release notes without the public-domain doctor command"
+fi
+assert_file_contains "$output_dir/missing-release-notes-public-doctor.err" "docs/release-notes.en.md is missing required text"
+assert_file_contains "$output_dir/missing-release-notes-public-doctor.err" "mnemonas-doctor --public-domain"
+git checkout -q -- docs/release-notes.en.md
+
+sed -i.bak '/cloud-firewall-checklist/d' docs/release-notes.en.md
+rm -f docs/release-notes.en.md.bak
+if ./scripts/release-readiness.sh --allow-dirty --allow-post-validation-changes >"$output_dir/missing-release-notes-cloud-firewall.out" 2>"$output_dir/missing-release-notes-cloud-firewall.err"; then
+	fail "release readiness accepted release notes without the cloud firewall checklist"
+fi
+assert_file_contains "$output_dir/missing-release-notes-cloud-firewall.err" "docs/release-notes.en.md is missing required text"
+assert_file_contains "$output_dir/missing-release-notes-cloud-firewall.err" "cloud-firewall-checklist"
 git checkout -q -- docs/release-notes.en.md
 
 sed -i.bak '/release-readiness/d' CHANGELOG.en.md

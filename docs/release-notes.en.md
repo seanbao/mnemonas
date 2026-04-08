@@ -27,9 +27,12 @@ This release candidate focuses on improving MnemoNAS stability, public-access sa
 - `release-readiness` also checks that both release-notes drafts record the current full-validation target, so stale validation snapshots fail before release.
 - `release-readiness` requires the `CHANGELOG.md` and `CHANGELOG.en.md` release checklists to include documentation, dependency-security, and Docker build/smoke commands, preventing final release verification from omitting key local gates.
 - `release-readiness` requires the Dependabot configuration to cover Go, Rust dataplane, Rust proto generator, Web npm, GitHub Actions, and Docker dependency update entry points, preventing the release branch from losing its dependency-maintenance baseline.
+- `release-readiness` requires `.github/workflows/ci.yml` and `.github/workflows/release.yml` to retain key CI, E2E, Docker smoke, release-tag validation, release-artifact verification, and publication-permission baselines, preventing core automation paths from being lost before release.
+- `release-readiness` requires `Makefile` to retain core local gate targets such as `check`, `verify-changed`, `quick-check`, `security-check`, `docker-check`, and `test-torture`, preventing CI, release-checklist, and maintainer-documentation entry points from being lost before release.
 - `release-readiness` requires `.github/workflows/torture.yml` to retain manual and scheduled triggers, read-only permissions, the `RUN_LIVE_FAULTS: '0'` non-destructive guard, and the `make test-torture` entry point, preventing the long-running regression workflow from being lost before release.
 - `release-readiness` requires blank Issues to stay disabled and checks that the bug report, usage question, feature request, and WebDAV compatibility Issue Forms keep sensitive-data redaction, diagnostic, and security-impact guidance, preventing public collaboration entry points from bypassing safety prompts.
 - `release-readiness` checks that the security policy and support guide retain private vulnerability reporting, public-disclosure warnings, dataplane port exposure boundaries, dependency-security checks, and direct-public-exposure limitations.
+- `release-readiness` requires the release checklist and bilingual release notes to retain the `mnemonas-doctor --public-domain`, `scripts/public-go-live-smoke.sh`, and `cloud-firewall-checklist` entry points, preventing public-deployment environment review from being omitted during final release preparation.
 - `release-readiness` rejects a base ref that is not an ancestor of the current HEAD, preventing misleading release-readiness summaries from sibling branch ranges.
 - Go test entry points now keep a 20-minute package timeout so heavy race packages are not interrupted by Go's default 10-minute timeout during full branch validation.
 - Documentation checks reject copyable raw `?path=/...` path queries in API examples, requiring restore and favorite-check `path` query examples to use `%2F...` encoding.
@@ -52,7 +55,7 @@ Archives should include a top-level directory, `nasd`, `dataplane`, Web UI stati
 
 The current hardening branch has the following validation evidence. Final publication should use the latest tag, Release workflow result, and required environment validation as the source of truth:
 
-Latest local full-validation snapshot: validation target `1c9ee8bd9fac`; `GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master` passed, covering the roadmap and hardening-progress responsibility-boundary documentation update, the WebDAV README overview, README client summary, mounting-guide compatibility-note alignment with the compatibility matrix, storage/configuration CDC documentation boundary contract, Chinese loading, upload, move/copy menu, multi-file summary ellipsis consistency, and alert-channel token placeholders no longer using ASCII ellipsis fragments, extension-point secret placeholders using explicit angle-bracket markers, and documentation checks rejecting JSON/TOML/YAML ellipsis-only secret placeholders, including hyphenated and dotted key/token field names, plus the observability E2E regression guard for ASCII ellipses in Chinese visible text, the release-readiness release-checklist gate for CHANGELOG documentation, dependency-security, Docker build/smoke commands, security policy, support-guide safety guidance, Dependabot baseline, torture workflow baseline, blank-Issue disablement, and the release-readiness Issue Form safety guidance gate, the public-deployment security-checklist documentation contract, Go package test-timeout gate stability, `make check`, dependency security scans, example config validation, public-access templates, protobuf regeneration stability, Rust fmt/test/clippy, proto-gen fmt/test/clippy, frontend lint/typecheck/unit/build, 375 Playwright E2E cases, Docker build, and Docker smoke. The Docker smoke used the Docker-assigned loopback port `http://127.0.0.1:32885`.
+Latest local full-validation snapshot: validation target `d87a3a4d2df2`; `GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master` passed, covering the roadmap and hardening-progress responsibility-boundary documentation update, the WebDAV README overview, README client summary, mounting-guide compatibility-note alignment with the compatibility matrix, storage/configuration CDC documentation boundary contract, Chinese loading, upload, move/copy menu, multi-file summary ellipsis consistency, and alert-channel token placeholders no longer using ASCII ellipsis fragments, extension-point secret placeholders using explicit angle-bracket markers, and documentation checks rejecting JSON/TOML/YAML ellipsis-only secret placeholders, including hyphenated and dotted key/token field names, plus the observability E2E regression guard for ASCII ellipses in Chinese visible text, the release-readiness release-checklist gate for CHANGELOG documentation, dependency-security, Docker build/smoke commands, security policy, support-guide safety guidance, Dependabot baseline, CI/Release workflow baseline, Makefile core local gate target baseline, torture workflow baseline, blank-Issue disablement, and the release-readiness Issue Form safety guidance gate, the public-deployment security-checklist documentation contract, Go package test-timeout gate stability, `make check`, dependency security scans, example config validation, public-access templates, protobuf regeneration stability, Rust fmt/test/clippy, proto-gen fmt/test/clippy, frontend lint/typecheck/unit/build, 375 Playwright E2E cases, Docker build, Docker image `sha256:3400ac78c2d70342912f496deb1433249686065a82081e9205f85c3ce59cf1a6`, and Docker smoke. The Docker smoke used the Docker-assigned loopback port `http://127.0.0.1:32887`.
 
 - `GOTOOLCHAIN=local ./scripts/verify-changed.sh`
 - `GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master`
@@ -60,6 +63,9 @@ Latest local full-validation snapshot: validation target `1c9ee8bd9fac`; `GOTOOL
 - `make docs-check`
 - `make security-check NPM_AUDIT=1`
 - `make docker-check`
+- `sudo mnemonas-doctor --public-domain <domain>`
+- `./scripts/public-go-live-smoke.sh <domain>`
+- `docs/cloud-firewall-checklist.en.md`
 - `./scripts/test-release-tag.sh`
 - `./scripts/test-release-package.sh`
 - `./scripts/test-release-artifacts.sh`
@@ -94,7 +100,7 @@ gh release download v0.1.0 \
   dist/release-check
 ```
 
-Then complete at least one archive-install smoke test, one Docker release-image startup smoke test, public documentation link checks, and deployment-environment review for DNS, firewall, TLS, and cloud security groups.
+Then complete at least one archive-install smoke test, one Docker release-image startup smoke test, public documentation link checks, and deployment-environment review covering `mnemonas-doctor --public-domain`, external-network `public-go-live-smoke.sh`, DNS, firewall, TLS, and cloud security groups.
 
 ## Known Limitations
 
@@ -109,6 +115,6 @@ Then complete at least one archive-install smoke test, one Docker release-image 
 - Confirm this draft is updated with the final tag, validation results, and artifact names.
 - Confirm `git status --short --branch` is clean.
 - Confirm `./scripts/plan-hardening-commits.sh --fail-on-manual` reports no paths left to group.
-- Run `./scripts/release-readiness.sh` and confirm commit subjects, temporary `fixup!` / `squash!` commits, hardening validation evidence, release-documentation commands, security policy, Dependabot baseline, torture workflow baseline, blank-Issue disablement and Issue Form safety guidance, and community health files pass.
+- Run `./scripts/release-readiness.sh` and confirm commit subjects, temporary `fixup!` / `squash!` commits, hardening validation evidence, release-documentation commands, public-deployment review commands, security policy, Dependabot baseline, CI/Release workflow baseline, Makefile core local gate target baseline, torture workflow baseline, blank-Issue disablement and Issue Form safety guidance, and community health files pass.
 - After creating and pushing the tag, confirm the Release workflow succeeds.
 - After publication, run the release artifact verifier and record the result.

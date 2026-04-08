@@ -200,6 +200,60 @@ check_torture_workflow() {
 	require_file_contains "$path" "run: make test-torture"
 }
 
+check_ci_workflow() {
+	local path=".github/workflows/ci.yml"
+
+	require_file_contains "$path" "pull_request:"
+	require_file_contains "$path" "permissions:"
+	require_file_contains "$path" "contents: read"
+	require_file_contains "$path" "persist-credentials: false"
+	require_file_contains "$path" "run: make workflows-check"
+	require_file_contains "$path" "run: make scripts-check"
+	require_file_contains "$path" "run: make docs-check"
+	require_file_contains "$path" "run: make toolchains-check"
+	require_file_contains "$path" "go test -v -race -coverprofile=coverage.out"
+	require_file_contains "$path" "npm audit --audit-level=\"\${{ env.NPM_AUDIT_LEVEL }}\""
+	require_file_contains "$path" "run: npm run test:e2e"
+	require_file_contains "$path" "run: ./scripts/docker-smoke.sh mnemonas:test"
+}
+
+check_release_workflow() {
+	local path=".github/workflows/release.yml"
+
+	require_file_contains "$path" "- 'v*'"
+	require_file_contains "$path" "permissions:"
+	require_file_contains "$path" "contents: read"
+	require_file_contains "$path" "packages: write"
+	require_file_contains "$path" "contents: write"
+	require_file_contains "$path" "persist-credentials: false"
+	require_file_contains "$path" "run: ./scripts/check-release-tag.sh \"\$GITHUB_REF_NAME\""
+	require_file_contains "$path" "run: ./scripts/docker-smoke.sh mnemonas:release-smoke"
+	require_file_contains "$path" "./scripts/verify-release-artifacts.sh \\"
+	require_file_contains "$path" "--require-targets"
+	require_file_contains "$path" "uses: softprops/action-gh-release@v2"
+	require_file_contains "$path" "prerelease: \${{ contains(github.ref_name, '-') }}"
+}
+
+check_makefile_targets() {
+	local path="Makefile"
+
+	require_file_contains "$path" "GO_TEST_TIMEOUT ?= 20m"
+	require_file_contains "$path" "go-packages:"
+	require_file_contains "$path" "workflows-check:"
+	require_file_contains "$path" "scripts-check:"
+	require_file_contains "$path" "toolchains-check:"
+	require_file_contains "$path" "docs-check:"
+	require_file_contains "$path" "security-check:"
+	require_file_contains "$path" "test:"
+	require_file_contains "$path" "test-torture:"
+	require_file_contains "$path" "./scripts/torture-test.sh"
+	require_file_contains "$path" "docker-check: docker docker-smoke"
+	require_file_contains "$path" "check: workflows-check scripts-check toolchains-check docs-check lint test"
+	require_file_contains "$path" "verify-changed:"
+	require_file_contains "$path" "./scripts/verify-changed.sh"
+	require_file_contains "$path" "quick-check:"
+}
+
 check_issue_templates() {
 	require_file_contains ".github/ISSUE_TEMPLATE/bug_report.yml" "Sensitive values such as passwords, tokens, cookies, private URLs, and internal addresses must be removed before posting logs."
 	require_file_contains ".github/ISSUE_TEMPLATE/bug_report.yml" "Relevant sanitized logs, \`mnemonas-doctor\`, Docker preflight, browser console output, screenshots, or request IDs."
@@ -246,6 +300,7 @@ check_community_files() {
 	local required_files=(
 		"README.md"
 		"README.en.md"
+		"Makefile"
 		"LICENSE"
 		"CHANGELOG.md"
 		"CHANGELOG.en.md"
@@ -264,6 +319,8 @@ check_community_files() {
 		".github/ISSUE_TEMPLATE/question.yml"
 		".github/ISSUE_TEMPLATE/webdav_compatibility.yml"
 		".github/pull_request_template.md"
+		".github/workflows/ci.yml"
+		".github/workflows/release.yml"
 		".github/workflows/torture.yml"
 	)
 
@@ -274,12 +331,15 @@ check_community_files() {
 	check_support_routes
 	check_security_policy
 	check_dependabot_config
+	check_ci_workflow
+	check_release_workflow
 	check_torture_workflow
+	check_makefile_targets
 	check_issue_template_config
 	check_issue_templates
 	check_pull_request_template
 
-	print_kv "community" "required community health files, dependency-update baseline, torture workflow baseline, support/security routes, and issue template safety guidance present"
+	print_kv "community" "required community health files, dependency-update baseline, CI/release/torture workflow and Makefile target baselines, support/security routes, and issue template safety guidance present"
 }
 
 extract_validation_target() {
@@ -413,6 +473,9 @@ check_release_notes() {
 		"make scripts-check"
 		"make security-check NPM_AUDIT=1"
 		"make docker-check"
+		"mnemonas-doctor --public-domain"
+		"./scripts/public-go-live-smoke.sh"
+		"cloud-firewall-checklist"
 		"./scripts/test-release-tag.sh"
 		"./scripts/test-release-package.sh"
 		"./scripts/test-release-artifacts.sh"
@@ -541,6 +604,12 @@ if [[ "$CHECK_CHECKLIST" -eq 1 ]]; then
 	require_file_contains "CHANGELOG.en.md" "make security-check NPM_AUDIT=1"
 	require_file_contains "CHANGELOG.md" "make docker-check"
 	require_file_contains "CHANGELOG.en.md" "make docker-check"
+	require_file_contains "CHANGELOG.md" "mnemonas-doctor --public-domain"
+	require_file_contains "CHANGELOG.en.md" "mnemonas-doctor --public-domain"
+	require_file_contains "CHANGELOG.md" "./scripts/public-go-live-smoke.sh"
+	require_file_contains "CHANGELOG.en.md" "./scripts/public-go-live-smoke.sh"
+	require_file_contains "CHANGELOG.md" "cloud-firewall-checklist"
+	require_file_contains "CHANGELOG.en.md" "cloud-firewall-checklist"
 	require_file_contains "CHANGELOG.md" "./scripts/release-readiness.sh"
 	require_file_contains "CHANGELOG.en.md" "./scripts/release-readiness.sh"
 	require_file_contains "CHANGELOG.md" "./scripts/plan-hardening-commits.sh --fail-on-manual"
