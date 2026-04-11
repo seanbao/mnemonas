@@ -37,7 +37,7 @@
 - `release-readiness` 会要求 `.github/workflows/torture.yml` 保留手动入口、定时入口、只读权限、`RUN_LIVE_FAULTS: '0'` 非破坏性开关和 `make test-torture` 执行入口，避免长期回归工作流在发布前失效。
 - `release-readiness` 会要求关闭空白 Issue，并检查缺陷报告、使用问题、功能建议和 WebDAV 兼容性 Issue 表单保留敏感信息脱敏、诊断信息和安全影响提示，避免公开协作入口绕过安全提示。
 - `release-readiness` 会检查安全策略和支持说明保留私密漏洞报告入口、禁止公开漏洞细节、dataplane 端口不外露、依赖安全检查和公网直连限制等关键提示。
-- `release-readiness` 会要求发布清单和双语 release notes 保留 `mnemonas-doctor --public-domain`、`scripts/public-go-live-smoke.sh` 和 `cloud-firewall-checklist` 入口，避免公网部署环境复核从最终发布流程中遗漏。
+- `release-readiness` 会要求发布清单和双语 release notes 保留 `mnemonas-doctor --public-domain`、`scripts/public-go-live-smoke.sh`、`scripts/backup-restore-drill-smoke.sh` 和 `cloud-firewall-checklist` 入口，避免公网部署环境复核和恢复演练入口从最终发布流程中遗漏。
 - `release-readiness` 会拒绝不是当前 HEAD 祖先的 base ref，避免用旁支范围生成误导性的发布就绪摘要。
 - Go 测试入口现在保留 20 分钟包级超时，避免重负载 race 包在完整分支验证中被 Go 默认 10 分钟超时中断。
 - 文档检查会拒绝 API 示例中可复制的 `?path=/...` 裸路径查询，要求恢复和收藏检查等 `path` 查询示例使用 `%2F...` 编码形式。
@@ -71,11 +71,13 @@ Release workflow 预期生成以下产物：
 - `make docker-check`
 - `sudo mnemonas-doctor --public-domain <domain>`
 - `./scripts/public-go-live-smoke.sh <domain>`
+- `./scripts/backup-restore-drill-smoke.sh`
 - `docs/cloud-firewall-checklist.md`
 - `./scripts/test-release-tag.sh`
 - `./scripts/test-release-package.sh`
 - `./scripts/test-release-artifacts.sh`
 - Public go-live TCP reachability test：`scripts/test-public-go-live-smoke.sh`
+- Backup restore-drill smoke safety test：`scripts/test-backup-restore-drill-smoke.sh`
 - Release artifact dash-prefixed directory test：`scripts/test-release-artifacts.sh`
 - Docker quickstart safety test：`scripts/test-docker-quickstart.sh`
 - Docker preflight safety test：`scripts/test-docker-preflight.sh`

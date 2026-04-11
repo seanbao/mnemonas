@@ -71,7 +71,7 @@ This project follows [Semantic Versioning 2.0.0](https://semver.org/).
 - `scripts/release-readiness.sh` requires `.github/workflows/torture.yml` to retain manual and scheduled triggers, read-only permissions, the `RUN_LIVE_FAULTS: '0'` non-destructive guard, and the `make test-torture` entry point, preventing the long-running regression workflow from being lost before release.
 - `scripts/release-readiness.sh` requires blank Issues to stay disabled and checks that the bug report, usage question, feature request, and WebDAV compatibility Issue Forms retain sensitive-data redaction, diagnostic, and security-impact guidance, preventing public collaboration entry points from bypassing safety prompts.
 - `scripts/release-readiness.sh` checks that the security policy and support guide retain private vulnerability reporting, public-disclosure warnings, dataplane port exposure boundaries, dependency-security checks, and direct-public-exposure limitations.
-- `scripts/release-readiness.sh` requires the release checklist and bilingual release notes to retain the `mnemonas-doctor --public-domain`, `scripts/public-go-live-smoke.sh`, and `cloud-firewall-checklist` entry points, preventing public-deployment environment review from being omitted during final release preparation.
+- `scripts/release-readiness.sh` requires the release checklist and bilingual release notes to retain the `mnemonas-doctor --public-domain`, `scripts/public-go-live-smoke.sh`, `scripts/backup-restore-drill-smoke.sh`, and `cloud-firewall-checklist` entry points, preventing public-deployment environment review and the restore-drill entry point from being omitted during final release preparation.
 - `scripts/release-readiness.sh` rejects a base ref that is not an ancestor of the current HEAD, preventing misleading release-readiness summaries from sibling branch ranges.
 - `scripts/release-readiness.sh` checks that local commit subjects on the current release branch follow Conventional Commits and rejects leftover `fixup!` / `squash!` temporary commits.
 - `scripts/public-go-live-smoke.sh` checks backend-port TCP reachability before HTTP status checks, so `8080/9090/9091` or custom backend ports fail when an external network can establish a TCP connection even if no HTTP status is returned.
@@ -197,6 +197,7 @@ First public release target.
 - [ ] Run Docker build and smoke checks: `make docker-check`
 - [ ] If public access is planned, run on the server: `sudo mnemonas-doctor --public-domain <domain>`, and review the [Public cloud firewall checklist](docs/cloud-firewall-checklist.en.md) for DNS, firewall, TLS, and cloud security groups
 - [ ] If public access is planned, run from an external network: `./scripts/public-go-live-smoke.sh <domain>` to confirm HTTPS, same-domain redirects, and private backend ports
+- [ ] If this release includes the backup and restore path, run `./scripts/backup-restore-drill-smoke.sh` against at least one configured backup job and confirm that immediate backup, retention review, restore drill, and restore report download can be repeated
 - [ ] Confirm `./scripts/plan-hardening-commits.sh --fail-on-manual` reports no unclassified paths
 - [ ] Run release readiness summary: `./scripts/release-readiness.sh`
 - [ ] Update `CHANGELOG.md`, `CHANGELOG.en.md`, README version references, and [release notes draft](docs/release-notes.en.md)

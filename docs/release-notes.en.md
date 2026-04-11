@@ -37,7 +37,7 @@ This release candidate focuses on improving MnemoNAS stability, public-access sa
 - `release-readiness` requires `.github/workflows/torture.yml` to retain manual and scheduled triggers, read-only permissions, the `RUN_LIVE_FAULTS: '0'` non-destructive guard, and the `make test-torture` entry point, preventing the long-running regression workflow from being lost before release.
 - `release-readiness` requires blank Issues to stay disabled and checks that the bug report, usage question, feature request, and WebDAV compatibility Issue Forms keep sensitive-data redaction, diagnostic, and security-impact guidance, preventing public collaboration entry points from bypassing safety prompts.
 - `release-readiness` checks that the security policy and support guide retain private vulnerability reporting, public-disclosure warnings, dataplane port exposure boundaries, dependency-security checks, and direct-public-exposure limitations.
-- `release-readiness` requires the release checklist and bilingual release notes to retain the `mnemonas-doctor --public-domain`, `scripts/public-go-live-smoke.sh`, and `cloud-firewall-checklist` entry points, preventing public-deployment environment review from being omitted during final release preparation.
+- `release-readiness` requires the release checklist and bilingual release notes to retain the `mnemonas-doctor --public-domain`, `scripts/public-go-live-smoke.sh`, `scripts/backup-restore-drill-smoke.sh`, and `cloud-firewall-checklist` entry points, preventing public-deployment environment review and the restore-drill entry point from being omitted during final release preparation.
 - `release-readiness` rejects a base ref that is not an ancestor of the current HEAD, preventing misleading release-readiness summaries from sibling branch ranges.
 - Go test entry points now keep a 20-minute package timeout so heavy race packages are not interrupted by Go's default 10-minute timeout during full branch validation.
 - Documentation checks reject copyable raw `?path=/...` path queries in API examples, requiring restore and favorite-check `path` query examples to use `%2F...` encoding.
@@ -71,11 +71,13 @@ Latest local full-validation snapshot: validation target `6375d0813b40`; `GOTOOL
 - `make docker-check`
 - `sudo mnemonas-doctor --public-domain <domain>`
 - `./scripts/public-go-live-smoke.sh <domain>`
+- `./scripts/backup-restore-drill-smoke.sh`
 - `docs/cloud-firewall-checklist.en.md`
 - `./scripts/test-release-tag.sh`
 - `./scripts/test-release-package.sh`
 - `./scripts/test-release-artifacts.sh`
 - Public go-live TCP reachability test: `scripts/test-public-go-live-smoke.sh`
+- Backup restore-drill smoke safety test: `scripts/test-backup-restore-drill-smoke.sh`
 - Release artifact dash-prefixed directory test: `scripts/test-release-artifacts.sh`
 - Docker quickstart safety test: `scripts/test-docker-quickstart.sh`
 - Docker preflight safety test: `scripts/test-docker-preflight.sh`
