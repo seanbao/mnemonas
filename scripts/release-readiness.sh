@@ -26,7 +26,7 @@ Print a read-only release readiness summary for the current branch.
 Options:
   --base REF                      Compare the current branch against REF. Defaults to master.
   --allow-dirty                   Print a draft summary even when the worktree is dirty.
-  --allow-post-validation-changes  Allow non-release-documentation changes after the recorded validation target.
+  --allow-post-validation-changes  Allow non-release-documentation changes after the recorded validation target for a draft summary.
   --skip-checklist                Skip release checklist and release-note command assertions.
   -h, --help        Show this help.
 EOF
@@ -457,6 +457,9 @@ check_validation_evidence() {
 
 	if [[ "$files_since" != "0" && "$release_docs_only" -eq 0 && "$ALLOW_POST_VALIDATION_CHANGES" -eq 0 ]]; then
 		fail "non-release-documentation changes exist after validation target $target_short; rerun full branch validation or pass --allow-post-validation-changes for a draft summary"
+	fi
+	if [[ "$files_since" != "0" && "$release_docs_only" -eq 0 && "$ALLOW_POST_VALIDATION_CHANGES" -eq 1 ]]; then
+		print_kv "validation-warning" "draft override allowed non-release-documentation changes after validation target $target_short; rerun full branch validation before release"
 	fi
 }
 
