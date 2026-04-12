@@ -667,6 +667,8 @@ assert_file_contains "$output_dir/pass.out" "[release-readiness] validation:"
 assert_file_contains "$output_dir/pass.out" "full gate evidence at"
 assert_file_contains "$output_dir/pass.out" "files changed since target"
 assert_file_contains "$output_dir/pass.out" "[release-readiness] validation-diff:"
+assert_file_contains "$output_dir/pass.out" "[release-readiness] validation-warning:"
+assert_file_contains "$output_dir/pass.out" "draft override allowed non-release-documentation changes after validation target"
 assert_file_contains "$output_dir/pass.out" "[release-readiness] release-notes:"
 assert_file_contains "$output_dir/pass.out" "[release-readiness] checklist:"
 assert_file_contains "$output_dir/pass.out" "[release-readiness] status:"
@@ -702,6 +704,7 @@ assert_file_contains "$output_dir/dirty.err" "worktree has uncommitted changes"
 
 ./scripts/release-readiness.sh --allow-dirty --allow-post-validation-changes >"$output_dir/allow-dirty.out" 2>"$output_dir/allow-dirty.err"
 assert_file_contains "$output_dir/allow-dirty.out" "[release-readiness] worktree:          dirty (draft summary)"
+assert_file_contains "$output_dir/allow-dirty.out" "[release-readiness] validation-warning:"
 
 git checkout -q -- README.md
 rm -f .github/pull_request_template.md
