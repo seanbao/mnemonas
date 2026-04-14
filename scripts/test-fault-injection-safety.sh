@@ -54,6 +54,13 @@ make_fake_curl() {
 		'#!/usr/bin/env bash' \
 		'set -euo pipefail' \
 		'printf "%s\n" "$*" >> "$CURL_INVOKED_LOG"' \
+		'previous=""' \
+		'for arg in "$@"; do' \
+		'  if [[ "$previous" == "--config" && -n "${CURL_CONFIG_SNAPSHOT:-}" && -f "$arg" ]]; then' \
+		'    cat "$arg" > "$CURL_CONFIG_SNAPSHOT"' \
+		'  fi' \
+		'  previous="$arg"' \
+		'done' \
 		'case " $* " in' \
 		'  *" -w "*"%{http_code}"*) printf "404"; exit 0 ;;' \
 		'  *"/health"*) printf "{\"status\":\"healthy\"}\n"; exit 0 ;;' \
@@ -576,6 +583,7 @@ run_fault_injection_webdav_users_env_credentials_test() {
 	local fake_bin="$case_dir/bin"
 	local fake_nasd="$case_dir/nasd"
 	local curl_log="$case_dir/curl.log"
+	local config_snapshot="$case_dir/curl-auth.conf"
 	local nasd_log="$case_dir/nasd.log"
 	local secret="mnemonas-user-secret"
 	mkdir -p "$case_dir/storage"
@@ -586,6 +594,7 @@ run_fault_injection_webdav_users_env_credentials_test() {
 		HOME="$case_dir/home" \
 		PATH="$fake_bin:$PATH" \
 		CURL_INVOKED_LOG="$curl_log" \
+		CURL_CONFIG_SNAPSHOT="$config_snapshot" \
 		MNEMONAS_LIVE_FAULTS=1 \
 		FAULT_INJECTION_ASSUME_YES=1 \
 		RUN_CORRUPTION_TESTS=0 \
@@ -602,8 +611,11 @@ run_fault_injection_webdav_users_env_credentials_test() {
 		bash "$REPO_ROOT/scripts/fault-injection-test.sh"
 
 	assert_file_contains "$case_dir/out.log" "Using WebDAV users auth credentials for user: family-user"
-	assert_file_contains "$curl_log" "family-user:$secret"
-	assert_file_contains "$curl_log" "-u family-user:$secret -sf -X MKCOL http://127.0.0.1:18080/dav/fault-test/"
+	assert_file_contains "$curl_log" "--config"
+	assert_file_not_contains "$curl_log" "$secret"
+	assert_file_not_contains "$curl_log" "-u family-user:$secret"
+	assert_file_contains "$config_snapshot" 'user = "family-user:mnemonas-user-secret"'
+	assert_file_contains "$curl_log" "-sf -X MKCOL http://127.0.0.1:18080/dav/fault-test/"
 }
 
 run_concurrent_conflict_fails_when_etag_missing_test() {

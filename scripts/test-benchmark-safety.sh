@@ -39,9 +39,16 @@ make_fake_curl() {
 	local bin_dir="$1"
 	local invoked_log="$2"
 	mkdir -p "$bin_dir"
-	cat > "$bin_dir/curl" <<'EOF'
+cat > "$bin_dir/curl" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$CURL_INVOKED_LOG"
+previous=""
+for arg in "$@"; do
+	if [[ "$previous" == "--config" && -n "${CURL_CONFIG_SNAPSHOT:-}" && -f "$arg" ]]; then
+		cat "$arg" > "$CURL_CONFIG_SNAPSHOT"
+	fi
+	previous="$arg"
+done
 exit 7
 EOF
 	chmod +x "$bin_dir/curl"
@@ -53,10 +60,17 @@ make_fake_benchmark_curl() {
 	local bin_dir="$1"
 	local invoked_log="$2"
 	mkdir -p "$bin_dir"
-	cat > "$bin_dir/curl" <<'EOF'
+cat > "$bin_dir/curl" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$*" >> "$CURL_INVOKED_LOG"
+previous=""
+for arg in "$@"; do
+	if [[ "$previous" == "--config" && -n "${CURL_CONFIG_SNAPSHOT:-}" && -f "$arg" ]]; then
+		cat "$arg" > "$CURL_CONFIG_SNAPSHOT"
+	fi
+	previous="$arg"
+done
 case " $* " in
   *"/api/v1/auth/login"*)
     printf '{\n  "success": true,\n  "data": {\n    "access_token": "access.pretty",\n    "refresh_token": "refresh.pretty"\n  }\n}\n'
@@ -325,6 +339,7 @@ run_webdav_secret_json_escape_test() {
 	local case_dir="$TMP_ROOT/webdav-secret-json-escape"
 	local fake_bin="$case_dir/bin"
 	local invoked_log="$case_dir/curl.log"
+	local config_snapshot="$case_dir/curl-auth.conf"
 	local secret='quote"slash\value'
 	mkdir -p "$case_dir/storage"
 	make_fake_curl "$fake_bin" "$invoked_log"
@@ -341,18 +356,22 @@ EOF
 		HOME="$case_dir/home" \
 		PATH="$fake_bin:$PATH" \
 		CURL_INVOKED_LOG="$invoked_log" \
+		CURL_CONFIG_SNAPSHOT="$config_snapshot" \
 		MNEMONAS_STORAGE_ROOT="$case_dir/storage" \
 		CONFIG_FILE="$case_dir/config.toml" \
 		SECRETS_FILE="$case_dir/secrets.json" \
 		bash "$REPO_ROOT/scripts/benchmark.sh" "http://127.0.0.1:9"
 
-	assert_file_contains "$invoked_log" "admin:$secret"
+	assert_file_contains "$invoked_log" "--config"
+	assert_file_not_contains "$invoked_log" "$secret"
+	assert_file_contains "$config_snapshot" 'user = "admin:quote\"slash\\value"'
 }
 
 run_webdav_config_toml_escape_test() {
 	local case_dir="$TMP_ROOT/webdav-config-toml-escape"
 	local fake_bin="$case_dir/bin"
 	local invoked_log="$case_dir/curl.log"
+	local config_snapshot="$case_dir/curl-auth.conf"
 	local secret='quote"slash\value'
 	mkdir -p "$case_dir/storage"
 	make_fake_curl "$fake_bin" "$invoked_log"
@@ -368,18 +387,22 @@ EOF
 		HOME="$case_dir/home" \
 		PATH="$fake_bin:$PATH" \
 		CURL_INVOKED_LOG="$invoked_log" \
+		CURL_CONFIG_SNAPSHOT="$config_snapshot" \
 		MNEMONAS_STORAGE_ROOT="$case_dir/storage" \
 		CONFIG_FILE="$case_dir/config.toml" \
 		SECRETS_FILE="$case_dir/secrets.json" \
 		bash "$REPO_ROOT/scripts/benchmark.sh" "http://127.0.0.1:9"
 
-	assert_file_contains "$invoked_log" "admin:$secret"
+	assert_file_contains "$invoked_log" "--config"
+	assert_file_not_contains "$invoked_log" "$secret"
+	assert_file_contains "$config_snapshot" 'user = "admin:quote\"slash\\value"'
 }
 
 run_webdav_users_env_credentials_test() {
 	local case_dir="$TMP_ROOT/webdav-users-env"
 	local fake_bin="$case_dir/bin"
 	local invoked_log="$case_dir/curl.log"
+	local config_snapshot="$case_dir/curl-auth.conf"
 	local secret='mnemonas-user-secret'
 	mkdir -p "$case_dir/storage"
 	make_fake_curl "$fake_bin" "$invoked_log"
@@ -388,14 +411,17 @@ run_webdav_users_env_credentials_test() {
 		HOME="$case_dir/home" \
 		PATH="$fake_bin:$PATH" \
 		CURL_INVOKED_LOG="$invoked_log" \
+		CURL_CONFIG_SNAPSHOT="$config_snapshot" \
 		MNEMONAS_STORAGE_ROOT="$case_dir/storage" \
 		MNEMONAS_WEBDAV_AUTH_TYPE=" Users " \
 		MNEMONAS_WEBDAV_USERNAME="family-user" \
 		MNEMONAS_WEBDAV_PASSWORD="$secret" \
 		bash "$REPO_ROOT/scripts/benchmark.sh" "http://127.0.0.1:9/"
 
-	assert_file_contains "$invoked_log" "family-user:$secret"
-	assert_file_contains "$invoked_log" "-u family-user:$secret -sS -o /dev/null -w %{http_code} -X PROPFIND"
+	assert_file_contains "$invoked_log" "--config"
+	assert_file_not_contains "$invoked_log" "$secret"
+	assert_file_not_contains "$invoked_log" "-u family-user:$secret"
+	assert_file_contains "$config_snapshot" 'user = "family-user:mnemonas-user-secret"'
 	assert_file_contains "$invoked_log" "http://127.0.0.1:9/dav/"
 }
 
@@ -584,12 +610,16 @@ run_refuse_default_personal_storage_test() {
 run_benchmark_docs_avoid_weak_webdav_env_credentials_test() {
 	assert_file_not_contains "$REPO_ROOT/docs/development.md" 'MNEMONAS_WEBDAV_USERNAME="webdav"'
 	assert_file_not_contains "$REPO_ROOT/docs/development.md" 'MNEMONAS_WEBDAV_PASSWORD="secret"'
+	assert_file_not_contains "$REPO_ROOT/docs/development.md" 'curl -u "<mnemonas-or-webdav-username>:<mnemonas-or-webdav-password>"'
 	assert_file_not_contains "$REPO_ROOT/docs/development.en.md" 'MNEMONAS_WEBDAV_USERNAME="webdav"'
 	assert_file_not_contains "$REPO_ROOT/docs/development.en.md" 'MNEMONAS_WEBDAV_PASSWORD="secret"'
+	assert_file_not_contains "$REPO_ROOT/docs/development.en.md" 'curl -u "<mnemonas-or-webdav-username>:<mnemonas-or-webdav-password>"'
 	assert_file_contains "$REPO_ROOT/docs/development.md" 'MNEMONAS_WEBDAV_USERNAME="<mnemonas-or-webdav-username>"'
 	assert_file_contains "$REPO_ROOT/docs/development.md" 'MNEMONAS_WEBDAV_PASSWORD="<mnemonas-or-webdav-password>"'
+	assert_file_contains "$REPO_ROOT/docs/development.md" "不应把 WebDAV 密码写进 \`curl -u\` 命令参数"
 	assert_file_contains "$REPO_ROOT/docs/development.en.md" 'MNEMONAS_WEBDAV_USERNAME="<mnemonas-or-webdav-username>"'
 	assert_file_contains "$REPO_ROOT/docs/development.en.md" 'MNEMONAS_WEBDAV_PASSWORD="<mnemonas-or-webdav-password>"'
+	assert_file_contains "$REPO_ROOT/docs/development.en.md" "instead of placing WebDAV passwords in \`curl -u\` command arguments"
 }
 
 run_isolated_target_reaches_health_check_test() {
