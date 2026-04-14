@@ -63,6 +63,7 @@ ADMIN_API_STATUS=""
 WEBDAV_USERNAME=""
 WEBDAV_PASSWORD=""
 WEBDAV_AUTH_ARGS=()
+CURL_AUTH_CONFIG=""
 
 # Utility functions
 log_info()  { echo -e "${BLUE}[INFO]${NC} $1"; }
@@ -556,6 +557,27 @@ normalize_webdav_auth_type() {
     printf '%s' "$value"
 }
 
+escape_curl_config_value() {
+    local value="$1"
+
+    value="${value//\\/\\\\}"
+    value="${value//\"/\\\"}"
+    printf '%s' "$value"
+}
+
+write_webdav_auth_config() {
+    local username="$1"
+    local password="$2"
+    local escaped_username escaped_password
+
+    escaped_username="$(escape_curl_config_value "$username")"
+    escaped_password="$(escape_curl_config_value "$password")"
+    CURL_AUTH_CONFIG="$(mktemp -t mnemonas-e2e-curl-auth.XXXXXX)"
+    chmod 0600 "$CURL_AUTH_CONFIG"
+    printf 'user = "%s:%s"\n' "$escaped_username" "$escaped_password" > "$CURL_AUTH_CONFIG"
+    WEBDAV_AUTH_ARGS=(--config "$CURL_AUTH_CONFIG")
+}
+
 configure_webdav_auth() {
     local auth_type="${MNEMONAS_WEBDAV_AUTH_TYPE:-$(read_config_value webdav auth_type)}"
     local username=""
@@ -596,7 +618,7 @@ configure_webdav_auth() {
             ;;
     esac
 
-    WEBDAV_AUTH_ARGS=(-u "$username:$password")
+    write_webdav_auth_config "$username" "$password"
     WEBDAV_USERNAME="$username"
     WEBDAV_PASSWORD="$password"
     log_info "Using WebDAV $auth_type auth credentials for user: $username"
@@ -654,6 +676,10 @@ curl() {
 cleanup() {
     log_info "Cleaning up test directory..."
     rm -rf -- "$TEST_DIR"
+    if [[ -n "$CURL_AUTH_CONFIG" ]]; then
+        rm -f -- "$CURL_AUTH_CONFIG"
+        CURL_AUTH_CONFIG=""
+    fi
     if [[ "$CLEANUP_REMOTE_ENABLED" != "1" ]]; then
         return
     fi
