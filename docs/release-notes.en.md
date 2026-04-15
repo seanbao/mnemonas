@@ -56,7 +56,7 @@ Archives should include a top-level directory, `nasd`, `dataplane`, Web UI stati
 
 The current hardening branch has the following validation evidence. Final publication should use the latest tag, Release workflow result, and required environment validation as the source of truth:
 
-Latest local full-validation snapshot: validation target `7186d66aa799`; `GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master` passed, covering the prior roadmap, WebDAV documentation, CDC documentation boundary, Chinese visible-text, release-readiness baseline, community entry-point, documentation-contract, backup restore-drill guide contract, and Go test-timeout gate increments, plus the release-readiness gate requiring the release checklist and bilingual release notes to retain the `mnemonas-doctor --public-domain`, external-network `public-go-live-smoke.sh`, and `cloud-firewall-checklist` public-deployment review entry points. It also covered `make check`, dependency security scans, example config validation, public-access templates, protobuf regeneration stability, Rust fmt/test/clippy, proto-gen fmt/test/clippy, frontend lint/typecheck/unit/build, 375 Playwright E2E cases, Docker build, Docker image `sha256:fa5f508ca6956a5a59579249d69b0a63480257481923a42618a259e2c893b2d0`, and Docker smoke. The Docker smoke used the Docker-assigned loopback port `http://127.0.0.1:32889`.
+Latest local full-validation snapshot: validation target `0cc51aac4f3c`; `GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master` passed, covering the prior roadmap, WebDAV documentation, CDC documentation boundary, Chinese visible-text, release-readiness baseline, community entry-point, documentation-contract, backup restore-drill guide contract, Go test-timeout gate, batch-restore preflight-failure disposition E2E, and release-note candidate-limit gate increments, plus the release-readiness gate requiring the release checklist and bilingual release notes to retain the `mnemonas-doctor --public-domain`, external-network `public-go-live-smoke.sh`, `cloud-firewall-checklist`, L1/L1+ candidate positioning, non-primary data-copy, and external-backup review entry points. It also covered `make check`, dependency security scans, example config validation, public-access templates, protobuf regeneration stability, Rust fmt/test/clippy, proto-gen fmt/test/clippy, frontend lint/typecheck/unit/build, 377 Playwright E2E cases, Docker build, Docker image `sha256:3156783a888170823db3883c4badcd45271d3be9232f6acb1d6375f368dc1def`, and Docker smoke. The Docker smoke used the Docker-assigned loopback port `http://127.0.0.1:32891`.
 
 - `GOTOOLCHAIN=local ./scripts/verify-changed.sh`
 - `GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master`
@@ -77,7 +77,7 @@ Latest local full-validation snapshot: validation target `7186d66aa799`; `GOTOOL
 - Docker smoke safety test: `scripts/test-docker-smoke.sh`
 - WebDAV curl smoke safety test: `scripts/test-webdav-client-smoke.sh`
 - Release workflow incremental validation: `make workflows-check`, `make scripts-check`, `./scripts/check-secret-leaks.sh`, `make toolchains-check`, `git diff --check`
-- Playwright E2E: `375 passed`
+- Playwright E2E: `377 passed`
 - Frontend unit tests: `3111 passed`
 - Docker build and `scripts/docker-smoke.sh`
 
@@ -105,6 +105,7 @@ Then complete at least one archive-install smoke test, one Docker release-image 
 
 ## Known Limitations
 
+- This release candidate is positioned as a fully locally validated L1 private file cloud with an initial L1+ public-access safety baseline, not as the only long-term copy of important data. Production use should keep external backups and continue collecting real-media restore, remote-restore disposition, cross-version upgrade, and rollback records.
 - The mountable SMB/Samba runtime is still not enabled. The current build only keeps configuration, diagnostics, and runtime-state notices.
 - `LOCK` / `UNLOCK` are virtual WebDAV compatibility behavior. Concurrent multi-client edits of the same file still require conflict control in the client or upper workflow.
 - Real public deployments depend on the specific DNS, firewall, TLS, reverse-proxy, and cloud security-group configuration. Templates and doctor checks do not replace environment-level review.
