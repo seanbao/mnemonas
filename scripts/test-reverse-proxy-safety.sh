@@ -209,9 +209,15 @@ run_webdav_docs_avoid_placeholder_password_test() {
     assert_file_contains "$REPO_ROOT/docs/reverse-proxy-setup.md" 'WEBDAV_USER="<mnemonas-or-webdav-username>"'
     assert_file_contains "$REPO_ROOT/docs/reverse-proxy-setup.md" 'WEBDAV_PASS="<mnemonas-or-webdav-password>"'
     assert_file_contains "$REPO_ROOT/docs/reverse-proxy-setup.md" '生成密码位于 /srv/mnemonas/secrets.json 的 webdav_password 字段'
+    assert_file_contains "$REPO_ROOT/docs/reverse-proxy-setup.md" "curl_auth_config=\"\$(mktemp -t mnemonas-webdav-curl-auth.XXXXXX)\""
+    assert_file_contains "$REPO_ROOT/docs/reverse-proxy-setup.md" "curl --config \"\$curl_auth_config\" -X PROPFIND"
+    assert_file_not_contains "$REPO_ROOT/docs/reverse-proxy-setup.md" "curl -u \"\$WEBDAV_USER:\$WEBDAV_PASS\""
     assert_file_contains "$REPO_ROOT/docs/reverse-proxy-setup.en.md" 'WEBDAV_USER="<mnemonas-or-webdav-username>"'
     assert_file_contains "$REPO_ROOT/docs/reverse-proxy-setup.en.md" 'WEBDAV_PASS="<mnemonas-or-webdav-password>"'
     assert_file_contains "$REPO_ROOT/docs/reverse-proxy-setup.en.md" 'webdav_password field in /srv/mnemonas/secrets.json'
+    assert_file_contains "$REPO_ROOT/docs/reverse-proxy-setup.en.md" "curl_auth_config=\"\$(mktemp -t mnemonas-webdav-curl-auth.XXXXXX)\""
+    assert_file_contains "$REPO_ROOT/docs/reverse-proxy-setup.en.md" "curl --config \"\$curl_auth_config\" -X PROPFIND"
+    assert_file_not_contains "$REPO_ROOT/docs/reverse-proxy-setup.en.md" "curl -u \"\$WEBDAV_USER:\$WEBDAV_PASS\""
 }
 
 run_reverse_proxy_docs_warn_against_insecure_traefik_dashboard_test() {
