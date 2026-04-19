@@ -78,6 +78,13 @@ test.describe('设置选项卡切换', () => {
 
     const webdavSwitch = page.getByRole('switch', { name: /启用 WebDAV/i })
     await expect(webdavSwitch).toBeVisible({ timeout: 5000 })
+    await expect(page.getByText('日常或生产挂载优先使用 MnemoNAS 用户账号；Basic Auth 仅用于旧客户端或专用服务凭据')).toBeVisible()
+
+    await page.getByLabel('WebDAV 认证方式').selectOption('users')
+    await expect(page.getByLabel('WebDAV 用户账号认证说明')).toBeVisible()
+    await expect(page.getByText('WebDAV 登录会复用已启用用户账号，并继续受用户状态和目录权限限制。')).toBeVisible()
+    await expect(page.locator('input[aria-label="WebDAV Basic Auth 用户名"]')).toHaveCount(0)
+    await expect(page.locator('input[aria-label="WebDAV Basic Auth 密码"]')).toHaveCount(0)
   })
 
   test('点击版本保留选项卡应显示版本设置', async ({ page }) => {
