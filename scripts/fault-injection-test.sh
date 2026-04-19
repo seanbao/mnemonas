@@ -54,6 +54,8 @@ SKIPPED=0
 ADMIN_ACCESS_TOKEN=""
 WEBDAV_AUTH_ARGS=()
 CURL_AUTH_CONFIG=""
+CURL_ADMIN_AUTH_CONFIG=""
+ADMIN_AUTH_ARGS=()
 
 log_info()  { echo -e "${BLUE}[INFO]${NC} $1"; }
 log_ok()    { echo -e "${GREEN}[PASS]${NC} $1"; ((PASSED+=1)); }
@@ -566,17 +568,52 @@ escape_curl_config_value() {
     printf '%s' "$value"
 }
 
+require_curl_config_value() {
+    local value="$1"
+    local label="$2"
+
+    if [[ "$value" == *$'\n'* || "$value" == *$'\r'* ]]; then
+        die "$label cannot contain newline characters"
+    fi
+    if [[ "$value" == *[[:cntrl:]]* ]]; then
+        die "$label cannot contain control characters"
+    fi
+}
+
 write_webdav_auth_config() {
     local username="$1"
     local password="$2"
     local escaped_username escaped_password
 
+    require_curl_config_value "$username" "WebDAV username"
+    require_curl_config_value "$password" "WebDAV password"
     escaped_username="$(escape_curl_config_value "$username")"
     escaped_password="$(escape_curl_config_value "$password")"
     CURL_AUTH_CONFIG="$(mktemp -t mnemonas-fault-curl-auth.XXXXXX)"
     chmod 0600 "$CURL_AUTH_CONFIG"
     printf 'user = "%s:%s"\n' "$escaped_username" "$escaped_password" > "$CURL_AUTH_CONFIG"
     WEBDAV_AUTH_ARGS=(--config "$CURL_AUTH_CONFIG")
+}
+
+cleanup_admin_auth_config() {
+    if [[ -n "$CURL_ADMIN_AUTH_CONFIG" ]]; then
+        rm -f -- "$CURL_ADMIN_AUTH_CONFIG"
+        CURL_ADMIN_AUTH_CONFIG=""
+    fi
+    ADMIN_AUTH_ARGS=()
+}
+
+write_admin_auth_config() {
+    local token="$1"
+    local escaped_token
+
+    cleanup_admin_auth_config
+    require_curl_config_value "$token" "admin bearer token"
+    escaped_token="$(escape_curl_config_value "$token")"
+    CURL_ADMIN_AUTH_CONFIG="$(mktemp -t mnemonas-fault-admin-auth.XXXXXX)"
+    chmod 0600 "$CURL_ADMIN_AUTH_CONFIG"
+    printf 'header = "Authorization: Bearer %s"\n' "$escaped_token" > "$CURL_ADMIN_AUTH_CONFIG"
+    ADMIN_AUTH_ARGS=(--config "$CURL_ADMIN_AUTH_CONFIG")
 }
 
 configure_webdav_auth() {
@@ -647,6 +684,7 @@ configure_admin_auth() {
 
     ADMIN_ACCESS_TOKEN=$(read_json_field "$resp" access_token)
     if [[ -n "$ADMIN_ACCESS_TOKEN" ]]; then
+        write_admin_auth_config "$ADMIN_ACCESS_TOKEN"
         log_info "Using bootstrap admin token for protected API checks"
         return 0
     fi
@@ -655,8 +693,8 @@ configure_admin_auth() {
 }
 
 authenticated_api_curl() {
-    if [[ -n "$ADMIN_ACCESS_TOKEN" ]]; then
-        command curl -H "Authorization: Bearer $ADMIN_ACCESS_TOKEN" "$@"
+    if [[ ${#ADMIN_AUTH_ARGS[@]} -gt 0 ]]; then
+        command curl "${ADMIN_AUTH_ARGS[@]}" "$@"
         return
     fi
 
@@ -691,6 +729,7 @@ cleanup() {
         rm -f -- "$CURL_AUTH_CONFIG"
         CURL_AUTH_CONFIG=""
     fi
+    cleanup_admin_auth_config
     # Restart only after this script killed the explicitly confirmed target.
     if [[ "$SERVICE_WAS_KILLED" == "1" ]] && ! curl -sf "$BASE_URL/health" > /dev/null 2>&1; then
         log_warn "Service not running, attempting restart..."

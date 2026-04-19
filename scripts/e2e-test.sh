@@ -64,6 +64,8 @@ WEBDAV_USERNAME=""
 WEBDAV_PASSWORD=""
 WEBDAV_AUTH_ARGS=()
 CURL_AUTH_CONFIG=""
+CURL_ADMIN_AUTH_CONFIG=""
+ADMIN_AUTH_ARGS=()
 
 # Utility functions
 log_info()  { echo -e "${BLUE}[INFO]${NC} $1"; }
@@ -565,17 +567,54 @@ escape_curl_config_value() {
     printf '%s' "$value"
 }
 
+require_curl_config_value() {
+    local value="$1"
+    local label="$2"
+
+    if [[ "$value" == *$'\n'* || "$value" == *$'\r'* ]]; then
+        echo -e "${RED}ERROR:${NC} $label cannot contain newline characters" >&2
+        exit 1
+    fi
+    if [[ "$value" == *[[:cntrl:]]* ]]; then
+        echo -e "${RED}ERROR:${NC} $label cannot contain control characters" >&2
+        exit 1
+    fi
+}
+
 write_webdav_auth_config() {
     local username="$1"
     local password="$2"
     local escaped_username escaped_password
 
+    require_curl_config_value "$username" "WebDAV username"
+    require_curl_config_value "$password" "WebDAV password"
     escaped_username="$(escape_curl_config_value "$username")"
     escaped_password="$(escape_curl_config_value "$password")"
     CURL_AUTH_CONFIG="$(mktemp -t mnemonas-e2e-curl-auth.XXXXXX)"
     chmod 0600 "$CURL_AUTH_CONFIG"
     printf 'user = "%s:%s"\n' "$escaped_username" "$escaped_password" > "$CURL_AUTH_CONFIG"
     WEBDAV_AUTH_ARGS=(--config "$CURL_AUTH_CONFIG")
+}
+
+cleanup_admin_auth_config() {
+    if [[ -n "$CURL_ADMIN_AUTH_CONFIG" ]]; then
+        rm -f -- "$CURL_ADMIN_AUTH_CONFIG"
+        CURL_ADMIN_AUTH_CONFIG=""
+    fi
+    ADMIN_AUTH_ARGS=()
+}
+
+write_admin_auth_config() {
+    local token="$1"
+    local escaped_token
+
+    cleanup_admin_auth_config
+    require_curl_config_value "$token" "admin bearer token"
+    escaped_token="$(escape_curl_config_value "$token")"
+    CURL_ADMIN_AUTH_CONFIG="$(mktemp -t mnemonas-e2e-admin-auth.XXXXXX)"
+    chmod 0600 "$CURL_ADMIN_AUTH_CONFIG"
+    printf 'header = "Authorization: Bearer %s"\n' "$escaped_token" > "$CURL_ADMIN_AUTH_CONFIG"
+    ADMIN_AUTH_ARGS=(--config "$CURL_ADMIN_AUTH_CONFIG")
 }
 
 configure_webdav_auth() {
@@ -644,8 +683,8 @@ auth_appears_configured() {
 }
 
 authenticated_api_curl() {
-    if [[ -n "$ADMIN_ACCESS_TOKEN" ]]; then
-        command curl -H "Authorization: Bearer $ADMIN_ACCESS_TOKEN" "$@"
+    if [[ ${#ADMIN_AUTH_ARGS[@]} -gt 0 ]]; then
+        command curl "${ADMIN_AUTH_ARGS[@]}" "$@"
         return
     fi
 
@@ -680,6 +719,7 @@ cleanup() {
         rm -f -- "$CURL_AUTH_CONFIG"
         CURL_AUTH_CONFIG=""
     fi
+    cleanup_admin_auth_config
     if [[ "$CLEANUP_REMOTE_ENABLED" != "1" ]]; then
         return
     fi
@@ -713,8 +753,8 @@ admin_api_request() {
     local response=""
     local curl_args=(-s -X "$method" "$url")
 
-    if [[ -n "$ADMIN_ACCESS_TOKEN" ]]; then
-        curl_args+=(-H "Authorization: Bearer $ADMIN_ACCESS_TOKEN")
+    if [[ ${#ADMIN_AUTH_ARGS[@]} -gt 0 ]]; then
+        curl_args+=("${ADMIN_AUTH_ARGS[@]}")
     fi
 
     response=$(curl "${curl_args[@]}" -w $'\n%{http_code}' 2>/dev/null || true)
@@ -1324,6 +1364,7 @@ test_auth_login_success() {
     ADMIN_ACCESS_TOKEN=$(read_json_field "$resp" access_token)
     ADMIN_REFRESH_TOKEN=$(read_json_field "$resp" refresh_token)
     if [[ -n "$ADMIN_ACCESS_TOKEN" ]]; then
+        write_admin_auth_config "$ADMIN_ACCESS_TOKEN"
         log_ok "Auth login with initial password successful"
     else
         log_fail "Auth login failed: $resp"
@@ -1424,6 +1465,9 @@ test_auth_token_refresh() {
 
         ADMIN_ACCESS_TOKEN=$(read_json_field "$login_resp" access_token)
         ADMIN_REFRESH_TOKEN=$(read_json_field "$login_resp" refresh_token)
+        if [[ -n "$ADMIN_ACCESS_TOKEN" ]]; then
+            write_admin_auth_config "$ADMIN_ACCESS_TOKEN"
+        fi
         refresh_token="$ADMIN_REFRESH_TOKEN"
     fi
     

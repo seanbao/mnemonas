@@ -865,8 +865,10 @@ run_docs_use_storage_root_config_placeholder_test() {
 run_configuration_common_scenarios_warn_about_auth_and_env_expansion_test() {
 	assert_file_contains "$REPO_ROOT/docs/configuration.md" "只把 \`webdav.auth_type\` 设为 \`none\` 不会关闭 Web UI/API 登录"
 	assert_file_contains "$REPO_ROOT/docs/configuration.en.md" "Setting only \`webdav.auth_type = \"none\"\` does not disable Web UI/API login"
-	assert_file_contains "$REPO_ROOT/docs/configuration.md" "当前配置文件不会展开环境变量；不要把 \`\${...}\` 写入 TOML 并期待运行时替换。"
-	assert_file_contains "$REPO_ROOT/docs/configuration.en.md" "Configuration files do not expand environment variables. Do not write \`\${...}\` in TOML and expect runtime substitution."
+	assert_file_contains "$REPO_ROOT/mnemonas.example.toml" 'This root example keeps Basic Auth for compatibility. Prefer auth_type = "users"'
+	assert_file_contains "$REPO_ROOT/mnemonas.example.toml" 'for day-to-day or production mounts so WebDAV uses MnemoNAS accounts.'
+	assert_file_contains "$REPO_ROOT/docs/configuration.md" "环境变量配置覆盖尚未支持。当前配置文件不会展开 \`\${...}\` 形式的环境变量"
+	assert_file_contains "$REPO_ROOT/docs/configuration.en.md" "Environment-variable config overrides are planned but not currently supported for TOML values. Do not write \`\${...}\` in TOML and expect runtime expansion."
 }
 
 run_backup_restore_docs_contract_test() {
@@ -1053,6 +1055,33 @@ run_webdav_users_env_credentials_test() {
 	assert_file_contains "$invoked_log" "-sS -X UNLOCK http://127.0.0.1:18080/dav/e2e-test/test.txt"
 }
 
+run_webdav_credentials_reject_newlines_test() {
+	local case_dir="$TMP_ROOT/webdav-credentials-newline"
+	local fake_bin="$case_dir/bin"
+	local invoked_log="$case_dir/curl.log"
+	local secret=$'mnemonas\nsecret'
+	mkdir -p "$case_dir/storage"
+	make_fake_e2e_curl "$fake_bin" "$invoked_log"
+
+	run_expect_failure "$case_dir/out.log" env \
+		HOME="$case_dir/home" \
+		PATH="$fake_bin:$PATH" \
+		CURL_INVOKED_LOG="$invoked_log" \
+		BASE_URL="http://127.0.0.1:18080/" \
+		STORAGE_ROOT="$case_dir/storage" \
+		CONFIG_FILE="$case_dir/config.toml" \
+		SECRETS_FILE="$case_dir/secrets.json" \
+		INITIAL_PASSWORD_FILE="$case_dir/initial-password.txt" \
+		MNEMONAS_WEBDAV_AUTH_TYPE="users" \
+		MNEMONAS_WEBDAV_USERNAME="family-user" \
+		MNEMONAS_WEBDAV_PASSWORD="$secret" \
+		bash "$REPO_ROOT/scripts/e2e-test.sh" --quick
+
+	assert_file_contains "$case_dir/out.log" "WebDAV password cannot contain newline characters"
+	assert_file_not_contains "$case_dir/out.log" "mnemonas"
+	assert_not_exists "$invoked_log"
+}
+
 run_webdav_users_missing_credentials_test() {
 	local case_dir="$TMP_ROOT/webdav-users-missing"
 	local fake_bin="$case_dir/bin"
@@ -1171,6 +1200,31 @@ run_auth_token_refresh_uses_existing_refresh_token_test() {
 	assert_file_contains "$function_body" "local refresh_token=\"\$ADMIN_REFRESH_TOKEN\""
 	assert_file_contains "$function_body" "if [[ -z \"\$refresh_token\" && ! -f \"\$password_file\" && ! -f \"\$USERS_FILE\" ]]; then"
 	assert_file_contains "$function_body" 'log_skip "Auth not configured for token refresh test"'
+}
+
+run_admin_bearer_token_uses_curl_config_test() {
+	local script="$REPO_ROOT/scripts/e2e-test.sh"
+
+	assert_file_contains "$script" 'CURL_ADMIN_AUTH_CONFIG=""'
+	assert_file_contains "$script" 'ADMIN_AUTH_ARGS=()'
+	# shellcheck disable=SC2016 # Match literal script text.
+	assert_file_contains "$script" 'require_curl_config_value "$token" "admin bearer token"'
+	# shellcheck disable=SC2016 # Match literal script text.
+	assert_file_contains "$script" 'require_curl_config_value "$username" "WebDAV username"'
+	# shellcheck disable=SC2016 # Match literal script text.
+	assert_file_contains "$script" 'require_curl_config_value "$password" "WebDAV password"'
+	# shellcheck disable=SC2016 # Match literal script text.
+	assert_file_contains "$script" 'ADMIN_AUTH_ARGS=(--config "$CURL_ADMIN_AUTH_CONFIG")'
+	# shellcheck disable=SC2016 # Match literal script text.
+	assert_file_contains "$script" 'command curl "${ADMIN_AUTH_ARGS[@]}" "$@"'
+	# shellcheck disable=SC2016 # Match literal script text.
+	assert_file_contains "$script" 'curl_args+=("${ADMIN_AUTH_ARGS[@]}")'
+	# shellcheck disable=SC2016 # Match literal script text.
+	assert_file_contains "$script" 'write_admin_auth_config "$ADMIN_ACCESS_TOKEN"'
+	# shellcheck disable=SC2016 # Match literal script text.
+	assert_file_not_contains "$script" 'command curl -H "Authorization: Bearer $ADMIN_ACCESS_TOKEN" "$@"'
+	# shellcheck disable=SC2016 # Match literal script text.
+	assert_file_not_contains "$script" 'curl_args+=(-H "Authorization: Bearer $ADMIN_ACCESS_TOKEN")'
 }
 
 run_auth_configured_helper_covers_files_and_config_test() {
@@ -1457,11 +1511,13 @@ run_isolated_target_reaches_health_check_test
 run_playwright_auth_helper_fails_closed_test
 run_webdav_users_missing_credentials_test
 run_webdav_users_env_credentials_test
+run_webdav_credentials_reject_newlines_test
 run_rclone_webdav_docs_contract_test
 run_webdav_lock_smoke_contract_test
 run_etag_returned_fetches_header_once_test
 run_auth_password_file_deletion_fails_after_successful_login_test
 run_auth_token_refresh_uses_existing_refresh_token_test
+run_admin_bearer_token_uses_curl_config_test
 run_auth_configured_helper_covers_files_and_config_test
 run_auth_login_failure_does_not_skip_configured_auth_test
 run_auth_protected_endpoint_does_not_skip_configured_auth_test

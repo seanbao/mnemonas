@@ -618,6 +618,42 @@ run_fault_injection_webdav_users_env_credentials_test() {
 	assert_file_contains "$curl_log" "-sf -X MKCOL http://127.0.0.1:18080/dav/fault-test/"
 }
 
+run_fault_injection_webdav_credentials_reject_newlines_test() {
+	local case_dir="$TMP_ROOT/webdav-credentials-newline"
+	local fake_bin="$case_dir/bin"
+	local fake_nasd="$case_dir/nasd"
+	local curl_log="$case_dir/curl.log"
+	local nasd_log="$case_dir/nasd.log"
+	local secret=$'mnemonas\nsecret'
+	mkdir -p "$case_dir/storage/.mnemonas/objects"
+	make_fake_curl "$fake_bin" "$curl_log"
+	make_fake_nasd "$fake_nasd"
+
+	run_expect_failure "$case_dir/out.log" env \
+		HOME="$case_dir/home" \
+		PATH="$fake_bin:$PATH" \
+		CURL_INVOKED_LOG="$curl_log" \
+		MNEMONAS_LIVE_FAULTS=1 \
+		FAULT_INJECTION_ASSUME_YES=1 \
+		RUN_CORRUPTION_TESTS=0 \
+		FAULT_UPLOAD_SIZE_MB=0 \
+		BASE_URL="http://127.0.0.1:18080" \
+		STORAGE_ROOT="$case_dir/storage" \
+		OBJECTS_DIR="$case_dir/storage/.mnemonas/objects" \
+		INDEX_DB="$case_dir/storage/.mnemonas/index.db" \
+		NASD_BIN="$fake_nasd" \
+		NASD_INVOKED_LOG="$nasd_log" \
+		MNEMONAS_WEBDAV_AUTH_TYPE="users" \
+		MNEMONAS_WEBDAV_USERNAME="family-user" \
+		MNEMONAS_WEBDAV_PASSWORD="$secret" \
+		bash "$REPO_ROOT/scripts/fault-injection-test.sh"
+
+	assert_file_contains "$case_dir/out.log" "WebDAV password cannot contain newline characters"
+	assert_file_not_contains "$case_dir/out.log" "mnemonas"
+	assert_file_contains "$curl_log" "/health"
+	assert_file_not_contains "$curl_log" "/dav/fault-test/"
+}
+
 run_concurrent_conflict_fails_when_etag_missing_test() {
 	local script="$REPO_ROOT/scripts/fault-injection-test.sh"
 	local function_body="$TMP_ROOT/concurrent-write-conflict-function.txt"
@@ -637,6 +673,27 @@ run_concurrent_conflict_fails_when_etag_missing_test() {
 	# shellcheck disable=SC2016 # Match literal script text.
 	assert_file_contains "$function_body" 'if [[ -z "$etag" ]]; then'
 	assert_file_contains "$function_body" 'log_fail "Could not read ETag for concurrent write conflict test"'
+}
+
+run_admin_bearer_token_uses_curl_config_test() {
+	local script="$REPO_ROOT/scripts/fault-injection-test.sh"
+
+	assert_file_contains "$script" 'CURL_ADMIN_AUTH_CONFIG=""'
+	assert_file_contains "$script" 'ADMIN_AUTH_ARGS=()'
+	# shellcheck disable=SC2016 # Match literal script text.
+	assert_file_contains "$script" 'ADMIN_AUTH_ARGS=(--config "$CURL_ADMIN_AUTH_CONFIG")'
+	# shellcheck disable=SC2016 # Match literal script text.
+	assert_file_contains "$script" 'command curl "${ADMIN_AUTH_ARGS[@]}" "$@"'
+	# shellcheck disable=SC2016 # Match literal script text.
+	assert_file_contains "$script" 'write_admin_auth_config "$ADMIN_ACCESS_TOKEN"'
+	# shellcheck disable=SC2016 # Match literal script text.
+	assert_file_contains "$script" 'require_curl_config_value "$token" "admin bearer token"'
+	# shellcheck disable=SC2016 # Match literal script text.
+	assert_file_contains "$script" 'require_curl_config_value "$username" "WebDAV username"'
+	# shellcheck disable=SC2016 # Match literal script text.
+	assert_file_contains "$script" 'require_curl_config_value "$password" "WebDAV password"'
+	# shellcheck disable=SC2016 # Match literal script text.
+	assert_file_not_contains "$script" 'command curl -H "Authorization: Bearer $ADMIN_ACCESS_TOKEN" "$@"'
 }
 
 run_default_disabled_test
@@ -662,6 +719,8 @@ run_fault_injection_docs_use_isolated_runner_test
 run_fault_injection_webdav_users_requires_explicit_credentials_test
 run_fault_injection_webdav_users_missing_credentials_test
 run_fault_injection_webdav_users_env_credentials_test
+run_fault_injection_webdav_credentials_reject_newlines_test
 run_concurrent_conflict_fails_when_etag_missing_test
+run_admin_bearer_token_uses_curl_config_test
 
 printf '[fault-injection-safety-test] all checks passed\n'
