@@ -44,7 +44,9 @@ Run from an external network:
 ./scripts/public-go-live-smoke.sh nas.example.com
 ```
 
-This script combines public HTTPS health, same-domain HTTP-to-HTTPS redirect, and `8080/9090/9091` backend-port-unreachable checks into one smoke. If the repository script is not available, run the equivalent commands manually from an external network:
+The TCP probes require a GNU `timeout`-compatible command. Linux systems usually provide `timeout`; macOS systems can use `gtimeout` from coreutils. The script auto-selects `timeout` then `gtimeout`, and `TIMEOUT_BIN` can specify another compatible wrapper.
+
+This script combines public HTTPS health, same-domain HTTP-to-HTTPS redirect, and `8080/9090/9091` backend-port TCP-unreachable and no-HTTP-status checks into one smoke. If the repository script is not available, run the equivalent commands manually from an external network:
 
 To check custom backend ports, set `PUBLIC_SMOKE_BACKEND_TARGETS='18080:/health 19090:/'`. Each entry uses `port:path`, where path must be an unambiguous absolute path without query strings, fragments, userinfo, backslashes, encoded slashes, encoded backslashes, empty path segments, or `.`/`..` path segments.
 
@@ -58,10 +60,11 @@ curl --connect-timeout 3 --max-time 10 http://nas.example.com:9091/health
 Expected result:
 
 - `https://nas.example.com/health` is reachable.
-- `http://nas.example.com:8080/health` fails to connect or times out, with no HTTP status response.
-- `http://nas.example.com:9090/` fails to connect or times out, with no HTTP status response.
-- `http://nas.example.com:9091/health` fails to connect or times out, with no HTTP status response.
-- Any custom backend ports also fail to connect or time out, with no HTTP status response.
+- `http://nas.example.com:8080/health` fails to connect or times out, with no TCP connection and no HTTP status response.
+- `http://nas.example.com:9090/` fails to connect or times out, with no TCP connection and no HTTP status response.
+- `http://nas.example.com:9091/health` fails to connect or times out, with no TCP connection and no HTTP status response.
+- Any custom backend ports also fail to connect or time out, with no TCP connection and no HTTP status response.
+- Any successful TCP connection means the backend port is still publicly reachable, even when no HTTP status is returned.
 
 ## Common Mistakes
 
