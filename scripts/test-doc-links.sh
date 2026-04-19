@@ -786,6 +786,87 @@ EOF
 	git -C "$repo" add README.md README.en.md
 }
 
+write_curl_basic_auth_guidance_allowed_doc() {
+	local repo="$1"
+	write_root_readme_pair "$repo"
+	cat >> "$repo/README.en.md" <<'EOF'
+
+Manual WebDAV checks should use temporary curl config files instead of `curl -u` command arguments.
+API clients can still use `Authorization: Bearer <access-token>` outside copyable shell commands.
+
+```bash
+curl --config "$curl_auth_config" \
+  -X PROPFIND \
+  https://example.com/webdav/
+```
+EOF
+	git -C "$repo" add README.md README.en.md
+}
+
+write_curl_basic_auth_argument_doc() {
+	local repo="$1"
+	write_root_readme_pair "$repo"
+	cat >> "$repo/README.en.md" <<'EOF'
+
+```bash
+curl -u "$WEBDAV_USER:$WEBDAV_PASS" -X PROPFIND https://example.com/webdav/
+```
+EOF
+	git -C "$repo" add README.md README.en.md
+}
+
+write_multiline_curl_basic_auth_argument_doc() {
+	local repo="$1"
+	write_root_readme_pair "$repo"
+	cat >> "$repo/README.en.md" <<'EOF'
+
+```bash
+curl -X PROPFIND \
+  --user "$WEBDAV_USER:$WEBDAV_PASS" \
+  https://example.com/webdav/
+```
+EOF
+	git -C "$repo" add README.md README.en.md
+}
+
+write_curl_basic_authorization_header_doc() {
+	local repo="$1"
+	write_root_readme_pair "$repo"
+	cat >> "$repo/README.en.md" <<'EOF'
+
+```bash
+curl -H 'Authorization: Basic ZGVtbzpwYXNzd29yZA==' https://example.com/webdav/
+```
+EOF
+	git -C "$repo" add README.md README.en.md
+}
+
+write_curl_bearer_auth_header_doc() {
+	local repo="$1"
+	write_root_readme_pair "$repo"
+	cat >> "$repo/README.en.md" <<'EOF'
+
+```bash
+curl -H "Authorization: Bearer <access-token>" https://example.com/api/v1/files
+```
+EOF
+	git -C "$repo" add README.md README.en.md
+}
+
+write_multiline_curl_bearer_auth_header_doc() {
+	local repo="$1"
+	write_root_readme_pair "$repo"
+	cat >> "$repo/README.en.md" <<'EOF'
+
+```bash
+curl -X POST \
+  -H "Authorization: Bearer <access-token>" \
+  https://example.com/api/v1/maintenance/gc
+```
+EOF
+	git -C "$repo" add README.md README.en.md
+}
+
 write_direct_executable_script_reference_doc() {
 	local repo="$1"
 	write_root_readme_pair "$repo"
@@ -1071,6 +1152,52 @@ write_security_checklist_contract_missing_firewall_doc() {
 	git -C "$repo" add docs/security.en.md
 }
 
+write_api_reference_webdav_auth_contract_valid_docs() {
+	local repo="$1"
+	write_valid_docs "$repo"
+	cat >> "$repo/docs/README.md" <<'EOF'
+| [API 参考](api-reference.md) | [API Reference](api-reference.en.md) |
+EOF
+	cat >> "$repo/docs/README.en.md" <<'EOF'
+| [API Reference](api-reference.en.md) | API reference |
+EOF
+	cat > "$repo/docs/api-reference.md" <<'EOF'
+# API 参考
+
+[English](api-reference.en.md) | 简体中文
+
+## WebDAV
+
+- 日常或生产挂载建议设置 `webdav.auth_type = "users"`，使用 MnemoNAS 用户账户挂载。
+- 根目录示例配置保留旧全局 Basic Auth 作为兼容基线；该模式使用 `[webdav]` 中的服务凭据。
+EOF
+	cat > "$repo/docs/api-reference.en.md" <<'EOF'
+# API Reference
+
+English | [简体中文](api-reference.md)
+
+## WebDAV
+
+- For day-to-day or production mounts, set `webdav.auth_type = "users"` to mount with MnemoNAS user accounts.
+- The root example config keeps legacy global Basic Auth as a compatibility baseline; that mode uses service credentials from `[webdav]`.
+EOF
+	git -C "$repo" add docs/README.md docs/README.en.md docs/api-reference.md docs/api-reference.en.md
+}
+
+write_api_reference_webdav_auth_contract_missing_users_doc() {
+	local repo="$1"
+	write_api_reference_webdav_auth_contract_valid_docs "$repo"
+	perl -0pi -e 's/For day-to-day or production mounts, set `webdav\.auth_type = "users"`/Choose an authentication mode/' "$repo/docs/api-reference.en.md"
+	git -C "$repo" add docs/api-reference.en.md
+}
+
+write_api_reference_webdav_auth_contract_legacy_first_doc() {
+	local repo="$1"
+	write_api_reference_webdav_auth_contract_valid_docs "$repo"
+	perl -0pi -e 's/- For day-to-day or production mounts, set `webdav\.auth_type = "users"` to mount with MnemoNAS user accounts\./- By default it uses the legacy global Basic Auth credentials from `[webdav]` or generated credentials in `secrets.json`.\n- For day-to-day or production mounts, set `webdav.auth_type = "users"` to mount with MnemoNAS user accounts./' "$repo/docs/api-reference.en.md"
+	git -C "$repo" add docs/api-reference.en.md
+}
+
 write_backup_restore_drill_contract_valid_docs() {
 	local repo="$1"
 	write_valid_docs "$repo"
@@ -1274,12 +1401,22 @@ cat > "$repo/docs/api-reference.md" <<EOF
 
 [English](api-reference.en.md) | 简体中文
 
+## WebDAV
+
+- 日常或生产挂载建议设置 \`webdav.auth_type = "users"\`，使用 MnemoNAS 用户账户挂载。
+- 根目录示例配置保留旧全局 Basic Auth 作为兼容基线；该模式使用 \`[webdav]\` 中的服务凭据。
+
 当前检查项 ID 包括 $chinese_ids。
 EOF
 	cat > "$repo/docs/api-reference.en.md" <<EOF
 # API Reference
 
 English | [简体中文](api-reference.md)
+
+## WebDAV
+
+- For day-to-day or production mounts, set \`webdav.auth_type = "users"\` to mount with MnemoNAS user accounts.
+- The root example config keeps legacy global Basic Auth as a compatibility baseline; that mode uses service credentials from \`[webdav]\`.
 
 Current check IDs include $english_ids.
 EOF
@@ -1326,10 +1463,12 @@ run_accepts "truncated-non-secret-ellipsis" write_truncated_non_secret_ellipsis_
 run_accepts "security-check-doc-ids" write_security_check_docs_valid
 run_accepts "direct-executable-script-reference" write_direct_executable_script_reference_doc
 run_accepts "interpreter-script-reference" write_interpreter_script_reference_doc
+run_accepts "curl-basic-auth-guidance-text" write_curl_basic_auth_guidance_allowed_doc
 run_accepts "encoded-restore-query-path" write_encoded_restore_query_path_doc
 run_accepts "encoded-api-path-query" write_encoded_api_path_query_doc
 run_accepts "storage-cdc-contract" write_storage_cdc_contract_valid_docs
 run_accepts "security-checklist-contract" write_security_checklist_contract_valid_docs
+run_accepts "api-reference-webdav-auth-contract" write_api_reference_webdav_auth_contract_valid_docs
 run_accepts "backup-restore-drill-contract" write_backup_restore_drill_contract_valid_docs
 run_rejects "missing-file" "missing link target: docs/missing.md" write_missing_file_doc
 run_rejects "escaping-link" "link escapes repository: ../outside.md" write_escaping_link_doc
@@ -1366,6 +1505,11 @@ run_rejects "chinese-doc-english-phrase" "avoid English phrasing in Chinese docu
 run_rejects "english-doc-chinese-text" "avoid non-English text outside language-navigation links in English documentation" write_english_doc_chinese_text_doc
 run_rejects "english-json-fence-chinese-text" "avoid non-English text outside language-navigation links in English documentation" write_english_json_fence_chinese_text_doc
 run_rejects "remote-shell-pipe" "avoid piping remote install scripts directly to a shell" write_remote_shell_pipe_doc
+run_rejects "curl-basic-auth-argument" "avoid putting Basic Auth credentials in curl command arguments" write_curl_basic_auth_argument_doc
+run_rejects "multiline-curl-basic-auth-argument" "avoid putting Basic Auth credentials in curl command arguments" write_multiline_curl_basic_auth_argument_doc
+run_rejects "curl-basic-authorization-header" "avoid putting Basic Auth credentials in curl command arguments" write_curl_basic_authorization_header_doc
+run_rejects "curl-bearer-auth-header" "avoid putting Bearer tokens in curl command arguments" write_curl_bearer_auth_header_doc
+run_rejects "multiline-curl-bearer-auth-header" "avoid putting Bearer tokens in curl command arguments" write_multiline_curl_bearer_auth_header_doc
 run_rejects "non-executable-script-reference" "script reference is not executable: ./scripts/helper.sh" write_non_executable_script_reference_doc
 run_rejects "non-executable-script-link" "linked script is not executable: scripts/helper.sh" write_non_executable_script_link_doc
 run_rejects "raw-restore-query-path" "URL-encode API path query values in documentation examples; use path=%2F..." write_raw_restore_query_path_doc
@@ -1373,6 +1517,8 @@ run_rejects "raw-api-path-query" "URL-encode API path query values in documentat
 run_rejects "storage-cdc-contract-missing-boundary" "docs/storage-internals.en.md: missing storage CDC boundary text: current version history does not reference-count CDC chunks" write_storage_cdc_contract_missing_boundary_doc
 run_rejects "configuration-cdc-contract-missing-boundary" "docs/configuration.en.md: missing storage CDC boundary text: Current Go version history still uses whole-object CAS snapshots" write_configuration_cdc_contract_missing_boundary_doc
 run_rejects "security-checklist-contract-missing-firewall" "docs/security.en.md: missing public deployment security checklist text: [Public cloud firewall checklist](cloud-firewall-checklist.en.md)" write_security_checklist_contract_missing_firewall_doc
+run_rejects "api-reference-webdav-auth-contract-missing-users" "docs/api-reference.en.md: missing WebDAV auth guidance text: For day-to-day or production mounts, set \`webdav.auth_type = \"users\"\`" write_api_reference_webdav_auth_contract_missing_users_doc
+run_rejects "api-reference-webdav-auth-contract-legacy-first" "docs/api-reference.en.md: avoid leading WebDAV auth guidance with legacy Basic Auth: - By default it uses the legacy global Basic Auth credentials" write_api_reference_webdav_auth_contract_legacy_first_doc
 run_rejects "backup-restore-drill-contract-missing-history" "docs/backup-guide.en.md: missing backup restore drill guidance text: Restore-drill history and explicit restore history both keep the latest 20 entries" write_backup_restore_drill_contract_missing_history_doc
 run_rejects "hardening-progress-release-readiness-contract-missing-backup-smoke" "docs/hardening-progress.en.md: missing release-readiness hardening ledger text: release checklist and bilingual release notes to retain the public-deployment doctor, external-network smoke, backup restore-drill smoke, and cloud-firewall review entry points" write_hardening_progress_release_readiness_contract_missing_backup_smoke_doc
 run_rejects "security-check-doc-missing-id" "docs/api-reference.en.md: security-check documentation is missing ID: config_file_access" write_security_check_docs_missing_english_id
