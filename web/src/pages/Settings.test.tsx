@@ -3130,7 +3130,8 @@ describe('SettingsPage', () => {
 
       await waitFor(() => {
         expect(screen.getByText('配置 WebDAV 协议接入；保存后会立即更新运行中的 WebDAV 配置')).toBeTruthy()
-        expect(screen.getByText('配置访问凭据；保存后会立即作用到运行中的 WebDAV 服务')).toBeTruthy()
+        expect(screen.getByText('日常或生产挂载优先使用 MnemoNAS 用户账号；Basic Auth 仅用于旧客户端或专用服务凭据')).toBeTruthy()
+        expect(screen.getByText('保存后会立即作用到运行中的 WebDAV 服务')).toBeTruthy()
         expect(screen.getByText('用于挂载当前运行中的 WebDAV 服务；保存成功后这里会显示最新的运行配置')).toBeTruthy()
       })
     })
@@ -3180,6 +3181,73 @@ describe('SettingsPage', () => {
       })
     })
 
+    it('only shows Basic Auth credential fields for the Basic WebDAV auth mode', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      render(<SettingsPage />)
+
+      await openTab(user, 'WebDAV')
+
+      const authTypeSelect = await screen.findByLabelText('WebDAV 认证方式')
+      expect(screen.getByLabelText('WebDAV Basic Auth 用户名')).toBeTruthy()
+      expect(screen.getByLabelText('WebDAV Basic Auth 密码')).toBeTruthy()
+      expect(screen.getByLabelText('保存时使用自动生成密码')).toBeTruthy()
+
+      await user.selectOptions(authTypeSelect, 'users')
+
+      await waitFor(() => {
+        expect(screen.getByText('使用 MnemoNAS 用户账号认证')).toBeTruthy()
+        expect(screen.getByText('WebDAV 登录会复用已启用用户账号，并继续受用户状态和目录权限限制。')).toBeTruthy()
+        expect(screen.queryByLabelText('WebDAV Basic Auth 用户名')).toBeNull()
+        expect(screen.queryByLabelText('WebDAV Basic Auth 密码')).toBeNull()
+        expect(screen.queryByLabelText('保存时使用自动生成密码')).toBeNull()
+      })
+
+      await user.selectOptions(authTypeSelect, 'none')
+
+      await waitFor(() => {
+        expect(screen.getByText('WebDAV 当前将无认证开放')).toBeTruthy()
+        expect(screen.queryByText('使用 MnemoNAS 用户账号认证')).toBeNull()
+        expect(screen.queryByLabelText('WebDAV Basic Auth 用户名')).toBeNull()
+        expect(screen.queryByLabelText('WebDAV Basic Auth 密码')).toBeNull()
+        expect(screen.queryByLabelText('保存时使用自动生成密码')).toBeNull()
+      })
+    })
+
+    it('disables WebDAV user-account auth when app auth is disabled', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockGetSettings.mockResolvedValueOnce({
+        data: {
+          ...defaultSettingsResponse.data,
+          auth: {
+            ...defaultSettingsResponse.data.auth,
+            enabled: false,
+          },
+          webdav: {
+            ...defaultSettingsResponse.data.webdav,
+            auth_type: 'basic',
+          },
+        },
+      })
+      render(<SettingsPage />)
+
+      await openTab(user, 'WebDAV')
+
+      const authTypeSelect = await screen.findByLabelText('WebDAV 认证方式')
+      expect(within(authTypeSelect).getByRole('option', { name: 'MnemoNAS 用户账号' })).toBeDisabled()
+      expect(screen.getByLabelText('WebDAV 用户账号认证不可用说明')).toBeTruthy()
+      expect(screen.getByText('Web 登录认证未启用')).toBeTruthy()
+      expect(screen.getByText(/WebDAV 用户账号认证需要先启用 Web 登录认证/)).toBeTruthy()
+      expect(screen.getByLabelText('WebDAV Basic Auth 用户名')).toBeTruthy()
+
+      await user.selectOptions(authTypeSelect, 'none')
+
+      await waitFor(() => {
+        expect(screen.getByText('WebDAV 当前将无认证开放')).toBeTruthy()
+        expect(screen.getByText(/建议改用 Basic Auth，或先启用 Web 登录认证后再改用用户账号认证/)).toBeTruthy()
+        expect(screen.queryByText(/建议改用 MnemoNAS 用户账号认证或 Basic Auth/)).toBeNull()
+      })
+    })
+
     it('allows editing WebDAV service fields and saves them', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
       render(<SettingsPage />)
@@ -3195,8 +3263,8 @@ describe('SettingsPage', () => {
       await user.click(switches[0])
       fireEvent.change(screen.getByLabelText('WebDAV URL 前缀'), { target: { value: 'remote' } })
       await user.click(switches[1])
-      fireEvent.change(screen.getByLabelText('WebDAV 用户名'), { target: { value: 'webdav-admin' } })
-      fireEvent.change(screen.getByLabelText('WebDAV 密码'), { target: { value: 'new-secret' } })
+      fireEvent.change(screen.getByLabelText('WebDAV Basic Auth 用户名'), { target: { value: 'webdav-admin' } })
+      fireEvent.change(screen.getByLabelText('WebDAV Basic Auth 密码'), { target: { value: 'new-secret' } })
 
       await user.click(screen.getByText('保存设置'))
 
@@ -3245,7 +3313,7 @@ describe('SettingsPage', () => {
 
       await openTab(user, 'WebDAV')
 
-      const passwordInput = await screen.findByLabelText('WebDAV 密码')
+      const passwordInput = await screen.findByLabelText('WebDAV Basic Auth 密码')
       fireEvent.change(passwordInput, { target: { value: 'new-webdav-secret' } })
       await user.click(screen.getByText('保存设置'))
 
@@ -3258,7 +3326,7 @@ describe('SettingsPage', () => {
         }))
       })
       await waitFor(() => {
-        expect(screen.getByLabelText('WebDAV 密码')).toHaveValue('')
+        expect(screen.getByLabelText('WebDAV Basic Auth 密码')).toHaveValue('')
       })
     })
 
@@ -3299,6 +3367,7 @@ describe('SettingsPage', () => {
 
       expect(screen.getByText('WebDAV 当前将无认证开放')).toBeTruthy()
       expect(screen.getByText(/任何能访问该端口的人都可以读写 WebDAV/)).toBeTruthy()
+      expect(screen.getByText(/建议改用 MnemoNAS 用户账号认证或 Basic Auth/)).toBeTruthy()
     })
   })
 
@@ -6688,7 +6757,7 @@ describe('SettingsPage', () => {
       await openTab(user, 'WebDAV')
 
       await waitFor(() => {
-        expect(screen.getByLabelText('WebDAV 用户名')).toHaveValue('admin')
+        expect(screen.getByLabelText('WebDAV Basic Auth 用户名')).toHaveValue('admin')
       })
     })
 
