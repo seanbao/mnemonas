@@ -69,6 +69,210 @@ func TestServer_RouteContract_SmokeRequestsDoNot500(t *testing.T) {
 	}
 }
 
+func TestServer_RouteContract_PublicRoutesDoNotRequireAuth(t *testing.T) {
+	server, session := newRouteSmokeServer(t)
+
+	checked := 0
+	for _, contract := range expectedRESTRouteContracts() {
+		contract := contract
+		if routeSmokeRequiresAuth(contract) {
+			continue
+		}
+		t.Run(contract, func(t *testing.T) {
+			method, routePattern, ok := strings.Cut(contract, " ")
+			if !ok {
+				t.Fatalf("invalid route contract %q", contract)
+			}
+
+			body := routeSmokeRequestBody(contract, session)
+			req := httptest.NewRequest(method, routeSmokePath(routePattern), strings.NewReader(body))
+			if body != "" {
+				req.Header.Set("Content-Type", "application/json")
+			}
+
+			rec := httptest.NewRecorder()
+			server.Router().ServeHTTP(rec, req)
+
+			if rec.Code == http.StatusUnauthorized || rec.Code == http.StatusForbidden {
+				t.Fatalf("%s without auth status = %d, want public route not to require auth; body=%s", contract, rec.Code, rec.Body.String())
+			}
+		})
+		checked++
+	}
+	if checked < 15 {
+		t.Fatalf("public route contract checked %d routes, want at least 15", checked)
+	}
+}
+
+func TestServer_RouteContract_AdminOnlyRoutesRejectNonAdmin(t *testing.T) {
+	server, adminSession := newRouteSmokeServer(t)
+
+	const username = "route-user"
+	const password = "route-smoke-user-password"
+	if _, err := server.userStore.Create(username, password, "", auth.RoleUser); err != nil {
+		t.Fatalf("creating route smoke user: %v", err)
+	}
+	userSession := loginRouteSmokeUser(t, server, username, password)
+
+	checked := 0
+	for _, contract := range expectedRESTRouteContracts() {
+		contract := contract
+		if !routeSmokeRequiresAdmin(contract) {
+			continue
+		}
+		t.Run(contract, func(t *testing.T) {
+			method, routePattern, ok := strings.Cut(contract, " ")
+			if !ok {
+				t.Fatalf("invalid route contract %q", contract)
+			}
+
+			body := routeSmokeRequestBody(contract, adminSession)
+			req := httptest.NewRequest(method, routeSmokePath(routePattern), strings.NewReader(body))
+			if body != "" {
+				req.Header.Set("Content-Type", "application/json")
+			}
+			req.Header.Set("Authorization", "Bearer "+userSession.accessToken)
+
+			rec := httptest.NewRecorder()
+			server.Router().ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusForbidden {
+				t.Fatalf("%s as non-admin status = %d, want %d; body=%s", contract, rec.Code, http.StatusForbidden, rec.Body.String())
+			}
+			if got := routeSmokeErrorCode(t, rec); got != "INSUFFICIENT_PERMISSIONS" {
+				t.Fatalf("%s as non-admin error code = %q, want %q; body=%s", contract, got, "INSUFFICIENT_PERMISSIONS", rec.Body.String())
+			}
+		})
+		checked++
+	}
+	if checked < 30 {
+		t.Fatalf("admin-only route contract checked %d routes, want at least 30", checked)
+	}
+}
+
+func TestServer_RouteContract_ProtectedRoutesRejectAnonymous(t *testing.T) {
+	server, session := newRouteSmokeServer(t)
+
+	checked := 0
+	for _, contract := range expectedRESTRouteContracts() {
+		contract := contract
+		if !routeSmokeRequiresAuth(contract) {
+			continue
+		}
+		t.Run(contract, func(t *testing.T) {
+			method, routePattern, ok := strings.Cut(contract, " ")
+			if !ok {
+				t.Fatalf("invalid route contract %q", contract)
+			}
+
+			body := routeSmokeRequestBody(contract, session)
+			req := httptest.NewRequest(method, routeSmokePath(routePattern), strings.NewReader(body))
+			if body != "" {
+				req.Header.Set("Content-Type", "application/json")
+			}
+
+			rec := httptest.NewRecorder()
+			server.Router().ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusUnauthorized {
+				t.Fatalf("%s without auth status = %d, want %d; body=%s", contract, rec.Code, http.StatusUnauthorized, rec.Body.String())
+			}
+			if got := routeSmokeErrorCode(t, rec); got != "MISSING_AUTH_HEADER" {
+				t.Fatalf("%s without auth error code = %q, want %q; body=%s", contract, got, "MISSING_AUTH_HEADER", rec.Body.String())
+			}
+		})
+		checked++
+	}
+	if checked < 70 {
+		t.Fatalf("authenticated route contract checked %d routes, want at least 70", checked)
+	}
+}
+
+func TestServer_RouteContract_ProtectedRoutesRejectInvalidAuthorizationHeader(t *testing.T) {
+	server, session := newRouteSmokeServer(t)
+
+	checked := 0
+	for _, contract := range expectedRESTRouteContracts() {
+		contract := contract
+		if !routeSmokeRequiresAuth(contract) {
+			continue
+		}
+		t.Run(contract, func(t *testing.T) {
+			method, routePattern, ok := strings.Cut(contract, " ")
+			if !ok {
+				t.Fatalf("invalid route contract %q", contract)
+			}
+
+			body := routeSmokeRequestBody(contract, session)
+			req := httptest.NewRequest(method, routeSmokePath(routePattern), strings.NewReader(body))
+			if body != "" {
+				req.Header.Set("Content-Type", "application/json")
+			}
+			req.Header.Set("Authorization", "Basic route-smoke")
+
+			rec := httptest.NewRecorder()
+			server.Router().ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusUnauthorized {
+				t.Fatalf("%s with invalid auth header status = %d, want %d; body=%s", contract, rec.Code, http.StatusUnauthorized, rec.Body.String())
+			}
+			if got := routeSmokeErrorCode(t, rec); got != "INVALID_AUTH_HEADER" {
+				t.Fatalf("%s with invalid auth header error code = %q, want %q; body=%s", contract, got, "INVALID_AUTH_HEADER", rec.Body.String())
+			}
+		})
+		checked++
+	}
+	if checked < 70 {
+		t.Fatalf("invalid auth header route contract checked %d routes, want at least 70", checked)
+	}
+}
+
+func TestServer_RouteContract_WriteRoutesRejectGuest(t *testing.T) {
+	server, adminSession := newRouteSmokeServer(t)
+
+	const username = "route-guest"
+	const password = "route-smoke-guest-password"
+	if _, err := server.userStore.Create(username, password, "", auth.RoleGuest); err != nil {
+		t.Fatalf("creating route smoke guest: %v", err)
+	}
+	guestSession := loginRouteSmokeUser(t, server, username, password)
+
+	checked := 0
+	for _, contract := range expectedRESTRouteContracts() {
+		contract := contract
+		if !routeSmokeRequiresWriteRole(contract) {
+			continue
+		}
+		t.Run(contract, func(t *testing.T) {
+			method, routePattern, ok := strings.Cut(contract, " ")
+			if !ok {
+				t.Fatalf("invalid route contract %q", contract)
+			}
+
+			body := routeSmokeRequestBody(contract, adminSession)
+			req := httptest.NewRequest(method, routeSmokePath(routePattern), strings.NewReader(body))
+			if body != "" {
+				req.Header.Set("Content-Type", "application/json")
+			}
+			req.Header.Set("Authorization", "Bearer "+guestSession.accessToken)
+
+			rec := httptest.NewRecorder()
+			server.Router().ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusForbidden {
+				t.Fatalf("%s as guest status = %d, want %d; body=%s", contract, rec.Code, http.StatusForbidden, rec.Body.String())
+			}
+			if got := routeSmokeErrorCode(t, rec); got != "INSUFFICIENT_PERMISSIONS" {
+				t.Fatalf("%s as guest error code = %q, want %q; body=%s", contract, got, "INSUFFICIENT_PERMISSIONS", rec.Body.String())
+			}
+		})
+		checked++
+	}
+	if checked < 10 {
+		t.Fatalf("write route contract checked %d routes, want at least 10", checked)
+	}
+}
+
 func newRouteSmokeServer(t *testing.T) (*Server, routeSmokeSession) {
 	t.Helper()
 
@@ -132,7 +336,13 @@ func newRouteSmokeServer(t *testing.T) (*Server, routeSmokeSession) {
 func loginRouteSmokeAdmin(t *testing.T, server *Server, password string) routeSmokeSession {
 	t.Helper()
 
-	reqBody := fmt.Sprintf(`{"username":"admin","password":%q}`, password)
+	return loginRouteSmokeUser(t, server, "admin", password)
+}
+
+func loginRouteSmokeUser(t *testing.T, server *Server, username, password string) routeSmokeSession {
+	t.Helper()
+
+	reqBody := fmt.Sprintf(`{"username":%q,"password":%q}`, username, password)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", strings.NewReader(reqBody))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
@@ -171,12 +381,36 @@ func routeSmokePath(routePattern string) string {
 	return path
 }
 
+func routeSmokeErrorCode(t *testing.T, rec *httptest.ResponseRecorder) string {
+	t.Helper()
+
+	var envelope struct {
+		Error *struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
+		t.Fatalf("decode route smoke error response: %v; body=%s", err, rec.Body.String())
+	}
+	if envelope.Error == nil {
+		t.Fatalf("route smoke response missing error envelope: %s", rec.Body.String())
+	}
+	return envelope.Error.Code
+}
+
 func routeSmokeNeedsBearer(contract string) bool {
+	if contract == "POST /api/v1/auth/logout" {
+		return true
+	}
+	return routeSmokeRequiresAuth(contract)
+}
+
+func routeSmokeRequiresAuth(contract string) bool {
 	_, routePattern, ok := strings.Cut(contract, " ")
 	if !ok {
 		return false
 	}
-	if contract == "POST /api/v1/auth/login" || contract == "POST /api/v1/auth/refresh" {
+	if contract == "POST /api/v1/auth/login" || contract == "POST /api/v1/auth/refresh" || contract == "POST /api/v1/auth/logout" {
 		return false
 	}
 	if routePattern == "/health" || routePattern == "/api/v1/version" || routePattern == "/api/v1/setup/" {
@@ -186,6 +420,66 @@ func routeSmokeNeedsBearer(contract string) bool {
 		return false
 	}
 	return true
+}
+
+func routeSmokeRequiresAdmin(contract string) bool {
+	method, routePattern, ok := strings.Cut(contract, " ")
+	if !ok {
+		return false
+	}
+
+	switch {
+	case routePattern == "/api/v1/setup/acknowledge":
+		return true
+	case strings.HasPrefix(routePattern, "/api/v1/admin/users"):
+		return true
+	case routePattern == "/api/v1/diagnostics" || routePattern == "/api/v1/diagnostics-export" || routePattern == "/api/v1/metrics":
+		return true
+	case method == http.MethodDelete && routePattern == "/api/v1/activity/":
+		return true
+	case strings.HasPrefix(routePattern, "/api/v1/activity/reviews"):
+		return true
+	case strings.HasPrefix(routePattern, "/api/v1/settings"):
+		return true
+	case strings.HasPrefix(routePattern, "/api/v1/maintenance"):
+		return true
+	case contract == "POST /api/v1/versions/{hash}/restore":
+		return true
+	default:
+		return false
+	}
+}
+
+func routeSmokeRequiresWriteRole(contract string) bool {
+	method, routePattern, ok := strings.Cut(contract, " ")
+	if !ok {
+		return false
+	}
+
+	switch {
+	case method == http.MethodPost && routePattern == "/api/v1/shares/":
+		return true
+	case (method == http.MethodPut || method == http.MethodDelete) && routePattern == "/api/v1/shares/{id}":
+		return true
+	case method == http.MethodPost && routePattern == "/api/v1/favorites/":
+		return true
+	case (method == http.MethodDelete || method == http.MethodPatch) && routePattern == "/api/v1/favorites/*":
+		return true
+	case (method == http.MethodPost || method == http.MethodDelete) && routePattern == "/api/v1/files/*":
+		return true
+	case method == http.MethodPost && (routePattern == "/api/v1/files-copy" || routePattern == "/api/v1/files-move"):
+		return true
+	case method == http.MethodPost && routePattern == "/api/v1/directories/*":
+		return true
+	case method == http.MethodDelete && routePattern == "/api/v1/trash/":
+		return true
+	case (method == http.MethodPost || method == http.MethodDelete) && routePattern == "/api/v1/trash/{id}":
+		return true
+	case method == http.MethodPost && routePattern == "/api/v1/trash/{id}/restore":
+		return true
+	default:
+		return false
+	}
 }
 
 func routeSmokeRequestBody(contract string, session routeSmokeSession) string {
