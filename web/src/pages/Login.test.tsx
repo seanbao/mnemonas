@@ -224,6 +224,19 @@ describe('LoginPage', () => {
       expect(mockNavigate).not.toHaveBeenCalledWith('//evil.example/login', expect.anything())
     })
 
+    it('does not redirect an already authenticated user back to the login page', async () => {
+      mockLocationState.current = { from: '/login?expired=1' }
+      const { useIsAuthenticated } = await import('@/stores/auth')
+      vi.mocked(useIsAuthenticated).mockReturnValue(true)
+
+      renderLogin()
+
+      await waitFor(() => {
+        expect(mockNavigate).toHaveBeenCalledWith('/', { replace: true })
+      })
+      expect(mockNavigate).not.toHaveBeenCalledWith('/login?expired=1', expect.anything())
+    })
+
     it('shows a persistent inline error when auth store reports a login error', async () => {
       const { useAuthStore } = await import('@/stores/auth')
       vi.mocked(useAuthStore).mockReturnValue({
@@ -389,6 +402,20 @@ describe('LoginPage', () => {
 
       expect(mockNavigate).toHaveBeenCalledWith('/', { replace: true })
       expect(mockNavigate).not.toHaveBeenCalledWith('https://evil.example/login', expect.anything())
+    })
+
+    it('falls back to home after successful login when the redirect target is a public share route', async () => {
+      mockLocationState.current = { from: '/s/share-1?download=1' }
+      mockLogin.mockResolvedValue({ warning: false, message: undefined })
+      const user = userEvent.setup()
+      renderLogin()
+
+      await user.type(screen.getByLabelText(/用户名/i, { selector: 'input' }), 'admin')
+      await user.type(screen.getByLabelText(/密码/i, { selector: 'input' }), 'password')
+      await user.click(screen.getByRole('button', { name: /登录/i }))
+
+      expect(mockNavigate).toHaveBeenCalledWith('/', { replace: true })
+      expect(mockNavigate).not.toHaveBeenCalledWith('/s/share-1?download=1', expect.anything())
     })
 
     it('shows a warning toast when login succeeds with backend warning metadata', async () => {
