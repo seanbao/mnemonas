@@ -225,7 +225,7 @@ docker run --rm --user "$(id -u):$(id -g)" -p 8080:8080 \
 make docker-check
 ```
 
-该目标构建 `mnemonas:latest`，然后通过 `scripts/docker-smoke.sh` 仅在 `127.0.0.1` 发布临时端口，检查 `/health` 和前端根页面。通过命令参数或 `MNEMONAS_DOCKER_SMOKE_IMAGE` 覆盖烟测镜像时，镜像引用不能为空、不能以 `-` 开头，且不能包含空白或控制字符。通过 `MNEMONAS_DOCKER_SMOKE_HOST` 覆盖发布主机时，只接受四段数字形式的 `127.0.0.0/8` loopback IPv4 地址。
+该目标构建 `mnemonas:latest`，然后通过 `scripts/docker-smoke.sh` 仅在 `127.0.0.1` 发布临时端口，检查 `/health` 和前端根页面。`/health` 的 HTTP 成功响应用于判定服务可达；配置 `MNEMONAS_DOCKER_SMOKE_EXPECT_VERSION` 时，响应体还必须包含匹配的版本。通过命令参数或 `MNEMONAS_DOCKER_SMOKE_IMAGE` 覆盖烟测镜像时，镜像引用不能为空、不能以 `-` 开头，且不能包含空白或控制字符。通过 `MNEMONAS_DOCKER_SMOKE_HOST` 覆盖发布主机时，只接受四段数字形式的 `127.0.0.0/8` loopback IPv4 地址。HTTP 探测默认使用 `CURL_CONNECT_TIMEOUT=3` 和 `CURL_MAX_TIME=10`，可在慢速本地环境中按需增大。
 
 可覆盖构建基础镜像，以便使用私有缓存或区域镜像源：
 

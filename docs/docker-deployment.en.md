@@ -226,7 +226,7 @@ For a local source build followed by a loopback container smoke test, run:
 make docker-check
 ```
 
-This target builds `mnemonas:latest`, then runs `scripts/docker-smoke.sh` with a temporary `127.0.0.1` port and checks `/health` plus the frontend root page. When a command argument or `MNEMONAS_DOCKER_SMOKE_IMAGE` overrides the smoke-test image, the image reference must be non-empty, must not start with `-`, and must not contain whitespace or control characters. When `MNEMONAS_DOCKER_SMOKE_HOST` overrides the published host, it only accepts dotted-quad `127.0.0.0/8` loopback IPv4 addresses.
+This target builds `mnemonas:latest`, then runs `scripts/docker-smoke.sh` with a temporary `127.0.0.1` port and checks `/health` plus the frontend root page. A successful `/health` HTTP response marks the service as reachable; when `MNEMONAS_DOCKER_SMOKE_EXPECT_VERSION` is configured, the response body must also contain the matching version. When a command argument or `MNEMONAS_DOCKER_SMOKE_IMAGE` overrides the smoke-test image, the image reference must be non-empty, must not start with `-`, and must not contain whitespace or control characters. When `MNEMONAS_DOCKER_SMOKE_HOST` overrides the published host, it only accepts dotted-quad `127.0.0.0/8` loopback IPv4 addresses. HTTP probes use `CURL_CONNECT_TIMEOUT=3` and `CURL_MAX_TIME=10` by default; increase them when a slow local environment needs more time.
 
 Build base images can be overridden for private caches or regional mirrors:
 

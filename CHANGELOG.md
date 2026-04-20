@@ -219,7 +219,7 @@
 
 ### Changed
 - `share.base_url` 校验会拒绝路径中编码后的查询或片段标记，避免公开分享基础 URL 被代理或浏览器解码成歧义地址
-- `scripts/docker-smoke.sh` 会在启动容器前拒绝空值、以 `-` 开头或包含空白/控制字符的镜像引用，避免 Docker smoke 把镜像名误解释为 Docker 运行参数
+- `scripts/docker-smoke.sh` 会在启动容器前拒绝空值、以 `-` 开头或包含空白/控制字符的镜像引用，避免 Docker smoke 把镜像名误解释为 Docker 运行参数；HTTP 探测现在带连接和总耗时上限，使用更通用的 curl timeout 参数形式，并以 `/health` HTTP 成功响应判定服务可达，避免半开连接或空响应体拖住容器烟测
 - 容器 healthcheck 的 `MNEMONAS_HEALTHCHECK_URL` 覆盖值会拒绝嵌入凭据和 fragment，同时继续允许合法 query 探针参数
 - Release archive 改为包含顶层目录，并随包附带 Web UI、安装/卸载脚本、诊断脚本、完整 docs 文档、公网访问 deploy 模板，以及预设匹配 release 镜像的 Docker Compose/env 模板
 - 默认 `docker-compose.yml` 从源码构建 `mnemonas:local`，公开 release 镜像可按文档改用明确版本标签

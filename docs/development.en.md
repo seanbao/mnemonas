@@ -367,6 +367,7 @@ npm run test:e2e:ui
 
 Playwright starts isolated backend and frontend servers by default.
 Local runs use 4 workers unless `MNEMONAS_E2E_WORKERS` is set to a positive integer; CI uses 1 worker.
+The default per-test Playwright timeout is 60 seconds, and the default assertion timeout is 10 seconds; override them with `MNEMONAS_E2E_TEST_TIMEOUT_MS` and `MNEMONAS_E2E_EXPECT_TIMEOUT_MS`.
 
 The isolated backend uses a 2-hour access-token lifetime and a 168-hour refresh-token lifetime.
 This prevents long parallel E2E runs from entering concurrent refresh-token rotation after a shared storageState expires.
