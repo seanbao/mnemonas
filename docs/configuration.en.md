@@ -616,6 +616,8 @@ By default, `auth.enabled = false` or enabled WebDAV with `webdav.auth_type = "n
 | `smtp_from` | string | `""` | Sender address, such as `MnemoNAS <alerts@example.com>` |
 | `smtp_to` | string[] | `[]` | Recipient addresses |
 
+Alert Webhook, Telegram, WeCom, and DingTalk outbound requests do not follow HTTP redirects; `3xx` responses are treated as delivery failures.
+
 Health pages and diagnostics show alert state and whether Webhook, Telegram, WeCom, DingTalk, or email notifications are configured. The email channel is marked configured only when email alerts are enabled and SMTP host, port, sender, and at least one non-empty recipient are present.
 
 Diagnostics do not expose webhook URL, webhook headers, `telegram_bot_token`, `wecom_webhook_url`, `dingtalk_webhook_url`, SMTP host, SMTP username, `smtp_password`, sender address, or recipient addresses.

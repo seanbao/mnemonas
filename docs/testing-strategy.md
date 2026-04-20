@@ -127,6 +127,7 @@ INITIAL_PASSWORD_FILE=/tmp/mnemonas-e2e-initial-password.txt \
 
 手动 `STORAGE_ROOT` 必须是绝对路径。
 该路径不能包含控制字符、`..` 或符号链接路径组件，且默认只允许位于 `/tmp` 或当前 checkout 下。
+手动 `BASE_URL` 必须是带 host 的 HTTP(S) URL；不能包含空白、控制字符、内嵌凭据、query、fragment、反斜杠、编码斜杠或编码反斜杠、编码 query 或 fragment 标记、空路径段，也不能包含 `.` 或 `..` 路径段。末尾斜杠会在校验后规范化。
 WebDAV 使用 `auth_type = "users"` 时，手动运行还必须显式传入 `MNEMONAS_WEBDAV_USERNAME` 和 `MNEMONAS_WEBDAV_PASSWORD`。
 
 手动检查需要初始管理员密码时，应解析 `Password:` 前缀后的完整值，例如：
@@ -322,6 +323,7 @@ RUN_CORRUPTION_TESTS=0 \
 
 - `scripts/run-fault-injection-isolated.sh` 只接受 `/tmp` 或 checkout 本地根目录，以及 loopback Web 和 dataplane 地址。
 - `BASE_URL`、`STORAGE_ROOT` 和 `NASD_BIN` 必须显式传入。
+- `BASE_URL` 必须是带 host 的 HTTP(S) URL，且不能包含凭据、query、fragment、反斜杠、编码边界字符、空路径段或 `.`/`..` 路径段。
 - 默认允许的存储根目录为 `/tmp` 或当前 checkout。
 - `STORAGE_ROOT` 必须是绝对路径，且不能包含控制字符、`..` 或符号链接路径组件。
 - 默认拒绝 `$HOME/.mnemonas`。

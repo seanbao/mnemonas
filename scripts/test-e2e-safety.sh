@@ -252,6 +252,102 @@ run_refuse_invalid_base_url_test() {
 	assert_not_exists "$invoked_log"
 }
 
+run_refuse_ambiguous_base_url_test() {
+	local case_dir="$TMP_ROOT/refuse-ambiguous-base-url"
+	local fake_bin="$case_dir/bin"
+	local invoked_log="$case_dir/curl.log"
+	mkdir -p "$case_dir/storage"
+	make_fake_curl "$fake_bin" "$invoked_log"
+
+	run_expect_failure "$case_dir/userinfo.log" env \
+		HOME="$case_dir/home" \
+		PATH="$fake_bin:$PATH" \
+		CURL_INVOKED_LOG="$invoked_log" \
+		BASE_URL="http://user:route-secret@127.0.0.1:9" \
+		STORAGE_ROOT="$case_dir/storage" \
+		CONFIG_FILE="$case_dir/config.toml" \
+		SECRETS_FILE="$case_dir/secrets.json" \
+		INITIAL_PASSWORD_FILE="$case_dir/initial-password.txt" \
+		bash "$REPO_ROOT/scripts/e2e-test.sh" --quick
+	assert_file_contains "$case_dir/userinfo.log" "BASE_URL must not contain embedded credentials"
+	assert_file_not_contains "$case_dir/userinfo.log" "route-secret"
+
+	run_expect_failure "$case_dir/query.log" env \
+		HOME="$case_dir/home" \
+		PATH="$fake_bin:$PATH" \
+		CURL_INVOKED_LOG="$invoked_log" \
+		BASE_URL="http://127.0.0.1:9?token=route-secret" \
+		STORAGE_ROOT="$case_dir/storage" \
+		CONFIG_FILE="$case_dir/config.toml" \
+		SECRETS_FILE="$case_dir/secrets.json" \
+		INITIAL_PASSWORD_FILE="$case_dir/initial-password.txt" \
+		bash "$REPO_ROOT/scripts/e2e-test.sh" --quick
+	assert_file_contains "$case_dir/query.log" "BASE_URL must not contain query strings or fragments"
+	assert_file_not_contains "$case_dir/query.log" "route-secret"
+
+	run_expect_failure "$case_dir/fragment.log" env \
+		HOME="$case_dir/home" \
+		PATH="$fake_bin:$PATH" \
+		CURL_INVOKED_LOG="$invoked_log" \
+		BASE_URL="http://127.0.0.1:9#route-secret" \
+		STORAGE_ROOT="$case_dir/storage" \
+		CONFIG_FILE="$case_dir/config.toml" \
+		SECRETS_FILE="$case_dir/secrets.json" \
+		INITIAL_PASSWORD_FILE="$case_dir/initial-password.txt" \
+		bash "$REPO_ROOT/scripts/e2e-test.sh" --quick
+	assert_file_contains "$case_dir/fragment.log" "BASE_URL must not contain query strings or fragments"
+	assert_file_not_contains "$case_dir/fragment.log" "route-secret"
+
+	run_expect_failure "$case_dir/backslash.log" env \
+		HOME="$case_dir/home" \
+		PATH="$fake_bin:$PATH" \
+		CURL_INVOKED_LOG="$invoked_log" \
+		BASE_URL='http://127.0.0.1:9\dav' \
+		STORAGE_ROOT="$case_dir/storage" \
+		CONFIG_FILE="$case_dir/config.toml" \
+		SECRETS_FILE="$case_dir/secrets.json" \
+		INITIAL_PASSWORD_FILE="$case_dir/initial-password.txt" \
+		bash "$REPO_ROOT/scripts/e2e-test.sh" --quick
+	assert_file_contains "$case_dir/backslash.log" "BASE_URL must not contain backslashes"
+
+	run_expect_failure "$case_dir/encoded-slash.log" env \
+		HOME="$case_dir/home" \
+		PATH="$fake_bin:$PATH" \
+		CURL_INVOKED_LOG="$invoked_log" \
+		BASE_URL="http://127.0.0.1:9/dav%2Froot" \
+		STORAGE_ROOT="$case_dir/storage" \
+		CONFIG_FILE="$case_dir/config.toml" \
+		SECRETS_FILE="$case_dir/secrets.json" \
+		INITIAL_PASSWORD_FILE="$case_dir/initial-password.txt" \
+		bash "$REPO_ROOT/scripts/e2e-test.sh" --quick
+	assert_file_contains "$case_dir/encoded-slash.log" "BASE_URL must not contain encoded slashes or backslashes"
+
+	run_expect_failure "$case_dir/encoded-dot.log" env \
+		HOME="$case_dir/home" \
+		PATH="$fake_bin:$PATH" \
+		CURL_INVOKED_LOG="$invoked_log" \
+		BASE_URL="http://127.0.0.1:9/%2e%2e/root" \
+		STORAGE_ROOT="$case_dir/storage" \
+		CONFIG_FILE="$case_dir/config.toml" \
+		SECRETS_FILE="$case_dir/secrets.json" \
+		INITIAL_PASSWORD_FILE="$case_dir/initial-password.txt" \
+		bash "$REPO_ROOT/scripts/e2e-test.sh" --quick
+	assert_file_contains "$case_dir/encoded-dot.log" "BASE_URL must not contain dot segments"
+
+	run_expect_failure "$case_dir/empty-host.log" env \
+		HOME="$case_dir/home" \
+		PATH="$fake_bin:$PATH" \
+		CURL_INVOKED_LOG="$invoked_log" \
+		BASE_URL="http:///dav" \
+		STORAGE_ROOT="$case_dir/storage" \
+		CONFIG_FILE="$case_dir/config.toml" \
+		SECRETS_FILE="$case_dir/secrets.json" \
+		INITIAL_PASSWORD_FILE="$case_dir/initial-password.txt" \
+		bash "$REPO_ROOT/scripts/e2e-test.sh" --quick
+	assert_file_contains "$case_dir/empty-host.log" "BASE_URL must include a host"
+	assert_not_exists "$invoked_log"
+}
+
 run_refuse_traversal_storage_test() {
 	local case_dir="$TMP_ROOT/refuse-traversal-storage"
 	mkdir -p "$case_dir"
@@ -922,7 +1018,7 @@ run_webdav_users_env_credentials_test() {
 		HOME="$case_dir/home" \
 		PATH="$fake_bin:$PATH" \
 		CURL_INVOKED_LOG="$invoked_log" \
-		BASE_URL="http://127.0.0.1:18080" \
+		BASE_URL="http://127.0.0.1:18080/" \
 		STORAGE_ROOT="$case_dir/storage" \
 		CONFIG_FILE="$case_dir/config.toml" \
 		SECRETS_FILE="$case_dir/secrets.json" \
@@ -1303,6 +1399,7 @@ run_rclone_webdav_opt_in_uses_webdav_credentials_test() {
 run_missing_explicit_target_test
 run_refuse_unisolated_storage_test
 run_refuse_invalid_base_url_test
+run_refuse_ambiguous_base_url_test
 run_refuse_traversal_storage_test
 run_refuse_newline_storage_test
 run_refuse_control_character_storage_test
