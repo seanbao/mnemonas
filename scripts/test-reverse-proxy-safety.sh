@@ -206,6 +206,8 @@ run_webdav_docs_avoid_placeholder_password_test() {
     assert_file_not_contains "$REPO_ROOT/docs/reverse-proxy-setup.en.md" 'change-this-webdav-password'
     assert_file_not_contains "$REPO_ROOT/docs/reverse-proxy-setup.md" '/srv/mnemonas/.mnemonas/secrets.json'
     assert_file_not_contains "$REPO_ROOT/docs/reverse-proxy-setup.en.md" '/srv/mnemonas/.mnemonas/secrets.json'
+    assert_file_contains "$REPO_ROOT/docs/reverse-proxy-setup.md" "公网或生产 WebDAV 挂载建议优先使用 \`auth_type=users\`"
+    assert_file_contains "$REPO_ROOT/docs/reverse-proxy-setup.en.md" "Prefer \`auth_type=users\` for public or production WebDAV mounts"
     assert_file_contains "$REPO_ROOT/docs/reverse-proxy-setup.md" 'WEBDAV_USER="<mnemonas-or-webdav-username>"'
     assert_file_contains "$REPO_ROOT/docs/reverse-proxy-setup.md" 'WEBDAV_PASS="<mnemonas-or-webdav-password>"'
     assert_file_contains "$REPO_ROOT/docs/reverse-proxy-setup.md" '生成密码位于 /srv/mnemonas/secrets.json 的 webdav_password 字段'
