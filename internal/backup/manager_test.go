@@ -159,6 +159,31 @@ func TestSanitizeBackupMessageForAPIRedactsSensitiveFlagValues(t *testing.T) {
 	}
 }
 
+func TestSanitizeBackupMessageForAPIRedactsProviderEnvironmentSecrets(t *testing.T) {
+	raw := `restic failed: B2_ACCOUNT_KEY=b2-secret RCLONE_CONFIG_REMOTE_PASS=rclone-pass AZURE_ACCOUNT_KEY: azure-secret RCLONE_CONFIG_REMOTE%5FPASS=encoded-pass pass=plain-pass {"B2_ACCOUNT_KEY":"json-b2"} compass=navigation bypass=allowed`
+
+	sanitized := sanitizeBackupMessageForAPI(raw)
+	for _, secret := range []string{"b2-secret", "rclone-pass", "azure-secret", "encoded-pass", "plain-pass", "json-b2"} {
+		if strings.Contains(sanitized, secret) {
+			t.Fatalf("sanitizeBackupMessageForAPI() = %q, leaked %q", sanitized, secret)
+		}
+	}
+	for _, want := range []string{
+		"B2_ACCOUNT_KEY=" + redactedBackupSecretValue,
+		"RCLONE_CONFIG_REMOTE_PASS=" + redactedBackupSecretValue,
+		"AZURE_ACCOUNT_KEY: " + redactedBackupSecretValue,
+		"RCLONE_CONFIG_REMOTE%5FPASS=" + redactedBackupSecretValue,
+		"pass=" + redactedBackupSecretValue,
+		`"B2_ACCOUNT_KEY":"` + redactedBackupSecretValue + `"`,
+		"compass=navigation",
+		"bypass=allowed",
+	} {
+		if !strings.Contains(sanitized, want) {
+			t.Fatalf("sanitizeBackupMessageForAPI() = %q, want %q", sanitized, want)
+		}
+	}
+}
+
 func protectedSystemDirectoryForTest(t *testing.T) string {
 	t.Helper()
 	if filepath.Separator != '/' {

@@ -278,7 +278,7 @@
 
 ---
 
-## [0.1.0] - 未发布
+## 0.1.0 - 未发布
 
 首个公开发布版本。
 
@@ -344,8 +344,7 @@
 - [ ] `./scripts/plan-hardening-commits.sh --fail-on-manual` 确认没有未归类路径
 - [ ] 发布前就绪摘要通过：`./scripts/release-readiness.sh`
 - [ ] 更新 CHANGELOG.md、CHANGELOG.en.md、README 版本引用和 [发布说明草稿](docs/release-notes.md)
-- [ ] 创建 Git tag：`git tag -a v0.1.0 -m "Release v0.1.0"`
-- [ ] 推送 tag：`git push origin v0.1.0`
+- [ ] 创建并推送 Git tag，例如 `git tag -a <tag> -m "Release <tag>"` 后执行 `git push origin <tag>`
 - [ ] GitHub Release 包含：
   - 版本说明（从 CHANGELOG 复制）
   - checksums
@@ -370,5 +369,4 @@
 
 ---
 
-[Unreleased]: https://github.com/seanbao/mnemonas/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/seanbao/mnemonas/releases/tag/v0.1.0
+[Unreleased]: https://github.com/seanbao/mnemonas/commits/HEAD
