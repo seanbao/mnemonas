@@ -169,6 +169,7 @@
 - GitHub Actions CI/CD 工作流（Go/Rust/Frontend 测试、Docker 构建）
 - Release 自动化工作流（多平台二进制构建、Docker 镜像发布）
 - Ubuntu/systemd 安装脚本，可将 release 包安装为 `mnemonas` 与 `mnemonas-dataplane` 服务
+- systemd 安装和卸载脚本对含控制字符的路径、地址、端口和账号参数使用 shell-safe 失败诊断，避免部署日志写入原始控制字符或形成多行注入
 - `mnemonas-doctor` 部署诊断脚本，检查二进制、配置、systemd、健康端点、端口、存储挂载、备份目录、公网 HTTPS 证书状态、HTTP 到 HTTPS 跳转，并提示云安全组人工复核项
 - `mnemonas-doctor --public-domain` 可识别后端控制面和数据面端口的宽泛 UFW 放行规则，并对存储路径和 WebDAV 用户文件路径中的 `~` 做一致展开
 - `mnemonas-public-setup` 公网 HTTPS 反向代理配置助手
