@@ -1071,6 +1071,73 @@ write_security_checklist_contract_missing_firewall_doc() {
 	git -C "$repo" add docs/security.en.md
 }
 
+write_backup_restore_drill_contract_valid_docs() {
+	local repo="$1"
+	write_valid_docs "$repo"
+	cat >> "$repo/docs/README.md" <<'EOF'
+| [Backup](backup-guide.md) | [Backup](backup-guide.en.md) |
+EOF
+	cat >> "$repo/docs/README.en.md" <<'EOF'
+| [Backup](backup-guide.en.md) | Backup guide |
+EOF
+	cat > "$repo/docs/backup-guide.md" <<'EOF'
+# 备份与恢复
+
+[English](backup-guide.en.md) | 简体中文
+
+## 恢复演练
+
+```toml
+restore_drill_stale_after = "720h"
+```
+
+恢复演练历史与显式恢复历史默认都保留最近 20 条。失败演练还会记录稳定的 `failure_category`。
+
+```bash
+curl -X POST -b cookies.txt \
+  http://localhost:8080/api/v1/maintenance/backups/external-disk/restore-drill \
+  -H 'Content-Type: application/json' \
+  -d '{"keep_artifact":false}'
+```
+
+`keep_artifact = true` 会保留临时恢复目录。`restic` 恢复演练当前执行 `restic check`；`rclone` 恢复演练当前执行 `rclone check --one-way`。
+
+维护页提供“导出摘要”入口。从未恢复过的备份只是推测，不是已经验证过的恢复路径。
+EOF
+	cat > "$repo/docs/backup-guide.en.md" <<'EOF'
+# Backup and Restore
+
+English | [简体中文](backup-guide.md)
+
+## Restore Drills
+
+```toml
+restore_drill_stale_after = "720h"
+```
+
+Restore-drill history and explicit restore history both keep the latest 20 entries. Failed drills also record a stable `failure_category`.
+
+```bash
+curl -X POST -b cookies.txt \
+  http://localhost:8080/api/v1/maintenance/backups/external-disk/restore-drill \
+  -H 'Content-Type: application/json' \
+  -d '{"keep_artifact":false}'
+```
+
+Set `keep_artifact = true` to keep the temporary restored directory. For `restic`, the drill currently runs `restic check`; for `rclone`, it runs `rclone check --one-way`.
+
+The Maintenance page provides an **Export summary** action. A backup that has never been restored is an assumption, not a proven recovery path.
+EOF
+	git -C "$repo" add docs/README.md docs/README.en.md docs/backup-guide.md docs/backup-guide.en.md
+}
+
+write_backup_restore_drill_contract_missing_history_doc() {
+	local repo="$1"
+	write_backup_restore_drill_contract_valid_docs "$repo"
+	perl -0pi -e 's/Restore-drill history and explicit restore history both keep the latest 20 entries\. //' "$repo/docs/backup-guide.en.md"
+	git -C "$repo" add docs/backup-guide.en.md
+}
+
 write_non_executable_script_reference_doc() {
 	local repo="$1"
 	write_root_readme_pair "$repo"
@@ -1224,6 +1291,7 @@ run_accepts "encoded-restore-query-path" write_encoded_restore_query_path_doc
 run_accepts "encoded-api-path-query" write_encoded_api_path_query_doc
 run_accepts "storage-cdc-contract" write_storage_cdc_contract_valid_docs
 run_accepts "security-checklist-contract" write_security_checklist_contract_valid_docs
+run_accepts "backup-restore-drill-contract" write_backup_restore_drill_contract_valid_docs
 run_rejects "missing-file" "missing link target: docs/missing.md" write_missing_file_doc
 run_rejects "escaping-link" "link escapes repository: ../outside.md" write_escaping_link_doc
 run_rejects "missing-anchor" "missing heading anchor: #missing-section" write_missing_anchor_doc
@@ -1266,6 +1334,7 @@ run_rejects "raw-api-path-query" "URL-encode API path query values in documentat
 run_rejects "storage-cdc-contract-missing-boundary" "docs/storage-internals.en.md: missing storage CDC boundary text: current version history does not reference-count CDC chunks" write_storage_cdc_contract_missing_boundary_doc
 run_rejects "configuration-cdc-contract-missing-boundary" "docs/configuration.en.md: missing storage CDC boundary text: Current Go version history still uses whole-object CAS snapshots" write_configuration_cdc_contract_missing_boundary_doc
 run_rejects "security-checklist-contract-missing-firewall" "docs/security.en.md: missing public deployment security checklist text: [Public cloud firewall checklist](cloud-firewall-checklist.en.md)" write_security_checklist_contract_missing_firewall_doc
+run_rejects "backup-restore-drill-contract-missing-history" "docs/backup-guide.en.md: missing backup restore drill guidance text: Restore-drill history and explicit restore history both keep the latest 20 entries" write_backup_restore_drill_contract_missing_history_doc
 run_rejects "security-check-doc-missing-id" "docs/api-reference.en.md: security-check documentation is missing ID: config_file_access" write_security_check_docs_missing_english_id
 run_rejects "security-check-doc-missing-chinese-id" "docs/api-reference.md: security-check documentation is missing ID: config_file_access" write_security_check_docs_missing_chinese_id
 run_rejects "security-check-doc-unknown-english-id" "docs/api-reference.en.md: security-check documentation lists unknown ID: ghost_probe" write_security_check_docs_unknown_english_id
