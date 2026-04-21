@@ -20,6 +20,8 @@ INTERNAL_DIR="${INTERNAL_DIR:-$STORAGE_ROOT/.mnemonas}"
 INITIAL_PASSWORD_FILE="${INITIAL_PASSWORD_FILE:-$INTERNAL_DIR/initial-password.txt}"
 WEBDAV_AUTH_ARGS=()
 CURL_AUTH_CONFIG=""
+CURL_ADMIN_AUTH_CONFIG=""
+ADMIN_AUTH_ARGS=()
 ADMIN_ACCESS_TOKEN="${MNEMONAS_ACCESS_TOKEN:-}"
 ALLOW_REAL_STORAGE="${ALLOW_REAL_STORAGE:-0}"
 CLEANUP_ENABLED=0
@@ -465,17 +467,45 @@ escape_curl_config_value() {
     printf '%s' "$value"
 }
 
+require_curl_config_value() {
+    local value="$1"
+    local label="$2"
+
+    if [[ "$value" == *$'\n'* || "$value" == *$'\r'* ]]; then
+        echo "ERROR: $label cannot contain newline characters" >&2
+        exit 1
+    fi
+    if [[ "$value" == *[[:cntrl:]]* ]]; then
+        echo "ERROR: $label cannot contain control characters" >&2
+        exit 1
+    fi
+}
+
 write_webdav_auth_config() {
     local username="$1"
     local password="$2"
     local escaped_username escaped_password
 
+    require_curl_config_value "$username" "WebDAV username"
+    require_curl_config_value "$password" "WebDAV password"
     escaped_username="$(escape_curl_config_value "$username")"
     escaped_password="$(escape_curl_config_value "$password")"
     CURL_AUTH_CONFIG="$(mktemp -t mnemonas-benchmark-curl-auth.XXXXXX)"
     chmod 0600 "$CURL_AUTH_CONFIG"
     printf 'user = "%s:%s"\n' "$escaped_username" "$escaped_password" > "$CURL_AUTH_CONFIG"
     WEBDAV_AUTH_ARGS=(--config "$CURL_AUTH_CONFIG")
+}
+
+write_admin_auth_config() {
+    local token="$1"
+    local escaped_token
+
+    require_curl_config_value "$token" "admin bearer token"
+    escaped_token="$(escape_curl_config_value "$token")"
+    CURL_ADMIN_AUTH_CONFIG="$(mktemp -t mnemonas-benchmark-admin-auth.XXXXXX)"
+    chmod 0600 "$CURL_ADMIN_AUTH_CONFIG"
+    printf 'header = "Authorization: Bearer %s"\n' "$escaped_token" > "$CURL_ADMIN_AUTH_CONFIG"
+    ADMIN_AUTH_ARGS=(--config "$CURL_ADMIN_AUTH_CONFIG")
 }
 
 configure_webdav_auth() {
@@ -522,7 +552,12 @@ configure_webdav_auth() {
 configure_admin_auth() {
     local auth_enabled="${MNEMONAS_AUTH_ENABLED:-$(read_config_value auth enabled)}"
 
-    if [[ -n "$ADMIN_ACCESS_TOKEN" ]] || [[ "$auth_enabled" != "true" ]] || [[ ! -f "$INITIAL_PASSWORD_FILE" ]]; then
+    if [[ -n "$ADMIN_ACCESS_TOKEN" ]]; then
+        write_admin_auth_config "$ADMIN_ACCESS_TOKEN"
+        return 0
+    fi
+
+    if [[ "$auth_enabled" != "true" ]] || [[ ! -f "$INITIAL_PASSWORD_FILE" ]]; then
         return 0
     fi
 
@@ -537,6 +572,9 @@ configure_admin_auth() {
         -H "Content-Type: application/json" \
         -d "$(json_login_payload "admin" "$password")" 2>/dev/null || echo "")
     ADMIN_ACCESS_TOKEN=$(read_json_field "$resp" access_token)
+    if [[ -n "$ADMIN_ACCESS_TOKEN" ]]; then
+        write_admin_auth_config "$ADMIN_ACCESS_TOKEN"
+    fi
 }
 
 webdav_curl() {
@@ -548,8 +586,8 @@ webdav_curl() {
 }
 
 metrics_curl() {
-    if [[ -n "$ADMIN_ACCESS_TOKEN" ]]; then
-        command curl -H "Authorization: Bearer $ADMIN_ACCESS_TOKEN" "$@"
+    if [[ ${#ADMIN_AUTH_ARGS[@]} -gt 0 ]]; then
+        command curl "${ADMIN_AUTH_ARGS[@]}" "$@"
         return
     fi
     command curl "$@"
@@ -559,6 +597,10 @@ cleanup_auth_config() {
     if [[ -n "$CURL_AUTH_CONFIG" ]]; then
         rm -f -- "$CURL_AUTH_CONFIG"
         CURL_AUTH_CONFIG=""
+    fi
+    if [[ -n "$CURL_ADMIN_AUTH_CONFIG" ]]; then
+        rm -f -- "$CURL_ADMIN_AUTH_CONFIG"
+        CURL_ADMIN_AUTH_CONFIG=""
     fi
 }
 
