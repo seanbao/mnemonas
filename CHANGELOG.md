@@ -182,9 +182,11 @@
 - `scripts/webdav-client-smoke.sh` 可对已运行服务执行 curl 协议 smoke，覆盖 WebDAV 基础读写、URL 编码空格路径、复制、移动和删除，并提前拒绝含空白、query、fragment、内嵌凭据的 `WEBDAV_URL` 和非 `0/1` 的 `CURL_INSECURE`，通过独立 safety test 纳入 `make scripts-check`
 - WebDAV 兼容性报告表单，用于提交常见桌面、移动端、媒体播放器和命令行客户端的验证结果或客户端特定失败
 - `scripts/check-release-tag.sh` 会在构建 release 产物前校验 release tag 是否为 `vMAJOR.MINOR.PATCH` 或语义化预发布 tag，并限制去掉 `v` 前缀后的 Docker 镜像 tag 长度不超过 128 个字符
+- `scripts/verify-release-artifacts.sh` 对下载目录、checksum 清单和归档成员中的控制字符路径使用 shell-safe 诊断表示，避免发布后验收日志写入原始控制字符
 - `scripts/release-readiness.sh` 在记录的完整验证目标之后发现非发布文档变更时默认失败；草稿摘要可显式使用 `--allow-post-validation-changes` 放行
 - `scripts/release-readiness.sh` 要求四份 hardening 证据文档存在且记录一致的完整验证目标，避免发布前证据缺失被静默跳过
 - `scripts/release-readiness.sh` 会检查双语 release notes 草稿记录当前完整验证目标，避免发布说明中的验证快照滞后
+- `scripts/release-readiness.sh` 会要求双语 release notes 的发布后下载和 artifact verifier 示例使用 `<tag>` 占位，避免首次发布前把固定版本号写入可复制命令
 - `scripts/release-readiness.sh` 会要求 `CHANGELOG.md` 和 `CHANGELOG.en.md` 的发布清单包含文档检查、依赖安全检查和 Docker 构建烟测命令，避免关键本地门禁从最终发布核验中遗漏
 - `scripts/release-readiness.sh` 会要求 Dependabot 配置覆盖 Go、Rust 数据面、Rust proto 生成器、Web npm、GitHub Actions 和 Docker 依赖更新入口，避免发布分支丢失依赖维护基线
 - `scripts/release-readiness.sh` 会要求 `.github/workflows/ci.yml` 和 `.github/workflows/release.yml` 保留关键 CI、E2E、Docker smoke、release tag 校验、release artifact 校验和发布权限基线，避免核心自动化路径在发布前失效

@@ -25,6 +25,15 @@ assert_file_contains() {
 	grep -Fq -- "$expected" "$path" || fail "$path does not contain: $expected"
 }
 
+assert_file_not_contains() {
+	local path="$1"
+	local unexpected="$2"
+
+	if grep -Fq -- "$unexpected" "$path"; then
+		fail "$path contains unexpected text: $unexpected"
+	fi
+}
+
 make_fake_docker() {
 	local bin_dir="$1"
 	local state_dir="$2"
@@ -340,6 +349,7 @@ run_checksum_control_character_path_fails_before_checksum() {
 
 	[[ "$status" -ne 0 ]] || fail "release artifact verifier accepted a checksum path with a control character"
 	assert_file_contains "$out" "checksums.txt contains a control character in file path"
+	assert_file_not_contains "$out" "$archive_name"
 }
 
 run_checksum_whitespace_path_fails_before_checksum() {
@@ -422,6 +432,26 @@ run_unexpected_artifact_entry_fails_before_checksum() {
 
 	[[ "$status" -ne 0 ]] || fail "release artifact verifier accepted an unexpected artifact directory entry"
 	assert_file_contains "$out" "artifact directory contains an unsupported entry: release-notes.txt"
+}
+
+run_unexpected_artifact_control_character_entry_escapes_diagnostic() {
+	local case_dir="$TMP_ROOT/unexpected-artifact-control-character-entry"
+	local dist_dir="$case_dir/dist"
+	local out="$case_dir/out.log"
+	local entry_name=$'release\tnotes.txt'
+	local status
+
+	make_complete_release "$dist_dir" "v1.2.3" "seanbao/mnemonas"
+	printf 'unexpected\n' >"$dist_dir/$entry_name"
+
+	set +e
+	bash "$REPO_ROOT/scripts/verify-release-artifacts.sh" "$dist_dir" >"$out" 2>&1
+	status=$?
+	set -e
+
+	[[ "$status" -ne 0 ]] || fail "release artifact verifier accepted an unexpected artifact directory entry with a control character"
+	assert_file_contains "$out" "artifact directory contains an unsupported entry"
+	assert_file_not_contains "$out" "$entry_name"
 }
 
 run_archive_entry_symlink_fails() {
@@ -570,6 +600,7 @@ run_archive_control_character_entry_fails() {
 
 	[[ "$status" -ne 0 ]] || fail "release artifact verifier accepted an archive entry with a control character"
 	assert_file_contains "$out" "archive entry contains a control character"
+	assert_file_not_contains "$out" "$entry_name"
 }
 
 run_archive_whitespace_entry_fails() {
@@ -687,6 +718,7 @@ run_checksum_whitespace_path_fails_before_checksum
 run_archive_whitespace_filename_fails_before_checksum
 run_archive_symlink_fails_before_checksum
 run_unexpected_artifact_entry_fails_before_checksum
+run_unexpected_artifact_control_character_entry_escapes_diagnostic
 run_archive_entry_symlink_fails
 run_archive_entry_hardlink_fails
 run_archive_duplicate_entry_fails

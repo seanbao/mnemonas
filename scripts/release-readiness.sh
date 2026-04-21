@@ -479,8 +479,9 @@ check_release_notes() {
 		"./scripts/test-release-tag.sh"
 		"./scripts/test-release-package.sh"
 		"./scripts/test-release-artifacts.sh"
-		"gh release download"
+		"gh release download <tag>"
 		"./scripts/verify-release-artifacts.sh"
+		"--version <tag>"
 		"--require-targets"
 		"--check-image"
 	)
