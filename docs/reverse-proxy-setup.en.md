@@ -141,6 +141,8 @@ sudo systemctl status caddy
 
 Verify:
 
+Prefer `auth_type=users` for public or production WebDAV mounts.
+
 ```bash
 curl -I https://nas.example.com/health
 
@@ -401,6 +403,8 @@ ss -tlnp | grep -E '80|443|8080|9090|9091'
 `8080/9090/9091`, or custom backend and dataplane ports, should not listen on public addresses.
 
 WebDAV:
+
+Prefer `auth_type=users` for public or production WebDAV mounts.
 
 ```bash
 # Use a MnemoNAS username and password when auth_type=users.
