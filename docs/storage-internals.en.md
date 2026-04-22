@@ -138,11 +138,17 @@ Version APIs:
 The restore URL `path` query value should be encoded in copyable examples. For example, `/documents/report.docx` is sent as `%2Fdocuments%2Freport.docx`.
 
 ```bash
-curl -H "Authorization: Bearer <access-token>" \
+MNEMONAS_ACCESS_TOKEN="<access-token>"
+curl_auth_config="$(mktemp)"
+trap 'rm -f "$curl_auth_config"' EXIT
+chmod 600 "$curl_auth_config"
+printf 'header = "Authorization: Bearer %s"\n' "$MNEMONAS_ACCESS_TOKEN" > "$curl_auth_config"
+
+curl --config "$curl_auth_config" \
   http://localhost:8080/api/v1/versions/documents/report.docx
 
 curl -X POST \
-  -H "Authorization: Bearer <access-token>" \
+  --config "$curl_auth_config" \
   "http://localhost:8080/api/v1/versions/abc123.../restore?path=%2Fdocuments%2Freport.docx"
 ```
 
