@@ -428,6 +428,80 @@ function checkHardeningProgressReleaseReadinessContract() {
   }
 }
 
+function checkReleaseNotesValidationEvidenceContract() {
+  const contracts = [
+    {
+      summaryFile: 'docs/hardening-review-summary.md',
+      releaseFile: 'docs/release-notes.md',
+      unitLabel: 'frontend unit test',
+      unitSummaryPattern: /前端单测\s+(\d+)\s+个用例/,
+      unitReleasePattern: /前端单测：`(\d+) passed`/,
+      e2eLabel: 'Playwright E2E',
+      e2eSummaryPattern: /Playwright\s+(\d+)\s+个 E2E 用例/,
+      e2eReleasePattern: /Playwright E2E：`(\d+) passed`/,
+    },
+    {
+      summaryFile: 'docs/hardening-review-summary.en.md',
+      releaseFile: 'docs/release-notes.en.md',
+      unitLabel: 'frontend unit test',
+      unitSummaryPattern: /(\d+)\s+frontend unit tests/,
+      unitReleasePattern: /Frontend unit tests: `(\d+) passed`/,
+      e2eLabel: 'Playwright E2E',
+      e2eSummaryPattern: /(\d+)\s+Playwright E2E cases/,
+      e2eReleasePattern: /Playwright E2E: `(\d+) passed`/,
+    },
+  ]
+
+  for (const contract of contracts) {
+    const summaryText = readOptionalFile(contract.summaryFile)
+    const releaseText = readOptionalFile(contract.releaseFile)
+    if (summaryText === null || releaseText === null) {
+      continue
+    }
+
+    checkReleaseNotesEvidenceCount(
+      contract.summaryFile,
+      summaryText,
+      contract.releaseFile,
+      releaseText,
+      contract.unitLabel,
+      contract.unitSummaryPattern,
+      contract.unitReleasePattern,
+    )
+    checkReleaseNotesEvidenceCount(
+      contract.summaryFile,
+      summaryText,
+      contract.releaseFile,
+      releaseText,
+      contract.e2eLabel,
+      contract.e2eSummaryPattern,
+      contract.e2eReleasePattern,
+    )
+  }
+}
+
+function checkReleaseNotesEvidenceCount(summaryFile, summaryText, releaseFile, releaseText, label, summaryPattern, releasePattern) {
+  const summaryCount = extractContractCount(summaryText, summaryPattern)
+  const releaseCount = extractContractCount(releaseText, releasePattern)
+
+  if (summaryCount === null) {
+    errors.push(`${summaryFile}: missing latest validation ${label} count`)
+    return
+  }
+  if (releaseCount === null) {
+    errors.push(`${releaseFile}: missing pre-release validation ${label} count`)
+    return
+  }
+  if (summaryCount !== releaseCount) {
+    errors.push(`${releaseFile}: ${label} count ${releaseCount} does not match ${summaryFile}: ${summaryCount}`)
+  }
+}
+
+function extractContractCount(text, pattern) {
+  const match = pattern.exec(text)
+  return match ? Number.parseInt(match[1], 10) : null
+}
+
 function hasMarkdownLinkTo(sourceFile, targetFile) {
   const markdown = readOptionalFile(sourceFile)
   if (markdown === null) {
@@ -637,6 +711,7 @@ checkSecurityChecklistContract()
 checkAPIReferenceWebDAVAuthContract()
 checkBackupRestoreDrillContract()
 checkHardeningProgressReleaseReadinessContract()
+checkReleaseNotesValidationEvidenceContract()
 
 for (const file of files) {
   const text = fs.readFileSync(path.join(repoRoot, file), 'utf8')
