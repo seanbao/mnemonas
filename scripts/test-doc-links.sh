@@ -1324,7 +1324,7 @@ EOF
 
 | 项目 | 当前状态 |
 |------|----------|
-| 最近完整验证 | 验证目标 `abc1234` 已通过完整验证，覆盖前端单测 3115 个用例和 Playwright 377 个 E2E 用例 |
+| 最近完整验证 | 验证目标 `abc1234` 已通过完整验证，覆盖前端单测 3115 个用例、Playwright 377 个 E2E 用例、Docker image `sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa` 和 Docker smoke 使用 Docker 自动分配的 loopback 端口 `http://127.0.0.1:32779` |
 EOF
 	cat > "$repo/docs/hardening-review-summary.en.md" <<'EOF'
 # Hardening Review Summary
@@ -1335,7 +1335,7 @@ English | [简体中文](hardening-review-summary.md)
 
 | Item | Current status |
 | --- | --- |
-| Latest broad validation | validation target `abc1234` passed full validation, covering 3115 frontend unit tests and 377 Playwright E2E cases |
+| Latest broad validation | validation target `abc1234` passed full validation, covering 3115 frontend unit tests, 377 Playwright E2E cases, Docker image `sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa`, and Docker smoke using Docker-assigned loopback port `http://127.0.0.1:32779` |
 EOF
 	cat > "$repo/docs/release-notes.md" <<'EOF'
 # 发布说明草稿
@@ -1343,6 +1343,8 @@ EOF
 [English](release-notes.en.md) | 简体中文
 
 ## 发布前验证
+
+最近本地完整验证快照：验证目标 `abc1234`，完整验证通过，覆盖 Docker image `sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa` 和 Docker smoke。Docker smoke 使用 Docker 自动分配的 loopback 端口 `http://127.0.0.1:32779`。
 
 - Playwright E2E：`377 passed`
 - 前端单测：`3115 passed`
@@ -1354,6 +1356,8 @@ English | [简体中文](release-notes.md)
 
 ## Pre-Release Validation
 
+Latest local full-validation snapshot: validation target `abc1234`; full validation passed, covering Docker image `sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa` and Docker smoke. The Docker smoke used the Docker-assigned loopback port `http://127.0.0.1:32779`.
+
 - Playwright E2E: `377 passed`
 - Frontend unit tests: `3115 passed`
 EOF
@@ -1364,6 +1368,20 @@ write_release_notes_validation_evidence_contract_mismatch_doc() {
 	local repo="$1"
 	write_release_notes_validation_evidence_contract_valid_docs "$repo"
 	perl -0pi -e 's/Frontend unit tests: `3115 passed`/Frontend unit tests: `3113 passed`/' "$repo/docs/release-notes.en.md"
+	git -C "$repo" add docs/release-notes.en.md
+}
+
+write_release_notes_validation_evidence_contract_docker_image_mismatch_doc() {
+	local repo="$1"
+	write_release_notes_validation_evidence_contract_valid_docs "$repo"
+	perl -0pi -e 's/sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/' "$repo/docs/release-notes.en.md"
+	git -C "$repo" add docs/release-notes.en.md
+}
+
+write_release_notes_validation_evidence_contract_docker_port_mismatch_doc() {
+	local repo="$1"
+	write_release_notes_validation_evidence_contract_valid_docs "$repo"
+	perl -0pi -e 's/http:\/\/127\.0\.0\.1:32779/http:\/\/127.0.0.1:32780/' "$repo/docs/release-notes.en.md"
 	git -C "$repo" add docs/release-notes.en.md
 }
 
@@ -1586,6 +1604,8 @@ run_rejects "api-reference-webdav-auth-contract-legacy-first" "docs/api-referenc
 run_rejects "backup-restore-drill-contract-missing-history" "docs/backup-guide.en.md: missing backup restore drill guidance text: Restore-drill history and explicit restore history both keep the latest 20 entries" write_backup_restore_drill_contract_missing_history_doc
 run_rejects "hardening-progress-release-readiness-contract-missing-backup-smoke" "docs/hardening-progress.en.md: missing release-readiness hardening ledger text: release checklist and bilingual release notes to retain the public-deployment doctor, external-network smoke, backup restore-drill smoke, and cloud-firewall review entry points" write_hardening_progress_release_readiness_contract_missing_backup_smoke_doc
 run_rejects "release-notes-validation-evidence-contract-mismatch" "docs/release-notes.en.md: frontend unit test count 3113 does not match docs/hardening-review-summary.en.md: 3115" write_release_notes_validation_evidence_contract_mismatch_doc
+run_rejects "release-notes-validation-evidence-contract-docker-image-mismatch" "docs/release-notes.en.md: Docker image sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb does not match docs/hardening-review-summary.en.md: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" write_release_notes_validation_evidence_contract_docker_image_mismatch_doc
+run_rejects "release-notes-validation-evidence-contract-docker-port-mismatch" "docs/release-notes.en.md: Docker smoke port http://127.0.0.1:32780 does not match docs/hardening-review-summary.en.md: http://127.0.0.1:32779" write_release_notes_validation_evidence_contract_docker_port_mismatch_doc
 run_rejects "security-check-doc-missing-id" "docs/api-reference.en.md: security-check documentation is missing ID: config_file_access" write_security_check_docs_missing_english_id
 run_rejects "security-check-doc-missing-chinese-id" "docs/api-reference.md: security-check documentation is missing ID: config_file_access" write_security_check_docs_missing_chinese_id
 run_rejects "security-check-doc-unknown-english-id" "docs/api-reference.en.md: security-check documentation lists unknown ID: ghost_probe" write_security_check_docs_unknown_english_id
