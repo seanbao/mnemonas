@@ -439,6 +439,12 @@ function checkReleaseNotesValidationEvidenceContract() {
       e2eLabel: 'Playwright E2E',
       e2eSummaryPattern: /Playwright\s+(\d+)\s+个 E2E 用例/,
       e2eReleasePattern: /Playwright E2E：`(\d+) passed`/,
+      dockerImageLabel: 'Docker image',
+      dockerImageSummaryPattern: /Docker image `(sha256:[0-9a-f]{64})`/,
+      dockerImageReleasePattern: /Docker image `(sha256:[0-9a-f]{64})`/,
+      dockerSmokePortLabel: 'Docker smoke port',
+      dockerSmokePortSummaryPattern: /Docker smoke 使用 Docker 自动分配的 loopback 端口 `(http:\/\/127\.0\.0\.1:\d+)`/,
+      dockerSmokePortReleasePattern: /Docker smoke 使用 Docker 自动分配的 loopback 端口 `(http:\/\/127\.0\.0\.1:\d+)`/,
     },
     {
       summaryFile: 'docs/hardening-review-summary.en.md',
@@ -449,6 +455,12 @@ function checkReleaseNotesValidationEvidenceContract() {
       e2eLabel: 'Playwright E2E',
       e2eSummaryPattern: /(\d+)\s+Playwright E2E cases/,
       e2eReleasePattern: /Playwright E2E: `(\d+) passed`/,
+      dockerImageLabel: 'Docker image',
+      dockerImageSummaryPattern: /Docker image `(sha256:[0-9a-f]{64})`/,
+      dockerImageReleasePattern: /Docker image `(sha256:[0-9a-f]{64})`/,
+      dockerSmokePortLabel: 'Docker smoke port',
+      dockerSmokePortSummaryPattern: /Docker smoke using Docker-assigned loopback port `(http:\/\/127\.0\.0\.1:\d+)`/,
+      dockerSmokePortReleasePattern: /Docker smoke used the Docker-assigned loopback port `(http:\/\/127\.0\.0\.1:\d+)`/,
     },
   ]
 
@@ -477,6 +489,24 @@ function checkReleaseNotesValidationEvidenceContract() {
       contract.e2eSummaryPattern,
       contract.e2eReleasePattern,
     )
+    checkReleaseNotesEvidenceValue(
+      contract.summaryFile,
+      summaryText,
+      contract.releaseFile,
+      releaseText,
+      contract.dockerImageLabel,
+      contract.dockerImageSummaryPattern,
+      contract.dockerImageReleasePattern,
+    )
+    checkReleaseNotesEvidenceValue(
+      contract.summaryFile,
+      summaryText,
+      contract.releaseFile,
+      releaseText,
+      contract.dockerSmokePortLabel,
+      contract.dockerSmokePortSummaryPattern,
+      contract.dockerSmokePortReleasePattern,
+    )
   }
 }
 
@@ -497,9 +527,31 @@ function checkReleaseNotesEvidenceCount(summaryFile, summaryText, releaseFile, r
   }
 }
 
+function checkReleaseNotesEvidenceValue(summaryFile, summaryText, releaseFile, releaseText, label, summaryPattern, releasePattern) {
+  const summaryValue = extractContractValue(summaryText, summaryPattern)
+  const releaseValue = extractContractValue(releaseText, releasePattern)
+
+  if (summaryValue === null) {
+    errors.push(`${summaryFile}: missing latest validation ${label}`)
+    return
+  }
+  if (releaseValue === null) {
+    errors.push(`${releaseFile}: missing pre-release validation ${label}`)
+    return
+  }
+  if (summaryValue !== releaseValue) {
+    errors.push(`${releaseFile}: ${label} ${releaseValue} does not match ${summaryFile}: ${summaryValue}`)
+  }
+}
+
 function extractContractCount(text, pattern) {
   const match = pattern.exec(text)
   return match ? Number.parseInt(match[1], 10) : null
+}
+
+function extractContractValue(text, pattern) {
+  const match = pattern.exec(text)
+  return match ? match[1] : null
 }
 
 function hasMarkdownLinkTo(sourceFile, targetFile) {
