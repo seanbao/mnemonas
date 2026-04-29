@@ -190,7 +190,7 @@
 - `scripts/release-readiness.sh` 会要求双语 release notes 的发布后下载和 artifact verifier 示例使用 `<tag>` 占位，避免首次发布前把固定版本号写入可复制命令
 - `scripts/release-readiness.sh` 会要求 `CHANGELOG.md` 和 `CHANGELOG.en.md` 的发布清单包含文档检查、依赖安全检查和 Docker 构建烟测命令，避免关键本地门禁从最终发布核验中遗漏
 - `scripts/release-readiness.sh` 会要求 Dependabot 配置覆盖 Go、Rust 数据面、Rust proto 生成器、Web npm、GitHub Actions 和 Docker 依赖更新入口，避免发布分支丢失依赖维护基线
-- `scripts/release-readiness.sh` 会要求 `.github/workflows/ci.yml` 和 `.github/workflows/release.yml` 保留关键 CI、E2E、Docker smoke、release tag 校验、release artifact 校验和发布权限基线，避免核心自动化路径在发布前失效
+- `scripts/release-readiness.sh` 会要求 `.github/workflows/ci.yml` 和 `.github/workflows/release.yml` 保留关键 CI、E2E、Docker smoke、release tag 校验、release artifact 校验、发布前镜像校验和发布权限基线，避免核心自动化路径在发布前失效
 - `scripts/release-readiness.sh` 会要求 `Makefile` 保留 `check`、`verify-changed`、`quick-check`、`security-check`、`docker-check` 和 `test-torture` 等核心本地门禁目标，避免 CI、发布清单和维护者文档引用的入口在发布前失效
 - `scripts/release-readiness.sh` 会要求 `.github/workflows/torture.yml` 保留手动入口、定时入口、只读权限、`RUN_LIVE_FAULTS: '0'` 非破坏性开关和 `make test-torture` 执行入口，避免长期回归工作流在发布前失效
 - `scripts/release-readiness.sh` 会要求关闭空白 Issue，并检查缺陷报告、使用问题、功能建议和 WebDAV 兼容性 Issue 表单保留敏感信息脱敏、诊断信息和安全影响提示，避免公开协作入口绕过安全提示
@@ -236,7 +236,7 @@
 - 统一 README、开发与测试文档中的前端 Node.js engine 要求，匹配 `web/package.json`
 - 安全策略文档补充 `make security-check NPM_AUDIT=1` 用法，避免误解前端依赖安全扫描默认行为
 - CI 和 release 工作流增加最小权限、job 级权限收缩、并发控制和 job 超时，减少权限面、重复运行和挂起风险
-- Release workflow 在创建 GitHub Release 前校验下载归档、checksums 和必需目标集合
+- Release workflow 在创建 GitHub Release 前校验下载归档、checksums、必需目标集合和已推送的容器镜像标签
 - Release workflow 在构建归档和容器镜像前拒绝非语义化版本 release tag
 - Release artifact verifier 在执行 checksum 前拒绝不安全的 checksum 路径、控制字符路径、空白字符路径、符号链接归档、下载目录中的未知条目、特殊归档条目、重复条目、归档成员控制字符路径、归档成员空白字符路径、反斜杠路径和歧义路径段，并会校验显式或从归档名推断出的 release version 是否符合 Docker/GHCR 镜像标签约束；发布后本地核验也支持通过 `--` 传入以 `-` 开头的 artifact 目录
 - Release artifact verifier 成功时会输出已验证目标集合，便于发布后核对平台归档覆盖范围
