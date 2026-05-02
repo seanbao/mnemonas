@@ -280,7 +280,7 @@ gh release download v1.2.3 \
 ```
 
 `--version` must use `vMAJOR.MINOR.PATCH` or a SemVer prerelease form, and the value after the leading `v` must stay within Docker's 128-character tag limit.
-`--check-image` uses Docker to check that `ghcr.io/seanbao/mnemonas:1.2.3` exists.
+`--check-image` uses Docker to check that `ghcr.io/seanbao/mnemonas:1.2.3` exists. It retries briefly unavailable image manifests by default; set `MNEMONAS_RELEASE_IMAGE_CHECK_RETRIES` and `MNEMONAS_RELEASE_IMAGE_CHECK_SLEEP_SECONDS` when different retry timing is required.
 Omit it when only the downloaded archives and checksums need offline verification.
 `--repository` must use a GHCR-compatible lowercase `owner/repo`; owner only allows lowercase letters, digits, and hyphens, while the repo name also allows dots and underscores, and both segments must start and end with a letter or digit.
 
