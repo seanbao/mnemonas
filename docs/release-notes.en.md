@@ -99,16 +99,10 @@ After the release tag is published, download the GitHub Release artifacts and ru
 
 ```bash
 mkdir -p dist/release-check
-gh release download <tag> \
-  --repo seanbao/mnemonas \
-  --dir dist/release-check
-
-./scripts/verify-release-artifacts.sh \
+./scripts/verify-published-release.sh \
   --version <tag> \
   --repository seanbao/mnemonas \
-  --require-targets \
-  --check-image \
-  dist/release-check
+  --artifact-dir dist/release-check
 ```
 
 Then complete at least one archive-install smoke test, one Docker release-image startup smoke test, public documentation link checks, and deployment-environment review covering `mnemonas-doctor --public-domain`, external-network `public-go-live-smoke.sh`, DNS, firewall, TLS, and cloud security groups.
