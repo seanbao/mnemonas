@@ -99,16 +99,10 @@ Release workflow 预期生成以下产物：
 
 ```bash
 mkdir -p dist/release-check
-gh release download <tag> \
-  --repo seanbao/mnemonas \
-  --dir dist/release-check
-
-./scripts/verify-release-artifacts.sh \
+./scripts/verify-published-release.sh \
   --version <tag> \
   --repository seanbao/mnemonas \
-  --require-targets \
-  --check-image \
-  dist/release-check
+  --artifact-dir dist/release-check
 ```
 
 随后应完成至少一次归档安装 smoke、Docker release 镜像启动 smoke、公开文档链接检查，以及公网部署环境的 `mnemonas-doctor --public-domain`、外部网络 `public-go-live-smoke.sh`、DNS、防火墙、TLS 和云安全组复核。

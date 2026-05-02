@@ -262,26 +262,21 @@ GitHub Releases 的二进制归档包含 `docker-compose.yml` 和 `.env.example`
 打包模板会将 `MNEMONAS_IMAGE` 预设为同一 release tag 的 GHCR 镜像。
 因此，从解压后的归档运行 `./scripts/docker-quickstart.sh --start` 时，默认走 release 镜像路径，而不是源码构建路径。
 
-发布后可在下载目录核验 GitHub Release 归档、`checksums.txt` 和对应 GHCR 镜像标签：
+发布后可下载并核验 GitHub Release 归档、`checksums.txt` 和对应 GHCR 镜像标签：
 
 ```bash
 mkdir -p dist/release-check
-gh release download v1.2.3 \
-  --repo seanbao/mnemonas \
-  --dir dist/release-check
-
-./scripts/verify-release-artifacts.sh \
+./scripts/verify-published-release.sh \
   --version v1.2.3 \
   --repository seanbao/mnemonas \
-  --require-targets \
-  --check-image \
-  dist/release-check
+  --artifact-dir dist/release-check
 ```
 
 `--version` 必须使用 `vMAJOR.MINOR.PATCH` 或语义化预发布形式，且去掉 `v` 前缀后不能超过 Docker tag 的 128 字符限制。
-`--check-image` 会调用 Docker 检查 `ghcr.io/seanbao/mnemonas:1.2.3` 是否存在。默认会重试短暂不可见的镜像 manifest；需要调整时，可设置 `MNEMONAS_RELEASE_IMAGE_CHECK_RETRIES` 和 `MNEMONAS_RELEASE_IMAGE_CHECK_SLEEP_SECONDS`。
-仅核验离线下载的归档和 checksums 时，可省略该参数。
+默认会调用 Docker 检查 `ghcr.io/seanbao/mnemonas:1.2.3` 是否存在，并会重试短暂不可见的镜像 manifest；需要调整时，可设置 `MNEMONAS_RELEASE_IMAGE_CHECK_RETRIES` 和 `MNEMONAS_RELEASE_IMAGE_CHECK_SLEEP_SECONDS`。
+仅核验下载的归档和 checksums 时，可传入 `--skip-image-check`。
 `--repository` 必须使用 GHCR 兼容的小写 `owner/repo`，owner 仅包含小写字母、数字和连字符，repo 名可包含小写字母、数字、点、下划线和连字符，并且两段都必须以字母或数字开头和结尾。
+未设置 `--artifact-dir` 时，脚本会使用临时目录；显式目录必须为空或不存在，以避免旧产物混入核验。
 
 下列示例默认使用源码构建的本地镜像，也可通过 `MNEMONAS_IMAGE` 切换到已验证的 release 镜像。
 

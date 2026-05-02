@@ -263,26 +263,21 @@ Binary archives from GitHub Releases include `docker-compose.yml` and `.env.exam
 The packaged template presets `MNEMONAS_IMAGE` to the GHCR image for the same release tag.
 Running `./scripts/docker-quickstart.sh --start` from an extracted archive therefore uses the release-image path by default instead of a source build.
 
-After a release is published, verify the GitHub Release archives, `checksums.txt`, and matching GHCR image tag from the download directory:
+After a release is published, download and verify the GitHub Release archives, `checksums.txt`, and matching GHCR image tag:
 
 ```bash
 mkdir -p dist/release-check
-gh release download v1.2.3 \
-  --repo seanbao/mnemonas \
-  --dir dist/release-check
-
-./scripts/verify-release-artifacts.sh \
+./scripts/verify-published-release.sh \
   --version v1.2.3 \
   --repository seanbao/mnemonas \
-  --require-targets \
-  --check-image \
-  dist/release-check
+  --artifact-dir dist/release-check
 ```
 
 `--version` must use `vMAJOR.MINOR.PATCH` or a SemVer prerelease form, and the value after the leading `v` must stay within Docker's 128-character tag limit.
-`--check-image` uses Docker to check that `ghcr.io/seanbao/mnemonas:1.2.3` exists. It retries briefly unavailable image manifests by default; set `MNEMONAS_RELEASE_IMAGE_CHECK_RETRIES` and `MNEMONAS_RELEASE_IMAGE_CHECK_SLEEP_SECONDS` when different retry timing is required.
-Omit it when only the downloaded archives and checksums need offline verification.
+By default, the script uses Docker to check that `ghcr.io/seanbao/mnemonas:1.2.3` exists and retries briefly unavailable image manifests; set `MNEMONAS_RELEASE_IMAGE_CHECK_RETRIES` and `MNEMONAS_RELEASE_IMAGE_CHECK_SLEEP_SECONDS` when different retry timing is required.
+Pass `--skip-image-check` when only the downloaded archives and checksums need verification.
 `--repository` must use a GHCR-compatible lowercase `owner/repo`; owner only allows lowercase letters, digits, and hyphens, while the repo name also allows dots and underscores, and both segments must start and end with a letter or digit.
+When `--artifact-dir` is omitted, the script uses a temporary directory. Explicit directories must be empty or absent so stale artifacts cannot enter verification.
 
 The examples below default to the source-built local image and can be switched to a verified release image with `MNEMONAS_IMAGE`.
 
