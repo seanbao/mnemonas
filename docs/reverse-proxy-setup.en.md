@@ -149,7 +149,19 @@ curl -I https://nas.example.com/health
 # Custom Basic passwords are not echoed back; generated passwords use the webdav_password field in /srv/mnemonas/secrets.json.
 WEBDAV_USER="<mnemonas-or-webdav-username>"
 WEBDAV_PASS="<mnemonas-or-webdav-password>"
-curl -u "$WEBDAV_USER:$WEBDAV_PASS" -X PROPFIND https://nas.example.com/dav/ -H "Depth: 0"
+curl_escape_config_value() {
+  local value="$1"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  printf '%s' "$value"
+}
+curl_auth_config="$(mktemp -t mnemonas-webdav-curl-auth.XXXXXX)"
+trap 'rm -f "$curl_auth_config"' EXIT
+chmod 600 "$curl_auth_config"
+printf 'user = "%s:%s"\n' \
+  "$(curl_escape_config_value "$WEBDAV_USER")" \
+  "$(curl_escape_config_value "$WEBDAV_PASS")" > "$curl_auth_config"
+curl --config "$curl_auth_config" -X PROPFIND https://nas.example.com/dav/ -H "Depth: 0"
 ```
 
 ## Option 2: Nginx + Certbot
@@ -396,7 +408,19 @@ WebDAV:
 # Custom Basic passwords are not echoed back; generated passwords use the webdav_password field in /srv/mnemonas/secrets.json.
 WEBDAV_USER="<mnemonas-or-webdav-username>"
 WEBDAV_PASS="<mnemonas-or-webdav-password>"
-curl -u "$WEBDAV_USER:$WEBDAV_PASS" -X PROPFIND https://nas.example.com/dav/ \
+curl_escape_config_value() {
+  local value="$1"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  printf '%s' "$value"
+}
+curl_auth_config="$(mktemp -t mnemonas-webdav-curl-auth.XXXXXX)"
+trap 'rm -f "$curl_auth_config"' EXIT
+chmod 600 "$curl_auth_config"
+printf 'user = "%s:%s"\n' \
+  "$(curl_escape_config_value "$WEBDAV_USER")" \
+  "$(curl_escape_config_value "$WEBDAV_PASS")" > "$curl_auth_config"
+curl --config "$curl_auth_config" -X PROPFIND https://nas.example.com/dav/ \
   -H "Depth: 1" \
   -v
 ```
