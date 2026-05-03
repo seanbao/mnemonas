@@ -403,6 +403,18 @@ curl http://localhost:9091/stats
 
 `9091` 应保持本地或私有网络可见。
 
+### 备份恢复演练烟测
+
+```bash
+# 对已运行服务执行维护 API smoke；脚本不会创建或删除备份任务。
+MNEMONAS_API_URL=http://localhost:8080/api/v1 \
+MNEMONAS_BACKUP_JOB_ID=external-disk \
+MNEMONAS_COOKIE_FILE=cookies.txt \
+./scripts/backup-restore-drill-smoke.sh
+```
+
+`scripts/backup-restore-drill-smoke.sh` 会按显式任务 ID 读取备份任务列表和单任务详情，触发立即备份，执行保留策略检查，运行恢复演练，并下载恢复报告。`MNEMONAS_API_URL` 必须是不包含空白、query、fragment、内嵌凭据、反斜杠、编码斜杠或编码反斜杠，也不包含空路径段或 `.`/`..` 路径段的 HTTP(S) API 根 URL；`MNEMONAS_BACKUP_JOB_ID` 必须是安全任务 ID。需要认证时通过 `MNEMONAS_COOKIE_FILE` 传入 curl cookie 文件。每次 curl 请求默认使用 `CURL_CONNECT_TIMEOUT=10` 和 `CURL_MAX_TIME=600`；高延迟备份目标可调大 `CURL_MAX_TIME`。如需保留本地演练产物供人工抽查，可设置 `MNEMONAS_BACKUP_KEEP_ARTIFACT=1`。
+
 ### E2E
 
 ```bash

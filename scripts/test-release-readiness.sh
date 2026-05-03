@@ -37,6 +37,7 @@ write_checklists() {
 - [ ] Docker 构建和烟测通过：`make docker-check`
 - [ ] 公网发布前在服务器运行：`sudo mnemonas-doctor --public-domain <domain>`，并按 [公网云防火墙复核清单](docs/cloud-firewall-checklist.md) 复核环境
 - [ ] 公网发布前从外部网络运行：`./scripts/public-go-live-smoke.sh <domain>`
+- [ ] 如本次发布包含备份恢复链路，运行恢复演练 smoke 入口：`./scripts/backup-restore-drill-smoke.sh`
 - [ ] 发布前就绪摘要通过：`./scripts/release-readiness.sh`
 - [ ] `./scripts/plan-hardening-commits.sh --fail-on-manual` 确认没有未归类路径
 - [ ] 发布后下载 GitHub Release 产物，并运行 `./scripts/verify-release-artifacts.sh --version <tag> --repository seanbao/mnemonas --require-targets --check-image <artifact-dir>`，验证 release 产物。
@@ -52,6 +53,7 @@ EOF
 - [ ] Run Docker build and smoke checks: `make docker-check`
 - [ ] Before public release, run on the server: `sudo mnemonas-doctor --public-domain <domain>` and review the [Public cloud firewall checklist](docs/cloud-firewall-checklist.en.md)
 - [ ] Before public release, run from an external network: `./scripts/public-go-live-smoke.sh <domain>`
+- [ ] If this release includes the backup and restore path, run the restore-drill smoke entry point: `./scripts/backup-restore-drill-smoke.sh`
 - [ ] Run release readiness summary: `./scripts/release-readiness.sh`
 - [ ] Confirm `./scripts/plan-hardening-commits.sh --fail-on-manual` reports no unclassified paths
 - [ ] After publication, download the GitHub Release artifacts and run `./scripts/verify-release-artifacts.sh --version <tag> --repository seanbao/mnemonas --require-targets --check-image <artifact-dir>` to verify release artifacts.
@@ -79,6 +81,7 @@ EOF
 - `make docker-check`
 - `sudo mnemonas-doctor --public-domain <domain>`
 - `./scripts/public-go-live-smoke.sh <domain>`
+- `./scripts/backup-restore-drill-smoke.sh`
 - `docs/cloud-firewall-checklist.md`
 - `./scripts/test-release-tag.sh`
 - `./scripts/test-release-package.sh`
@@ -113,6 +116,7 @@ EOF
 - `make docker-check`
 - `sudo mnemonas-doctor --public-domain <domain>`
 - `./scripts/public-go-live-smoke.sh <domain>`
+- `./scripts/backup-restore-drill-smoke.sh`
 - `docs/cloud-firewall-checklist.en.md`
 - `./scripts/test-release-tag.sh`
 - `./scripts/test-release-package.sh`
@@ -909,6 +913,15 @@ assert_file_contains "$output_dir/missing-public-smoke-checklist.err" "CHANGELOG
 assert_file_contains "$output_dir/missing-public-smoke-checklist.err" "./scripts/public-go-live-smoke.sh"
 git checkout -q -- CHANGELOG.en.md
 
+sed -i.bak '/backup-restore-drill-smoke/d' CHANGELOG.en.md
+rm -f CHANGELOG.en.md.bak
+if ./scripts/release-readiness.sh --allow-dirty --allow-post-validation-changes >"$output_dir/missing-backup-restore-smoke-checklist.out" 2>"$output_dir/missing-backup-restore-smoke-checklist.err"; then
+	fail "release readiness accepted a missing backup restore-drill smoke checklist command"
+fi
+assert_file_contains "$output_dir/missing-backup-restore-smoke-checklist.err" "CHANGELOG.en.md is missing required text"
+assert_file_contains "$output_dir/missing-backup-restore-smoke-checklist.err" "./scripts/backup-restore-drill-smoke.sh"
+git checkout -q -- CHANGELOG.en.md
+
 sed -i.bak '/security-check/d' docs/release-notes.en.md
 rm -f docs/release-notes.en.md.bak
 if ./scripts/release-readiness.sh --allow-dirty --allow-post-validation-changes >"$output_dir/missing-release-notes-security.out" 2>"$output_dir/missing-release-notes-security.err"; then
@@ -934,6 +947,15 @@ if ./scripts/release-readiness.sh --allow-dirty --allow-post-validation-changes 
 fi
 assert_file_contains "$output_dir/missing-release-notes-public-doctor.err" "docs/release-notes.en.md is missing required text"
 assert_file_contains "$output_dir/missing-release-notes-public-doctor.err" "mnemonas-doctor --public-domain"
+git checkout -q -- docs/release-notes.en.md
+
+sed -i.bak '/backup-restore-drill-smoke/d' docs/release-notes.en.md
+rm -f docs/release-notes.en.md.bak
+if ./scripts/release-readiness.sh --allow-dirty --allow-post-validation-changes >"$output_dir/missing-release-notes-backup-restore-smoke.out" 2>"$output_dir/missing-release-notes-backup-restore-smoke.err"; then
+	fail "release readiness accepted release notes without the backup restore-drill smoke command"
+fi
+assert_file_contains "$output_dir/missing-release-notes-backup-restore-smoke.err" "docs/release-notes.en.md is missing required text"
+assert_file_contains "$output_dir/missing-release-notes-backup-restore-smoke.err" "./scripts/backup-restore-drill-smoke.sh"
 git checkout -q -- docs/release-notes.en.md
 
 sed -i.bak '/cloud-firewall-checklist/d' docs/release-notes.en.md

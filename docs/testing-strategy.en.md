@@ -104,12 +104,17 @@ Quick isolated run:
 ./scripts/run-e2e-isolated.sh --quick
 RUN_RCLONE_WEBDAV=1 ./scripts/run-e2e-isolated.sh --quick
 WEBDAV_URL=http://localhost:8080/dav ./scripts/webdav-client-smoke.sh
+MNEMONAS_API_URL=http://localhost:8080/api/v1 \
+MNEMONAS_BACKUP_JOB_ID=external-disk \
+MNEMONAS_COOKIE_FILE=cookies.txt \
+./scripts/backup-restore-drill-smoke.sh
 ```
 
 The isolated runner starts a temporary backend, temporary storage, and non-default ports before invoking `scripts/e2e-test.sh`.
 The isolated root must be under `/tmp` or the current checkout and must not contain control characters, `..`, or symlink path components.
 When `RUN_RCLONE_WEBDAV=1` is set, the isolated runner passes it to the low-level E2E script so an installed `rclone` runs the WebDAV client smoke, covering upload, download, move/rename, list, and cleanup.
 `scripts/webdav-client-smoke.sh` targets an already running service and provides an independent curl protocol smoke, including read/write coverage for URL-encoded space paths. `WEBDAV_URL` must be an HTTP(S) WebDAV root URL without whitespace, query strings, fragments, embedded credentials, backslashes, encoded slashes, encoded backslashes, or `.`/`..` path segments. Pass `MNEMONAS_WEBDAV_USERNAME` and `MNEMONAS_WEBDAV_PASSWORD` when authentication is required. Each curl request uses `CURL_CONNECT_TIMEOUT=10` and `CURL_MAX_TIME=30` by default; increase these environment variables on high-latency links.
+`scripts/backup-restore-drill-smoke.sh` also targets an already running service. It reads the explicit backup job, triggers an immediate backup, runs the retention check, performs a restore drill, and downloads the restore report. The script does not create or delete backup jobs. `MNEMONAS_API_URL` must be an HTTP(S) API root URL without whitespace, query strings, fragments, embedded credentials, backslashes, encoded slashes or backslashes, empty path segments, or dot segments, and `MNEMONAS_BACKUP_JOB_ID` must be a safe job ID. Pass authentication through `MNEMONAS_COOKIE_FILE` when required. Each request uses `CURL_CONNECT_TIMEOUT=10` and `CURL_MAX_TIME=600` by default.
 The default backend port is `18180` and default frontend port is `14173` for Playwright.
 Playwright's isolated backend uses a 2-hour access-token lifetime and a 168-hour refresh-token lifetime.
 This reduces shared storageState expiration risk during long parallel runs.

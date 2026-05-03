@@ -195,7 +195,7 @@
 - `scripts/release-readiness.sh` 会要求 `.github/workflows/torture.yml` 保留手动入口、定时入口、只读权限、`RUN_LIVE_FAULTS: '0'` 非破坏性开关和 `make test-torture` 执行入口，避免长期回归工作流在发布前失效
 - `scripts/release-readiness.sh` 会要求关闭空白 Issue，并检查缺陷报告、使用问题、功能建议和 WebDAV 兼容性 Issue 表单保留敏感信息脱敏、诊断信息和安全影响提示，避免公开协作入口绕过安全提示
 - `scripts/release-readiness.sh` 会检查安全策略和支持说明保留私密漏洞报告入口、禁止公开漏洞细节、dataplane 端口不外露、依赖安全检查和公网直连限制等关键提示
-- `scripts/release-readiness.sh` 会要求发布清单和双语 release notes 保留 `mnemonas-doctor --public-domain`、`scripts/public-go-live-smoke.sh` 和 `cloud-firewall-checklist` 入口，避免公网部署环境复核从最终发布流程中遗漏
+- `scripts/release-readiness.sh` 会要求发布清单和双语 release notes 保留 `mnemonas-doctor --public-domain`、`scripts/public-go-live-smoke.sh`、`scripts/backup-restore-drill-smoke.sh` 和 `cloud-firewall-checklist` 入口，避免公网部署环境复核和恢复演练入口从最终发布流程中遗漏
 - `scripts/release-readiness.sh` 会拒绝不是当前 HEAD 祖先的 base ref，避免用旁支范围生成误导性的发布就绪摘要
 - `scripts/release-readiness.sh` 会检查当前发布分支的本地提交标题是否符合 Conventional Commits，并拒绝遗留的 `fixup!` / `squash!` 临时提交
 - `scripts/public-go-live-smoke.sh` 会先检查后端端口 TCP 可达性；`8080/9090/9091` 或自定义后端端口即使不返回 HTTP 状态，只要从外部网络可建立 TCP 连接就会失败
@@ -346,6 +346,7 @@
 - [ ] Docker 构建和烟测通过：`make docker-check`
 - [ ] 如果计划公网发布，在服务器运行 `sudo mnemonas-doctor --public-domain <domain>`，并按 [公网云防火墙复核清单](docs/cloud-firewall-checklist.md) 确认 DNS、防火墙、TLS 和云安全组
 - [ ] 如果计划公网发布，从外部网络运行 `./scripts/public-go-live-smoke.sh <domain>`，确认 HTTPS、同域跳转和后端端口不可外露
+- [ ] 如本次发布包含备份恢复链路，针对至少一个已配置备份任务运行 `./scripts/backup-restore-drill-smoke.sh`，确认立即备份、保留策略检查、恢复演练和恢复报告下载路径可复跑
 - [ ] `./scripts/plan-hardening-commits.sh --fail-on-manual` 确认没有未归类路径
 - [ ] 发布前就绪摘要通过：`./scripts/release-readiness.sh`
 - [ ] 更新 CHANGELOG.md、CHANGELOG.en.md、README 版本引用和 [发布说明草稿](docs/release-notes.md)
