@@ -206,6 +206,15 @@ curl -X POST -b cookies.txt \
   -d '{"keep_artifact":false}'
 ```
 
+The same maintenance path can also be exercised against a running service with the standalone smoke script. The script does not create or delete backup jobs, requires an explicit configured job ID, and uses a curl cookie file for authentication.
+
+```bash
+MNEMONAS_API_URL=http://localhost:8080/api/v1 \
+MNEMONAS_BACKUP_JOB_ID=external-disk \
+MNEMONAS_COOKIE_FILE=cookies.txt \
+./scripts/backup-restore-drill-smoke.sh
+```
+
 For `local`, the restore drill first confirms that the snapshot does not contain files missing from the manifest, then copies the latest snapshot into a temporary directory and verifies every file size, permission mode, and SHA-256 from the manifest. Set `keep_artifact = true` to retain the restored directory for manual inspection. With the default non-retained artifact behavior, if verification completes but temporary restore-directory cleanup fails, the drill remains completed and returns `warning=true`, `warnings[]`, `artifact_kept=true`, and `restored_path` so the Maintenance page can surface the retained artifact. For `restic`, the drill currently runs `restic check`; for `rclone`, it runs `rclone check --one-way` to verify remote consistency.
 
 To retrieve data from a `local`, `restic`, or `rclone` job, restore into an explicit independent directory:
