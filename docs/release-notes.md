@@ -63,7 +63,7 @@ Release workflow 预期生成以下产物：
 
 当前硬化分支已有以下验证证据；最终发布前应以最新 tag、Release workflow 结果和必要的环境验证为准：
 
-最近本地完整验证快照：验证目标 `3a6b14a3c274`，`GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master` 通过，覆盖 diff 空白、密钥泄漏扫描、workflow/YAML/脚本门禁、`make check`、工具链一致性、Go/Rust/frontend 依赖安全扫描、示例配置、public-access 模板、proto 再生成稳定性、Rust fmt/test/clippy、proto-gen fmt/test/clippy、前端 lint/typecheck/unit/build、Playwright 377 个 E2E 用例、Docker build、Docker image `sha256:53e61e3b8b2dbc13545768f6cbef4c686864e9a5ca3e6d6eaaf4524d58a0f8ed` 和 Docker smoke。Docker smoke 使用 Docker 自动分配的 loopback 端口 `http://127.0.0.1:32782`。
+最近本地完整验证快照：验证目标 `99ac1b279301`，`GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master` 通过，覆盖 diff 空白、密钥泄漏扫描、workflow/YAML/脚本门禁、`make check`、工具链一致性、Go/Rust/frontend 依赖安全扫描、示例配置、public-access 模板、proto 再生成稳定性、Rust fmt/test/clippy、proto-gen fmt/test/clippy、前端 lint/typecheck/unit/build、Playwright 377 个 E2E 用例、Docker build、Docker image `sha256:b787aa282bdf61a6103b70964c151b5df8fceddc24a9addd20bdd561c7c7d7c5` 和 Docker smoke。Docker smoke 使用 Docker 自动分配的 loopback 端口 `http://127.0.0.1:32783`。
 
 - `GOTOOLCHAIN=local ./scripts/verify-changed.sh`
 - `GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master`
