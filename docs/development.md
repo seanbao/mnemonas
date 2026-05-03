@@ -389,17 +389,13 @@ MNEMONAS_WEBDAV_USERNAME="<mnemonas-or-webdav-username>" \
 MNEMONAS_WEBDAV_PASSWORD="<mnemonas-or-webdav-password>" \
 ./scripts/webdav-client-smoke.sh
 
-# 仅需手动确认路由时，可直接执行只读 PROPFIND。
-curl -u "<mnemonas-or-webdav-username>:<mnemonas-or-webdav-password>" \
-  -X PROPFIND http://localhost:8080/dav/ -H "Depth: 1"
-
 curl http://localhost:8080/health
 curl http://localhost:9091/health
 curl http://localhost:9091/stats
 ```
 
 `scripts/webdav-client-smoke.sh` 覆盖 `OPTIONS`、`MKCOL`、`PUT`、`PROPFIND`、`GET`、`HEAD`、`COPY`、`MOVE`、`DELETE`、COPY/MOVE 后内容校验和 URL 编码空格路径读写。`WEBDAV_URL` 必须是不包含空白、query、fragment、内嵌凭据、反斜杠、编码斜杠或编码反斜杠，也不包含 `.`/`..` 路径段的 HTTP(S) WebDAV 根 URL；凭据应通过环境变量传入。如果启用 `webdav.auth_type = "basic"`，可用 `./scripts/dev.sh --creds` 查看凭据位置；如果启用 `webdav.auth_type = "users"`，则使用 MnemoNAS 用户名和密码。每次 curl 请求默认使用 `CURL_CONNECT_TIMEOUT=10` 和 `CURL_MAX_TIME=30`，高延迟网络可通过环境变量调大。
-脚本通过临时 curl 配置传递认证信息，避免在命令参数中输出明文密码。
+脚本通过临时 curl 配置传递认证信息，避免在命令参数中输出明文密码。手工只读 PROPFIND 排查也应使用临时 curl 配置或该 smoke 脚本，不应把 WebDAV 密码写进 `curl -u` 命令参数。
 
 `9091` 应保持本地或私有网络可见。
 

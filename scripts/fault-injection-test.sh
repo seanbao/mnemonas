@@ -53,6 +53,7 @@ FAILED=0
 SKIPPED=0
 ADMIN_ACCESS_TOKEN=""
 WEBDAV_AUTH_ARGS=()
+CURL_AUTH_CONFIG=""
 
 log_info()  { echo -e "${BLUE}[INFO]${NC} $1"; }
 log_ok()    { echo -e "${GREEN}[PASS]${NC} $1"; ((PASSED+=1)); }
@@ -557,6 +558,27 @@ normalize_webdav_auth_type() {
     printf '%s' "$value"
 }
 
+escape_curl_config_value() {
+    local value="$1"
+
+    value="${value//\\/\\\\}"
+    value="${value//\"/\\\"}"
+    printf '%s' "$value"
+}
+
+write_webdav_auth_config() {
+    local username="$1"
+    local password="$2"
+    local escaped_username escaped_password
+
+    escaped_username="$(escape_curl_config_value "$username")"
+    escaped_password="$(escape_curl_config_value "$password")"
+    CURL_AUTH_CONFIG="$(mktemp -t mnemonas-fault-curl-auth.XXXXXX)"
+    chmod 0600 "$CURL_AUTH_CONFIG"
+    printf 'user = "%s:%s"\n' "$escaped_username" "$escaped_password" > "$CURL_AUTH_CONFIG"
+    WEBDAV_AUTH_ARGS=(--config "$CURL_AUTH_CONFIG")
+}
+
 configure_webdav_auth() {
     local auth_type="${MNEMONAS_WEBDAV_AUTH_TYPE:-$(read_config_value webdav auth_type)}"
     local username=""
@@ -596,7 +618,7 @@ configure_webdav_auth() {
             ;;
     esac
 
-    WEBDAV_AUTH_ARGS=(-u "$username:$password")
+    write_webdav_auth_config "$username" "$password"
     log_info "Using WebDAV $auth_type auth credentials for user: $username"
 }
 
@@ -665,6 +687,10 @@ curl() {
 cleanup() {
     log_info "Cleaning up..."
     rm -rf -- "$TEST_DIR"
+    if [[ -n "$CURL_AUTH_CONFIG" ]]; then
+        rm -f -- "$CURL_AUTH_CONFIG"
+        CURL_AUTH_CONFIG=""
+    fi
     # Restart only after this script killed the explicitly confirmed target.
     if [[ "$SERVICE_WAS_KILLED" == "1" ]] && ! curl -sf "$BASE_URL/health" > /dev/null 2>&1; then
         log_warn "Service not running, attempting restart..."

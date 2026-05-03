@@ -19,6 +19,7 @@ SECRETS_FILE="${SECRETS_FILE:-$STORAGE_ROOT/secrets.json}"
 INTERNAL_DIR="${INTERNAL_DIR:-$STORAGE_ROOT/.mnemonas}"
 INITIAL_PASSWORD_FILE="${INITIAL_PASSWORD_FILE:-$INTERNAL_DIR/initial-password.txt}"
 WEBDAV_AUTH_ARGS=()
+CURL_AUTH_CONFIG=""
 ADMIN_ACCESS_TOKEN="${MNEMONAS_ACCESS_TOKEN:-}"
 ALLOW_REAL_STORAGE="${ALLOW_REAL_STORAGE:-0}"
 CLEANUP_ENABLED=0
@@ -456,6 +457,27 @@ normalize_webdav_auth_type() {
     printf '%s' "$value"
 }
 
+escape_curl_config_value() {
+    local value="$1"
+
+    value="${value//\\/\\\\}"
+    value="${value//\"/\\\"}"
+    printf '%s' "$value"
+}
+
+write_webdav_auth_config() {
+    local username="$1"
+    local password="$2"
+    local escaped_username escaped_password
+
+    escaped_username="$(escape_curl_config_value "$username")"
+    escaped_password="$(escape_curl_config_value "$password")"
+    CURL_AUTH_CONFIG="$(mktemp -t mnemonas-benchmark-curl-auth.XXXXXX)"
+    chmod 0600 "$CURL_AUTH_CONFIG"
+    printf 'user = "%s:%s"\n' "$escaped_username" "$escaped_password" > "$CURL_AUTH_CONFIG"
+    WEBDAV_AUTH_ARGS=(--config "$CURL_AUTH_CONFIG")
+}
+
 configure_webdav_auth() {
     local auth_type="${MNEMONAS_WEBDAV_AUTH_TYPE:-$(read_config_value webdav auth_type)}"
     auth_type="$(normalize_webdav_auth_type "$auth_type")"
@@ -494,7 +516,7 @@ configure_webdav_auth() {
             ;;
     esac
 
-    WEBDAV_AUTH_ARGS=(-u "$username:$password")
+    write_webdav_auth_config "$username" "$password"
 }
 
 configure_admin_auth() {
@@ -533,11 +555,23 @@ metrics_curl() {
     command curl "$@"
 }
 
-cleanup() {
+cleanup_auth_config() {
+    if [[ -n "$CURL_AUTH_CONFIG" ]]; then
+        rm -f -- "$CURL_AUTH_CONFIG"
+        CURL_AUTH_CONFIG=""
+    fi
+}
+
+cleanup_test_data() {
     if [[ "$CLEANUP_ENABLED" != "1" ]]; then
         return
     fi
     rm -rf -- "$TEST_DIR"
+}
+
+cleanup() {
+    cleanup_auth_config
+    cleanup_test_data
 }
 
 trap cleanup EXIT
@@ -625,7 +659,7 @@ benchmark_get() {
 }
 
 # Clean up old test data
-cleanup
+cleanup_test_data
 mkdir -p "$TEST_DIR"
 
 echo "--- Creating test directories ---"
@@ -685,7 +719,7 @@ fi
 
 echo ""
 echo "--- Cleanup ---"
-cleanup
+cleanup_test_data
 echo "Test files removed."
 
 echo ""
