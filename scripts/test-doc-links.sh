@@ -1282,6 +1282,7 @@ EOF
 | 区域 | 当前状态 | 验证证据 |
 |------|----------|----------|
 | 备份恢复演练 smoke 入口 | `scripts/backup-restore-drill-smoke.sh` 已纳入发布清单和双语 release notes 门禁，备份恢复演练 smoke 入口文档和发布门禁契约已记录。 | `make docs-check` |
+| 发布后产物核验 | 正式发布后运行 `./scripts/verify-published-release.sh --version <tag> --repository seanbao/mnemonas` 统一下载并核验 GitHub Release 产物、checksums 和容器镜像标签。 | `make docs-check` |
 | 审查分组与发布前检查 | 发布就绪摘要要求发布清单和双语 release notes 保留公网部署 doctor、外部网络 smoke、备份恢复演练 smoke 和云防火墙复核入口。 | `./scripts/release-readiness.sh` |
 EOF
 	cat > "$repo/docs/hardening-progress.en.md" <<'EOF'
@@ -1292,6 +1293,7 @@ English | [简体中文](hardening-progress.md)
 | Area | Current status | Verification evidence |
 | --- | --- | --- |
 | Backup restore-drill smoke entry point | `scripts/backup-restore-drill-smoke.sh` is covered by the release checklist and bilingual release-notes gates, and the backup restore-drill smoke entry-point documentation and release-readiness contract is recorded. | `make docs-check` |
+| Published release verification | After publication, run `./scripts/verify-published-release.sh --version <tag> --repository seanbao/mnemonas` to download and verify GitHub Release artifacts, checksums, and container image tags through the maintainer entry point. | `make docs-check` |
 | Review grouping and pre-release checks | The release-readiness summary requires the release checklist and bilingual release notes to retain the public-deployment doctor, external-network smoke, backup restore-drill smoke, and cloud-firewall review entry points. | `./scripts/release-readiness.sh` |
 EOF
 	git -C "$repo" add docs/README.md docs/README.en.md docs/hardening-progress.md docs/hardening-progress.en.md
@@ -1301,6 +1303,13 @@ write_hardening_progress_release_readiness_contract_missing_backup_smoke_doc() {
 	local repo="$1"
 	write_hardening_progress_release_readiness_contract_valid_docs "$repo"
 	perl -0pi -e 's/, backup restore-drill smoke//' "$repo/docs/hardening-progress.en.md"
+	git -C "$repo" add docs/hardening-progress.en.md
+}
+
+write_hardening_progress_release_readiness_contract_missing_published_release_verifier_doc() {
+	local repo="$1"
+	write_hardening_progress_release_readiness_contract_valid_docs "$repo"
+	perl -0pi -e 's/`\.\/scripts\/verify-published-release\.sh --version <tag> --repository seanbao\/mnemonas`/`\.\/scripts\/verify-release-artifacts.sh --require-targets --check-image`/' "$repo/docs/hardening-progress.en.md"
 	git -C "$repo" add docs/hardening-progress.en.md
 }
 
@@ -1603,6 +1612,7 @@ run_rejects "api-reference-webdav-auth-contract-missing-users" "docs/api-referen
 run_rejects "api-reference-webdav-auth-contract-legacy-first" "docs/api-reference.en.md: avoid leading WebDAV auth guidance with legacy Basic Auth: - By default it uses the legacy global Basic Auth credentials" write_api_reference_webdav_auth_contract_legacy_first_doc
 run_rejects "backup-restore-drill-contract-missing-history" "docs/backup-guide.en.md: missing backup restore drill guidance text: Restore-drill history and explicit restore history both keep the latest 20 entries" write_backup_restore_drill_contract_missing_history_doc
 run_rejects "hardening-progress-release-readiness-contract-missing-backup-smoke" "docs/hardening-progress.en.md: missing release-readiness hardening ledger text: release checklist and bilingual release notes to retain the public-deployment doctor, external-network smoke, backup restore-drill smoke, and cloud-firewall review entry points" write_hardening_progress_release_readiness_contract_missing_backup_smoke_doc
+run_rejects "hardening-progress-release-readiness-contract-missing-published-release-verifier" "docs/hardening-progress.en.md: missing release-readiness hardening ledger text: \`./scripts/verify-published-release.sh --version <tag> --repository seanbao/mnemonas\`" write_hardening_progress_release_readiness_contract_missing_published_release_verifier_doc
 run_rejects "release-notes-validation-evidence-contract-mismatch" "docs/release-notes.en.md: frontend unit test count 3113 does not match docs/hardening-review-summary.en.md: 3115" write_release_notes_validation_evidence_contract_mismatch_doc
 run_rejects "release-notes-validation-evidence-contract-docker-image-mismatch" "docs/release-notes.en.md: Docker image sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb does not match docs/hardening-review-summary.en.md: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" write_release_notes_validation_evidence_contract_docker_image_mismatch_doc
 run_rejects "release-notes-validation-evidence-contract-docker-port-mismatch" "docs/release-notes.en.md: Docker smoke port http://127.0.0.1:32780 does not match docs/hardening-review-summary.en.md: http://127.0.0.1:32779" write_release_notes_validation_evidence_contract_docker_port_mismatch_doc
