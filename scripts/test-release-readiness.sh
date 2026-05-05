@@ -90,6 +90,10 @@ EOF
 gh release download v0.1.0 --repo seanbao/mnemonas --dir dist/release-check
 ./scripts/verify-release-artifacts.sh --version v0.1.0 --repository seanbao/mnemonas --require-targets --check-image dist/release-check
 ```
+
+## 已知限制
+
+- 当前发布候选定位为已通过完整本地验证的 L1 私有文件云盘和 L1+ 公网安全入口基础，不应作为重要数据的唯一长期副本；生产使用仍应保留外部备份。
 EOF
 
 	cat >docs/release-notes.en.md <<'EOF'
@@ -120,6 +124,10 @@ EOF
 gh release download v0.1.0 --repo seanbao/mnemonas --dir dist/release-check
 ./scripts/verify-release-artifacts.sh --version v0.1.0 --repository seanbao/mnemonas --require-targets --check-image dist/release-check
 ```
+
+## Known Limitations
+
+- This release candidate is positioned as a fully locally validated L1 private file cloud with an initial L1+ public-access safety baseline, not as the only long-term copy of important data. Production use should keep external backups.
 EOF
 }
 
@@ -935,6 +943,15 @@ if ./scripts/release-readiness.sh --allow-dirty --allow-post-validation-changes 
 fi
 assert_file_contains "$output_dir/missing-release-notes-cloud-firewall.err" "docs/release-notes.en.md is missing required text"
 assert_file_contains "$output_dir/missing-release-notes-cloud-firewall.err" "cloud-firewall-checklist"
+git checkout -q -- docs/release-notes.en.md
+
+sed -i.bak 's/, not as the only long-term copy of important data//' docs/release-notes.en.md
+rm -f docs/release-notes.en.md.bak
+if ./scripts/release-readiness.sh --allow-dirty --allow-post-validation-changes >"$output_dir/missing-release-notes-candidate-limit.out" 2>"$output_dir/missing-release-notes-candidate-limit.err"; then
+	fail "release readiness accepted release notes without the release candidate data-copy limitation"
+fi
+assert_file_contains "$output_dir/missing-release-notes-candidate-limit.err" "docs/release-notes.en.md is missing required text"
+assert_file_contains "$output_dir/missing-release-notes-candidate-limit.err" "not as the only long-term copy of important data"
 git checkout -q -- docs/release-notes.en.md
 
 sed -i.bak '/release-readiness/d' CHANGELOG.en.md
