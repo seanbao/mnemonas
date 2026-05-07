@@ -66,6 +66,8 @@ max_chunk_size = 4194304     # 4 MiB.
 enabled = true
 prefix = "/dav"              # Must not be /, /api, /s, /health, or a child path of those reserved routes.
 read_only = false
+# This root example keeps Basic Auth for compatibility. Prefer auth_type = "users"
+# for day-to-day or production mounts so WebDAV uses MnemoNAS accounts.
 auth_type = "basic"          # users, basic, none
 username = "admin"           # Basic Auth username. The default is admin.
 password = ""                # Basic Auth password. Leave empty to generate a readable 16-character password in secrets.json on first startup.

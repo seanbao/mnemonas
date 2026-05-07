@@ -674,8 +674,14 @@ POST /api/v1/versions/{hash}/restore
 请求示例：
 
 ```bash
+MNEMONAS_ACCESS_TOKEN="<access-token>"
+curl_auth_config="$(mktemp)"
+trap 'rm -f "$curl_auth_config"' EXIT
+chmod 600 "$curl_auth_config"
+printf 'header = "Authorization: Bearer %s"\n' "$MNEMONAS_ACCESS_TOKEN" > "$curl_auth_config"
+
 curl -X POST \
-  -H "Authorization: Bearer <access-token>" \
+  --config "$curl_auth_config" \
   "http://localhost:8080/api/v1/versions/<hash>/restore?path=%2Fdocuments%2Freport.txt"
 ```
 
@@ -2104,9 +2110,9 @@ http://localhost:8080/dav
 
 WebDAV 访问和方法语义：
 
-- 默认使用 `[webdav]` 中的旧全局 Basic Auth 凭据，或 `secrets.json` 中生成的凭据。
-- 设置 `webdav.auth_type = "users"` 后，可以使用 MnemoNAS 用户账户挂载，并应用每个用户的 `home_dir` 边界。
+- 日常或生产挂载建议设置 `webdav.auth_type = "users"`，使用 MnemoNAS 用户账户挂载，并应用每个用户的 `home_dir` 边界。
   普通用户在 WebDAV 根目录也能看到已授权共享目录的顶层导航入口。
+- 根目录示例配置保留旧全局 Basic Auth 作为兼容基线；该模式使用 `[webdav]` 中的服务凭据，或 `secrets.json` 中生成的凭据。
 - 为嵌套授权合成的祖先入口只是只读导航；写入仍需要匹配写授权。
 - 支持的核心方法包括 `OPTIONS`、`PROPFIND`、`GET`、`HEAD`、`PUT`、`DELETE`、`MKCOL`、`MOVE`、`COPY`、简化 `PROPPATCH`、简化 `LOCK` 和简化 `UNLOCK`。
 - 直接父目录不存在时，`MKCOL` 返回 `409 Conflict`；目标已存在时，返回带 `Allow` 的 `405 Method Not Allowed`。

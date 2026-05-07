@@ -499,6 +499,7 @@ benchmark 目标 URL 使用与 E2E runner 相同的 HTTP(S) URL 安全规则。
 
 WebDAV `auth_type = "basic"` 时，手动 benchmark 在未提供环境凭据时会从 `config.toml` 或 `secrets.json` 读取 Basic Auth 凭据。
 WebDAV `auth_type = "users"` 时，应显式设置 `MNEMONAS_WEBDAV_USERNAME` 和 `MNEMONAS_WEBDAV_PASSWORD`。
+脚本通过临时 curl config 文件传递 WebDAV 凭据和 `MNEMONAS_ACCESS_TOKEN`，避免把密码或 Bearer token 写进 `curl` 命令参数。
 `[webdav].username/password` 不会被当作 MnemoNAS 用户凭据。
 
 隔离 benchmark runner 使用同样的 Web 和 dataplane loopback-only 规则。压测远端或共享网络实例时，应直接运行 `scripts/benchmark.sh`，并显式提供隔离的 `MNEMONAS_STORAGE_ROOT`。

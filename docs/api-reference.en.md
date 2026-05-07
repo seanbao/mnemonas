@@ -677,8 +677,14 @@ Successful restores write a `restore` activity entry with `details.restore_sourc
 Example request:
 
 ```bash
+MNEMONAS_ACCESS_TOKEN="<access-token>"
+curl_auth_config="$(mktemp)"
+trap 'rm -f "$curl_auth_config"' EXIT
+chmod 600 "$curl_auth_config"
+printf 'header = "Authorization: Bearer %s"\n' "$MNEMONAS_ACCESS_TOKEN" > "$curl_auth_config"
+
 curl -X POST \
-  -H "Authorization: Bearer <access-token>" \
+  --config "$curl_auth_config" \
   "http://localhost:8080/api/v1/versions/<hash>/restore?path=%2Fdocuments%2Freport.txt"
 ```
 
@@ -2093,9 +2099,9 @@ http://localhost:8080/dav
 
 WebDAV access and method semantics:
 
-- By default it uses the legacy global Basic Auth credentials from `[webdav]` or generated credentials in `secrets.json`.
-- Set `webdav.auth_type = "users"` to mount with MnemoNAS user accounts and per-user `home_dir` boundaries.
+- For day-to-day or production mounts, set `webdav.auth_type = "users"` to mount with MnemoNAS user accounts and per-user `home_dir` boundaries.
   Top-level navigation entries for granted shared directories are also listed at the WebDAV root for regular users.
+- The root example config keeps legacy global Basic Auth as a compatibility baseline; that mode uses service credentials from `[webdav]` or generated credentials in `secrets.json`.
 - Ancestor entries synthesized for nested grants are read-only navigation; writes still require a matching write grant.
 - Supported core methods include `OPTIONS`, `PROPFIND`, `GET`, `HEAD`, `PUT`, `DELETE`, `MKCOL`, `MOVE`, `COPY`, simplified `PROPPATCH`, simplified `LOCK`, and simplified `UNLOCK`.
 - `MKCOL` returns `409 Conflict` when the direct parent directory does not exist, and returns `405 Method Not Allowed` with `Allow` when the target already exists.

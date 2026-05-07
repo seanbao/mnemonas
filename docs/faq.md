@@ -132,7 +132,9 @@ prefix = "/dav"
 auth_type = "users"
 ```
 
-如需单独的全局 WebDAV 凭据，可使用：
+日常或生产 WebDAV 挂载应优先使用 MnemoNAS 用户认证。
+
+如旧客户端或专用服务凭据需要单独的全局 WebDAV 凭据，可使用 Basic Auth：
 
 ```toml
 [webdav]
@@ -189,11 +191,17 @@ API 示例：
 `path` 查询值在可复制的 shell 或浏览器示例中应进行 URL 编码，例如 `/path/to/file` 对应 `%2Fpath%2Fto%2Ffile`。
 
 ```bash
-curl -H "Authorization: Bearer <access-token>" \
+MNEMONAS_ACCESS_TOKEN="<access-token>"
+curl_auth_config="$(mktemp)"
+trap 'rm -f "$curl_auth_config"' EXIT
+chmod 600 "$curl_auth_config"
+printf 'header = "Authorization: Bearer %s"\n' "$MNEMONAS_ACCESS_TOKEN" > "$curl_auth_config"
+
+curl --config "$curl_auth_config" \
   http://localhost:8080/api/v1/versions/path/to/file
 
 curl -X POST \
-  -H "Authorization: Bearer <access-token>" \
+  --config "$curl_auth_config" \
   "http://localhost:8080/api/v1/versions/<hash>/restore?path=%2Fpath%2Fto%2Ffile"
 ```
 
@@ -226,8 +234,14 @@ max_versions = 10
 手动触发 GC：
 
 ```bash
+MNEMONAS_ACCESS_TOKEN="<access-token>"
+curl_auth_config="$(mktemp)"
+trap 'rm -f "$curl_auth_config"' EXIT
+chmod 600 "$curl_auth_config"
+printf 'header = "Authorization: Bearer %s"\n' "$MNEMONAS_ACCESS_TOKEN" > "$curl_auth_config"
+
 curl -X POST \
-  -H "Authorization: Bearer <access-token>" \
+  --config "$curl_auth_config" \
   http://localhost:8080/api/v1/maintenance/gc
 ```
 
@@ -250,7 +264,13 @@ curl http://localhost:8080/health
 指标：
 
 ```bash
-curl -H "Authorization: Bearer <admin-access-token>" http://localhost:8080/api/v1/metrics
+MNEMONAS_ADMIN_ACCESS_TOKEN="<admin-access-token>"
+curl_auth_config="$(mktemp)"
+trap 'rm -f "$curl_auth_config"' EXIT
+chmod 600 "$curl_auth_config"
+printf 'header = "Authorization: Bearer %s"\n' "$MNEMONAS_ADMIN_ACCESS_TOKEN" > "$curl_auth_config"
+
+curl --config "$curl_auth_config" http://localhost:8080/api/v1/metrics
 ```
 
 Dataplane 本地统计：
@@ -266,11 +286,17 @@ Dataplane 端口应保持 loopback 或私有网络绑定。
 Scrub 会按哈希校验已存储对象，并报告缺失或损坏的数据。
 
 ```bash
+MNEMONAS_ACCESS_TOKEN="<access-token>"
+curl_auth_config="$(mktemp)"
+trap 'rm -f "$curl_auth_config"' EXIT
+chmod 600 "$curl_auth_config"
+printf 'header = "Authorization: Bearer %s"\n' "$MNEMONAS_ACCESS_TOKEN" > "$curl_auth_config"
+
 curl -X POST \
-  -H "Authorization: Bearer <access-token>" \
+  --config "$curl_auth_config" \
   http://localhost:8080/api/v1/maintenance/scrub
 
-curl -H "Authorization: Bearer <access-token>" \
+curl --config "$curl_auth_config" \
   http://localhost:8080/api/v1/maintenance/scrub
 ```
 

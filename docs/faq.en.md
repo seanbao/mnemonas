@@ -132,7 +132,9 @@ prefix = "/dav"
 auth_type = "users"
 ```
 
-For a separate global WebDAV credential, use:
+Day-to-day or production WebDAV mounts should prefer MnemoNAS user authentication.
+
+If legacy clients or dedicated service credentials require a separate global WebDAV credential, use Basic Auth:
 
 ```toml
 [webdav]
@@ -189,11 +191,17 @@ API example:
 The `path` query value should be URL-encoded in copyable shell or browser examples. For example, `/path/to/file` is sent as `%2Fpath%2Fto%2Ffile`.
 
 ```bash
-curl -H "Authorization: Bearer <access-token>" \
+MNEMONAS_ACCESS_TOKEN="<access-token>"
+curl_auth_config="$(mktemp)"
+trap 'rm -f "$curl_auth_config"' EXIT
+chmod 600 "$curl_auth_config"
+printf 'header = "Authorization: Bearer %s"\n' "$MNEMONAS_ACCESS_TOKEN" > "$curl_auth_config"
+
+curl --config "$curl_auth_config" \
   http://localhost:8080/api/v1/versions/path/to/file
 
 curl -X POST \
-  -H "Authorization: Bearer <access-token>" \
+  --config "$curl_auth_config" \
   "http://localhost:8080/api/v1/versions/<hash>/restore?path=%2Fpath%2Fto%2Ffile"
 ```
 
@@ -226,8 +234,14 @@ max_versions = 10
 Manual GC:
 
 ```bash
+MNEMONAS_ACCESS_TOKEN="<access-token>"
+curl_auth_config="$(mktemp)"
+trap 'rm -f "$curl_auth_config"' EXIT
+chmod 600 "$curl_auth_config"
+printf 'header = "Authorization: Bearer %s"\n' "$MNEMONAS_ACCESS_TOKEN" > "$curl_auth_config"
+
 curl -X POST \
-  -H "Authorization: Bearer <access-token>" \
+  --config "$curl_auth_config" \
   http://localhost:8080/api/v1/maintenance/gc
 ```
 
@@ -250,7 +264,13 @@ curl http://localhost:8080/health
 Metrics:
 
 ```bash
-curl -H "Authorization: Bearer <admin-access-token>" http://localhost:8080/api/v1/metrics
+MNEMONAS_ADMIN_ACCESS_TOKEN="<admin-access-token>"
+curl_auth_config="$(mktemp)"
+trap 'rm -f "$curl_auth_config"' EXIT
+chmod 600 "$curl_auth_config"
+printf 'header = "Authorization: Bearer %s"\n' "$MNEMONAS_ADMIN_ACCESS_TOKEN" > "$curl_auth_config"
+
+curl --config "$curl_auth_config" http://localhost:8080/api/v1/metrics
 ```
 
 Dataplane local stats:
@@ -266,11 +286,17 @@ Keep dataplane ports loopback/private.
 Scrub verifies stored objects against their hashes and reports missing or corrupted data.
 
 ```bash
+MNEMONAS_ACCESS_TOKEN="<access-token>"
+curl_auth_config="$(mktemp)"
+trap 'rm -f "$curl_auth_config"' EXIT
+chmod 600 "$curl_auth_config"
+printf 'header = "Authorization: Bearer %s"\n' "$MNEMONAS_ACCESS_TOKEN" > "$curl_auth_config"
+
 curl -X POST \
-  -H "Authorization: Bearer <access-token>" \
+  --config "$curl_auth_config" \
   http://localhost:8080/api/v1/maintenance/scrub
 
-curl -H "Authorization: Bearer <access-token>" \
+curl --config "$curl_auth_config" \
   http://localhost:8080/api/v1/maintenance/scrub
 ```
 
