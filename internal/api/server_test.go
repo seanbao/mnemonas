@@ -312,6 +312,16 @@ func createPNGThumbnailSourceWithAlpha(width, height int) []byte {
 	return buf.Bytes()
 }
 
+func uniqueVersionTestContent(t *testing.T, label string) []byte {
+	t.Helper()
+	return []byte(fmt.Sprintf("%s:%s", t.Name(), label))
+}
+
+func uniqueSixByteVersionTestContent(t *testing.T, label string) []byte {
+	t.Helper()
+	return []byte(fmt.Sprintf("%06x", crc32.ChecksumIEEE(uniqueVersionTestContent(t, label)))[:6])
+}
+
 // testDataplaneAddr is the address of the test dataplane server
 func testDataplaneAddr() string {
 	if addr := os.Getenv("MNEMONAS_TEST_DATAPLANE_ADDR"); addr != "" {
@@ -2790,12 +2800,14 @@ func TestServer_DeleteFile_ReturnsWarningWhenTrashCapacityCleanupFailsAfterVisib
 func TestServer_DeleteFile_ReturnsWarningWhenPermanentDeleteCleanupFailsAfterVisibleDelete(t *testing.T) {
 	server, fs, _ := setupTestServer(t)
 	ctx := context.Background()
+	historicalContent := uniqueVersionTestContent(t, "delete-cleanup-v1")
+	currentContent := uniqueVersionTestContent(t, "delete-cleanup-v2")
 
 	fs.UpdateTrashSettings(false, 30, 0)
-	if err := fs.WriteFile(ctx, "/delete-cleanup-warning.txt", bytes.NewReader([]byte("v1"))); err != nil {
+	if err := fs.WriteFile(ctx, "/delete-cleanup-warning.txt", bytes.NewReader(historicalContent)); err != nil {
 		t.Fatalf("WriteFile(v1) error: %v", err)
 	}
-	if err := fs.WriteFile(ctx, "/delete-cleanup-warning.txt", bytes.NewReader([]byte("v2"))); err != nil {
+	if err := fs.WriteFile(ctx, "/delete-cleanup-warning.txt", bytes.NewReader(currentContent)); err != nil {
 		t.Fatalf("WriteFile(v2) error: %v", err)
 	}
 	setStorageHook(t, fs, "deleteVersionObject", func(ctx context.Context, hash string) error {
@@ -7002,11 +7014,13 @@ func TestServer_ListVersions(t *testing.T) {
 func TestServer_DownloadVersion_ContentDispositionEscapesFilename(t *testing.T) {
 	server, fs, _ := setupTestServer(t)
 	ctx := context.Background()
+	historicalContent := uniqueVersionTestContent(t, "quote-v1")
+	currentContent := uniqueVersionTestContent(t, "quote-v2")
 
-	if err := fs.WriteFile(ctx, "/versions/quote\"name.txt", bytes.NewReader([]byte("v1"))); err != nil {
+	if err := fs.WriteFile(ctx, "/versions/quote\"name.txt", bytes.NewReader(historicalContent)); err != nil {
 		t.Fatalf("WriteFile(v1) error: %v", err)
 	}
-	if err := fs.WriteFile(ctx, "/versions/quote\"name.txt", bytes.NewReader([]byte("v2"))); err != nil {
+	if err := fs.WriteFile(ctx, "/versions/quote\"name.txt", bytes.NewReader(currentContent)); err != nil {
 		t.Fatalf("WriteFile(v2) error: %v", err)
 	}
 
@@ -7043,11 +7057,13 @@ func TestServer_DownloadVersion_ContentDispositionEscapesFilename(t *testing.T) 
 func TestServer_DownloadVersion_UsesExtensionContentTypeForPreview(t *testing.T) {
 	server, fs, _ := setupTestServer(t)
 	ctx := context.Background()
+	historicalContent := uniqueVersionTestContent(t, "preview-v1")
+	currentContent := uniqueVersionTestContent(t, "preview-v2")
 
-	if err := fs.WriteFile(ctx, "/versions/preview.txt", bytes.NewReader([]byte("v1"))); err != nil {
+	if err := fs.WriteFile(ctx, "/versions/preview.txt", bytes.NewReader(historicalContent)); err != nil {
 		t.Fatalf("WriteFile(v1) error: %v", err)
 	}
-	if err := fs.WriteFile(ctx, "/versions/preview.txt", bytes.NewReader([]byte("v2"))); err != nil {
+	if err := fs.WriteFile(ctx, "/versions/preview.txt", bytes.NewReader(currentContent)); err != nil {
 		t.Fatalf("WriteFile(v2) error: %v", err)
 	}
 
@@ -7084,8 +7100,8 @@ func TestServer_DownloadVersion_UsesExtensionContentTypeForPreview(t *testing.T)
 	if got := w.Header().Get("Content-Security-Policy"); !strings.Contains(got, "sandbox") || !strings.Contains(got, "default-src 'none'") {
 		t.Fatalf("version preview Content-Security-Policy = %q, want sandboxed default-src none", got)
 	}
-	if body := w.Body.String(); body != "v1" {
-		t.Fatalf("version preview body = %q, want %q", body, "v1")
+	if body := w.Body.String(); body != string(historicalContent) {
+		t.Fatalf("version preview body = %q, want %q", body, string(historicalContent))
 	}
 }
 
@@ -7118,11 +7134,13 @@ func TestServer_DownloadVersionRejectsAmbiguousVersionParameter(t *testing.T) {
 func TestServer_DownloadVersion_UsesPrivateRevalidationCacheHeaders(t *testing.T) {
 	server, fs, _ := setupTestServer(t)
 	ctx := context.Background()
+	historicalContent := uniqueVersionTestContent(t, "cache-v1")
+	currentContent := uniqueVersionTestContent(t, "cache-v2")
 
-	if err := fs.WriteFile(ctx, "/versions/cache.txt", bytes.NewReader([]byte("v1"))); err != nil {
+	if err := fs.WriteFile(ctx, "/versions/cache.txt", bytes.NewReader(historicalContent)); err != nil {
 		t.Fatalf("WriteFile(v1) error: %v", err)
 	}
-	if err := fs.WriteFile(ctx, "/versions/cache.txt", bytes.NewReader([]byte("v2"))); err != nil {
+	if err := fs.WriteFile(ctx, "/versions/cache.txt", bytes.NewReader(currentContent)); err != nil {
 		t.Fatalf("WriteFile(v2) error: %v", err)
 	}
 
@@ -7181,11 +7199,13 @@ func TestServer_DownloadVersion_UsesPrivateRevalidationCacheHeaders(t *testing.T
 func TestServer_DownloadVersion_SupportsRangeRequests(t *testing.T) {
 	server, fs, _ := setupTestServer(t)
 	ctx := context.Background()
+	historicalContent := uniqueSixByteVersionTestContent(t, "range-v1")
+	currentContent := uniqueSixByteVersionTestContent(t, "range-v2")
 
-	if err := fs.WriteFile(ctx, "/versions/range.txt", bytes.NewReader([]byte("abcdef"))); err != nil {
+	if err := fs.WriteFile(ctx, "/versions/range.txt", bytes.NewReader(historicalContent)); err != nil {
 		t.Fatalf("WriteFile(v1) error: %v", err)
 	}
-	if err := fs.WriteFile(ctx, "/versions/range.txt", bytes.NewReader([]byte("ghijkl"))); err != nil {
+	if err := fs.WriteFile(ctx, "/versions/range.txt", bytes.NewReader(currentContent)); err != nil {
 		t.Fatalf("WriteFile(v2) error: %v", err)
 	}
 
@@ -7220,22 +7240,24 @@ func TestServer_DownloadVersion_SupportsRangeRequests(t *testing.T) {
 	if contentRange := w.Header().Get("Content-Range"); contentRange != "bytes 1-3/6" {
 		t.Fatalf("version range Content-Range = %q, want %q", contentRange, "bytes 1-3/6")
 	}
-	if body := w.Body.String(); body != "bcd" {
-		t.Fatalf("version range body = %q, want %q", body, "bcd")
+	if body := w.Body.String(); body != string(historicalContent[1:4]) {
+		t.Fatalf("version range body = %q, want %q", body, string(historicalContent[1:4]))
 	}
 }
 
 func TestServer_DownloadVersion_LogsDownloadActivityWithHash(t *testing.T) {
 	server, fs, _ := setupTestServer(t)
 	ctx := context.Background()
+	historicalContent := uniqueVersionTestContent(t, "activity-v1")
+	currentContent := uniqueVersionTestContent(t, "activity-v2")
 
 	if server.activity == nil {
 		t.Fatal("expected activity store to be initialized")
 	}
-	if err := fs.WriteFile(ctx, "/versions/activity.txt", bytes.NewReader([]byte("v1"))); err != nil {
+	if err := fs.WriteFile(ctx, "/versions/activity.txt", bytes.NewReader(historicalContent)); err != nil {
 		t.Fatalf("WriteFile(v1) error: %v", err)
 	}
-	if err := fs.WriteFile(ctx, "/versions/activity.txt", bytes.NewReader([]byte("v2"))); err != nil {
+	if err := fs.WriteFile(ctx, "/versions/activity.txt", bytes.NewReader(currentContent)); err != nil {
 		t.Fatalf("WriteFile(v2) error: %v", err)
 	}
 
@@ -7282,14 +7304,16 @@ func TestServer_DownloadVersion_LogsDownloadActivityWithHash(t *testing.T) {
 func TestServer_DownloadVersion_ErrorProbeDoesNotLogDownloadActivity(t *testing.T) {
 	server, fs, _ := setupTestServer(t)
 	ctx := context.Background()
+	historicalContent := uniqueVersionTestContent(t, "probe-v1")
+	currentContent := uniqueVersionTestContent(t, "probe-v2")
 
 	if server.activity == nil {
 		t.Fatal("expected activity store to be initialized")
 	}
-	if err := fs.WriteFile(ctx, "/versions/probe.txt", bytes.NewReader([]byte("v1"))); err != nil {
+	if err := fs.WriteFile(ctx, "/versions/probe.txt", bytes.NewReader(historicalContent)); err != nil {
 		t.Fatalf("WriteFile(v1) error: %v", err)
 	}
-	if err := fs.WriteFile(ctx, "/versions/probe.txt", bytes.NewReader([]byte("v2"))); err != nil {
+	if err := fs.WriteFile(ctx, "/versions/probe.txt", bytes.NewReader(currentContent)); err != nil {
 		t.Fatalf("WriteFile(v2) error: %v", err)
 	}
 
@@ -7329,14 +7353,16 @@ func TestServer_DownloadVersion_ErrorProbeDoesNotLogDownloadActivity(t *testing.
 func TestServer_DownloadVersion_ZeroLengthRangeDoesNotLogDownloadActivity(t *testing.T) {
 	server, fs, _ := setupTestServer(t)
 	ctx := context.Background()
+	historicalContent := uniqueVersionTestContent(t, "empty-range-v1")
+	currentContent := uniqueVersionTestContent(t, "empty-range-v2")
 
 	if server.activity == nil {
 		t.Fatal("expected activity store to be initialized")
 	}
-	if err := fs.WriteFile(ctx, "/versions/empty-range.txt", bytes.NewReader([]byte("v1"))); err != nil {
+	if err := fs.WriteFile(ctx, "/versions/empty-range.txt", bytes.NewReader(historicalContent)); err != nil {
 		t.Fatalf("WriteFile(v1) error: %v", err)
 	}
-	if err := fs.WriteFile(ctx, "/versions/empty-range.txt", bytes.NewReader([]byte("v2"))); err != nil {
+	if err := fs.WriteFile(ctx, "/versions/empty-range.txt", bytes.NewReader(currentContent)); err != nil {
 		t.Fatalf("WriteFile(v2) error: %v", err)
 	}
 
@@ -7378,14 +7404,16 @@ func TestServer_DownloadVersion_ZeroLengthRangeDoesNotLogDownloadActivity(t *tes
 func TestServer_DownloadVersion_ProbeHeaderWithNonProbeRangeLogsDownloadActivity(t *testing.T) {
 	server, fs, _ := setupTestServer(t)
 	ctx := context.Background()
+	historicalContent := uniqueVersionTestContent(t, "probe-range-v1")
+	currentContent := uniqueVersionTestContent(t, "probe-range-v2")
 
 	if server.activity == nil {
 		t.Fatal("expected activity store to be initialized")
 	}
-	if err := fs.WriteFile(ctx, "/versions/probe-range.txt", bytes.NewReader([]byte("v1"))); err != nil {
+	if err := fs.WriteFile(ctx, "/versions/probe-range.txt", bytes.NewReader(historicalContent)); err != nil {
 		t.Fatalf("WriteFile(v1) error: %v", err)
 	}
-	if err := fs.WriteFile(ctx, "/versions/probe-range.txt", bytes.NewReader([]byte("v2"))); err != nil {
+	if err := fs.WriteFile(ctx, "/versions/probe-range.txt", bytes.NewReader(currentContent)); err != nil {
 		t.Fatalf("WriteFile(v2) error: %v", err)
 	}
 
@@ -7474,11 +7502,13 @@ func TestServer_DownloadVersion_ReturnsNotFoundWhenHashBelongsToDifferentPath(t 
 func TestServer_DownloadVersion_ReturnsServiceUnavailableWhenVersionStorageUnavailable(t *testing.T) {
 	server, fs, _ := setupTestServer(t)
 	ctx := context.Background()
+	historicalContent := uniqueVersionTestContent(t, "unavailable-v1")
+	currentContent := uniqueVersionTestContent(t, "unavailable-v2")
 
-	if err := fs.WriteFile(ctx, "/versions/unavailable.txt", bytes.NewReader([]byte("v1"))); err != nil {
+	if err := fs.WriteFile(ctx, "/versions/unavailable.txt", bytes.NewReader(historicalContent)); err != nil {
 		t.Fatalf("WriteFile(v1) error: %v", err)
 	}
-	if err := fs.WriteFile(ctx, "/versions/unavailable.txt", bytes.NewReader([]byte("v2"))); err != nil {
+	if err := fs.WriteFile(ctx, "/versions/unavailable.txt", bytes.NewReader(currentContent)); err != nil {
 		t.Fatalf("WriteFile(v2) error: %v", err)
 	}
 
@@ -7571,11 +7601,13 @@ func TestServer_RestoreVersion_ReturnsNotFoundWhenHashBelongsToDifferentPath(t *
 func TestServer_RestoreVersion_ReturnsServiceUnavailableWhenVersionStorageUnavailable(t *testing.T) {
 	server, fs, _ := setupTestServer(t)
 	ctx := context.Background()
+	historicalContent := uniqueVersionTestContent(t, "restore-unavailable-v1")
+	currentContent := uniqueVersionTestContent(t, "restore-unavailable-v2")
 
-	if err := fs.WriteFile(ctx, "/versions/restore-unavailable.txt", bytes.NewReader([]byte("v1"))); err != nil {
+	if err := fs.WriteFile(ctx, "/versions/restore-unavailable.txt", bytes.NewReader(historicalContent)); err != nil {
 		t.Fatalf("WriteFile(v1) error: %v", err)
 	}
-	if err := fs.WriteFile(ctx, "/versions/restore-unavailable.txt", bytes.NewReader([]byte("v2"))); err != nil {
+	if err := fs.WriteFile(ctx, "/versions/restore-unavailable.txt", bytes.NewReader(currentContent)); err != nil {
 		t.Fatalf("WriteFile(v2) error: %v", err)
 	}
 
@@ -7837,11 +7869,13 @@ func TestServer_DeleteFromTrash_InternalErrorReturnsInternalServerError(t *testi
 func TestServer_DeleteFromTrash_ReturnsWarningWhenCleanupFailsAfterVisibleDelete(t *testing.T) {
 	server, fs, _ := setupTestServer(t)
 	ctx := context.Background()
+	historicalContent := uniqueVersionTestContent(t, "trash-delete-v1")
+	currentContent := uniqueVersionTestContent(t, "trash-delete-v2")
 
-	if err := fs.WriteFile(ctx, "/trash-delete-warning.txt", bytes.NewReader([]byte("v1"))); err != nil {
+	if err := fs.WriteFile(ctx, "/trash-delete-warning.txt", bytes.NewReader(historicalContent)); err != nil {
 		t.Fatalf("WriteFile(v1) error: %v", err)
 	}
-	if err := fs.WriteFile(ctx, "/trash-delete-warning.txt", bytes.NewReader([]byte("v2"))); err != nil {
+	if err := fs.WriteFile(ctx, "/trash-delete-warning.txt", bytes.NewReader(currentContent)); err != nil {
 		t.Fatalf("WriteFile(v2) error: %v", err)
 	}
 	if err := fs.Delete(ctx, "/trash-delete-warning.txt"); err != nil {
@@ -11329,11 +11363,13 @@ func TestServer_RestoreVersionRejectsAmbiguousPathWithoutMutation(t *testing.T) 
 func TestServer_RestoreVersion_RejectsWorkspaceRootPath(t *testing.T) {
 	server, fs, _ := setupTestServer(t)
 	ctx := context.Background()
+	historicalContent := uniqueVersionTestContent(t, "restore-root-v1")
+	currentContent := uniqueVersionTestContent(t, "restore-root-v2")
 
-	if err := fs.WriteFile(ctx, "/restore-root-version.txt", bytes.NewReader([]byte("v1"))); err != nil {
+	if err := fs.WriteFile(ctx, "/restore-root-version.txt", bytes.NewReader(historicalContent)); err != nil {
 		t.Fatalf("WriteFile(v1) error: %v", err)
 	}
-	if err := fs.WriteFile(ctx, "/restore-root-version.txt", bytes.NewReader([]byte("v2"))); err != nil {
+	if err := fs.WriteFile(ctx, "/restore-root-version.txt", bytes.NewReader(currentContent)); err != nil {
 		t.Fatalf("WriteFile(v2) error: %v", err)
 	}
 	versions, err := fs.ListVersions(ctx, "/restore-root-version.txt")
@@ -11388,11 +11424,13 @@ func TestServer_RestoreVersion_DirectoryPathReturnsBadRequest(t *testing.T) {
 func TestServer_RestoreVersion_ReturnsConflictWhenParentIsFile(t *testing.T) {
 	server, fs, _ := setupTestServer(t)
 	ctx := context.Background()
+	historicalContent := uniqueVersionTestContent(t, "restore-parent-v1")
+	currentContent := uniqueVersionTestContent(t, "restore-parent-v2")
 
-	if err := fs.WriteFile(ctx, "/restore-version-source.txt", bytes.NewReader([]byte("v1"))); err != nil {
+	if err := fs.WriteFile(ctx, "/restore-version-source.txt", bytes.NewReader(historicalContent)); err != nil {
 		t.Fatalf("WriteFile(v1) error: %v", err)
 	}
-	if err := fs.WriteFile(ctx, "/restore-version-source.txt", bytes.NewReader([]byte("v2"))); err != nil {
+	if err := fs.WriteFile(ctx, "/restore-version-source.txt", bytes.NewReader(currentContent)); err != nil {
 		t.Fatalf("WriteFile(v2) error: %v", err)
 	}
 	if err := fs.WriteFile(ctx, "/restore-version-parent-file", bytes.NewReader([]byte("content"))); err != nil {
@@ -15008,11 +15046,13 @@ func TestServer_Trash_EmptyPartialSuccessReturnsDeletedCount(t *testing.T) {
 func TestServer_Trash_EmptyReturnsWarningWhenCleanupFailsAfterVisibleDelete(t *testing.T) {
 	server, fs, _ := setupTestServer(t)
 	ctx := context.Background()
+	historicalContent := uniqueVersionTestContent(t, "trash-empty-v1")
+	currentContent := uniqueVersionTestContent(t, "trash-empty-v2")
 
-	if err := fs.WriteFile(ctx, "/trash-empty-warning-versioned.txt", bytes.NewReader([]byte("v1"))); err != nil {
+	if err := fs.WriteFile(ctx, "/trash-empty-warning-versioned.txt", bytes.NewReader(historicalContent)); err != nil {
 		t.Fatalf("WriteFile(versioned v1) error: %v", err)
 	}
-	if err := fs.WriteFile(ctx, "/trash-empty-warning-versioned.txt", bytes.NewReader([]byte("v2"))); err != nil {
+	if err := fs.WriteFile(ctx, "/trash-empty-warning-versioned.txt", bytes.NewReader(currentContent)); err != nil {
 		t.Fatalf("WriteFile(versioned v2) error: %v", err)
 	}
 	if err := fs.WriteFile(ctx, "/trash-empty-warning-plain.txt", bytes.NewReader([]byte("plain"))); err != nil {
@@ -21498,13 +21538,13 @@ func TestServer_UpdateSettings_UpdatesRetentionConfigForRunningStorage(t *testin
 	}
 
 	ctx := context.Background()
-	if err := fs.WriteFile(ctx, "/retention-live.md", bytes.NewReader([]byte("v1"))); err != nil {
+	if err := fs.WriteFile(ctx, "/retention-live.md", bytes.NewReader(uniqueVersionTestContent(t, "retention-live-v1"))); err != nil {
 		t.Fatalf("WriteFile(v1) error: %v", err)
 	}
-	if err := fs.WriteFile(ctx, "/retention-live.md", bytes.NewReader([]byte("v2"))); err != nil {
+	if err := fs.WriteFile(ctx, "/retention-live.md", bytes.NewReader(uniqueVersionTestContent(t, "retention-live-v2"))); err != nil {
 		t.Fatalf("WriteFile(v2) error: %v", err)
 	}
-	if err := fs.WriteFile(ctx, "/retention-live.md", bytes.NewReader([]byte("v3"))); err != nil {
+	if err := fs.WriteFile(ctx, "/retention-live.md", bytes.NewReader(uniqueVersionTestContent(t, "retention-live-v3"))); err != nil {
 		t.Fatalf("WriteFile(v3) error: %v", err)
 	}
 
@@ -22707,6 +22747,61 @@ func TestServer_ActivityStats_RejectsInvalidActionFilter(t *testing.T) {
 	}
 }
 
+func TestServer_ActivityStats_RejectsInvalidPathFilter(t *testing.T) {
+	server, _, _, username, _ := setupAuthServer(t)
+
+	for _, invalidPath := range []string{"../secret", "/tester/./photos", "/tester/report\n.txt"} {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/activity/stats?path="+url.QueryEscape(invalidPath), nil)
+		req.Header.Set("Authorization", "Bearer "+issueAccessTokenWithoutActivity(t, server, username))
+		w := httptest.NewRecorder()
+		server.Router().ServeHTTP(w, req)
+
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("activity stats with invalid path %q status = %d, want %d: %s", invalidPath, w.Code, http.StatusBadRequest, w.Body.String())
+		}
+		if !strings.Contains(w.Body.String(), "path parameter is invalid") {
+			t.Fatalf("expected invalid path filter message for %q, got %s", invalidPath, w.Body.String())
+		}
+	}
+}
+
+func TestServer_ActivityStats_RejectsInvalidTimeRange(t *testing.T) {
+	server, _, _, username, _ := setupAuthServer(t)
+
+	tests := []struct {
+		name    string
+		target  string
+		message string
+	}{
+		{
+			name:    "invalid since",
+			target:  "/api/v1/activity/stats?since=not-a-time",
+			message: "since parameter must be an RFC3339 timestamp",
+		},
+		{
+			name:    "since after until",
+			target:  "/api/v1/activity/stats?since=2026-05-02T00%3A00%3A00Z&until=2026-05-01T00%3A00%3A00Z",
+			message: "since parameter must be before or equal to until parameter",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, tc.target, nil)
+			req.Header.Set("Authorization", "Bearer "+issueAccessTokenWithoutActivity(t, server, username))
+			w := httptest.NewRecorder()
+			server.Router().ServeHTTP(w, req)
+
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("activity stats with %s status = %d, want %d: %s", tc.name, w.Code, http.StatusBadRequest, w.Body.String())
+			}
+			if !strings.Contains(w.Body.String(), tc.message) {
+				t.Fatalf("expected %q message, got %s", tc.message, w.Body.String())
+			}
+		})
+	}
+}
+
 func TestServer_ActivityStats_RejectsAmbiguousQueryParameters(t *testing.T) {
 	server, _, _, username, _ := setupAuthServer(t)
 
@@ -22716,9 +22811,19 @@ func TestServer_ActivityStats_RejectsAmbiguousQueryParameters(t *testing.T) {
 		message string
 	}{
 		{
+			name:    "duplicate action",
+			target:  "/api/v1/activity/stats?action=upload&action=delete",
+			message: "action parameter must appear at most once",
+		},
+		{
 			name:    "duplicate action_group",
 			target:  "/api/v1/activity/stats?action_group=share&action_group=risk",
 			message: "action_group parameter must appear at most once",
+		},
+		{
+			name:    "duplicate path",
+			target:  "/api/v1/activity/stats?path=%2Ftester&path=%2Fother",
+			message: "path parameter must appear at most once",
 		},
 		{
 			name:    "duplicate user",
