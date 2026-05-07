@@ -5279,6 +5279,8 @@ export function SettingsPage() {
     defaultMaxAccess: settings.shareDefaultMaxAccess,
     rules: settings.sharePolicyRules,
   }
+  const webdavUserAuthAvailable = settingsData?.data.auth.enabled !== false
+  const webdavUserAuthUnavailable = settings.webdavEnabled && !webdavUserAuthAvailable
   const webdavNoAuthSelected = settings.webdavEnabled && settings.webdavAuthType === 'none'
   const serverBeyondLoopback = listensBeyondLoopback(settings.serverHost)
   const normalizedWebDAVPrefixDraft = normalizeWebDAVPrefix(settings.webdavPrefix)
@@ -7715,29 +7717,51 @@ export function SettingsPage() {
 
               <SettingsSection
                 title="WebDAV 认证"
-                description="配置访问凭据；保存后会立即作用到运行中的 WebDAV 服务"
+                description="日常或生产挂载优先使用 MnemoNAS 用户账号；Basic Auth 仅用于旧客户端或专用服务凭据"
                 icon={Shield}
               >
                 <div className="space-y-4">
                   <SettingRow
                     label="认证方式"
-                    description="选择 WebDAV 访问所需的认证方式"
+                    description="保存后会立即作用到运行中的 WebDAV 服务"
                   >
                     <select
                       value={settings.webdavAuthType}
-                      onChange={(event) => updateDirtySettings((current) => ({
-                        ...current,
-                        webdavAuthType: event.target.value as WebDAVAuthType,
-                      }))}
+                      onChange={(event) => {
+                        const nextWebDAVAuthType = event.target.value as WebDAVAuthType
+                        updateDirtySettings((current) => ({
+                          ...current,
+                          webdavAuthType: nextWebDAVAuthType === 'users' && !webdavUserAuthAvailable
+                            ? 'basic'
+                            : nextWebDAVAuthType,
+                        }))
+                      }}
                       disabled={!settings.webdavEnabled}
                       className="input-shell h-9 rounded-lg px-3 text-sm bg-content1 border border-divider min-w-[160px]"
                       aria-label="WebDAV 认证方式"
                     >
-                      <option value="users">MnemoNAS 用户账号</option>
+                      <option value="users" disabled={!webdavUserAuthAvailable}>MnemoNAS 用户账号</option>
                       <option value="basic">Basic Auth</option>
                       <option value="none">无认证</option>
                     </select>
                   </SettingRow>
+                  {webdavUserAuthUnavailable && (
+                    <>
+                      <Divider className="bg-divider" />
+                      <div
+                        aria-label="WebDAV 用户账号认证不可用说明"
+                        className="flex items-start gap-3 rounded-lg border border-warning/30 bg-warning/5 px-4 py-3 text-sm"
+                      >
+                        <AlertCircle size={18} className="mt-0.5 shrink-0 text-warning" />
+                        <div>
+                          <div className="font-medium text-foreground">Web 登录认证未启用</div>
+                          <div className="text-default-600">
+                            WebDAV 用户账号认证需要先启用 Web 登录认证；当前可使用 Basic Auth，或在配置中启用认证后再改用用户账号认证。
+                          </div>
+                        </div>
+                      </div>
+                    </>
+                  )}
                   {webdavNoAuthSelected && (
                     <>
                       <Divider className="bg-divider" />
@@ -7762,57 +7786,80 @@ export function SettingsPage() {
                           </div>
                           <div className="text-default-600">
                             {serverBeyondLoopback
-                              ? '当前监听地址不是 loopback，保存后任何能访问该端口的人都可以读写 WebDAV。建议改用 Basic Auth，或先把监听地址/端口限制到可信网络。'
+                              ? webdavUserAuthAvailable
+                                ? '当前监听地址不是 loopback，保存后任何能访问该端口的人都可以读写 WebDAV。建议改用 MnemoNAS 用户账号认证或 Basic Auth，或先把监听地址/端口限制到可信网络。'
+                                : '当前监听地址不是 loopback，保存后任何能访问该端口的人都可以读写 WebDAV。建议改用 Basic Auth，或先启用 Web 登录认证后再改用用户账号认证。'
                               : '当前监听地址限制在本机；只有在反向代理、隧道或防火墙已提供外层认证时才建议保持无认证。'}
                           </div>
                         </div>
                       </div>
                     </>
                   )}
-                  <Divider className="bg-divider" />
-                  <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-                    <div>
-                      <label className="text-sm font-medium text-default-600 mb-1.5 block">用户名</label>
-                      <Input
-                        aria-label="WebDAV 用户名"
-                        placeholder="admin"
-                        value={settings.webdavUsername}
-                        onValueChange={(v) => updateDirtySettings(s => ({ ...s, webdavUsername: v }))}
-                        isDisabled={!settings.webdavEnabled || settings.webdavAuthType !== 'basic'}
-                        startContent={<User size={16} className="text-default-500" />}
-                        classNames={{
-                          inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary",
-                        }}
-                      />
-                    </div>
-                    <div>
-                      <label className="text-sm font-medium text-default-600 mb-1.5 block">密码</label>
-                      <Input
-                        type="password"
-                        aria-label="WebDAV 密码"
-                        placeholder="••••••••"
-                        value={settings.webdavPassword}
-                        onValueChange={(v) => updateDirtySettings(s => ({ ...s, webdavPassword: v, webdavUseGeneratedPassword: false }))}
-                        isDisabled={!settings.webdavEnabled || settings.webdavAuthType !== 'basic' || settings.webdavUseGeneratedPassword}
-                        startContent={<Lock size={16} className="text-default-500" />}
-                        description={settings.webdavUseGeneratedPassword ? '保存后使用 secrets.json 中的自动生成密码' : '留空保留当前密码；勾选下方选项可切回自动生成密码'}
-                        classNames={{
-                          inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary",
-                        }}
-                      />
-                    </div>
-                  </div>
-                  <Checkbox
-                    isSelected={settings.webdavUseGeneratedPassword}
-                    onValueChange={(value) => updateDirtySettings(s => ({
-                      ...s,
-                      webdavUseGeneratedPassword: value,
-                      webdavPassword: value ? '' : s.webdavPassword,
-                    }))}
-                    isDisabled={!settings.webdavEnabled || settings.webdavAuthType !== 'basic'}
-                  >
-                    保存时使用自动生成密码
-                  </Checkbox>
+                  {settings.webdavAuthType === 'users' && webdavUserAuthAvailable && (
+                    <>
+                      <Divider className="bg-divider" />
+                      <div
+                        aria-label="WebDAV 用户账号认证说明"
+                        className="flex items-start gap-3 rounded-lg border border-success/20 bg-success/5 px-4 py-3 text-sm"
+                      >
+                        <CheckCircle2 size={18} className="mt-0.5 shrink-0 text-success" />
+                        <div>
+                          <div className="font-medium text-foreground">使用 MnemoNAS 用户账号认证</div>
+                          <div className="text-default-600">
+                            WebDAV 登录会复用已启用用户账号，并继续受用户状态和目录权限限制。
+                          </div>
+                        </div>
+                      </div>
+                    </>
+                  )}
+                  {settings.webdavAuthType === 'basic' && (
+                    <>
+                      <Divider className="bg-divider" />
+                      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                        <div>
+                          <label className="text-sm font-medium text-default-600 mb-1.5 block">Basic Auth 用户名</label>
+                          <Input
+                            aria-label="WebDAV Basic Auth 用户名"
+                            placeholder="admin"
+                            value={settings.webdavUsername}
+                            onValueChange={(v) => updateDirtySettings(s => ({ ...s, webdavUsername: v }))}
+                            isDisabled={!settings.webdavEnabled}
+                            startContent={<User size={16} className="text-default-500" />}
+                            classNames={{
+                              inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary",
+                            }}
+                          />
+                        </div>
+                        <div>
+                          <label className="text-sm font-medium text-default-600 mb-1.5 block">Basic Auth 密码</label>
+                          <Input
+                            type="password"
+                            aria-label="WebDAV Basic Auth 密码"
+                            placeholder="••••••••"
+                            value={settings.webdavPassword}
+                            onValueChange={(v) => updateDirtySettings(s => ({ ...s, webdavPassword: v, webdavUseGeneratedPassword: false }))}
+                            isDisabled={!settings.webdavEnabled || settings.webdavUseGeneratedPassword}
+                            startContent={<Lock size={16} className="text-default-500" />}
+                            description={settings.webdavUseGeneratedPassword ? '保存后使用 secrets.json 中的自动生成密码' : '留空保留当前密码；勾选下方选项可切回自动生成密码'}
+                            classNames={{
+                              inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary",
+                            }}
+                          />
+                        </div>
+                      </div>
+                      <Checkbox
+                        isSelected={settings.webdavUseGeneratedPassword}
+                        onValueChange={(value) => updateDirtySettings(s => ({
+                          ...s,
+                          webdavUseGeneratedPassword: value,
+                          webdavPassword: value ? '' : s.webdavPassword,
+                        }))}
+                        isDisabled={!settings.webdavEnabled}
+                      >
+                        保存时使用自动生成密码
+                      </Checkbox>
+                    </>
+                  )}
                 </div>
               </SettingsSection>
             </div>
