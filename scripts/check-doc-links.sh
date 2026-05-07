@@ -428,6 +428,132 @@ function checkHardeningProgressReleaseReadinessContract() {
   }
 }
 
+function checkReleaseNotesValidationEvidenceContract() {
+  const contracts = [
+    {
+      summaryFile: 'docs/hardening-review-summary.md',
+      releaseFile: 'docs/release-notes.md',
+      unitLabel: 'frontend unit test',
+      unitSummaryPattern: /前端单测\s+(\d+)\s+个用例/,
+      unitReleasePattern: /前端单测：`(\d+) passed`/,
+      e2eLabel: 'Playwright E2E',
+      e2eSummaryPattern: /Playwright\s+(\d+)\s+个 E2E 用例/,
+      e2eReleasePattern: /Playwright E2E：`(\d+) passed`/,
+      dockerImageLabel: 'Docker image',
+      dockerImageSummaryPattern: /Docker image `(sha256:[0-9a-f]{64})`/,
+      dockerImageReleasePattern: /Docker image `(sha256:[0-9a-f]{64})`/,
+      dockerSmokePortLabel: 'Docker smoke port',
+      dockerSmokePortSummaryPattern: /Docker smoke 使用 Docker 自动分配的 loopback 端口 `(http:\/\/127\.0\.0\.1:\d+)`/,
+      dockerSmokePortReleasePattern: /Docker smoke 使用 Docker 自动分配的 loopback 端口 `(http:\/\/127\.0\.0\.1:\d+)`/,
+    },
+    {
+      summaryFile: 'docs/hardening-review-summary.en.md',
+      releaseFile: 'docs/release-notes.en.md',
+      unitLabel: 'frontend unit test',
+      unitSummaryPattern: /(\d+)\s+frontend unit tests/,
+      unitReleasePattern: /Frontend unit tests: `(\d+) passed`/,
+      e2eLabel: 'Playwright E2E',
+      e2eSummaryPattern: /(\d+)\s+Playwright E2E cases/,
+      e2eReleasePattern: /Playwright E2E: `(\d+) passed`/,
+      dockerImageLabel: 'Docker image',
+      dockerImageSummaryPattern: /Docker image `(sha256:[0-9a-f]{64})`/,
+      dockerImageReleasePattern: /Docker image `(sha256:[0-9a-f]{64})`/,
+      dockerSmokePortLabel: 'Docker smoke port',
+      dockerSmokePortSummaryPattern: /Docker smoke using Docker-assigned loopback port `(http:\/\/127\.0\.0\.1:\d+)`/,
+      dockerSmokePortReleasePattern: /Docker smoke used the Docker-assigned loopback port `(http:\/\/127\.0\.0\.1:\d+)`/,
+    },
+  ]
+
+  for (const contract of contracts) {
+    const summaryText = readOptionalFile(contract.summaryFile)
+    const releaseText = readOptionalFile(contract.releaseFile)
+    if (summaryText === null || releaseText === null) {
+      continue
+    }
+
+    checkReleaseNotesEvidenceCount(
+      contract.summaryFile,
+      summaryText,
+      contract.releaseFile,
+      releaseText,
+      contract.unitLabel,
+      contract.unitSummaryPattern,
+      contract.unitReleasePattern,
+    )
+    checkReleaseNotesEvidenceCount(
+      contract.summaryFile,
+      summaryText,
+      contract.releaseFile,
+      releaseText,
+      contract.e2eLabel,
+      contract.e2eSummaryPattern,
+      contract.e2eReleasePattern,
+    )
+    checkReleaseNotesEvidenceValue(
+      contract.summaryFile,
+      summaryText,
+      contract.releaseFile,
+      releaseText,
+      contract.dockerImageLabel,
+      contract.dockerImageSummaryPattern,
+      contract.dockerImageReleasePattern,
+    )
+    checkReleaseNotesEvidenceValue(
+      contract.summaryFile,
+      summaryText,
+      contract.releaseFile,
+      releaseText,
+      contract.dockerSmokePortLabel,
+      contract.dockerSmokePortSummaryPattern,
+      contract.dockerSmokePortReleasePattern,
+    )
+  }
+}
+
+function checkReleaseNotesEvidenceCount(summaryFile, summaryText, releaseFile, releaseText, label, summaryPattern, releasePattern) {
+  const summaryCount = extractContractCount(summaryText, summaryPattern)
+  const releaseCount = extractContractCount(releaseText, releasePattern)
+
+  if (summaryCount === null) {
+    errors.push(`${summaryFile}: missing latest validation ${label} count`)
+    return
+  }
+  if (releaseCount === null) {
+    errors.push(`${releaseFile}: missing pre-release validation ${label} count`)
+    return
+  }
+  if (summaryCount !== releaseCount) {
+    errors.push(`${releaseFile}: ${label} count ${releaseCount} does not match ${summaryFile}: ${summaryCount}`)
+  }
+}
+
+function checkReleaseNotesEvidenceValue(summaryFile, summaryText, releaseFile, releaseText, label, summaryPattern, releasePattern) {
+  const summaryValue = extractContractValue(summaryText, summaryPattern)
+  const releaseValue = extractContractValue(releaseText, releasePattern)
+
+  if (summaryValue === null) {
+    errors.push(`${summaryFile}: missing latest validation ${label}`)
+    return
+  }
+  if (releaseValue === null) {
+    errors.push(`${releaseFile}: missing pre-release validation ${label}`)
+    return
+  }
+  if (summaryValue !== releaseValue) {
+    errors.push(`${releaseFile}: ${label} ${releaseValue} does not match ${summaryFile}: ${summaryValue}`)
+  }
+}
+
+function extractContractCount(text, pattern) {
+  const match = pattern.exec(text)
+  return match ? Number.parseInt(match[1], 10) : null
+}
+
+function extractContractValue(text, pattern) {
+  const match = pattern.exec(text)
+  return match ? match[1] : null
+}
+
 function hasMarkdownLinkTo(sourceFile, targetFile) {
   const markdown = readOptionalFile(sourceFile)
   if (markdown === null) {
@@ -637,6 +763,7 @@ checkSecurityChecklistContract()
 checkAPIReferenceWebDAVAuthContract()
 checkBackupRestoreDrillContract()
 checkHardeningProgressReleaseReadinessContract()
+checkReleaseNotesValidationEvidenceContract()
 
 for (const file of files) {
   const text = fs.readFileSync(path.join(repoRoot, file), 'utf8')

@@ -42,6 +42,7 @@ This release candidate focuses on improving MnemoNAS stability, public-access sa
 - `release-readiness` rejects a base ref that is not an ancestor of the current HEAD, preventing misleading release-readiness summaries from sibling branch ranges.
 - Go test entry points now keep a 20-minute package timeout so heavy race packages are not interrupted by Go's default 10-minute timeout during full branch validation.
 - Documentation checks reject copyable raw `?path=/...` path queries in API examples, requiring restore and favorite-check `path` query examples to use `%2F...` encoding.
+- Documentation checks require the bilingual release-notes pre-release validation list to keep its Playwright E2E counts, frontend-unit-test counts, Docker image, and Docker smoke port aligned with the latest full-validation evidence in the hardening review summary, preventing stale local evidence after validation evidence refreshes.
 - Documentation checks require the security hardening guide's public-deployment checklist to retain the initial-password, WebDAV authentication, doctor, public firewall, anonymous WebDAV, direct-backend, and dataplane exposure review items.
 - Documentation checks require the backup guide to retain restore-drill commands, 30-day drill reminders, failure categories, retained drill artifacts, restore-summary export, and the guidance that backups are not proven until restored, preventing recovery-usability documentation from regressing.
 - Storage and configuration documentation clarify that the FastCDC API is a Rust dataplane capability, while current version history still uses whole-object CAS snapshots and does not reference-count CDC chunks; documentation checks reject overclaims that imply block-level version deduplication is enabled.
@@ -62,7 +63,7 @@ Archives should include a top-level directory, `nasd`, `dataplane`, Web UI stati
 
 The current hardening branch has the following validation evidence. Final publication should use the latest tag, Release workflow result, and required environment validation as the source of truth:
 
-Latest local full-validation snapshot: validation target `9792bb405389`; `GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master` passed, covering diff whitespace, secret-leak scanning, workflow/YAML/script gates, `make check`, toolchain consistency, Go/Rust/frontend dependency security scans, example config validation, public-access templates, protobuf regeneration stability, Rust fmt/test/clippy, proto-gen fmt/test/clippy, frontend lint/typecheck/unit/build, 377 Playwright E2E cases, Docker build, Docker image `sha256:4ab7ca98ab916a689641664cf4bcd3e4830bc557ec538427f0232645d764ca4f`, and Docker smoke. The Docker smoke used the Docker-assigned loopback port `http://127.0.0.1:32777`.
+Latest local full-validation snapshot: validation target `6504294e53f2`; `GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master` passed, covering diff whitespace, secret-leak scanning, workflow/YAML/script gates, `make check`, toolchain consistency, Go/Rust/frontend dependency security scans, example config validation, public-access templates, protobuf regeneration stability, Rust fmt/test/clippy, proto-gen fmt/test/clippy, frontend lint/typecheck/unit/build, 377 Playwright E2E cases, Docker build, Docker image `sha256:907afe788fdc2eaf6311f1e2ba8f53651adc1a0dbca07eee90e034498c84b8e2`, and Docker smoke. The Docker smoke used the Docker-assigned loopback port `http://127.0.0.1:32779`.
 
 - `GOTOOLCHAIN=local ./scripts/verify-changed.sh`
 - `GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master`
@@ -87,7 +88,7 @@ Latest local full-validation snapshot: validation target `9792bb405389`; `GOTOOL
 - WebDAV curl smoke safety test: `scripts/test-webdav-client-smoke.sh`
 - Release workflow incremental validation: `make workflows-check`, `make scripts-check`, `./scripts/check-secret-leaks.sh`, `make toolchains-check`, `git diff --check`
 - Playwright E2E: `377 passed`
-- Frontend unit tests: `3113 passed`
+- Frontend unit tests: `3115 passed`
 - Docker build and `scripts/docker-smoke.sh`
 
 If code, scripts, configuration, documentation, or workflow files change again before release, rerun the matching validation.
