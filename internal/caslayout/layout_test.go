@@ -2,7 +2,9 @@
 package caslayout
 
 import (
+	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -162,6 +164,181 @@ func TestEnsureCASDir_SyncsCreatedDirectoriesDeepestParentFirst(t *testing.T) {
 	}
 	if strings.Join(synced, "|") != strings.Join(want, "|") {
 		t.Fatalf("synced directories = %v, want %v", synced, want)
+	}
+}
+
+type cancelAfterFirstRead struct {
+	cancel context.CancelFunc
+	sent   bool
+}
+
+func (r *cancelAfterFirstRead) Read(p []byte) (int, error) {
+	if r.sent {
+		return 0, io.EOF
+	}
+	r.sent = true
+	n := copy(p, "partial")
+	r.cancel()
+	return n, nil
+}
+
+func TestStore_ContextAndReaderMethods(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := NewStore(tmpDir, nil)
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+
+	hash := "feedfacefeedfacefeedfacefeedface"
+	data := "streamed content"
+	if err := store.PutReaderContext(context.Background(), hash, strings.NewReader(data)); err != nil {
+		t.Fatalf("PutReaderContext() error: %v", err)
+	}
+
+	exists, err := store.Exists(context.Background(), hash)
+	if err != nil {
+		t.Fatalf("Exists() error: %v", err)
+	}
+	if !exists {
+		t.Fatal("Exists() = false, want true")
+	}
+
+	got, err := store.GetContext(context.Background(), hash)
+	if err != nil {
+		t.Fatalf("GetContext() error: %v", err)
+	}
+	if string(got) != data {
+		t.Fatalf("GetContext() = %q, want %q", string(got), data)
+	}
+
+	reader, err := store.ReaderContext(context.Background(), hash)
+	if err != nil {
+		t.Fatalf("ReaderContext() error: %v", err)
+	}
+	defer reader.Close()
+	readerData, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("ReadAll(ReaderContext) error: %v", err)
+	}
+	if string(readerData) != data {
+		t.Fatalf("ReaderContext data = %q, want %q", string(readerData), data)
+	}
+
+	size, err := store.SizeContext(context.Background(), hash)
+	if err != nil {
+		t.Fatalf("SizeContext() error: %v", err)
+	}
+	if size != int64(len(data)) {
+		t.Fatalf("SizeContext() = %d, want %d", size, len(data))
+	}
+
+	var walked []string
+	if err := store.WalkContext(context.Background(), func(gotHash string) error {
+		walked = append(walked, gotHash)
+		return nil
+	}); err != nil {
+		t.Fatalf("WalkContext() error: %v", err)
+	}
+	if len(walked) != 1 || walked[0] != hash {
+		t.Fatalf("WalkContext() = %v, want [%s]", walked, hash)
+	}
+
+	stats, err := store.StatsContext(context.Background())
+	if err != nil {
+		t.Fatalf("StatsContext() error: %v", err)
+	}
+	if stats.TotalObjects != 1 || stats.TotalSize != int64(len(data)) {
+		t.Fatalf("StatsContext() = %+v, want one object of size %d", stats, len(data))
+	}
+}
+
+func TestStore_ContextCancellationBeforeVisibleOperations(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := NewStore(tmpDir, nil)
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+
+	hash := "canceled000000000000000000000000"
+	existingHash := "existing000000000000000000000000"
+	if err := store.Put(existingHash, []byte("payload")); err != nil {
+		t.Fatalf("Put(existingHash) error: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if err := store.PutContext(ctx, hash, []byte("payload")); !errors.Is(err, context.Canceled) {
+		t.Fatalf("PutContext(canceled) error = %v, want context.Canceled", err)
+	}
+	if store.Has(hash) {
+		t.Fatal("PutContext(canceled) created an object")
+	}
+
+	if _, err := store.GetContext(ctx, existingHash); !errors.Is(err, context.Canceled) {
+		t.Fatalf("GetContext(canceled) error = %v, want context.Canceled", err)
+	}
+	if exists, err := store.Exists(ctx, existingHash); !errors.Is(err, context.Canceled) || exists {
+		t.Fatalf("Exists(canceled) = (%v, %v), want false and context.Canceled", exists, err)
+	}
+	if err := store.DeleteContext(ctx, existingHash); !errors.Is(err, context.Canceled) {
+		t.Fatalf("DeleteContext(canceled) error = %v, want context.Canceled", err)
+	}
+	if !store.Has(existingHash) {
+		t.Fatal("DeleteContext(canceled) removed the object")
+	}
+	if _, err := store.SizeContext(ctx, existingHash); !errors.Is(err, context.Canceled) {
+		t.Fatalf("SizeContext(canceled) error = %v, want context.Canceled", err)
+	}
+	if reader, err := store.ReaderContext(ctx, existingHash); !errors.Is(err, context.Canceled) || reader != nil {
+		t.Fatalf("ReaderContext(canceled) = (%v, %v), want nil and context.Canceled", reader, err)
+	}
+	if err := store.WalkContext(ctx, func(hash string) error {
+		t.Fatalf("WalkContext(canceled) callback unexpectedly received %q", hash)
+		return nil
+	}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("WalkContext(canceled) error = %v, want context.Canceled", err)
+	}
+	if _, err := store.StatsContext(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("StatsContext(canceled) error = %v, want context.Canceled", err)
+	}
+	if count, size, err := store.CleanupStagingContext(ctx); !errors.Is(err, context.Canceled) || count != 0 || size != 0 {
+		t.Fatalf("CleanupStagingContext(canceled) = (%d, %d, %v), want zeroes and context.Canceled", count, size, err)
+	}
+}
+
+func TestStore_PutReaderContextCleansPartialWriteOnCancel(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := NewStore(tmpDir, nil)
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	hash := "cancelmidstream0000000000000000"
+	err = store.PutReaderContext(ctx, hash, &cancelAfterFirstRead{cancel: cancel})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("PutReaderContext(cancel during read) error = %v, want context.Canceled", err)
+	}
+
+	objectPath := store.layout.FullPath(store.root, hash)
+	if _, statErr := os.Stat(objectPath); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("expected no object after canceled stream, stat error = %v", statErr)
+	}
+	var tmpFiles []string
+	if walkErr := filepath.WalkDir(tmpDir, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !entry.IsDir() && strings.Contains(filepath.Base(path), ".cas-") {
+			tmpFiles = append(tmpFiles, path)
+		}
+		return nil
+	}); walkErr != nil {
+		t.Fatalf("WalkDir(tmpDir) error: %v", walkErr)
+	}
+	if len(tmpFiles) != 0 {
+		t.Fatalf("expected no temp files after canceled stream, got %v", tmpFiles)
 	}
 }
 

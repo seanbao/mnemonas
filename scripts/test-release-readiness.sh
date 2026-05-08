@@ -40,6 +40,8 @@ write_checklists() {
 - [ ] 如本次发布包含备份恢复链路，运行恢复演练 smoke 入口：`./scripts/backup-restore-drill-smoke.sh`
 - [ ] 发布前就绪摘要通过：`./scripts/release-readiness.sh`
 - [ ] `./scripts/plan-hardening-commits.sh --fail-on-manual` 确认没有未归类路径
+- [ ] 所选发布 tag 校验通过：`./scripts/check-release-tag.sh <tag>`
+- [ ] 发布脚本回归通过：`./scripts/test-release-tag.sh`、`./scripts/test-release-package.sh`、`./scripts/test-release-artifacts.sh`
 - [ ] 发布后运行 `./scripts/verify-published-release.sh --version <tag> --repository seanbao/mnemonas`，下载并验证 GitHub Release 产物。
 EOF
 
@@ -56,6 +58,8 @@ EOF
 - [ ] If this release includes the backup and restore path, run the restore-drill smoke entry point: `./scripts/backup-restore-drill-smoke.sh`
 - [ ] Run release readiness summary: `./scripts/release-readiness.sh`
 - [ ] Confirm `./scripts/plan-hardening-commits.sh --fail-on-manual` reports no unclassified paths
+- [ ] Validate the selected release tag: `./scripts/check-release-tag.sh <tag>`
+- [ ] Run release script regressions: `./scripts/test-release-tag.sh`, `./scripts/test-release-package.sh`, and `./scripts/test-release-artifacts.sh`
 - [ ] After publication, run `./scripts/verify-published-release.sh --version <tag> --repository seanbao/mnemonas` to download and verify the GitHub Release artifacts.
 EOF
 }
@@ -942,6 +946,24 @@ if ./scripts/release-readiness.sh --allow-dirty --allow-post-validation-changes 
 fi
 assert_file_contains "$output_dir/missing-backup-restore-smoke-checklist.err" "CHANGELOG.en.md is missing required text"
 assert_file_contains "$output_dir/missing-backup-restore-smoke-checklist.err" "./scripts/backup-restore-drill-smoke.sh"
+git checkout -q -- CHANGELOG.en.md
+
+sed -i.bak '/check-release-tag/d' CHANGELOG.en.md
+rm -f CHANGELOG.en.md.bak
+if ./scripts/release-readiness.sh --allow-dirty --allow-post-validation-changes >"$output_dir/missing-release-tag-checklist.out" 2>"$output_dir/missing-release-tag-checklist.err"; then
+	fail "release readiness accepted a missing release tag validation checklist command"
+fi
+assert_file_contains "$output_dir/missing-release-tag-checklist.err" "CHANGELOG.en.md is missing required text"
+assert_file_contains "$output_dir/missing-release-tag-checklist.err" "./scripts/check-release-tag.sh <tag>"
+git checkout -q -- CHANGELOG.en.md
+
+perl -0pi.bak -e 's/, `\.\/scripts\/test-release-package\.sh`//' CHANGELOG.en.md
+rm -f CHANGELOG.en.md.bak
+if ./scripts/release-readiness.sh --allow-dirty --allow-post-validation-changes >"$output_dir/missing-release-package-checklist.out" 2>"$output_dir/missing-release-package-checklist.err"; then
+	fail "release readiness accepted a missing release package checklist command"
+fi
+assert_file_contains "$output_dir/missing-release-package-checklist.err" "CHANGELOG.en.md is missing required text"
+assert_file_contains "$output_dir/missing-release-package-checklist.err" "./scripts/test-release-package.sh"
 git checkout -q -- CHANGELOG.en.md
 
 sed -i.bak '/security-check/d' docs/release-notes.en.md
