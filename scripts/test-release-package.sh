@@ -217,10 +217,14 @@ assert_release_workflow_contains \
 assert_release_workflow_contains \
 	'sha256sum ./*.tar.gz > checksums.txt' \
 	'Verify release artifacts' \
+	'packages: read' \
+	'Login to GitHub Container Registry' \
+	'uses: docker/login-action@v3' \
 	'./scripts/verify-release-artifacts.sh' \
 	'--version "$GITHUB_REF_NAME"' \
 	'--repository "$GITHUB_REPOSITORY"' \
 	'--require-targets' \
+	'--check-image' \
 	'            dist' \
 	'dist/checksums.txt'
 

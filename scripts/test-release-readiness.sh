@@ -337,10 +337,13 @@ jobs:
   release:
     permissions:
       contents: write
+      packages: read
     steps:
+      - uses: docker/login-action@v3
       - run: |
           ./scripts/verify-release-artifacts.sh \
             --require-targets \
+            --check-image \
             dist
       - uses: softprops/action-gh-release@v2
         with:
@@ -799,6 +802,24 @@ if ./scripts/release-readiness.sh --allow-dirty --skip-checklist >"$output_dir/m
 fi
 assert_file_contains "$output_dir/missing-release-artifact-verifier.err" ".github/workflows/release.yml is missing required text"
 assert_file_contains "$output_dir/missing-release-artifact-verifier.err" "./scripts/verify-release-artifacts.sh"
+git checkout -q -- .github/workflows/release.yml
+
+sed -i.bak '/--check-image/d' .github/workflows/release.yml
+rm -f .github/workflows/release.yml.bak
+if ./scripts/release-readiness.sh --allow-dirty --skip-checklist >"$output_dir/missing-release-image-check.out" 2>"$output_dir/missing-release-image-check.err"; then
+	fail "release readiness accepted a Release workflow without pre-publish image verification"
+fi
+assert_file_contains "$output_dir/missing-release-image-check.err" ".github/workflows/release.yml job release is missing required text"
+assert_file_contains "$output_dir/missing-release-image-check.err" "--check-image"
+git checkout -q -- .github/workflows/release.yml
+
+sed -i.bak '/docker\/login-action@v3/d' .github/workflows/release.yml
+rm -f .github/workflows/release.yml.bak
+if ./scripts/release-readiness.sh --allow-dirty --skip-checklist >"$output_dir/missing-release-ghcr-login.out" 2>"$output_dir/missing-release-ghcr-login.err"; then
+	fail "release readiness accepted a Release workflow without release-job GHCR login"
+fi
+assert_file_contains "$output_dir/missing-release-ghcr-login.err" ".github/workflows/release.yml job release is missing required text"
+assert_file_contains "$output_dir/missing-release-ghcr-login.err" "uses: docker/login-action@v3"
 git checkout -q -- .github/workflows/release.yml
 
 sed -i.bak '/workflow_dispatch:/d' .github/workflows/torture.yml

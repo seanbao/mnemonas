@@ -91,6 +91,38 @@ require_community_file() {
 	[[ -f "$path" ]] || fail "missing required community file: $path"
 }
 
+require_workflow_job_contains() {
+	local path="$1"
+	local job="$2"
+	local expected="$3"
+	local job_block
+
+	job_block="$(awk -v job="$job" '
+		$0 == "  " job ":" {
+			in_job = 1
+			found = 1
+			print
+			next
+		}
+		in_job && $0 ~ /^  [A-Za-z0-9_-]+:/ {
+			exit
+		}
+		in_job {
+			print
+		}
+		END {
+			if (!found) {
+				exit 1
+			}
+		}
+	' "$path")" || fail "$path is missing required job: $job"
+
+	grep -Fq -- "$expected" <<<"$job_block" || {
+		printf 'release-readiness: %s job %s is missing required text:\n%s\n' "$path" "$job" "$expected" >&2
+		exit 1
+	}
+}
+
 check_support_routes() {
 	local webdav_report_url="https://github.com/seanbao/mnemonas/issues/new?template=webdav_compatibility.yml"
 
@@ -232,6 +264,9 @@ check_release_workflow() {
 	require_file_contains "$path" "--require-targets"
 	require_file_contains "$path" "uses: softprops/action-gh-release@v2"
 	require_file_contains "$path" "prerelease: \${{ contains(github.ref_name, '-') }}"
+	require_workflow_job_contains "$path" "release" "packages: read"
+	require_workflow_job_contains "$path" "release" "uses: docker/login-action@v3"
+	require_workflow_job_contains "$path" "release" "--check-image"
 }
 
 check_makefile_targets() {
