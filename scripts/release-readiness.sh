@@ -286,6 +286,8 @@ check_makefile_targets() {
 	require_file_contains "$path" "check: workflows-check scripts-check toolchains-check docs-check lint test"
 	require_file_contains "$path" "verify-changed:"
 	require_file_contains "$path" "./scripts/verify-changed.sh"
+	require_file_contains "$path" "release-readiness:"
+	require_file_contains "$path" "./scripts/release-readiness.sh"
 	require_file_contains "$path" "quick-check:"
 }
 
@@ -656,8 +658,8 @@ if [[ "$CHECK_CHECKLIST" -eq 1 ]]; then
 	require_file_contains "CHANGELOG.en.md" "./scripts/backup-restore-drill-smoke.sh"
 	require_file_contains "CHANGELOG.md" "cloud-firewall-checklist"
 	require_file_contains "CHANGELOG.en.md" "cloud-firewall-checklist"
-	require_file_contains "CHANGELOG.md" "./scripts/release-readiness.sh"
-	require_file_contains "CHANGELOG.en.md" "./scripts/release-readiness.sh"
+	require_file_contains "CHANGELOG.md" "make release-readiness"
+	require_file_contains "CHANGELOG.en.md" "make release-readiness"
 	require_file_contains "CHANGELOG.md" "./scripts/plan-hardening-commits.sh --fail-on-manual"
 	require_file_contains "CHANGELOG.en.md" "./scripts/plan-hardening-commits.sh --fail-on-manual"
 	require_file_contains "CHANGELOG.md" "./scripts/check-release-tag.sh <tag>"
@@ -670,6 +672,8 @@ if [[ "$CHECK_CHECKLIST" -eq 1 ]]; then
 	require_file_contains "CHANGELOG.en.md" "./scripts/test-release-artifacts.sh"
 	require_file_contains "CHANGELOG.md" "$artifact_verify_cmd"
 	require_file_contains "CHANGELOG.en.md" "$artifact_verify_cmd"
+	require_file_contains "CHANGELOG.md" "发布清单包含文档检查、依赖安全检查、Docker 构建烟测、所选发布 tag 校验和发布脚本回归命令"
+	require_file_contains "CHANGELOG.en.md" "release checklists to include documentation, dependency-security, Docker build/smoke, selected release tag validation, and release script regression commands"
 	check_release_notes
 	print_kv "checklist" "release commands present in CHANGELOG.md and CHANGELOG.en.md"
 fi

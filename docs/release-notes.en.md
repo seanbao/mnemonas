@@ -64,7 +64,7 @@ Archives should include a top-level directory, `nasd`, `dataplane`, Web UI stati
 
 The current hardening branch has the following validation evidence. Final publication should use the latest tag, Release workflow result, and required environment validation as the source of truth:
 
-Latest local full-validation snapshot: validation target `78f98eccf4cf`; `GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master` passed, covering diff whitespace, secret-leak scanning, workflow/YAML/script gates, `make check`, toolchain consistency, Go/Rust/frontend dependency security scans, example config validation, public-access templates, protobuf regeneration stability, Rust fmt/test/clippy, proto-gen fmt/test/clippy, frontend lint/typecheck/unit/build, 377 Playwright E2E cases, Docker build, Docker image `sha256:dd8efc4794def56899faa2f80f278c44c27aa4082c7bf9adb4957aa8143a586b`, and Docker smoke. The Docker smoke used the Docker-assigned loopback port `http://127.0.0.1:32788`.
+Latest local full-validation snapshot: validation target `d7a73688182a`; `GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master` passed, covering diff whitespace, secret-leak scanning, workflow/YAML/script gates, the release-readiness checklist summary-scope gate, `make check`, toolchain consistency, Go/Rust/frontend dependency security scans, example config validation, public-access templates, protobuf regeneration stability, Rust fmt/test/clippy, proto-gen fmt/test/clippy, frontend lint/typecheck/unit/build, 377 Playwright E2E cases, Docker build, Docker image `sha256:6e50c9671c556e703788987d88c3005aa77ef55efe9b7827f3ba5a36a9a81fe3`, and Docker smoke. The Docker smoke used the Docker-assigned loopback port `http://127.0.0.1:32789`.
 
 - `GOTOOLCHAIN=local ./scripts/verify-changed.sh`
 - `GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master`
@@ -72,6 +72,7 @@ Latest local full-validation snapshot: validation target `78f98eccf4cf`; `GOTOOL
 - `make docs-check`
 - `make security-check NPM_AUDIT=1`
 - `make docker-check`
+- `make release-readiness`
 - `sudo mnemonas-doctor --public-domain <domain>`
 - `./scripts/public-go-live-smoke.sh <domain>`
 - `./scripts/backup-restore-drill-smoke.sh`
@@ -123,6 +124,6 @@ Then complete at least one archive-install smoke test, one Docker release-image 
 - Confirm this draft is updated with the final tag, validation results, and artifact names.
 - Confirm `git status --short --branch` is clean.
 - Confirm `./scripts/plan-hardening-commits.sh --fail-on-manual` reports no paths left to group.
-- Run `./scripts/release-readiness.sh` and confirm commit subjects, temporary `fixup!` / `squash!` commits, hardening validation evidence, release-documentation commands, public-deployment review commands, security policy, Dependabot baseline, CI/Release workflow baseline, Makefile core local gate target baseline, torture workflow baseline, blank-Issue disablement and Issue Form safety guidance, and community health files pass.
+- Run `make release-readiness` and confirm commit subjects, temporary `fixup!` / `squash!` commits, hardening validation evidence, release-documentation commands, public-deployment review commands, security policy, Dependabot baseline, CI/Release workflow baseline, Makefile core local gate target baseline, torture workflow baseline, blank-Issue disablement and Issue Form safety guidance, and community health files pass.
 - After creating and pushing the tag, confirm the Release workflow succeeds.
 - After publication, run the release artifact verifier and record the result.

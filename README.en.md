@@ -259,6 +259,9 @@ make dev
 # Change-aware validation; run this first before committing local changes
 make verify-changed
 
+# Pre-release readiness summary; run before tagging
+make release-readiness
+
 # Fast local checks
 make quick-check
 
