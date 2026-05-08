@@ -1070,6 +1070,11 @@ EOF
 write_security_checklist_contract_valid_docs() {
 	local repo="$1"
 	write_valid_docs "$repo"
+	cat > "$repo/scripts/public-go-live-smoke.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+EOF
+	chmod +x "$repo/scripts/public-go-live-smoke.sh"
 	cat >> "$repo/docs/README.md" <<'EOF'
 | [Security](security.md) | [Security](security.en.md) |
 | [Cloud Firewall](cloud-firewall-checklist.md) | [Cloud Firewall](cloud-firewall-checklist.en.md) |
@@ -1102,8 +1107,17 @@ EOF
 - [ ] 匿名 WebDAV `PROPFIND` 被拒绝。
 - [ ] 没有 Web 后端直连。
 - [ ] 没有 dataplane 端口暴露。
+- [ ] 已从外部网络运行 `./scripts/public-go-live-smoke.sh <domain>`。
 - [ ] 已按 [公网云防火墙复核清单](cloud-firewall-checklist.md) 确认只开放 `80/443`。
 - [ ] 生产环境使用 HTTPS。
+
+运行时检查：
+
+```bash
+curl --connect-timeout 3 --max-time 10 http://<domain>:8080/health
+```
+
+只要 TCP 可连接，即使没有 HTTP 状态码，也表示后端端口仍可从公网访问。
 EOF
 	cat > "$repo/docs/security.en.md" <<'EOF'
 # Security Hardening Guide
@@ -1129,8 +1143,17 @@ English | [简体中文](security.md)
 - [ ] Anonymous access is disabled and anonymous WebDAV `PROPFIND` is rejected.
 - [ ] There is no direct backend exposure.
 - [ ] There is no dataplane exposure.
+- [ ] `./scripts/public-go-live-smoke.sh <domain>` has passed from an external network.
 - [ ] The [Public cloud firewall checklist](cloud-firewall-checklist.en.md) has been applied and public rules expose only `80/443`.
 - [ ] Public deployments use HTTPS.
+
+Runtime checks:
+
+```bash
+curl --connect-timeout 3 --max-time 10 http://<domain>:8080/health
+```
+
+Any successful TCP connection means the backend port is still publicly reachable.
 EOF
 	cat > "$repo/docs/cloud-firewall-checklist.md" <<'EOF'
 # 公网云防火墙复核清单
@@ -1142,13 +1165,20 @@ EOF
 
 English | [简体中文](cloud-firewall-checklist.md)
 EOF
-	git -C "$repo" add docs/README.md docs/README.en.md docs/security.md docs/security.en.md docs/cloud-firewall-checklist.md docs/cloud-firewall-checklist.en.md
+	git -C "$repo" add scripts/public-go-live-smoke.sh docs/README.md docs/README.en.md docs/security.md docs/security.en.md docs/cloud-firewall-checklist.md docs/cloud-firewall-checklist.en.md
 }
 
 write_security_checklist_contract_missing_firewall_doc() {
 	local repo="$1"
 	write_security_checklist_contract_valid_docs "$repo"
 	perl -0pi -e 's{- \[ \] The \[Public cloud firewall checklist\]\(cloud-firewall-checklist\.en\.md\) has been applied and public rules expose only `80/443`\.\n}{}' "$repo/docs/security.en.md"
+	git -C "$repo" add docs/security.en.md
+}
+
+write_security_checklist_contract_missing_public_smoke_doc() {
+	local repo="$1"
+	write_security_checklist_contract_valid_docs "$repo"
+	perl -0pi -e 's{- \[ \] `\.\/scripts\/public-go-live-smoke\.sh <domain>` has passed from an external network\.\n}{}' "$repo/docs/security.en.md"
 	git -C "$repo" add docs/security.en.md
 }
 
@@ -1677,6 +1707,7 @@ run_rejects "raw-api-path-query" "URL-encode API path query values in documentat
 run_rejects "storage-cdc-contract-missing-boundary" "docs/storage-internals.en.md: missing storage CDC boundary text: current version history does not reference-count CDC chunks" write_storage_cdc_contract_missing_boundary_doc
 run_rejects "configuration-cdc-contract-missing-boundary" "docs/configuration.en.md: missing storage CDC boundary text: Current Go version history still uses whole-object CAS snapshots" write_configuration_cdc_contract_missing_boundary_doc
 run_rejects "security-checklist-contract-missing-firewall" "docs/security.en.md: missing public deployment security checklist text: [Public cloud firewall checklist](cloud-firewall-checklist.en.md)" write_security_checklist_contract_missing_firewall_doc
+run_rejects "security-checklist-contract-missing-public-smoke" "docs/security.en.md: missing public deployment security checklist text: ./scripts/public-go-live-smoke.sh <domain>" write_security_checklist_contract_missing_public_smoke_doc
 run_rejects "api-reference-webdav-auth-contract-missing-users" "docs/api-reference.en.md: missing WebDAV auth guidance text: For day-to-day or production mounts, set \`webdav.auth_type = \"users\"\`" write_api_reference_webdav_auth_contract_missing_users_doc
 run_rejects "api-reference-webdav-auth-contract-legacy-first" "docs/api-reference.en.md: avoid leading WebDAV auth guidance with legacy Basic Auth: - By default it uses the legacy global Basic Auth credentials" write_api_reference_webdav_auth_contract_legacy_first_doc
 run_rejects "backup-restore-drill-contract-missing-history" "docs/backup-guide.en.md: missing backup restore drill guidance text: Restore-drill history and explicit restore history both keep the latest 20 entries" write_backup_restore_drill_contract_missing_history_doc
