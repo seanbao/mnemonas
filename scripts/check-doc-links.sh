@@ -151,6 +151,10 @@ const securityChecklistContracts = [
       '匿名 WebDAV `PROPFIND` 被拒绝',
       'Web 后端直连',
       'dataplane 端口暴露',
+      './scripts/public-go-live-smoke.sh <domain>',
+      '外部网络',
+      'curl --connect-timeout 3 --max-time 10 http://<domain>:8080/health',
+      '只要 TCP 可连接，即使没有 HTTP 状态码，也表示后端端口仍可从公网访问',
       '[公网云防火墙复核清单](cloud-firewall-checklist.md)',
       '只开放 `80/443`',
       '生产环境使用 HTTPS',
@@ -177,6 +181,10 @@ const securityChecklistContracts = [
       'anonymous WebDAV `PROPFIND` is rejected',
       'direct backend exposure',
       'dataplane exposure',
+      './scripts/public-go-live-smoke.sh <domain>',
+      'external network',
+      'curl --connect-timeout 3 --max-time 10 http://<domain>:8080/health',
+      'Any successful TCP connection means the backend port is still publicly reachable',
       '[Public cloud firewall checklist](cloud-firewall-checklist.en.md)',
       'expose only `80/443`',
       'Public deployments use HTTPS',
@@ -252,6 +260,38 @@ const hardeningProgressReleaseReadinessContracts = [
       '`./scripts/verify-published-release.sh --version <tag> --repository seanbao/mnemonas`',
       'backup restore-drill smoke entry-point documentation and release-readiness contract',
       'release checklist and bilingual release notes to retain the public-deployment doctor, external-network smoke, backup restore-drill smoke, and cloud-firewall review entry points',
+    ],
+  },
+]
+const dockerDeploymentReleaseVerificationContracts = [
+  {
+    file: 'docs/docker-deployment.md',
+    required: [
+      './scripts/verify-published-release.sh',
+      '--version v1.2.3',
+      '--repository seanbao/mnemonas',
+      '--artifact-dir dist/release-check',
+      'vMAJOR.MINOR.PATCH',
+      '默认会调用 Docker 检查 `ghcr.io/seanbao/mnemonas:1.2.3` 是否存在',
+      'MNEMONAS_RELEASE_IMAGE_CHECK_RETRIES',
+      'MNEMONAS_RELEASE_IMAGE_CHECK_SLEEP_SECONDS',
+      '--skip-image-check',
+      '显式目录必须为空或不存在',
+    ],
+  },
+  {
+    file: 'docs/docker-deployment.en.md',
+    required: [
+      './scripts/verify-published-release.sh',
+      '--version v1.2.3',
+      '--repository seanbao/mnemonas',
+      '--artifact-dir dist/release-check',
+      'vMAJOR.MINOR.PATCH',
+      'By default, the script uses Docker to check that `ghcr.io/seanbao/mnemonas:1.2.3` exists',
+      'MNEMONAS_RELEASE_IMAGE_CHECK_RETRIES',
+      'MNEMONAS_RELEASE_IMAGE_CHECK_SLEEP_SECONDS',
+      '--skip-image-check',
+      'Explicit directories must be empty or absent',
     ],
   },
 ]
@@ -425,6 +465,21 @@ function checkHardeningProgressReleaseReadinessContract() {
     for (const phrase of doc.required) {
       if (!text.includes(phrase)) {
         errors.push(`${doc.file}: missing release-readiness hardening ledger text: ${phrase}`)
+      }
+    }
+  }
+}
+
+function checkDockerDeploymentReleaseVerificationContract() {
+  for (const doc of dockerDeploymentReleaseVerificationContracts) {
+    const text = readOptionalFile(doc.file)
+    if (text === null) {
+      continue
+    }
+
+    for (const phrase of doc.required) {
+      if (!text.includes(phrase)) {
+        errors.push(`${doc.file}: missing Docker release verification guidance text: ${phrase}`)
       }
     }
   }
@@ -765,6 +820,7 @@ checkSecurityChecklistContract()
 checkAPIReferenceWebDAVAuthContract()
 checkBackupRestoreDrillContract()
 checkHardeningProgressReleaseReadinessContract()
+checkDockerDeploymentReleaseVerificationContract()
 checkReleaseNotesValidationEvidenceContract()
 
 for (const file of files) {

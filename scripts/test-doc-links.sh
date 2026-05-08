@@ -1070,6 +1070,11 @@ EOF
 write_security_checklist_contract_valid_docs() {
 	local repo="$1"
 	write_valid_docs "$repo"
+	cat > "$repo/scripts/public-go-live-smoke.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+EOF
+	chmod +x "$repo/scripts/public-go-live-smoke.sh"
 	cat >> "$repo/docs/README.md" <<'EOF'
 | [Security](security.md) | [Security](security.en.md) |
 | [Cloud Firewall](cloud-firewall-checklist.md) | [Cloud Firewall](cloud-firewall-checklist.en.md) |
@@ -1102,8 +1107,17 @@ EOF
 - [ ] 匿名 WebDAV `PROPFIND` 被拒绝。
 - [ ] 没有 Web 后端直连。
 - [ ] 没有 dataplane 端口暴露。
+- [ ] 已从外部网络运行 `./scripts/public-go-live-smoke.sh <domain>`。
 - [ ] 已按 [公网云防火墙复核清单](cloud-firewall-checklist.md) 确认只开放 `80/443`。
 - [ ] 生产环境使用 HTTPS。
+
+运行时检查：
+
+```bash
+curl --connect-timeout 3 --max-time 10 http://<domain>:8080/health
+```
+
+只要 TCP 可连接，即使没有 HTTP 状态码，也表示后端端口仍可从公网访问。
 EOF
 	cat > "$repo/docs/security.en.md" <<'EOF'
 # Security Hardening Guide
@@ -1129,8 +1143,17 @@ English | [简体中文](security.md)
 - [ ] Anonymous access is disabled and anonymous WebDAV `PROPFIND` is rejected.
 - [ ] There is no direct backend exposure.
 - [ ] There is no dataplane exposure.
+- [ ] `./scripts/public-go-live-smoke.sh <domain>` has passed from an external network.
 - [ ] The [Public cloud firewall checklist](cloud-firewall-checklist.en.md) has been applied and public rules expose only `80/443`.
 - [ ] Public deployments use HTTPS.
+
+Runtime checks:
+
+```bash
+curl --connect-timeout 3 --max-time 10 http://<domain>:8080/health
+```
+
+Any successful TCP connection means the backend port is still publicly reachable.
 EOF
 	cat > "$repo/docs/cloud-firewall-checklist.md" <<'EOF'
 # 公网云防火墙复核清单
@@ -1142,13 +1165,20 @@ EOF
 
 English | [简体中文](cloud-firewall-checklist.md)
 EOF
-	git -C "$repo" add docs/README.md docs/README.en.md docs/security.md docs/security.en.md docs/cloud-firewall-checklist.md docs/cloud-firewall-checklist.en.md
+	git -C "$repo" add scripts/public-go-live-smoke.sh docs/README.md docs/README.en.md docs/security.md docs/security.en.md docs/cloud-firewall-checklist.md docs/cloud-firewall-checklist.en.md
 }
 
 write_security_checklist_contract_missing_firewall_doc() {
 	local repo="$1"
 	write_security_checklist_contract_valid_docs "$repo"
 	perl -0pi -e 's{- \[ \] The \[Public cloud firewall checklist\]\(cloud-firewall-checklist\.en\.md\) has been applied and public rules expose only `80/443`\.\n}{}' "$repo/docs/security.en.md"
+	git -C "$repo" add docs/security.en.md
+}
+
+write_security_checklist_contract_missing_public_smoke_doc() {
+	local repo="$1"
+	write_security_checklist_contract_valid_docs "$repo"
+	perl -0pi -e 's{- \[ \] `\.\/scripts\/public-go-live-smoke\.sh <domain>` has passed from an external network\.\n}{}' "$repo/docs/security.en.md"
 	git -C "$repo" add docs/security.en.md
 }
 
@@ -1311,6 +1341,74 @@ write_hardening_progress_release_readiness_contract_missing_published_release_ve
 	write_hardening_progress_release_readiness_contract_valid_docs "$repo"
 	perl -0pi -e 's/`\.\/scripts\/verify-published-release\.sh --version <tag> --repository seanbao\/mnemonas`/`\.\/scripts\/verify-release-artifacts.sh --require-targets --check-image`/' "$repo/docs/hardening-progress.en.md"
 	git -C "$repo" add docs/hardening-progress.en.md
+}
+
+write_docker_deployment_release_verification_contract_valid_docs() {
+	local repo="$1"
+	write_valid_docs "$repo"
+	cat >> "$repo/docs/README.md" <<'EOF'
+| [Docker](docker-deployment.md) | [Docker](docker-deployment.en.md) |
+EOF
+	cat >> "$repo/docs/README.en.md" <<'EOF'
+| [Docker](docker-deployment.en.md) | Docker deployment guide |
+EOF
+	cat > "$repo/scripts/verify-published-release.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+EOF
+	chmod +x "$repo/scripts/verify-published-release.sh"
+	cat > "$repo/docs/docker-deployment.md" <<'EOF'
+# Docker 部署指南
+
+[English](docker-deployment.en.md) | 简体中文
+
+## 发布镜像
+
+发布后可下载并核验 GitHub Release 归档、`checksums.txt` 和对应 GHCR 镜像标签：
+
+```bash
+mkdir -p dist/release-check
+./scripts/verify-published-release.sh \
+  --version v1.2.3 \
+  --repository seanbao/mnemonas \
+  --artifact-dir dist/release-check
+```
+
+`--version` 必须使用 `vMAJOR.MINOR.PATCH` 或语义化预发布形式。
+默认会调用 Docker 检查 `ghcr.io/seanbao/mnemonas:1.2.3` 是否存在；需要调整时，可设置 `MNEMONAS_RELEASE_IMAGE_CHECK_RETRIES` 和 `MNEMONAS_RELEASE_IMAGE_CHECK_SLEEP_SECONDS`。
+仅核验下载的归档和 checksums 时，可传入 `--skip-image-check`。
+未设置 `--artifact-dir` 时，脚本会使用临时目录；显式目录必须为空或不存在。
+EOF
+	cat > "$repo/docs/docker-deployment.en.md" <<'EOF'
+# Docker Deployment Guide
+
+English | [简体中文](docker-deployment.md)
+
+## Release Images
+
+After a release is published, download and verify the GitHub Release archives, `checksums.txt`, and matching GHCR image tag:
+
+```bash
+mkdir -p dist/release-check
+./scripts/verify-published-release.sh \
+  --version v1.2.3 \
+  --repository seanbao/mnemonas \
+  --artifact-dir dist/release-check
+```
+
+`--version` must use `vMAJOR.MINOR.PATCH` or a SemVer prerelease form.
+By default, the script uses Docker to check that `ghcr.io/seanbao/mnemonas:1.2.3` exists; set `MNEMONAS_RELEASE_IMAGE_CHECK_RETRIES` and `MNEMONAS_RELEASE_IMAGE_CHECK_SLEEP_SECONDS` when different retry timing is required.
+Pass `--skip-image-check` when only the downloaded archives and checksums need verification.
+When `--artifact-dir` is omitted, the script uses a temporary directory. Explicit directories must be empty or absent.
+EOF
+	git -C "$repo" add scripts/verify-published-release.sh docs/README.md docs/README.en.md docs/docker-deployment.md docs/docker-deployment.en.md
+}
+
+write_docker_deployment_release_verification_contract_missing_retry_doc() {
+	local repo="$1"
+	write_docker_deployment_release_verification_contract_valid_docs "$repo"
+	perl -0pi -e 's/ and `MNEMONAS_RELEASE_IMAGE_CHECK_SLEEP_SECONDS`//' "$repo/docs/docker-deployment.en.md"
+	git -C "$repo" add docs/docker-deployment.en.md
 }
 
 write_release_notes_validation_evidence_contract_valid_docs() {
@@ -1560,6 +1658,7 @@ run_accepts "storage-cdc-contract" write_storage_cdc_contract_valid_docs
 run_accepts "security-checklist-contract" write_security_checklist_contract_valid_docs
 run_accepts "api-reference-webdav-auth-contract" write_api_reference_webdav_auth_contract_valid_docs
 run_accepts "backup-restore-drill-contract" write_backup_restore_drill_contract_valid_docs
+run_accepts "docker-deployment-release-verification-contract" write_docker_deployment_release_verification_contract_valid_docs
 run_accepts "release-notes-validation-evidence-contract" write_release_notes_validation_evidence_contract_valid_docs
 run_rejects "missing-file" "missing link target: docs/missing.md" write_missing_file_doc
 run_rejects "escaping-link" "link escapes repository: ../outside.md" write_escaping_link_doc
@@ -1608,11 +1707,13 @@ run_rejects "raw-api-path-query" "URL-encode API path query values in documentat
 run_rejects "storage-cdc-contract-missing-boundary" "docs/storage-internals.en.md: missing storage CDC boundary text: current version history does not reference-count CDC chunks" write_storage_cdc_contract_missing_boundary_doc
 run_rejects "configuration-cdc-contract-missing-boundary" "docs/configuration.en.md: missing storage CDC boundary text: Current Go version history still uses whole-object CAS snapshots" write_configuration_cdc_contract_missing_boundary_doc
 run_rejects "security-checklist-contract-missing-firewall" "docs/security.en.md: missing public deployment security checklist text: [Public cloud firewall checklist](cloud-firewall-checklist.en.md)" write_security_checklist_contract_missing_firewall_doc
+run_rejects "security-checklist-contract-missing-public-smoke" "docs/security.en.md: missing public deployment security checklist text: ./scripts/public-go-live-smoke.sh <domain>" write_security_checklist_contract_missing_public_smoke_doc
 run_rejects "api-reference-webdav-auth-contract-missing-users" "docs/api-reference.en.md: missing WebDAV auth guidance text: For day-to-day or production mounts, set \`webdav.auth_type = \"users\"\`" write_api_reference_webdav_auth_contract_missing_users_doc
 run_rejects "api-reference-webdav-auth-contract-legacy-first" "docs/api-reference.en.md: avoid leading WebDAV auth guidance with legacy Basic Auth: - By default it uses the legacy global Basic Auth credentials" write_api_reference_webdav_auth_contract_legacy_first_doc
 run_rejects "backup-restore-drill-contract-missing-history" "docs/backup-guide.en.md: missing backup restore drill guidance text: Restore-drill history and explicit restore history both keep the latest 20 entries" write_backup_restore_drill_contract_missing_history_doc
 run_rejects "hardening-progress-release-readiness-contract-missing-backup-smoke" "docs/hardening-progress.en.md: missing release-readiness hardening ledger text: release checklist and bilingual release notes to retain the public-deployment doctor, external-network smoke, backup restore-drill smoke, and cloud-firewall review entry points" write_hardening_progress_release_readiness_contract_missing_backup_smoke_doc
 run_rejects "hardening-progress-release-readiness-contract-missing-published-release-verifier" "docs/hardening-progress.en.md: missing release-readiness hardening ledger text: \`./scripts/verify-published-release.sh --version <tag> --repository seanbao/mnemonas\`" write_hardening_progress_release_readiness_contract_missing_published_release_verifier_doc
+run_rejects "docker-deployment-release-verification-contract-missing-retry" "docs/docker-deployment.en.md: missing Docker release verification guidance text: MNEMONAS_RELEASE_IMAGE_CHECK_SLEEP_SECONDS" write_docker_deployment_release_verification_contract_missing_retry_doc
 run_rejects "release-notes-validation-evidence-contract-mismatch" "docs/release-notes.en.md: frontend unit test count 3113 does not match docs/hardening-review-summary.en.md: 3115" write_release_notes_validation_evidence_contract_mismatch_doc
 run_rejects "release-notes-validation-evidence-contract-docker-image-mismatch" "docs/release-notes.en.md: Docker image sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb does not match docs/hardening-review-summary.en.md: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" write_release_notes_validation_evidence_contract_docker_image_mismatch_doc
 run_rejects "release-notes-validation-evidence-contract-docker-port-mismatch" "docs/release-notes.en.md: Docker smoke port http://127.0.0.1:32780 does not match docs/hardening-review-summary.en.md: http://127.0.0.1:32779" write_release_notes_validation_evidence_contract_docker_port_mismatch_doc
