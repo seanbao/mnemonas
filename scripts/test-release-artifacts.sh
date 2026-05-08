@@ -80,6 +80,7 @@ make_release_archive() {
 	write_executable "$release_root/scripts/docker-quickstart.sh" '#!/usr/bin/env sh' 'exit 0'
 	write_executable "$release_root/scripts/mnemonas-doctor.sh" '#!/usr/bin/env sh' 'exit 0'
 	write_executable "$release_root/scripts/verify-release-artifacts.sh" '#!/usr/bin/env sh' 'exit 0'
+	write_executable "$release_root/scripts/verify-published-release.sh" '#!/usr/bin/env sh' 'exit 0'
 
 	printf '<!doctype html><title>MnemoNAS</title>\n' >"$release_root/web/index.html"
 	printf '# docs\n' >"$release_root/docs/README.md"

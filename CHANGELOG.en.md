@@ -60,6 +60,7 @@ This project follows [Semantic Versioning 2.0.0](https://semver.org/).
 - WebDAV compatibility report form for submitting validation results or client-specific failures from common desktop, mobile, media-player, and CLI clients.
 - `scripts/check-release-tag.sh` validates release tags as `vMAJOR.MINOR.PATCH` or SemVer prerelease tags before release artifacts are built, and caps the Docker image tag after the leading `v` at 128 characters.
 - `scripts/verify-release-artifacts.sh` uses shell-safe diagnostics for control-character paths in downloaded artifact directories, checksum manifests, and archive members, preventing raw control characters from entering post-publish verification logs.
+- `scripts/verify-published-release.sh` wraps GitHub Release downloads and the artifact verifier, downloading into an empty or temporary directory by default and checking archives, checksums, required targets, and the GHCR image tag so post-publish checks are less likely to omit flags or mix in stale artifacts.
 - `scripts/release-readiness.sh` fails by default when non-release-documentation changes exist after the recorded full-validation target; draft summaries can opt in with `--allow-post-validation-changes`.
 - `scripts/release-readiness.sh` requires all four hardening evidence documents to exist and record the same full-validation target, preventing missing evidence from being skipped before release.
 - `scripts/release-readiness.sh` checks that both release-notes drafts record the current full-validation target, preventing stale validation snapshots in release notes.
@@ -202,7 +203,7 @@ First public release target.
 - [ ] Run release readiness summary: `./scripts/release-readiness.sh`
 - [ ] Update `CHANGELOG.md`, `CHANGELOG.en.md`, README version references, and [release notes draft](docs/release-notes.en.md)
 - [ ] Create and push a Git tag, for example `git tag -a <tag> -m "Release <tag>"` followed by `git push origin <tag>`
-- [ ] After publication, download the GitHub Release artifacts and run `./scripts/verify-release-artifacts.sh --version <tag> --repository seanbao/mnemonas --require-targets --check-image <artifact-dir>` to verify release artifacts, checksums, and container image tags
+- [ ] After publication, run `./scripts/verify-published-release.sh --version <tag> --repository seanbao/mnemonas` to download and verify release artifacts, checksums, and container image tags
 - [ ] After publication, verify release archive installation, Docker release image startup, and public documentation links
 
 ---

@@ -63,7 +63,7 @@ Archives should include a top-level directory, `nasd`, `dataplane`, Web UI stati
 
 The current hardening branch has the following validation evidence. Final publication should use the latest tag, Release workflow result, and required environment validation as the source of truth:
 
-Latest local full-validation snapshot: validation target `dd7fd9838967`; `GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master` passed, covering diff whitespace, secret-leak scanning, workflow/YAML/script gates, `make check`, toolchain consistency, Go/Rust/frontend dependency security scans, example config validation, public-access templates, protobuf regeneration stability, Rust fmt/test/clippy, proto-gen fmt/test/clippy, frontend lint/typecheck/unit/build, 377 Playwright E2E cases, Docker build, Docker image `sha256:09ba0965fce6e4533ec003360f67d41a3dfc396cd811f6dc7ec98729da854cee`, and Docker smoke. The Docker smoke used the Docker-assigned loopback port `http://127.0.0.1:32781`.
+Latest local full-validation snapshot: validation target `99ac1b279301`; `GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master` passed, covering diff whitespace, secret-leak scanning, workflow/YAML/script gates, `make check`, toolchain consistency, Go/Rust/frontend dependency security scans, example config validation, public-access templates, protobuf regeneration stability, Rust fmt/test/clippy, proto-gen fmt/test/clippy, frontend lint/typecheck/unit/build, 377 Playwright E2E cases, Docker build, Docker image `sha256:b787aa282bdf61a6103b70964c151b5df8fceddc24a9addd20bdd561c7c7d7c5`, and Docker smoke. The Docker smoke used the Docker-assigned loopback port `http://127.0.0.1:32783`.
 
 - `GOTOOLCHAIN=local ./scripts/verify-changed.sh`
 - `GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master`
@@ -99,16 +99,10 @@ After the release tag is published, download the GitHub Release artifacts and ru
 
 ```bash
 mkdir -p dist/release-check
-gh release download <tag> \
-  --repo seanbao/mnemonas \
-  --dir dist/release-check
-
-./scripts/verify-release-artifacts.sh \
+./scripts/verify-published-release.sh \
   --version <tag> \
   --repository seanbao/mnemonas \
-  --require-targets \
-  --check-image \
-  dist/release-check
+  --artifact-dir dist/release-check
 ```
 
 Then complete at least one archive-install smoke test, one Docker release-image startup smoke test, public documentation link checks, and deployment-environment review covering `mnemonas-doctor --public-domain`, external-network `public-go-live-smoke.sh`, DNS, firewall, TLS, and cloud security groups.

@@ -184,6 +184,7 @@
 - WebDAV 兼容性报告表单，用于提交常见桌面、移动端、媒体播放器和命令行客户端的验证结果或客户端特定失败
 - `scripts/check-release-tag.sh` 会在构建 release 产物前校验 release tag 是否为 `vMAJOR.MINOR.PATCH` 或语义化预发布 tag，并限制去掉 `v` 前缀后的 Docker 镜像 tag 长度不超过 128 个字符
 - `scripts/verify-release-artifacts.sh` 对下载目录、checksum 清单和归档成员中的控制字符路径使用 shell-safe 诊断表示，避免发布后验收日志写入原始控制字符
+- `scripts/verify-published-release.sh` 封装 GitHub Release 下载和 artifact verifier，默认使用空目录或临时目录下载产物并校验归档、checksums、必需目标集合和 GHCR 镜像标签，减少发布后手工命令遗漏参数或混入旧产物的风险
 - `scripts/release-readiness.sh` 在记录的完整验证目标之后发现非发布文档变更时默认失败；草稿摘要可显式使用 `--allow-post-validation-changes` 放行
 - `scripts/release-readiness.sh` 要求四份 hardening 证据文档存在且记录一致的完整验证目标，避免发布前证据缺失被静默跳过
 - `scripts/release-readiness.sh` 会检查双语 release notes 草稿记录当前完整验证目标，避免发布说明中的验证快照滞后
@@ -356,7 +357,7 @@
   - checksums
   - 二进制文件（Linux x86_64, ARM64, macOS）
   - Docker 镜像标签
-- [ ] 发布后下载 GitHub Release 产物，并运行 `./scripts/verify-release-artifacts.sh --version <tag> --repository seanbao/mnemonas --require-targets --check-image <artifact-dir>`，验证 release 产物、checksums 和容器镜像标签
+- [ ] 发布后运行 `./scripts/verify-published-release.sh --version <tag> --repository seanbao/mnemonas`，下载并验证 release 产物、checksums 和容器镜像标签
 - [ ] 发布后验证 release 归档安装、Docker release 镜像启动和公开文档链接
 
 ---

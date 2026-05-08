@@ -122,6 +122,7 @@ build_release_fixture() {
 	assert_tar_contains "$manifest" "$package_name/web/index.html"
 	assert_tar_contains "$manifest" "$package_name/scripts/install-systemd.sh"
 	assert_tar_contains "$manifest" "$package_name/scripts/mnemonas-doctor.sh"
+	assert_tar_contains "$manifest" "$package_name/scripts/verify-published-release.sh"
 	assert_tar_contains "$manifest" "$package_name/docs/README.md"
 	assert_tar_contains "$manifest" "$package_name/deploy/public-access/README.md"
 	assert_tar_contains "$manifest" "$package_name/docker-compose.yml"
@@ -144,6 +145,7 @@ build_release_fixture() {
 	assert_executable "$extracted/dataplane"
 	assert_executable "$extracted/scripts/install-systemd.sh"
 	assert_executable "$extracted/scripts/docker-quickstart.sh"
+	assert_executable "$extracted/scripts/verify-published-release.sh"
 	assert_file_contains "$extracted/.env.example" "MNEMONAS_IMAGE=$release_image"
 	assert_file_contains "$extracted/.env.example" "MNEMONAS_VERSION=$version"
 	assert_file_not_contains "$extracted/.env.example" "MNEMONAS_IMAGE=mnemonas:local"
@@ -168,6 +170,7 @@ for required_path in \
 	"$PROJECT_ROOT/scripts/docker-start.sh" \
 	"$PROJECT_ROOT/scripts/mnemonas-docker-preflight.sh" \
 	"$PROJECT_ROOT/scripts/verify-release-artifacts.sh" \
+	"$PROJECT_ROOT/scripts/verify-published-release.sh" \
 	"$PROJECT_ROOT/scripts/setup-reverse-proxy.sh" \
 	"$PROJECT_ROOT/scripts/uninstall-systemd.sh" \
 	"$PROJECT_ROOT/docker-compose.yml" \
@@ -245,5 +248,6 @@ assert_installer_contains \
 TMP_ROOT="$(mktemp -d)"
 build_release_fixture
 assert_executable "$TMP_ROOT/extract/mnemonas-v9.9.9-test-linux-amd64/scripts/verify-release-artifacts.sh"
+assert_executable "$TMP_ROOT/extract/mnemonas-v9.9.9-test-linux-amd64/scripts/verify-published-release.sh"
 
 printf '[release-package-test] all checks passed\n'
