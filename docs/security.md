@@ -138,6 +138,7 @@ sudo ufw deny 9091/tcp comment "MnemoNAS dataplane HTTP"
 2. 登录 Web UI 后打开 `设置 -> 常规 -> 公网访问向导`，根据部署方式应用 `server.host`、`trusted_proxy_hops`、分享域名等配置。
 3. 在 Web UI 运行“安全自检”，确认认证、会话有效期、登录限速、浏览器会话 cookie 边界、公开分享 cookie/cache 边界、配置文件权限、自动 WebDAV 凭据文件权限、用户文件权限、HTTPS 请求语义、受信代理、监听地址、dataplane 端口、WebDAV 认证、分享 Base URL、分享默认策略、本地备份目标、初始密码文件和管理员账号备用状态。
 4. 在服务器上运行 `sudo mnemonas-doctor --public-domain <domain>`，复核公网域名、反向代理和本机端口暴露情况。
+5. 从外部网络运行 `./scripts/public-go-live-smoke.sh <domain>`，确认公网 HTTPS、同域 HTTP 到 HTTPS 跳转，以及 Web 后端和 dataplane 端口都不能从公网建立 TCP 连接。
 
 Web UI 向导只负责 MnemoNAS 应用配置和操作提示；证书签发、防火墙、云安全组和反向代理安装仍应在服务器或云控制台完成。安全自检只能检查 MnemoNAS 进程能观察到的运行态和当前请求语义，不能替代云厂商安全组、真实公网端口和证书链检查。
 
@@ -238,6 +239,7 @@ cloudflared tunnel run mnemonas
 - [ ] `mnemonas-doctor --public-domain` 已确认管理员账号冗余可用、会话有效期符合公网建议、用户文件及其目录不是符号链接、路径组件不包含符号链接且权限为私有，自动 WebDAV 凭据文件不是符号链接、路径组件不包含符号链接且权限私有
 - [ ] `mnemonas-doctor --public-domain` 已确认 `initial-password.txt` 路径不存在，且没有保留符号链接、符号链接路径组件或非普通文件
 - [ ] 公开分享基础 URL、公开分享默认策略和公开分享 JSON 响应边界已处理（私有缓存、`Vary: Cookie`、无探测 cookie），匿名 WebDAV `PROPFIND` 被拒绝，且没有 Web 后端直连、dataplane 端口暴露或 UFW 放行警告
+- [ ] 已从外部网络运行 `./scripts/public-go-live-smoke.sh <domain>`，确认公网 HTTPS、同域 HTTP 到 HTTPS 跳转、Web 后端端口和 dataplane 端口外部不可达
 - [ ] 已按 [公网云防火墙复核清单](cloud-firewall-checklist.md) 确认云安全组或防火墙公网入口只开放 `80/443`；管理端口、Web 后端端口和 dataplane 端口不对公网开放
 - [ ] 生产环境使用 HTTPS
 
@@ -252,8 +254,12 @@ ss -tlnp | grep -E '9090|9091'
 
 curl -I https://<domain>/health
 
-curl --connect-timeout 3 http://<domain>:8080/health
-# 预期：连接失败或超时，且没有 HTTP 状态响应
+./scripts/public-go-live-smoke.sh <domain>
+# 预期：公网 HTTPS health 可访问，同域 HTTP 会跳转到 HTTPS，且后端端口从外部网络不可达。
+
+curl --connect-timeout 3 --max-time 10 http://<domain>:8080/health
+# 预期：连接失败或超时，且没有 HTTP 状态响应。
+# 只要 TCP 可连接，即使没有 HTTP 状态码，也表示后端端口仍可从公网访问。
 # 如果使用自定义后端端口，也应确认这些端口连接失败或超时，且没有 HTTP 状态响应。
 
 curl https://<domain>/dav/

@@ -138,6 +138,7 @@ Recommended path:
 2. After logging into the Web UI, open `System Settings -> General -> Public Access Wizard` and apply the recommended `server.host`, `trusted_proxy_hops`, share base URL, and related settings for the chosen deployment mode.
 3. Run the Web UI security self-check to verify authentication, session-token lifetimes, login throttling, browser session-cookie boundaries, public-share cookie/cache boundaries, config-file permissions, generated WebDAV credentials-file permissions, users-file permissions, HTTPS request semantics, trusted-proxy handling, listener scope, dataplane ports, WebDAV authentication, share base URL, share default policy, local backup destinations, initial password file state, and administrator-account redundancy.
 4. Run `sudo mnemonas-doctor --public-domain <domain>` on the server to re-check the public domain, reverse proxy, and local port exposure.
+5. Run `./scripts/public-go-live-smoke.sh <domain>` from an external network to verify public HTTPS, same-domain HTTP-to-HTTPS redirect, and public TCP reachability for the Web backend and dataplane ports.
 
 The Web UI wizard updates MnemoNAS application settings and shows operational guidance. Certificate issuance, firewall rules, cloud security groups, and reverse-proxy installation still belong on the server or in the cloud console. The security self-check can only verify runtime state and request semantics that the MnemoNAS process can observe; it does not replace cloud security-group, real public-port, or certificate-chain checks.
 
@@ -238,6 +239,7 @@ cloudflared tunnel run mnemonas
 - [ ] `mnemonas-doctor --public-domain` reports usable administrator-account redundancy, public-safe session-token lifetimes, a non-symlink users file and users-file directory that do not pass through symlink components and have private permissions, and a non-symlink generated WebDAV credentials file that does not pass through symlink components and has private permissions.
 - [ ] `mnemonas-doctor --public-domain` reports an absent `initial-password.txt` path with no symlink, symlink component, or non-regular file left behind.
 - [ ] Public-share base URL, public-share default policy, and public-share JSON response boundaries have been reviewed (private cache, `Vary: Cookie`, no probe cookie), anonymous WebDAV `PROPFIND` is rejected, and there are no direct backend exposure, dataplane exposure, or UFW allow warnings.
+- [ ] `./scripts/public-go-live-smoke.sh <domain>` has passed from an external network, covering public HTTPS, same-domain HTTP-to-HTTPS redirect, and external reachability for the Web backend and dataplane ports.
 - [ ] The [Public cloud firewall checklist](cloud-firewall-checklist.en.md) has been applied: cloud security groups or public firewall rules expose only `80/443`; management ports, the Web backend port, and dataplane ports are not publicly reachable.
 - [ ] Public deployments use HTTPS.
 
@@ -252,8 +254,12 @@ ss -tlnp | grep -E '9090|9091'
 
 curl -I https://<domain>/health
 
-curl --connect-timeout 3 http://<domain>:8080/health
-# expected: failed connection or timeout, with no HTTP status response
+./scripts/public-go-live-smoke.sh <domain>
+# expected: public HTTPS health is reachable, same-domain HTTP redirects to HTTPS, and backend ports are unreachable from the external network.
+
+curl --connect-timeout 3 --max-time 10 http://<domain>:8080/health
+# expected: failed connection or timeout, with no HTTP status response.
+# Any successful TCP connection means the backend port is still publicly reachable, even when no HTTP status is returned.
 # For custom backend ports, check that those ports also fail or time out without an HTTP status response.
 
 curl https://<domain>/dav/
