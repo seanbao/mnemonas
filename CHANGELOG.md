@@ -351,6 +351,8 @@
 - [ ] `./scripts/plan-hardening-commits.sh --fail-on-manual` 确认没有未归类路径
 - [ ] 发布前就绪摘要通过：`./scripts/release-readiness.sh`
 - [ ] 更新 CHANGELOG.md、CHANGELOG.en.md、README 版本引用和 [发布说明草稿](docs/release-notes.md)
+- [ ] 所选发布 tag 校验通过：`./scripts/check-release-tag.sh <tag>`
+- [ ] 发布脚本回归通过：`./scripts/test-release-tag.sh`、`./scripts/test-release-package.sh`、`./scripts/test-release-artifacts.sh`
 - [ ] 创建并推送 Git tag，例如 `git tag -a <tag> -m "Release <tag>"` 后执行 `git push origin <tag>`
 - [ ] GitHub Release 包含：
   - 版本说明（从 CHANGELOG 复制）

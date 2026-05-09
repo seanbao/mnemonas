@@ -202,6 +202,8 @@ First public release target.
 - [ ] Confirm `./scripts/plan-hardening-commits.sh --fail-on-manual` reports no unclassified paths
 - [ ] Run release readiness summary: `./scripts/release-readiness.sh`
 - [ ] Update `CHANGELOG.md`, `CHANGELOG.en.md`, README version references, and [release notes draft](docs/release-notes.en.md)
+- [ ] Validate the selected release tag: `./scripts/check-release-tag.sh <tag>`
+- [ ] Run release script regressions: `./scripts/test-release-tag.sh`, `./scripts/test-release-package.sh`, and `./scripts/test-release-artifacts.sh`
 - [ ] Create and push a Git tag, for example `git tag -a <tag> -m "Release <tag>"` followed by `git push origin <tag>`
 - [ ] After publication, run `./scripts/verify-published-release.sh --version <tag> --repository seanbao/mnemonas` to download and verify release artifacts, checksums, and container image tags
 - [ ] After publication, verify release archive installation, Docker release image startup, and public documentation links
