@@ -64,8 +64,8 @@ tier_policy = "age:30d"
 当前预留边界：
 
 - `internal/caslayout.Store` 已经隔离 object 操作。
-- 后续工作应加入 `context.Context`。
-- 后续工作应支持流式 `io.Reader` / `io.ReadCloser`。
+- 本地 CAS 层已提供 `PutContext`、`PutReaderContext`、`GetContext`、`ReaderContext`、`WalkContext` 和 `StatsContext` 等 context-aware 变体；旧入口保持兼容。
+- 本地 CAS 层已支持通过 `io.Reader` 流式写入对象，后续远程后端可沿用同一取消和清理语义。
 - 后续可在不改变面向用户文件 API 的情况下加入 `S3Backend`。
 
 ## 插件系统
