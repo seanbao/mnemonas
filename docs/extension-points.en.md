@@ -64,8 +64,8 @@ tier_policy = "age:30d"
 Current reservation:
 
 - `internal/caslayout.Store` already isolates object operations.
-- Future work should add `context.Context`.
-- Future work should support streaming `io.Reader` / `io.ReadCloser`.
+- The local CAS layer now provides context-aware variants such as `PutContext`, `PutReaderContext`, `GetContext`, `ReaderContext`, `WalkContext`, and `StatsContext`; legacy entry points remain compatible.
+- The local CAS layer supports streaming object writes through `io.Reader`, so future remote backends can reuse the same cancellation and cleanup semantics.
 - Future work can add `S3Backend` without changing user-facing file APIs.
 
 ## Plugin System

@@ -3,6 +3,8 @@
 package caslayout
 
 import (
+	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
@@ -110,6 +112,18 @@ type Store struct {
 
 type casWalkFunc func(relPath string, info os.FileInfo) error
 
+type casContextReader struct {
+	ctx    context.Context
+	reader io.Reader
+}
+
+func (r casContextReader) Read(p []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return r.reader.Read(p)
+}
+
 // NewStore creates a CAS store
 func NewStore(root string, layout Layout) (*Store, error) {
 	if layout == nil {
@@ -128,12 +142,45 @@ func NewStore(root string, layout Layout) (*Store, error) {
 	}, nil
 }
 
-// Put stores data, returns path
+func normalizeStoreContext(ctx context.Context) context.Context {
+	if ctx == nil {
+		return context.Background()
+	}
+	return ctx
+}
+
+// Put stores data.
 func (s *Store) Put(hash string, data []byte) error {
+	return s.PutContext(context.Background(), hash, data)
+}
+
+// PutContext stores data and observes ctx before visible mutations and while reading data.
+func (s *Store) PutContext(ctx context.Context, hash string, data []byte) error {
+	return s.PutReaderContext(ctx, hash, bytes.NewReader(data))
+}
+
+// PutReader stores data from reader.
+func (s *Store) PutReader(hash string, data io.Reader) error {
+	return s.PutReaderContext(context.Background(), hash, data)
+}
+
+// PutReaderContext stores streamed data and observes ctx before visible mutations and while reading data.
+func (s *Store) PutReaderContext(ctx context.Context, hash string, data io.Reader) error {
+	ctx = normalizeStoreContext(ctx)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if data == nil {
+		return errors.New("CAS data reader is nil")
+	}
+
 	relPath := filepath.Clean(s.layout.HashToPath(hash))
 	path := filepath.Join(s.root, relPath)
 	relDir := filepath.Dir(relPath)
 	if err := validateCASPath(s.root, path); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
 		return err
 	}
 	createdDirs, err := ensureCASDirWithRoot(s.rootHandle, relDir, 0755)
@@ -141,6 +188,11 @@ func (s *Store) Put(hash string, data []byte) error {
 		return fmt.Errorf("failed to create directory: %w", err)
 	}
 	if err := validateCASPath(s.root, filepath.Join(s.root, relDir)); err != nil {
+		cleanupCreatedCASDirsWithRoot(s.rootHandle, createdDirs)
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		cleanupCreatedCASDirsWithRoot(s.rootHandle, createdDirs)
 		return err
 	}
 	afterValidateCASPath()
@@ -155,7 +207,7 @@ func (s *Store) Put(hash string, data []byte) error {
 		return fmt.Errorf("failed to create temp file: %w", err)
 	}
 
-	_, writeErr := f.Write(data)
+	_, writeErr := io.Copy(f, casContextReader{ctx: ctx, reader: data})
 	syncErr := f.Sync() // fsync data before rename
 	closeErr := f.Close()
 
@@ -173,6 +225,11 @@ func (s *Store) Put(hash string, data []byte) error {
 		cleanupCASTempPath(s.rootHandle, tmpPath)
 		cleanupCreatedCASDirsWithRoot(s.rootHandle, createdDirs)
 		return fmt.Errorf("failed to close temp file: %w", closeErr)
+	}
+	if err := ctx.Err(); err != nil {
+		cleanupCASTempPath(s.rootHandle, tmpPath)
+		cleanupCreatedCASDirsWithRoot(s.rootHandle, createdDirs)
+		return err
 	}
 
 	// Step 2: Atomic rename
@@ -335,14 +392,19 @@ func syncCASRootDirectory(root *os.Root, dir string) error {
 	return parentDir.Close()
 }
 
-func readCASFileWithRoot(root *os.Root, path string) ([]byte, error) {
+func readCASFileWithRootContext(ctx context.Context, root *os.Root, path string) ([]byte, error) {
+	ctx = normalizeStoreContext(ctx)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
 	file, err := rootio.OpenFileNoFollow(root, path, os.O_RDONLY, 0)
 	if err != nil {
 		return nil, err
 	}
 	defer file.Close()
 
-	return io.ReadAll(file)
+	return io.ReadAll(casContextReader{ctx: ctx, reader: file})
 }
 
 func createCASTempFile(root *os.Root, dir string) (*os.File, string, error) {
@@ -389,13 +451,26 @@ func isCASRootEscapeError(err error) bool {
 
 // Get reads data
 func (s *Store) Get(hash string) ([]byte, error) {
+	return s.GetContext(context.Background(), hash)
+}
+
+// GetContext reads data and observes ctx before opening and while reading the object.
+func (s *Store) GetContext(ctx context.Context, hash string) ([]byte, error) {
+	ctx = normalizeStoreContext(ctx)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
 	relPath := filepath.Clean(s.layout.HashToPath(hash))
 	path := filepath.Join(s.root, relPath)
 	if err := validateCASPath(s.root, path); err != nil {
 		return nil, err
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	afterValidateCASPath()
-	data, err := readCASFileWithRoot(s.rootHandle, relPath)
+	data, err := readCASFileWithRootContext(ctx, s.rootHandle, relPath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, ErrNotFound
@@ -410,21 +485,60 @@ func (s *Store) Get(hash string) ([]byte, error) {
 
 // Has checks if data exists
 func (s *Store) Has(hash string) bool {
+	ok, err := s.Exists(context.Background(), hash)
+	return err == nil && ok
+}
+
+// Exists checks if data exists and returns boundary errors that Has hides for legacy callers.
+func (s *Store) Exists(ctx context.Context, hash string) (bool, error) {
+	ctx = normalizeStoreContext(ctx)
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+
 	relPath := filepath.Clean(s.layout.HashToPath(hash))
 	path := filepath.Join(s.root, relPath)
 	if err := validateCASPath(s.root, path); err != nil {
-		return false
+		return false, err
+	}
+	if err := ctx.Err(); err != nil {
+		return false, err
 	}
 	afterValidateCASPath()
 	info, err := s.rootHandle.Lstat(relPath)
-	return err == nil && info.Mode()&os.ModeSymlink == 0
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		if errors.Is(err, os.ErrPermission) || errors.Is(err, syscall.ELOOP) || rootio.IsSymlinkError(err) || isCASRootEscapeError(err) {
+			return false, errCASPathSymlink
+		}
+		return false, fmt.Errorf("failed to get file info: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return false, errCASPathSymlink
+	}
+	return true, nil
 }
 
 // Delete removes data
 func (s *Store) Delete(hash string) error {
+	return s.DeleteContext(context.Background(), hash)
+}
+
+// DeleteContext removes data and observes ctx before the visible delete.
+func (s *Store) DeleteContext(ctx context.Context, hash string) error {
+	ctx = normalizeStoreContext(ctx)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	relPath := filepath.Clean(s.layout.HashToPath(hash))
 	path := filepath.Join(s.root, relPath)
 	if err := validateCASPath(s.root, path); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
 		return err
 	}
 	afterValidateCASPath()
@@ -446,9 +560,22 @@ func (s *Store) Delete(hash string) error {
 
 // Size gets data size
 func (s *Store) Size(hash string) (int64, error) {
+	return s.SizeContext(context.Background(), hash)
+}
+
+// SizeContext gets data size and observes ctx before stat.
+func (s *Store) SizeContext(ctx context.Context, hash string) (int64, error) {
+	ctx = normalizeStoreContext(ctx)
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+
 	relPath := filepath.Clean(s.layout.HashToPath(hash))
 	path := filepath.Join(s.root, relPath)
 	if err := validateCASPath(s.root, path); err != nil {
+		return 0, err
+	}
+	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
 	afterValidateCASPath()
@@ -476,9 +603,22 @@ type ReadSeekCloser interface {
 
 // Reader returns a data reader with seek support for Range requests
 func (s *Store) Reader(hash string) (ReadSeekCloser, error) {
+	return s.ReaderContext(context.Background(), hash)
+}
+
+// ReaderContext returns a seekable data reader and observes ctx before opening the object.
+func (s *Store) ReaderContext(ctx context.Context, hash string) (ReadSeekCloser, error) {
+	ctx = normalizeStoreContext(ctx)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
 	relPath := filepath.Clean(s.layout.HashToPath(hash))
 	path := filepath.Join(s.root, relPath)
 	if err := validateCASPath(s.root, path); err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	afterValidateCASPath()
@@ -563,7 +703,11 @@ func (s *Store) casFullPath(relPath string) string {
 	return filepath.Join(s.root, relPath)
 }
 
-func (s *Store) walkWithRoot(fn casWalkFunc) error {
+func (s *Store) walkWithRootContext(ctx context.Context, fn casWalkFunc) error {
+	ctx = normalizeStoreContext(ctx)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	afterValidateCASPath()
 	rootInfo, err := s.rootHandle.Lstat(".")
 	if err != nil {
@@ -572,10 +716,13 @@ func (s *Store) walkWithRoot(fn casWalkFunc) error {
 		}
 		return err
 	}
-	return s.walkRootEntry(".", rootInfo, fn)
+	return s.walkRootEntry(ctx, ".", rootInfo, fn)
 }
 
-func (s *Store) walkRootEntry(relPath string, info os.FileInfo, fn casWalkFunc) error {
+func (s *Store) walkRootEntry(ctx context.Context, relPath string, info os.FileInfo, fn casWalkFunc) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if err := fn(relPath, info); err != nil {
 		return err
 	}
@@ -604,6 +751,9 @@ func (s *Store) walkRootEntry(relPath string, info os.FileInfo, fn casWalkFunc) 
 	})
 
 	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		entryName, err := safeCASDirEntryName(entry.Name())
 		if err != nil {
 			return err
@@ -616,7 +766,7 @@ func (s *Store) walkRootEntry(relPath string, info os.FileInfo, fn casWalkFunc) 
 			}
 			return err
 		}
-		if err := s.walkRootEntry(childRelPath, childInfo, fn); err != nil {
+		if err := s.walkRootEntry(ctx, childRelPath, childInfo, fn); err != nil {
 			return err
 		}
 	}
@@ -626,7 +776,12 @@ func (s *Store) walkRootEntry(relPath string, info os.FileInfo, fn casWalkFunc) 
 
 // Walk iterates over all stored hashes
 func (s *Store) Walk(fn func(hash string) error) error {
-	return s.walkWithRoot(func(relPath string, info os.FileInfo) error {
+	return s.WalkContext(context.Background(), fn)
+}
+
+// WalkContext iterates over all stored hashes and observes ctx between entries.
+func (s *Store) WalkContext(ctx context.Context, fn func(hash string) error) error {
+	return s.walkWithRootContext(ctx, func(relPath string, info os.FileInfo) error {
 		if info.IsDir() {
 			return nil
 		}
@@ -656,9 +811,14 @@ type Stats struct {
 
 // Stats returns storage statistics
 func (s *Store) Stats() (*Stats, error) {
+	return s.StatsContext(context.Background())
+}
+
+// StatsContext returns storage statistics and observes ctx between entries.
+func (s *Store) StatsContext(ctx context.Context) (*Stats, error) {
 	stats := &Stats{}
 
-	err := s.walkWithRoot(func(relPath string, info os.FileInfo) error {
+	err := s.walkWithRootContext(ctx, func(relPath string, info os.FileInfo) error {
 		path := s.casFullPath(relPath)
 		if info.IsDir() || strings.HasSuffix(path, ".tmp") {
 			return nil
@@ -710,7 +870,12 @@ func (s *Store) matchesLayoutPath(path string) bool {
 // CleanupStaging removes incomplete staging files (.tmp files)
 // Returns the number of files cleaned and total size freed
 func (s *Store) CleanupStaging() (count int, size int64, err error) {
-	err = s.walkWithRoot(func(relPath string, info os.FileInfo) error {
+	return s.CleanupStagingContext(context.Background())
+}
+
+// CleanupStagingContext removes incomplete staging files and observes ctx between entries.
+func (s *Store) CleanupStagingContext(ctx context.Context) (count int, size int64, err error) {
+	err = s.walkWithRootContext(ctx, func(relPath string, info os.FileInfo) error {
 		if info.IsDir() {
 			return nil
 		}
