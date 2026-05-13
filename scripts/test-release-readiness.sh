@@ -30,6 +30,8 @@ write_checklists() {
 	cat >CHANGELOG.md <<'EOF'
 # CHANGELOG
 
+- `scripts/release-readiness.sh` 会要求 `CHANGELOG.md` 和 `CHANGELOG.en.md` 的发布清单包含文档检查、依赖安全检查、Docker 构建烟测、所选发布 tag 校验和发布脚本回归命令，避免关键本地门禁从最终发布核验中遗漏
+
 - [ ] 变更感知完整验证通过：`GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master`
 - [ ] 文档检查通过：`make docs-check`
 - [ ] 脚本检查通过：`make scripts-check`
@@ -47,6 +49,8 @@ EOF
 
 	cat >CHANGELOG.en.md <<'EOF'
 # CHANGELOG
+
+- `scripts/release-readiness.sh` requires the `CHANGELOG.md` and `CHANGELOG.en.md` release checklists to include documentation, dependency-security, Docker build/smoke, selected release tag validation, and release script regression commands, preventing key local gates from being omitted from final release verification.
 
 - [ ] Run full change-aware validation: `GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master`
 - [ ] Run documentation checks: `make docs-check`
@@ -964,6 +968,15 @@ if ./scripts/release-readiness.sh --allow-dirty --allow-post-validation-changes 
 fi
 assert_file_contains "$output_dir/missing-release-package-checklist.err" "CHANGELOG.en.md is missing required text"
 assert_file_contains "$output_dir/missing-release-package-checklist.err" "./scripts/test-release-package.sh"
+git checkout -q -- CHANGELOG.en.md
+
+perl -0pi.bak -e 's/, selected release tag validation, and release script regression commands//' CHANGELOG.en.md
+rm -f CHANGELOG.en.md.bak
+if ./scripts/release-readiness.sh --allow-dirty --allow-post-validation-changes >"$output_dir/missing-checklist-summary-scope.out" 2>"$output_dir/missing-checklist-summary-scope.err"; then
+	fail "release readiness accepted stale release checklist summary wording"
+fi
+assert_file_contains "$output_dir/missing-checklist-summary-scope.err" "CHANGELOG.en.md is missing required text"
+assert_file_contains "$output_dir/missing-checklist-summary-scope.err" "release checklists to include documentation, dependency-security, Docker build/smoke, selected release tag validation, and release script regression commands"
 git checkout -q -- CHANGELOG.en.md
 
 sed -i.bak '/security-check/d' docs/release-notes.en.md

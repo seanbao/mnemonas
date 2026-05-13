@@ -670,6 +670,8 @@ if [[ "$CHECK_CHECKLIST" -eq 1 ]]; then
 	require_file_contains "CHANGELOG.en.md" "./scripts/test-release-artifacts.sh"
 	require_file_contains "CHANGELOG.md" "$artifact_verify_cmd"
 	require_file_contains "CHANGELOG.en.md" "$artifact_verify_cmd"
+	require_file_contains "CHANGELOG.md" "发布清单包含文档检查、依赖安全检查、Docker 构建烟测、所选发布 tag 校验和发布脚本回归命令"
+	require_file_contains "CHANGELOG.en.md" "release checklists to include documentation, dependency-security, Docker build/smoke, selected release tag validation, and release script regression commands"
 	check_release_notes
 	print_kv "checklist" "release commands present in CHANGELOG.md and CHANGELOG.en.md"
 fi
