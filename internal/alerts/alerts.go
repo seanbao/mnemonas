@@ -108,6 +108,12 @@ func cloneConfig(cfg Config) Config {
 var (
 	errStorageStatsInvalidBlockSize = errors.New("filesystem reported invalid block size")
 	errStorageStatsCapacityOverflow = errors.New("filesystem capacity exceeds uint64")
+	alertHTTPClient                 = &http.Client{
+		Timeout: 30 * time.Second,
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
 )
 
 func storageStatsFromStatfsBlocks(path string, blocks, availableBlocks uint64, blockSize int64, checkedAt time.Time) (StorageStats, error) {
@@ -580,6 +586,10 @@ func storageAlertPathScope(stats *StorageStats) string {
 	return "unknown"
 }
 
+func isAlertHTTPRedirect(statusCode int) bool {
+	return statusCode >= http.StatusMultipleChoices && statusCode < http.StatusBadRequest
+}
+
 func (m *Monitor) sendEventWebhook(ctx context.Context, payload EventPayload, cfg Config) error {
 	return m.sendWebhookRequest(ctx, payload, cfg, func(query url.Values) error {
 		setCommonWebhookQuery(query, payload.Type, payload.Level, payload.Message, payload.Hostname, payload.Timestamp)
@@ -642,13 +652,15 @@ func (m *Monitor) sendWebhookRequest(ctx context.Context, payload any, cfg Confi
 		req.Header.Set(key, value)
 	}
 
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := alertHTTPClient.Do(req)
 	if err != nil {
 		return sanitizedWebhookRequestError("send request", cfg.WebhookURL, err)
 	}
 	defer resp.Body.Close()
 
+	if isAlertHTTPRedirect(resp.StatusCode) {
+		return fmt.Errorf("webhook request to %s returned redirect status %d", redactWebhookURLForLog(cfg.WebhookURL), resp.StatusCode)
+	}
 	if resp.StatusCode >= 400 {
 		return fmt.Errorf("webhook request to %s returned status %d", redactWebhookURLForLog(cfg.WebhookURL), resp.StatusCode)
 	}
@@ -753,13 +765,15 @@ func (m *Monitor) sendTelegram(ctx context.Context, cfg Config, text string) err
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", "MnemoNAS-Alert/1.0")
 
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := alertHTTPClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("send telegram request: %w", err)
 	}
 	defer resp.Body.Close()
 
+	if isAlertHTTPRedirect(resp.StatusCode) {
+		return fmt.Errorf("telegram request returned redirect status %d", resp.StatusCode)
+	}
 	if resp.StatusCode >= 400 {
 		return fmt.Errorf("telegram request returned status %d", resp.StatusCode)
 	}
@@ -864,13 +878,15 @@ func (m *Monitor) sendWeCom(ctx context.Context, cfg Config, text string) error 
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", "MnemoNAS-Alert/1.0")
 
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := alertHTTPClient.Do(req)
 	if err != nil {
 		return sanitizedWeComWebhookRequestError("send request", webhookURL, err)
 	}
 	defer resp.Body.Close()
 
+	if isAlertHTTPRedirect(resp.StatusCode) {
+		return fmt.Errorf("wecom webhook request to %s returned redirect status %d", redactWebhookURLForLog(webhookURL), resp.StatusCode)
+	}
 	if resp.StatusCode >= 400 {
 		return fmt.Errorf("wecom webhook request to %s returned status %d", redactWebhookURLForLog(webhookURL), resp.StatusCode)
 	}
@@ -978,13 +994,15 @@ func (m *Monitor) sendDingTalk(ctx context.Context, cfg Config, text string) err
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", "MnemoNAS-Alert/1.0")
 
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := alertHTTPClient.Do(req)
 	if err != nil {
 		return sanitizedDingTalkWebhookRequestError("send request", webhookURL, err)
 	}
 	defer resp.Body.Close()
 
+	if isAlertHTTPRedirect(resp.StatusCode) {
+		return fmt.Errorf("dingtalk webhook request to %s returned redirect status %d", redactWebhookURLForLog(webhookURL), resp.StatusCode)
+	}
 	if resp.StatusCode >= 400 {
 		return fmt.Errorf("dingtalk webhook request to %s returned status %d", redactWebhookURLForLog(webhookURL), resp.StatusCode)
 	}

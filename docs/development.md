@@ -421,6 +421,7 @@ RUN_RCLONE_WEBDAV=1 ./scripts/run-e2e-isolated.sh --quick
 - `INITIAL_PASSWORD_FILE`。
 
 `STORAGE_ROOT` 不能包含控制字符、`..` 或符号链接路径组件。
+`BASE_URL` 必须是带 host 的 HTTP(S) URL；不能包含空白、控制字符、内嵌凭据、query、fragment、反斜杠、编码斜杠或编码反斜杠、编码 query 或 fragment 标记、空路径段，也不能包含 `.` 或 `..` 路径段。末尾斜杠会在校验后规范化。
 WebDAV `auth_type = "basic"` 时，脚本可以从配置或 `secrets.json` 读取 Basic Auth 凭据。
 WebDAV `auth_type = "users"` 时，应显式设置 `MNEMONAS_WEBDAV_USERNAME` 和 `MNEMONAS_WEBDAV_PASSWORD`。
 设置 `RUN_RCLONE_WEBDAV=1` 时，隔离 runner 和 `scripts/e2e-test.sh` 会在已安装 `rclone` 的环境中额外运行 WebDAV 客户端 smoke，覆盖上传、下载、移动/重命名、列出和清理。
@@ -453,6 +454,7 @@ RUN_CORRUPTION_TESTS=0 \
 隔离 runner 只接受 `/tmp` 或 checkout-local 根目录，以及 loopback Web 和 dataplane 地址。
 
 底层 runner 要求显式提供 `BASE_URL`、`STORAGE_ROOT` 和 `NASD_BIN`。
+`BASE_URL` 使用与 E2E runner 相同的 HTTP(S) URL 安全规则。
 WebDAV 使用 `auth_type = "users"` 时，还要求显式提供 `MNEMONAS_WEBDAV_USERNAME` 和 `MNEMONAS_WEBDAV_PASSWORD`。
 
 真实存储路径需要 `ALLOW_REAL_STORAGE=1`。
@@ -483,6 +485,7 @@ MNEMONAS_STORAGE_ROOT=/tmp/mnemonas-bench-target \
 ```
 
 手动 benchmark 目标会创建并删除 `storage.root/files/benchmark-test`。
+benchmark 目标 URL 使用与 E2E runner 相同的 HTTP(S) URL 安全规则。
 真实存储路径需要 `ALLOW_REAL_STORAGE=1`。
 该路径仍必须是绝对路径，不能包含控制字符、`..` 或符号链接路径组件，且不能指向受保护系统目录。
 

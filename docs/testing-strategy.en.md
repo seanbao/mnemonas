@@ -129,6 +129,7 @@ INITIAL_PASSWORD_FILE=/tmp/mnemonas-e2e-initial-password.txt \
 
 Manual `STORAGE_ROOT` values must be absolute paths.
 They must not contain control characters, `..`, or symlink path components, and are limited to `/tmp` or the current checkout by default.
+Manual `BASE_URL` values must be HTTP(S) URLs with a host; they must not contain whitespace, control characters, embedded credentials, query strings, fragments, backslashes, encoded slashes or backslashes, encoded query or fragment markers, empty path segments, or `.`/`..` path segments. Trailing slashes are normalized after validation.
 When WebDAV uses `auth_type = "users"`, manual runs also require explicit `MNEMONAS_WEBDAV_USERNAME` and `MNEMONAS_WEBDAV_PASSWORD`.
 
 When a manual check needs the initial administrator password, parse the full value after the `Password:` prefix, for example:
@@ -324,6 +325,7 @@ Safety gates:
 
 - `scripts/run-fault-injection-isolated.sh` accepts only `/tmp` or checkout-local roots and loopback Web and dataplane addresses.
 - `BASE_URL`, `STORAGE_ROOT`, and `NASD_BIN` must be explicit.
+- `BASE_URL` must be an HTTP(S) URL with a host, and must not contain credentials, queries, fragments, backslashes, encoded boundary characters, empty path segments, or `.`/`..` path segments.
 - Default allowed storage roots are `/tmp` or the current checkout.
 - `STORAGE_ROOT` must be absolute and must not contain control characters, `..`, or symlink path components.
 - `$HOME/.mnemonas` is rejected by default.
