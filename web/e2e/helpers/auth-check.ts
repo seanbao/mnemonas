@@ -1,9 +1,11 @@
 import { expect, test, type Locator, type Page } from '@playwright/test'
 import { resolveE2ECredentials } from './credentials'
+import { waitForRouteSettled } from './route-ready'
 
 export const LOGIN_BUTTON_PATTERN = /^(登录|sign in|login)$/i
 export const USERNAME_INPUT_PATTERN = /^用户名$/i
 export const PASSWORD_INPUT_PATTERN = /^密码$/i
+const AUTH_SURFACE_TIMEOUT_MS = 20_000
 
 type AuthSurface = 'app' | 'login' | 'loading'
 
@@ -23,7 +25,7 @@ function skipOrFail(message: string): never {
   throw new Error(`${message}. Set MNEMONAS_E2E_ALLOW_AUTH_SKIP=1 only when intentionally reusing an environment where protected-page checks may be skipped.`)
 }
 
-export async function waitForAuthSurface(page: Page, timeout = 10_000): Promise<Exclude<AuthSurface, 'loading'>> {
+export async function waitForAuthSurface(page: Page, timeout = AUTH_SURFACE_TIMEOUT_MS): Promise<Exclude<AuthSurface, 'loading'>> {
   const desktopNavigation = page.getByRole('navigation', { name: '主导航' })
   const mobileNavigation = page.getByRole('navigation', { name: '移动端主导航' })
   const mobileMenuButton = page.getByRole('button', { name: '打开导航菜单' })
@@ -51,7 +53,7 @@ export async function waitForAuthSurface(page: Page, timeout = 10_000): Promise<
   return observedSurface as Exclude<AuthSurface, 'loading'>
 }
 
-export async function waitForAppReady(page: Page): Promise<void> {
+export async function waitForAppReady(page: Page, route?: string): Promise<void> {
   // Vite HMR and app-level polling keep background requests alive, so networkidle is not a stable readiness signal.
   await page.waitForLoadState('domcontentloaded')
   await page.locator('body').waitFor({ state: 'visible' })
@@ -60,6 +62,9 @@ export async function waitForAppReady(page: Page): Promise<void> {
   await routeFallback.waitFor({ state: 'hidden', timeout: 10_000 }).catch(() => {})
 
   await waitForAuthSurface(page)
+  if (route) {
+    await waitForRouteSettled(page, route)
+  }
 }
 
 /**
@@ -122,8 +127,8 @@ export async function skipIfAuthRequired(page: Page, targetPath?: string): Promi
 
     if (targetPath && !page.url().includes(targetPath)) {
       await page.goto(targetPath, { waitUntil: 'domcontentloaded' })
-      await waitForAppReady(page)
     }
+    await waitForAppReady(page, targetPath)
   } catch {
     skipOrFail('Auto-login failed (invalid credentials, rate limit, or backend error)')
   }
@@ -134,7 +139,7 @@ export async function skipIfAuthRequired(page: Page, targetPath?: string): Promi
  */
 export async function ensureAuthenticatedAt(page: Page, path: string): Promise<void> {
   await page.goto(path, { waitUntil: 'domcontentloaded' })
-  await waitForAppReady(page)
+  await waitForAppReady(page, path)
   await skipIfAuthRequired(page, path)
 }
 

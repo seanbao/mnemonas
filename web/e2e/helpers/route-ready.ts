@@ -14,6 +14,13 @@ const routeLoadingText: Record<string, Array<{ text: string | RegExp; timeout: n
   '/users': [{ text: '加载用户列表…', timeout: 20_000 }],
 }
 
+const routeLoadingStatus: Record<string, Array<{ name: string | RegExp; timeout: number }>> = {
+  '/': [{ name: '加载首页', timeout: 15_000 }],
+  '/activity': [{ name: '加载最近操作', timeout: 15_000 }],
+  '/storage': [{ name: '加载空间与存储', timeout: 20_000 }],
+  '/trash': [{ name: '加载回收站', timeout: 15_000 }],
+}
+
 export async function waitForAnimationFrames(page: Page, frameCount = 2): Promise<void> {
   await page.evaluate((frames) => new Promise<void>((resolve) => {
     let remainingFrames = frames
@@ -46,6 +53,23 @@ async function waitForOptionalLoadingTextHidden(
   await loading.first().waitFor({ state: 'hidden', timeout })
 }
 
+async function waitForOptionalLoadingStatusHidden(
+  page: Page,
+  name: string | RegExp,
+  timeout: number,
+): Promise<void> {
+  const loading = page.getByRole('status', { name })
+  const appeared = await loading.first().waitFor({ state: 'visible', timeout: 250 })
+    .then(() => true)
+    .catch(() => false)
+
+  if (!appeared) {
+    return
+  }
+
+  await loading.first().waitFor({ state: 'hidden', timeout })
+}
+
 export async function waitForRouteSettled(
   page: Page,
   route: string,
@@ -58,6 +82,10 @@ export async function waitForRouteSettled(
 
   for (const loading of routeLoadingText[routePath] ?? []) {
     await waitForOptionalLoadingTextHidden(page, loading.text, loading.timeout)
+  }
+
+  for (const loading of routeLoadingStatus[routePath] ?? []) {
+    await waitForOptionalLoadingStatusHidden(page, loading.name, loading.timeout)
   }
 
   if (options.waitForNetworkIdle) {

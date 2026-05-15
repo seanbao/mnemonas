@@ -366,6 +366,7 @@ npm run test:e2e:ui
 
 Playwright 默认启动隔离后端和前端服务器。
 本地运行默认使用 4 个 worker，除非 `MNEMONAS_E2E_WORKERS` 设置为正整数；CI 使用 1 个 worker。
+默认单个 Playwright 测试超时为 60 秒，断言等待超时为 10 秒；可用 `MNEMONAS_E2E_TEST_TIMEOUT_MS` 和 `MNEMONAS_E2E_EXPECT_TIMEOUT_MS` 覆盖。
 
 隔离后端使用 2 小时 access token 生命周期和 168 小时 refresh token 生命周期。
 这可避免长时间并行 E2E 运行在共享 storageState 过期后进入并发 refresh-token 轮换。

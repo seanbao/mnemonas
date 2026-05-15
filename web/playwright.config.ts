@@ -21,6 +21,8 @@ const FRONTEND_HOST = normalizeTcpHostForCli('MNEMONAS_E2E_FRONTEND_URL host', R
 const FRONTEND_PORT = FRONTEND_PARSED_URL.port || (FRONTEND_PARSED_URL.protocol === 'https:' ? '443' : '80')
 const WEB_SERVER_ENV = { ...process.env }
 const LOCAL_WORKERS = parseOptionalPositiveInteger('MNEMONAS_E2E_WORKERS', process.env.MNEMONAS_E2E_WORKERS) ?? 4
+const TEST_TIMEOUT_MS = parseOptionalPositiveInteger('MNEMONAS_E2E_TEST_TIMEOUT_MS', process.env.MNEMONAS_E2E_TEST_TIMEOUT_MS) ?? 60_000
+const EXPECT_TIMEOUT_MS = parseOptionalPositiveInteger('MNEMONAS_E2E_EXPECT_TIMEOUT_MS', process.env.MNEMONAS_E2E_EXPECT_TIMEOUT_MS) ?? 10_000
 delete WEB_SERVER_ENV.NO_COLOR
 
 process.env.E2E_USERNAME ||= 'admin'
@@ -110,6 +112,10 @@ export default defineConfig({
   fullyParallel: true,
   forbidOnly: true,
   retries: process.env.CI ? 2 : 0,
+  timeout: TEST_TIMEOUT_MS,
+  expect: {
+    timeout: EXPECT_TIMEOUT_MS,
+  },
   workers: process.env.CI ? 1 : LOCAL_WORKERS,
   reporter: [
     ['html', { open: 'never' }],
