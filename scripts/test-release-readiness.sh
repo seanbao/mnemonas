@@ -40,7 +40,7 @@ write_checklists() {
 - [ ] 公网发布前在服务器运行：`sudo mnemonas-doctor --public-domain <domain>`，并按 [公网云防火墙复核清单](docs/cloud-firewall-checklist.md) 复核环境
 - [ ] 公网发布前从外部网络运行：`./scripts/public-go-live-smoke.sh <domain>`
 - [ ] 如本次发布包含备份恢复链路，运行恢复演练 smoke 入口：`./scripts/backup-restore-drill-smoke.sh`
-- [ ] 发布前就绪摘要通过：`./scripts/release-readiness.sh`
+- [ ] 发布前就绪摘要通过：`make release-readiness`
 - [ ] `./scripts/plan-hardening-commits.sh --fail-on-manual` 确认没有未归类路径
 - [ ] 所选发布 tag 校验通过：`./scripts/check-release-tag.sh <tag>`
 - [ ] 发布脚本回归通过：`./scripts/test-release-tag.sh`、`./scripts/test-release-package.sh`、`./scripts/test-release-artifacts.sh`
@@ -60,7 +60,7 @@ EOF
 - [ ] Before public release, run on the server: `sudo mnemonas-doctor --public-domain <domain>` and review the [Public cloud firewall checklist](docs/cloud-firewall-checklist.en.md)
 - [ ] Before public release, run from an external network: `./scripts/public-go-live-smoke.sh <domain>`
 - [ ] If this release includes the backup and restore path, run the restore-drill smoke entry point: `./scripts/backup-restore-drill-smoke.sh`
-- [ ] Run release readiness summary: `./scripts/release-readiness.sh`
+- [ ] Run release readiness summary: `make release-readiness`
 - [ ] Confirm `./scripts/plan-hardening-commits.sh --fail-on-manual` reports no unclassified paths
 - [ ] Validate the selected release tag: `./scripts/check-release-tag.sh <tag>`
 - [ ] Run release script regressions: `./scripts/test-release-tag.sh`, `./scripts/test-release-package.sh`, and `./scripts/test-release-artifacts.sh`
@@ -156,7 +156,7 @@ write_community_files() {
 		SECURITY.md \
 		SECURITY.zh-CN.md
 	cat >Makefile <<'EOF'
-.PHONY: go-packages workflows-check scripts-check toolchains-check docs-check security-check test test-torture docker docker-smoke docker-check check verify-changed quick-check lint
+.PHONY: go-packages workflows-check scripts-check toolchains-check docs-check security-check test test-torture docker docker-smoke docker-check check verify-changed release-readiness quick-check lint
 
 GO_TEST_TIMEOUT ?= 20m
 
@@ -200,6 +200,9 @@ check: workflows-check scripts-check toolchains-check docs-check lint test
 
 verify-changed:
 	./scripts/verify-changed.sh
+
+release-readiness:
+	./scripts/release-readiness.sh
 
 quick-check:
 	@true
@@ -853,6 +856,15 @@ if ./scripts/release-readiness.sh --allow-dirty --skip-checklist >"$output_dir/m
 fi
 assert_file_contains "$output_dir/missing-makefile-docker-check.err" "Makefile is missing required text"
 assert_file_contains "$output_dir/missing-makefile-docker-check.err" "docker-check: docker docker-smoke"
+git checkout -q -- Makefile
+
+sed -i.bak '/^release-readiness:/,+1d' Makefile
+rm -f Makefile.bak
+if ./scripts/release-readiness.sh --allow-dirty --skip-checklist >"$output_dir/missing-makefile-release-readiness.out" 2>"$output_dir/missing-makefile-release-readiness.err"; then
+	fail "release readiness accepted a Makefile without the release-readiness target baseline"
+fi
+assert_file_contains "$output_dir/missing-makefile-release-readiness.err" "Makefile is missing required text"
+assert_file_contains "$output_dir/missing-makefile-release-readiness.err" "release-readiness:"
 git checkout -q -- Makefile
 
 sed -i.bak '/Sensitive values such as passwords/d' .github/ISSUE_TEMPLATE/bug_report.yml

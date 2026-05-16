@@ -264,6 +264,9 @@ make dev
 # 变更感知验证；提交本地变更前优先运行
 make verify-changed
 
+# 发布前就绪摘要；打 tag 前运行
+make release-readiness
+
 # 快速本地检查
 make quick-check
 

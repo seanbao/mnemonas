@@ -72,6 +72,7 @@ Release workflow 预期生成以下产物：
 - `make docs-check`
 - `make security-check NPM_AUDIT=1`
 - `make docker-check`
+- `make release-readiness`
 - `sudo mnemonas-doctor --public-domain <domain>`
 - `./scripts/public-go-live-smoke.sh <domain>`
 - `./scripts/backup-restore-drill-smoke.sh`
@@ -123,6 +124,6 @@ mkdir -p dist/release-check
 - 确认本草稿已按最终 tag、验证结果和产物名称更新。
 - 确认 `git status --short --branch` 干净。
 - 确认 `./scripts/plan-hardening-commits.sh --fail-on-manual` 没有待分组路径。
-- 运行 `./scripts/release-readiness.sh`，确认提交标题、临时 `fixup!` / `squash!` 提交、hardening 验证证据、发布文档命令、公网部署复核命令、安全策略、Dependabot 基线、CI/Release workflow 基线、Makefile 核心本地门禁目标基线、torture workflow 基线、Issue 表单安全提示和 community health 文件均通过检查。
+- 运行 `make release-readiness`，确认提交标题、临时 `fixup!` / `squash!` 提交、hardening 验证证据、发布文档命令、公网部署复核命令、安全策略、Dependabot 基线、CI/Release workflow 基线、Makefile 核心本地门禁目标基线、torture workflow 基线、Issue 表单安全提示和 community health 文件均通过检查。
 - 创建并推送 tag 后，确认 Release workflow 成功。
 - 发布后运行 release artifact verifier 并记录结果。

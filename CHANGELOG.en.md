@@ -75,6 +75,7 @@ This project follows [Semantic Versioning 2.0.0](https://semver.org/).
 - `scripts/release-readiness.sh` requires the release checklist and bilingual release notes to retain the `mnemonas-doctor --public-domain`, `scripts/public-go-live-smoke.sh`, `scripts/backup-restore-drill-smoke.sh`, and `cloud-firewall-checklist` entry points, preventing public-deployment environment review and the restore-drill entry point from being omitted during final release preparation.
 - `scripts/release-readiness.sh` rejects a base ref that is not an ancestor of the current HEAD, preventing misleading release-readiness summaries from sibling branch ranges.
 - `scripts/release-readiness.sh` checks that local commit subjects on the current release branch follow Conventional Commits and rejects leftover `fixup!` / `squash!` temporary commits.
+- Added `make release-readiness` as a Makefile entry point for the release readiness summary, and the Makefile baseline gate retains that entry point so pre-release checks do not depend on remembering the script path.
 - `scripts/public-go-live-smoke.sh` checks backend-port TCP reachability before HTTP status checks, so `8080/9090/9091` or custom backend ports fail when an external network can establish a TCP connection even if no HTTP status is returned.
 - `scripts/public-go-live-smoke.sh` only prints redacted target shapes for invalid custom backend targets and bad HTTP redirects, avoiding query strings, fragments, userinfo, and control-character path content in failure logs.
 - `scripts/public-go-live-smoke.sh` auto-selects GNU timeout-compatible commands in `timeout`, then `gtimeout`, order for TCP probes and supports `TIMEOUT_BIN` for compatible overrides.
@@ -200,7 +201,7 @@ First public release target.
 - [ ] If public access is planned, run from an external network: `./scripts/public-go-live-smoke.sh <domain>` to confirm HTTPS, same-domain redirects, and private backend ports
 - [ ] If this release includes the backup and restore path, run `./scripts/backup-restore-drill-smoke.sh` against at least one configured backup job and confirm that immediate backup, retention review, restore drill, and restore report download can be repeated
 - [ ] Confirm `./scripts/plan-hardening-commits.sh --fail-on-manual` reports no unclassified paths
-- [ ] Run release readiness summary: `./scripts/release-readiness.sh`
+- [ ] Run release readiness summary: `make release-readiness`
 - [ ] Update `CHANGELOG.md`, `CHANGELOG.en.md`, README version references, and [release notes draft](docs/release-notes.en.md)
 - [ ] Validate the selected release tag: `./scripts/check-release-tag.sh <tag>`
 - [ ] Run release script regressions: `./scripts/test-release-tag.sh`, `./scripts/test-release-package.sh`, and `./scripts/test-release-artifacts.sh`
