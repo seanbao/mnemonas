@@ -278,6 +278,7 @@ format = "console"
 
 ```bash
 make verify-changed
+make release-readiness
 make test
 make test-torture
 make e2e
@@ -294,6 +295,7 @@ make docker-check
 当 `go.mod`、`go.sum`、Cargo 清单/锁文件或 Web npm 清单/锁文件变化时，`verify-changed` 会追加依赖安全检查；Web npm 清单或锁文件变化会使用 `NPM_AUDIT=1` 运行 npm audit。
 YAML 配置校验会拒绝语法错误和同一映射内的重复键，避免本地解析时静默覆盖配置值。
 使用 `./scripts/verify-changed.sh --staged` 只检查暂存内容，使用 `./scripts/verify-changed.sh --base <ref>` 检查分支范围，使用 `--dry-run` 查看将运行的命令而不执行。
+发布前运行 `make release-readiness` 汇总当前分支、提交标题、分组规划、验证证据和 release checklist 状态。
 Docker 镜像构建和容器烟测默认受 `VERIFY_CHANGED_DOCKER_TIMEOUT=45m` 限制，可按本地网络和构建机性能覆盖该值；脚本会自动使用 `timeout` 或 GNU coreutils 的 `gtimeout`。
 
 纯文档变更运行 `make docs-check`。

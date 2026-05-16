@@ -1,4 +1,4 @@
-.PHONY: all build web-build test test-torture fault-injection fault-injection-live clean deps dev proto proto-go proto-rust go-packages fmt lint workflows-check scripts-check toolchains-check docs-check security-check install-audit-tools docker docker-smoke docker-check e2e bench coverage rust-coverage check verify-changed quick-check run help
+.PHONY: all build web-build test test-torture fault-injection fault-injection-live clean deps dev proto proto-go proto-rust go-packages fmt lint workflows-check scripts-check toolchains-check docs-check security-check install-audit-tools docker docker-smoke docker-check e2e bench coverage rust-coverage check verify-changed release-readiness quick-check run help
 
 # Version metadata
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
@@ -70,6 +70,7 @@ help:
 	@echo "  test-torture - Run race/fuzz/property/browser torture tests"
 	@echo "  coverage   - Run tests with coverage report"
 	@echo "  verify-changed - Run checks selected from changed files"
+	@echo "  release-readiness - Summarize pre-release readiness"
 	@echo "  quick-check - Run fast local Go/Rust checks"
 	@echo "  lint       - Run linters (Go + Rust)"
 	@echo "  scripts-check - Validate deployment shell scripts and Web tool scripts"
@@ -360,6 +361,9 @@ check: workflows-check scripts-check toolchains-check docs-check lint test
 
 verify-changed:
 	./scripts/verify-changed.sh
+
+release-readiness:
+	./scripts/release-readiness.sh
 
 # Fast checks (before commit)
 quick-check:
