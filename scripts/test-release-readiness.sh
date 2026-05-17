@@ -337,6 +337,10 @@ jobs:
         with:
           persist-credentials: false
       - run: ./scripts/check-release-tag.sh "$GITHUB_REF_NAME"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mnemonas-linux-amd64
+          path: dist/*.tar.gz
   docker:
     permissions:
       contents: read
@@ -344,18 +348,31 @@ jobs:
     steps:
       - run: ./scripts/docker-smoke.sh mnemonas:release-smoke
   release:
+    needs: [build, docker]
     permissions:
       contents: write
       packages: read
     steps:
       - uses: docker/login-action@v3
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - run: |
+          cd dist
+          sha256sum ./*.tar.gz > checksums.txt
       - run: |
           ./scripts/verify-release-artifacts.sh \
+            --version "$GITHUB_REF_NAME" \
+            --repository "$GITHUB_REPOSITORY" \
             --require-targets \
             --check-image \
             dist
       - uses: softprops/action-gh-release@v2
         with:
+          files: |
+            dist/*.tar.gz
+            dist/checksums.txt
           prerelease: ${{ contains(github.ref_name, '-') }}
 EOF
 	cat >.github/workflows/torture.yml <<'EOF'
@@ -811,6 +828,60 @@ if ./scripts/release-readiness.sh --allow-dirty --skip-checklist >"$output_dir/m
 fi
 assert_file_contains "$output_dir/missing-release-artifact-verifier.err" ".github/workflows/release.yml is missing required text"
 assert_file_contains "$output_dir/missing-release-artifact-verifier.err" "./scripts/verify-release-artifacts.sh"
+git checkout -q -- .github/workflows/release.yml
+
+sed -i.bak '/actions\/upload-artifact@v4/d' .github/workflows/release.yml
+rm -f .github/workflows/release.yml.bak
+if ./scripts/release-readiness.sh --allow-dirty --skip-checklist >"$output_dir/missing-release-upload-artifact.out" 2>"$output_dir/missing-release-upload-artifact.err"; then
+	fail "release readiness accepted a Release workflow without build artifact upload"
+fi
+assert_file_contains "$output_dir/missing-release-upload-artifact.err" ".github/workflows/release.yml is missing required text"
+assert_file_contains "$output_dir/missing-release-upload-artifact.err" "uses: actions/upload-artifact@v4"
+git checkout -q -- .github/workflows/release.yml
+
+sed -i.bak 's/needs: \[build, docker\]/needs: build/' .github/workflows/release.yml
+rm -f .github/workflows/release.yml.bak
+if ./scripts/release-readiness.sh --allow-dirty --skip-checklist >"$output_dir/missing-release-needs.out" 2>"$output_dir/missing-release-needs.err"; then
+	fail "release readiness accepted a Release workflow without build and docker dependencies"
+fi
+assert_file_contains "$output_dir/missing-release-needs.err" ".github/workflows/release.yml job release is missing required text"
+assert_file_contains "$output_dir/missing-release-needs.err" "needs: [build, docker]"
+git checkout -q -- .github/workflows/release.yml
+
+sed -i.bak '/actions\/download-artifact@v4/d' .github/workflows/release.yml
+rm -f .github/workflows/release.yml.bak
+if ./scripts/release-readiness.sh --allow-dirty --skip-checklist >"$output_dir/missing-release-download-artifact.out" 2>"$output_dir/missing-release-download-artifact.err"; then
+	fail "release readiness accepted a Release workflow without artifact download"
+fi
+assert_file_contains "$output_dir/missing-release-download-artifact.err" ".github/workflows/release.yml job release is missing required text"
+assert_file_contains "$output_dir/missing-release-download-artifact.err" "uses: actions/download-artifact@v4"
+git checkout -q -- .github/workflows/release.yml
+
+sed -i.bak '/sha256sum .*checksums.txt/d' .github/workflows/release.yml
+rm -f .github/workflows/release.yml.bak
+if ./scripts/release-readiness.sh --allow-dirty --skip-checklist >"$output_dir/missing-release-checksums.out" 2>"$output_dir/missing-release-checksums.err"; then
+	fail "release readiness accepted a Release workflow without checksum generation"
+fi
+assert_file_contains "$output_dir/missing-release-checksums.err" ".github/workflows/release.yml job release is missing required text"
+assert_file_contains "$output_dir/missing-release-checksums.err" "sha256sum ./*.tar.gz > checksums.txt"
+git checkout -q -- .github/workflows/release.yml
+
+sed -i.bak '/--version/d' .github/workflows/release.yml
+rm -f .github/workflows/release.yml.bak
+if ./scripts/release-readiness.sh --allow-dirty --skip-checklist >"$output_dir/missing-release-verifier-version.out" 2>"$output_dir/missing-release-verifier-version.err"; then
+	fail "release readiness accepted a Release workflow without verifier version binding"
+fi
+assert_file_contains "$output_dir/missing-release-verifier-version.err" ".github/workflows/release.yml job release is missing required text"
+assert_file_contains "$output_dir/missing-release-verifier-version.err" "--version \"\$GITHUB_REF_NAME\""
+git checkout -q -- .github/workflows/release.yml
+
+sed -i.bak '/dist\/checksums.txt/d' .github/workflows/release.yml
+rm -f .github/workflows/release.yml.bak
+if ./scripts/release-readiness.sh --allow-dirty --skip-checklist >"$output_dir/missing-release-published-checksums.out" 2>"$output_dir/missing-release-published-checksums.err"; then
+	fail "release readiness accepted a Release workflow without publishing checksums"
+fi
+assert_file_contains "$output_dir/missing-release-published-checksums.err" ".github/workflows/release.yml job release is missing required text"
+assert_file_contains "$output_dir/missing-release-published-checksums.err" "dist/checksums.txt"
 git checkout -q -- .github/workflows/release.yml
 
 sed -i.bak '/--check-image/d' .github/workflows/release.yml
