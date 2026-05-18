@@ -14,7 +14,7 @@
 - 完善认证、用户、主目录、目录配额、目录访问规则、分享策略和会话安全默认值的后端与前端覆盖。
 - 加固邮件告警通知出口，消息头和 SMTP envelope 会清理控制字符，降低内部调用或后续扩展绕过配置校验后的头部注入风险。
 - 提升 Web 可见质量，核心页面、公开入口、移动端布局、基础可访问性、运行时错误、失败请求和破碎可见文本已纳入 Playwright 扫描。
-- 加固 systemd、Docker、反向代理、公网访问模板、doctor、公网域名就绪校验、release package 和 release artifact 验证路径；Docker preflight 会在 Compose 检查前拒绝空值、以 `-` 开头、包含空白或控制字符、URL 形态、无效 `sha256` digest 或不兼容 Docker tag 的 `MNEMONAS_IMAGE`，且 URL 形态诊断不回显凭据、query 或 fragment；Docker quickstart、preflight 和容器入口还会拒绝配置中包含父目录段或控制字符的 `auth.users_file` 容器路径，避免将 `/data/../...` 映射为宿主数据目录外的初始密码读取路径；Docker smoke 会在启动容器前拒绝以 `-` 开头或包含空白/控制字符的镜像引用；容器 healthcheck 对无效目标 URL 的诊断日志只输出脱敏后的 URL 形状，不写入嵌入凭据、原始查询字符串或 fragment；反向代理安装脚本对无效 `MNEMONAS_UPSTREAM_HOST` 只输出主机格式约束，不回显原始 host 值或误粘贴 URL 中的凭据、query、fragment；`mnemonas-doctor --public-domain` 对无效 `share.base_url` 诊断只输出脱敏 URL 形状，不回显误配置中的凭据、query 或 fragment；公网 go-live smoke 和 doctor 会拒绝 `localhost`、IP 地址和全数字四段主机名，给手动端口复核命令设置连接和总耗时上限，并拒绝空白的自定义后端目标列表和歧义目标路径，避免跳过端口暴露检查或生成不明确的后端探测 URL；Release workflow 会在创建 GitHub Release 前校验归档、checksums、必需目标集合、下载目录未知条目、归档条目类型、重复条目、控制字符路径、空白字符路径、归档成员控制字符路径、归档成员空白字符路径、反斜杠路径、歧义路径和 GHCR 仓库名；release artifact verifier 支持通过 `--` 传入以 `-` 开头的本地产物目录，避免发布后核验路径被 shell 内建命令按选项解释。
+- 加固 systemd、Docker、反向代理、公网访问模板、doctor、公网域名就绪校验、release package 和 release artifact 验证路径；Docker preflight 会在 Compose 检查前拒绝空值、以 `-` 开头、包含空白或控制字符、URL 形态、无效 `sha256` digest 或不兼容 Docker tag 的 `MNEMONAS_IMAGE`，且 URL 形态诊断不回显凭据、query 或 fragment；Docker quickstart、preflight 和容器入口还会拒绝配置中包含父目录段或控制字符的 `auth.users_file` 容器路径，避免将 `/data/../...` 映射为宿主数据目录外的初始密码读取路径；Docker smoke 会在启动容器前拒绝以 `-` 开头或包含空白/控制字符的镜像引用；容器 healthcheck 对无效目标 URL 的诊断日志只输出脱敏后的 URL 形状，不写入嵌入凭据、原始查询字符串或 fragment；反向代理安装脚本对无效 `MNEMONAS_UPSTREAM_HOST` 只输出主机格式约束，不回显原始 host 值或误粘贴 URL 中的凭据、query、fragment；`mnemonas-doctor --public-domain` 对无效 `share.base_url` 诊断只输出脱敏 URL 形状，不回显误配置中的凭据、query 或 fragment；公网 go-live smoke 和 doctor 会拒绝 `localhost`、IP 地址和全数字四段主机名，给手动端口复核命令设置连接和总耗时上限，并拒绝空白的自定义后端目标列表和歧义目标路径，避免跳过端口暴露检查或生成不明确的后端探测 URL；Release workflow 会在创建 GitHub Release 前校验归档、checksums、必需目标集合、下载目录未知条目、归档条目类型、重复条目、控制字符路径、空白字符路径、归档成员控制字符路径、归档成员空白字符路径、反斜杠路径、歧义路径和 GHCR 仓库名；release artifact verifier 支持通过 `--` 传入以 `-` 开头的本地产物目录，并对下载目录、checksum 清单和归档成员中的控制字符路径使用 shell-safe 诊断表示，避免发布后核验路径被 shell 内建命令按选项解释或把原始控制字符写入验收日志。
 - 公网 go-live smoke 会在 TCP 探测中按 `timeout`、`gtimeout` 顺序自动选择 GNU timeout 兼容命令，并支持用 `TIMEOUT_BIN` 指定兼容替代命令。
 - Release tag 会在产物构建前校验，必须使用 `vMAJOR.MINOR.PATCH` 或 `v1.2.3-rc.1` 这类语义化预发布形式，并且去掉 `v` 前缀后的 Docker 镜像 tag 长度不能超过 128 个字符；发布后 artifact verifier 会复用同一版本校验逻辑，对显式或归档名推断出的版本应用同一约束。
 - 新增可复跑的 WebDAV curl 协议 smoke，可对已运行服务验证基础读写、URL 编码空格路径、复制、移动和删除操作；脚本会提前拒绝含空白、query、fragment、内嵌凭据、反斜杠、编码斜杠、编码反斜杠或 `.`/`..` 路径段的 `WEBDAV_URL`，并拒绝非 `0/1` 的 `CURL_INSECURE`，相关契约通过脚本门禁覆盖。
@@ -26,6 +26,7 @@
 - 收紧发布就绪摘要：记录的完整验证目标之后如出现非发布文档变更，`release-readiness` 默认失败，并要求刷新完整验证或显式草稿放行。
 - `release-readiness` 现在要求四份 hardening 证据文档都存在，并且都记录同一个完整验证目标，避免发布前证据缺失被静默跳过。
 - `release-readiness` 还会检查双语 release notes 草稿记录当前完整验证目标，避免发布说明中的验证快照滞后。
+- `release-readiness` 会要求双语 release notes 的发布后下载和 artifact verifier 示例使用 `<tag>` 占位，避免首次发布前把固定版本号写入可复制命令。
 - `release-readiness` 会要求 `CHANGELOG.md` 和 `CHANGELOG.en.md` 的发布清单包含文档检查、依赖安全检查和 Docker 构建烟测命令，避免最终发布核验遗漏关键本地门禁。
 - `release-readiness` 会要求 Dependabot 配置覆盖 Go、Rust 数据面、Rust proto 生成器、Web npm、GitHub Actions 和 Docker 依赖更新入口，避免发布分支丢失依赖维护基线。
 - `release-readiness` 会要求 `.github/workflows/ci.yml` 和 `.github/workflows/release.yml` 保留关键 CI、E2E、Docker smoke、release tag 校验、release artifact 校验和发布权限基线，避免核心自动化路径在发布前失效。
@@ -57,7 +58,7 @@ Release workflow 预期生成以下产物：
 
 当前硬化分支已有以下验证证据；最终发布前应以最新 tag、Release workflow 结果和必要的环境验证为准：
 
-最近本地完整验证快照：验证目标 `dc14fbff0394`，`GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master` 通过，覆盖通知通道拒绝 HTTP 重定向、备份外部命令输出新增云存储 `account_key` 与 rclone `_pass`/`-pass` 类型字段脱敏，以及此前路线图、WebDAV 文档、CDC 文档边界、中文可见文案、release-readiness 基线、社区协作入口、文档契约、备份恢复演练指南文档契约、Go 测试超时门禁、批量恢复预检失败处置 E2E、release notes 候选版本边界门禁、公网 go-live 后端端口 TCP 可达性失败判定、timeout/gtimeout 兼容增量、Docker smoke curl 超时上限、`/health` 成功响应 readiness、配置期望版本时的响应体校验、portable curl timeout 参数形式、登录后重定向到 `/login` 或公开分享路由时回退首页的前端边界，以及 E2E/benchmark/故障注入脚本显式 `BASE_URL` 对凭据、query、fragment、编码边界字符和点段的拒绝与尾斜杠规范化增量；同时覆盖 `make check`、依赖安全扫描、示例配置、public-access 模板、proto 再生成稳定性、Rust fmt/test/clippy、proto-gen fmt/test/clippy、前端 lint/typecheck/unit/build、Playwright 377 个 E2E 用例、Docker build、Docker image `sha256:5b5ec2e8b0a3d3386992de32b928efdb1156774ad1f7763b1defd85d2603f528` 和 Docker smoke。Docker smoke 使用 Docker 自动分配的 loopback 端口 `http://127.0.0.1:32779`。
+最近本地完整验证快照：验证目标 `5f0be52a0ce1`，`GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master` 通过，覆盖 release notes 发布后核验命令 `<tag>` 占位门禁、release artifact verifier 控制字符路径 shell-safe 诊断表示、通知通道拒绝 HTTP 重定向、备份外部命令输出新增云存储 `account_key` 与 rclone `_pass`/`-pass` 类型字段脱敏，以及此前路线图、WebDAV 文档、CDC 文档边界、中文可见文案、release-readiness 基线、社区协作入口、文档契约、备份恢复演练指南文档契约、Go 测试超时门禁、批量恢复预检失败处置 E2E、release notes 候选版本边界门禁、公网 go-live 后端端口 TCP 可达性失败判定、timeout/gtimeout 兼容增量、Docker smoke curl 超时上限、`/health` 成功响应 readiness、配置期望版本时的响应体校验、portable curl timeout 参数形式、登录后重定向到 `/login` 或公开分享路由时回退首页的前端边界，以及 E2E/benchmark/故障注入脚本显式 `BASE_URL` 对凭据、query、fragment、编码边界字符和点段的拒绝与尾斜杠规范化增量；同时覆盖 `make check`、依赖安全扫描、示例配置、public-access 模板、proto 再生成稳定性、Rust fmt/test/clippy、proto-gen fmt/test/clippy、前端 lint/typecheck/unit/build、Playwright 377 个 E2E 用例、Docker build、Docker image `sha256:c759f53801b008cdc052aa5ec0367a843a704a00e99348ace89e94ea4f5adc24` 和 Docker smoke。Docker smoke 使用 Docker 自动分配的 loopback 端口 `http://127.0.0.1:32781`。
 
 - `GOTOOLCHAIN=local ./scripts/verify-changed.sh`
 - `GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master`
@@ -91,12 +92,12 @@ Release workflow 预期生成以下产物：
 
 ```bash
 mkdir -p dist/release-check
-gh release download v0.1.0 \
+gh release download <tag> \
   --repo seanbao/mnemonas \
   --dir dist/release-check
 
 ./scripts/verify-release-artifacts.sh \
-  --version v0.1.0 \
+  --version <tag> \
   --repository seanbao/mnemonas \
   --require-targets \
   --check-image \

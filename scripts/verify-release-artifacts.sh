@@ -85,6 +85,18 @@ contains_whitespace_character() {
 	[[ "$value" == *[[:space:]]* ]]
 }
 
+format_log_value() {
+	local value="$1"
+	local quoted
+
+	if contains_control_character "$value"; then
+		printf -v quoted '%q' "$value"
+		printf '%s\n' "$quoted"
+		return
+	fi
+	printf '%s\n' "$value"
+}
+
 validate_repository_owner() {
 	local value="$1"
 
@@ -206,7 +218,7 @@ validate_checksums_manifest() {
 		esac
 		[[ -n "$filename" ]] || fail "checksums.txt line $line_number has an empty filename"
 		if contains_control_character "$filename"; then
-			fail "checksums.txt contains a control character in file path: $filename"
+			fail "checksums.txt contains a control character in file path: $(format_log_value "$filename")"
 		fi
 		if contains_whitespace_character "$filename"; then
 			fail "checksums.txt contains whitespace in file path: $filename"
@@ -257,7 +269,7 @@ validate_artifact_directory_entries() {
 			checksums.txt|mnemonas-*.tar.gz)
 				;;
 			*)
-				fail "artifact directory contains an unsupported entry: $base"
+				fail "artifact directory contains an unsupported entry: $(format_log_value "$base")"
 				;;
 		esac
 	done
@@ -294,36 +306,36 @@ validate_manifest_paths() {
 	while IFS= read -r path; do
 		[[ -n "$path" ]] || continue
 		if [[ -n "${seen_paths[$path]+x}" ]]; then
-			fail "archive contains duplicate entry: $path"
+			fail "archive contains duplicate entry: $(format_log_value "$path")"
 		fi
 		seen_paths["$path"]=1
 		case "$path" in
 			/*|../*|*/../*|*/..|..)
-				fail "archive entry has an unsafe path: $path"
+				fail "archive entry has an unsafe path: $(format_log_value "$path")"
 				;;
 		esac
 		case "$path" in
 			*\\*)
-				fail "archive entry contains a backslash: $path"
+				fail "archive entry contains a backslash: $(format_log_value "$path")"
 				;;
 		esac
 		if contains_control_character "$path"; then
-			fail "archive entry contains a control character: $path"
+			fail "archive entry contains a control character: $(format_log_value "$path")"
 		fi
 		if contains_whitespace_character "$path"; then
-			fail "archive entry contains whitespace: $path"
+			fail "archive entry contains whitespace: $(format_log_value "$path")"
 		fi
 		case "$path" in
 			*//*|./*|*/./*|*/.|.)
-				fail "archive entry has an unsafe path segment: $path"
+				fail "archive entry has an unsafe path segment: $(format_log_value "$path")"
 				;;
 		esac
 		root="${path%%/*}"
-		[[ -n "$root" ]] || fail "archive entry has an empty top-level path: $path"
+		[[ -n "$root" ]] || fail "archive entry has an empty top-level path: $(format_log_value "$path")"
 		if [[ -z "$top" ]]; then
 			top="$root"
 		fi
-		[[ "$root" == "$top" ]] || fail "archive contains multiple top-level directories: $top and $root"
+		[[ "$root" == "$top" ]] || fail "archive contains multiple top-level directories: $(format_log_value "$top") and $(format_log_value "$root")"
 	done <"$manifest"
 
 	[[ "$top" == "$expected_top" ]] || fail "archive top-level directory is $top, expected $expected_top"
@@ -493,7 +505,7 @@ for archive in "${archives[@]}"; do
 	assert_regular_file "$archive"
 	base="$(basename -- "$archive")"
 	if contains_control_character "$base"; then
-		fail "release archive filename contains a control character: $base"
+		fail "release archive filename contains a control character: $(format_log_value "$base")"
 	fi
 	if contains_whitespace_character "$base"; then
 		fail "release archive filename contains whitespace: $base"
