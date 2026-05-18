@@ -46,6 +46,7 @@ This project follows [Semantic Versioning 2.0.0](https://semver.org/).
 - GitHub Actions CI/CD for Go, Rust, frontend checks, Docker builds, and release packaging.
 - Release workflow for multi-platform binaries and container images.
 - Linux/systemd install and uninstall scripts.
+- systemd install and uninstall scripts use shell-safe failure diagnostics for path, address, port, and account parameters with control characters, preventing deployment logs from writing raw control characters or injected log lines.
 - `mnemonas-doctor` deployment diagnostics, including public HTTPS certificate checks, HTTP-to-HTTPS redirect checks, and manual cloud-firewall review guidance.
 - `mnemonas-doctor --public-domain` detects broad UFW allow rules for backend control-plane and dataplane ports, and consistently expands `~` in storage and WebDAV user-file paths.
 - `mnemonas-public-setup` public HTTPS reverse-proxy setup helper.

@@ -59,6 +59,14 @@ assert_file_contains() {
   grep -Fq -- "$expected" "$path" || fail "$path does not contain: $expected"
 }
 
+assert_file_not_contains() {
+  local path="$1"
+  local unexpected="$2"
+  if grep -Fq -- "$unexpected" "$path"; then
+    fail "$path unexpectedly contains: $unexpected"
+  fi
+}
+
 run_preserve_data_test() {
   local case_dir="$TMP_ROOT/preserve"
   local fake_path="$case_dir/fake-bin"
@@ -255,6 +263,7 @@ run_refuse_control_character_remove_path_test() {
 
   [[ "$status" -ne 0 ]] || fail "uninstaller accepted control character in STORAGE_ROOT"
   assert_file_contains "$case_dir/uninstall.log" "STORAGE_ROOT cannot contain control characters"
+  assert_file_not_contains "$case_dir/uninstall.log" "$storage_root"
   assert_exists "$install_dir/share/mnemonas/web/index.html"
 }
 
