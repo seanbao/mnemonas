@@ -85,6 +85,26 @@ require_file_contains() {
 	}
 }
 
+require_file_line_contains_pair() {
+	local path="$1"
+	local first="$2"
+	local second="$3"
+	local description="$4"
+
+	[[ -f "$path" ]] || fail "missing required checklist file: $path"
+	awk -v first="$first" -v second="$second" '
+		index($0, first) && index($0, second) {
+			found = 1
+		}
+		END {
+			exit(found ? 0 : 1)
+		}
+	' "$path" || {
+		printf 'release-readiness: %s is missing required %s containing:\n%s\n%s\n' "$path" "$description" "$first" "$second" >&2
+		exit 1
+	}
+}
+
 require_community_file() {
 	local path="$1"
 
@@ -464,6 +484,9 @@ check_validation_evidence() {
 	target_short="$(git rev-parse --short=12 "$target_full")"
 	head_full="$(git rev-parse HEAD)"
 	VALIDATION_TARGET_SHORT="$target_short"
+
+	require_file_line_contains_pair "docs/hardening-progress.md" "make release-readiness" "$target_short" "release-readiness validation record"
+	require_file_line_contains_pair "docs/hardening-progress.en.md" "make release-readiness" "$target_short" "release-readiness validation record"
 
 	if ! git merge-base --is-ancestor "$target_full" HEAD; then
 		fail "validation evidence target is not an ancestor of HEAD: $target_short"
