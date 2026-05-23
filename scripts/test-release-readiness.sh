@@ -739,6 +739,20 @@ if ./scripts/release-readiness.sh --allow-post-validation-changes >"$output_dir/
 fi
 assert_file_contains "$output_dir/autosquash-commit-message.err" "temporary autosquash commit remains on release branch"
 
+git checkout -q master
+git checkout -q -b dirty-non-release-doc
+printf '# dirty docs\n' >>README.md
+if ./scripts/release-readiness.sh --allow-dirty >"$output_dir/dirty-non-release-doc.out" 2>"$output_dir/dirty-non-release-doc.err"; then
+	fail "release readiness accepted dirty non-release-documentation changes without an explicit draft override"
+fi
+assert_file_contains "$output_dir/dirty-non-release-doc.out" "[release-readiness] worktree:          dirty (draft summary)"
+assert_file_contains "$output_dir/dirty-non-release-doc.err" "uncommitted non-release-documentation changes exist"
+
+./scripts/release-readiness.sh --allow-dirty --allow-post-validation-changes >"$output_dir/dirty-non-release-doc-allowed.out" 2>"$output_dir/dirty-non-release-doc-allowed.err"
+assert_file_contains "$output_dir/dirty-non-release-doc-allowed.out" "[release-readiness] validation-warning:"
+assert_file_contains "$output_dir/dirty-non-release-doc-allowed.out" "draft override allowed uncommitted non-release-documentation changes"
+git checkout -q -- README.md
+
 git checkout -q release-readiness
 printf '# dirty docs\n' >>README.md
 if ./scripts/release-readiness.sh >"$output_dir/dirty.out" 2>"$output_dir/dirty.err"; then
