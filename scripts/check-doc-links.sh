@@ -191,6 +191,30 @@ const securityChecklistContracts = [
     ],
   },
 ]
+const reverseProxyWebDAVVerificationContracts = [
+  {
+    file: 'docs/reverse-proxy-setup.md',
+    required: [
+      '公网或生产 WebDAV 挂载建议优先使用 `auth_type=users`',
+      'auth_type=basic 时使用 WebDAV 用户名和密码',
+      '生成密码位于 /srv/mnemonas/secrets.json 的 webdav_password 字段',
+      'curl_auth_config="$(mktemp -t mnemonas-webdav-curl-auth.XXXXXX)"',
+      'chmod 600 "$curl_auth_config"',
+      'curl --config "$curl_auth_config" -X PROPFIND',
+    ],
+  },
+  {
+    file: 'docs/reverse-proxy-setup.en.md',
+    required: [
+      'Prefer `auth_type=users` for public or production WebDAV mounts',
+      'Use the WebDAV username and password when auth_type=basic',
+      'generated passwords use the webdav_password field in /srv/mnemonas/secrets.json',
+      'curl_auth_config="$(mktemp -t mnemonas-webdav-curl-auth.XXXXXX)"',
+      'chmod 600 "$curl_auth_config"',
+      'curl --config "$curl_auth_config" -X PROPFIND',
+    ],
+  },
+]
 const apiReferenceWebDAVAuthContracts = [
   {
     file: 'docs/api-reference.md',
@@ -415,6 +439,21 @@ function checkSecurityChecklistContract() {
     for (const phrase of doc.required) {
       if (!text.includes(phrase)) {
         errors.push(`${doc.file}: missing public deployment security checklist text: ${phrase}`)
+      }
+    }
+  }
+}
+
+function checkReverseProxyWebDAVVerificationContract() {
+  for (const doc of reverseProxyWebDAVVerificationContracts) {
+    const text = readOptionalFile(doc.file)
+    if (text === null) {
+      continue
+    }
+
+    for (const phrase of doc.required) {
+      if (!text.includes(phrase)) {
+        errors.push(`${doc.file}: missing reverse-proxy WebDAV verification guidance text: ${phrase}`)
       }
     }
   }
@@ -817,6 +856,7 @@ checkPairedHeadingLevelSequences()
 checkPairedLanguageLinks()
 checkStorageCDCContract()
 checkSecurityChecklistContract()
+checkReverseProxyWebDAVVerificationContract()
 checkAPIReferenceWebDAVAuthContract()
 checkBackupRestoreDrillContract()
 checkHardeningProgressReleaseReadinessContract()
