@@ -391,15 +391,16 @@ function updateActivityReviewRecordList(
   }
 
   const existed = current.items.some((item) => item.id === record.id)
-  const nextItems = shouldKeep(record)
-    ? current.items.map((item) => (item.id === record.id ? record : item))
+  const keepRecord = shouldKeep(record)
+  const nextItems = keepRecord
+    ? [record, ...current.items.filter((item) => item.id !== record.id)].slice(0, current.limit)
     : current.items.filter((item) => item.id !== record.id)
 
   return {
     ...current,
     items: nextItems,
-    total: shouldKeep(record)
-      ? current.total
+    total: keepRecord
+      ? current.total + (existed ? 0 : 1)
       : Math.max(0, current.total - (existed ? 1 : 0)),
   }
 }
