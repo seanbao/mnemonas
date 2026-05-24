@@ -27,8 +27,9 @@
 - 设置页目录权限用户矩阵和未保存规则预览可复制权限复核记录，内容包含路径、用户读写判定、命中规则和相关分享影响，并会保留后端持久化近期复核历史；服务端历史不可用时回退当前浏览器记录。
 - 分享路径策略可按用户、用户组或角色限制允许创建和维护分享链接的认证调用方；管理员保留修复既有分享的管理权限。
 - 分享、版本历史、回收站和维护页的关键处置入口会写入活动复核记录，覆盖分享停用、删除、重新启用、版本恢复、回收站恢复和备份恢复执行结果，便于追踪误分享、误删和恢复处置闭环。
-- 收紧发布就绪摘要：记录的完整验证目标之后如出现非发布文档变更，`release-readiness` 默认失败，并要求刷新完整验证或显式草稿放行；草稿放行非发布文档变更时会输出 `validation-warning`，避免被误读为正式发布就绪。
+- 收紧发布就绪摘要：记录的完整验证目标之后如出现已提交或未提交的非发布文档变更，`release-readiness` 默认失败，并要求刷新完整验证或显式草稿放行；草稿放行非发布文档变更时会输出 `validation-warning`，避免被误读为正式发布就绪。
 - `release-readiness` 现在要求四份 hardening 证据文档都存在，并且都记录同一个完整验证目标，避免发布前证据缺失被静默跳过。
+- `release-readiness` 还会要求双语 hardening progress 台账在 `make release-readiness` 记录中写入同一个完整验证目标，避免完整验证证据刷新后发布就绪摘要仍停留在旧目标。
 - `release-readiness` 还会检查双语 release notes 草稿记录当前完整验证目标，避免发布说明中的验证快照滞后。
 - `release-readiness` 会要求双语 release notes 的发布后下载和 artifact verifier 示例使用 `<tag>` 占位，避免首次发布前把固定版本号写入可复制命令。
 - `release-readiness` 会要求 `CHANGELOG.md` 和 `CHANGELOG.en.md` 的发布清单包含文档检查、依赖安全检查、Docker 构建烟测、所选发布 tag 校验和发布脚本回归命令，避免最终发布核验遗漏关键本地门禁。
@@ -64,7 +65,7 @@ Release workflow 预期生成以下产物：
 
 当前硬化分支已有以下验证证据；最终发布前应以最新 tag、Release workflow 结果和必要的环境验证为准：
 
-最近本地完整验证快照：验证目标 `3c06bc9b7323`，`GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master` 通过，覆盖 diff 空白、密钥泄漏扫描、workflow/YAML/脚本门禁、release-readiness 发布清单摘要范围门禁、Release workflow 结构门禁、`make release-readiness` 入口基线、`make check`、工具链一致性、Go/Rust/frontend 依赖安全扫描、示例配置、public-access 模板、proto 再生成稳定性、Rust fmt/test/clippy、proto-gen fmt/test/clippy、前端 lint/typecheck/unit/build、Playwright 377 个 E2E 用例、Docker build、Docker image `sha256:8b8e3b99881d79fd583ddb99502ddad23c4ace257c77edbd4f5ac73f73a705e9` 和 Docker smoke。Docker smoke 使用 Docker 自动分配的 loopback 端口 `http://127.0.0.1:32791`。
+最近本地完整验证快照：验证目标 `2821b6491036`，`GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master` 通过，覆盖 diff 空白、密钥泄漏扫描、workflow/YAML/脚本门禁、release-readiness 发布清单摘要范围门禁、Release workflow 结构门禁、hardening progress 中 `make release-readiness` 行级验证目标门禁、`make release-readiness` 入口基线、`make check`、工具链一致性、Go/Rust/frontend 依赖安全扫描、示例配置、public-access 模板、proto 再生成稳定性、Rust fmt/test/clippy、proto-gen fmt/test/clippy、前端 lint/typecheck/unit/build、Playwright 377 个 E2E 用例、Docker build、Docker image `sha256:23d73cf54a74f7eba8e82306b58e6775bc914d9ccf530241609e5cac274e90a8` 和 Docker smoke。Docker smoke 使用 Docker 自动分配的 loopback 端口 `http://127.0.0.1:32793`。
 
 - `GOTOOLCHAIN=local ./scripts/verify-changed.sh`
 - `GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master`
