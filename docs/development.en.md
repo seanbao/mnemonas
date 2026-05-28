@@ -404,6 +404,18 @@ The script passes authentication through a temporary curl config file so plainte
 
 `9091` should remain local/private.
 
+### Backup Restore-Drill Smoke Test
+
+```bash
+# Run a maintenance API smoke against a running service; the script does not create or delete backup jobs.
+MNEMONAS_API_URL=http://localhost:8080/api/v1 \
+MNEMONAS_BACKUP_JOB_ID=external-disk \
+MNEMONAS_COOKIE_FILE=cookies.txt \
+./scripts/backup-restore-drill-smoke.sh
+```
+
+`scripts/backup-restore-drill-smoke.sh` reads the backup job list and single-job detail by explicit job ID, triggers an immediate backup, runs the retention check, performs a restore drill, and downloads the restore report. `MNEMONAS_API_URL` must be an HTTP(S) API root URL without whitespace, query strings, fragments, embedded credentials, backslashes, encoded slashes, encoded backslashes, empty path segments, or `.`/`..` path segments; `MNEMONAS_BACKUP_JOB_ID` must be a safe job ID. Pass authentication through `MNEMONAS_COOKIE_FILE` when required. Each curl request uses `CURL_CONNECT_TIMEOUT=10` and `CURL_MAX_TIME=600` by default; increase `CURL_MAX_TIME` for high-latency backup targets. Set `MNEMONAS_BACKUP_KEEP_ARTIFACT=1` to retain local drill artifacts for manual inspection.
+
 ### E2E
 
 ```bash

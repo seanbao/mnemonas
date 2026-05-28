@@ -37,7 +37,7 @@
 - `release-readiness` 会要求 `.github/workflows/torture.yml` 保留手动入口、定时入口、只读权限、`RUN_LIVE_FAULTS: '0'` 非破坏性开关和 `make test-torture` 执行入口，避免长期回归工作流在发布前失效。
 - `release-readiness` 会要求关闭空白 Issue，并检查缺陷报告、使用问题、功能建议和 WebDAV 兼容性 Issue 表单保留敏感信息脱敏、诊断信息和安全影响提示，避免公开协作入口绕过安全提示。
 - `release-readiness` 会检查安全策略和支持说明保留私密漏洞报告入口、禁止公开漏洞细节、dataplane 端口不外露、依赖安全检查和公网直连限制等关键提示。
-- `release-readiness` 会要求发布清单和双语 release notes 保留 `mnemonas-doctor --public-domain`、`scripts/public-go-live-smoke.sh` 和 `cloud-firewall-checklist` 入口，避免公网部署环境复核从最终发布流程中遗漏。
+- `release-readiness` 会要求发布清单和双语 release notes 保留 `mnemonas-doctor --public-domain`、`scripts/public-go-live-smoke.sh`、`scripts/backup-restore-drill-smoke.sh` 和 `cloud-firewall-checklist` 入口，避免公网部署环境复核和恢复演练入口从最终发布流程中遗漏。
 - `release-readiness` 会拒绝不是当前 HEAD 祖先的 base ref，避免用旁支范围生成误导性的发布就绪摘要。
 - Go 测试入口现在保留 20 分钟包级超时，避免重负载 race 包在完整分支验证中被 Go 默认 10 分钟超时中断。
 - 文档检查会拒绝 API 示例中可复制的 `?path=/...` 裸路径查询，要求恢复和收藏检查等 `path` 查询示例使用 `%2F...` 编码形式。
@@ -61,7 +61,7 @@ Release workflow 预期生成以下产物：
 
 当前硬化分支已有以下验证证据；最终发布前应以最新 tag、Release workflow 结果和必要的环境验证为准：
 
-最近本地完整验证快照：验证目标 `d08b34895fff`，`GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master` 通过，覆盖 release notes 发布后核验命令 `<tag>` 占位门禁、公网 go-live smoke 脱敏目标形状诊断、`golang.org/x/image v0.43.0` 依赖安全修复、release artifact verifier 控制字符路径 shell-safe 诊断表示、systemd 安装和卸载控制字符诊断 shell-safe 表示、通知通道拒绝 HTTP 重定向、备份外部命令输出新增云存储 `account_key` 与 rclone `_pass`/`-pass` 类型字段脱敏、备份恢复演练 smoke 入口，以及此前路线图、WebDAV 文档、CDC 文档边界、中文可见文案、release-readiness 基线、社区协作入口、文档契约、备份恢复演练指南文档契约、Go 测试超时门禁、批量恢复预检失败处置 E2E、release notes 候选版本边界门禁、公网 go-live 后端端口 TCP 可达性失败判定、timeout/gtimeout 兼容增量、Docker smoke curl 超时上限、`/health` 成功响应 readiness、配置期望版本时的响应体校验、portable curl timeout 参数形式、登录后重定向到 `/login` 或公开分享路由时回退首页的前端边界，以及 E2E/benchmark/故障注入脚本显式 `BASE_URL` 对凭据、query、fragment、编码边界字符和点段的拒绝与尾斜杠规范化增量；同时覆盖 `make check`、依赖安全扫描、示例配置、public-access 模板、proto 再生成稳定性、Rust fmt/test/clippy、proto-gen fmt/test/clippy、前端 lint/typecheck/unit/build、Playwright 377 个 E2E 用例、Docker build、Docker image `sha256:4020126f076ac211dd5deb3eaf253ed77c234af9c4538ca07c9a0ec8d8b81ae3` 和 Docker smoke。Docker smoke 使用 Docker 自动分配的 loopback 端口 `http://127.0.0.1:32769`。
+最近本地完整验证快照：验证目标 `6375d0813b40`，`GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master` 通过，覆盖 release notes 发布后核验命令 `<tag>` 占位门禁、公网 go-live smoke 脱敏目标形状诊断、`golang.org/x/image v0.43.0` 依赖安全修复、release artifact verifier 控制字符路径 shell-safe 诊断表示、systemd 安装和卸载控制字符诊断 shell-safe 表示、通知通道拒绝 HTTP 重定向、备份外部命令输出新增云存储 `account_key` 与 rclone `_pass`/`-pass` 类型字段脱敏、备份恢复演练 smoke 入口文档契约，以及此前路线图、WebDAV 文档、CDC 文档边界、中文可见文案、release-readiness 基线、社区协作入口、文档契约、备份恢复演练指南文档契约、Go 测试超时门禁、批量恢复预检失败处置 E2E、release notes 候选版本边界门禁、公网 go-live 后端端口 TCP 可达性失败判定、timeout/gtimeout 兼容增量、Docker smoke curl 超时上限、`/health` 成功响应 readiness、配置期望版本时的响应体校验、portable curl timeout 参数形式、登录后重定向到 `/login` 或公开分享路由时回退首页的前端边界，以及 E2E/benchmark/故障注入脚本显式 `BASE_URL` 对凭据、query、fragment、编码边界字符和点段的拒绝与尾斜杠规范化增量；同时覆盖 `make check`、依赖安全扫描、示例配置、public-access 模板、proto 再生成稳定性、Rust fmt/test/clippy、proto-gen fmt/test/clippy、前端 lint/typecheck/unit/build、Playwright 377 个 E2E 用例、Docker build、Docker image `sha256:d6c67384112135df4e035c9dfe326acf66a4a5ca97019c6df06e0160eaf92e48` 和 Docker smoke。Docker smoke 使用 Docker 自动分配的 loopback 端口 `http://127.0.0.1:32770`。
 
 - `GOTOOLCHAIN=local ./scripts/verify-changed.sh`
 - `GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master`
@@ -71,11 +71,13 @@ Release workflow 预期生成以下产物：
 - `make docker-check`
 - `sudo mnemonas-doctor --public-domain <domain>`
 - `./scripts/public-go-live-smoke.sh <domain>`
+- `./scripts/backup-restore-drill-smoke.sh`
 - `docs/cloud-firewall-checklist.md`
 - `./scripts/test-release-tag.sh`
 - `./scripts/test-release-package.sh`
 - `./scripts/test-release-artifacts.sh`
 - Public go-live TCP reachability test：`scripts/test-public-go-live-smoke.sh`
+- Backup restore-drill smoke safety test：`scripts/test-backup-restore-drill-smoke.sh`
 - Release artifact dash-prefixed directory test：`scripts/test-release-artifacts.sh`
 - Docker quickstart safety test：`scripts/test-docker-quickstart.sh`
 - Docker preflight safety test：`scripts/test-docker-preflight.sh`
