@@ -841,6 +841,42 @@ EOF
 	git -C "$repo" add README.md README.en.md
 }
 
+write_reverse_proxy_webdav_contract_missing_chmod_doc() {
+	local repo="$1"
+	mkdir -p "$repo/docs"
+	write_root_readme_pair "$repo"
+	cat > "$repo/docs/reverse-proxy-setup.md" <<'EOF'
+# 外网访问配置指南
+
+[English](reverse-proxy-setup.en.md) | 简体中文
+
+公网或生产 WebDAV 挂载建议优先使用 `auth_type=users`。
+auth_type=basic 时使用 WebDAV 用户名和密码。
+生成密码位于 /srv/mnemonas/secrets.json 的 webdav_password 字段。
+
+```bash
+curl_auth_config="$(mktemp -t mnemonas-webdav-curl-auth.XXXXXX)"
+chmod 600 "$curl_auth_config"
+curl --config "$curl_auth_config" -X PROPFIND https://nas.example.com/dav/ -H "Depth: 0"
+```
+EOF
+	cat > "$repo/docs/reverse-proxy-setup.en.md" <<'EOF'
+# Public HTTPS and Reverse Proxy Setup
+
+English | [简体中文](reverse-proxy-setup.md)
+
+Prefer `auth_type=users` for public or production WebDAV mounts.
+Use the WebDAV username and password when auth_type=basic.
+Custom Basic passwords are not echoed back; generated passwords use the webdav_password field in /srv/mnemonas/secrets.json.
+
+```bash
+curl_auth_config="$(mktemp -t mnemonas-webdav-curl-auth.XXXXXX)"
+curl --config "$curl_auth_config" -X PROPFIND https://nas.example.com/dav/ -H "Depth: 0"
+```
+EOF
+	git -C "$repo" add README.md README.en.md docs/reverse-proxy-setup.md docs/reverse-proxy-setup.en.md
+}
+
 write_curl_bearer_auth_header_doc() {
 	local repo="$1"
 	write_root_readme_pair "$repo"
@@ -1698,6 +1734,7 @@ run_rejects "remote-shell-pipe" "avoid piping remote install scripts directly to
 run_rejects "curl-basic-auth-argument" "avoid putting Basic Auth credentials in curl command arguments" write_curl_basic_auth_argument_doc
 run_rejects "multiline-curl-basic-auth-argument" "avoid putting Basic Auth credentials in curl command arguments" write_multiline_curl_basic_auth_argument_doc
 run_rejects "curl-basic-authorization-header" "avoid putting Basic Auth credentials in curl command arguments" write_curl_basic_authorization_header_doc
+run_rejects "reverse-proxy-webdav-contract-missing-chmod" "docs/reverse-proxy-setup.en.md: missing reverse-proxy WebDAV verification guidance text: chmod 600 \"\$curl_auth_config\"" write_reverse_proxy_webdav_contract_missing_chmod_doc
 run_rejects "curl-bearer-auth-header" "avoid putting Bearer tokens in curl command arguments" write_curl_bearer_auth_header_doc
 run_rejects "multiline-curl-bearer-auth-header" "avoid putting Bearer tokens in curl command arguments" write_multiline_curl_bearer_auth_header_doc
 run_rejects "non-executable-script-reference" "script reference is not executable: ./scripts/helper.sh" write_non_executable_script_reference_doc
