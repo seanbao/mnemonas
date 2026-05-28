@@ -390,17 +390,13 @@ MNEMONAS_WEBDAV_USERNAME="<mnemonas-or-webdav-username>" \
 MNEMONAS_WEBDAV_PASSWORD="<mnemonas-or-webdav-password>" \
 ./scripts/webdav-client-smoke.sh
 
-# For a read-only routing check, a direct PROPFIND is enough.
-curl -u "<mnemonas-or-webdav-username>:<mnemonas-or-webdav-password>" \
-  -X PROPFIND http://localhost:8080/dav/ -H "Depth: 1"
-
 curl http://localhost:8080/health
 curl http://localhost:9091/health
 curl http://localhost:9091/stats
 ```
 
 `scripts/webdav-client-smoke.sh` covers `OPTIONS`, `MKCOL`, `PUT`, `PROPFIND`, `GET`, `HEAD`, `COPY`, `MOVE`, `DELETE`, content validation after COPY/MOVE, and read/write checks for URL-encoded space paths. `WEBDAV_URL` must be an HTTP(S) WebDAV root URL without whitespace, query strings, fragments, embedded credentials, backslashes, encoded slashes, encoded backslashes, or `.`/`..` path segments; pass credentials through environment variables. For `webdav.auth_type = "basic"`, use `./scripts/dev.sh --creds` to find credential locations. For `webdav.auth_type = "users"`, use a MnemoNAS username and password. Each curl request uses `CURL_CONNECT_TIMEOUT=10` and `CURL_MAX_TIME=30` by default; increase these environment variables on high-latency links.
-The script passes authentication through a temporary curl config file so plaintext passwords are not printed in command arguments.
+The script passes authentication through a temporary curl config file so plaintext passwords are not printed in command arguments. Manual read-only PROPFIND checks should also use a temporary curl config file or this smoke script instead of placing WebDAV passwords in `curl -u` command arguments.
 
 `9091` should remain local/private.
 

@@ -55,9 +55,16 @@ make_fake_curl() {
 	local bin_dir="$1"
 	local invoked_log="$2"
 	mkdir -p "$bin_dir"
-	cat > "$bin_dir/curl" <<'EOF'
+cat > "$bin_dir/curl" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$CURL_INVOKED_LOG"
+previous=""
+for arg in "$@"; do
+	if [[ "$previous" == "--config" && -n "${CURL_CONFIG_SNAPSHOT:-}" && -f "$arg" ]]; then
+		cat "$arg" > "$CURL_CONFIG_SNAPSHOT"
+	fi
+	previous="$arg"
+done
 exit 7
 EOF
 	chmod +x "$bin_dir/curl"
@@ -72,6 +79,13 @@ make_fake_e2e_curl() {
 	cat > "$bin_dir/curl" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$CURL_INVOKED_LOG"
+previous_config_arg=""
+for arg in "$@"; do
+	if [[ "$previous_config_arg" == "--config" && -n "${CURL_CONFIG_SNAPSHOT:-}" && -f "$arg" ]]; then
+		cat "$arg" > "$CURL_CONFIG_SNAPSHOT"
+	fi
+	previous_config_arg="$arg"
+done
 header_file=""
 body_file=""
 previous_arg=""
@@ -1010,6 +1024,7 @@ run_webdav_users_env_credentials_test() {
 	local case_dir="$TMP_ROOT/webdav-users-env"
 	local fake_bin="$case_dir/bin"
 	local invoked_log="$case_dir/curl.log"
+	local config_snapshot="$case_dir/curl-auth.conf"
 	local secret="mnemonas-user-secret"
 	mkdir -p "$case_dir/storage"
 	make_fake_e2e_curl "$fake_bin" "$invoked_log"
@@ -1018,6 +1033,7 @@ run_webdav_users_env_credentials_test() {
 		HOME="$case_dir/home" \
 		PATH="$fake_bin:$PATH" \
 		CURL_INVOKED_LOG="$invoked_log" \
+		CURL_CONFIG_SNAPSHOT="$config_snapshot" \
 		BASE_URL="http://127.0.0.1:18080/" \
 		STORAGE_ROOT="$case_dir/storage" \
 		CONFIG_FILE="$case_dir/config.toml" \
@@ -1029,9 +1045,12 @@ run_webdav_users_env_credentials_test() {
 		bash "$REPO_ROOT/scripts/e2e-test.sh" --quick
 
 	assert_file_contains "$case_dir/out.log" "Using WebDAV users auth credentials for user: family-user"
-	assert_file_contains "$invoked_log" "family-user:$secret"
-	assert_file_contains "$invoked_log" "-u family-user:$secret -sS -X LOCK http://127.0.0.1:18080/dav/e2e-test/test.txt"
-	assert_file_contains "$invoked_log" "-u family-user:$secret -sS -X UNLOCK http://127.0.0.1:18080/dav/e2e-test/test.txt"
+	assert_file_contains "$invoked_log" "--config"
+	assert_file_not_contains "$invoked_log" "$secret"
+	assert_file_not_contains "$invoked_log" "-u family-user:$secret"
+	assert_file_contains "$config_snapshot" 'user = "family-user:mnemonas-user-secret"'
+	assert_file_contains "$invoked_log" "-sS -X LOCK http://127.0.0.1:18080/dav/e2e-test/test.txt"
+	assert_file_contains "$invoked_log" "-sS -X UNLOCK http://127.0.0.1:18080/dav/e2e-test/test.txt"
 }
 
 run_webdav_users_missing_credentials_test() {
