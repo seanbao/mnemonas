@@ -20,6 +20,7 @@
 - 公网 go-live smoke 会在 TCP 探测中按 `timeout`、`gtimeout` 顺序自动选择 GNU timeout 兼容命令，并支持用 `TIMEOUT_BIN` 指定兼容替代命令。
 - Release tag 会在产物构建前校验，必须使用 `vMAJOR.MINOR.PATCH` 或 `v1.2.3-rc.1` 这类语义化预发布形式，并且去掉 `v` 前缀后的 Docker 镜像 tag 长度不能超过 128 个字符；发布后 artifact verifier 会复用同一版本校验逻辑，对显式或归档名推断出的版本应用同一约束。
 - 新增可复跑的 WebDAV curl 协议 smoke，可对已运行服务验证基础读写、URL 编码空格路径、复制、移动和删除操作；脚本会提前拒绝含空白、query、fragment、内嵌凭据、反斜杠、编码斜杠、编码反斜杠或 `.`/`..` 路径段的 `WEBDAV_URL`，并拒绝非 `0/1` 的 `CURL_INSECURE`，相关契约通过脚本门禁覆盖。
+- 新增可复跑的备份恢复演练 smoke 入口，可对已运行服务按显式备份任务 ID 执行任务列表读取、单任务读取、立即备份、保留策略检查、恢复演练和恢复报告下载；脚本不创建或删除备份任务，并提前拒绝含空白、query、fragment、内嵌凭据、反斜杠、编码斜杠/反斜杠、空路径段或点段的 API URL。
 - 新增 WebDAV 兼容性报告表单，用于收集 Finder、Windows File Explorer、移动端文件管理器、媒体播放器和命令行客户端的验证结果或客户端特定失败。
 - 维护页恢复完成后可复制恢复切换记录，内容包含恢复目标、只读校验、切换步骤、切换前确认和回滚清单；批量恢复结果会列出跨目录切换候选和冲突处置记录，并在可复制结果记录中写入任务名称、备份目标、保留策略状态、候选目录、只读校验复核结论、校验错误详情、冲突处置建议和配置文件保留要求，便于记录到工单或值班流程。
 - 设置页目录权限用户矩阵和未保存规则预览可复制权限复核记录，内容包含路径、用户读写判定、命中规则和相关分享影响，并会保留后端持久化近期复核历史；服务端历史不可用时回退当前浏览器记录。
@@ -60,7 +61,7 @@ Release workflow 预期生成以下产物：
 
 当前硬化分支已有以下验证证据；最终发布前应以最新 tag、Release workflow 结果和必要的环境验证为准：
 
-最近本地完整验证快照：验证目标 `0be02fc2122e`，`GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master` 通过，覆盖 release notes 发布后核验命令 `<tag>` 占位门禁、release artifact verifier 控制字符路径 shell-safe 诊断表示、systemd 安装和卸载控制字符诊断 shell-safe 表示、通知通道拒绝 HTTP 重定向、备份外部命令输出新增云存储 `account_key` 与 rclone `_pass`/`-pass` 类型字段脱敏，以及此前路线图、WebDAV 文档、CDC 文档边界、中文可见文案、release-readiness 基线、社区协作入口、文档契约、备份恢复演练指南文档契约、Go 测试超时门禁、批量恢复预检失败处置 E2E、release notes 候选版本边界门禁、公网 go-live 后端端口 TCP 可达性失败判定、timeout/gtimeout 兼容增量、Docker smoke curl 超时上限、`/health` 成功响应 readiness、配置期望版本时的响应体校验、portable curl timeout 参数形式、登录后重定向到 `/login` 或公开分享路由时回退首页的前端边界，以及 E2E/benchmark/故障注入脚本显式 `BASE_URL` 对凭据、query、fragment、编码边界字符和点段的拒绝与尾斜杠规范化增量；同时覆盖 `make check`、依赖安全扫描、示例配置、public-access 模板、proto 再生成稳定性、Rust fmt/test/clippy、proto-gen fmt/test/clippy、前端 lint/typecheck/unit/build、Playwright 377 个 E2E 用例、Docker build、Docker image `sha256:6c22bab62fab61c98b4da1a32eeb06a28e131b76434668e15208b2bb061e01c6` 和 Docker smoke。Docker smoke 使用 Docker 自动分配的 loopback 端口 `http://127.0.0.1:32782`。
+最近本地完整验证快照：验证目标 `d08b34895fff`，`GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master` 通过，覆盖 release notes 发布后核验命令 `<tag>` 占位门禁、公网 go-live smoke 脱敏目标形状诊断、`golang.org/x/image v0.43.0` 依赖安全修复、release artifact verifier 控制字符路径 shell-safe 诊断表示、systemd 安装和卸载控制字符诊断 shell-safe 表示、通知通道拒绝 HTTP 重定向、备份外部命令输出新增云存储 `account_key` 与 rclone `_pass`/`-pass` 类型字段脱敏、备份恢复演练 smoke 入口，以及此前路线图、WebDAV 文档、CDC 文档边界、中文可见文案、release-readiness 基线、社区协作入口、文档契约、备份恢复演练指南文档契约、Go 测试超时门禁、批量恢复预检失败处置 E2E、release notes 候选版本边界门禁、公网 go-live 后端端口 TCP 可达性失败判定、timeout/gtimeout 兼容增量、Docker smoke curl 超时上限、`/health` 成功响应 readiness、配置期望版本时的响应体校验、portable curl timeout 参数形式、登录后重定向到 `/login` 或公开分享路由时回退首页的前端边界，以及 E2E/benchmark/故障注入脚本显式 `BASE_URL` 对凭据、query、fragment、编码边界字符和点段的拒绝与尾斜杠规范化增量；同时覆盖 `make check`、依赖安全扫描、示例配置、public-access 模板、proto 再生成稳定性、Rust fmt/test/clippy、proto-gen fmt/test/clippy、前端 lint/typecheck/unit/build、Playwright 377 个 E2E 用例、Docker build、Docker image `sha256:4020126f076ac211dd5deb3eaf253ed77c234af9c4538ca07c9a0ec8d8b81ae3` 和 Docker smoke。Docker smoke 使用 Docker 自动分配的 loopback 端口 `http://127.0.0.1:32769`。
 
 - `GOTOOLCHAIN=local ./scripts/verify-changed.sh`
 - `GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master`
