@@ -425,6 +425,29 @@ run_webdav_users_env_credentials_test() {
 	assert_file_contains "$invoked_log" "http://127.0.0.1:9/dav/"
 }
 
+run_webdav_credentials_reject_newlines_test() {
+	local case_dir="$TMP_ROOT/webdav-credentials-newline"
+	local fake_bin="$case_dir/bin"
+	local invoked_log="$case_dir/curl.log"
+	local secret=$'mnemonas\nsecret'
+	mkdir -p "$case_dir/storage"
+	make_fake_curl "$fake_bin" "$invoked_log"
+
+	run_expect_failure "$case_dir/out.log" env \
+		HOME="$case_dir/home" \
+		PATH="$fake_bin:$PATH" \
+		CURL_INVOKED_LOG="$invoked_log" \
+		MNEMONAS_STORAGE_ROOT="$case_dir/storage" \
+		MNEMONAS_WEBDAV_AUTH_TYPE="users" \
+		MNEMONAS_WEBDAV_USERNAME="family-user" \
+		MNEMONAS_WEBDAV_PASSWORD="$secret" \
+		bash "$REPO_ROOT/scripts/benchmark.sh" "http://127.0.0.1:9"
+
+	assert_file_contains "$case_dir/out.log" "WebDAV password cannot contain newline characters"
+	assert_file_not_contains "$case_dir/out.log" "mnemonas"
+	assert_not_exists "$invoked_log"
+}
+
 run_webdav_users_missing_credentials_test() {
 	local case_dir="$TMP_ROOT/webdav-users-missing"
 	local fake_bin="$case_dir/bin"
@@ -448,6 +471,7 @@ run_admin_login_json_escape_and_pretty_response_test() {
 	local case_dir="$TMP_ROOT/admin-login-json"
 	local fake_bin="$case_dir/bin"
 	local invoked_log="$case_dir/curl.log"
+	local config_snapshot="$case_dir/admin-curl-auth.conf"
 	local secret='quote space"slash\value'
 	mkdir -p "$case_dir/storage/.mnemonas"
 	make_fake_benchmark_curl "$fake_bin" "$invoked_log"
@@ -462,13 +486,62 @@ EOF
 		HOME="$case_dir/home" \
 		PATH="$fake_bin:$PATH" \
 		CURL_INVOKED_LOG="$invoked_log" \
+		CURL_CONFIG_SNAPSHOT="$config_snapshot" \
 		MNEMONAS_STORAGE_ROOT="$case_dir/storage" \
 		CONFIG_FILE="$case_dir/config.toml" \
 		INITIAL_PASSWORD_FILE="$case_dir/storage/.mnemonas/initial-password.txt" \
 		bash "$REPO_ROOT/scripts/benchmark.sh" "http://127.0.0.1:9" > "$case_dir/out.log" 2>&1
 
 	assert_file_contains "$invoked_log" '{"username":"admin","password":"quote space\"slash\\value"}'
-	assert_file_contains "$invoked_log" "Authorization: Bearer access.pretty"
+	assert_file_contains "$invoked_log" "--config"
+	assert_file_not_contains "$invoked_log" "Authorization: Bearer access.pretty"
+	assert_file_contains "$config_snapshot" 'header = "Authorization: Bearer access.pretty"'
+}
+
+run_admin_env_token_uses_curl_config_test() {
+	local case_dir="$TMP_ROOT/admin-env-token"
+	local fake_bin="$case_dir/bin"
+	local invoked_log="$case_dir/curl.log"
+	local config_snapshot="$case_dir/admin-curl-auth.conf"
+	local secret='env"slash\access'
+	mkdir -p "$case_dir/storage"
+	make_fake_benchmark_curl "$fake_bin" "$invoked_log"
+
+	env \
+		HOME="$case_dir/home" \
+		PATH="$fake_bin:$PATH" \
+		CURL_INVOKED_LOG="$invoked_log" \
+		CURL_CONFIG_SNAPSHOT="$config_snapshot" \
+		MNEMONAS_STORAGE_ROOT="$case_dir/storage" \
+		MNEMONAS_ACCESS_TOKEN="$secret" \
+		MNEMONAS_AUTH_ENABLED="true" \
+		bash "$REPO_ROOT/scripts/benchmark.sh" "http://127.0.0.1:9" > "$case_dir/out.log" 2>&1
+
+	assert_file_contains "$invoked_log" "--config"
+	assert_file_not_contains "$invoked_log" "$secret"
+	assert_file_contains "$config_snapshot" 'header = "Authorization: Bearer env\"slash\\access"'
+}
+
+run_admin_env_token_rejects_newlines_test() {
+	local case_dir="$TMP_ROOT/admin-env-token-newline"
+	local fake_bin="$case_dir/bin"
+	local invoked_log="$case_dir/curl.log"
+	local secret=$'env\naccess'
+	mkdir -p "$case_dir/storage"
+	make_fake_curl "$fake_bin" "$invoked_log"
+
+	run_expect_failure "$case_dir/out.log" env \
+		HOME="$case_dir/home" \
+		PATH="$fake_bin:$PATH" \
+		CURL_INVOKED_LOG="$invoked_log" \
+		MNEMONAS_STORAGE_ROOT="$case_dir/storage" \
+		MNEMONAS_ACCESS_TOKEN="$secret" \
+		MNEMONAS_AUTH_ENABLED="true" \
+		bash "$REPO_ROOT/scripts/benchmark.sh" "http://127.0.0.1:9"
+
+	assert_file_contains "$case_dir/out.log" "admin bearer token cannot contain newline characters"
+	assert_file_not_contains "$case_dir/out.log" "access"
+	assert_not_exists "$invoked_log"
 }
 
 run_refuse_traversal_isolated_root_test() {
@@ -617,9 +690,11 @@ run_benchmark_docs_avoid_weak_webdav_env_credentials_test() {
 	assert_file_contains "$REPO_ROOT/docs/development.md" 'MNEMONAS_WEBDAV_USERNAME="<mnemonas-or-webdav-username>"'
 	assert_file_contains "$REPO_ROOT/docs/development.md" 'MNEMONAS_WEBDAV_PASSWORD="<mnemonas-or-webdav-password>"'
 	assert_file_contains "$REPO_ROOT/docs/development.md" "不应把 WebDAV 密码写进 \`curl -u\` 命令参数"
+	assert_file_contains "$REPO_ROOT/docs/development.md" "避免把密码或 Bearer token 写进 \`curl\` 命令参数"
 	assert_file_contains "$REPO_ROOT/docs/development.en.md" 'MNEMONAS_WEBDAV_USERNAME="<mnemonas-or-webdav-username>"'
 	assert_file_contains "$REPO_ROOT/docs/development.en.md" 'MNEMONAS_WEBDAV_PASSWORD="<mnemonas-or-webdav-password>"'
 	assert_file_contains "$REPO_ROOT/docs/development.en.md" "instead of placing WebDAV passwords in \`curl -u\` command arguments"
+	assert_file_contains "$REPO_ROOT/docs/development.en.md" "Bearer tokens are not placed in \`curl\` command arguments"
 }
 
 run_isolated_target_reaches_health_check_test() {
@@ -650,7 +725,10 @@ run_webdav_secret_json_escape_test
 run_webdav_config_toml_escape_test
 run_webdav_users_missing_credentials_test
 run_webdav_users_env_credentials_test
+run_webdav_credentials_reject_newlines_test
 run_admin_login_json_escape_and_pretty_response_test
+run_admin_env_token_uses_curl_config_test
+run_admin_env_token_rejects_newlines_test
 run_refuse_traversal_isolated_root_test
 run_refuse_newline_isolated_root_test
 run_refuse_control_character_isolated_root_test

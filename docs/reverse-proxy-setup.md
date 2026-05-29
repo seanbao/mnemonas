@@ -141,6 +141,8 @@ sudo systemctl status caddy
 
 验证：
 
+公网或生产 WebDAV 挂载建议优先使用 `auth_type=users`。
+
 ```bash
 curl -I https://nas.example.com/health
 
@@ -398,6 +400,8 @@ ss -tlnp | grep -E '80|443|8080|9090|9091'
 `8080/9090/9091` 或改过的后端和 dataplane 端口不应监听在公网地址上。
 
 WebDAV：
+
+公网或生产 WebDAV 挂载建议优先使用 `auth_type=users`。
 
 ```bash
 # auth_type=users 时使用 MnemoNAS 用户名和密码。

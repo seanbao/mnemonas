@@ -500,6 +500,7 @@ They must still be absolute, must not contain control characters, `..`, or symli
 
 For WebDAV `auth_type = "basic"`, the manual benchmark reads Basic Auth credentials from `config.toml` or `secrets.json` when environment credentials are not provided.
 For WebDAV `auth_type = "users"`, set `MNEMONAS_WEBDAV_USERNAME` and `MNEMONAS_WEBDAV_PASSWORD` explicitly.
+The script passes WebDAV credentials and `MNEMONAS_ACCESS_TOKEN` through temporary curl config files so passwords or Bearer tokens are not placed in `curl` command arguments.
 `[webdav].username/password` are not treated as MnemoNAS user credentials.
 
 The isolated benchmark runner uses the same loopback-only rule for Web and dataplane addresses. To benchmark a remote or shared-network instance, run `scripts/benchmark.sh` directly with an explicit isolated `MNEMONAS_STORAGE_ROOT`.

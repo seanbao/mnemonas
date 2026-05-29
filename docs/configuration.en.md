@@ -776,9 +776,10 @@ min_free_space = 107374182400  # 100GB
 
 [webdav]
 enabled = true
-auth_type = "basic"
-username = "admin"
-password = ""  # leave empty for generated credentials on first start; a password-manager value may also be set explicitly
+auth_type = "users"  # prefer MnemoNAS app users for production deployments
+
+[auth]
+enabled = true
 
 [log]
 level = "info"
@@ -786,7 +787,7 @@ format = "json"
 output = "/var/log/mnemonas/server.log"
 ```
 
-Configuration files do not expand environment variables. Do not write `${...}` in TOML and expect runtime substitution.
+When legacy clients or dedicated service credentials require global Basic Auth, set `auth_type = "basic"` and use a password-manager value or leave the password empty for first-start generation.
 
 ### Read-Only Archive
 

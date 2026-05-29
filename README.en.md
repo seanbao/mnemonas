@@ -195,7 +195,7 @@ MnemoNAS exposes WebDAV for common desktop, mobile, and CLI clients. The table b
 | CLI | rclone | `webdav:` remote |
 
 For day-to-day mounting, `auth_type = "users"` is preferred so clients use MnemoNAS usernames and passwords and follow the same `home_dir`, directory-access, and quota boundaries.
-The default example still enables `basic` mode, which uses separate WebDAV credentials.
+The root example config keeps `basic` as a compatibility baseline. Day-to-day or production mounts should switch to `users` unless legacy clients or dedicated service credentials require a global WebDAV username and password.
 
 The running Web UI exposes the mount URL, Basic username, and readable generated password on the Settings -> WebDAV tab.
 Custom Basic passwords are not echoed back and should come from the config file or password manager.

@@ -773,9 +773,10 @@ min_free_space = 107374182400  # 100GB
 
 [webdav]
 enabled = true
-auth_type = "basic"
-username = "admin"
-password = ""  # 留空时首次启动自动生成；也可以改成密码管理器生成的强密码
+auth_type = "users"  # 生产部署优先使用 MnemoNAS 应用用户
+
+[auth]
+enabled = true
 
 [log]
 level = "info"
@@ -783,7 +784,7 @@ format = "json"
 output = "/var/log/mnemonas/server.log"
 ```
 
-当前配置文件不会展开环境变量；不要把 `${...}` 写入 TOML 并期待运行时替换。
+旧客户端或专用服务凭据确实需要全局 Basic Auth 时，可改用 `auth_type = "basic"`，并使用密码管理器生成的强密码或留空由首次启动生成。
 
 ### 只读归档服务器
 
