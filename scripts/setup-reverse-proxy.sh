@@ -1807,7 +1807,21 @@ print_summary() {
     echo "  # 自定义 Basic 密码不会回显；自动生成密码在 <storage.root>/secrets.json 的 webdav_password 字段"
     echo "  WEBDAV_USER=\"<mnemonas-or-webdav-username>\""
     echo "  WEBDAV_PASS=\"<mnemonas-or-webdav-password>\""
-    echo "  curl -u \"\$WEBDAV_USER:\$WEBDAV_PASS\" -X PROPFIND '$webdav_probe_url' -H 'Depth: 0'"
+    cat <<'EOF'
+  curl_escape_config_value() {
+      local value="$1"
+      value="${value//\\/\\\\}"
+      value="${value//\"/\\\"}"
+      printf '%s' "$value"
+  }
+  curl_auth_config="$(mktemp -t mnemonas-webdav-curl-auth.XXXXXX)"
+  trap 'rm -f "$curl_auth_config"' EXIT
+  chmod 600 "$curl_auth_config"
+  printf 'user = "%s:%s"\n' \
+      "$(curl_escape_config_value "$WEBDAV_USER")" \
+      "$(curl_escape_config_value "$WEBDAV_PASS")" > "$curl_auth_config"
+EOF
+    printf "  curl --config \"\$curl_auth_config\" -X PROPFIND '%s' -H 'Depth: 0'\n" "$webdav_probe_url"
     echo ""
 
     if [[ "$PROXY_TYPE" == "caddy" ]]; then
@@ -1929,11 +1943,15 @@ EOF
     grep -Fq '自定义 Basic 密码不会回显' "$tmp/summary-skipped.log" || fail "self-test failed: custom WebDAV password disclosure hint missing"
     grep -Fq 'WEBDAV_USER="<mnemonas-or-webdav-username>"' "$tmp/summary-skipped.log" || fail "self-test failed: WebDAV username placeholder missing"
     grep -Fq 'WEBDAV_PASS="<mnemonas-or-webdav-password>"' "$tmp/summary-skipped.log" || fail "self-test failed: WebDAV password placeholder missing"
+    grep -Fq "curl_auth_config=\"\$(mktemp -t mnemonas-webdav-curl-auth.XXXXXX)\"" "$tmp/summary-skipped.log" || fail "self-test failed: WebDAV curl auth config setup missing"
+    grep -Fq "curl --config \"\$curl_auth_config\" -X PROPFIND" "$tmp/summary-skipped.log" || fail "self-test failed: WebDAV curl config command missing"
+    ! grep -Fq "curl -u \"\$WEBDAV_USER:\$WEBDAV_PASS\"" "$tmp/summary-skipped.log" || fail "self-test failed: WebDAV probe exposes password in curl arguments"
 
     WEBDAV_PREFIX="/team /sub"
     print_summary > "$tmp/summary-spaced-webdav.log"
     grep -Fq 'WebDAV:   https://nas.example.com/team%20/sub' "$tmp/summary-spaced-webdav.log" || fail "self-test failed: summary did not URL-escape WebDAV prefix spaces"
-    grep -Fq "curl -u \"\$WEBDAV_USER:\$WEBDAV_PASS\" -X PROPFIND 'https://nas.example.com/team%20/sub/' -H 'Depth: 0'" "$tmp/summary-spaced-webdav.log" || fail "self-test failed: summary WebDAV probe command was not shell-safe"
+    grep -Fq "curl --config \"\$curl_auth_config\" -X PROPFIND 'https://nas.example.com/team%20/sub/' -H 'Depth: 0'" "$tmp/summary-spaced-webdav.log" || fail "self-test failed: summary WebDAV probe command was not shell-safe"
+    ! grep -Fq "curl -u \"\$WEBDAV_USER:\$WEBDAV_PASS\"" "$tmp/summary-spaced-webdav.log" || fail "self-test failed: spaced WebDAV probe exposes password in curl arguments"
 
     fake_bin="$tmp/fake-bin"
     fake_ufw_log="$tmp/ufw.log"

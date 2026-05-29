@@ -149,7 +149,19 @@ curl -I https://nas.example.com/health
 # 自定义 Basic 密码不会回显；生成密码位于 /srv/mnemonas/secrets.json 的 webdav_password 字段。
 WEBDAV_USER="<mnemonas-or-webdav-username>"
 WEBDAV_PASS="<mnemonas-or-webdav-password>"
-curl -u "$WEBDAV_USER:$WEBDAV_PASS" -X PROPFIND https://nas.example.com/dav/ -H "Depth: 0"
+curl_escape_config_value() {
+  local value="$1"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  printf '%s' "$value"
+}
+curl_auth_config="$(mktemp -t mnemonas-webdav-curl-auth.XXXXXX)"
+trap 'rm -f "$curl_auth_config"' EXIT
+chmod 600 "$curl_auth_config"
+printf 'user = "%s:%s"\n' \
+  "$(curl_escape_config_value "$WEBDAV_USER")" \
+  "$(curl_escape_config_value "$WEBDAV_PASS")" > "$curl_auth_config"
+curl --config "$curl_auth_config" -X PROPFIND https://nas.example.com/dav/ -H "Depth: 0"
 ```
 
 ## 方案二：Nginx + Certbot
@@ -393,7 +405,19 @@ WebDAV：
 # 自定义 Basic 密码不会回显；生成密码位于 /srv/mnemonas/secrets.json 的 webdav_password 字段。
 WEBDAV_USER="<mnemonas-or-webdav-username>"
 WEBDAV_PASS="<mnemonas-or-webdav-password>"
-curl -u "$WEBDAV_USER:$WEBDAV_PASS" -X PROPFIND https://nas.example.com/dav/ \
+curl_escape_config_value() {
+  local value="$1"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  printf '%s' "$value"
+}
+curl_auth_config="$(mktemp -t mnemonas-webdav-curl-auth.XXXXXX)"
+trap 'rm -f "$curl_auth_config"' EXIT
+chmod 600 "$curl_auth_config"
+printf 'user = "%s:%s"\n' \
+  "$(curl_escape_config_value "$WEBDAV_USER")" \
+  "$(curl_escape_config_value "$WEBDAV_PASS")" > "$curl_auth_config"
+curl --config "$curl_auth_config" -X PROPFIND https://nas.example.com/dav/ \
   -H "Depth: 1" \
   -v
 ```
