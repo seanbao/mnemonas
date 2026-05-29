@@ -118,6 +118,8 @@ const readmeClientSummaries = [
       '兼容状态',
       '真实客户端 E2E 覆盖',
       '仍按矩阵继续跟踪',
+      '根目录示例配置保留 `basic` 作为兼容基线',
+      '日常或生产挂载应改用 `users`',
       '| 平台 | 常见客户端 | 连接地址 |',
     ],
     forbiddenText: [
@@ -140,6 +142,8 @@ const readmeClientSummaries = [
       'compatibility status',
       'real-client E2E coverage',
       'remain tracked by the matrix',
+      'root example config keeps `basic` as a compatibility baseline',
+      'Day-to-day or production mounts should switch to `users`',
       '| Platform | Common Client | URL |',
     ],
     forbiddenText: [
@@ -151,22 +155,51 @@ const readmeClientSummaries = [
 const mountingGuides = [
   {
     file: process.env.WEBDAV_MOUNTING_GUIDE || 'docs/mounting-guide.md',
-    sectionEnd: '## 连接信息',
+    sectionEnd: '## macOS',
     requiredText: [
       '[WebDAV 客户端兼容性](webdav-compatibility.md)',
       '实际兼容状态',
       '真实客户端 E2E 覆盖',
       '仍按矩阵跟踪',
+      '根目录示例配置保留 `basic` 作为兼容基线',
+      '日常或生产挂载应改用 `users`',
     ],
   },
   {
     file: process.env.WEBDAV_MOUNTING_GUIDE_EN || 'docs/mounting-guide.en.md',
-    sectionEnd: '## Connection Information',
+    sectionEnd: '## macOS',
     requiredText: [
       '[WebDAV compatibility](webdav-compatibility.en.md)',
       'actual compatibility status',
       'real-client E2E coverage',
       'remain tracked by the matrix',
+      'root example config keeps `basic` as a compatibility baseline',
+      'Day-to-day or production mounts should switch to `users`',
+    ],
+  },
+]
+
+const faqAuthGuides = [
+  {
+    file: process.env.WEBDAV_FAQ || 'docs/faq.md',
+    sectionStart: '### 如何启用 WebDAV 认证？',
+    sectionEnd: '### 是否支持 HTTPS？',
+    requiredText: [
+      'auth_type = "users"',
+      '日常或生产 WebDAV 挂载应优先使用 MnemoNAS 用户认证',
+      '旧客户端或专用服务凭据',
+      'Basic Auth',
+    ],
+  },
+  {
+    file: process.env.WEBDAV_FAQ_EN || 'docs/faq.en.md',
+    sectionStart: '### How do I enable WebDAV authentication?',
+    sectionEnd: '### Is HTTPS supported?',
+    requiredText: [
+      'auth_type = "users"',
+      'Day-to-day or production WebDAV mounts should prefer MnemoNAS user authentication',
+      'legacy clients or dedicated service credentials',
+      'Basic Auth',
     ],
   },
 ]
@@ -272,6 +305,20 @@ function checkMountingGuideCompatibilityNote(guide) {
   }
 }
 
+function checkFaqAuthGuidance(faq) {
+  const markdown = readDoc(faq.file)
+  if (markdown === null) {
+    return
+  }
+
+  const section = extractSection(markdown, faq.sectionStart, faq.sectionEnd, faq.file)
+  for (const text of faq.requiredText) {
+    if (!section.includes(text)) {
+      errors.push(`${faq.file}: missing required WebDAV FAQ auth guidance: ${text}`)
+    }
+  }
+}
+
 function checkMatrixRows(matrixMarkdown, doc) {
   const rows = tableRows(matrixMarkdown)
   const clientRows = rows.filter((cells) => cells.length === 4 && cells[0] !== '客户端' && cells[0] !== 'Client')
@@ -306,6 +353,9 @@ for (const readme of readmeClientSummaries) {
 for (const guide of mountingGuides) {
   checkMountingGuideCompatibilityNote(guide)
 }
+for (const faq of faqAuthGuides) {
+  checkFaqAuthGuidance(faq)
+}
 
 if (errors.length > 0) {
   for (const error of errors) {
@@ -314,5 +364,5 @@ if (errors.length > 0) {
   process.exit(1)
 }
 
-console.log('[webdav-compat-docs] checked WebDAV compatibility matrix, validation standard, README client summary, and mounting guide note')
+console.log('[webdav-compat-docs] checked WebDAV compatibility matrix, validation standard, README client summary, auth guidance, mounting guide note, and FAQ auth guidance')
 NODE

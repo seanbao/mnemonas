@@ -72,6 +72,9 @@ const allowedEnglishDocChineseLinkLabels = new Set([
 ])
 const shellFenceLanguages = new Set(['bash', 'sh', 'shell', 'console', 'zsh'])
 const remoteShellPipePattern = /\b(?:curl|wget)\b[^|]*\|\s*(?:sudo\s+)?(?:sh|bash|zsh)\b/i
+const curlBasicAuthArgumentPattern = /(^|\s)(?:-u|--user)(?:\s|=|$)/
+const curlBasicAuthorizationHeaderPattern = /Authorization:\s*Basic/i
+const curlBearerAuthorizationHeaderPattern = /Authorization:\s*Bearer/i
 const directScriptCommandPattern = /(^|[^\w./-])(\.\/scripts\/([A-Za-z0-9._-]+\.sh))\b/g
 const rawAPIPathQueryPattern = /\/api\/v1\/[^"'\s)]*[?&]path=\//
 const storageCDCContractDocs = [
@@ -177,6 +180,28 @@ const securityChecklistContracts = [
       '[Public cloud firewall checklist](cloud-firewall-checklist.en.md)',
       'expose only `80/443`',
       'Public deployments use HTTPS',
+    ],
+  },
+]
+const apiReferenceWebDAVAuthContracts = [
+  {
+    file: 'docs/api-reference.md',
+    required: [
+      '日常或生产挂载建议设置 `webdav.auth_type = "users"`',
+      '根目录示例配置保留旧全局 Basic Auth 作为兼容基线',
+    ],
+    forbidden: [
+      '- 默认使用 `[webdav]` 中的旧全局 Basic Auth 凭据',
+    ],
+  },
+  {
+    file: 'docs/api-reference.en.md',
+    required: [
+      'For day-to-day or production mounts, set `webdav.auth_type = "users"`',
+      'The root example config keeps legacy global Basic Auth as a compatibility baseline',
+    ],
+    forbidden: [
+      '- By default it uses the legacy global Basic Auth credentials',
     ],
   },
 ]
@@ -348,6 +373,26 @@ function checkSecurityChecklistContract() {
     for (const phrase of doc.required) {
       if (!text.includes(phrase)) {
         errors.push(`${doc.file}: missing public deployment security checklist text: ${phrase}`)
+      }
+    }
+  }
+}
+
+function checkAPIReferenceWebDAVAuthContract() {
+  for (const doc of apiReferenceWebDAVAuthContracts) {
+    const text = readOptionalFile(doc.file)
+    if (text === null) {
+      continue
+    }
+
+    for (const phrase of doc.required) {
+      if (!text.includes(phrase)) {
+        errors.push(`${doc.file}: missing WebDAV auth guidance text: ${phrase}`)
+      }
+    }
+    for (const phrase of doc.forbidden) {
+      if (text.includes(phrase)) {
+        errors.push(`${doc.file}: avoid leading WebDAV auth guidance with legacy Basic Auth: ${phrase}`)
       }
     }
   }
@@ -589,6 +634,7 @@ checkPairedHeadingLevelSequences()
 checkPairedLanguageLinks()
 checkStorageCDCContract()
 checkSecurityChecklistContract()
+checkAPIReferenceWebDAVAuthContract()
 checkBackupRestoreDrillContract()
 checkHardeningProgressReleaseReadinessContract()
 
@@ -722,6 +768,7 @@ function checkShellCodeFenceSafety(sourceFile, markdown) {
   let inFence = false
   let fenceChar = ''
   let language = ''
+  let activeCurlCommandLine = null
 
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index]
@@ -734,6 +781,7 @@ function checkShellCodeFenceSafety(sourceFile, markdown) {
       inFence = true
       fenceChar = match[1][0]
       language = (match[2] || '').trim().split(/\s+/, 1)[0].toLowerCase()
+      activeCurlCommandLine = null
       continue
     }
 
@@ -742,13 +790,41 @@ function checkShellCodeFenceSafety(sourceFile, markdown) {
       inFence = false
       fenceChar = ''
       language = ''
+      activeCurlCommandLine = null
       continue
     }
 
-    if (shellFenceLanguages.has(language) && remoteShellPipePattern.test(line)) {
+    if (!shellFenceLanguages.has(language)) {
+      continue
+    }
+
+    if (remoteShellPipePattern.test(line)) {
       errors.push(`${sourceFile}:${lineNumber}: avoid piping remote install scripts directly to a shell; download and inspect the script first`)
     }
+
+    const trimmedLine = line.trimStart()
+    const isComment = trimmedLine.startsWith('#')
+    const lineHasCurl = !isComment && /\bcurl\b/.test(line)
+    const insideCurlCommand = activeCurlCommandLine !== null || lineHasCurl
+    if (insideCurlCommand && !isComment) {
+      if (curlBasicAuthArgumentPattern.test(line) || curlBasicAuthorizationHeaderPattern.test(line)) {
+        errors.push(`${sourceFile}:${lineNumber}: avoid putting Basic Auth credentials in curl command arguments; use a temporary curl config or purpose-built smoke script`)
+      }
+      if (curlBearerAuthorizationHeaderPattern.test(line)) {
+        errors.push(`${sourceFile}:${lineNumber}: avoid putting Bearer tokens in curl command arguments; use a temporary curl config or cookie-based smoke script`)
+      }
+    }
+
+    if (insideCurlCommand && hasShellLineContinuation(line)) {
+      activeCurlCommandLine = activeCurlCommandLine ?? lineNumber
+    } else {
+      activeCurlCommandLine = null
+    }
   }
+}
+
+function hasShellLineContinuation(line) {
+  return /\\\s*$/.test(line)
 }
 
 function checkDocumentationScriptReferences(sourceFile, markdown) {
