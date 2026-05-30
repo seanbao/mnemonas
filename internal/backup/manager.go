@@ -1255,9 +1255,11 @@ func (m *Manager) jobViewLocked(id string, job config.BackupJobConfig) JobView {
 		RestoreHistory:             cloneRestoreResults(state.RestoreHistory),
 		LastRetentionCheck:         cloneRetentionCheckResult(state.LastRetentionCheck),
 	}
-	matchingRestoreVerify := cloneRestoreVerifyResult(matchingRestoreVerifyForRestore(state.LastRestore, state.LastRestoreVerify))
+	rawMatchingRestoreVerify := matchingRestoreVerifyForRestore(state.LastRestore, state.LastRestoreVerify)
+	rawRestoreVerifyMismatchFinding := restoreVerifyMismatchFinding(state.LastRestore, state.LastRestoreVerify)
+	matchingRestoreVerify := cloneRestoreVerifyResult(rawMatchingRestoreVerify)
 	view.LastMatchingRestoreVerify = matchingRestoreVerify
-	view.RestoreReportFindings = restoreReportFindingsWithMatchingVerify(view, matchingRestoreVerify)
+	view.RestoreReportFindings = restoreReportFindingsWithMatchingVerifyAndMismatch(view, matchingRestoreVerify, rawRestoreVerifyMismatchFinding)
 	return view
 }
 
