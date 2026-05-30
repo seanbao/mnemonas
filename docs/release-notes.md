@@ -23,7 +23,7 @@
 - 新增可复跑的 WebDAV curl 协议 smoke，可对已运行服务验证基础读写、URL 编码空格路径、复制、移动和删除操作；脚本会提前拒绝含空白、query、fragment、内嵌凭据、反斜杠、编码斜杠、编码反斜杠或 `.`/`..` 路径段的 `WEBDAV_URL`，并拒绝非 `0/1` 的 `CURL_INSECURE`，相关契约通过脚本门禁覆盖。
 - 新增可复跑的备份恢复演练 smoke 入口，可对已运行服务按显式备份任务 ID 执行任务列表读取、单任务读取、立即备份、保留策略检查、恢复演练和恢复报告下载；脚本不创建或删除备份任务，并提前拒绝含空白、query、fragment、内嵌凭据、反斜杠、编码斜杠/反斜杠、空路径段或点段的 API URL。
 - 新增 WebDAV 兼容性报告表单，用于收集 Finder、Windows File Explorer、移动端文件管理器、媒体播放器和命令行客户端的验证结果或客户端特定失败。
-- 维护页恢复完成后可复制恢复切换记录，内容包含恢复目标、只读校验、切换步骤、切换前确认和回滚清单；恢复报告会在最近一次恢复已完成但匹配只读校验缺失、现有只读校验早于恢复完成或不属于当前恢复目标时给出明确 findings，避免把陈旧校验误读为当前恢复已验证；批量恢复结果会列出跨目录切换候选和冲突处置记录，并在可复制结果记录中写入任务名称、备份目标、保留策略状态、候选目录、只读校验复核结论、校验错误详情、冲突处置建议和配置文件保留要求，便于记录到工单或值班流程。
+- 维护页恢复完成后可复制恢复切换记录，内容包含恢复目标、只读校验、切换步骤、切换前确认和回滚清单；恢复报告会基于原始恢复目标匹配结果，在最近一次恢复已完成但匹配只读校验缺失、只读校验早于恢复完成、只读校验不属于当前恢复目标或只读校验状态不能作为当前目标证据时给出明确 findings，避免把陈旧、跨目标或不可用校验误读为当前恢复已验证；批量恢复结果会列出跨目录切换候选和冲突处置记录，并在可复制结果记录中写入任务名称、备份目标、保留策略状态、候选目录、只读校验复核结论、校验错误详情、冲突处置建议和配置文件保留要求，便于记录到工单或值班流程。
 - 设置页目录权限用户矩阵和未保存规则预览可复制权限复核记录，内容包含路径、用户读写判定、命中规则和相关分享影响，并会保留后端持久化近期复核历史；服务端历史不可用时回退当前浏览器记录。
 - 分享路径策略可按用户、用户组或角色限制允许创建和维护分享链接的认证调用方；管理员保留修复既有分享的管理权限。
 - 分享、版本历史、回收站和维护页的关键处置入口会写入活动复核记录，覆盖分享停用、删除、重新启用、版本恢复、回收站恢复和备份恢复执行结果；活动页复核历史在处置后会立即显示符合当前筛选的新记录，便于追踪误分享、误删和恢复处置闭环。
@@ -65,7 +65,7 @@ Release workflow 预期生成以下产物：
 
 当前硬化分支已有以下验证证据；最终发布前应以最新 tag、Release workflow 结果和必要的环境验证为准：
 
-最近本地完整验证快照：验证目标 `3e187452118e`，`GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master` 通过，覆盖 diff 空白、密钥泄漏扫描、workflow/YAML/脚本门禁、恢复报告在最近一次恢复已完成但匹配只读校验缺失、现有只读校验早于恢复完成或不属于当前恢复目标时给出明确 findings、Activity 复核处置后把符合当前历史筛选的更新记录即时并入列表缓存、反向代理 WebDAV 验证文档契约门禁、release-readiness 发布清单摘要范围门禁、Release workflow 结构门禁、hardening progress 中 `make release-readiness` 行级验证目标门禁、`make release-readiness` 入口基线、`make check`、工具链一致性、Go/Rust/frontend 依赖安全扫描、示例配置、public-access 模板、proto 再生成稳定性、Rust fmt/test/clippy、proto-gen fmt/test/clippy、前端 lint/typecheck/unit/build、Playwright 377 个 E2E 用例、Docker build、Docker image `sha256:3fec51675af2dd16ac64648a7c80ea27dcfb0ef500a6010b5aeee8b1c2ec0ff2` 和 Docker smoke。Docker smoke 使用 Docker 自动分配的 loopback 端口 `http://127.0.0.1:32796`。
+最近本地完整验证快照：验证目标 `f51fd288942d`，`GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master` 通过，覆盖 diff 空白、密钥泄漏扫描、workflow/YAML/脚本门禁、恢复报告基于原始恢复目标匹配结果，在最近一次恢复已完成但匹配只读校验缺失、只读校验早于恢复完成、只读校验不属于当前恢复目标或只读校验状态不能作为当前目标证据时给出明确 findings、Activity 复核处置后把符合当前历史筛选的更新记录即时并入列表缓存、反向代理 WebDAV 验证文档契约门禁、release-readiness 发布清单摘要范围门禁、Release workflow 结构门禁、hardening progress 中 `make release-readiness` 行级验证目标门禁、`make release-readiness` 入口基线、`make check`、工具链一致性、Go/Rust/frontend 依赖安全扫描、示例配置、public-access 模板、proto 再生成稳定性、Rust fmt/test/clippy、proto-gen fmt/test/clippy、前端 lint/typecheck/unit/build、Playwright 377 个 E2E 用例、Docker build、Docker image `sha256:bd8a491d976f9c0be6e6af6344587bc6c0f03d1ddb3d86e0f4729a2c681b5ee3` 和 Docker smoke。Docker smoke 使用 Docker 自动分配的 loopback 端口 `http://127.0.0.1:32797`。
 
 - `GOTOOLCHAIN=local ./scripts/verify-changed.sh`
 - `GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master`
