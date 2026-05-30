@@ -1580,7 +1580,7 @@ describe('MaintenancePage', () => {
         last_matching_restore_verify: undefined,
         restore_report_findings: [
           '最近一次显式恢复尚未完成匹配的只读校验。',
-          '最近一次只读校验不属于当前恢复目标或早于恢复完成，需重新检查当前恢复目录。',
+          '最近一次只读校验目标不属于当前恢复目标，需重新检查当前恢复目录。',
         ],
       }])
 
@@ -1589,7 +1589,7 @@ describe('MaintenancePage', () => {
       await waitFor(() => {
         expect(screen.getByText('目标：/restore/new')).toBeTruthy()
         expect(screen.getByText('最近恢复尚未完成匹配的只读校验')).toBeTruthy()
-        expect(screen.getByText('摘要发现：最近一次显式恢复尚未完成匹配的只读校验。 等 2 项')).toHaveAttribute('title', '最近一次显式恢复尚未完成匹配的只读校验。\n最近一次只读校验不属于当前恢复目标或早于恢复完成，需重新检查当前恢复目录。')
+        expect(screen.getByText('摘要发现：最近一次显式恢复尚未完成匹配的只读校验。 等 2 项')).toHaveAttribute('title', '最近一次显式恢复尚未完成匹配的只读校验。\n最近一次只读校验目标不属于当前恢复目标，需重新检查当前恢复目录。')
         expect(screen.getByText('待校验')).toBeTruthy()
         expect(screen.queryByText(/最近检查：/)).toBeNull()
         expect(screen.queryByText('stale verify warning')).toBeNull()

@@ -1360,7 +1360,7 @@ func TestRestoreReportFindingsIgnoreStaleRestoreVerify(t *testing.T) {
 	})
 
 	assertWarningsContain(t, findings, "最近一次显式恢复尚未完成匹配的只读校验")
-	assertWarningsContain(t, findings, "最近一次只读校验不属于当前恢复目标或早于恢复完成")
+	assertWarningsContain(t, findings, "最近一次只读校验目标不属于当前恢复目标")
 	assertWarningsNotContain(t, findings, "stale verify warning")
 	if matching := matchingRestoreVerifyForRestore(&RestoreResult{
 		Status:     StatusCompleted,
@@ -1440,8 +1440,38 @@ func TestRestoreReportFindingsIgnoreOverlappingRestoreVerify(t *testing.T) {
 	})
 
 	assertWarningsContain(t, findings, "最近一次显式恢复尚未完成匹配的只读校验")
-	assertWarningsContain(t, findings, "最近一次只读校验不属于当前恢复目标或早于恢复完成")
+	assertWarningsContain(t, findings, "最近一次只读校验早于恢复完成")
 	assertWarningsNotContain(t, findings, "overlapping verify warning")
+}
+
+func TestRestoreReportFindingsReportUnusableRestoreVerifyStatus(t *testing.T) {
+	restoreStarted := time.Date(2026, 5, 9, 5, 0, 0, 0, time.UTC)
+	restoreFinished := restoreStarted.Add(time.Second)
+	verifyStarted := restoreFinished.Add(time.Minute)
+
+	findings := restoreReportFindings(JobView{
+		LastSuccessfulRun: &RunResult{
+			Status: StatusCompleted,
+		},
+		RetentionStatus:    "ok",
+		RestoreDrillStatus: "ok",
+		LastRestore: &RestoreResult{
+			Status:     StatusCompleted,
+			StartedAt:  restoreStarted,
+			FinishedAt: &restoreFinished,
+			TargetPath: "/restore/current",
+		},
+		LastRestoreVerify: &RestoreVerifyResult{
+			Status:     "queued",
+			StartedAt:  verifyStarted,
+			TargetPath: "/restore/current",
+			Warnings:   []string{"queued verify warning"},
+		},
+	})
+
+	assertWarningsContain(t, findings, "最近一次显式恢复尚未完成匹配的只读校验")
+	assertWarningsContain(t, findings, "最近一次只读校验状态不能作为当前恢复目标的校验证据")
+	assertWarningsNotContain(t, findings, "queued verify warning")
 }
 
 func TestRestoreReportFindingsAttachRunningRestoreVerify(t *testing.T) {
@@ -1585,7 +1615,7 @@ func TestRestoreReportMatchingUsesRawTargetsBeforeRedaction(t *testing.T) {
 		t.Fatalf("ListJobs() length = %d, want 1", len(jobs))
 	}
 	assertWarningsContain(t, jobs[0].RestoreReportFindings, "最近一次显式恢复尚未完成匹配的只读校验")
-	assertWarningsContain(t, jobs[0].RestoreReportFindings, "最近一次只读校验不属于当前恢复目标或早于恢复完成")
+	assertWarningsContain(t, jobs[0].RestoreReportFindings, "最近一次只读校验目标不属于当前恢复目标")
 	assertWarningsNotContain(t, jobs[0].RestoreReportFindings, "wrong target warning")
 	if jobs[0].LastMatchingRestoreVerify != nil {
 		t.Fatalf("LastMatchingRestoreVerify = %+v, want nil for different raw targets", jobs[0].LastMatchingRestoreVerify)
@@ -1599,7 +1629,7 @@ func TestRestoreReportMatchingUsesRawTargetsBeforeRedaction(t *testing.T) {
 		t.Fatalf("LastMatchingRestoreVerify = %+v, want nil for different raw targets", report.LastMatchingRestoreVerify)
 	}
 	assertWarningsContain(t, report.Findings, "最近一次显式恢复尚未完成匹配的只读校验")
-	assertWarningsContain(t, report.Findings, "最近一次只读校验不属于当前恢复目标或早于恢复完成")
+	assertWarningsContain(t, report.Findings, "最近一次只读校验目标不属于当前恢复目标")
 	assertWarningsNotContain(t, report.Findings, "wrong target warning")
 	assertNoBackupTargetSecrets(t, report.LastRestore.TargetPath)
 	assertNoBackupTargetSecrets(t, report.LastRestoreVerify.TargetPath)

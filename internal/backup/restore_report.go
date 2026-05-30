@@ -40,6 +40,10 @@ func restoreReportFindings(view JobView) []string {
 }
 
 func restoreReportFindingsWithMatchingVerify(view JobView, matchingRestoreVerify *RestoreVerifyResult) []string {
+	return restoreReportFindingsWithMatchingVerifyAndMismatch(view, matchingRestoreVerify, restoreVerifyMismatchFinding(view.LastRestore, view.LastRestoreVerify))
+}
+
+func restoreReportFindingsWithMatchingVerifyAndMismatch(view JobView, matchingRestoreVerify *RestoreVerifyResult, mismatchFinding string) []string {
 	var findings []string
 	appendFinding := func(prefix, message string) {
 		message = sanitizeBackupMessageForAPI(message)
@@ -81,8 +85,8 @@ func restoreReportFindingsWithMatchingVerify(view JobView, matchingRestoreVerify
 		appendFinding("最近一次显式恢复失败", view.LastRestore.ErrorMessage)
 	} else if view.LastRestore.Status == StatusCompleted && matchingRestoreVerify == nil {
 		findings = append(findings, "最近一次显式恢复尚未完成匹配的只读校验。")
-		if view.LastRestoreVerify != nil {
-			findings = append(findings, "最近一次只读校验不属于当前恢复目标或早于恢复完成，需重新检查当前恢复目录。")
+		if mismatchFinding != "" {
+			findings = append(findings, mismatchFinding)
 		}
 	}
 	if view.LastRestoreVerify == nil && (view.LastRestore == nil || view.LastRestore.Status != StatusCompleted) {
@@ -134,6 +138,29 @@ func restoreVerifyMatchesRestore(restore *RestoreResult, verify *RestoreVerifyRe
 		return false
 	}
 	return !verifyStart.Before(restoreTime)
+}
+
+func restoreVerifyMismatchFinding(restore *RestoreResult, verify *RestoreVerifyResult) string {
+	if restore == nil || verify == nil {
+		return ""
+	}
+	if verify.Status != StatusRunning && verify.Status != StatusCompleted && verify.Status != StatusFailed {
+		return "最近一次只读校验状态不能作为当前恢复目标的校验证据，需重新检查当前恢复目录。"
+	}
+	restoreTarget := strings.TrimSpace(restore.TargetPath)
+	verifyTarget := strings.TrimSpace(verify.TargetPath)
+	if restoreTarget == "" || verifyTarget == "" || restoreTarget != verifyTarget {
+		return "最近一次只读校验目标不属于当前恢复目标，需重新检查当前恢复目录。"
+	}
+	restoreTime := restore.StartedAt
+	if restore.FinishedAt != nil {
+		restoreTime = *restore.FinishedAt
+	}
+	verifyStart := verify.StartedAt
+	if restoreTime.IsZero() || verifyStart.IsZero() || verifyStart.Before(restoreTime) {
+		return "最近一次只读校验早于恢复完成，需重新检查当前恢复目录。"
+	}
+	return "最近一次只读校验状态不能作为当前恢复目标的校验证据，需重新检查当前恢复目录。"
 }
 
 func failedRestoreDrillHistoryCount(history []*RestoreDrillResult) int {
