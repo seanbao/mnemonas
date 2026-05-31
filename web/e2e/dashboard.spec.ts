@@ -35,6 +35,32 @@ test.describe('主页', () => {
       })
       .toBe(true)
   })
+
+  test('首次部署检查应提示分享启用但认证关闭的公网风险', async ({ page }) => {
+    await page.route('**/api/v1/setup/', async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        json: {
+          success: true,
+          is_first_run: true,
+          auth_enabled: false,
+          share_enabled: true,
+          webdav_enabled: true,
+          webdav_auth_type: 'basic',
+        },
+      })
+    })
+
+    await ensureAuthenticatedAt(page, '/')
+    await expectDashboardReady(page)
+
+    await expect(page.getByText('首次部署检查')).toBeVisible()
+    await expect(page.getByText(/认证：\s*需启用/)).toBeVisible()
+    await expect(page.getByText(/分享：\s*可用/)).toBeVisible()
+    await expect(page.getByText(/分享在无认证保护下可访问/)).toBeVisible()
+    await expect(page.getByText(/公网部署前应先处理/)).toBeVisible()
+  })
 })
 
 test.describe('首页备份风险提示', () => {
