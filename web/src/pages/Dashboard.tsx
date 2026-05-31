@@ -193,6 +193,9 @@ function getSetupSafetyWarning(status: SetupStatusResponse): string | null {
   if (!status.auth_enabled) {
     warnings.push('Web UI/API 认证未启用')
   }
+  if (!status.auth_enabled && status.share_enabled !== false) {
+    warnings.push('分享在无认证保护下可访问')
+  }
   if (status.webdav_enabled && status.webdav_auth_type === 'none') {
     warnings.push('WebDAV 匿名访问已启用')
   }

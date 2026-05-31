@@ -689,8 +689,28 @@ describe('DashboardPage', () => {
       expect(screen.getByText(/分享：\s*可用/)).toBeTruthy()
       expect(screen.getByText(/WebDAV：\s*匿名/)).toBeTruthy()
       expect(screen.getByText(/Web UI\/API 认证未启用/)).toBeTruthy()
+      expect(screen.getByText(/分享在无认证保护下可访问/)).toBeTruthy()
       expect(screen.getByText(/WebDAV 匿名访问已启用/)).toBeTruthy()
       expect(screen.getByText(/公网部署前应先处理/)).toBeTruthy()
+    })
+
+    it('does not warn about unauthenticated sharing when sharing is disabled', async () => {
+      mockGetSetupStatus.mockResolvedValueOnce({
+        success: true,
+        is_first_run: true,
+        auth_enabled: false,
+        share_enabled: false,
+        webdav_enabled: false,
+        webdav_auth_type: 'basic',
+      })
+
+      render(<DashboardPage />)
+
+      expect(await screen.findByText('首次部署检查')).toBeTruthy()
+      expect(screen.getByText(/认证：\s*需启用/)).toBeTruthy()
+      expect(screen.getByText(/分享：\s*未启用/)).toBeTruthy()
+      expect(screen.getByText(/Web UI\/API 认证未启用/)).toBeTruthy()
+      expect(screen.queryByText(/分享在无认证保护下可访问/)).toBeNull()
     })
   })
 
