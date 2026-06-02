@@ -32,7 +32,7 @@
 - `release-readiness` 还会要求双语 hardening progress 台账在 `make release-readiness` 记录中写入同一个完整验证目标，避免完整验证证据刷新后发布就绪摘要仍停留在旧目标。
 - `release-readiness` 还会检查双语 release notes 草稿记录当前完整验证目标，避免发布说明中的验证快照滞后。
 - `release-readiness` 会要求双语 release notes 的发布后下载和 artifact verifier 示例使用 `<tag>` 占位，避免首次发布前把固定版本号写入可复制命令。
-- `release-readiness` 会要求 `CHANGELOG.md` 和 `CHANGELOG.en.md` 的发布清单包含文档检查、依赖安全检查、Docker 构建烟测、所选发布 tag 校验和发布脚本回归命令，避免最终发布核验遗漏关键本地门禁。
+- `release-readiness` 会要求 `CHANGELOG.md` 和 `CHANGELOG.en.md` 的发布清单包含文档检查、依赖安全检查、Docker 构建烟测、所选发布 tag 校验和发布脚本回归命令，并保留 L1/L1+ 发布候选定位、非唯一长期副本和外部备份边界，避免最终发布核验遗漏关键本地门禁或数据安全限制。
 - `release-readiness` 会要求 Dependabot 配置覆盖 Go、Rust 数据面、Rust proto 生成器、Web npm、GitHub Actions 和 Docker 依赖更新入口，避免发布分支丢失依赖维护基线。
 - `release-readiness` 会要求 `.github/workflows/ci.yml` 和 `.github/workflows/release.yml` 保留关键 CI、E2E、Docker smoke、release tag 校验、release artifact 上传/下载、checksums 生成与发布、带版本和仓库绑定的 release artifact 校验、发布前镜像校验、release job 依赖和发布权限基线，避免核心自动化路径在发布前失效。
 - `release-readiness` 会要求 `Makefile` 保留 `check`、`verify-changed`、`release-readiness`、`quick-check`、`security-check`、`docker-check` 和 `test-torture` 等核心本地门禁目标，避免 CI、发布清单和维护者文档引用的入口在发布前失效。
