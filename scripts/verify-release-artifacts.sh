@@ -12,6 +12,8 @@ REQUIRE_TARGETS=0
 TMP_ROOT=""
 EXPECTED_TARGETS=(linux-amd64 linux-arm64 darwin-amd64 darwin-arm64)
 CHECKSUM_ARCHIVES=""
+IMAGE_CHECK_RETRIES="${MNEMONAS_RELEASE_IMAGE_CHECK_RETRIES:-6}"
+IMAGE_CHECK_SLEEP_SECONDS="${MNEMONAS_RELEASE_IMAGE_CHECK_SLEEP_SECONDS:-5}"
 
 cleanup() {
 	if [[ -n "$TMP_ROOT" && -d "$TMP_ROOT" ]]; then
@@ -42,6 +44,10 @@ Options:
   --require-targets      Require linux-amd64, linux-arm64, darwin-amd64,
                           and darwin-arm64 archives.
   --check-image          Verify the matching GHCR image tag with Docker.
+
+Environment:
+  MNEMONAS_RELEASE_IMAGE_CHECK_RETRIES        Image manifest check attempts. Defaults to 6.
+  MNEMONAS_RELEASE_IMAGE_CHECK_SLEEP_SECONDS  Seconds between image manifest check attempts. Defaults to 5.
   -h, --help             Show this help.
 EOF
 }
@@ -49,6 +55,21 @@ EOF
 need_tool() {
 	local tool="$1"
 	command -v "$tool" >/dev/null 2>&1 || fail "$tool is required"
+}
+
+require_positive_integer() {
+	local label="$1"
+	local value="$2"
+
+	[[ "$value" =~ ^[0-9]+$ ]] || fail "$label must be a positive integer: $value"
+	(( value > 0 )) || fail "$label must be a positive integer: $value"
+}
+
+require_non_negative_integer() {
+	local label="$1"
+	local value="$2"
+
+	[[ "$value" =~ ^[0-9]+$ ]] || fail "$label must be a non-negative integer: $value"
 }
 
 assert_file_contains() {
@@ -428,10 +449,28 @@ check_remote_image() {
 	local version="$1"
 	local repository="$2"
 	local image="ghcr.io/${repository}:${version#v}"
+	local attempt
 
 	need_tool docker
-	docker manifest inspect "$image" >/dev/null 2>&1 || fail "container image tag is not available: $image"
-	printf '[release-artifact-verify] verified container image: %s\n' "$image"
+	require_positive_integer "MNEMONAS_RELEASE_IMAGE_CHECK_RETRIES" "$IMAGE_CHECK_RETRIES"
+	require_non_negative_integer "MNEMONAS_RELEASE_IMAGE_CHECK_SLEEP_SECONDS" "$IMAGE_CHECK_SLEEP_SECONDS"
+
+	for ((attempt = 1; attempt <= IMAGE_CHECK_RETRIES; attempt++)); do
+		if docker manifest inspect "$image" >/dev/null 2>&1; then
+			printf '[release-artifact-verify] verified container image: %s\n' "$image"
+			return 0
+		fi
+		if (( attempt < IMAGE_CHECK_RETRIES )); then
+			printf '[release-artifact-verify] container image not available yet, retrying in %ss (%d/%d): %s\n' \
+				"$IMAGE_CHECK_SLEEP_SECONDS" \
+				"$attempt" \
+				"$IMAGE_CHECK_RETRIES" \
+				"$image" >&2
+			sleep "$IMAGE_CHECK_SLEEP_SECONDS"
+		fi
+	done
+
+	fail "container image tag is not available: $image"
 }
 
 while [[ "$#" -gt 0 ]]; do

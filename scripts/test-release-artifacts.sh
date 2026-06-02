@@ -43,8 +43,15 @@ make_fake_docker() {
 		'#!/usr/bin/env bash' \
 		'set -euo pipefail' \
 		'if [[ "${1:-}" == "manifest" && "${2:-}" == "inspect" ]]; then' \
+		'  count_file="$FAKE_DOCKER_STATE/count"' \
+		'  count=0' \
+		'  [[ -f "$count_file" ]] && read -r count < "$count_file"' \
+		'  count=$((count + 1))' \
+		'  printf "%s\n" "$count" > "$count_file"' \
 		'  printf "%s\n" "${3:-}" > "$FAKE_DOCKER_STATE/image"' \
 		'  [[ "${FAKE_DOCKER_IMAGE_FAIL:-0}" == "1" ]] && exit 1' \
+		'  failures="${FAKE_DOCKER_IMAGE_FAILS_BEFORE_SUCCESS:-0}"' \
+		'  if [[ "$failures" =~ ^[0-9]+$ && "$count" -le "$failures" ]]; then exit 1; fi' \
 		'  printf "{}\n"' \
 		'  exit 0' \
 		'fi' \
@@ -677,6 +684,33 @@ run_remote_image_check_uses_docker_manifest() {
 	assert_file_contains "$out" "verified container image: ghcr.io/seanbao/mnemonas:1.2.3"
 }
 
+run_remote_image_check_retries_transient_manifest_failure() {
+	local case_dir="$TMP_ROOT/image-check-retry"
+	local dist_dir="$case_dir/dist"
+	local fake_bin="$case_dir/bin"
+	local state_dir="$case_dir/state"
+	local out="$case_dir/out.log"
+
+	make_complete_release "$dist_dir" "v1.2.3" "seanbao/mnemonas"
+	make_fake_docker "$fake_bin" "$state_dir"
+
+	PATH="$fake_bin:$PATH" \
+		FAKE_DOCKER_STATE="$state_dir" \
+		FAKE_DOCKER_IMAGE_FAILS_BEFORE_SUCCESS=2 \
+		MNEMONAS_RELEASE_IMAGE_CHECK_RETRIES=3 \
+		MNEMONAS_RELEASE_IMAGE_CHECK_SLEEP_SECONDS=0 \
+		bash "$REPO_ROOT/scripts/verify-release-artifacts.sh" \
+			--version v1.2.3 \
+			--repository seanbao/mnemonas \
+			--check-image \
+			"$dist_dir" >"$out" 2>&1
+
+	assert_file_contains "$state_dir/count" "3"
+	assert_file_contains "$out" "retrying in 0s (1/3): ghcr.io/seanbao/mnemonas:1.2.3"
+	assert_file_contains "$out" "retrying in 0s (2/3): ghcr.io/seanbao/mnemonas:1.2.3"
+	assert_file_contains "$out" "verified container image: ghcr.io/seanbao/mnemonas:1.2.3"
+}
+
 run_remote_image_check_failure_fails() {
 	local case_dir="$TMP_ROOT/image-check-fails"
 	local dist_dir="$case_dir/dist"
@@ -692,6 +726,7 @@ run_remote_image_check_failure_fails() {
 	PATH="$fake_bin:$PATH" \
 		FAKE_DOCKER_STATE="$state_dir" \
 		FAKE_DOCKER_IMAGE_FAIL=1 \
+		MNEMONAS_RELEASE_IMAGE_CHECK_RETRIES=1 \
 		bash "$REPO_ROOT/scripts/verify-release-artifacts.sh" \
 			--version v1.2.3 \
 			--repository seanbao/mnemonas \
@@ -702,6 +737,33 @@ run_remote_image_check_failure_fails() {
 
 	[[ "$status" -ne 0 ]] || fail "release artifact verifier accepted a missing container image"
 	assert_file_contains "$out" "container image tag is not available: ghcr.io/seanbao/mnemonas:1.2.3"
+}
+
+run_remote_image_check_invalid_retry_config_fails() {
+	local case_dir="$TMP_ROOT/image-check-invalid-retry"
+	local dist_dir="$case_dir/dist"
+	local fake_bin="$case_dir/bin"
+	local state_dir="$case_dir/state"
+	local out="$case_dir/out.log"
+	local status
+
+	make_complete_release "$dist_dir" "v1.2.3" "seanbao/mnemonas"
+	make_fake_docker "$fake_bin" "$state_dir"
+
+	set +e
+	PATH="$fake_bin:$PATH" \
+		FAKE_DOCKER_STATE="$state_dir" \
+		MNEMONAS_RELEASE_IMAGE_CHECK_RETRIES=0 \
+		bash "$REPO_ROOT/scripts/verify-release-artifacts.sh" \
+			--version v1.2.3 \
+			--repository seanbao/mnemonas \
+			--check-image \
+			"$dist_dir" >"$out" 2>&1
+	status=$?
+	set -e
+
+	[[ "$status" -ne 0 ]] || fail "release artifact verifier accepted invalid image-check retry count"
+	assert_file_contains "$out" "MNEMONAS_RELEASE_IMAGE_CHECK_RETRIES must be a positive integer"
 }
 
 run_complete_release_passes
@@ -728,6 +790,8 @@ run_archive_control_character_entry_fails
 run_archive_whitespace_entry_fails
 run_wrong_env_image_fails
 run_remote_image_check_uses_docker_manifest
+run_remote_image_check_retries_transient_manifest_failure
 run_remote_image_check_failure_fails
+run_remote_image_check_invalid_retry_config_fails
 
 printf '[release-artifact-verify-test] all checks passed\n'
