@@ -179,6 +179,7 @@ First public release target.
 - Windows WebClient requires registry changes for HTTP connections; HTTPS is preferred.
 - Users, roles, groups, per-user root boundaries, and directory access rules are supported, but inherited ACL policies and per-file ACLs are not.
 - Direct public exposure without HTTPS reverse proxy or VPN is not recommended.
+- This version is positioned as an L1 private file cloud with an initial L1+ public-access safety baseline, not as the only long-term copy of important data. Production use should keep external backups.
 
 ### Compatibility
 - Go: 1.25.11+
