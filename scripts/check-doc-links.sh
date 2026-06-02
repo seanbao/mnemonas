@@ -240,6 +240,7 @@ const hardeningProgressReleaseReadinessContracts = [
     file: 'docs/hardening-progress.md',
     required: [
       '`scripts/backup-restore-drill-smoke.sh`',
+      '`./scripts/verify-published-release.sh --version <tag> --repository seanbao/mnemonas`',
       '备份恢复演练 smoke 入口文档和发布门禁契约',
       '发布清单和双语 release notes 保留公网部署 doctor、外部网络 smoke、备份恢复演练 smoke 和云防火墙复核入口',
     ],
@@ -248,6 +249,7 @@ const hardeningProgressReleaseReadinessContracts = [
     file: 'docs/hardening-progress.en.md',
     required: [
       '`scripts/backup-restore-drill-smoke.sh`',
+      '`./scripts/verify-published-release.sh --version <tag> --repository seanbao/mnemonas`',
       'backup restore-drill smoke entry-point documentation and release-readiness contract',
       'release checklist and bilingual release notes to retain the public-deployment doctor, external-network smoke, backup restore-drill smoke, and cloud-firewall review entry points',
     ],

@@ -518,11 +518,9 @@ check_release_notes() {
 		"./scripts/test-release-tag.sh"
 		"./scripts/test-release-package.sh"
 		"./scripts/test-release-artifacts.sh"
-		"gh release download <tag>"
-		"./scripts/verify-release-artifacts.sh"
+		"./scripts/verify-published-release.sh"
 		"--version <tag>"
-		"--require-targets"
-		"--check-image"
+		"--repository seanbao/mnemonas"
 	)
 
 	for path in "${release_note_files[@]}"; do
@@ -638,7 +636,7 @@ check_validation_evidence
 
 if [[ "$CHECK_CHECKLIST" -eq 1 ]]; then
 	verify_changed_cmd="GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master"
-	artifact_verify_cmd="./scripts/verify-release-artifacts.sh --version <tag> --repository seanbao/mnemonas --require-targets --check-image <artifact-dir>"
+	artifact_verify_cmd="./scripts/verify-published-release.sh --version <tag> --repository seanbao/mnemonas"
 
 	require_file_contains "CHANGELOG.md" "$verify_changed_cmd"
 	require_file_contains "CHANGELOG.en.md" "$verify_changed_cmd"

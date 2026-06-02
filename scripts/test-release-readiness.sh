@@ -40,7 +40,7 @@ write_checklists() {
 - [ ] 如本次发布包含备份恢复链路，运行恢复演练 smoke 入口：`./scripts/backup-restore-drill-smoke.sh`
 - [ ] 发布前就绪摘要通过：`./scripts/release-readiness.sh`
 - [ ] `./scripts/plan-hardening-commits.sh --fail-on-manual` 确认没有未归类路径
-- [ ] 发布后下载 GitHub Release 产物，并运行 `./scripts/verify-release-artifacts.sh --version <tag> --repository seanbao/mnemonas --require-targets --check-image <artifact-dir>`，验证 release 产物。
+- [ ] 发布后运行 `./scripts/verify-published-release.sh --version <tag> --repository seanbao/mnemonas`，下载并验证 GitHub Release 产物。
 EOF
 
 	cat >CHANGELOG.en.md <<'EOF'
@@ -56,7 +56,7 @@ EOF
 - [ ] If this release includes the backup and restore path, run the restore-drill smoke entry point: `./scripts/backup-restore-drill-smoke.sh`
 - [ ] Run release readiness summary: `./scripts/release-readiness.sh`
 - [ ] Confirm `./scripts/plan-hardening-commits.sh --fail-on-manual` reports no unclassified paths
-- [ ] After publication, download the GitHub Release artifacts and run `./scripts/verify-release-artifacts.sh --version <tag> --repository seanbao/mnemonas --require-targets --check-image <artifact-dir>` to verify release artifacts.
+- [ ] After publication, run `./scripts/verify-published-release.sh --version <tag> --repository seanbao/mnemonas` to download and verify the GitHub Release artifacts.
 EOF
 }
 
@@ -90,8 +90,7 @@ EOF
 ## 发布后核验
 
 ```bash
-gh release download <tag> --repo seanbao/mnemonas --dir dist/release-check
-./scripts/verify-release-artifacts.sh --version <tag> --repository seanbao/mnemonas --require-targets --check-image dist/release-check
+./scripts/verify-published-release.sh --version <tag> --repository seanbao/mnemonas --artifact-dir dist/release-check
 ```
 
 ## 已知限制
@@ -125,8 +124,7 @@ EOF
 ## Post-Publish Verification
 
 ```bash
-gh release download <tag> --repo seanbao/mnemonas --dir dist/release-check
-./scripts/verify-release-artifacts.sh --version <tag> --repository seanbao/mnemonas --require-targets --check-image dist/release-check
+./scripts/verify-published-release.sh --version <tag> --repository seanbao/mnemonas --artifact-dir dist/release-check
 ```
 
 ## Known Limitations
@@ -893,7 +891,7 @@ fi
 assert_file_contains "$output_dir/missing-pr-section.err" ".github/pull_request_template.md is missing required text"
 git checkout -q -- .github/pull_request_template.md
 
-sed -i.bak '/verify-release-artifacts/d' docs/release-notes.en.md
+sed -i.bak '/verify-published-release/d' docs/release-notes.en.md
 rm -f docs/release-notes.en.md.bak
 if ./scripts/release-readiness.sh --allow-dirty --allow-post-validation-changes >"$output_dir/missing-release-notes.out" 2>"$output_dir/missing-release-notes.err"; then
 	fail "release readiness accepted a missing release-notes command"
