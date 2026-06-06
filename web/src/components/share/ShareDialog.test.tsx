@@ -115,7 +115,13 @@ vi.mock('@/api/share', async () => {
   }
 })
 
+vi.mock('@/api/activity', () => ({
+  createActivityReviewRecord: vi.fn(),
+  listActivity: vi.fn(),
+}))
+
 import { copyShareUrl, createShare, getSharePolicy, ShareError } from '@/api/share'
+import * as activityApi from '@/api/activity'
 
 function createDeferred<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void
@@ -153,6 +159,18 @@ describe('ShareDialog', () => {
       default_expires_in: '168h',
       default_max_access: 0,
     })
+    vi.mocked(activityApi.listActivity).mockResolvedValue({
+      items: [],
+      total: 0,
+      limit: 100,
+      offset: 0,
+    })
+    vi.mocked(activityApi.createActivityReviewRecord).mockImplementation(async (input) => ({
+      id: 'review-created',
+      reviewed_at: '2026-03-27T01:01:00Z',
+      reviewer: 'admin',
+      ...input,
+    }))
   })
 
   it('renders when open', () => {
@@ -874,6 +892,158 @@ describe('ShareDialog', () => {
     expect(onShareCreated).toHaveBeenCalledWith(createdShare)
     expect(copyShareUrl).toHaveBeenCalledWith(createdShare)
     expect(mockAddToast).toHaveBeenCalledWith({ title: '链接已复制', color: 'success' })
+  })
+
+  it('records share creation execution results when a matching share activity exists', async () => {
+    const user = userEvent.setup()
+    const createdShare = {
+      id: 'share-1',
+      path: '/test/file.txt',
+      type: 'file' as const,
+      created_by: 'user-1',
+      created_at: '2026-03-27T01:00:00Z',
+      expires_at: null,
+      has_password: true,
+      permission: 'read' as const,
+      enabled: true,
+      access_count: 0,
+      max_access: 5,
+      description: '',
+      url: '/s/share-1',
+      warning: false,
+      message: undefined,
+    }
+    vi.mocked(createShare).mockResolvedValue(createdShare)
+    vi.mocked(activityApi.listActivity).mockResolvedValueOnce({
+      items: [
+        {
+          id: 'act-share-create-1',
+          timestamp: '2026-03-27T01:00:00Z',
+          action: 'share',
+          path: '/test/file.txt',
+          user: 'admin',
+        },
+        {
+          id: 'act-share-other-1',
+          timestamp: '2026-03-27T01:00:01Z',
+          action: 'share',
+          path: '/test/other.txt',
+          user: 'admin',
+        },
+        {
+          id: 'act-unshare-1',
+          timestamp: '2026-03-27T01:00:02Z',
+          action: 'unshare',
+          path: '/test/file.txt',
+          user: 'admin',
+        },
+      ],
+      total: 3,
+      limit: 100,
+      offset: 0,
+    })
+
+    render(
+      <ShareDialog
+        isOpen={true}
+        onClose={() => {}}
+        filePath="/test/file.txt"
+      />
+    )
+
+    await user.click(screen.getByText('创建分享链接'))
+
+    await waitFor(() => {
+      expect(activityApi.createActivityReviewRecord).toHaveBeenCalledTimes(1)
+    })
+    expect(activityApi.listActivity).toHaveBeenCalledWith(expect.objectContaining({
+      actionGroup: 'share',
+      path: '/test/file.txt',
+      limit: 100,
+      offset: 0,
+      signal: expect.any(AbortSignal),
+    }))
+    expect(activityApi.createActivityReviewRecord).toHaveBeenCalledWith(expect.objectContaining({
+      note: '分享执行结果：已创建 1 个分享；已关联 1 条分享活动。',
+      scope_label: '分享 /test/file.txt',
+      filter_summary: '审计分组 分享相关 · 路径 /test/file.txt · 当前分享 1/1 · 执行结果 创建分享',
+      disposition_status: 'confirmed',
+      action_counts: { share: 1 },
+      review_count: 1,
+      total_count: 3,
+      path_count: 1,
+      user_count: 1,
+      path_samples: ['/test/file.txt'],
+      user_samples: ['admin'],
+      share_disposition_details: [{
+        path: '/test/file.txt',
+        type: 'file',
+        enabled: true,
+        risk_level: 'none',
+        reason_summary: '新建分享。',
+        suggested_action: '已创建该分享；继续复核有效期、密码、访问次数和外部引用。',
+        access_summary: '密码保护 · 访问 0/5',
+        expires_at: '永不过期',
+      }],
+      activity_entry_ids: ['act-share-create-1'],
+    }), expect.objectContaining({
+      signal: expect.any(AbortSignal),
+    }))
+    expect(mockAddToast).toHaveBeenCalledWith({ title: '分享链接已创建', color: 'success' })
+    expect(mockAddToast).toHaveBeenCalledWith({ title: '分享创建结果已记录', color: 'success' })
+  })
+
+  it('keeps a created share visible when creation result recording fails', async () => {
+    const user = userEvent.setup()
+    vi.mocked(createShare).mockResolvedValue({
+      id: 'share-1',
+      path: '/test/file.txt',
+      type: 'file',
+      created_by: 'user-1',
+      created_at: '2026-03-27T01:00:00Z',
+      has_password: false,
+      permission: 'read',
+      enabled: true,
+      access_count: 0,
+      max_access: 0,
+      description: '',
+      url: '/s/share-1',
+      warning: false,
+      message: undefined,
+    } as never)
+    vi.mocked(activityApi.listActivity).mockResolvedValueOnce({
+      items: [{
+        id: 'act-share-create-1',
+        timestamp: '2026-03-27T01:00:00Z',
+        action: 'share',
+        path: '/test/file.txt',
+        user: 'admin',
+      }],
+      total: 1,
+      limit: 100,
+      offset: 0,
+    })
+    vi.mocked(activityApi.createActivityReviewRecord).mockRejectedValueOnce(new Error('review write failed'))
+
+    render(
+      <ShareDialog
+        isOpen={true}
+        onClose={() => {}}
+        filePath="/test/file.txt"
+      />
+    )
+
+    await user.click(screen.getByText('创建分享链接'))
+
+    expect(await screen.findByText('分享链接已创建')).toBeInTheDocument()
+    await waitFor(() => {
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '分享创建结果记录失败',
+        description: '操作未完成，请稍后重试。',
+        color: 'warning',
+      })
+    })
+    expect(screen.getByText('http://localhost:3000/s/share-1')).toBeInTheDocument()
   })
 
   it('uses absolute share URLs without adding the current origin', async () => {
