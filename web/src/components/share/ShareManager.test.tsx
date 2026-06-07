@@ -1515,6 +1515,144 @@ describe('ShareManager', () => {
     })
   })
 
+  it('updates share settings and records policy update execution results into activity review history', async () => {
+    const user = userEvent.setup()
+    vi.mocked(shareApi.updateShare).mockResolvedValueOnce({
+      ...mockShares[0],
+      max_access: 5,
+      description: 'reviewed',
+      warning: false,
+      message: undefined,
+    })
+    vi.mocked(activityApi.listActivity).mockResolvedValueOnce({
+      items: [{
+        id: 'act-share-policy-1',
+        timestamp: '2026-03-27T01:00:00Z',
+        action: 'share',
+        path: '/docs/report.pdf',
+        user: 'admin',
+        details: {
+          change_type: 'policy_update',
+          changed_fields: 'max_access,description',
+        },
+      }],
+      total: 1,
+      limit: 100,
+      offset: 0,
+    })
+
+    render(<ShareManager />)
+
+    await waitFor(() => {
+      expect(screen.getByText('report.pdf')).toBeInTheDocument()
+    })
+
+    await user.click(screen.getByLabelText('report.pdf 分享操作'))
+    await user.click(await screen.findByText('编辑策略'))
+
+    await waitFor(() => {
+      expect(screen.getByRole('heading', { name: '编辑分享策略' })).toBeInTheDocument()
+    })
+
+    const maxAccessInput = screen.getByLabelText('分享策略访问次数上限')
+    await user.clear(maxAccessInput)
+    await user.type(maxAccessInput, '5')
+    await user.type(screen.getByLabelText('分享策略备注'), 'reviewed')
+
+    await user.click(screen.getByRole('button', { name: '保存策略' }))
+
+    await waitFor(() => {
+      expectUpdateShareCalledWithAbortSignal('share-1', { max_access: 5, description: 'reviewed' })
+      expect(activityApi.createActivityReviewRecord).toHaveBeenCalledTimes(1)
+    })
+    expect(activityApi.listActivity).toHaveBeenCalledWith(expect.objectContaining({
+      actionGroup: 'share',
+      path: '/docs/report.pdf',
+      limit: 100,
+      offset: 0,
+      signal: expect.any(AbortSignal),
+    }))
+    expect(activityApi.createActivityReviewRecord).toHaveBeenCalledWith(expect.objectContaining({
+      note: '分享执行结果：已更新策略 1 个分享；已关联 1 条分享活动。',
+      scope_label: '分享 /docs/report.pdf',
+      filter_summary: '审计分组 分享相关 · 路径 /docs/report.pdf · 当前分享 1/1 · 执行结果 更新分享策略',
+      disposition_status: 'confirmed',
+      action_counts: { share: 1 },
+      review_count: 1,
+      total_count: 1,
+      path_count: 1,
+      user_count: 1,
+      path_samples: ['/docs/report.pdf'],
+      user_samples: ['admin'],
+      share_disposition_details: [{
+        path: '/docs/report.pdf',
+        type: 'file',
+        enabled: true,
+        risk_level: 'none',
+        reason_summary: '无',
+        suggested_action: '已更新该分享策略；继续复核有效期、密码、访问次数和外部引用。',
+        access_summary: '无密码 · 访问 3/5',
+        expires_at: '永不过期',
+      }],
+      activity_entry_ids: ['act-share-policy-1'],
+    }), expect.objectContaining({
+      signal: expect.any(AbortSignal),
+    }))
+    expect(mockAddToast).toHaveBeenCalledWith({ title: '分享策略已保存', color: 'success' })
+    expect(mockAddToast).toHaveBeenCalledWith({ title: '分享策略更新结果已记录', color: 'success' })
+    await waitFor(() => {
+      expect(screen.queryByRole('heading', { name: '编辑分享策略' })).not.toBeInTheDocument()
+    })
+    expect(screen.getByText('3 次访问 / 5')).toBeInTheDocument()
+  })
+
+  it('keeps updated share settings visible when policy update review recording fails', async () => {
+    const user = userEvent.setup()
+    vi.mocked(shareApi.updateShare).mockResolvedValueOnce({
+      ...mockShares[0],
+      max_access: 4,
+      warning: false,
+      message: undefined,
+    })
+    vi.mocked(activityApi.listActivity).mockResolvedValueOnce({
+      items: [{
+        id: 'act-share-policy-1',
+        timestamp: '2026-03-27T01:00:00Z',
+        action: 'share',
+        path: '/docs/report.pdf',
+        user: 'admin',
+        details: { change_type: 'policy_update' },
+      }],
+      total: 1,
+      limit: 100,
+      offset: 0,
+    })
+    vi.mocked(activityApi.createActivityReviewRecord).mockRejectedValueOnce(new Error('review write failed'))
+
+    render(<ShareManager />)
+
+    await waitFor(() => {
+      expect(screen.getByText('report.pdf')).toBeInTheDocument()
+    })
+
+    await user.click(screen.getByLabelText('report.pdf 分享操作'))
+    await user.click(await screen.findByText('编辑策略'))
+    const maxAccessInput = await screen.findByLabelText('分享策略访问次数上限')
+    await user.clear(maxAccessInput)
+    await user.type(maxAccessInput, '4')
+    await user.click(screen.getByRole('button', { name: '保存策略' }))
+
+    await waitFor(() => {
+      expectUpdateShareCalledWithAbortSignal('share-1', { max_access: 4 })
+      expect(mockAddToast).toHaveBeenCalledWith({ title: '分享策略已保存', color: 'success' })
+      expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({
+        title: '分享策略已保存，复核记录写入失败',
+        color: 'warning',
+      }))
+      expect(screen.getByText('3 次访问 / 4')).toBeInTheDocument()
+    })
+  })
+
   it('shows unavailable toast when toggling a share fails because the share service is unavailable', async () => {
     const user = userEvent.setup()
     vi.mocked(shareApi.updateShare).mockRejectedValue(new ShareError('share service unavailable', 503))
