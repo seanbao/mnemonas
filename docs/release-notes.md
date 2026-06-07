@@ -65,7 +65,7 @@ Release workflow 预期生成以下产物：
 
 当前硬化分支已有以下验证证据；最终发布前应以最新 tag、Release workflow 结果和必要的环境验证为准：
 
-最近本地完整验证快照：验证目标 `a868025c19b6`，`GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master` 通过，覆盖 diff 空白、密钥泄漏扫描、workflow/YAML/脚本门禁、恢复报告基于原始恢复目标匹配结果，在最近一次恢复已完成但匹配只读校验缺失、只读校验早于恢复完成、只读校验不属于当前恢复目标或只读校验状态不能作为当前目标证据时给出明确 findings、首页首次部署检查和登录页基于 setup 状态提示认证关闭、分享启用且认证关闭以及 WebDAV 匿名访问的部署安全风险、Activity 复核处置后把符合当前历史筛选的更新记录即时并入列表缓存、反向代理 WebDAV 验证文档契约门禁、release-readiness 发布清单摘要范围门禁、CHANGELOG 已知限制保留 L1/L1+ 发布候选定位、非唯一长期副本和外部备份边界的 release-readiness 门禁增量、Release workflow 结构门禁、hardening progress 中 `make release-readiness` 行级验证目标门禁、`make release-readiness` 入口基线、历史最小配置加载后回填当前默认值的配置兼容性回归、`make check`、工具链一致性、Go/Rust/frontend 依赖安全扫描、示例配置、public-access 模板、proto 再生成稳定性、Rust fmt/test/clippy、proto-gen fmt/test/clippy、前端 lint/typecheck/unit/build、Playwright 379 个 E2E 用例、Docker build、Docker image `sha256:aa7ab16e6bc2b3c4a416264ed71ceaca2e54119b77a050a495cc9da6618469b1` 和 Docker smoke。Docker smoke 使用 Docker 自动分配的 loopback 端口 `http://127.0.0.1:32801`。
+最近本地完整验证快照：验证目标 `f76b9c2390f2`，`GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master` 通过，覆盖 diff 空白、密钥泄漏扫描、workflow/YAML/脚本门禁、恢复报告基于原始恢复目标匹配结果，在最近一次恢复已完成但匹配只读校验缺失、只读校验早于恢复完成、只读校验不属于当前恢复目标或只读校验状态不能作为当前目标证据时给出明确 findings、首页首次部署检查和登录页基于 setup 状态提示认证关闭、分享启用且认证关闭以及 WebDAV 匿名访问的部署安全风险、Activity 复核处置后把符合当前历史筛选的更新记录即时并入列表缓存、反向代理 WebDAV 验证文档契约门禁、release-readiness 发布清单摘要范围门禁、CHANGELOG 已知限制保留 L1/L1+ 发布候选定位、非唯一长期副本和外部备份边界的 release-readiness 门禁增量、Release workflow 结构门禁、hardening progress 中 `make release-readiness` 行级验证目标门禁、`make release-readiness` 入口基线、历史最小配置加载后回填当前默认值的配置兼容性回归、分享创建执行结果记录增量、`make check`、工具链一致性、Go/Rust/frontend 依赖安全扫描、示例配置、public-access 模板、proto 再生成稳定性、Rust fmt/test/clippy、proto-gen fmt/test/clippy、前端 lint/typecheck/unit/build、Playwright 379 个 E2E 用例、Docker build、Docker image `sha256:42df39f70859d4b994da9e538c32dd80a4ff54d35d4c7d8b54ecf3e7d957feeb` 和 Docker smoke。Docker smoke 使用 Docker 自动分配的 loopback 端口 `http://127.0.0.1:32802`。
 
 - `GOTOOLCHAIN=local ./scripts/verify-changed.sh`
 - `GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master`
@@ -92,7 +92,7 @@ Release workflow 预期生成以下产物：
 - WebDAV curl smoke safety test：`scripts/test-webdav-client-smoke.sh`
 - Release workflow 增量验证：`make workflows-check`、`make scripts-check`、`./scripts/check-secret-leaks.sh`、`make toolchains-check`、`git diff --check`
 - Playwright E2E：`379 passed`
-- 前端单测：`3119 passed`
+- 前端单测：`3121 passed`
 - Docker build 和 `scripts/docker-smoke.sh`
 
 最终发布前如代码、脚本、配置、文档或 workflow 再次变更，应重跑对应验证。
