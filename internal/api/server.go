@@ -11910,18 +11910,23 @@ func (s *Server) handleUpdateShare(w http.ResponseWriter, r *http.Request) {
 		writeLimitedJSONBodyError(w, err, DefaultJSONRequestBodyLimit)
 		return
 	}
+	updateActivityRequest, hasUpdateActivityRequest := readUpdateShareRequestForActivity(r)
 	if !s.authEnabled {
 		r = withNoAuthShareManagementContext(r)
 	}
 	rec := newBufferedResponseRecorder()
 	s.shareHandler.UpdateShare(rec, r)
 	if rec.statusCode >= http.StatusOK && rec.statusCode < http.StatusMultipleChoices && shareInfo != nil {
-		if updatedShareInfo, ok := shareInfoFromAPIResponse(rec); ok && updatedShareInfo.Enabled != shareInfo.Enabled {
-			action := activity.ActionShare
-			if !updatedShareInfo.Enabled {
-				action = activity.ActionUnshare
+		if updatedShareInfo, ok := shareInfoFromAPIResponse(rec); ok {
+			if updatedShareInfo.Enabled != shareInfo.Enabled {
+				action := activity.ActionShare
+				if !updatedShareInfo.Enabled {
+					action = activity.ActionUnshare
+				}
+				s.LogActivityWithWarning(rec, r, action, updatedShareInfo.Path, shareUpdateActivityDetails(shareInfo, updatedShareInfo))
+			} else if sharePolicyUpdateChanged(shareInfo, updatedShareInfo, updateActivityRequest, hasUpdateActivityRequest) {
+				s.LogActivityWithWarning(rec, r, activity.ActionShare, updatedShareInfo.Path, sharePolicyUpdateActivityDetails(shareInfo, updatedShareInfo, updateActivityRequest, hasUpdateActivityRequest))
 			}
-			s.LogActivityWithWarning(rec, r, action, updatedShareInfo.Path, shareUpdateActivityDetails(shareInfo, updatedShareInfo))
 		}
 	}
 	rec.FlushTo(w)
@@ -12238,6 +12243,105 @@ func shareUpdateActivityDetails(previous *share.Share, updated share.ShareInfo) 
 	}
 	details["enabled"] = strconv.FormatBool(updated.Enabled)
 	return details
+}
+
+func readUpdateShareRequestForActivity(r *http.Request) (share.UpdateShareRequest, bool) {
+	var req share.UpdateShareRequest
+	if err := decodeJSONBody(r, &req); err != nil {
+		return share.UpdateShareRequest{}, false
+	}
+	return req, true
+}
+
+func sharePolicyUpdateChanged(previous *share.Share, updated share.ShareInfo, req share.UpdateShareRequest, hasReq bool) bool {
+	return len(sharePolicyUpdateChangedFields(previous, updated, req, hasReq)) > 0
+}
+
+func sharePolicyUpdateActivityDetails(previous *share.Share, updated share.ShareInfo, req share.UpdateShareRequest, hasReq bool) map[string]string {
+	details := shareActivityDetailsFromInfo(updated)
+	if details == nil {
+		details = make(map[string]string)
+	}
+	changedFields := sharePolicyUpdateChangedFields(previous, updated, req, hasReq)
+	details["change_type"] = "policy_update"
+	details["changed_fields"] = strings.Join(changedFields, ",")
+	details["policy_updated"] = "true"
+	details["enabled"] = strconv.FormatBool(updated.Enabled)
+	details["has_password"] = strconv.FormatBool(updated.HasPassword)
+	details["expires_at"] = formatShareActivityExpiresAt(updated.ExpiresAt)
+	details["max_access"] = strconv.FormatInt(updated.MaxAccess, 10)
+	details["description_set"] = strconv.FormatBool(strings.TrimSpace(updated.Description) != "")
+
+	if previousInfo := previousShareInfoForActivity(previous); previousInfo != nil {
+		details["previous_has_password"] = strconv.FormatBool(previousInfo.HasPassword)
+		details["previous_permission"] = string(previousInfo.Permission)
+		details["previous_expires_at"] = formatShareActivityExpiresAt(previousInfo.ExpiresAt)
+		details["previous_max_access"] = strconv.FormatInt(previousInfo.MaxAccess, 10)
+		details["previous_description_set"] = strconv.FormatBool(strings.TrimSpace(previousInfo.Description) != "")
+	}
+	if containsSharePolicyChangedField(changedFields, "password") {
+		details["password_changed"] = "true"
+	}
+	return details
+}
+
+func previousShareInfoForActivity(previous *share.Share) *share.ShareInfo {
+	if previous == nil {
+		return nil
+	}
+	return previous.ToInfo()
+}
+
+func sharePolicyUpdateChangedFields(previous *share.Share, updated share.ShareInfo, req share.UpdateShareRequest, hasReq bool) []string {
+	previousInfo := previousShareInfoForActivity(previous)
+	if previousInfo == nil {
+		return nil
+	}
+
+	fields := make([]string, 0, 5)
+	passwordChanged := previousInfo.HasPassword != updated.HasPassword
+	if !passwordChanged && hasReq && req.Password != nil && strings.TrimSpace(*req.Password) != "" && previousInfo.HasPassword && updated.HasPassword {
+		passwordChanged = true
+	}
+	if passwordChanged {
+		fields = append(fields, "password")
+	}
+	if previousInfo.Permission != updated.Permission {
+		fields = append(fields, "permission")
+	}
+	if !shareActivityTimesEqual(previousInfo.ExpiresAt, updated.ExpiresAt) {
+		fields = append(fields, "expires_at")
+	}
+	if previousInfo.MaxAccess != updated.MaxAccess {
+		fields = append(fields, "max_access")
+	}
+	if previousInfo.Description != updated.Description {
+		fields = append(fields, "description")
+	}
+	return fields
+}
+
+func containsSharePolicyChangedField(fields []string, target string) bool {
+	for _, field := range fields {
+		if field == target {
+			return true
+		}
+	}
+	return false
+}
+
+func shareActivityTimesEqual(left, right *time.Time) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return left.UTC().Equal(right.UTC())
+}
+
+func formatShareActivityExpiresAt(value *time.Time) string {
+	if value == nil {
+		return "none"
+	}
+	return value.UTC().Format(time.RFC3339)
 }
 
 func shareActivityDetailsFromInfo(shareInfo share.ShareInfo) map[string]string {

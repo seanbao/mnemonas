@@ -15,12 +15,16 @@ import {
   ModalHeader,
   ModalBody,
   ModalFooter,
+  Input,
+  Select,
+  SelectItem,
 } from '@heroui/react'
 import {
   Link2,
   MoreVertical,
   Copy,
   Trash2,
+  Pencil,
   ToggleLeft,
   ToggleRight,
   Lock,
@@ -41,6 +45,7 @@ import {
   ShareError,
   type Share,
   type ShareRiskReason,
+  type UpdateShareRequest,
 } from '@/api/share'
 import {
   createActivityReviewRecord,
@@ -151,6 +156,113 @@ function getShareToggleSuccessToast(enabled: boolean, warning: boolean): {
   return warning
     ? { title: `${actionTitle}，但存在警告`, color: 'warning' }
     : { title: actionTitle, color: 'success' }
+}
+
+const SHARE_SETTINGS_KEEP_EXPIRATION = 'keep'
+const SHARE_SETTINGS_NO_EXPIRATION = 'none'
+const MAX_SHARE_PASSWORD_BYTES = 72
+
+type ShareSettingsPasswordMode = 'keep' | 'set' | 'clear'
+
+type ShareSettingsDraft = {
+  passwordMode: ShareSettingsPasswordMode
+  password: string
+  expiresIn: string
+  maxAccess: string
+  description: string
+}
+
+const SHARE_SETTINGS_EXPIRATION_OPTIONS = [
+  { value: SHARE_SETTINGS_KEEP_EXPIRATION, label: '保留当前有效期' },
+  { value: SHARE_SETTINGS_NO_EXPIRATION, label: '永不过期' },
+  { value: '1h', label: '1 小时后过期' },
+  { value: '24h', label: '24 小时后过期' },
+  { value: '7d', label: '7 天后过期' },
+  { value: '30d', label: '30 天后过期' },
+  { value: '90d', label: '90 天后过期' },
+]
+
+const SHARE_SETTINGS_PASSWORD_MODE_OPTIONS: Array<{
+  value: ShareSettingsPasswordMode
+  label: string
+}> = [
+  { value: 'keep', label: '保留当前密码状态' },
+  { value: 'set', label: '设置或替换密码' },
+  { value: 'clear', label: '移除密码' },
+]
+
+function getShareSettingsUpdateSuccessToast(warning: boolean): {
+  title: string
+  color: 'success' | 'warning'
+} {
+  return warning
+    ? { title: '分享策略已保存，但存在警告', color: 'warning' }
+    : { title: '分享策略已保存', color: 'success' }
+}
+
+function getShareMaxAccessInputValue(share: Share): string {
+  return share.max_access && share.max_access > 0 ? String(share.max_access) : '0'
+}
+
+function getUTF8ByteLength(value: string): number {
+  return new TextEncoder().encode(value).length
+}
+
+function parseShareSettingsMaxAccess(value: string): { value: number; error?: string } {
+  const trimmed = value.trim()
+  if (trimmed === '') {
+    return { value: 0 }
+  }
+  if (!/^\d+$/.test(trimmed)) {
+    return { value: 0, error: '访问次数上限必须是非负整数。' }
+  }
+  const parsed = Number(trimmed)
+  if (!Number.isSafeInteger(parsed)) {
+    return { value: 0, error: '访问次数上限过大。' }
+  }
+  return { value: parsed }
+}
+
+function buildShareSettingsUpdateRequest(share: Share, draft: ShareSettingsDraft): {
+  request: UpdateShareRequest
+  hasChanges: boolean
+  error?: string
+} {
+  const request: UpdateShareRequest = {}
+
+  if (draft.passwordMode === 'set') {
+    if (draft.password.trim() === '') {
+      return { request, hasChanges: false, error: '请输入新的分享访问密码。' }
+    }
+    if (getUTF8ByteLength(draft.password) > MAX_SHARE_PASSWORD_BYTES) {
+      return { request, hasChanges: false, error: `分享访问密码不能超过 ${MAX_SHARE_PASSWORD_BYTES} 字节。` }
+    }
+    request.password = draft.password
+  } else if (draft.passwordMode === 'clear' && share.has_password) {
+    request.password = ''
+  }
+
+  if (draft.expiresIn !== SHARE_SETTINGS_KEEP_EXPIRATION) {
+    request.expires_in = draft.expiresIn === SHARE_SETTINGS_NO_EXPIRATION ? '' : draft.expiresIn
+  }
+
+  const parsedMaxAccess = parseShareSettingsMaxAccess(draft.maxAccess)
+  if (parsedMaxAccess.error) {
+    return { request, hasChanges: false, error: parsedMaxAccess.error }
+  }
+  const currentMaxAccess = share.max_access && share.max_access > 0 ? share.max_access : 0
+  if (parsedMaxAccess.value !== currentMaxAccess) {
+    request.max_access = parsedMaxAccess.value
+  }
+
+  if (draft.description !== (share.description ?? '')) {
+    request.description = draft.description
+  }
+
+  return {
+    request,
+    hasChanges: Object.keys(request).length > 0,
+  }
 }
 
 function isAbortError(error: unknown): boolean {
@@ -545,6 +657,13 @@ export function ShareManager({
   const [reviewFilter, setReviewFilter] = useState<ShareReviewFilter>(() => normalizeShareReviewFilter(initialReviewFilter))
   const [isDisablingHighRisk, setIsDisablingHighRisk] = useState(false)
   const [isRecordingShareReview, setIsRecordingShareReview] = useState(false)
+  const [editTarget, setEditTarget] = useState<Share | null>(null)
+  const [editPasswordMode, setEditPasswordMode] = useState<ShareSettingsPasswordMode>('keep')
+  const [editPassword, setEditPassword] = useState('')
+  const [editExpiresIn, setEditExpiresIn] = useState(SHARE_SETTINGS_KEEP_EXPIRATION)
+  const [editMaxAccess, setEditMaxAccess] = useState('0')
+  const [editDescription, setEditDescription] = useState('')
+  const [isUpdatingShareSettings, setIsUpdatingShareSettings] = useState(false)
   const sharesRef = useRef<Share[]>([])
   const loadRequestRef = useRef(0)
   const loadAbortControllerRef = useRef<AbortController | null>(null)
@@ -552,6 +671,7 @@ export function ShareManager({
   const disableHighRiskAbortControllerRef = useRef<AbortController | null>(null)
   const deleteAbortControllerRef = useRef<AbortController | null>(null)
   const recordReviewAbortControllerRef = useRef<AbortController | null>(null)
+  const editShareAbortControllerRef = useRef<AbortController | null>(null)
 
   useEffect(() => () => {
     loadRequestRef.current += 1
@@ -565,6 +685,8 @@ export function ShareManager({
     deleteAbortControllerRef.current = null
     recordReviewAbortControllerRef.current?.abort()
     recordReviewAbortControllerRef.current = null
+    editShareAbortControllerRef.current?.abort()
+    editShareAbortControllerRef.current = null
   }, [])
 
   useEffect(() => {
@@ -631,6 +753,8 @@ export function ShareManager({
       deleteAbortControllerRef.current = null
       recordReviewAbortControllerRef.current?.abort()
       recordReviewAbortControllerRef.current = null
+      editShareAbortControllerRef.current?.abort()
+      editShareAbortControllerRef.current = null
       let cancelled = false
       queueMicrotask(() => {
         if (cancelled) return
@@ -716,6 +840,17 @@ export function ShareManager({
   ]), [broadFolderShares.length, expiringSoonShares.length, passwordlessShares.length, riskyShares.length, staleShares.length])
   const reviewStatus = useMemo(() => getShareReviewStatus(reviewSummaryMetrics), [reviewSummaryMetrics])
   const reviewSummary = useMemo(() => summarizeShareReview(pathFilteredShares), [pathFilteredShares])
+  const shareSettingsUpdate = useMemo(() => (
+    editTarget
+      ? buildShareSettingsUpdateRequest(editTarget, {
+        passwordMode: editPasswordMode,
+        password: editPassword,
+        expiresIn: editExpiresIn,
+        maxAccess: editMaxAccess,
+        description: editDescription,
+      })
+      : { request: {}, hasChanges: false }
+  ), [editDescription, editExpiresIn, editMaxAccess, editPassword, editPasswordMode, editTarget])
 
   if (!featureEnabled) {
     return (
@@ -729,6 +864,28 @@ export function ShareManager({
   }
 
   const loadFeatureState = getShareFeatureState(loadError)
+
+  const handleOpenEditShareSettings = (share: Share) => {
+    if (isUpdatingShareSettings) {
+      return
+    }
+    setEditTarget(share)
+    setEditPasswordMode('keep')
+    setEditPassword('')
+    setEditExpiresIn(SHARE_SETTINGS_KEEP_EXPIRATION)
+    setEditMaxAccess(getShareMaxAccessInputValue(share))
+    setEditDescription(share.description ?? '')
+  }
+
+  const handleCloseEditShareSettingsModal = () => {
+    if (isUpdatingShareSettings) {
+      return
+    }
+    setEditTarget(null)
+    setEditPasswordMode('keep')
+    setEditPassword('')
+    setEditExpiresIn(SHARE_SETTINGS_KEEP_EXPIRATION)
+  }
 
   const handleCopy = async (share: Share) => {
     try {
@@ -751,6 +908,123 @@ export function ShareManager({
         description: '请检查浏览器剪贴板权限。',
         color: 'danger',
       })
+    }
+  }
+
+  const recordSharePolicyUpdateExecution = async (
+    updatedShare: Share,
+    signal: AbortSignal
+  ) => {
+    const normalizedSharePath = normalizePath(updatedShare.path)
+    const activityResult = await listActivity({
+      actionGroup: 'share',
+      path: normalizedSharePath,
+      limit: SHARE_REVIEW_ACTIVITY_LIMIT,
+      offset: 0,
+      signal,
+    })
+    if (signal.aborted) {
+      return
+    }
+
+    const sharePaths = new Set([normalizedSharePath])
+    const executionEntries = activityResult.items.filter((entry) => (
+      entry.action === 'share'
+        && entry.details?.change_type === 'policy_update'
+        && shareActivityMatchesAnyPath(entry, sharePaths)
+    ))
+    if (executionEntries.length === 0) {
+      return
+    }
+
+    await createActivityReviewRecord(buildShareAccessExecutionRecordInput({
+      entries: executionEntries,
+      totalEntries: activityResult.total,
+      targetShares: [updatedShare],
+      pathFilter: normalizedSharePath,
+      scopeLabel: `分享 ${normalizedSharePath}`,
+      targetShareLabel: '分享',
+      actionVerb: '更新策略',
+      filterExecutionLabel: '更新分享策略',
+      dispositionStatus: 'confirmed',
+      detailEnabled: updatedShare.enabled,
+      fallbackRiskLevel: 'none',
+      suggestedAction: '已更新该分享策略；继续复核有效期、密码、访问次数和外部引用。',
+    }), { signal })
+    if (!signal.aborted) {
+      addToast({ title: '分享策略更新结果已记录', color: 'success' })
+    }
+  }
+
+  const handleUpdateShareSettings = async () => {
+    if (!editTarget || isUpdatingShareSettings) {
+      return
+    }
+    if (shareSettingsUpdate.error) {
+      addToast({
+        title: '分享策略未保存',
+        description: shareSettingsUpdate.error,
+        color: 'warning',
+      })
+      return
+    }
+    if (!shareSettingsUpdate.hasChanges) {
+      addToast({
+        title: '没有策略变更',
+        description: '当前表单内容与分享现有策略一致。',
+        color: 'warning',
+      })
+      return
+    }
+
+    const target = editTarget
+    editShareAbortControllerRef.current?.abort()
+    const controller = new AbortController()
+    editShareAbortControllerRef.current = controller
+    setIsUpdatingShareSettings(true)
+    try {
+      const result = await updateShare(target.id, shareSettingsUpdate.request, { signal: controller.signal })
+      if (controller.signal.aborted) {
+        return
+      }
+
+      setShares(prev => prev.map(s => (s.id === target.id ? result : s)))
+      addToast(getShareSettingsUpdateSuccessToast(result.warning))
+      setEditTarget(current => (current?.id === target.id ? null : current))
+      try {
+        await recordSharePolicyUpdateExecution(result, controller.signal)
+      } catch (err) {
+        if (!controller.signal.aborted && !isAbortError(err)) {
+          addToast({
+            title: '分享策略已保存，复核记录写入失败',
+            description: getUserFacingErrorDescription(err),
+            color: 'warning',
+          })
+        }
+      }
+    } catch (err) {
+      if (controller.signal.aborted || isAbortError(err)) {
+        return
+      }
+
+      if (err instanceof ShareError && err.isNotFound) {
+        setShares(prev => prev.filter(s => s.id !== target.id))
+        addToast(getMissingShareToast())
+        setEditTarget(current => (current?.id === target.id ? null : current))
+        return
+      }
+
+      addToast(getShareActionErrorToast(err, {
+        unavailable: '分享策略更新暂不可用',
+        failure: '保存分享策略失败',
+      }))
+    } finally {
+      if (editShareAbortControllerRef.current === controller) {
+        editShareAbortControllerRef.current = null
+      }
+      if (!controller.signal.aborted) {
+        setIsUpdatingShareSettings(false)
+      }
     }
   }
 
@@ -1441,6 +1715,7 @@ export function ShareManager({
               share={share}
               onCopy={() => handleCopy(share)}
               onReviewActivity={() => handleReviewActivity(share)}
+              onEditSettings={() => handleOpenEditShareSettings(share)}
               onToggle={() => handleToggle(share)}
               onDelete={() => setDeleteTarget(share)}
             />
@@ -1459,6 +1734,151 @@ export function ShareManager({
           </div>
         </div>
       )}
+
+      {/* Share settings modal */}
+      <Modal
+        isOpen={!!editTarget}
+        onClose={handleCloseEditShareSettingsModal}
+        placement="center"
+        size="lg"
+        scrollBehavior="inside"
+        classNames={{
+          base: "bg-content1 border border-divider shadow-xl rounded-lg",
+          backdrop: "bg-black/60 backdrop-blur-md",
+          closeButton: "top-4 right-4 text-default-400 hover:text-foreground hover:bg-default-100 rounded-lg",
+        }}
+      >
+        <ModalContent>
+          <ModalHeader className="flex items-center gap-3 px-6 pt-6 pb-2">
+            <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-primary/10 text-primary">
+              <Pencil size={20} />
+            </div>
+            <div className="min-w-0">
+              <h3 className="text-lg font-semibold text-foreground">编辑分享策略</h3>
+              <p className="truncate text-xs font-normal text-default-500">
+                {editTarget?.path ?? ''}
+              </p>
+            </div>
+          </ModalHeader>
+          <ModalBody className="px-6 py-4">
+            {editTarget && (
+              <div className="space-y-5">
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <div className="rounded-lg border border-divider bg-content2/60 px-3 py-2">
+                    <div className="text-xs text-default-500">当前密码</div>
+                    <div className="mt-1 text-sm font-medium text-foreground">
+                      {editTarget.has_password ? '密码保护' : '无密码'}
+                    </div>
+                  </div>
+                  <div className="rounded-lg border border-divider bg-content2/60 px-3 py-2">
+                    <div className="text-xs text-default-500">当前有效期</div>
+                    <div className="mt-1 text-sm font-medium text-foreground">
+                      {formatExpiration(editTarget.expires_at)}
+                    </div>
+                  </div>
+                </div>
+
+                <Select
+                  aria-label="分享密码策略"
+                  label="密码策略"
+                  selectedKeys={[editPasswordMode]}
+                  onSelectionChange={(keys) => {
+                    const nextMode = [...keys][0] as ShareSettingsPasswordMode | undefined
+                    setEditPasswordMode(nextMode ?? 'keep')
+                  }}
+                  classNames={{
+                    trigger: "bg-content2 border-divider",
+                  }}
+                >
+                  {SHARE_SETTINGS_PASSWORD_MODE_OPTIONS
+                    .filter(option => option.value !== 'clear' || editTarget.has_password)
+                    .map((option) => (
+                      <SelectItem key={option.value}>{option.label}</SelectItem>
+                    ))}
+                </Select>
+
+                {editPasswordMode === 'set' && (
+                  <Input
+                    aria-label="新的分享访问密码"
+                    type="password"
+                    label="新的分享访问密码"
+                    placeholder="最多 72 字节"
+                    value={editPassword}
+                    onValueChange={setEditPassword}
+                    isInvalid={shareSettingsUpdate.error?.includes('密码') ?? false}
+                    errorMessage={shareSettingsUpdate.error?.includes('密码') ? shareSettingsUpdate.error : undefined}
+                    classNames={{
+                      inputWrapper: "bg-content2 border-divider",
+                    }}
+                  />
+                )}
+
+                <Select
+                  aria-label="分享策略有效期"
+                  label="有效期"
+                  selectedKeys={[editExpiresIn]}
+                  onSelectionChange={(keys) => {
+                    const nextValue = [...keys][0] as string | undefined
+                    setEditExpiresIn(nextValue ?? SHARE_SETTINGS_KEEP_EXPIRATION)
+                  }}
+                  classNames={{
+                    trigger: "bg-content2 border-divider",
+                  }}
+                >
+                  {SHARE_SETTINGS_EXPIRATION_OPTIONS.map((option) => (
+                    <SelectItem key={option.value}>{option.label}</SelectItem>
+                  ))}
+                </Select>
+
+                <Input
+                  aria-label="分享策略访问次数上限"
+                  label="访问次数上限"
+                  type="text"
+                  inputMode="numeric"
+                  pattern="[0-9]*"
+                  value={editMaxAccess}
+                  onValueChange={setEditMaxAccess}
+                  isInvalid={shareSettingsUpdate.error?.includes('访问次数') ?? false}
+                  errorMessage={shareSettingsUpdate.error?.includes('访问次数') ? shareSettingsUpdate.error : '0 表示不限制访问次数。'}
+                  classNames={{
+                    inputWrapper: "bg-content2 border-divider",
+                  }}
+                />
+
+                <Input
+                  aria-label="分享策略备注"
+                  label="备注"
+                  placeholder="添加备注信息"
+                  value={editDescription}
+                  onValueChange={setEditDescription}
+                  classNames={{
+                    inputWrapper: "bg-content2 border-divider",
+                  }}
+                />
+              </div>
+            )}
+          </ModalBody>
+          <ModalFooter className="px-6 pb-6 pt-2 gap-2">
+            <Button
+              variant="flat"
+              onPress={handleCloseEditShareSettingsModal}
+              isDisabled={isUpdatingShareSettings}
+              className="text-default-600 rounded-lg"
+            >
+              取消
+            </Button>
+            <Button
+              color="primary"
+              onPress={handleUpdateShareSettings}
+              isLoading={isUpdatingShareSettings}
+              isDisabled={Boolean(shareSettingsUpdate.error) || !shareSettingsUpdate.hasChanges}
+              className="rounded-lg"
+            >
+              保存策略
+            </Button>
+          </ModalFooter>
+        </ModalContent>
+      </Modal>
 
       {/* Delete confirmation modal */}
       <Modal 
@@ -1522,11 +1942,12 @@ interface ShareItemProps {
   share: Share
   onCopy: () => void
   onReviewActivity: () => void
+  onEditSettings: () => void
   onToggle: () => void
   onDelete: () => void
 }
 
-function ShareItem({ share, onCopy, onReviewActivity, onToggle, onDelete }: ShareItemProps) {
+function ShareItem({ share, onCopy, onReviewActivity, onEditSettings, onToggle, onDelete }: ShareItemProps) {
   const fileName = share.path.split('/').pop() || share.path
   const isExpired = share.expires_at ? new Date(share.expires_at) <= new Date() : false
   const riskPresentation = getRiskPresentation(share.risk?.level)
@@ -1645,6 +2066,13 @@ function ShareItem({ share, onCopy, onReviewActivity, onToggle, onDelete }: Shar
                   onPress={onReviewActivity}
                 >
                   查看分享活动
+                </DropdownItem>
+                <DropdownItem
+                  key="edit-settings"
+                  startContent={<Pencil size={14} />}
+                  onPress={onEditSettings}
+                >
+                  编辑策略
                 </DropdownItem>
                 <DropdownItem 
                   key="toggle"
