@@ -493,13 +493,15 @@ Example response:
   "auth_enabled": true,
   "share_enabled": true,
   "webdav_enabled": true,
-  "webdav_auth_type": "basic"
+  "webdav_auth_type": "basic",
+  "allow_unsafe_no_auth": false
 }
 ```
 
 Notes:
 
 - The endpoint does not return initial usernames or passwords.
+- `allow_unsafe_no_auth` only reports whether the dangerous configuration exception is enabled; public deployments should still rely on the security self-check, `mnemonas-doctor --public-domain`, and cloud-firewall review.
 - The first-run Web administrator password is written only to `initial-password.txt` next to `auth.users_file`; the default path is `<storage.root>/.mnemonas/initial-password.txt`, and non-interactive startup logs only report that file path.
 - The endpoint returns a setup-specific flat JSON payload and does not use the common `data` wrapper.
 
