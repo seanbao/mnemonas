@@ -107,6 +107,7 @@ vi.mock('@heroui/react', async () => {
           <div>
             <span>{placeholder}</span>
             <button onClick={() => onSelectionChange?.(new Set(['needs_follow_up']))}>筛选复核需跟进</button>
+            <button onClick={() => onSelectionChange?.(new Set(['disabled']))}>筛选复核已禁用</button>
             <button onClick={() => onSelectionChange?.(new Set(['all']))}>筛选复核全部处置</button>
             <div>{children}</div>
           </div>
@@ -1382,6 +1383,99 @@ describe('ActivityPage', () => {
           title: '复核状态已更新为已恢复',
           color: 'success',
         }))
+        expect(screen.queryByLabelText('需跟进复核批量视图')).toBeNull()
+      })
+    })
+
+    it('adds an updated follow-up review to the matching history filter', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockListActivityReviewRecords.mockImplementation(async (options) => {
+        if (options?.limit === 3 && options?.dispositionStatus === 'needs_follow_up') {
+          return {
+            items: [
+              {
+                id: 'review-share-follow-up-1',
+                reviewed_at: new Date(Date.now() - 1000 * 60 * 10).toISOString(),
+                reviewer: 'owner',
+                note: '分享链接仍需处理',
+                scope_label: '全部记录',
+                filter_summary: '分组 分享相关',
+                disposition_status: 'needs_follow_up',
+                action_counts: {
+                  share: 1,
+                },
+                review_count: 1,
+                total_count: 1,
+                path_count: 1,
+                user_count: 1,
+                path_samples: ['/docs/report.pdf'],
+                user_samples: ['owner'],
+                activity_entry_ids: ['share-1'],
+              },
+            ],
+            total: 1,
+            limit: 3,
+            offset: 0,
+          }
+        }
+
+        return {
+          items: [],
+          total: 0,
+          limit: options?.limit ?? 5,
+          offset: 0,
+        }
+      })
+      mockUpdateActivityReviewRecordDisposition.mockImplementationOnce(async (id, input) => ({
+        id,
+        reviewed_at: new Date(Date.now() - 1000).toISOString(),
+        reviewer: 'admin',
+        note: input.note ?? '分享链接已禁用',
+        scope_label: '全部记录',
+        filter_summary: '分组 分享相关',
+        disposition_status: input.disposition_status,
+        action_counts: {
+          share: 1,
+        },
+        review_count: 1,
+        total_count: 1,
+        path_count: 1,
+        user_count: 1,
+        path_samples: ['/docs/report.pdf'],
+        user_samples: ['owner'],
+        activity_entry_ids: ['share-1'],
+      }))
+
+      render(<ActivityPage />)
+
+      await waitFor(() => {
+        expect(screen.getByLabelText('复核历史筛选')).toBeTruthy()
+        expect(screen.getByLabelText('需跟进复核批量视图')).toBeTruthy()
+      })
+
+      await user.click(within(screen.getByLabelText('复核历史筛选')).getByText('筛选复核已禁用'))
+
+      await waitFor(() => {
+        expectListActivityReviewRecordsCalledWith({
+          limit: 5,
+          dispositionStatus: 'disabled',
+          reviewer: undefined,
+          actionGroup: undefined,
+          since: undefined,
+        })
+      })
+      expect(screen.queryByText('分享链接已禁用')).toBeNull()
+
+      await user.click(within(screen.getByLabelText('需跟进复核批量视图')).getByRole('button', { name: '标记已禁用' }))
+
+      await waitFor(() => {
+        expect(mockUpdateActivityReviewRecordDisposition).toHaveBeenCalledWith('review-share-follow-up-1', {
+          disposition_status: 'disabled',
+        })
+        expect(screen.getByText('分享链接已禁用')).toBeTruthy()
+        expect(screen.getAllByText('已禁用').length).toBeGreaterThan(1)
+        expect(screen.getByText('类型：创建分享 1')).toBeTruthy()
+        expect(screen.getByText('路径样例：/docs/report.pdf')).toBeTruthy()
         expect(screen.queryByLabelText('需跟进复核批量视图')).toBeNull()
       })
     })
