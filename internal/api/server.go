@@ -11266,12 +11266,13 @@ func formatWebDAVPrefix(prefix string) string {
 
 // SetupStatusResponse represents the setup status response
 type SetupStatusResponse struct {
-	Success        bool   `json:"success"`
-	IsFirstRun     bool   `json:"is_first_run"`
-	AuthEnabled    bool   `json:"auth_enabled"`
-	ShareEnabled   bool   `json:"share_enabled"`
-	WebDAVEnabled  bool   `json:"webdav_enabled"`
-	WebDAVAuthType string `json:"webdav_auth_type"`
+	Success           bool   `json:"success"`
+	IsFirstRun        bool   `json:"is_first_run"`
+	AuthEnabled       bool   `json:"auth_enabled"`
+	ShareEnabled      bool   `json:"share_enabled"`
+	WebDAVEnabled     bool   `json:"webdav_enabled"`
+	WebDAVAuthType    string `json:"webdav_auth_type"`
+	AllowUnsafeNoAuth bool   `json:"allow_unsafe_no_auth"`
 }
 
 // handleGetSetupStatus returns setup status for first run.
@@ -11298,12 +11299,13 @@ func (s *Server) handleGetSetupStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp := SetupStatusResponse{
-		Success:        true,
-		IsFirstRun:     !secrets.SetupShown,
-		AuthEnabled:    s.authEnabled,
-		ShareEnabled:   cfg.Share.Enabled,
-		WebDAVEnabled:  cfg.WebDAV.Enabled,
-		WebDAVAuthType: config.NormalizeWebDAVAuthType(cfg.WebDAV.AuthType),
+		Success:           true,
+		IsFirstRun:        !secrets.SetupShown,
+		AuthEnabled:       s.authEnabled,
+		ShareEnabled:      cfg.Share.Enabled,
+		WebDAVEnabled:     cfg.WebDAV.Enabled,
+		WebDAVAuthType:    config.NormalizeWebDAVAuthType(cfg.WebDAV.AuthType),
+		AllowUnsafeNoAuth: cfg.Security.AllowUnsafeNoAuth,
 	}
 
 	s.json(w, http.StatusOK, resp)

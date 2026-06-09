@@ -22010,6 +22010,7 @@ func TestServer_SetupStatus_DoesNotExposeCredentials(t *testing.T) {
 	server.config.Share.Enabled = true
 	server.config.WebDAV.AuthType = "basic"
 	server.config.WebDAV.Password = "custom-pass"
+	server.config.Security.AllowUnsafeNoAuth = true
 
 	req := httptest.NewRequest("GET", "/api/v1/setup/", nil)
 	w := httptest.NewRecorder()
@@ -22038,6 +22039,9 @@ func TestServer_SetupStatus_DoesNotExposeCredentials(t *testing.T) {
 	}
 	if payload["share_enabled"] != true {
 		t.Fatalf("expected share_enabled to reflect runtime config, got %v", payload["share_enabled"])
+	}
+	if payload["allow_unsafe_no_auth"] != true {
+		t.Fatalf("expected allow_unsafe_no_auth to reflect runtime config, got %v", payload["allow_unsafe_no_auth"])
 	}
 }
 

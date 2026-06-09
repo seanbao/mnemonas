@@ -61,6 +61,9 @@ function getSetupSecurityHints(status: SetupStatusResponse | null): string[] {
   if (status.webdav_enabled && status.webdav_auth_type.toLowerCase() === 'none') {
     hints.push('WebDAV 当前允许匿名访问；公网访问前应改为用户认证或关闭 WebDAV。')
   }
+  if (status.allow_unsafe_no_auth === true) {
+    hints.push('无认证暴露例外当前开启；公网访问前应关闭该例外并重新运行安全自检。')
+  }
   return hints
 }
 

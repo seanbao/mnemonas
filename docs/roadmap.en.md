@@ -19,7 +19,7 @@ The current capability set can be summarized by track:
 
 It is not yet a complete NAS appliance. The main missing areas are a mountable SMB runtime, more real-media and remote restore-disposition examples, more real permission and share-rule review examples, and fuller storage-pool visibility. Until external backups and the public-access security check flow are mature, MnemoNAS should not be treated as the only long-term copy of important data or exposed directly without an HTTPS reverse proxy.
 
-The Dashboard first-run checklist now includes authentication, sharing, and WebDAV status highlights, and warns before public deployment when authentication is disabled, sharing is enabled without authentication, or WebDAV anonymous access is enabled. This summary supplements first-run onboarding and does not replace the security self-check API, `mnemonas-doctor`, or cloud firewall review.
+The Dashboard first-run checklist now includes authentication, sharing, WebDAV, and `allow_unsafe_no_auth` status highlights, and warns before public deployment when authentication is disabled, sharing is enabled without authentication, WebDAV anonymous access is enabled, or the unauthenticated-exposure exception is on. This summary supplements first-run onboarding and does not replace the security self-check API, `mnemonas-doctor`, or cloud firewall review.
 
 ## Product Positioning
 
