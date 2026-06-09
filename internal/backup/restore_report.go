@@ -81,6 +81,9 @@ func restoreReportFindingsWithMatchingVerify(view JobView, matchingRestoreVerify
 		appendFinding("最近一次显式恢复失败", view.LastRestore.ErrorMessage)
 	} else if view.LastRestore.Status == StatusCompleted && matchingRestoreVerify == nil {
 		findings = append(findings, "最近一次显式恢复尚未完成匹配的只读校验。")
+		if view.LastRestoreVerify != nil {
+			findings = append(findings, "最近一次只读校验不属于当前恢复目标或早于恢复完成，需重新检查当前恢复目录。")
+		}
 	}
 	if view.LastRestoreVerify == nil && (view.LastRestore == nil || view.LastRestore.Status != StatusCompleted) {
 		findings = append(findings, "尚未持久化恢复后的只读校验报告。")
