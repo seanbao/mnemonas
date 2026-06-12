@@ -31,7 +31,7 @@ This release candidate focuses on improving MnemoNAS stability, public-access sa
 - `release-readiness` now requires all four hardening evidence documents to exist and record the same full-validation target, preventing missing evidence from being skipped before release.
 - `release-readiness` also checks that both release-notes drafts record the current full-validation target, so stale validation snapshots fail before release.
 - `release-readiness` requires the bilingual release-notes post-publish download and artifact-verifier examples to use `<tag>` placeholders, preventing fixed version numbers from entering copyable commands before the first release.
-- `release-readiness` requires the `CHANGELOG.md` and `CHANGELOG.en.md` release checklists to include documentation, dependency-security, and Docker build/smoke commands, preventing final release verification from omitting key local gates.
+- `release-readiness` requires the `CHANGELOG.md` and `CHANGELOG.en.md` release checklists to include documentation, dependency-security, Docker build/smoke, selected release tag validation, and release script regression commands, preventing final release verification from omitting key local gates.
 - `release-readiness` requires the Dependabot configuration to cover Go, Rust dataplane, Rust proto generator, Web npm, GitHub Actions, and Docker dependency update entry points, preventing the release branch from losing its dependency-maintenance baseline.
 - `release-readiness` requires `.github/workflows/ci.yml` and `.github/workflows/release.yml` to retain key CI, E2E, Docker smoke, release-tag validation, release-artifact verification, and publication-permission baselines, preventing core automation paths from being lost before release.
 - `release-readiness` requires `Makefile` to retain core local gate targets such as `check`, `verify-changed`, `quick-check`, `security-check`, `docker-check`, and `test-torture`, preventing CI, release-checklist, and maintainer-documentation entry points from being lost before release.
@@ -64,7 +64,7 @@ Archives should include a top-level directory, `nasd`, `dataplane`, Web UI stati
 
 The current hardening branch has the following validation evidence. Final publication should use the latest tag, Release workflow result, and required environment validation as the source of truth:
 
-Latest local full-validation snapshot: validation target `b604c96a4605`; `GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master` passed, covering diff whitespace, secret-leak scanning, workflow/YAML/script gates, `make check`, toolchain consistency, Go/Rust/frontend dependency security scans, example config validation, public-access templates, protobuf regeneration stability, Rust fmt/test/clippy, proto-gen fmt/test/clippy, frontend lint/typecheck/unit/build, 377 Playwright E2E cases, Docker build, Docker image `sha256:52ec64e5edf267e38f717c466da478ab2a1ccf37e0b8f0a762f99882a438e08f`, and Docker smoke. The Docker smoke used the Docker-assigned loopback port `http://127.0.0.1:32786`.
+Latest local full-validation snapshot: validation target `78f98eccf4cf`; `GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master` passed, covering diff whitespace, secret-leak scanning, workflow/YAML/script gates, `make check`, toolchain consistency, Go/Rust/frontend dependency security scans, example config validation, public-access templates, protobuf regeneration stability, Rust fmt/test/clippy, proto-gen fmt/test/clippy, frontend lint/typecheck/unit/build, 377 Playwright E2E cases, Docker build, Docker image `sha256:dd8efc4794def56899faa2f80f278c44c27aa4082c7bf9adb4957aa8143a586b`, and Docker smoke. The Docker smoke used the Docker-assigned loopback port `http://127.0.0.1:32788`.
 
 - `GOTOOLCHAIN=local ./scripts/verify-changed.sh`
 - `GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master`
@@ -76,6 +76,7 @@ Latest local full-validation snapshot: validation target `b604c96a4605`; `GOTOOL
 - `./scripts/public-go-live-smoke.sh <domain>`
 - `./scripts/backup-restore-drill-smoke.sh`
 - `docs/cloud-firewall-checklist.en.md`
+- `./scripts/check-release-tag.sh <tag>`
 - `./scripts/test-release-tag.sh`
 - `./scripts/test-release-package.sh`
 - `./scripts/test-release-artifacts.sh`
