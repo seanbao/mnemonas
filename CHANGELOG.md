@@ -189,7 +189,7 @@
 - `scripts/release-readiness.sh` 要求四份 hardening 证据文档存在且记录一致的完整验证目标，避免发布前证据缺失被静默跳过
 - `scripts/release-readiness.sh` 会检查双语 release notes 草稿记录当前完整验证目标，避免发布说明中的验证快照滞后
 - `scripts/release-readiness.sh` 会要求双语 release notes 的发布后下载和 artifact verifier 示例使用 `<tag>` 占位，避免首次发布前把固定版本号写入可复制命令
-- `scripts/release-readiness.sh` 会要求 `CHANGELOG.md` 和 `CHANGELOG.en.md` 的发布清单包含文档检查、依赖安全检查和 Docker 构建烟测命令，避免关键本地门禁从最终发布核验中遗漏
+- `scripts/release-readiness.sh` 会要求 `CHANGELOG.md` 和 `CHANGELOG.en.md` 的发布清单包含文档检查、依赖安全检查、Docker 构建烟测、所选发布 tag 校验和发布脚本回归命令，避免关键本地门禁从最终发布核验中遗漏
 - `scripts/release-readiness.sh` 会要求 Dependabot 配置覆盖 Go、Rust 数据面、Rust proto 生成器、Web npm、GitHub Actions 和 Docker 依赖更新入口，避免发布分支丢失依赖维护基线
 - `scripts/release-readiness.sh` 会要求 `.github/workflows/ci.yml` 和 `.github/workflows/release.yml` 保留关键 CI、E2E、Docker smoke、release tag 校验、release artifact 校验、发布前镜像校验和发布权限基线，避免核心自动化路径在发布前失效
 - `scripts/release-readiness.sh` 会要求 `Makefile` 保留 `check`、`verify-changed`、`quick-check`、`security-check`、`docker-check` 和 `test-torture` 等核心本地门禁目标，避免 CI、发布清单和维护者文档引用的入口在发布前失效
@@ -199,6 +199,7 @@
 - `scripts/release-readiness.sh` 会要求发布清单和双语 release notes 保留 `mnemonas-doctor --public-domain`、`scripts/public-go-live-smoke.sh`、`scripts/backup-restore-drill-smoke.sh` 和 `cloud-firewall-checklist` 入口，避免公网部署环境复核和恢复演练入口从最终发布流程中遗漏
 - `scripts/release-readiness.sh` 会拒绝不是当前 HEAD 祖先的 base ref，避免用旁支范围生成误导性的发布就绪摘要
 - `scripts/release-readiness.sh` 会检查当前发布分支的本地提交标题是否符合 Conventional Commits，并拒绝遗留的 `fixup!` / `squash!` 临时提交
+- 新增 `make release-readiness` 入口包装发布就绪摘要脚本，Makefile 基线门禁会保留该入口，避免发布前检查只能依赖脚本路径记忆
 - `scripts/public-go-live-smoke.sh` 会先检查后端端口 TCP 可达性；`8080/9090/9091` 或自定义后端端口即使不返回 HTTP 状态，只要从外部网络可建立 TCP 连接就会失败
 - `scripts/public-go-live-smoke.sh` 对无效自定义后端目标和错误 HTTP 跳转只输出脱敏后的目标形状，不回显 query、fragment、userinfo 或控制字符路径内容
 - `scripts/public-go-live-smoke.sh` 的 TCP 探测会按 `timeout`、`gtimeout` 顺序自动选择 GNU timeout 兼容命令，并支持通过 `TIMEOUT_BIN` 指定兼容替代命令
@@ -349,7 +350,7 @@
 - [ ] 如果计划公网发布，从外部网络运行 `./scripts/public-go-live-smoke.sh <domain>`，确认 HTTPS、同域跳转和后端端口不可外露
 - [ ] 如本次发布包含备份恢复链路，针对至少一个已配置备份任务运行 `./scripts/backup-restore-drill-smoke.sh`，确认立即备份、保留策略检查、恢复演练和恢复报告下载路径可复跑
 - [ ] `./scripts/plan-hardening-commits.sh --fail-on-manual` 确认没有未归类路径
-- [ ] 发布前就绪摘要通过：`./scripts/release-readiness.sh`
+- [ ] 发布前就绪摘要通过：`make release-readiness`
 - [ ] 更新 CHANGELOG.md、CHANGELOG.en.md、README 版本引用和 [发布说明草稿](docs/release-notes.md)
 - [ ] 所选发布 tag 校验通过：`./scripts/check-release-tag.sh <tag>`
 - [ ] 发布脚本回归通过：`./scripts/test-release-tag.sh`、`./scripts/test-release-package.sh`、`./scripts/test-release-artifacts.sh`

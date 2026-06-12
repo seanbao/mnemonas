@@ -279,6 +279,7 @@ Main entry points:
 
 ```bash
 make verify-changed
+make release-readiness
 make test
 make test-torture
 make e2e
@@ -295,6 +296,7 @@ It can select workflow, script, Go/Rust, frontend, E2E, Docker, documentation, d
 When `go.mod`, `go.sum`, Cargo manifests or lockfiles, or Web npm manifests or lockfiles change, `verify-changed` adds dependency security checks; Web npm manifest or lockfile changes run npm audit with `NPM_AUDIT=1`.
 YAML configuration validation rejects syntax errors and duplicate keys within the same mapping so local parsing cannot silently override configuration values.
 Use `./scripts/verify-changed.sh --staged` to inspect staged content only, `./scripts/verify-changed.sh --base <ref>` to validate a branch range, and `--dry-run` to review selected commands without executing them.
+Before tagging, run `make release-readiness` to summarize the current branch, commit subjects, grouping plan, validation evidence, and release checklist state.
 Docker image build and container smoke checks are bounded by `VERIFY_CHANGED_DOCKER_TIMEOUT=45m` by default; override it for slower networks or build hosts. The script automatically uses `timeout` or GNU coreutils `gtimeout`.
 
 Documentation-only changes run `make docs-check`.
