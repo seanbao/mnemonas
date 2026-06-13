@@ -85,6 +85,26 @@ require_file_contains() {
 	}
 }
 
+require_file_line_contains_pair() {
+	local path="$1"
+	local first="$2"
+	local second="$3"
+	local description="$4"
+
+	[[ -f "$path" ]] || fail "missing required checklist file: $path"
+	awk -v first="$first" -v second="$second" '
+		index($0, first) && index($0, second) {
+			found = 1
+		}
+		END {
+			exit(found ? 0 : 1)
+		}
+	' "$path" || {
+		printf 'release-readiness: %s is missing required %s containing:\n%s\n%s\n' "$path" "$description" "$first" "$second" >&2
+		exit 1
+	}
+}
+
 require_community_file() {
 	local path="$1"
 
@@ -425,6 +445,14 @@ is_release_documentation_path() {
 	esac
 }
 
+dirty_worktree_paths() {
+	{
+		git diff --name-only -z
+		git diff --cached --name-only -z
+		git ls-files --others --exclude-standard -z
+	} | sort -zu
+}
+
 check_validation_evidence() {
 	local path
 	local path_target
@@ -464,6 +492,9 @@ check_validation_evidence() {
 	target_short="$(git rev-parse --short=12 "$target_full")"
 	head_full="$(git rev-parse HEAD)"
 	VALIDATION_TARGET_SHORT="$target_short"
+
+	require_file_line_contains_pair "docs/hardening-progress.md" "make release-readiness" "$target_short" "release-readiness validation record"
+	require_file_line_contains_pair "docs/hardening-progress.en.md" "make release-readiness" "$target_short" "release-readiness validation record"
 
 	if ! git merge-base --is-ancestor "$target_full" HEAD; then
 		fail "validation evidence target is not an ancestor of HEAD: $target_short"
@@ -508,6 +539,35 @@ check_validation_evidence() {
 	if [[ "$files_since" != "0" && "$release_docs_only" -eq 0 && "$ALLOW_POST_VALIDATION_CHANGES" -eq 1 ]]; then
 		print_kv "validation-warning" "draft override allowed non-release-documentation changes after validation target $target_short; rerun full branch validation before release"
 	fi
+}
+
+check_dirty_worktree_release_scope() {
+	local dirty_files=0
+	local dirty_release_docs_only=1
+	local path
+
+	while IFS= read -r -d '' path; do
+		[[ -n "$path" ]] || continue
+		dirty_files=$((dirty_files + 1))
+		if ! is_release_documentation_path "$path"; then
+			dirty_release_docs_only=0
+		fi
+	done < <(dirty_worktree_paths)
+
+	if [[ "$dirty_files" -eq 0 ]]; then
+		return
+	fi
+
+	if [[ "$dirty_release_docs_only" -eq 1 ]]; then
+		print_kv "validation-dirty" "only release documentation is dirty ($dirty_files files)"
+		return
+	fi
+
+	if [[ "$ALLOW_POST_VALIDATION_CHANGES" -eq 0 ]]; then
+		fail "uncommitted non-release-documentation changes exist; commit them and rerun full branch validation or pass --allow-post-validation-changes for a draft summary"
+	fi
+
+	print_kv "validation-warning" "draft override allowed uncommitted non-release-documentation changes; rerun full branch validation before release"
 }
 
 check_release_notes() {
@@ -645,6 +705,7 @@ done <<<"$planner_output"
 check_branch_commit_messages
 check_community_files
 check_validation_evidence
+check_dirty_worktree_release_scope
 
 if [[ "$CHECK_CHECKLIST" -eq 1 ]]; then
 	verify_changed_cmd="GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master"
