@@ -9,6 +9,7 @@ import {
   addToast,
 } from '@heroui/react'
 import { 
+  AlertTriangle,
   Lock,
   User,
   LogIn,
@@ -19,7 +20,7 @@ import {
   EyeOff,
 } from 'lucide-react'
 import { useAuthStore, useIsAuthenticated } from '@/stores/auth'
-import { getSetupStatus } from '@/api/setup'
+import { getSetupStatus, type SetupStatusResponse } from '@/api/setup'
 import { getHealth } from '@/api/files'
 
 function getPostLoginRedirectPath(state: unknown): string {
@@ -45,6 +46,24 @@ function getPostLoginRedirectPath(state: unknown): string {
 
 const loginWarningTitle = '登录成功，但操作记录写入失败'
 
+function getSetupSecurityHints(status: SetupStatusResponse | null): string[] {
+  if (!status) {
+    return []
+  }
+
+  const hints: string[] = []
+  if (!status.auth_enabled) {
+    hints.push('认证当前关闭；公网访问前应先启用认证并确认至少一个管理员可用。')
+  }
+  if (status.share_enabled === true && !status.auth_enabled) {
+    hints.push('分享功能当前启用；认证关闭时不应把服务暴露到公网。')
+  }
+  if (status.webdav_enabled && status.webdav_auth_type.toLowerCase() === 'none') {
+    hints.push('WebDAV 当前允许匿名访问；公网访问前应改为用户认证或关闭 WebDAV。')
+  }
+  return hints
+}
+
 export function LoginPage() {
   const navigate = useNavigate()
   const location = useLocation()
@@ -55,11 +74,13 @@ export function LoginPage() {
   const [password, setPassword] = useState('')
   const [showPassword, setShowPassword] = useState(false)
   const [formError, setFormError] = useState<string | null>(null)
-  const [isFirstRun, setIsFirstRun] = useState<boolean | null>(null)
+  const [setupStatus, setSetupStatus] = useState<SetupStatusResponse | null>(null)
   const [appVersion, setAppVersion] = useState<string | null>(null)
   const usernameInputId = 'login-username'
   const passwordInputId = 'login-password'
   const displayError = formError ?? error
+  const isFirstRun = setupStatus?.is_first_run ?? null
+  const setupSecurityHints = getSetupSecurityHints(setupStatus)
 
   // Redirect if already authenticated
   useEffect(() => {
@@ -76,12 +97,12 @@ export function LoginPage() {
     void getSetupStatus({ signal: controller.signal })
       .then((status) => {
         if (!cancelled) {
-          setIsFirstRun(status.is_first_run)
+          setSetupStatus(status)
         }
       })
       .catch(() => {
         if (!cancelled) {
-          setIsFirstRun(null)
+          setSetupStatus(null)
         }
       })
 
@@ -316,6 +337,21 @@ export function LoginPage() {
                     </>
                   )}
                 </div>
+                {setupSecurityHints.length > 0 && (
+                  <div
+                    role="status"
+                    aria-label="部署安全提示"
+                    className="mt-3 space-y-1 rounded-lg border border-warning/25 bg-warning/5 px-3 py-2 text-xs text-default-600"
+                  >
+                    <div className="mb-1 flex items-center gap-1.5 font-medium text-warning">
+                      <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+                      <span>部署安全提示</span>
+                    </div>
+                    {setupSecurityHints.map((hint) => (
+                      <p key={hint}>{hint}</p>
+                    ))}
+                  </div>
+                )}
               </div>
             </CardBody>
           </Card>
