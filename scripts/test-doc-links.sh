@@ -1350,6 +1350,14 @@ EOF
 | 备份恢复演练 smoke 入口 | `scripts/backup-restore-drill-smoke.sh` 已纳入发布清单和双语 release notes 门禁，备份恢复演练 smoke 入口文档和发布门禁契约已记录。 | `make docs-check` |
 | 发布后产物核验 | 正式发布后运行 `./scripts/verify-published-release.sh --version <tag> --repository seanbao/mnemonas` 统一下载并核验 GitHub Release 产物、checksums 和容器镜像标签。 | `make docs-check` |
 | 审查分组与发布前检查 | 发布就绪摘要要求发布清单和双语 release notes 保留公网部署 doctor、外部网络 smoke、备份恢复演练 smoke 和云防火墙复核入口。 | `./scripts/release-readiness.sh` |
+
+## 整体状态边界
+
+| 状态项 | 当前结论 | 进入下一状态所需证据 |
+|------|----------|----------------------|
+| 工程内发布候选 | 已成立。 | 非发布文档变更后重新执行完整验证。 |
+| 最终可用目标 | 不能标记为最终完成。真实公网部署、正式 tag、Release workflow 结果和发布后产物核验仍缺少环境证据。 | 完成外部部署验证。 |
+| 后续功能边界 | 已确认推迟的边缘功能不阻塞当前硬化收尾。 | 维护者重新确认范围。 |
 EOF
 	cat > "$repo/docs/hardening-progress.en.md" <<'EOF'
 # Hardening Progress Ledger
@@ -1361,6 +1369,14 @@ English | [简体中文](hardening-progress.md)
 | Backup restore-drill smoke entry point | `scripts/backup-restore-drill-smoke.sh` is covered by the release checklist and bilingual release-notes gates, and the backup restore-drill smoke entry-point documentation and release-readiness contract is recorded. | `make docs-check` |
 | Published release verification | After publication, run `./scripts/verify-published-release.sh --version <tag> --repository seanbao/mnemonas` to download and verify GitHub Release artifacts, checksums, and container image tags through the maintainer entry point. | `make docs-check` |
 | Review grouping and pre-release checks | The release-readiness summary requires the release checklist and bilingual release notes to retain the public-deployment doctor, external-network smoke, backup restore-drill smoke, and cloud-firewall review entry points. | `./scripts/release-readiness.sh` |
+
+## Overall Status Boundary
+
+| Status item | Current conclusion | Evidence needed for the next state |
+| --- | --- | --- |
+| In-repository release candidate | Established. | Rerun validation after non-release-documentation changes. |
+| Final usability objective | Not complete. Code, scripts, Web UI, Docker, local release-package fixtures, documentation, and the release-readiness summary have local evidence, but real public deployment, the official tag, Release workflow results, and post-publication artifact verification still lack environment evidence. | Complete external deployment verification. |
+| Follow-up feature boundary | Confirmed deferred edge features do not block the current hardening closeout and should not be repeatedly reopened in this ledger. | Reconfirm scope before implementation. |
 EOF
 	git -C "$repo" add docs/README.md docs/README.en.md docs/hardening-progress.md docs/hardening-progress.en.md
 }
@@ -1376,6 +1392,13 @@ write_hardening_progress_release_readiness_contract_missing_published_release_ve
 	local repo="$1"
 	write_hardening_progress_release_readiness_contract_valid_docs "$repo"
 	perl -0pi -e 's/`\.\/scripts\/verify-published-release\.sh --version <tag> --repository seanbao\/mnemonas`/`\.\/scripts\/verify-release-artifacts.sh --require-targets --check-image`/' "$repo/docs/hardening-progress.en.md"
+	git -C "$repo" add docs/hardening-progress.en.md
+}
+
+write_hardening_progress_release_readiness_contract_missing_goal_boundary_doc() {
+	local repo="$1"
+	write_hardening_progress_release_readiness_contract_valid_docs "$repo"
+	perl -0pi -e 's/Not complete\. //' "$repo/docs/hardening-progress.en.md"
 	git -C "$repo" add docs/hardening-progress.en.md
 }
 
@@ -1750,6 +1773,7 @@ run_rejects "api-reference-webdav-auth-contract-legacy-first" "docs/api-referenc
 run_rejects "backup-restore-drill-contract-missing-history" "docs/backup-guide.en.md: missing backup restore drill guidance text: Restore-drill history and explicit restore history both keep the latest 20 entries" write_backup_restore_drill_contract_missing_history_doc
 run_rejects "hardening-progress-release-readiness-contract-missing-backup-smoke" "docs/hardening-progress.en.md: missing release-readiness hardening ledger text: release checklist and bilingual release notes to retain the public-deployment doctor, external-network smoke, backup restore-drill smoke, and cloud-firewall review entry points" write_hardening_progress_release_readiness_contract_missing_backup_smoke_doc
 run_rejects "hardening-progress-release-readiness-contract-missing-published-release-verifier" "docs/hardening-progress.en.md: missing release-readiness hardening ledger text: \`./scripts/verify-published-release.sh --version <tag> --repository seanbao/mnemonas\`" write_hardening_progress_release_readiness_contract_missing_published_release_verifier_doc
+run_rejects "hardening-progress-release-readiness-contract-missing-goal-boundary" "docs/hardening-progress.en.md: missing release-readiness hardening ledger text: Not complete." write_hardening_progress_release_readiness_contract_missing_goal_boundary_doc
 run_rejects "docker-deployment-release-verification-contract-missing-retry" "docs/docker-deployment.en.md: missing Docker release verification guidance text: MNEMONAS_RELEASE_IMAGE_CHECK_SLEEP_SECONDS" write_docker_deployment_release_verification_contract_missing_retry_doc
 run_rejects "release-notes-validation-evidence-contract-mismatch" "docs/release-notes.en.md: frontend unit test count 3113 does not match docs/hardening-review-summary.en.md: 3115" write_release_notes_validation_evidence_contract_mismatch_doc
 run_rejects "release-notes-validation-evidence-contract-docker-image-mismatch" "docs/release-notes.en.md: Docker image sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb does not match docs/hardening-review-summary.en.md: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" write_release_notes_validation_evidence_contract_docker_image_mismatch_doc
