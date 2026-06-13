@@ -185,6 +185,32 @@ describe('LoginPage', () => {
       expect(screen.getByText(/初始密码位于服务器上的 initial-password.txt/i)).toBeInTheDocument()
     })
 
+    it('shows deployment safety hints when setup status reports unsafe public-access prerequisites', async () => {
+      mockGetSetupStatus.mockResolvedValueOnce({
+        success: true,
+        is_first_run: true,
+        auth_enabled: false,
+        share_enabled: true,
+        webdav_enabled: true,
+        webdav_auth_type: 'none',
+      })
+
+      renderLogin()
+
+      expect(await screen.findByRole('status', { name: '部署安全提示' })).toBeInTheDocument()
+      expect(screen.getByText(/认证当前关闭；公网访问前应先启用认证/i)).toBeInTheDocument()
+      expect(screen.getByText(/分享功能当前启用；认证关闭时不应把服务暴露到公网/i)).toBeInTheDocument()
+      expect(screen.getByText(/WebDAV 当前允许匿名访问；公网访问前应改为用户认证或关闭 WebDAV/i)).toBeInTheDocument()
+    })
+
+    it('does not show deployment safety hints when setup status is safe for public-access prerequisites', async () => {
+      renderLogin()
+
+      await waitForSetupStatusLoad()
+
+      expect(screen.queryByRole('status', { name: '部署安全提示' })).not.toBeInTheDocument()
+    })
+
     it('falls back to neutral guidance when setup status cannot be loaded', async () => {
       mockGetSetupStatus.mockRejectedValueOnce(new Error('setup status unavailable'))
 
