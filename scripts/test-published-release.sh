@@ -56,7 +56,7 @@ make_fake_gh() {
 		'  printf "%s\n" "$tag" > "$FAKE_GH_STATE/tag"' \
 		'  printf "%s\n" "$repo" > "$FAKE_GH_STATE/repo"' \
 		'  printf "%s\n" "$dir" > "$FAKE_GH_STATE/dir"' \
-		'  mkdir -p "$dir"' \
+		'  mkdir -p -- "$dir"' \
 		'  cp -R "$FAKE_GH_RELEASE_DIR"/. "$dir"/' \
 		'  exit 0' \
 		'fi' \
@@ -196,6 +196,37 @@ run_skip_image_check_avoids_docker() {
 	assert_file_contains "$out" "verified published release v1.2.3 from seanbao/mnemonas"
 }
 
+run_dash_prefixed_artifact_dir_downloads_and_verifies() {
+	local case_dir="$TMP_ROOT/dash-prefixed-artifact-dir"
+	local release_dir="$case_dir/release"
+	local fake_bin="$case_dir/bin"
+	local gh_state="$case_dir/gh-state"
+	local docker_state="$case_dir/docker-state"
+	local out="$case_dir/out.log"
+
+	make_complete_release "$release_dir" "v1.2.3" "seanbao/mnemonas"
+	make_fake_gh "$fake_bin" "$gh_state"
+	make_fake_docker "$fake_bin" "$docker_state"
+
+	(
+		cd "$case_dir"
+		PATH="$fake_bin:$PATH" \
+			FAKE_GH_RELEASE_DIR="$release_dir" \
+			FAKE_GH_STATE="$gh_state" \
+			FAKE_DOCKER_STATE="$docker_state" \
+			bash "$REPO_ROOT/scripts/verify-published-release.sh" \
+				--version v1.2.3 \
+				--repository seanbao/mnemonas \
+				--artifact-dir -artifacts >"$out"
+	)
+
+	assert_file_contains "$gh_state/dir" "-artifacts"
+	assert_file_contains "$docker_state/image" "ghcr.io/seanbao/mnemonas:1.2.3"
+	assert_file_contains "$out" "verified targets: linux-amd64 linux-arm64 darwin-amd64 darwin-arm64"
+	assert_file_contains "$out" "verified published release v1.2.3 from seanbao/mnemonas"
+	[[ -f "$case_dir/-artifacts/checksums.txt" ]] || fail "dash-prefixed artifact directory was not populated"
+}
+
 run_non_empty_artifact_dir_fails_before_download() {
 	local case_dir="$TMP_ROOT/non-empty-artifact-dir"
 	local artifact_dir="$case_dir/artifacts"
@@ -248,9 +279,35 @@ run_invalid_version_fails_before_download() {
 	assert_file_not_exists "$gh_state/tag"
 }
 
+run_invalid_repository_fails_before_download() {
+	local case_dir="$TMP_ROOT/invalid-repository"
+	local fake_bin="$case_dir/bin"
+	local gh_state="$case_dir/gh-state"
+	local out="$case_dir/out.log"
+	local status
+
+	make_fake_gh "$fake_bin" "$gh_state"
+
+	set +e
+	PATH="$fake_bin:$PATH" \
+		FAKE_GH_RELEASE_DIR="$case_dir/release" \
+		FAKE_GH_STATE="$gh_state" \
+		bash "$REPO_ROOT/scripts/verify-published-release.sh" \
+			--version v1.2.3 \
+			--repository SeanBao/mnemonas >"$out" 2>&1
+	status=$?
+	set -e
+
+	[[ "$status" -ne 0 ]] || fail "published release verifier accepted an invalid repository"
+	assert_file_contains "$out" "repository must be lowercase OWNER/REPO for GHCR image tags"
+	assert_file_not_exists "$gh_state/tag"
+}
+
 run_downloads_and_verifies_published_release
 run_skip_image_check_avoids_docker
+run_dash_prefixed_artifact_dir_downloads_and_verifies
 run_non_empty_artifact_dir_fails_before_download
 run_invalid_version_fails_before_download
+run_invalid_repository_fails_before_download
 
 printf '[published-release-verify-test] all checks passed\n'

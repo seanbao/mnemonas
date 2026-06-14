@@ -40,6 +40,7 @@ Options:
                           Defaults to seanbao/mnemonas.
   --artifact-dir DIR      Download artifacts into DIR. DIR must be empty or
                           absent. Defaults to a temporary directory.
+                          Dash-prefixed relative paths are supported.
   --skip-image-check      Verify archives and checksums without checking GHCR.
   --keep-artifacts        Keep the temporary download directory after exit.
   -h, --help              Show this help.
@@ -113,6 +114,8 @@ validate_repository() {
 }
 
 prepare_download_dir() {
+	local artifact_dir_for_ops
+
 	if [[ -z "$ARTIFACT_DIR" ]]; then
 		TMP_ROOT="$(mktemp -d)"
 		DOWNLOAD_DIR="$TMP_ROOT/artifacts"
@@ -123,14 +126,18 @@ prepare_download_dir() {
 	if contains_control_character "$ARTIFACT_DIR"; then
 		fail "artifact directory must not contain control characters: $(format_log_value "$ARTIFACT_DIR")"
 	fi
-	if [[ -e "$ARTIFACT_DIR" && ! -d "$ARTIFACT_DIR" ]]; then
+	artifact_dir_for_ops="$ARTIFACT_DIR"
+	case "$artifact_dir_for_ops" in
+		-*) artifact_dir_for_ops="./$artifact_dir_for_ops" ;;
+	esac
+	if [[ -e "$artifact_dir_for_ops" && ! -d "$artifact_dir_for_ops" ]]; then
 		fail "artifact directory exists but is not a directory: $ARTIFACT_DIR"
 	fi
-	mkdir -p -- "$ARTIFACT_DIR"
-	if [[ -n "$(find "$ARTIFACT_DIR" -mindepth 1 -maxdepth 1 -print -quit)" ]]; then
+	mkdir -p -- "$artifact_dir_for_ops"
+	if [[ -n "$(find "$artifact_dir_for_ops" -mindepth 1 -maxdepth 1 -print -quit)" ]]; then
 		fail "artifact directory must be empty before download: $ARTIFACT_DIR"
 	fi
-	DOWNLOAD_DIR="$ARTIFACT_DIR"
+	DOWNLOAD_DIR="$artifact_dir_for_ops"
 }
 
 while [[ "$#" -gt 0 ]]; do
