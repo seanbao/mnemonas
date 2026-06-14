@@ -201,6 +201,7 @@ First public release target.
 - [ ] If public access is planned, run on the server: `sudo mnemonas-doctor --public-domain <domain>`, and review the [Public cloud firewall checklist](docs/cloud-firewall-checklist.en.md) for DNS, firewall, TLS, and cloud security groups
 - [ ] If public access is planned, run from an external network: `./scripts/public-go-live-smoke.sh <domain>` to confirm HTTPS, same-domain redirects, and private backend ports
 - [ ] If this release includes the backup and restore path, run `./scripts/backup-restore-drill-smoke.sh` against at least one configured backup job and confirm that immediate backup, retention review, restore drill, and restore report download can be repeated
+- [ ] Run the post-publication go-live check: `./scripts/release-go-live-check.sh --version <tag> --domain <domain>`; provide `--backup-api-url` and `--backup-job-id` for the restore drill, or explicitly record `--skip-backup-restore-drill`
 - [ ] Confirm `./scripts/plan-hardening-commits.sh --fail-on-manual` reports no unclassified paths
 - [ ] Run release readiness summary: `make release-readiness`
 - [ ] Update `CHANGELOG.md`, `CHANGELOG.en.md`, README version references, and [release notes draft](docs/release-notes.en.md)

@@ -22,6 +22,7 @@ This release candidate focuses on improving MnemoNAS stability, public-access sa
 - Release tags are checked before artifact builds and must use `vMAJOR.MINOR.PATCH` or a SemVer prerelease form such as `v1.2.3-rc.1`, with the Docker image tag after the leading `v` capped at 128 characters. The post-publish artifact verifier reuses the same version-validation logic for explicit or archive-inferred versions.
 - Added rerunnable WebDAV curl protocol smoke checks for validating basic read/write, URL-encoded space paths, copy, move, and delete operations against a running service. The script rejects `WEBDAV_URL` values with whitespace, query strings, fragments, embedded credentials, backslashes, encoded slashes, encoded backslashes, or `.`/`..` path segments, and rejects non-`0/1` `CURL_INSECURE` values, with coverage in the script gate.
 - Added a rerunnable backup restore-drill smoke entry point for exercising a running service by explicit backup job ID, covering job listing, single-job retrieval, immediate backup, retention check, restore drill, and restore-report download. The script does not create or delete backup jobs and rejects API URLs with whitespace, query strings, fragments, embedded credentials, backslashes, encoded slashes or backslashes, empty path segments, or dot segments before issuing requests.
+- Added the post-publication go-live entry point `scripts/release-go-live-check.sh`. It runs the release-readiness summary, GitHub Release and GHCR artifact verification, public `mnemonas-doctor --public-domain`, external-network go-live smoke, and backup restore-drill smoke in order. The restore drill requires an explicit API URL and job ID, or an explicit skip recorded in the release evidence.
 - Added a WebDAV compatibility report form for collecting validation results or client-specific failures from Finder, Windows File Explorer, mobile file managers, media players, and CLI clients.
 - The Maintenance completed-restore dialog can copy a restore cutover record with the target path, read-only verification result, cutover steps, pre-cutover confirmation, and rollback checklist. Restore reports now use raw restore-target matching to add explicit findings when the latest restore is complete but lacks matching read-only verification, when read-only verification predates restore completion, when it belongs to a different restore target, or when the read-only verification status cannot serve as current-target evidence, avoiding stale, cross-target, or unusable verification being read as current evidence. Batch restore results list cross-directory cutover candidates and conflict-disposition records, and include job names, backup targets, retention-policy status, candidate paths, read-only verification conclusions, verification error details, disposition guidance, and config-file retention requirements in the copyable result record for ticket or duty-log handoff.
 - The Settings directory-access user matrix and unsaved-rule preview can copy a review record with the path, user read/write decisions, matched rules, and related-share impact, and keep backend-persisted recent review history, falling back to current-browser records when server history is unavailable.
@@ -39,7 +40,7 @@ This release candidate focuses on improving MnemoNAS stability, public-access sa
 - `release-readiness` requires `.github/workflows/torture.yml` to retain manual and scheduled triggers, read-only permissions, the `RUN_LIVE_FAULTS: '0'` non-destructive guard, and the `make test-torture` entry point, preventing the long-running regression workflow from being lost before release.
 - `release-readiness` requires blank Issues to stay disabled and checks that the bug report, usage question, feature request, and WebDAV compatibility Issue Forms keep sensitive-data redaction, diagnostic, and security-impact guidance, preventing public collaboration entry points from bypassing safety prompts.
 - `release-readiness` checks that the security policy and support guide retain private vulnerability reporting, public-disclosure warnings, dataplane port exposure boundaries, dependency-security checks, and direct-public-exposure limitations.
-- `release-readiness` requires the release checklist and bilingual release notes to retain the `mnemonas-doctor --public-domain`, `scripts/public-go-live-smoke.sh`, `scripts/backup-restore-drill-smoke.sh`, and `cloud-firewall-checklist` entry points, preventing public-deployment environment review and the restore-drill entry point from being omitted during final release preparation.
+- `release-readiness` requires the release checklist and bilingual release notes to retain the `mnemonas-doctor --public-domain`, `scripts/public-go-live-smoke.sh`, `scripts/backup-restore-drill-smoke.sh`, `scripts/release-go-live-check.sh`, and `cloud-firewall-checklist` entry points, preventing public-deployment environment review, post-publication go-live verification, and the restore-drill entry point from being omitted during final release preparation.
 - `release-readiness` rejects a base ref that is not an ancestor of the current HEAD, preventing misleading release-readiness summaries from sibling branch ranges.
 - Go test entry points now keep a 20-minute package timeout so heavy race packages are not interrupted by Go's default 10-minute timeout during full branch validation.
 - Documentation checks reject copyable raw `?path=/...` path queries in API examples, requiring restore and favorite-check `path` query examples to use `%2F...` encoding.
@@ -77,6 +78,7 @@ Latest local full-validation snapshot: validation target `f2d86053ba1f`; `GOTOOL
 - `sudo mnemonas-doctor --public-domain <domain>`
 - `./scripts/public-go-live-smoke.sh <domain>`
 - `./scripts/backup-restore-drill-smoke.sh`
+- `./scripts/release-go-live-check.sh`
 - `docs/cloud-firewall-checklist.en.md`
 - `./scripts/check-release-tag.sh <tag>`
 - `./scripts/test-release-tag.sh`
@@ -99,7 +101,21 @@ If code, scripts, configuration, documentation, or workflow files change again b
 
 ## Post-Publish Verification
 
-After the release tag is published, download the GitHub Release artifacts and run:
+After the release tag is published, prefer the unified go-live entry point:
+
+```bash
+./scripts/release-go-live-check.sh \
+  --version <tag> \
+  --domain nas.example.com \
+  --repository seanbao/mnemonas \
+  --artifact-dir dist/release-check \
+  --backup-api-url https://nas.example.com/api/v1 \
+  --backup-job-id external-disk \
+  --cookie-file cookies.txt
+```
+
+When the backup restore drill cannot be run for the release, pass `--skip-backup-restore-drill` explicitly and record that the release does not have complete restore evidence.
+To verify only the GitHub Release artifacts, run:
 
 ```bash
 mkdir -p dist/release-check
@@ -128,4 +144,4 @@ Explicit `--artifact-dir` values may use dash-prefixed relative paths, and repos
 - Confirm `./scripts/plan-hardening-commits.sh --fail-on-manual` reports no paths left to group.
 - Run `make release-readiness` and confirm commit subjects, temporary `fixup!` / `squash!` commits, hardening validation evidence, release-documentation commands, public-deployment review commands, security policy, Dependabot baseline, CI/Release workflow baseline, Makefile core local gate target baseline, torture workflow baseline, blank-Issue disablement and Issue Form safety guidance, and community health files pass.
 - After creating and pushing the tag, confirm the Release workflow succeeds.
-- After publication, run the release artifact verifier and record the result.
+- After publication, run `./scripts/release-go-live-check.sh` and record the artifact verification, public smoke, and backup restore-drill results.
