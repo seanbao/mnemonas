@@ -15,7 +15,7 @@
 - 完善认证、用户、主目录、目录配额、目录访问规则、分享策略和会话安全默认值的后端与前端覆盖。
 - 加固邮件告警通知出口，消息头和 SMTP envelope 会清理控制字符，降低内部调用或后续扩展绕过配置校验后的头部注入风险。
 - 提升 Web 可见质量，核心页面、公开入口、移动端布局、基础可访问性、运行时错误、失败请求和破碎可见文本已纳入 Playwright 扫描。首页首次部署检查和登录页会基于 setup 状态提示认证关闭、分享启用且认证关闭、WebDAV 匿名访问和 `allow_unsafe_no_auth` 开启的部署风险。
-- 加固 systemd、Docker、反向代理、公网访问模板、doctor、公网域名就绪校验、release package 和 release artifact 验证路径；Docker preflight 会在 Compose 检查前拒绝空值、以 `-` 开头、包含空白或控制字符、URL 形态、无效 `sha256` digest 或不兼容 Docker tag 的 `MNEMONAS_IMAGE`，且 URL 形态诊断不回显凭据、query 或 fragment；Docker quickstart、preflight 和容器入口还会拒绝配置中包含父目录段或控制字符的 `auth.users_file` 容器路径，避免将 `/data/../...` 映射为宿主数据目录外的初始密码读取路径；Docker smoke 会在启动容器前拒绝以 `-` 开头或包含空白/控制字符的镜像引用；容器 healthcheck 对无效目标 URL 的诊断日志只输出脱敏后的 URL 形状，不写入嵌入凭据、原始查询字符串或 fragment；反向代理安装脚本对无效 `MNEMONAS_UPSTREAM_HOST` 只输出主机格式约束，不回显原始 host 值或误粘贴 URL 中的凭据、query、fragment；`mnemonas-doctor --public-domain` 对无效 `share.base_url` 诊断只输出脱敏 URL 形状，不回显误配置中的凭据、query 或 fragment；公网 go-live smoke 和 doctor 会拒绝 `localhost`、IP 地址和全数字四段主机名，给手动端口复核命令设置连接和总耗时上限，并拒绝空白的自定义后端目标列表和歧义目标路径，避免跳过端口暴露检查或生成不明确的后端探测 URL；公网 go-live smoke 对无效自定义后端目标和错误 HTTP 跳转只输出脱敏后的目标形状，不回显 query、fragment、userinfo 或控制字符路径内容；Release workflow 会在创建 GitHub Release 前校验归档、checksums、必需目标集合、下载目录未知条目、归档条目类型、重复条目、控制字符路径、空白字符路径、归档成员控制字符路径、归档成员空白字符路径、反斜杠路径、歧义路径、GHCR 仓库名和已推送的容器镜像标签；release artifact verifier 支持通过 `--` 传入以 `-` 开头的本地产物目录，并对下载目录、checksum 清单和归档成员中的控制字符路径使用 shell-safe 诊断表示，避免发布后核验路径被 shell 内建命令按选项解释或把原始控制字符写入验收日志。
+- 加固 systemd、Docker、反向代理、公网访问模板、doctor、公网域名就绪校验、release package 和 release artifact 验证路径；Docker preflight 会在 Compose 检查前拒绝空值、以 `-` 开头、包含空白或控制字符、URL 形态、无效 `sha256` digest 或不兼容 Docker tag 的 `MNEMONAS_IMAGE`，且 URL 形态诊断不回显凭据、query 或 fragment；Docker quickstart、preflight 和容器入口还会拒绝配置中包含父目录段或控制字符的 `auth.users_file` 容器路径，避免将 `/data/../...` 映射为宿主数据目录外的初始密码读取路径；Docker smoke 会在启动容器前拒绝以 `-` 开头或包含空白/控制字符的镜像引用；容器 healthcheck 对无效目标 URL 的诊断日志只输出脱敏后的 URL 形状，不写入嵌入凭据、原始查询字符串或 fragment；反向代理安装脚本对无效 `MNEMONAS_UPSTREAM_HOST` 只输出主机格式约束，不回显原始 host 值或误粘贴 URL 中的凭据、query、fragment；`mnemonas-doctor --public-domain` 对无效 `share.base_url` 诊断只输出脱敏 URL 形状，不回显误配置中的凭据、query 或 fragment；公网 go-live smoke 和 doctor 会拒绝 `localhost`、IP 地址和全数字四段主机名，给手动端口复核命令设置连接和总耗时上限，并拒绝空白的自定义后端目标列表和歧义目标路径，避免跳过端口暴露检查或生成不明确的后端探测 URL；公网 go-live smoke 对无效自定义后端目标和错误 HTTP 跳转只输出脱敏后的目标形状，不回显 query、fragment、userinfo 或控制字符路径内容；Release workflow 会在创建 GitHub Release 前校验归档、checksums、必需目标集合、下载目录未知条目、归档条目类型、重复条目、控制字符路径、空白字符路径、归档成员控制字符路径、归档成员空白字符路径、反斜杠路径、歧义路径、GHCR 仓库名和已推送的容器镜像标签；release artifact verifier 支持通过 `--` 传入以 `-` 开头的本地产物目录，并对下载目录、checksum 清单和归档成员中的控制字符路径使用 shell-safe 诊断表示，避免发布后核验路径被 shell 内建命令按选项解释或把原始控制字符写入验收日志；发布后统一核验入口会把以 `-` 开头的显式 artifact 目录规范化为本地路径，并在下载前拒绝非法仓库名。
 - systemd 安装和卸载脚本在拒绝包含控制字符的路径、地址、端口或账号参数时，会使用 shell-safe 诊断表示，避免失败日志写入原始控制字符或形成多行注入。
 - 基准测试、E2E、故障注入脚本、反向代理安装向导和双语反向代理文档的 WebDAV PROPFIND 示例均通过临时 curl config 传递 WebDAV Basic Auth 凭据，避免密码出现在 `curl` 命令参数；开发文档和反向代理文档均不再保留直接把 WebDAV 密码放入 `curl -u` 的手动示例，并由脚本测试和文档契约覆盖。
 - 公网 go-live smoke 会在 TCP 探测中按 `timeout`、`gtimeout` 顺序自动选择 GNU timeout 兼容命令，并支持用 `TIMEOUT_BIN` 指定兼容替代命令。
@@ -110,6 +110,7 @@ mkdir -p dist/release-check
 ```
 
 随后应完成至少一次归档安装 smoke、Docker release 镜像启动 smoke、公开文档链接检查，以及公网部署环境的 `mnemonas-doctor --public-domain`、外部网络 `public-go-live-smoke.sh`、DNS、防火墙、TLS 和云安全组复核。
+显式 `--artifact-dir` 可以使用以 `-` 开头的相对路径；仓库名会在下载前校验为 GHCR 兼容的小写 `owner/repo`。
 
 ## 已知限制
 

@@ -281,6 +281,7 @@ const hardeningProgressReleaseReadinessContracts = [
       '不能标记为最终完成',
       '真实公网部署、正式 tag、Release workflow 结果和发布后产物核验仍缺少环境证据',
       '已确认推迟的边缘功能不阻塞当前硬化收尾',
+      '以 `-` 开头的显式 artifact 目录',
     ],
   },
   {
@@ -296,6 +297,7 @@ const hardeningProgressReleaseReadinessContracts = [
       'Not complete.',
       'real public deployment, the official tag, Release workflow results, and post-publication artifact verification still lack environment evidence',
       'Confirmed deferred edge features do not block the current hardening closeout',
+      'Dash-prefixed explicit artifact directories',
     ],
   },
 ]
@@ -313,6 +315,8 @@ const dockerDeploymentReleaseVerificationContracts = [
       'MNEMONAS_RELEASE_IMAGE_CHECK_SLEEP_SECONDS',
       '--skip-image-check',
       '显式目录必须为空或不存在',
+      '以 `-` 开头的相对路径',
+      '下载前校验为 GHCR 兼容的小写 `owner/repo`',
     ],
   },
   {
@@ -328,6 +332,8 @@ const dockerDeploymentReleaseVerificationContracts = [
       'MNEMONAS_RELEASE_IMAGE_CHECK_SLEEP_SECONDS',
       '--skip-image-check',
       'Explicit directories must be empty or absent',
+      'dash-prefixed relative paths',
+      'GHCR-compatible lowercase `owner/repo` values before download',
     ],
   },
 ]
