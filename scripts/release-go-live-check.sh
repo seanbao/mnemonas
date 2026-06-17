@@ -26,6 +26,9 @@ fail() {
 	exit 1
 }
 
+# shellcheck source=scripts/release-version.sh
+. "$SCRIPT_DIR/release-version.sh"
+
 log_info() {
 	printf '[release-go-live-check] %s\n' "$*"
 }
@@ -74,10 +77,110 @@ need_executable() {
 	command -v "$command_path" >/dev/null 2>&1 || fail "$label is required: $command_path"
 }
 
+contains_control_character() {
+	local value="$1"
+
+	LC_ALL=C printf '%s' "$value" | LC_ALL=C grep -q '[[:cntrl:]]'
+}
+
+contains_whitespace_character() {
+	local value="$1"
+
+	[[ "$value" == *[[:space:]]* ]]
+}
+
+is_ipv4_like_host() {
+	local host="$1"
+	local octet
+	local -a octets
+
+	IFS='.' read -r -a octets <<< "$host"
+	[[ "${#octets[@]}" -eq 4 ]] || return 1
+	for octet in "${octets[@]}"; do
+		[[ "$octet" =~ ^[0-9]+$ ]] || return 1
+	done
+	return 0
+}
+
+is_valid_dns_hostname() {
+	local host="$1"
+	local label
+	local -a labels
+
+	[[ -n "$host" && "${#host}" -le 253 ]] || return 1
+	[[ "$host" =~ ^[a-z0-9.-]+$ ]] || return 1
+	[[ "$host" != *".."* ]] || return 1
+
+	IFS='.' read -r -a labels <<< "$host"
+	for label in "${labels[@]}"; do
+		[[ -n "$label" && "${#label}" -le 63 ]] || return 1
+		[[ "$label" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]] || return 1
+	done
+	return 0
+}
+
+normalize_domain() {
+	local value="$1"
+
+	value="${value,,}"
+	value="${value%.}"
+	printf '%s\n' "$value"
+}
+
+validate_domain() {
+	local value="$1"
+
+	[[ -n "$value" ]] || fail "public domain is required"
+	[[ "$value" != *[[:cntrl:][:space:]]* ]] || fail "public domain must not contain whitespace or control characters"
+	[[ "$value" != http://* && "$value" != https://* ]] || fail "public domain must not include a URL scheme"
+	[[ "$value" != *"/"* && "$value" != *"?"* && "$value" != *"#"* && "$value" != *"@"* ]] || fail "public domain must not include a path, query, fragment, or userinfo"
+	[[ "$value" != *":"* ]] || fail "public domain must not include a port"
+	is_valid_dns_hostname "$value" || fail "public domain must be a valid ASCII hostname"
+	[[ "$value" == *.* ]] || fail "public domain must be a fully qualified hostname"
+	[[ "$value" != "localhost" && "$value" != *.localhost ]] || fail "public domain must not be localhost"
+	! is_ipv4_like_host "$value" || fail "public domain must be a hostname, not an IP address"
+}
+
+validate_repository_owner() {
+	local value="$1"
+
+	[[ -n "$value" ]] || fail "repository owner must not be empty"
+	[[ "$value" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]] || fail "repository owner must use lowercase letters, digits, or hyphens, and must start and end with a letter or digit"
+}
+
+validate_repository_name() {
+	local value="$1"
+
+	[[ -n "$value" ]] || fail "repository name must not be empty"
+	[[ "$value" =~ ^[a-z0-9]([a-z0-9._-]*[a-z0-9])?$ ]] || fail "repository name must use lowercase letters, digits, dots, underscores, or hyphens, and must start and end with a letter or digit"
+}
+
+validate_repository() {
+	local value="$1"
+	local owner
+	local repo
+
+	[[ -n "$value" ]] || fail "repository must be in OWNER/REPO form"
+	if contains_control_character "$value" || contains_whitespace_character "$value"; then
+		fail "repository must not contain whitespace or control characters"
+	fi
+	[[ "$value" == "${value,,}" ]] || fail "repository must be lowercase OWNER/REPO for GHCR image tags"
+	[[ "$value" == */* && "$value" != */*/* ]] || fail "repository must be in OWNER/REPO form"
+
+	owner="${value%%/*}"
+	repo="${value#*/}"
+	validate_repository_owner "$owner"
+	validate_repository_name "$repo"
+}
+
 validate_args() {
 	[[ -n "$VERSION" ]] || fail "--version is required"
 	[[ -n "$DOMAIN" ]] || fail "--domain is required"
 	[[ -n "$REPOSITORY" ]] || fail "--repository must not be empty"
+	validate_docker_release_version "$VERSION" "release version" "release version must not be empty" 1
+	validate_repository "$REPOSITORY"
+	DOMAIN="$(normalize_domain "$DOMAIN")"
+	validate_domain "$DOMAIN"
 
 	if [[ "$SKIP_BACKUP_RESTORE_DRILL" == "1" ]]; then
 		[[ -z "$BACKUP_API_URL" && -z "$BACKUP_JOB_ID" && -z "$COOKIE_FILE" ]] || fail "backup smoke options cannot be combined with --skip-backup-restore-drill"
