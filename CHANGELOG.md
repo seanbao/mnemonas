@@ -185,7 +185,7 @@
 - `scripts/check-release-tag.sh` 会在构建 release 产物前校验 release tag 是否为 `vMAJOR.MINOR.PATCH` 或语义化预发布 tag，并限制去掉 `v` 前缀后的 Docker 镜像 tag 长度不超过 128 个字符
 - `scripts/verify-release-artifacts.sh` 对下载目录、checksum 清单和归档成员中的控制字符路径使用 shell-safe 诊断表示，避免发布后验收日志写入原始控制字符
 - `scripts/verify-published-release.sh` 封装 GitHub Release 下载和 artifact verifier，默认使用空目录或临时目录下载产物并校验归档、checksums、必需目标集合和 GHCR 镜像标签；显式 `--artifact-dir` 即使以 `-` 开头也会安全规范化为本地路径，并且非法仓库名会在下载前失败，减少发布后手工命令遗漏参数、混入旧产物或误用仓库名的风险
-- `scripts/release-go-live-check.sh` 将发布就绪摘要、已发布产物核验、公网 doctor、外部网络 go-live smoke 和备份恢复演练 smoke 串成统一发布后上线核验入口；备份演练必须提供 API/job 参数或显式跳过，避免发布后只完成局部核验却被记录为完整上线验证
+- `scripts/release-go-live-check.sh` 将发布就绪摘要、已发布产物核验、公网 doctor、外部网络 go-live smoke 和备份恢复演练 smoke 串成统一发布后上线核验入口；脚本会在启动任何 helper 前校验 release tag、仓库名和公网域名，并把大写或尾点域名规范化后传给公网检查；备份演练必须提供 API/job 参数或显式跳过，避免发布后只完成局部核验却被记录为完整上线验证
 - `scripts/release-readiness.sh` 在记录的完整验证目标之后发现非发布文档变更时默认失败；草稿摘要可显式使用 `--allow-post-validation-changes` 放行
 - `scripts/release-readiness.sh` 要求四份 hardening 证据文档存在且记录一致的完整验证目标，避免发布前证据缺失被静默跳过
 - `scripts/release-readiness.sh` 会检查双语 release notes 草稿记录当前完整验证目标，避免发布说明中的验证快照滞后
