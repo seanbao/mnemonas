@@ -2499,6 +2499,86 @@ func TestLoad_ExampleConfig(t *testing.T) {
 	assertDefaultVersioningPolicy(t, cfg)
 }
 
+func TestLoad_LegacyMinimalConfigBackfillsCurrentDefaults(t *testing.T) {
+	tmpDir := t.TempDir()
+	storageRoot := filepath.Join(tmpDir, "data")
+	configPath := filepath.Join(tmpDir, "config.toml")
+	content := fmt.Sprintf(`
+[server]
+host = "127.0.0.1"
+port = 18080
+
+[storage]
+root = %q
+
+[webdav]
+enabled = true
+prefix = "/dav"
+auth_type = "basic"
+
+[auth]
+enabled = true
+
+[share]
+enabled = false
+
+[log]
+level = "info"
+format = "console"
+output = "stdout"
+`, storageRoot)
+	if err := os.WriteFile(configPath, []byte(content), 0600); err != nil {
+		t.Fatalf("failed to write legacy config: %v", err)
+	}
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+
+	if cfg.Server.Port != 18080 {
+		t.Fatalf("server port = %d, want legacy override 18080", cfg.Server.Port)
+	}
+	if cfg.Server.ReadTimeout != 30*time.Second || cfg.Server.WriteTimeout != time.Minute || cfg.Server.IdleTimeout != 2*time.Minute {
+		t.Fatalf("server timeouts were not backfilled: %+v", cfg.Server)
+	}
+	if cfg.DataPlane.GRPCAddress != "127.0.0.1:9090" || cfg.DataPlane.Timeout != 30*time.Second || cfg.DataPlane.MaxRetries != 3 {
+		t.Fatalf("dataplane defaults were not backfilled: %+v", cfg.DataPlane)
+	}
+	if cfg.Storage.Retention.MaxVersions != 50 || cfg.Storage.Retention.GCInterval != 24*time.Hour || cfg.Storage.Trash.RetentionDays != 30 {
+		t.Fatalf("storage retention or trash defaults were not backfilled: %+v", cfg.Storage)
+	}
+	assertStorageRootDerivedInternalPaths(t, cfg)
+	assertDefaultVersioningPolicy(t, cfg)
+	if cfg.SMB.Enabled || cfg.SMB.Listen != "127.0.0.1:1445" || !cfg.SMB.SigningRequired {
+		t.Fatalf("SMB defaults were not backfilled: %+v", cfg.SMB)
+	}
+	if cfg.Backup.Jobs == nil || len(cfg.Backup.Jobs) != 0 {
+		t.Fatalf("backup jobs defaults were not backfilled as an empty slice: %+v", cfg.Backup.Jobs)
+	}
+	if cfg.Auth.AccessTokenTTL != 15*time.Minute || cfg.Auth.RefreshTokenTTL != 7*24*time.Hour {
+		t.Fatalf("auth TTL defaults were not backfilled: %+v", cfg.Auth)
+	}
+	if cfg.Share.DefaultExpiresIn != 7*24*time.Hour || cfg.Share.DefaultMaxAccess != 0 {
+		t.Fatalf("share defaults were not backfilled: %+v", cfg.Share)
+	}
+	if !cfg.Favorites.Enabled {
+		t.Fatalf("favorites default was not backfilled: %+v", cfg.Favorites)
+	}
+	if cfg.Alerts.WebhookMethod != "POST" || cfg.Alerts.SMTPPort != 587 || cfg.Alerts.SMTPTo == nil {
+		t.Fatalf("alert defaults were not backfilled: %+v", cfg.Alerts)
+	}
+	if cfg.DiskHealth.Command != "smartctl" || cfg.DiskHealth.CheckInterval != time.Hour || cfg.DiskHealth.Devices == nil {
+		t.Fatalf("disk health defaults were not backfilled: %+v", cfg.DiskHealth)
+	}
+	if cfg.Maintenance.Scrub.ScheduleInterval != 7*24*time.Hour || cfg.Maintenance.Scrub.RetryInterval != time.Hour || cfg.Maintenance.Scrub.MaxRetries != 1 {
+		t.Fatalf("maintenance scrub defaults were not backfilled: %+v", cfg.Maintenance.Scrub)
+	}
+	if cfg.Security.AllowUnsafeNoAuth {
+		t.Fatalf("unsafe auth override default was not preserved: %+v", cfg.Security)
+	}
+}
+
 func TestLoad_DocumentationConfigExamples(t *testing.T) {
 	for _, docPath := range []string{
 		filepath.Join("..", "..", "docs", "configuration.md"),

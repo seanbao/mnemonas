@@ -27,6 +27,7 @@ import {
   createShare,
   copyShareUrl,
   formatDuration,
+  formatExpiration,
   formatShareUrl,
   getSharePolicy,
   ShareError,
@@ -35,8 +36,15 @@ import {
   type SharePolicy,
   type SharePolicyRule,
 } from '@/api/share'
+import {
+  createActivityReviewRecord,
+  listActivity,
+  type ActivityActionCountMap,
+  type ActivityEntry,
+  type ActivityReviewRecordCreateInput,
+} from '@/api/activity'
 import { getUserFacingErrorDescription } from '@/lib/apiMessages'
-import { hasControlCharacter } from '@/lib/utils'
+import { hasControlCharacter, normalizePath } from '@/lib/utils'
 
 interface ShareDialogProps {
   isOpen: boolean
@@ -62,6 +70,7 @@ const PERMISSION_OPTIONS = [
 ]
 
 const maxSharePasswordBytes = 72
+const shareCreateActivityLimit = 100
 const shareCreateWarningTitle = '分享链接已创建，但存在警告'
 const shareCreateWarningMessage = '分享链接已创建，但后台记录可能存在延迟，请稍后确认分享列表。'
 const shareDurationUnitMs: Record<string, number> = {
@@ -357,6 +366,123 @@ function getShareCreateSuccessToast(share: { warning: boolean }): {
   return share.warning
     ? { title: shareCreateWarningTitle, color: 'warning' }
     : { title: '分享链接已创建', color: 'success' }
+}
+
+function getUniqueShareCreateReviewValues(values: Array<string | undefined>): string[] {
+  const seen = new Set<string>()
+  const result: string[] = []
+  for (const value of values) {
+    const trimmed = value?.trim() ?? ''
+    if (!trimmed || seen.has(trimmed)) {
+      continue
+    }
+    seen.add(trimmed)
+    result.push(trimmed)
+  }
+  return result
+}
+
+function getShareCreateActivityActionCounts(entries: ActivityEntry[]): ActivityActionCountMap {
+  return entries.reduce<ActivityActionCountMap>((counts, entry) => {
+    if (entry.action === 'share') {
+      counts.share = (counts.share ?? 0) + 1
+    }
+    return counts
+  }, {})
+}
+
+function shareCreateActivityMatchesPath(entry: ActivityEntry, path: string): boolean {
+  const entryPath = entry.path?.trim()
+  if (!entryPath) {
+    return false
+  }
+
+  try {
+    return normalizePath(entryPath) === path
+  } catch {
+    return false
+  }
+}
+
+function formatShareCreateAccessSummary(share: ShareCreateResult): string {
+  const passwordLabel = share.has_password ? '密码保护' : '无密码'
+  const maxAccess = share.max_access && share.max_access > 0 ? `${share.max_access}` : '不限'
+  return `${passwordLabel} · 访问 ${share.access_count}/${maxAccess}`
+}
+
+function getShareCreateReasonSummary(share: ShareCreateResult): string {
+  const reasons = share.risk?.reasons
+    ?.filter(reason => !reason.resolved)
+    .map(reason => reason.message.trim())
+    .filter(Boolean) ?? []
+  if (reasons.length > 0) {
+    return reasons.join('；')
+  }
+  return share.warning ? '创建成功但后台返回警告，请稍后确认分享列表。' : '新建分享。'
+}
+
+function buildShareCreateExecutionRecordInput({
+  share,
+  entries,
+  totalEntries,
+}: {
+  share: ShareCreateResult
+  entries: ActivityEntry[]
+  totalEntries: number
+}): ActivityReviewRecordCreateInput {
+  const path = normalizePath(share.path)
+  const users = getUniqueShareCreateReviewValues(entries.map((entry) => entry.user))
+  return {
+    note: `分享执行结果：已创建 1 个分享；已关联 ${entries.length} 条分享活动。`,
+    scope_label: `分享 ${path}`,
+    filter_summary: `审计分组 分享相关 · 路径 ${path} · 当前分享 1/1 · 执行结果 创建分享`,
+    disposition_status: 'confirmed',
+    action_counts: getShareCreateActivityActionCounts(entries),
+    review_count: entries.length,
+    total_count: Math.max(totalEntries, entries.length),
+    path_count: 1,
+    user_count: users.length,
+    path_samples: [path],
+    user_samples: users.slice(0, 10),
+    share_disposition_details: [{
+      path,
+      type: share.type,
+      enabled: share.enabled,
+      risk_level: share.risk?.level ?? 'none',
+      reason_summary: getShareCreateReasonSummary(share),
+      suggested_action: '已创建该分享；继续复核有效期、密码、访问次数和外部引用。',
+      access_summary: formatShareCreateAccessSummary(share),
+      expires_at: formatExpiration(share.expires_at),
+    }],
+    activity_entry_ids: entries.map((entry) => entry.id),
+  }
+}
+
+async function recordShareCreateExecutionResult(
+  share: ShareCreateResult,
+  signal: AbortSignal,
+): Promise<boolean> {
+  const path = normalizePath(share.path)
+  const activity = await listActivity({
+    actionGroup: 'share',
+    path,
+    limit: shareCreateActivityLimit,
+    offset: 0,
+    signal,
+  })
+  const entries = activity.items.filter((entry) => (
+    entry.action === 'share' && shareCreateActivityMatchesPath(entry, path)
+  ))
+  if (entries.length === 0) {
+    return false
+  }
+
+  await createActivityReviewRecord(buildShareCreateExecutionRecordInput({
+    share,
+    entries,
+    totalEntries: activity.total,
+  }), { signal })
+  return true
 }
 
 function isAbortError(error: unknown): boolean {
@@ -665,6 +791,20 @@ export function ShareDialog({
       setCreatedShare(share)
       onShareCreated?.(share)
       addToast(getShareCreateSuccessToast(share))
+      try {
+        const recorded = await recordShareCreateExecutionResult(share, controller.signal)
+        if (recorded && !controller.signal.aborted && isCurrentCreateRequest()) {
+          addToast({ title: '分享创建结果已记录', color: 'success' })
+        }
+      } catch (recordError) {
+        if (!controller.signal.aborted && !isAbortError(recordError) && isCurrentCreateRequest()) {
+          addToast({
+            title: '分享创建结果记录失败',
+            description: getUserFacingErrorDescription(recordError),
+            color: 'warning',
+          })
+        }
+      }
     } catch (err) {
       if (controller.signal.aborted || isAbortError(err) || !isCurrentCreateRequest()) {
         return
