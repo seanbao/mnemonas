@@ -18,7 +18,15 @@ describe('Setup API', () => {
   it('returns setup status payload', async () => {
     vi.mocked(global.fetch).mockResolvedValueOnce({
       ok: true,
-      json: () => Promise.resolve({ success: true, is_first_run: true, auth_enabled: true, share_enabled: false, webdav_enabled: true, webdav_auth_type: 'basic' }),
+      json: () => Promise.resolve({
+        success: true,
+        is_first_run: true,
+        auth_enabled: true,
+        share_enabled: false,
+        webdav_enabled: true,
+        webdav_auth_type: 'basic',
+        allow_unsafe_no_auth: true,
+      }),
     } as Response)
 
     const result = await getSetupStatus()
@@ -26,6 +34,7 @@ describe('Setup API', () => {
     expect(result.is_first_run).toBe(true)
     expect(result.share_enabled).toBe(false)
     expect(result.webdav_auth_type).toBe('basic')
+    expect(result.allow_unsafe_no_auth).toBe(true)
   })
 
   it('forwards abort signal when fetching setup status', async () => {
@@ -46,6 +55,23 @@ describe('Setup API', () => {
     vi.mocked(global.fetch).mockResolvedValueOnce({
       ok: true,
       json: () => Promise.resolve({ success: true, is_first_run: true, auth_enabled: true, share_enabled: 'no', webdav_enabled: true, webdav_auth_type: 'basic' }),
+    } as Response)
+
+    await expect(getSetupStatus()).rejects.toThrow(invalidResponseMessage)
+  })
+
+  it('rejects invalid unsafe no-auth setup status values', async () => {
+    vi.mocked(global.fetch).mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        success: true,
+        is_first_run: true,
+        auth_enabled: true,
+        share_enabled: true,
+        webdav_enabled: true,
+        webdav_auth_type: 'basic',
+        allow_unsafe_no_auth: 'yes',
+      }),
     } as Response)
 
     await expect(getSetupStatus()).rejects.toThrow(invalidResponseMessage)

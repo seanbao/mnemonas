@@ -5855,6 +5855,28 @@ func TestServer_UpdateShareEnableState_LogsShareActivity(t *testing.T) {
 	if unshareTotal != 1 {
 		t.Fatalf("description update should not log another unshare activity, got %d", unshareTotal)
 	}
+	shareEntries, shareTotal := server.activity.List(10, 0, activity.ActionShare, "")
+	if shareTotal != 1 || len(shareEntries) != 1 {
+		t.Fatalf("expected one share policy update activity entry, got total=%d len=%d", shareTotal, len(shareEntries))
+	}
+	if shareEntries[0].Path != "/docs" || shareEntries[0].User != "tester" {
+		t.Fatalf("unexpected share policy update entry: %+v", shareEntries[0])
+	}
+	if shareEntries[0].Details["change_type"] != "policy_update" || shareEntries[0].Details["changed_fields"] != "description" {
+		t.Fatalf("unexpected share policy update details: %+v", shareEntries[0].Details)
+	}
+	if shareEntries[0].Details["previous_description_set"] != "false" || shareEntries[0].Details["description_set"] != "true" {
+		t.Fatalf("unexpected share policy update description details: %+v", shareEntries[0].Details)
+	}
+	if _, ok := shareEntries[0].Details["description"]; ok {
+		t.Fatalf("share policy update details must not expose description text: %+v", shareEntries[0].Details)
+	}
+	if _, ok := shareEntries[0].Details["url"]; ok {
+		t.Fatalf("share policy update details must not expose share URL: %+v", shareEntries[0].Details)
+	}
+	if _, ok := shareEntries[0].Details["share_id"]; ok {
+		t.Fatalf("share policy update details must not expose share ID: %+v", shareEntries[0].Details)
+	}
 
 	enableReq := httptest.NewRequest(http.MethodPut, "/api/v1/shares/"+shareID, strings.NewReader(`{"enabled":true}`))
 	enableReq.Header.Set("Content-Type", "application/json")
@@ -5868,15 +5890,19 @@ func TestServer_UpdateShareEnableState_LogsShareActivity(t *testing.T) {
 	if enableRec.Code != http.StatusOK {
 		t.Fatalf("enable share status = %d, want %d: %s", enableRec.Code, http.StatusOK, enableRec.Body.String())
 	}
-	shareEntries, shareTotal := server.activity.List(10, 0, activity.ActionShare, "")
-	if shareTotal != 1 || len(shareEntries) != 1 {
-		t.Fatalf("expected one share activity entry, got total=%d len=%d", shareTotal, len(shareEntries))
+	shareEntries, shareTotal = server.activity.List(10, 0, activity.ActionShare, "")
+	if shareTotal != 2 || len(shareEntries) != 2 {
+		t.Fatalf("expected two share activity entries, got total=%d len=%d", shareTotal, len(shareEntries))
 	}
-	if shareEntries[0].Path != "/docs" || shareEntries[0].User != "tester" {
-		t.Fatalf("unexpected share entry: %+v", shareEntries[0])
+	foundEnableEntry := false
+	for _, entry := range shareEntries {
+		if entry.Path == "/docs" && entry.User == "tester" && entry.Details["enabled"] == "true" && entry.Details["previous_enabled"] == "false" {
+			foundEnableEntry = true
+			break
+		}
 	}
-	if shareEntries[0].Details["enabled"] != "true" || shareEntries[0].Details["previous_enabled"] != "false" {
-		t.Fatalf("unexpected share enabled details: %+v", shareEntries[0].Details)
+	if !foundEnableEntry {
+		t.Fatalf("expected share enable activity entry, got %+v", shareEntries)
 	}
 }
 
@@ -21984,6 +22010,7 @@ func TestServer_SetupStatus_DoesNotExposeCredentials(t *testing.T) {
 	server.config.Share.Enabled = true
 	server.config.WebDAV.AuthType = "basic"
 	server.config.WebDAV.Password = "custom-pass"
+	server.config.Security.AllowUnsafeNoAuth = true
 
 	req := httptest.NewRequest("GET", "/api/v1/setup/", nil)
 	w := httptest.NewRecorder()
@@ -22012,6 +22039,9 @@ func TestServer_SetupStatus_DoesNotExposeCredentials(t *testing.T) {
 	}
 	if payload["share_enabled"] != true {
 		t.Fatalf("expected share_enabled to reflect runtime config, got %v", payload["share_enabled"])
+	}
+	if payload["allow_unsafe_no_auth"] != true {
+		t.Fatalf("expected allow_unsafe_no_auth to reflect runtime config, got %v", payload["allow_unsafe_no_auth"])
 	}
 }
 

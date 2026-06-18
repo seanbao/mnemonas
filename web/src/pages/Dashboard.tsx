@@ -176,8 +176,7 @@ function formatWebDAVAuthType(authType: string): string {
 
 function getSetupSafetyHighlights(status: SetupStatusResponse): Array<{ label: string; value: string; tone: SetupSafetyTone }> {
   const webdavAuthType = formatWebDAVAuthType(status.webdav_auth_type)
-
-  return [
+  const highlights: Array<{ label: string; value: string; tone: SetupSafetyTone }> = [
     { label: '认证', value: status.auth_enabled ? '已启用' : '需启用', tone: status.auth_enabled ? 'success' : 'warning' },
     { label: '分享', value: status.share_enabled === false ? '未启用' : '可用', tone: 'default' },
     {
@@ -186,6 +185,16 @@ function getSetupSafetyHighlights(status: SetupStatusResponse): Array<{ label: s
       tone: status.webdav_enabled && status.webdav_auth_type === 'none' ? 'warning' : 'default',
     },
   ]
+
+  if (status.allow_unsafe_no_auth !== undefined) {
+    highlights.push({
+      label: '无认证例外',
+      value: status.allow_unsafe_no_auth ? '已开启' : '关闭',
+      tone: status.allow_unsafe_no_auth ? 'warning' : 'default',
+    })
+  }
+
+  return highlights
 }
 
 function getSetupSafetyWarning(status: SetupStatusResponse): string | null {
@@ -198,6 +207,9 @@ function getSetupSafetyWarning(status: SetupStatusResponse): string | null {
   }
   if (status.webdav_enabled && status.webdav_auth_type === 'none') {
     warnings.push('WebDAV 匿名访问已启用')
+  }
+  if (status.allow_unsafe_no_auth === true) {
+    warnings.push('无认证暴露例外已开启')
   }
   if (warnings.length === 0) {
     return null

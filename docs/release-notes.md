@@ -14,7 +14,7 @@
 - 升级 `golang.org/x/image` 到 `v0.43.0`，修复缩略图解码路径命中的 TIFF/WebP 依赖安全告警；同步刷新间接 `golang.org/x/text` 版本。
 - 完善认证、用户、主目录、目录配额、目录访问规则、分享策略和会话安全默认值的后端与前端覆盖。
 - 加固邮件告警通知出口，消息头和 SMTP envelope 会清理控制字符，降低内部调用或后续扩展绕过配置校验后的头部注入风险。
-- 提升 Web 可见质量，核心页面、公开入口、移动端布局、基础可访问性、运行时错误、失败请求和破碎可见文本已纳入 Playwright 扫描。首页首次部署检查和登录页会基于 setup 状态提示认证关闭、分享启用且认证关闭和 WebDAV 匿名访问的部署风险。
+- 提升 Web 可见质量，核心页面、公开入口、移动端布局、基础可访问性、运行时错误、失败请求和破碎可见文本已纳入 Playwright 扫描。首页首次部署检查和登录页会基于 setup 状态提示认证关闭、分享启用且认证关闭、WebDAV 匿名访问和 `allow_unsafe_no_auth` 开启的部署风险。
 - 加固 systemd、Docker、反向代理、公网访问模板、doctor、公网域名就绪校验、release package 和 release artifact 验证路径；Docker preflight 会在 Compose 检查前拒绝空值、以 `-` 开头、包含空白或控制字符、URL 形态、无效 `sha256` digest 或不兼容 Docker tag 的 `MNEMONAS_IMAGE`，且 URL 形态诊断不回显凭据、query 或 fragment；Docker quickstart、preflight 和容器入口还会拒绝配置中包含父目录段或控制字符的 `auth.users_file` 容器路径，避免将 `/data/../...` 映射为宿主数据目录外的初始密码读取路径；Docker smoke 会在启动容器前拒绝以 `-` 开头或包含空白/控制字符的镜像引用；容器 healthcheck 对无效目标 URL 的诊断日志只输出脱敏后的 URL 形状，不写入嵌入凭据、原始查询字符串或 fragment；反向代理安装脚本对无效 `MNEMONAS_UPSTREAM_HOST` 只输出主机格式约束，不回显原始 host 值或误粘贴 URL 中的凭据、query、fragment；`mnemonas-doctor --public-domain` 对无效 `share.base_url` 诊断只输出脱敏 URL 形状，不回显误配置中的凭据、query 或 fragment；公网 go-live smoke 和 doctor 会拒绝 `localhost`、IP 地址和全数字四段主机名，给手动端口复核命令设置连接和总耗时上限，并拒绝空白的自定义后端目标列表和歧义目标路径，避免跳过端口暴露检查或生成不明确的后端探测 URL；公网 go-live smoke 对无效自定义后端目标和错误 HTTP 跳转只输出脱敏后的目标形状，不回显 query、fragment、userinfo 或控制字符路径内容；Release workflow 会在创建 GitHub Release 前校验归档、checksums、必需目标集合、下载目录未知条目、归档条目类型、重复条目、控制字符路径、空白字符路径、归档成员控制字符路径、归档成员空白字符路径、反斜杠路径、歧义路径、GHCR 仓库名和已推送的容器镜像标签；release artifact verifier 支持通过 `--` 传入以 `-` 开头的本地产物目录，并对下载目录、checksum 清单和归档成员中的控制字符路径使用 shell-safe 诊断表示，避免发布后核验路径被 shell 内建命令按选项解释或把原始控制字符写入验收日志。
 - systemd 安装和卸载脚本在拒绝包含控制字符的路径、地址、端口或账号参数时，会使用 shell-safe 诊断表示，避免失败日志写入原始控制字符或形成多行注入。
 - 基准测试、E2E、故障注入脚本、反向代理安装向导和双语反向代理文档的 WebDAV PROPFIND 示例均通过临时 curl config 传递 WebDAV Basic Auth 凭据，避免密码出现在 `curl` 命令参数；开发文档和反向代理文档均不再保留直接把 WebDAV 密码放入 `curl -u` 的手动示例，并由脚本测试和文档契约覆盖。
@@ -26,7 +26,7 @@
 - 维护页恢复完成后可复制恢复切换记录，内容包含恢复目标、只读校验、切换步骤、切换前确认和回滚清单；恢复报告会基于原始恢复目标匹配结果，在最近一次恢复已完成但匹配只读校验缺失、只读校验早于恢复完成、只读校验不属于当前恢复目标或只读校验状态不能作为当前目标证据时给出明确 findings，避免把陈旧、跨目标或不可用校验误读为当前恢复已验证；批量恢复结果会列出跨目录切换候选和冲突处置记录，并在可复制结果记录中写入任务名称、备份目标、保留策略状态、候选目录、只读校验复核结论、校验错误详情、冲突处置建议和配置文件保留要求，便于记录到工单或值班流程。
 - 设置页目录权限用户矩阵和未保存规则预览可复制权限复核记录，内容包含路径、用户读写判定、命中规则和相关分享影响，并会保留后端持久化近期复核历史；服务端历史不可用时回退当前浏览器记录。
 - 分享路径策略可按用户、用户组或角色限制允许创建和维护分享链接的认证调用方；管理员保留修复既有分享的管理权限。
-- 分享、版本历史、回收站和维护页的关键处置入口会写入活动复核记录，覆盖分享停用、删除、重新启用、版本恢复、回收站恢复和备份恢复执行结果；活动页复核历史在处置后会立即显示符合当前筛选的新记录，便于追踪误分享、误删和恢复处置闭环。
+- 分享、版本历史、回收站和维护页的关键处置入口会写入活动复核记录，覆盖分享停用、删除、重新启用、策略更新、版本恢复、回收站恢复和备份恢复执行结果；活动页复核历史在处置后会立即显示符合当前筛选的新记录，便于追踪误分享、误删和恢复处置闭环。
 - 收紧发布就绪摘要：记录的完整验证目标之后如出现已提交或未提交的非发布文档变更，`release-readiness` 默认失败，并要求刷新完整验证或显式草稿放行；草稿放行非发布文档变更时会输出 `validation-warning`，避免被误读为正式发布就绪。
 - `release-readiness` 现在要求四份 hardening 证据文档都存在，并且都记录同一个完整验证目标，避免发布前证据缺失被静默跳过。
 - `release-readiness` 还会要求双语 hardening progress 台账在 `make release-readiness` 记录中写入同一个完整验证目标，避免完整验证证据刷新后发布就绪摘要仍停留在旧目标。
@@ -65,7 +65,7 @@ Release workflow 预期生成以下产物：
 
 当前硬化分支已有以下验证证据；最终发布前应以最新 tag、Release workflow 结果和必要的环境验证为准：
 
-最近本地完整验证快照：验证目标 `a868025c19b6`，`GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master` 通过，覆盖 diff 空白、密钥泄漏扫描、workflow/YAML/脚本门禁、恢复报告基于原始恢复目标匹配结果，在最近一次恢复已完成但匹配只读校验缺失、只读校验早于恢复完成、只读校验不属于当前恢复目标或只读校验状态不能作为当前目标证据时给出明确 findings、首页首次部署检查和登录页基于 setup 状态提示认证关闭、分享启用且认证关闭以及 WebDAV 匿名访问的部署安全风险、Activity 复核处置后把符合当前历史筛选的更新记录即时并入列表缓存、反向代理 WebDAV 验证文档契约门禁、release-readiness 发布清单摘要范围门禁、CHANGELOG 已知限制保留 L1/L1+ 发布候选定位、非唯一长期副本和外部备份边界的 release-readiness 门禁增量、Release workflow 结构门禁、hardening progress 中 `make release-readiness` 行级验证目标门禁、`make release-readiness` 入口基线、历史最小配置加载后回填当前默认值的配置兼容性回归、`make check`、工具链一致性、Go/Rust/frontend 依赖安全扫描、示例配置、public-access 模板、proto 再生成稳定性、Rust fmt/test/clippy、proto-gen fmt/test/clippy、前端 lint/typecheck/unit/build、Playwright 379 个 E2E 用例、Docker build、Docker image `sha256:aa7ab16e6bc2b3c4a416264ed71ceaca2e54119b77a050a495cc9da6618469b1` 和 Docker smoke。Docker smoke 使用 Docker 自动分配的 loopback 端口 `http://127.0.0.1:32801`。
+最近本地完整验证快照：验证目标 `5efefc177a4a`，`GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master` 通过，覆盖 diff 空白、密钥泄漏扫描、workflow/YAML/脚本门禁、恢复报告基于原始恢复目标匹配结果，在最近一次恢复已完成但匹配只读校验缺失、只读校验早于恢复完成、只读校验不属于当前恢复目标或只读校验状态不能作为当前目标证据时给出明确 findings、首页首次部署检查和登录页基于 setup 状态提示认证关闭、分享启用且认证关闭以及 WebDAV 匿名访问的部署安全风险、Activity 复核处置后把符合当前历史筛选的更新记录即时并入列表缓存、反向代理 WebDAV 验证文档契约门禁、release-readiness 发布清单摘要范围门禁、CHANGELOG 已知限制保留 L1/L1+ 发布候选定位、非唯一长期副本和外部备份边界的 release-readiness 门禁增量、Release workflow 结构门禁、hardening progress 中 `make release-readiness` 行级验证目标门禁、`make release-readiness` 入口基线、历史最小配置加载后回填当前默认值的配置兼容性回归、分享创建执行结果记录增量、分享策略更新执行结果记录增量、`make check`、工具链一致性、Go/Rust/frontend 依赖安全扫描、示例配置、public-access 模板、proto 再生成稳定性、Rust fmt/test/clippy、proto-gen fmt/test/clippy、前端 lint/typecheck/unit/build、Playwright 379 个 E2E 用例、Docker build、Docker image `sha256:ba8b363701134a3c6d2fadc1a3a2ea26b28950f24671d9f976c53aaab1b8eb82` 和 Docker smoke。Docker smoke 使用 Docker 自动分配的 loopback 端口 `http://127.0.0.1:32803`。
 
 - `GOTOOLCHAIN=local ./scripts/verify-changed.sh`
 - `GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master`
@@ -92,7 +92,7 @@ Release workflow 预期生成以下产物：
 - WebDAV curl smoke safety test：`scripts/test-webdav-client-smoke.sh`
 - Release workflow 增量验证：`make workflows-check`、`make scripts-check`、`./scripts/check-secret-leaks.sh`、`make toolchains-check`、`git diff --check`
 - Playwright E2E：`379 passed`
-- 前端单测：`3119 passed`
+- 前端单测：`3123 passed`
 - Docker build 和 `scripts/docker-smoke.sh`
 
 最终发布前如代码、脚本、配置、文档或 workflow 再次变更，应重跑对应验证。
