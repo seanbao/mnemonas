@@ -1673,11 +1673,21 @@ describe('ActivityPage', () => {
             user: 'admin',
             details: {
               max_access: '2',
+              previous_max_access: '0',
               has_password: 'true',
+              previous_has_password: 'false',
+              password_changed: 'true',
               type: 'file',
               expires_at: '2026-03-13T00:00:00Z',
+              previous_expires_at: 'none',
               access_count: '1',
               permission: 'read',
+              previous_permission: 'read',
+              change_type: 'policy_update',
+              changed_fields: 'password,max_access,description',
+              policy_updated: 'true',
+              description_set: 'true',
+              previous_description_set: 'false',
             },
           },
         ],
@@ -1691,12 +1701,23 @@ describe('ActivityPage', () => {
       await waitFor(() => {
         expect(screen.getByText('类型：文件')).toBeTruthy()
         expect(screen.getByText('权限：只读')).toBeTruthy()
+        expect(screen.getByText('原权限：只读')).toBeTruthy()
         expect(screen.getByText('密码保护：是')).toBeTruthy()
+        expect(screen.getByText('原密码保护：否')).toBeTruthy()
+        expect(screen.getByText('密码变更：是')).toBeTruthy()
         expect(screen.getByText('访问次数：1 次')).toBeTruthy()
         expect(screen.getByText('访问上限：2 次')).toBeTruthy()
+        expect(screen.getByText('原访问上限：不限')).toBeTruthy()
         expect(screen.getByText(/^过期时间：/)).toBeTruthy()
+        expect(screen.getByText('原过期时间：永不过期')).toBeTruthy()
+        expect(screen.getByText('变更类型：分享策略更新')).toBeTruthy()
+        expect(screen.getByText('变更字段：密码、访问上限、备注')).toBeTruthy()
+        expect(screen.getByText('策略更新：是')).toBeTruthy()
+        expect(screen.getByText('备注状态：已填写')).toBeTruthy()
+        expect(screen.getByText('原备注状态：未填写')).toBeTruthy()
         expect(screen.queryByText('has_password: true')).toBeNull()
         expect(screen.queryByText('max_access: 2')).toBeNull()
+        expect(screen.queryByText('change_type: policy_update')).toBeNull()
       })
     })
 

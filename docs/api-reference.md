@@ -493,13 +493,15 @@ GET /api/v1/setup/
   "auth_enabled": true,
   "share_enabled": true,
   "webdav_enabled": true,
-  "webdav_auth_type": "basic"
+  "webdav_auth_type": "basic",
+  "allow_unsafe_no_auth": false
 }
 ```
 
 说明：
 
 - 该端点不返回初始用户名或密码。
+- `allow_unsafe_no_auth` 只反映危险配置例外是否开启；公网部署前仍应以安全自检、`mnemonas-doctor --public-domain` 和云防火墙复核为准。
 - 首次运行的 Web 管理员密码只写入 `auth.users_file` 旁的 `initial-password.txt`；默认路径为 `<storage.root>/.mnemonas/initial-password.txt`，非交互启动日志只报告文件路径。
 - 该端点返回 setup 专用的扁平 JSON，不使用通用 `data` 包装。
 

@@ -193,6 +193,7 @@ describe('LoginPage', () => {
         share_enabled: true,
         webdav_enabled: true,
         webdav_auth_type: 'none',
+        allow_unsafe_no_auth: true,
       })
 
       renderLogin()
@@ -201,6 +202,7 @@ describe('LoginPage', () => {
       expect(screen.getByText(/认证当前关闭；公网访问前应先启用认证/i)).toBeInTheDocument()
       expect(screen.getByText(/分享功能当前启用；认证关闭时不应把服务暴露到公网/i)).toBeInTheDocument()
       expect(screen.getByText(/WebDAV 当前允许匿名访问；公网访问前应改为用户认证或关闭 WebDAV/i)).toBeInTheDocument()
+      expect(screen.getByText(/无认证暴露例外当前开启；公网访问前应关闭该例外/i)).toBeInTheDocument()
     })
 
     it('does not show deployment safety hints when setup status is safe for public-access prerequisites', async () => {

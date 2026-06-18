@@ -31,6 +31,7 @@ export interface SetupStatusResponse {
   share_enabled?: boolean
   webdav_enabled: boolean
   webdav_auth_type: string
+  allow_unsafe_no_auth?: boolean
 }
 
 export interface SetupRequestOptions {
@@ -100,7 +101,8 @@ export async function getSetupStatus(options: SetupRequestOptions = {}): Promise
     || typeof body.auth_enabled !== 'boolean'
     || (body.share_enabled !== undefined && typeof body.share_enabled !== 'boolean')
     || typeof body.webdav_enabled !== 'boolean'
-    || typeof body.webdav_auth_type !== 'string') {
+    || typeof body.webdav_auth_type !== 'string'
+    || (body.allow_unsafe_no_auth !== undefined && typeof body.allow_unsafe_no_auth !== 'boolean')) {
     throw new Error(INVALID_SETUP_RESPONSE_MESSAGE)
   }
 

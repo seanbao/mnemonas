@@ -501,6 +501,7 @@ describe('DashboardPage', () => {
           share_enabled: true,
           webdav_enabled: true,
           webdav_auth_type: 'basic',
+          allow_unsafe_no_auth: false,
         })
         .mockResolvedValueOnce({
           success: true,
@@ -509,6 +510,7 @@ describe('DashboardPage', () => {
           share_enabled: true,
           webdav_enabled: true,
           webdav_auth_type: 'basic',
+          allow_unsafe_no_auth: false,
         })
 
       render(<DashboardPage />)
@@ -523,6 +525,7 @@ describe('DashboardPage', () => {
       expect(screen.getByText(/认证：\s*已启用/)).toBeTruthy()
       expect(screen.getByText(/分享：\s*可用/)).toBeTruthy()
       expect(screen.getByText(/WebDAV：\s*Basic Auth/)).toBeTruthy()
+      expect(screen.getByText(/无认证例外：\s*关闭/)).toBeTruthy()
       expect(screen.getByText('还需确认 4 项后才能关闭首次运行提示。')).toBeTruthy()
       const confirmButton = screen.getByRole('button', { name: '还需确认 4 项' })
 
@@ -680,6 +683,7 @@ describe('DashboardPage', () => {
         share_enabled: true,
         webdav_enabled: true,
         webdav_auth_type: 'none',
+        allow_unsafe_no_auth: true,
       })
 
       render(<DashboardPage />)
@@ -688,9 +692,11 @@ describe('DashboardPage', () => {
       expect(screen.getByText(/认证：\s*需启用/)).toBeTruthy()
       expect(screen.getByText(/分享：\s*可用/)).toBeTruthy()
       expect(screen.getByText(/WebDAV：\s*匿名/)).toBeTruthy()
+      expect(screen.getByText(/无认证例外：\s*已开启/)).toBeTruthy()
       expect(screen.getByText(/Web UI\/API 认证未启用/)).toBeTruthy()
       expect(screen.getByText(/分享在无认证保护下可访问/)).toBeTruthy()
       expect(screen.getByText(/WebDAV 匿名访问已启用/)).toBeTruthy()
+      expect(screen.getByText(/无认证暴露例外已开启/)).toBeTruthy()
       expect(screen.getByText(/公网部署前应先处理/)).toBeTruthy()
     })
 

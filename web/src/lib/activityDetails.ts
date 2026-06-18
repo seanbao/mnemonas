@@ -10,10 +10,20 @@ import { redactDiagnosticSecretFragments } from '@/lib/diagnosticMessages'
 const ACTIVITY_DETAIL_LABELS: Record<string, string> = {
   type: '类型',
   permission: '权限',
+  previous_permission: '原权限',
   has_password: '密码保护',
+  previous_has_password: '原密码保护',
+  password_changed: '密码变更',
   expires_at: '过期时间',
+  previous_expires_at: '原过期时间',
   access_count: '访问次数',
   max_access: '访问上限',
+  previous_max_access: '原访问上限',
+  change_type: '变更类型',
+  changed_fields: '变更字段',
+  policy_updated: '策略更新',
+  description_set: '备注状态',
+  previous_description_set: '原备注状态',
   count: '项目数',
   path: '路径',
   from: '来源路径',
@@ -65,10 +75,20 @@ const ACTIVITY_DETAIL_LABELS: Record<string, string> = {
 const ACTIVITY_DETAIL_ORDER = new Map<string, number>([
   ['type', 0],
   ['permission', 1],
+  ['previous_permission', 1.1],
   ['has_password', 2],
+  ['previous_has_password', 2.1],
+  ['password_changed', 2.2],
   ['expires_at', 3],
+  ['previous_expires_at', 3.1],
   ['access_count', 4],
   ['max_access', 5],
+  ['previous_max_access', 5.1],
+  ['change_type', 5.2],
+  ['changed_fields', 5.3],
+  ['policy_updated', 5.4],
+  ['description_set', 5.5],
+  ['previous_description_set', 5.6],
   ['count', 6],
   ['path', 6.5],
   ['from', 6.6],
@@ -384,7 +404,29 @@ function formatActivityDetailValue(action: ActionType, key: string, value: strin
     }
   }
 
-  if (key === 'permission') {
+  if (key === 'change_type') {
+    const labels: Record<string, string> = {
+      policy_update: '分享策略更新',
+    }
+    return labels[value.trim().toLowerCase()] ?? value
+  }
+
+  if (key === 'changed_fields') {
+    const labels: Record<string, string> = {
+      password: '密码',
+      permission: '权限',
+      expires_at: '有效期',
+      max_access: '访问上限',
+      description: '备注',
+    }
+    return value
+      .split(',')
+      .map(field => labels[field.trim()] ?? field.trim())
+      .filter(Boolean)
+      .join('、')
+  }
+
+  if (key === 'permission' || key === 'previous_permission') {
     const labels: Record<string, string> = {
       read: '只读',
       read_write: '读写',
@@ -392,17 +434,29 @@ function formatActivityDetailValue(action: ActionType, key: string, value: strin
     return labels[value] ?? '未知权限'
   }
 
-  if (key === 'has_password') {
+  if (key === 'has_password' || key === 'previous_has_password' || key === 'policy_updated' || key === 'password_changed') {
     if (value === 'true') return '是'
     if (value === 'false') return '否'
   }
 
-  if (key === 'expires_at') {
+  if (key === 'description_set' || key === 'previous_description_set') {
+    if (value === 'true') return '已填写'
+    if (value === 'false') return '未填写'
+  }
+
+  if (key === 'expires_at' || key === 'previous_expires_at') {
+    if (value === 'none') {
+      return '永不过期'
+    }
     const formatted = formatDate(value)
     return formatted === '--' ? value : formatted
   }
 
-  if ((key === 'access_count' || key === 'max_access') && /^\d+$/.test(value)) {
+  if ((key === 'max_access' || key === 'previous_max_access') && value === '0') {
+    return '不限'
+  }
+
+  if ((key === 'access_count' || key === 'max_access' || key === 'previous_max_access') && /^\d+$/.test(value)) {
     return `${value} 次`
   }
 
