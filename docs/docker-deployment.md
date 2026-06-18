@@ -277,6 +277,8 @@ mkdir -p dist/release-check
 仅核验下载的归档和 checksums 时，可传入 `--skip-image-check`。
 `--repository` 必须使用 GHCR 兼容的小写 `owner/repo`，owner 仅包含小写字母、数字和连字符，repo 名可包含小写字母、数字、点、下划线和连字符，并且两段都必须以字母或数字开头和结尾。
 未设置 `--artifact-dir` 时，脚本会使用临时目录；显式目录必须为空或不存在，以避免旧产物混入核验。
+显式目录可以是以 `-` 开头的相对路径；脚本会在本地文件操作和 artifact verifier 调用前把它规范化为本地路径。
+仓库名会在下载前校验为 GHCR 兼容的小写 `owner/repo`，非法仓库名不会触发 GitHub Release 下载。
 
 下列示例默认使用源码构建的本地镜像，也可通过 `MNEMONAS_IMAGE` 切换到已验证的 release 镜像。
 

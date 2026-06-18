@@ -278,6 +278,8 @@ By default, the script uses Docker to check that `ghcr.io/seanbao/mnemonas:1.2.3
 Pass `--skip-image-check` when only the downloaded archives and checksums need verification.
 `--repository` must use a GHCR-compatible lowercase `owner/repo`; owner only allows lowercase letters, digits, and hyphens, while the repo name also allows dots and underscores, and both segments must start and end with a letter or digit.
 When `--artifact-dir` is omitted, the script uses a temporary directory. Explicit directories must be empty or absent so stale artifacts cannot enter verification.
+Explicit directories may be dash-prefixed relative paths; the script normalizes them for local file operations and artifact verifier calls.
+Repository names are validated as GHCR-compatible lowercase `owner/repo` values before download, so invalid repositories do not trigger GitHub Release downloads.
 
 The examples below default to the source-built local image and can be switched to a verified release image with `MNEMONAS_IMAGE`.
 
