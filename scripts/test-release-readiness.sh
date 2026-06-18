@@ -45,6 +45,10 @@ write_checklists() {
 - [ ] 所选发布 tag 校验通过：`./scripts/check-release-tag.sh <tag>`
 - [ ] 发布脚本回归通过：`./scripts/test-release-tag.sh`、`./scripts/test-release-package.sh`、`./scripts/test-release-artifacts.sh`
 - [ ] 发布后运行 `./scripts/verify-published-release.sh --version <tag> --repository seanbao/mnemonas`，下载并验证 GitHub Release 产物。
+
+## 已知限制
+
+- 当前版本定位为 L1 私有文件云盘和 L1+ 公网安全入口基础，不应作为重要数据的唯一长期副本；生产使用应保留外部备份。
 EOF
 
 	cat >CHANGELOG.en.md <<'EOF'
@@ -65,6 +69,10 @@ EOF
 - [ ] Validate the selected release tag: `./scripts/check-release-tag.sh <tag>`
 - [ ] Run release script regressions: `./scripts/test-release-tag.sh`, `./scripts/test-release-package.sh`, and `./scripts/test-release-artifacts.sh`
 - [ ] After publication, run `./scripts/verify-published-release.sh --version <tag> --repository seanbao/mnemonas` to download and verify the GitHub Release artifacts.
+
+## Known Limitations
+
+- This version is positioned as an L1 private file cloud with an initial L1+ public-access safety baseline, not as the only long-term copy of important data. Production use should keep external backups.
 EOF
 }
 
@@ -1089,6 +1097,15 @@ if ./scripts/release-readiness.sh --allow-dirty --allow-post-validation-changes 
 fi
 assert_file_contains "$output_dir/missing-checklist-summary-scope.err" "CHANGELOG.en.md is missing required text"
 assert_file_contains "$output_dir/missing-checklist-summary-scope.err" "release checklists to include documentation, dependency-security, Docker build/smoke, selected release tag validation, and release script regression commands"
+git checkout -q -- CHANGELOG.en.md
+
+sed -i.bak 's/, not as the only long-term copy of important data//' CHANGELOG.en.md
+rm -f CHANGELOG.en.md.bak
+if ./scripts/release-readiness.sh --allow-dirty --allow-post-validation-changes >"$output_dir/missing-changelog-candidate-limit.out" 2>"$output_dir/missing-changelog-candidate-limit.err"; then
+	fail "release readiness accepted CHANGELOG without the release candidate data-copy limitation"
+fi
+assert_file_contains "$output_dir/missing-changelog-candidate-limit.err" "CHANGELOG.en.md is missing required text"
+assert_file_contains "$output_dir/missing-changelog-candidate-limit.err" "not as the only long-term copy of important data"
 git checkout -q -- CHANGELOG.en.md
 
 sed -i.bak '/security-check/d' docs/release-notes.en.md
