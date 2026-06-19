@@ -119,6 +119,34 @@ is_valid_dns_hostname() {
 	return 0
 }
 
+validate_backup_api_url_path() {
+	local value="$1"
+	local after_authority path lower_path segment normalized_segment
+	local -a segments
+
+	[[ "$value" != *\\* ]] || fail "backup API URL must not contain backslashes"
+
+	after_authority="${value#*://}"
+	if [[ "$after_authority" == */* ]]; then
+		path="/${after_authority#*/}"
+	else
+		path="/"
+	fi
+
+	lower_path="${path,,}"
+	[[ "$lower_path" != *"%2f"* && "$lower_path" != *"%5c"* ]] || fail "backup API URL must not contain encoded slashes or backslashes"
+	if [[ "$path" != "/" ]]; then
+		[[ "$path" != *"//"* ]] || fail "backup API URL must not contain empty path segments"
+	fi
+
+	IFS='/' read -r -a segments <<< "$lower_path"
+	for segment in "${segments[@]}"; do
+		[[ -n "$segment" ]] || continue
+		normalized_segment="${segment//%2e/.}"
+		[[ "$normalized_segment" != "." && "$normalized_segment" != ".." ]] || fail "backup API URL must not contain dot segments"
+	done
+}
+
 normalize_domain() {
 	local value="$1"
 
@@ -174,6 +202,26 @@ validate_repository() {
 	validate_repository_name "$repo"
 }
 
+validate_backup_smoke_args() {
+	[[ -n "$BACKUP_API_URL" && -n "$BACKUP_JOB_ID" ]] || fail "--backup-api-url and --backup-job-id are required, or pass --skip-backup-restore-drill explicitly"
+
+	[[ "$BACKUP_API_URL" == http://* || "$BACKUP_API_URL" == https://* ]] || fail "backup API URL must start with http:// or https://"
+	[[ "$BACKUP_API_URL" != *[[:space:]]* ]] || fail "backup API URL must not contain whitespace"
+	[[ "$BACKUP_API_URL" != *[[:cntrl:]]* ]] || fail "backup API URL must not contain control characters"
+	[[ "$BACKUP_API_URL" != *\?* && "$BACKUP_API_URL" != *#* ]] || fail "backup API URL must not contain query strings or fragments"
+	[[ "$BACKUP_API_URL" != *"@"* ]] || fail "backup API URL must not contain embedded credentials"
+	validate_backup_api_url_path "$BACKUP_API_URL"
+
+	[[ "${#BACKUP_JOB_ID}" -le 64 ]] || fail "backup job ID must be 64 characters or fewer"
+	[[ "$BACKUP_JOB_ID" =~ ^[A-Za-z0-9._-]+$ ]] || fail "backup job ID must be a safe backup job ID"
+	[[ "$BACKUP_JOB_ID" != "." && "$BACKUP_JOB_ID" != ".." ]] || fail "backup job ID must not be . or .."
+
+	if [[ -n "$COOKIE_FILE" ]]; then
+		[[ "$COOKIE_FILE" != *[[:cntrl:]]* ]] || fail "backup cookie file must not contain control characters"
+		[[ -f "$COOKIE_FILE" && -r "$COOKIE_FILE" ]] || fail "backup cookie file must be a readable regular file"
+	fi
+}
+
 validate_args() {
 	[[ -n "$VERSION" ]] || fail "--version is required"
 	[[ -n "$DOMAIN" ]] || fail "--domain is required"
@@ -187,7 +235,7 @@ validate_args() {
 		[[ -z "$BACKUP_API_URL" && -z "$BACKUP_JOB_ID" && -z "$COOKIE_FILE" ]] || fail "backup smoke options cannot be combined with --skip-backup-restore-drill"
 		[[ "$KEEP_BACKUP_ARTIFACT" == "0" && "$CURL_INSECURE_VALUE" == "0" ]] || fail "backup smoke flags cannot be combined with --skip-backup-restore-drill"
 	else
-		[[ -n "$BACKUP_API_URL" && -n "$BACKUP_JOB_ID" ]] || fail "--backup-api-url and --backup-job-id are required, or pass --skip-backup-restore-drill explicitly"
+		validate_backup_smoke_args
 	fi
 
 	need_executable "release-readiness" "$RELEASE_READINESS_BIN"
