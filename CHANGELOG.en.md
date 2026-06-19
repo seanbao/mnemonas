@@ -109,6 +109,7 @@ This project follows [Semantic Versioning 2.0.0](https://semver.org/).
 - Release workflow rejects non-SemVer release tags before building archives or container images.
 - Release artifact verifier rejects unsafe checksum paths, control-character paths, whitespace paths, symlinked archives, unexpected downloaded artifact entries, special archive entries, duplicate entries, archive-member control-character paths, archive-member whitespace paths, backslash paths, and ambiguous path segments before running checksum validation, validates explicit or archive-inferred release versions against Docker/GHCR image tag constraints, supports passing dash-prefixed artifact directories through `--` for post-publication local checks, and retries briefly unavailable remote image manifests according to configuration.
 - Release artifact verifier reports the verified target set on success so post-publication checks can confirm platform archive coverage.
+- `scripts/release-go-live-check.sh` chains the release-readiness summary, published artifact verification, public doctor, external-network go-live smoke, and backup restore-drill smoke into one post-publication go-live entry point. It validates the release tag, repository name, and public domain before starting any helper, normalizes uppercase or trailing-dot domains for public checks, and requires backup API/job arguments unless the restore drill is explicitly skipped.
 - Security docs distinguish the Web UI initial admin password from generated WebDAV Basic Auth credentials.
 - Security docs and doctor checks warn that dataplane ports `9090/9091` should not be exposed to untrusted networks.
 - Added a public cloud firewall checklist covering common cloud security groups, VPC firewalls, IPv6, and port-forwarding mistakes.
@@ -201,6 +202,7 @@ First public release target.
 - [ ] If public access is planned, run on the server: `sudo mnemonas-doctor --public-domain <domain>`, and review the [Public cloud firewall checklist](docs/cloud-firewall-checklist.en.md) for DNS, firewall, TLS, and cloud security groups
 - [ ] If public access is planned, run from an external network: `./scripts/public-go-live-smoke.sh <domain>` to confirm HTTPS, same-domain redirects, and private backend ports
 - [ ] If this release includes the backup and restore path, run `./scripts/backup-restore-drill-smoke.sh` against at least one configured backup job and confirm that immediate backup, retention review, restore drill, and restore report download can be repeated
+- [ ] Run the post-publication go-live check: `./scripts/release-go-live-check.sh --version <tag> --domain <domain>`; provide `--backup-api-url` and `--backup-job-id` for the restore drill, or explicitly record `--skip-backup-restore-drill`
 - [ ] Confirm `./scripts/plan-hardening-commits.sh --fail-on-manual` reports no unclassified paths
 - [ ] Run release readiness summary: `make release-readiness`
 - [ ] Update `CHANGELOG.md`, `CHANGELOG.en.md`, README version references, and [release notes draft](docs/release-notes.en.md)

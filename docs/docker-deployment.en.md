@@ -281,6 +281,20 @@ When `--artifact-dir` is omitted, the script uses a temporary directory. Explici
 Explicit directories may be dash-prefixed relative paths; the script normalizes them for local file operations and artifact verifier calls.
 Repository names are validated as GHCR-compatible lowercase `owner/repo` values before download, so invalid repositories do not trigger GitHub Release downloads.
 
+After a public release, prefer the unified go-live entry point. It chains the release-readiness summary, published artifact verification, public doctor check, external-network go-live smoke, and backup restore-drill smoke:
+
+```bash
+./scripts/release-go-live-check.sh \
+  --version v1.2.3 \
+  --domain nas.example.com \
+  --repository seanbao/mnemonas \
+  --artifact-dir dist/release-check \
+  --backup-api-url https://nas.example.com/api/v1 \
+  --backup-job-id external-disk
+```
+
+When the backup restore drill cannot be run, pass `--skip-backup-restore-drill` explicitly. That result is not complete restore evidence.
+
 The examples below default to the source-built local image and can be switched to a verified release image with `MNEMONAS_IMAGE`.
 
 ## Media Archive Example

@@ -280,6 +280,20 @@ mkdir -p dist/release-check
 显式目录可以是以 `-` 开头的相对路径；脚本会在本地文件操作和 artifact verifier 调用前把它规范化为本地路径。
 仓库名会在下载前校验为 GHCR 兼容的小写 `owner/repo`，非法仓库名不会触发 GitHub Release 下载。
 
+公网发布后应优先运行统一上线核验入口，它会串联发布就绪摘要、已发布产物核验、公网 doctor、外部网络 go-live smoke 和备份恢复演练 smoke：
+
+```bash
+./scripts/release-go-live-check.sh \
+  --version v1.2.3 \
+  --domain nas.example.com \
+  --repository seanbao/mnemonas \
+  --artifact-dir dist/release-check \
+  --backup-api-url https://nas.example.com/api/v1 \
+  --backup-job-id external-disk
+```
+
+如不能执行备份恢复演练，必须显式传入 `--skip-backup-restore-drill`，该结果不等同于完整恢复证据。
+
 下列示例默认使用源码构建的本地镜像，也可通过 `MNEMONAS_IMAGE` 切换到已验证的 release 镜像。
 
 ## 媒体归档示例

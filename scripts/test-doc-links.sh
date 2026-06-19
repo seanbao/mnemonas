@@ -1348,8 +1348,8 @@ EOF
 | 区域 | 当前状态 | 验证证据 |
 |------|----------|----------|
 | 备份恢复演练 smoke 入口 | `scripts/backup-restore-drill-smoke.sh` 已纳入发布清单和双语 release notes 门禁，备份恢复演练 smoke 入口文档和发布门禁契约已记录。 | `make docs-check` |
-| 发布后产物核验 | 正式发布后运行 `./scripts/verify-published-release.sh --version <tag> --repository seanbao/mnemonas` 统一下载并核验 GitHub Release 产物、checksums 和容器镜像标签；以 `-` 开头的显式 artifact 目录会先规范化为本地路径。 | `make docs-check` |
-| 审查分组与发布前检查 | 发布就绪摘要要求发布清单和双语 release notes 保留公网部署 doctor、外部网络 smoke、备份恢复演练 smoke 和云防火墙复核入口。 | `./scripts/release-readiness.sh` |
+| 发布后上线总核验 | 正式发布后运行 `./scripts/release-go-live-check.sh --version <tag> --domain <domain>` 统一串联 release-readiness、公网核验和备份恢复演练，再由 `./scripts/verify-published-release.sh --version <tag> --repository seanbao/mnemonas` 下载并核验 GitHub Release 产物、checksums 和容器镜像标签；以 `-` 开头的显式 artifact 目录会先规范化为本地路径。 | `make docs-check` |
+| 审查分组与发布前检查 | 发布就绪摘要要求发布清单和双语 release notes 保留公网部署 doctor、外部网络 smoke、备份恢复演练 smoke、发布后上线总核验和云防火墙复核入口。 | `./scripts/release-readiness.sh` |
 
 ## 整体状态边界
 
@@ -1367,8 +1367,8 @@ English | [简体中文](hardening-progress.md)
 | Area | Current status | Verification evidence |
 | --- | --- | --- |
 | Backup restore-drill smoke entry point | `scripts/backup-restore-drill-smoke.sh` is covered by the release checklist and bilingual release-notes gates, and the backup restore-drill smoke entry-point documentation and release-readiness contract is recorded. | `make docs-check` |
-| Published release verification | After publication, run `./scripts/verify-published-release.sh --version <tag> --repository seanbao/mnemonas` to download and verify GitHub Release artifacts, checksums, and container image tags through the maintainer entry point. Dash-prefixed explicit artifact directories are normalized as local paths. | `make docs-check` |
-| Review grouping and pre-release checks | The release-readiness summary requires the release checklist and bilingual release notes to retain the public-deployment doctor, external-network smoke, backup restore-drill smoke, and cloud-firewall review entry points. | `./scripts/release-readiness.sh` |
+| Post-publication go-live verification | After publication, run `./scripts/release-go-live-check.sh --version <tag> --domain <domain>` to chain release-readiness, public verification, and backup restore-drill smoke, and use `./scripts/verify-published-release.sh --version <tag> --repository seanbao/mnemonas` to download and verify GitHub Release artifacts, checksums, and container image tags. Dash-prefixed explicit artifact directories are normalized as local paths. | `make docs-check` |
+| Review grouping and pre-release checks | The release-readiness summary requires the release checklist and bilingual release notes to retain the public-deployment doctor, external-network smoke, backup restore-drill smoke, post-publication go-live verification, and cloud-firewall review entry points. | `./scripts/release-readiness.sh` |
 
 ## Overall Status Boundary
 
@@ -1395,6 +1395,13 @@ write_hardening_progress_release_readiness_contract_missing_published_release_ve
 	git -C "$repo" add docs/hardening-progress.en.md
 }
 
+write_hardening_progress_release_readiness_contract_missing_go_live_doc() {
+	local repo="$1"
+	write_hardening_progress_release_readiness_contract_valid_docs "$repo"
+	perl -0pi -e 's/`\.\/scripts\/release-go-live-check\.sh --version <tag> --domain <domain>`/`\.\/scripts\/public-go-live-smoke.sh <domain>`/' "$repo/docs/hardening-progress.en.md"
+	git -C "$repo" add docs/hardening-progress.en.md
+}
+
 write_hardening_progress_release_readiness_contract_missing_goal_boundary_doc() {
 	local repo="$1"
 	write_hardening_progress_release_readiness_contract_valid_docs "$repo"
@@ -1415,7 +1422,11 @@ EOF
 #!/usr/bin/env bash
 set -euo pipefail
 EOF
-	chmod +x "$repo/scripts/verify-published-release.sh"
+	cat > "$repo/scripts/release-go-live-check.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+EOF
+	chmod +x "$repo/scripts/verify-published-release.sh" "$repo/scripts/release-go-live-check.sh"
 	cat > "$repo/docs/docker-deployment.md" <<'EOF'
 # Docker 部署指南
 
@@ -1438,6 +1449,20 @@ mkdir -p dist/release-check
 仅核验下载的归档和 checksums 时，可传入 `--skip-image-check`。
 未设置 `--artifact-dir` 时，脚本会使用临时目录；显式目录必须为空或不存在。
 显式目录可以是以 `-` 开头的相对路径；仓库名会在下载前校验为 GHCR 兼容的小写 `owner/repo`。
+
+公网发布后运行统一上线核验：
+
+```bash
+./scripts/release-go-live-check.sh \
+  --version v1.2.3 \
+  --domain nas.example.com \
+  --repository seanbao/mnemonas \
+  --artifact-dir dist/release-check \
+  --backup-api-url https://nas.example.com/api/v1 \
+  --backup-job-id external-disk
+```
+
+仅在发布记录说明缺少完整恢复证据时，才传入 `--skip-backup-restore-drill`。
 EOF
 	cat > "$repo/docs/docker-deployment.en.md" <<'EOF'
 # Docker Deployment Guide
@@ -1461,8 +1486,22 @@ By default, the script uses Docker to check that `ghcr.io/seanbao/mnemonas:1.2.3
 Pass `--skip-image-check` when only the downloaded archives and checksums need verification.
 When `--artifact-dir` is omitted, the script uses a temporary directory. Explicit directories must be empty or absent.
 Explicit directories may be dash-prefixed relative paths, and repository names are validated as GHCR-compatible lowercase `owner/repo` values before download.
+
+After a public release, run the unified go-live check:
+
+```bash
+./scripts/release-go-live-check.sh \
+  --version v1.2.3 \
+  --domain nas.example.com \
+  --repository seanbao/mnemonas \
+  --artifact-dir dist/release-check \
+  --backup-api-url https://nas.example.com/api/v1 \
+  --backup-job-id external-disk
+```
+
+Pass `--skip-backup-restore-drill` only when the release notes record that complete restore evidence is missing.
 EOF
-	git -C "$repo" add scripts/verify-published-release.sh docs/README.md docs/README.en.md docs/docker-deployment.md docs/docker-deployment.en.md
+	git -C "$repo" add scripts/verify-published-release.sh scripts/release-go-live-check.sh docs/README.md docs/README.en.md docs/docker-deployment.md docs/docker-deployment.en.md
 }
 
 write_docker_deployment_release_verification_contract_missing_retry_doc() {
@@ -1780,8 +1819,9 @@ run_rejects "security-checklist-contract-missing-public-smoke" "docs/security.en
 run_rejects "api-reference-webdav-auth-contract-missing-users" "docs/api-reference.en.md: missing WebDAV auth guidance text: For day-to-day or production mounts, set \`webdav.auth_type = \"users\"\`" write_api_reference_webdav_auth_contract_missing_users_doc
 run_rejects "api-reference-webdav-auth-contract-legacy-first" "docs/api-reference.en.md: avoid leading WebDAV auth guidance with legacy Basic Auth: - By default it uses the legacy global Basic Auth credentials" write_api_reference_webdav_auth_contract_legacy_first_doc
 run_rejects "backup-restore-drill-contract-missing-history" "docs/backup-guide.en.md: missing backup restore drill guidance text: Restore-drill history and explicit restore history both keep the latest 20 entries" write_backup_restore_drill_contract_missing_history_doc
-run_rejects "hardening-progress-release-readiness-contract-missing-backup-smoke" "docs/hardening-progress.en.md: missing release-readiness hardening ledger text: release checklist and bilingual release notes to retain the public-deployment doctor, external-network smoke, backup restore-drill smoke, and cloud-firewall review entry points" write_hardening_progress_release_readiness_contract_missing_backup_smoke_doc
+run_rejects "hardening-progress-release-readiness-contract-missing-backup-smoke" "docs/hardening-progress.en.md: missing release-readiness hardening ledger text: release checklist and bilingual release notes to retain the public-deployment doctor, external-network smoke, backup restore-drill smoke, post-publication go-live verification, and cloud-firewall review entry points" write_hardening_progress_release_readiness_contract_missing_backup_smoke_doc
 run_rejects "hardening-progress-release-readiness-contract-missing-published-release-verifier" "docs/hardening-progress.en.md: missing release-readiness hardening ledger text: \`./scripts/verify-published-release.sh --version <tag> --repository seanbao/mnemonas\`" write_hardening_progress_release_readiness_contract_missing_published_release_verifier_doc
+run_rejects "hardening-progress-release-readiness-contract-missing-go-live" "docs/hardening-progress.en.md: missing release-readiness hardening ledger text: \`./scripts/release-go-live-check.sh --version <tag> --domain <domain>\`" write_hardening_progress_release_readiness_contract_missing_go_live_doc
 run_rejects "hardening-progress-release-readiness-contract-missing-goal-boundary" "docs/hardening-progress.en.md: missing release-readiness hardening ledger text: Not complete." write_hardening_progress_release_readiness_contract_missing_goal_boundary_doc
 run_rejects "docker-deployment-release-verification-contract-missing-retry" "docs/docker-deployment.en.md: missing Docker release verification guidance text: MNEMONAS_RELEASE_IMAGE_CHECK_SLEEP_SECONDS" write_docker_deployment_release_verification_contract_missing_retry_doc
 run_rejects "docker-deployment-release-verification-contract-missing-dash-dir" "docs/docker-deployment.en.md: missing Docker release verification guidance text: dash-prefixed relative paths" write_docker_deployment_release_verification_contract_missing_dash_dir_doc

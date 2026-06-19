@@ -185,6 +185,7 @@
 - `scripts/check-release-tag.sh` 会在构建 release 产物前校验 release tag 是否为 `vMAJOR.MINOR.PATCH` 或语义化预发布 tag，并限制去掉 `v` 前缀后的 Docker 镜像 tag 长度不超过 128 个字符
 - `scripts/verify-release-artifacts.sh` 对下载目录、checksum 清单和归档成员中的控制字符路径使用 shell-safe 诊断表示，避免发布后验收日志写入原始控制字符
 - `scripts/verify-published-release.sh` 封装 GitHub Release 下载和 artifact verifier，默认使用空目录或临时目录下载产物并校验归档、checksums、必需目标集合和 GHCR 镜像标签；显式 `--artifact-dir` 即使以 `-` 开头也会安全规范化为本地路径，并且非法仓库名会在下载前失败，减少发布后手工命令遗漏参数、混入旧产物或误用仓库名的风险
+- `scripts/release-go-live-check.sh` 将发布就绪摘要、已发布产物核验、公网 doctor、外部网络 go-live smoke 和备份恢复演练 smoke 串成统一发布后上线核验入口；脚本会在启动任何 helper 前校验 release tag、仓库名和公网域名，并把大写或尾点域名规范化后传给公网检查；备份演练必须提供 API/job 参数或显式跳过，避免发布后只完成局部核验却被记录为完整上线验证
 - `scripts/release-readiness.sh` 在记录的完整验证目标之后发现非发布文档变更时默认失败；草稿摘要可显式使用 `--allow-post-validation-changes` 放行
 - `scripts/release-readiness.sh` 要求四份 hardening 证据文档存在且记录一致的完整验证目标，避免发布前证据缺失被静默跳过
 - `scripts/release-readiness.sh` 会检查双语 release notes 草稿记录当前完整验证目标，避免发布说明中的验证快照滞后
@@ -196,7 +197,7 @@
 - `scripts/release-readiness.sh` 会要求 `.github/workflows/torture.yml` 保留手动入口、定时入口、只读权限、`RUN_LIVE_FAULTS: '0'` 非破坏性开关和 `make test-torture` 执行入口，避免长期回归工作流在发布前失效
 - `scripts/release-readiness.sh` 会要求关闭空白 Issue，并检查缺陷报告、使用问题、功能建议和 WebDAV 兼容性 Issue 表单保留敏感信息脱敏、诊断信息和安全影响提示，避免公开协作入口绕过安全提示
 - `scripts/release-readiness.sh` 会检查安全策略和支持说明保留私密漏洞报告入口、禁止公开漏洞细节、dataplane 端口不外露、依赖安全检查和公网直连限制等关键提示
-- `scripts/release-readiness.sh` 会要求发布清单和双语 release notes 保留 `mnemonas-doctor --public-domain`、`scripts/public-go-live-smoke.sh`、`scripts/backup-restore-drill-smoke.sh` 和 `cloud-firewall-checklist` 入口，避免公网部署环境复核和恢复演练入口从最终发布流程中遗漏
+- `scripts/release-readiness.sh` 会要求发布清单和双语 release notes 保留 `mnemonas-doctor --public-domain`、`scripts/public-go-live-smoke.sh`、`scripts/backup-restore-drill-smoke.sh`、`scripts/release-go-live-check.sh` 和 `cloud-firewall-checklist` 入口，避免公网部署环境复核、发布后上线总核验和恢复演练入口从最终发布流程中遗漏
 - `scripts/release-readiness.sh` 会拒绝不是当前 HEAD 祖先的 base ref，避免用旁支范围生成误导性的发布就绪摘要
 - `scripts/release-readiness.sh` 会检查当前发布分支的本地提交标题是否符合 Conventional Commits，并拒绝遗留的 `fixup!` / `squash!` 临时提交
 - 新增 `make release-readiness` 入口包装发布就绪摘要脚本，Makefile 基线门禁会保留该入口，避免发布前检查只能依赖脚本路径记忆
@@ -350,6 +351,7 @@
 - [ ] 如果计划公网发布，在服务器运行 `sudo mnemonas-doctor --public-domain <domain>`，并按 [公网云防火墙复核清单](docs/cloud-firewall-checklist.md) 确认 DNS、防火墙、TLS 和云安全组
 - [ ] 如果计划公网发布，从外部网络运行 `./scripts/public-go-live-smoke.sh <domain>`，确认 HTTPS、同域跳转和后端端口不可外露
 - [ ] 如本次发布包含备份恢复链路，针对至少一个已配置备份任务运行 `./scripts/backup-restore-drill-smoke.sh`，确认立即备份、保留策略检查、恢复演练和恢复报告下载路径可复跑
+- [ ] 发布后上线总核验通过：`./scripts/release-go-live-check.sh --version <tag> --domain <domain>`；备份恢复演练必须提供 `--backup-api-url` 和 `--backup-job-id`，或显式记录 `--skip-backup-restore-drill`
 - [ ] `./scripts/plan-hardening-commits.sh --fail-on-manual` 确认没有未归类路径
 - [ ] 发布前就绪摘要通过：`make release-readiness`
 - [ ] 更新 CHANGELOG.md、CHANGELOG.en.md、README 版本引用和 [发布说明草稿](docs/release-notes.md)
