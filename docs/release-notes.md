@@ -22,13 +22,14 @@
 - Release tag 会在产物构建前校验，必须使用 `vMAJOR.MINOR.PATCH` 或 `v1.2.3-rc.1` 这类语义化预发布形式，并且去掉 `v` 前缀后的 Docker 镜像 tag 长度不能超过 128 个字符；发布后 artifact verifier 会复用同一版本校验逻辑，对显式或归档名推断出的版本应用同一约束。
 - 新增可复跑的 WebDAV curl 协议 smoke，可对已运行服务验证基础读写、URL 编码空格路径、复制、移动和删除操作；脚本会提前拒绝含空白、query、fragment、内嵌凭据、反斜杠、编码斜杠、编码反斜杠或 `.`/`..` 路径段的 `WEBDAV_URL`，并拒绝非 `0/1` 的 `CURL_INSECURE`，相关契约通过脚本门禁覆盖。
 - 新增可复跑的备份恢复演练 smoke 入口，可对已运行服务按显式备份任务 ID 执行任务列表读取、单任务读取、立即备份、保留策略检查、恢复演练和恢复报告下载；脚本不创建或删除备份任务，并提前拒绝含空白、query、fragment、内嵌凭据、反斜杠、编码斜杠/反斜杠、空路径段或点段的 API URL。
-- 新增发布后上线总核验入口 `scripts/release-go-live-check.sh`，按顺序执行发布就绪摘要、GitHub Release/GHCR 产物核验、公网 `mnemonas-doctor --public-domain`、外部网络 go-live smoke，以及备份恢复演练 smoke；脚本会在任何 helper 启动前校验 release tag、仓库名和公网域名，并把大写或尾点域名规范化后传给公网检查；备份演练需要显式 API URL 和任务 ID，或显式跳过并在发布记录中保留该事实。
+- 新增发布后上线总核验入口 `scripts/release-go-live-check.sh`，按顺序执行发布就绪摘要、GitHub Release/GHCR 产物核验、公网 `mnemonas-doctor --public-domain`、外部网络 go-live smoke，以及备份恢复演练 smoke；脚本会在任何 helper 启动前校验 release tag、仓库名和公网域名，把大写或单个尾点域名规范化后传给公网检查，并拒绝重复尾点域名；备份演练需要显式 API URL 和任务 ID，或显式跳过并在发布记录中保留该事实。
 - 新增 WebDAV 兼容性报告表单，用于收集 Finder、Windows File Explorer、移动端文件管理器、媒体播放器和命令行客户端的验证结果或客户端特定失败。
 - 维护页恢复完成后可复制恢复切换记录，内容包含恢复目标、只读校验、切换步骤、切换前确认和回滚清单；恢复报告会基于原始恢复目标匹配结果，在最近一次恢复已完成但匹配只读校验缺失、只读校验早于恢复完成、只读校验不属于当前恢复目标或只读校验状态不能作为当前目标证据时给出明确 findings，避免把陈旧、跨目标或不可用校验误读为当前恢复已验证；批量恢复结果会列出跨目录切换候选和冲突处置记录，并在可复制结果记录中写入任务名称、备份目标、保留策略状态、候选目录、只读校验复核结论、校验错误详情、冲突处置建议和配置文件保留要求，便于记录到工单或值班流程。
 - 设置页目录权限用户矩阵和未保存规则预览可复制权限复核记录，内容包含路径、用户读写判定、命中规则和相关分享影响，并会保留后端持久化近期复核历史；服务端历史不可用时回退当前浏览器记录。
 - 分享路径策略可按用户、用户组或角色限制允许创建和维护分享链接的认证调用方；管理员保留修复既有分享的管理权限。
 - 分享、版本历史、回收站和维护页的关键处置入口会写入活动复核记录，覆盖分享停用、删除、重新启用、策略更新、版本恢复、回收站恢复和备份恢复执行结果；活动页复核历史在处置后会立即显示符合当前筛选的新记录，便于追踪误分享、误删和恢复处置闭环。
 - 收紧发布就绪摘要：记录的完整验证目标之后如出现已提交或未提交的非发布文档变更，`release-readiness` 默认失败，并要求刷新完整验证或显式草稿放行；草稿放行非发布文档变更时会输出 `validation-warning`，避免被误读为正式发布就绪。
+- `release-readiness` 会把双语 Docker 部署说明视为完整验证目标后的发布文档，允许最终发布时按实际 tag、Release workflow 结果和产物名称刷新公开部署说明，同时继续拒绝普通文档或代码变更混入。
 - `release-readiness` 现在要求四份 hardening 证据文档都存在，并且都记录同一个完整验证目标，避免发布前证据缺失被静默跳过。
 - `release-readiness` 还会要求双语 hardening progress 台账在 `make release-readiness` 记录中写入同一个完整验证目标，避免完整验证证据刷新后发布就绪摘要仍停留在旧目标。
 - `release-readiness` 还会检查双语 release notes 草稿记录当前完整验证目标，避免发布说明中的验证快照滞后。
@@ -66,7 +67,7 @@ Release workflow 预期生成以下产物：
 
 当前硬化分支已有以下验证证据；最终发布前应以最新 tag、Release workflow 结果和必要的环境验证为准：
 
-最近本地完整验证快照：验证目标 `dd07c2ee5a9f`，`GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master` 通过，覆盖 diff 空白、密钥泄漏扫描、workflow/YAML/脚本门禁、恢复报告基于原始恢复目标匹配结果，在最近一次恢复已完成但匹配只读校验缺失、只读校验早于恢复完成、只读校验不属于当前恢复目标或只读校验状态不能作为当前目标证据时给出明确 findings、首页首次部署检查和登录页基于 setup 状态提示认证关闭、分享启用且认证关闭、WebDAV 匿名访问和 `allow_unsafe_no_auth` 开启的部署安全风险、Activity 复核处置后把符合当前历史筛选的更新记录即时并入列表缓存、反向代理 WebDAV 验证文档契约门禁、hardening progress 整体状态边界文档契约门禁、发布后核验入口对以 `-` 开头的显式 artifact 目录和非法仓库名下载前失败的回归、Docker 部署指南发布后核验文档契约扩展、发布后上线总核验入口和模拟回归、release-readiness 发布清单摘要范围门禁、CHANGELOG 已知限制保留 L1/L1+ 发布候选定位、非唯一长期副本和外部备份边界的 release-readiness 门禁增量、Release workflow 结构门禁、hardening progress 中 `make release-readiness` 行级验证目标门禁、`make release-readiness` 入口基线、历史最小配置加载后回填当前默认值的配置兼容性回归、分享创建执行结果记录增量、分享策略更新执行结果记录增量、`make check`、工具链一致性、Go/Rust/frontend 依赖安全扫描、示例配置、public-access 模板、proto 再生成稳定性、Rust fmt/test/clippy、proto-gen fmt/test/clippy、前端 lint/typecheck/unit/build、Playwright 379 个 E2E 用例、Docker build、Docker image `sha256:74b496b23c78c81b2ef2595c258ee71db4257d3b16d4b38c0258e464cdb60bf6` 和 Docker smoke。Docker smoke 使用 Docker 自动分配的 loopback 端口 `http://127.0.0.1:32807`。
+最近本地完整验证快照：验证目标 `875426e8d336`，`GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master` 通过，覆盖 diff 空白、密钥泄漏扫描、workflow/YAML/脚本门禁、恢复报告基于原始恢复目标匹配结果，在最近一次恢复已完成但匹配只读校验缺失、只读校验早于恢复完成、只读校验不属于当前恢复目标或只读校验状态不能作为当前目标证据时给出明确 findings、首页首次部署检查和登录页基于 setup 状态提示认证关闭、分享启用且认证关闭、WebDAV 匿名访问和 `allow_unsafe_no_auth` 开启的部署安全风险、Activity 复核处置后把符合当前历史筛选的更新记录即时并入列表缓存、反向代理 WebDAV 验证文档契约门禁、hardening progress 整体状态边界文档契约门禁、发布后核验入口对以 `-` 开头的显式 artifact 目录和非法仓库名下载前失败的回归、Docker 部署指南发布后核验文档契约扩展、发布后上线总核验入口、helper 启动前输入校验、重复尾点域名拒绝和模拟回归、release-readiness 发布清单摘要范围门禁、release-readiness 双语 Docker 部署说明发布文档分类门禁、CHANGELOG 已知限制保留 L1/L1+ 发布候选定位、非唯一长期副本和外部备份边界的 release-readiness 门禁增量、Release workflow 结构门禁、hardening progress 中 `make release-readiness` 行级验证目标门禁、`make release-readiness` 入口基线、历史最小配置加载后回填当前默认值的配置兼容性回归、分享创建执行结果记录增量、分享策略更新执行结果记录增量、`make check`、工具链一致性、Go/Rust/frontend 依赖安全扫描、示例配置、public-access 模板、proto 再生成稳定性、Rust fmt/test/clippy、proto-gen fmt/test/clippy、前端 lint/typecheck/unit/build、Playwright 379 个 E2E 用例、Docker build、Docker image `sha256:4bd280e1d00bf701c4589c6a0b7fd8b813c797d706d79b2bec481837fff191eb` 和 Docker smoke。Docker smoke 使用 Docker 自动分配的 loopback 端口 `http://127.0.0.1:32810`。
 
 - `GOTOOLCHAIN=local ./scripts/verify-changed.sh`
 - `GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master`

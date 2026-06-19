@@ -226,6 +226,23 @@ run_invalid_release_inputs_fail_before_helpers() {
 	[[ "$status" -ne 0 ]] || fail "release go-live check accepted an invalid public domain"
 	assert_file_contains "$case_dir/bad-domain.err" "public domain must not include a URL scheme"
 	[[ ! -f "$case_dir/bad-domain.log" ]] || fail "helpers ran before public domain was validated"
+
+	set +e
+	RELEASE_GO_LIVE_LOG="$case_dir/repeated-trailing-dot-domain.log" \
+		MNEMONAS_RELEASE_READINESS_BIN="$helper_dir/release-readiness" \
+		MNEMONAS_VERIFY_PUBLISHED_RELEASE_BIN="$helper_dir/verify-published" \
+		MNEMONAS_DOCTOR_BIN="$helper_dir/doctor" \
+		MNEMONAS_PUBLIC_GO_LIVE_SMOKE_BIN="$helper_dir/public-smoke" \
+		bash "$REPO_ROOT/scripts/release-go-live-check.sh" \
+			--version v1.2.3 \
+			--domain nas.example.com.. \
+			--skip-backup-restore-drill >"$case_dir/repeated-trailing-dot-domain.out" 2>"$case_dir/repeated-trailing-dot-domain.err"
+	status=$?
+	set -e
+
+	[[ "$status" -ne 0 ]] || fail "release go-live check accepted a repeated trailing-dot public domain"
+	assert_file_contains "$case_dir/repeated-trailing-dot-domain.err" "public domain must be a valid ASCII hostname"
+	[[ ! -f "$case_dir/repeated-trailing-dot-domain.log" ]] || fail "helpers ran before repeated trailing-dot public domain was validated"
 }
 
 run_helper_failure_stops_later_steps() {

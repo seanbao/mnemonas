@@ -698,6 +698,26 @@ assert_file_contains "$output_dir/release-docs-only.out" "only release documenta
 assert_file_contains "$output_dir/release-docs-only.out" "[release-readiness] validation-diff:"
 
 git checkout -q master
+git checkout -q -b deployment-release-docs
+cat >docs/docker-deployment.md <<'EOF'
+# Docker 部署
+
+发布后按实际 tag 和产物名称刷新。
+EOF
+cat >docs/docker-deployment.en.md <<'EOF'
+# Docker Deployment
+
+Refresh with the actual tag and artifact names after publication.
+EOF
+git add docs/docker-deployment.md docs/docker-deployment.en.md
+git commit -q -m "docs: update public deployment notes"
+
+./scripts/release-readiness.sh --base "$validation_target" >"$output_dir/deployment-release-docs-only.out" 2>"$output_dir/deployment-release-docs-only.err"
+assert_file_contains "$output_dir/deployment-release-docs-only.out" "[release-readiness] validation:"
+assert_file_contains "$output_dir/deployment-release-docs-only.out" "only release documentation changed since target"
+assert_file_contains "$output_dir/deployment-release-docs-only.out" "[release-readiness] validation-diff:"
+
+git checkout -q master
 git checkout -q -b release-readiness
 printf '# docs\n' >README.md
 git add README.md

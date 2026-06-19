@@ -435,6 +435,8 @@ is_release_documentation_path() {
 	case "$1" in
 		CHANGELOG.md|\
 		CHANGELOG.en.md|\
+		docs/docker-deployment.md|\
+		docs/docker-deployment.en.md|\
 		docs/release-notes.md|\
 		docs/release-notes.en.md)
 			return 0
