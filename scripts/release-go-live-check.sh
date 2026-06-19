@@ -8,6 +8,7 @@ VERSION=""
 DOMAIN=""
 REPOSITORY="seanbao/mnemonas"
 ARTIFACT_DIR=""
+KEEP_PUBLISHED_ARTIFACTS=0
 BACKUP_API_URL=""
 BACKUP_JOB_ID=""
 COOKIE_FILE=""
@@ -55,6 +56,7 @@ Options:
   --repository OWNER/REPO       GitHub repository and GHCR image owner/name.
                                 Defaults to seanbao/mnemonas.
   --artifact-dir DIR            Optional directory passed to verify-published-release.
+  --keep-published-artifacts    Retain verify-published-release temporary downloads.
   --backup-api-url URL          API root URL for backup restore-drill smoke.
   --backup-job-id ID            Backup job ID for backup restore-drill smoke.
   --cookie-file FILE            Optional curl cookie file for authenticated backup smoke.
@@ -230,6 +232,7 @@ validate_args() {
 	validate_repository "$REPOSITORY"
 	DOMAIN="$(normalize_domain "$DOMAIN")"
 	validate_domain "$DOMAIN"
+	[[ -z "$ARTIFACT_DIR" || "$KEEP_PUBLISHED_ARTIFACTS" == "0" ]] || fail "--keep-published-artifacts cannot be combined with --artifact-dir; explicit artifact directories are already retained"
 
 	if [[ "$SKIP_BACKUP_RESTORE_DRILL" == "1" ]]; then
 		[[ -z "$BACKUP_API_URL" && -z "$BACKUP_JOB_ID" && -z "$COOKIE_FILE" ]] || fail "backup smoke options cannot be combined with --skip-backup-restore-drill"
@@ -262,6 +265,9 @@ run_published_release_verifier() {
 	)
 	if [[ -n "$ARTIFACT_DIR" ]]; then
 		args+=(--artifact-dir "$ARTIFACT_DIR")
+	fi
+	if [[ "$KEEP_PUBLISHED_ARTIFACTS" == "1" ]]; then
+		args+=(--keep-artifacts)
 	fi
 
 	log_info "verifying published release $VERSION from $REPOSITORY"
@@ -325,6 +331,10 @@ while [[ "$#" -gt 0 ]]; do
 			[[ "$#" -ge 2 ]] || fail "--artifact-dir requires a value"
 			ARTIFACT_DIR="$2"
 			shift 2
+			;;
+		--keep-published-artifacts)
+			KEEP_PUBLISHED_ARTIFACTS=1
+			shift
 			;;
 		--backup-api-url)
 			[[ "$#" -ge 2 ]] || fail "--backup-api-url requires a value"

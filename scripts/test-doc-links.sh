@@ -1348,7 +1348,7 @@ EOF
 | 区域 | 当前状态 | 验证证据 |
 |------|----------|----------|
 | 备份恢复演练 smoke 入口 | `scripts/backup-restore-drill-smoke.sh` 已纳入发布清单和双语 release notes 门禁，备份恢复演练 smoke 入口文档和发布门禁契约已记录。 | `make docs-check` |
-| 发布后上线总核验 | 正式发布后运行 `./scripts/release-go-live-check.sh --version <tag> --domain <domain>` 统一串联 release-readiness、公网核验和备份恢复演练，再由 `./scripts/verify-published-release.sh --version <tag> --repository seanbao/mnemonas` 下载并核验 GitHub Release 产物、checksums 和容器镜像标签；以 `-` 开头的显式 artifact 目录会先规范化为本地路径。 | `make docs-check` |
+| 发布后上线总核验 | 正式发布后运行 `./scripts/release-go-live-check.sh --version <tag> --domain <domain>` 统一串联 release-readiness、公网核验和备份恢复演练，再由 `./scripts/verify-published-release.sh --version <tag> --repository seanbao/mnemonas` 下载并核验 GitHub Release 产物、checksums 和容器镜像标签；以 `-` 开头的显式 artifact 目录会先规范化为本地路径，`--keep-published-artifacts` 可保留临时下载产物。 | `make docs-check` |
 | 审查分组与发布前检查 | 发布就绪摘要要求发布清单和双语 release notes 保留公网部署 doctor、外部网络 smoke、备份恢复演练 smoke、发布后上线总核验和云防火墙复核入口。 | `./scripts/release-readiness.sh` |
 
 ## 整体状态边界
@@ -1367,7 +1367,7 @@ English | [简体中文](hardening-progress.md)
 | Area | Current status | Verification evidence |
 | --- | --- | --- |
 | Backup restore-drill smoke entry point | `scripts/backup-restore-drill-smoke.sh` is covered by the release checklist and bilingual release-notes gates, and the backup restore-drill smoke entry-point documentation and release-readiness contract is recorded. | `make docs-check` |
-| Post-publication go-live verification | After publication, run `./scripts/release-go-live-check.sh --version <tag> --domain <domain>` to chain release-readiness, public verification, and backup restore-drill smoke, and use `./scripts/verify-published-release.sh --version <tag> --repository seanbao/mnemonas` to download and verify GitHub Release artifacts, checksums, and container image tags. Dash-prefixed explicit artifact directories are normalized as local paths. | `make docs-check` |
+| Post-publication go-live verification | After publication, run `./scripts/release-go-live-check.sh --version <tag> --domain <domain>` to chain release-readiness, public verification, and backup restore-drill smoke, and use `./scripts/verify-published-release.sh --version <tag> --repository seanbao/mnemonas` to download and verify GitHub Release artifacts, checksums, and container image tags. Dash-prefixed explicit artifact directories are normalized as local paths, and `--keep-published-artifacts` can retain temporary downloaded artifacts. | `make docs-check` |
 | Review grouping and pre-release checks | The release-readiness summary requires the release checklist and bilingual release notes to retain the public-deployment doctor, external-network smoke, backup restore-drill smoke, post-publication go-live verification, and cloud-firewall review entry points. | `./scripts/release-readiness.sh` |
 
 ## Overall Status Boundary
@@ -1449,6 +1449,7 @@ mkdir -p dist/release-check
 仅核验下载的归档和 checksums 时，可传入 `--skip-image-check`。
 未设置 `--artifact-dir` 时，脚本会使用临时目录；显式目录必须为空或不存在。
 需要保留临时下载目录用于排查失败时，可省略 `--artifact-dir` 并传入 `--keep-artifacts`。
+统一上线核验入口需要保留临时下载产物用于排查失败时，可省略 `--artifact-dir` 并传入 `--keep-published-artifacts`。
 显式目录可以是以 `-` 开头的相对路径；仓库名会在下载前校验为 GHCR 兼容的小写 `owner/repo`。
 
 公网发布后运行统一上线核验：
@@ -1487,6 +1488,7 @@ By default, the script uses Docker to check that `ghcr.io/seanbao/mnemonas:1.2.3
 Pass `--skip-image-check` when only the downloaded archives and checksums need verification.
 When `--artifact-dir` is omitted, the script uses a temporary directory. Explicit directories must be empty or absent.
 To retain the temporary download directory for failure investigation, omit `--artifact-dir` and pass `--keep-artifacts`.
+When the unified go-live check should retain temporary downloaded published artifacts for troubleshooting, omit `--artifact-dir` and pass `--keep-published-artifacts`.
 Explicit directories may be dash-prefixed relative paths, and repository names are validated as GHCR-compatible lowercase `owner/repo` values before download.
 
 After a public release, run the unified go-live check:
@@ -1524,6 +1526,14 @@ write_docker_deployment_release_verification_contract_missing_keep_artifacts_doc
 	local repo="$1"
 	write_docker_deployment_release_verification_contract_valid_docs "$repo"
 	grep -Fv -- '--keep-artifacts' "$repo/docs/docker-deployment.en.md" > "$repo/docs/docker-deployment.en.md.tmp"
+	mv "$repo/docs/docker-deployment.en.md.tmp" "$repo/docs/docker-deployment.en.md"
+	git -C "$repo" add docs/docker-deployment.en.md
+}
+
+write_docker_deployment_release_verification_contract_missing_go_live_keep_artifacts_doc() {
+	local repo="$1"
+	write_docker_deployment_release_verification_contract_valid_docs "$repo"
+	grep -Fv -- '--keep-published-artifacts' "$repo/docs/docker-deployment.en.md" > "$repo/docs/docker-deployment.en.md.tmp"
 	mv "$repo/docs/docker-deployment.en.md.tmp" "$repo/docs/docker-deployment.en.md"
 	git -C "$repo" add docs/docker-deployment.en.md
 }
@@ -1836,6 +1846,7 @@ run_rejects "hardening-progress-release-readiness-contract-missing-goal-boundary
 run_rejects "docker-deployment-release-verification-contract-missing-retry" "docs/docker-deployment.en.md: missing Docker release verification guidance text: MNEMONAS_RELEASE_IMAGE_CHECK_SLEEP_SECONDS" write_docker_deployment_release_verification_contract_missing_retry_doc
 run_rejects "docker-deployment-release-verification-contract-missing-dash-dir" "docs/docker-deployment.en.md: missing Docker release verification guidance text: dash-prefixed relative paths" write_docker_deployment_release_verification_contract_missing_dash_dir_doc
 run_rejects "docker-deployment-release-verification-contract-missing-keep-artifacts" "docs/docker-deployment.en.md: missing Docker release verification guidance text: --keep-artifacts" write_docker_deployment_release_verification_contract_missing_keep_artifacts_doc
+run_rejects "docker-deployment-release-verification-contract-missing-go-live-keep-artifacts" "docs/docker-deployment.en.md: missing Docker release verification guidance text: --keep-published-artifacts" write_docker_deployment_release_verification_contract_missing_go_live_keep_artifacts_doc
 run_rejects "release-notes-validation-evidence-contract-mismatch" "docs/release-notes.en.md: frontend unit test count 3113 does not match docs/hardening-review-summary.en.md: 3115" write_release_notes_validation_evidence_contract_mismatch_doc
 run_rejects "release-notes-validation-evidence-contract-docker-image-mismatch" "docs/release-notes.en.md: Docker image sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb does not match docs/hardening-review-summary.en.md: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" write_release_notes_validation_evidence_contract_docker_image_mismatch_doc
 run_rejects "release-notes-validation-evidence-contract-docker-port-mismatch" "docs/release-notes.en.md: Docker smoke port http://127.0.0.1:32780 does not match docs/hardening-review-summary.en.md: http://127.0.0.1:32779" write_release_notes_validation_evidence_contract_docker_port_mismatch_doc
