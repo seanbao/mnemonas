@@ -135,6 +135,7 @@ validate_domain() {
 	[[ "$value" != http://* && "$value" != https://* ]] || fail "public domain must not include a URL scheme"
 	[[ "$value" != *"/"* && "$value" != *"?"* && "$value" != *"#"* && "$value" != *"@"* ]] || fail "public domain must not include a path, query, fragment, or userinfo"
 	[[ "$value" != *":"* ]] || fail "public domain must not include a port"
+	[[ "$value" != *. ]] || fail "public domain must be a valid ASCII hostname"
 	is_valid_dns_hostname "$value" || fail "public domain must be a valid ASCII hostname"
 	[[ "$value" == *.* ]] || fail "public domain must be a fully qualified hostname"
 	[[ "$value" != "localhost" && "$value" != *.localhost ]] || fail "public domain must not be localhost"
