@@ -167,6 +167,73 @@ run_missing_backup_args_fails_before_helpers() {
 	[[ ! -f "$log" ]] || fail "helpers ran before backup arguments were validated"
 }
 
+run_invalid_backup_inputs_fail_before_helpers() {
+	local case_dir="$TMP_ROOT/invalid-backup-inputs"
+	local helper_dir="$case_dir/helpers"
+	local status
+
+	mkdir -p "$case_dir"
+	make_fake_helpers "$case_dir"
+
+	set +e
+	RELEASE_GO_LIVE_LOG="$case_dir/bad-api-url.log" \
+		MNEMONAS_RELEASE_READINESS_BIN="$helper_dir/release-readiness" \
+		MNEMONAS_VERIFY_PUBLISHED_RELEASE_BIN="$helper_dir/verify-published" \
+		MNEMONAS_DOCTOR_BIN="$helper_dir/doctor" \
+		MNEMONAS_PUBLIC_GO_LIVE_SMOKE_BIN="$helper_dir/public-smoke" \
+		MNEMONAS_BACKUP_RESTORE_DRILL_SMOKE_BIN="$helper_dir/backup-smoke" \
+		bash "$REPO_ROOT/scripts/release-go-live-check.sh" \
+			--version v1.2.3 \
+			--domain nas.example.com \
+			--backup-api-url "https://nas.example.com/api/v1?token=abc" \
+			--backup-job-id external-disk >"$case_dir/bad-api-url.out" 2>"$case_dir/bad-api-url.err"
+	status=$?
+	set -e
+
+	[[ "$status" -ne 0 ]] || fail "release go-live check accepted backup API URL with query string"
+	assert_file_contains "$case_dir/bad-api-url.err" "backup API URL must not contain query strings or fragments"
+	[[ ! -f "$case_dir/bad-api-url.log" ]] || fail "helpers ran before backup API URL was validated"
+
+	set +e
+	RELEASE_GO_LIVE_LOG="$case_dir/bad-job-id.log" \
+		MNEMONAS_RELEASE_READINESS_BIN="$helper_dir/release-readiness" \
+		MNEMONAS_VERIFY_PUBLISHED_RELEASE_BIN="$helper_dir/verify-published" \
+		MNEMONAS_DOCTOR_BIN="$helper_dir/doctor" \
+		MNEMONAS_PUBLIC_GO_LIVE_SMOKE_BIN="$helper_dir/public-smoke" \
+		MNEMONAS_BACKUP_RESTORE_DRILL_SMOKE_BIN="$helper_dir/backup-smoke" \
+		bash "$REPO_ROOT/scripts/release-go-live-check.sh" \
+			--version v1.2.3 \
+			--domain nas.example.com \
+			--backup-api-url "https://nas.example.com/api/v1" \
+			--backup-job-id "external/disk" >"$case_dir/bad-job-id.out" 2>"$case_dir/bad-job-id.err"
+	status=$?
+	set -e
+
+	[[ "$status" -ne 0 ]] || fail "release go-live check accepted unsafe backup job ID"
+	assert_file_contains "$case_dir/bad-job-id.err" "backup job ID must be a safe backup job ID"
+	[[ ! -f "$case_dir/bad-job-id.log" ]] || fail "helpers ran before backup job ID was validated"
+
+	set +e
+	RELEASE_GO_LIVE_LOG="$case_dir/missing-cookie.log" \
+		MNEMONAS_RELEASE_READINESS_BIN="$helper_dir/release-readiness" \
+		MNEMONAS_VERIFY_PUBLISHED_RELEASE_BIN="$helper_dir/verify-published" \
+		MNEMONAS_DOCTOR_BIN="$helper_dir/doctor" \
+		MNEMONAS_PUBLIC_GO_LIVE_SMOKE_BIN="$helper_dir/public-smoke" \
+		MNEMONAS_BACKUP_RESTORE_DRILL_SMOKE_BIN="$helper_dir/backup-smoke" \
+		bash "$REPO_ROOT/scripts/release-go-live-check.sh" \
+			--version v1.2.3 \
+			--domain nas.example.com \
+			--backup-api-url "https://nas.example.com/api/v1" \
+			--backup-job-id external-disk \
+			--cookie-file "$case_dir/missing-cookie.txt" >"$case_dir/missing-cookie.out" 2>"$case_dir/missing-cookie.err"
+	status=$?
+	set -e
+
+	[[ "$status" -ne 0 ]] || fail "release go-live check accepted a missing backup cookie file"
+	assert_file_contains "$case_dir/missing-cookie.err" "backup cookie file must be a readable regular file"
+	[[ ! -f "$case_dir/missing-cookie.log" ]] || fail "helpers ran before backup cookie file was validated"
+}
+
 run_invalid_release_inputs_fail_before_helpers() {
 	local case_dir="$TMP_ROOT/invalid-release-inputs"
 	local helper_dir="$case_dir/helpers"
@@ -285,6 +352,7 @@ mkdir -p "$TMP_ROOT"
 run_full_check_orchestrates_all_steps
 run_skip_backup_requires_explicit_flag
 run_missing_backup_args_fails_before_helpers
+run_invalid_backup_inputs_fail_before_helpers
 run_invalid_release_inputs_fail_before_helpers
 run_helper_failure_stops_later_steps
 
