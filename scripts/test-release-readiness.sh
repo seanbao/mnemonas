@@ -40,6 +40,7 @@ write_checklists() {
 - [ ] 公网发布前在服务器运行：`sudo mnemonas-doctor --public-domain <domain>`，并按 [公网云防火墙复核清单](docs/cloud-firewall-checklist.md) 复核环境
 - [ ] 公网发布前从外部网络运行：`./scripts/public-go-live-smoke.sh <domain>`
 - [ ] 如本次发布包含备份恢复链路，运行恢复演练 smoke 入口：`./scripts/backup-restore-drill-smoke.sh`
+- [ ] 发布后上线总核验通过：`./scripts/release-go-live-check.sh --version <tag> --domain <domain>`
 - [ ] 发布前就绪摘要通过：`make release-readiness`
 - [ ] `./scripts/plan-hardening-commits.sh --fail-on-manual` 确认没有未归类路径
 - [ ] 所选发布 tag 校验通过：`./scripts/check-release-tag.sh <tag>`
@@ -64,6 +65,7 @@ EOF
 - [ ] Before public release, run on the server: `sudo mnemonas-doctor --public-domain <domain>` and review the [Public cloud firewall checklist](docs/cloud-firewall-checklist.en.md)
 - [ ] Before public release, run from an external network: `./scripts/public-go-live-smoke.sh <domain>`
 - [ ] If this release includes the backup and restore path, run the restore-drill smoke entry point: `./scripts/backup-restore-drill-smoke.sh`
+- [ ] Run post-publication go-live check: `./scripts/release-go-live-check.sh --version <tag> --domain <domain>`
 - [ ] Run release readiness summary: `make release-readiness`
 - [ ] Confirm `./scripts/plan-hardening-commits.sh --fail-on-manual` reports no unclassified paths
 - [ ] Validate the selected release tag: `./scripts/check-release-tag.sh <tag>`
@@ -98,6 +100,7 @@ EOF
 - `sudo mnemonas-doctor --public-domain <domain>`
 - `./scripts/public-go-live-smoke.sh <domain>`
 - `./scripts/backup-restore-drill-smoke.sh`
+- `./scripts/release-go-live-check.sh`
 - `docs/cloud-firewall-checklist.md`
 - `./scripts/test-release-tag.sh`
 - `./scripts/test-release-package.sh`
@@ -132,6 +135,7 @@ EOF
 - `sudo mnemonas-doctor --public-domain <domain>`
 - `./scripts/public-go-live-smoke.sh <domain>`
 - `./scripts/backup-restore-drill-smoke.sh`
+- `./scripts/release-go-live-check.sh`
 - `docs/cloud-firewall-checklist.en.md`
 - `./scripts/test-release-tag.sh`
 - `./scripts/test-release-package.sh`
@@ -1070,6 +1074,15 @@ if ./scripts/release-readiness.sh --allow-dirty --allow-post-validation-changes 
 fi
 assert_file_contains "$output_dir/missing-backup-restore-smoke-checklist.err" "CHANGELOG.en.md is missing required text"
 assert_file_contains "$output_dir/missing-backup-restore-smoke-checklist.err" "./scripts/backup-restore-drill-smoke.sh"
+git checkout -q -- CHANGELOG.en.md
+
+sed -i.bak '/release-go-live-check/d' CHANGELOG.en.md
+rm -f CHANGELOG.en.md.bak
+if ./scripts/release-readiness.sh --allow-dirty --allow-post-validation-changes >"$output_dir/missing-release-go-live-checklist.out" 2>"$output_dir/missing-release-go-live-checklist.err"; then
+	fail "release readiness accepted a missing release go-live checklist command"
+fi
+assert_file_contains "$output_dir/missing-release-go-live-checklist.err" "CHANGELOG.en.md is missing required text"
+assert_file_contains "$output_dir/missing-release-go-live-checklist.err" "./scripts/release-go-live-check.sh"
 git checkout -q -- CHANGELOG.en.md
 
 sed -i.bak '/check-release-tag/d' CHANGELOG.en.md
