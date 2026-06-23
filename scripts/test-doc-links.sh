@@ -1448,6 +1448,7 @@ mkdir -p dist/release-check
 默认会调用 Docker 检查 `ghcr.io/seanbao/mnemonas:1.2.3` 是否存在；需要调整时，可设置 `MNEMONAS_RELEASE_IMAGE_CHECK_RETRIES` 和 `MNEMONAS_RELEASE_IMAGE_CHECK_SLEEP_SECONDS`。
 仅核验下载的归档和 checksums 时，可传入 `--skip-image-check`。
 未设置 `--artifact-dir` 时，脚本会使用临时目录；显式目录必须为空或不存在。
+需要保留临时下载目录用于排查失败时，可省略 `--artifact-dir` 并传入 `--keep-artifacts`。
 显式目录可以是以 `-` 开头的相对路径；仓库名会在下载前校验为 GHCR 兼容的小写 `owner/repo`。
 
 公网发布后运行统一上线核验：
@@ -1485,6 +1486,7 @@ mkdir -p dist/release-check
 By default, the script uses Docker to check that `ghcr.io/seanbao/mnemonas:1.2.3` exists; set `MNEMONAS_RELEASE_IMAGE_CHECK_RETRIES` and `MNEMONAS_RELEASE_IMAGE_CHECK_SLEEP_SECONDS` when different retry timing is required.
 Pass `--skip-image-check` when only the downloaded archives and checksums need verification.
 When `--artifact-dir` is omitted, the script uses a temporary directory. Explicit directories must be empty or absent.
+To retain the temporary download directory for failure investigation, omit `--artifact-dir` and pass `--keep-artifacts`.
 Explicit directories may be dash-prefixed relative paths, and repository names are validated as GHCR-compatible lowercase `owner/repo` values before download.
 
 After a public release, run the unified go-live check:
@@ -1515,6 +1517,14 @@ write_docker_deployment_release_verification_contract_missing_dash_dir_doc() {
 	local repo="$1"
 	write_docker_deployment_release_verification_contract_valid_docs "$repo"
 	perl -0pi -e 's/Explicit directories may be dash-prefixed relative paths, and //' "$repo/docs/docker-deployment.en.md"
+	git -C "$repo" add docs/docker-deployment.en.md
+}
+
+write_docker_deployment_release_verification_contract_missing_keep_artifacts_doc() {
+	local repo="$1"
+	write_docker_deployment_release_verification_contract_valid_docs "$repo"
+	grep -Fv -- '--keep-artifacts' "$repo/docs/docker-deployment.en.md" > "$repo/docs/docker-deployment.en.md.tmp"
+	mv "$repo/docs/docker-deployment.en.md.tmp" "$repo/docs/docker-deployment.en.md"
 	git -C "$repo" add docs/docker-deployment.en.md
 }
 
@@ -1825,6 +1835,7 @@ run_rejects "hardening-progress-release-readiness-contract-missing-go-live" "doc
 run_rejects "hardening-progress-release-readiness-contract-missing-goal-boundary" "docs/hardening-progress.en.md: missing release-readiness hardening ledger text: Not complete." write_hardening_progress_release_readiness_contract_missing_goal_boundary_doc
 run_rejects "docker-deployment-release-verification-contract-missing-retry" "docs/docker-deployment.en.md: missing Docker release verification guidance text: MNEMONAS_RELEASE_IMAGE_CHECK_SLEEP_SECONDS" write_docker_deployment_release_verification_contract_missing_retry_doc
 run_rejects "docker-deployment-release-verification-contract-missing-dash-dir" "docs/docker-deployment.en.md: missing Docker release verification guidance text: dash-prefixed relative paths" write_docker_deployment_release_verification_contract_missing_dash_dir_doc
+run_rejects "docker-deployment-release-verification-contract-missing-keep-artifacts" "docs/docker-deployment.en.md: missing Docker release verification guidance text: --keep-artifacts" write_docker_deployment_release_verification_contract_missing_keep_artifacts_doc
 run_rejects "release-notes-validation-evidence-contract-mismatch" "docs/release-notes.en.md: frontend unit test count 3113 does not match docs/hardening-review-summary.en.md: 3115" write_release_notes_validation_evidence_contract_mismatch_doc
 run_rejects "release-notes-validation-evidence-contract-docker-image-mismatch" "docs/release-notes.en.md: Docker image sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb does not match docs/hardening-review-summary.en.md: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" write_release_notes_validation_evidence_contract_docker_image_mismatch_doc
 run_rejects "release-notes-validation-evidence-contract-docker-port-mismatch" "docs/release-notes.en.md: Docker smoke port http://127.0.0.1:32780 does not match docs/hardening-review-summary.en.md: http://127.0.0.1:32779" write_release_notes_validation_evidence_contract_docker_port_mismatch_doc
