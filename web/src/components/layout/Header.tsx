@@ -59,7 +59,7 @@ export function Header({ onMenuClick }: HeaderProps) {
       return
     }
 
-    navigate('/settings?tab=advanced')
+    navigate('/system-health#notification-settings')
   }, [isAdmin, navigate])
 
   const handleRefresh = async () => {

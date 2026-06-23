@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { fireEvent } from '@testing-library/react'
 import { render, screen, waitFor } from '@/test/utils'
 import userEvent from '@testing-library/user-event'
 import { HealthPage } from './Health'
@@ -30,6 +31,23 @@ vi.mock('@/api/files', () => ({
   downloadDiagnosticsExport: vi.fn(),
 }))
 
+vi.mock('@/api/settings', () => ({
+  SettingsError: class SettingsError extends Error {
+    status: number
+    code?: string
+    constructor(message: string, status: number, code?: string) {
+      super(message)
+      this.status = status
+      this.code = code
+    }
+    get isUnavailable() {
+      return this.status === 503 || this.code === 'SERVICE_UNAVAILABLE'
+    }
+  },
+  getSettings: vi.fn(),
+  updateSettings: vi.fn(),
+}))
+
 vi.mock('@/stores/auth', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/stores/auth')>()
   return {
@@ -39,11 +57,14 @@ vi.mock('@/stores/auth', async (importOriginal) => {
 })
 
 import { ApiError, getDiagnostics, getDiskHealth, getStorageStats, downloadDiagnosticsExport } from '@/api/files'
+import { getSettings, updateSettings } from '@/api/settings'
 
 const mockGetDiagnostics = getDiagnostics as ReturnType<typeof vi.fn>
 const mockGetDiskHealth = getDiskHealth as ReturnType<typeof vi.fn>
 const mockGetStorageStats = getStorageStats as ReturnType<typeof vi.fn>
 const mockDownloadDiagnosticsExport = downloadDiagnosticsExport as ReturnType<typeof vi.fn>
+const mockGetSettings = getSettings as ReturnType<typeof vi.fn>
+const mockUpdateSettings = updateSettings as ReturnType<typeof vi.fn>
 
 function expectCalledWithAbortSignal(mockFn: ReturnType<typeof vi.fn>) {
   const call = mockFn.mock.calls.find(([options]) => {
@@ -147,6 +168,53 @@ describe('HealthPage', () => {
     mockGetDiskHealth.mockResolvedValue(mockDiskHealth)
     mockGetStorageStats.mockResolvedValue(mockStats)
     mockDownloadDiagnosticsExport.mockResolvedValue(undefined)
+    mockGetSettings.mockResolvedValue({
+      success: true,
+      data: {
+        disk_health: {
+          enabled: true,
+          check_interval: '1h',
+          probe_timeout: '15s',
+          cooldown_period: '4h',
+          command: 'smartctl',
+          temperature_warning_c: 50,
+          temperature_critical_c: 60,
+          media_wear_warning_percent: 80,
+          media_wear_critical_percent: 100,
+          devices: [],
+        },
+        alerts: {
+          enabled: false,
+          check_interval: '1h',
+          threshold_pct: 90,
+          critical_pct: 95,
+          min_free_bytes: 10737418240,
+          cooldown_period: '4h',
+          webhook_url: '',
+          webhook_url_configured: false,
+          webhook_method: 'POST',
+          webhook_headers: [],
+          webhook_headers_configured: false,
+          telegram_enabled: false,
+          telegram_bot_token_configured: false,
+          telegram_chat_id: '',
+          wecom_enabled: false,
+          wecom_webhook_url: '',
+          wecom_webhook_url_configured: false,
+          dingtalk_enabled: false,
+          dingtalk_webhook_url: '',
+          dingtalk_webhook_url_configured: false,
+          email_enabled: false,
+          smtp_host: '',
+          smtp_port: 587,
+          smtp_username: '',
+          smtp_password_configured: false,
+          smtp_from: '',
+          smtp_to: [],
+        },
+      },
+    })
+    mockUpdateSettings.mockResolvedValue({ success: true, warning: false, message: 'settings updated' })
   })
 
   describe('loading state', () => {
@@ -742,6 +810,60 @@ describe('HealthPage', () => {
         expect(screen.getByText('TestDisk')).toBeTruthy()
         expect(screen.getByText('42 C · 磨损 8% · 备用 95%')).toBeTruthy()
       })
+    })
+
+    it('saves disk health settings from the health page without other top-level domains', async () => {
+      const user = userEvent.setup()
+      render(<HealthPage />)
+
+      await screen.findByRole('checkbox', { name: '启用磁盘健康检查' })
+      fireEvent.change(screen.getByLabelText('磁盘健康检查间隔'), { target: { value: '2h' } })
+      await user.click(screen.getByRole('button', { name: '保存磁盘健康设置' }))
+
+      await waitFor(() => expect(mockUpdateSettings).toHaveBeenCalledTimes(1))
+      const [request, options] = mockUpdateSettings.mock.calls[0]
+      expect(Object.keys(request)).toEqual(['disk_health'])
+      expect(request).toEqual({
+        disk_health: {
+          enabled: true,
+          check_interval: '2h',
+          probe_timeout: '15s',
+          cooldown_period: '4h',
+          command: 'smartctl',
+          temperature_warning_c: 50,
+          temperature_critical_c: 60,
+          media_wear_warning_percent: 80,
+          media_wear_critical_percent: 100,
+          devices: [],
+        },
+      })
+      expect(options?.signal).toBeInstanceOf(AbortSignal)
+      expect(Object.keys(options ?? {})).toEqual(['signal'])
+    })
+
+    it('saves notification settings from the health page without other top-level domains', async () => {
+      const user = userEvent.setup()
+      render(<HealthPage />)
+
+      const enabledSwitch = await screen.findByRole('checkbox', { name: '启用提醒' })
+      await user.click(enabledSwitch)
+      await user.click(screen.getByRole('button', { name: '保存通知设置' }))
+
+      await waitFor(() => expect(mockUpdateSettings).toHaveBeenCalledTimes(1))
+      const [request, options] = mockUpdateSettings.mock.calls[0]
+      expect(Object.keys(request)).toEqual(['alerts'])
+      expect(request).toEqual({
+        alerts: expect.objectContaining({
+          enabled: true,
+          check_interval: '1h',
+          threshold_pct: 90,
+          critical_pct: 95,
+          min_free_bytes: 10737418240,
+          cooldown_period: '4h',
+        }),
+      })
+      expect(options?.signal).toBeInstanceOf(AbortSignal)
+      expect(Object.keys(options ?? {})).toEqual(['signal'])
     })
 
     it('surfaces critical disk health status', async () => {

@@ -166,7 +166,7 @@ describe('Header', () => {
 
     screen.getByLabelText('提醒设置').click()
 
-    expect(navigateMock).toHaveBeenCalledWith('/settings?tab=advanced')
+    expect(navigateMock).toHaveBeenCalledWith('/system-health#notification-settings')
   })
 
   it('shows a warning when non-admin users click the alerts settings button', () => {
@@ -179,7 +179,7 @@ describe('Header', () => {
       title: '系统提醒设置仅管理员可用',
       color: 'warning',
     })
-    expect(navigateMock).not.toHaveBeenCalledWith('/settings?tab=advanced')
+    expect(navigateMock).not.toHaveBeenCalledWith('/system-health#notification-settings')
   })
 
   it('opens project docs when the help item is clicked', () => {

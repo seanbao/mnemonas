@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, waitFor } from '@/test/utils'
+import { render, screen, waitFor, within } from '@/test/utils'
 import userEvent from '@testing-library/user-event'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { DashboardPage } from './Dashboard'
@@ -491,7 +491,7 @@ describe('DashboardPage', () => {
       })
     })
 
-    it('shows first-run deployment checklist and acknowledges it explicitly', async () => {
+    it('keeps first-run tasks collapsed by default, expands them, and acknowledges them explicitly', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
       mockGetSetupStatus
         .mockResolvedValueOnce({
@@ -515,7 +515,16 @@ describe('DashboardPage', () => {
 
       render(<DashboardPage />)
 
-      expect(await screen.findByText('首次部署检查')).toBeTruthy()
+      expect(await screen.findByText('首次设置')).toBeTruthy()
+      expect(screen.getByText(/已完成 0\/4 项/)).toBeTruthy()
+      const setupDisclosure = screen.getByRole('button', { name: '展开首次设置任务' })
+      expect(setupDisclosure).toHaveAttribute('aria-expanded', 'false')
+      expect(screen.queryByRole('checkbox', { name: /初始登录凭据已处理/ })).toBeNull()
+      expect(screen.queryByText(/认证：\s*已启用/)).toBeNull()
+
+      await user.click(setupDisclosure)
+
+      expect(screen.getByRole('button', { name: '收起首次设置任务' })).toHaveAttribute('aria-expanded', 'true')
       expect(screen.getByText('初始登录凭据已处理')).toBeTruthy()
       expect(screen.getByText(/initial-password.txt/)).toHaveClass('hidden')
       expect(screen.getByText('4 项待确认')).toBeTruthy()
@@ -543,7 +552,7 @@ describe('DashboardPage', () => {
       }
 
       expect(screen.getByText('首次部署检查已完成，可以关闭首次运行提示。')).toBeTruthy()
-      expect(screen.getByText('可关闭提示')).toBeTruthy()
+      expect(screen.getAllByText('可关闭提示')).toHaveLength(2)
       expect(confirmButton).not.toBeDisabled()
       await user.click(confirmButton)
 
@@ -556,8 +565,48 @@ describe('DashboardPage', () => {
         })
       })
       await waitFor(() => {
-        expect(screen.queryByText('首次部署检查')).toBeNull()
+        expect(screen.queryByText('首次设置')).toBeNull()
       })
+    })
+
+    it('places the daily summary and ordered daily entries before setup and backup attention', async () => {
+      mockGetSetupStatus.mockResolvedValueOnce({
+        success: true,
+        is_first_run: true,
+        auth_enabled: true,
+        share_enabled: true,
+        webdav_enabled: true,
+        webdav_auth_type: 'basic',
+      })
+      mockListBackupJobs.mockResolvedValueOnce([{
+        id: 'external-disk',
+        name: '外置硬盘备份',
+        type: 'local',
+        disabled: false,
+        health_status: 'failed',
+        retention_status: 'ok',
+        restore_drill_status: 'ok',
+        running: false,
+        last_run: { status: 'failed' },
+      }])
+
+      render(<DashboardPage />)
+
+      const dailySummary = await screen.findByRole('region', { name: '日常空间摘要' })
+      const dailyEntries = screen.getByRole('navigation', { name: '常用入口' })
+      const setupDisclosure = await screen.findByRole('button', { name: '展开首次设置任务' })
+      const backupAttention = await screen.findByText('备份需要查看')
+      const entries = within(dailyEntries).getAllByRole('button')
+
+      expect(entries).toHaveLength(4)
+      expect(entries[0]).toHaveTextContent('文件')
+      expect(entries[1]).toHaveTextContent('版本')
+      expect(entries[2]).toHaveTextContent('空间')
+      expect(entries[3]).toHaveTextContent('备份与维护')
+      for (const priorityContent of [dailySummary, dailyEntries]) {
+        expect(priorityContent.compareDocumentPosition(setupDisclosure) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0)
+        expect(priorityContent.compareDocumentPosition(backupAttention) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0)
+      }
     })
 
     it('shows a warning toast when setup acknowledgement succeeds with warnings', async () => {
@@ -578,7 +627,8 @@ describe('DashboardPage', () => {
 
       render(<DashboardPage />)
 
-      expect(await screen.findByText('首次部署检查')).toBeTruthy()
+      expect(await screen.findByText('首次设置')).toBeTruthy()
+      await user.click(screen.getByRole('button', { name: '展开首次设置任务' }))
 
       for (const item of [
         '初始登录凭据已处理',
@@ -617,7 +667,8 @@ describe('DashboardPage', () => {
 
       render(<DashboardPage />)
 
-      expect(await screen.findByText('首次部署检查')).toBeTruthy()
+      expect(await screen.findByText('首次设置')).toBeTruthy()
+      await user.click(screen.getByRole('button', { name: '展开首次设置任务' }))
       expect(screen.getByText(/分享：\s*未启用/)).toBeTruthy()
       expect(screen.getByText(/WebDAV：\s*未启用/)).toBeTruthy()
 
@@ -639,7 +690,7 @@ describe('DashboardPage', () => {
           color: 'danger',
         })
       })
-      expect(screen.getByText('首次部署检查')).toBeTruthy()
+      expect(screen.getByText('首次设置')).toBeTruthy()
     })
 
     it('shows WebDAV user authentication as a user-facing label', async () => {
@@ -654,7 +705,8 @@ describe('DashboardPage', () => {
 
       render(<DashboardPage />)
 
-      expect(await screen.findByText('首次部署检查')).toBeTruthy()
+      expect(await screen.findByText('首次设置')).toBeTruthy()
+      await userEvent.setup({ writeToClipboard: false }).click(screen.getByRole('button', { name: '展开首次设置任务' }))
       expect(screen.getByText(/WebDAV：\s*用户认证/)).toBeTruthy()
     })
 
@@ -670,7 +722,8 @@ describe('DashboardPage', () => {
 
       render(<DashboardPage />)
 
-      expect(await screen.findByText('首次部署检查')).toBeTruthy()
+      expect(await screen.findByText('首次设置')).toBeTruthy()
+      await userEvent.setup({ writeToClipboard: false }).click(screen.getByRole('button', { name: '展开首次设置任务' }))
       expect(screen.getByText(/WebDAV：\s*未知认证方式/)).toBeTruthy()
       expect(screen.queryByText(/backend_raw_auth_type/)).toBeNull()
     })
@@ -688,7 +741,10 @@ describe('DashboardPage', () => {
 
       render(<DashboardPage />)
 
-      expect(await screen.findByText('首次部署检查')).toBeTruthy()
+      expect(await screen.findByText('首次设置')).toBeTruthy()
+      expect(screen.getByRole('button', { name: '展开首次设置任务' })).toHaveTextContent('安全状态需要处理')
+      expect(screen.queryByText(/认证：\s*需启用/)).toBeNull()
+      await userEvent.setup({ writeToClipboard: false }).click(screen.getByRole('button', { name: '展开首次设置任务' }))
       expect(screen.getByText(/认证：\s*需启用/)).toBeTruthy()
       expect(screen.getByText(/分享：\s*可用/)).toBeTruthy()
       expect(screen.getByText(/WebDAV：\s*匿名/)).toBeTruthy()
@@ -712,7 +768,8 @@ describe('DashboardPage', () => {
 
       render(<DashboardPage />)
 
-      expect(await screen.findByText('首次部署检查')).toBeTruthy()
+      expect(await screen.findByText('首次设置')).toBeTruthy()
+      await userEvent.setup({ writeToClipboard: false }).click(screen.getByRole('button', { name: '展开首次设置任务' }))
       expect(screen.getByText(/认证：\s*需启用/)).toBeTruthy()
       expect(screen.getByText(/分享：\s*未启用/)).toBeTruthy()
       expect(screen.getByText(/Web UI\/API 认证未启用/)).toBeTruthy()

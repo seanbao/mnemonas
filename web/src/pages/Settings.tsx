@@ -35,9 +35,9 @@ import {
   CheckCircle2,
   Key,
   AlertCircle,
-  Star,
   Trash2,
-  Send,
+  ChevronLeft,
+  ChevronDown,
 } from 'lucide-react'
 import { cn, copyTextToClipboard, parseByteSize, normalizeWebDAVPrefix, isValidWebDAVPrefix, webDAVPrefixOverlapsReservedRoute, formatWebDAVUrl, formatBytes, hasControlCharacter } from '@/lib/utils'
 import { GENERIC_LOAD_ERROR_DESCRIPTION, getUserFacingErrorDescription } from '@/lib/apiMessages'
@@ -45,6 +45,7 @@ import { getRedactedDiagnosticMessage } from '@/lib/diagnosticMessages'
 import { ShareManager, normalizeShareReviewFilter } from '@/components/share'
 import { PageHeader } from '@/components/ui/PageHeader'
 import { EmptyState } from '@/components/ui/EmptyState'
+import { SettingsOverview, type SettingsDestination } from '@/components/settings/SettingsOverview'
 import { useAuthStore, useUser } from '@/stores/auth'
 import {
   SettingsError,
@@ -57,7 +58,6 @@ import {
   listDirectoryAccessReviewRecords,
   previewDirectoryAccess,
   reportDirectoryAccess,
-  sendTestAlert,
   updateSettings,
   type DirectoryAccessCheckData,
   type DirectoryAccessCheckRequest,
@@ -70,7 +70,6 @@ import {
   type DirectoryAccessRule,
   type DirectoryAccessRole,
   type DirectoryQuota,
-  type DiskHealthDeviceSettings,
   type SecurityCheckData,
   type SecurityCheckItem,
   type SecurityCheckStatus,
@@ -78,8 +77,6 @@ import {
   type UpdateSettingsRequest,
 } from '@/api/settings'
 
-const MIN_CDC_CHUNK_SIZE_BYTES = 64 * 1024
-const MAX_CDC_CHUNK_SIZE_BYTES = 64 * 1024 * 1024
 const DEFAULT_VERSIONING_EXTENSIONS = [
   '.md', '.txt', '.org', '.rst', '.tex',
   '.go', '.rs', '.py', '.ts', '.js', '.tsx', '.jsx',
@@ -92,43 +89,12 @@ const DEFAULT_VERSIONING_FILENAMES = [
   'LICENSE', 'README', 'CHANGELOG',
   '.gitignore', '.dockerignore', '.editorconfig',
 ].join('\n')
-const REDACTED_SETTINGS_SECRET = '<redacted>'
 const BYTE_SIZE_FORMAT_ERROR_DESCRIPTION = '请使用 1024、1 KB、1.5 MB 之类的格式。'
-const ALERT_CHANNEL_LABELS: Record<string, string> = {
-  webhook: 'Webhook',
-  telegram: 'Telegram',
-  wecom: '企业微信',
-  dingtalk: '钉钉',
-  email: 'SMTP 邮件',
-}
-
-function formatAlertChannelLabel(channel: string): string {
-  const trimmed = channel.trim()
-  if (!trimmed) {
-    return ''
-  }
-  return ALERT_CHANNEL_LABELS[trimmed.toLowerCase()] ?? '未知通道'
-}
-
-function formatAlertChannelSummary(channels: string[]): string {
-  return channels
-    .map(formatAlertChannelLabel)
-    .filter(Boolean)
-    .join(' / ')
-}
 
 const getNonBlankToastDescription = getRedactedDiagnosticMessage
 
 function redactSecurityActionToastDescription(description: string): string {
   return getRedactedDiagnosticMessage(description) ?? description
-}
-
-function redactWebhookHeaderLine(header: string): string {
-  const separator = header.indexOf(':')
-  if (separator <= 0) {
-    return REDACTED_SETTINGS_SECRET
-  }
-  return `${header.slice(0, separator).trim()}: ${REDACTED_SETTINGS_SECRET}`
 }
 
 const SHARE_POLICY_PRESETS = [
@@ -198,6 +164,38 @@ function SettingsSection({
         {children}
       </CardBody>
     </Card>
+  )
+}
+
+function SettingsDisclosure({
+  title,
+  description,
+  children,
+}: {
+  title: string
+  description: string
+  children: React.ReactNode
+}) {
+  return (
+    <details className="group">
+      <summary className="card-mnemonas flex cursor-pointer list-none items-center gap-4 p-4 marker:hidden focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/35 sm:p-5">
+        <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
+          <Zap size={19} aria-hidden="true" />
+        </span>
+        <span className="min-w-0 flex-1">
+          <span className="block text-sm font-semibold text-foreground">{title}</span>
+          <span className="mt-1 block text-xs leading-5 text-default-500">{description}</span>
+        </span>
+        <ChevronDown
+          size={18}
+          aria-hidden="true"
+          className="shrink-0 text-default-500 transition-transform duration-200 group-open:rotate-180"
+        />
+      </summary>
+      <div className="mt-6 space-y-6">
+        {children}
+      </div>
+    </details>
   )
 }
 
@@ -334,7 +332,7 @@ function getSettingsSaveSuccessToast(message?: string, warning = false): {
   }
 }
 
-const SETTINGS_TABS = ['general', 'retention', 'webdav', 'advanced', 'shares'] as const
+const SETTINGS_TABS = ['overview', 'general', 'retention', 'webdav', 'shares'] as const
 
 type SettingsTabKey = (typeof SETTINGS_TABS)[number]
 type WebDAVAuthType = 'users' | 'basic' | 'none'
@@ -348,7 +346,7 @@ function normalizeSettingsTab(value: string | null): SettingsTabKey {
     return value
   }
 
-  return 'general'
+  return 'overview'
 }
 
 type PublicProxyKind = 'caddy' | 'nginx'
@@ -429,16 +427,6 @@ function hasControlChar(value: string): boolean {
   return hasControlCharacter(value)
 }
 
-function hasInvalidHTTPHeaderValueChar(value: string): boolean {
-  for (const char of value) {
-    if (char !== '\t' && hasControlCharacter(char)) {
-      return true
-    }
-  }
-
-  return false
-}
-
 function normalizeListenHost(host: string): string {
   const trimmed = host.trim()
   if (trimmed === '*') {
@@ -464,26 +452,6 @@ function listensBeyondLoopback(host: string): boolean {
     return false
   }
   return !normalized.startsWith('127.')
-}
-
-function isValidOptionalHTTPURL(value: string): boolean {
-  const trimmed = value.trim()
-  if (!trimmed) {
-    return true
-  }
-  if (/\s/.test(trimmed) || hasControlChar(trimmed)) {
-    return false
-  }
-  if (pathHasBackslashes(trimmed)) {
-    return false
-  }
-
-  try {
-    const parsed = new URL(trimmed)
-    return parsed.protocol === 'http:' || parsed.protocol === 'https:'
-  } catch {
-    return false
-  }
 }
 
 function urlHostnameForTCPValidation(hostname: string): string {
@@ -663,23 +631,6 @@ function isValidListenHost(host: string): boolean {
   }
   const normalized = normalizeListenHost(trimmed)
   return normalized === '' || isValidTCPHost(normalized)
-}
-
-function isValidTCPAddress(value: string): boolean {
-  const trimmed = value.trim()
-  if (!trimmed || /\s/.test(trimmed) || hasControlChar(trimmed)) {
-    return false
-  }
-
-  const ipv6Match = trimmed.match(/^\[([^\]]+)\]:(\d+)$/)
-  const hostPortMatch = ipv6Match ?? trimmed.match(/^([^:]+):(\d+)$/)
-  if (!hostPortMatch) {
-    return false
-  }
-
-  const host = hostPortMatch[1]
-  const port = Number(hostPortMatch[2])
-  return isValidTCPHost(host) && Number.isInteger(port) && port >= 1 && port <= 65535
 }
 
 function isValidIPv4Address(value: string): boolean {
@@ -1070,9 +1021,9 @@ function loopbackAddressWithOriginalPort(address: string, fallback: string): str
   return fallback
 }
 
-function dataplaneLoopbackAddressFromSecurityCheck(check: SecurityCheckItem, currentAddress: string): string {
+function dataplaneLoopbackAddressFromSecurityCheck(check: SecurityCheckItem): string {
   const detailAddress = typeof check.details?.grpc_address === 'string' ? check.details.grpc_address : ''
-  return loopbackAddressWithOriginalPort(detailAddress || currentAddress, '127.0.0.1:9090')
+  return loopbackAddressWithOriginalPort(detailAddress, '127.0.0.1:9090')
 }
 
 function dataplaneHTTPLoopbackAddressFromSecurityCheck(check: SecurityCheckItem): string {
@@ -1110,82 +1061,6 @@ function isValidTrustedProxyCIDR(value: string): boolean {
   const prefixLength = Number(parts[1])
   const maxPrefixLength = kind === 'ipv4' ? 32 : 128
   return Number.isInteger(prefixLength) && prefixLength >= 0 && prefixLength <= maxPrefixLength
-}
-
-const httpHeaderNamePattern = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/
-
-function splitWebhookHeaderLine(header: string): { name: string; value: string } | null {
-  const separator = header.indexOf(':')
-  if (separator <= 0 || separator === header.length - 1) {
-    return null
-  }
-
-  const name = header.slice(0, separator).trim()
-  const value = header.slice(separator + 1).trim()
-  if (!name || !value) {
-    return null
-  }
-
-  return { name, value }
-}
-
-function isValidWebhookHeaderLine(header: string): boolean {
-  const parts = splitWebhookHeaderLine(header)
-  if (!parts) {
-    return false
-  }
-
-  const { name, value } = parts
-  return httpHeaderNamePattern.test(name) && value.length > 0 && !hasInvalidHTTPHeaderValueChar(value)
-}
-
-function redactedWebhookHeaderNameCounts(headersText: string): Map<string, number> {
-  const counts = new Map<string, number>()
-  for (const header of headersText.split('\n')) {
-    const parts = splitWebhookHeaderLine(header.trim())
-    if (!parts || parts.value !== REDACTED_SETTINGS_SECRET) {
-      continue
-    }
-    const name = parts.name.toLowerCase()
-    counts.set(name, (counts.get(name) ?? 0) + 1)
-  }
-  return counts
-}
-
-function findUnknownRedactedWebhookHeader(headers: string[], savedHeadersText: string): string | null {
-  const savedHeaderCounts = redactedWebhookHeaderNameCounts(savedHeadersText)
-
-  for (const header of headers) {
-    const parts = splitWebhookHeaderLine(header)
-    if (!parts || parts.value !== REDACTED_SETTINGS_SECRET) {
-      continue
-    }
-
-    const name = parts.name.toLowerCase()
-    const remaining = savedHeaderCounts.get(name) ?? 0
-    if (remaining <= 0) {
-      return parts.name
-    }
-    savedHeaderCounts.set(name, remaining - 1)
-  }
-
-  return null
-}
-
-function findDuplicateWebhookHeaderName(headers: string[]): string | null {
-  const seen = new Set<string>()
-  for (const header of headers) {
-    const parts = splitWebhookHeaderLine(header)
-    if (!parts) {
-      continue
-    }
-    const name = parts.name.toLowerCase()
-    if (seen.has(name)) {
-      return parts.name
-    }
-    seen.add(name)
-  }
-  return null
 }
 
 function formatDirectoryQuotaLines(quotas: DirectoryQuota[] | undefined): string {
@@ -1566,88 +1441,6 @@ function parseDirectoryAccessRuleLines(value: string): { rules: DirectoryAccessR
   }
 
   return { rules }
-}
-
-function formatDiskHealthDeviceLines(devices: DiskHealthDeviceSettings[] | undefined): string {
-  return (devices ?? [])
-    .map((device) => [
-      device.path,
-      device.name ?? '',
-      device.type ?? '',
-      device.serial ?? '',
-      device.temperature_warning_c ? String(device.temperature_warning_c) : '',
-      device.temperature_critical_c ? String(device.temperature_critical_c) : '',
-    ].join(' | '))
-    .join('\n')
-}
-
-function parseOptionalNonNegativeIntegerCell(value: string, lineNumber: number, field: string): { value?: number; error?: string } {
-  const trimmed = value.trim()
-  if (!trimmed) {
-    return {}
-  }
-  const parsed = Number(trimmed)
-  if (!/^\d+$/.test(trimmed) || !Number.isSafeInteger(parsed)) {
-    return { error: `第 ${lineNumber} 行 ${field} 必须是 0 或不超过安全范围的整数` }
-  }
-  return { value: parsed }
-}
-
-function parseDiskHealthDeviceLines(value: string): { devices: DiskHealthDeviceSettings[]; error?: string } {
-  const lines = value.split('\n')
-  const devices: DiskHealthDeviceSettings[] = []
-
-  for (let index = 0; index < lines.length; index += 1) {
-    const lineNumber = index + 1
-    const line = lines[index].trim()
-    if (!line) {
-      continue
-    }
-
-    const parts = line.split('|').map((part) => part.trim())
-    if (parts.length > 6) {
-      return { devices: [], error: `第 ${lineNumber} 行最多包含 6 列` }
-    }
-
-    const [path, name = '', type = '', serial = '', warningText = '', criticalText = ''] = parts
-    if (!path || !path.startsWith('/') || hasControlChar(path)) {
-      return { devices: [], error: `第 ${lineNumber} 行设备路径必须是绝对路径` }
-    }
-    if ([name, type, serial].some(hasControlChar)) {
-      return { devices: [], error: `第 ${lineNumber} 行设备名称、类型和序列号不能包含控制字符` }
-    }
-
-    const warning = parseOptionalNonNegativeIntegerCell(warningText, lineNumber, '温度提醒阈值')
-    if (warning.error) {
-      return { devices: [], error: warning.error }
-    }
-    const critical = parseOptionalNonNegativeIntegerCell(criticalText, lineNumber, '温度严重阈值')
-    if (critical.error) {
-      return { devices: [], error: critical.error }
-    }
-    if (warning.value && critical.value && critical.value < warning.value) {
-      return { devices: [], error: `第 ${lineNumber} 行温度严重阈值不能小于提醒阈值` }
-    }
-
-    devices.push({
-      path,
-      ...(name && { name }),
-      ...(type && { type }),
-      ...(serial && { serial }),
-      ...(warning.value !== undefined && { temperature_warning_c: warning.value }),
-      ...(critical.value !== undefined && { temperature_critical_c: critical.value }),
-    })
-  }
-
-  return { devices }
-}
-
-function isValidDiskHealthCommand(value: string): boolean {
-  const trimmed = value.trim()
-  if (!trimmed || hasControlChar(trimmed) || /\s/.test(trimmed) || trimmed === '.' || trimmed === '..') {
-    return false
-  }
-  return trimmed.startsWith('/') || !trimmed.includes('/')
 }
 
 function normalizeSharePolicyRulesForSave(inputRules: SharePolicyRuleDraft[]): { rules: SharePolicyRule[]; error?: string } {
@@ -4456,58 +4249,7 @@ export function SettingsPage() {
     shareDefaultExpiresIn: '168h',
     shareDefaultMaxAccess: '0',
     sharePolicyRules: [] as SharePolicyRuleDraft[],
-    favoritesEnabled: true,
-    alertsEnabled: false,
-    alertsCheckInterval: '1h',
-    alertsThresholdPct: '90',
-    alertsCriticalPct: '95',
-    alertsMinFreeSpace: '10GB',
-    alertsCooldownPeriod: '4h',
-    alertsWebhookURL: '',
-    alertsWebhookURLConfigured: false,
-    alertsWebhookMethod: 'POST',
-    alertsWebhookHeaders: '',
-    alertsWebhookHeadersConfigured: false,
-    alertsTelegramEnabled: false,
-    alertsTelegramBotToken: '',
-    alertsTelegramBotTokenConfigured: false,
-    alertsTelegramBotTokenClear: false,
-    alertsTelegramChatID: '',
-    alertsWeComEnabled: false,
-    alertsWeComWebhookURL: '',
-    alertsWeComWebhookURLConfigured: false,
-    alertsDingTalkEnabled: false,
-    alertsDingTalkWebhookURL: '',
-    alertsDingTalkWebhookURLConfigured: false,
-    alertsEmailEnabled: false,
-    alertsSMTPHost: '',
-    alertsSMTPPort: '587',
-    alertsSMTPUsername: '',
-    alertsSMTPPassword: '',
-    alertsSMTPPasswordConfigured: false,
-    alertsSMTPPasswordClear: false,
-    alertsSMTPFrom: '',
-    alertsSMTPTo: '',
     scrubScheduleEnabled: false,
-    scrubScheduleInterval: '168h',
-    scrubRetryInterval: '1h',
-    scrubMaxRetries: '1',
-    diskHealthEnabled: false,
-    diskHealthCheckInterval: '1h',
-    diskHealthProbeTimeout: '15s',
-    diskHealthCooldownPeriod: '4h',
-    diskHealthCommand: 'smartctl',
-    diskHealthTemperatureWarningC: '50',
-    diskHealthTemperatureCriticalC: '60',
-    diskHealthMediaWearWarningPct: '80',
-    diskHealthMediaWearCriticalPct: '100',
-    diskHealthDevices: '',
-    dataplaneGrpcAddress: '127.0.0.1:9090',
-    dataplaneTimeout: '30s',
-    dataplaneMaxRetries: '3',
-    minChunkSize: '256KB',
-    avgChunkSize: '1MB',
-    maxChunkSize: '4MB',
   }
   type SettingsDraft = typeof defaultSettings
   type SaveSettingsVariables = {
@@ -4528,48 +4270,11 @@ export function SettingsPage() {
     request: DirectoryAccessPreviewRequest
     signal: AbortSignal
   }
-  type TestAlertVariables = {
-    signal: AbortSignal
-  }
-
-  const sanitizeSavedSettingsOverride = (
-    settings: SettingsDraft,
-    request: UpdateSettingsRequest,
-  ): SettingsDraft => {
-    const next: SettingsDraft = {
+  const sanitizeSavedSettingsOverride = (settings: SettingsDraft): SettingsDraft => ({
       ...settings,
       webdavPassword: '',
       webdavUseGeneratedPassword: false,
-      alertsTelegramBotToken: '',
-      alertsTelegramBotTokenClear: false,
-      alertsSMTPPassword: '',
-      alertsSMTPPasswordClear: false,
-    }
-
-    if (request.alerts) {
-      const webhookURL = request.alerts.webhook_url?.trim() ?? ''
-      next.alertsWebhookURL = webhookURL ? REDACTED_SETTINGS_SECRET : ''
-      next.alertsWebhookURLConfigured = webhookURL !== ''
-      next.alertsWebhookHeaders = request.alerts.webhook_headers?.length
-        ? request.alerts.webhook_headers.map(redactWebhookHeaderLine).join('\n')
-        : ''
-      next.alertsWebhookHeadersConfigured = (request.alerts.webhook_headers?.length ?? 0) > 0
-      next.alertsTelegramBotTokenConfigured = request.alerts.telegram_bot_token === ''
-        ? false
-        : settings.alertsTelegramBotTokenConfigured || (request.alerts.telegram_bot_token?.trim() ?? '') !== ''
-      const weComWebhookURL = request.alerts.wecom_webhook_url?.trim() ?? ''
-      next.alertsWeComWebhookURL = weComWebhookURL ? REDACTED_SETTINGS_SECRET : ''
-      next.alertsWeComWebhookURLConfigured = weComWebhookURL !== ''
-      const dingTalkWebhookURL = request.alerts.dingtalk_webhook_url?.trim() ?? ''
-      next.alertsDingTalkWebhookURL = dingTalkWebhookURL ? REDACTED_SETTINGS_SECRET : ''
-      next.alertsDingTalkWebhookURLConfigured = dingTalkWebhookURL !== ''
-      next.alertsSMTPPasswordConfigured = request.alerts.smtp_password === ''
-        ? false
-        : settings.alertsSMTPPasswordConfigured || (request.alerts.smtp_password?.trim() ?? '') !== ''
-    }
-
-    return next
-  }
+    })
 
   const sanitizeDirtyDraftAfterSave = (
     current: SettingsDraft,
@@ -4583,89 +4288,7 @@ export function SettingsPage() {
     if (current.webdavUseGeneratedPassword === submitted.webdavUseGeneratedPassword) {
       next.webdavUseGeneratedPassword = sanitizedSubmitted.webdavUseGeneratedPassword
     }
-    if (current.alertsWebhookURL === submitted.alertsWebhookURL) {
-      next.alertsWebhookURL = sanitizedSubmitted.alertsWebhookURL
-      next.alertsWebhookURLConfigured = sanitizedSubmitted.alertsWebhookURLConfigured
-    }
-    if (current.alertsWebhookHeaders === submitted.alertsWebhookHeaders) {
-      next.alertsWebhookHeaders = sanitizedSubmitted.alertsWebhookHeaders
-      next.alertsWebhookHeadersConfigured = sanitizedSubmitted.alertsWebhookHeadersConfigured
-    }
-    if (current.alertsTelegramBotToken === submitted.alertsTelegramBotToken) {
-      next.alertsTelegramBotToken = sanitizedSubmitted.alertsTelegramBotToken
-      next.alertsTelegramBotTokenConfigured = sanitizedSubmitted.alertsTelegramBotTokenConfigured
-    }
-    if (current.alertsTelegramBotTokenClear === submitted.alertsTelegramBotTokenClear) {
-      next.alertsTelegramBotTokenClear = sanitizedSubmitted.alertsTelegramBotTokenClear
-    }
-    if (current.alertsWeComWebhookURL === submitted.alertsWeComWebhookURL) {
-      next.alertsWeComWebhookURL = sanitizedSubmitted.alertsWeComWebhookURL
-      next.alertsWeComWebhookURLConfigured = sanitizedSubmitted.alertsWeComWebhookURLConfigured
-    }
-    if (current.alertsDingTalkWebhookURL === submitted.alertsDingTalkWebhookURL) {
-      next.alertsDingTalkWebhookURL = sanitizedSubmitted.alertsDingTalkWebhookURL
-      next.alertsDingTalkWebhookURLConfigured = sanitizedSubmitted.alertsDingTalkWebhookURLConfigured
-    }
-    if (current.alertsSMTPPassword === submitted.alertsSMTPPassword) {
-      next.alertsSMTPPassword = sanitizedSubmitted.alertsSMTPPassword
-      next.alertsSMTPPasswordConfigured = sanitizedSubmitted.alertsSMTPPasswordConfigured
-    }
-    if (current.alertsSMTPPasswordClear === submitted.alertsSMTPPasswordClear) {
-      next.alertsSMTPPasswordClear = sanitizedSubmitted.alertsSMTPPasswordClear
-    }
     return next
-  }
-
-  const hasSavedAlertNotificationChannel = (settings: SettingsDraft): boolean => {
-    if (settings.alertsWebhookURLConfigured || settings.alertsWebhookURL.trim() !== '') {
-      return true
-    }
-    if (
-      settings.alertsTelegramEnabled
-      && settings.alertsTelegramChatID.trim() !== ''
-      && (settings.alertsTelegramBotTokenConfigured || settings.alertsTelegramBotToken.trim() !== '')
-    ) {
-      return true
-    }
-    if (
-      settings.alertsWeComEnabled
-      && (settings.alertsWeComWebhookURLConfigured || settings.alertsWeComWebhookURL.trim() !== '')
-    ) {
-      return true
-    }
-    if (
-      settings.alertsDingTalkEnabled
-      && (settings.alertsDingTalkWebhookURLConfigured || settings.alertsDingTalkWebhookURL.trim() !== '')
-    ) {
-      return true
-    }
-    const smtpPort = Number(settings.alertsSMTPPort.trim())
-    const hasSMTPRecipient = settings.alertsSMTPTo
-      .split(/[\n,]+/)
-      .some(recipient => recipient.trim() !== '')
-    return settings.alertsEmailEnabled
-      && settings.alertsSMTPHost.trim() !== ''
-      && Number.isInteger(smtpPort)
-      && smtpPort > 0
-      && smtpPort <= 65535
-      && settings.alertsSMTPFrom.trim() !== ''
-      && hasSMTPRecipient
-  }
-
-  const getTestAlertReadinessWarning = (settings: SettingsDraft): { title: string; description: string } | null => {
-    if (!settings.alertsEnabled) {
-      return {
-        title: '提醒尚未启用',
-        description: '测试提醒会使用服务端已保存配置；请先启用提醒并保存。',
-      }
-    }
-    if (!hasSavedAlertNotificationChannel(settings)) {
-      return {
-        title: '没有可用提醒通道',
-        description: '请至少配置 Webhook、Telegram、企业微信、钉钉或邮件通道并保存后再发送测试提醒。',
-      }
-    }
-    return null
   }
 
   // WebDAV credentials state
@@ -4709,8 +4332,6 @@ export function SettingsPage() {
     : null
   const webdavRuntimeUnavailable = settingsData?.data.webdav.enabled === true
     && settingsData.data.webdav.runtime_enabled === false
-  const favoritesRuntimeUnavailable = settingsData?.data.favorites?.enabled === true
-    && settingsData.data.favorites?.runtime_available === false
   const webdavUrl = useMemo(() => {
     return formatWebDAVUrl(window.location.origin, webdavCredentials?.url ?? '')
   }, [webdavCredentials?.url])
@@ -4744,7 +4365,6 @@ export function SettingsPage() {
   const accessCheckAbortControllerRef = useRef<AbortController | null>(null)
   const accessReportAbortControllerRef = useRef<AbortController | null>(null)
   const accessPreviewAbortControllerRef = useRef<AbortController | null>(null)
-  const testAlertAbortControllerRef = useRef<AbortController | null>(null)
   useEffect(() => {
     const entries = mergeDirectoryAccessReviewHistory(
       serverDirectoryAccessReviewHistory,
@@ -4770,12 +4390,10 @@ export function SettingsPage() {
       accessCheckAbortControllerRef.current?.abort()
       accessReportAbortControllerRef.current?.abort()
       accessPreviewAbortControllerRef.current?.abort()
-      testAlertAbortControllerRef.current?.abort()
       saveSettingsAbortControllerRef.current = null
       accessCheckAbortControllerRef.current = null
       accessReportAbortControllerRef.current = null
       accessPreviewAbortControllerRef.current = null
-      testAlertAbortControllerRef.current = null
     }
   }, [user?.id])
   const accessCheckMutation = useMutation({
@@ -4829,37 +4447,6 @@ export function SettingsPage() {
       }
     },
   })
-  const testAlertMutation = useMutation({
-    mutationFn: ({ signal }: TestAlertVariables) => sendTestAlert({ signal }),
-    onSuccess: (result, variables) => {
-      if (variables.signal.aborted) {
-        return
-      }
-      const channels = formatAlertChannelSummary(result.data.channels)
-      addToast({
-        title: result.warning === true ? '测试提醒已发送，但存在警告' : '测试提醒已发送',
-        description: result.warning === true
-          ? getNonBlankToastDescription(result.message) ?? (channels ? `已发送到 ${channels}` : undefined)
-          : channels ? `已发送到 ${channels}` : getNonBlankToastDescription(result.message),
-        color: result.warning === true ? 'warning' : 'success',
-      })
-    },
-    onError: (err, variables) => {
-      if (variables.signal.aborted || isAbortError(err)) {
-        return
-      }
-      addToast(getSettingsActionErrorToast(err, {
-        unavailable: '提醒服务暂不可用',
-        failure: '测试提醒失败',
-      }))
-    },
-    onSettled: (_data, _error, variables) => {
-      if (testAlertAbortControllerRef.current?.signal === variables.signal) {
-        testAlertAbortControllerRef.current = null
-      }
-    },
-  })
-
   const handleCheckDirectoryAccess = () => {
     const username = accessCheckUsername.trim()
     const targetPath = accessCheckPath.trim()
@@ -4955,32 +4542,6 @@ export function SettingsPage() {
       },
       signal: controller.signal,
     })
-  }
-
-  const handleSendTestAlert = () => {
-    if (isDirty) {
-      addToast({
-        title: '需要先保存设置',
-        description: '测试提醒会使用服务端已保存的提醒配置。',
-        color: 'warning',
-      })
-      return
-    }
-    const readinessWarning = getTestAlertReadinessWarning(settings)
-    if (readinessWarning) {
-      addToast({
-        ...readinessWarning,
-        color: 'warning',
-      })
-      return
-    }
-    if (saveMutation.isPending || testAlertMutation.isPending) {
-      return
-    }
-    testAlertAbortControllerRef.current?.abort()
-    const controller = new AbortController()
-    testAlertAbortControllerRef.current = controller
-    testAlertMutation.mutate({ signal: controller.signal })
   }
 
   const handleCopy = async (field: string, value: string) => {
@@ -5086,13 +4647,21 @@ export function SettingsPage() {
   const handleTabSelectionChange = useCallback((key: React.Key) => {
     const nextTab = normalizeSettingsTab(String(key))
 
-    if (nextTab === 'general') {
+    if (nextTab === 'overview') {
       setSearchParams({})
       return
     }
 
     setSearchParams({ tab: nextTab })
   }, [setSearchParams])
+
+  const handleOverviewNavigate = useCallback((destination: SettingsDestination) => {
+    if (destination === 'device-care') {
+      navigate('/system-health#notification-settings')
+      return
+    }
+    handleTabSelectionChange(destination)
+  }, [handleTabSelectionChange, navigate])
 
   const handleClearSharePathFilter = useCallback(() => {
     const nextParams = new URLSearchParams(searchParams)
@@ -5142,58 +4711,7 @@ export function SettingsPage() {
       shareDefaultExpiresIn: data.share.default_expires_in ?? '168h',
       shareDefaultMaxAccess: String(data.share.default_max_access ?? 0),
       sharePolicyRules: (data.share.policy_rules ?? []).map((rule) => ({ ...rule })),
-      favoritesEnabled: data.favorites?.enabled ?? true,
-      alertsEnabled: data.alerts?.enabled ?? false,
-      alertsCheckInterval: data.alerts?.check_interval ?? '1h',
-      alertsThresholdPct: String(data.alerts?.threshold_pct ?? 90),
-      alertsCriticalPct: String(data.alerts?.critical_pct ?? 95),
-      alertsMinFreeSpace: formatBytes(data.alerts?.min_free_bytes ?? 10737418240),
-      alertsCooldownPeriod: data.alerts?.cooldown_period ?? '4h',
-      alertsWebhookURL: data.alerts?.webhook_url ?? '',
-      alertsWebhookURLConfigured: data.alerts?.webhook_url_configured ?? (data.alerts?.webhook_url ?? '') === REDACTED_SETTINGS_SECRET,
-      alertsWebhookMethod: data.alerts?.webhook_method ?? 'POST',
-      alertsWebhookHeaders: data.alerts?.webhook_headers?.join('\n') ?? '',
-      alertsWebhookHeadersConfigured: data.alerts?.webhook_headers_configured ?? ((data.alerts?.webhook_headers?.length ?? 0) > 0),
-      alertsTelegramEnabled: data.alerts?.telegram_enabled ?? false,
-      alertsTelegramBotToken: '',
-      alertsTelegramBotTokenConfigured: data.alerts?.telegram_bot_token_configured ?? false,
-      alertsTelegramBotTokenClear: false,
-      alertsTelegramChatID: data.alerts?.telegram_chat_id ?? '',
-      alertsWeComEnabled: data.alerts?.wecom_enabled ?? false,
-      alertsWeComWebhookURL: data.alerts?.wecom_webhook_url ?? '',
-      alertsWeComWebhookURLConfigured: data.alerts?.wecom_webhook_url_configured ?? (data.alerts?.wecom_webhook_url ?? '') === REDACTED_SETTINGS_SECRET,
-      alertsDingTalkEnabled: data.alerts?.dingtalk_enabled ?? false,
-      alertsDingTalkWebhookURL: data.alerts?.dingtalk_webhook_url ?? '',
-      alertsDingTalkWebhookURLConfigured: data.alerts?.dingtalk_webhook_url_configured ?? (data.alerts?.dingtalk_webhook_url ?? '') === REDACTED_SETTINGS_SECRET,
-      alertsEmailEnabled: data.alerts?.email_enabled ?? false,
-      alertsSMTPHost: data.alerts?.smtp_host ?? '',
-      alertsSMTPPort: String(data.alerts?.smtp_port ?? 587),
-      alertsSMTPUsername: data.alerts?.smtp_username ?? '',
-      alertsSMTPPassword: '',
-      alertsSMTPPasswordConfigured: data.alerts?.smtp_password_configured ?? false,
-      alertsSMTPPasswordClear: false,
-      alertsSMTPFrom: data.alerts?.smtp_from ?? '',
-      alertsSMTPTo: data.alerts?.smtp_to?.join('\n') ?? '',
       scrubScheduleEnabled: data.maintenance?.scrub?.enabled ?? false,
-      scrubScheduleInterval: data.maintenance?.scrub?.schedule_interval ?? '168h',
-      scrubRetryInterval: data.maintenance?.scrub?.retry_interval ?? '1h',
-      scrubMaxRetries: String(data.maintenance?.scrub?.max_retries ?? 1),
-      diskHealthEnabled: data.disk_health?.enabled ?? false,
-      diskHealthCheckInterval: data.disk_health?.check_interval ?? '1h',
-      diskHealthProbeTimeout: data.disk_health?.probe_timeout ?? '15s',
-      diskHealthCooldownPeriod: data.disk_health?.cooldown_period ?? '4h',
-      diskHealthCommand: data.disk_health?.command ?? 'smartctl',
-      diskHealthTemperatureWarningC: String(data.disk_health?.temperature_warning_c ?? 50),
-      diskHealthTemperatureCriticalC: String(data.disk_health?.temperature_critical_c ?? 60),
-      diskHealthMediaWearWarningPct: String(data.disk_health?.media_wear_warning_percent ?? 80),
-      diskHealthMediaWearCriticalPct: String(data.disk_health?.media_wear_critical_percent ?? 100),
-      diskHealthDevices: formatDiskHealthDeviceLines(data.disk_health?.devices),
-      dataplaneMaxRetries: String(data.dataplane.max_retries),
-      dataplaneGrpcAddress: data.dataplane.grpc_address,
-      dataplaneTimeout: data.dataplane.timeout,
-      minChunkSize: formatBytes(data.cdc.min_chunk_size),
-      avgChunkSize: formatBytes(data.cdc.avg_chunk_size),
-      maxChunkSize: formatBytes(data.cdc.max_chunk_size),
     }
   }, [])
 
@@ -5424,13 +4942,15 @@ export function SettingsPage() {
         updateDirtySettings((prev) => ({ ...prev, serverHost: '127.0.0.1' }))
         addToast({ title: '已改为本机监听', description: '保存设置并重启服务后生效。', color: 'success' })
         return
-      case 'dataplane_listen':
-        updateDirtySettings((prev) => ({
-          ...prev,
-          dataplaneGrpcAddress: dataplaneLoopbackAddressFromSecurityCheck(check, prev.dataplaneGrpcAddress),
-        }))
-        addToast({ title: '已改为本机数据面地址', description: '保存设置后会校验并切换连接。', color: 'success' })
+      case 'dataplane_listen': {
+        const dataplaneGRPCAddress = dataplaneLoopbackAddressFromSecurityCheck(check)
+        addToast({
+          title: '需要调整数据面配置',
+          description: `在 config.toml 的 [dataplane] 中设置 grpc_address = "${dataplaneGRPCAddress}"；systemd 部署还需将 DATAPLANE_GRPC_ADDR 设为相同地址，随后重启 dataplane 和 MnemoNAS 服务。`,
+          color: 'warning',
+        })
         return
+      }
       case 'webdav_auth':
         if (securityCheckUsesGeneratedWebDAVPassword(check) && securityCheckResponse?.data.config.auth_enabled !== false) {
           updateDirtySettings((prev) => ({
@@ -5576,7 +5096,7 @@ export function SettingsPage() {
         const dataplaneHTTPAddress = dataplaneHTTPLoopbackAddressFromSecurityCheck(check)
         addToast({
           title: '需要调整启动环境',
-          description: `将 DATAPLANE_HTTP_ADDR 设为 ${dataplaneHTTPAddress} 后重启 dataplane 和 MnemoNAS 服务。`,
+          description: `将 DATAPLANE_HTTP_ADDR 设为 ${dataplaneHTTPAddress}，随后重启 dataplane 和 MnemoNAS 服务。`,
           color: 'warning',
         })
         return
@@ -5635,7 +5155,7 @@ export function SettingsPage() {
       case 'server_listen':
         return { label: '改为本机监听', onPress: () => applySecurityCheckFix(check) }
       case 'dataplane_listen':
-        return { label: '改为本机地址', onPress: () => applySecurityCheckFix(check) }
+        return { label: '查看配置方法', onPress: () => applySecurityCheckFix(check) }
       case 'dataplane_http_listen':
         return { label: '查看环境变量', onPress: () => applySecurityCheckFix(check) }
       case 'webdav_auth':
@@ -5738,7 +5258,7 @@ export function SettingsPage() {
       if (variables.signal.aborted) {
         return
       }
-      const sanitizedSubmittedSettings = sanitizeSavedSettingsOverride(variables.submittedSettings, variables.request)
+      const sanitizedSubmittedSettings = sanitizeSavedSettingsOverride(variables.submittedSettings)
       setSavedSettingsOverride(sanitizedSubmittedSettings)
       setSavedSettingsOverrideUpdatedAt(variables.baseSettingsUpdatedAt)
       useAuthStore.getState().setShareEnabled(variables.submittedSettings.shareEnabled)
@@ -5772,12 +5292,8 @@ export function SettingsPage() {
 
   const handleSave = () => {
     let minFreeSpaceBytes: number
-    let alertsMinFreeBytes: number
     let trashMaxSizeBytes: number
     let versioningMaxSizeBytes: number
-    let minChunkBytes: number
-    let avgChunkBytes: number
-    let maxChunkBytes: number
     const trimmedPort = settings.serverPort.trim()
     const parsedPort = Number(trimmedPort)
     const trimmedServerHost = settings.serverHost.trim()
@@ -5794,57 +5310,10 @@ export function SettingsPage() {
     const trimmedGCInterval = settings.gcInterval.trim()
     const trimmedTrashRetentionDays = settings.trashRetentionDays.trim()
     const parsedTrashRetentionDays = Number(trimmedTrashRetentionDays)
-    const trimmedDataplaneGrpcAddress = settings.dataplaneGrpcAddress.trim()
-    const trimmedDataplaneTimeout = settings.dataplaneTimeout.trim()
-    const trimmedMaxRetries = settings.dataplaneMaxRetries.trim()
-    const parsedMaxRetries = Number(trimmedMaxRetries)
-    const trimmedAlertsCheckInterval = settings.alertsCheckInterval.trim()
-    const trimmedAlertsCooldownPeriod = settings.alertsCooldownPeriod.trim()
-    const trimmedAlertsThresholdPct = settings.alertsThresholdPct.trim()
-    const trimmedAlertsCriticalPct = settings.alertsCriticalPct.trim()
     const trimmedShareBaseURL = settings.shareBaseURL.trim()
     const trimmedShareDefaultExpiresIn = settings.shareDefaultExpiresIn.trim()
     const trimmedShareDefaultMaxAccess = settings.shareDefaultMaxAccess.trim()
     const parsedShareDefaultMaxAccess = parseNonNegativeSafeIntegerInput(trimmedShareDefaultMaxAccess)
-    const trimmedAlertsWebhookURL = settings.alertsWebhookURL.trim()
-    const trimmedAlertsWebhookMethod = settings.alertsWebhookMethod.trim().toUpperCase()
-    const trimmedAlertsTelegramBotToken = settings.alertsTelegramBotToken.trim()
-    const trimmedAlertsTelegramChatID = settings.alertsTelegramChatID.trim()
-    const trimmedAlertsWeComWebhookURL = settings.alertsWeComWebhookURL.trim()
-    const trimmedAlertsDingTalkWebhookURL = settings.alertsDingTalkWebhookURL.trim()
-    const trimmedAlertsSMTPHost = settings.alertsSMTPHost.trim()
-    const trimmedAlertsSMTPPort = settings.alertsSMTPPort.trim()
-    const parsedAlertsSMTPPort = Number(trimmedAlertsSMTPPort)
-    const trimmedAlertsSMTPUsername = settings.alertsSMTPUsername.trim()
-    const trimmedAlertsSMTPPassword = settings.alertsSMTPPassword.trim()
-    const trimmedAlertsSMTPFrom = settings.alertsSMTPFrom.trim()
-    const trimmedScrubScheduleInterval = settings.scrubScheduleInterval.trim()
-    const trimmedScrubRetryInterval = settings.scrubRetryInterval.trim()
-    const trimmedScrubMaxRetries = settings.scrubMaxRetries.trim()
-    const parsedScrubMaxRetries = Number(trimmedScrubMaxRetries)
-    const trimmedDiskHealthCheckInterval = settings.diskHealthCheckInterval.trim()
-    const trimmedDiskHealthProbeTimeout = settings.diskHealthProbeTimeout.trim()
-    const trimmedDiskHealthCooldownPeriod = settings.diskHealthCooldownPeriod.trim()
-    const trimmedDiskHealthCommand = settings.diskHealthCommand.trim()
-    const trimmedDiskHealthTemperatureWarningC = settings.diskHealthTemperatureWarningC.trim()
-    const parsedDiskHealthTemperatureWarningC = Number(trimmedDiskHealthTemperatureWarningC)
-    const trimmedDiskHealthTemperatureCriticalC = settings.diskHealthTemperatureCriticalC.trim()
-    const parsedDiskHealthTemperatureCriticalC = Number(trimmedDiskHealthTemperatureCriticalC)
-    const trimmedDiskHealthMediaWearWarningPct = settings.diskHealthMediaWearWarningPct.trim()
-    const parsedDiskHealthMediaWearWarningPct = Number(trimmedDiskHealthMediaWearWarningPct)
-    const trimmedDiskHealthMediaWearCriticalPct = settings.diskHealthMediaWearCriticalPct.trim()
-    const parsedDiskHealthMediaWearCriticalPct = Number(trimmedDiskHealthMediaWearCriticalPct)
-    const alertsWebhookHeaders = settings.alertsWebhookHeaders
-      .split('\n')
-      .map(header => header.trim())
-      .filter(Boolean)
-    const alertsSMTPTo = settings.alertsSMTPTo
-      .split(/[\n,]+/)
-      .map(recipient => recipient.trim())
-      .filter(Boolean)
-    const parsedAlertsThresholdPct = Number(trimmedAlertsThresholdPct)
-    const parsedAlertsCriticalPct = Number(trimmedAlertsCriticalPct)
-    const savedSettingsForSecretPlaceholders = savedSettingsOverride ?? (settingsData?.data ? mapServerSettings(settingsData.data) : null)
     const versioningExtensions = settings.versioningExtensions
       .split('\n')
       .map(entry => entry.trim())
@@ -5884,24 +5353,10 @@ export function SettingsPage() {
       })
       return
     }
-    const parsedDiskHealthDevices = parseDiskHealthDeviceLines(settings.diskHealthDevices)
-    if (parsedDiskHealthDevices.error) {
-      addToast({
-        title: '磁盘健康设备格式无效',
-        description: parsedDiskHealthDevices.error,
-        color: 'danger',
-      })
-      return
-    }
-
     try {
       minFreeSpaceBytes = parseByteSize(settings.minFreeSpace)
-      alertsMinFreeBytes = parseByteSize(settings.alertsMinFreeSpace)
       trashMaxSizeBytes = parseByteSize(settings.trashMaxSize)
       versioningMaxSizeBytes = parseByteSize(settings.versioningMaxSize)
-      minChunkBytes = parseByteSize(settings.minChunkSize)
-      avgChunkBytes = parseByteSize(settings.avgChunkSize)
-      maxChunkBytes = parseByteSize(settings.maxChunkSize)
     } catch {
       addToast({
         title: '大小格式无效',
@@ -5917,10 +5372,6 @@ export function SettingsPage() {
         description: '最小空闲空间必须是 0 或不超过安全范围的整数',
       },
       {
-        valid: isSafeByteSize(alertsMinFreeBytes, true),
-        description: '提醒最小剩余空间必须是 0 或不超过安全范围的整数',
-      },
-      {
         valid: isSafeByteSize(trashMaxSizeBytes, false),
         description: '回收站最大容量必须是大于 0 且不超过安全范围的整数',
       },
@@ -5934,42 +5385,6 @@ export function SettingsPage() {
       addToast({
         title: '大小格式无效',
         description: invalidCapacitySize.description,
-        color: 'danger',
-      })
-      return
-    }
-
-    if (minChunkBytes <= 0 || avgChunkBytes <= 0 || maxChunkBytes <= 0) {
-      addToast({
-        title: 'CDC 分块参数无效',
-        description: '最小、平均和最大块大小都必须大于 0',
-        color: 'danger',
-      })
-      return
-    }
-
-    if (minChunkBytes < MIN_CDC_CHUNK_SIZE_BYTES) {
-      addToast({
-        title: 'CDC 分块参数无效',
-        description: '最小块大小不能小于 64 KB',
-        color: 'danger',
-      })
-      return
-    }
-
-    if (minChunkBytes >= avgChunkBytes || avgChunkBytes >= maxChunkBytes) {
-      addToast({
-        title: 'CDC 分块参数无效',
-        description: '请保持最小块大小 < 平均块大小 < 最大块大小',
-        color: 'danger',
-      })
-      return
-    }
-
-    if (maxChunkBytes > MAX_CDC_CHUNK_SIZE_BYTES) {
-      addToast({
-        title: 'CDC 分块参数无效',
-        description: '最大块大小不能超过 64 MB',
         color: 'danger',
       })
       return
@@ -6112,105 +5527,6 @@ export function SettingsPage() {
       return
     }
 
-    if (!trimmedDataplaneTimeout) {
-      addToast({
-        title: '数据面超时格式无效',
-        description: '连接超时不能为空',
-        color: 'danger',
-      })
-      return
-    }
-
-    if (!isPositiveDurationString(trimmedDataplaneTimeout)) {
-      addToast({
-        title: '数据面超时格式无效',
-        description: '连接超时必须使用 30s / 1m 这类 Go duration 格式，且大于 0',
-        color: 'danger',
-      })
-      return
-    }
-
-    if (!isValidTCPAddress(trimmedDataplaneGrpcAddress)) {
-      addToast({
-        title: '数据面地址格式无效',
-        description: 'gRPC 地址必须是合法的 host:port，端口为 1 到 65535，且不能包含空白或控制字符',
-        color: 'danger',
-      })
-      return
-    }
-
-    if (!/^\d+$/.test(trimmedMaxRetries) || !Number.isSafeInteger(parsedMaxRetries)) {
-      addToast({
-        title: '最大重试次数格式无效',
-        description: '最大重试次数必须是 0 或不超过安全范围的整数',
-        color: 'danger',
-      })
-      return
-    }
-
-    if (!trimmedAlertsCheckInterval) {
-      addToast({
-        title: '提醒检查间隔格式无效',
-        description: '检查间隔不能为空',
-        color: 'danger',
-      })
-      return
-    }
-
-    if (!isPositiveDurationString(trimmedAlertsCheckInterval)) {
-      addToast({
-        title: '提醒检查间隔格式无效',
-        description: '检查间隔必须使用 1h / 30m 这类 Go duration 格式，且大于 0',
-        color: 'danger',
-      })
-      return
-    }
-
-    if (!trimmedAlertsCooldownPeriod) {
-      addToast({
-        title: '提醒冷却时间格式无效',
-        description: '冷却时间不能为空',
-        color: 'danger',
-      })
-      return
-    }
-
-    if (!isPositiveDurationString(trimmedAlertsCooldownPeriod)) {
-      addToast({
-        title: '提醒冷却时间格式无效',
-        description: '冷却时间必须使用 4h / 30m 这类 Go duration 格式，且大于 0',
-        color: 'danger',
-      })
-      return
-    }
-
-    if (!/^\d+$/.test(trimmedAlertsThresholdPct) || !Number.isInteger(parsedAlertsThresholdPct) || parsedAlertsThresholdPct < 0 || parsedAlertsThresholdPct > 100) {
-      addToast({
-        title: '提醒阈值格式无效',
-        description: '提醒阈值必须是 0 到 100 之间的整数',
-        color: 'danger',
-      })
-      return
-    }
-
-    if (!/^\d+$/.test(trimmedAlertsCriticalPct) || !Number.isInteger(parsedAlertsCriticalPct) || parsedAlertsCriticalPct < 0 || parsedAlertsCriticalPct > 100) {
-      addToast({
-        title: '严重提醒阈值格式无效',
-        description: '严重提醒阈值必须是 0 到 100 之间的整数',
-        color: 'danger',
-      })
-      return
-    }
-
-    if (parsedAlertsCriticalPct < parsedAlertsThresholdPct) {
-      addToast({
-        title: '提醒阈值关系无效',
-        description: '严重提醒阈值不能小于普通提醒阈值',
-        color: 'danger',
-      })
-      return
-    }
-
     if (!isValidShareBaseURL(trimmedShareBaseURL)) {
       addToast({
         title: '分享基础 URL 无效',
@@ -6238,339 +5554,10 @@ export function SettingsPage() {
       return
     }
 
-    if (trimmedAlertsWebhookURL === REDACTED_SETTINGS_SECRET && !settings.alertsWebhookURLConfigured) {
-      addToast({
-        title: 'Webhook URL 无法保留',
-        description: '当前没有已保存的 Webhook URL；新增 Webhook URL 需要填写真实地址。',
-        color: 'danger',
-      })
-      return
-    }
-
-    if (trimmedAlertsWebhookURL !== REDACTED_SETTINGS_SECRET && !isValidOptionalHTTPURL(trimmedAlertsWebhookURL)) {
-      addToast({
-        title: 'Webhook URL 无效',
-        description: 'Webhook URL 必须为空，或使用 http/https 的完整地址',
-        color: 'danger',
-      })
-      return
-    }
-
-    if (trimmedAlertsWebhookMethod !== 'GET' && trimmedAlertsWebhookMethod !== 'POST') {
-      addToast({
-        title: 'Webhook 方法无效',
-        description: 'Webhook 方法必须是 GET 或 POST',
-        color: 'danger',
-      })
-      return
-    }
-
-    if (settings.alertsTelegramEnabled) {
-      if (settings.alertsTelegramBotTokenClear) {
-        addToast({
-          title: 'Telegram Bot Token 缺失',
-          description: '启用 Telegram 通知时不能清除已保存 Token；请先关闭 Telegram 通知或填写新的 Bot Token。',
-          color: 'danger',
-        })
-        return
-      }
-      if (!trimmedAlertsTelegramBotToken && !settings.alertsTelegramBotTokenConfigured) {
-        addToast({
-          title: 'Telegram Bot Token 缺失',
-          description: '首次启用 Telegram 通知时必须填写 Bot Token',
-          color: 'danger',
-        })
-        return
-      }
-      if (!trimmedAlertsTelegramChatID) {
-        addToast({
-          title: 'Telegram Chat ID 缺失',
-          description: '启用 Telegram 通知时必须填写 Chat ID 或频道用户名',
-          color: 'danger',
-        })
-        return
-      }
-    }
-
-    if (trimmedAlertsTelegramBotToken && /[\s/?#]/.test(trimmedAlertsTelegramBotToken)) {
-      addToast({
-        title: 'Telegram Bot Token 格式无效',
-        description: 'Bot Token 不能包含空白、/、? 或 #',
-        color: 'danger',
-      })
-      return
-    }
-
-    if (trimmedAlertsTelegramChatID && /\s/.test(trimmedAlertsTelegramChatID)) {
-      addToast({
-        title: 'Telegram Chat ID 格式无效',
-        description: 'Chat ID 或频道用户名不能包含空白字符',
-        color: 'danger',
-      })
-      return
-    }
-
-    if (trimmedAlertsWeComWebhookURL === REDACTED_SETTINGS_SECRET && !settings.alertsWeComWebhookURLConfigured) {
-      addToast({
-        title: '企业微信 Webhook 无法保留',
-        description: '当前没有已保存的企业微信 Webhook URL；新增企业微信 Webhook 需要填写真实地址。',
-        color: 'danger',
-      })
-      return
-    }
-
-    if (trimmedAlertsWeComWebhookURL !== REDACTED_SETTINGS_SECRET && !isValidOptionalHTTPURL(trimmedAlertsWeComWebhookURL)) {
-      addToast({
-        title: '企业微信 Webhook URL 无效',
-        description: '企业微信 Webhook URL 必须为空，或使用 http/https 的完整地址',
-        color: 'danger',
-      })
-      return
-    }
-
-    if (settings.alertsWeComEnabled && !trimmedAlertsWeComWebhookURL && !settings.alertsWeComWebhookURLConfigured) {
-      addToast({
-        title: '企业微信 Webhook URL 缺失',
-        description: '启用企业微信通知时必须填写群机器人 Webhook URL。',
-        color: 'danger',
-      })
-      return
-    }
-
-    if (trimmedAlertsDingTalkWebhookURL === REDACTED_SETTINGS_SECRET && !settings.alertsDingTalkWebhookURLConfigured) {
-      addToast({
-        title: '钉钉 Webhook 无法保留',
-        description: '当前没有已保存的钉钉 Webhook URL；新增钉钉 Webhook 需要填写真实地址。',
-        color: 'danger',
-      })
-      return
-    }
-
-    if (trimmedAlertsDingTalkWebhookURL !== REDACTED_SETTINGS_SECRET && !isValidOptionalHTTPURL(trimmedAlertsDingTalkWebhookURL)) {
-      addToast({
-        title: '钉钉 Webhook URL 无效',
-        description: '钉钉 Webhook URL 必须为空，或使用 http/https 的完整地址',
-        color: 'danger',
-      })
-      return
-    }
-
-    if (settings.alertsDingTalkEnabled && !trimmedAlertsDingTalkWebhookURL && !settings.alertsDingTalkWebhookURLConfigured) {
-      addToast({
-        title: '钉钉 Webhook URL 缺失',
-        description: '启用钉钉通知时必须填写群机器人 Webhook URL。',
-        color: 'danger',
-      })
-      return
-    }
-
-    if (!/^\d+$/.test(trimmedAlertsSMTPPort) || !Number.isInteger(parsedAlertsSMTPPort) || parsedAlertsSMTPPort < 1 || parsedAlertsSMTPPort > 65535) {
-      addToast({
-        title: 'SMTP 端口格式无效',
-        description: 'SMTP 端口必须是 1 到 65535 之间的整数',
-        color: 'danger',
-      })
-      return
-    }
-
-    if (settings.alertsEmailEnabled) {
-      if (!trimmedAlertsSMTPHost) {
-        addToast({
-          title: 'SMTP 主机缺失',
-          description: '启用邮件通知时必须填写 SMTP 主机。',
-          color: 'danger',
-        })
-        return
-      }
-      if (!trimmedAlertsSMTPFrom) {
-        addToast({
-          title: 'SMTP 发件人缺失',
-          description: '启用邮件通知时必须填写发件人地址。',
-          color: 'danger',
-        })
-        return
-      }
-      if (alertsSMTPTo.length === 0) {
-        addToast({
-          title: 'SMTP 收件人缺失',
-          description: '启用邮件通知时至少需要一个收件人。',
-          color: 'danger',
-        })
-        return
-      }
-    }
-
-    if (!trimmedScrubScheduleInterval) {
-      addToast({
-        title: 'Scrub 周期间隔格式无效',
-        description: '周期 Scrub 的常规间隔不能为空',
-        color: 'danger',
-      })
-      return
-    }
-
-    if (!isPositiveDurationString(trimmedScrubScheduleInterval)) {
-      addToast({
-        title: 'Scrub 周期间隔格式无效',
-        description: '周期 Scrub 的常规间隔必须使用 168h / 1h 这类 Go duration 格式，且大于 0',
-        color: 'danger',
-      })
-      return
-    }
-
-    if (!trimmedScrubRetryInterval) {
-      addToast({
-        title: 'Scrub 重试间隔格式无效',
-        description: '周期 Scrub 的失败重试间隔不能为空',
-        color: 'danger',
-      })
-      return
-    }
-
-    if (!isPositiveDurationString(trimmedScrubRetryInterval)) {
-      addToast({
-        title: 'Scrub 重试间隔格式无效',
-        description: '周期 Scrub 的失败重试间隔必须使用 1h / 30m 这类 Go duration 格式，且大于 0',
-        color: 'danger',
-      })
-      return
-    }
-
-    if (!/^\d+$/.test(trimmedScrubMaxRetries) || !Number.isSafeInteger(parsedScrubMaxRetries)) {
-      addToast({
-        title: 'Scrub 重试次数格式无效',
-        description: '最大重试次数必须是 0 或不超过安全范围的整数',
-        color: 'danger',
-      })
-      return
-    }
-
-    if (!trimmedDiskHealthCheckInterval || !isPositiveDurationString(trimmedDiskHealthCheckInterval)) {
-      addToast({
-        title: '磁盘健康检查间隔格式无效',
-        description: '检查间隔必须使用 1h / 30m 这类 Go duration 格式，且大于 0',
-        color: 'danger',
-      })
-      return
-    }
-
-    if (!trimmedDiskHealthProbeTimeout || !isPositiveDurationString(trimmedDiskHealthProbeTimeout)) {
-      addToast({
-        title: '磁盘健康探测超时格式无效',
-        description: '探测超时必须使用 15s / 1m 这类 Go duration 格式，且大于 0',
-        color: 'danger',
-      })
-      return
-    }
-
-    if (!trimmedDiskHealthCooldownPeriod || !isPositiveDurationString(trimmedDiskHealthCooldownPeriod)) {
-      addToast({
-        title: '磁盘健康冷却时间格式无效',
-        description: '冷却时间必须使用 4h / 30m 这类 Go duration 格式，且大于 0',
-        color: 'danger',
-      })
-      return
-    }
-
-    if (!isValidDiskHealthCommand(trimmedDiskHealthCommand)) {
-      addToast({
-        title: '磁盘健康命令格式无效',
-        description: '命令必须是单个可执行文件名或绝对路径，不能包含空白或控制字符',
-        color: 'danger',
-      })
-      return
-    }
-
-    if (!/^\d+$/.test(trimmedDiskHealthTemperatureWarningC) || !Number.isSafeInteger(parsedDiskHealthTemperatureWarningC)) {
-      addToast({
-        title: '磁盘温度提醒阈值格式无效',
-        description: '温度提醒阈值必须是 0 或不超过安全范围的整数',
-        color: 'danger',
-      })
-      return
-    }
-
-    if (!/^\d+$/.test(trimmedDiskHealthTemperatureCriticalC) || !Number.isSafeInteger(parsedDiskHealthTemperatureCriticalC)) {
-      addToast({
-        title: '磁盘温度严重阈值格式无效',
-        description: '温度严重阈值必须是 0 或不超过安全范围的整数',
-        color: 'danger',
-      })
-      return
-    }
-
-    if (parsedDiskHealthTemperatureWarningC > 0 && parsedDiskHealthTemperatureCriticalC > 0 && parsedDiskHealthTemperatureCriticalC < parsedDiskHealthTemperatureWarningC) {
-      addToast({
-        title: '磁盘温度阈值关系无效',
-        description: '温度严重阈值不能小于提醒阈值',
-        color: 'danger',
-      })
-      return
-    }
-
-    if (!/^\d+$/.test(trimmedDiskHealthMediaWearWarningPct) || !Number.isInteger(parsedDiskHealthMediaWearWarningPct) || parsedDiskHealthMediaWearWarningPct > 100) {
-      addToast({
-        title: '介质磨损提醒阈值格式无效',
-        description: '介质磨损提醒阈值必须是 0 到 100 之间的整数',
-        color: 'danger',
-      })
-      return
-    }
-
-    if (!/^\d+$/.test(trimmedDiskHealthMediaWearCriticalPct) || !Number.isInteger(parsedDiskHealthMediaWearCriticalPct) || parsedDiskHealthMediaWearCriticalPct > 100) {
-      addToast({
-        title: '介质磨损严重阈值格式无效',
-        description: '介质磨损严重阈值必须是 0 到 100 之间的整数',
-        color: 'danger',
-      })
-      return
-    }
-
-    if (parsedDiskHealthMediaWearWarningPct > 0 && parsedDiskHealthMediaWearCriticalPct > 0 && parsedDiskHealthMediaWearCriticalPct < parsedDiskHealthMediaWearWarningPct) {
-      addToast({
-        title: '介质磨损阈值关系无效',
-        description: '介质磨损严重阈值不能小于提醒阈值',
-        color: 'danger',
-      })
-      return
-    }
-
     if (!/^\d+$/.test(trimmedTrashRetentionDays) || !Number.isSafeInteger(parsedTrashRetentionDays)) {
       addToast({
         title: '回收站保留天数格式无效',
         description: '回收站保留天数必须是 0 或不超过安全范围的整数',
-        color: 'danger',
-      })
-      return
-    }
-
-    for (const header of alertsWebhookHeaders) {
-      if (!isValidWebhookHeaderLine(header)) {
-        addToast({
-          title: 'Webhook Header 格式无效',
-          description: '每行必须使用合法的 HTTP Header 名称和值',
-          color: 'danger',
-        })
-        return
-      }
-    }
-    const duplicateWebhookHeaderName = findDuplicateWebhookHeaderName(alertsWebhookHeaders)
-    if (duplicateWebhookHeaderName) {
-      addToast({
-        title: 'Webhook Header 重复',
-        description: `Header ${duplicateWebhookHeaderName} 重复；每个自定义 Header 名称只能配置一次。`,
-        color: 'danger',
-      })
-      return
-    }
-    const unknownRedactedWebhookHeader = findUnknownRedactedWebhookHeader(
-      alertsWebhookHeaders,
-      savedSettingsForSecretPlaceholders?.alertsWebhookHeaders ?? '',
-    )
-    if (unknownRedactedWebhookHeader) {
-      addToast({
-        title: 'Webhook Header 无法保留',
-        description: `Header ${unknownRedactedWebhookHeader} 没有已保存的值；新增或改名的 Header 需要填写真实值。`,
         color: 'danger',
       })
       return
@@ -6663,78 +5650,12 @@ export function SettingsPage() {
         retention_days: parsedTrashRetentionDays,
         max_size: trashMaxSizeBytes,
       },
-      dataplane: {
-        grpc_address: trimmedDataplaneGrpcAddress,
-        timeout: trimmedDataplaneTimeout,
-        max_retries: parsedMaxRetries,
-      },
       share: {
         enabled: settings.shareEnabled,
         base_url: trimmedShareBaseURL,
         default_expires_in: trimmedShareDefaultExpiresIn,
         default_max_access: parsedShareDefaultMaxAccess.value,
         policy_rules: parsedSharePolicyRules.rules,
-      },
-      favorites: {
-        enabled: settings.favoritesEnabled,
-      },
-      alerts: {
-        enabled: settings.alertsEnabled,
-        check_interval: trimmedAlertsCheckInterval,
-        threshold_pct: parsedAlertsThresholdPct,
-        critical_pct: parsedAlertsCriticalPct,
-        min_free_bytes: alertsMinFreeBytes,
-        cooldown_period: trimmedAlertsCooldownPeriod,
-        webhook_url: trimmedAlertsWebhookURL,
-        webhook_method: trimmedAlertsWebhookMethod,
-        webhook_headers: alertsWebhookHeaders,
-        telegram_enabled: settings.alertsTelegramEnabled,
-        telegram_chat_id: trimmedAlertsTelegramChatID,
-        wecom_enabled: settings.alertsWeComEnabled,
-        wecom_webhook_url: trimmedAlertsWeComWebhookURL,
-        dingtalk_enabled: settings.alertsDingTalkEnabled,
-        dingtalk_webhook_url: trimmedAlertsDingTalkWebhookURL,
-        email_enabled: settings.alertsEmailEnabled,
-        smtp_host: trimmedAlertsSMTPHost,
-        smtp_port: parsedAlertsSMTPPort,
-        smtp_username: trimmedAlertsSMTPUsername,
-        smtp_from: trimmedAlertsSMTPFrom,
-        smtp_to: alertsSMTPTo,
-        ...(settings.alertsTelegramBotTokenClear
-          ? { telegram_bot_token: '' }
-          : trimmedAlertsTelegramBotToken
-            ? { telegram_bot_token: trimmedAlertsTelegramBotToken }
-            : {}),
-        ...(settings.alertsSMTPPasswordClear
-          ? { smtp_password: '' }
-          : trimmedAlertsSMTPPassword
-            ? { smtp_password: trimmedAlertsSMTPPassword }
-            : {}),
-      },
-      disk_health: {
-        enabled: settings.diskHealthEnabled,
-        check_interval: trimmedDiskHealthCheckInterval,
-        probe_timeout: trimmedDiskHealthProbeTimeout,
-        cooldown_period: trimmedDiskHealthCooldownPeriod,
-        command: trimmedDiskHealthCommand,
-        temperature_warning_c: parsedDiskHealthTemperatureWarningC,
-        temperature_critical_c: parsedDiskHealthTemperatureCriticalC,
-        media_wear_warning_percent: parsedDiskHealthMediaWearWarningPct,
-        media_wear_critical_percent: parsedDiskHealthMediaWearCriticalPct,
-        devices: parsedDiskHealthDevices.devices,
-      },
-      maintenance: {
-        scrub: {
-          enabled: settings.scrubScheduleEnabled,
-          schedule_interval: trimmedScrubScheduleInterval,
-          retry_interval: trimmedScrubRetryInterval,
-          max_retries: parsedScrubMaxRetries,
-        },
-      },
-      cdc: {
-        min_chunk_size: minChunkBytes,
-        avg_chunk_size: avgChunkBytes,
-        max_chunk_size: maxChunkBytes,
       },
       webdav: {
         enabled: settings.webdavEnabled,
@@ -6766,8 +5687,8 @@ export function SettingsPage() {
         <div className="max-w-4xl mx-auto p-4 sm:p-6 lg:p-7">
           <PageHeader
             title="设置"
-            subtitle="调整网络、访问和数据保留"
-            actions={
+            subtitle={selectedTab === 'overview' ? '按目标管理访问、保护和设备服务' : '调整网络、访问和数据保留'}
+            actions={selectedTab !== 'overview' ? (
               <>
                 <Button
                   variant="bordered"
@@ -6785,8 +5706,8 @@ export function SettingsPage() {
                   保存设置
                 </Button>
               </>
-            }
-            className="mb-8"
+            ) : undefined}
+            className={selectedTab === 'overview' ? 'mb-3' : 'mb-8'}
           />
 
           <Card className="card-mnemonas">
@@ -6825,8 +5746,8 @@ export function SettingsPage() {
         {/* Header */}
         <PageHeader
           title="设置"
-          subtitle="调整网络、访问和数据保留"
-          actions={
+          subtitle={selectedTab === 'overview' ? '按目标管理访问、保护和设备服务' : '调整网络、访问和数据保留'}
+          actions={selectedTab !== 'overview' ? (
             <>
               <Button
                 variant="bordered"
@@ -6847,23 +5768,65 @@ export function SettingsPage() {
                 保存设置
               </Button>
             </>
-          }
-          className="mb-8"
+          ) : undefined}
+          className={selectedTab === 'overview' ? 'mb-3' : 'mb-8'}
         />
 
+        {selectedTab !== 'overview' && (
+          <div className="mb-4 flex items-center gap-2 sm:hidden">
+            <button
+              type="button"
+              className="inline-flex h-10 shrink-0 items-center gap-1 rounded-lg border border-divider bg-content1 px-3 text-sm font-medium text-default-600 shadow-[var(--shadow-soft)]"
+              onClick={() => handleTabSelectionChange('overview')}
+            >
+              <ChevronLeft size={16} aria-hidden="true" />
+              概览
+            </button>
+            <label className="sr-only" htmlFor="settings-mobile-category">移动端设置分类</label>
+            <select
+              id="settings-mobile-category"
+              aria-label="移动端设置分类"
+              value={selectedTab}
+              onChange={(event) => handleTabSelectionChange(event.target.value)}
+              className="input-shell h-10 min-w-0 flex-1 rounded-lg border border-divider bg-content1 px-3 text-sm text-foreground shadow-[var(--shadow-soft)] outline-none focus:border-primary"
+            >
+              <option value="general">账户与远程访问</option>
+              <option value="retention">数据保护与权限</option>
+              <option value="webdav">设备挂载</option>
+              <option value="shares">分享与协作</option>
+            </select>
+          </div>
+        )}
+
         {/* Tabs */}
-        <Tabs 
+        <Tabs
           selectedKey={selectedTab}
           onSelectionChange={handleTabSelectionChange}
           aria-label="设置分类"
           classNames={{
             base: "w-full",
-            tabList: "grid w-full max-w-full grid-cols-2 justify-start gap-1 overflow-visible rounded-lg border border-divider bg-content1 p-1 shadow-[var(--shadow-soft)] sm:flex sm:flex-nowrap",
+            tabList: cn(
+              "w-full max-w-full justify-start gap-1 overflow-visible rounded-lg border border-divider bg-content1 p-1 shadow-[var(--shadow-soft)]",
+              selectedTab === 'overview' ? "hidden" : "hidden sm:flex sm:flex-nowrap",
+            ),
             tab: "!w-full min-w-0 px-3 py-2 rounded-lg text-default-600 data-[selected=true]:bg-accent-primary data-[selected=true]:text-white data-[selected=true]:shadow-sm whitespace-nowrap sm:!w-auto sm:!flex-none sm:min-w-fit sm:px-4",
             cursor: "hidden",
           }}
         >
-          <Tab key="general" title="常规">
+          <Tab key="overview" title="概览">
+            <SettingsOverview
+              trashEnabled={settings.trashEnabled}
+              webdavEnabled={settings.webdavEnabled}
+              webdavAuthType={settings.webdavAuthType}
+              shareEnabled={settings.shareEnabled}
+              alertsEnabled={settingsData?.data.alerts?.enabled ?? false}
+              diskHealthEnabled={settingsData?.data.disk_health?.enabled ?? false}
+              scrubScheduleEnabled={settings.scrubScheduleEnabled}
+              onNavigate={handleOverviewNavigate}
+            />
+          </Tab>
+
+          <Tab key="general" title="账户与访问">
             <div className="space-y-6 mt-6">
               <PublicAccessWizard
                 domainInput={publicAccessDomain}
@@ -6887,8 +5850,12 @@ export function SettingsPage() {
                 getAction={getSecurityCheckAction}
               />
 
-              <SettingsSection
-                title="认证会话"
+              <SettingsDisclosure
+                title="专业网络参数"
+                description="监听地址、会话周期、代理信任和证书路径仅在部署拓扑变化时调整"
+              >
+                <SettingsSection
+                  title="认证会话"
                 description="配置 Web UI token 有效期；保存后影响新签发的访问令牌和刷新令牌"
                 icon={Key}
               >
@@ -7119,6 +6086,8 @@ export function SettingsPage() {
                 </div>
               </SettingsSection>
 
+              </SettingsDisclosure>
+
               <SettingsSection
                 title="存储路径"
                 description="显示当前数据存储根目录"
@@ -7139,7 +6108,7 @@ export function SettingsPage() {
             </div>
           </Tab>
 
-          <Tab key="retention" title="版本保留">
+          <Tab key="retention" title="数据保护">
             <div className="space-y-6 mt-6">
               <SettingsSection
                 title="版本策略"
@@ -7438,7 +6407,7 @@ export function SettingsPage() {
             </div>
           </Tab>
 
-          <Tab key="webdav" title="WebDAV">
+          <Tab key="webdav" title="设备挂载">
             <div className="space-y-6 mt-6">
               {webdavCredentialsError && (
                 <div className="flex items-start gap-3 rounded-lg border border-warning/30 bg-warning/5 px-4 py-3 text-sm text-foreground">
@@ -7865,856 +6834,7 @@ export function SettingsPage() {
             </div>
           </Tab>
 
-          <Tab key="advanced" title="高级">
-            <div className="space-y-6 mt-6">
-              <SettingsSection
-                title="CDC 分块参数"
-                description="配置 dataplane 文件分块 API；保存后需重启数据面服务"
-                icon={Zap}
-              >
-                <div className="space-y-4">
-                  <div className="p-4 rounded-lg bg-content2 border border-divider">
-                    <div className="flex items-start gap-3">
-                      <div className="w-8 h-8 rounded-lg bg-accent-primary/15 flex items-center justify-center shrink-0 mt-0.5">
-                        <HardDrive size={16} className="text-accent-primary" />
-                      </div>
-                      <div>
-                        <div className="text-sm font-medium text-foreground">关于 CDC 分块</div>
-                        <div className="text-xs text-default-500 mt-1 leading-relaxed">
-                          dataplane 文件 API 会按内容边界切分文件。
-                          当前版本历史路径仍使用整对象 CAS；这些参数会影响接入该 API 的新写入。
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-
-                  <SettingRow
-                    label="最小块大小"
-                    description="分块的最小尺寸"
-                  >
-                    <Input
-                      aria-label="最小块大小"
-                      value={settings.minChunkSize}
-                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, minChunkSize: v }))}
-                      className="w-24"
-                      classNames={{
-                        inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
-                      }}
-                    />
-                  </SettingRow>
-                  <Divider className="bg-divider" />
-                  <SettingRow
-                    label="平均块大小"
-                    description="分块的目标平均尺寸"
-                  >
-                    <Input
-                      aria-label="平均块大小"
-                      value={settings.avgChunkSize}
-                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, avgChunkSize: v }))}
-                      className="w-24"
-                      classNames={{
-                        inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
-                      }}
-                    />
-                  </SettingRow>
-                  <Divider className="bg-divider" />
-                  <SettingRow
-                    label="最大块大小"
-                    description="分块的最大尺寸"
-                  >
-                    <Input
-                      aria-label="最大块大小"
-                      value={settings.maxChunkSize}
-                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, maxChunkSize: v }))}
-                      className="w-24"
-                      classNames={{
-                        inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
-                      }}
-                    />
-                  </SettingRow>
-                </div>
-              </SettingsSection>
-
-              <SettingsSection
-                title="数据面连接"
-                description="配置与 Rust 数据面的 gRPC 连接；地址变更会立即校验并切换，超时与重试设置用于后续连接建立"
-                icon={Zap}
-              >
-                <div className="space-y-4">
-                  <SettingRow
-                    label="gRPC 地址"
-                    description="Rust 数据面服务地址"
-                  >
-                    <Input
-                      aria-label="数据面 gRPC 地址"
-                      value={settings.dataplaneGrpcAddress}
-                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, dataplaneGrpcAddress: v }))}
-                      className="w-56"
-                      classNames={{
-                        inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
-                      }}
-                    />
-                  </SettingRow>
-                  <Divider className="bg-divider" />
-                  <SettingRow
-                    label="连接超时"
-                    description="gRPC 调用超时时间"
-                  >
-                    <Input
-                      aria-label="数据面连接超时"
-                      value={settings.dataplaneTimeout}
-                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, dataplaneTimeout: v }))}
-                      placeholder="30s"
-                      className="w-32"
-                      classNames={{
-                        inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
-                      }}
-                    />
-                  </SettingRow>
-                  <Divider className="bg-divider" />
-                  <SettingRow
-                    label="最大重试次数"
-                    description="失败后重试次数"
-                  >
-                    <Input
-                      aria-label="数据面最大重试次数"
-                      type="number"
-                      min={0}
-                      step={1}
-                      inputMode="numeric"
-                      value={settings.dataplaneMaxRetries}
-                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, dataplaneMaxRetries: v }))}
-                      className="w-24"
-                      classNames={{
-                        inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
-                      }}
-                    />
-                  </SettingRow>
-                </div>
-              </SettingsSection>
-
-              <SettingsSection
-                title="磁盘健康监控"
-                description="配置 smartctl 周期探测；保存后立即更新运行中的磁盘健康监控"
-                icon={HardDrive}
-              >
-                <div className="space-y-4">
-                  <SettingRow
-                    label="启用磁盘健康检查"
-                    description="启用后按周期检查已配置设备的 SMART、温度和介质健康状态"
-                  >
-                    <Switch
-                      aria-label="启用磁盘健康检查"
-                      isSelected={settings.diskHealthEnabled}
-                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, diskHealthEnabled: v }))}
-                      classNames={{
-                        wrapper: cn(
-                          "group-data-[selected=true]:bg-accent-primary",
-                          "bg-content2"
-                        ),
-                        label: "sr-only",
-                      }}
-                    >
-                      启用磁盘健康检查
-                    </Switch>
-                  </SettingRow>
-                  <Divider className="bg-divider" />
-                  <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
-                    <Input
-                      label="检查间隔"
-                      aria-label="磁盘健康检查间隔"
-                      value={settings.diskHealthCheckInterval}
-                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, diskHealthCheckInterval: v }))}
-                      placeholder="1h"
-                      isDisabled={!settings.diskHealthEnabled}
-                      classNames={{
-                        inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
-                      }}
-                    />
-                    <Input
-                      label="探测超时"
-                      aria-label="磁盘健康探测超时"
-                      value={settings.diskHealthProbeTimeout}
-                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, diskHealthProbeTimeout: v }))}
-                      placeholder="15s"
-                      isDisabled={!settings.diskHealthEnabled}
-                      classNames={{
-                        inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
-                      }}
-                    />
-                    <Input
-                      label="磁盘健康冷却时间"
-                      aria-label="磁盘健康冷却时间"
-                      value={settings.diskHealthCooldownPeriod}
-                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, diskHealthCooldownPeriod: v }))}
-                      placeholder="4h"
-                      isDisabled={!settings.diskHealthEnabled}
-                      classNames={{
-                        inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
-                      }}
-                    />
-                    <Input
-                      label="探测命令"
-                      aria-label="磁盘健康探测命令"
-                      value={settings.diskHealthCommand}
-                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, diskHealthCommand: v }))}
-                      placeholder="smartctl"
-                      isDisabled={!settings.diskHealthEnabled}
-                      classNames={{
-                        inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
-                      }}
-                    />
-                    <Input
-                      label="温度提醒阈值 (C)"
-                      aria-label="磁盘温度提醒阈值"
-                      type="number"
-                      min={0}
-                      inputMode="numeric"
-                      value={settings.diskHealthTemperatureWarningC}
-                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, diskHealthTemperatureWarningC: v }))}
-                      isDisabled={!settings.diskHealthEnabled}
-                      classNames={{
-                        inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
-                      }}
-                    />
-                    <Input
-                      label="温度严重阈值 (C)"
-                      aria-label="磁盘温度严重阈值"
-                      type="number"
-                      min={0}
-                      inputMode="numeric"
-                      value={settings.diskHealthTemperatureCriticalC}
-                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, diskHealthTemperatureCriticalC: v }))}
-                      isDisabled={!settings.diskHealthEnabled}
-                      classNames={{
-                        inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
-                      }}
-                    />
-                    <Input
-                      label="介质磨损提醒 (%)"
-                      aria-label="介质磨损提醒阈值"
-                      type="number"
-                      min={0}
-                      max={100}
-                      step={1}
-                      inputMode="numeric"
-                      value={settings.diskHealthMediaWearWarningPct}
-                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, diskHealthMediaWearWarningPct: v }))}
-                      isDisabled={!settings.diskHealthEnabled}
-                      classNames={{
-                        inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
-                      }}
-                    />
-                    <Input
-                      label="介质磨损严重 (%)"
-                      aria-label="介质磨损严重阈值"
-                      type="number"
-                      min={0}
-                      max={100}
-                      step={1}
-                      inputMode="numeric"
-                      value={settings.diskHealthMediaWearCriticalPct}
-                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, diskHealthMediaWearCriticalPct: v }))}
-                      isDisabled={!settings.diskHealthEnabled}
-                      classNames={{
-                        inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
-                      }}
-                    />
-                  </div>
-                  <Divider className="bg-divider" />
-                  <div>
-                    <label className="text-sm font-medium text-default-600 mb-1.5 block">设备列表</label>
-                    <textarea
-                      aria-label="磁盘健康设备列表"
-                      value={settings.diskHealthDevices}
-                      onChange={(event) => updateDirtySettings(s => ({ ...s, diskHealthDevices: event.target.value }))}
-                      disabled={!settings.diskHealthEnabled}
-                      placeholder={"/dev/disk/by-id/ata-data | Data | sat | SER123 | 45 | 55"}
-                      rows={4}
-                      className={cn(
-                        "input-shell w-full rounded-medium px-3 py-2 text-sm bg-transparent outline-none",
-                        "border border-transparent focus:border-accent-primary",
-                        !settings.diskHealthEnabled && "opacity-60 cursor-not-allowed"
-                      )}
-                    />
-                    <p className="text-xs text-default-500 mt-1">
-                      每行格式为：设备路径 | 名称 | 类型 | 期望序列号 | 温度提醒阈值 | 温度严重阈值。后五列可留空。
-                    </p>
-                  </div>
-                </div>
-              </SettingsSection>
-
-              <SettingsSection
-                title="数据巡检计划"
-                description="配置后台周期 Scrub；保存后立即更新调度，失败会按重试策略进入提醒和设备状态"
-                icon={Clock}
-              >
-                <div className="space-y-4">
-                  <SettingRow
-                    label="启用周期 Scrub"
-                    description="启用后按计划校验 CAS 对象完整性"
-                  >
-                    <Switch
-                      aria-label="启用周期 Scrub"
-                      isSelected={settings.scrubScheduleEnabled}
-                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, scrubScheduleEnabled: v }))}
-                      classNames={{
-                        wrapper: cn(
-                          "group-data-[selected=true]:bg-accent-primary",
-                          "bg-content2"
-                        ),
-                        label: "sr-only",
-                      }}
-                    >
-                      启用周期 Scrub
-                    </Switch>
-                  </SettingRow>
-                  <Divider className="bg-divider" />
-                  <SettingRow
-                    label="常规间隔"
-                    description="两次计划巡检之间的间隔"
-                  >
-                    <Input
-                      aria-label="Scrub 常规间隔"
-                      value={settings.scrubScheduleInterval}
-                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, scrubScheduleInterval: v }))}
-                      placeholder="168h"
-                      className="w-32"
-                      isDisabled={!settings.scrubScheduleEnabled}
-                      classNames={{
-                        inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
-                      }}
-                    />
-                  </SettingRow>
-                  <Divider className="bg-divider" />
-                  <SettingRow
-                    label="失败重试间隔"
-                    description="巡检失败后等待多久再自动重试"
-                  >
-                    <Input
-                      aria-label="Scrub 失败重试间隔"
-                      value={settings.scrubRetryInterval}
-                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, scrubRetryInterval: v }))}
-                      placeholder="1h"
-                      className="w-32"
-                      isDisabled={!settings.scrubScheduleEnabled}
-                      classNames={{
-                        inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
-                      }}
-                    />
-                  </SettingRow>
-                  <Divider className="bg-divider" />
-                  <SettingRow
-                    label="最大重试次数"
-                    description="单次失败后最多自动重试次数；0 表示不自动重试"
-                  >
-                    <Input
-                      aria-label="Scrub 最大重试次数"
-                      type="number"
-                      min={0}
-                      step={1}
-                      inputMode="numeric"
-                      value={settings.scrubMaxRetries}
-                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, scrubMaxRetries: v }))}
-                      className="w-24"
-                      isDisabled={!settings.scrubScheduleEnabled}
-                      classNames={{
-                        inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
-                      }}
-                    />
-                  </SettingRow>
-                </div>
-              </SettingsSection>
-
-              <SettingsSection
-                title="提醒通知"
-                description="配置磁盘空间、备份事件和外部通知；保存后立即更新运行态"
-                icon={AlertCircle}
-              >
-                <div className="space-y-4">
-                  <SettingRow
-                    label="启用提醒"
-                    description="启用后定期检查存储空间，并通过已配置通道发送备份、恢复、磁盘健康、Scrub 和登录限流事件通知"
-                  >
-                    <Switch
-                      aria-label="启用提醒"
-                      isSelected={settings.alertsEnabled}
-                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, alertsEnabled: v }))}
-                      classNames={{
-                        wrapper: cn(
-                          "group-data-[selected=true]:bg-accent-primary",
-                          "bg-content2"
-                        ),
-                        label: "sr-only",
-                      }}
-                    >
-                      启用提醒
-                    </Switch>
-                  </SettingRow>
-                  <Divider className="bg-divider" />
-                  <SettingRow
-                    label="测试提醒"
-                    description="使用已保存的提醒配置发送一次测试事件"
-                  >
-                    <Button
-                      variant="bordered"
-                      className="btn-secondary btn-md rounded-lg"
-                      startContent={<Send size={16} />}
-                      onPress={handleSendTestAlert}
-                      isLoading={testAlertMutation.isPending}
-                      isDisabled={saveMutation.isPending}
-                    >
-                      发送测试提醒
-                    </Button>
-                  </SettingRow>
-                  <Divider className="bg-divider" />
-                  <SettingRow
-                    label="检查间隔"
-                    description="磁盘空间检查频率"
-                  >
-                    <Input
-                      aria-label="提醒检查间隔"
-                      value={settings.alertsCheckInterval}
-                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, alertsCheckInterval: v }))}
-                      placeholder="1h"
-                      className="w-32"
-                      isDisabled={!settings.alertsEnabled}
-                      classNames={{
-                        inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
-                      }}
-                    />
-                  </SettingRow>
-                  <Divider className="bg-divider" />
-                  <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-                    <div>
-                      <label className="text-sm font-medium text-default-600 mb-1.5 block">提醒阈值 (%)</label>
-                      <Input
-                        aria-label="提醒阈值"
-                        type="number"
-                        min={0}
-                        max={100}
-                        step={1}
-                        inputMode="numeric"
-                        value={settings.alertsThresholdPct}
-                        onValueChange={(v) => updateDirtySettings(s => ({ ...s, alertsThresholdPct: v }))}
-                        isDisabled={!settings.alertsEnabled}
-                        classNames={{ inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary" }}
-                      />
-                    </div>
-                    <div>
-                      <label className="text-sm font-medium text-default-600 mb-1.5 block">严重提醒阈值 (%)</label>
-                      <Input
-                        aria-label="严重提醒阈值"
-                        type="number"
-                        min={0}
-                        max={100}
-                        step={1}
-                        inputMode="numeric"
-                        value={settings.alertsCriticalPct}
-                        onValueChange={(v) => updateDirtySettings(s => ({ ...s, alertsCriticalPct: v }))}
-                        isDisabled={!settings.alertsEnabled}
-                        classNames={{ inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary" }}
-                      />
-                    </div>
-                  </div>
-                  <Divider className="bg-divider" />
-                  <SettingRow
-                    label="最小剩余空间"
-                    description="剩余空间低于该值时发送提醒"
-                  >
-                    <Input
-                      aria-label="最小剩余空间"
-                      value={settings.alertsMinFreeSpace}
-                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, alertsMinFreeSpace: v }))}
-                      className="w-32"
-                      isDisabled={!settings.alertsEnabled}
-                      classNames={{
-                        inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
-                      }}
-                    />
-                  </SettingRow>
-                  <Divider className="bg-divider" />
-                  <SettingRow
-                    label="冷却时间"
-                    description="同级别连续提醒之间的最小间隔"
-                  >
-                    <Input
-                      aria-label="提醒冷却时间"
-                      value={settings.alertsCooldownPeriod}
-                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, alertsCooldownPeriod: v }))}
-                      placeholder="4h"
-                      className="w-32"
-                      isDisabled={!settings.alertsEnabled}
-                      classNames={{
-                        inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
-                      }}
-                    />
-                  </SettingRow>
-                  <Divider className="bg-divider" />
-                  <SettingRow
-                    label="Webhook URL"
-                    description="发送磁盘空间和备份事件通知的目标地址"
-                  >
-                    <Input
-                      type="url"
-                      aria-label="Webhook URL"
-                      value={settings.alertsWebhookURL}
-                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, alertsWebhookURL: v }))}
-                      placeholder="https://hooks.example.com/alert"
-                      isDisabled={!settings.alertsEnabled}
-                      classNames={{
-                        inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
-                      }}
-                    />
-                  </SettingRow>
-                  <Divider className="bg-divider" />
-                  <SettingRow
-                    label="Webhook 方法"
-                    description="通知请求使用的 HTTP 方法；GET 会把事件字段编码到 URL query"
-                  >
-                    <select
-                      aria-label="Webhook 方法"
-                      value={settings.alertsWebhookMethod}
-                      onChange={(event) => updateDirtySettings(s => ({ ...s, alertsWebhookMethod: event.target.value }))}
-                      disabled={!settings.alertsEnabled}
-                      className="input-shell min-w-[8rem] px-3 py-2 text-sm bg-transparent outline-none"
-                    >
-                      <option value="POST">POST</option>
-                      <option value="GET">GET</option>
-                    </select>
-                  </SettingRow>
-                  <Divider className="bg-divider" />
-                  <div>
-                    <label className="text-sm font-medium text-default-600 mb-1.5 block">自定义 Header</label>
-                    <textarea
-                      aria-label="Webhook 自定义 Header"
-                      value={settings.alertsWebhookHeaders}
-                      onChange={(event) => updateDirtySettings(s => ({ ...s, alertsWebhookHeaders: event.target.value }))}
-                      disabled={!settings.alertsEnabled}
-                      placeholder={"Authorization: Bearer token\nX-MnemoNAS: alerts"}
-                      rows={3}
-                      className={cn(
-                        "input-shell w-full rounded-medium px-3 py-2 text-sm bg-transparent outline-none",
-                        "border border-transparent focus:border-accent-primary",
-                        !settings.alertsEnabled && "opacity-60 cursor-not-allowed"
-                      )}
-                    />
-                    <p className="text-xs text-default-500 mt-1">每行一个 Header，使用 Key:Value 格式。</p>
-                  </div>
-                  <Divider className="bg-divider" />
-                  <SettingRow
-                    label="企业微信通知"
-                    description="将同一批提醒事件发送到企业微信/WeCom 群机器人"
-                  >
-                    <Switch
-                      aria-label="启用企业微信通知"
-                      isSelected={settings.alertsWeComEnabled}
-                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, alertsWeComEnabled: v }))}
-                      isDisabled={!settings.alertsEnabled}
-                      classNames={{
-                        wrapper: cn(
-                          "group-data-[selected=true]:bg-accent-primary",
-                          "bg-content2"
-                        ),
-                        label: "sr-only",
-                      }}
-                    >
-                      启用企业微信通知
-                    </Switch>
-                  </SettingRow>
-                  <Divider className="bg-divider" />
-                  <SettingRow
-                    label="企业微信 Webhook URL"
-                    description="企业微信群机器人 Webhook 地址；保存后不会回显完整地址"
-                  >
-                    <Input
-                      type="url"
-                      aria-label="企业微信 Webhook URL"
-                      value={settings.alertsWeComWebhookURL}
-                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, alertsWeComWebhookURL: v }))}
-                      placeholder="https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=<key>"
-                      isDisabled={!settings.alertsEnabled || !settings.alertsWeComEnabled}
-                      classNames={{
-                        inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
-                      }}
-                    />
-                  </SettingRow>
-                  <Divider className="bg-divider" />
-                  <SettingRow
-                    label="钉钉通知"
-                    description="将同一批提醒事件发送到钉钉群机器人"
-                  >
-                    <Switch
-                      aria-label="启用钉钉通知"
-                      isSelected={settings.alertsDingTalkEnabled}
-                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, alertsDingTalkEnabled: v }))}
-                      isDisabled={!settings.alertsEnabled}
-                      classNames={{
-                        wrapper: cn(
-                          "group-data-[selected=true]:bg-accent-primary",
-                          "bg-content2"
-                        ),
-                        label: "sr-only",
-                      }}
-                    >
-                      启用钉钉通知
-                    </Switch>
-                  </SettingRow>
-                  <Divider className="bg-divider" />
-                  <SettingRow
-                    label="钉钉 Webhook URL"
-                    description="钉钉群机器人 Webhook 地址；保存后不会回显完整地址"
-                  >
-                    <Input
-                      type="url"
-                      aria-label="钉钉 Webhook URL"
-                      value={settings.alertsDingTalkWebhookURL}
-                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, alertsDingTalkWebhookURL: v }))}
-                      placeholder="https://oapi.dingtalk.com/robot/send?access_token=<token>"
-                      isDisabled={!settings.alertsEnabled || !settings.alertsDingTalkEnabled}
-                      classNames={{
-                        inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
-                      }}
-                    />
-                  </SettingRow>
-                  <Divider className="bg-divider" />
-                  <SettingRow
-                    label="邮件通知"
-                    description="将同一批提醒事件发送到 SMTP 收件人"
-                  >
-                    <Switch
-                      aria-label="启用邮件通知"
-                      isSelected={settings.alertsEmailEnabled}
-                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, alertsEmailEnabled: v }))}
-                      isDisabled={!settings.alertsEnabled}
-                      classNames={{
-                        wrapper: cn(
-                          "group-data-[selected=true]:bg-accent-primary",
-                          "bg-content2"
-                        ),
-                        label: "sr-only",
-                      }}
-                    >
-                      启用邮件通知
-                    </Switch>
-                  </SettingRow>
-                  <Divider className="bg-divider" />
-                  <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-                    <Input
-                      label="SMTP 主机"
-                      aria-label="SMTP 主机"
-                      value={settings.alertsSMTPHost}
-                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, alertsSMTPHost: v }))}
-                      placeholder="smtp.example.com"
-                      isDisabled={!settings.alertsEnabled || !settings.alertsEmailEnabled}
-                      classNames={{
-                        inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
-                      }}
-                    />
-                    <Input
-                      label="SMTP 端口"
-                      aria-label="SMTP 端口"
-                      type="number"
-                      min={1}
-                      max={65535}
-                      inputMode="numeric"
-                      value={settings.alertsSMTPPort}
-                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, alertsSMTPPort: v }))}
-                      placeholder="587"
-                      isDisabled={!settings.alertsEnabled || !settings.alertsEmailEnabled}
-                      classNames={{
-                        inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
-                      }}
-                    />
-                    <Input
-                      label="SMTP 用户名"
-                      aria-label="SMTP 用户名"
-                      value={settings.alertsSMTPUsername}
-                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, alertsSMTPUsername: v }))}
-                      placeholder="alerts@example.com"
-                      isDisabled={!settings.alertsEnabled || !settings.alertsEmailEnabled}
-                      classNames={{
-                        inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
-                      }}
-                    />
-                    <div className="space-y-2">
-                      <Input
-                        label="SMTP 密码"
-                        type="password"
-                        aria-label="SMTP 密码"
-                        value={settings.alertsSMTPPassword}
-                        onValueChange={(v) => updateDirtySettings(s => ({
-                          ...s,
-                          alertsSMTPPassword: v,
-                          alertsSMTPPasswordClear: false,
-                        }))}
-                        placeholder={settings.alertsSMTPPasswordConfigured ? '已配置，留空不变' : '应用专用密码'}
-                        isDisabled={!settings.alertsEnabled || !settings.alertsEmailEnabled || settings.alertsSMTPPasswordClear}
-                        classNames={{
-                          inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
-                        }}
-                      />
-                      {settings.alertsSMTPPasswordConfigured && (
-                        <Checkbox
-                          isSelected={settings.alertsSMTPPasswordClear}
-                          onValueChange={(value) => updateDirtySettings(s => ({
-                            ...s,
-                            alertsSMTPPasswordClear: value,
-                            alertsSMTPPassword: value ? '' : s.alertsSMTPPassword,
-                          }))}
-                          classNames={{ label: "text-xs text-default-600" }}
-                        >
-                          保存时清除已保存 SMTP 密码
-                        </Checkbox>
-                      )}
-                    </div>
-                    <Input
-                      label="SMTP 发件人"
-                      aria-label="SMTP 发件人"
-                      value={settings.alertsSMTPFrom}
-                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, alertsSMTPFrom: v }))}
-                      placeholder="MnemoNAS <alerts@example.com>"
-                      isDisabled={!settings.alertsEnabled || !settings.alertsEmailEnabled}
-                      classNames={{
-                        inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
-                      }}
-                    />
-                    <div className="lg:col-span-2">
-                      <label className="text-sm font-medium text-default-600 mb-1.5 block">SMTP 收件人</label>
-                      <textarea
-                        aria-label="SMTP 收件人"
-                        value={settings.alertsSMTPTo}
-                        onChange={(event) => updateDirtySettings(s => ({ ...s, alertsSMTPTo: event.target.value }))}
-                        disabled={!settings.alertsEnabled || !settings.alertsEmailEnabled}
-                        placeholder={"admin@example.com\nops@example.com"}
-                        rows={3}
-                        className={cn(
-                          "input-shell w-full rounded-medium px-3 py-2 text-sm bg-transparent outline-none",
-                          "border border-transparent focus:border-accent-primary",
-                          (!settings.alertsEnabled || !settings.alertsEmailEnabled) && "opacity-60 cursor-not-allowed"
-                        )}
-                      />
-                      <p className="text-xs text-default-500 mt-1">每行一个收件人，也支持用逗号分隔；启用邮件通知时至少需要一个非空收件人。</p>
-                    </div>
-                  </div>
-                  <Divider className="bg-divider" />
-                  <SettingRow
-                    label="Telegram 通知"
-                    description="将同一批提醒事件发送到 Telegram 机器人"
-                  >
-                    <Switch
-                      aria-label="启用 Telegram 通知"
-                      isSelected={settings.alertsTelegramEnabled}
-                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, alertsTelegramEnabled: v }))}
-                      isDisabled={!settings.alertsEnabled}
-                      classNames={{
-                        wrapper: cn(
-                          "group-data-[selected=true]:bg-accent-primary",
-                          "bg-content2"
-                        ),
-                        label: "sr-only",
-                      }}
-                    >
-                      启用 Telegram 通知
-                    </Switch>
-                  </SettingRow>
-                  <Divider className="bg-divider" />
-                  <SettingRow
-                    label="Telegram Bot Token"
-                    description={settings.alertsTelegramBotTokenConfigured ? '留空会保留现有 Token；勾选清除或填写后覆盖' : '从 BotFather 获取的机器人 Token'}
-                  >
-                    <div className="space-y-2 sm:w-72">
-                      <Input
-                        type="password"
-                        aria-label="Telegram Bot Token"
-                        value={settings.alertsTelegramBotToken}
-                        onValueChange={(v) => updateDirtySettings(s => ({
-                          ...s,
-                          alertsTelegramBotToken: v,
-                          alertsTelegramBotTokenClear: false,
-                        }))}
-                        placeholder={settings.alertsTelegramBotTokenConfigured ? '已配置，留空不变' : '123456:<token>'}
-                        isDisabled={!settings.alertsEnabled || !settings.alertsTelegramEnabled || settings.alertsTelegramBotTokenClear}
-                        classNames={{
-                          inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
-                        }}
-                      />
-                      {settings.alertsTelegramBotTokenConfigured && (
-                        <Checkbox
-                          isSelected={settings.alertsTelegramBotTokenClear}
-                          onValueChange={(value) => updateDirtySettings(s => ({
-                            ...s,
-                            alertsTelegramBotTokenClear: value,
-                            alertsTelegramBotToken: value ? '' : s.alertsTelegramBotToken,
-                          }))}
-                          classNames={{ label: "text-xs text-default-600" }}
-                        >
-                          保存时清除已保存 Telegram Token
-                        </Checkbox>
-                      )}
-                    </div>
-                  </SettingRow>
-                  <Divider className="bg-divider" />
-                  <SettingRow
-                    label="Telegram Chat ID"
-                    description="支持数字 Chat ID 或 @channel 用户名"
-                  >
-                    <Input
-                      aria-label="Telegram Chat ID"
-                      value={settings.alertsTelegramChatID}
-                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, alertsTelegramChatID: v }))}
-                      placeholder="-1001234567890"
-                      isDisabled={!settings.alertsEnabled || !settings.alertsTelegramEnabled}
-                      classNames={{
-                        inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
-                      }}
-                    />
-                  </SettingRow>
-                </div>
-              </SettingsSection>
-
-              <SettingsSection
-                title="收藏功能"
-                description="控制文件收藏能力；关闭后收藏接口会立即拒绝请求"
-                icon={Star}
-              >
-                <div className="space-y-4">
-                  {favoritesRuntimeUnavailable && (
-                    <div className="flex items-start gap-3 rounded-lg border border-warning/30 bg-warning/5 px-4 py-3 text-sm text-foreground">
-                      <AlertCircle size={18} className="mt-0.5 shrink-0 text-warning" />
-                      <div>
-                        <div className="font-medium text-foreground">收藏运行态当前不可用</div>
-                        <div className="text-default-600">
-                          配置已启用，但运行中的收藏存储未就绪；收藏接口会返回不可用，直到服务恢复对收藏存储的访问。
-                        </div>
-                      </div>
-                    </div>
-                  )}
-                  <SettingRow
-                    label="启用收藏功能"
-                    description="允许标记收藏、查询收藏状态和维护收藏备注"
-                  >
-                    <Switch
-                      aria-label="启用收藏功能"
-                      isSelected={settings.favoritesEnabled}
-                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, favoritesEnabled: v }))}
-                      classNames={{
-                        wrapper: cn(
-                          "group-data-[selected=true]:bg-accent-primary",
-                          "bg-content2"
-                        ),
-                        label: "sr-only",
-                      }}
-                    >
-                      启用收藏功能
-                    </Switch>
-                  </SettingRow>
-                </div>
-              </SettingsSection>
-            </div>
-          </Tab>
-
-          <Tab key="shares" title="分享">
+          <Tab key="shares" title="分享与协作">
             <div className="space-y-6 mt-6">
               <SettingsSection
                 title="分享功能配置"

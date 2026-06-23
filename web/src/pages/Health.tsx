@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
+import { useLocation } from 'react-router-dom'
 import { Card, CardBody, CardHeader, Progress, Chip, Button, Divider, addToast } from '@heroui/react'
 import { 
   Activity, 
@@ -28,6 +29,8 @@ import { getDiskHealthDeviceDisplayMessage } from '@/lib/diskHealthMessages'
 import { PageHeader } from '@/components/ui/PageHeader'
 import { EmptyState } from '@/components/ui/EmptyState'
 import { StatCard } from '@/components/ui/StatCard'
+import { DiskHealthSettings } from '@/components/health'
+import { NotificationSettings } from '@/components/notifications'
 import { useUser } from '@/stores/auth'
 
 function StatusIndicator({ 
@@ -496,8 +499,19 @@ function getDiagnosticsExportErrorToast(error: unknown): { title: string; descri
 }
 
 export function HealthPage() {
+  const location = useLocation()
   const user = useUser()
   const diagnosticsExportAbortControllerRef = useRef<AbortController | null>(null)
+
+  useEffect(() => {
+    if (location.hash !== '#notification-settings') {
+      return
+    }
+    const frame = window.requestAnimationFrame(() => {
+      document.getElementById('notification-settings')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    })
+    return () => window.cancelAnimationFrame(frame)
+  }, [location.hash])
   const [isExportingDiagnostics, setIsExportingDiagnostics] = useState(false)
   const { data: diagnostics, isLoading: diagLoading, error: diagError, refetch: refetchDiag } = useQuery({
     queryKey: ['diagnostics', user?.id ?? 'anonymous'],
@@ -993,6 +1007,10 @@ export function HealthPage() {
           </CardBody>
         </Card>
       </div>
+
+      <DiskHealthSettings />
+
+      <NotificationSettings />
 
       {/* Memory & Performance */}
       <Card className="card-mnemonas">

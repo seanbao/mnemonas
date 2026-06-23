@@ -99,6 +99,11 @@ describe('Sidebar', () => {
   })
 
   describe('navigation items', () => {
+    it('renders home link', () => {
+      render(<Sidebar />)
+      expect(screen.getByText('首页')).toBeTruthy()
+    })
+
     it('renders files link', () => {
       render(<Sidebar />)
       expect(screen.getByText('文件')).toBeTruthy()
@@ -146,6 +151,11 @@ describe('Sidebar', () => {
   })
 
   describe('navigation links', () => {
+    it('has correct href for home', () => {
+      render(<Sidebar />)
+      expectSidebarLinkHref('首页', '/')
+    })
+
     it('has correct href for files', () => {
       render(<Sidebar />)
       expectSidebarLinkHref('文件', '/files')

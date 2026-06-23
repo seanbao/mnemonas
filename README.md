@@ -214,7 +214,7 @@ mnemonas/
 
 ### 环境要求
 
-- Go 1.25.11+
+- Go 1.25.12+
 - Rust 1.92+
 - Node.js `^20.19.0` 或 `>=22.12.0`（推荐使用 `.nvmrc` 指定的 22.x）
 - Docker Engine + Compose v2 插件（支持 `docker compose`）

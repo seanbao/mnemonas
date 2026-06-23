@@ -10,7 +10,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  GO_VERSION: '1.25.11'
+  GO_VERSION: '1.25.12'
   RUST_VERSION: '1.92'
   NODE_VERSION: '22'
   PROTOC_VERSION: '3.20.1'

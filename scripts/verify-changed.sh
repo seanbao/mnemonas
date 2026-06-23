@@ -157,6 +157,7 @@ rust_changed=0
 proto_tool_changed=0
 web_changed=0
 web_e2e_changed=0
+web_quality_changed=0
 proto_changed=0
 scripts_changed=0
 workflows_changed=0
@@ -220,6 +221,10 @@ for file in "${FILES[@]}"; do
 			;;
 		proto/*.proto)
 			proto_changed=1
+			;;
+		web/src/*.tsx|web/src/*.css)
+			web_changed=1
+			web_quality_changed=1
 			;;
 		web/e2e/*|web/playwright.config.*|web/tsconfig.e2e.json)
 			web_changed=1
@@ -391,8 +396,12 @@ fi
 if [[ "$web_changed" == "1" ]]; then
 	add_command "Run frontend lint" "cd web && npm run lint"
 	add_command "Run frontend typecheck" "cd web && npm run typecheck"
-	add_command "Run frontend unit tests" "cd web && npm run test:run"
+	add_command "Run frontend coverage tests" "cd web && npm run test:coverage"
 	add_command "Build frontend" "cd web && npm run build"
+fi
+
+if [[ "$web_quality_changed" == "1" && "$web_e2e_changed" != "1" ]]; then
+	add_command "Run frontend quality E2E" "cd web && npm run test:e2e:quality"
 fi
 
 if [[ "$web_e2e_changed" == "1" ]]; then

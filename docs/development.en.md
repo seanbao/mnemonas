@@ -8,7 +8,7 @@ This guide explains how to set up a local MnemoNAS development environment, buil
 
 | Tool | Minimum | Recommended | Purpose |
 | --- | --- | --- | --- |
-| Go | 1.25.11 | 1.25.11+ | Go control plane |
+| Go | 1.25.12 | 1.25.12+ | Go control plane |
 | Rust | 1.92 | 1.92.x | Rust data plane and protobuf generator |
 | Node.js | `^20.19.0` or `>=22.12.0` | `.nvmrc` 22.x | Frontend |
 | protoc | 3.20 | 3.20.1 for CI parity | Regenerate protobuf code |
@@ -59,7 +59,7 @@ cargo install cargo-watch --version 8.5.3
 ```bash
 sudo apt update
 
-GO_VERSION=1.25.11
+GO_VERSION=1.25.12
 wget "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz"
 sudo tar -C /usr/local -xzf "go${GO_VERSION}.linux-amd64.tar.gz"
 echo 'export PATH=$PATH:/usr/local/go/bin:$HOME/go/bin' >> ~/.bashrc
@@ -556,7 +556,7 @@ export PATH=$PATH:$(go env GOPATH)/bin
 
 ### Go Toolchain Download Fails
 
-The repo pins `toolchain go1.25.11`. When local network access blocks toolchain download but a compatible local Go 1.25.x is available:
+The repo pins `toolchain go1.25.12`. When local network access blocks toolchain download but a compatible local Go 1.25.x is available:
 
 ```bash
 packages=$(GOTOOLCHAIN=local make --no-print-directory go-packages)
@@ -564,7 +564,7 @@ GOTOOLCHAIN=local go test $packages
 GOTOOLCHAIN=local make build
 ```
 
-Release builds and vulnerability scans should use Go 1.25.11 or a newer 1.25.x patch version.
+Release builds and vulnerability scans should use Go 1.25.12 or a newer 1.25.x patch version.
 
 If `GOSUMDB=off` breaks toolchain verification:
 

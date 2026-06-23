@@ -19,6 +19,7 @@ import {
   Star,
   AlertCircle,
   RefreshCw,
+  Home,
 } from 'lucide-react'
 import { cn, formatBytes } from '@/lib/utils'
 import { areDiskStatsAvailable, clampUsagePercent, formatUsagePercent, getDiskSpaceStatus, type DiskSpaceStatusLevel } from '@/lib/storageStats'
@@ -43,6 +44,7 @@ const navSections: NavSection[] = [
   {
     title: '日常',
     items: [
+      { icon: Home, label: '首页', path: '/' },
       { icon: Folder, label: '文件', path: '/files' },
       { icon: Search, label: '搜索', path: '/search' },
       { icon: Image, label: '相册', path: '/album' },

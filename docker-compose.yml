@@ -6,7 +6,7 @@ services:
       args:
         RUST_IMAGE: ${RUST_IMAGE:-rust:1.92}
         NODE_IMAGE: ${NODE_IMAGE:-node:22-bookworm-slim}
-        GO_IMAGE: ${GO_IMAGE:-golang:1.25.11-alpine}
+        GO_IMAGE: ${GO_IMAGE:-golang:1.25.12-alpine}
         RUNTIME_IMAGE: ${RUNTIME_IMAGE:-debian:bookworm-slim}
         VERSION: ${MNEMONAS_VERSION:-local}
         BUILD_TIME: ${MNEMONAS_BUILD_TIME:-unknown}

@@ -232,7 +232,7 @@ make docker-check
 ```bash
 docker build -t mnemonas:local \
   --build-arg NODE_IMAGE=node:22-bookworm-slim \
-  --build-arg GO_IMAGE=golang:1.25.11-alpine \
+  --build-arg GO_IMAGE=golang:1.25.12-alpine \
   --build-arg RUST_IMAGE=rust:1.92 \
   --build-arg RUNTIME_IMAGE=debian:bookworm-slim \
   --build-arg VERSION=local \

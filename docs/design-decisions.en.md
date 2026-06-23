@@ -23,7 +23,7 @@ Why MnemoNAS:
 
 | Component | Choice | Reason |
 | --- | --- | --- |
-| Control plane | Go 1.25.11+ | Simple deployment, mature HTTP ecosystem, strong concurrency support |
+| Control plane | Go 1.25.12+ | Simple deployment, mature HTTP ecosystem, strong concurrency support |
 | Data plane | Rust 1.92+ | High performance and memory safety for storage-heavy logic |
 | HTTP router | chi | Lightweight, standard-library friendly, predictable |
 | WebDAV | `golang.org/x/net/webdav` plus local behavior | Mature base implementation with project-specific compatibility work |
@@ -44,7 +44,7 @@ Why MnemoNAS:
 | Virtualization | TanStack Virtual | Large directory performance |
 | Animation | Framer Motion | Controlled interaction polish |
 
-The interface target is a calm file-management tool: compact, readable, and suitable for repeated use. It is not intended to look like a marketing page or a dense admin console.
+The interface target is a calm file-management tool: compact, readable, and suitable for repeated use. It is not intended to look like a marketing page or a dense admin console. Settings are organized by user goal, with status and primary tasks shown before low-frequency network parameters. CDC, data-plane connection, and related deployment parameters remain in configuration files and diagnostics. Runtime configuration lives with its task: notifications and disk health belong to Health, scheduled integrity checks belong to Maintenance, and the favorites switch belongs to Favorites. Each form uses a domain-level partial save so it cannot overwrite unrelated configuration.
 
 ## Architecture Decisions
 

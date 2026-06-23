@@ -89,7 +89,8 @@ async function expectRouteSurface(page: Page, route: string): Promise<void> {
       break
     case '/settings':
       await expect(main.getByRole('heading', { name: /设置/i }).first()).toBeVisible({ timeout: 5000 })
-      await expect(main.getByRole('button', { name: /保存|保存设置/i })).toBeVisible()
+      await expect(main.getByRole('heading', { name: '按使用目标调整设备' })).toBeVisible()
+      await expect(main.getByRole('button', { name: /账户与远程访问/ })).toBeVisible()
       break
     default:
       throw new Error(`no route surface assertion for ${route}`)
@@ -215,6 +216,12 @@ test.describe('404 页面', () => {
 })
 
 test.describe('侧边栏点击导航', () => {
+  test('桌面侧边栏应能返回首页', async ({ page }) => {
+    await ensureAuthenticatedAt(page, '/files')
+    await clickSidebarLinkAndExpectURL(page, /首页|Home/i, /^http:\/\/[^/]+\/$/)
+    await expectRouteSurface(page, '/')
+  })
+
   test('点击文件链接应导航到文件页面', async ({ page }) => {
     await ensureAuthenticatedAt(page, '/')
     await clickSidebarLinkAndExpectURL(page, /文件|Files/i, /\/files/)

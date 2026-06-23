@@ -33,6 +33,7 @@ import {
 } from '@/api/favorites'
 import { FileIcon } from '@/components/ui/FileIcon'
 import { EmptyState } from '@/components/ui/EmptyState'
+import { FavoritesSettings } from '@/components/favorites/FavoritesSettings'
 import { cn, encodePathForUrl, formatRelativeTime } from '@/lib/utils'
 import { useBatchOperation, type BatchOperationResult } from '@/lib/useBatchOperation'
 import { PageHeader } from '@/components/ui/PageHeader'
@@ -305,6 +306,7 @@ export function FavoritesPage() {
   const queryClient = useQueryClient()
   const canWrite = useCanWrite()
   const user = useUser()
+  const isAdmin = user?.role === 'admin'
   const { scopedHomeDir, hasInvalidHomeDir } = resolveUserHomeScope(user)
   const authScopeKey = user?.id ?? 'anonymous'
   const favoritesScopeKey = `${authScopeKey}:${hasInvalidHomeDir ? '__invalid__' : (scopedHomeDir ?? '/')}`
@@ -611,6 +613,7 @@ export function FavoritesPage() {
           subtitle={invalidHomeDirTitle}
           icon={Star}
         />
+        {isAdmin && <FavoritesSettings />}
         <div className="flex flex-1 items-center justify-center">
           <EmptyState
             icon={AlertCircle}
@@ -624,10 +627,18 @@ export function FavoritesPage() {
 
   if (isLoading) {
     return (
-      <div className="flex h-full items-center justify-center p-6 lg:p-8">
-        <div className="text-center">
-          <div className="w-12 h-12 border-3 border-accent-primary border-t-transparent rounded-full animate-spin mx-auto mb-4" />
-          <p className="text-default-500">加载收藏列表…</p>
+      <div className="flex h-full min-h-0 flex-col space-y-4 overflow-auto p-4 custom-scrollbar sm:p-6">
+        <PageHeader
+          title="收藏夹"
+          subtitle="正在加载"
+          icon={Star}
+        />
+        {isAdmin && <FavoritesSettings />}
+        <div className="flex flex-1 items-center justify-center">
+          <div className="text-center">
+            <div className="w-12 h-12 border-3 border-accent-primary border-t-transparent rounded-full animate-spin mx-auto mb-4" />
+            <p className="text-default-500">加载收藏列表…</p>
+          </div>
         </div>
       </div>
     )
@@ -642,6 +653,7 @@ export function FavoritesPage() {
             subtitle="功能已关闭"
             icon={Star}
           />
+          {isAdmin && <FavoritesSettings />}
           <div className="flex flex-1 items-center justify-center">
             <EmptyState
               icon={Star}
@@ -661,6 +673,7 @@ export function FavoritesPage() {
             subtitle="暂不可用"
             icon={Star}
           />
+          {isAdmin && <FavoritesSettings />}
           <div className="flex flex-1 items-center justify-center">
             <EmptyState
               icon={AlertCircle}
@@ -684,6 +697,7 @@ export function FavoritesPage() {
           subtitle="加载失败"
           icon={Star}
         />
+        {isAdmin && <FavoritesSettings />}
         <div className="flex flex-1 items-center justify-center">
           <EmptyState
             icon={AlertCircle}
@@ -708,6 +722,8 @@ export function FavoritesPage() {
         subtitle={`${favoriteItems.length} 项收藏`}
         icon={Star}
       />
+
+      {isAdmin && <FavoritesSettings />}
 
       {/* Selection bar */}
       {canWrite && visibleSelectedItems.size > 0 && (

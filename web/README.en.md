@@ -131,6 +131,9 @@ Major upgrades for React, Vite, HeroUI, Tailwind, TypeScript, Vitest, or Playwri
 - Native `<button>` elements in production code must declare `type` explicitly to avoid implicit form submission when reused inside forms.
 - The visual style should be compact, calm, and suitable for repeated operational use.
 - Operational pages should prioritize scanning efficiency, 8px-or-smaller radii, fine borders, stable dimensions, and explicit state colors.
+- Settings and management entry points should follow user goals: show status and primary tasks first, then progressively disclose low-frequency network parameters. Internal CDC, data-plane connection, and other deployment parameters stay in configuration and diagnostics instead of consumer Web forms.
+- Runtime configuration should live with its task: notification and disk-health settings belong to Health, the scheduled integrity check belongs to Maintenance, and the favorites switch belongs to Favorites.
+- Runtime settings that can be updated independently should use domain-level saves. Notification, disk-health, scheduled integrity-check, and favorites forms submit only `alerts`, `disk_health`, `maintenance.scrub`, and `favorites`, respectively, and must not overwrite unrelated settings snapshots.
 - Mobile must be independently usable: common paths should be reachable through bottom navigation or clear actions, and content must not be hidden by headers, drawers, or bottom navigation.
 - Changes to login, app shell, navigation, or key responsive layouts should run relevant Playwright tests and check screenshot baselines.
 - Changes to navigation, sidebar, mobile bottom navigation, or page shell should run `npm run test:e2e:navigation` first, then add full E2E or screenshot regression as needed.

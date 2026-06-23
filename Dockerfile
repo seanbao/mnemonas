@@ -3,7 +3,7 @@
 
 ARG RUST_IMAGE=rust:1.92
 ARG NODE_IMAGE=node:22-bookworm-slim
-ARG GO_IMAGE=golang:1.25.11-alpine
+ARG GO_IMAGE=golang:1.25.12-alpine
 ARG RUNTIME_IMAGE=debian:bookworm-slim
 ARG VERSION=dev
 ARG BUILD_TIME=unknown

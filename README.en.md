@@ -225,7 +225,7 @@ mnemonas/
 
 ### Requirements
 
-- Go 1.25.11+
+- Go 1.25.12+
 - Rust 1.92+
 - Node.js `^20.19.0` or `>=22.12.0` (Node 22 from `.nvmrc` is recommended)
 - Docker Engine + Compose v2

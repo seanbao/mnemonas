@@ -26,6 +26,7 @@ import {
   Archive,
   RefreshCw,
   CheckCircle2,
+  ChevronDown,
 } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
 import { ApiError as FilesApiError, getAppVersion, getHealth, getStorageStats, listBackupJobs, type BackupJob } from '@/api/files'
@@ -52,19 +53,22 @@ function QuickAction({ icon: Icon, label, description, onClick }: QuickActionPro
   return (
     <button
       type="button"
-      className="group stat-card p-5 text-left transition-colors hover:border-primary/35"
+      className="group stat-card flex min-h-[4.5rem] min-w-0 items-center gap-3 p-3 text-left transition-colors hover:border-primary/35 sm:min-h-[8.5rem] sm:block sm:p-5"
       onClick={onClick}
     >
-      <div className="relative">
-        <div className="gradient-mnemonas-subtle mb-3 flex h-10 w-10 items-center justify-center rounded-lg">
-          <Icon size={20} className="text-accent-primary" />
+      <div className="gradient-mnemonas-subtle flex h-9 w-9 shrink-0 items-center justify-center rounded-lg sm:mb-3 sm:h-10 sm:w-10">
+        <Icon size={20} className="text-accent-primary" />
+      </div>
+      <div className="min-w-0 flex-1">
+        <div className="flex min-w-0 items-center justify-between gap-1">
+          <span className="truncate font-medium text-foreground">{label}</span>
+          <ArrowRight size={15} className="shrink-0 text-accent-primary transition-transform group-hover:translate-x-0.5 sm:hidden" />
         </div>
-        <h3 className="font-medium text-foreground mb-0.5">{label}</h3>
-        <p className="text-sm text-default-500">{description}</p>
-        
-        <div className="flex items-center gap-1 mt-3 text-sm text-accent-primary opacity-0 group-hover:opacity-100 transition-opacity">
+        <p className="hidden text-sm text-default-500 sm:block">{description}</p>
+
+        <div className="mt-3 hidden items-center gap-1 text-sm text-accent-primary opacity-0 transition-opacity group-hover:opacity-100 sm:flex">
           <span>进入</span>
-          <ArrowRight size={14} className="group-hover:translate-x-0.5 transition-transform" />
+          <ArrowRight size={14} className="transition-transform group-hover:translate-x-0.5" />
         </div>
       </div>
     </button>
@@ -366,6 +370,7 @@ export function DashboardPage() {
   const user = useUser()
   const [isAcknowledgingSetup, setIsAcknowledgingSetup] = useState(false)
   const [setupChecklist, setSetupChecklist] = useState<Record<string, boolean>>({})
+  const [isSetupExpanded, setIsSetupExpanded] = useState(false)
   const authScopeKey = user?.id ?? 'anonymous'
   const { rootPath, hasInvalidHomeDir } = resolveUserHomeScope(user)
   const homeScopeKey = hasInvalidHomeDir ? '__invalid__' : (rootPath ?? '/')
@@ -644,109 +649,55 @@ export function DashboardPage() {
         </Card>
       )}
 
-      {setupStatus?.is_first_run && (
-        <Card className="border-accent-primary/25 bg-accent-primary/5 shadow-none">
-          <CardBody className="space-y-3 sm:space-y-4">
-            <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-              <div className="flex items-start gap-3">
-                <CheckCircle2 size={18} className="mt-0.5 shrink-0 text-accent-primary" />
-                <div>
-                  <p className="text-sm font-medium text-foreground">首次部署检查</p>
-                  <p className="hidden text-xs text-default-600 sm:block">确认关键入口后关闭首次运行提示。</p>
-                </div>
-              </div>
-              <div className="flex flex-wrap gap-2">
-                <Chip
-                  size="sm"
-                  variant="flat"
-                  color={isSetupChecklistComplete ? 'success' : 'primary'}
-                  className="rounded-lg"
-                >
-                  {isSetupChecklistComplete ? '可关闭提示' : `${remainingSetupChecklistItems} 项待确认`}
-                </Chip>
-                {getSetupSafetyHighlights(setupStatus).map((item) => (
-                  <Chip key={item.label} size="sm" variant="flat" color={item.tone} className="rounded-lg">
-                    {item.label}：{item.value}
-                  </Chip>
-                ))}
-              </div>
-            </div>
-            {setupSafetyWarning && (
-              <div className="rounded-lg border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-default-700">
-                {setupSafetyWarning}
-              </div>
-            )}
-            <div className="grid grid-cols-1 gap-1.5 sm:gap-2 md:grid-cols-2">
-              {setupChecklistItems.map((item) => (
-                <Checkbox
-                  key={item.id}
-                  aria-label={`${item.label}。${item.description}`}
-                  isSelected={setupChecklist[item.id] === true}
-                  onValueChange={(selected) => {
-                    setSetupChecklist((current) => ({ ...current, [item.id]: selected }))
-                  }}
-                  className="m-0 min-h-0 rounded-lg bg-content1/60 px-2.5 py-2 sm:px-3"
-                  classNames={{
-                    label: 'w-full',
-                  }}
-                >
-                  <span className="block text-xs font-medium text-foreground">{item.label}</span>
-                  <span className="hidden text-xs text-default-500 sm:block">{item.description}</span>
-                </Checkbox>
-              ))}
-            </div>
-            <p className="hidden text-xs text-default-600 sm:block">
-              {getSetupChecklistProgressText(remainingSetupChecklistItems)}
-            </p>
-            <div className="grid grid-cols-2 gap-2 sm:flex sm:flex-row sm:flex-wrap sm:items-center">
-              <Button size="sm" variant="flat" className="w-full rounded-lg sm:w-auto" onPress={() => navigate('/users')}>
-                用户
-              </Button>
-              <Button size="sm" variant="flat" className="w-full rounded-lg sm:w-auto" onPress={() => navigate('/maintenance')}>
-                备份
-              </Button>
-              <Button size="sm" variant="flat" className="w-full rounded-lg sm:w-auto" onPress={() => navigate('/settings')}>
-                公网设置
-              </Button>
-              <Button
-                size="sm"
-                className="w-full rounded-lg bg-accent-primary text-white sm:w-auto"
-                isDisabled={!isSetupChecklistComplete}
-                isLoading={isAcknowledgingSetup}
-                onPress={handleAcknowledgeSetup}
-              >
-                {isSetupChecklistComplete ? '已确认' : `还需确认 ${remainingSetupChecklistItems} 项`}
-              </Button>
-            </div>
-          </CardBody>
-        </Card>
-      )}
+      {/* Quick Actions */}
+      <nav aria-label="常用入口" className="min-w-0">
+        <h2 className="mb-3 font-medium">常用入口</h2>
+        <div className="grid min-w-0 grid-cols-2 gap-2 sm:gap-3 lg:grid-cols-4">
+          <QuickAction
+            icon={FileBox}
+            label="文件"
+            description="上传、下载和整理文件"
+            onClick={() => navigate('/files')}
+          />
+          <QuickAction
+            icon={Clock}
+            label="版本"
+            description="找回历史版本"
+            onClick={() => navigate('/versions')}
+          />
+          {isAdmin && (
+            <QuickAction
+              icon={HardDrive}
+              label="空间"
+              description="查看磁盘和版本占用"
+              onClick={() => navigate('/storage')}
+            />
+          )}
+          {isAdmin && (
+            <QuickAction
+              icon={Archive}
+              label="备份与维护"
+              description="查看备份并执行恢复演练"
+              onClick={() => navigate('/maintenance')}
+            />
+          )}
+        </div>
+      </nav>
 
-      {backupOverview.needsAttention && (
-        <Card className="border-warning/30 bg-warning/5 shadow-none">
-          <CardBody className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-            <div className="flex items-start gap-3">
-              <AlertCircle size={18} className="mt-0.5 shrink-0 text-warning" />
-              <div>
-                <p className="text-sm font-medium text-foreground">备份需要查看</p>
-                <p className="text-xs text-default-600">{backupOverview.trend}</p>
-                {backupOverview.nextStep && (
-                  <p className="mt-1 text-xs text-default-600">建议：{backupOverview.nextStep}</p>
-                )}
-              </div>
-            </div>
-            <Button
-              size="sm"
-              variant="flat"
-              className="rounded-lg"
-              startContent={<Archive size={14} />}
-              onPress={() => navigate('/maintenance')}
-            >
-              打开备份
-            </Button>
-          </CardBody>
-        </Card>
-      )}
+      {/* Stats Grid */}
+      <section aria-label="日常空间摘要" className="grid grid-cols-2 gap-2 sm:gap-3 lg:grid-cols-4">
+        {statsCards.map((stat) => (
+          <StatCard
+            key={stat.title}
+            title={stat.title}
+            value={stat.value}
+            subtitle={stat.trend}
+            icon={stat.icon}
+            tone={stat.tone}
+            density="compact"
+          />
+        ))}
+      </section>
 
       {shouldShowDiskSpaceAlert && (
         <Card className={cn('shadow-none', getDiskSpaceAlertClass(diskSpaceStatus.level))}>
@@ -770,21 +721,6 @@ export function DashboardPage() {
           </CardBody>
         </Card>
       )}
-
-      {/* Stats Grid */}
-      <div className="grid grid-cols-2 gap-2 sm:gap-3 lg:grid-cols-4">
-        {statsCards.map((stat) => (
-          <StatCard
-            key={stat.title}
-            title={stat.title}
-            value={stat.value}
-            subtitle={stat.trend}
-            icon={stat.icon}
-            tone={stat.tone}
-            density="compact"
-          />
-        ))}
-      </div>
 
       {/* Storage Overview */}
       <Card className="card-mnemonas">
@@ -850,40 +786,140 @@ export function DashboardPage() {
         </CardBody>
       </Card>
 
-      {/* Quick Actions */}
-      <div>
-        <h2 className="font-medium mb-3">常用入口</h2>
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-          <QuickAction
-            icon={FileBox}
-            label="文件"
-            description="上传、下载和整理文件"
-            onClick={() => navigate('/files')}
-          />
-          {isAdmin && (
-            <QuickAction
-              icon={Archive}
-              label="备份与维护"
-              description="查看备份并执行恢复演练"
-              onClick={() => navigate('/maintenance')}
-            />
-          )}
-          {isAdmin && (
-            <QuickAction
-              icon={HardDrive}
-              label="空间"
-              description="查看磁盘和版本占用"
-              onClick={() => navigate('/storage')}
-            />
-          )}
-          <QuickAction
-            icon={Clock}
-            label="版本"
-            description="找回历史版本"
-            onClick={() => navigate('/versions')}
-          />
-        </div>
-      </div>
+      {setupStatus?.is_first_run && (
+        <Card className="border-accent-primary/25 bg-accent-primary/5 shadow-none">
+          <CardBody className="gap-0 p-0">
+            <button
+              type="button"
+              aria-expanded={isSetupExpanded}
+              aria-controls="first-setup-tasks"
+              aria-label={`${isSetupExpanded ? '收起' : '展开'}首次设置任务`}
+              className="flex w-full min-w-0 items-center justify-between gap-3 rounded-xl px-4 py-3 text-left outline-none transition-colors hover:bg-accent-primary/5 focus-visible:ring-2 focus-visible:ring-primary/40 sm:px-5 sm:py-4"
+              onClick={() => setIsSetupExpanded((current) => !current)}
+            >
+              <span className="flex min-w-0 items-start gap-3">
+                <CheckCircle2 size={18} className="mt-0.5 shrink-0 text-accent-primary" aria-hidden={true} />
+                <span className="min-w-0">
+                  <span className="block text-sm font-medium text-foreground">首次设置</span>
+                  <span className="block text-xs text-default-600">
+                    已完成 {setupChecklistItems.length - remainingSetupChecklistItems}/{setupChecklistItems.length} 项
+                    <span aria-hidden={true}> · </span>
+                    {setupSafetyWarning ? '安全状态需要处理' : '安全状态可继续确认'}
+                  </span>
+                </span>
+              </span>
+              <span className="flex shrink-0 items-center gap-2">
+                <Chip
+                  size="sm"
+                  variant="flat"
+                  color={isSetupChecklistComplete ? 'success' : 'primary'}
+                  className="hidden rounded-lg sm:inline-flex"
+                >
+                  {isSetupChecklistComplete ? '可关闭提示' : `${remainingSetupChecklistItems} 项待完成`}
+                </Chip>
+                <ChevronDown
+                  size={18}
+                  aria-hidden={true}
+                  className={cn('text-default-500 transition-transform', isSetupExpanded && 'rotate-180')}
+                />
+              </span>
+            </button>
+
+            {isSetupExpanded && (
+              <div id="first-setup-tasks" className="space-y-3 border-t border-divider px-4 py-4 sm:space-y-4 sm:px-5">
+                <div className="flex flex-wrap gap-2" aria-label="首次设置安全状态">
+                  <Chip
+                    size="sm"
+                    variant="flat"
+                    color={isSetupChecklistComplete ? 'success' : 'primary'}
+                    className="rounded-lg"
+                  >
+                    {isSetupChecklistComplete ? '可关闭提示' : `${remainingSetupChecklistItems} 项待确认`}
+                  </Chip>
+                  {getSetupSafetyHighlights(setupStatus).map((item) => (
+                    <Chip key={item.label} size="sm" variant="flat" color={item.tone} className="rounded-lg">
+                      {item.label}：{item.value}
+                    </Chip>
+                  ))}
+                </div>
+                {setupSafetyWarning && (
+                  <div className="rounded-lg border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-default-700">
+                    {setupSafetyWarning}
+                  </div>
+                )}
+                <div className="grid grid-cols-1 gap-1.5 sm:gap-2 md:grid-cols-2">
+                  {setupChecklistItems.map((item) => (
+                    <Checkbox
+                      key={item.id}
+                      aria-label={`${item.label}。${item.description}`}
+                      isSelected={setupChecklist[item.id] === true}
+                      onValueChange={(selected) => {
+                        setSetupChecklist((current) => ({ ...current, [item.id]: selected }))
+                      }}
+                      className="m-0 min-h-0 rounded-lg bg-content1/60 px-2.5 py-2 sm:px-3"
+                      classNames={{
+                        label: 'w-full',
+                      }}
+                    >
+                      <span className="block text-xs font-medium text-foreground">{item.label}</span>
+                      <span className="hidden text-xs text-default-500 sm:block">{item.description}</span>
+                    </Checkbox>
+                  ))}
+                </div>
+                <p className="hidden text-xs text-default-600 sm:block">
+                  {getSetupChecklistProgressText(remainingSetupChecklistItems)}
+                </p>
+                <div className="grid grid-cols-2 gap-2 sm:flex sm:flex-row sm:flex-wrap sm:items-center">
+                  <Button size="sm" variant="flat" className="w-full rounded-lg sm:w-auto" onPress={() => navigate('/users')}>
+                    用户
+                  </Button>
+                  <Button size="sm" variant="flat" className="w-full rounded-lg sm:w-auto" onPress={() => navigate('/maintenance')}>
+                    备份
+                  </Button>
+                  <Button size="sm" variant="flat" className="w-full rounded-lg sm:w-auto" onPress={() => navigate('/settings')}>
+                    公网设置
+                  </Button>
+                  <Button
+                    size="sm"
+                    className="w-full rounded-lg bg-accent-primary text-white sm:w-auto"
+                    isDisabled={!isSetupChecklistComplete}
+                    isLoading={isAcknowledgingSetup}
+                    onPress={handleAcknowledgeSetup}
+                  >
+                    {isSetupChecklistComplete ? '已确认' : `还需确认 ${remainingSetupChecklistItems} 项`}
+                  </Button>
+                </div>
+              </div>
+            )}
+          </CardBody>
+        </Card>
+      )}
+
+      {backupOverview.needsAttention && (
+        <Card className="border-warning/30 bg-warning/5 shadow-none">
+          <CardBody className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+            <div className="flex items-start gap-3">
+              <AlertCircle size={18} className="mt-0.5 shrink-0 text-warning" />
+              <div>
+                <p className="text-sm font-medium text-foreground">备份需要查看</p>
+                <p className="text-xs text-default-600">{backupOverview.trend}</p>
+                {backupOverview.nextStep && (
+                  <p className="mt-1 text-xs text-default-600">建议：{backupOverview.nextStep}</p>
+                )}
+              </div>
+            </div>
+            <Button
+              size="sm"
+              variant="flat"
+              className="rounded-lg"
+              startContent={<Archive size={14} />}
+              onPress={() => navigate('/maintenance')}
+            >
+              打开备份
+            </Button>
+          </CardBody>
+        </Card>
+      )}
 
       {/* Recent Activity */}
       <Card className="card-mnemonas">

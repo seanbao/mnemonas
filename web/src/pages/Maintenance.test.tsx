@@ -48,6 +48,23 @@ vi.mock('@/api/files', () => ({
   downloadBackupRestoreReport: vi.fn(),
 }))
 
+vi.mock('@/api/settings', () => ({
+  SettingsError: class SettingsError extends Error {
+    status: number
+    code?: string
+    constructor(message: string, status: number, code?: string) {
+      super(message)
+      this.status = status
+      this.code = code
+    }
+    get isUnavailable() {
+      return this.status === 503 || this.code === 'SERVICE_UNAVAILABLE'
+    }
+  },
+  getSettings: vi.fn(),
+  updateSettings: vi.fn(),
+}))
+
 vi.mock('@/stores/auth', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/stores/auth')>()
   return {
@@ -72,6 +89,7 @@ import {
   verifyBackupRestoreJob,
   downloadBackupRestoreReport,
 } from '@/api/files'
+import { getSettings, updateSettings } from '@/api/settings'
 
 const mockGetScrubResult = getScrubResult as ReturnType<typeof vi.fn>
 const mockRunScrub = runScrub as ReturnType<typeof vi.fn>
@@ -86,6 +104,8 @@ const mockRestoreBackupJob = restoreBackupJob as ReturnType<typeof vi.fn>
 const mockRunBatchBackupRestore = runBatchBackupRestore as ReturnType<typeof vi.fn>
 const mockVerifyBackupRestoreJob = verifyBackupRestoreJob as ReturnType<typeof vi.fn>
 const mockDownloadBackupRestoreReport = downloadBackupRestoreReport as ReturnType<typeof vi.fn>
+const mockGetSettings = vi.mocked(getSettings)
+const mockUpdateSettings = vi.mocked(updateSettings)
 
 function expectCalledWithAbortSignal(mockFn: ReturnType<typeof vi.fn>) {
   const call = mockFn.mock.calls.find(([options]) => {
@@ -379,6 +399,20 @@ describe('MaintenancePage', () => {
     mockGetScrubResult.mockResolvedValue(mockCompletedResult)
     mockRunScrub.mockResolvedValue(mockCompletedResult)
     mockDownloadDiagnosticsExport.mockResolvedValue(undefined)
+    mockGetSettings.mockResolvedValue({
+      success: true,
+      data: {
+        maintenance: {
+          scrub: {
+            enabled: false,
+            schedule_interval: '168h',
+            retry_interval: '1h',
+            max_retries: 1,
+          },
+        },
+      },
+    } as unknown as Awaited<ReturnType<typeof getSettings>>)
+    mockUpdateSettings.mockResolvedValue({ success: true, message: 'settings updated', warning: false })
     mockListBackupJobs.mockResolvedValue([])
     mockRunBackupJob.mockResolvedValue(mockBackupJobs[0].last_run)
     mockCheckBackupRetentionJob.mockResolvedValue(mockBackupJobs[0].last_retention_check)
@@ -833,6 +867,16 @@ describe('MaintenancePage', () => {
       await waitFor(() => {
         expect(screen.getByText('下载诊断包')).toBeTruthy()
       })
+    })
+
+    it('renders the independent periodic scrub schedule settings', async () => {
+      render(<Maintenance />)
+
+      expect(await screen.findByText('周期校验计划')).toBeInTheDocument()
+      expect(mockGetSettings).toHaveBeenCalledTimes(1)
+      const options = mockGetSettings.mock.calls[0][0]
+      expect(options?.signal).toBeInstanceOf(AbortSignal)
+      expect(Object.keys(options ?? {})).toEqual(['signal'])
     })
 
     it('refetches scrub history when the auth scope changes', async () => {

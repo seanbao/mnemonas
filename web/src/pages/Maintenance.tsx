@@ -22,6 +22,7 @@ import {
 import { PageHeader } from '@/components/ui/PageHeader'
 import { StatCard } from '@/components/ui/StatCard'
 import { EmptyState } from '@/components/ui/EmptyState'
+import { ScrubScheduleSettings } from '@/components/maintenance'
 import {
   ApiError,
   getScrubResult,
@@ -3762,6 +3763,8 @@ export default function Maintenance() {
           )}
         </CardBody>
       </Card>
+
+      <ScrubScheduleSettings />
 
       {/* Backup Jobs Card */}
       <Card className="card-mnemonas">

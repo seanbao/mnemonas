@@ -8,7 +8,7 @@
 
 | 工具 | 最低版本 | 推荐版本 | 用途 |
 | --- | --- | --- | --- |
-| Go | 1.25.11 | 1.25.11+ | Go 控制面 |
+| Go | 1.25.12 | 1.25.12+ | Go 控制面 |
 | Rust | 1.92 | 1.92.x | Rust 数据面与 protobuf 生成器 |
 | Node.js | `^20.19.0` 或 `>=22.12.0` | `.nvmrc` 指定的 22.x | 前端 |
 | protoc | 3.20 | CI 对齐版本 3.20.1 | 重新生成 protobuf 代码 |
@@ -59,7 +59,7 @@ cargo install cargo-watch --version 8.5.3
 ```bash
 sudo apt update
 
-GO_VERSION=1.25.11
+GO_VERSION=1.25.12
 wget "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz"
 sudo tar -C /usr/local -xzf "go${GO_VERSION}.linux-amd64.tar.gz"
 echo 'export PATH=$PATH:/usr/local/go/bin:$HOME/go/bin' >> ~/.bashrc
@@ -555,7 +555,7 @@ export PATH=$PATH:$(go env GOPATH)/bin
 
 ### Go 工具链下载失败
 
-仓库固定 `toolchain go1.25.11`。如果本地网络阻止 toolchain 下载，但已安装兼容的本地 Go 1.25.x：
+仓库固定 `toolchain go1.25.12`。如果本地网络阻止 toolchain 下载，但已安装兼容的本地 Go 1.25.x：
 
 ```bash
 packages=$(GOTOOLCHAIN=local make --no-print-directory go-packages)
@@ -563,7 +563,7 @@ GOTOOLCHAIN=local go test $packages
 GOTOOLCHAIN=local make build
 ```
 
-发布构建和漏洞扫描应使用 Go 1.25.11 或更新的 1.25.x patch 版本。
+发布构建和漏洞扫描应使用 Go 1.25.12 或更新的 1.25.x patch 版本。
 
 如果 `GOSUMDB=off` 导致 toolchain 校验失败：
 

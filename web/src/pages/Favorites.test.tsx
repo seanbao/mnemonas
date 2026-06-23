@@ -10,7 +10,13 @@ const mockAddToast = vi.fn()
 const mockNavigate = vi.fn()
 const mockBatchExecute = vi.fn()
 const useCanWriteMock = vi.fn(() => true)
-const mockUser = { id: 'user-1', username: 'user1', role: 'user' as const, email: 'user1@local', homeDir: '/' }
+const mockUser: {
+  id: string
+  username: string
+  role: 'admin' | 'user' | 'guest'
+  email: string
+  homeDir: string
+} = { id: 'user-1', username: 'user1', role: 'user', email: 'user1@local', homeDir: '/' }
 let mockUseRealBatchOperation = false
 let mockBatchResult = {
   succeeded: 1,
@@ -40,6 +46,10 @@ vi.mock('@/api/favorites', async () => {
     updateFavoriteNote: vi.fn(),
   }
 })
+
+vi.mock('@/components/favorites/FavoritesSettings', () => ({
+  FavoritesSettings: () => <section aria-label="收藏功能设置">收藏功能设置</section>,
+}))
 
 vi.mock('@/lib/useBatchOperation', () => ({
   useBatchOperation: (options: {
@@ -259,6 +269,32 @@ describe('FavoritesPage', () => {
       expect(screen.getByText('收藏夹')).toBeInTheDocument()
       expect(screen.getByText('2 项收藏')).toBeInTheDocument()
     })
+  })
+
+  it('shows the favorites settings card only to administrators', async () => {
+    const { rerender } = render(<FavoritesPage />)
+
+    await waitFor(() => {
+      expect(screen.getByText('2 项收藏')).toBeInTheDocument()
+    })
+    expect(screen.queryByRole('region', { name: '收藏功能设置' })).not.toBeInTheDocument()
+
+    mockUser.role = 'admin'
+    rerender(<FavoritesPage />)
+
+    expect(screen.getByRole('region', { name: '收藏功能设置' })).toBeInTheDocument()
+  })
+
+  it('keeps the favorites settings card available to administrators when favorites are disabled', async () => {
+    mockUser.role = 'admin'
+    vi.mocked(favoritesApi.listFavorites).mockRejectedValue(
+      new FavoritesError('favorites feature disabled', 503, 'FAVORITES_FEATURE_DISABLED'),
+    )
+
+    render(<FavoritesPage />)
+
+    expect(await screen.findByText('收藏功能已关闭')).toBeInTheDocument()
+    expect(screen.getByRole('region', { name: '收藏功能设置' })).toBeInTheDocument()
   })
 
   it('shows the leaf folder name for directory favorites', async () => {

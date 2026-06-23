@@ -377,6 +377,7 @@ Run `make verify-changed` before committing local changes. The target invokes `s
 The selector covers these change classes:
 
 - Go, Rust dataplane, `tools/proto-gen`, protobuf, Web UI, Playwright E2E, Docker, documentation, GitHub Actions workflow, and shell-script changes.
+- Web UI changes run threshold-enforced Vitest coverage tests. TSX and CSS changes under `web/src` also run the frontend quality E2E suite for accessibility, responsive layout, and interaction integrity.
 - Go, Rust, and Web dependency manifest or lockfile changes add dependency security checks.
 - Toolchain and quality configuration changes, including `.go-version`, `.nvmrc`, `.golangci.yml`/`.golangci.yaml`, `.github/dependabot.yml`/`.github/dependabot.yaml`, `codecov.yml`/`codecov.yaml`, and `mnemonas.example.toml`.
 - Docker and public-access template changes, including `.env.example`, Compose templates, and `deploy/public-access/`.
@@ -411,10 +412,15 @@ npm run lint
 npm run typecheck
 npm run build
 npm run test:e2e
+npm run test:e2e:quality
 npm run test:e2e:ui
 ```
 
 Playwright should cover desktop and mobile shells, navigation, file-page interactions, runtime console errors, and screenshot/layout checks for important views.
+
+`npm run test:e2e:quality` runs `accessibility.spec.ts`, `layout-integrity.spec.ts`, `interaction-integrity.spec.ts`, and `consumer-visual.spec.ts`. The consumer visual regression fixes theme and dynamic data, disables animation, masks the user avatar, and caps desktop and mobile screenshot differences at `0.005`. Changed-file validation selects this command for TSX and CSS changes under `web/src`; use `npm run test:e2e` for the complete Playwright suite.
+
+Vitest coverage excludes Playwright helpers under `web/e2e`. Real browser tests cover those helpers, so they do not belong in the unit-test coverage denominator. Frontend coverage thresholds remain centralized in `web/vitest.config.ts`.
 
 The default Playwright configuration starts isolated backend and frontend test servers.
 The default per-test Playwright timeout is 60 seconds, and the default assertion timeout is 10 seconds; use `MNEMONAS_E2E_TEST_TIMEOUT_MS` and `MNEMONAS_E2E_EXPECT_TIMEOUT_MS` for long flows or slow local environments.

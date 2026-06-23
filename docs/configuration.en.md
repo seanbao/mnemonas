@@ -588,6 +588,8 @@ By default, `auth.enabled = false` or enabled WebDAV with `webdav.auth_type = "n
 | `enabled` | bool | `true` | Enable favorites |
 | `store_file` | string | `<storage.root>/.mnemonas/favorites.json` | Favorites metadata file |
 
+Administrators can load, reset, and save the favorites switch independently on Favorites. The Web form submits only `favorites` and does not overwrite other runtime settings.
+
 ## `[alerts]`
 
 | Option | Type | Default | Description |
@@ -618,7 +620,7 @@ By default, `auth.enabled = false` or enabled WebDAV with `webdav.auth_type = "n
 
 Alert Webhook, Telegram, WeCom, and DingTalk outbound requests do not follow HTTP redirects; `3xx` responses are treated as delivery failures.
 
-Health pages and diagnostics show alert state and whether Webhook, Telegram, WeCom, DingTalk, or email notifications are configured. The email channel is marked configured only when email alerts are enabled and SMTP host, port, sender, and at least one non-empty recipient are present.
+Health loads, validates, resets, and saves notification settings independently. The Web form submits only `alerts` and does not overwrite other runtime settings. Health and diagnostics also show alert state and whether Webhook, Telegram, WeCom, DingTalk, or email notifications are configured. The email channel is marked configured only when email alerts are enabled and SMTP host, port, sender, and at least one non-empty recipient are present.
 
 Diagnostics do not expose webhook URL, webhook headers, `telegram_bot_token`, `wecom_webhook_url`, `dingtalk_webhook_url`, SMTP host, SMTP username, `smtp_password`, sender address, or recipient addresses.
 
@@ -632,7 +634,7 @@ Storage-capacity events use `storage_alert`. External payloads keep capacity met
 
 Backup-related event types include `backup_run`, `backup_restore`, `backup_restore_verify`, `backup_restore_drill`, and `backup_retention_check`. `scrub_run` details omit object hashes and lower-level error text; `login_rate_limited` details include only username status and client-address scope, not raw usernames or client addresses; share-related event types include `share_expiring_soon`, whose details use aggregate counts and do not include share paths, URLs, passwords, or IDs.
 
-Administrators can send an `alert_test` event from the Web settings page or `POST /api/v1/settings/alerts/test` after saving the alert configuration.
+Administrators can send an `alert_test` event from Health or `POST /api/v1/settings/alerts/test` after saving the alert configuration. The Web UI does not send a test alert while changes are unsaved, alerts are disabled, or no enabled channel is configured.
 
 Successful and failed webhook, WeCom, and DingTalk logs record only the URL scheme and host, not paths, query strings, credentials, or GET payload fields. Telegram send errors do not include the bot token. SMTP success logs do not record SMTP hosts or addresses, and SMTP failure errors do not echo SMTP hosts, usernames, passwords, senders, recipients, or raw server error text.
 
@@ -666,6 +668,7 @@ Disk health uses `smartctl --json --all` to collect SMART self-assessment, tempe
 
 Runtime behavior:
 
+- Administrators can load, validate, reset, and save disk-health settings independently on Health. The Web form submits only `disk_health` and does not overwrite other runtime settings.
 - `GET /api/v1/maintenance/disk-health` runs an immediate probe and returns full device details.
 - Diagnostics and diagnostic exports include only a sanitized summary, not serial numbers.
 - Background checks that find `warning`, `critical`, or `unavailable` status write a `disk_health` activity-log entry as the system user, with repeats limited by `cooldown_period`.
@@ -682,7 +685,7 @@ Runtime behavior:
 | `retry_interval` | duration | `"1h"` | Automatic retry interval after a failed Scrub |
 | `max_retries` | int | `1` | Maximum automatic retries after one failure; `0` disables retries |
 
-When enabled, the server triggers full Scrub runs in the background as the system user. Completion, failure, object anomalies, and result-persistence warnings continue to use maintenance history, activity logs, and configured alert channels. After a failed Scrub, the scheduler first retries according to `retry_interval` up to `max_retries`; after that, the next regular attempt follows `schedule_interval`. These fields can also be updated from the Web settings page or Settings API, and saving them immediately replaces the running background scheduler.
+When enabled, the server triggers full Scrub runs in the background as the system user. Completion, failure, object anomalies, and result-persistence warnings continue to use maintenance history, activity logs, and configured alert channels. After a failed Scrub, the scheduler first retries according to `retry_interval` up to `max_retries`; after that, the next regular attempt follows `schedule_interval`. These fields can also be updated from Maintenance or the Settings API. The Web form submits only `maintenance.scrub`; saving immediately replaces the running background scheduler without overwriting other runtime settings.
 
 ```toml
 [maintenance.scrub]

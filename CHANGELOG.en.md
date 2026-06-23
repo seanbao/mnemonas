@@ -11,7 +11,7 @@ This project follows [Semantic Versioning 2.0.0](https://semver.org/).
 ### Added
 
 #### Web UI
-- Dashboard with storage usage, file/version counts, recent activity, quick actions, and data-plane health.
+- Dashboard with storage usage, file/version counts, recent activity, quick actions, and data-plane health. The desktop sidebar now includes a Home entry consistent with mobile navigation.
 - File manager with breadcrumbs, list/grid views, context actions, drag-and-drop upload, batch operations, upload queue, and thumbnails.
 - Album mode with image waterfall layout, generated thumbnails, and focused image browsing.
 - Version history with version metadata, size comparison, and restore.
@@ -21,7 +21,11 @@ This project follows [Semantic Versioning 2.0.0](https://semver.org/).
 - Storage page shows filesystem type, mount point, and backing device/dataset source.
 - User management with create/edit/delete, home directory and quota editing, password reset, and enable/disable flows.
 - Share management with link creation, password protection, expiration, access statistics, public share access, risk filtering, soon-expiry reminders, policy presets, and direct disable actions for high-risk links.
-- Settings for server, storage, retention, WebDAV, CDC parameters, scheduled Scrub, data-plane connection status, and copyable directory-access review records with current-browser recent history from saved matrices or unsaved-rule previews.
+- The Favorites page provides administrators with an independently loaded, reset, and saved feature switch whose request contains only `favorites`.
+- Settings opens with task-oriented entries for account and remote access, data protection and permissions, sharing and collaboration, device mounting, and device status and notifications. The device-status entry opens Health. Mobile uses a single category selector, while expert network parameters are collapsed by default. CDC, data-plane connections, and related deployment parameters are no longer exposed in the Web UI and remain managed through configuration and diagnostics.
+- Settings for server, storage, retention, WebDAV, and copyable directory-access review records with current-browser recent history from saved matrices or unsaved-rule previews.
+- Scheduled Scrub configuration now lives on Maintenance and saves through an isolated request containing only `maintenance.scrub`.
+- Health owns disk-health and notification configuration. Each form loads, validates, resets, and saves independently through requests containing only `disk_health` or `alerts`; saved notification channels can send a test alert.
 - Public access wizard and security self-check entry point for HTTPS reverse proxy, trusted proxy hops, and share-domain configuration.
 - Desktop and mobile E2E coverage for the public access wizard.
 - Health and maintenance views for uptime, storage health, disk SMART/temperature/media-wear/missing-device status, scheduled Scrub status/retries, SMB preview runtime state, scrub, GC, object browsing, backup job health/schedules/retention/restore drills, and diagnostic bundle export.
@@ -38,11 +42,12 @@ This project follows [Semantic Versioning 2.0.0](https://semver.org/).
 - Runtime settings APIs, including public-access security self-check, certificate renewal and failure-triage guidance, scheduled Scrub updates, and hot updates for Webhook/Telegram/WeCom/DingTalk/SMTP alert notifications.
 - Configured local backup jobs and command-backed restic/rclone remote targets with run-now execution, lightweight scheduling, automatic backup windows, local snapshot retention, automatic/manual retention checks, job health status, manifest-based local restore drills, non-destructive restore previews, batch restore preview/execution for up to 20 items with per-item restore and read-only verification results, restore preflight for target isolation/state/capacity/content/config handling, failed-preflight blocking, safe-directory local/restic/rclone restore, persisted post-restore verification reports, post-restore cutover and rollback checklists, copyable restore cutover records, restore summary export, scheduled restore-drill reminders, rate-limited stale/missing restore-drill alerts, restore-drill history, success-rate summary, failure categorization, restore result history, remote consistency checks, and Webhook/Telegram/WeCom/DingTalk/SMTP events for backup failures, retention-check failures, and warnings.
 - Disk health API and runtime settings for `smartctl --json` SMART checks, temperature thresholds, NVMe/ATA media-wear signals, missing-device detection, serial-drift detection, `disk_health` activity-log records, and Webhook/Telegram/WeCom/DingTalk/SMTP events.
-- `[maintenance.scrub]` supports background scheduled Scrub with bounded failure retries; the Settings API and Web settings page can hot-update its scheduler, and diagnostics report schedule settings, latest Scrub state, and retry counts. Manual and scheduled scrub completion writes activity entries; scrub failures, object anomalies, and incomplete result persistence send `scrub_run` events through Webhook/Telegram/WeCom/DingTalk/SMTP notifications.
+- `[maintenance.scrub]` supports background scheduled Scrub with bounded failure retries; the Settings API and Web Maintenance page can hot-update its scheduler, and diagnostics report schedule settings, latest Scrub state, and retry counts. Manual and scheduled scrub completion writes activity entries; scrub failures, object anomalies, and incomplete result persistence send `scrub_run` events through Webhook/Telegram/WeCom/DingTalk/SMTP notifications.
 - Login rate limits send throttled `login_rate_limited` warning events through configured alert channels, containing only username and client address, never passwords or tokens.
 - SMB preview diagnostics return sanitized runtime state and share counts, and `nasd --check-config` warns when `smb.enabled=true` because current builds do not start an SMB/Samba listener.
 
 #### Project Tooling
+- Desktop and mobile visual regression for the consumer settings overview with fixed dynamic data and a `0.005` screenshot-difference limit.
 - GitHub Actions CI/CD for Go, Rust, frontend checks, Docker builds, and release packaging.
 - Release workflow for multi-platform binaries and container images.
 - Linux/systemd install and uninstall scripts.
@@ -185,7 +190,7 @@ First public release target.
 - This version is positioned as an L1 private file cloud with an initial L1+ public-access safety baseline, not as the only long-term copy of important data. Production use should keep external backups.
 
 ### Compatibility
-- Go: 1.25.11+
+- Go: 1.25.12+
 - Rust: 1.92+
 - Node.js: `^20.19.0` or `>=22.12.0`
 - Docker: 20.10+ with Compose v2 plugin

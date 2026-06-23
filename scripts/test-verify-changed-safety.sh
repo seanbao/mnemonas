@@ -188,7 +188,7 @@ run_untracked_web_e2e_change_selects_typecheck_and_e2e() {
   assert_file_contains "$out" "Run frontend E2E: cd web && npm run test:e2e"
 }
 
-run_web_src_change_selects_typecheck_without_e2e() {
+run_web_src_change_selects_coverage_and_quality_e2e() {
   local case_dir="$TMP_ROOT/web-src-change"
   local out="$TMP_ROOT/web-src-change-out.log"
   setup_repo "$case_dir"
@@ -197,7 +197,23 @@ run_web_src_change_selects_typecheck_without_e2e() {
   run_dry_run "$case_dir" "$out"
 
   assert_file_contains "$out" "Run frontend typecheck: cd web && npm run typecheck"
-  assert_file_not_contains "$out" "Run frontend E2E"
+  assert_file_contains "$out" "Run frontend coverage tests: cd web && npm run test:coverage"
+  assert_file_contains "$out" "Run frontend quality E2E: cd web && npm run test:e2e:quality"
+  assert_file_not_contains "$out" "Run frontend E2E: cd web && npm run test:e2e"
+}
+
+run_web_css_change_selects_coverage_and_quality_e2e() {
+  local case_dir="$TMP_ROOT/web-css-change"
+  local out="$TMP_ROOT/web-css-change-out.log"
+  setup_repo "$case_dir"
+
+  mkdir -p "$case_dir/web/src/styles"
+  printf '%s\n' ':root { color-scheme: light dark; }' > "$case_dir/web/src/styles/theme.css"
+  run_dry_run "$case_dir" "$out"
+
+  assert_file_contains "$out" "Run frontend coverage tests: cd web && npm run test:coverage"
+  assert_file_contains "$out" "Run frontend quality E2E: cd web && npm run test:e2e:quality"
+  assert_file_not_contains "$out" "Run frontend E2E: cd web && npm run test:e2e"
 }
 
 run_web_script_change_selects_frontend_and_scripts_checks() {
@@ -211,7 +227,7 @@ run_web_script_change_selects_frontend_and_scripts_checks() {
   assert_file_contains "$out" "Validate shell scripts: make scripts-check"
   assert_file_contains "$out" "Run frontend lint: cd web && npm run lint"
   assert_file_contains "$out" "Run frontend typecheck: cd web && npm run typecheck"
-  assert_file_contains "$out" "Run frontend unit tests: cd web && npm run test:run"
+  assert_file_contains "$out" "Run frontend coverage tests: cd web && npm run test:coverage"
   assert_file_contains "$out" "Build frontend: cd web && npm run build"
   assert_file_not_contains "$out" "Run frontend E2E"
 }
@@ -238,7 +254,7 @@ run_web_vitest_config_change_selects_unit_validation() {
 
   assert_file_contains "$out" "Run frontend lint: cd web && npm run lint"
   assert_file_contains "$out" "Run frontend typecheck: cd web && npm run typecheck"
-  assert_file_contains "$out" "Run frontend unit tests: cd web && npm run test:run"
+  assert_file_contains "$out" "Run frontend coverage tests: cd web && npm run test:coverage"
   assert_file_contains "$out" "Build frontend: cd web && npm run build"
   assert_file_not_contains "$out" "Run frontend E2E"
 }
@@ -253,7 +269,7 @@ run_web_vite_config_change_selects_build_validation() {
 
   assert_file_contains "$out" "Run frontend lint: cd web && npm run lint"
   assert_file_contains "$out" "Run frontend typecheck: cd web && npm run typecheck"
-  assert_file_contains "$out" "Run frontend unit tests: cd web && npm run test:run"
+  assert_file_contains "$out" "Run frontend coverage tests: cd web && npm run test:coverage"
   assert_file_contains "$out" "Build frontend: cd web && npm run build"
   assert_file_not_contains "$out" "Run frontend E2E"
 }
@@ -977,7 +993,8 @@ run_workflow_change_selects_workflows_check
 run_ci_workflow_runs_toolchain_check
 run_web_e2e_change_selects_typecheck_and_e2e
 run_untracked_web_e2e_change_selects_typecheck_and_e2e
-run_web_src_change_selects_typecheck_without_e2e
+run_web_src_change_selects_coverage_and_quality_e2e
+run_web_css_change_selects_coverage_and_quality_e2e
 run_web_script_change_selects_frontend_and_scripts_checks
 run_web_e2e_tsconfig_change_selects_typecheck_and_e2e
 run_web_vitest_config_change_selects_unit_validation

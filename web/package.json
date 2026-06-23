@@ -44,6 +44,8 @@
     "test:coverage": "node -r ./scripts/vitest-preload.cjs ./node_modules/vitest/vitest.mjs run --coverage",
     "pretest:e2e": "node ./scripts/check-node.cjs && npm run check:test-focus",
     "test:e2e": "node ./scripts/playwright.cjs test",
+    "pretest:e2e:quality": "node ./scripts/check-node.cjs && npm run check:test-focus",
+    "test:e2e:quality": "node ./scripts/playwright.cjs test accessibility.spec.ts layout-integrity.spec.ts interaction-integrity.spec.ts consumer-visual.spec.ts",
     "pretest:e2e:navigation": "node ./scripts/check-node.cjs && npm run check:test-focus",
     "test:e2e:navigation": "node ./scripts/playwright.cjs test navigation.spec.ts",
     "pretest:e2e:ui": "node ./scripts/check-node.cjs && npm run check:test-focus",
