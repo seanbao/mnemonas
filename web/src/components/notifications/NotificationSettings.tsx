@@ -1118,7 +1118,7 @@ export function NotificationSettings() {
                       classNames={{ inputWrapper: 'input-shell group-data-[focus=true]:border-accent-primary' }}
                     />
                     <FieldError message={validationErrors.weComWebhookURL} />
-                    <p className="text-xs text-default-500">地址保存后只显示脱敏占位符。</p>
+                    <p className="text-xs text-default-500">地址保存后只显示脱敏值。</p>
                   </div>
                 </DestinationSection>
 
@@ -1148,7 +1148,7 @@ export function NotificationSettings() {
                       classNames={{ inputWrapper: 'input-shell group-data-[focus=true]:border-accent-primary' }}
                     />
                     <FieldError message={validationErrors.dingTalkWebhookURL} />
-                    <p className="text-xs text-default-500">地址保存后只显示脱敏占位符。</p>
+                    <p className="text-xs text-default-500">地址保存后只显示脱敏值。</p>
                   </div>
                 </DestinationSection>
 
