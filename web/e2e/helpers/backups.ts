@@ -10,6 +10,19 @@ type BatchRestoreRouteOptions = {
   restoreMode?: 'success' | 'preflight-failure'
 }
 
+type CreateLocalBackupRequest = {
+  name: string
+  destination: string
+  schedule_interval?: '0'
+}
+
+export const backupJobsRoutePattern = /\/api\/v1\/maintenance\/backups(?:\?.*)?$/
+
+export type BackupJobsRouteState = {
+  jobs: Array<Record<string, unknown>>
+  createRequests: CreateLocalBackupRequest[]
+}
+
 function backupRun(jobId: string) {
   return {
     id: `${jobId}-run-20260509T020304Z`,
@@ -122,17 +135,68 @@ export const defaultBackupJobs = [
   backupJob('pending-restore', '待复核恢复备份', '/restore/pending', false),
 ]
 
-export async function routeBackupJobs(page: Page, jobs = defaultBackupJobs) {
-  await page.route(/\/api\/v1\/maintenance\/backups(?:\?.*)?$/, async (route) => {
+export async function routeBackupJobs(page: Page, initialJobs: Array<Record<string, unknown>> = defaultBackupJobs): Promise<BackupJobsRouteState> {
+  const state: BackupJobsRouteState = {
+    jobs: [...initialJobs],
+    createRequests: [],
+  }
+  await page.route(backupJobsRoutePattern, async (route) => {
+    if (route.request().method() === 'POST') {
+      const request = route.request().postDataJSON() as CreateLocalBackupRequest
+      state.createRequests.push(request)
+      const id = `local-backup-${state.jobs.length + 1}`
+      const automatic = request.schedule_interval !== '0'
+      const created = {
+        id,
+        name: request.name,
+        type: 'local',
+        source: '/srv/mnemonas',
+        destination: request.destination,
+        disabled: false,
+        ...(automatic ? {
+          schedule_interval: '24h0m0s',
+          next_run_at: '2026-05-10T02:03:04Z',
+          stale_after: '48h0m0s',
+        } : {}),
+        restore_drill_stale_after: '720h0m0s',
+        max_snapshots: 7,
+        retention_status: 'ok',
+        retention_message: '本地快照自动清理已配置',
+        health_status: 'due',
+        health_message: 'no successful backup yet',
+        restore_drill_status: 'blocked',
+        restore_drill_message: 'no successful backup yet',
+        include_config: true,
+        verify_after_backup: true,
+        exclude: ['.mnemonas/thumbnails'],
+        running: false,
+      }
+      state.jobs.unshift(created)
+      await route.fulfill({
+        status: 201,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          success: true,
+          message: 'backup job created',
+          data: created,
+        }),
+      })
+      return
+    }
+    if (route.request().method() !== 'GET') {
+      await route.fallback()
+      return
+    }
     await route.fulfill({
       status: 200,
       contentType: 'application/json',
       body: JSON.stringify({
         success: true,
-        data: jobs,
+        data: state.jobs,
       }),
     })
   })
+  return state
 }
 
 export async function routeBatchBackupRestore(page: Page, options: BatchRestoreRouteOptions = {}) {

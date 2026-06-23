@@ -52,6 +52,7 @@ func expectedRESTRouteContracts() []string {
 		"POST /api/v1/files-copy",
 		"POST /api/v1/files-move",
 		"GET /api/v1/maintenance/backups",
+		"POST /api/v1/maintenance/backups",
 		"GET /api/v1/maintenance/backups/{id}",
 		"GET /api/v1/maintenance/backups/{id}/restore-report",
 		"POST /api/v1/maintenance/backups/batch-restore",

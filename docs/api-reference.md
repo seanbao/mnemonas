@@ -1763,6 +1763,7 @@ WebDAV 凭据响应：
 | `GET` | `/api/v1/maintenance/objects` | 列出存储对象 |
 | `POST` | `/api/v1/maintenance/gc` | 运行垃圾回收 |
 | `GET` | `/api/v1/maintenance/backups` | 列出已配置备份任务 |
+| `POST` | `/api/v1/maintenance/backups` | 创建本地整机备份任务 |
 | `GET` | `/api/v1/maintenance/backups/{id}` | 获取单个备份任务状态 |
 | `POST` | `/api/v1/maintenance/backups/{id}/run` | 立即运行备份任务 |
 | `POST` | `/api/v1/maintenance/backups/{id}/retention-check` | 检查本地或远程保留状态 |
@@ -1781,6 +1782,21 @@ WebDAV 凭据响应：
 - `grace_period_hours`：可选非负整数，最多出现一次。默认值为 `24`；宽限期内创建的对象会被跳过。
 
 `dry_run=false` 且部分删除失败时，响应包含 `failed_count` 和 `delete_failures`。
+
+`POST /api/v1/maintenance/backups` 创建以当前 `storage.root` 为来源的本地备份任务。服务端生成任务 ID；该端点不接受任务类型、来源目录、远端仓库或外部命令字段。请求示例：
+
+```json
+{
+  "name": "外置硬盘备份",
+  "destination": "/mnt/backup-drive/mnemonas",
+  "schedule_interval": "24h",
+  "max_snapshots": 7,
+  "include_config": true,
+  "verify_after_backup": true
+}
+```
+
+`name` 和 `destination` 必填。`destination` 必须是 `storage.root` 之外的安全绝对路径，不能指向受保护系统目录、普通文件或经过符号链接的路径。可选字段默认值分别为 `24h`、`7`、`true` 和 `true`；`schedule_interval` 使用 `"0"` 表示仅手动运行。创建成功返回 `201 Created`、任务视图和指向任务状态端点的 `Location` 响应头。配置会先安全写入 `config.toml`，再添加到当前备份管理器，不需要重启服务。
 
 恢复预览请求：
 

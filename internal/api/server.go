@@ -2042,6 +2042,7 @@ func (s *Server) setupRoutes() {
 			r.Get("/objects", s.handleListObjects)
 			r.Post("/gc", s.handleGC)
 			r.Get("/backups", s.handleListBackups)
+			r.Post("/backups", s.handleCreateLocalBackup)
 			r.Post("/backups/batch-restore", s.handleRunBatchBackupRestore)
 			r.Post("/backups/batch-restore-preview", s.handlePreviewBatchBackupRestore)
 			r.Get("/backups/{id}", s.handleGetBackup)

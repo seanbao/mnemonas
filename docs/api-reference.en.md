@@ -1756,6 +1756,7 @@ If the runtime users-file path is empty, `initial_password_file` returns `block`
 | `GET` | `/api/v1/maintenance/objects` | List storage objects |
 | `POST` | `/api/v1/maintenance/gc` | Run garbage collection |
 | `GET` | `/api/v1/maintenance/backups` | List configured backup jobs |
+| `POST` | `/api/v1/maintenance/backups` | Create a local full-storage backup job |
 | `GET` | `/api/v1/maintenance/backups/{id}` | Get one backup job status |
 | `POST` | `/api/v1/maintenance/backups/{id}/run` | Run a backup job now |
 | `POST` | `/api/v1/maintenance/backups/{id}/retention-check` | Check local or remote retention state |
@@ -1774,6 +1775,21 @@ If the runtime users-file path is empty, `initial_password_file` returns `block`
 - `grace_period_hours`: optional non-negative integer, at most once. The default is `24`; objects created inside the grace period are skipped.
 
 When `dry_run=false` and some deletions fail, the response includes `failed_count` and `delete_failures`.
+
+`POST /api/v1/maintenance/backups` creates a local backup job whose source is the current `storage.root`. The server generates the job ID. This endpoint does not accept job type, source path, remote repository, or external-command fields. Example request:
+
+```json
+{
+  "name": "External disk backup",
+  "destination": "/mnt/backup-drive/mnemonas",
+  "schedule_interval": "24h",
+  "max_snapshots": 7,
+  "include_config": true,
+  "verify_after_backup": true
+}
+```
+
+`name` and `destination` are required. `destination` must be a safe absolute path outside `storage.root`; it cannot be a protected system directory, regular file, or path that traverses a symlink. The optional fields default to `24h`, `7`, `true`, and `true`, respectively. Set `schedule_interval` to `"0"` for a manual-only job. A successful request returns `201 Created`, the job view, and a `Location` header for the job-status endpoint. The configuration is safely persisted to `config.toml` before the job is added to the running backup manager, so no service restart is required.
 
 Restore preview request:
 ```json

@@ -77,6 +77,8 @@ MnemoNAS 提供内置备份任务入口，可在维护页或 API 中执行、查
 - `restic`：调用系统中的 `restic` 可执行文件，把来源目录写入 restic 仓库。
 - `rclone`：调用系统中的 `rclone` 可执行文件，把来源目录同步到 rclone remote。
 
+管理员可调用 `POST /api/v1/maintenance/backups`，创建以当前 `storage.root` 为来源的本地整机备份任务。该端点由服务端生成任务 ID，默认每 24 小时运行、保留 7 个快照、包含配置并在备份后执行校验；`schedule_interval` 设置为 `"0"` 时仅手动运行。任务保存后会加入当前备份管理器，不需要重启服务。自定义来源、restic 和 rclone 任务仍由配置文件管理。
+
 限制：
 
 - `local.destination` 必须是 `storage.root` 之外的绝对路径，且不能是文件系统根目录或受保护系统目录；已存在的路径组件不能是符号链接，避免递归把备份写回源目录或写入符号链接指向的位置。本地恢复预览、恢复和恢复演练在读取快照 manifest 或创建演练产物前也会重新检查该目标路径。

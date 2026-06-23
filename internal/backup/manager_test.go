@@ -325,6 +325,122 @@ func TestNewManagerRejectsDuplicateJobID(t *testing.T) {
 	}
 }
 
+func TestManagerAddJobMakesLocalJobRunnableWithoutRestart(t *testing.T) {
+	tmpDir := t.TempDir()
+	source := filepath.Join(tmpDir, "source")
+	destination := filepath.Join(tmpDir, "backups")
+	configPath := filepath.Join(tmpDir, "config.toml")
+	mustWriteFile(t, filepath.Join(source, "docs", "note.txt"), "hot added")
+	mustWriteFile(t, configPath, "[server]\nport = 8080\n")
+
+	manager, err := NewManager(ManagerConfig{
+		Root:        filepath.Join(tmpDir, "state"),
+		StorageRoot: source,
+		ConfigPath:  configPath,
+	})
+	if err != nil {
+		t.Fatalf("NewManager() error: %v", err)
+	}
+	job := config.BackupJobConfig{
+		ID:                "external-disk",
+		Name:              "External disk",
+		Type:              JobTypeLocal,
+		Destination:       destination,
+		ScheduleInterval:  24 * time.Hour,
+		MaxSnapshots:      7,
+		IncludeConfig:     true,
+		VerifyAfterBackup: true,
+	}
+	if err := manager.ValidateNewJob(job); err != nil {
+		t.Fatalf("ValidateNewJob() error: %v", err)
+	}
+	view, err := manager.AddJob(job)
+	if err != nil {
+		t.Fatalf("AddJob() error: %v", err)
+	}
+	if view.ID != job.ID || view.Source != source || view.Destination != destination {
+		t.Fatalf("AddJob() view = %+v", view)
+	}
+
+	result, err := manager.RunJob(context.Background(), job.ID)
+	if err != nil {
+		t.Fatalf("RunJob() error: %v", err)
+	}
+	if result.Status != StatusCompleted || result.FileCount != 2 {
+		t.Fatalf("RunJob() result = %+v", result)
+	}
+	if _, err := os.Stat(filepath.Join(result.SnapshotPath, "data", "docs", "note.txt")); err != nil {
+		t.Fatalf("backup snapshot stat error: %v", err)
+	}
+}
+
+func TestManagerAddJobRejectsCaseInsensitiveDuplicate(t *testing.T) {
+	tmpDir := t.TempDir()
+	source := filepath.Join(tmpDir, "source")
+	destination := filepath.Join(tmpDir, "backups")
+	if err := os.MkdirAll(source, 0700); err != nil {
+		t.Fatalf("MkdirAll(source) error: %v", err)
+	}
+	manager, err := NewManager(ManagerConfig{
+		Root:        filepath.Join(tmpDir, "state"),
+		StorageRoot: source,
+		Jobs: []config.BackupJobConfig{{
+			ID:          "External-Disk",
+			Name:        "External disk",
+			Type:        JobTypeLocal,
+			Destination: destination,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("NewManager() error: %v", err)
+	}
+
+	duplicate := config.BackupJobConfig{
+		ID:          "external-disk",
+		Name:        "Duplicate",
+		Type:        JobTypeLocal,
+		Destination: filepath.Join(tmpDir, "other-backups"),
+	}
+	if err := manager.ValidateNewJob(duplicate); !errors.Is(err, ErrJobAlreadyExists) {
+		t.Fatalf("ValidateNewJob() error = %v, want %v", err, ErrJobAlreadyExists)
+	}
+	if _, err := manager.AddJob(duplicate); !errors.Is(err, ErrJobAlreadyExists) {
+		t.Fatalf("AddJob() error = %v, want %v", err, ErrJobAlreadyExists)
+	}
+	if jobs := manager.ListJobs(); len(jobs) != 1 || jobs[0].ID != "External-Disk" {
+		t.Fatalf("ListJobs() = %+v", jobs)
+	}
+}
+
+func TestManagerValidateNewJobRejectsExistingFileDestination(t *testing.T) {
+	tmpDir := t.TempDir()
+	source := filepath.Join(tmpDir, "source")
+	destination := filepath.Join(tmpDir, "backup-file")
+	if err := os.MkdirAll(source, 0700); err != nil {
+		t.Fatalf("MkdirAll(source) error: %v", err)
+	}
+	if err := os.WriteFile(destination, []byte("not a directory"), 0600); err != nil {
+		t.Fatalf("WriteFile(destination) error: %v", err)
+	}
+	manager, err := NewManager(ManagerConfig{
+		Root:        filepath.Join(tmpDir, "state"),
+		StorageRoot: source,
+	})
+	if err != nil {
+		t.Fatalf("NewManager() error: %v", err)
+	}
+
+	err = manager.ValidateNewJob(config.BackupJobConfig{
+		ID:          "external-disk",
+		Name:        "External disk",
+		Type:        JobTypeLocal,
+		Destination: destination,
+	})
+	if !errors.Is(err, ErrUnsafePath) || !strings.Contains(err.Error(), "destination must be a directory") {
+		t.Fatalf("ValidateNewJob() error = %v, want unsafe directory error", err)
+	}
+}
+
 func TestWriteJSONFileRejectsTempSymlink(t *testing.T) {
 	tmpDir := t.TempDir()
 	filePath := filepath.Join(tmpDir, "state", stateFileName)

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -29,6 +30,294 @@ func (r *backupEventRecorder) UpdateConfig(alerts.Config) {}
 func (r *backupEventRecorder) SendEvent(_ context.Context, event alerts.EventPayload) error {
 	r.events = append(r.events, event)
 	return nil
+}
+
+func setupMutableBackupServer(t *testing.T) (*Server, string, string) {
+	t.Helper()
+	tmpDir := t.TempDir()
+	storageRoot := filepath.Join(tmpDir, "storage")
+	if err := os.MkdirAll(storageRoot, 0700); err != nil {
+		t.Fatalf("MkdirAll(storageRoot) error: %v", err)
+	}
+	mustWriteAPITestFile(t, filepath.Join(storageRoot, "docs", "note.txt"), "backup source")
+
+	cfg := config.Default()
+	cfg.Storage.Root = storageRoot
+	cfg.Backup.Jobs = nil
+	configPath := filepath.Join(tmpDir, "config.toml")
+	if err := cfg.Save(configPath); err != nil {
+		t.Fatalf("Save(configPath) error: %v", err)
+	}
+	server, err := NewServer(zerolog.Nop(), &ServerConfig{
+		BackupRoot:  filepath.Join(tmpDir, "backup-state"),
+		StorageRoot: storageRoot,
+		BackupJobs:  cfg.Backup.Jobs,
+		Config:      cfg,
+		ConfigPath:  configPath,
+	})
+	if err != nil {
+		t.Fatalf("NewServer() error: %v", err)
+	}
+	return server, configPath, storageRoot
+}
+
+func disableBackupSchedulerForTest(t *testing.T) {
+	t.Helper()
+	previous := startBackupScheduler
+	startBackupScheduler = func(*backup.Manager) bool { return false }
+	t.Cleanup(func() {
+		startBackupScheduler = previous
+	})
+}
+
+func TestServerCreateLocalBackupPersistsAndActivatesJob(t *testing.T) {
+	disableBackupSchedulerForTest(t)
+	server, configPath, storageRoot := setupMutableBackupServer(t)
+	destination := filepath.Join(filepath.Dir(storageRoot), "external-backup")
+	body, err := json.Marshal(map[string]any{
+		"name":        "External disk",
+		"destination": destination,
+	})
+	if err != nil {
+		t.Fatalf("Marshal(request) error: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/maintenance/backups", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	server.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create backup status = %d, want %d; body=%s", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+	var response struct {
+		Success bool           `json:"success"`
+		Data    backup.JobView `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode create response: %v", err)
+	}
+	created := response.Data
+	if !response.Success || !strings.HasPrefix(created.ID, "local-") {
+		t.Fatalf("create response = %+v", response)
+	}
+	if got := rec.Header().Get("Location"); got != "/api/v1/maintenance/backups/"+created.ID {
+		t.Fatalf("Location = %q", got)
+	}
+	if created.Type != backup.JobTypeLocal || created.Source != storageRoot || created.Destination != destination {
+		t.Fatalf("created job = %+v", created)
+	}
+	if created.ScheduleInterval != "24h0m0s" || created.MaxSnapshots != 7 || !created.IncludeConfig || !created.VerifyAfterBackup {
+		t.Fatalf("created defaults = %+v", created)
+	}
+
+	persisted, err := config.Load(configPath)
+	if err != nil {
+		t.Fatalf("Load(configPath) error: %v", err)
+	}
+	if len(persisted.Backup.Jobs) != 1 {
+		t.Fatalf("persisted backup jobs = %+v", persisted.Backup.Jobs)
+	}
+	persistedJob := persisted.Backup.Jobs[0]
+	if persistedJob.ID != created.ID || persistedJob.Source != "" || persistedJob.Destination != destination || persistedJob.ScheduleInterval != 24*time.Hour || persistedJob.MaxSnapshots != 7 || !persistedJob.IncludeConfig || !persistedJob.VerifyAfterBackup {
+		t.Fatalf("persisted backup job = %+v", persistedJob)
+	}
+	if jobs := server.backupManager.ListJobs(); len(jobs) != 1 || jobs[0].ID != created.ID {
+		t.Fatalf("running backup jobs = %+v", jobs)
+	}
+
+	runResult := runBackupAPIRequest[backup.RunResult](t, server, http.MethodPost, "/api/v1/maintenance/backups/"+created.ID+"/run", nil, http.StatusOK)
+	if runResult.Status != backup.StatusCompleted || runResult.FileCount == 0 {
+		t.Fatalf("run created backup result = %+v", runResult)
+	}
+}
+
+func TestServerCreateLocalBackupAllowsManualSchedule(t *testing.T) {
+	disableBackupSchedulerForTest(t)
+	server, configPath, storageRoot := setupMutableBackupServer(t)
+	destination := filepath.Join(filepath.Dir(storageRoot), "manual-backup")
+	body, _ := json.Marshal(map[string]any{
+		"name":                "Manual backup",
+		"destination":         destination,
+		"schedule_interval":   "0",
+		"max_snapshots":       3,
+		"include_config":      false,
+		"verify_after_backup": false,
+	})
+
+	created := runBackupAPIRequest[backup.JobView](t, server, http.MethodPost, "/api/v1/maintenance/backups", body, http.StatusCreated)
+	if created.ScheduleInterval != "" || created.MaxSnapshots != 3 || created.IncludeConfig || created.VerifyAfterBackup {
+		t.Fatalf("manual backup job = %+v", created)
+	}
+	persisted, err := config.Load(configPath)
+	if err != nil {
+		t.Fatalf("Load(configPath) error: %v", err)
+	}
+	if len(persisted.Backup.Jobs) != 1 || persisted.Backup.Jobs[0].ScheduleInterval != 0 {
+		t.Fatalf("persisted manual backup job = %+v", persisted.Backup.Jobs)
+	}
+}
+
+func TestServerCreateLocalBackupRejectsUnsafeOrInvalidRequests(t *testing.T) {
+	disableBackupSchedulerForTest(t)
+	tests := []struct {
+		name      string
+		buildBody func(t *testing.T, storageRoot string) []byte
+	}{
+		{
+			name: "relative destination",
+			buildBody: func(t *testing.T, _ string) []byte {
+				return []byte(`{"name":"Backup","destination":"relative"}`)
+			},
+		},
+		{
+			name: "destination inside storage root",
+			buildBody: func(t *testing.T, storageRoot string) []byte {
+				body, _ := json.Marshal(map[string]any{"name": "Backup", "destination": filepath.Join(storageRoot, "backup")})
+				return body
+			},
+		},
+		{
+			name: "existing file destination",
+			buildBody: func(t *testing.T, storageRoot string) []byte {
+				destination := filepath.Join(filepath.Dir(storageRoot), "backup-file")
+				if err := os.WriteFile(destination, []byte("file"), 0600); err != nil {
+					t.Fatalf("WriteFile(destination) error: %v", err)
+				}
+				body, _ := json.Marshal(map[string]any{"name": "Backup", "destination": destination})
+				return body
+			},
+		},
+		{
+			name: "symlink destination component",
+			buildBody: func(t *testing.T, storageRoot string) []byte {
+				realParent := filepath.Join(filepath.Dir(storageRoot), "real-parent")
+				linkParent := filepath.Join(filepath.Dir(storageRoot), "link-parent")
+				if err := os.MkdirAll(realParent, 0700); err != nil {
+					t.Fatalf("MkdirAll(realParent) error: %v", err)
+				}
+				if err := os.Symlink(realParent, linkParent); err != nil {
+					t.Skipf("symlink unavailable: %v", err)
+				}
+				body, _ := json.Marshal(map[string]any{"name": "Backup", "destination": filepath.Join(linkParent, "backup")})
+				return body
+			},
+		},
+		{
+			name: "invalid schedule",
+			buildBody: func(t *testing.T, storageRoot string) []byte {
+				body, _ := json.Marshal(map[string]any{"name": "Backup", "destination": filepath.Join(filepath.Dir(storageRoot), "backup"), "schedule_interval": "never"})
+				return body
+			},
+		},
+		{
+			name: "negative schedule",
+			buildBody: func(t *testing.T, storageRoot string) []byte {
+				body, _ := json.Marshal(map[string]any{"name": "Backup", "destination": filepath.Join(filepath.Dir(storageRoot), "backup"), "schedule_interval": "-1h"})
+				return body
+			},
+		},
+		{
+			name: "zero retention",
+			buildBody: func(t *testing.T, storageRoot string) []byte {
+				body, _ := json.Marshal(map[string]any{"name": "Backup", "destination": filepath.Join(filepath.Dir(storageRoot), "backup"), "max_snapshots": 0})
+				return body
+			},
+		},
+		{
+			name: "unknown field",
+			buildBody: func(t *testing.T, storageRoot string) []byte {
+				body, _ := json.Marshal(map[string]any{"name": "Backup", "destination": filepath.Join(filepath.Dir(storageRoot), "backup"), "type": "restic"})
+				return body
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server, configPath, storageRoot := setupMutableBackupServer(t)
+			body := tt.buildBody(t, storageRoot)
+			runBackupAPIRequest[json.RawMessage](t, server, http.MethodPost, "/api/v1/maintenance/backups", body, http.StatusBadRequest)
+			persisted, err := config.Load(configPath)
+			if err != nil {
+				t.Fatalf("Load(configPath) error: %v", err)
+			}
+			if len(persisted.Backup.Jobs) != 0 || len(server.backupManager.ListJobs()) != 0 {
+				t.Fatalf("rejected request changed backup jobs: persisted=%+v running=%+v", persisted.Backup.Jobs, server.backupManager.ListJobs())
+			}
+		})
+	}
+}
+
+func TestServerCreateLocalBackupSaveFailureDoesNotActivateJob(t *testing.T) {
+	disableBackupSchedulerForTest(t)
+	server, configPath, storageRoot := setupMutableBackupServer(t)
+	if err := os.Remove(configPath); err != nil {
+		t.Fatalf("Remove(configPath) error: %v", err)
+	}
+	if err := os.Mkdir(configPath, 0700); err != nil {
+		t.Fatalf("Mkdir(configPath) error: %v", err)
+	}
+	destination := filepath.Join(filepath.Dir(storageRoot), "external-backup")
+	body, _ := json.Marshal(map[string]any{"name": "Backup", "destination": destination})
+
+	runBackupAPIRequest[json.RawMessage](t, server, http.MethodPost, "/api/v1/maintenance/backups", body, http.StatusInternalServerError)
+	if jobs := server.backupManager.ListJobs(); len(jobs) != 0 {
+		t.Fatalf("running backup jobs = %+v, want empty", jobs)
+	}
+	if cfg := server.currentConfig(); cfg == nil || len(cfg.Backup.Jobs) != 0 {
+		t.Fatalf("running config backup jobs = %+v", cfg)
+	}
+}
+
+func TestServerCreateLocalBackupEntropyFailureDoesNotPersistJob(t *testing.T) {
+	disableBackupSchedulerForTest(t)
+	server, configPath, storageRoot := setupMutableBackupServer(t)
+	previousRandomRead := readLocalBackupJobRandom
+	readLocalBackupJobRandom = func([]byte) (int, error) {
+		return 0, errors.New("entropy unavailable")
+	}
+	t.Cleanup(func() {
+		readLocalBackupJobRandom = previousRandomRead
+	})
+	destination := filepath.Join(filepath.Dir(storageRoot), "external-backup")
+	body, _ := json.Marshal(map[string]any{"name": "Backup", "destination": destination})
+
+	runBackupAPIRequest[json.RawMessage](t, server, http.MethodPost, "/api/v1/maintenance/backups", body, http.StatusInternalServerError)
+	persisted, err := config.Load(configPath)
+	if err != nil {
+		t.Fatalf("Load(configPath) error: %v", err)
+	}
+	if len(persisted.Backup.Jobs) != 0 || len(server.backupManager.ListJobs()) != 0 {
+		t.Fatalf("entropy failure changed backup jobs: persisted=%+v running=%+v", persisted.Backup.Jobs, server.backupManager.ListJobs())
+	}
+}
+
+func TestServerCreateLocalBackupAddFailureRollsBackConfig(t *testing.T) {
+	disableBackupSchedulerForTest(t)
+	server, configPath, storageRoot := setupMutableBackupServer(t)
+	destination := filepath.Join(filepath.Dir(storageRoot), "external-backup")
+	previousHook := beforeAddLocalBackupJob
+	beforeAddLocalBackupJob = func(config.BackupJobConfig) {
+		if err := os.WriteFile(destination, []byte("replaced by file"), 0600); err != nil {
+			t.Fatalf("WriteFile(destination) error: %v", err)
+		}
+	}
+	t.Cleanup(func() {
+		beforeAddLocalBackupJob = previousHook
+	})
+	body, _ := json.Marshal(map[string]any{"name": "Backup", "destination": destination})
+
+	runBackupAPIRequest[json.RawMessage](t, server, http.MethodPost, "/api/v1/maintenance/backups", body, http.StatusBadRequest)
+	persisted, err := config.Load(configPath)
+	if err != nil {
+		t.Fatalf("Load(configPath) error: %v", err)
+	}
+	if len(persisted.Backup.Jobs) != 0 || len(server.backupManager.ListJobs()) != 0 {
+		t.Fatalf("failed activation was not rolled back: persisted=%+v running=%+v", persisted.Backup.Jobs, server.backupManager.ListJobs())
+	}
+	if cfg := server.currentConfig(); cfg == nil || len(cfg.Backup.Jobs) != 0 {
+		t.Fatalf("running config backup jobs = %+v", cfg)
+	}
 }
 
 func TestServer_BackupEndpoints_RunAndRestoreDrill(t *testing.T) {

@@ -1,6 +1,6 @@
 import { test, expect } from '@playwright/test'
 import { ensureAuthenticatedAt } from './helpers/auth-check'
-import { routeBackupJobs, routeBatchBackupRestore } from './helpers/backups'
+import { backupJobsRoutePattern, routeBackupJobs, routeBatchBackupRestore } from './helpers/backups'
 
 test.describe('备份与维护页面', () => {
   test.beforeEach(async ({ page }) => {
@@ -13,6 +13,37 @@ test.describe('备份与维护页面', () => {
     await expect(page.getByRole('heading', { name: '数据完整性校验' })).toBeVisible()
     await expect(page.getByRole('heading', { name: '备份任务与恢复演练' })).toBeVisible()
     await expect(page.getByRole('button', { name: '批量恢复' })).toBeVisible()
+  })
+
+  test('应从空状态创建每日本地备份且不额外调用立即备份', async ({ page }) => {
+    await page.unroute(backupJobsRoutePattern)
+    const routeState = await routeBackupJobs(page, [])
+    const runRequests: string[] = []
+    page.on('request', (request) => {
+      if (/\/api\/v1\/maintenance\/backups\/[^/]+\/run$/u.test(request.url())) {
+        runRequests.push(request.url())
+      }
+    })
+    await page.reload()
+
+    await expect(page.getByText('还没有备份')).toBeVisible()
+    await expect(page.getByText(/连接并挂载独立磁盘/)).toBeVisible()
+    await page.getByRole('button', { name: '添加首个备份' }).click()
+
+    const dialog = page.getByRole('dialog')
+    await expect(dialog.getByText('添加本地备份')).toBeVisible()
+    await expect(dialog.getByRole('switch', { name: '每天自动备份' })).toBeChecked()
+    await expect(dialog.getByText('创建后将开始首次备份，之后每天自动运行。')).toBeVisible()
+    await dialog.getByRole('textbox', { name: '目标目录' }).fill('/mnt/backup-drive/mnemonas')
+    await dialog.getByRole('button', { name: '创建并开始首次备份' }).click()
+
+    await expect(dialog).toBeHidden()
+    await expect(page.getByRole('row').filter({ hasText: '外置硬盘备份' })).toBeVisible()
+    expect(routeState.createRequests).toEqual([{
+      name: '外置硬盘备份',
+      destination: '/mnt/backup-drive/mnemonas',
+    }])
+    expect(runRequests).toEqual([])
   })
 
   test('最近恢复应显示已校验和待校验状态', async ({ page }) => {

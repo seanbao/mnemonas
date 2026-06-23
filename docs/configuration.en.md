@@ -447,6 +447,8 @@ Share paths must be absolute MnemoNAS virtual paths such as `/` or `/team/docs`.
 
 Backup jobs are not configured by default. `[[backup.jobs]]` supports `local`, `restic`, and `rclone` jobs triggered from the Maintenance page, API, or background scheduler.
 
+The Maintenance page can create a `local` full-storage backup job whose source is the current `storage.root`. Web-created jobs default to a 24-hour schedule, seven retained snapshots, configuration inclusion, and post-backup verification. Selecting manual-only execution stores `schedule_interval` as `"0"`. Saving updates both `config.toml` and the running backup manager, so no service restart is required. Custom `source`, `restic`, and `rclone` jobs remain configuration-file operations.
+
 | Option | Type | Default | Description |
 | --- | --- | --- | --- |
 | `[[backup.jobs]]` | array | `[]` | Backup job list |

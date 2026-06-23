@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { act, fireEvent } from '@testing-library/react'
 import { render, screen, waitFor, within } from '@/test/utils'
 import userEvent from '@testing-library/user-event'
+import { shouldPollBackupJobs } from '@/lib/backupPolling'
 import Maintenance from './Maintenance'
 
 const mockAddToast = vi.fn()
@@ -37,6 +38,7 @@ vi.mock('@/api/files', () => ({
   runScrub: vi.fn(),
   downloadDiagnosticsExport: vi.fn(),
   listBackupJobs: vi.fn(),
+  createLocalBackupJob: vi.fn(),
   runBackupJob: vi.fn(),
   checkBackupRetentionJob: vi.fn(),
   runBackupRestoreDrill: vi.fn(),
@@ -79,6 +81,7 @@ import {
   runScrub,
   downloadDiagnosticsExport,
   listBackupJobs,
+  createLocalBackupJob,
   runBackupJob,
   checkBackupRetentionJob,
   runBackupRestoreDrill,
@@ -95,6 +98,7 @@ const mockGetScrubResult = getScrubResult as ReturnType<typeof vi.fn>
 const mockRunScrub = runScrub as ReturnType<typeof vi.fn>
 const mockDownloadDiagnosticsExport = downloadDiagnosticsExport as ReturnType<typeof vi.fn>
 const mockListBackupJobs = listBackupJobs as ReturnType<typeof vi.fn>
+const mockCreateLocalBackupJob = createLocalBackupJob as ReturnType<typeof vi.fn>
 const mockRunBackupJob = runBackupJob as ReturnType<typeof vi.fn>
 const mockCheckBackupRetentionJob = checkBackupRetentionJob as ReturnType<typeof vi.fn>
 const mockRunBackupRestoreDrill = runBackupRestoreDrill as ReturnType<typeof vi.fn>
@@ -414,6 +418,7 @@ describe('MaintenancePage', () => {
     } as unknown as Awaited<ReturnType<typeof getSettings>>)
     mockUpdateSettings.mockResolvedValue({ success: true, message: 'settings updated', warning: false })
     mockListBackupJobs.mockResolvedValue([])
+    mockCreateLocalBackupJob.mockResolvedValue(mockBackupJobs[0])
     mockRunBackupJob.mockResolvedValue(mockBackupJobs[0].last_run)
     mockCheckBackupRetentionJob.mockResolvedValue(mockBackupJobs[0].last_retention_check)
     mockRunBackupRestoreDrill.mockResolvedValue(mockBackupJobs[0].last_restore_drill)
@@ -666,6 +671,32 @@ describe('MaintenancePage', () => {
         await Promise.resolve()
       })
       expect(mockAddToast).not.toHaveBeenCalled()
+    })
+
+    it('aborts a pending backup creation when the page unmounts and ignores abort feedback', async () => {
+      const user = userEvent.setup()
+      const createRequest = createDeferred<unknown>()
+      let signal: AbortSignal | undefined
+      mockCreateLocalBackupJob.mockImplementationOnce((_request, options) => {
+        signal = options?.signal
+        return createRequest.promise
+      })
+      const view = render(<Maintenance />)
+
+      await screen.findByText('还没有备份')
+      await user.click(screen.getByRole('button', { name: '添加备份' }))
+      await user.type(await screen.findByRole('textbox', { name: '目标目录' }), '/mnt/backup-drive/mnemonas')
+      await user.click(screen.getByRole('button', { name: '创建并开始首次备份' }))
+
+      await waitFor(() => expect(signal).toBeInstanceOf(AbortSignal))
+      view.unmount()
+      expect(signal?.aborted).toBe(true)
+      await act(async () => {
+        createRequest.reject(new DOMException('backup creation aborted', 'AbortError'))
+        await Promise.resolve()
+      })
+      expect(mockAddToast).not.toHaveBeenCalled()
+      expect(mockRunBackupJob).not.toHaveBeenCalled()
     })
 
     it('aborts a pending restore preview when the page unmounts and ignores abort feedback', async () => {
@@ -928,21 +959,138 @@ describe('MaintenancePage', () => {
   })
 
   describe('backup jobs', () => {
+    it('polls scheduled jobs until the scheduler exposes a run', () => {
+      const baseJob = mockBackupJobs[0]
+      expect(shouldPollBackupJobs([{
+        ...baseJob,
+        running: false,
+        last_run: undefined,
+        schedule_interval: '24h0m0s',
+      }])).toBe(true)
+      expect(shouldPollBackupJobs([{
+        ...baseJob,
+        running: true,
+        last_run: undefined,
+        schedule_interval: undefined,
+      }])).toBe(true)
+      expect(shouldPollBackupJobs([{
+        ...baseJob,
+        running: false,
+        last_run: undefined,
+        schedule_interval: undefined,
+      }])).toBe(false)
+      expect(shouldPollBackupJobs([{
+        ...baseJob,
+        running: false,
+        last_run: undefined,
+        schedule_interval: '0s',
+      }])).toBe(false)
+      expect(shouldPollBackupJobs([{
+        ...baseJob,
+        disabled: true,
+        running: false,
+        last_run: undefined,
+        schedule_interval: '24h0m0s',
+      }])).toBe(false)
+      expect(shouldPollBackupJobs([baseJob])).toBe(false)
+    })
+
     it('shows empty backup configuration state', async () => {
       render(<Maintenance />)
 
       await waitFor(() => {
-        expect(screen.getByText('尚未配置备份任务')).toBeTruthy()
-        expect(screen.getByText('外置盘本地备份示例')).toBeTruthy()
-        const starterSnippet = screen.getByText(/\[\[backup\.jobs\]\]/)
-        const starterSnippetBlock = starterSnippet.closest('pre')
-        expect(starterSnippetBlock).toHaveClass('whitespace-pre-wrap')
-        expect(starterSnippetBlock).toHaveClass('break-words')
-        expect(starterSnippetBlock).toHaveClass('overflow-x-hidden')
-        expect(starterSnippet.textContent).toContain('destination = "/mnt/backup-drive/mnemonas"')
-        expect(starterSnippet.textContent).toContain('verify_after_backup = true')
-        expect(screen.getByText(/不要把备份目标放在 storage\.root 内/)).toBeTruthy()
+        expect(screen.getByText('还没有备份')).toBeTruthy()
+        expect(screen.getByText('连接并挂载独立磁盘，然后添加首个本地备份。')).toBeTruthy()
+        expect(screen.getByRole('button', { name: '添加备份' })).toBeTruthy()
+        expect(screen.getByRole('button', { name: '添加首个备份' })).toBeTruthy()
+        expect(screen.queryByText(/\[\[backup\.jobs\]\]/)).toBeNull()
       })
+    })
+
+    it('creates an automatic local backup without running it from the client', async () => {
+      const user = userEvent.setup()
+      mockListBackupJobs
+        .mockResolvedValueOnce([])
+        .mockResolvedValue(mockBackupJobs)
+
+      render(<Maintenance />)
+      await screen.findByText('还没有备份')
+      await user.click(screen.getByRole('button', { name: '添加首个备份' }))
+      const destination = await screen.findByRole('textbox', { name: '目标目录' })
+      await user.type(destination, '/mnt/backup-drive/mnemonas')
+      await user.click(screen.getByRole('button', { name: '创建并开始首次备份' }))
+
+      await waitFor(() => {
+        expect(mockCreateLocalBackupJob).toHaveBeenCalledWith({
+          name: '外置硬盘备份',
+          destination: '/mnt/backup-drive/mnemonas',
+        }, expect.objectContaining({ signal: expect.any(AbortSignal) }))
+      })
+      expect(mockRunBackupJob).not.toHaveBeenCalled()
+      await waitFor(() => {
+        expect(screen.queryByText('添加本地备份')).toBeNull()
+        expect(screen.getByText('外置硬盘备份')).toBeTruthy()
+        expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({
+          title: '备份任务已创建，首次备份即将开始',
+          color: 'success',
+        }))
+      })
+      expect(mockListBackupJobs).toHaveBeenCalledTimes(2)
+    })
+
+    it('closes the local backup dialog from the modal close action', async () => {
+      const user = userEvent.setup()
+      render(<Maintenance />)
+      await screen.findByText('还没有备份')
+      await user.click(screen.getByRole('button', { name: '添加备份' }))
+      await screen.findByText('添加本地备份')
+
+      await user.click(screen.getByRole('button', { name: 'Close' }))
+
+      await waitFor(() => expect(screen.queryByText('添加本地备份')).toBeNull())
+      expect(mockCreateLocalBackupJob).not.toHaveBeenCalled()
+    })
+
+    it('creates a manual local backup with the schedule disabled', async () => {
+      const user = userEvent.setup()
+      render(<Maintenance />)
+      await screen.findByText('还没有备份')
+      await user.click(screen.getByRole('button', { name: '添加备份' }))
+      await user.type(await screen.findByRole('textbox', { name: '目标目录' }), '/mnt/manual-backup')
+      await user.click(screen.getByRole('switch', { name: '每天自动备份' }))
+      await user.click(screen.getByRole('button', { name: '仅创建备份任务' }))
+
+      await waitFor(() => {
+        expect(mockCreateLocalBackupJob).toHaveBeenCalledWith({
+          name: '外置硬盘备份',
+          destination: '/mnt/manual-backup',
+          schedule_interval: '0',
+        }, expect.objectContaining({ signal: expect.any(AbortSignal) }))
+      })
+      expect(mockRunBackupJob).not.toHaveBeenCalled()
+      expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({ title: '备份任务已创建' }))
+    })
+
+    it('keeps the local backup draft open when creation fails', async () => {
+      const user = userEvent.setup()
+      mockCreateLocalBackupJob.mockRejectedValueOnce(new ApiError('duplicate backup job', 409))
+      render(<Maintenance />)
+      await screen.findByText('还没有备份')
+      await user.click(screen.getByRole('button', { name: '添加备份' }))
+      const destination = await screen.findByRole('textbox', { name: '目标目录' })
+      await user.type(destination, '/mnt/existing-backup')
+      await user.click(screen.getByRole('button', { name: '创建并开始首次备份' }))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '备份任务已存在',
+          description: '请修改备份名称或目标目录后重试。',
+          color: 'warning',
+        })
+      })
+      expect(screen.getByText('添加本地备份')).toBeTruthy()
+      expect(destination).toHaveValue('/mnt/existing-backup')
+      expect(mockRunBackupJob).not.toHaveBeenCalled()
     })
 
     it('shows configured backup jobs and latest results', async () => {

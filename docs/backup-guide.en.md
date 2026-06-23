@@ -79,6 +79,8 @@ MnemoNAS has a built-in backup job entry point that can run from the Maintenance
 - `restic`: invoke the system `restic` executable and back up the source directory into a restic repository.
 - `rclone`: invoke the system `rclone` executable and sync the source directory to an rclone remote.
 
+Administrators can use `POST /api/v1/maintenance/backups` to create a local full-storage backup job whose source is the current `storage.root`. The endpoint generates the job ID and defaults to a 24-hour schedule, seven retained snapshots, configuration inclusion, and post-backup verification. Set `schedule_interval` to `"0"` for manual-only execution. The saved job is added to the running backup manager without a service restart. Custom sources, restic jobs, and rclone jobs remain configuration-file operations.
+
 Limits:
 
 - `local.destination` must be an absolute path outside `storage.root` and must not be the filesystem root or a protected system directory; existing destination path components must not be symlinks, otherwise the backup can recurse into itself or write through a symlink target. Local restore previews, restores, and restore drills recheck the destination before reading snapshot manifests or creating drill artifacts.

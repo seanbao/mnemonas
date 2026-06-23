@@ -18,17 +18,19 @@ import {
   RotateCcw,
   ListChecks,
   Copy,
+  Plus,
 } from 'lucide-react'
 import { PageHeader } from '@/components/ui/PageHeader'
 import { StatCard } from '@/components/ui/StatCard'
 import { EmptyState } from '@/components/ui/EmptyState'
-import { ScrubScheduleSettings } from '@/components/maintenance'
+import { CreateLocalBackupDialog, ScrubScheduleSettings } from '@/components/maintenance'
 import {
   ApiError,
   getScrubResult,
   runScrub,
   downloadDiagnosticsExport,
   listBackupJobs,
+  createLocalBackupJob,
   runBackupJob,
   checkBackupRetentionJob,
   runBackupRestoreDrill,
@@ -43,6 +45,7 @@ import {
   type BackupBatchRestorePreviewResult,
   type BackupBatchRestoreResult,
   type BackupJob,
+  type CreateLocalBackupJobRequest,
   type BackupRetentionCheckResult,
   type BackupRestorePreflightCheck,
   type BackupRunResult,
@@ -56,12 +59,14 @@ import {
 import { cn, copyTextToClipboard, formatBytes, formatDuration, hasControlCharacter } from '@/lib/utils'
 import { GENERIC_ACTION_ERROR_DESCRIPTION, GENERIC_LOAD_ERROR_DESCRIPTION, getUserFacingErrorDescription } from '@/lib/apiMessages'
 import { backupJobNeedsAttention, getBackupAttentionNextSteps, getBackupAttentionReasons } from '@/lib/backupAttention'
+import { shouldPollBackupJobs } from '@/lib/backupPolling'
 import { redactDiagnosticSecretFragments } from '@/lib/diagnosticMessages'
 import { useUser } from '@/stores/auth'
 
 type AbortControllerRef = { current: AbortController | null }
 type ScrubMutationRequest = { signal: AbortSignal }
 type BackupJobMutationRequest = { jobId: string; signal: AbortSignal }
+type CreateBackupJobMutationRequest = { request: CreateLocalBackupJobRequest; signal: AbortSignal }
 type RestorePreviewMutationRequest = { jobId: string; targetPath: string; includeConfig: boolean; signal: AbortSignal }
 type RestoreMutationRequest = RestorePreviewMutationRequest
 type RestoreVerifyMutationRequest = { jobId: string; targetPath: string; signal: AbortSignal }
@@ -576,15 +581,6 @@ function getBackupScheduleWindowText(job: BackupJob): string {
   }
   return `自动窗口：${job.schedule_window_start}-${job.schedule_window_end}`
 }
-
-const backupStarterConfigSnippet = `[[backup.jobs]]
-id = "external-disk"
-name = "外置硬盘备份"
-type = "local"
-destination = "/mnt/backup-drive/mnemonas"
-schedule_interval = "24h"
-max_snapshots = 7
-verify_after_backup = true`
 
 const batchRestoreItemLimit = 20
 
@@ -2798,6 +2794,7 @@ export default function Maintenance() {
   const diagnosticsExportAbortControllerRef = useRef<AbortController | null>(null)
   const restoreReportExportAbortControllerRef = useRef<AbortController | null>(null)
   const scrubAbortControllerRef = useRef<AbortController | null>(null)
+  const createBackupAbortControllerRef = useRef<AbortController | null>(null)
   const runBackupAbortControllerRef = useRef<AbortController | null>(null)
   const retentionCheckAbortControllerRef = useRef<AbortController | null>(null)
   const restoreDrillAbortControllerRef = useRef<AbortController | null>(null)
@@ -2809,6 +2806,7 @@ export default function Maintenance() {
   const [isExporting, setIsExporting] = useState(false)
   const [exportingRestoreReportJobId, setExportingRestoreReportJobId] = useState<string | null>(null)
   const [isAwaitingRunningState, setIsAwaitingRunningState] = useState(false)
+  const [isCreateBackupOpen, setIsCreateBackupOpen] = useState(false)
   const [restoreJob, setRestoreJob] = useState<BackupJob | null>(null)
   const [restoreTargetPath, setRestoreTargetPath] = useState('')
   const [restoreIncludeConfig, setRestoreIncludeConfig] = useState(false)
@@ -2832,6 +2830,7 @@ export default function Maintenance() {
         diagnosticsExportAbortControllerRef,
         restoreReportExportAbortControllerRef,
         scrubAbortControllerRef,
+        createBackupAbortControllerRef,
         runBackupAbortControllerRef,
         retentionCheckAbortControllerRef,
         restoreDrillAbortControllerRef,
@@ -2864,6 +2863,7 @@ export default function Maintenance() {
   } = useQuery({
     queryKey: backupJobsQueryKey,
     queryFn: ({ signal }) => listBackupJobs({ signal }),
+    refetchInterval: (query) => shouldPollBackupJobs(query.state.data) ? 2000 : false,
   })
   const backupLoadErrorPresentation = getBackupLoadErrorPresentation(backupError)
   const focusedBackupJobID = searchParams.get('backupJob')?.trim() ?? ''
@@ -3098,6 +3098,49 @@ export default function Maintenance() {
     },
     onSettled: (_result, _error, request) => {
       clearActionAbortController(scrubAbortControllerRef, request.signal)
+    },
+  })
+
+  const createBackupMutation = useMutation({
+    mutationFn: ({ request, signal }: CreateBackupJobMutationRequest) => createLocalBackupJob(request, { signal }),
+    onSuccess: (job, mutationRequest) => {
+      if (mutationRequest.signal.aborted) {
+        return
+      }
+      queryClient.setQueryData<BackupJob[]>(backupJobsQueryKey, (current = []) => [
+        job,
+        ...current.filter((currentJob) => currentJob.id !== job.id),
+      ])
+      void queryClient.invalidateQueries({ queryKey: backupJobsQueryKey })
+      setIsCreateBackupOpen(false)
+      addToast({
+        title: mutationRequest.request.schedule_interval === '0'
+          ? '备份任务已创建'
+          : '备份任务已创建，首次备份即将开始',
+        description: job.name,
+        color: 'success',
+      })
+    },
+    onError: (error: unknown, request) => {
+      if (request.signal.aborted || isAbortError(error)) {
+        return
+      }
+      const errorPresentation = getMaintenanceActionErrorPresentation(
+        error,
+        '创建备份任务失败',
+        '备份任务暂不可用',
+        '备份管理器当前不可用，请检查设备状态后重试。',
+      )
+      addToast({
+        title: error instanceof ApiError && error.status === 409 ? '备份任务已存在' : errorPresentation.title,
+        description: error instanceof ApiError && error.status === 409
+          ? '请修改备份名称或目标目录后重试。'
+          : errorPresentation.description,
+        color: error instanceof ApiError && error.status === 409 ? 'warning' : errorPresentation.color,
+      })
+    },
+    onSettled: (_result, _error, request) => {
+      clearActionAbortController(createBackupAbortControllerRef, request.signal)
     },
   })
 
@@ -3503,6 +3546,11 @@ export default function Maintenance() {
     runBackupMutation.mutate({ jobId, signal: controller.signal })
   }
 
+  const startCreateBackup = (request: CreateLocalBackupJobRequest) => {
+    const controller = createActionAbortController(createBackupAbortControllerRef)
+    createBackupMutation.mutate({ request, signal: controller.signal })
+  }
+
   const startRetentionCheck = (jobId: string) => {
     const controller = createActionAbortController(retentionCheckAbortControllerRef)
     retentionCheckMutation.mutate({ jobId, signal: controller.signal })
@@ -3780,6 +3828,13 @@ export default function Maintenance() {
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <Button
+              className="btn-primary w-full rounded-lg sm:w-auto"
+              startContent={<Plus size={18} />}
+              onPress={() => setIsCreateBackupOpen(true)}
+            >
+              添加备份
+            </Button>
+            <Button
               variant="bordered"
               className="rounded-lg"
               startContent={<ListChecks size={18} />}
@@ -3818,25 +3873,23 @@ export default function Maintenance() {
               />
             </div>
           ) : backupJobs.length === 0 ? (
-            <div className="grid grid-cols-1 gap-4 py-2 lg:grid-cols-[minmax(0,0.95fr)_minmax(0,1.05fr)]">
-              <div className="flex flex-col justify-center rounded-lg border border-dashed border-divider bg-content2/35 p-6 text-default-500">
-                <HardDrive size={42} className="mb-4 opacity-40" />
-                <p className="text-base font-medium text-foreground">尚未配置备份任务</p>
-                <p className="mt-2 text-sm leading-6">建议先配置一个独立外置盘或远端目标。配置后重启服务，再运行一次备份和恢复演练。</p>
-              </div>
-              <div className="rounded-lg border border-divider bg-content2/45 p-4">
-                <div className="mb-3 flex items-center gap-2 text-sm font-medium text-foreground">
-                  <Archive size={16} className="text-accent-primary" />
-                  外置盘本地备份示例
-                </div>
-                <pre className="max-h-72 overflow-y-auto overflow-x-hidden whitespace-pre-wrap break-words rounded-lg bg-content1 p-3 text-left text-xs leading-5 text-default-700">
-                  <code>{backupStarterConfigSnippet}</code>
-                </pre>
-                <p className="mt-3 text-xs leading-5 text-default-500">
-                  把目标目录换成独立磁盘挂载点；不要把备份目标放在 storage.root 内。
-                </p>
-              </div>
-            </div>
+            <EmptyState
+              icon={HardDrive}
+              title="还没有备份"
+              description="连接并挂载独立磁盘，然后添加首个本地备份。"
+              className="bg-content2/35"
+              action={(
+                <Button
+                  aria-label="添加首个备份"
+                  color="primary"
+                  className="min-h-11 w-full rounded-lg sm:w-auto"
+                  startContent={<Plus size={18} />}
+                  onPress={() => setIsCreateBackupOpen(true)}
+                >
+                  添加备份
+                </Button>
+              )}
+            />
           ) : (
             <div className="responsive-table">
               <Table aria-label="备份任务列表">
@@ -4027,6 +4080,19 @@ export default function Maintenance() {
           )}
         </CardBody>
       </Card>
+
+      {isCreateBackupOpen && (
+        <CreateLocalBackupDialog
+          isOpen
+          isSubmitting={createBackupMutation.isPending}
+          onClose={() => {
+            if (!createBackupMutation.isPending) {
+              setIsCreateBackupOpen(false)
+            }
+          }}
+          onSubmit={startCreateBackup}
+        />
+      )}
       
       {/* Info Card */}
       <Card className="card-mnemonas">

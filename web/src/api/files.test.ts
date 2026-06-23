@@ -25,6 +25,7 @@ import {
   getScrubResult,
   runScrub,
   listBackupJobs,
+  createLocalBackupJob,
   runBackupJob,
   checkBackupRetentionJob,
   runBackupRestoreDrill,
@@ -4071,6 +4072,90 @@ describe('API: files', () => {
       expectFetchCall(1, '/api/v1/maintenance/backups', {
         signal: controller.signal,
       })
+    })
+
+    it('creates an automatically scheduled local backup with server-managed defaults', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          success: true,
+          data: backupJob,
+          timestamp: '2026-05-09',
+        }),
+      })
+
+      const result = await createLocalBackupJob({
+        name: '  External disk  ',
+        destination: ' /mnt/backup-drive//mnemonas/ ',
+      })
+
+      expect(result.id).toBe('external-disk')
+      expectFetchCall(1, '/api/v1/maintenance/backups', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: 'External disk',
+          destination: '/mnt/backup-drive/mnemonas',
+        }),
+      })
+    })
+
+    it('creates a manual local backup and forwards the abort signal', async () => {
+      const controller = new AbortController()
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          success: true,
+          data: { ...backupJob, schedule_interval: undefined, next_run_at: undefined },
+          timestamp: '2026-05-09',
+        }),
+      })
+
+      await createLocalBackupJob({
+        name: '手动备份',
+        destination: '/mnt/manual-backup',
+        schedule_interval: '0',
+      }, { signal: controller.signal })
+
+      expectFetchCall(1, '/api/v1/maintenance/backups', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: '手动备份',
+          destination: '/mnt/manual-backup',
+          schedule_interval: '0',
+        }),
+        signal: controller.signal,
+      })
+    })
+
+    it.each([
+      ['blank name', { name: '  ', destination: '/mnt/backup' }],
+      ['control character in name', { name: 'backup\njob', destination: '/mnt/backup' }],
+      ['relative destination', { name: 'backup', destination: 'mnt/backup' }],
+      ['root destination', { name: 'backup', destination: '/' }],
+      ['backslash destination', { name: 'backup', destination: '/mnt\\backup' }],
+      ['dot destination segment', { name: 'backup', destination: '/mnt/../backup' }],
+      ['unsupported schedule', { name: 'backup', destination: '/mnt/backup', schedule_interval: '24h' }],
+    ])('rejects invalid local backup creation input before sending requests: %s', async (_label, request) => {
+      await expect(createLocalBackupJob(request as Parameters<typeof createLocalBackupJob>[0])).rejects.toThrow()
+      expect(mockFetch).not.toHaveBeenCalled()
+    })
+
+    it('rejects malformed local backup creation responses', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          success: true,
+          data: { ...backupJob, running: 'no' },
+          timestamp: '2026-05-09',
+        }),
+      })
+
+      await expect(createLocalBackupJob({
+        name: 'External disk',
+        destination: '/mnt/backup-drive/mnemonas',
+      })).rejects.toThrow('服务器返回了无效的数据')
     })
 
     it('forwards abort signals for maintenance write requests', async () => {

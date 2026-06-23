@@ -1548,6 +1548,12 @@ export interface BackupJob {
   last_retention_check?: BackupRetentionCheckResult
 }
 
+export interface CreateLocalBackupJobRequest {
+  name: string
+  destination: string
+  schedule_interval?: '0'
+}
+
 function isBackupStatus(value: unknown): value is BackupTaskStatus {
   return value === 'running' || value === 'completed' || value === 'failed'
 }
@@ -2592,6 +2598,34 @@ export async function listBackupJobs(options: RequestOptions = {}): Promise<Back
   const response = await authFetch(`${API_BASE}/maintenance/backups`, options)
   const data = await handleWrappedResponse<unknown>(response, '获取备份任务失败')
   if (!Array.isArray(data) || !data.every(isBackupJobShape)) {
+    throw new Error(INVALID_API_RESPONSE_MESSAGE)
+  }
+  return data
+}
+
+// Create a local backup job using server-managed safety defaults.
+export async function createLocalBackupJob(request: CreateLocalBackupJobRequest, options: RequestOptions = {}): Promise<BackupJob> {
+  const name = request.name.trim()
+  if (!name || hasControlCharacter(name)) {
+    throw new Error('非法备份名称')
+  }
+  if (request.schedule_interval !== undefined && request.schedule_interval !== '0') {
+    throw new Error('非法备份计划')
+  }
+
+  const normalizedRequest: CreateLocalBackupJobRequest = {
+    name,
+    destination: normalizeHostAbsolutePath(request.destination),
+    ...(request.schedule_interval === '0' ? { schedule_interval: '0' as const } : {}),
+  }
+  const response = await authFetch(`${API_BASE}/maintenance/backups`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(normalizedRequest),
+    signal: options.signal,
+  })
+  const data = await handleWrappedResponse<unknown>(response, '创建备份任务失败')
+  if (!isBackupJobShape(data)) {
     throw new Error(INVALID_API_RESPONSE_MESSAGE)
   }
   return data

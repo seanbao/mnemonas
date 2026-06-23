@@ -91,6 +91,7 @@ var afterValidateLocalBackupDestination = func(string) {}
 
 var (
 	ErrJobNotFound           = errors.New("backup job not found")
+	ErrJobAlreadyExists      = errors.New("backup job already exists")
 	ErrJobAlreadyRunning     = errors.New("backup job already running")
 	ErrJobDisabled           = errors.New("backup job disabled")
 	ErrNoSnapshots           = errors.New("backup job has no completed snapshots")
@@ -638,6 +639,61 @@ func (m *Manager) GetJob(id string) (*JobView, error) {
 	}
 	view := m.jobViewLocked(id, job)
 	return &view, nil
+}
+
+// ValidateNewJob verifies that a job can be added without mutating manager state.
+func (m *Manager) ValidateNewJob(job config.BackupJobConfig) error {
+	normalized, err := m.prepareNewJob(job)
+	if err != nil {
+		return err
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.validateNewJobIDLocked(normalized.ID)
+}
+
+// AddJob validates and atomically adds a job to the running manager.
+func (m *Manager) AddJob(job config.BackupJobConfig) (JobView, error) {
+	normalized, err := m.prepareNewJob(job)
+	if err != nil {
+		return JobView{}, err
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.validateNewJobIDLocked(normalized.ID); err != nil {
+		return JobView{}, err
+	}
+	m.jobs[normalized.ID] = cloneJob(normalized)
+	return m.jobViewLocked(normalized.ID, normalized), nil
+}
+
+func (m *Manager) prepareNewJob(job config.BackupJobConfig) (config.BackupJobConfig, error) {
+	normalized := normalizeJob(job, m.storageRoot)
+	if !isSafeManagerJobID(normalized.ID) {
+		return config.BackupJobConfig{}, fmt.Errorf("%w: backup job id is unsafe: %q", ErrUnsafePath, normalized.ID)
+	}
+	if normalized.Type != JobTypeLocal {
+		return config.BackupJobConfig{}, ErrUnsupportedJobType
+	}
+	source := effectiveSource(normalized, m.storageRoot)
+	if err := validateSourceDirectory(source); err != nil {
+		return config.BackupJobConfig{}, err
+	}
+	if err := validateDestination(source, normalized.Destination, m.storageRoot); err != nil {
+		return config.BackupJobConfig{}, err
+	}
+	return normalized, nil
+}
+
+func (m *Manager) validateNewJobIDLocked(id string) error {
+	for existingID := range m.jobs {
+		if strings.EqualFold(existingID, id) {
+			return ErrJobAlreadyExists
+		}
+	}
+	return nil
 }
 
 // RunJob runs a configured backup job synchronously.
@@ -4464,6 +4520,14 @@ func validateDestination(source, destination string, storageRoot string) error {
 		if err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 			return fmt.Errorf("%w: destination must not be inside storage.root", ErrUnsafePath)
 		}
+	}
+	info, err := os.Lstat(destinationClean)
+	if err == nil {
+		if !info.IsDir() {
+			return fmt.Errorf("%w: destination must be a directory", ErrUnsafePath)
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("stat backup destination: %w", err)
 	}
 	return nil
 }
